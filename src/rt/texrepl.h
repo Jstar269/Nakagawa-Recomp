@@ -60,6 +60,9 @@ extern "C" {
 #define NK_TEXREPL_MAX_DIM 2048
 /* The diagnostics kept; the rest are counted in the last line. */
 #define NK_TEXREPL_MAX_DIAG 40
+/* A ZIP pack's entries may declare at most this many unpacked bytes in all (more is refused whole);
+ * each image read is capped at 64 MiB and textures.ini at 4 MiB, in a ZIP or a folder. */
+#define NK_TEXREPL_MAX_PACK_BYTES ((uint64_t)8u << 30)
 /* Mip levels a texture's chain holds at most (PPSSPP's MAX_REPLACEMENT_MIP_LEVELS). */
 #define NK_TEXREPL_MAX_LEVELS 12
 
@@ -180,6 +183,7 @@ typedef struct NkTexReplStats {
     uint64_t open_ns;         /* nk_texrepl_open, by the C clock */
     uint64_t index_bytes;     /* what the open pack's own index holds (not the ZIP reader's directory) */
     uint64_t skipped;         /* images found unusable and skipped from then on, each counted once */
+    uint64_t list_ns;         /* the part of open_ns spent listing the folder, or opening and indexing the ZIP */
 } NkTexReplStats;
 void nk_texrepl_stats(const NkTexRepl *pack, NkTexReplStats *out);
 void nk_texrepl_note_bad_factor(NkTexRepl *pack);

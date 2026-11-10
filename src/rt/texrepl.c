@@ -206,7 +206,7 @@ uint32_t nk_texrepl_quick_hash(const void *data, uint32_t size, uint32_t guest_a
             for (int j = 0; j < 8; j++) {
                 uint16_t w;
                 memcpy(&w, b0 + 2 * j, 2);
-                cursor16[j] = (uint16_t)(cursor16[j] + (uint16_t)(w * cursor2[j]));
+                cursor16[j] = (uint16_t)(cursor16[j] + (uint16_t)((uint32_t)w * cursor2[j]));
             }
             for (int j = 0; j < 4; j++) {
                 uint32_t c;
@@ -218,7 +218,7 @@ uint32_t nk_texrepl_quick_hash(const void *data, uint32_t size, uint32_t guest_a
             for (int j = 0; j < 8; j++) {
                 uint16_t w;
                 memcpy(&w, b3 + 2 * j, 2);
-                cursor16[j] = (uint16_t)(cursor16[j] ^ (uint16_t)(w * cursor2[j]));
+                cursor16[j] = (uint16_t)(cursor16[j] ^ (uint16_t)((uint32_t)w * cursor2[j]));
             }
             for (int j = 0; j < 8; j++) cursor2[j] = (uint16_t)(cursor2[j] + 0x2455u);
         }
@@ -1201,7 +1201,7 @@ static int open_zip(NkTexRepl *p, const char *path, char *err, size_t err_cap) {
     NkZipError ze;
     memset(&opt, 0, sizeof(opt));
     opt.max_entries = NK_ZIP_READ_MAX_ENTRIES;
-    opt.max_total_bytes = UINT64_MAX;   /* nothing holds the whole pack: each read is bounded below */
+    opt.max_total_bytes = NK_TEXREPL_MAX_PACK_BYTES;   /* what all its entries declare, unpacked */
     opt.deflate = true;
     opt.data_descriptor = true;
     NkZipStatus st = nk_zip_reader_open_file_with(&p->zip, path, &opt, &ze);
@@ -1348,14 +1348,18 @@ NkTexRepl *nk_texrepl_open(const char *path, uint64_t budget_bytes, char *err, s
                      is_dir ? "textures.zip" : last_component(path, name, sizeof(name)), read_reason(zwhy));
             return open_fail(p);
         }
+        const uint64_t tl = now_ns();
         if (!open_zip(p, zip_path, err, err_cap)) return open_fail(p);
+        p->stats.list_ns = now_ns() - tl;
         if (is_dir) diag_add(p, "textures.zip read in place of the folder's own files, as PPSSPP reads it");
     } else {
         ScanCtx sc = { p, 1 };
+        const uint64_t tl = now_ns();
         if (!nk_platform_list_files(p->dir, scan_file, &sc) || !sc.ok) {
             snprintf(err, err_cap, "texture pack folder '%s' cannot be read", last_component(path, name, sizeof(name)));
             return open_fail(p);
         }
+        p->stats.list_ns = now_ns() - tl;
     }
 
     size_t size = 0;

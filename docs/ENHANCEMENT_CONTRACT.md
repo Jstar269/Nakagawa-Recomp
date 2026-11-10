@@ -763,11 +763,15 @@ memory, no network; ZIP packs through the project's own `src/core/nk_zip.c` and 
   in an authentic run the pack is not read whatever the environment says, and a request prints one
   `TEX_REPLACE: off (texture replacement needs Ace Mode)` line. A pack whose folder, ZIP or `textures.ini` cannot
   be read or is malformed (a line that is no comment, section or `key = value`, no `hash` type, an unknown one, a
-  `textures.ini` over 4 MiB, a damaged or unsafe ZIP) prints `TEX_REPLACE: refused (<reason>)` and is refused
-  whole; the reason names the pack by its last path component only. One image that cannot be used (missing, not a
-  regular file, outside the pack folder, over 64 MiB, a bad PNG, the wrong size for its level, over the budget) is
-  skipped: its texture is drawn as the game made it, a note says why, and the reader's `skipped` count includes
-  it. There is no launch-line key, library setting or per-title setting yet; they come
+  `textures.ini` over 4 MiB, a damaged or unsafe ZIP) prints
+  `TEX_REPLACE: refused (<reason>); the game runs without the pack` and is refused whole; the reason names the pack
+  by its last path component only, and the run goes on unreplaced without waiting on the pack (a stored pack that
+  no longer reads, its folder gone or its ini broken, is refused the same way at the next start). One image that
+  cannot be used (missing, gone since the pack opened, not a regular file, outside the pack folder, over 64 MiB, a
+  bad PNG, the wrong size for its level, over the budget) is skipped: its texture is drawn as the game made it, a
+  note says why, and the exit line's `skipped=` counts it once. That is the whole rule: the pack is used whole or not
+  at all only for what is read at open (the folder or ZIP listing and `textures.ini`); images are read later, one
+  at a time, and each fails alone. There is no launch-line key, library setting or per-title setting yet; they come
   with the launch-line pull request that follows #2074, and only that pull request admits the feature
   (section 11.3.4).
 - **The pack.** The project ships none and never downloads one: it is a folder or a ZIP file the user made or took
@@ -894,7 +898,10 @@ memory, no network; ZIP packs through the project's own `src/core/nk_zip.c` and 
   resolved (`GetFinalPathNameByHandleW`; `/proc/self/fd` or `realpath`), is inside the folder's own final path.
   A name the ZIP reader refuses (a device name such as `CON.png` or `COM1.png`, a trailing dot or space, a
   character Windows refuses) is not opened at all. Reads are capped: `textures.ini` at 4 MiB, an image at 64 MiB,
-  in a folder or a ZIP alike. A folder's `textures.zip`, and a ZIP named as the pack, is opened only when it is a
+  in a folder or a ZIP alike; a ZIP image's data is unpacked only up to the size it declares, and a ZIP whose
+  entries declare more than 8 GiB unpacked in all (`NK_TEXREPL_MAX_PACK_BYTES`) or hold more than 65,534 entries is
+  refused whole. What a pack holds in memory is its index (about 80 bytes an entry, from the bench below) and the
+  decoded images, which the budget bounds. A folder's `textures.zip`, and a ZIP named as the pack, is opened only when it is a
   regular file (the folder's inside the folder); the ZIP reader then opens it by name, so a file swapped in that
   moment is not caught by the handle check, though the ZIP's own checks still apply. A PNG is checked before
   any pixel memory is allocated: the signature, `IHDR` first with 1 to 2048 texels a side and a pixel format the
@@ -904,7 +911,7 @@ memory, no network; ZIP packs through the project's own `src/core/nk_zip.c` and 
 - **Stamps.** `TEX_REPLACE: on (hash=, entries=, notes=, budget_mb=)` at start, followed by the line section 11.3.4
   describes and one `TEX_REPLACE: note:` line for each thing read and not applied (a file that cannot be read or decoded is
   noted at its first use, when it is found, not only counted), and at exit `TEX_REPLACE: exit
-  (lookups=, hits=, misses=, left_alone=, queued=, bound_draws=, loaded=, load_failed=, over_budget=, evicted=,
+  (lookups=, hits=, misses=, left_alone=, queued=, bound_draws=, loaded=, load_failed=, skipped=, over_budget=, evicted=,
   bad_factor=, cache_peak_mb=, decode_ms=)`. Section 10.4 applies: the run is an Ace run.
 - **Not yet.** Decoding a PNG (and unpacking it from a ZIP) runs on the renderer thread the first time an image is
   needed (a worker thread, as scaling has, and DDS or KTX2 files come after); the tallest row a game draws is not
@@ -923,16 +930,24 @@ memory, no network; ZIP packs through the project's own `src/core/nk_zip.c` and 
   decodes at its size or is refused), `IHDR` sizes of 0, 4096 and 2^31 and a 2048x2048 one over a 1 MiB cap, and
   bad images in a pack skipped, noted and counted once; device names, a trailing dot, a junction or link out of
   the pack (a file link in it still read), a FIFO image and a FIFO `textures.zip` (POSIX), a `textures.ini` over
-  4 MiB, and a missing pack's message carrying no folder above it. These are fixed mutations, not
-  coverage-guided fuzzing, and no sanitizer build runs them; stb_image's own inflater is exercised only by them.
-  A file link needs Developer Mode on Windows, so that check is skipped there, and said, without it. `test_nk_zip` checks the
+  4 MiB, and a missing pack's message carrying no folder above it; every `IHDR` pixel format over the same data,
+  and a seeded pass of 30,000 random mutations (1 to 8 bytes, CRCs made right) over three images, each decoded
+  within its `IHDR` size or refused; images deleted after the pack opened, skipped at once; and, through
+  `nk_texrepl_open`, every ZIP refusal: absolute, drive-letter, backslash, `..` and device names, duplicate names
+  and names equal but for case, ZIP64, encryption, a local header that disagrees with the central directory,
+  overlapping entries, a central directory outside the file, the archive cut at every length, entries declaring
+  12 GiB, and an image declaring 100 MiB or unpacking past its declared size (skipped, the rest of the pack used).
+  The PNG cells are fixed and seeded mutations, not coverage-guided fuzzing; the selftest also runs under
+  AddressSanitizer and UndefinedBehaviorSanitizer on Linux. A file link needs Developer Mode on Windows, so that
+  check is skipped there, and said, without it. `test_nk_zip` checks the
   reader's options: DEFLATE read only when asked, its level bits, damaged, short and long streams, data
   descriptors and the caps. `texrepl_selftest --bench N` measures an N-texture synthetic pack as a folder and as
   a ZIP (open, lookup and first-use times, index size and process memory). `gpu-texscale-selftest`'s `replace` cell runs the production path on a Vulkan device: a
   listed texture drawn from the pack's image from the draw that finds it, even with the 1:1 rule on, with
   `SR_TEX_REPLACE` alone and with xBRZ also on; a rewrite to unlisted
   content never drawn from the old image; the content returning replaced again; an image of no whole factor counted
-  and not used; and an authentic start reading no pack.
+  and not used; an authentic start reading no pack; and an Ace start whose stored pack no longer reads (its folder
+  gone, its `textures.ini` malformed) refused, the renderer going on without it.
 
 ### 10.13. Sharp Game Text
 

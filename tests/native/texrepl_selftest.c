@@ -681,7 +681,8 @@ static void zbuf(uint8_t **d, size_t *n, size_t *cap, const void *src, size_t le
 static void le16(uint8_t *p, uint32_t v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); }
 static void le32(uint8_t *p, uint32_t v) { le16(p, v & 0xffffu); le16(p + 2, v >> 16); }
 
-typedef struct { int method; int descriptor; const uint8_t *packed; size_t packed_len; int corrupt; } ZwOpt;
+/* `declared`, when not 0, is the unpacked size the headers give in place of the data's own. */
+typedef struct { int method; int descriptor; const uint8_t *packed; size_t packed_len; int corrupt; uint32_t declared; } ZwOpt;
 
 static void zw_add(Zw *z, const char *name, const void *data, size_t size, ZwOpt o) {
     const uint8_t *src = (const uint8_t *)data;
@@ -708,6 +709,7 @@ static void zw_add(Zw *z, const char *name, const void *data, size_t size, ZwOpt
     if (o.corrupt && pn) packed[pn - 1] ^= 0x5a;
     const size_t nl = strlen(name);
     const uint32_t local = (uint32_t)z->n;
+    const uint32_t usize = o.declared ? o.declared : (uint32_t)size;
     const uint16_t flags = (uint16_t)(o.descriptor ? 8u : 0u);
     uint8_t h[46];
     memset(h, 0, sizeof(h));
@@ -718,7 +720,7 @@ static void zw_add(Zw *z, const char *name, const void *data, size_t size, ZwOpt
     if (!o.descriptor) {
         le32(h + 14, crc);
         le32(h + 18, (uint32_t)pn);
-        le32(h + 22, (uint32_t)size);
+        le32(h + 22, usize);
     }
     le16(h + 26, (uint32_t)nl);
     zbuf(&z->d, &z->n, &z->cap, h, 30);
@@ -729,7 +731,7 @@ static void zw_add(Zw *z, const char *name, const void *data, size_t size, ZwOpt
         le32(dd, 0x08074b50u);
         le32(dd + 4, crc);
         le32(dd + 8, (uint32_t)pn);
-        le32(dd + 12, (uint32_t)size);
+        le32(dd + 12, usize);
         zbuf(&z->d, &z->n, &z->cap, dd, 16);
     }
     memset(h, 0, sizeof(h));
@@ -740,7 +742,7 @@ static void zw_add(Zw *z, const char *name, const void *data, size_t size, ZwOpt
     le16(h + 10, (uint32_t)o.method);
     le32(h + 16, crc);
     le32(h + 20, (uint32_t)pn);
-    le32(h + 24, (uint32_t)size);
+    le32(h + 24, usize);
     le16(h + 28, (uint32_t)nl);
     le32(h + 42, local);
     zbuf(&z->cd, &z->cdn, &z->cdcap, h, 46);
@@ -750,7 +752,7 @@ static void zw_add(Zw *z, const char *name, const void *data, size_t size, ZwOpt
 }
 
 static void zw_add_text(Zw *z, const char *name, const char *text, int method) {
-    ZwOpt o = { method, 0, NULL, 0, 0 };
+    ZwOpt o = { method, 0, NULL, 0, 0, 0 };
     zw_add(z, name, text, strlen(text), o);
 }
 
@@ -820,8 +822,8 @@ static void test_zip_packs(void) {
     write_png(png2, 4, 4, blue);
     free(red);
     free(blue);
-    const ZwOpt stored = { 0, 0, NULL, 0, 0 }, deflated = { 8, 0, NULL, 0, 0 }, described = { 8, 1, NULL, 0, 0 };
-    const ZwOpt zlib_ini = { 8, 0, kZlibIni, sizeof(kZlibIni), 0 };
+    const ZwOpt stored = { 0, 0, NULL, 0, 0, 0 }, deflated = { 8, 0, NULL, 0, 0, 0 }, described = { 8, 1, NULL, 0, 0, 0 };
+    const ZwOpt zlib_ini = { 8, 0, kZlibIni, sizeof(kZlibIni), 0, 0 };
     NkTexReplId id = { 0x08804000u, 3u, 0x0202u, 0u, 0x11223344u };
     NkTexReplId named = { 0x08804000u, 3u, 0x0202u, 0u, 0x55667788u };
     NkTexReplHit hit;
@@ -933,7 +935,7 @@ static void test_zip_packs(void) {
             zw_add_text(&z, "textures.ini", "[options]\nhash = quick\nnot a line\n", 8);
         } else {
             zw_add_text(&z, "textures.ini", "[options]\nhash = quick\n", 0);
-            ZwOpt bz = { 12, 0, (const uint8_t *)"BZh", 3, 0 };
+            ZwOpt bz = { 12, 0, (const uint8_t *)"BZh", 3, 0, 0 };
             zw_add(&z, "x.png", "abc", 3, bz);
         }
         pack_path(zip, sizeof(zip), "texrepl_zip", kRefused[i].name);
@@ -983,6 +985,177 @@ static void mem_now(double *ws_mib, double *peak_mib) {
     *peak_mib = (double)ru.ru_maxrss / 1024.0;
 }
 #endif
+
+
+/* ------------------------------------------------------------------------- ZIP refusals */
+
+static uint32_t rd32le(const uint8_t *p) {
+    return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
+}
+static uint32_t rd16le(const uint8_t *p) { return (uint32_t)p[0] | (uint32_t)p[1] << 8; }
+
+static void file_save(const char *path, const uint8_t *d, size_t n) {
+    FILE *f = nk_fopen_utf8(path, "wb");
+    if (!f || fwrite(d, 1, n, f) != n) { fprintf(stderr, "cannot write %s\n", path); exit(2); }
+    fclose(f);
+}
+
+/* The offset of the idx-th central header of a ZIP the writer made (no comment, no extra fields). */
+static size_t central_at(const uint8_t *d, size_t n, int idx) {
+    size_t at = rd32le(d + n - 22 + 16);
+    for (int i = 0; i < idx; i++) at += 46u + rd16le(d + at + 28) + rd16le(d + at + 30) + rd16le(d + at + 32);
+    return at;
+}
+
+/* Every refusal the ZIP reader makes for a pack, through nk_texrepl_open: each refuses the pack
+ * whole, with the reader's code and no folder above the archive in the message. Then the caps:
+ * entries declaring more than NK_TEXREPL_MAX_PACK_BYTES in all are refused whole; an image over
+ * 64 MiB, or one whose data unpacks past its declared size, is skipped without unpacking more. */
+static void test_zip_refusals(void) {
+    char dir[512], zip[600], pngp[600], err[300];
+    make_pack(dir, sizeof(dir), "texrepl_zip_refuse");
+    uint32_t *px = solid(4, 4, 0xff0000ffu);
+    pack_path(pngp, sizeof(pngp), "texrepl_zip_refuse", "red.png");
+    write_png(pngp, 4, 4, px);
+    free(px);
+    const ZwOpt stored = { 0, 0, NULL, 0, 0, 0 };
+    static const char kIni[] = "[options]\nhash = quick\n[hashes]\n088040000000020211223344 = a.png\n";
+    enum { P_NONE, P_ZIP64, P_ENCRYPTED, P_LOCAL, P_OVERLAP, P_CD_OUTSIDE };
+    static const struct { const char *name, *entry, *entry2, *why; int patch; } kCells[] = {
+        { "absolute.zip", "/a.png", NULL, "ZIP_NAME_ABSOLUTE", P_NONE },
+        { "drive.zip", "C:/a.png", NULL, "ZIP_NAME_DRIVE", P_NONE },
+        { "backslash.zip", "sub\\a.png", NULL, "ZIP_NAME_BACKSLASH", P_NONE },
+        { "parent.zip", "sub/../../a.png", NULL, "ZIP_NAME_PARENT", P_NONE },
+        { "reserved.zip", "sub/NUL.png", NULL, "ZIP_NAME_RESERVED", P_NONE },
+        { "duplicate.zip", "a.png", "a.png", "ZIP_NAME_DUPLICATE", P_NONE },
+        { "case.zip", "a.png", "A.PNG", "ZIP_NAME_DUPLICATE", P_NONE },
+        { "zip64.zip", "a.png", NULL, "ZIP_ZIP64", P_ZIP64 },
+        { "encrypted.zip", "a.png", NULL, "ZIP_ENCRYPTED", P_ENCRYPTED },
+        { "local.zip", "a.png", NULL, "ZIP_LOCAL_MISMATCH", P_LOCAL },
+        { "overlap.zip", "a.png", "b.png", "ZIP_OVERLAP", P_OVERLAP },
+        { "cd_outside.zip", "a.png", NULL, "ZIP_CENTRAL_DIRECTORY", P_CD_OUTSIDE },
+    };
+    for (size_t i = 0; i < sizeof(kCells) / sizeof(kCells[0]); i++) {
+        Zw z;
+        memset(&z, 0, sizeof(z));
+        zw_add_text(&z, "textures.ini", kIni, 0);
+        zw_add_file(&z, kCells[i].entry, pngp, stored);
+        if (kCells[i].entry2) zw_add_file(&z, kCells[i].entry2, pngp, stored);
+        pack_path(zip, sizeof(zip), "texrepl_zip_refuse", kCells[i].name);
+        zw_finish(&z, zip, 0);
+        size_t n = 0;
+        uint8_t *d = read_all(zip, &n);
+        const size_t c1 = central_at(d, n, 1), l1 = rd32le(d + c1 + 42);
+        switch (kCells[i].patch) {
+        case P_ZIP64: le16(d + n - 22 + 10, 0xffffu); break;              /* "look in the ZIP64 record" */
+        case P_ENCRYPTED: d[c1 + 8] |= 1u; d[l1 + 6] |= 1u; break;        /* flag bit 0 */
+        case P_LOCAL: d[l1 + 14] ^= 1u; break;                            /* the local CRC */
+        case P_OVERLAP: {                                                /* a.png's data runs into b.png */
+            const uint32_t grow = rd32le(d + c1 + 20) + 8u;
+            le32(d + c1 + 20, grow); le32(d + c1 + 24, grow);
+            le32(d + l1 + 18, grow); le32(d + l1 + 22, grow);
+            break;
+        }
+        case P_CD_OUTSIDE: le32(d + n - 22 + 16, 0x7ffffff0u); break;
+        default: break;
+        }
+        file_save(zip, d, n);
+        free(d);
+        err[0] = '\0';
+        NkTexRepl *p = nk_texrepl_open(zip, 0, err, sizeof(err));
+        CHECK(p == NULL && strstr(err, kCells[i].why), "%s: refused with '%s'", kCells[i].name, err);
+        CHECK(!strstr(err, "texrepl_zip_refuse"), "%s: the message names folders: '%s'", kCells[i].name, err);
+        if (p) nk_texrepl_close(p);
+    }
+
+    /* A cut archive, at every length: refused whole each time. */
+    {
+        Zw z;
+        memset(&z, 0, sizeof(z));
+        zw_add_text(&z, "textures.ini", kIni, 8);
+        zw_add_file(&z, "a.png", pngp, stored);
+        pack_path(zip, sizeof(zip), "texrepl_zip_refuse", "whole.zip");
+        zw_finish(&z, zip, 0);
+        size_t n = 0;
+        uint8_t *d = read_all(zip, &n);
+        NkTexRepl *p = nk_texrepl_open(zip, 0, err, sizeof(err));
+        CHECK(p != NULL, "the uncut archive: %s", err);
+        if (p) nk_texrepl_close(p);
+        pack_path(zip, sizeof(zip), "texrepl_zip_refuse", "cut.zip");
+        int opened = 0, no_code = 0;
+        for (size_t cut = 1; cut < n; cut++) {
+            file_save(zip, d, n - cut);
+            err[0] = '\0';
+            p = nk_texrepl_open(zip, 0, err, sizeof(err));
+            if (p) { opened++; nk_texrepl_close(p); }
+            else if (!strstr(err, "ZIP_")) no_code++;
+        }
+        CHECK(opened == 0 && no_code == 0, "cut archives: %d of %zu opened, %d refused without a ZIP code", opened,
+              n - 1, no_code);
+        free(d);
+    }
+
+    /* Entries declaring more than 8 GiB unpacked in all: refused whole, nothing unpacked. */
+    {
+        Zw z;
+        memset(&z, 0, sizeof(z));
+        zw_add_text(&z, "textures.ini", kIni, 0);
+        static const uint8_t junk[4] = { 0x03, 0x00, 0x00, 0x00 };
+        const ZwOpt huge = { 8, 0, junk, sizeof(junk), 0, 0xfffffff0u };
+        zw_add(&z, "a.png", "x", 1, huge);
+        zw_add(&z, "b.png", "x", 1, huge);
+        zw_add(&z, "c.png", "x", 1, huge);
+        pack_path(zip, sizeof(zip), "texrepl_zip_refuse", "total.zip");
+        zw_finish(&z, zip, 0);
+        err[0] = '\0';
+        NkTexRepl *p = nk_texrepl_open(zip, 0, err, sizeof(err));
+        CHECK(p == NULL && strstr(err, "ZIP_TOO_LARGE"), "12 GiB declared: '%s'", err);
+        if (p) nk_texrepl_close(p);
+    }
+
+    /* Per image: one declaring 100 MiB is skipped before any unpacking (its data is not even
+     * DEFLATE); one whose data unpacks past the 100 bytes it declares stops at 100 and is skipped. */
+    {
+        Zw z;
+        memset(&z, 0, sizeof(z));
+        zw_add_text(&z, "textures.ini",
+                    "[options]\nhash = quick\n[hashes]\n088040000000020211223344 = big.png\n"
+                    "088040000000020211223345 = bomb.png\n088040000000020211223346 = a.png\n", 0);
+        static const uint8_t junk[4] = { 0xff, 0xff, 0xff, 0xff };
+        const ZwOpt big = { 8, 0, junk, sizeof(junk), 0, 100u << 20 };
+        zw_add(&z, "big.png", "x", 1, big);
+        uint8_t *stream = (uint8_t *)calloc(1, 5u + 4096u);
+        stream[0] = 1u;                          /* one final stored block of 4096 zero bytes */
+        le16(stream + 1, 4096u);
+        le16(stream + 3, (uint32_t)(~4096u & 0xffffu));
+        uint8_t zeros[100];
+        memset(zeros, 0, sizeof(zeros));
+        const ZwOpt bomb = { 8, 0, stream, 5u + 4096u, 0, 0 };
+        zw_add(&z, "bomb.png", zeros, sizeof(zeros), bomb);
+        free(stream);
+        zw_add_file(&z, "a.png", pngp, stored);
+        pack_path(zip, sizeof(zip), "texrepl_zip_refuse", "bombs.zip");
+        zw_finish(&z, zip, 0);
+        NkTexRepl *p = nk_texrepl_open(zip, 0, err, sizeof(err));
+        CHECK(p != NULL, "a ZIP with oversized entries: %s", err);
+        if (p) {
+            NkTexReplHit hit;
+            NkTexReplId id = { 0x08804000u, 3u, 0x0202u, 0u, 0x11223344u };
+            CHECK(nk_texrepl_lookup(p, &id, &hit) == 0, "a 100 MiB entry was used");
+            id.hash = 0x11223345u;
+            CHECK(nk_texrepl_lookup(p, &id, &hit) == 0, "an entry unpacking past its size was used");
+            id.hash = 0x11223346u;
+            CHECK(nk_texrepl_lookup(p, &id, &hit) == 1, "the good entry beside them was not used");
+            nk_texrepl_unpin(p, &hit);
+            CHECK(has_diag(p, "big.png: not used: it is larger than the cap of 64 MiB"), "100 MiB entry not noted");
+            CHECK(has_diag(p, "bomb.png: damaged in the ZIP (ZIP_SIZE_MISMATCH)"), "unpacking past the size not noted");
+            NkTexReplStats st;
+            nk_texrepl_stats(p, &st);
+            CHECK(st.skipped == 2, "skipped=%llu", (unsigned long long)st.skipped);
+            nk_texrepl_close(p);
+        }
+    }
+}
 
 /* ------------------------------------------------------------------------------ hardening */
 
@@ -1067,6 +1240,77 @@ static void test_png_corpus(void) {
     CHECK(wrong == 0 && decoded + refused > 0, "IDAT flips: %d decoded, %d refused, %d wrong", decoded, refused, wrong);
     printf("png corpus: %zu truncations and %zu flips refused; %d IDAT flips with fixed CRCs decoded, %d refused\n",
            n, n, decoded, refused);
+    /* Every IHDR pixel format (colour type, depth, interlace) over the same image data, CRC made
+     * right: stb_image decodes or refuses each, never more than the IHDR size. */
+    int formats = 0;
+    for (unsigned color = 0; color <= 6; color++) {
+        for (unsigned depth = 1; depth <= 16; depth <<= 1) {
+            for (unsigned lace = 0; lace <= 1; lace++) {
+                memcpy(m, png, n);
+                m[24] = (uint8_t)depth;
+                m[25] = (uint8_t)color;
+                m[28] = (uint8_t)lace;
+                png_fix_crc(m, 8);
+                rgba = NULL;
+                if (nk_texrepl_decode_png(m, n, 0, &rgba, &w, &h, why, sizeof(why)) && (w != 8 || h != 8 || !rgba))
+                    wrong++;
+                free(rgba);
+                formats++;
+            }
+        }
+    }
+    CHECK(wrong == 0, "IHDR formats: %d wrong", wrong);
+    /* A seeded random pass: 1 to 8 bytes after the signature set at random, then every chunk's CRC
+     * made right where the lengths still allow, over three source images. */
+    {
+        static const int kSizes[3][2] = { { 8, 8 }, { 1, 1 }, { 33, 5 } };
+        uint8_t *src[3];
+        size_t sn[3];
+        for (int k = 0; k < 3; k++) {
+            uint32_t *img = solid(kSizes[k][0], kSizes[k][1], 0x80402010u + (uint32_t)k);
+            for (int t = 0; t < kSizes[k][0] * kSizes[k][1]; t++) img[t] ^= (uint32_t)t * 2654435761u;
+            pack_path(path, sizeof(path), "texrepl_png_corpus", "fuzz_src.png");
+            write_png(path, kSizes[k][0], kSizes[k][1], img);
+            free(img);
+            src[k] = read_all(path, &sn[k]);
+        }
+        uint8_t *fm = (uint8_t *)malloc(sn[0] + sn[1] + sn[2]);
+        uint32_t seed = 0x2365u;
+        const int kRuns = 30000;
+        int fz_ok = 0, fz_no = 0, fz_wrong = 0;
+        for (int r = 0; r < kRuns; r++) {
+            const int k = r % 3;
+            memcpy(fm, src[k], sn[k]);
+            seed = seed * 1103515245u + 12345u;
+            const int flips = 1 + (int)((seed >> 16) % 8u);
+            for (int j = 0; j < flips; j++) {
+                seed = seed * 1103515245u + 12345u;
+                const size_t pos = 8u + (size_t)(seed >> 8) % (sn[k] - 8u);
+                seed = seed * 1103515245u + 12345u;
+                fm[pos] = (uint8_t)(seed >> 16);
+            }
+            for (size_t at = 8; at + 12u <= sn[k];) {   /* every CRC made right while the lengths allow */
+                const uint32_t len = be32_at(fm + at);
+                if (len > sn[k] - at - 12u) break;
+                png_fix_crc(fm, at);
+                at += (size_t)len + 12u;
+            }
+            rgba = NULL;
+            if (nk_texrepl_decode_png(fm, sn[k], 0, &rgba, &w, &h, why, sizeof(why))) {
+                fz_ok++;
+                if (!rgba || w < 1 || h < 1 || w > 2048 || h > 2048) fz_wrong++;
+            } else {
+                fz_no++;
+                if (rgba) fz_wrong++;
+            }
+            free(rgba);
+        }
+        CHECK(fz_wrong == 0, "fuzz: %d results out of bounds", fz_wrong);
+        printf("png fuzz: %d IHDR formats; %d seeded runs over 3 images (seed 0x2365): %d decoded, %d refused, "
+               "%d out of bounds, no crash\n", formats, kRuns, fz_ok, fz_no, fz_wrong);
+        free(fm);
+        for (int k = 0; k < 3; k++) free(src[k]);
+    }
     /* Sizes in IHDR: 4096 a side and 0 refused; 2048x2048 refused over an allocation cap. */
     static const struct { uint32_t w, h; uint64_t cap; const char *why; } kDims[] = {
         { 4096u, 8u, 0u, "not 1 to 2048" }, { 8u, 4096u, 0u, "not 1 to 2048" }, { 0u, 8u, 0u, "not 1 to 2048" },
@@ -1193,6 +1437,8 @@ static void test_file_checks(void) {
     write_png(path, 4, 4, px);
     pack_path(path, sizeof(path), "texrepl_pack_files", "sub");
     nk_platform_mkdir_p(path);
+    pack_path(path, sizeof(path), "texrepl_pack_files", "folder.png");   /* a folder named as an image */
+    nk_platform_mkdir_p(path);
 
     /* Links: a junction (Windows) or symlink to a folder outside, a file link outside and one inside. */
     pack_path(path, sizeof(path), "texrepl_pack_files", "jdir");
@@ -1217,13 +1463,14 @@ static void test_file_checks(void) {
                      "0880400000000202d0000003 = sub./in.png\n0880400000000202d0000004 = jdir/out.png\n"
                      "0880400000000202d0000005 = flink.png\n0880400000000202d0000006 = inlink.png\n"
                      "0880400000000202d0000007 = fifo.png\n0880400000000202d0000008 = in.png\n"
-                     "0880400000000202d0000009 = sub\n");
+                     "0880400000000202d0000009 = sub\n0880400000000202d000000a = NUL.png\n"
+                     "0880400000000202d000000b = folder.png\n");
     NkTexRepl *p = nk_texrepl_open(dir, 0, err, sizeof(err));
     CHECK(p != NULL, "file-check pack: %s", err);
     if (p) {
         NkTexReplHit hit;
-        int expect[10] = { 0, 0, 0, 0, 0, 0, 1, 0, 1, 0 };
-        for (uint32_t i = 1; i <= 9; i++) {
+        int expect[12] = { 0, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0 };
+        for (uint32_t i = 1; i <= 11; i++) {
             if ((i == 4 && !have_dir_link) || ((i == 5 || i == 6) && (!have_file_link || !have_in_link))) continue;
 #if defined(_WIN32)
             if (i == 7) continue;
@@ -1238,6 +1485,13 @@ static void test_file_checks(void) {
         CHECK(has_diag(p, "CON.png: not a file name this module opens (ZIP_NAME_RESERVED"), "CON.png not refused");
         CHECK(has_diag(p, "sub/COM1.png: not a file name this module opens (ZIP_NAME_RESERVED"), "COM1.png not refused");
         CHECK(has_diag(p, "sub./in.png: not a file name this module opens (ZIP_NAME_CHARACTER"), "trailing dot not refused");
+        CHECK(has_diag(p, "NUL.png: not a file name this module opens (ZIP_NAME_RESERVED"), "NUL.png not refused");
+#if defined(_WIN32)
+        /* A folder does not open as a file without backup semantics, so it is never read. */
+        CHECK(has_diag(p, "folder.png: not used: it is missing or cannot be opened"), "a folder image not refused");
+#else
+        CHECK(has_diag(p, "folder.png: not used: it is not a regular file"), "a folder image not refused");
+#endif
         if (have_dir_link)
             CHECK(has_diag(p, "jdir/out.png: not used: it resolves outside the pack folder"), "folder link followed out");
         if (have_file_link && have_in_link)
@@ -1245,6 +1499,31 @@ static void test_file_checks(void) {
 #if !defined(_WIN32)
         if (have_fifo) CHECK(has_diag(p, "fifo.png: not used: it is not a regular file"), "FIFO not refused");
 #endif
+        nk_texrepl_close(p);
+    }
+
+    /* A pack whose images go away after it opened (a drive unplugged, files deleted): every lookup
+     * returns at once, unreplaced, and each image is skipped with a note. */
+    char gone_dir[512];
+    make_pack(gone_dir, sizeof(gone_dir), "texrepl_pack_gone");
+    pack_path(path, sizeof(path), "texrepl_pack_gone", "088040000000020211223344.png");
+    write_png(path, 4, 4, px);
+    pack_path(target, sizeof(target), "texrepl_pack_gone", "088040000000020211223345.png");
+    write_png(target, 4, 4, px);
+    err[0] = '\0';
+    p = nk_texrepl_open(gone_dir, 0, err, sizeof(err));
+    CHECK(p != NULL, "the pack before its files went: %s", err);
+    if (p) {
+        CHECK(remove(path) == 0 && remove(target) == 0, "cannot remove the pack's files");
+        NkTexReplHit hit;
+        for (uint32_t i = 0; i < 2; i++) {
+            NkTexReplId id = { 0x08804000u, 3u, 0x0202u, 0u, 0x11223344u + i };
+            CHECK(nk_texrepl_lookup(p, &id, &hit) == 0, "an image that went away replaced a texture");
+        }
+        NkTexReplStats st;
+        nk_texrepl_stats(p, &st);
+        CHECK(st.skipped == 2 && has_diag(p, "088040000000020211223344.png: not used: it is missing"),
+              "images that went away: skipped=%llu", (unsigned long long)st.skipped);
         nk_texrepl_close(p);
     }
 
@@ -1294,8 +1573,12 @@ static void test_file_checks(void) {
 }
 
 /* --bench N: a synthetic pack of N textures (32x32 PNGs, one textures.ini line each, files in a
- * subfolder) as a folder and as a ZIP of DEFLATE entries in one top-level folder; prints open,
- * lookup, first-decode and memory figures for each. */
+ * subfolder) as a folder and as a ZIP of DEFLATE entries in one top-level folder, and N hash-named
+ * PNGs in one folder with no [hashes] lines (the listing then finds every texture); prints open,
+ * listing, lookup, first-decode and memory figures for each. --bench-only N folder|zip|named
+ * measures one pack --bench wrote, in a fresh process, so its peak working set is that pack's. */
+static int bench_measure(int n, const char *kind);
+
 static int bench(int n) {
     char dir[512], path[700], name[64], err[400];
     uint32_t *px = solid(32, 32, 0xff808080u);
@@ -1307,7 +1590,7 @@ static int bench(int n) {
     ini_n += (size_t)snprintf(ini, ini_cap, "[options]\nhash = xxh32\n[hashes]\n");
     Zw z;
     memset(&z, 0, sizeof(z));
-    const ZwOpt deflated = { 8, 0, NULL, 0, 0 };
+    const ZwOpt deflated = { 8, 0, NULL, 0, 0, 0 };
     const double t_write = wall_s();
     for (int i = 0; i < n; i++) {
         px[0] = 0xff000000u | (uint32_t)i;   /* each image differs */
@@ -1327,17 +1610,34 @@ static int bench(int n) {
     char zip[600];
     snprintf(zip, sizeof(zip), "%s/texrepl_bench/pack.zip", SR_SELFTEST_BUILD_ROOT);
     zw_finish(&z, zip, 0);
+    char named[512];
+    make_pack(named, sizeof(named), "texrepl_bench/named");
+    for (int i = 0; i < n; i++) {
+        px[0] = 0xff000000u | (uint32_t)i;
+        snprintf(path, sizeof(path), "%s/%016llx%08x.png", named,
+                 (unsigned long long)nk_texrepl_cache_key(0x08800000u + ((uint32_t)i << 4), 3u, 0x0505u, 0u), (unsigned)i);
+        write_png(path, 32, 32, px);
+    }
+    snprintf(path, sizeof(path), "%s/textures.ini", named);
+    write_text(path, "[options]\nhash = xxh32\n");
     free(ini);
     free(px);
-    printf("bench: wrote %d textures as a folder and a ZIP in %.2f s\n", n, wall_s() - t_write);
+    printf("bench: wrote %d textures as a folder, a ZIP and a hash-named folder in %.2f s\n", n, wall_s() - t_write);
+    (void)err;
+    return bench_measure(n, "folder") || bench_measure(n, "zip") || bench_measure(n, "named");
+}
 
-    const char *const paths[2] = { dir, zip };
-    const char *const kinds[2] = { "folder", "zip" };
-    for (int k = 0; k < 2; k++) {
+static int bench_measure(int n, const char *kind) {
+    char path[600], err[400];
+    if (!strcmp(kind, "zip")) snprintf(path, sizeof(path), "%s/texrepl_bench/pack.zip", SR_SELFTEST_BUILD_ROOT);
+    else snprintf(path, sizeof(path), "%s/texrepl_bench/%s", SR_SELFTEST_BUILD_ROOT, kind);
+    {
+        const char *const kinds[1] = { kind };
+        const int k = 0;
         double ws0, pk0, ws1, pk1;
         mem_now(&ws0, &pk0);
         double t0 = wall_s();
-        NkTexRepl *p = nk_texrepl_open(paths[k], 0, err, sizeof(err));
+        NkTexRepl *p = nk_texrepl_open(path, 0, err, sizeof(err));
         double t_open = wall_s() - t0;
         mem_now(&ws1, &pk1);
         if (!p) { printf("bench %s: open failed: %s\n", kinds[k], err); return 1; }
@@ -1369,11 +1669,12 @@ static int bench(int n) {
         mem_now(&ws2, &pk2);
         NkTexReplStats st;
         nk_texrepl_stats(p, &st);
-        printf("bench %s: entries=%zu open=%.1f ms index=%.2f MiB open_ws_delta=%.2f MiB | first use %d/%d: %.1f us each"
+        printf("bench %s: entries=%zu open=%.1f ms (listing %.1f ms) index=%.2f MiB ws_before=%.1f MiB "
+               "open_ws_delta=%.2f MiB peak_after_open=%.1f MiB | first use %d/%d: %.1f us each"
                " | held lookup %.3f us | miss %.3f us | cache=%.2f MiB peak_ws=%.1f MiB\n",
-               kinds[k], nk_texrepl_entry_count(p), t_open * 1e3, (double)st.index_bytes / 1048576.0,
-               ws1 >= 0 ? ws1 - ws0 : -1.0, hits, n, t_first * 1e6 / n, t_held * 1e6 / n, t_miss * 1e6 / n,
-               (double)st.cache_bytes / 1048576.0, pk2);
+               kinds[k], nk_texrepl_entry_count(p), t_open * 1e3, (double)st.list_ns / 1e6,
+               (double)st.index_bytes / 1048576.0, ws0, ws1 >= 0 ? ws1 - ws0 : -1.0, pk1, hits, n,
+               t_first * 1e6 / n, t_held * 1e6 / n, t_miss * 1e6 / n, (double)st.cache_bytes / 1048576.0, pk2);
         nk_texrepl_close(p);
     }
     return 0;
@@ -1382,6 +1683,7 @@ static int bench(int n) {
 int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
     if (argc == 3 && !strcmp(argv[1], "--bench")) return bench(atoi(argv[2]));
+    if (argc == 4 && !strcmp(argv[1], "--bench-only")) return bench_measure(atoi(argv[2]), argv[3]);
     test_hashes();
     test_synthetic_pack();
     test_malformed_ini();
@@ -1392,6 +1694,7 @@ int main(int argc, char **argv) {
     test_budget();
     test_index_forms();
     test_zip_packs();
+    test_zip_refusals();
     test_png_corpus();
     test_file_checks();
     if (g_failures) {
