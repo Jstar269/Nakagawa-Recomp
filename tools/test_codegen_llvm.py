@@ -235,12 +235,14 @@ class LoweringTests(unittest.TestCase):
     def test_hst_emission_sites_cover_every_hst_address_in_emit_function(self):
         # Every `hst_profile and ... addr == <literal>` site in emit_function or
         # one of the `_emit_*` steps it was split into (#1531) emits something
-        # other than the plain word; the LLVM backend must refuse each one.
+        # other than the plain word; the LLVM backend must refuse each one. The last
+        # such sites (two loop fast paths and the guest abort exit) were retired under
+        # #363, so none may come back unnoticed.
         tree = ast.parse((ROOT / "tools" / "codegen.py").read_text(encoding="utf-8"))
         emitters = [n for n in ast.walk(tree)
                     if isinstance(n, ast.FunctionDef)
                     and (n.name == "emit_function" or n.name.startswith("_emit_"))]
-        self.assertIn("_emit_hst_patch_site", {n.name for n in emitters})
+        self.assertIn("emit_function", {n.name for n in emitters})
         literals = set()
         for node in (n for emit in emitters for n in ast.walk(emit)):
             if not isinstance(node, ast.If):
@@ -253,7 +255,7 @@ class LoweringTests(unittest.TestCase):
                         and isinstance(cmp.ops[0], ast.Eq)
                         and isinstance(cmp.comparators[0], ast.Constant)):
                     literals.add(cmp.comparators[0].value)
-        self.assertTrue(literals)
+        self.assertEqual(literals, set(), "an HST-profile address site is back in an emitter")
         self.assertLessEqual(literals, codegen_llvm.hst_emission_sites(codegen))
 
 
@@ -452,6 +454,37 @@ class RuntimeAbiTests(unittest.TestCase):
         shims = {n for n in codegen_llvm.ABI_FUNCTIONS if n.startswith("sr_llvm_")}
         declared = set(re.findall(r"\b(sr_llvm_\w+)\(", header))
         self.assertEqual(shims, declared)
+
+
+class MutantAnchorTests(unittest.TestCase):
+    """Every cosimulation mutant must still apply to the source it damages (#2227).
+
+    Hosted CI runs only the default campaign, so a stale LLVM mutant would otherwise
+    surface only when someone ran ``cosim-mutants-llvm``. ``Mutant.apply`` raises when
+    a pattern matches a different number of times than declared.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "cosim_mutate", ROOT / "fixtures" / "cosim" / "mutate.py")
+        cls.mutate = importlib.util.module_from_spec(spec)
+        sys.modules["cosim_mutate"] = cls.mutate
+        spec.loader.exec_module(cls.mutate)
+
+    def test_every_mutant_pattern_matches_its_source(self):
+        m = self.mutate
+        paths = {
+            "interpreter": m.INTERPRETER, "fp-convert": m.FP_CONVERT,
+            "fpu-reference": m.FPU_REFERENCE, "generator": m.GENERATOR,
+            "split-generator": m.GENERATOR, "scheduler": m.SCHEDULER,
+            "llvm-backend": m.LLVM_BACKEND,
+        }
+        for mutant in (*m.MUTANTS, *m.LLVM_MUTANTS):
+            with self.subTest(mutant=mutant.name):
+                source = paths[mutant.target].read_text(encoding="utf-8")
+                self.assertNotEqual(mutant.apply(source), source)
 
 
 if __name__ == "__main__":

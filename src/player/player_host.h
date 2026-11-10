@@ -51,6 +51,11 @@ void player_host_set_window_icon(SDL_Window *window);
  * Wayland app ID and X11 class elsewhere). A refusal only costs the grouping; it is logged. */
 void player_host_set_app_identity(void);
 
+/* Write the renderer's current target to a BMP file at path: the --screenshot
+ * capture and the UI regression harness's last frame. False when the pixels
+ * could not be read or the file not written; SDL_GetError() says why. */
+bool player_host_save_screenshot(SDL_Renderer *renderer, const char *path);
+
 #ifdef __cplusplus
 }
 #endif

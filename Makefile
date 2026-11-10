@@ -145,6 +145,19 @@ EXTRA_SPAN_ARG  = $(if $(strip $(EFFECTIVE_EXTRA_SPANS)),--extra-span=$(strip $(
 ifneq ($(filter default undefined,$(origin CC)),)
 CC := gcc
 endif
+# The system the built program runs on (#360). Empty builds for this host, as before.
+# NK_TARGET=android builds a title as the Android library TitleActivity loads,
+# <BUILD_DIR>/lib<GAME_NAME>.so, with an Android Clang as CC: on the device, or from a PC
+# with the NDK's aarch64-linux-android<api>-clang. The conditionals about the built
+# program read NK_TARGET_OS; the ones about the host's own shell and tools keep reading OS.
+NK_TARGET ?=
+ifeq ($(strip $(NK_TARGET)),)
+NK_TARGET_OS := $(if $(filter Windows_NT,$(OS)),windows,posix)
+else ifeq ($(NK_TARGET),android)
+NK_TARGET_OS := android
+else
+$(error NK_TARGET '$(NK_TARGET)' is not a target this Makefile builds; leave it empty to build for this host, or set NK_TARGET=android)
+endif
 # Quote the executable in recipes so explicit Windows paths with spaces work.
 PYTHON     ?= python
 ifeq ($(OS),Windows_NT)
@@ -204,7 +217,22 @@ BUILD_ROOT_RUN := $(if $(filter /%,$(BUILD_ROOT))$(findstring :,$(BUILD_ROOT)),$
 # retain their existing lightweight SDL behavior.
 SDL3_DIR ?=
 SDL3_MAKE_FRAGMENT := $(BUILD_ROOT)/.sdl3-discovery.mk
-ifeq ($(strip $(filter clean distclean clean-preview,$(MAKECMDGOALS))$(NK_INFO_ONLY)),)
+ifeq ($(NK_TARGET_OS),android)
+# An Android title links the APK's own libSDL3.so, so nothing is discovered on the host:
+# ANDROID_SDL3_INCLUDE names the folder holding SDL3/SDL.h and ANDROID_SDL3_LIBDIR the folder
+# holding libSDL3.so (the native library folder on the device). The Vulkan and Android
+# headers and libraries are the NDK sysroot's, which CC already searches.
+ANDROID_SDL3_INCLUDE ?=
+ANDROID_SDL3_LIBDIR ?=
+SDL3_DIR := $(ANDROID_SDL3_INCLUDE)
+SDL3_PROVIDER := android
+SDL3_VERSION := $(if $(wildcard $(ANDROID_SDL3_INCLUDE)/SDL3/SDL_version.h),$(strip $(shell "$(PYTHON)" -c "import re, sys; t = open(sys.argv[1], encoding='utf-8').read(); v = [re.search(r'define SDL_%s_VERSION\s+(\d+)' % k, t) for k in ('MAJOR', 'MINOR', 'MICRO')]; print('.'.join(m.group(1) for m in v) if all(v) else '')" "$(ANDROID_SDL3_INCLUDE)/SDL3/SDL_version.h")),)
+SDL3_ERROR := $(if $(SDL3_VERSION),$(if $(wildcard $(ANDROID_SDL3_LIBDIR)/libSDL3.so),,NK_TARGET=android needs ANDROID_SDL3_LIBDIR naming the folder that holds the APK's libSDL3.so (got '$(ANDROID_SDL3_LIBDIR)')),NK_TARGET=android needs ANDROID_SDL3_INCLUDE naming the folder that holds SDL3/SDL_version.h (got '$(ANDROID_SDL3_INCLUDE)'))
+SDL3_DLL :=
+SDL3_INC_FLAGS := $(if $(ANDROID_SDL3_INCLUDE),-I"$(ANDROID_SDL3_INCLUDE)",)
+SDL3_LDFLAGS := $(if $(ANDROID_SDL3_LIBDIR),-L"$(ANDROID_SDL3_LIBDIR)",)
+VULKAN_SDK :=
+else ifeq ($(strip $(filter clean distclean clean-preview,$(MAKECMDGOALS))$(NK_INFO_ONLY)),)
 ifeq ($(VULKAN_SDK),)
 _BUILD_DEPENDENCY_DISCOVERY := $(shell "$(PYTHON)" -W ignore -c "import sys; sys.path.insert(0, 'tools'); from nk_doctor_checks import write_build_discovery_make_fragment; write_build_discovery_make_fragment(r'$(SDL3_MAKE_FRAGMENT)', r'$(subst \,/,$(SDL3_DIR))', r'$(CC)', r'$(subst \,/,$(VULKAN_SDK))', True)" 2>&1)
 ifneq ($(strip $(_BUILD_DEPENDENCY_DISCOVERY)),)
@@ -238,7 +266,7 @@ endif
 # An explicit VULKAN_SDK override on Linux is still honoured: if the caller names a real
 # directory, -L<root>/lib is added and the SDK's own headers are picked up. The default
 # (no override, no discovery) is the system loader.
-ifeq ($(OS),Windows_NT)
+ifeq ($(NK_TARGET_OS),windows)
 VULKAN_INC_FLAGS := -I"$(VULKAN_SDK)/Include" -I"$(VULKAN_SDK)/include"
 VULKAN_LIB_FLAGS := -L"$(VULKAN_SDK)/Lib" -L"$(VULKAN_SDK)/lib"
 else
@@ -275,7 +303,7 @@ LINK_MAP_ARG = $(if $(strip $(LINK_MAP)),$(LINK_MAP_VALUE),)
 # The Vulkan import library name differs by platform: vulkan-1.lib (Windows SDK) vs libvulkan.so
 # (Linux loader). The two are NOT interchangeable, so the name is chosen per platform rather
 # than unified to one.
-ifeq ($(OS),Windows_NT)
+ifeq ($(NK_TARGET_OS),windows)
 VULKAN_LIB_NAME := -lvulkan-1
 WIN_ONLY_LIBS   := -lmfplat -lgdi32 -lole32 -lshell32 -luuid -lwinmm
 # -Wl,--no-insert-timestamp keeps the PE image byte-reproducible on the
@@ -292,10 +320,28 @@ REPRODUCIBLE_LINK_FLAG :=
 # transcendental maths (GE rasterizer, VFPU, ATRAC DSP) references libm
 # symbols and ld refuses an implicit dependency ("DSO missing from command
 # line"). Listed here, after the project libraries, exactly as -lm is on any
-# other GNU link line.
-POSIX_RUNTIME_LIBS := -lm
+# other GNU link line. An Android title also links the NDK's logging and native-activity
+# libraries, which the runtime's Android platform code calls.
+POSIX_RUNTIME_LIBS := -lm $(if $(filter android,$(NK_TARGET_OS)),-llog -landroid,)
 endif
 LIBS       ?= -lSDL3 $(VULKAN_LIB_NAME) $(WIN_ONLY_LIBS) $(POSIX_RUNTIME_LIBS)
+
+# What the compile goal links. A desktop title is an executable. An Android title is the
+# shared library TitleActivity loads (android/app/src/main/java/.../TitleActivity.java): it
+# adds nk_android_title.c, whose nk_android_title_main runs the runtime's main(), and the
+# exit wrappers there end the title's process the way a desktop child's exit does. Every
+# object a shared library links is position independent (GE_CFLAGS and RECOMP_FLAGS take
+# the same flag where they are defined).
+ifeq ($(NK_TARGET_OS),android)
+override CFLAGS += -fPIC
+TITLE_OUTPUT = $(BUILD_DIR)/lib$(GAME_NAME).so
+TITLE_LINK_FLAGS := -shared -Wl,--wrap=exit -Wl,--wrap=_exit -Wl,--wrap=_Exit
+TITLE_ANDROID_OBJ = $(BUILD_DIR)/nk_android_title.o
+else
+TITLE_OUTPUT = $(BUILD_DIR)/$(GAME_NAME)$(EXE_EXT)
+TITLE_LINK_FLAGS :=
+TITLE_ANDROID_OBJ :=
+endif
 
 # Portable H.264 backend (src/rt/h264_ffmpeg.c): the pinned FFmpeg n4.4 H.264 decoder subset
 # vendored under src/rt/h264_ffmpeg_sub/ (LGPL-2.1-or-later, generic C, statically linked, no
@@ -303,7 +349,7 @@ LIBS       ?= -lSDL3 $(VULKAN_LIB_NAME) $(WIN_ONLY_LIBS) $(POSIX_RUNTIME_LIBS)
 # platform decoder exists; it is the default off Windows, where Media Foundation (h264_mf.c)
 # stays the backend. H264_FFMPEG=0 keeps h264_null.c failing closed. See NOTICE.md and
 # docs/PLATFORM_PORTABILITY.md.
-ifeq ($(OS),Windows_NT)
+ifeq ($(NK_TARGET_OS),windows)
 H264_FFMPEG ?= 0
 else
 H264_FFMPEG ?= 1

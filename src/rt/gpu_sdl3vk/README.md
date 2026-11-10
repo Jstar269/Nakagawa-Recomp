@@ -71,8 +71,29 @@ Enabled with `SR_GPU_GE=1`. Implementation:
   (analytic bound: truncation of two products plus round-to-nearest). Shader blends are
   bit-exact to `ge.c` for non-overlapping primitives. Measured by the
   `gpu-coherence-selftest` blend-parity matrix (726 factor/equation states on synthetic
-  draws). The shader reads a batch-start destination snapshot, so overlapping primitives
-  inside one batch are not bit-exact on the shader path; the matrix does not exercise that.
+  draws). Overlapping primitives inside one batch (#2109) depend on the destination-read
+  path below.
+- Destination reads (shader blends and the stencil test, #2109). On the snapshot path every
+  primitive of a batch reads one copy of the target taken before the batch, so a primitive
+  drawn over an earlier one of the same batch blends against the pre-batch pixels, not
+  against what that primitive stored. On the interlock path (`VK_EXT_fragment_shader_interlock`
+  with `fragmentShaderPixelInterlock` and `fragmentStoresAndAtomics`) such batches run
+  `psp_frag_rmw.inc`, `psp.frag` built with `-DSR_DST_INTERLOCK`. Each fragment loads the
+  target as a storage image, blends, and stores it inside a pixel-ordered interlock, so
+  overlapping primitives match `ge.c`. These batches record in a depth-only render pass with
+  the colour image in `GENERAL`. The other batches of the op keep the fixed-function pass, with
+  a barrier at each switch, and the op takes no snapshot copy. The variant tests depth early,
+  so an op whose destination-reading batch writes depth and may still kill a fragment in the
+  shader keeps the snapshot path (the alpha test, the color test, the transform-mode depth range
+  when it is narrower than 0–65535, or a stencil-fail KEEP). So does an op whose stencil state
+  also blends in fixed function, an op whose destination-reading batch textures from its own
+  target (the destination copy is its texture), every op into a widescreen wing canvas (which has
+  no RMW objects), and
+  every op while the host twin runs. The `submit-batch` and `gpu-timestamps` cells hold the
+  snapshot path on every device, since they count and time snapshot copies. The interlock path is
+  taken where the device has it; `SR_GPU_DST_READ` forces a path. On the snapshot path the
+  device, images, render passes and default shader are made exactly as before. The
+  `gpu-coherence-selftest` dst-read cells check both paths against `ge.c`.
 - Source-premultiplied states (src factor 2·α or 1−2α with a dst factor that reads the
   source colour, and min/max with those src factors) go through the shader or drop the
   premultiply, because fixed-function blending would otherwise read the premultiplied
@@ -116,7 +137,14 @@ Enabled with `SR_GPU_GE=1`. Implementation:
   `shaderDenormPreserveFloat32`. On other devices, NVIDIA's among them, ge.c keeps T&L and
   `SR_GPU_TNL=1` says so once. Everything else, and a draw the fragment state sends to
   software, keeps ge.c's T&L. The `tnl-parity` cells of `gpu-coherence-selftest` compare the
-  two routes byte for byte (on a device without the feature, every cell on ge.c's route). Left:
+  two routes byte for byte (on a device without the feature, every cell on ge.c's route).
+  `ge_tnl_reason_counts` counts each draw ge.c keeps under the first reason that rules the route
+  out (clear, flat, diagnostic, texgen, matrix, viewport, texcoord, fog, specular, light, alloc,
+  vertex, clip, backend). With `SR_GESTAT=1` as well, each stat window from the first
+  transform-mode triangle draw prints that window's counts as
+  `GESTAT-TNL f=N taken=N cpu=N: clear=N flat=N ... backend=N`, every reason in that order.
+  `ge-tnl-census-selftest` drives one draw per reason through ge.c and checks the line over two
+  windows. Left:
   texgen, flat shading, specular light by default, sprites, lines, points, clipped draws, and
   devices that flush fp32 subnormals.
 - `ge_powf`, the specular and powered-diffuse power, is one text in ge.c and `psp_tnl.vert`
@@ -174,8 +202,21 @@ UNDEFINED-layout image and published a PPM under a `.png` name. It is gone. In i
   `src/rt/fbcap_policy.{h,c}`; the hle.c integration is `fbcap_arm_for_present`.
 - `sdl3vk_capture_selftest()` (standalone binary via the Makefile `gpu-capture-selftest` target)
   exercises policy, CPU- and GPU-source captures, cancel, scale, and byte-checks the published
-  PPMs; under `SR_VULKAN_VALIDATION=1` it also asserts zero validation-layer errors. Exit 77
-  means SKIP (Vulkan unavailable). `fbcap-selftest` covers the presenter-neutral service itself
+  PPMs; under `SR_VULKAN_VALIDATION=1` it also asserts zero validation-layer errors. It also
+  checks present pacing (below) against a fake display that holds every image. Exit 77
+  means SKIP (Vulkan unavailable).
+- Present pacing: while the scheduler paces the guest to real time (the default), a game-frame
+  present never waits for the presentation engine (`sdl3vk_set_present_nowait`, set by
+  `gui_present`). The present polls its frame slot's fence and acquires with timeout 0; when a
+  FIFO (VSync) display still holds every image, or the frame slot's earlier submission is still
+  pending (under MAILBOX, a GPU frames behind), it returns `SDL3VK_PRESENT_DISPLAY_BUSY`. The
+  window keeps the frame it has, and the guest's VBLANK clock goes on. These frames count as
+  `vblanks.present_busy` in the perf JSON (apart from the output cap's `present_skips`), and
+  shutdown prints how many there were, by cause. A frame not shown is not recorded either, so a
+  VSync-on video recording repeats the previous picture at that VBLANK. Two kinds of present
+  still wait: a frame an armed file or evidence capture is waiting for (the picture probe is not
+  one), and every present in a deterministic-clock or turbo run (`SR_DETERMINISTIC_CLOCK=1`,
+  `SR_NOVBPACE=1`), which has no real-time clock to protect and keeps every frame. `fbcap-selftest` covers the presenter-neutral service itself
   without a GPU.
 
 ## Widescreen Fill wings (#1881)
@@ -289,6 +330,10 @@ depth aliasing.
   software fallback) closes the open command buffer itself. A larger limit trades CPU/GPU
   overlap inside one command buffer for fewer submits and fence waits.
 - `SR_GPU_SYNC_SUBMIT=1` — exact synchronous fallback: one op per submit, each waited on.
+- `SR_GPU_DST_READ=snapshot|interlock` — the destination-read path (#2109), read before the
+  device is made. Unset, the interlock is taken where the device has it; an unknown value says
+  so once and gets the same default. A forced path the device lacks is refused with its reason,
+  and the snapshot path runs.
 - `SR_GPU_READBACK_FULL=1` — copy the whole scaled target on a readback to guest memory, the
   reference path for the default copy of the rows guest memory keeps (#323).
 - `SR_GPU_PIPELINE_CACHE=0` — run without the pipeline cache in `<data root>/cache/gegpu`

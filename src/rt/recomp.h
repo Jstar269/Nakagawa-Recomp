@@ -1131,8 +1131,9 @@ void sr_vwrite(CpuState *s, const uint8_t *idx, float *d, int n, uint32_t dprefi
  * source, and an optimiser may swap the operands of a commutative + or *. So the
  * generated code and sr_vfpu_interp, each compiled on its own, kept different NaNs when
  * two met (the alias-edge sweep in tests/native/vfpu_interp_selftest.c, built at -O1 or
- * -O2). Both lanes call these helpers for every lane operation of vadd, vsub, vmul, vdiv,
- * vscl, vdot, vhdp, vcrs, vcrsp, vqmul, vmmul, vtfm and vmscl. The rule: the first NaN
+ * -O2). Both lanes call these helpers for every lane operation of vdot, vhdp, vcrs, vcrsp,
+ * vqmul, vmmul, vtfm and vmscl (vadd, vsub, vmul, vscl and vdiv use the measured sr_vfpu_*
+ * rule below). The rule: the first NaN
  * operand, quieted, else the invalid-operation NaN 0xFFC00000 (Inf - Inf, 0 * Inf, 0 / 0,
  * Inf / Inf). That is what x86-64 SSE returns for the operands in source order, but it is a
  * change for default builds too: even at -O0 (RECOMP_OPT, the Makefile default) GCC may
@@ -1159,7 +1160,55 @@ static inline float sr_vf_nan(float a, float b) {
 static inline float sr_vf_add(float a, float b) { const float r = a + b; return r == r ? r : sr_vf_nan(a, b); }
 static inline float sr_vf_sub(float a, float b) { const float r = a - b; return r == r ? r : sr_vf_nan(a, b); }
 static inline float sr_vf_mul(float a, float b) { const float r = a * b; return r == r ? r : sr_vf_nan(a, b); }
-static inline float sr_vf_div(float a, float b) { const float r = a / b; return r == r ? r : sr_vf_nan(a, b); }
+
+/* vadd, vsub, vmul, vscl and vdiv lane arithmetic as a PSP-3000 returned it (unrecorded PSP
+ * read, 2026-11-08, issue #326; probe case vfpu-basic-arith, 20 operand classes, all 400
+ * ordered pairs, .s/.p/.t/.q identical). IEEE float32 with denormals flushed to a zero of
+ * their sign on input. The output flush is measured only for vdiv (1 / 2^127 and 1 / FLT_MAX
+ * give +0); the 20 classes reach no denormal result of vadd, vsub or vmul, so their output
+ * flush extends the vdiv result by rule and is pinned by derived cells, not console ones. A NaN result
+ * is never an input payload: vadd and vsub give 0x7f800001 for a NaN operand or Inf - Inf,
+ * and vmul, vscl and vdiv give 0x7f800001 with the sign bit XOR of the two operand signs
+ * for a NaN operand, 0 * Inf, 0 / 0 or Inf / Inf. vdiv was measured at .s only; the other
+ * widths use the same lane rule. The other forms that call sr_vf_* keep the project rule
+ * above until they are measured. */
+static inline uint32_t sr_vfpu_bits(float x) {
+    uint32_t u;
+    memcpy(&u, &x, 4);
+    return u;
+}
+static inline float sr_vfpu_from_bits(uint32_t u) {
+    float x;
+    memcpy(&x, &u, 4);
+    return x;
+}
+static inline float sr_vfpu_daz(float x) {
+    const uint32_t u = sr_vfpu_bits(x);
+    return (u & 0x7f800000u) == 0u ? sr_vfpu_from_bits(u & 0x80000000u) : x;
+}
+static inline float sr_vfpu_nan_signed(float a, float b) {
+    return sr_vfpu_from_bits(0x7f800001u | ((sr_vfpu_bits(a) ^ sr_vfpu_bits(b)) & 0x80000000u));
+}
+static inline float sr_vfpu_add(float a, float b) {
+    a = sr_vfpu_daz(a); b = sr_vfpu_daz(b);
+    const float r = a + b;
+    return r == r ? sr_vfpu_daz(r) : sr_vfpu_from_bits(0x7f800001u);
+}
+static inline float sr_vfpu_sub(float a, float b) {
+    a = sr_vfpu_daz(a); b = sr_vfpu_daz(b);
+    const float r = a - b;
+    return r == r ? sr_vfpu_daz(r) : sr_vfpu_from_bits(0x7f800001u);
+}
+static inline float sr_vfpu_mul(float a, float b) {
+    a = sr_vfpu_daz(a); b = sr_vfpu_daz(b);
+    const float r = a * b;
+    return r == r ? sr_vfpu_daz(r) : sr_vfpu_nan_signed(a, b);
+}
+static inline float sr_vfpu_div(float a, float b) {
+    a = sr_vfpu_daz(a); b = sr_vfpu_daz(b);
+    const float r = a / b;
+    return r == r ? sr_vfpu_daz(r) : sr_vfpu_nan_signed(a, b);
+}
 
 /* VFPU transcendentals, exact ports of PPSSPP's table-based kernels (the PSP hardware does
  * not compute these with IEEE math). The lookup tables are loaded once from assets/vfpu/
@@ -1474,6 +1523,16 @@ int sr_enhancement_file_register(const char *disc_path, const uint8_t stock_sha2
  * sr_enhancement_logic_slowed() may be called from the presenter thread. */
 void sr_enhancement_register_updates(const volatile uint32_t *counter);
 int sr_enhancement_logic_slowed(unsigned *rate);
+/* A clip_x_widen site (section 10.8), from generated code right after the call at the site
+ * returns: the guest pointer `base` plus each of the `count` offsets addresses a column-major 4x4
+ * float clip matrix, and its x output row (elements 0, 4, 8, 12) is scaled by 480 / (480 + 2 * wing),
+ * so a title's own visibility test accepts the same extra width the Widescreen wings draw. It does
+ * nothing while Widescreen is off (wing 0) or the run's cull key is off, so the guest sees its stock
+ * matrices; a matrix outside guest RAM is reported once on stderr and left alone. A matrix whose x
+ * row still holds the words this function wrote is not scaled again, so a title that does not rebuild
+ * a matrix at every call cannot be scaled twice; the call at the site must leave each listed matrix
+ * describing the camera it was built for (rewritten, or unchanged since the last call). */
+void sr_enhancement_widen_clip_x(uint32_t base, const uint32_t *offsets, uint32_t count);
 
 /* The kernel's record of the main module, emitted by tools/codegen.py from the ELF (PT_LOAD
  * segments, SceModuleInfo, section or program headers, and the syslib's
@@ -1590,9 +1649,16 @@ void     dispatch_call(CpuState *s, uint32_t target, uint32_t resume_pc);
  * call's own return boundary, as a direct call has. Returns 1 when the caller must
  * return without running its continuation (sr_aot_return_boundary_end). */
 int      dispatch_call_checked(CpuState *s, uint32_t target, uint32_t resume_pc);
+/* The interpreter's linked call (guest_interp.c): 1 when the COSIM guest lane refused an
+ * import under it and the interpreter must return with that fatal flow, else 0 (#2196). */
+int      dispatch_call_interp(CpuState *s, uint32_t target, uint32_t resume_pc);
 /* Set only by the COSIM guest lane (domain_mode.c): its refused import unwinds through
- * dispatch_call_checked and dispatch_call_continue instead of ending the run. */
+ * dispatch_call_checked, dispatch_call_continue, dispatch_call_interp, dispatch_tail_step
+ * and dispatch instead of ending the run. */
 extern volatile int sr_dispatch_unwind_requested;
+/* The COSIM guest lane's import refusal (recomp.c, #2201): 1 when the lane holds and the
+ * import `nid` was refused (fatal flow and the unwind flag set), else 0 and nothing changes. */
+int      sr_guest_lane_refuse_import(CpuState *s, uint32_t nid);
 
 /* A computed jr/jalr whose target register holds 0 is a null code pointer (#1375): report
  * it and stop the run. Generated code tests the latched target before the transfer's link
@@ -2290,6 +2356,10 @@ int sched_clock_deterministic(void);
 extern int g_prof_enabled;
 void sr_profile_init(void);
 void sr_profile_dump(void);
+/* The end-of-run SR_PROFILE dump, printed once: from atexit, and from every hard exit (_Exit)
+ * that skips atexit, such as SR_EXIT_AT_VBLANK. A no-op when profiling is off. The periodic
+ * SR_PROFILE_DUMP_VBLANKS dumps call sr_profile_dump. */
+void sr_profile_dump_final(void);
 void sr_profile_block(uint32_t target_pc);
 /* Test accessors: defined only in SR_PROFILER_SELFTEST builds (recomp.c), but
  * declared unconditionally so no translation unit ever sees an implicit

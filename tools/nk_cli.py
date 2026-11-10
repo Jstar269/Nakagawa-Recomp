@@ -27,7 +27,7 @@ import tempfile
 import threading
 import traceback
 import time
-from typing import Any
+from typing import Any, NoReturn
 import zlib
 
 
@@ -2202,12 +2202,30 @@ def compile_progress_message(completed: int, total: int) -> str:
     return f"Compiling part {completed + 1} of {total}"
 
 
-def compile_load_notice(jobs: int | None, cpus: int | None) -> str | None:
-    """A calm note that other apps may slow down, sized to the share of the PC in use.
+def compile_load_notice(jobs: int | None, cpus: int | None, limit: str | None = None,
+                        free_gb: float | None = None) -> str | None:
+    """A calm note about how the build uses the PC.
 
-    One job leaves most of the PC free, so it gets no notice.
+    Several jobs get a note that other apps may slow down, sized to the share of the PC in
+    use. One job gets a note that parts compile one at a time and the build takes longer,
+    with the planner's real reason: ``limit`` is what bound the job count (``"memory"``,
+    ``"cpu"`` or ``"override"``) and ``free_gb`` the free memory then. A one-job row from
+    an older planner has no ``limit`` and gets no note.
     """
-    if not jobs or jobs <= 1:
+    if not jobs:
+        return None
+    if jobs <= 1:
+        if limit == "memory":
+            how = (f"only {free_gb:.1f} GB of memory is free" if free_gb is not None
+                   else "your PC is low on free memory")
+            return (f"Building compiles one part at a time because {how}, so it will "
+                    "take longer. Closing other apps or builds frees memory.")
+        if limit == "cpu":
+            return ("Building compiles one part at a time because your PC reports a single "
+                    "processor, so it will take longer.")
+        if limit == "override":
+            return ("Building compiles one part at a time because the job count was set "
+                    "to 1 (NK_PACKAGE_JOBS), so it will take longer.")
         return None
     if not cpus or jobs * 2 >= cpus:
         return ("Building uses most of your PC's power for a few minutes, "
@@ -2267,12 +2285,15 @@ class _CompileProgressRelay:
                 continue
             self.last = (completed, total)
             jobs, cpus = row.get("jobs"), row.get("cpus")
+            limit, free_gb = row.get("limit"), row.get("free_gb")
             self.reporter.report("compile", "RUNNING",
                                  compile_progress_message(completed, total),
                                  completed=completed, total=total,
                                  notice=compile_load_notice(
                                      jobs if isinstance(jobs, int) else None,
-                                     cpus if isinstance(cpus, int) else None))
+                                     cpus if isinstance(cpus, int) else None,
+                                     limit if isinstance(limit, str) else None,
+                                     free_gb if isinstance(free_gb, (int, float)) else None))
 
 
 _BUILD_DIAGNOSTIC_MARKERS = ("error:", "cannot find", "undefined reference")
@@ -2415,6 +2436,8 @@ def _select_enhancement_package(
     enhancement_package: Path | None,
     experimental_60hz: bool,
     environment: Mapping[str, str],
+    sfo_disc_id: str | None = None,
+    disc_version: str | None = None,
 ) -> tuple[Path | None, Path]:
     """The enhancement package a build applies and the package directory it writes.
 
@@ -2424,6 +2447,12 @@ def _select_enhancement_package(
     Makefile would read it, and it would otherwise enhance the authentic package or
     override the package checked here. An enhanced build gets its own directory, never
     the authentic `packages/<disc_id>`.
+
+    A published package (docs/ENHANCEMENT_CONTRACT.md section 5.1) names its disc. It is
+    refused by name before any site is read: `other_disc` when the disc's PARAM.SFO
+    DISC_ID differs, `other_revision` when its DISC_VERSION differs, and
+    `modified_executable` when both match but the executable's SHA-256 does not. Codegen
+    then checks every keyed stock digest (`site_mismatch`).
     """
     ambient = package_cache.ambient_enhancement_package(environment)
     if ambient is not None:
@@ -2450,6 +2479,8 @@ def _select_enhancement_package(
         package = enhancement_package_module.load_and_validate_package(package_path)
     except (OSError, ValueError) as exc:
         raise PackageBuildError(f"Enhancement package rejected: {exc}") from exc
+    if enhancement_package_module.is_published_package(package):
+        _check_published_package_disc(package, sfo_disc_id, disc_version, executable_sha256)
     if package["target_title_id"] != title_id:
         raise PackageBuildError(
             f"Enhancement package target_title_id {package['target_title_id']!r} "
@@ -2461,6 +2492,28 @@ def _select_enhancement_package(
             f"does not match selected executable SHA-256 {executable_sha256}."
         )
     return package_path, user_root / "packages" / f"{disc_id}-enhanced-{package['id']}"
+
+
+def _check_published_package_disc(package: Mapping[str, Any], sfo_disc_id: str | None,
+                                  disc_version: str | None, executable_sha256: str) -> None:
+    """Refuse a published package for another disc, revision or a modified executable, by name."""
+    def refuse(code: str, message: str) -> NoReturn:
+        raise PackageBuildError(f"Enhancement package refused ({code}): {message}. "
+                                "Nothing was built; the authentic package is unchanged.")
+
+    if not sfo_disc_id or not disc_version:
+        raise PackageBuildError("Enhancement package refused: a published package needs the disc's "
+                                "PARAM.SFO DISC_ID and DISC_VERSION, and this disc does not give both.")
+    if sfo_disc_id.upper() != package["disc_id"]:
+        refuse("other_disc", f"the package is for {package['disc_id']}, this disc is {sfo_disc_id.upper()} "
+                             "(another region or another game)")
+    if disc_version != package["disc_version"]:
+        refuse("other_revision", f"the package is for {package['disc_id']} version {package['disc_version']}, "
+                                 f"this disc is version {disc_version}")
+    if executable_sha256 != package["executable_sha256"]:
+        refuse("modified_executable", f"the disc ID and version match, but the executable's SHA-256 "
+                                      f"{executable_sha256} is not {package['executable_sha256']} "
+                                      "(a patched or re-encoded image)")
 
 
 @dataclass
@@ -2850,6 +2903,8 @@ def _package_cache_check(st):
         enhancement_package=getattr(args, "enhancement_package", None),
         experimental_60hz=bool(getattr(args, "experimental_60hz", False)),
         environment=os.environ,
+        sfo_disc_id=title_input_identity["disc"]["id"],
+        disc_version=title_input_identity["disc"]["disc_version"],
     )
     _require_child(user_root, target_dir, "Package destination")
     if target_dir.is_symlink() or (target_dir.exists() and not target_dir.is_dir()):
@@ -2979,6 +3034,9 @@ def _package_codegen(st):
             str(identity_path),
             "--public-safe",
         ]
+        package_target = getattr(args, "target", None)
+        if package_target is not None:
+            planner.extend(("--target", package_target))
         if module_dir is not None:
             planner.extend(("--module-dir", str(module_dir)))
         if cached_header is not None:
@@ -5996,6 +6054,10 @@ def main() -> int:
     p_build.add_argument("--no-shared-libraries", action="store_true",
                          help="compile the disc's system libraries for this game only, "
                               "without the shared library cache")
+    p_build.add_argument("--target", choices=("host", "android"), default=None,
+                         help="system the package runs on: host, or android for the "
+                              "shared library the Android app loads (default: android "
+                              "when this runs on Android, else host)")
     p_build.set_defaults(func=cmd_build_package)
 
     p_bringup = subparsers.add_parser(

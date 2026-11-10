@@ -62,7 +62,7 @@
     X("SR_DETERMINISTIC_CLOCK", "string", "empty (off)", "sched.c", "1 makes guest time follow the guest work, not the host clock; empty or 0 keeps the paced or turbo clock. 1 with SR_NOVBPACE=0 is rejected.") \
     X("SR_DETERMINISTIC_SLICE_US", "number", "100", "sched.c", "Guest microseconds the deterministic clock charges per scheduler boundary; a value outside 1..100000 or not a number is rejected.") \
     X("SR_DEVELOPER_MODE", "flag-nonzero", "off", "gpu_sdl3vk/sdl3vk.c", "Marks a hand-started run as a developer run in the SDL3 Vulkan presenter.") \
-    X("SR_DISC_ID", "string", "unset", "gui.c,replay_checkpoint.c", "Disc identifier string shown in the in-game pause overlay, set by the launcher.") \
+    X("SR_DISC_ID", "string", "unset", "gui.c,hle_display.c,replay_checkpoint.c", "Disc identifier string set by the launcher: shown in the in-game pause overlay and used in screenshot file names.") \
     X("SR_DISPLOG", "flag-presence", "off", "guest_interp.c,recomp.c", "Logs each guest dispatch with target, source pc and return address to stderr.") \
     X("SR_DLGLOG", "flag-presence", "off", "debug.h,hle_utility.c,savedata.c", "Prints diagnostic lines to stderr for utility dialogs and savedata dialog calls.") \
     X("SR_EXEC_SHARE_JSON", "path", "unset (no JSON written)", "perf.c", "File to which the execution-share profile is written as JSON at exit.") \
@@ -116,6 +116,7 @@
     X("SR_GPU_CAPTURE_TERMINAL_CASE", "string", "unset: lifecycle self-test runs", "gpu_sdl3vk/sdl3vk.c", "Names a terminal-fault case for the GPU capture self-test; when set, the lifecycle self-test is skipped.") \
     X("SR_GPU_COHERENCE_CASE", "string", "unset (run all cases)", "gpu_sdl3vk/ge_gpu.c", "Restricts the GPU coherence self-test to one case; scaled-upload, mip-lod or readback-rows.") \
     X("SR_GPU_CPU_PROFILE", "flag-nonzero", "off", "ge.c,ge_replay.c,gpu_sdl3vk/ge_gpu.c", "Enables CPU-side profiling of GPU and GE replay paths, with wall-phase stats in replay.") \
+    X("SR_GPU_DST_READ", "string", "unset (the interlock where the device has it, else the snapshot)", "gpu_sdl3vk/sdl3vk.c", "Destination-read path (snapshot or interlock) of shader blends and stencil; a path the device lacks is refused, an unknown value gets the default.") \
     X("SR_GPU_GE", "flag-nonzero", "off (software GE)", "gui.c", "Enables the GPU GE renderer when set to a non-empty value other than 0.") \
     X("SR_GPU_LOG", "flag-nonzero", "off", "gpu_sdl3vk/ge_gpu.c", "Enables verbose logging in the Vulkan GE backend and also turns on its statistics.") \
     X("SR_GPU_NORTT", "flag-nonzero", "off", "gpu_sdl3vk/ge_gpu.c", "When nonzero, changes how a texture sourced from a render target is bound in the GPU path.") \

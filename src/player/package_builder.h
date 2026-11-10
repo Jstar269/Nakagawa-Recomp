@@ -187,7 +187,8 @@ const char *package_builder_get_output_line(
 );
 
 /* Locate runnable CPython 3.15.x, or 3.14.x when no 3.15 runs, from PYTHON, UCRT64, or
- * PATH. Candidates must pass a bounded version probe before their paths are returned. */
+ * PATH. Candidates must pass a bounded version probe before their paths are returned.
+ * On Android the only candidate is the APK's libnk_python.so in its native library folder. */
 bool package_builder_find_python(char *out_path, size_t out_size);
 /* Prefer the installed pinned prerequisite under data_root, then use host search. */
 bool package_builder_find_python_in_root(const char *data_root,
@@ -394,7 +395,34 @@ bool package_builder_toolchain_missing(
     char *out_message, size_t out_message_size
 );
 
-/* Start the package build as a child process using nk_platform_spawn_process. */
+/* The UCRT64 bin folder that must lead the build child's PATH, so python, make
+ * and gcc all come from one toolchain (#2278). In order: a verified release
+ * bundle's msys64/ucrt64/bin (prerequisites_root, which alone decides when set),
+ * the per-user download under data_root, then a system MSYS2 UCRT64 install: a
+ * bin on path_env whose parent folder is named ucrt64, msys_hint (a prefix or its
+ * bin, as MSYS_PATH), then msys_default_prefix (NULL off Windows). A candidate
+ * counts only when its bin/gcc.exe exists and, for a system install, so does
+ * include/SDL3/SDL.h. A bin on path_env counts only when its parent folder is
+ * named exactly ucrt64. Returns false, with out empty, when no complete toolchain
+ * is found: PATH is then left alone and sdl3-check names the problem. */
+bool package_builder_resolve_toolchain_bin(const char *prerequisites_root,
+                                           const char *data_root,
+                                           const char *path_env,
+                                           const char *msys_hint,
+                                           const char *msys_default_prefix,
+                                           char *out, size_t out_size);
+
+/* Compose "<toolchain_bin><list separator><path_env>" for the build child's
+ * PATH. False, with out empty, when toolchain_bin is NULL or empty or the result
+ * does not fit out_size; package_builder_start then passes no PATH override, so
+ * the child inherits PATH unchanged. The buffer there is 32768 bytes, the Windows
+ * variable limit, so composing fails only when PATH plus the toolchain folder and
+ * its separator would pass 32767 characters. */
+bool package_builder_compose_build_path(const char *toolchain_bin, const char *path_env,
+                                        char *out, size_t out_size);
+
+/* Start the package build as a child process with nk_platform_spawn_tool (on
+ * Android only a tool in the app's native library folder can start). */
 NkResult package_builder_start(
     PackageBuildSession *session,
     const char *python_path,

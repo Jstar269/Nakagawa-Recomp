@@ -991,6 +991,7 @@ static uint32_t hle_libfont_startup_stop(const char *reason) {
         sr_compat_report();
         (void)sr_videorec_finish_status("the libfont start-up stop", HLE_LIBFONT_STARTUP_STOP_EXIT);
         sr_perf_shutdown();
+        sr_profile_dump_final();
         SR_VERIFY_REPORT_NOW();
         fflush(stderr);
         _Exit(HLE_LIBFONT_STARTUP_STOP_EXIT);
