@@ -94,6 +94,7 @@ static inline uint32_t note_rgba(const NkUiTheme *theme, PlayerUiNoteKind kind) 
 #define FLOW_ID_MESSAGE FLOW_ID(0x000042u)
 #define FLOW_ID_ELAPSED FLOW_ID(0x000043u)
 #define FLOW_ID_NOTICE FLOW_ID(0x000044u)
+#define FLOW_ID_SPEED FLOW_ID(0x000045u)          /* the build card's Build speed line */
 #define FLOW_ID_QUEUE_LINE FLOW_ID(0x000046u)  /* the build card's build queue line */
 #define FLOW_ID_LOG FLOW_ID(0x000050u)
 #define FLOW_ID_LOG_SPAN 0x10u
@@ -110,6 +111,12 @@ static inline uint32_t note_rgba(const NkUiTheme *theme, PlayerUiNoteKind kind) 
 #define FLOW_ID_REPORT_ROW FLOW_ID(0x000099u)
 #define FLOW_ID_PROMPTS FLOW_ID(0x0000A0u)
 #define FLOW_ID_WAVES FLOW_ID(0x0000B0u)
+#define FLOW_ID_NICKNAME_FIELD FLOW_ID(0x000300u)  /* the nickname editor's box (#2197) */
+#define FLOW_ID_NICKNAME_TEXT FLOW_ID(0x000301u)
+#define FLOW_ID_NICKNAME_NOTE FLOW_ID(0x000302u)   /* why Done was refused */
+#define FLOW_ID_NICKNAME_COUNT FLOW_ID(0x000303u)  /* "12 / 32 bytes" */
+#define FLOW_ID_NICKNAME_KEYS FLOW_ID(0x000310u)   /* its keyboard's rows (ui_keyboard.h) */
+#define FLOW_ID_NICKNAME_KEYS_SPAN 0x10u           /* UI_KEYBOARD_PART_COUNT */
 
 #define FLOW_MARK_DIAMOND "\xE2\x97\x86"
 #define FLOW_MARK_DOT "\xE2\x97\x8F"

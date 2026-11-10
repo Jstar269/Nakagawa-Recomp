@@ -66,8 +66,17 @@ PACKAGE_SCHEMA_VERSION = 2
 BUILD_REPORT_SCHEMA_VERSION = 1
 PACKAGE_FORMAT = "nakagawa-aot-package"
 BUILD_REPORT_FORMAT = "nakagawa-build-report"
-#: Package builds never run more than this many Make jobs.
+#: Balanced package builds never run more than this many Make jobs; Fastest lifts it.
 PACKAGE_BUILD_MAX_JOBS = 8
+#: The player's Settings > Build speed, passed to the planner in
+#: ``PACKAGE_BUILD_SPEED_ENV``: ``background`` runs at most
+#: ``PACKAGE_BUILD_BACKGROUND_JOBS`` jobs (the player also starts the build at low
+#: priority), ``balanced`` is the automatic sizing, and ``fastest`` runs a job for every
+#: logical CPU the free memory allows. Every speed keeps the memory budget.
+PACKAGE_BUILD_SPEEDS = ("background", "balanced", "fastest")
+PACKAGE_BUILD_SPEED_DEFAULT = "balanced"
+PACKAGE_BUILD_SPEED_ENV = "NK_PACKAGE_BUILD_SPEED"
+PACKAGE_BUILD_BACKGROUND_JOBS = 2
 #: Memory one compile job may need: one cc1 compiling a large generated chunk peaked
 #: at about 2.9 GB working set on the measured Hot Shots Tennis build.
 PACKAGE_BUILD_JOB_BYTES = 3 * 1024**3
@@ -89,7 +98,8 @@ PACKAGE_BUILD_OVERSIZED_UNIT_PERCENT = 125
 #: Memory left for the player, the OS and everything else while a package builds. The
 #: available-memory reading already excludes what other running programs hold.
 PACKAGE_BUILD_RESERVED_BYTES = 2 * 1024**3
-#: Overrides the computed job count (still clamped to 1..PACKAGE_BUILD_MAX_JOBS).
+#: Overrides the computed job count and the build speed's (still clamped to
+#: 1..PACKAGE_BUILD_MAX_JOBS).
 PACKAGE_BUILD_JOBS_ENV = "NK_PACKAGE_JOBS"
 #: Object-cache keys are taken by preprocessing each object's source, which peaked at
 #: about 80 MB for the largest generated Hot Shots Tennis chunk: keying is bounded by
@@ -218,9 +228,11 @@ class PackageBuildPlan:
 
     ``limit`` names the real reason the count is what it is, so the player can tell the
     user: ``"override"`` (``NK_PACKAGE_JOBS``), ``"cpu"`` (the logical CPUs),
-    ``"memory"`` (the free memory), ``"max"`` (``PACKAGE_BUILD_MAX_JOBS``),
-    ``"unknown_memory"`` (no memory reading, so the fixed count of two) or
-    ``"unknown_cpus"`` (no CPU count, so one job, which is not a statement about the PC).
+    ``"memory"`` (the free memory), ``"max"`` (``PACKAGE_BUILD_MAX_JOBS``, Balanced),
+    ``"background"`` (``PACKAGE_BUILD_BACKGROUND_JOBS``), ``"unknown_memory"`` (no
+    memory reading, so the fixed count of two) or ``"unknown_cpus"`` (no CPU count, so
+    one job, which is not a statement about the PC). ``speed`` is the build speed it was
+    planned for (``PACKAGE_BUILD_SPEEDS``).
     """
 
     jobs: int
@@ -230,6 +242,7 @@ class PackageBuildPlan:
     available_bytes: int | None
     #: True when not even one job fits beside the reserve: the build still runs one job.
     memory_short: bool = False
+    speed: str = PACKAGE_BUILD_SPEED_DEFAULT
 
 
 def package_build_plan(
@@ -238,6 +251,7 @@ def package_build_plan(
     available_bytes: int | None,
     override: str | None = None,
     job_bytes: int = PACKAGE_BUILD_JOB_BYTES,
+    speed: str | None = None,
 ) -> PackageBuildPlan:
     """Choose the Make job count for a package build and say why and what bound it.
 
@@ -251,11 +265,24 @@ def package_build_plan(
     skip. Unknown memory keeps the earlier fixed count of two. ``override``
     (``NK_PACKAGE_JOBS``) replaces the computed count but is still clamped to the same
     range.
+
+    ``speed`` (``PACKAGE_BUILD_SPEEDS``) sets the cap on top of the memory and the CPUs:
+    ``PACKAGE_BUILD_BACKGROUND_JOBS`` for Background, ``PACKAGE_BUILD_MAX_JOBS`` for
+    Balanced (the default, and what an unknown speed gets), none for Fastest. No speed
+    runs more jobs than the memory allows, and without a memory reading every speed
+    keeps the fixed count of two (one without a CPU count).
     """
     cpus_known = bool(cpu_count and cpu_count > 0)
     cpus = cpu_count if cpu_count is not None and cpu_count > 0 else 1
     cpu_text = f"{cpus} logical CPUs" if cpus_known else "CPU count unknown"
-    override_note = ""
+    notes = ""
+    if speed is None or not speed.strip():
+        speed = PACKAGE_BUILD_SPEED_DEFAULT
+    elif speed.strip() not in PACKAGE_BUILD_SPEEDS:
+        notes += f"; ignored {PACKAGE_BUILD_SPEED_ENV}={speed.strip()!r}"
+        speed = PACKAGE_BUILD_SPEED_DEFAULT
+    else:
+        speed = speed.strip()
     if override is not None and override.strip():
         try:
             requested = int(override.strip())
@@ -263,19 +290,23 @@ def package_build_plan(
             requested = None
         if requested is not None:
             jobs = max(1, min(requested, PACKAGE_BUILD_MAX_JOBS))
-            return PackageBuildPlan(jobs, f"{PACKAGE_BUILD_JOBS_ENV}={override.strip()}",
-                                    "override", cpus, available_bytes)
-        override_note = f"; ignored {PACKAGE_BUILD_JOBS_ENV}={override.strip()!r}"
+            return PackageBuildPlan(
+                jobs, f"{PACKAGE_BUILD_JOBS_ENV}={override.strip()} overrides the {speed} "
+                f"build speed's job count{notes}", "override", cpus, available_bytes,
+                speed=speed)
+        notes += f"; ignored {PACKAGE_BUILD_JOBS_ENV}={override.strip()!r}"
+    cap = {"background": PACKAGE_BUILD_BACKGROUND_JOBS,
+           "balanced": PACKAGE_BUILD_MAX_JOBS}.get(speed)
     if available_bytes is None:
-        jobs = max(1, min(cpus, 2, PACKAGE_BUILD_MAX_JOBS))
+        jobs = max(1, min(cpus, 2))
         return PackageBuildPlan(
-            jobs, f"{cpu_text}, available memory unknown{override_note}",
+            jobs, f"{speed} build speed, {cpu_text}, available memory unknown{notes}",
             "unknown_cpus" if not cpus_known else "cpu" if cpus <= 2 else "unknown_memory",
-            cpus, None)
+            cpus, None, speed=speed)
     by_memory = (available_bytes - PACKAGE_BUILD_RESERVED_BYTES) // max(1, job_bytes)
-    jobs = max(1, min(cpus, by_memory, PACKAGE_BUILD_MAX_JOBS))
+    jobs = max(1, min(cpus, by_memory) if cap is None else min(cpus, by_memory, cap))
     # The binding limit is the smallest bound; the CPUs win a tie because more memory
-    # would not add a job.
+    # would not add a job, and the memory wins over the speed's own cap.
     if not cpus_known:
         # One job is a stand-in for the missing count: name memory only when it binds too.
         limit = "memory" if by_memory <= jobs else "unknown_cpus"
@@ -284,15 +315,15 @@ def package_build_plan(
     elif by_memory <= jobs:
         limit = "memory"
     else:
-        limit = "max"
-    reason = (f"{cpu_text}, {available_bytes / 1024**3:.1f} GB memory available"
-              f"{override_note}")
+        limit = "background" if speed == "background" else "max"
+    reason = (f"{speed} build speed, {cpu_text}, "
+              f"{available_bytes / 1024**3:.1f} GB memory available{notes}")
     short = by_memory < 1
     if short:
         reason += (f"; below the {(PACKAGE_BUILD_RESERVED_BYTES + job_bytes) / 1024**3:.1f} GB "
                    "one job needs beside the reserve, so one job runs and the compiler may "
                    "fail if memory runs out")
-    return PackageBuildPlan(jobs, reason, limit, cpus, available_bytes, short)
+    return PackageBuildPlan(jobs, reason, limit, cpus, available_bytes, short, speed)
 
 
 def package_build_jobs(
@@ -301,10 +332,11 @@ def package_build_jobs(
     available_bytes: int | None,
     override: str | None = None,
     job_bytes: int = PACKAGE_BUILD_JOB_BYTES,
+    speed: str | None = None,
 ) -> tuple[int, str]:
     """``package_build_plan``'s job count and reason."""
     plan = package_build_plan(cpu_count=cpu_count, available_bytes=available_bytes,
-                              override=override, job_bytes=job_bytes)
+                              override=override, job_bytes=job_bytes, speed=speed)
     return plan.jobs, plan.reason
 
 
@@ -326,6 +358,7 @@ def _host_package_build_plan(chunk_target_bytes: str | None = None,
         available_bytes=available_physical_memory(),
         override=os.environ.get(PACKAGE_BUILD_JOBS_ENV),
         job_bytes=compile_job_bytes(chunk_target_bytes, largest_unit_bytes),
+        speed=os.environ.get(PACKAGE_BUILD_SPEED_ENV),
     )
 
 
@@ -435,13 +468,14 @@ def _run_make_with_progress(
 ) -> int:
     """Run Make, appending a progress line each time the finished-object count changes.
 
-    Each line also carries the job count and the logical CPUs, and, from ``plan``, what
-    bound the job count (``limit``) and the free memory then, so the player can say how
-    much of the PC the build is using and, for one job, why.
+    Each line also carries the job count and the logical CPUs, and, from ``plan``, the
+    build speed, what bound the job count (``limit``) and the free memory then, so the
+    player can say how much of the PC the build is using and why.
     """
     load: dict[str, Any] = {"jobs": jobs, "cpus": cpus}
     if plan is not None:
         load["limit"] = plan.limit
+        load["speed"] = plan.speed
         if plan.available_bytes is not None:
             load["free_gb"] = round(plan.available_bytes / 1024**3, 1)
     last = 0
@@ -2466,7 +2500,8 @@ def build_package(
                 build_environment["ENHANCEMENT_DATA_ROOT"] = enhancement_data_root.as_posix()
         jobs_plan = _host_package_build_plan(build_environment["CHUNK_TARGET_BYTES"])
         build_jobs = jobs_plan.jobs
-        print(f"PACKAGE_BUILD_JOBS: {build_jobs} ({jobs_plan.reason})", flush=True)
+        print(f"PACKAGE_BUILD_JOBS: {build_jobs} ({jobs_plan.reason}; "
+              f"limit: {jobs_plan.limit})", flush=True)
         progress_text = os.environ.get(COMPILE_PROGRESS_FILE_ENV, "")
         progress_file = Path(progress_text) if progress_text else None
         build_environment.pop(COMPILE_PROGRESS_FILE_ENV, None)
@@ -2492,7 +2527,7 @@ def build_package(
                 jobs = job_plan.jobs
                 if jobs != build_jobs or job_plan.memory_short:
                     print(f"PACKAGE_BUILD_JOBS: {jobs} for compile, largest unit {largest} bytes "
-                          f"({job_plan.reason})", flush=True)
+                          f"({job_plan.reason}; limit: {job_plan.limit})", flush=True)
             command = _make_build_command(make_executable, target, jobs=jobs)
             try:
                 if target == "compile" and (progress_file is not None or object_cache is not None):
