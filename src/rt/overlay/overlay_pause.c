@@ -243,8 +243,9 @@ NkOverlayAction nk_overlay_page_controls(NkUi *ui, NkOverlayState *state,
         NkUiTextStyle foot = nk_ui_type(NK_UI_TYPE_FOOTNOTE, theme->dim);
         foot.wrap = true;
         nk_ui_text(ui, CONTROLS_ID_FOOT,
-                   "Esc, F1 or the controller's Guide button opens this menu. Change the "
-                   "controller buttons in the library's Settings.", &foot);
+                   "Esc, F1 or the controller's Guide button opens this menu. In Enhanced and "
+                   "Ace, hold Tab or press F9 to fast forward. Change the controller buttons in "
+                   "the library's Settings.", &foot);
     }
     if (nk_ui_button(ui, NK_OVERLAY_ID_CONTROLS_BACK, "Back", 0u) ||
         nk_ui_take_event(ui, NK_UI_EV_BACK, NULL)) {
