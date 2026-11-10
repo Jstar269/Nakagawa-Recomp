@@ -302,7 +302,8 @@ typedef enum { FLOW_NONE = 0, FLOW_BUILD, FLOW_BUILT, FLOW_BUILD_PARTS, FLOW_CON
                FLOW_PAGE_TITLE_STEAM, FLOW_PAGE_STEAM, FLOW_PAGE_STEAM_ACCOUNTS,
                FLOW_PAGE_STEAM_BLOCKED, FLOW_PAGE_TITLE_TALL,
                FLOW_PAGE_QUEUE, FLOW_PAGE_QUEUE_PAUSED,
-               FLOW_CONSENT_FULL, FLOW_COUNT } FlowCase;
+               FLOW_CONSENT_FULL, FLOW_NICKNAME_FIRST, FLOW_NICKNAME_FULL,
+               FLOW_NICKNAME_REFUSED, FLOW_COUNT } FlowCase;
 
 /* The window size the game-found and Settings cases lay out for. */
 static float g_flow_width = 1280.0f;
@@ -1162,6 +1163,27 @@ static FlowCase g_flow_case;
 
 static PlayerUiAction draw_flow_case(NkUi *ui, FlowCase which) {
     PlayerUiAction none = {PLAYER_UI_ACTION_NONE, PLAYER_UI_PRIMARY_NONE, 0u};
+    if (which == FLOW_NICKNAME_FIRST || which == FLOW_NICKNAME_FULL ||
+        which == FLOW_NICKNAME_REFUSED) {
+        /* #2197: the nickname editor and its on-screen keyboard: the first-launch
+           prompt with nothing typed, Settings' editor with all 32 bytes used (the
+           widest text), and an empty Done refused (the note makes it the tallest). */
+        static char typed[NK_NICKNAME_MAX_BYTES + 1u];
+        static UiKeyboard keyboard;
+        PlayerUiNicknameModel nickname;
+        (void)snprintf(typed, sizeof(typed), "%s",
+                       which == FLOW_NICKNAME_FULL ? "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW" : "");
+        ui_keyboard_init(&keyboard, typed, NK_NICKNAME_MAX_BYTES, player_ui_nickname_accepts,
+                         NULL);
+        memset(&nickname, 0, sizeof(nickname));
+        nickname.first_launch = which == FLOW_NICKNAME_FIRST;
+        nickname.keyboard = &keyboard;
+        nickname.current = "Player";
+        nickname.refused = which == FLOW_NICKNAME_REFUSED;
+        nickname.logical_width = g_flow_width;
+        nickname.logical_height = g_flow_height;
+        return player_ui_screen_nickname(ui, &nickname);
+    }
     if (which == FLOW_ERROR_STOP || which == FLOW_ERROR_CRASH) {
         /* #1282: a game that stopped early, with Restart game and Copy details,
            and Report this game: a known cause leads with its issue (the stop),
@@ -6643,6 +6665,257 @@ static void test_tier_table_matches_the_docs(void) {
     CHECK(rows == 6u, "the docs Status words table has its six rows");
 }
 
+/* One frame of the nickname editor; *draw, when not NULL, gets its draw list. */
+static PlayerUiAction nickname_frame(NkUi *ui, const PlayerUiNicknameModel *model,
+                                     const NkUiDrawList **draw) {
+    PlayerUiAction action;
+    const NkUiDrawList *list;
+    nk_ui_begin(ui, 0.0);
+    action = player_ui_screen_nickname(ui, model);
+    list = nk_ui_end(ui);
+    if (draw != NULL) *draw = list;
+    return action;
+}
+
+static void nickname_push(NkUi *ui, NkUiEventType type, NkUiNavDir dir) {
+    NkUiEvent event;
+    memset(&event, 0, sizeof(event));
+    event.type = type;
+    event.dir = dir;
+    event.down = true;
+    nk_ui_push_event(ui, &event);
+}
+
+/* Focuses `id` and presses confirm on it, as the pad's A does. */
+static PlayerUiAction nickname_press(NkUi *ui, const PlayerUiNicknameModel *model, NkUiId id) {
+    (void)nickname_frame(ui, model, NULL);
+    nk_ui_focus(ui, id);
+    nickname_push(ui, NK_UI_EV_ACTIVATE, NK_UI_DIR_NONE);
+    return nickname_frame(ui, model, NULL);
+}
+
+/* Where focus lands from `from` after one move in `dir`. */
+static NkUiId nickname_move(NkUi *ui, const PlayerUiNicknameModel *model, NkUiId from,
+                            NkUiNavDir dir) {
+    (void)nickname_frame(ui, model, NULL);
+    nk_ui_focus(ui, from);
+    (void)nickname_frame(ui, model, NULL);
+    nickname_push(ui, NK_UI_EV_NAV, dir);
+    (void)nickname_frame(ui, model, NULL);
+    return nk_ui_focused(ui);
+}
+
+static bool nickname_op(PlayerUiAction action, PlayerUiNicknameOp op) {
+    return action.kind == PLAYER_UI_ACTION_NICKNAME && (unsigned)action.primary == (unsigned)op;
+}
+
+static bool nickname_dump_has(NkUi *ui, const PlayerUiNicknameModel *model, const char *needle) {
+    static char dump[CASE_DUMP_CAP];
+    (void)nickname_frame(ui, model, NULL);
+    (void)nk_ui_dump(ui, dump, sizeof(dump));
+    return strstr(dump, needle) != NULL;
+}
+
+/* #2197: the nickname editor's on-screen keyboard. Its keys type, in the letter case
+   Shift picks; Space and Delete; Done and Cancel (and Start and B) answer; the count
+   follows the text; the 32-byte cap and the nickname rule hold for every way of typing;
+   a key that cannot type is dimmed but keeps its focus stop; left and right stop at a
+   row's ends, as the find box's keys do. Failing-before: the editor had no keys. */
+static void test_nickname_keyboard(void) {
+    const NkUiId key = PLAYER_UI_ID_NICKNAME_KEY_BASE;
+    const NkUiId q = PLAYER_UI_ID_NICKNAME_KEY_BASE + UI_KEYBOARD_KEY_DEFAULT;
+    NkUiConfig config;
+    NkUiTextBackend text = screen_test_text_backend();
+    NkUi *ui;
+    char typed[NK_NICKNAME_MAX_BYTES + 1u] = "";
+    UiKeyboard keyboard;
+    PlayerUiNicknameModel model;
+    PlayerUiAction action;
+    const NkUiDrawList *draw = NULL;
+    const NkUiTheme *theme;
+    memset(&config, 0, sizeof(config));
+    config.host = NK_UI_HOST_LAUNCHER;
+    config.text = &text;
+    ui = screen_ui_create(&config);
+    CHECK(ui != NULL, "create a context for the nickname keyboard");
+    if (ui == NULL) return;
+    theme = nk_ui_theme(ui);
+    set_test_viewport(ui, 1280, 720);
+    ui_keyboard_init(&keyboard, typed, NK_NICKNAME_MAX_BYTES, player_ui_nickname_accepts, NULL);
+    memset(&model, 0, sizeof(model));
+    model.keyboard = &keyboard;
+    model.current = "Old name";
+    model.logical_width = 1280.0f;
+    model.logical_height = 720.0f;
+
+    (void)nickname_frame(ui, &model, NULL);
+    nk_ui_focus(ui, q);
+    (void)nickname_frame(ui, &model, &draw);
+    CHECK(nk_ui_focused(ui) == q &&
+              find_command(draw, q, NK_UI_DRAW_BORDER, theme->focus) != NULL,
+          "the keyboard's first letter takes focus, with the focus ring");
+    CHECK(nickname_dump_has(ui, &model, "\"0 / 32 bytes\"") &&
+              nickname_dump_has(ui, &model, "\"1\"") && nickname_dump_has(ui, &model, "\"q\"") &&
+              nickname_dump_has(ui, &model, "\"!\"") &&
+              nickname_dump_has(ui, &model, "\"SHIFT\"") &&
+              nickname_dump_has(ui, &model, "\"SPACE\"") &&
+              nickname_dump_has(ui, &model, "\"DELETE\"") &&
+              nickname_dump_has(ui, &model, "\"CANCEL\"") &&
+              nickname_dump_has(ui, &model, "\"DONE\"") &&
+              nickname_dump_has(ui, &model, "\"Old name\""),
+          "the editor shows the count, digits, letters, symbols, Shift, Space, Delete, "
+          "Cancel and Done, and the nickname in use while nothing is typed");
+
+    action = nickname_press(ui, &model, q);
+    CHECK(nickname_op(action, PLAYER_UI_NICKNAME_EDITED) && strcmp(typed, "q") == 0,
+          "a letter key types its letter");
+    action = nickname_press(ui, &model, key + UI_KEYBOARD_KEY_SHIFT);
+    CHECK(nickname_op(action, PLAYER_UI_NICKNAME_EDITED) && keyboard.shifted &&
+              nickname_dump_has(ui, &model, "\"Q\""),
+          "Shift turns the letters to upper case");
+    (void)nickname_press(ui, &model, q);
+    (void)nickname_press(ui, &model, key + UI_KEYBOARD_KEY_SPACE);
+    (void)nickname_press(ui, &model, key + 9u);
+    CHECK(strcmp(typed, "qQ 0") == 0, "keys type in the case shown; Space types a space");
+    action = nickname_press(ui, &model, key + UI_KEYBOARD_KEY_DELETE);
+    CHECK(nickname_op(action, PLAYER_UI_NICKNAME_EDITED) && strcmp(typed, "qQ ") == 0 &&
+              nickname_dump_has(ui, &model, "\"3 / 32 bytes\""),
+          "Delete removes the last character, and the count follows");
+
+    CHECK(nickname_move(ui, &model, key + 19u, NK_UI_DIR_RIGHT) == key + 19u &&
+              nickname_move(ui, &model, q, NK_UI_DIR_LEFT) == q,
+          "left and right stop at a row's ends, as the find box's keys do");
+    CHECK(nickname_move(ui, &model, q, NK_UI_DIR_DOWN) == key + 20u &&
+              nickname_move(ui, &model, key + 20u, NK_UI_DIR_UP) == q,
+          "up and down move between rows");
+
+    (void)nickname_frame(ui, &model, NULL);
+    nickname_push(ui, NK_UI_EV_OPTIONS, NK_UI_DIR_NONE);
+    (void)nickname_frame(ui, &model, NULL);
+    CHECK(strcmp(typed, "qQ") == 0, "the pad's X deletes");
+    nickname_push(ui, NK_UI_EV_DETAILS, NK_UI_DIR_NONE);
+    (void)nickname_frame(ui, &model, NULL);
+    CHECK(strcmp(typed, "qQ ") == 0, "the pad's Y types a space");
+    nickname_push(ui, NK_UI_EV_TAB, NK_UI_DIR_RIGHT);
+    (void)nickname_frame(ui, &model, NULL);
+    CHECK(!keyboard.shifted, "L or R turns the letter case over");
+    nickname_push(ui, NK_UI_EV_MENU, NK_UI_DIR_NONE);
+    CHECK(nickname_op(nickname_frame(ui, &model, NULL), PLAYER_UI_NICKNAME_SAVE),
+          "Start is Done");
+    nickname_push(ui, NK_UI_EV_BACK, NK_UI_DIR_NONE);
+    CHECK(nickname_op(nickname_frame(ui, &model, NULL), PLAYER_UI_NICKNAME_SKIP),
+          "Back is Cancel");
+    CHECK(nickname_op(nickname_press(ui, &model, PLAYER_UI_ID_NICKNAME_SAVE),
+                      PLAYER_UI_NICKNAME_SAVE) &&
+              nickname_op(nickname_press(ui, &model, PLAYER_UI_ID_NICKNAME_SKIP),
+                          PLAYER_UI_NICKNAME_SKIP),
+          "Done saves and Cancel cancels");
+
+    {
+        /* The mouse: a click (press and release on the same key) types it. */
+        const NkUiDrawCmd *w;
+        NkUiEvent pointer;
+        (void)snprintf(typed, sizeof(typed), "%s", "");
+        nk_ui_focus(ui, q);
+        (void)nickname_frame(ui, &model, &draw);
+        w = find_command(draw, key + 11u, NK_UI_DRAW_BORDER, 0u);
+        CHECK(w != NULL, "the w key is drawn");
+        if (w != NULL) {
+            memset(&pointer, 0, sizeof(pointer));
+            pointer.type = NK_UI_EV_POINTER;
+            pointer.x = 0.5f * (float)(w->bounds[0] + w->bounds[2]);
+            pointer.y = 0.5f * (float)(w->bounds[1] + w->bounds[3]);
+            pointer.down = true;
+            nk_ui_push_event(ui, &pointer);
+            (void)nickname_frame(ui, &model, NULL);
+            pointer.down = false;
+            nk_ui_push_event(ui, &pointer);
+            action = nickname_frame(ui, &model, NULL);
+            CHECK(nickname_op(action, PLAYER_UI_NICKNAME_EDITED) && strcmp(typed, "w") == 0 &&
+                      nk_ui_focused(ui) == key + 11u,
+                  "a mouse click on a key types it");
+        }
+    }
+
+    /* The cap: 31 bytes take one more letter, then no key types. */
+    (void)snprintf(typed, sizeof(typed), "%s", "abcdefghijklmnopqrstuvwxyz01234");
+    action = nickname_press(ui, &model, q);
+    CHECK(strlen(typed) == 32u && nickname_op(action, PLAYER_UI_NICKNAME_EDITED),
+          "the 32nd byte is typed");
+    action = nickname_press(ui, &model, q);
+    (void)nickname_press(ui, &model, key + UI_KEYBOARD_KEY_SPACE);
+    CHECK(strlen(typed) == 32u && action.kind == PLAYER_UI_ACTION_NONE &&
+              strcmp(typed + 26, "01234q") == 0,
+          "past 32 bytes a key does nothing");
+    CHECK(!ui_keyboard_type(&keyboard, "x") && strlen(typed) == 32u,
+          "typed text stops at the cap too");
+    nk_ui_focus(ui, q);
+    (void)nickname_frame(ui, &model, &draw);
+    CHECK(nk_ui_focused(ui) == q && find_command(draw, q, NK_UI_DRAW_TEXT, theme->muted) != NULL &&
+              nickname_dump_has(ui, &model, "\"32 / 32 bytes\""),
+          "a full text dims the keys, keeps the focus where it was, and reads 32 / 32 bytes");
+    {
+        /* #2197 review: colour is not the only cue. A key that cannot type also loses its
+           outline (w here, not focused, so no focus ring either), and keeps its size: its
+           label sits where it does once the key can type again. */
+        const NkUiDrawCmd *label = find_command(draw, key + 11u, NK_UI_DRAW_TEXT, theme->muted);
+        int dimmed[4] = {0, 0, 0, 0};
+        bool outlined = find_command(draw, key + 11u, NK_UI_DRAW_BORDER, 0u) != NULL;
+        if (label != NULL) memcpy(dimmed, label->bounds, sizeof(dimmed));
+        CHECK(label != NULL && !outlined, "a key that cannot type is drawn without its outline");
+        typed[31] = '\0';
+        (void)nickname_frame(ui, &model, &draw);
+        label = find_command(draw, key + 11u, NK_UI_DRAW_TEXT, 0u);
+        CHECK(label != NULL && label->rgba_pm != theme->muted &&
+                  find_command(draw, key + 11u, NK_UI_DRAW_BORDER, 0u) != NULL &&
+                  memcmp(label->bounds, dimmed, sizeof(dimmed)) == 0,
+              "a key that can type again has its outline back, in the same place and size");
+    }
+    (void)snprintf(typed, sizeof(typed), "%s", "abcdefghijklmnopqrstuvwxyz01234");
+    CHECK(!ui_keyboard_type(&keyboard, "\xC3\xA9") && strlen(typed) == 31u,
+          "a 2-byte character does not fit in the last byte");
+
+    /* The nickname rule: no control character, from any way of typing. */
+    (void)snprintf(typed, sizeof(typed), "%s", "ab");
+    CHECK(!ui_keyboard_type(&keyboard, "\x01") && !ui_keyboard_type(&keyboard, "\x1F") &&
+              !ui_keyboard_type(&keyboard, "\x7F") &&
+              !ui_keyboard_type(&keyboard, "\xC2\x85") &&
+              !ui_keyboard_type(&keyboard, "\xED\xA0\x80") &&
+              !ui_keyboard_type(&keyboard, "\xC0\xA1") && strcmp(typed, "ab") == 0,
+          "control characters (C0, DEL, C1), a surrogate and an overlong form are refused");
+    CHECK(ui_keyboard_type(&keyboard, "\x01" "c\xC3\xA9") && strcmp(typed, "ab" "c\xC3\xA9") == 0,
+          "what the rule takes in the same run is still typed");
+    CHECK(player_ui_nickname_accepts('A', NULL) && player_ui_nickname_accepts(0xA0u, NULL) &&
+              player_ui_nickname_accepts(0x3042u, NULL) &&
+              !player_ui_nickname_accepts(0x00u, NULL) &&
+              !player_ui_nickname_accepts(0x1Fu, NULL) &&
+              !player_ui_nickname_accepts(0x7Fu, NULL) &&
+              !player_ui_nickname_accepts(0x9Fu, NULL) &&
+              !player_ui_nickname_accepts(0xD800u, NULL) &&
+              !player_ui_nickname_accepts(0x110000u, NULL),
+          "the filter is nk_nickname_valid's rule for one character");
+    nk_ui_destroy(ui);
+
+    /* The editor at the smallest window the fit tests use, at every text size: the
+       count and the keys show (a larger text size scrolls the card instead). */
+    for (int size = 100; size <= 150; size += 25) {
+        char message[96];
+        g_flow_text_size_pct = size;
+        (void)snprintf(message, sizeof(message),
+                       "the full editor shows its count and first keys at 853 x 480, %d%% text",
+                       size);
+        CHECK(flow_case_shows(FLOW_NICKNAME_FULL, 853, 480, "32 / 32 bytes") &&
+                  flow_case_shows(FLOW_NICKNAME_FULL, 853, 480, "q") &&
+                  flow_case_shows(FLOW_NICKNAME_FIRST, 853, 480, "Player"),
+              message);
+    }
+    g_flow_text_size_pct = 100;
+    CHECK(flow_case_shows(FLOW_NICKNAME_FULL, 853, 480, "DONE") &&
+              flow_case_shows(FLOW_NICKNAME_REFUSED, 853, 480, "DONE") &&
+              flow_case_shows(FLOW_NICKNAME_FIRST, 960, 540, "SKIP"),
+          "at the design text size the whole keyboard fits the smallest window");
+}
+
 int main(int argc, char **argv) {
     static char library[DUMP_CAP];
     static char title[DUMP_CAP];
@@ -6699,6 +6972,7 @@ int main(int argc, char **argv) {
     test_library_centres_in_a_wide_window();
     test_library_sort_button();
     test_library_find_box();
+    test_nickname_keyboard();
     CHECK(build_library_golden(library, sizeof(library), &library_size),
           "build Library screen dumps");
     CHECK(build_title_golden(title, sizeof(title), &title_size),

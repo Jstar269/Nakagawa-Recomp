@@ -2085,6 +2085,294 @@ class NativePlayerUiTests(unittest.TestCase):
                 trail.append(frame["next_focus"])
         return trail
 
+    # The nickname editor's Save and Skip (or Cancel), and Settings > Nickname (#2197).
+    NICKNAME_SAVE = str(0x4560)
+    NICKNAME_SKIP = str(0x4561)
+    SETTINGS_NICKNAME = str(0x4562)
+
+    def test_next_ui_first_launch_nickname_prompt(self) -> None:
+        """#2197: the first launch asks for a nickname once. Skip (Esc) keeps the neutral
+        "Player" and is remembered, so the next start does not ask; a typed nickname is
+        saved. --view=nickname-prompt is the one view that shows it. Failing-before: there was
+        no prompt and settings.json had no nickname."""
+        skip = self.next_ui_run("nickname-prompt", ("WAIT_MS=300", "KEY_ESCAPE", "WAIT_MS=200"))
+        self.assertIn(self.NICKNAME_KEY_Q, self.focus_trail(skip),
+                      "the prompt opens on its keyboard's first letter")
+        self.assertNotIn("QUIT_DIALOG", str(skip["stdout"]), "Esc is Skip, not quit")
+        settings = skip["settings"]
+        assert isinstance(settings, dict)
+        self.assertEqual(settings.get("nickname"), "Player")
+        self.assertIs(settings.get("nickname_asked"), True)
+        again = self.next_ui_run("nickname-prompt", ("WAIT_MS=300",), settings=settings)
+        self.assertNotIn(self.NICKNAME_KEY_Q, self.focus_trail(again), "it is asked only once")
+        typed = self.next_ui_run(
+            "nickname-prompt", ("WAIT_MS=300", "TEXT=Ren 7", "KEY_RETURN", "WAIT_MS=200"))
+        self.assertNotIn(self.NICKNAME_KEY_Q, self.focus_trail(self.next_ui_run(
+            "library", ("WAIT_MS=300",))), "any other view keeps the prompt down")
+        saved = typed["settings"]
+        assert isinstance(saved, dict)
+        self.assertEqual(saved.get("nickname"), "Ren 7")
+        self.assertIs(saved.get("nickname_asked"), True)
+
+    def test_next_ui_settings_edits_the_nickname(self) -> None:
+        """#2197: Settings > Online and developer > Nickname opens the editor on its keyboard.
+        Typing on a physical keyboard moves focus to Done, so Enter saves what was typed; an
+        empty Done (Backspace on nothing, then Enter) is refused and leaves the nickname as it
+        was; Cancel returns to the row. Failing-before: the page had no Nickname row."""
+        run = self.next_ui_run(
+            "online-settings",
+            ("WAIT_MS=100", "KEY_DOWN", "KEY_RETURN", "WAIT_MS=100", "TEXT=Kai", "KEY_RETURN",
+             "WAIT_MS=100", "KEY_RETURN", "WAIT_MS=100", "KEY_BACKSPACE", "KEY_RETURN",
+             "WAIT_MS=100", "KEY_ESCAPE", "WAIT_MS=100"),
+            settings={"nickname": "Old name", "nickname_asked": True})
+        trail = self.focus_trail(run)
+        self.assertEqual(trail[:4], [self.SETTINGS_FOCUS["developer"], self.SETTINGS_NICKNAME,
+                                     self.NICKNAME_KEY_Q, self.NICKNAME_SAVE], trail)
+        self.assertEqual(trail[-1], self.SETTINGS_NICKNAME, "Cancel returns to the row")
+        frames = run["frames"]
+        assert isinstance(frames, list)
+        self.assertEqual(frames[-1]["view"], "online_settings", "the editor keeps the page")
+        settings = run["settings"]
+        assert isinstance(settings, dict)
+        self.assertEqual(settings.get("nickname"), "Kai", "Save kept it; the empty Save did not")
+        # Typing stops at the 32-byte cap: 33 letters save as 32.
+        capped = self.next_ui_run(
+            "online-settings",
+            ("WAIT_MS=100", "KEY_DOWN", "KEY_RETURN", "WAIT_MS=100", "TEXT=" + "x" * 33,
+             "KEY_RETURN", "WAIT_MS=100"),
+            settings={"nickname": "Old name", "nickname_asked": True})
+        saved = capped["settings"]
+        assert isinstance(saved, dict)
+        self.assertEqual(saved.get("nickname"), "x" * 32, "the editor keeps the first 32 bytes")
+
+    # The nickname editor's on-screen keyboard (#2197): its first letter, q, is where it opens.
+    NICKNAME_KEY_BASE = 0x4570
+    NICKNAME_KEY_Q = str(0x4570 + 10)
+
+    @staticmethod
+    def nickname_states(run: dict[str, object]) -> list[tuple[str, str]]:
+        """What the nickname editor held while it was open, frame by frame, and the count it
+        showed, with repeats collapsed."""
+        stdout = run["stdout"]
+        assert isinstance(stdout, str)
+        states: list[tuple[str, str]] = []
+        for text_hex, count in re.findall(
+                r"^\[PLAYER_UI_TEST\] nickname_editor frame=\d+ text_hex=([0-9a-f]*) count=(.*?)\r?$",
+                stdout, re.M):
+            state = (bytes.fromhex(text_hex).decode("utf-8"), count)
+            if not states or states[-1] != state:
+                states.append(state)
+        return states
+
+    def test_next_ui_nickname_keyboard_types_with_a_controller(self) -> None:
+        """#2197: the first-launch prompt's on-screen keyboard types a nickname with a
+        controller alone: the d-pad moves, A types the focused key, L is Shift, Start is Done,
+        and the setting holds what was typed. The count follows the text. Failing-before: the
+        editor had no keys, so a controller could only skip or save the nickname in use."""
+        right7 = ("PAD_DPAD_RIGHT",) * 7
+        left7 = ("PAD_DPAD_LEFT",) * 7
+        run = self.next_ui_run(
+            "nickname-prompt",
+            ("WAIT_MS=300", "PAD_LEFT_SHOULDER", "PAD_DPAD_DOWN") + right7 +
+            ("PAD_SOUTH", "PAD_LEFT_SHOULDER") + left7 + ("PAD_SOUTH", "PAD_DPAD_UP") + right7 +
+            ("PAD_SOUTH", "WAIT_MS=100", "PAD_START", "WAIT_MS=200"))
+        trail = self.focus_trail(run)
+        shown = [focus for focus in trail if focus != "0"]
+        self.assertEqual(shown[0] if shown else None, self.NICKNAME_KEY_Q,
+                         "the keyboard opens on its first letter")
+        states = self.nickname_states(run)
+        self.assertEqual([text for text, _ in states], ["", "K", "Ka", "Kai"], states)
+        self.assertEqual(states[-1][1], "3 / 32 bytes", "the count follows the text")
+        settings = run["settings"]
+        assert isinstance(settings, dict)
+        self.assertEqual(settings.get("nickname"), "Kai", "Done saved what the keys typed")
+        self.assertIs(settings.get("nickname_asked"), True)
+
+    def test_next_ui_nickname_keyboard_cancel_keeps_the_nickname(self) -> None:
+        """#2197: Settings > Nickname: keys typed with a controller, then Cancel (B, or the
+        keyboard's own Cancel key) leaves the nickname as it was before the editor opened, and
+        focus returns to the row. Failing-before: the editor had no keys to type with."""
+        old = {"nickname": "Old name", "nickname_asked": True}
+        open_editor = ("WAIT_MS=100", "PAD_DPAD_DOWN", "PAD_SOUTH", "WAIT_MS=100")
+        typed = ("PAD_SOUTH", "PAD_DPAD_RIGHT", "PAD_SOUTH")
+        back = self.next_ui_run("online-settings",
+                                open_editor + typed + ("PAD_EAST", "WAIT_MS=100"),
+                                settings=dict(old))
+        key = self.next_ui_run(
+            "online-settings",
+            open_editor + typed + ("PAD_DPAD_LEFT",) + ("PAD_DPAD_DOWN",) * 4 +
+            ("PAD_DPAD_RIGHT",) * 3 + ("PAD_SOUTH", "WAIT_MS=100"),
+            settings=dict(old))
+        for name, run in (("B", back), ("the Cancel key", key)):
+            states = self.nickname_states(run)
+            self.assertIn(("qw", "2 / 32 bytes"), states, f"{name}: the keys typed qw")
+            # Cancel saves nothing; a settings.json the run did write keeps the nickname too.
+            saved = run["settings"]
+            nickname = saved.get("nickname") if isinstance(saved, dict) else old["nickname"]
+            self.assertEqual(nickname, "Old name",
+                             f"{name}: Cancel keeps the nickname from before the editor opened")
+            self.assertEqual(self.focus_trail(run)[-1], self.SETTINGS_NICKNAME,
+                             f"{name}: focus returns to the row")
+        self.assertIn(self.NICKNAME_SKIP, self.focus_trail(key), "the Cancel key was pressed")
+
+    def test_next_ui_nickname_keyboard_stops_at_32_bytes(self) -> None:
+        """#2197: pressing a key past the 32-byte cap types nothing: 33 presses of q leave 32
+        bytes, the count reads 32 / 32 bytes, and Done saves those 32. Failing-before: the
+        editor had no keys."""
+        run = self.next_ui_run(
+            "online-settings",
+            ("WAIT_MS=100", "PAD_DPAD_DOWN", "PAD_SOUTH", "WAIT_MS=100") + ("PAD_SOUTH",) * 33 +
+            ("WAIT_MS=100", "PAD_START", "WAIT_MS=100"),
+            settings={"nickname": "Old name", "nickname_asked": True})
+        states = self.nickname_states(run)
+        self.assertEqual(states[-1], ("q" * 32, "32 / 32 bytes"), states[-3:])
+        self.assertTrue(all(len(text.encode("utf-8")) <= 32 for text, _ in states), states[-3:])
+        settings = run["settings"]
+        assert isinstance(settings, dict)
+        self.assertEqual(settings.get("nickname"), "q" * 32)
+
+    def test_next_ui_nickname_keyboard_refuses_what_the_rule_refuses(self) -> None:
+        """#2197: what is typed goes through the keyboard's filter, nk_nickname_valid's rule:
+        a control character (C0, DEL) leaves the text and its count as they were, and what the
+        rule takes is still typed. Failing-before: the editor showed no count and kept no
+        filtered text the test could read."""
+        run = self.next_ui_run(
+            "online-settings",
+            ("WAIT_MS=100", "PAD_DPAD_DOWN", "PAD_SOUTH", "WAIT_MS=100", "TEXT=Ab",
+             "WAIT_MS=50", "TEXT=\x01", "WAIT_MS=50", "TEXT=\x7f", "WAIT_MS=50", "TEXT=\x1b",
+             "WAIT_MS=50", "TEXT=c", "WAIT_MS=50", "KEY_RETURN", "WAIT_MS=100"),
+            settings={"nickname": "Old name", "nickname_asked": True})
+        states = self.nickname_states(run)
+        self.assertEqual(states, [("", "0 / 32 bytes"), ("Ab", "2 / 32 bytes"),
+                                  ("Abc", "3 / 32 bytes")], states)
+        settings = run["settings"]
+        assert isinstance(settings, dict)
+        self.assertEqual(settings.get("nickname"), "Abc")
+
+    def test_next_ui_nickname_done_trims_spaces_and_refuses_only_spaces(self) -> None:
+        """#2197 review: Done saves the typed text without the spaces around it, and a nickname
+        of spaces alone is refused (nk_nickname_valid, the runtime's rule too), so the editor
+        stays open and the nickname is kept. Typed both on a physical keyboard and with the
+        on-screen Space key (Y). Failing-before: "   " passed the rule and was saved, and
+        "  Kai  " was saved with its spaces."""
+        old = {"nickname": "Old name", "nickname_asked": True}
+        open_editor = ("WAIT_MS=100", "PAD_DPAD_DOWN", "PAD_SOUTH", "WAIT_MS=100")
+        trimmed = self.next_ui_run(
+            "online-settings", open_editor + ("TEXT=  Kai  ", "KEY_RETURN", "WAIT_MS=100"),
+            settings=dict(old))
+        self.assertIn(("  Kai  ", "7 / 32 bytes"), self.nickname_states(trimmed))
+        saved = trimmed["settings"]
+        assert isinstance(saved, dict)
+        self.assertEqual(saved.get("nickname"), "Kai", "Done trims the spaces around the name")
+        self.assertEqual(self.focus_trail(trimmed)[-1], self.SETTINGS_NICKNAME,
+                         "the trimmed name was saved and the editor closed")
+        for name, typed in (("a physical keyboard", ("TEXT=   ", "KEY_RETURN")),
+                            ("the Space key", ("PAD_NORTH",) * 3 + ("PAD_START",))):
+            with self.subTest(typed=name):
+                run = self.next_ui_run("online-settings",
+                                       open_editor + typed + ("WAIT_MS=200",),
+                                       settings=dict(old))
+                states = self.nickname_states(run)
+                self.assertIn(("   ", "3 / 32 bytes"), states, f"{name}: three spaces were typed")
+                saved = run["settings"]
+                nickname = saved.get("nickname") if isinstance(saved, dict) else old["nickname"]
+                self.assertEqual(nickname, "Old name", f"{name}: spaces alone are not saved")
+                self.assertEqual(states[-1], ("   ", "3 / 32 bytes"),
+                                 f"{name}: the refused Done keeps the editor open as it was")
+                self.assertNotEqual(self.focus_trail(run)[-1], self.SETTINGS_NICKNAME,
+                                    f"{name}: the editor did not close")
+
+    def test_next_ui_nickname_physical_tab_moves_focus_and_is_not_shift(self) -> None:
+        """#2197 review N3: a physical Tab is the toolkit's focus cycle (NK_UI_EV_CYCLE) in the
+        nickname editor as everywhere, not Shift: L and R (NK_UI_EV_TAB) are Shift, and the Q
+        and E keys that also mean TAB elsewhere type their letters here. Tab moves focus off q,
+        and A then types a lowercase letter."""
+        run = self.next_ui_run(
+            "online-settings",
+            ("WAIT_MS=100", "PAD_DPAD_DOWN", "PAD_SOUTH", "WAIT_MS=100", "KEY_TAB", "WAIT_MS=50",
+             "PAD_SOUTH", "WAIT_MS=50", "TEXT=qe", "WAIT_MS=100"),
+            settings={"nickname": "Old name", "nickname_asked": True})
+        trail = self.focus_trail(run)
+        at_q = trail.index(self.NICKNAME_KEY_Q)
+        self.assertEqual(trail[at_q + 1:at_q + 2], [str(0x4570 + 11)],
+                         f"Tab moves focus from q to the next key, w: {trail}")
+        states = self.nickname_states(run)
+        self.assertEqual([text for text, _ in states], ["", "w", "wqe"],
+                         f"Tab did not turn Shift on, and q and e typed letters: {states}")
+
+    def bare_screenshot(self, view: str,
+                        settings: dict[str, object] | None) -> tuple[bytes, object]:
+        """A bare ``--screenshot=<bmp> --view=<view>`` run, as tools/capture_native_screenshots.py
+        starts the player: no --ui-test-* option, on a throwaway data root that has a
+        settings.json only when one is given. Its pixels, and the settings it left behind."""
+        with tempfile.TemporaryDirectory(prefix=".player-ui-test-", dir=ROOT) as tmp:
+            scratch = Path(tmp)
+            localappdata = scratch / "localappdata"
+            runtime_root = scratch / "runtime"
+            localappdata.mkdir()
+            runtime_root.mkdir()
+            config = (localappdata / "Nakagawa" / "config" if os.name == "nt"
+                      else scratch / "config" / "nakagawa-recomp")
+            if settings is not None:
+                config.mkdir(parents=True)
+                (config / "settings.json").write_text(
+                    json.dumps({"schema_version": 2, **settings}), encoding="utf-8")
+            env = os.environ.copy()
+            env.update({
+                "SDL_VIDEODRIVER": "dummy", "SDL_RENDER_DRIVER": "software",
+                "APPDATA": str(scratch), "LOCALAPPDATA": str(localappdata),
+                "USERPROFILE": str(scratch), "HOME": str(scratch),
+                "XDG_CONFIG_HOME": str(scratch / "config"), "XDG_DATA_HOME": str(scratch / "data"),
+                "XDG_CACHE_HOME": str(scratch / "cache"),
+            })
+            bmp = scratch / "shot.bmp"
+            completed = subprocess.run(
+                [str(PLAYER_EXE), f"--screenshot={bmp}", f"--view={view}",
+                 f"--runtime-root={runtime_root}", "--width=1280", "--height=720"],
+                cwd=ROOT, env=env, capture_output=True, text=True, timeout=120, check=False)
+            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            self.assertTrue(bmp.is_file(), completed.stdout)
+            saved_path = config / "settings.json"
+            saved = (json.loads(saved_path.read_text(encoding="utf-8"))
+                     if saved_path.is_file() else None)
+            return read_bmp(bmp)[3], saved
+
+    def test_bare_screenshot_view_never_shows_the_nickname_prompt(self) -> None:
+        """#2197 review B1: a bare --screenshot --view run on a fresh data root captures the page
+        it names, never the first-launch nickname prompt over it, and records no answer;
+        --view=nickname-prompt is the one view that shows it. Failing-before: the prompt
+        opened over every such run, so a fresh root's frame differed from an answered one's.
+
+        Review N1: whether the next UI runs here is the font-independent UI_NEXT_ACTIVE marker,
+        as the other next-UI tests read it, never the frames themselves. On hosted CI (the
+        Linux player UI job installs SDL3_ttf, and the repository ships open fonts) a missing
+        marker fails instead of skipping, and with the next UI running, a prompt view that
+        draws the same frame as the answered one is a failure.
+
+        Review S1: both roots turn Reduce motion on (``reduce_motion_choice``), which holds every
+        animation and transition still, so the frame a run captures does not depend on how far
+        a busy host let its clock run before the capture. The fresh root is still one that has
+        not answered the prompt: a settings.json without ``nickname_asked`` reads as not asked,
+        as a missing file does."""
+        marker = "[PLAYER_UI_TEST] UI_NEXT_ACTIVE"
+        if marker not in str(self.run_player("empty")["stdout"]):
+            if os.environ.get("GITHUB_ACTIONS") or os.environ.get("CI"):
+                self.fail("the next UI did not start on this CI host (no UI_NEXT_ACTIVE "
+                          "marker), so the nickname prompt could not be checked")
+            self.skipTest("the next UI needs SDL3_ttf, which this host lacks")
+        fresh_root = {"reduce_motion_choice": "on"}
+        answered = {**fresh_root, "nickname_asked": True}
+        prompt_fresh, _ = self.bare_screenshot("nickname-prompt", fresh_root)
+        prompt_answered, _ = self.bare_screenshot("nickname-prompt", answered)
+        self.assertTrue(prompt_fresh != prompt_answered, "the prompt view drew no prompt")
+        for view in ("settings", "library"):
+            with self.subTest(view=view):
+                fresh, saved = self.bare_screenshot(view, fresh_root)
+                reference, _ = self.bare_screenshot(view, answered)
+                self.assertEqual(fresh, reference, "the fresh root's frame shows the prompt")
+                self.assertFalse(isinstance(saved, dict) and saved.get("nickname_asked") is True,
+                                 "holding the prompt down is not saved as an answer")
+
     @staticmethod
     def preset_lines(run: dict[str, object]) -> list[dict[str, str]]:
         """The graphics preset row and note the main Settings page drew, in order (#2150)."""

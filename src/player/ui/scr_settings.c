@@ -935,6 +935,21 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                               model->developer_mode, inner - 32.0f, &column)) {
                 *result = settings_op(PLAYER_UI_SETTINGS_TOGGLE_DEVELOPER);
             }
+            {
+                /* The console nickname games read (#2197); its button opens the nickname
+                   editor. A long one is shortened here. */
+                NkUiTextStyle value = nk_ui_type(NK_UI_TYPE_BODY, theme->paper);
+                if (scr_wizard_value(ui, PLAYER_UI_ID_SETTINGS_NICKNAME, SET_ID_TEXT + 0xB4u,
+                                     "Nickname",
+                                     nk_ui_text_clamp(ui, safe_text(model->nickname,
+                                                                    NK_NICKNAME_DEFAULT),
+                                                      &value, column.cell * 0.5f, 1),
+                                     "What games show as this PSP's nickname. It is never "
+                                     "taken from this PC's user name.",
+                                     false, inner - 32.0f, &column)) {
+                    *result = settings_op(PLAYER_UI_SETTINGS_EDIT_NICKNAME);
+                }
+            }
             nk_ui_end_container(ui);
         }
         {
