@@ -542,7 +542,7 @@ static void cell_readout_smooth(void) {
           "fed 30 Hz with smooth motion: '%s'", v.text);
     /* The same presents, but every in-between repeats the old frame over what changes: the
      * readout says 30, though sixty pictures a second reached the screen. */
-    (void)ace_init_spec("v1;tier=enhanced;af=16;text=on;readout=on;notice=on;wide=off;smooth=x2;sas=off",
+    (void)ace_init_spec("v1;tier=enhanced;af=16;text=on;readout=on;notice=on;wide=off;smooth=x2;sas=off;tess=off",
                         NULL);
     ns = 0;
     for (uint32_t vc = 1; vc <= 600; vc++) {
@@ -742,7 +742,7 @@ static void cell_report_worst(void) {
     char reason[128];
     memset(reason, 'r', sizeof(reason));
     reason[sizeof(reason) - 1] = '\0';
-    CHECK(ace_init_spec("v1;tier=ace;af=16;text=on;readout=on;notice=on;wide=fill;smooth=x2;sas=sinc;cull=on",
+    CHECK(ace_init_spec("v1;tier=ace;af=16;text=on;readout=on;notice=on;wide=fill;smooth=x2;sas=sinc;tess=off;cull=on",
                         NULL), "the longest line was refused");
     ace_set_af_effective(8, NULL);
     ace_note_af_failure();
@@ -836,7 +836,7 @@ static void cell_motion(void) {
      * and nothing in a run without smooth motion. */
     char json[ACE_REPORT_MAX];
     AceMotionStats m;
-    (void)ace_init_spec("v1;af=16;text=on;readout=off;notice=on;wide=off;smooth=x2;sas=off", NULL);
+    (void)ace_init_spec("v1;af=16;text=on;readout=off;notice=on;wide=off;smooth=x2;sas=off;tess=off", NULL);
     CHECK(ace_report_json(json, sizeof(json)) > 0 && strstr(json, "smooth_motion") == NULL,
           "a smooth run reported motion before any in-between was measured");
     ace_smooth_note_motion(1000u, 900u, 10u, 300u, 9700u, 4u);      /* phase 0.03: weight 60 */

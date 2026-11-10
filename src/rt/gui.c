@@ -2731,7 +2731,7 @@ static void busy_run(BusyRun *r, int reflip, int (*busy_at)(uint32_t), uint32_t 
     r->last_real = -1;
     r->busy_at = busy_at;
     r->fail_vcount = fail_vcount;
-    assert(ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=x2;sas=off", NULL));
+    assert(ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=x2;sas=off;tess=off", NULL));
     s_on = 1; s_sdl3 = 1; s_offscreen = 0; s_quit_requested = 0;
     s_ace_smooth = (AceBetween *)&s_stub_held;
     memset(&s_stub_smooth, 0, sizeof(s_stub_smooth));
