@@ -348,7 +348,8 @@ Code identifiers that say `ace` mean "Enhanced or Ace"; every name a player read
 The launcher always exports `SR_ACE`, so an inherited value cannot opt a launch in: `off` for Authentic, or
 `v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;smooth=x2;sas=off;tess=off`. `tier` (`enhanced` or `ace`) only names the
 run, in the game badge, the pause menu and the stamps; a line without it is an Enhanced run. `cull` (`on` or `off`,
-section 11.3.6) is the other key a line may leave out: a missing `cull` is off, and `cull=on` needs `tier=ace`. Every
+section 11.3.6) and `pad` (`late` or `off`, section 11.3.8) are the other keys a line may leave out: a missing one is
+off, and `cull=on` and `pad=late` need `tier=ace`. Every
 other key is required, in any order, each once; a value for a feature this build does not carry (`smooth=match`)
 refuses the line. So does anything else: the run is Authentic and one `ACE_MODE: refused (<reason>)` line says why.
 Unset is off. With Enhanced or Ace on, the launcher also exports `SR_ACE_REPORT`, the per-run report under
@@ -396,6 +397,9 @@ the device is created with no feature outside Ace.
   do Smooth motion's in-between frames (section 10.6).
 - **Sound:** `sas=sinc` writes band-limited sample values into the guest's SAS output buffer, so it is a
   guest-visible item. Its entry is section 11.3.1.
+- **Input timing:** `pad=late` holds each 60 FPS logic update at its package's update boundary until shortly before
+  its VBLANK deadline, so the update reads a fresher pad sample. It changes when the update runs inside its period,
+  which the guest can measure, so it is a guest-visible item. Its entry is section 11.3.8.
 - **Patches:** `tess=2` to `tess=4` draws every triangle patch with finer triangles, which changes the frames a
   present commits to guest VRAM, and under `SR_GE_TIMING=1` it alters the GE timing model's clocks. It is a
   guest-visible item. Its entry is section 11.3.7.
@@ -1485,3 +1489,64 @@ The feature of section 10.14 (#2053). How it draws is described there; this entr
   It is in no graphics preset, because it changes GE timing.
 - **Nothing worse (section 11.2, item 4):** not shown. It may not be on by default before the runs item 4 lists
   exist.
+
+#### 11.3.8. Late Pad Sampling (`pad=late`, Not Yet Admitted)
+
+An Ace part for a title with a 60 FPS timing package: each logic update starts closer to the VBLANK that shows it,
+so the pad sample it reads is younger when its frame reaches the screen.
+
+- **Status: guest-visible, not admitted under section 11.2.** It changes when, inside its VBLANK period, a logic
+  update runs. Its key, its library and per-title settings and this entry are in place (section 11.2, items 2, 3
+  and 6); the runs of item 4 exist for one title (below) and have not been reviewed, so it stays off by default and in
+  no preset.
+- **Mechanism.** The package's `update_boundary` (section 9.5) calls `sr_enhancement_update_begin()` while the run's
+  line carries `pad=late`. The runtime keeps the host cost of the last 64 updates, measured from the boundary to the
+  update's next display wait (`sched_vblank_block`). Once 30 updates in a row were measured, an update reaching the
+  boundary with more than its reserve left before the next VBLANK deadline waits there. The reserve is the largest of
+  those costs, a quarter of it again, and a 2 ms margin. The wait is an ordinary guest-thread delay
+  (`sched_delay_current`) and is never shorter than 1 ms. It is taken only where the thread could wait anyway: never in
+  an interrupt handler, a pending tail transfer or a pause. After the wait, the runtime polls the host input once more
+  and rewrites the newest controller sample in place, only if the guest has not read it yet. Its count of samples,
+  its timestamp and its scripted-input id stay the same. An update whose work then ends after the deadline it was held
+  for is late. Holding stops for 300 updates and the margin grows by 1 ms, up to 6 ms. A route (`SR_PADSCRIPT`), a
+  replay, the on-screen keyboard and the headless START pulse keep their samples: only live host input is refreshed.
+- **Key.** `pad=late` or `pad=off` on the launch line (section 10.1), an optional key: a line without it reads as off,
+  any other value is refused, and `pad=late` is refused unless the line carries `tier=ace`. The player has a library
+  setting and a per-title setting, "Late pad sampling", each able to turn it off alone (section 11.2, item 2); the
+  line carries `;pad=late` only for an Ace launch with the part on. The run names it (`ACE_MODE: pad late (...)` at
+  start, an `ACE_MODE: pad` line at exit and the report's `pad` object with updates, holds, mean and largest hold,
+  late updates and refreshed samples). It confirms the part when the boundary first runs; a run that asked for it and in
+  which no update boundary ran (no 60 FPS package, or `SR_EXPERIMENTAL_60HZ` off) reports it unavailable at exit.
+- **What it changes:** the time inside each VBLANK period at which an update begins, and the pad state of the newest
+  sample when the guest has not yet read it. The guest computes the same update from the input it reads: the number
+  of updates, the number of controller samples and every sample's timestamp are those of a run without it.
+- **VRAM bytes:** unchanged for the same input. A frame can show input from up to one period later than without it.
+- **Readbacks:** unchanged.
+- **Timing:** differs. A held update starts later in its period, by the hold, so the guest's system time read at its
+  start is later. Other guest threads that are ready while it waits run during the hold, before the update's work
+  rather than after it. The VBLANK schedule, the RTC, the media clocks and the GE timing model are unchanged. The
+  number of updates per second is unchanged unless an update is late, which the back-off limits.
+- **I/O speed:** unchanged.
+- **Package obligations:** the package's `update_boundary` runs once per logic update (section 9.5), and the title
+  reads its pad after that point in the update. A title that reads the pad before its boundary gets no fresher sample,
+  only the hold.
+- **Measured (Hot Shots Tennis, UCUS98701, 60 FPS package, Vulkan GE, hidden window, Windows 11, other builds running
+  on the machine).** At the title screen with live input, two pairs of 3,600-VBLANK runs:
+  - Sample-to-present latency (from the host poll behind the newest sample the guest read to the present of the frame
+    it set): mean 24.76 and 24.73 ms off, 15.08 and 15.09 ms with `pad=late`; median 31.0 and 30.5 ms off, 19.0 and
+    19.5 ms on; 95th percentile 33.0 and 33.0 ms off, 33.0 and 32.5 ms on.
+  - About 84 % of updates were held (2,842 of 3,398 and 2,784 of 3,318), for a mean of 10 to 12 ms and at most 13.6 ms.
+  - Late updates, off: 10 and 7. With `pad=late`: 2 late after a hold plus 9 and 4 late without one.
+  - In every run, every update was measured and none was left open (`unmeasured` 0), and each update set one new frame:
+    the new frames presented are the updates less one.
+  - One run on reported a largest latency of 1,275 ms that the repeat did not show (138 ms). It is a single frame
+    outside the 99th percentile (34 ms in both).
+  On a scripted menu, match load and rally route of 12,000 VBLANKs (a route's samples are not refreshed, so it shows
+  the hold's cost, not its gain), 8,744 updates off and 8,958 on, with 2,678 late updates off and 2,701 on, three and
+  four slowed-logic notices, and latency percentiles within 1 ms. These runs share the machine with other work, so
+  they show no regression at that load, not steady-state pacing.
+- **Limits.** The hold is planned from host costs, so a sudden expensive update after a run of cheap ones can be late
+  once before the back-off. A latency gain needs live host input polled by the window: a run with no window gets
+  only the hold.
+- **Tier:** Ace. **Default:** off. **Nothing worse (section 11.2, item 4):** the runs above, which have not been
+  reviewed.

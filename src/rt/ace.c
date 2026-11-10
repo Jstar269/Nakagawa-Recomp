@@ -370,6 +370,7 @@ size_t ace_feature_words(char *out, size_t cap) {
     if (s_eff.text) used = words_add(out, cap, used, "crisp keyboard");
     if (s_eff.wide) used = words_add(out, cap, used, "ultrawide");
     if (s_eff.cull) used = words_add(out, cap, used, "wider culling");
+    if (s_eff.pad) used = words_add(out, cap, used, "late pad sampling");
     if (s_eff.smooth) used = words_add(out, cap, used, "smooth motion");
     if (s_eff.sas) used = words_add(out, cap, used, "clean pitched sound");
     if (s_eff.tess) {
