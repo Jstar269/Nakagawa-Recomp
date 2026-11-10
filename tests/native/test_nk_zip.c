@@ -685,6 +685,162 @@ static void test_folder_state(const char *root) {
     printf("PASS: nk_zip folder state: missing, empty, with an entry\n");
 }
 
+/* One entry with any method, flags and packed bytes; the local header's CRC and
+   sizes zero when asked (a data descriptor's form; no descriptor is written:
+   the reader takes the central directory's values and never reads one). */
+static void tzip_build_packed(TZip *z, uint16_t method, uint16_t flags, const uint8_t *packed,
+                              uint32_t packed_size, uint32_t size, uint32_t crc, bool zero_local) {
+    static const char name[] = "TEXTURES/textures.ini";
+    uint8_t h[46];
+    memset(z, 0, sizeof(*z));
+    memset(h, 0, sizeof(h));
+    put32(h, 0x04034b50u);
+    put16(h + 4, 20u);
+    put16(h + 6, flags);
+    put16(h + 8, method);
+    if (!zero_local) {
+        put32(h + 14, crc);
+        put32(h + 18, packed_size);
+        put32(h + 22, size);
+    }
+    put16(h + 26, (uint16_t)(sizeof(name) - 1u));
+    tzip_bytes(z, h, 30);
+    tzip_bytes(z, name, sizeof(name) - 1u);
+    z->data[0] = z->size;
+    tzip_bytes(z, packed, packed_size);
+    z->central_offset = z->size;
+    z->central[0] = z->size;
+    memset(h, 0, sizeof(h));
+    put32(h, 0x02014b50u);
+    put16(h + 4, 20u);
+    put16(h + 6, 20u);
+    put16(h + 8, flags);
+    put16(h + 10, method);
+    put32(h + 16, crc);
+    put32(h + 20, packed_size);
+    put32(h + 24, size);
+    put16(h + 28, (uint16_t)(sizeof(name) - 1u));
+    tzip_bytes(z, h, 46);
+    tzip_bytes(z, name, sizeof(name) - 1u);
+    z->end = z->size;
+    memset(h, 0, sizeof(h));
+    put32(h, 0x06054b50u);
+    put16(h + 8, 1u);
+    put16(h + 10, 1u);
+    put32(h + 12, (uint32_t)(z->end - z->central_offset));
+    put32(h + 16, (uint32_t)z->central_offset);
+    tzip_bytes(z, h, 22);
+}
+
+/* Opens with `options`, then reads every entry; the first failure is returned. */
+static NkZipStatus tzip_open_with(const TZip *z, const NkZipReadOptions *options, uint8_t *out,
+                                  size_t cap, size_t *got) {
+    NkZipReader *reader = NULL;
+    NkZipError err;
+    NkZipStatus status = nk_zip_reader_open_memory_with(&reader, z->buf, z->size, options, &err);
+    if (got) *got = 0;
+    for (size_t i = 0; status == NK_ZIP_OK && i < nk_zip_reader_count(reader); ++i) {
+        NkZipEntryInfo info;
+        if (!nk_zip_reader_entry(reader, i, &info) || info.size > cap) return NK_ZIP_STATUS_COUNT;
+        status = nk_zip_reader_read(reader, i, out, cap, &err);
+        if (status == NK_ZIP_OK && got) *got = info.size;
+    }
+    if (status != NK_ZIP_OK) CHECK(err.status == status, "the error says the status returned");
+    nk_zip_reader_close(reader);
+    return status;
+}
+
+/* Archives other programs made (NkZipReadOptions, texture packs #1880): DEFLATE,
+   its level bits, data descriptors and the caller's caps; nothing changes
+   without options. The DEFLATE stream is zlib's (level 9, raw) of the text. */
+static void test_read_options(void) {
+    static const char plain[] = "save bytes save bytes save bytes save bytes";
+    static const uint8_t deflated[] = {0x2b, 0x4e, 0x2c, 0x4b, 0x55, 0x48, 0xaa, 0x2c,
+                                       0x49, 0x2d, 0x56, 0x28, 0x26, 0xc0, 0x04, 0x00};
+    const uint32_t size = (uint32_t)(sizeof(plain) - 1u);
+    const uint32_t crc = nk_zip_crc32(0u, plain, size);
+    NkZipReadOptions deflate = {0, 0, true, false};
+    NkZipReadOptions both = {0, 0, true, true};
+    uint8_t out[128];
+    size_t got = 0;
+    uint8_t bad[sizeof(deflated)];
+    TZip z;
+
+    CHECK(crc == 0x372638cfu, "the fixture's CRC-32");
+    tzip_build_packed(&z, 8u, 0u, deflated, sizeof(deflated), size, crc, false);
+    expect_status(&z, NK_ZIP_ERR_METHOD, "DEFLATE without options");
+    CHECK(tzip_open_with(&z, NULL, out, sizeof(out), &got) == NK_ZIP_ERR_METHOD,
+          "DEFLATE with no options given");
+    CHECK(tzip_open_with(&z, &deflate, out, sizeof(out), &got) == NK_ZIP_OK && got == size &&
+              memcmp(out, plain, size) == 0,
+          "a DEFLATE entry unpacks to its text");
+    {
+        NkZipReader *reader = NULL;
+        CHECK(nk_zip_reader_open_memory_with(&reader, z.buf, z.size, &deflate, NULL) == NK_ZIP_OK &&
+                  nk_zip_reader_verify(reader, NULL) == NK_ZIP_OK,
+              "verify unpacks and checks a DEFLATE entry");
+        nk_zip_reader_close(reader);
+    }
+    tzip_build_packed(&z, 8u, 2u, deflated, sizeof(deflated), size, crc, false);
+    CHECK(tzip_open_with(&z, &deflate, out, sizeof(out), &got) == NK_ZIP_OK,
+          "the DEFLATE level bits on a DEFLATE entry");
+    tzip_build_packed(&z, 0u, 2u, (const uint8_t *)plain, size, size, crc, false);
+    CHECK(tzip_open_with(&z, &deflate, out, sizeof(out), &got) == NK_ZIP_ERR_FLAGS,
+          "the DEFLATE level bits on a stored entry");
+    tzip_build_packed(&z, 12u, 0u, deflated, sizeof(deflated), size, crc, false);
+    CHECK(tzip_open_with(&z, &deflate, out, sizeof(out), &got) == NK_ZIP_ERR_METHOD,
+          "another method (bzip2) stays refused");
+    tzip_build_packed(&z, 8u, 0u, deflated, sizeof(deflated), size, crc ^ 1u, false);
+    CHECK(tzip_open_with(&z, &deflate, out, sizeof(out), &got) == NK_ZIP_ERR_CRC,
+          "a DEFLATE entry whose CRC does not match");
+    tzip_build_packed(&z, 8u, 0u, deflated, sizeof(deflated), size + 1u, crc, false);
+    CHECK(tzip_open_with(&z, &deflate, out, sizeof(out), &got) == NK_ZIP_ERR_SIZE_MISMATCH,
+          "a stream that ends short of its declared size");
+    tzip_build_packed(&z, 8u, 0u, deflated, sizeof(deflated), size - 1u, crc, false);
+    CHECK(tzip_open_with(&z, &deflate, out, sizeof(out), &got) == NK_ZIP_ERR_SIZE_MISMATCH,
+          "a stream that runs past its declared size");
+    memcpy(bad, deflated, sizeof(bad));
+    bad[0] = 0x07u; /* final block, type 3: reserved */
+    tzip_build_packed(&z, 8u, 0u, bad, sizeof(bad), size, crc, false);
+    CHECK(tzip_open_with(&z, &deflate, out, sizeof(out), &got) == NK_ZIP_ERR_INFLATE,
+          "a damaged DEFLATE stream");
+
+    /* Data descriptors: the local header's CRC and sizes left zero. */
+    tzip_build_packed(&z, 8u, 8u, deflated, sizeof(deflated), size, crc, true);
+    CHECK(tzip_open_with(&z, &deflate, out, sizeof(out), &got) == NK_ZIP_ERR_DATA_DESCRIPTOR,
+          "a data descriptor without the option");
+    CHECK(tzip_open_with(&z, &both, out, sizeof(out), &got) == NK_ZIP_OK && got == size &&
+              memcmp(out, plain, size) == 0,
+          "a data descriptor with the option");
+    tzip_build_packed(&z, 8u, 8u, deflated, sizeof(deflated), size, crc, false);
+    CHECK(tzip_open_with(&z, &both, out, sizeof(out), &got) == NK_ZIP_OK,
+          "a data descriptor whose local header has the values too");
+    tzip_build_packed(&z, 8u, 8u, deflated, sizeof(deflated), size, crc, false);
+    put32(z.buf + 14, crc ^ 1u);
+    CHECK(tzip_open_with(&z, &both, out, sizeof(out), &got) == NK_ZIP_ERR_LOCAL_MISMATCH,
+          "a data descriptor whose local header disagrees");
+    tzip_build_packed(&z, 8u, 0u, deflated, sizeof(deflated), size, crc, false);
+    put16(z.buf + 8, 0u);
+    CHECK(tzip_open_with(&z, &both, out, sizeof(out), &got) == NK_ZIP_ERR_LOCAL_MISMATCH,
+          "a local header with another method");
+
+    /* The caller's caps. */
+    {
+        TItem items[2] = {k_save, k_save};
+        NkZipReadOptions one = {1u, 0, false, false};
+        NkZipReadOptions small = {0, 5u, false, false};
+        items[1].name = "PSP/SAVEDATA/TEST00001DATA/PARAM.SFO";
+        tzip_build(&z, items, 2);
+        CHECK(tzip_open_with(&z, &one, out, sizeof(out), &got) == NK_ZIP_ERR_TOO_MANY_ENTRIES,
+              "an entry cap of one");
+        CHECK(tzip_open_with(&z, &small, out, sizeof(out), &got) == NK_ZIP_ERR_TOO_LARGE,
+              "a total cap of five bytes");
+        CHECK(tzip_open_with(&z, &deflate, out, sizeof(out), &got) == NK_ZIP_OK,
+              "stored entries with DEFLATE allowed");
+    }
+    printf("PASS: nk_zip read options (DEFLATE, level bits, data descriptors, caps)\n");
+}
+
 static void test_status_words(void) {
     for (int i = 0; i < (int)NK_ZIP_STATUS_COUNT; ++i) {
         const char *code = nk_zip_status_code((NkZipStatus)i);
@@ -712,6 +868,7 @@ int main(void) {
     test_name_refusals();
     test_duplicate_refusals();
     test_structure_refusals(root);
+    test_read_options();
     test_folder_state(root);
     if (g_failures) {
         fprintf(stderr, "%d of %d nk_zip checks failed\n", g_failures, g_checks);

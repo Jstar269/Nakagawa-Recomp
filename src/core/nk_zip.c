@@ -3,11 +3,13 @@
 
 /* Store-only ZIP reader and writer for save backups (#1883); nk_zip.h says what
    is written and what is refused. Written from PKWARE's APPNOTE.TXT (6.3.x):
-   section 4.3.7 (local header), 4.3.12 (central directory header), 4.3.16
-   (end of central directory record), 4.3.14-4.3.15 (the ZIP64 records),
-   4.4.4 (general purpose flags) and 4.5.3 (the ZIP64 extra field). */
+   section 4.3.7 (local header), 4.3.9 (data descriptor), 4.3.12 (central
+   directory header), 4.3.16 (end of central directory record), 4.3.14-4.3.15
+   (the ZIP64 records), 4.4.4 (general purpose flags), 4.4.5 (method 8,
+   DEFLATE) and 4.5.3 (the ZIP64 extra field). */
 
 #include "nk_zip.h"
+#include "nk_psp_inflate.h"
 
 #ifndef NK_ZIP_NO_HOST_IO
 #include "nk_platform.h"
@@ -28,6 +30,10 @@
 #define ZIP_MAX_COMMENT 65535u
 #define ZIP_FLAG_ENCRYPTED 0x0001u
 #define ZIP_FLAG_DESCRIPTOR 0x0008u
+#define ZIP_FLAG_DEFLATE_LEVEL 0x0006u  /* method 8: the compression level used */
+#define ZIP_METHOD_STORED 0u
+#define ZIP_METHOD_DEFLATE 8u
+#define ZIP_DESCRIPTOR_MAX 16u          /* signature, CRC and two sizes */
 #define ZIP_FLAG_STRONG_ENCRYPTION 0x0040u
 #define ZIP_FLAG_UTF8 0x0800u
 #define ZIP_FLAG_MASKED_HEADERS 0x2000u
@@ -36,12 +42,10 @@
 #define ZIP_VERSION_MADE_BY 20u  /* 2.0, MS-DOS attributes */
 #define ZIP_DOS_FOLDER 0x10u
 #define ZIP_CHUNK 65536u
-/* An archive's data, headers and central directory: bigger than this cannot
-   be one the caps allow. */
-#define ZIP_MAX_ARCHIVE_BYTES \
-    (NK_ZIP_MAX_TOTAL_BYTES + (uint64_t)NK_ZIP_MAX_CENTRAL_BYTES + \
-     (uint64_t)NK_ZIP_MAX_ENTRIES * (ZIP_LOCAL_SIZE + NK_ZIP_MAX_NAME_BYTES + 65535u) + \
-     ZIP_END_SIZE + ZIP_MAX_COMMENT)
+/* Without ZIP64 the central directory starts below 4 GiB and the end record
+   follows it: no archive this reader takes is longer. */
+#define ZIP_MAX_ARCHIVE_BYTES_32 \
+    (0xFFFFFFFFull + (uint64_t)NK_ZIP_MAX_CENTRAL_BYTES + ZIP_END_SIZE + ZIP_MAX_COMMENT)
 
 /* ---- Status words ---- */
 
@@ -94,6 +98,7 @@ static const struct {
     {"ZIP_EXISTS", "A file it would write is there already."},
     {"ZIP_LEFT_OUT", "A file or folder could not be put in the backup: a link, a junction, a "
                      "cloud file that is not on this computer, or one that cannot be read."},
+    {"ZIP_INFLATE", "A compressed file in it is damaged: it does not unpack."},
 };
 
 const char *nk_zip_status_code(NkZipStatus status) {
@@ -339,8 +344,10 @@ typedef struct {
     char *name;            /* NUL-terminated copy */
     uint16_t name_size;
     uint16_t flags;
+    uint16_t method;
     uint32_t crc;
-    uint32_t size;
+    uint32_t size;         /* unpacked */
+    uint32_t packed;       /* in the archive; the same as size when stored */
     uint32_t local_offset;
     uint64_t data_offset;
     bool folder;
@@ -358,6 +365,11 @@ struct NkZipReader {
     uint64_t total;
     uint8_t *chunk;
     uint32_t crc_table[256];
+    /* What this reader takes (NkZipReadOptions; the save caps without). */
+    size_t max_entries;
+    uint64_t max_total;
+    bool deflate;
+    bool descriptor;
 };
 
 static NkZipStatus zip_read_at(NkZipReader *r, uint64_t offset, void *buf, size_t size) {
@@ -392,14 +404,38 @@ static bool zip_extra_scan(const uint8_t *extra, size_t size, bool *zip64) {
 }
 
 /* The flag and method rules, the same for the central and the local header. */
-static NkZipStatus zip_check_flags(uint16_t flags, uint16_t method) {
+static NkZipStatus zip_check_flags(const NkZipReader *r, uint16_t flags, uint16_t method) {
+    uint16_t allowed = ZIP_FLAG_UTF8;
     if (flags & (ZIP_FLAG_ENCRYPTED | ZIP_FLAG_STRONG_ENCRYPTION | ZIP_FLAG_MASKED_HEADERS)) {
         return NK_ZIP_ERR_ENCRYPTED;
     }
-    if (flags & ZIP_FLAG_DESCRIPTOR) return NK_ZIP_ERR_DATA_DESCRIPTOR;
-    if (method != 0u) return NK_ZIP_ERR_METHOD;
-    if (flags & (uint16_t)~ZIP_FLAG_UTF8) return NK_ZIP_ERR_FLAGS;
+    if ((flags & ZIP_FLAG_DESCRIPTOR) && !r->descriptor) return NK_ZIP_ERR_DATA_DESCRIPTOR;
+    if (method != ZIP_METHOD_STORED && !(method == ZIP_METHOD_DEFLATE && r->deflate)) {
+        return NK_ZIP_ERR_METHOD;
+    }
+    if (r->descriptor) allowed |= ZIP_FLAG_DESCRIPTOR;
+    if (method == ZIP_METHOD_DEFLATE) allowed |= ZIP_FLAG_DEFLATE_LEVEL;
+    if (flags & (uint16_t)~allowed) return NK_ZIP_ERR_FLAGS;
     return NK_ZIP_OK;
+}
+
+static uint64_t zip_add_capped(uint64_t a, uint64_t b) {
+    return a > UINT64_MAX - b ? UINT64_MAX : a + b;
+}
+
+/* An archive's data, headers and central directory: bigger than this cannot
+   be one the caps allow. DEFLATE data can be longer than what it unpacks to,
+   so with it only the 32-bit bound holds. */
+static uint64_t zip_max_archive_bytes(const NkZipReader *r) {
+    uint64_t per_entry = (uint64_t)ZIP_LOCAL_SIZE + NK_ZIP_MAX_NAME_BYTES + 65535u +
+                         (r->descriptor ? ZIP_DESCRIPTOR_MAX : 0u);
+    uint64_t bound = ZIP_MAX_ARCHIVE_BYTES_32;
+    if (!r->deflate) {
+        bound = zip_add_capped(r->max_total, (uint64_t)NK_ZIP_MAX_CENTRAL_BYTES);
+        bound = zip_add_capped(bound, (uint64_t)r->max_entries * per_entry);
+        bound = zip_add_capped(bound, (uint64_t)ZIP_END_SIZE + ZIP_MAX_COMMENT);
+    }
+    return bound < ZIP_MAX_ARCHIVE_BYTES_32 ? bound : ZIP_MAX_ARCHIVE_BYTES_32;
 }
 
 /* Finds the one end record: the signature whose comment length reaches the
@@ -463,7 +499,7 @@ static NkZipStatus zip_reader_parse(NkZipReader *r, NkZipError *err) {
     size_t at = 0;
 
     if (r->size < ZIP_END_SIZE) return zip_fail(err, NK_ZIP_ERR_NOT_ZIP, NULL, 0);
-    if (r->size > ZIP_MAX_ARCHIVE_BYTES) return zip_fail(err, NK_ZIP_ERR_TOO_LARGE, NULL, 0);
+    if (r->size > zip_max_archive_bytes(r)) return zip_fail(err, NK_ZIP_ERR_TOO_LARGE, NULL, 0);
     status = zip_find_end(r, &end_offset, end);
     if (status != NK_ZIP_OK) return zip_fail(err, status, NULL, 0);
     disk = rd16(end + 4);
@@ -481,7 +517,7 @@ static NkZipStatus zip_reader_parse(NkZipReader *r, NkZipError *err) {
     if (disk != 0u || central_disk != 0u || disk_entries != total_entries) {
         return zip_fail(err, NK_ZIP_ERR_MULTI_DISK, NULL, 0);
     }
-    if (total_entries > NK_ZIP_MAX_ENTRIES) {
+    if (total_entries > r->max_entries) {
         return zip_fail(err, NK_ZIP_ERR_TOO_MANY_ENTRIES, NULL, 0);
     }
     if ((uint64_t)central_offset + central_size != end_offset) {
@@ -575,12 +611,12 @@ static NkZipStatus zip_reader_parse(NkZipReader *r, NkZipError *err) {
             status = zip_fail(err, NK_ZIP_ERR_MULTI_DISK, e->name, e->name_size);
             goto done;
         }
-        status = zip_check_flags(flags, method);
+        status = zip_check_flags(r, flags, method);
         if (status != NK_ZIP_OK) {
             status = zip_fail(err, status, e->name, e->name_size);
             goto done;
         }
-        if (packed != size || (folder && size != 0u)) {
+        if ((method == ZIP_METHOD_STORED && packed != size) || (folder && size != 0u)) {
             status = zip_fail(err, NK_ZIP_ERR_SIZE_MISMATCH, e->name, e->name_size);
             goto done;
         }
@@ -589,13 +625,15 @@ static NkZipStatus zip_reader_parse(NkZipReader *r, NkZipError *err) {
             goto done;
         }
         r->total += size;
-        if (r->total > NK_ZIP_MAX_TOTAL_BYTES) {
+        if (r->total > r->max_total) {
             status = zip_fail(err, NK_ZIP_ERR_TOO_LARGE, e->name, e->name_size);
             goto done;
         }
         e->flags = flags;
+        e->method = method;
         e->crc = crc;
         e->size = size;
+        e->packed = packed;
         e->local_offset = local;
         e->folder = folder;
         refs[i].name = e->name;
@@ -640,14 +678,18 @@ static NkZipStatus zip_reader_parse(NkZipReader *r, NkZipError *err) {
             goto done;
         }
         {
-            NkZipStatus local_flags = zip_check_flags(rd16(h + 6), rd16(h + 8));
+            NkZipStatus local_flags = zip_check_flags(r, rd16(h + 6), rd16(h + 8));
             if (local_flags != NK_ZIP_OK) {
                 status = zip_fail(err, local_flags, e->name, e->name_size);
                 goto done;
             }
         }
-        if (rd16(h + 6) != e->flags || rd32(h + 14) != e->crc || rd32(h + 18) != e->size ||
-            rd32(h + 22) != e->size || name_size != e->name_size) {
+        /* With a data descriptor the local header may leave the CRC and both
+           sizes zero (APPNOTE 4.4.4, bit 3); the central entry has them. */
+        if (rd16(h + 6) != e->flags || rd16(h + 8) != e->method || name_size != e->name_size ||
+            (!((e->flags & ZIP_FLAG_DESCRIPTOR) && rd32(h + 14) == 0u && rd32(h + 18) == 0u &&
+               rd32(h + 22) == 0u) &&
+             (rd32(h + 14) != e->crc || rd32(h + 18) != e->packed || rd32(h + 22) != e->size))) {
             status = zip_fail(err, NK_ZIP_ERR_LOCAL_MISMATCH, e->name, e->name_size);
             goto done;
         }
@@ -671,7 +713,7 @@ static NkZipStatus zip_reader_parse(NkZipReader *r, NkZipError *err) {
             goto done;
         }
         e->data_offset = header_end;
-        if (header_end + e->size > central_offset) {
+        if (header_end + e->packed > central_offset) {
             status = zip_fail(err, NK_ZIP_ERR_OFFSET, e->name, e->name_size);
             goto done;
         }
@@ -682,7 +724,7 @@ static NkZipStatus zip_reader_parse(NkZipReader *r, NkZipError *err) {
     if (r->count > 1) {
         qsort(by_offset, r->count, sizeof(by_offset[0]), zip_entry_offset_compare);
         for (size_t i = 0; i + 1 < r->count; ++i) {
-            if (by_offset[i]->data_offset + by_offset[i]->size > by_offset[i + 1]->local_offset) {
+            if (by_offset[i]->data_offset + by_offset[i]->packed > by_offset[i + 1]->local_offset) {
                 status = zip_fail(err, NK_ZIP_ERR_OVERLAP, by_offset[i + 1]->name,
                                   by_offset[i + 1]->name_size);
                 goto done;
@@ -697,8 +739,20 @@ done:
     return status;
 }
 
-static NkZipStatus zip_reader_start(NkZipReader *r, NkZipReader **out, NkZipError *err) {
+static NkZipStatus zip_reader_start(NkZipReader *r, NkZipReader **out,
+                                    const NkZipReadOptions *options, NkZipError *err) {
     NkZipStatus status;
+    r->max_entries = NK_ZIP_MAX_ENTRIES;
+    r->max_total = NK_ZIP_MAX_TOTAL_BYTES;
+    if (options) {
+        if (options->max_entries) {
+            r->max_entries = options->max_entries < NK_ZIP_READ_MAX_ENTRIES
+                                 ? options->max_entries : NK_ZIP_READ_MAX_ENTRIES;
+        }
+        if (options->max_total_bytes) r->max_total = options->max_total_bytes;
+        r->deflate = options->deflate;
+        r->descriptor = options->data_descriptor;
+    }
     zip_crc_table(r->crc_table);
     r->chunk = (uint8_t *)malloc(ZIP_CHUNK);
     if (!r->chunk) {
@@ -716,6 +770,11 @@ static NkZipStatus zip_reader_start(NkZipReader *r, NkZipReader **out, NkZipErro
 
 NkZipStatus nk_zip_reader_open_memory(NkZipReader **out, const void *data, size_t size,
                                       NkZipError *err) {
+    return nk_zip_reader_open_memory_with(out, data, size, NULL, err);
+}
+
+NkZipStatus nk_zip_reader_open_memory_with(NkZipReader **out, const void *data, size_t size,
+                                           const NkZipReadOptions *options, NkZipError *err) {
     NkZipReader *r;
     if (!out) return zip_fail(err, NK_ZIP_ERR_ARGUMENT, NULL, 0);
     *out = NULL;
@@ -725,7 +784,7 @@ NkZipStatus nk_zip_reader_open_memory(NkZipReader **out, const void *data, size_
     if (!r) return zip_fail(err, NK_ZIP_ERR_NO_MEMORY, NULL, 0);
     r->mem = (const uint8_t *)data;
     r->size = size;
-    return zip_reader_start(r, out, err);
+    return zip_reader_start(r, out, options, err);
 }
 
 size_t nk_zip_reader_count(const NkZipReader *reader) { return reader ? reader->count : 0; }
@@ -746,11 +805,49 @@ bool nk_zip_reader_entry(const NkZipReader *reader, size_t index, NkZipEntryInfo
 /* Streams one entry's data through `sink` (when given) and checks its CRC-32. */
 typedef bool (*ZipSink)(void *ctx, const uint8_t *data, size_t size);
 
+/* A DEFLATE entry, unpacked whole; its CRC is checked before the sink sees a
+   byte. */
+static NkZipStatus zip_inflate_entry(NkZipReader *r, const ZipEntry *e, ZipSink sink, void *ctx,
+                                     NkZipError *err) {
+    uint8_t *packed;
+    uint8_t *plain = NULL;
+    size_t plain_size = 0;
+    NkZipStatus status;
+    int rc;
+    if (e->packed == 0u && e->size == 0u) {
+        /* No stream at all for an empty file: nothing to unpack. */
+        return e->crc == 0u ? NK_ZIP_OK : zip_fail(err, NK_ZIP_ERR_CRC, e->name, e->name_size);
+    }
+    packed = (uint8_t *)malloc(e->packed ? (size_t)e->packed : 1u);
+    if (!packed) return zip_fail(err, NK_ZIP_ERR_NO_MEMORY, e->name, e->name_size);
+    status = zip_read_at(r, e->data_offset, packed, e->packed);
+    if (status != NK_ZIP_OK) {
+        free(packed);
+        return zip_fail(err, status, e->name, e->name_size);
+    }
+    /* The declared size bounds the output: a stream that runs past it stops there. */
+    rc = nk_psp_inflate_raw(packed, e->packed, &plain, &plain_size, e->size,
+                            e->size ? (size_t)e->size : 1u, NULL, 0);
+    free(packed);
+    if (rc != NK_INFLATE_OK) {
+        status = rc == NK_INFLATE_ERR_MEMORY     ? NK_ZIP_ERR_NO_MEMORY
+                 : rc == NK_INFLATE_ERR_OVERFLOW ? NK_ZIP_ERR_SIZE_MISMATCH
+                                                 : NK_ZIP_ERR_INFLATE;
+        return zip_fail(err, status, e->name, e->name_size);
+    }
+    if (plain_size != e->size) status = NK_ZIP_ERR_SIZE_MISMATCH;
+    else if (zip_crc_update(r->crc_table, 0u, plain, plain_size) != e->crc) status = NK_ZIP_ERR_CRC;
+    else if (sink && plain_size && !sink(ctx, plain, plain_size)) status = NK_ZIP_ERR_IO;
+    free(plain);
+    return status == NK_ZIP_OK ? NK_ZIP_OK : zip_fail(err, status, e->name, e->name_size);
+}
+
 static NkZipStatus zip_stream_entry(NkZipReader *r, const ZipEntry *e, ZipSink sink, void *ctx,
                                     NkZipError *err) {
     uint64_t left = e->size;
     uint64_t at = e->data_offset;
     uint32_t crc = 0;
+    if (e->method == ZIP_METHOD_DEFLATE) return zip_inflate_entry(r, e, sink, ctx, err);
     while (left > 0) {
         size_t n = left > ZIP_CHUNK ? ZIP_CHUNK : (size_t)left;
         NkZipStatus status = zip_read_at(r, at, r->chunk, n);
@@ -896,6 +993,11 @@ NkZipFolderState nk_zip_folder_state(const char *folder) {
 /* ---- Reader: files and extraction ---- */
 
 NkZipStatus nk_zip_reader_open_file(NkZipReader **out, const char *path, NkZipError *err) {
+    return nk_zip_reader_open_file_with(out, path, NULL, err);
+}
+
+NkZipStatus nk_zip_reader_open_file_with(NkZipReader **out, const char *path,
+                                         const NkZipReadOptions *options, NkZipError *err) {
     NkZipReader *r;
     int64_t size;
     if (!out) return zip_fail(err, NK_ZIP_ERR_ARGUMENT, NULL, 0);
@@ -913,7 +1015,7 @@ NkZipStatus nk_zip_reader_open_file(NkZipReader **out, const char *path, NkZipEr
         nk_zip_reader_close(r);
         return zip_fail(err, NK_ZIP_ERR_NOT_ZIP, NULL, 0);
     }
-    return zip_reader_start(r, out, err);
+    return zip_reader_start(r, out, options, err);
 }
 
 static bool zip_file_sink(void *ctx, const uint8_t *data, size_t size) {

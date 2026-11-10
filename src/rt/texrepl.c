@@ -15,11 +15,15 @@
  * The hashes must match PPSSPP's bit for bit, since a pack's file names depend on them; the
  * selftest checks them against fixed quick-hash vectors taken from PPSSPP's own code and published
  * xxHash vectors (XXH32 and XXH64 are the public algorithms). The ini parser, the PNG decode (stb),
- * the cache and the budget are this project's own.
+ * the cache and the budget are this project's own. The ini line rules, the texture-name and mip-chain
+ * rules and the ZIP pack rules follow the behaviour of PPSSPP's IniFile.cpp and TextureReplacer.cpp
+ * at the same revision, read as reference and written here in this project's own code; ZIP packs are
+ * read in place through the project's own reader (src/core/nk_zip.h).
  */
 #include "texrepl.h"
 
 #include "nk_platform.h"
+#include "nk_zip.h"
 
 #include <ctype.h>
 #include <stdarg.h>
@@ -249,32 +253,70 @@ uint32_t nk_texrepl_bits_per_texel(uint32_t format) {
     return kBits[format & 15u];
 }
 
+static uint64_t now_ns(void) {
+    return (uint64_t)((double)clock() * (1e9 / (double)CLOCKS_PER_SEC));
+}
+
 /* ======================================================================================= pack */
 
+/* One mip level of a listed texture. */
+typedef struct {
+    char *file;            /* under the pack's root, '/' between folders */
+    uint32_t *rgba;        /* decoded image while state is 1 */
+    int w, h;              /* known while state is 1 or 3 */
+    uint8_t state;         /* 0 not read yet, 1 decoded, 2 cannot be used, 3 size known, image not held */
+    uint32_t pins;
+    uint64_t lru;
+} Level;
+
+/* One texture key and its mip chain. level_n 0: a texture the pack leaves alone. */
 typedef struct {
     uint64_t cachekey;
     uint32_t hash;
-    uint32_t order;        /* position in the file listing and ini, so a later line wins */
-    char *file;            /* NULL: no file, a "leave alone" line */
-    /* Decoded image, loaded on first use. */
-    uint32_t *rgba;
-    int w, h;
-    uint8_t state;         /* 0 not loaded, 1 loaded, 2 cannot be loaded */
-    uint32_t pins;
-    uint64_t lru;
+    uint32_t level_n;
+    uint32_t indexed_noted;
+    Level *levels;
 } Alias;
 
-typedef struct { uint32_t addr; int w, h, new_w, new_h; } HashRange;
-typedef struct { int w, h; float value; } ReduceRange;
+/* A [hashes] line or a hash-named file, before the lines of one key are put together. */
+typedef struct {
+    uint64_t cachekey;
+    uint32_t hash;
+    int level;
+    uint32_t order;        /* the folder listing first, then the ini: a later one wins */
+    char *file;            /* "" for a blank value */
+} Record;
+
+/* An [indexed] line: the texture's image holds palette indices (mode 1, CPU; 2, GPU) or colours (0). */
+typedef struct {
+    uint64_t cachekey;
+    uint32_t hash;
+    uint32_t order;
+    uint8_t mode;
+} IndexedKey;
+
+typedef struct { uint32_t addr, w, h, new_w, new_h; } HashRange;
+typedef struct { uint32_t w, h; float value; } ReduceRange;
+
+/* A ZIP pack's file, by its name under the pack's root (the reader owns the name). */
+typedef struct { const char *rel; size_t index; uint32_t size; } ZipName;
 
 struct NkTexRepl {
-    char *dir;
+    char *dir;                 /* a folder pack */
+    NkZipReader *zip;          /* a ZIP pack */
+    ZipName *zip_names;
+    size_t zip_name_n;
     NkTexReplHash hash_kind;
     int ignore_address, reduce_hash;
     int skip_dxt1_128x64, skip_dxt1_128x128;
     float reduce_global;
+    Record *records;
+    size_t record_n, record_cap;
+    IndexedKey *indexed;
+    size_t indexed_n, indexed_cap;
+    size_t nonpng_listed;
     Alias *aliases;
-    size_t alias_n, alias_cap;
+    size_t alias_n;
     HashRange *ranges;
     size_t range_n, range_cap;
     ReduceRange *reduce;
@@ -333,66 +375,151 @@ const char *nk_texrepl_diag(const NkTexRepl *p, size_t i) {
 
 NkTexReplHash nk_texrepl_hash_kind(const NkTexRepl *p) { return p ? p->hash_kind : NK_TEXREPL_HASH_QUICK; }
 size_t nk_texrepl_entry_count(const NkTexRepl *p) { return p ? p->alias_n : 0u; }
+int nk_texrepl_is_zip(const NkTexRepl *p) { return p && p->zip ? 1 : 0; }
 
-static int alias_push(NkTexRepl *p, uint64_t cachekey, uint32_t hash, const char *file) {
-    if (p->alias_n == p->alias_cap) {
-        size_t cap = p->alias_cap ? p->alias_cap * 2 : 256;
-        Alias *grown = (Alias *)realloc(p->aliases, cap * sizeof(Alias));
+static char *dup_str(const char *s) {
+    size_t n = strlen(s);
+    char *c = (char *)malloc(n + 1);
+    if (c) memcpy(c, s, n + 1);
+    return c;
+}
+
+static int record_push(NkTexRepl *p, uint64_t cachekey, uint32_t hash, int level, const char *file) {
+    if (p->record_n == p->record_cap) {
+        size_t cap = p->record_cap ? p->record_cap * 2 : 256;
+        Record *grown = (Record *)realloc(p->records, cap * sizeof(Record));
         if (!grown) return 0;
-        p->aliases = grown;
-        p->alias_cap = cap;
+        p->records = grown;
+        p->record_cap = cap;
     }
-    Alias *a = &p->aliases[p->alias_n];
-    memset(a, 0, sizeof(*a));
-    a->cachekey = cachekey;
-    a->hash = hash;
-    a->order = (uint32_t)p->alias_n;
-    if (file && *file) {
-        size_t n = strlen(file);
-        a->file = (char *)malloc(n + 1);
-        if (!a->file) return 0;
-        memcpy(a->file, file, n + 1);
-        for (char *c = a->file; *c; c++) if (*c == '\\') *c = '/';
-    }
-    p->alias_n++;
+    char *copy = dup_str(file ? file : "");
+    if (!copy) return 0;
+    for (char *c = copy; *c; c++) if (*c == '\\') *c = '/';
+    Record *r = &p->records[p->record_n];
+    r->cachekey = cachekey;
+    r->hash = hash;
+    r->level = level;
+    r->order = (uint32_t)p->record_n;
+    r->file = copy;
+    p->record_n++;
     return 1;
 }
 
-static int alias_cmp(const void *x, const void *y) {
-    const Alias *a = (const Alias *)x, *b = (const Alias *)y;
+static int record_cmp(const void *x, const void *y) {
+    const Record *a = (const Record *)x, *b = (const Record *)y;
     if (a->cachekey != b->cachekey) return a->cachekey < b->cachekey ? -1 : 1;
     if (a->hash != b->hash) return a->hash < b->hash ? -1 : 1;
+    if (a->level != b->level) return a->level < b->level ? -1 : 1;
     if (a->order != b->order) return a->order < b->order ? -1 : 1;
     return 0;
 }
 
-/* Sort by key and keep the last line of each key (a later line, the ini's after the folder scan,
- * wins). */
-static void alias_finish(NkTexRepl *p) {
-    if (p->alias_n < 2) return;
-    qsort(p->aliases, p->alias_n, sizeof(Alias), alias_cmp);
-    size_t out = 0;
-    for (size_t i = 0; i < p->alias_n; i++) {
-        if (i + 1 < p->alias_n && p->aliases[i].cachekey == p->aliases[i + 1].cachekey &&
-            p->aliases[i].hash == p->aliases[i + 1].hash) {
-            free(p->aliases[i].file);
-            continue;
-        }
-        p->aliases[out++] = p->aliases[i];
-    }
-    p->alias_n = out;
+static void records_free(NkTexRepl *p) {
+    for (size_t i = 0; i < p->record_n; i++) free(p->records[i].file);
+    free(p->records);
+    p->records = NULL;
+    p->record_n = p->record_cap = 0;
 }
 
-static Alias *alias_find(const NkTexRepl *p, uint64_t cachekey, uint32_t hash) {
-    size_t lo = 0, hi = p->alias_n;
+/* The lines of one key make its mip chain the way PPSSPP's alias map does (ComputeAliasMap): the
+ * last line for each level counts, levels are taken from 0 up while they follow one another, and the
+ * names are joined with '|' and split again, so a value holding '|' names several levels. The chain
+ * ends at the first blank name, and at 12 levels. A key whose lines do not start at level 0, or
+ * whose level 0 is blank, has no chain: the texture is left alone, and no wildcard line is tried. */
+static int build_chain(NkTexRepl *p, const Record *first, size_t n, Alias *a) {
+    const char *names[NK_TEXREPL_MAX_LEVELS];
+    size_t name_len[NK_TEXREPL_MAX_LEVELS];
+    uint32_t count = 0;
+    int expect = 0, stopped = 0;
+    for (size_t i = 0; i < n && !stopped; i++) {
+        if (i + 1 < n && first[i + 1].level == first[i].level) continue;   /* a later line for this level */
+        if (first[i].level != expect) {
+            diag_add(p, "%016llx%08x: mip level %d is listed with no level %d before it; %s",
+                     (unsigned long long)a->cachekey, a->hash, first[i].level, expect,
+                     expect == 0 ? "the texture is left alone, as PPSSPP leaves it" : "the levels stop there");
+            break;
+        }
+        expect++;
+        const char *s = first[i].file;
+        for (;;) {   /* each '|'-separated part is a level */
+            const char *bar = strchr(s, '|');
+            size_t len = bar ? (size_t)(bar - s) : strlen(s);
+            if (len == 0 || count == NK_TEXREPL_MAX_LEVELS) { stopped = 1; break; }
+            names[count] = s;
+            name_len[count] = len;
+            count++;
+            if (!bar) break;
+            s = bar + 1;
+        }
+    }
+    a->level_n = 0;
+    a->levels = NULL;
+    if (!count) return 1;
+    a->levels = (Level *)calloc(count, sizeof(Level));
+    if (!a->levels) return 0;
+    for (uint32_t i = 0; i < count; i++) {
+        a->levels[i].file = (char *)malloc(name_len[i] + 1);
+        if (!a->levels[i].file) return 0;
+        memcpy(a->levels[i].file, names[i], name_len[i]);
+        a->levels[i].file[name_len[i]] = '\0';
+        a->level_n = i + 1;
+    }
+    return 1;
+}
+
+static int aliases_build(NkTexRepl *p) {
+    if (p->record_n) qsort(p->records, p->record_n, sizeof(Record), record_cmp);
+    size_t keys = 0;
+    for (size_t i = 0; i < p->record_n; i++)
+        if (i == 0 || p->records[i].cachekey != p->records[i - 1].cachekey || p->records[i].hash != p->records[i - 1].hash)
+            keys++;
+    p->aliases = (Alias *)calloc(keys ? keys : 1u, sizeof(Alias));
+    if (!p->aliases) return 0;
+    for (size_t i = 0; i < p->record_n;) {
+        size_t j = i + 1;
+        while (j < p->record_n && p->records[j].cachekey == p->records[i].cachekey && p->records[j].hash == p->records[i].hash) j++;
+        Alias *a = &p->aliases[p->alias_n++];
+        a->cachekey = p->records[i].cachekey;
+        a->hash = p->records[i].hash;
+        if (!build_chain(p, &p->records[i], j - i, a)) return 0;
+        i = j;
+    }
+    records_free(p);
+    return 1;
+}
+
+/* A sorted table whose rows start with the key (Alias, IndexedKey): the row for one exact key. */
+typedef struct { uint64_t cachekey; uint32_t hash; } KeyHead;
+static const void *key_find(const void *base, size_t n, size_t stride, uint64_t cachekey, uint32_t hash) {
+    size_t lo = 0, hi = n;
     while (lo < hi) {
         size_t mid = lo + (hi - lo) / 2;
-        const Alias *a = &p->aliases[mid];
-        if (a->cachekey == cachekey && a->hash == hash) return &p->aliases[mid];
+        const KeyHead *a = (const KeyHead *)((const char *)base + mid * stride);
+        if (a->cachekey == cachekey && a->hash == hash) return a;
         if (a->cachekey < cachekey || (a->cachekey == cachekey && a->hash < hash)) lo = mid + 1;
         else hi = mid;
     }
     return NULL;
+}
+
+static int indexed_cmp(const void *x, const void *y) {
+    const IndexedKey *a = (const IndexedKey *)x, *b = (const IndexedKey *)y;
+    if (a->cachekey != b->cachekey) return a->cachekey < b->cachekey ? -1 : 1;
+    if (a->hash != b->hash) return a->hash < b->hash ? -1 : 1;
+    return a->order < b->order ? -1 : (a->order > b->order);
+}
+
+/* Sorts the [indexed] lines and keeps the last line of each key. */
+static void indexed_finish(NkTexRepl *p) {
+    if (p->indexed_n < 2) return;
+    qsort(p->indexed, p->indexed_n, sizeof(IndexedKey), indexed_cmp);
+    size_t out = 0;
+    for (size_t i = 0; i < p->indexed_n; i++) {
+        if (i + 1 < p->indexed_n && p->indexed[i + 1].cachekey == p->indexed[i].cachekey &&
+            p->indexed[i + 1].hash == p->indexed[i].hash) continue;
+        p->indexed[out++] = p->indexed[i];
+    }
+    p->indexed_n = out;
 }
 
 /* ------------------------------------------------------------------------------------- ini */
@@ -402,20 +529,30 @@ static int ci_equal(const char *a, const char *b) {
     return *a == *b;
 }
 
+static int ci_cmp(const char *a, const char *b) {
+    for (;; a++, b++) {
+        int x = tolower((unsigned char)*a), y = tolower((unsigned char)*b);
+        if (x != y || !x) return x - y;
+    }
+}
+
+/* PPSSPP's StripSpaces: space, tab, CR and LF. */
+static int ini_space(char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; }
 static char *trim(char *s) {
-    while (*s && isspace((unsigned char)*s)) s++;
+    while (*s && ini_space(*s)) s++;
     char *e = s + strlen(s);
-    while (e > s && isspace((unsigned char)e[-1])) e--;
+    while (e > s && ini_space(e[-1])) e--;
     *e = '\0';
     return s;
 }
 
-/* "0xADDR", "ADDR": hexadecimal. */
-static int parse_hex32(const char *s, uint32_t *out) {
-    if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) s += 2;
-    if (!*s) return 0;
+/* A whole unsigned number as PPSSPP's TryParse reads one (strtoul with base 0: 0x hexadecimal, a
+ * leading 0 octal; leading blanks allowed, nothing after it). */
+static int parse_u32(const char *s, uint32_t *out) {
+    while (*s == ' ' || *s == '\t') s++;
+    if (!*s || *s == '-') return 0;
     char *end;
-    unsigned long long v = strtoull(s, &end, 16);
+    unsigned long long v = strtoull(s, &end, 0);
     if (*end || v > 0xFFFFFFFFull) return 0;
     *out = (uint32_t)v;
     return 1;
@@ -430,13 +567,14 @@ static int parse_int(const char *s, int *out) {
     return 1;
 }
 
+/* PPSSPP's TryParse for a bool: 1, 0, true or false (case ignored). */
 static int parse_bool(const char *s, int *out) {
     if (ci_equal(s, "true") || !strcmp(s, "1")) { *out = 1; return 1; }
-    if (ci_equal(s, "false") || !strcmp(s, "0") || !*s) { *out = 0; return 1; }
+    if (ci_equal(s, "false") || !strcmp(s, "0")) { *out = 0; return 1; }
     return 0;
 }
 
-/* A path that stays inside the pack folder: relative, no ".." component, no drive or stream. */
+/* A path that stays inside the pack: relative, no ".." component, no drive or stream. */
 static int path_inside_pack(const char *rel) {
     if (!*rel || rel[0] == '/' || rel[0] == '\\' || strchr(rel, ':')) return 0;
     const char *s = rel;
@@ -449,30 +587,34 @@ static int path_inside_pack(const char *rel) {
     return 1;
 }
 
-/* "<16 hex><8 hex>[_<level>]". */
+/* A texture name as PPSSPP reads one, with sscanf("%16llx%8x_%d") and at least the first field
+ * matched: up to 16 hex digits of key, then up to 8 of data hash, then "_level". A field that does
+ * not match is 0 (the level, 0 too), so a short name is a wildcard: "<16 digits>" alone is the key
+ * with no data hash. The C library's sscanf is the one PPSSPP calls, so its rules (leading blanks,
+ * a 0x prefix, a sign) are the same. */
 static int parse_hash_name(const char *name, uint64_t *cachekey, uint32_t *hash, int *level) {
-    size_t n = strlen(name);
-    if (n < 24) return 0;
-    for (size_t i = 0; i < 24; i++) if (!isxdigit((unsigned char)name[i])) return 0;
-    char part[17];
-    memcpy(part, name, 16);
-    part[16] = '\0';
-    *cachekey = strtoull(part, NULL, 16);
-    memcpy(part, name + 16, 8);
-    part[8] = '\0';
-    *hash = (uint32_t)strtoul(part, NULL, 16);
-    *level = 0;
-    if (n > 24) {
-        if (name[24] != '_') return 0;
-        if (!parse_int(name + 25, level) || *level < 0) return 0;
-    }
+    char k[128];
+    snprintf(k, sizeof(k), "%s", name);   /* PPSSPP copies the key into 128 bytes */
+    unsigned long long ck = 0;
+    unsigned int h = 0;
+    int lv = 0;
+    if (sscanf(k, "%16llx%8x_%d", &ck, &h, &lv) < 1) return 0;
+    *cachekey = (uint64_t)ck;
+    *hash = (uint32_t)h;
+    *level = lv;
     return 1;
 }
 
 typedef enum { SEC_NONE, SEC_OPTIONS, SEC_HASHES, SEC_HASHRANGES, SEC_REDUCE, SEC_FILTERING,
-               SEC_INDEXED, SEC_GAMES, SEC_UNKNOWN } Section;
+               SEC_INDEXED, SEC_GAMES, SEC_UNKNOWN, SEC_REPEATED, SEC_COUNT } Section;
 
 static int range_push(NkTexRepl *p, HashRange r) {
+    for (size_t i = 0; i < p->range_n; i++) {
+        if (p->ranges[i].addr == r.addr && p->ranges[i].w == r.w && p->ranges[i].h == r.h) {
+            p->ranges[i] = r;   /* a later line for the same texture replaces it */
+            return 1;
+        }
+    }
     if (p->range_n == p->range_cap) {
         size_t cap = p->range_cap ? p->range_cap * 2 : 16;
         HashRange *g = (HashRange *)realloc(p->ranges, cap * sizeof(*g));
@@ -484,6 +626,9 @@ static int range_push(NkTexRepl *p, HashRange r) {
     return 1;
 }
 static int reduce_push(NkTexRepl *p, ReduceRange r) {
+    for (size_t i = 0; i < p->reduce_n; i++) {
+        if (p->reduce[i].w == r.w && p->reduce[i].h == r.h) { p->reduce[i] = r; return 1; }
+    }
     if (p->reduce_n == p->reduce_cap) {
         size_t cap = p->reduce_cap ? p->reduce_cap * 2 : 16;
         ReduceRange *g = (ReduceRange *)realloc(p->reduce, cap * sizeof(*g));
@@ -495,55 +640,149 @@ static int reduce_push(NkTexRepl *p, ReduceRange r) {
     return 1;
 }
 
+/* Splits `s` at commas into at most `max` parts; returns how many there were (more than max: max + 1). */
+static int split_commas(char *s, char **parts, int max) {
+    int n = 0;
+    for (;;) {
+        if (n == max) return max + 1;
+        parts[n++] = s;
+        char *c = strchr(s, ',');
+        if (!c) return n;
+        *c = '\0';
+        s = c + 1;
+    }
+}
+
+/* PPSSPP's ini line rules (Common/Data/Format/IniFile.cpp), for "key = value": the key ends at the
+ * first '='; an unescaped '#' before it makes the line no key = value; in the value, an unescaped '#'
+ * starts a comment unless the whole value is in double quotes, "\#" is a '#', and the blanks around
+ * and one pair of double quotes around the value are removed. Edits `line` in place. Returns 0 when
+ * the line is no key = value. */
+static int split_key_value(char *line, char **key_out, char **value_out) {
+    char *w = line, *r = line;
+    for (;; r++) {   /* the key, unescaping "\#" */
+        if (!*r) return 0;
+        if (*r == '=') break;
+        if (*r == '#') {
+            if (r == line || r[-1] != '\\') return 0;
+            w[-1] = '#';   /* the backslash already copied becomes the '#' */
+            continue;
+        }
+        *w++ = *r;
+    }
+    if (r == line) return 0;   /* nothing before the '=' */
+    *w = '\0';
+    char *value = r + 1;
+    char *stripped = trim(value);
+    size_t sl = strlen(stripped);
+    if (!(sl >= 2 && stripped[0] == '"' && stripped[sl - 1] == '"')) {
+        char *vw = stripped, *vr = stripped;
+        for (; *vr; vr++) {
+            if (*vr == '#') {
+                if (vr == stripped || vr[-1] != '\\') break;
+                vw[-1] = '#';
+                continue;
+            }
+            *vw++ = *vr;
+        }
+        *vw = '\0';
+        stripped = trim(stripped);
+        sl = strlen(stripped);
+    }
+    if (sl >= 2 && stripped[0] == '"' && stripped[sl - 1] == '"') {
+        stripped[sl - 1] = '\0';
+        stripped++;
+    }
+    *key_out = trim(line);
+    *value_out = stripped;
+    return 1;
+}
+
+static const char *section_name(Section s) {
+    switch (s) {
+    case SEC_OPTIONS: return "options";
+    case SEC_HASHES: return "hashes";
+    case SEC_HASHRANGES: return "hashranges";
+    case SEC_REDUCE: return "reducehashranges";
+    case SEC_FILTERING: return "filtering";
+    case SEC_INDEXED: return "indexed";
+    case SEC_GAMES: return "games";
+    default: return "";
+    }
+}
+
+/* The [options] keys read; PPSSPP takes the first line of each. */
+enum { OPT_HASH, OPT_IGNORE_ADDRESS, OPT_REDUCE_HASH, OPT_IGNORE_MIPMAP, OPT_SAVE_INDEXED, OPT_SKIP64,
+       OPT_SKIP128, OPT_VERSION, OPT_COUNT };
+static const char *const kOptionKeys[OPT_COUNT] = {
+    "hash", "ignoreAddress", "reduceHash", "ignoreMipmap", "saveIndexed", "skipLastDXT1Blocks128x64",
+    "skipLastDXT1Blocks128x128", "version"};
+
 /* Parses the whole ini into `p`. Returns 0 with `err` set when it is malformed. */
 static int parse_ini(NkTexRepl *p, char *text, char *err, size_t err_cap) {
     Section sec = SEC_NONE;
-    int have_hash = 0, line_no = 0;
+    int line_no = 0;
+    int seen[SEC_COUNT] = {0};
+    int opt_seen[OPT_COUNT] = {0};
     size_t filtering = 0, indexed = 0, games = 0;
-    int mips_noted = 0;
     char *save = NULL;
+    for (char *c = text; *c; c++) if (*c == '\r') *c = ' ';   /* a CRLF line end's CR is a blank */
     for (char *line = text; line; line = save) {
         char *nl = strchr(line, '\n');
         if (nl) { *nl = '\0'; save = nl + 1; } else save = NULL;
         line_no++;
-        char *s = trim(line);
-        if (!*s || *s == '#' || *s == ';') continue;
-        if (*s == '[') {
-            char *close = strchr(s, ']');
-            if (!close || *trim(close + 1) != '\0') {
-                snprintf(err, err_cap, "textures.ini line %d: unfinished section header '%s'", line_no, s);
+        if ((unsigned char)line[0] == 0xEF && (unsigned char)line[1] == 0xBB && (unsigned char)line[2] == 0xBF)
+            line += 3;   /* a UTF-8 byte order mark, removed from any line as PPSSPP does */
+        if (line[0] == '[') {
+            /* A section header starts the line; what follows its ']' is a comment. */
+            char *close = strchr(line, ']');
+            if (!close) {
+                snprintf(err, err_cap, "textures.ini line %d: unfinished section header '%s'", line_no, trim(line));
                 return 0;
             }
             *close = '\0';
-            const char *name = trim(s + 1);
-            if (ci_equal(name, "options")) sec = SEC_OPTIONS;
-            else if (ci_equal(name, "hashes")) sec = SEC_HASHES;
-            else if (ci_equal(name, "hashranges")) sec = SEC_HASHRANGES;
-            else if (ci_equal(name, "reducehashranges")) sec = SEC_REDUCE;
-            else if (ci_equal(name, "filtering")) sec = SEC_FILTERING;
-            else if (ci_equal(name, "indexed")) sec = SEC_INDEXED;
-            else if (ci_equal(name, "games")) sec = SEC_GAMES;
-            else {
-                sec = SEC_UNKNOWN;
+            const char *name = line + 1;   /* not trimmed: PPSSPP compares the name as written */
+            Section next = SEC_UNKNOWN;
+            for (int s = SEC_OPTIONS; s <= SEC_GAMES; s++)
+                if (ci_equal(name, section_name((Section)s))) next = (Section)s;
+            if (next == SEC_UNKNOWN) {
                 diag_add(p, "textures.ini: unknown section [%s] not read", name);
+            } else if (seen[next]) {
+                diag_add(p, "textures.ini: a second [%s] section is not read (only the first one is, as in PPSSPP)", name);
+                next = SEC_REPEATED;
+            } else {
+                seen[next] = 1;
             }
+            sec = next;
             continue;
         }
-        char *eq = strchr(s, '=');
-        if (!eq) {
+        char *s = trim(line);
+        if (!*s || *s == '#' || *s == ';') continue;
+        if (*s == '[') {
+            snprintf(err, err_cap, "textures.ini line %d: '%s' is indented; a section header starts its line", line_no, s);
+            return 0;
+        }
+        char *key, *value;
+        if (!split_key_value(s, &key, &value)) {
             snprintf(err, err_cap, "textures.ini line %d: '%s' is not a section, a comment or key = value",
                      line_no, s);
             return 0;
         }
-        *eq = '\0';
-        char *key = trim(s), *value = trim(eq + 1);
         if (sec == SEC_NONE) {
             snprintf(err, err_cap, "textures.ini line %d: '%s' is outside any section", line_no, key);
             return 0;
         }
         switch (sec) {
-        case SEC_OPTIONS:
-            if (ci_equal(key, "hash")) {
+        case SEC_OPTIONS: {
+            int opt = -1;
+            for (int o = 0; o < OPT_COUNT; o++) if (ci_equal(key, kOptionKeys[o])) opt = o;
+            if (opt < 0) { diag_add(p, "textures.ini: unknown [options] key '%s' not read", key); break; }
+            if (opt_seen[opt]) {
+                diag_add(p, "textures.ini: a later '%s' line is not read (the first one counts, as in PPSSPP)", key);
+                break;
+            }
+            opt_seen[opt] = 1;
+            if (opt == OPT_HASH) {
                 if (ci_equal(value, "quick")) p->hash_kind = NK_TEXREPL_HASH_QUICK;
                 else if (ci_equal(value, "xxh32")) p->hash_kind = NK_TEXREPL_HASH_XXH32;
                 else if (ci_equal(value, "xxh64")) p->hash_kind = NK_TEXREPL_HASH_XXH64;
@@ -552,106 +791,141 @@ static int parse_ini(NkTexRepl *p, char *text, char *err, size_t err_cap) {
                              value);
                     return 0;
                 }
-                have_hash = 1;
-            } else if (ci_equal(key, "ignoreAddress") || ci_equal(key, "reduceHash") ||
-                       ci_equal(key, "ignoreMipmap")) {
+            } else if (opt == OPT_IGNORE_ADDRESS || opt == OPT_REDUCE_HASH || opt == OPT_IGNORE_MIPMAP) {
                 int b;
                 if (!parse_bool(value, &b)) {
-                    snprintf(err, err_cap, "textures.ini line %d: %s must be true or false, not '%s'",
-                             line_no, key, value);
-                    return 0;
+                    /* PPSSPP's Get leaves the option at its default (false) then. */
+                    diag_add(p, "textures.ini: %s = '%s' is not true or false; read as false, as PPSSPP reads it",
+                             key, value);
+                    b = 0;
                 }
-                if (ci_equal(key, "ignoreAddress")) p->ignore_address = b;
-                else if (ci_equal(key, "reduceHash")) p->reduce_hash = b;
-                else if (b) diag_add(p, "textures.ini: ignoreMipmap not applied (mip levels are not replaced)");
-            } else if (ci_equal(key, "skipLastDXT1Blocks128x64") || ci_equal(key, "skipLastDXT1Blocks128x128")) {
+                if (opt == OPT_IGNORE_ADDRESS) p->ignore_address = b;
+                else if (opt == OPT_REDUCE_HASH) p->reduce_hash = b;
+                /* ignoreMipmap only stops PPSSPP from saving mip levels when it dumps textures. */
+            } else if (opt == OPT_SKIP64 || opt == OPT_SKIP128) {
                 int n;
-                if (!parse_int(value, &n) || n < 0) {
-                    snprintf(err, err_cap, "textures.ini line %d: %s must be a whole number, not '%s'",
-                             line_no, key, value);
-                    return 0;
+                if (!parse_int(value, &n)) {
+                    diag_add(p, "textures.ini: %s = '%s' is not a whole number; read as 0", key, value);
+                    n = 0;
                 }
-                if (ci_equal(key, "skipLastDXT1Blocks128x64")) p->skip_dxt1_128x64 = n;
+                if (opt == OPT_SKIP64) p->skip_dxt1_128x64 = n;
                 else p->skip_dxt1_128x128 = n;
-            } else if (ci_equal(key, "version")) {
+            } else if (opt == OPT_VERSION) {
                 int v;
-                if (!parse_int(value, &v)) {
-                    snprintf(err, err_cap, "textures.ini line %d: version must be a whole number", line_no);
-                    return 0;
-                }
-                if (v > 1) diag_add(p, "textures.ini: version %d is newer than this build reads (1); reading it anyway", v);
-            } else if (ci_equal(key, "saveIndexed")) {
+                if (parse_int(value, &v) && v > 1)
+                    diag_add(p, "textures.ini: version %d is newer than this build reads (1); reading it anyway", v);
+            } else if (opt == OPT_SAVE_INDEXED) {
                 if (*value && !ci_equal(value, "false") && strcmp(value, "0") != 0)
                     diag_add(p, "textures.ini: saveIndexed not applied (indexed textures are not supported)");
-            } else {
-                diag_add(p, "textures.ini: unknown [options] key '%s' not read", key);
             }
             break;
+        }
         case SEC_HASHES: {
             uint64_t ck;
             uint32_t h;
             int level;
-            if (!*key || !parse_hash_name(key, &ck, &h, &level)) {
-                diag_add(p, "textures.ini: [hashes] line '%s' is not a 24-digit hash name, not read", key);
+            if (!*key) break;
+            if (!parse_hash_name(key, &ck, &h, &level)) {
+                diag_add(p, "textures.ini: [hashes] line '%s' does not start with a hash name; not read", key);
                 break;
             }
             if (*value && !path_inside_pack(value)) {
-                diag_add(p, "textures.ini: [hashes] '%s' names '%s', which is outside the pack folder; not read",
+                diag_add(p, "textures.ini: [hashes] '%s' names '%s', which is outside the pack; not read",
                          key, value);
                 break;
             }
-            if (level > 0) {
-                if (!mips_noted) {
-                    mips_noted = 1;
-                    diag_add(p, "textures.ini: mip-level entries (name_1) are not read; only level 0 is replaced");
-                }
-                break;
-            }
-            if (!alias_push(p, ck, h, value)) { snprintf(err, err_cap, "out of memory"); return 0; }
+            if (!record_push(p, ck, h, level, value)) { snprintf(err, err_cap, "out of memory"); return 0; }
             break;
         }
         case SEC_HASHRANGES: {
-            /* addr,w,h = newW,newH */
-            char *c1 = strchr(key, ','), *c2 = c1 ? strchr(c1 + 1, ',') : NULL;
-            char *vc = strchr(value, ',');
+            /* addr,w,h = newW,newH; an address without 0x is hexadecimal all the same */
+            char *kp[4], *vp[3];
             HashRange r;
-            if (!c2 || !vc) { diag_add(p, "textures.ini: [hashranges] '%s = %s' is not addr,w,h = w,h; not read", key, value); break; }
-            *c1 = *c2 = *vc = '\0';
-            if (!parse_hex32(trim(key), &r.addr) || !parse_int(trim(c1 + 1), &r.w) || !parse_int(trim(c2 + 1), &r.h) ||
-                !parse_int(trim(value), &r.new_w) || !parse_int(trim(vc + 1), &r.new_h) ||
-                r.w <= 0 || r.h <= 0 || r.new_w <= 0 || r.new_h <= 0) {
-                diag_add(p, "textures.ini: [hashranges] line for '%s' has a bad number; not read", key);
+            char addr[40];
+            if (split_commas(key, kp, 3) != 3 || split_commas(value, vp, 2) != 2) {
+                diag_add(p, "textures.ini: [hashranges] '%s' is not addr,w,h = w,h; not read", key);
+                break;
+            }
+            snprintf(addr, sizeof(addr), "%s%s", (kp[0][0] == '0' && (kp[0][1] == 'x' || kp[0][1] == 'X')) ? "" : "0x", kp[0]);
+            if (!parse_u32(addr, &r.addr) || !parse_u32(kp[1], &r.w) || !parse_u32(kp[2], &r.h) ||
+                !parse_u32(vp[0], &r.new_w) || !parse_u32(vp[1], &r.new_h)) {
+                diag_add(p, "textures.ini: [hashranges] line for '%s' has a bad number; not read", kp[0]);
+                break;
+            }
+            if (r.new_w > r.w || r.new_h > r.h || r.new_w == 0 || r.new_h == 0) {
+                diag_add(p, "textures.ini: [hashranges] line for '%s' is larger than its texture or empty; not read", kp[0]);
                 break;
             }
             if (!range_push(p, r)) { snprintf(err, err_cap, "out of memory"); return 0; }
             break;
         }
         case SEC_REDUCE: {
-            char *c1 = strchr(key, ',');
+            char *kp[3], *vp[2];
             ReduceRange r;
             char *end;
-            if (!c1) { diag_add(p, "textures.ini: [reducehashranges] '%s' is not w,h; not read", key); break; }
-            *c1 = '\0';
-            r.value = strtof(value, &end);
-            if (!parse_int(trim(key), &r.w) || !parse_int(trim(c1 + 1), &r.h) || *end || !*value) {
-                diag_add(p, "textures.ini: [reducehashranges] line for '%s' has a bad number; not read", key);
+            if (split_commas(key, kp, 2) != 2 || split_commas(value, vp, 1) != 1) {
+                diag_add(p, "textures.ini: [reducehashranges] '%s' is not w,h = fraction; not read", key);
+                break;
+            }
+            r.value = strtof(vp[0], &end);
+            if (!parse_u32(kp[0], &r.w) || !parse_u32(kp[1], &r.h) || *end || !*vp[0]) {
+                diag_add(p, "textures.ini: [reducehashranges] line for '%s' has a bad number; not read", kp[0]);
+                break;
+            }
+            if (r.value == 0.0f) {
+                diag_add(p, "textures.ini: [reducehashranges] line for '%s' is 0; not read", kp[0]);
                 break;
             }
             if (!reduce_push(p, r)) { snprintf(err, err_cap, "out of memory"); return 0; }
             break;
         }
         case SEC_FILTERING: filtering++; break;
-        case SEC_INDEXED: indexed++; break;
+        case SEC_INDEXED: {
+            /* hashname = true | 1 | gpu | false | 0, the name read as [hashes] reads one but with no level */
+            unsigned long long ck = 0;
+            unsigned int h = 0;
+            char k[128];
+            uint8_t mode;
+            snprintf(k, sizeof(k), "%s", key);
+            if (sscanf(k, "%16llx%8x", &ck, &h) < 1) {
+                diag_add(p, "textures.ini: [indexed] line '%s' does not start with a hash name; not read", key);
+                break;
+            }
+            if (ci_equal(value, "true") || !strcmp(value, "1")) mode = 1;
+            else if (ci_equal(value, "gpu")) mode = 2;
+            else if (ci_equal(value, "false") || !strcmp(value, "0")) mode = 0;
+            else {
+                diag_add(p, "textures.ini: [indexed] '%s = %s' is not true, gpu or false; not read", key, value);
+                break;
+            }
+            if (p->indexed_n == p->indexed_cap) {
+                size_t cap = p->indexed_cap ? p->indexed_cap * 2 : 16;
+                IndexedKey *g = (IndexedKey *)realloc(p->indexed, cap * sizeof(*g));
+                if (!g) { snprintf(err, err_cap, "out of memory"); return 0; }
+                p->indexed = g;
+                p->indexed_cap = cap;
+            }
+            IndexedKey *ik = &p->indexed[p->indexed_n];
+            ik->cachekey = (uint64_t)ck;
+            ik->hash = (uint32_t)h;
+            ik->order = (uint32_t)p->indexed_n;
+            ik->mode = mode;
+            p->indexed_n++;
+            indexed++;
+            break;
+        }
         case SEC_GAMES: games++; break;
         default: break;
         }
     }
-    if (!have_hash) {
+    if (!opt_seen[OPT_HASH]) {
         snprintf(err, err_cap, "textures.ini: no hash type in [options] (use hash = quick, xxh32 or xxh64)");
         return 0;
     }
     if (filtering) diag_add(p, "textures.ini: %zu [filtering] entries not applied (the game's own filtering is kept)", filtering);
-    if (indexed) diag_add(p, "textures.ini: %zu [indexed] entries not applied (indexed replacements are not supported)", indexed);
+    if (indexed)
+        diag_add(p, "textures.ini: %zu [indexed] entries read; a texture they mark indexed is not replaced "
+                    "(its image holds palette indices, which this build does not draw)", indexed);
     if (games) diag_add(p, "textures.ini: %zu [games] entries not applied (per-game ini overrides are not supported)", games);
     if (p->reduce_hash && p->hash_kind == NK_TEXREPL_HASH_QUICK) {
         p->reduce_hash = 0;
@@ -690,107 +964,269 @@ static unsigned char *read_whole(const char *path, size_t cap, size_t *size) {
     return buf;
 }
 
-typedef struct { NkTexRepl *p; } ScanCtx;
+static int zip_name_cmp(const void *x, const void *y) {
+    return ci_cmp(((const ZipName *)x)->rel, ((const ZipName *)y)->rel);
+}
+
+/* A ZIP pack's file by its name under the root, case ignored as PPSSPP's ZIP lookups ignore it. */
+static const ZipName *zip_find(const NkTexRepl *p, const char *rel) {
+    size_t lo = 0, hi = p->zip_name_n;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        int c = ci_cmp(p->zip_names[mid].rel, rel);
+        if (c == 0) return &p->zip_names[mid];
+        if (c < 0) lo = mid + 1;
+        else hi = mid;
+    }
+    return NULL;
+}
+
+typedef enum { PACK_READ_OK, PACK_READ_MISSING, PACK_READ_TOO_LARGE, PACK_READ_DAMAGED } PackRead;
+
+/* A pack file's bytes, at most `cap`: from the folder, or from the ZIP without writing anything. */
+static unsigned char *pack_read(NkTexRepl *p, const char *rel, size_t cap, size_t *size, PackRead *why,
+                                char *zip_why, size_t zip_why_cap) {
+    *why = PACK_READ_MISSING;
+    if (zip_why_cap) zip_why[0] = '\0';
+    if (p->zip) {
+        const ZipName *z = zip_find(p, rel);
+        if (!z) return NULL;
+        if (z->size > cap) { *why = PACK_READ_TOO_LARGE; return NULL; }
+        unsigned char *buf = (unsigned char *)malloc(z->size ? z->size : 1u);
+        if (!buf) { *why = PACK_READ_DAMAGED; return NULL; }
+        NkZipError ze;
+        NkZipStatus st = nk_zip_reader_read(p->zip, z->index, buf, z->size, &ze);
+        if (st != NK_ZIP_OK) {
+            free(buf);
+            *why = PACK_READ_DAMAGED;
+            if (zip_why_cap) snprintf(zip_why, zip_why_cap, "%s", nk_zip_status_code(st));
+            return NULL;
+        }
+        *size = z->size;
+        *why = PACK_READ_OK;
+        return buf;
+    }
+    char path[1400];
+    if (snprintf(path, sizeof(path), "%s/%s", p->dir, rel) >= (int)sizeof(path)) return NULL;
+    unsigned char *buf = read_whole(path, cap, size);
+    if (buf) *why = PACK_READ_OK;
+    else if (nk_platform_file_exists(path)) *why = PACK_READ_TOO_LARGE;
+    return buf;
+}
 
 static int ends_with_ci(const char *s, const char *suffix) {
     size_t a = strlen(s), b = strlen(suffix);
     return a >= b && ci_equal(s + a - b, suffix);
 }
 
-static bool scan_file(const char *name, void *ctx) {
-    NkTexRepl *p = ((ScanCtx *)ctx)->p;
-    if (!name || !*name || name[0] == '.') return true;
+/* A file in the pack's root named for a texture, as PPSSPP's ScanForHashNamedFiles takes one: a
+ * name of 24 characters, or 26 to 27 with '_' at the 25th, before a .png, .dds, .ktx2 or .zim
+ * extension, and not starting with '.'. Each is listed; only PNG is decoded. */
+static int scan_name(NkTexRepl *p, const char *name) {
+    if (!name || !*name || name[0] == '.') return 1;
     const char *dot = strrchr(name, '.');
-    if (!dot) return true;
+    if (!dot) return 1;
     size_t stem = (size_t)(dot - name);
-    if (!(stem == 24 || (stem >= 26 && stem <= 27 && name[24] == '_'))) return true;
+    if (!(stem == 24 || (stem >= 26 && stem <= 27 && name[24] == '_'))) return 1;
+    int png = ends_with_ci(name, ".png");
+    if (!png && !ends_with_ci(name, ".dds") && !ends_with_ci(name, ".ktx2") && !ends_with_ci(name, ".zim")) return 1;
     char base[40];
     memcpy(base, name, stem);
     base[stem] = '\0';
     uint64_t ck;
     uint32_t h;
     int level;
-    if (!parse_hash_name(base, &ck, &h, &level)) return true;
-    if (!ends_with_ci(name, ".png")) {
-        if (ends_with_ci(name, ".dds") || ends_with_ci(name, ".ktx2") || ends_with_ci(name, ".zim"))
-            diag_add(p, "%s: only PNG replacements are read in this version; not used", name);
-        return true;
-    }
-    if (level > 0) {
-        diag_add(p, "%s: mip-level files are not read; only level 0 is replaced", name);
-        return true;
-    }
-    alias_push(p, ck, h, name);
+    if (!parse_hash_name(base, &ck, &h, &level)) return 1;
+    if (!png) p->nonpng_listed++;
+    return record_push(p, ck, h, level, name);
+}
+
+typedef struct { NkTexRepl *p; int ok; } ScanCtx;
+
+static bool scan_file(const char *name, void *ctx) {
+    ScanCtx *sc = (ScanCtx *)ctx;
+    if (!scan_name(sc->p, name)) { sc->ok = 0; return false; }
     return true;
 }
 
-NkTexRepl *nk_texrepl_open(const char *dir, uint64_t budget_bytes, char *err, size_t err_cap) {
+static int name_is_dot_or_mac(const char *seg, size_t n) {
+    return (n > 0 && seg[0] == '.') || (n == 8 && !strncmp(seg, "__MACOSX", 8));
+}
+
+/* Opens the ZIP at `path` and indexes its files under the pack's root: the archive's top when
+ * textures.ini is there, else its one top-level folder when every file is in it and textures.ini is
+ * in that folder (a pack zipped with its folder). Entries starting with '.' or in __MACOSX at the top
+ * are not counted when looking for that folder. A ZIP with no textures.ini in either place is
+ * refused, as PPSSPP refuses a ZIP pack without one. */
+static int open_zip(NkTexRepl *p, const char *path, char *err, size_t err_cap) {
+    NkZipReadOptions opt;
+    NkZipError ze;
+    memset(&opt, 0, sizeof(opt));
+    opt.max_entries = NK_ZIP_READ_MAX_ENTRIES;
+    opt.max_total_bytes = UINT64_MAX;   /* nothing holds the whole pack: each read is bounded below */
+    opt.deflate = true;
+    opt.data_descriptor = true;
+    NkZipStatus st = nk_zip_reader_open_file_with(&p->zip, path, &opt, &ze);
+    if (st != NK_ZIP_OK) {
+        snprintf(err, err_cap, "texture pack ZIP refused (%s): %s%s%s", nk_zip_status_code(st),
+                 nk_zip_status_message(st), ze.entry[0] ? " Entry: " : "", ze.entry);
+        p->zip = NULL;
+        return 0;
+    }
+    size_t n = nk_zip_reader_count(p->zip);
+    size_t root_len = 0;
+    int ini_at_top = 0, top_ok = 1;
+    const char *top = NULL;
+    size_t top_len = 0;
+    for (size_t i = 0; i < n; i++) {
+        NkZipEntryInfo e;
+        if (!nk_zip_reader_entry(p->zip, i, &e)) continue;
+        if (!e.is_folder && ci_equal(e.name, "textures.ini")) ini_at_top = 1;
+        const char *slash = strchr(e.name, '/');
+        size_t seg = slash ? (size_t)(slash - e.name) : strlen(e.name);
+        if (name_is_dot_or_mac(e.name, seg)) continue;
+        if (!slash) { top_ok = 0; continue; }   /* a file at the top */
+        if (!top) { top = e.name; top_len = seg; }
+        else if (seg != top_len || strncmp(top, e.name, seg) != 0) top_ok = 0;
+    }
+    if (!ini_at_top) {
+        int ini_in_top = 0;
+        if (top_ok && top) {
+            for (size_t i = 0; i < n && !ini_in_top; i++) {
+                NkZipEntryInfo e;
+                if (nk_zip_reader_entry(p->zip, i, &e) && !e.is_folder && strlen(e.name) > top_len &&
+                    !strncmp(e.name, top, top_len) && e.name[top_len] == '/' && ci_equal(e.name + top_len + 1, "textures.ini"))
+                    ini_in_top = 1;
+            }
+        }
+        if (!ini_in_top) {
+            snprintf(err, err_cap, "texture pack ZIP has no textures.ini at its top or in its one top-level folder "
+                                   "(a ZIP pack needs one, as in PPSSPP)");
+            return 0;
+        }
+        root_len = top_len + 1;
+    }
+    p->zip_names = (ZipName *)calloc(n ? n : 1u, sizeof(ZipName));
+    if (!p->zip_names) { snprintf(err, err_cap, "out of memory"); return 0; }
+    for (size_t i = 0; i < n; i++) {
+        NkZipEntryInfo e;
+        if (!nk_zip_reader_entry(p->zip, i, &e) || e.is_folder || strlen(e.name) <= root_len) continue;
+        if (root_len && strncmp(e.name, top, root_len) != 0) continue;
+        ZipName *z = &p->zip_names[p->zip_name_n++];
+        z->rel = e.name + root_len;
+        z->index = i;
+        z->size = e.size;
+    }
+    qsort(p->zip_names, p->zip_name_n, sizeof(ZipName), zip_name_cmp);
+    for (size_t i = 0; i < p->zip_name_n; i++) {
+        if (strchr(p->zip_names[i].rel, '/')) continue;   /* only the root's files are scanned */
+        if (!scan_name(p, p->zip_names[i].rel)) { snprintf(err, err_cap, "out of memory"); return 0; }
+    }
+    return 1;
+}
+
+static uint64_t index_bytes(const NkTexRepl *p) {
+    uint64_t b = sizeof(*p) + (uint64_t)p->alias_n * sizeof(Alias) + (uint64_t)p->zip_name_n * sizeof(ZipName) +
+                 (uint64_t)p->range_cap * sizeof(HashRange) + (uint64_t)p->reduce_cap * sizeof(ReduceRange);
+    for (size_t i = 0; i < p->alias_n; i++) {
+        b += (uint64_t)p->aliases[i].level_n * sizeof(Level);
+        for (uint32_t l = 0; l < p->aliases[i].level_n; l++) b += strlen(p->aliases[i].levels[l].file) + 1u;
+    }
+    return b;
+}
+
+static NkTexRepl *open_fail(NkTexRepl *p) {
+    nk_texrepl_close(p);
+    return NULL;
+}
+
+NkTexRepl *nk_texrepl_open(const char *path, uint64_t budget_bytes, char *err, size_t err_cap) {
     char ebuf[256];
     if (!err || !err_cap) { err = ebuf; err_cap = sizeof(ebuf); }
     err[0] = '\0';
-    if (!dir || !*dir || !nk_platform_dir_exists(dir)) {
-        snprintf(err, err_cap, "texture pack folder '%s' does not exist", dir ? dir : "");
+    int is_dir = path && *path && nk_platform_dir_exists(path);
+    if (!is_dir && !(path && *path && nk_platform_file_exists(path))) {
+        snprintf(err, err_cap, "texture pack '%s' does not exist (a folder or a .zip file)", path ? path : "");
         return NULL;
     }
     NkTexRepl *p = (NkTexRepl *)calloc(1, sizeof(*p));
     if (!p) { snprintf(err, err_cap, "out of memory"); return NULL; }
-    size_t dn = strlen(dir);
-    p->dir = (char *)malloc(dn + 1);
-    if (!p->dir) { free(p); snprintf(err, err_cap, "out of memory"); return NULL; }
-    memcpy(p->dir, dir, dn + 1);
-    while (dn > 1 && (p->dir[dn - 1] == '/' || p->dir[dn - 1] == '\\')) p->dir[--dn] = '\0';
     p->budget = budget_bytes ? budget_bytes : (uint64_t)NK_TEXREPL_DEFAULT_BUDGET_MB << 20;
     p->reduce_global = 0.5f;
+    uint64_t t0 = now_ns();
 
-    ScanCtx sc = { p };
-    if (!nk_platform_list_files(p->dir, scan_file, &sc)) {
-        snprintf(err, err_cap, "texture pack folder '%s' cannot be read", dir);
-        nk_texrepl_close(p);
-        return NULL;
-    }
-
-    char path[1024];
-    if (snprintf(path, sizeof(path), "%s/textures.ini", p->dir) >= (int)sizeof(path)) {
-        snprintf(err, err_cap, "texture pack folder path is too long");
-        nk_texrepl_close(p);
-        return NULL;
-    }
-    if (nk_platform_file_exists(path)) {
-        size_t size = 0;
-        unsigned char *text = read_whole(path, 4u << 20, &size);
-        if (!text) {
-            snprintf(err, err_cap, "textures.ini cannot be read or is larger than 4 MiB");
-            nk_texrepl_close(p);
-            return NULL;
+    char zip_path[1024];
+    zip_path[0] = '\0';
+    if (is_dir) {
+        p->dir = dup_str(path);
+        if (!p->dir) { snprintf(err, err_cap, "out of memory"); return open_fail(p); }
+        size_t dn = strlen(p->dir);
+        while (dn > 1 && (p->dir[dn - 1] == '/' || p->dir[dn - 1] == '\\')) p->dir[--dn] = '\0';
+        /* PPSSPP reads a textures.zip in the pack folder in place of the folder's own files. */
+        if (snprintf(zip_path, sizeof(zip_path), "%s/textures.zip", p->dir) >= (int)sizeof(zip_path)) {
+            snprintf(err, err_cap, "texture pack folder path is too long");
+            return open_fail(p);
         }
+        if (!nk_platform_file_exists(zip_path)) zip_path[0] = '\0';
+    } else {
+        snprintf(zip_path, sizeof(zip_path), "%s", path);
+    }
+
+    if (zip_path[0]) {
+        if (!open_zip(p, zip_path, err, err_cap)) return open_fail(p);
+        if (is_dir) diag_add(p, "textures.zip read in place of the folder's own files, as PPSSPP reads it");
+    } else {
+        ScanCtx sc = { p, 1 };
+        if (!nk_platform_list_files(p->dir, scan_file, &sc) || !sc.ok) {
+            snprintf(err, err_cap, "texture pack folder '%s' cannot be read", path);
+            return open_fail(p);
+        }
+    }
+
+    size_t size = 0;
+    PackRead why;
+    char zip_why[40];
+    unsigned char *text = pack_read(p, "textures.ini", 4u << 20, &size, &why, zip_why, sizeof(zip_why));
+    if (!text && why != PACK_READ_MISSING) {
+        snprintf(err, err_cap, "textures.ini cannot be read%s%s%s", why == PACK_READ_TOO_LARGE ? " or is larger than 4 MiB" : "",
+                 zip_why[0] ? ": " : "", zip_why);
+        return open_fail(p);
+    }
+    if (text) {
         char *z = (char *)realloc(text, size + 1);
-        if (!z) { free(text); snprintf(err, err_cap, "out of memory"); nk_texrepl_close(p); return NULL; }
+        if (!z) { free(text); snprintf(err, err_cap, "out of memory"); return open_fail(p); }
         z[size] = '\0';
-        char *body = z;
-        if (size >= 3 && (unsigned char)z[0] == 0xEF && (unsigned char)z[1] == 0xBB && (unsigned char)z[2] == 0xBF)
-            body += 3;   /* a UTF-8 byte order mark */
-        for (char *c = body; *c; c++) if (*c == '\r') *c = ' ';
-        int ok = parse_ini(p, body, err, err_cap);
+        int ok = parse_ini(p, z, err, err_cap);
         free(z);
-        if (!ok) {
-            nk_texrepl_close(p);
-            return NULL;
-        }
+        if (!ok) return open_fail(p);
     }
-    alias_finish(p);
+    if (!aliases_build(p)) { snprintf(err, err_cap, "out of memory"); return open_fail(p); }
+    indexed_finish(p);
+    if (p->nonpng_listed)
+        diag_add(p, "%zu hash-named DDS, KTX2 or ZIM files listed; only PNG replacements are decoded in this version",
+                 p->nonpng_listed);
+    p->stats.open_ns = now_ns() - t0;
+    p->stats.index_bytes = index_bytes(p);
     return p;
 }
 
 void nk_texrepl_close(NkTexRepl *p) {
     if (!p) return;
     for (size_t i = 0; i < p->alias_n; i++) {
-        free(p->aliases[i].file);
-        free(p->aliases[i].rgba);
+        for (uint32_t l = 0; l < p->aliases[i].level_n; l++) {
+            free(p->aliases[i].levels[l].file);
+            free(p->aliases[i].levels[l].rgba);
+        }
+        free(p->aliases[i].levels);
     }
+    records_free(p);
     for (size_t i = 0; i < p->diag_n; i++) free(p->diag[i]);
     free(p->aliases);
     free(p->ranges);
     free(p->reduce);
+    free(p->zip_names);
+    free(p->indexed);
+    nk_zip_reader_close(p->zip);
     free(p->dir);
     free(p);
 }
@@ -800,7 +1236,11 @@ void nk_texrepl_close(NkTexRepl *p) {
 static int find_range(const NkTexRepl *p, uint32_t addr, int w, int h, int *nw, int *nh) {
     for (size_t i = 0; i < p->range_n; i++) {
         const HashRange *r = &p->ranges[i];
-        if (r->addr == addr && r->w == w && r->h == h) { *nw = r->new_w; *nh = r->new_h; return 1; }
+        if (r->addr == addr && r->w == (uint32_t)w && r->h == (uint32_t)h) {
+            *nw = (int)r->new_w;
+            *nh = (int)r->new_h;
+            return 1;
+        }
     }
     *nw = w;
     *nh = h;
@@ -809,7 +1249,7 @@ static int find_range(const NkTexRepl *p, uint32_t addr, int w, int h, int *nw, 
 
 static float reduce_for(const NkTexRepl *p, int w, int h) {
     for (size_t i = 0; i < p->reduce_n; i++)
-        if (p->reduce[i].w == w && p->reduce[i].h == h) return p->reduce[i].value;
+        if (p->reduce[i].w == (uint32_t)w && p->reduce[i].h == (uint32_t)h) return p->reduce[i].value;
     return p->reduce_global;
 }
 
@@ -859,99 +1299,132 @@ uint32_t nk_texrepl_hash_texture(const NkTexRepl *p, const uint8_t *data, size_t
 
 /* ------------------------------------------------------------------------------ lookup */
 
-static Alias *resolve(const NkTexRepl *p, const NkTexReplId *id) {
+/* PPSSPP's LookupWildcard order over a sorted key table, the key with its address zeroed first
+ * under ignoreAddress. */
+static const void *wildcard(const NkTexRepl *p, const void *base, size_t n, size_t stride, const NkTexReplId *id) {
     uint64_t ck = nk_texrepl_cache_key(id->addr, id->format, id->dim, id->clut_hash);
     uint32_t hash = id->hash;
     if (p->ignore_address) ck &= 0xFFFFFFFFull;
-    Alias *a;
-    if ((a = alias_find(p, ck, hash))) return a;
-    if ((a = alias_find(p, ck & 0xFFFFFFFFull, 0))) return a;               /* palette hash only */
-    if (!p->ignore_address && (a = alias_find(p, ck, 0))) return a;          /* no data hash */
-    if ((a = alias_find(p, ck & 0xFFFFFFFFull, hash))) return a;             /* no address */
+    const void *a;
+    if (!n) return NULL;
+    if ((a = key_find(base, n, stride, ck, hash))) return a;
+    if ((a = key_find(base, n, stride, ck & 0xFFFFFFFFull, 0))) return a;              /* palette hash only */
+    if (!p->ignore_address && (a = key_find(base, n, stride, ck, 0))) return a;         /* no data hash */
+    if ((a = key_find(base, n, stride, ck & 0xFFFFFFFFull, hash))) return a;            /* no address */
     if (!p->ignore_address) {
-        if ((a = alias_find(p, ck & ~0xFFFFFFFFull, hash))) return a;        /* address, not palette */
-        if ((a = alias_find(p, ck & ~0xFFFFFFFFull, 0))) return a;           /* address only */
+        if ((a = key_find(base, n, stride, ck & ~0xFFFFFFFFull, hash))) return a;       /* address, not palette */
+        if ((a = key_find(base, n, stride, ck & ~0xFFFFFFFFull, 0))) return a;          /* address only */
     }
-    return NULL;
+    return key_find(base, n, stride, 0, hash);                                          /* the data hash alone */
 }
 
-static uint64_t now_ns(void) {
-    return (uint64_t)((double)clock() * (1e9 / (double)CLOCKS_PER_SEC));
+static Alias *resolve(const NkTexRepl *p, const NkTexReplId *id) {
+    return (Alias *)(uintptr_t)wildcard(p, p->aliases, p->alias_n, sizeof(Alias), id);
+}
+
+/* A texture [indexed] marks: its image holds palette indices, which this build does not draw. */
+static int is_indexed(const NkTexRepl *p, const NkTexReplId *id) {
+    const IndexedKey *k = (const IndexedKey *)wildcard(p, p->indexed, p->indexed_n, sizeof(IndexedKey), id);
+    return k && k->mode != 0;
 }
 
 static void evict_for(NkTexRepl *p, uint64_t need) {
     while (p->used + need > p->budget) {
-        Alias *oldest = NULL;
+        Level *oldest = NULL;
         for (size_t i = 0; i < p->alias_n; i++) {
-            Alias *a = &p->aliases[i];
-            if (a->state == 1 && a->pins == 0 && (!oldest || a->lru < oldest->lru)) oldest = a;
+            for (uint32_t l = 0; l < p->aliases[i].level_n; l++) {
+                Level *v = &p->aliases[i].levels[l];
+                if (v->state == 1 && v->pins == 0 && (!oldest || v->lru < oldest->lru)) oldest = v;
+            }
         }
         if (!oldest) return;
         free(oldest->rgba);
         oldest->rgba = NULL;
-        oldest->state = 0;
+        oldest->state = 3;   /* its size stays known */
         p->used -= (uint64_t)oldest->w * (uint64_t)oldest->h * 4u;
         p->stats.evicted++;
     }
 }
 
-static int load_alias(NkTexRepl *p, Alias *a) {
-    if (!a->file || !path_inside_pack(a->file)) { a->state = 2; return 0; }
-    if (!ends_with_ci(a->file, ".png")) {
-        diag_add(p, "%s: only PNG replacements are read in this version; not used", a->file);
-        a->state = 2;
+static int level_size_ok(NkTexRepl *p, const Alias *a, uint32_t level, Level *v) {
+    if (level == 0) return 1;
+    const Level *l0 = &a->levels[0];
+    const int want_w = l0->w >> level > 0 ? l0->w >> level : 1, want_h = l0->h >> level > 0 ? l0->h >> level : 1;
+    if (v->w == want_w && v->h == want_h) return 1;
+    diag_add(p, "%s: mip level %u is %dx%d, not %dx%d (level 0 halved %u times); levels from %u on are not used",
+             v->file, (unsigned)level, v->w, v->h, want_w, want_h, (unsigned)level, (unsigned)level);
+    return 0;
+}
+
+/* Reads a level's file and, with `decode`, its image. Sets state 1 (decoded), 3 (size known) or 2. */
+static int load_level(NkTexRepl *p, Alias *a, uint32_t level, int decode) {
+    Level *v = &a->levels[level];
+    if (!path_inside_pack(v->file)) { v->state = 2; p->stats.load_failed++; return 0; }
+    if (!ends_with_ci(v->file, ".png")) {
+        diag_add(p, "%s: only PNG replacements are read in this version; not used", v->file);
+        v->state = 2;
         p->stats.load_failed++;
         return 0;
     }
-    char path[1400];
-    snprintf(path, sizeof(path), "%s/%s", p->dir, a->file);
     uint64_t t0 = now_ns();
     size_t size = 0;
-    unsigned char *file = read_whole(path, 64u << 20, &size);
+    PackRead why;
+    char zip_why[40];
+    unsigned char *file = pack_read(p, v->file, 64u << 20, &size, &why, zip_why, sizeof(zip_why));
     if (!file) {
-        diag_add(p, "%s: file is missing, unreadable or larger than 64 MiB; texture left as the game draws it", a->file);
-        a->state = 2;
+        if (why == PACK_READ_DAMAGED)
+            diag_add(p, "%s: damaged in the ZIP (%s); texture left as the game draws it", v->file, zip_why);
+        else
+            diag_add(p, "%s: file is missing, unreadable or larger than 64 MiB; texture left as the game draws it", v->file);
+        v->state = 2;
         p->stats.load_failed++;
         return 0;
     }
     int w = 0, h = 0, ch = 0;
-    unsigned char *px = NULL;
-    if (stbi_info_from_memory(file, (int)size, &w, &h, &ch) && w > 0 && h > 0 && w <= NK_TEXREPL_MAX_DIM &&
-        h <= NK_TEXREPL_MAX_DIM) {
-        const uint64_t bytes = (uint64_t)w * (uint64_t)h * 4u;
-        if (bytes > p->budget) {
-            free(file);
-            diag_add(p, "%s: %dx%d needs %llu KiB, more than the %llu KiB texture budget; not used", a->file, w, h,
-                     (unsigned long long)(bytes >> 10), (unsigned long long)(p->budget >> 10));
-            a->state = 2;
-            p->stats.over_budget++;
-            return 0;
-        }
-        px = stbi_load_from_memory(file, (int)size, &w, &h, &ch, 4);
-    }
-    free(file);
-    if (!px) {
-        diag_add(p, "%s: not a PNG this build can decode (or larger than %d texels a side); not used", a->file,
+    if (!stbi_info_from_memory(file, (int)size, &w, &h, &ch) || w <= 0 || h <= 0 || w > NK_TEXREPL_MAX_DIM ||
+        h > NK_TEXREPL_MAX_DIM) {
+        free(file);
+        diag_add(p, "%s: not a PNG this build can decode (or larger than %d texels a side); not used", v->file,
                  NK_TEXREPL_MAX_DIM);
-        a->state = 2;
+        v->state = 2;
         p->stats.load_failed++;
         return 0;
     }
+    v->w = w;
+    v->h = h;
+    if (!level_size_ok(p, a, level, v)) { free(file); v->state = 2; p->stats.load_failed++; return 0; }
     const uint64_t bytes = (uint64_t)w * (uint64_t)h * 4u;
+    if (bytes > p->budget) {
+        free(file);
+        diag_add(p, "%s: %dx%d needs %llu KiB, more than the %llu KiB texture budget; not used", v->file, w, h,
+                 (unsigned long long)(bytes >> 10), (unsigned long long)(p->budget >> 10));
+        v->state = 2;
+        p->stats.over_budget++;
+        return 0;
+    }
+    if (!decode) { free(file); v->state = 3; return 1; }
+    unsigned char *px = stbi_load_from_memory(file, (int)size, &w, &h, &ch, 4);
+    free(file);
+    if (!px || w != v->w || h != v->h) {
+        if (px) stbi_image_free(px);
+        diag_add(p, "%s: not a PNG this build can decode; not used", v->file);
+        v->state = 2;
+        p->stats.load_failed++;
+        return 0;
+    }
     evict_for(p, bytes);
     if (p->used + bytes > p->budget) {
         /* Everything held is in use: draw this texture unreplaced now, and try again on a later lookup. */
         stbi_image_free(px);
+        v->state = 3;
         p->stats.over_budget++;
         return 0;
     }
-    a->rgba = (uint32_t *)malloc((size_t)bytes);
-    if (!a->rgba) { stbi_image_free(px); a->state = 2; p->stats.load_failed++; return 0; }
-    memcpy(a->rgba, px, (size_t)bytes);   /* R, G, B, A bytes: R in the low byte on a little-endian host */
+    v->rgba = (uint32_t *)malloc((size_t)bytes);
+    if (!v->rgba) { stbi_image_free(px); v->state = 2; p->stats.load_failed++; return 0; }
+    memcpy(v->rgba, px, (size_t)bytes);   /* R, G, B, A bytes: R in the low byte on a little-endian host */
     stbi_image_free(px);
-    a->w = w;
-    a->h = h;
-    a->state = 1;
+    v->state = 1;
     p->used += bytes;
     if (p->used > p->stats.cache_peak) p->stats.cache_peak = p->used;
     p->stats.loaded++;
@@ -959,30 +1432,59 @@ static int load_alias(NkTexRepl *p, Alias *a) {
     return 1;
 }
 
-int nk_texrepl_lookup(NkTexRepl *p, const NkTexReplId *id, NkTexReplHit *out) {
+int nk_texrepl_level_count(const NkTexRepl *p, const NkTexReplId *id) {
+    if (!p || !id) return 0;
+    const Alias *a = resolve(p, id);
+    return a ? (int)a->level_n : 0;
+}
+
+int nk_texrepl_lookup_level(NkTexRepl *p, const NkTexReplId *id, int level, NkTexReplHit *out) {
     if (!p || !id || !out) return 0;
     memset(out, 0, sizeof(*out));
     p->stats.lookups++;
     Alias *a = resolve(p, id);
     if (!a) { p->stats.misses++; return 0; }
-    if (!a->file) { p->stats.left_alone++; p->stats.misses++; return 0; }
-    if (a->state == 0 && !load_alias(p, a)) { p->stats.misses++; return 0; }
-    if (a->state != 1) { p->stats.misses++; return 0; }
-    a->pins++;
-    a->lru = ++p->clock;
+    if (!a->level_n) { p->stats.left_alone++; p->stats.misses++; return 0; }
+    if (p->indexed_n && is_indexed(p, id)) {
+        if (!a->indexed_noted) {
+            a->indexed_noted = 1;
+            diag_add(p, "%s: [indexed] marks its texture indexed (the image holds palette indices); not replaced",
+                     a->levels[0].file);
+        }
+        p->stats.left_alone++;
+        p->stats.misses++;
+        return 0;
+    }
+    if (level < 0 || (uint32_t)level >= a->level_n) { p->stats.misses++; return 0; }
+    /* PPSSPP loads the levels in order and stops at the first it cannot use: every level below this
+     * one must be readable, and each the size of level 0 halved, before this one counts. */
+    for (uint32_t j = 0; j < (uint32_t)level; j++) {
+        Level *v = &a->levels[j];
+        if (v->state == 0) load_level(p, a, j, 0);
+        if (v->state == 2) { p->stats.misses++; return 0; }
+    }
+    Level *v = &a->levels[level];
+    if ((v->state == 0 || v->state == 3) && !load_level(p, a, (uint32_t)level, 1)) { p->stats.misses++; return 0; }
+    if (v->state != 1) { p->stats.misses++; return 0; }
+    v->pins++;
+    v->lru = ++p->clock;
     p->stats.hits++;
-    out->rgba = a->rgba;
-    out->w = a->w;
-    out->h = a->h;
-    out->pin = a;
+    out->rgba = v->rgba;
+    out->w = v->w;
+    out->h = v->h;
+    out->pin = v;
     return 1;
+}
+
+int nk_texrepl_lookup(NkTexRepl *p, const NkTexReplId *id, NkTexReplHit *out) {
+    return nk_texrepl_lookup_level(p, id, 0, out);
 }
 
 void nk_texrepl_unpin(NkTexRepl *p, NkTexReplHit *hit) {
     (void)p;
     if (!hit || !hit->pin) return;
-    Alias *a = (Alias *)hit->pin;
-    if (a->pins) a->pins--;
+    Level *v = (Level *)hit->pin;
+    if (v->pins) v->pins--;
     memset(hit, 0, sizeof(*hit));
 }
 

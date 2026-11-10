@@ -10,11 +10,19 @@
  *   - a malformed textures.ini is reported and loads nothing;
  *   - what is read but not applied is reported;
  *   - the decoded images stay under the memory budget;
- *   - a file name or [hashes] value that leaves the pack folder is refused.
+ *   - a file name or [hashes] value that leaves the pack folder is refused;
+ *   - every [hashes] key form PPSSPP reads (short keys, wildcards, "_<level>"), its ini line rules, and
+ *     the mip chains it builds, with each level the size of level 0 halved;
+ *   - ZIP packs read in place: textures.ini at the top or in one top-level folder, stored, DEFLATE
+ *     (zlib's own output among them) and data-descriptor entries, a folder's textures.zip, a damaged
+ *     image, and damaged, unsafe or ini-less archives refused whole.
+ * With "--bench N" it writes an N-texture pack as a folder and as a ZIP and prints open, lookup,
+ * first-decode and memory figures instead.
  */
 #include "texrepl.h"
 
 #include "nk_platform.h"
+#include "nk_zip.h"
 #include "synthetic_png.h"
 
 #include <stdio.h>
@@ -125,13 +133,13 @@ static void test_synthetic_pack(void) {
         "hash = quick\r\n"
         "version = 1\r\n"
         "[hashes]\r\n"
-        "0880400000000202 11223344 = red.png\n"        /* a space inside: not a 24-digit name, reported */
+        "0880400000000202 11223344 = red.png\n"        /* a space inside: sscanf skips it, the same key */
         "088040000000020211223344 = red.png\n"
         "088040000000020255667788 = wide.png\n"
         "08804000000002029999aaaa =\n"                  /* leave this one alone */
         "08804000000002020000bbbb = missing.png\n"
         "08804000000002020000cccc = ../outside.png\n"
-        "088040000000020211223344_1 = red.png\n"        /* mip level 1: not read */
+        "088040000000020211223344_1 = red.png\n"        /* mip level 1, but 4x4: not level 0 halved */
         "[filtering]\n"
         "088040000000020211223344 = nearest\n"
         "[mystery]\n"
@@ -190,10 +198,14 @@ static void test_synthetic_pack(void) {
     CHECK(st.hits == 3 && st.left_alone == 1 && st.load_failed == 1, "stats hits=%llu alone=%llu failed=%llu",
           (unsigned long long)st.hits, (unsigned long long)st.left_alone, (unsigned long long)st.load_failed);
 
+    /* Level 1 is listed, but an image of level 0's size is no level 1: the chain stops at level 0. */
+    CHECK(nk_texrepl_level_count(p, &id) == 2, "levels listed: %d", nk_texrepl_level_count(p, &id));
+    CHECK(nk_texrepl_lookup_level(p, &id, 1, &hit) == 0, "a level 1 the size of level 0 was used");
+    CHECK(has_diag(p, "mip level 1 is 4x4, not 2x2"), "a wrong-size mip level not reported");
+    CHECK(nk_texrepl_lookup_level(p, &id, 2, &hit) == 0, "an unlisted level 2 was found");
+
     /* What was read and not applied is reported. */
-    CHECK(has_diag(p, "11223344 = red.png") || has_diag(p, "not a 24-digit hash name"), "bad [hashes] name not reported");
-    CHECK(has_diag(p, "outside the pack folder"), "path outside the pack not reported");
-    CHECK(has_diag(p, "mip-level"), "mip levels not reported");
+    CHECK(has_diag(p, "outside the pack"), "path outside the pack not reported");
     CHECK(has_diag(p, "[filtering]"), "[filtering] not reported");
     CHECK(has_diag(p, "unknown section [mystery]"), "unknown section not reported");
     CHECK(has_diag(p, "missing.png"), "missing file not reported");
@@ -209,7 +221,10 @@ static void test_malformed_ini(void) {
         {"no_equals", "[options]\nhash = quick\nthis is not a key\n", "not a section"},
         {"open_section", "[options\nhash = quick\n", "unfinished section"},
         {"outside", "hash = quick\n", "outside any section"},
-        {"bad_bool", "[options]\nhash = quick\nignoreAddress = maybe\n", "true or false"},
+        {"indented", "[options]\nhash = quick\n  [hashes]\n", "indented"},
+        {"no_key", "[options]\nhash = quick\n= a.png\n", "not a section"},
+        {"hash_in_key", "[options]\nhash = quick\n[hashes]\nabc # def = a.png\n", "not a section"},
+        {"first_hash_counts", "[options]\nhash = crc\nhash = quick\n", "unsupported hash type 'crc'"},
     };
     for (size_t i = 0; i < sizeof(kBad) / sizeof(kBad[0]); i++) {
         char dir[512], path[600], err[256] = "";
@@ -254,8 +269,18 @@ static void test_ini_less_pack(void) {
     id.hash = 0xb1b2b3b4u;
     CHECK(nk_texrepl_lookup(p, &id, &hit) == 0, "a file that is not a PNG replaced a texture");
     CHECK(has_diag(p, "b1b2b3b4.png: not a PNG"), "undecodable PNG not reported");
+    /* A DDS file is listed, as PPSSPP lists one, so it matches; this build does not decode it. */
+    CHECK(has_diag(p, "1 hash-named DDS, KTX2 or ZIM files listed"), "listed DDS not reported at open");
+    id.hash = 0xc1c2c3c4u;
+    CHECK(nk_texrepl_lookup(p, &id, &hit) == 0, "a DDS file replaced a texture");
     CHECK(has_diag(p, "c1c2c3c4.dds") && has_diag(p, "only PNG"), "DDS not reported");
-    CHECK(has_diag(p, "d1d2d3d4_1.png"), "mip-level file not reported");
+    /* A level 1 file with no level 0: PPSSPP leaves that texture alone. */
+    id.hash = 0xd1d2d3d4u;
+    NkTexReplStats st;
+    CHECK(nk_texrepl_lookup(p, &id, &hit) == 0 && nk_texrepl_level_count(p, &id) == 0, "a chain with no level 0");
+    nk_texrepl_stats(p, &st);
+    CHECK(st.left_alone == 1, "a chain with no level 0 is left alone: %llu", (unsigned long long)st.left_alone);
+    CHECK(has_diag(p, "with no level 0 before it"), "a chain with no level 0 not reported");
     nk_texrepl_close(p);
 }
 
@@ -272,7 +297,7 @@ static void test_wildcards_and_palette(void) {
         "[options]\nhash = xxh32\n"
         "[hashes]\n"
         "0000000000000404deadbeef = a.png\n"             /* no address: this size code and data hash, anywhere */
-        "0880500000000303000000000 = a.png\n"            /* 25 digits: reported, not read */
+        "0880500000000303000000000 = a.png\n"            /* 25 digits: sscanf reads 16 + 8, the rest is no level */
         "088060000000030300000000 = a.png\n");           /* this address and size code, any data hash */
     NkTexRepl *p = nk_texrepl_open(dir, 0, err, sizeof(err));
     CHECK(p != NULL, "open: %s", err);
@@ -288,7 +313,10 @@ static void test_wildcards_and_palette(void) {
     nk_texrepl_unpin(p, &hit);
     at.dim = 0x0505u;
     CHECK(nk_texrepl_lookup(p, &at, &hit) == 0, "the same address with another size code matched");
-    CHECK(has_diag(p, "0880500000000303000000000"), "a 25-digit [hashes] name not reported");
+    /* The 25-digit line is this address and size code with data hash 0: any data hash. */
+    NkTexReplId at25 = { 0x08805000u, 3u, 0x0303u, 0u, 0x55aa55aau };
+    CHECK(nk_texrepl_lookup(p, &at25, &hit) == 1, "a 25-digit [hashes] name read as PPSSPP reads it");
+    nk_texrepl_unpin(p, &hit);
     nk_texrepl_close(p);
 
     /* ignoreAddress (needs a safer hash): the address part of every line is dropped. */
@@ -487,8 +515,553 @@ static void test_budget(void) {
     nk_texrepl_close(p);
 }
 
-int main(void) {
+/* Every [hashes] key form PPSSPP reads (sscanf "%16llx%8x_%d", at least the first field), its ini line
+ * rules, and the mip chains it builds from "_<level>" lines and files. */
+static void test_index_forms(void) {
+    char dir[512], path[600], err[256];
+    make_pack(dir, sizeof(dir), "texrepl_pack_forms");
+    uint32_t *l0 = solid(8, 8, 0xff000001u), *l1 = solid(4, 4, 0xff000002u), *l2 = solid(2, 2, 0xff000003u);
+    uint32_t *odd = solid(3, 3, 0xff000004u);
+    static const char *const k0[] = {"m0.png", "a#b.png", "q#.png", "bar0.png", "0880c00000000303aaaa0001.png"};
+    for (size_t i = 0; i < sizeof(k0) / sizeof(k0[0]); i++) {
+        pack_path(path, sizeof(path), "texrepl_pack_forms", k0[i]);
+        write_png(path, 8, 8, l0);
+    }
+    static const char *const k1[] = {"m1.png", "bar1.png", "0880c00000000303aaaa0001_1.png"};
+    for (size_t i = 0; i < sizeof(k1) / sizeof(k1[0]); i++) {
+        pack_path(path, sizeof(path), "texrepl_pack_forms", k1[i]);
+        write_png(path, 4, 4, l1);
+    }
+    pack_path(path, sizeof(path), "texrepl_pack_forms", "m2.png");
+    write_png(path, 2, 2, l2);
+    pack_path(path, sizeof(path), "texrepl_pack_forms", "0880c00000000303aaaa0001_2.png");
+    write_png(path, 3, 3, odd);   /* not 2x2: the file chain stops at level 1 */
+    pack_path(path, sizeof(path), "texrepl_pack_forms", "textures.ini");
+    write_text(path,
+        "[options] ; a comment after the header\n"
+        "hash = xxh32   # an inline comment\n"
+        "hash = quick\n"                                     /* a later line: not read */
+        "ignoreAddress = maybe\n"                            /* not a bool: read as false */
+        "[hashes]\n"
+        "0880900000000404 = m0.png\n"                        /* 16 digits: this address and size, any data hash */
+        "0000000000000000cafef00d = m0.png\n"                /* the data hash alone, anywhere */
+        "0880a00000000202000000a1 = m0.png\n"                /* a chain of three from ini lines */
+        "0880a00000000202000000a1_1 = m1.png\n"
+        "0880a00000000202000000a1_2 = m2.png\n"
+        "0880a00000000202000000a2 = m0.png\n"                /* a gap: _1 then _3, no _2 */
+        "0880a00000000202000000a2_1 = m1.png\n"
+        "0880a00000000202000000a2_3 = m2.png\n"
+        "0880a00000000202000000a3 = bar0.png|bar1.png\n"     /* '|' makes two levels, as PPSSPP's alias string */
+        "0880a00000000202000000a4 = m0.png\n"
+        "0880a00000000202000000a4_-1 = m1.png\n"             /* a negative level sorts first: left alone */
+        "0880a00000000202000000a5 = a" "\\#" "b.png\n"       /* an escaped '#' */
+        "0880a00000000202000000a6 = \"q#.png\"\n"            /* a quoted value keeps its '#' */
+        "0880a00000000202000000a7 =\n"                       /* blank level 0 and a level 1: no chain */
+        "0880a00000000202000000a7_1 = m1.png\n"
+        "0880a00000000202000000a8 = m0.png\n"
+        "[hashes]\n"                                         /* a second section: not read */
+        "0880b00000000202000000b1 = m0.png\n"
+        "[ hashes ]\n"                                       /* not the name "hashes" */
+        "0880b00000000202000000b2 = m0.png\n"
+        "[hashranges]\n"
+        "0880d000,16,16 = 32,8\n"                            /* larger than the texture: not read */
+        "[reducehashranges]\n"
+        "16,16 = 0\n"                                        /* 0: not read */
+        "[indexed]\n"
+        "0880a00000000202000000a8 = true\n");                /* an image of palette indices: not drawn */
+    NkTexRepl *p = nk_texrepl_open(dir, 0, err, sizeof(err));
+    CHECK(p != NULL, "open: %s", err);
+    free(l0); free(l1); free(l2); free(odd);
+    if (!p) return;
+    NkTexReplHit hit;
+    CHECK(nk_texrepl_hash_kind(p) == NK_TEXREPL_HASH_XXH32, "the first hash line and its inline comment");
+    CHECK(has_diag(p, "a later 'hash' line is not read"), "a later option line not reported");
+    CHECK(has_diag(p, "ignoreAddress = 'maybe' is not true or false"), "a bad bool not reported");
+    CHECK(has_diag(p, "a second [hashes] section is not read"), "a second section not reported");
+    CHECK(has_diag(p, "unknown section [ hashes ]"), "a spaced section name not reported");
+    CHECK(has_diag(p, "larger than its texture"), "a hash range larger than its texture not reported");
+    CHECK(has_diag(p, "[reducehashranges] line for '16' is 0"), "a zero reduce value not reported");
+
+    /* A 16-digit key: this address and size code, any data hash. */
+    NkTexReplId short_key = { 0x08809000u, 3u, 0x0404u, 0u, 0x01234567u };
+    CHECK(nk_texrepl_lookup(p, &short_key, &hit) == 1 && hit.w == 8, "a 16-digit key");
+    nk_texrepl_unpin(p, &hit);
+    /* The data hash alone matches any address and size code: PPSSPP's last wildcard. */
+    NkTexReplId anywhere = { 0x09900000u, 3u, 0x0707u, 0u, 0xcafef00du };
+    CHECK(nk_texrepl_lookup(p, &anywhere, &hit) == 1, "the data-hash-alone wildcard");
+    nk_texrepl_unpin(p, &hit);
+
+    /* A chain from ini lines: three levels, each level 0 halved. */
+    NkTexReplId chain = { 0x0880a000u, 3u, 0x0202u, 0u, 0x000000a1u };
+    CHECK(nk_texrepl_level_count(p, &chain) == 3, "chain levels %d", nk_texrepl_level_count(p, &chain));
+    for (int lv = 0; lv < 3; lv++) {
+        CHECK(nk_texrepl_lookup_level(p, &chain, lv, &hit) == 1 && hit.w == (8 >> lv) && hit.h == (8 >> lv) &&
+              hit.rgba[0] == (0xff000001u + (uint32_t)lv), "chain level %d", lv);
+        nk_texrepl_unpin(p, &hit);
+    }
+    CHECK(nk_texrepl_lookup_level(p, &chain, 3, &hit) == 0, "an unlisted level 3");
+    chain.hash = 0xa2u;
+    CHECK(nk_texrepl_level_count(p, &chain) == 2, "a gap ends the chain: %d", nk_texrepl_level_count(p, &chain));
+    CHECK(has_diag(p, "mip level 3 is listed with no level 2 before it"), "a gap not reported");
+    chain.hash = 0xa3u;
+    CHECK(nk_texrepl_level_count(p, &chain) == 2 && nk_texrepl_lookup_level(p, &chain, 1, &hit) == 1 && hit.w == 4,
+          "'|' in a value names two levels");
+    nk_texrepl_unpin(p, &hit);
+    chain.hash = 0xa4u;
+    CHECK(nk_texrepl_lookup(p, &chain, &hit) == 0 && nk_texrepl_level_count(p, &chain) == 0, "a negative level");
+    chain.hash = 0xa5u;
+    CHECK(nk_texrepl_lookup(p, &chain, &hit) == 1, "an escaped '#' in a file name");
+    nk_texrepl_unpin(p, &hit);
+    chain.hash = 0xa6u;
+    CHECK(nk_texrepl_lookup(p, &chain, &hit) == 1, "a quoted file name with '#'");
+    nk_texrepl_unpin(p, &hit);
+    chain.hash = 0xa7u;
+    CHECK(nk_texrepl_lookup(p, &chain, &hit) == 0 && nk_texrepl_level_count(p, &chain) == 0, "a blank level 0");
+    chain.hash = 0xa8u;
+    CHECK(nk_texrepl_lookup(p, &chain, &hit) == 0, "a texture [indexed] marks was replaced with its index image");
+    CHECK(has_diag(p, "m0.png: [indexed] marks its texture indexed"), "an [indexed] texture not reported");
+    NkTexReplId second = { 0x0880b000u, 3u, 0x0202u, 0u, 0x000000b1u };
+    CHECK(nk_texrepl_lookup(p, &second, &hit) == 0, "a line in a second [hashes] section was read");
+    second.hash = 0xb2u;
+    CHECK(nk_texrepl_lookup(p, &second, &hit) == 0, "a line in [ hashes ] was read");
+
+    /* A chain from hash-named files: level 2 is 3x3, not 2x2, so it stops at level 1. */
+    NkTexReplId files = { 0x0880c000u, 3u, 0x0303u, 0u, 0xaaaa0001u };
+    CHECK(nk_texrepl_level_count(p, &files) == 3, "file chain levels %d", nk_texrepl_level_count(p, &files));
+    CHECK(nk_texrepl_lookup_level(p, &files, 1, &hit) == 1 && hit.w == 4, "file chain level 1");
+    nk_texrepl_unpin(p, &hit);
+    CHECK(nk_texrepl_lookup_level(p, &files, 2, &hit) == 0, "a 3x3 level 2 under an 8x8 level 0 was used");
+    CHECK(has_diag(p, "mip level 2 is 3x3, not 2x2"), "a wrong-size file level not reported");
+
+    /* Level 1 asked first, with level 0 never decoded: level 0's size is read, not its image. */
+    nk_texrepl_close(p);
+    p = nk_texrepl_open(dir, 0, err, sizeof(err));
+    CHECK(p != NULL, "reopen: %s", err);
+    if (!p) return;
+    chain.hash = 0xa1u;
+    NkTexReplStats st;
+    CHECK(nk_texrepl_lookup_level(p, &chain, 2, &hit) == 1 && hit.w == 2, "level 2 first");
+    nk_texrepl_unpin(p, &hit);
+    nk_texrepl_stats(p, &st);
+    CHECK(st.loaded == 1 && st.cache_bytes == 2u * 2u * 4u, "only level 2 decoded: loaded %llu, %llu bytes",
+          (unsigned long long)st.loaded, (unsigned long long)st.cache_bytes);
+    nk_texrepl_close(p);
+}
+
+/* ---------------------------------------------------------------------------------- ZIP packs */
+
+/* A ZIP writer for the tests: stored entries, DEFLATE entries made of stored blocks (what zlib writes
+ * for data it cannot shrink, such as a PNG), given DEFLATE bytes, and data descriptors. */
+typedef struct {
+    uint8_t *d, *cd;
+    size_t n, cap, cdn, cdcap;
+    uint32_t count;
+} Zw;
+
+static void zbuf(uint8_t **d, size_t *n, size_t *cap, const void *src, size_t len) {
+    if (*n + len > *cap) {
+        size_t c = *cap ? *cap : 65536;
+        while (c < *n + len) c *= 2;
+        uint8_t *g = (uint8_t *)realloc(*d, c);
+        if (!g) { fprintf(stderr, "out of memory\n"); exit(2); }
+        *d = g;
+        *cap = c;
+    }
+    if (len) memcpy(*d + *n, src, len);
+    *n += len;
+}
+static void le16(uint8_t *p, uint32_t v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); }
+static void le32(uint8_t *p, uint32_t v) { le16(p, v & 0xffffu); le16(p + 2, v >> 16); }
+
+typedef struct { int method; int descriptor; const uint8_t *packed; size_t packed_len; int corrupt; } ZwOpt;
+
+static void zw_add(Zw *z, const char *name, const void *data, size_t size, ZwOpt o) {
+    const uint8_t *src = (const uint8_t *)data;
+    uint32_t crc = nk_zip_crc32(0u, data, size);
+    uint8_t *packed = NULL;
+    size_t pn = 0, pcap = 0;
+    if (o.method == 8 && o.packed) {
+        zbuf(&packed, &pn, &pcap, o.packed, o.packed_len);
+    } else if (o.method == 8) {
+        size_t at = 0;
+        do {   /* stored blocks: header, LEN, NLEN, bytes */
+            size_t len = size - at > 65535u ? 65535u : size - at;
+            uint8_t h[5];
+            h[0] = (uint8_t)(at + len == size ? 1u : 0u);
+            le16(h + 1, (uint32_t)len);
+            le16(h + 3, (uint32_t)(~len & 0xffffu));
+            zbuf(&packed, &pn, &pcap, h, 5);
+            zbuf(&packed, &pn, &pcap, src + at, len);
+            at += len;
+        } while (at < size);
+    } else {
+        zbuf(&packed, &pn, &pcap, data, size);
+    }
+    if (o.corrupt && pn) packed[pn - 1] ^= 0x5a;
+    const size_t nl = strlen(name);
+    const uint32_t local = (uint32_t)z->n;
+    const uint16_t flags = (uint16_t)(o.descriptor ? 8u : 0u);
+    uint8_t h[46];
+    memset(h, 0, sizeof(h));
+    le32(h, 0x04034b50u);
+    le16(h + 4, 20u);
+    le16(h + 6, flags);
+    le16(h + 8, (uint32_t)o.method);
+    if (!o.descriptor) {
+        le32(h + 14, crc);
+        le32(h + 18, (uint32_t)pn);
+        le32(h + 22, (uint32_t)size);
+    }
+    le16(h + 26, (uint32_t)nl);
+    zbuf(&z->d, &z->n, &z->cap, h, 30);
+    zbuf(&z->d, &z->n, &z->cap, name, nl);
+    zbuf(&z->d, &z->n, &z->cap, packed, pn);
+    if (o.descriptor) {
+        uint8_t dd[16];
+        le32(dd, 0x08074b50u);
+        le32(dd + 4, crc);
+        le32(dd + 8, (uint32_t)pn);
+        le32(dd + 12, (uint32_t)size);
+        zbuf(&z->d, &z->n, &z->cap, dd, 16);
+    }
+    memset(h, 0, sizeof(h));
+    le32(h, 0x02014b50u);
+    le16(h + 4, 20u);
+    le16(h + 6, 20u);
+    le16(h + 8, flags);
+    le16(h + 10, (uint32_t)o.method);
+    le32(h + 16, crc);
+    le32(h + 20, (uint32_t)pn);
+    le32(h + 24, (uint32_t)size);
+    le16(h + 28, (uint32_t)nl);
+    le32(h + 42, local);
+    zbuf(&z->cd, &z->cdn, &z->cdcap, h, 46);
+    zbuf(&z->cd, &z->cdn, &z->cdcap, name, nl);
+    z->count++;
+    free(packed);
+}
+
+static void zw_add_text(Zw *z, const char *name, const char *text, int method) {
+    ZwOpt o = { method, 0, NULL, 0, 0 };
+    zw_add(z, name, text, strlen(text), o);
+}
+
+static uint8_t *read_all(const char *path, size_t *size) {
+    FILE *f = nk_fopen_utf8(path, "rb");
+    if (!f) { fprintf(stderr, "cannot read %s\n", path); exit(2); }
+    size_t n = 0, cap = 0;
+    uint8_t *d = NULL;
+    uint8_t buf[65536];
+    size_t got;
+    while ((got = fread(buf, 1, sizeof(buf), f)) > 0) zbuf(&d, &n, &cap, buf, got);
+    fclose(f);
+    *size = n;
+    return d;
+}
+
+/* Adds the PNG at `file` (written by write_png) as `name`. */
+static void zw_add_file(Zw *z, const char *name, const char *file, ZwOpt o) {
+    size_t size;
+    uint8_t *d = read_all(file, &size);
+    zw_add(z, name, d, size, o);
+    free(d);
+}
+
+static void zw_finish(Zw *z, const char *path, size_t cut) {
+    uint8_t e[22];
+    memset(e, 0, sizeof(e));
+    le32(e, 0x06054b50u);
+    le16(e + 8, z->count);
+    le16(e + 10, z->count);
+    le32(e + 12, (uint32_t)z->cdn);
+    le32(e + 16, (uint32_t)z->n);
+    zbuf(&z->d, &z->n, &z->cap, z->cd, z->cdn);
+    zbuf(&z->d, &z->n, &z->cap, e, 22);
+    FILE *f = nk_fopen_utf8(path, "wb");
+    if (!f || fwrite(z->d, 1, z->n - cut, f) != z->n - cut) { fprintf(stderr, "cannot write %s\n", path); exit(2); }
+    fclose(f);
+    free(z->d);
+    free(z->cd);
+    memset(z, 0, sizeof(*z));
+}
+
+/* "# a ZIP pack, deflated by zlib\n[options]\nhash = xxh32 # comment after the value\n[hashes]\n
+ * 088040000000020211223344 = Sub/Red.png\n" (128 bytes), DEFLATE-compressed by zlib (level 9, raw):
+ * Huffman blocks, so the inflater's full path runs, not only stored blocks. */
+static const char kZlibIniText[] =
+    "# a ZIP pack, deflated by zlib\n[options]\nhash = xxh32 # comment after the value\n[hashes]\n"
+    "088040000000020211223344 = Sub/Red.png\n";
+static const uint8_t kZlibIni[] = {
+    0x2d, 0xcc, 0xb1, 0x0e, 0xc2, 0x20, 0x14, 0x46, 0xe1, 0x9d, 0xa7, 0xf8, 0x93, 0xae, 0x46, 0x29,
+    0x30, 0x74, 0xf1, 0x01, 0xdc, 0x4c, 0xdd, 0x6c, 0x1c, 0x2e, 0xe5, 0x56, 0x1a, 0x29, 0x10, 0x4b,
+    0x4d, 0xf5, 0xe9, 0xad, 0x89, 0x67, 0xfe, 0x72, 0x2a, 0x10, 0xae, 0xa7, 0x33, 0x32, 0xf5, 0x8f,
+    0x1d, 0x1c, 0x0f, 0x81, 0x0a, 0x3b, 0xd8, 0x37, 0x3e, 0x61, 0xb4, 0xa2, 0x4b, 0xb9, 0x8c, 0x29,
+    0xce, 0x37, 0xe1, 0x69, 0xf6, 0x38, 0x62, 0x5d, 0xbd, 0x56, 0xa8, 0xd0, 0xa7, 0x69, 0xe2, 0x58,
+    0x40, 0x43, 0xe1, 0x27, 0x8a, 0x67, 0xbc, 0x28, 0x2c, 0x2c, 0xba, 0x9f, 0xe3, 0xcd, 0xcb, 0xa6,
+    0x91, 0x46, 0xfe, 0x53, 0x52, 0xd5, 0xb5, 0x52, 0x5a, 0x1b, 0xb3, 0x3d, 0x2e, 0x8b, 0x3d, 0xb4,
+    0xec, 0xf6, 0x39, 0xde, 0xc5, 0x17};
+
+static void test_zip_packs(void) {
+    char dir[512], png[600], zip[600], err[400];
+    make_pack(dir, sizeof(dir), "texrepl_zip");
+    uint32_t *red = solid(4, 4, 0xff0000ffu), *blue = solid(4, 4, 0xffff0000u);
+    pack_path(png, sizeof(png), "texrepl_zip", "red.png");
+    write_png(png, 4, 4, red);
+    char png2[600];
+    pack_path(png2, sizeof(png2), "texrepl_zip", "blue.png");
+    write_png(png2, 4, 4, blue);
+    free(red);
+    free(blue);
+    const ZwOpt stored = { 0, 0, NULL, 0, 0 }, deflated = { 8, 0, NULL, 0, 0 }, described = { 8, 1, NULL, 0, 0 };
+    const ZwOpt zlib_ini = { 8, 0, kZlibIni, sizeof(kZlibIni), 0 };
+    NkTexReplId id = { 0x08804000u, 3u, 0x0202u, 0u, 0x11223344u };
+    NkTexReplId named = { 0x08804000u, 3u, 0x0202u, 0u, 0x55667788u };
+    NkTexReplHit hit;
+    Zw z;
+
+    /* textures.ini at the top (zlib-deflated); a file in a folder named with other case; a hash-named
+     * file at the top in a data-descriptor entry. */
+    memset(&z, 0, sizeof(z));
+    zw_add(&z, "textures.ini", kZlibIniText, strlen(kZlibIniText), zlib_ini);
+    zw_add_file(&z, "sub/red.png", png, deflated);
+    zw_add_file(&z, "088040000000020255667788.png", png2, described);
+    pack_path(zip, sizeof(zip), "texrepl_zip", "top.zip");
+    zw_finish(&z, zip, 0);
+    NkTexRepl *p = nk_texrepl_open(zip, 0, err, sizeof(err));
+    CHECK(p != NULL, "a ZIP pack: %s", err);
+    if (p) {
+        CHECK(nk_texrepl_is_zip(p) && nk_texrepl_hash_kind(p) == NK_TEXREPL_HASH_XXH32 && nk_texrepl_entry_count(p) == 2,
+              "ZIP pack read: entries %zu", nk_texrepl_entry_count(p));
+        CHECK(nk_texrepl_lookup(p, &id, &hit) == 1 && hit.rgba[0] == 0xff0000ffu, "a ZIP pack's [hashes] file, case ignored");
+        nk_texrepl_unpin(p, &hit);
+        CHECK(nk_texrepl_lookup(p, &named, &hit) == 1 && hit.rgba[0] == 0xffff0000u, "a ZIP pack's hash-named file");
+        nk_texrepl_unpin(p, &hit);
+        nk_texrepl_close(p);
+    }
+
+    /* One top-level folder holding textures.ini (with macOS's folder beside it); stored entries. */
+    memset(&z, 0, sizeof(z));
+    zw_add_text(&z, "MyPack/textures.ini", "[options]\nhash = quick\n[hashes]\n088040000000020211223344 = t/red.png\n", 0);
+    zw_add_file(&z, "MyPack/t/red.png", png, stored);
+    zw_add_file(&z, "MyPack/088040000000020255667788.png", png2, deflated);
+    zw_add_text(&z, "__MACOSX/MyPack/._textures.ini", "x", 0);
+    pack_path(zip, sizeof(zip), "texrepl_zip", "folder.zip");
+    zw_finish(&z, zip, 0);
+    p = nk_texrepl_open(zip, 0, err, sizeof(err));
+    CHECK(p != NULL, "a ZIP pack in one folder: %s", err);
+    if (p) {
+        CHECK(nk_texrepl_lookup(p, &id, &hit) == 1, "a foldered ZIP pack's [hashes] file");
+        nk_texrepl_unpin(p, &hit);
+        CHECK(nk_texrepl_lookup(p, &named, &hit) == 1, "a foldered ZIP pack's hash-named file");
+        nk_texrepl_unpin(p, &hit);
+        nk_texrepl_close(p);
+    }
+
+    /* A folder with textures.zip: the ZIP is the pack, as in PPSSPP; the folder's own PNGs are not read. */
+    char fdir[512], fzip[600];
+    make_pack(fdir, sizeof(fdir), "texrepl_zip_folder");
+    memset(&z, 0, sizeof(z));
+    zw_add_text(&z, "textures.ini", "[options]\nhash = quick\n[hashes]\n088040000000020211223344 = red.png\n", 8);
+    zw_add_file(&z, "red.png", png, deflated);
+    pack_path(fzip, sizeof(fzip), "texrepl_zip_folder", "textures.zip");
+    zw_finish(&z, fzip, 0);
+    {
+        char loose[600];
+        uint32_t *g = solid(4, 4, 0xff00ff00u);
+        pack_path(loose, sizeof(loose), "texrepl_zip_folder", "088040000000020255667788.png");
+        write_png(loose, 4, 4, g);
+        free(g);
+    }
+    p = nk_texrepl_open(fdir, 0, err, sizeof(err));
+    CHECK(p != NULL, "a folder with textures.zip: %s", err);
+    if (p) {
+        CHECK(nk_texrepl_is_zip(p) && has_diag(p, "textures.zip read in place"), "textures.zip not read or not reported");
+        CHECK(nk_texrepl_lookup(p, &id, &hit) == 1, "textures.zip's file");
+        nk_texrepl_unpin(p, &hit);
+        CHECK(nk_texrepl_lookup(p, &named, &hit) == 0, "a loose file beside textures.zip was read");
+        nk_texrepl_close(p);
+    }
+
+    /* A damaged image: the pack opens (its structure is whole), that image is not used, and says so. */
+    memset(&z, 0, sizeof(z));
+    zw_add_text(&z, "textures.ini", "[options]\nhash = quick\n[hashes]\n088040000000020211223344 = red.png\n", 0);
+    ZwOpt bad = deflated;
+    bad.corrupt = 1;
+    zw_add_file(&z, "red.png", png, bad);
+    pack_path(zip, sizeof(zip), "texrepl_zip", "crc.zip");
+    zw_finish(&z, zip, 0);
+    p = nk_texrepl_open(zip, 0, err, sizeof(err));
+    CHECK(p != NULL, "a ZIP with one damaged file: %s", err);
+    if (p) {
+        CHECK(nk_texrepl_lookup(p, &id, &hit) == 0, "a damaged image was used");
+        CHECK(has_diag(p, "red.png: damaged in the ZIP (ZIP_CRC)"), "a damaged image not reported");
+        nk_texrepl_close(p);
+    }
+
+    /* Refused whole, with the reason. */
+    static const struct { const char *name; const char *why; } kRefused[] = {
+        {"no_ini.zip", "no textures.ini"},
+        {"two_tops.zip", "no textures.ini"},
+        {"cut.zip", "ZIP_"},
+        {"parent.zip", "ZIP_NAME_PARENT"},
+        {"bad_ini.zip", "not a section"},
+        {"bzip2.zip", "ZIP_METHOD"},
+    };
+    for (size_t i = 0; i < sizeof(kRefused) / sizeof(kRefused[0]); i++) {
+        memset(&z, 0, sizeof(z));
+        size_t cut = 0;
+        if (i == 0) {
+            zw_add_file(&z, "088040000000020211223344.png", png, stored);
+        } else if (i == 1) {
+            zw_add_text(&z, "A/textures.ini", "[options]\nhash = quick\n", 0);
+            zw_add_text(&z, "B/textures.ini", "[options]\nhash = quick\n", 0);
+        } else if (i == 2) {
+            zw_add_text(&z, "textures.ini", "[options]\nhash = quick\n", 0);
+            cut = 10;
+        } else if (i == 3) {
+            zw_add_text(&z, "textures.ini", "[options]\nhash = quick\n", 0);
+            zw_add_file(&z, "../evil.png", png, stored);
+        } else if (i == 4) {
+            zw_add_text(&z, "textures.ini", "[options]\nhash = quick\nnot a line\n", 8);
+        } else {
+            zw_add_text(&z, "textures.ini", "[options]\nhash = quick\n", 0);
+            ZwOpt bz = { 12, 0, (const uint8_t *)"BZh", 3, 0 };
+            zw_add(&z, "x.png", "abc", 3, bz);
+        }
+        pack_path(zip, sizeof(zip), "texrepl_zip", kRefused[i].name);
+        zw_finish(&z, zip, cut);
+        err[0] = '\0';
+        p = nk_texrepl_open(zip, 0, err, sizeof(err));
+        CHECK(p == NULL, "%s: a bad ZIP pack loaded", kRefused[i].name);
+        CHECK(strstr(err, kRefused[i].why) != NULL, "%s: message was '%s'", kRefused[i].name, err);
+        if (p) nk_texrepl_close(p);
+    }
+}
+
+/* ------------------------------------------------------------------------------------ bench */
+
+#if defined(_WIN32)
+#define PSAPI_VERSION 2
+#include <windows.h>
+#include <psapi.h>
+static double wall_s(void) {
+    LARGE_INTEGER f, c;
+    QueryPerformanceFrequency(&f);
+    QueryPerformanceCounter(&c);
+    return (double)c.QuadPart / (double)f.QuadPart;
+}
+static void mem_now(double *ws_mib, double *peak_mib) {
+    PROCESS_MEMORY_COUNTERS pmc;
+    memset(&pmc, 0, sizeof(pmc));
+    K32GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof(pmc));
+    *ws_mib = (double)pmc.WorkingSetSize / 1048576.0;
+    *peak_mib = (double)pmc.PeakWorkingSetSize / 1048576.0;
+}
+#else
+#include <sys/resource.h>
+#include <sys/time.h>
+static double wall_s(void) {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (double)tv.tv_sec + (double)tv.tv_usec / 1e6;
+}
+static void mem_now(double *ws_mib, double *peak_mib) {
+    struct rusage ru;
+    getrusage(RUSAGE_SELF, &ru);
+    *ws_mib = -1.0;   /* not read on this host */
+    *peak_mib = (double)ru.ru_maxrss / 1024.0;
+}
+#endif
+
+/* --bench N: a synthetic pack of N textures (32x32 PNGs, one textures.ini line each, files in a
+ * subfolder) as a folder and as a ZIP of DEFLATE entries in one top-level folder; prints open,
+ * lookup, first-decode and memory figures for each. */
+static int bench(int n) {
+    char dir[512], path[700], name[64], err[400];
+    uint32_t *px = solid(32, 32, 0xff808080u);
+    make_pack(dir, sizeof(dir), "texrepl_bench/folder");
+    snprintf(path, sizeof(path), "%s/t", dir);
+    nk_platform_mkdir_p(path);
+    size_t ini_cap = (size_t)n * 64u + 64u, ini_n = 0;
+    char *ini = (char *)malloc(ini_cap);
+    ini_n += (size_t)snprintf(ini, ini_cap, "[options]\nhash = xxh32\n[hashes]\n");
+    Zw z;
+    memset(&z, 0, sizeof(z));
+    const ZwOpt deflated = { 8, 0, NULL, 0, 0 };
+    const double t_write = wall_s();
+    for (int i = 0; i < n; i++) {
+        px[0] = 0xff000000u | (uint32_t)i;   /* each image differs */
+        snprintf(name, sizeof(name), "t/%d.png", i);
+        snprintf(path, sizeof(path), "%s/%s", dir, name);
+        write_png(path, 32, 32, px);
+        ini_n += (size_t)snprintf(ini + ini_n, ini_cap - ini_n, "%016llx%08x = %s\n",
+                                  (unsigned long long)nk_texrepl_cache_key(0x08800000u + ((uint32_t)i << 4), 3u, 0x0505u, 0u),
+                                  (unsigned)i, name);
+        char zname[80];
+        snprintf(zname, sizeof(zname), "BenchPack/%s", name);
+        zw_add_file(&z, zname, path, deflated);
+    }
+    snprintf(path, sizeof(path), "%s/textures.ini", dir);
+    write_text(path, ini);
+    zw_add_text(&z, "BenchPack/textures.ini", ini, 8);
+    char zip[600];
+    snprintf(zip, sizeof(zip), "%s/texrepl_bench/pack.zip", SR_SELFTEST_BUILD_ROOT);
+    zw_finish(&z, zip, 0);
+    free(ini);
+    free(px);
+    printf("bench: wrote %d textures as a folder and a ZIP in %.2f s\n", n, wall_s() - t_write);
+
+    const char *const paths[2] = { dir, zip };
+    const char *const kinds[2] = { "folder", "zip" };
+    for (int k = 0; k < 2; k++) {
+        double ws0, pk0, ws1, pk1;
+        mem_now(&ws0, &pk0);
+        double t0 = wall_s();
+        NkTexRepl *p = nk_texrepl_open(paths[k], 0, err, sizeof(err));
+        double t_open = wall_s() - t0;
+        mem_now(&ws1, &pk1);
+        if (!p) { printf("bench %s: open failed: %s\n", kinds[k], err); return 1; }
+        NkTexReplHit hit;
+        NkTexReplId id = { 0, 3u, 0x0505u, 0u, 0 };
+        int hits = 0;
+        t0 = wall_s();
+        for (int i = 0; i < n; i++) {   /* first use: read, unpack and decode each image */
+            id.addr = 0x08800000u + ((uint32_t)i << 4);
+            id.hash = (uint32_t)i;
+            if (nk_texrepl_lookup(p, &id, &hit)) { hits++; nk_texrepl_unpin(p, &hit); }
+        }
+        double t_first = wall_s() - t0;
+        t0 = wall_s();
+        for (int i = 0; i < n; i++) {   /* held images: the lookup alone */
+            id.addr = 0x08800000u + ((uint32_t)i << 4);
+            id.hash = (uint32_t)i;
+            if (nk_texrepl_lookup(p, &id, &hit)) nk_texrepl_unpin(p, &hit);
+        }
+        double t_held = wall_s() - t0;
+        t0 = wall_s();
+        for (int i = 0; i < n; i++) {   /* misses: every wildcard step tried */
+            id.addr = 0x09000000u + ((uint32_t)i << 4);
+            id.hash = 0x80000000u | (uint32_t)i;
+            (void)nk_texrepl_lookup(p, &id, &hit);
+        }
+        double t_miss = wall_s() - t0;
+        double ws2, pk2;
+        mem_now(&ws2, &pk2);
+        NkTexReplStats st;
+        nk_texrepl_stats(p, &st);
+        printf("bench %s: entries=%zu open=%.1f ms index=%.2f MiB open_ws_delta=%.2f MiB | first use %d/%d: %.1f us each"
+               " | held lookup %.3f us | miss %.3f us | cache=%.2f MiB peak_ws=%.1f MiB\n",
+               kinds[k], nk_texrepl_entry_count(p), t_open * 1e3, (double)st.index_bytes / 1048576.0,
+               ws1 >= 0 ? ws1 - ws0 : -1.0, hits, n, t_first * 1e6 / n, t_held * 1e6 / n, t_miss * 1e6 / n,
+               (double)st.cache_bytes / 1048576.0, pk2);
+        nk_texrepl_close(p);
+    }
+    return 0;
+}
+
+int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
+    if (argc == 3 && !strcmp(argv[1], "--bench")) return bench(atoi(argv[2]));
     test_hashes();
     test_synthetic_pack();
     test_malformed_ini();
@@ -497,6 +1070,8 @@ int main(void) {
     test_palette_identity();
     test_texture_hash();
     test_budget();
+    test_index_forms();
+    test_zip_packs();
     if (g_failures) {
         fprintf(stderr, "texrepl selftest: %d check(s) failed\n", g_failures);
         return 1;
