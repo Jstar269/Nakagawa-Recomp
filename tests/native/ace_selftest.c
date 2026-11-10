@@ -67,6 +67,31 @@ static void cell_parse(void) {
         snprintf(spec, sizeof(spec), "%s;tier=ace;cull=on;cull=off", base);
         CHECK(ace_parse(spec, &c, why, sizeof(why)) == 0 && strcmp(why, "duplicate key") == 0, "a duplicate cull");
     }
+    /* mips (contract 10.15, 11.3.8): optional like cull, in an Enhanced or an Ace line; a missing key
+       and mips=off are both off, and a line without it formats as before. */
+    {
+        static const char base[] = "v1;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off";
+        char spec[ACE_SPEC_MAX], out[ACE_SPEC_MAX];
+        CHECK(ace_parse(base, &c, why, sizeof(why)) == 1 && c.mips == 0, "a missing mips is off");
+        CHECK(ace_format(&c, out, sizeof(out)) && strcmp(out, "v1;tier=enhanced;af=16;text=on;readout=off;notice=on;"
+              "wide=off;smooth=off;sas=off;tess=off") == 0, "a line without mips formats as before (%s)", out);
+        snprintf(spec, sizeof(spec), "%s;mips=off", base);
+        CHECK(ace_parse(spec, &c, why, sizeof(why)) == 1 && c.on && c.mips == 0, "mips=off is off");
+        snprintf(spec, sizeof(spec), "%s;mips=on", base);
+        CHECK(ace_parse(spec, &c, why, sizeof(why)) == 1 && c.on && c.mips == 1 && c.tier == ACE_TIER_ENHANCED,
+              "mips=on in an Enhanced line");
+        CHECK(ace_format(&c, out, sizeof(out)) && strcmp(out + strlen(out) - 8, ";mips=on") == 0,
+              "mips=on formats with the key last (%s)", out);
+        snprintf(spec, sizeof(spec), "%s;tier=ace;cull=on;mips=on", base);
+        CHECK(ace_parse(spec, &c, why, sizeof(why)) == 1 && c.cull == 1 && c.mips == 1 &&
+              ace_format(&c, out, sizeof(out)) && strcmp(out + strlen(out) - 16, ";cull=on;mips=on") == 0,
+              "cull and mips together format in that order (%s)", out);
+        snprintf(spec, sizeof(spec), "%s;mips=2", base);
+        CHECK(ace_parse(spec, &c, why, sizeof(why)) == 0 && strcmp(why, "bad value") == 0 && c.on == 0,
+              "mips=2 is a bad value");
+        snprintf(spec, sizeof(spec), "%s;mips=on;mips=on", base);
+        CHECK(ace_parse(spec, &c, why, sizeof(why)) == 0 && strcmp(why, "duplicate key") == 0, "a duplicate mips");
+    }
     /* Every key but tier is required, whatever its place: leaving out any one of them refuses
        the line, leaving out tier does not (src/rt/ace.c names the required keys one by one). */
     {
@@ -144,7 +169,7 @@ static void cell_parse(void) {
 
     /* format and parse agree */
     char line[ACE_SPEC_MAX];
-    AceConfig a = { 1, 4, 0, 1, 0, 0, 0, ACE_TIER_ENHANCED, ACE_SAS_OFF, 0, 0 }, b;
+    AceConfig a = { 1, 4, 0, 1, 0, 0, 0, ACE_TIER_ENHANCED, ACE_SAS_OFF, 0, 0, 0 }, b;
     CHECK(ace_format(&a, line, sizeof(line)) && ace_parse(line, &b, NULL, 0) &&
           memcmp(&a, &b, sizeof(a)) == 0, "format round trip (%s)", line);
     CHECK(ace_format(&a, line, 8) == 0 && line[0] == '\0', "format refuses a short buffer");

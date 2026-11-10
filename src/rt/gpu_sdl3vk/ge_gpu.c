@@ -108,6 +108,13 @@
  *    image until it is. Nothing reads a twin back, so nothing the guest reads changes
  *    (gpu-coherence-selftest twin-*). The software backend has no twin and shows the
  *    authentic image. Off (the default), no twin is made and every path is the one above.
+ *  - Host mip chains (Enhanced part mips=on, tex_mips.h; ENHANCEMENT_CONTRACT.md 10.15): a cache
+ *    entry the game gives one level, filtered linearly when minified and not a render target, is
+ *    made with a full chain whose levels 1.. are built on the host from the decoded level 0. Its
+ *    plain view and set still hold level 0 alone; a transformed draw whose texture alpha, if it
+ *    has any, is used binds the chain (tex_hm_applies) and psp.frag samples it with gradients per
+ *    device pixel (F_HOSTMIP). Off (the default, and always in an authentic run), every entry,
+ *    sampler and set is the one above.
  */
 #include "ge_gpu.h"
 #include "sdl3vk.h"
@@ -122,6 +129,7 @@
 #include "glyph_recon.h"  /* sharp game text: glyph reconstruction (Ace on only, #2110) */
 #include "pipeline_cache.h"   /* the pipeline cache's file on disk (#2149) */
 #include "../texrepl.h"  /* texture replacement packs (#1880; Ace on only) */
+#include "tex_mips.h"     /* host-built mip chains for single-level textures (Enhanced mips=on only) */
 
 #include <vulkan/vulkan.h>
 #include <SDL3/SDL_timer.h>
@@ -217,7 +225,8 @@ typedef struct { int32_t cfg[4]; float texenv[4]; float fogcol[4]; float texsize
 enum { F_TEX = 1, F_RGBA = 2, F_DBL = 4, F_FOG = 8, F_PERSP = 16, F_CLEAR = 32,
        F_NEAREST = 64, F_SA2X = 128, F_SA2XI = 256, F_DITHER = 512, F_SHBLEND = 4096,
        F_STENCIL = 8192, F_LODFRAG = 16384, F_SALPHA = 32768,
-       F_FULLC = 65536 };                  /* host twin only: no 16-bit colour snap (#2050) */
+       F_FULLC = 65536,                    /* host twin only: no 16-bit colour snap (#2050) */
+       F_HOSTMIP = 8388608 };              /* bit 23: a host-built mip chain is bound (tex_mips.h) */
 #define F_FMT_SHIFT 10                     /* bits 10-11: framebuffer psm for quantization */
 /* bits 17-19 (cfg[0] bits 25-27): the bound texture is a scaled copy (tex_scale.h), factor =
  * value + 1; 0 for every guest texture and render target, so the shader samples exactly as
@@ -311,6 +320,13 @@ typedef struct {
     /* Sharp game text (glyph_recon.h, glyph_gpu.inc): the rebuilt glyph rectangles of this page, in
      * a host-only image beside the guest-resolution one. NULL until a draw's rectangle is rebuilt. */
     struct GlSet *gl;
+    /* Host mip chain (tex_mips.h, Enhanced mips=on): `img` has hm_levels levels, 1.. built on the
+     * host from level 0 at every decode, and hm_set samples them all. `view` and `set` keep level
+     * 0 alone, so a draw the chain does not apply to samples exactly as without it. 0: none. */
+    uint32_t hm_levels;
+    int hm_alpha;                          /* some level-0 texel has alpha below 255 */
+    VkImageView hm_view; VkSampler hm_smp;
+    VkDescriptorSet hm_set;
 } TexEnt;
 
 typedef struct { PipeKey key; VkPipeline pipe; int used; } PipeEnt;
@@ -477,6 +493,17 @@ static uint64_t s_cnt_af_samplers = 0;
  * run, and then no scaled image, job or thread is ever made and no draw's filter changes. */
 static int s_xs_factor = 0;
 static int s_xs_smart2d = 0;
+/* Host mip chains (tex_mips.h), read once at init: 0 in an authentic run and with the part off,
+ * and then no entry has a chain, no chain sampler or set is made and no draw sets F_HOSTMIP. */
+static int s_hm = 0;
+static NkTexMipsCurve s_hm_curve;
+static uint32_t *s_hm_out;                 /* levels 1.. of the chain being built */
+static float *s_hm_work;
+static int s_tex_bound_hm;                 /* the last tex_get bound a chain */
+static struct {
+    uint64_t entries, builds, texels, build_ns, bound, plain_alpha, plain_ctest, plain_target,
+             set_failures, bytes, bytes_peak;
+} s_hm_stats;
 /* The texture-replacement pack in force (texrepl.h), opened once at init: NULL in an authentic run
  * and whenever SR_TEX_REPLACE is unset or names no readable pack. A replacement rides the scaled-
  * copy machinery: it is an image `repl_factor` times the guest texture, held in the entry's xs copy. */
@@ -4107,6 +4134,21 @@ static void tex_xs_budget_wait(TexEnt *e) {
 /* Evict the least-recently-used quarter of the cache (the working set survives; the
  * old full-clear rebuilt EVERY texture every frame once a scene exceeded the cap). */
 static void tex_gl_free(TexEnt *e);   /* glyph_gpu.inc */
+
+/* GPU memory of an entry's levels 1.. (the chain beside level 0). */
+static uint64_t tex_hm_bytes(const TexEnt *e) {
+    return e->hm_levels > 1u ? 4u * (uint64_t)nk_tex_mips_chain_texels((uint32_t)e->w, (uint32_t)e->h) : 0u;
+}
+
+static void tex_hm_free(TexEnt *e) {
+    if (e->hm_set) vkFreeDescriptorSets(s_dev, s_dpool_tex, 1, &e->hm_set);
+    if (e->hm_smp) vkDestroySampler(s_dev, e->hm_smp, NULL);
+    if (e->hm_view) vkDestroyImageView(s_dev, e->hm_view, NULL);
+    s_hm_stats.bytes -= tex_hm_bytes(e);
+    e->hm_set = VK_NULL_HANDLE; e->hm_smp = VK_NULL_HANDLE; e->hm_view = VK_NULL_HANDLE;
+    e->hm_levels = 0u;
+}
+
 static void tex_evict_lru(void) {
     /* The caller submits batches before eviction.  Texture uploads and render submits
      * use the scoped GE fence, so there is no device-wide lifetime dependency here. */
@@ -4122,6 +4164,7 @@ static void tex_evict_lru(void) {
         vkDestroySampler(s_dev, e->smp, NULL);
         if (e->set_af) vkFreeDescriptorSets(s_dev, s_dpool_tex, 1, &e->set_af);
         if (e->smp_af) vkDestroySampler(s_dev, e->smp_af, NULL);
+        tex_hm_free(e);
         vkDestroyImageView(s_dev, e->view, NULL);
         vkDestroyImage(s_dev, e->img, NULL);
         vkFreeMemory(s_dev, e->mem, NULL);
@@ -4170,8 +4213,30 @@ static uint32_t s_selftest_upload_fail_after = UINT32_MAX;
 /* Decode the current texture's levels 0..levels-1 through ge.c's sampler and upload them.
  * Chain level L is max(1, w >> L) x max(1, h >> L), which tex_mip_chain_supported() checked
  * is the level's own TEXSIZE. */
-static int tex_decode_upload(VkImage img, int w, int h, uint32_t levels) {
+/* Build entry `e`'s host chain from level 0 in s_texscratch (left as it is) and upload levels
+ * 1..hm_levels-1; the last moves the image to SHADER_READ_ONLY. Sets e->hm_alpha. */
+static int tex_hm_upload(TexEnt *e, VkImage img, VkImageLayout *lay, int w, int h) {
+    const uint64_t t0 = SDL_GetTicksNS();
+    const uint32_t built = nk_tex_mips_build(&s_hm_curve, s_texscratch, (uint32_t)w, (uint32_t)h,
+                                             s_hm_work, s_hm_out, &e->hm_alpha);
+    s_hm_stats.build_ns += SDL_GetTicksNS() - t0;
+    if (built + 1u != e->hm_levels) return 0;
+    s_hm_stats.builds++;
+    size_t off = 0;
+    for (uint32_t l = 1; l < e->hm_levels; l++) {
+        const uint32_t lw = nk_tex_mips_dim((uint32_t)w, l), lh = nk_tex_mips_dim((uint32_t)h, l);
+        if (!tex_upload_level(img, lay, l, l + 1u == e->hm_levels, s_hm_out + off, (int)lw, (int)lh))
+            return 0;
+        off += (size_t)lw * lh;
+    }
+    s_hm_stats.texels += off;
+    return 1;
+}
+
+/* `hm`: the entry whose host chain (tex_mips.h) follows level 0, or NULL. */
+static int tex_decode_upload(VkImage img, int w, int h, uint32_t levels, TexEnt *hm) {
     VkImageLayout lay = VK_IMAGE_LAYOUT_UNDEFINED;
+    const int chain = hm && hm->hm_levels > 1u && levels == 1u;
     if (sr_perf_enabled) sr_perf_texture_cache(0);
     for (uint32_t level = 0; level < levels; level++) {
         int lw = w >> level, lh = h >> level;
@@ -4185,7 +4250,7 @@ static int tex_decode_upload(VkImage img, int w, int h, uint32_t levels) {
             sr_perf_texture_decode(perf_decode_started,
                                    level ? tex_level_source_size(level) : tex_source_size());
         cpu_profile_add(GEGPU_CPU_TEXTURE_DECODE, decode_started);
-        if (!tex_upload_level(img, &lay, level, level + 1u == levels, s_texscratch, lw, lh))
+        if (!tex_upload_level(img, &lay, level, level + 1u == levels && !chain, s_texscratch, lw, lh))
             return 0;
 #ifdef SR_GPU_COHERENCE_SELFTEST
         if (level == s_selftest_upload_fail_after) {
@@ -4194,7 +4259,7 @@ static int tex_decode_upload(VkImage img, int w, int h, uint32_t levels) {
         }
 #endif
     }
-    return 1;
+    return chain ? tex_hm_upload(hm, img, &lay, w, h) : 1;
 }
 
 /* Whether TEXLEVEL mode `mode` picks the level of detail per fragment (automatic 0, slope 2):
@@ -4249,10 +4314,12 @@ static void tex_sampler_info(int min_linear, int mag_linear, int clamp_u, int cl
     sci->addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
 }
 
-static int tex_make(int w, int h, uint32_t levels, int min_linear, int mag_linear,
+/* `img_levels`: the image's levels, above `levels` (the view's) only for a host chain. */
+static int tex_make(int w, int h, uint32_t levels, uint32_t img_levels, int min_linear, int mag_linear,
                     int clamp_u, int clamp_v, const TexMipKey *mip,
                     VkImage *img, VkDeviceMemory *mem, VkImageView *view, VkSampler *smp) {
-    if (!make_image_levels((uint32_t)w, (uint32_t)h, levels, VK_FORMAT_R8G8B8A8_UNORM,
+    if (!make_image_levels((uint32_t)w, (uint32_t)h, img_levels > levels ? img_levels : levels,
+                           VK_FORMAT_R8G8B8A8_UNORM,
                            VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, img, mem))
         return 0;
     if (!make_view_levels(*img, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_ASPECT_COLOR_BIT, levels, view))
@@ -4360,19 +4427,12 @@ static void tex_mip_targets_readback(const TexMipKey *mip, const uint32_t *level
  * scaling is on, it has one level, it is not a render target read back through the cache
  * (s_tex_noscale), and no byte of it lies inside a render target, whose contents stay exactly
  * as the GE drew them. Checked when a copy is offered and again whenever one would be bound. */
+static int tex_vram_meets_target(uint32_t addr, uint32_t bytes);
+
 static int tex_xs_eligible(const TexEnt *e, uint32_t levels) {
     if (!xs_enabled() || s_tex_noscale || levels != 1u) return 0;
     if (!tex_xs_factor(e)) return 0;
-    if (is_vram(e->addr)) {
-        const uint64_t a0 = vram_off(e->addr), a1 = a0 + (e->bytes ? e->bytes : 1u);
-        for (int t = 0; t < MAX_TGT; t++) {
-            const Target *tg = &s_tgts[t];
-            if (!tg->used) continue;
-            const uint64_t t0 = tg->fba, t1 = t0 + (uint64_t)tg->stride * FB_H * (tg->fmt == 3u ? 4u : 2u);
-            if (a0 < t1 && t0 < a1) return 0;
-        }
-    }
-    return 1;
+    return !tex_vram_meets_target(e->addr, e->bytes);
 }
 
 /* The scaled copy is drawn only while it was made from the entry's current content: the same
@@ -4703,11 +4763,143 @@ static int color_test_active(const GeState *g) {
  * (tex_xs_bindable, tex_xs_eligible), else tex_entry_set's. s_tex_bound_scale reports which.
  * A color-test draw binds the guest-resolution set: ge.c keys on the guest's texels, and an xBRZ
  * or replacement copy's texels are other colours, with the key blended into their edges. */
+/* ---- host mip chains (tex_mips.h; Enhanced part mips=on, ENHANCEMENT_CONTRACT.md 10.15) ------
+ * Which textures: one the game gives one level (no TEXMODE levels), that it filters linearly when
+ * minified (the cache key holds the filter), that is not a render target read back through the
+ * cache (s_tex_noscale) and none of whose bytes lie in a live render target: those stay exactly
+ * as the GE drew them, as for texture scaling. The chain is built from the decoded level 0 at
+ * every decode-upload of the entry, so it holds the content and the palette (the key holds the
+ * palette's hash) that level 0 holds, and it is never stale. */
+
+/* Whether any byte of guest range [addr, addr + bytes) lies inside a live render target. */
+static int tex_vram_meets_target(uint32_t addr, uint32_t bytes) {
+    if (!is_vram(addr)) return 0;
+    const uint64_t a0 = vram_off(addr), a1 = a0 + (bytes ? bytes : 1u);
+    for (int t = 0; t < MAX_TGT; t++) {
+        const Target *tg = &s_tgts[t];
+        if (!tg->used) continue;
+        const uint64_t t0 = tg->fba, t1 = t0 + (uint64_t)tg->stride * FB_H * (tg->fmt == 3u ? 4u : 2u);
+        if (a0 < t1 && t0 < a1) return 1;
+    }
+    return 0;
+}
+
+/* The image levels a new entry gets: a full chain, or 0 for none. */
+static uint32_t tex_hm_levels_for(int w, int h, uint32_t levels, int min_linear) {
+    if (!s_hm || levels != 1u || !min_linear || s_tex_noscale) return 0u;
+    if (tex_vram_meets_target(s_ge->tex_addr, tex_source_size())) return 0u;
+    const uint32_t n = nk_tex_mips_levels((uint32_t)w, (uint32_t)h);
+    return n > 1u ? n : 0u;
+}
+
+/* The chain's view (every level) and its sampler: the entry's own filters and wrap, linear
+ * between levels, the level of detail from the draw's own gradients with no bias (psp.frag
+ * passes them per device pixel, so the render scale is in them), and texture filtering's
+ * anisotropy when that part is on. A failure leaves the entry without a chain set: every draw
+ * then binds level 0, as without the part. */
+static void tex_hm_make(TexEnt *e, int mag_linear, int clamp_u, int clamp_v) {
+    TexMipKey none;
+    memset(&none, 0, sizeof(none));
+    VkSamplerCreateInfo sci;
+    tex_sampler_info(1, mag_linear, clamp_u, clamp_v, &none, &sci);
+    sci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    sci.minLod = 0.0f;
+    sci.maxLod = (float)(e->hm_levels - 1u);
+    if (s_ace_af) {
+        sci.anisotropyEnable = VK_TRUE;
+        sci.maxAnisotropy = (float)s_ace_af;
+    }
+    s_hm_stats.entries++;
+    s_hm_stats.bytes += tex_hm_bytes(e);
+    if (s_hm_stats.bytes > s_hm_stats.bytes_peak) s_hm_stats.bytes_peak = s_hm_stats.bytes;
+    if (make_view_levels(e->img, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_ASPECT_COLOR_BIT, e->hm_levels, &e->hm_view) &&
+        vkCreateSampler(s_dev, &sci, NULL, &e->hm_smp) == VK_SUCCESS &&
+        (e->hm_set = make_descriptor(e->hm_view, e->hm_smp, s_dpool_tex)) != VK_NULL_HANDLE)
+        return;
+    if (e->hm_smp) vkDestroySampler(s_dev, e->hm_smp, NULL);
+    if (e->hm_view) vkDestroyImageView(s_dev, e->hm_view, NULL);
+    e->hm_smp = VK_NULL_HANDLE; e->hm_view = VK_NULL_HANDLE; e->hm_set = VK_NULL_HANDLE;
+    s_hm_stats.set_failures++;
+}
+
+/* Whether the draw's colour depends on the texture's alpha: the texture function takes it
+ * (TEXFUNC RGBA) and the alpha test or a blend factor reads the source alpha. Then the chain's
+ * alpha-weighted colour is what level 0 shows from a distance; otherwise a texel with low alpha
+ * shows its colour fully, and a texture that has such texels keeps level 0. */
+static int tex_alpha_used(const GeState *g) {
+    if (!(g->tex_func & 0x100u)) return 0;
+    if (g->atest_enable) return 1;
+    if (!g->blend_enable) return 0;
+    const uint32_t sf = g->blend_mode & 0xFu, df = (g->blend_mode >> 4) & 0xFu;
+    return sf == 2u || sf == 3u || sf == 6u || sf == 7u || df == 2u || df == 3u || df == 6u || df == 7u;
+}
+
+/* Whether this draw binds entry `e`'s chain: a transformed draw (through-mode HUDs, menus and
+ * text keep level 0, as texture filtering's rule has it) that filters linearly when minified,
+ * without the color test (it keys on the guest's texels), and whose texture alpha, if it has
+ * any, is used. Rechecked at each bind for a render target that has since met the texture. */
+static int tex_hm_applies(const TexEnt *e) {
+    if (!e->hm_set || s_tex_noscale || (s_ge->vtype & (1u << 23)) || !(tex_filter_variant(s_ge->tex_filter) & 2u))
+        return 0;
+    if (color_test_active(s_ge)) { s_hm_stats.plain_ctest++; return 0; }
+    if (e->hm_alpha && !tex_alpha_used(s_ge)) { s_hm_stats.plain_alpha++; return 0; }
+    if (tex_vram_meets_target(e->addr, e->bytes)) { s_hm_stats.plain_target++; return 0; }
+    return 1;
+}
+
+static VkDescriptorSet tex_hm_or_entry_set(TexEnt *e) {
+    if (s_hm && tex_hm_applies(e)) {
+        s_tex_bound_hm = 1;
+        s_hm_stats.bound++;
+        return e->hm_set;
+    }
+    return tex_entry_set(e);
+}
+
+static void tex_hm_init(void) {
+    s_hm = 0;
+    memset(&s_hm_stats, 0, sizeof(s_hm_stats));
+    if (!g_ace_on || !ace_effective()->mips) return;
+    const size_t texels = nk_tex_mips_chain_texels(NK_TEX_MIPS_MAX_DIM, NK_TEX_MIPS_MAX_DIM);
+    s_hm_out = (uint32_t *)malloc(texels * sizeof(uint32_t));
+    s_hm_work = (float *)malloc(nk_tex_mips_work_floats(NK_TEX_MIPS_MAX_DIM, NK_TEX_MIPS_MAX_DIM) * sizeof(float));
+    if (!s_hm_out || !s_hm_work) {
+        free(s_hm_out); free(s_hm_work);
+        s_hm_out = NULL; s_hm_work = NULL;
+        ace_feature_unavailable(ACE_FEATURE_MIPS, "no memory for the chain builder");
+        return;
+    }
+    nk_tex_mips_curve_init(&s_hm_curve);
+    s_hm = 1;
+    ace_confirm(ACE_FEATURE_MIPS);
+    fprintf(stderr, "HOST_MIPS: on (filter=box in linear light, alpha-weighted, key fill; bias=0 at %dx; "
+                    "anisotropy=%d)\n", s_scale, s_ace_af);
+    fprintf(stderr, "HOST_MIPS: guest-visible: every present commits the smoothed frame to guest VRAM "
+                    "(ENHANCEMENT_CONTRACT.md 11.3.8)\n");
+}
+
+static void tex_hm_shutdown(void) {
+    if (s_hm)
+        fprintf(stderr, "HOST_MIPS: exit (entries=%llu, builds=%llu, texels=%llu, build_ms=%.1f, bound=%llu, "
+                        "plain_alpha_unused=%llu, plain_color_test=%llu, plain_target=%llu, set_failures=%llu, "
+                        "chain_peak_kib=%llu)\n",
+                (unsigned long long)s_hm_stats.entries, (unsigned long long)s_hm_stats.builds,
+                (unsigned long long)s_hm_stats.texels, (double)s_hm_stats.build_ns / 1e6,
+                (unsigned long long)s_hm_stats.bound, (unsigned long long)s_hm_stats.plain_alpha,
+                (unsigned long long)s_hm_stats.plain_ctest, (unsigned long long)s_hm_stats.plain_target,
+                (unsigned long long)s_hm_stats.set_failures,
+                (unsigned long long)(s_hm_stats.bytes_peak >> 10));
+    free(s_hm_out); free(s_hm_work);
+    s_hm_out = NULL; s_hm_work = NULL;
+    s_hm = 0;
+}
+
 static VkDescriptorSet tex_bind_set(TexEnt *e, uint32_t levels) {
     s_tex_bound_scale = 1;
+    s_tex_bound_hm = 0;
     s_tex_cur = e;
     if (!xs_enabled() || color_test_active(s_ge) || !tex_xs_bindable(e) || !tex_xs_eligible(e, levels))
-        return tex_entry_set(e);
+        return tex_hm_or_entry_set(e);
     VkDescriptorSet set = e->xs.set;
     if (s_ace_af && (tex_filter_variant(s_ge->tex_filter) & 2u) && !(s_ge->vtype & (1u << 23))) {
         /* Ace Mode's texture filtering applies to the copy as tex_entry_set applies it. */
@@ -4761,6 +4953,7 @@ static void tex_xs_retry(TexEnt *e, uint32_t levels) {
 
 static VkDescriptorSet tex_get(void) {
     s_tex_bound_scale = 1;
+    s_tex_bound_hm = 0;
     s_tex_cur = NULL;
     tex_xs_collect();
     int w = s_ge->tex_w, h = s_ge->tex_h;
@@ -4819,7 +5012,7 @@ static VkDescriptorSet tex_get(void) {
         /* same texture state, new contents: update in place (cache stays bounded) */
         if (e->pending) submit_pending();
         if (!e->content_valid) s_cnt_shadow_required++;
-        if (!tex_decode_upload(e->img, e->w, e->h, levels)) {
+        if (!tex_decode_upload(e->img, e->w, e->h, levels, e)) {
             /* The image may be partly undefined now: with no valid mark and no shadow, the next
              * lookup decodes again, whatever the content hash says. */
             e->content_valid = 0;
@@ -4846,12 +5039,15 @@ static VkDescriptorSet tex_get(void) {
     }
     TexEnt *e = &s_tex[s_tex_n];
     memset(e, 0, sizeof(*e));
-    if (!tex_make(w, h, levels, min_linear, mag_linear, clamp_u, clamp_v, &mip,
+    e->hm_levels = tex_hm_levels_for(w, h, levels, min_linear);
+    if (!tex_make(w, h, levels, e->hm_levels, min_linear, mag_linear, clamp_u, clamp_v, &mip,
                   &e->img, &e->mem, &e->view, &e->smp))
         return s_white_set;
-    if (!tex_decode_upload(e->img, w, h, levels)) return s_white_set;
+    e->w = w; e->h = h;
+    if (e->hm_levels > 1u) tex_hm_make(e, mag_linear, clamp_u, clamp_v);
+    if (!tex_decode_upload(e->img, w, h, levels, e)) { tex_hm_free(e); return s_white_set; }
     e->set = make_descriptor(e->view, e->smp, s_dpool_tex);
-    if (!e->set) return s_white_set;
+    if (!e->set) { tex_hm_free(e); return s_white_set; }
     e->key = key; e->hash = hash;
     e->gen = ++s_tex_gen;
     e->w = w; e->h = h;
@@ -5364,6 +5560,8 @@ static void build_state(int persp, int sprite, Batch *b) {
             }
         } else {
             b->dset = tex_get();
+            /* A host chain (tex_mips.h): psp.frag samples it with gradients per device pixel. */
+            if (s_tex_bound_hm) flags |= F_HOSTMIP;
             /* A scaled copy (tex_scale.h) samples on its own texel lattice in psp.frag. */
             if (s_tex_bound_scale > 1) {
                 flags |= (s_tex_bound_scale - 1) << F_TSCALE_SHIFT;
@@ -5710,7 +5908,7 @@ static struct {
  * keeps each texel (or each texel of a scaled copy) sharp where linear blurs it. */
 static int smart2d_candidate(const Batch *b) {
     const uint32_t flags = (uint32_t)b->pc.cfg[0] >> 8;
-    return s_xs_smart2d && (flags & F_TEX) && !(flags & (F_NEAREST | F_LODFRAG | F_CLEAR));
+    return s_xs_smart2d && (flags & F_TEX) && !(flags & (F_NEAREST | F_LODFRAG | F_HOSTMIP | F_CLEAR));
 }
 
 static void smart2d_apply(Batch *b) {
@@ -6903,12 +7101,16 @@ static const GeGpuHooks k_hooks = {
 #ifdef SR_GPU_GLYPH_SELFTEST
 #include "glyph_gpu_selftest.inc"
 #endif
+#ifdef SR_GPU_MIPS_SELFTEST
+#include "tex_mips_gpu_selftest.inc"
+#endif
 
 void gegpu_ace_stats(GeGpuAceStats *out) {
     if (!out) return;
     out->af = s_ace_af;
     out->af_samplers = (unsigned long long)s_cnt_af_samplers;
     out->tex_pool_sets = s_tex_pool_sets;
+    out->mips_entries = (unsigned long long)s_hm_stats.entries;
 }
 
 /* Make the run's twin resources (s_twin). Called by gegpu_init before any target exists; a
@@ -7145,8 +7347,11 @@ int gegpu_init(void) {
             nk_tex_scale_configure(&c);
         }
     }
-    /* Per entry: its set (and the anisotropic one), a scaled copy's set (and its anisotropic one), and a glyph image's. */
-    const uint32_t per_entry = (s_ace_af ? 2u : 1u) + (xs_enabled() ? (s_ace_af ? 2u : 1u) : 0u) + (s_glyphs ? 1u : 0u);
+    tex_hm_init();
+    /* Per entry: its set (and the anisotropic one), a scaled copy's set (and its anisotropic one), a glyph
+     * image's, and a host chain's. */
+    const uint32_t per_entry = (s_ace_af ? 2u : 1u) + (xs_enabled() ? (s_ace_af ? 2u : 1u) : 0u) + (s_glyphs ? 1u : 0u) +
+                               (s_hm ? 1u : 0u);
     const uint32_t tex_sets = MAX_TEX * per_entry;
     s_tex_pool_sets = tex_sets;
     if (s_ace_af) ace_confirm(ACE_FEATURE_AF);   /* the renderer that filters is up */
@@ -7267,7 +7472,7 @@ int gegpu_init(void) {
         uint32_t white = 0xFFFFFFFFu;
         static const TexMipKey no_mip;
         VkImageLayout white_layout = VK_IMAGE_LAYOUT_UNDEFINED;
-        if (!tex_make(1, 1, 1u, 0, 0, 1, 1, &no_mip,
+        if (!tex_make(1, 1, 1u, 0u, 0, 0, 1, 1, &no_mip,
                       &s_white, &s_white_mem, &s_white_view, &s_white_smp) ||
             !tex_upload_level(s_white, &white_layout, 0u, 1, &white, 1, 1))
             return 0;
@@ -7354,6 +7559,7 @@ void gegpu_shutdown(void) {
         if (e->smp) vkDestroySampler(s_dev, e->smp, NULL);
         if (e->set_af) vkFreeDescriptorSets(s_dev, s_dpool_tex, 1, &e->set_af);
         if (e->smp_af) vkDestroySampler(s_dev, e->smp_af, NULL);
+        tex_hm_free(e);
         if (e->view) vkDestroyImageView(s_dev, e->view, NULL);
         if (e->img) vkDestroyImage(s_dev, e->img, NULL);
         if (e->mem) vkFreeMemory(s_dev, e->mem, NULL);
@@ -7361,6 +7567,7 @@ void gegpu_shutdown(void) {
         tex_gl_free(e);
     }
     s_tex_n = 0;
+    tex_hm_shutdown();
     if (s_glyphs_asked) {
         glyph_report();
         s_glyphs_asked = s_glyphs = 0;

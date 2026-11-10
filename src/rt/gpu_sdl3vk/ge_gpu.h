@@ -247,11 +247,13 @@ void gegpu_cpu_profile_stats_get(GeGpuCpuProfileStats *out);
 int gegpu_coherence_selftest(void);
 /* Ace Mode's texture filtering (src/rt/ace.h): the anisotropy level the renderer uses (0 in an
  * authentic run), the anisotropic samplers it has made, and its texture descriptor pool's
- * size. Invariant A2: an authentic run makes none and keeps MAX_TEX sets. */
+ * size. Invariant A2: an authentic run makes none and keeps MAX_TEX sets. mips_entries: the
+ * cache entries given a host mip chain (tex_mips.h, mips=on); none in an authentic run. */
 typedef struct {
     int af;
     unsigned long long af_samplers;
     unsigned tex_pool_sets;
+    unsigned long long mips_entries;
 } GeGpuAceStats;
 void gegpu_ace_stats(GeGpuAceStats *out);
 
@@ -268,6 +270,7 @@ int gegpu_texscale_selftest(void); /* texture scaling and the smart 2D filter (t
 int gegpu_texrepl_only_prepare(const char *build_root); /* --repl-only: write the pack, set SR_TEX_REPLACE, before gegpu_init */
 int gegpu_texrepl_only_selftest(void); /* --repl-only: SR_TEX_REPLACE with no texture scaling */
 int gegpu_glyph_selftest(void);         /* sharp game text (glyph_recon.h) */
+int gegpu_mips_selftest(void);          /* host-built mip chains (tex_mips.h) */
 int gegpu_glyph_authentic_selftest(void); /* --authentic: the scene, no glyph rebuilt, a hash of the picture */
 
 void gegpu_shutdown(void);

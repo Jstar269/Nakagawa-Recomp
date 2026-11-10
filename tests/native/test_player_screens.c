@@ -54,6 +54,7 @@ static const EnhancedPartFixture k_enhanced_parts[] = {
                              "memory changes."},
     {"Sharper enlarging", "Off", "AMD FSR 1 sharpens display and recordings; game memory and "
                                   "screenshots do not change."},
+    {"Smooth distant textures", "Off", "Stops far textures shimmering at high resolution. Save pictures keep the smoothing."},
 };
 typedef char player_screens_enhanced_fixture_matches_parts[
     sizeof(k_enhanced_parts) / sizeof(k_enhanced_parts[0]) == PLAYER_PART_COUNT ? 1 : -1];

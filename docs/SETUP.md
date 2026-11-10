@@ -121,6 +121,15 @@ Measured on a Windows 11 x64 PC building and running Hot Shots Tennis with the p
   coverage, in either direction. A run's log ends with a `PATCH_TESS: exit` line
   that counts the draws the vertex cap lowered. The rules are in
   [`ENHANCEMENT_CONTRACT.md`](ENHANCEMENT_CONTRACT.md#1014-finer-bezier-and-spline-patches).
+- **Smooth distant textures.** A part of Enhanced and Ace, off by default and in no graphics preset: Settings >
+  Enhanced offers it as **Smooth distant textures** (On or Off), for the library or for one game, and the launch
+  line carries it as `mips=on`. It is not on by choosing Enhanced or Ace, because it changes the frames the game can
+  read back ([section 11.3.8](ENHANCEMENT_CONTRACT.md#1138-smooth-distant-textures-mips)). A texture the game gives
+  only one level gets smaller copies of itself, built on the game's thread when the texture is loaded, so a far
+  surface no longer shimmers at a high render scale. The copies add up to a third of the texture's GPU memory.
+  Menus, text and textures the game already shrinks itself are drawn as before. A run's log ends with a
+  `HOST_MIPS: exit` line that counts the textures and the build time. The rules are in
+  [`ENHANCEMENT_CONTRACT.md`](ENHANCEMENT_CONTRACT.md#1015-smooth-distant-textures-host-mip-chains).
 - **Where your data lives.** Imported discs, built games, saves and settings are in the per-user data
   folder (`%LOCALAPPDATA%\Nakagawa\data`, [below](#2-supply-local-game-inputs)), never inside the unpacked
   release. An update unpacks into a new folder and leaves the data folder alone, so deleting an old release

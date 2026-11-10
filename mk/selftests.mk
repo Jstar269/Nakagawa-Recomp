@@ -1146,6 +1146,49 @@ tex-scale-selftest:
 
 native-core-tests: tex-scale-selftest
 
+# tex-mips-selftest - host-built mip chains' CPU side (src/rt/gpu_sdl3vk/tex_mips.h, contract 10.15):
+# the level count, the linear-light box filter, alpha weighting, the colour-key fill and a texture
+# with no alpha. No GPU and no SDL3. tex-mips-mutant builds it without the colour-key fill and passes
+# only when the key-edge cell fails for that reason.
+tex-mips-selftest:
+	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_DIR)').mkdir(parents=True, exist_ok=True)"
+	$(CC) $(CFLAGS) -O2 -o $(BUILD_DIR)/tex_mips_selftest$(EXE_EXT) src/rt/gpu_sdl3vk/tex_mips_selftest.c -lm
+	$(BUILD_DIR)/tex_mips_selftest$(EXE_EXT)
+
+tex-mips-mutant:
+	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_DIR)').mkdir(parents=True, exist_ok=True)"
+	$(CC) $(CFLAGS) -O2 -DNK_TEX_MIPS_MUTANT_NO_FILL -o $(BUILD_DIR)/tex_mips_mutant$(EXE_EXT) \
+		src/rt/gpu_sdl3vk/tex_mips_selftest.c -lm
+	@rc=0; out=$$($(BUILD_DIR)/tex_mips_mutant$(EXE_EXT) 2>&1) || rc=$$?; \
+	if [ $$rc -ne 0 ] && printf '%s\n' "$$out" | grep -q "FAIL key edge texel .* the key's colour reached it"; then \
+		echo "PASS tex-mips-mutant (the key-edge cell fails without the colour-key fill)"; \
+	else printf '%s\n' "$$out"; echo "FAIL tex-mips-mutant (exit $$rc: the missing fill went unnoticed)"; exit 1; fi
+
+native-core-tests: tex-mips-selftest tex-mips-mutant
+
+# gpu-mips-selftest - host-built mip chains (mips=on) through ge_gpu.c's own hooks on a real Vulkan
+# device, read at device resolution (tex_mips_gpu_selftest.inc): a minified single-level CLUT texture
+# samples the chain, the level of detail follows the render scale, a second palette gets its own
+# chain, a rewrite rebuilds it, a colour-keyed edge takes no key colour, and through-mode, color-test
+# and alpha-unused draws keep level 0. It runs at render scales 4, 2 and 1, with 16x texture
+# filtering, and once with mips off, where the minified cell must show level 0's aliasing and no
+# chain may exist. Exit 77 (SKIP) without Vulkan.
+GPU_MIPS_LINE := v1;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off
+gpu_mips_run = rc=0; $(BUILD_DIR)/gpu_mips_selftest.exe $(1) || rc=$$?; \
+	if [ $$rc -eq 77 ]; then echo "SKIP gpu-mips-selftest $(2) (exit 77; the reason is printed above)"; \
+	elif [ $$rc -ne 0 ]; then echo "FAIL gpu-mips-selftest $(2) (exit $$rc)"; exit $$rc; fi
+gpu-mips-selftest: shader-verify $(RT_GE_O)
+	$(CC) $(CFLAGS) -DSR_GPU_COHERENCE_SELFTEST -DSR_GPU_MIPS_SELFTEST -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" \
+		-ffunction-sections -fdata-sections $(LDFLAGS) -Wl,--gc-sections \
+		-o $(BUILD_DIR)/gpu_mips_selftest.exe \
+		tests/native/gpu_coherence_selftest.c src/rt/ge_capture.c src/rt/ge_raster_ref.c $(RT_GE_O) src/rt/flight_recorder.c src/rt/perf.c \
+		$(SDL3VK_SRCS) $(GEGPU_SRCS) $(LIBS)
+	@$(call gpu_mips_run,--scale 4,scale 4)
+	@$(call gpu_mips_run,--scale 2,scale 2)
+	@$(call gpu_mips_run,--scale 1,scale 1)
+	@$(call gpu_mips_run,--scale 4 --ace '$(GPU_MIPS_LINE);af=16;mips=on',scale 4 af 16)
+	@$(call gpu_mips_run,--scale 4 --ace '$(GPU_MIPS_LINE);af=0',scale 4 mips off)
+
 # glyph-recon-selftest - sharp game text's CPU side (src/rt/gpu_sdl3vk/glyph_recon.h, #2110) on
 # synthetic glyphs only: the setting and its Ace gate, every source the rebuild refuses by name (VRAM,
 # a 4-bit reversed buffer, a 24-bit buffer, a mip chain, render scale 1, formats with no usable

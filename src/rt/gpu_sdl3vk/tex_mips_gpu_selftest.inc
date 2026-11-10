@@ -1,0 +1,286 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* Copyright (C) 2026 the Nakagawa Recomp authors */
+/*
+ * tex_mips_gpu_selftest.inc - gpu-mips-selftest: host-built mip chains (tex_mips.h, Enhanced
+ * part mips=on) through ge_gpu.c's own hooks on a Vulkan device, read back at device resolution.
+ * Included by ge_gpu.c in the SR_GPU_MIPS_SELFTEST build, after ge_gpu_selftest.inc.
+ *
+ * The fixture is a 64x64 CLUT8 texture with one level, filtered linearly, clamped, drawn as a
+ * transformed quad. Cells:
+ *  - minified: a one-texel checkerboard (palette entries 0 black, 1 white) drawn at 3.2 texels
+ *    per device pixel samples the chain: every device pixel is the chain's linear-light grey
+ *    (sRGB 188). Level 0 alone aliases: the pixels range from dark to light.
+ *  - scale-aware: 2 texels per guest pixel is minified at 1x but not from 2x, where the draw keeps
+ *    level 0's own detail (the level of detail is per device pixel, with no bias).
+ *  - palette: the same index image under another palette is another cache entry with its own
+ *    chain (red and blue give sRGB 188, 0, 188); the first palette's entry is still its own.
+ *  - rewrite: guest bytes rewritten under the same palette rebuild the chain at the next decode.
+ *  - key-edge: opaque red beside the colour key (entry 2, magenta, alpha 0), blended by source
+ *    alpha over black: no device pixel takes any blue, at the edge or anywhere.
+ *  - gates: a through-mode draw, a color-test draw and a draw whose texture function ignores
+ *    the alpha of a texture that has some bind level 0 alone.
+ * With mips off (`--ace` with a line that has no mips) the run checks the other side: no chain
+ * is made, nothing is bound, and the minified cell shows the aliasing the chain removes.
+ */
+
+#define HM_TEX   0x04050000u                 /* 64x64 CLUT8 indices */
+#define HM_CLUT  0x04052000u                 /* 256 entries of 8888 */
+#define HM_LIST  0x00104000u
+#define HM_FBA   0x00160000u
+#define HM_Y     40
+
+static uint32_t hm_rgba(uint32_t r, uint32_t g, uint32_t b, uint32_t a) {
+    return r | (g << 8) | (b << 16) | (a << 24);
+}
+
+static void hm_fill(int kind) {
+    uint8_t *t = (uint8_t *)SR_HOST(HM_TEX);
+    for (uint32_t v = 0; v < 64u; v++)
+        for (uint32_t u = 0; u < 64u; u++)
+            t[v * 64u + u] = kind == 0 ? (uint8_t)((u ^ v) & 1u) : kind == 1 ? (uint8_t)1u
+                                                                  : (uint8_t)(u < 32u ? 3u : 2u);
+    sr_gpu_vram_dirty(HM_TEX, 64u * 64u);
+}
+
+static void hm_palette(uint32_t c0, uint32_t c1) {
+    uint32_t *p = (uint32_t *)SR_HOST(HM_CLUT);
+    for (uint32_t i = 0; i < 256u; i++) p[i] = hm_rgba(0, 0, 0, 255);
+    p[0] = c0; p[1] = c1;
+    p[2] = hm_rgba(255, 0, 255, 0);           /* the colour key */
+    p[3] = hm_rgba(255, 0, 0, 255);
+    sr_gpu_vram_dirty(HM_CLUT, 256u * 4u);
+}
+
+/* The state, no draw: TEXFUNC `tfunc` (bit 8 RGBA), blending by source alpha when `blend`, the
+ * color test when `ctest`, and the palette loaded from HM_CLUT. */
+static void hm_state(uint32_t tfunc, int blend, int ctest) {
+    uint32_t *dl = (uint32_t *)SR_HOST(HM_LIST);
+    int p = 0;
+    #define DL_EMIT(cmd, val) dl[p++] = ((uint32_t)(cmd) << 24) | ((uint32_t)(val) & 0x00FFFFFFu)
+    DL_EMIT(0x10, 0);
+    DL_EMIT(0x9C, HM_FBA);
+    DL_EMIT(0x9D, 512u | (0x04000000u >> 8));
+    DL_EMIT(0xD2, 3);
+    DL_EMIT(0xD3, 0);
+    DL_EMIT(0x4C, 0);
+    DL_EMIT(0x4D, 0);
+    DL_EMIT(0x23, 0);
+    DL_EMIT(0x22, 0);
+    DL_EMIT(0x21, blend ? 1u : 0u);
+    DL_EMIT(0xDF, 2u | (3u << 4));                      /* src alpha, 1 - src alpha, add */
+    DL_EMIT(0x24, 0);                                   /* stencil test off */
+    DL_EMIT(0x27, ctest ? 1u : 0u);                     /* color test */
+    DL_EMIT(0xD8, 2u);                                  /* equal */
+    DL_EMIT(0xD9, 0x00FF00FFu);
+    DL_EMIT(0xDA, 0x00FFFFFFu);
+    DL_EMIT(0x15, 0);
+    DL_EMIT(0x16, ((FB_H - 1) << 10) | (FB_W - 1));
+    DL_EMIT(0xD4, 0);
+    DL_EMIT(0xD5, ((FB_H - 1) << 10) | (FB_W - 1));
+    DL_EMIT(0xB0, HM_CLUT & 0x00FFFFFFu);
+    DL_EMIT(0xB1, (HM_CLUT & 0xFF000000u) >> 8);
+    DL_EMIT(0xC4, 32u);                                 /* 256 entries of 8888 */
+    DL_EMIT(0xC5, 3u | (0xFFu << 8));
+    DL_EMIT(0xA0, HM_TEX & 0x00FFFFFFu);
+    DL_EMIT(0xA8, 64u | ((HM_TEX & 0xFF000000u) >> 8));
+    DL_EMIT(0xB8, (6u << 8) | 6u);
+    DL_EMIT(0xC2, 0);                                   /* one level */
+    DL_EMIT(0xC8, 0);
+    DL_EMIT(0xC0, 0);
+    DL_EMIT(0xC3, 5);                                   /* CLUT8 */
+    DL_EMIT(0xC6, 0x101u);                              /* linear min and mag */
+    DL_EMIT(0xC7, (1u << 8) | 1u);                      /* clamp u and v */
+    DL_EMIT(0xC9, tfunc);
+    DL_EMIT(0xCB, 0);
+    DL_EMIT(0x1E, 1);
+    DL_EMIT(0x12, (3u << 0) | (3u << 7) | (1u << 23));
+    DL_EMIT(0x0F, 0);
+    DL_EMIT(0x0C, 0);
+    #undef DL_EMIT
+    ge_run_list(HM_LIST, 0);
+    s_ge->minz = 0u;
+    s_ge->maxz = 65535u;
+}
+
+/* A quad from guest x `x`, HM_Y, `size` guest pixels square, texel coordinates 0..`span` (+0.25),
+ * transformed (`through` 0) or through mode. Returns 0 on a failed draw. */
+static int hm_quad(int x, int size, float span, int through) {
+    if (through) s_ge->vtype |= 1u << 23; else s_ge->vtype &= ~(1u << 23);
+    const float x0 = (float)x, y0 = (float)HM_Y, x1 = x0 + (float)size, y1 = y0 + (float)size;
+    const float u0 = 0.25f, u1 = 0.25f + span;
+    GeVtx a = { x0, y0, 1.0f, 1.0f, u0, u0, 1.0f, 255, 255, 255, 255 };
+    GeVtx b = { x1, y0, 1.0f, 1.0f, u1, u0, 1.0f, 255, 255, 255, 255 };
+    GeVtx d = { x0, y1, 1.0f, 1.0f, u0, u1, 1.0f, 255, 255, 255, 255 };
+    GeVtx e = { x1, y1, 1.0f, 1.0f, u1, u1, 1.0f, 255, 255, 255, 255 };
+    const unsigned long long fb0 = s_replay_stats.fallback_prims;
+    if (through) return hook_sprite(&a, &e, 0) && s_replay_stats.fallback_prims == fb0;
+    return hook_tri(&a, &b, &e, 1) && hook_tri(&a, &e, &d, 1) && s_replay_stats.fallback_prims == fb0;
+}
+
+typedef struct { uint32_t lo[4], hi[4]; unsigned n; } HmRange;
+
+/* The channel ranges over the quad's device pixels, one device pixel in from each edge. */
+static int hm_read(int x, int size, uint32_t *dev, HmRange *r) {
+    if (!s_cur || !coherence_read_device(s_cur->img, VK_IMAGE_ASPECT_COLOR_BIT, &s_cur->layout,
+                                         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, 4u, dev))
+        return 0;
+    const uint32_t s = (uint32_t)s_scale;
+    for (int c = 0; c < 4; c++) { r->lo[c] = 255u; r->hi[c] = 0u; }
+    r->n = 0;
+    for (uint32_t y = HM_Y * s + 1u; y + 1u < (uint32_t)(HM_Y + size) * s; y++) {
+        for (uint32_t xx = (uint32_t)x * s + 1u; xx + 1u < (uint32_t)(x + size) * s; xx++) {
+            const uint32_t px = dev[(size_t)y * SCL_W + xx];
+            for (int c = 0; c < 4; c++) {
+                const uint32_t v = (px >> (8 * c)) & 0xFFu;
+                if (v < r->lo[c]) r->lo[c] = v;
+                if (v > r->hi[c]) r->hi[c] = v;
+            }
+            r->n++;
+        }
+    }
+    return r->n > 0u;
+}
+
+static int hm_near(const HmRange *r, uint32_t want, uint32_t tol) {
+    for (int c = 0; c < 3; c++) {
+        const uint32_t w = (want >> (8 * c)) & 0xFFu;
+        if (r->lo[c] + tol < w || r->hi[c] > w + tol) return 0;
+    }
+    return 1;
+}
+
+static void hm_say(const char *cell, const HmRange *r) {
+    fprintf(stderr, "gpu mips selftest [%s]: %u device pixels, r %u-%u g %u-%u b %u-%u at scale %d\n", cell,
+            r->n, r->lo[0], r->hi[0], r->lo[1], r->hi[1], r->lo[2], r->hi[2], s_scale);
+}
+
+int gegpu_mips_selftest(void) {
+    const uint32_t base = 0x04000000u | HM_FBA;
+    const int on = s_hm;
+    uint32_t *dev = (uint32_t *)malloc((size_t)SCL_W * SCL_H * 4u);
+    if (!dev) return 0;
+    coherence_reset_targets();
+    memset(SR_HOST(base), 0, 512u * FB_H * 4u);
+    sr_gpu_vram_dirty(base, 512u * FB_H * 4u);
+    ge_set_gpu_hooks(&k_hooks);
+    const uint32_t grey = hm_rgba(188, 188, 188, 0);
+    int ok = 1;
+    HmRange r;
+
+    /* minified: 64 texels over 5 guest pixels, 3.2 texels per device pixel at 4x. */
+    hm_fill(0);
+    hm_palette(hm_rgba(0, 0, 0, 255), hm_rgba(255, 255, 255, 255));
+    hm_state(3u | (1u << 8), 0, 0);
+    const uint64_t bound0 = s_hm_stats.bound;
+    ok = hm_quad(20, 5, 64.0f, 0) && hm_read(20, 5, dev, &r);
+    if (ok && on && (!hm_near(&r, grey, 1u) || s_hm_stats.bound != bound0 + 1u || s_hm_stats.entries != 1u)) {
+        hm_say("minified", &r);
+        fprintf(stderr, "gpu mips selftest [minified]: want every pixel 188 from the chain (bound %llu, entries %llu)\n",
+                (unsigned long long)(s_hm_stats.bound - bound0), (unsigned long long)s_hm_stats.entries);
+        ok = 0;
+    }
+    if (ok && !on && (r.hi[0] - r.lo[0] < 64u || s_hm_stats.entries != 0u || s_hm_stats.bound != 0u)) {
+        hm_say("minified, mips off", &r);
+        fprintf(stderr, "gpu mips selftest [minified, mips off]: want level 0's aliasing and no chain\n");
+        ok = 0;
+    }
+    if (ok) printf("gpu mips selftest: PASS minified    r %u-%u (%s) scale=%d\n", r.lo[0], r.hi[0],
+                   on ? "the chain's grey" : "level 0 aliases, mips off", s_scale);
+    if (!on) {
+        free(dev);
+        coherence_reset_targets();
+        return ok;
+    }
+
+    /* scale-aware: 64 texels over 32 guest pixels, half a texel per device pixel at 4x. */
+    if (ok) {
+        ok = hm_quad(40, 32, 64.0f, 0) && hm_read(40, 32, dev, &r);
+        const int sharp = r.hi[0] - r.lo[0] >= 128u;
+        if (ok && (s_scale >= 2) != sharp) {
+            hm_say("scale-aware", &r);
+            fprintf(stderr, "gpu mips selftest [scale-aware]: want level 0's detail from 2x, the grey at 1x\n");
+            ok = 0;
+        }
+        if (ok) printf("gpu mips selftest: PASS scale-aware r %u-%u scale=%d\n", r.lo[0], r.hi[0], s_scale);
+    }
+
+    /* palette: the same indices, red and blue. */
+    if (ok) {
+        const uint64_t builds0 = s_hm_stats.builds;
+        hm_palette(hm_rgba(255, 0, 0, 255), hm_rgba(0, 0, 255, 255));
+        hm_state(3u | (1u << 8), 0, 0);
+        ok = hm_quad(80, 5, 64.0f, 0) && hm_read(80, 5, dev, &r);
+        if (ok && (!hm_near(&r, hm_rgba(188, 0, 188, 0), 1u) || s_hm_stats.builds != builds0 + 1u ||
+                   s_hm_stats.entries != 2u)) {
+            hm_say("palette", &r);
+            fprintf(stderr, "gpu mips selftest [palette]: want 188,0,188 from a new chain (builds +%llu, entries %llu)\n",
+                    (unsigned long long)(s_hm_stats.builds - builds0), (unsigned long long)s_hm_stats.entries);
+            ok = 0;
+        }
+        hm_palette(hm_rgba(0, 0, 0, 255), hm_rgba(255, 255, 255, 255));
+        hm_state(3u | (1u << 8), 0, 0);
+        ok = ok && hm_quad(90, 5, 64.0f, 0) && hm_read(90, 5, dev, &r);
+        if (ok && (!hm_near(&r, grey, 1u) || s_hm_stats.builds != builds0 + 1u)) {
+            hm_say("palette back", &r);
+            fprintf(stderr, "gpu mips selftest [palette]: the first palette's entry should be drawn again unchanged\n");
+            ok = 0;
+        }
+        if (ok) printf("gpu mips selftest: PASS palette    a second palette gets its own chain\n");
+    }
+
+    /* rewrite: every index 1 (white) under the same palette. */
+    if (ok) {
+        const uint64_t builds0 = s_hm_stats.builds;
+        hm_fill(1);
+        hm_state(3u | (1u << 8), 0, 0);
+        ok = hm_quad(100, 5, 64.0f, 0) && hm_read(100, 5, dev, &r);
+        if (ok && (!hm_near(&r, hm_rgba(255, 255, 255, 0), 0u) || s_hm_stats.builds != builds0 + 1u)) {
+            hm_say("rewrite", &r);
+            fprintf(stderr, "gpu mips selftest [rewrite]: want white from a rebuilt chain\n");
+            ok = 0;
+        }
+        if (ok) printf("gpu mips selftest: PASS rewrite    rebuilt at the next decode\n");
+    }
+
+    /* key-edge: red beside the key, blended over black. */
+    if (ok) {
+        hm_fill(2);
+        hm_state(3u | (1u << 8), 1, 0);
+        ok = hm_quad(120, 5, 64.0f, 0) && hm_read(120, 5, dev, &r);
+        if (ok && (r.hi[2] > 0u || r.hi[0] < 100u || r.lo[0] > 0u)) {
+            hm_say("key-edge", &r);
+            fprintf(stderr, "gpu mips selftest [key-edge]: want red fading to black with no blue\n");
+            ok = 0;
+        }
+        if (ok) printf("gpu mips selftest: PASS key-edge   r %u-%u, b max %u\n", r.lo[0], r.hi[0], r.hi[2]);
+    }
+
+    /* gates: each binds level 0 alone. */
+    if (ok) {
+        hm_fill(0);
+        const uint64_t bound0 = s_hm_stats.bound, ct0 = s_hm_stats.plain_ctest, al0 = s_hm_stats.plain_alpha;
+        hm_state(3u | (1u << 8), 0, 0);
+        int g = hm_quad(140, 5, 64.0f, 1) && !s_tex_bound_hm;                       /* through mode */
+        hm_state(3u | (1u << 8), 0, 1);
+        g = g && hm_quad(150, 5, 64.0f, 0) && !s_tex_bound_hm && s_hm_stats.plain_ctest == ct0 + 1u;
+        hm_fill(2);
+        hm_state(3u, 1, 0);                                                         /* RGB: alpha unused */
+        g = g && hm_quad(160, 5, 64.0f, 0) && !s_tex_bound_hm && s_hm_stats.plain_alpha == al0 + 1u;
+        if (!g || s_hm_stats.bound != bound0) {
+            fprintf(stderr, "gpu mips selftest [gates]: a through-mode, color-test or alpha-unused draw bound the chain\n");
+            ok = 0;
+        } else {
+            printf("gpu mips selftest: PASS gates      through mode, color test, unused alpha keep level 0\n");
+        }
+    }
+
+    /* memory: each 64x64 chain is levels 1..6, 1365 texels. */
+    if (ok && s_hm_stats.bytes != s_hm_stats.entries * 1365u * 4u) {
+        fprintf(stderr, "gpu mips selftest [memory]: %llu bytes for %llu chains\n",
+                (unsigned long long)s_hm_stats.bytes, (unsigned long long)s_hm_stats.entries);
+        ok = 0;
+    }
+    free(dev);
+    coherence_reset_targets();
+    return ok;
+}

@@ -467,7 +467,7 @@ static AceUi *s_ace_ui;
 static int s_ace_ui_ready;
 static int s_ace_keyboard_now;                    /* this present's keyboard is the UI pass's */
 static uint64_t s_ace_first_frame_ns;             /* the first accepted present: the notice starts */
-static char s_ace_words[160];
+static char s_ace_words[192];
 
 static void gui_ace_ui_pass(const Sdl3VkUiPass *p) {
     const AceConfig *ace = ace_effective();
@@ -1927,10 +1927,10 @@ static int gui_pause_compose(int w, int h, int rgba) {
         model.hud_on = sdl3vk_hud_is_enabled() != 0;
         /* Enhanced or Ace (ace.h): the menu says what it does; the readout is a live switch while
          * the in-game UI can draw it. Nothing in an authentic run. */
-        static char ace_caption[200];
+        static char ace_caption[232];
         ace_caption[0] = '\0';
         if (g_ace_on) {
-            char words[160];
+            char words[192];
             if (ace_feature_words(words, sizeof(words)) > 0)
                 snprintf(ace_caption, sizeof(ace_caption), "%s: %s", ace_tier_name(), words);
             else
