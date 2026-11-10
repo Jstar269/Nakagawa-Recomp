@@ -366,6 +366,62 @@ static TexEnt *xst_entry_at(uint32_t addr) {
         if (s_tex[i].addr == addr) return &s_tex[i];
     return NULL;
 }
+/* A colour-keyed sprite (#2318): the GE color test keys on the guest's texels, so a color-test draw
+ * binds the texture, never its copy, whose texels are other colours and blend the key into their
+ * edges. Nearest REPLACE through a 1:1 sprite, which psp.frag tests exactly, with the copy ready. */
+static int xst_cell_color_test(int f) {
+    uint32_t tex[XST_W * XST_H], want[XST_W * XST_H];
+    xst_reset();
+    nk_tex_scale_set_sync(1);
+    xst_pattern(tex, 11u);
+    xst_upload(tex);
+    const uint32_t key = tex[0] & XST_RGB;   /* the field colour */
+    unsigned keyed = 0;
+    for (int i = 0; i < XST_W * XST_H; i++) {
+        const int k = (tex[i] & XST_RGB) == key;
+        keyed += (unsigned)k;
+        want[i] = k ? 0u : tex[i];           /* a dropped pixel keeps the cleared frame */
+    }
+    xst_state(XST_BASE, XST_TEX, 3u, 0, 1);
+    s_ge->color_test_enable = 1;
+    s_ge->color_test = 3u;                   /* NOTEQUAL: the key colour is dropped */
+    s_ge->color_ref = key;
+    s_ge->color_test_mask = XST_RGB;
+    ge_state_note_external_write();
+    const uint64_t bound0 = s_cnt_xs_bound, fell0 = s_replay_stats.fallback_prims;
+    int ok = xst_draw(20.0f, 20.0f);         /* decodes and (sync) scales */
+    s_tmpl_ok = 0;
+    ok = ok && xst_draw(60.0f, 20.0f);       /* the copy is stored at this lookup */
+    s_tmpl_ok = 0;
+    ok = ok && xst_draw(100.0f, 20.0f);      /* and would be bound here */
+    const TexEnt *e = xst_entry_at(XST_TEX);
+    const int ready = e && tex_xs_bindable(e) && tex_xs_eligible(e, 1u);
+    s_ge->color_test_enable = 0;
+    ge_state_note_external_write();
+    if (!ok) { fprintf(stderr, "gpu texscale selftest: FAIL color-test: draw or readback failed\n"); return 0; }
+    if (!ready || keyed == 0u || keyed == (unsigned)(XST_W * XST_H)) {
+        fprintf(stderr, "gpu texscale selftest: FAIL color-test: no copy was ready (%d) or the key matched %u of %d "
+                        "texels (vacuous)\n", ready, keyed, XST_W * XST_H);
+        return 0;
+    }
+    if (s_replay_stats.fallback_prims != fell0) {
+        fprintf(stderr, "gpu texscale selftest: FAIL color-test: %llu primitives took the software fallback (want 0)\n",
+                (unsigned long long)(s_replay_stats.fallback_prims - fell0));
+        return 0;
+    }
+    if (s_cnt_xs_bound != bound0) {
+        fprintf(stderr, "gpu texscale selftest: FAIL color-test: a color-test draw bound the scaled copy %llu times "
+                        "(want 0)\n", (unsigned long long)(s_cnt_xs_bound - bound0));
+        return 0;
+    }
+    if (!xst_report("color-test", 20, 20, want, "the first draw is not the keyed texture") ||
+        !xst_report("color-test", 100, 20, want, "the draw with the copy ready is not the keyed texture"))
+        return 0;
+    printf("gpu texscale selftest: PASS %-12s factor=%d render-scale=%d: with the copy ready, the keyed draw is the "
+           "texture (%u texels keyed)\n", "color-test", f, s_scale, keyed);
+    return 1;
+}
+
 static int xst_up_draw(uint32_t addr) {
     xst_state(XST_BASE, addr, 3u, 1, 1);
     s_ge->tex_bufw = XST_BIG;
@@ -1155,9 +1211,9 @@ int gegpu_texscale_selftest(void) {
     static int (*const cells[])(int) = { xst_cell_scaled_draw, xst_cell_large, xst_cell_upload_cap,
                                          xst_cell_not_ready, xst_cell_rewrite, xst_cell_clut, xst_cell_replace,
                                          xst_cell_replace_palette,
-                                         xst_cell_budget, xst_cell_rtt, xst_cell_onetoone };
+                                         xst_cell_budget, xst_cell_rtt, xst_cell_color_test, xst_cell_onetoone };
     static const char *const names[] = { "scaled-draw", "large", "upload-cap", "not-ready", "rewrite", "clut",
-                                         "replace", "replace-pal", "budget", "rtt", "onetoone" };
+                                         "replace", "replace-pal", "budget", "rtt", "color-test", "onetoone" };
     /* The cells before onetoone check copies through 1:1 sprites, so they run with the 1:1 rule
      * off; onetoone turns it back on. */
     s_xs_onetoone_plain = 0;

@@ -169,14 +169,14 @@ int main(int argc, char **argv) {
     sr_perf_init();
 #ifdef SR_GPU_ACE_SELFTEST
     /* Ace Mode with 16x texture filtering, read before the device is made (src/rt/ace.h). */
-    if (!ace_init_spec("v1;af=16;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off", NULL)) {
+    if (!ace_init_spec("v1;af=16;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off", NULL)) {
         fprintf(stderr, "gpu ace selftest: FAIL the Ace line was refused\n");
         free(arena);
         return 1;
     }
 #else
     if (twin_arg && !authentic &&
-        !ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off", NULL)) {
+        !ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off", NULL)) {
         fprintf(stderr, "gpu coherence selftest: FAIL the Ace line for the host twin was refused\n");
         free(arena);
         return 1;
@@ -188,7 +188,7 @@ int main(int argc, char **argv) {
 #ifdef SR_GPU_GLYPH_SELFTEST
     /* Sharp game text (glyph_recon.h) alone: Ace Mode with no texture scaling, and SR_GLYPHS on
      * unless `--glyphs VALUE` says otherwise. `--authentic` leaves Ace Mode off. */
-    if ((!authentic && !ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off", NULL)) ||
+    if ((!authentic && !ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off", NULL)) ||
         !set_env("SR_TEX_SCALE", "off") || !set_env("SR_SMART_2D", "off") ||
         (!authentic && !getenv("SR_GLYPHS") && !set_env("SR_GLYPHS", "on"))) {
         fprintf(stderr, "gpu glyph selftest: FAIL the Ace line or the settings were refused\n");
@@ -199,14 +199,14 @@ int main(int argc, char **argv) {
     if (repl_only) {
         /* SR_TEX_REPLACE alone (the documented default use): no texture scaling, no smart 2D, and
          * the pack written and named before the renderer reads it. */
-        if (!ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off", NULL) ||
+        if (!ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off", NULL) ||
             !set_env("SR_TEX_SCALE", "off") || !set_env("SR_SMART_2D", "off") ||
             !gegpu_texrepl_only_prepare(SR_SELFTEST_BUILD_ROOT)) {
             fprintf(stderr, "gpu texscale selftest: FAIL the Ace line, the settings or the synthetic pack were refused\n");
             free(arena);
             return 1;
         }
-    } else if (!ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off", NULL) ||
+    } else if (!ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off", NULL) ||
         (!getenv("SR_TEX_SCALE") && !set_env("SR_TEX_SCALE", "2")) || !set_env("SR_SMART_2D", "on")) {
         fprintf(stderr, "gpu texscale selftest: FAIL the Ace line or the settings were refused\n");
         free(arena);

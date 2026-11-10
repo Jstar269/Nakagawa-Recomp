@@ -83,7 +83,7 @@ Presentation enhancements operate strictly after or alongside the host graphics 
 Guest code hooks represent the highest-risk category because they directly alter guest architectural state.
 
 - **Allowed:** Intercepting a symbolic function call (e.g., `title_skip_intro_movie`) to set return register `$v0 = 1` and bypass playback; adjusting game progression flags at verified symbolic lifecycle points.
-- **Forbidden:** Specifying raw hex address literals (e.g., `0x08804000`); embedding commercial title binaries or patched MIPS machine code inside the package; executing arbitrary unverified host shellcode.
+- **Forbidden:** Specifying raw hex address literals (e.g., `0x08804000`) in hook symbols, capability names or site function names; embedding commercial title binaries, game bytes or patched MIPS machine code inside the package; executing arbitrary unverified host shellcode. A published package may name its sites' addresses in its site map, under the rules of section 5.1.
 
 ### 2.4. Save-Data Modification (`save_data_modification`)
 
@@ -142,7 +142,26 @@ Enhancements must follow the same strict rule:
 
 - **Symbolic hook targets and capability names only:** Enhancement packages declare hook points using symbolic function names (e.g., `symbol: "title_init_display"`, `symbol: "stage_load_complete"`) and request capabilities via symbolic names (e.g., `capabilities: ["hud_overlay"]`).
 - **Prohibition of raw address literals:** Enhancement package manifests must not contain raw numerical or hexadecimal addresses in hook symbols or capability names. The validator enforces a uniform rejection rule across all forms: 0x-hex (e.g. `0x08804000`), decompiler-style stems (`sub_`, `loc_`, `func_`), bare 6-8 digit hex strings (including all-letter strings like `deadbeef`), and numeric addresses.
-- **Resolution via title profile:** Symbolic hook names are resolved to guest addresses exclusively through the title's private profile and symbol registry. The generic enhancement runtime operates strictly on resolved symbols, keeping all commercial addresses out of package declarations.
+- **Resolution via title profile or site map:** Symbolic hook names are resolved to guest addresses through the title's private profile and symbol registry, or through a published package's site map (section 5.1). The generic enhancement runtime operates strictly on resolved symbols; generic code (`src/`, `tools/`) never holds a title's addresses.
+
+### 5.1. Published Site Data
+
+I publish a title's packages as site data, so that a user who builds from source gets the same enhancements as a user of my own builds. A published package is data about one exact executable, not a piece of it. It holds only:
+
+- the disc ID, the disc version and the SHA-256 of the decrypted executable the title profile selects (usually `EBOOT.BIN`) it was made for;
+- a site map: each symbolic function name the package uses and its address in that executable;
+- each site's change: one of the declared transforms of section 9.2, never code or values;
+- for each byte range a site reads or replaces, a digest of the stock bytes, keyed by the executable (below).
+
+It holds no game bytes: no instruction words, data, tables, strings or values copied from the disc, and no patched code. Every symbolic name is project-authored (from a decompilation or named by the project), never taken from the executable's own symbol table. A disc file path and a CSV column name appear only as locators, naming where a data transform applies. A store site that checks the values the game's loader stores publishes only keyed digests of them (`stock_value_digests`, never `stock_values`): when the game stores a value, the runtime digests it, compares, and scales the value it observed, and on a mismatch it stops the run, naming the site. Where a transform's result depends on the stock value (such as twice it), the package publishes the rule, never the result.
+
+**Keyed digests.** A plain SHA-256 of one 32-bit instruction word can be inverted by trying all $2^{32}$ words, so it would publish the word. Every stock digest in a published package is therefore an HMAC-SHA-256 whose key is derived from the whole executable (a different hash from the published executable digest, so that digest does not give the key away). Only someone who holds the executable can compute or check it, and they already have the bytes.
+
+**Exact match, fail closed.** A published package applies only to the executable it names. Before any site is read, build-package refuses it by name when the disc ID differs (`other_disc`: another region or another game), when the disc version differs (`other_revision`), or when the disc ID and version match but the executable digest does not (`modified_executable`: a patched or re-encoded image). A site whose keyed digest does not match refuses the whole package (`site_mismatch`). The build stays authentic, as section 6 requires.
+
+**Why this is publishable.** It is the same practice as decompilation projects that publish symbol maps (function names and addresses for one ROM checksum) and emulator patch and cheat databases that publish addresses and their own replacement values for a named game ID. In each case the game comes only from the user's own copy, and the published file is useless without it.
+
+**Where they live.** Published packages are separate data files in `assets/enhancements/`, one per disc and package, and pass the publication audit's no-game-bytes check before they enter the public tree. That check sees only the file. It refuses any property outside the format, and any string holding an address, an instruction-word-shaped or long hex run, a base64-like run or an escaped byte. It cannot tell a keyed digest from 32 raw bytes, and no pattern check can stop free text encoded on purpose; those are its stated limits. The export command holds the executable and computes every digest from it, so it is what makes each digest a digest, and review covers the text.
 
 ---
 
@@ -155,6 +174,7 @@ The declaration schema is kept lean and focused on core metadata and capability 
 - **Required root properties:** `schema_version` (must be 1), `id` (package identifier), `display_name`, `version` (semver), `category` (one of the 6 recognized categories), `target_title_id` (title ID or `*`), and `capabilities` (non-empty array of symbolic capability names).
 - **Optional root properties:** `min_runtime_version` (semver), `hooks` (array of hook objects with `symbol` and `type` only), and—for declarative frame-rate rescale packages (category `timing_frame_presentation`, and the `game_version`, `executable_sha256` and `sites` of a `guest_memory_code_hook` package, section 11.3.6)—`game_version` (exact title version string), `executable_sha256` (64-char lowercase hex SHA-256 of the stock guest ELF), `rng_policy` (`mode` and `reason`), and `sites` (non-empty array of symbolic instruction-site transform descriptors).
 - **Symbolic site descriptors (`sites`):** Each site entry declares `id` (site identifier), `function` (symbolic function name, never a raw hex address or `FUN_`/`sub_`/`loc_`/`func_` stem), `insn_offset` (non-negative 4-byte-aligned byte offset inside the function), `stock_digest` (64-char lowercase hex SHA-256 of the expected little-endian stock MIPS instruction word or words), optional `word_count` (an integer from 1 to 16, default `1`, the number of words `stock_digest` covers; only `1` has a defined rewrite, so a larger value refuses the package), and `transform` (one of the site transforms of section 9.2). A `gate_30hz_alt` site also declares `alternates`, a list of 1 to 4 distinct function symbols; every other transform refuses that field. A `clip_x_widen` site (category `guest_memory_code_hook`, section 11.3.6) also declares `clip_register` (`v0` or `v1`) and `clip_offsets` (1 to 4 distinct 16-byte-aligned byte offsets from 0 to 65536); no other transform takes them, and a `guest_memory_code_hook` package takes no other transform and carries only `game_version`, `executable_sha256` and `sites` of the timing fields.
+- **Published packages (section 5.1):** a published package adds `published_package` (must be 1), `disc_id`, `disc_version`, `digest_scheme` (`hmac-sha256-executable-key-v1`) and `site_map` (each symbolic name the package uses and its `0x%08x` address, and no other), and requires `executable_sha256`. Its stock digests (`stock_digest`, `low_stock_digest`, a data site's `stock_digest`, a data file's `sha256`) are HMAC-SHA-256 under `published_digest_key()`, SHA-256 of a fixed tag and the whole executable. It may not declare `stock_values`: a store site declares `stock_value_digests` instead, the keyed digests (`keyed_stock_value_digest()`) of the tag `stock value`, the site id and each stock value's 32 bits. Codegen embeds the key in the user's own build, and the store-site check (`nk_enh_store`) digests each value the game stores, compares it, and scales the observed value as the builder scales a stock value; a mismatch, or a result outside the f32 or s32 range, stops the run with `ENHANCEMENT_DATA_MISMATCH`, naming the site. `python tools/enhancement_package.py --publish <package> --elf <selected.elf> --base <hex> --disc-id <ID> --disc-version <n.nn> --out <disc_id>-<kind>.json` writes one from a private package and its `.symbols.json`, after checking that it resolves back to the same declaration. Its names come only from that symbol map, and it refuses any name the executable's own symbol table holds. A function without a decompilation name may carry a project-assigned name ending in its own address (`hst_fn_0001ea64`); a name whose 8-hex suffix differs from its site-map address is refused. A published package's `version` has no build metadata and a pre-release tag of at most 16 characters, and its `rng_policy.reason` is at most 1024 characters. Codegen resolves a published package only through `resolve_published_package()`, which refuses `modified_executable` and `site_mismatch`; build-package refuses `other_disc`, `other_revision` and `modified_executable` first, from the disc's PARAM.SFO. `tools/publish_audit.py` (`check_enhancement_packages`) refuses any package outside `assets/enhancements/`, any `.symbols.json`, and any file there, whatever its extension, that is not a valid published package named `<disc id, lowercase>-<kind>.json`. It also refuses a package in which any string or key, outside the digest slots and the site map's addresses, holds an address literal, an 8-hex-digit token delimited by anything but a letter or digit (an instruction word, or an address; a site-map name's own-address suffix is the one exception), a run of more than 8 hex digits, a base64-like run of 32 or more characters, an escaped byte or a control character. A regular-expression gate cannot stop text encoded on purpose: shorter base64 runs, or hex in chunks of 7 digits or fewer, pass it. Bounded fields (`rng_policy.reason` at 1024 characters) limit that, and review covers the rest. The audit checks only a digest's shape: it cannot tell a keyed digest from 32 raw bytes without the executable, so the export command, which computes every digest from the executable, is what makes it a digest.
 - **No speculative payloads:** Unimplemented category payloads (`assets`, `presentation`, `timing`, `camera`, `save_data`) remain forbidden in the schema until their respective runtime loaders land.
 
 The package loader and AOT codegen hook (`tools/enhancement_package.py` and `tools/codegen.py`) strictly adhere to fail-closed principles:
@@ -310,10 +330,10 @@ The player offers three play modes per game (#2055):
 - **Authentic** is the standard: the game as released, recreating the PSP as closely as the project can. It is the
   default for a new library.
 - **Enhanced** turns on the project-authored improvements that work for any game: texture filtering, crisp system
-  text, the speed readout, the game badge, widescreen, smooth motion, clean pitched sound and sharper enlarging. A new
-  library starts with texture filtering, crisp system text and the game badge on and the rest off, and a graphics
-  preset sets crisp system text and sharper enlarging (section 10.1). Each one is a *part* that can be turned off for
-  the library or for a single game.
+  text, the speed readout, the game badge, widescreen, smooth motion, clean pitched sound, finer patches and sharper
+  enlarging. A new library starts with texture filtering, crisp system text and the game badge on and the rest off,
+  and a graphics preset sets crisp system text and sharper enlarging (section 10.1); finer patches are in no preset.
+  Each one is a *part* that can be turned off for the library or for a single game.
 - **Ace** is Enhanced plus the improvements made for that game alone. Today that is the title's 60 FPS game logic
   package (section 9). The player offers Ace only for a title with a usable package; its own parts can be turned off
   for that game too.
@@ -326,7 +346,7 @@ Code identifiers that say `ace` mean "Enhanced or Ace"; every name a player read
 ### 10.1. The Launch Line
 
 The launcher always exports `SR_ACE`, so an inherited value cannot opt a launch in: `off` for Authentic, or
-`v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;smooth=x2;sas=off`. `tier` (`enhanced` or `ace`) only names the
+`v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;smooth=x2;sas=off;tess=off`. `tier` (`enhanced` or `ace`) only names the
 run, in the game badge, the pause menu and the stamps; a line without it is an Enhanced run. `cull` (`on` or `off`,
 section 11.3.6) is the other key a line may leave out: a missing `cull` is off, and `cull=on` needs `tier=ace`. Every
 other key is required, in any order, each once; a value for a feature this build does not carry (`smooth=match`)
@@ -349,7 +369,8 @@ counters do not run. Nothing is printed, except one `TEX_SCALE: off` line when t
 scaling or the smart 2D filter, which names the request and does not obey it (section 10.10), one `TWIN: off` or
 `TWIN: refused` line when `SR_GPU_TWIN_COLOR` is set, which changes nothing else (section 10.11), one line that
 names an unknown or refused `SR_GPU_DST_READ` value, which changes nothing else, and the
-`sdl3vk: destination reads: interlock|snapshot` line that every run prints (below).
+`sdl3vk: destination reads: interlock|snapshot` line that every run prints (below). Finer patches (section 10.14)
+have no environment variable, so an authentic run prints nothing for them.
 `gpu-coherence-selftest` checks the samplers and the pool; `display-smoke` keeps its image hash.
 
 One device feature setting outside Ace applies to every run, Authentic included, because it is a correctness fix and not an
@@ -375,6 +396,9 @@ the device is created with no feature outside Ace.
   do Smooth motion's in-between frames (section 10.6).
 - **Sound:** `sas=sinc` writes band-limited sample values into the guest's SAS output buffer, so it is a
   guest-visible item. Its entry is section 11.3.1.
+- **Patches:** `tess=2` to `tess=4` draws every triangle patch with finer triangles, which changes the frames a
+  present commits to guest VRAM, and under `SR_GE_TIMING=1` it alters the GE timing model's clocks. It is a
+  guest-visible item. Its entry is section 11.3.7.
 
 ### 10.4. Stamps and Evidence
 
@@ -621,7 +645,7 @@ that builds one clip-space matrix per camera and tests object bounds against it.
 
 ```json
 "enhanced": {"default": "enhanced", "af": "16", "text": "on", "readout": "off", "notice": "on", "wide": "off",
-            "smooth": "off", "sas": "off", "upscale": "off"},
+            "smooth": "off", "sas": "off", "tess": "off", "upscale": "off"},
 "title_play": {"ULUS10000": {"mode": "ace", "af": "8"}, "ULES00000": {"mode": "library", "logic_60": "off"}}
 ```
 
@@ -980,6 +1004,62 @@ and not admitted under section 11.2: section 11.3.5 is its entry, and this secti
   the CLUT unchanged; the setting idle at 1x; and an authentic run that rebuilds nothing and draws the same picture
   with `SR_GLYPHS` unset and on. `gpu-glyph-mutant` removes the content check of a bound tile, keys the tiles on the
   cache's sampled content hash instead of its generation, removes the per-present count, and the VRAM, hard-edge, colour and Ace guards, each of which must fail its own cell.
+
+### 10.14. Finer Bezier and Spline Patches
+
+The GE draws Bezier and spline patches by cutting them into triangles at the division the game sets with
+`PATCHDIVISION` (#2053). Games keep it low, so curved surfaces show facets, the more so above 1x. This feature
+multiplies that division on the host for every game, with no per-title data. It is guest-visible (section 11.1) and
+alters the GE timing model's clocks under `SR_GE_TIMING=1`: section 11.3.7 is its entry and says what the guest can
+observe; this section says how it draws. The code is `draw_patch` and `ge_patch_tess_init` in `src/rt/ge.c`, which
+both renderers share, so the software renderer and the Vulkan renderer draw the same finer triangles.
+
+- **Setting.** The `tess` key of the `SR_ACE` launch line (section 10.1): `tess=off`, or the factor `tess=2`,
+  `tess=3` or `tess=4`, a required key like every key but `tier`. In the player it is the part "Finer patches"
+  (`"tess"`: `2`, `3`, `4` or `off`) on the library's Settings > Enhanced page and on each game's own page
+  (section 10.9). It is off in a fresh settings file, is in no graphics preset and is not turned on by choosing
+  Enhanced or Ace: a player turns it on, for the library or for one game. It takes effect only in Ace Mode: an
+  authentic run has no launch line, so its factor is never read, and a line with any other value is refused whole
+  (`ACE_MODE: refused (bad value)`). The runtime reads the factor once when it starts, and there is no environment
+  variable for it.
+- **Only triangle patches.** A line or point patch (`PATCHPRIMITIVE` 1 or 2) keeps the PSP's division: a finer
+  wireframe or point grid is a denser picture, not a smoother surface.
+- **Cap.** While the finer grid would have more than 262144 vertices, F drops along a divisor chain (4, 2, 1 or
+  3, 1), so every edge vertex of a lowered draw's grid lies on its neighbours' finer grid. The cap is per draw: where
+  a lowered draw meets a neighbour drawn at the full factor, the neighbour's extra edge vertices lie on the curve and
+  the lowered draw's edge between them is straight, which can leave a crack up to a pixel or so wide. The PSP's own
+  cap does the same for neighbours whose divisions differ. Each lowered draw is counted, and the run's exit line
+  reports the count.
+- **Guest memory.** The vertex and index data in guest memory and the GE state the game reads back are unchanged.
+  What a present commits to guest VRAM does change, which makes the feature guest-visible (section 11.3.7).
+- **GE timing.** With the GE timing model off (the default) the extra triangles cost host time only. With
+  `SR_GE_TIMING=1` the model charges a patch's control points and then the rows and spans of every triangle drawn,
+  the finer ones included, so factor F on a division d costs exactly the GE time of the division d x F, which is not
+  the time of the PSP's division d. On 8888 targets without depth test, for untextured spans and textures that run
+  at fill rate, each added triangle adds a fixed row charge on spans under 48 pixels, so a small patch costs
+  more and a patch whose wide spans the finer grid cuts below 48 pixels can cost less. Elsewhere (depth-tested,
+  16-bit targets, most textured spans) a span is charged per pixel, and the cost changes only with the coverage
+  of the finer surface, in either direction. List completion, `sceGeDrawSync`,
+  `sceGeListSync` and the finish interrupt move with it (section 11.3.7).
+- **Stamps.** `PATCH_TESS: on (factor=<F>, at most 262144 vertices a patch draw)` at start, followed by the line
+  section 11.3.7 describes, and `PATCH_TESS: exit (quads=<n>, capped_draws=<n>)` when the run ends, through
+  `sr_at_process_end()`. `ACE_MODE: on (...)` carries `tess=`, the flight recorder's `runtime.enhancements` carries
+  the launch line, and the report's `effective` block has `"tess"`. Section 10.4 applies: the run is an Ace run.
+- **Tests.** `ge-patch-tess-selftest` runs the production `ge.c` software renderer:
+  - the factor the `tess` key carries (`ace-selftest` pins the key, its values and its Ace gate);
+  - factor F on a division d against the PSP's own division d x F, for a Bezier and a four-patch spline surface with
+    a colour per control point, at factors 2 to 4, and against division d to show it is finer;
+  - F x F times the quads;
+  - factor 1 against the default run;
+  - two Bezier patches that share a curved edge, and a four-patch spline, with no background pixel between their
+    outer edges at factors 1 to 4, and a control that draws the two halves at factors 4 and 1 and requires the check
+    to find the crack;
+  - line and point patches unchanged;
+  - the vertex cap and its divisor chain;
+  - a draw the PSP's own 65535-vertex cap lowers, which is lowered first and multiplied after;
+  - with the GE timing model on, factor F on a division d costing exactly the GE clocks of the division d x F: more
+    than d for a small patch, and different from d for a large one;
+  - the exit line, with the quads drawn and the capped draws.
 
 ## 11. Guest-Visible Items
 
@@ -1410,3 +1490,40 @@ The Layer 2 mechanism of section 10.8, for a title that skips objects outside it
   report's `cull_untracked`) instead of being scaled without a record.
 - **Tier:** Ace (one title). **Default:** off.
 - **Nothing worse (section 11.2, item 4):** not shown. The tests are synthetic.
+
+#### 11.3.7. Finer Bezier and Spline Patches (`tess`)
+
+The feature of section 10.14 (#2053). How it draws is described there; this entry is what the guest can observe.
+
+- **Status: guest-visible, and it alters GE timing under `SR_GE_TIMING=1`.** Each present commits the frame it shows
+  to guest VRAM, so a frame with a finer patch is the frame the guest keeps. Its key, its library and per-title
+  settings and this entry are in place (section 11.2, items 2, 3 and 6). The runs of item 4 do not exist, so it stays
+  off by default and in no preset.
+- **Key and off switch.** `tess=off`, `tess=2`, `tess=3` or `tess=4` on the launch line (section 10.1), a required
+  key. A line without it, or with any other value, is refused, and the run is Authentic. Its off switch is `tess=off`
+  in a run, and `"tess": "off"` for the library or for one game (section 10.9); an unknown value in a settings
+  file reads as off, an unset value in the library block is off, an unset value for one game follows the library
+  setting, and an authentic run, which has no line, never has a factor. Section 11.3.5 lists what
+  adding a key to the `SR_ACE` launch line costs.
+- **Never silent.** A run with it on prints, after its `PATCH_TESS: on` line, one line naming the feature as
+  guest-visible and as altering GE timing under `SR_GE_TIMING=1`, and at its end a `PATCH_TESS: exit` line with the
+  quads drawn and the draws the vertex cap lowered, each of which can leave a crack (section 10.14).
+- **What it changes:** the pixels of every triangle patch the game draws, in the frame a present commits: the curved
+  surface is drawn with F x F times the triangles.
+- **VRAM bytes:** differ in those frames, at the pixels where the finer surface differs from the PSP's facets.
+- **Readbacks:** differ the same way, for a GE or display readback, save picture or screenshot that covers them, and
+  for a render-to-texture pass that draws patches.
+- **Timing:** differs with the GE timing model on. With `SR_GE_TIMING=1` every finer triangle's rows and spans are
+  charged, so factor F on a division d costs what the division d x F costs, not what the PSP's division d costs
+  (section 10.14). Where the fixed row charge applies (8888 without depth test, spans under 48 pixels),
+  a list with small patches completes later in guest time, and `sceGeDrawSync`, `sceGeListSync` and the finish
+  interrupt wait longer, and a list with large patches can complete earlier; elsewhere the change follows the
+  finer surface's coverage, in either direction. With the model off (the
+  default) the GE timing is the PSP path's. The VBLANK schedule and the media clocks are unchanged either way. The
+  finer triangles are host work on the GE thread, the thread the guest runs on, so a guest frame with many patches
+  can take longer in host time. Not measured on a title.
+- **I/O speed:** unchanged.
+- **Tier:** Enhanced. **Default:** off, and Ace-only: an authentic run has no launch line, so it is never on there.
+  It is in no graphics preset, because it changes GE timing.
+- **Nothing worse (section 11.2, item 4):** not shown. It may not be on by default before the runs item 4 lists
+  exist.
