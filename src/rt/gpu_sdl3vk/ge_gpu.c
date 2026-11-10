@@ -114,10 +114,11 @@
  *    authentic image. Off (the default), no twin is made and every path is the one above.
  *  - Host mip chains (Enhanced part mips=on, tex_mips.h; ENHANCEMENT_CONTRACT.md 10.16): a cache
  *    entry the game gives one level, filtered linearly when minified and not a render target, is
- *    made with a full chain whose levels 1.. are built on the host from the decoded level 0. Its
- *    plain view and set still hold level 0 alone; a transformed draw whose texture alpha, if it
- *    has any, is used binds the chain (tex_hm_applies) and psp.frag samples it with gradients per
- *    device pixel (F_HOSTMIP). Off (the default, and always in an authentic run), every entry,
+ *    made with a full chain whose levels 1.. are built on the host from the decoded level 0, at
+ *    the first bind after each decode that the chain applies to (tex_hm_build). Its plain view
+ *    and set still hold level 0 alone; a transformed draw whose texture alpha, if it has any, is
+ *    used binds the chain (tex_hm_applies) and psp.frag samples it with gradients per device
+ *    pixel (F_HOSTMIP). Off (the default, and always in an authentic run), every entry,
  *    sampler and set is the one above.
  */
 #include "ge_gpu.h"
@@ -328,10 +329,12 @@ typedef struct {
      * a host-only image beside the guest-resolution one. NULL until a draw's rectangle is rebuilt. */
     struct GlSet *gl;
     /* Host mip chain (tex_mips.h, Enhanced mips=on): `img` has hm_levels levels, 1.. built on the
-     * host from level 0 at every decode, and hm_set samples them all. `view` and `set` keep level
-     * 0 alone, so a draw the chain does not apply to samples exactly as without it. 0: none. */
+     * host from level 0 by the first bind after a decode that the chain applies to, and hm_set
+     * samples them all. `view` and `set` keep level 0 alone, so a draw the chain does not apply
+     * to samples exactly as without it. 0: none. */
     uint32_t hm_levels;
     int hm_alpha;                          /* some level-0 texel has alpha below 255 */
+    int hm_ready;                          /* levels 1.. hold the chain of level 0's content */
     VkImageView hm_view; VkSampler hm_smp;
     VkDescriptorSet hm_set;
 } TexEnt;
@@ -538,7 +541,7 @@ static uint32_t *s_hm_out;                 /* levels 1.. of the chain being buil
 static float *s_hm_work;
 static int s_tex_bound_hm;                 /* the last tex_get bound a chain */
 static struct {
-    uint64_t entries, builds, reused, texels, build_ns, bound, plain_alpha, plain_target,
+    uint64_t entries, builds, reused, redecodes, texels, build_ns, bound, plain_alpha, plain_target,
              set_failures, bytes, bytes_peak, cache_peak;
 } s_hm_stats;
 /* Built chains by the content of their level 0 (a full 64-bit hash of the decoded texels and the
@@ -4333,17 +4336,41 @@ static void tex_hm_cache_put(uint64_t hash, uint32_t w, uint32_t h, int alpha, s
     if (s_hm_cache_bytes > s_hm_stats.cache_peak) s_hm_stats.cache_peak = s_hm_cache_bytes;
 }
 
-/* Entry `e`'s host chain for level 0 in s_texscratch (left as it is): the cached chain of the
- * same contents, or one built now and kept. Uploads levels 1..hm_levels-1; the last moves the
- * image to SHADER_READ_ONLY. Sets e->hm_alpha. */
-static int tex_hm_upload(TexEnt *e, VkImage img, VkImageLayout *lay, int w, int h) {
+/* The entry whose level 0 s_texscratch holds: set by the decode in this tex_get call, cleared at
+ * the start of each call, so a bind straight after a decode builds the chain from the texels just
+ * decoded and any other bind decodes level 0 again. */
+static const TexEnt *s_hm_scratch;
+
+/* Whether any of the `n` texels has alpha below 255 (a decode's cheap scan: the draw rule needs it
+ * before the chain is built). */
+static int tex_hm_any_alpha(const uint32_t *t, size_t n) {
+    for (size_t i = 0; i < n; i++)
+        if ((t[i] >> 24) != 0xFFu) return 1;
+    return 0;
+}
+
+/* Entry `e`'s host chain, at the first bind after a decode that it applies to: level 0 from
+ * s_texscratch (decoded again when this tex_get call's decode was not this entry's), then the
+ * cached chain of the same contents, or one built now and kept. Uploads levels 1..hm_levels-1
+ * and leaves the image in SHADER_READ_ONLY, as the decode did. A texture only through-mode
+ * draws, unused alpha or a render target ever meets costs no build. */
+static int tex_hm_build(TexEnt *e) {
     const uint64_t t0 = SDL_GetTicksNS();
-    const size_t texels = nk_tex_mips_chain_texels((uint32_t)w, (uint32_t)h);
-    const uint64_t hash = tex_hm_content_hash(s_texscratch, (uint32_t)w, (uint32_t)h);
+    const uint32_t w = (uint32_t)e->w, h = (uint32_t)e->h;
+    if (s_hm_scratch != e) {
+        /* Draws recorded since the last submit may read level 0, which the transfer below moves
+         * out of SHADER_READ_ONLY: they go first, as for an update in place. */
+        if (e->pending) submit_pending();
+        ge_decode_tex_rgba(s_texscratch);
+        s_hm_scratch = e;
+        s_hm_stats.redecodes++;
+    }
+    const size_t texels = nk_tex_mips_chain_texels(w, h);
+    const uint64_t hash = tex_hm_content_hash(s_texscratch, w, h);
     const uint32_t *chain = NULL;
     for (int i = 0; i < HM_CACHE_SLOTS; i++) {
         HmCached *c = &s_hm_cache[i];
-        if (c->chain && c->hash == hash && c->w == (uint32_t)w && c->h == (uint32_t)h && c->texels == texels) {
+        if (c->chain && c->hash == hash && c->w == w && c->h == h && c->texels == texels) {
             c->lru = ++s_hm_cache_clock;
             e->hm_alpha = c->alpha;
             chain = c->chain;
@@ -4352,26 +4379,33 @@ static int tex_hm_upload(TexEnt *e, VkImage img, VkImageLayout *lay, int w, int 
         }
     }
     if (!chain) {
-        const uint32_t built = nk_tex_mips_build(&s_hm_curve, s_texscratch, (uint32_t)w, (uint32_t)h,
-                                                 s_hm_work, s_hm_out, &e->hm_alpha);
+        const uint32_t built = nk_tex_mips_build(&s_hm_curve, s_texscratch, w, h, s_hm_work, s_hm_out,
+                                                 &e->hm_alpha);
         if (built + 1u != e->hm_levels) { s_hm_stats.build_ns += SDL_GetTicksNS() - t0; return 0; }
         s_hm_stats.builds++;
         s_hm_stats.texels += texels;
-        tex_hm_cache_put(hash, (uint32_t)w, (uint32_t)h, e->hm_alpha, texels);
+        tex_hm_cache_put(hash, w, h, e->hm_alpha, texels);
         chain = s_hm_out;
     }
     s_hm_stats.build_ns += SDL_GetTicksNS() - t0;
+    VkImageLayout lay = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    to_layout(s_cmd, e->img, VK_IMAGE_ASPECT_COLOR_BIT, &lay, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
     size_t off = 0;
     for (uint32_t l = 1; l < e->hm_levels; l++) {
-        const uint32_t lw = nk_tex_mips_dim((uint32_t)w, l), lh = nk_tex_mips_dim((uint32_t)h, l);
-        if (!tex_upload_level(img, lay, l, l + 1u == e->hm_levels, chain + off, (int)lw, (int)lh))
+        const uint32_t lw = nk_tex_mips_dim(w, l), lh = nk_tex_mips_dim(h, l);
+        if (!tex_upload_level(e->img, &lay, l, l + 1u == e->hm_levels, chain + off, (int)lw, (int)lh)) {
+            /* Level 0 is intact; draws go on sampling it, and the next bind tries again. */
+            to_layout(s_cmd, e->img, VK_IMAGE_ASPECT_COLOR_BIT, &lay, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
             return 0;
+        }
         off += (size_t)lw * lh;
     }
+    e->hm_ready = 1;
     return 1;
 }
 
-/* `hm`: the entry whose host chain (tex_mips.h) follows level 0, or NULL. */
+/* `hm`: the entry whose host chain (tex_mips.h) follows level 0, or NULL. The decode uploads
+ * level 0 alone and marks the chain stale; tex_hm_build makes it at the first bind it applies to. */
 static int tex_decode_upload(VkImage img, int w, int h, uint32_t levels, TexEnt *hm) {
     VkImageLayout lay = VK_IMAGE_LAYOUT_UNDEFINED;
     const int chain = hm && hm->hm_levels > 1u && levels == 1u;
@@ -4388,7 +4422,7 @@ static int tex_decode_upload(VkImage img, int w, int h, uint32_t levels, TexEnt 
             sr_perf_texture_decode(perf_decode_started,
                                    level ? tex_level_source_size(level) : tex_source_size());
         cpu_profile_add(GEGPU_CPU_TEXTURE_DECODE, decode_started);
-        if (!tex_upload_level(img, &lay, level, level + 1u == levels && !chain, s_texscratch, lw, lh))
+        if (!tex_upload_level(img, &lay, level, level + 1u == levels, s_texscratch, lw, lh))
             return 0;
 #ifdef SR_GPU_COHERENCE_SELFTEST
         if (level == s_selftest_upload_fail_after) {
@@ -4397,7 +4431,12 @@ static int tex_decode_upload(VkImage img, int w, int h, uint32_t levels, TexEnt 
         }
 #endif
     }
-    return chain ? tex_hm_upload(hm, img, &lay, w, h) : 1;
+    if (chain) {
+        hm->hm_ready = 0;
+        hm->hm_alpha = tex_hm_any_alpha(s_texscratch, (size_t)w * (size_t)h);
+        s_hm_scratch = hm;
+    }
+    return 1;
 }
 
 /* Whether TEXLEVEL mode `mode` picks the level of detail per fragment (automatic 0, slope 2):
@@ -4989,7 +5028,7 @@ static int tex_hm_applies(const TexEnt *e) {
 }
 
 static VkDescriptorSet tex_hm_or_entry_set(TexEnt *e) {
-    if (s_hm && tex_hm_applies(e)) {
+    if (s_hm && tex_hm_applies(e) && (e->hm_ready || tex_hm_build(e))) {
         s_tex_bound_hm = 1;
         s_hm_stats.bound++;
         return e->hm_set;
@@ -5004,11 +5043,11 @@ static int s_hm_reported;
 static void tex_hm_report(void) {
     if (!s_hm || s_hm_reported) return;
     s_hm_reported = 1;
-    fprintf(stderr, "HOST_MIPS: exit (entries=%llu, builds=%llu, reused=%llu, texels=%llu, build_ms=%.1f, "
+    fprintf(stderr, "HOST_MIPS: exit (entries=%llu, builds=%llu, reused=%llu, redecodes=%llu, texels=%llu, build_ms=%.1f, "
                     "bound=%llu, plain_alpha_unused=%llu, plain_target=%llu, set_failures=%llu, "
                     "chain_peak_kib=%llu, cache_peak_kib=%llu)\n",
             (unsigned long long)s_hm_stats.entries, (unsigned long long)s_hm_stats.builds,
-            (unsigned long long)s_hm_stats.reused,
+            (unsigned long long)s_hm_stats.reused, (unsigned long long)s_hm_stats.redecodes,
             (unsigned long long)s_hm_stats.texels, (double)s_hm_stats.build_ns / 1e6,
             (unsigned long long)s_hm_stats.bound, (unsigned long long)s_hm_stats.plain_alpha,
             (unsigned long long)s_hm_stats.plain_target,
@@ -5111,6 +5150,7 @@ static VkDescriptorSet tex_get(void) {
     s_tex_bound_scale = 1;
     s_tex_bound_hm = 0;
     s_tex_cur = NULL;
+    s_hm_scratch = NULL;
     tex_xs_collect();
     int w = s_ge->tex_w, h = s_ge->tex_h;
     if (w <= 0 || h <= 0 || w > 512 || h > 512) return s_white_set;

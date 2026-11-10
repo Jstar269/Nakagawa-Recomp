@@ -16,9 +16,12 @@
  *    is the chain's linear-light grey, where level 0 alone gives the sRGB blend (about 96).
  *  - palette: the same index image under another palette is another cache entry with its own
  *    chain (red and blue give sRGB 188, 0, 188); the first palette's entry is still its own.
- *  - rewrite: guest bytes rewritten under the same palette rebuild the chain at the next decode.
+ *  - rewrite: guest bytes rewritten under the same palette rebuild the chain at the next bind.
  *  - reuse: the checkerboard written back is contents the chain cache has seen: its chain is
  *    uploaded again with no build, and samples the same grey.
+ *  - deferred: new contents (one-texel stripes) drawn in through mode only build nothing; the
+ *    first transformed, minified draw of them decodes level 0 again and builds the chain once,
+ *    and samples the same grey.
  *  - key-edge: opaque red beside the colour key (entry 2, magenta, alpha 0), blended by source
  *    alpha over black: no device pixel takes any blue, at the edge or anywhere.
  *  - gates: a through-mode draw and a draw whose texture function ignores the alpha of a
@@ -43,7 +46,7 @@ static void hm_fill(int kind) {
     for (uint32_t v = 0; v < 64u; v++)
         for (uint32_t u = 0; u < 64u; u++)
             t[v * 64u + u] = kind == 0 ? (uint8_t)((u ^ v) & 1u) : kind == 1 ? (uint8_t)1u
-                                                                  : (uint8_t)(u < 32u ? 3u : 2u);
+                           : kind == 3 ? (uint8_t)(v & 1u) : (uint8_t)(u < 32u ? 3u : 2u);
     sr_gpu_vram_dirty(HM_TEX, 64u * 64u);
 }
 
@@ -281,7 +284,7 @@ int gegpu_mips_selftest(void) {
             fprintf(stderr, "gpu mips selftest [rewrite]: want white from a rebuilt chain\n");
             ok = 0;
         }
-        if (ok) printf("gpu mips selftest: PASS rewrite    rebuilt at the next decode\n");
+        if (ok) printf("gpu mips selftest: PASS rewrite    rebuilt at the next bind\n");
     }
 
     /* reuse: the checkerboard written back into the same texture is contents the cache has seen,
@@ -299,6 +302,27 @@ int gegpu_mips_selftest(void) {
             ok = 0;
         }
         if (ok) printf("gpu mips selftest: PASS reuse      contents seen before upload their kept chain\n");
+    }
+
+    /* deferred: a through-mode draw of new contents builds nothing; the transformed draw after it
+       finds no fresh decode, decodes level 0 again, and builds the chain once. */
+    if (ok) {
+        const uint64_t builds0 = s_hm_stats.builds, redecodes0 = s_hm_stats.redecodes;
+        hm_fill(3);
+        hm_state(3u | (1u << 8), 0, 0);
+        const int through = hm_quad(130, 5, 64.0f, 1) && !s_tex_bound_hm && s_hm_stats.builds == builds0;
+        ok = through && hm_quad(130, 5, 64.0f, 0) && s_tex_bound_hm && hm_read(130, 5, dev, &r);
+        if (!through || (ok && (!hm_near(&r, grey, 1u) || s_hm_stats.builds != builds0 + 1u ||
+                                s_hm_stats.redecodes != redecodes0 + 1u))) {
+            if (through) hm_say("deferred", &r);
+            fprintf(stderr, "gpu mips selftest [deferred]: want no build for the through-mode draw (%s), then one "
+                            "build from a fresh decode (builds +%llu, redecodes +%llu)\n", through ? "ok" : "BAD",
+                    (unsigned long long)(s_hm_stats.builds - builds0),
+                    (unsigned long long)(s_hm_stats.redecodes - redecodes0));
+            ok = 0;
+        }
+        if (ok) printf("gpu mips selftest: PASS deferred   through mode builds nothing; the first minified draw "
+                       "builds once\n");
     }
 
     /* key-edge: red beside the key, blended over black. */

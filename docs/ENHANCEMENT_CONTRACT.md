@@ -1047,6 +1047,11 @@ code is `src/rt/gpu_sdl3vk/tex_mips.h` (the chain) and the `tex_hm_*` functions 
   target, read back as a texture, never gets one: its contents are guest drawing, not texture data. A texture that
   changes every frame, from a CPU write or a DMA, is decoded again as before, and its chain follows it: built again
   for contents the renderer has not seen, or taken from the chain cache (below) for contents it has.
+- **When a chain is built.** At the first bind after a decode that the chain applies to (the next item), not at the
+  decode: a decode uploads level 0 alone and marks the chain stale. The bind builds it from the texels that decode
+  left, or, when the texture was decoded for an earlier draw, decodes level 0 again first. Contents that only
+  through-mode draws, alpha-unused draws or render targets ever meet, such as a loading screen's or a menu's
+  textures, cost no build.
   A CLUT texture's palette is part of its cache key, so each palette has its own entry and its own chain, and a
   palette animation that comes back to a palette finds the chain it built the first time.
 - **Which draws.** A draw binds the chain only when it is transformed (through-mode HUDs, menus and text keep
@@ -1082,12 +1087,14 @@ code is `src/rt/gpu_sdl3vk/tex_mips.h` (the chain) and the `tex_hm_*` functions 
   cache keyed by a 64-bit hash of every decoded level-0 texel and the size: contents it has seen upload their kept
   chain instead of building it (the hash costs about a fifteenth of a build). The cache holds at most 32 MiB, about
   two and a half times the chains Hot Shots Tennis keeps resident at 4x, and drops the least recently used chain
-  first. The exit stamp gives the builds, the reuses, the time of both and the cache's peak.
+  first. The exit stamp gives the builds, the reuses, the level-0 decodes a late build repeated, the time of all
+  three and the cache's peak.
 - **Stamps.** `ACE_MODE: mips on (textures with one level get host-built mip chains)` after the `ACE_MODE: on` line;
   `HOST_MIPS: on (filter=box in linear light, alpha-weighted, key fill; bias=0 at <S>x; anisotropy=<A>)` and the
   guest-visible line section 11.3.8 describes when the renderer starts; `HOST_MIPS: exit (entries=, builds=, reused=,
-  texels=, build_ms=, bound=, plain_alpha_unused=, plain_target=, set_failures=, chain_peak_kib=, cache_peak_kib=)`
-  (`build_ms` is the time of the hash, the cache lookup and the builds; `texels` counts built ones) when it
+  redecodes=, texels=, build_ms=, bound=, plain_alpha_unused=, plain_target=, set_failures=, chain_peak_kib=,
+  cache_peak_kib=)` (`build_ms` is the time of the repeated decodes, the hash, the cache lookup and the builds;
+  `texels` counts built ones) when it
   stops, or, on the `SR_EXIT_AT_VBLANK` path that skips the renderer's shutdown, from `ace_finish` (once either
   way). The report's `effective` block has `"mips"`, the game badge lists "smooth far textures", and the flight
   recorder's `runtime.enhancements` carries the launch line. Section 10.4 applies: the run is an Enhanced run. If the
@@ -1103,8 +1110,9 @@ code is `src/rt/gpu_sdl3vk/tex_mips.h` (the chain) and the `tex_hm_*` functions 
     64x64 single-level CLUT checker drawn 5 pixels wide samples the chain's grey, not level 0's aliasing; a draw at
     two texels per guest pixel matches the same draw on level 0 alone pixel for pixel from 2x, and is the chain's
     grey at 1x; a second palette builds a second chain and the first palette, back again, finds its own; a rewrite
-    of the texels rebuilds the chain, and the checker written back takes its cached chain with no build; a
-    colour-keyed edge blended over black takes no key colour; through-mode and alpha-unused draws keep level 0, and a
+    of the texels rebuilds the chain, and the checker written back takes its cached chain with no build; new
+    contents drawn in through mode build nothing, and the first minified draw of them decodes level 0 again and
+    builds once; a colour-keyed edge blended over black takes no key colour; through-mode and alpha-unused draws keep level 0, and a
     colour-tested draw stays with the software renderer; the chain bytes are 1365 texels an entry. It runs at render
     scales 4, 2 and 1, with 16x texture filtering, and with the part off, where the minified draw must show level
     0's aliasing and no entry may have a chain.
@@ -1640,8 +1648,9 @@ The feature of section 10.16 (#1273). How it draws is described there; this entr
   for a render-to-texture pass that draws such a texture minified.
 - **Timing:** unchanged in guest time: the GE timing model (on or off) charges the draw by its texture and
   footprint, not by the level the host samples, and the VBLANK schedule and the media clocks are unchanged. A chain
-  is built on the GE thread, the thread the guest runs on, at each upload of the texture, so a frame that uploads
-  many textures can take longer in host time. The measured cost on a title is in the pull request that brought it.
+  is built on the GE thread, the thread the guest runs on, at the first draw after each upload that samples it, so
+  a frame that brings many new textures into such draws can take longer in host time. The measured cost on a title
+  is in the pull request that brought it.
 - **I/O speed:** unchanged.
 - **Tier:** Enhanced. **Default:** off. It is in no graphics preset.
 - **Nothing worse (section 11.2, item 4):** not shown. It may not be on by default before the runs item 4 lists
