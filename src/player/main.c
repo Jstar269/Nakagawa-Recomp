@@ -1493,7 +1493,7 @@ static int SDLCALL player_report_thread_main(void *userdata) {
     argv[argc++] = job->config_dir;
     argv[argc] = NULL;
     (void)remove(job->output_path);   /* the spawn appends */
-    if (!nk_platform_spawn_process(python_path, argv, NULL, NULL, job->output_path, &process)) {
+    if (!nk_platform_spawn_tool(python_path, argv, NULL, NULL, job->output_path, &process)) {
         out->phase = PLAYER_REPORT_FAILED;
         snprintf(out->message, sizeof(out->message), "Python could not be started.");
         goto finished;

@@ -310,3 +310,29 @@ behavior is correct. Choose the frame count for the checkpoint being reviewed,
 then inspect the corresponding private snapshot or window evidence separately.
 Keep title inputs, captures, logs, and detailed measurements outside the public
 repository; report only a verdict, timings, and counts.
+
+## Experimental titles from the command line
+
+`--launch-now` never starts an experimental title. It refuses it with
+`EXPERIMENTAL_LAUNCH_UNAVAILABLE` and does not add it to the library, so its compatibility checks are
+reviewed first. A scripted or headless repro of an experimental title uses a library entry instead:
+
+1. Add the title from its card (**ADD TO LIBRARY**) and build it from its page, once.
+2. Start it by disc ID, without the launcher window:
+
+```powershell
+& .\nakagawa_player.exe --launch-title=<disc ID> --headless-launch
+```
+
+An experimental entry whose package is not built yet exits 3 with "not built for this PC yet".
+`--headless-accept-presented-frames=N` and `--headless-timeout-ms=N` work as in the section above.
+The child runtime inherits your environment, apart from what the launch sets itself (it clears
+`SR_NOVBPACE`, for example), so diagnostic switches such as `SR_EXIT_AT_VBLANK=<V>`, `SR_PERF=1`
+and `SR_PROFILE=1` reach the game.
+
+`SR_PROFILE=1` prints its hot-path table (`--- PERF_PROFILE ---`) to the runtime's standard error
+when the run ends. That includes a run stopped by `SR_EXIT_AT_VBLANK`, an `SR_FBDUMP` capture exit,
+the `SR_WATCHDOG_EXIT` watchdog, the stops for an unsupported import or a guest fault, and the stop
+when the guest's own exit path fails: each of those ends the process without the C runtime's exit handlers, and prints the table first.
+`SR_PROFILE_DUMP_VBLANKS=<N>` also prints it every N VBLANKs, for a run that may be killed from
+outside.

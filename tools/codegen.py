@@ -2828,6 +2828,10 @@ def _vfpu_cop2_effect(addr, w, options, delay_branch_pc):
     handler = _VFPU_COP2_MOVE_FORMS.get(sub)
     if handler is None:
         raise Unsupported(f"cop2 sub {sub} or register {imm} at 0x{addr:08x}")
+    if sub == 7 and imm == 131:
+        # VFPU_CC keeps only bits 0..5: mtvc then mfvc read back written & 0x3f in every cell
+        # (unrecorded PSP read, PSP-3000, 2026-11-08, issue #326, probe case vfpu-cc-cmov).
+        return f"{dst} = {R(rt(w))} & 0x3fu;", None, 0
     return handler(w, src, dst)
 
 
@@ -2863,7 +2867,7 @@ def _vfpu3_vcmp(addr, w, options, delay_branch_pc):
     body = (f"float _a[4],_b[4]; sr_vread(_a,s,{_arr(si)},{n},s->vfpuCtrl[0]); "
             f"sr_vread(_b,s,{_arr(ti)},{n},s->vfpuCtrl[1]); "
             f"int _cc=0,_or=0,_and=1,_aff=(1<<4)|(1<<5); "
-            f"for(int _i=0;_i<{n};_i++){{ float _x=_a[_i],_y=_b[_i]; (void)_x; (void)_y; int _c=({_C}); "
+            f"for(int _i=0;_i<{n};_i++){{ float _x=sr_vfpu_ftz(_a[_i]),_y=sr_vfpu_ftz(_b[_i]); (void)_x; (void)_y; int _c=({_C}); "
             f"_cc|=(_c<<_i);_or|=_c;_and&=_c;_aff|=1<<_i; }} "
             f"s->vfpuCtrl[3]=(s->vfpuCtrl[3]&~_aff)|((_cc|(_or<<4)|(_and<<5))&_aff);{_EAT}")
     return "{ " + body + " }", None, 0
@@ -2880,7 +2884,8 @@ def _vfpu3_minmax(addr, w, options, delay_branch_pc):
             f"if(_an||_bn){{ int32_t _ai,_bi,_r; memcpy(&_ai,&_a[_i],4); memcpy(&_bi,&_b[_i],4); "
             f"if({ismin}) _r=(_ai<0&&_bi<0)?(_bi<_ai?_ai:_bi):(_ai<_bi?_ai:_bi); "
             f"else _r=(_ai<0&&_bi<0)?(_ai<_bi?_ai:_bi):(_bi<_ai?_ai:_bi); memcpy(&_d[_i],&_r,4); }} "
-            f"else _d[_i]={ismin}?(_a[_i]<_b[_i]?_a[_i]:_b[_i]):(_b[_i]<_a[_i]?_a[_i]:_b[_i]); }} "
+            f"else {{ float _fa=sr_vfpu_daz(_a[_i]),_fb=sr_vfpu_daz(_b[_i]); "
+            f"_d[_i]={ismin}?(_fa<_fb?_a[_i]:_b[_i]):(_fb<_fa?_a[_i]:_b[_i]); }} }} "
             + _nanv(addr, "vmin.s" if ismin == "1" else "vmax.s", vd, "_d", n,
                     "_a", n, "_b", n, options=options)
             + f"sr_vwrite(s,{_arr(di)},_d,{n},s->vfpuCtrl[2]);{_EAT}")
@@ -2982,12 +2987,12 @@ def _vfpu_matrix_scale(addr, w, options, delay_branch_pc):
     writes = [f"float _sc = s->v[{scalar_vidx}];"]
     for row in range(side - 1):
         for col in range(side):
-            writes.append(f"s->v[{mreg_index(vd, side, col, row)}] = sr_vf_mul(s->v[{mreg_index(vs, side, col, row)}], _sc);")
+            writes.append(f"s->v[{mreg_index(vd, side, col, row)}] = sr_vfpu_mul(s->v[{mreg_index(vs, side, col, row)}], _sc);")
     last_row_vs = [mreg_index(vs, side, col, side - 1) for col in range(side)]
     last_row_vd = [mreg_index(vd, side, col, side - 1) for col in range(side)]
     writes.append(f"float _s[4], _t[4]; sr_vread(_s, s, {_arr(last_row_vs)}, {side}, s->vfpuCtrl[0]);")
     writes.append(f"sr_vread(_t, s, (const uint8_t[]){{{scalar_vidx},{scalar_vidx},{scalar_vidx},{scalar_vidx}}}, {side}, s->vfpuCtrl[1]);")
-    writes.append(f"float _d[4]; for (int _i = 0; _i < {side}; _i++) _d[_i] = sr_vf_mul(_s[_i], _t[_i]);")
+    writes.append(f"float _d[4]; for (int _i = 0; _i < {side}; _i++) _d[_i] = sr_vfpu_mul(_s[_i], _t[_i]);")
     writes.append(_nanv(addr, "vmscl", vd, "_d", side, "_s", side, "_t", side,
                         options=options))
     writes.append(f"sr_vwrite(s, {_arr(last_row_vd)}, _d, {side}, s->vfpuCtrl[2]);")
@@ -3063,8 +3068,8 @@ def _vfpu_binary_arithmetic(addr, w, options, delay_branch_pc):
     di, si = vreg_indices(vd, n), vreg_indices(vs, n)
     ti = vreg_indices(vt, n)
     # Call literals, so tools/recomp_helper_inventory.py sees every helper the emitter writes.
-    call = {(0x18, 0): "sr_vf_add(", (0x18, 1): "sr_vf_sub(", (0x18, 7): "sr_vf_div(",
-            (0x19, 0): "sr_vf_mul("}[(op, sub)]
+    call = {(0x18, 0): "sr_vfpu_add(", (0x18, 1): "sr_vfpu_sub(", (0x18, 7): "sr_vfpu_div(",
+            (0x19, 0): "sr_vfpu_mul("}[(op, sub)]
     body = (f"float _s[4],_t[4],_d[4]; "
             f"sr_vread(_s,s,{_arr(si)},{n},s->vfpuCtrl[0]); "
             f"sr_vread(_t,s,{_arr(ti)},{n},s->vfpuCtrl[1]); "
@@ -3177,7 +3182,7 @@ def _vfpu_scale_effect(addr, w, options, delay_branch_pc):
     scalar = vreg_indices(vt, 1)[0]
     body = (f"float _s[4],_d[4]; sr_vread(_s,s,{_arr(si)},{n},s->vfpuCtrl[0]); "
             f"float _sc=s->v[{scalar}]; "
-            f"for(int _i=0;_i<{n};_i++) _d[_i]=sr_vf_mul(_s[_i],_sc); "
+            f"for(int _i=0;_i<{n};_i++) _d[_i]=sr_vfpu_mul(_s[_i],_sc); "
             + _nanv(addr, "vscl.s", vd, "_d", n, "_s", n, "(&_sc)", 1, options=options)
             + f"sr_vwrite(s,{_arr(di)},_d,{n},s->vfpuCtrl[2]);{_EAT}")
     return "{ " + body + " }", None, 0
@@ -3192,12 +3197,12 @@ def _vfpu_matrix_scale_effect(addr, w, options, delay_branch_pc):
     writes.append(f"float _sc = s->v[{scalar_vidx}];")
     for row in range(side - 1):
         for col in range(side):
-            writes.append(f"s->v[{mreg_index(vd, side, col, row)}] = sr_vf_mul(s->v[{mreg_index(vs, side, col, row)}], _sc);")
+            writes.append(f"s->v[{mreg_index(vd, side, col, row)}] = sr_vfpu_mul(s->v[{mreg_index(vs, side, col, row)}], _sc);")
     last_row_vs = [mreg_index(vs, side, col, side - 1) for col in range(side)]
     last_row_vd = [mreg_index(vd, side, col, side - 1) for col in range(side)]
     writes.append(f"float _s[4], _t[4]; sr_vread(_s, s, {_arr(last_row_vs)}, {side}, s->vfpuCtrl[0]);")
     writes.append(f"sr_vread(_t, s, (const uint8_t[]){{{scalar_vidx},{scalar_vidx},{scalar_vidx},{scalar_vidx}}}, {side}, s->vfpuCtrl[1]);")
-    writes.append(f"float _d[4]; for (int _i = 0; _i < {side}; _i++) _d[_i] = sr_vf_mul(_s[_i], _t[_i]);")
+    writes.append(f"float _d[4]; for (int _i = 0; _i < {side}; _i++) _d[_i] = sr_vfpu_mul(_s[_i], _t[_i]);")
     writes.append(_nanv(addr, "vmscl", vd, "_d", side, "_s", side, "_t", side,
                          options=options))
     writes.append(f"sr_vwrite(s, {_arr(last_row_vd)}, _d, {side}, s->vfpuCtrl[2]);")
@@ -4304,7 +4309,16 @@ def _emit_jal(ctx, out, addr, w, ds, dsw):
     else:
         _call_stmt = "    " + emit_checked_dispatch_call(
             G(target), G((addr + 8) & 0xFFFFFFFF))
-    if _jal_rw is not None:
+    if _jal_rw is not None and _jal_rw["kind"] == "clip_x_widen":
+        # clip_x_widen (contract section 10.8): the stock call runs unchanged; when it returns,
+        # the runtime scales the x row of the clip matrices at the offsets from the pointer the
+        # call returned, by the Widescreen factor. It does nothing while Widescreen is off.
+        out.extend(_call_stmt.split("\n"))
+        _offsets = ", ".join(f"{o}u" for o in _jal_rw["offsets"])
+        out.append(f"    {{ static const uint32_t _nk_clip_off[] = {{{_offsets}}};")
+        out.append(f"      sr_enhancement_widen_clip_x(s->r[{_jal_rw['reg']}], _nk_clip_off, "
+                   f"{len(_jal_rw['offsets'])}u); }}")
+    elif _jal_rw is not None:
         # A gate on a call (gate_30hz, gate_30hz_hold or gate_30hz_alt; no other rewrite
         # plans a call site): the delay slot above always runs; the call is gated while the
         # toggle is on. A gate_30hz_hold call returns its float argument unchanged
@@ -5960,7 +5974,7 @@ def _load_enhancement_package(elf, known, symbols, enhancement_pkg_path, enhance
             for site in ENHANCEMENT_SITES.values():
                 stock = site["stock_words"][0]
                 if is_control(stock) and not (
-                    (stock >> 26) == 3 and site["rewrite"]["kind"] == "gate"
+                    (stock >> 26) == 3 and site["rewrite"]["kind"] in ("gate", "clip_x_widen")
                 ):
                     raise enhancement_package.EnhancementPackageError(
                         f"site {site['id']}: only a jal call site can be rewritten among "

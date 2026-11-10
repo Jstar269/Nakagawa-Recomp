@@ -92,15 +92,24 @@ static SrProfEntry *prof_find(uint32_t pc) {
 }
 #endif
 
+static int g_prof_final_dumped;
+
 void sr_profile_init(void) {
     memset(g_prof_table, 0, sizeof(g_prof_table));
     g_prof_lookup_drops = 0;
+    g_prof_final_dumped = 0;
     const char *e = getenv("SR_PROFILE");
     g_prof_enabled = (e != NULL && strcmp(e, "0") != 0) || ((g_sr_debug & 0x04) != 0);
     if (g_prof_enabled) {
         fprintf(stderr, "[profiler] Hot-path profiling enabled (SR_PROFILE=1 or SR_DEBUG & 0x04)\n");
-        atexit(sr_profile_dump);
+        atexit(sr_profile_dump_final);
     }
+}
+
+void sr_profile_dump_final(void) {
+    if (!g_prof_enabled || g_prof_final_dumped) return;
+    g_prof_final_dumped = 1;
+    sr_profile_dump();
 }
 
 void sr_profile_dump(void) {

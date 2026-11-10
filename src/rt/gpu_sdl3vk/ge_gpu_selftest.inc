@@ -3376,6 +3376,229 @@ static int coherence_run_clut_format_same_palette(void) {
     return 1;
 }
 
+/* Through mode takes z as the GE's unsigned 16-bit depth. A title that writes float positions
+ * there may put any float in z: two triangles at z = -1.0 (a 2D overlay drawn last, with the
+ * depth test off) must still be drawn. The Vulkan path maps z / 65535 to the clip depth, so an
+ * unclamped -1.0 lies outside the depth range and every such triangle was clipped away. A
+ * fraction must give the same depth on both renderers too: ge.c truncates a pixel's depth and the
+ * Vulkan path rounds z / 65535 to the nearest step, so an undecoded 100.7 was 100 on one and 101
+ * on the other. An infinite z saturates and is drawn, a NaN z is dropped, and a transform-mode z
+ * is left alone. */
+typedef struct ThroughFloatVtx { uint32_t c; float x, y, z; } ThroughFloatVtx;
+
+static uint32_t tfz_f24(float f) { uint32_t u; memcpy(&u, &f, 4); return u >> 8; }
+
+/* Does a float z of `z` pass the depth test `zfunc` against the stored depth `depth`? One list
+ * draws a through-mode quad at z = depth (an integer) with the depth test ALWAYS and depth writes
+ * on, then a second quad over it at `z` with the test `zfunc` and depth writes off. Returns 1 when
+ * the second quad's colour is there, 0 when the first one's is, -1 when neither is or the readback
+ * failed. `gpu`: through the Vulkan hooks, else ge.c alone. `transform`: the second quad is drawn
+ * in transform mode, with identity matrices and a viewport that maps a clip z to
+ * z * 30000 + 32768, so its z is a model coordinate the decoder must leave alone. */
+static int through_float_z_passes(float z, uint32_t depth, int gpu, uint32_t zfunc, int transform) {
+    const uint32_t base = 0x04000000u | 0x00160000u, stride = 512u;
+    const uint32_t vaddr = 0x00101800u, list_addr = 0x00100800u;
+    const uint32_t under = 0xFF3366CCu, over = 0xFF20C040u;   /* ABGR: opaque */
+    uint32_t *guest = (uint32_t *)SR_HOST(base);
+    coherence_reset_targets();
+    memset(guest, 0, stride * FB_H * 4u);
+    sr_gpu_vram_dirty(base, stride * FB_H * 4u);
+    memset(s_ge, 0, sizeof(*s_ge));
+    ThroughFloatVtx *vtx = (ThroughFloatVtx *)SR_HOST(vaddr);
+    for (int q = 0; q < 2; q++) {
+        const uint32_t c = q ? over : under;
+        const float qz = q ? z : (float)depth;
+        /* through mode: pixels 16..48; transform mode: clip coordinates of pixels 12..60, 13.6..54.4 */
+        const int clip = q && transform;
+        const float x0 = clip ? -0.95f : 16.0f, x1 = clip ? -0.75f : 48.0f;
+        const float y0 = clip ? 0.9f : 16.0f, y1 = clip ? 0.6f : 48.0f;
+        ThroughFloatVtx *v = vtx + 6 * q;
+        v[0] = (ThroughFloatVtx){ c, x0, y0, qz };
+        v[1] = (ThroughFloatVtx){ c, x1, y0, qz };
+        v[2] = (ThroughFloatVtx){ c, x0, y1, qz };
+        v[3] = (ThroughFloatVtx){ c, x1, y0, qz };
+        v[4] = (ThroughFloatVtx){ c, x1, y1, qz };
+        v[5] = (ThroughFloatVtx){ c, x0, y1, qz };
+    }
+    uint32_t *dl = (uint32_t *)SR_HOST(list_addr);
+    int p = 0;
+    #define DL_EMIT(cmd, val) dl[p++] = ((uint32_t)(cmd) << 24) | ((uint32_t)(val) & 0x00FFFFFFu)
+    DL_EMIT(0x10, 0);
+    DL_EMIT(0x9C, base & 0x00FFFFFFu);
+    DL_EMIT(0x9D, stride | ((base & 0xFF000000u) >> 8));
+    DL_EMIT(0x9E, 0x00080000u);                         /* depth buffer */
+    DL_EMIT(0x9F, 512u | (0x04000000u >> 8));
+    DL_EMIT(0xD2, 3);
+    DL_EMIT(0xD3, 0);
+    DL_EMIT(0x1E, 0);                                   /* no texture */
+    DL_EMIT(0x1D, 0);                                   /* no culling */
+    DL_EMIT(0x21, 0);
+    DL_EMIT(0x22, 0);
+    DL_EMIT(0x23, 1);                                   /* depth test */
+    DL_EMIT(0xDE, 1);                                   /* ALWAYS */
+    DL_EMIT(0xE7, 0);                                   /* depth writes on */
+    DL_EMIT(0x15, 0);
+    DL_EMIT(0x16, ((FB_H - 1) << 10) | 479);
+    DL_EMIT(0xD4, 0);
+    DL_EMIT(0xD5, ((FB_H - 1) << 10) | (FB_W - 1));
+    DL_EMIT(0xD6, 0);
+    DL_EMIT(0xD7, 0xFFFF);
+    DL_EMIT(0x12, (1u << 23) | (7u << 2) | (3u << 7)); /* through, 8888 colour, float pos */
+    DL_EMIT(0x01, vaddr & 0x00FFFFFFu);
+    DL_EMIT(0x04, (3u << 16) | 6u);
+    if (transform) {
+        static const float ident43[12] = { 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0 };
+        static const float ident44[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+        DL_EMIT(0x3A, 0);                               /* world, view and projection: identity */
+        for (int k = 0; k < 12; k++) DL_EMIT(0x3B, tfz_f24(ident43[k]));
+        DL_EMIT(0x3C, 0);
+        for (int k = 0; k < 12; k++) DL_EMIT(0x3D, tfz_f24(ident43[k]));
+        DL_EMIT(0x3E, 0);
+        for (int k = 0; k < 16; k++) DL_EMIT(0x3F, tfz_f24(ident44[k]));
+        DL_EMIT(0x42, tfz_f24(240.0f));
+        DL_EMIT(0x43, tfz_f24(-136.0f));
+        DL_EMIT(0x44, tfz_f24(30000.0f));
+        DL_EMIT(0x45, tfz_f24(2048.0f));
+        DL_EMIT(0x46, tfz_f24(2048.0f));
+        DL_EMIT(0x47, tfz_f24(32768.0f));
+        DL_EMIT(0x4C, (2048u - 240u) << 4);
+        DL_EMIT(0x4D, (2048u - 136u) << 4);
+        DL_EMIT(0x12, (7u << 2) | (3u << 7));           /* transform mode, 8888 colour, float pos */
+    }
+    DL_EMIT(0xDE, zfunc);
+    DL_EMIT(0xE7, 1);                                   /* depth writes off */
+    DL_EMIT(0x04, (3u << 16) | 6u);                     /* the next six vertices */
+    DL_EMIT(0x0F, 0);
+    DL_EMIT(0x0C, 0);
+    #undef DL_EMIT
+    ge_set_gpu_hooks(gpu ? &k_hooks : NULL);
+    ge_run_list(list_addr, 0);
+    ge_set_gpu_hooks(&k_hooks);
+    if (gpu) {
+        GeGpuFbDescriptor desc = { .addr = base, .format = 3, .stride = stride,
+                                   .width = 480, .height = 272 };
+        if (!gegpu_sync_guest_fb(&desc)) return -1;
+    }
+    const uint32_t px = guest[32u * stride + 32u] & 0x00FFFFFFu;
+    return px == (over & 0x00FFFFFFu) ? 1 : px == (under & 0x00FFFFFFu) ? 0 : -1;
+}
+
+static int coherence_run_through_float_z(void) {
+    const char *name = "through-float-z";
+    const uint32_t base = 0x04000000u | 0x00160000u, stride = 512u;
+    const uint32_t vaddr = 0x00101800u, list_addr = 0x00100800u;
+    const uint32_t colour = 0xFF3366CCu;               /* ABGR: opaque */
+    const float zs[2] = { -1.0f, 70000.0f };           /* below and above the 16-bit range */
+    uint32_t *guest = (uint32_t *)SR_HOST(base);
+    int ok = 1;
+    for (int k = 0; ok && k < 2; k++) {
+        coherence_reset_targets();
+        memset(guest, 0, stride * FB_H * 4u);
+        sr_gpu_vram_dirty(base, stride * FB_H * 4u);
+        memset(s_ge, 0, sizeof(*s_ge));
+        ThroughFloatVtx *vtx = (ThroughFloatVtx *)SR_HOST(vaddr);
+        const float x0 = 16.0f, y0 = 16.0f, x1 = 48.0f, y1 = 48.0f, z = zs[k];
+        vtx[0] = (ThroughFloatVtx){ colour, x0, y0, z };
+        vtx[1] = (ThroughFloatVtx){ colour, x1, y0, z };
+        vtx[2] = (ThroughFloatVtx){ colour, x0, y1, z };
+        vtx[3] = (ThroughFloatVtx){ colour, x1, y0, z };
+        vtx[4] = (ThroughFloatVtx){ colour, x1, y1, z };
+        vtx[5] = (ThroughFloatVtx){ colour, x0, y1, z };
+        uint32_t *dl = (uint32_t *)SR_HOST(list_addr);
+        int p = 0;
+        #define DL_EMIT(cmd, val) dl[p++] = ((uint32_t)(cmd) << 24) | ((uint32_t)(val) & 0x00FFFFFFu)
+        DL_EMIT(0x10, 0);
+        DL_EMIT(0x9C, base & 0x00FFFFFFu);
+        DL_EMIT(0x9D, stride | ((base & 0xFF000000u) >> 8));
+        DL_EMIT(0xD2, 3);
+        DL_EMIT(0xD3, 0);
+        DL_EMIT(0x1E, 0);                                   /* no texture */
+        DL_EMIT(0x1D, 0);                                   /* no culling */
+        DL_EMIT(0x21, 0);
+        DL_EMIT(0x22, 0);
+        DL_EMIT(0x23, 0);                                   /* no depth test */
+        DL_EMIT(0xD4, 0);
+        DL_EMIT(0xD5, ((FB_H - 1) << 10) | (FB_W - 1));
+        DL_EMIT(0x12, (1u << 23) | (7u << 2) | (3u << 7)); /* through, 8888 colour, float pos */
+        DL_EMIT(0x01, vaddr & 0x00FFFFFFu);
+        DL_EMIT(0x04, (3u << 16) | 6u);                     /* two triangles */
+        DL_EMIT(0x0F, 0);
+        DL_EMIT(0x0C, 0);
+        #undef DL_EMIT
+        ge_set_gpu_hooks(&k_hooks);
+        ge_run_list(list_addr, 0);
+        GeGpuFbDescriptor desc = { .addr = base, .format = 3, .stride = stride,
+                                   .width = 480, .height = 272 };
+        if (!gegpu_sync_guest_fb(&desc)) {
+            fprintf(stderr, "gpu coherence selftest [%s]: GPU readback failed\n", name);
+            coherence_reset_targets();
+            return 0;
+        }
+        const uint32_t inside = guest[32u * stride + 32u], outside = guest[8u * stride + 8u];
+        /* RGB only: the alpha byte of a 32-bit target holds stencil, which this draw leaves. */
+        if ((inside & 0x00FFFFFFu) != (colour & 0x00FFFFFFu) || (outside & 0x00FFFFFFu) != 0u) {
+            fprintf(stderr, "gpu coherence selftest [%s]: z=%.1f: inside=0x%08x (want 0x%08x) "
+                            "outside=0x%08x%s\n", name, (double)z, inside, colour, outside,
+                    (inside & 0x00FFFFFFu) == 0u ? " -- the triangles were clipped away" : "");
+            ok = 0;
+        }
+    }
+    /* The depth each renderer takes for a z with a fraction, for one just outside the range and for
+     * an infinite one: the depth test EQUAL must pass against `want` and fail against its
+     * neighbour. An infinite z was dropped by the non-finite vertex rule before the decoder
+     * saturated it; it is drawn now, at the end of the range it lies beyond. */
+    static const struct { float z; uint32_t want; } k_frac[] = {
+        { 100.7f, 100u }, { 100.3f, 100u }, { 0.99f, 0u }, { 65534.7f, 65534u },
+        { -0.5f, 0u }, { 65535.5f, 65535u }, { INFINITY, 65535u }, { -INFINITY, 0u },
+    };
+    for (unsigned i = 0; i < sizeof k_frac / sizeof k_frac[0]; i++) {
+        const uint32_t want = k_frac[i].want, other = want < 65535u ? want + 1u : want - 1u;
+        for (int gpu = 1; gpu >= 0; gpu--) {
+            const int at_want = through_float_z_passes(k_frac[i].z, want, gpu, 2u, 0);
+            const int at_other = through_float_z_passes(k_frac[i].z, other, gpu, 2u, 0);
+            if (at_want == 1 && at_other == 0) continue;
+            fprintf(stderr, "gpu coherence selftest [%s]: z=%.2f on %s: equal to depth %u: %d (want 1), "
+                            "to depth %u: %d (want 0)\n", name, (double)k_frac[i].z,
+                    gpu ? "the Vulkan path" : "ge.c", want, at_want, other, at_other);
+            ok = 0;
+        }
+    }
+    /* A NaN z stays NaN: the non-finite vertex rule drops the primitive on both renderers, even
+     * under a depth test that always passes. The same quad at a finite z is drawn, so the cell can
+     * tell the two apart. */
+    for (int gpu = 1; gpu >= 0; gpu--) {
+        const int nan_drawn = through_float_z_passes(NAN, 100u, gpu, 1u, 0);
+        const int finite_drawn = through_float_z_passes(50.0f, 100u, gpu, 1u, 0);
+        if (nan_drawn != 0 || finite_drawn != 1) {
+            fprintf(stderr, "gpu coherence selftest [%s]: on %s a quad at z=NaN under the depth test ALWAYS "
+                            "was drawn: %d (want 0), and one at z=50: %d (want 1)\n", name,
+                    gpu ? "the Vulkan path" : "ge.c", nan_drawn, finite_drawn);
+            ok = 0;
+        }
+    }
+    /* Through mode only: a transform-mode z is a model coordinate, and the decoder must leave it
+     * alone. With identity matrices and a viewport of z * 30000 + 32768, a model z of -0.5 is depth
+     * 17768 and one of 0.25 is depth 40268; saturated or truncated in the decoder, both would be
+     * depth 32768. */
+    static const struct { float z; uint32_t want; } k_scope[] = { { -0.5f, 17768u }, { 0.25f, 40268u } };
+    for (unsigned i = 0; i < sizeof k_scope / sizeof k_scope[0]; i++)
+        for (int gpu = 1; gpu >= 0; gpu--) {
+            const int at_want = through_float_z_passes(k_scope[i].z, k_scope[i].want, gpu, 2u, 1);
+            const int at_zero = through_float_z_passes(k_scope[i].z, 32768u, gpu, 2u, 1);
+            if (at_want == 1 && at_zero == 0) continue;
+            fprintf(stderr, "gpu coherence selftest [%s]: transform-mode z=%.2f on %s: equal to depth %u: %d "
+                            "(want 1), to depth 32768: %d (want 0) -- the decoder changed a transform-mode z\n",
+                    name, (double)k_scope[i].z, gpu ? "the Vulkan path" : "ge.c", k_scope[i].want, at_want,
+                    at_zero);
+            ok = 0;
+        }
+    coherence_reset_targets();
+    if (ok)
+        printf("gpu coherence selftest: PASS %-22s z=-1.0 and z=70000.0 drawn; a fraction and an infinity "
+               "are the same depth on both renderers; NaN dropped; transform-mode z untouched\n", name);
+    return ok;
+}
+
 /* The same palette change sent the way a title sends it: one list loads the palette, draws a
  * CLUT8 sprite, changes only CLUTFORMAT (shift 1), and draws again. Every command moves the
  * GE state serial, so the second sprite must rebuild its state and decode through index >> 1. */
@@ -5958,6 +6181,90 @@ static int wide_frame(int gpu, int flags, uint32_t *vram, uint32_t *canvas) {
     return ok;
 }
 
+/* clip_x_widen (docs/ENHANCEMENT_CONTRACT.md section 11.3.6): with Fill on the runtime scales the x row (elements
+ * 0, 4, 8, 12) of each column-major clip matrix by 480 / (480 + 2D) and touches nothing else; with Fill off it
+ * leaves every float alone. Two matrices at different offsets from one base, in guest RAM away from the frames. */
+static int wide_clip_x_check(int wing, int cull, uint32_t off0, uint32_t off1) {
+    const uint32_t base = SR_RAM_BASE + 0x00f00000u;
+    const uint32_t offsets[2] = {off0, off1};
+    /* A stock matrix pair: what the title's call leaves each time it rebuilds them. */
+    const int rebuilds = 2;   /* call, call again with no rebuild, then rebuild and call */
+    int ok = 1;
+    for (int pass = 0; pass < rebuilds + 1; pass++) {
+        if (pass != 1) {   /* pass 1 is the call that finds the matrices as the last call left them */
+            for (uint32_t m = 0; m < 2; m++)
+                for (uint32_t e = 0; e < 16u; e++) {
+                    const float v = 1.0f + (float)e + 100.0f * (float)m;
+                    memcpy(SR_HOST(base + offsets[m] + 4u * e), &v, sizeof v);
+                }
+        }
+        ge_wide_set_cull(cull);
+        sr_enhancement_widen_clip_x(base, offsets, 2u);
+        ge_wide_set_cull(0);
+        /* Scaled once with a wing and the key on, whatever the pass; any other pair leaves them alone. */
+        const float scale = (wing && cull) ? 480.0f / (480.0f + 2.0f * (float)wing) : 1.0f;
+        for (uint32_t m = 0; m < 2; m++)
+            for (uint32_t e = 0; e < 16u; e++) {
+                float got;
+                memcpy(&got, SR_HOST(base + offsets[m] + 4u * e), sizeof got);
+                const float v = 1.0f + (float)e + 100.0f * (float)m;
+                const float want = (e % 4u == 0u) ? v * scale : v;
+                if (got != want) {
+                    fprintf(stderr, "gpu coherence selftest [wide-fill]: clip_x_widen wing %d cull %d pass %d "
+                                    "matrix %u element %u: %g, want %g\n", wing, cull, pass, m, e, (double)got,
+                            (double)want);
+                    ok = 0;
+                }
+            }
+    }
+    return ok;
+}
+
+/* The table that stops a matrix being scaled twice holds 4096 matrices and never evicts. One call listing more
+ * than that must scale each tracked matrix once, leave every other matrix untouched (never scaled untracked),
+ * and count those in ge_wide_cull_untracked, which the run report names; a repeat call changes nothing and
+ * counts them again. Run after the other clip_x_widen cells: the table is never cleared. */
+#define FILL_N 4200u
+static int wide_clip_x_fill_check(int wing) {
+    static uint32_t offsets[FILL_N];
+    const uint32_t base = SR_RAM_BASE + 0x00f00000u, first = 0x20000u;   /* clear of the other cells' matrices */
+    const float scale = 480.0f / (480.0f + 2.0f * (float)wing);
+    int ok = 1;
+    for (uint32_t i = 0; i < FILL_N; i++) {
+        offsets[i] = first + 64u * i;
+        for (uint32_t e = 0; e < 16u; e++) {
+            const float v = 1.0f + (float)e + (float)(i % 7u);
+            memcpy(SR_HOST(base + offsets[i] + 4u * e), &v, sizeof v);
+        }
+    }
+    unsigned long left_alone[2] = {0, 0};
+    for (int pass = 0; pass < 2; pass++) {
+        const unsigned long u0 = ge_wide_cull_untracked();
+        ge_wide_set_cull(1);
+        sr_enhancement_widen_clip_x(base, offsets, FILL_N);
+        ge_wide_set_cull(0);
+        unsigned long scaled = 0, untouched = 0;
+        for (uint32_t i = 0; i < FILL_N; i++) {
+            float got;
+            memcpy(&got, SR_HOST(base + offsets[i]), sizeof got);
+            const float v = 1.0f + (float)(i % 7u);
+            if (got == v * scale) scaled++;
+            else if (got == v) untouched++;
+            else ok = 0;   /* scaled twice, or partly */
+        }
+        left_alone[pass] = ge_wide_cull_untracked() - u0;
+        if (scaled + untouched != FILL_N || untouched != left_alone[pass] || untouched == 0 ||
+            untouched >= FILL_N) {
+            fprintf(stderr, "gpu coherence selftest [wide-fill]: clip_x_widen table full pass %d: scaled %lu, "
+                            "untouched %lu, counted untracked %lu of %u\n", pass, scaled, untouched,
+                    left_alone[pass], FILL_N);
+            ok = 0;
+        }
+    }
+    if (left_alone[0] != left_alone[1]) ok = 0;
+    return ok;
+}
+
 /* A fresh run with wing width `wing`: Fill is turned on for it and off after. */
 static int wide_run(int gpu, int wing, int flags, uint32_t *vram, uint32_t *canvas) {
     coherence_reset_targets();
@@ -6136,7 +6443,13 @@ static int wide_frames(const WideBufs *B) {
                 ok = 0;
             }
         }
+        /* The second pair lies 41344 bytes apart, which shared a slot in a direct-mapped table: each
+         * matrix is scaled once however the pair falls (a repeat call must not scale it again). */
+        if (ok && ge_wide_set_wing(WIDE_D) == WIDE_D)
+            ok = wide_clip_x_check(WIDE_D, 1, 640u, 448u) && wide_clip_x_check(WIDE_D, 0, 640u, 448u) &&
+                 wide_clip_x_check(WIDE_D, 1, 0u, 41344u) && wide_clip_x_fill_check(WIDE_D);
         ge_wide_set_wing(0);
+        if (ok) ok = wide_clip_x_check(0, 1, 640u, 448u);
         if (ok) printf("gpu coherence selftest: PASS %-22s %s frames scale=%d\n", "wide-fill", who, s_scale);
         else fprintf(stderr, "gpu coherence selftest [wide-fill]: FAIL %s frames\n", who);
         ok_all &= ok;
@@ -8354,6 +8667,7 @@ static int coherence_selftest_cases(void) {
         if (strcmp(only, "sprite-scaled") == 0) return coherence_run_sprite_scaled();
         if (strcmp(only, "uv-edge-clamp") == 0) return coherence_run_uv_edge_clamp();
         if (strcmp(only, "undrawn-rows") == 0) return coherence_run_undrawn_rows();
+        if (strcmp(only, "through-float-z") == 0) return coherence_run_through_float_z();
         if (strcmp(only, "depth-alias-no-zwrite") == 0) return coherence_run_depth_alias_no_zwrite();
         if (strcmp(only, "wide-fill") == 0) return coherence_run_wide_fill();
         if (strcmp(only, "gpu-timestamps") == 0) return coherence_run_gpu_timestamps();
@@ -8412,6 +8726,7 @@ static int coherence_selftest_cases(void) {
     if (!coherence_run_texture_ram_unnotified_change()) ok = 0;
     if (!coherence_run_clut_format_same_palette()) ok = 0;
     if (!coherence_run_clut_format_list()) ok = 0;
+    if (!coherence_run_through_float_z()) ok = 0;
     if (!coherence_run_blend_parity()) ok = 0;
     if (!coherence_run_undrawn_rows()) ok = 0;
     if (!coherence_run_depth_alias_no_zwrite()) ok = 0;
