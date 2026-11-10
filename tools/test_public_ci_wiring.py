@@ -3476,7 +3476,7 @@ class TwoTierInvariantTests(CiRunHarness):
             "python -m pip install --disable-pip-version-check --require-hashes -r tools/requirements-lock.txt",
             "python -m unittest tools.test_lint_docs",
             "python tools/format_portability_check.py",
-            "python tools/regen_all.py --check",
+            'python tools/regen_all.py --check --base "${BASE_SHA}"',
             "python tools/mypy_baseline.py --scope issue-1391",
             "python tools/mypy_baseline.py",
         ):
@@ -3485,6 +3485,9 @@ class TwoTierInvariantTests(CiRunHarness):
         self.assertIn("    runs-on: ubuntu-24.04", block)
         self.assertIn("libc6-dev-i386", text)
         self.assertNotIn("continue-on-error", text)
+        # The provenance step of regen_all needs the history and the event's exact base.
+        self.assertIn("          fetch-depth: 0", block)
+        self.assertIn("          BASE_SHA: ${{ github.event.pull_request.base.sha }}", block)
 
     def test_the_two_mypy_steps_are_the_same(self) -> None:
         """A pin or a command changed in one must change in the other: both run the tools mypy baseline."""

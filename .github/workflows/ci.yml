@@ -448,6 +448,9 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # Full history: the provenance step of regen_all diffs against the
+          # event's base commit, as the trusted attestation does.
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
@@ -476,7 +479,13 @@ jobs:
           python tools/format_portability_check.py
 
       - name: Check that every generated file is current
-        run: python tools/regen_all.py --check
+        # This job runs only on a light pull request run, so the event always names a base.
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          test -n "${BASE_SHA}"
+          python tools/regen_all.py --check --base "${BASE_SHA}"
 
       - name: Enforce tools mypy baseline
         # The Python tooling job's step, with the same pins and commands
