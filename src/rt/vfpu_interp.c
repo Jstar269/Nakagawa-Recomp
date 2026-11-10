@@ -833,7 +833,22 @@ int sr_vfpu_interp(CpuState *s, uint32_t w) {
                 for (int i = 0; i < 4; i++) s->vi[di[i]] = sr_vfpu_uc2i(x >> (8 * i));
                 return SR_VFPU_COMPUTE;
             }
-            /* vf2h.s/.t, the other vuc2i/vc2i widths, vus2i and the forms above outside
+            if (idx7 == 26 && n <= 2 && forms_identity) {
+                /* vus2i.s/.p: each source word's low then high half, zero-extended and
+                 * shifted left by 15, to a double-width result (.s -> pair, .p -> quad).
+                 * Sources are read first, so the in-place form is the same as a disjoint
+                 * one. vus2i.t/.q are unmeasured (fail closed). */
+                uint32_t sv[2], d[4];
+                vreg_idx(vs, n, si); vreg_idx(vd, 2 * n, di);
+                for (int i = 0; i < n; i++) sv[i] = s->vi[si[i]];
+                for (int i = 0; i < n; i++) {
+                    d[2 * i] = sr_vfpu_us2i(sv[i]);
+                    d[2 * i + 1] = sr_vfpu_us2i(sv[i] >> 16);
+                }
+                for (int i = 0; i < 2 * n; i++) s->vi[di[i]] = d[i];
+                return SR_VFPU_COMPUTE;
+            }
+            /* vf2h.s/.t, the other vuc2i/vc2i widths, vus2i.t/.q and the forms above outside
              * their measured widths or prefixes: docs/HARDWARE_ORACLE.md records no rule
              * for them. */
             return SR_VFPU_OTHER;

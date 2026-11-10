@@ -2065,6 +2065,16 @@ static int check_psp_measured_vfpu9(void) {
         {"vsgn.s -0", 0xd04a0405u, 0xe4u, {0x80000000u}, {0x00000000u}, 1, 1},
         {"vsgn.s -denormal", 0xd04a0020u, 0xe4u, {0x80000001u}, {0x00000000u}, 1, 0},
         {"vsgn.s -Inf", 0xd04a0020u, 0xe4u, {0xff800000u}, {0xbf800000u}, 1, 0},
+        /* vsgn.p/.t/.q (unrecorded PSP read, probe case vfpu-vus2i, PSP-3000, 2026-11-08,
+         * issue #326): the same rule at every width. The .p row is a probe cell; the .t and
+         * .q rows mix lanes of different probe images and follow the rule (measured=0). */
+        {"vsgn.p 2.5 -3.5", 0xd04a0088u, 0xe4u, {0x40200000u, 0xc0600000u},
+         {0x3f800000u, 0xbf800000u}, 2, 1},
+        {"vsgn.t specials", 0xd04a8008u, 0xe4u, {0x7f800001u, 0x80000001u, 0x00000000u},
+         {0x3f800000u, 0x00000000u, 0x00000000u}, 3, 0},
+        {"vsgn.q specials", 0xd04a8088u, 0xe4u,
+         {0x80000000u, 0x00000001u, 0xffc00000u, 0x7f800000u},
+         {0x00000000u, 0x00000000u, 0xbf800000u, 0x3f800000u}, 4, 0},
         /* vbfy1.q: inf - inf and NaN operands give the canonical 0x7f800001. */
         {"vbfy1.q specials", 0xd0428080u, 0xe4u,
          {0x7f800000u, 0xff800000u, 0x7fc00000u, 0x00000000u},
@@ -2505,6 +2515,65 @@ static int check_vmscl_measured(void) {
             bad = 1;
             fprintf(stderr, "FAIL: vmscl 0x%08x * 0x%08x: psp=0x%08x aot=0x%08x interp=0x%08x\n", cells[k].m,
                     cells[k].scalar, cells[k].want, aot.vi[32], interp.vi[32]);
+        }
+    }
+    return bad;
+}
+
+/* Unrecorded PSP read (PSP-3000, 2026-11-08, issue #326, probe case vfpu-vus2i; its
+ * register entry is not in this tree yet): vus2i.s/.p (half << 15) and vs2i.s/.p
+ * (half << 16) over twelve source words, identity prefixes. The low half goes to the even
+ * output lane; .p is two .s results in order. Both lanes run the probe's own words. */
+static int check_vus2i_vs2i_measured_words(void) {
+    static const uint32_t src[12] = {
+        0x00000001u, 0x00008000u, 0x0000ffffu, 0xffff0000u, 0x80000000u, 0x7fff8001u,
+        0xffff0001u, 0x12345678u, 0xffffffffu, 0x00010000u, 0x80008000u, 0x00000000u};
+    static const uint32_t us2i[12][2] = {
+        {0x00008000u, 0}, {0x40000000u, 0}, {0x7fff8000u, 0}, {0, 0x7fff8000u},
+        {0, 0x40000000u}, {0x40008000u, 0x3fff8000u}, {0x00008000u, 0x7fff8000u},
+        {0x2b3c0000u, 0x091a0000u}, {0x7fff8000u, 0x7fff8000u}, {0, 0x00008000u},
+        {0x40000000u, 0x40000000u}, {0, 0}};
+    static const uint32_t s2i[12][2] = {
+        {0x00010000u, 0}, {0x80000000u, 0}, {0xffff0000u, 0}, {0, 0xffff0000u},
+        {0, 0x80000000u}, {0x80010000u, 0x7fff0000u}, {0x00010000u, 0xffff0000u},
+        {0x56780000u, 0x12340000u}, {0xffff0000u, 0xffff0000u}, {0, 0x00010000u},
+        {0x80000000u, 0x80000000u}, {0, 0}};
+    static const char *const names[4] = {"vus2i-s-measured", "vus2i-p-measured",
+                                         "vs2i-s-measured", "vs2i-p-measured"};
+    int bad = 0;
+    for (int f = 0; f < 4; f++) {
+        const int c = find_overlap_diff_case(names[f]);
+        CHECK(c >= 0, "measured vus2i/vs2i word is in the overlap-diff header");
+        if (c < 0) { bad = 1; continue; }
+        const uint32_t w = overlap_diff_cases[c].w;
+        const int n = (f & 1) + 1;
+        const uint32_t (*want)[2] = f < 2 ? us2i : s2i;
+        for (int k = 0; k < 12; k++) {
+            uint8_t si[4], di[4];
+            CpuState aot, interp;
+            setup_identity_compute(&aot);
+            for (int i = 0; i < 128; i++) aot.vi[i] = 0x7a5a5a00u + (uint32_t)i;
+            vreg_idx((int)((w >> 8) & 0x7fu), n, si);
+            vreg_idx((int)(w & 0x7fu), 2 * n, di);
+            /* .p takes the pair (src[k], src[(k + 1) % 12]), the .s result of each in order. */
+            const uint32_t pair[2] = {src[k], src[(k + 1) % 12]};
+            for (int i = 0; i < n; i++) aot.vi[si[i]] = pair[i];
+            interp = aot;
+            overlap_diff_run_codegen(&aot, c);
+            const int kind = sr_vfpu_interp(&interp, w);
+            int ok = kind == SR_VFPU_COMPUTE;
+            for (int i = 0; i < n; i++)
+                for (int h = 0; h < 2; h++) {
+                    const uint32_t exp = want[i == 0 ? k : (k + 1) % 12][h];
+                    ok &= aot.vi[di[2 * i + h]] == exp && interp.vi[di[2 * i + h]] == exp;
+                }
+            ok &= memcmp(aot.vi, interp.vi, sizeof(aot.vi)) == 0;
+            g_checks++;
+            if (!ok) {
+                g_failures++;
+                bad = 1;
+                fprintf(stderr, "FAIL: %s src=0x%08x kind=%d\n", names[f], pair[0], kind);
+            }
         }
     }
     return bad;
@@ -3166,6 +3235,7 @@ int main(void) {
     bad |= check_psp_measured_funnel();
     bad |= check_psp_measured_sort();
     bad |= check_psp_measured_forms2();
+    bad |= check_vus2i_vs2i_measured_words();
     bad |= check_vfpu_basic_arith_measured();
     bad |= check_vfpu_unary_arith_measured();
     bad |= check_vmscl_measured();
