@@ -1,0 +1,181 @@
+{
+  "schema_version": 1,
+  "description": "Public PSP homebrew corpus for the no-title-hacks smoke (#2144). Sources are not vendored: they ship in the pinned PSPDEV release archive and are byte-identical to the pinned PSPSDK commit.",
+  "source": {
+    "project": "PSPSDK",
+    "repository": "https://github.com/pspdev/pspsdk",
+    "commit": "687501d09733390ad75d855f73d69a0672b93a12",
+    "license_expression": "BSD-3-Clause",
+    "license_file": "LICENSE",
+    "license_blob_sha1": "6a7c199bb9063529bbb70c1387122adf88c96c42",
+    "delivery": {
+      "lock": "assets/upstream/pspdev.lock.json",
+      "release": "v20261101",
+      "archive_asset": "pspdev-ubuntu-latest-x86_64.tar.gz",
+      "archive_sha256": "5dc9d785a5fd490ee9d5204b90f715efb6c46940ba3944036bbef9c993c17713",
+      "samples_root": "psp/sdk/samples"
+    }
+  },
+  "check_vocabulary": [
+    "first_frame",
+    "nonblank_frame",
+    "scripted_input",
+    "audio_output",
+    "save_round_trip"
+  ],
+  "statuses": [
+    "UNMEASURED",
+    "PASS",
+    "KNOWN_FAIL"
+  ],
+  "programs": [
+    {
+      "id": "gu-cube",
+      "title": "Cube Sample",
+      "sample_dir": "gu/cube",
+      "target": "cube",
+      "files": [
+        {
+          "path": "gu/cube/Makefile",
+          "upstream_path": "src/samples/gu/cube/Makefile.sample",
+          "git_blob_sha1": "b21accdc19a117dd23c14d42e6b84b9d5a3763c4"
+        },
+        {
+          "path": "gu/cube/cube.c",
+          "upstream_path": "src/samples/gu/cube/cube.c",
+          "git_blob_sha1": "fc278924ec7f4f1065a373e0292308adb14ef54d"
+        },
+        {
+          "path": "gu/cube/logo.raw",
+          "upstream_path": "src/samples/gu/cube/logo.raw",
+          "git_blob_sha1": "fbac33e10e4dcf356365dab805ca39c271e1fcc3"
+        }
+      ],
+      "shared_files": [
+        {
+          "path": "gu/common/callbacks.c",
+          "upstream_path": "src/samples/gu/common/callbacks.c",
+          "git_blob_sha1": "7233aa64852573bc7ae33e6448fbe2bf8884029a"
+        },
+        {
+          "path": "gu/common/callbacks.h",
+          "upstream_path": "src/samples/gu/common/callbacks.h",
+          "git_blob_sha1": "a6ecd7a66429c1c479a3a00abb9939655a542ed2"
+        }
+      ],
+      "copyright": [
+        "2005 Jesper Svennevid"
+      ],
+      "smoke_checks": [
+        "first_frame",
+        "nonblank_frame"
+      ],
+      "expected": {
+        "status": "UNMEASURED",
+        "issue": null,
+        "note": "3D triangles through sceGu; the generality proof for the GE path with no title patches."
+      }
+    },
+    {
+      "id": "controller-basic",
+      "title": "Basic controller sample",
+      "sample_dir": "controller/basic",
+      "target": "controller_basic",
+      "files": [
+        {
+          "path": "controller/basic/Makefile",
+          "upstream_path": "src/samples/controller/basic/Makefile.sample",
+          "git_blob_sha1": "10971a9ca56347b0ab5e328e3eb14aae6baaaae2"
+        },
+        {
+          "path": "controller/basic/main.c",
+          "upstream_path": "src/samples/controller/basic/main.c",
+          "git_blob_sha1": "5df7169a3c7f6a664e0f026af79e960311e9af2e"
+        }
+      ],
+      "shared_files": [],
+      "copyright": [
+        "2005 Donour Sizemore",
+        "2005 James Forshaw",
+        "2005 John Kelley",
+        "2005 Marcus R. Brown"
+      ],
+      "smoke_checks": [
+        "first_frame",
+        "scripted_input"
+      ],
+      "expected": {
+        "status": "UNMEASURED",
+        "issue": null,
+        "note": "sceCtrl reads shown on the debug screen; the scripted pad press must change the picture."
+      }
+    },
+    {
+      "id": "audio-polyphonic",
+      "title": "Polyphonic sample by Shine",
+      "sample_dir": "audio/polyphonic",
+      "target": "polyphonic",
+      "files": [
+        {
+          "path": "audio/polyphonic/Makefile",
+          "upstream_path": "src/samples/audio/polyphonic/Makefile.sample",
+          "git_blob_sha1": "db3c90119d57ff0a6b21042ba2f111eb963130b5"
+        },
+        {
+          "path": "audio/polyphonic/main.c",
+          "upstream_path": "src/samples/audio/polyphonic/main.c",
+          "git_blob_sha1": "1be775f1ea919698420343fe8b2035c7ee6d0c9f"
+        }
+      ],
+      "shared_files": [],
+      "copyright": [
+        "2005 Frank Buss"
+      ],
+      "smoke_checks": [
+        "first_frame",
+        "audio_output"
+      ],
+      "expected": {
+        "status": "UNMEASURED",
+        "issue": null,
+        "note": "pspaudiolib mixer; audio output must be non-silent."
+      }
+    },
+    {
+      "id": "savedata-utility",
+      "title": "PSPSDK Savedata Sample",
+      "sample_dir": "savedata/utility",
+      "target": "savedata",
+      "files": [
+        {
+          "path": "savedata/utility/Makefile",
+          "upstream_path": "src/samples/savedata/utility/Makefile.sample",
+          "git_blob_sha1": "93404bbf20a07761ba0b69ad9b8dc807f72c1eae"
+        },
+        {
+          "path": "savedata/utility/main.c",
+          "upstream_path": "src/samples/savedata/utility/main.c",
+          "git_blob_sha1": "bd90e36f96cdb9b9007055e79a30ccfe1ecaab16"
+        },
+        {
+          "path": "savedata/utility/data.h",
+          "upstream_path": "src/samples/savedata/utility/data.h",
+          "git_blob_sha1": "1e627adcec724e1f88365345049686dd5dd5aa13"
+        }
+      ],
+      "shared_files": [],
+      "copyright": [
+        "2005 weltall"
+      ],
+      "smoke_checks": [
+        "first_frame",
+        "save_round_trip"
+      ],
+      "expected": {
+        "status": "UNMEASURED",
+        "issue": null,
+        "note": "sceUtility savedata dialog; a save written in one run must load in the next."
+      }
+    }
+  ]
+}

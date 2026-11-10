@@ -189,6 +189,15 @@ int sr_picture_watch_tick_needs_probe(const SrPictureWatch *w, uint32_t vcount);
  * (then dropped here), clears the pending state with no result, like a failed present. */
 int sr_picture_watch_collect(SrPictureWatch *w, int block, uint32_t *brightest);
 
+/* Screenshot key (the game window's F12). A request asks for the next presented frame the
+ * display path can arm to be saved as a PNG under <user data>/screenshots/; it stays pending
+ * until a present services it, so a frame that no presenter showed is never saved in its place.
+ * Only the display path arms it, and only while no developer capture (SR_FBDUMP, SR_FBSNAP)
+ * owns the capture slot. The request itself lives in fbcap_policy.h (sr_screenshot_request),
+ * so every target that links the display path has it. A capture armed with a path ending in
+ * ".png" is published as a PNG (8-bit RGB, stored deflate blocks), every other path as the P6
+ * PPM described above. */
+
 #ifdef __cplusplus
 }
 #endif
