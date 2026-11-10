@@ -50,11 +50,11 @@ static const EnhancedPartFixture k_enhanced_parts[] = {
      "Resamples pitched effects without aliasing. The game receives changed samples."},
     {"Finer patches", "Off",
      "More triangles per curved patch. Slower; alters GE timing; the game receives changed pictures."},
-    {"Short loads", "Off", "Ace only, in games with a loading-wait package. Skips those waits; changes the game's timing."},
     {"Wider culling", "Off", "Ace only, with Widescreen, in games that have a culling build. The game's "
                              "memory changes."},
     {"Sharper enlarging", "Off", "AMD FSR 1 sharpens display and recordings; game memory and "
                                   "screenshots do not change."},
+    {"Short loads", "Off", "Ace only, in games with a loading-wait package. Skips those waits; changes the game's timing."},
 };
 typedef char player_screens_enhanced_fixture_matches_parts[
     sizeof(k_enhanced_parts) / sizeof(k_enhanced_parts[0]) == PLAYER_PART_COUNT ? 1 : -1];

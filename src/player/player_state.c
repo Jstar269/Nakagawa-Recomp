@@ -1229,11 +1229,6 @@ static const PlayerEnhancedPartInfo k_enhanced_parts[PLAYER_PART_COUNT] = {
     {"tess", "Finer patches",
      "More triangles per curved patch. Slower; alters GE timing; the game receives changed pictures.",
      4, k_part_tess_values, k_part_tess_labels, k_part_tess_words, 0},
-    /* A guest-visible item (contract 11.3.10) that changes guest timing: off by default and in no
-       preset; it matters only for a title whose own package declares a load part, and only in Ace. */
-    {"load", "Short loads",
-     "Ace only, in games with a loading-wait package. Skips those waits; changes the game's timing.",
-     2, k_part_switch_values, k_part_switch_labels, k_part_load_words, 0},
     /* A guest-visible item (contract 11.3.6): off by default; it matters only for a title whose own
        package carries the culling hook, and only with Widescreen on. */
     {"cull", "Wider culling",
@@ -1243,6 +1238,11 @@ static const PlayerEnhancedPartInfo k_enhanced_parts[PLAYER_PART_COUNT] = {
     {"upscale", "Sharper enlarging",
      "AMD FSR 1 sharpens display and recordings; game memory and screenshots do not change.",
      2, k_part_switch_values, k_part_upscale_labels, k_part_upscale_words, 0},
+    /* A guest-visible item (contract 11.3.10) that changes guest timing: off by default and in no
+       preset; it matters only for a title whose own package declares a load part, and only in Ace. */
+    {"load", "Short loads",
+     "Ace only, in games with a loading-wait package. Skips those waits; changes the game's timing.",
+     2, k_part_switch_values, k_part_switch_labels, k_part_load_words, 0},
 };
 
 const PlayerEnhancedPartInfo *player_enhanced_part(int part) {
@@ -2274,7 +2274,7 @@ void player_app_cycle_present_scaling(PlayerApp *app, int direction) {
    test_graphics_presets checks that every other part is -1, so a new part needs a choice. */
 #define PRESET_PART_LIST(X, text, upscale)                                                \
     X(FILTERING, -1) X(TEXT, (text)) X(READOUT, -1) X(NOTICE, -1) X(WIDE, -1) X(SMOOTH, -1) \
-    X(SAS, -1) X(TESS, -1) X(LOAD, -1) X(CULL, -1) X(UPSCALE, (upscale))
+    X(SAS, -1) X(TESS, -1) X(CULL, -1) X(UPSCALE, (upscale)) X(LOAD, -1)
 #define PRESET_PART_SET(part, value) [PLAYER_PART_##part] = value,
 #define PRESET_PART_ONE(part, value) + 1
 #define PRESET_PARTS(text, upscale) {PRESET_PART_LIST(PRESET_PART_SET, text, upscale)}
@@ -3018,12 +3018,18 @@ bool player_play_launch_line(const PlayerPlayResolved *play, char *out, size_t c
         /* A missing load is off (contract 11.3.10, 11.2 item 2): only an Ace launch with the part
            on writes load=fast. */
         if (p == PLAYER_PART_LOAD && (play->part[p] != 1 || play->mode != PLAYER_PLAY_ACE)) continue;
-        /* Likewise cull: the line carries the key only when it is on. */
-        if (p == PLAYER_PART_CULL && (play->part[p] != 1 || play->mode != PLAYER_PLAY_ACE)) continue;
+        /* Cull is written after the loop: the Ace line ends with it whatever the enum order. */
+        if (p == PLAYER_PART_CULL) continue;
         n = snprintf(out + used, cap - used, ";%s=%s", k_enhanced_parts[p].key,
                      enhanced_part_word(p, play->part[p]));
         if (n <= 0 || (size_t)n >= cap - used) { out[0] = '\0'; return false; }
         used += (size_t)n;
+    }
+    /* Likewise cull, last: the line carries the key only when it is on. */
+    if (play->part[PLAYER_PART_CULL] == 1 && play->mode == PLAYER_PLAY_ACE) {
+        n = snprintf(out + used, cap - used, ";%s=%s", k_enhanced_parts[PLAYER_PART_CULL].key,
+                     enhanced_part_word(PLAYER_PART_CULL, play->part[PLAYER_PART_CULL]));
+        if (n <= 0 || (size_t)n >= cap - used) { out[0] = '\0'; return false; }
     }
     return true;
 }
