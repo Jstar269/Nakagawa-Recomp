@@ -2953,7 +2953,8 @@ static void selftest_busy_display_keeps_real_frames(void) {
 
     /* The same failed present with a renderer that can present nothing any more: nothing can
      * show frame 200 later, so it is given up and counted, and 201 is not held, so no VBLANK
-     * shows it a second time. */
+     * shows it a second time. Only the give-up's accounting is checked here: a real terminal
+     * renderer fails the CPU present too, which this stand-in still lets through. */
     s_stub_terminal = 1;
     busy_run(&r, 0, busy_one_held, 402u, 1, 0u);
     s_stub_terminal = 0;
