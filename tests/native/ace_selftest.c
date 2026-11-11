@@ -286,6 +286,53 @@ static void cell_parse(void) {
     a.tess = 0;
     a.on = 0;
     CHECK(ace_format(&a, line, sizeof(line)) && strcmp(line, "off") == 0, "off formats as off");
+
+    /* The longest line the key table formats fits ACE_SPEC_MAX, the size of SR_ACE's value and of the
+       flight recorder's copy (flight_recorder.c s_flight_ace): each key at its longest value, in an
+       Ace line, which every key may carry, among the values this build accepts. A new key adds its
+       values here. */
+    {
+        AceConfig w;
+        char big[512];
+        memset(&w, 0, sizeof(w));
+        w.on = 1;
+        w.tier = ACE_TIER_ACE;
+#define ACE_WIDEST(field, ...)                                                                          \
+        do {                                                                                            \
+            static const int vals[] = { __VA_ARGS__ };                                                  \
+            int best = vals[0];                                                                         \
+            size_t best_len = 0;                                                                        \
+            for (size_t k = 0; k < sizeof(vals) / sizeof(vals[0]); k++) {                               \
+                w.field = vals[k];                                                                      \
+                AceConfig rt;   /* only values this build parses (smooth=match is off in some) */       \
+                if (ace_format(&w, big, sizeof(big)) && strlen(big) > best_len &&                       \
+                    ace_parse(big, &rt, why, sizeof(why)) == 1) {                                       \
+                    best_len = strlen(big);                                                             \
+                    best = vals[k];                                                                     \
+                }                                                                                       \
+            }                                                                                           \
+            w.field = best;                                                                             \
+        } while (0)
+        ACE_WIDEST(af, 0, 2, 4, 8, 16);
+        ACE_WIDEST(text, 0, 1);
+        ACE_WIDEST(readout, 0, 1);
+        ACE_WIDEST(notice, 0, 1);
+        ACE_WIDEST(wide, ACE_WIDE_OFF, ACE_WIDE_FILL);
+        ACE_WIDEST(smooth, ACE_SMOOTH_OFF, ACE_SMOOTH_MATCH, ACE_SMOOTH_X2);
+        ACE_WIDEST(sas, ACE_SAS_OFF, ACE_SAS_SINC);
+        ACE_WIDEST(tess, 0, 2, 3, 4);
+        ACE_WIDEST(stick, 0, 1, ACE_STICK_COUNTS_MAX);
+        ACE_WIDEST(load, 0, 1);
+        ACE_WIDEST(ssaa, 0, 2, 4);
+        ACE_WIDEST(cull, 0, 1);
+#undef ACE_WIDEST
+        AceConfig back;
+        const int formatted = ace_format(&w, big, sizeof(big));
+        CHECK(formatted && strlen(big) < ACE_SPEC_MAX && ace_parse(big, &back, why, sizeof(why)) == 1 &&
+                  memcmp(&w, &back, sizeof(w)) == 0,
+              "the longest line (%zu characters: %s) fits ACE_SPEC_MAX %u and parses back (%s)",
+              formatted ? strlen(big) : (size_t)0, big, (unsigned)ACE_SPEC_MAX, why);
+    }
 }
 
 /* ---- the run's switch and its silence ------------------------------------------------------- */

@@ -80,7 +80,7 @@ typedef struct {
     int stick;       /* stick=<counts>: 0 off, else the square stick dead zone the title ignores, 1..126
                         (guest-visible, 11.3.11) */
     int load;        /* load=fast: the waits a title's load part declares are skipped (guest timing, 11.3.10) */
-    int ssaa;        /* ssaa=2|4: 1 off, else the supersampling factor per axis on top of render scale;
+    int ssaa;        /* ssaa=2|4: 0 off, else the supersampling factor per axis on top of render scale;
                         host presentation only (10.21) */
 } AceConfig;
 

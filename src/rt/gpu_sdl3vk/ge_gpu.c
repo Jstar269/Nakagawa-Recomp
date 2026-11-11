@@ -580,6 +580,12 @@ static VkBuffer s_xfer;                    /* pixel transfer staging (at least 1
 static VkDeviceMemory s_xfer_m;
 static void    *s_xfer_map;
 static GpuVert s_vcpu[MAX_VERTS];
+/* The host twin's own copy of s_vcpu, index for index, while the twin draws above 1x and the render
+ * scale is 1x (supersampling at render scale 1, contract 10.21). A primitive's fixes above 1x, the
+ * edge range (uv_edge_axis) and a nearest 1:1 sprite's texel alignment (sprite_nearest_axis), go
+ * into the twin's vertices only: the authentic ones stay exactly as at 1x, so guest memory does not
+ * change. NULL otherwise, and both passes draw s_vcpu (at a render scale above 1x both get the fixes). */
+static GpuVert *s_tvcpu;
 
 static VkDescriptorSetLayout s_dlayout;
 static VkDescriptorPool s_dpool_tex, s_dpool_fix;
@@ -2473,7 +2479,8 @@ static int snapshot_copy_op(Target *t) {
 typedef struct {
     const Batch *arr;
     uint32_t b0, b1, v0, tv0, p0, param_base, ntverts;
-    VkDeviceSize vertex_offset, tvertex_offset;
+    /* twin_vertex_offset: where the twin's pass reads its vertices (s_tvcpu's copy, else vertex_offset) */
+    VkDeviceSize vertex_offset, tvertex_offset, twin_vertex_offset;
     /* rmw_op: an interlock op, recorded by record_rmw_range as runs of one kind; rmw: this run
      * holds destination-reading batches, recorded in the depth-only pass with the RMW variant. */
     int rmw_op, rmw;
@@ -2624,7 +2631,8 @@ static void record_range(Target *t, const RangeRec *r, int twin) {
         cur_set = dset;
         if (bound_tnl != (int)b->key.tnl) {
             vkCmdBindVertexBuffers(s_cmd, 0, 1, b->key.tnl ? &s_cmd_slot->tbuf : &s_cmd_slot->vbuf,
-                                   b->key.tnl ? &r->tvertex_offset : &r->vertex_offset);
+                                   b->key.tnl ? &r->tvertex_offset
+                                              : twin ? &r->twin_vertex_offset : &r->vertex_offset);
             bound_tnl = (int)b->key.tnl;
         }
         if (b->key.tnl)
@@ -2658,38 +2666,45 @@ static int submit_range(Target *t, const Batch *arr, uint32_t b0, uint32_t b1, i
         p1 = i + 1u;
     }
     if (p0 == UINT32_MAX) p0 = p1 = 0;
-    if (!cmd_batch_begin_tnl(nverts, ntverts, p1)) return 0;
+    /* With s_tvcpu the twin's vertices follow the authentic ones in the ring, in the same order. */
+    const uint32_t nstaged = s_tvcpu ? 2u * nverts : nverts;
+    if (!cmd_batch_begin_tnl(nstaged, ntverts, p1)) return 0;
     uint32_t vertex_base = s_cmd_slot->vused;
     uint32_t tvertex_base = s_cmd_slot->tused;
     /* Records go where their staged index plus a non-negative delta lands, and the delta is
      * the draws' firstInstance, which psp_tnl.vert adds to each reference's index. */
     uint32_t param_base = s_cmd_slot->pused > p0 ? s_cmd_slot->pused : p0;
     uint64_t memcpy_started = cpu_profile_now();
-    memcpy(s_cmd_slot->vmap + vertex_base, s_vcpu + v0, (size_t)nverts * sizeof(GpuVert));
-    /* A write-once stencil batch (Batch.once) reads one snapshot, and Vulkan keeps the last fragment
-     * at a pixel where ge.c keeps the first one that passes: its triangles go into the ring last to
-     * first, each with its own vertex order (winding and the flat colour stay). The host twin's
-     * pass draws the same ring. An interlock op (rmw_op) orders the fragments itself and keeps the
-     * staged order. */
+    for (int copy = 0; copy < (s_tvcpu ? 2 : 1); copy++) {
+        const GpuVert *src = copy ? s_tvcpu : s_vcpu;
+        GpuVert *base = s_cmd_slot->vmap + vertex_base + (copy ? nverts : 0u);
+        memcpy(base, src + v0, (size_t)nverts * sizeof(GpuVert));
+        /* A write-once stencil batch (Batch.once) reads one snapshot, and Vulkan keeps the last
+         * fragment at a pixel where ge.c keeps the first one that passes: its triangles go into the
+         * ring last to first, each with its own vertex order (winding and the flat colour stay). The
+         * host twin's pass draws the same ring (or its own copy, staged alike). An interlock op
+         * (rmw_op) orders the fragments itself and keeps the staged order. */
 #if SR_GPU_STENCIL_ONCE_MUTANT != 1
-    for (uint32_t i = b0; i < b1 && !rmw_op; i++) {
-        const Batch *b = &arr[i];
-        if (!b->once || b->key.tnl) continue;
-        const uint32_t ntri = b->count / 3u;
-        GpuVert *dst = s_cmd_slot->vmap + vertex_base + (b->first - v0);
-        for (uint32_t tri = 0; tri < ntri; tri++)
-            memcpy(dst + 3u * tri, s_vcpu + b->first + 3u * (ntri - 1u - tri), 3u * sizeof(GpuVert));
-        s_cnt_once_batches++;
-        s_cnt_once_tris += ntri;
-    }
+        for (uint32_t i = b0; i < b1 && !rmw_op; i++) {
+            const Batch *b = &arr[i];
+            if (!b->once || b->key.tnl) continue;
+            const uint32_t ntri = b->count / 3u;
+            GpuVert *dst = base + (b->first - v0);
+            for (uint32_t tri = 0; tri < ntri; tri++)
+                memcpy(dst + (size_t)3u * tri, src + b->first + (size_t)3u * (ntri - 1u - tri), 3u * sizeof(GpuVert));
+            if (copy) continue;
+            s_cnt_once_batches++;
+            s_cnt_once_tris += ntri;
+        }
 #endif
+    }
     if (ntverts) {
         memcpy(s_cmd_slot->tmap + tvertex_base, s_tnl_vcpu + tv0, (size_t)ntverts * sizeof(GeTnlVtx));
         memcpy(s_cmd_slot->pmap + param_base, s_tnl_pcpu + p0, (size_t)(p1 - p0) * sizeof(GeTnlParams));
     }
     if (s_cpu_profile) {
         cpu_profile_add(GEGPU_CPU_MEMCPY, memcpy_started);
-        s_cpu_profile_stats.memcpy_bytes += (uint64_t)nverts * sizeof(GpuVert);
+        s_cpu_profile_stats.memcpy_bytes += (uint64_t)nstaged * sizeof(GpuVert);
     }
 
     uint64_t command_started = cpu_profile_now();
@@ -2701,8 +2716,10 @@ static int submit_range(Target *t, const Batch *arr, uint32_t b0, uint32_t b1, i
 
     VkDeviceSize vertex_offset = (VkDeviceSize)vertex_base * sizeof(GpuVert);
     VkDeviceSize tvertex_offset = (VkDeviceSize)tvertex_base * sizeof(GeTnlVtx);
+    VkDeviceSize twin_vertex_offset = s_tvcpu ? (VkDeviceSize)(vertex_base + nverts) * sizeof(GpuVert)
+                                              : vertex_offset;
     RangeRec rr = { arr, b0, b1, v0, tv0, p0, param_base, ntverts, vertex_offset, tvertex_offset,
-                    rmw_op, 0 };
+                    twin_vertex_offset, rmw_op, 0 };
     /* The host twin's pass draws on the twin's copy of what this op starts from: a twin that
      * is behind (some write did not reach it) is first re-seeded from the authentic image. */
     int twin_pass = s_twin && t->tfb && t->dep && t->dep->timg;
@@ -2748,7 +2765,7 @@ static int submit_range(Target *t, const Batch *arr, uint32_t b0, uint32_t b1, i
 
     s_replay_stats.batches += b1 - b0;
     s_replay_stats.draws += b1 - b0;
-    s_cmd_slot->vused += nverts;
+    s_cmd_slot->vused += nstaged;
     s_cmd_slot->tused += ntverts;
     if (ntverts) s_cmd_slot->pused = param_base + (p1 - p0);
     int ok = cmd_batch_record(SR_PERF_GE_RENDER_BATCH);
@@ -3392,8 +3409,11 @@ static void twin_off_for_run(const char *what) {
     if (!s_twin) return;
     fprintf(stderr, "TWIN: off for the rest of the run (%s could not be allocated): the authentic image "
             "is shown at %dx, as with the twin off\n", what, s_scale);
-    if (s_ssaa > 1)
+    if (s_ssaa > 1) {
         fprintf(stderr, "SSAA: off for the rest of the run with the twin (it renders the samples)\n");
+        /* The report, stamps and pause-menu words follow: supersampling is unavailable from here. */
+        ace_set_ssaa_effective(1, "the host twin, which renders its samples, was turned off for the rest of the run");
+    }
     if (!cmd_drain(GEGPU_BOUNDARY_LIFETIME)) {
         /* Work may still be in flight (a lost device): record no more twin passes and show no
          * twin, but free nothing here; gegpu_shutdown waits for the device before it frees the
@@ -5091,10 +5111,12 @@ static void uv_edge_axis(double e0, double e1, double c0, double c1, float *lo, 
     *hi = (float)(a < b ? b : a);
 }
 
-/* Whether a primitive gets a range: textured, through mode, above 1x. */
-static int uv_edge_applies(int persp) {
-    return s_scale > 1 && !persp && s_ge->tex_enable && !s_ge->clear;
+/* Whether a primitive drawn at `scale` gets a range: textured, through mode, above 1x. */
+static int uv_edge_applies_at(int scale, int persp) {
+    return scale > 1 && !persp && s_ge->tex_enable && !s_ge->clear;
 }
+
+static int uv_edge_applies(int persp) { return uv_edge_applies_at(s_scale, persp); }
 
 /* A triangle with a horizontal and a vertical leg (at its snapped, rasterised positions) whose u
  * is constant along the vertical leg and v along the horizontal one has u a function of x alone
@@ -5135,6 +5157,7 @@ static void put_vert(float x, float y, float z, float rw, float u, float v, floa
     uint32_t cb = (uint32_t)(b < 0 ? 0 : b > 255 ? 255 : b);
     uint32_t ca = (uint32_t)(a < 0 ? 0 : a > 255 ? 255 : a);
     o->rgba = cr | (cg << 8) | (cb << 16) | (ca << 24);
+    if (s_tvcpu) s_tvcpu[s_nverts - 1u] = *o;
 }
 
 /* Ensure s_snapimg holds the CURRENT contents of `src`: pending batches submit first,
@@ -6221,6 +6244,11 @@ static int hook_tri(const GeVtx *A, const GeVtx *B, const GeVtx *C, int persp) {
     put_vert(B->x, B->y, B->z, B->rw, B->u, B->v, B->fog, cb->r, cb->g, cb->b, cb->a);
     put_vert(C->x, C->y, C->z, C->rw, C->u, C->v, C->fog, C->r, C->g, C->b, C->a);
     memcpy(s_uv_box, k_uv_box_free, sizeof s_uv_box);
+    if (s_tvcpu && uv_edge_applies_at(s_tscale, persp)) {   /* the twin's range, above 1x */
+        tri_uv_edge_box(A, B, C);
+        for (uint32_t i = first; i < first + 3u; i++) memcpy(s_tvcpu[i].box, s_uv_box, sizeof s_uv_box);
+        memcpy(s_uv_box, k_uv_box_free, sizeof s_uv_box);
+    }
     cpu_profile_vertex_done(vertex_started, 3);
     append(&b, first, 3);
     if (!s_wing_dst) {   /* a wing canvas draw is not the target's: no count, no HUD box */
@@ -6404,6 +6432,25 @@ static int hook_sprite(const GeVtx *p0, const GeVtx *p1, int persp) {
     put_vert(xb, yb, z, 1.0f, ub, vb, fog, r, g, bb_, a);
     put_vert(xa, yb, z, 1.0f, ua, vb, fog, r, g, bb_, a);
     memcpy(s_uv_box, k_uv_box_free, sizeof s_uv_box);
+    if (s_tvcpu) {   /* the twin's vertices draw above 1x: the alignment and range above, for them */
+        float tua = ul, tub = ur, tva = vt, tvb = vbm, box[4];
+        if (s_ge->tex_enable && !(s_ge->tex_filter & 0x100u)) {
+            sprite_nearest_axis(&tua, &tub, xb - xa);
+            sprite_nearest_axis(&tva, &tvb, yb - ya);
+        }
+        memcpy(box, k_uv_box_free, sizeof box);
+        if (!glyph_bound && uv_edge_applies_at(s_tscale, persp)) {
+            uv_edge_axis(xa, xb, tua, tub, &box[0], &box[2]);
+            uv_edge_axis(ya, yb, tva, tvb, &box[1], &box[3]);
+        }
+        const float tu[6] = { tua, tub, tua, tub, tub, tua }, tv[6] = { tva, tva, tvb, tva, tvb, tvb };
+        for (uint32_t i = 0; i < 6u; i++) {
+            GpuVert *o = &s_tvcpu[first + i];
+            o->u = tu[i];
+            o->v = tv[i];
+            memcpy(o->box, box, sizeof box);
+        }
+    }
     cpu_profile_vertex_done(vertex_started, 6);
     append(&b, first, 6);
     if (!s_wing_dst) {
@@ -6851,10 +6898,12 @@ static int present_scale(const Target *t) {
     return t->tshow && s_ssaa == 1 ? s_tscale : s_scale;
 }
 
-/* The layout field of present_image(t). */
+#ifdef SR_GPU_COHERENCE_SELFTEST
+/* The layout field of present_image(t) (the selftest reads the shown image through it). */
 static VkImageLayout *present_layout(Target *t) {
     return t->tshow ? (s_ssaa > 1 ? &t->rlayout : &t->tlayout) : &t->layout;
 }
+#endif
 
 /* ---- widescreen Fill: the presented picture (#1881) -------------------------------------------
  * With Fill on, gegpu_present shows one (480 + 2D) x 272 image at the shown image's scale: the
@@ -7189,7 +7238,7 @@ static const GeGpuHooks k_hooks = {
 static uint64_t ssaa_bytes(int scale, int f, unsigned depth_bpp) {
     const uint64_t base = (uint64_t)FB_W * (uint64_t)scale * (uint64_t)FB_H * (uint64_t)scale;
     const uint64_t px = base * (uint64_t)f * (uint64_t)f;
-    uint64_t bytes = px * (SSAA_EST_TARGETS * (4u + depth_bpp) + 4u) + base * 4u * SSAA_EST_TARGETS;
+    uint64_t bytes = px * ((uint64_t)SSAA_EST_TARGETS * (4u + depth_bpp) + 4u) + base * 4u * SSAA_EST_TARGETS;
     if (f == 4) bytes += base * 4u * 4u;
     return bytes;
 }
@@ -7200,6 +7249,7 @@ static uint64_t ssaa_bytes(int scale, int f, unsigned depth_bpp) {
 static int ssaa_choose(int want, int scale, uint32_t max_dim, uint64_t budget, unsigned depth_bpp,
                        char *why, size_t cap) {
     if (cap) why[0] = '\0';
+    char last[160] = "";
     for (int f = want; f > 1; f /= 2) {
         const uint32_t w = (uint32_t)FB_W * (uint32_t)(scale * f), h = (uint32_t)FB_H * (uint32_t)(scale * f);
         const uint64_t need = ssaa_bytes(scale, f, depth_bpp);
@@ -7217,6 +7267,12 @@ static int ssaa_choose(int want, int scale, uint32_t max_dim, uint64_t budget, u
         }
         if (!no) return f;
         if (f == want && cap) snprintf(why, cap, "%s", no);
+        else snprintf(last, sizeof(last), "%s", no);
+    }
+    /* Nothing fits: the reason names every factor tried, the request's first. */
+    if (cap && last[0]) {
+        const size_t n = strlen(why);
+        if (n + 2u < cap) snprintf(why + n, cap - n, "; %s", last);
     }
     return 1;
 }
@@ -7295,6 +7351,8 @@ static int twin_init(int color) {
  * buffers' twins are freed with them. */
 static void twin_release(void) {
     s_twin = s_twin_color = 0;
+    free(s_tvcpu);
+    s_tvcpu = NULL;
     if (s_dpool_twin) vkDestroyDescriptorPool(s_dev, s_dpool_twin, NULL);   /* frees its sets */
     s_dpool_twin = VK_NULL_HANDLE;
     memset(s_tsnap_set, 0, sizeof(s_tsnap_set));
@@ -7388,12 +7446,18 @@ int gegpu_init(void) {
         VkFormatProperties cf;
         vkGetPhysicalDeviceFormatProperties(s_pdev, VK_FORMAT_R8G8B8A8_UNORM, &cf);
         uint64_t budget = ssaa_budget();
+        /* The twin is an image, a framebuffer and a viewport at its scale: the smallest of their
+         * limits bounds each side. */
         uint32_t max_dim = props.limits.maxImageDimension2D;
+        const uint32_t lims[4] = { props.limits.maxFramebufferWidth, props.limits.maxFramebufferHeight,
+                                   props.limits.maxViewportDimensions[0], props.limits.maxViewportDimensions[1] };
+        for (int i = 0; i < 4; i++)
+            if (lims[i] < max_dim) max_dim = lims[i];
 #ifdef SR_GPU_COHERENCE_SELFTEST
         if (s_ssaa_test_budget) budget = s_ssaa_test_budget;
         if (s_ssaa_test_dim) max_dim = s_ssaa_test_dim;
 #endif
-        char why[192] = "";
+        char why[320] = "";
         int f = 1;
         if ((cf.optimalTilingFeatures & lin) != lin)
             snprintf(why, sizeof(why), "this GPU cannot average RGBA8 images with a linear blit");
@@ -7652,6 +7716,19 @@ int gegpu_init(void) {
         if (s_ssaa > 1) ace_set_ssaa_effective(1, "the host twin, which renders its samples, could not be made");
         s_ssaa = 1;
         s_tscale = s_scale;
+    }
+    /* Supersampling at render scale 1: the twin draws above 1x from its own vertices (s_tvcpu). */
+    if (s_twin && s_ssaa > 1 && s_scale == 1) {
+        s_tvcpu = (GpuVert *)malloc((size_t)MAX_VERTS * sizeof(GpuVert));
+        if (!s_tvcpu) {
+            fprintf(stderr, "TWIN: unavailable (no memory for its vertices): native colour at render scale "
+                    "%dx\n", s_scale);
+            twin_release();
+            s_twin_unavailable = 1;
+            ace_set_ssaa_effective(1, "no memory for the host twin's vertices");
+            s_ssaa = 1;
+            s_tscale = s_scale;
+        }
     }
 
     /* 1x1 white texture for untextured draws */

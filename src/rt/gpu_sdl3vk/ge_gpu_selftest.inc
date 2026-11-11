@@ -1792,27 +1792,58 @@ static float coherence_spr_expect(SprAxis ax, int nearest, uint32_t d, uint32_t 
     return 16.0f * floorf(pos);
 }
 
+typedef struct { int x, n; uint32_t tflt; float u0, u1, v0, v1; const char *name; } SprCell;
+
+/* Every sample stays inside texels 0..15, so clamping never decides a value. */
+static const SprCell k_spr_cells[] = {
+    { 100, 12, 0x000u, 2.0f, 14.0f, 2.0f, 14.0f, "nearest-1to1" },
+    { 120, 12, 0x000u, 2.5f, 14.5f, 2.5f, 14.5f, "nearest-half-origin" },
+    { 140, 12, 0x000u, 2.25f, 14.25f, 2.75f, 14.75f, "nearest-quarter-origin" },
+    { 160, 12, 0x000u, 2.0f, 14.0f, 14.5f, 2.5f, "nearest-flipped-v" },
+    { 180, 6, 0x000u, 2.25f, 14.25f, 2.25f, 14.25f, "nearest-minified" },
+    { 200, 12, 0x101u, 2.0f, 14.0f, 2.0f, 14.0f, "linear-1to1" },
+    { 220, 12, 0x101u, 2.5f, 14.5f, 2.5f, 14.5f, "linear-half-origin" },
+    { 240, 12, 0x101u, 2.0f, 14.0f, 14.5f, 2.5f, "linear-flipped-v" },
+};
+#define SPR_NEAREST_1TO1 4   /* the first four cells: nearest, one texel per pixel */
+
+/* The 16x16 gradient texture and a display list drawing `cells` as through-mode sprites at row y0 of
+ * the 8888 target at fba (stride 512), through ge.c's interpreter and the production hooks. */
+static void coherence_sprite_list(const SprCell *cells, int ncells, int y0, uint32_t fba, uint32_t stride);
+/* sprite-scaled's checks of the device image `dev` (at the render scale; freed here) and guest VRAM. */
+static int coherence_sprite_check(const SprCell *cells, int ncells, int y0, const uint32_t *fb, uint32_t stride,
+                                  uint32_t *dev, int ok);
+
 static int coherence_run_sprite_scaled(void) {
     const uint32_t fba = 0x00160000u, base = 0x04000000u | fba, stride = 512u;
     const size_t bytes = (size_t)stride * FB_H * 4u;
     uint32_t *fb = (uint32_t *)SR_HOST(base);
+    const SprCell *cells = k_spr_cells;
+    const int ncells = (int)(sizeof(k_spr_cells) / sizeof(k_spr_cells[0])), y0 = 10;
+    coherence_sprite_list(cells, ncells, y0, fba, stride);
+
+    const uint32_t s = (uint32_t)s_scale;
+    uint32_t *dev = (uint32_t *)malloc((size_t)SCL_W * SCL_H * 4u);
+    if (!dev) return 0;
+    coherence_reset_targets();
+    memset(fb, 0, bytes);
+    sr_gpu_vram_dirty(base, (uint32_t)bytes);
+    ge_set_gpu_hooks(&k_hooks);
+    ge_run_list(COH_SAMPLE_LIST, 0);
+    GeGpuFbDescriptor desc = { .addr = base, .format = 3, .stride = stride,
+                               .width = 480, .height = 272 };
+    int ok = gegpu_sync_guest_fb(&desc);
+    Target *t = ok ? target_find_by_fba(fba) : NULL;
+    ok = t != NULL && coherence_read_device(t->img, VK_IMAGE_ASPECT_COLOR_BIT, &t->layout,
+                                            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, 4u, dev);
+    return coherence_sprite_check(cells, ncells, y0, fb, stride, dev, ok);
+}
+
+static void coherence_sprite_list(const SprCell *cells, int ncells, int y0, uint32_t fba, uint32_t stride) {
     uint32_t *tex = (uint32_t *)SR_HOST(COH_SAMPLE_TEX);
     for (unsigned v = 0; v < 16u; v++)
         for (unsigned u = 0; u < 16u; u++) tex[v * 16u + u] = 0xFF000000u | ((16u * v) << 8) | (16u * u);
     sr_gpu_vram_dirty(COH_SAMPLE_TEX, 16u * 16u * 4u);
-
-    /* Every sample stays inside texels 0..15, so clamping never decides a value. */
-    static const struct { int x, n; uint32_t tflt; float u0, u1, v0, v1; const char *name; } cells[] = {
-        { 100, 12, 0x000u, 2.0f, 14.0f, 2.0f, 14.0f, "nearest-1to1" },
-        { 120, 12, 0x000u, 2.5f, 14.5f, 2.5f, 14.5f, "nearest-half-origin" },
-        { 140, 12, 0x000u, 2.25f, 14.25f, 2.75f, 14.75f, "nearest-quarter-origin" },
-        { 160, 12, 0x000u, 2.0f, 14.0f, 14.5f, 2.5f, "nearest-flipped-v" },
-        { 180, 6, 0x000u, 2.25f, 14.25f, 2.25f, 14.25f, "nearest-minified" },
-        { 200, 12, 0x101u, 2.0f, 14.0f, 2.0f, 14.0f, "linear-1to1" },
-        { 220, 12, 0x101u, 2.5f, 14.5f, 2.5f, 14.5f, "linear-half-origin" },
-        { 240, 12, 0x101u, 2.0f, 14.0f, 14.5f, 2.5f, "linear-flipped-v" },
-    };
-    const int ncells = (int)(sizeof(cells) / sizeof(cells[0])), y0 = 10;
     RawSpriteVtx *vtx = (RawSpriteVtx *)SR_HOST(COH_SAMPLE_VERTS);
     uint32_t *dl = (uint32_t *)SR_HOST(COH_SAMPLE_LIST);
     int p = 0, nv = 0;
@@ -1856,21 +1887,11 @@ static int coherence_run_sprite_scaled(void) {
     DL_EMIT(0x0F, 0);
     DL_EMIT(0x0C, 0);
     #undef DL_EMIT
+}
 
+static int coherence_sprite_check(const SprCell *cells, int ncells, int y0, const uint32_t *fb, uint32_t stride,
+                                  uint32_t *dev, int ok) {
     const uint32_t s = (uint32_t)s_scale;
-    uint32_t *dev = (uint32_t *)malloc((size_t)SCL_W * SCL_H * 4u);
-    if (!dev) return 0;
-    coherence_reset_targets();
-    memset(fb, 0, bytes);
-    sr_gpu_vram_dirty(base, (uint32_t)bytes);
-    ge_set_gpu_hooks(&k_hooks);
-    ge_run_list(COH_SAMPLE_LIST, 0);
-    GeGpuFbDescriptor desc = { .addr = base, .format = 3, .stride = stride,
-                               .width = 480, .height = 272 };
-    int ok = gegpu_sync_guest_fb(&desc);
-    Target *t = ok ? target_find_by_fba(fba) : NULL;
-    ok = t != NULL && coherence_read_device(t->img, VK_IMAGE_ASPECT_COLOR_BIT, &t->layout,
-                                            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, 4u, dev);
     if (!ok) fprintf(stderr, "gpu coherence selftest [sprite-scaled]: draw or device read failed\n");
     int bad = 0;
     for (int c = 0; ok && c < ncells; c++) {
@@ -8654,7 +8675,7 @@ static int coherence_run_ssaa_edge(void) {
         coherence_reset_targets();
         return 0;
     }
-    const uint64_t vram = twin_hash(SR_HOST(SS_BASE), 512u * FB_H * 4u, 0xcbf29ce484222325ull);
+    const uint64_t vram = twin_hash(SR_HOST(SS_BASE), (size_t)512u * FB_H * 4u, 0xcbf29ce484222325ull);
     /* guest VRAM: the triangle is there at all */
     if (((uint32_t *)SR_HOST(SS_BASE))[10 * 512 + 10] != SS_WHITE ||
         ((uint32_t *)SR_HOST(SS_BASE))[260 * 512 + 470] != SS_BLACK) {
@@ -8662,15 +8683,9 @@ static int coherence_run_ssaa_edge(void) {
         ok = 0;
     }
 
-    /* what gegpu_present hands the presenter: target_prepare_present's choice and resolve */
-    t->tshow = s_twin && t->timg && !s_twin_authentic_shown && t->tgen == t->wgen;
-    if (t->tshow && s_ssaa > 1) {
-        if (!cmd_begin()) ok = 0;
-        else {
-            ssaa_resolve(t);
-            if (!cmd_submit_wait(SR_PERF_GE_TARGET_READBACK_TRANSITION)) ok = 0;
-        }
-    }
+    /* what gegpu_present hands the presenter: target_prepare_present, the production step, chooses the
+     * image and resolves it */
+    if (ok && !target_prepare_present(t)) ok = 0;
     const int sc = present_scale(t);
     const uint32_t w = (uint32_t)FB_W * (uint32_t)sc, h = (uint32_t)FB_H * (uint32_t)sc;
     uint32_t *img = (uint32_t *)malloc((size_t)w * h * 4u);
@@ -8764,10 +8779,84 @@ static int coherence_run_ssaa_edge(void) {
     return ok;
 }
 
+/* ssaa-sprite: sprite-scaled's nearest one-texel-per-pixel sprites (on a texel edge, half and a quarter
+ * of a texel off, flipped), drawn and presented through the production path. The PSP shows one texel
+ * across each guest pixel, and above 1x every device pixel of it does too (sprite_nearest_axis), so
+ * each guest pixel's samples are equal and their average is that texel: the shown image equals the
+ * authentic device image at every pixel of the sprites, at 2x and 4x as without supersampling. At
+ * render scale 1 the twin draws above 1x from its own vertices (s_tvcpu); drawing it from the
+ * authentic ones, made for 1x, splits a quarter-off sprite's texels inside each guest pixel. */
+static int coherence_run_ssaa_sprite(void) {
+    const char *name = "ssaa-sprite";
+    if (s_twin_unavailable && g_ace_on && ace_effective()->ssaa > 1) {
+        printf("gpu coherence selftest: SKIP %s: supersampling was asked for but this device refused the "
+               "host twin\n", name);
+        return 1;
+    }
+    const uint32_t fba = 0x00160000u, base = 0x04000000u | fba, stride = 512u;
+    const int y0 = 10;
+    coherence_sprite_list(k_spr_cells, SPR_NEAREST_1TO1, y0, fba, stride);
+    coherence_reset_targets();
+    memset(SR_HOST(base), 0, (size_t)stride * FB_H * 4u);
+    sr_gpu_vram_dirty(base, stride * FB_H * 4u);
+    ge_set_gpu_hooks(&k_hooks);
+    ge_run_list(COH_SAMPLE_LIST, 0);
+    GeGpuFbDescriptor desc = { .addr = base, .format = 3, .stride = stride, .width = 480, .height = FB_H };
+    int ok = gegpu_sync_guest_fb(&desc) == GEGPU_SYNC_OK;
+    Target *t = ok ? target_find_by_fba(fba) : NULL;
+    const uint32_t s = (uint32_t)s_scale;
+    uint32_t *dev = (uint32_t *)malloc((size_t)SCL_W * SCL_H * 4u);
+    uint32_t *img = (uint32_t *)malloc((size_t)SCL_W * SCL_H * 4u);
+    ok = ok && t && dev && img &&
+         coherence_read_device(t->img, VK_IMAGE_ASPECT_COLOR_BIT, &t->layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                               4u, dev) &&
+         target_prepare_present(t) && present_scale(t) == s_scale &&
+         twin_read_image(present_image(t), VK_IMAGE_ASPECT_COLOR_BIT, present_layout(t),
+                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 4u, SCL_W, SCL_H, img);
+    const int shown_twin = t ? t->tshow : 0;
+    if (t) t->tshow = 0;
+    if (!ok) fprintf(stderr, "gpu coherence selftest [%s]: FAIL the sprites could not be drawn or read\n", name);
+    if (ok && s_ssaa > 1 && !shown_twin) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL supersampling %dx shows the authentic image\n", name,
+                s_ssaa);
+        ok = 0;
+    }
+    unsigned long differ = 0, px = 0;
+    uint8_t levels[256] = {0};
+    for (int c = 0; ok && c < SPR_NEAREST_1TO1; c++) {
+        const SprCell *cell = &k_spr_cells[c];
+        for (uint32_t dy = 0; dy < (uint32_t)cell->n * s; dy++)
+            for (uint32_t dx = 0; dx < (uint32_t)cell->n * s; dx++) {
+                const size_t at = ((size_t)y0 * s + dy) * SCL_W + (size_t)cell->x * s + dx;
+                const uint32_t a = dev[at] & 0x00FFFFFFu, b = img[at] & 0x00FFFFFFu;
+                px++;
+                levels[a & 0xFFu] = 1;
+                if (a != b && differ++ < 8)
+                    fprintf(stderr, "gpu coherence selftest [%s/%s]: ssaa=%d scale=%u device pixel (%u,%u) shown "
+                            "%06x, authentic %06x\n", name, cell->name, s_ssaa, s, dx, dy, b, a);
+            }
+    }
+    unsigned distinct = 0;
+    for (int i = 0; i < 256; i++) distinct += levels[i];
+    if (ok && (differ || distinct < 8u)) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL ssaa=%d scale=%u: %lu of %lu sprite pixels differ from "
+                "the authentic image (want 0), %u texel values (want at least 8)\n", name, s_ssaa, s, differ, px,
+                distinct);
+        ok = 0;
+    }
+    free(dev);
+    free(img);
+    coherence_reset_targets();
+    if (ok)
+        printf("gpu coherence selftest: PASS %s ssaa=%d scale=%u: %lu sprite pixels shown as the authentic image, "
+               "%u texel values\n", name, s_ssaa, s, px, distinct);
+    return ok;
+}
+
 static int coherence_run_ssaa_limit(void) {
     const char *name = "ssaa-limit";
     int ok = 1;
-    char why[192];
+    char why[320];
     struct { int want, scale; uint32_t dim; uint64_t budget; int expect; const char *says; } k_cells[] = {
         { 4, 1, 16384u, 1ull << 40, 4, "" },
         { 4, 4, 8192u, 1ull << 40, 4, "" },                     /* 8192 x 4352 fits a side of 8192 */
@@ -8776,6 +8865,8 @@ static int coherence_run_ssaa_limit(void) {
         { 4, 1, 0, 0, 2, "MB of GPU memory, over the" },        /* budget: exactly what 2x needs */
         { 2, 4, 16384u, 1ull << 20, 1, "2x at render scale 4x needs about" },
         { 2, 2, 16384u, 0, 2, "" },                             /* budget: exactly what 2x needs */
+        /* nothing fits: the reason names 4x's and then 2x's */
+        { 4, 4, 2048u, 1ull << 40, 1, "largest is 2048; 2x at render scale 4x needs 4096x2176 images" },
     };
     for (unsigned i = 0; i < sizeof(k_cells) / sizeof(k_cells[0]); i++) {
         const uint32_t dim = k_cells[i].dim ? k_cells[i].dim : 16384u;
@@ -8805,6 +8896,24 @@ static int coherence_run_ssaa_limit(void) {
             (s_ssaa > 1) != (s_twin != 0)) {
             fprintf(stderr, "gpu coherence selftest [%s]: FAIL init chose %d (Ace line's effective %d, twin %s at "
                     "%dx), want %llu\n", name, s_ssaa, eff, s_twin ? "on" : "off", s_tscale, s_ssaa_expect);
+            ok = 0;
+        }
+        /* The Ace report says what the run got: the factor in effect (1 when unavailable, with the size
+         * check's reason), and the request beside a lowered one. */
+        static char json[ACE_REPORT_MAX];
+        char want[64];
+        const int req = g_ace_on ? ace_requested()->ssaa : 0;
+        snprintf(want, sizeof(want), "\"ssaa\": %llu", s_ssaa_expect);
+        int rep = g_ace_on && ace_report_json(json, sizeof(json)) > 0 && strstr(json, want) != NULL;
+        if (rep && s_ssaa_expect > 1 && (int)s_ssaa_expect < req) {
+            snprintf(want, sizeof(want), "\"ssaa_requested\": %d", req);
+            rep = strstr(json, want) != NULL;
+        }
+        if (rep && s_ssaa_expect == 1)
+            rep = strstr(json, "over the") != NULL || strstr(json, "largest is") != NULL;
+        if (!rep) {
+            fprintf(stderr, "gpu coherence selftest [%s]: FAIL the Ace report does not say %llu of %d with its "
+                    "reason:\n%s\n", name, s_ssaa_expect, req, g_ace_on ? json : "(Ace off)");
             ok = 0;
         }
     }
@@ -10609,6 +10718,7 @@ static int coherence_selftest_cases(void) {
         if (strcmp(only, "depth-evict-holder") == 0) return coherence_run_depth_evict_holder();
         if (strcmp(only, "twin-scene") == 0) return coherence_run_twin_scene();
         if (strcmp(only, "ssaa-edge") == 0) return coherence_run_ssaa_edge();
+        if (strcmp(only, "ssaa-sprite") == 0) return coherence_run_ssaa_sprite();
         if (strcmp(only, "ssaa-limit") == 0) return coherence_run_ssaa_limit();
         if (strcmp(only, "twin-sync") == 0) return coherence_run_twin_sync();
         if (strcmp(only, "twin-gate") == 0) return coherence_run_twin_gate();
@@ -10705,6 +10815,7 @@ static int coherence_selftest_cases(void) {
     if (s_twin && s_tscale == s_scale && !coherence_run_twin_sync()) ok = 0;
     if (!coherence_run_rtt_scale()) ok = 0;
     if (!coherence_run_ssaa_edge()) ok = 0;
+    if (!coherence_run_ssaa_sprite()) ok = 0;
     if (!coherence_run_ssaa_limit()) ok = 0;
     coherence_reset_targets();
     return ok;

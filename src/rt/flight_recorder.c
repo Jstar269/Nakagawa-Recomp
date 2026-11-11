@@ -5,6 +5,7 @@
 #define SR_FLIGHT_RECORDER_LINKED
 #endif
 #include "flight_recorder.h"
+#include "ace.h"     /* ACE_SPEC_MAX, the size of the Ace line the bundle keeps */
 #include "recomp.h"  /* SR_CPUSTATE_ABI_VERSION, stamped into the bundle header */
 
 #include <errno.h>
@@ -217,11 +218,11 @@ static uint64_t s_flight_recorded;
 static uint64_t s_flight_last_sequence;
 static uint32_t s_flight_last_kind;
 static int s_flight_init_state;
-/* Ace Mode's line for an enhanced run, else empty. Its size is ACE_SPEC_MAX (src/rt/ace.h, which the
- * recorder does not include), so any line the runtime accepts is kept whole: at 96 an Enhanced line
- * with sas=sinc, wide=fill and ssaa=4 (100 characters) lost its last key. tools/test_flight_diff.py
- * checks the size. */
-static char s_flight_ace[192];
+/* Ace Mode's line for an enhanced run, else empty. It holds ACE_SPEC_MAX bytes, the size of every line
+ * the runtime accepts (ace-selftest checks that the longest line the key table formats fits it), so a
+ * line is kept whole: at 96 an Enhanced line with sas=sinc, wide=fill and ssaa=4 (100 characters) lost
+ * its last key. tools/test_flight_diff.py checks the declaration and the schema's maxLength. */
+static char s_flight_ace[ACE_SPEC_MAX];
 /* The window's upscale stamp (gui.c gui_upscale_init): "fsr1", "movie-anime4k", "movie-fsr1",
  * "fsr1+movie-anime4k" or "fsr1+movie-fsr1". 32 holds the longest (18) with room to spare. */
 static char s_flight_upscale[32];

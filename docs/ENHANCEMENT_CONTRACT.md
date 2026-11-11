@@ -1209,31 +1209,41 @@ what the guest draws into, reads or waits for. The code is the comment at `s_ssa
   file and in every graphics preset, because of its cost (below). It has no other switch.
 - **How.** It runs the host twin (section 10.11) at the render scale times the factor; the twin keeps the authentic
   colour unless full colour was asked for. At each present the twin is averaged down to the render scale by
-  halving blits with linear filtering: one at 2x, two at 4x. Each halving step weighs four samples equally, so each
-  shown pixel is the plain mean of the 4 (2x) or 16 (4x) samples it covers. Dither stays keyed to guest pixels,
-  as at any render scale. The presenter, the speed readout, Smooth motion and Widescreen Fill take that image at
-  the render scale, as without supersampling, so Fill's wings are drawn as usual.
-- **Guest memory.** The authentic chain keeps the render scale, and nothing reads the twin or its average back.
-  Guest VRAM, every readback, every block transfer into RAM and the frame each present commits to guest VRAM are
-  those of a run without supersampling at the same render scale, byte for byte (`gpu-coherence-selftest`
-  ssaa-edge at 1x, 2x and 4x and render scales 1 and 2; twin-scene with it on). Section 11.1's four items are
-  unchanged, as for the twin: the extra GPU work is a host wait, never in the guest timing model.
+  halving blits with linear filtering: one at 2x, two at 4x. Each halving step weighs four samples equally and
+  stores 8 bits a channel, so at 2x each shown pixel is the mean of the 4 samples it covers, rounded once, and at
+  4x the mean of the 16 it covers within two such roundings. Dither stays keyed to guest pixels, as at any render
+  scale. At render scale 1 the twin draws from its own copy of the vertices, with the above-1x texture fixes
+  (the render-scale item's edge box and nearest-sprite alignment, section 11.1) applied at the twin's scale; the
+  authentic chain keeps the 1x vertices unchanged. The presenter, the speed readout, Smooth motion and Widescreen
+  Fill take that image at the render scale, as without supersampling, so Fill's wings are drawn as usual.
+- **Guest memory.** The authentic chain keeps the render scale, and nothing reads the twin or its average back,
+  so guest VRAM, every readback, every block transfer into RAM and the frame each present commits to guest VRAM
+  are those of a run without supersampling at the same render scale. The tests: ssaa-edge hashes guest VRAM after
+  its scene is read back and requires the hash of a run without supersampling, at 2x and 4x and render scales 1
+  and 2; twin-scene and the whole suite run with it on at 2x and 4x, so every readback and block-transfer case
+  meets its own expected bytes with it on. Section 11.1's four items are unchanged, as for the twin: the extra GPU
+  work is a host wait, never in the guest timing model.
 - **What the picture shows.** Without it every pixel of a black-and-white scene is black or white; with it, pixels
   on an edge take the shades between, only within a pixel and a half of the edge, and every other pixel keeps its
-  value (ssaa-edge). 4x gives more shades than 2x can. Present-source captures follow the shown image, so they
-  hold the averaged picture.
+  value (ssaa-edge, which reads the image the production present step, `target_prepare_present`, hands the
+  presenter). 4x gives more shades than 2x can. A nearest-filtered sprite drawn one texel per guest pixel shows
+  the authentic image at every pixel, since each guest pixel's samples hold the same texel (ssaa-sprite, at
+  render scales 1 and 2). Present-source captures follow the shown image, so they hold the averaged picture.
 - **Size check.** At start the renderer checks the twin's images against the GPU: each side at most the device's
-  largest image (`maxImageDimension2D`), and an estimate of the memory the factor holds within half of the largest
+  largest image, framebuffer and viewport (`maxImageDimension2D`, `maxFramebufferWidth` and `Height`,
+  `maxViewportDimensions`), and an estimate of the memory the factor holds within half of the largest
   device-local memory heap. The estimate counts four render targets (two display buffers and two others), each
   with its twin and depth twin at the twin's scale and its average at the render scale, the twin snapshot, and at
   4x the halving step. If 4x does not fit and 2x does, the run uses 2x and says so in one
   `ACE_MODE: ssaa 2 (asked for 4: <reason>)` line; if nothing fits, supersampling is unavailable for the run
-  (`SSAA: unavailable (<reason>)`, and the Ace report and stamps say so). It never falls back to 1x without a
+  (`SSAA: unavailable (<reason>)`, the reason naming each factor tried, and the Ace report and stamps say so). It never falls back to 1x without a
   message. A GPU without linear blits of RGBA8, or one that refuses the twin, makes it unavailable the same way.
   The estimate is not a promise: a title with more live render targets uses more, and a twin allocation that fails
   later turns the twin off for the rest of the run with one `TWIN: off ...` line and one
-  `SSAA: off for the rest of the run with the twin` line (section 10.11). `ssaa-limit` forces small limits and
-  checks the factor chosen and the reason given.
+  `SSAA: off for the rest of the run with the twin` line (section 10.11), and the Ace report then gives
+  `"ssaa": 1` with the factor asked for. At render scale 1 a failed allocation of the twin's vertices makes it
+  unavailable the same way. `ssaa-limit` forces small limits and checks the factor chosen, the reason given and
+  the Ace report.
 - **Cost.** Every render op is drawn a second time, into the twin, at factor x factor times the render scale's
   pixels: 4 times at 2x and 16 times at 4x, plus one or two blits per present. The estimate above is 17 MB at
   render scale 1 and 2x, 64 MB at 1x and 4x, 68 MB and 255 MB at 2x render scale, and 272 MB and 1020 MB at 4x
@@ -1243,8 +1253,9 @@ what the guest draws into, reads or waits for. The code is the comment at `s_ssa
   lowered it; and "2x supersampling" or "4x supersampling" in the pause menu's list of parts. Section 10.4
   applies.
 - **Tests.** `gpu-coherence-selftest` runs ssaa-edge without supersampling to write a reference at render scales 1
-  and 2 and at 2x and 4x against it, twin-scene and the whole suite with it on, twin-gate with it on, and
-  ssaa-limit with a forced memory budget and a forced largest side. `ace-selftest` checks the key's parsing,
+  and 2 and at 2x and 4x against it, twin-scene, ssaa-sprite at 2x and 4x (render scale 1) and at 4x (render
+  scale 2), the whole suite at 2x and at 4x, twin-gate with it on, and ssaa-limit with a forced memory budget and
+  a forced largest side. `ace-selftest` checks the key's parsing,
   order, report and words; `test_player_state` the setting, its presets and its launch line.
 
 ## 11. Guest-Visible Items
