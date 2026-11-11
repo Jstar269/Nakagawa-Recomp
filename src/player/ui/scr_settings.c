@@ -1118,7 +1118,7 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
         nk_ui_text_role(ui, FLOW_ID_TITLE, "PSP fonts", NK_UI_TYPE_TITLE, theme->paper);
         nk_ui_text_role(ui, FLOW_ID_LEAD,
                         /* #2005: what the stand-in fonts change, as font/README.md
-                           describes them: letter shapes, line widths within 3 %, and the
+                           describes them: letter shapes, Latin line widths within 3 %, and the
                            characters they lack. The Latin stand-ins have every character
                            of the PSP's Latin fonts, Cyrillic included (--latin-cyrillic-text
                            in mk/housekeeping.mk); the Japanese one lacks about 2,200 of the
@@ -1127,7 +1127,7 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                         "Optional. Without your PSP's own fonts, every game still runs and "
                         "shows its text in open stand-in fonts. They look different: the "
                         "letters are shaped differently, English lines come out a little wider "
-                        "or narrower, and a few rarely used characters of the PSP's Japanese "
+                        "or narrower, and some rarely used characters of the PSP's Japanese "
                         "and Korean fonts are missing. For the PSP's own look, "
                         "connect your PSP by USB and choose Get fonts from my PSP, or copy the "
                         ".pgf files from flash0:/font on your PSP to a folder on this PC "
