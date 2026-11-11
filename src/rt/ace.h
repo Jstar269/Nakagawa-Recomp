@@ -11,9 +11,10 @@
  *     SR_ACE=v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off
  *
  * tier (enhanced or ace) only names the run, in the badge, the pause menu and the stamps; a
- * line without it is an Enhanced run. stick and cull are the other keys a line may leave out: a
- * missing stick or cull reads as off (section 11.2 item 2); stick has no off word, its value is
- * the game's dead zone (1..126), and a line that writes cull=off means the same as none. Every other
+ * line without it is an Enhanced run. stick, load and cull are the other keys a line may leave
+ * out: a missing stick, load or cull reads as off (section 11.2 item 2); stick has no off word,
+ * its value is the game's dead zone (1..126), and a line that writes load=off or cull=off means
+ * the same as none; stick=<counts>, load=fast and cull=on need tier=ace. Every other
  * key is required in v1, in any order, each once. A key or value for a feature this build
  * does not carry (smooth=match) is still parsed and refused. Anything else (an unknown version, key
  * or value, a duplicate, a missing key, an empty field) refuses the whole line: Ace is off for
@@ -24,7 +25,7 @@
  * are today's, and nothing is printed. With Ace on, guest logic and the guest timing model are
  * unchanged; host presentation changes (and, with sas=sinc, the mixed SAS sample values; with
  * tess=2..4, the pixels of every triangle patch and the GE timing model's clocks under
- * SR_GE_TIMING=1), and
+ * SR_GE_TIMING=1; with load=fast, the guest timing of a title's declared loading waits), and
  * the run says so ("ACE_MODE: on (...)" at start, an exit line, and the flight recorder's
  * runtime.enhancements block).
  *
@@ -49,6 +50,7 @@
 #define ACE_HAS_CULL 1          /* cull=on: widen a title's own view-culling test to the wings (11.3.6) */
 #define ACE_HAS_STICK 1         /* stick=<counts>: start the host stick past the game's dead zone (11.3.11) */
 #define ACE_STICK_COUNTS_MAX 126 /* stick=1..126: the square dead zone, in the game's centred counts */
+#define ACE_HAS_LOAD 1          /* load=fast: a title's declared loading waits return at once (11.3.10) */
 
 typedef enum { ACE_WIDE_OFF = 0, ACE_WIDE_FILL = 1 } AceWide;
 typedef enum { ACE_SMOOTH_OFF = 0, ACE_SMOOTH_MATCH = 1, ACE_SMOOTH_X2 = 2 } AceSmooth;
@@ -75,6 +77,7 @@ typedef struct {
     int cull;        /* cull=on: a title's culling is widened to the wings (guest-visible, 11.3.6) */
     int stick;       /* stick=<counts>: 0 off, else the square stick dead zone the title ignores, 1..126
                         (guest-visible, 11.3.11) */
+    int load;        /* load=fast: the waits a title's load part declares are skipped (guest timing, 11.3.10) */
 } AceConfig;
 
 typedef enum {
@@ -87,6 +90,7 @@ typedef enum {
     ACE_FEATURE_SAS,
     ACE_FEATURE_TESS,
     ACE_FEATURE_STICK,
+    ACE_FEATURE_LOAD,
     ACE_FEATURE_CULL,
     ACE_FEATURE_COUNT
 } AceFeature;
@@ -150,6 +154,36 @@ void ace_stick_remap(uint8_t *lx, uint8_t *ly, int game_counts, int host_counts)
  * Counts the samples off rest it passed through the curve (the report's samples_remapped),
  * confirms the feature at the first one, and keeps host_counts for the report. */
 void ace_stick_sample(uint8_t *lx, uint8_t *ly, int host_counts);
+
+/* A vblank_wait_skip site of the title's Ace load part (contract 9.8 and 11.3.10), asked by
+ * nk_ace_load_skip_wait() (recomp.h, src/rt/hle_display.c) once that call would block: nonzero
+ * only while load=fast is in effect, and then the site's call to sceDisplayWaitVblankStart is
+ * skipped. Each nonzero return is one skipped wait, counted
+ * for the report (load_waits_skipped), and confirms the part. A run that asked for load=fast and
+ * never reached a site reports it unavailable at exit: the title's build has no load part, or
+ * none of its declared waits ran. site and pc name the declared site (its id and the jal's
+ * address) in the guard's line below.
+ *
+ * The pacing guard (contract 11.3.10): a load wait is skipped in a loading screen, not in every
+ * logic update, so the run counts consecutive logic updates (nk_ace_load_update(), which
+ * generated code calls where each one begins) in each of which at least one wait was skipped.
+ * When that run reaches ACE_LOAD_PACING_UPDATES, the skipped wait paces updates, not a load: from
+ * then on nothing is skipped for the rest of the run, so every declared wait runs its stock call,
+ * and one "ENHANCEMENT_LOAD_PACING:" line names the site whose skip reached it. The report carries
+ * the longest run seen (load_skip_max_run) and whether the guard fired (load_paced). 8 is four
+ * times the longest run measured through one title's loads (2 updates, contract 11.3.10), and
+ * provisional until a second title is measured. */
+#define ACE_LOAD_PACING_UPDATES 8u
+int nk_ace_load_fast(const char *site, uint32_t pc);
+/* One logic update begins (the package's update_boundary): ends the previous update's part of
+ * the guard's run. Does nothing unless load=fast is in effect. */
+void nk_ace_load_update(void);
+/* The waits nk_ace_load_fast() has skipped in this run. */
+unsigned long long ace_load_waits_skipped(void);
+/* The longest run of consecutive logic updates with a skipped wait, and whether it reached
+ * ACE_LOAD_PACING_UPDATES (skipping then stopped for the rest of the run). */
+unsigned ace_load_skip_max_run(void);
+int ace_load_paced(void);
 /* An anisotropic sampler the renderer could not make: that draw kept the plain one. */
 void ace_note_af_failure(void);
 /* The pause menu's live Speed readout switch (Ace on only; a readout this host cannot draw
@@ -494,9 +528,9 @@ void ace_smooth_aux_report(const AceSmoothAuxStats *s);
 
 /* ---- the per-run report -------------------------------------------------------------------- */
 
-/* The worst case, every block present and every number at its widest, is about 4.2 KB;
- * ace_selftest's cell_report_worst checks that it fits. */
-#define ACE_REPORT_MAX 4608u
+/* The worst case, every block present and every number at its widest, is about 4.8 KB with
+ * stick and load in the spec; ace_selftest's cell_report_worst checks that it fits. */
+#define ACE_REPORT_MAX 5120u
 /* The report's JSON for the run so far; 0 when it would not fit. */
 size_t ace_report_json(char *out, size_t cap);
 /* Settles the features that never ran (ace_confirm), then writes the report (SR_ACE_REPORT,

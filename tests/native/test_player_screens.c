@@ -52,7 +52,8 @@ static const EnhancedWords k_enhanced_words[PLAYER_PART_COUNT] = {
     [PLAYER_PART_TESS] = ENHANCED_WORDS(k_enhanced_tess_labels),
     [PLAYER_PART_CULL] = ENHANCED_WORDS(k_enhanced_switch_labels),
     [PLAYER_PART_UPSCALE] = ENHANCED_WORDS(k_enhanced_upscale_labels),
-    [PLAYER_PART_STICK] = ENHANCED_WORDS(k_enhanced_switch_labels)};
+    [PLAYER_PART_STICK] = ENHANCED_WORDS(k_enhanced_switch_labels),
+    [PLAYER_PART_LOAD] = ENHANCED_WORDS(k_enhanced_switch_labels)};
 #undef ENHANCED_WORDS
 /* The most words any part has, for the stays-put test's steps. */
 enum { ENHANCED_MAX_WORDS = 5 };

@@ -7975,7 +7975,7 @@ static void test_play_mode_settings(void) {
                                       "\"notice\": \"on\", \"wide\": \"off\", "
                                       "\"smooth\": \"off\", \"sas\": \"off\", "
                                       "\"tess\": \"off\", \"cull\": \"off\", \"upscale\": \"off\", "
-                                      "\"stick\": \"off\"},") != NULL);
+                                      "\"stick\": \"off\", \"load\": \"off\"},") != NULL);
         assert(strstr(saved, "\"TEST90001\": {\"mode\": \"library\", \"af\": \"8\", "
                              "\"notice\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST90002\": {\"mode\": \"library\", \"logic_60\": \"off\"}")
@@ -8173,7 +8173,7 @@ static void test_play_mode_sas_settings(void) {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"smooth\": \"off\", \"sas\": \"sinc\", "
                                       "\"tess\": \"off\", \"cull\": \"off\", \"upscale\": \"off\", "
-                                      "\"stick\": \"off\"}") != NULL);
+                                      "\"stick\": \"off\", \"load\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST92001\": {\"mode\": \"library\", \"sas\": \"off\"}") != NULL);
         free(saved);
     }
@@ -8200,7 +8200,7 @@ static void test_play_mode_sas_settings(void) {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"smooth\": \"off\", \"sas\": \"off\", "
                                       "\"tess\": \"off\", \"cull\": \"off\", \"upscale\": \"off\", "
-                                      "\"stick\": \"off\"}") != NULL);
+                                      "\"stick\": \"off\", \"load\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST92001\": {\"mode\": \"library\", \"sas\": \"sinc\"}") != NULL);
         free(saved);
     }
@@ -8267,7 +8267,7 @@ static void test_play_mode_cull_settings(void) {
     {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"cull\": \"on\", \"upscale\": \"off\", "
-                                      "\"stick\": \"off\"}") != NULL);
+                                      "\"stick\": \"off\", \"load\": \"off\"}") != NULL);
         free(saved);
     }
     memset(back, 0, sizeof(*back));
@@ -8298,6 +8298,8 @@ static void test_play_mode_cull_settings(void) {
  * "stick" are read, the title's wins, both survive a save and a load, and only an Ace launch of a
  * title whose catalog entry declares a dead zone carries the key, with the catalog's count. The
  * built-in UCUS98701 declares 64; a disc the catalog does not know declares none. */
+static void expect_line_parses_in_runtime(const PlayerPlayResolved *r);
+
 static void test_play_mode_stick_settings(void) {
     char sep = nk_platform_path_separator();
     char cache_root[512], root[700], path[800];
@@ -8335,6 +8337,13 @@ static void test_play_mode_stick_settings(void) {
     r.part[PLAYER_PART_CULL] = 1;
     assert(player_play_launch_line(&r, line, sizeof(line)) &&
            strcmp(line + strlen(line) - 17, ";stick=64;cull=on") == 0 && strstr(line, ";tess=off;stick=64") != NULL);
+    /* Short loads too: stick, then load, then cull (contract 11.3.10, 11.3.11). */
+    r.part[PLAYER_PART_LOAD] = 1;
+    assert(player_play_launch_line(&r, line, sizeof(line)) &&
+           strcmp(line + strlen(line) - 27, ";stick=64;load=fast;cull=on") == 0 &&
+           strstr(line, ";tess=off;stick=64") != NULL);
+    expect_line_parses_in_runtime(&r);   /* the runtime writes the same order */
+    r.part[PLAYER_PART_LOAD] = 0;
     r.part[PLAYER_PART_CULL] = 0;
     player_play_resolve(&app->settings, "TEST92001", &r);       /* no declared dead zone */
     assert(r.on && r.mode == PLAYER_PLAY_ACE && r.part[PLAYER_PART_STICK] == 1 && r.stick_counts == 0);
@@ -8345,7 +8354,8 @@ static void test_play_mode_stick_settings(void) {
     assert(player_app_save_settings(app, path) == NK_OK);
     {
         char *saved = read_text_file(path);
-        assert(saved && strstr(saved, "\"cull\": \"off\", \"upscale\": \"off\", \"stick\": \"on\"}") != NULL);
+        assert(saved && strstr(saved, "\"cull\": \"off\", \"upscale\": \"off\", \"stick\": \"on\", "
+                                      "\"load\": \"off\"}") != NULL);
         free(saved);
     }
 
@@ -8453,6 +8463,96 @@ static void test_play_mode_stick_settings(void) {
            "launch of a title that declares a dead zone carries it\n");
 }
 
+/* Short loads (contract 11.3.10, 11.2 item 2): off in a fresh file and in every graphics
+ * preset, its row says it changes the game's timing, a library "load" and a title's own are read,
+ * the title's wins, only an Ace launch with it on carries ";load=fast", and an unknown word is off. */
+static void test_play_mode_load_settings(void) {
+    char sep = nk_platform_path_separator();
+    char cache_root[512], root[700], path[800];
+    char line[192];
+    PlayerPlayResolved r;
+    assert(nk_platform_get_path(NK_PATH_CACHE, cache_root, sizeof(cache_root)));
+    snprintf(root, sizeof(root), "%s%cplay_mode_load_probe", cache_root, sep);
+    assert(nk_platform_mkdir_p(root));
+    snprintf(path, sizeof(path), "%s%csettings.json", root, sep);
+    PlayerApp *app = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    PlayerApp *back = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    assert(app && back);
+
+    /* Fresh: off, named, guest-timing text, and no preset turns it on. */
+    player_app_settings_init_default(&app->settings);
+    assert(app->settings.enhanced.part[PLAYER_PART_LOAD] == 0);
+    assert(player_enhanced_part(PLAYER_PART_LOAD)->fresh == 0);
+    assert(strcmp(player_enhanced_part(PLAYER_PART_LOAD)->key, "load") == 0);
+    assert(strcmp(player_enhanced_part(PLAYER_PART_LOAD)->name, "Short loads") == 0);
+    assert(strstr(player_enhanced_part(PLAYER_PART_LOAD)->sentence, "Ace only") != NULL);
+    assert(strstr(player_enhanced_part(PLAYER_PART_LOAD)->sentence, "changes the game's timing") != NULL);
+    app->settings.enhanced.library = PLAYER_PLAY_ENHANCED;
+    for (int preset = PLAYER_PRESET_LOW; preset < PLAYER_PRESET_COUNT; preset++) {
+        player_app_apply_graphics_preset(app, preset);
+        player_play_resolve(&app->settings, "TEST95001", &r);
+        assert(r.on && r.part[PLAYER_PART_LOAD] == 0);
+        assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, "load") == NULL);
+    }
+
+    /* The library on; one Ace title turns it off, one follows, one stays Enhanced. */
+    write_text_file(path,
+        "{\"schema_version\": 2,"
+        " \"enhanced\": {\"default\": \"enhanced\", \"load\": \"fast\"},"
+        " \"title_play\": {\"TEST95001\": {\"mode\": \"ace\", \"load\": \"off\"},"
+        " \"TEST95002\": {\"mode\": \"ace\"}}}");
+    memset(app, 0, sizeof(*app));
+    assert(player_app_load_settings(app, path) == NK_OK);
+    assert(app->settings.enhanced.part[PLAYER_PART_LOAD] == 1);
+    player_play_resolve(&app->settings, "TEST95001", &r);
+    assert(r.on && r.mode == PLAYER_PLAY_ACE && r.part[PLAYER_PART_LOAD] == 0);
+    assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, "load") == NULL);
+    player_play_resolve(&app->settings, "TEST95002", &r);       /* follows the library */
+    assert(r.on && r.mode == PLAYER_PLAY_ACE && r.part[PLAYER_PART_LOAD] == 1);
+    assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, "tier=ace;") != NULL &&
+           strcmp(line + strlen(line) - 10, ";load=fast") == 0);
+    player_play_resolve(&app->settings, "TEST95003", &r);       /* Enhanced: read, never launched */
+    assert(r.on && r.mode == PLAYER_PLAY_ENHANCED && r.part[PLAYER_PART_LOAD] == 1);
+    assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, "load") == NULL);
+    assert(player_app_save_settings(app, path) == NK_OK);
+    {
+        char *saved = read_text_file(path);
+        assert(saved && strstr(saved, "\"cull\": \"off\", \"upscale\": \"off\", \"stick\": \"off\", "
+                                      "\"load\": \"fast\"}") != NULL);
+        assert(strstr(saved, "\"TEST95001\": {\"mode\": \"ace\", \"load\": \"off\"}") != NULL);
+        free(saved);
+    }
+    memset(back, 0, sizeof(*back));
+    assert(player_app_load_settings(back, path) == NK_OK);
+    assert(back->settings.enhanced.part[PLAYER_PART_LOAD] == 1);
+    player_play_resolve(&back->settings, "TEST95001", &r);
+    assert(r.on && r.part[PLAYER_PART_LOAD] == 0);
+
+    /* With cull on too, the line ends with both optional keys, cull last. */
+    app->settings.enhanced.part[PLAYER_PART_CULL] = 1;
+    player_play_resolve(&app->settings, "TEST95002", &r);
+    assert(player_play_launch_line(&r, line, sizeof(line)) &&
+           strcmp(line + strlen(line) - 18, ";load=fast;cull=on") == 0);
+
+    /* An unknown word reads as off. */
+    write_text_file(path,
+        "{\"schema_version\": 2, \"enhanced\": {\"default\": \"enhanced\", \"load\": \"faster\"},"
+        " \"title_play\": {\"TEST95002\": {\"mode\": \"ace\"}}}");
+    memset(app, 0, sizeof(*app));
+    assert(player_app_load_settings(app, path) == NK_OK);
+    assert(app->settings.enhanced.part[PLAYER_PART_LOAD] == 0);
+    player_play_resolve(&app->settings, "TEST95002", &r);
+    assert(r.on && r.mode == PLAYER_PLAY_ACE && r.part[PLAYER_PART_LOAD] == 0);
+    assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, "load") == NULL);
+
+    remove(path);
+    (void)test_rmdir(root);
+    free(back);
+    free(app);
+    printf("PASS: short loads are off by default, read and saved at both levels, and only Ace "
+           "launches them\n");
+}
+
 /* Finer patches (contract 10.14, 11.3.7) at both levels: off in a fresh file and in no graphics
  * preset, a library "tess" and a title's own are read (2, 3, 4 or off), the title's wins, an unknown
  * word is off, the launch line carries the factor, and an Authentic run has no line. */
@@ -8504,7 +8604,7 @@ static void test_play_mode_tess_settings(void) {
     {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"sas\": \"off\", \"tess\": \"4\", \"cull\": \"off\", "
-                                      "\"upscale\": \"off\", \"stick\": \"off\"}") != NULL);
+                                      "\"upscale\": \"off\", \"stick\": \"off\", \"load\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST93001\": {\"mode\": \"library\", \"tess\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST93002\": {\"mode\": \"ace\", \"tess\": \"2\"}") != NULL);
         free(saved);
@@ -9190,7 +9290,7 @@ static void test_play_mode_upscale_settings(void) {
     {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"sas\": \"off\", \"tess\": \"off\", \"cull\": \"off\", "
-                                      "\"upscale\": \"fsr1\", \"stick\": \"off\"}") != NULL);
+                                      "\"upscale\": \"fsr1\", \"stick\": \"off\", \"load\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST94001\": {\"mode\": \"library\", \"upscale\": \"off\"}") != NULL);
         free(saved);
     }
@@ -9995,6 +10095,7 @@ int main(int argc, char **argv) {
     test_play_mode_sas_settings();
     test_play_mode_cull_settings();
     test_play_mode_stick_settings();
+    test_play_mode_load_settings();
     test_play_mode_tess_settings();
     test_player_nickname();
     test_graphics_presets();
