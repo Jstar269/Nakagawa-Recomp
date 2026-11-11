@@ -645,8 +645,8 @@ capture holds one PRIM of two overlapping translucent sprites on a 16-bit target
 find exactly its overlap as the first bad draw on the snapshot destination-read path (the known
 shader-blend batch-order difference, #2109), and report `NO_DIFFERENCE` on the interlock path. On a
 device that refuses the interlock, the interlock leg is a `SKIP`. Four more generated captures check that the
-tool fails closed: a scissor past ge.c's raster bound (the stride, up to 512 columns, or 480 on a
-stride of 480 or less; a 512 scissor on a 512 stride is compared), 33 targets or a stride of
+tool fails closed: a scissor past ge.c's raster bound (the stride, up to 512 columns; a 512
+scissor on a 512 stride is compared), 33 targets or a stride of
 1088 are `INCOMPLETE`, and a capture with no draw is `NO_DRAWS`. The same step then runs
 `vram-view-identity-selftest` (#314): the GE decoders the pause menu's VRAM viewer calls, run at
 a paused VBLANK, must leave later presented frames, guest memory and the GE state as a run
