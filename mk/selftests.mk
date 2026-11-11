@@ -1479,8 +1479,9 @@ ge-replay: shader-verify $(RT_GE_O)
 # copy of the target, a known difference no mutant made: it must be found as draw 1, its 100x100
 # overlap and nothing else. On the interlock path the capture must be NO_DIFFERENCE; a device
 # without the interlock refuses that path (sdl3vk prints the reason) and the leg is a SKIP.
-# Then fail-closed cells: a scissor past ge.c's raster bound (the past capture: x2 600 on a 512
-# stride; ge.c draws up to the stride, 512 at most, or 480 columns on a narrower one), 33 targets
+# The wide capture (a 512 scissor on a 512 stride) must compare clean. Then fail-closed cells: a
+# scissor past ge.c's raster bound (the past capture: x2 600 on a 512 stride; ge.c draws up to the
+# stride, 512 at most, or 480 columns on a stride of 480 or less), 33 targets
 # (one past the limit) and a stride past 1024 are INCOMPLETE (exit 5), and a capture with no
 # draw is NO_DRAWS (exit 6); none is ever NO_DIFFERENCE.
 # Exit 77 (no Vulkan device) is a SKIP, as for gpu-coherence-selftest (GE_FBD_SKIP_STATUS).

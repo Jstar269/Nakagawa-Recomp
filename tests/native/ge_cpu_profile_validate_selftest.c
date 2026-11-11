@@ -1474,8 +1474,9 @@ static void test_ge_wide_fill(void) {
 }
 
 /* The GE clock charges a sprite for the columns ge.c rasterizes (#2193): on a 512 stride a
- * scissor to x 511 times the 32 columns past 480 too, and on a 480 stride it times 480 columns,
- * as before. One through-mode sprite, x 0-512, rows 0-15, no texture, wing off. */
+ * scissor to x 511 times the 32 columns past 480 too, on a 500 stride the 20 up to its last
+ * column, and on a 480 stride 480 columns, as before. One through-mode sprite, x 0-512, rows
+ * 0-15, no texture, wing off. */
 static double wide_raster_sprite_clk(uint32_t fbw, uint32_t x2) {
     const uint32_t through = (7u << 2) | (3u << 7) | (1u << 23);
     memset(SR_HOST(WIDE_VRAM), 0, WIDE_VRAM_SIZE);
@@ -1510,12 +1511,13 @@ static void test_ge_wide_raster_timing(void) {
     const double wide = wide_raster_sprite_clk(512u, 511u);
     const double screen = wide_raster_sprite_clk(512u, 479u);
     const double narrow = wide_raster_sprite_clk(480u, 511u);
+    const double mid = wide_raster_sprite_clk(500u, 511u);
     ge_timing_set_enabled(0);
-    if (!(screen > 0.0 && wide > screen && narrow == screen)) {
+    if (!(screen > 0.0 && wide > screen && narrow == screen && mid > screen && mid < wide)) {
         fprintf(stderr, "wide_raster_clk: GE clock %.3f (512 stride, x2 511), %.3f (512 stride, x2 479), "
-                        "%.3f (480 stride, x2 511)\n", wide, screen, narrow);
+                        "%.3f (480 stride, x2 511), %.3f (500 stride, x2 511)\n", wide, screen, narrow, mid);
         expect(0, "wide_raster_clk",
-               "a 512 scissor on a 512 stride times more columns than the screen; a 480 stride times 480");
+               "a 512 scissor times 512 columns on a 512 stride, 500 on a 500 stride, 480 on a 480 stride");
     }
 }
 
