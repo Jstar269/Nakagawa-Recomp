@@ -558,10 +558,13 @@ void hle_register_regular_audio_handlers(void) {
     /* sceAudioGetChannelRestLen (#2361) shares the handler. Measured on a PSP-3000
      * (PSP-HLE-AUDIO-REST-001): with the channel in $a0, read right after each of 32 blocking
      * outputs on stereo channels of F = 1024, 2048 and 4096 frames, the two calls agree and
-     * return F or F - 64, and RestLen alone, polled after the last output, reaches 0. The
-     * PSP-AUDIO-001 query cells also read both calls on channel 0 (before and after output,
-     * just after release). UNMEASURED, for both calls, and taken from RestLength: the
-     * invalid-channel code (negative or >= 8) and any other queue state. */
+     * return F or F - 64, and RestLen alone, polled after the last output, reaches 0. That
+     * run is evidence that the two calls are one answer; the value itself is not reproduced
+     * here: this runtime's blocking output returns with up to two blocks queued (#67), so in
+     * that state both calls can read up to 2F where the console read one block (#279, open).
+     * The PSP-AUDIO-001 query cells also read both calls on channel 0 (before and after
+     * output, just after release). UNMEASURED, for both calls, and taken from RestLength:
+     * the invalid-channel code (negative or >= 8) and any other queue state. */
     sr_hle_register(0xe9d97901, "sceAudioGetChannelRestLen", h_AudioRestLen);
     sr_hle_register(0xb7e1d8e7, "sceAudioChangeChannelVolume", h_AudioChangeChannelVolume);
     sr_hle_register(0xcb2e439e, "sceAudioSetChannelDataLen", h_AudioSetChannelDataLen);

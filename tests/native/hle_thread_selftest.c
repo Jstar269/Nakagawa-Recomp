@@ -12197,10 +12197,10 @@ static void test_audio_regular_contract_safety(void) {
      *   NID and the run stops (exit 7). */
     expect(audio_dispatch(&cpu, NID_SCE_AUDIO_GET_CHANNEL_REST_LEN, 0xffffffffu, 0u, 0u) ==
                SCE_AUDIO_ERROR_INVALID_CH,
-           "AudioGetChannelRestLen rejects a negative channel as RestLength does");
+           "AudioGetChannelRestLen rejects a negative channel with RestLength's code (unmeasured for both)");
     expect(audio_dispatch(&cpu, NID_SCE_AUDIO_GET_CHANNEL_REST_LEN, 8u, 0u, 0u) ==
                SCE_AUDIO_ERROR_INVALID_CH,
-           "AudioGetChannelRestLen rejects out-of-range channel 8 as RestLength does");
+           "AudioGetChannelRestLen rejects out-of-range channel 8 with RestLength's code (unmeasured for both)");
     s_audio_queue_result = 512;
     expect(audio_dispatch(&cpu, NID_SCE_AUDIO_GET_CHANNEL_REST_LEN, 0u, 0u, 0u) == 512u,
            "AudioGetChannelRestLen returns the queued frame count RestLength returns");
