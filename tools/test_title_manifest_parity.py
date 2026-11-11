@@ -213,6 +213,45 @@ class TitleManifestParityTests(unittest.TestCase):
                     self.assertIn("filesystem.loose_content_roots", py_out)
                     self.assertIn("filesystem.loose_content_roots", c_out)
 
+    def test_input_dead_zone_accepts_and_rejects_with_native_python_parity(self):
+        base = json.loads((ROOT / "assets" / "titles" / "synthetic.json").read_text(encoding="utf-8"))
+        base["input"] = {"analog_dead_zone": {"shape": "square", "counts": 64}}
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "input.json"
+            for counts in (1, 64, 126):
+                with self.subTest(counts=counts):
+                    good = json.loads(json.dumps(base))
+                    good["input"]["analog_dead_zone"]["counts"] = counts
+                    path.write_text(json.dumps(good), encoding="utf-8")
+                    py_ok, py_out = self._run_python(path)
+                    c_ok, c_out = self._run_native(path, allow_override=True)
+                    self.assertTrue(py_ok, py_out)
+                    self.assertTrue(c_ok, c_out)
+            failures = [
+                "not an object",
+                {},
+                {"analog_dead_zone": {"shape": "round", "counts": 64}},
+                {"analog_dead_zone": {"shape": "square", "counts": 0}},
+                {"analog_dead_zone": {"shape": "square", "counts": 127}},
+                {"analog_dead_zone": {"shape": "square", "counts": 64.5}},
+                {"analog_dead_zone": {"shape": "square", "counts": "64"}},
+                {"analog_dead_zone": {"shape": "square", "counts": True}},
+                {"analog_dead_zone": {"shape": "square"}},
+                {"analog_dead_zone": {"shape": "square", "counts": 64, "extra": 1}},
+                {"analog_dead_zone": {"shape": "square", "counts": 64}, "extra": 1},
+            ]
+            for block in failures:
+                with self.subTest(block=block):
+                    bad = json.loads(json.dumps(base))
+                    bad["input"] = block
+                    path.write_text(json.dumps(bad), encoding="utf-8")
+                    py_ok, py_out = self._run_python(path)
+                    c_ok, c_out = self._run_native(path, allow_override=True)
+                    self.assertFalse(py_ok, py_out)
+                    self.assertFalse(c_ok, c_out)
+                    self.assertIn("input", py_out)
+                    self.assertIn("input", c_out)
+
     def test_python_and_nk_launch_encode_identical_loose_root_bytes(self):
         manifest = json.loads(
             (ROOT / "assets" / "titles" / "synthetic.json").read_text(encoding="utf-8")

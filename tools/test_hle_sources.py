@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from pathlib import Path
 import re
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -245,6 +247,75 @@ class FailClosedTests(unittest.TestCase):
         files["src/rt/hle_extra.c"] = "int z;\n"
         files["tests/native/hle_thread_selftest.c"] = "int t;\n"
         self.assertEqual(hle_sources.unlisted_hle_files(self._tree(files)), ["src/rt/hle_extra.c"])
+
+
+CC = shutil.which("gcc")
+NM = shutil.which("nm")
+THREAD_HARNESS = ROOT / "tests" / "native" / "hle_thread_selftest.c"
+MPEG_PORT = ROOT / "src" / "rt" / "mpeg.c"
+_HARNESS_DEFINITION = re.compile(r"^(?!static\b)[A-Za-z_][\w \t*]*?\b(mpeg_\w+)\s*\(", re.MULTILINE)
+
+
+def _harness_mpeg_definitions(source: str) -> set[str]:
+    """The ``mpeg_*`` functions a C file defines (a prototype ends in ``;`` before any ``{``)."""
+    names = set()
+    for match in _HARNESS_DEFINITION.finditer(source):
+        rest = source[match.end():]
+        brace, semicolon = rest.find("{"), rest.find(";")
+        if brace != -1 and (semicolon == -1 or brace < semicolon):
+            names.add(match.group(1))
+    return names
+
+
+class ThreadHarnessMpegLinkTests(unittest.TestCase):
+    """The executable HLE harness links no ``src/rt/mpeg.c`` (#317).
+
+    hle-thread-selftest-build compiles the sceMpeg handlers with ``SR_HLE_THREAD_SELFTEST`` and
+    supplies its own ``mpeg_init``/``mpeg_finish``/``mpeg_create``/``mpeg_delete``. Any other
+    reference into the port is an undefined symbol: GNU ld with ``--gc-sections`` drops it when
+    nothing reaches it, lld refuses the link. This compiles the handler file as the harness does
+    and requires every port function it refers to to be one the harness defines.
+
+    It covers the mpeg half of the link only. The harness's two interpreter dispatch entries
+    (``dispatch_call_interp``, ``dispatch_call_continue``, which guest_interp.c refers to while
+    recomp.c is not linked) and any new reference of that kind are caught by an lld build of
+    hle-thread-selftest-build, not here. The handler file is compiled with ``gcc -std=c11`` and
+    the include path, not the build's full flags, and a harness definition is counted whatever
+    ``#if`` surrounds it; a guarded definition would need both to be tightened.
+    """
+
+    def _symbols(self, source: Path, out: Path, *flags: str, defined: bool) -> set[str]:
+        includes = re.search(r"^HLE_INCLUDES\s*:=(.*)$", read_makefile(ROOT), re.MULTILINE)
+        self.assertIsNotNone(includes, "HLE_INCLUDES is not assigned in the Makefile")
+        assert includes is not None and CC is not None and NM is not None
+        compiled = subprocess.run(
+            [CC, "-std=c11", "-Isrc/rt", "-Isrc/core", *includes.group(1).split(), "-ffunction-sections",
+             "-fdata-sections", *flags, "-c", str(source), "-o", str(out)],
+            cwd=ROOT, capture_output=True, text=True, check=False)
+        self.assertEqual(compiled.returncode, 0, compiled.stderr)
+        listed = subprocess.run([NM, "-g", "--defined-only" if defined else "-u", str(out)],
+                                capture_output=True, text=True, check=True)
+        return {line.split()[-1] for line in listed.stdout.splitlines() if line.strip()}
+
+    def test_the_harness_defines_every_port_function_its_handlers_call(self) -> None:
+        if CC is None or NM is None:
+            self.skipTest("NOT_RUN: needs gcc and nm on PATH")
+        handlers = ROOT / hle_sources.defining_file("hle_register_psmf_player_handlers")
+        with tempfile.TemporaryDirectory() as tmp:
+            port = {name for name in self._symbols(MPEG_PORT, Path(tmp) / "mpeg.o", defined=True)
+                    if name.startswith("mpeg_")}
+            called = self._symbols(handlers, Path(tmp) / "handlers.o", "-DSR_HLE_THREAD_SELFTEST",
+                                   defined=False) & port
+        supplied = _harness_mpeg_definitions(THREAD_HARNESS.read_text(encoding="utf-8"))
+        # The interrupt-context check of sceMpegCreate goes through these; a pass on none proves nothing.
+        self.assertTrue({"mpeg_create", "mpeg_delete"} <= called & supplied, sorted(called))
+        self.assertEqual(sorted(called - supplied), [],
+                         "port functions the harness neither links nor defines")
+
+    def test_definitions_are_told_from_prototypes(self) -> None:
+        source = ("uint32_t mpeg_a(void);\nuint32_t mpeg_b(uint32_t x,\n    uint32_t y) {\n  return 0;\n}\n"
+                  "static uint32_t mpeg_c(void) { return 0; }\n")
+        self.assertEqual(_harness_mpeg_definitions(source), {"mpeg_b"})
 
 
 class MakefileTests(unittest.TestCase):

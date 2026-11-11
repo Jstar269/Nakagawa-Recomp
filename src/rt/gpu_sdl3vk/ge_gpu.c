@@ -388,6 +388,10 @@ typedef struct Target {
     VkImageLayout tlayout;
     VkDescriptorSet tset[TEX_FILTER_VARIANTS];
     VkFramebuffer tfb;                     /* for (timg, dep->timg) */
+    /* The twin's interlock objects (#2109): made where the image has its own (rmw_set, fb_rmw), so
+     * the twin's pass of an interlock op loads and stores the twin as the op does the image. */
+    VkDescriptorSet trmw_set;
+    VkFramebuffer tfb_rmw;                 /* depth-only, for (dep->timg) */
     uint64_t wgen, tgen;
     uint32_t tseed;
     int tshow;                             /* the coming present shows the twin */
@@ -397,8 +401,9 @@ typedef struct Target {
  * a render op whose destination-reading batches may all test depth early (op_rmw) records those
  * batches with the RMW variant of psp.frag: each fragment loads the target, blends and stores it
  * inside a pixel-ordered interlock, so the primitives of one batch see each other's stores. Its
- * other batches keep the fixed-function pass, and the op takes no snapshot copy. None of these
- * objects exists on the snapshot path. */
+ * other batches keep the fixed-function pass, and the op takes no snapshot copy. With the host
+ * twin on, the twin's pass of such an op is recorded the same way into the twin, which it loads
+ * and stores in place of the twin snapshot. None of these objects exists on the snapshot path. */
 static int s_dst_interlock = 0;
 static VkShaderModule s_fs_rmw = VK_NULL_HANDLE;
 static VkRenderPass s_rp_rmw = VK_NULL_HANDLE;            /* depth-only: the D16 attachment */
@@ -408,6 +413,7 @@ static VkDescriptorPool s_dpool_rmw = VK_NULL_HANDLE;
 static PipeEnt *s_rmw_pipes = NULL;
 static int s_rmw_pipe_n = 0, s_rmw_pipe_cap = 0;
 static unsigned long long s_cnt_rmw_ops = 0, s_cnt_rmw_batches = 0, s_cnt_rmw_breaks = 0;
+static unsigned long long s_cnt_twin_rmw_ops = 0;        /* interlock ops recorded into a twin too */
 /* Write-once stencil batches drawn last to first, and their triangles (submit_range). */
 static unsigned long long s_cnt_once_batches = 0, s_cnt_once_tris = 0;
 static VkImageUsageFlags s_target_usage = 0;              /* the last colour target's usage */
@@ -691,7 +697,8 @@ static VkDescriptorSet s_dst_set, s_tdst_set;
  * upload from guest VRAM, CPU-write patch and depth upload reaches it as a nearest-filtered blit
  * of the rectangle the authentic image took (exact pixel replication); a block transfer is
  * repeated between the twins; each destination-snapshot copy has a twin snapshot copy of the
- * same guest rectangle. The twin's pass differs only in its scale and picture options
+ * same guest rectangle, and the twin's pass of an interlock op (#2109), which takes no copy, loads
+ * and stores the twin itself. The twin's pass differs only in its scale and picture options
  * (s_twin_color: no dither and no 16-bit colour snap), and it samples twins: a draw that samples
  * a render target or the snapshot samples that target's twin or the twin snapshot. The
  * presenter shows the twin when it is in step (wgen == tgen). Nothing reads a twin back: guest
@@ -1011,7 +1018,9 @@ static void to_layout(VkCommandBuffer cmd, VkImage img, VkImageAspectFlags aspec
  * no effect), 2 swaps the source and destination blend factors of the RMW batches, 3 lets an op
  * holding a batch the rmwzfb rule refuses take the interlock, 4 gives every colour target
  * STORAGE_BIT on the snapshot path too, 5 turns the depth test of the RMW pipelines off, 6 drops
- * the rmwzfb rule's color-test line, 7 its own-target line. */
+ * the rmwzfb rule's color-test line, 7 its own-target line, 8 keeps every op of a run with the host
+ * twin on the snapshot path, 9 records the twin's pass of an interlock op as one fixed-function pass
+ * that reads the twin snapshot. */
 #ifndef SR_GPU_DSTREAD_MUTANT
 #define SR_GPU_DSTREAD_MUTANT 0
 #endif
@@ -2302,10 +2311,13 @@ static void rmw_target_fallback(const char *what) {
 
 /* Does the op [0, n) of `arr` into `t` take the interlock? It must read the destination, every
  * batch that does must pass the rmwzfb rule, and the target must have its RMW objects (a target in
- * s_tgts; a wing canvas has none). The host twin keeps the snapshot path: its pass reads the twin
- * snapshot, and its targets have no storage set. */
+ * s_tgts; a wing canvas has none). The host twin does not enter the decision: the image is drawn
+ * as in a twin-off run, and the twin's pass follows the op (submit_range). */
 static int op_rmw(const Target *t, const Batch *arr, uint32_t n) {
-    if (!s_dst_interlock || s_twin || !t->rmw_set || !t->fb_rmw) return 0;
+    if (!s_dst_interlock || !t->rmw_set || !t->fb_rmw) return 0;
+#if SR_GPU_DSTREAD_MUTANT == 8
+    if (s_twin) return 0;
+#endif
     int reads = 0;
     for (uint32_t i = 0; i < n; i++) {
         if (!batch_reads_dst(&arr[i])) continue;
@@ -2449,7 +2461,7 @@ static void record_range(Target *t, const RangeRec *r, int twin);
 
 /* The dependency between two passes of an interlock op: depth and colour written by one (as an
  * attachment or a storage image) before the next tests, loads or stores them. The colour layout
- * changes in record_range (to_layout). */
+ * changes in record_range (to_layout). s_cnt_rmw_breaks counts the image's, not its twin's. */
 static void rmw_break(void) {
     VkMemoryBarrier mb = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER };
     mb.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
@@ -2463,14 +2475,14 @@ static void rmw_break(void) {
                          VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT |
                          VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                          0, 1, &mb, 0, NULL, 0, NULL);
-    s_cnt_rmw_breaks++;
 }
 
 /* An interlock op: runs of fixed-function batches in today's pass and runs of destination-reading
  * batches in the depth-only pass with the colour image in GENERAL, a dependency at every break.
- * Color ends SHADER_READ_ONLY, as after record_range. */
-static void record_rmw_range(Target *t, const RangeRec *r) {
+ * Color ends SHADER_READ_ONLY, as after record_range. `twin`: the same runs into the host twin. */
+static void record_rmw_range(Target *t, const RangeRec *r, int twin) {
     const Batch *arr = r->arr;
+    VkImageLayout *const layout = twin ? &t->tlayout : &t->layout;
 #if SR_GPU_DSTREAD_MUTANT == 2
     static Batch mutant[MAX_BATCH];
     memcpy(mutant + r->b0, arr + r->b0, (size_t)(r->b1 - r->b0) * sizeof(Batch));
@@ -2486,27 +2498,32 @@ static void record_rmw_range(Target *t, const RangeRec *r) {
         uint32_t j = i + 1u;
         while (j < r->b1 && batch_reads_dst(&arr[j]) == rmw) j++;
         rmw_break();
+        if (!twin) s_cnt_rmw_breaks++;
         RangeRec run = *r;
         run.arr = arr; run.b0 = i; run.b1 = j; run.rmw_op = 0; run.rmw = rmw;
-        record_range(t, &run, 0);
+        record_range(t, &run, twin);
         /* the fixed-function pass's final colour layout; the depth-only pass leaves it alone */
-        t->layout = rmw ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        if (rmw) s_cnt_rmw_batches += j - i;
+        *layout = rmw ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        if (rmw && !twin) s_cnt_rmw_batches += j - i;
         i = j;
     }
-    to_layout(s_cmd, t->img, VK_IMAGE_ASPECT_COLOR_BIT, &t->layout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    to_layout(s_cmd, twin ? t->timg : t->img, VK_IMAGE_ASPECT_COLOR_BIT, layout,
+              VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 }
 
 /* Record batches [r->b0, r->b1) as one render pass into `t`'s image, or (twin) into its host
  * twin with the twin's picture options, descriptor sets and snapshot. Color ends
- * SHADER_READ_ONLY (the render pass's final layout). */
+ * SHADER_READ_ONLY (the render pass's final layout); an RMW run (r->rmw) leaves it GENERAL. */
 static void record_range(Target *t, const RangeRec *r, int twin) {
-    if (!twin && r->rmw_op) { record_rmw_range(t, r); return; }
-    const int rmw = !twin && r->rmw;
+#if SR_GPU_DSTREAD_MUTANT == 9
+    if (!twin)
+#endif
+    if (r->rmw_op) { record_rmw_range(t, r, twin); return; }
+    const int rmw = r->rmw;
     VkPipelineLayout playout = rmw ? s_playout_rmw : s_playout;
     if (twin) {
         to_layout(s_cmd, t->timg, VK_IMAGE_ASPECT_COLOR_BIT, &t->tlayout,
-                  VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+                  rmw ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
         to_layout(s_cmd, t->dep->timg, VK_IMAGE_ASPECT_DEPTH_BIT, &t->dep->tlayout,
                   VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
     } else {
@@ -2521,7 +2538,7 @@ static void record_range(Target *t, const RangeRec *r, int twin) {
     const uint32_t cw = (uint32_t)(FB_W * scale), ch = (uint32_t)(FB_H * scale);
     VkRenderPassBeginInfo rbi = { .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
     rbi.renderPass = rmw ? s_rp_rmw : s_rp;
-    rbi.framebuffer = twin ? t->tfb : rmw ? t->fb_rmw : t->fb;
+    rbi.framebuffer = rmw ? (twin ? t->tfb_rmw : t->fb_rmw) : (twin ? t->tfb : t->fb);
     rbi.renderArea.extent.width = cw; rbi.renderArea.extent.height = ch;
     vkCmdBeginRenderPass(s_cmd, &rbi, VK_SUBPASS_CONTENTS_INLINE);
 
@@ -2535,10 +2552,11 @@ static void record_range(Target *t, const RangeRec *r, int twin) {
     if (r->ntverts)
         vkCmdBindDescriptorSets(s_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, playout, 1, 1,
                                 &s_cmd_slot->tset, 0, NULL);
-    /* set 2: the destination snapshot (the twin's pass reads the twin snapshot; an RMW run, the
-     * target itself) */
+    /* set 2: the destination snapshot (the twin's pass reads the twin snapshot), or for an RMW
+     * run the image the pass draws, the target or its twin, as a storage image */
     vkCmdBindDescriptorSets(s_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, playout, 2, 1,
-                            twin ? &s_tdst_set : rmw ? &t->rmw_set : &s_dst_set, 0, NULL);
+                            rmw ? (twin ? &t->trmw_set : &t->rmw_set) : (twin ? &s_tdst_set : &s_dst_set),
+                            0, NULL);
 
     VkPipeline cur = VK_NULL_HANDLE;
     VkDescriptorSet cur_set = VK_NULL_HANDLE;
@@ -2593,7 +2611,7 @@ static void record_range(Target *t, const RangeRec *r, int twin) {
             vkCmdDraw(s_cmd, b->count, 1, b->first - v0, 0);
     }
     vkCmdEndRenderPass(s_cmd);
-    if (twin) t->tlayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    if (twin && !rmw) t->tlayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 }
 
 /* Record batches [b0, b1) as one render op into `t`. Leaves the color image SHADER_READ_ONLY. */
@@ -2666,6 +2684,13 @@ static int submit_range(Target *t, const Batch *arr, uint32_t b0, uint32_t b1, i
     /* The host twin's pass draws on the twin's copy of what this op starts from: a twin that
      * is behind (some write did not reach it) is first re-seeded from the authentic image. */
     int twin_pass = s_twin && t->tfb && t->dep && t->dep->timg;
+    /* The twin's pass of an interlock op needs the twin's own interlock objects, which a twin has
+     * wherever its image does (twin_target_make, target_acquire). A twin without them would fall
+     * behind here and be re-seeded; it is never drawn from the twin snapshot, which an interlock
+     * op does not refresh. */
+#if SR_GPU_DSTREAD_MUTANT != 9
+    if (rmw_op && (!t->trmw_set || !t->tfb_rmw)) twin_pass = 0;
+#endif
     if (twin_pass && t->tgen != t->wgen) twin_seed_target(t, 0);
     if (twin_pass && t->dep->tgen != t->dep->wgen) twin_seed_depth(t->dep, 0);
     record_range(t, &rr, 0);
@@ -2676,6 +2701,7 @@ static int submit_range(Target *t, const Batch *arr, uint32_t b0, uint32_t b1, i
     if (twin_pass) {
         record_range(t, &rr, 1);
         s_cnt_twin_ops++;
+        if (rmw_op) s_cnt_twin_rmw_ops++;
     }
     /* A widescreen wing canvas (WingEnt: never in s_tgts, its depth never in s_deps) has no twin,
      * by design: the presenter shows it as it is, so its writes leave no twin behind. */
@@ -3306,12 +3332,15 @@ static void twin_target_free(Target *t) {
     if (!t->timg && !t->tview && !t->tmem) return;
     (void)sdl3vk_wait_image((void *)t->timg);
     if (t->tfb) vkDestroyFramebuffer(s_dev, t->tfb, NULL);
+    if (t->tfb_rmw) vkDestroyFramebuffer(s_dev, t->tfb_rmw, NULL);
+    if (t->trmw_set) vkFreeDescriptorSets(s_dev, s_dpool_rmw, 1, &t->trmw_set);
     for (unsigned i = 0; i < TEX_FILTER_VARIANTS; i++)
         if (t->tset[i]) vkFreeDescriptorSets(s_dev, s_dpool_twin, 1, &t->tset[i]);
     if (t->tview) vkDestroyImageView(s_dev, t->tview, NULL);
     if (t->timg) vkDestroyImage(s_dev, t->timg, NULL);
     if (t->tmem) vkFreeMemory(s_dev, t->tmem, NULL);
-    t->tfb = VK_NULL_HANDLE;
+    t->tfb = t->tfb_rmw = VK_NULL_HANDLE;
+    t->trmw_set = VK_NULL_HANDLE;
     memset(t->tset, 0, sizeof(t->tset));
     t->tview = VK_NULL_HANDLE; t->timg = VK_NULL_HANDLE; t->tmem = VK_NULL_HANDLE;
     t->tlayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -3355,19 +3384,26 @@ static void twin_off_for_run(const char *what) {
 #endif
 
 /* The twin of a new target: the same format at the twin's scale. Its first content comes with
- * the target's (target_upload seeds it), and until then it is behind (wgen > tgen). */
+ * the target's (target_upload seeds it), and until then it is behind (wgen > tgen). Where the
+ * target has its storage set (the interlock path, #2109), the twin gets one too, and STORAGE_BIT
+ * with it: the twin's pass of an interlock op stores into the twin. */
 static int twin_target_make(Target *t) {
     t->wgen = 1; t->tgen = 0;
     if (TWIN_INJECTED_FAIL()) return 0;
     if (!make_image(TSCL_W, TSCL_H, VK_FORMAT_R8G8B8A8_UNORM,
                     VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
-                    VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                    VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                    (t->rmw_set ? VK_IMAGE_USAGE_STORAGE_BIT : 0u),
                     &t->timg, &t->tmem)) return 0;
     if (!make_view(t->timg, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_ASPECT_COLOR_BIT, &t->tview)) return 0;
     t->tlayout = VK_IMAGE_LAYOUT_UNDEFINED;
     for (unsigned i = 0; i < TEX_FILTER_VARIANTS; i++) {
         t->tset[i] = make_descriptor(t->tview, s_smp[i], s_dpool_twin);
         if (!t->tset[i]) return 0;
+    }
+    if (t->rmw_set) {
+        t->trmw_set = make_rmw_descriptor(t->tview);
+        if (!t->trmw_set) return 0;
     }
     return 1;
 }
@@ -3710,13 +3746,18 @@ static DepthEnt *depth_acquire(uint32_t zba, uint32_t zstride) {
         vkDestroyImage(s_dev, d->img, NULL);
         vkFreeMemory(s_dev, d->mem, NULL);
         twin_depth_free(d);
-        /* targets holding this depth must drop their framebuffers */
+        /* targets holding this depth must drop their framebuffers: every one made over its views,
+         * the interlock path's depth-only ones included (target_acquire destroys only what it
+         * finds beside fb or tfb, so one left here would be made again over itself) */
         for (int i = 0; i < MAX_TGT; i++)
             if (s_tgts[i].used && s_tgts[i].dep == d) {
-                vkDestroyFramebuffer(s_dev, s_tgts[i].fb, NULL);
-                if (s_tgts[i].tfb) vkDestroyFramebuffer(s_dev, s_tgts[i].tfb, NULL);
-                s_tgts[i].fb = VK_NULL_HANDLE; s_tgts[i].tfb = VK_NULL_HANDLE;
-                s_tgts[i].dep = NULL;
+                Target *h = &s_tgts[i];
+                vkDestroyFramebuffer(s_dev, h->fb, NULL);
+                if (h->tfb) vkDestroyFramebuffer(s_dev, h->tfb, NULL);
+                if (h->fb_rmw) vkDestroyFramebuffer(s_dev, h->fb_rmw, NULL);
+                if (h->tfb_rmw) vkDestroyFramebuffer(s_dev, h->tfb_rmw, NULL);
+                h->fb = h->tfb = h->fb_rmw = h->tfb_rmw = VK_NULL_HANDLE;
+                h->dep = NULL;
             }
         memset(d, 0, sizeof(*d));
     }
@@ -3765,7 +3806,8 @@ static Target *target_acquire(void) {
             if (t->fb) vkDestroyFramebuffer(s_dev, t->fb, NULL);
             if (t->tfb) vkDestroyFramebuffer(s_dev, t->tfb, NULL);
             if (t->fb_rmw) vkDestroyFramebuffer(s_dev, t->fb_rmw, NULL);
-            t->fb = t->tfb = t->fb_rmw = VK_NULL_HANDLE;
+            if (t->tfb_rmw) vkDestroyFramebuffer(s_dev, t->tfb_rmw, NULL);
+            t->fb = t->tfb = t->fb_rmw = t->tfb_rmw = VK_NULL_HANDLE;
         }
         VkImageView views[2] = { t->view, d->view };
         VkFramebufferCreateInfo fbc = { .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
@@ -3783,16 +3825,25 @@ static Target *target_acquire(void) {
                 rmw_target_fallback("its depth-only framebuffer");
             }
         }
-        /* The twin's (colour, depth) pair, for the twin's pass. Without it the twin goes off for
+        /* The twin's (colour, depth) pair, for the twin's pass, and its depth-only pair where the
+         * image has one (the twin's pass of an interlock op). Without them the twin goes off for
          * the run: the authentic chain never depends on the twin. */
         if (s_twin && t->timg && d->timg) {
             VkImageView tviews[2] = { t->tview, d->tview };
             fbc.pAttachments = tviews;
             fbc.width = TSCL_W; fbc.height = TSCL_H;
-            if (TWIN_INJECTED_FAIL() || vkCreateFramebuffer(s_dev, &fbc, NULL, &t->tfb) != VK_SUCCESS) {
-                t->tfb = VK_NULL_HANDLE;
-                twin_off_for_run("a twin framebuffer");
+            int made = !TWIN_INJECTED_FAIL() &&
+                       vkCreateFramebuffer(s_dev, &fbc, NULL, &t->tfb) == VK_SUCCESS;
+            if (!made) t->tfb = VK_NULL_HANDLE;
+            if (made && t->fb_rmw) {
+                VkFramebufferCreateInfo tzfc = fbc;
+                tzfc.renderPass = s_rp_rmw; tzfc.attachmentCount = 1; tzfc.pAttachments = &d->tview;
+                if (vkCreateFramebuffer(s_dev, &tzfc, NULL, &t->tfb_rmw) != VK_SUCCESS) {
+                    t->tfb_rmw = VK_NULL_HANDLE;
+                    made = 0;
+                }
             }
+            if (!made) twin_off_for_run("a twin framebuffer");
         }
     }
     t->lru = s_lru++;
@@ -5239,9 +5290,12 @@ static void build_state(int persp, int sprite, Batch *b) {
 
     /* scissor: the GE state drives the rect; only clamp to the target image bounds
      * (512-wide render targets legitimately draw in columns 480..511 — the 480-pixel
-     * crop is a PRESENTATION property, not a rasterization limit) */
+     * crop is a PRESENTATION property, not a rasterization limit). A narrower stride bounds
+     * the rect too, as ge.c's raster_columns does: a column past it is not the target's
+     * (#2193), and the guest sync never copies it. */
+    const int last_col = g->fbw && g->fbw < (uint32_t)FB_W ? (int)g->fbw - 1 : FB_W - 1;
     int sx1 = g->scis_x1 > 0 ? g->scis_x1 : 0, sy1 = g->scis_y1 > 0 ? g->scis_y1 : 0;
-    int sx2 = g->scis_x2 < FB_W - 1 ? g->scis_x2 : FB_W - 1;
+    int sx2 = (int)g->scis_x2 < last_col ? (int)g->scis_x2 : last_col;
     int sy2 = g->scis_y2 < FB_H - 1 ? g->scis_y2 : FB_H - 1;
     if (sx1 > sx2 || sy1 > sy2) { b->sw = 0; return; }   /* nothing drawable */
     b->sx = sx1; b->sy = sy1; b->sw = sx2 - sx1 + 1; b->sh = sy2 - sy1 + 1;
@@ -7340,7 +7394,8 @@ int gegpu_init(void) {
     plc.pushConstantRangeCount = 1; plc.pPushConstantRanges = &pcr;
     VKC(vkCreatePipelineLayout(s_dev, &plc, NULL, &s_playout));
     if (s_dst_interlock) {
-        /* RMW set 2: the target as a storage image, one set per target slot */
+        /* RMW set 2: the target as a storage image, one set per target slot and one for its
+         * host twin */
         VkDescriptorSetLayoutBinding rb = {0};
         rb.binding = 0; rb.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
         rb.descriptorCount = 1; rb.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
@@ -7350,10 +7405,10 @@ int gegpu_init(void) {
         VkDescriptorSetLayout rmw_layouts[3] = { s_dlayout, s_tnl_dlayout, s_rmw_dlayout };
         plc.pSetLayouts = rmw_layouts;
         VKC(vkCreatePipelineLayout(s_dev, &plc, NULL, &s_playout_rmw));
-        VkDescriptorPoolSize rps = { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, MAX_TGT };
+        VkDescriptorPoolSize rps = { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 2u * MAX_TGT };
         VkDescriptorPoolCreateInfo rpci = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
         rpci.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-        rpci.maxSets = MAX_TGT; rpci.poolSizeCount = 1; rpci.pPoolSizes = &rps;
+        rpci.maxSets = 2u * MAX_TGT; rpci.poolSizeCount = 1; rpci.pPoolSizes = &rps;
         VKC(vkCreateDescriptorPool(s_dev, &rpci, NULL, &s_dpool_rmw));
     }
 

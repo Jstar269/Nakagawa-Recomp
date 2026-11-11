@@ -854,6 +854,10 @@ class TestProductionSmokePackage(unittest.TestCase):
         shutil.copyfile(self.fixture_dir / "guest.psp", psp_header)
         enhancement_package = inputs / "enhancement package.json"
         enhancement_package.write_text("{}", encoding="utf-8")
+        # A code-hook package beside it (contract section 9.9), with its symbols sidecar.
+        code_hook_package = inputs / "enhancement package.cull.json"
+        code_hook_package.write_text("{}", encoding="utf-8")
+        code_hook_package.with_suffix(".symbols.json").write_text("{}", encoding="utf-8")
         enhancement_data_root = long_root / "enhancement data"
         enhancement_data_root.mkdir()
         data_root_alias = alias_root / "ENHDAT~1"
@@ -877,12 +881,21 @@ class TestProductionSmokePackage(unittest.TestCase):
             return resolved
 
         make_calls = []
+        hook_sidecars = []
+        option_environments = []
 
         def record_make(command, *args, **kwargs):
             if command and command[0] == "/toolchain/make":
                 make_calls.append((list(command), dict(kwargs["env"])))
+                # The staged workspace is gone once build_package returns: look at Make time.
+                hook = kwargs["env"].get("ENHANCEMENT_CODE_HOOK_PACKAGE")
+                hook_sidecars.append(bool(hook) and Path(hook).with_suffix(".symbols.json").is_file())
                 return subprocess.CompletedProcess(command, 0)
             return real_run(command, *args, **kwargs)
+
+        def record_options(environment):
+            option_environments.append(dict(environment))
+            return {}
 
         with (
             mock.patch.dict(os.environ, {}, clear=False),
@@ -893,7 +906,7 @@ class TestProductionSmokePackage(unittest.TestCase):
             mock.patch.object(title_codegen_plan, "_version_identity",
                               return_value=("synthetic 1.0", "synthetic 1.0")),
             # The package file is staged, not parsed, by this route test.
-            mock.patch("nk_core.package_cache.enhancement_package_options", return_value={}),
+            mock.patch("nk_core.package_cache.enhancement_package_options", side_effect=record_options),
             mock.patch.object(title_codegen_plan.subprocess, "run", side_effect=record_make),
             contextlib.redirect_stdout(io.StringIO()),
             self.assertRaises(title_codegen_plan.PackageRouteError) as caught,
@@ -910,6 +923,7 @@ class TestProductionSmokePackage(unittest.TestCase):
                 make_command="make",
                 enhancement_package_path=enhancement_package,
                 enhancement_data_root=enhancement_data_root,
+                code_hook_package_path=code_hook_package,
             )
         # Make was recorded, not run, so the package is incomplete; any path refusal
         # would have stopped the route before Make with PACKAGE_UNSUPPORTED_PATH.
@@ -917,7 +931,7 @@ class TestProductionSmokePackage(unittest.TestCase):
         self.assertTrue(make_calls)
         path_keys = (
             "GAME_ELF", "GAME_PSP_HEADER", "TITLE_MANIFEST", "BUILD_DIR", "LINK_MAP",
-            "ENHANCEMENT_PACKAGE", "ENHANCEMENT_DATA_ROOT",
+            "ENHANCEMENT_PACKAGE", "ENHANCEMENT_DATA_ROOT", "ENHANCEMENT_CODE_HOOK_PACKAGE",
         )
         for command, environment in make_calls:
             for argument in command[1:]:
@@ -926,6 +940,8 @@ class TestProductionSmokePackage(unittest.TestCase):
                 value = environment[key]
                 self.assertFalse(title_codegen_plan._make_unsafe(value), (key, value))
                 self.assertTrue(Path(value).is_relative_to(alias_root), (key, value))
+            # The code-hook package is staged under a name of its own.
+            self.assertNotEqual(environment["ENHANCEMENT_CODE_HOOK_PACKAGE"], environment["ENHANCEMENT_PACKAGE"])
             # The data root is read in place: its short form is passed on as written.
             self.assertEqual(environment["ENHANCEMENT_DATA_ROOT"], data_root_alias.as_posix())
             extra = environment["GAME_EXTRA_ELFS"].split(" ")
@@ -934,6 +950,12 @@ class TestProductionSmokePackage(unittest.TestCase):
             self.assertTrue(Path(module_path).is_relative_to(alias_root), module_path)
             self.assertEqual(Path(module_path).name, "block.i3d.prx")
             self.assertEqual(Path(module_path).parent.name, "modules")
+        # Its sidecar was staged beside it, and the cache key was computed with it named.
+        self.assertEqual(hook_sidecars, [True] * len(make_calls))
+        self.assertTrue(option_environments)
+        for environment in option_environments:
+            self.assertEqual(Path(environment["ENHANCEMENT_CODE_HOOK_PACKAGE"]).name,
+                             "enhancement_package.cull.json", environment)
 
     def test_spaced_enhancement_data_root_uses_short_form_or_is_refused(self):
         """#2281: the data root is read in place and interpolated into the codegen
@@ -1738,7 +1760,7 @@ class TestPresenterContract(unittest.TestCase):
     def test_gdi_acceptance_requires_window_dc_and_positive_scanlines(self):
         """The headless suite cannot open GDI, so pin its acceptance contract in source."""
         source = (ROOT / "src" / "rt" / "gui.c").read_text(encoding="utf-8")
-        presenter = source[source.index("int gui_present"):]
+        presenter = source[source.index("int gui_present("):]
         accepted = presenter[:presenter.index("#else")]
         # The present accepts a GDI frame only when the blit drew it; a failed blit
         # resolves an armed capture as failed and reports the frame as not presented.
@@ -1746,7 +1768,7 @@ class TestPresenterContract(unittest.TestCase):
             accepted,
             r"if \(!gdi_blit\(\)\)\s*\{\s*sr_capture_fail\([^;]*\);\s*return 0;\s*\}",
         )
-        gdi = source[source.index("static int gdi_blit(void)"):source.index("int gui_present")]
+        gdi = source[source.index("static int gdi_blit(void)"):source.index("int gui_present(")]
         self.assertIn("if (!s_hwnd) return 0;", gdi)
         self.assertIn("HDC dc = GetDC(s_hwnd);", gdi)
         self.assertIn("if (!dc) return 0;", gdi)
@@ -1764,7 +1786,7 @@ class TestPresenterContract(unittest.TestCase):
 
     def test_offscreen_frame_event_is_quiet_without_present_trace(self):
         source = (ROOT / "src" / "rt" / "gui.c").read_text(encoding="utf-8")
-        presenter = source[source.index("int gui_present"):]
+        presenter = source[source.index("int gui_present("):]
         offscreen = presenter[presenter.index("if (s_offscreen)"):presenter.index("int accepted")]
         self.assertRegex(
             offscreen,
@@ -1778,8 +1800,8 @@ class TestPresenterContract(unittest.TestCase):
         convert_fb reads it, and a failed sync must decline the frame instead of drawing the
         keyboard over stale pixels."""
         source = (ROOT / "src" / "rt" / "gui.c").read_text(encoding="utf-8")
-        presenter = source[source.index("int gui_present"):]
-        sdl = presenter[presenter.index("if (s_sdl3) {"):presenter.index("int present_result")]
+        presenter = source[source.index("int gui_present("):]
+        sdl = presenter[presenter.index("if (s_sdl3) {"):presenter.index("cpu_result = sdl3vk_present_rgba")]
         # One keyboard decision gates both the skipped fast path and the sync that replaces it,
         # so sync_sdl_input() cannot open or close the keyboard between the two.
         self.assertIn("int osk_open = sr_osk_overlay_active();", sdl)
@@ -1806,8 +1828,8 @@ class TestPresenterContract(unittest.TestCase):
         present result is remapped only from -1; 0 (close) and 1 (shown) pass through."""
         root = ROOT / "src" / "rt"
         gui = (root / "gui.c").read_text(encoding="utf-8")
-        presenter = gui[gui.index("int gui_present"):]
-        sdl = presenter[presenter.index("if (s_sdl3) {"):presenter.index("int present_result")]
+        presenter = gui[gui.index("int gui_present("):]
+        sdl = presenter[presenter.index("if (s_sdl3) {"):presenter.index("cpu_result = sdl3vk_present_rgba")]
         # The fall-through convert_fb reads guest VRAM. The target-failed branch must sync it
         # first, and it must be the only branch that does so for the decline code.
         marker = "if (res == GEGPU_PRESENT_TARGET_FAILED) {"
