@@ -244,6 +244,9 @@ typedef enum {
                                   title whose catalog entry declares a stick dead zone. Appended: the
                                   enum fixes the Settings > Enhanced rows and the saved order; the Ace
                                   line still writes stick before cull */
+    PLAYER_PART_LOAD,          /* short loads (section 11.3.10): 0 off, 1 fast. The display waits
+                                  a title's package declares return at once; guest timing changes. Ace
+                                  only; a title without a load part ignores it */
     PLAYER_PART_COUNT
 } PlayerEnhancedPart;
 
@@ -1717,6 +1720,7 @@ void player_play_apply_logic_60(PlayerPlayResolved *play, bool logic_60);
  * notice=on;wide=off;smooth=off;sas=off;tess=off" (tier=ace for Ace; smooth=match is never written).
  * ";stick=<counts>" follows only for Ace with the Stick dead zone part on and a title whose
  * catalog entry declares a dead zone (stick_counts > 0); a missing stick is off.
+ * ";load=fast" follows only for Ace with the Short loads part on; a missing load is off.
  * ";cull=on" follows, last, only for Ace with the Wider culling part on; a missing cull is off.
  * Returns false when it does not fit. */
 bool player_play_launch_line(const PlayerPlayResolved *play, char *out, size_t cap);

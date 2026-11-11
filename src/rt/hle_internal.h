@@ -1370,7 +1370,7 @@ int io_host_seek(FILE *host, uint32_t offset);
 int io_restore_truncated_gap(Fd *f);
 uint32_t h_IoWrite(CpuState *s);
 uint32_t h_IoRead(CpuState *s);
-uint32_t io_seek_destination(const Fd *f, int64_t offset, uint32_t whence, const char *api, uint32_t *position);
+uint32_t io_seek_destination(const Fd *f, int64_t offset, uint32_t whence, const char *api, uint32_t *position, uint32_t *error_high);
 uint32_t h_IoLseek32(CpuState *s);
 /* The volatile-memory lock handlers (hle_kernel_memory.c); hle_power.c registers their scePower
  * aliases. */

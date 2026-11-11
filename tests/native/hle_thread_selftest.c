@@ -68,6 +68,7 @@ instrumentation is this test's protection against the historical RAM runaway."
 #include "nk_platform.h"        /* per-user data directory override for the font cache */
 #include "audio_resample.h"
 #include "vfpu_tables.h"        /* sr_vfpu_sha256: enhancement data-file digests */
+#include "guest_interp.h"      /* SrGuestInterpCallBoundary: the dispatch entries defined below */
 
 #include <math.h>
 #include <stdint.h>
@@ -45996,6 +45997,215 @@ static void test_wc_display_getmode_and_start_cb(void) {
     s_cur = -1;
 }
 
+/* The Ace load part (ENHANCEMENT_CONTRACT.md 9.8 and 11.3.10): nk_ace_load_skip_wait() skips a
+ * declared sceDisplayWaitVblankStart only where the stock call would block. Where waits are not
+ * permitted the stock call returns CAN_NOT_WAIT at once, so the skip steps aside, uncounted, and
+ * the stock call runs; a skip leaves the 0 the stock call returns after its wait. */
+static void test_ace_load_skip_wait_only_where_the_stock_call_blocks(void) {
+    enum { NID_WAIT_VBLANK_START = 0x984c27e7u };
+    static const char k_load_fast[] =
+        "v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;tier=ace;load=fast";
+    CpuState cpu;
+    reset_fixture();
+    sr_hle_init();
+    TCB *t = fixture_thread(0x2c06u, TH_RUNNING, 32);
+    t->started = 1;
+    s_cur = (int)(t - s_tcb);
+    memset(&cpu, 0, sizeof(cpu));
+
+    expect(ace_init_spec("off", NULL) == 0, "ace load skip: an authentic run");
+    cpu.r[2] = 0x5au;
+    expect(nk_ace_load_skip_wait(&cpu, "T", 0x08800000u) == 0 && cpu.r[2] == 0x5au,
+           "ace load skip: an authentic run skips no wait and leaves $v0 alone");
+
+    expect(ace_init_spec(k_load_fast, NULL) == 1 && ace_effective()->load == 1, "ace load skip: load=fast is on");
+    for (int ctx = 0; ctx < 2; ctx++) {
+        s_interrupts_enabled = ctx;
+        s_dispatch_enabled = !ctx;
+        uint32_t stock = sr_syscall(&cpu, NID_WAIT_VBLANK_START);
+        expect(stock == SCE_KERNEL_ERROR_CAN_NOT_WAIT && t->state == TH_RUNNING,
+               ctx ? "ace load skip (dispatch disabled): the stock call returns CAN_NOT_WAIT without blocking"
+                   : "ace load skip (interrupts disabled): the stock call returns CAN_NOT_WAIT without blocking");
+        cpu.r[2] = 0x5au;
+        expect(nk_ace_load_skip_wait(&cpu, "T", 0x08800000u) == 0 && cpu.r[2] == 0x5au && ace_load_waits_skipped() == 0,
+               ctx ? "ace load skip (dispatch disabled): no skip, so the stock call runs"
+                   : "ace load skip (interrupts disabled): no skip, so the stock call runs");
+    }
+    /* Where the stock call would block, the skip blocks too, for 1 us: that needs a running
+     * scheduler, so test_ace_load_skip_wait_lets_a_lower_priority_thread_run covers it. */
+    s_interrupts_enabled = 1;
+    s_dispatch_enabled = 1;
+    (void)ace_init_spec("off", NULL);
+    s_cur = -1;
+}
+
+/* A skipped wait still blocks, for the shortest real delay, so a loading loop that spins until a
+ * lower-priority loader thread finishes does finish: the loader runs during the skip, as it would
+ * during the stock wait, and sees the waiter in a delay wait. A zero delay or a rotation would not
+ * let it run (#340), and the loop would spin to its bound. */
+static volatile uint32_t s_ace_skip_loaded;
+static volatile uint32_t s_ace_skip_loaded_in_loop;
+static volatile uint32_t s_ace_skip_iterations;
+static volatile uint32_t s_ace_skip_v0;
+static volatile int s_ace_skip_waiter;
+static volatile int s_ace_skip_waiter_state;
+static volatile int s_ace_skip_loader_lower;
+
+enum {
+    ACE_SKIP_WAITER_ENTRY = 0x08990300u,
+    ACE_SKIP_LOADER_ENTRY = 0x08990340u,
+    ACE_SKIP_LOOP_BOUND = 64u,
+};
+
+static void ace_skip_loader_guest_fn(CpuState *cpu) {
+    s_ace_skip_waiter_state = s_tcb[s_ace_skip_waiter].state;
+    s_ace_skip_loaded = 1u;
+    cpu->r[2] = 0u;
+}
+
+static void ace_skip_waiter_guest_fn(CpuState *cpu) {
+    s_ace_skip_waiter = s_cur;
+    int priority = sched_current_priority();
+    uint32_t loader_uid = sched_create_thread(ACE_SKIP_LOADER_ENTRY, priority + 8, 0x2000u);
+    expect(loader_uid != 0u, "ace load skip yield: the lower-priority loader is created");
+    if (loader_uid == 0u) return;
+    TCB *loader = tcb_by_uid(loader_uid);
+    expect(sched_start_thread(loader_uid, 0u, 0u) == 0u, "ace load skip yield: the loader is started");
+    s_ace_skip_loader_lower = loader && loader->state == TH_READY && loader->priority > priority;
+    /* The title's loading loop: wait for a VBLANK until the load is done. The bound only stops a
+     * failing run; a passing one leaves at its first skip. */
+    while (!s_ace_skip_loaded && s_ace_skip_iterations < ACE_SKIP_LOOP_BOUND) {
+        cpu->r[2] = 0x5au;
+        expect(nk_ace_load_skip_wait(cpu, "T", 0x08800000u) == 1, "ace load skip yield: each wait in the loop is skipped");
+        s_ace_skip_v0 = cpu->r[2];
+        s_ace_skip_iterations++;
+        SR_YIELD(cpu, ACE_SKIP_WAITER_ENTRY);
+    }
+    s_ace_skip_loaded_in_loop = s_ace_skip_loaded;
+    cpu->r[2] = 0u;
+}
+
+static void test_ace_load_skip_wait_lets_a_lower_priority_thread_run(void) {
+    static const char k_load_fast[] =
+        "v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;tier=ace;load=fast";
+    reset_fixture();
+    sr_hle_init();
+    sr_test_guest_fn_reset();
+    s_ace_skip_loaded = 0u;
+    s_ace_skip_loaded_in_loop = 0u;
+    s_ace_skip_iterations = 0u;
+    s_ace_skip_v0 = UINT32_MAX;
+    s_ace_skip_waiter = -1;
+    s_ace_skip_waiter_state = -1;
+    s_ace_skip_loader_lower = 0;
+    expect(ace_init_spec(k_load_fast, NULL) == 1, "ace load skip yield: load=fast is on");
+    sr_test_register_guest_fn(ACE_SKIP_WAITER_ENTRY, ace_skip_waiter_guest_fn);
+    sr_test_register_guest_fn(ACE_SKIP_LOADER_ENTRY, ace_skip_loader_guest_fn);
+    g_worker_uid = SR_ROLE_UID_NONE;
+    memset(s_cpu, 0, sizeof(*s_cpu));
+
+    sched_run(ACE_SKIP_WAITER_ENTRY, 0u, 0u);
+
+    expect(s_ace_skip_loader_lower, "ace load skip yield: the loader was ready at a lower priority");
+    expect(s_ace_skip_loaded_in_loop == 1u,
+           "ace load skip yield: the lower-priority loader ran during a skipped wait, before the loop ended");
+    expect(s_ace_skip_iterations == 1u, "ace load skip yield: the loading loop finished at its first skipped wait");
+    expect(s_ace_skip_waiter_state == TH_WAIT_DELAY,
+           "ace load skip yield: the waiter was in a delay wait while the loader ran");
+    expect(s_ace_skip_v0 == 0u, "ace load skip yield: a skipped wait returns 0 in $v0");
+    expect(ace_load_waits_skipped() == 1u, "ace load skip yield: the one skip is counted");
+    (void)ace_init_spec("off", NULL);
+    sr_test_guest_fn_reset();
+}
+
+/* The pacing guard (ENHANCEMENT_CONTRACT.md 11.3.10), through the real skip on a running
+ * scheduler: generated code calls nk_ace_load_update() where each logic update begins. A load
+ * tail (skips in three updates in a row, then updates without one) leaves the guard alone; a
+ * wait skipped in every update fires it once its run reaches ACE_LOAD_PACING_UPDATES, after
+ * which the skip steps aside (the stock call runs, $v0 untouched), nothing more is counted, and
+ * one ENHANCEMENT_LOAD_PACING line names the site. */
+enum { ACE_PACING_ENTRY = 0x08990380u, ACE_PACING_SITE_PC = 0x08804010u, ACE_PACING_TAIL = 3u };
+static volatile unsigned s_ace_pacing_skips[ACE_LOAD_PACING_UPDATES * 2u + ACE_PACING_TAIL];
+static volatile unsigned s_ace_pacing_tail_skips;
+static volatile unsigned s_ace_pacing_tail_run;
+static volatile int s_ace_pacing_tail_paced;
+static volatile int s_ace_pacing_v0_kept;
+
+static void ace_pacing_guest_fn(CpuState *cpu) {
+    /* The load tail: three waits in each of three updates, then updates without a skip. */
+    for (unsigned u = 0; u < ACE_PACING_TAIL; u++) {
+        nk_ace_load_update();
+        for (unsigned w = 0; w < 3u; w++)
+            s_ace_pacing_tail_skips += (unsigned)nk_ace_load_skip_wait(cpu, "SYNTH_LOAD_WAIT", ACE_PACING_SITE_PC);
+        SR_YIELD(cpu, ACE_PACING_ENTRY);
+    }
+    for (unsigned u = 0; u < 2u * ACE_LOAD_PACING_UPDATES; u++) nk_ace_load_update();
+    s_ace_pacing_tail_run = ace_load_skip_max_run();
+    s_ace_pacing_tail_paced = ace_load_paced();
+    /* The pacing wait: one skip asked in every update. */
+    s_ace_pacing_v0_kept = 1;
+    for (unsigned u = 0; u < sizeof(s_ace_pacing_skips) / sizeof(s_ace_pacing_skips[0]); u++) {
+        nk_ace_load_update();
+        cpu->r[2] = 0x5au;
+        s_ace_pacing_skips[u] = (unsigned)nk_ace_load_skip_wait(cpu, "SYNTH_LOAD_WAIT", ACE_PACING_SITE_PC);
+        if (!s_ace_pacing_skips[u] && cpu->r[2] != 0x5au) s_ace_pacing_v0_kept = 0;
+        SR_YIELD(cpu, ACE_PACING_ENTRY);
+    }
+    cpu->r[2] = 0u;
+}
+
+static void test_ace_load_skip_wait_stops_once_it_paces_updates(void) {
+    static const char k_load_fast[] =
+        "v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;tier=ace;load=fast";
+    enum { UPDATES = (int)(sizeof(s_ace_pacing_skips) / sizeof(s_ace_pacing_skips[0])) };
+    char captured[4096];
+    FILE *capture = NULL;
+    int saved_fd = -1;
+    reset_fixture();
+    sr_hle_init();
+    sr_test_guest_fn_reset();
+    s_ace_pacing_tail_skips = 0u;
+    s_ace_pacing_tail_run = 0u;
+    s_ace_pacing_tail_paced = -1;
+    s_ace_pacing_v0_kept = 0;
+    for (int u = 0; u < UPDATES; u++) s_ace_pacing_skips[u] = 2u;
+    expect(ace_init_spec(k_load_fast, NULL) == 1, "ace load pacing: load=fast is on");
+    sr_test_register_guest_fn(ACE_PACING_ENTRY, ace_pacing_guest_fn);
+    g_worker_uid = SR_ROLE_UID_NONE;
+    memset(s_cpu, 0, sizeof(*s_cpu));
+
+    int capturing = hle_data_stderr_capture_begin(&capture, &saved_fd);
+    sched_run(ACE_PACING_ENTRY, 0u, 0u);
+    captured[0] = '\0';
+    if (capturing) hle_data_stderr_capture_end(capture, saved_fd, captured, sizeof(captured));
+
+    expect(s_ace_pacing_tail_skips == 3u * ACE_PACING_TAIL && s_ace_pacing_tail_run == ACE_PACING_TAIL &&
+               s_ace_pacing_tail_paced == 0,
+           "ace load pacing: a load tail skips every wait and leaves the guard alone");
+    int skipped = 0, stock_after = 1;
+    for (int u = 0; u < UPDATES; u++) {
+        if (u < (int)ACE_LOAD_PACING_UPDATES) skipped += s_ace_pacing_skips[u] == 1u;
+        else if (s_ace_pacing_skips[u] != 0u) stock_after = 0;
+    }
+    expect(skipped == (int)ACE_LOAD_PACING_UPDATES,
+           "ace load pacing: the pacing wait is skipped until its run reaches the threshold");
+    expect(stock_after && s_ace_pacing_v0_kept,
+           "ace load pacing: after the guard fired every wait runs its stock call, $v0 untouched");
+    expect(ace_load_paced() && ace_load_skip_max_run() == ACE_LOAD_PACING_UPDATES,
+           "ace load pacing: the guard fired at a run of the threshold");
+    expect(ace_load_waits_skipped() == 3u * ACE_PACING_TAIL + ACE_LOAD_PACING_UPDATES,
+           "ace load pacing: nothing is counted after the guard fired");
+    if (capturing) {
+        expect(count_occurrences(captured, "ENHANCEMENT_LOAD_PACING:") == 1 &&
+                   strstr(captured, "ENHANCEMENT_LOAD_PACING: site SYNTH_LOAD_WAIT at 0x08804010 ") != NULL,
+               "ace load pacing: one ENHANCEMENT_LOAD_PACING line names the site");
+    } else {
+        expect(0, "ace load pacing: stderr could be captured");
+    }
+    (void)ace_init_spec("off", NULL);
+    sr_test_guest_fn_reset();
+}
+
 static void test_psmf_rejected_stream_names_the_boundary(void) {
     CpuState cpu;
     char captured[8192];
@@ -48916,6 +49126,98 @@ static void test_flash0_font_device(void) {
                f0t_read(fd, 4u) == 4u &&
                f0t_guest_equals(F0T_BUF_ADDR, served_latin_bytes + served_latin_size - 4u, 4u),
            "SEEK_END then read returns the tail of the served file");
+    /* PSP-HLE-IO-SEEK-001 (measured, PSP-3000, flash0:/font/ltn0.pgf opened read-only): with the
+     * position at 8, every seek below returns 0x80010016 and leaves the position at 8. The 64-bit
+     * sceIoLseek's high word is 0xFFFFFFFF for SET -1, SET size + 16, END +16 and END -(size + 1),
+     * and 0 for SET 0xFFFFFFFF and SET 0x100000000; sceIoLseek32 of the first four returns
+     * 0x80010016. SEEK_CUR and the async calls were not measured. */
+    {
+        const int64_t size = (int64_t)served_latin_size;
+        static const struct { const char *name; uint32_t whence; int kind; int64_t literal; uint32_t high; }
+            refused[] = {
+                {"SET -1", 0u, 0, -1, 0xffffffffu},
+                {"SET size + 16", 0u, 1, 0, 0xffffffffu},
+                {"END +16", 2u, 0, 16, 0xffffffffu},
+                {"END -(size + 1)", 2u, 2, 0, 0xffffffffu},
+                {"SET 0xFFFFFFFF", 0u, 0, 0xffffffffll, 0u},
+                {"SET 0x100000000", 0u, 0, 0x100000000ll, 0u},
+            };
+        for (size_t i = 0; i < sizeof(refused) / sizeof(refused[0]); i++) {
+            int64_t offset = refused[i].kind == 1 ? size + 16
+                           : refused[i].kind == 2 ? -(size + 1) : refused[i].literal;
+            CpuState cpu;
+            expect(f0t_seek32(fd, 8, 0u) == 8u, "a flash0 seek places the descriptor at 8");
+            memset(&cpu, 0, sizeof(cpu));
+            cpu.r[4] = fd;
+            cpu.r[6] = (uint32_t)((uint64_t)offset & 0xffffffffu);
+            cpu.r[7] = (uint32_t)((uint64_t)offset >> 32);
+            cpu.r[8] = refused[i].whence;
+            uint32_t low = sr_hle_test_io_lseek(&cpu);
+            snprintf(msg, sizeof(msg),
+                     "flash0 sceIoLseek %s returns 0x80010016 with high word 0x%08x (got 0x%08x:%08x)",
+                     refused[i].name, refused[i].high, cpu.r[3], low);
+            expect(low == 0x80010016u && cpu.r[3] == refused[i].high, msg);
+            snprintf(msg, sizeof(msg), "flash0 sceIoLseek %s leaves the position at 8", refused[i].name);
+            expect(f0t_seek32(fd, 0, 1u) == 8u, msg);
+            if (offset < INT32_MIN || offset > INT32_MAX || refused[i].high == 0u) continue;
+            expect(f0t_seek32(fd, 8, 0u) == 8u, "a flash0 seek places the descriptor at 8");
+            uint32_t narrow = f0t_seek32(fd, (int32_t)offset, refused[i].whence);
+            snprintf(msg, sizeof(msg), "flash0 sceIoLseek32 %s returns 0x80010016 (got 0x%08x)",
+                     refused[i].name, narrow);
+            expect(narrow == 0x80010016u, msg);
+            snprintf(msg, sizeof(msg), "flash0 sceIoLseek32 %s leaves the position at 8", refused[i].name);
+            expect(f0t_seek32(fd, 0, 1u) == 8u, msg);
+        }
+        /* The file's own edges are inside it: SET 0 and SET size are made, high word 0. */
+        static const struct { const char *name; int at_end; } edges[] = {{"SET 0", 0}, {"SET size", 1}};
+        for (size_t i = 0; i < sizeof(edges) / sizeof(edges[0]); i++) {
+            const uint32_t want = edges[i].at_end ? (uint32_t)size : 0u;
+            CpuState cpu;
+            expect(f0t_seek32(fd, 8, 0u) == 8u, "a flash0 seek places the descriptor at 8");
+            memset(&cpu, 0, sizeof(cpu));
+            cpu.r[4] = fd;
+            cpu.r[6] = want;
+            cpu.r[7] = 0u;
+            cpu.r[8] = 0u;
+            cpu.r[3] = 0xdeadbeefu;   /* the call must write the high word */
+            uint32_t low = sr_hle_test_io_lseek(&cpu);
+            snprintf(msg, sizeof(msg), "flash0 sceIoLseek %s is made (got 0x%08x:%08x)",
+                     edges[i].name, cpu.r[3], low);
+            expect(low == want && cpu.r[3] == 0u && f0t_seek32(fd, 0, 1u) == want, msg);
+        }
+        /* sceIoLseekAsync shares the check, and its 64-bit result carries the same high word. */
+        static const struct { const char *name; int64_t offset; uint32_t high; } async_refused[] = {
+            {"SET -1", -1, 0xffffffffu},
+            {"SET 0xFFFFFFFF", 0xffffffffll, 0u},
+        };
+        for (size_t i = 0; i < sizeof(async_refused) / sizeof(async_refused[0]); i++) {
+            CpuState cpu;
+            expect(f0t_seek32(fd, 8, 0u) == 8u, "a flash0 seek places the descriptor at 8");
+            memset(&cpu, 0, sizeof(cpu));
+            cpu.r[4] = fd;
+            cpu.r[6] = (uint32_t)((uint64_t)async_refused[i].offset & 0xffffffffu);
+            cpu.r[7] = (uint32_t)((uint64_t)async_refused[i].offset >> 32);
+            cpu.r[8] = 0u;
+            snprintf(msg, sizeof(msg), "flash0 sceIoLseekAsync %s is queued", async_refused[i].name);
+            expect(sr_hle_test_io_lseek_async(&cpu) == 0u, msg);
+            sr_hle_test_io_async_import_boundary();
+            sr_hle_test_io_async_import_boundary();
+            memset(&cpu, 0, sizeof(cpu));
+            cpu.r[4] = fd;
+            cpu.r[5] = F0T_BUF_ADDR;
+            uint32_t polled = sr_hle_test_io_poll_async(&cpu);
+            snprintf(msg, sizeof(msg),
+                     "flash0 sceIoLseekAsync %s completes with 0x%08x:80010016 (got %u, 0x%08x:%08x)",
+                     async_refused[i].name, async_refused[i].high, polled,
+                     MEM_R32(F0T_BUF_ADDR + 4u), MEM_R32(F0T_BUF_ADDR));
+            expect(polled == 0u && MEM_R32(F0T_BUF_ADDR) == 0x80010016u &&
+                       MEM_R32(F0T_BUF_ADDR + 4u) == async_refused[i].high,
+                   msg);
+            snprintf(msg, sizeof(msg), "flash0 sceIoLseekAsync %s leaves the position at 8",
+                     async_refused[i].name);
+            expect(f0t_seek32(fd, 0, 1u) == 8u, msg);
+        }
+    }
     expect(f0t_close(fd) == 0u && sr_hle_test_fd_kind(fd) == 0,
            "closing a served font releases its descriptor");
 
@@ -51645,6 +51947,9 @@ static int hle_selftest_main(int argc, char **argv) {
     test_wc_umd_unregister_callback();
     test_wc_display_multi_count_signed();
     test_wc_display_getmode_and_start_cb();
+    test_ace_load_skip_wait_only_where_the_stock_call_blocks();
+    test_ace_load_skip_wait_lets_a_lower_priority_thread_run();
+    test_ace_load_skip_wait_stops_once_it_paces_updates();
     test_psmf_rejected_stream_names_the_boundary();
     test_psmf_get_current_pts_after_stop_stops_by_name();
     test_psmf_start_reads_init_pts_from_the_third_argument();
@@ -51769,5 +52074,27 @@ int dispatch_call_interp(CpuState *s, uint32_t target, uint32_t resume_pc) {
     s->flow_kind = SR_FLOW_FATAL;
     s->flow_target = target;
     return 1;
+}
+#else
+/* This variant links guest_interp.c (other runtime objects reach it) but not recomp.c,
+ * whose dispatcher the interpreter's linked calls enter. No test here interprets guest code,
+ * so those two entries only have to exist: GNU ld's --gc-sections drops the reference, but
+ * lld resolves every symbol first and refused the link (#317). Each ends the process by name
+ * if it is ever reached: a caller that does not check the flow could not let it go on. */
+int dispatch_call_interp(CpuState *s, uint32_t target, uint32_t resume_pc) {
+    fprintf(stderr, "hle_thread_selftest: this harness has no interpreted linked call "
+                    "(target 0x%08x, resume 0x%08x)\n", target, resume_pc);
+    (void)s;
+    fflush(stderr);
+    exit(1);
+}
+
+int dispatch_call_continue(CpuState *s, uint32_t target, const SrGuestInterpCallBoundary *call) {
+    (void)call;
+    fprintf(stderr, "hle_thread_selftest: this harness has no interpreted call to continue "
+                    "(target 0x%08x)\n", target);
+    (void)s;
+    fflush(stderr);
+    exit(1);
 }
 #endif /* SR_HLE_AOT_BOUNDARY_TEST */

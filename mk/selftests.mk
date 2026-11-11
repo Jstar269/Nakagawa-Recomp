@@ -932,7 +932,9 @@ asset-index-selftest:
 # cells (#2109) run alone at scales 1 and 4 on each destination-read path (`--dst-read snapshot`,
 # `--dst-read interlock`; a device that refuses the interlock prints a SKIP line), and so does
 # stencil-once (write-once stencil batches: at scales 1 and 4 on the snapshot path, where they are
-# drawn last to first, and at scale 1 on the interlock path). The pipeline
+# drawn last to first, and at scale 1 on the interlock path). The dst-read cells then run with the
+# host twin on, native and full colour, on both paths at scales 1 and 4 (the twin's pass takes the
+# path the op took), and stencil-once with the native twin on the interlock path. The pipeline
 # cache (#2149) runs last, as three processes over one empty data root: a cold run saves the
 # cache, a warm run must start from it and draw the same frames, and a reject run re-opens it
 # over damaged, foreign and other-driver files and with the switch off or refused.
@@ -998,6 +1000,15 @@ gpu-coherence-selftest: $(GPU_COHERENCE_BIN)
 	$(GPU_COHERENCE_BIN) --dst-read snapshot --case stencil-once
 	$(GPU_COHERENCE_BIN) --dst-read snapshot --scale 4 --case stencil-once
 	$(GPU_COHERENCE_BIN) --dst-read interlock --case stencil-once
+	$(GPU_COHERENCE_BIN) --twin native --dst-read snapshot --case dst-read
+	$(GPU_COHERENCE_BIN) --twin native --dst-read snapshot --scale 4 --case dst-read
+	$(GPU_COHERENCE_BIN) --twin native --dst-read interlock --case dst-read
+	$(GPU_COHERENCE_BIN) --twin native --dst-read interlock --scale 4 --case dst-read
+	$(GPU_COHERENCE_BIN) --twin 1 --dst-read snapshot --case dst-read
+	$(GPU_COHERENCE_BIN) --twin 1 --dst-read snapshot --scale 4 --case dst-read
+	$(GPU_COHERENCE_BIN) --twin 1 --dst-read interlock --case dst-read
+	$(GPU_COHERENCE_BIN) --twin 1 --dst-read interlock --scale 4 --case dst-read
+	$(GPU_COHERENCE_BIN) --twin native --dst-read interlock --case stencil-once
 	@"$(PYTHON)" -c "import shutil; shutil.rmtree('$(BUILD_DIR)/pipeline_cache_test', ignore_errors=True)"
 	$(GPU_COHERENCE_BIN) --pipeline-cache $(BUILD_DIR)/pipeline_cache_test --case pipeline-cache-cold
 	$(GPU_COHERENCE_BIN) --pipeline-cache $(BUILD_DIR)/pipeline_cache_test --case pipeline-cache-warm
@@ -1090,13 +1101,18 @@ vram-view-identity-selftest: $(VRAM_VIEW_BIN)
 # (dst-read-depth), 4 gives colour targets STORAGE_BIT on the snapshot path (dst-read-pins), 5
 # turns the RMW pipelines' depth test off, so a sprite behind the wall blends (dst-read-ztest), 6
 # drops the rmwzfb rule's color-test line, so a fragment the color test rejects writes depth
-# (dst-read-ctest), and 7 drops its own-target line, so a sprite that textures from its own target
-# samples texels older than the sprite before it (dst-read-feedback).
-# Mutants 1 to 3 and 5 to 7 run on the interlock path, 4 on the snapshot path. Each builds its own
+# (dst-read-ctest), 7 drops its own-target line, so a sprite that textures from its own target
+# samples texels older than the sprite before it (dst-read-feedback), 8 keeps every op of a run
+# with the host twin on the snapshot path, so the image blends the pair against the pre-batch
+# destination again (dst-read-order with the native twin), and 9 records the twin's pass of an
+# interlock op as one pass that reads the twin snapshot, so the twin differs from its image
+# (dst-read-order with the native twin).
+# 10 is mutant 9's build run with the full-colour twin, whose check must fail too.
+# Mutants 1 to 3 and 5 to 10 run on the interlock path, 4 on the snapshot path. Each builds its own
 # binary and must fail with its own message. Exit 77 (no Vulkan device, or a device without the
-# interlock for 1 to 3 and 5 to 7) is a SKIP of that mutant.
+# interlock for 1 to 3 and 5 to 10) is a SKIP of that mutant.
 gpu-dst-read-mutants: shader-verify $(RT_GE_O)
-	@for m in 1 2 3 4 5 6 7; do \
+	@for m in 1 2 3 4 5 6 7 8 9 10; do \
 		case $$m in \
 			1) args="--dst-read interlock --case dst-read-order"; kill="the RMW store had no effect";; \
 			2) args="--dst-read interlock --case dst-read-order"; kill="differs from ge.c in [0-9]+ pixels .* on the interlock path";; \
@@ -1104,10 +1120,13 @@ gpu-dst-read-mutants: shader-verify $(RT_GE_O)
 			5) args="--dst-read interlock --case dst-read-ztest"; kill="colour differs from ge.c in [0-9]+ pixels .* on the interlock path";; \
 			6) args="--dst-read interlock --case dst-read-ctest"; kill="dst-read-ctest\]: colour differs from ge.c in [0-9]+ pixels, depth differs from ge.c in [1-9]";; \
 			7) args="--dst-read interlock --case dst-read-feedback"; kill="dst-read-feedback\]: [1-9][0-9]* pixels differ from ge.c";; \
+			8) args="--twin native --dst-read interlock --case dst-read-order"; kill="differs from ge.c in [1-9][0-9]* pixels \(0 outside the overlap\) on the interlock path \(host twin on\)";; \
+			9) args="--twin native --dst-read interlock --case dst-read-order"; kill="host twin \(native colour\) differs from its image in [1-9][0-9]* device pixels";; \
+			10) args="--twin 1 --dst-read interlock --case dst-read-order"; kill="host twin \(full colour\) differs from the ordered 8-bit blend in [1-9][0-9]* device pixels";; \
 			*) args="--dst-read snapshot --case dst-read-pins"; kill="the snapshot path made interlock state";; \
 		esac; \
 		bin=$(BUILD_DIR)/gpu_coherence_dstread_mutant$$m.exe; \
-		$(CC) $(CFLAGS) -DSR_GPU_COHERENCE_SELFTEST -DSR_GPU_DSTREAD_MUTANT=$$m -ffunction-sections -fdata-sections \
+		$(CC) $(CFLAGS) -DSR_GPU_COHERENCE_SELFTEST -DSR_GPU_DSTREAD_MUTANT=$$(test $$m -eq 10 && echo 9 || echo $$m) -ffunction-sections -fdata-sections \
 			-DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(LDFLAGS) -Wl,--gc-sections -o $$bin \
 			tests/native/gpu_coherence_selftest.c src/rt/ge_capture.c src/rt/ge_raster_ref.c $(RT_GE_O) src/rt/flight_recorder.c src/rt/perf.c \
 			$(SDL3VK_SRCS) $(GEGPU_SRCS) $(LIBS) || exit 1; \

@@ -472,7 +472,7 @@ uint32_t h_IoLseek32(CpuState *s) {
     Fd *f = &s_fds[fd];
     if (f->async.state == IO_ASYNC_PENDING) return SCE_ERROR_KERNEL_ASYNC_BUSY;
     uint32_t position = 0;
-    uint32_t refused = io_seek_destination(f, off, whence, "sceIoLseek32", &position);
+    uint32_t refused = io_seek_destination(f, off, whence, "sceIoLseek32", &position, NULL);
     if (refused != 0u) return refused;
     f->off = position;
     return f->off;
@@ -508,9 +508,9 @@ static uint32_t h_IoLseek(CpuState *s) {
     }
     if (whence >= 3u) { s->r[3] = 0xFFFFFFFF; return SCE_ERROR_KERNEL_INVALID_ARGUMENT; }
     Fd *f = &s_fds[fd];
-    uint32_t position = 0;
-    uint32_t refused = io_seek_destination(f, off, whence, "sceIoLseek", &position);
-    if (refused != 0u) { s->r[3] = 0xFFFFFFFF; return refused; }
+    uint32_t position = 0, error_high = 0xffffffffu;
+    uint32_t refused = io_seek_destination(f, off, whence, "sceIoLseek", &position, &error_high);
+    if (refused != 0u) { s->r[3] = error_high; return refused; }
     f->off = position;
     s->r[3] = 0;
     return position;
