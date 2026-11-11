@@ -275,6 +275,13 @@ class ThreadHarnessMpegLinkTests(unittest.TestCase):
     reference into the port is an undefined symbol: GNU ld with ``--gc-sections`` drops it when
     nothing reaches it, lld refuses the link. This compiles the handler file as the harness does
     and requires every port function it refers to to be one the harness defines.
+
+    It covers the mpeg half of the link only. The harness's two interpreter dispatch entries
+    (``dispatch_call_interp``, ``dispatch_call_continue``, which guest_interp.c refers to while
+    recomp.c is not linked) and any new reference of that kind are caught by an lld build of
+    hle-thread-selftest-build, not here. The handler file is compiled with ``gcc -std=c11`` and
+    the include path, not the build's full flags, and a harness definition is counted whatever
+    ``#if`` surrounds it; a guarded definition would need both to be tightened.
     """
 
     def _symbols(self, source: Path, out: Path, *flags: str, defined: bool) -> set[str]:

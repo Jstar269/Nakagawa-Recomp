@@ -1123,10 +1123,10 @@ uint32_t mpeg_avc_decode_flush(uint32_t mpegAddr);
 
 static uint32_t h_MpegInit(CpuState *s) { (void)s; return mpeg_init(); }
 static uint32_t h_MpegFinish(CpuState *s) { (void)s; return mpeg_finish(); }
+#ifndef SR_HLE_THREAD_SELFTEST
 /* sceMpegQueryMemSize() takes no args and RETURNS the context size in v0 (PPSSPP MpegRequiredMem:
  * 0x10000 for lib version >= 0x0105, which ACX uses). The earlier wrapper wrote it to a pointer and
  * returned 0, so the game allocated a 0-byte mpeg buffer and sceMpegCreate failed with NO_MEMORY. */
-#ifndef SR_HLE_THREAD_SELFTEST
 static uint32_t h_MpegQueryMemSize(CpuState *s) { (void)s; return 0x10000u; }
 #endif
 /* sceMpegCreate refuses an interrupt handler with 0x80618008 and creates nothing: measured by
