@@ -46,13 +46,13 @@ names #341 on every entry and only shrinks: reviewing a handler retires its entr
 <!-- BEGIN GENERATED HLE STATUS CENSUS -->
 ### HLE Semantic Status Census
 
-Registered NIDs: **707** (dedicated **609**, fake_success **4**, controlled_unsupported **94**).
-Semantic handler census: **584** handlers across **30** API families, covering **616** handler-associated NID registrations.
+Registered NIDs: **708** (dedicated **610**, fake_success **4**, controlled_unsupported **94**).
+Semantic handler census: **584** handlers across **30** API families, covering **617** handler-associated NID registrations.
 
 | Semantic Status | Handlers | NID Registrations |
 | :--- | :---: | :---: |
 | `complete` | 14 | 23 |
-| `partial` | 345 | 356 |
+| `partial` | 345 | 357 |
 | `compatibility` | 1 | 1 |
 | `controlled_unsupported` | 3 | 7 |
 | `unreviewed` | 221 | 229 |
@@ -62,7 +62,7 @@ Semantic handler census: **584** handlers across **30** API families, covering *
 | `newlib` | 0 | 0 | 0 | 0 | 1 | 1 | 1 |
 | `other` | 1 | 1 | 0 | 0 | 0 | 2 | 2 |
 | `sceAtrac` | 0 | 0 | 0 | 0 | 32 | 32 | 33 |
-| `sceAudio` | 0 | 11 | 0 | 0 | 5 | 16 | 17 |
+| `sceAudio` | 0 | 11 | 0 | 0 | 5 | 16 | 18 |
 | `sceAudiocodec` | 0 | 5 | 0 | 0 | 0 | 5 | 5 |
 | `sceCtrl` | 0 | 12 | 0 | 0 | 0 | 12 | 12 |
 | `sceDisplay` | 1 | 14 | 0 | 0 | 1 | 16 | 16 |
@@ -89,7 +89,7 @@ Semantic handler census: **584** handlers across **30** API families, covering *
 | `sceVaudio` | 0 | 3 | 0 | 0 | 0 | 3 | 3 |
 | `sceVideocodec` | 0 | 10 | 0 | 0 | 0 | 10 | 10 |
 | `sceWlan` | 0 | 0 | 0 | 0 | 2 | 2 | 3 |
-| **Total** | **14** | **345** | **1** | **3** | **221** | **584** | **616** |
+| **Total** | **14** | **345** | **1** | **3** | **221** | **584** | **617** |
 
 #### Complete Handlers (Evidence-Backed)
 
@@ -198,11 +198,13 @@ Semantic handler census: **584** handlers across **30** API families, covering *
   - Evidence: tools/psp_oracle/manifest.json:PSP-AUDIO-001
   - Evidence: fixtures/psp_oracle/probe.c:run_audio_query
   - Evidence: PSP-AUDIO-001 cells: audio-ch-output-blocking-0, audio-ch-output-blocking-1
-- **`h_AudioRestLen`** (`sceAudio`): `sceAudioGetChannelRestLength` (0xb011922f)
-  - Limitation: the cells query channel 0 before and after blocking output and just after release; invalid-channel error behavior and other queue states are unmeasured (#341)
+- **`h_AudioRestLen`** (`sceAudio`): `sceAudioGetChannelRestLength` (0xb011922f), `sceAudioGetChannelRestLen` (0xe9d97901)
+  - Limitation: serves sceAudioGetChannelRestLength and sceAudioGetChannelRestLen; the PSP-AUDIO-001 cells query both on channel 0 before and after blocking output and just after release, and PSP-HLE-AUDIO-REST-001 finds them equal (F or F - 64) after each blocking output on stereo channels of 1024, 2048 and 4096 frames, which is evidence that the two calls give one answer, not that this handler gives the console's: the runtime's blocking output returns with up to two blocks queued (#67), so both calls can read up to 2F there where the console held one block (#279, open); invalid-channel error behavior and other queue states are unmeasured for both calls (#341, #2361)
   - Evidence: tools/psp_oracle/manifest.json:PSP-AUDIO-001
   - Evidence: fixtures/psp_oracle/probe.c:run_audio_query
   - Evidence: PSP-AUDIO-001 cells: audio-ch-query-before, audio-ch-query-after, audio-ch-query-released
+  - Evidence: tools/psp_oracle/manifest.json:PSP-HLE-AUDIO-REST-001
+  - Evidence: fixtures/psp_oracle/probe_hle_measure.c:hle_arest_size
 - **`h_AudioSRCChRelease`** (`sceAudio`): `sceAudioSRCChRelease` (0x5c37c0ae)
   - Limitation: release after a blocking output (0) and release with nothing reserved (0x80260008) are measured (PSP-HLE-AUDIO-SRC-001); whether a release succeeds while samples are still queued, as the Output2 busy rule does, and releasing a reservation made through the other API (refused here as not reserved) are unmeasured (#339)
 - **`h_AudioSRCChReserve`** (`sceAudio`): `sceAudioSRCChReserve` (0x38553111)
