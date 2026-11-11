@@ -10148,12 +10148,13 @@ static int ssh_row_ramp(const uint32_t *fb, int *levels, int *jump) {
     return mono;
 }
 
-/* SR_GPU_COHERENCE_CASE=soft-shadow at render scale 4 (the harness's --soft-shadow MODE sets the
+/* SR_GPU_COHERENCE_CASE=soft-shadow at render scale 1 or 4 (the harness's --soft-shadow MODE sets the
  * Ace line and the declaration before the renderer starts):
  *   on          disc A is drawn from its softened copy from the first draw: its centre row is a
  *               monotone ramp with more levels and a smaller largest step than stock, its flat
  *               interior is stock's, and the part counts the match, the copy queued and the bind and
- *               confirms itself; disc B, undeclared, is byte-identical to stock;
+ *               confirms itself; a freed copy is made again without hashing again and draws the
+ *               same; disc B, undeclared, is byte-identical to stock;
  *   off         (no shadow key, a declaration in force) nothing is hashed or copied, and both discs
  *               are stock;
  *   undeclared  (shadow=soft, nothing declared) the part is unavailable with its reason, and both
@@ -10168,10 +10169,12 @@ static int coherence_run_soft_shadow(void) {
     const int want_on = g_ace_on && asked && declared;
     uint32_t *soft = (uint32_t *)malloc(fbytes), *stock = (uint32_t *)malloc(fbytes);
     uint32_t *b_on = (uint32_t *)malloc(fbytes), *b_off = (uint32_t *)malloc(fbytes);
+    uint32_t *again = (uint32_t *)malloc(fbytes);
     uint8_t *vram0 = (uint8_t *)malloc(SSH_VRAM);
-    int ok = soft && stock && b_on && b_off && vram0;
-    if (ok && s_scale != 4) {
-        fprintf(stderr, "gpu coherence selftest [%s]: FAIL runs at render scale 4 (--scale 4), not %d\n", name, s_scale);
+    int ok = soft && stock && b_on && b_off && again && vram0;
+    if (ok && s_scale != 1 && s_scale != 4) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL runs at render scale 1 or 4 (--scale), not %d\n", name,
+                s_scale);
         ok = 0;
     }
     if (ok && s_soft_on != want_on) {
@@ -10203,7 +10206,7 @@ static int coherence_run_soft_shadow(void) {
         ok = ssh_frame(SSH_TEX_A, stock) && ssh_frame(SSH_TEX_B, b_off);
         s_soft_on = saved;
     }
-    if (!ok && soft && stock && b_on && b_off && vram0)
+    if (!ok && soft && stock && b_on && b_off && again && vram0)
         fprintf(stderr, "gpu coherence selftest [%s]: FAIL a draw or its readback failed\n", name);
     /* Guest VRAM outside the committed frame: the textures and everything else, byte for byte. */
     if (ok) {
@@ -10258,6 +10261,33 @@ static int coherence_run_soft_shadow(void) {
                     (unsigned long long)s_cnt_soft_matched);
             ok = 0;
         }
+        /* A freed copy (a budget reclaim, tex_xs_release) is made again on the next present's hit from
+         * the match the entry keeps: not hashed again, queued once more, and drawn as before. */
+        TexEnt *ea = NULL;
+        for (int i = 0; i < s_tex_n && !ea; i++)
+            if (s_tex[i].xs.soft && s_tex[i].xs.factor) ea = &s_tex[i];
+        if (ok && (!ea || !submit_pending() || !cmd_drain(GEGPU_BOUNDARY_LIFETIME))) {
+            fprintf(stderr, "gpu coherence selftest [%s]: FAIL no softened copy to free, or the drain failed\n", name);
+            ok = 0;
+        }
+        if (ok) {
+            const uint64_t hashed0 = s_cnt_soft_hashed, queued0 = s_cnt_soft_queued, bound0 = s_cnt_soft_bound;
+            tex_xs_release(ea);
+            s_cnt_present_gpu++;   /* the next present: a budget retry runs at most once per present */
+            ok = ssh_frame(SSH_TEX_A, again);
+            if (!ok)
+                fprintf(stderr, "gpu coherence selftest [%s]: FAIL the redraw after the free failed\n", name);
+            else if (s_cnt_soft_hashed != hashed0 || s_cnt_soft_queued != queued0 + 1u ||
+                     s_cnt_soft_bound <= bound0 || !ea->xs.soft || memcmp(again, soft, fbytes) != 0) {
+                fprintf(stderr, "gpu coherence selftest [%s]: FAIL after the copy was freed: hashed %llu (was %llu), "
+                                "queued %llu (was %llu), bound %llu (was %llu), soft %d, frame %s\n", name,
+                        (unsigned long long)s_cnt_soft_hashed, (unsigned long long)hashed0,
+                        (unsigned long long)s_cnt_soft_queued, (unsigned long long)queued0,
+                        (unsigned long long)s_cnt_soft_bound, (unsigned long long)bound0, ea->xs.soft,
+                        memcmp(again, soft, fbytes) ? "differs" : "same");
+                ok = 0;
+            }
+        }
     } else if (ok) {
         if (memcmp(soft, stock, fbytes) != 0 || s_cnt_soft_hashed || s_cnt_soft_queued || s_cnt_soft_bound) {
             fprintf(stderr, "gpu coherence selftest [%s]: FAIL with the part off disc A is not stock, or something was "
@@ -10296,7 +10326,7 @@ static int coherence_run_soft_shadow(void) {
                "%d interior pixels stock; undeclared disc stock; VRAM outside the frame unchanged%s\n", name,
                !asked ? "off" : declared ? "on" : "undeclared", s_soft_on ? "on" : "off", levels_soft, jump_soft,
                levels_stock, jump_stock, interior, ref && ref[0] ? "; stock frames match the off run" : "");
-    free(soft); free(stock); free(b_on); free(b_off); free(vram0);
+    free(soft); free(stock); free(b_on); free(b_off); free(again); free(vram0);
     return ok;
 }
 

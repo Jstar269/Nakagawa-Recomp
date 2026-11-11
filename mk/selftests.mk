@@ -922,10 +922,11 @@ asset-index-selftest:
 # widescreen Fill case (#1881) run again alone at render scales 2 and 4; the sprite-scaled and
 # uv-edge-clamp cases (#2110) run alone at scales 2, 3 and 4; rtt-scale (#2052: a quarter-size
 # render target sampled back, linear, at the render scale and not at 1x) runs alone at scales 2
-# and 4 (the whole-suite run covers 1x). soft-shadow (Ace's shadow=soft) runs alone at scale 4 three
-# times: without the key (`--soft-shadow off`, which writes its stock frames' hashes to a reference
+# and 4 (the whole-suite run covers 1x). soft-shadow (Ace's shadow=soft) runs alone at scales 1 and 4,
+# three times at each: without the key (`--soft-shadow off`, which writes its stock frames' hashes to a reference
 # file), with a synthetic disc declared (`on`: soft edges, stock interior, stock for an undeclared
-# disc and with the part off, guest VRAM untouched) and with the key but nothing declared
+# disc and with the part off, guest VRAM untouched, a freed copy made again without a second hash) and
+# with the key but nothing declared
 # (`undeclared`: the part unavailable); both later runs draw the off run's stock frames. Each is
 # selected by arguments: a
 # VAR=value prefix needs a POSIX shell, and cmd.exe does not take one. The host twin (#2050) runs
@@ -977,6 +978,9 @@ gpu-coherence-selftest: $(GPU_COHERENCE_BIN)
 	$(GPU_COHERENCE_BIN) --scale 4 --case uv-edge-clamp
 	$(GPU_COHERENCE_BIN) --scale 2 --case rtt-scale
 	$(GPU_COHERENCE_BIN) --scale 4 --case rtt-scale
+	$(GPU_COHERENCE_BIN) --scale 1 --soft-shadow off --soft-ref $(BUILD_DIR)/soft_shadow_ref_s1.txt --case soft-shadow
+	$(GPU_COHERENCE_BIN) --scale 1 --soft-shadow on --soft-ref $(BUILD_DIR)/soft_shadow_ref_s1.txt --case soft-shadow
+	$(GPU_COHERENCE_BIN) --scale 1 --soft-shadow undeclared --soft-ref $(BUILD_DIR)/soft_shadow_ref_s1.txt --case soft-shadow
 	$(GPU_COHERENCE_BIN) --scale 4 --soft-shadow off --soft-ref $(BUILD_DIR)/soft_shadow_ref.txt --case soft-shadow
 	$(GPU_COHERENCE_BIN) --scale 4 --soft-shadow on --soft-ref $(BUILD_DIR)/soft_shadow_ref.txt --case soft-shadow
 	$(GPU_COHERENCE_BIN) --scale 4 --soft-shadow undeclared --soft-ref $(BUILD_DIR)/soft_shadow_ref.txt --case soft-shadow

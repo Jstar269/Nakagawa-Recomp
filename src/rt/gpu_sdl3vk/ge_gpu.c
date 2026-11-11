@@ -7625,10 +7625,10 @@ void gegpu_shutdown(void) {
         glyph_report();
         s_glyphs_asked = s_glyphs = 0;
     }
-    const int had_repl = s_repl != NULL;
+    const int had_repl = s_repl != NULL, had_soft = s_soft_on;
     tex_repl_shutdown();   /* the exit line, the pack closed; the scaled-copy machinery it used goes next */
     tex_soft_shutdown();
-    if (had_repl && !s_xs_factor && !s_xs_smart2d) nk_tex_scale_shutdown();
+    if ((had_repl || had_soft) && !s_xs_factor && !s_xs_smart2d) nk_tex_scale_shutdown();
     if (s_xs_factor || s_xs_smart2d) {
         nk_tex_scale_shutdown();
         fprintf(stderr, "TEX_SCALE: draws (scaled_binds=%llu, onetoone_unscaled=%llu, scaled_uploads=%llu, "

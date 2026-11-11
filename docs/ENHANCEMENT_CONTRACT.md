@@ -1060,7 +1060,8 @@ window's keys turn it on, and it never runs in an Authentic run.
 
 Many PSP games draw a character's shadow as one small texture, a dark disc or blob whose alpha falls from opaque to
 clear over a few texels, stretched across a quad under the character. Above 1x those few texels become a hard,
-stepped rim. This feature draws the textures a title's package names as its shadows with a smooth edge. It is
+stepped rim. This feature draws the textures a title's package names as its shadows with a smooth edge, at every
+render scale: at 1x the softened copy is sampled at guest resolution, so the rim is softer there too. It is
 guest-visible (section 11.1): section 11.3.12 is its entry and says what the guest can observe; this section says how
 it draws. The code is `tex_soft_init`, `tex_soft_match` and `tex_xs_offer` in `src/rt/gpu_sdl3vk/ge_gpu.c`, with the
 filter `nk_tex_soften_alpha_edge` and the digest `nk_tex_soft_shadow_digest` in `src/rt/gpu_sdl3vk/tex_scale.c`.
@@ -1075,13 +1076,16 @@ filter `nk_tex_soften_alpha_edge` and the digest `nk_tex_soft_shadow_digest` in 
 - **Match.** A texture is a candidate only when it has one mip level and is at most 64 x 64 texels, and no
   replacement pack image (section 10.12) is found for it. Its digest is HMAC-SHA-256 (RFC 2104, on the runtime's
   SHA-256) under the declared key, over the bytes `soft shadow texture v1`, a zero byte, the width and height as
-  16-bit little-endian integers, and the decoded level-0 texels as RGBA8888, red first. Each content is hashed once:
-  the answer is kept on the texture cache entry for its content, so later draws and retries of the same content do
-  not hash it again. A texture whose digest is not declared is drawn as before.
+  16-bit little-endian integers, and the decoded level-0 texels as RGBA8888, red first. Each upload of a content is
+  hashed once: the answer is kept on the texture cache entry for that upload, so later draws, retries and a copy
+  remade after a reclaim do not hash it again; a texture the guest uploads again is hashed again. A texture whose
+  digest is not declared is drawn as before. A match is counted when it is hashed, so a declared texture that is
+  also a render target counts as matched but is never drawn soft (below).
 - **Softened copy.** A match takes a 4x copy through the scaled-copy machinery of section 10.10: its VRAM budget
   (512 MiB when `SR_TEX_SCALE` sets none), its reclaim, retry and stale rules, and the texture's own filter and wrap
   state as the copy's sampler. The copy is made on the renderer thread and stored at once, as a replacement image is,
-  so the draw that found it is the first to show it. It is made in integer arithmetic: colour and alpha are each
+  so the draw that found it is normally the first to show it (a draw that finds the upload budget of that present
+  spent, or earlier finished copies waiting, shows it on a later draw). It is made in integer arithmetic: colour and alpha are each
   interpolated bilinearly with clamp-to-edge, and the alpha is then box-blurred over a square of radius
   `edge x 4` output texels, also clamped to the copy's edges. The header states two guarantees and
   `tex-scale-selftest` checks both: an output texel whose source neighbourhood (every texel within `edge + 1` source
@@ -1631,8 +1635,8 @@ The feature of section 10.20. How it draws is described there; this entry is wha
   (`ACE_MODE: shadow unavailable (nothing declared: this build's package carries no ace_parts.soft_shadows
   textures)`), and the runs of item 4 do not exist.
 - **Mechanism.** A one-level texture of at most 64 x 64 texels whose keyed digest the package declares is drawn from
-  a 4x copy whose alpha edge is widened and smoothed (section 10.20). The guest's texture, its CLUT and every other
-  draw are unchanged.
+  a 4x copy whose alpha edge is widened and smoothed (section 10.20), at every render scale, 1x included. The guest's
+  texture, its CLUT and every other draw are unchanged.
 - **Key and off switch.** `shadow=soft` or `shadow=off` on the launch line (section 10.1), an optional key: a line
   without it reads as off, `shadow=soft` is refused unless the line carries `tier=ace`, and any other value refuses
   the line. The player has a library setting and a per-title setting, "Soft shadows", each able to turn it off alone
@@ -1650,7 +1654,7 @@ The feature of section 10.20. How it draws is described there; this entry is wha
 - **Readbacks:** differ the same way, for a GE or display readback, save picture or screenshot that covers them, and
   for a render-to-texture pass that draws a declared texture. Texture readbacks are unchanged: the guest's texture is
   never written.
-- **Timing:** differs in host time only. A candidate's digest is computed once per content on the renderer thread, the
+- **Timing:** differs in host time only. A candidate's digest is computed once per upload on the renderer thread, the
   thread the guest runs on, over at most 16 KiB of texels, and a match's copy is made and uploaded there the first
   time it is drawn. Not measured on a title. The GE timing model, the VBLANK schedule and the media clocks are
   unchanged.

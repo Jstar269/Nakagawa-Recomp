@@ -726,7 +726,7 @@ static void test_soften(void) {
               bad, bx, by, out[by * SN * 4 + bx], ref_soft_texel(small, SN, SN, 4, 1, bx, by));
         int row_ok = 1;
         for (int x = 0; x < SN * 4; x++) row_ok &= (out[23 * SN * 4 + x] >> 24) == k_row23[x];
-        if (!row_ok || getenv("NK_SOFT_PRINT_ROW")) {
+        if (!row_ok) {
             fprintf(stderr, "soften: row 23 alpha:");
             for (int x = 0; x < SN * 4; x++) fprintf(stderr, "%s%u", x ? ", " : " ", out[23 * SN * 4 + x] >> 24);
             fputc('\n', stderr);
