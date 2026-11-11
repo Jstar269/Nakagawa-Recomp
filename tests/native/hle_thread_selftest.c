@@ -39453,6 +39453,27 @@ static void test_vpl_blocking_waits(void) {
     expect(selftest_vpl_free(vpool, addr1) == 0, "VPL: free reused block succeeds");
     expect(selftest_vpl_delete(vpool) == 0, "VPL: DeleteVpl succeeds");
 
+    /* ---- 1b. A request no block of the pool can ever hold is refused, not waited on ----
+     * A 256-byte pool hands out 224 bytes (PSP-B1-01): 216 bytes fit, 217 or 256 never can.
+     * Their code is UNMEASURED (the pspautotests "more than the pool" code); a blocking allocate
+     * must not wait for space that cannot exist. */
+    vpool = selftest_vpl_create(256);
+    expect(vpool >= 0x600u, "VPL: CreateVpl for the never-fits cells succeeds");
+    MEM_W32(out1, 0xfeedfaceu);
+    expect(selftest_vpl_try_allocate(vpool, 217, out1) == 0x800201b7u &&
+               selftest_vpl_try_allocate(vpool, 256, out1) == 0x800201b7u &&
+               MEM_R32(out1) == 0xfeedfaceu,
+           "VPL: TryAllocate of a request whose cost exceeds the pool is 0x800201B7");
+    expect(selftest_vpl_allocate(vpool, 256, out1, 0) == 0x800201b7u && MEM_R32(out1) == 0xfeedfaceu,
+           "VPL: a blocking Allocate that can never fit returns 0x800201B7 instead of waiting");
+    expect(selftest_vpl_try_allocate(vpool, 216, out1) == 0u, "VPL: 216 bytes still fit the empty pool");
+    expect(selftest_vpl_free(vpool, MEM_R32(out1)) == 0 && selftest_vpl_delete(vpool) == 0,
+           "VPL: never-fits pool frees and deletes");
+    vpool = selftest_vpl_create(0x20u);
+    expect(vpool >= 0x600u && selftest_vpl_try_allocate(vpool, 1, out1) == 0x800201b7u,
+           "VPL: a pool of 0x20 bytes holds no block, so any request is 0x800201B7");
+    expect(selftest_vpl_delete(vpool) == 0, "VPL: the 0x20-byte pool deletes");
+
     /* ---- 2. AllocateVpl blocks then wakes on FreeVpl (FIFO order & CB check) ---- */
     vpool = selftest_vpl_create(256);
     expect(vpool >= 0x600u, "VPL: CreateVpl succeeds");

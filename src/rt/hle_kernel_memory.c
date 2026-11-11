@@ -704,6 +704,16 @@ static uint32_t vpl_pool_size(const VplPool *p) {
     return p->size > VPL_POOL_HEADER ? (p->size - VPL_POOL_HEADER) & ~(VPL_GRANULE - 1u) : 0u;
 }
 
+/* A request no block of this pool can ever hold: 0 bytes, -1 bytes and more than the pool
+ * answer VPL_ILLEGAL_SIZE (pspautotests, above). UNMEASURED: a request within the create size
+ * whose cost exceeds the bytes the pool hands out gets the same code here, so a blocking
+ * allocate fails instead of waiting for space that can never exist. The request bound also
+ * keeps the cost from wrapping. */
+static int vpl_request_illegal(const VplPool *p, uint32_t request) {
+    if (request == 0 || request > p->size) return 1;
+    return ((request + (VPL_GRANULE - 1u)) & ~(VPL_GRANULE - 1u)) + VPL_BLOCK_HEADER > vpl_pool_size(p);
+}
+
 static uint32_t h_CreateVpl(CpuState *s) {
     uint32_t size = A3;
     if (size == 0) return VPL_EXHAUSTED; /* exact zero-size result is UNMEASURED */
@@ -727,7 +737,7 @@ static uint32_t h_CreateVpl(CpuState *s) {
 }
 
 static uint32_t vpl_try_allocate_internal(VplPool *p, uint32_t request, uint32_t *addr_out) {
-    if (request == 0 || request > p->size) return VPL_ILLEGAL_SIZE; /* also keeps the rounding below from wrapping */
+    if (vpl_request_illegal(p, request)) return VPL_ILLEGAL_SIZE;
     /* PSP-B1-01: roundup(request, 8) + 8 bytes, carved from the top of the highest span that
      * holds them. */
     uint32_t need = ((request + (VPL_GRANULE - 1u)) & ~(VPL_GRANULE - 1u)) + VPL_BLOCK_HEADER;
@@ -752,7 +762,7 @@ static uint32_t h_TryAllocateVpl(CpuState *s) {
     VplPool *p = vpl_lookup(A0);
     uint32_t request = A1, out = A2;
     if (!p) return SCE_KERNEL_ERROR_UNKNOWN_VPLID;
-    if (request == 0 || request > p->size) return VPL_ILLEGAL_SIZE;
+    if (vpl_request_illegal(p, request)) return VPL_ILLEGAL_SIZE;
     if (out && !sr_guest_span_writable(out, 4u)) return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
     uint32_t addr = 0;
     uint32_t err = vpl_try_allocate_internal(p, request, &addr);
@@ -767,7 +777,7 @@ static uint32_t allocate_vpl_common(CpuState *s, int is_cb) {
     uint32_t uid = A0, request = A1, out = A2, toptr = A3;
     VplPool *p = vpl_lookup(uid);
     if (!p) return SCE_KERNEL_ERROR_UNKNOWN_VPLID;
-    if (request == 0 || request > p->size) return VPL_ILLEGAL_SIZE;
+    if (vpl_request_illegal(p, request)) return VPL_ILLEGAL_SIZE;
     if (out && !sr_guest_span_writable(out, 4u)) return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
 
     uint64_t end_time = 0;
