@@ -453,6 +453,7 @@ static void swap_final_file(void *opaque) {
 static void check_open_cases(const char *base) {
 #if defined(SR_CD_BACKEND_POSIX_AT)
     char root[512], path[512], outside[512], target[512], inroot[512], inroot_link[512], fifo[512], content[64];
+    char seed[512], seed_slot[600];
 
     /* Ordinary SAVE then LOAD: the production path still works. */
     snprintf(root, sizeof(root), "%s/normal", base);
@@ -468,6 +469,10 @@ static void check_open_cases(const char *base) {
     snprintf(root, sizeof(root), "%s/final", base);
     snprintf(outside, sizeof(outside), "%s/final-outside", base);
     CHECK(make_savedata_tree(root) && make_dir(outside), "final-link fixture");
+    /* A whole save first, so the save has its PARAM.SFO: a save without one is reported as
+     * damaged before its data file is opened (pspautotests loadbroken), and the LOAD below
+     * must reach the data file's open to prove that open does not follow the link. */
+    CHECK(run_save(root, "SEED.BIN", "SEED") == 0, "final-link fixture SAVE writes PARAM.SFO");
     snprintf(target, sizeof(target), "%s/target.bin", outside);
     snprintf(path, sizeof(path), "%s/PSP/SAVEDATA/ULUS99999SLOT00/DATA.BIN", root);
     CHECK(write_file(target, "OUTSIDE") && symlink(target, path) == 0, "final-link setup");
@@ -514,8 +519,19 @@ static void check_open_cases(const char *base) {
     CHECK(run_save(root, "DATA.BIN", "ATTACK") != 0, "intermediate symlink SAVE must fail closed");
     snprintf(path, sizeof(path), "%s/ULUS99999SLOT00/DATA.BIN", target);
     CHECK(!exists_no_follow(path), "intermediate symlink SAVE must not create outside data");
+    /* A whole save behind the link (made in its own tree, then moved there), so the LOAD below
+     * would succeed if its directory walk followed the link. The contained directory check
+     * refuses the link before PARAM.SFO or the data file is looked at; without the save behind
+     * it, the check would pass whatever LOAD did. */
+    snprintf(seed, sizeof(seed), "%s/intermediate-seed", base);
+    CHECK(make_savedata_tree(seed) && run_save(seed, "DATA.BIN", "OUTSIDE") == 0,
+          "intermediate-link seed SAVE");
+    snprintf(seed_slot, sizeof(seed_slot), "%s/PSP/SAVEDATA/ULUS99999SLOT00", seed);
+    snprintf(path, sizeof(path), "%s/ULUS99999SLOT00", target);
+    CHECK(rename(seed_slot, path) == 0, "intermediate-link seed moved behind the link");
     memset(content, 0, sizeof(content));
-    CHECK(run_load(root, "DATA.BIN", content, sizeof(content)) != 0,
+    CHECK(run_load(root, "DATA.BIN", content, sizeof(content)) != 0 &&
+              memcmp(content, "OUTSIDE", 7) != 0,
           "intermediate symlink LOAD must fail closed");
 
     /* An operator-configured root symlink remains valid: only below-root

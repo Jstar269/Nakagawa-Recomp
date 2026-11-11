@@ -143,6 +143,9 @@ typedef struct {
 #define SCR_ONLINE_NOT_BUILT_LINE \
     "Online features aren't built yet, so Nakagawa makes no connection and has " \
     "nothing to switch on."
+/* The Nickname row in Settings (#2197): its button opens the nickname editor. */
+#define SCR_NICKNAME_SENTENCE \
+    "What games show as this PSP's nickname. It is never taken from this PC's user name."
 /* A user whose stored online_mode is On still gets the switch, with what it does now, so
    they can turn it off. Nobody else sees it (#2007). */
 #define SCR_ONLINE_STORED_ON_SENTENCE \
