@@ -414,9 +414,9 @@ class TestGeFirstBadDrawWiring(unittest.TestCase):
                       "exit $(GE_FBD_SKIP_STATUS); fi", self.rule)
         self.assertIn("--fbd-self-check", self.rule)
 
-    def test_wide_capture_is_compared_and_past_the_stride_is_refused(self):
+    def test_wide_capture_is_compared_and_past_512_columns_is_refused(self):
         # #2193: ge.c draws up to a 512 stride, so the 512-wide capture must compare clean and
-        # mutant 1's draw right of x 480 must be named; a scissor past the stride stays refused.
+        # mutant 1's draw right of x 480 must be named; a scissor past 512 columns stays refused.
         self.assertIn("for v in wide narrow past empty many deep; do", self.rule)
         wide = self.rule.split("@log=$(GE_FBD_DIR)/wide.log;", 1)[1].split("@for cell in", 1)[0]
         self.assertIn("$(GE_FBD_DIR)/wide.ngef --first-bad-draw", wide)

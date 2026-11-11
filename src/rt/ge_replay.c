@@ -300,7 +300,8 @@ static int fbd_observer(void *ctx, unsigned long index, uint32_t op, uint32_t cm
     }
     /* Both renderers draw only inside the target's columns (fbd_raster_w: the stride, 512 at
      * most) and 272 rows, so that is what a draw can write. A scissor past 512 columns or 272
-     * rows has pixels a PSP may draw and neither renderer does: a gap, not a difference. */
+     * rows reaches pixels neither renderer has (their targets are 512x272) and whose PSP
+     * result is unmeasured: a gap, not a difference. */
     const uint32_t raster_w = fbd_raster_w(st);
     const uint32_t scis_w = fbd_extent(st->scis_x2), scis_h = fbd_extent(st->scis_y2);
     const uint32_t need_w = scis_w < raster_w ? scis_w : raster_w;
