@@ -1239,8 +1239,10 @@ section 11.3.12 is its entry and says what the guest can observe; this section s
   step stored at a pixel is the same with the key on and off: a test whose answer the key changes compares two
   values of one step, and the value it keeps lies in that step either way, while a draw the lean passes writes no
   depth. So a depth readback, depth read as a texture through guest memory, and the software renderer when a draw
-  falls back to it see the same 16-bit depth. A value exactly half way between two steps may round the other way on
-  a device whose 16-bit conversion rounds such ties differently. The colour is what changes.
+  falls back to it see the same 16-bit depth, except for a value near half way between two steps: Vulkan leaves the
+  precision of a 16-bit attachment's conversion to the driver, so such a value may land in the other step with the
+  key off (lavapipe stores 17/32 of a step as the lower step), while `depth_texel` rounds it to the nearest. The
+  colour is what changes.
 - **The software renderer** (`src/rt/ge.c`) keeps its 16-bit depth. It is the PSP's model and the renderer of the
   fallback paths, so a frame it draws z-fights as on the PSP; this feature is a property of the Vulkan renderer's host
   buffer.
@@ -1264,7 +1266,8 @@ section 11.3.12 is its entry and says what the guest can observe; this section s
   - upload: every 16-bit value written by the CPU reads back from the device unchanged, and a quad at a written
     step passes EQUAL against it while one a step away fails, from 0 to 65535;
   - readback: a scene's depth committed to guest VRAM hashes to the same value with the key on as the key-off run
-    at the same scale (`--depth-ref`).
+    at the same scale (`--depth-ref`); its depths lie at least an eighth of a step from a half step, where the
+    16-bit conversion is the driver's.
 
   The whole suite also runs once with `--depth 32`, and its cells that read the device's depth image read it at
   either format.

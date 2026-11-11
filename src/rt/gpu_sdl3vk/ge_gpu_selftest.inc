@@ -10507,14 +10507,17 @@ static int coherence_run_host_depth(void) {
     /* readback: the z-fight, decal and equal scene's depth committed to guest VRAM. */
     uint64_t hash = 0xcbf29ce484222325ull;
     if (ok) {
-        /* Fractions of a step at device pixel centres are odd multiples of 1/(32 x scale) or more, far
-         * from one half next to float rounding at these depths; the steep quad's depth is whole. The
-         * LEQUAL quad crosses its base's plane at x = 80, where the two lie within one step. */
+        /* Every depth here lies an eighth of a step or more from a half step: how a D16 attachment
+         * rounds a value next to a half step is the driver's (lavapipe rounds 17/32 of a step down), so
+         * only such values have one 16-bit answer on every device. The z-fight pair and the decal pair
+         * each round to one step, so at 16 bits the second surface passes and writes that step, and
+         * with depth=32 it fails and the first one's value stays: the stored step is the same. The
+         * steep quad's depth is whole at every device pixel centre. */
         const HdQuad q[5] = {
-            { HD_NEAR, 16.0f, 144.0f, 16.0f, 48.0f, 1000.0f, 1008.0f, 1u, 1u },
-            { HD_FAR, 16.0f, 144.0f, 16.0f, 48.0f, 999.0f, 1008.0f, 7u, 1u },
-            { HD_NEAR, 16.0f, 144.0f, 64.0f, 96.0f, 3000.0f, 3016.0f, 1u, 1u },
-            { HD_DECAL, 48.0f, 112.0f, 64.0f, 96.0f, 3003.0f, 3013.0f, 5u, 1u },
+            { HD_NEAR, 16.0f, 144.0f, 16.0f, 48.0f, 1000.125f, 1000.125f, 1u, 1u },
+            { HD_FAR, 16.0f, 144.0f, 16.0f, 48.0f, 999.875f, 999.875f, 7u, 1u },
+            { HD_NEAR, 16.0f, 144.0f, 64.0f, 96.0f, 3000.125f, 3000.125f, 1u, 1u },
+            { HD_DECAL, 48.0f, 112.0f, 64.0f, 96.0f, 3000.25f, 3000.25f, 5u, 1u },
             { HD_NEAR, 160.0f, 400.0f, 100.0f, 260.0f, 60000.0f, 56160.0f, 1u, 1u },
         };
         ok = hd_reset(0x1234u) && hd_draw(q, 5);
@@ -10528,11 +10531,21 @@ static int coherence_run_host_depth(void) {
         if (!ok) fprintf(stderr, "gpu coherence selftest [%s]: readback (%s) did not run\n", name, mode);
     }
     const char *ref_path = getenv("SR_GPU_DEPTH_REF");
+    /* The span's bytes go beside the reference (<ref>.raw), so a mismatch names its pixels. */
+    char raw_path[600];
+    snprintf(raw_path, sizeof(raw_path), "%s.raw", ref_path ? ref_path : "");
+    uint32_t span_first = 0, span_end = 0;
+    if (ok) (void)ge_zbuf_guest_span_bounds(0x04000000u + HD_ZBA, 512u, &span_first, &span_end);
     if (ok && ref_path && *ref_path) {
         if (!s_depth32) {
             FILE *f = fopen(ref_path, "w");
             ok = f && fprintf(f, "scale=%d hash=%016llx\n", s_scale, (unsigned long long)hash) > 0;
             if (f && fclose(f) != 0) ok = 0;
+            FILE *r = ok ? fopen(raw_path, "wb") : NULL;
+            if (r) {
+                (void)fwrite(SR_HOST_LINEAR(span_first), 1, span_end - span_first, r);
+                fclose(r);
+            }
             if (!ok) fprintf(stderr, "gpu coherence selftest [%s]: cannot write %s\n", name, ref_path);
         } else {
             FILE *f = fopen(ref_path, "r");
@@ -10545,6 +10558,22 @@ static int coherence_run_host_depth(void) {
                 fprintf(stderr, "gpu coherence selftest [%s]: readback with depth=32 at scale %d: hash %016llx, "
                         "the key-off run at scale %d: %016llx\n", name, s_scale, (unsigned long long)hash, scale,
                         want);
+                FILE *r = fopen(raw_path, "rb");
+                const uint32_t n = (span_end - span_first) / 2u;
+                uint16_t *off = r ? (uint16_t *)malloc((size_t)n * 2u) : NULL;
+                if (off && fread(off, 2u, n, r) == n) {
+                    const uint16_t *on = (const uint16_t *)SR_HOST_LINEAR(span_first);
+                    uint32_t diffs = 0;
+                    for (uint32_t i = 0; i < n; i++) {
+                        if (off[i] == on[i]) continue;
+                        if (diffs++ < 12)
+                            fprintf(stderr, "gpu coherence selftest [%s]:   x=%u y=%u key off %u, depth=32 %u\n", name,
+                                    i % 512u, i / 512u, off[i], on[i]);
+                    }
+                    fprintf(stderr, "gpu coherence selftest [%s]:   %u of %u depth values differ\n", name, diffs, n);
+                }
+                free(off);
+                if (r) fclose(r);
                 ok = 0;
             }
         }
