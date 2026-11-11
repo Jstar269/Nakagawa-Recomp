@@ -224,10 +224,10 @@ int ctrl_refresh_allowed(void) {
 }
 
 /* Late pad sampling: the newest sample takes the given input in place when
- * ctrl_refresh_allowed(). It keeps every button its latch carried as a press (new since the
- * sample before, or from a pulse), so a press the VBLANK delivered is never lost to a release
- * during the hold; taps are the pulses this refresh consumed, kept the same way. Its timestamp and its scripted-input id stay; the number
- * of samples does not change. Returns 1 when the sample was refreshed. */
+ * ctrl_refresh_allowed(). It keeps every button its latch carried as a press (see ctrl_push),
+ * so a press the VBLANK delivered is never lost to a release during the hold; taps are the
+ * pulses this refresh consumed, kept the same way. Its timestamp and its scripted-input id
+ * stay; the number of samples does not change. Returns 1 when the sample was refreshed. */
 int ctrl_refresh_newest(uint32_t buttons, uint8_t lx, uint8_t ly, uint64_t poll_ns, uint32_t taps) {
     if (!ctrl_refresh_allowed()) return 0;
     const int newest = (s_ctrl_w - 1 + CTRL_RING) % CTRL_RING;
@@ -249,8 +249,12 @@ void ctrl_push(const CtrlSample *smp, uint32_t ts) {
     s_ctrl_ring[s_ctrl_w].ts = ts;
     s_ctrl_ring_poll_ns[s_ctrl_w] = s_ctrl_live_poll_ns;
     /* The presses this sample carries that a refresh must keep: new since the sample before,
-     * or from a pulse (a press released again before this VBLANK). */
-    s_ctrl_newest_taps = s_ctrl_live_taps | (smp->btn & ~before);
+     * from a pulse (a press released again before this VBLANK), and, while the sample before was
+     * handed to no guest call, its kept presses still down here: a read of one buffer returns
+     * only this sample, so a press the sample before carried reaches the guest only here. */
+    const uint32_t carried =
+        s_ctrl_sample_count && !s_ctrl_newest_delivered ? s_ctrl_newest_taps & smp->btn : 0u;
+    s_ctrl_newest_taps = s_ctrl_live_taps | (smp->btn & ~before) | carried;
     /* A sampling cycle's samples (ctrl_cycle_catch_up pushes them while the cycle is non-zero)
      * are not VBLANK samples, even once the cycle is back to 0. */
     s_ctrl_newest_refreshable = !s_ctrl_sampling_cycle && !s_ctrl_live_keyboard;

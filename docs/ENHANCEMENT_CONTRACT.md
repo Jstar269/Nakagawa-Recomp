@@ -1573,35 +1573,37 @@ so the pad sample it reads is younger when its frame reaches the screen.
   while 60 FPS game logic is on. In an Enhanced or Ace run the runtime keeps the host cost of the last 64 updates,
   measured from the boundary to the update's next display wait (`sched_vblank_block`); only a line that carries
   `pad=late` holds an update, and with no Enhanced or Ace line the call returns at once. Once 30 updates in a row were
-  measured, an update reaching the
-  boundary with more than its reserve left before the next VBLANK deadline waits there. The reserve is the largest of
-  those costs, a quarter of it again, and a 2 ms margin. The deadline is the next VBLANK on the host clock: the paced
-  time left until it, moved to the host clock at the current speed, so it stays exact after a fast-forward span has
-  put the paced clock ahead of the host's. It is never later than one VBLANK period after the last VBLANK the
-  scheduler latched, and a deadline more than one period ahead is not planned against (no hold, and the 30 updates
-  are counted again). Every hold is shorter than one VBLANK period. The wait is an ordinary guest-thread delay
-  (`sched_delay_current`) and is never shorter than 1 ms. It is taken only where the thread could wait anyway (never in
-  an interrupt handler, a pending tail transfer, a pause request or the COSIM guest lane), not in fast forward (whose
-  guest time, the delay's clock, runs ahead of the host time the hold is planned on), and only where a refresh could
-  follow it: not under a route (`SR_PADSCRIPT`), a recording or replay, the headless START pulse or a non-zero
-  sampling cycle, not with no window a person is at (the offscreen sink, a headless presenter) or while the on-screen
-  keyboard is open, and not once the newest sample was handed to a guest call.
-  After the wait, the runtime polls the host input once more and rewrites the newest controller sample in place, only
-  if that poll read the host input (the GDI window reads its keys when it presents, so there the sample stays as
-  latched) and no guest call has been handed the sample yet: a buffer read or peek, and a latch read or peek, all
-  count. The rewritten sample keeps every button its VBLANK latch took as a press, one down in it and up in the sample
-  before, whatever its source (a key, a gamepad button, a trigger or a stick bound to a button), and one pressed and
-  released since the sample before, so a press that sample carried is never lost to a release during the wait. The sample whose press closed the on-screen keyboard, a sample
-  a sampling cycle latched, and a pause requested, opened or closed by then leave the sample as latched. Its count of
+  measured, an update reaching the boundary with more than its reserve left before the next VBLANK deadline waits there.
+  The reserve is the largest of those costs, a quarter of it again, and a 2 ms margin. The deadline is the next VBLANK
+  on the host clock: the paced time left until it, moved to the host clock at the current speed, so it stays exact after
+  a fast-forward span has put the paced clock ahead of the host's. It is never later than one VBLANK period after the
+  last VBLANK the scheduler latched, and a deadline more than one period ahead is not planned against (no hold, and the
+  30 updates are counted again). Every hold is shorter than one VBLANK period. The wait is an ordinary guest-thread
+  delay (`sched_delay_current`) and is never shorter than 1 ms. It is taken only where the thread could wait anyway
+  (never in an interrupt handler, a pending tail transfer, a pause request or the COSIM guest lane), not in fast forward
+  (whose guest time, the delay's clock, runs ahead of the host time the hold is planned on), and only where the gates a
+  refresh checks pass (the GDI window passes them, but its pump polls no input; see Limits): not under a route
+  (`SR_PADSCRIPT`), a recording or replay, the headless START pulse or a non-zero sampling cycle, not with no window a
+  person is at (the offscreen sink, a headless presenter) or while the on-screen keyboard is open, and not once the
+  newest sample was handed to a guest call. After the wait, the runtime polls the host input once more and rewrites the
+  newest controller sample in place, only if that poll read the host input (the GDI window reads its keys when it
+  presents, so there the sample stays as latched) and no guest call has been handed the sample yet: a buffer read or
+  peek, and a latch read or peek, all count. The rewritten sample keeps every button its VBLANK latch took as a press,
+  one down in it and up in the sample before, whatever its source (a key, a gamepad button, a trigger or a stick bound
+  to a button), and one pressed and released since the sample before, and, while the sample before was handed to no
+  guest call, the presses that sample kept that are still down (a read of one buffer skips it), so a press that sample
+  carried is never lost to a release during the wait. The sample whose press closed the on-screen keyboard, a sample a
+  sampling cycle latched, and a pause requested, opened or closed by then leave the sample as latched. Its count of
   samples, its timestamp and its scripted-input id stay the same. An update whose work then ends after the deadline it
   was held for is late. Holding stops for 300 updates and the margin grows by 1 ms, up to 6 ms.
 - **Key.** `pad=late` or `pad=off` on the launch line (section 10.1), an optional key: a line without it reads as off,
   any other value is refused, and `pad=late` is refused unless the line carries `tier=ace`. The player has a library
-  setting and a per-title setting, "Late pad sampling", each able to turn it off alone (section 11.2, item 2); the
-  line carries `;pad=late` only for an Ace launch with the part on. The run names it (`ACE_MODE: pad late (...)` at
-  start, an `ACE_MODE: pad` line at exit and the report's `pad` object with updates, holds, mean and largest hold,
-  late updates, refreshed samples and deadlines more than a period ahead). It confirms the part when the boundary first runs; a run that asked for it and in
-  which no update boundary ran (no 60 FPS package, or `SR_EXPERIMENTAL_60HZ` off) reports it unavailable at exit.
+  setting and a per-title setting, "Late pad sampling", each able to turn it off alone (section 11.2, item 2); the line
+  carries `;pad=late` only for an Ace launch with the part on. The run names it (`ACE_MODE: pad late (...)` at start, an
+  `ACE_MODE: pad` line at exit and the report's `pad` object with updates, holds, mean and largest hold, late updates,
+  refreshed samples and deadlines more than a period ahead). It confirms the part when the boundary first runs; a run
+  that asked for it and in which no update boundary ran (no 60 FPS package, or `SR_EXPERIMENTAL_60HZ` off) reports it
+  unavailable at exit.
 - **What it changes:** the time inside each VBLANK period at which an update begins, and the pad state of the newest
   sample when no guest call has been handed it yet. A refreshed sample's content is up to one hold newer than its
   `TimeStamp`: stamps stay monotonic, but a stamp no longer says when its content was polled. While no hold overruns,
@@ -1613,13 +1615,13 @@ so the pad sample it reads is younger when its frame reaches the screen.
 - **VRAM bytes:** unchanged for the same input. A frame can show input from up to one period later than without it.
 - **Readbacks:** unchanged.
 - **Timing:** differs. A held update starts later in its period, by the hold, so the guest's system time read at its
-  start is later. During the hold the update's thread is in a delay wait (`TH_WAIT_DELAY`), which a run without it
-  never puts it in there: sceKernelReferThreadStatus and the thread lists show it waiting, and
-  sceKernelReleaseWaitThread on it is refused as on a thread that is not waiting (the runtime releases only object
-  waits), where without the part it would find the thread running or in its releasable VBLANK wait. Other guest threads that are ready while it waits run during the
-  hold, before the update's work rather than after it. The VBLANK schedule, the RTC, the media clocks and the GE timing model are unchanged. The
-  number of updates per second is unchanged unless a held update is late (an overrun, above), which the back-off
-  limits.
+  start is later. During the hold the update's thread is in a delay wait (`TH_WAIT_DELAY`), which a run without it never
+  puts it in there: sceKernelReferThreadStatus and the thread lists show it waiting, and sceKernelReleaseWaitThread on
+  it is refused as on a thread that is not waiting (the runtime releases only object waits), where without the part it
+  would find the thread running or in its releasable VBLANK wait. Other guest threads that are ready while it waits run
+  during the hold, before the update's work rather than after it. The VBLANK schedule, the RTC, the media clocks and the
+  GE timing model are unchanged. The number of updates per second is unchanged unless a held update is late (an overrun,
+  above), which the back-off limits.
 - **I/O speed:** unchanged.
 - **Package obligations:** the package's `update_boundary` runs once per logic update (section 9.5), and the title
   reads its pad after that point in the update. A title that reads the pad before its boundary gets no fresher sample,

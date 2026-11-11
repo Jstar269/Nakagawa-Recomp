@@ -44661,9 +44661,10 @@ static void test_pad_late_through_the_boundary(void) {
     pad_late_teardown();
 
     /* B4: a press that raised no pulse (a trigger or a stick bound to a button) stays too. The
-     * sample before has SQUARE; the VBLANK latches SQUARE and R, and both are released during
-     * the hold. R is new in this sample, so a run without the part delivers it here and the
-     * refreshed sample keeps it; SQUARE was already down, so its release may arrive now. */
+     * sample before has SQUARE, new in it and read by no guest call; the VBLANK latches SQUARE
+     * and R, and both are released during the hold. R is new in this sample, and SQUARE is a
+     * press of the unread sample before, which a read of one buffer skips: the refreshed sample
+     * keeps both, as a run without the part delivers them. */
     pad_late_fixture();
     {
         const uint64_t t = s_pad_vblank_ns + PAD_PERIOD_NS;
@@ -44678,10 +44679,34 @@ static void test_pad_late_through_the_boundary(void) {
         s_test_gui_buttons = 0u;                       /* both released during the hold */
         pad_update_resume(u, t + PAD_PERIOD_NS + 12u * PAD_MS);
         expect(ace_pad_plan()->refreshed == 1u, "pad: the trigger sample is refreshed");
-        expect(pad_read_newest() == NK_PSP_BTN_RTRIGGER_BIT,
+        expect(pad_read_newest() == (NK_PSP_BTN_SQUARE_BIT | NK_PSP_BTN_RTRIGGER_BIT),
                "pad: the refreshed sample keeps a press new in it that raised no pulse");
     }
     pad_late_teardown();
+
+    /* S9: the same, read one buffer at a time. The unread sample before is skipped by the read,
+     * so its press reaches the guest only in the refreshed sample. Once the sample before was
+     * handed to a read, a release of its press may arrive in the next. */
+    for (int handed = 0; handed < 2; handed++) {
+        pad_late_fixture();
+        const uint64_t t = s_pad_vblank_ns + PAD_PERIOD_NS;
+        s_test_gui_buttons = NK_PSP_BTN_SQUARE_BIT;
+        pad_vblank(t);
+        if (handed) (void)ctrlc_call(NID_SCE_CTRL_READ_BUFFER_POSITIVE, CTRL_OK_BUF, 1u);
+        pad_vblank(t + PAD_PERIOD_NS);                 /* SQUARE still down */
+        s_pad_host_ns = t + PAD_PERIOD_NS + PAD_MS;
+        s_ctrlc_ret = 0u;
+        TCB *u = pad_update_start();
+        expect(pad_update_held(u), "pad: the update after the unread press is held");
+        s_test_gui_buttons = 0u;                       /* released during the hold */
+        pad_update_resume(u, t + PAD_PERIOD_NS + 12u * PAD_MS);
+        const uint32_t n = ctrlc_call(NID_SCE_CTRL_READ_BUFFER_POSITIVE, CTRL_OK_BUF, 1u);
+        expect(ace_pad_plan()->refreshed == 1u && n == 1u &&
+                   MEM_R32(CTRL_OK_BUF + 4u) == (handed ? 0u : NK_PSP_BTN_SQUARE_BIT),
+               handed ? "pad: a press of a sample already read may be released in the refresh"
+                      : "pad: a read of one buffer keeps the press of the unread sample before");
+        pad_late_teardown();
+    }
 
     /* N9: a pump that polls nothing (the GDI window reads its keys when it presents) leaves the
      * sample as latched, and it is not counted as refreshed. */
@@ -44711,7 +44736,7 @@ static void test_pad_late_through_the_boundary(void) {
             pad_fixture_line(off_lines[i]);
             char msg[192];
             const uint64_t t = s_pad_vblank_ns;
-            expect(!ace_effective()->pad, "pad: the off line has no late pad sampling");
+            expect(!ace_effective()->pad && g_ace_on == (i < 2u), "pad: the off line has no late pad sampling");
             TCB *u = pad_update_start();
             snprintf(msg, sizeof msg, "pad: no hold with '%s'", off_lines[i]);
             expect(u && s_pad_body_done && u->state != TH_WAIT_DELAY && ace_pad_plan()->held_updates == 0u &&
@@ -44786,6 +44811,19 @@ static void test_pad_late_through_the_boundary(void) {
         ctrl_env("", "", "", "");
         s_test_gui_interactive = 0;
         pad_expect_no_hold("while the headless START pulse owns the pad");
+        ctrl_env(noinput ? "1" : "", "", "", "");
+    }
+    pad_late_teardown();
+
+    pad_late_fixture();
+    {
+        /* No window a person is at, with SR_NOINPUT set (no START pulse): the window gate alone
+         * refuses the hold. */
+        const char *was = getenv("SR_NOINPUT");
+        const int noinput = was && was[0];
+        ctrl_env("1", "", "", "");
+        s_test_gui_interactive = 0;
+        pad_expect_no_hold("with no window a person is at");
         ctrl_env(noinput ? "1" : "", "", "", "");
     }
     pad_late_teardown();
