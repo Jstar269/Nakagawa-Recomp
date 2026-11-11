@@ -663,10 +663,11 @@ class OutsideOutputRootInventoryTests(unittest.TestCase):
     fixed paths tools write. The runtime lists are derived from the source here, both
     ways. The source side is: a path default in src/rt/env_registry.h; an fopen of a
     literal name for writing and a `logs/`, `build/` or `place_game_here/` literal
-    anywhere in src/; and a bare file name with an output extension in src/rt. Comments
-    are skipped, and a literal split around an inttypes.h format macro is joined with the
-    macro's name in place. A name the code assembles from separate pieces at run time is
-    not seen. Each runtime row's switches must be registered variables, and a literal
+    anywhere in src/; and a file name with an output extension in src/rt, bare or after
+    `%s/`. Self-test output names and comments are skipped, and a literal split around an inttypes.h format macro is
+    joined with the macro's name in place. A name the code assembles from separate pieces
+    at run time is not seen, nor a literal default in code that env_registry.h does not
+    record. Each runtime row's switches must be registered variables, and a literal
     fopen'd for writing must be declared as written. The tools table is checked row by
     row against its tool's source, not derived. A written path inside the checkout must
     be gitignored, or a debug run under `make run` leaves a file that `git add -A` stages.
@@ -686,7 +687,8 @@ class OutsideOutputRootInventoryTests(unittest.TestCase):
     FOPEN_WRITE = re.compile(r'fopen\(\s*"([^"]+)"\s*,\s*"[wa]')
     ROOTED_LITERAL = re.compile(r'"((?:logs|build|place_game_here)/[^"]*)"')
     BARE_NAME = re.compile(
-        r'"([A-Za-z0-9][A-Za-z0-9_%.-]*\.(?:ppm|pgm|png|bin|csv|json|jsonl|txt|ngef|wav|flag|tmp))"')
+        r'"(?:%s/)?([A-Za-z0-9][A-Za-z0-9_%.-]*\.'
+        r'(?:ppm|pgm|png|bin|csv|json|jsonl|txt|ngef|wav|flag|tmp|mkv|bgr0|srt|nkcap))"')
     #: Comments, string literals and character literals, so a comment is dropped and a
     #: quote inside a literal does not end it.
     C_TOKEN = re.compile(
@@ -758,6 +760,8 @@ class OutsideOutputRootInventoryTests(unittest.TestCase):
                 patterns.append(cls.BARE_NAME)
             for pattern in patterns:
                 for literal in pattern.findall(text):
+                    if "selftest" in literal:  # a self-test's scratch output, in TEMP
+                        continue
                     literals.setdefault(literal, set()).add(relative)
             opened_for_writing.update(cls.FOPEN_WRITE.findall(text))
         defaults = {
