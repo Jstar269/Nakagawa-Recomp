@@ -131,6 +131,12 @@ const SrPauseHost *sr_sched_pause_host = NULL;
 void sr_audio_pause_enter(void) {{}}
 void sr_audio_pause_leave(void) {{}}
 int sr_audio_pause_script_ready(void) {{ return 1; }}
+/* No audio backend in this harness: Ace Mode's peak=limit is refused (driver.c never confirms it). */
+int sr_audio_set_true_peak_limiter(int on) {{ (void)on; return 0; }}
+void sr_audio_true_peak_stats(uint64_t *pushes_wide, uint64_t *frames_wide, uint64_t *frames_limited,
+                              double *min_gain) {{
+    (void)pushes_wide; (void)frames_wide; (void)frames_limited; (void)min_gain;
+}}
 uint32_t sr_newlib_malloc(uint32_t size, uint32_t guest_ra) {{
     (void)guest_ra;
     if (size > sizeof(g_module_start_arg)) return 0;
@@ -180,6 +186,7 @@ int sr_host_data_prepare(void) {{
 size_t sr_host_data_entry_count(void) {{ return 0; }}
 /* No SAS mixer in this harness: Ace Mode's sas=sinc is refused (driver.c never confirms it). */
 int sr_hle_sas_set_band_limited(int on) {{ (void)on; return 0; }}
+int sr_hle_sas_set_wide_mix(int on) {{ (void)on; return 0; }}
 /* No GE in this harness: finer patches (#2053) stay at the PSP's division. */
 int ge_patch_tess_init(int factor) {{ (void)factor; return 1; }}
 

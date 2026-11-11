@@ -67,6 +67,40 @@ static void cell_parse(void) {
         snprintf(spec, sizeof(spec), "%s;tier=ace;cull=on;cull=off", base);
         CHECK(ace_parse(spec, &c, why, sizeof(why)) == 0 && strcmp(why, "duplicate key") == 0, "a duplicate cull");
     }
+    /* peak (contract 10.22, #2137): optional, a missing key and peak=off are both off, peak=limit is
+       an Enhanced part (no tier=ace), it formats next to sas, and a line without it formats as before. */
+    {
+        static const char base[] = "v1;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=sinc;tess=off";
+        char spec[ACE_SPEC_MAX], out[ACE_SPEC_MAX];
+        CHECK(ace_parse(base, &c, why, sizeof(why)) == 1 && c.peak == 0, "a missing peak is off");
+        snprintf(spec, sizeof(spec), "%s;peak=off", base);
+        CHECK(ace_parse(spec, &c, why, sizeof(why)) == 1 && c.on && c.peak == 0, "peak=off is off");
+        CHECK(ace_format(&c, out, sizeof(out)) && strstr(out, "peak") == NULL, "off writes no peak key (%s)", out);
+        snprintf(spec, sizeof(spec), "%s;peak=limit", base);
+        CHECK(ace_parse(spec, &c, why, sizeof(why)) == 1 && c.on && c.peak == 1 && c.tier == ACE_TIER_ENHANCED,
+              "peak=limit in an Enhanced line (%s)", why);
+        CHECK(ace_format(&c, out, sizeof(out)) &&
+              strcmp(out, "v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;"
+                          "sas=sinc;peak=limit;tess=off") == 0,
+              "peak=limit formats next to sas (%s)", out);
+        AceConfig back;
+        CHECK(ace_parse(out, &back, why, sizeof(why)) == 1 && memcmp(&c, &back, sizeof(c)) == 0,
+              "peak=limit round trips (%s)", out);
+        snprintf(spec, sizeof(spec), "v1;peak=limit;tier=ace;af=0;text=off;readout=off;notice=off;wide=off;"
+                                     "smooth=off;sas=off;tess=off;cull=on");
+        CHECK(ace_parse(spec, &c, why, sizeof(why)) == 1 && c.peak == 1 && c.cull == 1 &&
+              ace_format(&c, out, sizeof(out)) && strstr(out, ";sas=off;peak=limit;tess=off;") != NULL &&
+              strcmp(out + strlen(out) - 8, ";cull=on") == 0,
+              "peak=limit anywhere in an Ace line formats next to sas, cull still last (%s)", out);
+        static const char *const bad[] = { "on", "Limit", "soft", "1", "limited" };
+        for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+            snprintf(spec, sizeof(spec), "%s;peak=%s", base, bad[i]);
+            CHECK(ace_parse(spec, &c, why, sizeof(why)) == 0 && strcmp(why, "bad value") == 0 && c.on == 0,
+                  "peak=%s is a bad value (%s)", bad[i], why);
+        }
+        snprintf(spec, sizeof(spec), "%s;peak=limit;peak=off", base);
+        CHECK(ace_parse(spec, &c, why, sizeof(why)) == 0 && strcmp(why, "duplicate key") == 0, "a duplicate peak");
+    }
     /* stick (contract 11.3.11): optional, a missing key is off, its value is the game's dead zone
        (1..126) in canonical decimal, it needs an Ace line, and a line without it formats as before. */
     {
@@ -220,7 +254,7 @@ static void cell_parse(void) {
 
     /* format and parse agree */
     char line[ACE_SPEC_MAX];
-    AceConfig a = { 1, 4, 0, 1, 0, 0, 0, ACE_TIER_ENHANCED, ACE_SAS_OFF, 0, 0, 0, 0 }, b;
+    AceConfig a = { 1, 4, 0, 1, 0, 0, 0, ACE_TIER_ENHANCED, ACE_SAS_OFF, 0, 0, 0, 0, 0 }, b;
     CHECK(ace_format(&a, line, sizeof(line)) && ace_parse(line, &b, NULL, 0) &&
           memcmp(&a, &b, sizeof(a)) == 0, "format round trip (%s)", line);
     CHECK(ace_format(&a, line, 8) == 0 && line[0] == '\0', "format refuses a short buffer");
@@ -1367,8 +1401,10 @@ static void cell_report_worst(void) {
     char reason[128];
     memset(reason, 'r', sizeof(reason));
     reason[sizeof(reason) - 1] = '\0';
-    CHECK(ace_init_spec("v1;tier=ace;af=16;text=on;readout=on;notice=on;wide=fill;smooth=x2;sas=sinc;tess=off;stick=126;load=fast;cull=on",
+    CHECK(ace_init_spec("v1;tier=ace;af=16;text=on;readout=on;notice=on;wide=fill;smooth=x2;sas=sinc;"
+                        "peak=limit;tess=off;stick=126;load=fast;cull=on",
                         NULL), "the longest line was refused");
+    ace_set_peak_stats(UINT64_MAX, UINT64_MAX, UINT64_MAX, 1e-9);
     ace_set_af_effective(8, NULL);
     ace_note_af_failure();
     ace_set_cull_untracked(1ul);
@@ -1389,7 +1425,8 @@ static void cell_report_worst(void) {
               strstr(json, "\"af_sampler_failures\"") && strstr(json, "\"presents\"") &&
               strstr(json, "\"added_delay_ms\"") && strstr(json, "\"smooth_motion\"") &&
               strstr(json, "\"smooth_aux\"") && strstr(json, "\"present_interval_ms\"") &&
-              strstr(json, "\"samples_remapped\"") && strstr(json, "\"load_paced\""),
+              strstr(json, "\"samples_remapped\"") && strstr(json, "\"load_paced\"") &&
+              strstr(json, "\"frames_limited\""),
           "a report with every block:\n%s", json);
     if (!len) return;
     size_t worst = len;

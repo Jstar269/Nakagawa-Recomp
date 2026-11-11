@@ -29,7 +29,7 @@ static int value_on_off(const char *v, int *out) {
    nothing: tier is the one key a line may leave out (an Enhanced run). */
 typedef enum {
     ACE_KEY_AF, ACE_KEY_TEXT, ACE_KEY_READOUT, ACE_KEY_NOTICE, ACE_KEY_WIDE, ACE_KEY_SMOOTH,
-    ACE_KEY_SAS, ACE_KEY_TESS, ACE_KEY_TIER, ACE_KEY_STICK, ACE_KEY_LOAD, ACE_KEY_CULL
+    ACE_KEY_SAS, ACE_KEY_TESS, ACE_KEY_TIER, ACE_KEY_STICK, ACE_KEY_LOAD, ACE_KEY_CULL, ACE_KEY_PEAK
 } AceKey;
 
 static const struct {
@@ -44,6 +44,7 @@ static const struct {
     {"wide", ACE_KEY_WIDE, 1},
     {"smooth", ACE_KEY_SMOOTH, 1},
     {"sas", ACE_KEY_SAS, 1},
+    {"peak", ACE_KEY_PEAK, 0},
     {"tess", ACE_KEY_TESS, 1},
     {"tier", ACE_KEY_TIER, 0},
     {"stick", ACE_KEY_STICK, 0},
@@ -153,6 +154,13 @@ int ace_parse(const char *spec, AceConfig *out, char *why, size_t why_cap) {
                     why_set(why, why_cap, "sas is not part of this build"); return 0;
                 }
                 break;
+            case ACE_KEY_PEAK:
+                if (strcmp(v, "off") == 0) { c.peak = 0; ok = 1; }
+                else if (strcmp(v, "limit") == 0) { c.peak = 1; ok = 1; }
+                if (ok && c.peak && !ACE_HAS_PEAK) {
+                    why_set(why, why_cap, "peak is not part of this build"); return 0;
+                }
+                break;
             case ACE_KEY_TESS:
                 if (strcmp(v, "off") == 0) { c.tess = 0; ok = 1; }
                 else if (strcmp(v, "2") == 0 || strcmp(v, "3") == 0 || strcmp(v, "4") == 0) {
@@ -194,11 +202,15 @@ int ace_format(const AceConfig *c, char *out, size_t cap) {
     int n;
     if (!out || !cap) return 0;
     if (!c || !c->on) n = snprintf(out, cap, "off");
-    else n = snprintf(out, cap, "v1;tier=%s;af=%d;text=%s;readout=%s;notice=%s;wide=%s;smooth=%s;"
-                                "sas=%s;tess=%s",
-                      tier_word(c->tier), c->af, on_off(c->text), on_off(c->readout),
-                      on_off(c->notice), wide_word(c->wide), smooth_word(c->smooth),
-                      sas_word(c->sas), tess_word(c->tess));
+    else {
+        /* peak sits next to sas and is written only when on (a missing peak is off), so every
+         * line without it keeps its text. */
+        n = snprintf(out, cap, "v1;tier=%s;af=%d;text=%s;readout=%s;notice=%s;wide=%s;smooth=%s;"
+                               "sas=%s%s;tess=%s",
+                     tier_word(c->tier), c->af, on_off(c->text), on_off(c->readout),
+                     on_off(c->notice), wide_word(c->wide), smooth_word(c->smooth),
+                     sas_word(c->sas), c->peak ? ";peak=limit" : "", tess_word(c->tess));
+    }
     /* Written only when on: a missing stick is off, so every line without it keeps its text. */
     if (n > 0 && (size_t)n < cap && c && c->on && c->stick) {
         const int m = snprintf(out + n, cap - (size_t)n, ";stick=%d", c->stick);
@@ -237,9 +249,11 @@ static unsigned s_load_run;          /* consecutive logic updates with a skip, t
 static unsigned s_load_run_max;
 static int s_load_update_skipped;    /* a wait was skipped since the last update began */
 static int s_load_paced;             /* the guard fired: nothing is skipped for the rest of the run */
+static uint64_t s_peak_pushes, s_peak_frames_wide, s_peak_frames_limited;   /* peak=limit's totals */
+static double s_peak_min_gain = 1.0;
 
 static const char *const k_feature_key[ACE_FEATURE_COUNT] = {
-    "af", "text", "readout", "notice", "wide", "smooth", "sas", "tess", "stick", "load", "cull"
+    "af", "text", "readout", "notice", "wide", "smooth", "sas", "tess", "stick", "load", "cull", "peak"
 };
 
 /* The run's observation state. */
@@ -309,6 +323,8 @@ int ace_init_spec(const char *spec, const char *report_path) {
     s_load_run_max = 0;
     s_load_update_skipped = 0;
     s_load_paced = 0;
+    s_peak_pushes = s_peak_frames_wide = s_peak_frames_limited = 0;
+    s_peak_min_gain = 1.0;
     s_af_device = 0;
     s_report_path[0] = '\0';
     snprintf(s_spec, sizeof(s_spec), "off");
@@ -336,6 +352,9 @@ int ace_init_spec(const char *spec, const char *report_path) {
         fprintf(stderr, "ACE_MODE: load fast (a title's declared loading waits return at once; "
                         "guest timing changes)\n");
     if (s_req.cull) fprintf(stderr, "ACE_MODE: cull on (a title's own culling is widened to the wings)\n");
+    if (s_req.peak)
+        fprintf(stderr, "ACE_MODE: peak limit (the host hears SAS mixes unsaturated, through a true-peak "
+                        "limiter; the guest's SAS bytes are unchanged)\n");
     return 1;
 }
 
@@ -364,6 +383,7 @@ void ace_feature_unavailable(AceFeature feature, const char *reason) {
     case ACE_FEATURE_SAS: s_eff.sas = 0; break;
     case ACE_FEATURE_LOAD: s_eff.load = 0; break;
     case ACE_FEATURE_CULL: s_eff.cull = 0; break;
+    case ACE_FEATURE_PEAK: s_eff.peak = 0; break;
     default: s_eff.tess = 0; break;
     }
     fprintf(stderr, "ACE_MODE: %s unavailable (%s)\n", k_feature_key[feature], s_unavailable[feature]);
@@ -371,6 +391,14 @@ void ace_feature_unavailable(AceFeature feature, const char *reason) {
 
 void ace_set_cull_untracked(unsigned long n) {
     if (g_ace_on) s_cull_untracked = n;
+}
+
+void ace_set_peak_stats(uint64_t pushes_wide, uint64_t frames_wide, uint64_t frames_limited, double min_gain) {
+    if (!g_ace_on) return;
+    s_peak_pushes = pushes_wide;
+    s_peak_frames_wide = frames_wide;
+    s_peak_frames_limited = frames_limited;
+    s_peak_min_gain = min_gain > 0.0 && min_gain < 1.0 ? min_gain : 1.0;
 }
 
 /* ---- stick dead-zone remap ------------------------------------------------------------------ */
@@ -507,6 +535,7 @@ size_t ace_feature_words(char *out, size_t cap) {
     if (s_eff.cull) used = words_add(out, cap, used, "wider culling");
     if (s_eff.smooth) used = words_add(out, cap, used, "smooth motion");
     if (s_eff.sas) used = words_add(out, cap, used, "clean pitched sound");
+    if (s_eff.peak) used = words_add(out, cap, used, "unclipped sound");
     if (s_eff.tess) {
         char tess[32];
         snprintf(tess, sizeof(tess), "%dx patches", s_eff.tess);
@@ -1105,6 +1134,12 @@ size_t ace_report_json(char *out, size_t cap) {
                             s_load_paced ? "true" : "false");
     if (s_req.cull) ACE_PUT("  \"cull\": %s,\n  \"cull_untracked\": %lu,\n",
                             s_eff.cull ? "true" : "false", s_cull_untracked);
+    if (s_req.peak) ACE_PUT("  \"peak\": {\"on\": %s, \"pushes_wide\": %llu, \"frames_wide\": %llu, "
+                            "\"frames_limited\": %llu, \"min_gain\": %.4f},\n",
+                            s_eff.peak ? "true" : "false", (unsigned long long)s_peak_pushes,
+                            (unsigned long long)s_peak_frames_wide,
+                            (unsigned long long)s_peak_frames_limited,
+                            s_peak_min_gain);
     ACE_PUT("  \"unavailable\": {");
     int first = 1;
     for (int f = 0; f < ACE_FEATURE_COUNT; f++) {
@@ -1195,11 +1230,11 @@ void ace_finish(void) {
     if (!g_ace_on) return;
     /* A feature that is on but never ran: its renderer or presenter did not start. */
     static const int has[ACE_FEATURE_COUNT] = { 1, 1, 1, 1, ACE_HAS_WIDE, ACE_HAS_SMOOTH, ACE_HAS_SAS, ACE_HAS_TESS,
-                                                ACE_HAS_STICK, ACE_HAS_LOAD, ACE_HAS_CULL };
+                                                ACE_HAS_STICK, ACE_HAS_LOAD, ACE_HAS_CULL, ACE_HAS_PEAK };
     const int on[ACE_FEATURE_COUNT] = { s_eff.af > 0, s_eff.text, s_eff.readout, s_eff.notice,
                                         s_eff.wide, s_eff.smooth, s_eff.sas, s_eff.tess, s_eff.stick,
                                         s_eff.load,
-                                        s_eff.cull };
+                                        s_eff.cull, s_eff.peak };
     for (int f = 0; f < ACE_FEATURE_COUNT; f++) {
         if (has[f] && on[f] && !s_confirmed[f])
             ace_feature_unavailable((AceFeature)f, f == ACE_FEATURE_CULL
@@ -1208,6 +1243,8 @@ void ace_finish(void) {
                 ? "did not run: no live stick sample left its rest position in analog mode"
                 : f == ACE_FEATURE_LOAD
                 ? "did not run: this title's build declares no load part, or none of its waits was reached"
+                : f == ACE_FEATURE_PEAK
+                ? "did not run: this build has no SAS mixer or no host audio backend"
                 : "did not run: its renderer or presenter did not start");
     }
     size_t len = ace_report_json(json, sizeof(json));

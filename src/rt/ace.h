@@ -11,10 +11,10 @@
  *     SR_ACE=v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off
  *
  * tier (enhanced or ace) only names the run, in the badge, the pause menu and the stamps; a
- * line without it is an Enhanced run. stick, load and cull are the other keys a line may leave
- * out: a missing stick, load or cull reads as off (section 11.2 item 2); stick has no off word,
- * its value is the game's dead zone (1..126), and a line that writes load=off or cull=off means
- * the same as none; stick=<counts>, load=fast and cull=on need tier=ace. Every other
+ * line without it is an Enhanced run. peak, stick, load and cull are the other keys a line may
+ * leave out: a missing peak, stick, load or cull reads as off (section 11.2 item 2); stick has no
+ * off word, its value is the game's dead zone (1..126), and a line that writes peak=off, load=off
+ * or cull=off means the same as none; stick=<counts>, load=fast and cull=on need tier=ace. Every other
  * key is required in v1, in any order, each once. A key or value for a feature this build
  * does not carry (smooth=match) is still parsed and refused. Anything else (an unknown version, key
  * or value, a duplicate, a missing key, an empty field) refuses the whole line: Ace is off for
@@ -25,7 +25,8 @@
  * are today's, and nothing is printed. With Ace on, guest logic and the guest timing model are
  * unchanged; host presentation changes (and, with sas=sinc, the mixed SAS sample values; with
  * tess=2..4, the pixels of every triangle patch and the GE timing model's clocks under
- * SR_GE_TIMING=1; with load=fast, the guest timing of a title's declared loading waits), and
+ * SR_GE_TIMING=1; with load=fast, the guest timing of a title's declared loading waits; with
+ * peak=limit, only the host's sound: the guest's SAS bytes stay the PSP's), and
  * the run says so ("ACE_MODE: on (...)" at start, an exit line, and the flight recorder's
  * runtime.enhancements block).
  *
@@ -51,6 +52,7 @@
 #define ACE_HAS_STICK 1         /* stick=<counts>: start the host stick past the game's dead zone (11.3.11) */
 #define ACE_STICK_COUNTS_MAX 126 /* stick=1..126: the square dead zone, in the game's centred counts */
 #define ACE_HAS_LOAD 1          /* load=fast: a title's declared loading waits return at once (11.3.10) */
+#define ACE_HAS_PEAK 1          /* peak=limit: SAS mixes unsaturated through a true-peak limiter (#2137, 10.22) */
 
 typedef enum { ACE_WIDE_OFF = 0, ACE_WIDE_FILL = 1 } AceWide;
 typedef enum { ACE_SMOOTH_OFF = 0, ACE_SMOOTH_MATCH = 1, ACE_SMOOTH_X2 = 2 } AceSmooth;
@@ -78,6 +80,8 @@ typedef struct {
     int stick;       /* stick=<counts>: 0 off, else the square stick dead zone the title ignores, 1..126
                         (guest-visible, 11.3.11) */
     int load;        /* load=fast: the waits a title's load part declares are skipped (guest timing, 11.3.10) */
+    int peak;        /* peak=limit: the host hears SAS mixes unsaturated, through a true-peak limiter
+                        (host-only, 10.22) */
 } AceConfig;
 
 typedef enum {
@@ -92,6 +96,7 @@ typedef enum {
     ACE_FEATURE_STICK,
     ACE_FEATURE_LOAD,
     ACE_FEATURE_CULL,
+    ACE_FEATURE_PEAK,
     ACE_FEATURE_COUNT
 } AceFeature;
 
@@ -129,6 +134,10 @@ void ace_feature_unavailable(AceFeature feature, const char *reason);
 void ace_confirm(AceFeature feature);
 /* Matrix uses the culling hook left alone (its table was full): the report's cull_untracked. */
 void ace_set_cull_untracked(unsigned long n);
+/* peak=limit's totals for the report (driver.c reads them from the audio backend at exit): pushes
+ * that carried a SAS sum past 16 bits, the frames of those that differ from the guest's saturated
+ * copy, the output frames the limiter turned down, and its lowest gain (1 when it never acted). */
+void ace_set_peak_stats(uint64_t pushes_wide, uint64_t frames_wide, uint64_t frames_limited, double min_gain);
 
 /* ---- stick dead-zone remap (stick=<counts>, contract 11.3.11) ------------------------------- */
 
