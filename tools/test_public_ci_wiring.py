@@ -2345,7 +2345,7 @@ class CoverageWiringTests(unittest.TestCase):
         self.assertIn('gcov_dir="$RUNNER_TEMP/c-coverage-gcov"', text)
         # The tests' own sources and generated C stay out of the number, and an empty set
         # of notes or reports fails the step instead of uploading nothing.
-        self.assertIn("0:Source:(tests/|fixtures/|build/|src/player/player_ui_test\\.c$|.*_selftest\\.(c|inc)$)",
+        self.assertIn("0:Source:(tests/|fixtures/|build/|src/player/player_ui_test\\.c$|.*selftest\\.(c|cpp|inc)$)",
                       text)
         self.assertIn('test "${#notes[@]}" -gt 0', text)
         self.assertIn('test "${#reports[@]}" -gt 0', text)

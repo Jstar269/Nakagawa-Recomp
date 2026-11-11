@@ -2093,7 +2093,7 @@ jobs:
               mv -- "$report" "$gcov_dir/${obj//\//#}##$report"
             done
           done
-          { grep -l -m1 -E '^ +-: +0:Source:(tests/|fixtures/|build/|src/player/player_ui_test\.c$|.*_selftest\.(c|inc)$)' "$gcov_dir"/*.gcov || true; } \
+          { grep -l -m1 -E '^ +-: +0:Source:(tests/|fixtures/|build/|src/player/player_ui_test\.c$|.*selftest\.(c|cpp|inc)$)' "$gcov_dir"/*.gcov || true; } \
             | xargs -r rm -f --
           reports=("$gcov_dir"/*.gcov)
           test "${#reports[@]}" -gt 0

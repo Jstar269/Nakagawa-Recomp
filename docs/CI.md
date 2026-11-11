@@ -1077,9 +1077,9 @@ whenever their jobs run; neither can change a gate's result.
   reads it: a failure shows red on this job and on the run without blocking anything. It stays
   off pull requests, landing batches and merge groups because the
   [Trusted CI verdict](#trusted-ci-verdict) is computed when the whole CI run completes, and
-  this job outlasts the required jobs. Run 43089041907 measured it at 17.6 minutes before it
-  reached the GPU self-tests' end, against 18.5 minutes for the longest required job, so on
-  every pull request it would hold the verdict back. Between measured commits Codecov carries
+  this job outlasts the required jobs: in run 43094169097 it took 24.6 minutes and the last
+  required job ended after 18.0, so on every pull request it would hold the verdict back
+  (figures below). Between measured commits Codecov carries
   the `c` flag forward (`carryforward: true`), so a pull request's report shows the last
   nightly figure. `native_tools`' gates run unprofiled and no longer wait for a measurement. Its
   setup steps are `native_tools`' own, byte for byte (packages through `NK_APT_INSTALL`, the
@@ -1104,7 +1104,7 @@ whenever their jobs run; neither can change a gate's result.
   as not executed. Notes files of the mutants built inside measured targets (every path with
   `mutant` in it) are skipped: lines only a mutant define compiles would otherwise count as
   covered. `-r` keeps system headers out, and reports for the tests' own sources (`tests/`,
-  `fixtures/`, `*_selftest.c`, `*_selftest.inc`, `src/player/player_ui_test.c`) and for C
+  `fixtures/`, `*selftest.c`, `*selftest.cpp`, `*selftest.inc`, `src/player/player_ui_test.c`) and for C
   generated into `build/` are dropped, as `tools/test_*.py` is for Python. Everything is
   uploaded once, under `flags: c`. A failure in any earlier step skips the upload, so a
   partial run uploads nothing and the `c` flag carries the last complete report forward.
@@ -1147,6 +1147,34 @@ whenever their jobs run; neither can change a gate's result.
 
   The Windows-only self-tests run in `windows_runtime` and are not measured. Self-tests that
   need a real GPU (the FSR 3 frame generation cells beyond `G-R`) run in no hosted job.
+
+**Figures before and after #2394.** Codecov's totals per flag, from real runs:
+
+| Flag | Before: `main` at `8257cfc27` (run 43078241056) | After: `0889c5d90` (manual run 43094169097) |
+| --- | --- | --- |
+| Combined | 50.35 % of 141,165 lines in 355 files | 61.82 % of 234,377 lines in 597 files |
+| `python` | 80.59 % of 76,108 lines in 194 files | 80.62 % of 76,108 lines in 194 files |
+| `c` | 14.98 % of 65,061 lines in 161 files | 52.79 % of 158,269 lines in 403 files |
+| `c`, `src/` only | 15.48 % of 61,555 lines | 59.11 % of 131,899 lines |
+
+- **More lines, not only more hits.** The `c` flag now counts every file the self-tests
+  compile, so files no target built under `CFLAGS` before (the player, `src/core`, and the
+  vendored libraries the player tests link) enter the denominator. Vendored code under
+  `third_party/` is 25,875 of the lines, at 19.69 % (libchdr, rcheevos and dr_libs are linked
+  whole and exercised in part). The `src/` row leaves it out, and is the figure for the
+  project's own code.
+- **One correction after the run.** Run 43094169097 still counted `src/ref/selftest.cpp`
+  (495 lines at 98.99 %), the C++ interpreter's test source, which the filter now drops. From
+  the same report without it, `c` is 52.65 % and combined 61.75 %; the `src/` row already
+  leaves it out.
+
+**Wall time.** `native_tools`' core part took 12 min 33 s in run 43078241056, 4 min 46 s of
+it the coverage build. Without that build it took 6 min 15 s in run 43089041907 and 8 min 10 s
+in run 43094169097. `c_coverage` took 24 min 35 s in run 43094169097:
+- 2 min 30 s of setup, 2 min 3 s of it rebuilding SDL3 and SDL3_ttf, because a changed
+  workflow file misses their cache;
+- 21 min 32 s measuring (native core suite 6 min 36 s, GPU self-tests 7 min 3 s);
+- 16 s for gcov collection and 14 s for the upload.
 
 Both reports are uploaded with `codecov/codecov-action` (pinned by commit SHA)
 under `flags: python` and `flags: c`, authenticated with the job's OIDC identity
