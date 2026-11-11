@@ -4119,10 +4119,10 @@ static int ms_cell_host_exists(const char *guest) {
 static void test_io_memory_stick_cells_through_syscall(void) {
     static const char file_guest[] = "ms0:/NAKAGAWA_IO_1380.BIN";
     static const char missing_guest[] = "ms0:/NAKAGAWA_IO_1380_MISSING.BIN";
-    enum { EINVAL = 0x80010016u, ENOENT = 0x80010002u, EEXIST = 0x80010011u,
-           BADF = 0x80020323u, SIZE = 16u };
-    uint8_t pattern[SIZE];
-    for (uint32_t i = 0; i < SIZE; i++) pattern[i] = (uint8_t)(0x40u + i);
+    enum { MS_EINVAL = 0x80010016u, MS_ENOENT = 0x80010002u, MS_EEXIST = 0x80010011u,
+           MS_BADF = 0x80020323u, MS_SIZE = 16u };
+    uint8_t pattern[MS_SIZE];
+    for (uint32_t i = 0; i < MS_SIZE; i++) pattern[i] = (uint8_t)(0x40u + i);
     char host[512];
     fd_host_path(host, sizeof(host), file_guest);
     nk_remove_utf8(host);
@@ -4133,37 +4133,37 @@ static void test_io_memory_stick_cells_through_syscall(void) {
     /* io-eof-missing: write-only, read-write, read-only and write-only with PSP_O_TRUNC. */
     static const uint32_t no_create[] = {0x0002u, 0x0003u, 0x0001u, 0x0402u};
     for (size_t i = 0; i < sizeof(no_create) / sizeof(no_create[0]); i++)
-        expect(ms_cell_path_call(MS_CELL_OPEN, missing_guest, no_create[i]) == ENOENT,
+        expect(ms_cell_path_call(MS_CELL_OPEN, missing_guest, no_create[i]) == MS_ENOENT,
                "a missing Memory Stick file opened without PSP_O_CREAT is 0x80010002");
-    expect(ms_cell_path_call(MS_CELL_GETSTAT, missing_guest, 0u) == ENOENT &&
+    expect(ms_cell_path_call(MS_CELL_GETSTAT, missing_guest, 0u) == MS_ENOENT &&
                !ms_cell_host_exists(missing_guest),
            "an open without PSP_O_CREAT creates nothing");
 
     /* io-seek-ms-write-rdonly-creat: PSP_O_RDONLY | PSP_O_CREAT on a missing file. */
     const uint32_t rdonly_creat = ms_cell_path_call(MS_CELL_OPEN, missing_guest, 0x0201u);
-    expect(rdonly_creat == EINVAL,
+    expect(rdonly_creat == MS_EINVAL,
            "PSP_O_RDONLY | PSP_O_CREAT on a missing Memory Stick file is 0x80010016");
     if (rdonly_creat < 64u) (void)ms_cell_fd_call(MS_CELL_CLOSE, rdonly_creat, 0u, 0u);
-    expect(ms_cell_path_call(MS_CELL_GETSTAT, missing_guest, 0u) == ENOENT &&
+    expect(ms_cell_path_call(MS_CELL_GETSTAT, missing_guest, 0u) == MS_ENOENT &&
                !ms_cell_host_exists(missing_guest),
            "the refused read-only create creates nothing");
     fd_host_path(host, sizeof(host), missing_guest);
     nk_remove_utf8(host);
 
     /* The probe-owned 16-byte file, made by an exclusive create. */
-    fd_guest_copy(MS_CELL_DATA, pattern, SIZE);
+    fd_guest_copy(MS_CELL_DATA, pattern, MS_SIZE);
     uint32_t fd = ms_cell_path_call(MS_CELL_OPEN, file_guest, 0x0803u);  /* RDWR|CREAT|EXCL */
     expect(fd >= 3u && fd < 64u, "an exclusive create of a new Memory Stick file opens");
     if (fd < 3u || fd >= 64u) return;
-    expect(ms_cell_fd_call(MS_CELL_WRITE, fd, MS_CELL_DATA, SIZE) == SIZE &&
+    expect(ms_cell_fd_call(MS_CELL_WRITE, fd, MS_CELL_DATA, MS_SIZE) == MS_SIZE &&
                ms_cell_fd_call(MS_CELL_CLOSE, fd, 0u, 0u) == 0u,
            "the probe file takes its 16 bytes");
 
     /* io-excl-existing: with and without PSP_O_TRUNC, the file is left as it was. */
     fd_host_path(host, sizeof(host), file_guest);
-    expect(ms_cell_path_call(MS_CELL_OPEN, file_guest, 0x0803u) == EEXIST &&
-               ms_cell_path_call(MS_CELL_OPEN, file_guest, 0x0E03u) == EEXIST &&
-               fd_host_bytes_equal(host, pattern, SIZE),
+    expect(ms_cell_path_call(MS_CELL_OPEN, file_guest, 0x0803u) == MS_EEXIST &&
+               ms_cell_path_call(MS_CELL_OPEN, file_guest, 0x0E03u) == MS_EEXIST &&
+               fd_host_bytes_equal(host, pattern, MS_SIZE),
            "an exclusive create of an existing file is 0x80010011 and leaves it unchanged");
 
     /* io-seek-ms-write-rdonly: a write through a PSP_O_RDONLY descriptor. */
@@ -4172,16 +4172,16 @@ static void test_io_memory_stick_cells_through_syscall(void) {
     if (fd < 3u || fd >= 64u) return;
     static const uint8_t other[4] = {0xd0u, 0xd1u, 0xd2u, 0xd3u};
     fd_guest_copy(MS_CELL_BACK, other, sizeof(other));
-    expect(ms_cell_fd_call(MS_CELL_WRITE, fd, MS_CELL_BACK, 4u) == BADF,
+    expect(ms_cell_fd_call(MS_CELL_WRITE, fd, MS_CELL_BACK, 4u) == MS_BADF,
            "a write through a PSP_O_RDONLY Memory Stick descriptor is 0x80020323");
     expect(ms_cell_fd_call(MS_CELL_LSEEK32, fd, 0u, 1u) == 0u,
            "the refused write leaves the position");
     /* io-eof-seek-negative-rdonly: SEEK_SET -1 on the read-only descriptor. */
-    expect(ms_cell_seek64(fd, -1, 0u, &high) == EINVAL && high == 0xffffffffu &&
+    expect(ms_cell_seek64(fd, -1, 0u, &high) == MS_EINVAL && high == 0xffffffffu &&
                ms_cell_fd_call(MS_CELL_LSEEK32, fd, 0u, 1u) == 0u,
            "a read-only Memory Stick seek to -1 is 0x80010016 and keeps the position");
     expect(ms_cell_fd_call(MS_CELL_CLOSE, fd, 0u, 0u) == 0u &&
-               fd_host_bytes_equal(host, pattern, SIZE),
+               fd_host_bytes_equal(host, pattern, MS_SIZE),
            "the refused write left the file unchanged");
 
     fd = ms_cell_path_call(MS_CELL_OPEN, file_guest, 0x0003u);   /* RDWR */
@@ -4195,18 +4195,18 @@ static void test_io_memory_stick_cells_through_syscall(void) {
     for (size_t i = 0; i < sizeof(before_start) / sizeof(before_start[0]); i++) {
         expect(ms_cell_fd_call(MS_CELL_LSEEK32, fd, 8u, 0u) == 8u &&
                    ms_cell_seek64(fd, before_start[i].offset, before_start[i].whence, &high) ==
-                       EINVAL &&
+                       MS_EINVAL &&
                    high == 0xffffffffu && ms_cell_fd_call(MS_CELL_LSEEK32, fd, 0u, 1u) == 8u,
                "a Memory Stick seek before the start is 0x80010016 and keeps the position");
     }
-    expect(ms_cell_fd_call(MS_CELL_LSEEK32, fd, 0xffffffffu, 0u) == EINVAL &&
+    expect(ms_cell_fd_call(MS_CELL_LSEEK32, fd, 0xffffffffu, 0u) == MS_EINVAL &&
                ms_cell_fd_call(MS_CELL_LSEEK32, fd, 0u, 1u) == 8u,
            "sceIoLseek32 to -1 on the Memory Stick is 0x80010016 and keeps the position");
 
     /* io-eof-write-past: a seek to 0x20 leaves the size at 16; a 4-byte write there makes the
      * position and the size 0x24 and reads back at 0x20 (the gap's bytes are not asserted). */
     expect(ms_cell_fd_call(MS_CELL_LSEEK32, fd, 0x20u, 0u) == 0x20u &&
-               ms_cell_seek64(fd, 0, 2u, &high) == SIZE && high == 0u &&
+               ms_cell_seek64(fd, 0, 2u, &high) == MS_SIZE && high == 0u &&
                ms_cell_fd_call(MS_CELL_LSEEK32, fd, 0x20u, 0u) == 0x20u,
            "a Memory Stick seek past the end succeeds and leaves the size");
     expect(ms_cell_fd_call(MS_CELL_WRITE, fd, MS_CELL_BACK, 4u) == 4u &&
@@ -4228,7 +4228,7 @@ static void test_io_memory_stick_cells_through_syscall(void) {
     expect(ms_cell_seek64(fd, 0xffffffffll, 0u, &high) == 0xffffffffu && high == 0u,
            "a Memory Stick seek to 0xFFFFFFFF is accepted");
     expect(ms_cell_fd_call(MS_CELL_LSEEK32, fd, 8u, 0u) == 8u &&
-               ms_cell_seek64(fd, 0x100000000ll, 0u, &high) == EINVAL &&
+               ms_cell_seek64(fd, 0x100000000ll, 0u, &high) == MS_EINVAL &&
                high == 0xffffffffu && ms_cell_fd_call(MS_CELL_LSEEK32, fd, 0u, 1u) == 8u,
            "a Memory Stick seek to 0x100000000 is 0x80010016 and keeps the position");
 
