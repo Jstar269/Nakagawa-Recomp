@@ -46,9 +46,12 @@ format.
 `python tools/psp_oracle/run_psplink.py --ge-corpus-write RUN_REPORT...` writes a probe run from
 the runner's report of a `ge-raster`, `ge-weight` or `ge-rtt` launch. It takes only a qualified,
 acceptance-eligible `PSP_HARDWARE` envelope with no blockers whose raw result is a complete stream
-with every record `PASS` (and, for `ge-raster`, whose reported digests match their rows). It stores
-that raw result as `ge-corpus/<test id>-<commit>.txt` in the private results directory, and it
-writes the corpus only when the gate then reports the run `MEASURED`.
+with every record `PASS` (and, for `ge-raster`, whose reported digests match their rows), and whose
+model, firmware, source commit and PRX SHA-256 are the envelope's. It checks every report before it
+writes anything. It stores each raw result as `ge-corpus/<test id>-<first 12 digits of the
+commit>.txt` in the private results directory and never replaces a record with different bytes. It
+writes the corpus only when the gate then refuses nothing and reports each written run `MEASURED`;
+otherwise it removes the records it created.
 
 Run `python tools/psp_oracle/run_psplink.py --ge-corpus-gate` to validate the corpus and report each
 case and probe run. A case is `MEASURED` only when its source tier is `PSP_HARDWARE`, the oracle

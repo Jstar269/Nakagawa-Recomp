@@ -1219,7 +1219,9 @@ class GeCorpusGateTests(unittest.TestCase):
     def _rtt_runner_report(scratch: Path, raw: str, **changes: Any) -> Path:
         envelope = {"CASE_ID": "ge-rtt", "EVIDENCE_CLASS": "PSP_HARDWARE", "ACCEPTANCE_ELIGIBLE": True,
                     "QUALIFICATION_STATUS": "QUALIFIED", "ACCEPTANCE_BLOCKERS": [],
-                    "PHYSICAL_MODEL_LABEL": "PSP-3000", "RAW_RESULT": raw, **changes}
+                    "PHYSICAL_MODEL_LABEL": "PSP-3000", "FW": "6.61-ARK",
+                    "SOURCE_COMMIT": MEASURED_COMMIT, "BINARY_SHA256": MEASURED_SHA,
+                    "RAW_RESULT": raw, **changes}
         path = scratch / "runner.json"
         path.write_text(json.dumps({"envelopes": [{"CASE_ID": "transport-write"}, envelope]}),
                         encoding="utf-8")
@@ -1284,8 +1286,11 @@ class GeCorpusGateTests(unittest.TestCase):
                     ({"QUALIFICATION_STATUS": "UNQUALIFIED"}, raw, "acceptance-eligible"),
                     ({"ACCEPTANCE_BLOCKERS": ["stale log"]}, raw, "acceptance-eligible"),
                     ({"EVIDENCE_CLASS": "UNQUALIFIED_CAPTURE"}, raw, "acceptance-eligible"),
-                    ({"PHYSICAL_MODEL_LABEL": "PSP-2000"}, raw, "model label"),
-                    ({}, partial, "PSP-GE-RTT-001"), ({}, failed, "all PASS")):
+                    ({"PHYSICAL_MODEL_LABEL": "PSP-2000"}, raw, "PHYSICAL_MODEL_LABEL"),
+                    ({"FW": "6.60"}, raw, "envelope's FW"),
+                    ({"SOURCE_COMMIT": "c" * 40}, raw, "envelope's SOURCE_COMMIT"),
+                    ({"BINARY_SHA256": "c" * 64}, raw, "envelope's BINARY_SHA256"),
+                    ({}, partial, "stream incomplete"), ({}, failed, "all PASS")):
                 with self.subTest(changes=changes, needle=needle):
                     with self.assertRaises(ProtocolError) as caught:
                         write_ge_corpus_probe_runs(
@@ -1293,6 +1298,46 @@ class GeCorpusGateTests(unittest.TestCase):
                             [self._rtt_runner_report(scratch, text, **changes)], scratch / "results")
                     self.assertIn(needle, str(caught.exception))
             self.assertEqual(corpus_path.read_text(encoding="utf-8"), before)
+            self.assertFalse((scratch / "results").exists())
+
+    def test_a_refused_write_keeps_the_records_already_there(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ge-corpus-write-") as scratch_text:
+            scratch = Path(scratch_text)
+            results = scratch / "results"
+            corpus_path = self._scratch_corpus(scratch)
+            schema_path = self.root / "assets" / "ge_corpus.schema.json"
+            raw = self._rtt_stream()
+            write_ge_corpus_probe_runs(
+                corpus_path, schema_path, [self._rtt_runner_report(scratch, raw)], results)
+            written = corpus_path.read_text(encoding="utf-8")
+            record = results / "ge-corpus" / f"PSP-GE-RTT-001-{MEASURED_COMMIT[:12]}.txt"
+            # The same commit with other words would replace the record behind a measured run.
+            other = scratch / "other"
+            other.mkdir()
+            with self.assertRaisesRegex(ProtocolError, "already holds a different result record"):
+                write_ge_corpus_probe_runs(
+                    corpus_path, schema_path,
+                    [self._rtt_runner_report(other, self._rtt_stream(word=1))], results)
+            self.assertEqual(record.read_text(encoding="utf-8"), raw)
+            self.assertEqual(corpus_path.read_text(encoding="utf-8"), written)
+            # Rewriting the identical run is allowed and leaves both in place.
+            write_ge_corpus_probe_runs(
+                corpus_path, schema_path, [self._rtt_runner_report(scratch, raw)], results)
+            self.assertEqual(corpus_path.read_text(encoding="utf-8"), written)
+            # A corpus the gate refuses elsewhere is not written, and a new record is removed again.
+            document = json.loads(written)
+            document["cases"][0]["source_tier"] = "PSP_HARDWARE"
+            corpus_path.write_text(json.dumps(document), encoding="utf-8")
+            refused = corpus_path.read_text(encoding="utf-8")
+            new_commit = "d" * 40
+            new_raw = self._rtt_stream().replace(MEASURED_COMMIT, new_commit)
+            with self.assertRaisesRegex(ProtocolError, "the gate refuses the corpus"):
+                write_ge_corpus_probe_runs(
+                    corpus_path, schema_path,
+                    [self._rtt_runner_report(other, new_raw, SOURCE_COMMIT=new_commit)], results)
+            self.assertEqual(corpus_path.read_text(encoding="utf-8"), refused)
+            self.assertEqual(sorted(path.name for path in (results / "ge-corpus").iterdir()),
+                             [record.name])
 
     def test_a_raster_digest_its_rows_do_not_give_is_refused(self) -> None:
         spec, counts = CAMPAIGN_PROBE_CASES["ge-raster"]
