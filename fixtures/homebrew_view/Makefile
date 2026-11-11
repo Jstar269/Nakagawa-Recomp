@@ -3,6 +3,7 @@
 #
 # The homebrew folder probe (main.c, #2143), built into an EBOOT.PBP with PSPDEV:
 #   make -f fixtures/homebrew_view/Makefile -C <out> VPATH=<this folder> EBOOT.PBP
+# Project-authored, adapted from fixtures/pspdev_phase5/Makefile.
 
 TARGET = homebrew_view
 OBJS = main.o
