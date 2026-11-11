@@ -1269,6 +1269,24 @@ instead, because the renderer does not detect depth aliasing. The cases, the dep
 
 At 1x the readback is the PSP's value.
 
+The render-target reads that decode at 1x do so by decision (#2279), each for its reason, which the README gives in
+full:
+
+- a read with another texel size (8888 as 16-bit, 16-bit as 8888, CLUT4, CLUT8): its texels are not the target's
+  pixels, so they have no device samples of their own;
+- CLUT16 and CLUT32 at the target's pixel size: the palette lookup runs in the texture decoder, not in the shader;
+- DXT: the target's pixels read as compressed blocks have no scaled form;
+- a 16-bit target read as another 16-bit format: a scaled read would repack each tap in the shader, which it does
+  not do yet;
+- a swizzled read, or a read with another buffer width: neighbouring texels are not neighbouring pixels of the target;
+- a mipmapped read: the chain is built from guest VRAM, its other levels are 1x buffers, and a target image has no
+  levels;
+- depth outside every colour target: the renderer never samples its depth image; the read commits the depth to
+  guest VRAM first, through the GE's CPU-read path.
+
+`rtt-1x-reads` in `gpu-coherence-selftest` pins these reads at 1x, 2x and 4x: none binds a target's image, and guest
+VRAM equals the software renderer's.
+
 ### 11.2. What an Item Must Have
 
 1. **Authentic stays byte-identical.** With the library choice or the title's choice at Authentic, a build behaves

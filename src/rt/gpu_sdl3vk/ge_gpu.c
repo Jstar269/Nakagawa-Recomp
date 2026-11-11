@@ -819,7 +819,7 @@ unsigned long s_cnt_present_gpu = 0;
 /* Public read-only accessor: number of GE list submissions since process start.
  * Unused by the recomp/runtime; kept available for downstream tools/diffing. */
 unsigned long sr_submit_count(void) { return s_cnt_submit; }
-static unsigned long s_cnt_present_cpu = 0, s_cnt_rtt = 0;
+static unsigned long s_cnt_present_cpu = 0, s_cnt_rtt = 0, s_cnt_rtt_direct = 0;
 static unsigned long s_cnt_readback = 0, s_cnt_upload = 0, s_cnt_dirty = 0;
 static unsigned long s_cnt_snap = 0, s_cnt_texup = 0, s_cnt_xferblit = 0;
 static uint64_t s_cnt_tex_invalidations = 0;
@@ -5512,6 +5512,7 @@ static void build_state(int persp, int sprite, Batch *b) {
             if (src->gpu_valid && !nortt && !ge_tex_mip_active(g) && g->tex_fmt == src->fmt && !g->tex_swizzle &&
                 (g->tex_bufw == src->stride || g->tex_bufw == 0) && (toff % bpp_s) == 0) {
                 uint32_t pix = toff / bpp_s;
+                s_cnt_rtt_direct++;
                 if (src == s_cur) {
                     /* feedback loop: sample a snapshot copy; reuse the previous snapshot
                      * while nothing new has rendered into the target */

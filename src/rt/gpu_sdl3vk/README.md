@@ -322,6 +322,37 @@ depth aliasing.
 
 `SR_GPU_NORTT=1` sends every render-target read through that 1x path, for bisecting.
 
+### Why the other reads stay at 1x (#2279)
+
+Each read below decodes guest VRAM at 1x at every render scale, by decision. `rtt-1x-reads` in
+`gpu-coherence-selftest` pins each kind at 1x, 2x and 4x: the read never binds a target's image,
+and guest VRAM equals the software renderer's.
+
+- **Another texel size: 8888 read as a 16-bit format, 16-bit read as 8888, CLUT4 and CLUT8.** The
+  texture's texel grid is not the target's pixel grid. A 16-bit texel is half of an 8888 pixel, a
+  CLUT8 texel a quarter of one, and an 8888 texel spans two 16-bit pixels, so a texel has no
+  device samples of its own to scale.
+- **CLUT16 of a 16-bit target, CLUT32 of an 8888 target.** The grids match, but the palette lookup
+  runs in the texture decoder on guest VRAM, and a target image is sampled without a palette.
+  Scaling these needs a palette lookup per device sample in the shader.
+- **DXT.** The read takes the target's pixels as compressed blocks, which have no scaled form.
+- **A 16-bit target read as another 16-bit format** (5650, 5551 or 4444). The grids match and each
+  device sample is a pixel in the target's format, so a scaled read would repack each tap's bits
+  in the shader before filtering. The shader does not do that yet.
+- **Swizzled.** A swizzled texture takes the buffer's 16-byte by 8-row blocks in another order, so
+  neighbouring texels come from pixels that are not neighbours in the target. The device samples
+  between two texels belong to neither, so the read has no scaled form.
+- **Mipmapped.** The texture cache builds the whole chain from guest VRAM: its other levels are
+  separate 1x buffers, and a target image has no mip levels. A level 0 at render scale beside 1x
+  levels would filter between levels of unrelated detail.
+- **Another buffer width.** Texture rows are not the target's rows, so a texel's neighbours above
+  and below are not the pixels above and below it in the target, and the device samples between
+  them are not the texture's.
+- **Depth outside every colour target.** The depth image is an attachment the renderer never
+  samples, and the depth address is swizzled storage. The read goes through the GE's CPU-read
+  path (`sr_ge_vram_read_prepare`), which commits the GPU's depth to guest VRAM first, and decodes
+  there at 1x, through the depth address and through the 0x04600000 linear view alike.
+
 ## Environment variables
 
 - `SR_GPU_GE=1` — enable the GPU rasterizer (SDL3 build only; default off).
