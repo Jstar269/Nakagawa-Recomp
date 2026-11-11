@@ -407,8 +407,25 @@ class TestGeFirstBadDrawWiring(unittest.TestCase):
         # A skip is reported as a skip (exit 77 run alone), never as a pass.
         self.assertIn("GE_FBD_SKIP_STATUS ?= 77", self.makefile)
         self.assertNotIn("exit 77; fi", self.rule)
-        self.assertEqual(self.rule.count("exit $(GE_FBD_SKIP_STATUS); fi"), 4)
+        # Five runs can skip: the clean synthetic, the mutants, the overlap, the wide capture and
+        # the refused cells.
+        self.assertEqual(self.rule.count("exit $(GE_FBD_SKIP_STATUS); fi"), 5)
+        self.assertIn('echo "SKIP ge-first-bad-draw-selftest wide (no Vulkan device)"; '
+                      "exit $(GE_FBD_SKIP_STATUS); fi", self.rule)
         self.assertIn("--fbd-self-check", self.rule)
+
+    def test_wide_capture_is_compared_and_past_the_stride_is_refused(self):
+        # #2193: ge.c draws up to a 512 stride, so the 512-wide capture must compare clean and
+        # mutant 1's draw right of x 480 must be named; a scissor past the stride stays refused.
+        self.assertIn("for v in wide past empty many deep; do", self.rule)
+        wide = self.rule.split("@log=$(GE_FBD_DIR)/wide.log;", 1)[1].split("@for cell in", 1)[0]
+        self.assertIn("$(GE_FBD_DIR)/wide.ngef --first-bad-draw", wide)
+        self.assertIn('"result=NO_DIFFERENCE draws=4 "', wide)
+        self.assertIn("for m in 1; do", wide)
+        self.assertIn("ge_replay_fbd_mutant$$m.exe $(GE_FBD_DIR)/wide.ngef", wide)
+        self.assertIn('"result=FIRST_BAD_DRAW index=3 "', wide)
+        self.assertIn('"past 5 reason=raster-bound"', self.rule)
+        self.assertNotIn('"wide 5 reason=raster-bound"', self.rule)
 
     def test_known_overlap_difference_is_pinned(self):
         # #2109: on the snapshot path the generated overlap capture must be found at draw 1, the
