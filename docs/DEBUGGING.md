@@ -2368,7 +2368,8 @@ player and game behave as they do for everyone ([#314](https://github.com/Jstar2
   is counted under its rule name (`rule=blend-2lsb`), and a frame with only those reports
   `result=RULE_ONLY`. Each buffer is compared over everything a draw can write there (the scissor,
   or a transfer's rectangle). When a buffer cannot be compared in full (more than 32 buffers, a
-  stride past 1024, a scissor past the 480x272 that ge.c rasterizes, depth past ge.c's 272 rows),
+  stride past 1024, a scissor past ge.c's raster bound (the stride up to 512 columns, or 480 on a
+  stride of 480 or less, and 272 rows), depth past ge.c's 272 rows),
   the tool prints `result=INCOMPLETE` with a
   `GE_FBD_UNCOMPARED` line per buffer and exits 5, and a capture with no draw is `result=NO_DRAWS`
   (exit 6): neither is ever `NO_DIFFERENCE`. A capture of a title is private, and so are its report
