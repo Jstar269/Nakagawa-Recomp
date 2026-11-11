@@ -143,6 +143,40 @@ static void cell_parse(void) {
         snprintf(spec, sizeof(spec), "%s;tier=ace;load=fast;load=off", base);
         CHECK(ace_parse(spec, &c, why, sizeof(why)) == 0 && strcmp(why, "duplicate key") == 0, "a duplicate load");
     }
+    /* ssaa (contract 10.21): optional; ssaa=2 and ssaa=4 are an Enhanced part (no tier=ace needed),
+       ssaa=off and a missing key are off, any other value is refused, and it is written after load
+       and before cull, only when on. */
+    {
+        static const char base[] = "v1;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off";
+        char spec[ACE_SPEC_MAX], out[ACE_SPEC_MAX];
+        CHECK(ace_parse(base, &c, why, sizeof(why)) == 1 && c.ssaa == 0, "a missing ssaa is off");
+        snprintf(spec, sizeof(spec), "%s;ssaa=off", base);
+        CHECK(ace_parse(spec, &c, why, sizeof(why)) == 1 && c.on && c.ssaa == 0, "ssaa=off is off");
+        snprintf(spec, sizeof(spec), "%s;ssaa=2", base);
+        CHECK(ace_parse(spec, &c, why, sizeof(why)) == 1 && c.on && c.ssaa == 2 && c.tier == ACE_TIER_ENHANCED,
+              "ssaa=2 in an Enhanced line");
+        snprintf(spec, sizeof(spec), "%s;ssaa=4", base);
+        CHECK(ace_parse(spec, &c, why, sizeof(why)) == 1 && c.on && c.ssaa == 4, "ssaa=4 in an Enhanced line");
+        CHECK(ace_format(&c, out, sizeof(out)) && strcmp(out + strlen(out) - 7, ";ssaa=4") == 0,
+              "a line with ssaa=4 formats with the key last (%s)", out);
+        c.tier = ACE_TIER_ACE;
+        c.load = 1;
+        c.cull = 1;
+        CHECK(ace_format(&c, out, sizeof(out)) && strcmp(out + strlen(out) - 25, ";load=fast;ssaa=4;cull=on") == 0,
+              "load, then ssaa, then cull, which stays last (%s)", out);
+        CHECK(ace_parse(out, &c, why, sizeof(why)) == 1 && c.ssaa == 4 && c.load == 1 && c.cull == 1,
+              "the formatted line parses back (%s)", why);
+        c.ssaa = 0;
+        CHECK(ace_format(&c, out, sizeof(out)) && strstr(out, "ssaa") == NULL, "off writes no ssaa key (%s)", out);
+        static const char *const bad[] = { "1", "3", "8", "on", "2x", "4 ", "", "OFF" };
+        for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+            snprintf(spec, sizeof(spec), "%s;ssaa=%s", base, bad[i]);
+            CHECK(ace_parse(spec, &c, why, sizeof(why)) == 0 && c.on == 0 && c.ssaa == 0,
+                  "ssaa=%s is refused (%s)", bad[i], why);
+        }
+        snprintf(spec, sizeof(spec), "%s;ssaa=2;ssaa=off", base);
+        CHECK(ace_parse(spec, &c, why, sizeof(why)) == 0 && strcmp(why, "duplicate key") == 0, "a duplicate ssaa");
+    }
     /* Every key but tier is required, whatever its place: leaving out any one of them refuses
        the line, leaving out tier does not (src/rt/ace.c names the required keys one by one). */
     {
@@ -220,7 +254,7 @@ static void cell_parse(void) {
 
     /* format and parse agree */
     char line[ACE_SPEC_MAX];
-    AceConfig a = { 1, 4, 0, 1, 0, 0, 0, ACE_TIER_ENHANCED, ACE_SAS_OFF, 0, 0, 0, 0 }, b;
+    AceConfig a = { 1, 4, 0, 1, 0, 0, 0, ACE_TIER_ENHANCED, ACE_SAS_OFF, 0, 0, 0, 0, 0 }, b;
     CHECK(ace_format(&a, line, sizeof(line)) && ace_parse(line, &b, NULL, 0) &&
           memcmp(&a, &b, sizeof(a)) == 0, "format round trip (%s)", line);
     CHECK(ace_format(&a, line, 8) == 0 && line[0] == '\0', "format refuses a short buffer");
@@ -343,6 +377,38 @@ static void cell_switch(void) {
     CHECK(ace_effective()->cull == 0 && ace_requested()->cull == 1 &&
           ace_report_json(json, sizeof(json)) > 0 && strstr(json, "\"cull\": false") != NULL &&
           strstr(json, "partial: test") != NULL, "a partial cull run is reported unavailable:\n%s", json);
+
+    /* ssaa (contract 10.21): the stamp's line, the report and the words carry it; the renderer's size
+       check (ge_gpu.c) can lower it, which the report records with the request, or make it
+       unavailable, which reports 1. */
+    CHECK(ace_init_spec(k_good, NULL) == 1 && ace_effective()->ssaa == 0 &&
+          ace_report_json(json, sizeof(json)) > 0 && strstr(json, "\"ssaa\"") == NULL,
+          "a run without ssaa reports none:\n%s", json);
+    CHECK(ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;ssaa=4",
+                        NULL) == 1 && ace_effective()->ssaa == 4, "ssaa=4 in an Enhanced line turns it on");
+    CHECK(strcmp(ace_spec_text(), "v1;tier=enhanced;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;"
+                                  "sas=off;tess=off;ssaa=4") == 0,
+          "the stamp's line carries ssaa=4: '%s'", ace_spec_text());
+    CHECK(ace_report_json(json, sizeof(json)) > 0 && strstr(json, "\"ssaa\": 4") != NULL &&
+          strstr(json, "ssaa_requested") == NULL, "the report carries ssaa 4:\n%s", json);
+    CHECK(ace_feature_words(json, sizeof(json)) > 0 && strstr(json, "4x supersampling") != NULL,
+          "the badge words name 4x supersampling: '%s'", json);
+    ace_set_ssaa_effective(4, "");
+    CHECK(ace_effective()->ssaa == 4, "the full factor leaves it as asked");
+    ace_set_ssaa_effective(2, "too big: test");
+    CHECK(ace_effective()->ssaa == 2 && ace_requested()->ssaa == 4 &&
+          ace_report_json(json, sizeof(json)) > 0 && strstr(json, "\"ssaa\": 2") != NULL &&
+          strstr(json, "\"ssaa_requested\": 4") != NULL, "a lowered factor reports 2 of 4:\n%s", json);
+    CHECK(ace_feature_words(json, sizeof(json)) > 0 && strstr(json, "2x supersampling") != NULL,
+          "the badge words follow the lowered factor: '%s'", json);
+    ace_set_ssaa_effective(1, "nothing fits: test");
+    CHECK(ace_effective()->ssaa == 0 && ace_report_json(json, sizeof(json)) > 0 &&
+          strstr(json, "\"ssaa\": 1") != NULL && strstr(json, "nothing fits: test") != NULL,
+          "an unavailable ssaa reports 1 and why:\n%s", json);
+    CHECK(ace_init_spec(k_good, NULL) == 1, "back to the plain line");
+    ace_set_ssaa_effective(1, "not asked: test");
+    CHECK(ace_effective()->ssaa == 0 && ace_report_json(json, sizeof(json)) > 0 &&
+          strstr(json, "not asked: test") == NULL, "a run that did not ask is untouched:\n%s", json);
 
     /* load=fast (contract 11.3.10): the switch nk_ace_load_skip_wait() asks at a declared wait that
        would block (src/rt/hle_display.c, tested in hle-thread-selftest). Off, and in an

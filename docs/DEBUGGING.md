@@ -615,6 +615,7 @@ coverage classes, such as `unverified` and `synthetic`, are defined in [`HLE_COV
 | `SR_GPU_TWIN_COLOR=1\|native` | Host twin (#2050), Ace Mode only: `1` presents full 32-bit colour without dither, `native` keeps the authentic colour (for identity checks). Any other value except `0` and `off` is refused. Guest VRAM is unchanged ([ENHANCEMENT_CONTRACT.md 10.11](ENHANCEMENT_CONTRACT.md#1011-full-32-bit-colour-the-host-twin)). Prints `TWIN:` lines at start and exit |
 | `SR_GPU_TWIN_CAPTURE=authentic` | With the twin on, present and capture the authentic image instead of the twin |
 | `SR_GPU_TWIN_DUMP=PREFIX` | `gpu-coherence-selftest` twin-scene: write each shown image as `PREFIX_t<n>_s<scale>.raw` (RGBA) |
+| `SR_GPU_SSAA_REF=PATH` | `gpu-coherence-selftest` ssaa-edge case: a run without supersampling writes this reference (its guest VRAM hash), a supersampled run at the same scale checks against it (the harness's `--ssaa-ref`) |
 | `SR_GPU_TWIN_REF=PATH` | `gpu-coherence-selftest` twin cases: a twin-off run writes this reference, a twin-on run at the same scale checks against it (the harness's `--twin-ref`) |
 | `SR_GEDUMP=1` | Per-primitive `GE PRIM` lines (through and transform), bounded to the first ~40 |
 | `SR_GE_ENQUEUE_TRACE=1` | Trace GE enqueue/stall-update provenance without enabling the broader GE dump |

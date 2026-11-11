@@ -41,6 +41,8 @@ static const EnhancedPartFixture k_enhanced_parts[] = {
                                "the feel changes."},
     {"Short loads", "Off", "Ace only, in games with a loading-wait package. Skips those waits; changes "
                            "the game's timing."},
+    {"Supersampling", "Off", "Smooths jagged edges by drawing each frame larger. 2x needs 4 times the "
+                             "GPU work, 4x 16 times."},
 };
 typedef char player_enhanced_fixture_matches_parts[
     sizeof(k_enhanced_parts) / sizeof(k_enhanced_parts[0]) == PLAYER_PART_COUNT ? 1 : -1];

@@ -143,8 +143,15 @@ static int s_scale = 1;     /* integer render scale (SR_GPU_SCALE), 1..MAX_SCALE
 #define SCL_W ((uint32_t)(FB_W * s_scale))   /* device-pixel canvas */
 #define SCL_H ((uint32_t)(FB_H * s_scale))
 /* The host twin's scale (#2050): the user's render scale, which the authentic chain keeps too
- * (s_tscale == s_scale). The twin code is written for any whole ratio between the two. */
+ * (s_tscale == s_scale), times the supersampling factor (s_ssaa). The twin code is written for
+ * any whole ratio between the two. */
 static int s_tscale = 1;
+/* Supersampling (#2073, ENHANCEMENT_CONTRACT.md 10.21): the Ace line's ssaa=2|4 runs the host twin
+ * at s_ssaa times the render scale per axis (s_tscale = s_scale * s_ssaa) and each present shows
+ * the twin's box-filtered average at the render scale (ssaa_resolve, Target.rimg). The authentic
+ * chain keeps s_scale, so guest VRAM, every readback and every GE decision are those of a run
+ * without it. 1 is off. */
+static int s_ssaa = 1;
 #define TSCL_W ((uint32_t)(FB_W * s_tscale))
 #define TSCL_H ((uint32_t)(FB_H * s_tscale))
 #define MAX_VERTS  131072
@@ -395,6 +402,10 @@ typedef struct Target {
     uint64_t wgen, tgen;
     uint32_t tseed;
     int tshow;                             /* the coming present shows the twin */
+    /* Supersampling (s_ssaa > 1): the twin's box-filtered average at the render scale, which the
+     * presenter shows in the twin's place (ssaa_resolve). Made and freed with the twin. */
+    VkImage rimg; VkDeviceMemory rmem;
+    VkImageLayout rlayout;
 } Target;
 
 /* Ordered destination reads (#2109). On the interlock path (sdl3vk.h SDL3VK_DST_READ_INTERLOCK)
@@ -724,6 +735,16 @@ static unsigned long s_cnt_twin_reseed = 0;
 static unsigned long s_cnt_twin_present_auth = 0;
 static const char *s_twin_lag_cause = NULL;  /* the write that last left a twin behind */
 static unsigned long s_cnt_twin_alloc_fail = 0;  /* twin allocations that failed (each turns it off) */
+/* Supersampling's halving step at 4x (2 x the render scale), shared by every target's resolve,
+ * and the resolves recorded. */
+static VkImage s_ssmid; static VkDeviceMemory s_ssmid_mem; static VkImageLayout s_ssmid_layout;
+static unsigned long s_cnt_ssaa_resolves = 0;
+#ifdef SR_GPU_COHERENCE_SELFTEST
+/* gegpu_selftest_ssaa_limits: the size check's GPU memory budget and largest image side, in
+ * place of the device's (0 keeps the device's). */
+static uint64_t s_ssaa_test_budget = 0;
+static uint32_t s_ssaa_test_dim = 0;
+#endif
 static int s_twin_unavailable = 0;         /* asked for and allowed, but this GPU refused it at init */
 #ifdef SR_GPU_COHERENCE_SELFTEST
 static int s_twin_inject_fail = 0;         /* the selftest: fail the Nth twin allocation from now */
@@ -744,6 +765,7 @@ static void twin_blit(VkImage src, VkImageLayout *src_layout, VkImage dst, VkIma
                       VkImageAspectFlags aspect, VkImageLayout rest, uint32_t n,
                       const VkOffset2D *off, const VkExtent2D *ext);
 static int twin_seed_target(struct Target *t, int seeding);
+static void ssaa_resolve(struct Target *t);
 static int twin_seed_depth(DepthEnt *d, int seeding);
 static void twin_depth_free(DepthEnt *d);
 static VkDescriptorSet twin_dset(const Batch *b);
@@ -2947,11 +2969,14 @@ static int target_prepare_present(Target *t) {
     t->tshow = 0;
     if (s_twin && t->timg && !s_twin_authentic_shown) {
         int in_step = t->tgen == t->wgen;
-        if (!in_step || t->tlayout != VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL) {
+        /* With supersampling every present of the twin resolves it again: the resolve image is
+         * what the presenter shows. */
+        if (!in_step || t->tlayout != VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL || s_ssaa > 1) {
             if (!cmd_batch_begin(0)) return 0;
             if (in_step) {
                 to_layout(s_cmd, t->timg, VK_IMAGE_ASPECT_COLOR_BIT, &t->tlayout,
                           VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+                if (s_ssaa > 1) ssaa_resolve(t);
             } else {
                 (void)twin_seed_target(t, 0);
                 s_cnt_twin_present_auth++;
@@ -3329,8 +3354,13 @@ static void target_note_cpu_write(Target *t, uint32_t lo, uint32_t hi) {
 /* ---- the host twin (see s_twin) ---------------------------------------------------------- */
 
 static void twin_target_free(Target *t) {
-    if (!t->timg && !t->tview && !t->tmem) return;
+    if (!t->timg && !t->tview && !t->tmem && !t->rimg && !t->rmem) return;
     (void)sdl3vk_wait_image((void *)t->timg);
+    (void)sdl3vk_wait_image((void *)t->rimg);
+    if (t->rimg) vkDestroyImage(s_dev, t->rimg, NULL);
+    if (t->rmem) vkFreeMemory(s_dev, t->rmem, NULL);
+    t->rimg = VK_NULL_HANDLE; t->rmem = VK_NULL_HANDLE;
+    t->rlayout = VK_IMAGE_LAYOUT_UNDEFINED;
     if (t->tfb) vkDestroyFramebuffer(s_dev, t->tfb, NULL);
     if (t->tfb_rmw) vkDestroyFramebuffer(s_dev, t->tfb_rmw, NULL);
     if (t->trmw_set) vkFreeDescriptorSets(s_dev, s_dpool_rmw, 1, &t->trmw_set);
@@ -3362,6 +3392,8 @@ static void twin_off_for_run(const char *what) {
     if (!s_twin) return;
     fprintf(stderr, "TWIN: off for the rest of the run (%s could not be allocated): the authentic image "
             "is shown at %dx, as with the twin off\n", what, s_scale);
+    if (s_ssaa > 1)
+        fprintf(stderr, "SSAA: off for the rest of the run with the twin (it renders the samples)\n");
     if (!cmd_drain(GEGPU_BOUNDARY_LIFETIME)) {
         /* Work may still be in flight (a lost device): record no more twin passes and show no
          * twin, but free nothing here; gegpu_shutdown waits for the device before it frees the
@@ -3397,6 +3429,12 @@ static int twin_target_make(Target *t) {
                     &t->timg, &t->tmem)) return 0;
     if (!make_view(t->timg, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_ASPECT_COLOR_BIT, &t->tview)) return 0;
     t->tlayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    if (s_ssaa > 1) {
+        if (!make_image(SCL_W, SCL_H, VK_FORMAT_R8G8B8A8_UNORM,
+                        VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                        VK_IMAGE_USAGE_SAMPLED_BIT, &t->rimg, &t->rmem)) return 0;
+        t->rlayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    }
     for (unsigned i = 0; i < TEX_FILTER_VARIANTS; i++) {
         t->tset[i] = make_descriptor(t->tview, s_smp[i], s_dpool_twin);
         if (!t->tset[i]) return 0;
@@ -3458,6 +3496,41 @@ static void twin_blit(VkImage src, VkImageLayout *src_layout, VkImage dst, VkIma
     to_layout(s_cmd, dst, aspect, dst_layout, rest);
     to_layout(s_cmd, src, aspect, src_layout, rest);
     s_cnt_twin_copies++;
+}
+
+/* One 2:1 step of the supersampling resolve (open command buffer): a linear blit of `src` (sw x sh)
+ * into the top-left (sw / 2) x (sh / 2) of `dst`. Each destination pixel's centre falls on the
+ * corner shared by its four source pixels, so linear filtering weighs them equally: a 2x2 box. */
+static void ssaa_half(VkImage src, VkImageLayout *src_layout, uint32_t sw, uint32_t sh, VkImage dst,
+                      VkImageLayout *dst_layout) {
+    VkImageBlit b;
+    memset(&b, 0, sizeof(b));
+    b.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    b.srcSubresource.layerCount = 1;
+    b.dstSubresource = b.srcSubresource;
+    b.srcOffsets[1] = (VkOffset3D){ (int32_t)sw, (int32_t)sh, 1 };
+    b.dstOffsets[1] = (VkOffset3D){ (int32_t)(sw / 2u), (int32_t)(sh / 2u), 1 };
+    to_layout(s_cmd, src, VK_IMAGE_ASPECT_COLOR_BIT, src_layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    to_layout(s_cmd, dst, VK_IMAGE_ASPECT_COLOR_BIT, dst_layout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    vkCmdBlitImage(s_cmd, src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                   1, &b, VK_FILTER_LINEAR);
+}
+
+/* Supersampling's resolve of target `t` (open command buffer; s_ssaa > 1, the twin in step): its
+ * twin, at s_ssaa times the render scale, averaged into its resolve image at the render scale by
+ * 2:1 box steps (one at 2x, two through s_ssmid at 4x), so each resolved pixel is the plain mean of
+ * the s_ssaa x s_ssaa samples it covers. Both end ready for the presenter's blit. */
+static void ssaa_resolve(Target *t) {
+    if (s_ssaa == 4) {
+        ssaa_half(t->timg, &t->tlayout, TSCL_W, TSCL_H, s_ssmid, &s_ssmid_layout);
+        ssaa_half(s_ssmid, &s_ssmid_layout, TSCL_W / 2u, TSCL_H / 2u, t->rimg, &t->rlayout);
+        to_layout(s_cmd, s_ssmid, VK_IMAGE_ASPECT_COLOR_BIT, &s_ssmid_layout,
+                  VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    } else {
+        ssaa_half(t->timg, &t->tlayout, TSCL_W, TSCL_H, t->rimg, &t->rlayout);
+    }
+    to_layout(s_cmd, t->rimg, VK_IMAGE_ASPECT_COLOR_BIT, &t->rlayout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    s_cnt_ssaa_resolves++;
 }
 
 /* Re-seed the whole twin of `t` from its authentic image (open command buffer): it is then in
@@ -6768,13 +6841,19 @@ void gegpu_flush(const char *reason) {
  * not GPU-resident (CPU-written movie frames, pre-GPU content) — caller uses the
  * guest-VRAM path. */
 /* The image the presenter shows for a target, as target_prepare_present chose it: the host twin
- * when it is on and in step, otherwise the authentic image guest VRAM is committed from. */
+ * when it is on and in step (with supersampling, its resolve at the render scale), otherwise the
+ * authentic image guest VRAM is committed from. */
 static VkImage present_image(const Target *t) {
-    return t->tshow ? t->timg : t->img;
+    return t->tshow ? (s_ssaa > 1 ? t->rimg : t->timg) : t->img;
 }
 
 static int present_scale(const Target *t) {
-    return t->tshow ? s_tscale : s_scale;
+    return t->tshow && s_ssaa == 1 ? s_tscale : s_scale;
+}
+
+/* The layout field of present_image(t). */
+static VkImageLayout *present_layout(Target *t) {
+    return t->tshow ? (s_ssaa > 1 ? &t->rlayout : &t->tlayout) : &t->layout;
 }
 
 /* ---- widescreen Fill: the presented picture (#1881) -------------------------------------------
@@ -6959,7 +7038,8 @@ int gegpu_present(uint32_t fbaddr, int fmt, uint32_t stride) {
     stats_tick();
     VkImage shown = present_image(t);
     /* Keyed by the shown image: gui.c takes the HUD mask by the image it shows, which is the
-     * twin while the twin is shown. The authentic depth matches it (s_tscale == s_scale). */
+     * twin (or its supersampling resolve) while the twin is shown. The authentic depth matches it:
+     * the shown image is at the render scale (s_tscale == s_scale without supersampling). */
     if (g_ace_hud_on)
         ace_hud_present((int)(t - s_tgts), shown, t->dep ? t->dep->img : VK_NULL_HANDLE,
                         t->dep ? t->dep->layout : VK_IMAGE_LAYOUT_UNDEFINED, (int)SCL_W, (int)SCL_H,
@@ -6970,6 +7050,7 @@ int gegpu_present(uint32_t fbaddr, int fmt, uint32_t stride) {
     /* The frame was shown: its next draw begins a new frame, which clears its canvas first.
      * Presenting it again before then keeps its wings. */
     if (pr == GEGPU_PRESENT_SHOWN) ge_wide_shown(fbaddr);
+    if (pr == GEGPU_PRESENT_SHOWN && t->tshow && s_ssaa > 1) ace_confirm(ACE_FEATURE_SSAA);
     /* Only SDL's -1 is remapped: it is a present that failed after the target was prepared, so
      * the target's newest pixels may exist only in its image. SDL's 0 (user close), 1 (shown)
      * and 2 (display busy) are GEGPU_PRESENT_WINDOW_CLOSED, GEGPU_PRESENT_SHOWN and
@@ -7099,6 +7180,59 @@ static const GeGpuHooks k_hooks = {
     hook_tnl_prim, hook_wing_tri, hook_wing_sprite,
 };
 
+/* Supersampling's size check (ENHANCEMENT_CONTRACT.md 10.21). SSAA_EST_TARGETS is the render
+ * targets the estimate counts: a title's two display buffers and two others. The bytes a factor
+ * holds: those targets' twins with their depth twins, the twin snapshot, their resolve images at
+ * the render scale and, at 4x, the halving step. An estimate: a title with more live targets uses
+ * more, and a twin that later cannot be allocated turns the twin off with its own message. */
+#define SSAA_EST_TARGETS 4u
+static uint64_t ssaa_bytes(int scale, int f, unsigned depth_bpp) {
+    const uint64_t base = (uint64_t)FB_W * (uint64_t)scale * (uint64_t)FB_H * (uint64_t)scale;
+    const uint64_t px = base * (uint64_t)f * (uint64_t)f;
+    uint64_t bytes = px * (SSAA_EST_TARGETS * (4u + depth_bpp) + 4u) + base * 4u * SSAA_EST_TARGETS;
+    if (f == 4) bytes += base * 4u * 4u;
+    return bytes;
+}
+
+/* The largest factor of `want` (4, then 2) whose twin fits: each side at most `max_dim`, and
+ * ssaa_bytes within `budget`. 1 when neither fits. `why` gets the reason the request did not fit
+ * (empty when it did). */
+static int ssaa_choose(int want, int scale, uint32_t max_dim, uint64_t budget, unsigned depth_bpp,
+                       char *why, size_t cap) {
+    if (cap) why[0] = '\0';
+    for (int f = want; f > 1; f /= 2) {
+        const uint32_t w = (uint32_t)FB_W * (uint32_t)(scale * f), h = (uint32_t)FB_H * (uint32_t)(scale * f);
+        const uint64_t need = ssaa_bytes(scale, f, depth_bpp);
+        const char *no = NULL;
+        char buf[160];
+        if (w > max_dim || h > max_dim) {
+            snprintf(buf, sizeof(buf), "%dx at render scale %dx needs %ux%u images, and this GPU's "
+                     "largest is %u", f, scale, w, h, max_dim);
+            no = buf;
+        } else if (need > budget) {
+            snprintf(buf, sizeof(buf), "%dx at render scale %dx needs about %llu MB of GPU memory, "
+                     "over the %llu MB budget", f, scale, (unsigned long long)(need >> 20),
+                     (unsigned long long)(budget >> 20));
+            no = buf;
+        }
+        if (!no) return f;
+        if (f == want && cap) snprintf(why, cap, "%s", no);
+    }
+    return 1;
+}
+
+/* The size check's GPU memory budget: half the largest device-local heap (the rest stays for
+ * textures, the authentic chain and the presenter). */
+static uint64_t ssaa_budget(void) {
+    VkPhysicalDeviceMemoryProperties mp;
+    vkGetPhysicalDeviceMemoryProperties(s_pdev, &mp);
+    uint64_t best = 0;
+    for (uint32_t i = 0; i < mp.memoryHeapCount; i++)
+        if ((mp.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) && mp.memoryHeaps[i].size > best)
+            best = mp.memoryHeaps[i].size;
+    return best / 2u;
+}
+
 #ifdef SR_GPU_COHERENCE_SELFTEST
 #include "ge_gpu_selftest.inc"
 #endif
@@ -7141,10 +7275,19 @@ static int twin_init(int color) {
     }
     s_tdst_set = make_dst_descriptor(s_tsnap_view, s_dpool_twin);
     if (!s_tdst_set) return 0;
+    if (s_ssaa == 4) {
+        if (!make_image(TSCL_W / 2u, TSCL_H / 2u, VK_FORMAT_R8G8B8A8_UNORM,
+                        VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                        &s_ssmid, &s_ssmid_mem)) return 0;
+        s_ssmid_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    }
     s_twin = 1;
     s_twin_color = color ? 1 : 0;
     fprintf(stderr, "TWIN: on (colour=%s, scale=%dx): the presenter shows the twin; guest VRAM keeps "
             "the authentic image\n", s_twin_color ? "full" : "native", s_tscale);
+    if (s_ssaa > 1)
+        fprintf(stderr, "SSAA: on (%dx: the twin renders %ux%u, and each present shows its box-filtered "
+                "average at %ux%u)\n", s_ssaa, TSCL_W, TSCL_H, SCL_W, SCL_H);
     return 1;
 }
 
@@ -7160,6 +7303,10 @@ static void twin_release(void) {
     if (s_tsnapimg) vkDestroyImage(s_dev, s_tsnapimg, NULL);
     if (s_tsnapimg_mem) vkFreeMemory(s_dev, s_tsnapimg_mem, NULL);
     s_tsnap_view = VK_NULL_HANDLE; s_tsnapimg = VK_NULL_HANDLE; s_tsnapimg_mem = VK_NULL_HANDLE;
+    if (s_ssmid) vkDestroyImage(s_dev, s_ssmid, NULL);
+    if (s_ssmid_mem) vkFreeMemory(s_dev, s_ssmid_mem, NULL);
+    s_ssmid = VK_NULL_HANDLE; s_ssmid_mem = VK_NULL_HANDLE;
+    s_ssmid_layout = VK_IMAGE_LAYOUT_UNDEFINED;
 }
 
 int gegpu_init(void) {
@@ -7229,6 +7376,39 @@ int gegpu_init(void) {
         const char *cap = getenv("SR_GPU_TWIN_CAPTURE");
         s_twin_authentic_shown = cap && strcmp(cap, "authentic") == 0;
     }
+    /* Supersampling (#2073, 10.21): the Ace line's ssaa=2|4 runs the twin at that many times the
+     * render scale, with native colour unless the twin was asked for in full colour. The largest
+     * factor up to the request whose images fit the device (ssaa_choose) is used, and a lower one
+     * is reported; it needs linear blits of RGBA8 for its resolve. */
+    s_ssaa = 1;
+    if (g_ace_on && ace_effective()->ssaa > 1) {
+        const int want = ace_effective()->ssaa;
+        const VkFormatFeatureFlags lin = VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT |
+                                         VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+        VkFormatProperties cf;
+        vkGetPhysicalDeviceFormatProperties(s_pdev, VK_FORMAT_R8G8B8A8_UNORM, &cf);
+        uint64_t budget = ssaa_budget();
+        uint32_t max_dim = props.limits.maxImageDimension2D;
+#ifdef SR_GPU_COHERENCE_SELFTEST
+        if (s_ssaa_test_budget) budget = s_ssaa_test_budget;
+        if (s_ssaa_test_dim) max_dim = s_ssaa_test_dim;
+#endif
+        char why[192] = "";
+        int f = 1;
+        if ((cf.optimalTilingFeatures & lin) != lin)
+            snprintf(why, sizeof(why), "this GPU cannot average RGBA8 images with a linear blit");
+        else
+            f = ssaa_choose(want, s_scale, max_dim, budget, 2u, why, sizeof(why));   /* D16 depth */
+        ace_set_ssaa_effective(f, why);
+        if (f > 1) {
+            s_ssaa = f;
+            if (!twin_req) twin_req = 2;
+        } else {
+            fprintf(stderr, "SSAA: unavailable (%s): the picture is drawn at render scale %dx\n", why,
+                    s_scale);
+        }
+    }
+    s_tscale = s_scale * s_ssaa;
     if (twin_req) {
         const VkFormatFeatureFlags blit = VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT;
         VkFormatProperties cf, df;
@@ -7239,6 +7419,9 @@ int gegpu_init(void) {
                     "colour at render scale %dx\n", s_scale);
             twin_req = 0;
             s_twin_unavailable = 1;
+            if (s_ssaa > 1) ace_set_ssaa_effective(1, "the host twin, which renders its samples, is unavailable");
+            s_ssaa = 1;
+            s_tscale = s_scale;
         }
     }
     s_xfer_align = props.limits.optimalBufferCopyOffsetAlignment;
@@ -7466,6 +7649,9 @@ int gegpu_init(void) {
                 "scale %dx\n", s_scale);
         twin_release();
         s_twin_unavailable = 1;
+        if (s_ssaa > 1) ace_set_ssaa_effective(1, "the host twin, which renders its samples, could not be made");
+        s_ssaa = 1;
+        s_tscale = s_scale;
     }
 
     /* 1x1 white texture for untextured draws */

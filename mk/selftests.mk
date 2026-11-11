@@ -928,7 +928,10 @@ asset-index-selftest:
 # same scale check (guest VRAM always, the shown images for the native twin), `--twin native`
 # runs the whole suite with every twin checked against its image after each case, twin-gate
 # checks the switch's values and its Ace gate (`--authentic`), and twin-alloc-fail injects a
-# failed twin allocation, and gpu-timestamps runs once more with the twin shown. The dst-read
+# failed twin allocation, and gpu-timestamps runs once more with the twin shown. Supersampling
+# (#2073) follows: ssaa-edge runs without it to write a reference at scales 1 and 2 and at 2x and
+# 4x against it (guest VRAM identical, edges filtered only when on), twin-scene and the whole
+# suite run with it, and ssaa-limit checks the size check with forced limits. The dst-read
 # cells (#2109) run alone at scales 1 and 4 on each destination-read path (`--dst-read snapshot`,
 # `--dst-read interlock`; a device that refuses the interlock prints a SKIP line), and so does
 # stencil-once (write-once stencil batches: at scales 1 and 4 on the snapshot path, where they are
@@ -990,6 +993,18 @@ gpu-coherence-selftest: $(GPU_COHERENCE_BIN)
 	$(GPU_COHERENCE_BIN) --twin yes --case twin-gate
 	$(GPU_COHERENCE_BIN) --twin 1 --scale 4 --case twin-alloc-fail --twin-ref $(BUILD_DIR)/twin_ref_s4.txt
 	$(GPU_COHERENCE_BIN) --twin native --scale 2 --case twin-alloc-fail --twin-ref $(BUILD_DIR)/twin_ref_s2.txt
+	$(GPU_COHERENCE_BIN) --case ssaa-edge --ssaa-ref $(BUILD_DIR)/ssaa_ref_s1.txt
+	$(GPU_COHERENCE_BIN) --ssaa 2 --case ssaa-edge --ssaa-ref $(BUILD_DIR)/ssaa_ref_s1.txt
+	$(GPU_COHERENCE_BIN) --ssaa 4 --case ssaa-edge --ssaa-ref $(BUILD_DIR)/ssaa_ref_s1.txt
+	$(GPU_COHERENCE_BIN) --scale 2 --case ssaa-edge --ssaa-ref $(BUILD_DIR)/ssaa_ref_s2.txt
+	$(GPU_COHERENCE_BIN) --ssaa 2 --scale 2 --case ssaa-edge --ssaa-ref $(BUILD_DIR)/ssaa_ref_s2.txt
+	$(GPU_COHERENCE_BIN) --ssaa 4 --scale 2 --case ssaa-edge --ssaa-ref $(BUILD_DIR)/ssaa_ref_s2.txt
+	$(GPU_COHERENCE_BIN) --ssaa 2 --case twin-scene --twin-ref $(BUILD_DIR)/twin_ref_s1.txt
+	$(GPU_COHERENCE_BIN) --ssaa 4 --twin 1 --scale 2 --case twin-scene --twin-ref $(BUILD_DIR)/twin_ref_s2.txt
+	$(GPU_COHERENCE_BIN) --ssaa 2
+	$(GPU_COHERENCE_BIN) --ssaa 4 --ssaa-budget-mb 48 --ssaa-expect 2 --case ssaa-limit
+	$(GPU_COHERENCE_BIN) --ssaa 2 --ssaa-budget-mb 8 --ssaa-expect 1 --case ssaa-limit
+	$(GPU_COHERENCE_BIN) --ssaa 4 --scale 4 --ssaa-max-dim 4096 --ssaa-expect 2 --case ssaa-limit
 	@rc=0; $(GPU_COHERENCE_BIN) --twin 1 --gpu-timestamps 1 --case gpu-timestamps || rc=$$?; \
 	if [ $$rc -eq 77 ]; then echo "SKIP gpu-coherence-selftest twin gpu-timestamps (exit 77; the reason is printed above)"; \
 	elif [ $$rc -ne 0 ]; then echo "FAIL gpu-coherence-selftest twin gpu-timestamps (exit $$rc)"; exit $$rc; fi

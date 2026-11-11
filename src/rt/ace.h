@@ -11,10 +11,11 @@
  *     SR_ACE=v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off
  *
  * tier (enhanced or ace) only names the run, in the badge, the pause menu and the stamps; a
- * line without it is an Enhanced run. stick, load and cull are the other keys a line may leave
- * out: a missing stick, load or cull reads as off (section 11.2 item 2); stick has no off word,
- * its value is the game's dead zone (1..126), and a line that writes load=off or cull=off means
- * the same as none; stick=<counts>, load=fast and cull=on need tier=ace. Every other
+ * line without it is an Enhanced run. stick, load, ssaa and cull are the other keys a line may
+ * leave out: a missing stick, load, ssaa or cull reads as off (section 11.2 item 2); stick has
+ * no off word, its value is the game's dead zone (1..126), and a line that writes load=off,
+ * ssaa=off or cull=off means the same as none; stick=<counts>, load=fast and cull=on need
+ * tier=ace, and ssaa=2|4 (supersampling, #2073) does not. Every other
  * key is required in v1, in any order, each once. A key or value for a feature this build
  * does not carry (smooth=match) is still parsed and refused. Anything else (an unknown version, key
  * or value, a duplicate, a missing key, an empty field) refuses the whole line: Ace is off for
@@ -48,6 +49,7 @@
 #define ACE_HAS_SAS 1           /* sas=sinc: band-limited SAS voice resampling (#2054) */
 #define ACE_HAS_TESS 1          /* tess=2..4: finer Bezier and spline patches (#2053) */
 #define ACE_HAS_CULL 1          /* cull=on: widen a title's own view-culling test to the wings (11.3.6) */
+#define ACE_HAS_SSAA 1          /* ssaa=2|4: supersampling on top of render scale (#2073, 10.21) */
 #define ACE_HAS_STICK 1         /* stick=<counts>: start the host stick past the game's dead zone (11.3.11) */
 #define ACE_STICK_COUNTS_MAX 126 /* stick=1..126: the square dead zone, in the game's centred counts */
 #define ACE_HAS_LOAD 1          /* load=fast: a title's declared loading waits return at once (11.3.10) */
@@ -78,6 +80,8 @@ typedef struct {
     int stick;       /* stick=<counts>: 0 off, else the square stick dead zone the title ignores, 1..126
                         (guest-visible, 11.3.11) */
     int load;        /* load=fast: the waits a title's load part declares are skipped (guest timing, 11.3.10) */
+    int ssaa;        /* ssaa=2|4: 1 off, else the supersampling factor per axis on top of render scale;
+                        host presentation only (10.21) */
 } AceConfig;
 
 typedef enum {
@@ -92,6 +96,7 @@ typedef enum {
     ACE_FEATURE_STICK,
     ACE_FEATURE_LOAD,
     ACE_FEATURE_CULL,
+    ACE_FEATURE_SSAA,
     ACE_FEATURE_COUNT
 } AceFeature;
 
@@ -191,6 +196,10 @@ void ace_note_af_failure(void);
 void ace_set_readout(int on);
 /* The anisotropy the device gives, at most the requested level (0 = none). */
 void ace_set_af_effective(int af, const char *reason);
+/* The supersampling factor the renderer could give (ENHANCEMENT_CONTRACT.md 10.21): below the
+ * request, the run records the factor and `reason` and says so in one "ACE_MODE: ssaa" line; 1 or
+ * less marks supersampling unavailable with `reason`. Does nothing unless ssaa was asked for. */
+void ace_set_ssaa_effective(int factor, const char *reason);
 /* The active features in words, joined by " \xC2\xB7 " ("16x filtering \xC2\xB7 crisp keyboard"),
  * for the pause menu caption and the launch notice. Empty with Ace off. */
 size_t ace_feature_words(char *out, size_t cap);

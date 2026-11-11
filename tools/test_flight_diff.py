@@ -345,6 +345,22 @@ class ComparabilityContractTests(unittest.TestCase):
         ace = copy.deepcopy(candidate)
         ace["runtime"]["enhancements"] = {"ace": self.ACE_LINE}
         flight_diff.validate_bundle(ace)
+        # A line past the 95 characters the field used to keep: every optional key on (#2073's ssaa=4
+        # alone takes an Enhanced line to 100). The recorder keeps ACE_SPEC_MAX - 1 characters, and the
+        # schema allows as many.
+        long_line = ("v1;tier=ace;af=16;text=on;readout=off;notice=on;wide=fill;smooth=x2;sas=sinc;tess=4;"
+                     "stick=126;load=fast;ssaa=4;cull=on")
+        self.assertGreater(len(long_line), 95)
+        ace["runtime"]["enhancements"] = {"ace": long_line}
+        flight_diff.validate_bundle(ace)
+        header = (ROOT / "src" / "rt" / "ace.h").read_text(encoding="utf-8")
+        spec_max = int(re.search(r"^#define ACE_SPEC_MAX (\d+)\b", header, re.MULTILINE).group(1))
+        recorder = (ROOT / "src" / "rt" / "flight_recorder.c").read_text(encoding="utf-8")
+        field = int(re.search(r"^static char s_flight_ace\[(\d+)\];", recorder, re.MULTILINE).group(1))
+        self.assertEqual(field, spec_max)
+        self.assertLess(len(long_line), spec_max)
+        ace["runtime"]["enhancements"] = {"ace": "v1;af=0" + ";x=1" * ((spec_max - 1 - 7) // 4)}
+        flight_diff.validate_bundle(ace)
         # The presentation upscaler's stamp, alone or beside Ace Mode's line (#1273).
         # ... and the movie upscaler's (SR_MOVIE_UPSCALE), alone or with the presentation upscaler's:
         # such a bundle is an enhanced run (incomparable), never a malformed one.

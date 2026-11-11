@@ -247,6 +247,9 @@ typedef enum {
     PLAYER_PART_LOAD,          /* short loads (section 11.3.10): 0 off, 1 fast. The display waits
                                   a title's package declares return at once; guest timing changes. Ace
                                   only; a title without a load part ignores it */
+    PLAYER_PART_SSAA,          /* supersampling (#2073, section 10.21): 0 off, or the factor 2 or 4 per
+                                  axis on top of the render scale. Host presentation only; off in a
+                                  fresh file and in every preset */
     PLAYER_PART_COUNT
 } PlayerEnhancedPart;
 
