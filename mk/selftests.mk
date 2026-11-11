@@ -933,7 +933,8 @@ asset-index-selftest:
 # 4x against it (guest VRAM identical, edges filtered only when on), twin-scene and the whole
 # suite run with it at 2x and 4x, ssaa-sprite checks that textured one-texel-per-pixel sprites are
 # shown as the authentic image (at render scale 1, where the twin draws from its own vertices, and
-# at 2), and ssaa-limit checks the size check with forced limits. The dst-read
+# at 2), twin-alloc-fail with it on checks that the Ace report gives it as off once the twin is,
+# and ssaa-limit checks the size check with forced limits. The dst-read
 # cells (#2109) run alone at scales 1 and 4 on each destination-read path (`--dst-read snapshot`,
 # `--dst-read interlock`; a device that refuses the interlock prints a SKIP line), and so does
 # stencil-once (write-once stencil batches: at scales 1 and 4 on the snapshot path, where they are
@@ -1008,6 +1009,7 @@ gpu-coherence-selftest: $(GPU_COHERENCE_BIN)
 	$(GPU_COHERENCE_BIN) --ssaa 2 --case ssaa-sprite
 	$(GPU_COHERENCE_BIN) --ssaa 4 --case ssaa-sprite
 	$(GPU_COHERENCE_BIN) --ssaa 4 --scale 2 --case ssaa-sprite
+	$(GPU_COHERENCE_BIN) --ssaa 2 --twin native --scale 2 --case twin-alloc-fail --twin-ref $(BUILD_DIR)/twin_ref_s2.txt
 	$(GPU_COHERENCE_BIN) --ssaa 4 --ssaa-budget-mb 48 --ssaa-expect 2 --case ssaa-limit
 	$(GPU_COHERENCE_BIN) --ssaa 2 --ssaa-budget-mb 8 --ssaa-expect 1 --case ssaa-limit
 	$(GPU_COHERENCE_BIN) --ssaa 4 --scale 4 --ssaa-max-dim 4096 --ssaa-expect 2 --case ssaa-limit

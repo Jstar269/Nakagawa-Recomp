@@ -1206,7 +1206,7 @@ what the guest draws into, reads or waits for. The code is the comment at `s_ssa
 - **Setting.** Settings > Enhanced offers **Supersampling** (2x, 4x or Off), for the library or for one game
   (section 10.5), and the launch line carries it as `ssaa=2` or `ssaa=4` for an Enhanced or Ace launch with it
   on (section 10.1); a missing key or `ssaa=off` is off. It needs no `tier=ace`. It is off in a fresh settings
-  file and in every graphics preset, because of its cost (below). It has no other switch.
+  file and in no graphics preset, because of its cost (below): a preset leaves it as it is. It has no other switch.
 - **How.** It runs the host twin (section 10.11) at the render scale times the factor; the twin keeps the authentic
   colour unless full colour was asked for. At each present the twin is averaged down to the render scale by
   halving blits with linear filtering: one at 2x, two at 4x. Each halving step weighs four samples equally and
@@ -1241,7 +1241,7 @@ what the guest draws into, reads or waits for. The code is the comment at `s_ssa
   The estimate is not a promise: a title with more live render targets uses more, and a twin allocation that fails
   later turns the twin off for the rest of the run with one `TWIN: off ...` line and one
   `SSAA: off for the rest of the run with the twin` line (section 10.11), and the Ace report then gives
-  `"ssaa": 1` with the factor asked for. At render scale 1 a failed allocation of the twin's vertices makes it
+  `"ssaa": 1` with the factor asked for (twin-alloc-fail with `--ssaa 2`). At render scale 1 a failed allocation of the twin's vertices makes it
   unavailable the same way. `ssaa-limit` forces small limits and checks the factor chosen, the reason given and
   the Ace report.
 - **Cost.** Every render op is drawn a second time, into the twin, at factor x factor times the render scale's

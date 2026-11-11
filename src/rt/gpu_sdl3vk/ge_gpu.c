@@ -7245,7 +7245,7 @@ static uint64_t ssaa_bytes(int scale, int f, unsigned depth_bpp) {
 
 /* The largest factor of `want` (4, then 2) whose twin fits: each side at most `max_dim`, and
  * ssaa_bytes within `budget`. 1 when neither fits. `why` gets the reason the request did not fit
- * (empty when it did). */
+ * (empty when it did) and, when nothing fits, the reason the last factor tried did not. */
 static int ssaa_choose(int want, int scale, uint32_t max_dim, uint64_t budget, unsigned depth_bpp,
                        char *why, size_t cap) {
     if (cap) why[0] = '\0';

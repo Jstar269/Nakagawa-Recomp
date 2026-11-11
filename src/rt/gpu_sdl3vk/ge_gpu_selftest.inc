@@ -8966,7 +8966,8 @@ static int coherence_run_twin_gate(void) {
  * allocation of the scene fails (N = 1: T1's twin; 2: its depth twin; 3: their framebuffer; 4 and
  * 5: T2's twin and framebuffer, after T1's twin has drawn). Each time the twin must go off for the
  * run, once, and the scene must then equal the twin-off run exactly: guest VRAM and the shown
- * images, at the user's scale, never a lower one. The twin is made again between steps. */
+ * images, at the user's scale, never a lower one. The twin is made again between steps. With
+ * supersampling asked for (`--ssaa`), the Ace report must then give `"ssaa": 1` (section 10.21). */
 static int coherence_run_twin_alloc_fail(void) {
     const char *name = "twin-alloc-fail";
     if (s_twin_unavailable) {
@@ -9012,6 +9013,14 @@ static int coherence_run_twin_alloc_fail(void) {
                             run.ref.vram[i] != ref.vram[i] ? "guest VRAM" : "the shown image");
                     ok = 0;
                 }
+            }
+            static char json[ACE_REPORT_MAX];
+            if (ok && g_ace_on && ace_requested()->ssaa > 1 &&
+                (ace_report_json(json, sizeof(json)) <= 0 || !strstr(json, "\"ssaa\": 1,"))) {
+                fprintf(stderr, "gpu coherence selftest [%s]: FAIL step %d: supersampling %dx was asked for and "
+                        "the twin is off, but the Ace report does not give \"ssaa\": 1\n", name, n,
+                        ace_requested()->ssaa);
+                ok = 0;
             }
         }
         twin_run_free(&run);
