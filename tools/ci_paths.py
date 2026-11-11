@@ -1411,8 +1411,8 @@ def run_tier(event_name: str, event: Mapping[str, object]) -> tuple[str, str]:
 #: module, test_production_smoke (about 16 hosted minutes by the weights in
 #: tools/ci_test_weights.json), sets the slowest shard: three shards plan to about 19
 #: minutes each, four to that module alone and about 14 minutes for each of the others,
-#: and a fifth would leave the slowest shard unchanged. Four keep a whole CI run at 16
-#: jobs (17 with the Windows installer job), inside the free plan's 20 concurrent jobs
+#: and a fifth would leave the slowest shard unchanged. Four keep a whole CI run at 17
+#: jobs (18 with the Windows installer job), inside the free plan's 20 concurrent jobs
 #: (docs/CI.md, "Jobs per run").
 #: tools/test_ci_test_shards.py holds both counts to that rule. The Makefile-coupled
 #: subset (tools/ci_test_shards.py --select makefile) is nearly the whole suite by
