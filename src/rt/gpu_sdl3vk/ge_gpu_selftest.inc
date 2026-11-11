@@ -8818,18 +8818,21 @@ static uint32_t dro_mixed_list(const DroState *st) {
  * (a depth test against depth the batch wrote itself); and K at z 47768, which the kind's test
  * rejects: 0 the alpha test GREATER 0x40 (K's alpha is 0x20), 1 the color test NOTEQUAL K's colour,
  * 2 the transform-mode depth range 0-40000, 3 the stencil test EQUAL 0 with a stencil-fail KEEP.
+ * Then Q at z 25268 under the depth test LESS with depth writes off, in the same shader-depth run:
+ * it passes over P1 and P2 and fails over P3 and the cleared depth, and writes none.
  * Last an opaque sprite at z 20000 under GEQUAL with depth writes off over all of them: where K
  * wrote depth anyway it would be hidden.
  * -zrange draws the command in transform mode, with identity matrices and a viewport that maps clip
  * x, y and z to 240 + 240 x, 136 - 136 y and 32768 + 30000 z: the boxes lie on 30 by 17 pixel
  * steps and the depths on 7500 steps, which those maps reach exactly. */
-static const float k_drk_box[4][5] = {
+static const float k_drk_box[5][5] = {
     { 60.0f, 34.0f, 150.0f, 102.0f, 32768.0f },    /* P1 */
     { 120.0f, 68.0f, 210.0f, 136.0f, 32768.0f },   /* P2 */
     { 30.0f, 17.0f, 90.0f, 68.0f, 25268.0f },      /* P3 */
     { 240.0f, 34.0f, 300.0f, 102.0f, 47768.0f },   /* K */
+    { 30.0f, 51.0f, 150.0f, 119.0f, 25268.0f },    /* Q */
 };
-static const uint32_t k_drk_rgba[4] = { 0x803050F0u, 0x80E0C020u, 0x8040C0E0u, 0x80608020u };
+static const uint32_t k_drk_rgba[5] = { 0x803050F0u, 0x80E0C020u, 0x8040C0E0u, 0x80608020u, 0x80A040C0u };
 static const DroBox k_drk_overlap = { 120u, 68u, 150u, 102u };
 
 static uint32_t dro_kill_list(const DroState *st, int kind) {
@@ -8837,13 +8840,13 @@ static uint32_t dro_kill_list(const DroState *st, int kind) {
     static const float behind[1][5] = { { 30.0f, 17.0f, 330.0f, 153.0f, 20000.0f } };
     static const uint32_t clear_rgba[1] = { 0 }, stencil_rgba[1] = { 0xFF000000u };
     static const uint32_t behind_rgba[1] = { 0xFF20A060u };
-    float box[4][5];
-    uint32_t rgba[4];
+    float box[5][5];
+    uint32_t rgba[5];
     memcpy(box, k_drk_box, sizeof box);
     memcpy(rgba, k_drk_rgba, sizeof rgba);
     if (kind == 0) rgba[3] = (rgba[3] & 0x00FFFFFFu) | 0x20000000u;
     if (kind == 2) {
-        for (int i = 0; i < 4; i++) {
+        for (int i = 0; i < 5; i++) {
             box[i][0] = (box[i][0] - 240.0f) / 240.0f; box[i][2] = (box[i][2] - 240.0f) / 240.0f;
             box[i][1] = (136.0f - box[i][1]) / 136.0f; box[i][3] = (136.0f - box[i][3]) / 136.0f;
             box[i][4] = (box[i][4] - 32768.0f) / 30000.0f;
@@ -8897,6 +8900,10 @@ static uint32_t dro_kill_list(const DroState *st, int kind) {
         stp_emit(&l, 0xDD, 0);                            /* KEEP, KEEP, KEEP */
     }
     dro_sprites(&l, &vaddr, (const float (*)[5])box, rgba, 4u);
+    stp_emit(&l, 0xE7, 1);                                /* Q: depth writes off, LESS */
+    stp_emit(&l, 0xDE, 4);
+    dro_sprites(&l, &vaddr, (const float (*)[5])&box[4], &rgba[4], 1u);
+    stp_emit(&l, 0xDE, 7);                                /* GEQUAL again for the sprite behind */
     stp_emit(&l, 0x12, (7u << 2) | (3u << 7) | (1u << 23));   /* through mode */
     stp_emit(&l, 0x22, 0);
     stp_emit(&l, 0x24, 0);

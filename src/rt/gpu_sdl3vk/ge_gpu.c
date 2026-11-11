@@ -1032,8 +1032,10 @@ static void to_layout(VkCommandBuffer cmd, VkImage img, VkImageAspectFlags aspec
  * run with the host twin on the snapshot path, 9 records the twin's pass of an interlock op as one
  * fixed-function pass that reads the twin snapshot, 11 drops the rmwzfb rule's depth-range line,
  * 12 its stencil-fail line, 13 makes the shader's depth test always pass in a shader-depth run, and
- * 14 skips that run's copy of its depth back to the depth image, and 15 restores the rule before
- * shader-owned depth: an op holding such a batch keeps the snapshot path (the failing-before state). */
+ * 14 skips that run's copy of its depth back to the depth image, 15 restores the rule before
+ * shader-owned depth: an op holding such a batch keeps the snapshot path (the failing-before state),
+ * 16 copies the twin's pass of a shader-depth run back into the image's depth instead of the twin's,
+ * and 17 lets a shader-depth run write depth for a batch whose depth writes are off. */
 #ifndef SR_GPU_DSTREAD_MUTANT
 #define SR_GPU_DSTREAD_MUTANT 0
 #endif
@@ -1950,7 +1952,7 @@ static VkPipeline pipe_create(const PipeKey *k, int rmw) {
 #if SR_GPU_DSTREAD_MUTANT == 13
         rmw_consts.zfunc = VK_COMPARE_OP_ALWAYS;
 #endif
-        rmw_consts.zwrite = k->zwrite ? VK_TRUE : VK_FALSE;
+        rmw_consts.zwrite = k->zwrite || SR_GPU_DSTREAD_MUTANT == 17 ? VK_TRUE : VK_FALSE;
     }
     const VkSpecializationMapEntry rmw_entries[3] = {
         { 0, (uint32_t)offsetof(RmwConsts, cmask), sizeof(int32_t) },
@@ -2536,7 +2538,9 @@ static void rmw_break(void) {
  * image's width, two D16 values to a word), and back after it (`out` 1). Both copies move the
  * values bit for bit. The box covers every fragment of the run (batch_rect holds its primitives
  * within the scissor); its left edge is taken down to an even column, because a depth copy's
- * buffer offset must be a multiple of 4. */
+ * buffer offset must be a multiple of 4. Every run, the image's and the twin's, shares the one
+ * buffer: the barriers below order them because all of them are recorded for the one graphics
+ * queue, which runs its submissions in order. */
 static void zrun_copy(Target *t, int twin, const SnapRect *g, int out) {
     if (snap_rect_empty(g)) return;
     DepthEnt *d = t->dep;
@@ -2616,7 +2620,7 @@ static void record_rmw_range(Target *t, const RangeRec *r, int twin) {
         if (zshader) zrun_copy(t, twin, &zbox, 0);
         record_range(t, &run, twin);
 #if SR_GPU_DSTREAD_MUTANT != 14
-        if (zshader) zrun_copy(t, twin, &zbox, 1);
+        if (zshader) zrun_copy(t, SR_GPU_DSTREAD_MUTANT == 16 ? 0 : twin, &zbox, 1);
 #endif
         /* the fixed-function pass's final colour layout; the depth-only pass leaves it alone */
         *layout = rmw ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;

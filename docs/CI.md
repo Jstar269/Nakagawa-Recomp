@@ -585,8 +585,8 @@ and the depth-tested pair of `dst-read-ztest` must equal it in depth too. `dst-r
 `dst-read-zrange` and `dst-read-sfail` write depth under a kill the early depth test cannot undo (the alpha test,
 the color test, a narrow transform-mode depth range, a stencil-fail KEEP): on the interlock path their op must take
 the interlock with depth tested and written in the shader and equal the software GE in colour and depth, an
-overlapping pair, a primitive behind another in the same batch and an opaque sprite behind the rejected one
-included; on the snapshot path their depth must equal it, and `dst-read-sfail` its colour too (a stencil
+overlapping pair, a primitive behind another in the same batch, a blended primitive under another depth test with
+depth writes off, and an opaque sprite behind the rejected one included; on the snapshot path their depth must equal it, and `dst-read-sfail` its colour too (a stencil
 batch that blends splits where its primitives overlap, a snapshot copy each). `dst-read-feedback`, a stencil state that textures from
 its own target, must keep the snapshot path on both paths: the destination copy is the texture its second sprite
 samples. On
@@ -605,12 +605,13 @@ pipeline cache (#2149) runs next, as three processes over one empty data root: c
 mutant targets follow, and each broken variant must fail its case with its own message:
 `gpu-coherence-selftest-snapbar-mutants` breaks the destination-snapshot copy's barriers three ways
 (`SR_GPU_SNAPBAR_MUTANT`, the submit-batch case), `gpu-coherence-pcache-mutant` makes pipelines bypass the
-pipeline cache (pipeline-cache-cold), and `gpu-dst-read-mutants` breaks the destination-read paths fourteen ways
-(`SR_GPU_DSTREAD_MUTANT`; mutants 1 to 3 and 5 to 15 run on the interlock path and are a SKIP on a device without it,
+pipeline cache (pipeline-cache-cold), and `gpu-dst-read-mutants` breaks the destination-read paths sixteen ways
+(`SR_GPU_DSTREAD_MUTANT`; mutants 1 to 3 and 5 to 17 run on the interlock path and are a SKIP on a device without it,
 the hosted lavapipe device included; 8 and 9 break the host twin's use of the interlock, 10 runs mutant 9 with the
-full-colour twin, 3, 6, 11 and 12 send one of the four kills back to the early depth test, 13 makes the shader's depth
+full-colour twin, 3 sends all four kills back to the early depth test and 6, 11 and 12 one each, 13 makes the shader's depth
 test always pass, 14 skips the copy of the shader's depth back to the depth image, and 15 keeps such an op on the
-snapshot path as before the shader owned depth),
+snapshot path as before the shader owned depth, 16 copies the twin's shader depth back into the image's, and 17
+writes depth for a batch whose depth writes are off),
 and `gpu-stencil-once-mutants` breaks the write-once stencil batch three ways (`SR_GPU_STENCIL_ONCE_MUTANT`: no
 reordering, every state called write-once, no depth condition).
 `fsr3-pass-selftest` runs FSR 3's eight compute passes on

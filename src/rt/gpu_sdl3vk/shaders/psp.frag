@@ -379,8 +379,10 @@ void main() {
 
 #ifdef SR_DST_INTERLOCK
     /* Shader-owned depth, in ge.c's order (put_px_rgba_tested): after the stencil test, before
-     * the blend. The depth is the pipeline's own rounding of the fragment's z (the depth-range
-     * test above takes it the same way). A failing fragment is dropped: the depth-fail op is KEEP
+     * the blend. The fragment's z is rounded to nearest, as the depth-range test above takes it;
+     * that is assumed to equal the D16 attachment's own conversion, which Vulkan asks for but does
+     * not require, so an EQUAL or NOTEQUAL test between an early-depth run and a shader-depth run
+     * of one op relies on it. A failing fragment is dropped: the depth-fail op is KEEP
      * wherever the test can fail (ge_gpu.c stencil_gpu_supported). */
     if (k_zfunc >= 0 && !kill && !stencil_fail) {
         uint zi = uint(gl_FragCoord.y) * uint(imageSize(u_dsti).x) + uint(gl_FragCoord.x);
