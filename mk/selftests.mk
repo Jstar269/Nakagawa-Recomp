@@ -1083,8 +1083,10 @@ gpu-coherence-selftest-snapbar-mutants: shader-verify $(RT_GE_O)
 		echo "gpu-coherence-selftest-snapbar-mutants: mutant $$m killed ($$kill)"; \
 	done
 
-# vram-view-identity-selftest — the GE decoders the pause menu's VRAM viewer calls leave later
-# frames, guest memory and the GE state unchanged (#314; the gui.c layer and timing are not covered). ge.c's lists run on ge_gpu.c's real targets: each frame draws a target, stores into it
+# vram-view-identity-selftest — the sources and decode the pause menu's VRAM viewer runs
+# (ge_vram_view_sources, ge_vram_view_decode, with gui.c's arguments) name the expected surfaces and
+# leave later frames, guest memory and the GE state unchanged (#314; timing is not covered).
+# ge.c's lists run on ge_gpu.c's real targets: each frame draws a target, stores into it
 # from the CPU, draws it as a texture into the shown target and presents that with a capture
 # armed. A run without the viewer writes the digest (every presented frame, the lists' return
 # codes, then guest VRAM and RAM as a guest read sees them and the GE state); runs with the
