@@ -1412,11 +1412,15 @@ bool nk_platform_absolute_path(const char *path, char *out_path, size_t max_len)
 
 bool nk_platform_real_path(const char *path, char *out_path, size_t max_len) {
     if (!path || !*path || !out_path || max_len == 0) return false;
-    WCHAR wpath[32768];
-    if (!utf8_to_wide(path, wpath, sizeof(wpath) / sizeof(wpath[0]))) return false;
+    WCHAR *wpath = (WCHAR *)malloc(NK_FINAL_PATH_CHARS * sizeof(WCHAR));
+    if (!wpath || !utf8_to_wide(path, wpath, NK_FINAL_PATH_CHARS)) {
+        free(wpath);
+        return false;
+    }
     HANDLE handle = CreateFileW(wpath, FILE_READ_ATTRIBUTES,
                                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
                                 OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    free(wpath);
     if (handle == INVALID_HANDLE_VALUE) return false;
     WCHAR *final_path = (WCHAR *)malloc(NK_FINAL_PATH_CHARS * sizeof(WCHAR));
     DWORD length = final_path == NULL ? 0 :
@@ -1444,10 +1448,14 @@ bool nk_platform_real_path(const char *path, char *out_path, size_t max_len) {
 
 FILE *nk_platform_open_regular_file(const char *path) {
     if (!path || !*path) return NULL;
-    WCHAR wpath[32768];
-    if (!utf8_to_wide(path, wpath, sizeof(wpath) / sizeof(wpath[0]))) return NULL;
+    WCHAR *wpath = (WCHAR *)malloc(NK_FINAL_PATH_CHARS * sizeof(WCHAR));
+    if (!wpath || !utf8_to_wide(path, wpath, NK_FINAL_PATH_CHARS)) {
+        free(wpath);
+        return NULL;
+    }
     HANDLE handle = CreateFileW(wpath, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
                                 FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_SEQUENTIAL_SCAN, NULL);
+    free(wpath);
     if (handle == INVALID_HANDLE_VALUE) return NULL;
     BY_HANDLE_FILE_INFORMATION info;
     if (!GetFileInformationByHandle(handle, &info) ||

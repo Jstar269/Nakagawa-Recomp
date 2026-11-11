@@ -202,9 +202,10 @@ from the package once, on this PC, in `<user data>/discs/<key>/<key>.iso`, holdi
 adds that image as if you had picked it. The folder the `EBOOT.PBP` is in comes with it, copied beside the image
 (`<key>.ms0`): the program runs from `ms0:/PSP/GAME/<folder>/` on its own Memory Stick, as on a PSP, so it finds
 the files it keeps beside itself. Each start copies the files the Memory Stick lacks from that copy, so what
-the program writes there stays. For a newer release, copy it over the folder and pick its `EBOOT.PBP`
-again: the next start replaces each file the program left as it was, and keeps each one it changed or
-wrote. A program added before its folder came along stops with a message asking you to pick it again.
+the program writes there stays. When a release changes only the files beside the program, copy it over the
+folder and pick its `EBOOT.PBP` again: the next start replaces each file the program left as it was, and
+keeps each one it changed or wrote. A release whose program changed is another title, with its own key and
+its own Memory Stick. A program added before its folder came along stops with a message asking you to pick it again.
 Keep each program in its own folder, as `PSP/GAME/<folder>/` on a PSP's Memory Stick has it. The key is made from the program and its title, so the same homebrew is
 the same game wherever you add it from, and the library shows it as **Beta / unofficial**. Homebrew is
 **Experimental**: nobody has checked a program unless [`COMPATIBILITY.md`](COMPATIBILITY.md#homebrew-limits)

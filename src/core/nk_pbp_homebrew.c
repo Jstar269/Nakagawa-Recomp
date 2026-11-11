@@ -593,7 +593,7 @@ done:
 #define HB_COPY_CHUNK (64u * 1024u)
 #define HB_MANIFEST_NAME "view.manifest"
 #define HB_MANIFEST_HEADER "nakagawa-homebrew-view 1"
-#define HB_SEEDED_HEADER "nakagawa-homebrew-seeded 1"
+#define HB_SEEDED_HEADER "nakagawa-homebrew-seeded 2"
 #define HB_TEXT_MAX (8u * 1024u * 1024u)
 #define HB_HEX_LEN 64u
 #define HB_TEMP_TRIES 10
@@ -707,8 +707,9 @@ bool nk_pbp_homebrew_folder_name(const char *pbp_path, char *out, size_t out_siz
     out[0] = '\0';
     if (!hb_source(pbp_path, &source)) {
         hb_problem(problem, problem_size, "%s",
-                   "The package's folder could not be found. Put the EBOOT.PBP in its own "
-                   "folder, as on a PSP's Memory Stick (PSP/GAME/<folder>/EBOOT.PBP).");
+                   "The package's folder could not be found, or where it really is could "
+                   "not be read from the system. Put the EBOOT.PBP in its own folder on a "
+                   "local drive, as on a PSP's Memory Stick (PSP/GAME/<folder>/EBOOT.PBP).");
         return false;
     }
     length = strlen(source.picked + source.name_at);
@@ -884,9 +885,11 @@ static bool hb_read_file(const char *from, uint64_t size, FILE *out, uint8_t dig
 
 /* Copy one file of size bytes to to, through a temporary name beside it that nothing
    holds yet, on the disk before it takes its name (replacing what to held). With expect
-   (a manifest digest), bytes that differ from it are not put in place. */
+   (a manifest digest), bytes that differ from it are not put in place, and *mismatch is
+   set. */
 static bool hb_copy_file(const char *from, const char *to, uint64_t size, const char *expect,
-                         char hex[HB_HEX_LEN + 1u], char *problem, size_t problem_size)
+                         char hex[HB_HEX_LEN + 1u], bool *mismatch, char *problem,
+                         size_t problem_size)
 {
     char temp[HB_PATH_MAX];
     uint8_t digest[32];
@@ -913,6 +916,7 @@ static bool hb_copy_file(const char *from, const char *to, uint64_t size, const 
     }
     hb_hex(digest, hex);
     if (ok && expect != NULL && strcmp(hex, expect) != 0) {
+        if (mismatch != NULL) *mismatch = true;
         hb_problem(problem, problem_size,
                    "%.400s is not the file the import copied: the program's folder beside "
                    "its disc image is damaged. Add the program's EBOOT.PBP again.", from);
@@ -1026,7 +1030,7 @@ static bool hb_walk(const char *from, const char *rel, const char *to, unsigned 
         char child[HB_PATH_MAX];
         int written = rel[0] ? snprintf(child, sizeof(child), "%s/%s", rel, name)
                              : snprintf(child, sizeof(child), "%s", name);
-        if (written <= 0 || (size_t)written >= sizeof(child) ||
+        if (written <= 0 || (size_t)written >= HB_PATH_MAX / 2u ||
             !hb_join(source, sizeof(source), from, name) ||
             (to != NULL && !hb_join(target, sizeof(target), to, name))) {
             hb_problem(walk->problem, walk->problem_size, "%s",
@@ -1072,8 +1076,8 @@ static bool hb_walk(const char *from, const char *rel, const char *to, unsigned 
                 hb_problem(walk->problem, walk->problem_size, "%s", "The import was cancelled.");
                 ok = false;
             } else if (to != NULL) {
-                ok = hb_copy_file(source, target, (uint64_t)size, NULL, hex, walk->problem,
-                                  walk->problem_size);
+                ok = hb_copy_file(source, target, (uint64_t)size, NULL, hex, NULL,
+                                  walk->problem, walk->problem_size);
             } else if (walk->manifest != NULL) {
                 ok = hb_read_file(source, (uint64_t)size, NULL, digest, walk->problem,
                                   walk->problem_size);
@@ -1110,7 +1114,7 @@ static bool hb_real_maybe_missing(const char *path, char *out, size_t out_size)
     while (!nk_platform_real_path(head, out, out_size)) {
         while (cut > 0u && !hb_is_separator(head[cut - 1u])) --cut;
         while (cut > 0u && hb_is_separator(head[cut - 1u])) --cut;
-        if (cut == 0u) return false;
+        if (cut == 0u || (cut == 2u && head[1] == ':')) return false;
         head[cut] = '\0';
     }
     if (cut < length) {
@@ -1145,7 +1149,15 @@ static bool hb_holds_personal_folder(const char *folder)
             hb_holds_folder(folder, known))
             return true;
     }
-    if (hb_holds_folder(folder, nk_platform_env_home_dir())) return true;
+    static const char *const english[] = {
+        "Desktop", "Documents", "Downloads", "Music", "Pictures", "Videos"
+    };
+    const char *home = nk_platform_env_home_dir();
+    if (hb_holds_folder(folder, home)) return true;
+    for (size_t i = 0; home != NULL && home[0] && i < sizeof(english) / sizeof(english[0]); ++i) {
+        if (hb_join(known, sizeof(known), home, english[i]) && hb_holds_folder(folder, known))
+            return true;
+    }
     for (size_t i = 0; i < sizeof(sync_roots) / sizeof(sync_roots[0]); ++i) {
         if (hb_holds_folder(folder, getenv(sync_roots[i]))) return true;
     }
@@ -1502,8 +1514,11 @@ static const char *hb_seeded_digest(char *const *lines, size_t count, const char
     return NULL;
 }
 
-/* Read the seed record: NULL lines and true when there is none yet. */
-static bool hb_seeded_read(const char *path, char **text, char ***lines, size_t *count)
+/* Read the seed record for the stick folder whose real path is stick: NULL lines and true
+   when there is none yet, or when it describes another Memory Stick (then nothing on this
+   one counts as placed, and the seed adopts by content). */
+static bool hb_seeded_read(const char *path, const char *stick, char **text, char ***lines,
+                           size_t *count)
 {
     size_t capacity = 0, n = 0;
     char *line;
@@ -1525,6 +1540,12 @@ static bool hb_seeded_read(const char *path, char **text, char ***lines, size_t 
         *end = '\0';
         if (n == 0u) {
             if (strcmp(line, HB_SEEDED_HEADER) != 0) return false;
+        } else if (n == 1u) {
+            if (strncmp(line, "stick ", 6) != 0) return false;
+            if (strcmp(line + 6, stick) != 0) {
+                *count = 0;
+                return true;
+            }
         } else {
             if (strlen(line) <= HB_HEX_LEN + 1u || !hb_is_hex(line) || line[HB_HEX_LEN] != ' ')
                 return false;
@@ -1533,7 +1554,7 @@ static bool hb_seeded_read(const char *path, char **text, char ***lines, size_t 
         n++;
         line = end + 1;
     }
-    return n >= 1u;
+    return n >= 2u;
 }
 
 /* Whether rel lies under one of the kept prefixes (a folder of the view the program
@@ -1547,6 +1568,28 @@ static bool hb_under(const char *rel, const char *const *prefixes, size_t count)
     return false;
 }
 
+/* The seed record for one Memory Stick: "<image>.seeded/<first 128 bits of the SHA-256 of
+   the stick folder's real path>", so each stick a title runs on keeps its own. */
+static bool hb_seeded_record_path(const char *dir, const char *stick, char *out,
+                                  size_t out_size)
+{
+    NkSha256 sha;
+    uint8_t digest[32];
+    char hex[HB_HEX_LEN + 1u];
+    nk_sha256_init(&sha);
+    nk_sha256_update(&sha, (const uint8_t *)stick, strlen(stick));
+    nk_sha256_finish(&sha, digest);
+    hb_hex(digest, hex);
+    hex[32] = '\0';
+    return hb_join(out, out_size, dir, hex);
+}
+
+static void hb_record(HbText *record, const char *hex, const char *rel)
+{
+    hb_text_add(record, hex, " ", rel);
+    hb_text_add(record, "\n", NULL, NULL);
+}
+
 bool nk_pbp_homebrew_seed_memstick(const char *iso_path, const char *folder,
                                    const char *memstick_root,
                                    char *problem, size_t problem_size)
@@ -1556,7 +1599,10 @@ bool nk_pbp_homebrew_seed_memstick(const char *iso_path, const char *folder,
     char source[HB_PATH_MAX];
     char stick_game[HB_PATH_MAX];
     char target[HB_PATH_MAX];
+    char target_real[HB_PATH_MAX];
+    char seeded_dir[HB_PATH_MAX];
     char seeded_path[HB_PATH_MAX];
+    char manifest_path[HB_PATH_MAX];
     HbManifest manifest;
     HbText record;
     char *seeded_text = NULL;
@@ -1564,14 +1610,18 @@ bool nk_pbp_homebrew_seed_memstick(const char *iso_path, const char *folder,
     size_t seeded_count = 0;
     const char **kept = NULL;
     size_t kept_count = 0;
+    size_t done = 0;
     bool ok = true;
+    bool record_ok = false;
+    bool view_damaged = false;
     if (memstick_root == NULL || memstick_root[0] == '\0' || !hb_is_absolute(memstick_root)) {
         hb_problem(problem, problem_size, "%s",
                    "The title has no Memory Stick folder to put the program's folder on.");
         return false;
     }
     if (folder == NULL || !nk_pbp_homebrew_view_root(iso_path, root, sizeof(root)) ||
-        !hb_beside_image(iso_path, ".seeded", seeded_path, sizeof(seeded_path)) ||
+        !hb_beside_image(iso_path, ".seeded", seeded_dir, sizeof(seeded_dir)) ||
+        !hb_join(manifest_path, sizeof(manifest_path), root, HB_MANIFEST_NAME) ||
         !hb_game_dir(root, game, sizeof(game)) || !hb_join(source, sizeof(source), game, folder) ||
         !hb_game_dir(memstick_root, stick_game, sizeof(stick_game)) ||
         !hb_join(target, sizeof(target), stick_game, folder)) {
@@ -1586,22 +1636,29 @@ bool nk_pbp_homebrew_seed_memstick(const char *iso_path, const char *folder,
                    "the program's EBOOT.PBP again.");
         return false;
     }
-    if (!hb_seeded_read(seeded_path, &seeded_text, &seeded, &seeded_count)) {
+    if (hb_state(target) == HB_FILE || hb_state(target) == HB_UNKNOWN ||
+        !nk_platform_mkdir_p_private(target) ||
+        !nk_platform_real_path(target, target_real, sizeof(target_real))) {
+        hb_problem(problem, problem_size, "%.400s could not be made on the Memory Stick.",
+                   target);
+        ok = false;
+    } else if (!hb_seeded_record_path(seeded_dir, target_real, seeded_path,
+                                      sizeof(seeded_path))) {
+        hb_problem(problem, problem_size, "%s",
+                   "The program's Memory Stick folder has a path too long to use.");
+        ok = false;
+    } else if (!hb_seeded_read(seeded_path, target_real, &seeded_text, &seeded, &seeded_count)) {
         hb_problem(problem, problem_size,
                    "%.400s, the record of what was put on the Memory Stick, could not be "
                    "read. Remove it and start the program again; nothing on the Memory Stick "
                    "is replaced without it.", seeded_path);
         ok = false;
-    }
-    if (ok && (hb_state(target) == HB_FILE || hb_state(target) == HB_UNKNOWN ||
-               !nk_platform_mkdir_p_private(target))) {
-        hb_problem(problem, problem_size, "%.400s could not be made on the Memory Stick.",
-                   target);
-        ok = false;
+    } else {
+        record_ok = true;
     }
     kept = (const char **)calloc(manifest.count + 1u, sizeof(*kept));
     memset(&record, 0, sizeof(record));
-    hb_text_add(&record, HB_SEEDED_HEADER "\n", NULL, NULL);
+    if (record_ok) hb_text_add(&record, HB_SEEDED_HEADER "\nstick ", target_real, "\n");
     if (kept == NULL) ok = false;
     for (size_t i = 0; ok && i < manifest.count; ++i) {
         const HbEntry *entry = &manifest.items[i];
@@ -1609,6 +1666,7 @@ bool nk_pbp_homebrew_seed_memstick(const char *iso_path, const char *folder,
         char view[HB_PATH_MAX];
         char hex[HB_HEX_LEN + 1u];
         HbState state;
+        done = i;
         if (hb_under(entry->rel, kept, kept_count)) continue;
         if (!hb_join_rel(stick, sizeof(stick), target, entry->rel) ||
             !hb_join_rel(view, sizeof(view), source, entry->rel)) {
@@ -1628,45 +1686,63 @@ bool nk_pbp_homebrew_seed_memstick(const char *iso_path, const char *folder,
                 hb_problem(problem, problem_size, "%.400s could not be made.", stick);
                 ok = false;
             }
+        } else if (state == HB_FOLDER) {
+            /* a folder where the view has a file: the program's, it stays */
+        } else if (hb_state(view) != HB_FILE ||
+                   nk_platform_get_file_size(view) != (int64_t)entry->size) {
+            view_damaged = true;
+            ok = false;
         } else if (state == HB_MISSING) {
-            ok = hb_copy_file(view, stick, entry->size, entry->hex, hex, problem, problem_size);
-            if (ok) {
-                hb_text_add(&record, entry->hex, " ", entry->rel);
-                hb_text_add(&record, "\n", NULL, NULL);
-            }
-        } else if (state == HB_FILE) {
-            /* Replaced only when it still holds the bytes put there before: then the
-               program has not changed it, and the folder brings a newer one. */
+            ok = hb_copy_file(view, stick, entry->size, entry->hex, hex, &view_damaged, problem,
+                              problem_size);
+            if (ok) hb_record(&record, entry->hex, entry->rel);
+        } else {
+            /* A file the stick has: the seed's while it holds what a seed put there (or the
+               view's own bytes); replaced only then, when the view brings others. Anything
+               else is the program's and stays. */
             const char *placed = hb_seeded_digest(seeded, seeded_count, entry->rel);
             int64_t size = nk_platform_get_file_size(stick);
             uint8_t digest[32];
-            if (placed == NULL) {
-                /* not put there by a seed: the program's own file */
-            } else if (strncmp(placed, entry->hex, HB_HEX_LEN) == 0) {
-                hb_text_add(&record, entry->hex, " ", entry->rel);
-                hb_text_add(&record, "\n", NULL, NULL);
+            if (placed != NULL && strncmp(placed, entry->hex, HB_HEX_LEN) == 0) {
+                hb_record(&record, entry->hex, entry->rel);
             } else if (size < 0 ||
                        !hb_read_file(stick, (uint64_t)size, NULL, digest, problem, problem_size)) {
                 if (size < 0) hb_problem(problem, problem_size, "%.400s could not be read.", stick);
                 ok = false;
             } else {
                 hb_hex(digest, hex);
-                if (strncmp(placed, hex, HB_HEX_LEN) == 0) {
-                    ok = hb_copy_file(view, stick, entry->size, entry->hex, hex, problem,
-                                      problem_size);
-                    if (ok) {
-                        hb_text_add(&record, entry->hex, " ", entry->rel);
-                        hb_text_add(&record, "\n", NULL, NULL);
-                    }
+                if (strcmp(hex, entry->hex) == 0) {
+                    hb_record(&record, entry->hex, entry->rel);
+                } else if (placed != NULL && strncmp(placed, hex, HB_HEX_LEN) == 0) {
+                    ok = hb_copy_file(view, stick, entry->size, entry->hex, hex, &view_damaged,
+                                      problem, problem_size);
+                    if (ok) hb_record(&record, entry->hex, entry->rel);
                 }
-                /* else the program changed it: it stays, and is no longer the seed's */
             }
         }
-        /* a folder where the view has a file: the program's, it stays */
     }
-    if (ok && (!nk_platform_sync_dir(target) || !hb_write_text(seeded_path, &record))) {
-        hb_problem(problem, problem_size, "%.400s could not be written.", seeded_path);
-        ok = false;
+    if (ok) done = manifest.count;
+    if (view_damaged) {
+        /* Without its manifest the view is BROKEN and no longer current, so adding the
+           program again writes it afresh rather than keep failing here. */
+        (void)nk_remove_utf8(manifest_path);
+        hb_problem(problem, problem_size,
+                   "The copy of the program's folder beside %.300s is damaged. Add the "
+                   "program's EBOOT.PBP again.", iso_path);
+    }
+    if (record_ok) {
+        /* What a seed stopped part way did place is recorded too, and what it did not reach
+           keeps its earlier record, so a later release still reaches it. */
+        for (size_t i = done; i < manifest.count; ++i) {
+            const char *placed = manifest.items[i].kind == 'F'
+                ? hb_seeded_digest(seeded, seeded_count, manifest.items[i].rel) : NULL;
+            if (placed != NULL) hb_text_add(&record, placed, "\n", NULL);
+        }
+        if (!nk_platform_sync_dir(target) || !nk_platform_mkdir_p_private(seeded_dir) ||
+            !hb_write_text(seeded_path, &record)) {
+            if (ok) hb_problem(problem, problem_size, "%.400s could not be written.", seeded_path);
+            ok = false;
+        }
     }
     free(record.text);
     free(kept);

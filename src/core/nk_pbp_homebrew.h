@@ -146,11 +146,14 @@ NkPbpHomebrewView nk_pbp_homebrew_find_view(const char *iso_path, char *folder,
  * path), in PSP/GAME/<folder>/, as a PSP owner copying a newer release over the
  * folder would, without losing what the program wrote. A file or folder the stick
  * lacks is copied. A file the stick has is replaced only when it still holds the
- * bytes an earlier launch put there and the view now has others; anything else
- * there (the program's own writes, a file the program changed) stays as it is.
- * What was put there is recorded in "<image without .iso>.seeded", beside the
- * image. Every file copied is checked against the manifest. False, with a sentence
- * in problem, when a part could not be read or copied. */
+ * bytes an earlier launch put there (or the view's own bytes) and the view now has
+ * others; anything else there (the program's own writes, a file the program
+ * changed) stays as it is. What was put there is recorded per Memory Stick in
+ * "<image without .iso>.seeded/", beside the image, also when the seed stops part
+ * way. Every file copied is checked against the manifest; a view file that is
+ * missing or differs from it removes the manifest, so adding the program again
+ * writes the view afresh. False, with a sentence in problem, when a part could not
+ * be read or copied. */
 bool nk_pbp_homebrew_seed_memstick(const char *iso_path, const char *folder,
                                    const char *memstick_root,
                                    char *problem, size_t problem_size);

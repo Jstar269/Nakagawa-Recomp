@@ -903,6 +903,53 @@ static void test_no_iso_child_environment(const char *test_executable,
         snprintf(hb_file, sizeof(hb_file), "%s%cSETTINGS.INI", hb_stick_folder, sep);
         assert_file_text(hb_file, "the player's own settings");
 
+        /* A seed that stops part way still records what it placed, so a later release
+           reaches those files; a view file that differs from the manifest stops the launch
+           and leaves the view to be written afresh (review of #2426, M-new-1, m-new-4).
+           Sorted, DATA.TXT is seeded before NEW.TXT, whose view copy is damaged. */
+        snprintf(hb_file, sizeof(hb_file), "%s%cDATA.TXT", hb_src, sep);
+        write_file(hb_file, "release three");
+        snprintf(hb_file, sizeof(hb_file), "%s%cNEW.TXT", hb_src, sep);
+        write_file(hb_file, "a new file");
+        assert(nk_pbp_homebrew_write_view(hb_pbp, hb_view_root, NULL, problem, sizeof(problem)));
+        snprintf(hb_file, sizeof(hb_file), "%s%cPSP%cGAME%cMYHB%cNEW.TXT", hb_view_root, sep, sep,
+                 sep, sep);
+        write_file(hb_file, "a bad file");
+        assert(nk_launch_start(&session) != NK_OK);
+        assert(strstr(session.last_error, "is damaged") != NULL);
+        assert(strstr(session.last_error, "Add the program's EBOOT.PBP again") != NULL);
+        assert(!nk_pbp_homebrew_view_current(hb_pbp, hb_view_root));
+        snprintf(hb_file, sizeof(hb_file), "%s%cDATA.TXT", hb_stick_folder, sep);
+        assert_file_text(hb_file, "release three");
+        snprintf(hb_file, sizeof(hb_file), "%s%cNEW.TXT", hb_stick_folder, sep);
+        assert(nk_platform_path_missing(hb_file));
+        snprintf(hb_file, sizeof(hb_file), "%s%cDATA.TXT", hb_src, sep);
+        write_file(hb_file, "release four");
+        assert(nk_pbp_homebrew_write_view(hb_pbp, hb_view_root, NULL, problem, sizeof(problem)));
+        run_probe(&session, report_path, observed, sizeof(observed));
+        snprintf(hb_file, sizeof(hb_file), "%s%cDATA.TXT", hb_stick_folder, sep);
+        assert_file_text(hb_file, "release four");
+        snprintf(hb_file, sizeof(hb_file), "%s%cNEW.TXT", hb_stick_folder, sep);
+        assert_file_text(hb_file, "a new file");
+
+        /* Each Memory Stick keeps its own record: a run on another stick does not make the
+           title's own stick take its old files for current ones (review of #2426, m-new-1). */
+        {
+            char hb_other_stick[NK_MAX_PATH * 2 + 32];
+            snprintf(hb_other_stick, sizeof(hb_other_stick), "%s%chomebrew-stick-copy", root, sep);
+            assert(nk_platform_mkdir_p(hb_other_stick));
+            snprintf(hb_file, sizeof(hb_file), "%s%cDATA.TXT", hb_src, sep);
+            write_file(hb_file, "release five");
+            assert(nk_pbp_homebrew_write_view(hb_pbp, hb_view_root, NULL, problem,
+                                              sizeof(problem)));
+            copy_field(session.memstick_root, sizeof(session.memstick_root), hb_other_stick);
+            run_probe(&session, report_path, observed, sizeof(observed));
+            copy_field(session.memstick_root, sizeof(session.memstick_root), hb_stick);
+            run_probe(&session, report_path, observed, sizeof(observed));
+            snprintf(hb_file, sizeof(hb_file), "%s%cDATA.TXT", hb_stick_folder, sep);
+            assert_file_text(hb_file, "release five");
+        }
+
         /* A second folder in the view is not a program's folder: the launch stops. */
         snprintf(hb_view, sizeof(hb_view), "%s%cPSP%cGAME%cOTHER", hb_view_root, sep, sep, sep);
         assert(nk_platform_mkdir_p(hb_view));
