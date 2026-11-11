@@ -1406,6 +1406,7 @@ the report runs the toolchain check, which can take a minute.
 
 | Symptom | Cause | Fix |
 | --- | --- | --- |
+| Make stops with `<target> needs a POSIX sh, and mingw32-make found no sh.exe on PATH` | `mingw32-make` found no POSIX `sh`, so it would run that recipe with `cmd.exe`, which misreads sh syntax; the Makefile refuses before any line of the recipe runs | Put Git for Windows' `usr\bin` ahead of `C:\msys64\usr\bin` on `PATH` (see [PATH order](#path-order)) |
 | A Make recipe fails with a shell error, or runs words such as `status` as commands | `mingw32-make` found no POSIX `sh` and fell back to `cmd.exe` | Put Git for Windows' `usr\bin` ahead of `C:\msys64\usr\bin` on `PATH` (see [PATH order](#path-order)) |
 | `cannot find -lvulkan` with `VULKAN_SDK=/ucrt64` | That is the CI's MSYS2 layout; a local MSYS2 may lack the import library | Leave `VULKAN_SDK` unset so the Makefile finds the installed Vulkan SDK |
 | A Make-driven step fails on a `C:\path\to\dir` path | Backslashes in a Make variable are read as escapes | Pass Make paths with forward slashes (`C:/path/to/dir`) |
