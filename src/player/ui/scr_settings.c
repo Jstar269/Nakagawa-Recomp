@@ -926,8 +926,10 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
             bool discord_row = model->discord_available || model->discord_presence;
             const char *discord_sentence = model->discord_available
                 ? SCR_DISCORD_SENTENCE : SCR_DISCORD_STORED_ON_SENTENCE;
-            /* One button column for the rows the page shows. */
-            WizardRow rows[3];
+            /* One button column for every row the page shows, so a sentence of any of them
+               that would be cut makes them all stack. The Nickname button's value is clamped
+               to half the column, so only its name counts for the column's width. */
+            WizardRow rows[4];
             size_t row_count = 0u;
             if (model->online_mode) {
                 rows[row_count++] = (WizardRow){"Online mode", "On",
@@ -941,6 +943,7 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                                                 model->discord_presence ? "On" : "Off",
                                                 discord_sentence};
             }
+            rows[row_count++] = (WizardRow){"Nickname", "", SCR_NICKNAME_SENTENCE};
             WizardColumn column = scr_wizard_column(ui, rows, row_count, inner - 32.0f, false);
             if (model->online_mode &&
                 scr_wizard_switch(ui, PLAYER_UI_ID_SETTINGS_ONLINE_MODE, SET_ID_TEXT + 0x80u,
@@ -968,8 +971,7 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                                      nk_ui_text_clamp(ui, safe_text(model->nickname,
                                                                     NK_NICKNAME_DEFAULT),
                                                       &value, column.cell * 0.5f, 1),
-                                     "What games show as this PSP's nickname. It is never "
-                                     "taken from this PC's user name.",
+                                     SCR_NICKNAME_SENTENCE,
                                      false, inner - 32.0f, &column)) {
                     *result = settings_op(PLAYER_UI_SETTINGS_EDIT_NICKNAME);
                 }
