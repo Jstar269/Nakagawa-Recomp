@@ -270,6 +270,7 @@ extern void sr_hle_test_audio_wait_reset(void);
 extern void sr_hle_test_audio_wait_hook(void (*hook)(uint32_t us));
 extern uint64_t sr_hle_test_audio_wait_total_us(void);
 extern void sr_hle_test_audio_lead_reset(void);
+extern uint32_t sr_hle_test_audio_late_wake_us(void);
 extern void sr_hle_test_audio_lead_feed(uint32_t vbl, int ch, int queued);
 extern unsigned long sr_hle_test_audio_lead_window(int *peak, uint32_t *peak_ch,
                                                    unsigned long *noqueue, long *last_ms);
@@ -530,9 +531,35 @@ static int s_cap_pending;      /* armed and not yet resolved by the present path
  * arms without the report path writing legacy snapshot files. */
 static int s_cap_arm_accept = 1;
 
+/* A host output device for the pacing regressions (test_audio_host_hold_*). While it is on
+ * (s_audio_sim_pull > 0) every channel has its own queue: pushes fill it, and the time the guest
+ * waits is device time, in which the device takes s_audio_sim_pull frames from each channel that
+ * has been pushed, every that many frames of time. A pull that finds fewer takes what is there
+ * and counts as a dropout; one that finds nothing leaves the channel played dry, as the SDL
+ * backend reports it. Off by default: the stubs then report s_audio_queue_result as before and no
+ * device block size. */
+static int s_audio_sim_pull;
+static int s_audio_sim_reported_pull = -1;    /* what the device is said to take; -1: what it takes */
+static int s_audio_sim_q[9];
+static int s_audio_sim_pushed[9];
+static int s_audio_sim_dry[9];                /* sr_audio_played_dry's answer, device or not */
+static unsigned long s_audio_sim_short[9];
+static uint64_t s_audio_sim_us, s_audio_sim_next_pull_us;
+static unsigned long s_audio_sim_pulls;
+static uint64_t s_audio_sim_pushed_frames;
+static uint32_t s_audio_sim_late_us;          /* every guest wait ends this much late */
+static unsigned long s_audio_silence_calls;   /* sr_audio_push_silence, device or not */
+static uint64_t s_audio_silence_frames;
+
 void sr_audio_push(int ch, const int16_t *lr, int nframes, int volL, int volR) {
     (void)ch;
     s_audio_push_calls++;
+    if (s_audio_sim_pull > 0 && nframes > 0 && ch >= 0 && ch < 9) {
+        s_audio_sim_q[ch] += nframes;
+        s_audio_sim_pushed[ch] = 1;
+        s_audio_sim_dry[ch] = 0;
+        s_audio_sim_pushed_frames += (uint64_t)nframes;
+    }
     s_audio_push_frames = nframes;
     s_audio_push_vol_l = volL;
     s_audio_push_vol_r = volR;
@@ -547,8 +574,48 @@ void sr_audio_push(int ch, const int16_t *lr, int nframes, int volL, int volR) {
     }
 }
 
+void sr_audio_push_silence(int ch, int nframes) {
+    s_audio_silence_calls++;
+    if (nframes <= 0 || ch < 0 || ch >= 9) return;
+    s_audio_silence_frames += (uint64_t)nframes;
+    if (s_audio_sim_pull > 0) {
+        s_audio_sim_q[ch] += nframes;
+        s_audio_sim_pushed[ch] = 1;
+        s_audio_sim_dry[ch] = 0;
+    }
+}
+
+int sr_audio_played_dry(int ch) {
+    return ch >= 0 && ch < 9 && s_audio_sim_dry[ch] && (s_audio_sim_pull <= 0 || s_audio_sim_q[ch] == 0);
+}
+
+static void audio_sim_advance(uint32_t us) {
+    s_audio_sim_us += (uint64_t)us + s_audio_sim_late_us;
+    while (s_audio_sim_pull > 0 && s_audio_sim_us >= s_audio_sim_next_pull_us) {
+        s_audio_sim_pulls++;
+        for (int ch = 0; ch < 9; ch++) {
+            if (!s_audio_sim_pushed[ch]) continue;
+            if (s_audio_sim_q[ch] < s_audio_sim_pull) {
+                s_audio_sim_short[ch]++;
+                if (s_audio_sim_q[ch] == 0) s_audio_sim_dry[ch] = 1;   /* a pull that got nothing */
+                s_audio_sim_q[ch] = 0;
+            } else {
+                s_audio_sim_q[ch] -= s_audio_sim_pull;
+            }
+        }
+        s_audio_sim_next_pull_us += (uint64_t)s_audio_sim_pull * 1000000u / 44100u;
+    }
+}
+
+int sr_audio_host_pull_frames(void) {
+    return s_audio_sim_reported_pull >= 0 ? s_audio_sim_reported_pull : s_audio_sim_pull;
+}
+
 int sr_audio_queued(int ch) {
-    (void)ch;
+    if (s_audio_sim_pull > 0 && ch >= 0 && ch < 9) {
+        s_audio_queue_calls++;
+        return s_audio_sim_q[ch];
+    }
     if (s_audio_queue_seq_len > 0) {
         int i = (int)s_audio_queue_calls;
         if (i >= s_audio_queue_seq_len) i = s_audio_queue_seq_len - 1;
@@ -573,6 +640,18 @@ static void audio_fixture_reset(void) {
     s_audio_push_capture_frames = 0;
     s_audio_queue_result = 0;
     s_audio_queue_seq_len = 0;
+    s_audio_sim_pull = 0;
+    s_audio_sim_reported_pull = -1;
+    memset(s_audio_sim_q, 0, sizeof(s_audio_sim_q));
+    memset(s_audio_sim_pushed, 0, sizeof(s_audio_sim_pushed));
+    memset(s_audio_sim_dry, 0, sizeof(s_audio_sim_dry));
+    memset(s_audio_sim_short, 0, sizeof(s_audio_sim_short));
+    s_audio_sim_us = s_audio_sim_next_pull_us = 0u;
+    s_audio_sim_pulls = 0u;
+    s_audio_sim_pushed_frames = 0u;
+    s_audio_sim_late_us = 0u;
+    s_audio_silence_calls = 0u;
+    s_audio_silence_frames = 0u;
 }
 
 static int s_test_gui_on;
@@ -12459,6 +12538,471 @@ static void test_audio_drift_window_reports_the_pacing_value(void) {
            "the all-unmeasured window closed and reset like any other");
     expect(last_ms == -1L, "a window with no host queue reports -1 ms, not 0");
     sr_hle_test_audio_lead_reset();
+}
+
+/* A channel played through the simulated host device (audio_sim_advance): blocking outputs by a
+ * guest that does nothing else, so every wait is one the blocking output asked for, against a
+ * device that takes `pull` frames at a time. The regular, Output2 and 44.1 kHz SRC calls all end in
+ * the same output; each is driven through its own NIDs. */
+typedef enum { AUDIO_SIM_REGULAR, AUDIO_SIM_OUTPUT2, AUDIO_SIM_SRC } AudioSimApi;
+
+typedef struct {
+    unsigned long pulls, short_pulls;
+    uint64_t pushed_frames, silence_frames;
+    unsigned long silence_calls;
+    uint32_t outputs;
+    uint32_t max_rest;       /* the deepest queue the guest was shown after an output returned */
+    int max_host;            /* the deepest queue the host mixer held then */
+    int rest_was_host;       /* every such reading was the host's whole queue */
+    uint32_t at_once;        /* outputs that returned before the first one that waited */
+    uint64_t wait_us;        /* what the outputs asked to wait, in all */
+    uint32_t waits[64];      /* and each of the first 64 */
+} AudioSimRun;
+
+enum { AUDIO_SIM_BUF = 0x08a00000u };
+static AudioSimApi s_audio_sim_api;
+static uint32_t s_audio_sim_frames;
+static int s_audio_sim_started_waiting;
+
+static int audio_sim_channel(void) { return s_audio_sim_api == AUDIO_SIM_REGULAR ? 0 : 8; }
+
+static uint32_t audio_sim_rest(void) {
+    extern int hle_audio_queued(int ch);
+    CpuState cpu;
+    if (s_audio_sim_api == AUDIO_SIM_REGULAR)
+        return audio_dispatch(&cpu, NID_SCE_AUDIO_GET_CHANNEL_REST_LENGTH, 0u, 0u, 0u);
+    if (s_audio_sim_api == AUDIO_SIM_OUTPUT2)
+        return audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT2_REST_SAMPLE, 0u, 0u, 0u);
+    const int q = hle_audio_queued(8);   /* the SRC calls have no rest query of their own */
+    return q > 0 ? (uint32_t)q : 0u;
+}
+
+static void audio_sim_begin(AudioSimApi api, uint32_t frames, int pull, int reported_pull, uint32_t late_us,
+                            AudioSimRun *r) {
+    CpuState cpu;
+    memset(r, 0, sizeof(*r));
+    r->rest_was_host = 1;
+    reset_fixture();
+    sr_hle_init();
+    sr_hle_test_audio_reset();
+    audio_fixture_reset();
+    s_audio_sim_api = api;
+    s_audio_sim_frames = frames;
+    s_audio_sim_started_waiting = 0;
+    if (api == AUDIO_SIM_REGULAR)
+        expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RESERVE, 0u, frames, 0u) == 0u,
+               "the device fixture reserves the regular channel");
+    else if (api == AUDIO_SIM_OUTPUT2)
+        expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT2_RESERVE, frames, 0u, 0u) == 0u,
+               "the device fixture reserves Output2");
+    else
+        expect(audio_dispatch(&cpu, NID_SCE_AUDIO_SRC_CH_RESERVE, frames, 44100u, 2u) == 0u,
+               "the device fixture reserves the SRC channel at 44100 Hz");
+    s_audio_sim_pull = pull;
+    s_audio_sim_reported_pull = reported_pull;
+    s_audio_sim_next_pull_us = (uint64_t)pull * 1000000u / 44100u;
+    s_audio_sim_late_us = late_us;
+    for (int ch = 0; ch < 9; ch++) s_audio_sim_dry[ch] = 1;   /* nothing was ever pushed */
+    sr_hle_test_audio_wait_reset();
+    sr_hle_test_audio_wait_hook(audio_sim_advance);
+}
+
+static void audio_sim_outputs(uint32_t outputs, AudioSimRun *r) {
+    const int ch = audio_sim_channel();
+    CpuState cpu;
+    int returns_ok = 1;
+    for (uint32_t i = 0; i < outputs; i++) {
+        const uint64_t waited = sr_hle_test_audio_wait_total_us();
+        uint32_t ret;
+        if (s_audio_sim_api == AUDIO_SIM_REGULAR) {
+            ret = audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT_BLOCKING, 0u, 0x80008000u, AUDIO_SIM_BUF);
+            if (ret != s_audio_sim_frames) returns_ok = 0;
+        } else if (s_audio_sim_api == AUDIO_SIM_OUTPUT2) {
+            ret = audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT2_OUTPUT_BLOCKING, 0x8000u, AUDIO_SIM_BUF, 0u);
+            if (ret != 0u) returns_ok = 0;
+        } else {
+            ret = audio_dispatch(&cpu, NID_SCE_AUDIO_SRC_OUTPUT_BLOCKING, 0x8000u, AUDIO_SIM_BUF, 0u);
+            if (ret != s_audio_sim_frames) returns_ok = 0;
+        }
+        const uint64_t asked = sr_hle_test_audio_wait_total_us() - waited;
+        if (asked) s_audio_sim_started_waiting = 1;
+        else if (!s_audio_sim_started_waiting) r->at_once++;
+        if (r->outputs < 64u) r->waits[r->outputs] = (uint32_t)asked;
+        r->outputs++;
+        r->wait_us += asked;
+        const uint32_t rest = audio_sim_rest();
+        if (rest > r->max_rest) r->max_rest = rest;
+        if (s_audio_sim_q[ch] > r->max_host) r->max_host = s_audio_sim_q[ch];
+        if (rest != (uint32_t)s_audio_sim_q[ch]) r->rest_was_host = 0;
+    }
+    expect(returns_ok, "every blocking output returned what its call returns");
+    r->pulls = s_audio_sim_pulls;
+    r->short_pulls = s_audio_sim_short[ch];
+    r->pushed_frames = s_audio_sim_pushed_frames;
+    r->silence_frames = s_audio_silence_frames;
+    r->silence_calls = s_audio_silence_calls;
+}
+
+static void audio_sim_end(void) {
+    sr_hle_test_audio_wait_hook(NULL);
+    sr_hle_test_audio_reset();
+    audio_fixture_reset();
+    reset_fixture();
+}
+
+static void audio_sim_run(AudioSimApi api, uint32_t frames, int pull, uint32_t late_us, uint32_t outputs,
+                          AudioSimRun *r) {
+    audio_sim_begin(api, frames, pull, -1, late_us, r);
+    audio_sim_outputs(outputs, r);
+    audio_sim_end();
+}
+
+/* The host mixer holds what its device takes in one pull (Warship Gunner 2 Portable, 256-frame
+ * channel). Held to the guest's two periods (512 frames), the queue is smaller than a 1024-frame
+ * device pull: every pull came up short and the channel delivered three periods per pull, 75% of
+ * its audio. With the hold (1024 + 736 - 512 = 1248 frames) no pull is short and the device is
+ * given all it asks for, while the guest is still shown at most its two periods.
+ *
+ * MUTANT: audio_host_hold_frames returns 0 -- the pulls come up short and fewer frames are
+ *   delivered than the device took.
+ * MUTANT: the hold leaves out the device pull (need is AUDIO_LATE_WAKE_FRAMES alone) -- pulls come
+ *   up short. */
+static void test_audio_host_hold_covers_a_device_pull(void) {
+    AudioSimRun r;
+    audio_sim_run(AUDIO_SIM_REGULAR, 256u, 1024, 0u, 2000u, &r);
+    expect(r.pulls >= 400u, "the device pulled throughout the run");
+    expect(r.short_pulls == 0u, "no 1024-frame pull found the 256-frame channel short");
+    expect(r.silence_frames == 1248u, "the hold was queued once, as silence ahead of the first push");
+    expect(r.pushed_frames + r.silence_frames >= (uint64_t)r.pulls * 1024u,
+           "the channel delivered every frame the device took: it is not slowed");
+    expect(r.max_rest <= 2u * 256u, "the guest is still shown at most its two periods");
+    expect(r.max_host > 2 * 256, "while the host mixer holds more than those");
+}
+
+/* The hold also covers a late wake: every wait of the blocking output ends one display period late
+ * and still no pull is short, on periods and pulls where two periods alone do not reach.
+ *
+ * MUTANT: the hold leaves out AUDIO_LATE_WAKE_FRAMES (need is the pull alone) -- pulls come up
+ *   short against 441-frame pulls and on the 512-frame channel. */
+static void test_audio_host_hold_covers_a_late_wake(void) {
+    static const struct { uint32_t frames; int pull; } cases[] = {
+        { 256u, 441 }, { 256u, 1024 }, { 512u, 441 }, { 512u, 1024 }, { 768u, 941 }, { 1024u, 4096 },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        AudioSimRun r;
+        audio_sim_run(AUDIO_SIM_REGULAR, cases[i].frames, cases[i].pull, sr_hle_test_audio_late_wake_us(), 2000u, &r);
+        expect(r.pulls >= 400u, "the device pulled throughout the late run");
+        expect(r.short_pulls == 0u, "a wake one display period late does not run the channel dry");
+        expect(r.max_rest <= 2u * cases[i].frames, "the guest is still shown at most its two periods");
+    }
+}
+
+/* A channel whose two periods already cover a pull and a display period is paced exactly as
+ * before: nothing is held back from what the guest sees and no silence is queued, late wakes or
+ * not (1024 and 2048 frames against 441- and 1024-frame pulls, 768 against 441). */
+static void test_audio_host_hold_leaves_long_periods_alone(void) {
+    static const struct { uint32_t frames; int pull; } cases[] = {
+        { 2048u, 1024 }, { 2048u, 441 }, { 1024u, 1024 }, { 1024u, 441 }, { 768u, 441 },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        AudioSimRun r;
+        audio_sim_run(AUDIO_SIM_REGULAR, cases[i].frames, cases[i].pull, sr_hle_test_audio_late_wake_us(), 400u, &r);
+        expect(r.short_pulls == 0u, "a long-period channel never came up short");
+        expect(r.rest_was_host, "and the guest sees the host mixer's whole queue: nothing is held back");
+        expect(r.silence_frames == 0u && r.silence_calls == 0u, "no silence is queued for it");
+    }
+}
+
+/* A channel starts as on the PSP: two outputs return at once and the third waits, whatever the
+ * hold, because the hold is queued as silence ahead of the first push and not filled by the
+ * guest. Where the device takes blocks the two periods do cover without late wakes (256-frame
+ * pulls), every wait the guest is asked for is the one it is asked for with no hold at all.
+ *
+ * MUTANT: audio_host_hold_prime does nothing -- four outputs return at once against 441-frame
+ *   pulls and six against 1024-frame pulls. */
+static void test_audio_host_hold_starts_as_the_psp_does(void) {
+    static const struct { uint32_t frames; int pull; uint32_t hold; } cases[] = {
+        { 256u, 441, 665u }, { 256u, 1024, 1248u }, { 512u, 1024, 736u }, { 1024u, 4096, 2784u },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        AudioSimRun r;
+        audio_sim_run(AUDIO_SIM_REGULAR, cases[i].frames, cases[i].pull, 0u, 64u, &r);
+        expect(r.at_once == 2u, "two outputs return at once at a channel's start, and the third waits");
+        expect(r.silence_frames == cases[i].hold && r.silence_calls == 1u,
+               "the hold is queued once, as silence");
+    }
+
+    AudioSimRun held, bare;
+    audio_sim_run(AUDIO_SIM_REGULAR, 256u, 256, 0u, 400u, &held);
+    audio_sim_begin(AUDIO_SIM_REGULAR, 256u, 256, 0, 0u, &bare);   /* the device says nothing: no hold */
+    audio_sim_outputs(400u, &bare);
+    audio_sim_end();
+    expect(held.silence_frames == 480u && bare.silence_frames == 0u, "one run holds 480 frames, the other none");
+    expect(held.short_pulls == 0u && bare.short_pulls == 0u, "neither comes up short against 256-frame pulls");
+    expect(held.at_once == 2u && bare.at_once == 2u, "both start with two outputs at once");
+    expect(held.wait_us == bare.wait_us && memcmp(held.waits, bare.waits, sizeof(held.waits)) == 0,
+           "and the guest is asked to wait exactly as long in both, output by output");
+}
+
+/* A channel that stops and is played dry starts again as it first started: the hold is queued as
+ * silence once more and two outputs return at once. One that resumes while held frames are still
+ * queued gets no silence, which would cut into audio that is playing: the guest refills the hold
+ * itself, its next outputs returning at once.
+ *
+ * MUTANT: audio_host_hold_prime takes an empty queue for played dry (sr_audio_queued(ch) != 0 in
+ *   place of !sr_audio_played_dry(ch)) -- silence is queued for the channel a full pull left at
+ *   zero. */
+static void test_audio_host_hold_restarts_as_the_psp_does(void) {
+    static const struct { uint32_t frames; int pull; uint32_t hold; } cases[] = {
+        { 256u, 441, 665u }, { 256u, 1024, 1248u },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        const uint32_t pull_us = (uint32_t)((uint64_t)cases[i].pull * 1000000u / 44100u);
+        AudioSimRun first, again;
+        audio_sim_begin(AUDIO_SIM_REGULAR, cases[i].frames, cases[i].pull, -1, 0u, &first);
+        audio_sim_outputs(300u, &first);
+        expect(first.at_once == 2u && first.short_pulls == 0u && first.silence_frames == cases[i].hold,
+               "the first start: two outputs at once, the hold queued once, no short pull");
+
+        /* The guest stops. The device plays what is queued, and takes one pull more from nothing. */
+        for (int pulls = 0; pulls < 16 && !s_audio_sim_dry[0]; pulls++) audio_sim_advance(pull_us);
+        expect(s_audio_sim_dry[0] && s_audio_sim_q[0] == 0, "the stopped channel is played dry");
+        const unsigned long short_while_stopped = s_audio_sim_short[0];
+
+        memset(&again, 0, sizeof(again));
+        again.rest_was_host = 1;
+        s_audio_sim_started_waiting = 0;
+        audio_sim_outputs(300u, &again);
+        expect(again.at_once == 2u, "the restart: two outputs return at once, and the third waits");
+        expect(again.silence_frames == 2u * cases[i].hold && again.silence_calls == 2u,
+               "the hold is queued as silence a second time");
+        expect(again.short_pulls == short_while_stopped, "and no pull is short after the restart");
+        expect(again.max_rest <= 2u * cases[i].frames, "the guest is shown at most its two periods");
+        audio_sim_end();
+    }
+
+    /* 256 frames against 441-frame pulls: after one pull with no output, 356 frames are still
+     * queued, all of them part of the 665-frame hold. */
+    AudioSimRun first, again;
+    audio_sim_begin(AUDIO_SIM_REGULAR, 256u, 441, -1, 0u, &first);
+    audio_sim_outputs(600u, &first);
+    audio_sim_advance(10000u);
+    expect(s_audio_sim_q[0] > 0 && audio_sim_rest() == 0u && !s_audio_sim_dry[0],
+           "one pull after the guest stops, held frames are still queued and the guest sees none");
+    memset(&again, 0, sizeof(again));
+    again.rest_was_host = 1;
+    s_audio_sim_started_waiting = 0;
+    audio_sim_outputs(300u, &again);
+    expect(again.silence_frames == 665u && again.silence_calls == 1u,
+           "a channel that resumes with frames still queued gets no silence");
+    expect(again.at_once > 2u, "its guest refills the hold: more than two outputs return at once");
+    expect(again.short_pulls == 0u && again.max_rest <= 512u,
+           "no pull is short and the guest is shown at most its two periods");
+
+    /* A full pull can leave a playing channel's queue at exactly zero: empty, but not played dry. */
+    CpuState cpu;
+    const uint64_t silence_before = s_audio_silence_frames;
+    s_audio_sim_q[0] = 0;
+    s_audio_sim_dry[0] = 0;
+    (void)audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT_BLOCKING, 0u, 0x80008000u, AUDIO_SIM_BUF);
+    expect(s_audio_silence_frames == silence_before,
+           "an empty queue that the device has not played dry gets no silence");
+    audio_sim_end();
+}
+
+/* Output2 and the 44.1 kHz SRC output are the same output on slot 8. Output2's release reads the
+ * queue the guest sees: busy while its rest count is above zero, and granted once the count is
+ * zero, with held frames still to play (measured busy rule: #311).
+ *
+ * MUTANT: h_AudioOutput2Release reads hle_audio_play_lead -- the release is refused while the
+ *   rest count reads zero. */
+static void test_audio_host_hold_on_output2_and_src(void) {
+    CpuState cpu;
+    AudioSimRun r;
+    audio_sim_begin(AUDIO_SIM_OUTPUT2, 256u, 441, -1, 0u, &r);
+    audio_sim_outputs(600u, &r);
+    expect(r.at_once == 2u && r.short_pulls == 0u && r.max_rest <= 2u * 256u,
+           "Output2 starts, holds and paces as the regular channel does");
+    expect(audio_sim_rest() > 0u, "after the last output the guest still sees samples queued");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT2_RELEASE, 0u, 0u, 0u) == 0x80268002u,
+           "so the release is refused as busy");
+    audio_sim_advance(10000u);   /* one 441-frame pull */
+    expect(audio_sim_rest() == 0u && s_audio_sim_q[8] > 0,
+           "one pull later the guest sees none, while the host still holds frames to play");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT2_RELEASE, 0u, 0u, 0u) == 0u,
+           "and the release succeeds");
+    audio_sim_end();
+
+    audio_sim_run(AUDIO_SIM_SRC, 256u, 1024, sr_hle_test_audio_late_wake_us(), 600u, &r);
+    expect(r.at_once == 2u && r.short_pulls == 0u && r.max_rest <= 2u * 256u,
+           "the 44100 Hz SRC output starts, holds and paces the same way, late wakes included");
+    expect(r.silence_frames == 1248u, "with the hold a 256-sample period needs against 1024-frame pulls");
+}
+
+/* Each channel holds for its own period. Two 256-frame channels fed in turn by one guest thread
+ * both stay fed against 1024-frame pulls, and a 256-frame and a 2048-frame channel that hold the
+ * same queue show the guest different depths.
+ *
+ * MUTANT: hle_audio_queued takes the period of channel 0 for every channel -- the 2048-frame
+ *   channel reads 752. */
+static void test_audio_host_hold_is_per_channel(void) {
+    CpuState cpu;
+    AudioSimRun r;
+    audio_sim_begin(AUDIO_SIM_REGULAR, 256u, 1024, -1, 0u, &r);
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RESERVE, 1u, 256u, 0u) == 1u,
+           "a second 256-frame channel is reserved");
+    uint32_t max_rest[2] = { 0u, 0u };
+    for (uint32_t i = 0; i < 4000u; i++) {
+        const uint32_t ch = i & 1u;
+        (void)audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT_BLOCKING, ch, 0x80008000u, AUDIO_SIM_BUF);
+        const uint32_t rest = audio_dispatch(&cpu, NID_SCE_AUDIO_GET_CHANNEL_REST_LENGTH, ch, 0u, 0u);
+        if (rest > max_rest[ch]) max_rest[ch] = rest;
+    }
+    expect(s_audio_sim_pulls >= 400u, "the device pulled throughout the two-channel run");
+    expect(s_audio_sim_short[0] == 0u && s_audio_sim_short[1] == 0u, "neither channel came up short");
+    expect(max_rest[0] <= 512u && max_rest[1] <= 512u, "each is shown at most its own two periods");
+    expect(s_audio_silence_frames == 2u * 1248u && s_audio_silence_calls == 2u,
+           "and each got its hold once");
+    audio_sim_end();
+
+    audio_sim_begin(AUDIO_SIM_REGULAR, 256u, 1024, -1, 0u, &r);
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RESERVE, 1u, 2048u, 0u) == 1u,
+           "a 2048-frame channel is reserved beside the 256-frame one");
+    s_audio_sim_q[0] = s_audio_sim_q[1] = 2000;
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_GET_CHANNEL_REST_LENGTH, 0u, 0u, 0u) == 752u,
+           "of 2000 queued frames the 256-frame channel's guest sees 752: 1248 are held");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_GET_CHANNEL_REST_LENGTH, 1u, 0u, 0u) == 2000u,
+           "and the 2048-frame channel's guest sees all 2000");
+    audio_sim_end();
+}
+
+/* The hold follows the device: when the block the device takes changes mid-run, in either
+ * direction, the channel goes on without a short pull and without a second helping of silence. A
+ * larger block is covered by the guest's next outputs returning at once. */
+static void test_audio_host_hold_follows_the_device(void) {
+    static const struct { int from, to; uint32_t hold; } cases[] = { { 441, 1024, 665u }, { 1024, 441, 1248u } };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        AudioSimRun r;
+        audio_sim_begin(AUDIO_SIM_REGULAR, 256u, cases[i].from, -1, sr_hle_test_audio_late_wake_us(), &r);
+        audio_sim_outputs(1000u, &r);
+        s_audio_sim_pull = cases[i].to;
+        audio_sim_outputs(1000u, &r);
+        expect(r.pulls >= 400u, "the device pulled before and after its block size changed");
+        expect(r.short_pulls == 0u, "no pull is short across a change of the device's block size");
+        expect(r.silence_frames == cases[i].hold, "silence was queued once, at the start");
+        expect(r.max_rest <= 2u * 256u, "the guest is shown at most its two periods throughout");
+        audio_sim_end();
+    }
+}
+
+/* Under the deterministic clock the guest sees the guest-time model and the host mixer only
+ * follows (#2037): a device that takes 1024-frame blocks changes neither what the guest reads nor
+ * what is queued for it.
+ *
+ * MUTANT: hle_audio_queued subtracts the hold under the deterministic clock too -- the guest reads
+ *   0 for the 256 frames it pushed.
+ * MUTANT: audio_host_hold_prime primes under the deterministic clock too -- silence is queued. */
+static void test_audio_host_hold_is_off_under_the_deterministic_clock(void) {
+    extern int hle_audio_queued(int ch);
+    CpuState cpu;
+    reset_fixture();
+    sr_hle_init();
+    sr_hle_test_audio_reset();
+    audio_fixture_reset();
+    s_det_clock = 1;
+    s_vtime_us = 1000u;
+    s_audio_sim_reported_pull = 1024;
+    for (int ch = 0; ch < 9; ch++) s_audio_sim_dry[ch] = 1;
+    s_audio_queue_result = 100000;   /* the host mixer is far behind: the guest must not see it */
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RESERVE, 0u, 256u, 0u) == 0u,
+           "the deterministic fixture reserves a 256-frame channel");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT_BLOCKING, 0u, 0x80008000u, AUDIO_SIM_BUF) == 256u,
+           "one blocking output under the deterministic clock");
+    expect(hle_audio_queued(0) == 256, "the guest reads the 256 frames it pushed: the model's, with no hold");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_GET_CHANNEL_REST_LENGTH, 0u, 0u, 0u) == 256u,
+           "and so does sceAudioGetChannelRestLength");
+    expect(s_audio_silence_calls == 0u, "no silence is queued under the deterministic clock");
+    s_det_clock = 0;
+    s_audio_queue_result = 0;
+    sr_hle_test_audio_reset();
+    audio_fixture_reset();
+    reset_fixture();
+}
+
+/* Fast forward gives the host device nothing and the guest the guest-time model, so the hold has no
+ * part in it: the model is seeded with what the guest saw of the host queue (the queue less the
+ * hold), no silence is queued for a channel the device has played dry, and the PSMF lead is the
+ * model's. Once fast forward stops, the played-dry channel gets its hold as silence again.
+ *
+ * MUTANT: audio_vq_on seeds the model with the host's whole queue -- the guest reads 2000 where it
+ *   read 752 a moment before fast forward.
+ * MUTANT: audio_host_hold_prime asks the deterministic clock only -- silence is queued during
+ *   fast forward. */
+static void test_audio_host_hold_stays_out_of_fast_forward(void) {
+    extern int hle_audio_queued(int ch);
+    extern int psmf_av_queue_frames(int ch);
+    CpuState cpu;
+    reset_fixture();
+    sr_hle_init();
+    sr_hle_test_audio_reset();
+    audio_fixture_reset();
+    s_det_clock = 0;
+    s_vtime_us = 1000u;
+    s_audio_sim_reported_pull = 1024;
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RESERVE, 0u, 256u, 0u) == 0u,
+           "the fast-forward hold fixture reserves a 256-frame channel");
+    s_audio_queue_result = 2000;
+    expect(hle_audio_queued(0) == 752, "before fast forward the guest sees 752 of 2000 queued frames");
+
+    s_ff_speed = SCHED_FAST_FORWARD_SPEED;
+    s_ff_epoch++;
+    expect(hle_audio_queued(0) == 752, "fast forward starts the guest queue at what the guest saw, not at 2000");
+    expect(psmf_av_queue_frames(0) == 752, "and the PSMF lead is the model's while it runs");
+    s_vtime_us += 100000u;   /* 100 ms of guest time plays the model out */
+    expect(hle_audio_queued(0) == 0, "the model drains in guest time");
+
+    for (int ch = 0; ch < 9; ch++) s_audio_sim_dry[ch] = 1;   /* the muted device plays the channel dry */
+    s_audio_queue_result = 0;
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT_BLOCKING, 0u, 0x80008000u, AUDIO_SIM_BUF) == 256u,
+           "a blocking output during fast forward");
+    expect(s_audio_silence_calls == 0u && s_audio_push_calls == 0u,
+           "fast forward queues neither silence nor audio on the host");
+
+    s_ff_speed = 1u;
+    s_vtime_us += 100000u;
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT_BLOCKING, 0u, 0x80008000u, AUDIO_SIM_BUF) == 256u,
+           "a blocking output after fast forward");
+    expect(s_audio_silence_calls == 1u && s_audio_silence_frames == 1248u && s_audio_push_calls == 1u,
+           "after fast forward the played-dry channel gets its hold as silence, then its audio");
+
+    s_audio_queue_result = 0;
+    sr_hle_test_audio_reset();
+    audio_fixture_reset();
+    reset_fixture();
+}
+
+/* The PSMF player measures when a pushed frame is heard, so its audio lead is the host mixer's
+ * whole queue, the hold included, while the guest's own view leaves the hold out.
+ *
+ * MUTANT: psmf_av_queue_frames returns hle_audio_queued(ch) -- the lead reads 752. */
+static void test_audio_host_hold_is_in_the_psmf_lead(void) {
+    extern int hle_audio_queued(int ch);
+    extern int psmf_av_queue_frames(int ch);
+    CpuState cpu;
+    reset_fixture();
+    sr_hle_init();
+    sr_hle_test_audio_reset();
+    audio_fixture_reset();
+    s_audio_sim_reported_pull = 1024;
+    s_audio_queue_result = 2000;
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RESERVE, 0u, 256u, 0u) == 0u,
+           "the lead fixture reserves a 256-frame channel");
+    expect(hle_audio_queued(0) == 752, "the guest sees 752 of 2000 queued frames");
+    expect(psmf_av_queue_frames(0) == 2000, "the PSMF audio lead is all 2000");
+    s_audio_queue_result = 0;
+    sr_hle_test_audio_reset();
+    audio_fixture_reset();
+    reset_fixture();
 }
 
 static uint64_t selftest_guest_u64(uint32_t addr) {
@@ -50528,6 +51072,17 @@ static int hle_selftest_main(int argc, char **argv) {
     test_audio_output2_and_src_accept_volumes_to_0xfffff();
     test_vaudio_plays_through_the_src_slot();
     test_audio_drift_window_reports_the_pacing_value();
+    test_audio_host_hold_covers_a_device_pull();
+    test_audio_host_hold_covers_a_late_wake();
+    test_audio_host_hold_leaves_long_periods_alone();
+    test_audio_host_hold_starts_as_the_psp_does();
+    test_audio_host_hold_restarts_as_the_psp_does();
+    test_audio_host_hold_on_output2_and_src();
+    test_audio_host_hold_is_per_channel();
+    test_audio_host_hold_follows_the_device();
+    test_audio_host_hold_is_off_under_the_deterministic_clock();
+    test_audio_host_hold_stays_out_of_fast_forward();
+    test_audio_host_hold_is_in_the_psmf_lead();
     test_audio_output_telemetry_counts_guest_frames();
     test_audio_queue_drains_in_guest_time_under_the_deterministic_clock();
     test_audio_guest_view_is_the_same_with_and_without_a_host_device();

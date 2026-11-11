@@ -230,7 +230,7 @@ static int s_have_view;
 static AceCounters s_counters;
 static uint64_t s_win_start_ns;
 static int s_win_started;
-static uint32_t s_win_frames, s_win_skipped, s_win_betweens, s_win_shown;
+static uint32_t s_win_frames, s_win_skipped, s_win_betweens, s_win_shown, s_win_motion_milli;
 static uint64_t s_shown_seq;   /* AcePace.frame_seq of the newest real frame that reached the screen */
 static uint64_t s_win_idle_ns;
 static uint32_t s_last_flip_vcount, s_last_flip_fb;
@@ -242,6 +242,7 @@ static AcePace s_pace;
 static AcePaceStats s_pace_stats;
 static uint32_t s_pace_vcount;
 static AceSmoothAuxStats s_aux_stats;
+static AceMotionStats s_motion;
 static int s_have_aux_stats;
 
 #define ACE_TARGETS 8
@@ -257,6 +258,8 @@ static void observation_reset(void) {
     memset(&s_counters, 0, sizeof(s_counters));
     s_win_start_ns = 0; s_win_started = 0;
     s_win_frames = s_win_skipped = s_win_betweens = s_win_shown = 0; s_win_idle_ns = 0;
+    s_win_motion_milli = 0;
+    memset(&s_motion, 0, sizeof(s_motion));
     s_shown_seq = 0;
     s_last_flip_vcount = s_last_flip_fb = 0; s_have_flip = 0;
     memset(s_rate_vblanks, 0, sizeof(s_rate_vblanks));
@@ -615,9 +618,16 @@ void ace_readout_judge(AceReadoutState *s, const AceWindow *w, AceReadoutView *o
     if (w->smooth) {
         v.smooth_on = 1;
         v.shown_fps = (double)w->shown / secs;
+        /* What moved: the real pictures, and each in-between by its measured weight. */
+        uint32_t real = w->shown >= w->betweens ? w->shown - w->betweens : 0u;
+        /* A measurement is read a few presents after its in-between, so it can land in the next
+         * window; no window is credited with more motion than the in-betweens it showed. */
+        uint64_t motion_milli = w->motion_milli;
+        if (motion_milli > 1000ull * w->betweens) motion_milli = 1000ull * w->betweens;
+        v.motion_fps = ((double)real + (double)motion_milli / 1000.0) / secs;
         size_t len = strlen(v.text);
         if (w->betweens)
-            snprintf(v.text + len, sizeof(v.text) - len, "  SMOOTH %d", (int)(v.shown_fps + 0.5));
+            snprintf(v.text + len, sizeof(v.text) - len, "  SMOOTH %d", (int)(v.motion_fps + 0.5));
         else
             snprintf(v.text + len, sizeof(v.text) - len, "  SMOOTH OFF");
     }
@@ -706,14 +716,24 @@ int ace_flip(uint32_t fb, uint32_t bytes, uint32_t vcount, uint64_t now_ns) {
     if (ace_det_flip(&s_det, vcount, new_frame))
         fprintf(stderr, "ACE_RATE: %s\n", ace_rate_name(s_det.stable));
     s_pace_vcount = vcount;
-    if (s_pace.held && new_frame) s_pace_stats.superseded++;
-    ace_pace_flip(&s_pace, new_frame, s_det.stable, s_eff.smooth, now_ns);
+    /* Fast forward makes no in-betweens: each new frame is shown and kept, as at every rate but
+     * 30, so the first in-between after it pairs two frames shown one after the other. A frame
+     * still held (or owed to a busy display) when fast forward starts is superseded by the first
+     * new frame: an OWED verdict would hold that new frame for a VBLANK, and with the display
+     * busy each frame after it would be owed in turn for the whole of fast forward. */
+    if (s_ff_running && new_frame && s_pace.held) {
+        s_pace.superseded++;
+        s_pace.held = 0;
+        s_pace.owed = 0;
+    }
+    ace_pace_flip(&s_pace, new_frame, s_ff_running ? ACE_RATE_NONE : s_det.stable, s_eff.smooth, now_ns);
     if (s_ff_running) {
         /* Fast forward: no window is judged (ace_note_fast_forward). */
     } else if (!s_win_started) {
         s_win_started = 1;
         s_win_start_ns = now_ns;
         s_win_frames = 0; s_win_skipped = 0; s_win_betweens = 0; s_win_shown = 0; s_win_idle_ns = 0;
+        s_win_motion_milli = 0;
     } else if (now_ns - s_win_start_ns >= 1000000000ull) {
         AceWindow w;
         w.wall_ns = now_ns - s_win_start_ns;
@@ -726,12 +746,14 @@ int ace_flip(uint32_t fb, uint32_t bytes, uint32_t vcount, uint64_t now_ns) {
         w.smooth = s_req.smooth != 0;  /* asked for: off for the run (no GPU) still says so */
         w.betweens = s_win_betweens;
         w.shown = s_win_shown;
+        w.motion_milli = s_win_motion_milli;
         ace_readout_judge(&s_readout, &w, &s_view);
         s_have_view = 1;
         s_counters.windows++;
         if (s_view.pc_limited) s_limited_windows++;
         s_win_start_ns = now_ns;
         s_win_frames = 0; s_win_skipped = 0; s_win_betweens = 0; s_win_shown = 0; s_win_idle_ns = 0;
+        s_win_motion_milli = 0;
     }
     return new_frame;
 }
@@ -755,11 +777,33 @@ void ace_pace_reset(AcePace *p) {
 }
 
 void ace_pace_flip(AcePace *p, int new_frame, AceRate rate, int smooth, uint64_t now_ns) {
-    p->reflip = p->held && !new_frame;
-    p->held = 0;
     p->flip_ns = now_ns;
     if (smooth && new_frame) p->frame_seq++;
-    if (!smooth || !new_frame) p->show = ACE_SHOW_REAL;
+    if (!new_frame) {
+        /* The frame on the screen's buffer is shown again. It is the held frame only when the
+         * pass kept the newest frame flipped: after flips whose presents were dropped it is a
+         * newer real frame, and that one replaces the held frame. Otherwise the held frame
+         * stays held until a present shows it. */
+        if (p->held && p->taken_seq != p->frame_seq) {
+            p->superseded++;
+            p->held = 0;
+            p->owed = 0;
+        }
+        p->reflip = p->held;
+        p->show = ACE_SHOW_REAL;
+        return;
+    }
+    p->reflip = 0;
+    if (smooth && p->held && p->owed) {
+        p->show = ACE_SHOW_OWED;
+        return;
+    }
+    if (p->held) {
+        p->superseded++;
+        p->held = 0;
+        p->owed = 0;
+    }
+    if (!smooth) p->show = ACE_SHOW_REAL;
     else p->show = rate == ACE_RATE_K2 ? ACE_SHOW_BETWEEN : ACE_SHOW_KEEP;
 }
 
@@ -767,9 +811,15 @@ AceShow ace_pace_take(AcePace *p) {
     AceShow show = p->show;
     p->show = ACE_SHOW_REAL;
     if (show == ACE_SHOW_REAL) return show;
-    if (show == ACE_SHOW_BETWEEN && p->taken_seq + 1u != p->frame_seq) {
+    int consecutive = p->taken_seq + 1u == p->frame_seq;
+    if (show == ACE_SHOW_BETWEEN && !consecutive) {
         show = ACE_SHOW_KEEP;
         p->unpaired++;
+    } else if (show == ACE_SHOW_OWED && !consecutive) {
+        show = ACE_SHOW_KEEP;
+        p->superseded++;
+        p->held = 0;
+        p->owed = 0;
     }
     p->taken_seq = p->frame_seq;
     return show;
@@ -777,6 +827,16 @@ AceShow ace_pace_take(AcePace *p) {
 
 void ace_pace_shown_between(AcePace *p, uint32_t vcount, uint64_t now_ns) {
     p->held = 1;
+    p->owed = 0;
+    p->held_after = vcount;
+    p->held_ns = now_ns;
+}
+
+void ace_pace_shown_owed(AcePace *p, uint32_t vcount, uint64_t now_ns) {
+    p->owed_ns = p->held_ns;
+    p->owed_shown = 1;
+    p->held = 1;
+    p->owed = 0;
     p->held_after = vcount;
     p->held_ns = now_ns;
 }
@@ -786,9 +846,30 @@ AcePresentKind ace_pace_flip_kind(const AcePace *p) {
 }
 
 int ace_pace_vblank(AcePace *p, uint32_t vcount) {
-    if (!p->held || vcount == p->held_after) return 0;
+    return p->held && vcount != p->held_after;
+}
+
+uint64_t ace_pace_held_shown(AcePace *p) {
+    if (p->owed_shown) {
+        /* The owed frame, shown by the flip of the frame after it: that one stays held. */
+        p->owed_shown = 0;
+        return p->owed_ns;
+    }
     p->held = 0;
-    return 1;
+    p->owed = 0;
+    return p->held_ns;
+}
+
+void ace_pace_held_missed(AcePace *p, int busy) {
+    if (!p->held) return;
+    if (busy) {
+        p->owed = 1;
+        p->busy++;
+    } else {
+        p->superseded++;
+        p->held = 0;
+        p->owed = 0;
+    }
 }
 
 AceShow ace_smooth_take(void) {
@@ -800,8 +881,23 @@ void ace_smooth_shown_between(uint64_t now_ns) {
     ace_pace_shown_between(&s_pace, s_pace_vcount, now_ns);
 }
 
+void ace_smooth_shown_owed(uint64_t now_ns) {
+    if (!g_ace_on) return;
+    ace_pace_shown_owed(&s_pace, s_pace_vcount, now_ns);
+}
+
 int ace_smooth_vblank(uint32_t vcount) {
     return g_ace_on && ace_pace_vblank(&s_pace, vcount);
+}
+
+void ace_smooth_held_missed(int busy) {
+    if (g_ace_on) ace_pace_held_missed(&s_pace, busy);
+}
+
+void ace_smooth_flip_busy(void) {
+    if (!g_ace_on || !s_pace.reflip) return;
+    s_pace.reflip = 0;
+    ace_pace_held_missed(&s_pace, 1);
 }
 
 void ace_pace_stats_add(AcePaceStats *s, AcePresentKind kind, uint64_t now_ns) {
@@ -833,8 +929,9 @@ void ace_smooth_note_present(AcePresentKind kind, uint64_t now_ns) {
         s_win_shown++;
         s_shown_seq = s_pace.frame_seq;
     }
-    if (kind == ACE_PRESENT_HELD && now_ns > s_pace.held_ns) {
-        uint64_t ns = now_ns - s_pace.held_ns;
+    uint64_t held_since = kind == ACE_PRESENT_HELD ? ace_pace_held_shown(&s_pace) : 0u;
+    if (kind == ACE_PRESENT_HELD && now_ns > held_since) {
+        uint64_t ns = now_ns - held_since;
         s_pace_stats.hold_count++;
         s_pace_stats.hold_sum_ns += ns;
         if (ns > s_pace_stats.hold_max_ns) s_pace_stats.hold_max_ns = ns;
@@ -842,7 +939,67 @@ void ace_smooth_note_present(AcePresentKind kind, uint64_t now_ns) {
 }
 
 void ace_pace_stats(AcePaceStats *out) {
-    if (out) *out = s_pace_stats;
+    if (!out) return;
+    *out = s_pace_stats;
+    out->superseded = s_pace.superseded;
+    out->busy = s_pace.busy;
+}
+
+/* ---- smooth motion: what an in-between moved ------------------------------------------------- */
+
+uint32_t ace_motion_weight_milli(uint32_t sum_old, uint32_t sum_new) {
+    uint64_t total = (uint64_t)sum_old + (uint64_t)sum_new;
+    uint64_t least = sum_old < sum_new ? sum_old : sum_new;
+    if (!total) return 0u;
+    return (uint32_t)((2000u * least + total / 2u) / total);
+}
+
+void ace_smooth_note_motion(uint32_t moving, uint32_t eq_old, uint32_t eq_new, uint32_t sum_old,
+                            uint32_t sum_new, uint32_t novel) {
+    if (!g_ace_on) return;
+    uint32_t weight = ace_motion_weight_milli(sum_old, sum_new);
+    s_motion.measured++;
+    s_motion.moving += moving;
+    s_motion.eq_old += eq_old;
+    s_motion.eq_new += eq_new;
+    s_motion.sum_old += sum_old;
+    s_motion.sum_new += sum_new;
+    s_motion.novel += novel;
+    s_motion.weight_milli += weight;
+    s_win_motion_milli += weight;
+}
+
+void ace_smooth_note_motion_unread(void) {
+    if (g_ace_on) s_motion.unread++;
+}
+
+void ace_motion_stats(AceMotionStats *out) {
+    if (out) *out = s_motion;
+}
+
+void ace_motion_queue_reset(AceMotionQueue *q) {
+    if (q) memset(q, 0, sizeof(*q));
+}
+
+int ace_motion_queue_made(AceMotionQueue *q, uint64_t serial, uint64_t submission) {
+    if (q->count == ACE_MOTION_PENDING) {
+        q->dropped++;
+        return 0;
+    }
+    uint32_t at = (q->head + q->count) % ACE_MOTION_PENDING;
+    q->serial[at] = serial;
+    q->submission[at] = submission;
+    q->count++;
+    return 1;
+}
+
+uint64_t ace_motion_queue_due(AceMotionQueue *q, uint64_t completed) {
+    /* Submissions finish in order, so the oldest entry is the first that can be due. */
+    if (!q->count || completed < q->submission[q->head]) return 0u;
+    uint64_t serial = q->serial[q->head];
+    q->head = (q->head + 1u) % ACE_MOTION_PENDING;
+    q->count--;
+    return serial;
 }
 
 /* ---- the per-run report -------------------------------------------------------------------- */
@@ -918,14 +1075,27 @@ size_t ace_report_json(char *out, size_t cap) {
     if (s_req.smooth) {
         const AcePaceStats *ps = &s_pace_stats;
         ACE_PUT("  \"presents\": {\"real\": %llu, \"between\": %llu, \"held\": %llu, "
-                "\"superseded\": %llu, \"unpaired\": %llu},\n",
+                "\"superseded\": %llu, \"unpaired\": %llu, \"busy\": %llu},\n",
                 (unsigned long long)ps->kind[ACE_PRESENT_REAL],
                 (unsigned long long)ps->kind[ACE_PRESENT_BETWEEN],
                 (unsigned long long)ps->kind[ACE_PRESENT_HELD],
-                (unsigned long long)ps->superseded, (unsigned long long)s_pace.unpaired);
+                (unsigned long long)s_pace.superseded, (unsigned long long)s_pace.unpaired,
+                (unsigned long long)s_pace.busy);
         ACE_PUT("  \"added_delay_ms\": {\"mean\": %.2f, \"max\": %.2f},\n",
                 ps->hold_count ? (double)ps->hold_sum_ns / (double)ps->hold_count / 1e6 : 0.0,
                 (double)ps->hold_max_ns / 1e6);
+    }
+    if (s_req.smooth && (s_motion.measured || s_motion.unread)) {
+        const AceMotionStats *m = &s_motion;
+        uint64_t sums = m->sum_old + m->sum_new;
+        ACE_PUT("  \"smooth_motion\": {\"measured\": %llu, \"unread\": %llu, \"moving_px\": %llu, "
+                "\"old_px\": %llu, \"new_px\": %llu, \"novel_px\": %llu, \"phase\": %.3f, "
+                "\"weight\": %.3f},\n",
+                (unsigned long long)m->measured, (unsigned long long)m->unread,
+                (unsigned long long)m->moving, (unsigned long long)m->eq_old,
+                (unsigned long long)m->eq_new, (unsigned long long)m->novel,
+                sums ? (double)m->sum_old / (double)sums : 0.0,
+                m->measured ? (double)m->weight_milli / 1000.0 / (double)m->measured : 0.0);
     }
     if (s_req.smooth && s_have_aux_stats) {
         const AceSmoothAuxStats *a = &s_aux_stats;

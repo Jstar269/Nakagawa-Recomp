@@ -25,6 +25,7 @@
 #endif
 
 #include "player_state.h"
+#include "player_enhanced_fixture.h"
 #include "ace.h"
 #include "iso_reader.h"
 #include "nk_font.h"
@@ -7729,6 +7730,17 @@ static void test_play_mode_settings(void) {
         assert(has_off);
     }
     assert(player_enhanced_part(PLAYER_PART_COUNT) == NULL);
+    /* The screen test's fixture is the page a new settings file shows: same names, fresh-value
+       words and sentences as the shipped table. */
+    for (int p = 0; p < PLAYER_PART_COUNT; p++) {
+        const PlayerEnhancedPartInfo *info = player_enhanced_part(p);
+        if (strcmp(info->name, k_enhanced_parts[p].name) != 0 ||
+            strcmp(player_enhanced_part_label(p, info->fresh), k_enhanced_parts[p].value) != 0 ||
+            strcmp(info->sentence, k_enhanced_parts[p].sentence) != 0) {
+            fprintf(stderr, "FAIL: part %d (%s) differs from player_enhanced_fixture.h\n", p, info->name);
+            assert(0);
+        }
+    }
     assert(strcmp(player_enhanced_part_label(PLAYER_PART_FILTERING, 8), "8x") == 0 &&
            strcmp(player_enhanced_part_label(PLAYER_PART_FILTERING, 0), "Off") == 0 &&
            strcmp(player_enhanced_part_label(PLAYER_PART_FILTERING, 7), "Off") == 0);
@@ -7814,6 +7826,45 @@ static void test_play_mode_settings(void) {
             "{\"id\": \"fixture-60hz\", \"target_title_id\": \"fixture-title\"}");
         player_app_refresh_title_enhancements(app);
         assert(app->title_enhancements[2].available);
+    }
+    /* A published package the source tree ships (assets/enhancements, section 5.1) gives a
+       title without one in the user's data folder its Ace; a file in that folder comes first,
+       even one that cannot be used. */
+    {
+        char src_root[760], dir[800], file[860], own[860];
+        bool had_install = false;
+        char *saved_install = capture_environment_value("NK_INSTALL_ROOT", &had_install);
+        snprintf(src_root, sizeof(src_root), "%s%cshipped_src", root, sep);
+        snprintf(dir, sizeof(dir), "%s%ctools", src_root, sep);
+        assert(nk_platform_mkdir_p(dir));
+        snprintf(file, sizeof(file), "%s%cnk_cli.py", dir, sep);
+        write_text_file(file, "# fixture\n");
+        snprintf(dir, sizeof(dir), "%s%cassets%cenhancements", src_root, sep, sep);
+        assert(nk_platform_mkdir_p(dir));
+        snprintf(file, sizeof(file), "%s%ctest90002-60hz.json", dir, sep);
+        write_text_file(file,
+            "{\"id\": \"shipped-60hz\", \"target_title_id\": \"fixture-title-2\"}");
+        snprintf(app->games[1].title_id, sizeof(app->games[1].title_id), "fixture-title-2");
+        set_environment_value("NK_INSTALL_ROOT", src_root);
+        char found[NK_MAX_PATH];
+        assert(player_app_shipped_enhancements_root(app, found, sizeof(found)) &&
+               strstr(found, "shipped_src") && strstr(found, "enhancements"));
+        player_app_refresh_title_enhancements(app);
+        assert(app->title_enhancements[1].available && app->title_enhancements[1].shipped);
+        assert(strcmp(app->title_enhancements[1].package_id, "shipped-60hz") == 0);
+        assert(app->title_enhancements[2].available && !app->title_enhancements[2].shipped);
+        snprintf(own, sizeof(own), "%s%cenhancements%ctest90002-60hz.json", root, sep, sep);
+        write_text_file(own, "{}");
+        player_app_refresh_title_enhancements(app);
+        assert(!app->title_enhancements[1].available && !app->title_enhancements[1].shipped &&
+               app->title_enhancements[1].problem[0]);
+        remove(own);
+        remove(file);
+        player_app_refresh_title_enhancements(app);
+        assert(!app->title_enhancements[1].available);
+        restore_environment_value("NK_INSTALL_ROOT", saved_install, had_install);
+        free(saved_install);
+        app->games[1].title_id[0] = '\0';
     }
 
     /* Per-part off switches at the library's level: a following title gets them. */

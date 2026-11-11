@@ -575,7 +575,7 @@ class NativeHostBackendTests(unittest.TestCase):
         sites = {"if (!sdl3vk_poll()) gui_quit_request();": 2,
                  "if (msg.message == WM_QUIT) { gui_quit_request(); continue; }": 1,
                  "if (gpu_action == GUI_GPU_CLOSED) gui_quit_request();": 1,
-                 "if (present_result == 0) gui_quit_request();": 1,
+                 "if (cpu_result == 0) gui_quit_request();": 1,
                  "if (result == 0) gui_quit_request();": 1,
                  "if (!sdl3vk_poll()) return gui_pause_quit();": 1,
                  "if (presented == 0) return gui_pause_quit();": 1,

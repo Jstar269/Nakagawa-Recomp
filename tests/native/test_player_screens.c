@@ -8,6 +8,7 @@
 #include "nk_ui_waves.h"
 #include "nk_ui_widgets.h"
 #include "scr_shared.h"
+#include "player_enhanced_fixture.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -27,36 +28,6 @@ static const uint8_t k_test_glyph_pixel = 0xFFu;
 typedef char player_screens_enhanced_rows_fit[
     PLAYER_PART_COUNT <= PLAYER_UI_ENHANCED_ROWS ? 1 : -1];
 
-typedef struct {
-    const char *name;
-    const char *value;
-    const char *sentence;
-} EnhancedPartFixture;
-
-/* The screen-only target omits the player model builder; mirror its real parts and pin the
-   fixture's size to PLAYER_PART_COUNT so a new part cannot silently disappear from the layout. */
-static const EnhancedPartFixture k_enhanced_parts[] = {
-    {"Texture filtering", "16x",
-     "Keeps slanted surfaces sharp. Save pictures keep the filtering."},
-    {"Crisp system text", "On",
-     "Draws the on-screen keyboard at your screen's resolution."},
-    {"Speed readout", "Off", "The game's speed and frame rate in a corner, over its HUD."},
-    {"Game badge", "On", "Names the mode for a few seconds when a game starts."},
-    {"Widescreen", "Off", "Shows more 3D space; HUD stays shaped. Some objects pop in. Smooth "
-                            "motion disables it."},
-    {"Smooth motion", "Off", "Shows steady 30 FPS scenes at 60, others as they are. Adds about 17 "
-                              "ms of delay."},
-    {"Clean pitched sound", "Off",
-     "Resamples pitched effects without aliasing. The game receives changed samples."},
-    {"Finer patches", "Off",
-     "More triangles per curved patch. Slower; alters GE timing; the game receives changed pictures."},
-    {"Wider culling", "Off", "Ace only, with Widescreen, in games that have a culling build. The game's "
-                             "memory changes."},
-    {"Sharper enlarging", "Off", "AMD FSR 1 sharpens display and recordings; game memory and "
-                                  "screenshots do not change."},
-    {"Stick dead zone", "Off", "Ace only, in games that ignore part of the stick. Small pushes count; "
-                               "the feel changes."},
-};
 /* Each part's words, as player_state.c's k_enhanced_parts gives them. */
 static const char *const k_enhanced_af_labels[] = {"16x", "8x", "4x", "2x", "Off"};
 static const char *const k_enhanced_switch_labels[] = {"On", "Off"};
@@ -93,9 +64,6 @@ static const char *const k_enhanced_title_modes[] = {"Library (Enhanced)", "Auth
    keeps the fixture's) and the play mode (NULL keeps the case's). */
 static const char *g_enhanced_value[PLAYER_PART_COUNT];
 static const char *g_enhanced_mode;
-
-typedef char player_screens_enhanced_fixture_matches_parts[
-    sizeof(k_enhanced_parts) / sizeof(k_enhanced_parts[0]) == PLAYER_PART_COUNT ? 1 : -1];
 
 #define CHECK(condition, message) do { \
     if (!(condition)) { \
@@ -3243,7 +3211,8 @@ static void test_settings_pages(void) {
               strstr(dump, "\"CLEAN PITCHED SOUND: OFF\"") != NULL &&
               strstr(dump, "\"SHARPER ENLARGING: OFF\"") != NULL &&
               /* The sentences wrap; their lines are dumped one by one. */
-              strstr(dump, "Adds about 17 ms of") != NULL && strstr(dump, "delay.\"") != NULL &&
+              strstr(dump, "Smooths steady 30 FPS scenes") != NULL &&
+              strstr(dump, "Adds about 17 ms of delay.\"") != NULL &&
               strstr(dump, "Smooth motion disables it.") != NULL &&
               strstr(dump, "game receives changed samples.") != NULL &&
               strstr(dump, "screenshots do not change.") != NULL &&
