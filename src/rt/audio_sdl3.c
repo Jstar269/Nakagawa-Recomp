@@ -1533,8 +1533,10 @@ static void test_null_backend_env(void) {
  *
  * MUTANT: sr_audio_init does not return early when ACTIVE -- the second init opens again and
  *   the attempts read 2.
- * MUTANT: sr_audio_init does not return early when UNAVAILABLE -- the push after the refused
- *   open tries again and the attempts read 2. */
+ * MUTANT: sr_audio_init does not return early when UNAVAILABLE -- the second init after the
+ *   refused open (a LoadExec restart's, were the driver's call inside its loop) tries again
+ *   and the attempts read 2. A push cannot show it: push, queued and played_dry call
+ *   sr_audio_init only while the state is UNINITIALIZED. */
 static void test_start_up_open_is_the_only_open(void) {
     static const int16_t block[64 * 2];
     test_reset();
@@ -1566,6 +1568,7 @@ static void test_start_up_open_is_the_only_open(void) {
     assert(sr_audio_queued(0) == -1 && sr_audio_played_dry(0) == 0);
     assert(s_audio_state == AUDIO_STATE_UNAVAILABLE && s_reported_unavailable == 1);
     assert(s_test_device_open_attempts == 1 && s_stats.total_pushed_frames == 0u);
+    assert(sr_audio_init() == -1 && s_test_device_open_attempts == 1);   /* a second init does not retry */
 
     /* A null back end: nothing is opened, at start-up or after. */
     test_reset();

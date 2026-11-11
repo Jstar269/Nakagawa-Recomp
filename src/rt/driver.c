@@ -715,9 +715,10 @@ have_image:;
          * (#2361). Opening it takes tens of milliseconds, and every guest thread runs on this
          * one host thread, so an open at the guest's first audio call would stall sound and
          * picture together just as the game begins to play. It comes after
-         * sched_preempt_timer_start, which raises this thread's priority: on Linux the threads
-         * a raised thread creates inherit its nice value, and SDL's audio device thread is
-         * created by this open. sr_audio_init makes the same decision as at a first audio call:
+         * sched_preempt_timer_start, which raises this thread's priority in a paced run (the
+         * turbo and deterministic clocks raise nothing): on Linux the threads a raised thread
+         * creates inherit its nice value, and SDL's audio device thread is created by this
+         * open. sr_audio_init makes the same decision as at a first audio call:
          * SR_AUDIO_DISABLED=1, SR_AUDIO_BACKEND=null (none, 0, off), or SR_HEADLESS=1 without
          * SR_AUDIO_BACKEND opens nothing, and a failed open is reported once and the run goes
          * on silently, so the result is not needed here. Outside the LoadExec loop: a replacement
