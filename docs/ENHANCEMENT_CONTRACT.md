@@ -1198,8 +1198,8 @@ at the Hot Shots Tennis (UCUS98701) title logo on a PSP-3000. Authentic keeps do
 (#2137) plays the same mix without the hardware's clipping: the unsaturated sum, through a true-peak limiter at the
 host's output.
 
-- **The line.** `peak=limit` sits after `sas` and is written only when on; a missing `peak` and `peak=off` are off.
-  It is an Enhanced part and needs no `tier=ace`. A build without it (`ACE_HAS_PEAK`) refuses the line.
+- **The line.** `peak=limit` sits just before `cull` (after the other optional keys) and is written only when on;
+  a missing `peak` and `peak=off` are off. It is an Enhanced part and needs no `tier=ace`. A build without it (`ACE_HAS_PEAK`) refuses the line.
 - **What the guest sees: nothing.** The guest's SAS buffer gets the PSP's saturated bytes in every mode, because a
   game may read it back; `hle-thread-selftest` checks them byte for byte against a run with the part off. The
   limiter keeps a channel's queue depth: a push of n frames queues n frames.
@@ -1226,7 +1226,9 @@ host's output.
   is back within half a count of unity well inside a second), so the level is the PSP's wherever the PSP did not
   clip; only the overs are rounded off instead of cut. A stream that stops leaves its last 71 frames in the
   limiter until that channel's next push or hold of silence (`sr_audio_push_silence`, which passes through the
-  limiter too), which plays them first: nothing is dropped or invented, and nothing plays out of order. The video recorder (`sr_videorec_audio`) and the counters keep the guest's copy.
+  limiter too), which plays them first, in order. Once the device has played the channel dry they are dropped
+  instead, as the converter's kept-back frames are (after the gap they would be a 1.6 ms fragment between two
+  silences). Nothing is invented. The video recorder (`sr_videorec_audio`) and the counters keep the guest's copy.
 - **Off.** Without `peak=limit` neither side runs: the SAS mixer keeps nothing, `sr_audio_push` is the plain push,
   and `sr_audio_push_wide` is the plain push of the guest's copy (`audio-selftest` checks the bytes). Fast forward
   pushes nothing, so nothing is limited while it runs.

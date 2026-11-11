@@ -203,13 +203,11 @@ int ace_format(const AceConfig *c, char *out, size_t cap) {
     if (!out || !cap) return 0;
     if (!c || !c->on) n = snprintf(out, cap, "off");
     else {
-        /* peak sits next to sas and is written only when on (a missing peak is off), so every
-         * line without it keeps its text. */
         n = snprintf(out, cap, "v1;tier=%s;af=%d;text=%s;readout=%s;notice=%s;wide=%s;smooth=%s;"
-                               "sas=%s%s;tess=%s",
+                               "sas=%s;tess=%s",
                      tier_word(c->tier), c->af, on_off(c->text), on_off(c->readout),
                      on_off(c->notice), wide_word(c->wide), smooth_word(c->smooth),
-                     sas_word(c->sas), c->peak ? ";peak=limit" : "", tess_word(c->tess));
+                     sas_word(c->sas), tess_word(c->tess));
     }
     /* Written only when on: a missing stick is off, so every line without it keeps its text. */
     if (n > 0 && (size_t)n < cap && c && c->on && c->stick) {
@@ -219,6 +217,11 @@ int ace_format(const AceConfig *c, char *out, size_t cap) {
     /* Likewise load, after stick: a missing load is off. */
     if (n > 0 && (size_t)n < cap && c && c->on && c->load) {
         const int m = snprintf(out + n, cap - (size_t)n, ";load=fast");
+        n = m < 0 ? -1 : n + m;
+    }
+    /* Likewise peak, the last optional key before cull: a missing peak is off. */
+    if (n > 0 && (size_t)n < cap && c && c->on && c->peak) {
+        const int m = snprintf(out + n, cap - (size_t)n, ";peak=limit");
         n = m < 0 ? -1 : n + m;
     }
     /* The same for cull, which stays last: written only when on. */
