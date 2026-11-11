@@ -8,6 +8,8 @@
  *   hud-exact       a corner that does not change keeps every byte, while the scene moves
  *   cut-holds       two unrelated pictures: the in-between is the old one, byte for byte
  *   held-is-new     the frame ace_smooth_held returns is the new frame, byte for byte
+ *   previous-is-old the frame ace_smooth_previous returns is the one kept before the newest, byte
+ *                   for byte; none before a second frame
  *   source-unread   the pass never writes the source image, and its result is another image
  *   no-predecessor  the first frame gives no in-between
  *   scales          the same scene at 2x render scale
@@ -24,6 +26,9 @@
  *                   old frame or the new: where the search can only guess, the in-between repeats
  *                   the old frame. A limit: a small fast shape near a guess stays where it was
  *   figure-textured the same figure on a textured floor, where a floor's vector fits only nearly
+ *   motion-*        the motion measure (ace_smooth_motion): a pan is about halfway, the posed figure
+ *                   is the old frame, still frames move nothing, the counters equal the CPU's at 1x
+ *                   and 2x, the ring keeps the last 8, and an in-between that never ran is refused
  *
  * Exit 77 (SKIP) without a Vulkan loader or device.
  */
@@ -393,6 +398,9 @@ static void cell_scene(int scale) {
     memcpy(a, g.map, (size_t)w * (size_t)h * 4u);
     source_fill(&src, w, h, 1);
     CHECK(feed(s, &src, w, h, 1) == VK_NULL_HANDLE, "no-predecessor: an in-between from one frame");
+    cmd_begin();
+    CHECK(ace_smooth_previous(s, g.cb) == VK_NULL_HANDLE, "previous-is-old: a frame before the first");
+    cmd_end();
 
     paint(w, h, scale, 0, shape_a + step, 1);
     memcpy(b, g.map, (size_t)w * (size_t)h * 4u);
@@ -431,6 +439,14 @@ static void cell_scene(int scale) {
         image_read(held, w, h);
         CHECK(memcmp(g.map, b, (size_t)w * (size_t)h * 4u) == 0, "held-is-new: bytes differ");
     }
+    cmd_begin();
+    VkImage previous = ace_smooth_previous(s, g.cb);
+    cmd_end();
+    CHECK(previous != VK_NULL_HANDLE && previous != held, "previous-is-old: no frame before the newest");
+    if (previous) {
+        image_read(previous, w, h);
+        CHECK(memcmp(g.map, a, (size_t)w * (size_t)h * 4u) == 0, "previous-is-old: bytes differ");
+    }
     image_read(src.image, w, h);
     CHECK(memcmp(g.map, b, (size_t)w * (size_t)h * 4u) == 0, "source-unread: the source changed");
 
@@ -444,6 +460,15 @@ static void cell_scene(int scale) {
         size_t differ = 0;
         for (size_t i = 0; i < (size_t)w * (size_t)h; i++) differ += g.map[i] != b[i];
         CHECK(differ == 0, "cut-holds: %zu px differ from the old frame", differ);
+    }
+    /* A third frame is kept: the one before it is now the second. */
+    cmd_begin();
+    previous = ace_smooth_previous(s, g.cb);
+    cmd_end();
+    CHECK(previous != VK_NULL_HANDLE, "previous-is-old: no frame before the third");
+    if (previous) {
+        image_read(previous, w, h);
+        CHECK(memcmp(g.map, b, (size_t)w * (size_t)h * 4u) == 0, "previous-is-old: the frame before the third differs");
     }
     DeviceWaitIdle(g.device);
     ace_smooth_destroy(s);
@@ -1121,6 +1146,191 @@ static void posed_run(int textured) {
 static void cell_figure_posed(void) { posed_run(0); }
 static void cell_figure_textured(void) { posed_run(1); }
 
+/* ---- the motion measure (ace_smooth_motion) ----------------------------------------------------- */
+
+/* The largest channel difference of two pixels, r, g and b, in 1/255. */
+static uint32_t px_diff(uint32_t x, uint32_t y) {
+    uint32_t d = 0;
+    for (int c = 0; c < 24; c += 8) {
+        int e = abs((int)((x >> c) & 255u) - (int)((y >> c) & 255u));
+        if ((uint32_t)e > d) d = (uint32_t)e;
+    }
+    return d;
+}
+
+/* The measure on the CPU, by ace_measure.comp's rule, from the old frame, the new one and the
+ * in-between. */
+static void motion_cpu(const uint32_t *a, const uint32_t *b, const uint32_t *m, int w, int h,
+                       AceSmoothMotion *o) {
+    memset(o, 0, sizeof(*o));
+    for (int gy = 0; gy < 272; gy++) {
+        for (int gx = 0; gx < 480; gx++) {
+            int x = ((2 * gx + 1) * w) / (2 * 480), y = ((2 * gy + 1) * h) / (2 * 272);
+            size_t i = (size_t)y * (size_t)w + (size_t)x;
+            uint32_t d_ab = px_diff(a[i], b[i]), d_ma = px_diff(m[i], a[i]), d_mb = px_diff(m[i], b[i]);
+            if (d_ab > 40u) {
+                o->moving++;
+                o->sum_old += d_ma;
+                o->sum_new += d_mb;
+                if (d_ma <= 6u) o->eq_old++;
+                else if (d_mb <= 6u) o->eq_new++;
+            } else if (d_ma > 64u && d_mb > 64u) {
+                o->novel++;
+            }
+            o->sampled++;
+        }
+    }
+}
+
+static int motion_same(const AceSmoothMotion *x, const AceSmoothMotion *y) {
+    return x->moving == y->moving && x->eq_old == y->eq_old && x->eq_new == y->eq_new &&
+           x->sum_old == y->sum_old && x->sum_new == y->sum_new && x->novel == y->novel &&
+           x->sampled == y->sampled;
+}
+
+static void motion_print(const char *name, const char *what, const AceSmoothMotion *m) {
+    printf("  %s %s: moving %u eq_old %u eq_new %u sum_old %u sum_new %u novel %u sampled %u\n", name, what,
+           m->moving, m->eq_old, m->eq_new, m->sum_old, m->sum_new, m->novel, m->sampled);
+}
+
+enum { MOTION_PAN, MOTION_SHAPE2X, MOTION_POSED, MOTION_STILL };
+
+/* Frame 0 or 1 of a scene into g.map. */
+static void motion_paint(int scene, int frame, int w, int h) {
+    switch (scene) {
+    case MOTION_PAN: paint(w, h, 1, frame ? 40 : 0, 5000, 0); break;
+    case MOTION_SHAPE2X: paint(w, h, 2, 0, frame ? 216 : 200, 1); break;
+    case MOTION_POSED: paint_posed(w, h, frame, 300, frame ? 124 : 100, 0); break;
+    default: paint(w, h, 1, 0, 200, 1); break;
+    }
+}
+
+/* One pair of a scene: the GPU's measure of its in-between and the CPU's from the read-back
+ * pictures. 0 when something could not be made or read. */
+static int motion_pair(int scene, int w, int h, AceSmoothMotion *gpu, AceSmoothMotion *cpu) {
+    size_t n = (size_t)w * (size_t)h;
+    uint32_t *a = (uint32_t *)malloc(n * 4u), *b = (uint32_t *)malloc(n * 4u);
+    Source src;
+    memset(&src, 0, sizeof(src));
+    AceBetween *s = smooth_new();
+    int ok = 0;
+    if (a && b && s && source_make(&src, w, h)) {
+        motion_paint(scene, 0, w, h);
+        memcpy(a, g.map, n * 4u);
+        source_fill(&src, w, h, 1);
+        (void)feed(s, &src, w, h, 0);
+        motion_paint(scene, 1, w, h);
+        memcpy(b, g.map, n * 4u);
+        source_fill(&src, w, h, 0);
+        VkImage mid = feed(s, &src, w, h, 1);
+        uint64_t serial = ace_smooth_between_serial(s);
+        CHECK(serial == 1u, "motion scene %d: serial %llu after one in-between", scene, (unsigned long long)serial);
+        if (mid && ace_smooth_motion(s, serial, gpu)) {
+            image_read(mid, w, h);
+            motion_cpu(a, b, g.map, w, h, cpu);
+            ok = 1;
+        }
+    }
+    CHECK(ok, "motion scene %d: no in-between or no measure", scene);
+    DeviceWaitIdle(g.device);
+    ace_smooth_destroy(s);
+    if (src.image) DestroyImage(g.device, src.image, NULL);
+    if (src.memory) FreeMemory(g.device, src.memory, NULL);
+    free(a);
+    free(b);
+    return ok;
+}
+
+/*   motion-pan      a pan the search carries: the in-between is about as far from either frame
+ *   motion-posed    the posed figure, where the in-between repeats the old frame: like the old
+ *   motion-still    two identical frames: nothing moves and nothing is new
+ *   motion-cpu      the counters equal the CPU's from the read-back pictures, at 1x and 2x */
+static void cell_motion(void) {
+    AceSmoothMotion gm, cm;
+    memset(&gm, 0, sizeof(gm));
+    memset(&cm, 0, sizeof(cm));
+    if (motion_pair(MOTION_PAN, 480, 272, &gm, &cm)) {
+        motion_print("motion-pan", "gpu", &gm);
+        uint32_t hi = gm.sum_old > gm.sum_new ? gm.sum_old : gm.sum_new;
+        uint32_t lo = gm.sum_old > gm.sum_new ? gm.sum_new : gm.sum_old;
+        CHECK(gm.moving > 0u && (uint64_t)(hi - lo) * 5u <= hi,
+              "motion-pan: moving %u, sum_old %u and sum_new %u not within 20%%", gm.moving, gm.sum_old,
+              gm.sum_new);
+        if (!motion_same(&gm, &cm)) motion_print("motion-pan", "cpu", &cm);
+        CHECK(motion_same(&gm, &cm), "motion-cpu: the pan at 480x272 differs from the CPU's");
+    }
+    if (motion_pair(MOTION_SHAPE2X, 960, 544, &gm, &cm)) {
+        motion_print("motion-shape-2x", "gpu", &gm);
+        if (!motion_same(&gm, &cm)) motion_print("motion-shape-2x", "cpu", &cm);
+        CHECK(gm.moving > 0u, "motion-shape-2x: nothing moving");
+        CHECK(motion_same(&gm, &cm), "motion-cpu: the shape at 960x544 differs from the CPU's");
+    }
+    if (motion_pair(MOTION_POSED, 480, 272, &gm, &cm)) {
+        motion_print("motion-posed", "gpu", &gm);
+        CHECK(gm.moving > 0u && (uint64_t)gm.eq_old * 10u >= (uint64_t)gm.moving * 9u &&
+              (uint64_t)gm.sum_old * 10u < gm.sum_new,
+              "motion-posed: moving %u eq_old %u sum_old %u sum_new %u: not the old frame", gm.moving,
+              gm.eq_old, gm.sum_old, gm.sum_new);
+        if (!motion_same(&gm, &cm)) motion_print("motion-posed", "cpu", &cm);
+        CHECK(motion_same(&gm, &cm), "motion-cpu: the posed figure differs from the CPU's");
+    }
+    if (motion_pair(MOTION_STILL, 480, 272, &gm, &cm)) {
+        motion_print("motion-still", "gpu", &gm);
+        CHECK(gm.moving == 0u && gm.novel == 0u && gm.sampled == 480u * 272u,
+              "motion-still: moving %u novel %u sampled %u", gm.moving, gm.novel, gm.sampled);
+    }
+}
+
+/*   motion-ring     after 9 in-betweens, serial 1 is gone and 2..9 read back; 0 and 10 are refused
+ *   motion-unrun    an in-between recorded into a command buffer that never runs is refused (its
+ *                   slot still holds serial 2's record), while serial 9 still reads back */
+static void cell_motion_ring(void) {
+    int w = 480, h = 272;
+    Source src;
+    memset(&src, 0, sizeof(src));
+    AceBetween *s = smooth_new();
+    if (!s || !source_make(&src, w, h)) { CHECK(0, "motion-ring setup failed"); ace_smooth_destroy(s); return; }
+    paint(w, h, 1, 0, 200, 1);
+    source_fill(&src, w, h, 1);
+    (void)feed(s, &src, w, h, 1);
+    CHECK(ace_smooth_between_serial(s) == 0u, "motion-ring: a serial before the first in-between");
+    for (int i = 0; i < 9; i++) {
+        paint(w, h, 1, (i & 1) ? 0 : 12, (i & 1) ? 200 : 216, 1);
+        source_fill(&src, w, h, 0);
+        CHECK(feed(s, &src, w, h, 1) != VK_NULL_HANDLE, "motion-ring: no in-between %d", i + 1);
+    }
+    uint64_t newest = ace_smooth_between_serial(s);
+    CHECK(newest == 9u, "motion-ring: serial %llu after 9 in-betweens", (unsigned long long)newest);
+    AceSmoothMotion m;
+    CHECK(!ace_smooth_motion(s, 0, &m), "motion-ring: serial 0 was read");
+    CHECK(!ace_smooth_motion(s, 1, &m), "motion-ring: serial 1 outlived the ring");
+    CHECK(!ace_smooth_motion(s, newest + 1u, &m), "motion-ring: a serial not made yet was read");
+    for (uint64_t k = 2; k <= 9u; k++) {
+        memset(&m, 0, sizeof(m));
+        int got = ace_smooth_motion(s, k, &m);
+        CHECK(got && m.sampled == 480u * 272u && m.moving > 0u,
+              "motion-ring: serial %llu: read %d, moving %u sampled %u", (unsigned long long)k, got, m.moving,
+              m.sampled);
+    }
+    /* Serial 10, recorded and thrown away unsubmitted, as a present that fails after recording. */
+    paint(w, h, 1, 12, 216, 1);
+    source_fill(&src, w, h, 0);
+    cmd_begin();
+    VkImage lost = ace_smooth_record(s, g.cb, src.image, w, h, 1);
+    EndCommandBuffer(g.cb);
+    ResetCommandBuffer(g.cb, 0);
+    CHECK(lost != VK_NULL_HANDLE && ace_smooth_between_serial(s) == 10u, "motion-unrun: serial %llu",
+          (unsigned long long)ace_smooth_between_serial(s));
+    CHECK(!ace_smooth_motion(s, 10, &m), "motion-unrun: an in-between that never ran was read (sampled %u)",
+          m.sampled);
+    CHECK(ace_smooth_motion(s, 9, &m) && m.sampled == 480u * 272u,
+          "motion-unrun: serial 9 no longer reads back");
+    DeviceWaitIdle(g.device);
+    ace_smooth_destroy(s);
+    DestroyImage(g.device, src.image, NULL);
+    FreeMemory(g.device, src.memory, NULL);
+}
+
 
 int main(int argc, char **argv) {
     (void)argc; (void)argv;
@@ -1143,6 +1353,8 @@ int main(int argc, char **argv) {
     cell_figure_kept();
     cell_figure_posed();
     cell_figure_textured();
+    cell_motion();
+    cell_motion_ring();
     gpu_close();
     printf(s_fail ? "ace-smooth-selftest: FAIL\n" : "ace-smooth-selftest: PASS\n");
     return s_fail ? 1 : 0;
