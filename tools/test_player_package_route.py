@@ -1206,8 +1206,18 @@ class TestPlayerPackageRoute(unittest.TestCase):
             iso_path, sealed, disc_id=DISC_ID, title="Synthetic Sealed Disc",
         )
         # The program is on the disc only in its sealed form: a route that copied
-        # the guest instead of decrypting it would have no clear bytes to copy.
-        self.assertNotIn(elf_bytes[0x100:0x200], iso_path.read_bytes())
+        # the guest instead of decrypting it would have no clear bytes to copy. The
+        # checked span is the file image of the first PT_LOAD segment, the guest's code.
+        phoff, = struct.unpack_from("<I", elf_bytes, 28)
+        phentsize, phnum = struct.unpack_from("<2H", elf_bytes, 42)
+        code = next(
+            elf_bytes[offset:offset + filesz]
+            for p_type, offset, filesz in (
+                struct.unpack_from("<2I8xI", elf_bytes, phoff + index * phentsize)
+                for index in range(phnum))
+            if p_type == 1 and filesz)
+        self.assertGreaterEqual(len(code), 0x100)
+        self.assertNotIn(code, iso_path.read_bytes())
 
         user_root = self.root / "sealed-user-data"
         user_root.mkdir()
@@ -1303,7 +1313,9 @@ class TestPlayerPackageRoute(unittest.TestCase):
         #    shows it (src/rt/hle_display.c: the legacy snap_<n>.ppm, synchronised
         #    from the GPU first), into the child's working directory, the package.
         perf_csv = self.sandbox / "sealed-perf.csv"
-        self.assertEqual(sorted(package_dir.glob("snap_*.ppm")), [])
+        #    (snap_f*.ppm is the GE's own SR_GESTAT snapshot, not this one.)
+        legacy_snapshots = "snap_[0-9]*.ppm"
+        self.assertEqual(sorted(package_dir.glob(legacy_snapshots)), [])
         launched = self.run_launch(perf_csv, user_data_root=user_root,
                                    accept_presented_frames=FRAMES,
                                    extra_environment={"SR_FBSNAP": "1"})
@@ -1312,15 +1324,19 @@ class TestPlayerPackageRoute(unittest.TestCase):
         self.assertIn("[PLAYER] Launch index 0: PLAY NOW available", launched.stdout)
         self.assertIn("HEADLESS_ACCEPTANCE status=PASS", launched.stdout)
         # The guest's own result: every presented frame is exactly one frame of the
-        # stripe pattern its MIPS computes, recomputed here by the fixture's oracle.
-        snapshots = sorted(package_dir.glob("snap_*.ppm"))
+        # stripe pattern its MIPS computes, recomputed here by the fixture's oracle,
+        # and the frames advance up to the guest's last one.
+        snapshots = sorted(package_dir.glob(legacy_snapshots))
         self.assertTrue(snapshots, "the launch presented no frame the runtime could snapshot")
+        frames_seen = set()
         for snapshot in snapshots:
             try:
-                display_smoke_generator._require_exact_present_pixels(
-                    snapshot, FRAMES, f"sealed-disc launch {snapshot.name}")
+                frames_seen.add(display_smoke_generator._require_exact_present_pixels(
+                    snapshot, FRAMES, f"sealed-disc launch {snapshot.name}"))
             except RuntimeError as exc:
                 self.fail(str(exc))
+        self.assertGreater(len(frames_seen), 1, f"the guest's frames never advanced: {frames_seen}")
+        self.assertIn(FRAMES - 1, frames_seen, f"the guest's last frame was not presented: {frames_seen}")
         # With --user-data-root, the player's cache folder is that root's cache
         # (nk_platform_win32.c resolve_override_path).
         boot_logs = list((user_root / "cache").glob("player-boot-*.events"))
