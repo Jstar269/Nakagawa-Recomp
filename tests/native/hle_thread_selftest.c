@@ -48031,6 +48031,7 @@ static void test_flash0_font_device(void) {
             cpu.r[6] = want;
             cpu.r[7] = 0u;
             cpu.r[8] = 0u;
+            cpu.r[3] = 0xdeadbeefu;   /* the call must write the high word */
             uint32_t low = sr_hle_test_io_lseek(&cpu);
             snprintf(msg, sizeof(msg), "flash0 sceIoLseek %s is made (got 0x%08x:%08x)",
                      edges[i].name, cpu.r[3], low);

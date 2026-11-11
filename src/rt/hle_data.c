@@ -2508,10 +2508,11 @@ uint32_t io_seek_destination(const Fd *f, int64_t offset, uint32_t whence,
     if (error_high) *error_high = 0xffffffffu;
     if (f->flash0 && whence != 1u) {
         /* A flash0: file (read-only) refuses a destination before the start or past the end
-         * with 0x80010016, position unchanged (PSP-HLE-IO-SEEK-001, measured from SEEK_SET and
-         * SEEK_END through sceIoLseek and sceIoLseek32 at -1, size + 16, 0xFFFFFFFF and
-         * 0x100000000). sceIoLseek's high word is 0xFFFFFFFF at -1 and size + 16 but 0 at
-         * 0xFFFFFFFF and 0x100000000. Unmeasured: where the high word changes between
+         * with 0x80010016, position unchanged (PSP-HLE-IO-SEEK-001, on ltn0.pgf: SEEK_SET -1,
+         * size + 16, 0xFFFFFFFF and 0x100000000 and SEEK_END +16 and -(size + 1) through
+         * sceIoLseek; SEEK_SET -1 and size + 16 and both SEEK_END cells through sceIoLseek32).
+         * sceIoLseek's high word is 0xFFFFFFFF at -1 and size + 16 but 0 at 0xFFFFFFFF and
+         * 0x100000000. Unmeasured: where the high word changes between
          * size + 16 and 0xFFFFFFFF; the 0xFFFFFFFF and 0x100000000 band from SEEK_END (measured
          * from SEEK_SET only); destinations past 0x100000000 (the boundary below); SEEK_CUR
          * (the generic path below, as before this rule); the async calls, which share this check;
