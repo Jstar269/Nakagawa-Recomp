@@ -103,7 +103,7 @@ static void usage(const char *exe) {
     fprintf(stderr, "usage: %s <fixture.ngef> [--backend software|vulkan] [--repeat N] [--output frame.ppm]\n"
                     "       %s <fixture.ngef> --first-bad-draw [--mode auto|linear|bisect] [--report PREFIX]\n"
                     "         (either Vulkan form also takes --dst-read snapshot|interlock: SR_GPU_DST_READ)\n"
-                    "       %s --write-synthetic <fixture.ngef> [basic|overlap|wide|empty|many|deep]\n"
+                    "       %s --write-synthetic <fixture.ngef> [basic|overlap|wide|past|empty|many|deep]\n"
                     "       %s --fbd-self-check\n", exe, exe, exe, exe);
 }
 

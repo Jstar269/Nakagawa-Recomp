@@ -2378,7 +2378,7 @@ player and game behave as they do for everyone ([#314](https://github.com/Jstar2
   executed Vulkan mutants and the overlapping-blend capture (#2109): a known difference on the
   snapshot destination-read path, `NO_DIFFERENCE` on the interlock path. `--dst-read
   snapshot|interlock` picks the path for a replay (`SR_GPU_DST_READ`, `src/rt/gpu_sdl3vk/README.md`).
-  `ge_replay --write-synthetic <path> [basic|overlap|wide|empty|many|deep]` writes those captures.
+  `ge_replay --write-synthetic <path> [basic|overlap|wide|past|empty|many|deep]` writes those captures.
 - **Capture frames unattended.** Set `SR_NOINPUT=1` so the automatic START pulse does not reach the game, bound the run
   with `SR_EXIT_AT_VBLANK` ([where it stops](#where-sr_exit_at_vblank-actually-stops)), and capture with
   `SR_FBSNAP_WINDOWS` ([both ends of a transition](#capturing-both-ends-of-a-transition--snapwindows)).
