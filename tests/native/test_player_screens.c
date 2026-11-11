@@ -4211,7 +4211,7 @@ static bool flow_case_text_whole(FlowCase which, int width, int height, NkUiId s
    Authentic, Enhanced and Ace, as does Settings > Enhanced, at the 960 x 540 minimum window
    and at 960 x 544 (the PSP's picture at 2x), at every text size. On main the card cut the
    parts and the last session to one or two lines, ending in "…". Above the design text
-   size, Settings' Online and Developer rows with the Nickname row, and the wizard's, stack
+   size, Settings' Online, Developer, Discord status and Nickname rows, and the wizard's, stack
    under their buttons when a sentence would be cut beside them, and wrap whole there; at
    the design size those rows stay beside their buttons by design (two lines at most). */
 static void test_game_page_text_is_never_cut(void) {
