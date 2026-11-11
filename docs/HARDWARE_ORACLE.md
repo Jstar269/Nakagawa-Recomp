@@ -1234,6 +1234,21 @@ One console is one data point; see §11. Nothing here closes issue #70
     filtering, through-mode triangle coverage, points, 16-bit framebuffer conversion, dithering, pixel masks,
     the sixteen logic operations, and transform-mode triangles and sprites.
 
+  The Vulkan backend runs the same cells: `src/rt/gpu_sdl3vk/ge_gpu_selftest.inc` carries the block and the
+  PSP digest table byte for byte (`tools/test_psp_oracle.py` pins all three copies), and
+  `gpu_coherence_selftest --case psp-raster` (also in its default pass) draws every cell through `ge.c` with the
+  GPU hooks on at render scale 1 and compares the window it reads back with the PSP's digest. On 2026-11-11 146
+  cells are drawn on the GPU and equal the PSP. 23 are drawn by the software fallback, which proves nothing
+  about Vulkan: the depth test with stencil (`z-lt-st`, `z-gt-st`), points (`e-points`), partial pixel masks
+  (`msk-8888`, `msk-565`, `clr-ca-msk`) and the logic operations (`lo-*`). 20 are drawn on the GPU and differ
+  from the PSP by 1 or 2 per channel, because Vulkan blends and combines texture and vertex colours in floating
+  point where the PSP truncates integer products: `b-sa-isa`, `b-dc-sc`, `b-idc-isc`, `b-da-ida`,
+  `b-sub-sa-fix`, `b-rsub-sa-isa`, `tf-mod-rgb`, `tf-mod-rgb-x2`, `tf-mod-rgba`, `tf-mod-rgba-x2`,
+  `tf-mod-rgba-1`, `tf-dec-rgba`, `tf-dec-rgba-x2`, `tf-bld-rgb`, `tf-bld-rgb-x2`, `tf-bld-rgba`,
+  `tf-bld-rgba-x2`, `tfa-mod-rgba`, `tfa-bld-rgba` and `tfa-add-rgba`. The case pins all three classes, so a cell that moves between them fails. It
+  found that a clear with a partial pixel mask was drawn unmasked on the GPU (`clr-ca-msk`); such a clear now
+  falls back to `ge.c`, as a masked draw already did.
+
 - **PSP-3000 single-case runs of the `ge-mip` and `ge-sync-ids` probes on commit `66940d76` (2026-10-31)**:
   system software 6.61, ARK-5.1.0 (owner); `pspver` 6.6.0. PSPLink 3.2.1, operator-declared model PSP-3000,
   boot 86. PSPLink `pspver` read 6.6.0 (`0x06060010`) at the cited launch, and that is the firmware declared to

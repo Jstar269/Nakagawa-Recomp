@@ -11957,6 +11957,37 @@ class GeRasterProbeTests(unittest.TestCase):
         self.assertNotIn("#include", block)
         self.assertIn("test_ge_raster_cells_match_psp();", self.selftest)
 
+    def test_the_vulkan_selftest_carries_the_block_and_the_psp_digests(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        inc = (root / "src" / "rt" / "gpu_sdl3vk" / "ge_gpu_selftest.inc").read_text(encoding="utf-8")
+        self.assertEqual(inc.count(self.START), 1)
+        self.assertEqual(self._block(inc), self._block(self.probe))
+        table_start = "/* PSP-GE-RASTER-001 (#343): the window digest each cell left on a PSP-3000"
+
+        def table(text: str) -> str:
+            start = text.index(table_start)
+            return text[start:text.index("\n};\n", start) + 4]
+
+        self.assertEqual(table(inc), table(self.selftest))
+        # The case runs in the default (render scale 1) pass and on its own.
+        self.assertIn("    if (!coherence_run_psp_raster()) ok = 0;\n", inc)
+        self.assertIn('if (strcmp(only, "psp-raster") == 0) return coherence_run_psp_raster();', inc)
+        body = inc[inc.index("static int coherence_run_psp_raster(void) {"):]
+        body = body[:body.index("\n}\n")]
+        for term in ("s_scale != 1", "fallback_prims", "gegpu_sync_guest_fb(&desc)",
+                     "gr_digest(px) == s_gr_psp[k].psp", "k_gr_vk_software", "k_gr_vk_divergent"):
+            self.assertIn(term, body)
+        # The two pinned classes name real cells, once each, and no cell is in both.
+        cells = set(re.findall(r'^\s*\{"([a-z0-9-]+)", GR_K_', self._block(inc), re.M))
+        self.assertEqual(len(cells), 189)
+        pinned = []
+        for name in ("k_gr_vk_divergent", "k_gr_vk_software"):
+            start = inc.index(f"static const char *const {name}[] = {{")
+            pinned.append(re.findall(r'"([a-z0-9-]+)"', inc[start:inc.index("};", start)]))
+        divergent, software = pinned
+        self.assertEqual(len(divergent) + len(software), len(set(divergent) | set(software)))
+        self.assertLessEqual(set(divergent) | set(software), cells)
+
     def test_section_calls_only_the_ge_and_cache_imports_and_is_bounded(self) -> None:
         self.assertEqual(set(re.findall(r"\b(sce\w+)\s*\(", self.section)), {
             "sceGeEdramGetAddr", "sceGeListEnQueue", "sceGeListSync", "sceGeDrawSync",
