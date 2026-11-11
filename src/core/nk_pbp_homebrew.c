@@ -919,6 +919,33 @@ static bool hb_path_within(const char *path, const char *folder)
     return path[length] == '\0' || hb_is_separator(path[length]);
 }
 
+/* Whether folder is the user's home folder, Desktop, or one of the personal folders in the
+   home folder: a package picked from one of those does not bring the folder along, since it
+   holds the user's own files, not the program's. */
+static bool hb_is_personal_folder(const char *folder)
+{
+    static const char *const personal[] = {
+        "Desktop", "Documents", "Downloads", "Music", "Pictures", "Videos", "OneDrive"
+    };
+    char known[HB_PATH_MAX];
+    char resolved[HB_PATH_MAX];
+    const char *home = nk_platform_env_home_dir();
+    if (nk_platform_get_desktop_dir(known, sizeof(known)) &&
+        nk_platform_absolute_path(known, resolved, sizeof(resolved)) &&
+        hb_path_within(folder, resolved) && hb_path_within(resolved, folder))
+        return true;
+    if (home == NULL || home[0] == '\0' ||
+        !nk_platform_absolute_path(home, resolved, sizeof(resolved)))
+        return false;
+    if (hb_path_within(folder, resolved) && hb_path_within(resolved, folder)) return true;
+    for (size_t i = 0; i < sizeof(personal) / sizeof(personal[0]); ++i) {
+        if (hb_join(known, sizeof(known), resolved, personal[i]) &&
+            hb_path_within(folder, known) && hb_path_within(known, folder))
+            return true;
+    }
+    return false;
+}
+
 bool nk_pbp_homebrew_check_folder(const char *pbp_path, const char *view_root,
                                   char *problem, size_t problem_size)
 {
@@ -939,6 +966,13 @@ bool nk_pbp_homebrew_check_folder(const char *pbp_path, const char *view_root,
                    "The folder \"%.80s\" also holds Nakagawa's data folder. Put the EBOOT.PBP "
                    "in its own folder, as on a PSP's Memory Stick (PSP/GAME/<folder>/).",
                    folder + name_at);
+        return false;
+    }
+    if (hb_is_personal_folder(folder)) {
+        hb_problem(problem, problem_size,
+                   "The EBOOT.PBP is in your \"%.80s\" folder, which holds your own files, and "
+                   "the program's folder is copied with it. Put the EBOOT.PBP in its own folder, "
+                   "as on a PSP's Memory Stick (PSP/GAME/<folder>/).", folder + name_at);
         return false;
     }
     memset(&walk, 0, sizeof(walk));

@@ -212,8 +212,8 @@ Some homebrew can't run, and the player says which kind when you pick it: an enc
 homebrew and custom-firmware plugins (they need the PSP's own kernel), and anything that is not a PSP program.
 A program that writes its own machine code while it runs, such as an emulator with a JIT, starts and then stops
 at the first jump into that code. A folder too large to copy (over 1 GiB or 4,096 files and folders), one that
-holds a link or a file kept in the cloud, or one whose name a PSP's Memory Stick can't hold is refused when you
-pick the program. [Homebrew limits](COMPATIBILITY.md#homebrew-limits) lists each kind.
+holds a link or a file kept in the cloud, one whose name a PSP's Memory Stick can't hold, or one of your personal
+folders (your home folder, Desktop, Documents, Downloads and the like) is refused when you pick the program. [Homebrew limits](COMPATIBILITY.md#homebrew-limits) lists each kind.
 
 ### Supplying title manifests
 

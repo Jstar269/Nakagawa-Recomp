@@ -7098,6 +7098,33 @@ static void test_homebrew_package_becomes_a_private_disc(void) {
         psn_test_refused(loose_path, "HOMEBREW_FOLDER_UNSUPPORTED",
                          "has no name a PSP's Memory Stick can hold");
     }
+    /* A package picked from the user's Downloads (or another personal folder) does not take
+       the user's own files along as the program's folder: refused by name, nothing copied. */
+    {
+        char home[NATIVE_TEST_PATH_MAX + 96];
+        char downloads[NATIVE_TEST_PATH_MAX + 128];
+        char loose_path[NATIVE_TEST_PATH_MAX + 160];
+        const char *home_name =
+#if defined(_WIN32) || defined(_WIN64)
+            "USERPROFILE";
+#else
+            "HOME";
+#endif
+        const char *previous = getenv(home_name);
+        char saved[NATIVE_TEST_PATH_MAX + 96];
+        bool had_home = previous != NULL;
+        snprintf(saved, sizeof(saved), "%s", previous ? previous : "");
+        snprintf(home, sizeof(home), "%s%chome", base, sep);
+        snprintf(downloads, sizeof(downloads), "%s%cDownloads", home, sep);
+        assert(nk_platform_mkdir_p(downloads));
+        snprintf(loose_path, sizeof(loose_path), "%s%cEBOOT.PBP", downloads, sep);
+        pbp = homebrew_pbp("Downloaded", program, 88u, NULL, 0, &pbp_len);
+        write_binary_file(loose_path, pbp, pbp_len);
+        free(pbp);
+        nk_ps_set_env(home_name, home);
+        psn_test_refused(loose_path, "HOMEBREW_FOLDER_UNSUPPORTED", "which holds your own files");
+        nk_ps_set_env(home_name, had_home ? saved : NULL);
+    }
 
     /* An encrypted program and a file that is not a program are refused by name, and nothing
        is written. */
