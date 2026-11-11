@@ -8298,6 +8298,8 @@ static void test_play_mode_cull_settings(void) {
  * "stick" are read, the title's wins, both survive a save and a load, and only an Ace launch of a
  * title whose catalog entry declares a dead zone carries the key, with the catalog's count. The
  * built-in UCUS98701 declares 64; a disc the catalog does not know declares none. */
+static void expect_line_parses_in_runtime(const PlayerPlayResolved *r);
+
 static void test_play_mode_stick_settings(void) {
     char sep = nk_platform_path_separator();
     char cache_root[512], root[700], path[800];
@@ -8340,6 +8342,7 @@ static void test_play_mode_stick_settings(void) {
     assert(player_play_launch_line(&r, line, sizeof(line)) &&
            strcmp(line + strlen(line) - 27, ";stick=64;load=fast;cull=on") == 0 &&
            strstr(line, ";tess=off;stick=64") != NULL);
+    expect_line_parses_in_runtime(&r);   /* the runtime writes the same order */
     r.part[PLAYER_PART_LOAD] = 0;
     r.part[PLAYER_PART_CULL] = 0;
     player_play_resolve(&app->settings, "TEST92001", &r);       /* no declared dead zone */

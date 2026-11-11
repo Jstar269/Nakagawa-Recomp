@@ -1388,7 +1388,8 @@ static void cell_report_worst(void) {
     CHECK(len > 0 && strstr(json, "\"cull_untracked\"") && strstr(json, "\"af_device_max\"") &&
               strstr(json, "\"af_sampler_failures\"") && strstr(json, "\"presents\"") &&
               strstr(json, "\"added_delay_ms\"") && strstr(json, "\"smooth_motion\"") &&
-              strstr(json, "\"smooth_aux\"") && strstr(json, "\"present_interval_ms\""),
+              strstr(json, "\"smooth_aux\"") && strstr(json, "\"present_interval_ms\"") &&
+              strstr(json, "\"samples_remapped\"") && strstr(json, "\"load_paced\""),
           "a report with every block:\n%s", json);
     if (!len) return;
     size_t worst = len;
