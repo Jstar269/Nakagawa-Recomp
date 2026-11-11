@@ -10432,40 +10432,53 @@ static int coherence_run_rtt_scale(void) {
 
 /* rtt-1x-reads (#2279): the render-target reads that decode guest VRAM at 1x at every render scale,
  * each a recorded decision (src/rt/gpu_sdl3vk/README.md, docs/ENHANCEMENT_CONTRACT.md). T (8888,
- * stride 512, at 0x100000) is drawn as 16 x 16 cells of distinct colours and alphas over its rows
- * 0..63 and columns 0..255; M's depth buffer Z (at 0x1A0000, outside every colour target) is
- * filled in four rectangles of distinct depths with clears. Seven 64 x 64 sprites on M then read,
- * nearest and 1:1:
- *   - T as 4444 (a 16-bit format: each texel is half a target pixel);
- *   - T as CLUT8 through a 256-entry 8888 palette (one byte per texel);
- *   - T swizzled;
- *   - T with a second mip level and a mipmap filter (level 1 is a plain 1x buffer elsewhere);
- *   - T with half its buffer width (texture rows are not target rows);
- *   - Z as 4444 through its address (the raw view, swizzled) and through the 0x04600000 linear view.
- * None of them may bind T's image (s_cnt_rtt_direct), the five reads of T are render-target reads
- * (s_cnt_rtt), and guest VRAM of M equals the software renderer's exactly at any scale: T's cells
- * and Z's rectangles are on whole guest pixels, so T's top-left device samples are its software
- * pixels, and each sprite takes whole texels. Each sprite's software picture holds at least two
- * colours, so a read of zeroed or stale VRAM shows. */
+ * stride 512, at 0x100000) and U (5650, stride 512, at 0x010000) are drawn as 16 x 16 cells of
+ * distinct colours (and alphas, in T) over their rows 0..63 and columns 0..255; M's depth buffer Z
+ * (at 0x1A0000, outside every colour target) is filled in four rectangles of distinct depths with
+ * clears. Fourteen 64 x 64 sprites on M then read, nearest and 1:1. Every read of a target uses the
+ * target's stride as its buffer width unless another width is the case, so the rule the case names
+ * is the one that keeps it off the direct bind:
+ *   - T as 4444 (each texel is half a target pixel), CLUT8 through a 256-entry 8888 palette (a
+ *     byte per texel), CLUT4 (a nibble per texel) and DXT1 (blocks);
+ *   - T as CLUT32 through the same palette (index: each pixel's low byte), on T's own pixel grid;
+ *   - T swizzled; T with a second mip level and a mipmap filter (level 1 is a plain 1x buffer
+ *     elsewhere); T with half its buffer width (texture rows are not target rows);
+ *   - U as 5551 (another 16-bit format, the same grid) and as 8888 (each texel spans two pixels);
+ *   - Z as 4444 through its address (swizzled storage), the 0x04200000 linear view and the
+ *     0x04600000 view;
+ *   - and a control: T as itself, which binds T's image directly.
+ * Only the control may bind a target's image, exactly once (s_cnt_rtt_direct); the eleven reads of
+ * T and U are render-target reads (s_cnt_rtt); the depth reads commit the GPU's depth to guest VRAM
+ * first (s_cnt_depth_commit); and guest VRAM of M equals the software renderer's exactly at any
+ * scale: the cells and Z's rectangles are on whole guest pixels, so a target's top-left device
+ * samples are its software pixels, and each sprite takes whole texels. Each sprite's software
+ * picture holds at least two colours, so a read of zeroed or stale VRAM shows. */
 #define R1X_T     0x00100000u
+#define R1X_U     0x00010000u
 #define R1X_M     0x00060000u
 #define R1X_Z     0x001A0000u
 #define R1X_CLUT  0x001F0000u
 #define R1X_MIP1  0x001F1000u
 #define R1X_VERTS 0x041F2000u
-enum { R1X_CELLS = 64, R1X_READS = 7 };
+enum { R1X_CELLS = 64, R1X_READS = 14 };
 static int coherence_run_rtt_1x_reads(void) {
     const char *name = "rtt-1x-reads";
-    const uint32_t ta = 0x04000000u | R1X_T, ma = 0x04000000u | R1X_M, za = 0x04000000u | R1X_Z;
+    const uint32_t ta = 0x04000000u | R1X_T, ua = 0x04000000u | R1X_U, ma = 0x04000000u | R1X_M;
+    const uint32_t za = 0x04000000u | R1X_Z;
     const uint32_t stride = 512u, bytes = stride * FB_H * 4u, zbytes = stride * FB_H * 2u;
+    enum { R1X_CONTROL = R1X_READS - 1 };
     static const char *const read_name[R1X_READS] = {
-        "4444 read of the 8888 target", "CLUT8 read", "swizzled read", "mipmapped read",
-        "read at half the buffer width", "depth read through its address", "depth read through the linear view" };
+        "4444 read of the 8888 target", "CLUT8 read", "CLUT4 read", "DXT1 read", "CLUT32 read", "swizzled read",
+        "mipmapped read", "read at half the buffer width", "5551 read of the 5650 target",
+        "8888 read of the 5650 target", "depth read through its address", "depth read through the linear view",
+        "depth read through the 0x04600000 view", "direct read (control)" };
     /* per read: texture address, buffer width, format, TEXMODE */
     static const uint32_t rd[R1X_READS][4] = {
-        { R1X_T, 1024u, 2u, 0u }, { R1X_T, 2048u, 5u, 0u }, { R1X_T, 512u, 3u, 1u },
-        { R1X_T, 512u, 3u, 1u << 16 }, { R1X_T, 256u, 3u, 0u },
-        { R1X_Z, 512u, 2u, 0u }, { 0x600000u | R1X_Z, 512u, 2u, 0u } };
+        { R1X_T, 512u, 2u, 0u }, { R1X_T, 2048u, 5u, 0u }, { R1X_T, 512u, 4u, 0u }, { R1X_T, 512u, 8u, 0u },
+        { R1X_T, 512u, 7u, 0u }, { R1X_T, 512u, 3u, 1u }, { R1X_T, 512u, 3u, 1u << 16 }, { R1X_T, 256u, 3u, 0u },
+        { R1X_U, 512u, 1u, 0u }, { R1X_U, 512u, 3u, 0u },
+        { R1X_Z, 512u, 2u, 0u }, { 0x200000u | R1X_Z, 512u, 2u, 0u }, { 0x600000u | R1X_Z, 512u, 2u, 0u },
+        { R1X_T, 512u, 3u, 0u } };
 
     /* vertices in VRAM past the palette and level 1: T's cells, Z's rectangles, the read sprites */
     RttCVtx *cv = (RttCVtx *)SR_HOST(R1X_VERTS);
@@ -10522,12 +10535,17 @@ static int coherence_run_rtt_1x_reads(void) {
     DL_EMIT(0x12, (7u << 2) | (3u << 7) | (1u << 23));     /* 8888 colour, float pos, through */
     DL_EMIT(0x01, cv_addr);
     DL_EMIT(0x04, (6u << 16) | (2u * R1X_CELLS));          /* T's cells */
+    DL_EMIT(0x01, cv_addr);
+    DL_EMIT(0x9C, R1X_U);                                  /* U: 5650, the same cells */
+    DL_EMIT(0xD2, 0);
+    DL_EMIT(0x04, (6u << 16) | (2u * R1X_CELLS));
+    DL_EMIT(0xD2, 3);
     DL_EMIT(0x9C, R1X_M);                                  /* M, with Z */
     DL_EMIT(0xD3, 1u | 0x400u);                            /* clear: depth only */
     DL_EMIT(0x01, zv_addr);
     DL_EMIT(0x04, (6u << 16) | 8u);                        /* Z's four rectangles */
     DL_EMIT(0xD3, 0);
-    DL_EMIT(0xB0, R1X_CLUT);                               /* the palette, for the CLUT8 read */
+    DL_EMIT(0xB0, R1X_CLUT);                               /* the palette, for the CLUT8 and CLUT32 reads */
     DL_EMIT(0xB1, 0x04u << 16);
     DL_EMIT(0xC5, 3u | (0xFFu << 8));                      /* 8888, shift 0, mask 0xFF */
     DL_EMIT(0xC4, 32u);                                    /* 256 entries */
@@ -10560,22 +10578,33 @@ static int coherence_run_rtt_1x_reads(void) {
     coherence_reset_targets();
     coherence_reset_depths();
     memset(SR_HOST(ta), 0, bytes);
+    memset(SR_HOST(ua), 0, zbytes);
     memset(SR_HOST(ma), 0, bytes);
     memset(SR_HOST(za), 0, zbytes);
     sr_gpu_vram_dirty(ta, bytes);
+    sr_gpu_vram_dirty(ua, zbytes);
     sr_gpu_vram_dirty(ma, bytes);
     sr_gpu_vram_dirty(za, zbytes);
     ge_set_gpu_hooks(&k_hooks);
-    const uint64_t rtt0 = s_cnt_rtt, direct0 = s_cnt_rtt_direct;
-    int ok = ge_run_list(COH_SAMPLE_LIST, 0) == 0 && (!s_nbatch || submit_pending());
+    const uint64_t rtt0 = s_cnt_rtt, direct0 = s_cnt_rtt_direct, commit0 = s_cnt_depth_commit;
+    int ok = ge_run_list(COH_SAMPLE_LIST, 0) == 0;
+    const uint64_t commits = s_cnt_depth_commit - commit0;   /* during the list: the depth reads */
+    ok = ok && (!s_nbatch || submit_pending());
     GeGpuFbDescriptor desc = { .addr = ma, .format = 3, .stride = stride, .width = 480, .height = FB_H };
     ok = ok && gegpu_sync_guest_fb(&desc) == GEGPU_SYNC_OK;
     if (!ok) fprintf(stderr, "gpu coherence selftest [%s]: the GPU run failed\n", name);
-    const Target *tt = ok ? target_find_by_fba(R1X_T) : NULL;
-    if (ok && (!tt || !tt->gpu_valid || s_cnt_rtt - rtt0 != 5u || s_cnt_rtt_direct != direct0)) {
-        fprintf(stderr, "gpu coherence selftest [%s]: FAIL T is %sa GPU target, %llu reads of it were render-target "
-                "reads (want 5) and %llu bound a target's image (want 0)\n", name, tt && tt->gpu_valid ? "" : "not ",
+    const Target *tt = ok ? target_find_by_fba(R1X_T) : NULL, *tu = ok ? target_find_by_fba(R1X_U) : NULL;
+    if (ok && (!tt || !tt->gpu_valid || !tu || !tu->gpu_valid || s_cnt_rtt - rtt0 != 11u ||
+               s_cnt_rtt_direct - direct0 != 1u)) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL T and U are %sGPU targets, %llu reads of them were "
+                "render-target reads (want 11) and %llu bound a target's image (want 1, the control)\n", name,
+                tt && tt->gpu_valid && tu && tu->gpu_valid ? "" : "not both ",
                 (unsigned long long)(s_cnt_rtt - rtt0), (unsigned long long)(s_cnt_rtt_direct - direct0));
+        ok = 0;
+    }
+    if (ok && !commits) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL the depth reads committed no GPU depth to guest VRAM\n",
+                name);
         ok = 0;
     }
     if (ok) memcpy(gpu_m, SR_HOST(ma), bytes);
@@ -10584,8 +10613,10 @@ static int coherence_run_rtt_1x_reads(void) {
     if (ok) {
         coherence_reset_depths();
         memset(SR_HOST(ta), 0, bytes);
+        memset(SR_HOST(ua), 0, zbytes);
         memset(SR_HOST(ma), 0, bytes);
         memset(SR_HOST(za), 0, zbytes);
+        sr_gpu_vram_dirty(ua, zbytes);
         sr_gpu_vram_dirty(ta, bytes);
         sr_gpu_vram_dirty(ma, bytes);
         sr_gpu_vram_dirty(za, zbytes);
@@ -10633,9 +10664,10 @@ static int coherence_run_rtt_1x_reads(void) {
     coherence_reset_targets();
     coherence_reset_depths();
     if (ok)
-        printf("gpu coherence selftest: PASS %-22s scale=%d seven reads that decode at 1x (another format, CLUT8, "
-               "swizzled, mipmapped, another buffer width, depth through both views): none binds a target's image, "
-               "and guest VRAM equals the software renderer's exactly\n", name, s_scale);
+        printf("gpu coherence selftest: PASS %-22s scale=%d thirteen reads that decode at 1x (other formats, CLUT4, CLUT8, "
+               "CLUT32, DXT1, swizzled, mipmapped, another buffer width, depth through three views, after %llu "
+               "depth commit(s)) bind no target's image, the control binds T's, and guest VRAM equals the software "
+               "renderer's exactly\n", name, s_scale, (unsigned long long)commits);
     return ok;
 }
 

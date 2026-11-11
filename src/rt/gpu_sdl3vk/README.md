@@ -324,34 +324,54 @@ depth aliasing.
 
 ### Why the other reads stay at 1x (#2279)
 
-Each read below decodes guest VRAM at 1x at every render scale, by decision. `rtt-1x-reads` in
-`gpu-coherence-selftest` pins each kind at 1x, 2x and 4x: the read never binds a target's image,
-and guest VRAM equals the software renderer's.
+Each read below decodes guest VRAM at 1x at every render scale, by decision. None of them is a
+plain sample of the target's image: each reinterprets the target's memory, which is what the 1x
+decode does exactly, as the GE did.
 
-- **Another texel size: 8888 read as a 16-bit format, 16-bit read as 8888, CLUT4 and CLUT8.** The
-  texture's texel grid is not the target's pixel grid. A 16-bit texel is half of an 8888 pixel, a
-  CLUT8 texel a quarter of one, and an 8888 texel spans two 16-bit pixels, so a texel has no
-  device samples of its own to scale.
-- **CLUT16 of a 16-bit target, CLUT32 of an 8888 target.** The grids match, but the palette lookup
-  runs in the texture decoder on guest VRAM, and a target image is sampled without a palette.
-  Scaling these needs a palette lookup per device sample in the shader.
-- **DXT.** The read takes the target's pixels as compressed blocks, which have no scaled form.
-- **A 16-bit target read as another 16-bit format** (5650, 5551 or 4444). The grids match and each
-  device sample is a pixel in the target's format, so a scaled read would repack each tap's bits
-  in the shader before filtering. The shader does not do that yet.
-- **Swizzled.** A swizzled texture takes the buffer's 16-byte by 8-row blocks in another order, so
-  neighbouring texels come from pixels that are not neighbours in the target. The device samples
-  between two texels belong to neither, so the read has no scaled form.
-- **Mipmapped.** The texture cache builds the whole chain from guest VRAM: its other levels are
-  separate 1x buffers, and a target image has no mip levels. A level 0 at render scale beside 1x
-  levels would filter between levels of unrelated detail.
-- **Another buffer width.** Texture rows are not the target's rows, so a texel's neighbours above
-  and below are not the pixels above and below it in the target, and the device samples between
-  them are not the texture's.
-- **Depth outside every colour target.** The depth image is an attachment the renderer never
-  samples, and the depth address is swizzled storage. The read goes through the GE's CPU-read
-  path (`sr_ge_vram_read_prepare`), which commits the GPU's depth to guest VRAM first, and decodes
-  there at 1x, through the depth address and through the 0x04600000 linear view alike.
+**No scaled form.** The texture's texel grid is not the target's pixel grid, so a texel has no
+device samples of its own:
+
+- an 8888 target read as a 16-bit format (a texel is half a pixel), and a 16-bit target read as
+  8888 (a texel spans two pixels);
+- CLUT4 and CLUT8 (a texel is a nibble or a byte of a pixel);
+- DXT (a 4 x 4 block of texels is 8 or 16 bytes of pixels);
+- an address that is not on a pixel boundary of the target (each texel straddles two pixels).
+
+**A scaled form that redoes the reinterpretation per device sample.** Here each texel is one
+pixel of the target, so a scaled read could exist, but the shader would have to repeat, for every
+filter tap, what the decoder does once per texel:
+
+- a 16-bit target read as another 16-bit format (5650, 5551, 4444): repack each tap's bits from
+  the target's format into the texture's before filtering;
+- CLUT16 of a 16-bit target, CLUT32 of an 8888 target: look each tap up in the palette, a lookup
+  that runs only in the texture decoder;
+- a swizzled read, or a read with another buffer width: find the target pixel that holds each
+  tap's texel (a swizzled texture takes the buffer's 16-byte by 8-row blocks in another order;
+  another width puts texture rows across the target's rows), and filter only between texels,
+  whose neighbours are not the target's neighbouring pixels.
+
+The renderer keeps these at 1x: each would be a separate shader path for a read that
+reinterprets memory, while the 1x read is already exact. A title whose effect shows the 1x detail
+through one of them is the case for adding that path, under its own issue.
+
+**Mipmapped** (a mipmap filter and a highest level above 0). The texture cache builds the whole
+chain from guest VRAM: its other levels are separate 1x buffers, and a target image has no mip
+levels. A level 0 at render scale beside 1x levels would filter between levels of unrelated
+detail.
+
+**Depth outside every colour target.** The depth image is an attachment the renderer never
+samples; a scaled read would sample it and repack each depth value into the texture's format.
+The read goes through the GE's CPU-read path (`sr_ge_vram_read_prepare`), which commits the GPU's
+depth to guest VRAM first, and decodes there at 1x, through the depth address (swizzled storage),
+the 0x04200000 linear view and the 0x04600000 view alike.
+
+`rtt-1x-reads` in `gpu-coherence-selftest` runs thirteen of these reads at 1x, 2x and 4x: an 8888
+target read as 4444, CLUT8, CLUT4, DXT1, CLUT32, swizzled, mipmapped and at half its buffer width;
+a 5650 target read as 5551 and as 8888; and its depth through the three views. None binds a
+target's image, the depth reads commit the GPU's depth first, and guest VRAM equals the software
+renderer's exactly. A control read in the target's own format binds its image directly. The
+others (an unaligned read, CLUT16, the other pairs of 16-bit formats) rest on the reasons above
+alone.
 
 ## Environment variables
 
