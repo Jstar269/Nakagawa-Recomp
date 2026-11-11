@@ -2602,6 +2602,7 @@ class PspOracleBuildRouteTests(unittest.TestCase):
             self.assertIn(call, section)
         self.assertIn('"sas-adsr-done", sascore_ok ? "PASS" : "SKIP"', section)
         self.assertNotIn('"RC"', section)
+        self._assert_sas_case_unloads_its_av_modules(section, "sas-adsr-done")
         # The registered stream follows the source tables: 9 pairs of 1024 grains, 32 mode rows
         # and the explicit runs in order, 695 records before the done record, held to a strict
         # golden sequence.
@@ -2631,6 +2632,18 @@ class PspOracleBuildRouteTests(unittest.TestCase):
         self.assertEqual(counts["sas-adsr-m00-calls"], 16)
         self.assertEqual(counts["sas-adsr-load"], 4)
 
+    def _assert_sas_case_unloads_its_av_modules(self, section: str, done_case: str) -> None:
+        # The runner's teardown check compares the module set after the probe's unload with the
+        # one before the launch; SASCORE and AVCODEC left loaded made every capture of these
+        # cases unqualified. Both are unloaded, newest first, after the done record and before
+        # the park.
+        done = section.index(f'"{done_case}"')
+        sascore = section.index("sceUtilityUnloadAvModule(PSP_AV_MODULE_SASCORE)", done)
+        avcodec = section.index("sceUtilityUnloadAvModule(PSP_AV_MODULE_AVCODEC)", done)
+        park = section.index('"park"', done)
+        self.assertLess(sascore, avcodec)
+        self.assertLess(avcodec, park)
+
     def test_sas_mix_case_links_sascore_and_records_every_cell(self) -> None:
         # The case's own LIBS block links the SAS and utility stubs (#2135, #2054).
         block = re.search(r"(?ms)^ifeq \(\$\(CASE\),sas-mix\)\n(.*?)^endif$", self.makefile)
@@ -2658,6 +2671,7 @@ class PspOracleBuildRouteTests(unittest.TestCase):
         self.assertEqual(len(set(edges)), 12)
         self.assertIn('"sas-mix-done", sascore_ok ? "PASS" : "SKIP"', section)
         self.assertNotIn('"RC"', section)
+        self._assert_sas_case_unloads_its_av_modules(section, "sas-mix-done")
         # The registered stream follows the source tables: their names in order, 204 records
         # before the done record, which the runner holds to a strict golden sequence.
         spec, counts = CAMPAIGN_PROBE_CASES["sas-mix"]
