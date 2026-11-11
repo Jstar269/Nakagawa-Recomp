@@ -1058,6 +1058,45 @@ class StateResumeTests(unittest.TestCase):
         self.assertIn(line, result)
         self.assertNotIn("SR_RESUME_POINT_CALL", "\n".join(result))
 
+    def test_a_call_in_a_block_that_stays_open_gets_no_point(self):
+        # An enhancement site declares locals, calls, and reads them on a later line. A
+        # label after the call would be entered past their initializers.
+        call = ("      if (sr_aot_return_boundary_begin(s, 0x0000100cu, 0x00001004u, 1u)) return; "
+                "f_00001040(s); SR_TAIL_DRAIN(s); if (sr_aot_return_boundary_end(s)) return;")
+        out = ["void f_00001000(CpuState *s) {", "    SR_YIELD(s, 0x00001000u);",
+               "    uint32_t _sp_entry = s->r[29]; (void)_sp_entry;",
+               "    { uint32_t _nk_a0 = s->r[4];", call,
+               "      MEM_W32_PC(_nk_a0 + 16u, 0u, 0x00001004u); }",
+               "    s->r[29] = _sp_entry; return;", "}", ""]
+        result = "\n".join(codegen.state_resume_pass(out, 0x1000))
+        self.assertIn(call, result)
+        self.assertNotIn("SR_RESUME_POINT_CALL", result)
+        self.assertIn("SR_STATE_ENTRY", result)
+        # The same call with its block closed on its own line has one.
+        closed = out[:4] + [call + " }"] + out[6:]
+        self.assertIn("SR_RESUME_POINT_CALL", "\n".join(codegen.state_resume_pass(closed, 0x1000)))
+        # A brace in a comment or a string is not a block.
+        noisy = out[:3] + ['    /* } */ sr_log("}");', "    " + call.strip()] + out[6:]
+        self.assertIn("SR_RESUME_POINT_CALL", "\n".join(codegen.state_resume_pass(noisy, 0x1000)))
+        # A comment left open hides what follows: nothing after it gets a point.
+        hidden = out[:3] + ["    /* open", "    " + call.strip()] + out[6:]
+        self.assertNotIn("SR_RESUME_POINT_CALL",
+                         "\n".join(codegen.state_resume_pass(hidden, 0x1000)))
+
+    def test_a_loop_edge_to_a_label_inside_a_block_keeps_its_plain_yield(self):
+        edge = "      if (_c) { SR_YIELD(s, 0x00001010u); goto L_00001004; } }"
+        out = ["void f_00001000(CpuState *s) {", "    SR_YIELD(s, 0x00001000u);",
+               "    uint32_t _sp_entry = s->r[29]; (void)_sp_entry;",
+               "    { uint32_t _t = s->r[8];", "  L_00001004: ;", "      s->r[9] = _t; }",
+               "    { uint32_t _c = (s->r[16] != 0u);", edge,
+               "    s->r[29] = _sp_entry; return;", "}", ""]
+        result = "\n".join(codegen.state_resume_pass(out, 0x1000))
+        self.assertIn(edge, result)
+        self.assertNotIn("SR_RESUME_POINT_YIELD", result)
+        scoped = out[:3] + ["  L_00001004: ;"] + out[6:]
+        self.assertIn("SR_RESUME_KEY(SR_RESUME_POINT_YIELD, 0x00001004u)",
+                      "\n".join(codegen.state_resume_pass(scoped, 0x1000)))
+
     def test_option_is_parsed_and_refuses_what_it_cannot_restore(self):
         options = codegen.CodegenOptions()
         cli = codegen._command_line_parser().parse_args(["--state-resume"])

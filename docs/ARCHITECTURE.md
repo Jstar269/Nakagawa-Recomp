@@ -672,8 +672,8 @@ two tiers differ in state a save state and a replay checkpoint both hold:
 - yield points: every `SR_YIELD` counts down the slice and, under `SR_DETERMINISTIC_CLOCK=1`, each
   `sr_yield` charges guest time. Where they sit (a body's entry, a taken backward branch, the
   dispatcher) is decided by `tools/codegen.py`; the interpreter has none.
-- `$sp` at a return: a callable body ends with `s->r[29] = _sp_entry` and a tail drain applies its
-  chain's restore; the interpreter runs only the instructions present (the `spleak` cell).
+- `$sp` at a return: a callable body ends with `s->r[29] = _sp_entry`, where an interpreted
+  `jr $ra` leaves `$sp` as the instructions set it (the `spleak` cell).
 - coverage: the interpreter decodes only the forms a cosimulation cell executes.
 
 Copying host stacks was rejected too: they hold absolute host addresses, so a copy can be neither
@@ -704,6 +704,11 @@ of a callable body and nothing else:
   callee, the calling body and its entry `$sp`, and the call gets a label between the callee and
   the call's own tail drain and end check.
 
+A point's label is entered with only the entry `$sp` restored, so it has to sit at function
+scope: a call whose line leaves a block open (an enhancement site that reads a local of its own
+after the call) and a loop edge whose target label is inside a block keep their text and have no
+point.
+
 The body ends with one `switch` over `SR_RESUME_KEY(kind, pc)`: a call point runs
 `sr_resume_inner` (the frame above) and jumps to the call's label, so the drain and the end check
 run after a resumed callee exactly as after a called one; a parked point jumps to its label. That
@@ -723,9 +728,9 @@ direction:
 | `tail-chain-live` | a tail drain is running a body: the chain's owed restore and release are on the host stack |
 | `tail-transfer-pending` | a recorded transfer has not been drained |
 | `foreign-cpu-state` | a call record belongs to another `CpuState` |
-| `root-not-host-entry` | its outermost call does not return to `SR_HOST_RETURN_PC` |
+| `root-not-host-entry` | its outermost call is not a host entry's own dispatch of a body: it does not return to `SR_HOST_RETURN_PC`, or the interpreter ran first and handed the frame on, and its run still holds what the call owes |
 | `return-in-flight` | a call record holds a captured return target or an unwind |
-| `frame-not-described` | a live call was not begun by a direct call site of a state-resumable body: a dispatched call (`jalr`), a call from the interpreter, a runtime call, or a body with no points |
+| `frame-not-described` | a live call above the outermost was not begun by a direct call site of a state-resumable body: a dispatched call (`jalr`), a call from the interpreter, a runtime call, or a body with no points |
 | `frame-chain` | a call's calling body is not the body the call below entered: a tail transfer changed the body |
 | `frame-sp` | a body's entry `$sp` is not the `$sp` of the call that entered it |
 | `not-parked` | the innermost body is not at a resume point |
@@ -751,7 +756,8 @@ parked memory and the frame list, with a rebuilt dispatch table and an empty cal
 compared with the uninterrupted run on the whole `CpuState` (`pc` included), the memory window,
 the guest writes and the instruction trace after the park, and the number of yield points counted.
 The same lane refuses each frame list and each set of call records above by name and checks that
-nothing changed. Every other cosimulation lane runs the same cases on ordinary output and requires
+nothing changed, except `body-stale`: stale-code detection is an environment switch the fixture
+runs without. Every other cosimulation lane runs the same cases on ordinary output and requires
 every thread to be refused. The cells, the mutants and the limits of the evidence are in
 [`fixtures/cosim/README.md`](../fixtures/cosim/README.md).
 

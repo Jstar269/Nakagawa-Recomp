@@ -2327,11 +2327,14 @@ static int32_t resume_lane_end(CosimLane *lane, const char *trace_path) {
 }
 
 /* The uninterrupted run, entered as a thread's entry is. `park_at` is the ordinal of the
- * yield point that parks (0: none). Returns the slice counter the run ended with. */
-static int32_t resume_run_uninterrupted(uint32_t entry, int park_at, const char *trace_path) {
+ * yield point that parks (0: none); `omit` is a body left to the interpreter (0: none).
+ * Returns the slice counter the run ended with. */
+static int32_t resume_run_uninterrupted(uint32_t entry, uint32_t omit, int park_at,
+                                        const char *trace_path) {
     static const CosimCase plain = { "resume", 0u, 0u, "", 0u, 0u, NULL };
     CosimLane *lane = &g_resume_ref;
-    install_lane(COSIM_LANE_AOT);
+    if (omit != 0u) install_lane_mixed(omit);
+    else install_lane(COSIM_LANE_AOT);
     seed_window();
     seed_state(&lane->state, &plain);
     lane->state.r[31] = SR_HOST_RETURN_PC;
@@ -2503,10 +2506,13 @@ typedef struct {
     const char *name;
     uint32_t entry;
     /* In a state-resumable build: the first yield point in a body that must be refused, and
-     * the refusal (0: every body point resumes). Point 1 is the dispatcher's own yield, before
-     * any call record exists. */
+     * the refusal (0: every body point resumes). The points before `first_body_point` are
+     * the dispatcher's own, met before any call record exists. */
     unsigned refused_from;
     SrResumeStatus refusal;
+    unsigned first_body_point;
+    /* A body left to the interpreter: the entry itself, so no host entry dispatches a body. */
+    uint32_t omit;
 } CosimResumeCase;
 
 /* Shapes the `rs` sweep must have met, so the cell cannot stop exercising one unnoticed. */
@@ -2520,7 +2526,7 @@ static unsigned g_resume_deep_ordinal;
 
 static unsigned run_resume_case(const CosimResumeCase *test, const char *ref_path,
                                 const char *res_path, int resumable_build) {
-    const int32_t whole = resume_run_uninterrupted(test->entry, 0, ref_path);
+    const int32_t whole = resume_run_uninterrupted(test->entry, test->omit, 0, ref_path);
     const unsigned points = (unsigned)(COSIM_RESUME_SLICE - whole);
     unsigned resumed = 0u;
     static CosimPark parked, reference_next;
@@ -2529,15 +2535,19 @@ static unsigned run_resume_case(const CosimResumeCase *test, const char *ref_pat
         return 0u;
     }
     for (unsigned ordinal = 1u; ordinal <= points; ordinal++) {
-        const int32_t ref_slice = resume_run_uninterrupted(test->entry, (int)ordinal, ref_path);
+        const int32_t ref_slice =
+            resume_run_uninterrupted(test->entry, test->omit, (int)ordinal, ref_path);
         char detail[320];
         if (!g_park.fired) {
             resume_fail(test->name, ordinal, "the yield point did not park");
             continue;
         }
         SrResumeStatus expected = SR_RESUME_OK;
-        if (ordinal == 1u) {
+        if (ordinal < test->first_body_point) {
             expected = SR_RESUME_NO_FRAMES;
+        } else if (test->omit != 0u) {
+            /* The outermost call is refused before anything else is looked at, in any build. */
+            expected = test->refusal;
         } else if (!resumable_build) {
             /* No body has a resume point: the outermost is not parked, and a deeper call
              * was begun by an ordinary call site. */
@@ -2591,7 +2601,7 @@ static unsigned run_resume_case(const CosimResumeCase *test, const char *ref_pat
         /* The uninterrupted run again, parking at this point and at the next, and the same
          * resume again, parking at its first yield point. */
         g_resume_park_twice = 1;
-        (void)resume_run_uninterrupted(test->entry, (int)ordinal, ref_path);
+        (void)resume_run_uninterrupted(test->entry, test->omit, (int)ordinal, ref_path);
         g_resume_park_twice = 0;
         reference_next = g_park_next;
         if (reference_next.fired != (ordinal < points)) {
@@ -2698,6 +2708,25 @@ static void run_resume_refusals(const char *res_path) {
     resume_expect_refusal("a frame the call below did not enter", frames, 3u,
                           SR_RESUME_FRAME_CHAIN, res_path);
 
+    /* A second resume while one is in progress. */
+    RESUME_FRAMES_RESET();
+    {
+        CpuState state = g_resume_deep.state;
+        install_lane(COSIM_LANE_AOT);
+        sr_resume_request = &frames[0];
+        const SrResumeStatus status = sr_resume_validate(&state, frames, count, NULL, 0u);
+        const int kept = sr_resume_request == &frames[0];
+        sr_resume_request = NULL;
+        if (status != SR_RESUME_BUSY || !kept ||
+            memcmp(&state, &g_resume_deep.state, sizeof state) != 0) {
+            resume_fail("refusal", g_resume_deep_ordinal,
+                        "a resume in progress was not refused as resume-busy, or was disturbed");
+        } else {
+            fprintf(stderr, "  cosim resume OK   refusal    %-26s %s" NEWLINE,
+                    sr_resume_status_name(status), "a resume while one is in progress");
+        }
+    }
+
     /* A fiber that already holds a call record is not a fresh one. */
     RESUME_FRAMES_RESET();
     {
@@ -2736,6 +2765,7 @@ static void resume_records_from_frames(SrAotReturnBoundary *records, CpuState *s
         records[k].dispatch_owned = k == 0u;
         records[k].callee = frames[k].body;
         records[k].flags = SR_BOUNDARY_CALLEE;
+        if (k == 0u) records[k].flags |= SR_BOUNDARY_HOST_ENTRY;
         if (k != 0u) {
             records[k].caller_body = frames[k - 1u].body;
             records[k].caller_sp = frames[k - 1u].sp;
@@ -2828,6 +2858,11 @@ static void run_resume_describe_refusals(void) {
                               SR_RESUME_ROOT_NOT_HOST_ENTRY);
 
     RESUME_STACK_RESET();
+    records[0].flags &= ~SR_BOUNDARY_HOST_ENTRY;
+    resume_expect_undescribed("an outermost call the interpreter handed on", &stack, &state,
+                              SR_RESUME_ROOT_NOT_HOST_ENTRY);
+
+    RESUME_STACK_RESET();
     records[1].observed_target = UINT64_C(0x100000000) | COSIM_RETURN;
     resume_expect_undescribed("a captured return target", &stack, &state,
                               SR_RESUME_RETURN_IN_FLIGHT);
@@ -2900,15 +2935,20 @@ static int run_resume_cases(const char *trace_dir) {
     }
     const CosimResumeCase cases[] = {
         /* Three frames and a leaf: every yield point in a body resumes. */
-        { "rs", COSIM_RS, 0u, SR_RESUME_OK },
+        { "rs", COSIM_RS, 0u, SR_RESUME_OK, 2u, 0u },
         /* A direct call in a conventional frame, and one behind a taken linked branch. */
-        { "link", link, 0u, SR_RESUME_OK },
-        { "zlink", zlink, 0u, SR_RESUME_OK },
+        { "link", link, 0u, SR_RESUME_OK, 2u, 0u },
+        { "zlink", zlink, 0u, SR_RESUME_OK, 2u, 0u },
         /* rs_tail's own entry resumes (point 2); rs_inner then runs under a tail drain. */
-        { "rs_tail", COSIM_RS_TAIL, 3u, SR_RESUME_TAIL_CHAIN_LIVE },
+        { "rs_tail", COSIM_RS_TAIL, 3u, SR_RESUME_TAIL_CHAIN_LIVE, 2u, 0u },
         /* linkr's own entry resumes (point 2); its `jalr` goes through the dispatcher, whose
          * call record no state-resumable call site began. */
-        { "linkr", linkr, 3u, SR_RESUME_FRAME_NOT_DESCRIBED },
+        { "linkr", linkr, 3u, SR_RESUME_FRAME_NOT_DESCRIBED, 2u, 0u },
+        /* The host entry lands on a body with no translation. The interpreter runs it and
+         * hands the frame to xread by `j` (points 1 and 2 are the two dispatches); xread's
+         * call record returns to the host, but the interpreter's run under it still holds
+         * what the call owes, so it is not a host entry's own. */
+        { "xtailmid", COSIM_XTAILMID, 3u, SR_RESUME_ROOT_NOT_HOST_ENTRY, 3u, COSIM_XTAILMID },
     };
     fprintf(stderr, NEWLINE "cosim: resume at a PC (build: %s)" NEWLINE,
             resumable_build ? "state-resumable" : "ordinary; every thread must be refused");
@@ -2954,7 +2994,7 @@ static int run_resume_cases(const char *trace_dir) {
         resume_fail("rs", 0u, detail);
         return g_resume_failures;
     }
-    /* The live refusals staged at each park of the rs sweep hold the last park's results. */
+    /* Each park of the rs sweep staged four refusals; these are the four-deep park's. */
     if (g_resume_deep.foreign_state != SR_RESUME_FOREIGN_STATE ||
         g_resume_deep.short_capacity != SR_RESUME_TOO_MANY_FRAMES ||
         g_resume_deep.scope_live != SR_RESUME_SCOPE_LIVE ||

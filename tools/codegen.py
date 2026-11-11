@@ -5195,9 +5195,34 @@ _STATE_RESUME_CALL = re.compile(
     r"if \(sr_aot_return_boundary_end\(s\)\) return;")
 #: What may follow a direct call in its line for the call to get a resume point: the close of
 #: the blocks it sits in. A point's label is jumped to from the body's resume switch, past
-#: every local those blocks declare, so nothing after the label may read one.
+#: every local those blocks declare, so nothing after the label may read one. The line must
+#: also end at function scope (_state_resume_depths): a block still open after it can read its
+#: locals on a later line.
 _STATE_RESUME_CALL_TAIL = re.compile(r"^[\s}]*$")
+_STATE_RESUME_LABEL = re.compile(r"^\s*L_([0-9a-f]{8}): ;$")
+#: Comments and literals, whose braces are not blocks.
+_STATE_RESUME_NOT_CODE = re.compile(
+    r"/\*.*?\*/|\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'", re.S)
 STATE_RESUME_STATS = {"bodies": 0, "points": 0, "plain_bodies": 0}
+
+
+def _state_resume_depths(out):
+    """The block depth after each of ``out``'s lines, 1 being the function's own scope.
+
+    ``None`` from the first line whose braces cannot be counted (a comment left open), and
+    for every line after it: nothing there gets a resume point.
+    """
+    depths = []
+    depth = 0
+    for line in out:
+        if depth is not None:
+            code = _STATE_RESUME_NOT_CODE.sub("", line)
+            if "/*" in code or "*/" in code:
+                depth = None
+            else:
+                depth += code.count("{") - code.count("}")
+        depths.append(depth)
+    return depths
 
 
 def state_resume_pass(out, start):
@@ -5213,6 +5238,11 @@ def state_resume_pass(out, start):
       entry ``$sp``, and the point is a label between the callee and the call's own drain and
       end check, which run after a resumed callee exactly as after a called one.
 
+    A point's label is entered from the resume switch with only the entry ``$sp`` restored,
+    so it must sit at function scope: a loop edge whose target label is inside a block is left
+    alone, and so is a call whose line does not close every block it sits in (an enhancement
+    site that reads a local of its own after the call).
+
     A statement of any other shape keeps its text and has no point, so a thread parked or
     suspended there is refused when it is described (sr_resume_describe); nothing is guessed.
     Returns the new lines, or ``out`` itself when the body has no entry yield of the expected
@@ -5224,6 +5254,14 @@ def state_resume_pass(out, start):
         return out
     if not any(line.startswith("    uint32_t _sp_entry = s->r[29];") for line in out):
         return out
+    depths = _state_resume_depths(out)
+    if depths[entry_at] != 1:
+        return out
+    # Loop targets whose label is at function scope, before and after its own line.
+    scope_labels = {
+        match.group(1) for index, line in enumerate(out)
+        if (match := _STATE_RESUME_LABEL.match(line))
+        and depths[index] == 1 and depths[index - 1] == 1}
     cases = [f"      case SR_RESUME_KEY(SR_RESUME_POINT_ENTRY, {body}): "
              f"SR_RESUME_AT(_nk_e, SR_RESUME_POINT_ENTRY, 0u); goto _nk_enter;"]
     yield_targets = set()
@@ -5231,6 +5269,8 @@ def state_resume_pass(out, start):
 
     def park(match):
         site, target = match.group(1), match.group(2)
+        if target not in scope_labels:
+            return match.group(0)
         if target not in yield_targets:
             yield_targets.add(target)
             cases.append(f"      case SR_RESUME_KEY(SR_RESUME_POINT_YIELD, 0x{target}u): "
@@ -5246,6 +5286,7 @@ def state_resume_pass(out, start):
         line = _STATE_RESUME_YIELD.sub(park, line)
         calls = list(_STATE_RESUME_CALL.finditer(line))
         if (len(calls) == 1 and calls[0].group(1) not in call_points
+                and depths[index] == 1
                 and _STATE_RESUME_CALL_TAIL.match(line[calls[0].end():])):
             call = calls[0]
             resume, call_pc, callee = call.group(1), call.group(2), call.group(3)

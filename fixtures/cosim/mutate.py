@@ -590,6 +590,17 @@ MUTANTS: tuple[Mutant, ...] = (
         target="resume-generator",
     ),
     Mutant(
+        # The point exists and validates; only what the resumed run then does is wrong.
+        "resume-loop-point-restarts-the-body",
+        "RESUME GENERATOR: a body resumed at a loop edge runs from its entry instead",
+        [(
+            'f"SR_RESUME_AT(_nk_e, SR_RESUME_POINT_YIELD, 0u); goto L_{target};")',
+            'f"SR_RESUME_AT(_nk_e, SR_RESUME_POINT_YIELD, 0u); goto _nk_enter;")',
+            1,
+        )],
+        target="resume-generator",
+    ),
+    Mutant(
         "resume-entry-counts-a-yield-point",
         "RESUME GENERATOR: a body resumed at its entry counts the entry's yield point again",
         [(

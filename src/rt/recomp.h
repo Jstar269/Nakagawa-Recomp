@@ -1754,6 +1754,9 @@ typedef struct SrAotReturnBoundary {
 #define SR_BOUNDARY_CALLEE 0x1u /* the dispatcher or a generated call site named the callee */
 #define SR_BOUNDARY_SITE   0x2u /* begun at a direct call site of a state-resumable body */
 #define SR_BOUNDARY_PARKED 0x4u /* the body under this call is inside sr_yield at a resume point */
+/* The host entry's own dispatch entered the callee. Not set when the interpreter ran first and
+ * handed the call's frame on (dispatch_call_continue): its run holds what the call still owes. */
+#define SR_BOUNDARY_HOST_ENTRY 0x8u
 
 /* The active AOT return stack follows the running guest fiber. Each TCB owns
  * one descriptor; sched_run swaps it with the active descriptor around every
@@ -1856,7 +1859,7 @@ typedef enum SrResumeStatus {
     SR_RESUME_TAIL_CHAIN_LIVE,     /* "tail-chain-live": a tail drain's chain state is on the host stack */
     SR_RESUME_TAIL_PENDING,        /* "tail-transfer-pending" */
     SR_RESUME_FOREIGN_STATE,       /* "foreign-cpu-state": a call record of another CpuState */
-    SR_RESUME_ROOT_NOT_HOST_ENTRY, /* "root-not-host-entry": the outermost call does not return to the host */
+    SR_RESUME_ROOT_NOT_HOST_ENTRY, /* "root-not-host-entry": the outermost call is not a host entry's own */
     SR_RESUME_RETURN_IN_FLIGHT,    /* "return-in-flight": a call record holds a captured return or an unwind */
     SR_RESUME_FRAME_NOT_DESCRIBED, /* "frame-not-described": a call no state-resumable call site began */
     SR_RESUME_FRAME_CHAIN,         /* "frame-chain": a frame's body is not the one the call below it entered */
@@ -1876,10 +1879,11 @@ typedef enum SrResumeStatus {
 const char *sr_resume_status_name(SrResumeStatus status);
 
 /* The frames of the thread whose return-boundary stack is `stack` (NULL: the running fiber's)
- * and whose registers are `s`, outermost first. Refuses unless every live call was begun by the
- * host entry or by a direct call site of a state-resumable body, each body is the one its call
- * entered, no tail drain, callback or captured return is live, and the innermost body is
- * parked at a resume point. `detail` (may be NULL) names the frame that refused. */
+ * and whose registers are `s`, outermost first. Refuses unless the outermost call is a host
+ * entry's own dispatch of a body, every other live call was begun by a direct call site of a
+ * state-resumable body, each body is the one its call entered, no tail drain, callback or
+ * captured return is live, and the innermost body is parked at a resume point. `detail` (may
+ * be NULL) names the frame that refused. */
 SrResumeStatus sr_resume_describe(const SrAotReturnBoundaryStack *stack, const CpuState *s,
                                   SrResumeFrame *frames, uint32_t capacity, uint32_t *count,
                                   char *detail, size_t detail_cap);

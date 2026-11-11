@@ -192,15 +192,16 @@ reference parks twice too, because a park writes `s->pc`.
 | `zlink` | a direct call behind a taken linked branch: the point's label sits inside the branch's block |
 | `rs_tail` | its own entry resumes; `rs_inner` then runs under a tail drain and every park there must be refused as `tail-chain-live` |
 | `linkr` | its own entry resumes; its `jalr` goes through the dispatcher and every park under it must be refused as `frame-not-described` |
+| `xtailmid` | entered by the host with no translation of its own (lane `MIXED`): the interpreter runs it and hands the frame to `xread`, whose park must be refused as `root-not-host-entry` in every build |
 
 The first yield point of every case is the dispatcher's own, before any call record exists, and
-must be refused as `no-frames`.
+must be refused as `no-frames`; `xtailmid` meets two of them.
 
 Two fail-closed corpora run from one snapshot four frames deep. Frame lists the build cannot
 resume (no frames, an unknown kind, a call point innermost, a parked point below a frame, an
 unregistered body, a registered body with no points, a return PC that is no call's, a call's
-return PC offered as a parked point, a frame the call below did not enter, a fiber that already
-holds a call record) must each be refused by name with the registers, the memory, the trace, the
+return PC offered as a parked point, a frame the call below did not enter, a resume while one is
+in progress, a fiber that already holds a call record) must each be refused by name with the registers, the memory, the trace, the
 write log and the slice counter untouched; the body with no points must not be called. Call
 records the frame list cannot describe are built from the same snapshot, first checked to
 describe as exactly that list, then changed one field at a time, and each must be refused by
@@ -410,9 +411,11 @@ The campaign counts any divergence as a kill; the first it reports for these is 
 Making `beql $zero, $zero` a terminator too would be an equivalent mutant (its slot
 and target are the same either way when taken) and is not claimed.
 
-Five more generator mutants damage the pass that writes resume points, and run in a lane of
+Six more generator mutants damage the pass that writes resume points, and run in a lane of
 their own against the resume lane (`--state-resume`): a call point that continues without running
-the frame above it, a loop edge that parks naming its own PC instead of its target, an entry that
+the frame above it, a loop edge that parks naming its own PC instead of its target (killed as a
+description the build then refuses), a loop point that runs the body from its entry (a point that
+exists and validates, killed by the comparison), an entry that
 counts its yield point again when it is resumed, a resumed body that takes the live `$sp` for its
 entry `$sp`, and a call whose resume label sits after its drain and end check. The entry mutant
 changes no register and no byte of memory: only the yield-point count and the second park catch it.

@@ -2652,6 +2652,11 @@ static void dispatch_call_aot(RecompFn fn, CpuState *s, uint32_t target,
         sr_aot_return_boundary_top->dispatch_owned = 1u;
         sr_aot_return_boundary_top->callee = target;
         sr_aot_return_boundary_top->flags |= SR_BOUNDARY_CALLEE;
+        /* A host entry whose first code is this body. When the interpreter ran first and
+         * handed the frame on, its run still holds the entry $sp the call owes. */
+        if (call_boundary != NULL && !call_boundary->continuation &&
+            call_boundary->resume_pc == SR_HOST_RETURN_PC)
+            sr_aot_return_boundary_top->flags |= SR_BOUNDARY_HOST_ENTRY;
     }
 #ifdef SR_VERIFY
     /* A continuation is the rest of a call already under way, not a call to sample. */
@@ -3248,9 +3253,12 @@ SrResumeStatus sr_resume_describe(const SrAotReturnBoundaryStack *stack, const C
             return resume_refuse(SR_RESUME_RETURN_IN_FLIGHT, detail, detail_cap, "frame %zu", k);
         if (k == 0u) {
             if (!record->has_resume_pc || record->resume_pc != SR_HOST_RETURN_PC ||
-                !record->dispatch_owned || !(record->flags & SR_BOUNDARY_CALLEE))
+                !record->dispatch_owned ||
+                (record->flags & (SR_BOUNDARY_CALLEE | SR_BOUNDARY_HOST_ENTRY)) !=
+                    (SR_BOUNDARY_CALLEE | SR_BOUNDARY_HOST_ENTRY))
                 return resume_refuse(SR_RESUME_ROOT_NOT_HOST_ENTRY, detail, detail_cap,
-                                     "resume 0x%08" PRIx32, record->resume_pc);
+                                     "resume 0x%08" PRIx32 ", flags 0x%" PRIx32,
+                                     record->resume_pc, record->flags);
         } else {
             const SrAotReturnBoundary *below = &records[k - 1u];
             if (!record->has_resume_pc || record->dispatch_owned ||
@@ -3437,6 +3445,7 @@ SrResumeStatus dispatch_resume_from_host(CpuState *s, const SrResumeFrame *frame
         record->flags = SR_BOUNDARY_CALLEE;
         if (k == 0u) {
             record->dispatch_owned = 1u;
+            record->flags |= SR_BOUNDARY_HOST_ENTRY;
         } else {
             record->caller_body = frames[k - 1u].body;
             record->caller_sp = frames[k - 1u].sp;
