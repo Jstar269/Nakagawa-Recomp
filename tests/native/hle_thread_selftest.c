@@ -382,6 +382,7 @@ static uint32_t vblank_delivered(uint32_t no, uint32_t *arg) {
 #define NID_SCE_AUDIO_SET_DATA_LEN 0xcb2e439eu
 #define NID_SCE_AUDIO_CHANGE_CHANNEL_CONFIG 0x95fd0c2du
 #define NID_SCE_AUDIO_GET_CHANNEL_REST_LENGTH 0xb011922fu
+#define NID_SCE_AUDIO_GET_CHANNEL_REST_LEN 0xe9d97901u
 #define NID_SCE_IO_RENAME 0x779103a0u
 #define NID_SCE_AUDIO_CHANGE_VOLUME 0xb7e1d8e7u
 #define NID_SCE_AUDIO_OUTPUT2_RESERVE 0x01562ba3u
@@ -11862,9 +11863,13 @@ static void test_audio_calls_read_the_guest_queue_under_the_deterministic_clock(
     s_audio_queue_result = 100000;
     expect(audio_dispatch(&cpu, NID_SCE_AUDIO_GET_CHANNEL_REST_LENGTH, 0u, 0u, 0u) == 64u,
            "GetChannelRestLength reports the model's 64 frames, not the host's 100000");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_GET_CHANNEL_REST_LEN, 0u, 0u, 0u) == 64u,
+           "GetChannelRestLen agrees with RestLength on the model's 64 frames (#2361)");
     s_vtime_us += 2000u;   /* the 64 frames have played in guest time */
     expect(audio_dispatch(&cpu, NID_SCE_AUDIO_GET_CHANNEL_REST_LENGTH, 0u, 0u, 0u) == 0u,
            "and 2 ms of guest time later the model is empty whatever the host holds");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_GET_CHANNEL_REST_LEN, 0u, 0u, 0u) == 0u,
+           "and GetChannelRestLen reads the same empty model (#2361)");
 
     expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT2_RESERVE, 64u, 0u, 0u) == 0u,
            "Output2 reserves a 64-sample channel");
@@ -12182,6 +12187,29 @@ static void test_audio_regular_contract_safety(void) {
     s_audio_queue_result = -1;
     expect(audio_dispatch(&cpu, NID_SCE_AUDIO_GET_CHANNEL_REST_LENGTH, 0u, 0u, 0u) == 0u,
            "AudioGetChannelRestLength clamps negative queue backend report to 0");
+    s_audio_queue_result = 0;
+
+    /* sceAudioGetChannelRestLen (#2361) answers as sceAudioGetChannelRestLength does: on a
+     * PSP-3000 the two, channel in $a0, read the same rest length after each blocking output
+     * (PSP-HLE-AUDIO-REST-001). The invalid-channel code is UNMEASURED for both calls; RestLen
+     * keeps RestLength's.
+     * MUTANT: drop the 0xe9d97901 registration -- the first call below is an unimplemented
+     *   NID and the run stops (exit 7). */
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_GET_CHANNEL_REST_LEN, 0xffffffffu, 0u, 0u) ==
+               SCE_AUDIO_ERROR_INVALID_CH,
+           "AudioGetChannelRestLen rejects a negative channel with RestLength's code (unmeasured for both)");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_GET_CHANNEL_REST_LEN, 8u, 0u, 0u) ==
+               SCE_AUDIO_ERROR_INVALID_CH,
+           "AudioGetChannelRestLen rejects out-of-range channel 8 with RestLength's code (unmeasured for both)");
+    s_audio_queue_result = 512;
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_GET_CHANNEL_REST_LEN, 0u, 0u, 0u) == 512u,
+           "AudioGetChannelRestLen returns the queued frame count RestLength returns");
+    s_audio_queue_result = 0;
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_GET_CHANNEL_REST_LEN, 0u, 0u, 0u) == 0u,
+           "AudioGetChannelRestLen returns 0 when queue has 0 frames");
+    s_audio_queue_result = -1;
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_GET_CHANNEL_REST_LEN, 0u, 0u, 0u) == 0u,
+           "AudioGetChannelRestLen clamps negative queue backend report to 0");
     s_audio_queue_result = 0;
 
     for (uint32_t i = 0; i < 64u; i++)
