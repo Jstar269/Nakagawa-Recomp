@@ -48,8 +48,13 @@ ROOT_KEYS = {
     "modules", "filesystem", "hle_profile", "feature_requirements",
     "compatibility_manifest", "verification_profile", "codegen_profile", "notes",
     "runtime_contract", "profile_zero", "runtime_bindings", "game_name",
-    "required_runtime_bindings",
+    "required_runtime_bindings", "input",
 }
+
+#: The shapes of a stick dead zone a title may declare under $.input.analog_dead_zone, and
+#: the range of its size in the title's own centred counts (-127..127 per axis).
+ANALOG_DEAD_ZONE_SHAPES = ("square",)
+ANALOG_DEAD_ZONE_COUNTS = (1, 126)
 
 #: Optional title bindings the compiled runtime may consume. Every field is
 #: individually optional so a generic build has none of them; the paired VBLANK
@@ -1165,6 +1170,25 @@ def enforce_required_runtime_bindings(required: list[str], bindings: dict[str, A
          + " (configure them under $.runtime_bindings, or drop the requirement)")
 
 
+def validate_input(value: Any, path: str) -> dict[str, Any]:
+    """$.input: how the title reads its controls, for host input that adapts to it."""
+    value = obj(value, path, {"analog_dead_zone"})
+    require(value, path, "analog_dead_zone")
+    zone_path = f"{path}.analog_dead_zone"
+    zone = obj(value["analog_dead_zone"], zone_path, {"shape", "counts"})
+    require(zone, zone_path, "shape", "counts")
+    shape = text(zone["shape"], f"{zone_path}.shape", 16)
+    if shape not in ANALOG_DEAD_ZONE_SHAPES:
+        fail(f"{zone_path}.shape", "unsupported dead-zone shape")
+    low, high = ANALOG_DEAD_ZONE_COUNTS
+    counts = zone["counts"]
+    if type(counts) is not int:
+        fail(f"{zone_path}.counts", "must be an integer")
+    if not low <= counts <= high:
+        fail(f"{zone_path}.counts", f"must be in range {low}..{high}")
+    return {"analog_dead_zone": {"shape": shape, "counts": counts}}
+
+
 def validate_manifest(value: Any) -> dict[str, Any]:
     value = obj(value, "$", ROOT_KEYS)
     required = {
@@ -1230,6 +1254,8 @@ def validate_manifest(value: Any) -> dict[str, Any]:
         if "runtime_contract" not in result or result["runtime_contract"]["profile_id"] != "profile-zero-v1":
             fail("$.profile_zero", "requires runtime_contract.profile_id=profile-zero-v1")
         result["profile_zero"] = validate_profile_zero(value["profile_zero"], "$.profile_zero")
+    if "input" in value:
+        result["input"] = validate_input(value["input"], "$.input")
     if "notes" in value:
         result["notes"] = text(value["notes"], "$.notes", 2048, 0)
     return result

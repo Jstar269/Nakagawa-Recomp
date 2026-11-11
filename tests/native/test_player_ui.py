@@ -1697,6 +1697,58 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertNotIn("QUIT_DIALOG", keyboard["stdout"], "Esc closes the box, not the player")
         self.assertEqual(self.focus_trail(keyboard)[-1], self.FIND)
 
+    @staticmethod
+    def find_states(run: dict[str, object]) -> list[str]:
+        """What the find box held while it was open, frame by frame, with repeats collapsed."""
+        stdout = run["stdout"]
+        assert isinstance(stdout, str)
+        states: list[str] = []
+        for text_hex in re.findall(
+                r"^\[PLAYER_UI_TEST\] find_box frame=\d+ text_hex=([0-9a-f]*)\r?$", stdout, re.M):
+            state = bytes.fromhex(text_hex).decode("utf-8")
+            if not states or states[-1] != state:
+                states.append(state)
+        return states
+
+    def test_next_ui_find_stops_at_its_cap(self) -> None:
+        """#2206: what a hardware keyboard types into the find box goes through the shared
+        keyboard's cap: 40 characters typed twice (the second time into a box that holds
+        text), 63 bytes kept."""
+        run = self.run_player(
+            "library", ("WAIT_MS=1000", "KEY_SLASH", "TEXT=" + "x" * 40, "WAIT_MS=200",
+                        "TEXT=" + "x" * 40, "WAIT_MS=200"),
+            library_titles=4, timeout=120.0,
+        )
+        if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in run["stdout"]:
+            self.skipTest("the next UI could not start here (no UI fonts)")
+        states = self.find_states(run)
+        self.assertTrue(states, run["stdout"])
+        self.assertEqual(states[-1], "x" * 63)
+
+    def test_next_ui_find_types_with_a_controller_alone(self) -> None:
+        """#2206: the find box's keys are the shared on-screen keyboard, so a controller
+        alone searches: the d-pad moves, A types the focused key, X deletes, Start is Done
+        (focus goes to the first match) and A opens it. Failing-before: the box had its own
+        grid, X did nothing while it was open, and Start left the library for Settings."""
+        run = self.run_player(
+            "library",
+            ("WAIT_MS=1000", "PAD_WEST", "WAIT_MS=100", "PAD_DPAD_UP", "PAD_SOUTH",
+             "PAD_DPAD_RIGHT", "PAD_SOUTH", "WAIT_MS=100", "PAD_WEST", "WAIT_MS=100",
+             "PAD_DPAD_LEFT", "PAD_SOUTH", "WAIT_MS=100", "PAD_START", "WAIT_MS=100",
+             "PAD_SOUTH", "WAIT_MS=200"),
+            library_titles=12, timeout=120.0,
+        )
+        if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in run["stdout"]:
+            self.skipTest("the next UI could not start here (no UI fonts)")
+        frames = run["frames"]
+        assert isinstance(frames, list)
+        self.assertIn(self.FIND_KEY_Q, self.focus_trail(run), "the pad opens the box on q")
+        # 1, 2, X deletes the 2, 1: "11" is in Synthetic title 11 and its disc ID alone.
+        self.assertEqual((frames[-1]["next_route"], frames[-1]["selected"]), ("2", "11"),
+                         "Start is Done, and A opens the one match")
+        self.assertEqual(self.find_states(run), ["", "1", "12", "1", "11"],
+                         "the keys typed 1 and 2, X deleted the 2, and 1 was typed again")
+
     def test_next_ui_is_the_only_launcher(self) -> None:
         """The owner's rule for v0.0.1: the new launcher or nothing.
 
@@ -3104,8 +3156,11 @@ class NativePlayerUiTests(unittest.TestCase):
              UPDATE_DOWNLOAD_PREFIX + f"v{UPDATE_NEWER_VERSION}/nakagawa-recomp-{UPDATE_NEWER_VERSION}-windows-x64.zip"],
             "the checksum file and its signature first, then the ZIP, each once")
         installed = steps[-1]
-        self.assertTrue(installed["zip"].endswith(
-            os.sep.join(("Nakagawa", "data", "downloads", f"nakagawa-recomp-{UPDATE_NEWER_VERSION}-windows-x64.zip"))),
+        # The player writes its own separator, not the one of the Python running this test
+        # (MSYS2's python has os.sep "/" on Windows), so compare the path's last components.
+        self.assertEqual(
+            re.split(r"[\\/]", installed["zip"])[-4:],
+            ["Nakagawa", "data", "downloads", f"nakagawa-recomp-{UPDATE_NEWER_VERSION}-windows-x64.zip"],
             installed)
         self.assertTrue(installed["install"].endswith(f"nakagawa-recomp-{UPDATE_NEWER_VERSION}-windows-x64"), installed)
         frames = run["frames"]
@@ -5201,6 +5256,43 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertIn("smooth motion", lines[-1], "smooth motion is among the parts on")
         self.assertNotIn("Smooth motion is off", lines[-1])
         self.assertEqual(page["smooth"], "Library (On)")
+
+    EVERY_PART_ON = {"default": "enhanced", "af": "16", "text": "on", "readout": "on",
+                     "notice": "on", "wide": "fill", "smooth": "x2", "sas": "sinc", "tess": "2",
+                     "cull": "on", "upscale": "fsr1"}
+    EVERY_PART_WORDS = ("16x texture filtering", "crisp system text", "speed readout",
+                        "game badge", "widescreen", "clean pitched sound", "2x finer patches",
+                        "wider culling", "sharper enlarging")
+
+    def every_part_play_line(self, title: dict[str, str]) -> str:
+        """The title page's play line for the packaged TEST00006 with every Enhanced part on in
+        the library and `title` as its own play choice: the line player_ui_nk.c builds."""
+        settings = {"enhanced": dict(self.EVERY_PART_ON), "title_play": {"TEST00006": title}}
+        run = self.next_ui_run(
+            "ready", ("WAIT_MS=300", "KEY_RETURN", "WAIT_MS=300"),
+            post_build_ready=True, wait_background=True, settings=settings,
+            enhancement_packages={"TEST00006": "display-smoke-v1"})
+        lines = re.findall(r"next_ui_title_play_line disc=TEST00006 line=(.+?)\r?$",
+                           str(run["stdout"]), re.M)
+        self.assertTrue(lines, run["stdout"])
+        return lines[-1]
+
+    def test_next_ui_play_line_names_every_part(self) -> None:
+        """The game page's play line with every part on names each one and ends whole: on main
+        the parts list (160 bytes) cut "sharper enlarging" to "sharper e", and the Ace line (256 bytes) was
+        cut mid-word, with no ellipsis for the page test to see."""
+        enhanced = self.every_part_play_line({"mode": "enhanced"})
+        self.assertTrue(enhanced.startswith("Enhanced for this game: "), enhanced)
+        self.assertTrue(enhanced.endswith("smooth motion, clean pitched sound, 2x finer patches, "
+                                          "wider culling, sharper enlarging."), enhanced)
+        for words in self.EVERY_PART_WORDS:
+            self.assertIn(words, enhanced)
+        ace = self.every_part_play_line({"mode": "ace"})
+        self.assertTrue(ace.startswith("Ace for this game: 60 FPS game logic, "), ace)
+        self.assertTrue(ace.endswith("Smooth motion is off while it runs at 60 FPS: this build "
+                                     "smooths only 30 FPS games."), ace)
+        for words in self.EVERY_PART_WORDS:
+            self.assertIn(words, ace)
 
     def test_compatibility_records_carry_a_player_tier(self) -> None:
         """#1297: every title record maps to a player tier; Hot Shots Tennis is Playable.

@@ -317,7 +317,8 @@ const NkTitleEntry nk_title_catalog_entries[] = {
         false,
         false,
         NULL,
-        0
+        0,
+        0U
     },
     {
         "hst-ucus98701-v1",
@@ -342,7 +343,8 @@ const NkTitleEntry nk_title_catalog_entries[] = {
         false,
         false,
         s_modules_title_1,
-        3
+        3,
+        64U
     },
     {
         "pspdev-phase5-v1",
@@ -367,7 +369,8 @@ const NkTitleEntry nk_title_catalog_entries[] = {
         false,
         false,
         NULL,
-        0
+        0,
+        0U
     },
     {
         "showcase-breakout-v1",
@@ -392,7 +395,8 @@ const NkTitleEntry nk_title_catalog_entries[] = {
         false,
         false,
         NULL,
-        0
+        0,
+        0U
     },
     {
         "showcase-scene-v1",
@@ -417,7 +421,8 @@ const NkTitleEntry nk_title_catalog_entries[] = {
         false,
         false,
         NULL,
-        0
+        0,
+        0U
     },
     {
         "synthetic-allegrex-v1",
@@ -442,7 +447,8 @@ const NkTitleEntry nk_title_catalog_entries[] = {
         false,
         false,
         s_modules_title_5,
-        1
+        1,
+        0U
     },
     {
         "synthetic-title2-v1",
@@ -467,7 +473,8 @@ const NkTitleEntry nk_title_catalog_entries[] = {
         false,
         false,
         s_modules_title_6,
-        1
+        1,
+        0U
     },
 };
 

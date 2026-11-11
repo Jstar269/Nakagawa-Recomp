@@ -1556,9 +1556,26 @@ given reports `SKIP` with the reason rather than passing, and a quantity the run
 publish is reported as absent.
 
 **Audio drift** is the one that was unmeasurable until the telemetry published it. The runtime
-reads `sr_audio_queued()` — the queue depth the blocking output paces against — in
-`src/rt/hle_audio.c`, in the same place it computes the delay from it, and prints one reading per
-300 delivered vblanks (about five seconds) behind `SR_AUDIOSTAT`:
+reads the queue depth the blocking output paces against in `src/rt/hle_audio.c`
+(`hle_audio_queued()`), in the same place it computes the delay from it, and prints one reading per
+300 delivered vblanks (about five seconds) behind `SR_AUDIOSTAT`. That depth is the host mixer's
+queue less what the mixer holds for its output device: one device pull and one display period (736
+frames), so far as the channel's own two periods do not already cover them. Against the 441-frame
+pulls of WASAPI and the 1024-frame pulls of DirectSound on the reference PC, a 1024-frame or
+2048-frame channel holds nothing back, and a 256-frame one holds 665 or 1248 frames. A channel
+the device has played dry (a pull came while its stream had nothing to give) gets the hold as
+silence ahead of its next push; when that push is a counted dropout, `starved_ms` includes the
+silence. The start-up line
+`audio: the host device takes N frames at R Hz per pull (T ms, M mixer frames)` gives SDL's chunk
+size at the device's rate and the same in 44.1 kHz mixer frames; the hold uses the mixer-frame
+figure, or the larger pull the device was measured to take: the widest single pull since the
+device last changed, plus the frames a rate-converting stream keeps back. Pulls the device takes
+together in a burst change the figure only once such a burst has found a playing channel short. `queued=` in
+`AUDIOSTAT_HOST` is the
+mixer's whole queue, the hold included, and so are `q_min_ms` and `q_max_ms` in `PERF_AUDIO`,
+which leave out only silence queued for the push that reports them. A queue whose stream can
+give the device nothing reads 0 everywhere, to the guest as well: a stream that converts the
+sample rate keeps its last few frames back, and they are not counted as queued:
 
 ```text
 AUDIOSTAT_LEAD: vbl=9300 ch=8 outputs=268 queued=8820 lead_ms=200
