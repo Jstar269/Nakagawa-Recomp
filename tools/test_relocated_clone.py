@@ -33,6 +33,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from typing import ClassVar
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -201,6 +202,122 @@ class RelocatedCloneTests(unittest.TestCase):
             "\n\n".join(self.failures)
             + f"\n\nfailed steps: {len(self.failures)} in {self.clone}",
         )
+
+
+#: The route both checkouts build at once: a generated title-config header (Python), a
+#: runtime capture written by a C program, Python translation of that capture into C, and
+#: two links against runtime sources. Generated and runtime assets, all from one checkout.
+ISOLATION_GOAL = "code-capture-selftest"
+#: The source both binaries compile, which each checkout marks with its own name.
+ISOLATION_MARKED_SOURCE = Path("tests/native/code_capture_selftest.c")
+ISOLATION_BINARIES = ("code_capture_selftest_capture.exe", "code_capture_selftest_bound.exe")
+
+
+def _marker(name: str) -> bytes:
+    return f"nk-isolation-marker-{name}".encode("ascii")
+
+
+def _snapshot(root: Path, skip: Path | None = None) -> dict[str, tuple[int, int]]:
+    """Every file under ``root`` (except under ``skip``): relative path -> (size, mtime_ns)."""
+    found: dict[str, tuple[int, int]] = {}
+    for directory, folders, files in os.walk(root):
+        here = Path(directory)
+        if skip is not None and (here == skip or skip in here.parents):
+            folders[:] = []
+            continue
+        for name in files:
+            path = here / name
+            stat = path.stat()
+            found[path.relative_to(root).as_posix()] = (stat.st_size, stat.st_mtime_ns)
+    return found
+
+
+def _changed(before: dict[str, tuple[int, int]], after: dict[str, tuple[int, int]]) -> list[str]:
+    return sorted(path for path in before.keys() | after.keys() if before.get(path) != after.get(path))
+
+
+class TwoCheckoutIsolationTests(unittest.TestCase):
+    """Two checkouts building at once use only their own generated and runtime assets (#368).
+
+    Two copies of the tracked tree, each with a different title name (so a different
+    BUILD_DIR) and its own marker compiled into the route's binaries, build
+    ``code-capture-selftest`` at the same time with no BUILD_ROOT set, as a developer with
+    two worktrees would. Then: nothing beside the two checkouts in their shared parent
+    changed; each checkout built the route's binaries in its own build folder, and they
+    carry its own marker and not the other's; and no file one checkout built names the
+    other checkout's path (a dependency file, stamp or generated source that did would
+    mean it read or wrote there). A location elsewhere on the machine is not watched:
+    outputs moved there fail the own-build-folder check, and a shared input read from
+    there fails the marker check only if it differs between the checkouts.
+    """
+
+    make: ClassVar[str]
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        make = shutil.which("mingw32-make") or shutil.which("make")
+        if not make:
+            raise unittest.SkipTest("GNU Make is required for the two-checkout isolation check")
+        if not (os.environ.get("CC") or shutil.which("gcc") or shutil.which("cc")):
+            raise unittest.SkipTest("a C compiler is required to build the isolation route")
+        cls.make = make
+
+    def test_two_checkouts_building_at_once_consume_only_their_own_assets(self) -> None:
+        base = Path(tempfile.mkdtemp(prefix="nakagawa-two-checkouts-"))
+        self.addCleanup(shutil.rmtree, base, True)
+        if any(char.isspace() for char in base.as_posix()):
+            self.skipTest(f"the temporary directory {base} contains whitespace; this test "
+                          "names a BUILD_DIR, which Make refuses with a space")
+        checkouts = {name: base / f"checkout-{name}" for name in ("a", "b")}
+        for name, checkout in checkouts.items():
+            checkout.mkdir()
+            self.assertGreater(copy_tracked_tree(ROOT, checkout), 100)
+            source = checkout / ISOLATION_MARKED_SOURCE
+            source.write_bytes(
+                source.read_bytes()
+                + b"\n__attribute__((used)) static const char nk_isolation_marker[] = \""
+                + _marker(name) + b"\";\n"
+            )
+        outside = _snapshot(base, skip=None)
+        outside = {path: value for path, value in outside.items()
+                   if not path.startswith(("checkout-a/", "checkout-b/"))}
+
+        runs = {
+            name: subprocess.Popen(
+                [self.make, "--no-print-directory", ISOLATION_GOAL, f"GAME_NAME=iso{name}",
+                 f"PYTHON={Path(sys.executable).as_posix()}"],
+                cwd=checkout, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+            )
+            for name, checkout in checkouts.items()
+        }
+        outputs = {name: run.communicate(timeout=COMMAND_TIMEOUT_S)[0] for name, run in runs.items()}
+        for name, run in runs.items():
+            self.assertEqual(run.returncode, 0, f"checkout {name}:\n{outputs[name][-4000:]}")
+
+        after = {path: value for path, value in _snapshot(base).items()
+                 if not path.startswith(("checkout-a/", "checkout-b/"))}
+        self.assertEqual(_changed(outside, after), [],
+                         "the two builds wrote beside their checkouts, in a place both share")
+
+        for name, checkout in checkouts.items():
+            other = "b" if name == "a" else "a"
+            build_dir = checkout / "build" / f"iso{name}"
+            for binary in ISOLATION_BINARIES:
+                with self.subTest(checkout=name, binary=binary):
+                    self.assertTrue((build_dir / binary).is_file(),
+                                    f"checkout {name} did not build {binary} in its own "
+                                    f"build folder {build_dir}")
+                    data = (build_dir / binary).read_bytes()
+                    self.assertIn(_marker(name), data)
+                    self.assertNotIn(_marker(other), data)
+            other_root = {checkouts[other].as_posix().encode(), str(checkouts[other]).encode()}
+            naming_other = sorted(
+                path.relative_to(checkout).as_posix()
+                for path in (checkout / "build").rglob("*")
+                if path.is_file() and any(root in path.read_bytes() for root in other_root)
+            )
+            self.assertEqual(naming_other, [],
+                             f"checkout {name} built files that name checkout {other}")
 
 
 if __name__ == "__main__":
