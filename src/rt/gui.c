@@ -427,15 +427,25 @@ static void *gui_ace_show_pass(void *cmd, void *src, int *w, int *h) {
 /* The present the show pass recorded into ended (sdl3vk.h, Sdl3VkShowDone). Shown, the owed frame
  * or the in-between leaves the new frame held for the VBLANK after, and the in-between's
  * measurement waits for its submission. Failed (an out-of-date swapchain, or a GPU present the CPU
- * path then takes over), neither reached the screen: the owed frame is given up and counted, the
- * new frame is not held, so the CPU present that may follow shows it as itself and no VBLANK
- * shows it again, and an in-between nobody saw is not measured. */
+ * path then takes over), neither reached the screen. When the present failed after its
+ * submission and the renderer can present again, the owed frame stays owed, as for a busy
+ * display, and the pass drops the new frame it recorded, so the CPU present that follows shows
+ * the owed frame and holds the new one again (ace.h, ace_pace_owed_failed). Failed before its
+ * submission, the pass's commands never ran, so the frame is given up and counted. The new frame of a
+ * failed in-between is not held, so the CPU present shows it as itself and no VBLANK shows it
+ * again, and an in-between nobody saw is not measured. */
 static void gui_ace_show_done(int result, uint64_t submission) {
     const AceShow shown = s_ace_show_pending;
     s_ace_show_pending = ACE_SHOW_REAL;
     if (shown == ACE_SHOW_OWED) {
-        if (result == 1) ace_smooth_shown_owed(SDL_GetTicksNS());
-        else ace_smooth_held_missed(0);
+        if (result == 1) {
+            ace_smooth_shown_owed(SDL_GetTicksNS());
+        } else if (submission && !sdl3vk_renderer_terminal()) {
+            ace_smooth_unrecord(s_ace_smooth);
+            ace_smooth_owed_failed();
+        } else {
+            ace_smooth_held_missed(0);
+        }
     } else if (shown == ACE_SHOW_BETWEEN && result == 1) {
         ace_smooth_shown_between(SDL_GetTicksNS());
         if (!ace_motion_queue_made(&s_ace_motion_queue, s_ace_between_serial, submission))
@@ -1477,8 +1487,8 @@ void gui_ace_vblank(uint32_t vcount) {
     sync_sdl_input();
     if (result == 0) gui_quit_request();
     /* Shown, or not: a display too busy to take it leaves the frame owed, tried again at the
-     * next VBLANK or shown by the next new flip (ace.h); a failed present or a closed window
-     * gives it up. */
+     * next VBLANK or shown by the next flip (ace.h); a failed present or a closed window gives it
+     * up, and it is counted. */
     if (result == 1) ace_smooth_note_present(ACE_PRESENT_HELD, SDL_GetTicksNS());
     else ace_smooth_held_missed(result == SDL3VK_PRESENT_DISPLAY_BUSY);
 #else
@@ -2641,7 +2651,8 @@ typedef struct {
     int last_real;
     int (*busy_at)(uint32_t);   /* the display cannot take a present at that VBLANK */
     uint32_t vcount;            /* the VBLANK the presents are made in */
-    uint32_t fail_vcount;       /* the first present made in it fails after its submission */
+    uint32_t fail_vcount;       /* the first presents made in it fail after their submission */
+    int fails;                  /* how many */
     uint64_t submitted;         /* present submissions made */
     unsigned keeps;             /* pictures the recording was told to keep (sr_videorec_frame_keep) */
 } BusyRun;
@@ -2668,6 +2679,17 @@ VkImage ace_smooth_previous(AceBetween *s, VkCommandBuffer cmd) {
     (void)s; (void)cmd;
     return s_stub_smooth.have_old ? busy_image(BUSY_IMG_FRAME, s_stub_smooth.older) : VK_NULL_HANDLE;
 }
+
+void ace_smooth_unrecord(AceBetween *s) {
+    (void)s;
+    if (!s_stub_smooth.have_old) return;
+    s_stub_smooth.newest = s_stub_smooth.older;
+    s_stub_smooth.have_old = 0;
+}
+
+/* A failed present is an out-of-date swapchain, unless a run makes the renderer terminal. */
+static int s_stub_terminal;
+int sdl3vk_renderer_terminal(void) { return s_stub_terminal; }
 
 void ace_smooth_size(const AceBetween *s, int *w, int *h) {
     (void)s;
@@ -2729,8 +2751,8 @@ static int busy_present(VkImage src) {
     BusyRun *r = s_busy;
     if (r->busy_at(r->vcount)) return SDL3VK_PRESENT_DISPLAY_BUSY;
     int result = 1;
-    if (r->vcount == r->fail_vcount) {
-        r->fail_vcount = BUSY_NO_FAIL;
+    if (r->vcount == r->fail_vcount && r->fails > 0) {
+        r->fails--;
         result = -1;
     }
     const uint64_t next = r->submitted + 1u;
@@ -2764,12 +2786,14 @@ static void busy_flip(int frame) {
     gui_ace_presented(gpu_action == GUI_GPU_SHOWN || cpu_result == 1, gui_present_busy(gpu_action, cpu_result));
 }
 
-static void busy_run(BusyRun *r, int reflip, int (*busy_at)(uint32_t), uint32_t fail_vcount, uint64_t lost) {
+static void busy_run(BusyRun *r, int reflip, int (*busy_at)(uint32_t), uint32_t fail_vcount, int fails,
+                     uint64_t lost) {
     memset(r, 0, sizeof(*r));
     r->order_ok = 1;
     r->last_real = -1;
     r->busy_at = busy_at;
     r->fail_vcount = fail_vcount;
+    r->fails = fails;
     assert(ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=x2;sas=off;tess=off", NULL));
     s_on = 1; s_sdl3 = 1; s_offscreen = 0; s_quit_requested = 0;
     s_ace_smooth = (AceBetween *)&s_stub_held;
@@ -2849,10 +2873,10 @@ static void selftest_busy_display_keeps_real_frames(void) {
     AcePaceStats st;
     static const uint64_t busy_one[2] = { 1u, 2u };     /* reflip: its flip's present and its VBLANK */
     static const uint64_t busy_odd[2] = { 90u, 180u };
-    static const uint64_t busy_four[2] = { 4u, 3u };
+    static const uint64_t busy_four[2] = { 4u, 5u };
     for (int reflip = 0; reflip <= 1; reflip++) {
         /* The display takes every present: each frame has its in-between and its own picture. */
-        busy_run(&r, reflip, busy_never, BUSY_NO_FAIL, 0u);
+        busy_run(&r, reflip, busy_never, BUSY_NO_FAIL, 0, 0u);
         ace_pace_stats(&st);
         assert(busy_count(r.real, 0, BUSY_FRAMES) == BUSY_FRAMES && r.order_ok);
         assert(busy_count(r.between, 100, BUSY_FRAMES) == BUSY_FRAMES - 100);
@@ -2863,7 +2887,7 @@ static void selftest_busy_display_keeps_real_frames(void) {
         /* One held present finds the display busy: that frame is shown by the next flip's
          * present in place of the in-between, the new frame at its own VBLANK, and the frames
          * after carry on with in-betweens. */
-        busy_run(&r, reflip, busy_one_held, BUSY_NO_FAIL, 0u);
+        busy_run(&r, reflip, busy_one_held, BUSY_NO_FAIL, 0, 0u);
         ace_pace_stats(&st);
         assert(r.between[200] && r.real[200]);              /* was: never shown as itself */
         assert(!r.between[201] && r.real[201]);
@@ -2876,7 +2900,7 @@ static void selftest_busy_display_keeps_real_frames(void) {
 
         /* A display that takes only every second present, the flips': every game frame is
          * shown as itself, in order, and no made-up picture takes a real one's place. */
-        busy_run(&r, reflip, busy_every_odd, BUSY_NO_FAIL, 0u);
+        busy_run(&r, reflip, busy_every_odd, BUSY_NO_FAIL, 0, 0u);
         ace_pace_stats(&st);
         assert(busy_count(r.real, 0, BUSY_FRAMES - 1) == BUSY_FRAMES - 1 && r.order_ok);
         assert(busy_count(r.between, 152, BUSY_FRAMES) == 0);
@@ -2885,25 +2909,55 @@ static void selftest_busy_display_keeps_real_frames(void) {
 
         /* The display is busy for four VBLANKs: frame 200's held present, frame 201's flip and
          * VBLANK, frame 202's flip. Frames 201 and 202 never reach a show pass, as without smooth
-         * motion. At frame 202's VBLANK the display takes a present again. A title that flips
-         * once per frame shows the owed frame 200 there. One that flips each frame twice shows
-         * its newest frame, 202, itself: a newer real frame replaces the owed one, which is
-         * counted. Either way no in-between stands in for a real frame, frame 203 is shown as it
-         * is, and in-betweens resume with frame 204. */
-        busy_run(&r, reflip, busy_stretch, BUSY_NO_FAIL, 0u);
+         * motion. At frame 202's VBLANK the display takes a present again, and the owed frame
+         * 200 is shown there, never replaced by a newer one. A title that flips each frame twice
+         * re-flips 202 there, so 202's picture was taken too: that present shows 200 and holds
+         * 202, which the next flip shows in place of 203's in-between. Either way every frame
+         * whose present was taken is shown, in order, nothing is superseded, no in-between
+         * stands in for a real frame, and in-betweens resume with frame 204. */
+        busy_run(&r, reflip, busy_stretch, BUSY_NO_FAIL, 0, 0u);
         ace_pace_stats(&st);
-        assert(r.order_ok && !r.real[201] && !r.between[201] && !r.between[202]);
-        if (reflip) assert(!r.real[200] && r.real[202] && st.superseded == 1u);
-        else assert(r.real[200] && !r.real[202] && st.superseded == 0u);
+        assert(r.order_ok && r.real[200] == 1 && !r.real[201] && !r.between[201] && !r.between[202]);
+        assert(reflip ? r.real[202] == 1 : !r.real[202]);
         assert(r.real[203] && !r.between[203] && r.between[204] && r.real[204]);
-        assert(st.busy == busy_four[reflip]);
+        assert(busy_most(r.real) == 1 + reflip);    /* a re-flip's present shows its frame again */
+        assert(st.busy == busy_four[reflip] && st.superseded == 0u);
         busy_check_motion(&r, 0u);
     }
 
     /* The present that should show the owed frame 200 fails after its submission (frame 201's
-     * flip; gui_present's CPU path then shows 201 itself). Frame 200 never reached the screen: it
-     * is counted, and 201 is not held, so no VBLANK shows it a second time. */
-    busy_run(&r, 0, busy_one_held, 402u, 0u);
+     * flip). Nothing reached the screen, so 200 stays owed, and gui_present's CPU present of the
+     * same flip shows it and holds 201, which its VBLANK shows. Every frame is shown once, in
+     * order; the failed present is counted with the busy ones. */
+    busy_run(&r, 0, busy_one_held, 402u, 1, 0u);
+    ace_pace_stats(&st);
+    assert(r.real[200] == 1 && r.between[200] && r.real[201] == 1 && !r.between[201]);
+    assert(r.real[202] == 1 && r.between[202] == 1 && r.order_ok && busy_most(r.real) == 1);
+    assert(busy_count(r.real, 0, BUSY_FRAMES) == BUSY_FRAMES);
+    assert(st.busy == 2u && st.superseded == 0u);
+    busy_check_motion(&r, 0u);
+    busy_check_report("\"superseded\": 0, \"unpaired\": 0, \"busy\": 2}");
+
+    /* Both presents of frame 201's flip fail, the GPU one and the CPU one: 200 stays owed and its
+     * VBLANK shows it. 201 never reached the screen, as a frame whose presents fail is lost
+     * without smooth motion, and 202 follows 200 as itself, since no in-between pairs it with a
+     * frame two steps back. */
+    busy_run(&r, 0, busy_one_held, 402u, 2, 0u);
+    ace_pace_stats(&st);
+    assert(r.real[200] == 1 && r.between[200] && !r.real[201] && !r.between[201]);
+    assert(r.real[202] == 1 && !r.between[202] && r.between[203] && r.order_ok && busy_most(r.real) == 1);
+    assert(busy_count(r.real, 0, BUSY_FRAMES) == BUSY_FRAMES - 1);
+    assert(st.busy == 3u && st.superseded == 0u);
+    busy_check_motion(&r, 0u);
+    busy_check_report("\"superseded\": 0, \"unpaired\": 1, \"busy\": 3}");
+
+    /* The same failed present with a renderer that can present nothing any more: nothing can
+     * show frame 200 later, so it is given up and counted, and 201 is not held, so no VBLANK
+     * shows it a second time. Only the give-up's accounting is checked here: a real terminal
+     * renderer fails the CPU present too, which this stand-in still lets through. */
+    s_stub_terminal = 1;
+    busy_run(&r, 0, busy_one_held, 402u, 1, 0u);
+    s_stub_terminal = 0;
     ace_pace_stats(&st);
     assert(!r.real[200] && r.between[200] && r.real[201] == 1 && !r.between[201]);
     assert(r.real[202] == 1 && r.between[202] == 1 && r.order_ok && busy_most(r.real) == 1);
@@ -2914,7 +2968,7 @@ static void selftest_busy_display_keeps_real_frames(void) {
 
     /* An in-between's present fails after its submission (frame 150's flip): nobody saw it, so it
      * is not measured, and its frame, shown by the CPU path, is not held for a second showing. */
-    busy_run(&r, 0, busy_never, 300u, 0u);
+    busy_run(&r, 0, busy_never, 300u, 1, 0u);
     ace_pace_stats(&st);
     assert(!r.between[150] && r.real[150] == 1 && r.between[151] == 1 && busy_most(r.real) == 1);
     assert(busy_count(r.real, 0, BUSY_FRAMES) == BUSY_FRAMES && r.order_ok);
@@ -2923,7 +2977,7 @@ static void selftest_busy_display_keeps_real_frames(void) {
 
     /* A measurement that cannot be read when its submission has finished is counted, never
      * guessed. */
-    busy_run(&r, 0, busy_never, BUSY_NO_FAIL, 5u);
+    busy_run(&r, 0, busy_never, BUSY_NO_FAIL, 0, 5u);
     busy_check_motion(&r, 1u);
     g_ace_on = 0;
 }
