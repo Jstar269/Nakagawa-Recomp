@@ -934,6 +934,8 @@ class LiveManifestTests(unittest.TestCase):
                     "docs/HARDWARE_ORACLE.md (PSP-IO-001: io-lseek and io-append)",
                     "docs/HARDWARE_ORACLE.md (PSP-KERNEL-SEM-001: io-seek64, io-seek64-rdwr)",
                     "docs/HARDWARE_ORACLE.md (PSP-IO-EOF-001: io-eof-seek-negative, io-eof-seek-negative-rdonly, io-eof-write-past, io-eof-read-past)",
+                    "docs/HARDWARE_ORACLE.md (PSP-HLE-IO-SEEK-001: io-seek-flash-*)",
+                    "tests/native/hle_thread_selftest.c:test_flash0_font_device",
                     "tests/native/hle_thread_selftest.c:test_umd_block_device_sectors",
                 ],
             ),
