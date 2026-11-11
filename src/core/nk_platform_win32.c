@@ -10,6 +10,7 @@
 #include <shlobj.h>
 #include <objbase.h>
 #include <ctype.h>
+#include <fcntl.h>
 #include <io.h>
 #include <process.h>
 #include <stdio.h>
@@ -693,7 +694,7 @@ bool nk_platform_get_desktop_dir(char *out_path, size_t max_len) {
 bool nk_platform_get_personal_dir(NkPersonalDir which, char *out_path, size_t max_len) {
     static const KNOWNFOLDERID *const folders[NK_PERSONAL_COUNT] = {
         &FOLDERID_Documents, &FOLDERID_Downloads, &FOLDERID_Music, &FOLDERID_Pictures,
-        &FOLDERID_Videos
+        &FOLDERID_Videos, &FOLDERID_Desktop
     };
     if (!out_path || max_len == 0) return false;
     out_path[0] = '\0';
@@ -1405,6 +1406,66 @@ bool nk_platform_absolute_path(const char *path, char *out_path, size_t max_len)
 
     memcpy(out_path, buffer, (size_t)written + 1);
     return true;
+}
+
+#define NK_FINAL_PATH_CHARS 32768u
+
+bool nk_platform_real_path(const char *path, char *out_path, size_t max_len) {
+    if (!path || !*path || !out_path || max_len == 0) return false;
+    WCHAR wpath[32768];
+    if (!utf8_to_wide(path, wpath, sizeof(wpath) / sizeof(wpath[0]))) return false;
+    HANDLE handle = CreateFileW(wpath, FILE_READ_ATTRIBUTES,
+                                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+                                OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    if (handle == INVALID_HANDLE_VALUE) return false;
+    WCHAR *final_path = (WCHAR *)malloc(NK_FINAL_PATH_CHARS * sizeof(WCHAR));
+    DWORD length = final_path == NULL ? 0 :
+        GetFinalPathNameByHandleW(handle, final_path, NK_FINAL_PATH_CHARS,
+                                  FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+    CloseHandle(handle);
+    bool ok = length > 0 && length < NK_FINAL_PATH_CHARS;
+    if (ok) {
+        WCHAR *start = final_path;
+        if (wcsncmp(start, L"\\\\?\\UNC\\", 8) == 0) {
+            start += 6; /* a share: the prefix becomes the two leading separators */
+            start[0] = L'\\';
+        } else if (wcsncmp(start, L"\\\\?\\", 4) == 0) {
+            start += 4;
+        }
+        ok = wide_to_utf8(start, out_path, max_len);
+    }
+    free(final_path);
+    return ok;
+}
+
+#ifndef FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS
+#define FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS 0x00400000
+#endif
+
+FILE *nk_platform_open_regular_file(const char *path) {
+    if (!path || !*path) return NULL;
+    WCHAR wpath[32768];
+    if (!utf8_to_wide(path, wpath, sizeof(wpath) / sizeof(wpath[0]))) return NULL;
+    HANDLE handle = CreateFileW(wpath, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
+                                FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_SEQUENTIAL_SCAN, NULL);
+    if (handle == INVALID_HANDLE_VALUE) return NULL;
+    BY_HANDLE_FILE_INFORMATION info;
+    if (!GetFileInformationByHandle(handle, &info) ||
+        (info.dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY |
+                                  FILE_ATTRIBUTE_DEVICE | FILE_ATTRIBUTE_OFFLINE |
+                                  FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS)) != 0 ||
+        GetFileType(handle) != FILE_TYPE_DISK) {
+        CloseHandle(handle);
+        return NULL;
+    }
+    int fd = _open_osfhandle((intptr_t)handle, _O_RDONLY | _O_BINARY);
+    if (fd < 0) {
+        CloseHandle(handle);
+        return NULL;
+    }
+    FILE *file = _fdopen(fd, "rb");
+    if (!file) _close(fd);
+    return file;
 }
 
 void nk_platform_terminate_process(NkProcessHandle *process) {

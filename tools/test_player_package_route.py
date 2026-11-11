@@ -86,8 +86,9 @@ LOW_FIXED_ADDRESS_BASE = 0x08804000
 
 
 HOMEBREW_REQUIRED = "NK_HOMEBREW_E2E_REQUIRED"
-# A folder of programs built from the fixtures below by a host with PSPDEV (hosted CI's
-# public_export job), for a host without it: <dir>/<fixture>/EBOOT.PBP beside a copy of the
+# A folder of programs built from the fixtures below by a host with PSPDEV, for a host
+# without it (hosted CI's Windows routes, once its public_export job builds them; until then
+# hosted CI skips the tests that need the programs): <dir>/<fixture>/EBOOT.PBP beside a copy of the
 # fixture's main.c and Makefile it was built from, and <dir>/SHA256SUMS over all of them.
 HOMEBREW_PREBUILT = "NK_HOMEBREW_EBOOT_DIR"
 HOMEBREW_FIXTURE = ROOT / "fixtures" / "pspdev_phase5"
@@ -100,9 +101,12 @@ def prebuilt_homebrew_eboot(source_dir: Path, out_dir: Path) -> Path | None:
     """The EBOOT.PBP NK_HOMEBREW_EBOOT_DIR holds for source_dir, checked, copied into out_dir.
 
     None when the variable is unset. Set, the folder must hold the program and SHA256SUMS
-    must match every file, and the main.c and Makefile it was built from must be this
-    checkout's own (byte for byte), so a test can never run bytes built from other source;
-    anything else fails, whatever NK_HOMEBREW_E2E_REQUIRED says, and never skips.
+    must match every file, and the main.c and Makefile beside the program must be this
+    checkout's own (byte for byte); anything else fails, whatever NK_HOMEBREW_E2E_REQUIRED
+    says, and never skips. This catches a stale, partial or damaged folder and one made for
+    other sources. It cannot prove how the program was built, since the folder carries its
+    own digests: the folder is trusted for what its producer is, hosted CI's build of the
+    fixtures from this checkout in the same workflow run.
     """
     prebuilt = os.environ.get(HOMEBREW_PREBUILT)
     if not prebuilt:

@@ -24,6 +24,7 @@
 #include "nk_font.h"
 #include "nk_iso.h"
 #include "nk_launch.h"
+#include "nk_pbp_homebrew.h"
 #include "nk_psp_keystore.h"
 #include "nk_platform.h"
 #include "nk_title_manifest.h"
@@ -87,6 +88,54 @@ static void write_file(const char *path, const char *data) {
         assert(fwrite(data, 1, strlen(data), f) == strlen(data));
     }
     fclose(f);
+}
+
+/* A disc image as the homebrew import writes it, as far as a launch looks: the primary
+   volume descriptor with the import's volume identifier (nk_pbp_homebrew.c). */
+static void write_homebrew_image(const char *path, bool imported) {
+    static unsigned char head[17u * 2048u];
+    unsigned char *pvd = head + 16u * 2048u;
+    FILE *f = fopen(path, "wb");
+    assert(f != NULL);
+    memset(head, 0, sizeof(head));
+    pvd[0] = 1;
+    memcpy(pvd + 1, "CD001", 5);
+    pvd[6] = 1;
+    memset(pvd + 8, ' ', 64);
+    memcpy(pvd + 40, imported ? "NAKAGAWA_HOMEBREW" : "SOME_OTHER_DISC", imported ? 17 : 15);
+    assert(fwrite(head, 1, sizeof(head), f) == sizeof(head));
+    assert(fclose(f) == 0);
+}
+
+/* Start the probe, wait for it, and read what it reported into observed. */
+static void run_probe(NkLaunchSession *session, const char *report_path, char *observed,
+                      size_t observed_cap) {
+    FILE *report;
+    size_t got;
+    assert(nk_launch_start(session) == NK_OK);
+    assert(nk_launch_wait(session, -1) == 0);
+    nk_launch_stop(session);
+    report = fopen(report_path, "rb");
+    assert(report != NULL);
+    got = fread(observed, 1, observed_cap - 1u, report);
+    observed[got] = '\0';
+    assert(!ferror(report));
+    assert(fclose(report) == 0);
+}
+
+/* Copy src into a fixed field of the session, which must hold it whole. */
+static void copy_field(char *field, size_t field_size, const char *src) {
+    size_t length = strlen(src);
+    assert(length < field_size);
+    memcpy(field, src, length + 1u);
+}
+
+static char *read_text_file(const char *path);
+
+static void assert_file_text(const char *path, const char *expected) {
+    char *text = read_text_file(path);
+    assert(text != NULL && strcmp(text, expected) == 0);
+    free(text);
 }
 
 /* The whole file as text (NUL-terminated), or NULL when it cannot be read. */
@@ -769,81 +818,117 @@ static void test_no_iso_child_environment(const char *test_executable,
 
     /* #2143: an imported homebrew program runs from its Memory Stick folder. The import's
        copy of the folder it was picked from sits beside its disc image ("<image>.ms0",
-       nk_pbp_homebrew.h); the launch puts what the title's Memory Stick lacks on it, leaves
-       what the program wrote there, and boots ms0:/PSP/GAME/<folder>/EBOOT.PBP. A view that
-       is not one such folder stops the launch by name. Failing before: the launch booted
+       nk_pbp_homebrew.h); the launch puts it on the title's Memory Stick and boots
+       ms0:/PSP/GAME/<folder>/EBOOT.PBP. Failing before: the launch booted
        disc0:/PSP_GAME/SYSDIR/EBOOT.BIN and the program's folder was on no Memory Stick. */
     {
         char hb_dir[NK_MAX_PATH * 2];
         char hb_iso[NK_MAX_PATH * 2 + 32];
+        char hb_view_root[NK_MAX_PATH * 2 + 32];
         char hb_view[NK_MAX_PATH * 2 + 96];
+        char hb_src[NK_MAX_PATH * 2 + 64];
+        char hb_pbp[NK_MAX_PATH * 2 + 96];
         char hb_file[NK_MAX_PATH * 2 + 128];
         char hb_stick[NK_MAX_PATH * 2 + 32];
         char hb_stick_folder[NK_MAX_PATH * 2 + 96];
+        char problem[512];
         char saved_iso[sizeof(session.iso_path)];
         char saved_stick[sizeof(session.memstick_root)];
         snprintf(saved_iso, sizeof(saved_iso), "%s", session.iso_path);
         snprintf(saved_stick, sizeof(saved_stick), "%s", session.memstick_root);
         snprintf(hb_dir, sizeof(hb_dir), "%s%chomebrew-launch", root, sep);
         snprintf(hb_iso, sizeof(hb_iso), "%s%cXHBT00001.iso", hb_dir, sep);
-        snprintf(hb_view, sizeof(hb_view), "%s%cXHBT00001.ms0%cPSP%cGAME%cMYHB", hb_dir, sep,
-                 sep, sep, sep);
+        snprintf(hb_view_root, sizeof(hb_view_root), "%s%cXHBT00001.ms0", hb_dir, sep);
+        snprintf(hb_src, sizeof(hb_src), "%s%chomebrew-source%cMYHB", root, sep, sep);
+        snprintf(hb_pbp, sizeof(hb_pbp), "%s%cEBOOT.PBP", hb_src, sep);
         snprintf(hb_stick, sizeof(hb_stick), "%s%chomebrew-stick", root, sep);
         snprintf(hb_stick_folder, sizeof(hb_stick_folder), "%s%cPSP%cGAME%cMYHB", hb_stick, sep,
                  sep, sep);
-        assert(nk_platform_mkdir_p(hb_view));
+        assert(nk_platform_mkdir_p(hb_dir));
+        snprintf(hb_file, sizeof(hb_file), "%s%clevels", hb_src, sep);
+        assert(nk_platform_mkdir_p(hb_file));
         assert(nk_platform_mkdir_p(hb_stick_folder));
-        write_file(hb_iso, "disc image");
-        snprintf(hb_file, sizeof(hb_file), "%s%cEBOOT.PBP", hb_view, sep);
-        write_file(hb_file, "\x00PBP program");
-        snprintf(hb_file, sizeof(hb_file), "%s%cDATA.TXT", hb_view, sep);
+        write_homebrew_image(hb_iso, true);
+        write_file(hb_pbp, "PBP program");
+        snprintf(hb_file, sizeof(hb_file), "%s%cDATA.TXT", hb_src, sep);
         write_file(hb_file, "shipped with the program");
-        snprintf(hb_file, sizeof(hb_file), "%s%cSETTINGS.INI", hb_view, sep);
+        snprintf(hb_file, sizeof(hb_file), "%s%cSETTINGS.INI", hb_src, sep);
         write_file(hb_file, "shipped settings");
+        snprintf(hb_file, sizeof(hb_file), "%s%clevels%cONE.TXT", hb_src, sep, sep);
+        write_file(hb_file, "level one");
+        assert(nk_pbp_homebrew_write_view(hb_pbp, hb_view_root, NULL, problem, sizeof(problem)));
         /* What the program wrote on an earlier run stays. */
         snprintf(hb_file, sizeof(hb_file), "%s%cSETTINGS.INI", hb_stick_folder, sep);
         write_file(hb_file, "the player's own settings");
-        snprintf(session.iso_path, sizeof(session.iso_path), "%s", hb_iso);
-        snprintf(session.memstick_root, sizeof(session.memstick_root), "%s", hb_stick);
+        /* A file of the program's own with the copy's temporary name is not touched. */
+        snprintf(hb_file, sizeof(hb_file), "%s%cDATA.TXT.nkcopy", hb_stick_folder, sep);
+        write_file(hb_file, "the program's own");
+        copy_field(session.iso_path, sizeof(session.iso_path), hb_iso);
+        copy_field(session.memstick_root, sizeof(session.memstick_root), hb_stick);
 
-        assert(nk_launch_start(&session) == NK_OK);
-        child_exit = nk_launch_wait(&session, -1);
-        nk_launch_stop(&session);
-        assert(child_exit == 0);
-        report = fopen(report_path, "rb");
-        assert(report != NULL);
-        observed_size = fread(observed, 1, sizeof(observed) - 1, report);
-        observed[observed_size] = '\0';
-        assert(!ferror(report));
-        assert(fclose(report) == 0);
+        run_probe(&session, report_path, observed, sizeof(observed));
         assert(strstr(observed, "SR_BOOT_PATH=ms0:/PSP/GAME/MYHB/EBOOT.PBP\n") != NULL);
         snprintf(hb_file, sizeof(hb_file), "%s%cEBOOT.PBP", hb_stick_folder, sep);
-        assert(nk_platform_file_exists(hb_file));
+        assert_file_text(hb_file, "PBP program");
         snprintf(hb_file, sizeof(hb_file), "%s%cDATA.TXT", hb_stick_folder, sep);
-        {
-            char *data = read_text_file(hb_file);
-            assert(data != NULL && strcmp(data, "shipped with the program") == 0);
-            free(data);
-        }
+        assert_file_text(hb_file, "shipped with the program");
+        snprintf(hb_file, sizeof(hb_file), "%s%clevels%cONE.TXT", hb_stick_folder, sep, sep);
+        assert_file_text(hb_file, "level one");
         snprintf(hb_file, sizeof(hb_file), "%s%cSETTINGS.INI", hb_stick_folder, sep);
-        {
-            char *settings = read_text_file(hb_file);
-            assert(settings != NULL && strcmp(settings, "the player's own settings") == 0);
-            free(settings);
-        }
+        assert_file_text(hb_file, "the player's own settings");
+        snprintf(hb_file, sizeof(hb_file), "%s%cDATA.TXT.nkcopy", hb_stick_folder, sep);
+        assert_file_text(hb_file, "the program's own");
         /* Nothing the folder does not hold appears: a path it lacks stays missing. */
         snprintf(hb_file, sizeof(hb_file), "%s%cMISSING.BIN", hb_stick_folder, sep);
         assert(nk_platform_path_missing(hb_file));
 
+        /* A newer release copied over the folder and added again: what the program left as
+           it was is replaced, what it changed stays (review of #2426, M2). */
+        snprintf(hb_file, sizeof(hb_file), "%s%clevels%cONE.TXT", hb_stick_folder, sep, sep);
+        write_file(hb_file, "changed by the program");
+        snprintf(hb_file, sizeof(hb_file), "%s%cDATA.TXT", hb_src, sep);
+        write_file(hb_file, "the newer release");
+        snprintf(hb_file, sizeof(hb_file), "%s%clevels%cONE.TXT", hb_src, sep, sep);
+        write_file(hb_file, "the newer level one");
+        snprintf(hb_file, sizeof(hb_file), "%s%cSETTINGS.INI", hb_src, sep);
+        write_file(hb_file, "newer shipped settings");
+        assert(!nk_pbp_homebrew_view_current(hb_pbp, hb_view_root));
+        assert(nk_pbp_homebrew_write_view(hb_pbp, hb_view_root, NULL, problem, sizeof(problem)));
+        assert(nk_pbp_homebrew_view_current(hb_pbp, hb_view_root));
+        run_probe(&session, report_path, observed, sizeof(observed));
+        snprintf(hb_file, sizeof(hb_file), "%s%cDATA.TXT", hb_stick_folder, sep);
+        assert_file_text(hb_file, "the newer release");
+        snprintf(hb_file, sizeof(hb_file), "%s%clevels%cONE.TXT", hb_stick_folder, sep, sep);
+        assert_file_text(hb_file, "changed by the program");
+        snprintf(hb_file, sizeof(hb_file), "%s%cSETTINGS.INI", hb_stick_folder, sep);
+        assert_file_text(hb_file, "the player's own settings");
+
         /* A second folder in the view is not a program's folder: the launch stops. */
-        snprintf(hb_view, sizeof(hb_view), "%s%cXHBT00001.ms0%cPSP%cGAME%cOTHER", hb_dir, sep,
-                 sep, sep, sep);
+        snprintf(hb_view, sizeof(hb_view), "%s%cPSP%cGAME%cOTHER", hb_view_root, sep, sep, sep);
         assert(nk_platform_mkdir_p(hb_view));
         assert(nk_launch_start(&session) != NK_OK);
         assert(strstr(session.last_error, "Memory Stick folder") != NULL);
         assert(strstr(session.last_error, "damaged") != NULL);
 
-        /* A disc image with no view beside it keeps its disc boot path. */
+        /* An imported program's image without its folder stops the launch by name, rather
+           than boot the program where it cannot find its files (review of #2426, M1). */
+        assert(nk_platform_remove_tree(hb_view_root, NULL));
+        assert(nk_launch_start(&session) != NK_OK);
+        assert(strstr(session.last_error, "no copy of its Memory Stick folder") != NULL);
+        assert(strstr(session.last_error, "Add the program's EBOOT.PBP again") != NULL);
+
+        /* With no Memory Stick folder for the title, nothing is copied anywhere else. */
+        assert(nk_pbp_homebrew_write_view(hb_pbp, hb_view_root, NULL, problem, sizeof(problem)));
+        session.memstick_root[0] = '\0';
+        assert(nk_launch_start(&session) != NK_OK);
+        assert(strstr(session.last_error, "no Memory Stick folder") != NULL);
+        copy_field(session.memstick_root, sizeof(session.memstick_root), hb_stick);
+
+        /* Any other disc image keeps its disc boot path, whatever lies beside it. */
+        write_homebrew_image(hb_iso, false);
+        run_probe(&session, report_path, observed, sizeof(observed));
+        assert(strstr(observed, "SR_BOOT_PATH=ms0:") == NULL);
+
         snprintf(session.iso_path, sizeof(session.iso_path), "%s", saved_iso);
         snprintf(session.memstick_root, sizeof(session.memstick_root), "%s", saved_stick);
     }

@@ -8380,16 +8380,18 @@ static void player_psn_result(char *code, size_t code_size, const char *name,
 /* A package of unencrypted homebrew (#2143): the package is not refused but turned into a
    private disc image holding its program, under the library key that image will have, and a
    copy of the folder it was picked from, the program's ms0:/PSP/GAME/<folder>/
-   (nk_pbp_homebrew.h). An image without that folder, as an older import made it, is made
+   (nk_pbp_homebrew.h). An image without that folder, as an older import made it, or whose
+   folder no longer matches the one picked (a newer release copied over it), is made
    again. */
 static bool player_homebrew_iso_ready(const char *iso_path, const char *key,
-                                      const char *folder) {
+                                      const char *folder, const char *pbp_path,
+                                      const char *view_root) {
     NkIsoMetadata *meta;
     bool ready;
     char found[NK_PBP_HOMEBREW_FOLDER_NAME_MAX + 1u];
     if (nk_platform_path_missing(iso_path)) return false;
     if (nk_pbp_homebrew_find_view(iso_path, found, sizeof(found)) != NK_PBP_HB_VIEW_FOUND ||
-        strcmp(found, folder) != 0)
+        strcmp(found, folder) != 0 || !nk_pbp_homebrew_view_current(pbp_path, view_root))
         return false;
     meta = (NkIsoMetadata *)calloc(1, sizeof(*meta));
     if (meta == NULL) return false;
@@ -8487,7 +8489,8 @@ static bool player_homebrew_package_inspect(const char *pbp_path, const NkPbpInf
     snprintf(package->title, sizeof(package->title), "%s",
              info->title[0] ? info->title : "Homebrew");
     package->homebrew = true;
-    package->iso_ready = player_homebrew_iso_ready(package->iso_path, program.key, folder);
+    package->iso_ready = player_homebrew_iso_ready(package->iso_path, program.key, folder,
+                                                   pbp_path, view_root);
     return true;
 }
 
@@ -8618,36 +8621,42 @@ static bool player_homebrew_package_convert(const PlayerPsnPackage *package,
                           "The package changed after it was checked. Add it again.");
         return false;
     }
-    rc = nk_pbp_homebrew_convert_file(&ctx, package->pbp_path, &info, package->iso_path, &hooks,
-                                      &program);
-    if (rc == NK_PSP_OK && strcmp(program.key, package->disc_id) != 0) {
-        (void)nk_remove_utf8(package->iso_path);
-        player_psn_result(code, code_size, "PBP_PACKAGE_UNSUPPORTED", message, message_size,
-                          "The package changed after it was checked. Add it again.");
-        return false;
-    }
-    if (rc == NK_PSP_OK) {
+    /* The folder first, then the image: an image is never left without its folder, and a
+       launch refuses one that is (NK_PBP_HB_VIEW_MISSING). */
+    {
         char view_root[MAX_PATH_LEN];
         char problem[512];
-        bool cancelled;
-        if (nk_pbp_homebrew_view_root(package->iso_path, view_root, sizeof(view_root)) &&
-            nk_pbp_homebrew_write_view(package->pbp_path, view_root, &hooks, problem,
-                                       sizeof(problem)))
-            return true;
-        /* Without its folder the program is not imported: the image goes too. */
-        (void)nk_remove_utf8(package->iso_path);
-        cancelled = callbacks != NULL && callbacks->is_cancelled != NULL &&
-                    callbacks->is_cancelled(callbacks->userdata);
-        if (cancelled) {
-            player_psn_result(code, code_size, "CANCELLED", message, message_size,
-                              "The import was cancelled, and nothing was kept.");
-        } else {
-            fprintf(stderr, "[PLAYER] homebrew folder copy stopped: %s\n", problem);
-            player_psn_result(code, code_size, "HOMEBREW_FOLDER_UNSUPPORTED", message,
-                              message_size, "The package's folder could not be copied: "
-                              "%.300s Nothing was kept.", problem);
+        bool had_image = !nk_platform_path_missing(package->iso_path);
+        problem[0] = '\0';
+        if (!nk_pbp_homebrew_view_root(package->iso_path, view_root, sizeof(view_root)) ||
+            !nk_pbp_homebrew_write_view(package->pbp_path, view_root, &hooks, problem,
+                                        sizeof(problem))) {
+            bool cancelled = callbacks != NULL && callbacks->is_cancelled != NULL &&
+                             callbacks->is_cancelled(callbacks->userdata);
+            if (cancelled) {
+                player_psn_result(code, code_size, "CANCELLED", message, message_size,
+                                  "The import was cancelled, and nothing was kept.");
+            } else {
+                fprintf(stderr, "[PLAYER] homebrew folder copy stopped: %s\n", problem);
+                player_psn_result(code, code_size, "HOMEBREW_FOLDER_UNSUPPORTED", message,
+                                  message_size, "The package's folder could not be copied: "
+                                  "%.300s Nothing was kept.", problem);
+            }
+            return false;
         }
-        return false;
+        rc = nk_pbp_homebrew_convert_file(&ctx, package->pbp_path, &info, package->iso_path,
+                                          &hooks, &program);
+        if (rc == NK_PSP_OK && strcmp(program.key, package->disc_id) != 0) {
+            (void)nk_remove_utf8(package->iso_path);
+            (void)nk_platform_remove_tree(view_root, NULL);
+            player_psn_result(code, code_size, "PBP_PACKAGE_UNSUPPORTED", message, message_size,
+                              "The package changed after it was checked. Add it again.");
+            return false;
+        }
+        if (rc == NK_PSP_OK) return true;
+        /* A first import keeps nothing; an earlier image of the same program (the same
+           key) keeps the new folder, which belongs to it. */
+        if (!had_image) (void)nk_platform_remove_tree(view_root, NULL);
     }
     if (rc == NK_PSP_ERR_CANCELLED) {
         player_psn_result(code, code_size, nk_psp_status_name(rc), message, message_size,

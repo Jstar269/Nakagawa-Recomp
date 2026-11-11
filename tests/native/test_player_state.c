@@ -6991,6 +6991,10 @@ static void test_homebrew_package_becomes_a_private_disc(void) {
                                        sizeof(message)));
     assert(strcmp(code, "CANCELLED") == 0);
     assert(nk_platform_path_missing(package.iso_path) && nk_platform_path_missing(partial));
+    assert(nk_pbp_homebrew_view_root(package.iso_path, view_root, sizeof(view_root)));
+    assert(nk_platform_path_missing(view_root));
+    snprintf(view_path, sizeof(view_path), "%s.importing", view_root);
+    assert(nk_platform_path_missing(view_path));
 
     memset(&progress, 0, sizeof(progress));
     hooks.userdata = &progress;
@@ -7063,6 +7067,30 @@ static void test_homebrew_package_becomes_a_private_disc(void) {
                                       sizeof(message)));
     assert(nk_pbp_homebrew_find_view(again.iso_path, view_folder, sizeof(view_folder)) ==
            NK_PBP_HB_VIEW_FOUND);
+    /* A newer release copied over the folder is not ready either: picking it again copies the
+       folder as it is now (review of #2426, M2). Failing before: the image counted as ready
+       and the program kept reading the first import's files. */
+    write_binary_file(data_path, (const uint8_t *)"the newer release", 17u);
+    assert(player_psn_package_inspect(pbp_path, &again, code, sizeof(code), message,
+                                      sizeof(message)));
+    assert(again.homebrew && !again.iso_ready);
+    assert(player_psn_package_convert(&again, &hooks, code, sizeof(code), message,
+                                      sizeof(message)));
+    snprintf(view_path, sizeof(view_path), "%s%cPSP%cGAME%cMYHB%cDATA.TXT", view_root, sep, sep,
+             sep, sep);
+    after = psn_test_read_file(view_path, &after_len);
+    assert(after != NULL && after_len == 17u && memcmp(after, "the newer release", 17u) == 0);
+    free(after);
+    assert(player_psn_package_inspect(pbp_path, &again, code, sizeof(code), message,
+                                      sizeof(message)));
+    assert(again.homebrew && again.iso_ready);
+    /* An imported program's image with no folder beside it is named as such, never taken for
+       another disc. */
+    assert(test_remove_tree(view_root));
+    assert(nk_pbp_homebrew_find_view(again.iso_path, view_folder, sizeof(view_folder)) ==
+           NK_PBP_HB_VIEW_MISSING);
+    assert(player_psn_package_convert(&again, &hooks, code, sizeof(code), message,
+                                      sizeof(message)));
     pbp = homebrew_pbp("Another Title", program, 88u, icon, sizeof(icon), &pbp_len);
     write_binary_file(other_path, pbp, pbp_len);
     free(pbp);
@@ -7083,8 +7111,8 @@ static void test_homebrew_package_becomes_a_private_disc(void) {
        written: a folder that also holds Nakagawa's data folder (its copy would hold itself),
        and a folder name a PSP's Memory Stick cannot hold. */
     {
-        char loose_path[NATIVE_TEST_PATH_MAX + 256];
-        char odd_folder[NATIVE_TEST_PATH_MAX + 128];
+        char loose_path[NATIVE_TEST_PATH_MAX + 288];
+        char odd_folder[NATIVE_TEST_PATH_MAX + 192];
         snprintf(loose_path, sizeof(loose_path), "%s%cLOOSE.PBP", base, sep);
         pbp = homebrew_pbp("Loose", program, 88u, NULL, 0, &pbp_len);
         write_binary_file(loose_path, pbp, pbp_len);
@@ -7100,6 +7128,60 @@ static void test_homebrew_package_becomes_a_private_disc(void) {
         psn_test_refused(loose_path, "HOMEBREW_FOLDER_UNSUPPORTED",
                          "has no name a PSP's Memory Stick can hold");
     }
+    /* A folder past the bounds is refused by name: more than 4096 entries, or more than 16
+       levels of folders. */
+    {
+        char crowded[NATIVE_TEST_PATH_MAX + 128];
+        char entry[NATIVE_TEST_PATH_MAX + 320];
+        char deep[NATIVE_TEST_PATH_MAX + 256];
+        snprintf(crowded, sizeof(crowded), "%s%cCROWDED", base, sep);
+        assert(nk_platform_mkdir_p(crowded));
+        snprintf(entry, sizeof(entry), "%s%cEBOOT.PBP", crowded, sep);
+        pbp = homebrew_pbp("Crowded", program, 88u, NULL, 0, &pbp_len);
+        write_binary_file(entry, pbp, pbp_len);
+        for (unsigned i = 0; i < NK_PBP_HOMEBREW_FOLDER_MAX_ENTRIES; ++i) {
+            snprintf(entry, sizeof(entry), "%s%cF%04u.BIN", crowded, sep, i);
+            write_binary_file(entry, (const uint8_t *)"x", 1u);
+        }
+        snprintf(entry, sizeof(entry), "%s%cEBOOT.PBP", crowded, sep);
+        psn_test_refused(entry, "HOMEBREW_FOLDER_UNSUPPORTED", "more than 4096 files");
+        assert(test_remove_tree(crowded));
+        snprintf(deep, sizeof(deep), "%s%cDEEP", base, sep);
+        assert(nk_platform_mkdir_p(deep));
+        snprintf(entry, sizeof(entry), "%s%cEBOOT.PBP", deep, sep);
+        write_binary_file(entry, pbp, pbp_len);
+        free(pbp);
+        for (unsigned level = 0; level <= NK_PBP_HOMEBREW_FOLDER_MAX_DEPTH; ++level) {
+            size_t used = strlen(deep);
+            snprintf(deep + used, sizeof(deep) - used, "%cd", sep);
+        }
+        assert(nk_platform_mkdir_p(deep));
+        psn_test_refused(entry, "HOMEBREW_FOLDER_UNSUPPORTED", "more than 16 levels");
+    }
+#if !defined(_WIN32) && !defined(_WIN64)
+    /* A link, which a copy would leave out or follow out of the folder, and a name a Memory
+       Stick cannot hold, are refused by name (Windows cannot make either without rights or
+       at all). */
+    {
+        char odd[NATIVE_TEST_PATH_MAX + 128];
+        char entry[NATIVE_TEST_PATH_MAX + 192];
+        char program_path[NATIVE_TEST_PATH_MAX + 192];
+        snprintf(odd, sizeof(odd), "%s%cLINKED", base, sep);
+        assert(nk_platform_mkdir_p(odd));
+        snprintf(program_path, sizeof(program_path), "%s%cEBOOT.PBP", odd, sep);
+        pbp = homebrew_pbp("Linked", program, 88u, NULL, 0, &pbp_len);
+        write_binary_file(program_path, pbp, pbp_len);
+        free(pbp);
+        snprintf(entry, sizeof(entry), "%s%cSECRET.TXT", odd, sep);
+        assert(symlink(data_path, entry) == 0);
+        psn_test_refused(program_path, "HOMEBREW_FOLDER_UNSUPPORTED", "a link");
+        assert(unlink(entry) == 0);
+        snprintf(entry, sizeof(entry), "%s%cWHAT?.TXT", odd, sep);
+        write_binary_file(entry, (const uint8_t *)"x", 1u);
+        psn_test_refused(program_path, "HOMEBREW_FOLDER_UNSUPPORTED",
+                         "has a name a PSP's Memory Stick cannot hold");
+    }
+#endif
     /* A package picked from the user's home folder (or Downloads, Documents and the other
        personal folders, wherever the system keeps them) does not take the user's own files
        along as the program's folder: refused by name, nothing copied. */
@@ -7124,6 +7206,21 @@ static void test_homebrew_package_becomes_a_private_disc(void) {
         free(pbp);
         nk_ps_set_env(home_name, home);
         psn_test_refused(loose_path, "HOMEBREW_FOLDER_UNSUPPORTED", "which holds your own files");
+        /* A folder that holds the home folder takes it along as well (review of #2426, m4). */
+        {
+            char holder[NATIVE_TEST_PATH_MAX + 96];
+            char inner[NATIVE_TEST_PATH_MAX + 128];
+            snprintf(holder, sizeof(holder), "%s%cHOLDER", base, sep);
+            snprintf(inner, sizeof(inner), "%s%cme", holder, sep);
+            assert(nk_platform_mkdir_p(inner));
+            snprintf(loose_path, sizeof(loose_path), "%s%cEBOOT.PBP", holder, sep);
+            pbp = homebrew_pbp("Holder", program, 88u, NULL, 0, &pbp_len);
+            write_binary_file(loose_path, pbp, pbp_len);
+            free(pbp);
+            nk_ps_set_env(home_name, inner);
+            psn_test_refused(loose_path, "HOMEBREW_FOLDER_UNSUPPORTED",
+                             "which holds your own files");
+        }
         nk_ps_set_env(home_name, had_home ? saved : NULL);
     }
 
