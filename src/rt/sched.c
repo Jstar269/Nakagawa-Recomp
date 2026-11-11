@@ -1649,7 +1649,7 @@ static __uint128_t scheduler_vblank_delta(uint64_t count, uint32_t rem,
                                           uint32_t *new_rem) {
     __uint128_t phase = (__uint128_t)rem + (__uint128_t)count * 20000u;
     if (new_rem) *new_rem = (uint32_t)(phase % 60000u);
-    return (__uint128_t)count * 16683u + phase / 60000u;
+    return (__uint128_t)count * SR_DISPLAY_PERIOD_US + phase / 60000u;
 }
 
 static void scheduler_advance_vblank_deadlines(uint64_t count) {
@@ -1810,7 +1810,7 @@ static void sleep_until_us(uint64_t target_us) {
 static void vblank_pace(void) {
     pace_setup();
     if (!s_pace_on) {
-        scheduler_add_time(16683u);
+        scheduler_add_time(SR_DISPLAY_PERIOD_US);
         s_vtime_period_rem += 20000u;
         if (s_vtime_period_rem >= 60000u) {
             scheduler_add_time(1u);

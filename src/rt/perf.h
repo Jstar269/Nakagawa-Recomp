@@ -12,6 +12,12 @@
 extern "C" {
 #endif
 
+/* One PSP display period in microseconds (60000/1001 Hz, rounded down): the one definition the
+ * scheduler, perf, video recording and audio code share. It lives here because recomp.h already
+ * includes this header. The scheduler itself carries each period's 1/3 us remainder
+ * (scheduler_vblank_delta, vblank_pace). */
+#define SR_DISPLAY_PERIOD_US 16683u
+
 typedef enum SrPerfGeReason {
     SR_PERF_GE_RENDER_BATCH = 0,
     SR_PERF_GE_SNAPSHOT_COPY,

@@ -240,11 +240,10 @@ typedef struct {
     int nwaiters;
 } FplPool;
 
-/* Variable Pool (VPL): one SysMem partition block per pool, with a host-side first-fit
+/* Variable Pool (VPL): one SysMem partition block per pool, with a host-side free list
  * free list for the pool span, waiter queuing, and blocking allocation support (PR-G).
- * The pool's kernel header and exact PSP alignment are UNMEASURED; this implementation
- * exposes the requested span and uses 16-byte chunks, the smallest conservative
- * alignment for guest allocations. */
+ * The accounting is the PSP-B1-01 measurement (hle_kernel_memory.c: a 0x20-byte pool
+ * header, roundup(size, 8) + 8 bytes per block, carved from the top down). */
 #define VPL_MAX 16
 #define VPL_MAX_WAITERS 64
 typedef struct { uint32_t addr, size; } VplSpan;
@@ -252,8 +251,8 @@ typedef struct { uint32_t addr, size; } VplAlloc;
 typedef struct { uint32_t thread_uid; uint32_t size; } VplWaiter;
 /* The free spans (sorted by address) and the live blocks are host arrays that grow on
  * demand. A PSP keeps a block's header inside the pool, so only the pool's own bytes bound
- * how many blocks it holds; every block here is at least VPL_ALIGN bytes, which bounds
- * both arrays by size / VPL_ALIGN + 1. A fixed table made the 129th live block of a pool
+ * how many blocks it holds; every block here costs at least 16 bytes, which bounds
+ * both arrays by size / 16 + 1. A fixed table made the 129th live block of a pool
  * with free space read as exhausted, and a blocking AllocateVpl then never returned. */
 typedef struct {
     uint32_t base, size, block_uid;
@@ -1214,10 +1213,6 @@ extern int s_psmf_av_test_queue;
 #endif
 int64_t psmf_av_now_us(void);
 int psmf_av_queue_frames(int ch);
-/* One PSP display period in microseconds (60000/1001 Hz, rounded down). The scheduler delivers
- * VBLANKs at this period and ordinarily reaches a boundary at least that often; sched.c, perf.c
- * and videorec.c each still spell the figure out themselves. */
-#define HLE_DISPLAY_PERIOD_US 16683u
 /* The audio queue depth in frames the guest sees on `ch` (-1: no host output). Under the
  * deterministic clock it is a model that drains in guest time (#2037), not the host mixer's.
  * Otherwise it leaves out what the host mixer holds for its device (hle_audio.c). */
