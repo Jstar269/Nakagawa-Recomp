@@ -2509,6 +2509,39 @@ class TestEnhancementBuildPackageWiring(unittest.TestCase):
                             )
                     self.assertEqual(ctx.exception.code, "PACKAGE_AMBIENT_ENHANCEMENT")
 
+    def test_the_build_route_names_the_code_hook_package(self) -> None:
+        timing = self._write_pkg("pkg.json")
+        hook = self._write_pkg("hook.json", category="guest_memory_code_hook", id="synth.widen.clip",
+                               capabilities=["widen_visibility"], sites=[{
+                                   "id": "SYNTH_WIDEN", "function": "synth_scene_cache", "insn_offset": 0,
+                                   "stock_digest": compute_stock_words_digest([0x0C000440]),
+                                   "transform": "clip_x_widen", "clip_register": "v0", "clip_offsets": [640]}])
+        for key in ("rng_policy",):
+            data = json.loads(hook.read_text(encoding="utf-8"))
+            data.pop(key, None)
+            hook.write_text(json.dumps(data), encoding="utf-8")
+        # nk_cli: the planner arguments and the cache key's environment, unchanged without one.
+        self.assertEqual(self.nk_cli._planner_package_args(timing, None, ""), ["--enhancement-package", str(timing)])
+        self.assertEqual(self.nk_cli._planner_package_args(timing, hook, ""),
+                         ["--enhancement-package", str(timing), "--code-hook-package", str(hook)])
+        self.assertEqual(self.nk_cli._planner_package_args(None, None, str(self.root)), [])
+        self.assertEqual(self.nk_cli._package_environment(timing, None), {"ENHANCEMENT_PACKAGE": str(timing)})
+        self.assertEqual(self.nk_cli._package_environment(timing, hook),
+                         {"ENHANCEMENT_PACKAGE": str(timing), "ENHANCEMENT_CODE_HOOK_PACKAGE": str(hook)})
+        # The planner's cache options: the code-hook package is named only when there is one.
+        plan = {"environment": {"GAME_BASE": "0x08804000", "GAME_ENTRY": "0x08804000", "TITLE_EXTRA_SPANS": ""},
+                "codegen_profile": "none"}
+        with mock.patch.dict(os.environ, {}, clear=False):
+            for name in ("ENHANCEMENT_PACKAGE", "ENHANCEMENT_CODE_HOOK_PACKAGE", "CODEGEN_USER_ARGS"):
+                os.environ.pop(name, None)
+            alone = self.plan._cache_codegen_options(plan, selected_optional=set(), funcs_per_chunk=2000,
+                                                     enhancement_package_path=timing)
+            both = self.plan._cache_codegen_options(plan, selected_optional=set(), funcs_per_chunk=2000,
+                                                    enhancement_package_path=timing, code_hook_package_path=hook)
+        self.assertNotIn("code_hook_package_id", alone)
+        self.assertEqual({k: v for k, v in both.items() if not k.startswith("code_hook_")}, alone)
+        self.assertEqual(both["code_hook_package_id"], "synth.widen.clip")
+
     def test_planner_refuses_a_code_hook_package_without_an_enhancement_package(self) -> None:
         hook = self._write_pkg("hook.json", category="guest_memory_code_hook")
         with self.assertRaises(self.plan.PackageRouteError) as ctx:
@@ -4216,7 +4249,7 @@ class TestCodeHookBesideTiming(unittest.TestCase):
             for line in added:
                 self.assertTrue("Code-Hook Package" in line or "_nk_clip_off" in line, line)
 
-    def test_without_a_hook_package_the_output_is_unchanged(self) -> None:
+    def test_a_stacked_build_leaves_nothing_behind_for_the_next_build(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp = Path(tmp_dir)
             self._elf(tmp)
@@ -4268,6 +4301,30 @@ class TestCodeHookBesideTiming(unittest.TestCase):
         self._refused(r"code-hook site SYNTH_WIDEN at 0x00001200: its delay slot 0x00001204 is site "
                       r"SYNTH_SLOT of the enhancement package, inside a span it rewrites",
                       self._timing(slot), self._hook())
+
+    def test_a_hook_whose_delay_slot_is_the_update_boundary_is_refused(self) -> None:
+        self._elf_bytes_for_packages()
+        timing = self._timing()
+        timing["update_boundary"] = {"function": "synth_scene_cache", "insn_offset": 4,
+                                     "stock_digest": compute_stock_words_digest([self.COUNT])}
+        self._refused(r"code-hook site SYNTH_WIDEN at 0x00001200: its delay slot 0x00001204 is the "
+                      r"update_boundary of the enhancement package", timing, self._hook())
+
+    def test_a_hook_rewrite_that_keeps_run_time_state_is_refused(self) -> None:
+        # No code-hook transform keeps state today; this pins the guard for the first one that does.
+        self._elf_bytes_for_packages()
+        real = enhancement_package.verify_and_resolve_sites
+
+        def with_state(pkg: dict[str, Any], **kwargs: Any) -> Any:
+            sites = real(pkg, **kwargs)
+            if pkg["category"] == "guest_memory_code_hook":
+                for site in sites.values():
+                    site["rewrite"]["requires"] = ["SYNTH_TIMER"]
+            return sites
+
+        with mock.patch.object(enhancement_package, "verify_and_resolve_sites", side_effect=with_state):
+            self._refused(r"code-hook site SYNTH_WIDEN: transform 'clip_x_widen' keeps run-time state",
+                          self._timing(), self._hook())
 
     def test_a_hook_for_another_title_is_refused(self) -> None:
         self._elf_bytes_for_packages()
@@ -6428,7 +6485,7 @@ class TestAcePartsLoad(unittest.TestCase):
         return names
 
     def _codegen(self, tmp: Path, name: str, pkg: dict[str, Any] | None,
-                 symbols: dict[str, str] | None = None) -> tuple[int, str, dict[str, str]]:
+                 symbols: dict[str, str] | None = None, extra: tuple[str, ...] = ()) -> tuple[int, str, dict[str, str]]:
         elf_path = tmp / "load.elf"
         elf_path.write_bytes(self.elf)
         out_dir = tmp / name
@@ -6441,11 +6498,53 @@ class TestAcePartsLoad(unittest.TestCase):
             if symbols is not None:
                 pkg_path.with_suffix(".symbols.json").write_text(json.dumps(symbols), encoding="utf-8")
             argv.append(f"--enhancement-package={pkg_path}")
+        argv.extend(extra)
         out, err = StringIO(), StringIO()
         with mock.patch("sys.stdout", new=out), mock.patch("sys.stderr", new=err):
             rc = codegen.main(argv)
         files = {p.name: p.read_text(encoding="utf-8") for p in sorted(out_dir.glob("out*")) if p.is_file()}
         return rc, out.getvalue() + err.getvalue(), files if rc == 0 else {}
+
+    def _codegen_with_hook(self, tmp: Path, offset: int, site_id: str) -> tuple[int, str, dict[str, str]]:
+        """Codegen with the load package and a code-hook package whose clip_x_widen site is the jal at
+        synth_loader+offset (contract section 9.9)."""
+        hook = {
+            "schema_version": 1, "id": "synth.widen.clip", "display_name": "Synthetic clip widen",
+            "version": "1.0.0", "category": "guest_memory_code_hook", "target_title_id": "synthetic-allegrex-v1",
+            "game_version": "1.00", "executable_sha256": hashlib.sha256(self.elf).hexdigest(),
+            "capabilities": ["widen_visibility"],
+            "sites": [{"id": site_id, "function": "synth_loader", "insn_offset": offset,
+                       "stock_digest": self._digest("synth_loader", offset), "transform": "clip_x_widen",
+                       "clip_register": "v0", "clip_offsets": [640]}],
+        }
+        hook_path = tmp / "hook.json"
+        hook_path.write_text(json.dumps(hook), encoding="utf-8")
+        hook_path.with_suffix(".symbols.json").write_text(json.dumps(self.symbols()), encoding="utf-8")
+        return self._codegen(tmp, "stacked", self.package(), self.symbols(),
+                             extra=(f"--code-hook-package={hook_path}",))
+
+    def test_a_code_hook_site_on_an_ace_part_site_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            rc, out, files = self._codegen_with_hook(Path(tmp_dir), 8, "SYNTH_WIDEN")
+        self.assertEqual(rc, 1, out)
+        self.assertRegex(out, rf"code-hook site SYNTH_WIDEN: address 0x{self.loader + 8:08x} collides with "
+                              r"site SYNTH_LOAD_WAIT of the enhancement package")
+        self.assertEqual(files, {})
+
+    def test_a_code_hook_site_id_an_ace_part_uses_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            rc, out, files = self._codegen_with_hook(Path(tmp_dir), 24, "SYNTH_LOAD_WAIT")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("code-hook site SYNTH_LOAD_WAIT: the enhancement package has a site with that id", out)
+        self.assertEqual(files, {})
+
+    def test_a_code_hook_site_beside_an_ace_part_builds(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            rc, out, files = self._codegen_with_hook(Path(tmp_dir), 24, "SYNTH_WIDEN")
+        self.assertEqual(rc, 0, out)
+        text = "\n".join(files.values())
+        self.assertEqual(text.count("sr_enhancement_widen_clip_x(s->r[2], _nk_clip_off, 1u);"), 1)
+        self.assertIn('nk_ace_load_skip_wait(s, "SYNTH_LOAD_WAIT"', text)
 
     # ---- the validator ------------------------------------------------------------------------
 

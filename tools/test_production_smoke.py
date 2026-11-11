@@ -854,6 +854,10 @@ class TestProductionSmokePackage(unittest.TestCase):
         shutil.copyfile(self.fixture_dir / "guest.psp", psp_header)
         enhancement_package = inputs / "enhancement package.json"
         enhancement_package.write_text("{}", encoding="utf-8")
+        # A code-hook package beside it (contract section 9.9), with its symbols sidecar.
+        code_hook_package = inputs / "enhancement package.cull.json"
+        code_hook_package.write_text("{}", encoding="utf-8")
+        code_hook_package.with_suffix(".symbols.json").write_text("{}", encoding="utf-8")
         enhancement_data_root = long_root / "enhancement data"
         enhancement_data_root.mkdir()
         data_root_alias = alias_root / "ENHDAT~1"
@@ -910,6 +914,7 @@ class TestProductionSmokePackage(unittest.TestCase):
                 make_command="make",
                 enhancement_package_path=enhancement_package,
                 enhancement_data_root=enhancement_data_root,
+                code_hook_package_path=code_hook_package,
             )
         # Make was recorded, not run, so the package is incomplete; any path refusal
         # would have stopped the route before Make with PACKAGE_UNSUPPORTED_PATH.
@@ -917,7 +922,7 @@ class TestProductionSmokePackage(unittest.TestCase):
         self.assertTrue(make_calls)
         path_keys = (
             "GAME_ELF", "GAME_PSP_HEADER", "TITLE_MANIFEST", "BUILD_DIR", "LINK_MAP",
-            "ENHANCEMENT_PACKAGE", "ENHANCEMENT_DATA_ROOT",
+            "ENHANCEMENT_PACKAGE", "ENHANCEMENT_DATA_ROOT", "ENHANCEMENT_CODE_HOOK_PACKAGE",
         )
         for command, environment in make_calls:
             for argument in command[1:]:
@@ -926,6 +931,10 @@ class TestProductionSmokePackage(unittest.TestCase):
                 value = environment[key]
                 self.assertFalse(title_codegen_plan._make_unsafe(value), (key, value))
                 self.assertTrue(Path(value).is_relative_to(alias_root), (key, value))
+            # The code-hook package is staged under a name of its own, its sidecar beside it.
+            hook = Path(environment["ENHANCEMENT_CODE_HOOK_PACKAGE"])
+            self.assertNotEqual(hook, Path(environment["ENHANCEMENT_PACKAGE"]))
+            self.assertTrue(hook.with_suffix(".symbols.json").is_file(), hook)
             # The data root is read in place: its short form is passed on as written.
             self.assertEqual(environment["ENHANCEMENT_DATA_ROOT"], data_root_alias.as_posix())
             extra = environment["GAME_EXTRA_ELFS"].split(" ")

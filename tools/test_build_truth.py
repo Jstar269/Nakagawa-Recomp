@@ -1357,6 +1357,33 @@ class CodegenProfileTransportTests(unittest.TestCase):
         self.assertRegex(self._profile_hash(modules), r"^[0-9a-f]{20}$")
         self.assertNotEqual(self._profile_hash(modules), self._profile_hash(modules[:-1]))
 
+    def _probe(self, *assignments: str) -> tuple[str, str]:
+        completed = subprocess.run(
+            [cast(str, self.make), "--no-print-directory", "GAME_NAME=probe",
+             f"BUILD_ROOT={Path(self.temp.name).as_posix()}",
+             f"BUILD_DIR={Path(self.temp.name).as_posix()}", *assignments,
+             "--eval", "nkprobe: ; @echo ARG=[$(strip $(ENHANCEMENT_PACKAGE_ARG))] HASH=$(CODEGEN_PROFILE_HASH)",
+             "nkprobe"],
+            cwd=ROOT, capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        line = next(text for text in completed.stdout.splitlines() if text.startswith("ARG="))
+        arg, _, digest = line.partition(" HASH=")
+        return arg.removeprefix("ARG="), digest
+
+    def test_the_code_hook_package_reaches_codegen_and_the_profile(self) -> None:
+        # Contract section 9.9: without ENHANCEMENT_CODE_HOOK_PACKAGE the codegen arguments are as
+        # before; with it codegen gets --code-hook-package and the profile changes; alone it is still
+        # passed, so codegen refuses it instead of building without it.
+        alone_arg, alone_hash = self._probe("ENHANCEMENT_PACKAGE=a.json")
+        self.assertEqual(alone_arg, "[--enhancement-package=a.json]")
+        both_arg, both_hash = self._probe("ENHANCEMENT_PACKAGE=a.json", "ENHANCEMENT_CODE_HOOK_PACKAGE=h.json")
+        self.assertEqual(both_arg, "[--enhancement-package=a.json --code-hook-package=h.json]")
+        self.assertNotEqual(alone_hash, both_hash)
+        self.assertEqual(self._probe("ENHANCEMENT_PACKAGE=a.json", "ENHANCEMENT_CODE_HOOK_PACKAGE=")[1],
+                         alone_hash)
+        self.assertEqual(self._probe("ENHANCEMENT_CODE_HOOK_PACKAGE=h.json")[0], "[--code-hook-package=h.json]")
+
     def test_the_transport_keeps_the_argv_hash(self) -> None:
         # The environment form must hash exactly as the former --entry form did, so
         # existing builds keep their codegen profile. The former form is evaluated in

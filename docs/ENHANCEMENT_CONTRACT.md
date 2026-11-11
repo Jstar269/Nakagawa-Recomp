@@ -403,7 +403,10 @@ A build carries one enhancement package and, beside it, at most one `guest_memor
 so a title's Ace items that change guest memory build together with its 60 FPS game logic. The code-hook package
 stays a package of its own: the rule of section 9.2 holds as it is, and a timing package still refuses a code-hook
 transform such as `clip_x_widen` (the decision of 2026-11-10, #2366, under "Guest memory written by a timing
-transform"). The two are joined only in the build, where each keeps its own category, digest and checks.
+transform"). A timing transform writes guest memory only where it replaces a value the title's own logic stores
+there; `clip_x_widen` writes the x row of matrices the title built, a value no stock store of that site writes, so
+it is a code hook and keeps that category's declaration and checks. The two are joined only in the build, where
+each keeps its own category, digest and checks.
 
 - **Naming it.** `build-package` takes `--code-hook-package <path>`, or `--ace-cull`, which reads
   `<user data>/enhancements/<disc_id>-cull.json` (lowercase disc ID), else a published package of that name in
@@ -414,9 +417,10 @@ transform"). The two are joined only in the build, where each keeps its own cate
   resolved and verified as the enhancement package's are. Each of these refuses the build by name, and nothing is
   merged: a second package whose category is not `guest_memory_code_hook`; an enhancement package that is a
   code-hook package too; a code-hook package for another title; a site id both packages use; a code-hook site at
-  an address a site of the enhancement package rewrites (a 60 Hz site, an Ace part site or the `update_boundary`);
-  and a code-hook call whose delay slot is such a word, or the delay slot of a rewritten call, inside the span the
-  enhancement package rewrites. Codegen refuses `--code-hook-package` without `--enhancement-package`.
+  a word the enhancement package rewrites (a 60 Hz site, an Ace part site or the `update_boundary`) or at the delay
+  slot of a rewritten call; a code-hook call whose delay slot is such a word, inside the span the enhancement
+  package rewrites; and a code-hook site whose rewrite keeps run-time state. Codegen refuses `--code-hook-package`
+  without `--enhancement-package`.
 - **The build.** The code-hook sites join the site table and are emitted as they would be in a build of that
   package alone; the generated code gains one header line naming the code-hook package's id, version, site count
   and digest, and the package's cache key gains its id and digest. A build of a timing package with a code-hook

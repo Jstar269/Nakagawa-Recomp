@@ -6394,6 +6394,15 @@ def _load_code_hook_package(elf, known, symbols, code_hook_pkg_path, symbol_map_
         read_const_fn=enhancement_package.elf_constant_reader(elf),
     )
     _refuse_uncallable_control_sites(sites)
+    for site in sites.values():
+        # Run-time state is numbered over the enhancement package's sites before these join the
+        # table (_number_enhancement_store_sites), so a code-hook site may not carry any.
+        rw = site["rewrite"]
+        if (rw["kind"] == "launch_from_rest"
+                or {"requires", "stock_values", "stock_value_digests", "half_step"} & set(rw)):
+            raise enhancement_package.EnhancementPackageError(
+                f"code-hook site {site['id']}: transform {site['transform']!r} keeps run-time state, "
+                "which a code-hook package beside an enhancement package cannot carry (fail-closed refusal)")
     first_ids = {site["id"] for site in enhancement_pkg.get("sites", ())}
     for part in enhancement_pkg.get("ace_parts", {}).values():
         first_ids.update(site["id"] for site in part["sites"])

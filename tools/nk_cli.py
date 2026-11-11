@@ -1875,10 +1875,7 @@ def _current_package_cache_key(
     environment = _runtime_build_environment(instruction_trace=instruction_trace)
     # The planner compiles with these when the environment sets none; the key must agree.
     environment.update(package_cache.package_optimization(environment))
-    if enhancement_package_path is not None:
-        environment["ENHANCEMENT_PACKAGE"] = str(enhancement_package_path)
-    if code_hook_package_path is not None:
-        environment["ENHANCEMENT_CODE_HOOK_PACKAGE"] = str(code_hook_package_path)
+    environment.update(_package_environment(enhancement_package_path, code_hook_package_path))
     try:
         options = _package_codegen_options(manifest, environment)
     except package_cache.PackageCacheError as exc:
@@ -2617,6 +2614,31 @@ def _select_enhancement_package(
     return package_path, user_root / "packages" / f"{disc_id}-enhanced-{package['id']}"
 
 
+def _package_environment(enhancement_package_path: Path | None,
+                         code_hook_package_path: Path | None) -> dict[str, str]:
+    """The Make variables that name a build's packages, for its cache key: none for an authentic build."""
+    environment: dict[str, str] = {}
+    if enhancement_package_path is not None:
+        environment["ENHANCEMENT_PACKAGE"] = str(enhancement_package_path)
+    if code_hook_package_path is not None:
+        environment["ENHANCEMENT_CODE_HOOK_PACKAGE"] = str(code_hook_package_path)
+    return environment
+
+
+def _planner_package_args(enhancement_package_path: Path | None, code_hook_package_path: Path | None,
+                          prepared_root: str) -> list[str]:
+    """The planner arguments that name a build's packages: none for an authentic build."""
+    args: list[str] = []
+    if enhancement_package_path is not None:
+        args += ["--enhancement-package", str(enhancement_package_path)]
+        # The title's extracted files, where the package's data_files are read.
+        if prepared_root and Path(prepared_root).is_dir():
+            args += ["--enhancement-data-root", prepared_root]
+    if code_hook_package_path is not None:
+        args += ["--code-hook-package", str(code_hook_package_path)]
+    return args
+
+
 def _select_code_hook_package(
     user_root: Path,
     disc_id: str,
@@ -3286,14 +3308,8 @@ def _package_codegen(st):
             planner.extend(("--module-dir", str(module_dir)))
         if cached_header is not None:
             planner.extend(("--psp-header", str(cached_header)))
-        if enhancement_package_path is not None:
-            planner.extend(("--enhancement-package", str(enhancement_package_path)))
-            # The title's extracted files, where the package's data_files are read.
-            prepared_root = entry.get("prepared_root") or ""
-            if prepared_root and Path(prepared_root).is_dir():
-                planner.extend(("--enhancement-data-root", prepared_root))
-        if st.code_hook_package_path is not None:
-            planner.extend(("--code-hook-package", str(st.code_hook_package_path)))
+        planner.extend(_planner_package_args(enhancement_package_path, st.code_hook_package_path,
+                                             entry.get("prepared_root") or ""))
         return planner
 
     def log_command(planner: list[str]) -> None:
