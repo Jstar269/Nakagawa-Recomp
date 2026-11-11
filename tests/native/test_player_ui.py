@@ -5205,6 +5205,43 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertNotIn("Smooth motion is off", lines[-1])
         self.assertEqual(page["smooth"], "Library (On)")
 
+    EVERY_PART_ON = {"default": "enhanced", "af": "16", "text": "on", "readout": "on",
+                     "notice": "on", "wide": "fill", "smooth": "x2", "sas": "sinc", "tess": "2",
+                     "cull": "on", "upscale": "fsr1"}
+    EVERY_PART_WORDS = ("16x texture filtering", "crisp system text", "speed readout",
+                        "game badge", "widescreen", "clean pitched sound", "2x finer patches",
+                        "wider culling", "sharper enlarging")
+
+    def every_part_play_line(self, title: dict[str, str]) -> str:
+        """The title page's play line for the packaged TEST00006 with every Enhanced part on in
+        the library and `title` as its own play choice: the line player_ui_nk.c builds."""
+        settings = {"enhanced": dict(self.EVERY_PART_ON), "title_play": {"TEST00006": title}}
+        run = self.next_ui_run(
+            "ready", ("WAIT_MS=300", "KEY_RETURN", "WAIT_MS=300"),
+            post_build_ready=True, wait_background=True, settings=settings,
+            enhancement_packages={"TEST00006": "display-smoke-v1"})
+        lines = re.findall(r"next_ui_title_play_line disc=TEST00006 line=(.+?)\r?$",
+                           str(run["stdout"]), re.M)
+        self.assertTrue(lines, run["stdout"])
+        return lines[-1]
+
+    def test_next_ui_play_line_names_every_part(self) -> None:
+        """The game page's play line with every part on names each one and ends whole: on main
+        the parts list (160 bytes) cut "sharper enlarging" to "sharper e", and the Ace line (256 bytes) was
+        cut mid-word, with no ellipsis for the page test to see."""
+        enhanced = self.every_part_play_line({"mode": "enhanced"})
+        self.assertTrue(enhanced.startswith("Enhanced for this game: "), enhanced)
+        self.assertTrue(enhanced.endswith("smooth motion, clean pitched sound, 2x finer patches, "
+                                          "wider culling, sharper enlarging."), enhanced)
+        for words in self.EVERY_PART_WORDS:
+            self.assertIn(words, enhanced)
+        ace = self.every_part_play_line({"mode": "ace"})
+        self.assertTrue(ace.startswith("Ace for this game: 60 FPS game logic, "), ace)
+        self.assertTrue(ace.endswith("Smooth motion is off while it runs at 60 FPS: this build "
+                                     "smooths only 30 FPS games."), ace)
+        for words in self.EVERY_PART_WORDS:
+            self.assertIn(words, ace)
+
     def test_compatibility_records_carry_a_player_tier(self) -> None:
         """#1297: every title record maps to a player tier; Hot Shots Tennis is Playable.
 
