@@ -9260,8 +9260,11 @@ static int dro_kill_cell(const char *cell, const DroState *stp, int kind, const 
                         i % 480u, i / 480u, gz[i], wz[i]);
         }
         /* The interlock path equals ge.c; the snapshot path keeps the known hazard, in the
-         * overlap only, and its depth equals ge.c. */
-        if (zdiff || (ordered ? diff != 0u : (!diff || outside))) {
+         * overlap only, and its depth equals ge.c. A stencil batch that blends never merges
+         * overlapping primitives (stencil_reads_own_writes), so for -sfail the snapshot path
+         * equals ge.c too, at the price of a copy per split batch. */
+        const int split = kind == 3;
+        if (zdiff || (ordered || split ? diff != 0u : (!diff || outside))) {
             fprintf(stderr, "gpu coherence selftest [%s]: colour differs from ge.c in %u pixels, depth "
                             "differs from ge.c in %u pixels (%u colour pixels outside the overlap) on the %s "
                             "path%s\n", cell, diff, zdiff, outside, ordered ? "interlock" : "snapshot",
@@ -9274,10 +9277,10 @@ static int dro_kill_cell(const char *cell, const DroState *stp, int kind, const 
                             "or more)\n", cell, what, run.rmw_ops, run.copies, run.zruns);
             ok = 0;
         }
-        if (!ordered && (run.rmw_ops || !run.copies)) {
+        if (!ordered && (run.rmw_ops || run.copies < (split ? 2u : 1u))) {
             fprintf(stderr, "gpu coherence selftest [%s]: on the snapshot path the %s op took %llu interlock "
-                            "ops and %llu snapshot copies (want 0 and 1 or more)\n", cell, what, run.rmw_ops,
-                    run.copies);
+                            "ops and %llu snapshot copies (want 0 and %s)\n", cell, what, run.rmw_ops,
+                    run.copies, split ? "2 or more" : "1 or more");
             ok = 0;
         }
         if (s_twin && run.twin_rmw_ops != run.rmw_ops) {
@@ -9297,6 +9300,9 @@ static int dro_kill_cell(const char *cell, const DroState *stp, int kind, const 
     if (ok && ordered)
         printf("gpu coherence selftest: PASS %-22s interlock, depth in the shader (%llu runs): colour and "
                "depth equal ge.c\n", cell, run.zruns);
+    else if (ok && kind == 3)
+        printf("gpu coherence selftest: PASS %-22s snapshot path: colour and depth equal ge.c; the stencil "
+               "batch split at the overlaps (%llu snapshot copies)\n", cell, run.copies);
     else if (ok)
         printf("gpu coherence selftest: PASS %-22s snapshot path: depth equals ge.c; the known #2109 hazard, "
                "%u pixels, all in the overlap\n", cell, diff);
