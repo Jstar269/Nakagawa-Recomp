@@ -432,7 +432,9 @@ native-core-tests: ge-cpu-profile-validate-selftest
 # earlier draw transformed at the same address under another world matrix; 2 does not check
 # the address, so a vertex whose index shares a table slot gets another vertex's result; 3
 # caches vertices outside plain RAM, which a draw's own pixels may rewrite in VRAM. Each
-# builds its own ge.c object and binary and must fail with its own message.
+# builds its own ge.c object and binary and must fail with its own message; mutant 1 must
+# also fail every state-change pair (vertex data, matrices, lights, material, vertex type,
+# morph weights and the rest) with pixels that differ from the cache-off draw.
 ge-vertex-cache-mutants: $(RT_GE_O)
 	@for m in 1 2 3; do \
 		case $$m in \
@@ -440,6 +442,7 @@ ge-vertex-cache-mutants: $(RT_GE_O)
 			2) kill="FAIL vertex_cache\[u16-list-texgen1\]: a distinct vertex was not transformed in its draw";; \
 			*) kill="FAIL vertex_cache\[vram-u8-list\]: a VRAM vertex went through the cache";; \
 		esac; \
+		changes=0; if test $$m -eq 1; then changes=16; fi; \
 		obj=$(BUILD_DIR)/ge_vertex_cache_mutant$$m.o; \
 		bin=$(BUILD_DIR)/ge_vertex_cache_mutant$$m$(EXE_EXT); \
 		$(CC) $(GE_CFLAGS) -DSR_GE_VERTEX_CACHE_MUTANT=$$m -c src/rt/ge.c -o $$obj || exit 1; \
@@ -448,6 +451,8 @@ ge-vertex-cache-mutants: $(RT_GE_O)
 		$$bin > $$bin.log 2>&1; result=$$?; \
 		if test $$result -eq 0; then cat $$bin.log; echo "vertex cache mutant $$m unexpectedly passed" >&2; exit 1; fi; \
 		if ! grep -Eq "$$kill" $$bin.log; then cat $$bin.log; echo "vertex cache mutant $$m failed for another reason" >&2; exit 1; fi; \
+		differ=$$(grep -Ec "^FAIL vertex_cache_change\[[a-z-]+\]: cache on and off differ" $$bin.log); \
+		if test $$changes -ne 0 && test "$$differ" -ne $$changes; then cat $$bin.log; echo "vertex cache mutant $$m: $$differ of $$changes state-change pairs differ" >&2; exit 1; fi; \
 		echo "ge-vertex-cache-mutants: mutant $$m killed ($$kill)"; \
 	done
 

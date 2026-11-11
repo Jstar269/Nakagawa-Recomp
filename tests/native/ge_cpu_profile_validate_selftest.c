@@ -2609,6 +2609,10 @@ static unsigned vc_uses(const VcCase *c, int strip_cache) {
     return (c->count - 2u) * 3u;
 }
 
+/* Written into the case's list after its state and texture map mode (test_ge_vertex_cache_changes):
+ * the one thing that differs between the two draws of a change pair. */
+static void (*s_vc_change)(void);
+
 static void vc_run_case(VcCase *c) {
     uint32_t index_addr = VC_INDICES;
     if (c->indices) {
@@ -2619,6 +2623,7 @@ static void vc_run_case(VcCase *c) {
     vc_state();
     vc_matrix43(0x3A, 0x3B, c->world_angle, 0.05f * c->world_angle, -0.03f * c->world_angle);
     W(0xC0, c->tex_map_mode);
+    if (s_vc_change) s_vc_change();
     W(0x12, c->vtype);
     if (c->indices) W(0x02, index_addr);
     W(0x10, (c->vaddr >> 8) & 0xFF0000u);           /* BASE for VADDR (0x04 for VRAM vertices) */
@@ -2757,6 +2762,189 @@ static void test_ge_vertex_cache(int strip_cache) {
            "differing=%lu\n", strip_cache ? "on" : "off", total_hits[0], total_misses[0],
            total_uses, drawn, depth, fb_diff + z_diff);
     free(fb[0]); free(fb[1]); free(zb[0]); free(zb[1]);
+}
+
+/* ---- Vertex cache across a state change ----
+ *
+ * Each pair draws the same vertices at the same addresses twice, with one input of the
+ * transform changed in between: the vertex bytes, a matrix (view, projection, bone, texgen),
+ * a light, the material, the vertex type, the morph weights, the viewport, the texture scale
+ * or the fog range. The second draw must transform every distinct vertex again (no hit may
+ * come from the first draw), and its colour and depth must equal the same draw with the cache
+ * off. The change must be visible: with the cache off, the second draw's image differs from
+ * the first's, so a stale vertex could not hide. Each draw is made on a cleared target. */
+
+/* Two triangles per quad over the whole 16x16 grid (or the skinned grid): 450 triangles. */
+static uint16_t s_vc_u16_grid[15 * 15 * 6];
+
+static uint8_t s_vc_saved[VC_PLAIN_N * VC_PLAIN_STRIDE + VC_SKIN_N * 2u * VC_SKIN_ONE];
+
+static void vc_save_vertices(void) {
+    memcpy(s_vc_saved, SR_HOST(VC_PLAIN), VC_PLAIN_N * VC_PLAIN_STRIDE);
+    memcpy(s_vc_saved + VC_PLAIN_N * VC_PLAIN_STRIDE, SR_HOST(VC_SKIN), VC_SKIN_N * 2u * VC_SKIN_ONE);
+}
+
+static void vc_restore_vertices(void) {
+    memcpy(SR_HOST(VC_PLAIN), s_vc_saved, VC_PLAIN_N * VC_PLAIN_STRIDE);
+    memcpy(SR_HOST(VC_SKIN), s_vc_saved + VC_PLAIN_N * VC_PLAIN_STRIDE, VC_SKIN_N * 2u * VC_SKIN_ONE);
+}
+
+/* The guest rewrites the grid's colours and depths in place between the draws. */
+static void vc_change_vertex_data(void) {
+    for (unsigned i = 0; i < 256u; i++) {
+        uint8_t *p = SR_HOST(VC_PLAIN + i * VC_PLAIN_STRIDE);
+        uint32_t color;
+        float z;
+        memcpy(&color, p + 8u, 4);
+        memcpy(&z, p + 32u, 4);
+        color ^= 0x00FF00FFu;
+        z += 0.4f;
+        memcpy(p + 8u, &color, 4);
+        memcpy(p + 32u, &z, 4);
+    }
+}
+static void vc_change_view(void) { vc_matrix43(0x3C, 0x3D, 0.25f, 0.1f, -0.05f); }
+static void vc_change_proj(void) {
+    static const float wider[16] = {
+        0.8f, 0, 0, 0,  0, 0.8f, 0, 0,  0, 0, -101.0f / 99.0f, -1,  0, 0, -200.0f / 99.0f, 0,
+    };
+    matrix(0x3E, 0x3F, wider, 16);
+}
+static void vc_change_light_position(void) { W(0x63, f24(-0.7f)); W(0x64, f24(-0.2f)); W(0x65, f24(-2.0f)); }
+static void vc_change_light_colour(void) { W(0x93, 0xF02010); }
+static void vc_change_light_enable(void) { W(0x18, 0); }
+static void vc_change_material_ambient(void) { W(0x55, 0xA02060); }
+static void vc_change_material_specular(void) { W(0x57, 0x2040F0); W(0x5B, f24(3.0f)); }
+static void vc_change_material_update(void) { W(0x53, 1); }   /* ambient, not diffuse, from the vertex colour */
+static void vc_change_morph_weights(void) { W(0x2C, f24(0.1f)); W(0x2D, f24(0.9f)); }
+static void vc_change_bones(void) {
+    static const float bones[24] = {
+        0.8f, -0.3f, 0,  0.3f, 0.8f, 0,  0, 0, 1,  -0.1f, 0.1f, 0,
+        1, 0, 0,  0, 1, 0,  0, 0, 1,  0.2f, 0.15f, -0.1f,
+    };
+    matrix(0x2A, 0x2B, bones, 24);
+}
+static void vc_change_texgen(void) {
+    static const float tgen[12] = { -0.2f, 0.4f, 0, 0.3f, 0.1f, 0, 0.05f, -0.2f, 1, 0.1f, 0.6f, 0 };
+    matrix(0x40, 0x41, tgen, 12);
+}
+static void vc_change_viewport(void) { W(0x42, f24(48.0f)); W(0x43, f24(-52.0f)); }
+static void vc_change_tex_scale(void) { W(0x48, f24(2.5f)); W(0x4A, f24(0.3f)); }
+static void vc_change_fog(void) { W(0xCD, f24(4.0f)); W(0xCE, f24(0.6f)); }
+
+/* VT_VC_PLAIN with a 5650 colour: its field aligns the normal at the same offset, so the
+ * stride stays 36 and every vertex keeps its address under the new type. */
+#define VT_VC_PLAIN_5650 ((VT_VC_PLAIN & ~(7u << 2)) | (4u << 2))
+
+typedef struct {
+    const char *name;
+    int skin;                 /* the skinned, morphed indexed list instead of the plain one */
+    uint32_t tex_map_mode;
+    void (*change)(void);     /* written before the second draw; NULL: only the vertex type */
+    uint32_t vtype_second;    /* 0: the same vertex type as the first draw */
+} VcChange;
+
+static void vc_snap(uint32_t *fb, uint16_t *zb) {
+    memcpy(fb, SR_HOST(VC_FB), 128u * 128u * 4u);
+    const uint16_t *depth_buffer = ge_zbuf_ptr();
+    uint32_t depth_stride = ge_zbuf_stride();
+    for (uint32_t y = 0; y < 128u; y++)
+        for (uint32_t x = 0; x < 128u; x++)
+            zb[y * 128u + x] = depth_buffer ? depth_buffer[y * depth_stride + x] : 0u;
+}
+
+static void test_ge_vertex_cache_changes(void) {
+    static const VcChange changes[] = {
+        { "vertex_cache_change[vertex-data]", 0, 0, vc_change_vertex_data, 0 },
+        { "vertex_cache_change[view-matrix]", 0, 0, vc_change_view, 0 },
+        { "vertex_cache_change[projection-matrix]", 0, 0, vc_change_proj, 0 },
+        { "vertex_cache_change[light-position]", 0, 0, vc_change_light_position, 0 },
+        { "vertex_cache_change[light-colour]", 0, 0, vc_change_light_colour, 0 },
+        { "vertex_cache_change[light-enable]", 0, 0, vc_change_light_enable, 0 },
+        { "vertex_cache_change[material-ambient]", 0, 0, vc_change_material_ambient, 0 },
+        { "vertex_cache_change[material-specular]", 0, 0, vc_change_material_specular, 0 },
+        { "vertex_cache_change[material-update]", 0, 0, vc_change_material_update, 0 },
+        { "vertex_cache_change[vertex-type]", 0, 0, NULL, VT_VC_PLAIN_5650 | VT_INDEX16 },
+        { "vertex_cache_change[morph-weights]", 1, 0, vc_change_morph_weights, 0 },
+        { "vertex_cache_change[bone-matrix]", 1, 0, vc_change_bones, 0 },
+        { "vertex_cache_change[texgen-matrix]", 0, 1u, vc_change_texgen, 0 },
+        { "vertex_cache_change[viewport]", 0, 0, vc_change_viewport, 0 },
+        { "vertex_cache_change[texture-scale]", 0, 0, vc_change_tex_scale, 0 },
+        { "vertex_cache_change[fog-range]", 0, 0, vc_change_fog, 0 },
+    };
+    enum { N = sizeof changes / sizeof changes[0], PIXELS = 128 * 128 };
+    /* [run][change]: the second draw's image; [change]: the first draw's with the cache off. */
+    uint32_t *fb2 = (uint32_t *)malloc(2u * N * PIXELS * 4u), *fb1 = (uint32_t *)malloc(N * PIXELS * 4u);
+    uint16_t *zb2 = (uint16_t *)malloc(2u * N * PIXELS * 2u), *zb1 = (uint16_t *)malloc(N * PIXELS * 2u);
+    if (!fb2 || !fb1 || !zb2 || !zb1) {
+        expect(0, "vertex_cache_change", "no memory for the snapshots");
+        free(fb2); free(fb1); free(zb2); free(zb1);
+        return;
+    }
+    vc_fill();
+    vc_quads(0, 15, 0, 15, s_vc_u16_grid);
+    vc_save_vertices();
+    unsigned long second_hits = 0;
+    for (int run = 0; run < 2; run++) {
+        int cache_on = run == 0;
+        env_set("SR_GE_VERTEX_CACHE_DISABLE", cache_on ? NULL : "1");
+        ge_vertex_cache_reload_env();
+        for (unsigned k = 0; k < N; k++) {
+            const VcChange *ch = &changes[k];
+            VcCase draw = ch->skin
+                ? (VcCase){ ch->name, VT_VC_SKIN | VT_INDEX16, VC_SKIN, 3, 1350, s_vc_u16_grid,
+                            ch->tex_map_mode, 0.0f, 0, 0, 0, 0 }
+                : (VcCase){ ch->name, VT_VC_PLAIN | VT_INDEX16, VC_PLAIN, 3, 1350, s_vc_u16_grid,
+                            ch->tex_map_mode, 0.0f, 0, 0, 0, 0 };
+            vc_restore_vertices();
+            vc_clear();
+            s_vc_change = NULL;
+            vc_run_case(&draw);
+            if (!cache_on) vc_snap(fb1 + (size_t)k * PIXELS, zb1 + (size_t)k * PIXELS);
+            vc_clear();
+            if (ch->vtype_second) draw.vtype = ch->vtype_second;
+            s_vc_change = ch->change;
+            vc_run_case(&draw);
+            s_vc_change = NULL;
+            vc_snap(fb2 + ((size_t)run * N + k) * PIXELS, zb2 + ((size_t)run * N + k) * PIXELS);
+            if (cache_on) {
+                char what[160];
+                unsigned distinct = vc_distinct(&draw), uses = vc_uses(&draw, 1);
+                snprintf(what, sizeof what, "the second draw reused a vertex of the first "
+                         "(misses=%lu distinct=%u)", draw.misses, distinct);
+                expect(draw.misses >= distinct, ch->name, what);
+                snprintf(what, sizeof what, "hits+misses=%lu, uses=%u", draw.hits + draw.misses, uses);
+                expect(draw.hits + draw.misses == uses && draw.bypasses == 0, ch->name, what);
+                second_hits += draw.hits;
+            }
+        }
+    }
+    vc_restore_vertices();
+    env_set("SR_GE_VERTEX_CACHE_DISABLE", NULL);
+    ge_vertex_cache_reload_env();   /* anything after this sees the cache on */
+
+    unsigned long total_diff = 0;
+    for (unsigned k = 0; k < N; k++) {
+        const uint32_t *on = fb2 + (size_t)k * PIXELS, *off = fb2 + ((size_t)N + k) * PIXELS;
+        const uint16_t *zon = zb2 + (size_t)k * PIXELS, *zoff = zb2 + ((size_t)N + k) * PIXELS;
+        const uint32_t *first = fb1 + (size_t)k * PIXELS;
+        const uint16_t *zfirst = zb1 + (size_t)k * PIXELS;
+        unsigned long diff = 0, changed = 0, drawn = 0;
+        for (uint32_t i = 0; i < PIXELS; i++) {
+            if (on[i] != off[i] || zon[i] != zoff[i]) diff++;
+            if (off[i] != first[i] || zoff[i] != zfirst[i]) changed++;
+            if (off[i] != VC_CLEAR) drawn++;
+        }
+        char what[200];
+        snprintf(what, sizeof what, "cache on and off differ after the change: %lu pixels", diff);
+        expect(diff == 0, changes[k].name, what);
+        snprintf(what, sizeof what, "the change is not visible (%lu pixels changed, %lu drawn)", changed, drawn);
+        expect(changed > 100u && drawn > 1000u, changes[k].name, what);
+        total_diff += diff;
+    }
+    printf("VERTEX_CACHE_CHANGES changes=%u second_draw_hits=%lu differing=%lu\n", (unsigned)N,
+           second_hits, total_diff);
+    free(fb2); free(fb1); free(zb2); free(zb1);
 }
 
 int main(int argc, char **argv) {
@@ -2916,6 +3104,7 @@ int main(int argc, char **argv) {
     test_ge_bounding_box_branch();
     test_ge_vram_view_decode();
     test_ge_vertex_cache(strip_cache);
+    test_ge_vertex_cache_changes();
 
     printf("ge_cpu_profile_validate_selftest: strip_cache=%s vertex_cache=%s scenarios=%u faults=%u "
            "failures=%d\n", strip_cache ? "on" : "off", vertex_cache ? "on" : "off", s_scenarios,
