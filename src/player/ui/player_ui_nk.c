@@ -2665,7 +2665,8 @@ static void player_ui_title_ace(PlayerUiNk *player, const PlayerApp *app, int in
     if (play.mode == PLAYER_PLAY_AUTHENTIC) {
         out->ace_line = "Authentic: plays exactly as released, with nothing added.";
     } else {
-        char words[PLAYER_PART_COUNT * 64] = ""; /* each part as long as its part[64] */
+        /* Every part: each as long as its part[64], with the ", " before it. */
+        char words[PLAYER_PART_COUNT * (64 + 2)] = "";
         size_t used = 0;
         size_t count = 0;
         for (int p = 0; p < PLAYER_PART_COUNT; p++) {

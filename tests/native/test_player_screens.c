@@ -974,9 +974,9 @@ static PlayerUiAction draw_page_case(NkUi *ui, FlowCase which) {
         fixture.ace_line = authentic
             ? "Authentic: plays exactly as released, with nothing added."
             : ace ? "Ace for this game: 60 FPS game logic, 16x texture filtering, crisp system "
-                    "text, speed readout, game badge, widescreen, smooth motion, clean pitched "
-                    "sound, 2x finer patches, wider culling, sharper enlarging. Smooth motion is "
-                    "off while it runs at 60 FPS: this build smooths only 30 FPS games."
+                    "text, speed readout, game badge, widescreen, clean pitched sound, 2x finer "
+                    "patches, wider culling, sharper enlarging. Smooth motion is off while it "
+                    "runs at 60 FPS: this build smooths only 30 FPS games."
                   : "Enhanced for this game: 16x texture filtering, crisp system text, speed "
                     "readout, game badge, widescreen, smooth motion, clean pitched sound, 2x "
                     "finer patches, wider culling, sharper enlarging.";
@@ -4210,7 +4210,10 @@ static bool flow_case_text_whole(FlowCase which, int width, int height, NkUiId s
    ENHANCEMENTS card, with every part on and a last session, wraps both sentences whole in
    Authentic, Enhanced and Ace, as does Settings > Enhanced, at the 960 x 540 minimum window
    and at 960 x 544 (the PSP's picture at 2x), at every text size. On main the card cut the
-   parts and the last session to one or two lines, ending in "…". */
+   parts and the last session to one or two lines, ending in "…". Above the design text
+   size, Settings' Online and Developer rows with the Nickname row, and the wizard's, stack
+   under their buttons when a sentence would be cut beside them, and wrap whole there; at
+   the design size those rows stay beside their buttons by design (two lines at most). */
 static void test_game_page_text_is_never_cut(void) {
     static const struct { int w; int h; } sizes[] = {{960, 540}, {960, 544}};
     static const int text_sizes[] = {100, 125, 150};
@@ -4222,12 +4225,17 @@ static void test_game_page_text_is_never_cut(void) {
         const char *const *ends;
         size_t end_count;
         const char *what;
+        int min_text_pct; /* the smallest text size the case is checked at */
     } cases[] = {
-        {FLOW_PAGE_TITLE_LONGEST_AUTHENTIC, authentic_ends, 2u, "Authentic game page"},
-        {FLOW_PAGE_TITLE_LONGEST_ENHANCED, enhanced_ends, 2u, "Enhanced game page"},
-        {FLOW_PAGE_TITLE_LONGEST_ACE, ace_ends, 3u, "Ace game page"},
-        {FLOW_SETTINGS_ACE, NULL, 0u, "Settings > Enhanced"},
-        {FLOW_SETTINGS_ACE_TITLE, NULL, 0u, "a game's Settings > Enhanced"}
+        {FLOW_PAGE_TITLE_LONGEST_AUTHENTIC, authentic_ends, 2u, "Authentic game page", 100},
+        {FLOW_PAGE_TITLE_LONGEST_ENHANCED, enhanced_ends, 2u, "Enhanced game page", 100},
+        {FLOW_PAGE_TITLE_LONGEST_ACE, ace_ends, 3u, "Ace game page", 100},
+        {FLOW_SETTINGS_ACE, NULL, 0u, "Settings > Enhanced", 100},
+        {FLOW_SETTINGS_ACE_TITLE, NULL, 0u, "a game's Settings > Enhanced", 100},
+        {FLOW_SETTINGS_ONLINE, NULL, 0u, "Settings > Online", 125},
+        {FLOW_SETTINGS_ONLINE_ON, NULL, 0u, "Settings > Online with Online mode on", 125},
+        {FLOW_WIZ_OPTIONS, NULL, 0u, "wizard's options", 125},
+        {FLOW_WIZ_OPTIONS_ON, NULL, 0u, "wizard's options with Online mode on", 125}
     };
     int saved = g_flow_text_size_pct;
     for (size_t t = 0u; t < sizeof(text_sizes) / sizeof(text_sizes[0]); ++t) {
@@ -4236,6 +4244,7 @@ static void test_game_page_text_is_never_cut(void) {
             for (size_t c = 0u; c < sizeof(cases) / sizeof(cases[0]); ++c) {
                 char message[160];
                 bool title = cases[c].end_count > 0u;
+                if (text_sizes[t] < cases[c].min_text_pct) continue;
                 (void)snprintf(message, sizeof(message),
                                "the %s ends no sentence in an ellipsis at %d x %d, %d%% text",
                                cases[c].what, sizes[s].w, sizes[s].h, text_sizes[t]);

@@ -145,6 +145,9 @@ typedef struct {
     "nothing to switch on."
 /* A user whose stored online_mode is On still gets the switch, with what it does now, so
    they can turn it off. Nobody else sees it (#2007). */
+/* The Nickname row in Settings (#2197): its button opens the nickname editor. */
+#define SCR_NICKNAME_SENTENCE \
+    "What games show as this PSP's nickname. It is never taken from this PC's user name."
 #define SCR_ONLINE_STORED_ON_SENTENCE \
     "Online mode is on in your settings, but it does nothing yet because online " \
     "features aren't built. Switch it off to keep it off."
@@ -175,6 +178,7 @@ bool scr_wizard_value_state(NkUi *ui, NkUiId id, NkUiId text_id, const char *nam
                             float width, const WizardColumn *column);
 bool scr_wizard_switch(NkUi *ui, NkUiId id, NkUiId text_id, const char *name,
                        const char *sentence, bool on, float width, const WizardColumn *column);
-WizardColumn scr_online_developer_column(NkUi *ui, bool online_on, bool developer, float width);
+WizardColumn scr_online_developer_column(NkUi *ui, bool online_on, bool developer, bool nickname,
+                                         float width);
 
 #endif /* NK_PLAYER_UI_SCR_SHARED_H */

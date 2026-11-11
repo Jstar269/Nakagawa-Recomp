@@ -203,6 +203,9 @@ minimum, lowers the density so the same layout is drawn smaller, instead of push
 the window. A larger window keeps its density and gains room. Clay clips at most 100 containers per layout: shorten
 long text with `nk_ui_text_clamp` instead of clipping it, but only text the player can read whole another way (a
 value with its own editor or detail page); text with no other place to be read wraps whole on a page that scrolls.
+One exception is by design: at the design text size a setting's sentence beside its button is clamped to two lines,
+so the rows keep their side-by-side layout. Above it, a sentence that would be cut makes the rows stack, and under
+its button the sentence wraps whole.
 
 Wrapped text keeps its wrapped height when its page is overfull. Clay took a paragraph's minimum height before
 wrapping, as one line, so compressing an overfull column squeezed the paragraph back and the next block painted over
@@ -566,9 +569,9 @@ Authentic the part rows are disabled (`dim`, not focusable) and keep their value
 card shows PLAY MODE for every game (LIBRARY DEFAULT, AUTHENTIC, ENHANCED, and ACE only for a game with a usable
 package; `PRIMARY` while Enhanced or Ace is in effect, never the default focus), ENHANCED OPTIONS, which opens the
 same page for that game alone (its play mode, and each part on LIBRARY (16X) or its own value; Done returns
-to the title page), then what is on and, as its own `BODY_S` `muted` paragraph, the last session, and, while Ace is
-in effect, Ace's 60 FPS switch beside them. Both sentences wrap whole, however many parts are on: the page body
-scrolls, so the card grows instead of ending either one in an ellipsis. A library card where Enhanced or Ace is in effect carries an `ENHANCED` or `ACE` badge at the
+to the title page), and, while Ace is in effect, Ace's 60 FPS switch in the same row. Under the buttons come what is
+on and, as its own `BODY_S` `muted` paragraph, the last session. Both sentences wrap whole, however many parts are
+on: the page body scrolls, so the card grows instead of ending either one in an ellipsis. A library card where Enhanced or Ace is in effect carries an `ENHANCED` or `ACE` badge at the
 art's top right. In game, the pause menu's caption names the mode and its parts and its Settings page has a live
 SPEED READOUT row; the launch notice (ENHANCED or ACE, top right, 3 s, a cut with Reduce motion) and the readout
 (top left) are chips on the 16 px safe area.

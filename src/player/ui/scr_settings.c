@@ -922,7 +922,7 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                         theme->warning);
         if (scr_wizard_box_begin(ui, 0u)) {
             WizardColumn column = scr_online_developer_column(ui, model->online_mode,
-                                                              model->developer_mode,
+                                                              model->developer_mode, true,
                                                               inner - 32.0f);
             if (model->online_mode &&
                 scr_wizard_switch(ui, PLAYER_UI_ID_SETTINGS_ONLINE_MODE, SET_ID_TEXT + 0x80u,
@@ -944,8 +944,7 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                                      nk_ui_text_clamp(ui, safe_text(model->nickname,
                                                                     NK_NICKNAME_DEFAULT),
                                                       &value, column.cell * 0.5f, 1),
-                                     "What games show as this PSP's nickname. It is never "
-                                     "taken from this PC's user name.",
+                                     SCR_NICKNAME_SENTENCE,
                                      false, inner - 32.0f, &column)) {
                     *result = settings_op(PLAYER_UI_SETTINGS_EDIT_NICKNAME);
                 }
