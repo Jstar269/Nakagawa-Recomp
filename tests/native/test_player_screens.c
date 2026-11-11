@@ -3814,8 +3814,10 @@ typedef struct {
 static EnhancedRowPlaces enhanced_row_places(FlowCase which) {
     EnhancedRowPlaces places;
     NkUi *ui = NULL;
-    /* As wide as the design window and tall enough that no row is scrolled away. */
-    const NkUiDrawList *draw = flow_case_layout(which, 1280, 1200, &ui);
+    /* As wide as the design window and tall enough that no row is scrolled away: a game's page
+       stacks each row's sentence under its button at this width, so its last row starts below
+       1300 pixels. */
+    const NkUiDrawList *draw = flow_case_layout(which, 1280, 1600, &ui);
     memset(&places, -1, sizeof(places));
     for (uint32_t i = 0u; draw != NULL && i < draw->ncmd; ++i) {
         const NkUiDrawCmd *cmd = &draw->cmd[i];

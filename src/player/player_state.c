@@ -1237,7 +1237,8 @@ static const PlayerEnhancedPartInfo k_enhanced_parts[PLAYER_PART_COUNT] = {
     /* Presentation only (contract section 2.2): the window and its recording, never the guest. */
     {"upscale", "Sharper enlarging",
      "AMD FSR 1 sharpens display and recordings; game memory and screenshots do not change.",
-     2, k_part_switch_values, k_part_upscale_labels, k_part_upscale_words, 0},    /* A guest-visible item (contract 11.3.4): off by default, in no preset, and in effect only for
+     2, k_part_switch_values, k_part_upscale_labels, k_part_upscale_words, 0},
+    /* A guest-visible item (contract 11.3.4): off by default, in no preset, and in effect only for
        a title with a pack of the player's own chosen on its page. */
     {"texpack", "Texture pack",
      "Draws the texture pack chosen on a game's page. The game receives changed pictures.",

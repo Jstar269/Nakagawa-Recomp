@@ -1206,8 +1206,10 @@ int gegpu_texrepl_only_selftest(void) {
            "replace-only");
 
     /* The refusals of a texpack=on start (tex_repl_init): no folder named, a budget outside 1 to
-     * 8192 MB, and a folder whose textures.ini names no hash each read no pack, so the run draws the
-     * game's own textures; the pack this cell drew from is put back afterwards. */
+     * 8192 MB, a folder whose textures.ini names no hash, and a pack whose [games] names another
+     * game than SR_DISC_ID (or a run with no SR_DISC_ID) each read no pack, so the run draws the
+     * game's own textures; the same pack is read for the game it names. The pack this cell drew
+     * from is put back afterwards. */
     if (!ace_requested()->texpack) {
         fprintf(stderr, "gpu texscale selftest: FAIL replace-only: the harness line has no texpack=on\n");
         return 0;
@@ -1218,6 +1220,16 @@ int gegpu_texrepl_only_selftest(void) {
     FILE *fini = nk_platform_mkdir_p(bad) ? fopen(ini, "wb") : NULL;
     const int ini_ok = fini && fputs("[options]\nversion = 1\n", fini) >= 0;
     if (fini) fclose(fini);
+    char other[400], other_ini[480];
+    snprintf(other, sizeof(other), "%s/texrepl_gpu_other_game_pack", SR_SELFTEST_BUILD_ROOT);
+    snprintf(other_ini, sizeof(other_ini), "%s/textures.ini", other);
+    FILE *fother = nk_platform_mkdir_p(other) ? fopen(other_ini, "wb") : NULL;
+    const int other_ok =
+        fother && fputs("[options]\nhash = quick\n[games]\nULUS-99999 = textures.ini\n", fother) >= 0;
+    if (fother) fclose(fother);
+    const char *disc_env = getenv("SR_DISC_ID");
+    char disc_copy[64];
+    snprintf(disc_copy, sizeof(disc_copy), "%s", disc_env ? disc_env : "");
     const char *pack_dir = getenv("SR_TEX_REPLACE");
     char pack_copy[400];
     snprintf(pack_copy, sizeof(pack_copy), "%s", pack_dir ? pack_dir : "");
@@ -1237,17 +1249,36 @@ int gegpu_texrepl_only_selftest(void) {
     tex_repl_init(1);
     const int malformed_read = s_repl != NULL;
     tex_repl_shutdown();
+    xst_setenv("SR_TEX_REPLACE", other);
+    xst_setenv("SR_DISC_ID", "NPJH50001");
+    tex_repl_init(1);
+    const int other_game_read = s_repl != NULL;
+    tex_repl_shutdown();
+    xst_setenv("SR_DISC_ID", NULL);
+    tex_repl_init(1);
+    const int no_disc_read = s_repl != NULL;
+    tex_repl_shutdown();
+    xst_setenv("SR_DISC_ID", "ULUS99999");
+    tex_repl_init(1);
+    const int named_game_read = s_repl != NULL;
+    tex_repl_shutdown();
+    xst_setenv("SR_DISC_ID", disc_copy[0] ? disc_copy : NULL);
     xst_setenv("SR_TEX_REPLACE", pack_copy);
     s_repl = drawn;
-    if (!ini_ok || unnamed_read || budget_read || malformed_read) {
+    if (!ini_ok || !other_ok || unnamed_read || budget_read || malformed_read || other_game_read ||
+        no_disc_read || !named_game_read) {
         fprintf(stderr, "gpu texscale selftest: FAIL replace-only: %s\n",
-                !ini_ok ? "cannot write the malformed pack"
+                !ini_ok || !other_ok ? "cannot write the refused packs"
                 : unnamed_read ? "texpack=on with no SR_TEX_REPLACE read a pack"
                 : budget_read ? "SR_TEX_REPLACE_BUDGET_MB=0 read a pack"
-                : "a textures.ini with no hash type read a pack");
+                : malformed_read ? "a textures.ini with no hash type read a pack"
+                : other_game_read ? "a pack whose [games] names another game was read"
+                : no_disc_read ? "a pack whose [games] names a game was read by a run with no SR_DISC_ID"
+                : "a pack was refused for the game its [games] names");
         return 0;
     }
-    printf("gpu texscale selftest: PASS %-12s texpack=on with no folder, a bad budget or a malformed pack reads none\n",
+    printf("gpu texscale selftest: PASS %-12s texpack=on with no folder, a bad budget, a malformed pack or "
+           "another game's pack reads none; a pack is read for the game it names\n",
            "replace-only");
     return 1;
 }

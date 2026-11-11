@@ -4516,8 +4516,9 @@ static int tex_repl_find(const TexEnt *e, NkTexReplHit *hit, int *factor) {
  * launch in. SR_TEX_REPLACE_BUDGET_MB (1 to 8192, default 256) bounds the decoded images kept. An
  * authentic run, or an Enhanced or Ace run without texpack=on, names the request and reads no pack.
  * Replacement changes the committed frame, so it is guest-visible (docs/ENHANCEMENT_CONTRACT.md,
- * section 11.3.4) and says so at start. A pack that cannot be read, or whose textures.ini is
- * malformed, is refused whole, the run goes on unreplaced, and the report names it unavailable. */
+ * section 11.3.4) and says so at start. A pack that cannot be read, whose textures.ini is
+ * malformed, or whose [games] list names other games only, is refused whole, the run goes on
+ * unreplaced, and the report names it unavailable. */
 static void tex_repl_init(int enhanced) {
     s_repl = NULL;
     const char *dir = getenv("SR_TEX_REPLACE");
@@ -4554,6 +4555,18 @@ static void tex_repl_init(int enhanced) {
     if (!s_repl) {
         fprintf(stderr, "TEX_REPLACE: refused (%s)\n", err);
         ace_feature_unavailable(ACE_FEATURE_TEXPACK, "the texture pack was refused");
+        return;
+    }
+    /* The player checks the pack's [games] list when it is chosen and before the launch; the
+     * runtime checks it again against the run's own disc, so a textures.ini swapped in between is
+     * not used for a game it does not name. A pack that names no game does not say, and is read. */
+    const char *disc = getenv("SR_DISC_ID");
+    if (nk_texrepl_names_game(s_repl, disc) == 0) {
+        fprintf(stderr, "TEX_REPLACE: refused (its textures.ini [games] names other games only, not %s)\n",
+                disc && disc[0] ? disc : "this run, which has no SR_DISC_ID");
+        ace_feature_unavailable(ACE_FEATURE_TEXPACK, "the texture pack is for other games");
+        nk_texrepl_close(s_repl);
+        s_repl = NULL;
         return;
     }
     ace_confirm(ACE_FEATURE_TEXPACK);
