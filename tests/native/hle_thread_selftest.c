@@ -4100,6 +4100,13 @@ static uint32_t ms_cell_seek64(uint32_t fd, int64_t offset, uint32_t whence, uin
     return low;
 }
 
+/* An open that should be refused; a descriptor it returns anyway is closed again. */
+static uint32_t ms_cell_refused_open(const char *guest, uint32_t flags) {
+    uint32_t rc = ms_cell_path_call(MS_CELL_OPEN, guest, flags);
+    if (rc < 64u) (void)ms_cell_fd_call(MS_CELL_CLOSE, rc, 0u, 0u);
+    return rc;
+}
+
 static int ms_cell_host_exists(const char *guest) {
     char host[512];
     fd_host_path(host, sizeof(host), guest);
@@ -4133,17 +4140,15 @@ static void test_io_memory_stick_cells_through_syscall(void) {
     /* io-eof-missing: write-only, read-write, read-only and write-only with PSP_O_TRUNC. */
     static const uint32_t no_create[] = {0x0002u, 0x0003u, 0x0001u, 0x0402u};
     for (size_t i = 0; i < sizeof(no_create) / sizeof(no_create[0]); i++)
-        expect(ms_cell_path_call(MS_CELL_OPEN, missing_guest, no_create[i]) == MS_ENOENT,
+        expect(ms_cell_refused_open(missing_guest, no_create[i]) == MS_ENOENT,
                "a missing Memory Stick file opened without PSP_O_CREAT is 0x80010002");
     expect(ms_cell_path_call(MS_CELL_GETSTAT, missing_guest, 0u) == MS_ENOENT &&
                !ms_cell_host_exists(missing_guest),
            "an open without PSP_O_CREAT creates nothing");
 
     /* io-seek-ms-write-rdonly-creat: PSP_O_RDONLY | PSP_O_CREAT on a missing file. */
-    const uint32_t rdonly_creat = ms_cell_path_call(MS_CELL_OPEN, missing_guest, 0x0201u);
-    expect(rdonly_creat == MS_EINVAL,
+    expect(ms_cell_refused_open(missing_guest, 0x0201u) == MS_EINVAL,
            "PSP_O_RDONLY | PSP_O_CREAT on a missing Memory Stick file is 0x80010016");
-    if (rdonly_creat < 64u) (void)ms_cell_fd_call(MS_CELL_CLOSE, rdonly_creat, 0u, 0u);
     expect(ms_cell_path_call(MS_CELL_GETSTAT, missing_guest, 0u) == MS_ENOENT &&
                !ms_cell_host_exists(missing_guest),
            "the refused read-only create creates nothing");
@@ -4161,19 +4166,19 @@ static void test_io_memory_stick_cells_through_syscall(void) {
 
     /* io-excl-existing: with and without PSP_O_TRUNC, the file is left as it was. */
     fd_host_path(host, sizeof(host), file_guest);
-    expect(ms_cell_path_call(MS_CELL_OPEN, file_guest, 0x0A03u) == MS_EEXIST &&
-               ms_cell_path_call(MS_CELL_OPEN, file_guest, 0x0E03u) == MS_EEXIST &&
+    expect(ms_cell_refused_open(file_guest, 0x0A03u) == MS_EEXIST &&
+               ms_cell_refused_open(file_guest, 0x0E03u) == MS_EEXIST &&
                fd_host_bytes_equal(host, pattern, MS_SIZE),
            "an exclusive create of an existing file is 0x80010011 and leaves it unchanged");
 
     /* Read-only creates no cell measured stop at the named boundary with nothing opened,
      * created or cut: on an existing file, with PSP_O_TRUNC, and with PSP_O_EXCL. */
-    expect(ms_cell_path_call(MS_CELL_OPEN, file_guest, 0x0201u) == 0x80010086u &&
-               ms_cell_path_call(MS_CELL_OPEN, file_guest, 0x0601u) == 0x80010086u &&
+    expect(ms_cell_refused_open(file_guest, 0x0201u) == 0x80010086u &&
+               ms_cell_refused_open(file_guest, 0x0601u) == 0x80010086u &&
                fd_host_bytes_equal(host, pattern, MS_SIZE),
            "PSP_O_RDONLY | PSP_O_CREAT on an existing file stops at the boundary, file unchanged");
-    expect(ms_cell_path_call(MS_CELL_OPEN, missing_guest, 0x0A01u) == 0x80010086u &&
-               ms_cell_path_call(MS_CELL_OPEN, missing_guest, 0x0301u) == 0x80010086u &&
+    expect(ms_cell_refused_open(missing_guest, 0x0A01u) == 0x80010086u &&
+               ms_cell_refused_open(missing_guest, 0x0301u) == 0x80010086u &&
                !ms_cell_host_exists(missing_guest),
            "PSP_O_RDONLY | PSP_O_CREAT with PSP_O_EXCL or PSP_O_APPEND stops at the boundary "
            "and creates nothing");
@@ -4245,6 +4250,8 @@ static void test_io_memory_stick_cells_through_syscall(void) {
     expect(ms_cell_fd_call(MS_CELL_CLOSE, fd, 0u, 0u) == 0u &&
                ms_cell_path_call(MS_CELL_REMOVE, file_guest, 0u) == 0u,
            "the probe file closes and is removed");
+    fd_host_path(host, sizeof(host), missing_guest);
+    nk_remove_utf8(host);   /* only a runtime that wrongly created it leaves one */
 }
 
 /* sceIoAssign / sceIoUnassign through the production syscall path. WipEout Pure's Memory
