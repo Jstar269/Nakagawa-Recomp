@@ -294,7 +294,7 @@ WizardColumn scr_online_developer_column(NkUi *ui, bool online_on, bool develope
     /* The Online mode row is there only while the stored setting is On; the Nickname row
        only in Settings. Every row drawn with the column is measured, so a sentence of
        any of them that would be cut makes them all stack. The Nickname button's value
-       is cut to fit the column, so only its name counts for the column's width. */
+       is clamped to half the column, so only its name counts for the column's width. */
     WizardRow rows[3];
     size_t count = 0u;
     if (online_on) rows[count++] = (WizardRow){"Online mode", "On", SCR_ONLINE_STORED_ON_SENTENCE};

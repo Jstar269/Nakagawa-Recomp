@@ -204,7 +204,7 @@ the window. A larger window keeps its density and gains room. Clay clips at most
 long text with `nk_ui_text_clamp` instead of clipping it, but only text the player can read whole another way (a
 value with its own editor or detail page); text with no other place to be read wraps whole on a page that scrolls.
 One exception is by design: at the design text size a setting's sentence beside its button is clamped to two lines,
-so the rows keep their side-by-side layout. Above it, a sentence that would be cut makes the rows stack, and under
+so the rows keep their side-by-side layout (Settings > Enhanced stacks its rows at every size instead). Above it, a sentence that would be cut makes the rows stack, and under
 its button the sentence wraps whole.
 
 Wrapped text keeps its wrapped height when its page is overfull. Clay took a paragraph's minimum height before

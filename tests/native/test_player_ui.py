@@ -5224,7 +5224,7 @@ class NativePlayerUiTests(unittest.TestCase):
 
     def test_next_ui_play_line_names_every_part(self) -> None:
         """The game page's play line with every part on names each one and ends whole: on main
-        the parts list (160 bytes) dropped "sharper enlarging", and the Ace line (256 bytes) was
+        the parts list (160 bytes) cut "sharper enlarging" to "sharper e", and the Ace line (256 bytes) was
         cut mid-word, with no ellipsis for the page test to see."""
         enhanced = self.every_part_play_line({"mode": "enhanced"})
         self.assertTrue(enhanced.startswith("Enhanced for this game: "), enhanced)
