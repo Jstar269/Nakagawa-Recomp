@@ -2179,7 +2179,8 @@ static uint32_t do_load(uint32_t param, const char *game, const char *save, int 
     if (fileName[0] && savedata_encrypted(dir, "LOAD")) return ERR_LOAD_DATA_BROKEN_UNMEASURED;
     /* No PARAM.SFO: a damaged save, whether or not the data file is there (PSP, loadbroken),
      * and dataSize is left as the game wrote it (PSP-HLE-SAVEDATA-NODATA-001, CAPTURED on a
-     * PSP-3000: AUTOLOAD, READDATA and READDATASECURE left it at its preset). */
+     * PSP-3000: AUTOLOAD, READDATA and READDATASECURE left it at its preset; LOAD and LISTLOAD
+     * are UNMEASURED and follow AUTOLOAD). */
     if (savedata_member_state(dir, "PARAM.SFO") == 0)
         return rw ? ERR_RW_DATA_BROKEN : ERR_LOAD_DATA_BROKEN;
     /* dataSize is zeroed before the read, as PPSSPP's LoadSaveData does; what a PSP leaves

@@ -520,9 +520,9 @@ static void check_open_cases(const char *base) {
     snprintf(path, sizeof(path), "%s/ULUS99999SLOT00/DATA.BIN", target);
     CHECK(!exists_no_follow(path), "intermediate symlink SAVE must not create outside data");
     /* A whole save behind the link (made in its own tree, then moved there), so the LOAD below
-     * would succeed if any step of it followed the link. The contained directory check refuses
-     * the link before PARAM.SFO or the data file is looked at; without the save behind it, the
-     * check would pass whatever LOAD did. */
+     * would succeed if its directory walk followed the link. The contained directory check
+     * refuses the link before PARAM.SFO or the data file is looked at; without the save behind
+     * it, the check would pass whatever LOAD did. */
     snprintf(seed, sizeof(seed), "%s/intermediate-seed", base);
     CHECK(make_savedata_tree(seed) && run_save(seed, "DATA.BIN", "OUTSIDE") == 0,
           "intermediate-link seed SAVE");
