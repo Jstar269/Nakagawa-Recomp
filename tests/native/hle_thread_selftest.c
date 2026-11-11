@@ -28002,10 +28002,9 @@ static unsigned gr_run_cells(int mutant, unsigned char diverged[GR_CELL_COUNT], 
     return count;
 }
 
-/* Each deliberately wrong raster rule of ge.c and the PSP-GE-RASTER-001 cells it must fail (on
- * 2026-11-11 each fails exactly these). Depth rounding has no mutant here: every cell's depth is
- * an integer and the window holds colour only, so rounding to nearest instead of truncating
- * passes all 189 cells (docs/HARDWARE_ORACLE.md, "GE raster pixel corpus"). */
+/* Each deliberately wrong raster rule of ge.c and exactly the PSP-GE-RASTER-001 cells it fails.
+ * Depth rounding has no mutant here: every depth a cell draws or clears is an integer, so
+ * rounding to nearest instead of truncating passes all 189 cells (docs/HARDWARE_ORACLE.md). */
 #define GR_MUTANT_CELLS 8
 static const struct {
     int mutant;
@@ -28040,11 +28039,16 @@ static void test_ge_raster_cells_match_psp(void) {
         unsigned named = 0, caught = 0;
         for (size_t n = 0; n < GR_MUTANT_CELLS && s_gr_mutants[m].cells[n] != NULL; n++) {
             named++;
+            unsigned hit = 0;
             for (uint32_t k = 0; k < GR_CELL_COUNT; k++)
-                if (strcmp(gr_cells[k].name, s_gr_mutants[m].cells[n]) == 0 && diverged[k]) caught++;
+                if (strcmp(gr_cells[k].name, s_gr_mutants[m].cells[n]) == 0 && diverged[k]) hit = 1;
+            if (!hit)
+                fprintf(stderr, "GE-RASTER mutant %d: named cell %s matches the PSP\n",
+                        s_gr_mutants[m].mutant, s_gr_mutants[m].cells[n]);
+            caught += hit;
         }
-        expect(msynced && named > 0 && caught == named,
-               "each wrong PSP-GE-RASTER-001 raster rule fails its named PSP cells");
+        expect(msynced && named > 0 && caught == named && wrong == named,
+               "each wrong PSP-GE-RASTER-001 raster rule fails exactly its named PSP cells");
     }
 }
 
