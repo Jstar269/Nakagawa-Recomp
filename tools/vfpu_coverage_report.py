@@ -654,7 +654,8 @@ def _measured_selftests(word: int, op: int, size: object) -> list[str]:
         tests.append("vfpu-interp-selftest:check_vcmp_denormal_operands")
     # lv.q / sv.q with the write-back flag (bit 1) and vt below 32 (bit 0 clear), off the zero base
     # register: the probe's words and the check's (base $t2, C000). Rows visited only with r0 keep
-    # their own, unverified decode (PSP-VFPU-QUADWB-001).
+    # their own, unverified decode (PSP-VFPU-QUADWB-001). Row-level, like every census credit: other base
+    # registers and offsets of the same form are credited with the measured ones.
     if op in {0x36, 0x3E} and word & 3 == 2 and (word >> 21) & 0x1F:
         tests.append("vfpu-interp-selftest:check_quad_wb_measured")
     # vadd/vsub/vmul/vmin/vmax at .s and .q, vscl.q, vdiv.s (PSP-VFPU-BASICARITH-001); the wider

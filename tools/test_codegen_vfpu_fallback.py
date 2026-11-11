@@ -298,8 +298,8 @@ int main(void) {{
         # aligned lv.q/sv.q, the write-back flag, did not change the base register in any
         # form (offsets 0, +16, +32, -16; four in a row from one base did not drift), and
         # the access used base + offset. The generated code therefore emits the same access
-        # as the plain word and never assigns the base register. Not hardware evidence until
-        # the register entry lands.
+        # as the plain word and never assigns the base register (the register entry is
+        # PSP-VFPU-QUADWB-001).
         for op, plain_word in ((0x36, 0xD9400000), (0x3E, 0xF9400000)):
             for offset in (0x0000, 0x0010, 0x0020, 0xFFF0):
                 for lle_cpu in (False, True):

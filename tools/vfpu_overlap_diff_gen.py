@@ -169,7 +169,7 @@ def build_cases() -> tuple[list[tuple[int, str, int]], int, tuple[int, int]]:
 
     # vf2in/vf2iz/vf2iu/vf2id.s at scale 0 (PSP-VFPU-CONVERT-001, probe case vfpu-convert, PSP-3000,
     # 2026-11-08): check_vf2i_measured_cells() finds them by name and runs the measured denormal and
-    # NaN cells through both lanes. Source S000, destination S001.
+    # NaN cells through both lanes. Physical source v[0], destination v[4].
     for mode, name in enumerate(("vf2in", "vf2iz", "vf2iu", "vf2id")):
         cases.append((0xD2000001 | (mode << 21), f"{name}-s-measured", 1))
 
