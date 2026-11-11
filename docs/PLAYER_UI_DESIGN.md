@@ -333,14 +333,19 @@ first page.
 
 FIND, beside it, opens the find box; so do the screen's Options action (the pad's west button, Space) and, from a
 hardware keyboard, "/" or Ctrl+F. The box takes TEST THIS PC's room: a field showing what is typed ("Type a name or
-disc ID" until then), a primary DONE, and an on-screen keyboard of 44 px keys in four rows 4 px apart (digits, three
-QWERTY rows with `-`, `.`, `'`, SPACE and DELETE), so a row of cards still fits at 1280 x 720. The grid shows the
-games whose name or disc ID holds what is typed, ignoring case, without the add card or the demos; the count reads
-"3 of 40 titles", and no match says "No games match". A hardware keyboard types straight in (SDL's text input is on
+disc ID" until then) and, 4 px under it, the player's shared on-screen keyboard (`src/player/ui/ui_keyboard.c`, the
+nickname editor's too). Its 34 px keys sit in rows 4 px apart: digits, three QWERTY rows with `'`, `,`, `.` and `-`,
+a row of symbols, and SHIFT, SPACE, DELETE, CANCEL and DONE. The letters are lower case until SHIFT. The field is a
+key's height, so a row of cards still fits under the box at 1280 x 720; with larger text the grid scrolls under it.
+The box takes printable characters, up to 63 bytes. The grid shows the games whose name or disc ID holds what is
+typed, ignoring case, without the add card or the demos; the count reads "3 of 40 titles", and no match says "No
+games match". With a controller the keyboard's shortcuts work while the box is open: X deletes, Y types a space, L
+or R is SHIFT and Start is DONE (instead of the next tab and Settings). DONE moves focus to the first match, and the
+box stays open. A hardware keyboard types straight in, through the same filter and limit (SDL's text input is on
 while the box is open, so an input method works too), Backspace deletes, and letters that are launcher shortcuts
 (O, S, D, Q, E) are typed instead. Opened from the keyboard, focus is on DONE, so Enter moves to the first match; from
-a controller or the mouse, on Q. Esc or B clears and closes the box and focus returns to FIND. The prompt bar reads
-MOVE, SELECT and CLEAR while it is open.
+a controller or the mouse, on q. CANCEL, Esc or B clears and closes the box and focus returns to FIND. The prompt bar
+reads MOVE, SELECT and CLEAR while it is open.
 
 The sorts are those three. Find is one
 model for every input: a Find action (a button, and a controller button) opens a find box that filters the library

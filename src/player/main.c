@@ -810,8 +810,10 @@ static bool player_dispatch_ui_event(PlayerApp *app, PlayerUiNk *next_ui,
                the routes below would give to the page under it. */
             return player_ui_nk_handle_event(next_ui, event);
         }
+        /* Start opens Settings from the library, except while the find box is
+           open: its keyboard takes Start as Done (#2206). */
         if (use_next_ui && event->gbutton.button == SDL_GAMEPAD_BUTTON_START &&
-            player_view_is_library(app->active_view)) {
+            player_view_is_library(app->active_view) && !player_ui_nk_find_open(next_ui)) {
             player_app_set_view(app, VIEW_SETTINGS);
             return true;
         }

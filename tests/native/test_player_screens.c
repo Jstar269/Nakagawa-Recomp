@@ -853,9 +853,15 @@ static PlayerUiAction draw_page_case(NkUi *ui, FlowCase which) {
         library.update_notice = "Version 0.0.2 is out";
         library.sort_label = "Recently played";
         if (which == FLOW_PAGE_LIBRARY_FIND) {
-            /* The find box open on a long query, with every game a match. */
+            /* The find box open on a long query, with every game a match, and the
+               shared keyboard under its field as the launcher draws it (#2206). */
+            static char query[64];
+            static UiKeyboard keyboard;
+            (void)snprintf(query, sizeof(query), "%s", "Synthetic Showcase Scene and more");
+            ui_keyboard_init(&keyboard, query, sizeof(query) - 1u, player_ui_find_accepts, NULL);
             library.find_open = true;
-            library.find_query = "Synthetic Showcase Scene and more";
+            library.find_query = query;
+            library.find_keyboard = &keyboard;
             library.game_total = library.title_count;
         }
         return player_ui_screen_library(ui, &library);
@@ -1702,6 +1708,9 @@ static void test_library_find_box(void) {
     NkUiTextBackend text = screen_test_text_backend();
     static const size_t matches[] = {0u, 2u, 4u};
     const char *dump;
+    char typed[64] = "";
+    UiKeyboard keyboard;
+    ui_keyboard_init(&keyboard, typed, sizeof(typed) - 1u, player_ui_find_accepts, NULL);
     memset(&config, 0, sizeof(config));
     config.host = NK_UI_HOST_LAUNCHER;
     config.text = &text;
@@ -1722,7 +1731,8 @@ static void test_library_find_box(void) {
     CHECK(action.kind == PLAYER_UI_ACTION_FIND_OPEN, "FIND opens the box");
 
     model.find_open = true;
-    model.find_query = "";
+    model.find_query = typed;
+    model.find_keyboard = &keyboard;
     model.game_total = model.title_count;
     model.grid = matches;
     model.grid_count = 3u;
@@ -1730,29 +1740,34 @@ static void test_library_find_box(void) {
     dump = library_frame_dump(ui, &model, NULL);
     CHECK(strstr(dump, "Type a name or disc ID") != NULL &&
               strstr(dump, "\"3 of 7 titles\"") != NULL && strstr(dump, "\"DONE\"") != NULL &&
-              strstr(dump, "\"Q\"") != NULL && strstr(dump, "\"DELETE\"") != NULL &&
+              strstr(dump, "\"q\"") != NULL && strstr(dump, "\"DELETE\"") != NULL &&
               strstr(dump, "\"CLEAR\"") != NULL && strstr(dump, "\"FIND\"") == NULL &&
               strstr(dump, "Add a disc image") == NULL,
           "the open box shows what to type, the count, DONE, the keyboard and Clear, and no "
           "add card");
-    model.find_query = "syn";
+    (void)snprintf(typed, sizeof(typed), "syn");
     dump = library_frame_dump(ui, &model, NULL);
     CHECK(strstr(dump, "\"syn|\"") != NULL, "the box shows what is typed");
-    action = library_activate(ui, &model, PLAYER_UI_ID_LIBRARY_FIND_KEY_BASE + 10u);
-    CHECK(action.kind == PLAYER_UI_ACTION_FIND_KEY && action.title_index == 'Q',
-          "an on-screen key types its character");
-    action = library_activate(ui, &model, PLAYER_UI_ID_LIBRARY_FIND_KEY_BASE + 39u);
-    CHECK(action.kind == PLAYER_UI_ACTION_FIND_KEY && action.title_index == ' ',
-          "the last key on the keyboard is Space");
-    action = library_activate(ui, &model, PLAYER_UI_ID_LIBRARY_FIND_KEY_BASE + 40u);
-    CHECK(action.kind == PLAYER_UI_ACTION_FIND_KEY &&
-              action.title_index == PLAYER_UI_FIND_DELETE,
-          "DELETE deletes");
+    action = library_activate(ui, &model, PLAYER_UI_ID_LIBRARY_FIND_KEY_BASE + UI_KEYBOARD_KEY_DEFAULT);
+    CHECK(action.kind == PLAYER_UI_ACTION_FIND_KEY && action.title_index == PLAYER_UI_FIND_EDITED &&
+              strcmp(typed, "synq") == 0,
+          "an on-screen key types its character into the box");
+    action = library_activate(ui, &model, PLAYER_UI_ID_LIBRARY_FIND_KEY_BASE + UI_KEYBOARD_KEY_SPACE);
+    CHECK(action.kind == PLAYER_UI_ACTION_FIND_KEY && action.title_index == PLAYER_UI_FIND_EDITED &&
+              strcmp(typed, "synq ") == 0,
+          "SPACE types a space");
+    action = library_activate(ui, &model, PLAYER_UI_ID_LIBRARY_FIND_KEY_BASE + UI_KEYBOARD_KEY_DELETE);
+    CHECK(action.kind == PLAYER_UI_ACTION_FIND_KEY && action.title_index == PLAYER_UI_FIND_EDITED &&
+              strcmp(typed, "synq") == 0,
+          "DELETE deletes the last character");
     action = library_activate(ui, &model, PLAYER_UI_ID_LIBRARY_FIND_DONE);
     CHECK(action.kind == PLAYER_UI_ACTION_FIND_KEY && action.title_index == PLAYER_UI_FIND_DONE,
           "DONE finishes");
+    action = library_activate(ui, &model, PLAYER_UI_ID_LIBRARY_FIND_CANCEL);
+    CHECK(action.kind == PLAYER_UI_ACTION_FIND_KEY && action.title_index == PLAYER_UI_FIND_CANCEL,
+          "CANCEL closes the box");
     model.grid_count = 0u;
-    model.find_query = "zzz";
+    (void)snprintf(typed, sizeof(typed), "zzz");
     dump = library_frame_dump(ui, &model, NULL);
     CHECK(strstr(dump, "No games match \\\"zzz\\\".") != NULL &&
               strstr(dump, "\"0 of 7 titles\"") != NULL &&
@@ -1791,6 +1806,9 @@ static void test_library_find_box_is_the_shared_keyboard(void) {
     NkUiTextBackend text = screen_test_text_backend();
     static const size_t matches[] = {0u, 2u, 4u};
     const char *dump;
+    char typed[64] = "";
+    UiKeyboard keyboard;
+    ui_keyboard_init(&keyboard, typed, sizeof(typed) - 1u, player_ui_find_accepts, NULL);
     memset(&config, 0, sizeof(config));
     config.host = NK_UI_HOST_LAUNCHER;
     config.text = &text;
@@ -1812,7 +1830,8 @@ static void test_library_find_box_is_the_shared_keyboard(void) {
           "with the box closed, Start opens Settings");
 
     model.find_open = true;
-    model.find_query = "";
+    model.find_query = typed;
+    model.find_keyboard = &keyboard;
     model.game_total = model.title_count;
     model.grid = matches;
     model.grid_count = 3u;
@@ -1825,7 +1844,8 @@ static void test_library_find_box_is_the_shared_keyboard(void) {
               strstr(dump, "\"DONE\"") != NULL,
           "the find box has the shared keyboard's symbol row, Shift, Space, Delete and Done");
     action = library_shortcut(ui, &model, NK_UI_EV_TAB, NK_UI_DIR_RIGHT);
-    CHECK(action.kind == PLAYER_UI_ACTION_FIND_KEY,
+    CHECK(action.kind == PLAYER_UI_ACTION_FIND_KEY && action.title_index == PLAYER_UI_FIND_EDITED &&
+              keyboard.shifted,
           "with the box open, R is the keyboard's Shift, not the top bar's next tab");
     dump = library_frame_dump(ui, &model, NULL);
     CHECK(strstr(dump, "\"Q\"") != NULL && strstr(dump, "\"q\"") == NULL,
@@ -3977,6 +3997,91 @@ static void test_enhanced_rows_stay_put(void) {
     }
     memset(g_enhanced_value, 0, sizeof(g_enhanced_value));
     g_enhanced_mode = NULL;
+}
+
+/* The find page (FLOW_PAGE_LIBRARY_FIND, the shared keyboard under its field) at
+   this window and text size: whether it fits the window, whether every key row of
+   the keyboard (every key, Done and Cancel) is drawn whole, and whether the first card is drawn whole, inside the window
+   and nothing of it cut off by the scrolling body. */
+typedef struct {
+    bool fits;
+    bool keyboard;
+    bool card;
+} LibraryFindFit;
+
+static LibraryFindFit library_find_fit(int width, int height, int text_size_pct) {
+    LibraryFindFit fit = {false, false, false};
+    bool key_drawn[UI_KEYBOARD_KEY_COUNT + 2u];
+    bool key_cut = false;
+    NkUi *ui = NULL;
+    const NkUiDrawList *draw;
+    bool card_drawn = false;
+    bool card_cut = false;
+    int saved = g_flow_text_size_pct;
+    memset(key_drawn, 0, sizeof(key_drawn));
+    g_flow_text_size_pct = text_size_pct;
+    fit.fits = flow_case_fits(FLOW_PAGE_LIBRARY_FIND, width, height, NULL, 0u);
+    draw = flow_case_layout(FLOW_PAGE_LIBRARY_FIND, width, height, &ui);
+    for (uint32_t i = 0u; draw != NULL && i < draw->ncmd; ++i) {
+        const NkUiDrawCmd *cmd = &draw->cmd[i];
+        NkUiId id = cmd->element_id;
+        bool cut = false;
+        if (cmd->kind == NK_UI_DRAW_SCISSOR_START || cmd->kind == NK_UI_DRAW_SCISSOR_END) {
+            continue;
+        }
+        for (int k = 0; k < 4; ++k) {
+            if (cmd->bounds[k] != cmd->clip[k]) cut = true;
+        }
+        if (cmd->bounds[0] < 0 || cmd->bounds[1] < 0 || cmd->bounds[2] > width ||
+            cmd->bounds[3] > height) {
+            cut = true;
+        }
+        /* The keyboard's keys, then its Done and Cancel. */
+        if (id >= PLAYER_UI_ID_LIBRARY_FIND_KEY_BASE &&
+            id < PLAYER_UI_ID_LIBRARY_FIND_KEY_BASE + UI_KEYBOARD_KEY_COUNT) {
+            key_drawn[id - PLAYER_UI_ID_LIBRARY_FIND_KEY_BASE] = true;
+            if (cut) key_cut = true;
+        } else if (id == PLAYER_UI_ID_LIBRARY_FIND_DONE ||
+                   id == PLAYER_UI_ID_LIBRARY_FIND_CANCEL) {
+            key_drawn[UI_KEYBOARD_KEY_COUNT + (id == PLAYER_UI_ID_LIBRARY_FIND_DONE ? 0u : 1u)] =
+                true;
+            if (cut) key_cut = true;
+        }
+        if (id != PLAYER_UI_ID_LIBRARY_ITEM(0u)) continue;
+        card_drawn = true;
+        if (cut) card_cut = true;
+    }
+    fit.card = card_drawn && !card_cut;
+    fit.keyboard = !key_cut;
+    for (size_t k = 0u; k < sizeof(key_drawn) / sizeof(key_drawn[0]); ++k) {
+        if (!key_drawn[k]) fit.keyboard = false;
+    }
+    if (ui != NULL) nk_ui_destroy(ui);
+    g_flow_text_size_pct = saved;
+    return fit;
+}
+
+/* #2206: the find box with the shared keyboard. At the design text size every
+   window size the launcher supports (each lays out at 1280 x 720 or larger) keeps a
+   row of cards whole under the box; at the smallest size and the largest text the
+   page still fits the window with every key row, and the grid scrolls under it. */
+static void test_library_find_box_fits(void) {
+    static const struct { int w; int h; } sizes[] = {
+        {1280, 720}, {960, 540}, {1366, 705}, {853, 480}
+    };
+    for (size_t s = 0u; s < sizeof(sizes) / sizeof(sizes[0]); ++s) {
+        char message[160];
+        LibraryFindFit fit = library_find_fit(sizes[s].w, sizes[s].h, 100);
+        (void)snprintf(message, sizeof(message),
+                       "the find box at %d x %d, 100%% text, fits with its keyboard and a whole "
+                       "row of cards", sizes[s].w, sizes[s].h);
+        CHECK(fit.fits && fit.keyboard && fit.card, message);
+    }
+    {
+        LibraryFindFit fit = library_find_fit(853, 480, 150);
+        CHECK(fit.fits && fit.keyboard,
+              "the find box at 853 x 480 with 150% text fits the window with every key row");
+    }
 }
 
 static void test_every_screen_fits_the_window(void) {
@@ -7048,6 +7153,7 @@ int main(int argc, char **argv) {
     test_library_sort_button();
     test_library_find_box();
     test_library_find_box_is_the_shared_keyboard();
+    test_library_find_box_fits();
     test_nickname_keyboard();
     CHECK(build_library_golden(library, sizeof(library), &library_size),
           "build Library screen dumps");

@@ -118,6 +118,7 @@ struct PlayerUiNk {
        input is on for it. */
     bool find_open;
     char find_query[64];
+    UiKeyboard find_keyboard;  /* edits find_query (#2206) */
     bool find_text_input;
     /* The control the box focuses, on the first frame that lays it out. */
     NkUiId find_focus;
@@ -1883,6 +1884,10 @@ unsigned player_ui_nk_test_focus(const PlayerUiNk *player) {
     return player != NULL && player->ui != NULL ? (unsigned)nk_ui_focused(player->ui) : 0u;
 }
 
+const char *player_ui_nk_test_find(const PlayerUiNk *player) {
+    return player_ui_nk_find_open(player) ? player->find_query : NULL;
+}
+
 const char *player_ui_nk_test_nickname(const PlayerUiNk *player, char *count, size_t cap) {
     if (count != NULL && cap > 0u) count[0] = '\0';
     if (player == NULL || !player->nickname_open) return NULL;
@@ -2258,13 +2263,16 @@ size_t player_ui_nk_shown_titles(const PlayerUiNk *player, int *out, size_t cap)
 
 /* The library's find box. From a hardware keyboard, which types straight into
    it, focus goes to DONE, so Enter moves on to the matches; otherwise to the
-   on-screen keyboard's Q, ready for a controller or the mouse. */
+   on-screen keyboard's q, ready for a controller or the mouse. */
 static void player_ui_find_open(PlayerUiNk *player, bool from_keyboard) {
     player->find_open = true;
     player->find_query[0] = '\0';
+    ui_keyboard_init(&player->find_keyboard, player->find_query,
+                     sizeof(player->find_query) - 1u, player_ui_find_accepts, NULL);
     player->library_page = 0u;
-    player->find_focus = from_keyboard ? PLAYER_UI_ID_LIBRARY_FIND_DONE
-                                       : PLAYER_UI_ID_LIBRARY_FIND_KEY_BASE + 10u;
+    player->find_focus = from_keyboard
+        ? PLAYER_UI_ID_LIBRARY_FIND_DONE
+        : PLAYER_UI_ID_LIBRARY_FIND_KEY_BASE + UI_KEYBOARD_KEY_DEFAULT;
 }
 
 /* Clears and closes the box; focus goes back to FIND. */
@@ -2275,47 +2283,17 @@ static void player_ui_find_close(PlayerUiNk *player) {
     player->find_focus = PLAYER_UI_ID_LIBRARY_FIND;
 }
 
-/* Adds one character as UTF-8, when it fits whole; control characters are
-   not typed. */
+/* A hardware keyboard's character, typed through the on-screen keyboard's filter and
+   cap (player_ui_find_accepts): control characters are not typed. */
 static void player_ui_find_type(PlayerUiNk *player, uint32_t codepoint) {
-    char bytes[4];
-    size_t n;
-    size_t length = strlen(player->find_query);
-    if (codepoint < 0x20u || codepoint == 0x7Fu || codepoint > 0x10FFFFu) return;
-    if (codepoint < 0x80u) {
-        bytes[0] = (char)codepoint;
-        n = 1u;
-    } else if (codepoint < 0x800u) {
-        bytes[0] = (char)(0xC0u | (codepoint >> 6));
-        bytes[1] = (char)(0x80u | (codepoint & 0x3Fu));
-        n = 2u;
-    } else if (codepoint < 0x10000u) {
-        bytes[0] = (char)(0xE0u | (codepoint >> 12));
-        bytes[1] = (char)(0x80u | ((codepoint >> 6) & 0x3Fu));
-        bytes[2] = (char)(0x80u | (codepoint & 0x3Fu));
-        n = 3u;
-    } else {
-        bytes[0] = (char)(0xF0u | (codepoint >> 18));
-        bytes[1] = (char)(0x80u | ((codepoint >> 12) & 0x3Fu));
-        bytes[2] = (char)(0x80u | ((codepoint >> 6) & 0x3Fu));
-        bytes[3] = (char)(0x80u | (codepoint & 0x3Fu));
-        n = 4u;
-    }
-    if (length + n >= sizeof(player->find_query)) return;
-    memcpy(player->find_query + length, bytes, n);
-    player->find_query[length + n] = '\0';
-    player->library_page = 0u;
+    char bytes[5];
+    if (ui_keyboard_utf8(codepoint, bytes) == 0u) return;
+    if (ui_keyboard_type(&player->find_keyboard, bytes)) player->library_page = 0u;
 }
 
 /* Removes the last character, all of its UTF-8 bytes. */
 static void player_ui_find_delete(PlayerUiNk *player) {
-    size_t length = strlen(player->find_query);
-    while (length > 0u && ((unsigned char)player->find_query[length - 1u] & 0xC0u) == 0x80u) {
-        --length;
-    }
-    if (length > 0u) --length;
-    player->find_query[length] = '\0';
-    player->library_page = 0u;
+    if (ui_keyboard_delete(&player->find_keyboard)) player->library_page = 0u;
 }
 
 /* The nickname editor starts empty, showing the nickname in use until
@@ -3511,6 +3489,7 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
         model.sort_label = player_library_sort_label(app->settings.library_sort);
         model.find_open = player->find_open;
         model.find_query = player->find_query;
+        model.find_keyboard = player->find_open ? &player->find_keyboard : NULL;
         model.game_total = player->library_game_total;
         model.page_index = player->library_page;
         model.page_size = page_size;
@@ -3584,10 +3563,11 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
                 nk_ui_focus(player->ui, games > 0u
                                             ? PLAYER_UI_ID_LIBRARY_ITEM(player->library_grid[0])
                                             : PLAYER_UI_ID_LIBRARY_FIND_DONE);
-            } else if (action.title_index == PLAYER_UI_FIND_DELETE) {
-                player_ui_find_delete(player);
+            } else if (action.title_index == PLAYER_UI_FIND_CANCEL) {
+                player_ui_find_close(player);
             } else {
-                player_ui_find_type(player, (uint32_t)action.title_index);
+                /* A key edited the text (or the letter case): the matches start over. */
+                player->library_page = 0u;
             }
             action.kind = PLAYER_UI_ACTION_NONE;
         } else if (action.kind == PLAYER_UI_ACTION_CYCLE_SORT) {
