@@ -488,11 +488,10 @@ static void fbcap_parse_windows_once(void) {
  * capture owns the slot; a present nobody serviced leaves the request pending for the next one. */
 static char s_shot_path[1024];
 
+/* Through the platform layer's wide-path call: a user data folder on a non-ASCII path (an accented
+   or Japanese user name) still finds a screenshot already saved in this second. */
 static int shot_file_exists(const char *path) {
-    FILE *f = fopen(path, "rb");
-    if (!f) return 0;
-    fclose(f);
-    return 1;
+    return nk_platform_file_exists(path) ? 1 : 0;
 }
 
 static void screenshot_arm_for_present(const DisplayFrameState *fb, int framebuf_set) {

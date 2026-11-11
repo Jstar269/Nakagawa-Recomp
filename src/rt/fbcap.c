@@ -26,6 +26,7 @@
 
 #include "../core/nk_platform.h"   /* the wide-path (UTF-8) file calls: user data paths */
 
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -490,9 +491,20 @@ int sr_file_publish_new(const char *path, const void *data, size_t len) {
     if (!path || !path[0] || (!data && len)) return SR_PUBLISH_FAILED;
     static unsigned long s_publish_seq;
     char tmp[1024 + 64];
-    if (snprintf(tmp, sizeof tmp, "%s.tmp%lu", path, ++s_publish_seq) >= (int)sizeof tmp)
-        return SR_PUBLISH_FAILED;
-    FILE *f = nk_fopen_utf8(tmp, "wb");
+    FILE *f = NULL;
+    /* The temp name carries this process's id, and is created only where no file is ("x": no
+       file, and no link, already at that name is opened, truncated or followed), so another run
+       dumping into the same folder, or a name left behind, is never written through. A name that
+       is taken costs one more try, up to PUBLISH_TEMP_TRIES; then the publish fails and says so. */
+    enum { PUBLISH_TEMP_TRIES = 16 };
+    for (int attempt = 0; attempt < PUBLISH_TEMP_TRIES && !f; attempt++) {
+        if (snprintf(tmp, sizeof tmp, "%s.tmp%lu.%lu", path, nk_platform_process_id(), ++s_publish_seq) >=
+            (int)sizeof tmp)
+            return SR_PUBLISH_FAILED;
+        errno = 0;
+        f = nk_fopen_utf8(tmp, "wbx");
+        if (!f && errno != EEXIST) return SR_PUBLISH_FAILED;   /* a failure, not a taken name */
+    }
     if (!f) return SR_PUBLISH_FAILED;
     int ok = len == 0u || fwrite(data, 1, len, f) == len;
     if (ok && fflush(f) != 0) ok = 0;

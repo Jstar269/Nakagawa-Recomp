@@ -217,7 +217,9 @@ enum {
 /* Publish `len` bytes as a new file at UTF-8 `path`: a temp sibling is written whole, flushed and
  * closed, then moved to `path` with nk_rename_noreplace_utf8, so a reader never sees a part of
  * the file and an existing file (a player's own edited image) is never replaced, even one that
- * appears while the temp file is written. Every file call is the platform layer's wide-path one. */
+ * appears while the temp file is written. The temp sibling ("<path>.tmp<process id>.<n>") is
+ * created exclusively, so nothing already at that name (another run's temp file, a link) is
+ * written through. Every file call is the platform layer's wide-path one. */
 int sr_file_publish_new(const char *path, const void *data, size_t len);
 
 #ifdef __cplusplus

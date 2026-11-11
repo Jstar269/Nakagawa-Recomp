@@ -830,8 +830,11 @@ memory, no network) and its hook in `ge_gpu.c`'s scaled-copy path (`tex_xs_offer
   `sr_video_frame_note`), which are frames, not loaded textures; textures with no pack identity (no power-of-two
   size, or a source the renderer cannot read directly); and a content hash of 0 (the name a pack gives every content
   at an address). An address whose content is new in 30 presents in a row (at most 4 presents apart) is an animation
-  or a movie drawn as a texture: it is no longer dumped until the dump is turned on again, with one
-  `TEX_DUMP: note:` line, and the row counts it. A file already in the folder is never written again or replaced:
+  or a movie drawn as a texture: it is no longer dumped, with one `TEX_DUMP: note:` line, and the row counts it,
+  until its content has held still for 300 presents (a font cache that has finished typing, a streaming slot that
+  settled); then it is dumped again. A texture skipped as a movie picture or for its changing address is looked at
+  again once that no longer holds, so a texture the game loads where a movie played is not lost. A file already in
+  the folder is never written again or replaced:
   each PNG (compressed with fixed-Huffman deflate, `sr_png_encode_rgba`) is written to a temporary file and moved
   into place only while no file has the name (`sr_file_publish_new`, `nk_rename_noreplace_utf8`), so an image the
   player enlarges in place is kept even when it is saved during the dump. Every file call is the platform layer's

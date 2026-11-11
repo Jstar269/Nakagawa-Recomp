@@ -29,6 +29,8 @@
 #define TEXT_DUMP_CAP 262144u
 #define GOLDEN_PATH "fixtures/nk_ui/overlay.golden"
 
+static bool list_shows_whole(const NkUiDrawList *list, NkUiId id, int top, int bottom);
+
 static int failures;
 static const uint8_t k_test_glyph_pixel = 0xFFu;
 
@@ -519,6 +521,17 @@ static void test_display_rows(void) {
             CHECK(list != NULL && inside, "every Settings row fits every window");
             CHECK(found_card && clear,
                   "the Settings card with every row stays clear of the edges and the prompt bar");
+            /* The card scrolls when its rows do not fit, so fitting the card is not enough: the
+               last row, Dump textures, is drawn whole, uncut by the card's scroll and above the
+               prompt bar, as the page opens. */
+            {
+                /* overlay_quick.c part_id(5, 1) and (5, 2): the row's label and description. */
+                const NkUiId dump_label = NK_UI_ID(NK_UI_ID_SCREEN_OVERLAY, 0x002100u + 5u * 0x40u + 1u);
+                const NkUiId dump_text = NK_UI_ID(NK_UI_ID_SCREEN_OVERLAY, 0x002100u + 5u * 0x40u + 2u);
+                CHECK(list != NULL && list_shows_whole(list, dump_label, edge, bar_top) &&
+                          list_shows_whole(list, dump_text, edge, bar_top),
+                      "the Dump textures row is shown whole on every window as the Settings page opens");
+            }
             nk_ui_destroy(fit);
         }
     }

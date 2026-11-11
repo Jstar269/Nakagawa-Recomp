@@ -1019,6 +1019,29 @@ static void test_png_encode(void) {
     CHECK(encode_round_trips(noise, NW, NH, &n), "png encode: noise (no matches) inflates exactly");
     CHECK(encode_round_trips(longrow, LW, LH, &n), "png encode: long and distant matches inflate exactly");
     CHECK(encode_round_trips(&one, 1u, 1u, &n), "png encode: a 1x1 image inflates exactly");
+    /* Past the 32 KiB window and the encoder's first output buffer: 512x512 noise (1 MiB of
+     * filtered rows, no matches, so the output grows several times and every window slot is
+     * reused); noise that repeats exactly 32768 bytes back (one 16384-texel row whose second half
+     * is its first: the longest distance deflate has), and noise that repeats 32769 bytes back
+     * (two equal 8192-texel rows of 1 + 32768 bytes: one past the window, so no match); and runs
+     * of one texel longer than a 258-byte match after a change. */
+    enum { BW = 512, BH = 512, PW = 256, PH = 256, DW = 16384, HALF = DW / 2 };
+    static uint32_t big[BW * BH], far_px[DW], runs[PW * PH];
+    for (int i = 0; i < BW * BH; i++) big[i] = enc_rand(&seed);
+    CHECK(encode_round_trips(big, BW, BH, &n) && n > (size_t)BH * (1u + 4u * BW),
+          "png encode: 512x512 noise (output growth, window reuse) inflates exactly");
+    for (int x = 0; x < DW; x++) far_px[x] = x < HALF ? enc_rand(&seed) : far_px[x - HALF];
+    CHECK(encode_round_trips(far_px, DW, 1u, &n), "png encode: a repeat exactly 32768 bytes back inflates exactly");
+    CHECK(n < (1u + 4u * DW) * 5u / 8u, "png encode: a repeat exactly 32768 bytes back is matched");
+    CHECK(encode_round_trips(far_px, HALF, 2u, &n), "png encode: a repeat 32769 bytes back inflates exactly");
+    CHECK(n > 2u * (1u + 4u * HALF), "png encode: a repeat 32769 bytes back, past the window, is not matched");
+    for (int y = 0; y < PH; y++)
+        for (int x = 0; x < PW; x++)
+            runs[y * PW + x] = x < 3 ? enc_rand(&seed) : (x < 200 ? 0xFF336699u : 0xFF996633u);
+    CHECK(encode_round_trips(runs, PW, PH, &n), "png encode: runs past 258 bytes after a change inflate exactly");
+    /* Transparent texels (bytes equal to the one before: matches one byte back) between noise. */
+    for (int i = 0; i < PW * PH; i++) runs[i] = (i / 37) % 2 ? 0u : enc_rand(&seed);
+    CHECK(encode_round_trips(runs, PW, PH, &n), "png encode: runs of one byte value inflate exactly");
     uint8_t *out = (uint8_t *)1;
     size_t out_len = 1;
     CHECK(sr_png_encode_rgba(flat, 0u, 4u, &out, &out_len) == 0 && out == NULL && out_len == 0u,
@@ -1067,6 +1090,37 @@ static void test_publish_new_unicode(void) {
     CHECK(nk_platform_list_files(dir, count_file, &files) && files == 1,
           "publish: no temp file is left beside it");
     CHECK(sr_file_publish_new("", "x", 1u) == SR_PUBLISH_FAILED, "publish: an empty path is refused");
+    /* Files already at temp names (another run's temp file, a name left behind) are never written
+     * through: decoys at the old "<path>.tmp<n>" form and at this process's "<path>.tmp<pid>.<n>"
+     * names keep their bytes, and the publish still lands. */
+    {
+        char second[800], decoy[900];
+        snprintf(second, sizeof second, "%s/1111111111111111cafef00d.png", dir);
+        nk_remove_utf8(second);
+        enum { DECOYS = 12 };
+        for (int k = 1; k <= DECOYS; k++) {
+            for (int form = 0; form < 2; form++) {
+                if (form) snprintf(decoy, sizeof decoy, "%s.tmp%lu.%d", second, nk_platform_process_id(), k);
+                else snprintf(decoy, sizeof decoy, "%s.tmp%d", second, k);
+                FILE *d = nk_fopen_utf8(decoy, "wb");
+                if (d) { fputs("decoy", d); fclose(d); }
+            }
+        }
+        CHECK(sr_file_publish_new(second, "third", 5u) == SR_PUBLISH_WRITTEN &&
+                  read_back(second, buf, sizeof buf) == 5 && strcmp(buf, "third") == 0,
+              "publish: a file is published past files already at temp names");
+        int intact = 0;
+        for (int k = 1; k <= DECOYS; k++) {
+            for (int form = 0; form < 2; form++) {
+                if (form) snprintf(decoy, sizeof decoy, "%s.tmp%lu.%d", second, nk_platform_process_id(), k);
+                else snprintf(decoy, sizeof decoy, "%s.tmp%d", second, k);
+                if (read_back(decoy, buf, sizeof buf) == 5 && strcmp(buf, "decoy") == 0) intact++;
+                nk_remove_utf8(decoy);
+            }
+        }
+        CHECK(intact == 2 * DECOYS, "publish: a file already at a temp name is never written through");
+        nk_remove_utf8(second);
+    }
     /* A screenshot (cap_write_file) into a non-ASCII folder it has to make. */
     CHECK(sr_capture_arm(shot) == 1, "publish: screenshot arm accepted");
     CHECK(sr_capture_serve_host(s_frame, PSP_W, PSP_H, PSP_W * 4u, SR_CAP_ORDER_BGRX) == 1 &&

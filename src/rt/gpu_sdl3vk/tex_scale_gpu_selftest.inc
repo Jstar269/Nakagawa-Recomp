@@ -38,10 +38,11 @@
  *                    in the cache and a newly decoded one are written under the names a pack gives them
  *                    (cache key and quick hash, worked out here), the folder reads back as a pack holding
  *                    the textures' own pixels (its own [games] line not reported), a file already there
- *                    (the player's own included) is never written again, a movie picture is skipped, the
- *                    budget, the file limit and the first failed write each stop the dump and say why on
- *                    the row, an address new in every present stops being dumped after its run while
- *                    another goes on, SR_TEX_DUMP_BUDGET_MB and SR_TEX_DUMP_MAX_FILES take a whole number
+ *                    (the player's own included) is never written again, a movie picture is skipped while
+ *                    the movie writes there and written once it no longer does, the budget, the file
+ *                    limit and the first failed write each stop the dump and say why on the row, an
+ *                    address new in every present stops being dumped after its run while another goes
+ *                    on, and is dumped again once it has held still, SR_TEX_DUMP_BUDGET_MB and SR_TEX_DUMP_MAX_FILES take a whole number
  *                    in range only, and a refusal names no full path;
  *   dump-xxh         under a textures.ini with xxh32 or xxh64 and ignoreAddress, files are named without
  *                    the address and found by the pack at another address;
@@ -1163,6 +1164,7 @@ static int xst_cell_replace_palette(int f) {
 #define XST_DUMP_NONASCII " \xC3\xA9\xE6\x97\xA5"   /* " ", U+00E9, U+65E5 in UTF-8 */
 #define XST_DUMP_VIDEO (XST_TEX + 0x20000u)       /* a movie picture's address (dump cell only) */
 #define XST_DUMP_OTHER (XST_TEX + 0x2000u)        /* a second texture address */
+void ge_set_frame(uint32_t frame);   /* ge.c: the VBLANK a movie span's age is counted in */
 
 static int xst_dump_has(const char *dir, const char *name) {
     char path[600];
@@ -1354,6 +1356,18 @@ static int xst_cell_dump(int f) {
         xst_dump_upload_at(XST_DUMP_VIDEO, c);
         if (!xst_dump_draw()) return xst_dump_fail("a draw failed");
         if (s_dump.written != w0 || s_dump.skipped != k0 + 1u) return xst_dump_fail("a movie picture was dumped");
+        s_cnt_present_gpu++;
+        if (!xst_dump_draw()) return xst_dump_fail("a draw failed");
+        if (s_dump.written != w0 || s_dump.skipped != k0 + 1u)
+            return xst_dump_fail("a movie picture drawn again was dumped, or counted twice");
+        /* Once the movie no longer writes there (its span is past ge.c's 120 VBLANKs), the same
+         * entry's texture is a texture the game loaded at that address: it is written. This cell
+         * runs at VBLANK 0 (nothing else here sets the frame), so 1000 is well past the span. */
+        ge_set_frame(1000u);
+        s_cnt_present_gpu++;
+        if (!xst_dump_draw()) return xst_dump_fail("a draw failed");
+        if (s_dump.written != w0 + 1u || s_dump.skipped != k0 + 1u)
+            return xst_dump_fail("a texture at a movie's old address was not dumped once the movie ended");
         xst_state(XST_BASE, XST_TEX, 3u, 1, 1);
     }
 
@@ -1449,6 +1463,19 @@ static int xst_cell_dump(int f) {
         if (!xst_dump_draw()) return xst_dump_fail("a draw failed");
         if (s_dump.written != w0 + TEX_DUMP_CHURN_RUN) return xst_dump_fail("another address stopped being dumped with the animated one");
         xst_state(XST_BASE, XST_TEX, 3u, 1, 1);
+        /* Within TEX_DUMP_CHURN_QUIET presents of its last change, the cut-off address stays cut off. */
+        s_cnt_present_gpu += TEX_DUMP_CHURN_QUIET - 2u;
+        if (!xst_dump_draw()) return xst_dump_fail("a draw failed");
+        gegpu_texdump_status(NULL, &changing, NULL);
+        if (s_dump.written != w0 + TEX_DUMP_CHURN_RUN || s_dump.churn_addrs != 1u || changing != 1u)
+            return xst_dump_fail("an animated texture was dumped, or no longer counted, before it held still");
+        /* Once it has held still that long, its last content (skipped while it changed) is written,
+         * and the address is no longer counted as cut off. */
+        s_cnt_present_gpu += 4u;
+        if (!xst_dump_draw()) return xst_dump_fail("a draw failed");
+        gegpu_texdump_status(NULL, &changing, NULL);
+        if (s_dump.written != w0 + TEX_DUMP_CHURN_RUN + 1u || s_dump.churn_addrs != 0u || changing != 0u)
+            return xst_dump_fail("an animated texture that held still was not dumped again");
     }
     gegpu_texdump_stop();
 

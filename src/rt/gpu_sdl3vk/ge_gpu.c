@@ -320,8 +320,11 @@ typedef struct {
      * a host-only image beside the guest-resolution one. NULL until a draw's rectangle is rebuilt. */
     struct GlSet *gl;
     /* The texture dump (gegpu_texdump_start): the dump stretch and the content this entry was last
-     * looked at in, so each content is written at most once a stretch. */
+     * looked at in, so each content is written at most once a stretch; dump_retry when it was
+     * skipped for a reason that ends (a movie at its address, its address changing every frame), so
+     * it is looked at again once that reason no longer holds. */
     uint64_t dump_serial, dump_hash;
+    uint8_t dump_retry;
 } TexEnt;
 
 typedef struct { PipeKey key; VkPipeline pipe; int used; } PipeEnt;
@@ -4614,13 +4617,16 @@ static void tex_repl_shutdown(void) {
  * SR_TEX_DUMP_MAX_FILES (1 to 1000000, default 20000) for its files; the first file that cannot
  * be written (a full disk included) stops it too. An address whose content is new in
  * TEX_DUMP_CHURN_RUN presents in a row (a gap of at most TEX_DUMP_CHURN_GAP presents between
- * them) is a movie or an animation drawn as a texture: it is no longer dumped in that stretch,
- * with one note, while every other address goes on. */
+ * them) is a movie or an animation drawn as a texture: it is no longer dumped, with one note,
+ * while every other address goes on, until its content has held still for TEX_DUMP_CHURN_QUIET
+ * presents (a font cache that has finished typing, a streaming slot that settled). A texture
+ * skipped as a movie picture or for its changing address is looked at again once that ends. */
 #define TEX_DUMP_DEFAULT_BUDGET_MB 4096u
 #define TEX_DUMP_DEFAULT_MAX_FILES 20000u
 #define TEX_DUMP_MAX_FILES_LIMIT 1000000u
 #define TEX_DUMP_CHURN_RUN 30u
 #define TEX_DUMP_CHURN_GAP 4u
+#define TEX_DUMP_CHURN_QUIET 300u
 #define TEX_DUMP_CHURN_SLOTS 256
 
 typedef enum {
@@ -4657,7 +4663,10 @@ typedef struct {
     TexDumpChurn churn[TEX_DUMP_CHURN_SLOTS];
 } TexDump;
 static TexDump s_dump;
-static uint32_t s_dumpscratch[512 * 512];
+/* The decoded level being written: 512x512 texels at most (the GE's largest texture), allocated
+ * when a dump first starts and freed at shutdown, so a run that never dumps holds none of it. */
+#define TEX_DUMP_SCRATCH_TEXELS (512u * 512u)
+static uint32_t *s_dumpscratch;
 
 static void tex_dump_line(const char *what) {
     fprintf(stderr, "TEX_DUMP: %s (written=%llu, already_there=%llu, skipped=%llu, changing=%llu, failed=%llu, "
@@ -4737,6 +4746,10 @@ int gegpu_texdump_start(const char *dir, char *err, size_t err_cap) {
         snprintf(err, err_cap, "SR_TEX_DUMP_MAX_FILES takes a whole number from 1 to 1000000");
         return 0;
     }
+    if (!s_dumpscratch && !(s_dumpscratch = (uint32_t *)malloc(sizeof(uint32_t) * TEX_DUMP_SCRATCH_TEXELS))) {
+        snprintf(err, err_cap, "no memory for the dump");
+        return 0;
+    }
     if (!nk_platform_mkdir_p(dir)) {
         snprintf(err, err_cap, "the dump folder could not be made");
         return 0;
@@ -4810,9 +4823,20 @@ int gegpu_texdump_row(void) {
     return s_dump.on ? 2 : 1;
 }
 
+/* Addresses cut off now: changing within the last TEX_DUMP_CHURN_QUIET presents. One that has held
+ * still since is not counted, whether or not the game has drawn it again. */
+static unsigned long long tex_dump_churn_live(void) {
+    unsigned long long n = 0;
+    for (int i = 0; i < TEX_DUMP_CHURN_SLOTS; i++) {
+        const TexDumpChurn *c = &s_dump.churn[i];
+        if (c->used && c->off && xs_now() - c->last <= TEX_DUMP_CHURN_QUIET) n++;
+    }
+    return n;
+}
+
 void gegpu_texdump_status(unsigned long long *saved, unsigned long long *changing, const char **stopped) {
     if (saved) *saved = s_dump.written;
-    if (changing) *changing = s_dump.on ? s_dump.churn_addrs : 0u;
+    if (changing) *changing = s_dump.on ? tex_dump_churn_live() : 0u;
     if (stopped) *stopped = s_dump.on && s_dump.stop ? s_dump_stop_why[s_dump.stop] : NULL;
 }
 
@@ -4826,11 +4850,23 @@ static int tex_dump_churn_victim(const TexDumpChurn *c, const TexDumpChurn *pick
     return c->last < pick->last;
 }
 
+/* Whether `addr` is no longer dumped: it was cut off, and its content was new within the last
+ * TEX_DUMP_CHURN_QUIET presents. Changes nothing. */
+static int tex_dump_churn_holds(uint32_t addr) {
+    for (int i = 0; i < TEX_DUMP_CHURN_SLOTS; i++) {
+        const TexDumpChurn *c = &s_dump.churn[i];
+        if (c->used && c->addr == addr) return c->off && xs_now() - c->last <= TEX_DUMP_CHURN_QUIET;
+    }
+    return 0;
+}
+
 /* Whether `addr`, about to get a file for content new to the folder, is a movie or an animation
  * drawn as a texture: its content has been new in TEX_DUMP_CHURN_RUN presents in a row. New
  * contents in one present count once, so an address the game streams many textures through in
  * one frame is dumped whole. Returns 1 (skip) from the present that makes the run, and from then
- * on in this stretch. The table holds the TEX_DUMP_CHURN_SLOTS addresses seen most recently. */
+ * on while its content keeps being new; once it has held still for TEX_DUMP_CHURN_QUIET presents
+ * the address is dumped again, its run starting over. The table holds the TEX_DUMP_CHURN_SLOTS
+ * addresses seen most recently. */
 static int tex_dump_churning(uint32_t addr) {
     const uint64_t now = xs_now();
     TexDumpChurn *slot = NULL, *pick = NULL;
@@ -4840,6 +4876,7 @@ static int tex_dump_churning(uint32_t addr) {
         if (tex_dump_churn_victim(c, pick)) pick = c;
     }
     if (!slot) {
+        if (pick->used && pick->off) s_dump.churn_addrs--;   /* a cut-off address gives way: no longer counted */
         memset(pick, 0, sizeof(*pick));
         pick->used = 1;
         pick->addr = addr;
@@ -4847,7 +4884,18 @@ static int tex_dump_churning(uint32_t addr) {
         pick->last = now;
         return 0;
     }
-    if (slot->off) return 1;
+    if (slot->off) {
+        if (now - slot->last <= TEX_DUMP_CHURN_QUIET) {
+            slot->last = now;   /* new content again: still cut off */
+            return 1;
+        }
+        slot->off = 0;
+        slot->run = 1u;
+        slot->last = now;
+        s_dump.churn_addrs--;
+        fprintf(stderr, "TEX_DUMP: note: the texture at 0x%08x has held still; it is dumped again\n", addr);
+        return 0;
+    }
     if (now == slot->last) return 0;
     slot->run = now - slot->last <= TEX_DUMP_CHURN_GAP ? slot->run + 1u : 1u;
     slot->last = now;
@@ -4855,25 +4903,39 @@ static int tex_dump_churning(uint32_t addr) {
     slot->off = 1;
     s_dump.churn_addrs++;
     fprintf(stderr, "TEX_DUMP: note: the texture at 0x%08x changes every frame (a movie or an animation); "
-            "it is no longer dumped until the dump is turned on again\n", addr);
+            "it is not dumped while it keeps changing\n", addr);
     return 1;
 }
 
 /* Entry `e` was just looked up and is about to be bound with the GE state it was looked up with:
  * write each of its `levels` levels that the folder does not hold yet. */
 static void tex_dump_note(TexEnt *e, uint32_t levels) {
-    if (!s_dump.on || (e->dump_serial == s_dump.serial && e->dump_hash == e->hash)) return;
+    if (!s_dump.on) return;
+    const int relook = e->dump_serial == s_dump.serial && e->dump_hash == e->hash;   /* counted once already */
+    if (relook) {
+        /* Looked at in this stretch. A skip for a reason that ends lasts only while it holds, so a
+         * texture the game loads where a movie played, or into a slot that has settled, is not
+         * lost for as long as the entry lives. */
+        if (!e->dump_retry || sr_video_frame_recent(e->addr, e->bytes) || tex_dump_churn_holds(e->addr)) return;
+    } else if (sr_video_frame_recent(e->addr, e->bytes)) {
+        /* A movie picture is a frame, not a texture the game loaded. */
+        e->dump_serial = s_dump.serial;
+        e->dump_hash = e->hash;
+        e->dump_retry = 1u;
+        s_dump.skipped++;
+        return;
+    }
     e->dump_serial = s_dump.serial;
     e->dump_hash = e->hash;
+    e->dump_retry = 0u;
     if (s_dump.stop) return;
     NkTexReplId id;
-    /* A render target read back (s_tex_noscale) or sampled in place, and a movie picture, are
-     * frames, not textures the game loaded. A zero hash is the name a pack gives every content at
-     * an address ("no data hash"); a file by that name would replace whatever the game puts
-     * there, so such a texture is skipped too. */
-    if (s_tex_noscale || tex_ent_over_target(e) || sr_video_frame_recent(e->addr, e->bytes) ||
-        !tex_repl_identify(s_dump.names, e, &id) || id.hash == 0u) {
-        s_dump.skipped++;
+    /* A render target read back (s_tex_noscale) or sampled in place is a frame, not a texture the
+     * game loaded. A zero hash is the name a pack gives every content at an address ("no data
+     * hash"); a file by that name would replace whatever the game puts there, so such a texture is
+     * skipped too. */
+    if (s_tex_noscale || tex_ent_over_target(e) || !tex_repl_identify(s_dump.names, e, &id) || id.hash == 0u) {
+        if (!relook) s_dump.skipped++;
         return;
     }
     const unsigned long long key = (unsigned long long)nk_texrepl_file_key(s_dump.names, &id);
@@ -4890,7 +4952,11 @@ static void tex_dump_note(TexEnt *e, uint32_t levels) {
         if (nk_platform_file_exists(path)) { s_dump.present++; continue; }
         if (!churn_checked) {
             churn_checked = 1;
-            if (tex_dump_churning(id.addr)) { s_dump.changing++; return; }
+            if (tex_dump_churning(id.addr)) {
+                e->dump_retry = 1u;   /* looked at again once the address holds still */
+                s_dump.changing++;
+                return;
+            }
         }
         if (s_dump.written >= s_dump.max_files) {
             tex_dump_halt(TEX_DUMP_STOP_COUNT);
@@ -4932,6 +4998,8 @@ static void tex_dump_shutdown(void) {
     gegpu_texdump_stop();
     if (s_dump.starts) tex_dump_line("exit");
     memset(&s_dump, 0, sizeof(s_dump));
+    free(s_dumpscratch);
+    s_dumpscratch = NULL;
 }
 
 /* Offer the content just decoded into s_texscratch (level 0 of entry `e`, hash `hash`) for
