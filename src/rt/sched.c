@@ -3149,6 +3149,15 @@ static void sched_idle_wait(void) {
     if (s_pace_on && soonest != (uint64_t)-1 && soonest > s_vtime_us &&
         soonest - s_vtime_us < vblank_due_us())
         { sleep_until_us(soonest); scheduler_progress_time(); }
+    else if (!s_pace_on && soonest != (uint64_t)-1 && soonest > s_vtime_us &&
+             soonest < s_vbl_next_us) {
+        /* A virtual clock with nothing to run goes to a deadline that comes before the next
+         * VBLANK, not a whole display period on (#1296): a 100 us wait for the UMD drive cost a
+         * period whenever its thread was the only one, so a load of a thousand reads took a
+         * thousand VBLANKs under the deterministic clock. No VBLANK comes due on the way, so
+         * there is nothing to latch. */
+        s_vtime_us = soonest;
+    }
     else {
         vblank_pace();
         scheduler_latch_due_events();
@@ -3466,6 +3475,136 @@ void sched_preempt_timer_start(void) {
     }
     SDL_DetachThread(thread);
     s_preempt_timer_mode = SCHED_PREEMPT_TIMER_THREAD;
+}
+
+/* ---- host work a guest thread waits for (#2361) ----------------------------------------
+ * Every guest thread runs on the scheduler's one host thread, so a host call that blocks
+ * there stops sound and picture together: a first read of a disc image on a USB hard disk
+ * held it 341 to 604 ms. One worker thread takes such a call instead. The guest thread that
+ * asked for it waits in the scheduler like any other waiter, and looks again each time its
+ * wait ends (the caller chooses how long: sched_delay_current), so the other threads run
+ * meanwhile, as they do on a PSP while a device transfers.
+ *
+ * Only a paced run uses it (sched_host_work_usable): there guest time is the host's already.
+ * Under the turbo and deterministic clocks the caller keeps its synchronous call, so guest
+ * time stays a function of the guest's work.
+ *
+ * One mutex guards the queue and every item's state. An item belongs to its submitter until
+ * it is finished (after done) or abandoned (the submitter's thread ended while it waited):
+ * an abandoned item is dropped by whoever comes last, the worker when it finishes the call or
+ * the abandoning thread when the call had already finished. run and drop are called with the
+ * mutex released; run never touches guest state, which only the scheduler's thread may. */
+struct SrHostWork {
+    SrHostWorkFn run, drop;
+    void *ctx;
+    int done, abandoned;
+    uint64_t host_ns;   /* how long run took */
+    struct SrHostWork *next;
+};
+static SDL_Mutex *s_host_work_mutex;
+static SDL_Condition *s_host_work_cond;
+static SrHostWork *s_host_work_head, *s_host_work_tail;
+static int s_host_work_state;   /* 0 not started, 1 running, -1 unavailable */
+#ifdef SR_HLE_THREAD_SELFTEST
+static int s_host_work_test_force;   /* a fixture on a virtual clock asks for the worker anyway */
+#endif
+
+static int SDLCALL sched_host_work_main(void *unused) {
+    (void)unused;
+    sr_perf_exclude_thread();   /* the perf counters are the scheduler thread's alone */
+    SDL_LockMutex(s_host_work_mutex);
+    for (;;) {
+        SrHostWork *w = s_host_work_head;
+        if (!w) {
+            SDL_WaitCondition(s_host_work_cond, s_host_work_mutex);
+            continue;
+        }
+        s_host_work_head = w->next;
+        if (!s_host_work_head) s_host_work_tail = NULL;
+        SDL_UnlockMutex(s_host_work_mutex);
+        const uint64_t from = SDL_GetTicksNS();
+        w->run(w->ctx);
+        const uint64_t host_ns = SDL_GetTicksNS() - from;
+        SDL_LockMutex(s_host_work_mutex);
+        w->host_ns = host_ns;
+        w->done = 1;
+        if (w->abandoned) {
+            SDL_UnlockMutex(s_host_work_mutex);
+            if (w->drop) w->drop(w->ctx);
+            free(w);
+            SDL_LockMutex(s_host_work_mutex);
+        }
+    }
+    return 0;
+}
+
+static int sched_host_work_start(void) {
+    if (s_host_work_state) return s_host_work_state > 0;
+    s_host_work_mutex = SDL_CreateMutex();
+    s_host_work_cond = SDL_CreateCondition();
+    SDL_Thread *thread = s_host_work_mutex && s_host_work_cond
+        ? SDL_CreateThread(sched_host_work_main, "nk-host-work", NULL) : NULL;
+    if (!thread) {
+        fprintf(stderr, "sched: host worker unavailable (no host thread); a blocking host read "
+                        "runs on the scheduler's thread, as before\n");
+        s_host_work_state = -1;
+        return 0;
+    }
+    SDL_DetachThread(thread);
+    s_host_work_state = 1;
+    return 1;
+}
+
+int sched_host_work_usable(void) {
+    pace_setup();
+    int wanted = s_pace_on > 0;
+#ifdef SR_HLE_THREAD_SELFTEST
+    if (s_host_work_test_force) wanted = 1;
+#endif
+    return wanted && sched_guest_thread_running() && sched_wait_permitted() &&
+           sched_host_work_start();
+}
+
+SrHostWork *sched_host_work_submit(SrHostWorkFn run, SrHostWorkFn drop, void *ctx) {
+    if (!run || !sched_host_work_start()) return NULL;
+    SrHostWork *w = (SrHostWork *)calloc(1, sizeof(*w));
+    if (!w) return NULL;
+    w->run = run;
+    w->drop = drop;
+    w->ctx = ctx;
+    SDL_LockMutex(s_host_work_mutex);
+    if (s_host_work_tail) s_host_work_tail->next = w;
+    else s_host_work_head = w;
+    s_host_work_tail = w;
+    SDL_SignalCondition(s_host_work_cond);
+    SDL_UnlockMutex(s_host_work_mutex);
+    return w;
+}
+
+int sched_host_work_done(SrHostWork *w) {
+    if (!w) return 1;
+    SDL_LockMutex(s_host_work_mutex);
+    const int done = w->done;
+    SDL_UnlockMutex(s_host_work_mutex);
+    return done;
+}
+
+uint64_t sched_host_work_finish(SrHostWork *w) {
+    if (!w) return 0u;
+    const uint64_t host_ns = w->host_ns;   /* done, and never abandoned: the worker no longer holds it */
+    free(w);
+    return host_ns;
+}
+
+void sched_host_work_abandon(SrHostWork *w) {
+    if (!w) return;
+    SDL_LockMutex(s_host_work_mutex);
+    const int done = w->done;
+    w->abandoned = 1;
+    SDL_UnlockMutex(s_host_work_mutex);
+    if (!done) return;   /* the worker drops it when the call returns */
+    if (w->drop) w->drop(w->ctx);
+    free(w);
 }
 
 void sr_yield(CpuState *s) {
