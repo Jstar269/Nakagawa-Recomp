@@ -164,6 +164,23 @@ void sdl3vk_set_ui_pass(void (*pass)(const Sdl3VkUiPass *frame));
  * motion; NULL removes it. */
 typedef void *(*Sdl3VkShowPass)(void *cmd, void *src, int *w, int *h);
 void sdl3vk_set_show_pass(Sdl3VkShowPass pass);
+/* How the present a show pass recorded into ended, told once per show pass before that present
+ * returns: `result` is what the present returns (1 shown, -1 failed), and `submission` is the
+ * serial of the queue submission that carries the pass's commands (sdl3vk_present_completed), or
+ * 0 when they were never submitted. A present can fail after its submission (an out-of-date
+ * swapchain), so a failed one may still have run its commands. NULL removes it. */
+typedef void (*Sdl3VkShowDone)(int result, uint64_t submission);
+void sdl3vk_set_show_done(Sdl3VkShowDone done);
+/* The present frame slots: a present records only once its slot's previous submission has
+ * finished, so at most this many present submissions are in flight. A failed present can leave
+ * its slot to the next one, so the slots are not always used in turn. */
+#define SDL3VK_PRESENT_FRAMES 3
+/* The newest present submission the presenter has seen finished (its fence signalled), counted
+ * from 1 in submission order; 0 before any. That submission and every present submission before
+ * it have finished on the GPU: they share one queue, and a fence signals only after every command
+ * submitted to that queue before it. So what a show pass left in a buffer of its own may be read
+ * once this has reached its submission's serial. */
+uint64_t sdl3vk_present_completed(void);
 /* Presents what the show pass returns for no source: no capture, no input latch. Returns as the
  * other presents do, and 0 with nothing to show or no pass. */
 int sdl3vk_present_held(void);
