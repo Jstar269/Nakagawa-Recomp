@@ -10510,7 +10510,9 @@ static int coherence_run_host_depth(void) {
         /* A z-fight whose outcome the key changes. Through mode cuts a vertex's z to a whole step
          * (ge.c), so fractions come only from interpolation. The near ramp climbs 8 steps a guest
          * pixel, which is a whole step at every device pixel centre at scales 1, 2 and 4; the far ramp
-         * starts a step behind it and closes to it across the strip. At 16 bits the far surface passes
+         * starts a step behind it and closes to a ninth of a step at the strip's end (it runs on to x 160,
+         * past the near one, where it fails against the seed), so with depth=32 it fails by a clear
+         * margin, not a few float ulps. At 16 bits the far surface passes
          * GEQUAL only where it rounds to the near one's step, and then writes that same step; with
          * depth=32 it fails everywhere and the near step stays. Either way each pixel stores the near
          * step, which a D16 attachment holds exactly, so no stored value lies near a half step (where a
@@ -10518,7 +10520,7 @@ static int coherence_run_host_depth(void) {
          * The steep quad's depth is whole at every device pixel centre too. */
         const HdQuad q[3] = {
             { HD_NEAR, 16.0f, 144.0f, 16.0f, 48.0f, 1000.0f, 2024.0f, 1u, 1u },
-            { HD_FAR, 16.0f, 144.0f, 16.0f, 48.0f, 999.0f, 2024.0f, 7u, 1u },
+            { HD_FAR, 16.0f, 160.0f, 16.0f, 48.0f, 999.0f, 2152.0f, 7u, 1u },
             { HD_NEAR, 160.0f, 400.0f, 100.0f, 260.0f, 60000.0f, 56160.0f, 1u, 1u },
         };
         ok = hd_reset(0x1234u) && hd_draw(q, 3);

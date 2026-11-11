@@ -1229,10 +1229,11 @@ section 11.3.12 is its entry and says what the guest can observe; this section s
   - A surface with depth writes on, drawn with LEQUAL or GEQUAL on the plane of another from other vertices, is
     decided by float rounding pixel by pixel where the PSP passes every pixel, so it can speckle. That, and the EQUAL
     case above, are why the feature is off by default.
-  - Through-mode draws (2D overlays and their lines) carry whole-step depths, while a 3D surface stores its depth
-    with its fraction. An overlay at the step such a surface rounds to, drawn with LEQUAL or GEQUAL, meets the
-    cases above at each pixel: it fails where it lies on the losing side of the stored value by more than the lean
-    (up to half a step), or by any amount when it writes depth, where the PSP passes it.
+  - Through-mode draws (2D overlays) and every line, 3D lines included, carry whole-step depths (a line's depth is
+    cut to its step), while a 3D surface stores its depth with its fraction. Such a draw at the step a surface
+    rounds to, with LEQUAL or GEQUAL, meets the cases above at each pixel: it fails where it lies on the losing side
+    of the stored value by more than the lean, or by any amount when it writes depth, where the PSP passes it. A
+    cut line can lie almost a whole step from the surface it was drawn on, so lines show this most.
 
   ALWAYS, NEVER and clear mode are unchanged, and so is the minz/maxz range test, which rounds the fragment's depth
   to a step in `psp.frag`, except that on a draw with the lean a device may give the shader the leaned depth, which
