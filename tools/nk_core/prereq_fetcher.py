@@ -790,7 +790,7 @@ def _ready_artifacts(manifest: dict) -> list[dict]:
 def _check_artifact_sources(item: dict, by_id: dict[str, dict]) -> set[str]:
     """Check one artifact's source references; return the source ids it names."""
     source_id = item.get("source")
-    source = by_id.get(source_id) if isinstance(source_id, str) else None
+    source = None if source_id is None else by_id.get(source_id)
     if source is None:
         raise PrerequisiteFetchError(f"SOURCE_UNPINNED: {item.get('id')} names no pinned source.")
     if source["version"] != item.get("version"):
