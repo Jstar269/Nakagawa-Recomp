@@ -2440,6 +2440,7 @@ class TestEnhancementBuildPackageWiring(unittest.TestCase):
             enhancement_package=package,
             experimental_60hz=experimental_60hz,
             environment={} if environment is None else environment,
+            shipped_enhancements=self.root / "shipped",
         )
 
     def test_no_package_builds_the_authentic_directory(self) -> None:
@@ -2546,6 +2547,53 @@ class TestEnhancementBuildPackageWiring(unittest.TestCase):
         # The disc is named before the title: another region's disc is other_disc, not a title mismatch.
         with self.assertRaisesRegex(self.nk_cli.PackageBuildError, r"refused \(other_disc\)"):
             self._select_published("ULES99999", "1.01", target_title_id="other-title")
+
+    def _select_shipped(self) -> Any:
+        return self.nk_cli._select_enhancement_package(
+            self.root, self.DISC, title_id=self.TITLE, executable_sha256=self.EXE_SHA,
+            enhancement_package=None, experimental_60hz=True, environment={},
+            sfo_disc_id=self.DISC, disc_version="1.01", shipped_enhancements=self.root / "shipped")
+
+    def test_experimental_60hz_falls_back_to_the_shipped_published_package(self) -> None:
+        shipped = self.root / "shipped" / f"{self.DISC.lower()}-60hz.json"
+        shipped.parent.mkdir(parents=True)
+        shipped.write_text(json.dumps(self._published()), encoding="utf-8")
+        selected, target = self._select_shipped()
+        self.assertEqual(selected, shipped.resolve())
+        self.assertEqual(target.name, f"{self.DISC}-enhanced-synth.timing.60hz")
+        # The user's own package comes first.
+        own = self._write_pkg(f"enhancements/{self.DISC.lower()}-60hz.json")
+        self.assertEqual(self._select_shipped()[0], own.resolve())
+
+    def test_an_unusable_own_package_is_not_replaced_by_the_shipped_one(self) -> None:
+        shipped = self.root / "shipped" / f"{self.DISC.lower()}-60hz.json"
+        shipped.parent.mkdir(parents=True)
+        shipped.write_text(json.dumps(self._published()), encoding="utf-8")
+        own = self._write_pkg(f"enhancements/{self.DISC.lower()}-60hz.json")
+        own.write_text("{ not json", encoding="utf-8")
+        with self.assertRaises((self.nk_cli.PackageBuildError, enhancement_package.EnhancementPackageError)):
+            self._select_shipped()
+
+    def test_no_package_in_either_place_names_both(self) -> None:
+        with self.assertRaisesRegex(self.nk_cli.PackageBuildError, "or a published one at") as ctx:
+            self._select_shipped()
+        self.assertIn(str(self.root / "shipped"), str(ctx.exception))
+
+    def test_a_shipped_package_must_be_published(self) -> None:
+        shipped = self.root / "shipped" / f"{self.DISC.lower()}-60hz.json"
+        shipped.parent.mkdir(parents=True)
+        shipped.write_text(json.dumps(self.pkg), encoding="utf-8")
+        with self.assertRaisesRegex(self.nk_cli.PackageBuildError, "not in the published form"):
+            self._select_shipped()
+
+    def test_every_shipped_package_is_found_for_its_own_disc(self) -> None:
+        shipped = sorted(self.nk_cli.SHIPPED_ENHANCEMENTS.glob("*-60hz.json"))
+        self.assertTrue(shipped)
+        for path in shipped:
+            with self.subTest(path.name):
+                package = enhancement_package.load_and_validate_package(path)
+                self.assertTrue(enhancement_package.is_published_package(package))
+                self.assertEqual(path.name, f"{package['disc_id'].lower()}-60hz.json")
 
     def test_published_package_needs_the_disc_identity(self) -> None:
         for sfo_disc_id, disc_version in ((None, "1.01"), (self.DISC, None), ("", "")):
