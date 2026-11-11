@@ -270,6 +270,7 @@ extern void sr_hle_test_audio_wait_reset(void);
 extern void sr_hle_test_audio_wait_hook(void (*hook)(uint32_t us));
 extern uint64_t sr_hle_test_audio_wait_total_us(void);
 extern void sr_hle_test_audio_lead_reset(void);
+extern uint32_t sr_hle_test_audio_late_wake_us(void);
 extern void sr_hle_test_audio_lead_feed(uint32_t vbl, int ch, int queued);
 extern unsigned long sr_hle_test_audio_lead_window(int *peak, uint32_t *peak_ch,
                                                    unsigned long *noqueue, long *last_ms);
@@ -530,9 +531,35 @@ static int s_cap_pending;      /* armed and not yet resolved by the present path
  * arms without the report path writing legacy snapshot files. */
 static int s_cap_arm_accept = 1;
 
+/* A host output device for the pacing regressions (test_audio_host_hold_*). While it is on
+ * (s_audio_sim_pull > 0) every channel has its own queue: pushes fill it, and the time the guest
+ * waits is device time, in which the device takes s_audio_sim_pull frames from each channel that
+ * has been pushed, every that many frames of time. A pull that finds fewer takes what is there
+ * and counts as a dropout; one that finds nothing leaves the channel played dry, as the SDL
+ * backend reports it. Off by default: the stubs then report s_audio_queue_result as before and no
+ * device block size. */
+static int s_audio_sim_pull;
+static int s_audio_sim_reported_pull = -1;    /* what the device is said to take; -1: what it takes */
+static int s_audio_sim_q[9];
+static int s_audio_sim_pushed[9];
+static int s_audio_sim_dry[9];                /* sr_audio_played_dry's answer, device or not */
+static unsigned long s_audio_sim_short[9];
+static uint64_t s_audio_sim_us, s_audio_sim_next_pull_us;
+static unsigned long s_audio_sim_pulls;
+static uint64_t s_audio_sim_pushed_frames;
+static uint32_t s_audio_sim_late_us;          /* every guest wait ends this much late */
+static unsigned long s_audio_silence_calls;   /* sr_audio_push_silence, device or not */
+static uint64_t s_audio_silence_frames;
+
 void sr_audio_push(int ch, const int16_t *lr, int nframes, int volL, int volR) {
     (void)ch;
     s_audio_push_calls++;
+    if (s_audio_sim_pull > 0 && nframes > 0 && ch >= 0 && ch < 9) {
+        s_audio_sim_q[ch] += nframes;
+        s_audio_sim_pushed[ch] = 1;
+        s_audio_sim_dry[ch] = 0;
+        s_audio_sim_pushed_frames += (uint64_t)nframes;
+    }
     s_audio_push_frames = nframes;
     s_audio_push_vol_l = volL;
     s_audio_push_vol_r = volR;
@@ -547,8 +574,48 @@ void sr_audio_push(int ch, const int16_t *lr, int nframes, int volL, int volR) {
     }
 }
 
+void sr_audio_push_silence(int ch, int nframes) {
+    s_audio_silence_calls++;
+    if (nframes <= 0 || ch < 0 || ch >= 9) return;
+    s_audio_silence_frames += (uint64_t)nframes;
+    if (s_audio_sim_pull > 0) {
+        s_audio_sim_q[ch] += nframes;
+        s_audio_sim_pushed[ch] = 1;
+        s_audio_sim_dry[ch] = 0;
+    }
+}
+
+int sr_audio_played_dry(int ch) {
+    return ch >= 0 && ch < 9 && s_audio_sim_dry[ch] && (s_audio_sim_pull <= 0 || s_audio_sim_q[ch] == 0);
+}
+
+static void audio_sim_advance(uint32_t us) {
+    s_audio_sim_us += (uint64_t)us + s_audio_sim_late_us;
+    while (s_audio_sim_pull > 0 && s_audio_sim_us >= s_audio_sim_next_pull_us) {
+        s_audio_sim_pulls++;
+        for (int ch = 0; ch < 9; ch++) {
+            if (!s_audio_sim_pushed[ch]) continue;
+            if (s_audio_sim_q[ch] < s_audio_sim_pull) {
+                s_audio_sim_short[ch]++;
+                if (s_audio_sim_q[ch] == 0) s_audio_sim_dry[ch] = 1;   /* a pull that got nothing */
+                s_audio_sim_q[ch] = 0;
+            } else {
+                s_audio_sim_q[ch] -= s_audio_sim_pull;
+            }
+        }
+        s_audio_sim_next_pull_us += (uint64_t)s_audio_sim_pull * 1000000u / 44100u;
+    }
+}
+
+int sr_audio_host_pull_frames(void) {
+    return s_audio_sim_reported_pull >= 0 ? s_audio_sim_reported_pull : s_audio_sim_pull;
+}
+
 int sr_audio_queued(int ch) {
-    (void)ch;
+    if (s_audio_sim_pull > 0 && ch >= 0 && ch < 9) {
+        s_audio_queue_calls++;
+        return s_audio_sim_q[ch];
+    }
     if (s_audio_queue_seq_len > 0) {
         int i = (int)s_audio_queue_calls;
         if (i >= s_audio_queue_seq_len) i = s_audio_queue_seq_len - 1;
@@ -573,6 +640,18 @@ static void audio_fixture_reset(void) {
     s_audio_push_capture_frames = 0;
     s_audio_queue_result = 0;
     s_audio_queue_seq_len = 0;
+    s_audio_sim_pull = 0;
+    s_audio_sim_reported_pull = -1;
+    memset(s_audio_sim_q, 0, sizeof(s_audio_sim_q));
+    memset(s_audio_sim_pushed, 0, sizeof(s_audio_sim_pushed));
+    memset(s_audio_sim_dry, 0, sizeof(s_audio_sim_dry));
+    memset(s_audio_sim_short, 0, sizeof(s_audio_sim_short));
+    s_audio_sim_us = s_audio_sim_next_pull_us = 0u;
+    s_audio_sim_pulls = 0u;
+    s_audio_sim_pushed_frames = 0u;
+    s_audio_sim_late_us = 0u;
+    s_audio_silence_calls = 0u;
+    s_audio_silence_frames = 0u;
 }
 
 static int s_test_gui_on;
@@ -596,10 +675,15 @@ uint32_t gui_pad_pulses_take(void) {
     s_osk_test_pulse = 0u;
     return pulse;
 }
+/* The window's stick and the input profile's dead zone: at rest and 0, except where the stick
+ * remap test moves them. */
+static uint8_t s_test_gui_lx = 128u, s_test_gui_ly = 128u;
+static int s_test_gui_stick_dead_zone;
 void gui_analog(uint8_t *lx, uint8_t *ly) {
-    if (lx) *lx = 128;
-    if (ly) *ly = 128;
+    if (lx) *lx = s_test_gui_lx;
+    if (ly) *ly = s_test_gui_ly;
 }
+int gui_stick_dead_zone(void) { return s_test_gui_stick_dead_zone; }
 int gui_pad_present(void) { return 0; }
 void gui_ace_vblank(uint32_t vcount) { (void)vcount; }
 int gui_present(uint32_t fbaddr, int fmt, uint32_t stride) {
@@ -10398,12 +10482,17 @@ static uint32_t sdt_list_load(uint32_t focus, const char *save, const char *cons
     return sr_savedata_execute(SDT_PARAM);
 }
 
-/* One save NKLIST<save>/DATA.BIN holding `data`, its directory dated `when`. */
+static int sdt_plant_sfo(const char *root, const char *leaf, uint8_t crypt_mode);
+
+/* One whole save NKLIST<save>: an unencrypted PARAM.SFO and DATA.BIN holding `data`, dated
+ * `when` (a save's time is its PARAM.SFO's). */
 static int sdt_plant_list(const char *root, const char *save, const char *data, time_t when) {
-    char leaf[64], dir[512];
+    char leaf[64], dir[512], sfo[600];
     snprintf(leaf, sizeof(leaf), "NKLIST%s", save);
     snprintf(dir, sizeof(dir), "%s/PSP/SAVEDATA/%s", root, leaf);
-    return sdt_plant(root, leaf, "DATA.BIN", data) && sdt_set_times(dir, when, when);
+    snprintf(sfo, sizeof(sfo), "%s/PARAM.SFO", dir);
+    return sdt_plant_sfo(root, leaf, 0u) && sdt_plant(root, leaf, "DATA.BIN", data) &&
+           sdt_set_times(sfo, when, when) && sdt_set_times(dir, when, when);
 }
 
 static void test_savedata_list_selection(void) {
@@ -10713,6 +10802,313 @@ static void test_savedata_encrypted_save_refused(void) {
                "an ERASE in a save with an unreadable PARAM.SFO is refused");
     }
     (void)dir;
+    sdt_root_end(root, old);
+}
+
+/* FILES of <game><save> with room for four rows in each list, the system list at SDT_FILES; the
+ * three result counts preset to 0x7f so a written zero shows. */
+static uint32_t sdt_files(const char *game, const char *save) {
+    sdt_param(12u /* FILES */, game, save, "");
+    memset(g_mem_base + SDT_FILES, 0, 80u * 4u);
+    memset(g_mem_base + SDT_FILELIST, 0, 36u);
+    MEM_W32(SDT_FILELIST + 0u, 4u);              /* maxSecure */
+    MEM_W32(SDT_FILELIST + 4u, 4u);              /* maxNormal */
+    MEM_W32(SDT_FILELIST + 8u, 4u);              /* maxSystem */
+    MEM_W32(SDT_FILELIST + 12u, 0x7fu);
+    MEM_W32(SDT_FILELIST + 16u, 0x7fu);
+    MEM_W32(SDT_FILELIST + 20u, 0x7fu);
+    MEM_W32(SDT_FILELIST + 32u, SDT_FILES);      /* system entries */
+    MEM_W32(SDT_PARAM + 0x5f8u, SDT_FILELIST);
+    return sr_savedata_execute(SDT_PARAM);
+}
+
+static int sdt_files_counts_are(uint32_t v) {
+    return MEM_R32(SDT_FILELIST + 12u) == v && MEM_R32(SDT_FILELIST + 16u) == v &&
+           MEM_R32(SDT_FILELIST + 20u) == v;
+}
+
+/* Everything sdt_files preset is still there: the counts, the three list pointers (secure and
+ * normal 0, system SDT_FILES) and the zeroed entries. */
+static int sdt_files_untouched(void) {
+    if (!sdt_files_counts_are(0x7fu) || MEM_R32(SDT_FILELIST + 24u) != 0u ||
+        MEM_R32(SDT_FILELIST + 28u) != 0u || MEM_R32(SDT_FILELIST + 32u) != SDT_FILES)
+        return 0;
+    for (uint32_t i = 0; i < 80u * 4u; i++)
+        if (MEM_R8(SDT_FILES + i) != 0u) return 0;
+    return 1;
+}
+
+/* One mode against <game><save> with fileName DATA.BIN, the data buffer preset to 0xee and
+ * dataSize preset to 0x40, so a write to either shows. */
+static uint32_t sdt_run(uint32_t mode, const char *game, const char *save) {
+    sdt_param(mode, game, save, "DATA.BIN");
+    memset(g_mem_base + SDT_BUF, 0xee, 0x100u);
+    MEM_W32(SDT_PARAM + 0x7cu, 0x40u);
+    return sr_savedata_execute(SDT_PARAM);
+}
+
+/* LISTLOAD of NKLIST<save>, the only listed save, with focus FIRSTLIST. */
+static uint32_t sdt_run_listload(const char *save) {
+    const char *const names[] = { save, NULL };
+    sdt_list(4u /* LISTLOAD */, 1u /* FIRSTLIST */, "", names);
+    memset(g_mem_base + SDT_BUF, 0xee, 0x100u);
+    MEM_W32(SDT_PARAM + 0x7cu, 0x40u);
+    return sr_savedata_execute(SDT_PARAM);
+}
+
+/* A dangling link at `path` (a junction on Windows, a symlink on POSIX) to NKMISSINGTARGET in the
+ * same directory, which does not exist. Returns 0 when this host cannot make one. */
+static int sdt_dangling_link(const char *path) {
+#ifdef _WIN32
+    char link[600], target[640], cmd[1400];
+    snprintf(link, sizeof(link), "%s", path);
+    snprintf(target, sizeof(target), "%s", path);
+    char *slash = strrchr(target, '/');
+    if (!slash) return 0;
+    snprintf(slash + 1, sizeof(target) - (size_t)(slash + 1 - target), "NKMISSINGTARGET");
+    for (char *p = link; *p; p++) if (*p == '/') *p = '\\';
+    for (char *p = target; *p; p++) if (*p == '/') *p = '\\';
+    snprintf(cmd, sizeof(cmd), "cmd /c mklink /J \"%s\" \"%s\" >nul 2>&1", link, target);
+    return system(cmd) == 0 && !nk_platform_path_missing(path);
+#else
+    return symlink("NKMISSINGTARGET", path) == 0;
+#endif
+}
+
+static void sdt_unlink_link(const char *path) {
+#ifdef _WIN32
+    rmdir(path);
+#else
+    unlink(path);
+#endif
+}
+
+/* A Memory Stick with no save yet, a save directory without its PARAM.SFO, one with only its
+ * PARAM.SFO, and a whole save. The results are the ones pspautotests records from a PSP
+ * (tests/utility/savedata at 26a3dd01: deletedata, deletebroken, loadbroken, loaddata) and the
+ * ones PSP-HLE-SAVEDATA-NODATA-001 shows (docs/HARDWARE_ORACLE.md: CAPTURED once on a PSP-3000,
+ * marked NODATA-001 below), except those marked UNMEASURED, which no recording covers and which
+ * follow the runtime's own codes.
+ * Valkyria Chronicles II checks its save with FILES at boot and read the old LOAD-family answer
+ * as a damaged save. */
+static void test_savedata_empty_stick_and_broken_saves(void) {
+    static const char root[] = HLE_BUILD_ROOT "/hle_savedata_nodata";
+    char *old = sdt_root_begin(root);
+    char path[600], dir[512], text[64];
+    sr_hle_init();
+    sr_hle_test_register_iofilemgr();
+
+    /* No save directory: first a stick with no PSP/SAVEDATA at all, then one with an empty
+     * PSP/SAVEDATA. dataSize is not touched when the directory does not exist. */
+    for (int pass = 0; pass < 2; pass++) {
+        if (pass == 1) {
+            snprintf(dir, sizeof(dir), "%s/PSP/SAVEDATA", root);
+            nk_platform_mkdir_p(dir);
+        }
+        snprintf(dir, sizeof(dir), "%s/PSP/SAVEDATA/NKEMPTYSLOT", root);
+        expect(sdt_files("NKEMPTY", "SLOT") == 0x80110327u && sdt_files_untouched(),
+               "FILES of a save that does not exist is RW_NO_DATA (PSP: deletedata) and leaves "
+               "the counts, the list pointers and the entries as they were (NODATA-001)");
+        static const uint32_t load_modes[] = { 2u /* LOAD */, 0u /* AUTOLOAD */ };
+        for (size_t i = 0; i < 2; i++)
+            expect(sdt_run(load_modes[i], "NKEMPTY", "SLOT") == 0x80110307u &&
+                       MEM_R8(SDT_BUF) == 0xeeu && MEM_R32(SDT_PARAM + 0x7cu) == 0x40u,
+                   "LOAD and AUTOLOAD of a save that does not exist are LOAD_NO_DATA and write "
+                   "nothing (PSP: loaddata; NODATA-001 for AUTOLOAD)");
+        expect(sdt_run_listload("EMPTY") != 0u && MEM_R8(SDT_BUF) == 0xeeu,
+               "LISTLOAD of a listed save that does not exist fails and writes nothing");
+        static const uint32_t rd_modes[] = { 16u /* READDATA */, 15u /* READDATASECURE */ };
+        for (size_t i = 0; i < 2; i++)
+            expect(sdt_run(rd_modes[i], "NKEMPTY", "SLOT") == 0x80110327u &&
+                       MEM_R8(SDT_BUF) == 0xeeu && MEM_R32(SDT_PARAM + 0x7cu) == 0x40u,
+                   "READDATA and READDATASECURE of a save that does not exist are RW_NO_DATA and "
+                   "write nothing (PSP: loaddata, NODATA-001)");
+        expect(sdt_run(9u /* AUTODELETE */, "NKEMPTY", "SLOT") == 0x80110347u,
+               "AUTODELETE of a save that does not exist is DELETE_NO_DATA (NODATA-001)");
+        expect(sdt_run(10u /* DELETE */, "NKEMPTY", "SLOT") == 0x80110347u,
+               "DELETE of a save that does not exist is DELETE_NO_DATA, not an access error "
+               "(UNMEASURED value, as AUTODELETE)");
+        expect(sdt_run(21u /* DELETEDATA */, "NKEMPTY", "SLOT") == 0x80110327u,
+               "DELETEDATA of a save that does not exist is RW_NO_DATA (NODATA-001)");
+        static const uint32_t erase_modes[] = { 20u /* ERASE */, 19u /* ERASESECURE */ };
+        for (size_t i = 0; i < 2; i++)
+            expect(sdt_run(erase_modes[i], "NKEMPTY", "SLOT") == 0x80110327u,
+                   "ERASE and ERASESECURE in a save that does not exist are RW_NO_DATA "
+                   "(NODATA-001)");
+        expect(!nk_platform_dir_exists(dir), "no read or delete of a missing save creates it");
+    }
+
+    /* A save directory with its data file and no PARAM.SFO (PSP: broken 2), and an empty one
+     * (broken 3). Each DELETE-family mode deletes it (PSP: result 0), so it is planted again
+     * before each. */
+    for (int empty = 0; empty < 2; empty++) {
+        const char *save = empty ? "HOLLOW" : "NOSFO";
+        char leaf[32];
+        snprintf(leaf, sizeof(leaf), "NKBROKEN%s", save);
+        snprintf(dir, sizeof(dir), "%s/PSP/SAVEDATA/%s", root, leaf);
+        snprintf(path, sizeof(path), "%s/DATA.BIN", dir);
+        static const uint32_t del_modes[] = { 10u /* DELETE */, 9u /* AUTODELETE */,
+                                              21u /* DELETEDATA */ };
+        for (size_t m = 0; m < 3; m++) {
+            if (empty) nk_platform_mkdir_p(dir);
+            else expect(sdt_plant(root, leaf, "DATA.BIN", "ORPHAN"), "a save without PARAM.SFO is planted");
+            if (m == 0) {
+                expect(sdt_files("NKBROKEN", save) == 0x80110326u && sdt_files_counts_are(0x7fu),
+                       "FILES of a save without PARAM.SFO is RW_DATA_BROKEN and leaves the "
+                       "counts as they were (PSP: deletebroken, loadbroken)");
+                static const uint32_t load_modes[] = { 2u /* LOAD */, 0u /* AUTOLOAD */ };
+                for (size_t i = 0; i < 2; i++)
+                    expect(sdt_run(load_modes[i], "NKBROKEN", save) == 0x80110306u &&
+                               MEM_R8(SDT_BUF) == 0xeeu && MEM_R32(SDT_PARAM + 0x7cu) == 0x40u,
+                           "LOAD and AUTOLOAD of a save without PARAM.SFO are LOAD_DATA_BROKEN "
+                           "(PSP: loadbroken) and leave the buffer and dataSize as they were "
+                           "(NODATA-001 for AUTOLOAD)");
+                static const uint32_t rd_modes[] = { 16u /* READDATA */, 15u /* READDATASECURE */ };
+                for (size_t i = 0; i < 2; i++)
+                    expect(sdt_run(rd_modes[i], "NKBROKEN", save) == 0x80110326u &&
+                               MEM_R8(SDT_BUF) == 0xeeu && MEM_R32(SDT_PARAM + 0x7cu) == 0x40u,
+                           "READDATA and READDATASECURE of a save without PARAM.SFO are "
+                           "RW_DATA_BROKEN (PSP: loadbroken) and leave the buffer and dataSize as "
+                           "they were (NODATA-001)");
+                static const uint32_t erase_modes[] = { 20u /* ERASE */, 19u /* ERASESECURE */ };
+                for (size_t i = 0; i < 2; i++)
+                    expect(sdt_run(erase_modes[i], "NKBROKEN", save) == 0x80110326u &&
+                               (empty || nk_platform_file_exists(path)),
+                           "ERASE and ERASESECURE in a save without PARAM.SFO are RW_DATA_BROKEN "
+                           "(PSP: deletebroken) and erase nothing");
+            }
+            expect(sdt_run(del_modes[m], "NKBROKEN", save) == 0u && !nk_platform_dir_exists(dir),
+                   "DELETE, AUTODELETE and DELETEDATA of a save without PARAM.SFO succeed "
+                   "(PSP: deletebroken, result 0) and remove it");
+        }
+    }
+
+    /* LISTLOAD selects a listed save without PARAM.SFO and reports it damaged (PSP: loadbroken
+     * covers LISTLOAD). */
+    expect(sdt_plant(root, "NKLISTBROKE", "DATA.BIN", "ORPHAN"), "a listed save without PARAM.SFO is planted");
+    expect(sdt_run_listload("BROKE") == 0x80110306u && MEM_R8(SDT_BUF) == 0xeeu,
+           "LISTLOAD of a save without PARAM.SFO is LOAD_DATA_BROKEN and reads nothing "
+           "(PSP: loadbroken)");
+
+    /* PARAM.SFO and no data file (PSP: broken 1). */
+    expect(sdt_plant_sfo(root, "NKNODATASLOT", 0u), "a save with only PARAM.SFO is planted");
+    expect(sdt_files("NKNODATA", "SLOT") == 0u && MEM_R32(SDT_FILELIST + 20u) == 1u,
+           "FILES of a save with PARAM.SFO lists it in the system list (PSP: deletebroken)");
+    {
+        static const uint32_t load_modes[] = { 2u /* LOAD */, 0u /* AUTOLOAD */ };
+        for (size_t i = 0; i < 2; i++)
+            expect(sdt_run(load_modes[i], "NKNODATA", "SLOT") == 0x80110309u,
+                   "LOAD and AUTOLOAD of a missing data file are LOAD_FILE_NOT_FOUND (PSP: loadbroken)");
+        static const uint32_t rd_modes[] = { 16u /* READDATA */, 15u /* READDATASECURE */ };
+        for (size_t i = 0; i < 2; i++)
+            expect(sdt_run(rd_modes[i], "NKNODATA", "SLOT") == 0x80110329u,
+                   "READDATA and READDATASECURE of a missing data file are RW_FILE_NOT_FOUND "
+                   "(PSP: loadbroken)");
+        static const uint32_t erase_modes[] = { 20u /* ERASE */, 19u /* ERASESECURE */ };
+        for (size_t i = 0; i < 2; i++)
+            expect(sdt_run(erase_modes[i], "NKNODATA", "SLOT") == 0x80110329u,
+                   "ERASE and ERASESECURE of a missing data file are RW_FILE_NOT_FOUND "
+                   "(PSP: deletebroken)");
+    }
+
+    /* A whole save: it loads, its data file is erased, each DELETE-family mode deletes it, and
+     * FILES then finds no save (PSP: deletedata). */
+    snprintf(dir, sizeof(dir), "%s/PSP/SAVEDATA/NKWHOLESLOT", root);
+    snprintf(path, sizeof(path), "%s/DATA.BIN", dir);
+    {
+        static const uint32_t erase_modes[] = { 20u /* ERASE */, 19u /* ERASESECURE */ };
+        for (size_t i = 0; i < 2; i++) {
+            expect(sdt_plant_sfo(root, "NKWHOLESLOT", 0u) && sdt_plant(root, "NKWHOLESLOT", "DATA.BIN", "WHOLE"),
+                   "a whole save is planted");
+            expect(sdt_run(erase_modes[i], "NKWHOLE", "SLOT") == 0u && !nk_platform_file_exists(path) &&
+                       nk_platform_dir_exists(dir),
+                   "ERASE and ERASESECURE of a whole save's data file remove that file only");
+        }
+        static const uint32_t del_modes[] = { 10u /* DELETE */, 9u /* AUTODELETE */,
+                                              21u /* DELETEDATA */ };
+        for (size_t i = 0; i < 3; i++) {
+            expect(sdt_plant_sfo(root, "NKWHOLESLOT", 0u) && sdt_plant(root, "NKWHOLESLOT", "DATA.BIN", "WHOLE"),
+                   "a whole save is planted");
+            if (i == 0) {
+                expect(sdt_files("NKWHOLE", "SLOT") == 0u, "FILES of a whole save succeeds");
+                expect(sdt_run(2u /* LOAD */, "NKWHOLE", "SLOT") == 0u &&
+                           !memcmp(g_mem_base + SDT_BUF, "WHOLE", 5u) &&
+                           MEM_R32(SDT_PARAM + 0x7cu) == 5u,
+                       "LOAD of a whole save reads its data");
+            }
+            expect(sdt_run(del_modes[i], "NKWHOLE", "SLOT") == 0u && !nk_platform_dir_exists(dir),
+                   "DELETE, AUTODELETE and DELETEDATA of a whole save succeed and remove it");
+            expect(sdt_files("NKWHOLE", "SLOT") == 0x80110327u && sdt_files_untouched(),
+                   "FILES after the delete is RW_NO_DATA (PSP: deletedata) and leaves the counts, "
+                   "the list pointers and the entries (NODATA-001)");
+        }
+    }
+
+    /* Something at the save's name that is not known to be a directory is never "no save": a
+     * file, a dangling link and an unreadable directory are refused by every mode that could
+     * remove or replace data, and nothing there is removed or followed. */
+    {
+        snprintf(dir, sizeof(dir), "%s/PSP/SAVEDATA", root);
+        nk_platform_mkdir_p(dir);
+        snprintf(path, sizeof(path), "%s/PSP/SAVEDATA/NKFILESLOT", root);
+        expect(sdt_write(path, "NOT-A-DIR", 9u), "a file at a save's name is planted");
+        expect(sdt_run(10u /* DELETE */, "NKFILE", "SLOT") == 0x80110345u &&
+                   sdt_run(9u /* AUTODELETE */, "NKFILE", "SLOT") == 0x80110345u &&
+                   sdt_run(21u /* DELETEDATA */, "NKFILE", "SLOT") == 0x80110321u &&
+                   sdt_run(20u /* ERASE */, "NKFILE", "SLOT") == 0x80110321u &&
+                   sdt_files("NKFILE", "SLOT") == 0x80110305u,
+               "a file at a save's name is an access error for DELETE, ERASE and FILES, not no data");
+        sdt_param(3u /* SAVE */, "NKFILE", "SLOT", "DATA.BIN");
+        fd_guest_copy(SDT_BUF, "OVER", 4u);
+        MEM_W32(SDT_PARAM + 0x7cu, 4u);
+        expect(sr_savedata_execute(SDT_PARAM) != 0u && sdt_read(path, text, sizeof(text)) &&
+                   !strcmp(text, "NOT-A-DIR"),
+               "a SAVE onto a file at a save's name is refused and leaves the file as it is");
+        expect(sdt_read(path, text, sizeof(text)) && !strcmp(text, "NOT-A-DIR"),
+               "the file at a save's name is still there after every refusal");
+
+        snprintf(path, sizeof(path), "%s/PSP/SAVEDATA/NKLINKSLOT", root);
+        if (sdt_dangling_link(path)) {
+            expect(sdt_run(10u /* DELETE */, "NKLINK", "SLOT") == 0x80110345u &&
+                       sdt_run(21u /* DELETEDATA */, "NKLINK", "SLOT") == 0x80110321u &&
+                       sdt_run(20u /* ERASE */, "NKLINK", "SLOT") == 0x80110321u &&
+                       sdt_files("NKLINK", "SLOT") == 0x80110305u,
+                   "a dangling link at a save's name is an access error for DELETE, ERASE and "
+                   "FILES, not no data");
+            sdt_param(3u /* SAVE */, "NKLINK", "SLOT", "DATA.BIN");
+            fd_guest_copy(SDT_BUF, "OVER", 4u);
+            MEM_W32(SDT_PARAM + 0x7cu, 4u);
+            char target[640];
+            snprintf(target, sizeof(target), "%s/PSP/SAVEDATA/NKMISSINGTARGET", root);
+            const uint32_t r = sr_savedata_execute(SDT_PARAM);
+            expect(r != 0u && nk_platform_path_missing(target), "a SAVE through a dangling link is refused");
+            expect(!nk_platform_path_missing(path), "the dangling link is still there after every refusal");
+            sdt_unlink_link(path);
+        } else {
+            fprintf(stderr, "SKIP: dangling-link save fixture needs mklink /J (Win32) or symlink\n");
+        }
+
+#ifndef _WIN32
+        /* An encrypted save whose directory cannot be read. Root reads it anyway: skipped. */
+        if (geteuid() != 0) {
+            snprintf(dir, sizeof(dir), "%s/PSP/SAVEDATA/NKLOCKEDSLOT", root);
+            snprintf(path, sizeof(path), "%s/DATA.BIN", dir);
+            expect(sdt_plant_sfo(root, "NKLOCKEDSLOT", 0x41u) &&
+                       sdt_plant(root, "NKLOCKEDSLOT", "DATA.BIN", "CIPHER") && chmod(dir, 0) == 0,
+                   "an unreadable encrypted save is planted");
+            const uint32_t del = sdt_run(10u /* DELETE */, "NKLOCKED", "SLOT");
+            const uint32_t era = sdt_run(20u /* ERASE */, "NKLOCKED", "SLOT");
+            const uint32_t fil = sdt_files("NKLOCKED", "SLOT");
+            chmod(dir, 0755);
+            expect(del == 0x80110345u && era == 0x80110321u && fil == 0x80110305u &&
+                       sdt_read(path, text, sizeof(text)) && !strcmp(text, "CIPHER"),
+                   "an unreadable save directory is an access error for DELETE, ERASE and FILES, "
+                   "and its data is kept");
+        } else {
+            fprintf(stderr, "SKIP: unreadable-directory save fixture does not apply to root\n");
+        }
+#endif
+    }
     sdt_root_end(root, old);
 }
 
@@ -12454,6 +12850,471 @@ static void test_audio_drift_window_reports_the_pacing_value(void) {
            "the all-unmeasured window closed and reset like any other");
     expect(last_ms == -1L, "a window with no host queue reports -1 ms, not 0");
     sr_hle_test_audio_lead_reset();
+}
+
+/* A channel played through the simulated host device (audio_sim_advance): blocking outputs by a
+ * guest that does nothing else, so every wait is one the blocking output asked for, against a
+ * device that takes `pull` frames at a time. The regular, Output2 and 44.1 kHz SRC calls all end in
+ * the same output; each is driven through its own NIDs. */
+typedef enum { AUDIO_SIM_REGULAR, AUDIO_SIM_OUTPUT2, AUDIO_SIM_SRC } AudioSimApi;
+
+typedef struct {
+    unsigned long pulls, short_pulls;
+    uint64_t pushed_frames, silence_frames;
+    unsigned long silence_calls;
+    uint32_t outputs;
+    uint32_t max_rest;       /* the deepest queue the guest was shown after an output returned */
+    int max_host;            /* the deepest queue the host mixer held then */
+    int rest_was_host;       /* every such reading was the host's whole queue */
+    uint32_t at_once;        /* outputs that returned before the first one that waited */
+    uint64_t wait_us;        /* what the outputs asked to wait, in all */
+    uint32_t waits[64];      /* and each of the first 64 */
+} AudioSimRun;
+
+enum { AUDIO_SIM_BUF = 0x08a00000u };
+static AudioSimApi s_audio_sim_api;
+static uint32_t s_audio_sim_frames;
+static int s_audio_sim_started_waiting;
+
+static int audio_sim_channel(void) { return s_audio_sim_api == AUDIO_SIM_REGULAR ? 0 : 8; }
+
+static uint32_t audio_sim_rest(void) {
+    extern int hle_audio_queued(int ch);
+    CpuState cpu;
+    if (s_audio_sim_api == AUDIO_SIM_REGULAR)
+        return audio_dispatch(&cpu, NID_SCE_AUDIO_GET_CHANNEL_REST_LENGTH, 0u, 0u, 0u);
+    if (s_audio_sim_api == AUDIO_SIM_OUTPUT2)
+        return audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT2_REST_SAMPLE, 0u, 0u, 0u);
+    const int q = hle_audio_queued(8);   /* the SRC calls have no rest query of their own */
+    return q > 0 ? (uint32_t)q : 0u;
+}
+
+static void audio_sim_begin(AudioSimApi api, uint32_t frames, int pull, int reported_pull, uint32_t late_us,
+                            AudioSimRun *r) {
+    CpuState cpu;
+    memset(r, 0, sizeof(*r));
+    r->rest_was_host = 1;
+    reset_fixture();
+    sr_hle_init();
+    sr_hle_test_audio_reset();
+    audio_fixture_reset();
+    s_audio_sim_api = api;
+    s_audio_sim_frames = frames;
+    s_audio_sim_started_waiting = 0;
+    if (api == AUDIO_SIM_REGULAR)
+        expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RESERVE, 0u, frames, 0u) == 0u,
+               "the device fixture reserves the regular channel");
+    else if (api == AUDIO_SIM_OUTPUT2)
+        expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT2_RESERVE, frames, 0u, 0u) == 0u,
+               "the device fixture reserves Output2");
+    else
+        expect(audio_dispatch(&cpu, NID_SCE_AUDIO_SRC_CH_RESERVE, frames, 44100u, 2u) == 0u,
+               "the device fixture reserves the SRC channel at 44100 Hz");
+    s_audio_sim_pull = pull;
+    s_audio_sim_reported_pull = reported_pull;
+    s_audio_sim_next_pull_us = (uint64_t)pull * 1000000u / 44100u;
+    s_audio_sim_late_us = late_us;
+    for (int ch = 0; ch < 9; ch++) s_audio_sim_dry[ch] = 1;   /* nothing was ever pushed */
+    sr_hle_test_audio_wait_reset();
+    sr_hle_test_audio_wait_hook(audio_sim_advance);
+}
+
+static void audio_sim_outputs(uint32_t outputs, AudioSimRun *r) {
+    const int ch = audio_sim_channel();
+    CpuState cpu;
+    int returns_ok = 1;
+    for (uint32_t i = 0; i < outputs; i++) {
+        const uint64_t waited = sr_hle_test_audio_wait_total_us();
+        uint32_t ret;
+        if (s_audio_sim_api == AUDIO_SIM_REGULAR) {
+            ret = audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT_BLOCKING, 0u, 0x80008000u, AUDIO_SIM_BUF);
+            if (ret != s_audio_sim_frames) returns_ok = 0;
+        } else if (s_audio_sim_api == AUDIO_SIM_OUTPUT2) {
+            ret = audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT2_OUTPUT_BLOCKING, 0x8000u, AUDIO_SIM_BUF, 0u);
+            if (ret != 0u) returns_ok = 0;
+        } else {
+            ret = audio_dispatch(&cpu, NID_SCE_AUDIO_SRC_OUTPUT_BLOCKING, 0x8000u, AUDIO_SIM_BUF, 0u);
+            if (ret != s_audio_sim_frames) returns_ok = 0;
+        }
+        const uint64_t asked = sr_hle_test_audio_wait_total_us() - waited;
+        if (asked) s_audio_sim_started_waiting = 1;
+        else if (!s_audio_sim_started_waiting) r->at_once++;
+        if (r->outputs < 64u) r->waits[r->outputs] = (uint32_t)asked;
+        r->outputs++;
+        r->wait_us += asked;
+        const uint32_t rest = audio_sim_rest();
+        if (rest > r->max_rest) r->max_rest = rest;
+        if (s_audio_sim_q[ch] > r->max_host) r->max_host = s_audio_sim_q[ch];
+        if (rest != (uint32_t)s_audio_sim_q[ch]) r->rest_was_host = 0;
+    }
+    expect(returns_ok, "every blocking output returned what its call returns");
+    r->pulls = s_audio_sim_pulls;
+    r->short_pulls = s_audio_sim_short[ch];
+    r->pushed_frames = s_audio_sim_pushed_frames;
+    r->silence_frames = s_audio_silence_frames;
+    r->silence_calls = s_audio_silence_calls;
+}
+
+static void audio_sim_end(void) {
+    sr_hle_test_audio_wait_hook(NULL);
+    sr_hle_test_audio_reset();
+    audio_fixture_reset();
+    reset_fixture();
+}
+
+static void audio_sim_run(AudioSimApi api, uint32_t frames, int pull, uint32_t late_us, uint32_t outputs,
+                          AudioSimRun *r) {
+    audio_sim_begin(api, frames, pull, -1, late_us, r);
+    audio_sim_outputs(outputs, r);
+    audio_sim_end();
+}
+
+/* The host mixer holds what its device takes in one pull (Warship Gunner 2 Portable, 256-frame
+ * channel). Held to the guest's two periods (512 frames), the queue is smaller than a 1024-frame
+ * device pull: every pull came up short and the channel delivered three periods per pull, 75% of
+ * its audio. With the hold (1024 + 736 - 512 = 1248 frames) no pull is short and the device is
+ * given all it asks for, while the guest is still shown at most its two periods.
+ *
+ * MUTANT: audio_host_hold_frames returns 0 -- the pulls come up short and fewer frames are
+ *   delivered than the device took.
+ * MUTANT: the hold leaves out the device pull (need is AUDIO_LATE_WAKE_FRAMES alone) -- pulls come
+ *   up short. */
+static void test_audio_host_hold_covers_a_device_pull(void) {
+    AudioSimRun r;
+    audio_sim_run(AUDIO_SIM_REGULAR, 256u, 1024, 0u, 2000u, &r);
+    expect(r.pulls >= 400u, "the device pulled throughout the run");
+    expect(r.short_pulls == 0u, "no 1024-frame pull found the 256-frame channel short");
+    expect(r.silence_frames == 1248u, "the hold was queued once, as silence ahead of the first push");
+    expect(r.pushed_frames + r.silence_frames >= (uint64_t)r.pulls * 1024u,
+           "the channel delivered every frame the device took: it is not slowed");
+    expect(r.max_rest <= 2u * 256u, "the guest is still shown at most its two periods");
+    expect(r.max_host > 2 * 256, "while the host mixer holds more than those");
+}
+
+/* The hold also covers a late wake: every wait of the blocking output ends one display period late
+ * and still no pull is short, on periods and pulls where two periods alone do not reach.
+ *
+ * MUTANT: the hold leaves out AUDIO_LATE_WAKE_FRAMES (need is the pull alone) -- pulls come up
+ *   short against 441-frame pulls and on the 512-frame channel. */
+static void test_audio_host_hold_covers_a_late_wake(void) {
+    static const struct { uint32_t frames; int pull; } cases[] = {
+        { 256u, 441 }, { 256u, 1024 }, { 512u, 441 }, { 512u, 1024 }, { 768u, 941 }, { 1024u, 4096 },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        AudioSimRun r;
+        audio_sim_run(AUDIO_SIM_REGULAR, cases[i].frames, cases[i].pull, sr_hle_test_audio_late_wake_us(), 2000u, &r);
+        expect(r.pulls >= 400u, "the device pulled throughout the late run");
+        expect(r.short_pulls == 0u, "a wake one display period late does not run the channel dry");
+        expect(r.max_rest <= 2u * cases[i].frames, "the guest is still shown at most its two periods");
+    }
+}
+
+/* A channel whose two periods already cover a pull and a display period is paced exactly as
+ * before: nothing is held back from what the guest sees and no silence is queued, late wakes or
+ * not (1024 and 2048 frames against 441- and 1024-frame pulls, 768 against 441). */
+static void test_audio_host_hold_leaves_long_periods_alone(void) {
+    static const struct { uint32_t frames; int pull; } cases[] = {
+        { 2048u, 1024 }, { 2048u, 441 }, { 1024u, 1024 }, { 1024u, 441 }, { 768u, 441 },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        AudioSimRun r;
+        audio_sim_run(AUDIO_SIM_REGULAR, cases[i].frames, cases[i].pull, sr_hle_test_audio_late_wake_us(), 400u, &r);
+        expect(r.short_pulls == 0u, "a long-period channel never came up short");
+        expect(r.rest_was_host, "and the guest sees the host mixer's whole queue: nothing is held back");
+        expect(r.silence_frames == 0u && r.silence_calls == 0u, "no silence is queued for it");
+    }
+}
+
+/* A channel starts as on the PSP: two outputs return at once and the third waits, whatever the
+ * hold, because the hold is queued as silence ahead of the first push and not filled by the
+ * guest. Where the device takes blocks the two periods do cover without late wakes (256-frame
+ * pulls), every wait the guest is asked for is the one it is asked for with no hold at all.
+ *
+ * MUTANT: audio_host_hold_prime does nothing -- four outputs return at once against 441-frame
+ *   pulls and six against 1024-frame pulls. */
+static void test_audio_host_hold_starts_as_the_psp_does(void) {
+    static const struct { uint32_t frames; int pull; uint32_t hold; } cases[] = {
+        { 256u, 441, 665u }, { 256u, 1024, 1248u }, { 512u, 1024, 736u }, { 1024u, 4096, 2784u },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        AudioSimRun r;
+        audio_sim_run(AUDIO_SIM_REGULAR, cases[i].frames, cases[i].pull, 0u, 64u, &r);
+        expect(r.at_once == 2u, "two outputs return at once at a channel's start, and the third waits");
+        expect(r.silence_frames == cases[i].hold && r.silence_calls == 1u,
+               "the hold is queued once, as silence");
+    }
+
+    AudioSimRun held, bare;
+    audio_sim_run(AUDIO_SIM_REGULAR, 256u, 256, 0u, 400u, &held);
+    audio_sim_begin(AUDIO_SIM_REGULAR, 256u, 256, 0, 0u, &bare);   /* the device says nothing: no hold */
+    audio_sim_outputs(400u, &bare);
+    audio_sim_end();
+    expect(held.silence_frames == 480u && bare.silence_frames == 0u, "one run holds 480 frames, the other none");
+    expect(held.short_pulls == 0u && bare.short_pulls == 0u, "neither comes up short against 256-frame pulls");
+    expect(held.at_once == 2u && bare.at_once == 2u, "both start with two outputs at once");
+    expect(held.wait_us == bare.wait_us && memcmp(held.waits, bare.waits, sizeof(held.waits)) == 0,
+           "and the guest is asked to wait exactly as long in both, output by output");
+}
+
+/* A channel that stops and is played dry starts again as it first started: the hold is queued as
+ * silence once more and two outputs return at once. One that resumes while held frames are still
+ * queued gets no silence, which would cut into audio that is playing: the guest refills the hold
+ * itself, its next outputs returning at once.
+ *
+ * MUTANT: audio_host_hold_prime takes an empty queue for played dry (sr_audio_queued(ch) != 0 in
+ *   place of !sr_audio_played_dry(ch)) -- silence is queued for the channel a full pull left at
+ *   zero. */
+static void test_audio_host_hold_restarts_as_the_psp_does(void) {
+    static const struct { uint32_t frames; int pull; uint32_t hold; } cases[] = {
+        { 256u, 441, 665u }, { 256u, 1024, 1248u },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        const uint32_t pull_us = (uint32_t)((uint64_t)cases[i].pull * 1000000u / 44100u);
+        AudioSimRun first, again;
+        audio_sim_begin(AUDIO_SIM_REGULAR, cases[i].frames, cases[i].pull, -1, 0u, &first);
+        audio_sim_outputs(300u, &first);
+        expect(first.at_once == 2u && first.short_pulls == 0u && first.silence_frames == cases[i].hold,
+               "the first start: two outputs at once, the hold queued once, no short pull");
+
+        /* The guest stops. The device plays what is queued, and takes one pull more from nothing. */
+        for (int pulls = 0; pulls < 16 && !s_audio_sim_dry[0]; pulls++) audio_sim_advance(pull_us);
+        expect(s_audio_sim_dry[0] && s_audio_sim_q[0] == 0, "the stopped channel is played dry");
+        const unsigned long short_while_stopped = s_audio_sim_short[0];
+
+        memset(&again, 0, sizeof(again));
+        again.rest_was_host = 1;
+        s_audio_sim_started_waiting = 0;
+        audio_sim_outputs(300u, &again);
+        expect(again.at_once == 2u, "the restart: two outputs return at once, and the third waits");
+        expect(again.silence_frames == 2u * cases[i].hold && again.silence_calls == 2u,
+               "the hold is queued as silence a second time");
+        expect(again.short_pulls == short_while_stopped, "and no pull is short after the restart");
+        expect(again.max_rest <= 2u * cases[i].frames, "the guest is shown at most its two periods");
+        audio_sim_end();
+    }
+
+    /* 256 frames against 441-frame pulls: after one pull with no output, 356 frames are still
+     * queued, all of them part of the 665-frame hold. */
+    AudioSimRun first, again;
+    audio_sim_begin(AUDIO_SIM_REGULAR, 256u, 441, -1, 0u, &first);
+    audio_sim_outputs(600u, &first);
+    audio_sim_advance(10000u);
+    expect(s_audio_sim_q[0] > 0 && audio_sim_rest() == 0u && !s_audio_sim_dry[0],
+           "one pull after the guest stops, held frames are still queued and the guest sees none");
+    memset(&again, 0, sizeof(again));
+    again.rest_was_host = 1;
+    s_audio_sim_started_waiting = 0;
+    audio_sim_outputs(300u, &again);
+    expect(again.silence_frames == 665u && again.silence_calls == 1u,
+           "a channel that resumes with frames still queued gets no silence");
+    expect(again.at_once > 2u, "its guest refills the hold: more than two outputs return at once");
+    expect(again.short_pulls == 0u && again.max_rest <= 512u,
+           "no pull is short and the guest is shown at most its two periods");
+
+    /* A full pull can leave a playing channel's queue at exactly zero: empty, but not played dry. */
+    CpuState cpu;
+    const uint64_t silence_before = s_audio_silence_frames;
+    s_audio_sim_q[0] = 0;
+    s_audio_sim_dry[0] = 0;
+    (void)audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT_BLOCKING, 0u, 0x80008000u, AUDIO_SIM_BUF);
+    expect(s_audio_silence_frames == silence_before,
+           "an empty queue that the device has not played dry gets no silence");
+    audio_sim_end();
+}
+
+/* Output2 and the 44.1 kHz SRC output are the same output on slot 8. Output2's release reads the
+ * queue the guest sees: busy while its rest count is above zero, and granted once the count is
+ * zero, with held frames still to play (measured busy rule: #311).
+ *
+ * MUTANT: h_AudioOutput2Release reads hle_audio_play_lead -- the release is refused while the
+ *   rest count reads zero. */
+static void test_audio_host_hold_on_output2_and_src(void) {
+    CpuState cpu;
+    AudioSimRun r;
+    audio_sim_begin(AUDIO_SIM_OUTPUT2, 256u, 441, -1, 0u, &r);
+    audio_sim_outputs(600u, &r);
+    expect(r.at_once == 2u && r.short_pulls == 0u && r.max_rest <= 2u * 256u,
+           "Output2 starts, holds and paces as the regular channel does");
+    expect(audio_sim_rest() > 0u, "after the last output the guest still sees samples queued");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT2_RELEASE, 0u, 0u, 0u) == 0x80268002u,
+           "so the release is refused as busy");
+    audio_sim_advance(10000u);   /* one 441-frame pull */
+    expect(audio_sim_rest() == 0u && s_audio_sim_q[8] > 0,
+           "one pull later the guest sees none, while the host still holds frames to play");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT2_RELEASE, 0u, 0u, 0u) == 0u,
+           "and the release succeeds");
+    audio_sim_end();
+
+    audio_sim_run(AUDIO_SIM_SRC, 256u, 1024, sr_hle_test_audio_late_wake_us(), 600u, &r);
+    expect(r.at_once == 2u && r.short_pulls == 0u && r.max_rest <= 2u * 256u,
+           "the 44100 Hz SRC output starts, holds and paces the same way, late wakes included");
+    expect(r.silence_frames == 1248u, "with the hold a 256-sample period needs against 1024-frame pulls");
+}
+
+/* Each channel holds for its own period. Two 256-frame channels fed in turn by one guest thread
+ * both stay fed against 1024-frame pulls, and a 256-frame and a 2048-frame channel that hold the
+ * same queue show the guest different depths.
+ *
+ * MUTANT: hle_audio_queued takes the period of channel 0 for every channel -- the 2048-frame
+ *   channel reads 752. */
+static void test_audio_host_hold_is_per_channel(void) {
+    CpuState cpu;
+    AudioSimRun r;
+    audio_sim_begin(AUDIO_SIM_REGULAR, 256u, 1024, -1, 0u, &r);
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RESERVE, 1u, 256u, 0u) == 1u,
+           "a second 256-frame channel is reserved");
+    uint32_t max_rest[2] = { 0u, 0u };
+    for (uint32_t i = 0; i < 4000u; i++) {
+        const uint32_t ch = i & 1u;
+        (void)audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT_BLOCKING, ch, 0x80008000u, AUDIO_SIM_BUF);
+        const uint32_t rest = audio_dispatch(&cpu, NID_SCE_AUDIO_GET_CHANNEL_REST_LENGTH, ch, 0u, 0u);
+        if (rest > max_rest[ch]) max_rest[ch] = rest;
+    }
+    expect(s_audio_sim_pulls >= 400u, "the device pulled throughout the two-channel run");
+    expect(s_audio_sim_short[0] == 0u && s_audio_sim_short[1] == 0u, "neither channel came up short");
+    expect(max_rest[0] <= 512u && max_rest[1] <= 512u, "each is shown at most its own two periods");
+    expect(s_audio_silence_frames == 2u * 1248u && s_audio_silence_calls == 2u,
+           "and each got its hold once");
+    audio_sim_end();
+
+    audio_sim_begin(AUDIO_SIM_REGULAR, 256u, 1024, -1, 0u, &r);
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RESERVE, 1u, 2048u, 0u) == 1u,
+           "a 2048-frame channel is reserved beside the 256-frame one");
+    s_audio_sim_q[0] = s_audio_sim_q[1] = 2000;
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_GET_CHANNEL_REST_LENGTH, 0u, 0u, 0u) == 752u,
+           "of 2000 queued frames the 256-frame channel's guest sees 752: 1248 are held");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_GET_CHANNEL_REST_LENGTH, 1u, 0u, 0u) == 2000u,
+           "and the 2048-frame channel's guest sees all 2000");
+    audio_sim_end();
+}
+
+/* The hold follows the device: when the block the device takes changes mid-run, in either
+ * direction, the channel goes on without a short pull and without a second helping of silence. A
+ * larger block is covered by the guest's next outputs returning at once. */
+static void test_audio_host_hold_follows_the_device(void) {
+    static const struct { int from, to; uint32_t hold; } cases[] = { { 441, 1024, 665u }, { 1024, 441, 1248u } };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        AudioSimRun r;
+        audio_sim_begin(AUDIO_SIM_REGULAR, 256u, cases[i].from, -1, sr_hle_test_audio_late_wake_us(), &r);
+        audio_sim_outputs(1000u, &r);
+        s_audio_sim_pull = cases[i].to;
+        audio_sim_outputs(1000u, &r);
+        expect(r.pulls >= 400u, "the device pulled before and after its block size changed");
+        expect(r.short_pulls == 0u, "no pull is short across a change of the device's block size");
+        expect(r.silence_frames == cases[i].hold, "silence was queued once, at the start");
+        expect(r.max_rest <= 2u * 256u, "the guest is shown at most its two periods throughout");
+        audio_sim_end();
+    }
+}
+
+/* Under the deterministic clock the guest sees the guest-time model and the host mixer only
+ * follows (#2037): a device that takes 1024-frame blocks changes neither what the guest reads nor
+ * what is queued for it.
+ *
+ * MUTANT: hle_audio_queued subtracts the hold under the deterministic clock too -- the guest reads
+ *   0 for the 256 frames it pushed.
+ * MUTANT: audio_host_hold_prime primes under the deterministic clock too -- silence is queued. */
+static void test_audio_host_hold_is_off_under_the_deterministic_clock(void) {
+    extern int hle_audio_queued(int ch);
+    CpuState cpu;
+    reset_fixture();
+    sr_hle_init();
+    sr_hle_test_audio_reset();
+    audio_fixture_reset();
+    s_det_clock = 1;
+    s_vtime_us = 1000u;
+    s_audio_sim_reported_pull = 1024;
+    for (int ch = 0; ch < 9; ch++) s_audio_sim_dry[ch] = 1;
+    s_audio_queue_result = 100000;   /* the host mixer is far behind: the guest must not see it */
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RESERVE, 0u, 256u, 0u) == 0u,
+           "the deterministic fixture reserves a 256-frame channel");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT_BLOCKING, 0u, 0x80008000u, AUDIO_SIM_BUF) == 256u,
+           "one blocking output under the deterministic clock");
+    expect(hle_audio_queued(0) == 256, "the guest reads the 256 frames it pushed: the model's, with no hold");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_GET_CHANNEL_REST_LENGTH, 0u, 0u, 0u) == 256u,
+           "and so does sceAudioGetChannelRestLength");
+    expect(s_audio_silence_calls == 0u, "no silence is queued under the deterministic clock");
+    s_det_clock = 0;
+    s_audio_queue_result = 0;
+    sr_hle_test_audio_reset();
+    audio_fixture_reset();
+    reset_fixture();
+}
+
+/* Fast forward gives the host device nothing and the guest the guest-time model, so the hold has no
+ * part in it: the model is seeded with what the guest saw of the host queue (the queue less the
+ * hold), no silence is queued for a channel the device has played dry, and the PSMF lead is the
+ * model's. Once fast forward stops, the played-dry channel gets its hold as silence again.
+ *
+ * MUTANT: audio_vq_on seeds the model with the host's whole queue -- the guest reads 2000 where it
+ *   read 752 a moment before fast forward.
+ * MUTANT: audio_host_hold_prime asks the deterministic clock only -- silence is queued during
+ *   fast forward. */
+static void test_audio_host_hold_stays_out_of_fast_forward(void) {
+    extern int hle_audio_queued(int ch);
+    extern int psmf_av_queue_frames(int ch);
+    CpuState cpu;
+    reset_fixture();
+    sr_hle_init();
+    sr_hle_test_audio_reset();
+    audio_fixture_reset();
+    s_det_clock = 0;
+    s_vtime_us = 1000u;
+    s_audio_sim_reported_pull = 1024;
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RESERVE, 0u, 256u, 0u) == 0u,
+           "the fast-forward hold fixture reserves a 256-frame channel");
+    s_audio_queue_result = 2000;
+    expect(hle_audio_queued(0) == 752, "before fast forward the guest sees 752 of 2000 queued frames");
+
+    s_ff_speed = SCHED_FAST_FORWARD_SPEED;
+    s_ff_epoch++;
+    expect(hle_audio_queued(0) == 752, "fast forward starts the guest queue at what the guest saw, not at 2000");
+    expect(psmf_av_queue_frames(0) == 752, "and the PSMF lead is the model's while it runs");
+    s_vtime_us += 100000u;   /* 100 ms of guest time plays the model out */
+    expect(hle_audio_queued(0) == 0, "the model drains in guest time");
+
+    for (int ch = 0; ch < 9; ch++) s_audio_sim_dry[ch] = 1;   /* the muted device plays the channel dry */
+    s_audio_queue_result = 0;
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT_BLOCKING, 0u, 0x80008000u, AUDIO_SIM_BUF) == 256u,
+           "a blocking output during fast forward");
+    expect(s_audio_silence_calls == 0u && s_audio_push_calls == 0u,
+           "fast forward queues neither silence nor audio on the host");
+
+    s_ff_speed = 1u;
+    s_vtime_us += 100000u;
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT_BLOCKING, 0u, 0x80008000u, AUDIO_SIM_BUF) == 256u,
+           "a blocking output after fast forward");
+    expect(s_audio_silence_calls == 1u && s_audio_silence_frames == 1248u && s_audio_push_calls == 1u,
+           "after fast forward the played-dry channel gets its hold as silence, then its audio");
+
+    s_audio_queue_result = 0;
+    sr_hle_test_audio_reset();
+    audio_fixture_reset();
+    reset_fixture();
+}
+
+/* The PSMF player measures when a pushed frame is heard, so its audio lead is the host mixer's
+ * whole queue, the hold included, while the guest's own view leaves the hold out.
+ *
+ * MUTANT: psmf_av_queue_frames returns hle_audio_queued(ch) -- the lead reads 752. */
+static void test_audio_host_hold_is_in_the_psmf_lead(void) {
+    extern int hle_audio_queued(int ch);
+    extern int psmf_av_queue_frames(int ch);
+    CpuState cpu;
+    reset_fixture();
+    sr_hle_init();
+    sr_hle_test_audio_reset();
+    audio_fixture_reset();
+    s_audio_sim_reported_pull = 1024;
+    s_audio_queue_result = 2000;
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RESERVE, 0u, 256u, 0u) == 0u,
+           "the lead fixture reserves a 256-frame channel");
+    expect(hle_audio_queued(0) == 752, "the guest sees 752 of 2000 queued frames");
+    expect(psmf_av_queue_frames(0) == 2000, "the PSMF audio lead is all 2000");
+    s_audio_queue_result = 0;
+    sr_hle_test_audio_reset();
+    audio_fixture_reset();
+    reset_fixture();
 }
 
 static uint64_t selftest_guest_u64(uint32_t addr) {
@@ -42359,6 +43220,83 @@ static void test_route_stick_reaches_the_guest_through_the_controller_sample(voi
  * so a walk recorded with the analog stick replayed standing still. Also here: an unread stick
  * press names the position in its failure, and a long route program loads (the step limit was
  * 256, which a walked level route passes before its first obstacle). */
+/* Ace's stick dead-zone remap (stick=<counts>, contract 11.3.11) in the real latch: the window's
+ * stick goes through it in sr_ctrl_sample before the controller ring stores the sample, so the
+ * guest's sceCtrlReadBufferPositive reads the remapped bytes. Without the key the guest reads the
+ * window's bytes, and a route's stick and a digital-mode sample are never remapped. Driven
+ * through the real vblank episode service and the real dispatch, as the route stick test is. */
+static void test_ace_stick_remap_reaches_the_guest_only_from_the_live_stick(void) {
+    extern int s_ctrl_test_stick;
+    extern int ace_init_spec(const char *spec, const char *report_path);
+    static const char stick_line[] =
+        "v1;tier=ace;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;stick=64";
+    CpuState cpu;
+    RouteStickRead r;
+    const int test_stick = s_ctrl_test_stick;
+
+    reset_fixture();
+    sr_hle_init();
+    sr_route_reset();
+    ctrl_env("1", "", "", "");
+    sr_ctrl_test_reset_live_input();
+    sr_hle_test_ctrl_sampling_reset();
+    starve_reset();
+    route_stick_mode(&cpu, 1u);
+    ctrl_drain(&cpu);
+    s_ctrl_test_stick = 0;            /* the window's stick, not the test build's stand-in */
+    s_test_gui_on = 1;
+    s_test_gui_stick_dead_zone = 30;  /* the default profile's 7849 */
+    s_test_gui_lx = (uint8_t)(128u + 31u);
+    s_test_gui_ly = 128u;
+
+    (void)ace_init_spec("off", NULL);
+    starve_batch(1u);
+    r = route_stick_read(&cpu);
+    expect(route_stick_is(r, 0u, 159u, 128u), "an Authentic run latches the window's stick bytes as they are");
+
+    expect(ace_init_spec(stick_line, NULL) == 1, "an Ace line with stick=64 starts the remap");
+    starve_batch(1u);
+    r = route_stick_read(&cpu);
+    expect(route_stick_is(r, 0u, 192u, 128u),
+           "a live push of 31 past the host's dead zone of 30 is latched as the game's 64 (byte 192)");
+    s_test_gui_lx = (uint8_t)(128u + 90u);
+    s_test_gui_ly = (uint8_t)(128u + 90u);
+    starve_batch(1u);
+    r = route_stick_read(&cpu);
+    expect(route_stick_is(r, 0u, 230u, 230u), "the live diagonal 90,90 is latched as the game's 102,102");
+    s_test_gui_lx = 255u;
+    s_test_gui_ly = 0u;
+    starve_batch(1u);
+    r = route_stick_read(&cpu);
+    expect(route_stick_is(r, 0u, 255u, 0u), "full throw is latched unchanged");
+
+    /* A route step that holds the stick hands the guest its own bytes, remap on or off. */
+    s_test_gui_lx = (uint8_t)(128u + 31u);
+    s_test_gui_ly = 128u;
+    rt_write("STICK 159 128 PRESS 0 2\nEND\n");
+    expect(sr_route_load(RT_PATH) == 1, "a route that holds the stick loads with the remap on");
+    starve_batch(1u);
+    r = route_stick_read(&cpu);
+    expect(route_stick_is(r, 0u, 159u, 128u), "a route's stick reaches the guest unremapped");
+    remove(RT_PATH);
+    sr_route_reset();
+
+    /* Digital mode reads the stick centred, remap or not. */
+    route_stick_mode(&cpu, 0u);
+    ctrl_drain(&cpu);
+    starve_batch(1u);
+    r = route_stick_read(&cpu);
+    expect(route_stick_is(r, 0u, 128u, 128u), "a digital-mode sample is centred, not remapped");
+    route_stick_mode(&cpu, 1u);
+
+    (void)ace_init_spec("off", NULL);
+    s_test_gui_on = 0;
+    s_test_gui_stick_dead_zone = 0;
+    s_test_gui_lx = 128u;
+    s_test_gui_ly = 128u;
+    s_ctrl_test_stick = test_stick;
+}
+
 static void test_route_recording_carries_the_stick_from_log_to_replay(void) {
     extern void sr_hle_test_inlog(int on);
     CpuState cpu;
@@ -50414,6 +51352,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_savedata_list_selection();
     test_savedata_listing_times();
     test_savedata_encrypted_save_refused();
+    test_savedata_empty_stick_and_broken_saves();
     test_savedata_commit_faults();
     test_savedata_nested_outputs();
     test_utility_dialog_measured_states();
@@ -50446,6 +51385,17 @@ static int hle_selftest_main(int argc, char **argv) {
     test_audio_output2_and_src_accept_volumes_to_0xfffff();
     test_vaudio_plays_through_the_src_slot();
     test_audio_drift_window_reports_the_pacing_value();
+    test_audio_host_hold_covers_a_device_pull();
+    test_audio_host_hold_covers_a_late_wake();
+    test_audio_host_hold_leaves_long_periods_alone();
+    test_audio_host_hold_starts_as_the_psp_does();
+    test_audio_host_hold_restarts_as_the_psp_does();
+    test_audio_host_hold_on_output2_and_src();
+    test_audio_host_hold_is_per_channel();
+    test_audio_host_hold_follows_the_device();
+    test_audio_host_hold_is_off_under_the_deterministic_clock();
+    test_audio_host_hold_stays_out_of_fast_forward();
+    test_audio_host_hold_is_in_the_psmf_lead();
     test_audio_output_telemetry_counts_guest_frames();
     test_audio_queue_drains_in_guest_time_under_the_deterministic_clock();
     test_audio_guest_view_is_the_same_with_and_without_a_host_device();
@@ -50734,6 +51684,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_scripted_input_reaches_a_starved_guest();
     test_route_read_widths_hold_for_their_reads_on_a_starved_host();
     test_route_stick_reaches_the_guest_through_the_controller_sample();
+    test_ace_stick_remap_reaches_the_guest_only_from_the_live_stick();
     test_route_recording_carries_the_stick_from_log_to_replay();
 
     check_coroutine_lifecycle();

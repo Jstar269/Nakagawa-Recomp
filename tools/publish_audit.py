@@ -1386,6 +1386,7 @@ SPDX_GENERATED_EMBEDDING_SOURCES = {
     "src/rt/gpu_sdl3vk/psp_tnl_vert.inc": "src/rt/gpu_sdl3vk/shaders/psp_tnl.vert",
     "src/rt/gpu_sdl3vk/ace_match_comp.inc": "src/rt/gpu_sdl3vk/shaders/ace_match.comp",
     "src/rt/gpu_sdl3vk/ace_compose_comp.inc": "src/rt/gpu_sdl3vk/shaders/ace_compose.comp",
+    "src/rt/gpu_sdl3vk/ace_measure_comp.inc": "src/rt/gpu_sdl3vk/shaders/ace_measure.comp",
     "src/rt/gpu_sdl3vk/fsr1_easu_comp.inc": "src/rt/gpu_sdl3vk/shaders/fsr1_easu.comp",
     "src/rt/gpu_sdl3vk/fsr1_rcas_comp.inc": "src/rt/gpu_sdl3vk/shaders/fsr1_rcas.comp",
     "src/rt/gpu_sdl3vk/anime4k_cnn_x2_m_0_comp.inc": "src/rt/gpu_sdl3vk/shaders/anime4k_cnn_x2_m_0.comp",

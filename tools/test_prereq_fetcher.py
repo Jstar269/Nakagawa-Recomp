@@ -1227,6 +1227,13 @@ UPDATE_CHECK_HOSTS = frozenset({
 ACHIEVEMENTS_HOST = "retroachievements.org"
 ACHIEVEMENTS_NO_NETWORK_PATHS = ("src/core/nk_achievements.c", "src/core/nk_achievements.h")
 ACHIEVEMENTS_VENDORED_TREE = "third_party/rcheevos"
+# Discord status (#2259; owner decision 2026-11-08): opt-in and off by default, and not an
+# egress. The player writes the game's title, play mode and start time to the Discord app on
+# this PC through its local named pipe (nk_platform_local_pipe_*), never a network API; the
+# Discord app receives them. docs/SETUP.md "Network use" says so. These files may name only
+# that pipe and must stay outside the allowlist above.
+DISCORD_PRESENCE_PATHS = ("src/player/discord_presence.c", "src/player/discord_presence.h")
+DISCORD_PIPE_PREFIX = "discord-ipc-"
 # The only shipped callers of the native transport: the prerequisite bootstrap (in
 # package_builder.c itself) and the update check. Another caller is a new egress.
 NATIVE_TRANSPORT_CALLERS = frozenset({
@@ -1336,6 +1343,25 @@ class TestNetworkEgressAllowlist(unittest.TestCase):
                 if match:
                     offenders.append(f"{path.relative_to(REPO_ROOT).as_posix()}: {match.group(0)}")
         self.assertEqual(offenders, [], "the achievements bridge and rcheevos open no connection")
+
+    def test_discord_status_is_local_ipc_only(self) -> None:
+        for rel in DISCORD_PRESENCE_PATHS:
+            self.assertNotIn(rel, NETWORK_EGRESS_ALLOWLIST)
+            text = (REPO_ROOT / rel).read_text(encoding="utf-8")
+            match = NETWORK_EGRESS_PATTERN.search(text)
+            self.assertIsNone(match, f"{rel}: {match.group(0) if match else ''}")
+            self.assertEqual(re.findall(r"https?://", text), [], rel)
+        header = (REPO_ROOT / "src/player/discord_presence.h").read_text(encoding="utf-8")
+        self.assertIn(f'#define NK_DISCORD_PIPE_PREFIX "{DISCORD_PIPE_PREFIX}"', header)
+        # The local pipe seam opens pipes in this PC's own pipe namespace only, nothing remote.
+        win32 = (REPO_ROOT / "src/core/nk_platform_win32.c").read_text(encoding="utf-8")
+        pipe_paths = re.findall(r'"(\\\\\\\\[^"]*pipe[^"]*)"', win32)
+        self.assertEqual(pipe_paths, ["\\\\\\\\.\\\\pipe\\\\%s"])
+        # The pipe's server, whoever created it, may identify the player but never act as it.
+        self.assertIn("SECURITY_SQOS_PRESENT", win32)
+        self.assertIn("SECURITY_IDENTIFICATION", win32)
+        setup = (REPO_ROOT / "docs/SETUP.md").read_text(encoding="utf-8")
+        self.assertIn("**Discord status**", setup)
 
     def test_only_the_known_callers_use_the_native_transport(self) -> None:
         callers = set()

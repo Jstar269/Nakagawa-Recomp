@@ -128,6 +128,19 @@ MEASURED_COMMIT = "b" * 40
 STAGED_PRX = b"synthetic PSP oracle probe"
 STAGED_SHA = hashlib.sha256(STAGED_PRX).hexdigest()
 
+# The firmware identity every 2026-11-10 PSP-3000 measurement note states in full: pspver's
+# "6.6.0" in the XMB context is not the system software version.
+PSP_3000_FIRMWARE_IDENTITY_20261110 = (
+    "2026-11-10", "console PSP-3000", "system software 6.61",
+    "release:6.61:", "system:58401@release_661,0x06060110:",
+    "sceKernelDevkitVersion()", "0x06060110",
+    "pspver printed 0x06060010 (\"6.6.0\") in the XMB context",
+    "prints 0x06060110 in the game context",
+    "ARK-5 with cIPL, version 5.1.0 (the version was not read by a tool",
+    "SystemControl, ARKCompatLayer and VshCtrl",
+    "acceptance-eligible with 0 blockers",
+)
+
 # PSP-VRAM-MIRROR-001 measured rules, from the PSP-3000 runs on 2026-10-16
 # (commits 24c1472e, fd3efc64, and df41dba2). These are algorithmic constants;
 # tests synthesize their own result words and contain no captured PSP words.
@@ -2488,16 +2501,16 @@ class PspOracleBuildRouteTests(unittest.TestCase):
         )
         # Sequential probe.c and HLE cases use distinct numbered ranges. The count and
         # the id set are exact: a probe PR bumps both, and an accidental removal fails here.
-        self.assertEqual(len(routes), 149)
+        self.assertEqual(len(routes), 159)
         names = [name for name, _ in routes]
         ids = [int(case_id) for _, case_id in routes]
         self.assertEqual(len(names), len(set(names)))
         self.assertEqual(len(ids), len(set(ids)))
-        self.assertEqual(set(range(1, 79)) | set(range(90, 105)) | {106, 107, 108, 109}
+        self.assertEqual(set(range(1, 79)) | set(range(90, 105)) | {180} | {106, 107, 108, 109}
                          | {110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126,
                             127}
                          | {128, 129, 130, 132, 133, 134, 135, 136, 137, 138, 139, 140}
-                         | {150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 167, 168, 169, 170, 171, 172},
+                         | {150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 167, 168, 169, 170, 171, 172, 173, 174, 175, 176, 181, 182, 183, 184, 185},
                          set(ids))
         self.assertNotIn("psp_b1_imports.S", self.makefile)
         self.assertNotIn("psp_b2_imports.S", self.makefile)
@@ -3482,6 +3495,18 @@ class PspDmacProbeTests(unittest.TestCase):
                 "PSP-VFPU-BASICARITH-001", "PSP-VFPU-VUS2I-001",
                 # The 2026-11-08 acceptance-eligible hle-self-stop-unload (#341, boot 165) run.
                 "PSP-HLE-SELFSTOP-001",
+                # The 2026-11-10 acceptance-eligible hle-issues-batch (#326, #356, boot 172) and
+                # hle-kernel-pool-bounds (boot 173) runs of 979c6a1dd.
+                "PSP-HLE-ISSUES-001", "PSP-HLE-KERNEL-STATUS-002",
+                # The 2026-11-09 (UTC) acceptance-eligible vfpu-mfv-mtv (boot 167),
+                # vfpu-wide-dot-matrix (boot 168) and vfpu-round-sep (boot 169) runs (#326).
+                "PSP-VFPU-MFVMTV-001", "PSP-VFPU-WIDEDOT-001", "PSP-VFPU-ROUNDSEP-001",
+                # The 2026-11-10 acceptance-eligible vfpu-prefix-state (boot 175, 48cea955),
+                # vfpu-wider-ops (boot 176) and vfpu-constants (boot 178, both 9426722a) runs (#326).
+                "PSP-VFPU-PREFIX-001", "PSP-VFPU-WIDEROPS-001", "PSP-VFPU-CONSTANTS-001",
+                # The 2026-11-10 acceptance-eligible ge-through-z (boot 180, e4e6a3a2) and
+                # vfpu-reserved-widths (#326, boot 182, c6abab53) runs.
+                "PSP-GE-THROUGHZ-001", "PSP-VFPU-RESERVED-001",
             },
         )
         self.assertEqual(
@@ -3490,7 +3515,7 @@ class PspDmacProbeTests(unittest.TestCase):
                 # Captured only: the runner classified its envelope as not acceptance-eligible.
                 "PSP-TEARDOWN-001",
                 # b5d6fc5b, 2026-10-15: an incomplete NULL-pointer stream. (The pool-bounds
-                # capture of the same day belongs to a revision since replaced; NOT_RUN.)
+                # capture of the same day belongs to a revision since replaced and measured.)
                 "PSP-HLE-NULL-OUT-001",
                 # 2026-10-17: raw UMD capture stopped before the 32768-byte seek/read result.
                 "PSP-UMDRAW-001",
@@ -3503,6 +3528,18 @@ class PspDmacProbeTests(unittest.TestCase):
                 # 2026-11-02: memory-edge (bb3f36e4): 33 PASS and 42 intentional SKIP records
                 # (no bottom-of-RAM edge, no scratchpad or VRAM file call, no unproven overrun).
                 "PSP-MEMEDGE-001",
+                # 2026-11-07: sas-mix (979de58f, boot 146, game context): a complete all-PASS
+                # stream whose envelope is blocked by "loaded module was not proven unloaded".
+                "PSP-SAS-003",
+                # 2026-11-10: ge-signal (80e7c9eb, boot 179, XMB context): 37 records, 12 of 14
+                # cells; it stalled at rjump-un and the console needed a power cycle.
+                "PSP-GE-SIGNAL-001",
+                # 2026-11-10: hle-savedata-nodata (dbb47db4, boot 183, game context): 34 PASS and
+                # 1 SKIP; nodir-load stayed VISIBLE to its bound and the console needed a power cycle.
+                "PSP-HLE-SAVEDATA-NODATA-001",
+                # 2026-11-10: sas-adsr (74acbe42, boot 185, game context): a complete all-PASS
+                # stream whose envelope is blocked by "loaded module was not proven unloaded".
+                "PSP-SAS-002",
             },
         )
 
@@ -5375,6 +5412,10 @@ class HleMeasureProbeTests(unittest.TestCase):
     # Families added after the 2026-10-15 single-launch set, with literal record calls; the
     # single-launch class pins only cases 97-104.
     LATER_FAMILIES = (
+        # Case 180: savedata modes on a missing save, a save without PARAM.SFO and a probe-made
+        # save; HleSavedataNodataProbeTests pins its Memory Stick rules.
+        ("hle-savedata-nodata", 180, "hle_savedata_nodata", "hle_utility_imports.S",
+         "HLE_CASE_SAVEDATA_NODATA", "PSP-HLE-SAVEDATA-NODATA-001"),
         ("hle-std-handles", 156, "hle_std_handles", None,
          "HLE_CASE_STD_HANDLES", "PSP-HLE-STDIO-001"),
         ("hle-utility-dialogs", 161, "hle_utility_dialogs", "hle_utility_imports.S",
@@ -5425,6 +5466,13 @@ class HleMeasureProbeTests(unittest.TestCase):
     # dialog calls for hle-savedata-getsize (104) alone, so hle-sysparam keeps exactly its Get pair.
     CASE_EXTRA_PINS = {
         ("hle_utility_imports.S", 104): {
+            "sceUtilitySavedataInitStart": 0x50C4CD57,
+            "sceUtilitySavedataGetStatus": 0x8874DBE0,
+            "sceUtilitySavedataUpdate": 0xD4B95FFB,
+            "sceUtilitySavedataShutdownStart": 0x9790B33C,
+        },
+        # hle-savedata-nodata (180) declares the same four savedata dialog calls.
+        ("hle_utility_imports.S", 180): {
             "sceUtilitySavedataInitStart": 0x50C4CD57,
             "sceUtilitySavedataGetStatus": 0x8874DBE0,
             "sceUtilitySavedataUpdate": 0xD4B95FFB,
@@ -5710,14 +5758,14 @@ class HleMeasureProbeTests(unittest.TestCase):
         hle-sysparam can import no savedata call."""
         block = "hle_utility_imports.S"
         self.assertEqual(re.findall(r"^#if PSP_ORACLE_CASE == (\d+)$", self._block_text(block),
-                                    re.MULTILINE), ["104", "140", "161"])
+                                    re.MULTILINE), ["104", "180", "140", "161"])
         self.assertIn("#define HLE_CASE_SAVEDATA_GETSIZE 104\n", self.probe)
         self.assertIn("else ifeq ($(CASE),hle-savedata-getsize)\nCASE_ID = 104\n", self.makefile)
         users = [(case, case_id) for case, case_id, _stem, linked, _macro, _test
                  in self.ALL_FAMILIES if linked == block]
         self.assertEqual(users, [("hle-sysparam", 95), ("hle-savedata-getsize", 104),
-                                 ("hle-utility-none", 140), ("hle-utility-dialogs", 161),
-                                 ("hle-nickname-limit", 164)])
+                                 ("hle-utility-none", 140), ("hle-savedata-nodata", 180),
+                                 ("hle-utility-dialogs", 161), ("hle-nickname-limit", 164)])
         for case, case_id in users:
             with self.subTest(case=case):
                 gate = self.makefile.split(f"\nifeq ($(CASE),{case})\n", 1)[1].split("endif", 1)[0]
@@ -5925,7 +5973,11 @@ class HleMeasureProbeTests(unittest.TestCase):
         # Removal is this file's alone on host0; the only other removal is hle-utility-dialogs'
         # cleanup of its own gamedata directory on ms0: (HleUtilityDialogsProbeTests).
         self.assertEqual(re.findall(r"\bsceIoRemove\s*\(([^)]*)\)", self.probe),
-                         ["HLE_PRIVATE_STRINGS_PATH", "s_ud_path",
+                         ["HLE_PRIVATE_STRINGS_PATH",
+                          # hle-savedata-nodata: its own state-B file, then each regular file
+                          # its data-cleanup finds in the probe-owned NKPROBE01DATA directory.
+                          "HLE_ND_NOSFO_FILE", "s_nd_path",
+                          "s_ud_path",
                           # hle-io-seek: the probe-owned ms0: file, the same file once more on
                           # its setup failure, and the file its RDONLY|CREAT cell may create.
                           "HLE_IS_FILE", "HLE_IS_FILE", "HLE_IS_MISSING"])
@@ -6263,12 +6315,12 @@ class HleSingleLaunchProbeTests(unittest.TestCase):
     h: ClassVar[HleMeasureProbeTests]
 
     SINGLE = HleMeasureProbeTests.SINGLE_LAUNCH_FAMILIES
-    # Manifest hardware_evidence per case after the 2026-10-15 runs. The pool-bounds probe was
-    # revised after its captured run, so its revised form is NOT_RUN.
+    # Manifest hardware_evidence per case. The pool-bounds probe was revised after its captured
+    # 2026-10-15 run; the revised form was measured on 2026-11-10 (boot 173, 979c6a1dd).
     HARDWARE = {
         "hle-vtimer-unit": "MEASURED",
         "hle-vtimer-errors": "MEASURED",
-        "hle-kernel-pool-bounds": "NOT_RUN",
+        "hle-kernel-pool-bounds": "MEASURED",
         "hle-power-float-v0": "MEASURED",
         "hle-null-out-pointers": "CAPTURED",
         "hle-audio-src": "MEASURED",
@@ -6283,6 +6335,12 @@ class HleSingleLaunchProbeTests(unittest.TestCase):
         "hle-audio-src": "7fc1641e",
         "hle-timer-order": "22b027f6",
         "hle-savedata-getsize": "eded11ac",
+        "hle-kernel-pool-bounds": "979c6a1dd",
+    }
+    # The date of each MEASURED case's cited run, where it is not 2026-10-15.
+    RUN_DATE = {
+        "hle-savedata-getsize": "2026-11-02",
+        "hle-kernel-pool-bounds": "2026-11-10",
     }
     # The pending-campaign status cell each case carries in docs/HARDWARE_ORACLE.md.
     DOC_STATUS = {
@@ -6290,9 +6348,9 @@ class HleSingleLaunchProbeTests(unittest.TestCase):
                            "campaign queue)",
         "hle-vtimer-errors": "`MEASURED` (2026-10-15, `b5d6fc5b`; single launch, not in the "
                              "campaign queue)",
-        "hle-kernel-pool-bounds": "`NOT_RUN` (revised form; single launch, not in the campaign "
-                                  "queue; the earlier revision's 2026-10-15 `b5d6fc5b` run was "
-                                  "captured only)",
+        "hle-kernel-pool-bounds": "`MEASURED` (2026-11-10, PSP-3000, boot 173, `979c6a1dd`; 9 "
+                                  "records; single launch, not in the campaign queue; the earlier "
+                                  "revision's 2026-10-15 `b5d6fc5b` run was captured only)",
         "hle-power-float-v0": "`MEASURED` (2026-10-15, `b5d6fc5b`; single launch, not in the "
                               "campaign queue)",
         "hle-null-out-pointers": "`CAPTURED` (2026-10-15, `b5d6fc5b`; incomplete, not measured; "
@@ -6673,7 +6731,7 @@ class HleSingleLaunchProbeTests(unittest.TestCase):
                                      list(spec.ordered_cases))
                     self.assertNotIn("uncited_cases", row)
                     self.assertNotIn("evidence_note", row)
-                    run_date = "2026-11-02" if case == "hle-savedata-getsize" else "2026-10-15"
+                    run_date = self.RUN_DATE.get(case, "2026-10-15")
                     for word in (run_date, self.RUN_COMMIT[case],
                                  "acceptance-eligible with 0 blockers"):
                         self.assertIn(word, row["measurement_note"])
@@ -6688,9 +6746,6 @@ class HleSingleLaunchProbeTests(unittest.TestCase):
                         for word in ("2026-10-15", "b5d6fc5b",
                                      "establishes nothing about PSP behaviour"):
                             self.assertIn(word, row["evidence_note"])
-                    elif case == "hle-kernel-pool-bounds":
-                        self.assertIn("No hardware capture of this revision exists",
-                                      row["evidence_note"])
                     else:
                         self.assertIn("No hardware capture exists",
                                       row["evidence_note"])
@@ -6709,6 +6764,23 @@ class HleSingleLaunchProbeTests(unittest.TestCase):
                 listed = {api for api in row["apis"] if api.startswith("sce")}
                 self.assertEqual(sorted(listed), sorted(self.h._probe_calls(macro)))
                 self.assertNotIn("until refusal", json.dumps(row))
+
+    def test_pool_bounds_row_records_the_2026_11_10_measured_cells(self) -> None:
+        """The revised pool-bounds form ran on 2026-11-10 (boot 173, 979c6a1dd): both FPL creates
+        were refused, so no delete was issued, and the 0x1000-byte VPL gave 15 blocks of 0x100
+        bytes before refusing. The note names the full firmware identity, never a bare 6.6.0."""
+        row = next(test for test in self.h.manifest["tests"]
+                   if test["id"] == "PSP-HLE-KERNEL-STATUS-002")
+        note = row["measurement_note"]
+        for word in PSP_3000_FIRMWARE_IDENTITY_20261110 + (
+                "boot 173", "XMB context", "979c6a1dd", "9 records",
+                "block size 0 and 1 block returned 0x800201b7",
+                "block size 0x7fffffff and 1 block returned 0x80020190",
+                "neither delete cell issued a call (result 0, out0 0)",
+                "succeeded 15 times and the 16th call returned 0x80020190",
+                "sceKernelDeleteVpl returned 0"):
+            self.assertIn(word, note)
+        self.assertEqual(row["issues"], [])
 
     def test_vtimer_unit_row_does_not_claim_a_precise_rate(self) -> None:
         """The VTimer and system-clock intervals are offset by host0 writes, so the unit is
@@ -7289,7 +7361,11 @@ class HleIssuesProbeTests(unittest.TestCase):
         head = ("#if PSP_ORACLE_CASE == 106 || PSP_ORACLE_CASE == 108 || PSP_ORACLE_CASE == 121 "
                 "|| PSP_ORACLE_CASE == 122 || PSP_ORACLE_CASE == 125 || PSP_ORACLE_CASE == 163 "
                 "|| PSP_ORACLE_CASE == 165 || PSP_ORACLE_CASE == 168 || PSP_ORACLE_CASE == 169 "
-                "|| PSP_ORACLE_CASE == 170 || PSP_ORACLE_CASE == 171\n")
+                "|| PSP_ORACLE_CASE == 170 || PSP_ORACLE_CASE == 171 || PSP_ORACLE_CASE == 173 "
+                "|| PSP_ORACLE_CASE == 174 || PSP_ORACLE_CASE == 175 || PSP_ORACLE_CASE == 176 "
+                "|| PSP_ORACLE_CASE == 182 "
+                "|| PSP_ORACLE_CASE == 183 "
+                "|| PSP_ORACLE_CASE == 184\n")
         self.assertIn(head, self.probe)
         attr = self.probe[self.probe.index(head):]
         attr = attr[:attr.index("#endif") + len("#endif")]
@@ -7309,7 +7385,7 @@ class HleIssuesProbeTests(unittest.TestCase):
         ]))
         for banned in ("for (;;)", "do {", "goto ", "malloc(", "sceKernelAllocPartitionMemory"):
             self.assertNotIn(banned, code)
-        bound = r"(?:\d+u?|[A-Z][A-Z0-9_]*|sizeof\(\w+\)|first \+ n && k < 16u|count && .*|n|nexec|s_end|BA_OPERANDS / n)"
+        bound = r"(?:\d+u?|[A-Z][A-Z0-9_]*|sizeof\(\w+\)|first \+ n && k < 16u|count && .*|n|nexec|s_end|BA_OPERANDS / n|nin|nout|nrec|last|c0|c1|nidx|ncells)"
         # The one variable bound: the stored handler calls, capped at IC_TCALLS.
         self.assertIn("const uint32_t n = s_ic_tcount < IC_TCALLS ? s_ic_tcount : IC_TCALLS;", code)
         headers = [code[loop.end():_c_close(code, loop.end() - 1)]
@@ -7524,7 +7600,7 @@ class HleIssuesProbeTests(unittest.TestCase):
                   for target in self.WRAPPER_RE.findall(text)}
         return calls
 
-    def test_manifest_rows_are_not_run_and_name_every_import(self) -> None:
+    def test_manifest_rows_are_measured_and_name_every_import(self) -> None:
         by_id = {test["id"]: test for test in self.manifest["tests"]}
         for case, _cid, stem, macro, test_id, _log in self.CASES:
             with self.subTest(case=case):
@@ -7541,11 +7617,16 @@ class HleIssuesProbeTests(unittest.TestCase):
                     self.assertEqual(row["evidence_cases"], row["case_ids"][:-1])
                     hle_manifest.measured_evidence_section(row)
                 else:
-                    self.assertEqual(row["hardware_evidence"], "NOT_RUN")
-                    for absent in ("evidence_ref", "evidence_cases", "measurement_note"):
-                        self.assertNotIn(absent, row)
-                    self.assertIn("No acceptance-eligible capture exists",
-                                  row["evidence_note"])
+                    # Measured by the 2026-11-10 run of 979c6a1dd (boot 172); everything but the
+                    # done record is cited.
+                    self.assertEqual(row["hardware_evidence"], "MEASURED")
+                    for word in PSP_3000_FIRMWARE_IDENTITY_20261110 + (
+                            "979c6a1dd", "boot 172", "XMB context",
+                            "1858 result records and the done record"):
+                        self.assertIn(word, row["measurement_note"])
+                    self.assertEqual(row["uncited_cases"], [f"{case}-done"])
+                    self.assertEqual(row["evidence_cases"], row["case_ids"][:-1])
+                    hle_manifest.measured_evidence_section(row)
                 self.assertIn("not in the campaign queue", row["evidence_note"])
                 self.assertEqual(row["source"], "fixtures/psp_oracle/probe_hle_issues.c")
                 self.assertEqual(row["prx"], f"{stem}.prx")
@@ -7556,6 +7637,22 @@ class HleIssuesProbeTests(unittest.TestCase):
                 self.assertEqual(row["case_ids"][-1], f"{case}-done")
         self.assertEqual(by_id["PSP-HLE-ISSUES-001"]["issues"], [326, 356])
         self.assertEqual(by_id["PSP-HLE-INTR-001"]["issues"], [325])
+
+    def test_issues_batch_row_records_the_2026_11_10_measured_cells(self) -> None:
+        """The 2026-11-10 run (boot 172, 979c6a1dd): the model getters, the vscmp order rule and
+        the vrndi.s step rule, with both passes identical; the per-boot syscall word and the
+        kernel getter's address are not cited."""
+        row = next(test for test in self.manifest["tests"] if test["id"] == "PSP-HLE-ISSUES-001")
+        note = row["measurement_note"]
+        for word in ("kuKernelGetModel returned 3 on both calls",
+                     "first word 0x03e00008", "per-boot syscall word and is not cited",
+                     "stub words 0x0000054c and 0) and both calls returned 0x8002013a",
+                     "kuKernelCall returned 0 and the getter returned 3 for both",
+                     "all 60 vscmp cells", "VFPU_CC preset 0x15",
+                     "all 1792 rcar and rcbig rows", "Passes 0 and 1 are identical record for record",
+                     "da97b2c0 showed; that launch had no runner envelope and is not cited"):
+            self.assertIn(word, note)
+        self.assertNotIn("0x8800", note)
 
     def test_manifest_case_patterns_cover_each_stream_in_order(self) -> None:
         by_id = {test["id"]: test for test in self.manifest["tests"]}
@@ -7702,7 +7799,7 @@ class HleIssuesProbeTests(unittest.TestCase):
 
     # ---- docs -----------------------------------------------------------------------------
 
-    def test_docs_list_both_cases_as_observed_but_not_acceptance_eligible(self) -> None:
+    def test_docs_list_both_cases_as_measured(self) -> None:
         hardware = (self.root / "docs" / "HARDWARE_ORACLE.md").read_text(encoding="utf-8")
         readme = (self.fixture / "README.md").read_text(encoding="utf-8")
         for case, _cid, _stem, _macro, test_id, _log in self.CASES:
@@ -7712,8 +7809,9 @@ class HleIssuesProbeTests(unittest.TestCase):
                                   "boot 66; observed earlier from `da97b2c0` without a runner "
                                   "envelope; single launch, not in the campaign queue) |", hardware)
                 else:
-                    self.assertIn(f"| `{case}` | `{test_id}` | `NOT_RUN` (observed 2026-10-24 from "
-                                  "`da97b2c0` without a runner envelope, so not acceptance-eligible; "
+                    self.assertIn(f"| `{case}` | `{test_id}` | `MEASURED` (2026-11-10, PSP-3000, "
+                                  "boot 172, `979c6a1dd`; 1858 records and the done record; "
+                                  "observed earlier from `da97b2c0` without a runner envelope; "
                                   "single launch, not in the campaign queue) |", hardware)
                 self.assertIn(f"| `{case}` | `{test_id}` |", readme)
         self.assertIn("probe_hle_issues.c", readme)
@@ -9325,7 +9423,7 @@ class VfpuVus2iProbeTests(unittest.TestCase):
                       "OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o\n",
                       self.makefile)
         self.assertIn("#define HLE_CASE_VFPU_VUS2I 171\n", self.probe)
-        self.assertIn("PSP_ORACLE_CASE == 171\n", self.probe)
+        self.assertIn("PSP_ORACLE_CASE == 171 ||", self.probe)
         self.assertIn('#define HLE_CAMPAIGN_ID "vfpu-vus2i"\n'
                       '#define HLE_TEST_ID "PSP-VFPU-VUS2I-001"\n'
                       '#define HLE_LOG "host0:/vfpu_vus2i_log.txt"', self.probe)
@@ -9587,6 +9685,1181 @@ class VfpuBasicArithProbeTests(unittest.TestCase):
         self.assertEqual(row["hardware_evidence"], "MEASURED")
         self.assertEqual(row["evidence_cases"], row["case_ids"])
         self.assertIn("POWER RISK", row["risk"])
+
+
+class VfpuWideDotProbeTests(unittest.TestCase):
+    """CASE=vfpu-wide-dot-matrix (173, PSP-VFPU-WIDEDOT-001) in probe_hle_issues.c: the #326 wide
+    dot-product and matrix VFPU forms. Register-only: no system call in the section beyond the
+    shared writer, bounded loops, a step before each form group, identity prefixes, records within
+    the writer's line, a fixed-shape stream that matches the registry, and the 2026-11-09 hardware
+    result recorded as MEASURED."""
+
+    makefile: ClassVar[str]
+    probe: ClassVar[str]
+    rows: ClassVar[list[dict[str, Any]]]
+    section: ClassVar[str]
+    readme: ClassVar[str]
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        root = Path(__file__).resolve().parents[1]
+        fixture = root / "fixtures" / "psp_oracle"
+        cls.probe = (fixture / "probe_hle_issues.c").read_text(encoding="utf-8")
+        cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
+        cls.readme = (fixture / "README.md").read_text(encoding="utf-8")
+        manifest = json.loads((root / "tools" / "psp_oracle" / "manifest.json")
+                              .read_text(encoding="utf-8"))
+        cls.rows = []
+        stack = [manifest]
+        for _ in range(100000):
+            if not stack:
+                break
+            node = stack.pop()
+            if isinstance(node, dict):
+                if node.get("id") == "PSP-VFPU-WIDEDOT-001":
+                    cls.rows.append(node)
+                stack.extend(node.values())
+            elif isinstance(node, list):
+                stack.extend(node)
+        start = cls.probe.rindex("#if PSP_ORACLE_CASE == HLE_CASE_VFPU_WIDE_DOT\n")
+        end = cls.probe.index("#endif /* HLE_CASE_VFPU_WIDE_DOT */", start)
+        cls.section = _c_code(cls.probe[start:end])
+
+    def test_route_registration_and_log(self) -> None:
+        self.assertIn("else ifeq ($(CASE),vfpu-wide-dot-matrix)\nCASE_ID = 173\n", self.makefile)
+        self.assertIn("else ifeq ($(CASE),vfpu-wide-dot-matrix)\n"
+                      "TARGET = $(BUILD_DIR)/vfpu_wide_dot_matrix\n"
+                      "OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o\n",
+                      self.makefile)
+        self.assertIn("#define HLE_CASE_VFPU_WIDE_DOT 173\n", self.probe)
+        self.assertIn("PSP_ORACLE_CASE == 173 ||", self.probe)
+        self.assertIn('#define HLE_CAMPAIGN_ID "vfpu-wide-dot-matrix"\n'
+                      '#define HLE_TEST_ID "PSP-VFPU-WIDEDOT-001"\n'
+                      '#define HLE_LOG "host0:/vfpu_wide_dot_matrix_log.txt"', self.probe)
+        self.assertEqual(_campaign_host0_log_path(Path("/scratch"), "vfpu-wide-dot-matrix").name,
+                         "vfpu_wide_dot_matrix_log.txt")
+        self.assertEqual(_campaign_completeness_contract("vfpu-wide-dot-matrix"),
+                         "strict-golden-sequence")
+        self.assertNotIn("vfpu-wide-dot-matrix", CAMPAIGN_QUEUE_CASES)
+        self.assertIn("vfpu-wide-dot-matrix", parse_golden.HLE_OBSERVATION_CASES)
+        self.assertIn("| `vfpu-wide-dot-matrix` | `PSP-VFPU-WIDEDOT-001` |", self.readme)
+
+    def test_section_is_register_only_and_bounded(self) -> None:
+        self.assertEqual(set(re.findall(r"\b(sce\w+)\s*\(", self.section)), set())
+        self.assertNotIn("while (", self.section)
+        for banned in ("for (;;)", "do {", "goto ", "malloc(", "kuKernel", "sctrl", "mtvc",
+                       "ctc2", "cfc2"):
+            self.assertNotIn(banned, self.section)
+        headers = re.findall(r"\bfor \(([^)]*)\)", self.section)
+        self.assertGreaterEqual(len(headers), 10)
+        for header in headers:
+            with self.subTest(loop=header):
+                self.assertRegex(header, r"^unsigned \w+ = [\w *+]+; \w+ < ")
+        # The identity prefix only: no vpfxs word is issued in this case.
+        self.assertNotIn("TN_PFX_P1", self.section)
+        self.assertNotIn("TN_PFX_P2", self.section)
+
+    def test_the_step_comes_before_the_records(self) -> None:
+        bodies = _c_function_bodies(self.section)
+        self.assertLess(bodies["wd_group"].index("hle_step(name);"),
+                        bodies["wd_group"].index("hle_record("))
+        self.assertIn("wd_group(pass, &s_wd_forms[form])", bodies["hle_run"])
+        self.assertIn("form < WD_FORMS", bodies["hle_run"])
+
+    def test_the_words_match_the_forms(self) -> None:
+        words = {
+            "vdot_p": 0x64810088, "vdot_q": 0x64818088, "vhdp_q": 0x66018088,
+            "vcrsp_t": 0xf2818008, "vqmul_q": 0xf2818088, "vtfm_q": 0xf1808488,
+            "vhtfm_q": 0xf1808408, "vmmul_q": 0xf0008488, "vmmul_qt": 0xf000a488,
+            "vmscl_q": 0xf2018488, "vmzero_q": 0xf3868088, "vmidt_q": 0xf3838088,
+            "vmone_q": 0xf3878088, "vmmov_q": 0xf3808488, "vrot_q": 0xf3a48088,
+        }
+        self.assertEqual(len(words), 15)
+        for name, word in words.items():
+            with self.subTest(form=name):
+                self.assertIn(f'TN_CELL_FN(wd_{name}, TN_PFX_NONE, "0x{word:08x}")', self.section)
+                self.assertIn(f"0x{word:08x}u, wd_{name},", self.section)
+        # Destination S200/C200/M200 (0x08) in the low seven bits of every word.
+        for word in words.values():
+            self.assertEqual(word & 0x7f, 0x08)
+
+    def test_the_operands(self) -> None:
+        spec = re.search(r"s_wd_spec\[WD_SPECIALS\] = \{(.*?)\n\};", self.section, re.DOTALL)
+        self.assertIsNotNone(spec)
+        words = [int(w, 16) for w in re.findall(r"0x([0-9a-f]{8})u", _matched(spec).group(1))]
+        self.assertEqual(words, [0x7fc00011, 0xffc00022, 0x7f800033, 0x7f800000, 0xff800000,
+                                 0x00000001, 0x80000001, 0x80000000])
+        self.assertTrue(words[0] & 0x00400000)
+        self.assertTrue(words[1] & 0x00400000)
+        self.assertFalse(words[2] & 0x00400000)
+        self.assertTrue(words[2] & 0x003fffff)
+        order = re.search(r"s_wd_ord\[WD_ORDERS\]\[4\] = \{(.*?)\n\};", self.section, re.DOTALL)
+        self.assertIsNotNone(order)
+        ow = [int(w, 16) for w in re.findall(r"0x([0-9a-f]{8})u", _matched(order).group(1))]
+        self.assertEqual(len(ow), 32)
+        tiny, big, one, e8 = 0x33800000, 0x4b800000, 0x3f800000, 0x4cbebc20
+        self.assertEqual(ow[:12], [one, tiny, tiny, tiny, tiny, tiny, tiny, one,
+                                   big, one, one, one])
+        self.assertEqual(ow[16:20], [e8, one, e8 | 0x80000000, one])
+        self.assertIn("#define WD_MAX_WORDS 80u", self.section)
+
+    def test_stream_shape_matches_the_registry(self) -> None:
+        spec, counts = CAMPAIGN_PROBE_CASES["vfpu-wide-dot-matrix"]
+        self.assertEqual(spec.test_id, "PSP-VFPU-WIDEDOT-001")
+        self.assertEqual(spec.terminal_case, "vfpu-wide-dot-matrix-done")
+        cases = parse_golden.VFPU_WIDE_DOT_CASES
+        self.assertEqual(len(cases), 366)
+        self.assertEqual(len(cases), len(set(cases)))
+        self.assertEqual(cases[0], "vdot-p-p0-0")
+        self.assertEqual(cases[-1], "vrot-q-p1")
+        self.assertEqual(counts["vdot-p-p0-0"], 80)
+        self.assertEqual(counts["vdot-p-p0-2"], 5)
+        self.assertEqual(counts["vmmul-q-p1-72"], 48)
+        self.assertEqual(counts["vmmul-qt-p0"], 48)
+        self.assertEqual(counts["vmzero-q-p0"], 16)
+        self.assertEqual(counts["vrot-q-p0"], 80)
+        self.assertEqual(max(counts.values()), 80)
+        # The writer's line: a header plus 80 words of up to 17 characters stays under its 1536 bytes.
+        self.assertLess(120 + 10 * 16 + 70 * 17, 1536 - 32)
+        # The probe's table agrees with the registry: stem, source words, destination words, cells.
+        table = re.search(r"s_wd_forms\[WD_FORMS\] = \{(.*?)\n\};", self.section, re.DOTALL)
+        self.assertIsNotNone(table)
+        probe_rows = re.findall(
+            r'\{"([\w-]+)", 0x[0-9a-f]{8}u, wd_\w+, WD_\w+, \d+, (\d+), (\d+), \d+, (\d+), \d+, (\d+)\}',
+            _matched(table).group(1))
+        self.assertEqual(len(probe_rows), 15)
+        self.assertEqual(
+            [(stem, int(c0) + int(c1), int(nout), int(nscen))
+             for stem, nscen, nout, c0, c1 in probe_rows],
+            [tuple(row) for row in parse_golden.VFPU_WIDE_DOT_FORMS])
+        for fragment in ("#define WD_FORMS 15u", "pass < 2u", "form < WD_FORMS"):
+            self.assertIn(fragment, self.section)
+
+    def test_manifest_row_is_a_measured_case(self) -> None:
+        self.assertEqual(len(self.rows), 1)
+        row = self.rows[0]
+        self.assertEqual(row["prx"], "vfpu_wide_dot_matrix.prx")
+        self.assertEqual(row["source"], "fixtures/psp_oracle/probe_hle_issues.c")
+        self.assertEqual(row["diagnostic_case_ids"], ["vfpu-wide-dot-matrix"])
+        self.assertEqual(row["issues"], [326])
+        self.assertEqual(row["hardware_evidence"], "MEASURED")
+        self.assertEqual(row["evidence_cases"], row["case_ids"])
+        self.assertNotIn("evidence_note", row)
+        self.assertEqual(row["case_ids"][-1], "vfpu-wide-dot-matrix-done")
+
+    def test_measurement_note_names_the_run_and_its_exact_cells(self) -> None:
+        note = self.rows[0]["measurement_note"]
+        # The 2026-11-09 (UTC) launch: boot 168, XMB context, pspver 0x06060010, from a
+        # pre-publication commit of this case whose case code matches this tree.
+        for term in ("2026-11-09 (UTC)", "PSP-3000", "boot 168", "XMB context", "b2271c93",
+                     "pre-publication commit", "identical to this tree's", "system software 6.61",
+                     "0x06060010", "ARK-5 with cIPL, version 5.1.0", "367 records",
+                     "acceptance-eligible with 0 blockers", "537 cells"):
+            self.assertIn(term, note)
+        # Aligned truncation in the frame of the largest term; vrot NaN and infinity words.
+        for cell in ("= 0x3f800001", "= 0x4b800001", "(0, 0xbf7ffffe, 0x3f7ffffe)",
+                     "0.25 (0x3f6c835c, 0x3ec3ef14)", "-inf (0x7f800001, 0xff800001)"):
+            self.assertIn(cell, note)
+
+
+class VfpuMfvMtvProbeTests(unittest.TestCase):
+    """CASE=vfpu-mfv-mtv (174, PSP-VFPU-MFVMTV-001) in probe_hle_issues.c: the #326 mtv.s/mfv.s word round trip. Register-only: no system call
+    in the section beyond the shared writer, bounded loops, a step before the cells, no
+    control-register write, a fixed-shape stream that matches the registry, and the 2026-11-09
+    hardware result recorded as MEASURED."""
+
+    makefile: ClassVar[str]
+    probe: ClassVar[str]
+    rows: ClassVar[list[dict[str, Any]]]
+    section: ClassVar[str]
+    readme: ClassVar[str]
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        root = Path(__file__).resolve().parents[1]
+        fixture = root / "fixtures" / "psp_oracle"
+        cls.probe = (fixture / "probe_hle_issues.c").read_text(encoding="utf-8")
+        cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
+        cls.readme = (fixture / "README.md").read_text(encoding="utf-8")
+        manifest = json.loads((root / "tools" / "psp_oracle" / "manifest.json")
+                              .read_text(encoding="utf-8"))
+        cls.rows = []
+        stack = [manifest]
+        for _ in range(100000):
+            if not stack:
+                break
+            node = stack.pop()
+            if isinstance(node, dict):
+                if node.get("id") == "PSP-VFPU-MFVMTV-001":
+                    cls.rows.append(node)
+                stack.extend(node.values())
+            elif isinstance(node, list):
+                stack.extend(node)
+        start = cls.probe.rindex("#if PSP_ORACLE_CASE == HLE_CASE_VFPU_MFV_MTV\n")
+        end = cls.probe.index("#endif /* HLE_CASE_VFPU_MFV_MTV */", start)
+        cls.section = _c_code(cls.probe[start:end])
+
+    def test_route_registration_and_log(self) -> None:
+        self.assertIn("else ifeq ($(CASE),vfpu-mfv-mtv)\nCASE_ID = 174\n", self.makefile)
+        self.assertIn("else ifeq ($(CASE),vfpu-mfv-mtv)\nTARGET = $(BUILD_DIR)/vfpu_mfv_mtv\n"
+                      "OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o\n",
+                      self.makefile)
+        self.assertIn("#define HLE_CASE_VFPU_MFV_MTV 174\n", self.probe)
+        self.assertIn("PSP_ORACLE_CASE == 174 ||", self.probe)
+        self.assertIn('#define HLE_CAMPAIGN_ID "vfpu-mfv-mtv"\n'
+                      '#define HLE_TEST_ID "PSP-VFPU-MFVMTV-001"\n'
+                      '#define HLE_LOG "host0:/vfpu_mfv_mtv_log.txt"', self.probe)
+        self.assertEqual(_campaign_host0_log_path(Path("/scratch"), "vfpu-mfv-mtv").name,
+                         "vfpu_mfv_mtv_log.txt")
+        self.assertEqual(_campaign_completeness_contract("vfpu-mfv-mtv"), "strict-golden-sequence")
+        self.assertNotIn("vfpu-mfv-mtv", CAMPAIGN_QUEUE_CASES)
+        self.assertIn("vfpu-mfv-mtv", parse_golden.HLE_OBSERVATION_CASES)
+        self.assertIn("| `vfpu-mfv-mtv` | `PSP-VFPU-MFVMTV-001` |", self.readme)
+
+    def test_section_is_register_only_and_bounded(self) -> None:
+        self.assertEqual(set(re.findall(r"\b(sce\w+)\s*\(", self.section)), set())
+        self.assertNotIn("while (", self.section)
+        for banned in ("for (;;)", "do {", "goto ", "malloc(", "kuKernel", "sctrl", "TN_PFX_P1",
+                       "TN_PFX_P2"):
+            self.assertNotIn(banned, self.section)
+        headers = re.findall(r"\bfor \(([^)]*)\)", self.section)
+        self.assertGreaterEqual(len(headers), 2)
+        for header in headers:
+            with self.subTest(loop=header):
+                self.assertRegex(header, r"^unsigned \w+ = [\w *]+; \w+ < ")
+        # No control register is written: no mtvc word (COP2 rs 7 with bit 7 of the immediate set).
+        for word in re.findall(r"0x([0-9a-f]{8})", self.section):
+            value = int(word, 16)
+            self.assertFalse((value >> 21) == 0x247 and value & 0x80, word)
+
+    def test_manifest_row_is_a_measured_case(self) -> None:
+        self.assertEqual(len(self.rows), 1)
+        row = self.rows[0]
+        self.assertEqual(row["prx"], "vfpu_mfv_mtv.prx")
+        self.assertEqual(row["source"], "fixtures/psp_oracle/probe_hle_issues.c")
+        self.assertEqual(row["diagnostic_case_ids"], ["vfpu-mfv-mtv"])
+        self.assertEqual(row["issues"], [326])
+        self.assertEqual(row["hardware_evidence"], "MEASURED")
+        self.assertEqual(row["evidence_cases"], row["case_ids"])
+        self.assertNotIn("evidence_note", row)
+        self.assertEqual(row["case_ids"][-1], "vfpu-mfv-mtv-done")
+
+    def test_measurement_note_names_the_run_and_every_word(self) -> None:
+        note = self.rows[0]["measurement_note"]
+        for term in ("2026-11-09 (UTC)", "PSP-3000", "boot 167", "XMB context", "1301371e",
+                     "pre-publication commit", "identical to this tree's", "system software 6.61",
+                     "0x06060010", "ARK-5 with cIPL, version 5.1.0", "5 records",
+                     "acceptance-eligible with 0 blockers", "bit for bit"):
+            self.assertIn(term, note)
+        # Every input word came back unchanged through both registers.
+        for word in (0x80000000, 0x00000001, 0x80000001, 0x007FFFFF, 0x807FFFFF, 0x7FC00011,
+                     0xFFC00022, 0x7F800033, 0xFF800044, 0x7F800000, 0xFF800000, 0x7F7FFFFF,
+                     0x3F800000, 0xDEADBEEF, 0xFFFFFFFF):
+            self.assertIn(f"0x{word:08x}", note)
+
+    def test_the_encodings_match_the_forms(self) -> None:
+        for word, text in ((0x48e80000, "mtv $t0, S000"), (0x48690000, "mfv $t1, S000"),
+                           (0x48e8007f, "mtv $t0, S733"), (0x4869007f, "mfv $t1, S733")):
+            with self.subTest(form=text):
+                self.assertIn(f'".word 0x{word:08x}\\n\\t"', self.section, text)
+        # mtv: COP2 rs 7, rt $t0 (8); mfv: COP2 rs 3, rt $t1 (9); vd index in the low 7 bits.
+        self.assertEqual(0x48000000 | (7 << 21) | (8 << 16) | 0x00, 0x48e80000)
+        self.assertEqual(0x48000000 | (3 << 21) | (9 << 16) | 0x7f, 0x4869007f)
+
+    def test_the_input_words(self) -> None:
+        ops = re.search(r"s_mm_in\[MM_WORDS\] = \{(.*?)\n\};", self.section, re.DOTALL)
+        self.assertIsNotNone(ops)
+        words = [int(w, 16) for w in re.findall(r"0x([0-9a-f]{8})u", _matched(ops).group(1))]
+        self.assertEqual(words, [
+            0x00000000, 0x80000000, 0x00000001, 0x80000001, 0x007fffff, 0x807fffff, 0x7fc00011,
+            0xffc00022, 0x7f800033, 0xff800044, 0x7f800000, 0xff800000, 0x7f7fffff, 0x3f800000,
+            0xdeadbeef, 0xffffffff, 0x00000000])
+        self.assertIn("#define MM_WORDS 17u", self.section)
+        for word in words[6:8]:
+            self.assertTrue(word & 0x00400000)
+        for word in words[8:10]:
+            self.assertFalse(word & 0x00400000)
+            self.assertTrue(word & 0x003fffff)
+
+    def test_stream_shape_matches_the_registry(self) -> None:
+        spec, counts = CAMPAIGN_PROBE_CASES["vfpu-mfv-mtv"]
+        self.assertEqual(spec.test_id, "PSP-VFPU-MFVMTV-001")
+        self.assertEqual(spec.terminal_case, "vfpu-mfv-mtv-done")
+        self.assertEqual(parse_golden.VFPU_MFV_MTV_CASES,
+                         ("mtv-mfv-p0", "mtv-mfv2-p0", "mtv-mfv-p1", "mtv-mfv2-p1"))
+        for case in parse_golden.VFPU_MFV_MTV_CASES:
+            self.assertEqual(counts[case], 17)
+        bodies = _c_function_bodies(self.section)
+        self.assertLess(bodies["mm_pass"].index("hle_step(name);"),
+                        bodies["mm_pass"].index("hle_record("))
+        self.assertIn("pass < 2u", bodies["hle_run"])
+
+
+class VfpuConstantsProbeTests(unittest.TestCase):
+    """CASE=vfpu-constants (175, PSP-VFPU-CONSTANTS-001) in probe_hle_issues.c: the #326 vcst.s/vcst.q constants. Register-only: no system call
+    in the section beyond the shared writer, bounded loops, a step before the cells, no
+    control-register write, a fixed-shape stream that matches the registry, and the 2026-11-10
+    hardware result recorded as MEASURED."""
+
+    makefile: ClassVar[str]
+    probe: ClassVar[str]
+    rows: ClassVar[list[dict[str, Any]]]
+    section: ClassVar[str]
+    readme: ClassVar[str]
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        root = Path(__file__).resolve().parents[1]
+        fixture = root / "fixtures" / "psp_oracle"
+        cls.probe = (fixture / "probe_hle_issues.c").read_text(encoding="utf-8")
+        cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
+        cls.readme = (fixture / "README.md").read_text(encoding="utf-8")
+        manifest = json.loads((root / "tools" / "psp_oracle" / "manifest.json")
+                              .read_text(encoding="utf-8"))
+        cls.rows = []
+        stack = [manifest]
+        for _ in range(100000):
+            if not stack:
+                break
+            node = stack.pop()
+            if isinstance(node, dict):
+                if node.get("id") == "PSP-VFPU-CONSTANTS-001":
+                    cls.rows.append(node)
+                stack.extend(node.values())
+            elif isinstance(node, list):
+                stack.extend(node)
+        start = cls.probe.rindex("#if PSP_ORACLE_CASE == HLE_CASE_VFPU_CONSTANTS\n")
+        end = cls.probe.index("#endif /* HLE_CASE_VFPU_CONSTANTS */", start)
+        cls.section = _c_code(cls.probe[start:end])
+
+    def test_route_registration_and_log(self) -> None:
+        self.assertIn("else ifeq ($(CASE),vfpu-constants)\nCASE_ID = 175\n", self.makefile)
+        self.assertIn("else ifeq ($(CASE),vfpu-constants)\nTARGET = $(BUILD_DIR)/vfpu_constants\n"
+                      "OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o\n",
+                      self.makefile)
+        self.assertIn("#define HLE_CASE_VFPU_CONSTANTS 175\n", self.probe)
+        self.assertIn("PSP_ORACLE_CASE == 175 ||", self.probe)
+        self.assertIn('#define HLE_CAMPAIGN_ID "vfpu-constants"\n'
+                      '#define HLE_TEST_ID "PSP-VFPU-CONSTANTS-001"\n'
+                      '#define HLE_LOG "host0:/vfpu_constants_log.txt"', self.probe)
+        self.assertEqual(_campaign_host0_log_path(Path("/scratch"), "vfpu-constants").name,
+                         "vfpu_constants_log.txt")
+        self.assertEqual(_campaign_completeness_contract("vfpu-constants"), "strict-golden-sequence")
+        self.assertNotIn("vfpu-constants", CAMPAIGN_QUEUE_CASES)
+        self.assertIn("vfpu-constants", parse_golden.HLE_OBSERVATION_CASES)
+        self.assertIn("| `vfpu-constants` | `PSP-VFPU-CONSTANTS-001` |", self.readme)
+
+    def test_section_is_register_only_and_bounded(self) -> None:
+        self.assertEqual(set(re.findall(r"\b(sce\w+)\s*\(", self.section)), set())
+        self.assertNotIn("while (", self.section)
+        for banned in ("for (;;)", "do {", "goto ", "malloc(", "kuKernel", "sctrl", "TN_PFX_P1",
+                       "TN_PFX_P2"):
+            self.assertNotIn(banned, self.section)
+        headers = re.findall(r"\bfor \(([^)]*)\)", self.section)
+        self.assertGreaterEqual(len(headers), 2)
+        for header in headers:
+            with self.subTest(loop=header):
+                self.assertRegex(header, r"^unsigned \w+ = [\w *]+; \w+ < ")
+        # No control register is written: no mtvc word (COP2 rs 7 with bit 7 of the immediate set).
+        for word in re.findall(r"0x([0-9a-f]{8})", self.section):
+            value = int(word, 16)
+            self.assertFalse((value >> 21) == 0x247 and value & 0x80, word)
+
+    def test_manifest_row_is_a_measured_case(self) -> None:
+        self.assertEqual(len(self.rows), 1)
+        row = self.rows[0]
+        self.assertEqual(row["prx"], "vfpu_constants.prx")
+        self.assertEqual(row["source"], "fixtures/psp_oracle/probe_hle_issues.c")
+        self.assertEqual(row["diagnostic_case_ids"], ["vfpu-constants"])
+        self.assertEqual(row["issues"], [326])
+        self.assertEqual(row["hardware_evidence"], "MEASURED")
+        self.assertEqual(row["evidence_cases"], row["case_ids"])
+        self.assertNotIn("evidence_note", row)
+        self.assertEqual(row["case_ids"][-1], "vfpu-constants-done")
+
+    def test_measurement_note_names_the_run_and_every_constant(self) -> None:
+        note = self.rows[0]["measurement_note"]
+        # The 2026-11-10 (UTC) launch: boot 178, XMB context, pspver 0x06060010, from an ancestor
+        # of this tree whose case code matches it.
+        for term in ("2026-11-10 (UTC)", "PSP-3000", "boot 178", "XMB context", "9426722a",
+                     "identical to this tree's", "system software 6.61",
+                     "release:6.61:, system:58401@release_661,0x06060110:", "0x06060010 (\"6.6.0\")",
+                     "ARK-5 with cIPL, version 5.1.0", "9 records",
+                     "acceptance-eligible with 0 blockers", "none faulted", "0x7a5a5a5a"):
+            self.assertIn(term, note)
+        # Indices 0-19 in order; index 4 is 0x3f906ebb, one ulp above the PPSSPP-derived table.
+        words = (0x00000000, 0x7F7FFFFF, 0x3FB504F3, 0x3F3504F3, 0x3F906EBB, 0x3F22F983, 0x3EA2F983,
+                 0x3F490FDB, 0x3FC90FDB, 0x40490FDB, 0x402DF854, 0x3FB8AA3B, 0x3EDE5BD9, 0x3F317218,
+                 0x40135D8E, 0x40C90FDB, 0x3F060A92, 0x3E9A209B, 0x40549A78, 0x3F5DB3D7)
+        for index, word in enumerate(words):
+            self.assertIn(f"{index} 0x{word:08x}", note)
+        self.assertIn("The reserved indices 20-31 wrote 0x00000000", note)
+
+    def test_the_encodings_match_the_forms(self) -> None:
+        # vcst: 0xd0600000 | index << 16, .s vd S200 0x0008, .q vd C200 0x8088. psp-as accepts the
+        # named constants for indices 1-19 and its words equal these (VFPU_HUGE .s 0xd0610008,
+        # VFPU_SQRT3_2 .q 0xd0738088).
+        for index in range(32):
+            for size, bits in (("s", 0x0008), ("q", 0x8088)):
+                word = 0xd0600000 | (index << 16) | bits
+                with self.subTest(index=index, size=size):
+                    self.assertIn(f'TN_CELL_FN(vc_{size}_{index}, TN_PFX_NONE, "0x{word:08x}")',
+                                  self.section)
+        self.assertEqual(0xd0600000 | (1 << 16) | 0x0008, 0xd0610008)
+        self.assertEqual(0xd0600000 | (19 << 16) | 0x8088, 0xd0738088)
+        self.assertIn("vc_s_28, vc_s_29, vc_s_30, vc_s_31,", self.section)
+        self.assertIn("vc_q_28, vc_q_29, vc_q_30, vc_q_31,", self.section)
+
+    def test_sentinel_background_reserved_last_and_steps(self) -> None:
+        bodies = _c_function_bodies(self.section)
+        self.assertIn("s_vc_in[i] = TN_SENTINEL;", bodies["vc_exec"])
+        header = (Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+                  / "hle_vfpu_cells.h").read_text(encoding="utf-8")
+        self.assertIn("#define TN_SENTINEL 0x7a5a5a5au", header)
+        for group in ("vc_core", "vc_reserved"):
+            with self.subTest(group=group):
+                self.assertLess(bodies[group].index("hle_step(name);"),
+                                bodies[group].index("vc_record("))
+        run = bodies["hle_run"]
+        self.assertLess(run.index("vc_core(pass)"), run.index("vc_reserved(pass)"))
+        self.assertEqual(run.count("pass < 2u"), 2)
+        self.assertIn("#define VC_CORE 20u", self.section)
+
+    def test_stream_shape_matches_the_registry(self) -> None:
+        spec, counts = CAMPAIGN_PROBE_CASES["vfpu-constants"]
+        self.assertEqual(spec.test_id, "PSP-VFPU-CONSTANTS-001")
+        self.assertEqual(spec.terminal_case, "vfpu-constants-done")
+        self.assertEqual(parse_golden.VFPU_CONSTANTS_CASES, (
+            "vcst-s-p0", "vcst-q-p0", "vcst-s-p1", "vcst-q-p1",
+            "vcst-s-res-p0", "vcst-q-res-p0", "vcst-s-res-p1", "vcst-q-res-p1"))
+        self.assertEqual(counts["vcst-s-p0"], 21)
+        self.assertEqual(counts["vcst-q-p1"], 81)
+        self.assertEqual(counts["vcst-s-res-p0"], 13)
+        self.assertEqual(counts["vcst-q-res-p1"], 49)
+        # The log line buffer (1536 bytes) holds at most 94 words of 16 bytes.
+        self.assertLessEqual(max(counts.values()), 94)
+
+    def test_manifest_row_names_the_power_risk(self) -> None:
+        self.assertIn("POWER RISK", self.rows[0]["risk"])
+
+
+class VfpuRoundSepProbeTests(unittest.TestCase):
+    """CASE=vfpu-round-sep (176, PSP-VFPU-ROUNDSEP-001) in probe_hle_issues.c: the #326 rounding
+    separation of vdot.q, vmscl.q, vmul.s, vadd.s and vsub.s. Register-only: no system call in the
+    section beyond the shared writer, bounded loops, a step before each form group, identity
+    prefixes, records within the writer's line, a fixed-shape stream that matches the registry,
+    and the 2026-11-09 hardware result recorded as MEASURED."""
+
+    makefile: ClassVar[str]
+    probe: ClassVar[str]
+    rows: ClassVar[list[dict[str, Any]]]
+    section: ClassVar[str]
+    readme: ClassVar[str]
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        root = Path(__file__).resolve().parents[1]
+        fixture = root / "fixtures" / "psp_oracle"
+        cls.probe = (fixture / "probe_hle_issues.c").read_text(encoding="utf-8")
+        cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
+        cls.readme = (fixture / "README.md").read_text(encoding="utf-8")
+        manifest = json.loads((root / "tools" / "psp_oracle" / "manifest.json")
+                              .read_text(encoding="utf-8"))
+        cls.rows = []
+        stack = [manifest]
+        for _ in range(100000):
+            if not stack:
+                break
+            node = stack.pop()
+            if isinstance(node, dict):
+                if node.get("id") == "PSP-VFPU-ROUNDSEP-001":
+                    cls.rows.append(node)
+                stack.extend(node.values())
+            elif isinstance(node, list):
+                stack.extend(node)
+        start = cls.probe.rindex("#if PSP_ORACLE_CASE == HLE_CASE_VFPU_ROUND_SEP\n")
+        end = cls.probe.index("#endif /* HLE_CASE_VFPU_ROUND_SEP */", start)
+        cls.section = _c_code(cls.probe[start:end])
+
+    def test_route_registration_and_log(self) -> None:
+        self.assertIn("else ifeq ($(CASE),vfpu-round-sep)\nCASE_ID = 176\n", self.makefile)
+        self.assertIn("else ifeq ($(CASE),vfpu-round-sep)\n"
+                      "TARGET = $(BUILD_DIR)/vfpu_round_sep\n"
+                      "OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o\n",
+                      self.makefile)
+        self.assertIn("#define HLE_CASE_VFPU_ROUND_SEP 176\n", self.probe)
+        self.assertIn("PSP_ORACLE_CASE == 176 ||", self.probe)
+        self.assertIn('#define HLE_CAMPAIGN_ID "vfpu-round-sep"\n'
+                      '#define HLE_TEST_ID "PSP-VFPU-ROUNDSEP-001"\n'
+                      '#define HLE_LOG "host0:/vfpu_round_sep_log.txt"', self.probe)
+        self.assertEqual(_campaign_host0_log_path(Path("/scratch"), "vfpu-round-sep").name,
+                         "vfpu_round_sep_log.txt")
+        self.assertEqual(_campaign_completeness_contract("vfpu-round-sep"),
+                         "strict-golden-sequence")
+        self.assertNotIn("vfpu-round-sep", CAMPAIGN_QUEUE_CASES)
+        self.assertIn("vfpu-round-sep", parse_golden.HLE_OBSERVATION_CASES)
+        self.assertIn("| `vfpu-round-sep` | `PSP-VFPU-ROUNDSEP-001` |", self.readme)
+
+    def test_section_is_register_only_and_bounded(self) -> None:
+        self.assertEqual(set(re.findall(r"\b(sce\w+)\s*\(", self.section)), set())
+        self.assertNotIn("while (", self.section)
+        for banned in ("for (;;)", "do {", "goto ", "malloc(", "kuKernel", "sctrl", "mtvc",
+                       "ctc2", "cfc2"):
+            self.assertNotIn(banned, self.section)
+        headers = re.findall(r"\bfor \(([^)]*)\)", self.section)
+        self.assertGreaterEqual(len(headers), 6)
+        for header in headers:
+            with self.subTest(loop=header):
+                self.assertRegex(header, r"^unsigned \w+ = [\w *+]+; \w+ < ")
+        self.assertNotIn("TN_PFX_P1", self.section)
+        self.assertNotIn("TN_PFX_P2", self.section)
+
+    def test_the_step_comes_before_the_records(self) -> None:
+        bodies = _c_function_bodies(self.section)
+        self.assertLess(bodies["rs_group"].index("hle_step(name);"),
+                        bodies["rs_group"].index("hle_record("))
+        self.assertIn("rs_group(pass, &s_rs_forms[form])", bodies["hle_run"])
+        self.assertIn("form < RS_FORMS", bodies["hle_run"])
+
+    def test_the_words_match_the_forms(self) -> None:
+        words = {"vdot_q": 0x64818088, "vmscl_q": 0xf2018488, "vmul_s": 0x64010008,
+                 "vadd_s": 0x60010008, "vsub_s": 0x60810008}
+        for name, word in words.items():
+            with self.subTest(form=name):
+                self.assertIn(f'TN_CELL_FN(rs_{name}, TN_PFX_NONE, "0x{word:08x}")', self.section)
+                self.assertIn(f"0x{word:08x}u, rs_{name},", self.section)
+            self.assertEqual(word & 0x7f, 0x08)
+
+    def test_the_operands(self) -> None:
+        def table(name: str) -> list[int]:
+            match = re.search(name + r"\[\d+\]\[\d+\] = \{(.*?)\n\};", self.section, re.DOTALL)
+            self.assertIsNotNone(match)
+            return [int(w, 16) for w in re.findall(r"0x([0-9a-f]{8})u", _matched(match).group(1))]
+
+        self.assertEqual(table("s_rs_mscl"), [
+            0x3fc00001, 0x3fc00001, 0x3fc00001, 0xbfc00001, 0xbfc00001, 0x3fc00001,
+            0xbfc00001, 0xbfc00001, 0x3f800001, 0x3f800001, 0x3fc00003, 0x3fc00001])
+        self.assertEqual(table("s_rs_vmul"), [
+            0x3fc00001, 0x3fc00001, 0x3fc00001, 0xbfc00001, 0x3f800001, 0x3f800001,
+            0x3fc00003, 0x3fc00001])
+        self.assertEqual(table("s_rs_vadd"), [0x3f800003, 0x3f800000, 0x3f800001, 0x3f000000,
+                                              0xbf800003, 0xbf800000])
+        self.assertEqual(table("s_rs_vsub"), [0x3f800003, 0xbf800000])
+        vdot = re.search(r"s_rs_vdot\[7\]\[8\] = \{(.*?)\n\};", self.section, re.DOTALL)
+        self.assertIsNotNone(vdot)
+        self.assertEqual(len(re.findall(r"\{[^{}]*\}", _matched(vdot).group(1))), 7)
+        self.assertIn("{0x40000001u, 0x40000000u, 0u, 0u, RS_ONE, RS_ONE, 0u, 0u}", self.section)
+        self.assertIn("#define RS_MAX_WORDS 80u", self.section)
+
+    def test_stream_shape_matches_the_registry(self) -> None:
+        spec, counts = CAMPAIGN_PROBE_CASES["vfpu-round-sep"]
+        self.assertEqual(spec.test_id, "PSP-VFPU-ROUNDSEP-001")
+        self.assertEqual(spec.terminal_case, "vfpu-round-sep-done")
+        cases = parse_golden.VFPU_ROUND_SEP_CASES
+        self.assertEqual(len(cases), 14)
+        self.assertEqual(len(cases), len(set(cases)))
+        self.assertEqual(cases[0], "vdot-rs-p0")
+        self.assertEqual(cases[-1], "vsub-rs-p1")
+        self.assertEqual(counts["vdot-rs-p0"], 63)
+        self.assertEqual(counts["vmscl-rs-p0-0"], 66)
+        self.assertEqual(counts["vmscl-rs-p1-2"], 66)
+        self.assertEqual(counts["vmul-rs-p0"], 12)
+        self.assertEqual(counts["vadd-rs-p1"], 9)
+        self.assertEqual(counts["vsub-rs-p0"], 3)
+        self.assertLessEqual(max(counts.values()), 80)
+        table = re.search(r"s_rs_forms\[RS_FORMS\] = \{(.*?)\n\};", self.section, re.DOTALL)
+        self.assertIsNotNone(table)
+        probe_rows = re.findall(
+            r'\{"([\w-]+)", 0x[0-9a-f]{8}u, rs_\w+, RS_\w+, &s_rs_\w+\[0\]\[0\], \d+, '
+            r'(\d+), (\d+), \d+, (\d+), \d+, (\d+)\}',
+            _matched(table).group(1))
+        self.assertEqual(len(probe_rows), 5)
+        self.assertEqual(
+            [(stem, int(c0) + int(c1), int(nout), int(nscen))
+             for stem, nscen, nout, c0, c1 in probe_rows],
+            [tuple(row) for row in parse_golden.VFPU_ROUND_SEP_FORMS])
+        for fragment in ("#define RS_FORMS 5u", "pass < 2u", "form < RS_FORMS"):
+            self.assertIn(fragment, self.section)
+
+    def test_manifest_row_is_a_measured_case(self) -> None:
+        self.assertEqual(len(self.rows), 1)
+        row = self.rows[0]
+        self.assertEqual(row["prx"], "vfpu_round_sep.prx")
+        self.assertEqual(row["source"], "fixtures/psp_oracle/probe_hle_issues.c")
+        self.assertEqual(row["diagnostic_case_ids"], ["vfpu-round-sep"])
+        self.assertEqual(row["issues"], [326])
+        self.assertEqual(row["hardware_evidence"], "MEASURED")
+        self.assertEqual(row["evidence_cases"], row["case_ids"])
+        self.assertNotIn("evidence_note", row)
+        self.assertNotIn("No hardware result is claimed", row["invariant"])
+        self.assertEqual(row["case_ids"][-1], "vfpu-round-sep-done")
+
+    def test_measurement_note_separates_rounding_from_truncation(self) -> None:
+        note = self.rows[0]["measurement_note"]
+        for term in ("2026-11-09 (UTC)", "PSP-3000", "boot 169", "XMB context", "f50333e8",
+                     "pre-publication commit", "identical to this tree's", "system software 6.61",
+                     "0x06060010", "ARK-5 with cIPL, version 5.1.0", "15 records",
+                     "acceptance-eligible with 0 blockers"):
+            self.assertIn(term, note)
+        # A carry-out sum rounds to nearest even; single products round to nearest.
+        for cell in ("(0x3f800003, 0x3f800000) gives 0x40000002",
+                     "(0x3f800007, 0x3f800000) gives 0x40000004",
+                     "(0x40000001, 0x40000000) gives 0x40800000",
+                     "0x3fc00001 * 0x3fc00001 = 0x40100002",
+                     "0x3fc00003 * 0x3fc00001 = 0x40100003",
+                     "0x3f800001 + 0x3f000000 = 0x3fc00001",
+                     "0x3f800003 - 0xbf800000 = 0x40000002"):
+            self.assertIn(cell, note)
+
+
+class VfpuPrefixStateProbeTests(unittest.TestCase):
+    """CASE=vfpu-prefix-state (182, PSP-VFPU-PREFIX-001) in probe_hle_issues.c: the #326 VFPU
+    prefix state (non-identity vpfxs/vpfxt/vpfxd on measured forms, prefix lifetime across other
+    instructions, vfim.s/viim.s under a pending vpfxd). Register-only: no system call in the section
+    beyond the shared writer, bounded loops, a step before every record, no control-register write,
+    identity prefixes issued around every cell, a fixed-shape stream that matches the registry, and
+    the 2026-11-10 hardware result recorded as MEASURED."""
+
+    makefile: ClassVar[str]
+    probe: ClassVar[str]
+    rows: ClassVar[list[dict[str, Any]]]
+    section: ClassVar[str]
+    raw_section: ClassVar[str]
+    readme: ClassVar[str]
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        root = Path(__file__).resolve().parents[1]
+        fixture = root / "fixtures" / "psp_oracle"
+        cls.probe = (fixture / "probe_hle_issues.c").read_text(encoding="utf-8")
+        cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
+        cls.readme = (fixture / "README.md").read_text(encoding="utf-8")
+        manifest = json.loads((root / "tools" / "psp_oracle" / "manifest.json")
+                              .read_text(encoding="utf-8"))
+        cls.rows = []
+        stack = [manifest]
+        for _ in range(100000):
+            if not stack:
+                break
+            node = stack.pop()
+            if isinstance(node, dict):
+                if node.get("id") == "PSP-VFPU-PREFIX-001":
+                    cls.rows.append(node)
+                stack.extend(node.values())
+            elif isinstance(node, list):
+                stack.extend(node)
+        start = cls.probe.rindex("#if PSP_ORACLE_CASE == HLE_CASE_VFPU_PREFIX_STATE\n")
+        end = cls.probe.index("#endif /* HLE_CASE_VFPU_PREFIX_STATE */", start)
+        cls.raw_section = cls.probe[start:end]
+        cls.section = _c_code(cls.raw_section)
+
+    def test_route_registration_and_log(self) -> None:
+        self.assertIn("else ifeq ($(CASE),vfpu-prefix-state)\nCASE_ID = 182\n", self.makefile)
+        self.assertIn("else ifeq ($(CASE),vfpu-prefix-state)\n"
+                      "TARGET = $(BUILD_DIR)/vfpu_prefix_state\n"
+                      "OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o\n",
+                      self.makefile)
+        self.assertIn("#define HLE_CASE_VFPU_PREFIX_STATE 182\n", self.probe)
+        self.assertIn("PSP_ORACLE_CASE == 182 ||", self.probe)
+        self.assertIn('#define HLE_CAMPAIGN_ID "vfpu-prefix-state"\n'
+                      '#define HLE_TEST_ID "PSP-VFPU-PREFIX-001"\n'
+                      '#define HLE_LOG "host0:/vfpu_prefix_state_log.txt"', self.probe)
+        self.assertEqual(_campaign_host0_log_path(Path("/scratch"), "vfpu-prefix-state").name,
+                         "vfpu_prefix_state_log.txt")
+        self.assertEqual(_campaign_completeness_contract("vfpu-prefix-state"),
+                         "strict-golden-sequence")
+        self.assertNotIn("vfpu-prefix-state", CAMPAIGN_QUEUE_CASES)
+        self.assertIn("vfpu-prefix-state", parse_golden.HLE_OBSERVATION_CASES)
+        self.assertIn("| `vfpu-prefix-state` | `PSP-VFPU-PREFIX-001` |", self.readme)
+
+    def test_section_is_register_only_and_bounded(self) -> None:
+        self.assertEqual(set(re.findall(r"\b(sce\w+)\s*\(", self.section)), set())
+        self.assertNotIn("while (", self.section)
+        for banned in ("for (;;)", "do {", "goto ", "malloc(", "kuKernel", "sctrl", "mtvc",
+                       "ctc2", "cfc2"):
+            self.assertNotIn(banned, self.section)
+        # No mtvc word (COP2 rs=7, imm 128-255): the only COP2 rs=7 word is mtv $t1, S733.
+        self.assertEqual(set(re.findall(r"0x48e[0-9a-f]{5}", self.section)), {"0x48e9007f"})
+        headers = re.findall(r"\bfor \(([^)]*)\)", self.section)
+        self.assertGreaterEqual(len(headers), 10)
+        for header in headers:
+            with self.subTest(loop=header):
+                self.assertRegex(header, r"^unsigned \w+ = [\w *+]+; \w+ < ")
+
+    def test_every_cell_resets_the_prefixes_and_reads_the_controls(self) -> None:
+        self.assertIn('#define PS_RESET ".word 0xdc0000e4\\n\\t.word 0xdd0000e4\\n\\t.word 0xde000000\\n\\t"',
+                      self.section)
+        for word in ("0x48690080", "0x48690081", "0x48690082"):
+            self.assertIn(f".word {word}", self.section)
+        macro = self.section[self.section.index("#define PS_CELL_FN"):]
+        macro = macro[macro.index("__asm__"):macro.index("struct ps_arith")]
+        self.assertLess(macro.index("TN_LOAD_ALL"), macro.index("PS_RESET"))
+        self.assertLess(macro.index("PS_RESET"), macro.index('PS_CTL_READ("0", "4", "8")'))
+        self.assertLess(macro.index('PS_CTL_READ("0", "4", "8")'), macro.index("body"))
+        self.assertLess(macro.index("body"), macro.index('PS_CTL_READ("24", "28", "32")'))
+        self.assertLess(macro.index("TN_STORE_ALL"), macro.rindex("PS_RESET"))
+
+    def test_the_prefix_and_form_words(self) -> None:
+        table = re.search(r"s_ps_arith\[PS_ARITH\] = \{(.*?)\n\};", self.section, re.DOTALL)
+        self.assertIsNotNone(table)
+        rows = re.findall(r'\{"([\w-]+)", 0x([0-9a-f]{8})u, 0x([0-9a-f]{8})u, (ps_a\d+)\}',
+                          _matched(table).group(1))
+        self.assertEqual(len(rows), 75)
+        self.assertEqual([name for name, _p, _w, _f in rows], list(parse_golden.VFPU_PREFIX_STATE_ARITH))
+        forms = {"vadd-q": 0x60018088, "vmul-q": 0x64018088, "vdot-q": 0x64818088,
+                 "vmin-q": 0x6d018088, "vmov-q": 0xd0008088, "vneg-q": 0xd0028088,
+                 "vzero-q": 0xd0068088, "vidt-q": 0xd0038088}
+        prefixes = {
+            "pfxs": [0xdc0000b1, 0xdc000fe4, 0xdc0f00e4, 0xdc00f0e4, 0xdc00ffe4, 0xdc0fe1d0],
+            "pfxt": [0xdd0000b1, 0xdd000fe4, 0xdd0f00e4, 0xdd00f0e4, 0xdd00ffe4],
+            "pfxd": [0xde000a00, 0xde000055, 0xde0000ff, 0xde000231],
+        }
+        for name, pfx, word, fn in rows:
+            with self.subTest(cell=name):
+                kind, form_a, form_b, k = name.split("-")
+                self.assertEqual(int(word, 16), forms[f"{form_a}-{form_b}"])
+                self.assertEqual(int(pfx, 16), prefixes[kind][int(k)])
+                self.assertIn(f'PS_CELL_FN({fn}, ".word 0x{pfx}\\n\\t.word 0x{word}\\n\\t")', self.section)
+        # vpfxd carries no swizzle, negate, constant or abs field (bits 12-23 clear).
+        for word in prefixes["pfxd"]:
+            self.assertEqual(word & 0xfff000, 0)
+
+    def test_the_lifetime_cells(self) -> None:
+        table = re.search(r"s_ps_life\[PS_LIFE\] = \{(.*?)\n\};", self.section, re.DOTALL)
+        self.assertIsNotNone(table)
+        rows = re.findall(r'\{"([\w-]+)", 0x([0-9a-f]{8})u, (ps_l\d+)\}', _matched(table).group(1))
+        self.assertEqual([name for name, _p, _f in rows], list(parse_golden.VFPU_PREFIX_STATE_LIFE))
+        between = {"vnop": "0xffff0000", "vsync": "0xffff0320", "vflush": "0xffff040d",
+                   "adds": "0x46000000", "mtv": "0x48e9007f", "mfv": "0x4869007f",
+                   "vpfxt": "0xdd0f00e4"}
+        for name, pfx, fn in rows:
+            with self.subTest(cell=name):
+                self.assertEqual(pfx, "dc0100e4" if name.startswith("s-") else "de000001")
+                line = re.search(rf"PS_CELL_FN\({fn}, (.*)\)\n", self.section)
+                self.assertIsNotNone(line)
+                body = _matched(line).group(1)
+                self.assertTrue(body.startswith(f'".word 0x{pfx}\\n\\t" '))
+                self.assertTrue(body.endswith('".word 0xd0000008\\n\\t.word 0xd0000028\\n\\t"'))
+                what = name.split("-", 1)[1]
+                if what in between:
+                    self.assertIn(f'".word {between[what]}\\n\\t"', body)
+        self.assertIn("b 1f\\n\\tnop\\n1:", self.section)
+        self.assertIn('PS_CTL_READ("12", "16", "20")', self.section)
+        self.assertIn('lv.q C730, 496(%[in])', self.section)
+
+    def test_the_immediate_cells(self) -> None:
+        vfim = re.search(r"s_ps_vfim_words\[PS_VFIM\] = \{(.*?)\n\};", self.section, re.DOTALL)
+        viim = re.search(r"s_ps_viim_words\[PS_VIIM\] = \{(.*?)\n\};", self.section, re.DOTALL)
+        self.assertIsNotNone(vfim)
+        self.assertIsNotNone(viim)
+        fw = [int(w, 16) for w in re.findall(r"0x([0-9a-f]{8})u", _matched(vfim).group(1))]
+        iw = [int(w, 16) for w in re.findall(r"0x([0-9a-f]{8})u", _matched(viim).group(1))]
+        self.assertEqual([w & 0xffff for w in fw], [0x0000, 0x3c00, 0xc000, 0x7c00, 0x7c01, 0x8000,
+                                                     0x0400, 0x7bff])
+        self.assertEqual([w & 0xffff for w in iw], [0x0000, 0x0001, 0xffff, 0x7fff, 0x8000])
+        for word in fw:
+            self.assertEqual(word & 0xffff0000, 0xdf880000)
+        for word in iw:
+            self.assertEqual(word & 0xffff0000, 0xdf080000)
+        self.assertIn("0x00000000u, 0xde000001u, 0xde000003u, 0xde000100u", self.section)
+
+    def test_stream_shape_matches_the_registry(self) -> None:
+        spec, counts = CAMPAIGN_PROBE_CASES["vfpu-prefix-state"]
+        self.assertEqual(spec.test_id, "PSP-VFPU-PREFIX-001")
+        self.assertEqual(spec.terminal_case, "vfpu-prefix-state-done")
+        cases = parse_golden.VFPU_PREFIX_STATE_CASES
+        self.assertEqual(len(cases), 198)
+        self.assertEqual(len(cases), len(set(cases)))
+        self.assertEqual(cases[0], "operands-p0")
+        self.assertEqual(cases[1], "pfxs-vadd-q-0-p0")
+        self.assertEqual(cases[-1], "viim-mask-p1")
+        self.assertEqual(counts["operands-p1"], 24)
+        self.assertEqual(counts["pfxd-vidt-q-3-p1"], 13)
+        self.assertEqual(counts["life-s-mfvc-p0"], 11)
+        self.assertEqual(counts["vfim-sat01-p0"], 16)
+        self.assertEqual(counts["viim-none-p1"], 10)
+        # Pass 1 repeats pass 0 row for row.
+        half = len(cases) // 2
+        self.assertEqual([c[:-3] for c in cases[:half]], [c[:-3] for c in cases[half:]])
+        for fragment in ("#define PS_ARITH 75u", "#define PS_LIFE 15u", "#define PS_VFIM 8u",
+                         "#define PS_VIIM 5u", "#define PS_IMMD 4u", "#define PS_MAX_WORDS 24u",
+                         "pass < 2u"):
+            self.assertIn(fragment, self.section)
+        bodies = _c_function_bodies(self.section)
+        for fn in ("ps_operands", "ps_arith_record", "ps_life_record", "ps_imm_record"):
+            with self.subTest(fn=fn):
+                self.assertLess(bodies[fn].index("hle_step(name);"), bodies[fn].index("hle_record("))
+
+    def test_manifest_row_is_a_measured_case(self) -> None:
+        self.assertEqual(len(self.rows), 1)
+        row = self.rows[0]
+        self.assertEqual(row["prx"], "vfpu_prefix_state.prx")
+        self.assertEqual(row["source"], "fixtures/psp_oracle/probe_hle_issues.c")
+        self.assertEqual(row["diagnostic_case_ids"], ["vfpu-prefix-state"])
+        self.assertEqual(row["issues"], [326])
+        self.assertEqual(row["hardware_evidence"], "MEASURED")
+        self.assertEqual(row["evidence_cases"], row["case_ids"])
+        self.assertNotIn("evidence_note", row)
+        self.assertNotIn("No hardware result is claimed", row["invariant"])
+        self.assertEqual(row["case_ids"][-1], "vfpu-prefix-state-done")
+
+    def test_measurement_note_names_the_run_and_its_exact_cells(self) -> None:
+        note = self.rows[0]["measurement_note"]
+        for term in ("2026-11-10 (UTC)", "PSP-3000", "boot 175", "XMB context", "48cea955",
+                     "identical to this tree's", "system software 6.61", "0x06060010 (\"6.6.0\")",
+                     "ARK-5 with cIPL, version 5.1.0", "199 records",
+                     "acceptance-eligible with 0 blockers"):
+            self.assertIn(term, note)
+        # Prefixes act on raw words; saturation keeps NaNs and maps -0 to +0 at [0:1]; a pending
+        # vpfxs survives every instruction between and one vmov.s consumes it; vfim keeps a
+        # canonical NaN.
+        for cell in ("|0xffc00022| = 0x7fc00022", "-(+0) = 0x80000000", "0x7f800033 * -0 = 0xff800001",
+                     "min(-0, 0x80000001) = 0x80000001", "vmov.q ignores vpfxt",
+                     "[0:1] gives 0x00000000 for -2.25, -1, -0, -inf and 0x807fffff",
+                     "[-1:1] keeps 0x80000000", "none of them cleared or consumed it",
+                     "VFPU_PFXS 0x000100e4", "0x7c01", "0x7f800001, 0x80000000, 0x38800000 and 0x477fe000",
+                     "0x46fffe00 and 0xc7000000"):
+            self.assertIn(cell, note)
+
+
+class VfpuWiderOpsProbeTests(unittest.TestCase):
+    """CASE=vfpu-wider-ops (183, PSP-VFPU-WIDEROPS-001) in probe_hle_issues.c: the #326 VFPU forms
+    measured so far at one width only (vdiv, vsin/vcos/vrcp/vrsq/vsqrt/vocp, the dot and matrix
+    widths, vidt into every column and row register). Register-only: no system call in the section
+    beyond the shared writer, bounded loops, a step before every record, identity prefixes,
+    records within the writer's line, a fixed-shape stream that matches the registry, and the
+    2026-11-10 hardware result recorded as MEASURED."""
+
+    makefile: ClassVar[str]
+    probe: ClassVar[str]
+    rows: ClassVar[list[dict[str, Any]]]
+    section: ClassVar[str]
+    readme: ClassVar[str]
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        root = Path(__file__).resolve().parents[1]
+        fixture = root / "fixtures" / "psp_oracle"
+        cls.probe = (fixture / "probe_hle_issues.c").read_text(encoding="utf-8")
+        cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
+        cls.readme = (fixture / "README.md").read_text(encoding="utf-8")
+        manifest = json.loads((root / "tools" / "psp_oracle" / "manifest.json")
+                              .read_text(encoding="utf-8"))
+        cls.rows = []
+        stack = [manifest]
+        for _ in range(100000):
+            if not stack:
+                break
+            node = stack.pop()
+            if isinstance(node, dict):
+                if node.get("id") == "PSP-VFPU-WIDEROPS-001":
+                    cls.rows.append(node)
+                stack.extend(node.values())
+            elif isinstance(node, list):
+                stack.extend(node)
+        start = cls.probe.rindex("#if PSP_ORACLE_CASE == HLE_CASE_VFPU_WIDER_OPS\n")
+        end = cls.probe.index("#endif /* HLE_CASE_VFPU_WIDER_OPS */", start)
+        cls.section = _c_code(cls.probe[start:end])
+
+    def test_route_registration_and_log(self) -> None:
+        self.assertIn("else ifeq ($(CASE),vfpu-wider-ops)\nCASE_ID = 183\n", self.makefile)
+        self.assertIn("else ifeq ($(CASE),vfpu-wider-ops)\n"
+                      "TARGET = $(BUILD_DIR)/vfpu_wider_ops\n"
+                      "OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o\n",
+                      self.makefile)
+        self.assertIn("#define HLE_CASE_VFPU_WIDER_OPS 183\n", self.probe)
+        self.assertIn("PSP_ORACLE_CASE == 183 ||", self.probe)
+        self.assertIn('#define HLE_CAMPAIGN_ID "vfpu-wider-ops"\n'
+                      '#define HLE_TEST_ID "PSP-VFPU-WIDEROPS-001"\n'
+                      '#define HLE_LOG "host0:/vfpu_wider_ops_log.txt"', self.probe)
+        self.assertEqual(_campaign_host0_log_path(Path("/scratch"), "vfpu-wider-ops").name,
+                         "vfpu_wider_ops_log.txt")
+        self.assertEqual(_campaign_completeness_contract("vfpu-wider-ops"), "strict-golden-sequence")
+        self.assertNotIn("vfpu-wider-ops", CAMPAIGN_QUEUE_CASES)
+        self.assertIn("vfpu-wider-ops", parse_golden.HLE_OBSERVATION_CASES)
+        self.assertIn("| `vfpu-wider-ops` | `PSP-VFPU-WIDEROPS-001` |", self.readme)
+
+    def test_section_is_register_only_and_bounded(self) -> None:
+        self.assertEqual(set(re.findall(r"\b(sce\w+)\s*\(", self.section)), set())
+        self.assertNotIn("while (", self.section)
+        for banned in ("for (;;)", "do {", "goto ", "malloc(", "kuKernel", "sctrl", "mtvc",
+                       "ctc2", "cfc2"):
+            self.assertNotIn(banned, self.section)
+        headers = re.findall(r"\bfor \(([^)]*)\)", self.section)
+        self.assertGreaterEqual(len(headers), 10)
+        for header in headers:
+            with self.subTest(loop=header):
+                self.assertRegex(header, r"^unsigned \w+ = [\w *+]+; \w+ < ")
+        # The identity prefix only: no vpfxs word is issued in this case.
+        self.assertNotIn("TN_PFX_P1", self.section)
+        self.assertNotIn("TN_PFX_P2", self.section)
+        self.assertEqual(len(re.findall(r"TN_CELL_FN\(wo_\w+, TN_PFX_NONE, \"0x[0-9a-f]{8}\"\)",
+                                        self.section)), 3 + 13 + 47)
+
+    def test_the_words_match_the_forms(self) -> None:
+        words = {
+            "vdiv_p": 0x63810088, "vdiv_t": 0x63818008, "vdiv_q": 0x63818088,
+            "vsin_p": 0xd0120088, "vsin_t": 0xd0128008, "vsin_q": 0xd0128088,
+            "vcos_p": 0xd0130088, "vcos_t": 0xd0138008, "vcos_q": 0xd0138088,
+            "vrcp_p": 0xd0100088, "vrcp_t": 0xd0108008, "vrcp_q": 0xd0108088,
+            "vrsq_q": 0xd0118088, "vsqrt_q": 0xd0168088, "vocp_s": 0xd0440008, "vocp_q": 0xd0448088,
+            "vdot_t": 0x64818008, "vhdp_p": 0x66010088, "vhdp_t": 0x66018008, "vscl_t": 0x65018008,
+            "vcrs_t": 0x66818008, "vmmul_p": 0xf0000488, "vmmul_t": 0xf0008408,
+            "vtfm2_p": 0xf0800488, "vtfm3_t": 0xf1008408, "vhtfm2_p": 0xf0800408,
+            "vhtfm3_t": 0xf1000488, "vmscl_p": 0xf2010488, "vmscl_t": 0xf2018408,
+            "vmmov_p": 0xf3800488, "vmmov_t": 0xf3808408, "vmidt_p": 0xf3830088,
+            "vmidt_t": 0xf3838008, "vmzero_p": 0xf3860088, "vmzero_t": 0xf3868008,
+            "vmone_p": 0xf3870088, "vmone_t": 0xf3878008, "vzero_t": 0xd0068008, "vone_t": 0xd0078008,
+        }
+        for name, word in words.items():
+            with self.subTest(form=name):
+                self.assertIn(f'TN_CELL_FN(wo_{name}, TN_PFX_NONE, "0x{word:08x}")', self.section)
+                # Destination S200/C200/M200 (0x08) in the low seven bits.
+                self.assertEqual(word & 0x7f, 0x08)
+        # vidt into every legal column and row register of M200: .q columns C200-C230 (0x08-0x0b)
+        # and rows (0x28-0x2b); .p columns at row offsets 0 and 2 (0x08-0x0b, 0x48-0x4b) and rows
+        # at column offsets 0 and 2 (0x28-0x2b, 0x68-0x6b).
+        vidt = dict(re.findall(r'TN_CELL_FN\(wo_vidt_([pq]_[cr]\d{3}), TN_PFX_NONE, "0x([0-9a-f]{8})"\)',
+                               self.section))
+        self.assertEqual(len(vidt), 24)
+        q = sorted(int(w, 16) & 0x7f for k, w in vidt.items() if k.startswith("q_"))
+        p = sorted(int(w, 16) & 0x7f for k, w in vidt.items() if k.startswith("p_"))
+        self.assertEqual(q, [0x08, 0x09, 0x0a, 0x0b, 0x28, 0x29, 0x2a, 0x2b])
+        self.assertEqual(p, [0x08, 0x09, 0x0a, 0x0b, 0x28, 0x29, 0x2a, 0x2b,
+                             0x48, 0x49, 0x4a, 0x4b, 0x68, 0x69, 0x6a, 0x6b])
+        for k, w in vidt.items():
+            self.assertEqual(int(w, 16) & 0xffffff80, 0xd0038080 if k.startswith("q_") else 0xd0030080)
+
+    def test_the_operands(self) -> None:
+        ops = re.search(r"s_wo_ops\[WO_OPERANDS\] = \{(.*?)\n\};", self.section, re.DOTALL)
+        trans = re.search(r"s_wo_trans\[WO_OPERANDS\] = \{(.*?)\n\};", self.section, re.DOTALL)
+        div = re.search(r"s_wo_div_b\[WO_DIV_B\] = \{(.*?)\n\};", self.section, re.DOTALL)
+        for found in (ops, trans, div):
+            self.assertIsNotNone(found)
+        ow = [int(w, 16) for w in re.findall(r"0x([0-9a-f]{8})u", _matched(ops).group(1))]
+        tw = [int(w, 16) for w in re.findall(r"0x([0-9a-f]{8})u", _matched(trans).group(1))]
+        dw = [int(w, 16) for w in re.findall(r"0x([0-9a-f]{8})u", _matched(div).group(1))]
+        # The basic-arith operand table and the transcendental specials, reused verbatim.
+        basic = self.probe[self.probe.index("static const uint32_t s_ba_ops[BA_OPERANDS] = {"):]
+        basic = basic[:basic.index("};")]
+        self.assertEqual(ow, [int(w, 16) for w in re.findall(r"0x([0-9a-f]{8})u", basic)])
+        probe_c = (Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle" / "probe.c").read_text(
+            encoding="utf-8")
+        corpus = probe_c[probe_c.index("s_vfpu_trans_specials[VFPU_TRANS_SPECIAL_COUNT] = {"):]
+        corpus = corpus[:corpus.index("};")]
+        self.assertEqual(tw, [int(w, 16) for w in re.findall(r"0x([0-9a-f]{8})u", corpus)])
+        self.assertEqual(len(ow), 20)
+        self.assertEqual(len(tw), 20)
+        self.assertEqual(dw, [0x3f800000, 0x00000000, 0x7f800000, 0x7fc00011, 0x00000001])
+
+    def test_stream_shape_matches_the_registry(self) -> None:
+        spec, counts = CAMPAIGN_PROBE_CASES["vfpu-wider-ops"]
+        self.assertEqual(spec.test_id, "PSP-VFPU-WIDEROPS-001")
+        self.assertEqual(spec.terminal_case, "vfpu-wider-ops-done")
+        cases = parse_golden.VFPU_WIDER_OPS_CASES
+        self.assertEqual(len(cases), 222)
+        self.assertEqual(len(cases), len(set(cases)))
+        self.assertEqual(cases[0], "vdiv-p-p0-0")
+        self.assertEqual(cases[-1], "vone-t-p1")
+        self.assertEqual(counts["vdiv-p-p0-0"], 50)
+        self.assertEqual(counts["vdiv-t-p1-1"], 51)
+        self.assertEqual(counts["vdiv-q-p0-1"], 52)
+        self.assertEqual(counts["vsin-t-p0"], 21)
+        self.assertEqual(counts["vocp-s-p1"], 20)
+        self.assertEqual(counts["vmmul-t-c3-p0"], 34)
+        self.assertEqual(counts["vidt-p-r223-p1"], 16)
+        self.assertEqual(counts["vzero-t-p0"], 4)
+        self.assertLessEqual(max(counts.values()), 64)
+        half = len(cases) // 2
+        self.assertEqual([c.replace("-p0", "") for c in cases[:half]],
+                         [c.replace("-p1", "") for c in cases[half:]])
+        table = re.search(r"s_wo_forms\[WO_FORMS\] = \{(.*?)\n\};", self.section, re.DOTALL)
+        self.assertIsNotNone(table)
+        probe_rows = re.findall(r'\{"([\w-]+)", 0x[0-9a-f]{8}u, wo_\w+, (\d+), (\d+), (\d+), (\d+)\}',
+                                _matched(table).group(1))
+        self.assertEqual(len(probe_rows), 47)
+        self.assertEqual([(stem, int(ns), int(nd), int(nc)) for stem, _s0, ns, nd, nc in probe_rows],
+                         [tuple(row) for row in parse_golden.VFPU_WIDER_OPS_CELL_FORMS])
+        # The source runs tile the index table in order.
+        first = 0
+        for _stem, s0, ns, _nd, _nc in probe_rows:
+            self.assertEqual(int(s0), first)
+            first += int(ns)
+        self.assertIn(f"#define WO_SRC_WORDS {first}u", self.section)
+        lanes = re.findall(r'\{"([\w-]+)", 0x[0-9a-f]{8}u, wo_\w+, (\d)\}', self.section)
+        self.assertEqual([(stem, int(n)) for stem, n in lanes],
+                         list(parse_golden.VFPU_WIDER_OPS_DIV) + list(parse_golden.VFPU_WIDER_OPS_UNARY))
+        bodies = _c_function_bodies(self.section)
+        for fn in ("wo_div_group", "wo_unary_group", "wo_form_group"):
+            with self.subTest(fn=fn):
+                self.assertLess(bodies[fn].index("hle_step(name);"), bodies[fn].index("hle_record("))
+        for fragment in ("#define WO_FORMS 47u", "pass < 2u", "form < WO_FORMS"):
+            self.assertIn(fragment, self.section)
+
+    def test_manifest_row_is_a_measured_case(self) -> None:
+        self.assertEqual(len(self.rows), 1)
+        row = self.rows[0]
+        self.assertEqual(row["prx"], "vfpu_wider_ops.prx")
+        self.assertEqual(row["source"], "fixtures/psp_oracle/probe_hle_issues.c")
+        self.assertEqual(row["diagnostic_case_ids"], ["vfpu-wider-ops"])
+        self.assertEqual(row["issues"], [326])
+        self.assertEqual(row["hardware_evidence"], "MEASURED")
+        self.assertEqual(row["evidence_cases"], row["case_ids"])
+        self.assertNotIn("evidence_note", row)
+        self.assertNotIn("No hardware result is claimed", row["invariant"])
+        self.assertEqual(row["case_ids"][-1], "vfpu-wider-ops-done")
+
+    def test_measurement_note_names_the_run_and_its_exact_cells(self) -> None:
+        note = self.rows[0]["measurement_note"]
+        for term in ("2026-11-10 (UTC)", "PSP-3000", "boot 176", "XMB context", "9426722a",
+                     "identical to this tree's", "system software 6.61", "0x06060010 (\"6.6.0\")",
+                     "ARK-5 with cIPL, version 5.1.0", "223 records",
+                     "acceptance-eligible with 0 blockers", "same word per pair at all three widths"):
+            self.assertIn(term, note)
+        # Width agreement, the order-insensitive multi-term sums and the vidt lane rules.
+        for cell in ("-0 / 0x7fc00011 = 0xff800001", "0x7e800000, 0xfe800000, 0, -0, 0, -0",
+                     "0x5f000000", "0x5f3504f0", "0xff000000, 0x7f000000, -inf, +inf",
+                     "vdot.t (1e8, 1, -1e8) . (1, 1, 1) = 0, 0x7f800001, +inf, 0xccbebc20",
+                     "(-1.5, 0xcc8f0d18, 0x4dbebc20)", "give 0 in every finite output in every order",
+                     "(0xccbebc20, 0, 0x4cbebc20)", "1.0 to lane (vd & 3)", "1.0 to lane (vd & 1)"):
+            self.assertIn(cell, note)
+
+
+class VfpuReservedWidthsProbeTests(unittest.TestCase):
+    """CASE=vfpu-reserved-widths (184, PSP-VFPU-RESERVED-001) in probe_hle_issues.c: the #326
+    vus2i/vs2i words at the reserved widths .t and .q, hand-encoded because psp-as refuses them.
+    Register-only: no system call in the section beyond the shared writer, bounded loops, a step
+    before every cell, identity prefixes, a fixed-shape stream that matches the registry, the power
+    risk named, and the 2026-11-10 hardware result recorded as MEASURED."""
+
+    makefile: ClassVar[str]
+    probe: ClassVar[str]
+    rows: ClassVar[list[dict[str, Any]]]
+    section: ClassVar[str]
+    readme: ClassVar[str]
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        root = Path(__file__).resolve().parents[1]
+        fixture = root / "fixtures" / "psp_oracle"
+        cls.probe = (fixture / "probe_hle_issues.c").read_text(encoding="utf-8")
+        cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
+        cls.readme = (fixture / "README.md").read_text(encoding="utf-8")
+        manifest = json.loads((root / "tools" / "psp_oracle" / "manifest.json")
+                              .read_text(encoding="utf-8"))
+        cls.rows = []
+        stack = [manifest]
+        for _ in range(100000):
+            if not stack:
+                break
+            node = stack.pop()
+            if isinstance(node, dict):
+                if node.get("id") == "PSP-VFPU-RESERVED-001":
+                    cls.rows.append(node)
+                stack.extend(node.values())
+            elif isinstance(node, list):
+                stack.extend(node)
+        start = cls.probe.rindex("#if PSP_ORACLE_CASE == HLE_CASE_VFPU_RESERVED_WIDTHS\n")
+        end = cls.probe.index("#endif /* HLE_CASE_VFPU_RESERVED_WIDTHS */", start)
+        cls.section = _c_code(cls.probe[start:end])
+
+    def test_route_registration_and_log(self) -> None:
+        self.assertIn("else ifeq ($(CASE),vfpu-reserved-widths)\nCASE_ID = 184\n", self.makefile)
+        self.assertIn("else ifeq ($(CASE),vfpu-reserved-widths)\n"
+                      "TARGET = $(BUILD_DIR)/vfpu_reserved_widths\n"
+                      "OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o\n",
+                      self.makefile)
+        self.assertIn("#define HLE_CASE_VFPU_RESERVED_WIDTHS 184\n", self.probe)
+        self.assertIn("PSP_ORACLE_CASE == 184\n", self.probe)
+        self.assertIn('#define HLE_CAMPAIGN_ID "vfpu-reserved-widths"\n'
+                      '#define HLE_TEST_ID "PSP-VFPU-RESERVED-001"\n'
+                      '#define HLE_LOG "host0:/vfpu_reserved_widths_log.txt"', self.probe)
+        self.assertEqual(_campaign_host0_log_path(Path("/scratch"), "vfpu-reserved-widths").name,
+                         "vfpu_reserved_widths_log.txt")
+        self.assertEqual(_campaign_completeness_contract("vfpu-reserved-widths"),
+                         "strict-golden-sequence")
+        self.assertNotIn("vfpu-reserved-widths", CAMPAIGN_QUEUE_CASES)
+        self.assertIn("vfpu-reserved-widths", parse_golden.HLE_OBSERVATION_CASES)
+        row = [line for line in self.readme.splitlines()
+               if line.startswith("| `vfpu-reserved-widths` | `PSP-VFPU-RESERVED-001` |")]
+        self.assertEqual(len(row), 1)
+        self.assertIn("POWER RISK: reserved encodings; owner present", row[0])
+
+    def test_section_is_register_only_and_bounded(self) -> None:
+        self.assertEqual(set(re.findall(r"\b(sce\w+)\s*\(", self.section)), set())
+        self.assertNotIn("while (", self.section)
+        for banned in ("for (;;)", "do {", "goto ", "malloc(", "kuKernel", "sctrl", "mtvc",
+                       "ctc2", "cfc2"):
+            self.assertNotIn(banned, self.section)
+        headers = re.findall(r"\bfor \(([^)]*)\)", self.section)
+        self.assertGreaterEqual(len(headers), 6)
+        for header in headers:
+            with self.subTest(loop=header):
+                self.assertRegex(header, r"^unsigned \w+ = [\w *+]+; \w+ < ")
+        self.assertNotIn("TN_PFX_P1", self.section)
+        self.assertNotIn("TN_PFX_P2", self.section)
+        bodies = _c_function_bodies(self.section)
+        self.assertLess(bodies["rw_cell"].index("hle_step(name);"), bodies["rw_cell"].index("f->fn("))
+
+    def test_the_words_are_the_reserved_widths(self) -> None:
+        words = {"vus2i_t": 0xd03a8008, "vus2i_q": 0xd03a8088, "vs2i_t": 0xd03b8008, "vs2i_q": 0xd03b8088}
+        for name, word in words.items():
+            with self.subTest(form=name):
+                self.assertIn(f'TN_CELL_FN(rw_{name}, TN_PFX_NONE, "0x{word:08x}")', self.section)
+                self.assertIn(f"0x{word:08x}u, rw_{name}}}", self.section)
+                # Size bit 15 set (.t or .q), source C000 (bits 14:8 zero), destination C200 (0x08).
+                self.assertTrue(word & 0x8000)
+                self.assertEqual(word & 0x7f7f, 0x0008)
+        self.assertEqual(len(re.findall(r"TN_CELL_FN\(", self.section)), 4)
+
+    def test_stream_shape_matches_the_registry(self) -> None:
+        spec, counts = CAMPAIGN_PROBE_CASES["vfpu-reserved-widths"]
+        self.assertEqual(spec.test_id, "PSP-VFPU-RESERVED-001")
+        self.assertEqual(spec.terminal_case, "vfpu-reserved-widths-done")
+        self.assertEqual(parse_golden.VFPU_RESERVED_WIDTHS_CASES,
+                         ("vus2i-t-p0", "vus2i-q-p0", "vs2i-t-p0", "vs2i-q-p0",
+                          "vus2i-t-p1", "vus2i-q-p1", "vs2i-t-p1", "vs2i-q-p1"))
+        for case in parse_golden.VFPU_RESERVED_WIDTHS_CASES:
+            self.assertEqual(counts[case], 20)
+        for fragment in ("#define RW_FORMS 4u", "#define RW_WORDS 20u", "pass < 2u",
+                         "form < RW_FORMS"):
+            self.assertIn(fragment, self.section)
+
+    def test_manifest_row_names_the_power_risk(self) -> None:
+        self.assertEqual(len(self.rows), 1)
+        row = self.rows[0]
+        self.assertEqual(row["prx"], "vfpu_reserved_widths.prx")
+        self.assertEqual(row["source"], "fixtures/psp_oracle/probe_hle_issues.c")
+        self.assertEqual(row["diagnostic_case_ids"], ["vfpu-reserved-widths"])
+        self.assertEqual(row["issues"], [326])
+        self.assertEqual(row["hardware_evidence"], "MEASURED")
+        self.assertEqual(row["evidence_cases"], row["case_ids"])
+        self.assertNotIn("evidence_note", row)
+        self.assertNotIn("No hardware result is claimed", row["invariant"])
+        self.assertEqual(row["case_ids"][-1], "vfpu-reserved-widths-done")
+        self.assertIn("POWER RISK: reserved encodings; owner present", row["risk"])
+        self.assertIn("POWER RISK: reserved encodings; owner present", row["measurement_note"])
+
+    def test_measurement_note_names_the_run_and_every_word(self) -> None:
+        note = self.rows[0]["measurement_note"]
+        for term in ("2026-11-10 (UTC)", "PSP-3000", "boot 182", "XMB context", "c6abab53",
+                     "identical to this tree's", "system software 6.61",
+                     "release:6.61:, system:58401@release_661,0x06060110:", "0x06060010 (\"6.6.0\")",
+                     "ARK-5 with cIPL, version 5.1.0", "9 records",
+                     "acceptance-eligible with 0 blockers",
+                     "none of the four reserved words raised an exception",
+                     "passes 0 and 1 agree record for record", "refused by the PC-side controller"):
+            self.assertIn(term, note)
+        # vus2i: each half << 15, low half to the even lane; vs2i: each half << 16; at .t and .q
+        # both write four lanes from S000 and S001, as .p, and leave the rest of M200 alone.
+        for cell in ("vus2i.t (0xd03a8008) and vus2i.q (0xd03a8088) both wrote C200 = "
+                     "(0x3fff8000, 0x40008000, 0x7fff8000, 0x00000000)",
+                     "vs2i.t (0xd03b8008) and vs2i.q (0xd03b8088) both wrote (0x7fff0000, "
+                     "0x80010000, 0xffff0000, 0x00000000)",
+                     "The other 12 words of M200 kept the sentinel 0x7a5a5a5a and C000 was unchanged"):
+            self.assertIn(cell, note)
+        self.assertIn("**MEASURED** on 2026-11-10 UTC (PSP-3000, boot 182, `c6abab53`; 9 records",
+                      self.readme)
 
 
 class VfpuCcCmovProbeTests(unittest.TestCase):
@@ -9903,6 +11176,204 @@ class VfpuForms2ProbeTests(unittest.TestCase):
         self.assertEqual(row["hardware_evidence"], "MEASURED")
         self.assertEqual(row["evidence_cases"], row["case_ids"])
         self.assertEqual(row["case_ids"][-1], "vfpu-forms2-done")
+
+
+class GeSignalProbeTests(unittest.TestCase):
+    """CASE=ge-signal (181, PSP-GE-SIGNAL-001) in probe.c: GE SIGNAL handler behaviours 0x00-0x04
+    and RJUMP/RCALL offset alignment. Project-written lists in probe RAM (no VRAM), every GE wait
+    bounded, sceGeContinue in a deadline-bounded helper thread, a sceGeBreak(1) reset after a
+    TIMEOUT, a fixed-shape stream that matches the registry, and the incomplete 2026-11-10
+    capture recorded as CAPTURED, claiming no hardware result."""
+
+    makefile: ClassVar[str]
+    probe: ClassVar[str]
+    readme: ClassVar[str]
+    doc: ClassVar[str]
+    rows: ClassVar[list[dict[str, Any]]]
+    section: ClassVar[str]
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        root = Path(__file__).resolve().parents[1]
+        fixture = root / "fixtures" / "psp_oracle"
+        cls.probe = (fixture / "probe.c").read_text(encoding="utf-8")
+        cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
+        cls.readme = (fixture / "README.md").read_text(encoding="utf-8")
+        cls.doc = (root / "docs" / "HARDWARE_ORACLE.md").read_text(encoding="utf-8")
+        manifest = json.loads((root / "tools" / "psp_oracle" / "manifest.json")
+                              .read_text(encoding="utf-8"))
+        cls.rows = []
+        stack = [manifest]
+        for _ in range(100000):
+            if not stack:
+                break
+            node = stack.pop()
+            if isinstance(node, dict):
+                if node.get("id") == "PSP-GE-SIGNAL-001":
+                    cls.rows.append(node)
+                stack.extend(node.values())
+            elif isinstance(node, list):
+                stack.extend(node)
+        start = cls.probe.index("#if PSP_ORACLE_CASE == PSP_ORACLE_CASE_GE_SIGNAL\n/*")
+        end = cls.probe.index("#endif /* PSP_ORACLE_CASE_GE_SIGNAL */", start)
+        cls.section = cls.probe[start:end]
+
+    def test_route_registration_and_log(self) -> None:
+        self.assertIn("else ifeq ($(CASE),ge-sync-ids)\nCASE_ID = 78\n", self.makefile)
+        self.assertIn("else ifeq ($(CASE),ge-signal)\nCASE_ID = 181\n", self.makefile)
+        self.assertIn("#define PSP_ORACLE_CASE_GE_SIGNAL 181\n", self.probe)
+        self.assertIn("#elif PSP_ORACLE_CASE == PSP_ORACLE_CASE_GE_SIGNAL\n"
+                      '#define PROBE_HOST0_LOG "host0:/ge_signal_log.txt"\n', self.probe)
+        self.assertIn("#elif PSP_ORACLE_CASE == PSP_ORACLE_CASE_GE_SIGNAL\n"
+                      "    run_ge_signal(emulated);\n", self.probe)
+        # The bounded-wait helpers (ge_wait_idle, ge_reset_queues) are built for this case.
+        self.assertIn("    PSP_ORACLE_CASE == PSP_ORACLE_CASE_GE_SIGNAL || \\\n", self.probe)
+        self.assertEqual(_campaign_host0_log_path(Path("/scratch"), "ge-signal").name,
+                         "ge_signal_log.txt")
+        self.assertEqual(_campaign_completeness_contract("ge-signal"), "strict-golden-sequence")
+        self.assertNotIn("ge-signal", CAMPAIGN_QUEUE_CASES)
+        self.assertIn("| `ge-signal` | `PSP-GE-SIGNAL-001` |", self.readme)
+        self.assertIn("| `ge-signal` | `PSP-GE-SIGNAL-001` | `CAPTURED` (2026-11-10, PSP-3000, "
+                      "boot 179, XMB context, `80e7c9eb`; 37 records, 12 of 14 cells;", self.doc)
+
+    def test_encoding_is_cited_and_matches_uofw(self) -> None:
+        self.assertIn("uofw src/kd/ge/ge.c", self.section)
+        for fragment in ("#define GSG_CMD_SIGNAL 0x0Eu", "#define GSG_CMD_END 0x0Cu",
+                         "#define GSG_CMD_FINISH 0x0Fu", "#define GSG_SIGNAL_ID 0x1234u",
+                         "#define GSG_FINISH_ID 0x5678u", "#define GSG_BEH_RET 0x12u"):
+            self.assertIn(fragment, self.section)
+        # Behaviour in bits 16-23 and the 16-bit id in bits 0-15; the jump offset's high half in
+        # the SIGNAL and its low half in the following END.
+        self.assertIn("((uint32_t)cell->behaviour << 16) | GSG_SIGNAL_ID", self.section)
+        self.assertIn("((uint32_t)cell->behaviour << 16) | ((uint32_t)cell->offset >> 16)",
+                      self.section)
+        self.assertIn("gsg_cmd(GSG_CMD_END, (uint32_t)cell->offset & 0xffffu)", self.section)
+        # The 0x03 cells end the SIGNAL with END 2 (the list signal PAUSE in uofw).
+        self.assertIn('{"b03", GSG_KIND_HANDLER, 0x03u, 2u, 1u, 0u, 0u}', self.section)
+
+    def test_cells_order_and_registry_agree(self) -> None:
+        table = re.search(r"s_gsg_cells\[GSG_CELLS\] = \{(.*?)\n\};", self.section, re.DOTALL)
+        self.assertIsNotNone(table)
+        names = re.findall(r'\{"([\w-]+)", GSG_KIND_', _matched(table).group(1))
+        self.assertEqual(tuple(names), parse_golden.GE_SIGNAL_CELLS)
+        self.assertIn("#define GSG_CELLS 14u", self.section)
+        # The undefined behaviours are last among the handler cells; the unaligned jump cells
+        # are last of all.
+        self.assertEqual(names[8:10], ["b00", "b04"])
+        self.assertEqual(names[-2:], ["rjump-un", "rcall-un"])
+        self.assertIn('{"rjump-un", GSG_KIND_RJUMP, 0x13u, 0u, 1u, 0x22u, 0u}', self.section)
+        self.assertIn('{"rcall-al", GSG_KIND_RCALL, 0x14u, 0u, 1u, 0x20u, 0u}', self.section)
+        self.assertIn('{"b02-block", GSG_KIND_HANDLER, 0x02u, 0u, 1u, 0u, 5000u}', self.section)
+        self.assertIn('{"b02-nocb", GSG_KIND_HANDLER, 0x02u, 0u, 0u, 0u, 0u}', self.section)
+
+    def test_stream_shape_matches_the_registry(self) -> None:
+        spec, counts = CAMPAIGN_PROBE_CASES["ge-signal"]
+        self.assertEqual(spec.test_id, "PSP-GE-SIGNAL-001")
+        self.assertEqual(spec.terminal_case, "ge-signal-done")
+        cases = parse_golden.GE_SIGNAL_CASES
+        self.assertEqual(len(cases), 44)
+        self.assertEqual(len(cases), len(set(cases)))
+        self.assertEqual(cases[:4], ("gsg-setup", "gsg-ctl-cb", "gsg-ctl-run", "gsg-ctl-end"))
+        self.assertEqual(cases[-1], "gsg-teardown")
+        self.assertEqual(counts["gsg-setup"], 7)
+        self.assertEqual(counts["gsg-b02-cb"], 24)
+        self.assertEqual(counts["gsg-b02-run"], 19)
+        self.assertEqual(counts["gsg-rcall-un-end"], 27)
+        self.assertEqual(counts["gsg-teardown"], 12)
+        self.assertEqual(counts["ge-signal-done"], 1)
+        # The probe's record widths and done count agree with the registry.
+        for fragment in ("#define GSG_RUNS 6u", "#define GSG_REGS 4u", "#define GSG_CB_WORDS 24u",
+                         "#define GSG_SEQ_WORDS (2u + 2u * GSG_RUNS)",
+                         "#define GSG_RUN_WORDS (GSG_SEQ_WORDS + GSG_REGS + 1u)",
+                         "#define GSG_END_WORDS (4u + GSG_SEQ_WORDS + 5u + GSG_REGS)",
+                         "out, 3u + GSG_REGS);", "out, 12u);",
+                         "uint32_t done = 1u + 3u * GSG_CELLS + 1u;"):
+            self.assertIn(fragment, self.section)
+        for part, width in parse_golden.GE_SIGNAL_PARTS:
+            self.assertIn(f'"gsg-%s-{part}", cell->name);', self.section)
+            self.assertGreater(width, 0)
+        # The longest record stays inside emit_record_extended's 1024-byte line.
+        header = len("NAKAGAWA_PSP_TEST schema=1 test_id=PSP-GE-SIGNAL-001 "
+                     "case_id=gsg-b02-block-end status=TIMEOUT result=0x00000000")
+        self.assertLess(header + 10 * 16 + 17 * 17 + 1, 1024)
+
+    def test_waits_are_bounded_and_the_ge_is_left_clean(self) -> None:
+        code = _c_code(self.section)
+        for banned in ("while (", "for (;;)", "do {", "goto ", "sceGeEdramGetAddr",
+                       "sceGuInit", "sceGeDrawSync(0)", "sceGeListSync(qid, 0)",
+                       "sceGeListSync(s_gsg_qid, 0)", "TBP", "FRAMEBUF"):
+            self.assertNotIn(banned, code)
+        # Polls: 100 of 1 ms; continue in a helper thread with a deadline; reset after a TIMEOUT.
+        for fragment in ("#define GSG_POLLS 100u", "#define GSG_POLL_US 1000u",
+                         "#define GSG_CONTINUE_TIMEOUT_US 200000u",
+                         "s_gsg_continue_rc = sceGeContinue();",
+                         "sceKernelWaitThreadEnd(th, &timeout)",
+                         "sceKernelTerminateDeleteThread(th)",
+                         "tail[3] = (uint32_t)ge_reset_queues(&w);",
+                         "ge_wait_idle(qid, qid >= 0 ? GE_IDLE_DEADLINE_US : 0u)"):
+            self.assertIn(fragment, code)
+        bodies = _c_function_bodies(code)
+        self.assertLess(bodies["gsg_cell"].index('probe_step(emulated, "ge-signal", cell->name);'),
+                        bodies["gsg_cell"].index("sceGeListEnQueue("))
+        self.assertLess(bodies["gsg_cell"].index('probe_step(emulated, "ge-signal", "reset");'),
+                        bodies["gsg_cell"].index("ge_reset_queues(&w)"))
+        # XMB context: continue and reset rest on this list's state and a bounded idle wait,
+        # never on one sceGeDrawSync(1) sample (the VSH queues its own lists every frame).
+        cell = bodies["gsg_cell"]
+        self.assertIn("if (qid >= 0 && last1 >= 1 && last1 <= 4) {", cell)
+        self.assertNotIn("draw1 != PSP_GE_LIST_DONE", cell)
+        self.assertNotIn("ge_wait_idle(-1, 0u)", cell)
+        self.assertIn("#define GSG_IDLE_WAIT_US 100000u", code)
+        self.assertLess(cell.index("GeIdleWait w = ge_wait_idle(-1, GSG_IDLE_WAIT_US);"),
+                        cell.index("const int timed_out = !w.idle || (qid >= 0 && final_list >= 1 "
+                                   "&& final_list <= 4);"))
+        teardown = bodies["run_ge_signal"]
+        self.assertIn("sceGeUnsetCallback(cbid_handlers)", teardown)
+        self.assertIn("sceGeUnsetCallback(cbid_null_rc)", teardown)
+        self.assertLess(teardown.index("ge_reset_queues(&w)"),
+                        teardown.index("sceGeUnsetCallback(cbid_handlers)"))
+        # The handler's busy hold is a timed for loop with a cap.
+        self.assertIn("for (uint32_t k = 0; k < GSG_BUSY_SPIN_CAP; k++)", code)
+        # Every list word lives in the probe's own arrays.
+        self.assertIn("static uint32_t s_gsg_list[GSG_LIST_WORDS] __attribute__((aligned(64)));",
+                      code)
+        self.assertIn("sceGeListEnQueue(list, list, cbid, jump ? &args : NULL)", code)
+        self.assertIn("sceGeListUpdateStallAddr(qid, (void *)&s_gsg_list[GSG_LIST_WORDS])", code)
+
+    def test_manifest_row_is_a_captured_case(self) -> None:
+        self.assertEqual(len(self.rows), 1)
+        row = self.rows[0]
+        self.assertEqual(row["prx"], "nakagawa_psp_oracle.prx")
+        self.assertEqual(row["source"], "fixtures/psp_oracle/probe.c")
+        self.assertEqual(row["diagnostic_case_ids"], ["ge-signal"])
+        self.assertEqual(row["hardware_evidence"], "CAPTURED")
+        self.assertNotIn("evidence_cases", row)
+        self.assertNotIn("measurement_note", row)
+        self.assertEqual(row["case_ids"][-1], "ge-signal-done")
+
+    def test_the_incomplete_capture_is_captured_with_its_stall(self) -> None:
+        row = self.rows[0]
+        note = row["evidence_note"]
+        for term in ("2026-11-10", "PSP-3000", "boot 179", "XMB context", "80e7c9eb",
+                     "pre-publication commit", "identical to this tree's", "system software 6.61",
+                     "system:58401@release_661,0x06060110:", "0x06060010",
+                     "ARK-5 with cIPL, version 5.1.0", "37 records", "12 of the 14 cells",
+                     "35 PASS and 2 TIMEOUT", "Not acceptance-eligible", "step marker rjump-un",
+                     "manual power cycle", "POWER RISK: rjump-un and rcall-un",
+                     "establishes nothing about PSP behaviour", "are the VSH's",
+                     "0x80000020", "0x80000100", "words 12 and 13 not shown"):
+            self.assertIn(term, note)
+        self.assertNotIn("6.6.0)", note)  # the identity is never a bare 6.6.0
+        self.assertIn("POWER RISK", row["risk"])
+        self.assertIn("### PSP-GE-SIGNAL-001 capture 2026-11-10", self.doc)
+        self.assertIn("(#psp-ge-signal-001-capture-2026-11-10)", self.doc)
+        section = self.doc[self.doc.index("### PSP-GE-SIGNAL-001 capture 2026-11-10"):]
+        section = " ".join(section[:section.index("\n### ", 1)].split())
+        for term in ("`step=rjump-un`", "manual power cycle", "POWER RISK", "is the VSH's",
+                     "establishes nothing about PSP behaviour", "Not shown:"):
+            self.assertIn(term, section)
+        self.assertIn("**CAPTURED** on 2026-11-10 UTC (PSP-3000, boot 179, XMB context, "
+                      "`80e7c9eb`; 37 records, 12 of 14 cells", self.readme)
 
 
 class GeSampleProbeTests(unittest.TestCase):
@@ -10279,6 +11750,157 @@ class MemoryEdgeProbeTests(unittest.TestCase):
         self.assertEqual(row["case_ids"][-1], "memory-edge-done")
         self.assertEqual(row["case_ids"], [name for name, _ in parse_golden.MEMORY_EDGE_ROWS]
                          + ["memory-edge-done"])
+
+
+class GeThroughZProbeTests(unittest.TestCase):
+    """CASE=ge-through-z (185, PSP-GE-THROUGHZ-001) in probe_ge_sample.c: through-mode vertex z
+    outside 0..65535, fractional, infinite and NaN. One bounded list per cell into the ge-raster
+    and ge-rtt VRAM blocks, the depth test ALWAYS with writes on, a fixed-shape stream that
+    matches the registry, and the 2026-11-10 hardware result recorded as MEASURED."""
+
+    probe: ClassVar[str]
+    makefile: ClassVar[str]
+    readme: ClassVar[str]
+    doc: ClassVar[str]
+    rows: ClassVar[list[dict[str, Any]]]
+    section: ClassVar[str]
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        root = Path(__file__).resolve().parents[1]
+        fixture = root / "fixtures" / "psp_oracle"
+        cls.probe = (fixture / "probe_ge_sample.c").read_text(encoding="utf-8")
+        cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
+        cls.readme = (fixture / "README.md").read_text(encoding="utf-8")
+        cls.doc = (root / "docs" / "HARDWARE_ORACLE.md").read_text(encoding="utf-8")
+        manifest = json.loads((root / "tools" / "psp_oracle" / "manifest.json")
+                              .read_text(encoding="utf-8"))
+        cls.rows = []
+        stack = [manifest]
+        for _ in range(100000):
+            if not stack:
+                break
+            node = stack.pop()
+            if isinstance(node, dict):
+                if node.get("id") == "PSP-GE-THROUGHZ-001":
+                    cls.rows.append(node)
+                stack.extend(node.values())
+            elif isinstance(node, list):
+                stack.extend(node)
+        start = cls.probe.index("#if PSP_ORACLE_CASE == GE_CASE_THROUGH_Z\n\n")
+        end = cls.probe.index("#endif /* GE_CASE_THROUGH_Z */", start)
+        cls.section = _c_code(cls.probe[start:end])
+
+    def test_route_registration_and_log(self) -> None:
+        self.assertIn("else ifeq ($(CASE),ge-through-z)\nCASE_ID = 185\n", self.makefile)
+        self.assertIn("else ifeq ($(CASE),ge-through-z)\nTARGET = $(BUILD_DIR)/ge_through_z\n"
+                      "OBJS = $(BUILD_DIR)/probe_ge_sample.o $(BUILD_DIR)/threadman_user_imports.o\n",
+                      self.makefile)
+        self.assertIn("#define GE_CASE_THROUGH_Z 185\n", self.probe)
+        self.assertIn('#define HLE_CAMPAIGN_ID "ge-through-z"\n#define HLE_TEST_ID "PSP-GE-THROUGHZ-001"\n'
+                      '#define HLE_LOG "host0:/ge_through_z_log.txt"', self.probe)
+        self.assertEqual(_campaign_host0_log_path(Path("/scratch"), "ge-through-z").name,
+                         "ge_through_z_log.txt")
+        self.assertEqual(_campaign_completeness_contract("ge-through-z"), "strict-golden-sequence")
+        self.assertNotIn("ge-through-z", CAMPAIGN_QUEUE_CASES)
+        self.assertIn("| `ge-through-z` | `PSP-GE-THROUGHZ-001` |", self.readme)
+        self.assertIn("| `ge-through-z` | `PSP-GE-THROUGHZ-001` | `MEASURED` (2026-11-10, PSP-3000, "
+                      "boot 180, XMB context, `e4e6a3a2`; 23 records) |", self.doc)
+
+    def test_section_calls_only_the_ge_and_cache_imports_and_is_bounded(self) -> None:
+        self.assertEqual(set(re.findall(r"\b(sce\w+)\s*\(", self.section)), {
+            "sceGeEdramGetAddr", "sceGeListEnQueue", "sceGeListSync", "sceGeDrawSync",
+            "sceGeBreak", "sceKernelDcacheWritebackAll", "sceKernelDelayThread",
+            "sceKernelGetSystemTimeLow"})
+        self.assertNotIn("while (", self.section)
+        for banned in ("for (;;)", "do {", "goto ", "malloc(", "sceGu", "sceDisplay", "sceIo"):
+            self.assertNotIn(banned, self.section)
+        self.assertEqual(self.section.count("i < GTZ_WAIT_POLLS; i++"), 2)
+        body = _c_function_bodies(self.section)["gtz_draw"]
+        self.assertLess(body.index("hle_step(c->name);"), body.index("sceGeListEnQueue("))
+        self.assertLess(body.index("gtz_prepare();"), body.index("sceGeListEnQueue("))
+        self.assertLess(body.index("sceKernelDcacheWritebackAll();"), body.index("sceGeListEnQueue("))
+        self.assertIn("reset_rc = sceGeBreak(1, &param);", body)
+        # The ge-raster and ge-rtt blocks: colour at 0x100000, depth at 0x110000, 64x32.
+        for fragment in ("#define GTZ_FB_OFFSET 0x00100000u", "#define GTZ_ZB_OFFSET 0x00110000u",
+                         "#define GTZ_STRIDE 64u", "#define GTZ_ROWS 32u",
+                         "#define GTZ_ZCLEAR 0x1234u"):
+            self.assertIn(fragment, self.section)
+
+    def test_list_words(self) -> None:
+        body = _c_function_bodies(self.section)["gtz_list"]
+        for fragment in ("GTZ_W(0xd2, 0u);", "GTZ_W(0x23, 1);", "GTZ_W(0xde, 1);",
+                         "GTZ_W(0xe7, 0);", "GTZ_W(0x1e, 0);", "GTZ_W(0x12, 0x0080019cu);",
+                         "GTZ_W(0x04, (6u << 16) | 2u);", "GTZ_W(0x0f, 0);", "GTZ_W(0x0c, 0);",
+                         "GTZ_W(0x9e, GTZ_ZB_OFFSET);", "GTZ_W(0x9c, GTZ_FB_OFFSET);"):
+            self.assertIn(fragment, body)
+        # Through mode (bit 23), 8888 colour (7 << 2), float position (3 << 7), no texture.
+        self.assertEqual(0x0080019c, (1 << 23) | (3 << 7) | (7 << 2))
+        # The depth test enable is not among the units the list turns off.
+        units = re.search(r"off_units\[11\] = \{(.*?)\};", body, re.DOTALL)
+        self.assertIsNotNone(units)
+        self.assertNotIn("0x23u", _matched(units).group(1))
+
+    def test_cells_are_the_z_values_in_order(self) -> None:
+        import struct
+        table = re.search(r"gtz_cells\[GTZ_CELL_COUNT\] = \{(.*?)\n\};", self.section, re.DOTALL)
+        self.assertIsNotNone(table)
+        cells = re.findall(r'\{"([\w-]+)", 0x([0-9a-f]{8})u\}', _matched(table).group(1))
+        self.assertEqual(tuple(name for name, _ in cells), parse_golden.GE_THROUGH_Z_CELLS)
+        values = [struct.unpack("<f", struct.pack("<I", int(bits, 16)))[0] for _, bits in cells]
+        self.assertEqual(values[:9], [-1.0, -0.5, 0.0, 0.5, 1.5, 65535.0, 65535.5, 65536.0, 70000.0])
+        self.assertEqual(values[9], float("inf"))
+        self.assertNotEqual(values[10], values[10])  # NaN, last
+
+    def test_stream_shape_matches_the_registry(self) -> None:
+        spec, counts = CAMPAIGN_PROBE_CASES["ge-through-z"]
+        self.assertEqual(spec.test_id, "PSP-GE-THROUGHZ-001")
+        self.assertEqual(spec.terminal_case, "ge-through-z-done")
+        cases = parse_golden.GE_THROUGH_Z_CASES
+        self.assertEqual(len(cases), 22)
+        self.assertEqual(cases[:2], ("zm1-draw", "zm1-z"))
+        self.assertEqual(cases[-1], "znan-z")
+        self.assertEqual(set(counts.values()), {16, 1})
+        self.assertIn("hle_record(row, qid < 0 ? \"FAIL\" : idle ? \"PASS\" : \"TIMEOUT\", "
+                      "(uint32_t)qid, draw, 16);", self.section)
+        self.assertIn("hle_record(row, \"PASS\", 0, s_gtz_row, GTZ_SIDE);", self.section)
+        self.assertIn("#define GTZ_SIDE 16u", self.section)
+
+    def test_manifest_row_is_a_measured_case(self) -> None:
+        self.assertEqual(len(self.rows), 1)
+        row = self.rows[0]
+        self.assertEqual(row["prx"], "ge_through_z.prx")
+        self.assertEqual(row["source"], "fixtures/psp_oracle/probe_ge_sample.c")
+        self.assertEqual(row["diagnostic_case_ids"], ["ge-through-z"])
+        self.assertEqual(row["hardware_evidence"], "MEASURED")
+        self.assertEqual(row["evidence_cases"], row["case_ids"])
+        self.assertNotIn("evidence_note", row)
+        self.assertEqual(row["case_ids"][-1], "ge-through-z-done")
+
+    def test_measurement_note_names_the_run_and_what_it_does_not_show(self) -> None:
+        note = self.rows[0]["measurement_note"]
+        for term in ("2026-11-10 (UTC)", "PSP-3000", "boot 180", "XMB context", "e4e6a3a2",
+                     "identical to this tree's", "system software 6.61",
+                     "release:6.61:, system:58401@release_661,0x06060110:", "0x06060010 (\"6.6.0\")",
+                     "ARK-5 with cIPL, version 5.1.0", "23 records",
+                     "acceptance-eligible with 0 blockers"):
+            self.assertIn(term, note)
+        # Every z drew the sprite; no depth word of the block read linearly changed, so the read
+        # does not decide clamp or wrap.
+        for cell in ("Every cell wrote all 256 colour pixels", "the infinity and the NaN included",
+                     "146 us for +inf", "changed from 0x1234 in any cell",
+                     "does not decide clamp, wrap or truncation", "an inference",
+                     "none appeared"):
+            self.assertIn(cell, note)
+        self.assertNotIn("6.6.0)", note)  # the identity is never a bare 6.6.0
+        start = self.doc.index("- **PSP-3000 single-case run of `ge-through-z` (2026-11-10 UTC)**")
+        section = " ".join(self.doc[start:self.doc.index("\n- **", start + 1)].split())
+        for term in ("`PSP-GE-THROUGHZ-001` | `z*-draw`, `z*-z`, `ge-through-z-done` (boot 180)",
+                     "*The draw is never dropped.*", "*No depth word in the block changed.*",
+                     "*XMB context.*", "does not decide clamp, wrap or truncation"):
+            self.assertIn(term, section)
+        self.assertIn("**MEASURED** on 2026-11-10 UTC (PSP-3000, boot 180, XMB context, "
+                      "`e4e6a3a2`; 23 records", self.readme)
 
 
 class GeRasterProbeTests(unittest.TestCase):
@@ -11008,6 +12630,227 @@ class HleNicknameLimitProbeTests(unittest.TestCase):
         run = self.section[self.section.index("static int hle_run(void)"):]
         self.assertEqual(re.findall(r"\b(hle_nick_\w+)\(", run),
                          ["hle_nick_registry", "hle_nick_lengths"])
+
+
+class HleSavedataNodataProbeTests(unittest.TestCase):
+    """CASE=hle-savedata-nodata (180, PSP-HLE-SAVEDATA-NODATA-001) in probe_hle_measure.c:
+    savedata modes on a save that does not exist, a save directory without PARAM.SFO and a
+    probe-made save. These pin the Memory Stick rules (probe-owned names only, nothing touched
+    when an NKPROBE01* directory is already there, cleanup of what the case made), the dialog
+    bounds and the record shape; no PSP value is asserted. The 2026-11-10 capture is recorded as
+    CAPTURED, claiming no hardware result."""
+
+    probe: ClassVar[str]
+    section: ClassVar[str]
+    code: ClassVar[str]
+    makefile: ClassVar[str]
+    readme: ClassVar[str]
+    doc: ClassVar[str]
+    row: ClassVar[dict[str, Any]]
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        root = Path(__file__).resolve().parents[1]
+        fixture = root / "fixtures" / "psp_oracle"
+        cls.probe = (fixture / "probe_hle_measure.c").read_text(encoding="utf-8")
+        cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
+        cls.readme = (fixture / "README.md").read_text(encoding="utf-8")
+        cls.doc = (root / "docs" / "HARDWARE_ORACLE.md").read_text(encoding="utf-8")
+        manifest = json.loads((root / "tools" / "psp_oracle" / "manifest.json")
+                              .read_text(encoding="utf-8"))
+        rows = [t for t in manifest["tests"] if t["id"] == "PSP-HLE-SAVEDATA-NODATA-001"]
+        assert len(rows) == 1
+        cls.row = rows[0]
+        start = cls.probe.index("#if PSP_ORACLE_CASE == HLE_CASE_SAVEDATA_NODATA\n\n")
+        cls.section = cls.probe[start:cls.probe.index("#endif /* HLE_CASE_SAVEDATA_NODATA */")]
+        cls.code = _c_code(cls.section)
+
+    def _function(self, signature: str) -> str:
+        start = self.code.index(signature)
+        return self.code[start:self.code.index("\n}\n", start)]
+
+    def test_the_capture_is_captured_with_its_stuck_dialog_and_cleanup(self) -> None:
+        row = self.row
+        self.assertEqual(row["hardware_evidence"], "CAPTURED")
+        self.assertNotIn("measurement_note", row)
+        self.assertNotIn("evidence_cases", row)
+        note = row["evidence_note"]
+        for term in ("2026-11-10 (UTC)", "PSP-3000", "boot 183", "game context", "dbb47db4",
+                     "only in how the synthetic 16-byte key is spelled", "NKPROBE01KEY0001",
+                     "the bytes the probe passes at +0x5dc are the same", "system software 6.61",
+                     "release:6.61:, system:58401@release_661,0x06060110:", "0x06060110",
+                     "ARK-5 with cIPL, version 5.1.0", "not in the campaign queue", "35 records",
+                     "34 PASS and 1 SKIP", "COMPLETE FAIL", "Not acceptance-eligible",
+                     "loaded module was not proven unloaded", "PHYSICAL_INTERVENTION_REQUIRED",
+                     "stayed VISIBLE for its whole 1790-poll bound", "0x80110001",
+                     "manual power cycle", "establishes nothing about PSP behaviour"):
+            self.assertIn(term, note)
+        self.assertNotIn("6.6.1)", note)  # the identity is never a bare 6.6.1
+        # What the capture shows, for a rerun to confirm: the codes of a missing save, of a
+        # directory without PARAM.SFO and of a real save, the FILES counts left at the preset,
+        # and no probe directory left behind.
+        for cell in ("AUTOLOAD 0x80110307", "AUTODELETE 0x80110347", "SIZES 0x801103c7",
+                     "FILES 0x80110327 with all three counts and every entry left at the preset",
+                     "AUTOLOAD 0x80110306", "FILES and ERASE 0x80110326",
+                     "DELETEDATA 0, after which DATA.BIN and the directory were gone",
+                     "ERASE of a file not in the save 0x80110329", "0x10000-byte cluster",
+                     "no probe directory was left on the Memory Stick", "Not shown: mode 10 DELETE"):
+            self.assertIn(cell, note)
+        self.assertIn("| `hle-savedata-nodata` | `PSP-HLE-SAVEDATA-NODATA-001` | `CAPTURED` "
+                      "(2026-11-10, PSP-3000, boot 183, game context, `dbb47db4`;", self.doc)
+        self.assertIn("(#psp-hle-savedata-nodata-001-capture-2026-11-10)", self.doc)
+        start = self.doc.index("### PSP-HLE-SAVEDATA-NODATA-001 capture 2026-11-10")
+        section = " ".join(self.doc[start:self.doc.index("\n### ", start + 1)].split())
+        for term in ("*No save (`NODIR`):*", "*A directory without PARAM.SFO (`NOSFO`",
+                     "*A save AUTOSAVE made (`DATA`):*", "*Cleanup:*",
+                     "no probe directory was left on the Memory Stick",
+                     "establishes nothing about PSP behaviour", "Not shown:"):
+            self.assertIn(term, section)
+        self.assertIn("**CAPTURED** on 2026-11-10 UTC (PSP-3000, boot 183, game context, "
+                      "`dbb47db4`; 35 records, 34 PASS and 1 SKIP;", self.readme)
+
+    def test_route_and_registry(self) -> None:
+        self.assertIn("else ifeq ($(CASE),hle-savedata-nodata)\nCASE_ID = 180\n", self.makefile)
+        self.assertIn("#define HLE_CASE_SAVEDATA_NODATA 180\n", self.probe)
+        self.assertIn('#define HLE_CAMPAIGN_ID "hle-savedata-nodata"\n'
+                      '#define HLE_TEST_ID "PSP-HLE-SAVEDATA-NODATA-001"\n'
+                      '#define HLE_LOG "host0:/hle_savedata_nodata_log.txt"', self.probe)
+        spec, counts = CAMPAIGN_PROBE_CASES["hle-savedata-nodata"]
+        rows = tuple(row for row, _ in parse_golden.HLE_SAVEDATA_NODATA_ROWS)
+        self.assertEqual(spec.ordered_cases[:-1], rows)
+        self.assertEqual(len(rows), 34)
+        self.assertEqual(spec.terminal_case, "hle-savedata-nodata-done")
+        self.assertTrue(all(counts[row] <= 24 for row in rows))
+        self.assertIn("hle-savedata-nodata", parse_golden.HLE_MACHINERY_STATUS_CASES)
+        self.assertEqual(_campaign_host0_log_path(Path("/scratch"), "hle-savedata-nodata").name,
+                         "hle_savedata_nodata_log.txt")
+        gate = self.makefile.split("\nifeq ($(CASE),hle-savedata-nodata)\n", 1)[1]
+        gate = gate.split("endif", 1)[0]
+        self.assertEqual(
+            gate.strip(),
+            "USER_MODE_IMPORT_GATE_ARGS += --exact-library "
+            "sceUtility=0xA5DA2406,0x34B78343,0x50C4CD57,0x8874DBE0,0xD4B95FFB,0x9790B33C")
+
+    def test_only_probe_owned_memory_stick_paths_are_written(self) -> None:
+        paths = set(re.findall(r'"(ms0:[^"]*)"', self.code))
+        self.assertEqual(paths, {"ms0:/PSP/SAVEDATA"})
+        for define in ('#define HLE_ND_GAME "NKPROBE01"\n',
+                       '#define HLE_ND_NODIR_DIR HLE_ND_ROOT "/" HLE_ND_GAME "NODIR"\n',
+                       '#define HLE_ND_NOSFO_DIR HLE_ND_ROOT "/" HLE_ND_GAME "NOSFO"\n',
+                       '#define HLE_ND_DATA_DIR HLE_ND_ROOT "/" HLE_ND_GAME "DATA"\n',
+                       '#define HLE_ND_NOSFO_FILE HLE_ND_NOSFO_DIR "/DATA.BIN"\n'):
+            self.assertIn(define, self.section)
+        self.assertEqual(re.findall(r"\bsceIoMkdir\s*\(([^,]*),", self.code), ["HLE_ND_NOSFO_DIR"])
+        self.assertEqual(re.findall(r"\bsceIoRemove\s*\(([^)]*)\)", self.code),
+                         ["HLE_ND_NOSFO_FILE", "s_nd_path"])
+        self.assertEqual(re.findall(r"\bsceIoRmdir\s*\(([^)]*)\)", self.code),
+                         ["HLE_ND_NOSFO_DIR", "HLE_ND_DATA_DIR"])
+        self.assertEqual(re.findall(r"\bsceIoOpen\s*\(([^,]*),", self.code), ["HLE_ND_NOSFO_FILE"])
+        self.assertNotRegex(self.code, r"\bsceIo(?:Rename|Chstat|Ioctl|Devctl)\s*\(")
+        # The fallback removal path is built only inside NKPROBE01DATA, from a name its own
+        # listing of that directory returned (a regular file, no '/').
+        path = self._function("static void hle_nd_data_path(")
+        self.assertIn("memcpy(s_nd_path, HLE_ND_DATA_DIR, dir);", path)
+        cleanup = self._function("static void hle_nd_data_cleanup(void)")
+        self.assertIn("sceIoDopen(HLE_ND_DATA_DIR)", cleanup)
+        self.assertIn("FIO_S_ISREG(s_nd_dirent.d_stat.st_mode)", cleanup)
+        self.assertIn("strchr(name, '/') == NULL", cleanup)
+        self.assertLess(cleanup.index("if (out[0] != HLE_ND_ABSENT)"), cleanup.index("sceIoDopen("))
+
+    def test_an_existing_probe_directory_makes_every_cell_skip(self) -> None:
+        precheck = self._function("static void hle_nd_precheck(void)")
+        self.assertIn("sceIoDopen(HLE_ND_ROOT)", precheck)
+        self.assertIn("i < HLE_ND_ROOT_READS", precheck)
+        self.assertIn("s_nd_skip = (dfd < 0 || !complete || matches) ? HLE_ND_SKIP_PRESENT : 0u;",
+                      " ".join(precheck.split()))
+        run = self._function("static int hle_run(void)")
+        self.assertLess(run.index("hle_nd_precheck();"), run.index("hle_nd_load_cell("))
+        reason = self._function("static uint32_t hle_nd_reason(uint32_t save)")
+        self.assertLess(reason.index("s_nd_skip"), reason.index("s_nd_stuck"))
+        cells = re.findall(r"^static void (hle_nd_\w+_cell)\(", self.code, re.MULTILINE)
+        self.assertEqual(len(cells), 7)
+        for cell in cells:
+            with self.subTest(cell=cell):
+                body = self._function(f"static void {cell}(")
+                self.assertLess(body.index("hle_nd_reason("), body.index("hle_nd_param("))
+                self.assertLess(body.index('"SKIP"'), body.index("hle_nd_dialog("))
+        for writer in ("hle_nd_nosfo_setup", "hle_nd_data_cleanup"):
+            body = self._function(f"static void {writer}(void)")
+            self.assertLess(body.index("if (s_nd_skip)"), body.index("sce"))
+        cleanup = self._function("static void hle_nd_nosfo_cleanup(void)")
+        self.assertLess(cleanup.index("if (!s_nd_nosfo_made)"), cleanup.index("sceIoRemove("))
+        setup = self._function("static void hle_nd_nosfo_setup(void)")
+        self.assertLess(setup.index("if (made >= 0) {"), setup.index("s_nd_nosfo_made = 1u;"))
+
+    def test_dialogs_are_bounded_and_a_timeout_stops_the_savedata_calls(self) -> None:
+        self.assertIn("#define HLE_ND_POLL_VBLANKS 1200u\n", self.section)
+        self.assertIn("#define HLE_ND_DIALOG_POLL_VBLANKS 1790u\n", self.section)
+        self.assertLess(1790 / 59.94, 30.0)
+        runner = self._function("static int hle_nd_run(")
+        self.assertIn("for (uint32_t i = 0; i < bound; i++) {", runner)
+        self.assertEqual(runner.count("sceUtilitySavedataShutdownStart()"), 2)
+        timeout = runner[runner.index("if (outcome == HLE_ND_OUTCOME_TIMEOUT) {"):]
+        self.assertIn("s_nd_stuck = 1u;", timeout)
+        self.assertIn("if (last == HLE_ND_STATUS_VISIBLE && !shutdown_called) {", timeout)
+        self.assertEqual(self.code.count("sceUtilitySavedataInitStart("), 1)
+        run = self._function("static int hle_run(void)")
+        calls = re.findall(r'hle_nd_\w+\("([a-z-]+)"', run)
+        rows = [row for row, _ in parse_golden.HLE_SAVEDATA_NODATA_ROWS]
+        self.assertEqual(calls, [row for row in rows if row not in (
+            "nodata-precheck", "nosfo-setup", "nosfo-cleanup", "data-cleanup")])
+        # The two modes that may show a system dialog run last, with the 30-second bound;
+        # every other dialog uses the 1200-vblank bound.
+        self.assertEqual(rows[-2:], ["nodir-load", "nodir-delete"])
+        head, tail = run.split('"nodir-load"', 1)
+        self.assertIn("PSP_UTILITY_SAVEDATA_LOAD,", tail)
+        self.assertIn("SCE_UTILITY_SAVEDATA_DELETE,", tail)
+        self.assertEqual(tail.count("HLE_ND_DIALOG_POLL_VBLANKS"), 2)
+        self.assertNotIn("HLE_ND_DIALOG_POLL_VBLANKS", head)
+        self.assertNotIn("PSP_UTILITY_SAVEDATA_LOAD,", head)
+        self.assertNotIn("SCE_UTILITY_SAVEDATA_DELETE,", head)
+        # Destructive modes come last in each state, and the real save is deleted last of all.
+        for state in ("nodir-", "nosfo-", "data-"):
+            names = [row for row in calls if row.startswith(state) and row not in (
+                "nodir-load", "nodir-delete")]
+            first = min(i for i, row in enumerate(names)
+                        if "erase" in row or "delete" in row)
+            self.assertTrue(all("erase" in row or "delete" in row or row == "nodir-getsize"
+                                for row in names[first:]), state)
+        self.assertEqual([row for row in calls if row.startswith("data-")][-1], "data-autodelete")
+
+    def test_offsets_are_pinned_to_the_sdk_header(self) -> None:
+        for field, offset in (("mode", "0x30u"), ("bind", "0x34u"), ("saveNameList", "0x60u"),
+                              ("fileName", "0x64u"), ("dataSize", "0x7cu"), ("msFree", "0x5d0u"),
+                              ("msData", "0x5d4u"), ("utilityData", "0x5d8u"), ("key", "0x5dcu"),
+                              ("idList", "0x5f4u"), ("fileList", "0x5f8u"),
+                              ("sizeInfo", "0x5fcu")):
+            self.assertIn(f"offsetof(SceUtilitySavedataParam, {field}) == {offset}", self.code)
+        self.assertIn("offsetof(SceUtilitySavedataIdListEntry, name) == HLE_ND_ID_NAME_OFFSET",
+                      self.code)
+        self.assertIn("offsetof(SceUtilitySavedataFileListEntry, st_size) == "
+                      "HLE_ND_FILE_SIZE_OFFSET", self.code)
+        self.assertIn("#define HLE_ND_ID_NAME_OFFSET 52u\n", self.section)
+        self.assertIn("#define HLE_ND_FILE_SIZE_OFFSET 8u\n", self.section)
+
+    def test_a_skipped_stream_parses_with_its_shape(self) -> None:
+        spec, counts = CAMPAIGN_PROBE_CASES["hle-savedata-nodata"]
+        lines = ["NAKAGAWA_PSP_META schema=1 source=psp model=unknown firmware=unknown "
+                 "binary_sha256=" + "0" * 64 + " source_commit=" + "b" * 40 + " fixture=hle-measure"]
+        for row in spec.semantic_cases:
+            status = "PASS" if row == "nodata-precheck" else "SKIP"
+            fields = " ".join(f"out{i}=0xa5a5a5a5" for i in range(counts[row]))
+            lines.append(f"NAKAGAWA_PSP_TEST schema=1 test_id={spec.test_id} case_id={row} "
+                         f"status={status} result=0x1 {fields}")
+        lines.append(f"NAKAGAWA_PSP_TEST schema=1 test_id={spec.test_id} "
+                     f"case_id={spec.terminal_case} status=PASS result=0x0 out0=0x22")
+        text = "\n".join(lines) + "\n"
+        self.assertTrue(parse_campaign_probe_output(text, "hle-savedata-nodata").complete)
+        failed = text.replace("case_id=nodir-list status=SKIP", "case_id=nodir-list status=FAIL")
+        with self.assertRaises(ProtocolError):
+            parse_campaign_probe_output(failed, "hle-savedata-nodata")
+        short = text.replace(" out23=0xa5a5a5a5", "", 1)
+        with self.assertRaises(ProtocolError):
+            parse_campaign_probe_output(short, "hle-savedata-nodata")
 
 
 class GeMipProbeTests(unittest.TestCase):
@@ -12345,6 +14188,22 @@ class RegistryFontSourceTests(unittest.TestCase):
         self.assertIn("$(BUILD_DIR)/probe.o: probe.c registry_walk.h", self.makefile)
         self.assertRegex(self.makefile, r"(?m)^else ifeq \(\$\(CASE\),registry-font\)\nCASE_ID = 72$")
         self.assertIn('#define PROBE_HOST0_LOG "host0:/registry_font_log.txt"', self.probe)
+
+    def test_the_2026_11_10_capture_is_recorded_as_captured_not_measured(self) -> None:
+        """Boot 174 (979c6a1dd): sceRegGetKeysNum on the registry handle returned the bad-handle
+        code, font-category-0000 is FAIL and no subtree was walked, so nothing is cited."""
+        hardware = (self.root / "docs" / "HARDWARE_ORACLE.md").read_text(encoding="utf-8")
+        readme = (self.fixture / "README.md").read_text(encoding="utf-8")
+        self.assertIn("| `registry-font` | `PSP-REGISTRY-002` | `CAPTURED` (2026-11-10, PSP-3000, "
+                      "boot 174, `979c6a1dd`; 3 records, `font-category-0000` FAIL, so not "
+                      "acceptance-eligible: `sceRegGetKeysNum` on the registry handle returned "
+                      "`0x8008272E` and no subtree was walked) |", hardware)
+        self.assertIn("| `PSP-REGISTRY-002` | none (boot 174) |", hardware)
+        self.assertIn("Nothing about `/DATA/FONT` or `/SYSPROFILE/RESOLUTION` was learned.", hardware)
+        self.assertIn("**CAPTURED** on 2026-11-10 (PSP-3000, boot 174, `979c6a1dd`", readme)
+        manifest = json.loads((self.root / "tools" / "psp_oracle" / "manifest.json")
+                              .read_text(encoding="utf-8"))
+        self.assertNotIn("PSP-REGISTRY-002", [test["id"] for test in manifest["tests"]])
 
     def _gate(self, libs: list[tuple[str, list[int]]], *extra: str,
               module_attributes: int = 0) -> tuple[int, str, str]:
@@ -13935,8 +15794,17 @@ class Record20261015Tests(unittest.TestCase):
             ("vfpu-basic-arith", "PSP-VFPU-BASICARITH-001", "MEASURED"),
             ("vfpu-vus2i", "PSP-VFPU-VUS2I-001", "MEASURED"),
             ("hle-self-stop-unload", "PSP-HLE-SELFSTOP-001", "MEASURED"),
-            ("sas-adsr", "PSP-SAS-002", "NOT_RUN"),
-            ("sas-mix", "PSP-SAS-003", "NOT_RUN"),
+            ("vfpu-mfv-mtv", "PSP-VFPU-MFVMTV-001", "MEASURED"),
+            ("vfpu-wide-dot-matrix", "PSP-VFPU-WIDEDOT-001", "MEASURED"),
+            ("vfpu-round-sep", "PSP-VFPU-ROUNDSEP-001", "MEASURED"),
+            ("vfpu-prefix-state", "PSP-VFPU-PREFIX-001", "MEASURED"),
+            ("vfpu-wider-ops", "PSP-VFPU-WIDEROPS-001", "MEASURED"),
+            ("vfpu-constants", "PSP-VFPU-CONSTANTS-001", "MEASURED"),
+            ("ge-through-z", "PSP-GE-THROUGHZ-001", "MEASURED"),
+            ("vfpu-reserved-widths", "PSP-VFPU-RESERVED-001", "MEASURED"),
+            ("hle-savedata-nodata", "PSP-HLE-SAVEDATA-NODATA-001", "CAPTURED"),
+            ("sas-adsr", "PSP-SAS-002", "CAPTURED"),
+            ("sas-mix", "PSP-SAS-003", "CAPTURED"),
             ("vcodec-words", "PSP-VCODEC-001", "NOT_RUN"),
             ("hle-utility-dialogs", "PSP-HLE-UTILITY-DIALOG-001", "NOT_RUN"),
             ("mpeg-ycbcr", "PSP-MPEG-YCBCR-001", "NOT_RUN"),
@@ -13950,6 +15818,35 @@ class Record20261015Tests(unittest.TestCase):
                 self.assertEqual(readme[case][1], test_id)
                 self.assertIn(status, readme[case][2])
                 self.assertEqual(self.rows[test_id]["hardware_evidence"], status)
+
+    def test_the_sas_adsr_capture_is_captured_with_its_blocker(self) -> None:
+        row = self.rows["PSP-SAS-002"]
+        self.assertEqual(row["hardware_evidence"], "CAPTURED")
+        self.assertNotIn("measurement_note", row)
+        note = row["evidence_note"]
+        for term in ("2026-11-10", "PSP-3000", "boot 185", "game context", "74acbe42",
+                     "identical to this tree's", "system software 6.61", "0x06060110",
+                     "ARK-5 with cIPL, version 5.1.0", "696 records", "not acceptance-eligible",
+                     "loaded module was not proven unloaded",
+                     "establishes nothing about PSP behaviour", "2026-11-05"):
+            self.assertIn(term, note)
+        self.assertIn("### PSP-SAS-002 capture 2026-11-10", self.doc)
+        self.assertIn("(#psp-sas-002-capture-2026-11-10)", self.doc)
+
+    def test_the_sas_mix_capture_is_captured_with_its_blocker(self) -> None:
+        row = self.rows["PSP-SAS-003"]
+        self.assertEqual(row["hardware_evidence"], "CAPTURED")
+        self.assertNotIn("measurement_note", row)
+        self.assertNotIn("evidence_cases", row)
+        note = row["evidence_note"]
+        for term in ("2026-11-07", "PSP-3000", "boot 146", "game context", "979de58f",
+                     "pre-publication commit", "identical to this tree's", "system software 6.61",
+                     "0x06060110", "ARK-5 with cIPL, version 5.1.0", "205 records",
+                     "not acceptance-eligible", "loaded module was not proven unloaded",
+                     "establishes nothing about PSP behaviour", "0x80420018", "0x80000004"):
+            self.assertIn(term, note)
+        self.assertIn("### PSP-SAS-003 capture 2026-11-07", self.doc)
+        self.assertIn("(#psp-sas-003-capture-2026-11-07)", self.doc)
 
     def test_the_audio_src_and_timer_comparisons_are_recorded_and_pinned(self) -> None:
         for name in ("test_audio_src_matches_the_measured_contract",

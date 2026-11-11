@@ -1738,7 +1738,7 @@ class TestPresenterContract(unittest.TestCase):
     def test_gdi_acceptance_requires_window_dc_and_positive_scanlines(self):
         """The headless suite cannot open GDI, so pin its acceptance contract in source."""
         source = (ROOT / "src" / "rt" / "gui.c").read_text(encoding="utf-8")
-        presenter = source[source.index("int gui_present"):]
+        presenter = source[source.index("int gui_present("):]
         accepted = presenter[:presenter.index("#else")]
         # The present accepts a GDI frame only when the blit drew it; a failed blit
         # resolves an armed capture as failed and reports the frame as not presented.
@@ -1746,7 +1746,7 @@ class TestPresenterContract(unittest.TestCase):
             accepted,
             r"if \(!gdi_blit\(\)\)\s*\{\s*sr_capture_fail\([^;]*\);\s*return 0;\s*\}",
         )
-        gdi = source[source.index("static int gdi_blit(void)"):source.index("int gui_present")]
+        gdi = source[source.index("static int gdi_blit(void)"):source.index("int gui_present(")]
         self.assertIn("if (!s_hwnd) return 0;", gdi)
         self.assertIn("HDC dc = GetDC(s_hwnd);", gdi)
         self.assertIn("if (!dc) return 0;", gdi)
@@ -1764,7 +1764,7 @@ class TestPresenterContract(unittest.TestCase):
 
     def test_offscreen_frame_event_is_quiet_without_present_trace(self):
         source = (ROOT / "src" / "rt" / "gui.c").read_text(encoding="utf-8")
-        presenter = source[source.index("int gui_present"):]
+        presenter = source[source.index("int gui_present("):]
         offscreen = presenter[presenter.index("if (s_offscreen)"):presenter.index("int accepted")]
         self.assertRegex(
             offscreen,
@@ -1778,8 +1778,8 @@ class TestPresenterContract(unittest.TestCase):
         convert_fb reads it, and a failed sync must decline the frame instead of drawing the
         keyboard over stale pixels."""
         source = (ROOT / "src" / "rt" / "gui.c").read_text(encoding="utf-8")
-        presenter = source[source.index("int gui_present"):]
-        sdl = presenter[presenter.index("if (s_sdl3) {"):presenter.index("int present_result")]
+        presenter = source[source.index("int gui_present("):]
+        sdl = presenter[presenter.index("if (s_sdl3) {"):presenter.index("cpu_result = sdl3vk_present_rgba")]
         # One keyboard decision gates both the skipped fast path and the sync that replaces it,
         # so sync_sdl_input() cannot open or close the keyboard between the two.
         self.assertIn("int osk_open = sr_osk_overlay_active();", sdl)
@@ -1806,8 +1806,8 @@ class TestPresenterContract(unittest.TestCase):
         present result is remapped only from -1; 0 (close) and 1 (shown) pass through."""
         root = ROOT / "src" / "rt"
         gui = (root / "gui.c").read_text(encoding="utf-8")
-        presenter = gui[gui.index("int gui_present"):]
-        sdl = presenter[presenter.index("if (s_sdl3) {"):presenter.index("int present_result")]
+        presenter = gui[gui.index("int gui_present("):]
+        sdl = presenter[presenter.index("if (s_sdl3) {"):presenter.index("cpu_result = sdl3vk_present_rgba")]
         # The fall-through convert_fb reads guest VRAM. The target-failed branch must sync it
         # first, and it must be the only branch that does so for the decline code.
         marker = "if (res == GEGPU_PRESENT_TARGET_FAILED) {"

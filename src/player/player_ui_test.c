@@ -799,6 +799,15 @@ void player_ui_test_report_frame(int frame_number, const PlayerApp *app,
             }
             printf(" count=%s\n", count);
         }
+        /* The library's find box (#2206) while it is open, in hex the same way. */
+        const char *find = player_ui_nk_test_find(g_ui_test_next_ui);
+        if (find != NULL) {
+            printf("[PLAYER_UI_TEST] find_box frame=%d text_hex=", frame_number);
+            for (size_t i = 0; find[i] != '\0'; i++) {
+                printf("%02x", (unsigned)(unsigned char)find[i]);
+            }
+            printf("\n");
+        }
     }
 
     static bool consent_items_reported = false;
