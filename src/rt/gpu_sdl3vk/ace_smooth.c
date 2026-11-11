@@ -19,6 +19,7 @@
  * in-between (ace_smooth_motion). It only reads the images, so the in-between is the same either way.
  */
 #include "ace_smooth.h"
+#include "ace_hud.h"      /* ace_hud_depth_float: the depth format of the copies (#2051) */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -104,7 +105,8 @@ struct AceBetween {
     int have_depth[2];
     /* What the pairs ran with (AceSmoothAuxStats' pair counts). */
     uint64_t pairs, pairs_mask, pairs_depth, depth_refused;
-    VkBuffer zstage;               /* D16 texels on their way into depth[] */
+    VkBuffer zstage;               /* depth texels on their way into depth[] (D16, or D32: ace_hud_depth_float) */
+    int zfloat;                    /* 1: depth[] is R32_SFLOAT and zstage holds D32 texels */
     VkDeviceMemory zstage_memory;
     VkBuffer stats;
     VkDeviceMemory stats_memory;
@@ -326,10 +328,14 @@ static int sized_make(AceBetween *s, int w, int h) {
                       VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT)) return 0;
     if (!img_make(s, &s->out, FRAME_FORMAT, w, h, 1,
                   VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT)) return 0;
+    /* The depth copies keep the source's precision: R16 for D16, R32F for depth=32's D32. Both
+     * sample as 0..1, so the passes read either alike. */
+    s->zfloat = ace_hud_depth_float();
     for (int i = 0; i < 2; i++)
-        if (!img_make(s, &s->depth[i], VK_FORMAT_R16_UNORM, w, h, 1,
+        if (!img_make(s, &s->depth[i], s->zfloat ? VK_FORMAT_R32_SFLOAT : VK_FORMAT_R16_UNORM, w, h, 1,
                       VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT)) return 0;
-    if (!buf_make(s, &s->zstage, &s->zstage_memory, (VkDeviceSize)w * (VkDeviceSize)h * 2u,
+    if (!buf_make(s, &s->zstage, &s->zstage_memory,
+                  (VkDeviceSize)w * (VkDeviceSize)h * (s->zfloat ? 4u : 2u),
                   VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT)) return 0;
     s->w = w;
     s->h = h;
