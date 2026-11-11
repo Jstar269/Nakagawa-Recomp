@@ -852,6 +852,19 @@ static int s_zbuf_boundary_reported;
 
 static uint32_t zbuf_stride(void) { return ge.zbw ? ge.zbw : (ge.fbw ? ge.fbw : 512); }
 
+/* Where a depth write of pixel (x, y) goes in s_zbuf, or 0 when the pixel lies outside the
+ * depth buffer: zbw columns by 272 rows (#2193). s_zbuf holds guest depth row by row at the
+ * buffer's stride, so a column at or past zbw would be the next row's pixel there, or on row
+ * 271 a cell past the buffer that ge_zbuf_materialize_current never copies to guest memory.
+ * The Vulkan backend writes back the same zbw columns (depth_readback_to_guest). Whether a
+ * PSP stops at zbw is unmeasured. */
+static int zbuf_write_index(int x, int y, uint32_t *idx) {
+    const uint32_t stride = zbuf_stride();
+    if (x < 0 || y < 0 || y >= 272 || stride > 512u || (uint32_t)x >= stride) return 0;
+    *idx = (uint32_t)y * stride + (uint32_t)x;
+    return 1;
+}
+
 /* Extremes of (v ^ mask) over every integer v in [lo, hi]. The range is covered by aligned
  * power-of-two blocks: inside one block the XOR only permutes the low bits, so each block maps onto
  * one aligned interval. The result is exact for the even addresses a 16-bit surface uses and may
@@ -1128,6 +1141,8 @@ void ge_replay_restore(const GeState *state, const uint16_t *zbuf) {
     g_ge_stall_addr = 0;
 }
 
+static inline int raster_columns(void);
+
 static void zbuf_fill_rect(int x0, int y0, int x1, int y1, uint16_t z) {
     if (__builtin_expect(s_wing != NULL, 0)) {
         /* A wing canvas: its own depth, clipped to the pass's columns and the scissor rows,
@@ -1143,18 +1158,27 @@ static void zbuf_fill_rect(int x0, int y0, int x1, int y1, uint16_t z) {
         return;
     }
     if (!ge_zbuf_prepare_current()) return;
-    uint32_t stride = zbuf_stride();
+    /* The pixels the clear's colour reaches (the scissor, inside the target's columns and 272
+     * rows, as fill_rect_clear_fast and a GPU backend's scissor clip it), and of those only
+     * the ones inside the depth buffer (zbuf_write_index). */
+    const uint32_t stride = zbuf_stride();
+    if (stride > 512u) return;
+    int last_col = raster_columns() - 1;
+    if ((int)stride - 1 < last_col) last_col = (int)stride - 1;
+    if ((int)ge.scis_x2 < last_col) last_col = (int)ge.scis_x2;
+    const int last_row = (int)ge.scis_y2 < 271 ? (int)ge.scis_y2 : 271;
+    if (x0 < (int)ge.scis_x1) x0 = (int)ge.scis_x1;
+    if (y0 < (int)ge.scis_y1) y0 = (int)ge.scis_y1;
     if (x0 < 0) x0 = 0;
     if (y0 < 0) y0 = 0;
-    int wrote = 0;
+    if (x1 > last_col) x1 = last_col;
+    if (y1 > last_row) y1 = last_row;
+    if (x0 > x1 || y0 > y1) return;
     for (int y = y0; y <= y1; y++) {
-        uint32_t base = (uint32_t)y * stride;
-        for (int x = x0; x <= x1; x++) {
-            uint32_t idx = base + (uint32_t)x;
-            if (idx < 272u * 512u) { s_zbuf[idx] = z; wrote = 1; }
-        }
+        uint16_t *row = s_zbuf + (uint32_t)y * stride;
+        for (int x = x0; x <= x1; x++) row[x] = z;
     }
-    if (wrote) ge_zbuf_note_write();
+    ge_zbuf_note_write();
 }
 
 static void stat_zfail(void);
@@ -2723,12 +2747,14 @@ static int blend_chan(int s, int d, int sf, int df, int eq) {
 /* The columns the rasteriser may write, before the scissor. #2193 states that a PSP draws
  * anywhere inside the scissor on a target up to 512 pixels wide (not measured here; the Vulkan
  * backend already draws there), so a stride past 480 (an offscreen target, or a display
- * buffer's padding) is drawn up to its last column, 511 at most. Stopping at the stride for a
- * stride of 481 to 511 is unmeasured too. A stride of 480 or less keeps the screen's 480
- * columns, as before: what a PSP does past a narrower stride is not measured. */
+ * buffer's padding) is drawn up to its last column, 511 at most. A narrower stride bounds the
+ * draw the same way: column x of row y is guest address (y * stride + x), so a column past the
+ * stride would land in the next row, or past the buffer's last row, and never in the target
+ * the draw was given (#2193). The Vulkan backend clamps its scissor to the same columns
+ * (build_state). Stopping at the stride, at any width, is unmeasured on a PSP. */
 static inline int raster_columns(void) {
     const uint32_t stride = ge.fbw ? ge.fbw : 512u;
-    return stride > 480u ? (stride < 512u ? (int)stride : 512) : 480;
+    return stride < 512u ? (int)stride : 512;
 }
 
 static int pixel_in_bounds(int x, int y) {
@@ -2905,8 +2931,8 @@ static void put_px_rgba_tested(int x, int y, uint16_t pz, int use_z,
     if (use_z && !ge.zwrite_disable) {
         if (__builtin_expect(s_wing != NULL, 0)) s_wing->depth[WING_PX(x, y)] = pz;
         else {
-            uint32_t zi=(uint32_t)(y*(int)zbuf_stride()+x);
-            if (zi<272u*512u) { s_zbuf[zi]=pz; ge_zbuf_note_write(); }
+            uint32_t zi;
+            if (zbuf_write_index(x, y, &zi)) { s_zbuf[zi]=pz; ge_zbuf_note_write(); }
         }
     }
     if (ge.stencil_enable)
@@ -3565,9 +3591,9 @@ static void raster_tri(const Vtx *A, const Vtx *B, const Vtx *C, int persp) {
              * clearing depth with triangles would leave stale z behind (mass z-rejects). */
             if (ge.clear) {
                 if (ge.clear_mode & 0x400) {
-                    uint32_t zi = (uint32_t)(y * (int)zbuf_stride() + x);
+                    uint32_t zi;
                     if (wing) s_wing->depth[WING_PX(x, y)] = clamp_z(iz);
-                    else if (zi < 272u*512u) {
+                    else if (zbuf_write_index(x, y, &zi)) {
                         s_zbuf[zi] = clamp_z(iz);
                         ge_zbuf_note_write();
                     }
