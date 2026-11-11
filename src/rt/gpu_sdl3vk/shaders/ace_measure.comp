@@ -1,0 +1,70 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* Copyright (C) 2026 the Nakagawa Recomp authors */
+/* ace_measure.comp - how far Ace Mode's in-between frame moved what changed (gpu_sdl3vk/ace_smooth.c,
+ * ace_smooth_motion). It runs after the compose pass and only reads: the old frame, the new frame
+ * and the in-between, at the same texel of each, on a fixed 480x272 grid whatever the frame's size.
+ * Grid cell g looks at texel floor((g + 0.5) * size / (480, 272)), computed in integers so the CPU
+ * gets the same texel.
+ *
+ * A difference is the largest of the r, g and b differences, in 1/255. A grid pixel whose two real
+ * frames differ by more than 40 is moving: the pass adds its difference to the old frame and to the
+ * new one, and counts it as like the old frame (within 6 of it) or else like the new one. A pixel
+ * the two frames agree on that the in-between shows more than 64 from both is novel: something
+ * neither frame has.
+ *
+ * The record is eight words, ring slot pc.slot: moving, eq_old, eq_new, sum_old, sum_new, novel,
+ * sampled, and the in-between's serial (low 32 bits). The command buffer zeroes the whole record
+ * before this pass and writes the serial word after it, so a record carries its serial only once
+ * this pass has run; this pass never touches that word. */
+#version 450
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(set = 0, binding = 0) uniform sampler2D old_frame;
+layout(set = 0, binding = 1) uniform sampler2D new_frame;
+layout(set = 0, binding = 4, rgba8) uniform readonly image2D between;
+layout(set = 0, binding = 10, std430) buffer Motion { uint words[]; } motion;
+
+layout(push_constant) uniform Measure {
+    ivec2 size;   /* the pair's width and height */
+    uint slot;    /* the ring slot of this in-between's record */
+} pc;
+
+const ivec2 GRID = ivec2(480, 272);
+const uint MOVING = 40u;   /* the two real frames differ by more than this */
+const uint EQUAL = 6u;     /* within this of a frame: the same as it */
+const uint NOVEL = 64u;    /* more than this from both frames: something new */
+
+shared uint acc[7];
+
+uint diff(vec3 x, vec3 y) {
+    vec3 d = abs(x - y);
+    return uint(round(255.0 * max(d.r, max(d.g, d.b))));
+}
+
+void main() {
+    uint li = gl_LocalInvocationIndex;
+    if (li < 7u) acc[li] = 0u;
+    memoryBarrierShared();
+    barrier();
+    ivec2 g = ivec2(gl_GlobalInvocationID.xy);
+    if (all(lessThan(g, GRID))) {
+        ivec2 p = ((2 * g + 1) * pc.size) / (2 * GRID);
+        vec3 a = texelFetch(old_frame, p, 0).rgb;
+        vec3 b = texelFetch(new_frame, p, 0).rgb;
+        vec3 m = imageLoad(between, p).rgb;
+        uint d_ab = diff(a, b), d_ma = diff(m, a), d_mb = diff(m, b);
+        if (d_ab > MOVING) {
+            atomicAdd(acc[0], 1u);
+            atomicAdd(acc[3], d_ma);
+            atomicAdd(acc[4], d_mb);
+            if (d_ma <= EQUAL) atomicAdd(acc[1], 1u);
+            else if (d_mb <= EQUAL) atomicAdd(acc[2], 1u);
+        } else if (d_ma > NOVEL && d_mb > NOVEL) {
+            atomicAdd(acc[5], 1u);
+        }
+        atomicAdd(acc[6], 1u);
+    }
+    memoryBarrierShared();
+    barrier();
+    if (li < 7u && acc[li] != 0u) atomicAdd(motion.words[pc.slot * 8u + li], acc[li]);
+}

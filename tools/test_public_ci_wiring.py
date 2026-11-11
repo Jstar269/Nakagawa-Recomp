@@ -33,6 +33,7 @@ import ci_trust_verdict  # noqa: E402
 import mypy_baseline  # noqa: E402
 import showcase as showcase_cli  # noqa: E402
 from makefile_text import read_makefile  # noqa: E402
+from test_ci_test_shards import _bash_path, _step_bash  # noqa: E402
 
 
 def _ci_job_blocks() -> dict[str, list[str]]:
@@ -2319,6 +2320,21 @@ def _uncommented(text: str) -> str:
     return "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
 
 
+def _named_step(job: str, name: str) -> str:
+    """One step of a job's text: from its ``- name:`` line to the next step, comments dropped."""
+    lines = job.splitlines()
+    first = lines.index(f"      - name: {name}")
+    last = next((i for i in range(first + 1, len(lines)) if lines[i].startswith("      - ")), len(lines))
+    return "".join(line + "\n" for line in lines[first:last] if not line.lstrip().startswith("#"))
+
+
+def _step_script(step: str) -> str:
+    """The body of a step's ``run: |`` block, without its indentation."""
+    lines = step.splitlines()
+    start = lines.index("        run: |")
+    return "".join(line[10:] + "\n" for line in lines[start + 1:] if line.startswith("          ") or not line.strip())
+
+
 def _workflow_job_blocks(name: str) -> dict[str, list[str]]:
     """Map each top-level job of one workflow to its lines, header included."""
     lines = _workflow_text(name).splitlines()
@@ -2922,8 +2938,10 @@ class TrustedAttestationRouteTests(unittest.TestCase):
         self.assertEqual(len(re.findall(r"github\.event\.pull_request\.head\.sha", text)), 2)   # and the title
         self.assertEqual(len(re.findall(r"github\.event\.pull_request\.base\.sha", text)), 1)
         self.assertEqual(len(re.findall(r"github\.event\.pull_request\.number", text)), 2)      # and concurrency
-        self.assertEqual(self.attest.count("${{ steps.target.outputs.head_sha }}"), 3)
-        self.assertEqual(self.attest.count("${{ steps.target.outputs.base_sha }}"), 4)
+        self.assertEqual(self.attest.count("${{ steps.target.outputs.head_sha }}"), 4)   # and the merge base
+        # The event's base is only checked to be on the default branch; the verdict base is the merge base.
+        self.assertEqual(self.attest.count("${{ steps.target.outputs.base_sha }}"), 1)
+        self.assertEqual(self.attest.count("${{ steps.base.outputs.base_sha }}"), 3)
         self.assertEqual(self.attest.count("${{ steps.target.outputs.number }}"), 1)
         self.assertIn("--attestation-target)", self.attest)
         # A run that resolves no pull request must fail: nothing in the job tolerates a failed step.
@@ -2934,6 +2952,86 @@ class TrustedAttestationRouteTests(unittest.TestCase):
         self.assertIn("          set -euo pipefail\n", resolver)
         self.assertIn('if [ "${GITHUB_REF}" != "refs/heads/${DEFAULT_BRANCH}" ]; then', resolver)
         self.assertRegex(resolver, r'(?s)\*\)\n\s+echo "unsupported event \$\{EVENT_NAME\}" >&2\n\s+exit 1')
+
+    def test_the_verdict_base_is_the_merge_base_of_the_head_with_the_default_branch(self) -> None:
+        # Every step that judges the candidate reads the merge base, never the event's base.
+        for name in ("Fetch the trusted detailed implementation ledger",
+                     "Generate the trusted base public baseline from the authority",
+                     "Generate and verify ephemeral provenance controls"):
+            with self.subTest(step=name):
+                step = _named_step(self.attest, name)
+                self.assertIn("          BASE_SHA: ${{ steps.base.outputs.base_sha }}\n", step)
+                self.assertNotIn("steps.target.outputs.base_sha", step)
+        resolve = _named_step(self.attest, "Resolve the verdict base")
+        self.assertIn("        id: base\n", resolve)
+        self.assertLess(self.attest.index("- name: Fetch the candidate objects"),
+                        self.attest.index("- name: Resolve the verdict base"))
+        self.assertLess(self.attest.index("- name: Resolve the verdict base"),
+                        self.attest.index("- name: Fetch the trusted detailed implementation ledger"))
+
+        # Run the step's own script. `main` is A, then B (an admission lands after the fork).
+        bash, reason = _step_bash()
+        if bash is None:
+            self.skipTest(reason)
+        script = _step_script(resolve)
+        with tempfile.TemporaryDirectory() as scratch:
+            repo = Path(scratch) / "repo"
+            repo.mkdir()
+
+            def git(*args: str) -> str:
+                done = subprocess.run(
+                    ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false",
+                     *args], cwd=repo, capture_output=True, text=True, check=True)
+                return done.stdout.strip()
+
+            def commit(message: str, name: str) -> str:
+                (repo / name).write_text(message + "\n", encoding="utf-8")
+                git("add", name)
+                git("commit", "-q", "-m", message)
+                return git("rev-parse", "HEAD")
+
+            git("init", "-q", "-b", "main")
+            fork_point = commit("A", "a.txt")
+            git("checkout", "-q", "-b", "behind")
+            behind = commit("a pull request that forked at A", "pr.txt")
+            git("checkout", "-q", "main")
+            tip = commit("B: an admission lands", "admitted.txt")
+            git("checkout", "-q", "-b", "merged", behind)
+            git("merge", "-q", "--no-edit", "main")
+            merged = git("rev-parse", "HEAD")
+            git("checkout", "-q", "main")
+            later = commit("C: a later admission", "later.txt")
+            git("checkout", "-q", "--orphan", "unrelated")
+            git("rm", "-q", "-rf", ".")
+            unrelated = commit("no history in common", "x.txt")
+            git("checkout", "-q", "main")          # the trusted checkout is the default branch
+
+            def run(head: str) -> tuple[int, str, str]:
+                output = Path(scratch) / "github-output"
+                output.write_text("", encoding="utf-8")
+                done = subprocess.run(
+                    [bash, "-c", script], cwd=repo, capture_output=True, text=True, check=False,
+                    env={**os.environ, "HEAD_SHA": head, "GITHUB_OUTPUT": _bash_path(output)})
+                return done.returncode, output.read_text(encoding="utf-8"), done.stderr
+
+            # Behind an admission: judged against its fork point, not against the tip it never saw.
+            self.assertEqual(run(behind)[:2], (0, f"base_sha={fork_point}\n"))
+            # A head that merged main at B and is behind C: the newest main commit it contains.
+            self.assertEqual(run(merged)[:2], (0, f"base_sha={tip}\n"))
+            # The tip itself: the tip.
+            self.assertEqual(run(later)[:2], (0, f"base_sha={later}\n"))
+            # A head that is not a SHA is refused before git runs.
+            for head in ("main", "", later.upper()):
+                with self.subTest(head=head):
+                    code, written, err = run(head)
+                    self.assertEqual((code, written), (1, ""))
+                    self.assertIn("sha malformed", err)
+                    self.assertNotIn("base sha malformed", err)
+            # No common history: git merge-base finds no base and the step stops there.
+            code, written, err = run(unrelated)
+            self.assertNotEqual(code, 0)
+            self.assertEqual(written, "")
+            self.assertNotIn("malformed", err)
 
     def test_candidate_chosen_text_never_reaches_the_job(self) -> None:
         text = _uncommented(self.text)

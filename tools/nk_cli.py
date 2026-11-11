@@ -113,6 +113,8 @@ from analyze import check_code_overlay, is_code_overlay  # noqa: E402
 
 
 ROOT = Path(__file__).resolve().parent.parent
+# Published per-title packages (docs/ENHANCEMENT_CONTRACT.md section 5.1) this source tree ships.
+SHIPPED_ENHANCEMENTS = ROOT / "assets" / "enhancements"
 PACKAGE_CACHE_MARKER = ".nk-aot-package-cache-v1"
 MAX_GUEST_MODULES = MAX_MODULE_CANDIDATES
 MAX_GUEST_MODULE_BYTES = 256 * 1024 * 1024
@@ -2539,11 +2541,15 @@ def _select_enhancement_package(
     environment: Mapping[str, str],
     sfo_disc_id: str | None = None,
     disc_version: str | None = None,
+    shipped_enhancements: Path | None = None,
 ) -> tuple[Path | None, Path]:
     """The enhancement package a build applies and the package directory it writes.
 
     A package is applied only when the command names it (`--enhancement-package`, or
-    `--experimental-60hz` with `<user data>/enhancements/<disc id, lowercase>-60hz.json`).
+    `--experimental-60hz` with `<user data>/enhancements/<disc id, lowercase>-60hz.json`, else
+    the published package this source tree ships at
+    `assets/enhancements/<disc id, lowercase>-60hz.json`). The user's own file comes first, so a
+    package author can try a new declaration; a shipped file must be in the published form.
     An environment that names one on its own is refused, explicit package or not: the
     Makefile would read it, and it would otherwise enhance the authentic package or
     override the package checked here. An enhanced build gets its own directory, never
@@ -2563,14 +2569,22 @@ def _select_enhancement_package(
             "or --experimental-60hz."
         )
     package_path = enhancement_package
+    shipped = False
     if experimental_60hz and package_path is None:
-        candidate = user_root / "enhancements" / f"{disc_id.lower()}-60hz.json"
-        if not candidate.is_file():
+        leaf = f"{disc_id.lower()}-60hz.json"
+        candidate = user_root / "enhancements" / leaf
+        shipped_candidate = (SHIPPED_ENHANCEMENTS if shipped_enhancements is None
+                             else shipped_enhancements) / leaf
+        if candidate.is_file():
+            package_path = candidate
+        elif shipped_candidate.is_file():
+            package_path, shipped = shipped_candidate, True
+        else:
             raise PackageBuildError(
                 f"--experimental-60hz requires an enhancement package at {candidate} "
-                "or an explicit --enhancement-package <path>."
+                f"(or a published one at {shipped_candidate}) or an explicit "
+                "--enhancement-package <path>."
             )
-        package_path = candidate
     if package_path is None:
         return None, user_root / "packages" / disc_id
     import enhancement_package as enhancement_package_module
@@ -2580,6 +2594,11 @@ def _select_enhancement_package(
         package = enhancement_package_module.load_and_validate_package(package_path)
     except (OSError, ValueError) as exc:
         raise PackageBuildError(f"Enhancement package rejected: {exc}") from exc
+    if shipped and not enhancement_package_module.is_published_package(package):
+        raise PackageBuildError(
+            f"Enhancement package rejected: {package_path} is shipped with the source tree but is "
+            "not in the published form (docs/ENHANCEMENT_CONTRACT.md section 5.1)."
+        )
     if enhancement_package_module.is_published_package(package):
         _check_published_package_disc(package, sfo_disc_id, disc_version, executable_sha256)
     if package["target_title_id"] != title_id:
