@@ -10504,23 +10504,31 @@ static int coherence_run_host_depth(void) {
         if (ok && seen != FB_W * FB_H) ok = 0;
     }
 
-    /* readback: the z-fight, decal and equal scene's depth committed to guest VRAM. */
+    /* readback: a z-fight scene's depth committed to guest VRAM. */
     uint64_t hash = 0xcbf29ce484222325ull;
     if (ok) {
-        /* Every depth here lies an eighth of a step or more from a half step: how a D16 attachment
-         * rounds a value next to a half step is the driver's (lavapipe rounds 17/32 of a step down), so
-         * only such values have one 16-bit answer on every device. The z-fight pair and the decal pair
-         * each round to one step, so at 16 bits the second surface passes and writes that step, and
-         * with depth=32 it fails and the first one's value stays: the stored step is the same. The
-         * steep quad's depth is whole at every device pixel centre. */
-        const HdQuad q[5] = {
-            { HD_NEAR, 16.0f, 144.0f, 16.0f, 48.0f, 1000.125f, 1000.125f, 1u, 1u },
-            { HD_FAR, 16.0f, 144.0f, 16.0f, 48.0f, 999.875f, 999.875f, 7u, 1u },
-            { HD_NEAR, 16.0f, 144.0f, 64.0f, 96.0f, 3000.125f, 3000.125f, 1u, 1u },
-            { HD_DECAL, 48.0f, 112.0f, 64.0f, 96.0f, 3000.25f, 3000.25f, 5u, 1u },
+        /* A z-fight whose outcome the key changes. Through mode cuts a vertex's z to a whole step
+         * (ge.c), so fractions come only from interpolation. The near ramp climbs 8 steps a guest
+         * pixel, which is a whole step at every device pixel centre at scales 1, 2 and 4; the far ramp
+         * starts a step behind it and closes to it across the strip. At 16 bits the far surface passes
+         * GEQUAL only where it rounds to the near one's step, and then writes that same step; with
+         * depth=32 it fails everywhere and the near step stays. Either way each pixel stores the near
+         * step, which a D16 attachment holds exactly, so no stored value lies near a half step (where a
+         * D16 conversion's rounding is the driver's: lavapipe stores 17/32 of a step as the lower one).
+         * The steep quad's depth is whole at every device pixel centre too. */
+        const HdQuad q[3] = {
+            { HD_NEAR, 16.0f, 144.0f, 16.0f, 48.0f, 1000.0f, 2024.0f, 1u, 1u },
+            { HD_FAR, 16.0f, 144.0f, 16.0f, 48.0f, 999.0f, 2024.0f, 7u, 1u },
             { HD_NEAR, 160.0f, 400.0f, 100.0f, 260.0f, 60000.0f, 56160.0f, 1u, 1u },
         };
-        ok = hd_reset(0x1234u) && hd_draw(q, 5);
+        ok = hd_reset(0x1234u) && hd_draw(q, 3);
+        /* The scene must show the key's effect, or the hash would match whatever the key did. */
+        const uint32_t far_px = ok ? hd_count(HD_FAR, 16, 144, 16, 48) : 0u;
+        if (ok && (s_depth32 ? far_px != 0u : far_px == 0u)) {
+            fprintf(stderr, "gpu coherence selftest [%s]: readback scene (%s): the far ramp shows at %u pixels "
+                    "(want %s)\n", name, mode, far_px, s_depth32 ? "none" : "some, where the steps tie");
+            ok = 0;
+        }
         DepthEnt *d = ok ? hd_depth() : NULL;
         if (d) d->guest_dirty = 1;
         ok = d && depth_readback_to_guest(d);

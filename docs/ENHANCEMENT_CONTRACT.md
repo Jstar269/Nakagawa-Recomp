@@ -1229,6 +1229,10 @@ section 11.3.12 is its entry and says what the guest can observe; this section s
   - A surface with depth writes on, drawn with LEQUAL or GEQUAL on the plane of another from other vertices, is
     decided by float rounding pixel by pixel where the PSP passes every pixel, so it can speckle. That, and the EQUAL
     case above, are why the feature is off by default.
+  - Through-mode draws (2D overlays and their lines) carry whole-step depths, while a 3D surface stores its depth
+    with its fraction. An overlay at the step such a surface rounds to, drawn with LEQUAL or GEQUAL, meets the
+    cases above at each pixel: it fails where it lies on the losing side of the stored value by more than the lean
+    (up to half a step), or by any amount when it writes depth, where the PSP passes it.
 
   ALWAYS, NEVER and clear mode are unchanged, and so is the minz/maxz range test, which rounds the fragment's depth
   to a step in `psp.frag`, except that on a draw with the lean a device may give the shader the leaned depth, which
@@ -1257,8 +1261,8 @@ section 11.3.12 is its entry and says what the guest can observe; this section s
   Section 10.4 applies: the run is an Enhanced or Ace run.
 - **Tests.** `ace-selftest` pins the key, its values, its place in the line, the stamp's line and the report.
   `gpu-coherence-selftest` runs `host-depth` with the key off and on (`--depth 32`) at scales 1 and 4:
-  - z-fight: a surface drawn after a nearer one with GEQUAL and depth writes, behind it by one step closing to 1/256
-    of one: with the key off the far surface shows where the two round to one step, which is the defect; with the
+  - z-fight: a surface drawn after a nearer one with GEQUAL and depth writes, behind it by one step closing to a
+    small fraction of one (1/256 at the last device pixel at scale 1, 1/1024 at scale 4): with the key off the far surface shows where the two round to one step, which is the defect; with the
     key on the near surface shows at every pixel;
   - decal: a quad drawn on its base's plane from other vertices with GEQUAL, and with LEQUAL, and depth writes off,
     covers every pixel it spans, with the key on and off;
@@ -1266,8 +1270,10 @@ section 11.3.12 is its entry and says what the guest can observe; this section s
   - upload: every 16-bit value written by the CPU reads back from the device unchanged, and a quad at a written
     step passes EQUAL against it while one a step away fails, from 0 to 65535;
   - readback: a scene's depth committed to guest VRAM hashes to the same value with the key on as the key-off run
-    at the same scale (`--depth-ref`); its depths lie at least an eighth of a step from a half step, where the
-    16-bit conversion is the driver's.
+    at the same scale (`--depth-ref`). The scene is a z-fight the key changes (the far surface shows at some
+    pixels with the key off and at none with it on, which the test checks), drawn so that every pixel stores the
+    near surface's step either way and that step is whole at each device pixel centre, away from the half steps
+    where a 16-bit conversion's rounding is the driver's.
 
   The whole suite also runs once with `--depth 32`, and its cells that read the device's depth image read it at
   either format.
