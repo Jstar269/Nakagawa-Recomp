@@ -4625,9 +4625,14 @@ bool player_app_retry_from_error(PlayerApp *app) {
     app->selected_game_index = index;
     player_app_set_view(app, VIEW_LIBRARY);
     if (retry == PLAYER_ERROR_RETRY_WITHOUT_PACK) {
-        /* This one launch leaves the pack out; the stored choice stays for the next. */
-        if (!player_disc_id_key(app->games[index].disc_id, app->launch_without_pack)) return false;
+        /* This one launch leaves the pack out; the stored choice stays for the next. It is armed
+           only once the launch is asked for, so a request refused here (its package rebuilding)
+           leaves nothing behind for a later launch. */
+        char key[PLAYER_DISC_ID_KEY_LEN];
+        if (!player_disc_id_key(app->games[index].disc_id, key)) return false;
         player_app_request_launch(app, index);
+        if (app->request_launch && app->request_launch_index == index)
+            memcpy(app->launch_without_pack, key, sizeof(app->launch_without_pack));
         return true;
     }
     if (retry == PLAYER_ERROR_RETRY_RESTART_GAME) {
@@ -5413,9 +5418,9 @@ bool player_app_launch_begin(PlayerApp *app, int game_index, PlayerLaunchWork *w
             char message[640];
             snprintf(message, sizeof(message),
                      "The texture pack chosen for this game cannot be used: %s. Play without the "
-                     "pack starts the game without it this time and keeps your choice. To fix it, "
-                     "choose the pack again on the game's Enhanced page, or remove it or turn "
-                     "Texture pack off there.", info.error);
+                     "pack starts the game without it this time and keeps your choice. Fix the "
+                     "pack where it is, or choose another, remove it or turn Texture pack off "
+                     "on the game's Enhanced page.", info.error);
             player_app_set_error(app, "TEXTURE_PACK_REFUSED", "Texture pack not used", message,
                                  "Back to library", VIEW_LIBRARY);
             if (have_key) {
@@ -5699,6 +5704,9 @@ bool player_app_launch_game(PlayerApp *app, int game_index) {
 
 void player_app_request_launch(PlayerApp *app, int game_index) {
     if (!app || game_index < 0 || game_index >= app->game_count) return;
+    /* Every request starts with the pack in: only "Play without the pack" arms its own request
+       (player_app_retry_from_error), and an earlier one that never started takes nothing along. */
+    app->launch_without_pack[0] = '\0';
     /* A package that is being rebuilt is about to be replaced: its game waits
        until the rebuild ends (its card says so). */
     if (app->build_session.is_building &&

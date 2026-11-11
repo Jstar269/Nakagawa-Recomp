@@ -873,8 +873,9 @@ static void settings_ace(NkUi *ui, const PlayerUiSettingsModel *model, float inn
         }
         /* The column is sized from the widest value each row can show on this page, not
            the one it shows now, so stepping a setting (Smooth motion turning Widescreen
-           off, say) never moves or restacks the rows. The texture pack rows have one value
-           each, so they are measured as they are. */
+           off, say) never moves or restacks the rows. The texture pack rows change only when
+           a pack is chosen or removed, never when a setting steps, so they are measured as
+           they are. */
         WizardRow widest[1 + PLAYER_UI_ENHANCED_ROWS + 2];
         memcpy(widest, rows, sizeof(rows[0]) * measured);
         widest[0].value = settings_widest_value(ui, rows[0].name, rows[0].value,

@@ -95,8 +95,11 @@ def _ace_line_longest() -> str:
     if table is None:
         raise AssertionError("k_ace_keys not found in src/rt/ace.c")
     keys = re.findall(r'\{"([a-z0-9_]+)",\s*ACE_KEY_\w+,\s*[01],\s*"([^"]+)"\}', table.group(1))
-    if not keys:
-        raise AssertionError("k_ace_keys names no key with its longest value")
+    rows = re.findall(r'\{"', table.group(1))
+    if not keys or len(keys) != len(rows):
+        raise AssertionError(
+            f"k_ace_keys: {len(keys)} of its {len(rows)} rows read as a key with its longest value"
+        )
     return "v1" + "".join(f";{name}={value}" for name, value in keys)
 
 

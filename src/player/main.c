@@ -5428,6 +5428,10 @@ static void player_frame_render(PlayerRun *run) {
             player_note_launcher_display(app, run->window);
             run->launch_job = player_launch_job_start(app, app->request_launch_index);
         }
+        /* A request dropped here (a launch already running, or one refused before
+           player_app_launch_begin) must not leave its "Play without the pack" for a later launch;
+           a launch that began has already taken it. */
+        app->launch_without_pack[0] = '\0';
     }
     if (app->request_factory_reset) {
         app->request_factory_reset = false;

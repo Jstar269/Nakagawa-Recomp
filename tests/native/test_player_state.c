@@ -9251,6 +9251,30 @@ static void test_play_mode_texpack_settings(void) {
         memset(work, 0, sizeof(*work));
         assert(!player_app_launch_begin(app, 0, work));
         assert(strcmp(app->last_error.error_code, "TEXTURE_PACK_REFUSED") == 0);
+        /* "Play without the pack" is armed only with its own request: while the game's package
+           rebuilds the request is refused and nothing stays armed, and a later ordinary request
+           clears one that never started. */
+        {
+            ErrorState card = app->last_error;
+            const bool was_building = app->build_session.is_building;
+            char was_disc[sizeof(app->build_session.disc_id)];
+            memcpy(was_disc, app->build_session.disc_id, sizeof(was_disc));
+            app->build_session.is_building = true;
+            snprintf(app->build_session.disc_id, sizeof(app->build_session.disc_id), "%s",
+                     app->games[0].disc_id);
+            app->request_launch = false;
+            assert(player_app_retry_from_error(app));
+            assert(!app->request_launch && app->launch_without_pack[0] == '\0');
+            app->build_session.is_building = was_building;
+            memcpy(app->build_session.disc_id, was_disc, sizeof(was_disc));
+            app->last_error = card;
+            assert(player_app_retry_from_error(app));
+            assert(app->request_launch && strcmp(app->launch_without_pack, "TEST95001") == 0);
+            player_app_request_launch(app, 0);
+            assert(app->request_launch && app->launch_without_pack[0] == '\0');
+            app->request_launch = false;
+            app->last_error = card;
+        }
         /* Another game's launch does not take a "without the pack" meant for this one. */
         snprintf(app->launch_without_pack, sizeof(app->launch_without_pack), "TEST95002");
         memset(work, 0, sizeof(*work));

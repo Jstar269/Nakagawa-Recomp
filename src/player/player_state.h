@@ -929,9 +929,10 @@ struct PlayerApp {
        a pick that completes after the page closed or moved still reaches that game alone. */
     bool request_texpack_folder_picker;
     char texpack_pick_disc[PLAYER_DISC_ID_KEY_LEN];
-    /* The game (normalised disc ID) whose next launch leaves its texture pack out, set by the
-       refusal card's "Play without the pack" and taken by that launch alone
-       (player_app_launch_begin), whether it starts or not. */
+    /* The game (normalised disc ID) whose requested launch leaves its texture pack out, armed by
+       the refusal card's "Play without the pack" together with its request_launch and taken by
+       that launch alone (player_app_launch_begin), whether it starts or not. A new request clears
+       it, and so does the event loop when it drops the request without a launch. */
     char launch_without_pack[PLAYER_DISC_ID_KEY_LEN];
     /* The pack of the title whose Enhanced page is open, read when the page opens or the pack
        changes (player_app_title_pack_info), so the page never scans a folder each frame. */
