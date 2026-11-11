@@ -478,6 +478,8 @@ the device is created with no feature outside Ace.
   guest-visible item. Its entry is section 11.3.7.
 - **Input:** `stick=<counts>` (Ace only) changes the left-stick values of the live host samples the guest latches,
   never when they are latched. It is a guest-visible item. Its entry is section 11.3.11.
+- **Loads:** `load=fast` (Ace only) shortens the display waits a title's own loading screen paces itself with, so
+  it changes guest timing. It is a guest-visible item, not yet admitted. Its entry is section 11.3.10.
 
 ### 10.4. Stamps and Evidence
 

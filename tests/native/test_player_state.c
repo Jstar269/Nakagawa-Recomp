@@ -8335,6 +8335,12 @@ static void test_play_mode_stick_settings(void) {
     r.part[PLAYER_PART_CULL] = 1;
     assert(player_play_launch_line(&r, line, sizeof(line)) &&
            strcmp(line + strlen(line) - 17, ";stick=64;cull=on") == 0 && strstr(line, ";tess=off;stick=64") != NULL);
+    /* Short loads too: stick, then load, then cull (contract 11.3.10, 11.3.11). */
+    r.part[PLAYER_PART_LOAD] = 1;
+    assert(player_play_launch_line(&r, line, sizeof(line)) &&
+           strcmp(line + strlen(line) - 27, ";stick=64;load=fast;cull=on") == 0 &&
+           strstr(line, ";tess=off;stick=64") != NULL);
+    r.part[PLAYER_PART_LOAD] = 0;
     r.part[PLAYER_PART_CULL] = 0;
     player_play_resolve(&app->settings, "TEST92001", &r);       /* no declared dead zone */
     assert(r.on && r.mode == PLAYER_PLAY_ACE && r.part[PLAYER_PART_STICK] == 1 && r.stick_counts == 0);
