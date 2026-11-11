@@ -575,22 +575,25 @@ below). The code is `src/rt/gpu_sdl3vk/ace_smooth.c`, its shaders and the pure p
   frame to overflow the mask prints a warning.
 - **When.** The flip of frame B shows the in-between of A and B; the next VBLANK shows B. Nothing is shown before the
   guest made it, so a frame is never predicted. The cost is one VBLANK of added delay (about 17 ms), reported in the
-  run's report as `added_delay_ms`. A new flip that arrives before B was due replaces it, counted in
-  `presents.superseded`.
+  run's report as `added_delay_ms`. Only a flip in B's own VBLANK replaces it, counted in `presents.superseded`, as a
+  PSP shows only the last frame flipped before a VBLANK; a flip after B's VBLANK has come shows B first (below).
 - **A busy display never costs a real frame** outside fast forward (see "Only at 30" below). While the guest is
   paced to real time, a present does not wait for the display (`src/rt/gpu_sdl3vk/README.md`): when the display
   cannot take a frame, the present returns at once and shows nothing. When that happens to B's present, B stays
   owed. It is tried again at each later VBLANK until a present shows it: one with no flip, or one whose flip's own
-  present found the display busy too. The flip of the next frame C shows B in place of the in-between of B and C,
-  then C at its own VBLANK. So a frame whose in-between was shown is never dropped for a made-up picture, and a
-  display that takes only every second present shows the real frames, with `SMOOTH OFF` on the readout. A title that
-  flips each frame twice shows its newest frame at the second flip; when flips in between found the display busy
-  too, that frame is newer than the owed one and replaces it. What a present shows changes the pace only once that
-  present has reached the screen. When the present that should show B fails (an out-of-date window, say), B is given
-  up and C is not held: the CPU present that takes over shows C as it is, and no VBLANK shows it again. When the
-  failed present is the CPU one itself (a frame that is not resident, or the software renderer), nothing takes over:
-  C is lost as a failed present loses a frame without smooth motion. `presents.busy` counts the held presents the
-  display could not take, and `presents.superseded` every held frame that never reached the screen.
+  present found the display busy too. The first flip whose present the display takes shows B in place of its
+  in-between, then its own frame at its VBLANK, however many flips the display missed in between. Frames whose
+  presents the display never took are not shown, as without smooth motion; every frame whose present it took is
+  shown, in order. So a frame whose in-between was shown is never dropped for a made-up picture, and a display that
+  takes only every second present shows the real frames, with `SMOOTH OFF` on the readout. A title that flips each
+  frame twice is no different: when the flips in between found the display busy, the second flip of a newer frame
+  is that frame's first present, so it shows B and holds its own frame for the next flip. What a present shows
+  changes the pace only once that present has reached the screen. A present that fails (an out-of-date window, say)
+  shows nothing, as a busy display: B stays owed, the pass drops the frame it recorded with it, and the CPU present
+  that takes over shows B and holds C. When that one fails too, B's VBLANK shows it and C is lost, as a failed
+  present loses a frame without smooth motion. B is given up only when the window closes or the renderer can present
+  nothing any more. `presents.busy` counts the held presents the display could not take or that failed, and
+  `presents.superseded` every held frame that never reached the screen.
 - **Only consecutive frames.** An in-between is made of a frame and the one flipped just before it. When that one
   never reached a present (the presenter's slot rule dropped its flip on a busy PC, or the present failed), the
   pass still holds an older frame, and an in-between of the two would put a fast-moving object in the wrong place

@@ -784,7 +784,7 @@ int ace_flip(uint32_t fb, uint32_t bytes, uint32_t vcount, uint64_t now_ns) {
         s_pace.held = 0;
         s_pace.owed = 0;
     }
-    ace_pace_flip(&s_pace, new_frame, s_ff_running ? ACE_RATE_NONE : s_det.stable, s_eff.smooth, now_ns);
+    ace_pace_flip(&s_pace, new_frame, s_ff_running ? ACE_RATE_NONE : s_det.stable, s_eff.smooth, vcount, now_ns);
     if (s_ff_running) {
         /* Fast forward: no window is judged (ace_note_fast_forward). */
     } else if (!s_win_started) {
@@ -834,15 +834,24 @@ void ace_pace_reset(AcePace *p) {
     if (p) memset(p, 0, sizeof(*p));
 }
 
-void ace_pace_flip(AcePace *p, int new_frame, AceRate rate, int smooth, uint64_t now_ns) {
+void ace_pace_flip(AcePace *p, int new_frame, AceRate rate, int smooth, uint32_t vcount, uint64_t now_ns) {
     p->flip_ns = now_ns;
     if (smooth && new_frame) p->frame_seq++;
+    /* The held frame's VBLANK has come, or its present found the display busy: it is shown
+     * before anything newer, never replaced (ace.h). */
+    const int late = smooth && p->held && (p->owed || vcount != p->held_after);
     if (!new_frame) {
         /* The frame on the screen's buffer is shown again. It is the held frame only when the
-         * pass kept the newest frame flipped: after flips whose presents were dropped it is a
-         * newer real frame, and that one replaces the held frame. Otherwise the held frame
-         * stays held until a present shows it. */
+         * pass kept the newest frame flipped. After flips whose presents were dropped it is a
+         * newer real frame: this present is that frame's first, so, as for a new frame, it
+         * shows a late held frame and holds the newer one, or replaces a held frame whose
+         * VBLANK has not come. Otherwise the held frame stays held until a present shows it. */
         if (p->held && p->taken_seq != p->frame_seq) {
+            p->reflip = 0;
+            if (late) {
+                p->show = ACE_SHOW_OWED;
+                return;
+            }
             p->superseded++;
             p->held = 0;
             p->owed = 0;
@@ -852,7 +861,7 @@ void ace_pace_flip(AcePace *p, int new_frame, AceRate rate, int smooth, uint64_t
         return;
     }
     p->reflip = 0;
-    if (smooth && p->held && p->owed) {
+    if (late) {
         p->show = ACE_SHOW_OWED;
         return;
     }
@@ -873,14 +882,21 @@ AceShow ace_pace_take(AcePace *p) {
     if (show == ACE_SHOW_BETWEEN && !consecutive) {
         show = ACE_SHOW_KEEP;
         p->unpaired++;
-    } else if (show == ACE_SHOW_OWED && !consecutive) {
+    } else if (show == ACE_SHOW_OWED && !p->held) {
+        /* A verdict no present took before a VBLANK showed the held frame: nothing is owed. */
         show = ACE_SHOW_KEEP;
-        p->superseded++;
-        p->held = 0;
-        p->owed = 0;
     }
+    if (show == ACE_SHOW_OWED) p->owed_seq = p->taken_seq;
     p->taken_seq = p->frame_seq;
     return show;
+}
+
+void ace_pace_owed_failed(AcePace *p) {
+    if (!p->held) return;
+    p->show = ACE_SHOW_OWED;
+    p->taken_seq = p->owed_seq;
+    p->owed = 1;
+    p->busy++;
 }
 
 void ace_pace_shown_between(AcePace *p, uint32_t vcount, uint64_t now_ns) {
@@ -918,9 +934,9 @@ uint64_t ace_pace_held_shown(AcePace *p) {
     return p->held_ns;
 }
 
-void ace_pace_held_missed(AcePace *p, int busy) {
+void ace_pace_held_missed(AcePace *p, int retry) {
     if (!p->held) return;
-    if (busy) {
+    if (retry) {
         p->owed = 1;
         p->busy++;
     } else {
@@ -944,12 +960,16 @@ void ace_smooth_shown_owed(uint64_t now_ns) {
     ace_pace_shown_owed(&s_pace, s_pace_vcount, now_ns);
 }
 
+void ace_smooth_owed_failed(void) {
+    if (g_ace_on) ace_pace_owed_failed(&s_pace);
+}
+
 int ace_smooth_vblank(uint32_t vcount) {
     return g_ace_on && ace_pace_vblank(&s_pace, vcount);
 }
 
-void ace_smooth_held_missed(int busy) {
-    if (g_ace_on) ace_pace_held_missed(&s_pace, busy);
+void ace_smooth_held_missed(int retry) {
+    if (g_ace_on) ace_pace_held_missed(&s_pace, retry);
 }
 
 void ace_smooth_flip_busy(void) {
