@@ -10523,7 +10523,7 @@ static int hd_draw(const HdQuad *q, int n) {
 static int hd_reset(uint16_t z) {
     coherence_reset_targets();
     coherence_reset_depths();
-    memset(SR_HOST(HD_BASE), 0, 512u * FB_H * 4u);
+    memset(SR_HOST(HD_BASE), 0, (size_t)512u * FB_H * 4u);
     sr_gpu_vram_dirty(HD_BASE, 512u * FB_H * 4u);
     memset(s_ge, 0, sizeof(*s_ge));
     s_ge->zbp = 0x04000000u | HD_ZBA; s_ge->zbw = 512u;

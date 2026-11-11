@@ -3662,9 +3662,9 @@ static int depth_from_cpu(DepthEnt *d) {
     for (uint32_t y = 0; s_depth32 && y < FB_H; y++) {
         const uint16_t *src = s_zbuf + y * source_stride;
         for (uint32_t x = 0; x < FB_W; x++)
-            for (int i = 0; i < s_scale; i++) s_zwidef[x * (uint32_t)s_scale + (uint32_t)i] = depth_unorm(src[x]);
-        float *dl = (float *)upload.map + (uint32_t)(y * s_scale) * drow;
-        for (int j = 0; j < s_scale; j++) memcpy(dl + (uint32_t)j * drow, s_zwidef, drow * 4u);
+            for (int i = 0; i < s_scale; i++) s_zwidef[(size_t)x * (size_t)s_scale + (size_t)i] = depth_unorm(src[x]);
+        float *dl = (float *)upload.map + (size_t)y * (size_t)s_scale * drow;
+        for (int j = 0; j < s_scale; j++) memcpy(dl + (size_t)j * drow, s_zwidef, (size_t)drow * sizeof(float));
     }
     for (uint32_t y = 0; !s_depth32 && y < FB_H; y++) {
         const uint16_t *src = s_zbuf + y * source_stride;
@@ -3710,7 +3710,7 @@ static int depth_to_cpu(DepthEnt *d) {
     for (uint32_t y = 0; y < FB_H; y++)
         for (uint32_t x = 0; x < FB_W; x++)
             s_zbuf[y * d->zstride + x] =
-                depth_texel(s_xfer_map, (size_t)y * readback_row_step() * SCL_W + x * (uint32_t)s_scale);
+                depth_texel(s_xfer_map, (size_t)y * readback_row_step() * SCL_W + (size_t)x * (size_t)s_scale);
     if (sr_perf_enabled) sr_perf_vulkan_readback((uint32_t)readback_bytes(DEPTH_BPP));
     d->cpu_dirty = 1;
     d->guest_dirty = 0;
@@ -3756,7 +3756,7 @@ static int depth_readback_to_guest(DepthEnt *d) {
             uint32_t linear = (y * d->zstride + x) * 2u;
             uint32_t addr = 0x04000000u + ((d->zba + linear) ^ 0x2040u);
             uint16_t value = depth_texel(s_xfer_map, (size_t)y * readback_row_step() * SCL_W +
-                                                     x * (uint32_t)s_scale);
+                                                     (size_t)x * (size_t)s_scale);
             if (!sr_inrange_n(addr, 2u)) return 0;
             memcpy(SR_HOST_LINEAR(addr), &value, sizeof value);
         }
