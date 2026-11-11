@@ -1822,11 +1822,11 @@ static void gui_pause_describe_controls(void) {
                                  nk_overlay_host_pad_family(s_pause_host));
 }
 
-_Static_assert(GE_VRAM_VIEW_DISPLAY == NK_OVERLAY_VRAM_DISPLAY &&
-                   GE_VRAM_VIEW_DRAW == NK_OVERLAY_VRAM_DRAW &&
-                   GE_VRAM_VIEW_DEPTH == NK_OVERLAY_VRAM_DEPTH &&
-                   GE_VRAM_VIEW_TEXTURE == NK_OVERLAY_VRAM_TEXTURE &&
-                   GE_VRAM_VIEW_SOURCES == NK_OVERLAY_VRAM_SOURCE_COUNT &&
+_Static_assert((int)GE_VRAM_VIEW_DISPLAY == (int)NK_OVERLAY_VRAM_DISPLAY &&
+                   (int)GE_VRAM_VIEW_DRAW == (int)NK_OVERLAY_VRAM_DRAW &&
+                   (int)GE_VRAM_VIEW_DEPTH == (int)NK_OVERLAY_VRAM_DEPTH &&
+                   (int)GE_VRAM_VIEW_TEXTURE == (int)NK_OVERLAY_VRAM_TEXTURE &&
+                   (int)GE_VRAM_VIEW_SOURCES == (int)NK_OVERLAY_VRAM_SOURCE_COUNT &&
                    GE_VRAM_VIEW_DEPTH16 == NK_OVERLAY_VRAM_DEPTH16,
                "the GE's VRAM view sources are the overlay page's, index for index");
 /* The surfaces the display and the GE state name while the game is paused, from the same
