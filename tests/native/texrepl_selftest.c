@@ -2070,7 +2070,9 @@ static int *libc_adversary(int n) {
 
 /* The project sort: at most 2 n log2 n + 2 n comparisons on the worst orders it can be given, and
  * right on every order of up to 7 items; then packs in the order that costs qsort most open in
- * time far below what qsort takes on Windows (30 s for the ini, over 2 minutes for the ZIP). */
+ * time far below what qsort takes on Windows (about 8 s for the 100,000-line ini, over 2 minutes
+ * for the ZIP). Making that order costs the C library what sorting it costs (n * n / 4 comparisons
+ * on Windows, about 10 s at 100,000), once per build folder. */
 static void test_sort_adversary(void) {
     /* every permutation of up to 7 items */
     for (int n = 0; n <= 7; n++) {
@@ -2096,13 +2098,14 @@ static void test_sort_adversary(void) {
     unsigned long long cmps = 0;
     free(adversary(kN, nk_zip_sort, &cmps));
     CHECK((double)cmps <= bound, "the adversary against nk_zip_sort: %llu comparisons", cmps);
-    int *v = libc_adversary(kN);
+    const int kL = 100000;   /* the C library's worst order: n * n / 4 comparisons to make on Windows */
+    int *v = libc_adversary(kL);
     int *copy = (int *)malloc(sizeof(int) * (size_t)kN);
-    memcpy(copy, v, sizeof(int) * (size_t)kN);
+    memcpy(copy, v, sizeof(int) * (size_t)kL);
     g_cmps = 0;
-    nk_zip_sort(copy, (size_t)kN, sizeof(int), int_cmp);
+    nk_zip_sort(copy, (size_t)kL, sizeof(int), int_cmp);
     const unsigned long long cmps_libc_order = g_cmps;
-    for (int i = 0; i < kN; i++) if (copy[i] != i) { CHECK(0, "nk_zip_sort left the adversary's order unsorted"); break; }
+    for (int i = 0; i < kL; i++) if (copy[i] != i) { CHECK(0, "nk_zip_sort left the adversary's order unsorted"); break; }
     CHECK((double)g_cmps <= bound, "qsort's worst order through nk_zip_sort: %llu comparisons", g_cmps);
     for (int i = 0; i < kN; i++) copy[i] = kN - i;
     g_cmps = 0;
@@ -2114,23 +2117,23 @@ static void test_sort_adversary(void) {
     CHECK((double)g_cmps <= bound, "all equal: %llu comparisons", g_cmps);
     free(copy);
     printf("sort: n=%d, at most %.0f comparisons allowed; McIlroy's adversary against nk_zip_sort %llu, qsort's worst "
-           "order %llu\n", kN, bound, cmps, cmps_libc_order);
+           "order (n=%d) %llu\n", kN, bound, cmps, kL, cmps_libc_order);
 
-    /* A 200,000-line textures.ini in that order. */
+    /* A 100,000-line textures.ini in that order. */
     char dir[512], path[600], err[256] = "";
     make_pack(dir, sizeof(dir), "texrepl_adv_ini");
-    size_t cap = (size_t)kN * 12u + 64u, at = 0;
+    size_t cap = (size_t)kL * 12u + 64u, at = 0;
     char *ini = (char *)malloc(cap);
     at += (size_t)snprintf(ini, cap, "[options]\nhash=quick\n[hashes]\n");
-    for (int i = 0; i < kN; i++) at += (size_t)snprintf(ini + at, cap - at, "%x=a\n", (unsigned)v[i]);
+    for (int i = 0; i < kL; i++) at += (size_t)snprintf(ini + at, cap - at, "%x=a\n", (unsigned)v[i]);
     pack_path(path, sizeof(path), "texrepl_adv_ini", "textures.ini");
     write_text(path, ini);
     free(ini);
     double t0 = wall_s();
     NkTexRepl *p = nk_texrepl_open(dir, 0, err, sizeof(err));
     const double t_ini = wall_s() - t0;
-    CHECK(p && nk_texrepl_entry_count(p) == (size_t)kN, "the adversary's ini: %s", err);
-    CHECK(t_ini < 10.0, "the adversary's 200,000-line ini took %.2f s to open", t_ini);
+    CHECK(p && nk_texrepl_entry_count(p) == (size_t)kL, "the adversary's ini: %s", err);
+    CHECK(t_ini < 3.0, "the adversary's 100,000-line ini took %.2f s to open", t_ini);
     if (p) nk_texrepl_close(p);
     free(v);
 
@@ -2212,7 +2215,7 @@ static void test_sort_adversary(void) {
     CHECK(p != NULL, "the adversary's ZIP: %s", err);
     CHECK(t_zip < 10.0, "the adversary's 16,384-entry ZIP took %.2f s to open", t_zip);
     if (p) nk_texrepl_close(p);
-    printf("sort: qsort's worst order opens in %.3f s as a 200,000-line ini and %.3f s as a 16,384-entry ZIP\n", t_ini,
+    printf("sort: qsort's worst order opens in %.3f s as a 100,000-line ini and %.3f s as a 16,384-entry ZIP\n", t_ini,
            t_zip);
 }
 

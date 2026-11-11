@@ -962,8 +962,8 @@ memory, no network; ZIP packs through the project's own `src/core/nk_zip.c` and 
   data unpacks to 64 MiB, listed under 81 wildcard keys, is skipped 81 times within the time bound, nothing cached,
   `decode_peak` within the file's size and 4 KiB; a ZIP image and a `textures.ini` behind 1 MiB of empty DEFLATE
   blocks are refused at open; the sort is checked on every order up to 7 items, against its comparison bound on
-  McIlroy's adversary, on the order that costs the C library's `qsort` most, and through a 200,000-line
-  `textures.ini` and a 16,384-entry ZIP in that order, each opened within 10 s; `[hashranges]` lines are checked for
+  McIlroy's adversary, on the order that costs the C library's `qsort` most, and through a 100,000-line
+  `textures.ini` and a 16,384-entry ZIP in that order, opened within 3 s and 10 s; `[hashranges]` lines are checked for
   the last line winning, a non-finite fraction noted, 16,384 lines in reverse order and a pack with one more
   refused. These cells are fixed and seeded mutations, not coverage-guided fuzzing; the selftest also runs under
   AddressSanitizer and UndefinedBehaviorSanitizer on Linux. A file link needs Developer Mode on Windows, so that

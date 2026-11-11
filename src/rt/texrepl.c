@@ -14,8 +14,9 @@
  *
  * The hashes must match PPSSPP's bit for bit, since a pack's file names depend on them; the
  * selftest checks them against fixed quick-hash vectors taken from PPSSPP's own code and published
- * xxHash vectors (XXH32 and XXH64 are the public algorithms). The ini parser, the PNG decode (stb),
- * the cache and the budget are this project's own. The ini line rules, the texture-name and mip-chain
+ * xxHash vectors (XXH32 and XXH64 are the public algorithms). The ini parser, the PNG decoder (written
+ * from the PNG specification, its image data unpacked by src/core/nk_psp_inflate.c), the cache and
+ * the budget are this project's own. The ini line rules, the texture-name and mip-chain
  * rules and the ZIP pack rules follow the behaviour of PPSSPP's IniFile.cpp and TextureReplacer.cpp
  * at the same revision, read as reference and written here in this project's own code; ZIP packs are
  * read in place through the project's own reader (src/core/nk_zip.h).
@@ -1753,7 +1754,8 @@ static unsigned png_sample(const unsigned char *row, size_t i, unsigned depth) {
  * project's own inflater with g->raw_size as its hard limit, so a stream that unpacks to more is
  * refused after at most that many bytes, whatever its length; one that unpacks to less, or whose
  * zlib header or Adler-32 is wrong, is refused too. `*scratch` is the most memory the decode held
- * at once (the joined image data, the unpacked rows and the result). */
+ * at once (the joined image data and the unpacked rows, then the rows and the result), set whether
+ * the image is decoded or refused. */
 static uint32_t *png_decode(const unsigned char *d, size_t n, const PngInfo *g, uint64_t *scratch, char *why,
                             size_t why_cap) {
     (void)d;
@@ -1784,6 +1786,8 @@ static uint32_t *png_decode(const unsigned char *d, size_t n, const PngInfo *g, 
     }
     uint8_t *raw = NULL;
     size_t raw_n = 0;
+    /* The inflater holds at most raw_size bytes beside the joined data, refused or not. */
+    *scratch = (uint64_t)joined_bytes + (uint64_t)g->raw_size;
     const int rc = nk_psp_inflate_raw(z + 2, zn - 2, &raw, &raw_n, g->raw_size, g->raw_size, NULL, 0);
     const uint32_t adler = png_be32(z + zn - 4);
     free(joined);
@@ -1803,8 +1807,8 @@ static uint32_t *png_decode(const unsigned char *d, size_t n, const PngInfo *g, 
     const size_t out_bytes = (size_t)g->w * (size_t)g->h * 4u;
     unsigned char *out = (unsigned char *)malloc(out_bytes);
     if (!out) { free(raw); snprintf(why, why_cap, "out of memory"); return NULL; }
-    /* While unpacking, the joined data and the rows were held; now the rows and the result. */
-    *scratch = (uint64_t)raw_n + (joined_bytes > out_bytes ? joined_bytes : out_bytes);
+    /* Now the rows and the result are held. */
+    if ((uint64_t)raw_n + out_bytes > *scratch) *scratch = (uint64_t)raw_n + out_bytes;
     const size_t bpp = (g->depth * g->channels + 7u) / 8u;   /* bytes back the filters look */
     const unsigned max = (1u << (g->depth < 16 ? g->depth : 16u)) - 1u;
     unsigned char *row = raw;
