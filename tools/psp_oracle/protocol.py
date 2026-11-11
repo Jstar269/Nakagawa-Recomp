@@ -1122,7 +1122,7 @@ def _ge_probe_run_semantic_errors(run: dict[str, Any], path: str) -> list[tuple[
         if tuple(record["case_id"] for record in cell["records"]) != expected:
             errors.append((cell_path + ".records", "must be " + ", ".join(expected)))
             continue
-        rows = [record["words"] for record, suffix in zip(cell["records"], suffixes)
+        rows = [record["words"] for record, suffix in zip(cell["records"], suffixes, strict=True)
                 if suffix.startswith("r")]
         if ge_window_fnv1a64(rows) != cell["window_fnv1a64"]:
             errors.append((cell_path + ".window_fnv1a64", "is not the digest of the cell's rows"))
@@ -1150,7 +1150,7 @@ def _ge_probe_run_status(run: dict[str, Any], results_root: Path | None) -> tupl
     identity_refusal = _raw_identity_refusal(sequence.metadata, envelope)
     if identity_refusal:
         return "REFUSED", identity_refusal
-    for recorded, derived in zip(run["cells"], cells):
+    for recorded, derived in zip(run["cells"], cells, strict=True):
         if recorded != derived:
             return "REFUSED", f"corpus cell {recorded['cell']} differs from the result record."
     return "MEASURED", (f"acceptance-eligible PSP_HARDWARE record gives all {len(cells)} cells of "

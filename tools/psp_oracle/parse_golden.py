@@ -3106,7 +3106,7 @@ def ge_corpus_cells(sequence: SequenceReport, probe_case: str) -> list[dict[str,
             words = " ".join(f"{int(values[f'out{i}'], 0):08x}" for i in range(GE_CORPUS_ROW_WORDS))
             records.append({"case_id": case_id, "words": words})
         digest = ge_window_fnv1a64(
-            record["words"] for record, suffix in zip(records, suffixes) if suffix.startswith("r"))
+            record["words"] for record, suffix in zip(records, suffixes, strict=True) if suffix.startswith("r"))
         if probe_case == "ge-raster":
             draw = dict(sequence.results[f"{cell}-draw"].values)
             reported = f"0x{(int(draw['out8'], 0) << 32) | int(draw['out7'], 0):016x}"
