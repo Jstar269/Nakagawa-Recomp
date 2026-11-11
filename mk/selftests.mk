@@ -423,9 +423,8 @@ ge-cpu-profile-validate-selftest: $(RT_GE_O)
 	$(GE_CPU_PROFILE_VALIDATE_SELFTEST)
 	$(GE_CPU_PROFILE_VALIDATE_SELFTEST) --strip-cache-disabled
 	SR_GE_VERTEX_CACHE_DISABLE=1 $(GE_CPU_PROFILE_VALIDATE_SELFTEST)
-	@$(MAKE) --no-print-directory ge-vertex-cache-mutants
 
-native-core-tests: ge-cpu-profile-validate-selftest
+native-core-tests: ge-cpu-profile-validate-selftest ge-vertex-cache-mutants
 
 # ge-vertex-cache-mutants — the selftest's vertex cache case must kill each
 # SR_GE_VERTEX_CACHE_MUTANT in ge.c: 1 never starts a new epoch, so a draw reuses vertices an

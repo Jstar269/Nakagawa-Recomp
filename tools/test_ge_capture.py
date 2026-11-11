@@ -375,7 +375,8 @@ class TestGeCaptureWiring(unittest.TestCase):
         self.assertIn("$(RT_GE_O)", rule)
         self.assertNotIn("src/rt/ge.c", rule)
         self.assertIn("$(GE_CPU_PROFILE_VALIDATE_SELFTEST) --strip-cache-disabled", rule)
-        self.assertIn("native-core-tests: ge-cpu-profile-validate-selftest", makefile)
+        self.assertIn("native-core-tests: ge-cpu-profile-validate-selftest ge-vertex-cache-mutants",
+                      makefile)
         replay = (RT / "ge_replay.c").read_text(encoding="utf-8")
         self.assertIn("ge_cpu_profile_validate(&ge_cpu_stats", replay)
         self.assertIn("return ge_cpu_failed ? 4 : 0;", replay)
