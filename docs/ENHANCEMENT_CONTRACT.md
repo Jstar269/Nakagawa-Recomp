@@ -253,8 +253,8 @@ Each `sites` entry names a symbolic `function`, a 4-byte-aligned `insn_offset`, 
 | `count_x2` | positive `addi`/`addiu`/`slti`/`sltiu` immediate; `andi` mask $2^n-1$; `lui` of a normal float; `sll`; integer loads; `lwc1`/`swc1`; `sw` (only with `stock_values`, §9.6); `lv.s` (the loaded VFPU register is scaled); single-precision arithmetic and `cvt.s.w`; a unit countdown `addiu rt, rt, -1` | the produced value is doubled (a countdown is gated) |
 | `count_x2_even` | `slti`/`sltiu rt, rs, n` with $0 < n \le$ `0x3FFF` and `rt` neither `$zero` nor `rs` | a bound on a counter of logic updates since an event: true while `rs` $< 2n$ and `rs` is even, so the $n$ events of the stock window still happen, one every second update, at the stock instants (`count_x2` would make $2n$ of them, twice as dense). Under `slti` a negative `rs` stays true, as in stock, so an inactive value such as $-1$ keeps its meaning; under `sltiu` it is a large unsigned value, false in both forms. The resolver refuses the site unless `rs` is loaded from memory (`lb`, `lbu`, `lh`, `lhu` or `lw`) within the 16 instructions before the compare, with no branch, jump or call in between, and not in the delay slot of a jump, a call or a branch-likely. The check reads backward in address order and does not see a branch from elsewhere into those instructions. The site's evidence shows the rest: that the stored count advances by one every update |
 | `step_x0.5`, `probability_per_update_x0.5` | as `count_x2` except integer loads, plus accumulating `+1`/`-1`/`addu`/`subu` updates | the produced value is halved (exactly, or by gating a unit or register step); `add.s fd, fd, ft` halves the addend `ft` |
-| `decay_k_to_1-sqrt(1-k)` | `lui` of a float $k \in (0, 1)$; `lwc1` or `lv.s` of the factor | $k \to 1 - \sqrt{1-k}$, evaluated as $k / (1 + \sqrt{1-k})$ in double so that a small $k$ does not cancel to 0, and rounded to the upper half; after an `lwc1` or `lv.s` the loaded register is mapped at run time, and a value outside $(0, 1)$ keeps its stock value and is reported once per site (`ENHANCEMENT_FACTOR_KEPT`) |
-| `retention_m_to_sqrt(m)` | `lui` of a float $m \in (0, 1)$; `lwc1` or `lv.s` of the factor; `add.s`, `sub.s`, `mul.s` or `div.s` whose result is the factor (such as $1 - cL$) | $m \to \sqrt{m}$, rounded to the upper half; after an `lwc1` or `lv.s` as for `decay_k_to_1-sqrt(1-k)`, and likewise after the arithmetic instruction, whose result register is mapped at run time |
+| `decay_k_to_1-sqrt(1-k)` | `lui` of a float $k \in (0, 1)$; `lwc1` or `lv.s` of the factor; `mov.s` that copies the factor (section 11.3.2.7) | $k \to 1 - \sqrt{1-k}$, evaluated as $k / (1 + \sqrt{1-k})$ in double so that a small $k$ does not cancel to 0, and rounded to the upper half; after an `lwc1` or `lv.s` the loaded register is mapped at run time, after a `mov.s` only the copy, and a value outside $(0, 1)$ keeps its stock value and is reported once per site (`ENHANCEMENT_FACTOR_KEPT`) |
+| `retention_m_to_sqrt(m)` | `lui` of a float $m \in (0, 1)$; `lwc1` or `lv.s` of the factor; `add.s`, `sub.s`, `mul.s` or `div.s` whose result is the factor (such as $1 - cL$); `mov.s` that copies the factor (section 11.3.2.7) | $m \to \sqrt{m}$, rounded to the upper half; after an `lwc1` or `lv.s` as for `decay_k_to_1-sqrt(1-k)`, and likewise after the arithmetic instruction, whose result register is mapped at run time; after a `mov.s` only the copy |
 | `accel_x0.25` | `lui` of a float (or a `lui`/`ori` pair) | the per-update acceleration is divided by 4 (two exponent steps on a lone `lui`) |
 | `launch_velocity_x0.5` | a `lui`/`ori` float pair with `acceleration_site` | the launch velocity $v_0 \to v_0/2 + g/8$, where $g$ is the stock value of the named `accel_x0.25` site |
 | `offset_x2` | `addi`/`addiu` with a nonzero immediate, also when the destination is a source | an additive offset counted in updates (a lookahead, a delay added to a base) doubles: $n \to 2n$ |
@@ -1685,6 +1685,31 @@ timing transform").
 - **Sampled checking.** As section 11.3.2.
 - **"Nothing worse".** As section 11.3.2.4; in the double-precision model the arc differs from stock's when the
   retention of half a step is $1 - cL/2$ in place of the square root.
+
+##### 11.3.2.7. Decay and Retention on a Register Copy
+
+`decay_k_to_1-sqrt(1-k)` and `retention_m_to_sqrt(m)` on a `mov.s fd, fs` that copies a per-update factor are
+admitted here by their own entry. A title can load one constant once and use it twice, for example 0.2 as a blend
+factor applied every update and 0.2 as a duration in seconds. A site on the load would change both; a site on the
+copy changes only the factor.
+
+- **Key and off switch.** Those of section 11.3.2. A package leaves the form out for its title by not naming it.
+- **What it changes.** After the stock copy, the destination register `fd` is mapped as the `lwc1` form maps its
+  loaded register: inside $(0, 1)$ to $1 - \sqrt{1-k}$ or $\sqrt{m}$; outside it, `fd` keeps its stock value and the
+  site reports once (`ENHANCEMENT_FACTOR_KEPT`). The source register `fs` keeps its stock value, so a copy onto
+  itself (`fd` equal to `fs`) refuses the package, as do `mov.d` and any other instruction this section and
+  section 9.2 do not name.
+- **What the guest can observe.**
+  - Guest registers and memory: the one FPU register `fd`, and everything computed from it. No memory is written.
+    The map is the one the `lwc1` form uses: the decay in double on the host, the square root the host's
+    `sqrtf` (section 9.2, "Host arithmetic").
+  - VRAM bytes, readbacks, timing the guest can measure and I/O speed: unchanged, as section 11.3.2.4.
+- **Tier and default.** Ace, off by default, as section 11.3.2.
+- **Authentic stays byte-identical.** As section 11.3.2. `test_mapped_register_copy_keeps_its_source_when_run`
+  compiles the emitted statement and runs it: with the toggle off both registers hold the stock copy; with it on,
+  `fd` is the mapped factor and `fs` keeps its stock bits.
+- **Sampled checking.** As section 11.3.2.
+- **"Nothing worse".** As section 11.3.2.4.
 
 #### 11.3.3. Texture Scaling and the Smart 2D Filter (Not Yet Admitted)
 
