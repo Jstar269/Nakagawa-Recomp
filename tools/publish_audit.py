@@ -316,7 +316,7 @@ def isolated_git_env(root: Path | None = None) -> dict[str, str]:
     what Git reports and whose ``core.fsmonitor`` names a command Git runs. With the setting, Git
     uses a bare repository only when one is named explicitly, which this tool never does.
     """
-    env = _isolated_git_env(root=root)
+    env: dict[str, str] = _isolated_git_env(root=root)
     count = int(env.get("GIT_CONFIG_COUNT", "0"))
     env[f"GIT_CONFIG_KEY_{count}"] = "safe.bareRepository"
     env[f"GIT_CONFIG_VALUE_{count}"] = "explicit"
