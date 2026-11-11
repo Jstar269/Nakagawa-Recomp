@@ -9131,6 +9131,11 @@ static int dro_overlap_cell(const char *cell, const DroState *states, uint32_t n
     free(s_dro_img_px); free(s_dro_twin_px);
     s_dro_img_px = s_dro_twin_px = NULL;
     s_dro_twin_read = 0;
+    if (twin_pair && s_twin_color && twin_in_order == 0u) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL the ordered and pre-batch 8-bit blends "
+                        "never differ, so the full-colour twin check cannot tell the paths apart\n", cell);
+        ok = 0;
+    }
     char twin_note[160] = "";
     if (twin_pair && s_twin_color)
         snprintf(twin_note, sizeof twin_note, "; the full-colour twin holds the %s 8-bit blend (the two "

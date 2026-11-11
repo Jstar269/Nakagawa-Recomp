@@ -601,8 +601,9 @@ mutant targets follow, and each broken variant must fail its case with its own m
 `gpu-coherence-selftest-snapbar-mutants` breaks the destination-snapshot copy's barriers three ways
 (`SR_GPU_SNAPBAR_MUTANT`, the submit-batch case), `gpu-coherence-pcache-mutant` makes pipelines bypass the
 pipeline cache (pipeline-cache-cold), and `gpu-dst-read-mutants` breaks the destination-read paths nine ways
-(`SR_GPU_DSTREAD_MUTANT`; mutants 1 to 3 and 5 to 9 run on the interlock path and are a SKIP on a device without it,
-the hosted lavapipe device included; 8 and 9 break the host twin's use of the interlock),
+(`SR_GPU_DSTREAD_MUTANT`; mutants 1 to 3 and 5 to 10 run on the interlock path and are a SKIP on a device without it,
+the hosted lavapipe device included; 8 and 9 break the host twin's use of the interlock, and 10 runs mutant 9 with the
+full-colour twin),
 and `gpu-stencil-once-mutants` breaks the write-once stencil batch three ways (`SR_GPU_STENCIL_ONCE_MUTANT`: no
 reordering, every state called write-once, no depth condition).
 `fsr3-pass-selftest` runs FSR 3's eight compute passes on
