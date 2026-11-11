@@ -1507,7 +1507,6 @@ void sr_perf_vblank(void) {
  * phase that was executing when the period came due is what turns "the rate is
  * low" into "this construct holds the CPU".  Counted here, not derived afterwards:
  * after the fact the phase is unknowable. */
-#define SR_PERF_DISPLAY_PERIOD_US 16683u   /* 60000/1001 Hz */
 #define SR_PERF_PHASE_SAMPLE_N 4u          /* guest-PC/NID samples kept per phase */
 
 typedef struct SrPerfPhaseAttrib {
@@ -1663,8 +1662,8 @@ void sr_perf_vblank_latch(uint64_t gap_us, uint32_t periods, int masked) {
     if (phase >= SR_RT_PHASE_COUNT) phase = SR_RT_PHASE_OTHER;
     SrPerfPhaseAttrib *a = &s_phase_attrib[phase];
     a->latches++;
-    if (gap_us <= SR_PERF_DISPLAY_PERIOD_US) return;
-    uint64_t lost = gap_us - SR_PERF_DISPLAY_PERIOD_US;
+    if (gap_us <= SR_DISPLAY_PERIOD_US) return;
+    uint64_t lost = gap_us - SR_DISPLAY_PERIOD_US;
     s_perf.late_since_frame = 1;
     a->late++;
     a->lost_us += lost;
