@@ -288,9 +288,10 @@ The state of each build and workspace ergonomics item:
    `RuntimeLauncher` defaults to the checkout that holds the module and `PreparationEngine`
    requires an explicit base folder, so neither follows the working directory.
    `TwoCheckoutIsolationTests` in `tools/test_relocated_clone.py` builds a route of generated and
-   runtime assets in two copies of the tree at once and checks that each built only from its own
-   sources, into its own build folder, and wrote nothing in the folder the two share; a location
-   elsewhere on the machine is not watched;
+   runtime assets in two copies of the tree at once and checks that each built from its own
+   marked source, into its own build folder, that no file it built names the other copy, and
+   that neither wrote in the folder the two share. A location elsewhere on the machine is not
+   watched, and the route involves no game input or per-user data;
 4. [DONE - #368] add a long-path diagnostic to the workspace doctor:
    implemented in `tools/nk_doctor_checks.py` (`check_long_paths`, `query_windows_long_paths_enabled`)
    under code `LONG_PATHS`, reporting Windows `LongPathsEnabled` registry policy and both the

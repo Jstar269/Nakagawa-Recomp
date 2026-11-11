@@ -217,19 +217,25 @@ def _marker(name: str) -> bytes:
     return f"nk-isolation-marker-{name}".encode("ascii")
 
 
-def _snapshot(root: Path, skip: Path | None = None) -> dict[str, tuple[int, int]]:
-    """Every file under ``root`` (except under ``skip``): relative path -> (size, mtime_ns)."""
+def _snapshot(root: Path, skip: tuple[str, ...] = ()) -> dict[str, tuple[int, int]]:
+    """Every file under ``root``, except in its top-level folders named in ``skip``:
+    relative path -> (size, mtime_ns)."""
     found: dict[str, tuple[int, int]] = {}
     for directory, folders, files in os.walk(root):
         here = Path(directory)
-        if skip is not None and (here == skip or skip in here.parents):
-            folders[:] = []
-            continue
+        if here == root:
+            folders[:] = [folder for folder in folders if folder not in skip]
         for name in files:
             path = here / name
             stat = path.stat()
             found[path.relative_to(root).as_posix()] = (stat.st_size, stat.st_mtime_ns)
     return found
+
+
+def _stop(run: subprocess.Popen[bytes]) -> None:
+    if run.poll() is None:
+        run.kill()
+        run.wait()
 
 
 def _changed(before: dict[str, tuple[int, int]], after: dict[str, tuple[int, int]]) -> list[str]:
@@ -239,16 +245,25 @@ def _changed(before: dict[str, tuple[int, int]], after: dict[str, tuple[int, int
 class TwoCheckoutIsolationTests(unittest.TestCase):
     """Two checkouts building at once use only their own generated and runtime assets (#368).
 
-    Two copies of the tracked tree, each with a different title name (so a different
-    BUILD_DIR) and its own marker compiled into the route's binaries, build
-    ``code-capture-selftest`` at the same time with no BUILD_ROOT set, as a developer with
-    two worktrees would. Then: nothing beside the two checkouts in their shared parent
-    changed; each checkout built the route's binaries in its own build folder, and they
-    carry its own marker and not the other's; and no file one checkout built names the
-    other checkout's path (a dependency file, stamp or generated source that did would
-    mean it read or wrote there). A location elsewhere on the machine is not watched:
-    outputs moved there fail the own-build-folder check, and a shared input read from
-    there fails the marker check only if it differs between the checkouts.
+    Two copies of the tracked tree, under a parent whose name has a space, each with a
+    different title name (so a different BUILD_DIR) and its own marker compiled into the
+    route's binaries, build ``code-capture-selftest`` at the same time with no BUILD_ROOT
+    set, as a developer with two worktrees would. Each build logs to a file, so a full
+    pipe cannot make one wait for the other. Then:
+
+    - nothing in the parent the two share changed, apart from those logs;
+    - each checkout built the route's binaries in its own build folder, and they carry
+      its own marker and not the other's;
+    - no file one checkout built names the other checkout's folder, in any case (which
+      also catches a relative, MSYS or absolute form of its path).
+
+    The marker proves only the marked source's origin: the generated header, the capture
+    and the translated unit are identical in both checkouts, so a build that used the
+    other checkout's copy of those is caught only by the last check, a backstop with no
+    mutant behind it. A location elsewhere on the machine is not watched: outputs moved
+    there fail the own-build-folder check, and a shared input read from there is caught
+    only if it differs between the checkouts. The route involves no game input or
+    per-user data; ExplicitAssetRootTests in test_workspace_paths covers those roots.
     """
 
     make: ClassVar[str]
@@ -257,18 +272,26 @@ class TwoCheckoutIsolationTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         make = shutil.which("mingw32-make") or shutil.which("make")
         if not make:
-            raise unittest.SkipTest("GNU Make is required for the two-checkout isolation check")
+            reason = "GNU Make is required for the two-checkout isolation check"
+            print(f"SKIP {__name__}: {reason} (no mingw32-make or make on PATH)")
+            raise unittest.SkipTest(reason)
+        if not (shutil.which("git") or (ROOT / ".git").exists()):
+            reason = "Git is required to enumerate the tracked tree"
+            print(f"SKIP {__name__}: {reason}")
+            raise unittest.SkipTest(reason)
         if not (os.environ.get("CC") or shutil.which("gcc") or shutil.which("cc")):
-            raise unittest.SkipTest("a C compiler is required to build the isolation route")
+            reason = "a C compiler is required to build the isolation route"
+            print(f"SKIP {__name__}: {reason} (no gcc or cc on PATH)")
+            raise unittest.SkipTest(reason)
         cls.make = make
 
     def test_two_checkouts_building_at_once_consume_only_their_own_assets(self) -> None:
-        base = Path(tempfile.mkdtemp(prefix="nakagawa-two-checkouts-"))
+        base = Path(tempfile.mkdtemp(prefix="nakagawa two checkouts "))
         self.addCleanup(shutil.rmtree, base, True)
-        if any(char.isspace() for char in base.as_posix()):
-            self.skipTest(f"the temporary directory {base} contains whitespace; this test "
-                          "names a BUILD_DIR, which Make refuses with a space")
+        self.assertIn(" ", base.name)
         checkouts = {name: base / f"checkout-{name}" for name in ("a", "b")}
+        logs = base / "logs"
+        logs.mkdir()
         for name, checkout in checkouts.items():
             checkout.mkdir()
             self.assertGreater(copy_tracked_tree(ROOT, checkout), 100)
@@ -278,25 +301,29 @@ class TwoCheckoutIsolationTests(unittest.TestCase):
                 + b"\n__attribute__((used)) static const char nk_isolation_marker[] = \""
                 + _marker(name) + b"\";\n"
             )
-        outside = _snapshot(base, skip=None)
-        outside = {path: value for path, value in outside.items()
-                   if not path.startswith(("checkout-a/", "checkout-b/"))}
+        private = ("checkout-a", "checkout-b", "logs")
+        outside = _snapshot(base, skip=private)
 
-        runs = {
-            name: subprocess.Popen(
+        runs = {}
+        for name, checkout in checkouts.items():
+            log = (logs / f"{name}.log").open("w", encoding="utf-8", errors="replace")
+            self.addCleanup(log.close)
+            run = subprocess.Popen(
                 [self.make, "--no-print-directory", ISOLATION_GOAL, f"GAME_NAME=iso{name}",
                  f"PYTHON={Path(sys.executable).as_posix()}"],
-                cwd=checkout, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                cwd=checkout, stdout=log, stderr=subprocess.STDOUT,
             )
-            for name, checkout in checkouts.items()
-        }
-        outputs = {name: run.communicate(timeout=COMMAND_TIMEOUT_S)[0] for name, run in runs.items()}
+            # A run still going when the test ends (a timeout, a failed assertion) is
+            # stopped, so it neither keeps building nor holds the temporary tree open.
+            self.addCleanup(_stop, run)
+            runs[name] = run
         for name, run in runs.items():
-            self.assertEqual(run.returncode, 0, f"checkout {name}:\n{outputs[name][-4000:]}")
+            run.wait(timeout=COMMAND_TIMEOUT_S)
+        for name, run in runs.items():
+            output = (logs / f"{name}.log").read_text(encoding="utf-8", errors="replace")
+            self.assertEqual(run.returncode, 0, f"checkout {name}:\n{output[-4000:]}")
 
-        after = {path: value for path, value in _snapshot(base).items()
-                 if not path.startswith(("checkout-a/", "checkout-b/"))}
-        self.assertEqual(_changed(outside, after), [],
+        self.assertEqual(_changed(outside, _snapshot(base, skip=private)), [],
                          "the two builds wrote beside their checkouts, in a place both share")
 
         for name, checkout in checkouts.items():
@@ -310,11 +337,11 @@ class TwoCheckoutIsolationTests(unittest.TestCase):
                     data = (build_dir / binary).read_bytes()
                     self.assertIn(_marker(name), data)
                     self.assertNotIn(_marker(other), data)
-            other_root = {checkouts[other].as_posix().encode(), str(checkouts[other]).encode()}
+            other_folder = f"checkout-{other}".encode("ascii")
             naming_other = sorted(
                 path.relative_to(checkout).as_posix()
                 for path in (checkout / "build").rglob("*")
-                if path.is_file() and any(root in path.read_bytes() for root in other_root)
+                if path.is_file() and other_folder in path.read_bytes().lower()
             )
             self.assertEqual(naming_other, [],
                              f"checkout {name} built files that name checkout {other}")
