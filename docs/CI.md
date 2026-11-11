@@ -441,6 +441,23 @@ aggregates the parts, so `CI required` fails when any part fails.
 `tools/test_public_ci_wiring.py` (`NativeToolsPartitionTests`) fails if a serial gate is
 dropped, runs in more than one part, or changes its command.
 
+### Ubuntu packages and mirror outages
+
+Every step that installs Ubuntu packages (the native parts' dependencies, and
+`libc6-dev-i386` for the quick checks' 32-bit format check) runs one helper, the
+workflow-level `NK_APT_INSTALL`. It installs only the packages that are missing, so an
+image that carries them needs no mirror. Otherwise it probes each mirror in
+`NK_APT_MIRRORS` once for the release's `InRelease`, points the Ubuntu sources at the
+mirrors that answered, in list order, and makes up to three attempts (3 minutes for the
+index update, 8 for the install), moving the head mirror to the end of the list after a
+failed one. The list starts with the Azure mirror and `archive.ubuntu.com` and goes on to
+mirrors outside `ubuntu.com`: on 2026-11-11 the hosted runners reached none of Canonical's
+hosts, and the image's own mirror list holds only those. apt checks every index against
+the Ubuntu archive key whichever mirror serves it. When no mirror answers or every attempt
+fails, the step fails; it is never skipped. `tools/test_public_ci_wiring.py`
+(`AptInstallHelperTests`) runs the helper against stubs and fails if a step calls `apt-get`
+itself.
+
 ### Android launcher build
 
 The `android_build` job (#360) runs whenever the native gates do (`run_native`), beside
@@ -622,7 +639,8 @@ capture holds one PRIM of two overlapping translucent sprites on a 16-bit target
 find exactly its overlap as the first bad draw on the snapshot destination-read path (the known
 shader-blend batch-order difference, #2109), and report `NO_DIFFERENCE` on the interlock path. On a
 device that refuses the interlock, the interlock leg is a `SKIP`. Four more generated captures check that the
-tool fails closed: a 512-wide scissor (ge.c rasterizes inside 480x272), 33 targets or a stride of
+tool fails closed: a scissor past ge.c's raster bound (the stride, up to 512 columns, or 480 on a
+stride of 480 or less; a 512 scissor on a 512 stride is compared), 33 targets or a stride of
 1088 are `INCOMPLETE`, and a capture with no draw is `NO_DRAWS`. The same step then runs
 `vram-view-identity-selftest` (#314): the GE decoders the pause menu's VRAM viewer calls, run at
 a paused VBLANK, must leave later presented frames, guest memory and the GE state as a run

@@ -1087,6 +1087,145 @@ static int coherence_run_software_sprite_semantics(void) {
     return 1;
 }
 
+/* ---- raster bounds: the scissor and the target's stride, not the 480-pixel screen (#2193) ----
+ *
+ * #2193 states that a PSP draws anywhere inside the scissor on a target up to 512 pixels
+ * wide: an offscreen render target, or a display buffer's stride padding. This cell checks
+ * that the two renderers agree on that bound, not what a PSP draws; stopping at a stride of
+ * 481 to 511 is unmeasured on a PSP. One list draws three bands reaching
+ * x = 512 on an 8888 target pre-filled with a sentinel: a clear (rows 0-89), a sprite (rows
+ * 90-179, x from 400) and two triangles (rows 180-271, x from 400). The Vulkan backend and
+ * ge.c each run it, and each must draw every column up to the scissor's x2 or the stride's
+ * last column, whichever is less, leave the rest of each row alone, and agree byte for byte.
+ * The 480-pixel scissor on a 512 stride is the screen case: columns 480-511 keep the
+ * sentinel and columns 0-479 hold what they held before this bound changed. */
+typedef struct CohWideVtx { uint32_t c; float x, y, z; } CohWideVtx;
+
+enum { COH_WIDE_CLEAR = 0xff2040c0u, COH_WIDE_SPRITE = 0xff30a050u, COH_WIDE_TRI = 0xffc06030u };
+static const uint32_t k_coh_wide_bg = 0xa5a5a5a5u;
+
+static uint32_t coherence_wide_raster_list(uint32_t base, uint32_t stride, int scis_x2) {
+    const uint32_t vaddr = 0x00102000u;
+    CohWideVtx *v = (CohWideVtx *)SR_HOST(vaddr);
+    const CohWideVtx verts[] = {
+        { COH_WIDE_CLEAR, 0.0f, 0.0f, 0.0f },     { COH_WIDE_CLEAR, 512.0f, 90.0f, 0.0f },
+        { COH_WIDE_SPRITE, 400.0f, 90.0f, 0.0f }, { COH_WIDE_SPRITE, 512.0f, 180.0f, 0.0f },
+        { COH_WIDE_TRI, 400.0f, 180.0f, 0.0f },   { COH_WIDE_TRI, 400.0f, 272.0f, 0.0f },
+        { COH_WIDE_TRI, 512.0f, 180.0f, 0.0f },   { COH_WIDE_TRI, 512.0f, 180.0f, 0.0f },
+        { COH_WIDE_TRI, 400.0f, 272.0f, 0.0f },   { COH_WIDE_TRI, 512.0f, 272.0f, 0.0f },
+    };
+    memcpy(v, verts, sizeof verts);
+
+    const uint32_t list_addr = 0x00100000u;
+    uint32_t *dl = (uint32_t *)SR_HOST(list_addr);
+    int p = 0;
+    #define DL_EMIT(cmd, val) dl[p++] = ((uint32_t)(cmd) << 24) | ((val) & 0x00FFFFFFu)
+    DL_EMIT(0x10, 0);
+    DL_EMIT(0x4C, 0);
+    DL_EMIT(0x4D, 0);
+    DL_EMIT(0x9C, base & 0x00FFFFFFu);
+    DL_EMIT(0x9D, stride | ((base & 0xFF000000u) >> 8));
+    DL_EMIT(0xD2, 3);
+    DL_EMIT(0x23, 0);
+    DL_EMIT(0x22, 0);
+    DL_EMIT(0x21, 0);
+    DL_EMIT(0x1E, 0);
+    for (uint32_t cmd = 0x1Du; cmd <= 0x28u; cmd++)   /* cull, fog, dither ... logic op: all off */
+        if (cmd != 0x1Eu) DL_EMIT(cmd, 0);
+    DL_EMIT(0xE8, 0);
+    DL_EMIT(0xE9, 0);
+    DL_EMIT(0x15, 0);                                    /* the drawing region: the whole target */
+    DL_EMIT(0x16, ((FB_H - 1) << 10) | (FB_W - 1));
+    DL_EMIT(0xD4, 0);                                    /* the scissor, to x2 */
+    DL_EMIT(0xD5, ((FB_H - 1) << 10) | (uint32_t)scis_x2);
+    DL_EMIT(0x12, (7u << 2) | (3u << 7) | (1u << 23));   /* 8888 colour, float position, through */
+    DL_EMIT(0x01, vaddr & 0x00FFFFFFu);
+    DL_EMIT(0xD3, 1u | (3u << 8));                       /* clear mode: colour and alpha */
+    DL_EMIT(0x04, (6u << 16) | 2u);
+    DL_EMIT(0xD3, 0);
+    DL_EMIT(0x04, (6u << 16) | 2u);
+    DL_EMIT(0x04, (3u << 16) | 6u);
+    DL_EMIT(0x0F, 0);
+    DL_EMIT(0x0C, 0);
+    #undef DL_EMIT
+    return list_addr;
+}
+
+/* The pixel (x, y) must hold: its band's colour inside the bound, the sentinel outside. The
+ * sprite and triangles keep the sentinel's alpha (the stencil byte), so only RGB is theirs. */
+static int coherence_wide_raster_verify(const char *path, const char *name, const uint32_t *fb,
+                                        uint32_t stride, int last_col) {
+    for (int y = 0; y < FB_H; y++) {
+        for (int x = 0; x < (int)stride; x++) {
+            uint32_t got = fb[(uint32_t)y * stride + (uint32_t)x], want = k_coh_wide_bg, mask = ~0u;
+            if (x <= last_col) {
+                if (y < 90) want = COH_WIDE_CLEAR;
+                else if (x >= 400) { want = y < 180 ? COH_WIDE_SPRITE : COH_WIDE_TRI; mask = 0x00ffffffu; }
+            }
+            if ((got & mask) != (want & mask)) {
+                fprintf(stderr, "gpu coherence selftest [%s]: %s pixel=(%d,%d) got=%08x want=%08x "
+                                "(last column %d)\n", name, path, x, y, got, want, last_col);
+                return 0;
+            }
+        }
+    }
+    return 1;
+}
+
+static int coherence_run_wide_raster_one(const char *name, uint32_t stride, int scis_x2) {
+    const uint32_t base = 0x04000000u | 0x00160000u;
+    const size_t bytes = (size_t)stride * FB_H * 4u;
+    const int last_col = scis_x2 < (int)stride - 1 ? scis_x2 : (int)stride - 1;
+    uint32_t *fb = (uint32_t *)SR_HOST(base);
+
+    coherence_reset_targets();
+    for (size_t i = 0; i < bytes / 4u; i++) fb[i] = k_coh_wide_bg;
+    sr_gpu_vram_dirty(base, (uint32_t)bytes);
+    const unsigned long spr_before = s_cnt_spr, tri_before = s_cnt_tri;
+    ge_set_gpu_hooks(&k_hooks);
+    ge_run_list(coherence_wide_raster_list(base, stride, scis_x2), 0);
+    GeGpuFbDescriptor desc = { .addr = base, .format = 3, .stride = stride, .width = 480, .height = 272 };
+    if (s_cnt_spr != spr_before + 2u || s_cnt_tri != tri_before + 2u || !gegpu_sync_guest_fb(&desc)) {
+        fprintf(stderr, "gpu coherence selftest [%s]: the GPU took %lu sprite(s) and %lu triangle(s), "
+                        "want 2 and 2, or the sync failed\n", name, s_cnt_spr - spr_before, s_cnt_tri - tri_before);
+        coherence_reset_targets();
+        return 0;
+    }
+    int ok = coherence_wide_raster_verify("gpu", name, fb, stride, last_col);
+    uint32_t *gpu = (uint32_t *)malloc(bytes);
+    if (!gpu) { coherence_reset_targets(); return 0; }
+    memcpy(gpu, fb, bytes);
+    coherence_reset_targets();
+
+    for (size_t i = 0; i < bytes / 4u; i++) fb[i] = k_coh_wide_bg;
+    ge_set_gpu_hooks(NULL);
+    ge_run_list(coherence_wide_raster_list(base, stride, scis_x2), 0);
+    ge_set_gpu_hooks(&k_hooks);
+    ok = coherence_wide_raster_verify("software", name, fb, stride, last_col) && ok;
+    size_t mismatch = 0;
+    while (mismatch < bytes && ((const uint8_t *)gpu)[mismatch] == ((const uint8_t *)fb)[mismatch])
+        mismatch++;
+    if (mismatch != bytes) {
+        fprintf(stderr, "gpu coherence selftest [%s]: GPU/software mismatch at byte=%zu pixel=(%zu,%zu) "
+                        "gpu=%02x software=%02x\n", name, mismatch, (mismatch / 4u) % stride,
+                (mismatch / 4u) / stride, ((const uint8_t *)gpu)[mismatch], ((const uint8_t *)fb)[mismatch]);
+        ok = 0;
+    }
+    free(gpu);
+    sr_gpu_vram_dirty(base, (uint32_t)bytes);
+    if (ok)
+        printf("gpu coherence selftest: PASS %-22s fmt=3 stride=%u scissor_x2=%d scale=%d\n",
+               name, stride, scis_x2, s_scale);
+    return ok;
+}
+
+static int coherence_run_wide_raster(void) {
+    int ok = coherence_run_wide_raster_one("wide-raster-512", 512u, 511);
+    ok = coherence_run_wide_raster_one("wide-raster-screen", 512u, 479) && ok;
+    ok = coherence_run_wide_raster_one("wide-raster-stride", 500u, 511) && ok;
+    return ok;
+}
+
 /* ---- linearly filtered sprite: nothing from outside the sampled region may bleed ----
  *
  * The sprite-exact fixtures above run with GE_TEXFILTER=0 (NEAREST), so they pin the
@@ -10322,6 +10461,7 @@ static int coherence_selftest_cases(void) {
         if (strcmp(only, "rtt-scale") == 0) return coherence_run_rtt_scale();
         if (strcmp(only, "color-test") == 0) return coherence_run_color_test();
         if (strcmp(only, "lines") == 0) return coherence_run_lines();
+        if (strcmp(only, "wide-raster") == 0) return coherence_run_wide_raster();
         fprintf(stderr, "gpu coherence selftest: unknown SR_GPU_COHERENCE_CASE '%s'\n", only);
         return 0;
     }
@@ -10351,6 +10491,7 @@ static int coherence_selftest_cases(void) {
     if (!coherence_run_tflt_descriptor_capacity()) ok = 0;
     if (!coherence_run_sprite_semantics()) ok = 0;
     if (!coherence_run_software_sprite_semantics()) ok = 0;
+    if (!coherence_run_wide_raster()) ok = 0;
     if (!coherence_run_linear_sprite()) ok = 0;
     if (!coherence_run_tflt_filters()) ok = 0;
     if (!coherence_run_ring_wrap()) ok = 0;

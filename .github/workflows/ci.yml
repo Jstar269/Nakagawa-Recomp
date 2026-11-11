@@ -64,6 +64,94 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  # Every step that installs Ubuntu packages runs the one helper below:
+  #   bash -c "$NK_APT_INSTALL" nk-apt-install [APT-GET-OPTION...] PACKAGE...
+  # On 2026-11-11 the hosted runners could reach none of Canonical's hosts (the Azure
+  # mirror timed out, then archive.ubuntu.com and security.ubuntu.com failed to resolve),
+  # and the image's own mirror list holds only those three, so every apt step failed. The
+  # list below adds mirrors outside ubuntu.com. apt verifies every index against the
+  # Ubuntu archive key whichever mirror serves it, so a mirror changes speed, not trust.
+  NK_APT_MIRRORS: >-
+    http://azure.archive.ubuntu.com/ubuntu/
+    http://archive.ubuntu.com/ubuntu/
+    http://mirrors.edge.kernel.org/ubuntu/
+    http://mirrors.mit.edu/ubuntu/
+    http://ftp.osuosl.org/pub/ubuntu/
+  # The helper installs only the packages that are missing, so an image that carries them
+  # needs no mirror. Otherwise it probes each mirror once for this release's index, points
+  # the Ubuntu sources at the ones that answered (in the order above), and makes up to
+  # three bounded attempts, moving the mirror at the head of the list to its end after a
+  # failed one. It fails, never skips, when no mirror answers or every attempt fails.
+  # NK_APT_ROOT exists only for tools/test_public_ci_wiring.py, which runs the helper
+  # against a scratch tree.
+  NK_APT_INSTALL: |
+    set -euo pipefail
+    root="${NK_APT_ROOT:-}"
+    apt_etc="$root/etc/apt"
+    list="$apt_etc/apt-mirrors.txt"
+    options=()
+    packages=()
+    for arg in "$@"; do
+      case "$arg" in
+        -*) options+=("$arg") ;;
+        *) packages+=("$arg") ;;
+      esac
+    done
+    if [ "${#packages[@]}" -eq 0 ]; then
+      echo "::error::nk-apt-install: no package named" >&2
+      exit 2
+    fi
+    missing=()
+    for package in "${packages[@]}"; do
+      status="$(dpkg-query -W -f='${db:Status-Status}' "$package" 2>/dev/null || true)"
+      if [ "$status" != installed ]; then
+        missing+=("$package")
+      fi
+    done
+    if [ "${#missing[@]}" -eq 0 ]; then
+      echo "nk-apt-install: already installed: ${packages[*]}"
+      exit 0
+    fi
+    codename="$(. "$root/etc/os-release" && echo "${VERSION_CODENAME:-${UBUNTU_CODENAME:-}}")"
+    if [ -z "$codename" ]; then
+      echo "::error::nk-apt-install: $root/etc/os-release names no release" >&2
+      exit 1
+    fi
+    reachable=()
+    for mirror in ${NK_APT_MIRRORS:?}; do
+      mirror="${mirror%/}/"
+      if curl -fsS --connect-timeout 10 --max-time 20 -o /dev/null "${mirror}dists/$codename/InRelease"; then
+        reachable+=("$mirror")
+      else
+        echo "nk-apt-install: $mirror did not serve dists/$codename/InRelease; not using it" >&2
+      fi
+    done
+    if [ "${#reachable[@]}" -eq 0 ]; then
+      echo "::error::nk-apt-install: no Ubuntu mirror answered for $codename (tried: $NK_APT_MIRRORS)" >&2
+      exit 1
+    fi
+    printf '%s\n' 'Acquire::Retries "5";' 'Acquire::http::Timeout "30";' 'Acquire::https::Timeout "30";' \
+      | sudo tee "$apt_etc/apt.conf.d/79-nk-apt-network" >/dev/null
+    # The hosted image's Ubuntu sources already read mirror+file:/etc/apt/apt-mirrors.txt;
+    # point any plain Canonical URI (another image) at the same list.
+    for sources in "$apt_etc/sources.list" "$apt_etc"/sources.list.d/*.sources "$apt_etc"/sources.list.d/*.list; do
+      if [ -f "$sources" ]; then
+        sudo sed -i -E "s#https?://((azure\.)?archive|security)\.ubuntu\.com/ubuntu/?#mirror+file:$list#g" "$sources"
+      fi
+    done
+    for attempt in 1 2 3; do
+      printf '%s\n' "${reachable[@]}" | sudo tee "$list" >/dev/null
+      echo "nk-apt-install: attempt $attempt of 3, mirrors in order: ${reachable[*]}"
+      if sudo timeout 180 apt-get update \
+          && sudo timeout 480 apt-get install -y "${options[@]}" "${missing[@]}"; then
+        exit 0
+      fi
+      reachable=("${reachable[@]:1}" "${reachable[0]}")
+    done
+    echo "::error::nk-apt-install: installing ${missing[*]} failed on every attempt" >&2
+    exit 1
+
 jobs:
   classify:
     name: Classify change
@@ -475,11 +563,10 @@ jobs:
       - name: Check 32-bit format specifier portability across portable core
         # libc6-dev-i386 supplies the 32-bit C library headers for the syntax-only
         # -m32 build (tools/format_portability_check.py); the native job installs
-        # it with its other packages.
+        # it with its other packages. NK_APT_INSTALL is the workflow's apt helper.
         run: |
           set -euo pipefail
-          sudo timeout 180 apt-get update
-          sudo timeout 300 apt-get install -y --no-install-recommends libc6-dev-i386
+          bash -c "$NK_APT_INSTALL" nk-apt-install --no-install-recommends libc6-dev-i386
           python tools/format_portability_check.py
 
       - name: Check that every generated file is current
@@ -712,7 +799,7 @@ jobs:
       # The runner's Ubuntu mirror is sometimes very slow rather than stalled (2026-10-23: 43.6 kB/s,
       # 39 minutes for 103 MB; then one package per ~7 minutes), so timeouts alone do not help. The
       # downloaded .deb files are cached between runs (packages only, never repository objects), and
-      # a failed or slow attempt moves to the primary Ubuntu archive before retrying.
+      # a failed or slow attempt moves to the next mirror that answered (NK_APT_INSTALL) before retrying.
       - name: Restore the native apt package cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -724,39 +811,23 @@ jobs:
       - name: Install native test dependencies
         timeout-minutes: 30
         run: |
+          set -euo pipefail
           archives="$RUNNER_TEMP/apt-archives"
           mkdir -p "$archives/partial"
-          printf '%s\n' 'Acquire::Retries "5";' 'Acquire::http::Timeout "30";' \
-            'Acquire::https::Timeout "30";' "Dir::Cache::Archives \"$archives\";" \
-            'APT::Keep-Downloaded-Packages "true";' | sudo tee /etc/apt/apt.conf.d/80-ci-network >/dev/null
-          for attempt in 1 2 3; do
-            if [ "$attempt" -gt 1 ]; then
-              echo "apt install attempt $((attempt - 1)) failed; switching to the primary Ubuntu archive" >&2
-              # The hosted image's sources read mirror+file:/etc/apt/apt-mirrors.txt; put the primary
-              # archive first in that list (and in any plain URI), keeping Azure as a fallback.
-              if [ -f /etc/apt/apt-mirrors.txt ]; then
-                printf '%s\n' 'http://archive.ubuntu.com/ubuntu/' 'http://azure.archive.ubuntu.com/ubuntu/' \
-                  | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
-              fi
-              sudo sed -i 's|http://azure.archive.ubuntu.com/ubuntu|http://archive.ubuntu.com/ubuntu|g' \
-                /etc/apt/sources.list.d/*.sources /etc/apt/sources.list 2>/dev/null || true
-            fi
-            # Both halves are capped per attempt so a slow mirror cannot spend the whole step budget
-            # before the fallback runs: 3 minutes for the index update, 8 for the install.
-            if sudo timeout 180 apt-get update && sudo timeout 480 apt-get install -y build-essential cmake curl gcc-mipsel-linux-gnu \
-                git libc6-dev-i386 libvulkan-dev \
-                libxcursor-dev libxext-dev libxfixes-dev libxi-dev libxinerama-dev \
-                libxkbcommon-dev libx11-dev libxrandr-dev libxss-dev libxtst-dev \
-                mesa-vulkan-drivers ninja-build pkg-config vulkan-tools \
-                vulkan-validationlayers xauth xvfb; then
-              # The cache action runs as the runner user; make the root-owned .deb files readable.
-              sudo rm -rf "$archives/partial" "$archives/lock"
-              sudo chmod -R a+rX "$archives"
-              exit 0
-            fi
-            sleep 10
-          done
-          exit 1
+          printf '%s\n' "Dir::Cache::Archives \"$archives\";" 'APT::Keep-Downloaded-Packages "true";' \
+            | sudo tee /etc/apt/apt.conf.d/80-ci-apt-cache >/dev/null
+          # NK_APT_INSTALL is the workflow's apt helper: it caps each attempt (3 minutes for the
+          # index update, 8 for the install) so a slow mirror cannot spend the step's budget, and
+          # moves to the next mirror that answered after a failed attempt.
+          bash -c "$NK_APT_INSTALL" nk-apt-install build-essential cmake curl gcc-mipsel-linux-gnu \
+            git libc6-dev-i386 libvulkan-dev \
+            libxcursor-dev libxext-dev libxfixes-dev libxi-dev libxinerama-dev \
+            libxkbcommon-dev libx11-dev libxrandr-dev libxss-dev libxtst-dev \
+            mesa-vulkan-drivers ninja-build pkg-config vulkan-tools \
+            vulkan-validationlayers xauth xvfb
+          # The cache action runs as the runner user; make the root-owned .deb files readable.
+          sudo rm -rf "$archives/partial" "$archives/lock"
+          sudo chmod -R a+rX "$archives"
 
       # The pinned SDL3 install is cached under an exact key: the pinned version and
       # commit, the gcc and cmake that build it, and this workflow file (which holds
