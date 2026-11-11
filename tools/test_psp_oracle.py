@@ -2501,7 +2501,7 @@ class PspOracleBuildRouteTests(unittest.TestCase):
         )
         # Sequential probe.c and HLE cases use distinct numbered ranges. The count and
         # the id set are exact: a probe PR bumps both, and an accidental removal fails here.
-        self.assertEqual(len(routes), 159)
+        self.assertEqual(len(routes), 160)
         names = [name for name, _ in routes]
         ids = [int(case_id) for _, case_id in routes]
         self.assertEqual(len(names), len(set(names)))
@@ -2510,7 +2510,7 @@ class PspOracleBuildRouteTests(unittest.TestCase):
                          | {110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126,
                             127}
                          | {128, 129, 130, 132, 133, 134, 135, 136, 137, 138, 139, 140}
-                         | {150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 167, 168, 169, 170, 171, 172, 173, 174, 175, 176, 181, 182, 183, 184, 185},
+                         | {150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 167, 168, 169, 170, 171, 172, 173, 174, 175, 176, 181, 182, 183, 184, 185, 186},
                          set(ids))
         self.assertNotIn("psp_b1_imports.S", self.makefile)
         self.assertNotIn("psp_b2_imports.S", self.makefile)
@@ -5422,6 +5422,9 @@ class HleMeasureProbeTests(unittest.TestCase):
          "HLE_CASE_UTILITY_DIALOGS", "PSP-HLE-UTILITY-DIALOG-001"),
         ("hle-io-seek", 162, "hle_io_seek", None,
          "HLE_CASE_IO_SEEK", "PSP-HLE-IO-SEEK-001"),
+        # #1380's cells hle-io-seek left open: flash0: SEEK_CUR and past-2^32 seeks, ms0: flags.
+        ("hle-io-seek-edges", 186, "hle_io_seek_edges", None,
+         "HLE_CASE_IO_SEEK_EDGES", "PSP-HLE-IO-SEEK-002"),
         ("hle-nickname-limit", 164, "hle_nickname_limit", "hle_utility_imports.S",
          "HLE_CASE_NICKNAME_LIMIT", "PSP-HLE-NICKNAME-001"),
         # #341 part 2: loads the helper PRX of case 172 (probe_hle_self_stop_helper.c).
@@ -5545,6 +5548,8 @@ class HleMeasureProbeTests(unittest.TestCase):
         "sceIoDopen", "sceIoDread", "sceIoDclose", "sceIoRmdir",
         # hle-io-seek: the seeks, the ioctl and the probe-owned ms0: directory.
         "sceIoLseek", "sceIoLseek32", "sceIoIoctl", "sceIoMkdir",
+        # hle-io-seek-edges: the async write on a read-only descriptor and its bounded poll.
+        "sceIoWriteAsync", "sceIoPollAsync", "sceIoWaitAsync",
         "sceNetInit", "sceNetTerm", "sceNetInetInit", "sceNetInetTerm",
         "sceNetApctlInit", "sceNetApctlTerm", "sceNetAdhocInit", "sceNetAdhocTerm",
         "sceNetAdhocctlInit", "sceNetAdhocctlTerm",
@@ -5980,7 +5985,10 @@ class HleMeasureProbeTests(unittest.TestCase):
                           "s_ud_path",
                           # hle-io-seek: the probe-owned ms0: file, the same file once more on
                           # its setup failure, and the file its RDONLY|CREAT cell may create.
-                          "HLE_IS_FILE", "HLE_IS_FILE", "HLE_IS_MISSING"])
+                          "HLE_IS_FILE", "HLE_IS_FILE", "HLE_IS_MISSING",
+                          # hle-io-seek-edges: its ms0: file on a setup failure, the file the
+                          # RDONLY|CREAT|EXCL cell created (only when it exists), then cleanup.
+                          "HLE_ISE_FILE", "HLE_ISE_MISSING", "HLE_ISE_FILE", "HLE_ISE_MISSING"])
         issues = (self.fixture / "probe_hle_issues.c").read_text(encoding="utf-8")
         self.assertNotRegex(issues, r"\bsceIoRemove\s*\(")
 
@@ -7692,7 +7700,8 @@ class HleIssuesProbeTests(unittest.TestCase):
 
     def test_pass_only_cases_reject_fail_and_skip_rows(self) -> None:
         helper = HleMeasureProbeTests("test_case_ids_are_registered_once_and_match_the_families")
-        for case in ("hle-io-seek", "hle-nickname-limit", "hle-self-stop-unload", "vfpu-quad-wb"):
+        for case in ("hle-io-seek", "hle-io-seek-edges", "hle-nickname-limit",
+                     "hle-self-stop-unload", "vfpu-quad-wb"):
             spec, counts = CAMPAIGN_PROBE_CASES[case]
             clean = helper._stream(case)
             self.assertTrue(parse_campaign_probe_output(helper._body(clean), case).complete)
@@ -15807,6 +15816,7 @@ class Record20261015Tests(unittest.TestCase):
             ("sas-mix", "PSP-SAS-003", "CAPTURED"),
             ("vcodec-words", "PSP-VCODEC-001", "NOT_RUN"),
             ("hle-utility-dialogs", "PSP-HLE-UTILITY-DIALOG-001", "NOT_RUN"),
+            ("hle-io-seek-edges", "PSP-HLE-IO-SEEK-002", "NOT_RUN"),
             ("mpeg-ycbcr", "PSP-MPEG-YCBCR-001", "NOT_RUN"),
         )
         docs = {row[0]: row for row in self._table_rows(self.doc) if len(row) == 4}

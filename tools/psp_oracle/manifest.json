@@ -8052,6 +8052,22 @@
       "reset": "one PRX launch; PSPLink soft reset before the next launch"
     },
     {
+      "id": "PSP-HLE-IO-SEEK-002",
+      "status": "implemented",
+      "hardware_evidence": "NOT_RUN",
+      "evidence_note": "Built as the fixed-shape case 186 stream of #1380's remaining seek cells: flash0 SEEK_CUR and past-0x100000000 seeks on ltn0.pgf, and Memory Stick open-flag and sceIoWriteAsync cells on a probe-owned file. No hardware run is cited and no measurement is claimed.",
+      "group": "system",
+      "source": "fixtures/psp_oracle/probe_hle_measure.c",
+      "prx": "hle_io_seek_edges.prx",
+      "apis": ["sceIoLseek", "sceIoLseek32", "sceIoOpen", "sceIoWrite", "sceIoGetstat", "sceIoWriteAsync", "sceIoPollAsync", "sceIoWaitAsync"],
+      "diagnostic_case_ids": ["hle-io-seek-edges"],
+      "case_ids": ["io-edge-flash-*", "io-edge-ms-*"],
+      "invariant": "Each seek, open-flag and read-only-descriptor write has a fixed-shape record of return values, counts and 64-bit positions or results as (low, high) words; no file byte of flash0: is recorded, no disc0: call is made, every async wait is bounded, and the only writes are to a probe-owned ms0: directory the probe removes.",
+      "issues": [1380],
+      "risk": "low; read-only on flash0:, writes only the probe-owned ms0:/NKIOSK02 it creates when absent and removes; every async wait bounded",
+      "reset": "one PRX launch; PSPLink soft reset before the next launch"
+    },
+    {
       "id": "PSP-HLE-NICKNAME-001",
       "status": "implemented",
       "hardware_evidence": "MEASURED",
