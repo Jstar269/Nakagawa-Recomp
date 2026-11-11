@@ -2528,6 +2528,25 @@ class TestEnhancementBuildPackageWiring(unittest.TestCase):
         self.assertEqual(self.nk_cli._package_environment(timing, None), {"ENHANCEMENT_PACKAGE": str(timing)})
         self.assertEqual(self.nk_cli._package_environment(timing, hook),
                          {"ENHANCEMENT_PACKAGE": str(timing), "ENHANCEMENT_CODE_HOOK_PACKAGE": str(hook)})
+        # nk_cli's cache key is computed with both packages named.
+        class Stop(Exception):
+            pass
+
+        seen: list[dict[str, str]] = []
+
+        def capture(_manifest: Any, environment: dict[str, str]) -> Any:
+            seen.append(dict(environment))
+            raise Stop
+
+        manifest_path = self.root / "manifest.json"
+        manifest_path.write_text("{}", encoding="utf-8")
+        with mock.patch.object(self.nk_cli, "_package_codegen_options", side_effect=capture):
+            with self.assertRaises(Stop):
+                self.nk_cli._current_package_cache_key(
+                    {"modules": []}, manifest_path, self.EXE_SHA, None, None, {},
+                    enhancement_package_path=timing, code_hook_package_path=hook)
+        self.assertEqual(seen[0]["ENHANCEMENT_PACKAGE"], str(timing))
+        self.assertEqual(seen[0]["ENHANCEMENT_CODE_HOOK_PACKAGE"], str(hook))
         # The planner's cache options: the code-hook package is named only when there is one.
         plan = {"environment": {"GAME_BASE": "0x08804000", "GAME_ENTRY": "0x08804000", "TITLE_EXTRA_SPANS": ""},
                 "codegen_profile": "none"}
