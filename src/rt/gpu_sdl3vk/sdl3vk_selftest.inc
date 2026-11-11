@@ -1744,6 +1744,74 @@ static int sdl3vk_capture_selftest_body(void) {
     }
     remove("selftest_cpu.ppm");
 
+    /* ---- the F3 HUD composes over the picture (#314, LIVE_FRAME_OVERLAY) ---------------
+     * The performance HUD, and in developer mode the profile HUD, are copied into a rectangle
+     * of the window's image after the frame blit: a rectangle inside the window that leaves
+     * the rest of the picture showing, at the 16-pixel inset, and the HUD surface the software
+     * renderer drew for it holds the HUD. The frame the game drew, the source the window is
+     * blitted from, is untouched: a capture of the same present is the same bytes as
+     * with the HUD off. Off again, nothing is copied. */
+    {
+        static const int modes[] = { SDL3VK_HUD_PERF, SDL3VK_HUD_PROFILE };
+        static const int want_w[] = { HUD_W, PROFILE_HUD_W };
+        static const int want_h[] = { HUD_H, PROFILE_HUD_H };
+        const int saved_developer = s_developer;
+        const int saved_mode = s_hud_enabled;
+        s_developer = 1;
+        for (int m = 0; m < 2; m++) {
+            const unsigned before = s_hud_last.copies;
+            const char *what = m ? "profile HUD" : "performance HUD";
+            hud_set_mode(modes[m]);
+            if (!sr_capture_arm("selftest_hud.ppm") || sdl3vk_present_rgba(px) != 1 ||
+                sr_capture_result() != 1) {
+                fprintf(stderr, "hud: %s present or capture failed\n", what); ok = 0;
+                continue;
+            }
+            if (!cap_test_verify_ppm("selftest_hud.ppm", PSP_W, PSP_H)) {
+                fprintf(stderr, "hud: with the %s on, the captured frame is not the frame the "
+                                "game drew\n", what);
+                ok = 0;
+            }
+            remove("selftest_hud.ppm");
+            if (s_hud_last.copies != before + 1u || s_hud_last.w != want_w[m] ||
+                s_hud_last.h != want_h[m]) {
+                fprintf(stderr, "hud: %s copies %u (want %u), %dx%d (want %dx%d)\n", what,
+                        s_hud_last.copies - before, 1u, s_hud_last.w, s_hud_last.h, want_w[m],
+                        want_h[m]);
+                ok = 0;
+                continue;
+            }
+            if (s_hud_last.x != 16 || s_hud_last.y != 16 ||
+                s_hud_last.x + s_hud_last.w > s_hud_last.swap_w ||
+                s_hud_last.y + s_hud_last.h > s_hud_last.swap_h ||
+                (s_hud_last.w >= s_hud_last.swap_w && s_hud_last.h >= s_hud_last.swap_h)) {
+                fprintf(stderr, "hud: %s rectangle (%d,%d %dx%d) in a %dx%d image does not sit "
+                                "over part of the picture\n", what, s_hud_last.x, s_hud_last.y,
+                        s_hud_last.w, s_hud_last.h, s_hud_last.swap_w, s_hud_last.swap_h);
+                ok = 0;
+            }
+            /* What was copied is the HUD: its background and border, as drawn. */
+            Uint8 r = 0, g = 0, b = 0, a = 0, br = 0, bg = 0, bb = 0, ba = 0;
+            if (!s_hud_surf || !SDL_ReadSurfacePixel(s_hud_surf, 2, s_hud_last.h - 2, &r, &g, &b, &a) ||
+                !SDL_ReadSurfacePixel(s_hud_surf, 0, 0, &br, &bg, &bb, &ba) ||
+                r != 20 || g != 24 || b != 32 || br != 70 || bg != 90 || bb != 130) {
+                fprintf(stderr, "hud: %s surface shows %u,%u,%u inside and %u,%u,%u on the "
+                                "border\n", what, r, g, b, br, bg, bb);
+                ok = 0;
+            }
+        }
+        hud_set_mode(SDL3VK_HUD_OFF);
+        {
+            const unsigned before = s_hud_last.copies;
+            if (sdl3vk_present_rgba(px) != 1 || s_hud_last.copies != before) {
+                fprintf(stderr, "hud: with the HUD off a present still copied a HUD\n");
+                ok = 0;
+            }
+        }
+        s_developer = saved_developer;
+        hud_set_mode(saved_mode);
+    }
+
     /* ---- presentation upscaler (#1273, SR_PRESENT_UPSCALE=fsr1) ------------------------
      * The real FSR 1 pass on the present path, under the validation layer. A 480x272 frame in the
      * larger window runs the pass at its place's size, and the frame blit reads the pass's image

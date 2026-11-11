@@ -1098,7 +1098,10 @@ static int coherence_run_software_sprite_semantics(void) {
  * ge.c each run it, and each must draw every column up to the scissor's x2 or the stride's
  * last column, whichever is less, leave the rest of each row alone, and agree byte for byte.
  * The 480-pixel scissor on a 512 stride is the screen case: columns 480-511 keep the
- * sentinel and columns 0-479 hold what they held before this bound changed. */
+ * sentinel and columns 0-479 hold what they held before this bound changed. A 256 stride
+ * under that scissor is the narrow case: a column past the stride would be the next row's
+ * pixel in guest memory, so each renderer must stop at column 255, and the row past the
+ * target (checked in every case) must keep the sentinel. */
 typedef struct CohWideVtx { uint32_t c; float x, y, z; } CohWideVtx;
 
 enum { COH_WIDE_CLEAR = 0xff2040c0u, COH_WIDE_SPRITE = 0xff30a050u, COH_WIDE_TRI = 0xffc06030u };
@@ -1155,10 +1158,10 @@ static uint32_t coherence_wide_raster_list(uint32_t base, uint32_t stride, int s
  * sprite and triangles keep the sentinel's alpha (the stencil byte), so only RGB is theirs. */
 static int coherence_wide_raster_verify(const char *path, const char *name, const uint32_t *fb,
                                         uint32_t stride, int last_col) {
-    for (int y = 0; y < FB_H; y++) {
+    for (int y = 0; y <= FB_H; y++) {                   /* row FB_H: the one past the target */
         for (int x = 0; x < (int)stride; x++) {
             uint32_t got = fb[(uint32_t)y * stride + (uint32_t)x], want = k_coh_wide_bg, mask = ~0u;
-            if (x <= last_col) {
+            if (x <= last_col && y < FB_H) {
                 if (y < 90) want = COH_WIDE_CLEAR;
                 else if (x >= 400) { want = y < 180 ? COH_WIDE_SPRITE : COH_WIDE_TRI; mask = 0x00ffffffu; }
             }
@@ -1174,7 +1177,7 @@ static int coherence_wide_raster_verify(const char *path, const char *name, cons
 
 static int coherence_run_wide_raster_one(const char *name, uint32_t stride, int scis_x2) {
     const uint32_t base = 0x04000000u | 0x00160000u;
-    const size_t bytes = (size_t)stride * FB_H * 4u;
+    const size_t bytes = (size_t)stride * (FB_H + 1u) * 4u;   /* the target and the row past it */
     const int last_col = scis_x2 < (int)stride - 1 ? scis_x2 : (int)stride - 1;
     uint32_t *fb = (uint32_t *)SR_HOST(base);
 
@@ -1184,8 +1187,11 @@ static int coherence_run_wide_raster_one(const char *name, uint32_t stride, int 
     const unsigned long spr_before = s_cnt_spr, tri_before = s_cnt_tri;
     ge_set_gpu_hooks(&k_hooks);
     ge_run_list(coherence_wide_raster_list(base, stride, scis_x2), 0);
-    GeGpuFbDescriptor desc = { .addr = base, .format = 3, .stride = stride, .width = 480, .height = 272 };
-    if (s_cnt_spr != spr_before + 2u || s_cnt_tri != tri_before + 2u || !gegpu_sync_guest_fb(&desc)) {
+    /* the visible width, never past the stride (a narrower one is refused) */
+    GeGpuFbDescriptor desc = { .addr = base, .format = 3, .stride = stride,
+                               .width = stride < 480u ? stride : 480u, .height = 272 };
+    if (s_cnt_spr != spr_before + 2u || s_cnt_tri != tri_before + 2u ||
+        gegpu_sync_guest_fb(&desc) != GEGPU_SYNC_OK) {
         fprintf(stderr, "gpu coherence selftest [%s]: the GPU took %lu sprite(s) and %lu triangle(s), "
                         "want 2 and 2, or the sync failed\n", name, s_cnt_spr - spr_before, s_cnt_tri - tri_before);
         coherence_reset_targets();
@@ -1219,10 +1225,173 @@ static int coherence_run_wide_raster_one(const char *name, uint32_t stride, int 
     return ok;
 }
 
+/* Depth writes stay inside the depth buffer (#2193). The depth surface is zbw columns by 272
+ * rows; column x of row y is guest address (y * zbw + x), so a depth write past zbw would be
+ * the next row's pixel, or on row 271 one past the buffer. One list on an 8888 target with
+ * stride fbw and a depth buffer with stride zbw, depth pre-filled with a sentinel: a depth
+ * clear (depth A) of the whole 512x272, a depth-writing sprite (test ALWAYS, depth B) on rows
+ * 0-9 at x 256-511, and under a scissor of x 0-99 a depth clear (depth C) of rows 200-271.
+ * Every pixel drawn is inside the colour target and the depth buffer, so the depth buffer must
+ * hold C in rows 200-271 of columns 0-99, A in the rest of the columns both buffers have, and
+ * the sentinel in any column past the colour target's stride and in the row past the buffer.
+ * The Vulkan backend and ge.c each run it and must agree byte for byte. A 512-stride target
+ * with a 256-wide depth buffer is the case where the sprite lies past zbw; a 256-stride target
+ * with a 512-wide depth buffer the case where the draws reach past the colour target. */
+static void coherence_reset_depths(void);
+
+enum { COH_WIDE_DEPTH_A = 0x4000u, COH_WIDE_DEPTH_B = 0x0100u, COH_WIDE_DEPTH_C = 0x7777u,
+       COH_WIDE_DEPTH_SENT = 0x1234u };
+
+static uint32_t coherence_wide_depth_list(uint32_t base, uint32_t fbw, uint32_t zbase, uint32_t zbw) {
+    const uint32_t vaddr = 0x00102000u;
+    CohWideVtx *v = (CohWideVtx *)SR_HOST(vaddr);
+    const CohWideVtx verts[] = {
+        { COH_WIDE_CLEAR, 0.0f, 0.0f, (float)COH_WIDE_DEPTH_A },
+        { COH_WIDE_CLEAR, 512.0f, 272.0f, (float)COH_WIDE_DEPTH_A },
+        { COH_WIDE_SPRITE, 256.0f, 0.0f, (float)COH_WIDE_DEPTH_B },
+        { COH_WIDE_SPRITE, 512.0f, 10.0f, (float)COH_WIDE_DEPTH_B },
+        { COH_WIDE_CLEAR, 0.0f, 200.0f, (float)COH_WIDE_DEPTH_C },
+        { COH_WIDE_CLEAR, 512.0f, 272.0f, (float)COH_WIDE_DEPTH_C },
+    };
+    memcpy(v, verts, sizeof verts);
+
+    const uint32_t list_addr = 0x00100000u;
+    uint32_t *dl = (uint32_t *)SR_HOST(list_addr);
+    int p = 0;
+    #define DL_EMIT(cmd, val) dl[p++] = ((uint32_t)(cmd) << 24) | ((val) & 0x00FFFFFFu)
+    DL_EMIT(0x10, 0);
+    DL_EMIT(0x4C, 0);
+    DL_EMIT(0x4D, 0);
+    DL_EMIT(0x9C, base & 0x00FFFFFFu);
+    DL_EMIT(0x9D, fbw | ((base & 0xFF000000u) >> 8));
+    DL_EMIT(0x9E, zbase & 0x00FFFFFFu);
+    DL_EMIT(0x9F, zbw | ((zbase & 0xFF000000u) >> 8));
+    DL_EMIT(0xD2, 3);
+    for (uint32_t cmd = 0x1Du; cmd <= 0x28u; cmd++)   /* cull, fog, ... depth test, logic op: all off */
+        DL_EMIT(cmd, 0);
+    DL_EMIT(0xE8, 0);
+    DL_EMIT(0xE9, 0);
+    DL_EMIT(0xD6, 0);                                    /* depth range: all of it */
+    DL_EMIT(0xD7, 0xFFFFu);
+    DL_EMIT(0xE7, 0);                                    /* depth writes on */
+    DL_EMIT(0xDE, 1);                                    /* depth test: ALWAYS */
+    DL_EMIT(0x15, 0);                                    /* the drawing region: the whole 512x272 */
+    DL_EMIT(0x16, ((FB_H - 1) << 10) | (FB_W - 1));
+    DL_EMIT(0xD4, 0);
+    DL_EMIT(0xD5, ((FB_H - 1) << 10) | (FB_W - 1));
+    DL_EMIT(0x12, (7u << 2) | (3u << 7) | (1u << 23));   /* 8888 colour, float position, through */
+    DL_EMIT(0x01, vaddr & 0x00FFFFFFu);
+    DL_EMIT(0xD3, 1u | (4u << 8));                       /* clear mode: depth only */
+    DL_EMIT(0x04, (6u << 16) | 2u);
+    DL_EMIT(0xD3, 0);
+    DL_EMIT(0x23, 1);                                    /* depth test on */
+    DL_EMIT(0x04, (6u << 16) | 2u);
+    DL_EMIT(0x23, 0);
+    DL_EMIT(0xD5, ((FB_H - 1) << 10) | 99u);             /* the scissor, to x 99 */
+    DL_EMIT(0xD3, 1u | (4u << 8));
+    DL_EMIT(0x04, (6u << 16) | 2u);
+    DL_EMIT(0xD3, 0);
+    DL_EMIT(0x0F, 0);
+    DL_EMIT(0x0C, 0);
+    #undef DL_EMIT
+    return list_addr;
+}
+
+/* Guest depth pixel `linear` (y * zbw + x), at the address both renderers' depth surfaces use. */
+static uint16_t *coherence_wide_depth_px(uint32_t zbase, uint32_t linear) {
+    return (uint16_t *)SR_HOST_LINEAR((zbase + linear * 2u) ^ 0x2040u);
+}
+
+static void coherence_wide_depth_fill(uint32_t zbase, uint32_t zbw, uint32_t span) {
+    const uint16_t sent = COH_WIDE_DEPTH_SENT;
+    for (uint32_t i = 0; i < zbw * (FB_H + 1u); i++) memcpy(coherence_wide_depth_px(zbase, i), &sent, 2);
+    sr_gpu_vram_dirty(zbase, span);
+    ge_zbuf_invalidate_guest_span(zbase, span);
+}
+
+static int coherence_wide_depth_verify(const char *path, const char *name, uint32_t zbase,
+                                       uint32_t fbw, uint32_t zbw) {
+    const uint32_t cols = fbw < zbw ? fbw : zbw;
+    for (uint32_t i = 0; i < zbw * (FB_H + 1u); i++) {
+        const uint32_t x = i % zbw, y = i / zbw;
+        uint16_t want = COH_WIDE_DEPTH_SENT, got;
+        if (y < FB_H && x < cols) want = y >= 200u && x < 100u ? COH_WIDE_DEPTH_C : COH_WIDE_DEPTH_A;
+        memcpy(&got, coherence_wide_depth_px(zbase, i), 2);
+        if (got != want) {
+            fprintf(stderr, "gpu coherence selftest [%s]: %s depth pixel=(%u,%u) got=%04x want=%04x "
+                            "(stride %u, depth stride %u)\n", name, path, (unsigned)x, (unsigned)y,
+                    got, want, (unsigned)fbw, (unsigned)zbw);
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int coherence_run_wide_raster_depth(const char *name, uint32_t fbw, uint32_t zbw) {
+    const uint32_t base = 0x04000000u | 0x00160000u, zbase = 0x04000000u;
+    /* the depth buffer, the row past it, and the 0x2040 swizzle's reach */
+    const uint32_t span = zbw * (FB_H + 1u) * 2u + 0x2040u;
+    const size_t fb_bytes = (size_t)fbw * FB_H * 4u;
+
+    coherence_reset_depths();
+    memset(SR_HOST(base), 0, fb_bytes);
+    sr_gpu_vram_dirty(base, (uint32_t)fb_bytes);
+    coherence_wide_depth_fill(zbase, zbw, span);
+    const unsigned long spr_before = s_cnt_spr;
+    ge_set_gpu_hooks(&k_hooks);
+    ge_run_list(coherence_wide_depth_list(base, fbw, zbase, zbw), 0);
+    int ok = s_cnt_spr == spr_before + 3u && submit_pending();
+    for (int i = 0; ok && i < MAX_DEP; i++)
+        if (s_deps[i].used) ok = depth_readback_to_guest(&s_deps[i]);
+    if (!ok) {
+        fprintf(stderr, "gpu coherence selftest [%s]: the GPU took %lu sprite(s), want 3, or the depth "
+                        "readback failed\n", name, s_cnt_spr - spr_before);
+        coherence_reset_depths();
+        return 0;
+    }
+    ok = coherence_wide_depth_verify("gpu", name, zbase, fbw, zbw);
+    uint8_t *gpu = (uint8_t *)malloc(span);
+    if (!gpu) { coherence_reset_depths(); return 0; }
+    memcpy(gpu, SR_HOST_LINEAR(zbase), span);
+    coherence_reset_depths();
+
+    memset(SR_HOST(base), 0, fb_bytes);
+    sr_gpu_vram_dirty(base, (uint32_t)fb_bytes);
+    coherence_wide_depth_fill(zbase, zbw, span);
+    ge_set_gpu_hooks(NULL);
+    ge_run_list(coherence_wide_depth_list(base, fbw, zbase, zbw), 0);
+    const int materialized = ge_zbuf_materialize_current();
+    ge_set_gpu_hooks(&k_hooks);
+    if (!materialized) {
+        fprintf(stderr, "gpu coherence selftest [%s]: ge.c's depth surface was not written back\n", name);
+        ok = 0;
+    }
+    ok = coherence_wide_depth_verify("software", name, zbase, fbw, zbw) && ok;
+    const uint8_t *sw = (const uint8_t *)SR_HOST_LINEAR(zbase);
+    uint32_t mismatch = 0;
+    while (mismatch < span && gpu[mismatch] == sw[mismatch]) mismatch++;
+    if (mismatch != span) {
+        fprintf(stderr, "gpu coherence selftest [%s]: GPU/software depth mismatch at byte=%u gpu=%02x "
+                        "software=%02x\n", name, (unsigned)mismatch, gpu[mismatch], sw[mismatch]);
+        ok = 0;
+    }
+    free(gpu);
+    sr_gpu_vram_dirty(base, (uint32_t)fb_bytes);
+    sr_gpu_vram_dirty(zbase, span);
+    ge_zbuf_invalidate_guest_span(zbase, span);
+    if (ok)
+        printf("gpu coherence selftest: PASS %-22s fmt=3 stride=%u depth_stride=%u scale=%d\n",
+               name, (unsigned)fbw, (unsigned)zbw, s_scale);
+    return ok;
+}
+
 static int coherence_run_wide_raster(void) {
     int ok = coherence_run_wide_raster_one("wide-raster-512", 512u, 511);
     ok = coherence_run_wide_raster_one("wide-raster-screen", 512u, 479) && ok;
     ok = coherence_run_wide_raster_one("wide-raster-stride", 500u, 511) && ok;
+    ok = coherence_run_wide_raster_one("wide-raster-narrow", 256u, 479) && ok;
+    ok = coherence_run_wide_raster_depth("wide-raster-depth", 512u, 256u) && ok;
+    ok = coherence_run_wide_raster_depth("wide-raster-depth-narrow", 256u, 512u) && ok;
     return ok;
 }
 
