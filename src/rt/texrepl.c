@@ -1833,6 +1833,7 @@ static uint32_t *png_decode(const unsigned char *d, size_t n, const PngInfo *g, 
     *scratch = (uint64_t)joined_bytes + (g->raw_size <= (1u << 20) ? (uint64_t)g->raw_size : 2u * (uint64_t)g->raw_size);
     const int rc = nk_psp_inflate_raw(z + 2, zn - 2, &raw, &raw_n, g->raw_size, g->raw_size, NULL, 0);
     const uint32_t adler = png_be32(z + zn - 4);
+    if ((uint64_t)joined_bytes + raw_n > *scratch) *scratch = (uint64_t)joined_bytes + raw_n;   /* what it gave */
     free(joined);
     if (rc != NK_INFLATE_OK || raw_n != g->raw_size) {
         free(raw);

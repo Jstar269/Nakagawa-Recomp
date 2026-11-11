@@ -2334,7 +2334,7 @@ static void test_sort_adversary(void) {
            "order (n=%d) %llu of %.0f\n", kN, bound, cmps, kL, cmps_libc_order, lbound);
 
     /* textures.ini with kL [hashes] lines in that order: the lines are sorted once, and their kL
-     * levels (all naming one file) once more by name. Then kL [indexed] lines in that order. */
+     * levels once more by file name. Then kL [indexed] lines in that order. */
     char dir[512], path[600];
     size_t cap = (size_t)kL * 24u + 128u, at = 0;
     char *ini = (char *)malloc(cap);
@@ -2342,7 +2342,9 @@ static void test_sort_adversary(void) {
     int ok = 0;
     make_pack(dir, sizeof(dir), "texrepl_adv_ini");
     at += (size_t)snprintf(ini, cap, "[options]\nhash=quick\n[hashes]\n");
-    for (int i = 0; i < kL; i++) at += (size_t)snprintf(ini + at, cap - at, "%x=a\n", (unsigned)v[i]);
+    /* line i names file v[v[i]]: once the lines are sorted by key, the file names come in the
+     * adversary's order too, for the sort that gives each distinct file its one image */
+    for (int i = 0; i < kL; i++) at += (size_t)snprintf(ini + at, cap - at, "%x=%05d.png\n", (unsigned)v[i], v[v[i]]);
     pack_path(path, sizeof(path), "texrepl_adv_ini", "textures.ini");
     write_text(path, ini);
     const unsigned long long c_ini = open_counted(dir, &ok, &t_ini);
