@@ -2,8 +2,9 @@
 // Copyright (C) 2026 the Nakagawa Recomp authors
 
 /* PSP-EABI printf-family formatter for HLE boundaries that take a guest format
- * string and variadic words (the kernel's printf import).  It formats into a
- * bounded host buffer and never into guest memory.  A title's own sprintf is
+ * string and variadic words (the kernel's printf import).  The text goes into
+ * a bounded host buffer; the only guest store is `%n`'s count, through the
+ * checked accessors.  A title's own sprintf is
  * guest code and runs as translated: the native sprintf entry that once stood
  * in for one title's formatter was retired under #363.
  *
@@ -25,7 +26,8 @@
  * PSP ABI (measured, not assumed)
  * -------------------------------
  * Proven with the PSPSDK compiler (psp-gcc 15.2.0, default `-mabi=eabi`) by
- * inspecting emitted MIPS for variadic `sprintf` calls:
+ * inspecting emitted MIPS for variadic `sprintf` calls, whose first variadic
+ * word is $6; printf's is $5, and the rules below are otherwise the same:
  *   - int/long/size_t/ptrdiff_t/pointer are 32 bits and take one argument word;
  *   - long long / intmax_t are 64 bits and take two words at an even slot;
  *   - long double is identical to double (8 bytes) and travels as two words;

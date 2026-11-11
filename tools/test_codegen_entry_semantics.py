@@ -1649,8 +1649,11 @@ class FormatterAtRetiredSprintfBridgeTests(unittest.TestCase):
     t0..t3) to its frame, and the core picks each conversion through a jump table inside
     its loop while its own frame is live, so every conversion is a computed transfer that
     owes the core's frame, and the entry then reads its own frame again. It fails while the
-    profile emits anything but the guest's words there, and if the text, the return value,
-    $sp, $ra or a callee-saved register come back wrong."""
+    profile emits anything but the guest's words there, and if the text, its terminator, the
+    return value, $ra or a callee-saved register come back wrong. The generated entry
+    rebalances $sp itself on every exit, so a lost frame shows in the terminator and $ra,
+    not in $sp. The drain is this harness's stand-in, so the fixture checks the generated
+    code, not the runtime's own drain (src/rt/guest_interp.c)."""
 
     def _run(self, profile: str, work: Path) -> tuple[str, str]:
         assert CC is not None
