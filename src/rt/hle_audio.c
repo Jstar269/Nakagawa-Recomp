@@ -1319,15 +1319,12 @@ static void sas_mix_stateful(uint32_t out, int add, int32_t in_gain_l, int32_t i
         if (rs) sas_mix_band_limited(v, &pre, &grain, mixl, mixr, mixsl, mixsr);
     }
     /* peak=limit: the stereo sum before the store saturates it, for the host only. */
-    const int keep_wide = s_sas_wide_mix && !s_sas_core.output_mode;
-    SasWideGrain *wide_grain = NULL;
+    static int32_t wide_sum[SAS_GRAIN_MAX * 2];
+    int32_t *wide_grain = NULL;
     int wide_differs = 0;
     if (s_sas_wide_mix) {
         sas_wide_forget(out, (uint32_t)n * (s_sas_core.output_mode ? 8u : 4u));
-        if (keep_wide) {
-            wide_grain = &s_sas_wide[s_sas_wide_next];
-            wide_grain->frames = 0;   /* the oldest kept grain gives up its slot */
-        }
+        if (!s_sas_core.output_mode) wide_grain = wide_sum;
     }
     for (int i = 0; i < n; i++) {
         /* in_gain_l/in_gain_r scale the caller's PCM already in out (add only), never the voice
@@ -1343,8 +1340,8 @@ static void sas_mix_stateful(uint32_t out, int add, int32_t in_gain_l, int32_t i
             }
             wl = wl > SAS_WIDE_LIMIT ? SAS_WIDE_LIMIT : wl < -SAS_WIDE_LIMIT ? -SAS_WIDE_LIMIT : wl;
             wr = wr > SAS_WIDE_LIMIT ? SAS_WIDE_LIMIT : wr < -SAS_WIDE_LIMIT ? -SAS_WIDE_LIMIT : wr;
-            wide_grain->wide[i * 2] = (int32_t)wl;
-            wide_grain->wide[i * 2 + 1] = (int32_t)wr;
+            wide_grain[i * 2] = (int32_t)wl;
+            wide_grain[i * 2 + 1] = (int32_t)wr;
             if (wl > 32767 || wl < -32768 || wr > 32767 || wr < -32768) wide_differs = 1;
         }
         if (add) {
@@ -1365,14 +1362,17 @@ static void sas_mix_stateful(uint32_t out, int add, int32_t in_gain_l, int32_t i
             sas_output_write(out, (uint32_t)i, 3, sr);
         }
     }
-    /* Kept only when the store saturated: elsewhere the guest's bytes are the sum already. */
+    /* Kept only when the store saturated, in the oldest slot: elsewhere the guest's bytes are the
+     * sum already, and a grain that did not saturate leaves the kept ones alone. */
     if (wide_grain && wide_differs) {
+        SasWideGrain *g = &s_sas_wide[s_sas_wide_next];
+        memcpy(g->wide, wide_grain, (size_t)n * 2u * sizeof(int32_t));
         for (int i = 0; i < n; i++) {
-            wide_grain->stored[i * 2] = sas_output_read(out, (uint32_t)i, 0);
-            wide_grain->stored[i * 2 + 1] = sas_output_read(out, (uint32_t)i, 1);
+            g->stored[i * 2] = sas_output_read(out, (uint32_t)i, 0);
+            g->stored[i * 2 + 1] = sas_output_read(out, (uint32_t)i, 1);
         }
-        wide_grain->addr = out;
-        wide_grain->frames = (uint32_t)n;
+        g->addr = out;
+        g->frames = (uint32_t)n;
         s_sas_wide_next = (s_sas_wide_next + 1u) % SAS_WIDE_RING;
     }
     if (stat) {

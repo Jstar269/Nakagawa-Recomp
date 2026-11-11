@@ -1222,24 +1222,28 @@ host's output.
   frames, released exponentially (50 ms), then averaged over 64 frames, so it falls over 1.45 ms before a peak and
   is at most what the peak needs when it arrives. The ceiling is -0.3 dBTP as that detector reads it; read at 16x,
   the overflow fixture's hard 62000-count step rings 0.13 dB past it, still under full scale. The output is 71 frames (1.61 ms)
-  late. A frame below the ceiling with no peak within the attack or release of it comes out bit-exact, so the
-  level is the PSP's wherever the PSP did not clip; only the overs are rounded off instead of cut. A stream that
-  stops leaves its last 71 frames in the limiter until that channel's next push, which plays them first: nothing is
-  dropped or invented. The video recorder (`sr_videorec_audio`) and the counters keep the guest's copy.
+  late. A frame below the ceiling comes out bit-exact unless a peak's attack or release reaches it (the release
+  is back within half a count of unity well inside a second), so the level is the PSP's wherever the PSP did not
+  clip; only the overs are rounded off instead of cut. A stream that stops leaves its last 71 frames in the
+  limiter until that channel's next push or hold of silence (`sr_audio_push_silence`, which passes through the
+  limiter too), which plays them first: nothing is dropped or invented, and nothing plays out of order. The video recorder (`sr_videorec_audio`) and the counters keep the guest's copy.
 - **Off.** Without `peak=limit` neither side runs: the SAS mixer keeps nothing, `sr_audio_push` is the plain push,
   and `sr_audio_push_wide` is the plain push of the guest's copy (`audio-selftest` checks the bytes). Fast forward
   pushes nothing, so nothing is limited while it runs.
 - **Stamps and the report.** `ACE_MODE: peak limit (...)` at start; the badge's words say "unclipped sound"; the
   report's `"peak"` block gives `on`, `pushes_wide` (pushes that carried a kept sum), `frames_wide` (their frames
-  where the sum and the guest's copy differ), `frames_limited` (output frames turned down) and `min_gain`. The part
+  where the sum and the guest's copy differ), `frames_limited` (output frames whose bytes the gain changed) and
+  `min_gain`. The part
   is confirmed once the SAS mixer and the audio backend both take the switch (`driver.c`); a link without either,
   the headless gate, reports it as never run. Section 10.4 applies.
 - **Tests.** `hle-thread-selftest` runs the overflow fixture (twenty full-scale voices over caller PCM through
   `__sceSasCoreWithMix`): the guest's bytes are identical with the part on and off; the output of that buffer
   carries the sum, past 16 bits exactly where the store saturated and the guest's value elsewhere; a buffer changed
   after the mix and a copy play the guest's bytes. `audio-selftest` checks that the part off is the plain push; that
-  quiet audio comes out bit-exact and 71 frames late with an unchanged queue depth; and that a sine reaching 6.6 dB
-  past 16 bits leaves no sample past the ceiling and a true peak (read at 16x) under full scale, the
+  quiet audio comes out bit-exact and 71 frames late with an unchanged queue depth; that a hold of silence keeps
+  the order; and that a sine reaching 6.6 dB
+  past 16 bits leaves no sample past the ceiling and a true peak (read at 16x) under full scale, a gain that falls
+  before the overflow arrives, the
   passage before it bit-exact and the one after it at the input's level within 0.1 dB.
 - **Not yet.** The player has no part for it yet: a launch line names it by hand. The Hot Shots Tennis title-logo
   check (no full-scale sample, and the non-clipping music at the PSP's -15.6 dBFS) waits for the #2135 console read.
