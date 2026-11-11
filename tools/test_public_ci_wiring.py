@@ -383,7 +383,11 @@ class PublicCiWiringTests(unittest.TestCase):
             _ci_step_index(native_tools, step_name),
         )
         makefile = read_makefile(ROOT)
-        self.assertIn("gpu-coherence-selftest: $(GPU_COHERENCE_BIN)\n\t$(GPU_COHERENCE_BIN)\n", makefile)
+        self.assertIn(
+            "gpu-coherence-selftest: $(GPU_COHERENCE_BIN)\n"
+            "\t$(NK_REQUIRE_POSIX_SHELL)\n\t$(GPU_COHERENCE_BIN)\n",
+            makefile,
+        )
         docs = (ROOT / "docs" / "CI.md").read_text(encoding="utf-8")
         self.assertIn("`gpu-coherence-selftest`", docs)
 

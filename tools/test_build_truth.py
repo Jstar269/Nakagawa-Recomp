@@ -1951,6 +1951,283 @@ class ShellPortabilityAndRecipeTruthTests(unittest.TestCase):
                 )
 
 
+#: The guard a recipe written for a POSIX sh names on its first line (Makefile, "RECIPE SHELL").
+POSIX_SHELL_GUARD = "$(NK_REQUIRE_POSIX_SHELL)"
+
+_SHELL_STRING = re.compile(r'"(?:\\.|[^"\\])*"|\'[^\']*\'')
+_SHELL_ANYWHERE = {
+    "command substitution": re.compile(r"\$\$\(|`"),
+    "shell variable": re.compile(r"\$\$(?:\{|[A-Za-z_?#!*0-9])"),
+    "/dev/null": re.compile(r"/dev/null"),
+}
+#: Words that, in command position, mean sh syntax or a POSIX utility cmd.exe does not have.
+#: A bare `:` is absent on purpose: mingw32-make runs it as a no-op under cmd.exe too.
+_POSIX_COMMAND_WORDS = frozenset({
+    "if", "then", "else", "elif", "fi", "for", "while", "until", "do", "done", "case", "esac",
+    "[", "test", "{", "}", "export", "set", "unset", "trap", "exec", "true", "false",
+    "rm", "cp", "mv", "cat", "grep", "sed", "awk", "touch", "ls", "find", "xargs", "head",
+    "tail", "wc", "tee", "printf", "sh", "bash", "env", "cmp", "diff", "mkdir", "chmod",
+    "sort", "uniq", "tr", "cut",
+})
+_SHELL_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_DATABASE_RECIPE = re.compile(r"^#  recipe to execute \(from '([^']+)', line (\d+)\):$")
+
+
+def _without_make_references(text: str, replacement: str = " MREF ") -> str:
+    """``text`` with every ``$(...)`` / ``${...}`` Make reference, nested or not, replaced.
+
+    ``$$`` is the recipe's literal dollar for the shell and stays. Parentheses inside a
+    reference's text (an $(error ...) message, say) are balanced by the scan, so a
+    reference is removed whole.
+    """
+    out: list[str] = []
+    index = 0
+    while index < len(text):
+        if text.startswith("$$", index):
+            out.append("$$")
+            index += 2
+            continue
+        if text[index] == "$" and index + 1 < len(text) and text[index + 1] in "({":
+            opener = text[index + 1]
+            closer = ")" if opener == "(" else "}"
+            depth = 0
+            end = index + 1
+            while end < len(text):
+                if text[end] == opener:
+                    depth += 1
+                elif text[end] == closer:
+                    depth -= 1
+                    if depth == 0:
+                        break
+                end += 1
+            out.append(replacement)
+            index = end + 1
+            continue
+        out.append(text[index])
+        index += 1
+    return "".join(out)
+
+
+def posix_shell_constructs(command: str) -> list[str]:
+    """The POSIX-sh-only constructs in one recipe command (continuation lines joined).
+
+    What cmd.exe cannot run the same way: sh keywords and `[`/`test`, a `VAR=value cmd`
+    environment prefix, `$$var` and `$$(...)` expansion, `/dev/null`, `;` between
+    commands (cmd.exe keeps it as text, so `echo x; exit 2` prints and exits 0), and the
+    POSIX utilities a plain Windows PATH lacks. Make references are removed first, so a
+    `$(if ...)` or a `VAR=value` argument to `$(MAKE)` is not mistaken for shell syntax;
+    quoted strings are removed before the command-position checks, so the `;` and `for`
+    inside a `python -c "..."` program do not count either.
+    """
+    found: set[str] = set()
+    for name, pattern in _SHELL_ANYWHERE.items():
+        if pattern.search(command.replace("$$$$", "")):
+            found.add(name)
+    body = _SHELL_STRING.sub(" STR ", _without_make_references(command))
+    if ";" in body:
+        found.add("';' between commands")
+    for part in re.split(r"&&|\|\||[;|&\n()]", body):
+        words = part.split()
+        if not words:
+            continue
+        word = words[0].lstrip("@-+!") or (words[1] if len(words) > 1 else "")
+        if _SHELL_ASSIGNMENT.match(word) and len(words) > 1:
+            found.add(f"environment prefix {word.split('=', 1)[0]}=")
+        elif word in _POSIX_COMMAND_WORDS:
+            found.add(f"'{word}'")
+    return sorted(found)
+
+
+def _database_recipes(database: str) -> dict[tuple[str, int], tuple[str, list[str]]]:
+    """Every recipe in ``make -p`` output: (file, first line) -> (target, recipe lines).
+
+    The database names each recipe's own file and line after conditionals, templates and
+    target-specific variables are resolved, which a reading of the Makefile text cannot.
+    """
+    recipes: dict[tuple[str, int], tuple[str, list[str]]] = {}
+    lines = database.splitlines()
+    target = ""
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if line and not line.startswith(("#", "\t", " ")) and ":" in line:
+            target = line.split(":", 1)[0]
+        match = _DATABASE_RECIPE.match(line)
+        if match is None:
+            index += 1
+            continue
+        body: list[str] = []
+        index += 1
+        while index < len(lines) and lines[index].startswith("\t"):
+            body.append(lines[index][1:])
+            index += 1
+        recipes.setdefault((match.group(1), int(match.group(2))), (target, body))
+    return recipes
+
+
+def _recipe_commands(body: list[str]) -> list[str]:
+    commands: list[str] = []
+    pending: list[str] = []
+    for line in body:
+        if line.endswith("\\"):
+            pending.append(line[:-1])
+            continue
+        pending.append(line)
+        commands.append(" ".join(pending))
+        pending = []
+    if pending:
+        commands.append(" ".join(pending))
+    return commands
+
+
+class RecipeShellGuardTests(unittest.TestCase):
+    """A recipe written for a POSIX sh refuses to run under the cmd.exe fallback (#368).
+
+    mingw32-make runs recipes with cmd.exe when it finds no sh.exe on PATH. A recipe in
+    sh syntax then fails with an unrelated error after a long build, or exits 0 having
+    done nothing. Every such recipe names $(NK_REQUIRE_POSIX_SHELL) first, which stops
+    Make before any line of it runs. The list comes from Make's own rule database, so a
+    new POSIX recipe without the guard fails here, and so does a guard on a recipe that
+    cmd.exe runs correctly (it would refuse a build that works, such as the player's
+    package build, which has no sh).
+    """
+
+    make: ClassVar[str | None]
+    recipes: ClassVar[dict[tuple[str, int], tuple[str, list[str]]]]
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.make = shutil.which("mingw32-make") or shutil.which("make")
+        cls.recipes = {}
+        if not cls.make:
+            return
+        scratch = _make_safe_temp_dir("nakagawa-recipe-shell-")
+        cls.addClassCleanup(shutil.rmtree, scratch, True)
+        proc = _run_scratch_make(
+            cls.make, "-p", "-q", "help",
+            build_root=scratch / "build", log_dir=scratch / "logs",
+        )
+        if "# Finished Make data base" not in proc.stdout:
+            raise AssertionError("make -p printed no rule database:\n" + proc.stderr[-4000:])
+        cls.recipes = _database_recipes(proc.stdout)
+
+    def setUp(self) -> None:
+        if not self.make:
+            self.skipTest("GNU Make is required")
+
+    def _posix_recipes(self) -> dict[tuple[str, int], tuple[str, list[str]]]:
+        found = {}
+        for where, (target, body) in self.recipes.items():
+            constructs = sorted({c for command in _recipe_commands(body)
+                                 for c in posix_shell_constructs(command)})
+            if constructs:
+                found[where] = (target, constructs)
+        return found
+
+    def test_classifier_separates_sh_syntax_from_cmd_safe_recipes(self) -> None:
+        posix = (
+            '@echo "ERROR: set NK_UI_CAPTURE_DIR"; exit 2',
+            "if [ -f x ]; then echo y; fi",
+            "SR_GPU_CAPTURE_TERMINAL_CASE=surface-lost $(GPU_CAPTURE_BIN)",
+            '@test -n "$(REV)" || { echo no; exit 1; }',
+            "@rc=0; $(BIN) || rc=$$?",
+            "for f in a b; do echo $$f; done",
+            "cat $(LOG) >/dev/null",
+        )
+        cmd_safe = (
+            '"$(PYTHON)" -c "import sys; [print(a) for a in sys.argv]" x',
+            '"$(PYTHON)" tools/nk_clean.py $(if $(filter 1,$(CONFIRM)),--yes,)',
+            "$(MAKE) BUILD_DIR=$(COSIM_DIR) clean",
+            "$(if $(strip $(VULKAN_SDK)),,$(error No SDK; set VULKAN_SDK (e.g. C:/x)))",
+            "@:",
+            "$(CC) $(CFLAGS) -o $(BUILD_DIR)/a.exe a.c 2>&1",
+            "$(BUILD_DIR)/coro_selftest.exe",
+        )
+        for command in posix:
+            with self.subTest(command=command):
+                self.assertNotEqual(posix_shell_constructs(command), [])
+        for command in cmd_safe:
+            with self.subTest(command=command):
+                self.assertEqual(posix_shell_constructs(command), [])
+
+    def test_every_posix_recipe_starts_with_the_guard(self) -> None:
+        offenders = [
+            f"{file}:{line}: {target} uses {', '.join(constructs)}"
+            for (file, line), (target, constructs) in sorted(self._posix_recipes().items())
+            if self.recipes[(file, line)][1][:1] != [POSIX_SHELL_GUARD]
+        ]
+        self.assertEqual(
+            offenders, [],
+            "these recipes need a POSIX sh but do not start with "
+            f"{POSIX_SHELL_GUARD}, so the cmd.exe fallback runs them wrongly:\n"
+            + "\n".join(offenders),
+        )
+
+    def test_guard_only_on_recipes_that_need_sh(self) -> None:
+        posix = self._posix_recipes()
+        guarded = [
+            f"{file}:{line}: {target}"
+            for (file, line), (target, body) in sorted(self.recipes.items())
+            if POSIX_SHELL_GUARD in body and (file, line) not in posix
+        ]
+        self.assertEqual(
+            guarded, [],
+            f"{POSIX_SHELL_GUARD} refuses these recipes under cmd.exe, which runs them "
+            "correctly:\n" + "\n".join(guarded),
+        )
+        self.assertTrue(posix, "the rule database listed no POSIX recipe; the parse is broken")
+
+    def _scratch_run(self, *arguments: str, env: dict[str, str] | None = None
+                     ) -> subprocess.CompletedProcess:
+        assert self.make is not None
+        scratch = _make_safe_temp_dir("nakagawa-recipe-shell-run-")
+        self.addCleanup(shutil.rmtree, scratch, True)
+        build_root, log_dir = scratch / "build", scratch / "logs"
+        for variable, root in (("BUILD_ROOT", build_root), ("LOG_DIR", log_dir)):
+            self.assertFalse(_reaches_checkout(root), f"{variable} reaches the checkout")
+        return subprocess.run(
+            [self.make, "--no-print-directory", *arguments, f"PYTHON={Path(sys.executable).as_posix()}",
+             f"BUILD_ROOT={build_root.as_posix()}", f"LOG_DIR={log_dir.as_posix()}"],
+            cwd=ROOT, capture_output=True, text=True, check=False, env=env,
+        )
+
+    def test_guard_stops_make_before_the_recipe_runs(self) -> None:
+        # NK_RECIPE_SHELL=cmd.exe is what the Makefile derives on Windows when Make found
+        # no sh; setting it here runs the guard on any host.
+        proc = self._scratch_run("selftest-repeat", "NK_RECIPE_SHELL=cmd.exe",
+                                 "SELFTEST_REPEAT=nk-recipe-shell-marker")
+        self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("selftest-repeat needs a POSIX sh", proc.stderr)
+        self.assertIn("docs/SETUP.md", proc.stderr)
+        self.assertNotIn("nk-recipe-shell-marker", proc.stdout + proc.stderr)
+
+    @unittest.skipUnless(os.name == "nt", "the cmd.exe fallback exists only on Windows")
+    def test_without_sh_on_path_make_refuses_instead_of_misrunning(self) -> None:
+        """The production failure: mingw32-make started from a PATH that has no sh.exe.
+
+        Before the guard, `nk-ui-player-screens-capture` with no capture folder ran
+        `echo "ERROR ..."; exit 2` under cmd.exe, which printed the line and exited 0,
+        and a POSIX selftest ran its sh syntax under cmd.exe.
+        """
+        assert self.make is not None
+        system_root = Path(os.environ.get("SystemRoot", r"C:\Windows"))
+        path = [Path(self.make).parent, Path(sys.executable).parent,
+                system_root / "System32", system_root]
+        for folder in path:
+            if (folder / "sh.exe").exists():
+                self.skipTest(f"{folder} holds sh.exe; no PATH without sh is available")
+        env = {key: value for key, value in os.environ.items() if key.upper() != "PATH"}
+        env["PATH"] = os.pathsep.join(str(folder) for folder in path)
+        capture = self._scratch_run("nk-ui-player-screens-capture", "SDL3_TTF_AVAILABLE=yes",
+                                    "NK_UI_CAPTURE_DIR=", env=env)
+        self.assertNotEqual(capture.returncode, 0, capture.stdout + capture.stderr)
+        self.assertIn("set NK_UI_CAPTURE_DIR", capture.stderr)
+        guarded = self._scratch_run("selftest-repeat", "SELFTEST_REPEAT=nk-recipe-shell-marker", env=env)
+        self.assertNotEqual(guarded.returncode, 0, guarded.stdout + guarded.stderr)
+        self.assertIn("selftest-repeat needs a POSIX sh", guarded.stderr)
+        self.assertNotIn("nk-recipe-shell-marker", guarded.stdout + guarded.stderr)
+
+
 class BuildArtifactLifecycleTests(unittest.TestCase):
     """Structural and functional tests for clean, clean-fixtures, distclean, tidy, and clean-all targets.
 
