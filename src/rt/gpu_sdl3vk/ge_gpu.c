@@ -82,7 +82,8 @@
  *  - Write masks: a channel whose native bits are all masked or all written maps to the
  *    colour write mask; any other mask (and in clear mode an alpha mask that is not) falls
  *    back to ge.c (gpu_state_unsupported_reason).
- *  - Approximated (no software fallback): lines/points (1px quads, not DDA).
+ *  - Approximated (no software fallback): untextured lines (1px quads, not DDA). Points and
+ *    textured lines fall back to ge.c.
  *  - Render scale (default 1): SR_RESOLUTION_SCALE carries the player's Settings >
  *    Internal Render Resolution choice (1..4); SR_GPU_SCALE overrides it as an
  *    explicit diagnostic (sr_parse_render_scale in ge_gpu.h). Targets/depth/snapshot images are

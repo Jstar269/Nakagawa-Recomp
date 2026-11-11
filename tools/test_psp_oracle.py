@@ -11972,11 +11972,18 @@ class GeRasterProbeTests(unittest.TestCase):
         # The case runs in the default (render scale 1) pass and on its own.
         self.assertIn("    if (!coherence_run_psp_raster()) ok = 0;\n", inc)
         self.assertIn('if (strcmp(only, "psp-raster") == 0) return coherence_run_psp_raster();', inc)
-        body = inc[inc.index("static int coherence_run_psp_raster(void) {"):]
-        body = body[:body.index("\n}\n")]
-        for term in ("s_scale != 1", "fallback_prims", "gegpu_sync_guest_fb(&desc)",
-                     "gr_digest(px) == s_gr_psp[k].psp", "k_gr_vk_software", "k_gr_vk_divergent"):
-            self.assertIn(term, body)
+        bodies = {}
+        for name in ("gr_vk_draw", "coherence_run_psp_raster"):
+            body = inc[inc.index(f"static {'void' if name == 'gr_vk_draw' else 'int'} {name}("):]
+            bodies[name] = body[:body.index("\n}\n")]
+        for term in ("fallback_prims", "gegpu_sync_guest_fb(&desc)", "ge_set_gpu_hooks(gpu ? &k_hooks : NULL);"):
+            self.assertIn(term, bodies["gr_vk_draw"])
+        for term in ("s_scale != 1", "gr_digest(ref) == s_gr_psp[k].psp", "gr_digest(px) == s_gr_psp[k].psp",
+                     "else if (want_sw) pass = on_sw && matches;",
+                     "else if (want_div) pass = on_gpu && !matches && delta <= GR_VK_DIVERGENT_MAX_DELTA;",
+                     "else pass = on_gpu && matches;"):
+            self.assertIn(term, bodies["coherence_run_psp_raster"])
+        self.assertIn("#define GR_VK_DIVERGENT_MAX_DELTA 2u\n", inc)
         # The two pinned classes name real cells, once each, and no cell is in both.
         cells = set(re.findall(r'^\s*\{"([a-z0-9-]+)", GR_K_', self._block(inc), re.M))
         self.assertEqual(len(cells), 189)
@@ -11987,6 +11994,18 @@ class GeRasterProbeTests(unittest.TestCase):
         divergent, software = pinned
         self.assertEqual(len(divergent) + len(software), len(set(divergent) | set(software)))
         self.assertLessEqual(set(divergent) | set(software), cells)
+        # docs/HARDWARE_ORACLE.md names exactly the pinned cells and their counts.
+        doc = (root / "docs" / "HARDWARE_ORACLE.md").read_text(encoding="utf-8")
+        para = doc[doc.index("  The Vulkan backend runs the same cells:"):]
+        para = " ".join(para[:para.index("\n\n")].split())
+        named = set(re.findall(r"`([a-z0-9-]+\*?)`", para))
+        lo = {cell for cell in cells if cell.startswith("lo-")}
+        self.assertIn("lo-*", named)
+        self.assertLessEqual(lo, set(software))
+        self.assertEqual((named & cells) | lo, set(divergent) | set(software))
+        self.assertIn(f"{len(software)} are drawn by the software fallback", para)
+        self.assertIn(f"{len(divergent)} are drawn on the GPU and differ", para)
+        self.assertIn(f"{len(cells) - len(software) - len(divergent)} cells are drawn on the GPU and equal", para)
 
     def test_section_calls_only_the_ge_and_cache_imports_and_is_bounded(self) -> None:
         self.assertEqual(set(re.findall(r"\b(sce\w+)\s*\(", self.section)), {

@@ -11231,9 +11231,11 @@ static const struct {
  *  - drawn on the GPU and equal to the PSP (every cell not named below);
  *  - drawn on the GPU and not equal (k_gr_vk_divergent): the Vulkan blend and texture-function
  *    arithmetic rounds in floating point where the PSP truncates integer products, so these
- *    differ by 1 or 2 per channel (docs/HARDWARE_ORACLE.md, "GE raster pixel corpus");
- *  - not drawn on the GPU (k_gr_vk_software): the backend refuses the primitive and ge.c draws
- *    it, which proves nothing about Vulkan. */
+ *    differ by 1 or 2 per channel; each pixel must stay within GR_VK_DIVERGENT_MAX_DELTA of
+ *    ge.c's, which equals the PSP's (docs/HARDWARE_ORACLE.md, "GE raster pixel corpus");
+ *  - drawn by the software fallback (k_gr_vk_software): the backend refuses a primitive and
+ *    ge.c draws it, which proves nothing about Vulkan's raster, but the window must still
+ *    equal the PSP's after the readback. */
 static const char *const k_gr_vk_divergent[] = {
     "b-sa-isa", "b-dc-sc", "b-idc-isc", "b-da-ida", "b-sub-sa-fix", "b-rsub-sa-isa",
     "tf-mod-rgb", "tf-mod-rgb-x2", "tf-mod-rgba", "tf-mod-rgba-x2", "tf-dec-rgba",
@@ -11253,13 +11255,67 @@ static int gr_vk_named(const char *const *names, size_t n, const char *cell) {
     return 0;
 }
 
+/* The largest difference of one native colour field between two pixels of format psm. */
+static uint32_t gr_vk_channel_delta(uint32_t psm, uint32_t a, uint32_t b) {
+    static const uint8_t k_fields[4][4][2] = {
+        {{0, 5}, {5, 6}, {11, 5}, {0, 0}}, {{0, 5}, {5, 5}, {10, 5}, {15, 1}},
+        {{0, 4}, {4, 4}, {8, 4}, {12, 4}}, {{0, 8}, {8, 8}, {16, 8}, {24, 8}},
+    };
+    uint32_t worst = 0;
+    for (int f = 0; f < 4; f++) {
+        const uint32_t shift = k_fields[psm & 3u][f][0], bits = k_fields[psm & 3u][f][1];
+        if (bits == 0) continue;
+        const uint32_t va = (a >> shift) & ((1u << bits) - 1u), vb = (b >> shift) & ((1u << bits) - 1u);
+        const uint32_t d = va > vb ? va - vb : vb - va;
+        if (d > worst) worst = d;
+    }
+    return worst;
+}
+
+/* One cell from a clean window: its list through ge.c, with the GPU hooks when gpu is set (the
+ * window is then read back from the GPU), into px. */
+static void gr_vk_draw(const struct gr_cell *c, int gpu, const uint32_t *tex, uint32_t clut,
+                       uint32_t px[GR_N], unsigned long long *fell, int *sync) {
+    const uint32_t list = 0x08900000u, vtx = 0x08904000u;
+    const uint32_t fb = 0x04000000u + GR_FB_OFFSET;
+    coherence_reset_targets();
+    memset(SR_HOST(fb), 0, GR_STRIDE * GR_ROWS * 4u);
+    for (uint32_t i = 0; i < GR_N; i++) {
+        const uint32_t at = (GR_WY + i / GR_WW) * GR_STRIDE + GR_WX + i % GR_WW;
+        if (c->psm == 3u) MEM_W32(fb + at * 4u, gr_dst(c, i));
+        else MEM_W16(fb + at * 2u, (uint16_t)gr_dst(c, i));
+    }
+    sr_gpu_vram_dirty(fb, GR_STRIDE * GR_ROWS * 4u);
+    (void)gr_vertices(c, (uint32_t *)SR_HOST(vtx));
+    (void)gr_list(c, vtx, tex, clut, (uint32_t *)SR_HOST(list));
+    const unsigned long long fallback0 = s_replay_stats.fallback_prims;
+    ge_set_gpu_hooks(gpu ? &k_hooks : NULL);
+    ge_run_list(list, 0);
+    ge_set_gpu_hooks(&k_hooks);
+    *fell = s_replay_stats.fallback_prims - fallback0;
+    *sync = GEGPU_SYNC_NO_TARGET;
+    if (gpu) {
+        GeGpuFbDescriptor desc = { .addr = fb, .format = c->psm, .stride = GR_STRIDE,
+                                   .width = GR_STRIDE, .height = GR_ROWS };
+        *sync = gegpu_sync_guest_fb(&desc);
+    }
+    for (uint32_t i = 0; i < GR_N; i++) {
+        const uint32_t at = (GR_WY + i / GR_WW) * GR_STRIDE + GR_WX + i % GR_WW;
+        px[i] = c->psm == 3u ? MEM_R32(fb + at * 4u) : (uint32_t)MEM_R16(fb + at * 2u);
+    }
+}
+
+/* Pinned cells differ from the PSP by at most this much in any native colour field. */
+#define GR_VK_DIVERGENT_MAX_DELTA 2u
+
 static int coherence_run_psp_raster(void) {
     if (s_scale != 1) {
         fprintf(stderr, "gpu coherence selftest [psp-raster]: needs render scale 1, not %d\n", s_scale);
         return 0;
     }
-    const uint32_t list = 0x08900000u, vtx = 0x08904000u, clut = 0x08918000u;
-    const uint32_t fb = 0x04000000u + GR_FB_OFFSET;
+    enum { GR_VK_SOFTWARE = sizeof(k_gr_vk_software) / sizeof(k_gr_vk_software[0]),
+           GR_VK_DIVERGENT = sizeof(k_gr_vk_divergent) / sizeof(k_gr_vk_divergent[0]) };
+    const uint32_t clut = 0x08918000u;
     uint32_t tex[GR_T_COUNT];
     for (uint32_t t = 0; t < GR_T_COUNT; t++) {
         tex[t] = 0x08910000u + t * 0x400u;
@@ -11267,55 +11323,63 @@ static int coherence_run_psp_raster(void) {
     }
     gr_clut((uint8_t *)SR_HOST(clut));
     GeState saved = *s_ge;
-    unsigned char on_gpu[GR_CELL_COUNT], matches[GR_CELL_COUNT];
     unsigned gpu_match = 0, gpu_div = 0, sw_cells = 0;
-    enum { GR_VK_SOFTWARE = sizeof(k_gr_vk_software) / sizeof(k_gr_vk_software[0]),
-           GR_VK_DIVERGENT = sizeof(k_gr_vk_divergent) / sizeof(k_gr_vk_divergent[0]) };
+    uint32_t worst_div = 0;
     int ok = 1;
     for (uint32_t k = 0; k < GR_CELL_COUNT; k++) {
         const struct gr_cell *c = &gr_cells[k];
-        uint32_t px[GR_N];
-        coherence_reset_targets();
-        memset(SR_HOST(fb), 0, GR_STRIDE * GR_ROWS * 4u);
-        for (uint32_t i = 0; i < GR_N; i++) {
-            const uint32_t at = (GR_WY + i / GR_WW) * GR_STRIDE + GR_WX + i % GR_WW;
-            if (c->psm == 3u) MEM_W32(fb + at * 4u, gr_dst(c, i));
-            else MEM_W16(fb + at * 2u, (uint16_t)gr_dst(c, i));
-        }
-        sr_gpu_vram_dirty(fb, GR_STRIDE * GR_ROWS * 4u);
-        (void)gr_vertices(c, (uint32_t *)SR_HOST(vtx));
-        (void)gr_list(c, vtx, tex, clut, (uint32_t *)SR_HOST(list));
-        const unsigned long long fallback0 = s_replay_stats.fallback_prims;
-        ge_set_gpu_hooks(&k_hooks);
-        ge_run_list(list, 0);
-        const unsigned long long fell = s_replay_stats.fallback_prims - fallback0;
-        GeGpuFbDescriptor desc = { .addr = fb, .format = c->psm, .stride = GR_STRIDE,
-                                   .width = GR_STRIDE, .height = GR_ROWS };
-        const int sync = gegpu_sync_guest_fb(&desc);
+        uint32_t px[GR_N], ref[GR_N];
+        unsigned long long fell = 0, ref_fell = 0;
+        int sync = 0, ref_sync = 0;
         if (strcmp(s_gr_psp[k].name, c->name) != 0) {
             fprintf(stderr, "gpu coherence selftest [psp-raster]: digest row %u names %s, not %s\n",
                     (unsigned)k, s_gr_psp[k].name, c->name);
             ok = 0;
+            continue;
         }
-        for (uint32_t i = 0; i < GR_N; i++) {
-            const uint32_t at = (GR_WY + i / GR_WW) * GR_STRIDE + GR_WX + i % GR_WW;
-            px[i] = c->psm == 3u ? MEM_R32(fb + at * 4u) : (uint32_t)MEM_R16(fb + at * 2u);
-        }
-        on_gpu[k] = sync == GEGPU_SYNC_OK && fell == 0u;
-        matches[k] = gr_digest(px) == s_gr_psp[k].psp;
+        /* ge.c alone gives the PSP's window (test_ge_raster_cells_match_psp): the reference a
+         * divergent GPU window is measured against, pixel by pixel. */
+        gr_vk_draw(c, 0, tex, clut, ref, &ref_fell, &ref_sync);
+        gr_vk_draw(c, 1, tex, clut, px, &fell, &sync);
         const int want_sw = gr_vk_named(k_gr_vk_software, GR_VK_SOFTWARE, c->name);
         const int want_div = gr_vk_named(k_gr_vk_divergent, GR_VK_DIVERGENT, c->name);
-        if (!on_gpu[k]) sw_cells++;
-        else if (matches[k]) gpu_match++;
-        else gpu_div++;
-        if (on_gpu[k] == !want_sw && (!on_gpu[k] || matches[k] == !want_div)) continue;
+        const int ref_ok = gr_digest(ref) == s_gr_psp[k].psp;
+        const int matches = gr_digest(px) == s_gr_psp[k].psp;
+        /* Drawn on the GPU: no primitive fell back and the GPU target was read back. Drawn by the
+         * software fallback: some primitive fell back and the readback did not fail. Anything else
+         * (a failed readback, or nothing drawn at all) is neither and fails. */
+        const int on_gpu = sync == GEGPU_SYNC_OK && fell == 0u;
+        const int on_sw = fell > 0u && sync != GEGPU_SYNC_FAILED;
+        uint32_t delta = 0;
+        for (uint32_t i = 0; i < GR_N; i++) {
+            const uint32_t d = gr_vk_channel_delta(c->psm, px[i], ref[i]);
+            if (d > delta) delta = d;
+        }
+        const char *got = on_gpu ? (matches ? "GPU, equal to the PSP" : "GPU, not equal to the PSP")
+                        : on_sw ? (matches ? "software fallback, equal to the PSP"
+                                           : "software fallback, not equal to the PSP")
+                        : "neither drawn on the GPU nor by the fallback";
+        int pass;
+        if (!ref_ok) pass = 0;
+        else if (want_sw) pass = on_sw && matches;
+        else if (want_div) pass = on_gpu && !matches && delta <= GR_VK_DIVERGENT_MAX_DELTA;
+        else pass = on_gpu && matches;
+        if (on_gpu && !matches) {
+            gpu_div++;
+            if (delta > worst_div) worst_div = delta;
+        } else if (on_gpu) {
+            gpu_match++;
+        } else if (on_sw) {
+            sw_cells++;
+        }
+        if (pass) continue;
         ok = 0;
-        fprintf(stderr, "gpu coherence selftest [psp-raster/%s]: %s (%s), expected %s; "
-                "gpu=0x%016llx psp=0x%016llx", c->name,
-                !on_gpu[k] ? "software fallback" : matches[k] ? "GPU, equal to the PSP"
-                                                              : "GPU, not equal to the PSP",
-                sync == GEGPU_SYNC_OK ? "synced" : "not synced",
-                want_sw ? "software fallback" : want_div ? "GPU, not equal" : "GPU, equal",
+        fprintf(stderr, "gpu coherence selftest [psp-raster/%s]: %s (fell %llu, sync %d), expected %s; "
+                "largest field difference from ge.c %u; ge.c %s the PSP; gpu=0x%016llx psp=0x%016llx",
+                c->name, got, fell, sync,
+                want_sw ? "software fallback, equal to the PSP"
+                        : want_div ? "GPU, within 2 per field of the PSP" : "GPU, equal to the PSP",
+                (unsigned)delta, ref_ok ? "equals" : "does not equal",
                 (unsigned long long)gr_digest(px), (unsigned long long)s_gr_psp[k].psp);
         for (uint32_t i = 0; i < GR_N; i++)
             fprintf(stderr, "%s%08x", i % GR_WW ? " " : "\n  ", (unsigned)px[i]);
@@ -11335,8 +11399,9 @@ static int coherence_run_psp_raster(void) {
     ge_set_gpu_hooks(&k_hooks);
     if (ok)
         printf("gpu coherence selftest: PASS %-22s PSP-GE-RASTER-001 at 1x: %u cells drawn on the GPU "
-               "equal the PSP, %u differ as pinned, %u drawn by the software fallback (%u cells)\n",
-               "psp-raster", gpu_match, gpu_div, sw_cells, (unsigned)GR_CELL_COUNT);
+               "equal the PSP, %u differ as pinned (at most %u per field), %u drawn by the software "
+               "fallback equal the PSP (%u cells)\n", "psp-raster", gpu_match, gpu_div,
+               (unsigned)worst_div, sw_cells, (unsigned)GR_CELL_COUNT);
     return ok;
 }
 
