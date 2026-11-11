@@ -131,14 +131,14 @@ def build_cases() -> tuple[list[tuple[int, str, int]], int, tuple[int, int]]:
     # PSP-3000 returned.
     cases.append((_vv2_word(28, 1, 0x40, 0x00), "vrexp2-s-measured", 1))
 
-    # vcmp.q C000 against C010, all 16 conditions (unrecorded PSP read, probe case vfpu-cc-cmov, PSP-3000,
+    # vcmp.q C000 against C010, all 16 conditions (PSP-VFPU-CCCMOV-001, probe case vfpu-cc-cmov, PSP-3000,
     # 2026-11-08, issue #326):
     # check_vcmp_denormal_operands() finds them by name and pins both lanes to the CC the
     # PSP read back for the signed-zero and denormal operand set.
     for cond in range(16):
         cases.append((_bin_word(0x1B, 0, 4, cond, 0x00, 0x01), f"vcmp-q-c{cond:02d}-measured", 4))
 
-    # vus2i / vs2i .s and .p (issue #326, probe case vfpu-vus2i, PSP-3000, 2026-11-08):
+    # vus2i / vs2i .s and .p (PSP-VFPU-VUS2I-001, issue #326, probe case vfpu-vus2i, PSP-3000, 2026-11-08):
     # check_vus2i_vs2i_measured_words() finds them by name and pins both lanes to the words
     # the PSP returned for twelve source words.
     for name, word in (("vus2i-s-measured", 0xD03A0008), ("vus2i-p-measured", 0xD03A0088),
@@ -189,8 +189,8 @@ def build_cases() -> tuple[list[tuple[int, str, int]], int, tuple[int, int]]:
             cases.append((_bin_word(0x1B, sub, size, 0x00, 0x04, 0x08), f"{op}-{suffix}", size))
     cmp_range = (cmp_first, len(cases) - cmp_first)
 
-    # vadd/vsub/vmul/vdiv/vscl/vmin/vmax at .s and .q (issue #326, probe case vfpu-basic-arith,
-    # PSP-3000, 2026-11-08): check_vfpu_basic_arith_measured() finds them by name and runs the
+    # vadd/vsub/vmul/vdiv/vscl/vmin/vmax at .s and .q (PSP-VFPU-BASICARITH-001, issue #326, probe case
+    # vfpu-basic-arith, PSP-3000, 2026-11-08): check_vfpu_basic_arith_measured() finds them by name and runs the
     # 20 x 20 operand grid through both lanes. Destination matrix 0, sources matrices 1 and 2.
     for opname, op6, sub in (("vadd", 0x18, 0), ("vsub", 0x18, 1), ("vmul", 0x19, 0),
                              ("vdiv", 0x18, 7), ("vscl", 0x19, 2), ("vmin", 0x1B, 2),
@@ -209,8 +209,8 @@ def build_cases() -> tuple[list[tuple[int, str, int]], int, tuple[int, int]]:
         for size, suffix in ((1, "s"), (2, "p"), (4, "q")):
             cases.append((_vv2_word(optype, size, 0x00, 0x04), f"arith-{opname}-{suffix}", size))
 
-    # Dot, cross, quaternion and matrix forms (issue #326, probe case vfpu-wide-dot-matrix,
-    # unrecorded PSP read, PSP-3000, 2026-11-08): check_vfpu_wide_dot_measured() finds each
+    # Dot, cross, quaternion and matrix forms (PSP-VFPU-WIDEDOT-001, issue #326, probe case
+    # vfpu-wide-dot-matrix, PSP-3000, 2026-11-08): check_vfpu_wide_dot_measured() finds each
     # word by name and runs the console's cells through both lanes. The registers are the
     # probe's: vectors at columns 0 and 1 of matrix 0, the matrix operand at matrix 1, the
     # destination at matrix 2.
