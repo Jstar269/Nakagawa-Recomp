@@ -1254,7 +1254,7 @@ static const PlayerEnhancedPartInfo k_enhanced_parts[PLAYER_PART_COUNT] = {
     /* Host presentation only (contract 10.21): the picture the window shows, never guest memory.
        Off by default and in every preset: it multiplies the GPU's work by 4 or 16. */
     {"ssaa", "Supersampling",
-     "Smooths jagged edges by drawing each frame larger. 2x needs 4 times the GPU work, 4x 16 times.",
+     "Smooths jagged edges. 2x takes 4 times the GPU work, 4x 16 times.",
      3, k_part_ssaa_values, k_part_ssaa_labels, k_part_ssaa_words, 0},
 };
 

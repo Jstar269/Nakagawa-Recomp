@@ -7271,6 +7271,25 @@ static int wide_picture_check(const char *what, const uint32_t *pic, int cols, c
             else if (x < d + 480u) want = frame[y * 512u + x - d];
             else want = want_wings ? canvas[y * 512u + x - 480u] : 0u;
             const uint32_t got = pic[(size_t)y * (uint32_t)cols + x];
+            /* With supersampling (contract 10.21) the frame is the average of its samples: a pixel by
+             * an edge mixes the colours on either side, so each channel lies within those of the
+             * guest pixels around it. The wings come from the canvas and stay exact. */
+            if (s_ssaa > 1 && x >= d && x < d + 480u && (got & 0x00FFFFFFu) != (want & 0x00FFFFFFu)) {
+                const uint32_t fx = x - d;
+                int inside = 1;
+                for (int sh = 0; sh < 24; sh += 8) {
+                    uint32_t lo = 255u, hi = 0u;
+                    for (uint32_t ny = y ? y - 1u : 0u; ny <= y + 1u && ny < FB_H; ny++)
+                        for (uint32_t nx = fx ? fx - 1u : 0u; nx <= fx + 1u && nx < 480u; nx++) {
+                            const uint32_t c = (frame[ny * 512u + nx] >> sh) & 0xFFu;
+                            if (c < lo) lo = c;
+                            if (c > hi) hi = c;
+                        }
+                    const uint32_t g = (got >> sh) & 0xFFu;
+                    if (g < lo || g > hi) inside = 0;
+                }
+                if (inside) continue;
+            }
             if ((got & 0x00FFFFFFu) != (want & 0x00FFFFFFu)) {
                 fprintf(stderr, "gpu coherence selftest [wide-fill]: present %s: picture (%u,%u) = %08x, want "
                                 "%08x\n", what, x, y, (unsigned)got, (unsigned)want);
@@ -9290,7 +9309,10 @@ static int dro_twin_pair_check(const char *cell, const DroState *st, int ordered
         for (uint32_t x = 0; x < 480u * sc; x++) {
             const uint32_t gx = x / sc, gy = y / sc, i = gy * FB_W + gx;
             const uint32_t twin = s_dro_twin_px[(size_t)y * TSCL_W + x];
-            const uint32_t img = s_dro_img_px[(size_t)y * SCL_W + x];
+            /* the authentic device pixel this twin pixel lies in (the twin runs at a whole multiple of
+             * the render scale with supersampling, #2073) */
+            const uint32_t k = (uint32_t)(s_tscale / s_scale);
+            const uint32_t img = s_dro_img_px[(size_t)(y / k) * SCL_W + x / k];
             uint32_t want = img;
             if (s_twin_color) {
                 const uint32_t bg = dro_bg_rgb(st->fmt, i);
