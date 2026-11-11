@@ -1179,8 +1179,9 @@ class TestPlayerPackageRoute(unittest.TestCase):
              title_codegen_plan.py and gcc, binds the package to the decrypted
              program's digest, and the player's validator accepts the package;
           5. launch: PLAY, headless, starts the guest at its entry, the runtime counts
-             FRAMES presents, and the first presented frame is, pixel for pixel, the
-             stripe pattern the guest's own MIPS computes (the display-smoke oracle), so
+             FRAMES presents, and every frame it snapshots at a present is, pixel for
+             pixel, the stripe pattern the guest's own MIPS computes (the display-smoke
+             oracle), so
              a launch or a translation that runs but draws the wrong thing fails.
 
         One step is the test's, not the player's: the library record that ADD TO LIBRARY
@@ -1297,31 +1298,29 @@ class TestPlayerPackageRoute(unittest.TestCase):
         self.assertIn("PACKAGE_STATUS=OK", validated.stdout)
 
         # 5. PLAY, headless, through the player's own launch session. The runtime
-        #    reports acceptance once it counted FRAMES presents; SR_FIRST_FRAME_DUMP
-        #    makes it write the first presented frame (src/rt/gui.c convert_fb).
+        #    reports acceptance once it counted FRAMES presents. SR_FBSNAP=1 makes it
+        #    snapshot the guest framebuffer at every present, whichever presenter
+        #    shows it (src/rt/hle_display.c: the legacy snap_<n>.ppm, synchronised
+        #    from the GPU first), into the child's working directory, the package.
         perf_csv = self.sandbox / "sealed-perf.csv"
-        root_frame = ROOT / "frame_first.ppm"
-        root_frame_before = root_frame.stat().st_mtime_ns if root_frame.exists() else None
+        self.assertEqual(sorted(package_dir.glob("snap_*.ppm")), [])
         launched = self.run_launch(perf_csv, user_data_root=user_root,
                                    accept_presented_frames=FRAMES,
-                                   extra_environment={"SR_FIRST_FRAME_DUMP": "1"})
+                                   extra_environment={"SR_FBSNAP": "1"})
         output = launched.stdout + launched.stderr
         self.assertEqual(launched.returncode, 0, output[-4000:])
         self.assertIn("[PLAYER] Launch index 0: PLAY NOW available", launched.stdout)
         self.assertIn("HEADLESS_ACCEPTANCE status=PASS", launched.stdout)
-        # The guest's own result: the first presented frame is exactly one frame of
-        # the stripe pattern its MIPS computes, recomputed here by the fixture's oracle.
-        self.assertEqual(
-            root_frame.stat().st_mtime_ns if root_frame.exists() else None,
-            root_frame_before, "the launched runtime wrote its frame dump into the checkout")
-        frames = sorted(self.root.rglob("frame_first.ppm"))
-        self.assertEqual(len(frames), 1, f"expected one first-frame dump, found {frames}\n"
-                         + output[-4000:])
-        try:
-            display_smoke_generator._require_exact_present_pixels(
-                frames[0], FRAMES, "sealed-disc launch")
-        except RuntimeError as exc:
-            self.fail(str(exc))
+        # The guest's own result: every presented frame is exactly one frame of the
+        # stripe pattern its MIPS computes, recomputed here by the fixture's oracle.
+        snapshots = sorted(package_dir.glob("snap_*.ppm"))
+        self.assertTrue(snapshots, "the launch presented no frame the runtime could snapshot")
+        for snapshot in snapshots:
+            try:
+                display_smoke_generator._require_exact_present_pixels(
+                    snapshot, FRAMES, f"sealed-disc launch {snapshot.name}")
+            except RuntimeError as exc:
+                self.fail(str(exc))
         # With --user-data-root, the player's cache folder is that root's cache
         # (nk_platform_win32.c resolve_override_path).
         boot_logs = list((user_root / "cache").glob("player-boot-*.events"))
