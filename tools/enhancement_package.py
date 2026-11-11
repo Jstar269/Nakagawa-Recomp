@@ -3497,6 +3497,7 @@ _GATE_STORE_OPS = (0x28, 0x29, 0x2B, 0x39)  # sb, sh, sw, swc1
 _FPU_RESULT_FUNCS = (0x00, 0x01, 0x02, 0x03, 0x05, 0x06, 0x07)  # add sub mul div abs mov neg
 _FPU_ARITHMETIC_FUNCS = (0x00, 0x01, 0x02, 0x03)  # add.s sub.s mul.s div.s
 _FPU_MOV_S = 0x06
+_FPU_UNARY_FUNCS = (0x05, 0x06, 0x07)  # abs.s mov.s neg.s: the ft field must be 0
 
 
 def _f32(bits: int) -> float:
@@ -4000,9 +4001,10 @@ def _plan_word_rewrite(site: Mapping[str, Any], w: int,
         if mapping == "retention" and is_fpu_s and fn in _FPU_ARITHMETIC_FUNCS:
             # The retention is computed (such as 1 - c*L): map the result register.
             return {"kind": "map_f_reg", "reg": sa, "map": mapping}
-        if is_fpu_s and fn == _FPU_MOV_S and rt == 0:
+        if is_fpu_s and fn == _FPU_MOV_S and rt == 0 and sa != rd:
             # mov.s fd, fs copies the factor: map the copy only. The source register may hold the
-            # same value for another use (a duration, say) that must keep its stock value.
+            # same value for another use (a duration, say) that must keep its stock value, so a
+            # copy onto itself (fd == fs) is refused.
             return {"kind": "map_f_reg", "reg": sa, "map": mapping}
         if op != 0x0F:
             _refuse(site, w, "expects the lui of a float constant, an lwc1, an lv.s or a mov.s"
@@ -4067,7 +4069,7 @@ def _plan_word_rewrite(site: Mapping[str, Any], w: int,
         return {"kind": "scale_int_store", "reg": rt}
     if is_fpu_s and fn in (0x00, 0x01) and sa == rd and rt != rd:
         return {"kind": "scale_f_addend", "reg": rt, "factor": factor}
-    if is_fpu_s and fn in _FPU_RESULT_FUNCS:
+    if is_fpu_s and fn in _FPU_RESULT_FUNCS and (fn not in _FPU_UNARY_FUNCS or rt == 0):
         return {"kind": "scale_f_reg", "reg": sa, "factor": factor}
     if op == 0x11 and rs == 0x14 and fn == 0x20:  # cvt.s.w
         return {"kind": "scale_f_reg", "reg": sa, "factor": factor}

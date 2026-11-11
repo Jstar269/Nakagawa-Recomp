@@ -1170,6 +1170,11 @@ class TestEnhancementAotCodegenAndCache(_SynthTimingElfFixture):
             ("decay_k_to_1-sqrt(1-k)", 0x46207506),  # mov.d: a double, not a single factor
             ("decay_k_to_1-sqrt(1-k)", 0x46007507),  # neg.s does not copy the factor
             ("decay_k_to_1-sqrt(1-k)", 0x46007502),  # mul.s: the decay is not taken from arithmetic
+            ("decay_k_to_1-sqrt(1-k)", 0x460018C6),  # mov.s f3, f3: no copy, the source would change
+            ("retention_m_to_sqrt(m)", 0x460018C6),
+            ("decay_k_to_1-sqrt(1-k)", 0x46017506),  # mov.s with a nonzero ft field is not a valid word
+            ("count_x2", 0x46017506),
+            ("step_x0.5", 0x46017507),  # neg.s likewise
         ):
             with self.subTest(transform=transform, word=f"{word:08x}"):
                 with self.assertRaises(EnhancementPackageError):
@@ -1885,7 +1890,8 @@ class TestEnhancementAotCodegenAndCache(_SynthTimingElfFixture):
 
     @unittest.skipUnless(GCC, "needs a host C compiler")
     def test_mapped_register_copy_keeps_its_source_when_run(self) -> None:
-        """A decay or retention site on mov.s fd, fs: compile the whole emitted statement and run it.
+        """A decay or retention site on mov.s fd, fs, as the planner plans it: compile the whole emitted
+        statement and run it.
         With the toggle on, fd is the mapped factor and fs keeps its stock bits (the source may also
         be a duration); with the toggle off both are the stock copy."""
         mov_s = 0x46007506  # mov.s $f20, $f14
@@ -1894,9 +1900,9 @@ class TestEnhancementAotCodegenAndCache(_SynthTimingElfFixture):
         try:
             for kind in ("decay", "retention"):
                 with self.subTest(map=kind):
-                    codegen.ENHANCEMENT_SITES = {
-                        0x1300: {"id": "K", "rewrite": {"kind": "map_f_reg", "reg": 20, "map": kind}}
-                    }
+                    transform = {"decay": "decay_k_to_1-sqrt(1-k)", "retention": "retention_m_to_sqrt(m)"}[kind]
+                    rewrite = enhancement_package.plan_site_rewrite({"id": "K", "transform": transform}, mov_s)
+                    codegen.ENHANCEMENT_SITES = {0x1300: {"id": "K", "rewrite": rewrite}}
                     codegen.ENHANCEMENT_APPLIED.clear()
                     line = codegen.normal_line(0x1300, mov_s, lle_cpu=False)
                     with tempfile.TemporaryDirectory() as tmp_dir:
@@ -1929,7 +1935,6 @@ class TestEnhancementAotCodegenAndCache(_SynthTimingElfFixture):
                                         str(harness), "-lm"], check=True, capture_output=True, text=True)
                         out = subprocess.run([str(exe)], check=True, capture_output=True, text=True).stdout.split()
                     stock = struct.unpack("<I", struct.pack("<f", k))[0]
-                    transform = {"decay": "decay_k_to_1-sqrt(1-k)", "retention": "retention_m_to_sqrt(m)"}[kind]
                     mapped = struct.unpack("<I", struct.pack("<f", _scale_value(transform, k)))[0]
                     self.assertNotEqual(mapped, stock)
                     self.assertEqual([int(v, 16) for v in out], [stock, stock, stock, mapped])
