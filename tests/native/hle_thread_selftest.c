@@ -39609,6 +39609,77 @@ static void test_vpl_blocking_waits(void) {
     s_cur = (int)(cur - s_tcb);
 }
 
+/* Pool bounds measured on the PSP-3000 (docs/HARDWARE_ORACLE.md, #2397):
+ * - PSP-HLE-KERNEL-STATUS-002 (case hle-kernel-pool-bounds, 2026-11-10, boot 173): partition 2,
+ *   attribute 0, NULL options. sceKernelCreateFpl with block size 0 and one block is 0x800201B7,
+ *   with block size 0x7FFFFFFF and one block 0x80020190, and neither makes a pool. A 0x1000-byte
+ *   VPL takes 15 TryAllocateVpl calls of 0x100 bytes; the 16th returns 0x80020190.
+ * - PSP-B1-01 (kernel-object semantics, FPL and VPL): a 1024-byte VPL reports 992 bytes, each
+ *   allocation costs roundup(size, 8) + 8, and allocations run from high addresses downward. */
+static void test_kernel_pool_bounds_measured(void) {
+    extern void sr_hle_test_partition_reset(void);
+    extern int sr_hle_test_partition_free_block_count(void);
+    reset_fixture();
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+
+    const int blocks_before = sr_hle_test_partition_free_block_count();
+    expect(selftest_fpl_create(0u, 1u) == 0x800201b7u,
+           "pool bounds: CreateFpl with block size 0 is 0x800201B7 (PSP-HLE-KERNEL-STATUS-002)");
+    expect(selftest_fpl_create(0x7fffffffu, 1u) == 0x80020190u,
+           "pool bounds: CreateFpl of a 0x7FFFFFFF-byte block is 0x80020190 (PSP-HLE-KERNEL-STATUS-002)");
+    expect(sr_hle_test_partition_free_block_count() == blocks_before,
+           "pool bounds: a refused CreateFpl leaves the partition as it was");
+
+    uint32_t vpl = selftest_vpl_create(0x1000u);
+    expect(vpl >= 0x600u && vpl < 0x80000000u, "pool bounds: CreateVpl of 0x1000 bytes returns a UID");
+    uint32_t blocks[16] = {0};
+    uint32_t taken = 0;
+    for (; taken < 16u; ++taken) {
+        MEM_W32(VPL_OUTPTR, 0xfeedfaceu);
+        if (selftest_vpl_try_allocate(vpl, 0x100u, VPL_OUTPTR) != 0u) break;
+        blocks[taken] = MEM_R32(VPL_OUTPTR);
+    }
+    expect(taken == 15u, "pool bounds: a 0x1000-byte VPL gives 15 allocations of 0x100 (PSP-HLE-KERNEL-STATUS-002)");
+    MEM_W32(VPL_OUTPTR, 0xfeedfaceu);
+    expect(selftest_vpl_try_allocate(vpl, 0x100u, VPL_OUTPTR) == 0x80020190u &&
+               MEM_R32(VPL_OUTPTR) == 0xfeedfaceu,
+           "pool bounds: the 16th TryAllocateVpl of 0x100 is 0x80020190 and writes no address");
+    int freed = 1;
+    for (uint32_t i = 0; i < taken; ++i)
+        if (selftest_vpl_free(vpl, blocks[i]) != 0u) freed = 0;
+    expect(freed, "pool bounds: every VPL block frees with 0");
+    expect(selftest_vpl_delete(vpl) == 0u, "pool bounds: DeleteVpl returns 0");
+
+    /* PSP-B1-01: the 1024-byte pool reports 992 bytes of pool and of free space. */
+    vpl = selftest_vpl_create(1024u);
+    expect(vpl >= 0x600u && vpl < 0x80000000u, "pool bounds: CreateVpl of 1024 bytes returns a UID");
+    CpuState cpu;
+    MEM_W32(VPL_INFO, 0x34u);
+    memset(&cpu, 0, sizeof cpu); cpu.r[4] = vpl; cpu.r[5] = VPL_INFO;
+    expect(sr_syscall(&cpu, NID_VPL_REFER) == 0u && MEM_R32(VPL_INFO + 40) == 992u &&
+               MEM_R32(VPL_INFO + 44) == 992u,
+           "pool bounds: a 1024-byte VPL reports 992 bytes of pool and free size (PSP-B1-01)");
+    expect(selftest_vpl_try_allocate(vpl, 100u, VPL_OUTPTR) == 0u, "pool bounds: TryAllocateVpl of 100 succeeds");
+    const uint32_t a100 = MEM_R32(VPL_OUTPTR);
+    MEM_W32(VPL_INFO, 0x34u);
+    memset(&cpu, 0, sizeof cpu); cpu.r[4] = vpl; cpu.r[5] = VPL_INFO;
+    expect(sr_syscall(&cpu, NID_VPL_REFER) == 0u && MEM_R32(VPL_INFO + 40) == 992u &&
+               MEM_R32(VPL_INFO + 44) == 992u - (104u + 8u),
+           "pool bounds: a 100-byte block costs roundup(100, 8) + 8 = 112 bytes (PSP-B1-01)");
+    expect(selftest_vpl_try_allocate(vpl, 64u, VPL_OUTPTR) == 0u, "pool bounds: TryAllocateVpl of 64 succeeds");
+    const uint32_t a64 = MEM_R32(VPL_OUTPTR);
+    expect(a64 < a100 && a100 - a64 == 64u + 8u,
+           "pool bounds: the next block sits directly below the previous one (PSP-B1-01)");
+    expect(selftest_vpl_free(vpl, a64) == 0u && selftest_vpl_free(vpl, a100) == 0u,
+           "pool bounds: both blocks free with 0");
+    MEM_W32(VPL_INFO, 0x34u);
+    memset(&cpu, 0, sizeof cpu); cpu.r[4] = vpl; cpu.r[5] = VPL_INFO;
+    expect(sr_syscall(&cpu, NID_VPL_REFER) == 0u && MEM_R32(VPL_INFO + 44) == 992u,
+           "pool bounds: freeing every block restores 992 free bytes");
+    expect(selftest_vpl_delete(vpl) == 0u, "pool bounds: DeleteVpl of the 1024-byte pool returns 0");
+}
+
 /* =========================================================================
  * Mailbox object model tests (issue #339)
  * Measured anchors from docs/HARDWARE_ORACLE.md:
@@ -51921,6 +51992,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_tlspl_lifecycle_and_thread_isolation();
     test_wb_tlspl_vpl_cells();
     test_vpl_blocking_waits();
+    test_kernel_pool_bounds_measured();
     test_mbx_lifecycle_and_ordering();
     test_intr_context_conformance();
     test_mpeg_create_refused_in_interrupt();
