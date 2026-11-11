@@ -88,9 +88,70 @@ LOW_FIXED_ADDRESS_BASE = 0x08804000
 HOMEBREW_REQUIRED = "NK_HOMEBREW_E2E_REQUIRED"
 HOMEBREW_FIXTURE = ROOT / "fixtures" / "pspdev_phase5"
 
+# A PSPSDK program written for the Memory Stick folder test below (#2143), built with the
+# fixture's own Makefile: it opens its files by relative path, as homebrew does, so it finds
+# them only when it runs from ms0:/PSP/GAME/<folder>/ and that folder holds them. It writes
+# what it saw to the title's Memory Stick, the checked guest result. Project-authored.
+HOMEBREW_VIEW_PROBE_C = r"""/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* Copyright (C) 2026 the Nakagawa Recomp authors */
+#include <pspkernel.h>
+#include <stdio.h>
+#include <string.h>
 
-def build_homebrew_eboot(out_dir: Path) -> Path:
-    """Build the project's own PSPSDK program (fixtures/pspdev_phase5) into a real EBOOT.PBP.
+PSP_MODULE_INFO("NK_HOMEBREW_VIEW", 0, 1, 1);
+PSP_MAIN_THREAD_ATTR(THREAD_ATTR_USER);
+
+int main(int argc, char *argv[]) {
+    char data[64];
+    int data_bytes = -1;
+    int missing_opened = 0;
+    memset(data, 0, sizeof(data));
+    FILE *own = fopen("DATA.TXT", "rb");
+    if (own) {
+        data_bytes = (int)fread(data, 1, sizeof(data) - 1, own);
+        fclose(own);
+    }
+    FILE *missing = fopen("MISSING.TXT", "rb");
+    if (missing) {
+        missing_opened = 1;
+        fclose(missing);
+    }
+    FILE *written = fopen("WRITTEN.TXT", "wb");
+    if (written) {
+        fputs("written by the program", written);
+        fclose(written);
+    }
+    sceIoMkdir("ms0:/NAKAGAWA_TEST", 0777);
+    FILE *result = fopen("ms0:/NAKAGAWA_TEST/HOMEBREW_VIEW.TXT", "wb");
+    if (result) {
+        fprintf(result, "ARGV0=%s\nDATA=%s\nDATA_BYTES=%d\nMISSING_OPENED=%d\n",
+                argc > 0 ? argv[0] : "", data, data_bytes, missing_opened);
+        fclose(result);
+    }
+    sceKernelExitGame();
+    return 0;
+}
+"""
+
+
+def write_homebrew_view_probe(source_dir: Path) -> Path:
+    """Write the probe's source and a Makefile (the fixture's, renamed) into source_dir."""
+    source_dir.mkdir(parents=True, exist_ok=True)
+    (source_dir / "main.c").write_text(HOMEBREW_VIEW_PROBE_C, encoding="utf-8", newline="\n")
+    makefile = (HOMEBREW_FIXTURE / "Makefile").read_text(encoding="utf-8")
+    makefile = makefile.replace("TARGET = pspdev_phase5", "TARGET = homebrew_view")
+    makefile = makefile.replace("PSP_EBOOT_TITLE = Nakagawa PSP Recompilation Oracle",
+                                "PSP_EBOOT_TITLE = Nakagawa Homebrew Folder Probe")
+    makefile = makefile.replace(
+        "LIBS = -lpspdebug -lpspdisplay -lpspge -lpspctrl -lpsputility -lpspuser -lpspkernel",
+        "LIBS = -lpspuser -lpspkernel")
+    assert "homebrew_view" in makefile and "Folder Probe" in makefile
+    (source_dir / "Makefile").write_text(makefile, encoding="utf-8", newline="\n")
+    return source_dir
+
+
+def build_homebrew_eboot(out_dir: Path, source_dir: Path = HOMEBREW_FIXTURE) -> Path:
+    """Build a project PSPSDK program (fixtures/pspdev_phase5 by default) into an EBOOT.PBP.
 
     PSPDEV's make and ``pack-pbp`` write the package, so its PARAM.SFO is the one every
     PSPSDK homebrew has (category MG), not one a test author guessed (#2143). With no PSPDEV
@@ -108,7 +169,7 @@ def build_homebrew_eboot(out_dir: Path) -> Path:
         unavailable("PSPDEV/PSPSDK is absent (psp-gcc, pack-pbp)")
     assert backend is not None
     out_dir.mkdir(parents=True, exist_ok=True)
-    makefile = HOMEBREW_FIXTURE / "Makefile"
+    makefile = source_dir / "Makefile"
     if backend[0] == "wsl":
         wsl = backend[1]
         assert wsl is not None
@@ -116,7 +177,7 @@ def build_homebrew_eboot(out_dir: Path) -> Path:
             wsl, "-d", "Ubuntu", "--", "/usr/bin/env", "PSPDEV=/usr/local/pspdev",
             "PATH=/usr/local/pspdev/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
             "make", "--no-print-directory", "-B", "-f", _wsl_path(wsl, makefile),
-            "-C", _wsl_path(wsl, out_dir), f"VPATH={_wsl_path(wsl, HOMEBREW_FIXTURE)}",
+            "-C", _wsl_path(wsl, out_dir), f"VPATH={_wsl_path(wsl, source_dir)}",
             "EBOOT.PBP",
         ]
         environment = None
@@ -127,7 +188,7 @@ def build_homebrew_eboot(out_dir: Path) -> Path:
         assert make is not None
         command = [
             make, "--no-print-directory", "-B", "-f", str(makefile), "-C", str(out_dir),
-            f"VPATH={HOMEBREW_FIXTURE}", "EBOOT.PBP",
+            f"VPATH={source_dir}", "EBOOT.PBP",
         ]
         environment = os.environ.copy()
         for key in ("MAKEFLAGS", "MFLAGS", "MAKELEVEL", "MAKEOVERRIDES"):
@@ -136,7 +197,7 @@ def build_homebrew_eboot(out_dir: Path) -> Path:
                                text=True, timeout=300, check=False)
     if completed.returncode:
         raise AssertionError(
-            f"PSPDEV build of {HOMEBREW_FIXTURE.name} failed (exit {completed.returncode}):\n"
+            f"PSPDEV build of {source_dir.name} failed (exit {completed.returncode}):\n"
             f"{completed.stdout}\n{completed.stderr}"
         )
     eboot = out_dir / "EBOOT.PBP"
@@ -995,19 +1056,17 @@ class TestPlayerPackageRoute(unittest.TestCase):
         self.assertIn("add the disc from the player's library", completed.stderr)
         self.assertTrue((self.user_root / "experimental" / DISC_ID / "profile.json").is_file())
 
-    def test_homebrew_eboot_imports_and_builds_as_experimental(self):
-        """#2143: a real PSPSDK EBOOT.PBP imports, builds a package, and stays Experimental.
+    def homebrew_folder(self, eboot: Path, folder: str, files: dict[str, bytes]) -> Path:
+        """Put the built package in its own folder, as on a PSP's Memory Stick, beside files."""
+        game = self.root / "stick" / "PSP" / "GAME" / folder
+        game.mkdir(parents=True)
+        shutil.copyfile(eboot, game / "EBOOT.PBP")
+        for name, data in files.items():
+            (game / name).write_bytes(data)
+        return game / "EBOOT.PBP"
 
-        Failing before: PSPSDK writes the category MG for every homebrew, and the package
-        classifier read MG as a firmware updater, so the import ended FIRMWARE_OUT_OF_SCOPE;
-        and the small private disc image the import makes was refused by the build route's
-        1 MiB floor. This runs the production path: the player's own --iso import (package
-        inspect, conversion, disc inspection, experimental profile), the library record the
-        card's ADD TO LIBRARY writes, and the player's own BUILD PACKAGE action. The card's
-        click is covered by tests/native/test_player_ui.py.
-        """
-        self.skip_if_toolchain_unavailable()
-        eboot = build_homebrew_eboot(self.root / "homebrew")
+    def import_and_build_homebrew(self, eboot: Path) -> tuple[str, str]:
+        """The player's --iso import of eboot, ADD TO LIBRARY, and BUILD PACKAGE: (key, title)."""
         environment = os.environ.copy()
         environment["LOCALAPPDATA"] = str(self.local_appdata)
         environment["APPDATA"] = str(self.root / "appdata")
@@ -1020,6 +1079,7 @@ class TestPlayerPackageRoute(unittest.TestCase):
         output = imported.stdout + imported.stderr
         self.assertNotIn("FIRMWARE_OUT_OF_SCOPE", output)
         self.assertNotIn("PBP_PACKAGE_UNSUPPORTED", output)
+        self.assertNotIn("HOMEBREW_FOLDER_UNSUPPORTED", output)
         # An uncatalogued program stops --stage-only at the title list, as an ISO does; the
         # import itself is what ran and what recorded the profile.
         self.assertEqual(imported.returncode, 3, output)
@@ -1028,7 +1088,6 @@ class TestPlayerPackageRoute(unittest.TestCase):
         self.assertIsNotNone(found, output)
         assert found is not None
         key, title = found.group(1), found.group(2)
-        self.assertEqual(title, "Nakagawa PSP Recompilation Oracle")
         profile_path = self.user_root / "experimental" / key / "profile.json"
         profile = json.loads(profile_path.read_text(encoding="utf-8"))
         self.assertEqual(profile["manifest"]["verification_profile"], "experimental-unverified")
@@ -1055,6 +1114,77 @@ class TestPlayerPackageRoute(unittest.TestCase):
         self.assertEqual(built.returncode, 0, built.stdout[-4000:] + built.stderr[-4000:])
         self.assertIn("PACKAGE_BUILD_ROUTE status=PASS", built.stdout)
         self.assertTrue((self.user_root / "packages" / key).is_dir())
+        return key, title
+
+    def test_homebrew_eboot_imports_builds_and_runs_as_experimental(self):
+        """#2143: a real PSPSDK EBOOT.PBP imports, builds a package, stays Experimental, and runs.
+
+        Failing before the import landed: PSPSDK writes the category MG for every homebrew,
+        and the package classifier read MG as a firmware updater, so the import ended
+        FIRMWARE_OUT_OF_SCOPE; and the small private disc image the import makes was refused
+        by the build route's 1 MiB floor. This runs the production path: the player's own
+        --iso import (package inspect, conversion, disc inspection, experimental profile), the
+        library record the card's ADD TO LIBRARY writes, the player's own BUILD PACKAGE
+        action, and PLAY, headless. The program's checked result is the file it writes to its
+        Memory Stick: the sum it computes and its pass flag. The card's click is covered by
+        tests/native/test_player_ui.py.
+        """
+        self.skip_if_toolchain_unavailable()
+        eboot = self.homebrew_folder(build_homebrew_eboot(self.root / "homebrew"), "NKPHASE5", {})
+        key, title = self.import_and_build_homebrew(eboot)
+        self.assertEqual(title, "Nakagawa PSP Recompilation Oracle")
+
+        launched = self.run_launch(self.sandbox / "homebrew-perf.csv",
+                                   user_data_root=self.user_root)
+        output = launched.stdout + launched.stderr
+        self.assertIn("[PLAYER] Launch index 0: PLAY NOW available", launched.stdout,
+                      output[-4000:])
+        self.assertEqual(launched.returncode, 0, output[-4000:])
+        stick = self.user_root / "saves" / key
+        result = (stick / "NAKAGAWA_TEST" / "RESULT.TXT").read_text(encoding="utf-8")
+        self.assertIn("BUILD_ID=NAKAGAWA-PSPDEV-PHASE5-v1\n", result)
+        self.assertIn("SUM=5050\n", result)
+        self.assertIn("PASS=1\n", result)
+        # It ran from its folder, which the launch put on its Memory Stick.
+        self.assertEqual((stick / "PSP" / "GAME" / "NKPHASE5" / "EBOOT.PBP").read_bytes(),
+                         eboot.read_bytes())
+
+    def test_homebrew_finds_its_own_files_in_its_memory_stick_folder(self):
+        """#2143: an imported program runs from ms0:/PSP/GAME/<folder>/ and finds its files there.
+
+        A PSP boots homebrew as ms0:/PSP/GAME/<folder>/EBOOT.PBP, and PSPSDK's start-up code
+        makes that folder the program's working folder, so a program opens its own files by
+        relative path. Failing before: the import kept only the program, in a disc image the
+        program was booted from as disc0:/PSP_GAME/SYSDIR/EBOOT.BIN, so DATA.TXT was nowhere
+        the program could open it. Nothing is aliased: a file the folder lacks stays missing,
+        and what the program writes lands on its Memory Stick, never in the user's folder or
+        the import's copy.
+        """
+        self.skip_if_toolchain_unavailable()
+        source = write_homebrew_view_probe(self.root / "probe-source")
+        eboot = self.homebrew_folder(
+            build_homebrew_eboot(self.root / "probe-build", source), "NKHBVIEW",
+            {"DATA.TXT": b"shipped beside the program"},
+        )
+        key, title = self.import_and_build_homebrew(eboot)
+        self.assertEqual(title, "Nakagawa Homebrew Folder Probe")
+        view = self.user_root / "discs" / key / f"{key}.ms0" / "PSP" / "GAME" / "NKHBVIEW"
+        self.assertEqual(sorted(path.name for path in view.iterdir()), ["DATA.TXT", "EBOOT.PBP"])
+
+        launched = self.run_launch(self.sandbox / "probe-perf.csv", user_data_root=self.user_root)
+        output = launched.stdout + launched.stderr
+        self.assertEqual(launched.returncode, 0, output[-4000:])
+        stick = self.user_root / "saves" / key
+        seen = (stick / "NAKAGAWA_TEST" / "HOMEBREW_VIEW.TXT").read_text(encoding="utf-8")
+        self.assertIn("ARGV0=ms0:/PSP/GAME/NKHBVIEW/EBOOT.PBP\n", seen)
+        self.assertIn("DATA=shipped beside the program\n", seen)
+        self.assertIn("DATA_BYTES=26\n", seen)
+        self.assertIn("MISSING_OPENED=0\n", seen)
+        folder = stick / "PSP" / "GAME" / "NKHBVIEW"
+        self.assertEqual((folder / "WRITTEN.TXT").read_bytes(), b"written by the program")
+        self.assertFalse((eboot.parent / "WRITTEN.TXT").exists())
+        self.assertFalse((view / "WRITTEN.TXT").exists())
+        self.assertFalse((folder / "MISSING.TXT").exists())
 
     def test_uncatalogued_player_route_builds_with_generic_profile(self):
         """The package action upgrades the native profile through bring-up's writer."""

@@ -586,3 +586,485 @@ done:
     fclose(in);
     return rc;
 }
+
+/* ---- The program's Memory Stick folder (see nk_pbp_homebrew.h) ---------------------------- */
+
+#define HB_PATH_MAX 4096u
+#define HB_COPY_CHUNK (64u * 1024u)
+
+static void hb_problem(char *problem, size_t problem_size, const char *fmt, const char *arg)
+{
+    if (problem != NULL && problem_size > 0) snprintf(problem, problem_size, fmt, arg);
+}
+
+static bool hb_is_separator(char c)
+{
+#ifdef _WIN32
+    return c == '\\' || c == '/';
+#else
+    return c == '/';
+#endif
+}
+
+static bool hb_join(char *out, size_t out_size, const char *left, const char *right)
+{
+    int written = snprintf(out, out_size, "%s%c%s", left, nk_platform_path_separator(), right);
+    return written > 0 && (size_t)written < out_size;
+}
+
+/* A name a PSP's Memory Stick holds, kept to printable ASCII so the program, the
+   launcher's boot argument and every host file system agree on its bytes. */
+static bool hb_name_valid(const char *name, size_t length)
+{
+    if (length == 0u || length > NK_PBP_HOMEBREW_FOLDER_NAME_MAX) return false;
+    if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) return false;
+    for (size_t i = 0; i < length; ++i) {
+        unsigned char c = (unsigned char)name[i];
+        if (c < 0x20u || c > 0x7Eu || strchr("\\/:*?\"<>|", (int)c) != NULL) return false;
+    }
+    return name[length - 1u] != ' ' && name[length - 1u] != '.';
+}
+
+/* The absolute path of the folder pbp_path is in, and where its name starts in it. */
+static bool hb_source_folder(const char *pbp_path, char *folder, size_t folder_size,
+                             size_t *name_at)
+{
+    char absolute[HB_PATH_MAX];
+    size_t end, start;
+    if (pbp_path == NULL || !nk_platform_absolute_path(pbp_path, absolute, sizeof(absolute)))
+        return false;
+    end = strlen(absolute);
+    while (end > 0u && !hb_is_separator(absolute[end - 1u])) --end;  /* drop the file name */
+    while (end > 0u && hb_is_separator(absolute[end - 1u])) --end;   /* and its separator */
+    start = end;
+    while (start > 0u && !hb_is_separator(absolute[start - 1u])) --start;
+    if (end == 0u || end >= folder_size) return false;
+    memcpy(folder, absolute, end);
+    folder[end] = '\0';
+    *name_at = start;
+    return true;
+}
+
+bool nk_pbp_homebrew_folder_name(const char *pbp_path, char *out, size_t out_size,
+                                 char *problem, size_t problem_size)
+{
+    char folder[HB_PATH_MAX];
+    size_t name_at = 0, length;
+    if (out == NULL || out_size == 0u) return false;
+    out[0] = '\0';
+    if (!hb_source_folder(pbp_path, folder, sizeof(folder), &name_at)) {
+        hb_problem(problem, problem_size, "%s",
+                   "The package's folder could not be found. Put the EBOOT.PBP in its own "
+                   "folder, as on a PSP's Memory Stick (PSP/GAME/<folder>/EBOOT.PBP).");
+        return false;
+    }
+    length = strlen(folder + name_at);
+    if (!hb_name_valid(folder + name_at, length) || length >= out_size) {
+        hb_problem(problem, problem_size,
+                   "The package's folder, \"%.80s\", has no name a PSP's Memory Stick can "
+                   "hold. Rename it with up to 64 English letters, digits, spaces and . _ - "
+                   "( ) characters, not ending in a space or a dot, or put the EBOOT.PBP in "
+                   "its own folder.", folder + name_at);
+        return false;
+    }
+    memcpy(out, folder + name_at, length + 1u);
+    return true;
+}
+
+bool nk_pbp_homebrew_view_root(const char *iso_path, char *out, size_t out_size)
+{
+    size_t length;
+    if (iso_path == NULL || out == NULL || out_size == 0u) return false;
+    length = strlen(iso_path);
+    if (length <= 4u || length >= out_size) return false;
+    if (strcmp(iso_path + length - 4u, ".iso") != 0 && strcmp(iso_path + length - 4u, ".ISO") != 0)
+        return false;
+    memcpy(out, iso_path, length - 4u);
+    memcpy(out + length - 4u, ".ms0", 5u);
+    return true;
+}
+
+/* A directory listing, read whole before anything under it is touched. */
+typedef struct {
+    char **names;
+    bool *folders;
+    size_t count;
+    size_t capacity;
+    bool failed;
+} HbList;
+
+static bool hb_list_add(const char *name, bool is_dir, void *ctx)
+{
+    HbList *list = (HbList *)ctx;
+    size_t size = strlen(name) + 1u;
+    if (list->count == list->capacity) {
+        size_t capacity = list->capacity ? list->capacity * 2u : 16u;
+        char **names = (char **)realloc(list->names, capacity * sizeof(*names));
+        bool *folders;
+        if (names == NULL) {
+            list->failed = true;
+            return false;
+        }
+        list->names = names;
+        folders = (bool *)realloc(list->folders, capacity * sizeof(*folders));
+        if (folders == NULL) {
+            list->failed = true;
+            return false;
+        }
+        list->folders = folders;
+        list->capacity = capacity;
+    }
+    list->names[list->count] = (char *)malloc(size);
+    if (list->names[list->count] == NULL) {
+        list->failed = true;
+        return false;
+    }
+    memcpy(list->names[list->count], name, size);
+    list->folders[list->count] = is_dir;
+    list->count++;
+    return true;
+}
+
+static void hb_list_free(HbList *list)
+{
+    for (size_t i = 0; i < list->count; ++i) free(list->names[i]);
+    free(list->names);
+    free(list->folders);
+}
+
+typedef struct {
+    size_t entries;
+    uint64_t bytes;
+    bool keep_existing; /* a seed: what the target holds already stays as it is */
+    const NkNpumdimgCallbacks *callbacks;
+    char *problem;
+    size_t problem_size;
+} HbWalk;
+
+/* Copy one file through "<to>.nkcopy", on the disk before it takes its name. */
+static bool hb_copy_file(const char *from, const char *to, HbWalk *walk)
+{
+    char temp[HB_PATH_MAX];
+    unsigned char *buffer;
+    FILE *in, *out;
+    bool ok = true;
+    int written = snprintf(temp, sizeof(temp), "%s.nkcopy", to);
+    if (written <= 0 || (size_t)written >= sizeof(temp)) {
+        hb_problem(walk->problem, walk->problem_size, "%s", "A path in the folder is too long.");
+        return false;
+    }
+    buffer = (unsigned char *)malloc(HB_COPY_CHUNK);
+    in = nk_fopen_utf8(from, "rb");
+    if (buffer == NULL || in == NULL) {
+        free(buffer);
+        if (in != NULL) fclose(in);
+        hb_problem(walk->problem, walk->problem_size, "%.400s could not be read.", from);
+        return false;
+    }
+    out = nk_fopen_utf8(temp, "wb");
+    if (out == NULL) {
+        free(buffer);
+        fclose(in);
+        hb_problem(walk->problem, walk->problem_size, "%.400s could not be written.", to);
+        return false;
+    }
+    for (;;) {
+        size_t got = fread(buffer, 1, HB_COPY_CHUNK, in);
+        if (got == 0) break;
+        if (fwrite(buffer, 1, got, out) != got) {
+            hb_problem(walk->problem, walk->problem_size,
+                       "%.400s could not be written (is the disk full?).", to);
+            ok = false;
+            break;
+        }
+    }
+    if (ok && ferror(in)) {
+        hb_problem(walk->problem, walk->problem_size, "%.400s could not be read.", from);
+        ok = false;
+    }
+    if (ok && !nk_platform_sync_file(out)) {
+        hb_problem(walk->problem, walk->problem_size,
+                   "%.400s could not be written to the disk.", to);
+        ok = false;
+    }
+    free(buffer);
+    fclose(in);
+    if (fclose(out) != 0 && ok) {
+        hb_problem(walk->problem, walk->problem_size, "%.400s could not be written.", to);
+        ok = false;
+    }
+    if (ok && nk_rename_utf8(temp, to) != 0) {
+        hb_problem(walk->problem, walk->problem_size, "%.400s could not be put in place.", to);
+        ok = false;
+    }
+    if (!ok) (void)nk_remove_utf8(temp);
+    return ok;
+}
+
+/* Walk from within the folder bounds; with to, copy each entry there as well. */
+static bool hb_walk(const char *from, const char *to, unsigned depth, HbWalk *walk)
+{
+    HbList list;
+    size_t skipped = 0;
+    bool ok = true;
+    memset(&list, 0, sizeof(list));
+    if (depth > NK_PBP_HOMEBREW_FOLDER_MAX_DEPTH) {
+        hb_problem(walk->problem, walk->problem_size, "%s",
+                   "The package's folder has more than 16 levels of folders inside it.");
+        return false;
+    }
+    if (!nk_platform_list_dir_counted(from, hb_list_add, &list, &skipped) || list.failed) {
+        hb_problem(walk->problem, walk->problem_size, "%.400s could not be read.", from);
+        ok = false;
+    } else if (skipped > 0u) {
+        hb_problem(walk->problem, walk->problem_size,
+                   "%.400s holds a link, a junction or a file kept in the cloud and not on "
+                   "this computer, which the import would leave out.", from);
+        ok = false;
+    }
+    for (size_t i = 0; ok && i < list.count; ++i) {
+        char source[HB_PATH_MAX];
+        char target[HB_PATH_MAX];
+        if (!hb_join(source, sizeof(source), from, list.names[i]) ||
+            (to != NULL && !hb_join(target, sizeof(target), to, list.names[i]))) {
+            hb_problem(walk->problem, walk->problem_size, "%s",
+                       "A path in the package's folder is too long.");
+            ok = false;
+        } else if (++walk->entries > NK_PBP_HOMEBREW_FOLDER_MAX_ENTRIES) {
+            hb_problem(walk->problem, walk->problem_size, "%s",
+                       "The package's folder holds more than 4096 files and folders. Put "
+                       "the EBOOT.PBP in its own folder with only the files it uses.");
+            ok = false;
+        } else if (list.folders[i]) {
+            if (to == NULL) {
+                ok = hb_walk(source, NULL, depth + 1u, walk);
+            } else if (walk->keep_existing && nk_platform_file_exists(target)) {
+                /* the program put a file where the folder has a folder: the file stays */
+            } else if (!nk_platform_mkdir_p_private(target)) {
+                hb_problem(walk->problem, walk->problem_size, "%.400s could not be made.",
+                           target);
+                ok = false;
+            } else {
+                ok = hb_walk(source, target, depth + 1u, walk);
+            }
+        } else {
+            int64_t size = nk_platform_get_file_size(source);
+            if (size < 0) {
+                hb_problem(walk->problem, walk->problem_size, "%.400s could not be read.",
+                           source);
+                ok = false;
+            } else if ((walk->bytes += (uint64_t)size) > NK_PBP_HOMEBREW_FOLDER_MAX_BYTES) {
+                hb_problem(walk->problem, walk->problem_size, "%s",
+                           "The package's folder holds more than 1 GiB. Put the EBOOT.PBP in "
+                           "its own folder with only the files it uses.");
+                ok = false;
+            } else if (to == NULL ||
+                       (walk->keep_existing && !nk_platform_path_missing(target))) {
+                /* counted only, or already on the Memory Stick */
+            } else if (walk->callbacks != NULL && walk->callbacks->is_cancelled != NULL &&
+                       walk->callbacks->is_cancelled(walk->callbacks->user)) {
+                hb_problem(walk->problem, walk->problem_size, "%s", "The import was cancelled.");
+                ok = false;
+            } else {
+                ok = hb_copy_file(source, target, walk);
+            }
+        }
+    }
+    if (ok && to != NULL && !nk_platform_sync_dir(to)) {
+        hb_problem(walk->problem, walk->problem_size,
+                   "%.400s could not be written to the disk.", to);
+        ok = false;
+    }
+    hb_list_free(&list);
+    return ok;
+}
+
+/* The absolute form of a path whose last parts may not exist yet. */
+static bool hb_absolute_maybe_missing(const char *path, char *out, size_t out_size)
+{
+    char head[HB_PATH_MAX];
+    size_t length = strlen(path);
+    size_t cut = length;
+    if (length >= sizeof(head)) return false;
+    memcpy(head, path, length + 1u);
+    while (!nk_platform_absolute_path(head, out, out_size)) {
+        while (cut > 0u && !hb_is_separator(head[cut - 1u])) --cut;
+        while (cut > 0u && hb_is_separator(head[cut - 1u])) --cut;
+        if (cut == 0u) return false;
+        head[cut] = '\0';
+    }
+    if (cut < length) {
+        size_t used = strlen(out);
+        if (used + (length - cut) >= out_size) return false;
+        memcpy(out + used, path + cut, length - cut + 1u);
+    }
+    return true;
+}
+
+/* Whether path is folder or lies inside it. */
+static bool hb_path_within(const char *path, const char *folder)
+{
+    size_t length = strlen(folder);
+    for (size_t i = 0; i < length; ++i) {
+        char a = path[i], b = folder[i];
+        if (a == '\0') return false;
+#ifdef _WIN32
+        if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
+        if (b >= 'A' && b <= 'Z') b = (char)(b - 'A' + 'a');
+        if (a == '/') a = '\\';
+        if (b == '/') b = '\\';
+#endif
+        if (a != b) return false;
+    }
+    return path[length] == '\0' || hb_is_separator(path[length]);
+}
+
+bool nk_pbp_homebrew_check_folder(const char *pbp_path, const char *view_root,
+                                  char *problem, size_t problem_size)
+{
+    char name[NK_PBP_HOMEBREW_FOLDER_NAME_MAX + 1u];
+    char folder[HB_PATH_MAX];
+    char view[HB_PATH_MAX];
+    size_t name_at = 0;
+    HbWalk walk;
+    if (!nk_pbp_homebrew_folder_name(pbp_path, name, sizeof(name), problem, problem_size))
+        return false;
+    if (!hb_source_folder(pbp_path, folder, sizeof(folder), &name_at) || view_root == NULL ||
+        !hb_absolute_maybe_missing(view_root, view, sizeof(view))) {
+        hb_problem(problem, problem_size, "%s", "The package's folder could not be found.");
+        return false;
+    }
+    if (hb_path_within(view, folder)) {
+        hb_problem(problem, problem_size,
+                   "The folder \"%.80s\" also holds Nakagawa's data folder. Put the EBOOT.PBP "
+                   "in its own folder, as on a PSP's Memory Stick (PSP/GAME/<folder>/).",
+                   folder + name_at);
+        return false;
+    }
+    memset(&walk, 0, sizeof(walk));
+    walk.problem = problem;
+    walk.problem_size = problem_size;
+    return hb_walk(folder, NULL, 0u, &walk);
+}
+
+/* <root>/PSP/GAME. */
+static bool hb_game_dir(const char *root, char *out, size_t out_size)
+{
+    char psp[HB_PATH_MAX];
+    return hb_join(psp, sizeof(psp), root, "PSP") && hb_join(out, out_size, psp, "GAME");
+}
+
+bool nk_pbp_homebrew_write_view(const char *pbp_path, const char *view_root,
+                                const NkNpumdimgCallbacks *callbacks,
+                                char *problem, size_t problem_size)
+{
+    char name[NK_PBP_HOMEBREW_FOLDER_NAME_MAX + 1u];
+    char folder[HB_PATH_MAX];
+    char staging[HB_PATH_MAX];
+    char game[HB_PATH_MAX];
+    char target[HB_PATH_MAX];
+    size_t name_at = 0;
+    HbWalk walk;
+    int written;
+    if (!nk_pbp_homebrew_check_folder(pbp_path, view_root, problem, problem_size) ||
+        !nk_pbp_homebrew_folder_name(pbp_path, name, sizeof(name), problem, problem_size) ||
+        !hb_source_folder(pbp_path, folder, sizeof(folder), &name_at))
+        return false;
+    written = snprintf(staging, sizeof(staging), "%s.importing", view_root);
+    if (written <= 0 || (size_t)written >= sizeof(staging) ||
+        !hb_game_dir(staging, game, sizeof(game)) || !hb_join(target, sizeof(target), game, name)) {
+        hb_problem(problem, problem_size, "%s", "The path to Nakagawa's data folder is too long.");
+        return false;
+    }
+    if (!nk_platform_remove_tree(staging, NULL) || !nk_platform_mkdir_p_private(target)) {
+        hb_problem(problem, problem_size, "%.400s could not be made.", target);
+        return false;
+    }
+    memset(&walk, 0, sizeof(walk));
+    walk.callbacks = callbacks;
+    walk.problem = problem;
+    walk.problem_size = problem_size;
+    if (!hb_walk(folder, target, 0u, &walk)) {
+        (void)nk_platform_remove_tree(staging, NULL);
+        return false;
+    }
+    if (!nk_platform_remove_tree(view_root, NULL) || nk_rename_utf8(staging, view_root) != 0) {
+        (void)nk_platform_remove_tree(staging, NULL);
+        hb_problem(problem, problem_size, "%.400s could not be put in place.", view_root);
+        return false;
+    }
+    return true;
+}
+
+typedef struct {
+    char name[NK_PBP_HOMEBREW_FOLDER_NAME_MAX + 1u];
+    size_t folders;
+    size_t files;
+} HbViewScan;
+
+static bool hb_view_scan(const char *name, bool is_dir, void *ctx)
+{
+    HbViewScan *scan = (HbViewScan *)ctx;
+    if (!is_dir) {
+        scan->files++;
+    } else if (++scan->folders == 1u) {
+        size_t length = strlen(name);
+        if (hb_name_valid(name, length)) memcpy(scan->name, name, length + 1u);
+    }
+    return true;
+}
+
+NkPbpHomebrewView nk_pbp_homebrew_find_view(const char *iso_path, char *folder,
+                                            size_t folder_size)
+{
+    char root[HB_PATH_MAX];
+    char game[HB_PATH_MAX];
+    char program_dir[HB_PATH_MAX];
+    char program[HB_PATH_MAX];
+    HbViewScan scan;
+    if (folder != NULL && folder_size > 0u) folder[0] = '\0';
+    if (!nk_pbp_homebrew_view_root(iso_path, root, sizeof(root)) ||
+        nk_platform_path_missing(root))
+        return NK_PBP_HB_VIEW_NONE;
+    memset(&scan, 0, sizeof(scan));
+    if (folder == NULL || !hb_game_dir(root, game, sizeof(game)) ||
+        !nk_platform_list_dir(game, hb_view_scan, &scan) || scan.folders != 1u ||
+        scan.files != 0u || scan.name[0] == '\0' || strlen(scan.name) >= folder_size ||
+        !hb_join(program_dir, sizeof(program_dir), game, scan.name) ||
+        !hb_join(program, sizeof(program), program_dir, "EBOOT.PBP") ||
+        !nk_platform_file_exists(program))
+        return NK_PBP_HB_VIEW_BROKEN;
+    memcpy(folder, scan.name, strlen(scan.name) + 1u);
+    return NK_PBP_HB_VIEW_FOUND;
+}
+
+bool nk_pbp_homebrew_seed_memstick(const char *iso_path, const char *folder,
+                                   const char *memstick_root,
+                                   char *problem, size_t problem_size)
+{
+    char root[HB_PATH_MAX];
+    char game[HB_PATH_MAX];
+    char source[HB_PATH_MAX];
+    char stick_game[HB_PATH_MAX];
+    char target[HB_PATH_MAX];
+    HbWalk walk;
+    if (folder == NULL || memstick_root == NULL ||
+        !nk_pbp_homebrew_view_root(iso_path, root, sizeof(root)) ||
+        !hb_game_dir(root, game, sizeof(game)) || !hb_join(source, sizeof(source), game, folder) ||
+        !hb_game_dir(memstick_root, stick_game, sizeof(stick_game)) ||
+        !hb_join(target, sizeof(target), stick_game, folder)) {
+        hb_problem(problem, problem_size, "%s",
+                   "The program's Memory Stick folder has a path too long to use.");
+        return false;
+    }
+    if (nk_platform_file_exists(target) || !nk_platform_mkdir_p_private(target)) {
+        hb_problem(problem, problem_size, "%.400s could not be made on the Memory Stick.",
+                   target);
+        return false;
+    }
+    memset(&walk, 0, sizeof(walk));
+    walk.keep_existing = true;
+    walk.problem = problem;
+    walk.problem_size = problem_size;
+    return hb_walk(source, target, 0u, &walk);
+}

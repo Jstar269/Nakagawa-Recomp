@@ -30,6 +30,7 @@
 #include "iso_reader.h"
 #include "nk_font.h"
 #include "nk_title_manifest.h"
+#include "nk_pbp_homebrew.h"
 #include "nk_platform.h"
 #include "nk_zip.h"
 #include "native_test_isolation.h"
@@ -6903,15 +6904,23 @@ static void test_homebrew_stop_cards_name_their_limit(void) {
 
 /* #2143: an unencrypted homebrew EBOOT.PBP imports as a small private disc image holding its
    program (and icon) under the library key of that image: the same program and title is the
-   same game, a different title is another. Encrypted and kernel-mode packages keep a named
+   same game, a different title is another. The folder the package was picked from comes with
+   it, copied beside the image as the program's ms0:/PSP/GAME/<folder>/ (nk_pbp_homebrew.h).
+   Encrypted and kernel-mode packages, and a folder that cannot be the program's, keep a named
    refusal, and nothing is written for them. */
 static void test_homebrew_package_becomes_a_private_disc(void) {
     const char sep = nk_platform_path_separator();
     char cache_root[NK_MAX_PATH];
     char base[NATIVE_TEST_PATH_MAX + 64];
     char data_root[NATIVE_TEST_PATH_MAX + 96];
-    char pbp_path[NATIVE_TEST_PATH_MAX + 96];
-    char other_path[NATIVE_TEST_PATH_MAX + 96];
+    char folder_path[NATIVE_TEST_PATH_MAX + 96];
+    char pbp_path[NATIVE_TEST_PATH_MAX + 128];
+    char data_path[NATIVE_TEST_PATH_MAX + 128];
+    char level_path[NATIVE_TEST_PATH_MAX + 160];
+    char other_path[NATIVE_TEST_PATH_MAX + 128];
+    char view_path[NATIVE_TEST_PATH_MAX + 320];
+    char view_root[NATIVE_TEST_PATH_MAX + 256];
+    char view_folder[NK_PBP_HOMEBREW_FOLDER_NAME_MAX + 1u];
     char expected_iso[NATIVE_TEST_PATH_MAX + 192];
     char partial[NATIVE_TEST_PATH_MAX + 192];
     char code[64];
@@ -6938,8 +6947,19 @@ static void test_homebrew_package_becomes_a_private_disc(void) {
     assert(test_remove_tree(base));
     snprintf(data_root, sizeof(data_root), "%s%cdata", base, sep);
     assert(nk_platform_mkdir_p(data_root));
-    snprintf(pbp_path, sizeof(pbp_path), "%s%cEBOOT.PBP", base, sep);
-    snprintf(other_path, sizeof(other_path), "%s%cOTHER.PBP", base, sep);
+    /* The package sits in its own folder, as on a PSP's Memory Stick, beside the files the
+       program reads; another package is in a folder of its own. */
+    snprintf(folder_path, sizeof(folder_path), "%s%cMYHB", base, sep);
+    snprintf(pbp_path, sizeof(pbp_path), "%s%cEBOOT.PBP", folder_path, sep);
+    snprintf(data_path, sizeof(data_path), "%s%cDATA.TXT", folder_path, sep);
+    snprintf(level_path, sizeof(level_path), "%s%clevels%cONE.BIN", folder_path, sep, sep);
+    snprintf(other_path, sizeof(other_path), "%s%cOTHER%cOTHER.PBP", base, sep, sep);
+    snprintf(view_path, sizeof(view_path), "%s%clevels", folder_path, sep);
+    assert(nk_platform_mkdir_p(view_path));
+    snprintf(view_path, sizeof(view_path), "%s%cOTHER", base, sep);
+    assert(nk_platform_mkdir_p(view_path));
+    write_binary_file(data_path, (const uint8_t *)"read by the program", 19u);
+    write_binary_file(level_path, (const uint8_t *)"level one", 9u);
     assert(nk_platform_set_app_data_dir_override(data_root));
 
     memset(program, 0, sizeof(program));
@@ -6989,12 +7009,42 @@ static void test_homebrew_package_becomes_a_private_disc(void) {
     assert(memcmp(image + 23u * 2048u, icon, sizeof(icon)) == 0);
     free(image);
 
-    /* The user's own package is only read, never changed: the import writes under the data
-       folder alone. (The package's folder is not mounted as ms0:/PSP/GAME/<folder>/ for the
-       program; the disc image holds only the program, its title and its icon, #2143.) */
+    /* The package's folder is beside the image as the program's ms0:/PSP/GAME/MYHB/: the
+       package and every file and folder beside it, byte for byte, and nothing else. Failing
+       before: the import kept only the disc image, so the program's own files were nowhere. */
+    assert(nk_pbp_homebrew_find_view(package.iso_path, view_folder, sizeof(view_folder)) ==
+           NK_PBP_HB_VIEW_FOUND);
+    assert(strcmp(view_folder, "MYHB") == 0);
+    assert(nk_pbp_homebrew_view_root(package.iso_path, view_root, sizeof(view_root)));
+    snprintf(view_path, sizeof(view_path), "%s%cPSP%cGAME%cMYHB%cEBOOT.PBP", view_root, sep, sep,
+             sep, sep);
+    after = psn_test_read_file(view_path, &after_len);
+    assert(after != NULL && after_len == before_len && memcmp(after, before, before_len) == 0);
+    free(after);
+    snprintf(view_path, sizeof(view_path), "%s%cPSP%cGAME%cMYHB%cDATA.TXT", view_root, sep, sep,
+             sep, sep);
+    after = psn_test_read_file(view_path, &after_len);
+    assert(after != NULL && after_len == 19u && memcmp(after, "read by the program", 19u) == 0);
+    free(after);
+    snprintf(view_path, sizeof(view_path), "%s%cPSP%cGAME%cMYHB%clevels%cONE.BIN", view_root, sep,
+             sep, sep, sep, sep);
+    after = psn_test_read_file(view_path, &after_len);
+    assert(after != NULL && after_len == 9u && memcmp(after, "level one", 9u) == 0);
+    free(after);
+    snprintf(view_path, sizeof(view_path), "%s%cPSP%cGAME%cMYHB%cMISSING.BIN", view_root, sep,
+             sep, sep, sep);
+    assert(nk_platform_path_missing(view_path));
+    snprintf(view_path, sizeof(view_path), "%s.importing", view_root);
+    assert(nk_platform_path_missing(view_path));
+
+    /* The user's own package and folder are only read, never changed: the import writes under
+       the data folder alone. */
     after = psn_test_read_file(pbp_path, &after_len);
     assert(after != NULL && after_len == before_len && memcmp(after, before, before_len) == 0);
     free(before);
+    free(after);
+    after = psn_test_read_file(data_path, &after_len);
+    assert(after != NULL && after_len == 19u && memcmp(after, "read by the program", 19u) == 0);
     free(after);
 
     /* Picking it again reuses the checked image; the same program under another title is
@@ -7003,6 +7053,16 @@ static void test_homebrew_package_becomes_a_private_disc(void) {
                                       sizeof(message)));
     assert(again.homebrew && again.iso_ready);
     assert(strcmp(again.disc_id, package.disc_id) == 0);
+    /* An image without its folder, as an import before the folder came along made it, is not
+       ready: picking the package again makes both. */
+    assert(test_remove_tree(view_root));
+    assert(player_psn_package_inspect(pbp_path, &again, code, sizeof(code), message,
+                                      sizeof(message)));
+    assert(again.homebrew && !again.iso_ready);
+    assert(player_psn_package_convert(&again, &hooks, code, sizeof(code), message,
+                                      sizeof(message)));
+    assert(nk_pbp_homebrew_find_view(again.iso_path, view_folder, sizeof(view_folder)) ==
+           NK_PBP_HB_VIEW_FOUND);
     pbp = homebrew_pbp("Another Title", program, 88u, icon, sizeof(icon), &pbp_len);
     write_binary_file(other_path, pbp, pbp_len);
     free(pbp);
@@ -7018,6 +7078,26 @@ static void test_homebrew_package_becomes_a_private_disc(void) {
     assert(strstr(app->wizard.status_message, "My Homebrew") != NULL);
     assert(strstr(app->wizard.status_message, "PSN") == NULL);
     free(app);
+
+    /* A package whose folder cannot be the program's is refused by name before anything is
+       written: a folder that also holds Nakagawa's data folder (its copy would hold itself),
+       and a folder name a PSP's Memory Stick cannot hold. */
+    {
+        char loose_path[NATIVE_TEST_PATH_MAX + 128];
+        char odd_folder[NATIVE_TEST_PATH_MAX + 128];
+        snprintf(loose_path, sizeof(loose_path), "%s%cLOOSE.PBP", base, sep);
+        pbp = homebrew_pbp("Loose", program, 88u, NULL, 0, &pbp_len);
+        write_binary_file(loose_path, pbp, pbp_len);
+        psn_test_refused(loose_path, "HOMEBREW_FOLDER_UNSUPPORTED",
+                         "also holds Nakagawa's data folder");
+        snprintf(odd_folder, sizeof(odd_folder), "%s%cCaf\xC3\xA9", base, sep);
+        assert(nk_platform_mkdir_p(odd_folder));
+        snprintf(loose_path, sizeof(loose_path), "%s%cEBOOT.PBP", odd_folder, sep);
+        write_binary_file(loose_path, pbp, pbp_len);
+        free(pbp);
+        psn_test_refused(loose_path, "HOMEBREW_FOLDER_UNSUPPORTED",
+                         "has no name a PSP's Memory Stick can hold");
+    }
 
     /* An encrypted program and a file that is not a program are refused by name, and nothing
        is written. */

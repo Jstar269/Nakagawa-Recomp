@@ -8378,11 +8378,19 @@ static void player_psn_result(char *code, size_t code_size, const char *name,
 }
 
 /* A package of unencrypted homebrew (#2143): the package is not refused but turned into a
-   private disc image holding its program, under the library key that image will have. */
-static bool player_homebrew_iso_ready(const char *iso_path, const char *key) {
+   private disc image holding its program, under the library key that image will have, and a
+   copy of the folder it was picked from, the program's ms0:/PSP/GAME/<folder>/
+   (nk_pbp_homebrew.h). An image without that folder, as an older import made it, is made
+   again. */
+static bool player_homebrew_iso_ready(const char *iso_path, const char *key,
+                                      const char *folder) {
     NkIsoMetadata *meta;
     bool ready;
+    char found[NK_PBP_HOMEBREW_FOLDER_NAME_MAX + 1u];
     if (nk_platform_path_missing(iso_path)) return false;
+    if (nk_pbp_homebrew_find_view(iso_path, found, sizeof(found)) != NK_PBP_HB_VIEW_FOUND ||
+        strcmp(found, folder) != 0)
+        return false;
     meta = (NkIsoMetadata *)calloc(1, sizeof(*meta));
     if (meta == NULL) return false;
     ready = nk_iso_inspect(iso_path, meta) == NK_OK && meta->non_retail &&
@@ -8413,6 +8421,9 @@ static bool player_homebrew_package_inspect(const char *pbp_path, const NkPbpInf
     NkPbpHomebrew program;
     char label[160];
     char data_root[NK_MAX_PATH];
+    char view_root[MAX_PATH_LEN];
+    char folder[NK_PBP_HOMEBREW_FOLDER_NAME_MAX + 1u];
+    char problem[512];
     int rc;
     snprintf(label, sizeof(label), "%.120s", info->title[0] ? info->title : "This package");
     nk_psp_ctx_init(&ctx, NULL);
@@ -8456,12 +8467,27 @@ static bool player_homebrew_package_inspect(const char *pbp_path, const NkPbpInf
                           "The path to Nakagawa's data folder is too long.");
         return false;
     }
+    /* The folder the package is in comes with it, as the program's Memory Stick folder. */
+    if (!nk_pbp_homebrew_view_root(package->iso_path, view_root, sizeof(view_root))) {
+        package->iso_path[0] = '\0';
+        player_psn_result(code, code_size, "IO_FAILURE", message, message_size,
+                          "The path to Nakagawa's data folder is too long.");
+        return false;
+    }
+    if (!nk_pbp_homebrew_check_folder(pbp_path, view_root, problem, sizeof(problem)) ||
+        !nk_pbp_homebrew_folder_name(pbp_path, folder, sizeof(folder), problem,
+                                     sizeof(problem))) {
+        package->iso_path[0] = '\0';
+        player_psn_result(code, code_size, "HOMEBREW_FOLDER_UNSUPPORTED", message, message_size,
+                          "%s", problem);
+        return false;
+    }
     snprintf(package->pbp_path, sizeof(package->pbp_path), "%s", pbp_path);
     snprintf(package->disc_id, sizeof(package->disc_id), "%s", program.key);
     snprintf(package->title, sizeof(package->title), "%s",
              info->title[0] ? info->title : "Homebrew");
     package->homebrew = true;
-    package->iso_ready = player_homebrew_iso_ready(package->iso_path, program.key);
+    package->iso_ready = player_homebrew_iso_ready(package->iso_path, program.key, folder);
     return true;
 }
 
@@ -8600,7 +8626,29 @@ static bool player_homebrew_package_convert(const PlayerPsnPackage *package,
                           "The package changed after it was checked. Add it again.");
         return false;
     }
-    if (rc == NK_PSP_OK) return true;
+    if (rc == NK_PSP_OK) {
+        char view_root[MAX_PATH_LEN];
+        char problem[512];
+        bool cancelled;
+        if (nk_pbp_homebrew_view_root(package->iso_path, view_root, sizeof(view_root)) &&
+            nk_pbp_homebrew_write_view(package->pbp_path, view_root, &hooks, problem,
+                                       sizeof(problem)))
+            return true;
+        /* Without its folder the program is not imported: the image goes too. */
+        (void)nk_remove_utf8(package->iso_path);
+        cancelled = callbacks != NULL && callbacks->is_cancelled != NULL &&
+                    callbacks->is_cancelled(callbacks->userdata);
+        if (cancelled) {
+            player_psn_result(code, code_size, "CANCELLED", message, message_size,
+                              "The import was cancelled, and nothing was kept.");
+        } else {
+            fprintf(stderr, "[PLAYER] homebrew folder copy stopped: %s\n", problem);
+            player_psn_result(code, code_size, "HOMEBREW_FOLDER_UNSUPPORTED", message,
+                              message_size, "The package's folder could not be copied: "
+                              "%.300s Nothing was kept.", problem);
+        }
+        return false;
+    }
     if (rc == NK_PSP_ERR_CANCELLED) {
         player_psn_result(code, code_size, nk_psp_status_name(rc), message, message_size,
                           "The conversion was cancelled, and the partial disc image was "

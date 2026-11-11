@@ -89,6 +89,26 @@ static void write_file(const char *path, const char *data) {
     fclose(f);
 }
 
+/* The whole file as text (NUL-terminated), or NULL when it cannot be read. */
+static char *read_text_file(const char *path) {
+    FILE *f = fopen(path, "rb");
+    char *text;
+    long size;
+    if (!f) return NULL;
+    if (fseek(f, 0, SEEK_END) != 0 || (size = ftell(f)) < 0 || fseek(f, 0, SEEK_SET) != 0) {
+        fclose(f);
+        return NULL;
+    }
+    text = (char *)malloc((size_t)size + 1u);
+    if (text && fread(text, 1, (size_t)size, f) != (size_t)size) {
+        free(text);
+        text = NULL;
+    }
+    if (text) text[size] = '\0';
+    fclose(f);
+    return text;
+}
+
 static void set_environment_value(const char *name, const char *value) {
 #if defined(_WIN32) || defined(_WIN64)
     assert(_putenv_s(name, value) == 0);
@@ -192,6 +212,7 @@ static int write_launch_environment_probe(void) {
     const char *ace_report = getenv("SR_ACE_REPORT");
     const char *host_time_zone = getenv("SR_HOST_TIME_ZONE");
     const char *code_capture = getenv("SR_CODE_CAPTURE");
+    const char *boot_path = getenv("SR_BOOT_PATH");
     char nickname_utf8[512];
     const char *nickname = probe_env_utf8("SR_NICKNAME", nickname_utf8, sizeof(nickname_utf8));
     int ok = fprintf(f,
@@ -220,6 +241,7 @@ static int write_launch_environment_probe(void) {
                      "SR_ACE_REPORT=%s\n"
                      "SR_HOST_TIME_ZONE=%s\n"
                      "SR_CODE_CAPTURE=%s\n"
+                     "SR_BOOT_PATH=%s\n"
                      "SR_NICKNAME=%s\n",
                      iso ? iso : "<unset>",
                      unrelated ? unrelated : "<unset>",
@@ -246,6 +268,7 @@ static int write_launch_environment_probe(void) {
                      ace_report ? ace_report : "<unset>",
                      host_time_zone ? host_time_zone : "<unset>",
                      code_capture ? code_capture : "<unset>",
+                     boot_path ? boot_path : "<unset>",
                      nickname ? nickname : "<unset>") >= 0;
     if (fclose(f) != 0) ok = 0;
     /* Subtest 21 sets NK_LAUNCH_TEST_HOLD so the probe stays alive long
@@ -742,6 +765,87 @@ static void test_no_iso_child_environment(const char *test_executable,
         assert(strstr(observed, "SR_PRESENT_UPSCALE=fsr1\n") != NULL);
         session.enhancement_package_id[0] = '\0';
         snprintf(session.config.ace_spec, sizeof(session.config.ace_spec), "off");
+    }
+
+    /* #2143: an imported homebrew program runs from its Memory Stick folder. The import's
+       copy of the folder it was picked from sits beside its disc image ("<image>.ms0",
+       nk_pbp_homebrew.h); the launch puts what the title's Memory Stick lacks on it, leaves
+       what the program wrote there, and boots ms0:/PSP/GAME/<folder>/EBOOT.PBP. A view that
+       is not one such folder stops the launch by name. Failing before: the launch booted
+       disc0:/PSP_GAME/SYSDIR/EBOOT.BIN and the program's folder was on no Memory Stick. */
+    {
+        char hb_dir[NK_MAX_PATH * 2];
+        char hb_iso[NK_MAX_PATH * 2 + 32];
+        char hb_view[NK_MAX_PATH * 2 + 96];
+        char hb_file[NK_MAX_PATH * 2 + 128];
+        char hb_stick[NK_MAX_PATH * 2 + 32];
+        char hb_stick_folder[NK_MAX_PATH * 2 + 96];
+        char saved_iso[sizeof(session.iso_path)];
+        char saved_stick[sizeof(session.memstick_root)];
+        snprintf(saved_iso, sizeof(saved_iso), "%s", session.iso_path);
+        snprintf(saved_stick, sizeof(saved_stick), "%s", session.memstick_root);
+        snprintf(hb_dir, sizeof(hb_dir), "%s%chomebrew-launch", root, sep);
+        snprintf(hb_iso, sizeof(hb_iso), "%s%cXHBT00001.iso", hb_dir, sep);
+        snprintf(hb_view, sizeof(hb_view), "%s%cXHBT00001.ms0%cPSP%cGAME%cMYHB", hb_dir, sep,
+                 sep, sep, sep);
+        snprintf(hb_stick, sizeof(hb_stick), "%s%chomebrew-stick", root, sep);
+        snprintf(hb_stick_folder, sizeof(hb_stick_folder), "%s%cPSP%cGAME%cMYHB", hb_stick, sep,
+                 sep, sep);
+        assert(nk_platform_mkdir_p(hb_view));
+        assert(nk_platform_mkdir_p(hb_stick_folder));
+        write_file(hb_iso, "disc image");
+        snprintf(hb_file, sizeof(hb_file), "%s%cEBOOT.PBP", hb_view, sep);
+        write_file(hb_file, "\x00PBP program");
+        snprintf(hb_file, sizeof(hb_file), "%s%cDATA.TXT", hb_view, sep);
+        write_file(hb_file, "shipped with the program");
+        snprintf(hb_file, sizeof(hb_file), "%s%cSETTINGS.INI", hb_view, sep);
+        write_file(hb_file, "shipped settings");
+        /* What the program wrote on an earlier run stays. */
+        snprintf(hb_file, sizeof(hb_file), "%s%cSETTINGS.INI", hb_stick_folder, sep);
+        write_file(hb_file, "the player's own settings");
+        snprintf(session.iso_path, sizeof(session.iso_path), "%s", hb_iso);
+        snprintf(session.memstick_root, sizeof(session.memstick_root), "%s", hb_stick);
+
+        assert(nk_launch_start(&session) == NK_OK);
+        child_exit = nk_launch_wait(&session, -1);
+        nk_launch_stop(&session);
+        assert(child_exit == 0);
+        report = fopen(report_path, "rb");
+        assert(report != NULL);
+        observed_size = fread(observed, 1, sizeof(observed) - 1, report);
+        observed[observed_size] = '\0';
+        assert(!ferror(report));
+        assert(fclose(report) == 0);
+        assert(strstr(observed, "SR_BOOT_PATH=ms0:/PSP/GAME/MYHB/EBOOT.PBP\n") != NULL);
+        snprintf(hb_file, sizeof(hb_file), "%s%cEBOOT.PBP", hb_stick_folder, sep);
+        assert(nk_platform_file_exists(hb_file));
+        snprintf(hb_file, sizeof(hb_file), "%s%cDATA.TXT", hb_stick_folder, sep);
+        {
+            char *data = read_text_file(hb_file);
+            assert(data != NULL && strcmp(data, "shipped with the program") == 0);
+            free(data);
+        }
+        snprintf(hb_file, sizeof(hb_file), "%s%cSETTINGS.INI", hb_stick_folder, sep);
+        {
+            char *settings = read_text_file(hb_file);
+            assert(settings != NULL && strcmp(settings, "the player's own settings") == 0);
+            free(settings);
+        }
+        /* Nothing the folder does not hold appears: a path it lacks stays missing. */
+        snprintf(hb_file, sizeof(hb_file), "%s%cMISSING.BIN", hb_stick_folder, sep);
+        assert(nk_platform_path_missing(hb_file));
+
+        /* A second folder in the view is not a program's folder: the launch stops. */
+        snprintf(hb_view, sizeof(hb_view), "%s%cXHBT00001.ms0%cPSP%cGAME%cOTHER", hb_dir, sep,
+                 sep, sep, sep);
+        assert(nk_platform_mkdir_p(hb_view));
+        assert(nk_launch_start(&session) != NK_OK);
+        assert(strstr(session.last_error, "Memory Stick folder") != NULL);
+        assert(strstr(session.last_error, "damaged") != NULL);
+
+        /* A disc image with no view beside it keeps its disc boot path. */
+        snprintf(session.iso_path, sizeof(session.iso_path), "%s", saved_iso);
+        snprintf(session.memstick_root, sizeof(session.memstick_root), "%s", saved_stick);
     }
 
     restore_environment_value("SR_ACE", old_ace, had_ace);

@@ -199,17 +199,21 @@ PGD-protected data aren't supported.
 PSP homebrew (programs the community wrote, with no game from a shop in them) is added the same way: pick its
 `EBOOT.PBP`. A homebrew program is not encrypted, so it needs no keys. The player writes a small disc image
 from the package once, on this PC, in `<user data>/discs/<key>/<key>.iso`, holding the program and its icon, and
-adds that image as if you had picked it. The key is made from the program and its title, so the same homebrew is
+adds that image as if you had picked it. The folder the `EBOOT.PBP` is in comes with it, copied beside the image
+(`<key>.ms0`): the program runs from `ms0:/PSP/GAME/<folder>/` on its own Memory Stick, as on a PSP, so it finds
+the files it keeps beside itself. Each start copies the files the Memory Stick lacks from that copy, so what
+the program writes there stays. Keep each program in its own folder, as `PSP/GAME/<folder>/` on a PSP's
+Memory Stick has it. The key is made from the program and its title, so the same homebrew is
 the same game wherever you add it from, and the library shows it as **Beta / unofficial**. Homebrew is
 **Experimental**: nobody has checked a program unless [`COMPATIBILITY.md`](COMPATIBILITY.md#homebrew-limits)
-says so. Your `EBOOT.PBP` is only read, never changed.
+says so. Your `EBOOT.PBP` and its folder are only read, never changed.
 
 Some homebrew can't run, and the player says which kind when you pick it: an encrypted program, kernel-mode
 homebrew and custom-firmware plugins (they need the PSP's own kernel), and anything that is not a PSP program.
 A program that writes its own machine code while it runs, such as an emulator with a JIT, starts and then stops
-at the first jump into that code. Only the `EBOOT.PBP` is imported: files that sit beside it in the program's
-folder (data, plugins, configuration) are not available to the program, so a program that needs them stops when
-it looks for one. [Homebrew limits](COMPATIBILITY.md#homebrew-limits) lists each kind.
+at the first jump into that code. A folder too large to copy (over 1 GiB or 4,096 files and folders), one that
+holds a link or a file kept in the cloud, or one whose name a PSP's Memory Stick can't hold is refused when you
+pick the program. [Homebrew limits](COMPATIBILITY.md#homebrew-limits) lists each kind.
 
 ### Supplying title manifests
 
