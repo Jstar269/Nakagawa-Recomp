@@ -1722,10 +1722,12 @@ jobs:
     # ladder builds under build/platform-ladder; the two fuzz shards, which used to
     # run on separate runners, now share build/windows-runtime, which is harmless
     # because each regenerates its cases header and vfpu_fuzz_build always relinks
-    # and reruns the fuzzer. routes uses nothing smoke builds: native-core-tests and
-    # profile-zero-e2e build their own inputs, and when the two shared build/, the
-    # selftest targets they had in common had no output file, so their recipes
-    # compiled and ran every time anyway.
+    # and reruns the fuzzer. Neither smoke nor routes uses what the other builds:
+    # native-core-tests and profile-zero-e2e build their own inputs, the player
+    # targets build the libchdr archive native-core-tests used to leave behind (a
+    # Make prerequisite), and when the two shared build/, the selftest targets they
+    # had in common had no output file, so their recipes compiled and ran every
+    # time anyway.
     # needs.windows_runtime.result aggregates all groups, and a failing step fails
     # its group's job.
     # A group's timeout is the sum of its parts' former 25-minute limits.
