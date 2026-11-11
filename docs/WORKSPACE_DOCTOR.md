@@ -382,14 +382,18 @@ The state of each build and workspace ergonomics item:
    hardcoded directories, keeps the HST build directory only as the named `HST_DEFAULT_BUILD_DIR`
    fallback for the simulation mock state and the unattached artifact root, and fails with a clear
    error when a `--exe` target does not exist on disk;
-3. [PARTIAL - #368] make worktree asset resolution explicit and independent of the invoking
+3. [DONE - #368] make worktree asset resolution explicit and independent of the invoking
    checkout: `nk_cli.py prepare` now names its per-user data root as the preparation engine's
    base folder, where it used to fall back to the shell's working directory, so a compressed disc
    was expanded and a raw disc placed under whichever checkout ran the command
    (`ExplicitAssetRootTests` in `tools/test_workspace_paths.py`). The library classes
    `RuntimeLauncher` defaults to the checkout that holds the module and `PreparationEngine`
-   requires an explicit base folder, so neither follows the working directory; the remaining gap
-   is a two-worktree test proving each checkout consumes only its own assets;
+   requires an explicit base folder, so neither follows the working directory.
+   `TwoCheckoutIsolationTests` in `tools/test_relocated_clone.py` builds a route of generated and
+   runtime assets in two copies of the tree at once and checks that each built from its own
+   marked source, into its own build folder, that no file it built names the other copy, and
+   that neither wrote in the folder the two share. A location elsewhere on the machine is not
+   watched, and the route involves no game input or per-user data;
 4. [DONE - #368] add a long-path diagnostic to the workspace doctor:
    implemented in `tools/nk_doctor_checks.py` (`check_long_paths`, `query_windows_long_paths_enabled`)
    under code `LONG_PATHS`, reporting Windows `LongPathsEnabled` registry policy and both the
