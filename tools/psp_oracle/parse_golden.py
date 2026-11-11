@@ -2081,6 +2081,32 @@ _register_campaign_probe(
     "hle-io-seek", "PSP-HLE-IO-SEEK-001",
     tuple(row for row, _ in HLE_IO_SEEK_ROWS), dict(HLE_IO_SEEK_ROWS),
 )
+# hle-io-seek-edges (186, probe_hle_measure.c): #1380's cells hle-io-seek left open. flash0:
+# SEEK_CUR seeks (64- and 32-bit), 64-bit SEEK_SET and SEEK_END past 0x100000000 and around the
+# high-word boundaries, each from a position of 8; then on a probe-owned ms0: file the
+# PSP_O_RDONLY | PSP_O_CREAT open with and without PSP_O_TRUNC or PSP_O_EXCL, and sceIoWriteAsync
+# on a PSP_O_RDONLY descriptor with a bounded poll. No disc0: call. Every row is emitted on every
+# run with a fixed word count; SKIP rows keep it.
+HLE_IO_SEEK_EDGES_ROWS = (
+    ("io-edge-flash-open", 3),
+    ("io-edge-flash-s64-cur-neg9", 5), ("io-edge-flash-s64-cur-past16", 5),
+    ("io-edge-flash-s64-cur-to-ffffffff", 5), ("io-edge-flash-s64-cur-to-2p32", 5),
+    ("io-edge-flash-s32-cur-neg9", 5), ("io-edge-flash-s32-cur-past16", 5),
+    ("io-edge-flash-s64-set-2p32-plus1", 5), ("io-edge-flash-s64-set-2p33", 5),
+    ("io-edge-flash-s64-set-max", 5), ("io-edge-flash-s64-end-to-ffffffff", 5),
+    ("io-edge-flash-s64-end-to-2p32", 5), ("io-edge-flash-s64-set-10000", 5),
+    ("io-edge-flash-s64-set-7fffffff", 5), ("io-edge-flash-s64-set-80000000", 5),
+    ("io-edge-flash-s64-set-fffffffe", 5),
+    ("io-edge-flash-close", 1),
+    ("io-edge-ms-setup", 4),
+    ("io-edge-ms-rdonly-creat-write", 4), ("io-edge-ms-rdonly-creat-trunc", 4),
+    ("io-edge-ms-rdonly-creat-excl", 4), ("io-edge-ms-write-async", 10),
+    ("io-edge-ms-cleanup", 4),
+)
+_register_campaign_probe(
+    "hle-io-seek-edges", "PSP-HLE-IO-SEEK-002",
+    tuple(row for row, _ in HLE_IO_SEEK_EDGES_ROWS), dict(HLE_IO_SEEK_EDGES_ROWS),
+)
 # hle-nickname-limit (164, probe_hle_measure.c): W-NET-1, read-only. The registry walk to the
 # owner_name key (type and size only; no value call and no value bytes), then the system-parameter
 # string with eight buffer lengths (the return only) and one summary row. Every row is emitted on
@@ -3378,13 +3404,13 @@ HLE_MACHINERY_STATUS_CASES = frozenset({
 })
 VFPU_RAW_WORD_CASES = frozenset({"vfpu-transcendental-corpus"})
 #: Cases whose every cell is an unconditional observation: each record is PASS. hle-io-seek,
-#: hle-nickname-limit and hle-self-stop-unload are in this set too: their SKIP rows only keep the
+#: hle-io-seek-edges, hle-nickname-limit and hle-self-stop-unload are in this set too: their SKIP rows only keep the
 #: word count when a precondition is missing (the ms0: directory already exists, the registry
 #: does not open) and their FAIL rows mean a probe-owned object could not be set up, so a stream
 #: with either is not a measurement of the cells it names.
 HLE_OBSERVATION_CASES = frozenset({"hle-issues-batch", "vfpu-forms", "intr-cause", "vfpu-forms2",
                                    "vfpu-funnel", "vfpu-sort", "vfpu-unmodeled", "vfpu-quad-wb", "vfpu-convert", "vfpu-cc-cmov", "vfpu-vus2i", "vfpu-basic-arith",
-                                   "hle-io-seek", "hle-nickname-limit", "hle-self-stop-unload", "vfpu-wide-dot-matrix",
+                                   "hle-io-seek", "hle-io-seek-edges", "hle-nickname-limit", "hle-self-stop-unload", "vfpu-wide-dot-matrix",
                                    "vfpu-mfv-mtv", "vfpu-constants", "vfpu-round-sep",
                                    "vfpu-prefix-state",
                                    "vfpu-wider-ops",
