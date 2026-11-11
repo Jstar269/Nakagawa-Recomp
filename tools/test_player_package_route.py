@@ -86,78 +86,69 @@ LOW_FIXED_ADDRESS_BASE = 0x08804000
 
 
 HOMEBREW_REQUIRED = "NK_HOMEBREW_E2E_REQUIRED"
+# A folder of programs built from the fixtures below by a host with PSPDEV (hosted CI's
+# public_export job), for a host without it: <dir>/<fixture>/EBOOT.PBP beside a copy of the
+# fixture's main.c and Makefile it was built from, and <dir>/SHA256SUMS over all of them.
+HOMEBREW_PREBUILT = "NK_HOMEBREW_EBOOT_DIR"
 HOMEBREW_FIXTURE = ROOT / "fixtures" / "pspdev_phase5"
-
-# A PSPSDK program written for the Memory Stick folder test below (#2143), built with the
-# fixture's own Makefile: it opens its files by relative path, as homebrew does, so it finds
-# them only when it runs from ms0:/PSP/GAME/<folder>/ and that folder holds them. It writes
-# what it saw to the title's Memory Stick, the checked guest result. Project-authored.
-HOMEBREW_VIEW_PROBE_C = r"""/* SPDX-License-Identifier: GPL-3.0-or-later */
-/* Copyright (C) 2026 the Nakagawa Recomp authors */
-#include <pspkernel.h>
-#include <stdio.h>
-#include <string.h>
-
-PSP_MODULE_INFO("NK_HOMEBREW_VIEW", 0, 1, 1);
-PSP_MAIN_THREAD_ATTR(THREAD_ATTR_USER);
-
-int main(int argc, char *argv[]) {
-    char data[64];
-    int data_bytes = -1;
-    int missing_opened = 0;
-    memset(data, 0, sizeof(data));
-    FILE *own = fopen("DATA.TXT", "rb");
-    if (own) {
-        data_bytes = (int)fread(data, 1, sizeof(data) - 1, own);
-        fclose(own);
-    }
-    FILE *missing = fopen("MISSING.TXT", "rb");
-    if (missing) {
-        missing_opened = 1;
-        fclose(missing);
-    }
-    FILE *written = fopen("WRITTEN.TXT", "wb");
-    if (written) {
-        fputs("written by the program", written);
-        fclose(written);
-    }
-    sceIoMkdir("ms0:/NAKAGAWA_TEST", 0777);
-    FILE *result = fopen("ms0:/NAKAGAWA_TEST/HOMEBREW_VIEW.TXT", "wb");
-    if (result) {
-        fprintf(result, "ARGV0=%s\nDATA=%s\nDATA_BYTES=%d\nMISSING_OPENED=%d\n",
-                argc > 0 ? argv[0] : "", data, data_bytes, missing_opened);
-        fclose(result);
-    }
-    sceKernelExitGame();
-    return 0;
-}
-"""
+# The homebrew folder probe (#2143): opens its own files by relative path.
+HOMEBREW_VIEW_FIXTURE = ROOT / "fixtures" / "homebrew_view"
+HOMEBREW_SOURCES = ("main.c", "Makefile")
 
 
-def write_homebrew_view_probe(source_dir: Path) -> Path:
-    """Write the probe's source and a Makefile (the fixture's, renamed) into source_dir."""
-    source_dir.mkdir(parents=True, exist_ok=True)
-    (source_dir / "main.c").write_text(HOMEBREW_VIEW_PROBE_C, encoding="utf-8", newline="\n")
-    makefile = (HOMEBREW_FIXTURE / "Makefile").read_text(encoding="utf-8")
-    makefile = makefile.replace("TARGET = pspdev_phase5", "TARGET = homebrew_view")
-    makefile = makefile.replace("PSP_EBOOT_TITLE = Nakagawa PSP Recompilation Oracle",
-                                "PSP_EBOOT_TITLE = Nakagawa Homebrew Folder Probe")
-    makefile = makefile.replace(
-        "LIBS = -lpspdebug -lpspdisplay -lpspge -lpspctrl -lpsputility -lpspuser -lpspkernel",
-        "LIBS = -lpspuser -lpspkernel")
-    assert "homebrew_view" in makefile and "Folder Probe" in makefile
-    (source_dir / "Makefile").write_text(makefile, encoding="utf-8", newline="\n")
-    return source_dir
+def prebuilt_homebrew_eboot(source_dir: Path, out_dir: Path) -> Path | None:
+    """The EBOOT.PBP NK_HOMEBREW_EBOOT_DIR holds for source_dir, checked, copied into out_dir.
+
+    None when the variable is unset. Set, the folder must hold the program and SHA256SUMS
+    must match every file, and the main.c and Makefile it was built from must be this
+    checkout's own (byte for byte), so a test can never run bytes built from other source;
+    anything else fails, whatever NK_HOMEBREW_E2E_REQUIRED says, and never skips.
+    """
+    prebuilt = os.environ.get(HOMEBREW_PREBUILT)
+    if not prebuilt:
+        return None
+    root = Path(prebuilt)
+    name = source_dir.name
+    try:
+        listed: dict[str, str] = {}
+        for line in (root / "SHA256SUMS").read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                digest, _, rel = line.partition("  ")
+                listed[rel.strip()] = digest.strip()
+        wanted = [f"{name}/EBOOT.PBP"] + [f"{name}/{source}" for source in HOMEBREW_SOURCES]
+        for rel in wanted:
+            if rel not in listed:
+                raise AssertionError(f"{HOMEBREW_PREBUILT}: SHA256SUMS does not list {rel}")
+            data = (root / rel).read_bytes()
+            if hashlib.sha256(data).hexdigest() != listed[rel]:
+                raise AssertionError(f"{HOMEBREW_PREBUILT}: {rel} does not match SHA256SUMS")
+        for source in HOMEBREW_SOURCES:
+            if (root / name / source).read_bytes() != (source_dir / source).read_bytes():
+                raise AssertionError(
+                    f"{HOMEBREW_PREBUILT}: {name}/{source} is not this checkout's "
+                    f"{source_dir.relative_to(ROOT).as_posix()}/{source}"
+                )
+        out_dir.mkdir(parents=True, exist_ok=True)
+        eboot = out_dir / "EBOOT.PBP"
+        shutil.copyfile(root / name / "EBOOT.PBP", eboot)
+    except OSError as error:
+        raise AssertionError(f"{HOMEBREW_PREBUILT}={prebuilt} cannot be read: {error}") from error
+    return eboot
 
 
 def build_homebrew_eboot(out_dir: Path, source_dir: Path = HOMEBREW_FIXTURE) -> Path:
     """Build a project PSPSDK program (fixtures/pspdev_phase5 by default) into an EBOOT.PBP.
 
     PSPDEV's make and ``pack-pbp`` write the package, so its PARAM.SFO is the one every
-    PSPSDK homebrew has (category MG), not one a test author guessed (#2143). With no PSPDEV
+    PSPSDK homebrew has (category MG), not one a test author guessed (#2143). A host
+    without PSPDEV takes the checked program NK_HOMEBREW_EBOOT_DIR names; with neither,
     the caller's test is skipped, or failed when NK_HOMEBREW_E2E_REQUIRED=1.
     """
     from test_profile_zero_e2e import _pspdev_backend, _wsl_path  # noqa: E402
+
+    prebuilt = prebuilt_homebrew_eboot(source_dir, out_dir)
+    if prebuilt is not None:
+        return prebuilt
 
     def unavailable(reason: str) -> None:
         if os.environ.get(HOMEBREW_REQUIRED) == "1":
@@ -507,6 +498,70 @@ def fixed_address_exec_elf(executable: bytes, base: int) -> bytes:
         if flags & 2 and any(start <= address <= end for start, end in loads):
             struct.pack_into("<I", fixed, offset + 12, base + address)
     return bytes(fixed)
+
+
+class TestHomebrewPrebuilt(unittest.TestCase):
+    """NK_HOMEBREW_EBOOT_DIR (#2143): a host without PSPDEV runs only checked programs."""
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory(prefix="nk-homebrew-prebuilt-")
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.prebuilt = self.root / "prebuilt"
+        folder = self.prebuilt / HOMEBREW_FIXTURE.name
+        folder.mkdir(parents=True)
+        (folder / "EBOOT.PBP").write_bytes(b"\x00PBP built from the fixture")
+        for source in HOMEBREW_SOURCES:
+            shutil.copyfile(HOMEBREW_FIXTURE / source, folder / source)
+        self.write_sums()
+
+    def write_sums(self) -> None:
+        lines = []
+        for path in sorted(self.prebuilt.rglob("*")):
+            if path.is_file() and path.name != "SHA256SUMS":
+                digest = hashlib.sha256(path.read_bytes()).hexdigest()
+                lines.append(f"{digest}  {path.relative_to(self.prebuilt).as_posix()}")
+        (self.prebuilt / "SHA256SUMS").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    def build(self, environment: dict[str, str]) -> Path:
+        with patch.dict(os.environ, environment, clear=False):
+            for name in (HOMEBREW_PREBUILT, HOMEBREW_REQUIRED):
+                if name not in environment:
+                    os.environ.pop(name, None)
+            return build_homebrew_eboot(self.root / "out")
+
+    def test_checked_program_is_used_without_pspdev(self) -> None:
+        eboot = self.build({HOMEBREW_PREBUILT: str(self.prebuilt), HOMEBREW_REQUIRED: "1"})
+        self.assertEqual(eboot.read_bytes(), b"\x00PBP built from the fixture")
+
+    def test_required_run_fails_on_a_missing_folder(self) -> None:
+        with self.assertRaisesRegex(AssertionError, "cannot be read"):
+            self.build({HOMEBREW_PREBUILT: str(self.root / "absent"), HOMEBREW_REQUIRED: "1"})
+
+    def test_missing_folder_fails_even_when_not_required(self) -> None:
+        with self.assertRaisesRegex(AssertionError, "cannot be read"):
+            self.build({HOMEBREW_PREBUILT: str(self.root / "absent")})
+
+    def test_changed_program_fails(self) -> None:
+        (self.prebuilt / HOMEBREW_FIXTURE.name / "EBOOT.PBP").write_bytes(b"other bytes")
+        with self.assertRaisesRegex(AssertionError, "does not match SHA256SUMS"):
+            self.build({HOMEBREW_PREBUILT: str(self.prebuilt), HOMEBREW_REQUIRED: "1"})
+
+    def test_program_built_from_other_source_fails(self) -> None:
+        (self.prebuilt / HOMEBREW_FIXTURE.name / "main.c").write_text("int main(void){}\n")
+        self.write_sums()
+        with self.assertRaisesRegex(AssertionError, "is not this checkout's"):
+            self.build({HOMEBREW_PREBUILT: str(self.prebuilt), HOMEBREW_REQUIRED: "1"})
+
+    def test_required_run_without_prebuilt_or_pspdev_fails(self) -> None:
+        with patch("test_profile_zero_e2e._pspdev_backend", return_value=None):
+            with self.assertRaisesRegex(AssertionError, "the build did not run"):
+                self.build({HOMEBREW_REQUIRED: "1"})
+
+    def test_local_run_without_prebuilt_or_pspdev_skips(self) -> None:
+        with patch("test_profile_zero_e2e._pspdev_backend", return_value=None):
+            with self.assertRaises(unittest.SkipTest):
+                self.build({})
 
 
 class TestReleaseDocumentation(unittest.TestCase):
@@ -1161,9 +1216,8 @@ class TestPlayerPackageRoute(unittest.TestCase):
         the import's copy.
         """
         self.skip_if_toolchain_unavailable()
-        source = write_homebrew_view_probe(self.root / "probe-source")
         eboot = self.homebrew_folder(
-            build_homebrew_eboot(self.root / "probe-build", source), "NKHBVIEW",
+            build_homebrew_eboot(self.root / "probe-build", HOMEBREW_VIEW_FIXTURE), "NKHBVIEW",
             {"DATA.TXT": b"shipped beside the program"},
         )
         key, title = self.import_and_build_homebrew(eboot)

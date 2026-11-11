@@ -7083,14 +7083,16 @@ static void test_homebrew_package_becomes_a_private_disc(void) {
        written: a folder that also holds Nakagawa's data folder (its copy would hold itself),
        and a folder name a PSP's Memory Stick cannot hold. */
     {
-        char loose_path[NATIVE_TEST_PATH_MAX + 128];
+        char loose_path[NATIVE_TEST_PATH_MAX + 256];
         char odd_folder[NATIVE_TEST_PATH_MAX + 128];
         snprintf(loose_path, sizeof(loose_path), "%s%cLOOSE.PBP", base, sep);
         pbp = homebrew_pbp("Loose", program, 88u, NULL, 0, &pbp_len);
         write_binary_file(loose_path, pbp, pbp_len);
         psn_test_refused(loose_path, "HOMEBREW_FOLDER_UNSUPPORTED",
                          "also holds Nakagawa's data folder");
-        snprintf(odd_folder, sizeof(odd_folder), "%s%cCaf\xC3\xA9", base, sep);
+        /* Longer than the 64 characters a program's folder name may have. */
+        snprintf(odd_folder, sizeof(odd_folder), "%s%c%s", base, sep,
+                 "Folder-name-far-longer-than-a-Memory-Stick-program-folder-may-have");
         assert(nk_platform_mkdir_p(odd_folder));
         snprintf(loose_path, sizeof(loose_path), "%s%cEBOOT.PBP", odd_folder, sep);
         write_binary_file(loose_path, pbp, pbp_len);
@@ -7098,11 +7100,11 @@ static void test_homebrew_package_becomes_a_private_disc(void) {
         psn_test_refused(loose_path, "HOMEBREW_FOLDER_UNSUPPORTED",
                          "has no name a PSP's Memory Stick can hold");
     }
-    /* A package picked from the user's Downloads (or another personal folder) does not take
-       the user's own files along as the program's folder: refused by name, nothing copied. */
+    /* A package picked from the user's home folder (or Downloads, Documents and the other
+       personal folders, wherever the system keeps them) does not take the user's own files
+       along as the program's folder: refused by name, nothing copied. */
     {
         char home[NATIVE_TEST_PATH_MAX + 96];
-        char downloads[NATIVE_TEST_PATH_MAX + 128];
         char loose_path[NATIVE_TEST_PATH_MAX + 160];
         const char *home_name =
 #if defined(_WIN32) || defined(_WIN64)
@@ -7115,9 +7117,8 @@ static void test_homebrew_package_becomes_a_private_disc(void) {
         bool had_home = previous != NULL;
         snprintf(saved, sizeof(saved), "%s", previous ? previous : "");
         snprintf(home, sizeof(home), "%s%chome", base, sep);
-        snprintf(downloads, sizeof(downloads), "%s%cDownloads", home, sep);
-        assert(nk_platform_mkdir_p(downloads));
-        snprintf(loose_path, sizeof(loose_path), "%s%cEBOOT.PBP", downloads, sep);
+        assert(nk_platform_mkdir_p(home));
+        snprintf(loose_path, sizeof(loose_path), "%s%cEBOOT.PBP", home, sep);
         pbp = homebrew_pbp("Downloaded", program, 88u, NULL, 0, &pbp_len);
         write_binary_file(loose_path, pbp, pbp_len);
         free(pbp);
