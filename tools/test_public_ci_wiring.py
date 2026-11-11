@@ -838,7 +838,8 @@ _WINDOWS_MAIN_SAVE_CONDITION = (
 #: run"). Parts in one group share the build tree; the fuzz shards, which used to run on
 #: separate runners, share build/windows-runtime, and each rebuilds and reruns there.
 _WINDOWS_GROUPS = {
-    "smoke-routes": ["smoke", "routes"],
+    "smoke": ["smoke"],
+    "routes": ["routes"],
     "ladder-fuzz": ["ladder", "fuzz-0", "fuzz-1"],
     "selftests": ["selftests"],
 }
@@ -3171,6 +3172,188 @@ class SelfHostedRunnerWiringTests(unittest.TestCase):
                      "which is the boundary", "`all_external_contributors`", "`gh run rerun <run>`"):
             with self.subTest(fact=fact):
                 self.assertIn(fact, section)
+
+
+def _workflow_env_value(name: str, key: str) -> str:
+    """One workflow-level `env:` value: a `|` block keeps its lines, a `>-` block folds them."""
+    lines = _workflow_text(name).splitlines()
+    start = lines.index("env:")
+    header = next(i for i in range(start + 1, len(lines)) if lines[i].startswith(f"  {key}: "))
+    style = lines[header].split(":", 1)[1].strip()
+    body: list[str] = []
+    for line in lines[header + 1:]:
+        if line.strip() and not line.startswith("    "):
+            break
+        body.append(line[4:])
+    while body and not body[-1].strip():
+        body.pop()
+    if style == "|":
+        return "".join(line + "\n" for line in body)
+    if style == ">-":
+        return " ".join(line.strip() for line in body if line.strip())
+    raise AssertionError(f"{key}: unexpected block style {style!r}")
+
+
+_APT_STUBS = {
+    "sudo": '#!/bin/sh\nexec "$@"\n',
+    "timeout": '#!/bin/sh\nshift\nexec "$@"\n',
+    "dpkg-query": (
+        '#!/bin/bash\nfor last; do :; done\n'
+        'case " $NK_TEST_INSTALLED " in *" $last "*) printf installed ;; '
+        '*) echo "dpkg-query: no packages found matching $last" >&2; exit 1 ;; esac\n'
+    ),
+    "curl": (
+        '#!/bin/bash\nfor url; do :; done\necho "curl $url" >> "$NK_TEST_LOG"\n'
+        'for up in $NK_TEST_UP; do case "$url" in "$up"*) exit 0 ;; esac; done\n'
+        'echo "curl: (6) Could not resolve host" >&2\nexit 6\n'
+    ),
+    "apt-get": (
+        '#!/bin/bash\ncase "$1" in\n'
+        '  update) echo "update $(tr \'\\n\' \' \' < "$NK_APT_ROOT/etc/apt/apt-mirrors.txt")" >> "$NK_TEST_LOG" ;;\n'
+        '  install) n=$(( $(cat "$NK_TEST_COUNT" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$NK_TEST_COUNT"\n'
+        '    echo "install ${*:2}" >> "$NK_TEST_LOG"; [ "$n" -gt "$NK_TEST_INSTALL_FAILURES" ] ;;\n'
+        '  *) exit 64 ;;\nesac\n'
+    ),
+}
+
+
+class AptInstallHelperTests(unittest.TestCase):
+    """The workflow's one apt helper (NK_APT_INSTALL), run as the steps run it, against stubs.
+
+    On 2026-11-11 the hosted runners reached none of Canonical's hosts and every apt step
+    failed: the lint job's format-portability step had no fallback at all, and the native
+    job's fallback only reordered ubuntu.com hosts that were down too.
+    """
+
+    ALL_MIRRORS: ClassVar[list[str]]
+    CANONICAL = ("http://azure.archive.ubuntu.com/", "http://archive.ubuntu.com/", "http://security.ubuntu.com/")
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.ALL_MIRRORS = _workflow_env_value("ci.yml", "NK_APT_MIRRORS").split()
+
+    def run_helper(self, *args: str, up: Sequence[str] = (), installed: str = "",
+                   install_failures: int = 0) -> tuple[subprocess.CompletedProcess[str], list[str], Path]:
+        bash, reason = _step_bash()
+        if bash is None:
+            self.skipTest(reason)
+        holder = tempfile.TemporaryDirectory()
+        self.addCleanup(holder.cleanup)
+        scratch = Path(holder.name)
+        root = scratch / "root"
+        (root / "etc" / "apt" / "apt.conf.d").mkdir(parents=True)
+        (root / "etc" / "apt" / "sources.list.d").mkdir()
+        (root / "etc" / "os-release").write_text('NAME="Ubuntu"\nVERSION_CODENAME=noble\n', encoding="utf-8")
+        # The hosted image's form, and a plain Canonical URI as another image would carry it.
+        (root / "etc" / "apt" / "sources.list.d" / "ubuntu.sources").write_text(
+            "Types: deb\nURIs: mirror+file:/etc/apt/apt-mirrors.txt\nSuites: noble noble-updates\n", encoding="utf-8")
+        (root / "etc" / "apt" / "sources.list.d" / "plain.sources").write_text(
+            "Types: deb\nURIs: http://azure.archive.ubuntu.com/ubuntu/\nSuites: noble\n\n"
+            "Types: deb\nURIs: https://security.ubuntu.com/ubuntu\nSuites: noble-security\n", encoding="utf-8")
+        stubs = scratch / "bin"
+        stubs.mkdir()
+        for name, body in _APT_STUBS.items():
+            (stubs / name).write_bytes(body.encode("utf-8"))
+            (stubs / name).chmod(0o755)
+        log = scratch / "log"
+        log.write_text("", encoding="utf-8")
+        env = {
+            **os.environ,
+            "NK_APT_INSTALL": _workflow_env_value("ci.yml", "NK_APT_INSTALL"),
+            "NK_APT_MIRRORS": " ".join(self.ALL_MIRRORS),
+            "NK_APT_ROOT": _bash_path(root),
+            "NK_TEST_STUBS": _bash_path(stubs),
+            "NK_TEST_LOG": _bash_path(log),
+            "NK_TEST_COUNT": _bash_path(scratch / "count"),
+            "NK_TEST_UP": " ".join(up),
+            "NK_TEST_INSTALLED": installed,
+            "NK_TEST_INSTALL_FAILURES": str(install_failures),
+        }
+        # The steps' own invocation, with the stubs first on PATH.
+        wrapper = 'export PATH="$NK_TEST_STUBS:$PATH"; bash -c "$NK_APT_INSTALL" nk-apt-install "$@"'
+        done = subprocess.run([bash, "-c", wrapper, "wrapper", *args], capture_output=True, text=True,
+                              env=env, timeout=120, check=False)
+        return done, log.read_text(encoding="utf-8").splitlines(), root
+
+    def test_the_mirror_list_reaches_beyond_canonical(self) -> None:
+        self.assertEqual(self.ALL_MIRRORS[:2], ["http://azure.archive.ubuntu.com/ubuntu/",
+                                                "http://archive.ubuntu.com/ubuntu/"])
+        others = [m for m in self.ALL_MIRRORS if not re.match(r"https?://([a-z.]+\.)?ubuntu\.com/", m)]
+        self.assertGreaterEqual(len(others), 2, self.ALL_MIRRORS)
+
+    def test_an_outage_of_every_canonical_host_installs_from_the_other_mirrors(self) -> None:
+        others = [m for m in self.ALL_MIRRORS if not m.startswith(self.CANONICAL)]
+        done, log, root = self.run_helper("--no-install-recommends", "libc6-dev-i386", up=others)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual([line.split()[0] for line in log if not line.startswith("curl ")], ["update", "install"])
+        self.assertEqual(log[len(self.ALL_MIRRORS)].split()[1:], others)
+        self.assertEqual(log[-1], "install -y --no-install-recommends libc6-dev-i386")
+        self.assertEqual((root / "etc" / "apt" / "apt-mirrors.txt").read_text(encoding="utf-8").split(), others)
+        mirror_list = f"mirror+file:{_bash_path(root)}/etc/apt/apt-mirrors.txt"
+        plain = (root / "etc" / "apt" / "sources.list.d" / "plain.sources").read_text(encoding="utf-8")
+        self.assertEqual(plain.count(f"URIs: {mirror_list}\n"), 2, plain)
+        self.assertNotIn("ubuntu.com", plain)
+        network = (root / "etc" / "apt" / "apt.conf.d" / "79-nk-apt-network").read_text(encoding="utf-8")
+        self.assertIn('Acquire::Retries "5";', network)
+        for mirror in self.ALL_MIRRORS:
+            with self.subTest(probed=mirror):
+                self.assertIn(f"curl {mirror}dists/noble/InRelease", log)
+                if mirror not in others:
+                    self.assertIn(f"{mirror} did not serve dists/noble/InRelease", done.stderr)
+
+    def test_no_mirror_answering_fails_before_apt_runs(self) -> None:
+        done, log, _ = self.run_helper("libc6-dev-i386")
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("::error::nk-apt-install: no Ubuntu mirror answered for noble", done.stderr)
+        self.assertEqual([line for line in log if not line.startswith("curl ")], [])
+
+    def test_a_failed_attempt_moves_the_head_mirror_to_the_end(self) -> None:
+        done, log, _ = self.run_helper("libc6-dev-i386", up=self.ALL_MIRRORS, install_failures=1)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        updates = [line.split()[1:] for line in log if line.startswith("update ")]
+        self.assertEqual(updates, [self.ALL_MIRRORS, self.ALL_MIRRORS[1:] + self.ALL_MIRRORS[:1]])
+
+    def test_every_attempt_failing_fails_the_step(self) -> None:
+        done, log, _ = self.run_helper("libc6-dev-i386", up=self.ALL_MIRRORS, install_failures=99)
+        self.assertEqual(done.returncode, 1)
+        self.assertEqual(sum(line.startswith("install ") for line in log), 3)
+        self.assertIn("::error::nk-apt-install: installing libc6-dev-i386 failed on every attempt", done.stderr)
+
+    def test_installed_packages_need_no_mirror(self) -> None:
+        done, log, _ = self.run_helper("cmake", "git", installed="cmake git")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(log, [])
+        self.assertIn("already installed: cmake git", done.stdout)
+
+    def test_only_missing_packages_are_installed(self) -> None:
+        done, log, _ = self.run_helper("cmake", "libc6-dev-i386", up=self.ALL_MIRRORS, installed="cmake")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(log[-1], "install -y libc6-dev-i386")
+
+    def test_no_package_is_a_usage_error(self) -> None:
+        done, log, _ = self.run_helper("--no-install-recommends", up=self.ALL_MIRRORS)
+        self.assertEqual(done.returncode, 2)
+        self.assertEqual(log, [])
+
+    def test_every_package_install_goes_through_the_helper(self) -> None:
+        """Both apt steps call the helper; no step runs apt-get itself."""
+        text = _workflow_text("ci.yml")
+        jobs = text[text.index("\njobs:\n"):]
+        self.assertNotRegex(jobs, r"(?m)^\s*[^#\n]*\bapt-get\b")
+        invocation = 'bash -c "$NK_APT_INSTALL" nk-apt-install'
+        blocks = _ci_job_blocks()
+        lint = _ci_step(blocks["quick_checks"], "Check 32-bit format specifier portability across portable core")
+        native = _ci_step(blocks["native_tools"], "Install native test dependencies")
+        assert lint is not None and native is not None
+        lint_text, native_text = "\n".join(lint), "\n".join(native)
+        self.assertIn(f"{invocation} --no-install-recommends libc6-dev-i386", lint_text)
+        # The check runs after the install, in the same step, and the step can only fail.
+        self.assertLess(lint_text.index(invocation), lint_text.index("python tools/format_portability_check.py"))
+        self.assertIn("set -euo pipefail", lint_text)
+        self.assertNotIn("continue-on-error", lint_text)
+        self.assertIn(f"{invocation} build-essential", native_text)
+        self.assertIn("libc6-dev-i386", native_text)
+        self.assertIn("set -euo pipefail", native_text)
 
 
 class Gcc16CanaryWiringTests(unittest.TestCase):
