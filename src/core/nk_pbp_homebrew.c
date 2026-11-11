@@ -919,29 +919,34 @@ static bool hb_path_within(const char *path, const char *folder)
     return path[length] == '\0' || hb_is_separator(path[length]);
 }
 
-/* Whether folder is the user's home folder, Desktop, or one of the personal folders in the
-   home folder: a package picked from one of those does not bring the folder along, since it
-   holds the user's own files, not the program's. */
+static bool hb_same_folder(const char *folder, const char *other)
+{
+    char resolved[HB_PATH_MAX];
+    return other != NULL && other[0] != '\0' &&
+           nk_platform_absolute_path(other, resolved, sizeof(resolved)) &&
+           hb_path_within(folder, resolved) && hb_path_within(resolved, folder);
+}
+
+/* Whether folder is one of the user's personal folders: the home folder, the Desktop,
+   Documents, Downloads, Music, Pictures or Videos (where the system says they are, so a
+   folder moved into a cloud folder is still found), or a cloud-sync root the system names.
+   A package picked from one of those does not bring the folder along: its files are the
+   user's, not the program's. */
 static bool hb_is_personal_folder(const char *folder)
 {
-    static const char *const personal[] = {
-        "Desktop", "Documents", "Downloads", "Music", "Pictures", "Videos"
-    };
+    /* The sync client's roots, by the environment names it sets on Windows. */
+    static const char *const sync_roots[] = { "OneDriveConsumer", "OneDriveCommercial" };
     char known[HB_PATH_MAX];
-    char resolved[HB_PATH_MAX];
-    const char *home = nk_platform_env_home_dir();
-    if (nk_platform_get_desktop_dir(known, sizeof(known)) &&
-        nk_platform_absolute_path(known, resolved, sizeof(resolved)) &&
-        hb_path_within(folder, resolved) && hb_path_within(resolved, folder))
+    if (nk_platform_get_desktop_dir(known, sizeof(known)) && hb_same_folder(folder, known))
         return true;
-    if (home == NULL || home[0] == '\0' ||
-        !nk_platform_absolute_path(home, resolved, sizeof(resolved)))
-        return false;
-    if (hb_path_within(folder, resolved) && hb_path_within(resolved, folder)) return true;
-    for (size_t i = 0; i < sizeof(personal) / sizeof(personal[0]); ++i) {
-        if (hb_join(known, sizeof(known), resolved, personal[i]) &&
-            hb_path_within(folder, known) && hb_path_within(known, folder))
+    for (int which = 0; which < (int)NK_PERSONAL_COUNT; ++which) {
+        if (nk_platform_get_personal_dir((NkPersonalDir)which, known, sizeof(known)) &&
+            hb_same_folder(folder, known))
             return true;
+    }
+    if (hb_same_folder(folder, nk_platform_env_home_dir())) return true;
+    for (size_t i = 0; i < sizeof(sync_roots) / sizeof(sync_roots[0]); ++i) {
+        if (hb_same_folder(folder, getenv(sync_roots[i]))) return true;
     }
     return false;
 }

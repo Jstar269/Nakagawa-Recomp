@@ -197,6 +197,19 @@ bool nk_platform_get_legacy_app_data_dir(char *out_path, size_t max_len);
  * POSIX: the Desktop folder in the home folder when it exists, else the home
  * folder itself. False when there is none. */
 bool nk_platform_get_desktop_dir(char *out_path, size_t max_len);
+/* The user's personal folders other than the Desktop. */
+typedef enum {
+    NK_PERSONAL_DOCUMENTS = 0,
+    NK_PERSONAL_DOWNLOADS,
+    NK_PERSONAL_MUSIC,
+    NK_PERSONAL_PICTURES,
+    NK_PERSONAL_VIDEOS,
+    NK_PERSONAL_COUNT
+} NkPersonalDir;
+/* Where one of them is. Windows: its known folder (FOLDERID_Documents and so on),
+ * which follows a folder the user or a sync tool moved. POSIX: the folder of that
+ * name in the home folder. False when it does not exist. */
+bool nk_platform_get_personal_dir(NkPersonalDir which, char *out_path, size_t max_len);
 #if defined(_WIN32) || defined(_WIN64)
 /* Unit-testable Windows base selection: LOCALAPPDATA, Known Folder, APPDATA.
  * USERPROFILE is deliberately not a candidate. */

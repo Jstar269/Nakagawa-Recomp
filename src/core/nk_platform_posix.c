@@ -638,6 +638,21 @@ bool nk_platform_get_desktop_dir(char *out_path, size_t max_len) {
     return false;
 }
 
+bool nk_platform_get_personal_dir(NkPersonalDir which, char *out_path, size_t max_len) {
+    static const char *const names[NK_PERSONAL_COUNT] = {
+        "Documents", "Downloads", "Music", "Pictures", "Videos"
+    };
+    if (!out_path || max_len == 0) return false;
+    out_path[0] = '\0';
+    if ((unsigned)which >= (unsigned)NK_PERSONAL_COUNT) return false;
+    const char *home = getenv("HOME");
+    if (!home || !*home) return false;
+    int written = snprintf(out_path, max_len, "%s/%s", home, names[which]);
+    if (written > 0 && (size_t)written < max_len && nk_platform_dir_exists(out_path)) return true;
+    out_path[0] = '\0';
+    return false;
+}
+
 /* ---- fork/exec children ----------------------------------------------------------------------
  *
  * Every POSIX process the desktop starts, and on Android the bundled tool programs

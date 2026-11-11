@@ -690,6 +690,23 @@ bool nk_platform_get_desktop_dir(char *out_path, size_t max_len) {
     return resolved;
 }
 
+bool nk_platform_get_personal_dir(NkPersonalDir which, char *out_path, size_t max_len) {
+    static const KNOWNFOLDERID *const folders[NK_PERSONAL_COUNT] = {
+        &FOLDERID_Documents, &FOLDERID_Downloads, &FOLDERID_Music, &FOLDERID_Pictures,
+        &FOLDERID_Videos
+    };
+    if (!out_path || max_len == 0) return false;
+    out_path[0] = '\0';
+    if ((unsigned)which >= (unsigned)NK_PERSONAL_COUNT) return false;
+    PWSTR wide_path = NULL;
+    HRESULT result = SHGetKnownFolderPath(folders[which], KF_FLAG_DEFAULT, NULL, &wide_path);
+    bool resolved = SUCCEEDED(result) && wide_path &&
+        wide_to_utf8(wide_path, out_path, max_len) && nk_platform_dir_exists(out_path);
+    if (wide_path) CoTaskMemFree(wide_path);
+    if (!resolved) out_path[0] = '\0';
+    return resolved;
+}
+
 static bool get_windows_data_base(char *out_base, size_t max_len) {
     char known_local_app_data[32768] = "";
     char local_app_data[32768] = "";
