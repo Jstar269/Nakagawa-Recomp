@@ -3496,6 +3496,7 @@ _INT_LOAD_OPS = (0x20, 0x21, 0x23, 0x24, 0x25)  # lb, lh, lw, lbu, lhu
 _GATE_STORE_OPS = (0x28, 0x29, 0x2B, 0x39)  # sb, sh, sw, swc1
 _FPU_RESULT_FUNCS = (0x00, 0x01, 0x02, 0x03, 0x05, 0x06, 0x07)  # add sub mul div abs mov neg
 _FPU_ARITHMETIC_FUNCS = (0x00, 0x01, 0x02, 0x03)  # add.s sub.s mul.s div.s
+_FPU_MOV_S = 0x06
 
 
 def _f32(bits: int) -> float:
@@ -3800,8 +3801,9 @@ def _plan_word_rewrite(site: Mapping[str, Any], w: int,
       ``scale_f_store``   store FPR ``reg`` multiplied by ``factor`` (the register is kept);
       ``scale_int_store`` store GPR ``reg`` doubled (the register is kept; count_x2 on ``sw``);
       ``scale_f_addend``  run ``fd = fd +/- ft`` with ``ft`` multiplied by ``factor``;
-      ``map_f_reg``       after the stock lwc1 (or, for retention, the stock single-precision
-                          arithmetic), map FPR ``reg`` by ``map`` (decay or retention);
+      ``map_f_reg``       after the stock lwc1 or mov.s (or, for retention, the stock
+                          single-precision arithmetic), map FPR ``reg`` by ``map`` (decay or
+                          retention);
       ``scale_v_reg``     after the stock lv.s, multiply VFPU register ``vreg`` by ``factor``;
       ``scale_vq_reg``    after the stock lv.q, multiply the four lanes of VFPU register ``vreg``
                           by ``factor``;
@@ -3998,8 +4000,12 @@ def _plan_word_rewrite(site: Mapping[str, Any], w: int,
         if mapping == "retention" and is_fpu_s and fn in _FPU_ARITHMETIC_FUNCS:
             # The retention is computed (such as 1 - c*L): map the result register.
             return {"kind": "map_f_reg", "reg": sa, "map": mapping}
+        if is_fpu_s and fn == _FPU_MOV_S and rt == 0:
+            # mov.s fd, fs copies the factor: map the copy only. The source register may hold the
+            # same value for another use (a duration, say) that must keep its stock value.
+            return {"kind": "map_f_reg", "reg": sa, "map": mapping}
         if op != 0x0F:
-            _refuse(site, w, "expects the lui of a float constant, an lwc1 or an lv.s"
+            _refuse(site, w, "expects the lui of a float constant, an lwc1, an lv.s or a mov.s"
                              + (", or single-precision arithmetic" if mapping == "retention" else ""))
         value = _f32(imm16 << 16)
         if not 0.0 < value < 1.0:
