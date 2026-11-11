@@ -68,6 +68,7 @@ instrumentation is this test's protection against the historical RAM runaway."
 #include "nk_platform.h"        /* per-user data directory override for the font cache */
 #include "audio_resample.h"
 #include "vfpu_tables.h"        /* sr_vfpu_sha256: enhancement data-file digests */
+#include "guest_interp.h"      /* SrGuestInterpCallBoundary: the dispatch entries defined below */
 
 #include <math.h>
 #include <stdint.h>
@@ -51981,5 +51982,27 @@ int dispatch_call_interp(CpuState *s, uint32_t target, uint32_t resume_pc) {
     s->flow_kind = SR_FLOW_FATAL;
     s->flow_target = target;
     return 1;
+}
+#else
+/* This variant links guest_interp.c (other runtime objects reach it) but not recomp.c,
+ * whose dispatcher the interpreter's linked calls enter. No test here interprets guest code,
+ * so those two entries only have to exist: GNU ld's --gc-sections drops the reference, but
+ * lld resolves every symbol first and refused the link (#317). Each ends the process by name
+ * if it is ever reached: a caller that does not check the flow could not let it go on. */
+int dispatch_call_interp(CpuState *s, uint32_t target, uint32_t resume_pc) {
+    fprintf(stderr, "hle_thread_selftest: this harness has no interpreted linked call "
+                    "(target 0x%08x, resume 0x%08x)\n", target, resume_pc);
+    (void)s;
+    fflush(stderr);
+    exit(1);
+}
+
+int dispatch_call_continue(CpuState *s, uint32_t target, const SrGuestInterpCallBoundary *call) {
+    (void)call;
+    fprintf(stderr, "hle_thread_selftest: this harness has no interpreted call to continue "
+                    "(target 0x%08x)\n", target);
+    (void)s;
+    fflush(stderr);
+    exit(1);
 }
 #endif /* SR_HLE_AOT_BOUNDARY_TEST */
