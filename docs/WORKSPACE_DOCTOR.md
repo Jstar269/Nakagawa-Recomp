@@ -223,39 +223,68 @@ semantics; `clean-preview` is additive.
 
 ### Paths outside the output roots
 
-Make writes only beneath `BUILD_ROOT` and `LOG_DIR`. Everything else that reads or writes a
-fixed path outside them is listed here with the reason it stays, and
-`OutsideOutputRootInventoryTests` in `tools/test_workspace_paths.py` keeps the lists current:
-a new runtime default, `fopen` of a literal name, or `logs/`, `build/` or `place_game_here/`
-literal in `src/` that is missing here fails it, and so does a row whose path no longer
-exists in the source or a root-level file that is not gitignored.
+Make writes only beneath `BUILD_ROOT` and `LOG_DIR`. The fixed paths that the runtime and
+the tools read or write outside them are listed here, each with the reason it stays.
+`OutsideOutputRootInventoryTests` in `tools/test_workspace_paths.py` derives the runtime's
+list from the source and fails on a name missing here or a row the source no longer names.
+It finds a `path` default in `src/rt/env_registry.h`, an `fopen` of a literal name, a
+`logs/`, `build/` or `place_game_here/` literal anywhere in `src/`, and a bare file name
+with an output extension in `src/rt`. A name split around an `inttypes.h` format macro is
+joined and listed with the macro's name in place, so `"snap_f%05" PRIu32 ".ppm"` is
+`snap_f%05PRIu32.ppm`. Comments are not read. It cannot see a name the code assembles from separate pieces at run time. The
+tools table is not derived: the test checks each of its rows against its tool's source,
+and requires every written path inside the checkout to be gitignored.
 
 The runtime opens these relative to its working directory, the run folder. `make run` and
 the private title routes run from the checkout, so there they land in or read from the
-checkout; the player runs a title from its package folder in the per-user data. Every
-written one is off until its switch is set.
+checkout. The player runs a title from its package folder in the per-user data when the
+package is valid, otherwise from the folder it was given. Each written path is off until
+the switches named turn it on, except `memstick`, which the guest writes whenever it saves.
+Where two switches are named, the first turns the output on and the second moves it.
 
 | Path | Switch | Direction | Why it stays |
 | --- | --- | --- | --- |
-| `flight-recorder.json` | `SR_FLIGHT_OUTPUT` | written | The flight recorder's dump goes where the run is, so a crash report sits next to the run that made it. Gitignored at the checkout root. |
-| `samples.csv` | `SR_SAMPLE_OUT` | written | The state-sampling route's output, beside the run it measured. Gitignored at the checkout root. |
+| `flight-recorder.json` | `SR_FLIGHT`, `SR_FLIGHT_OUTPUT` | written | The flight recorder's dump goes where the run is, so a crash report sits next to the run that made it. Gitignored at the checkout root, with its `.tmp` while it is written. |
+| `samples.csv` | `SR_SAMPLE_SPEC`, `SR_SAMPLE_OUT` | written | The state-sampling route's output, beside the run it measured. Gitignored at the checkout root. |
 | `nidseq_mine.txt` | `SR_NIDLOG` | written | One line per HLE call for comparing call sequences between runs ([DEBUGGING.md](DEBUGGING.md)). Gitignored. |
 | `edram.bin` | `SR_FBDUMP` | written | The 2 MB eDRAM image of a framebuffer dump. Gitignored (`*.bin`). |
+| `fb_present.ppm` | `SR_FBDUMP` | written | The presented framebuffer of that dump. Gitignored (`*.ppm`). |
+| `present_source.ppm` | `SR_FBDUMP` | written | The source image the presenter drew for that frame. Gitignored (`*.ppm`). |
+| `fb_content.ppm` | `SR_FBDUMP`, `SR_GEDUMP` | written | The framebuffer at the end of a display list that drew textured pixels. Gitignored (`*.ppm`). |
+| `snap_f%05PRIu32.ppm` | `SR_FBSNAP` | written | The GE's per-frame snapshots, `snap_f<frame>.ppm`. Gitignored (`*.ppm`). |
+| `snap_%u.ppm` | `SR_FBSNAP` | written | The display's rolling snapshots, eight names reused. Gitignored (`*.ppm`). |
+| `snap_v%u.ppm` | `SR_FBSNAP`, `SR_FBSNAP_WINDOWS` | written | The same, named by vblank inside the chosen windows. Gitignored (`*.ppm`). |
+| `frame_v%u.ppm` | `SR_FBSNAP`, `SR_FBSNAP_WINDOWS` | written | The capture policy's frame inside the chosen windows. Gitignored (`*.ppm`). |
+| `build/snapshots/frame_%04u.ppm` | `SR_FBSNAP` | written | The capture policy's frames without windows, which `tools/ppmdiff.py` compares with `build/golden` by default; under `build/`, gitignored. |
+| `tex_%08PRIx32_f%PRIu32_%dx%d.ppm` | `SR_TEXDUMP` | written | Each distinct texture a draw used, once per run. Gitignored (`*.ppm`). |
+| `tex_%08PRIx32_f%PRIu32_%dx%d_a.pgm` | `SR_TEXDUMP` | written | That texture's alpha. Gitignored (`*.pgm`). |
 | `vram_first.bin` | `SR_FIRST_FRAME_DUMP` | written | The first presented frame's VRAM, raw. Gitignored (`*.bin`). |
 | `frame_first.ppm` | `SR_FIRST_FRAME_DUMP` | written | The first presented frame as an image. Gitignored (`*.ppm`). |
-| `logs/ge_capture.ngef` | `SR_GE_CAPTURE_PATH` | written | A GE command capture; under the run folder's `logs/`, gitignored. |
-| `logs/trace_window.txt` | `SR_TRACE` | written | The PC trace window; under `logs/`, gitignored. |
+| `logs/ge_capture.ngef` | `SR_GE_CAPTURE_FRAME`, `SR_GE_CAPTURE_PATH` | written | A GE command capture; under the run folder's `logs/`, gitignored. |
+| `logs/trace_window.txt` | `SR_TRACE_PC`, `SR_TRACE` | written | The PC trace window; under `logs/`, gitignored. |
 | `logs/ge_transition_trace.jsonl` | `SR_GE_TRANSITION_TRACE` | written | The GE transition trace when the switch is `1`; under `logs/`, gitignored. |
-| `build/snapshots/frame_%04u.ppm` | `SR_FBSNAP` | written | Framebuffer snapshots that `tools/ppmdiff.py` compares with `build/golden` by default; under `build/`, gitignored. |
-| `place_game_here/EXTRACTED/decrypted` | `SR_MODULE_DIR` | read | The decrypted guest modules of a private title run, in the ignored input root. |
+| `ge_replay.ppm` | none | written | The `ge_replay` tool's image when no output is named on its command line. Gitignored (`*.ppm`). |
 | `memstick` | `SR_MEMSTICK` | read and written | The guest's `ms0:` root, saves included, in the ignored input root. |
-| `watchpoints.json` | `SR_WATCHPOINTS_FILE` | read | The debugger's watchpoint list. Gitignored at the checkout root. |
+| `place_game_here/EXTRACTED/decrypted` | `SR_MODULE_DIR` | read | The decrypted guest modules of a private title run, in the ignored input root. |
+| `watchpoints.json` | `SR_WATCHPOINTS_FILE` | read | The debugger's watchpoint list, read when present. Gitignored at the checkout root. |
 | `assets/vfpu` | `PSP_VFPU_TABLES` | read | The VFPU tables tracked in the repository. |
 | `build/display-smoke-v1/staged` | none | neither | The folder named by the synthetic library card that the player's `ready-library` screenshot view shows. The card stays in memory and the folder is never opened. |
 
-The launch candidates in `src/core/generated/nk_title_catalog.c` (`build/<name>/<name>.exe`
-and the image beside it) are not in this table: `src/core/nk_launch.c` joins them to the
-checkout it was given, never to the working directory.
+These names are joined to a folder the runtime is given or finds, never to the run folder:
+
+| Name | Joined to |
+| --- | --- |
+| `crash_dump.bin` | the folder holding the running executable |
+| `exited.flag` | the folder holding the running executable |
+| `record.json` | the recording folder a video recording names |
+| `record.json.tmp` | the recording folder, while `record.json` is written |
+| `audio.wav` | the recording folder |
+| `frames.csv` | the recording folder |
+| `vram_%PRIu32.bin` | the folder a VRAM dump request names |
+
+`src/core/generated/nk_title_catalog.c` is not scanned. Its launch candidates
+(`build/<name>/<name>.exe` and the image beside it) and its fixture memory-stick roots are
+joined by `src/core/nk_launch.c` to the checkout it was given, never to the working directory.
 
 Tools write these fixed paths outside `BUILD_ROOT` and `LOG_DIR`:
 
@@ -267,9 +296,9 @@ Tools write these fixed paths outside `BUILD_ROOT` and `LOG_DIR`:
 | `third_party/ghidra/exports` | `tools/ghidra_headless.py` | That project's exports, beside it. |
 | `%LOCALAPPDATA%\Nakagawa` | `tools/verify_installer.py` | The installer check plants marker files in the per-user data folders to prove an uninstall keeps them, and removes them and any folder it made. |
 
-The generators that `python tools/regen_all.py --list` names write tracked files under `src/`,
-`docs/` and `assets/` by design: those files are their output, and the generated-file check
-proves them current.
+The generators that `python tools/regen_all.py --list` names write tracked files across the
+tree by design: those files are their output, and the generated-file check proves them
+current.
 
 ## Checkouts at an arbitrary path
 
