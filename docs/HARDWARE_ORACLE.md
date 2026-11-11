@@ -1382,7 +1382,7 @@ One console is one data point; see §11. Nothing here closes issue #70
     `0xFFFFFFFE`; 64-bit `SEEK_END` to `0xFFFFFFFF` and to `0x100000000`. `SEEK_SET` `0x10000` succeeds (returns
     `0x10000`, position `0x10000`).
   - *High word of a refused 64-bit seek.* `0xffffffff` (the error sign-extended) for `SEEK_CUR` -9, `SEEK_CUR` to
-    size+16 and `SEEK_SET` `0x7FFFFFFF`; `0` for the other eleven 64-bit refusals (every target at or above
+    size+16 and `SEEK_SET` `0x7FFFFFFF`; `0` for the other nine 64-bit refusals (every target at or above
     `0x80000000` reached by `SEEK_SET`, `SEEK_CUR` or `SEEK_END`). With the `hle-io-seek` cells this fits a
     refusal whose high word is 0 exactly when the requested target is at or above `0x80000000`.
   - *`PSP_O_RDONLY|PSP_O_CREAT` on an existing file* opens it; a 4-byte `sceIoWrite` returns `0x80020323`, the
@@ -3847,47 +3847,53 @@ the utility cannot read (the probe does not construct one); any of this in the X
 
 ### PSP-SAS-002 capture 2026-11-10
 
-`sas-adsr` (case 152, `fixtures/psp_oracle/probe.c`) ran once on 2026-11-10 (UTC) on the PSP-3000, boot 185, in
-the game context (standalone PSPLink), at `74acbe42`, an ancestor of this tree whose `sas-adsr` section of
-`probe.c` and Makefile CASE and LIBS lines are identical to this tree's, apart from the two AV-module unloads after the done record added on 2026-11-11, which run after every record. Firmware: system software 6.61 (`flash0:/vsh/etc/version.txt`: `release:6.61:`,
-`system:58401@release_661,0x06060110:`); PSPLink `pspver` 0x06060110, which the runner records as 6.6.1; custom
-firmware ARK-5 with cIPL, version 5.1.0 (operator-declared, not read by a tool). The stream is complete: 696
-records, all PASS, and COMPLETE PASS, after a `transport-write` preflight. The envelope is not
-acceptance-eligible: its one acceptance blocker is "loaded module was not proven unloaded" (the teardown found
-the post-unload module set different from the one before the launch), and the runner's recovery then reset the
-PSP to boot 186. The capture is therefore `CAPTURED` and establishes nothing about PSP behaviour. The raw
-envelope, host0 log and decode stay in the private campaign directory.
+`sas-adsr` (case 152, `fixtures/psp_oracle/probe.c`) ran once on 2026-11-10 (UTC) on the PSP-3000, boot 185, in the
+game context (standalone PSPLink), at `74acbe42`, an ancestor of this tree whose `sas-adsr` section of `probe.c` and
+Makefile CASE and LIBS lines are identical to this tree's, apart from the two AV-module unloads after the done record
+added on 2026-11-11, which run after every record. Firmware: system software 6.61 (`flash0:/vsh/etc/version.txt`:
+`release:6.61:`, `system:58401@release_661,0x06060110:`); PSPLink `pspver` 0x06060110, which the runner records as
+6.6.1; custom firmware ARK-5 with cIPL, version 5.1.0 (operator-declared, not read by a tool). The stream is
+complete: 696 records, all PASS, and COMPLETE PASS, after a `transport-write` preflight. The envelope is not
+acceptance-eligible: its one acceptance blocker is "loaded module was not proven unloaded" (the teardown found the
+post-unload module set different from the one before the launch), and the runner's recovery then reset the PSP to
+boot 186. The capture is therefore `CAPTURED` and establishes nothing about PSP behaviour. The raw envelope, host0
+log and decode stay in the private campaign directory.
 
-It is the first run of the current status encoding, which writes `PASS` or `ERROR` where the 2026-11-05 run of
-the earlier source revision wrote `RC`. The two streams have the same 696 case ids, and every record has the same
-result and out words in both. The values described in `fixtures/psp_oracle/README.md` are therefore what both runs
-show. The case used to keep AVCODEC and SASCORE loaded (as `sas-init` does), so the module set after it always
-differed from the one before the launch. Since 2026-11-11 it unloads SASCORE, then AVCODEC, after its done
-record, so a rerun can pass the runner's teardown check; no such rerun has been made.
+It is the first run of the current status encoding, which writes `PASS` or `ERROR` where the 2026-11-05 run of the
+earlier source revision wrote `RC`. The two streams have the same 696 case ids, and every record has the same result
+and out words in both. The values described in `fixtures/psp_oracle/README.md` are therefore what both runs show. The
+case used to keep AVCODEC and SASCORE loaded (as `sas-init` does), so the module set after it always differed from
+the one before the launch. Since 2026-11-11 it unloads SASCORE, then AVCODEC, after its done record, so a rerun can
+pass the runner's teardown check; no such rerun has been made, and that rerun is also the first run of the unload
+itself (unloading SASCORE while a SAS core is initialised is not measured).
 
 ### PSP-SAS-003 capture 2026-11-07
 
-`sas-mix` (case 155, `run_sas_mix` in `fixtures/psp_oracle/probe.c`) ran once on 2026-11-07 on the PSP-3000,
-boot 146, in the game context, at `979de58f`, a pre-publication commit whose `sas_mix` functions, tables and
-constants in `probe.c` and whose Makefile CASE and LIBS lines are identical to this tree's, apart from the two AV-module unloads after the done record added on 2026-11-11, which run after every record. Firmware: system
-software 6.61 (`flash0:/vsh/etc/version.txt`, read on 2026-11-10: `release:6.61:`,
-`system:58401@release_661,0x06060110:`); PSPLink `pspver` 0x06060110, which the runner records as 6.6.1 and
-which `pspver` prints in the game context (0x06060010 in the XMB context); custom firmware ARK-5 with cIPL,
-version 5.1.0 (operator-declared, not read by a tool). The stream is complete: 205 records (204 cells and the
-done record, out0 `0xcc`), all PASS, COMPLETE PASS, after a `transport-write` preflight. The envelope is not
-acceptance-eligible: its one acceptance blocker is "loaded module was not proven unloaded" (the teardown found
-the post-unload module set different from the one before the launch), and the runner's recovery then reset
-the PSP to boot 147. The capture is therefore `CAPTURED` and establishes nothing about PSP behaviour; the values
-below are what it shows. The case kept AVCODEC and SASCORE loaded, so the module set after it differed.
+`sas-mix` (case 155, `run_sas_mix` in `fixtures/psp_oracle/probe.c`) ran once on 2026-11-07 on the PSP-3000, boot
+146, in the game context, at `979de58f`, a pre-publication commit whose `sas_mix` functions, tables and constants in
+`probe.c` and whose Makefile CASE and LIBS lines are identical to this tree's, apart from the two AV-module unloads
+after the done record added on 2026-11-11, which run after every record. Firmware: system software 6.61
+(`flash0:/vsh/etc/version.txt`, read on 2026-11-10: `release:6.61:`, `system:58401@release_661,0x06060110:`); PSPLink
+`pspver` 0x06060110, which the runner records as 6.6.1 and which `pspver` prints in the game context (0x06060010 in
+the XMB context); custom firmware ARK-5 with cIPL, version 5.1.0 (operator-declared, not read by a tool). The stream
+is complete: 205 records (204 cells and the done record, out0 `0xcc`), all PASS, COMPLETE PASS, after a
+`transport-write` preflight. The envelope is not acceptance-eligible: its one acceptance blocker is "loaded module
+was not proven unloaded" (the teardown found the post-unload module set different from the one before the launch),
+and the runner's recovery then reset the PSP to boot 147. The capture is therefore `CAPTURED` and establishes nothing
+about PSP behaviour; the values below are what it shows. The case kept AVCODEC and SASCORE loaded, so the module set
+after it differed.
 
 A second capture on 2026-11-11 (UTC), boot 191, game context, at `a39f7a14c` (the same `sas_mix` source as
-`979de58f`), after the custom firmware update to ARK-5 5.2.0 (operator-declared; `pspver` 0x06060110, recorded
-as 6.6.1; PSPLink built from `pspdev/psplinkusb` `7a0035d9`), gave the same 205 records with the same result
-and out words, all PASS, COMPLETE PASS. It met the same blocker (54 modules after the unload against 52 before
-the launch), and the runner's recovery then could not get a PSPLink reply, so the Nakagawa Link watchdog reset
-the PSP to boot 192. Since 2026-11-11 the case unloads SASCORE, then AVCODEC, after its done record, so a rerun
-can pass the teardown check; no such rerun has been made. The raw envelopes, host0 logs and decode stay in the
-private campaign directory.
+`979de58f`), after the custom firmware update to ARK-5 5.2.0 (operator-declared; `pspver` 0x06060110, recorded as
+6.6.1; PSPLink built from `pspdev/psplinkusb` `7a0035d9`), gave the same 205 records with the same result and out
+words, all PASS, COMPLETE PASS. It is not acceptance-eligible, with three blockers: the same module blocker (54
+modules after the unload against 52 before the launch), "source worktree is dirty" (the runner ran from a worktree
+with uncommitted edits, so `a39f7a14c` is the commit the probe reported, not a clean-source binding) and
+`PHYSICAL_INTERVENTION_REQUIRED`; the runner's recovery then could not get a PSPLink reply, so the Nakagawa Link
+watchdog reset the PSP to boot 192. Since 2026-11-11 the case unloads SASCORE, then AVCODEC, after its done record,
+so a rerun can pass the teardown check; no such rerun has been made, and that rerun is also the first run of the
+unload itself (unloading SASCORE while a SAS core is initialised is not measured). The raw envelopes, host0 logs and
+decode stay in the private campaign directory.
 
 The voice is a flat VAG of sample `0x0700`, whose full-scale output is `0x06fe`.
 

@@ -12735,7 +12735,8 @@ static void run_sas_adsr(int emulated) {
     sas_adsr_record(emulated, "sas-adsr-done", sascore_ok ? "PASS" : "SKIP", done, 1u);
     /* Unload what this case loaded, newest first, so the runner's post-unload module set equals
        the one before the launch (the 2026-11-10 capture was blocked by the two AV modules left
-       loaded). No SAS call follows. */
+       loaded). No SAS call follows. Not yet run on a PSP: unloading SASCORE while a SAS core is
+       initialised is unmeasured, and the results are not recorded (the stream is unchanged). */
     if (sascore_ok) {
         probe_step(emulated, "sas-adsr", "unload-sascore");
         (void)sceUtilityUnloadAvModule(PSP_AV_MODULE_SASCORE);
@@ -13125,7 +13126,8 @@ static void run_sas_mix(int emulated) {
     sas_mix_record(emulated, "sas-mix-done", sascore_ok ? "PASS" : "SKIP", done, 1u);
     /* Unload what this case loaded, newest first, so the runner's post-unload module set equals
        the one before the launch (the 2026-11-07 and 2026-11-11 captures were blocked by the two
-       AV modules left loaded). No SAS call follows. */
+       AV modules left loaded). No SAS call follows. Not yet run on a PSP: unloading SASCORE while a SAS
+       core is initialised is unmeasured, and the results are not recorded (the stream is unchanged). */
     if (sascore_ok) {
         probe_step(emulated, "sas-mix", "unload-sascore");
         (void)sceUtilityUnloadAvModule(PSP_AV_MODULE_SASCORE);

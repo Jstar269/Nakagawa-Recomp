@@ -4990,8 +4990,9 @@ static void hle_ise_ms(void)
        w = open, the call's result, the number of sceIoPollAsync calls made (HLE_SENTINEL when
        the call did not return 0), the last poll's return and the 64-bit result word it wrote
        (low, high; preset to HLE_SENTINEL), then sceIoWaitAsync's return and its 64-bit result
-       (low, high), called only when a poll returned 0 (complete), and the close's result. Each word that was not reached is HLE_SENTINEL. The open is the probe's
-       setup, so the row is FAIL when it fails. */
+       (low, high), called only when a poll returned 0 (complete), and the close's result. Each
+       word that was not reached is HLE_SENTINEL. The open is the probe's setup, so the row is
+       FAIL when it fails. */
     hle_step("io-edge-ms-write-async");
     fd = sceIoOpen(HLE_ISE_FILE, PSP_O_RDONLY, 0777);
     for (unsigned i = 1; i < 10u; i++) w[i] = HLE_SENTINEL;
