@@ -233,6 +233,10 @@ CASE_ID = 161
 # 162: #1380's flash0:/ms0:/disc0: seek cells and sceIoIoctl file commands (probe_hle_measure.c).
 else ifeq ($(CASE),hle-io-seek)
 CASE_ID = 162
+# 186: #1380's remaining seek cells: flash0: SEEK_CUR and past-0x100000000 seeks, and ms0:
+# open-flag and async-write cells on a probe-owned file (probe_hle_measure.c, PSP-HLE-IO-SEEK-002).
+else ifeq ($(CASE),hle-io-seek-edges)
+CASE_ID = 186
 # 164: W-NET-1's nickname limit: owner_name key info and the system-parameter string length
 # refusals, read-only (probe_hle_measure.c, PSP-HLE-NICKNAME-001).
 else ifeq ($(CASE),hle-nickname-limit)
@@ -648,6 +652,9 @@ TARGET = $(BUILD_DIR)/hle_utility_dialogs
 OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o $(BUILD_DIR)/hle_utility_imports.o
 else ifeq ($(CASE),hle-io-seek)
 TARGET = $(BUILD_DIR)/hle_io_seek
+OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o
+else ifeq ($(CASE),hle-io-seek-edges)
+TARGET = $(BUILD_DIR)/hle_io_seek_edges
 OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o
 else ifeq ($(CASE),hle-nickname-limit)
 TARGET = $(BUILD_DIR)/hle_nickname_limit
