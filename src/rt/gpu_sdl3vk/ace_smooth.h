@@ -47,7 +47,8 @@ void ace_smooth_destroy(AceBetween *s);
 typedef struct {
     /* ACE_SMOOTH_HUD_WORDS words, or NULL: no mask (the frame is matched as before). */
     const uint32_t *hud_bits;
-    /* The frame's D16 depth image, in depth_layout, with the presented frame at its top-left at
+    /* The frame's depth image (D16, or D32 under depth=32: ace_hud_depth_float), in depth_layout,
+     * with the presented frame at its top-left at
      * the same scale; VK_NULL_HANDLE when the frame wrote no depth. It is only read, and is left
      * in depth_layout. It needs VK_IMAGE_USAGE_TRANSFER_SRC_BIT. */
     VkImage depth;
