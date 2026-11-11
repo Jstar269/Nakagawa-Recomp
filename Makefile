@@ -165,6 +165,28 @@ POWERSHELL ?= powershell.exe
 else
 POWERSHELL ?= pwsh
 endif
+# RECIPE SHELL (#368). GNU Make runs recipes with sh. On Windows, mingw32-make looks
+# for sh.exe on PATH when it starts and, when it finds one, sets SHELL to its full
+# path. When it finds none, SHELL keeps the bare default `sh.exe` and every recipe
+# runs under cmd.exe instead, with no warning. Most recipes are written for both,
+# and the player's package build (a bundled toolchain with no sh) relies on that.
+# The rest use POSIX syntax (if/then, for loops, `[`, `VAR=value cmd`, `$$var`, `;`
+# between commands), which cmd.exe misreads: it fails with an unrelated error, or
+# worse, exits 0 (`echo ...; exit 2` prints the whole line and succeeds). Each such
+# recipe starts with $(NK_REQUIRE_POSIX_SHELL). Make expands a recipe in full before
+# running its first line, so under cmd.exe the guard stops Make, naming the target
+# and the fix, before any line of that recipe runs; with a POSIX sh it expands to
+# nothing. The guard applies to `make -n` too, which then stops instead of printing.
+# tools/test_build_truth.py::RecipeShellGuardTests classifies the recipes in Make's own
+# rule database, with the `define` macros they call, and fails when one in POSIX syntax
+# lacks the guard; it sees only the conditional branches of the host it runs on. An
+# explicit `SHELL=cmd.exe` on the command line is the caller's choice and is not refused.
+ifeq ($(OS),Windows_NT)
+NK_RECIPE_SHELL := $(if $(filter sh.exe,$(SHELL)),cmd.exe,posix)
+else
+NK_RECIPE_SHELL := posix
+endif
+NK_REQUIRE_POSIX_SHELL = $(if $(filter cmd.exe,$(NK_RECIPE_SHELL)),$(error $@ needs a POSIX sh, and mingw32-make found no sh.exe on PATH, so it would run this recipe with cmd.exe. Put the usr\bin folder of Git for Windows or MSYS2 on PATH and run it again; see "PATH order" in docs/SETUP.md))
 # glslc from the Vulkan SDK is used ONLY by the opt-in shaders target.
 GLSLC ?= glslc
 
