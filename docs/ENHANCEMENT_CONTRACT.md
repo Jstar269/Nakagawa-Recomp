@@ -1096,7 +1096,8 @@ code is `src/rt/gpu_sdl3vk/tex_mips.h` (the chain) and the `tex_hm_*` functions 
     own size, and a chain taken from the cache, or contents refused below, charge a sixteenth of their texels. A
     later bind builds the chain. The budget counts texels and guest flips, not host time or host presents (which
     a frame cap drops on a wall-clock grid), because a chain changes the frame the guest keeps: which draws bind
-    one is the same on every host and in every deterministic run, record and replay included.
+    one is the same on every host and in every deterministic run started from boot, record and replay included
+    (a saved state does not carry the budget, the streaming table or the chain cache).
   - **Streaming textures.** A texture address whose contents are decoded anew in three guest frames in a row,
     each within two frames of the last (a movie on a surface, a palette fade, which makes a new entry at each step, a
     texture rewritten every frame), would build chains that are replaced before they are seen again. While it
