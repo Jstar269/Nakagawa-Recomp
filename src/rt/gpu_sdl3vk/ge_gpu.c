@@ -821,7 +821,7 @@ unsigned long s_cnt_present_gpu = 0;
 /* Public read-only accessor: number of GE list submissions since process start.
  * Unused by the recomp/runtime; kept available for downstream tools/diffing. */
 unsigned long sr_submit_count(void) { return s_cnt_submit; }
-static unsigned long s_cnt_present_cpu = 0, s_cnt_rtt = 0;
+static unsigned long s_cnt_present_cpu = 0, s_cnt_rtt = 0, s_cnt_rtt_direct = 0;
 /* One count over every target image change and depth write, so a texture read whose address lies
  * in both a colour target and a depth buffer can tell which was written last (depth_containing). */
 static uint64_t s_write_seq = 0;
@@ -5533,7 +5533,9 @@ static void build_state(int persp, int sprite, Batch *b) {
              * target's colour is the newer content and the rules below apply. Queued batches are
              * submitted first, so both write counts include them. */
             DepthEnt *zsrc = depth_containing(vram_off(g->tex_addr));
-            if (zsrc && s_nbatch) submit_pending();
+            if (zsrc && s_nbatch && !submit_pending())
+                fprintf(stderr, "gegpu: a texture read inside depth buffer 0x%06x: the queued batches did not "
+                        "submit, so the newer of colour and depth is judged without them\n", zsrc->zba);
             const int depth_read = zsrc && zsrc->zseq > src->cseq;
             if (src->gpu_valid && !depth_read && !nortt && !ge_tex_mip_active(g) && g->tex_fmt == src->fmt &&
                 !g->tex_swizzle && (g->tex_bufw == src->stride || g->tex_bufw == 0) && (toff % bpp_s) == 0) {
@@ -5543,7 +5545,9 @@ static void build_state(int persp, int sprite, Batch *b) {
                  * levels, so these per-fragment LOD lanes are free (F_LODFRAG is off). */
                 b->pc.texenv[3] = (float)g->tex_w;
                 b->pc.fogcol[3] = (float)g->tex_h;
-                b->pc.cfg[1] |= (int32_t)(((g->tex_wrap & 1u) | (((g->tex_wrap >> 8) & 1u) << 1)) << 24);
+                b->pc.cfg[1] |= (int32_t)(((g->tex_wrap & 1u) | (((g->tex_wrap >> 8) & 1u) << 1) |
+                                           ((g->tex_filter & 1u) << 2) | (((g->tex_filter >> 8) & 1u) << 3)) << 24);
+                s_cnt_rtt_direct++;
                 if (src == s_cur) {
                     /* feedback loop: sample a snapshot copy; reuse the previous snapshot
                      * while nothing new has rendered into the target */
@@ -5588,9 +5592,10 @@ static void build_state(int persp, int sprite, Batch *b) {
                 /* incompatible stride/format reinterpretation, or mip levels: VRAM + decoder.
                  * A render target is drawn as the GE drew it: never from a scaled copy. A depth
                  * read commits what a CPU read would (the targets' pixels, then the depth). */
-                if (depth_read)
-                    (void)hook_vram_read(0x04000000u + vram_off(g->tex_addr),
-                                         tex_span_size(g->tex_bufw, g->tex_w, g->tex_h));
+                if (depth_read && !hook_vram_read(0x04000000u + vram_off(g->tex_addr),
+                                                  tex_span_size(g->tex_bufw, g->tex_w, g->tex_h)))
+                    fprintf(stderr, "gegpu: a depth read at 0x%06x could not commit the depth to guest VRAM: "
+                            "it decodes what guest VRAM holds\n", vram_off(g->tex_addr));
                 else
                     (void)target_readback_span(src, vram_off(g->tex_addr),
                                                tex_span_size(g->tex_bufw, g->tex_w, g->tex_h));

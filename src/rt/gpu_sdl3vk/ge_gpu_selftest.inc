@@ -10335,9 +10335,11 @@ static int coherence_run_rtt_scale_at(int offset) {
 
 /* rtt-edge (#2052): a texture inside a render target ends at its own width and height, not at the
  * target image's. O (8888, stride 512) is red but for a 16 x 16 texture at (200, 40) in four 8 x 8
- * quadrants with no red, and four sprites on M read that texture, bound directly at O's image, at
- * u and v from -8 to 24 (4x magnified): clamped and linear, repeated and linear, clamped and
- * nearest, repeated and nearest. The PSP clamps or wraps each texel index at the texture's size
+ * quadrants with no red, and six sprites on M read that texture, bound directly at O's image, at
+ * u and v from -8 to 24 (4x and 2x magnified): clamped and linear, repeated and linear, clamped and
+ * nearest, repeated and nearest, then repeated with nearest magnification and linear minification
+ * and clamped with the reverse (magnified, so each takes its magnification filter: a seam blend of
+ * the nearest one is not the PSP's sample). The PSP clamps or wraps each texel index at the texture's size
  * (ge.c sample_tex), so no sample is red. Before the box (psp.frag, texenv.a and fogcol.a), the
  * direct bind clamped at the 512 x 272 image: the samples past the texture read O's red. Checked
  * at 1x, 2x and 4x: no red in M's device image or in guest VRAM, and guest VRAM equals the software
@@ -10352,13 +10354,20 @@ static int coherence_run_rtt_scale_at(int offset) {
 static int coherence_run_rtt_edge(void) {
     const char *name = "rtt-edge";
     static const uint32_t quad_rgba[4] = { 0xFF00FF00u, 0xFFFF0000u, 0xFFFFFF00u, 0xFF808000u };
-    static const char *const sprite_name[4] = { "clamp linear", "repeat linear", "clamp nearest",
-                                                "repeat nearest" };
+    enum { RTE_SPRITES = 6 };
+    static const char *const sprite_name[RTE_SPRITES] = { "clamp linear", "repeat linear", "clamp nearest",
+                                                          "repeat nearest", "repeat mag nearest min linear",
+                                                          "clamp mag linear min nearest" };
+    /* each sprite's rectangle on M (x0, y0, size), TFLT and clamp bits */
+    static const uint32_t rect[RTE_SPRITES][3] = { { 0, 64, 128 }, { 128, 64, 128 }, { 256, 64, 128 },
+                                                   { 384, 64, 128 }, { 0, 196, 64 }, { 128, 196, 64 } };
+    static const uint32_t tflt[RTE_SPRITES] = { 0x101u, 0x101u, 0u, 0u, 0x001u, 0x100u };
+    static const uint32_t twrap[RTE_SPRITES] = { 0x101u, 0u, 0x101u, 0u, 0u, 0x101u };
     const uint32_t oa = 0x04000000u | RTE_O, ma = 0x04000000u | RTE_M, stride = 512u;
     const uint32_t bytes = stride * FB_H * 4u;
     const uint32_t s = (uint32_t)s_scale, w = SCL_W, h = SCL_H;
     RttCVtx *cv = (RttCVtx *)SR_HOST(COH_SAMPLE_VERTS);
-    RawSpriteVtx *sv = (RawSpriteVtx *)(cv + 10);
+    RawSpriteVtx *sv = (RawSpriteVtx *)(cv + 10);   /* RTE_SPRITES pairs */
     const uint32_t cv_addr = COH_SAMPLE_VERTS, sv_addr = COH_SAMPLE_VERTS + 10u * (uint32_t)sizeof(RttCVtx);
     cv[0] = (RttCVtx){ RTE_RED, 0.0f, 0.0f, 0.0f };
     cv[1] = (RttCVtx){ RTE_RED, 512.0f, 272.0f, 0.0f };
@@ -10367,9 +10376,10 @@ static int coherence_run_rtt_edge(void) {
         cv[2u + 2u * q] = (RttCVtx){ quad_rgba[q], x0, y0, 0.0f };
         cv[3u + 2u * q] = (RttCVtx){ quad_rgba[q], x0 + 8.0f, y0 + 8.0f, 0.0f };
     }
-    for (uint32_t k = 0; k < 4u; k++) {
-        sv[2u * k] = (RawSpriteVtx){ -8.0f, -8.0f, (float)(128u * k), 64.0f, 0.0f };
-        sv[2u * k + 1u] = (RawSpriteVtx){ 24.0f, 24.0f, (float)(128u * k + 128u), 192.0f, 0.0f };
+    for (uint32_t k = 0; k < RTE_SPRITES; k++) {
+        sv[2u * k] = (RawSpriteVtx){ -8.0f, -8.0f, (float)rect[k][0], (float)rect[k][1], 0.0f };
+        sv[2u * k + 1u] = (RawSpriteVtx){ 24.0f, 24.0f, (float)(rect[k][0] + rect[k][2]),
+                                          (float)(rect[k][1] + rect[k][2]), 0.0f };
     }
 
     uint32_t *dl = (uint32_t *)SR_HOST(COH_SAMPLE_LIST);
@@ -10406,9 +10416,9 @@ static int coherence_run_rtt_edge(void) {
     DL_EMIT(0xC9, 3u | 0x100u);                            /* replace, RGBA */
     DL_EMIT(0xCB, 0);
     DL_EMIT(0x12, 3u | (3u << 7) | (1u << 23));            /* float UV and position, through */
-    for (uint32_t k = 0; k < 4u; k++) {
-        DL_EMIT(0xC6, k < 2u ? 0x101u : 0u);               /* linear, linear, nearest, nearest */
-        DL_EMIT(0xC7, (k & 1u) ? 0u : 0x101u);             /* clamp, repeat, clamp, repeat */
+    for (uint32_t k = 0; k < RTE_SPRITES; k++) {
+        DL_EMIT(0xC6, tflt[k]);
+        DL_EMIT(0xC7, twrap[k]);
         DL_EMIT(0x01, sv_addr + 2u * k * (uint32_t)sizeof(RawSpriteVtx));
         DL_EMIT(0x04, (6u << 16) | 2u);
     }
@@ -10426,7 +10436,7 @@ static int coherence_run_rtt_edge(void) {
     sr_gpu_vram_dirty(oa, bytes);
     sr_gpu_vram_dirty(ma, bytes);
     ge_set_gpu_hooks(&k_hooks);
-    const uint64_t rtt0 = s_cnt_rtt;
+    const uint64_t rtt0 = s_cnt_rtt, direct0 = s_cnt_rtt_direct;
     int ok = ge_run_list(COH_SAMPLE_LIST, 0) == 0 && (!s_nbatch || submit_pending());
     GeGpuFbDescriptor desc = { .addr = ma, .format = 3, .stride = stride, .width = 480, .height = FB_H };
     ok = ok && gegpu_sync_guest_fb(&desc) == GEGPU_SYNC_OK;
@@ -10436,10 +10446,11 @@ static int coherence_run_rtt_edge(void) {
     if (!ok) fprintf(stderr, "gpu coherence selftest [%s]: draw or device read failed\n", name);
     if (ok) memcpy(gpu_m, SR_HOST(ma), bytes);
     const Target *to = ok ? target_find_by_fba(RTE_O) : NULL;
-    if (ok && (!to || !to->gpu_valid || s_cnt_rtt - rtt0 != 4u)) {
-        fprintf(stderr, "gpu coherence selftest [%s]: FAIL O is %s a GPU target and %llu of 4 sprites sampled a "
-                "render target\n", name, to && to->gpu_valid ? "" : "not",
-                (unsigned long long)(s_cnt_rtt - rtt0));
+    if (ok && (!to || !to->gpu_valid || s_cnt_rtt - rtt0 != RTE_SPRITES || s_cnt_rtt_direct - direct0 != RTE_SPRITES)) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL O is %s a GPU target and %llu of %d sprites sampled a "
+                "render target, %llu bound it directly\n", name, to && to->gpu_valid ? "" : "not",
+                (unsigned long long)(s_cnt_rtt - rtt0), RTE_SPRITES,
+                (unsigned long long)(s_cnt_rtt_direct - direct0));
         ok = 0;
     }
     if (ok) {
@@ -10454,13 +10465,15 @@ static int coherence_run_rtt_edge(void) {
         else fprintf(stderr, "gpu coherence selftest [%s]: the software run failed\n", name);
     }
 
-    uint32_t red_dev[4] = {0}, red_vram[4] = {0}, red_sw = 0, differ[4] = {0}, compared = 0;
-    for (uint32_t k = 0; ok && k < 4u; k++) {
-        for (uint32_t y = 64u * s; y < 192u * s; y++)
-            for (uint32_t x = 128u * k * s; x < (128u * k + 128u) * s; x++)
+    uint32_t red_dev[RTE_SPRITES] = {0}, red_vram[RTE_SPRITES] = {0}, red_sw = 0, differ[RTE_SPRITES] = {0};
+    uint32_t compared = 0;
+    for (uint32_t k = 0; ok && k < RTE_SPRITES; k++) {
+        const uint32_t x0 = rect[k][0], y0 = rect[k][1], x1 = x0 + rect[k][2], y1 = y0 + rect[k][2];
+        for (uint32_t y = y0 * s; y < y1 * s; y++)
+            for (uint32_t x = x0 * s; x < x1 * s; x++)
                 if ((dev[(size_t)y * w + x] & 0xFFu) > 2u) red_dev[k]++;
-        for (uint32_t gy = 64u; gy < 192u; gy++) {
-            for (uint32_t gx = 128u * k; gx < 128u * k + 128u; gx++) {
+        for (uint32_t gy = y0; gy < y1; gy++) {
+            for (uint32_t gx = x0; gx < x1; gx++) {
                 if (gx >= 480u) continue;                  /* guest VRAM is synced for 480 columns */
                 const uint32_t got = gpu_m[(size_t)gy * stride + gx], sw = sw_m[(size_t)gy * stride + gx];
                 if ((got & 0xFFu) > 2u) red_vram[k]++;
@@ -10469,7 +10482,7 @@ static int coherence_run_rtt_edge(void) {
                 for (int dy = -1; dy <= 1 && flat; dy++)
                     for (int dx = -1; dx <= 1 && flat; dx++) {
                         const uint32_t nx = gx + (uint32_t)dx, ny = gy + (uint32_t)dy;
-                        if (nx < 128u * k || nx >= 128u * k + 128u || ny < 64u || ny >= 192u) continue;
+                        if (nx < x0 || nx >= x1 || ny < y0 || ny >= y1) continue;
                         flat = sw_m[(size_t)ny * stride + nx] == sw;
                     }
                 if (s != 1u && !flat) continue;
@@ -10485,7 +10498,7 @@ static int coherence_run_rtt_edge(void) {
             }
         }
     }
-    for (uint32_t k = 0; ok && k < 4u; k++) {
+    for (uint32_t k = 0; ok && k < RTE_SPRITES; k++) {
         if (red_dev[k] || red_vram[k] || differ[k]) {
             fprintf(stderr, "gpu coherence selftest [%s]: FAIL %s at scale %u: %u device and %u guest pixels show O "
                     "outside the texture (red), %u guest pixels differ from the software renderer\n", name,
@@ -10502,8 +10515,8 @@ static int coherence_run_rtt_edge(void) {
     coherence_reset_depths();
     if (ok)
         printf("gpu coherence selftest: PASS %-22s scale=%u a 16 x 16 texture inside a target clamps and repeats at "
-               "its own size (linear and nearest); no sample of the target outside it; %u guest pixels equal the "
-               "software renderer's within 2\n", name, s, compared);
+               "its own size (linear, nearest and mixed, all bound directly); no sample of the target outside it; %u "
+               "guest pixels equal the software renderer's within 2\n", name, s, compared);
     return ok;
 }
 
@@ -10514,7 +10527,10 @@ static int coherence_run_rtt_edge(void) {
  * address and through the 0x04600000 VRAM mirror (the PSP's linear depth view). Each read passes
  * the direct-bind rules, and before depth aliasing was detected it bound C's image: magenta. The
  * depth buffer was written after C was drawn, so the read is a depth read: it commits the depth to
- * guest VRAM and decodes it there at 1x, the software renderer's picture. Nearest and 1:1, so guest
+ * guest VRAM and decodes it there at 1x, the software renderer's picture. Then C is drawn green over the rows those reads
+ * took, and a third read of the same address is a colour read: C changed after the depth was
+ * written, so it binds C's image directly, as the software renderer reads C's green from VRAM (a
+ * title that leaves its depth address on a colour buffer it draws). Nearest and 1:1, so guest
  * VRAM equals the software renderer's exactly at any scale. */
 #define RDA_C 0x00100000u
 #define RDA_Z 0x00140000u
@@ -10525,13 +10541,15 @@ static int coherence_run_rtt_depth_alias(void) {
     const uint32_t bytes = stride * FB_H * 4u;
     const uint32_t magenta = 0xFFFF00FFu;
     RttCVtx *cv = (RttCVtx *)SR_HOST(COH_SAMPLE_VERTS);
-    RawSpriteVtx *sv = (RawSpriteVtx *)(cv + 4);
-    const uint32_t cv_addr = COH_SAMPLE_VERTS, sv_addr = COH_SAMPLE_VERTS + 4u * (uint32_t)sizeof(RttCVtx);
+    RawSpriteVtx *sv = (RawSpriteVtx *)(cv + 6);
+    const uint32_t cv_addr = COH_SAMPLE_VERTS, sv_addr = COH_SAMPLE_VERTS + 6u * (uint32_t)sizeof(RttCVtx);
     cv[0] = (RttCVtx){ magenta, 0.0f, 0.0f, 0.0f };
     cv[1] = (RttCVtx){ magenta, 512.0f, 272.0f, 0.0f };
     cv[2] = (RttCVtx){ 0xFF000000u, 0.0f, 0.0f, 13398.0f };   /* depth 0x3456 */
     cv[3] = (RttCVtx){ 0xFF000000u, 512.0f, 272.0f, 13398.0f };
-    for (uint32_t k = 0; k < 2u; k++) {
+    cv[4] = (RttCVtx){ 0xFF00FF00u, 0.0f, 128.0f, 0.0f };      /* green over C's rows 128..159 */
+    cv[5] = (RttCVtx){ 0xFF00FF00u, 64.0f, 160.0f, 0.0f };
+    for (uint32_t k = 0; k < 3u; k++) {
         sv[2u * k] = (RawSpriteVtx){ 0.0f, 0.0f, (float)(100u * k), 200.0f, 0.0f };
         sv[2u * k + 1u] = (RawSpriteVtx){ 64.0f, 32.0f, (float)(100u * k + 64u), 232.0f, 0.0f };
     }
@@ -10582,6 +10600,17 @@ static int coherence_run_rtt_depth_alias(void) {
     DL_EMIT(0xA0, 0x600000u | RDA_Z);                      /* the same depth through the linear view */
     DL_EMIT(0x01, sv_addr + 2u * (uint32_t)sizeof(RawSpriteVtx));
     DL_EMIT(0x04, (6u << 16) | 2u);
+    DL_EMIT(0x1E, 0);                                      /* C, green over the depth's first rows */
+    DL_EMIT(0x9C, RDA_C);
+    DL_EMIT(0x12, (7u << 2) | (3u << 7) | (1u << 23));
+    DL_EMIT(0x01, cv_addr + 4u * (uint32_t)sizeof(RttCVtx));
+    DL_EMIT(0x04, (6u << 16) | 2u);
+    DL_EMIT(0x9C, RDA_T);                                  /* T again: read the same address */
+    DL_EMIT(0x1E, 1);
+    DL_EMIT(0xA0, RDA_Z);
+    DL_EMIT(0x12, 3u | (3u << 7) | (1u << 23));
+    DL_EMIT(0x01, sv_addr + 4u * (uint32_t)sizeof(RawSpriteVtx));
+    DL_EMIT(0x04, (6u << 16) | 2u);
     DL_EMIT(0x0F, 0);
     DL_EMIT(0x0C, 0);
     #undef DL_EMIT
@@ -10595,10 +10624,16 @@ static int coherence_run_rtt_depth_alias(void) {
     sr_gpu_vram_dirty(ca, bytes);
     sr_gpu_vram_dirty(ta, bytes);
     ge_set_gpu_hooks(&k_hooks);
+    const uint64_t direct0 = s_cnt_rtt_direct;
     int ok = ge_run_list(COH_SAMPLE_LIST, 0) == 0 && (!s_nbatch || submit_pending());
     GeGpuFbDescriptor desc = { .addr = ta, .format = 3, .stride = stride, .width = 480, .height = FB_H };
     ok = ok && gegpu_sync_guest_fb(&desc) == GEGPU_SYNC_OK;
     if (!ok) fprintf(stderr, "gpu coherence selftest [%s]: the GPU run failed\n", name);
+    if (ok && s_cnt_rtt_direct - direct0 != 1u) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL %llu of the three reads bound C directly; only the read "
+                "after C was drawn over the depth should\n", name, (unsigned long long)(s_cnt_rtt_direct - direct0));
+        ok = 0;
+    }
     if (ok) memcpy(gpu_t, SR_HOST(ta), bytes);
     const Target *tc = ok ? target_find_by_fba(RDA_C) : NULL;
     if (ok && (!tc || !tc->gpu_valid)) {
@@ -10617,29 +10652,31 @@ static int coherence_run_rtt_depth_alias(void) {
         if (ok) memcpy(sw_t, SR_HOST(ta), bytes);
         else fprintf(stderr, "gpu coherence selftest [%s]: the software run failed\n", name);
     }
-    static const char *const how[2] = { "through the depth buffer's address", "through the linear depth view" };
-    uint32_t wrong[2] = {0}, sw_magenta = 0;
-    for (uint32_t k = 0; ok && k < 2u; k++) {
+    static const char *const how[3] = { "through the depth buffer's address", "through the linear depth view",
+                                        "after C was drawn over it" };
+    uint32_t wrong[3] = {0}, sw_magenta = 0, sw_not_green = 0;
+    for (uint32_t k = 0; ok && k < 3u; k++) {
         for (uint32_t gy = 200u; gy < 232u; gy++) {
             for (uint32_t gx = 100u * k; gx < 100u * k + 64u; gx++) {
                 const uint32_t got = gpu_t[(size_t)gy * stride + gx], sw = sw_t[(size_t)gy * stride + gx];
-                if (sw == magenta) sw_magenta++;
+                if (k < 2u && sw == magenta) sw_magenta++;
+                if (k == 2u && (sw & 0x00FFFFFFu) != 0x0000FF00u) sw_not_green++;
                 if (got != sw && wrong[k]++ < 3u)
                     fprintf(stderr, "gpu coherence selftest [%s]: %s: guest pixel (%u,%u) = %08x, software %08x "
                             "(C is %08x)\n", name, how[k], gx, gy, got, sw, magenta);
             }
         }
     }
-    for (uint32_t k = 0; ok && k < 2u; k++) {
+    for (uint32_t k = 0; ok && k < 3u; k++) {
         if (wrong[k]) {
             fprintf(stderr, "gpu coherence selftest [%s]: FAIL the read %s: %u of 2048 pixels differ from the "
                     "software renderer's (scale %d)\n", name, how[k], wrong[k], s_scale);
             ok = 0;
         }
     }
-    if (ok && sw_magenta) {
-        fprintf(stderr, "gpu coherence selftest [%s]: FAIL the software picture shows C, not the depth (%u pixels)\n",
-                name, sw_magenta);
+    if (ok && (sw_magenta || sw_not_green)) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL the software picture shows C instead of the depth (%u "
+                "pixels) or not C's green after it was drawn (%u)\n", name, sw_magenta, sw_not_green);
         ok = 0;
     }
     const uint32_t first = sw_t[200u * stride];
@@ -10648,7 +10685,8 @@ static int coherence_run_rtt_depth_alias(void) {
     coherence_reset_depths();
     if (ok)
         printf("gpu coherence selftest: PASS %-22s scale=%d a depth read inside a colour target's span decodes the "
-               "depth (first texel %08x) at 1x, through its address and the linear view, not the colour image\n",
+               "depth (first texel %08x) at 1x, through its address and the linear view, not the colour image; after "
+               "the colour target is drawn over it the read binds the colour target\n",
                name, s_scale, first);
     return ok;
 }

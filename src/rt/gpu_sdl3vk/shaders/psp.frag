@@ -218,23 +218,36 @@ void main() {
             if (tscale > 1) uv /= float(tscale);
             /* A render target bound directly (ge_gpu.c build_state, #2052) is a texture inside the
              * target's 512 x 272 image at texel offset texsize.zw. texenv.a and fogcol.a carry the
-             * texture's width and height (0 for every other texture) and cfg.y bits 24-25 its U and
-             * V clamp bits: the bind never has mip levels, so those per-fragment LOD lanes are free.
-             * Each texel index is clamped or wrapped at the texture's size, as ge.c sample_tex does,
-             * not at the image's edge. Nearest takes the clamped or wrapped texel's centre. Linear
-             * clamps the position to the centres of the texture's first and last device texels,
-             * where both taps lie inside it; a repeated axis wraps the position, and where its two
-             * taps straddle the seam all four taps are fetched and blended here, wrapped in device
-             * texels. Inside the texture nothing changes. */
+             * texture's width and height (0 for every other texture), cfg.y bits 24-25 its U and V
+             * clamp bits and bits 26-27 its minification and magnification filters (1: linear): the
+             * bind never has mip levels, so those per-fragment LOD lanes are free. Each texel index
+             * is clamped or wrapped at the texture's size, as ge.c sample_tex does, not at the
+             * image's edge. A fragment filters as ge.c shade picks: minified when the larger
+             * squared length of its texel coordinate's derivatives per guest pixel exceeds 1.
+             * Nearest keeps a position inside the texture and moves one outside it to the clamped
+             * or wrapped texel. Linear clamps the position to the centres of the texture's first
+             * and last device texels, where both taps lie inside it; a repeated axis wraps the
+             * position, and where its two taps straddle the seam all four taps are fetched and
+             * blended here, wrapped in device texels. The sampler takes the gradients of the
+             * unwrapped coordinate, so a wrap or clamp never moves the filter choice. Inside the
+             * texture nothing changes. */
+            bool rtt_box = (flags & 16384) == 0 && pc.texenv.a > 0.0;
             bool rtt_seam = false;
             ivec2 rtt_c0 = ivec2(0), rtt_c1 = ivec2(0);
-            vec2 rtt_f = vec2(0.0);
-            if ((flags & 16384) == 0 && pc.texenv.a > 0.0) {
+            vec2 rtt_f = vec2(0.0), rtt_gdx = vec2(0.0), rtt_gdy = vec2(0.0);
+            if (rtt_box) {
                 vec2 tsz = vec2(pc.texenv.a, pc.fogcol.a);
                 bvec2 clampm = bvec2(((pc.cfg.y >> 24) & 1) != 0, ((pc.cfg.y >> 25) & 1) != 0);
-                if ((flags & 64) != 0) {
+                vec2 u0 = v_uv / rw;
+                vec2 fdx = (duv_dx - u0 * drw_dx) / rw, fdy = (duv_dy - u0 * drw_dy) / rw;
+                rtt_gdx = fdx / (lod_scale * pc.texsize.xy);
+                rtt_gdy = fdy / (lod_scale * pc.texsize.xy);
+                bool minify = max(dot(fdx, fdx), dot(fdy, fdy)) > 1.0;
+                bool linear = (flags & 64) == 0 && ((pc.cfg.y >> (minify ? 26 : 27)) & 1) != 0;
+                if (!linear) {
                     vec2 idx = floor(uv);
-                    uv = mix(idx - tsz * floor(idx / tsz), clamp(idx, vec2(0.0), tsz - vec2(1.0)), clampm) + vec2(0.5);
+                    vec2 moved = mix(idx - tsz * floor(idx / tsz), clamp(idx, vec2(0.0), tsz - vec2(1.0)), clampm);
+                    uv += moved - idx;
                 } else {
                     float sc = lod_scale;
                     vec2 lo = vec2(0.5 / sc), hi = tsz - vec2(0.5 / sc);
@@ -252,12 +265,8 @@ void main() {
             }
             uv += pc.texsize.zw;
             vec4 t;
-            if (rtt_seam) {
-                vec4 t00 = texelFetch(u_tex, ivec2(rtt_c0.x, rtt_c0.y), 0);
-                vec4 t10 = texelFetch(u_tex, ivec2(rtt_c1.x, rtt_c0.y), 0);
-                vec4 t01 = texelFetch(u_tex, ivec2(rtt_c0.x, rtt_c1.y), 0);
-                vec4 t11 = texelFetch(u_tex, ivec2(rtt_c1.x, rtt_c1.y), 0);
-                t = mix(mix(t00, t10, rtt_f.x), mix(t01, t11, rtt_f.x), rtt_f.y) * 255.0;
+            if (rtt_box) {
+                t = textureGrad(u_tex, uv / pc.texsize.xy, rtt_gdx, rtt_gdy) * 255.0;
             } else if ((flags & 16384) != 0) {
                 /* ge.c tex_detail16: automatic mode is log16 of the footprint (the larger
                  * squared length of the level-0 texel coordinate's screen derivatives, each
@@ -294,6 +303,13 @@ void main() {
                 t = textureGrad(u_tex, uv / pc.texsize.xy, gdx, gdy) * 255.0;
             } else {
                 t = texture(u_tex, uv / pc.texsize.xy) * 255.0;
+            }
+            if (rtt_seam) {
+                vec4 t00 = texelFetch(u_tex, ivec2(rtt_c0.x, rtt_c0.y), 0);
+                vec4 t10 = texelFetch(u_tex, ivec2(rtt_c1.x, rtt_c0.y), 0);
+                vec4 t01 = texelFetch(u_tex, ivec2(rtt_c0.x, rtt_c1.y), 0);
+                vec4 t11 = texelFetch(u_tex, ivec2(rtt_c1.x, rtt_c1.y), 0);
+                t = mix(mix(t00, t10, rtt_f.x), mix(t01, t11, rtt_f.x), rtt_f.y) * 255.0;
             }
             int  tf    = pc.cfg.x & 7;
             bool rgba  = (flags & 2) != 0;

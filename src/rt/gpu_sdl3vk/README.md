@@ -298,11 +298,14 @@ into one target and read it back as a texture keep the scale in these cases:
   - The texture's own width and height bound the read, as on the PSP: each texel index is clamped
     or wrapped at them (the texture's clamp bits), not at the edge of the target's image, so a
     texture inside a larger target never shows the target's pixels beyond it (`rtt-edge`, clamped
-    and repeated, linear and nearest). `psp.frag` gets the size in `texenv.a` and `fogcol.a` and
-    the clamp bits in `cfg.y` bits 24 and 25, lanes the per-fragment level of detail uses only for
-    a mipmapped read, which is never bound directly. A linear tap pair that straddles a repeated
-    texture's seam is fetched and blended in the shader, wrapped in device texels. Rows of the
-    texture below the target's 272 rows read the image's last row.
+    and repeated, linear and nearest). `psp.frag` gets the size in `texenv.a` and `fogcol.a`, the
+    clamp bits in `cfg.y` bits 24 and 25 and the minification and magnification filters in bits
+    26 and 27, lanes the per-fragment level of detail uses only for a mipmapped read, which is
+    never bound directly. Each fragment picks its filter from its footprint per guest pixel, as
+    `ge.c` does, so a texture with different minification and magnification filters wraps and
+    clamps as the PSP does too. A linear tap pair that straddles a repeated texture's seam is
+    fetched and blended in the shader, wrapped in device texels. Rows of the texture below the
+    target's 272 rows read the image's last row.
   - A texture that starts inside the target, at a pixel-aligned offset, is read through that
     offset (`texsize.zw`): `rtt-scale-offset` runs the bloom-like pass with its buffer as a
     sub-rectangle of a 512-wide target.
@@ -333,14 +336,18 @@ the effect shows 1x detail at any render scale. Those reads include:
 Depth is matched by address like any texture. A depth buffer read as a texture decodes guest VRAM
 at 1x when its address lies outside every colour target's span. When the texture's address lies
 inside both a colour target's span and a depth buffer the renderer holds (its stride times 272 rows
-of 16-bit values from its base; `depth_containing`), the read takes whichever was written last.
-Every change to a target's image and every batch that writes depth takes the next value of one
-count (`cseq`, `zseq`), and queued batches are submitted first. Depth written after the target last
-changed makes it a depth read: it commits what a CPU read would (the targets' drawn pixels in the
-span, then the depth) and decodes guest VRAM at 1x, through the depth buffer's own address or the
-0x04600000 linear view alike (`rtt-depth-alias`). Otherwise the target's colour is the newer
-content and the rules above apply, so a title that leaves its depth address on a colour buffer it
-draws (and writes no depth there) keeps the direct bind.
+of 16-bit values from its base; `depth_containing`: the texture's start address decides, as for
+colour targets), the read takes whichever of the two buffers was written last. Each change to a
+target's image takes the next value of one count (`cseq`), a batch that writes depth stamps its
+depth buffer with its own (`zseq`), and queued batches are submitted first. Depth written after the
+target last changed makes it a depth read: it commits what a CPU read would (the targets' drawn
+pixels in the span, then the whole depth buffer) and decodes guest VRAM at 1x, through the depth
+buffer's own address or the 0x04600000 linear view alike (`rtt-depth-alias`). Otherwise the
+target's colour is the newer content and the rules above apply, so a title that leaves its depth
+address on a colour buffer it draws (and writes no depth there) keeps the direct bind
+(`rtt-depth-alias` draws the colour target over the depth buffer's rows and reads it again). The
+choice is per buffer, not per pixel: a depth buffer some batch wrote after the colour target
+changed is read whole, rows that batch did not reach included, as a CPU read of it is.
 
 `SR_GPU_NORTT=1` sends every render-target read through that 1x path, for bisecting.
 
