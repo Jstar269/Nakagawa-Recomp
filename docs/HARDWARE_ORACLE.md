@@ -3761,10 +3761,10 @@ ARK-5 with cIPL, version 5.1.0 (operator-declared, not read by a tool). The stre
 SKIP (`nodir-delete`, result 2: an earlier dialog timed out), and ends COMPLETE FAIL. The envelope is not
 acceptance-eligible; its blockers are "loaded module was not proven unloaded", "PHYSICAL_INTERVENTION_REQUIRED" and
 "one or more scalar result records did not pass". The capture is therefore `CAPTURED` and establishes nothing about
-PSP behaviour; the values below are what it shows, for a rerun to confirm. A rerun of this revision would end the
-same way: the LOAD (mode 2) dialog of a missing save stays VISIBLE because the probe draws no frame, and the
-cells after it are then skipped. LOAD and DELETE (mode 10) have to move into a case of their own before states A
-to C can give an acceptance-eligible envelope. The raw envelope, host0 log and decode stay in the private campaign
+PSP behaviour; the values below are what it shows. A rerun of this revision would end the same way: the LOAD
+(mode 2) dialog of a missing save stays VISIBLE because the probe draws no frame, and `nodir-delete` after it is
+then skipped. LOAD and DELETE (mode 10) have to move into a case of their own before states A to C can give an
+acceptance-eligible envelope that confirms these values. The raw envelope, host0 log and decode stay in the private campaign
 directory.
 
 The `nodir-load` cell (mode 2 LOAD of the missing save `NODIR`, owner present) went INIT then VISIBLE and stayed
