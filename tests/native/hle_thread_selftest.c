@@ -44684,6 +44684,35 @@ static void test_pad_late_through_the_boundary(void) {
     }
     pad_late_teardown();
 
+    /* N17: a press the refresh added (a trigger, no pulse) to a sample no guest call reads is
+     * kept by the next sample: R goes down during the first hold and up during the second, and
+     * a read of one buffer, which skips the first sample, still sees R. */
+    pad_late_fixture();
+    {
+        const uint64_t t = s_pad_vblank_ns;
+        s_ctrlc_ret = 0u;
+        TCB *u = pad_update_start();
+        expect(pad_update_held(u), "pad: the first update is held");
+        s_test_gui_buttons = NK_PSP_BTN_RTRIGGER_BIT;  /* pressed during the hold, no pulse */
+        s_pad_host_ns = t + 12u * PAD_MS;
+        vm_run(u);                                     /* the hold ends into the refresh */
+        s_cur = (int)(u - s_tcb);
+        s_pad_host_ns += 2u * PAD_MS;
+        sr_enhancement_update_waits();                 /* its VBLANK wait closes the update */
+        liveness_finish_waiter(u);
+        s_cur = -1;
+        pad_vblank(t + PAD_PERIOD_NS);                 /* R still down */
+        s_pad_host_ns = t + PAD_PERIOD_NS + PAD_MS;
+        u = pad_update_start();
+        expect(pad_update_held(u), "pad: the second update is held");
+        s_test_gui_buttons = 0u;                       /* released during the second hold */
+        pad_update_resume(u, t + PAD_PERIOD_NS + 12u * PAD_MS);
+        const uint32_t n = ctrlc_call(NID_SCE_CTRL_READ_BUFFER_POSITIVE, CTRL_OK_BUF, 1u);
+        expect(ace_pad_plan()->refreshed == 2u && n == 1u && MEM_R32(CTRL_OK_BUF + 4u) == NK_PSP_BTN_RTRIGGER_BIT,
+               "pad: a press a refresh added to an unread sample reaches a read of one buffer");
+    }
+    pad_late_teardown();
+
     /* S9: the same, read one buffer at a time. The unread sample before is skipped by the read,
      * so its press reaches the guest only in the refreshed sample. Once the sample before was
      * handed to a read, a release of its press may arrive in the next. */

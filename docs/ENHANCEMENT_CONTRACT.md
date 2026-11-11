@@ -1591,11 +1591,11 @@ so the pad sample it reads is younger when its frame reaches the screen.
   peek, and a latch read or peek, all count. The rewritten sample keeps every button its VBLANK latch took as a press,
   one down in it and up in the sample before, whatever its source (a key, a gamepad button, a trigger or a stick bound
   to a button), and one pressed and released since the sample before, and, while the sample before was handed to no
-  guest call, the presses that sample kept that are still down (a read of one buffer skips it), so a press that sample
-  carried is never lost to a release during the wait. The sample whose press closed the on-screen keyboard, a sample a
-  sampling cycle latched, and a pause requested, opened or closed by then leave the sample as latched. Its count of
-  samples, its timestamp and its scripted-input id stay the same. An update whose work then ends after the deadline it
-  was held for is late. Holding stops for 300 updates and the margin grows by 1 ms, up to 6 ms.
+  guest call, the presses that sample kept or a refresh added to it that are still down (a read of one buffer skips it),
+  so a press that sample carried is never lost to a release during the wait. The sample whose press closed the on-screen
+  keyboard, a sample a sampling cycle latched, and a pause requested, opened or closed by then leave the sample as
+  latched. Its count of samples, its timestamp and its scripted-input id stay the same. An update whose work then ends
+  after the deadline it was held for is late. Holding stops for 300 updates and the margin grows by 1 ms, up to 6 ms.
 - **Key.** `pad=late` or `pad=off` on the launch line (section 10.1), an optional key: a line without it reads as off,
   any other value is refused, and `pad=late` is refused unless the line carries `tier=ace`. The player has a library
   setting and a per-title setting, "Late pad sampling", each able to turn it off alone (section 11.2, item 2); the line

@@ -191,8 +191,9 @@ static uint64_t s_ctrl_cycle_next_us;
  * pulses its latch consumed (a press, or a press and release, since the previous sample), and
  * whether the on-screen keyboard took it (its buttons are then 0). ctrl_push keeps them for the
  * newest sample, with every button down in it that was up in the sample before (a press that
- * raised no pulse: a trigger or a stick bound to a button), whether that sample was latched at a
- * VBLANK of live input and whether any read, peek or latch call has been handed it. */
+ * raised no pulse: a trigger or a stick bound to a button), the kept presses of an unread sample
+ * before that are still down, and the presses a refresh adds; whether that sample was latched
+ * at a VBLANK of live input; and whether any read, peek or latch call has been handed it. */
 uint64_t s_ctrl_live_poll_ns;
 uint32_t s_ctrl_live_taps;
 int s_ctrl_live_keyboard;
@@ -225,14 +226,16 @@ int ctrl_refresh_allowed(void) {
 
 /* Late pad sampling: the newest sample takes the given input in place when
  * ctrl_refresh_allowed(). It keeps every button its latch carried as a press (see ctrl_push),
- * so a press the VBLANK delivered is never lost to a release during the hold; taps are the
- * pulses this refresh consumed, kept the same way. Its timestamp and its scripted-input id
- * stay; the number of samples does not change. Returns 1 when the sample was refreshed. */
+ * so a press the VBLANK delivered is never lost to a release during the hold. The presses it
+ * adds (down now, up in the sample as latched) and taps, the pulses this refresh consumed, are
+ * kept the same way, so the next sample carries them while this one stays unread. Its timestamp
+ * and its scripted-input id stay; the number of samples does not change. Returns 1 when the
+ * sample was refreshed. */
 int ctrl_refresh_newest(uint32_t buttons, uint8_t lx, uint8_t ly, uint64_t poll_ns, uint32_t taps) {
     if (!ctrl_refresh_allowed()) return 0;
     const int newest = (s_ctrl_w - 1 + CTRL_RING) % CTRL_RING;
     buttons |= s_ctrl_newest_taps;
-    s_ctrl_newest_taps |= taps;
+    s_ctrl_newest_taps |= taps | (buttons & ~s_ctrl_ring[newest].btn);
     s_ctrl_ring[newest].btn = buttons;
     s_ctrl_ring[newest].lx = lx;
     s_ctrl_ring[newest].ly = ly;
