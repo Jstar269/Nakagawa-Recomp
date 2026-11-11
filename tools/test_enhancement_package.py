@@ -4130,8 +4130,8 @@ class TestPublishedPackages(_SynthTimingElfFixture):
     def test_shipped_packages_validate_and_pass_the_publication_check(self) -> None:
         """Every package in assets/enhancements/ is a valid published package with no findings.
 
-        Its sites name only functions its own site_map resolves, and every site_map name is used
-        by a site or the update boundary, so a republished package drops the names it no longer needs.
+        The validator also refuses a site_map name that no site, data site, hook or update
+        boundary uses, so a republished package must drop the names it no longer needs.
         """
         import publish_audit
 
@@ -4144,12 +4144,6 @@ class TestPublishedPackages(_SynthTimingElfFixture):
                 package = json.loads(data.decode("utf-8"))
                 validate_package(copy.deepcopy(package))
                 self.assertEqual(publish_audit.check_enhancement_packages({rel: (data, None)}), [])
-                names = {site["function"] for site in package["sites"]}
-                names |= {name for site in package["sites"] for name in site.get("alternates", ())}
-                names |= {site["symbol"] for site in package.get("data_sites", ())}
-                if "update_boundary" in package:
-                    names.add(package["update_boundary"]["function"])
-                self.assertEqual(names, set(package["site_map"]))
 
     def test_validator_refuses_malformed_published_packages(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
