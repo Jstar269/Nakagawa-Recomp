@@ -397,6 +397,35 @@ that a player turns on or off apart from the 60 FPS game logic. The field is an 
 | --- | --- | --- |
 | `vblank_wait_skip` | `jal` whose target is the executable's import stub of `sceDisplayWaitVblankStart` (NID `0x984C27E7`); any other target refuses the package | the delay slot runs as stock; the call runs unless the runtime skips it (`nk_ace_load_skip_wait()`), which it does only while the run's `load=fast` is in effect and waits are permitted, that is, where the stock call would block. A skipped call still blocks the thread, for 1 µs, the shortest delay wait the scheduler has (that of `sceKernelDelayThread(1)`), so ready threads of any priority run as during the stock wait, and it leaves `$v0` = 0, the stock function's return there. Where waits are not permitted the stock call runs and returns `CAN_NOT_WAIT`. A package with a `load` part must declare an `update_boundary`, and the site may not be in its function, compared by name, by site-map address in a published package, and by resolved address in codegen. Nothing else about where the site sits is checked: a wait in a caller or a callee of the boundary's function is accepted, and the site's own evidence must show it is reached only while loading (section 11.3.10) |
 
+### 9.9. A Code-Hook Package Beside the Timing Package
+
+A build carries one enhancement package and, beside it, at most one `guest_memory_code_hook` package (section 2.3),
+so a title's Ace items that change guest memory build together with its 60 FPS game logic. The code-hook package
+stays a package of its own: the rule of section 9.2 holds as it is, and a timing package still refuses a code-hook
+transform such as `clip_x_widen` (the decision of 2026-11-10, #2366, under "Guest memory written by a timing
+transform"). The two are joined only in the build, where each keeps its own category, digest and checks.
+
+- **Naming it.** `build-package` takes `--code-hook-package <path>`, or `--ace-cull`, which reads
+  `<user data>/enhancements/<disc_id>-cull.json` (lowercase disc ID), else a published package of that name in
+  `assets/enhancements/` (section 5.1). Make takes `ENHANCEMENT_CODE_HOOK_PACKAGE=<path>` beside
+  `ENHANCEMENT_PACKAGE`, and codegen `--code-hook-package` beside `--enhancement-package`. An environment that
+  names one on its own is refused, as for the enhancement package.
+- **Checks.** The code-hook package is validated, matched to the disc, title and executable, and its sites
+  resolved and verified as the enhancement package's are. Each of these refuses the build by name, and nothing is
+  merged: a second package whose category is not `guest_memory_code_hook`; an enhancement package that is a
+  code-hook package too; a code-hook package for another title; a site id both packages use; a code-hook site at
+  an address a site of the enhancement package rewrites (a 60 Hz site, an Ace part site or the `update_boundary`);
+  and a code-hook call whose delay slot is such a word, or the delay slot of a rewritten call, inside the span the
+  enhancement package rewrites. Codegen refuses `--code-hook-package` without `--enhancement-package`.
+- **The build.** The code-hook sites join the site table and are emitted as they would be in a build of that
+  package alone; the generated code gains one header line naming the code-hook package's id, version, site count
+  and digest, and the package's cache key gains its id and digest. A build of a timing package with a code-hook
+  package is `packages/<disc_id>-enhanced-<timing id>+<hook id>` (no package id holds a `+`, and the joined name
+  may have at most 64 characters); a code-hook package with no timing package is the build's one package,
+  `packages/<disc_id>-enhanced-<hook id>`.
+- **Without one** the generated output, the package directory and the cache key are byte-identical to a build
+  before this section.
+
 ## 10. Play Modes: Authentic, Enhanced and Ace
 
 The player offers three play modes per game (#2055):
@@ -1777,7 +1806,8 @@ The Layer 2 mechanism of section 10.8, for a title that skips objects outside it
   the key and Widescreen has a wing (`D` > 0); with either missing, the stock call runs and nothing is written. The run
   names it (`ACE_MODE: cull on (...)`, the report's `cull`), and reports it unavailable when no matrix was scaled by
   the end of the run: the title's build has no culling package, or Widescreen is off. The package build is chosen by
-  the title's own data (section 5); the launcher picking it for an Ace launch with the part on is a separate
+  the title's own data (section 5): `build-package --ace-cull` builds the title's culling package beside its
+  timing package (section 9.9); the launcher picking that build for an Ace launch with the part on is a separate
   change. The player cannot tell ahead of a launch which games have a culling build, so the row's text says it
   acts only in games that do, and a run without one says so in the `ACE_MODE: cull unavailable (...)` line and
   the report. The runtime remembers at most 4096 distinct matrices (see Limits below); the report's

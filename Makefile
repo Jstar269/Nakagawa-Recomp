@@ -530,6 +530,13 @@ else
 ENHANCEMENT_PACKAGE_ARG := --enhancement-package=$(ENHANCEMENT_PACKAGE)
 ENHANCEMENT_PACKAGE_PROFILE_LINE := $(NEWLINE)ENHANCEMENT_PACKAGE=$(ENHANCEMENT_PACKAGE)
 endif
+# A guest_memory_code_hook package applied beside ENHANCEMENT_PACKAGE (docs/ENHANCEMENT_CONTRACT.md
+# section 9.9). Passed whenever set: codegen refuses it without ENHANCEMENT_PACKAGE.
+ENHANCEMENT_CODE_HOOK_PACKAGE ?=
+ifneq ($(strip $(ENHANCEMENT_CODE_HOOK_PACKAGE)),)
+ENHANCEMENT_PACKAGE_ARG += --code-hook-package=$(ENHANCEMENT_CODE_HOOK_PACKAGE)
+ENHANCEMENT_PACKAGE_PROFILE_LINE := $(ENHANCEMENT_PACKAGE_PROFILE_LINE)$(NEWLINE)ENHANCEMENT_CODE_HOOK_PACKAGE=$(ENHANCEMENT_CODE_HOOK_PACKAGE)
+endif
 # The title's extracted files, where a package's data_files are read and checked.
 # Only a package build passes it; the package digest already names those files.
 ENHANCEMENT_DATA_ROOT ?=
