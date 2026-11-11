@@ -452,7 +452,8 @@ jobs:
         with:
           persist-credentials: false
           # Full history: the provenance step of regen_all diffs against the
-          # event's base commit, as the trusted attestation does.
+          # event's base commit. (The trusted attestation judges the head
+          # against its merge base with the default branch instead.)
           fetch-depth: 0
 
       - name: Set up Python

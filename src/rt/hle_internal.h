@@ -422,7 +422,7 @@ typedef struct {
  * remembered delivery matches it, first time only:
  *   video  present time = guest time of the present
  *   audio  play time    = guest time of the submit + the host queue lead ahead of it
- * (sr_audio_queued() before the push, 44.1 kHz frames; no host queue (-1) is "not
+ * (hle_audio_play_lead() before the push, 44.1 kHz frames; no host queue (-1) is "not
  * measured" and is counted as such, it never reads as a lead of zero).
  * The per-stream presentation offset is play_time - pts (pts converted from 90 kHz to
  * microseconds), kept exactly in units of 1/9 microsecond because 1 tick = 100/9 us.  The A/V
@@ -438,7 +438,7 @@ typedef struct {
  * drawn); one whose render target is never presented stays pending and is counted.
  *
  * Nothing here changes behaviour: no guest memory is written, no time advances, and the
- * only host call on a match is one sr_audio_queued() read.  A delivery that is never
+ * only host call on a match is one hle_audio_play_lead() read.  A delivery that is never
  * presented/played (overwritten by a later delivery, pushed out of the ring, or still waiting
  * when the report is made) is counted, never hidden.
  *
@@ -1213,9 +1213,16 @@ extern int s_psmf_av_test_queue;
 #endif
 int64_t psmf_av_now_us(void);
 int psmf_av_queue_frames(int ch);
+/* One PSP display period in microseconds (60000/1001 Hz, rounded down). The scheduler delivers
+ * VBLANKs at this period and ordinarily reaches a boundary at least that often; sched.c, perf.c
+ * and videorec.c each still spell the figure out themselves. */
+#define HLE_DISPLAY_PERIOD_US 16683u
 /* The audio queue depth in frames the guest sees on `ch` (-1: no host output). Under the
- * deterministic clock it is a model that drains in guest time (#2037), not the host mixer's. */
+ * deterministic clock it is a model that drains in guest time (#2037), not the host mixer's.
+ * Otherwise it leaves out what the host mixer holds for its device (hle_audio.c). */
 int hle_audio_queued(int ch);
+/* The frames of `ch` not played yet, that hold included: when a pushed frame is heard. */
+int hle_audio_play_lead(int ch);
 void psmf_av_window_tick(int64_t now_us);
 void psmf_av_final(const char *reason);
 void psmf_av_exit_report(void);
@@ -1363,7 +1370,7 @@ int io_host_seek(FILE *host, uint32_t offset);
 int io_restore_truncated_gap(Fd *f);
 uint32_t h_IoWrite(CpuState *s);
 uint32_t h_IoRead(CpuState *s);
-uint32_t io_seek_destination(const Fd *f, int64_t offset, uint32_t whence, const char *api, uint32_t *position);
+uint32_t io_seek_destination(const Fd *f, int64_t offset, uint32_t whence, const char *api, uint32_t *position, uint32_t *error_high);
 uint32_t h_IoLseek32(CpuState *s);
 /* The volatile-memory lock handlers (hle_kernel_memory.c); hle_power.c registers their scePower
  * aliases. */

@@ -138,7 +138,10 @@ bool scr_wizard_value_state(NkUi *ui, NkUiId id, NkUiId text_id, const char *nam
             nk_ui_end_container(ui);
         }
     }
-    nk_ui_text(ui, text_id + 2u, nk_ui_text_clamp(ui, sentence, &text, room, 2), &text);
+    /* Under its button the sentence has the full width and wraps whole: the rows stack so
+       that no sentence is cut, and it says what the setting does nowhere else. */
+    nk_ui_text(ui, text_id + 2u,
+               column->stacked ? sentence : nk_ui_text_clamp(ui, sentence, &text, room, 2), &text);
     nk_ui_end_container(ui);
     return pressed;
 }
