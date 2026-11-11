@@ -551,7 +551,7 @@ Semantic handler census: **584** handlers across **30** API families, covering *
   - Evidence: docs/HARDWARE_ORACLE.md (Kernel-object semantics, PSP-B1-01 and PSP-B2-01 FPL cells)
   - Evidence: docs/HARDWARE_ORACLE.md (PSP-HLE-KERNEL-STATUS-001 FPL create, exhaustion, status, free and delete cells)
 - **`h_AllocateVpl`** (`sceKernel`): `sceKernelAllocateVpl` (0xbed27435)
-  - Limitation: ordinary allocation, one finite timeout, measured pool accounting, one-waiter hand-off and the invalid sizes are covered; invalid output pointers and fragmented-pool behaviour beyond the measured cases are not measured (#341)
+  - Limitation: ordinary allocation, one finite timeout, measured pool accounting, one-waiter hand-off and the invalid sizes are covered; a request within the create size that no block can hold is refused with 0x800201B7 instead of waiting (unmeasured for the last 8 bytes below poolSize); invalid output pointers and fragmented-pool behaviour beyond the measured cases are not measured (#341)
   - Evidence: docs/HARDWARE_ORACLE.md (Kernel-object semantics, PSP-B1-01 and PSP-B2-01 VPL cells)
   - Evidence: PSPAutotests tests/threads/vpl/allocate.expected (0 bytes, -1 bytes and more than the pool 0x800201B7)
   - Evidence: tests/native/hle_thread_selftest.c:test_wb_tlspl_vpl_cells

@@ -39686,7 +39686,7 @@ static void test_kernel_pool_bounds_measured(void) {
     memset(&cpu, 0, sizeof cpu); cpu.r[4] = vpl; cpu.r[5] = VPL_INFO;
     expect(sr_syscall(&cpu, NID_VPL_REFER) == 0u && MEM_R32(VPL_INFO + 40) == 992u &&
                MEM_R32(VPL_INFO + 44) == 992u,
-           "pool bounds: a 1024-byte VPL reports 992 bytes of pool and free size (PSP-B1-01)");
+           "pool bounds: a 1024-byte VPL reports 992 bytes (PSP-B1-01), as poolSize and freeSize");
     expect(selftest_vpl_try_allocate(vpl, 100u, VPL_OUTPTR) == 0u, "pool bounds: TryAllocateVpl of 100 succeeds");
     const uint32_t a100 = MEM_R32(VPL_OUTPTR);
     MEM_W32(VPL_INFO, 0x34u);
@@ -39697,7 +39697,7 @@ static void test_kernel_pool_bounds_measured(void) {
     expect(selftest_vpl_try_allocate(vpl, 64u, VPL_OUTPTR) == 0u, "pool bounds: TryAllocateVpl of 64 succeeds");
     const uint32_t a64 = MEM_R32(VPL_OUTPTR);
     expect(a64 < a100 && a100 - a64 == 64u + 8u,
-           "pool bounds: the next block sits directly below the previous one (PSP-B1-01)");
+           "pool bounds: the next block sits directly below the previous one (from PSP-B1-01's cost and direction)");
     expect(selftest_vpl_free(vpl, a64) == 0u && selftest_vpl_free(vpl, a100) == 0u,
            "pool bounds: both blocks free with 0");
     MEM_W32(VPL_INFO, 0x34u);

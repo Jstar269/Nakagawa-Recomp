@@ -1566,7 +1566,7 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
             "tests/native/hle_thread_selftest.c:test_wb_tlspl_vpl_cells",
             "tests/native/hle_thread_selftest.c:test_vpl_blocking_waits",
         ],
-        "limitation": "ordinary allocation, one finite timeout, measured pool accounting, one-waiter hand-off and the invalid sizes are covered; invalid output pointers and fragmented-pool behaviour beyond the measured cases are not measured (#341)",
+        "limitation": "ordinary allocation, one finite timeout, measured pool accounting, one-waiter hand-off and the invalid sizes are covered; a request within the create size that no block can hold is refused with 0x800201B7 instead of waiting (unmeasured for the last 8 bytes below poolSize); invalid output pointers and fragmented-pool behaviour beyond the measured cases are not measured (#341)",
     },
     # Route-A batch 3: each citation was checked against the exact API path in
     # its hardware cell. These handlers remain partial where the cell does not

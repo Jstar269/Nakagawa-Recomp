@@ -288,7 +288,8 @@ static uint32_t h_MaxFreeMemSize(CpuState *s) {
 #define FPL_ILLEGAL_MEMSIZE 0x800201b7u
 #define FPL_NO_MEMORY 0x80020190u
 /* UNMEASURED: a create with no free FPL slot and a blocking allocate outside a thread keep the
- * code they returned before the 2026-10-15 measurement; neither path was probed. */
+ * code they returned before the 2026-10-15 measurement; neither path was probed. Block size 0
+ * was measured with one block: with a block count of 0 as well, the code order decides. */
 #define FPL_UNMEASURED_NO_SPACE 0x800200d9u
 
 /* A woken waiter that loses the freed block (or wakes for another reason, e.g. a
@@ -617,7 +618,8 @@ static uint32_t h_ReferFplStatus(CpuState *s) {
  * pspautotests tests/threads/vpl/refer.expected reports poolSize 0xFFE0 for a 0x10000 pool.
  * UNMEASURED: where the 0x20 bytes and each block's 8 bytes sit (here: the pool's first 0x20
  * bytes, and the 8 bytes below the address handed out), and a pool size that is not a multiple
- * of 8 (here rounded down). */
+ * of 8 (here rounded down), and which span a fragmented pool carves from (here the highest
+ * span that holds the block). */
 #define VPL_POOL_HEADER 0x20u
 #define VPL_BLOCK_HEADER 8u
 #define VPL_GRANULE 8u
@@ -738,7 +740,8 @@ static uint32_t h_CreateVpl(CpuState *s) {
 
 static uint32_t vpl_try_allocate_internal(VplPool *p, uint32_t request, uint32_t *addr_out) {
     if (vpl_request_illegal(p, request)) return VPL_ILLEGAL_SIZE;
-    /* PSP-B1-01: roundup(request, 8) + 8 bytes, carved from the top of the highest span that
+    /* PSP-B1-01: roundup(request, 8) + 8 bytes, carved from the top (the span choice is
+     * UNMEASURED, above) of the highest span that
      * holds them. */
     uint32_t need = ((request + (VPL_GRANULE - 1u)) & ~(VPL_GRANULE - 1u)) + VPL_BLOCK_HEADER;
     for (int i = p->nfree - 1; i >= 0; --i) {

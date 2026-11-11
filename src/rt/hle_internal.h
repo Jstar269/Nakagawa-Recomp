@@ -240,7 +240,7 @@ typedef struct {
     int nwaiters;
 } FplPool;
 
-/* Variable Pool (VPL): one SysMem partition block per pool, with a host-side first-fit
+/* Variable Pool (VPL): one SysMem partition block per pool, with a host-side free list
  * free list for the pool span, waiter queuing, and blocking allocation support (PR-G).
  * The accounting is the PSP-B1-01 measurement (hle_kernel_memory.c: a 0x20-byte pool
  * header, roundup(size, 8) + 8 bytes per block, carved from the top down). */
