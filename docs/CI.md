@@ -35,7 +35,7 @@ case-insensitive `true` or `false`; missing or malformed control state is red.
 | Workflow push to `main` (a changed workflow, action, CI classifier, aggregate or shard planner), or a push whose change set cannot be read | the full applicable validation above plus the main smoke steps | none of the substantive public gates |
 | Manual `workflow_dispatch` | the full matrix, Windows installer, full Python tier and C coverage, regardless of paths | none |
 | Nightly schedule (`17 3 * * *` UTC) | the full matrix, Windows installer, full Python tier and C coverage | none |
-| Merge-queue group (`merge_group`, `checks_requested`) | the full matrix, as for a manual dispatch, regardless of paths; every required check reports on the group commit | none |
+| Merge-queue group (`merge_group`, `checks_requested`) | the full matrix, as for a manual dispatch but without C coverage, regardless of paths; every required check reports on the group commit | none |
 
 ### What else starts on a pull request push
 
@@ -58,7 +58,7 @@ pull request's run waited for runners while the first ran. The same checks then 
 jobs; the Android launcher build (`android_build`), added later, makes 15, a fourth Python
 shard makes 16, a fourth Windows group makes 17, and installer and Windows-runtime changes add
 one path-gated Windows installer job. The nightly schedule and a manual run add the informational
-C coverage job (`c_coverage`), 18 in all. Nothing was dropped and no
+C coverage job (`c_coverage`): 19 jobs in all, with the installer job they also run. Nothing was dropped and no
 command changed; jobs were merged and their steps run one after another. Three things differ in
 when or how a step runs, and none of them skips a step
 where it ran before:
@@ -1103,7 +1103,9 @@ whenever their jobs run; neither can change a gate's result.
   duplicate line records, and a notes file whose program never ran still reports its lines,
   as not executed. Notes files of the mutants built inside measured targets (every path with
   `mutant` in it) are skipped: lines only a mutant define compiles would otherwise count as
-  covered. `-r` keeps system headers out, and reports for the tests' own sources (`tests/`,
+  covered. A mutant that links a shared, unmutated object still adds its run to that object's
+  counts: the GPU coherence and first-bad-draw mutants link `ge.o`, so their runs count in
+  `src/rt/ge.c`. `-r` keeps system headers out, and reports for the tests' own sources (`tests/`,
   `fixtures/`, `*selftest.c`, `*selftest.cpp`, `*selftest.inc`, `src/player/player_ui_test.c`) and for C
   generated into `build/` are dropped, as `tools/test_*.py` is for Python. Everything is
   uploaded once, under `flags: c`. A failure in any earlier step skips the upload, so a
@@ -1135,8 +1137,9 @@ whenever their jobs run; neither can change a gate's result.
   measured or named:
 
   - Mutants: the separate mutant steps (`gpu-texscale-mutant`, the cosimulation mutation
-    corpus) are left out, and the mutants built inside measured targets are skipped at
-    collection. They run deliberately broken code.
+    corpus) are left out, and the objects the mutants inside measured targets compile for
+    themselves are skipped at collection. They run deliberately broken code. Their runs still
+    count in the unmutated objects they link.
   - Not C self-tests: the import and fake-success audit, the provenance gap check, the 32-bit
     format portability build (syntax only), the portable-object and GE profiling compiles, and
     the FSR 3 shader reproduction.
@@ -1153,7 +1156,7 @@ whenever their jobs run; neither can change a gate's result.
 | Flag | Before: `main` at `8257cfc27` (run 43078241056) | After: `0889c5d90` (manual run 43094169097) |
 | --- | --- | --- |
 | Combined | 50.35 % of 141,165 lines in 355 files | 61.82 % of 234,377 lines in 597 files |
-| `python` | 80.59 % of 76,108 lines in 194 files | 80.62 % of 76,108 lines in 194 files |
+| `python` | 80.59 % of 76,104 lines in 194 files | 80.62 % of 76,108 lines in 194 files |
 | `c` | 14.98 % of 65,061 lines in 161 files | 52.79 % of 158,269 lines in 403 files |
 | `c`, `src/` only | 15.48 % of 61,555 lines | 59.11 % of 131,899 lines |
 
@@ -1388,7 +1391,7 @@ as described below.
 
 | Check the verdict judges | Behaviour on a group commit |
 | --- | --- |
-| `CI required` | `ci.yml` runs the complete matrix, as for a manual dispatch. `hygiene` and `public_export` run ungated. |
+| `CI required` | `ci.yml` runs the complete matrix, as for a manual dispatch, except the informational C coverage job. `hygiene` and `public_export` run ungated. |
 | `Hygiene and security` | Ungated, as on every event. |
 | `OSV Vulnerability Scan` | `osv-scanner.yml` already triggers on `merge_group`. |
 | `dependency-review` | Passes `base-ref` and `head-ref` from the group payload. On a pull request they are empty, which the action reads as unset. |

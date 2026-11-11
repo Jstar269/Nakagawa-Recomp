@@ -2039,8 +2039,8 @@ jobs:
           make CC=gcc player-ui-regressions
           SDL_VIDEODRIVER=dummy SDL_RENDER_DRIVER=software make CC=gcc player-ui-tests
 
-      # The separate mutant steps native_tools runs are left out, and the collection step drops
-      # the mutants built inside measured targets: they run deliberately broken code.
+      # The separate mutant steps native_tools runs are left out. The mutants built inside measured
+      # targets still run; the collection step drops their own objects (see there).
       - name: Measure the GPU selftests on lavapipe
         run: |
           set -euo pipefail
@@ -2073,7 +2073,8 @@ jobs:
       # several objects that share a source, gcov 13 appends their line records into one file.
       # A notes file whose program never ran still reports its lines, as not executed. Notes
       # files of the mutants built inside measured targets are skipped: lines that only a mutant
-      # define compiles would otherwise count as covered. -r keeps repository-relative sources
+      # define compiles would otherwise count as covered. A mutant that links a shared,
+      # unmutated object (ge.o) still adds its run to that object's counts. -r keeps repository-relative sources
       # only (no system headers), and the tests' own sources (also those kept under src/) and
       # the C generated into build/ are dropped, so the number describes the code under test.
       # Any failure before this step skips the upload: a partial run uploads nothing, and the

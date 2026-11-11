@@ -32,9 +32,9 @@ uint32_t g_sr_store_context_pc;
 int g_sr_store_context_mem_gpr = -1;
 uint32_t g_sr_store_context_mem_offset;
 unsigned g_sr_store_context_mem_words;
-/* Read by recomp.h's sr_log_mem_watch_context, which ge.o's checked stores call. An
- * optimized build drops that caller with --gc-sections, which hid the missing definitions;
- * an instrumented (--coverage) build keeps it, and the link failed (#2394). */
+/* Read by recomp.h's sr_log_mem_watch_context, which ge.o's checked stores call. At -O2 the
+ * optimizer folds the reference away, which hid the missing definitions; an instrumented
+ * (--coverage) build keeps it in a .constprop clone, and the link failed (#2394). */
 uint32_t g_sr_mem_watch_context_pc;
 unsigned g_sr_mem_watch_context_limit;
 unsigned g_sr_mem_watch_context_count;
