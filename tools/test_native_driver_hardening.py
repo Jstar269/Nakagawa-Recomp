@@ -50,12 +50,20 @@ static char g_module_start_arg[128];
 static int g_direct_stack_below_args = 0;
 static uint32_t g_host_entry_ra = 0;
 /* The host audio opens (sr_audio_init below), and how many had happened when the guest's
- * first instruction ran, by either boot: the scheduler's or the direct entry's. */
+ * first instruction ran, by either boot: the scheduler's or the direct entry's; when the
+ * scheduler thread was raised (sched_preempt_timer_start); and at the latest sched_run, of
+ * g_sched_runs (a LoadExec restart runs it again). */
 static int g_audio_init_calls = 0;
 static int g_audio_init_calls_at_guest_start = -1;
+static int g_audio_init_calls_at_timer_start = -1;
+static int g_audio_init_calls_at_last_sched_run = -1;
+static int g_sched_runs = 0;
 static void note_guest_start(void) {{
     if (g_audio_init_calls_at_guest_start < 0) g_audio_init_calls_at_guest_start = g_audio_init_calls;
 }}
+/* LoadExec restarts the harness's take still reports: 0 unless a mode arms one. */
+static int g_loadexec_restarts = 0;
+static int g_loadexec_armed = 0;
 
 uint32_t g_sr_debug = 0;
 int sr_hit_hle = 0;
@@ -140,7 +148,7 @@ void sr_audio_pause_enter(void) {{}}
 void sr_audio_pause_leave(void) {{}}
 int sr_audio_pause_script_ready(void) {{ return 1; }}
 /* Host audio seam (audio_sdl3.c, #2361): counts the opens. HARNESS_AUDIO_OPEN_FAILS=1 answers
- * as a host with no audio device does. */
+ * -1, as sr_audio_init does on a host with no audio device; the driver discards the answer. */
 int sr_audio_init(void) {{
     g_audio_init_calls++;
     const char *fails = getenv("HARNESS_AUDIO_OPEN_FAILS");
@@ -157,18 +165,29 @@ void sched_init(CpuState *cpu) {{ s_cpu = cpu; }}
    below). This harness runs no scheduler, so the clock is the paced one, and a requested
    recording is refused for needing SR_DETERMINISTIC_CLOCK=1. */
 int sched_clock_deterministic(void) {{ return 0; }}
-void sched_preempt_timer_start(void) {{}}
-/* sceKernelLoadExec restart seam (driver.c --sched loop). This harness never queues a
- * LoadExec request, so take reports none and the loop ends; the rest are reachable only
- * after a taken request and refuse instead of pretending a replacement program booted. */
-int sr_hle_loadexec_take(SrLoadExecRequest *out) {{ (void)out; return 0; }}
+/* The scheduler thread's priority raise (sched.c) happens here. */
+void sched_preempt_timer_start(void) {{ g_audio_init_calls_at_timer_start = g_audio_init_calls; }}
+/* sceKernelLoadExec restart seam (driver.c --sched loop). Unless a mode arms a restart, take
+ * reports none and the loop ends, and the rest refuse instead of pretending a replacement
+ * program booted. An armed restart boots the same synthetic entry again, with no arguments. */
+int sr_hle_loadexec_take(SrLoadExecRequest *out) {{
+    if (g_loadexec_restarts <= 0) return 0;
+    g_loadexec_restarts--;
+    memset(out, 0, sizeof(*out));
+    strcpy(out->guest_path, "disc0:/PSP_GAME/SYSDIR/NEXT.BIN");
+    return 1;
+}}
 void sr_hle_loadexec_release(SrLoadExecRequest *request) {{ (void)request; }}
 void sr_hle_loadexec_reset_guest_state(void) {{}}
 int sr_hle_loadexec_boot_module(const char *guest_path, uint32_t *entry_out, uint32_t *gp_out) {{
-    (void)guest_path; (void)entry_out; (void)gp_out; return 0;
+    (void)guest_path;
+    if (!g_loadexec_armed) return 0;
+    *entry_out = 0x08000010u;
+    *gp_out = 0u;
+    return 1;
 }}
 void sr_hle_loadexec_finish(void) {{}}
-int sched_reset_for_loadexec(void) {{ return 0; }}
+int sched_reset_for_loadexec(void) {{ return g_loadexec_armed; }}
 void sched_set_guest_process_gp(uint32_t gp) {{ (void)gp; }}
 void sr_mem_reset(void) {{}}
 void sr_loaded_end_set(uint32_t end) {{ (void)end; }}
@@ -183,6 +202,8 @@ static void synthetic_module_start(uint32_t args, uint32_t argp) {{
 }}
 void sched_run(uint32_t entry, uint32_t arglen, uint32_t argp) {{
     note_guest_start();
+    g_sched_runs++;
+    g_audio_init_calls_at_last_sched_run = g_audio_init_calls;
     if (entry == 0x08000010u) synthetic_module_start(arglen, argp);
 }}
 /* Extracted-data preparation seam: this harness links driver.c without hle.c,
@@ -488,18 +509,35 @@ int main(int argc, char **argv) {{
     }}
 
     if (strcmp(mode, "audio_open_sched") == 0) {{
-        /* #2361: the scheduler path opens the host audio device once, before the guest's first
-         * instruction, and runs on whether or not the open succeeded. */
+        /* #2361: the scheduler path opens the host audio device once, after the scheduler
+         * thread is raised (sched_preempt_timer_start), before the guest's first instruction,
+         * and outside the LoadExec loop. With "loadexec" the guest asks for one LoadExec
+         * restart, so sched_run runs twice and the second run must find no second open. */
         if (argc < 3) return 119;
+        const int loadexec = argc > 3 && strcmp(argv[3], "loadexec") == 0;
+        g_loadexec_restarts = loadexec ? 1 : 0;
+        g_loadexec_armed = loadexec;
+        const int expected_runs = loadexec ? 2 : 1;
         char *argv_fake[] = {{
             "driver", "--image", argv[2], "0x08000000", "0x08000010", "none", "none", "--sched"
         }};
         int result = driver_main(8, argv_fake);
         if (result != 0) return result;
+        if (g_audio_init_calls_at_timer_start != 0) {{
+            fprintf(stderr, "audio opens before the scheduler thread was raised: %d, expected 0\\n",
+                    g_audio_init_calls_at_timer_start);
+            return 124;
+        }}
         if (g_audio_init_calls_at_guest_start != 1) {{
             fprintf(stderr, "audio opens before the guest started: %d, expected 1\\n",
                     g_audio_init_calls_at_guest_start);
             return 120;
+        }}
+        if (g_sched_runs != expected_runs || g_audio_init_calls_at_last_sched_run != 1) {{
+            fprintf(stderr, "sched_run ran %d times (expected %d); audio opens at its last run: %d, "
+                            "expected 1\\n", g_sched_runs, expected_runs,
+                    g_audio_init_calls_at_last_sched_run);
+            return 125;
         }}
         if (g_audio_init_calls != 1) {{
             fprintf(stderr, "audio opens by the driver: %d, expected 1\\n", g_audio_init_calls);
@@ -737,17 +775,22 @@ int main(int argc, char **argv) {{
                 direct_boot_args.stderr + direct_boot_args.stdout,
             )
 
-            # 6c. #2361: the scheduler path opens the host audio device before the guest starts,
-            # once, and goes on when the host has no device; the direct boot opens nothing.
+            # 6c. #2361: the scheduler path opens the host audio device once, after the
+            # scheduler thread's priority raise and before the guest starts, and a LoadExec
+            # restart does not open it again; the direct boot opens nothing. With the open
+            # answering -1 (a host with no device) the run must still reach sched_run and end
+            # as a normal run (exit 0): the driver does not depend on the open succeeding.
             for fails in ("0", "1"):
-                audio_env = os.environ.copy()
-                audio_env["HARNESS_AUDIO_OPEN_FAILS"] = fails
-                audio_sched = subprocess.run(
-                    [str(exe), "audio_open_sched", str(sample_img)],
-                    capture_output=True, text=True, env=audio_env,
-                )
-                self.assertEqual(audio_sched.returncode, 0,
-                                 f"open fails={fails}: {audio_sched.stderr}{audio_sched.stdout}")
+                for restart in ([], ["loadexec"]):
+                    audio_env = os.environ.copy()
+                    audio_env["HARNESS_AUDIO_OPEN_FAILS"] = fails
+                    audio_sched = subprocess.run(
+                        [str(exe), "audio_open_sched", str(sample_img), *restart],
+                        capture_output=True, text=True, env=audio_env,
+                    )
+                    self.assertEqual(audio_sched.returncode, 0,
+                                     f"open fails={fails} {restart}: "
+                                     f"{audio_sched.stderr}{audio_sched.stdout}")
             audio_direct = subprocess.run(
                 [str(exe), "audio_open_direct", str(sample_img)], capture_output=True, text=True
             )

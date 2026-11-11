@@ -708,18 +708,22 @@ have_image:;
          * package-local sceKernelLoadExec request stops this scheduler at its next
          * guest-thread exit boundary; the outer loop then clears guest state and boots
          * the declared project program from the same runtime module package. sched_init
-         * is process-start-only; LoadExec uses the explicit teardown/rebind seam below.
-         *
-         * The host audio device opens here, before the guest's first instruction (#2361).
-         * Opening it takes tens of milliseconds, and every guest thread runs on this one host
-         * thread, so an open at the guest's first audio call stalled sound and picture together
-         * just as the game began to play. sr_audio_init makes the same decision it made there:
-         * a null, disabled or headless back end opens nothing, and a failed open is reported once
-         * and the run goes on silently. A run without the scheduler (below) still opens the
-         * device at its first audio call, as before. */
-        (void)sr_audio_init();
+         * is process-start-only; LoadExec uses the explicit teardown/rebind seam below. */
         sched_init(&s);
         sched_preempt_timer_start();
+        /* The host audio device opens here, once, before the guest's first instruction
+         * (#2361). Opening it takes tens of milliseconds, and every guest thread runs on this
+         * one host thread, so an open at the guest's first audio call would stall sound and
+         * picture together just as the game begins to play. It comes after
+         * sched_preempt_timer_start, which raises this thread's priority: on Linux the threads
+         * a raised thread creates inherit its nice value, and SDL's audio device thread is
+         * created by this open. sr_audio_init makes the same decision as at a first audio call:
+         * SR_AUDIO_DISABLED=1, SR_AUDIO_BACKEND=null (none, 0, off), or SR_HEADLESS=1 without
+         * SR_AUDIO_BACKEND opens nothing, and a failed open is reported once and the run goes
+         * on silently, so the result is not needed here. Outside the LoadExec loop: a replacement
+         * program keeps the open device. A run without the scheduler (below) opens the device
+         * at its first audio call. */
+        (void)sr_audio_init();
         for (;;) {
             sr_driver_boot_event("BOOT_EVENT phase=guest_start mode=scheduler entry=0x%08x", entry);
             sched_run(entry, s.r[4], s.r[5]);
