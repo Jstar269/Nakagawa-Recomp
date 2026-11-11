@@ -2719,11 +2719,12 @@ static int blend_chan(int s, int d, int sf, int df, int eq) {
     }
 }
 
-/* The columns the rasteriser may write, before the scissor: a PSP draws anywhere inside the
- * scissor on a target up to 512 pixels wide (#2193), so a stride past 480 (an offscreen target,
- * or a display buffer's padding) is drawn up to its last column, 511 at most. A stride of 480 or
- * less keeps the screen's 480 columns, as before: what a PSP does past a narrower stride is not
- * measured. */
+/* The columns the rasteriser may write, before the scissor. #2193 states that a PSP draws
+ * anywhere inside the scissor on a target up to 512 pixels wide (not measured here; the Vulkan
+ * backend already draws there), so a stride past 480 (an offscreen target, or a display
+ * buffer's padding) is drawn up to its last column, 511 at most. Stopping at the stride for a
+ * stride of 481 to 511 is unmeasured too. A stride of 480 or less keeps the screen's 480
+ * columns, as before: what a PSP does past a narrower stride is not measured. */
 static inline int raster_columns(void) {
     const uint32_t stride = ge.fbw ? ge.fbw : 512u;
     return stride > 480u ? (stride < 512u ? (int)stride : 512) : 480;

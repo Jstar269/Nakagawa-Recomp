@@ -1473,6 +1473,52 @@ static void test_ge_wide_fill(void) {
     free(on);
 }
 
+/* The GE clock charges a sprite for the columns ge.c rasterizes (#2193): on a 512 stride a
+ * scissor to x 511 times the 32 columns past 480 too, and on a 480 stride it times 480 columns,
+ * as before. One through-mode sprite, x 0-512, rows 0-15, no texture, wing off. */
+static double wide_raster_sprite_clk(uint32_t fbw, uint32_t x2) {
+    const uint32_t through = (7u << 2) | (3u << 7) | (1u << 23);
+    memset(SR_HOST(WIDE_VRAM), 0, WIDE_VRAM_SIZE);
+    s_pc = LIST_WIDE;
+    s_wide_vc = WIDE_VERTS;
+    W(0x10, 0x080000u);
+    W(0x13, 0u);
+    W(0x9C, WIDE_FB & 0x00FFFFFFu);
+    W(0x9D, fbw);
+    W(0xD2, 3u);
+    W(0x15, 0u);
+    W(0x16, (271u << 10) | 511u);
+    W(0xD4, 0u);
+    W(0xD5, (271u << 10) | x2);
+    for (uint32_t cmd = 0x17; cmd <= 0x28; cmd++) W(cmd, 0u);   /* every unit off */
+    W(0x50, 0u);
+    const uint32_t at = s_wide_vc;
+    wide_vtx(WIDE_BAR, 0.0f, 0.0f);
+    wide_vtx(WIDE_BAR, 512.0f, 16.0f);
+    W(0x12, through);
+    W(0x01, at & 0x00FFFFFFu);
+    W(0x04, (6u << 16) | 2u);
+    W(0x0F, 0u);
+    W(0x0C, 0u);
+    expect(ge_run_list(LIST_WIDE, 0) == 0, "wide_raster_clk", "list did not reach END");
+    return ge_timing_run_clk();
+}
+
+static void test_ge_wide_raster_timing(void) {
+    ge_wide_set_wing(0);
+    ge_timing_set_enabled(1);
+    const double wide = wide_raster_sprite_clk(512u, 511u);
+    const double screen = wide_raster_sprite_clk(512u, 479u);
+    const double narrow = wide_raster_sprite_clk(480u, 511u);
+    ge_timing_set_enabled(0);
+    if (!(screen > 0.0 && wide > screen && narrow == screen)) {
+        fprintf(stderr, "wide_raster_clk: GE clock %.3f (512 stride, x2 511), %.3f (512 stride, x2 479), "
+                        "%.3f (480 stride, x2 511)\n", wide, screen, narrow);
+        expect(0, "wide_raster_clk",
+               "a 512 scissor on a 512 stride times more columns than the screen; a 480 stride times 480");
+    }
+}
+
 static void print_mask(FILE *out, uint32_t mask) {
     if (!mask) { fputs("none", out); return; }
     const char *sep = "";
@@ -2384,6 +2430,7 @@ int main(int argc, char **argv) {
     test_ge_immediate_mode();
     test_ge_immediate_stream();
     test_ge_wide_fill();
+    test_ge_wide_raster_timing();
     build_lists();
     expect_api_contract();
 

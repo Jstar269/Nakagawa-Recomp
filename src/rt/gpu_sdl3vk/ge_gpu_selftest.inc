@@ -1089,8 +1089,10 @@ static int coherence_run_software_sprite_semantics(void) {
 
 /* ---- raster bounds: the scissor and the target's stride, not the 480-pixel screen (#2193) ----
  *
- * A PSP draws anywhere inside the scissor on a target up to 512 pixels wide: an offscreen
- * render target, or a display buffer's stride padding. One list draws three bands reaching
+ * #2193 states that a PSP draws anywhere inside the scissor on a target up to 512 pixels
+ * wide: an offscreen render target, or a display buffer's stride padding. This cell checks
+ * that the two renderers agree on that bound, not what a PSP draws; stopping at a stride of
+ * 481 to 511 is unmeasured on a PSP. One list draws three bands reaching
  * x = 512 on an 8888 target pre-filled with a sentinel: a clear (rows 0-89), a sprite (rows
  * 90-179, x from 400) and two triangles (rows 180-271, x from 400). The Vulkan backend and
  * ge.c each run it, and each must draw every column up to the scissor's x2 or the stride's

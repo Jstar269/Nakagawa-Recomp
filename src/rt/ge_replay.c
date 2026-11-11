@@ -255,7 +255,6 @@ static void fbd_finalize(FbdRun *run) {
     }
 }
 
-/* The scissor's extent from the buffer's origin: the pixels a draw can write. */
 /* The columns ge.c rasterizes on this target (ge.c's raster_columns): a stride past 480 up to
  * its last column, 512 at most; otherwise the screen's 480. */
 static uint32_t fbd_raster_w(const GeState *st) {
@@ -263,6 +262,7 @@ static uint32_t fbd_raster_w(const GeState *st) {
     return stride > 480u ? (stride < 512u ? stride : 512u) : 480u;
 }
 
+/* The scissor's extent from the buffer's origin: the pixels a draw can write. */
 static uint32_t fbd_extent(int last) {
     if (last < 0) return 1u;
     return (uint32_t)last + 1u > FBD_MAX_SIDE ? FBD_MAX_SIDE : (uint32_t)last + 1u;
