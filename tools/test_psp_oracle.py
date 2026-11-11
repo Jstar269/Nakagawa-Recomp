@@ -3509,6 +3509,9 @@ class PspDmacProbeTests(unittest.TestCase):
                 "PSP-VFPU-BASICARITH-001", "PSP-VFPU-VUS2I-001",
                 # The 2026-11-08 acceptance-eligible hle-self-stop-unload (#341, boot 165) run.
                 "PSP-HLE-SELFSTOP-001",
+                # The 2026-11-11 acceptance-eligible hle-io-seek-edges (#1380, boot 192, ARK-5
+                # 5.2.0) run of 1a5157e37.
+                "PSP-HLE-IO-SEEK-002",
                 # The 2026-11-10 acceptance-eligible hle-issues-batch (#326, #356, boot 172) and
                 # hle-kernel-pool-bounds (boot 173) runs of 979c6a1dd.
                 "PSP-HLE-ISSUES-001", "PSP-HLE-KERNEL-STATUS-002",
@@ -15830,7 +15833,7 @@ class Record20261015Tests(unittest.TestCase):
             ("sas-mix", "PSP-SAS-003", "CAPTURED"),
             ("vcodec-words", "PSP-VCODEC-001", "NOT_RUN"),
             ("hle-utility-dialogs", "PSP-HLE-UTILITY-DIALOG-001", "NOT_RUN"),
-            ("hle-io-seek-edges", "PSP-HLE-IO-SEEK-002", "NOT_RUN"),
+            ("hle-io-seek-edges", "PSP-HLE-IO-SEEK-002", "MEASURED"),
             ("mpeg-ycbcr", "PSP-MPEG-YCBCR-001", "NOT_RUN"),
         )
         docs = {row[0]: row for row in self._table_rows(self.doc) if len(row) == 4}
@@ -15842,6 +15845,28 @@ class Record20261015Tests(unittest.TestCase):
                 self.assertEqual(readme[case][1], test_id)
                 self.assertIn(status, readme[case][2])
                 self.assertEqual(self.rows[test_id]["hardware_evidence"], status)
+
+    def test_the_io_seek_edges_run_is_measured_on_ark_5_2_0(self) -> None:
+        row = self.rows["PSP-HLE-IO-SEEK-002"]
+        self.assertEqual(row["hardware_evidence"], "MEASURED")
+        self.assertNotIn("evidence_note", row)
+        note = row["measurement_note"]
+        for term in ("2026-11-11", "PSP-3000", "boot 192", "XMB context", "1a5157e37",
+                     "ARK-5 5.2.0", "7a0035d9", "acceptance-eligible with 0 blockers",
+                     "0x80020323", "0x80010016", "queues nothing"):
+            self.assertIn(term, note)
+        self.assertIn("- **PSP-3000 single-case run of `hle-io-seek-edges` (2026-11-11 UTC)**", self.doc)
+
+    def test_the_sas_mix_second_capture_keeps_it_captured(self) -> None:
+        row = self.rows["PSP-SAS-003"]
+        self.assertEqual(row["hardware_evidence"], "CAPTURED")
+        self.assertNotIn("measurement_note", row)
+        note = row["evidence_note"]
+        for term in ("2026-11-11", "boot 191", "a39f7a14c", "ARK-5 5.2.0", "same 205 records",
+                     "unloads SASCORE, then AVCODEC", "no such rerun has been made"):
+            self.assertIn(term, note)
+        self.assertNotIn("on purpose", note)
+        self.assertNotIn("on purpose", self.rows["PSP-SAS-002"]["evidence_note"])
 
     def test_the_sas_adsr_capture_is_captured_with_its_blocker(self) -> None:
         row = self.rows["PSP-SAS-002"]
