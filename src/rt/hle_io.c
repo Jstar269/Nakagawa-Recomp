@@ -331,10 +331,12 @@ uint32_t h_IoWrite(CpuState *s) {
     if (f->kind != FD_KIND_FILE) return SCE_ERROR_KERNEL_BAD_FILE_DESCRIPTOR;
     if (f->flash0) return sr_flash0_font_refuse_write(f->guest_path, "write through a font descriptor");
     if (!f->host) return 0x80010013;                 /* read-only (ISO) fd: not writable */
-    /* A write through a Memory Stick descriptor opened without write access answers the
-     * manager's bad-descriptor error and leaves the file unchanged (PSP-HLE-IO-SEEK-001
-     * io-seek-ms-write-rdonly, measured on a PSP-3000; sceIoWriteAsync shares it, unmeasured). */
-    if (!f->writable && loadexec_ms0_path(f->guest_path))
+    /* A write through a Memory Stick (ms0: or fatms0:) descriptor opened without write access
+     * answers the manager's bad-descriptor error and leaves the file unchanged
+     * (PSP-HLE-IO-SEEK-001 io-seek-ms-write-rdonly, measured on a PSP-3000; sceIoWriteAsync
+     * shares it, unmeasured). */
+    if (!f->writable && strchr(f->guest_path, ':') &&
+        sr_ms0_classify(f->guest_path, NULL) == SR_MS0_OWNED)
         return SCE_ERROR_KERNEL_BAD_FILE_DESCRIPTOR;
     if (count > UINT32_MAX - f->off) {
         /* A seek may leave the position anywhere in 32 bits; a write that would carry it
