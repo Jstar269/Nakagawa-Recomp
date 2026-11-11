@@ -1137,6 +1137,11 @@ class TestEnhancementAotCodegenAndCache(_SynthTimingElfFixture):
                          {"kind": "map_f_reg", "reg": 3, "map": "decay"})
         self.assertEqual(plan("retention_m_to_sqrt(m)", 0xC4430010),
                          {"kind": "map_f_reg", "reg": 3, "map": "retention"})
+        # mov.s f20, f14 copies the factor: the copy is mapped, never the source register
+        self.assertEqual(plan("decay_k_to_1-sqrt(1-k)", 0x46007506),
+                         {"kind": "map_f_reg", "reg": 20, "map": "decay"})
+        self.assertEqual(plan("retention_m_to_sqrt(m)", 0x46007506),
+                         {"kind": "map_f_reg", "reg": 20, "map": "retention"})
         self.assertEqual(plan("count_x2", 0xC8404F84),  # lv.s S000.s, 0x4f84(v0)
                          {"kind": "scale_v_reg", "vreg": 0, "factor": 2.0})
         self.assertEqual(plan("step_x0.5", 0xC8470011),  # lv.s S131.s (vt 7 | 1 << 5)
@@ -1162,6 +1167,14 @@ class TestEnhancementAotCodegenAndCache(_SynthTimingElfFixture):
             ("decay_k_to_1-sqrt(1-k)", 0x3C023F80),  # 1.0 is outside (0, 1)
             ("decay_k_to_1-sqrt(1-k)", 0xE4430010),  # swc1 stores, it does not load the factor
             ("retention_m_to_sqrt(m)", 0x24020003),
+            ("decay_k_to_1-sqrt(1-k)", 0x46207506),  # mov.d: a double, not a single factor
+            ("decay_k_to_1-sqrt(1-k)", 0x46007507),  # neg.s does not copy the factor
+            ("decay_k_to_1-sqrt(1-k)", 0x46007502),  # mul.s: the decay is not taken from arithmetic
+            ("decay_k_to_1-sqrt(1-k)", 0x460018C6),  # mov.s f3, f3: no copy, the source would change
+            ("retention_m_to_sqrt(m)", 0x460018C6),
+            ("decay_k_to_1-sqrt(1-k)", 0x46017506),  # mov.s with a nonzero ft field is not a valid word
+            ("count_x2", 0x46017506),
+            ("step_x0.5", 0x46017507),  # neg.s likewise
         ):
             with self.subTest(transform=transform, word=f"{word:08x}"):
                 with self.assertRaises(EnhancementPackageError):
@@ -1871,6 +1884,60 @@ class TestEnhancementAotCodegenAndCache(_SynthTimingElfFixture):
                             nearest = _f32_decay_reference(k)
                             self.assertLessEqual(abs(want - nearest), 0 if nearest >= 0x00800000 else 1,
                                                  f"k={k!r}")
+        finally:
+            codegen.ENHANCEMENT_SITES = saved
+            codegen.ENHANCEMENT_APPLIED.clear()
+
+    @unittest.skipUnless(GCC, "needs a host C compiler")
+    def test_mapped_register_copy_keeps_its_source_when_run(self) -> None:
+        """A decay or retention site on mov.s fd, fs, as the planner plans it: compile the whole emitted
+        statement and run it.
+        With the toggle on, fd is the mapped factor and fs keeps its stock bits (the source may also
+        be a duration); with the toggle off both are the stock copy."""
+        mov_s = 0x46007506  # mov.s $f20, $f14
+        k = struct.unpack("<f", struct.pack("<f", 0.2))[0]
+        saved = codegen.ENHANCEMENT_SITES
+        try:
+            for kind in ("decay", "retention"):
+                with self.subTest(map=kind):
+                    transform = {"decay": "decay_k_to_1-sqrt(1-k)", "retention": "retention_m_to_sqrt(m)"}[kind]
+                    rewrite = enhancement_package.plan_site_rewrite({"id": "K", "transform": transform}, mov_s)
+                    codegen.ENHANCEMENT_SITES = {0x1300: {"id": "K", "rewrite": rewrite}}
+                    codegen.ENHANCEMENT_APPLIED.clear()
+                    line = codegen.normal_line(0x1300, mov_s, lle_cpu=False)
+                    with tempfile.TemporaryDirectory() as tmp_dir:
+                        tmp = Path(tmp_dir)
+                        harness = tmp / "copy.c"
+                        harness.write_text(
+                            "#include <math.h>\n#include <stdint.h>\n#include <stdio.h>\n#include <string.h>\n"
+                            "typedef struct { float f[32]; } S;\n"
+                            "static int on;\n"
+                            "static int nk_enhancement_on(void) { return on; }\n"
+                            "static void sr_begin(S *s, uint32_t pc, uint32_t w) { (void)s; (void)pc; (void)w; }\n"
+                            "static void sr_end(S *s, uint32_t a, int n) { (void)s; (void)a; (void)n; }\n"
+                            "static void nk_enhancement_factor_kept(int *reported, const char *site, "
+                            "uint32_t pc, float value) { (void)reported; (void)site; (void)pc; (void)value; }\n"
+                            "int main(void) {\n"
+                            "    for (on = 0; on < 2; on++) {\n"
+                            "        S st, *s = &st; uint32_t a, b;\n"
+                            "        memset(&st, 0, sizeof st);\n"
+                            f"        s->f[14] = {k!r}f; s->f[20] = 7.0f;\n"
+                            f"    {line}\n"
+                            "        memcpy(&a, &s->f[14], 4); memcpy(&b, &s->f[20], 4);\n"
+                            "        printf(\"%08x %08x\\n\", (unsigned)a, (unsigned)b);\n"
+                            "    }\n"
+                            "    return 0;\n"
+                            "}\n",
+                            encoding="utf-8",
+                        )
+                        exe = tmp / "copy.exe"
+                        subprocess.run([str(GCC), "-std=c11", "-O2", "-Wall", "-Werror", "-o", str(exe),
+                                        str(harness), "-lm"], check=True, capture_output=True, text=True)
+                        out = subprocess.run([str(exe)], check=True, capture_output=True, text=True).stdout.split()
+                    stock = struct.unpack("<I", struct.pack("<f", k))[0]
+                    mapped = struct.unpack("<I", struct.pack("<f", _scale_value(transform, k)))[0]
+                    self.assertNotEqual(mapped, stock)
+                    self.assertEqual([int(v, 16) for v in out], [stock, stock, stock, mapped])
         finally:
             codegen.ENHANCEMENT_SITES = saved
             codegen.ENHANCEMENT_APPLIED.clear()
@@ -4639,11 +4706,13 @@ class TestTwoUpdateTransforms(unittest.TestCase):
         for fn in (0x00, 0x01, 0x02, 0x03):
             self.assertEqual(plan_site_rewrite(retain, _fpu_s(fn, 3, 0, 2)),
                              {"kind": "map_f_reg", "reg": 3, "map": "retention"})
-        # A move, a compare, and the decay transform on arithmetic keep their refusals.
-        for word in (_fpu_s(0x06, 3, 0, 0), _fpu_s(0x3E, 0, 0, 1)):
-            with self.assertRaisesRegex(EnhancementPackageError, "or single-precision arithmetic"):
-                plan_site_rewrite(retain, word)
-        with self.assertRaisesRegex(EnhancementPackageError, r"an lwc1 or an lv\.s\) \(fail-closed"):
+        # A move copies the factor: its destination is mapped (section 11.3.2.7).
+        self.assertEqual(plan_site_rewrite(retain, _fpu_s(0x06, 3, 0, 0)),
+                         {"kind": "map_f_reg", "reg": 3, "map": "retention"})
+        # A compare, and the decay transform on arithmetic, keep their refusals.
+        with self.assertRaisesRegex(EnhancementPackageError, "or single-precision arithmetic"):
+            plan_site_rewrite(retain, _fpu_s(0x3E, 0, 0, 1))
+        with self.assertRaisesRegex(EnhancementPackageError, r"an lv\.s or a mov\.s\) \(fail-closed"):
             plan_site_rewrite({"id": "D", "transform": "decay_k_to_1-sqrt(1-k)"}, _fpu_s(0x01, 3, 0, 2))
         # An lv.q names its register with the low bit of its offset field; the other low bit is
         # not part of a plain lv.q, and such a word is refused.
