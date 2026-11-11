@@ -110,8 +110,8 @@ bool nk_pbp_homebrew_view_root(const char *iso_path, char *out, size_t out_size)
  * (nk_pbp_homebrew_folder_name), stays within the bounds above, holds nothing a
  * copy would leave out (a link, a junction, a file kept in the cloud), does not
  * hold view_root, and is not one of the user's personal folders (the home folder,
- * the Desktop, and Documents, Downloads, Music, Pictures, Videos and OneDrive in
- * the home folder), whose files are the user's, not the program's. Reads the
+ * the Desktop wherever it was moved, and Documents, Downloads, Music, Pictures and
+ * Videos in the home folder), whose files are the user's, not the program's. Reads the
  * folder; writes nothing. */
 bool nk_pbp_homebrew_check_folder(const char *pbp_path, const char *view_root,
                                   char *problem, size_t problem_size);

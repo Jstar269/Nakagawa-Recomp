@@ -925,7 +925,7 @@ static bool hb_path_within(const char *path, const char *folder)
 static bool hb_is_personal_folder(const char *folder)
 {
     static const char *const personal[] = {
-        "Desktop", "Documents", "Downloads", "Music", "Pictures", "Videos", "OneDrive"
+        "Desktop", "Documents", "Downloads", "Music", "Pictures", "Videos"
     };
     char known[HB_PATH_MAX];
     char resolved[HB_PATH_MAX];
