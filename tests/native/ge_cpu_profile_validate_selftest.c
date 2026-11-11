@@ -1512,13 +1512,170 @@ static void test_ge_wide_raster_timing(void) {
     const double screen = wide_raster_sprite_clk(512u, 479u);
     const double narrow = wide_raster_sprite_clk(480u, 511u);
     const double mid = wide_raster_sprite_clk(500u, 511u);
+    const double small = wide_raster_sprite_clk(256u, 479u);
     ge_timing_set_enabled(0);
-    if (!(screen > 0.0 && wide > screen && narrow == screen && mid > screen && mid < wide)) {
+    if (!(screen > 0.0 && wide > screen && narrow == screen && mid > screen && mid < wide &&
+          small > 0.0 && small < screen)) {
         fprintf(stderr, "wide_raster_clk: GE clock %.3f (512 stride, x2 511), %.3f (512 stride, x2 479), "
-                        "%.3f (480 stride, x2 511), %.3f (500 stride, x2 511)\n", wide, screen, narrow, mid);
+                        "%.3f (480 stride, x2 511), %.3f (500 stride, x2 511), %.3f (256 stride, x2 479)\n",
+                wide, screen, narrow, mid, small);
         expect(0, "wide_raster_clk",
-               "a 512 scissor times 512 columns on a 512 stride, 500 on a 500 stride, 480 on a 480 stride");
+               "a 512 scissor times 512 columns on a 512 stride, 500 on a 500 stride, 480 on a 480 stride, "
+               "and 256 on a 256 stride");
     }
+}
+
+/* Every raster write stays inside the buffer it writes (#2193): colour inside the target's
+ * stride, depth inside the depth buffer's zbw columns and 272 rows. Column x of row y is guest
+ * address (y * stride + x), so a write past the stride lands in the next row, or past the last
+ * row. Three cells, software rasterizer, wing off:
+ *   colour: a 256-stride 8888 target, scissor x2 479, a sprite x 0-512 on rows 100-109. Rows
+ *     100-109 must hold it in columns 0-255, and nothing else may change: not row 110, not the
+ *     row past the buffer.
+ *   depth: a 512-stride target with a 256-wide depth buffer, cleared to depth A, then a
+ *     depth-writing sprite (ALWAYS, depth B) on rows 0-9 at x 256-511, outside the depth
+ *     buffer's columns. Every depth pixel must still hold A, and the row past the buffer its
+ *     sentinel.
+ *   clear: a depth clear (depth C) under a scissor of x 0-99 must write columns 0-99 only. */
+#define RSB_FB         0x04000000u
+#define RSB_ZB         0x04100000u
+#define RSB_BG         0x5a5a5a5au
+#define RSB_SPRITE     0xff3080c0u
+#define RSB_DEPTH_SENT 0x1234u
+#define RSB_DEPTH_A    0x4000u
+#define RSB_DEPTH_B    0x0100u
+#define RSB_DEPTH_C    0x7777u
+
+static void rsb_vtx(uint32_t color, float x, float y, float z) {
+    uint8_t *d = (uint8_t *)SR_HOST(s_wide_vc);
+    const float pos[3] = { x, y, z };
+    memcpy(d, &color, 4);
+    memcpy(d + 4, pos, 12);
+    s_wide_vc += 16u;
+}
+
+static void rsb_sprite(uint32_t color, float x0, float y0, float x1, float y1, float z) {
+    const uint32_t at = s_wide_vc;
+    rsb_vtx(color, x0, y0, z);
+    rsb_vtx(color, x1, y1, z);
+    W(0x01, at & 0x00FFFFFFu);
+    W(0x04, (6u << 16) | 2u);
+}
+
+/* The list's state: an 8888 target at RSB_FB with stride fbw, depth at RSB_ZB with stride
+ * zbw, every unit off, depth writes on with the test ALWAYS (enabled per cell), the region the
+ * whole 512x272 and the scissor x 0 to scis_x2 on every row. */
+static void rsb_begin(uint32_t fbw, uint32_t zbw, uint32_t scis_x2) {
+    s_pc = LIST_WIDE;
+    s_wide_vc = WIDE_VERTS;
+    W(0x10, 0x080000u);
+    W(0x13, 0u);
+    W(0x9C, RSB_FB & 0x00FFFFFFu);
+    W(0x9D, fbw | ((RSB_FB & 0xFF000000u) >> 8));
+    W(0x9E, RSB_ZB & 0x00FFFFFFu);
+    W(0x9F, zbw | ((RSB_ZB & 0xFF000000u) >> 8));
+    W(0xD2, 3u);
+    W(0x15, 0u);
+    W(0x16, (271u << 10) | 511u);
+    W(0xD4, 0u);
+    W(0xD5, (271u << 10) | scis_x2);
+    for (uint32_t cmd = 0x17; cmd <= 0x28; cmd++) W(cmd, 0u);   /* every unit off */
+    W(0xD3, 0u);
+    W(0xE7, 0u);                                                  /* depth writes on */
+    W(0xDE, 1u);                                                  /* depth test ALWAYS */
+    W(0x50, 0u);
+    W(0x12, (7u << 2) | (3u << 7) | (1u << 23));                  /* 8888, float, through */
+}
+
+static void rsb_end(const char *scenario) {
+    W(0x0F, 0u);
+    W(0x0C, 0u);
+    expect(ge_run_list(LIST_WIDE, 0) == 0, scenario, "list did not reach END");
+}
+
+static uint32_t rsb_fb(uint32_t linear) {
+    uint32_t v;
+    memcpy(&v, SR_HOST(RSB_FB + linear * 4u), 4);
+    return v;
+}
+
+/* Guest depth pixel `linear` (y * zbw + x), at the address ge.c's depth surface uses for it. */
+static void *rsb_depth(uint32_t linear) {
+    return SR_HOST((RSB_ZB + linear * 2u) ^ 0x2040u);
+}
+
+/* A CPU write of guest depth: ge.c's cached surface over it is stale, as after a guest store. */
+static void rsb_fill_depth(uint32_t pixels, uint16_t z) {
+    for (uint32_t i = 0; i < pixels; i++) memcpy(rsb_depth(i), &z, 2);
+    ge_zbuf_invalidate_guest_span(RSB_ZB, pixels * 2u + 0x2040u);
+}
+
+/* Columns below `cols` hold `inside`, the rest `outside`, and the row past the buffer the
+ * sentinel, once ge.c has written its depth surface back to guest memory. */
+static void rsb_check_depth(const char *scenario, uint32_t zbw, uint32_t cols, uint16_t inside,
+                            uint16_t outside) {
+    if (!ge_zbuf_materialize_current()) {
+        expect(0, scenario, "the depth surface was not written back to guest memory");
+        return;
+    }
+    for (uint32_t i = 0; i < zbw * 273u; i++) {
+        const uint32_t x = i % zbw, y = i / zbw;
+        const uint16_t want = y >= 272u ? RSB_DEPTH_SENT : (x < cols ? inside : outside);
+        uint16_t got;
+        memcpy(&got, rsb_depth(i), 2);
+        if (got != want) {
+            fprintf(stderr, "%s: depth pixel (%u,%u) of a %u-wide depth buffer is 0x%04x, want 0x%04x\n",
+                    scenario, (unsigned)x, (unsigned)y, (unsigned)zbw, got, want);
+            expect(0, scenario, y >= 272u ? "a depth write landed past the depth buffer's last row"
+                                          : "a depth write landed outside the pixel it was given");
+            return;
+        }
+    }
+}
+
+static void test_ge_raster_stride_bounds(void) {
+    ge_wide_set_wing(0);
+
+    /* colour: a 256 stride, scissor x2 479 */
+    for (uint32_t i = 0; i < 256u * 273u; i++) {
+        const uint32_t bg = RSB_BG;
+        memcpy(SR_HOST(RSB_FB + i * 4u), &bg, 4);
+    }
+    rsb_begin(256u, 256u, 479u);
+    rsb_sprite(RSB_SPRITE, 0.0f, 100.0f, 512.0f, 110.0f, 0.0f);
+    rsb_end("raster_stride_colour");
+    for (uint32_t i = 0; i < 256u * 273u; i++) {
+        const uint32_t y = i / 256u;
+        const uint32_t want = y >= 100u && y < 110u ? RSB_SPRITE : RSB_BG;
+        if ((rsb_fb(i) & 0x00ffffffu) != (want & 0x00ffffffu)) {
+            fprintf(stderr, "raster_stride_colour: pixel (%u,%u) of a 256-stride target is %08x, want %08x\n",
+                    (unsigned)(i % 256u), (unsigned)y, rsb_fb(i), want);
+            expect(0, "raster_stride_colour",
+                   y >= 272u ? "a colour write landed past the target's last row"
+                             : "a colour write past the stride landed in another row");
+            break;
+        }
+    }
+
+    /* depth: a 512-stride target, a 256-wide depth buffer */
+    rsb_fill_depth(256u * 273u, RSB_DEPTH_SENT);
+    rsb_begin(512u, 256u, 511u);
+    W(0xD3, 1u | (4u << 8));                                      /* clear mode: depth only */
+    rsb_sprite(RSB_SPRITE, 0.0f, 0.0f, 512.0f, 272.0f, (float)RSB_DEPTH_A);
+    W(0xD3, 0u);
+    W(0x23, 1u);                                                  /* depth test on, ALWAYS */
+    rsb_sprite(RSB_SPRITE, 256.0f, 0.0f, 512.0f, 10.0f, (float)RSB_DEPTH_B);
+    rsb_end("raster_stride_depth");
+    rsb_check_depth("raster_stride_depth", 256u, 256u, RSB_DEPTH_A, RSB_DEPTH_A);
+
+    /* clear: a depth clear under a 100-column scissor */
+    rsb_fill_depth(256u * 273u, RSB_DEPTH_SENT);
+    rsb_begin(512u, 256u, 99u);
+    W(0xD3, 1u | (4u << 8));
+    rsb_sprite(RSB_SPRITE, 0.0f, 0.0f, 512.0f, 272.0f, (float)RSB_DEPTH_C);
+    W(0xD3, 0u);
+    rsb_end("raster_stride_depth_clear");
+    rsb_check_depth("raster_stride_depth_clear", 256u, 100u, RSB_DEPTH_C, RSB_DEPTH_SENT);
 }
 
 static void print_mask(FILE *out, uint32_t mask) {
@@ -2433,6 +2590,7 @@ int main(int argc, char **argv) {
     test_ge_immediate_stream();
     test_ge_wide_fill();
     test_ge_wide_raster_timing();
+    test_ge_raster_stride_bounds();
     build_lists();
     expect_api_contract();
 
