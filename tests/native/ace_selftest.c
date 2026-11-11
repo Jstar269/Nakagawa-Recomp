@@ -1029,6 +1029,49 @@ static void cell_pad_plan(void) {
     CHECK(ace_latency_percentile_ns(&l, 100) == ACE_LAT_BINS * ACE_LAT_BIN_NS, "the last bin holds the rest");
 }
 
+/* The largest report still fits ACE_REPORT_MAX (ace_report_json drops a report that does not):
+ * every optional object on, every feature named unavailable with the longest reason, and every
+ * counter the selftest can reach at its widest. The counters it cannot set (present intervals,
+ * present kinds, latency and frame counts, rate seconds, PC LIMITED seconds) are charged their
+ * widest text, 20 digits each, as slack. */
+static void cell_report_worst_case(void) {
+    static char json[ACE_REPORT_MAX];
+    (void)ace_init_spec("v1;tier=ace;af=16;text=on;readout=on;notice=on;wide=fill;smooth=x2;sas=sinc;tess=4;"
+                        "cull=on;pad=late", NULL);
+    CHECK(ace_effective()->pad && ace_effective()->cull && ace_effective()->smooth,
+          "the worst-case line turns every optional object on (%s)", ace_spec_text());
+    char reason[96];
+    memset(reason, 'x', sizeof(reason) - 1u);
+    reason[sizeof(reason) - 1u] = '\0';
+    for (int f = 0; f < ACE_FEATURE_COUNT; f++) ace_feature_unavailable((AceFeature)f, reason);
+    ace_set_af_effective(16, NULL);
+    for (int i = 0; i < 3; i++) ace_note_af_failure();
+    ace_set_cull_untracked((unsigned long)-1);
+    AcePadPlan *p = ace_pad_plan();
+    p->updates = p->measured = p->unmeasured = p->late_held = p->late_unheld = p->refreshed =
+        p->far_deadlines = p->hold_ns_sum = p->hold_ns_max = UINT64_MAX;
+    p->held_updates = 1u;
+    ace_note_input_latency(UINT64_MAX);
+    ace_note_frame_without_read();
+    AceSmoothAuxStats a;
+    memset(&a, 0xff, sizeof(a));
+    ace_smooth_aux_report(&a);
+    for (uint32_t vc = 1; vc <= 600; vc++) (void)ace_flip(vc & 1u ? 0x0u : 0x44000u, 0x22000u, vc, vc * 16683333ull);
+    for (uint64_t i = 0, ns = 0; i < ACE_PACE_BINS; i++) {
+        ns += (i + 1u) * 1000000u;
+        ace_smooth_note_present(ACE_PRESENT_REAL, ns);
+    }
+    const size_t slack = (size_t)(ACE_PACE_BINS + 16u) * 20u;
+    const size_t len = ace_report_json(json, sizeof(json));
+    CHECK(len > 0 && len + slack < ACE_REPORT_MAX, "the largest report fits: %zu bytes, %zu of slack, cap %u",
+          len, slack, ACE_REPORT_MAX);
+    CHECK(len > 0 && strstr(json, "\"far_deadline\": 18446744073709551615") &&
+              strstr(json, "\"input_latency_ms\"") && strstr(json, "\"smooth_aux\"") &&
+              strstr(json, "\"cull_untracked\""),
+          "the worst-case report carries every optional object");
+    (void)ace_init_spec("off", NULL);
+}
+
 int main(int argc, char **argv) {
     cell_parse();
     cell_pad_plan();
@@ -1040,10 +1083,11 @@ int main(int argc, char **argv) {
     cell_readout_smooth();
     cell_fast_forward();
     cell_report(argc > 1 ? argv[1] : NULL);
+    cell_report_worst_case();
     if (s_fail) {
         fprintf(stderr, "ace-selftest: %d check(s) FAILED\n", s_fail);
         return 1;
     }
-    printf("ace-selftest: PASS (parse, pad plan, switch, detector, feed, readout, fast forward, report)\n");
+    printf("ace-selftest: PASS (parse, pad plan, switch, detector, feed, readout, fast forward, report, worst-case report)\n");
     return 0;
 }

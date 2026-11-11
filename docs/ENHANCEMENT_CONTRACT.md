@@ -1578,9 +1578,11 @@ so the pad sample it reads is younger when its frame reaches the screen.
   host's cannot lengthen a hold; a deadline more than one period ahead is not planned against (no hold, and the 30
   updates are counted again). Every hold is shorter than one VBLANK period. The wait is an ordinary guest-thread delay
   (`sched_delay_current`) and is never shorter than 1 ms. It is taken only where the thread could wait anyway (never in
-  an interrupt handler, a pending tail transfer or a pause request) and only where a refresh could follow it: not
-  under a route (`SR_PADSCRIPT`), a recording or replay, the headless START pulse or a non-zero sampling cycle, not
-  with no window or while the on-screen keyboard is open, and not once the newest sample was handed to a guest call.
+  an interrupt handler, a pending tail transfer, a pause request or the COSIM guest lane), not in fast forward (whose
+  guest time, the delay's clock, runs ahead of the host time the hold is planned on), and only where a refresh could
+  follow it: not under a route (`SR_PADSCRIPT`), a recording or replay, the headless START pulse or a non-zero
+  sampling cycle, not with no window or while the on-screen keyboard is open, and not once the newest sample was
+  handed to a guest call.
   After the wait, the runtime polls the host input once more and rewrites the newest controller sample in place, only
   if no guest call has been handed it yet: a buffer read or peek, and a latch read or peek, all count. The rewritten
   sample keeps every button its VBLANK latch took from a press since the previous sample, so a press that sample
@@ -1623,7 +1625,7 @@ so the pad sample it reads is younger when its frame reaches the screen.
     15.09 ms with `pad=late`; median 31.0 and 30.5 ms off, 19.0 and 19.5 ms on; 95th percentile 33.0 and 33.0 ms off,
     33.0 and 32.5 ms on.
   - About 84 % of updates were held (2,842 of 3,398 and 2,784 of 3,318), for a mean of 10 to 12 ms and at most 13.6 ms.
-  - Late updates, off: 10 and 7. With `pad=late`: 2 late after a hold plus 9 and 4 late without one.
+  - Late updates, off: 10 and 7. With `pad=late`: 2 and 2 late after a hold, plus 9 and 4 late without one.
   - In every run, every update was measured and none was left open (`unmeasured` 0), and each update set one new frame:
     the new frames presented are the updates less one.
   - One run on reported a largest latency of 1,275 ms that the repeat did not show (138 ms). It is a single frame

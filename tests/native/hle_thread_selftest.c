@@ -44515,9 +44515,17 @@ static void test_pad_latency_charges_reads_to_new_frames(void) {
 }
 
 static int s_pad_body_done;
+static int s_pad_body_in_lane;   /* the boundary runs inside a held COSIM guest lane */
 static void pad_update_body(void *arg) {
     (void)arg;
+    if (s_pad_body_in_lane) {
+        sr_guest_lane_hold.held = 1;
+        sr_guest_lane_hold.uid = sched_current_uid();
+    }
+    /* A hold here would switch fibers inside the lane, which stops the run (sched.c). */
     sr_enhancement_update_begin();
+    sr_guest_lane_hold.held = 0;
+    sr_guest_lane_hold.uid = 0u;
     s_pad_body_done = 1;
     s_ctrlc_parks++;
     selftest_park_on_scheduler();
@@ -44687,6 +44695,30 @@ static void test_pad_late_through_the_boundary(void) {
     s_pause_requested = 1;
     pad_expect_no_hold("with a pause requested");
     s_pause_requested = 0;
+    pad_late_teardown();
+
+    /* B3: in fast forward the delay's clock (guest time) runs ahead of the host time the plan
+     * measures, so no update is held. Speed 1 again, the next update is held. */
+    pad_late_fixture();
+    s_ff_pace_anchor_ns = s_ff_host_anchor_ns = s_pad_host_ns;
+    s_ff_speed = SCHED_FAST_FORWARD_SPEED;
+    pad_expect_no_hold("in fast forward");
+    s_ff_speed = 1u;
+    s_ff_pace_anchor_ns = s_ff_host_anchor_ns = 0u;
+    pad_vblank(s_pad_vblank_ns + PAD_PERIOD_NS);
+    s_pad_host_ns = s_pad_vblank_ns + PAD_MS;
+    {
+        TCB *u = pad_update_start();
+        expect(pad_update_held(u), "pad: held again once fast forward stops");
+        pad_update_resume(u, s_pad_vblank_ns + 12u * PAD_MS);
+    }
+    pad_late_teardown();
+
+    /* N4: never held inside the COSIM guest lane, where a fiber switch stops the run. */
+    pad_late_fixture();
+    s_pad_body_in_lane = 1;
+    pad_expect_no_hold("inside the COSIM guest lane");
+    s_pad_body_in_lane = 0;
     pad_late_teardown();
 
     pad_late_fixture();

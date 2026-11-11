@@ -1870,9 +1870,13 @@ void sr_enhancement_update_begin(void) {
     if (late) ace_confirm(ACE_FEATURE_PAD);   /* the title's boundary runs */
     const uint32_t uid = sched_current_uid();
     /* A delay is an ordinary thread wait: only where the thread could wait anyway, and only
-     * where a refresh could follow it. */
+     * where a refresh could follow it. Not in fast forward, where guest time (the delay's
+     * clock) runs ahead of the host time the plan measures, so a hold would end at no
+     * predictable point of the period. Not inside the COSIM guest lane, where a fiber switch
+     * is a stop (sched.c). */
     const int can_wait = late && uid != 0u && sched_wait_permitted() && !sched_is_intr_context() &&
-                         !sr_tail_transfer.pending && !sched_pause_pending() && pad_refresh_possible();
+                         !sr_tail_transfer.pending && !sched_pause_pending() && !sched_fast_forward_on() &&
+                         !sr_guest_lane_hold.held && pad_refresh_possible();
     uint64_t now = sched_host_now_ns();
     const uint64_t hold = ace_pad_plan_begin(plan, now, sched_vblank_deadline_ns(), sched_vblank_period_ns(),
                                              can_wait);
