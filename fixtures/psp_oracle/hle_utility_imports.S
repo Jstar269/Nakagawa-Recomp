@@ -13,7 +13,8 @@
    sceUtilityGetSystemParamInt. That is why the Get pair is declared for every case that
    links this file, not only for hle-sysparam.
 
-   Case 104 (hle-savedata-getsize) also declares the four savedata dialog calls, and case 140
+   Case 104 (hle-savedata-getsize) and case 180 (hle-savedata-nodata) also declare the four
+   savedata dialog calls, and case 140
    (hle-utility-none) the GetStatus, Update and ShutdownStart calls of five dialogs and no
    InitStart (as nkUtil* stubs, because PSPSDK headers declare some of them returning void
    while the calls return a status), each only under its own CASE_ID, which the Makefile passes to the assembler as -DPSP_ORACLE_CASE.
@@ -31,6 +32,12 @@
     IMPORT_FUNC  "sceUtility", 0xA5DA2406, sceUtilityGetSystemParamInt
     IMPORT_FUNC  "sceUtility", 0x34B78343, sceUtilityGetSystemParamString
 #if PSP_ORACLE_CASE == 104
+    IMPORT_FUNC  "sceUtility", 0x50C4CD57, sceUtilitySavedataInitStart
+    IMPORT_FUNC  "sceUtility", 0x8874DBE0, sceUtilitySavedataGetStatus
+    IMPORT_FUNC  "sceUtility", 0xD4B95FFB, sceUtilitySavedataUpdate
+    IMPORT_FUNC  "sceUtility", 0x9790B33C, sceUtilitySavedataShutdownStart
+#endif
+#if PSP_ORACLE_CASE == 180
     IMPORT_FUNC  "sceUtility", 0x50C4CD57, sceUtilitySavedataInitStart
     IMPORT_FUNC  "sceUtility", 0x8874DBE0, sceUtilitySavedataGetStatus
     IMPORT_FUNC  "sceUtility", 0xD4B95FFB, sceUtilitySavedataUpdate

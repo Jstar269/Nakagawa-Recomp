@@ -36,9 +36,9 @@ does not make this file stale. `--details` prints them to stdout.
 
 ## Summary
 
-- helpers: **486** (declared in `recomp.h`: 414)
-- reach class: emitter-reached 87, production-runtime-only 361, selftest-only 0, address-only 8, none 30
-- provenance class of the home definition: declared-only 1, project_authored_attested 39, upstream_derived 446
+- helpers: **487** (declared in `recomp.h`: 415)
+- reach class: emitter-reached 87, production-runtime-only 362, selftest-only 0, address-only 8, none 30
+- provenance class of the home definition: declared-only 1, project_authored_attested 39, upstream_derived 447
 
 ## Helpers
 
@@ -109,6 +109,7 @@ does not make this file stale. `--details` prints them to stdout.
 | `gui_pump` | `rt/gui.c` | yes | production-runtime-only | `rt/gui.c`: upstream_derived |
 | `gui_quit_requested` | `rt/gui.c` | yes | production-runtime-only | `rt/gui.c`: upstream_derived |
 | `gui_shutdown` | `rt/gui.c` | yes | production-runtime-only | `rt/gui.c`: upstream_derived |
+| `gui_stick_dead_zone` | `rt/gui.c` | yes | production-runtime-only | `rt/gui.c`: upstream_derived |
 | `gui_stop_requested` | `rt/gui.c` | yes | production-runtime-only | `rt/gui.c`: upstream_derived |
 | `nk_ace_load_skip_wait` | `rt/hle_display.c` | yes | emitter-reached (direct) | `rt/hle_display.c`: upstream_derived |
 | `nk_ace_load_update` | `rt/ace.c` | yes | emitter-reached (direct) | `rt/ace.c`: project_authored_attested |

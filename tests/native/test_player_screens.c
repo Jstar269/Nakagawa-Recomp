@@ -8,6 +8,7 @@
 #include "nk_ui_waves.h"
 #include "nk_ui_widgets.h"
 #include "scr_shared.h"
+#include "player_enhanced_fixture.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -27,35 +28,6 @@ static const uint8_t k_test_glyph_pixel = 0xFFu;
 typedef char player_screens_enhanced_rows_fit[
     PLAYER_PART_COUNT <= PLAYER_UI_ENHANCED_ROWS ? 1 : -1];
 
-typedef struct {
-    const char *name;
-    const char *value;
-    const char *sentence;
-} EnhancedPartFixture;
-
-/* The screen-only target omits the player model builder; mirror its real parts and pin the
-   fixture's size to PLAYER_PART_COUNT so a new part cannot silently disappear from the layout. */
-static const EnhancedPartFixture k_enhanced_parts[] = {
-    {"Texture filtering", "16x",
-     "Keeps slanted surfaces sharp. Save pictures keep the filtering."},
-    {"Crisp system text", "On",
-     "Draws the on-screen keyboard at your screen's resolution."},
-    {"Speed readout", "Off", "The game's speed and frame rate in a corner, over its HUD."},
-    {"Game badge", "On", "Names the mode for a few seconds when a game starts."},
-    {"Widescreen", "Off", "Shows more 3D space; HUD stays shaped. Some objects pop in. Smooth "
-                            "motion disables it."},
-    {"Smooth motion", "Off", "Shows steady 30 FPS scenes at 60, others as they are. Adds about 17 "
-                              "ms of delay."},
-    {"Clean pitched sound", "Off",
-     "Resamples pitched effects without aliasing. The game receives changed samples."},
-    {"Finer patches", "Off",
-     "More triangles per curved patch. Slower; alters GE timing; the game receives changed pictures."},
-    {"Wider culling", "Off", "Ace only, with Widescreen, in games that have a culling build. The game's "
-                             "memory changes."},
-    {"Sharper enlarging", "Off", "AMD FSR 1 sharpens display and recordings; game memory and "
-                                  "screenshots do not change."},
-    {"Short loads", "Off", "Ace only, in games with a loading-wait package. Skips those waits; changes the game's timing."},
-};
 /* Each part's words, as player_state.c's k_enhanced_parts gives them. */
 static const char *const k_enhanced_af_labels[] = {"16x", "8x", "4x", "2x", "Off"};
 static const char *const k_enhanced_switch_labels[] = {"On", "Off"};
@@ -80,6 +52,7 @@ static const EnhancedWords k_enhanced_words[PLAYER_PART_COUNT] = {
     [PLAYER_PART_TESS] = ENHANCED_WORDS(k_enhanced_tess_labels),
     [PLAYER_PART_CULL] = ENHANCED_WORDS(k_enhanced_switch_labels),
     [PLAYER_PART_UPSCALE] = ENHANCED_WORDS(k_enhanced_upscale_labels),
+    [PLAYER_PART_STICK] = ENHANCED_WORDS(k_enhanced_switch_labels),
     [PLAYER_PART_LOAD] = ENHANCED_WORDS(k_enhanced_switch_labels)};
 #undef ENHANCED_WORDS
 /* The most words any part has, for the stays-put test's steps. */
@@ -92,9 +65,6 @@ static const char *const k_enhanced_title_modes[] = {"Library (Enhanced)", "Auth
    keeps the fixture's) and the play mode (NULL keeps the case's). */
 static const char *g_enhanced_value[PLAYER_PART_COUNT];
 static const char *g_enhanced_mode;
-
-typedef char player_screens_enhanced_fixture_matches_parts[
-    sizeof(k_enhanced_parts) / sizeof(k_enhanced_parts[0]) == PLAYER_PART_COUNT ? 1 : -1];
 
 #define CHECK(condition, message) do { \
     if (!(condition)) { \
@@ -3242,7 +3212,8 @@ static void test_settings_pages(void) {
               strstr(dump, "\"CLEAN PITCHED SOUND: OFF\"") != NULL &&
               strstr(dump, "\"SHARPER ENLARGING: OFF\"") != NULL &&
               /* The sentences wrap; their lines are dumped one by one. */
-              strstr(dump, "Adds about 17 ms of") != NULL && strstr(dump, "delay.\"") != NULL &&
+              strstr(dump, "Smooths steady 30 FPS scenes") != NULL &&
+              strstr(dump, "Adds about 17 ms of delay.\"") != NULL &&
               strstr(dump, "Smooth motion disables it.") != NULL &&
               strstr(dump, "game receives changed samples.") != NULL &&
               strstr(dump, "screenshots do not change.") != NULL &&
@@ -3840,7 +3811,9 @@ typedef struct {
 static EnhancedRowPlaces enhanced_row_places(FlowCase which) {
     EnhancedRowPlaces places;
     NkUi *ui = NULL;
-    /* As wide as the design window and tall enough that no row is scrolled away. */
+    /* As wide as the design window and tall enough that no row is scrolled away: a game's page
+       stacks each row's sentence under its button at this width, so its last row starts below
+       1300 pixels. */
     const NkUiDrawList *draw = flow_case_layout(which, 1280, 1600, &ui);
     memset(&places, -1, sizeof(places));
     for (uint32_t i = 0u; draw != NULL && i < draw->ncmd; ++i) {

@@ -193,13 +193,17 @@ typedef enum {
 #define PLAYER_DISC_ID_KEY_LEN 10
 
 /* A title's 60 FPS game-logic enhancement package (docs/ENHANCEMENT_CONTRACT.md
- * section 9): <user data>/enhancements/<disc ID, lowercase>-60hz.json. */
+ * section 9): <user data>/enhancements/<disc ID, lowercase>-60hz.json, else the
+ * published package the source tree ships at assets/enhancements/ (section 5.1). */
 typedef struct {
     /* The file parses, its id is a valid package name
        (nk_title_manifest_enhancement_id_valid) and its target_title_id is the
        title's own. */
     bool available;
     char package_id[NK_MAX_ENHANCEMENT_PACKAGE_ID];
+    /* The file read is the shipped published package, not one in the user's
+       data folder. */
+    bool shipped;
     /* Why a file that exists cannot be used; empty when there is no file or it
        is usable. */
     char problem[160];
@@ -236,6 +240,10 @@ typedef enum {
     PLAYER_PART_UPSCALE,       /* the presentation upscaler (#2122): 0 off, 1 FSR 1. It reaches the
                                   runtime as SR_PRESENT_UPSCALE (NkRuntimeConfig.present_upscale),
                                   not in the SR_ACE line */
+    PLAYER_PART_STICK,         /* stick dead-zone remap (section 11.3.11): 0 off, 1 on. Acts only for a
+                                  title whose catalog entry declares a stick dead zone. Appended: the
+                                  enum fixes the Settings > Enhanced rows and the saved order; the Ace
+                                  line still writes stick before cull */
     PLAYER_PART_LOAD,          /* short loads (section 11.3.10): 0 off, 1 fast. The display waits
                                   a title's package declares return at once; guest timing changes. Ace
                                   only; a title without a load part ignores it */
@@ -275,6 +283,8 @@ typedef struct {
     bool on;                   /* Enhanced or Ace: the launch line is not "off" */
     int part[PLAYER_PART_COUNT];
     bool logic_60;             /* Ace with its 60 FPS game logic on (the package may be gone) */
+    int stick_counts;          /* the square stick dead zone the title's catalog entry declares
+                                  (NkTitleEntry.analog_dead_zone_counts), 0 when none */
 } PlayerPlayResolved;
 
 typedef struct {
@@ -1648,10 +1658,17 @@ const char *player_library_sort_label(PlayerLibrarySort sort);
  * choice to package checks, builds and launches. */
 
 /* Reads <user_root>/enhancements/<disc ID, lowercase>-60hz.json for `game` with
- * nk_json. Returns out->available. A showcase demo, a test program or a disc ID
- * that is not a PSP disc ID has none. */
-bool player_read_title_enhancement(const char *user_root, const GameRecord *game,
-                                   PlayerTitleEnhancement *out);
+ * nk_json; when that file does not exist, the same name in `shipped_root` (the
+ * source tree's assets/enhancements folder, NULL for none), as tools/nk_cli.py
+ * build-package --experimental-60hz does. A file in the user's data folder comes
+ * first, even when it cannot be used. Returns out->available. A showcase demo, a
+ * test program or a disc ID that is not a PSP disc ID has none. */
+bool player_read_title_enhancement(const char *user_root, const char *shipped_root,
+                                   const GameRecord *game, PlayerTitleEnhancement *out);
+/* The folder of published packages the source tree beside this player ships
+ * (<source>/assets/enhancements, the tree package_builder_find_cli finds
+ * tools/nk_cli.py in). False when there is no source tree. */
+bool player_app_shipped_enhancements_root(const PlayerApp *app, char *out, size_t out_size);
 /* Re-reads every title's enhancement package and sets each GameRecord's
  * enhancement_package_id. player_app_sync_library calls it. */
 void player_app_refresh_title_enhancements(PlayerApp *app);
@@ -1701,6 +1718,8 @@ void player_play_resolve(const PlayerSettings *settings, const char *disc_id,
 void player_play_apply_logic_60(PlayerPlayResolved *play, bool logic_60);
 /* The SR_ACE line for a resolution: "off", or "v1;tier=enhanced;af=16;text=on;readout=off;
  * notice=on;wide=off;smooth=off;sas=off;tess=off" (tier=ace for Ace; smooth=match is never written).
+ * ";stick=<counts>" follows only for Ace with the Stick dead zone part on and a title whose
+ * catalog entry declares a dead zone (stick_counts > 0); a missing stick is off.
  * ";load=fast" follows only for Ace with the Short loads part on; a missing load is off.
  * ";cull=on" follows, last, only for Ace with the Wider culling part on; a missing cull is off.
  * Returns false when it does not fit. */

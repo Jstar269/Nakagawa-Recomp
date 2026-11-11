@@ -1217,7 +1217,7 @@ static const PlayerEnhancedPartInfo k_enhanced_parts[PLAYER_PART_COUNT] = {
      "Shows more 3D space; HUD stays shaped. Some objects pop in. Smooth motion disables it.",
      2, k_part_switch_values, k_part_switch_labels, k_part_wide_words, 0},
     {"smooth", "Smooth motion",
-     "Shows steady 30 FPS scenes at 60, others as they are. Adds about 17 ms of delay.",
+     "Smooths steady 30 FPS scenes only where it can follow the motion. Adds about 17 ms of delay.",
      2, k_part_switch_values, k_part_switch_labels, k_part_smooth_words, 0},
     /* A guest-visible item (contract 11.3.1): off by default until its "nothing worse" runs
        exist (11.2 item 4), with its own off switch in the library and each title (item 2). */
@@ -1238,6 +1238,11 @@ static const PlayerEnhancedPartInfo k_enhanced_parts[PLAYER_PART_COUNT] = {
     {"upscale", "Sharper enlarging",
      "AMD FSR 1 sharpens display and recordings; game memory and screenshots do not change.",
      2, k_part_switch_values, k_part_upscale_labels, k_part_upscale_words, 0},
+    /* A guest-visible item (contract 11.3.11): off by default; it acts only for a title whose
+       catalog entry declares the stick dead zone the game ignores. */
+    {"stick", "Stick dead zone",
+     "Ace only, in games that ignore part of the stick. Small pushes count; the feel changes.",
+     2, k_part_switch_values, k_part_switch_labels, k_part_switch_words, 0},
     /* A guest-visible item (contract 11.3.10) that changes guest timing: off by default and in no
        preset; it matters only for a title whose own package declares a load part, and only in Ace. */
     {"load", "Short loads",
@@ -2302,7 +2307,7 @@ void player_app_cycle_present_scaling(PlayerApp *app, int direction) {
    test_graphics_presets checks that every other part is -1, so a new part needs a choice. */
 #define PRESET_PART_LIST(X, text, upscale)                                                \
     X(FILTERING, -1) X(TEXT, (text)) X(READOUT, -1) X(NOTICE, -1) X(WIDE, -1) X(SMOOTH, -1) \
-    X(SAS, -1) X(TESS, -1) X(CULL, -1) X(UPSCALE, (upscale)) X(LOAD, -1)
+    X(SAS, -1) X(TESS, -1) X(CULL, -1) X(UPSCALE, (upscale)) X(STICK, -1) X(LOAD, -1)
 #define PRESET_PART_SET(part, value) [PLAYER_PART_##part] = value,
 #define PRESET_PART_ONE(part, value) + 1
 #define PRESET_PARTS(text, upscale) {PRESET_PART_LIST(PRESET_PART_SET, text, upscale)}
@@ -2826,12 +2831,25 @@ void player_app_toggle_ui_sounds(PlayerApp *app) {
     maybe_persist_settings(app);
 }
 
-bool player_read_title_enhancement(const char *user_root, const GameRecord *game,
-                                   PlayerTitleEnhancement *out) {
+bool player_app_shipped_enhancements_root(const PlayerApp *app, char *out, size_t out_size) {
+    if (!out || out_size == 0) return false;
+    out[0] = '\0';
+    /* The tree whose tools/nk_cli.py builds packages ships them: the same root a build uses. */
+    char source[NK_MAX_PATH];
+    char assets[NK_MAX_PATH];
+    return player_app_build_source_root(app, source, sizeof(source)) &&
+           player_join_path(assets, sizeof(assets), source, "assets") &&
+           player_join_path(out, out_size, assets, "enhancements");
+}
+
+bool player_read_title_enhancement(const char *user_root, const char *shipped_root,
+                                   const GameRecord *game, PlayerTitleEnhancement *out) {
     if (!out) return false;
     memset(out, 0, sizeof(*out));
     char key[PLAYER_DISC_ID_KEY_LEN];
-    if (!user_root || !user_root[0] || !game || game->is_sample ||
+    bool have_user = user_root && user_root[0];
+    bool have_shipped = shipped_root && shipped_root[0];
+    if ((!have_user && !have_shipped) || !game || game->is_sample ||
         game->is_showcase_package || !game->title_id[0] ||
         !player_disc_id_key(game->disc_id, key)) {
         return false;
@@ -2841,11 +2859,16 @@ bool player_read_title_enhancement(const char *user_root, const GameRecord *game
     snprintf(leaf, sizeof(leaf), "%s-60hz.json", key);
     char folder[MAX_PATH_LEN];
     char path[MAX_PATH_LEN];
-    if (!player_join_path(folder, sizeof(folder), user_root, "enhancements") ||
-        !player_join_path(path, sizeof(path), folder, leaf) ||
-        !nk_platform_file_exists(path)) {
-        return false;
+    bool found = have_user &&
+                 player_join_path(folder, sizeof(folder), user_root, "enhancements") &&
+                 player_join_path(path, sizeof(path), folder, leaf) &&
+                 nk_platform_file_exists(path);
+    if (!found && have_shipped && player_join_path(path, sizeof(path), shipped_root, leaf) &&
+        nk_platform_file_exists(path)) {
+        found = true;
+        out->shipped = true;
     }
+    if (!found) return false;
     FILE *f = nk_fopen_utf8(path, "rb");
     if (!f) {
         snprintf(out->problem, sizeof(out->problem), "Its enhancement package can't be read.");
@@ -2935,9 +2958,12 @@ static void player_app_select_package_variant(PlayerApp *app, int game_index) {
 void player_app_refresh_title_enhancements(PlayerApp *app) {
     if (!app) return;
     char user_root[NK_MAX_PATH];
+    char shipped[NK_MAX_PATH];
     bool have_root = player_app_data_root(app, user_root, sizeof(user_root));
+    bool have_shipped = player_app_shipped_enhancements_root(app, shipped, sizeof(shipped));
     for (int i = 0; i < app->game_count && i < MAX_LIBRARY_GAMES; i++) {
-        (void)player_read_title_enhancement(have_root ? user_root : NULL, &app->games[i],
+        (void)player_read_title_enhancement(have_root ? user_root : NULL,
+                                            have_shipped ? shipped : NULL, &app->games[i],
                                             &app->title_enhancements[i]);
         player_app_select_package_variant(app, i);
     }
@@ -2948,8 +2974,11 @@ void player_app_refresh_title_enhancements(PlayerApp *app) {
    package checked. */
 static void player_app_title_play_changed(PlayerApp *app, int game_index) {
     char user_root[NK_MAX_PATH];
+    char shipped[NK_MAX_PATH];
     bool have_root = player_app_data_root(app, user_root, sizeof(user_root));
+    bool have_shipped = player_app_shipped_enhancements_root(app, shipped, sizeof(shipped));
     (void)player_read_title_enhancement(have_root ? user_root : NULL,
+                                        have_shipped ? shipped : NULL,
                                         &app->games[game_index],
                                         &app->title_enhancements[game_index]);
     player_app_select_package_variant(app, game_index);
@@ -3015,6 +3044,15 @@ void player_play_resolve(const PlayerSettings *settings, const char *disc_id,
         out->part[p] = enhanced_part_value_index(p, value) >= 0 ? value : 0;
     }
     out->logic_60 = out->mode == PLAYER_PLAY_ACE && (!title || title->logic_60 != 0);
+    /* The stick dead zone is the title's own data, never a value in this file: the input block
+       of the entry found for the disc, a loaded overlay manifest's own or else the public
+       manifest's (carried into the generated catalog). Nothing is merged between the two. */
+    if (disc_id && disc_id[0]) {
+        nk_title_catalog_lock();
+        const NkTitleEntry *entry = nk_title_catalog_find_by_disc_id_locked(disc_id);
+        out->stick_counts = entry ? entry->analog_dead_zone_counts : 0;
+        nk_title_catalog_unlock();
+    }
 }
 
 void player_play_apply_logic_60(PlayerPlayResolved *play, bool logic_60) {
@@ -3041,22 +3079,33 @@ bool player_play_launch_line(const PlayerPlayResolved *play, char *out, size_t c
     used = (size_t)n;
     for (int p = 0; p < PLAYER_PART_COUNT; p++) {
         /* The upscaler travels as SR_PRESENT_UPSCALE (player_play_present_upscale), which the
-           launcher exports for every session; the runtime's SR_ACE line has no such key. */
-        if (p == PLAYER_PART_UPSCALE) continue;
-        /* A missing load is off (contract 11.3.10, 11.2 item 2): only an Ace launch with the part
-           on writes load=fast. */
-        if (p == PLAYER_PART_LOAD && (play->part[p] != 1 || play->mode != PLAYER_PLAY_ACE)) continue;
-        /* Cull is written after the loop: the Ace line ends with it whatever the enum order. */
-        if (p == PLAYER_PART_CULL) continue;
+           launcher exports for every session; the runtime's SR_ACE line has no such key. Stick,
+           load and cull come last, in the Ace line's own order (src/rt/ace.c), whatever the enum's. */
+        if (p == PLAYER_PART_UPSCALE || p == PLAYER_PART_STICK || p == PLAYER_PART_LOAD ||
+            p == PLAYER_PART_CULL) continue;
         n = snprintf(out + used, cap - used, ";%s=%s", k_enhanced_parts[p].key,
                      enhanced_part_word(p, play->part[p]));
         if (n <= 0 || (size_t)n >= cap - used) { out[0] = '\0'; return false; }
         used += (size_t)n;
     }
-    /* Likewise cull, last: the line carries the key only when it is on. */
-    if (play->part[PLAYER_PART_CULL] == 1 && play->mode == PLAYER_PLAY_ACE) {
+    /* A missing stick, load or cull is off (contract 11.2 item 2): the line carries each key only
+       when it is on in an Ace launch. Stick also needs the title's declared dead zone: its value is
+       that count, not the part's word. */
+    if (play->mode == PLAYER_PLAY_ACE && play->part[PLAYER_PART_STICK] == 1 && play->stick_counts >= 1 &&
+        play->stick_counts <= ACE_STICK_COUNTS_MAX) {
+        n = snprintf(out + used, cap - used, ";stick=%d", play->stick_counts);
+        if (n <= 0 || (size_t)n >= cap - used) { out[0] = '\0'; return false; }
+        used += (size_t)n;
+    }
+    if (play->mode == PLAYER_PLAY_ACE && play->part[PLAYER_PART_LOAD] == 1) {
+        n = snprintf(out + used, cap - used, ";%s=%s", k_enhanced_parts[PLAYER_PART_LOAD].key,
+                     enhanced_part_word(PLAYER_PART_LOAD, 1));
+        if (n <= 0 || (size_t)n >= cap - used) { out[0] = '\0'; return false; }
+        used += (size_t)n;
+    }
+    if (play->mode == PLAYER_PLAY_ACE && play->part[PLAYER_PART_CULL] == 1) {
         n = snprintf(out + used, cap - used, ";%s=%s", k_enhanced_parts[PLAYER_PART_CULL].key,
-                     enhanced_part_word(PLAYER_PART_CULL, play->part[PLAYER_PART_CULL]));
+                     enhanced_part_word(PLAYER_PART_CULL, 1));
         if (n <= 0 || (size_t)n >= cap - used) { out[0] = '\0'; return false; }
         used += (size_t)n;
     }

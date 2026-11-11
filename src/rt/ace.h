@@ -11,9 +11,10 @@
  *     SR_ACE=v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off
  *
  * tier (enhanced or ace) only names the run, in the badge, the pause menu and the stamps; a
- * line without it is an Enhanced run. load and cull are the other keys a line may leave out: a
- * missing load or cull reads as off (section 11.2 item 2), and a line that writes load=off or
- * cull=off means the same; load=fast and cull=on need tier=ace. Every other
+ * line without it is an Enhanced run. stick, load and cull are the other keys a line may leave
+ * out: a missing stick, load or cull reads as off (section 11.2 item 2); stick has no off word,
+ * its value is the game's dead zone (1..126), and a line that writes load=off or cull=off means
+ * the same as none; stick=<counts>, load=fast and cull=on need tier=ace. Every other
  * key is required in v1, in any order, each once. A key or value for a feature this build
  * does not carry (smooth=match) is still parsed and refused. Anything else (an unknown version, key
  * or value, a duplicate, a missing key, an empty field) refuses the whole line: Ace is off for
@@ -47,6 +48,8 @@
 #define ACE_HAS_SAS 1           /* sas=sinc: band-limited SAS voice resampling (#2054) */
 #define ACE_HAS_TESS 1          /* tess=2..4: finer Bezier and spline patches (#2053) */
 #define ACE_HAS_CULL 1          /* cull=on: widen a title's own view-culling test to the wings (11.3.6) */
+#define ACE_HAS_STICK 1         /* stick=<counts>: start the host stick past the game's dead zone (11.3.11) */
+#define ACE_STICK_COUNTS_MAX 126 /* stick=1..126: the square dead zone, in the game's centred counts */
 #define ACE_HAS_LOAD 1          /* load=fast: a title's declared loading waits return at once (11.3.10) */
 
 typedef enum { ACE_WIDE_OFF = 0, ACE_WIDE_FILL = 1 } AceWide;
@@ -72,6 +75,8 @@ typedef struct {
     int sas;         /* AceSas: SAS voices mix through a band-limited resampler (host-only) */
     int tess;        /* finer patches (#2053): 0 off, or the factor 2, 3 or 4 on the guest's division */
     int cull;        /* cull=on: a title's culling is widened to the wings (guest-visible, 11.3.6) */
+    int stick;       /* stick=<counts>: 0 off, else the square stick dead zone the title ignores, 1..126
+                        (guest-visible, 11.3.11) */
     int load;        /* load=fast: the waits a title's load part declares are skipped (guest timing, 11.3.10) */
 } AceConfig;
 
@@ -84,6 +89,7 @@ typedef enum {
     ACE_FEATURE_SMOOTH,
     ACE_FEATURE_SAS,
     ACE_FEATURE_TESS,
+    ACE_FEATURE_STICK,
     ACE_FEATURE_LOAD,
     ACE_FEATURE_CULL,
     ACE_FEATURE_COUNT
@@ -123,6 +129,32 @@ void ace_feature_unavailable(AceFeature feature, const char *reason);
 void ace_confirm(AceFeature feature);
 /* Matrix uses the culling hook left alone (its table was full): the report's cull_untracked. */
 void ace_set_cull_untracked(unsigned long n);
+
+/* ---- stick dead-zone remap (stick=<counts>, contract 11.3.11) ------------------------------- */
+
+/* The host's stick dead zone in centred counts (0..127): the larger of the two axes'
+ * deadzone_inner (0..32767 of a host axis) as (deadzone_inner * 255) / 65535. A negative value
+ * reads as 0. */
+int ace_stick_host_counts(int deadzone_inner_x, int deadzone_inner_y);
+/* Remaps one left-stick sample (bytes 0..255, 128 at rest) so the host's live range starts past
+ * a square dead zone of game_counts (1..126) that the title ignores. host_counts is the host's
+ * own dead zone (ace_stick_host_counts): 127 or more, or below 0, reads as 0; any D in 0..126
+ * is used as it is, at or above game_counts too. With h = byte - 128 (clamped to -127..127) and
+ * m = max(|hx|, |hy|), the target magnitude is G + (m - D) * (127 - G) / (127 - D) past D and
+ * m * (G - 1) / D up to it; both axes scale by that over m, rounded to nearest, signs kept, and
+ * go back to bytes through the inverse of the title's centring (x >= 1: x + 128, else x + 127).
+ * A sample at rest (m == 0), an axis at rest and a game_counts out of range are left as they
+ * are; m == 127 maps to 127, so full throw is unchanged. With D < G no moved axis comes out at
+ * rest. With D >= G an axis can: up to D (a mouse) the target is 0 when m * (G - 1) < D (G 10, D 100,
+ * m 5), and past D the minor axis of a push can scale below half a count (G 10, D 30, (31, 1));
+ * such an axis becomes byte 127, which the title reads as 0 (rest, 128, reads +1), inside its dead
+ * zone either way. Pure: no state, no I/O. */
+void ace_stick_remap(uint8_t *lx, uint8_t *ly, int game_counts, int host_counts);
+/* The run's remap of one live host sample: does nothing unless Ace is on with stick=<counts>.
+ * Counts the samples off rest it passed through the curve (the report's samples_remapped),
+ * confirms the feature at the first one, and keeps host_counts for the report. */
+void ace_stick_sample(uint8_t *lx, uint8_t *ly, int host_counts);
+
 /* A vblank_wait_skip site of the title's Ace load part (contract 9.8 and 11.3.10), asked by
  * nk_ace_load_skip_wait() (recomp.h, src/rt/hle_display.c) once that call would block: nonzero
  * only while load=fast is in effect, and then the site's call to sceDisplayWaitVblankStart is
@@ -223,6 +255,8 @@ typedef struct {
     uint32_t betweens;         /* in-betweens that reached the screen in the window */
     uint32_t shown;            /* distinct pictures that reached the screen: those, the held
                                 * frames and the new frames shown as they are */
+    uint32_t motion_milli;     /* the motion weights of the in-betweens measured in the window, in
+                                * thousandths (ace_motion_weight_milli) */
 } AceWindow;
 
 typedef struct {
@@ -239,6 +273,8 @@ typedef struct {
     int speed_pct;             /* F / T while PC limited, else 100 */
     int smooth_on;             /* Smooth motion is on: the text says whether it added frames */
     double shown_fps;          /* with it on, pictures that reached the screen per second */
+    double motion_fps;         /* with it on, the real pictures per second plus each in-between's
+                                * motion weight: what "SMOOTH n" prints */
     char text[64];             /* "100%  30 FPS", "\xE2\x96\xB2 87%  26 FPS  PC LIMITED", "\xE2\x80\x94 27 FPS" */
 } AceReadoutView;
 
@@ -246,9 +282,11 @@ void ace_readout_reset(AceReadoutState *s);
 /* Judges one window; PC limited when a slot was skipped, or when the host idled under 2% while
  * frames came slower than the class allows. The target keeps the class stable when the stretch
  * began, so a steady slowdown does not redefine it. With Smooth motion on, the text ends with
- * "SMOOTH n" (n pictures a second reached the screen, in-betweens included) or, in a window it
- * showed no in-between in (the game was not at a steady 30 FPS), "SMOOTH OFF": it is never off
- * without saying so. */
+ * "SMOOTH n" or, in a window it showed no in-between in (the game was not at a steady 30 FPS),
+ * "SMOOTH OFF": it is never off without saying so. n counts what moved, not what was presented:
+ * the real pictures that reached the screen in a second, plus each in-between by its measured
+ * motion weight. An in-between that repeats the old frame adds nothing, so a scene the
+ * in-betweens cannot follow reads SMOOTH 30 however many presents there were. */
 void ace_readout_judge(AceReadoutState *s, const AceWindow *w, AceReadoutView *out);
 
 /* ---- observation feed (Ace on only; callers check g_ace_on) ---------------------------------- */
@@ -295,38 +333,62 @@ void ace_counters(AceCounters *out);
 typedef enum {
     ACE_SHOW_REAL = 0,     /* no new frame, or smooth off: this present is today's */
     ACE_SHOW_KEEP,         /* a new frame outside 30 Hz: show it and keep a copy */
-    ACE_SHOW_BETWEEN       /* a new 30 Hz frame: show the in-between, hold the frame */
+    ACE_SHOW_BETWEEN,      /* a new 30 Hz frame: show the in-between, hold the frame */
+    ACE_SHOW_OWED          /* a new frame while the one before it is owed: show that one, hold
+                            * this one */
 } AceShow;
 
 typedef struct {
     AceShow show;          /* the flip's verdict, until its present takes it */
-    int held;              /* a frame waits for its VBLANK */
+    int held;              /* a real frame the pass holds has not reached the screen */
+    int owed;              /* its present came due and the display could not take it */
     uint32_t held_after;   /* the VCOUNT of the present that holds it */
     uint64_t flip_ns;      /* when the latest flip arrived */
     uint64_t held_ns;      /* when the in-between of the held frame was presented */
+    uint64_t owed_ns;      /* the same for an owed frame the next flip's present shows */
+    int owed_shown;        /* that present is on its way: its HELD note is the owed frame's */
     int reflip;            /* this flip shows the held frame again: it is the held present */
     uint64_t frame_seq;    /* new frames flipped with smooth motion on */
     uint64_t taken_seq;    /* the newest of them whose verdict a present took */
     uint64_t unpaired;     /* in-betweens refused: the frame before never reached a present */
+    uint64_t superseded;   /* held frames never shown: replaced by a later flip, or given up
+                            * when the present that should show them failed */
+    uint64_t busy;         /* held presents the display could not take */
 } AcePace;
 
 void ace_pace_reset(AcePace *p);
-/* A flip. The verdict stands until ace_pace_take. A new frame supersedes a frame still held; a
- * flip of the unchanged frame (a title that flips each frame twice) shows it, so that present
- * is the held one and the VBLANK has nothing left to show. */
+/* A flip. The verdict stands until ace_pace_take. A flip of the unchanged frame (a title that
+ * flips each frame twice) shows the held frame, so that present is the held one. A new frame
+ * that arrives before the held frame was due supersedes it. A new frame that arrives while the
+ * held frame is owed (its present came due and the display could not take it) does not: the
+ * verdict is OWED, the present shows the owed frame in place of an in-between, and the new
+ * frame is held as usual. So a game frame whose in-between was shown is never dropped for a
+ * made-up picture, and a display that takes only every second present gets the real frames. */
 void ace_pace_flip(AcePace *p, int new_frame, AceRate rate, int smooth, uint64_t now_ns);
 /* The flip's present: returns the verdict and clears it. An in-between is made only of two
  * consecutive frames: when the frame before this one never reached a present (the presenter's
  * slot rule dropped its flip, or the present failed), the pass holds an older frame, and an
  * in-between of the two would put whatever moved between them in the wrong place, or lose it.
- * Such a verdict becomes KEEP (the real frame is shown and kept) and is counted in `unpaired`. */
+ * Such a verdict becomes KEEP (the real frame is shown and kept) and is counted in `unpaired`.
+ * An OWED verdict needs the same: when the pass does not hold the frame just before this one,
+ * the owed frame is older still, so it is superseded and this frame is shown as it is. */
 AceShow ace_pace_take(AcePace *p);
 /* The in-between went to the screen at now_ns (the presenter's clock): the frame is held for the
  * VBLANK after `vcount`. Without smooth motion the frame would have been shown then, so the
  * held present's time less this one is the delay smooth motion adds. */
 void ace_pace_shown_between(AcePace *p, uint32_t vcount, uint64_t now_ns);
-/* One VBLANK. Returns 1 when the held frame is due; it is then no longer held. */
+/* The owed frame went to the screen with the flip of the frame after it, at now_ns: that frame
+ * is now the held one, for the VBLANK after `vcount`. */
+void ace_pace_shown_owed(AcePace *p, uint32_t vcount, uint64_t now_ns);
+/* One VBLANK. Returns 1 when the held frame is due. It stays held until a present shows it
+ * (ace_pace_held_shown) or gives it up (ace_pace_held_missed). */
 int ace_pace_vblank(AcePace *p, uint32_t vcount);
+/* A present showed a held frame. Returns when that frame's in-between was presented. */
+uint64_t ace_pace_held_shown(AcePace *p);
+/* The held frame's present was due and did not show it. `busy`: the display could not take a
+ * frame, so the frame is owed and tried again at the next VBLANK, or shown by the next new
+ * flip. Otherwise the present failed or the window closed, and the frame is given up. */
+void ace_pace_held_missed(AcePace *p, int busy);
 
 typedef enum {
     ACE_PRESENT_REAL = 0,  /* the flip's own frame */
@@ -346,7 +408,10 @@ typedef struct {
     uint64_t hold_count;
     uint64_t hold_sum_ns;         /* flip to held present: the delay smooth motion adds */
     uint64_t hold_max_ns;
-    uint64_t superseded;          /* a held frame a later flip replaced */
+    /* The pace machine's counts (AcePace), filled in by ace_pace_stats; ace_pace_stats_add
+     * leaves them alone. */
+    uint64_t superseded;          /* held frames that never reached the screen */
+    uint64_t busy;                /* held presents the display could not take */
     uint64_t last_ns;
 } AcePaceStats;
 
@@ -355,11 +420,20 @@ AcePresentKind ace_pace_flip_kind(const AcePace *p);
 
 /* The run's verdict for the flip ace_flip just saw. */
 AceShow ace_smooth_take(void);
-/* The show pass made an in-between for this present: the frame is held for the VBLANK after. It
- * counts nothing; ace_smooth_note_present counts what the swapchain accepted. */
+/* The present of an in-between the show pass made reached the screen: the frame is held for the
+ * VBLANK after. It counts nothing; ace_smooth_note_present counts what the swapchain accepted. */
 void ace_smooth_shown_between(uint64_t now_ns);
+/* The present that showed the owed frame in place of an in-between reached the screen, and the
+ * show pass kept the new frame: that one is held for the VBLANK after. When that present fails,
+ * the owed frame is given up instead (ace_smooth_held_missed with busy 0). */
+void ace_smooth_shown_owed(uint64_t now_ns);
 /* One VBLANK: 1 when the held frame should be presented now. Off, it reads nothing. */
 int ace_smooth_vblank(uint32_t vcount);
+/* The held frame's present did not show it (ace_pace_held_missed). */
+void ace_smooth_held_missed(int busy);
+/* A flip's own present found the display busy. When that flip re-showed the held frame, the
+ * frame is owed. */
+void ace_smooth_flip_busy(void);
 /* A present reached the swapchain (the presenter accepted it). A flip's present that showed no
  * in-between is passed as REAL and counted as HELD when it re-showed the held frame. This is also
  * what the readout's "SMOOTH n" counts: an in-between, a held frame, and a flip's own frame when
@@ -367,6 +441,60 @@ int ace_smooth_vblank(uint32_t vcount);
 void ace_smooth_note_present(AcePresentKind kind, uint64_t now_ns);
 void ace_pace_stats(AcePaceStats *out);
 void ace_pace_stats_add(AcePaceStats *s, AcePresentKind kind, uint64_t now_ns);
+
+/* ---- smooth motion: what an in-between moved ------------------------------------------------- */
+
+/* The presenter measures every in-between it makes against its two real frames
+ * (gpu_sdl3vk/ace_smooth.h, AceSmoothMotion): over the pixels that differ between the two frames,
+ * `sum_old` and `sum_new` are the in-between's summed distance to the old and to the new frame.
+ * Its phase is sum_old / (sum_old + sum_new): 0 for a repeat of the old frame, one half when the
+ * changing content sits half-way, 1 for the new frame. The weight is how much of a picture of
+ * its own that makes it, in thousandths: 2 * min(sum_old, sum_new) / (sum_old + sum_new), so 0
+ * at either end and 1000 at one half, and 0 when nothing differs. A plain blend of the two
+ * frames also weighs 1000: the weight says the content is between the frames, not that it is
+ * sharp. */
+uint32_t ace_motion_weight_milli(uint32_t sum_old, uint32_t sum_new);
+
+typedef struct {
+    uint64_t measured;      /* in-betweens measured */
+    uint64_t moving;        /* sampled pixels that differ between the two real frames */
+    uint64_t eq_old;        /* of those, shown as the old frame */
+    uint64_t eq_new;        /* of the rest, shown as the new frame */
+    uint64_t sum_old;       /* summed distance of the moving pixels to the old frame */
+    uint64_t sum_new;       /* and to the new frame */
+    uint64_t novel;         /* pixels the two frames agree on that the in-between shows otherwise */
+    uint64_t weight_milli;  /* the sum of the in-betweens' weights */
+    uint64_t unread;        /* in-betweens whose measurement could not be read */
+} AceMotionStats;
+
+/* One in-between's measurement, read once its commands have finished on the GPU. Feeds the
+ * readout's window and the report's `smooth_motion`. */
+void ace_smooth_note_motion(uint32_t moving, uint32_t eq_old, uint32_t eq_new, uint32_t sum_old,
+                            uint32_t sum_new, uint32_t novel);
+/* An in-between whose measurement was gone when it came due: counted, never guessed. */
+void ace_smooth_note_motion_unread(void);
+void ace_motion_stats(AceMotionStats *out);
+
+/* When a measurement may be read. The show pass records an in-between and its measurement into
+ * the present's command buffer, which goes to the GPU in one numbered submission. The presenter
+ * counts the submissions it has seen finished, in submission order (gpu_sdl3vk/sdl3vk.h,
+ * sdl3vk_present_completed), so a measurement may be read once that count has reached its
+ * submission. Pure: the presenter feeds it (gui.c) and reads what is due. */
+#define ACE_MOTION_PENDING 8u
+typedef struct {
+    uint64_t serial[ACE_MOTION_PENDING];
+    uint64_t submission[ACE_MOTION_PENDING];
+    uint32_t head, count;
+    uint64_t dropped;       /* serials dropped because the queue was full */
+} AceMotionQueue;
+
+void ace_motion_queue_reset(AceMotionQueue *q);
+/* In-between `serial` reached the screen, its commands in `submission`. Returns 0 when the queue
+ * is full; the serial is then dropped and counted. */
+int ace_motion_queue_made(AceMotionQueue *q, uint64_t serial, uint64_t submission);
+/* The oldest serial whose submission has finished by `completed` (the newest submission seen
+ * finished), removed from the queue; 0 when none is due. */
+uint64_t ace_motion_queue_due(AceMotionQueue *q, uint64_t completed);
 
 /* What smooth motion's in-betweens read besides the pixels (gpu_sdl3vk/ace_hud.c and ace_smooth.c,
  * contract section 10.6), counted so a title where the HUD rule or the depth gate never applies
@@ -400,7 +528,9 @@ void ace_smooth_aux_report(const AceSmoothAuxStats *s);
 
 /* ---- the per-run report -------------------------------------------------------------------- */
 
-#define ACE_REPORT_MAX 6144u
+/* The worst case, every block present and every number at its widest, is about 4.2 KB;
+ * ace_selftest's cell_report_worst checks that it fits. */
+#define ACE_REPORT_MAX 4608u
 /* The report's JSON for the run so far; 0 when it would not fit. */
 size_t ace_report_json(char *out, size_t cap);
 /* Settles the features that never ran (ace_confirm), then writes the report (SR_ACE_REPORT,
