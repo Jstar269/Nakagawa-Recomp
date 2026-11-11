@@ -32,6 +32,7 @@ remedy, never a silent pass.
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -73,6 +74,16 @@ SHOWCASE_FIXTURE_DIR = ROOT / "fixtures" / "showcase"
 if str(SHOWCASE_FIXTURE_DIR) not in sys.path:
     sys.path.insert(0, str(SHOWCASE_FIXTURE_DIR))
 from showcase import DEMOS as SHOWCASE_DEMOS, make_icon_png, write_iso  # noqa: E402
+
+# The display-smoke generator's exact-pixel oracle: the stripe pattern the guest's MIPS
+# draws, recomputed in Python (fixtures/display_smoke/generate.py).
+_DISPLAY_SMOKE_SPEC = importlib.util.spec_from_file_location(
+    "display_smoke_generator", ROOT / "fixtures" / "display_smoke" / "generate.py"
+)
+if _DISPLAY_SMOKE_SPEC is None or _DISPLAY_SMOKE_SPEC.loader is None:
+    raise RuntimeError("cannot load fixtures/display_smoke/generate.py")
+display_smoke_generator = importlib.util.module_from_spec(_DISPLAY_SMOKE_SPEC)
+_DISPLAY_SMOKE_SPEC.loader.exec_module(display_smoke_generator)
 
 # Short enough to keep the hosted run quick, long enough that the guest really
 # presents frames. The guest loops this many times, one vblank wait each.
@@ -879,9 +890,11 @@ class TestPlayerPackageRoute(unittest.TestCase):
     def run_launch(
         self, perf_csv: Path, *, accept_presented_frames: int | None = None,
         headless_timeout_ms: int | None = None, user_data_root: Path | None = None,
+        extra_environment: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess:
         environment = os.environ.copy()
         environment["LOCALAPPDATA"] = str(self.local_appdata)
+        environment.update(extra_environment or {})
         # The acceptance route must exercise a real host presenter. A caller's
         # offscreen SDL selection would make the test prove only framebuffer
         # conversion, so clear those overrides for this windowed child.
@@ -1165,8 +1178,14 @@ class TestPlayerPackageRoute(unittest.TestCase):
           4. analyze, generate and build: the player's BUILD PACKAGE action runs
              title_codegen_plan.py and gcc, binds the package to the decrypted
              program's digest, and the player's validator accepts the package;
-          5. launch: PLAY, headless, reaches the guest, which presents its frames and
-             exits with the code it computed (42).
+          5. launch: PLAY, headless, starts the guest at its entry, the runtime counts
+             FRAMES presents, and the first presented frame is, pixel for pixel, the
+             stripe pattern the guest's own MIPS computes (the display-smoke oracle), so
+             a launch or a translation that runs but draws the wrong thing fails.
+
+        One step is the test's, not the player's: the library record that ADD TO LIBRARY
+        writes on the Experimental card, because the player has no command-line route
+        for that click (tests/native/test_player_ui.py covers the click).
 
         No game data and no key outside the built-in table: the guest is generated from
         the committed fixtures/display_smoke recipe, and the seal reads the table at run
@@ -1196,8 +1215,9 @@ class TestPlayerPackageRoute(unittest.TestCase):
         decrypted_eboot = decrypted_dir / "EBOOT.elf"
         self.assertFalse(decrypted_eboot.exists())
 
-        # 1 and 2. Import: the player's own --iso inspection and disc check. An
-        # uncatalogued disc stops --stage-only at the title list after both ran.
+        # 1 and 2. Import: the player's own --iso inspection and disc check. Today an
+        # uncatalogued disc stops --stage-only at the title list (exit 3,
+        # STAGING_RESULT status=FAIL) after both ran; that is the current boundary.
         environment = os.environ.copy()
         environment["LOCALAPPDATA"] = str(self.local_appdata)
         environment["APPDATA"] = str(self.root / "appdata")
@@ -1221,7 +1241,8 @@ class TestPlayerPackageRoute(unittest.TestCase):
         self.assertEqual(decrypted_eboot.read_bytes(), elf_bytes,
                          "the decrypted EBOOT.elf is not the program that was sealed")
 
-        # ADD TO LIBRARY on the Experimental card stores the record the build reads.
+        # ADD TO LIBRARY on the Experimental card stores the record the build reads
+        # (written here: the player has no command-line route for that click).
         (user_root / "library.json").write_text(json.dumps({
             "schema_version": 1,
             "games": [{
@@ -1275,17 +1296,32 @@ class TestPlayerPackageRoute(unittest.TestCase):
         self.assertEqual(validated.returncode, 0, validated.stdout + validated.stderr)
         self.assertIn("PACKAGE_STATUS=OK", validated.stdout)
 
-        # 5. PLAY, headless, through the player's own launch session, to the guest's
-        #    own result: FRAMES presented frames, then the exit code it computed.
+        # 5. PLAY, headless, through the player's own launch session. The runtime
+        #    reports acceptance once it counted FRAMES presents; SR_FIRST_FRAME_DUMP
+        #    makes it write the first presented frame (src/rt/gui.c convert_fb).
         perf_csv = self.sandbox / "sealed-perf.csv"
+        root_frame = ROOT / "frame_first.ppm"
+        root_frame_before = root_frame.stat().st_mtime_ns if root_frame.exists() else None
         launched = self.run_launch(perf_csv, user_data_root=user_root,
-                                   accept_presented_frames=FRAMES)
+                                   accept_presented_frames=FRAMES,
+                                   extra_environment={"SR_FIRST_FRAME_DUMP": "1"})
         output = launched.stdout + launched.stderr
         self.assertEqual(launched.returncode, 0, output[-4000:])
         self.assertIn("[PLAYER] Launch index 0: PLAY NOW available", launched.stdout)
         self.assertIn("HEADLESS_ACCEPTANCE status=PASS", launched.stdout)
-        self.assertIn(f"presented_frames={FRAMES}", launched.stdout)
-        self.assertIn("child_exit=42", launched.stdout)
+        # The guest's own result: the first presented frame is exactly one frame of
+        # the stripe pattern its MIPS computes, recomputed here by the fixture's oracle.
+        self.assertEqual(
+            root_frame.stat().st_mtime_ns if root_frame.exists() else None,
+            root_frame_before, "the launched runtime wrote its frame dump into the checkout")
+        frames = sorted(self.root.rglob("frame_first.ppm"))
+        self.assertEqual(len(frames), 1, f"expected one first-frame dump, found {frames}\n"
+                         + output[-4000:])
+        try:
+            display_smoke_generator._require_exact_present_pixels(
+                frames[0], FRAMES, "sealed-disc launch")
+        except RuntimeError as exc:
+            self.fail(str(exc))
         # With --user-data-root, the player's cache folder is that root's cache
         # (nk_platform_win32.c resolve_override_path).
         boot_logs = list((user_root / "cache").glob("player-boot-*.events"))
