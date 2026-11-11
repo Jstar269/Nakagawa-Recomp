@@ -192,6 +192,7 @@ static void gpu_dirty_reset(void) {
 extern uint32_t sr_hle_test_io_open(CpuState *s);
 extern uint32_t sr_hle_test_io_read(CpuState *s);
 extern uint32_t hle_io_umd_read_us(uint64_t bytes);   /* the UMD drive's read time (hle_io.c) */
+extern int sr_hle_test_io_disc_fetches_in_flight(void);
 extern uint32_t sr_hle_test_io_write(CpuState *s);
 extern uint32_t sr_hle_test_io_lseek(CpuState *s);
 extern uint32_t sr_hle_test_io_lseek32(CpuState *s);
@@ -28980,11 +28981,17 @@ static void test_savedata_thread_ended_inside_a_parked_save(void) {
  * MUTANT: drop io_read_caller_can_wait from h_IoRead -- the read made with dispatch disabled
  *   takes guest time. MUTANT: drop the on_umd test -- the Memory Stick read takes guest time.
  * MUTANT: hle_io_umd_read_us charges a sector count as bytes -- the long read takes the minimum.
- * MUTANT: io_async_complete_fd calls h_IoRead -- the waited queued read takes the drive's time. */
+ * MUTANT: io_async_complete_fd calls h_IoRead -- the waited queued read takes the drive's time.
+ * MUTANT: sched_idle_wait steps a display period past a wait the slice already reached -- the
+ *   one-sector read takes 16.7 ms and more. */
 enum {
     URW_MAIN_ENTRY = 0x08a71000u,
     URW_SOUND_ENTRY = 0x08a71040u,
     URW_WEAK_ENTRY = 0x08a71080u,
+    URW_DOOMED_ENTRY = 0x08a71180u,
+    URW_FILE_LBA = 0x1002u,     /* where the synthetic lookup puts disc0:/UMD_DATA.BIN */
+    URW_DISC_SECTORS = 0x1100u, /* the disc for this cell: past that file */
+    URW_NID_IO_REMOVE = 0xf27a9c51u,
     URW_NAME = 0x08a710c0u,
     URW_PATH = 0x08a71100u,
     URW_ASYNC_RESULT = 0x08a71200u,
@@ -29008,6 +29015,9 @@ static uint32_t s_urw_nodispatch, s_urw_nodispatch_us, s_urw_ms, s_urw_ms_us;
 static uint32_t s_urw_async, s_urw_async_us;
 static int s_urw_bytes_ok, s_urw_gated;
 static uint32_t s_urw_read_calls;   /* disc reads the long read made */
+static uint32_t s_urw_file, s_urw_file_us, s_urw_doomed_fd, s_urw_after_doomed;
+static int s_urw_file_ok, s_urw_doomed_returned, s_urw_in_flight_parked, s_urw_in_flight_ended;
+static int s_urw_after_doomed_ok;
 static uint32_t s_urw_gate_weak;   /* the weaker thread's count when the gated read began */
 
 static uint32_t urw_now(void) { return gsw_call(NID_SCE_KERNEL_GET_SYSTEM_TIME_LOW, 0u, 0u, 0u, 0u); }
@@ -29030,6 +29040,13 @@ static void urw_weak_fn(CpuState *cpu) {
         if (atomic_load(&s_umd_synthetic_gate) == 1 && s_urw_weak >= s_urw_gate_weak + 5u)
             atomic_store(&s_umd_synthetic_gate, 2);
     }
+    cpu->r[2] = 0u;
+}
+
+/* A reader that is ended while the host is still reading for it (the worker pass). */
+static void urw_doomed_fn(CpuState *cpu) {
+    (void)gsw_call(URW_NID_IO_READ, s_urw_doomed_fd, URW_DST + 0x40000u, 8u, 0u);
+    s_urw_doomed_returned = 1;   /* not reached: main ends this thread inside the read */
     cpu->r[2] = 0u;
 }
 
@@ -29079,7 +29096,39 @@ static void urw_main_fn(CpuState *cpu) {
     (void)gsw_call(URW_NID_IO_WAIT_ASYNC, fd, URW_ASYNC_RESULT, 0u, 0u);
     s_urw_async_us = urw_now() - t0;
     s_urw_async = MEM_R32(URW_ASYNC_RESULT);
+
+    if (s_urw_gated) {
+        /* A reader ended while the host read for it is blocked: its fetch is abandoned, the
+         * worker drops it when the host read returns, and the next reader is served. */
+        (void)gsw_call(URW_NID_IO_LSEEK32, fd, 0u, 0u, 0u);
+        s_urw_doomed_fd = fd;
+        s_urw_gate_weak = 0x7ffffff0u;   /* the weaker thread does not open this gate: main does */
+        atomic_store(&s_umd_synthetic_gate, 1);
+        const uint32_t doomed = gsw_call(NID_SCE_KERNEL_CREATE_THREAD, URW_NAME, URW_DOOMED_ENTRY, 24u, 0x1000u);
+        (void)gsw_call(NID_SCE_KERNEL_START_THREAD, doomed, 0u, 0u, 0u);   /* it runs and parks in its read */
+        s_urw_in_flight_parked = sr_hle_test_io_disc_fetches_in_flight();
+        (void)gsw_call(NID_SCE_KERNEL_TERMINATE_DELETE_THREAD, doomed, 0u, 0u, 0u);
+        s_urw_in_flight_ended = sr_hle_test_io_disc_fetches_in_flight();
+        atomic_store(&s_umd_synthetic_gate, 2);   /* the host read returns to nobody */
+        (void)gsw_call(URW_NID_IO_LSEEK32, fd, 32u, 0u, 0u);
+        s_urw_after_doomed = gsw_call(URW_NID_IO_READ, fd, URW_DST + 0x50000u, 4u, 0u);
+        s_urw_after_doomed_ok = umd_test_sectors_match(URW_DST + 0x50000u, 32u, 4u);
+        atomic_store(&s_umd_synthetic_gate, 0);
+    }
     (void)gsw_call(URW_NID_IO_CLOSE, fd, 0u, 0u, 0u);
+
+    /* A file of the disc, read from the middle: the drive's time, and the right bytes. */
+    title_hle_write_cstr(URW_PATH, "disc0:/UMD_DATA.BIN");
+    const uint32_t file = gsw_call(URW_NID_IO_OPEN, URW_PATH, 1u, 0u, 0u);
+    (void)gsw_call(URW_NID_IO_LSEEK32, file, 512u, 0u, 0u);
+    t0 = urw_now();
+    s_urw_file = gsw_call(URW_NID_IO_READ, file, URW_DST + 0x60000u, 1024u, 0u);
+    s_urw_file_us = urw_now() - t0;
+    s_urw_file_ok = 1;
+    for (uint32_t i = 0; i < 1024u; i++)
+        if (MEM_R8(URW_DST + 0x60000u + i) != umd_synthetic_byte((uint64_t)URW_FILE_LBA * 2048u + 512u + i))
+            s_urw_file_ok = 0;
+    (void)gsw_call(URW_NID_IO_CLOSE, file, 0u, 0u, 0u);
 
     /* A Memory Stick file is not the drive's: its read returns at once. */
     title_hle_write_cstr(URW_PATH, "ms0:/urw_read.bin");
@@ -29091,6 +29140,7 @@ static void urw_main_fn(CpuState *cpu) {
     s_urw_ms = gsw_call(URW_NID_IO_READ, in, URW_DST + 0x10000u, 4096u, 0u);
     s_urw_ms_us = urw_now() - t0;
     (void)gsw_call(URW_NID_IO_CLOSE, in, 0u, 0u, 0u);
+    (void)gsw_call(URW_NID_IO_REMOVE, URW_PATH, 0u, 0u, 0u);
 
     atomic_store(&s_urw_stop, 1);
     (void)gsw_call(NID_SCE_KERNEL_DELAY_THREAD, 30000u, 0u, 0u, 0u);   /* both loops see it and end */
@@ -29107,9 +29157,10 @@ static void urw_run(int deterministic, int host_worker) {
     sr_test_register_guest_fn(URW_MAIN_ENTRY, urw_main_fn);
     sr_test_register_guest_fn(URW_SOUND_ENTRY, urw_sound_fn);
     sr_test_register_guest_fn(URW_WEAK_ENTRY, urw_weak_fn);
+    sr_test_register_guest_fn(URW_DOOMED_ENTRY, urw_doomed_fn);
     title_hle_write_cstr(URW_NAME, "urw-thread");
     s_umd_io_synthetic_enabled = 1;
-    s_umd_synthetic_sectors = 2u * URW_SECTORS;
+    s_umd_synthetic_sectors = URW_DISC_SECTORS;
     s_det_clock = deterministic;
     s_host_work_test_force = host_worker;
     s_urw_gated = host_worker;
@@ -29125,6 +29176,9 @@ static void urw_run(int deterministic, int host_worker) {
     s_urw_ms_us = s_urw_async_us = 0xdeadbeefu;
     s_urw_read_outputs = s_urw_read_weak = 0xdeadbeefu;
     s_urw_bytes_ok = 0;
+    s_urw_file = s_urw_file_us = s_urw_after_doomed = 0xdeadbeefu;
+    s_urw_file_ok = s_urw_doomed_returned = s_urw_after_doomed_ok = 0;
+    s_urw_in_flight_parked = s_urw_in_flight_ended = -1;
     g_worker_uid = SR_ROLE_UID_NONE;
     memset(s_cpu, 0, sizeof(*s_cpu));
     sched_run(URW_MAIN_ENTRY, 0u, 0u);
@@ -29173,8 +29227,10 @@ static void test_umd_read_parks_its_thread_for_the_drives_time(void) {
         expect(s_urw_read_outputs >= expected,
                "the sound thread outputs its blocks through the long read");
         expect(s_urw_read_weak != 0u, "a weaker thread runs while the reader waits for the drive");
-        expect(s_urw_short == 1u && s_urw_short_us >= minimum_us && s_urw_short_us < drive_us,
-               "a one-sector read waits the drive's minimum, not the long read's time");
+        expect(s_urw_short == 1u && s_urw_short_us >= minimum_us && s_urw_short_us < 16683u,
+               "a one-sector read waits the drive's minimum, not a display period");
+        expect(s_urw_file == 1024u && s_urw_file_ok && s_urw_file_us >= minimum_us && s_urw_file_us < 16683u,
+               "a read from the middle of a disc file returns its bytes after the drive's minimum");
         expect(s_urw_refused == 0x80010016u && s_urw_refused_us == 0u,
                "a refused read returns at once");
         expect(s_urw_nodispatch == 16u && s_urw_nodispatch_us == 0u,
@@ -29190,6 +29246,9 @@ static void test_umd_read_parks_its_thread_for_the_drives_time(void) {
      * the weaker guest thread has run five more times, so it can only end if that thread runs
      * while the host read is blocked. Made on the scheduler's thread, as before, the read
      * holds every thread until its 3 s of host time run out.
+     * MUTANT: drop the hle_io_release_thread call in sr_hle_release_thread_resources -- the ended
+     *   reader's fetch stays in flight. MUTANT: io_iso_read drops the fetch's own offset -- the
+     *   disc file's bytes differ.
      * MUTANT: h_IoRead never asks for the worker (io_disc_fetch_start returns NULL) -- the
      *   gated read runs out. MUTANT: io_iso_read ignores the fetched bytes -- the disc is read
      *   again on the scheduler's thread, 1024 more reads than the worker's 64. */
@@ -29206,6 +29265,14 @@ static void test_umd_read_parks_its_thread_for_the_drives_time(void) {
     expect(s_urw_read_calls == URW_SECTORS * 2048u / 65536u,
            "the disc is read once, by the worker in 64 KiB pieces, and the read is served from that");
     expect(s_urw_read_us >= drive_us, "a read fetched on the host worker still takes the drive's time");
+    expect(s_urw_file == 1024u && s_urw_file_ok,
+           "a disc file read from the middle is fetched from the right place on the worker");
+    expect(s_urw_in_flight_parked == 1 && !s_urw_doomed_returned,
+           "a reader parks while the host reads for it, with its fetch in flight");
+    expect(s_urw_in_flight_ended == 0,
+           "ending that reader abandons its fetch: none is left in flight");
+    expect(s_urw_after_doomed == 4u && s_urw_after_doomed_ok && sr_hle_test_io_disc_fetches_in_flight() == 0,
+           "after the abandoned host read returns, the next reader is served the right bytes");
     expect(s_urw_short == 1u && s_urw_refused == 0x80010016u && s_urw_refused_us == 0u &&
                s_urw_nodispatch == 16u && s_urw_nodispatch_us == 0u,
            "with the host worker a short read, a refused one and one with dispatch disabled answer as before");

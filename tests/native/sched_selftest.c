@@ -3408,6 +3408,32 @@ static void test_idle_virtual_clock_stops_at_a_deadline_before_the_vblank(void) 
     expect(pick_next() == waiter && s_tcb[waiter].state == TH_READY,
            "idle wait, deterministic clock: the thread whose wait ended runs next");
 
+    /* A deadline the slice itself reaches: the thread runs, with no display-period step. On
+     * turbo the slice is 10 ms.
+     * MUTANT: the due-waiter return in sched_idle_wait stays paced-only -- 16783 us, and a
+     *   vblank, where 100 us pass; on turbo 26683 us where 10 ms pass. */
+    reset_sched();
+    begin_clock_fixture(0, 0u);
+    s_det_clock = 1;
+    s_det_slice_us = 100u;
+    s_vbl_next_us = 16683u;
+    int brief = mk(0x23au, TH_WAIT_DELAY, 16);
+    s_tcb[brief].wake = 100u;
+    s_cur = -1;
+    sched_idle_wait();
+    expect(s_vtime_us == 100u && s_pending_vblanks == 0u && pick_next() == brief,
+           "idle wait, deterministic clock: a wait the slice reaches runs with no display-period step");
+    reset_sched();
+    begin_clock_fixture(0, 0u);
+    s_det_clock = 0;
+    s_vbl_next_us = 16683u;
+    int turbo_brief = mk(0x23bu, TH_WAIT_DELAY, 16);
+    s_tcb[turbo_brief].wake = 5000u;
+    s_cur = -1;
+    sched_idle_wait();
+    expect(s_vtime_us == 10000u && pick_next() == turbo_brief,
+           "idle wait, turbo clock: a wait the 10 ms slice reaches runs with no display-period step");
+
     /* A deadline after the next vblank: the clock steps one display period, as before. */
     reset_sched();
     begin_clock_fixture(0, 0u);

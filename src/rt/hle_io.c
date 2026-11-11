@@ -465,15 +465,18 @@ uint32_t io_read_now(CpuState *s) {
  * So a read of a file of the disc parks its thread for the time the drive takes
  * (hle_io_umd_read_us): the call returns that long after it was made. The wait is in guest
  * time, so it is the same under the deterministic clock, and it ends like any other timed wait.
- * Each read waits on its own: two threads reading at once do not queue behind one another.
+ * Each read's drive time is its own: two threads reading at once do not wait out one another's
+ * (their host reads, below, do run one after the other on the one worker).
  *
  * In a paced run the host's own read is kept off the scheduler's thread as well (#2361): a
  * first read of a disc image on a USB hard disk held that thread, and with it every guest
  * thread, for 341 to 604 ms. The bytes the read will need are fetched from the disc image by
  * the scheduler's host worker (io_disc_fetch_start, sched_host_work_*) while the reading
- * thread waits, looking again every IO_UMD_READ_MIN_US; then the read itself runs as it always
- * did, served from the fetched bytes (io_iso_read), and the rest of the drive's time, if the
- * host was quicker than the drive, is waited out. So the read's results and refusals are the
+ * thread waits: the drive's minimum first, which every read waits anyway, then looking again
+ * every IO_DISC_FETCH_POLL_US while the host is still reading. Then the read itself runs as it
+ * always did, served from the fetched bytes (io_iso_read), and the rest of the drive's time,
+ * if the host was quicker than the drive, is waited out. A read whose destination is not
+ * writable guest memory is not fetched: it is refused as before, at once. So the read's results and refusals are the
  * same call's either way, and whatever another thread did to the descriptor while the host
  * read is what the read finds: a span it no longer covers is read directly, as before. Under
  * the turbo and deterministic clocks the host read stays on the scheduler's thread, so guest
@@ -483,16 +486,21 @@ uint32_t io_read_now(CpuState *s) {
  *
  * SYNTHETIC, not measured on a PSP (docs/HARDWARE_ORACLE.md: no UMD read or seek time is
  * measured): the time is the public behaviour reference's low estimate, PPSSPP
- * Core/HLE/sceIo.cpp __IoReadDelayUs, 100 bytes per microsecond and never under 100
- * microseconds, with no seek and no spin-up time. That is far faster than a real drive, so a
- * load does not come out slower than the host read it stands for. Taken from that reference too:
- * a read that returns 0 bytes waits the minimum, a refused one does not wait. UNMEASURED: the
+ * Core/HLE/sceIo.cpp __IoReadDelayUs (revision 45a5e3b7223c), 100 bytes per microsecond and
+ * never under 100 microseconds, with no seek and no spin-up time. That is far faster than a
+ * real drive: it adds about 10 ms of guest time for each MiB read and 100 us for each call,
+ * which a host that reads faster than that now waits out. Taken from that reference too: a
+ * read that returns 0 bytes waits the minimum, a refused one does not wait. UNMEASURED: the
  * drive's rate, seek and spin-up, whether two readers queue, the reader's wait type as another
  * thread sees it, and a read made with dispatch or interrupts disabled, which keeps today's
  * call that returns at once, as does a read outside a guest thread. A queued read
  * (sceIoReadAsync) completes on the request queue's own synthetic schedule, not this one. */
 #define IO_UMD_READ_BYTES_PER_US 100u
 #define IO_UMD_READ_MIN_US 100u
+/* How often a reader looks again while the host is still reading its bytes (a runtime choice,
+ * not the drive's): short against a display period, long enough that a stronger reader does not
+ * end the weaker threads' slices more than 2000 times a second. */
+#define IO_DISC_FETCH_POLL_US 500u
 
 uint32_t hle_io_umd_read_us(uint64_t bytes) {
     const uint64_t us = bytes / IO_UMD_READ_BYTES_PER_US;
@@ -533,11 +541,14 @@ static void io_disc_fetch_run(void *ctx) {
 
 static void io_disc_fetch_drop(void *ctx) { free(ctx); }
 
-/* The span of the disc image a read of `count` on `fd` would ask iso_read for, or 0 when the
- * read is not one of the disc image (or would be refused or transfer nothing: io_read_now
- * decides that, this only looks). */
-static int io_disc_read_span(uint32_t fd, uint32_t count, uint32_t *lba, uint32_t *offset,
-                             uint32_t *bytes) {
+/* The span of the disc image a read of `count` to `dst` on `fd` would ask iso_read for, or 0
+ * when nothing is to be fetched ahead: the read is not one of the disc image, or it would
+ * transfer nothing, or its destination is not writable guest memory for the whole span (the
+ * block device refuses such a read, and no host read of a guest-chosen size is made for one;
+ * a file read to such a destination goes on as before, piece by piece). io_read_now decides
+ * the read's result; this only looks. */
+static int io_disc_read_span(uint32_t fd, uint32_t dst, uint32_t count, uint32_t *lba,
+                             uint32_t *offset, uint32_t *bytes) {
     if (fd >= (uint32_t)(sizeof(s_fds) / sizeof(s_fds[0])) || !s_fds[fd].used) return 0;
     const Fd *f = &s_fds[fd];
     if (f->async.state == IO_ASYNC_PENDING || f->off >= f->size || count == 0u) return 0;
@@ -547,7 +558,7 @@ static int io_disc_read_span(uint32_t fd, uint32_t count, uint32_t *lba, uint32_
         *lba = f->off;
         *offset = 0u;
         *bytes = count * IO_UMD_SECTOR_BYTES;
-        return 1;
+        return sr_guest_span_writable(dst, *bytes);
     }
     if (f->kind != FD_KIND_FILE || f->host || f->flash0 || f->archive_vfs || f->pgd ||
         f->enhancement_data)
@@ -556,12 +567,12 @@ static int io_disc_read_span(uint32_t fd, uint32_t count, uint32_t *lba, uint32_
     *lba = f->lba;
     *offset = f->off;
     *bytes = count;
-    return 1;
+    return sr_guest_span_writable(dst, count);
 }
 
-static IoDiscFetch *io_disc_fetch_start(uint32_t fd, uint32_t count) {
+static IoDiscFetch *io_disc_fetch_start(uint32_t fd, uint32_t dst, uint32_t count) {
     uint32_t lba, offset, bytes;
-    if (!io_disc_read_span(fd, count, &lba, &offset, &bytes)) return NULL;
+    if (!io_disc_read_span(fd, dst, count, &lba, &offset, &bytes)) return NULL;
     int slot = 0;
     while (slot < IO_DISC_FETCH_MAX && s_io_disc_fetches[slot]) slot++;
     if (slot == IO_DISC_FETCH_MAX) return NULL;
@@ -585,6 +596,15 @@ static void io_disc_fetch_forget(const IoDiscFetch *fetch) {
     for (int i = 0; i < IO_DISC_FETCH_MAX; i++)
         if (s_io_disc_fetches[i] == fetch) s_io_disc_fetches[i] = NULL;
 }
+
+#ifdef SR_HLE_THREAD_SELFTEST
+/* Fetches no reader has finished or abandoned yet. */
+int sr_hle_test_io_disc_fetches_in_flight(void) {
+    int n = 0;
+    for (int i = 0; i < IO_DISC_FETCH_MAX; i++) n += s_io_disc_fetches[i] != NULL;
+    return n;
+}
+#endif
 
 /* A thread ended (sr_hle_release_thread_resources): the fetch it was waiting for has no reader
  * left. The worker may still be inside the host read, so the bytes go when that returns. */
@@ -619,11 +639,13 @@ uint32_t h_IoRead(CpuState *s) {
                        s_fds[fd].on_umd;
     if (!on_umd || !io_read_caller_can_wait()) return io_read_now(s);
     const int sectors = s_fds[fd].raw_umd;   /* the block device counts sectors */
+    sched_vtime_refresh();
     const uint64_t started = sched_vtime_us();
-    IoDiscFetch *fetch = sched_host_work_usable() ? io_disc_fetch_start(fd, A2) : NULL;
+    IoDiscFetch *fetch = sched_host_work_usable() ? io_disc_fetch_start(fd, A1, A2) : NULL;
     uint64_t host_ns = 0u;
     if (fetch) {
-        while (!sched_host_work_done(fetch->work)) sched_delay_current(IO_UMD_READ_MIN_US);
+        sched_delay_current(IO_UMD_READ_MIN_US);
+        while (!sched_host_work_done(fetch->work)) sched_delay_current(IO_DISC_FETCH_POLL_US);
         io_disc_fetch_forget(fetch);
         host_ns = sched_host_work_finish(fetch->work);
         s_io_disc_serving = fetch;
@@ -641,6 +663,7 @@ uint32_t h_IoRead(CpuState *s) {
     if (result & 0x80000000u) return result;
     const uint64_t drive_us = hle_io_umd_read_us(
         (uint64_t)result * (sectors ? IO_UMD_SECTOR_BYTES : 1u));
+    sched_vtime_refresh();   /* a paced run: the host time the read itself took counts as waited */
     const uint64_t waited_us = sched_vtime_us() - started;
     if (waited_us < drive_us) sched_delay_current(drive_us - waited_us);
     return result;

@@ -3144,7 +3144,11 @@ static void sched_idle_wait(void) {
     if (any_waiting && sched_transfer_wake_deadline() < soonest)
         soonest = sched_transfer_wake_deadline();
     scheduler_progress_time();
-    if (s_pace_on && soonest_runnable != SCHED_WAIT_FOREVER && soonest_runnable <= s_vtime_us)
+    /* A wait that came due, by the host clock or by the slice just charged, runs now, on every
+     * clock. On a virtual clock it used to fall into the display-period step below, so a wait
+     * no longer than a slice (100 us on the deterministic clock) cost 16.7 ms and a VBLANK
+     * whenever its thread was the only one (#1296). */
+    if (soonest_runnable != SCHED_WAIT_FOREVER && soonest_runnable <= s_vtime_us)
         return;
     if (s_pace_on && soonest != (uint64_t)-1 && soonest > s_vtime_us &&
         soonest - s_vtime_us < vblank_due_us())
@@ -3152,10 +3156,9 @@ static void sched_idle_wait(void) {
     else if (!s_pace_on && soonest != (uint64_t)-1 && soonest > s_vtime_us &&
              soonest < s_vbl_next_us) {
         /* A virtual clock with nothing to run goes to a deadline that comes before the next
-         * VBLANK, not a whole display period on (#1296): a 100 us wait for the UMD drive cost a
-         * period whenever its thread was the only one, so a load of a thousand reads took a
-         * thousand VBLANKs under the deterministic clock. No VBLANK comes due on the way, so
-         * there is nothing to latch. */
+         * VBLANK, not a whole display period on (#1296): a load of a thousand disc reads, each
+         * waiting for the drive, took a thousand VBLANKs under the deterministic clock. No
+         * VBLANK comes due on the way, so there is nothing to latch. */
         s_vtime_us = soonest;
     }
     else {
@@ -3545,8 +3548,12 @@ static int sched_host_work_start(void) {
     SDL_Thread *thread = s_host_work_mutex && s_host_work_cond
         ? SDL_CreateThread(sched_host_work_main, "nk-host-work", NULL) : NULL;
     if (!thread) {
-        fprintf(stderr, "sched: host worker unavailable (no host thread); a blocking host read "
-                        "runs on the scheduler's thread, as before\n");
+        fprintf(stderr, "sched: host worker unavailable (%s); a blocking host read runs on the "
+                        "scheduler's thread, as before\n", SDL_GetError());
+        if (s_host_work_cond) SDL_DestroyCondition(s_host_work_cond);
+        if (s_host_work_mutex) SDL_DestroyMutex(s_host_work_mutex);
+        s_host_work_cond = NULL;
+        s_host_work_mutex = NULL;
         s_host_work_state = -1;
         return 0;
     }
