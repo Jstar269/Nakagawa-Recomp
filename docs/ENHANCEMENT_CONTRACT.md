@@ -1091,17 +1091,18 @@ code is `src/rt/gpu_sdl3vk/tex_mips.h` (the chain) and the `tex_hm_*` functions 
   alpha-unused or alpha-tested draws, 1:1 draws or render targets ever meet, such as a loading screen's or a menu's
   textures, cost no build. Two limits keep builds off the frames that cannot afford them, and a draw either limit
   stops binds level 0, as with the part off:
-  - **The build budget.** The builds started in one present stop once they have read 131,072 level-0 texels (two
-    256x256 textures); one build may run past it by its own size, and a chain taken from the cache, or contents
-    refused below, charge a sixteenth of their texels. A later bind builds the chain. The budget counts texels,
-    not host time, because a chain changes the frame the guest keeps: which draws bind one is the same on every
-    host and in every deterministic run.
-  - **Streaming textures.** A texture address whose contents are decoded anew in three presents in a row, each
-    within two presents of the last (a movie on a surface, a palette fade, which makes a new entry at each step, a
+  - **The build budget.** The builds started in one guest frame, from one of the guest's display flips to the
+    next, stop once they have read 131,072 level-0 texels (two 256x256 textures); one build may run past it by its
+    own size, and a chain taken from the cache, or contents refused below, charge a sixteenth of their texels. A
+    later bind builds the chain. The budget counts texels and guest flips, not host time or host presents (which
+    a frame cap drops on a wall-clock grid), because a chain changes the frame the guest keeps: which draws bind
+    one is the same on every host and in every deterministic run, record and replay included.
+  - **Streaming textures.** A texture address whose contents are decoded anew in three guest frames in a row,
+    each within two frames of the last (a movie on a surface, a palette fade, which makes a new entry at each step, a
     texture rewritten every frame), would build chains that are replaced before they are seen again. While it
     streams, contents the chain cache holds bind their kept chain, and contents a streaming address has shown once
     before (a slot several textures share in turn) are built when they come back; contents new to both keep level
-    0, and their hash is noted in a ring of 1,024. Once the address holds still for longer than two presents, its
+    0, and their hash is noted in a ring of 1,024. Once the address holds still for longer than two frames, its
     next draw builds as usual.
 - **Which draws.** A draw binds the chain only when it is transformed (through-mode HUDs, menus and text keep
   level 0, as texture filtering's rule has it), its minifying filter is linear, and, for a texture with any alpha
@@ -1135,8 +1136,9 @@ code is `src/rt/gpu_sdl3vk/tex_mips.h` (the chain) and the `tex_hm_*` functions 
   images is later work. The smart 2D filter never takes a draw that binds the chain.
 - **Memory and cost.** A chain adds a third of level 0's bytes or less (a 64x64 texture: 1365 texels on top of
   4096), in the same image as level 0, plus one descriptor set an entry. The chain is freed with its entry at
-  eviction and at shutdown. The builder's two buffers, made once when the part is on, hold a 512x512 chain (1.33 MiB)
-  and its float work area (2.25 MiB). A build is CPU work on the GE thread, bounded per present by the build
+  eviction and at shutdown. The builder's two buffers, made once when the part is on, hold a 512x512 chain's levels below level 0
+  (0.33 MiB)
+  and its float work area (2.25 MiB). A build is CPU work on the GE thread, bounded per guest frame by the build
   budget above. A game that streams several textures
   through one VRAM slot in turn decodes each of them again and again, so the renderer keeps built chains in a host
   cache keyed by a 64-bit hash of every decoded level-0 texel and the size: contents it has seen upload their kept
@@ -1151,9 +1153,10 @@ code is `src/rt/gpu_sdl3vk/tex_mips.h` (the chain) and the `tex_hm_*` functions 
   `HOST_MIPS: on (filter=box in linear light, alpha-weighted, key fill; bias=0 at <S>x; anisotropy=<A>)` and the
   guest-visible line section 11.3.8 describes when the renderer starts; `HOST_MIPS: exit (entries=, sets=, builds=,
   reused=, redecodes=, texels=, build_ms=, bound=, plain_alpha_unused=, plain_alpha_test=, plain_onetoone=,
-  plain_budget=, plain_stream=, plain_target=, set_failures=, chain_peak_kib=, cache_peak_kib=, present_peak_ms=)`
+  plain_budget=, plain_stream=, plain_target=, set_failures=, chain_peak_kib=, cache_peak_kib=, frame_peak_ms=)`
   (`entries` are the images with a chain, `sets` the ones a draw has bound; `build_ms` is the time of the repeated
-  decodes, the hash, the cache lookup and the builds, and `present_peak_ms` the most of it one present took; `texels` counts built ones; `plain_onetoone` counts draws, the other `plain_`
+  decodes, the hash, the cache lookup, the builds and the copies into the upload buffer, and `frame_peak_ms` the
+  most of it one guest frame took; `texels` counts built ones; `plain_onetoone` counts draws, the other `plain_`
   fields binds) when it
   stops, or, on the `SR_EXIT_AT_VBLANK` path that skips the renderer's shutdown, from `ace_finish` (once either
   way). The report's `effective` block has `"mips"`, the game badge lists "smooth far textures", and the flight
@@ -1174,8 +1177,9 @@ code is `src/rt/gpu_sdl3vk/tex_mips.h` (the chain) and the `tex_hm_*` functions 
     contents drawn in through mode build nothing, and the first minified draw of them decodes level 0 again and
     builds once, after a submit that closes the command buffer; an alpha-tested draw of a texture with alpha, and a
     transformed draw at 1:1, bind level 0; past the build budget a draw binds level 0 and builds nothing, and with
-    budget it builds; with room for two 64x64 textures, two new contents build in one present and the third binds
-    level 0 until the next; new contents at the address in three presents in a row keep level 0 at the third,
+    budget it builds; with room for two 64x64 textures, two new contents build in one guest frame and the third
+    binds level 0 until the next, which guest flips that no host present follows still open; new contents at the
+    address in three frames in a row keep level 0 at the third,
     while it streams contents the cache holds bind their chain, contents refused once build when they come back
     and contents new again keep level 0, and the address held still builds again; a colour-keyed edge blended over black takes no key colour; through-mode and
     alpha-unused draws keep level 0, and a colour-tested draw stays with the software renderer; the chain bytes
@@ -1183,9 +1187,10 @@ code is `src/rt/gpu_sdl3vk/tex_mips.h` (the chain) and the `tex_hm_*` functions 
     scales 4, 2 and 1, with 16x texture filtering, and with the part off, where the minified draw must show level
     0's aliasing and no entry may have a chain, and the key-off cell requires the draw the renderer made before
     the part: an image of the game's one level, no chain view, sampler, set or builder buffers, the entry's own
-    set bound and no chain flag in the batch. `gpu-mips-mutant` builds it three times: recording the late build's
+    set bound and no chain flag in the batch. `gpu-mips-mutant` builds it four times: recording the late build's
     barrier before a command buffer begins and building at every decode, which the deferred cell must kill, and
-    giving an entry chain levels with the key off, which the key-off cell must kill.
+    giving an entry chain levels with the key off, which the key-off cell must kill, and keying the budget on
+    host presents, which the budget cell must kill.
   - `ace-selftest` pins the key: optional, `on` or `off`, in an Enhanced or Ace line, written only when on, after
     `tess` and before `cull`; the longest line the key table allows (`ace_line_longest`) fits `ACE_SPEC_MAX`, and so
     the flight recorder's field, and every part on, found from that table, has badge words that fit `ACE_WORDS_MAX`;
@@ -1723,9 +1728,11 @@ The feature of section 10.16 (#1273). How it draws is described there; this entr
   footprint, not by the level the host samples, and the VBLANK schedule and the media clocks are unchanged. A chain
   is built on the GE thread, the thread the guest runs on, at the first draw after each upload that samples it, so
   a frame that brings many new textures into such draws can take longer in host time. The build budget
-  (section 10.16) bounds that: on the measured host (Windows 11, 2026-11-10) the builder read about 82 million
-  level-0 texels a second, so a present's budget costs about 1.6 ms, and the worst present, the budget plus one
-  512x512 build that starts just under it, about 4.8 ms. On LittleBigPlanet's first story level at 4x, before the
+  (section 10.16) bounds the builds: on the measured host (Windows 11, 2026-11-10) the builder read about 82
+  million level-0 texels a second, so a guest frame's budget of builds costs about 1.6 ms, and the worst frame of
+  builds, the budget plus one 512x512 build that starts just under it, about 4.8 ms. Chains taken from the cache
+  and contents refused while streaming are charged a sixteenth of their texels but may each decode level 0 again,
+  hash it and upload a kept chain; the exit stamp's `frame_peak_ms` is the measured worst frame of all of it. On LittleBigPlanet's first story level at 4x, before the
   budget, builds took 7.1 s of an 8,740-VBLANK run, all in its intro and loading screens; on Hot Shots Tennis, 25 to
   31 ms. The figures with the budget are not yet measured.
 - **I/O speed:** unchanged.

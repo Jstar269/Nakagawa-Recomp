@@ -129,7 +129,7 @@ Measured on a Windows 11 x64 PC building and running Hot Shots Tennis with the p
   reduces shimmer on such surfaces, but by little when texture filtering is on: on LittleBigPlanet's first level
   at 4x, distant shimmer fell by 0.1 % with 16x filtering and by 2.2 % without it. The copies are built on the
   game's own thread at the first draw that shows the texture small, so a scene that brings in many new textures
-  can stutter; each frame builds at most about two 256x256 textures' worth (the rest draw unsmoothed until a later frame), and textures that
+  can stutter; each frame builds about two 256x256 textures' worth, plus at most one more that started under that limit (the rest draw unsmoothed until a later frame), and textures that
   change every frame, such as movies, keep their one level while they change. The copies add up to a third of
   the texture's GPU memory. Through-mode menus and text, alpha-tested cut-outs, textures drawn at their own size
   or larger, and

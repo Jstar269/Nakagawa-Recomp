@@ -104,6 +104,11 @@ typedef enum GeGpuSyncResult {
  * validated span. This is target-scoped and does not make ordinary presentation wait. */
 int gegpu_sync_guest_fb(const GeGpuFbDescriptor *desc);
 
+/* One guest flip (the display's frame swap), counted before the presenter's slot rule or the
+ * on-screen keyboard can drop it: the clock of the host mip chain's build budget and streaming
+ * windows (ENHANCEMENT_CONTRACT.md 10.16), which must not depend on how fast the host presents. */
+void gegpu_note_guest_flip(void);
+
 typedef enum GeGpuReplayBoundaryKind {
     GEGPU_BOUNDARY_RENDER_SNAPSHOT = 0,
     GEGPU_BOUNDARY_TEXTURE_UPLOAD,

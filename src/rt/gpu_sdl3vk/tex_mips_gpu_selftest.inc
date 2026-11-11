@@ -25,10 +25,11 @@
  *  - alpha-test: an alpha-tested draw of a texture with alpha binds level 0 (coverage, depth and
  *    stencil stay the game's own).
  *  - one-to-one: a transformed draw that maps texels 1:1 onto guest pixels binds level 0.
- *  - budget: past the present's build budget a draw binds level 0 and builds nothing; with
- *    budget it builds. The budget counts level-0 texels, not host time: with room for two 64x64
- *    textures, two new contents build in one present and the third binds level 0 until the next.
- *  - stream: new contents at the texture's address in three presents in a row stop the builds
+ *  - budget: past the guest frame's build budget a draw binds level 0 and builds nothing; with
+ *    budget it builds. The budget counts level-0 texels, not host time, per guest flip, not host
+ *    present: with room for two 64x64 textures, two new contents build in one frame and the third
+ *    binds level 0 until the next, which guest flips that no host present follows still open.
+ *  - stream: new contents at the texture's address in three guest frames in a row stop the builds
  *    (the third draw binds level 0). While it streams, contents the cache holds bind their kept
  *    chain, contents refused once are built when they come back, and contents new again keep
  *    level 0 until the address holds still, when the next draw builds.
@@ -61,6 +62,11 @@ static void hm_fill(int kind) {
                            : kind >= 10 ? (uint8_t)(((u * 7u + v * 13u + (uint32_t)kind) % 5u) == 0u)
                            : (uint8_t)(u < 32u ? 3u : 2u);
     sr_gpu_vram_dirty(HM_TEX, 64u * 64u);
+}
+
+/* `n` guest flips, as the display reports them (gegpu_note_guest_flip), with no host present. */
+static void hm_flips(uint32_t n) {
+    for (uint32_t i = 0; i < n; i++) gegpu_note_guest_flip();
 }
 
 static void hm_palette(uint32_t c0, uint32_t c1) {
@@ -429,11 +435,14 @@ int gegpu_mips_selftest(void) {
             printf("gpu mips selftest: PASS budget     past the budget level 0, then one build\n");
         }
     }
-    /* budget in texels: room for two 64x64 builds in one present; the third waits a present. */
+    /* budget in texels: room for two 64x64 builds in one guest frame; the third waits a frame. The
+       frames are guest flips that no host present follows (a frame cap's slot rule dropped them),
+       which must still open a new window: the windows may not depend on how fast the host is. */
     if (ok) {
         const uint64_t builds0 = s_hm_stats.builds, pb0 = s_hm_stats.plain_budget;
+        const uint64_t presents0 = xs_now();
         int binds = 0;
-        s_cnt_present_cpu += HM_STREAM_GAP + 1u;
+        hm_flips(HM_STREAM_GAP + 1u);
         s_hm_budget_texels = 2u * 64u * 64u;
         for (int k = 0; k < 3 && ok; k++) {
             hm_fill(20 + k);
@@ -443,18 +452,18 @@ int gegpu_mips_selftest(void) {
         }
         const int held = ok && binds == 2 && s_hm_stats.builds == builds0 + 2u &&
                          s_hm_stats.plain_budget == pb0 + 1u;
-        s_cnt_present_cpu += HM_STREAM_GAP + 1u;
+        hm_flips(HM_STREAM_GAP + 1u);
         /* A submit ends the batch, as a present does: a draw with the same state would join it. */
         ok = held && submit_pending() && hm_quad(270, 5, 64.0f, 0) && s_tex_bound_hm &&
-             s_hm_stats.builds == builds0 + 3u;
+             s_hm_stats.builds == builds0 + 3u && xs_now() == presents0;
         s_hm_budget_texels = UINT64_MAX;
         if (!ok) {
             fprintf(stderr, "gpu mips selftest [budget-texels]: want two builds and level 0 for the third in one "
-                            "present (%s), then a build at the next (builds +%llu, plain_budget +%llu, binds %d)\n",
+                            "frame (%s), then a build after guest flips alone (builds +%llu, plain_budget +%llu, binds %d)\n",
                     held ? "ok" : "BAD", (unsigned long long)(s_hm_stats.builds - builds0),
                     (unsigned long long)(s_hm_stats.plain_budget - pb0), binds);
         } else {
-            printf("gpu mips selftest: PASS budget-tx  two 64x64 builds fill a present's texels; the third waits\n");
+            printf("gpu mips selftest: PASS budget-tx  two 64x64 builds fill a frame's texels; the third waits a flip\n");
         }
     }
 
@@ -468,9 +477,9 @@ int gegpu_mips_selftest(void) {
             {13, 1, "contents that come back build"},   {14, 0, "new contents again keep level 0"},
         };
         const char *bad = NULL;
-        s_cnt_present_cpu += HM_STREAM_GAP;   /* the earlier cells' decodes are past the gap */
+        hm_flips(HM_STREAM_GAP);   /* the earlier cells' decodes are past the gap */
         for (size_t k = 0; k < sizeof(k_steps) / sizeof(k_steps[0]) && ok && !bad; k++) {
-            s_cnt_present_cpu++;
+            hm_flips(1u);
             hm_fill(k_steps[k].kind);
             hm_state(3u | (1u << 8), 0, 0);
             ok = hm_quad(280, 5, 64.0f, 0);
@@ -479,7 +488,7 @@ int gegpu_mips_selftest(void) {
         if (ok && !bad && (s_hm_stats.builds != builds0 + 3u || s_hm_stats.reused != reused0 + 1u ||
                            s_hm_stats.plain_stream != ps0 + 2u))
             bad = "three builds, one kept chain and two refusals while it streams";
-        s_cnt_present_cpu += HM_STREAM_GAP + 1u;
+        hm_flips(HM_STREAM_GAP + 1u);
         if (ok && !bad &&
             !(submit_pending() && hm_quad(280, 5, 64.0f, 0) && s_tex_bound_hm && s_hm_stats.builds == builds0 + 4u))
             bad = "the address held still builds";

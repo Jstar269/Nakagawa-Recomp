@@ -1225,12 +1225,14 @@ gpu-mips-selftest: shader-verify $(RT_GE_O)
 # kill: 1 records the late build's layout barrier before any reservation begins a command buffer (the
 # order that aborted a title in the Vulkan loader once a submit had closed s_cmd), 2 builds the chain
 # at every decode instead of at the first bind it applies to (both the deferred cell), 3 gives an
-# entry chain levels with the key off (the key-off cell, in a run without mips).
+# entry chain levels with the key off (the key-off cell, in a run without mips), 4 keys the budget
+# window on host presents instead of guest flips (the budget-tx cell).
 gpu-mips-mutant: shader-verify $(RT_GE_O)
-	@for n in 1 2 3; do \
+	@for n in 1 2 3 4; do \
 		args='--scale 4'; \
 		case $$n in 1) want='Invalid commandBuffer';; 2) want='want no build for the through-mode draw (BAD)';; \
-			3) want='[key off]: the image has chain levels'; args="--scale 4 --ace $(GPU_MIPS_LINE);af=0";; esac; rc=0; \
+			3) want='[key off]: the image has chain levels'; args="--scale 4 --ace $(GPU_MIPS_LINE);af=0";; \
+			4) want='gpu mips selftest [budget-texels]:';; esac; rc=0; \
 		$(CC) $(CFLAGS) -DSR_GPU_COHERENCE_SELFTEST -DSR_GPU_MIPS_SELFTEST -DSR_GPU_MIPS_MUTANT=$$n \
 			-DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" -ffunction-sections -fdata-sections $(LDFLAGS) -Wl,--gc-sections \
 			-o $(BUILD_DIR)/gpu_mips_mutant_$$n.exe \

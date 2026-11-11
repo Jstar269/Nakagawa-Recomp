@@ -546,14 +546,14 @@ static int s_tex_bound_hm;                 /* the last tex_get bound a chain */
 static struct {
     uint64_t entries, builds, reused, redecodes, texels, build_ns, bound, plain_alpha, plain_target,
              plain_alpha_test, plain_onetoone, plain_budget, plain_stream, sets, set_failures, bytes, bytes_peak, cache_peak,
-             present_peak_ns;
+             frame_peak_ns;
 } s_hm_stats;
 /* Built chains by the content of their level 0 (a full 64-bit hash of the decoded texels and the
  * size), so a texture whose contents come back, as when a game streams several textures through
  * one VRAM slot in turn, uploads its chain again instead of building it again. Bounded by
  * HM_CACHE_BYTES of host memory, least recently used out first. */
 #define HM_CACHE_SLOTS 256
-#define HM_CACHE_BYTES (32u << 20)          /* 24 full 512x512 chains, or about 2.5 times the
+#define HM_CACHE_BYTES (32u << 20)          /* 96 full 512x512 chains, or about 2.5 times the
                                                chains Hot Shots Tennis keeps resident at 4x */
 typedef struct { uint64_t hash, lru; uint32_t w, h; int alpha; size_t texels; uint32_t *chain; } HmCached;
 static HmCached s_hm_cache[HM_CACHE_SLOTS];
@@ -4352,35 +4352,53 @@ static const TexEnt *s_hm_scratch;
 #endif
 
 /* The build budget: chain builds run on the GE thread, the guest's, so the builds started in one
- * present stop once they have read HM_BUILD_BUDGET_TEXELS level-0 texels. A draw past it binds
- * level 0, as with the part off, and a later bind builds the chain. The budget counts texels, not
- * time, because a chain changes the frame the guest keeps: which draws bind one must be the same
- * on every host and in every deterministic run. Two 256x256 textures a present took about 1.6 ms
+ * guest frame (between two guest flips, hm_now) stop once they have read HM_BUILD_BUDGET_TEXELS
+ * level-0 texels. A draw past it binds level 0, as with the part off, and a later bind builds the
+ * chain. The budget counts texels and guest frames, not time or host presents, because a chain
+ * changes the frame the guest keeps: which draws bind one must be the same on every host and in
+ * every deterministic run. Two 256x256 textures a frame took about 1.6 ms
  * on the measured host (82 million level-0 texels a second); one build may run past the budget
  * by its own size, and a kept chain or a hash alone is charged a sixteenth.
  * s_hm_budget_texels is a variable for gpu-mips-selftest's budget cell. */
 #define HM_BUILD_BUDGET_TEXELS (2u * 256u * 256u)
 static uint64_t s_hm_budget_texels = HM_BUILD_BUDGET_TEXELS;
-static uint64_t s_hm_budget_present = UINT64_MAX, s_hm_budget_used, s_hm_present_ns;
+static uint64_t s_hm_budget_frame = UINT64_MAX, s_hm_budget_used, s_hm_frame_ns;
 static int tex_hm_objects(TexEnt *e);
 
+/* The budget's and the streaming table's clock: guest flips (gegpu_note_guest_flip, from the
+ * display's flip before the presenter's slot rule), not host presents, which a frame cap drops on
+ * a wall-clock grid. The same guest run then opens the same windows on every host. */
+static uint64_t s_hm_flips;
+
+void gegpu_note_guest_flip(void) {
+    s_hm_flips++;
+}
+
+static uint64_t hm_now(void) {
+#if SR_GPU_MIPS_MUTANT == 4
+    return xs_now();      /* gpu-mips-mutant 4: host presents, which the budget-tx cell refuses */
+#else
+    return s_hm_flips;
+#endif
+}
+
 static int tex_hm_budget_left(void) {
-    const uint64_t now = xs_now();
-    if (now != s_hm_budget_present) { s_hm_budget_present = now; s_hm_budget_used = 0; s_hm_present_ns = 0; }
+    const uint64_t now = hm_now();
+    if (now != s_hm_budget_frame) { s_hm_budget_frame = now; s_hm_budget_used = 0; s_hm_frame_ns = 0; }
     return s_hm_budget_used < s_hm_budget_texels;
 }
 
-/* Host time a build call spent since `t0`: the run's total, and this present's, whose peak the
- * exit stamp reports (the most one present's builds held the GE thread). */
+/* Host time a build call spent since `t0`: the run's total, and this guest frame's, whose peak
+ * the exit stamp reports (the most one frame's builds held the GE thread). */
 static void tex_hm_spent(uint64_t t0) {
     const uint64_t d = SDL_GetTicksNS() - t0;
     s_hm_stats.build_ns += d;
-    s_hm_present_ns += d;
-    if (s_hm_present_ns > s_hm_stats.present_peak_ns) s_hm_stats.present_peak_ns = s_hm_present_ns;
+    s_hm_frame_ns += d;
+    if (s_hm_frame_ns > s_hm_stats.frame_peak_ns) s_hm_stats.frame_peak_ns = s_hm_frame_ns;
 }
 
 /* Streaming textures: a texture address whose contents are decoded anew in HM_STREAM_PRESENTS
- * presents in a row, each within HM_STREAM_GAP presents of the last (a movie drawn on a surface,
+ * guest frames in a row, each within HM_STREAM_GAP frames of the last (a movie drawn on a surface,
  * a palette fade, which makes a new entry at each step, a texture the game rewrites each frame),
  * would build a chain that is replaced before it is seen again. While it streams, contents bind
  * a chain only if the chain cache has theirs or they have been at a streaming address before
@@ -4403,7 +4421,7 @@ static int tex_hm_seen(uint64_t hash) {
 }
 
 static void tex_hm_note_decode(uint32_t addr) {
-    const uint64_t now = xs_now();
+    const uint64_t now = hm_now();
     int victim = 0;
     for (int i = 0; i < HM_STREAM_SLOTS; i++) {
         if (s_hm_stream[i].streak && s_hm_stream[i].addr == addr) {
@@ -4421,7 +4439,7 @@ static void tex_hm_note_decode(uint32_t addr) {
 }
 
 static int tex_hm_streaming(uint32_t addr) {
-    const uint64_t now = xs_now();
+    const uint64_t now = hm_now();
     for (int i = 0; i < HM_STREAM_SLOTS; i++)
         if (s_hm_stream[i].streak && s_hm_stream[i].addr == addr)
             return s_hm_stream[i].streak >= HM_STREAM_PRESENTS && now - s_hm_stream[i].last <= HM_STREAM_GAP;
@@ -5213,7 +5231,7 @@ static void tex_hm_report(void) {
     fprintf(stderr, "HOST_MIPS: exit (entries=%llu, sets=%llu, builds=%llu, reused=%llu, redecodes=%llu, texels=%llu, "
                     "build_ms=%.1f, bound=%llu, plain_alpha_unused=%llu, plain_alpha_test=%llu, plain_onetoone=%llu, "
                     "plain_budget=%llu, plain_stream=%llu, plain_target=%llu, set_failures=%llu, "
-                    "chain_peak_kib=%llu, cache_peak_kib=%llu, present_peak_ms=%.2f)\n",
+                    "chain_peak_kib=%llu, cache_peak_kib=%llu, frame_peak_ms=%.2f)\n",
             (unsigned long long)s_hm_stats.entries, (unsigned long long)s_hm_stats.sets,
             (unsigned long long)s_hm_stats.builds,
             (unsigned long long)s_hm_stats.reused, (unsigned long long)s_hm_stats.redecodes,
@@ -5224,7 +5242,7 @@ static void tex_hm_report(void) {
             (unsigned long long)s_hm_stats.plain_target,
             (unsigned long long)s_hm_stats.set_failures,
             (unsigned long long)(s_hm_stats.bytes_peak >> 10),
-            (unsigned long long)(s_hm_stats.cache_peak >> 10), (double)s_hm_stats.present_peak_ns / 1e6);
+            (unsigned long long)(s_hm_stats.cache_peak >> 10), (double)s_hm_stats.frame_peak_ns / 1e6);
 }
 
 static void tex_hm_init(void) {
@@ -5233,9 +5251,9 @@ static void tex_hm_init(void) {
     memset(&s_hm_stats, 0, sizeof(s_hm_stats));
     memset(s_hm_stream, 0, sizeof(s_hm_stream));
     s_hm_seen_n = 0;
-    s_hm_budget_present = UINT64_MAX;
+    s_hm_budget_frame = UINT64_MAX;
     s_hm_budget_used = 0;
-    s_hm_present_ns = 0;
+    s_hm_frame_ns = 0;
     if (!g_ace_on || !ace_effective()->mips) return;
     const size_t texels = nk_tex_mips_chain_texels(NK_TEX_MIPS_MAX_DIM, NK_TEX_MIPS_MAX_DIM);
     s_hm_out = (uint32_t *)malloc(texels * sizeof(uint32_t));
