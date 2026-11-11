@@ -1101,9 +1101,10 @@ static void sr_audio_push_frames(int ch, const int16_t *lr, const int32_t *wide,
 
     const int16_t *submitted = lr;
     int push_ok;
-    /* Played dry: a device pull found nothing (an empty queue a pull just emptied is still playing). */
-    const int played_dry = SDL_GetAtomicInt(&s_played_dry[ch]) && takeable_frames == 0;
-    SDL_SetAtomicInt(&s_played_dry[ch], 0);   /* before the data, as in sr_audio_push_silence */
+    /* Before the data, as in sr_audio_push_silence. Played dry: a device pull found nothing (an
+     * empty queue a pull just emptied is still playing). Read and cleared in one step, so a pull
+     * that finds nothing in between is not lost. */
+    const int played_dry = SDL_SetAtomicInt(&s_played_dry[ch], 0) && takeable_frames == 0;
     /* Volume scaling and submission */
     if (s_tpl_on) {
         /* Ace Mode's limiter in place of the per-sample clamp: n frames in, n frames out. On a
@@ -2681,7 +2682,7 @@ static void test_peak_limiter_keeps_a_hold_in_order(void) {
         const int16_t want = i < 500u + SR_TPL_DELAY ? 0 : -5000;
         assert(test_queued_sample(1, i, 0) == want && test_queued_sample(1, i, 1) == want);
     }
-    /* Dry with no hold (a pull came up short): b follows the limiter's delay at once, with none
+    /* Dry with no hold (a pull found nothing): b follows the limiter's delay at once, with none
      * of a's frames ahead. */
     sr_audio_push(2, a, 300, 0x8000, 0x8000);
     assert(SDL_ClearAudioStream(s_streams[2]));

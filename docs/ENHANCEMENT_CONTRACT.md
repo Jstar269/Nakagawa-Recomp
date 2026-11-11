@@ -1228,9 +1228,9 @@ host's output.
   PSP did not clip; only the overs are rounded off instead of cut. A stream that stops leaves its last 71 frames in the
   limiter until that channel's next push or hold of silence (`sr_audio_push_silence`, which passes through the
   limiter too), which plays them first, in order. A push or hold that finds the channel played dry (a device pull
-  came up short) drops them instead, as a hold drops the converter's kept-back frames (after the gap they would
-  be a 1.6 ms fragment ahead of the new sound). Nothing is invented. The video recorder (`sr_videorec_audio`) and
-  the counters keep the guest's copy.
+  found nothing) drops them instead (after the gap they would be a 1.6 ms fragment ahead of the new sound); a hold
+  also drops the converter's kept-back frames, a push leaves them in place. Nothing is invented. The video
+  recorder (`sr_videorec_audio`) and the counters keep the guest's copy.
 - **Off.** Without `peak=limit` neither side runs: the SAS mixer keeps nothing, `sr_audio_push` is the plain push,
   and `sr_audio_push_wide` is the plain push of the guest's copy (`audio-selftest` checks the bytes). Fast forward
   pushes nothing, so nothing is limited while it runs.
