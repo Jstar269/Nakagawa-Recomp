@@ -9075,7 +9075,8 @@ static void test_play_mode_twin_settings(void) {
     assert(player_app_save_settings(app, path) == NK_OK);
     {
         char *saved = read_text_file(path);
-        assert(saved && strstr(saved, "\"upscale\": \"off\", \"twin\": \"on\"}") != NULL);
+        assert(saved && strstr(saved, "\"upscale\": \"off\", \"stick\": \"off\", "
+                                      "\"load\": \"off\", \"twin\": \"on\"}") != NULL);
         assert(strstr(saved, "\"TEST92001\": {\"mode\": \"library\", \"twin\": \"off\"}") != NULL);
         free(saved);
     }
@@ -9100,7 +9101,8 @@ static void test_play_mode_twin_settings(void) {
     assert(player_app_save_settings(app, path) == NK_OK);
     {
         char *saved = read_text_file(path);
-        assert(saved && strstr(saved, "\"upscale\": \"off\", \"twin\": \"off\"}") != NULL);
+        assert(saved && strstr(saved, "\"upscale\": \"off\", \"stick\": \"off\", "
+                                      "\"load\": \"off\", \"twin\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST92001\": {\"mode\": \"library\", \"twin\": \"on\"}") != NULL);
         free(saved);
     }
