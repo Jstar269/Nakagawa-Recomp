@@ -214,9 +214,9 @@ static int check_cop2_control_transfers(void) {
 }
 
 static int check_vfpu_cc_write_mask(void) {
-    /* Unrecorded PSP read (PSP-3000, 2026-11-08, issue #326, probe case vfpu-cc-cmov; its
-     * register entry is not in this tree yet): mtvc then mfvc on VFPU_CC (control register 3)
-     * read back written & 0x3f in every cell. */
+    /* PSP-VFPU-CCCMOV-001 (PSP-3000, 2026-11-08, issue #326, probe case vfpu-cc-cmov, cells
+     * cc-roundtrip-p0/p1): mtvc then mfvc on VFPU_CC (control register 3) read back
+     * written & 0x3f in every cell. */
     static const uint32_t written[] = {0x00u, 0x3fu, 0x15u, 0x2au, 0x01u, 0x10u, 0x20u,
                                        0x40u, 0x80u, 0xffu, 0x100u, 0xffffffffu};
     CpuState s;
@@ -231,6 +231,50 @@ static int check_vfpu_cc_write_mask(void) {
               "mfvc reads VFPU_CC");
         CHECK(s.r[6] == (written[i] & 0x3fu), "VFPU_CC reads back the written value and 0x3f");
         bad |= s.r[6] != (written[i] & 0x3fu);
+    }
+    return bad;
+}
+
+/* PSP-VFPU-QUADWB-001 (PSP-3000, 2026-11-08, issue #326, probe case vfpu-quad-wb, base $t2 =
+ * r10, 16-byte aligned): bit 1 of an aligned lv.q/sv.q is the write-back flag. The console
+ * showed the flag does not change the base register in any form (offsets 0, +16, +32, -16;
+ * four stores in a row from one base did not drift) and that the access uses base + offset,
+ * as the plain word does. This pins that read in the interpreter. */
+static int check_quad_wb_measured(void) {
+    CpuState s;
+    int bad = 0;
+    {
+        static const uint32_t offsets[4] = {0x0000u, 0x0010u, 0x0020u, 0xFFF0u};
+        const uint32_t base = 0x08004200u;
+        for (int k = 0; k < 4; k++) {
+            const uint32_t at = base + (uint32_t)(int32_t)(int16_t)offsets[k];
+            sr_mem_init();
+            setup_state(&s);
+            s.r[10] = base;
+            for (int i = 0; i < 4; i++) MEM_W32(at + (uint32_t)i * 4u, 0x5a5a0000u + (uint32_t)i);
+            fill_vi(&s, 0);
+            CHECK(sr_vfpu_interp(&s, lvq(10, 0, offsets[k]) | 2u) == SR_VFPU_COMPUTE,
+                  "lv.q with the write-back bit set loads");
+            CHECK(s.vi[0] == 0x5a5a0000u && s.vi[3] == 0x5a5a0003u && s.r[10] == base,
+                  "lv.q wb loads from base + offset and leaves the base register unchanged");
+            for (int i = 0; i < 4; i++) s.vi[i] = 0xc0de0000u + (uint32_t)i;
+            CHECK(sr_vfpu_interp(&s, svq(10, 0, offsets[k]) | 2u) == SR_VFPU_STATE,
+                  "sv.q with the write-back bit set stores");
+            CHECK(MEM_R32(at) == 0xc0de0000u && MEM_R32(at + 12u) == 0xc0de0003u && s.r[10] == base,
+                  "sv.q wb stores at base + offset and leaves the base register unchanged");
+        }
+        /* Four stores in a row from one base land in order and the base never drifts. */
+        sr_mem_init();
+        setup_state(&s);
+        s.r[10] = base;
+        for (int q = 0; q < 4; q++) {
+            for (int i = 0; i < 4; i++) s.vi[i] = 0xc0de0000u + ((uint32_t)q << 8) + (uint32_t)i;
+            CHECK(sr_vfpu_interp(&s, svq(10, 0, (uint32_t)q * 16u) | 2u) == SR_VFPU_STATE &&
+                  s.r[10] == base, "a run of sv.q wb from one base does not drift the base");
+        }
+        CHECK(MEM_R32(base) == 0xc0de0000u && MEM_R32(base + 16u) == 0xc0de0100u &&
+              MEM_R32(base + 32u) == 0xc0de0200u && MEM_R32(base + 60u) == 0xc0de0303u,
+              "a run of sv.q wb stores each quad at its own offset");
     }
     return bad;
 }
@@ -337,47 +381,6 @@ static int check_quad_memops(void) {
     CHECK(MEM_R32(ARENA_END - 12u) == 0xCAFE0000u && MEM_R32(ARENA_END - 8u) == 0xCAFE0001u &&
           MEM_R32(ARENA_END - 4u) == 0xCAFE0002u,
           "sv.q rejection leaves every earlier guest word unchanged");
-
-    /* 7b. Bit 1 of an aligned lv.q/sv.q is the write-back flag. An unrecorded PSP read
-     * (PSP-3000, 2026-11-08, issue #326, probe case vfpu-quad-wb, base $t2 = r10, 16-byte
-     * aligned; its register entry, PSP-VFPU-QUADWB-001, is not in this tree yet and is not
-     * a MEASURED row here) showed the flag does not change the base register in any form
-     * (offsets 0, +16, +32, -16; four stores in a row from one base did not drift) and
-     * that the access uses base + offset, as the plain word does. This pins that read in
-     * both lanes; it is not hardware evidence until the register entry lands. */
-    {
-        static const uint32_t offsets[4] = {0x0000u, 0x0010u, 0x0020u, 0xFFF0u};
-        const uint32_t base = 0x08004200u;
-        for (int k = 0; k < 4; k++) {
-            const uint32_t at = base + (uint32_t)(int32_t)(int16_t)offsets[k];
-            sr_mem_init();
-            setup_state(&s);
-            s.r[10] = base;
-            for (int i = 0; i < 4; i++) MEM_W32(at + (uint32_t)i * 4u, 0x5a5a0000u + (uint32_t)i);
-            fill_vi(&s, 0);
-            CHECK(sr_vfpu_interp(&s, lvq(10, 0, offsets[k]) | 2u) == SR_VFPU_COMPUTE,
-                  "lv.q with the write-back bit set loads");
-            CHECK(s.vi[0] == 0x5a5a0000u && s.vi[3] == 0x5a5a0003u && s.r[10] == base,
-                  "lv.q wb loads from base + offset and leaves the base register unchanged");
-            for (int i = 0; i < 4; i++) s.vi[i] = 0xc0de0000u + (uint32_t)i;
-            CHECK(sr_vfpu_interp(&s, svq(10, 0, offsets[k]) | 2u) == SR_VFPU_STATE,
-                  "sv.q with the write-back bit set stores");
-            CHECK(MEM_R32(at) == 0xc0de0000u && MEM_R32(at + 12u) == 0xc0de0003u && s.r[10] == base,
-                  "sv.q wb stores at base + offset and leaves the base register unchanged");
-        }
-        /* Four stores in a row from one base land in order and the base never drifts. */
-        sr_mem_init();
-        setup_state(&s);
-        s.r[10] = base;
-        for (int q = 0; q < 4; q++) {
-            for (int i = 0; i < 4; i++) s.vi[i] = 0xc0de0000u + ((uint32_t)q << 8) + (uint32_t)i;
-            CHECK(sr_vfpu_interp(&s, svq(10, 0, (uint32_t)q * 16u) | 2u) == SR_VFPU_STATE &&
-                  s.r[10] == base, "a run of sv.q wb from one base does not drift the base");
-        }
-        CHECK(MEM_R32(base) == 0xc0de0000u && MEM_R32(base + 16u) == 0xc0de0100u &&
-              MEM_R32(base + 32u) == 0xc0de0200u && MEM_R32(base + 60u) == 0xc0de0303u,
-              "a run of sv.q wb stores each quad at its own offset");
-    }
 
     /* 8. Left/right merge forms preflight their exact sub-span. The sub-span
      * always lies inside the aligned 16-byte window containing addr (the left
@@ -744,6 +747,57 @@ static uint32_t vf2i(unsigned mode, unsigned scale) {
            ((scale & 31u) << 16) | 1u;
 }
 
+static int find_overlap_diff_case(const char *name);
+
+/* PSP-VFPU-CONVERT-001 (PSP-3000, 2026-11-08, issue #326, probe case vfpu-convert, vf2in/vf2iz/
+ * vf2iu/vf2id.s at scale 0, both lanes): a denormal input of either sign converts as zero in all four modes,
+ * and a negative quiet NaN gives 0x7fffffff. The result must not depend on the host rounding mode. */
+static int check_vf2i_measured_cells(void) {
+    static const struct {
+        const char *name;
+        uint32_t input;
+        unsigned mode;
+        uint32_t expected;
+    } vectors[] = {
+        {"vf2in +denormal", 0x00000001u, 0u, 0x00000000u},
+        {"vf2in -denormal", 0x80000001u, 0u, 0x00000000u},
+        {"vf2iz +denormal", 0x00000001u, 1u, 0x00000000u},
+        {"vf2iz -denormal", 0x80000001u, 1u, 0x00000000u},
+        {"vf2iu +denormal not ceiled", 0x00000001u, 2u, 0x00000000u},
+        {"vf2iu -denormal", 0x80000001u, 2u, 0x00000000u},
+        {"vf2id +denormal", 0x00000001u, 3u, 0x00000000u},
+        {"vf2id -denormal not floored", 0x80000001u, 3u, 0x00000000u},
+        {"vf2in negative quiet NaN", 0xffc00000u, 0u, 0x7fffffffu},
+    };
+    static const int host_modes[] = {FE_TONEAREST, FE_DOWNWARD, FE_UPWARD, FE_TOWARDZERO};
+    static const char *const case_names[4] = {"vf2in-s-measured", "vf2iz-s-measured",
+                                              "vf2iu-s-measured", "vf2id-s-measured"};
+    CpuState s;
+    int bad = 0;
+    const int saved_mode = fegetround();
+    for (size_t m = 0; m < sizeof(host_modes) / sizeof(host_modes[0]); m++) {
+        CHECK(fesetround(host_modes[m]) == 0, "host rounding mode is available for the measured vf2i cells");
+        for (size_t i = 0; i < sizeof(vectors) / sizeof(vectors[0]); i++) {
+            const int c = find_overlap_diff_case(case_names[vectors[i].mode]);
+            CHECK(c >= 0 && overlap_diff_cases[c].w == vf2i(vectors[i].mode, 0u),
+                  "measured vf2i word is in the overlap-diff header");
+            if (c < 0) { bad = 1; continue; }
+            CpuState aot;
+            setup_identity_compute(&s);
+            s.vi[0] = vectors[i].input;
+            s.vi[4] = 0xa5a5a5a5u;
+            aot = s;
+            overlap_diff_run_codegen(&aot, c);
+            CHECK(sr_vfpu_interp(&s, vf2i(vectors[i].mode, 0u)) == SR_VFPU_COMPUTE,
+                  "measured vf2i cell executes through the interpreter");
+            CHECKB(bad, s.vi[4] == vectors[i].expected, vectors[i].name);
+            CHECKB(bad, aot.vi[4] == vectors[i].expected, vectors[i].name);
+        }
+    }
+    if (saved_mode != -1) (void)fesetround(saved_mode);
+    return bad;
+}
+
 static int check_vf2i_conversions(void) {
     static const struct {
         const char *name;
@@ -767,19 +821,7 @@ static int check_vf2i_conversions(void) {
         {"vf2in negative infinity", 0xff800000u, 0u, 0u, 0x80000000u},
         {"vf2in NaN", 0x7fc00000u, 0u, 0u, 0x7fffffffu},
         {"vf2in signaling NaN", 0x7f800001u, 0u, 0u, 0x7fffffffu},
-        /* Unrecorded PSP read (PSP-3000, 2026-11-08, issue #326, probe case vfpu-convert; its
-         * register entry is not in this tree yet): a denormal input of either sign converts
-         * as zero in all four modes, and either sign of NaN gives 0x7fffffff. */
-        {"vf2in +denormal", 0x00000001u, 0u, 0u, 0x00000000u},
-        {"vf2in -denormal", 0x80000001u, 0u, 0u, 0x00000000u},
-        {"vf2iz +denormal", 0x00000001u, 1u, 0u, 0x00000000u},
-        {"vf2iz -denormal", 0x80000001u, 1u, 0u, 0x00000000u},
-        {"vf2iu +denormal not ceiled", 0x00000001u, 2u, 0u, 0x00000000u},
-        {"vf2iu -denormal", 0x80000001u, 2u, 0u, 0x00000000u},
-        {"vf2id +denormal", 0x00000001u, 3u, 0u, 0x00000000u},
-        {"vf2id -denormal not floored", 0x80000001u, 3u, 0u, 0x00000000u},
         {"vf2iu largest denormal scaled", 0x007fffffu, 2u, 31u, 0x00000000u}, /* derived from the rule, not a probe cell */
-        {"vf2in negative quiet NaN", 0xffc00000u, 0u, 0u, 0x7fffffffu},
     };
     static const int host_modes[] = {
         FE_TONEAREST, FE_DOWNWARD, FE_UPWARD, FE_TOWARDZERO,
@@ -2065,7 +2107,7 @@ static int check_psp_measured_vfpu9(void) {
         {"vsgn.s -0", 0xd04a0405u, 0xe4u, {0x80000000u}, {0x00000000u}, 1, 1},
         {"vsgn.s -denormal", 0xd04a0020u, 0xe4u, {0x80000001u}, {0x00000000u}, 1, 0},
         {"vsgn.s -Inf", 0xd04a0020u, 0xe4u, {0xff800000u}, {0xbf800000u}, 1, 0},
-        /* vsgn.p/.t/.q (unrecorded PSP read, probe case vfpu-vus2i, PSP-3000, 2026-11-08,
+        /* vsgn.p/.t/.q (PSP-VFPU-VUS2I-001, probe case vfpu-vus2i, PSP-3000, 2026-11-08,
          * issue #326): the same rule at every width. The .p row is a probe cell; the .t and
          * .q rows mix lanes of different probe images and follow the rule (measured=0). */
         {"vsgn.p 2.5 -3.5", 0xd04a0088u, 0xe4u, {0x40200000u, 0xc0600000u},
@@ -2233,8 +2275,8 @@ static int check_vrexp2_measured_words(void) {
     return bad;
 }
 
-/* Unrecorded PSP read (PSP-3000, 2026-11-08, issue #326, probe case vfpu-cc-cmov; its
- * register entry is not in this tree yet): vcmp.q of C000 against C010 on the signed-zero and
+/* PSP-VFPU-CCCMOV-001 (PSP-3000, 2026-11-08, issue #326, probe case vfpu-cc-cmov, cells
+ * vcmp-c<hh>-q-p0/p1): vcmp.q of C000 against C010 on the signed-zero and
  * denormal operand set a = (+0, -0, +den, -den), b = (-0, +0, +0, +den), preset CC 0, read after
  * vsync. A denormal operand compares as a zero, so EQ/LE/GE are true on all four lanes and
  * LT/NE/GT are false; EZ is true and NZ false for all four. Both lanes run the same words. */
@@ -2268,8 +2310,8 @@ static int check_vcmp_denormal_operands(void) {
     return bad;
 }
 
-/* Unrecorded PSP read (PSP-3000, 2026-11-08, issue #326, probe case vfpu-basic-arith; its
- * register entry is not in this tree yet): vadd, vsub, vmul, vscl, vdiv.s, vmin and vmax over
+/* PSP-VFPU-BASICARITH-001 (PSP-3000, 2026-11-08, issue #326, probe case vfpu-basic-arith):
+ * vadd, vsub, vmul, vscl, vdiv.s, vmin and vmax over
  * 20 operand classes, all 400 ordered pairs, identical at .s/.p/.t/.q for every form but vdiv,
  * which was run at .s only; its .q case here follows the same lane rule. The reference
  * below states the measured rule; it matched every one of the 400 pairs of each form in the
@@ -2429,7 +2471,7 @@ static int check_vfpu_basic_arith_measured(void) {
     return bad;
 }
 
-/* Unrecorded PSP read (same probe as above): vmov, vabs and vneg are bitwise (NaN payloads, denormals
+/* PSP-VFPU-BASICARITH-001 (same probe as above): vmov, vabs and vneg are bitwise (NaN payloads, denormals
  * and -0 pass unchanged; vabs clears bit 31, vneg flips it), and vzero, vone and vidt write only the
  * lanes of the width (vidt.s wrote lane 0 = 1.0 without a fault; vidt.p = (1, 0); vidt.q =
  * (1, 0, 0, 0) for destination row 0), leaving the other lanes alone. */
@@ -2481,7 +2523,7 @@ static int check_vfpu_unary_arith_measured(void) {
     return bad;
 }
 
-/* vmscl.q (0xf2018488): each lane is a vmul lane. Unrecorded PSP reads (PSP-3000, 2026-11-08 and
+/* vmscl.q (0xf2018488): each lane is a vmul lane. PSP-VFPU-WIDEDOT-001 and PSP-VFPU-ROUNDSEP-001 (PSP-3000, 2026-11-08 and
  * 2026-11-09, issue #326, probe cases vfpu-wide-dot-matrix and vfpu-round-sep): a NaN operand or
  * 0 * Inf gives 0x7f800001 with the XOR of the operand signs, and an inexact product rounds to
  * nearest: 0x3fc00001 * 0x3fc00001 is 0x40100002, not the truncated 0x40100001. The scalar is the
@@ -2520,8 +2562,8 @@ static int check_vmscl_measured(void) {
     return bad;
 }
 
-/* Unrecorded PSP read (PSP-3000, 2026-11-08, issue #326, probe case vfpu-vus2i; its
- * register entry is not in this tree yet): vus2i.s/.p (half << 15) and vs2i.s/.p
+/* PSP-VFPU-VUS2I-001 (PSP-3000, 2026-11-08, issue #326, probe case vfpu-vus2i):
+ * vus2i.s/.p (half << 15) and vs2i.s/.p
  * (half << 16) over twelve source words, identity prefixes. The low half goes to the even
  * output lane; .p is two .s results in order. Both lanes run the probe's own words. */
 static int check_vus2i_vs2i_measured_words(void) {
@@ -3122,7 +3164,7 @@ static int check_vf_nan_rule(void) {
     return bad;
 }
 
-/* PSP-3000 reads of the dot, cross, quaternion and matrix forms (unrecorded PSP read,
+/* PSP-3000 reads of the dot, cross, quaternion and matrix forms (PSP-VFPU-WIDEDOT-001,
  * 2026-11-08, issue #326, probe case vfpu-wide-dot-matrix: vdot.p/.q, vhdp.q, vcrsp.t, vqmul.q,
  * vtfm4.q, vhtfm4.q, vmmul.q at identity prefixes, plus vmmov, vrot and the constant fills).
  * wd_stream holds cells of that run, each the form index, the source words, then the result
@@ -3490,7 +3532,7 @@ static int check_vfpu_wide_dot_quoted_cells(void) {
         {{0x3f800000u, 0xccbebc20u, 0x3f800000u, 0x4cbebc20u}, {0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u},
          0x00000000u, "the same terms in another order = 0"},
         /* Carry-out into the next binade rounds to nearest even (probe case vfpu-round-sep,
-         * also an unrecorded PSP read, PSP-3000, 2026-11-09, b = (1, 1, 1, 1) with the last lane of a
+         * also PSP-VFPU-ROUNDSEP-001, PSP-3000, 2026-11-09, b = (1, 1, 1, 1) with the last lane of a
          * zero unless listed). */
         {{0x3f800003u, 0x3f800000u, 0x00000000u, 0x00000000u}, {0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u},
          0x40000002u, "(1 + 3 ulp) + 1 rounds to nearest even at the carry-out"},
@@ -3696,6 +3738,7 @@ int main(void) {
     bad |= check_vfpu_cc_write_mask();
     bad |= check_vcmp_denormal_operands();
     bad |= check_quad_memops();
+    bad |= check_quad_wb_measured();
     bad |= check_vcrs_widths();
     bad |= check_vasin_measured_domain_words();
     bad |= check_vfpu_compare_measured_words();
@@ -3710,6 +3753,7 @@ int main(void) {
     bad |= check_vfpu3_compare_parity();
     bad |= check_vhdp_signed_zero_corpus();
     bad |= check_vf2i_conversions();
+    bad |= check_vf2i_measured_cells();
     bad |= check_vf_nan_rule();
     bad |= check_vfpu_wide_dot_measured();
     bad |= check_vfpu_wide_dot_quoted_cells();

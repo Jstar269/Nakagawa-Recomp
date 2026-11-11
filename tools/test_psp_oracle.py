@@ -64,6 +64,7 @@ from psp_oracle.run_psplink import (
     annotate_terminal_outcome,
     evaluate_teardown_snapshots,
     main as run_psplink_main,
+    write_ge_corpus_probe_runs,
     parse_psplink_meminfo,
     parse_psplink_module_list,
     parse_psplink_module_threads,
@@ -1085,7 +1086,12 @@ class GeCorpusGateTests(unittest.TestCase):
         self.assertIn("not present", self._report(completed)["cases"][0]["reason"])
 
     def test_schema_requires_a_record_reference_not_inline_raw_text(self) -> None:
-        envelope = self._schema()["$defs"]["case"]["properties"]["evidence_envelope"]
+        schema = self._schema()
+        self.assertEqual(schema["$defs"]["case"]["properties"]["evidence_envelope"],
+                         {"$ref": "#/$defs/evidence_envelope"})
+        self.assertEqual(schema["$defs"]["probe_run"]["properties"]["evidence_envelope"],
+                         {"$ref": "#/$defs/evidence_envelope"})
+        envelope = schema["$defs"]["evidence_envelope"]
         self.assertIn("RESULT_RECORD", envelope["required"])
         self.assertNotIn("RAW_RESULT", envelope["properties"])
         document = self._hardware_case(stream("psp"))
@@ -1134,6 +1140,233 @@ class GeCorpusGateTests(unittest.TestCase):
             capture_output=True, text=True, check=False)
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("must be assets/ge_corpus.schema.json", completed.stderr)
+
+    # ---- probe runs: the measured ge-raster, ge-weight and ge-rtt results (#343) ----
+
+    def test_probe_runs_are_the_three_measured_probes_in_order(self) -> None:
+        runs = self.corpus["probe_runs"]
+        self.assertEqual([run["probe_case"] for run in runs], list(parse_golden.GE_CORPUS_PROBES))
+        manifest = json.loads(
+            (self.root / "tools" / "psp_oracle" / "manifest.json").read_text(encoding="utf-8"))
+        entries = {entry["id"]: entry for entry in manifest["tests"]}
+        for run in runs:
+            test_id, cells, suffixes = parse_golden.GE_CORPUS_PROBES[run["probe_case"]]
+            self.assertEqual(run["test_id"], test_id)
+            self.assertEqual(tuple(cell["cell"] for cell in run["cells"]), cells)
+            for cell in run["cells"]:
+                self.assertEqual([record["case_id"] for record in cell["records"]],
+                                 [f"{cell['cell']}-{suffix}" for suffix in suffixes])
+            # The run each corpus entry cites is the measurement the manifest records.
+            self.assertEqual(entries[test_id]["hardware_evidence"], "MEASURED")
+            self.assertIn(f"of commit {run['evidence_envelope']['SOURCE_COMMIT'][:8]}",
+                          entries[test_id]["measurement_note"])
+
+    def test_raster_window_digests_are_the_selftest_psp_table(self) -> None:
+        selftest = (self.root / "tests" / "native" / "hle_thread_selftest.c").read_text(encoding="utf-8")
+        table = selftest[selftest.index("} s_gr_psp[GR_CELL_COUNT] = {"):]
+        table = table[:table.index("\n};")]
+        pinned = re.findall(r'\{"([a-z0-9-]+)", (0x[0-9a-f]{16})ull\}', table)
+        raster = self.corpus["probe_runs"][0]
+        self.assertEqual(raster["test_id"], "PSP-GE-RASTER-001")
+        self.assertEqual([(cell["cell"], cell["window_fnv1a64"]) for cell in raster["cells"]], pinned)
+
+    def test_probe_runs_pass_the_public_checks_and_need_the_record_to_be_measured(self) -> None:
+        report = ge_corpus_report(self.corpus, self._schema(), None)
+        self.assertEqual(report["status"], "IN_THE_WORKS")
+        self.assertEqual([item["status"] for item in report["probe_runs"]], ["NOT_RUN"] * 3)
+
+    def test_a_changed_pixel_breaks_the_window_digest(self) -> None:
+        document = json.loads(json.dumps(self.corpus))
+        record = document["probe_runs"][1]["cells"][3]["records"][5]
+        head = "00000000" if record["words"].startswith("ffffffff") else "ffffffff"
+        record["words"] = head + record["words"][8:]
+        result = ge_corpus_report(document, self._schema(), None)
+        self.assertEqual(result["status"], "REFUSED")
+        self.assertIn("window_fnv1a64: is not the digest", result["probe_runs"][1]["reason"])
+
+    def test_a_dropped_or_moved_cell_or_record_is_refused(self) -> None:
+        dropped = json.loads(json.dumps(self.corpus))
+        del dropped["probe_runs"][2]["cells"][4]
+        moved = json.loads(json.dumps(self.corpus))
+        cells = moved["probe_runs"][0]["cells"]
+        cells[0], cells[1] = cells[1], cells[0]
+        renamed = json.loads(json.dumps(self.corpus))
+        renamed["probe_runs"][2]["cells"][0]["records"][0]["case_id"] = "cpu-r0"
+        swapped = json.loads(json.dumps(self.corpus))
+        swapped["probe_runs"][0]["test_id"] = "PSP-GE-RTT-001"
+        for document, needle in ((dropped, "cells in stream order"), (moved, "cells in stream order"),
+                                 (renamed, "must be cpu-t0"), (swapped, "records PSP-GE-RASTER-001")):
+            with self.subTest(needle=needle):
+                result = ge_corpus_report(document, self._schema(), None)
+                self.assertEqual(result["status"], "REFUSED")
+                self.assertIn(needle, " ".join(item["reason"] for item in result["probe_runs"]))
+
+    @staticmethod
+    def _rtt_stream(word: int = 0) -> str:
+        spec, counts = CAMPAIGN_PROBE_CASES["ge-rtt"]
+        lines = [META.format(source="psp", model="PSP-3000", firmware="6.61-ARK",
+                             binary=MEASURED_SHA, commit=MEASURED_COMMIT)]
+        for index, case in enumerate(spec.semantic_cases):
+            outs = " ".join(f"out{i}=0x{(index * 0x10001 + i * 0x101 + word) & 0xffffffff:08x}"
+                            for i in range(counts[case]))
+            lines.append(f"NAKAGAWA_PSP_TEST schema=1 test_id=PSP-GE-RTT-001 case_id={case} "
+                         f"status=PASS result=0x00000000 {outs}\n")
+        lines.append("NAKAGAWA_PSP_TEST schema=1 test_id=PSP-GE-RTT-001 case_id=ge-rtt-done "
+                     f"status=PASS result=0x00000000 out0=0x{len(spec.semantic_cases):08x}\n")
+        return "".join(lines)
+
+    @staticmethod
+    def _rtt_runner_report(scratch: Path, raw: str, **changes: Any) -> Path:
+        envelope = {"CASE_ID": "ge-rtt", "EVIDENCE_CLASS": "PSP_HARDWARE", "ACCEPTANCE_ELIGIBLE": True,
+                    "QUALIFICATION_STATUS": "QUALIFIED", "ACCEPTANCE_BLOCKERS": [],
+                    "PHYSICAL_MODEL_LABEL": "PSP-3000", "FW": "6.61-ARK",
+                    "SOURCE_COMMIT": MEASURED_COMMIT, "BINARY_SHA256": MEASURED_SHA,
+                    "RAW_RESULT": raw, **changes}
+        path = scratch / "runner.json"
+        path.write_text(json.dumps({"envelopes": [{"CASE_ID": "transport-write"}, envelope]}),
+                        encoding="utf-8")
+        return path
+
+    def _scratch_corpus(self, scratch: Path) -> Path:
+        document = json.loads(json.dumps(self.corpus))
+        del document["probe_runs"]
+        path = scratch / "corpus.json"
+        path.write_text(json.dumps(document), encoding="utf-8")
+        return path
+
+    def test_writer_writes_a_run_the_gate_rederives_from_its_record(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ge-corpus-write-") as scratch_text:
+            scratch = Path(scratch_text)
+            results = scratch / "results"
+            corpus_path = self._scratch_corpus(scratch)
+            schema_path = self.root / "assets" / "ge_corpus.schema.json"
+            raw = self._rtt_stream()
+            report = write_ge_corpus_probe_runs(
+                corpus_path, schema_path, [self._rtt_runner_report(scratch, raw)], results)
+            self.assertEqual(report["probe_runs"], [{
+                "test_id": "PSP-GE-RTT-001", "status": "MEASURED",
+                "reason": "acceptance-eligible PSP_HARDWARE record gives all 9 cells of "
+                          "PSP-GE-RTT-001 exactly."}])
+            written = json.loads(corpus_path.read_text(encoding="utf-8"))
+            run = written["probe_runs"][0]
+            record_ref = run["evidence_envelope"]["RESULT_RECORD"]
+            self.assertEqual(record_ref, {
+                "path": f"ge-corpus/PSP-GE-RTT-001-{MEASURED_COMMIT[:12]}.txt",
+                "sha256": hashlib.sha256(raw.encode("utf-8")).hexdigest()})
+            self.assertEqual((results / record_ref["path"]).read_text(encoding="utf-8"), raw)
+            self.assertEqual(run["cells"][0]["records"][0]["words"],
+                             " ".join(f"{(1 * 0x10001 + i * 0x101):08x}" for i in range(16)))
+            # A corpus row that is not the record's, with its digest made consistent, is refused.
+            edited = json.loads(json.dumps(written))
+            cell = edited["probe_runs"][0]["cells"][1]
+            cell["records"][3]["words"] = "0" * 8 + cell["records"][3]["words"][8:]
+            cell["window_fnv1a64"] = parse_golden.ge_window_fnv1a64(
+                record["words"] for record in cell["records"][1:])
+            result = ge_corpus_report(edited, self._schema(), results)["probe_runs"][0]
+            self.assertEqual(result["status"], "REFUSED")
+            self.assertIn("corpus cell flush differs from the result record", result["reason"])
+            # A record that is not the one the envelope names is refused.
+            (results / record_ref["path"]).write_text(self._rtt_stream(word=1), encoding="utf-8",
+                                                      newline="")
+            result = ge_corpus_report(written, self._schema(), results)["probe_runs"][0]
+            self.assertEqual(result["status"], "REFUSED")
+            self.assertIn("sha256 does not match", result["reason"])
+
+    def test_writer_refuses_a_run_that_is_not_accepted_hardware(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ge-corpus-write-") as scratch_text:
+            scratch = Path(scratch_text)
+            corpus_path = self._scratch_corpus(scratch)
+            before = corpus_path.read_text(encoding="utf-8")
+            schema_path = self.root / "assets" / "ge_corpus.schema.json"
+            raw = self._rtt_stream()
+            partial = raw[:raw.index("case_id=warm-noflush-draw")].rsplit("\n", 1)[0] + "\n"
+            failed = raw.replace("case_id=cpu-r0 status=PASS", "case_id=cpu-r0 status=FAIL")
+            for changes, text, needle in (
+                    ({"ACCEPTANCE_ELIGIBLE": False}, raw, "acceptance-eligible"),
+                    ({"QUALIFICATION_STATUS": "UNQUALIFIED"}, raw, "acceptance-eligible"),
+                    ({"ACCEPTANCE_BLOCKERS": ["stale log"]}, raw, "acceptance-eligible"),
+                    ({"EVIDENCE_CLASS": "UNQUALIFIED_CAPTURE"}, raw, "acceptance-eligible"),
+                    ({"PHYSICAL_MODEL_LABEL": "PSP-2000"}, raw, "PHYSICAL_MODEL_LABEL"),
+                    ({"FW": "6.60"}, raw, "envelope's FW"),
+                    ({"SOURCE_COMMIT": "c" * 40}, raw, "envelope's SOURCE_COMMIT"),
+                    ({"BINARY_SHA256": "c" * 64}, raw, "envelope's BINARY_SHA256"),
+                    ({}, partial, "stream incomplete"), ({}, failed, "all PASS")):
+                with self.subTest(changes=changes, needle=needle):
+                    with self.assertRaises(ProtocolError) as caught:
+                        write_ge_corpus_probe_runs(
+                            corpus_path, schema_path,
+                            [self._rtt_runner_report(scratch, text, **changes)], scratch / "results")
+                    self.assertIn(needle, str(caught.exception))
+            self.assertEqual(corpus_path.read_text(encoding="utf-8"), before)
+            self.assertFalse((scratch / "results").exists())
+
+    def test_a_refused_write_keeps_the_records_already_there(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ge-corpus-write-") as scratch_text:
+            scratch = Path(scratch_text)
+            results = scratch / "results"
+            corpus_path = self._scratch_corpus(scratch)
+            schema_path = self.root / "assets" / "ge_corpus.schema.json"
+            raw = self._rtt_stream()
+            write_ge_corpus_probe_runs(
+                corpus_path, schema_path, [self._rtt_runner_report(scratch, raw)], results)
+            written = corpus_path.read_text(encoding="utf-8")
+            record = results / "ge-corpus" / f"PSP-GE-RTT-001-{MEASURED_COMMIT[:12]}.txt"
+            # The same commit with other words would replace the record behind a measured run.
+            other = scratch / "other"
+            other.mkdir()
+            with self.assertRaisesRegex(ProtocolError, "already holds a different result record"):
+                write_ge_corpus_probe_runs(
+                    corpus_path, schema_path,
+                    [self._rtt_runner_report(other, self._rtt_stream(word=1))], results)
+            self.assertEqual(record.read_text(encoding="utf-8"), raw)
+            self.assertEqual(corpus_path.read_text(encoding="utf-8"), written)
+            # Rewriting the identical run is allowed and leaves both in place.
+            write_ge_corpus_probe_runs(
+                corpus_path, schema_path, [self._rtt_runner_report(scratch, raw)], results)
+            self.assertEqual(corpus_path.read_text(encoding="utf-8"), written)
+            # A corpus the gate refuses elsewhere is not written, and a new record is removed again.
+            document = json.loads(written)
+            document["cases"][0]["source_tier"] = "PSP_HARDWARE"
+            corpus_path.write_text(json.dumps(document), encoding="utf-8")
+            refused = corpus_path.read_text(encoding="utf-8")
+            new_commit = "d" * 40
+            new_raw = self._rtt_stream().replace(MEASURED_COMMIT, new_commit)
+            with self.assertRaisesRegex(ProtocolError, "the gate refuses the corpus"):
+                write_ge_corpus_probe_runs(
+                    corpus_path, schema_path,
+                    [self._rtt_runner_report(other, new_raw, SOURCE_COMMIT=new_commit)], results)
+            self.assertEqual(corpus_path.read_text(encoding="utf-8"), refused)
+            self.assertEqual(sorted(path.name for path in (results / "ge-corpus").iterdir()),
+                             [record.name])
+            # The same refusal for the identical run removes nothing it did not create.
+            with self.assertRaisesRegex(ProtocolError, "the gate refuses the corpus"):
+                write_ge_corpus_probe_runs(
+                    corpus_path, schema_path, [self._rtt_runner_report(scratch, raw)], results)
+            self.assertEqual(record.read_text(encoding="utf-8"), raw)
+            self.assertEqual(corpus_path.read_text(encoding="utf-8"), refused)
+            # Two reports of one probe in a single write are refused before anything is written.
+            corpus_path.write_text(written, encoding="utf-8")
+            with self.assertRaisesRegex(ProtocolError, "a second ge-rtt run in one write"):
+                write_ge_corpus_probe_runs(
+                    corpus_path, schema_path,
+                    [self._rtt_runner_report(scratch, raw),
+                     self._rtt_runner_report(other, new_raw, SOURCE_COMMIT=new_commit)], results)
+            self.assertEqual(sorted(path.name for path in (results / "ge-corpus").iterdir()),
+                             [record.name])
+
+    def test_a_raster_digest_its_rows_do_not_give_is_refused(self) -> None:
+        spec, counts = CAMPAIGN_PROBE_CASES["ge-raster"]
+        lines = [META.format(source="psp", model="PSP-3000", firmware="6.61-ARK",
+                             binary=MEASURED_SHA, commit=MEASURED_COMMIT)]
+        for case in spec.semantic_cases:
+            outs = " ".join(f"out{i}=0x00000000" for i in range(counts[case]))
+            lines.append(f"NAKAGAWA_PSP_TEST schema=1 test_id=PSP-GE-RASTER-001 case_id={case} "
+                         f"status=PASS result=0x00000000 {outs}\n")
+        lines.append("NAKAGAWA_PSP_TEST schema=1 test_id=PSP-GE-RASTER-001 case_id=ge-raster-done "
+                     f"status=PASS result=0x00000000 out0=0x{len(spec.semantic_cases):08x}\n")
+        sequence = parse_golden.parse_campaign_probe_output("".join(lines), "ge-raster")
+        with self.assertRaisesRegex(ProtocolError, "b-sa-isa reports window digest 0x0000000000000000"):
+            parse_golden.ge_corpus_cells(sequence, "ge-raster")
 
     def test_schema_violation_is_refused_with_case_field_name(self) -> None:
         document = json.loads(json.dumps(self.corpus))
@@ -2501,7 +2734,7 @@ class PspOracleBuildRouteTests(unittest.TestCase):
         )
         # Sequential probe.c and HLE cases use distinct numbered ranges. The count and
         # the id set are exact: a probe PR bumps both, and an accidental removal fails here.
-        self.assertEqual(len(routes), 159)
+        self.assertEqual(len(routes), 160)
         names = [name for name, _ in routes]
         ids = [int(case_id) for _, case_id in routes]
         self.assertEqual(len(names), len(set(names)))
@@ -2510,7 +2743,7 @@ class PspOracleBuildRouteTests(unittest.TestCase):
                          | {110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126,
                             127}
                          | {128, 129, 130, 132, 133, 134, 135, 136, 137, 138, 139, 140}
-                         | {150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 167, 168, 169, 170, 171, 172, 173, 174, 175, 176, 181, 182, 183, 184, 185},
+                         | {150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 167, 168, 169, 170, 171, 172, 173, 174, 175, 176, 181, 182, 183, 184, 185, 186},
                          set(ids))
         self.assertNotIn("psp_b1_imports.S", self.makefile)
         self.assertNotIn("psp_b2_imports.S", self.makefile)
@@ -2602,6 +2835,7 @@ class PspOracleBuildRouteTests(unittest.TestCase):
             self.assertIn(call, section)
         self.assertIn('"sas-adsr-done", sascore_ok ? "PASS" : "SKIP"', section)
         self.assertNotIn('"RC"', section)
+        self._assert_sas_case_unloads_its_av_modules(section, "sas-adsr-done")
         # The registered stream follows the source tables: 9 pairs of 1024 grains, 32 mode rows
         # and the explicit runs in order, 695 records before the done record, held to a strict
         # golden sequence.
@@ -2631,6 +2865,18 @@ class PspOracleBuildRouteTests(unittest.TestCase):
         self.assertEqual(counts["sas-adsr-m00-calls"], 16)
         self.assertEqual(counts["sas-adsr-load"], 4)
 
+    def _assert_sas_case_unloads_its_av_modules(self, section: str, done_case: str) -> None:
+        # The runner's teardown check compares the module set after the probe's unload with the
+        # one before the launch; SASCORE and AVCODEC left loaded made every capture of these
+        # cases unqualified. Both are unloaded, newest first, after the done record and before
+        # the park.
+        done = section.index(f'"{done_case}"')
+        sascore = section.index("sceUtilityUnloadAvModule(PSP_AV_MODULE_SASCORE)", done)
+        avcodec = section.index("sceUtilityUnloadAvModule(PSP_AV_MODULE_AVCODEC)", done)
+        park = section.index('"park"', done)
+        self.assertLess(sascore, avcodec)
+        self.assertLess(avcodec, park)
+
     def test_sas_mix_case_links_sascore_and_records_every_cell(self) -> None:
         # The case's own LIBS block links the SAS and utility stubs (#2135, #2054).
         block = re.search(r"(?ms)^ifeq \(\$\(CASE\),sas-mix\)\n(.*?)^endif$", self.makefile)
@@ -2658,6 +2904,7 @@ class PspOracleBuildRouteTests(unittest.TestCase):
         self.assertEqual(len(set(edges)), 12)
         self.assertIn('"sas-mix-done", sascore_ok ? "PASS" : "SKIP"', section)
         self.assertNotIn('"RC"', section)
+        self._assert_sas_case_unloads_its_av_modules(section, "sas-mix-done")
         # The registered stream follows the source tables: their names in order, 204 records
         # before the done record, which the runner holds to a strict golden sequence.
         spec, counts = CAMPAIGN_PROBE_CASES["sas-mix"]
@@ -3495,6 +3742,9 @@ class PspDmacProbeTests(unittest.TestCase):
                 "PSP-VFPU-BASICARITH-001", "PSP-VFPU-VUS2I-001",
                 # The 2026-11-08 acceptance-eligible hle-self-stop-unload (#341, boot 165) run.
                 "PSP-HLE-SELFSTOP-001",
+                # The 2026-11-11 acceptance-eligible hle-io-seek-edges (#1380, boot 192, ARK-5
+                # 5.2.0) run of 1a5157e37.
+                "PSP-HLE-IO-SEEK-002",
                 # The 2026-11-10 acceptance-eligible hle-issues-batch (#326, #356, boot 172) and
                 # hle-kernel-pool-bounds (boot 173) runs of 979c6a1dd.
                 "PSP-HLE-ISSUES-001", "PSP-HLE-KERNEL-STATUS-002",
@@ -5422,6 +5672,9 @@ class HleMeasureProbeTests(unittest.TestCase):
          "HLE_CASE_UTILITY_DIALOGS", "PSP-HLE-UTILITY-DIALOG-001"),
         ("hle-io-seek", 162, "hle_io_seek", None,
          "HLE_CASE_IO_SEEK", "PSP-HLE-IO-SEEK-001"),
+        # #1380's cells hle-io-seek left open: flash0: SEEK_CUR and past-2^32 seeks, ms0: flags.
+        ("hle-io-seek-edges", 186, "hle_io_seek_edges", None,
+         "HLE_CASE_IO_SEEK_EDGES", "PSP-HLE-IO-SEEK-002"),
         ("hle-nickname-limit", 164, "hle_nickname_limit", "hle_utility_imports.S",
          "HLE_CASE_NICKNAME_LIMIT", "PSP-HLE-NICKNAME-001"),
         # #341 part 2: loads the helper PRX of case 172 (probe_hle_self_stop_helper.c).
@@ -5545,6 +5798,8 @@ class HleMeasureProbeTests(unittest.TestCase):
         "sceIoDopen", "sceIoDread", "sceIoDclose", "sceIoRmdir",
         # hle-io-seek: the seeks, the ioctl and the probe-owned ms0: directory.
         "sceIoLseek", "sceIoLseek32", "sceIoIoctl", "sceIoMkdir",
+        # hle-io-seek-edges: the async write on a read-only descriptor and its bounded poll.
+        "sceIoWriteAsync", "sceIoPollAsync", "sceIoWaitAsync",
         "sceNetInit", "sceNetTerm", "sceNetInetInit", "sceNetInetTerm",
         "sceNetApctlInit", "sceNetApctlTerm", "sceNetAdhocInit", "sceNetAdhocTerm",
         "sceNetAdhocctlInit", "sceNetAdhocctlTerm",
@@ -5980,7 +6235,10 @@ class HleMeasureProbeTests(unittest.TestCase):
                           "s_ud_path",
                           # hle-io-seek: the probe-owned ms0: file, the same file once more on
                           # its setup failure, and the file its RDONLY|CREAT cell may create.
-                          "HLE_IS_FILE", "HLE_IS_FILE", "HLE_IS_MISSING"])
+                          "HLE_IS_FILE", "HLE_IS_FILE", "HLE_IS_MISSING",
+                          # hle-io-seek-edges: its ms0: file on a setup failure, the file the
+                          # RDONLY|CREAT|EXCL cell created (only when it exists), then cleanup.
+                          "HLE_ISE_FILE", "HLE_ISE_MISSING", "HLE_ISE_FILE", "HLE_ISE_MISSING"])
         issues = (self.fixture / "probe_hle_issues.c").read_text(encoding="utf-8")
         self.assertNotRegex(issues, r"\bsceIoRemove\s*\(")
 
@@ -7692,7 +7950,8 @@ class HleIssuesProbeTests(unittest.TestCase):
 
     def test_pass_only_cases_reject_fail_and_skip_rows(self) -> None:
         helper = HleMeasureProbeTests("test_case_ids_are_registered_once_and_match_the_families")
-        for case in ("hle-io-seek", "hle-nickname-limit", "hle-self-stop-unload", "vfpu-quad-wb"):
+        for case in ("hle-io-seek", "hle-io-seek-edges", "hle-nickname-limit",
+                     "hle-self-stop-unload", "vfpu-quad-wb"):
             spec, counts = CAMPAIGN_PROBE_CASES[case]
             clean = helper._stream(case)
             self.assertTrue(parse_campaign_probe_output(helper._body(clean), case).complete)
@@ -15863,6 +16122,7 @@ class Record20261015Tests(unittest.TestCase):
             ("sas-mix", "PSP-SAS-003", "CAPTURED"),
             ("vcodec-words", "PSP-VCODEC-001", "NOT_RUN"),
             ("hle-utility-dialogs", "PSP-HLE-UTILITY-DIALOG-001", "NOT_RUN"),
+            ("hle-io-seek-edges", "PSP-HLE-IO-SEEK-002", "MEASURED"),
             ("mpeg-ycbcr", "PSP-MPEG-YCBCR-001", "NOT_RUN"),
         )
         docs = {row[0]: row for row in self._table_rows(self.doc) if len(row) == 4}
@@ -15874,6 +16134,28 @@ class Record20261015Tests(unittest.TestCase):
                 self.assertEqual(readme[case][1], test_id)
                 self.assertIn(status, readme[case][2])
                 self.assertEqual(self.rows[test_id]["hardware_evidence"], status)
+
+    def test_the_io_seek_edges_run_is_measured_on_ark_5_2_0(self) -> None:
+        row = self.rows["PSP-HLE-IO-SEEK-002"]
+        self.assertEqual(row["hardware_evidence"], "MEASURED")
+        self.assertNotIn("evidence_note", row)
+        note = row["measurement_note"]
+        for term in ("2026-11-11", "PSP-3000", "boot 192", "XMB context", "1a5157e37",
+                     "ARK-5 5.2.0", "7a0035d9", "acceptance-eligible with 0 blockers",
+                     "0x80020323", "0x80010016", "queues nothing"):
+            self.assertIn(term, note)
+        self.assertIn("- **PSP-3000 single-case run of `hle-io-seek-edges` (2026-11-11 UTC)**", self.doc)
+
+    def test_the_sas_mix_second_capture_keeps_it_captured(self) -> None:
+        row = self.rows["PSP-SAS-003"]
+        self.assertEqual(row["hardware_evidence"], "CAPTURED")
+        self.assertNotIn("measurement_note", row)
+        note = row["evidence_note"]
+        for term in ("2026-11-11", "boot 191", "a39f7a14c", "ARK-5 5.2.0", "same 205 records",
+                     "unloads SASCORE, then AVCODEC", "no such rerun has been made"):
+            self.assertIn(term, note)
+        self.assertNotIn("on purpose", note)
+        self.assertNotIn("on purpose", self.rows["PSP-SAS-002"]["evidence_note"])
 
     def test_the_sas_adsr_capture_is_captured_with_its_blocker(self) -> None:
         row = self.rows["PSP-SAS-002"]

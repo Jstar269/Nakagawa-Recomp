@@ -21,28 +21,51 @@ same sense as
 
 ## GE raster pixel corpus (#343)
 
-`assets/ge_corpus.schema.json` defines version 1 of the source-owned GE case corpus. The first
-case is an untextured solid triangle in a 16×16 8888 framebuffer. Its selected pixels and full
-framebuffer digest are deliberately unset until a qualified PSP run records them. The case uses
-the PSP GE command word layout; address operands are explicit relocations to its source-owned
-vertex words. A result records `framebuffer_sha256` and one `pixel_<x>_<y>` value for each selected
-coordinate, packed according to the case framebuffer format.
+`assets/ge_corpus.schema.json` defines version 2 of the source-owned GE corpus,
+`fixtures/psp_oracle/ge_corpus.json`. It has two parts.
 
-The measured raster corpus is the `ge-raster` probe (`PSP-GE-RASTER-001`, in the measured index
-below): 189 cells whose window digests `tests/native/hle_thread_selftest.c` compares with the software GE. The schema corpus below does not cite
-those runs yet.
+`probe_runs` holds the measured results of the three #343 probes in `probe_ge_sample.c`, one
+acceptance-eligible PSP-3000 run each (see the measured index below): `ge-raster`
+(`PSP-GE-RASTER-001`, 189 cells, a 16x4 window each), `ge-weight` (`PSP-GE-WEIGHT-001`, 16 cells,
+a 16x17 window each) and `ge-rtt` (`PSP-GE-RTT-001`, 9 cells, the CPU's read of the target's first
+row and a 16x12 window each). Per cell it keeps every record except `-draw` (the GE wait outcome
+and timings), as the sixteen words the PSP reported, and the window's FNV-1a 64 digest over its
+`rN` rows. For `ge-raster` that digest is the one the PSP computed, and
+`test_ge_raster_cells_match_psp` in `tests/native/hle_thread_selftest.c` compares the software GE
+with the same values (`tools/test_psp_oracle.py` keeps the two in step). Each run's envelope names
+its runner commit, model, firmware and PRX digest, and its `RESULT_RECORD` names the private raw
+stream.
+
+`cases` holds command-word cases. The first is an untextured solid triangle in a 16×16 8888
+framebuffer. Its selected pixels and full framebuffer digest are deliberately unset until a
+qualified PSP run records them. The case uses the PSP GE command word layout; address operands are
+explicit relocations to its source-owned vertex words. A result records `framebuffer_sha256` and
+one `pixel_<x>_<y>` value for each selected coordinate, packed according to the case framebuffer
+format.
+
+`python tools/psp_oracle/run_psplink.py --ge-corpus-write RUN_REPORT...` writes a probe run from
+the runner's report of a `ge-raster`, `ge-weight` or `ge-rtt` launch. It takes only a qualified,
+acceptance-eligible `PSP_HARDWARE` envelope with no blockers whose raw result is a complete stream
+with every record `PASS` (and, for `ge-raster`, whose reported digests match their rows), and whose
+model, firmware, source commit and PRX SHA-256 are the envelope's. It checks every report before it
+writes anything. It stores each raw result as `ge-corpus/<test id>-<first 12 digits of the
+commit>.txt` in the private results directory and never replaces a record with different bytes. It
+writes the corpus only when the gate then refuses nothing and reports each written run `MEASURED`;
+otherwise it removes the records it created.
 
 Run `python tools/psp_oracle/run_psplink.py --ge-corpus-gate` to validate the corpus and report each
-case. A case is `MEASURED` only when its source tier is `PSP_HARDWARE`, the oracle envelope is
-acceptance-eligible, and the raw result protocol identifies `source=psp`. The public corpus never
-inlines raw hardware result text: its envelope's `RESULT_RECORD` names a file under the private
-results directory (`--results-directory`, default `oracle/hardware-results/`) by relative path and
-SHA-256, and the gate verifies that file. Without that directory a hardware claim reports
-`NOT_RUN`, never `MEASURED`. Software, Vulkan, or
-PPSSPP data cannot be promoted by setting a hardware label. The current case reports `NOT_RUN`.
-**GE raster pixel conformance is partial (#343, open):** the
-`ge-raster` cells are measured; the schema corpus case, the Vulkan comparison and the families no cell covers
-are not.
+case and probe run. A case is `MEASURED` only when its source tier is `PSP_HARDWARE`, the oracle
+envelope is acceptance-eligible, and the raw result protocol identifies `source=psp`; a probe run
+is `MEASURED` only when its raw result, identity included, gives every one of its cells exactly. The
+public corpus never inlines raw hardware result text: its envelope's `RESULT_RECORD` names a file
+under the private results directory (`--results-directory`, default `oracle/hardware-results/`) by
+relative path and SHA-256, and the gate verifies that file. Without that directory a hardware
+claim reports `NOT_RUN`, never `MEASURED`; the public checks (cell names and order, record names,
+window digests) still run. Software, Vulkan, or PPSSPP data cannot be promoted by setting a
+hardware label. The current command-word case reports `NOT_RUN`.
+**GE raster pixel conformance is partial (#343, open):** the `ge-raster`, `ge-weight` and
+`ge-rtt` cells are measured and in the corpus; the command-word case, the Vulkan comparison and
+the families no cell covers are not.
 
 ## Measured to date (index — exact cells only, do not generalize)
 
@@ -1374,6 +1397,43 @@ One console is one data point; see §11. Nothing here closes issue #70
   - *Unmeasured:* T32 textures, and whether the per-level offset is added before or after the index mask
     (every index the cells mask is below the offset). The software sampler (`clut_index` in `src/rt/ge.c`)
     reads t at every level of a T32 texture, as for T16, and adds the offset after the mask.
+
+- **PSP-3000 single-case run of `hle-io-seek-edges` (2026-11-11 UTC)**: one PSP-3000, XMB context, one launch on
+  its own boot (boot 192) after the `transport-write` preflight (PSP-TRANSPORT-001 is not re-cited). Firmware
+  identity: console PSP-3000; system software 6.61 (operator-declared; `flash0:/vsh/etc/version.txt` read
+  `release:6.61:` on 2026-11-10, before the custom firmware update); PSPLink `pspver` printed `0x06060010` ("6.6.0")
+  in the XMB context on this boot, which the runner records as 6.6.0; custom firmware ARK-5 with cIPL, version 5.2.0
+  (operator-declared, updated from 5.1.0 on 2026-11-10, not read by a tool); PSPLink v3.2.1 built from
+  `pspdev/psplinkusb` `7a0035d9` on the host and the console. `hle-io-seek-edges` (case 186,
+  `fixtures/psp_oracle/probe_hle_measure.c`) at `1a5157e37`, 23 records and the done record. The envelope is
+  acceptance-eligible with 0 blockers (evidence class `PSP_HARDWARE`), every record is PASS, the stream ends
+  COMPLETE PASS, and the PSP stayed qualified on boot 192 afterwards. The probe created its own `ms0:/NKIOSK02`
+  and removed it (the check after removal opened nothing, `0x80010002`). The raw envelope and host0 log stay in
+  the private campaign directory.
+
+  | Evidence id | Cells cited | Not cited | Outcome (2026-11-11) |
+  | --- | --- | --- | --- |
+  | `PSP-HLE-IO-SEEK-002` | `io-edge-flash-*`, `io-edge-ms-*`, `hle-io-seek-edges-done` (boot 192) | other flash0 files, other devices, descriptors opened for writing, an asynchronous write that is queued (none was) | MEASURED: 23 records and the done record, all PASS |
+
+  What the cells establish, for `flash0:/font/ltn0.pgf` opened `PSP_O_RDONLY` and a probe-owned Memory Stick file
+  only. The position was 8 before every seek.
+  - *Refused seeks.* All 14 out-of-range seeks return `0x80010016` and leave the position at 8: 64-bit `SEEK_CUR`
+    -9, to size+16, to `0xFFFFFFFF` and to `0x100000000`; 32-bit `sceIoLseek32` `SEEK_CUR` -9 and to size+16;
+    64-bit `SEEK_SET` `0x100000001`, `0x200000000`, `0x7FFFFFFFFFFFFFFF`, `0x7FFFFFFF`, `0x80000000` and
+    `0xFFFFFFFE`; 64-bit `SEEK_END` to `0xFFFFFFFF` and to `0x100000000`. `SEEK_SET` `0x10000` succeeds (returns
+    `0x10000`, position `0x10000`).
+  - *High word of a refused 64-bit seek.* `0xffffffff` (the error sign-extended) for `SEEK_CUR` -9, `SEEK_CUR` to
+    size+16 and `SEEK_SET` `0x7FFFFFFF`; `0` for the other nine 64-bit refusals (every target at or above
+    `0x80000000` reached by `SEEK_SET`, `SEEK_CUR` or `SEEK_END`). With the `hle-io-seek` cells this fits a
+    refusal whose high word is 0 exactly when the requested target is at or above `0x80000000`.
+  - *`PSP_O_RDONLY|PSP_O_CREAT` on an existing file* opens it; a 4-byte `sceIoWrite` returns `0x80020323`, the
+    close returns 0, and the file is unchanged.
+  - *`PSP_O_RDONLY|PSP_O_CREAT|PSP_O_TRUNC` on an existing file* is refused with `0x80010016`; the file keeps its
+    16 bytes.
+  - *`PSP_O_RDONLY|PSP_O_CREAT|PSP_O_EXCL` on a missing name* is refused with `0x80010016`; nothing is created
+    (`sceIoGetstat` `0x80010002`).
+  - *`sceIoWriteAsync` of 4 bytes on a `PSP_O_RDONLY` descriptor* returns `0x80020323` at once and queues nothing,
+    so no poll or wait was made; the close returns 0.
 
 - **PSP-3000 single-case runs of `hle-issues-batch`, `hle-kernel-pool-bounds` and `registry-font` (2026-11-10)**:
   one PSP-3000, all three PRXs built from `979c6a1dd`, XMB context, one launch per boot (boots 172, 173 and 174),
@@ -3750,6 +3810,7 @@ not expected PSP values.
 | `hle-self-stop-unload` | `PSP-HLE-SELFSTOP-001` | `MEASURED` (2026-11-08, PSP-3000, boot 165, `935f225d`; 6 records) | #341: sceKernelSelfStopUnloadModule from a helper PRX's own thread: the call does not return, module_stop runs once and the module is unloaded. |
 | `hle-utility-dialogs` | `PSP-HLE-UTILITY-DIALOG-001` | `NOT_RUN` | Built #1386 dialog timing and wrong-state cells; no hardware result is claimed. |
 | `hle-io-seek` | `PSP-HLE-IO-SEEK-001` | `MEASURED` (2026-11-08, PSP-3000, boot 156, `59520eb0`; 30 records) | #1380: flash0 seeks (64- and 32-bit), sceIoIoctl file commands, and writes on read-only descriptors. |
+| `hle-io-seek-edges` | `PSP-HLE-IO-SEEK-002` | `MEASURED` (2026-11-11, PSP-3000, boot 192, `1a5157e37`; 24 records) | #1380: flash0 SEEK_CUR and past-0x100000000 seeks, and Memory Stick open-flag and async-write cells on a probe-owned file. |
 | `hle-nickname-limit` | `PSP-HLE-NICKNAME-001` | `MEASURED` (2026-11-08, PSP-3000, boot 155, `07e58170`; 16 records) | W-NET-1 (#2197): the owner_name key type and the nickname string call at eight buffer lengths; no value bytes. |
 | `vfpu-unmodeled` | `PSP-VFPU-UNMODELED-001` | `MEASURED` (2026-11-08, PSP-3000, boot 157, `d1d8558a`; 115 records; the PSP needed its watchdog afterwards) | #326: VFPU forms the runtime refuses (vcrs, vcmov imm3 7, control 255, VFPU9 widths). POWER RISK. |
 | `vfpu-quad-wb` | `PSP-VFPU-QUADWB-001` | `MEASURED` (2026-11-08, PSP-3000, boot 159, `ecc203af`; 19 records) | #326: lv.q and sv.q with the write-back flag; the base register is unchanged and the access is base plus offset. |
@@ -3827,40 +3888,53 @@ the utility cannot read (the probe does not construct one); any of this in the X
 
 ### PSP-SAS-002 capture 2026-11-10
 
-`sas-adsr` (case 152, `fixtures/psp_oracle/probe.c`) ran once on 2026-11-10 (UTC) on the PSP-3000, boot 185, in
-the game context (standalone PSPLink), at `74acbe42`, an ancestor of this tree whose `probe.c` and Makefile are
-identical to this tree's. Firmware: system software 6.61 (`flash0:/vsh/etc/version.txt`: `release:6.61:`,
-`system:58401@release_661,0x06060110:`); PSPLink `pspver` 0x06060110, which the runner records as 6.6.1; custom
-firmware ARK-5 with cIPL, version 5.1.0 (operator-declared, not read by a tool). The stream is complete: 696
-records, all PASS, and COMPLETE PASS, after a `transport-write` preflight. The envelope is not
-acceptance-eligible: its one acceptance blocker is "loaded module was not proven unloaded" (the teardown found
-the post-unload module set different from the one before the launch), and the runner's recovery then reset the
-PSP to boot 186. The capture is therefore `CAPTURED` and establishes nothing about PSP behaviour. The raw
-envelope, host0 log and decode stay in the private campaign directory.
+`sas-adsr` (case 152, `fixtures/psp_oracle/probe.c`) ran once on 2026-11-10 (UTC) on the PSP-3000, boot 185, in the
+game context (standalone PSPLink), at `74acbe42`, an ancestor of this tree whose `sas-adsr` section of `probe.c` and
+Makefile CASE and LIBS lines are identical to this tree's, apart from the two AV-module unloads after the done record
+added on 2026-11-11, which run after every record. Firmware: system software 6.61 (`flash0:/vsh/etc/version.txt`:
+`release:6.61:`, `system:58401@release_661,0x06060110:`); PSPLink `pspver` 0x06060110, which the runner records as
+6.6.1; custom firmware ARK-5 with cIPL, version 5.1.0 (operator-declared, not read by a tool). The stream is
+complete: 696 records, all PASS, and COMPLETE PASS, after a `transport-write` preflight. The envelope is not
+acceptance-eligible: its one acceptance blocker is "loaded module was not proven unloaded" (the teardown found the
+post-unload module set different from the one before the launch), and the runner's recovery then reset the PSP to
+boot 186. The capture is therefore `CAPTURED` and establishes nothing about PSP behaviour. The raw envelope, host0
+log and decode stay in the private campaign directory.
 
-It is the first run of the current status encoding, which writes `PASS` or `ERROR` where the 2026-11-05 run of
-the earlier source revision wrote `RC`. The two streams have the same 696 case ids, and every record has the same
-result and out words in both. The values described in `fixtures/psp_oracle/README.md` are therefore what both runs
-show. A rerun of the same probe meets the same blocker: the case keeps AVCODEC and SASCORE loaded on purpose (as
-`sas-init` does), so the module set after it always differs. It can be promoted only once the runner accepts a
-module set the case declares it leaves loaded.
+It is the first run of the current status encoding, which writes `PASS` or `ERROR` where the 2026-11-05 run of the
+earlier source revision wrote `RC`. The two streams have the same 696 case ids, and every record has the same result
+and out words in both. The values described in `fixtures/psp_oracle/README.md` are therefore what both runs show. The
+case used to keep AVCODEC and SASCORE loaded (as `sas-init` does), so the module set after it always differed from
+the one before the launch. Since 2026-11-11 it unloads SASCORE, then AVCODEC, after its done record, so a rerun can
+pass the runner's teardown check; no such rerun has been made, and that rerun is also the first run of the unload
+itself (unloading SASCORE while a SAS core is initialised is not measured).
 
 ### PSP-SAS-003 capture 2026-11-07
 
-`sas-mix` (case 155, `run_sas_mix` in `fixtures/psp_oracle/probe.c`) ran once on 2026-11-07 on the PSP-3000,
-boot 146, in the game context, at `979de58f`, a pre-publication commit whose `sas_mix` functions, tables and
-constants in `probe.c` and whose Makefile CASE and LIBS lines are identical to this tree's. Firmware: system
-software 6.61 (`flash0:/vsh/etc/version.txt`, read on 2026-11-10: `release:6.61:`,
-`system:58401@release_661,0x06060110:`); PSPLink `pspver` 0x06060110, which the runner records as 6.6.1 and
-which `pspver` prints in the game context (0x06060010 in the XMB context); custom firmware ARK-5 with cIPL,
-version 5.1.0 (operator-declared, not read by a tool). The stream is complete: 205 records (204 cells and the
-done record, out0 `0xcc`), all PASS, COMPLETE PASS, after a `transport-write` preflight. The envelope is not
-acceptance-eligible: its one acceptance blocker is "loaded module was not proven unloaded" (the teardown found
-the post-unload module set different from the one before the launch), and the runner's recovery then reset
-the PSP to boot 147. The capture is therefore `CAPTURED` and establishes nothing about PSP behaviour; the values
-below are what it shows. A rerun of the same probe meets the same blocker, because the case keeps AVCODEC and
-SASCORE loaded on purpose; it can be promoted only once the runner accepts a module set the case declares it
-leaves loaded. The raw envelope, host0 log and decode stay in the private campaign directory.
+`sas-mix` (case 155, `run_sas_mix` in `fixtures/psp_oracle/probe.c`) ran once on 2026-11-07 on the PSP-3000, boot
+146, in the game context, at `979de58f`, a pre-publication commit whose `sas_mix` functions, tables and constants in
+`probe.c` and whose Makefile CASE and LIBS lines are identical to this tree's, apart from the two AV-module unloads
+after the done record added on 2026-11-11, which run after every record. Firmware: system software 6.61
+(`flash0:/vsh/etc/version.txt`, read on 2026-11-10: `release:6.61:`, `system:58401@release_661,0x06060110:`); PSPLink
+`pspver` 0x06060110, which the runner records as 6.6.1 and which `pspver` prints in the game context (0x06060010 in
+the XMB context); custom firmware ARK-5 with cIPL, version 5.1.0 (operator-declared, not read by a tool). The stream
+is complete: 205 records (204 cells and the done record, out0 `0xcc`), all PASS, COMPLETE PASS, after a
+`transport-write` preflight. The envelope is not acceptance-eligible: its one acceptance blocker is "loaded module
+was not proven unloaded" (the teardown found the post-unload module set different from the one before the launch),
+and the runner's recovery then reset the PSP to boot 147. The capture is therefore `CAPTURED` and establishes nothing
+about PSP behaviour; the values below are what it shows. The case kept AVCODEC and SASCORE loaded, so the module set
+after it differed.
+
+A second capture on 2026-11-11 (UTC), boot 191, game context, at `a39f7a14c` (the same `sas_mix` source as
+`979de58f`), after the custom firmware update to ARK-5 5.2.0 (operator-declared; `pspver` 0x06060110, recorded as
+6.6.1; PSPLink built from `pspdev/psplinkusb` `7a0035d9`), gave the same 205 records with the same result and out
+words, all PASS, COMPLETE PASS. It is not acceptance-eligible, with three blockers: the same module blocker (54
+modules after the unload against 52 before the launch), "source worktree is dirty" (the runner ran from a worktree
+with uncommitted edits, so `a39f7a14c` is the commit the probe reported, not a clean-source binding) and
+`PHYSICAL_INTERVENTION_REQUIRED`; the runner's recovery then could not get a PSPLink reply, so the Nakagawa Link
+watchdog reset the PSP to boot 192. Since 2026-11-11 the case unloads SASCORE, then AVCODEC, after its done record,
+so a rerun can pass the teardown check; no such rerun has been made, and that rerun is also the first run of the
+unload itself (unloading SASCORE while a SAS core is initialised is not measured). The raw envelopes, host0 logs and
+decode stay in the private campaign directory.
 
 The voice is a flat VAG of sample `0x0700`, whose full-scale output is `0x06fe`.
 
