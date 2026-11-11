@@ -1132,10 +1132,10 @@ static uint32_t coherence_wide_raster_list(uint32_t base, uint32_t stride, int s
         if (cmd != 0x1Eu) DL_EMIT(cmd, 0);
     DL_EMIT(0xE8, 0);
     DL_EMIT(0xE9, 0);
-    DL_EMIT(0x15, 0);
-    DL_EMIT(0x16, ((FB_H - 1) << 10) | (uint32_t)scis_x2);
-    DL_EMIT(0xD4, 0);
-    DL_EMIT(0xD5, ((FB_H - 1) << 10) | (FB_W - 1));
+    DL_EMIT(0x15, 0);                                    /* the drawing region: the whole target */
+    DL_EMIT(0x16, ((FB_H - 1) << 10) | (FB_W - 1));
+    DL_EMIT(0xD4, 0);                                    /* the scissor, to x2 */
+    DL_EMIT(0xD5, ((FB_H - 1) << 10) | (uint32_t)scis_x2);
     DL_EMIT(0x12, (7u << 2) | (3u << 7) | (1u << 23));   /* 8888 colour, float position, through */
     DL_EMIT(0x01, vaddr & 0x00FFFFFFu);
     DL_EMIT(0xD3, 1u | (3u << 8));                       /* clear mode: colour and alpha */
