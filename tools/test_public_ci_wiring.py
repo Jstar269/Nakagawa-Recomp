@@ -1982,6 +1982,17 @@ class PublicExportJobTests(unittest.TestCase):
         self.assertIn("python tools/build_public_export.py --export-dir", export)
         self.assertIn("--public-safe-profile 2>&1", export)
         self.assertIn("PROVENANCE_UNVERIFIED", export)
+        # Review 2387-0087347807fa N-A: a failed gate whose text named PROVENANCE_UNVERIFIED passed.
+        # The gates' part must hold no [FAIL] line, and the token is searched only after the last pass line.
+        for line in ("marker='[ALL GATES PASSED] Public-export gates verified.'",
+                     'last="$(grep -nxF "$marker" <<<"$output" | tail -n 1 | cut -d: -f1 || true)"',
+                     'gates="$(head -n "$last" <<<"$output")"',
+                     'audit="$(tail -n "+$((last + 1))" <<<"$output")"',
+                     "if grep -q '^\\[FAIL\\] ' <<<\"$gates\"; then",
+                     'if ! grep -q "PROVENANCE_UNVERIFIED" <<<"$audit"; then'):
+            self.assertIn(line, export)
+        self.assertNotIn('grep -q "PROVENANCE_UNVERIFIED" <<<"$output"', export)
+        self.assertEqual(export.count('echo "a publication gate failed before the candidate audit ran" >&2'), 2)
         job = "\n".join(self.blocks["public_export"])
         self.assertIn("fetch-depth: 0", job)
         self.assertIn('python-version: "3.15.2"', job)
@@ -2948,9 +2959,10 @@ class TrustedAttestationRouteTests(unittest.TestCase):
                       '            --repo-root "${GITHUB_WORKSPACE}" \\\n'
                       '            --committed-tree "${HEAD_SHA}" \\\n'
                       '            --policy "${RUNNER_TEMP}/tree-audit/public_source_profile.json" \\\n'
-                      '            --public-scope --provenance-self-consistency \\\n'
-                      '            | tee "${RUNNER_TEMP}/tree-audit/report.txt"\n'
+                      '            --public-scope --provenance-self-consistency\n'
                       '          touch "${RUNNER_TEMP}/tree-audit/passed"\n', step)
+        # Review 2387-0087347807fa N-F: nothing read a copy of the report; the job log holds it.
+        self.assertNotIn("tree-audit/report.txt", self.attest)
         # The head is re-checked here, so a reordered step cannot pass an unchecked value to Git.
         self.assertIn('          if [[ ! "${HEAD_SHA}" =~ ^[0-9a-f]{40}$ ]]; then\n', step)
         # A failed tree audit is named in the summary, after the verdict, without its findings.

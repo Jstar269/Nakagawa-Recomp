@@ -3250,7 +3250,7 @@ class GateCodeTests(unittest.TestCase):
     def test_a_new_tools_module_named_like_the_standard_library_is_protected(self) -> None:
         # Failing-before (review 2387-22495ab5fee4 S3): an added tools/fnmatch.py replaced the fnmatch the
         # audit imports, and no listed path changed.
-        for path in ("tools/fnmatch.py", "tools/json/__init__.py", "tools/tempfile.pyc",
+        for path in ("tools/fnmatch.py", "tools/json/__init__.py", "tools/tempfile.pyc", "tools/glob.PY",
                      "tools/hashlib.cpython-315-x86_64-linux-gnu.so"):
             with self.subTest(path=path):
                 protected = ctv.protected_paths({}, {path: "1"}, [])
@@ -3270,7 +3270,7 @@ class GateCodeTests(unittest.TestCase):
                 module = Path(target).stem
                 top_level = [node for node in parsed.body if isinstance(node, (ast.Import, ast.ImportFrom))
                              and module in ([alias.name for alias in node.names] + [getattr(node, "module", "")])]
-                self.assertEqual(top_level, [], "an exempt import must not run when the module is loaded")
+                self.assertEqual(top_level, [], "an exempt edge must not run when the module is loaded")
                 self.assertNotIn(target, self.protected, "an exempt edge to a protected file needs no exemption")
 
     def test_every_local_pre_commit_hook_is_protected(self) -> None:

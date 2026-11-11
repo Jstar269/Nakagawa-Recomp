@@ -2929,6 +2929,47 @@ class CommittedTreeMaterializationTests(unittest.TestCase):
         count = int(env["GIT_CONFIG_COUNT"])
         settings = {env[f"GIT_CONFIG_KEY_{i}"]: env[f"GIT_CONFIG_VALUE_{i}"] for i in range(count)}
         self.assertEqual(settings.get("safe.bareRepository"), "explicit")
+        # Review 2387-0087347807fa N-D: the setting's effect, not only its presence. Git, run inside a
+        # directory shaped like a bare repository, finds it as one without the setting and refuses it with.
+        with tempfile.TemporaryDirectory() as tmp:
+            bare = Path(tmp).resolve() / "candidate"
+            for folder in ("objects/info", "refs/heads"):
+                (bare / folder).mkdir(parents=True)
+            (bare / "HEAD").write_bytes(b"ref: refs/heads/main\n")
+            (bare / "config").write_bytes(b"[core]\n\trepositoryformatversion = 0\n\tbare = true\n")
+            found = subprocess.run(
+                ["git", "-c", "safe.bareRepository=all", "rev-parse", "--absolute-git-dir"], cwd=bare,
+                env=isolated_git_env(), capture_output=True, text=True, check=False)
+            self.assertEqual(found.returncode, 0, found.stderr)
+            self.assertEqual(Path(found.stdout.strip()).resolve(), bare)
+            refused = subprocess.run(["git", "rev-parse", "--absolute-git-dir"], cwd=bare,
+                                     env=publish_audit.isolated_git_env(), capture_output=True, text=True,
+                                     check=False)
+            self.assertEqual(refused.returncode, 128, refused.stdout)
+            self.assertIn("bare repository", refused.stderr)
+
+    def test_the_written_tree_is_removed_after_the_audit(self) -> None:
+        # Review 2387-0087347807fa N-F: main() removed the written tree only when writing it failed, so
+        # every audit left a copy of the candidate in the temporary directory.
+        import contextlib  # noqa: PLC0415
+        import io  # noqa: PLC0415
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._repo(tmp)
+            written: list[Path] = []
+            materialize = publish_audit._materialize_committed_tree
+
+            def spy(*args: object, **kwargs: object) -> tuple[Path, str]:
+                root, tree = materialize(*args, **kwargs)  # type: ignore[arg-type]
+                written.append(root)
+                return root, tree
+
+            with mock.patch.object(publish_audit, "_materialize_committed_tree", side_effect=spy), \
+                    contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                code = publish_audit.main(["--repo-root", str(repo), "--committed-tree", "HEAD", "--public-scope"])
+            self.assertEqual(code, 1)
+            self.assertEqual(len(written), 1)
+            self.assertFalse(written[0].exists(), written[0])
 
 
 class TrustedTreeAuditTests(unittest.TestCase):

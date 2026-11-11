@@ -3277,16 +3277,20 @@ def _commit_of(ref: str, source_repo: Path) -> str:
         return "unknown"
 
 
-def _materialize_committed_tree(ref: str, source_repo: Path) -> tuple[Path, str]:
+def _materialize_committed_tree(
+    ref: str, source_repo: Path, entries_out: list[tuple[str, str, str]] | None = None,
+) -> tuple[Path, str]:
     """Materialize a commit/tree into a disposable directory for exact-byte audit.
 
     Every file is written from the tree's own objects (``git ls-tree``, ``git cat-file``). ``git archive``
     is not used: it leaves out a path marked ``export-ignore`` and rewrites one marked ``export-subst``,
     and both attributes come from the ``.gitattributes`` of the tree under audit, so one line there would
-    hide a file from the audit.
+    hide a file from the audit. ``entries_out``, when given, receives the tree's ``git ls-tree`` list.
     """
     tree_sha = _git_output(["rev-parse", f"{ref}^{{tree}}"], source_repo).strip()
     entries = _committed_tree_entries(tree_sha, source_repo)
+    if entries_out is not None:
+        entries_out[:] = entries
     batch = subprocess.run(
         ["git", "cat-file", "--batch"], cwd=source_repo, env=isolated_git_env(root=source_repo),
         input="".join(f"{object_id}\n" for _path, _mode, object_id in entries).encode("ascii"),
@@ -3319,6 +3323,16 @@ def _materialize_committed_tree(ref: str, source_repo: Path) -> tuple[Path, str]
 
 
 def main(argv: list[str] | None = None) -> int:
+    # A materialized committed tree is disposable: remove it however the audit ends.
+    disposable: list[Path] = []
+    try:
+        return _main(argv, disposable)
+    finally:
+        for path in disposable:
+            shutil.rmtree(path, ignore_errors=True)
+
+
+def _main(argv: list[str] | None, disposable: list[Path]) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--tracked-only",
@@ -3480,9 +3494,13 @@ def main(argv: list[str] | None = None) -> int:
     committed_commit: str | None = None
     if args.committed_tree:
         try:
-            committed_audit_root, committed_tree_sha = _materialize_committed_tree(args.committed_tree, audit_repo_root)
-            committed_tree_list = _committed_tree_entries(committed_tree_sha, audit_repo_root)
+            # Resolve the name once, so the report's commit and the audited tree are the same object.
             committed_commit = _commit_of(args.committed_tree, audit_repo_root)
+            ref = args.committed_tree if committed_commit == "unknown" else committed_commit
+            committed_audit_root, committed_tree_sha = _materialize_committed_tree(
+                ref, audit_repo_root, entries_out=committed_tree_list,
+            )
+            disposable.append(committed_audit_root)
         except (OSError, RuntimeError, subprocess.CalledProcessError) as error:
             print(f"publication audit failed: cannot materialize committed tree: {error}", file=sys.stderr)
             return 2

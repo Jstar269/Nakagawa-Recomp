@@ -829,11 +829,11 @@ def _shadows_stdlib(path: str) -> bool:
         return False
     if len(parts) == 3:
         name, leaf = parts[1], parts[2]
-        if not (leaf.startswith("__init__.") and leaf.endswith(_IMPORTABLE_SUFFIXES)):
+        if not (leaf.startswith("__init__.") and leaf.lower().endswith(_IMPORTABLE_SUFFIXES)):
             return False
     else:
         name, leaf = parts[1].split(".", 1)[0], parts[1]
-        if not leaf.endswith(_IMPORTABLE_SUFFIXES):
+        if not leaf.lower().endswith(_IMPORTABLE_SUFFIXES):
             return False
     return name in sys.stdlib_module_names
 

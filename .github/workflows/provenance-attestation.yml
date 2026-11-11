@@ -504,8 +504,7 @@ jobs:
             --repo-root "${GITHUB_WORKSPACE}" \
             --committed-tree "${HEAD_SHA}" \
             --policy "${RUNNER_TEMP}/tree-audit/public_source_profile.json" \
-            --public-scope --provenance-self-consistency \
-            | tee "${RUNNER_TEMP}/tree-audit/report.txt"
+            --public-scope --provenance-self-consistency
           touch "${RUNNER_TEMP}/tree-audit/passed"
 
       # The first thing the pull-request author reads. The verdict itself is
