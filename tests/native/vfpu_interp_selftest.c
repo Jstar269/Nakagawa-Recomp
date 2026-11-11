@@ -748,7 +748,7 @@ static uint32_t vf2i(unsigned mode, unsigned scale) {
 }
 
 /* PSP-VFPU-CONVERT-001 (PSP-3000, 2026-11-08, issue #326, probe case vfpu-convert, vf2in/vf2iz/
- * vf2iu/vf2id.s at scale 0): a denormal input of either sign converts as zero in all four modes,
+ * vf2iu/vf2id.s at scale 0, both lanes): a denormal input of either sign converts as zero in all four modes,
  * and a negative quiet NaN gives 0x7fffffff. The result must not depend on the host rounding mode. */
 static int check_vf2i_measured_cells(void) {
     static const struct {
@@ -768,18 +768,28 @@ static int check_vf2i_measured_cells(void) {
         {"vf2in negative quiet NaN", 0xffc00000u, 0u, 0x7fffffffu},
     };
     static const int host_modes[] = {FE_TONEAREST, FE_DOWNWARD, FE_UPWARD, FE_TOWARDZERO};
+    static const char *const case_names[4] = {"vf2in-s-measured", "vf2iz-s-measured",
+                                              "vf2iu-s-measured", "vf2id-s-measured"};
     CpuState s;
     int bad = 0;
     const int saved_mode = fegetround();
     for (size_t m = 0; m < sizeof(host_modes) / sizeof(host_modes[0]); m++) {
         CHECK(fesetround(host_modes[m]) == 0, "host rounding mode is available for the measured vf2i cells");
         for (size_t i = 0; i < sizeof(vectors) / sizeof(vectors[0]); i++) {
+            const int c = find_overlap_diff_case(case_names[vectors[i].mode]);
+            CHECK(c >= 0 && overlap_diff_cases[c].w == vf2i(vectors[i].mode, 0u),
+                  "measured vf2i word is in the overlap-diff header");
+            if (c < 0) { bad = 1; continue; }
+            CpuState aot;
             setup_identity_compute(&s);
             s.vi[0] = vectors[i].input;
             s.vi[4] = 0xa5a5a5a5u;
+            aot = s;
+            overlap_diff_run_codegen(&aot, c);
             CHECK(sr_vfpu_interp(&s, vf2i(vectors[i].mode, 0u)) == SR_VFPU_COMPUTE,
-                  "measured vf2i cell executes through production fallback");
+                  "measured vf2i cell executes through the interpreter");
             CHECKB(bad, s.vi[4] == vectors[i].expected, vectors[i].name);
+            CHECKB(bad, aot.vi[4] == vectors[i].expected, vectors[i].name);
         }
     }
     if (saved_mode != -1) (void)fesetround(saved_mode);
@@ -2095,7 +2105,7 @@ static int check_psp_measured_vfpu9(void) {
         {"vsgn.s -0", 0xd04a0405u, 0xe4u, {0x80000000u}, {0x00000000u}, 1, 1},
         {"vsgn.s -denormal", 0xd04a0020u, 0xe4u, {0x80000001u}, {0x00000000u}, 1, 0},
         {"vsgn.s -Inf", 0xd04a0020u, 0xe4u, {0xff800000u}, {0xbf800000u}, 1, 0},
-        /* vsgn.p/.t/.q (unrecorded PSP read, probe case vfpu-vus2i, PSP-3000, 2026-11-08,
+        /* vsgn.p/.t/.q (PSP-VFPU-VUS2I-001, probe case vfpu-vus2i, PSP-3000, 2026-11-08,
          * issue #326): the same rule at every width. The .p row is a probe cell; the .t and
          * .q rows mix lanes of different probe images and follow the rule (measured=0). */
         {"vsgn.p 2.5 -3.5", 0xd04a0088u, 0xe4u, {0x40200000u, 0xc0600000u},
@@ -2511,7 +2521,7 @@ static int check_vfpu_unary_arith_measured(void) {
     return bad;
 }
 
-/* vmscl.q (0xf2018488): each lane is a vmul lane. Unrecorded PSP reads (PSP-3000, 2026-11-08 and
+/* vmscl.q (0xf2018488): each lane is a vmul lane. PSP-VFPU-WIDEDOT-001 and PSP-VFPU-ROUNDSEP-001 (PSP-3000, 2026-11-08 and
  * 2026-11-09, issue #326, probe cases vfpu-wide-dot-matrix and vfpu-round-sep): a NaN operand or
  * 0 * Inf gives 0x7f800001 with the XOR of the operand signs, and an inexact product rounds to
  * nearest: 0x3fc00001 * 0x3fc00001 is 0x40100002, not the truncated 0x40100001. The scalar is the
@@ -3520,7 +3530,7 @@ static int check_vfpu_wide_dot_quoted_cells(void) {
         {{0x3f800000u, 0xccbebc20u, 0x3f800000u, 0x4cbebc20u}, {0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u},
          0x00000000u, "the same terms in another order = 0"},
         /* Carry-out into the next binade rounds to nearest even (probe case vfpu-round-sep,
-         * also an unrecorded PSP read, PSP-3000, 2026-11-09, b = (1, 1, 1, 1) with the last lane of a
+         * also PSP-VFPU-ROUNDSEP-001, PSP-3000, 2026-11-09, b = (1, 1, 1, 1) with the last lane of a
          * zero unless listed). */
         {{0x3f800003u, 0x3f800000u, 0x00000000u, 0x00000000u}, {0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u},
          0x40000002u, "(1 + 3 ulp) + 1 rounds to nearest even at the carry-out"},

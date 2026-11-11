@@ -82,7 +82,7 @@ CENSUS_GAP_WORDS: tuple[int, ...] = (
 )
 
 
-# The probe words of the unrecorded vfpu-wide-dot-matrix read, by the name check_vfpu_wide_dot_measured() looks up.
+# The probe words of the vfpu-wide-dot-matrix read (PSP-VFPU-WIDEDOT-001), by the name check_vfpu_wide_dot_measured() looks up.
 WIDE_DOT_WORDS: tuple[tuple[str, int], ...] = (
     ("vdot-p", 0x64810088), ("vdot-q", 0x64818088), ("vhdp-q", 0x66018088),
     ("vcrsp-t", 0xF2818008), ("vqmul-q", 0xF2818088), ("vtfm-q", 0xF1808488),
@@ -166,6 +166,12 @@ def build_cases() -> tuple[list[tuple[int, str, int]], int, tuple[int, int]]:
         cases.append((0xD3000008 | (e << 16), f"wbn-s-{e:02x}", 1))
     cases.append((0xD0220000, "rndf1-s-forms", 1))
     cases.append((0xD0230000, "rndf2-s-forms", 1))
+
+    # vf2in/vf2iz/vf2iu/vf2id.s at scale 0 (PSP-VFPU-CONVERT-001, probe case vfpu-convert, PSP-3000,
+    # 2026-11-08): check_vf2i_measured_cells() finds them by name and runs the measured denormal and
+    # NaN cells through both lanes. Source S000, destination S001.
+    for mode, name in enumerate(("vf2in", "vf2iz", "vf2iu", "vf2id")):
+        cases.append((0xD2000001 | (mode << 21), f"{name}-s-measured", 1))
 
     # vmscl.t (op 0x3C sub 4 size 3): scalar inside destination matrix
     cases.append((_bin_word(0x3C, 4, 3, 0x20, 0x20, 0x00), "vmscl-t-scalar-in-dest", 2))
