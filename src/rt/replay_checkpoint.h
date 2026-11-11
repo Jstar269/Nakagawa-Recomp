@@ -148,9 +148,10 @@ void sr_replay_checkpoint_vblank(uint32_t vcount);
  *
  * With SR_FLIGHT set, the first divergent checkpoint arms the flight recorder's checkpoint mode
  * at the newest recorded event (unless SR_FLIGHT_TRIGGER armed a mode already), so the bundle
- * freezes with the events just before the divergence, and one stderr line names the
- * SR_FLIGHT_TRIGGER=checkpoint:KIND:N:AFTER that makes the next replay keep the events from the
- * last matching checkpoint on. These SR_FLIGHT lines are not verdicts. */
+ * freezes with the events just before the divergence. When the ring no longer holds the newest
+ * event before the last matching checkpoint, one more stderr line names the
+ * SR_FLIGHT_TRIGGER=checkpoint:KIND:N:AFTER that makes the next replay keep the first events
+ * after that checkpoint. These SR_FLIGHT lines are not verdicts. */
 
 /* sr_ctrl_sample's entry points (hle_route.c). At its top, sr_replay_pad_skip(live_skip)
  * says whether this sample is skipped: the live answer, written down under SR_RECORD; the

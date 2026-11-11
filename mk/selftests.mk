@@ -827,10 +827,11 @@ domain-mode-selftest: $(GENERIC_TITLE_CONFIG_HEADER)
 # frame it happened. SR_RECORD/SR_REPLAY run in fresh child processes: a replay ends in the
 # recorded state without asking the (fake) keyboard user, and a changed word, an extra poll,
 # an early stop, an edited or truncated file and the host clock each end in their own named
-# verdict. The record and replay children are distinct processes. Under SR_FLIGHT the first
+# verdict. The record and replay children are processes of their own. Under SR_FLIGHT the first
 # divergent checkpoint freezes the flight record at its newest event, in the same bytes as a run
-# armed with that checkpoint trigger from the start, and the trigger it names for the next run
-# keeps the events from the last matching checkpoint on. Exit code 0 = all hold.
+# armed with that checkpoint trigger from the start; when the ring lost the last matching
+# checkpoint, the trigger it names for the next run keeps the first events after that
+# checkpoint. Exit code 0 = all hold.
 nkstate-selftest: $(GENERIC_TITLE_CONFIG_HEADER)
 	$(CC) $(CFLAGS) -I$(GENERIC_TITLE_CONFIG_DIR) $(LDFLAGS) -o $(BUILD_DIR)/nkstate_selftest.exe \
 		-DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" \

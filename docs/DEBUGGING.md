@@ -1423,8 +1423,8 @@ Use the deterministic clock. Under the paced clock, guest time follows the host,
 from the first checkpoint on by design. To narrow a mismatch:
 
 - a `ram.<addr>` chunk: set a memory watch on that MiB;
-- a `cpu.<uid>` thread: record a replay of the run with `SR_FLIGHT` set. Its first mismatch freezes
-  the flight record there (see "Recording and replaying a run" below).
+- a `cpu.<uid>` thread: replay the recording with `SR_FLIGHT` set. Its first mismatch freezes the
+  flight record there (see "Recording and replaying a run" below).
 
 Hashing all of RAM takes a noticeable fraction of a second per checkpoint, so raise
 `SR_REPLAY_CHECKPOINT_EVERY` on long runs. A checkpoint file holds no game bytes, but it describes a
@@ -1480,16 +1480,17 @@ keeps the events just before the divergence:
 
 - With no `SR_FLIGHT_TRIGGER` mode armed, the mismatch arms the `checkpoint:KIND:N:0` mode at the
   newest recorded event, the `N`th of its kind, and the record freezes there with terminal
-  `trigger`. The bundle is the same, byte for byte, as the one a run armed with that spec from the
-  start writes. stderr says `SR_FLIGHT: the replay mismatch froze the record at event <seq>
-  (SR_FLIGHT_TRIGGER=checkpoint:<kind>:<n>:0)`.
+  `trigger`. The bundle has the events, policy and terminal of a run armed with that spec from the
+  start. Its thread table and refusal counts are read at the mismatch. stderr says
+  `SR_FLIGHT: the replay mismatch froze the record at event <seq> (SR_FLIGHT_TRIGGER=checkpoint:<kind>:<n>:0)`.
 - A mode you armed is left in charge, and stderr says so.
-- After a matching checkpoint, stderr also gives the next run's trigger:
+- When more events happened since the last matching checkpoint than the ring holds, the frozen
+  bundle starts after that checkpoint. stderr then also gives the next run's trigger,
   `SR_FLIGHT_TRIGGER=checkpoint:<kind>:<n>:<limit-1>`. It opens the window at the newest event
   before the last matching checkpoint, so the next replay, with the same `SR_FLIGHT`, keeps the
-  events from that checkpoint up to the mismatch. That is the run to make when more events
-  happened between the two checkpoints than the ring holds. The position is exact only when the
-  enabled classes record the same events in both replays; check with `tools/flight_diff.py`.
+  first `limit - 1` events after that checkpoint, where the divergence began. The two bundles
+  bracket the span. The position is exact only when the enabled classes record the same events
+  in both replays; check with `tools/flight_diff.py`.
 
 These `SR_FLIGHT:` lines are not verdicts. Without `SR_FLIGHT` the mismatch prints none.
 

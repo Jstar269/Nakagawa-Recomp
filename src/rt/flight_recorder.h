@@ -345,8 +345,10 @@ enum {
  * this arms the checkpoint mode at the newest recorded event, as SR_FLIGHT_TRIGGER=
  * checkpoint:KIND:N:0 would have from the start, and that event matches it at once: the record
  * freezes with terminal "trigger" and the bundle is written, holding the events just before
- * the divergent checkpoint. The bundle is byte for byte the one a run armed with that spec
- * from the start writes. An armed mode is never replaced. */
+ * the divergent checkpoint. Its events, policy and terminal are those a run armed with that
+ * spec from the start records; the thread table and the refusal counts are read when the
+ * bundle is written, here at the mismatch rather than at the event. An armed mode is never
+ * replaced. */
 int sr_flight_replay_divergence(SrFlightMark *at);
 
 #if defined(SR_HLE_THREAD_SELFTEST) || defined(SR_SCHED_LIVENESS_TEST)

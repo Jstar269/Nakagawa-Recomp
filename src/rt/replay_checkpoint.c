@@ -790,8 +790,10 @@ static void record_answer(uint32_t request, uint32_t pending, AnswResult result,
 
 /* The first divergent checkpoint arms the flight recorder, when SR_FLIGHT records (#2147): with
  * no SR_FLIGHT_TRIGGER mode armed, the record freezes at its newest event, so the bundle keeps
- * the events just before the divergence. Each line says what happened and how to arm the next
- * run from the last matching checkpoint. Without SR_FLIGHT it says nothing. */
+ * the events just before the divergence. One line says what happened. When the ring no longer
+ * holds the newest event before the last matching checkpoint, a second line names the trigger
+ * that makes the next run keep the first events after that checkpoint instead. Without
+ * SR_FLIGHT it says nothing. */
 static void flight_divergence(void) {
     SrFlightMark at;
     const int armed = sr_flight_replay_divergence(&at);
@@ -805,9 +807,11 @@ static void flight_divergence(void) {
         fputs("SR_FLIGHT: the replay mismatch left the armed SR_FLIGHT_TRIGGER mode in charge\n", stderr);
     else
         fputs("SR_FLIGHT: the record had stopped or held no event; the replay mismatch armed nothing\n", stderr);
-    if (s_rep_flight_ok)
+    /* The frozen ring holds the last after + 1 events, so it still has the mark when they span it. */
+    const int covered = armed == SR_FLIGHT_DIVERGENCE_FROZE && at.sequence - s_rep_flight.sequence <= s_rep_flight.after;
+    if (s_rep_flight_ok && !covered)
         fprintf(stderr,
-                "SR_FLIGHT: to keep the events from the last matching checkpoint (frame %" PRIu32 ") on, replay "
+                "SR_FLIGHT: to keep the events after the last matching checkpoint (frame %" PRIu32 "), replay "
                 "again with the same SR_FLIGHT and SR_FLIGHT_TRIGGER=checkpoint:%" PRIu32 ":%" PRIu32 ":%" PRIu32 "\n",
                 s_rep_flight_frame, s_rep_flight.kind, s_rep_flight.occurrence, s_rep_flight.after);
 }
