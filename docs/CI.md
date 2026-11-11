@@ -459,10 +459,25 @@ index update, 8 for the install), moving the head mirror to the end of the list 
 failed one. The list starts with the Azure mirror and `archive.ubuntu.com` and goes on to
 mirrors outside `ubuntu.com`: on 2026-11-11 the hosted runners reached none of Canonical's
 hosts, and the image's own mirror list holds only those. apt checks every index against
-the Ubuntu archive key whichever mirror serves it. When no mirror answers or every attempt
-fails, the step fails; it is never skipped. `tools/test_public_ci_wiring.py`
-(`AptInstallHelperTests`) runs the helper against stubs and fails if a step calls `apt-get`
-itself.
+the Ubuntu archive key whichever mirror serves it: the helper keeps each source's
+`Signed-By`, and no workflow may switch the check off. When no mirror answers or every
+attempt fails, the step fails; it is never skipped.
+
+On a self-hosted `nk-wsl` runner ([below](#self-hosted-linux-runners)) the helper changes
+nothing while the image carries every package. When one is missing, it edits the
+runner's own apt configuration as it does on a hosted runner: it points the Ubuntu
+sources at `/etc/apt/apt-mirrors.txt`, writes that list and
+`/etc/apt/apt.conf.d/79-nk-apt-network`, and installs the package. Those changes last
+until the runner is discarded: each pool runner is a container that takes one job, so they
+never reach the pool's image or the next job, and every job repeats the fetch until the
+image carries the package.
+
+`tools/test_public_ci_wiring.py` (`AptInstallHelperTests`) runs the helper against stubs. It
+fails if a step calls `apt-get` itself, if the helper drops a source's `Signed-By`, or if
+any workflow switches apt's signature check off: `--allow-unauthenticated`,
+`--allow-insecure-repositories`, `--allow-downgrade-to-insecure-repositories`, `force-yes`
+as a flag or setting, a `trusted` source option with any value, or an `AllowInsecure*`,
+`AllowDowngradeToInsecure*` or `AllowUnauthenticated` setting.
 
 ### Android launcher build
 
