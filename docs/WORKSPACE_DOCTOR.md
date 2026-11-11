@@ -221,6 +221,56 @@ mingw32-make clean-preview OLDER_THAN=7
 `make clean`, `clean-fixtures`, `distclean`, and `clean-all` keep their existing pinned
 semantics; `clean-preview` is additive.
 
+### Paths outside the output roots
+
+Make writes only beneath `BUILD_ROOT` and `LOG_DIR`. Everything else that reads or writes a
+fixed path outside them is listed here with the reason it stays, and
+`OutsideOutputRootInventoryTests` in `tools/test_workspace_paths.py` keeps the lists current:
+a new runtime default, `fopen` of a literal name, or `logs/`, `build/` or `place_game_here/`
+literal in `src/` that is missing here fails it, and so does a row whose path no longer
+exists in the source or a root-level file that is not gitignored.
+
+The runtime opens these relative to its working directory, the run folder. `make run` and
+the private title routes run from the checkout, so there they land in or read from the
+checkout; the player runs a title from its package folder in the per-user data. Every
+written one is off until its switch is set.
+
+| Path | Switch | Direction | Why it stays |
+| --- | --- | --- | --- |
+| `flight-recorder.json` | `SR_FLIGHT_OUTPUT` | written | The flight recorder's dump goes where the run is, so a crash report sits next to the run that made it. Gitignored at the checkout root. |
+| `samples.csv` | `SR_SAMPLE_OUT` | written | The state-sampling route's output, beside the run it measured. Gitignored at the checkout root. |
+| `nidseq_mine.txt` | `SR_NIDLOG` | written | One line per HLE call for comparing call sequences between runs ([DEBUGGING.md](DEBUGGING.md)). Gitignored. |
+| `edram.bin` | `SR_FBDUMP` | written | The 2 MB eDRAM image of a framebuffer dump. Gitignored (`*.bin`). |
+| `vram_first.bin` | `SR_FIRST_FRAME_DUMP` | written | The first presented frame's VRAM, raw. Gitignored (`*.bin`). |
+| `frame_first.ppm` | `SR_FIRST_FRAME_DUMP` | written | The first presented frame as an image. Gitignored (`*.ppm`). |
+| `logs/ge_capture.ngef` | `SR_GE_CAPTURE_PATH` | written | A GE command capture; under the run folder's `logs/`, gitignored. |
+| `logs/trace_window.txt` | `SR_TRACE` | written | The PC trace window; under `logs/`, gitignored. |
+| `logs/ge_transition_trace.jsonl` | `SR_GE_TRANSITION_TRACE` | written | The GE transition trace when the switch is `1`; under `logs/`, gitignored. |
+| `build/snapshots/frame_%04u.ppm` | `SR_FBSNAP` | written | Framebuffer snapshots that `tools/ppmdiff.py` compares with `build/golden` by default; under `build/`, gitignored. |
+| `place_game_here/EXTRACTED/decrypted` | `SR_MODULE_DIR` | read | The decrypted guest modules of a private title run, in the ignored input root. |
+| `memstick` | `SR_MEMSTICK` | read and written | The guest's `ms0:` root, saves included, in the ignored input root. |
+| `watchpoints.json` | `SR_WATCHPOINTS_FILE` | read | The debugger's watchpoint list. Gitignored at the checkout root. |
+| `assets/vfpu` | `PSP_VFPU_TABLES` | read | The VFPU tables tracked in the repository. |
+| `build/display-smoke-v1/staged` | none | neither | The folder named by the synthetic library card that the player's `ready-library` screenshot view shows. The card stays in memory and the folder is never opened. |
+
+The launch candidates in `src/core/generated/nk_title_catalog.c` (`build/<name>/<name>.exe`
+and the image beside it) are not in this table: `src/core/nk_launch.c` joins them to the
+checkout it was given, never to the working directory.
+
+Tools write these fixed paths outside `BUILD_ROOT` and `LOG_DIR`:
+
+| Path | Tool | Why it stays |
+| --- | --- | --- |
+| `progress.json` | `tools/progress_tracker.py` | The HST progress snapshot, written at the checkout root beside the `build/hst` and `logs` it reads. Gitignored. |
+| `visual_regression_report.json` | `tools/ppmdiff.py` | Written to the working directory, where the hosted visual regression step reads it. Gitignored at the checkout root. |
+| `third_party/ghidra/projects` | `tools/ghidra_headless.py` | The local Ghidra project of a private title, inside the ignored `third_party/` tree; it never leaves the machine. |
+| `third_party/ghidra/exports` | `tools/ghidra_headless.py` | That project's exports, beside it. |
+| `%LOCALAPPDATA%\Nakagawa` | `tools/verify_installer.py` | The installer check plants marker files in the per-user data folders to prove an uninstall keeps them, and removes them and any folder it made. |
+
+The generators that `python tools/regen_all.py --list` names write tracked files under `src/`,
+`docs/` and `assets/` by design: those files are their output, and the generated-file check
+proves them current.
+
 ## Checkouts at an arbitrary path
 
 An outside contributor clones the public repository wherever their tooling puts it, and a checkout
@@ -298,8 +348,12 @@ The state of each build and workspace ergonomics item:
    `build` lifecycle tests no longer take their `BUILD_DIR` from the repository root, so they cannot
    make Make write `spaces/` litter into a checkout, and a whitespace-bearing `BUILD_DIR` is refused
    outright; `clean-preview` still selects only its bounded allowlist (the disposable roots in the
-   table), and linked-worktree build output is now surfaced by `WORKTREES_BUILD_SIZE`, but a non-build
-   route that writes outside the listed roots is not surfaced by a single inventory;
+   table), and linked-worktree build output is now surfaced by `WORKTREES_BUILD_SIZE`. The fixed
+   paths a run or a tool reads or writes outside `BUILD_ROOT` and `LOG_DIR` are one inventory,
+   [Paths outside the output roots](#paths-outside-the-output-roots), each with its reason, and
+   `OutsideOutputRootInventoryTests` derives the runtime half from the source and requires every
+   written path in the checkout to be gitignored. The runtime still writes its debug outputs in
+   its working directory, which is the checkout under `make run`;
 7. [DONE - #368] eliminate absolute paths from generated `compile_commands.json`:
    `python tools/compdb_relocate.py compile_commands.json` rewrites every path under the checkout
    to a root-relative form and keeps only `directory` absolute, so a moved or cloned workspace

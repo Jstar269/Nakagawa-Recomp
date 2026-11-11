@@ -655,6 +655,127 @@ def _check_ignored(paths: list[str]) -> set[str]:
     return {line for line in proc.stdout.decode("utf-8", "replace").splitlines() if line}
 
 
+class OutsideOutputRootInventoryTests(unittest.TestCase):
+    """Every fixed path outside BUILD_ROOT and LOG_DIR is declared, with its reason (#368).
+
+    docs/WORKSPACE_DOCTOR.md, "Paths outside the output roots", lists what the runtime
+    opens relative to its run folder and the fixed paths tools write. The runtime list is
+    derived from the source here, both ways: a default path in src/rt/env_registry.h, an
+    fopen of a literal name for writing, or a `logs/`, `build/` or `place_game_here/`
+    literal that the table lacks fails, and so does a row nothing in the source names. A
+    written path inside the checkout must be gitignored, or a debug run under `make run`
+    leaves a file that `git add -A` stages.
+    """
+
+    DOC = ROOT / "docs" / "WORKSPACE_DOCTOR.md"
+    SECTION = "### Paths outside the output roots"
+    RUNTIME_HEADER = "| Path | Switch | Direction | Why it stays |"
+    TOOLS_HEADER = "| Path | Tool | Why it stays |"
+    #: The launch candidates are joined to the checkout src/core/nk_launch.c is given,
+    #: never to the working directory (the doc says so below the runtime table).
+    EXCLUDED_DIRS = ("src/core/generated/",)
+    REGISTRY_PATH_ROW = re.compile(r'X\("([^"]+)",\s*"path",\s*"([^"]*)"')
+    RELATIVE_DEFAULT = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_./%-]*$")
+    FOPEN_WRITE = re.compile(r'fopen\(\s*"([^"]+)"\s*,\s*"[wa]')
+    ROOTED_LITERAL = re.compile(r'"((?:logs|build|place_game_here)/[^"]*)"')
+    CODE_SPAN = re.compile(r"`([^`]+)`")
+
+    @classmethod
+    def _table(cls, header: str) -> list[list[str]]:
+        text = cls.DOC.read_text(encoding="utf-8")
+        if cls.SECTION not in text:
+            raise AssertionError(f"{cls.DOC.name} has no {cls.SECTION!r} section")
+        section = text.split(cls.SECTION, 1)[1].split("\n## ", 1)[0]
+        if header not in section:
+            raise AssertionError(f"the section has no table headed {header!r}")
+        rows = []
+        for line in section.split(header, 1)[1].splitlines()[2:]:
+            if not line.startswith("|"):
+                break
+            rows.append([cell.strip() for cell in line.strip().strip("|").split("|")])
+        return rows
+
+    @classmethod
+    def _spans(cls, cell: str) -> list[str]:
+        return cls.CODE_SPAN.findall(cell)
+
+    @classmethod
+    def _runtime_sources(cls) -> list[Path]:
+        found = []
+        for path in sorted((ROOT / "src").rglob("*")):
+            relative = path.relative_to(ROOT).as_posix()
+            if path.suffix not in {".c", ".h", ".inc"} or not path.is_file():
+                continue
+            if "selftest" in path.name or path.name.endswith("_test.c") or "/tests/" in relative:
+                continue
+            if relative.startswith(cls.EXCLUDED_DIRS):
+                continue
+            found.append(path)
+        return found
+
+    def _source_paths(self) -> tuple[dict[str, set[str]], dict[str, str]]:
+        """(literal path -> the files naming it, registry default -> its variable)."""
+        literals: dict[str, set[str]] = {}
+        for path in self._runtime_sources():
+            text = path.read_text(encoding="utf-8", errors="replace")
+            for pattern in (self.FOPEN_WRITE, self.ROOTED_LITERAL):
+                for literal in pattern.findall(text):
+                    literals.setdefault(literal, set()).add(path.relative_to(ROOT).as_posix())
+        registry = (ROOT / "src" / "rt" / "env_registry.h").read_text(encoding="utf-8")
+        defaults = {
+            default: name
+            for name, default in self.REGISTRY_PATH_ROW.findall(registry)
+            if default not in {"off", "unset"} and self.RELATIVE_DEFAULT.fullmatch(default)
+        }
+        return literals, defaults
+
+    def test_every_runtime_path_is_declared(self) -> None:
+        literals, defaults = self._source_paths()
+        rows = {self._spans(row[0])[0]: row for row in self._table(self.RUNTIME_HEADER)
+                if self._spans(row[0])}
+        missing = sorted(set(literals) - set(rows))
+        missing += sorted(f"{default} ({name})" for default, name in defaults.items()
+                          if default not in rows)
+        self.assertEqual(missing, [], "these runtime paths outside the output roots are not "
+                         f"declared in {self.DOC.name}:\n" + "\n".join(missing))
+        wrong_switch = sorted(f"{default}: table names {self._spans(rows[default][1])}, "
+                              f"the registry {name}"
+                              for default, name in defaults.items()
+                              if default in rows and name not in self._spans(rows[default][1]))
+        self.assertEqual(wrong_switch, [])
+
+    def test_no_runtime_row_is_stale(self) -> None:
+        literals, defaults = self._source_paths()
+        stale = sorted(path for row in self._table(self.RUNTIME_HEADER)
+                       for path in self._spans(row[0])[:1]
+                       if path not in literals and path not in defaults)
+        self.assertEqual(stale, [], "these declared runtime paths no longer appear in src/")
+
+    def test_every_tool_row_names_a_tool_that_writes_it(self) -> None:
+        rows = self._table(self.TOOLS_HEADER)
+        self.assertTrue(rows)
+        for row in rows:
+            path, tool = self._spans(row[0])[0], self._spans(row[1])[0]
+            with self.subTest(path=path):
+                source = ROOT / tool
+                self.assertTrue(source.is_file(), f"{tool} does not exist")
+                self.assertIn(re.split(r"[\\/]", path)[-1],
+                              source.read_text(encoding="utf-8"))
+
+    def test_written_paths_in_the_checkout_are_gitignored(self) -> None:
+        written = [self._spans(row[0])[0] for row in self._table(self.RUNTIME_HEADER)
+                   if "written" in row[2]]
+        written += [self._spans(row[0])[0] for row in self._table(self.TOOLS_HEADER)
+                    if "%" not in self._spans(row[0])[0]]
+        self.assertGreater(len(written), 5)
+        # A folder is asked about with its trailing slash, so a rule for folders applies.
+        asked = [path if Path(path).suffix else path + "/" for path in written]
+        ignored = _check_ignored(asked)
+        self.assertEqual(sorted(set(asked) - ignored), [],
+                         "a run or tool writes these into the checkout, but `git add -A` "
+                         "would stage them")
+
+
 class KeyFileIgnoreTests(unittest.TestCase):
     """A KeyStore file dropped anywhere in the tree stays out of `git add -A`.
 
