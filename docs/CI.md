@@ -56,8 +56,8 @@ GitHub's free plan runs about 20 jobs at once for this repository. A full `CI` r
 change, a manual run, the nightly schedule, a merge group) used to need 23 jobs, so a second
 pull request's run waited for runners while the first ran. The same checks then ran in 14
 jobs; the Android launcher build (`android_build`), added later, makes 15, a fourth Python
-shard makes 16, a fourth Windows group makes 17, and installer and Windows-runtime changes add
-one path-gated Windows installer job. Nothing was dropped and no
+shard makes 16, a fourth Windows group makes 17, the informational C coverage job (`c_coverage`)
+makes 18, and installer and Windows-runtime changes add one path-gated Windows installer job. Nothing was dropped and no
 command changed; jobs were merged and their steps run one after another. Three things differ in
 when or how a step runs, and none of them skips a step
 where it ran before:
@@ -78,6 +78,7 @@ The jobs:
 | `hygiene` ("Hygiene and security") | 3 jobs: `hygiene` 2.2 min, `markdown` 0.4 min, `main_smoke` (pushes to `main` and full-matrix events only) | 1 job, about 2.5 min: hygiene's steps, then the main smoke steps, then the Markdown lint |
 | `public_export` | 2 jobs: `public_export` 0.2 min, `profile_zero_fixture` 0.4 min | 1 job, about 0.7 min: the export audit, then the profile-zero fixture build |
 | `linux_gcc16` | 1 job, 3.3 min | unchanged (not required, a container job on a hosted runner) |
+| `c_coverage` ("C coverage (informational)") | not present | 1 job, added later (not required, a hosted runner; [Coverage](#coverage)) |
 | `native_tools` | 3 parts, 7.9-9.2 min | unchanged |
 | `python_tools` | 6 shards, 4.2-18.2 min | 4 shards: `test_production_smoke` alone, about 16 min, and three of about 14 min |
 | `windows_runtime` | 6 parts, 4.2-9.7 min (4.5-12.0 in run 42258417250) | 4 groups of parts, 8.1-13.9 min in run 43055225113 (smoke 8.1, routes 13.9, selftests 9.3, ladder-fuzz 9.7) |
@@ -1066,28 +1067,61 @@ whenever their jobs run; neither can change a gate's result.
   `omit = ["tools/test_*.py"]` in `[tool.coverage.run]` (`pyproject.toml`) keep
   the test modules themselves out of the number. Coverage records the run and
   exits with unittest's own status, so a failing shard still fails the job.
-- **C runtime (`native_tools`).** One additional step builds and runs the same
-  `native-core-tests` target in its own `$RUNNER_TEMP/native-core-coverage`
-  `BUILD_DIR`, with `--coverage` appended to the Makefile's own `CFLAGS` (read
-  back through `compiler-info`, so the measured build uses the default
-  configuration) and to `LDFLAGS`. The same step then runs `gcov -p -b -r` once per
-  object from the repository root, where the objects' recorded `src/...` source
-  paths resolve, and collects the reports in `$RUNNER_TEMP/native-core-gcov`. The
-  action's own `gcov` plugin is not used (`plugins: noop`): it runs gcov from the
-  build directory, cannot open any source there, and uploads header-only reports
-  that Codecov rejects. One run per object keeps a source shared by several
-  selftests from getting duplicate line records, `-r` keeps system headers and
-  generated fixtures out, and reports for the selftests' own `*_selftest.c` sources
-  are dropped, as `tools/test_*.py` is for Python. The unprofiled
-  `make CC=gcc native-core-tests` gate still runs first and is unchanged. The
-  `CFLAGS`/`LDFLAGS` route instruments the targets that compile through those
-  variables; a target that hard-codes its own compile flags is not measured, so
-  the C number is a lower bound for `src/` rather than a complete statement about
-  it.
+- **C runtime (`c_coverage`).** A job of its own, beside `native_tools`, builds and runs the
+  self-tests `native_tools` runs on Linux, from `native-core-tests` to the GPU self-tests on
+  lavapipe, a second time with gcov instrumentation (#2394).
+  It runs whenever `native_tools` runs (`run_native`), on a hosted `ubuntu-24.04` runner and
+  never on the self-hosted pool, so it cannot take a runner from a gate. `ci_required` neither
+  needs nor reads it: a failure shows red on this job and on the run without blocking a
+  merge, and `native_tools`' gates run unprofiled and no longer wait for a measurement. Its
+  setup steps are `native_tools`' own, byte for byte (packages through `NK_APT_INSTALL`, the
+  pinned SDL3 and SDL3_ttf, PSPDEV), so the two jobs share their caches.
+
+  After the setup, a wrapper named `gcc` goes first on `PATH`: it runs the real `gcc` with
+  `--coverage` added. The measuring steps then run the gates' own commands
+  (`make CC=gcc native-core-tests`, and so on), and every compile and link is instrumented,
+  including the targets that hard-code their own compile flags. Before #2394 the C number came
+  from one extra build of `native-core-tests` in `native_tools`' core part, with `--coverage`
+  appended to the Makefile's `CFLAGS` and `LDFLAGS`, which measured only the targets that
+  compile through those variables. The setup builds the pinned libraries with the real `gcc`,
+  before the wrapper exists, so they stay out of the number.
+
+  The collection step runs `gcov -p -b -r` once per `*.gcno` notes file under `build/`, from
+  the repository root, where the objects' recorded `src/...` source paths resolve. The
+  action's own `gcov` plugin is not used (`plugins: noop`): it runs gcov from the build
+  directory, cannot open any source there, and uploads header-only reports that Codecov
+  rejects. One run per notes file keeps a source shared by several self-tests from getting
+  duplicate line records, and a notes file whose program never ran still reports its lines,
+  as not executed. `-r` keeps system headers out, and reports for the tests' own sources
+  (`tests/`, `fixtures/`, `*_selftest.c`) and for C generated into `build/` are dropped, as
+  `tools/test_*.py` is for Python. Everything is uploaded once, under `flags: c`.
+
+  Measured, with the command `native_tools` runs for each:
+
+  - `native-core-tests`: the CPU self-tests, Ace Mode's among them (`ace-selftest`,
+    `ace-ui-selftest`, `ace-smooth-selftest`), the player state and input settings tests and
+    the player screens self-test (`nk-ui-player-screens-selftest`).
+  - `psmf-media-selftest` with the vendored FFmpeg H.264 subset (`H264_FFMPEG=1`).
+  - The HLE thread and title self-tests, the AOT return-boundary self-test, the scheduler
+    matrix (`sched-selftest`), dispatch isolation, cosimulation, snapshot execution and the
+    verify self-test.
+  - `gui-present-selftest`, the player UI regressions and the player UI tests (overlays,
+    fonts, art).
+  - On lavapipe under Xvfb, as in `native_tools`: the GPU snapshot sync, capture, coherence,
+    VRAM view identity and texture scaling self-tests, the FSR 3 pass self-test and the FSR 3
+    frame generation refusal (cell `G-R`).
+
+  Not measured: the deliberate mutants (`gpu-texscale-mutant` and the mutants inside
+  `native-core-tests` are built and run, but they measure broken code on purpose, and the
+  separate mutant steps are left out), the cosimulation mutation corpus, the codegen gates,
+  the showcase, the CMake player and the player smokes. Those are end-to-end routes, not
+  self-tests. The nightly selftest repeat reruns binaries that are already measured. The
+  Windows-only self-tests run in `windows_runtime` and are not measured on Linux. Self-tests
+  that need a real GPU (the FSR 3 frame generation cells beyond `G-R`) run in no hosted job.
 
 Both reports are uploaded with `codecov/codecov-action` (pinned by commit SHA)
 under `flags: python` and `flags: c`, authenticated with the job's OIDC identity
-(`use_oidc: true`, which is why those two jobs -- and only those two -- declare
+(`use_oidc: true`, which is why `python_tools` and `c_coverage` -- and only those two -- declare
 `id-token: write` beside `contents: read`). `fail_ci_if_error: false` keeps an
 upload or Codecov outage from failing the job.
 
@@ -1804,7 +1838,7 @@ repository guarantee.
 ## Self-hosted Linux runners
 
 GitHub's free plan runs about 20 jobs at once for this repository, and one full CI run
-needs 17 of them ([Jobs per run](#jobs-per-run)), so a second run can wait for runners. To keep landings moving, the
+needs 18 of them ([Jobs per run](#jobs-per-run)), so a second run can wait for runners. To keep landings moving, the
 maintainer runs a small pool of self-hosted Linux runners, labelled `nk-wsl`, on their
 own PC. Contributors need nothing from it: every run they can start uses GitHub's
 hosted images, exactly as before.

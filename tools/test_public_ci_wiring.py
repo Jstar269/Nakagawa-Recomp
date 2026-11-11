@@ -1087,9 +1087,6 @@ _NATIVE_SERIAL_GATES = {
         "run: python tools/format_portability_check.py",
     "Run native core test suite (hostile parsers, catalog, launch resolution, POSIX process)":
         "run: make CC=gcc native-core-tests",
-    "Measure native core C statement coverage":
-        'CFLAGS="$base_cflags --coverage" LDFLAGS="--coverage" native-core-tests',
-    "Upload C coverage to Codecov": "directory: ${{ runner.temp }}/native-core-gcov",
     "Compile GE frontend profiling mode":
         'make --no-print-directory CC=gcc BUILD_DIR="$build_dir" GE_FRONTEND_PROFILE=1 "$build_dir/ge.o"',
     "Build and run HLE thread selftest (links SDL3)": "run: make CC=gcc -j4 hle-thread-selftest",
@@ -1185,7 +1182,6 @@ _NATIVE_DEPENDENT_GATES = (
      "Stage the installed Linux player and smoke the installed binary"),
     ("Build and run the Linux showcase headlessly",
      "Stage the installed Linux player and smoke the installed binary"),
-    ("Measure native core C statement coverage", "Upload C coverage to Codecov"),
     ("Build run_elf (Interpreter runner)", "Generate golden oracle trace (Gate A)"),
     ("Compile MIPS microtest ELF (Gate A, -march=r4000 -mfp32)", "Generate golden oracle trace (Gate A)"),
     ("Create dummy init trace for interpreter", "Generate golden oracle trace (Gate A)"),
@@ -2096,25 +2092,64 @@ def _folded_run(step: list[str]) -> str:
 
 
 class CoverageWiringTests(unittest.TestCase):
-    """Coverage is measured inside the existing gates and published informationally.
+    """Coverage is measured beside the gates and published informationally.
 
     The measurement may not weaken a gate: the Python shards run the exact module
-    list they always ran under unittest, the unprofiled native core gate keeps its
-    command, and both uploads are informational (``.github/codecov.yml``,
-    ``fail_ci_if_error: false``), so a Codecov outage cannot fail a required job.
+    list they always ran under unittest, the native gates run unprofiled in
+    native_tools while c_coverage, a job ci_required never reads, builds and runs the
+    same self-tests again with gcov, and both uploads are informational
+    (``.github/codecov.yml``, ``fail_ci_if_error: false``), so a Codecov outage
+    cannot fail a required job (#2394).
     """
 
     PYTHON_TEST_NEEDLE = "Run Python unit tests"
-    C_MEASURE_STEP = "Measure native core C statement coverage"
-    C_GATE_STEP = "Run native core test suite (hostile parsers, catalog, launch resolution, POSIX process)"
+    C_JOB = "c_coverage"
+    C_WRAPPER_STEP = "Put the coverage gcc wrapper first on PATH"
+    C_COLLECT_STEP = "Collect the gcov reports"
+    C_MEASURE_PREFIX = "Measure the "
     UPLOADS = {
         "python_tools": ("Upload Python coverage to Codecov", "python", "coverage-python.xml"),
-        "native_tools": ("Upload C coverage to Codecov", "c", None),
+        "c_coverage": ("Upload C coverage to Codecov", "c", None),
     }
+    #: native_tools' setup, repeated byte for byte so both jobs build against the same
+    #: packages and pinned libraries and share their caches.
+    C_SETUP_STEPS = (
+        "Check out repository",
+        "Set up Python",
+        "Restore the native apt package cache",
+        "Install native test dependencies",
+        "Key the pinned SDL3 install",
+        "Restore the pinned SDL3 install",
+        "Build pinned SDL3 for headless Linux runtime",
+        "Install the pinned SDL3 into the Linux prefix",
+        "Key the pinned SDL3_ttf install",
+        "Restore the pinned SDL3_ttf install",
+        "Build pinned SDL3_ttf with vendored FreeType and HarfBuzz",
+        "Install and verify pinned SDL3_ttf and shaping libraries",
+        "Install PSPDEV from the checked-in lock",
+    )
+    #: Every self-test target native_tools runs on Linux. c_coverage measures each one;
+    #: the mutants, the cosimulation mutation corpus, the codegen gates and the player
+    #: smokes are left out (docs/CI.md, "Coverage").
+    C_MEASURED_TARGETS = (
+        "native-core-tests", "psmf-media-selftest", "hle-thread-selftest", "hle-title-selftest",
+        "aot-return-boundary-thread-selftest", "sched-selftest", "dispatch-isolation-selftest",
+        "cosim-selftest", "snapshot-selftest", "verify-selftest", "gui-present-selftest",
+        "player-ui-regressions", "player-ui-tests", "gpu-snapsync-selftest", "gpu-capture-selftest",
+        "gpu-coherence-selftest", "vram-view-identity-selftest", "gpu-texscale-selftest",
+        "fsr3-pass-selftest", "fsr3-fg-pass-selftest",
+    )
 
     def setUp(self) -> None:
         self.blocks = _ci_job_blocks()
         self.ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+
+    def _measure_steps(self) -> list[str]:
+        block = self.blocks[self.C_JOB]
+        names = [line.strip()[len("- name: "):] for line in block if line.strip().startswith("- name: ")]
+        measured = [name for name in names if name.startswith(self.C_MEASURE_PREFIX)]
+        self.assertTrue(measured, "c_coverage measures nothing")
+        return measured
 
     def test_python_shards_run_their_unchanged_module_list_under_coverage(self) -> None:
         step = _ci_step_with(self.blocks["python_tools"], "coverage run")
@@ -2132,46 +2167,96 @@ class CoverageWiringTests(unittest.TestCase):
         self.assertIn("python -m coverage combine", text)
         self.assertIn("python -m coverage xml -o coverage-python.xml", text)
 
-    def test_native_coverage_is_a_separate_instrumented_build_beside_the_gate(self) -> None:
+    def test_c_coverage_is_a_hosted_job_beside_native_tools_that_no_gate_reads(self) -> None:
+        block = self.blocks[self.C_JOB]
         native = self.blocks["native_tools"]
-        gate = _ci_step(native, self.C_GATE_STEP)
-        self.assertIsNotNone(gate, "the unprofiled native core gate was removed")
-        self.assertIn("make CC=gcc native-core-tests", "\n".join(gate or []))
-        measured = _ci_step(native, self.C_MEASURE_STEP)
-        self.assertIsNotNone(measured, "native_tools no longer measures C coverage")
-        self.assertLess(
-            _ci_step_index(native, self.C_GATE_STEP),
-            _ci_step_index(native, self.C_MEASURE_STEP),
-            "the measured build runs after the gate it must not disturb",
-        )
-        text = _folded_run(measured or [])
-        # Its own build directory, under the runner temp tree, so the gate's tree
-        # and objects are never reused or overwritten.
-        self.assertIn('coverage_build="$RUNNER_TEMP/native-core-coverage"', text)
-        self.assertIn('BUILD_DIR="$coverage_build"', text)
-        # The instrumentation is appended to the Makefile's own flags, so the
-        # measured build keeps the default configuration.
-        self.assertIn("compiler-info", text)
-        self.assertIn('CFLAGS="$base_cflags --coverage"', text)
-        self.assertIn('LDFLAGS="--coverage"', text)
-        self.assertIn("native-core-tests", text)
-        self.assertNotIn("gcovr", text)
+        # The native gates run unprofiled: no instrumented build, no upload in their job.
+        self.assertNotIn("--coverage", "\n".join(native))
+        self.assertNotIn("codecov", "\n".join(native))
+        self.assertIn("make CC=gcc native-core-tests", "\n".join(_ci_step(
+            native, "Run native core test suite (hostile parsers, catalog, launch resolution, POSIX process)") or []))
+        # It runs whenever native_tools does, and only then.
+        self.assertEqual(_job_if(block), _job_if(native))
+        needs = [line.strip() for line in block if line.startswith("    needs: ")]
+        self.assertEqual(needs, [line.strip() for line in native if line.startswith("    needs: ")])
+        # A hosted runner: the measurement never takes a self-hosted pool slot from a gate.
+        self.assertIn("    runs-on: ubuntu-24.04", block)
+        self.assertNotIn("linux_runner", "\n".join(block))
+        # Not required: ci_required neither needs nor reads it, so it can never fail or hold a merge.
+        required = "\n".join(self.blocks["ci_required"])
+        self.assertNotIn(self.C_JOB, required)
+        self.assertNotIn(self.C_JOB, (ROOT / "tools" / "ci_required.py").read_text(encoding="utf-8"))
 
-    def test_native_gcov_reports_are_generated_from_the_repository_root(self) -> None:
-        text = _folded_run(_ci_step(self.blocks["native_tools"], self.C_MEASURE_STEP) or [])
+    def test_c_coverage_repeats_native_tools_setup_byte_for_byte(self) -> None:
+        block = self.blocks[self.C_JOB]
+        for name in self.C_SETUP_STEPS:
+            with self.subTest(step=name):
+                ours = _ci_step(block, name)
+                self.assertIsNotNone(ours, f"c_coverage lost the setup step {name!r}")
+                # A step's lines run on to the comment above the next step: compare the step itself.
+                self.assertEqual(_uncommented("\n".join(ours or [])).rstrip(),
+                                 _uncommented("\n".join(_ci_step(self.blocks["native_tools"], name) or [])).rstrip())
+        # Package installs go through the workflow's apt helper, as everywhere else.
+        self.assertIn('bash -c "$NK_APT_INSTALL" nk-apt-install',
+                      "\n".join(_ci_step(block, "Install native test dependencies") or []))
+
+    def test_every_compile_is_instrumented_by_the_gcc_wrapper(self) -> None:
+        block = self.blocks[self.C_JOB]
+        wrapper = _folded_run(_ci_step(block, self.C_WRAPPER_STEP) or [])
+        # The wrapper runs the real gcc, found before the wrapper exists, with --coverage
+        # added, and goes first on PATH for every later step.
+        self.assertIn('real_gcc="$(command -v gcc)"', wrapper)
+        self.assertIn('exec %s --coverage "$@"', wrapper)
+        self.assertIn('"$real_gcc" > "$wrapper_dir/gcc"', wrapper)
+        self.assertIn('echo "$wrapper_dir" >> "$GITHUB_PATH"', wrapper)
+        # After every setup step, so the pinned libraries are built uninstrumented, and
+        # before every measurement; the next step fails if the wrapper is not the gcc found.
+        wrapper_index = _ci_step_index(block, self.C_WRAPPER_STEP)
+        for name in self.C_SETUP_STEPS:
+            with self.subTest(setup=name):
+                self.assertLess(_ci_step_index(block, name), wrapper_index)
+        self.assertIn('test "$(command -v gcc)" = "$RUNNER_TEMP/coverage-gcc/gcc"',
+                      "\n".join(_ci_step(block, "Create build directory") or []))
+        for name in self._measure_steps():
+            with self.subTest(measure=name):
+                self.assertLess(wrapper_index, _ci_step_index(block, name))
+                text = _uncommented("\n".join(_ci_step(block, name) or []))
+                # The gates' own make commands: instrumentation comes from the wrapper alone.
+                self.assertNotIn("--coverage", text)
+                self.assertNotIn("CFLAGS=", text)
+                self.assertIn("make CC=gcc", text)
+                self.assertNotIn("mutant", text)
+
+    def test_every_linux_self_test_target_is_measured(self) -> None:
+        native = "\n".join(self.blocks["native_tools"])
+        measured = _uncommented("\n".join("\n".join(_ci_step(self.blocks[self.C_JOB], name) or [])
+                                          for name in self._measure_steps()))
+        for target in self.C_MEASURED_TARGETS:
+            with self.subTest(target=target):
+                self.assertRegex(native, rf"make [^\n]*\b{re.escape(target)}\b", "not a native_tools target")
+                self.assertRegex(measured, rf"make [^\n]*\b{re.escape(target)}\b")
+        # Everything the job builds lands under build/, where the collection step looks.
+        self.assertNotIn("RUNNER_TEMP", measured)
+
+    def test_c_gcov_reports_are_generated_from_the_repository_root(self) -> None:
+        text = _folded_run(_ci_step(self.blocks[self.C_JOB], self.C_COLLECT_STEP) or [])
         # gcov runs in the step's working directory, the repository root, where the
         # objects' recorded src/... paths resolve. A cd into the build directory would
         # bring back the header-only reports Codecov rejected.
-        self.assertNotIn('cd "$coverage_build"', text)
-        # One gcov run per object: several objects in one run append duplicate line
+        self.assertNotIn("cd ", text)
+        self.assertIn("mapfile -t notes < <(find build -name '*.gcno' -print | LC_ALL=C sort)", text)
+        # One gcov run per notes file: several objects in one run append duplicate line
         # records for a shared source into the same report.
-        self.assertIn('for gcno in "$coverage_build"/*.gcno; do', text)
+        self.assertIn('for gcno in "${notes[@]}"; do', text)
         self.assertIn('gcov -p -b -r "$gcno"', text)
-        self.assertIn('gcov_dir="$RUNNER_TEMP/native-core-gcov"', text)
-        # The selftests' own sources stay out of the number, and an empty set of
-        # reports fails the step instead of uploading nothing.
-        self.assertIn("_selftest\\.c$", text)
+        self.assertIn('gcov_dir="$RUNNER_TEMP/c-coverage-gcov"', text)
+        # The tests' own sources and generated C stay out of the number, and an empty set
+        # of notes or reports fails the step instead of uploading nothing.
+        self.assertIn("0:Source:(tests/|fixtures/|build/|.*_selftest\\.c$)", text)
+        self.assertIn('test "${#notes[@]}" -gt 0', text)
         self.assertIn('test "${#reports[@]}" -gt 0', text)
+        self.assertLess(_ci_step_index(self.blocks[self.C_JOB], self._measure_steps()[-1]),
+                        _ci_step_index(self.blocks[self.C_JOB], self.C_COLLECT_STEP))
 
     def test_both_uploads_use_the_pinned_action_oidc_and_the_declared_flags(self) -> None:
         for job, (name, flag, report) in self.UPLOADS.items():
@@ -2188,7 +2273,7 @@ class CoverageWiringTests(unittest.TestCase):
                     # The reports are generated in the measuring step; the action only
                     # uploads them. Its gcov plugin runs gcov from the build directory,
                     # where the objects' repository-relative sources cannot be opened.
-                    self.assertIn("directory: ${{ runner.temp }}/native-core-gcov", text)
+                    self.assertIn("directory: ${{ runner.temp }}/c-coverage-gcov", text)
                     self.assertIn("plugins: noop", text)
                     self.assertNotIn("plugins: gcov", text)
                 else:
@@ -2250,7 +2335,7 @@ class CoverageWiringTests(unittest.TestCase):
         for terms in (
             ("python_tools", "coverage-python.xml", "unittest"),
             (".github/codecov.yml", "informational"),
-            ("native_tools", "native-core-tests"),
+            ("c_coverage", "native-core-tests", "gcov"),
         ):
             with self.subTest(terms=terms):
                 self.assertTrue(
@@ -3585,8 +3670,8 @@ class CiRunHarness(unittest.TestCase):
     QUICK = frozenset({"hygiene", "public_export"})
     LIGHT_ONLY = frozenset({"quick_checks", "ci_quick"})
     FULL_ONLY = frozenset({"ci_required"})
-    HEAVY = frozenset({"python_tools", "native_tools", "linux_gcc16", "android_build", "windows_runtime",
-                       "windows_installer"})
+    HEAVY = frozenset({"python_tools", "native_tools", "linux_gcc16", "c_coverage", "android_build",
+                       "windows_runtime", "windows_installer"})
     LIGHT = QUICK | LIGHT_ONLY
     FULL = QUICK | FULL_ONLY
     JOBS = QUICK | LIGHT_ONLY | FULL_ONLY | HEAVY
