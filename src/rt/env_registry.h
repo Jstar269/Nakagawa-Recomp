@@ -84,7 +84,7 @@
     X("SR_FONTDIR", "path", "unset", "hle_thread_selftest.c", "Font cache directory; the flash0 self-test sets it to a test cache and restores it.") \
     X("SR_FONTLOG", "flag-presence", "off", "debug.h,flash0_font.c,hle_data.c,hle_font.c,hle_system.c", "Enables font and flash0 font-serving diagnostic logging to stderr.") \
     X("SR_FPS_CAP", "number", "native scanout rate (also for empty or 'native')", "gui.c", "Caps presented frames per second; values above 240 clamp to 240, 0 is accepted, invalid text uses native.") \
-    X("SR_FSDIR", "path", "unset", "hle_thread_selftest.c", "Host directory used as the writable filesystem overlay; read here by self-tests that save and restore it.") \
+    X("SR_FSDIR", "path", "fs", "hle_host.c,hle_io.c,hle_thread_selftest.c", "Legacy flat Memory Stick folder; an ms0: read-open miss imports a file found there into memstick, and self-tests save and restore it.") \
     X("SR_FULLSCREEN", "flag-nonzero", "off (windowed)", "gpu_sdl3vk/sdl3vk.c", "When nonzero, the presenter asks SDL for desktop fullscreen before creating the Vulkan surface.") \
     X("SR_GAME_TITLE", "string", "unset (default window caption)", "driver.c,gui.c", "Title text for the window caption and pause overlay, sanitized before use; set by the launcher.") \
     X("SR_GEDUMP", "flag-presence", "off", "ge.c,hle.c", "Enables GE display list dump logging and framebuffer snapshots.") \
