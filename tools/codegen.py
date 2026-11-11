@@ -6371,6 +6371,9 @@ def _load_code_hook_package(elf, known, symbols, code_hook_pkg_path, symbol_map_
     """
     import hashlib
     pkg = enhancement_package.validate_package(enhancement_package.load_package(code_hook_pkg_path))
+    if pkg["category"] == "guest_memory_code_hook" and not pkg.get("sites"):
+        raise enhancement_package.EnhancementPackageError(
+            f"code-hook package {pkg['id']!r} has no sites (fail-closed refusal)")
     if pkg["category"] != "guest_memory_code_hook":
         raise enhancement_package.EnhancementPackageError(
             f"code-hook package {pkg['id']!r}: category {pkg['category']!r} is not "
@@ -6412,7 +6415,17 @@ def _load_code_hook_package(elf, known, symbols, code_hook_pkg_path, symbol_map_
                 f"code-hook site {site['id']}: the enhancement package has a site with that id; "
                 "site ids are one namespace across both packages (fail-closed refusal)")
     taken = _rewritten_words()
+    # A gate_30hz_alt site calls its alternates itself on alternate updates, bypassing the gated
+    # function's own call to them: a hook on such a call would act only on the other updates.
+    alternates = {alt: f"site {s['id']}" for s in ENHANCEMENT_SITES.values()
+                  for alt in s["rewrite"].get("alternates", ())}
     for addr, site in sorted(sites.items()):
+        stock = site["stock_words"][0]
+        if (stock >> 26) == 3 and jump_target(addr, stock) in alternates:
+            raise enhancement_package.EnhancementPackageError(
+                f"code-hook site {site['id']} at 0x{addr:08x}: its call to 0x{jump_target(addr, stock):08x} "
+                f"is an alternate that {alternates[jump_target(addr, stock)]} of the enhancement package "
+                "calls itself on alternate updates, where the hook would not run (fail-closed refusal)")
         if addr in taken:
             raise enhancement_package.EnhancementPackageError(
                 f"code-hook site {site['id']}: address 0x{addr:08x} collides with {taken[addr]} of "

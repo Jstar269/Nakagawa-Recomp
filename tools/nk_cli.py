@@ -2689,6 +2689,8 @@ def _select_code_hook_package(
             f"Code-hook package rejected: {package_path} has category {package['category']!r}, "
             "not 'guest_memory_code_hook'."
         )
+    if not package.get("sites"):
+        raise PackageBuildError(f"Code-hook package rejected: {package_path} has no sites.")
     if shipped and not enhancement_package_module.is_published_package(package):
         raise PackageBuildError(
             f"Code-hook package rejected: {package_path} is shipped with the source tree but is "
@@ -2701,7 +2703,7 @@ def _select_code_hook_package(
             f"Code-hook package target_title_id {package['target_title_id']!r} "
             f"does not match library title_id {title_id!r}."
         )
-    if package["executable_sha256"] != executable_sha256:
+    if "executable_sha256" in package and package["executable_sha256"] != executable_sha256:
         raise PackageBuildError(
             f"Code-hook package executable_sha256 {package['executable_sha256']} "
             f"does not match selected executable SHA-256 {executable_sha256}."

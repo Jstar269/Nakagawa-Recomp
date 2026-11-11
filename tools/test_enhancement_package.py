@@ -2719,6 +2719,15 @@ class TestEnhancementBuildPackageWiring(unittest.TestCase):
         self.assertEqual(self._stacked(None, hook), (
             hook.resolve(), None, self.root / "packages" / f"{self.DISC}-enhanced-synth.widen.clip"))
 
+    def test_a_code_hook_package_with_no_sites_is_refused(self) -> None:
+        path = self._hook_pkg("no-sites.json")
+        data = json.loads(path.read_text(encoding="utf-8"))
+        for key in ("sites", "game_version", "executable_sha256"):
+            del data[key]
+        path.write_text(json.dumps(data), encoding="utf-8")
+        with self.assertRaisesRegex(self.nk_cli.PackageBuildError, "has no sites"):
+            self._select_hook(path)
+
     def test_a_code_hook_package_is_checked_like_the_enhancement_package(self) -> None:
         cases = {
             "not 'guest_memory_code_hook'": self._write_pkg("timing-as-hook.json"),
@@ -2754,6 +2763,12 @@ class TestEnhancementBuildPackageWiring(unittest.TestCase):
         self.assertEqual(both["code_hook_package_id"], "synth.widen.clip")
         self.assertEqual(both["code_hook_package_sha256"],
                          enhancement_package.compute_package_digest(enhancement_package.load_and_validate_package(hook)))
+        self.assertNotIn("code_hook_symbol_map_sha256", both)
+        # Its symbols sidecar names its sites, so an edited one is a different build.
+        hook.with_suffix(".symbols.json").write_text('{"synth_scene_cache": "0x00001200"}', encoding="utf-8")
+        named = package_cache.enhancement_package_options(
+            {"ENHANCEMENT_PACKAGE": str(timing), "ENHANCEMENT_CODE_HOOK_PACKAGE": str(hook)})
+        self.assertEqual(named["code_hook_symbol_map_sha256"], package_cache.sha256_file(hook.with_suffix(".symbols.json")))
 
     def test_an_inherited_code_hook_package_is_ambient(self) -> None:
         from nk_core import package_cache
@@ -4166,17 +4181,23 @@ class TestCodeHookBesideTiming(unittest.TestCase):
     BUILD = 0x1100     # returns a pointer in $v0
     CALLER = 0x1200    # jal BUILD; its delay slot loads a count
     TIMER = 0x1300     # a count the timing package doubles; its return's delay slot is the boundary
+    PAIR = 0x1400      # jal TIMER, then jal BUILD in its delay slot
+    RELAY = 0x1500     # jal BUILD, passing its own $a0 on
     COUNT = 0x2404001E  # addiu $a0, $zero, 30
 
     def setUp(self) -> None:
         self.words = _program({
-            self.ENTRY: [_jal(self.CALLER), _NOP, _jal(self.TIMER), _NOP, _JR_RA, _NOP],
+            self.ENTRY: [_jal(self.CALLER), _NOP, _jal(self.TIMER), _NOP, _jal(self.RELAY), _NOP,
+                         _jal(self.PAIR), _NOP, _JR_RA, _NOP],
             self.BUILD: [_i(0x09, _ZERO, _V0, 0x0400), _JR_RA, _NOP],       # addiu v0, zero, 0x400
             self.CALLER: [_jal(self.BUILD), self.COUNT, _JR_RA, _NOP],
             self.TIMER: [self.COUNT, _JR_RA, _NOP],
+            self.PAIR: [_jal(self.TIMER), _jal(self.BUILD), _NOP, _JR_RA, _NOP],
+            self.RELAY: [_jal(self.BUILD), _NOP, _JR_RA, _NOP],
         })
         self.symbols = {"synth_entry": f"0x{self.ENTRY:08x}", "synth_scene_build": f"0x{self.BUILD:08x}",
-                        "synth_scene_cache": f"0x{self.CALLER:08x}", "synth_timer": f"0x{self.TIMER:08x}"}
+                        "synth_scene_cache": f"0x{self.CALLER:08x}", "synth_timer": f"0x{self.TIMER:08x}",
+                        "synth_pair": f"0x{self.PAIR:08x}", "synth_relay": f"0x{self.RELAY:08x}"}
 
     def _timing(self, *sites: dict[str, Any]) -> dict[str, Any]:
         return {
@@ -4320,6 +4341,38 @@ class TestCodeHookBesideTiming(unittest.TestCase):
         self._refused(r"code-hook site SYNTH_WIDEN at 0x00001200: its delay slot 0x00001204 is site "
                       r"SYNTH_SLOT of the enhancement package, inside a span it rewrites",
                       self._timing(slot), self._hook())
+
+    def test_a_hook_at_the_delay_slot_of_a_rewritten_call_is_refused(self) -> None:
+        self._elf_bytes_for_packages()
+        gate = {"id": "SYNTH_GATE", "function": "synth_pair", "insn_offset": 0,
+                "stock_digest": compute_stock_words_digest([self.words[self.PAIR]]), "transform": "gate_30hz"}
+        hook = self._hook()
+        hook["sites"][0].update(function="synth_pair", insn_offset=4,
+                                stock_digest=compute_stock_words_digest([self.words[self.PAIR + 4]]))
+        self._refused(r"code-hook site SYNTH_WIDEN: address 0x00001404 collides with the delay slot of site "
+                      r"SYNTH_GATE of the enhancement package", self._timing(gate), hook)
+
+    def test_a_hook_on_a_call_an_alternate_gate_bypasses_is_refused(self) -> None:
+        # The timing package gates jal synth_relay with the alternate synth_scene_build, so on an alternate
+        # update it calls synth_scene_build itself and the hooked jal inside synth_relay never runs.
+        self._elf_bytes_for_packages()
+        alt = {"id": "SYNTH_ALT", "function": "synth_entry", "insn_offset": 16,
+               "stock_digest": compute_stock_words_digest([self.words[self.ENTRY + 16]]),
+               "transform": "gate_30hz_alt", "alternates": ["synth_scene_build"]}
+        hook = self._hook()
+        hook["sites"][0].update(function="synth_relay", insn_offset=0,
+                                stock_digest=compute_stock_words_digest([self.words[self.RELAY]]))
+        self._refused(r"code-hook site SYNTH_WIDEN at 0x00001500: its call to 0x00001100 is an alternate that "
+                      r"site SYNTH_ALT of the enhancement package calls itself on alternate updates",
+                      self._timing(alt), hook)
+
+    def test_a_hook_package_with_no_sites_is_refused(self) -> None:
+        self._elf_bytes_for_packages()
+        hook = self._hook()
+        for key in ("sites", "game_version", "executable_sha256"):
+            del hook[key]
+        validate_package(copy.deepcopy(hook))
+        self._refused(r"code-hook package 'synth.widen.clip' has no sites", self._timing(), hook)
 
     def test_a_hook_whose_delay_slot_is_the_update_boundary_is_refused(self) -> None:
         self._elf_bytes_for_packages()

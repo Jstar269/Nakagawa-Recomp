@@ -419,14 +419,16 @@ each keeps its own category, digest and checks.
   code-hook package too; a code-hook package for another title; a site id both packages use; a code-hook site at
   a word the enhancement package rewrites (a 60 Hz site, an Ace part site or the `update_boundary`) or at the delay
   slot of a rewritten call; a code-hook call whose delay slot is such a word, inside the span the enhancement
-  package rewrites; and a code-hook site whose rewrite keeps run-time state. Codegen refuses `--code-hook-package`
-  without `--enhancement-package`.
+  package rewrites; a code-hook site whose rewrite keeps run-time state; a code-hook call to a function that a
+  `gate_30hz_alt` site of the enhancement package lists as an alternate (on an alternate update that site calls the
+  alternate itself, so the hook would act only on the other updates); and a code-hook package with no sites. Codegen
+  refuses `--code-hook-package` without `--enhancement-package`.
 - **The build.** The code-hook sites join the site table and are emitted as they would be in a build of that
   package alone; the generated code gains one header line naming the code-hook package's id, version, site count
-  and digest, and the package's cache key gains its id and digest. A build of a timing package with a code-hook
-  package is `packages/<disc_id>-enhanced-<timing id>+<hook id>` (no package id holds a `+`, and the joined name
-  may have at most 64 characters); a code-hook package with no timing package is the build's one package,
-  `packages/<disc_id>-enhanced-<hook id>`.
+  and digest; the package's cache key gains its id, its digest and, when it has one, its symbols sidecar's digest.
+  A build of a timing package with a code-hook package is `packages/<disc_id>-enhanced-<timing id>+<hook id>` (no
+  package id holds a `+`, and the joined name may have at most 64 characters); a code-hook package with no timing
+  package is the build's one package, `packages/<disc_id>-enhanced-<hook id>`.
 - **Without one** the generated output, the package directory and the cache key are byte-identical to a build
   before this section.
 
@@ -1810,8 +1812,9 @@ The Layer 2 mechanism of section 10.8, for a title that skips objects outside it
   the key and Widescreen has a wing (`D` > 0); with either missing, the stock call runs and nothing is written. The run
   names it (`ACE_MODE: cull on (...)`, the report's `cull`), and reports it unavailable when no matrix was scaled by
   the end of the run: the title's build has no culling package, or Widescreen is off. The package build is chosen by
-  the title's own data (section 5): `build-package --ace-cull` builds the title's culling package beside its
-  timing package (section 9.9); the launcher picking that build for an Ace launch with the part on is a separate
+  the title's own data (section 5): `build-package --ace-cull` adds the title's culling package, beside the timing
+  package when the build has one (`--experimental-60hz` or `--enhancement-package`) and as the build's one package
+  otherwise (section 9.9); the launcher picking that build for an Ace launch with the part on is a separate
   change. The player cannot tell ahead of a launch which games have a culling build, so the row's text says it
   acts only in games that do, and a run without one says so in the `ACE_MODE: cull unavailable (...)` line and
   the report. The runtime remembers at most 4096 distinct matrices (see Limits below); the report's
