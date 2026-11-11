@@ -252,7 +252,7 @@ typedef enum { FLOW_NONE = 0, FLOW_BUILD, FLOW_BUILT, FLOW_BUILD_PARTS, FLOW_CON
                FLOW_DISC_CHECKING, FLOW_DISC_SUPPORTED,
                FLOW_DISC_UNTESTED, FLOW_DISC_FONTS, FLOW_DISC_BLOCKED, FLOW_DISC_UNSUPPORTED,
                FLOW_DISC_GUIDED, FLOW_SETTINGS, FLOW_SETTINGS_ONLINE, FLOW_SETTINGS_ONLINE_ON,
-               FLOW_SETTINGS_ONLINE_DISCORD_ON,
+               FLOW_SETTINGS_ONLINE_DISCORD_ON, FLOW_SETTINGS_ONLINE_NO_DISCORD,
                FLOW_SETTINGS_NOTICES,
                FLOW_SETTINGS_REMOVE, FLOW_SETTINGS_BUILD_CACHE, FLOW_SETTINGS_FONTS,
                FLOW_SETTINGS_UPDATES, FLOW_SETTINGS_UPDATE_FAILED,
@@ -274,6 +274,8 @@ typedef enum { FLOW_NONE = 0, FLOW_BUILD, FLOW_BUILT, FLOW_BUILD_PARTS, FLOW_CON
                FLOW_PAGE_TITLE_STEAM, FLOW_PAGE_STEAM, FLOW_PAGE_STEAM_ACCOUNTS,
                FLOW_PAGE_STEAM_BLOCKED, FLOW_PAGE_TITLE_TALL,
                FLOW_PAGE_QUEUE, FLOW_PAGE_QUEUE_PAUSED,
+               FLOW_PAGE_TITLE_LONGEST_AUTHENTIC, FLOW_PAGE_TITLE_LONGEST_ENHANCED,
+               FLOW_PAGE_TITLE_LONGEST_ACE,
                FLOW_CONSENT_FULL, FLOW_NICKNAME_FIRST, FLOW_NICKNAME_FULL,
                FLOW_NICKNAME_REFUSED, FLOW_COUNT } FlowCase;
 
@@ -394,7 +396,8 @@ static PlayerUiAction draw_settings_case(NkUi *ui, FlowCase which) {
     PlayerUiSettingsModel settings;
     memset(&settings, 0, sizeof(settings));
     settings.page = which == FLOW_SETTINGS_ONLINE || which == FLOW_SETTINGS_ONLINE_ON ||
-                    which == FLOW_SETTINGS_ONLINE_DISCORD_ON
+                    which == FLOW_SETTINGS_ONLINE_DISCORD_ON ||
+                    which == FLOW_SETTINGS_ONLINE_NO_DISCORD
         ? PLAYER_UI_SETTINGS_PAGE_ONLINE
         : which == FLOW_SETTINGS_NOTICES ? PLAYER_UI_SETTINGS_PAGE_NOTICES
         : which == FLOW_SETTINGS_REMOVE ? PLAYER_UI_SETTINGS_PAGE_REMOVE_TOOLS
@@ -468,7 +471,8 @@ static PlayerUiAction draw_settings_case(NkUi *ui, FlowCase which) {
     settings.online_mode = which == FLOW_SETTINGS_ONLINE_ON;
     /* Discord status (#2259): a build that can show it on the plain page; the stored online
        mode case is a build that cannot, where the row is hidden; and a build that cannot with
-       Discord status stored On, where the row stays so it can be turned off. */
+       Discord status stored On, where the row stays so it can be turned off. The page of a
+       build that cannot, with both settings Off, shows only Developer mode and Nickname. */
     settings.discord_available = which == FLOW_SETTINGS_ONLINE;
     settings.discord_presence = which == FLOW_SETTINGS_ONLINE_DISCORD_ON;
     settings.developer_mode = true;
@@ -923,6 +927,51 @@ static PlayerUiAction draw_page_case(NkUi *ui, FlowCase which) {
                 "in a basic Windows window. The Internal resolution setting has no effect, and "
                 "the game may run slower. Updating the graphics driver may help.";
         }
+        return player_ui_screen_title(ui, &title);
+    }
+    if (which == FLOW_PAGE_TITLE_LONGEST_AUTHENTIC || which == FLOW_PAGE_TITLE_LONGEST_ENHANCED ||
+        which == FLOW_PAGE_TITLE_LONGEST_ACE) {
+        /* The ENHANCEMENTS card's longest text in each play mode: every Enhanced part on (in
+           player_ui_nk.c's words), Ace's 60 FPS game logic with smooth motion held off, the
+           longest last-session line the runtime's report gives, and an older build with its
+           chip and Rebuild beside PLAY. */
+        static PlayerUiTitle fixture;
+        PlayerUiTitleModel title;
+        bool ace = which == FLOW_PAGE_TITLE_LONGEST_ACE;
+        bool authentic = which == FLOW_PAGE_TITLE_LONGEST_AUTHENTIC;
+        fixture = k_titles[6];
+        fixture.library_status = "Older build";
+        fixture.status_marker = "\xE2\x96\xB2";
+        fixture.status_rgba = 0xDBB024FFu;
+        fixture.library_status_detail = "Built by an older Nakagawa. It still plays; rebuild "
+                                        "it to use this version's fixes.";
+        fixture.rebuild_offered = true;
+        fixture.ace_shown = true;
+        fixture.ace_label = ace ? "Play mode: Ace"
+                          : authentic ? "Play mode: Authentic" : "Play mode: Enhanced";
+        fixture.ace_in_effect = !authentic;
+        fixture.ace_enabled = true;
+        fixture.ace_line = authentic
+            ? "Authentic: plays exactly as released, with nothing added."
+            : ace ? "Ace for this game: 60 FPS game logic, 16x texture filtering, crisp system "
+                    "text, speed readout, game badge, widescreen, clean pitched sound, 2x finer "
+                    "patches, wider culling, sharper enlarging. Smooth motion is off while it "
+                    "runs at 60 FPS: this build smooths only 30 FPS games."
+                  : "Enhanced for this game: 16x texture filtering, crisp system text, speed "
+                    "readout, game badge, widescreen, smooth motion, clean pitched sound, 2x "
+                    "finer patches, wider culling, sharper enlarging.";
+        fixture.ace_last_session = "Last session: 16x filtering, crisp keyboard; the game ran "
+                                   "at 30 Hz.";
+        fixture.options_shown = true;
+        fixture.options_enabled = true;
+        fixture.enhancement_shown = ace;
+        fixture.enhancement_enabled = ace;
+        fixture.enhancement_on = ace;
+        memset(&title, 0, sizeof(title));
+        title.title = &fixture;
+        title.title_index = 6u;
+        title.logical_width = g_flow_width;
+        title.logical_height = g_flow_height;
         return player_ui_screen_title(ui, &title);
     }
     if (which == FLOW_PAGE_ABOUT) {
@@ -4092,6 +4141,133 @@ static void test_prompt_bar_stays_whole(void) {
     g_flow_text_size_pct = saved;
 }
 
+/* Whether a text run ends in an ellipsis: nk_ui_text_clamp's "…", or three full stops. */
+static bool run_ends_in_ellipsis(const NkUiTextRun *run) {
+    static const char mark[] = "\xE2\x80\xA6";
+    size_t length = run->length;
+    while (length > 0u && run->text[length - 1u] == ' ') --length;
+    return (length >= sizeof(mark) - 1u &&
+            memcmp(run->text + length - (sizeof(mark) - 1u), mark, sizeof(mark) - 1u) == 0) ||
+           (length >= 3u && memcmp(run->text + length - 3u, "...", 3u) == 0);
+}
+
+/* Lays a case out at width x height and reads its text runs from the top of the scrolling
+   container `scroller` to its end, 120 px at a time, as the player scrolls: whether no run
+   ends in an ellipsis (each one found is named) and every needle in `ends` is drawn. */
+static bool flow_case_text_whole(FlowCase which, int width, int height, NkUiId scroller,
+                                 const char *const *ends, size_t end_count) {
+    NkUi *ui = NULL;
+    const NkUiDrawList *draw = flow_case_layout(which, width, height, &ui);
+    NkUiViewport viewport = launcher_viewport(width, height, 1.0f);
+    NkUiScale scale;
+    NkUiScrollState state;
+    bool found[8] = {false};
+    bool whole = draw != NULL && ui != NULL && end_count <= sizeof(found) / sizeof(found[0]);
+    float offset = 0.0f;
+    viewport.text_size_pct = g_flow_text_size_pct;
+    scale = nk_ui_scale_for_viewport(&viewport);
+    while (whole && draw != NULL) {
+        for (uint32_t i = 0u; i < draw->ncmd; ++i) {
+            const NkUiTextRun *run = draw->cmd[i].kind == NK_UI_DRAW_TEXT
+                                         ? (const NkUiTextRun *)draw->cmd[i].custom : NULL;
+            if (run == NULL || run->text == NULL) continue;
+            if (run_ends_in_ellipsis(run)) {
+                size_t shown = run->length > 70u ? 70u : run->length;
+                fprintf(stderr, "  cut short at %d x %d, %d%% text: %08X \"...%.*s\"\n", width,
+                        height, g_flow_text_size_pct, (unsigned)draw->cmd[i].element_id,
+                        (int)shown, run->text + run->length - shown);
+                whole = false;
+            }
+            for (size_t e = 0u; e < end_count; ++e) {
+                size_t n = strlen(ends[e]);
+                for (size_t at = 0u; !found[e] && at + n <= run->length; ++at) {
+                    found[e] = memcmp(run->text + at, ends[e], n) == 0;
+                }
+            }
+        }
+        if (!nk_ui_scroll_state(ui, scroller, &state) || offset >= state.max_offset) break;
+        offset += 120.0f;
+        nk_ui_scroll_to(ui, scroller, offset);
+        g_flow_width = scale.logical_w;
+        g_flow_height = scale.logical_h;
+        for (int frame = 0; frame < 2; ++frame) {
+            nk_ui_begin(ui, 0.0);
+            (void)draw_flow_case(ui, which);
+            draw = nk_ui_end(ui);
+        }
+        g_flow_width = 1280.0f;
+        g_flow_height = 800.0f;
+    }
+    for (size_t e = 0u; whole && e < end_count; ++e) {
+        if (!found[e]) {
+            fprintf(stderr, "  not drawn at %d x %d, %d%% text: \"%s\"\n", width, height,
+                    g_flow_text_size_pct, ends[e]);
+            whole = false;
+        }
+    }
+    if (ui != NULL) nk_ui_destroy(ui);
+    return whole;
+}
+
+/* Never an ellipsis on what the player cannot read another way: the game page's
+   ENHANCEMENTS card, with every part on and a last session, wraps both sentences whole in
+   Authentic, Enhanced and Ace, as does Settings > Enhanced, at the 960 x 540 minimum window
+   and at 960 x 544 (the PSP's picture at 2x), at every text size. On main the card cut the
+   parts and the last session to one or two lines, ending in "…". Above the design text
+   size, Settings' Online, Developer, Discord status and Nickname rows, and the wizard's, stack
+   under their buttons when a sentence would be cut beside them, and wrap whole there; at
+   the design size those rows stay beside their buttons by design (two lines at most). */
+static void test_game_page_text_is_never_cut(void) {
+    static const struct { int w; int h; } sizes[] = {{960, 540}, {960, 544}};
+    static const int text_sizes[] = {100, 125, 150};
+    static const char *const authentic_ends[] = {"added.", "Hz."};
+    static const char *const enhanced_ends[] = {"enlarging.", "Hz."};
+    static const char *const ace_ends[] = {"enlarging.", "games.", "Hz."};
+    static const struct {
+        FlowCase which;
+        const char *const *ends;
+        size_t end_count;
+        const char *what;
+        int min_text_pct; /* the smallest text size the case is checked at */
+    } cases[] = {
+        {FLOW_PAGE_TITLE_LONGEST_AUTHENTIC, authentic_ends, 2u, "Authentic game page", 100},
+        {FLOW_PAGE_TITLE_LONGEST_ENHANCED, enhanced_ends, 2u, "Enhanced game page", 100},
+        {FLOW_PAGE_TITLE_LONGEST_ACE, ace_ends, 3u, "Ace game page", 100},
+        {FLOW_SETTINGS_ACE, NULL, 0u, "Settings > Enhanced", 100},
+        {FLOW_SETTINGS_ACE_TITLE, NULL, 0u, "a game's Settings > Enhanced", 100},
+        {FLOW_SETTINGS_ACCESSIBILITY, NULL, 0u, "Settings > Accessibility", 125},
+        {FLOW_SETTINGS_BUILD_CACHE, NULL, 0u, "Settings > Build tools", 125},
+        {FLOW_SETTINGS_ONLINE, NULL, 0u, "Settings > Online", 125},
+        {FLOW_SETTINGS_ONLINE_ON, NULL, 0u, "Settings > Online with Online mode on", 125},
+        {FLOW_SETTINGS_ONLINE_DISCORD_ON, NULL, 0u, "Settings > Online with Discord status on",
+         125},
+        {FLOW_SETTINGS_ONLINE_NO_DISCORD, NULL, 0u, "Settings > Online without Discord status",
+         125},
+        {FLOW_WIZ_OPTIONS, NULL, 0u, "wizard's options", 125},
+        {FLOW_WIZ_OPTIONS_ON, NULL, 0u, "wizard's options with Online mode on", 125}
+    };
+    int saved = g_flow_text_size_pct;
+    for (size_t t = 0u; t < sizeof(text_sizes) / sizeof(text_sizes[0]); ++t) {
+        g_flow_text_size_pct = text_sizes[t];
+        for (size_t s = 0u; s < sizeof(sizes) / sizeof(sizes[0]); ++s) {
+            for (size_t c = 0u; c < sizeof(cases) / sizeof(cases[0]); ++c) {
+                char message[160];
+                bool title = cases[c].end_count > 0u;
+                if (text_sizes[t] < cases[c].min_text_pct) continue;
+                (void)snprintf(message, sizeof(message),
+                               "the %s ends no sentence in an ellipsis at %d x %d, %d%% text",
+                               cases[c].what, sizes[s].w, sizes[s].h, text_sizes[t]);
+                CHECK(flow_case_text_whole(cases[c].which, sizes[s].w, sizes[s].h,
+                                           title ? NK_UI_ID(NK_UI_ID_SCREEN_TITLE, 0x000020u)
+                                                 : FLOW_ID_CARD,
+                                           cases[c].ends, cases[c].end_count),
+                      message);
+            }
+        }
+    }
+    g_flow_text_size_pct = saved;
+}
+
 static void test_refresh_advice_classifier(void) {
     static const double silent[] = {60.0, 120.0, 180.0, 240.0, 59.94, 119.88, 179.82,
                                     60000.0 / 1001.0, 59.9401, 0.0, -1.0};
@@ -6939,6 +7115,7 @@ int main(int argc, char **argv) {
     test_tall_title_page_scrolls();
     test_enhanced_rows_stay_put();
     test_prompt_bar_stays_whole();
+    test_game_page_text_is_never_cut();
     test_psp_fonts_page();
     test_wizard_actions();
     test_plain_cards();

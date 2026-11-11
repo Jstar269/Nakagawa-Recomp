@@ -159,7 +159,8 @@ struct PlayerUiNk {
     char settings_saves[NK_MAX_PATH];
     /* The play mode on the open title's page: what it turns on, and its last session, read
        at most every two seconds (the runtime writes the report when a game ends). */
-    char ace_line[256];
+    /* Every part named, with the 60 FPS and smooth-motion words: the line is never cut. */
+    char ace_line[PLAYER_PART_COUNT * 64 + 192];
     char enhanced_smooth_sentence[160];  /* the Smooth motion row's words under 60 FPS logic */
     char ace_last_session[200];
     char ace_last_disc[NK_MAX_DISC_ID_LEN];
@@ -282,7 +283,7 @@ struct PlayerUiNk {
     char status_reported[PLAYER_UI_TITLE_CAP][32]; /* the status word last printed */
     char play_reported[PLAYER_UI_TITLE_CAP][16];   /* the play mode badge last printed */
     char enhanced_reported[512];                    /* Settings > Enhanced as last printed */
-    char ace_line_reported[256];                    /* the open title's play line last printed */
+    char ace_line_reported[PLAYER_PART_COUNT * 64 + 192]; /* the play line last printed */
     char preset_note_reported[200];                 /* the main Settings page's preset note */
     int disc_reported_view;  /* the game-found card whose rows were printed, or -1 */
 #endif
@@ -2666,7 +2667,8 @@ static void player_ui_title_ace(PlayerUiNk *player, const PlayerApp *app, int in
     if (play.mode == PLAYER_PLAY_AUTHENTIC) {
         out->ace_line = "Authentic: plays exactly as released, with nothing added.";
     } else {
-        char words[160] = "";
+        /* Every part: each as long as its part[64], with the ", " before it. */
+        char words[PLAYER_PART_COUNT * (64 + 2)] = "";
         size_t used = 0;
         size_t count = 0;
         for (int p = 0; p < PLAYER_PART_COUNT; p++) {
