@@ -2182,6 +2182,8 @@ static uint32_t do_load(uint32_t param, const char *game, const char *save, int 
      * PSP-3000: AUTOLOAD, READDATA and READDATASECURE left it at its preset). */
     if (savedata_member_state(dir, "PARAM.SFO") == 0)
         return rw ? ERR_RW_DATA_BROKEN : ERR_LOAD_DATA_BROKEN;
+    /* dataSize is zeroed before the read, as PPSSPP's LoadSaveData does; what a PSP leaves
+     * there when the read then fails is UNMEASURED. */
     MEM_W32(param + SDP_dataSize, 0);
     /* Blank fileName means success without reading data (PPSSPP LoadSaveData); the SFO and
      * icon blobs are still handed back. */

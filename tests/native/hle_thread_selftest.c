@@ -10743,6 +10743,17 @@ static int sdt_files_counts_are(uint32_t v) {
            MEM_R32(SDT_FILELIST + 20u) == v;
 }
 
+/* Everything sdt_files preset is still there: the counts, the three list pointers (secure and
+ * normal 0, system SDT_FILES) and the zeroed entries. */
+static int sdt_files_untouched(void) {
+    if (!sdt_files_counts_are(0x7fu) || MEM_R32(SDT_FILELIST + 24u) != 0u ||
+        MEM_R32(SDT_FILELIST + 28u) != 0u || MEM_R32(SDT_FILELIST + 32u) != SDT_FILES)
+        return 0;
+    for (uint32_t i = 0; i < 80u * 4u; i++)
+        if (MEM_R8(SDT_FILES + i) != 0u) return 0;
+    return 1;
+}
+
 /* One mode against <game><save> with fileName DATA.BIN, the data buffer preset to 0xee and
  * dataSize preset to 0x40, so a write to either shows. */
 static uint32_t sdt_run(uint32_t mode, const char *game, const char *save) {
@@ -10811,9 +10822,9 @@ static void test_savedata_empty_stick_and_broken_saves(void) {
             nk_platform_mkdir_p(dir);
         }
         snprintf(dir, sizeof(dir), "%s/PSP/SAVEDATA/NKEMPTYSLOT", root);
-        expect(sdt_files("NKEMPTY", "SLOT") == 0x80110327u && sdt_files_counts_are(0x7fu),
+        expect(sdt_files("NKEMPTY", "SLOT") == 0x80110327u && sdt_files_untouched(),
                "FILES of a save that does not exist is RW_NO_DATA (PSP: deletedata) and leaves "
-               "the counts as they were (NODATA-001)");
+               "the counts, the list pointers and the entries as they were (NODATA-001)");
         static const uint32_t load_modes[] = { 2u /* LOAD */, 0u /* AUTOLOAD */ };
         for (size_t i = 0; i < 2; i++)
             expect(sdt_run(load_modes[i], "NKEMPTY", "SLOT") == 0x80110307u &&
@@ -10943,8 +10954,9 @@ static void test_savedata_empty_stick_and_broken_saves(void) {
             }
             expect(sdt_run(del_modes[i], "NKWHOLE", "SLOT") == 0u && !nk_platform_dir_exists(dir),
                    "DELETE, AUTODELETE and DELETEDATA of a whole save succeed and remove it");
-            expect(sdt_files("NKWHOLE", "SLOT") == 0x80110327u && sdt_files_counts_are(0x7fu),
-                   "FILES after the delete is RW_NO_DATA (PSP: deletedata)");
+            expect(sdt_files("NKWHOLE", "SLOT") == 0x80110327u && sdt_files_untouched(),
+                   "FILES after the delete is RW_NO_DATA (PSP: deletedata) and leaves the counts, "
+                   "the list pointers and the entries (NODATA-001)");
         }
     }
 
