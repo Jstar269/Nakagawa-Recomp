@@ -1286,9 +1286,11 @@ class TestPlayerPackageRoute(unittest.TestCase):
         self.assertIn("HEADLESS_ACCEPTANCE status=PASS", launched.stdout)
         self.assertIn(f"presented_frames={FRAMES}", launched.stdout)
         self.assertIn("child_exit=42", launched.stdout)
-        boot_logs = self.player_boot_event_files()
+        # With --user-data-root, the player's cache folder is that root's cache
+        # (nk_platform_win32.c resolve_override_path).
+        boot_logs = list((user_root / "cache").glob("player-boot-*.events"))
         self.assertEqual(len(boot_logs), 1, "the player did not retain the child's boot evidence")
-        events = next(iter(boot_logs)).read_text(encoding="utf-8", errors="replace")
+        events = boot_logs[0].read_text(encoding="utf-8", errors="replace")
         self.assertIn(
             f"BOOT_EVENT phase=guest_start mode=scheduler entry=0x{LOW_FIXED_ADDRESS_BASE:08x}",
             events)
