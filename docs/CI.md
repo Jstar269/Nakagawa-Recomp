@@ -33,8 +33,8 @@ case-insensitive `true` or `false`; missing or malformed control state is red.
 | Mixed documentation/native changes | classification, hygiene/security, Python tooling, native/translation, Windows, Windows installer, CI required | none of the applicable product gates |
 | Ordinary push to `main` after a validated merge, including one with a path the classifier does not recognise | classification, hygiene/security with its Markdown step when needed and its compact main smoke steps, CI required | expensive platform matrix; the merged PR (or batch) carried it, and an unrecognised path already forced the full matrix there |
 | Workflow push to `main` (a changed workflow, action, CI classifier, aggregate or shard planner), or a push whose change set cannot be read | the full applicable validation above plus the main smoke steps | none of the substantive public gates |
-| Manual `workflow_dispatch` | the full matrix, Windows installer, and full Python tier, regardless of paths | none |
-| Nightly schedule (`17 3 * * *` UTC) | the full matrix, Windows installer, and full Python tier | none |
+| Manual `workflow_dispatch` | the full matrix, Windows installer, full Python tier and C coverage, regardless of paths | none |
+| Nightly schedule (`17 3 * * *` UTC) | the full matrix, Windows installer, full Python tier and C coverage | none |
 | Merge-queue group (`merge_group`, `checks_requested`) | the full matrix, as for a manual dispatch, regardless of paths; every required check reports on the group commit | none |
 
 ### What else starts on a pull request push
@@ -56,8 +56,9 @@ GitHub's free plan runs about 20 jobs at once for this repository. A full `CI` r
 change, a manual run, the nightly schedule, a merge group) used to need 23 jobs, so a second
 pull request's run waited for runners while the first ran. The same checks then ran in 14
 jobs; the Android launcher build (`android_build`), added later, makes 15, a fourth Python
-shard makes 16, a fourth Windows group makes 17, the informational C coverage job (`c_coverage`)
-makes 18, and installer and Windows-runtime changes add one path-gated Windows installer job. Nothing was dropped and no
+shard makes 16, a fourth Windows group makes 17, and installer and Windows-runtime changes add
+one path-gated Windows installer job. The nightly schedule and a manual run add the informational
+C coverage job (`c_coverage`), 18 in all. Nothing was dropped and no
 command changed; jobs were merged and their steps run one after another. Three things differ in
 when or how a step runs, and none of them skips a step
 where it ran before:
@@ -78,7 +79,7 @@ The jobs:
 | `hygiene` ("Hygiene and security") | 3 jobs: `hygiene` 2.2 min, `markdown` 0.4 min, `main_smoke` (pushes to `main` and full-matrix events only) | 1 job, about 2.5 min: hygiene's steps, then the main smoke steps, then the Markdown lint |
 | `public_export` | 2 jobs: `public_export` 0.2 min, `profile_zero_fixture` 0.4 min | 1 job, about 0.7 min: the export audit, then the profile-zero fixture build |
 | `linux_gcc16` | 1 job, 3.3 min | unchanged (not required, a container job on a hosted runner) |
-| `c_coverage` ("C coverage (informational)") | not present | 1 job, added later (not required, a hosted runner; [Coverage](#coverage)) |
+| `c_coverage` ("C coverage (informational)") | not present | 1 job, added later, on the nightly schedule and a manual run only (not required, a hosted runner; [Coverage](#coverage)) |
 | `native_tools` | 3 parts, 7.9-9.2 min | unchanged |
 | `python_tools` | 6 shards, 4.2-18.2 min | 4 shards: `test_production_smoke` alone, about 16 min, and three of about 14 min |
 | `windows_runtime` | 6 parts, 4.2-9.7 min (4.5-12.0 in run 42258417250) | 4 groups of parts, 8.1-13.9 min in run 43055225113 (smoke 8.1, routes 13.9, selftests 9.3, ladder-fuzz 9.7) |
@@ -1070,21 +1071,29 @@ whenever their jobs run; neither can change a gate's result.
 - **C runtime (`c_coverage`).** A job of its own, beside `native_tools`, builds and runs the
   self-tests `native_tools` runs on Linux, from `native-core-tests` to the GPU self-tests on
   lavapipe, a second time with gcov instrumentation (#2394).
-  It runs whenever `native_tools` runs (`run_native`), on a hosted `ubuntu-24.04` runner and
-  never on the self-hosted pool, so it cannot take a runner from a gate. `ci_required` neither
-  needs nor reads it: a failure shows red on this job and on the run without blocking a
-  merge, and `native_tools`' gates run unprofiled and no longer wait for a measurement. Its
+  It runs only on the nightly schedule and on a manual run (`workflow_dispatch`), under
+  `native_tools`' own condition (`run_native`), on a hosted `ubuntu-24.04` runner and never on
+  the self-hosted pool, so it cannot take a runner from a gate. `ci_required` neither needs nor
+  reads it: a failure shows red on this job and on the run without blocking anything. It stays
+  off pull requests, landing batches and merge groups because the
+  [Trusted CI verdict](#trusted-ci-verdict) is computed when the whole CI run completes, and
+  this job outlasts the required jobs. Run 43089041907 measured it at 17.6 minutes before it
+  reached the GPU self-tests' end, against 18.5 minutes for the longest required job, so on
+  every pull request it would hold the verdict back. Between measured commits Codecov carries
+  the `c` flag forward (`carryforward: true`), so a pull request's report shows the last
+  nightly figure. `native_tools`' gates run unprofiled and no longer wait for a measurement. Its
   setup steps are `native_tools`' own, byte for byte (packages through `NK_APT_INSTALL`, the
   pinned SDL3 and SDL3_ttf, PSPDEV), so the two jobs share their caches.
 
-  After the setup, a wrapper named `gcc` goes first on `PATH`: it runs the real `gcc` with
-  `--coverage` added. The measuring steps then run the gates' own commands
-  (`make CC=gcc native-core-tests`, and so on), and every compile and link is instrumented,
-  including the targets that hard-code their own compile flags. Before #2394 the C number came
+  After the setup, wrappers named `gcc` and `g++` go first on `PATH`: each runs the real
+  compiler with `--coverage` added. The measuring steps then run the gates' commands
+  (`make CC=gcc native-core-tests`, and so on; only an isolated build root or directory moves
+  under `build/`), and every compile and link is instrumented, including the targets that
+  hard-code their own compile flags and the C++ reference interpreter. Before #2394 the C number came
   from one extra build of `native-core-tests` in `native_tools`' core part, with `--coverage`
   appended to the Makefile's `CFLAGS` and `LDFLAGS`, which measured only the targets that
-  compile through those variables. The setup builds the pinned libraries with the real `gcc`,
-  before the wrapper exists, so they stay out of the number.
+  compile through those variables. The setup builds the pinned libraries with the real
+  compilers, before the wrappers exist, so they stay out of the number.
 
   The collection step runs `gcov -p -b -r` once per `*.gcno` notes file under `build/`, from
   the repository root, where the objects' recorded `src/...` source paths resolve. The
@@ -1092,9 +1101,13 @@ whenever their jobs run; neither can change a gate's result.
   directory, cannot open any source there, and uploads header-only reports that Codecov
   rejects. One run per notes file keeps a source shared by several self-tests from getting
   duplicate line records, and a notes file whose program never ran still reports its lines,
-  as not executed. `-r` keeps system headers out, and reports for the tests' own sources
-  (`tests/`, `fixtures/`, `*_selftest.c`) and for C generated into `build/` are dropped, as
-  `tools/test_*.py` is for Python. Everything is uploaded once, under `flags: c`.
+  as not executed. Notes files of the mutants built inside measured targets (every path with
+  `mutant` in it) are skipped: lines only a mutant define compiles would otherwise count as
+  covered. `-r` keeps system headers out, and reports for the tests' own sources (`tests/`,
+  `fixtures/`, `*_selftest.c`, `*_selftest.inc`, `src/player/player_ui_test.c`) and for C
+  generated into `build/` are dropped, as `tools/test_*.py` is for Python. Everything is
+  uploaded once, under `flags: c`. A failure in any earlier step skips the upload, so a
+  partial run uploads nothing and the `c` flag carries the last complete report forward.
 
   Measured, with the command `native_tools` runs for each:
 
@@ -1105,19 +1118,35 @@ whenever their jobs run; neither can change a gate's result.
   - The HLE thread and title self-tests, the AOT return-boundary self-test, the scheduler
     matrix (`sched-selftest`), dispatch isolation, cosimulation, snapshot execution and the
     verify self-test.
+  - The self-tests `native_tools` compiles directly instead of through make, their steps
+    copied byte for byte: the C++ interpreter unit tests, the FPU/VFPU conversion, VFPU table
+    loader, watchpoints-file parser, strbuf and VFPU interpreter self-tests, and the ATRAC3+
+    decoder and bridge self-tests, UBSan builds included.
   - `gui-present-selftest`, the player UI regressions and the player UI tests (overlays,
     fonts, art).
   - On lavapipe under Xvfb, as in `native_tools`: the GPU snapshot sync, capture, coherence,
     VRAM view identity and texture scaling self-tests, the FSR 3 pass self-test and the FSR 3
-    frame generation refusal (cell `G-R`).
+    frame generation refusal (cell `G-R`). As in `native_tools`, the step fails when the
+  device is not llvmpipe or the texture scaling self-test prints a `SKIP`, so a skip cannot
+  shrink the number unseen.
 
-  Not measured: the deliberate mutants (`gpu-texscale-mutant` and the mutants inside
-  `native-core-tests` are built and run, but they measure broken code on purpose, and the
-  separate mutant steps are left out), the cosimulation mutation corpus, the codegen gates,
-  the showcase, the CMake player and the player smokes. Those are end-to-end routes, not
-  self-tests. The nightly selftest repeat reruns binaries that are already measured. The
-  Windows-only self-tests run in `windows_runtime` and are not measured on Linux. Self-tests
-  that need a real GPU (the FSR 3 frame generation cells beyond `G-R`) run in no hosted job.
+  Not measured, each `native_tools` step named in `tools/test_public_ci_wiring.py`
+  (`CoverageWiringTests.C_NOT_MEASURED`), so a gate added later fails that test until it is
+  measured or named:
+
+  - Mutants: the separate mutant steps (`gpu-texscale-mutant`, the cosimulation mutation
+    corpus) are left out, and the mutants built inside measured targets are skipped at
+    collection. They run deliberately broken code.
+  - Not C self-tests: the import and fake-success audit, the provenance gap check, the 32-bit
+    format portability build (syntax only), the portable-object and GE profiling compiles, and
+    the FSR 3 shader reproduction.
+  - End-to-end routes: the CMake player build, test and smokes, the showcase, the installed
+    player smoke, the profile-zero route, and the codegen gates (run_elf, the MIPS
+    microtests, their golden traces and the framebuffer parity checks).
+  - The nightly selftest repeat, which reruns binaries already measured.
+
+  The Windows-only self-tests run in `windows_runtime` and are not measured. Self-tests that
+  need a real GPU (the FSR 3 frame generation cells beyond `G-R`) run in no hosted job.
 
 Both reports are uploaded with `codecov/codecov-action` (pinned by commit SHA)
 under `flags: python` and `flags: c`, authenticated with the job's OIDC identity
@@ -1838,7 +1867,7 @@ repository guarantee.
 ## Self-hosted Linux runners
 
 GitHub's free plan runs about 20 jobs at once for this repository, and one full CI run
-needs 18 of them ([Jobs per run](#jobs-per-run)), so a second run can wait for runners. To keep landings moving, the
+needs 17 of them ([Jobs per run](#jobs-per-run)), so a second run can wait for runners. To keep landings moving, the
 maintainer runs a small pool of self-hosted Linux runners, labelled `nk-wsl`, on their
 own PC. Contributors need nothing from it: every run they can start uses GitHub's
 hosted images, exactly as before.

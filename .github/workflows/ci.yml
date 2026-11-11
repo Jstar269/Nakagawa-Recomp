@@ -1613,9 +1613,13 @@ jobs:
     # time, the self-tests native_tools runs on Linux, with gcov instrumentation, and uploads the
     # reports under Codecov's `c` flag. It is not required: ci_required does not need it, so a
     # failure shows red here and on the run without blocking a merge, and native_tools' gates run
-    # unprofiled and at their own pace beside it. The setup steps are native_tools' own, so both
-    # jobs share the apt, SDL3 and SDL3_ttf caches. A hosted runner, never the nk-wsl pool: the
-    # measurement must not take a pool slot from a gate (docs/CI.md, "Coverage").
+    # unprofiled beside it. It runs only on the nightly schedule and on a manual run: the Trusted
+    # CI verdict is computed when the whole CI run completes, and this job outlasts the required
+    # jobs, so on a pull request or a landing batch it would hold the verdict back. Codecov
+    # carries the c flag forward between measured commits (.github/codecov.yml). The setup steps
+    # are native_tools' own, so both jobs share the apt, SDL3 and SDL3_ttf caches. A hosted
+    # runner, never the nk-wsl pool: the measurement must not take a pool slot from a gate
+    # (docs/CI.md, "Coverage").
     runs-on: ubuntu-24.04
     # id-token: write exists only for the Codecov OIDC upload below; contents
     # stays read, as everywhere else in this workflow.
@@ -1627,7 +1631,8 @@ jobs:
       ${{ always() && needs.classify.result == 'success' &&
           needs.public_export.result == 'success' &&
           needs.classify.outputs.allow_substantive == 'true' &&
-          needs.classify.outputs.run_native == 'true' }}
+          needs.classify.outputs.run_native == 'true' &&
+          (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
     timeout-minutes: 60
     steps:
       - name: Check out repository
@@ -1857,27 +1862,31 @@ jobs:
           echo "/usr/local/pspdev/bin" >> "$GITHUB_PATH"
           echo "PSPDEV=/usr/local/pspdev" >> "$GITHUB_ENV"
 
-      # Every `gcc` the steps below run, from make, the Python tools and the selftest
-      # drivers alike, is this wrapper: the real gcc with `--coverage` added. The measured
-      # commands are then the gates' own commands, byte for byte, and every compile and
-      # link is instrumented, including the targets that hard-code their own flags and so
-      # never saw a `--coverage` passed through CFLAGS. The setup steps above built the
-      # pinned libraries with the real gcc, before the wrapper existed.
+      # Every `gcc` and `g++` the steps below run, from make, the Python tools and the
+      # selftest commands alike, is this wrapper: the real compiler with `--coverage` added.
+      # The measuring steps then run the gates' commands (only an isolated build root or
+      # directory moves under build/), and every compile and link is instrumented,
+      # including the targets that hard-code their own flags and so never saw a
+      # `--coverage` passed through CFLAGS. The setup steps above built the pinned
+      # libraries with the real compilers, before the wrapper existed.
       - name: Put the coverage gcc wrapper first on PATH
         run: |
           set -euo pipefail
-          real_gcc="$(command -v gcc)"
           wrapper_dir="$RUNNER_TEMP/coverage-gcc"
           mkdir -p "$wrapper_dir"
-          printf '#!/bin/sh\nexec %s --coverage "$@"\n' "$real_gcc" > "$wrapper_dir/gcc"
-          chmod +x "$wrapper_dir/gcc"
+          for compiler in gcc g++; do
+            real="$(command -v "$compiler")"
+            printf '#!/bin/sh\nexec %s --coverage "$@"\n' "$real" > "$wrapper_dir/$compiler"
+            chmod +x "$wrapper_dir/$compiler"
+          done
           echo "$wrapper_dir" >> "$GITHUB_PATH"
 
       - name: Create build directory
         run: |
           set -euo pipefail
-          # The wrapper is on PATH from this step on: fail here if it is not the gcc found.
+          # The wrappers are on PATH from this step on: fail here if they are not the compilers found.
           test "$(command -v gcc)" = "$RUNNER_TEMP/coverage-gcc/gcc"
+          test "$(command -v g++)" = "$RUNNER_TEMP/coverage-gcc/g++"
           mkdir -p build
 
       - name: Measure the native core suite (Ace, player state and the other CPU selftests)
@@ -1899,6 +1908,130 @@ jobs:
           make CC=gcc snapshot-selftest
           make CC=gcc verify-selftest
 
+      # native_tools' own commands for the self-tests it compiles directly rather than through
+      # make, copied byte for byte without their part condition (tools/test_public_ci_wiring.py
+      # pins the copies). They follow the translation selftests, which generate the title
+      # configuration headers the VFPU interpreter selftest includes.
+      - name: Run selftest (C++ interpreter unit tests under UBSan)
+        run: |
+          g++ -std=c++17 -O1 -Isrc/ref -Isrc/rt -o build/selftest \
+            src/ref/selftest.cpp src/ref/interp.cpp src/ref/run_elf.cpp \
+            -DSR_SELFTEST_ONLY -fno-exceptions \
+            -fsanitize=undefined,float-cast-overflow -fno-sanitize-recover=all
+          ./build/selftest
+
+      - name: Run portable FPU/VFPU conversion selftest under UBSan
+        # Fixed expected vectors exercise NaN, infinities, finite overflow,
+        # signed boundaries, ties, all guest rounding modes and VFPU scaling.
+        # float-cast-overflow remains enabled: the historical implementation
+        # reached that sanitizer on FLT_MAX and must never be suppressed.
+        run: |
+          gcc -std=c11 -O1 -Wall -Wextra -Werror -Isrc/rt \
+            -fsanitize=undefined,float-cast-overflow -fno-sanitize-recover=all \
+            -o build/fp_convert_selftest_san tests/native/fp_convert_selftest.c -lm
+          ./build/fp_convert_selftest_san
+
+      - name: Run VFPU table loader selftest (source-owned, no game inputs)
+        # Issue #187: fail-closed table load (exact length + EOF + SHA-256 +
+        # value-domain invariants), atomic once-only publication and concurrent
+        # first use. Linux gcc provides C11 threads, so the concurrency race is
+        # exercised here in addition to the Windows Win32-thread path.
+        run: |
+          gcc -std=c11 -O1 -Wall -Wextra -Isrc/rt -D_CRT_SECURE_NO_WARNINGS \
+            -o build/vfpu_tables_selftest \
+            tests/native/vfpu_tables_selftest.c src/rt/vfpu_tables.c
+          ./build/vfpu_tables_selftest
+
+      - name: Run watchpoints-file parser selftest (source-owned, no game inputs)
+        # Issue #188: the derived watchpoints.json artifact round-trips a
+        # canonical fixture into the expected native watchpoint set, plus
+        # fail-closed cases (version/format, bounds, labels,
+        # duplicates, capacity, legacy array form).
+        run: |
+          gcc -std=c11 -O1 -Wall -Wextra -Isrc/rt -D_CRT_SECURE_NO_WARNINGS \
+            -o build/watchpoints_file_selftest \
+            tests/native/watchpoints_file_selftest.c src/rt/watchpoints_file.c
+          ./build/watchpoints_file_selftest
+
+      - name: Run strbuf checked-append formatting selftest under UBSan
+        run: |
+          gcc -std=c11 -O1 -Wall -Wextra -Werror -fsanitize=undefined -fno-sanitize-recover=all \
+            -Isrc/rt -o build/strbuf_selftest_san tests/native/strbuf_selftest.c
+          ./build/strbuf_selftest_san
+
+      - name: Run VFPU interpreter selftest (source-owned, no game inputs)
+        # Issue #184: quad/vector VFPU memory ops are all-or-nothing (span
+        # preflight before any lane commit; rejected ops consume no prefixes),
+        # vcrs rejects non-triple widths with zero state change, and the vrot
+        # overlap scan only inspects active lanes. White-box TU includes the
+        # real recomp.c/vfpu_tables.c/vfpu_interp.c (heap_selftest pattern).
+        # The ASan/UBSan build below is the source-owned uninitialized-read and
+        # overflow gate the issue asks for; Windows/MinGW cannot run sanitizers.
+        #
+        # This TU #includes recomp.c, whose dispatch() consumes the generic
+        # title-configuration accessors, so it must link src/rt/title_config.c
+        # against a generated artifact exactly as the Makefile target does. The
+        # generic configuration is what CI wants: no manifest, every binding
+        # disabled, both typed collections empty. recomp.c's sr_lookup()/
+        # dispatch() also consult the exec-span registry and interpreter floor,
+        # so src/rt/guest_interp.c must be linked here exactly as the Makefile
+        # target does.
+        run: |
+          mkdir -p build/title-config/generic
+          python tools/title_runtime_config.py \
+            --output build/title-config/generic/sr_title_config.h
+          python tools/vfpu_overlap_diff_gen.py build/vfpu_overlap_diff_cases.h
+          gcc -std=c11 -O1 -Wall -Wextra -Isrc/rt -Ibuild/title-config/generic -Ibuild \
+            -D_CRT_SECURE_NO_WARNINGS \
+            -o build/vfpu_interp_selftest \
+            tests/native/vfpu_interp_selftest.c src/rt/guest_interp.c src/rt/cpu_lle.c src/rt/domain_mode.c src/rt/stale_code.c src/rt/title_config.c src/rt/perf.c -lm
+          ./build/vfpu_interp_selftest
+          gcc -std=c11 -O1 -Wall -Wextra -Isrc/rt -Ibuild/title-config/generic -Ibuild \
+            -D_CRT_SECURE_NO_WARNINGS \
+            -fsanitize=address,undefined,float-cast-overflow -fno-sanitize-recover=all \
+            -o build/vfpu_interp_selftest_san \
+            tests/native/vfpu_interp_selftest.c src/rt/guest_interp.c src/rt/cpu_lle.c src/rt/domain_mode.c src/rt/stale_code.c src/rt/title_config.c src/rt/perf.c -lm
+          ./build/vfpu_interp_selftest_san
+
+      - name: Run ATRAC3+ decoder and bridge selftests (source-owned, no game inputs)
+        # #286/#32: PR-A raw decoder (4144 checks) and PR-B HLE decode bridge
+        # (4138 checks) under ASan/UBSan. The suites cover the deterministic
+        # terminator + MONO transform-path canaries, malformed/garbage-input
+        # rejection with the nb_samples=0 failure contract, and the
+        # reset/recreate lifecycle. The optional private fixture hook
+        # (ATRAC3P_FIXTURE, stream.bin + meta.txt) reports SKIP when unset and
+        # is never committed. Windows/MinGW cannot run sanitizers, so this
+        # Linux job is the ATRAC uninitialized-read/overflow gate; the FFmpeg
+        # n4.4 import stays byte-exact (no instrumentation edits). Upstream
+        # import warnings are expected and intentionally not enforced.
+        run: |
+          set -euo pipefail
+          ATRAC3P_SRCS="src/rt/atrac3p/atrac3p_api.c \
+            src/rt/atrac3p/libavcodec/atrac.c src/rt/atrac3p/libavcodec/atrac3.c \
+            src/rt/atrac3p/libavcodec/atrac3plus.c \
+            src/rt/atrac3p/libavcodec/atrac3plusdec.c src/rt/atrac3p/libavcodec/atrac3plusdsp.c \
+            src/rt/atrac3p/libavcodec/bitstream.c src/rt/atrac3p/libavcodec/fft_float.c \
+            src/rt/atrac3p/libavcodec/fft_init_table.c src/rt/atrac3p/libavcodec/mdct_float.c \
+            src/rt/atrac3p/libavcodec/sinewin.c src/rt/atrac3p/libavutil/float_dsp.c \
+            src/rt/atrac3p/libavutil/intmath.c src/rt/atrac3p/libavutil/log2_tab.c \
+            src/rt/atrac3p/libavutil/mem.c src/rt/atrac3p/libavutil/reverse.c"
+          INC="-Isrc/rt -Itests/native -Isrc/rt/atrac3p -Isrc/rt/atrac3p/libavcodec -Isrc/rt/atrac3p/libavutil"
+          gcc -std=c11 -O1 $INC -o build/atrac3p_selftest \
+            tests/native/atrac3p_selftest.c $ATRAC3P_SRCS src/rt/vfpu_tables.c -lm
+          ./build/atrac3p_selftest
+          gcc -std=c11 -O1 $INC -o build/atrac3p_bridge_selftest \
+            tests/native/atrac3p_bridge_selftest.c src/rt/atrac3p_bridge.c src/rt/perf.c tests/native/pcm_wav_dump.c \
+            $ATRAC3P_SRCS src/rt/vfpu_tables.c -lm
+          ./build/atrac3p_bridge_selftest
+          SAN="-fsanitize=address,undefined -fno-sanitize-recover=all"
+          gcc -std=c11 -O1 $SAN $INC -o build/atrac3p_selftest_san \
+            tests/native/atrac3p_selftest.c $ATRAC3P_SRCS src/rt/vfpu_tables.c -lm
+          ./build/atrac3p_selftest_san
+          gcc -std=c11 -O1 $SAN $INC -o build/atrac3p_bridge_selftest_san \
+            tests/native/atrac3p_bridge_selftest.c src/rt/atrac3p_bridge.c src/rt/perf.c tests/native/pcm_wav_dump.c \
+            $ATRAC3P_SRCS src/rt/vfpu_tables.c -lm
+          ./build/atrac3p_bridge_selftest_san
+
       - name: Measure the present pacing and player UI selftests
         run: |
           set -euo pipefail
@@ -1906,7 +2039,8 @@ jobs:
           make CC=gcc player-ui-regressions
           SDL_VIDEODRIVER=dummy SDL_RENDER_DRIVER=software make CC=gcc player-ui-tests
 
-      # The mutants native_tools also runs are left out: they measure deliberately broken code.
+      # The separate mutant steps native_tools runs are left out, and the collection step drops
+      # the mutants built inside measured targets: they run deliberately broken code.
       - name: Measure the GPU selftests on lavapipe
         run: |
           set -euo pipefail
@@ -1916,9 +2050,19 @@ jobs:
             exit 1
           }
           export VK_ICD_FILENAMES="$lvp_icd"
+          # A software device that is not lavapipe, or a skipped texture scaling selftest,
+          # would shrink the number without failing: both fail the step, as in native_tools.
+          vulkaninfo --summary | tee "$RUNNER_TEMP/vulkan-summary.txt"
+          grep -qi llvmpipe "$RUNNER_TEMP/vulkan-summary.txt"
           xvfb-run -a -s "-screen 0 1280x800x24" env SDL_VIDEODRIVER=x11 make CC=gcc -j4 gpu-snapsync-selftest
           xvfb-run -a -s "-screen 0 1280x800x24" env SDL_VIDEODRIVER=x11 \
-            make CC=gcc gpu-capture-selftest gpu-coherence-selftest vram-view-identity-selftest gpu-texscale-selftest
+            make CC=gcc gpu-capture-selftest gpu-coherence-selftest vram-view-identity-selftest
+          xvfb-run -a -s "-screen 0 1280x800x24" env SDL_VIDEODRIVER=x11 \
+            make CC=gcc gpu-texscale-selftest 2>&1 | tee "$RUNNER_TEMP/texscale.log"
+          if grep -q '^SKIP gpu-texscale' "$RUNNER_TEMP/texscale.log"; then
+            echo "the texture scaling selftest skipped on lavapipe" >&2
+            exit 1
+          fi
           NK_UI_VK_REQUIRE=1 make CC=gcc fsr3-pass-selftest
           NK_UI_VK_REQUIRE=1 make CC=gcc fsr3-fg-pass-selftest FSR3FG_PASS_ARGS="--cell G-R"
 
@@ -1927,16 +2071,20 @@ jobs:
       # action's gcov plugin does, it cannot open any source and writes header-only reports that
       # Codecov rejects as unusable. One gcov run per notes file keeps each report whole: given
       # several objects that share a source, gcov 13 appends their line records into one file.
-      # A notes file whose program never ran still reports its lines, as not executed. -r keeps
-      # repository-relative sources only (no system headers), and the tests' own sources and the
-      # C generated into build/ are dropped, so the number describes the code under test.
+      # A notes file whose program never ran still reports its lines, as not executed. Notes
+      # files of the mutants built inside measured targets are skipped: lines that only a mutant
+      # define compiles would otherwise count as covered. -r keeps repository-relative sources
+      # only (no system headers), and the tests' own sources (also those kept under src/) and
+      # the C generated into build/ are dropped, so the number describes the code under test.
+      # Any failure before this step skips the upload: a partial run uploads nothing, and the
+      # c flag carries the last complete report forward (.github/codecov.yml).
       - name: Collect the gcov reports
         run: |
           set -euo pipefail
           shopt -s nullglob
           gcov_dir="$RUNNER_TEMP/c-coverage-gcov"
           mkdir -p "$gcov_dir"
-          mapfile -t notes < <(find build -name '*.gcno' -print | LC_ALL=C sort)
+          mapfile -t notes < <(find build -name '*.gcno' ! -path '*mutant*' -print | LC_ALL=C sort)
           test "${#notes[@]}" -gt 0
           for gcno in "${notes[@]}"; do
             obj="${gcno%.gcno}"
@@ -1945,7 +2093,7 @@ jobs:
               mv -- "$report" "$gcov_dir/${obj//\//#}##$report"
             done
           done
-          { grep -l -m1 -E '^ +-: +0:Source:(tests/|fixtures/|build/|.*_selftest\.c$)' "$gcov_dir"/*.gcov || true; } \
+          { grep -l -m1 -E '^ +-: +0:Source:(tests/|fixtures/|build/|src/player/player_ui_test\.c$|.*_selftest\.(c|inc)$)' "$gcov_dir"/*.gcov || true; } \
             | xargs -r rm -f --
           reports=("$gcov_dir"/*.gcov)
           test "${#reports[@]}" -gt 0
