@@ -5592,13 +5592,14 @@ static void build_state(int persp, int sprite, Batch *b) {
                 /* incompatible stride/format reinterpretation, or mip levels: VRAM + decoder.
                  * A render target is drawn as the GE drew it: never from a scaled copy. A depth
                  * read commits what a CPU read would (the targets' pixels, then the depth). */
-                if (depth_read && !hook_vram_read(0x04000000u + vram_off(g->tex_addr),
-                                                  tex_span_size(g->tex_bufw, g->tex_w, g->tex_h)))
-                    fprintf(stderr, "gegpu: a depth read at 0x%06x could not commit the depth to guest VRAM: "
-                            "it decodes what guest VRAM holds\n", vram_off(g->tex_addr));
-                else
-                    (void)target_readback_span(src, vram_off(g->tex_addr),
-                                               tex_span_size(g->tex_bufw, g->tex_w, g->tex_h));
+                const uint32_t span = tex_span_size(g->tex_bufw, g->tex_w, g->tex_h);
+                if (depth_read) {
+                    if (!hook_vram_read(0x04000000u + vram_off(g->tex_addr), span))
+                        fprintf(stderr, "gegpu: a depth read at 0x%06x could not commit the depth to guest "
+                                "VRAM: it decodes what guest VRAM holds\n", vram_off(g->tex_addr));
+                } else {
+                    (void)target_readback_span(src, vram_off(g->tex_addr), span);
+                }
                 s_tex_noscale = 1;
                 b->dset = tex_get();
                 s_tex_noscale = 0;

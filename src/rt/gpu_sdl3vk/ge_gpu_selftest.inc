@@ -10339,7 +10339,8 @@ static int coherence_run_rtt_scale_at(int offset) {
  * u and v from -8 to 24 (4x and 2x magnified): clamped and linear, repeated and linear, clamped and
  * nearest, repeated and nearest, then repeated with nearest magnification and linear minification
  * and clamped with the reverse (magnified, so each takes its magnification filter: a seam blend of
- * the nearest one is not the PSP's sample). The PSP clamps or wraps each texel index at the texture's size
+ * the nearest one is not the PSP's sample), and the same two pairs minified 2:1 (32 texels over 16
+ * pixels: each takes its minification filter). The PSP clamps or wraps each texel index at the texture's size
  * (ge.c sample_tex), so no sample is red. Before the box (psp.frag, texenv.a and fogcol.a), the
  * direct bind clamped at the 512 x 272 image: the samples past the texture read O's red. Checked
  * at 1x, 2x and 4x: no red in M's device image or in guest VRAM, and guest VRAM equals the software
@@ -10354,15 +10355,18 @@ static int coherence_run_rtt_scale_at(int offset) {
 static int coherence_run_rtt_edge(void) {
     const char *name = "rtt-edge";
     static const uint32_t quad_rgba[4] = { 0xFF00FF00u, 0xFFFF0000u, 0xFFFFFF00u, 0xFF808000u };
-    enum { RTE_SPRITES = 6 };
+    enum { RTE_SPRITES = 8 };
     static const char *const sprite_name[RTE_SPRITES] = { "clamp linear", "repeat linear", "clamp nearest",
                                                           "repeat nearest", "repeat mag nearest min linear",
-                                                          "clamp mag linear min nearest" };
+                                                          "clamp mag linear min nearest",
+                                                          "minified repeat min nearest mag linear",
+                                                          "minified clamp min linear mag nearest" };
     /* each sprite's rectangle on M (x0, y0, size), TFLT and clamp bits */
     static const uint32_t rect[RTE_SPRITES][3] = { { 0, 64, 128 }, { 128, 64, 128 }, { 256, 64, 128 },
-                                                   { 384, 64, 128 }, { 0, 196, 64 }, { 128, 196, 64 } };
-    static const uint32_t tflt[RTE_SPRITES] = { 0x101u, 0x101u, 0u, 0u, 0x001u, 0x100u };
-    static const uint32_t twrap[RTE_SPRITES] = { 0x101u, 0u, 0x101u, 0u, 0u, 0x101u };
+                                                   { 384, 64, 128 }, { 0, 196, 64 }, { 128, 196, 64 },
+                                                   { 256, 196, 16 }, { 320, 196, 16 } };
+    static const uint32_t tflt[RTE_SPRITES] = { 0x101u, 0x101u, 0u, 0u, 0x001u, 0x100u, 0x100u, 0x001u };
+    static const uint32_t twrap[RTE_SPRITES] = { 0x101u, 0u, 0x101u, 0u, 0u, 0x101u, 0u, 0x101u };
     const uint32_t oa = 0x04000000u | RTE_O, ma = 0x04000000u | RTE_M, stride = 512u;
     const uint32_t bytes = stride * FB_H * 4u;
     const uint32_t s = (uint32_t)s_scale, w = SCL_W, h = SCL_H;

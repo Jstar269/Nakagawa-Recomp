@@ -228,11 +228,14 @@ void main() {
              * or wrapped texel. Linear clamps the position to the centres of the texture's first
              * and last device texels, where both taps lie inside it; a repeated axis wraps the
              * position, and where its two taps straddle the seam all four taps are fetched and
-             * blended here, wrapped in device texels. The sampler takes the gradients of the
-             * unwrapped coordinate, so a wrap or clamp never moves the filter choice. Inside the
-             * texture nothing changes. */
+             * blended here, wrapped in device texels. With the same filter both ways the sampler
+             * filters (given the unwrapped coordinate's gradients) and inside the texture nothing
+             * changes. With different filters the shader's choice must hold, and a sampler may
+             * judge the footprint another way (Vulkan allows approximations of it), so the shader
+             * fetches every sample itself: the device texel under the position for nearest, the
+             * four taps for linear. */
             bool rtt_box = (flags & 16384) == 0 && pc.texenv.a > 0.0;
-            bool rtt_seam = false;
+            bool rtt_seam = false, rtt_near = false;
             ivec2 rtt_c0 = ivec2(0), rtt_c1 = ivec2(0);
             vec2 rtt_f = vec2(0.0), rtt_gdx = vec2(0.0), rtt_gdy = vec2(0.0);
             if (rtt_box) {
@@ -244,20 +247,23 @@ void main() {
                 rtt_gdy = fdy / (lod_scale * pc.texsize.xy);
                 bool minify = max(dot(fdx, fdx), dot(fdy, fdy)) > 1.0;
                 bool linear = (flags & 64) == 0 && ((pc.cfg.y >> (minify ? 26 : 27)) & 1) != 0;
+                bool mixed = (flags & 64) == 0 && (((pc.cfg.y >> 26) ^ (pc.cfg.y >> 27)) & 1) != 0;
+                float sc = lod_scale;
+                ivec2 lim = textureSize(u_tex, 0) - ivec2(1);
                 if (!linear) {
                     vec2 idx = floor(uv);
                     vec2 moved = mix(idx - tsz * floor(idx / tsz), clamp(idx, vec2(0.0), tsz - vec2(1.0)), clampm);
                     uv += moved - idx;
+                    rtt_near = mixed;
+                    if (rtt_near) rtt_c0 = clamp(ivec2(floor(uv * sc) + pc.texsize.zw * sc), ivec2(0), lim);
                 } else {
-                    float sc = lod_scale;
                     vec2 lo = vec2(0.5 / sc), hi = tsz - vec2(0.5 / sc);
                     uv = mix(uv - tsz * floor(uv / tsz), clamp(uv, lo, hi), clampm);
-                    rtt_seam = any(lessThan(uv, lo)) || any(greaterThan(uv, hi));
+                    rtt_seam = mixed || any(lessThan(uv, lo)) || any(greaterThan(uv, hi));
                     if (rtt_seam) {
                         vec2 n = tsz * sc, p = uv * sc - vec2(0.5), i0 = floor(p);
                         rtt_f = p - i0;
                         vec2 a = i0 - n * floor(i0 / n), b = (i0 + vec2(1.0)) - n * floor((i0 + vec2(1.0)) / n);
-                        ivec2 lim = textureSize(u_tex, 0) - ivec2(1);
                         rtt_c0 = clamp(ivec2(a + pc.texsize.zw * sc), ivec2(0), lim);
                         rtt_c1 = clamp(ivec2(b + pc.texsize.zw * sc), ivec2(0), lim);
                     }
@@ -304,6 +310,7 @@ void main() {
             } else {
                 t = texture(u_tex, uv / pc.texsize.xy) * 255.0;
             }
+            if (rtt_near) t = texelFetch(u_tex, rtt_c0, 0) * 255.0;
             if (rtt_seam) {
                 vec4 t00 = texelFetch(u_tex, ivec2(rtt_c0.x, rtt_c0.y), 0);
                 vec4 t10 = texelFetch(u_tex, ivec2(rtt_c1.x, rtt_c0.y), 0);

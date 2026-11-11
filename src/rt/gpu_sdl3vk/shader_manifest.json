@@ -20,11 +20,11 @@
     },
     {
       "embedded": "psp_frag.inc",
-      "embedded_sha256": "440fd8e5899a99e68a98169a79db31541e21d41c9b898dca6ca91f930ad6612f",
+      "embedded_sha256": "6a2f94b0717bc94c736e379df78bfae2e1c3ee9aa986ab4a1ef2fb6689dc8999",
       "source": "shaders/psp.frag",
-      "source_sha256": "16587ccf1c7f0caf6d1431af8e1da9668fcf647fe26b0c1621e9c8b6ccf32b67",
-      "spirv_bytes": 43484,
-      "spirv_sha256": "8a3cfc232c1acb054bc159c444aedf0a56fc7196071c3e2253fbf2c4850144c7",
+      "source_sha256": "c0bf4e96b686efa95e97f2c31d5705cd98acc4628f843168cf267ebd1ba5beb2",
+      "spirv_bytes": 44548,
+      "spirv_sha256": "adb12d13ae7af04ff50ebedfa75bf8eb42aa4f52cef0fec9491f61ac217e3884",
       "stage": "frag"
     },
     {
@@ -32,11 +32,11 @@
         "SR_DST_INTERLOCK"
       ],
       "embedded": "psp_frag_rmw.inc",
-      "embedded_sha256": "1e7b9fba2d7c487d986a074dec993786dd6fb0283b0819f006793eb325f22a24",
+      "embedded_sha256": "e4c4ec286c1a68a6c0480173c07531d38ef8b489b99f298f0d7b99f289c92cb5",
       "source": "shaders/psp.frag",
-      "source_sha256": "16587ccf1c7f0caf6d1431af8e1da9668fcf647fe26b0c1621e9c8b6ccf32b67",
-      "spirv_bytes": 44532,
-      "spirv_sha256": "4c74d6f472240f63f248e31b2627eb3792037cf2e88f88887978600d9b4813a3",
+      "source_sha256": "c0bf4e96b686efa95e97f2c31d5705cd98acc4628f843168cf267ebd1ba5beb2",
+      "spirv_bytes": 45596,
+      "spirv_sha256": "de7e5a1956aa65cc66009fa62efbf5a86db9fbde297d977b4a4ba7e387b1c9bf",
       "stage": "frag"
     },
     {

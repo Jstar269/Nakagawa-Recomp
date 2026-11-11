@@ -302,8 +302,9 @@ into one target and read it back as a texture keep the scale in these cases:
     clamp bits in `cfg.y` bits 24 and 25 and the minification and magnification filters in bits
     26 and 27, lanes the per-fragment level of detail uses only for a mipmapped read, which is
     never bound directly. Each fragment picks its filter from its footprint per guest pixel, as
-    `ge.c` does, so a texture with different minification and magnification filters wraps and
-    clamps as the PSP does too. A linear tap pair that straddles a repeated texture's seam is
+    `ge.c` does. With different minification and magnification filters the shader fetches every
+    sample itself (the device texel under the position, or the four linear taps), since a Vulkan
+    sampler may judge the footprint another way. A linear tap pair that straddles a repeated texture's seam is
     fetched and blended in the shader, wrapped in device texels. Rows of the texture below the
     target's 272 rows read the image's last row.
   - A texture that starts inside the target, at a pixel-aligned offset, is read through that
@@ -347,7 +348,10 @@ target's colour is the newer content and the rules above apply, so a title that 
 address on a colour buffer it draws (and writes no depth there) keeps the direct bind
 (`rtt-depth-alias` draws the colour target over the depth buffer's rows and reads it again). The
 choice is per buffer, not per pixel: a depth buffer some batch wrote after the colour target
-changed is read whole, rows that batch did not reach included, as a CPU read of it is.
+changed is read whole, rows that batch did not reach included, as a CPU read of it is; and a
+colour target that changed after the depth was written is bound whole, its rows where depth was
+written later than its last draw there included (those rows show the target's colour where the
+PSP's VRAM holds depth).
 
 `SR_GPU_NORTT=1` sends every render-target read through that 1x path, for bisecting.
 
