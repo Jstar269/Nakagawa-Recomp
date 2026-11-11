@@ -1224,12 +1224,13 @@ host's output.
   is at most what the peak needs when it arrives. The ceiling is -0.3 dBTP as that detector reads it; read at 16x,
   the overflow fixture's hard 62000-count step rings 0.13 dB past it, still under full scale. The output is 71
   frames (1.61 ms) late. A frame below the ceiling comes out bit-exact unless a peak's attack or release reaches it
-  (the release is back within half a count of unity well inside a second), so the level is the PSP's wherever the PSP did not
-  clip; only the overs are rounded off instead of cut. A stream that stops leaves its last 71 frames in the
+  (the release is back within half a count of unity well inside a second), so the level is the PSP's wherever the
+  PSP did not clip; only the overs are rounded off instead of cut. A stream that stops leaves its last 71 frames in the
   limiter until that channel's next push or hold of silence (`sr_audio_push_silence`, which passes through the
-  limiter too), which plays them first, in order. A push or hold that finds the channel played dry drops them
-  instead, as a hold drops the converter's kept-back frames (after the gap they would be a 1.6 ms fragment ahead of
-  the new sound). Nothing is invented. The video recorder (`sr_videorec_audio`) and the counters keep the guest's copy.
+  limiter too), which plays them first, in order. A push or hold that finds the channel played dry (a device pull
+  came up short) drops them instead, as a hold drops the converter's kept-back frames (after the gap they would
+  be a 1.6 ms fragment ahead of the new sound). Nothing is invented. The video recorder (`sr_videorec_audio`) and
+  the counters keep the guest's copy.
 - **Off.** Without `peak=limit` neither side runs: the SAS mixer keeps nothing, `sr_audio_push` is the plain push,
   and `sr_audio_push_wide` is the plain push of the guest's copy (`audio-selftest` checks the bytes). Fast forward
   pushes nothing, so nothing is limited while it runs.

@@ -1101,13 +1101,16 @@ static void sr_audio_push_frames(int ch, const int16_t *lr, const int32_t *wide,
 
     const int16_t *submitted = lr;
     int push_ok;
+    /* Played dry: a device pull found nothing (an empty queue a pull just emptied is still playing). */
+    const int played_dry = SDL_GetAtomicInt(&s_played_dry[ch]) && takeable_frames == 0;
     SDL_SetAtomicInt(&s_played_dry[ch], 0);   /* before the data, as in sr_audio_push_silence */
     /* Volume scaling and submission */
     if (s_tpl_on) {
         /* Ace Mode's limiter in place of the per-sample clamp: n frames in, n frames out. On a
          * channel played dry with no hold ahead of this push, the frames the limiter still holds
-         * would play as a fragment ahead of the new sound, so they go (as in the hold). */
-        if (takeable_frames == 0) sr_audio_tpl_reset_channel(ch);
+         * would play as a fragment ahead of the new sound, so they go (as in the hold). A queue the
+         * last pull emptied without coming up short is still playing: its frames stay. */
+        if (played_dry) sr_audio_tpl_reset_channel(ch);
         int16_t stack_buf[1024 * 2];
         int16_t *buf = stack_buf;
         if (nframes > 1024) {
@@ -2646,7 +2649,9 @@ static void test_peak_limiter_rounds_off_an_overflow(void) {
  * A push to a dry channel with no hold ahead of it (hle_audio.c holds only when the pull is long
  * against the block) drops them the same way.
  * MUTANT: drop the limiter reset on a dry channel in sr_audio_push_silence -- the dry cell fails.
- * MUTANT: drop it in sr_audio_push_frames -- the no-hold cell fails. */
+ * A queue a pull emptied without coming up short is still playing: a push there keeps the frames.
+ * MUTANT: drop it in sr_audio_push_frames -- the no-hold cell fails.
+ * MUTANT: reset on any empty queue, played dry or not -- the still-playing cell fails. */
 static void test_peak_limiter_keeps_a_hold_in_order(void) {
     test_reset();
     SDL_SetHintWithPriority(SDL_HINT_AUDIO_DRIVER, "dummy", SDL_HINT_OVERRIDE);
@@ -2676,14 +2681,27 @@ static void test_peak_limiter_keeps_a_hold_in_order(void) {
         const int16_t want = i < 500u + SR_TPL_DELAY ? 0 : -5000;
         assert(test_queued_sample(1, i, 0) == want && test_queued_sample(1, i, 1) == want);
     }
-    /* Dry with no hold: b follows the limiter's delay at once, with none of a's frames ahead. */
+    /* Dry with no hold (a pull came up short): b follows the limiter's delay at once, with none
+     * of a's frames ahead. */
     sr_audio_push(2, a, 300, 0x8000, 0x8000);
     assert(SDL_ClearAudioStream(s_streams[2]));
+    SDL_SetAtomicInt(&s_played_dry[2], 1);
     sr_audio_push(2, b, 200, 0x8000, 0x8000);
     assert(sr_audio_queued(2) == 200);
     for (uint32_t i = 0; i < 200u; i++) {
         const int16_t want = i < SR_TPL_DELAY ? 0 : -5000;
         assert(test_queued_sample(2, i, 0) == want && test_queued_sample(2, i, 1) == want);
+    }
+    /* Still playing: a pull took the last queued frame without coming up short. a's last frames
+     * still play ahead of b, with no hole between them. */
+    sr_audio_push(3, a, 300, 0x8000, 0x8000);
+    assert(SDL_ClearAudioStream(s_streams[3]));
+    assert(SDL_GetAtomicInt(&s_played_dry[3]) == 0);
+    sr_audio_push(3, b, 200, 0x8000, 0x8000);
+    assert(sr_audio_queued(3) == 200);
+    for (uint32_t i = 0; i < 200u; i++) {
+        const int16_t want = i < SR_TPL_DELAY ? 10000 : -5000;
+        assert(test_queued_sample(3, i, 0) == want && test_queued_sample(3, i, 1) == want);
     }
     test_reset();
     printf("test_peak_limiter_keeps_a_hold_in_order: PASS\n");
