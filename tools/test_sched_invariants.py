@@ -656,6 +656,11 @@ class HostCallbackEntryAuditTests(unittest.TestCase):
         # The SR_AUDIODUMP postmix writer copies the device's mixed output into a host WAV
         # file; it reads no guest memory and writes no state the guest reads.
         ("src/rt/audio_sdl3.c", "SDL_SetAudioPostmixCallback"),
+        # Each channel stream reports the device's pulls: the pull size the blocking output
+        # queues against and the channel's played-dry flag. It reads the stream's queue depth,
+        # no guest memory, and leaves its results in host atomics that the guest's audio
+        # calls read on the scheduler thread, as they read the queue depth.
+        ("src/rt/audio_sdl3.c", "SDL_SetAudioStreamGetCallback"),
     }
 
     def _registrations(self):

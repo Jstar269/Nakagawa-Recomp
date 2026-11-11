@@ -1646,7 +1646,8 @@ def target_main(args: argparse.Namespace, gh: GitHub) -> int:
     except Exception as error:  # Fail closed: any error, an API failure included, resolves nothing.
         print(f"no attestation target: {type(error).__name__}: {error}", file=sys.stderr)
         return 1
-    print(f"attesting #{target['number']} at {target['head_sha']} against base {target['base_sha']}")
+    print(f"attesting #{target['number']} at {target['head_sha']} (event base {target['base_sha']}; "
+          "the verdict base is the head's merge base with the default branch)")
     output = args.github_output or os.environ.get("GITHUB_OUTPUT")
     if output:
         with open(output, "a", encoding="utf-8") as handle:
