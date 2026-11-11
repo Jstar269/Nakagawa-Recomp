@@ -7602,6 +7602,68 @@ int ge_vram_decode_bound_texture(uint32_t *out, size_t capacity) {
     return 1;
 }
 
+/* A GE-local offset (below 2 MiB) or any view of VRAM, as its 0x04000000 address: the fold
+ * ge_fb_addr() applies to the draw target. Any other address is left as it is. */
+static uint32_t ge_vram_view_fold(uint32_t addr) {
+    if (addr < 0x00200000u || (addr & 0x0F000000u) == 0x04000000u)
+        return 0x04000000u | (addr & 0x001FFFFFu);
+    return addr;
+}
+
+void ge_vram_view_sources(uint32_t shown_addr, uint32_t shown_stride, uint32_t shown_fmt,
+                          int shown_valid, GeVramSources *out) {
+    if (!out) return;
+    memset(out, 0, sizeof(*out));
+    /* The display is 480 x 272 whatever buffer it scans out. */
+    if (shown_valid) {
+        GeVramWindow w = { shown_addr, shown_stride, 480u, 272u, shown_fmt & 3u };
+        out->window[GE_VRAM_VIEW_DISPLAY] = w;
+        out->present[GE_VRAM_VIEW_DISPLAY] = 1;
+    }
+    if (ge.fbw) {
+        GeVramWindow w = { ge_fb_addr(), ge.fbw, 480u, 272u, ge.fbfmt & 3u };
+        out->window[GE_VRAM_VIEW_DRAW] = w;
+        out->present[GE_VRAM_VIEW_DRAW] = 1;
+    }
+    if (ge.zbp) {
+        GeVramWindow w = { ge_vram_view_fold(ge.zbp), ge.zbw ? ge.zbw : (ge.fbw ? ge.fbw : 512u),
+                           480u, 272u, GE_VRAM_VIEW_DEPTH16 };
+        out->window[GE_VRAM_VIEW_DEPTH] = w;
+        out->present[GE_VRAM_VIEW_DEPTH] = 1;
+    }
+    if (ge.tex_addr && ge.tex_w > 0 && ge.tex_h > 0) {
+        GeVramWindow w = { ge.tex_addr, ge.tex_bufw ? ge.tex_bufw : (uint32_t)ge.tex_w,
+                           (uint32_t)ge.tex_w, (uint32_t)ge.tex_h, ge.tex_fmt };
+        out->window[GE_VRAM_VIEW_TEXTURE] = w;
+        out->present[GE_VRAM_VIEW_TEXTURE] = 1;
+        out->texture_swizzled = ge.tex_swizzle != 0;
+    }
+}
+
+int ge_vram_view_decode(int texture, const GeVramWindow *window, uint32_t *out,
+                        size_t capacity, uint32_t *width, uint32_t *height) {
+    uint32_t w, h;
+    if (width) *width = 0u;
+    if (height) *height = 0u;
+    if (!out || (!texture && !window)) return GE_VRAM_VIEW_NO_ROOM;
+    if (texture) {
+        if (!ge_vram_decode_bound_texture(out, capacity)) return GE_VRAM_VIEW_TEXTURE_REFUSED;
+        w = (uint32_t)ge.tex_w;
+        h = (uint32_t)ge.tex_h;
+    } else {
+        if ((uint64_t)window->width * window->height > capacity) return GE_VRAM_VIEW_NO_ROOM;
+        if (!ge_vram_decode_surface(window->addr, window->width, window->height, window->stride,
+                                    window->format, out))
+            return GE_VRAM_VIEW_UNREADABLE;
+        w = window->width;
+        h = window->height;
+    }
+    for (size_t i = 0; i < (size_t)w * h; i++) out[i] |= 0xFF000000u;
+    if (width) *width = w;
+    if (height) *height = h;
+    return GE_VRAM_VIEW_SHOWN;
+}
+
 static void ge_vramdump_surface(FILE *file, int *first, const char *name,
                                 const char *kind, uint32_t addr, uint32_t width,
                                 uint32_t height, uint32_t stride, uint32_t format,

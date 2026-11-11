@@ -600,6 +600,46 @@ int       ge_vram_cli_decode(uint32_t addr, uint32_t width, uint32_t height, uin
  * while a GE capture is active, when the texture's bytes are not all readable, when it is
  * larger than GE_VRAM_VIEW_MAX_*, or when `capacity` words cannot hold it. */
 int       ge_vram_decode_bound_texture(uint32_t *out, size_t capacity);
+/* The developer VRAM viewer's sources and its decode (#314), shared by gui.c's pause page and
+ * vram-view-identity-selftest so both run the same code. A window is an address, a row stride
+ * and a size in pixels, and a format: a colour PSM 0-3, GE_VRAM_VIEW_DEPTH16, or for the
+ * texture source its own PSM 0-10. */
+#define GE_VRAM_VIEW_DEPTH16 11u
+enum {
+    GE_VRAM_VIEW_DISPLAY = 0,   /* the framebuffer on screen (the display's, not the GE's) */
+    GE_VRAM_VIEW_DRAW,          /* the GE's render target */
+    GE_VRAM_VIEW_DEPTH,         /* the GE's depth buffer */
+    GE_VRAM_VIEW_TEXTURE,       /* level 0 of the texture the last draw bound */
+    GE_VRAM_VIEW_SOURCES
+};
+typedef struct {
+    uint32_t addr, stride, width, height, format;
+} GeVramWindow;
+typedef struct {
+    GeVramWindow window[GE_VRAM_VIEW_SOURCES];
+    uint8_t present[GE_VRAM_VIEW_SOURCES];   /* the display or the GE state names that surface */
+    uint8_t texture_swizzled;
+} GeVramSources;
+/* The surfaces the viewer offers, as the VRAMDUMP sidecar names them: the displayed
+ * framebuffer (shown_valid, at shown_addr with shown_stride and colour format shown_fmt,
+ * 480 x 272), the draw target (ge_framebuffer(), FBW, FBPSM), the depth buffer (ZBP folded onto
+ * 0x04000000, ZBW or else FBW or else 512, DEPTH16) and the bound texture (its address, buffer
+ * width, size and PSM). A surface the state does not name is absent. Reads only. */
+void      ge_vram_view_sources(uint32_t shown_addr, uint32_t shown_stride, uint32_t shown_fmt,
+                               int shown_valid, GeVramSources *out);
+/* Decodes what the viewer shows for `window` into `out` (`capacity` words) with alpha made
+ * opaque, as the PSP display shows a framebuffer: the bound texture through
+ * ge_vram_decode_bound_texture when `texture` is set (the window then only names it), any other
+ * window through ge_vram_decode_surface. Stores the decoded size in *width and *height.
+ * Returns GE_VRAM_VIEW_SHOWN, or a refusal that writes nothing to `out`. */
+enum {
+    GE_VRAM_VIEW_SHOWN = 0,
+    GE_VRAM_VIEW_UNREADABLE,          /* the window cannot be read now */
+    GE_VRAM_VIEW_TEXTURE_REFUSED,     /* outside guest memory, over 512 pixels, or a GE capture runs */
+    GE_VRAM_VIEW_NO_ROOM              /* `out` is NULL or smaller than the window */
+};
+int       ge_vram_view_decode(int texture, const GeVramWindow *window, uint32_t *out,
+                              size_t capacity, uint32_t *width, uint32_t *height);
 /* The CLUT loads seen so far: the size of the last one and the largest, in bytes (0 before the
  * first). PPSSPP's palette identity for texture replacement is built from them. */
 void      ge_clut_load_extent(uint32_t *last_bytes, uint32_t *max_bytes);

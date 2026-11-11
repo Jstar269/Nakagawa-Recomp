@@ -1822,57 +1822,40 @@ static void gui_pause_describe_controls(void) {
                                  nk_overlay_host_pad_family(s_pause_host));
 }
 
-/* A GE-local framebuffer offset, or any view of VRAM, as its 0x04000000 address, the fold
- * ge_framebuffer() applies to the draw target; any other address is left as it is. */
-static uint32_t gui_vram_fold(uint32_t addr) {
-    if (addr < 0x00200000u || (addr & 0x0F000000u) == 0x04000000u)
-        return 0x04000000u | (addr & 0x001FFFFFu);
-    return addr;
-}
-
-/* The surfaces the GE state names while the game is paused, as the VRAMDUMP sidecar names
- * them: the displayed framebuffer, the draw target, the depth buffer and the bound texture. */
+_Static_assert(GE_VRAM_VIEW_DISPLAY == NK_OVERLAY_VRAM_DISPLAY &&
+                   GE_VRAM_VIEW_DRAW == NK_OVERLAY_VRAM_DRAW &&
+                   GE_VRAM_VIEW_DEPTH == NK_OVERLAY_VRAM_DEPTH &&
+                   GE_VRAM_VIEW_TEXTURE == NK_OVERLAY_VRAM_TEXTURE &&
+                   GE_VRAM_VIEW_SOURCES == NK_OVERLAY_VRAM_SOURCE_COUNT &&
+                   GE_VRAM_VIEW_DEPTH16 == NK_OVERLAY_VRAM_DEPTH16,
+               "the GE's VRAM view sources are the overlay page's, index for index");
+/* The surfaces the display and the GE state name while the game is paused, from the same
+ * ge.c function vram-view-identity-selftest runs (ge_shared.h): the displayed framebuffer, the
+ * draw target, the depth buffer and the bound texture. */
 static void gui_pause_describe_vram(void) {
-    const GeState *ge = ge_state_ptr();
     NkOverlayVram *v = &s_pause_vram;
-    memset(v->sources, 0, sizeof(v->sources));
-    memset(v->present, 0, sizeof(v->present));
-    if (s_shown_fb.valid) {
-        NkOverlayVramSurface s = { s_shown_fb.addr, s_shown_fb.stride, PSP_W, PSP_H,
-                                   (uint32_t)s_shown_fb.fmt & 3u };
-        v->sources[NK_OVERLAY_VRAM_DISPLAY] = s;
-        v->present[NK_OVERLAY_VRAM_DISPLAY] = 1;
+    GeVramSources sources;
+    ge_vram_view_sources(s_shown_fb.addr, s_shown_fb.stride, (uint32_t)s_shown_fb.fmt,
+                         s_shown_fb.valid, &sources);
+    for (int i = 0; i < GE_VRAM_VIEW_SOURCES; i++) {
+        const GeVramWindow *w = &sources.window[i];
+        NkOverlayVramSurface s = { w->addr, w->stride, w->width, w->height, w->format };
+        v->sources[i] = s;
+        v->present[i] = sources.present[i] != 0;
     }
-    if (!ge) return;
-    if (ge->fbw) {
-        NkOverlayVramSurface s = { ge_framebuffer(), ge->fbw, PSP_W, PSP_H, ge->fbfmt & 3u };
-        v->sources[NK_OVERLAY_VRAM_DRAW] = s;
-        v->present[NK_OVERLAY_VRAM_DRAW] = 1;
-    }
-    if (ge->zbp) {
-        NkOverlayVramSurface s = { gui_vram_fold(ge->zbp), ge->zbw ? ge->zbw : (ge->fbw ? ge->fbw : 512u),
-                                   PSP_W, PSP_H, NK_OVERLAY_VRAM_DEPTH16 };
-        v->sources[NK_OVERLAY_VRAM_DEPTH] = s;
-        v->present[NK_OVERLAY_VRAM_DEPTH] = 1;
-    }
-    if (ge->tex_addr && ge->tex_w > 0 && ge->tex_h > 0) {
-        NkOverlayVramSurface s = { ge->tex_addr, ge->tex_bufw ? ge->tex_bufw : (uint32_t)ge->tex_w,
-                                   (uint32_t)ge->tex_w, (uint32_t)ge->tex_h, ge->tex_fmt };
-        v->sources[NK_OVERLAY_VRAM_TEXTURE] = s;
-        v->present[NK_OVERLAY_VRAM_TEXTURE] = 1;
-        v->texture_swizzled = ge->tex_swizzle != 0;
-    }
+    v->texture_swizzled = sources.texture_swizzled != 0;
 }
 
-/* Decodes the viewer's window into the page's image. Reads only: the surface decoder copies
- * guest bytes as stored, and the bound texture goes through the texture decoder with the GE
- * state left as it is (ge_shared.h). Alpha is shown opaque, as the PSP display shows a
- * framebuffer. */
+/* Decodes the viewer's window into the page's image through ge_vram_view_decode, the decode
+ * vram-view-identity-selftest runs. Reads only: the surface decoder copies guest bytes as
+ * stored, and the bound texture goes through the texture decoder with the GE state left as it
+ * is (ge_shared.h). Alpha is shown opaque, as the PSP display shows a framebuffer. */
 static void gui_pause_decode_vram(void) {
     const NkOverlayVramView *view = nk_overlay_host_vram_view(s_pause_host);
     const size_t capacity = (size_t)GE_VRAM_VIEW_MAX_WIDTH * GE_VRAM_VIEW_MAX_HEIGHT;
+    GeVramWindow window;
     uint32_t width, height;
-    int ok;
+    int result;
     s_pause_vram.image = NULL;
     s_pause_vram.note = NULL;
     if (!view || !view->chosen) return;
@@ -1881,24 +1864,22 @@ static void gui_pause_decode_vram(void) {
         s_pause_vram.note = "Out of memory for the decoded window.";
         return;
     }
-    if (view->source == NK_OVERLAY_VRAM_TEXTURE) {
-        const GeState *ge = ge_state_ptr();
-        ok = ge && ge_vram_decode_bound_texture(s_pause_vram_px, capacity);
-        width = ok ? (uint32_t)ge->tex_w : 0u;
-        height = ok ? (uint32_t)ge->tex_h : 0u;
-        if (!ok)
-            s_pause_vram.note = "The bound texture cannot be read now: it is outside guest memory, "
-                                "larger than 512 pixels, or a GE capture is running.";
-    } else {
-        const NkOverlayVramSurface *w = &view->view;
-        ok = ge_vram_decode_surface(w->addr, w->width, w->height, w->stride, w->format,
-                                    s_pause_vram_px);
-        width = w->width;
-        height = w->height;
-        if (!ok) s_pause_vram.note = "This window cannot be read now.";
+    window.addr = view->view.addr;
+    window.stride = view->view.stride;
+    window.width = view->view.width;
+    window.height = view->view.height;
+    window.format = view->view.format;
+    result = ge_vram_view_decode(view->source == NK_OVERLAY_VRAM_TEXTURE, &window,
+                                 s_pause_vram_px, capacity, &width, &height);
+    if (result == GE_VRAM_VIEW_TEXTURE_REFUSED) {
+        s_pause_vram.note = "The bound texture cannot be read now: it is outside guest memory, "
+                            "larger than 512 pixels, or a GE capture is running.";
+        return;
     }
-    if (!ok) return;
-    for (size_t i = 0; i < (size_t)width * height; i++) s_pause_vram_px[i] |= 0xFF000000u;
+    if (result != GE_VRAM_VIEW_SHOWN) {
+        s_pause_vram.note = "This window cannot be read now.";
+        return;
+    }
     s_pause_vram_image.width = width;
     s_pause_vram_image.height = height;
     s_pause_vram_image.rgba_pm = (uint8_t *)s_pause_vram_px;

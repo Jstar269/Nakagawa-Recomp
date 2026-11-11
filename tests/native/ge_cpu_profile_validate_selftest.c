@@ -2194,6 +2194,105 @@ static void test_ge_vram_view_decode(void) {
     printf("VRAM_VIEW decode cases=11\n");
 }
 
+/* The viewer's sources and decode (#314), the functions gui.c's pause page calls: which
+ * buffer, stride, size and format each source names (the depth buffer's GE-local ZBP folded
+ * onto VRAM, its stride falling back to FBW and then 512), sources the state does not name are
+ * absent, and a decode is opaque, sized as asked, and refused without writing. */
+static void test_ge_vram_view_sources(void) {
+    static const uint32_t base = 0x041C0000u;
+    GeState *state = ge_state_ptr();
+    GeState saved = *state;
+    GeVramSources src;
+    uint32_t out[8], w = 99u, h = 99u;
+
+    memset(state, 0, sizeof(*state));
+    ge_vram_view_sources(0x44088000u, 512u, 7u, 0, &src);
+    expect(!src.present[GE_VRAM_VIEW_DISPLAY] && !src.present[GE_VRAM_VIEW_DRAW] &&
+           !src.present[GE_VRAM_VIEW_DEPTH] && !src.present[GE_VRAM_VIEW_TEXTURE],
+           "vram_view_sources", "nothing named, nothing offered");
+
+    ge_vram_view_sources(0x44088000u, 512u, 7u, 1, &src);
+    expect(src.present[GE_VRAM_VIEW_DISPLAY] && src.window[GE_VRAM_VIEW_DISPLAY].addr == 0x44088000u &&
+           src.window[GE_VRAM_VIEW_DISPLAY].stride == 512u &&
+           src.window[GE_VRAM_VIEW_DISPLAY].width == 480u &&
+           src.window[GE_VRAM_VIEW_DISPLAY].height == 272u &&
+           src.window[GE_VRAM_VIEW_DISPLAY].format == 3u, "vram_view_sources",
+           "the display is the shown buffer at its stride, 480 x 272, in its colour format");
+
+    state->fbp = 0x00044000u;
+    state->fbw = 512u;
+    state->fbfmt = 1u;
+    state->zbp = 0x00110000u;
+    ge_vram_view_sources(0, 0, 0, 0, &src);
+    expect(src.present[GE_VRAM_VIEW_DRAW] && src.window[GE_VRAM_VIEW_DRAW].addr == ge_framebuffer() &&
+           src.window[GE_VRAM_VIEW_DRAW].stride == 512u && src.window[GE_VRAM_VIEW_DRAW].format == 1u,
+           "vram_view_sources", "the draw target is ge_framebuffer() at FBW in FBPSM");
+    expect(src.present[GE_VRAM_VIEW_DEPTH] && src.window[GE_VRAM_VIEW_DEPTH].addr == 0x04110000u &&
+           src.window[GE_VRAM_VIEW_DEPTH].stride == 512u &&
+           src.window[GE_VRAM_VIEW_DEPTH].format == GE_VRAM_VIEW_DEPTH16, "vram_view_sources",
+           "a GE-local ZBP folds onto VRAM; without ZBW the depth stride is FBW; DEPTH16");
+    state->zbp = 0x44110000u;
+    state->zbw = 256u;
+    ge_vram_view_sources(0, 0, 0, 0, &src);
+    expect(src.window[GE_VRAM_VIEW_DEPTH].addr == 0x04110000u &&
+           src.window[GE_VRAM_VIEW_DEPTH].stride == 256u, "vram_view_sources",
+           "an uncached ZBP folds onto VRAM and ZBW is the depth stride");
+    state->fbw = 0u;
+    state->zbw = 0u;
+    ge_vram_view_sources(0, 0, 0, 0, &src);
+    expect(!src.present[GE_VRAM_VIEW_DRAW] && src.window[GE_VRAM_VIEW_DEPTH].stride == 512u,
+           "vram_view_sources", "no FBW: no draw target, and the depth stride is 512");
+
+    state->tex_addr = base + 0x200u;
+    state->tex_w = 2;
+    state->tex_h = 1;
+    state->tex_bufw = 0u;
+    state->tex_fmt = 5u;
+    state->tex_swizzle = 1;
+    ge_vram_view_sources(0, 0, 0, 0, &src);
+    expect(src.present[GE_VRAM_VIEW_TEXTURE] && src.window[GE_VRAM_VIEW_TEXTURE].addr == base + 0x200u &&
+           src.window[GE_VRAM_VIEW_TEXTURE].stride == 2u &&
+           src.window[GE_VRAM_VIEW_TEXTURE].width == 2u &&
+           src.window[GE_VRAM_VIEW_TEXTURE].height == 1u &&
+           src.window[GE_VRAM_VIEW_TEXTURE].format == 5u && src.texture_swizzled,
+           "vram_view_sources", "the texture is its address, buffer width (else width), size, PSM "
+           "and swizzle");
+
+    /* The decode: a 5551 pixel with alpha clear shows opaque, sized as the window. */
+    {
+        const uint16_t clear_alpha = 0x7C00u;
+        const GeVramWindow window = { base + 0x100u, 1u, 1u, 1u, 1u };
+        memcpy(SR_HOST(base + 0x100u), &clear_alpha, 2u);
+        expect(ge_vram_view_decode(0, &window, out, 8u, &w, &h) == GE_VRAM_VIEW_SHOWN &&
+               out[0] == 0xFFFF0000u && w == 1u && h == 1u, "vram_view_sources",
+               "a decoded window is opaque and sized as asked");
+        const GeVramWindow wide = { base, 4u, 3u, 3u, 0u };
+        memset(out, 0xA5, sizeof out);
+        expect(ge_vram_view_decode(0, &wide, out, 8u, &w, &h) == GE_VRAM_VIEW_NO_ROOM &&
+               out[0] == 0xA5A5A5A5u && w == 0u && h == 0u, "vram_view_sources",
+               "a window larger than the buffer is refused and writes nothing");
+        const GeVramWindow outside = { 0xFFFFF000u, 4u, 1u, 1u, 3u };
+        expect(ge_vram_view_decode(0, &outside, out, 8u, &w, &h) == GE_VRAM_VIEW_UNREADABLE &&
+               out[0] == 0xA5A5A5A5u, "vram_view_sources", "an unreadable window is refused");
+    }
+    {
+        uint32_t texels[2] = {0x00223344u, 0x55667788u};
+        memcpy(SR_HOST(base + 0x200u), texels, sizeof texels);
+        state->tex_fmt = 3u;
+        state->tex_swizzle = 0;
+        state->tex_bufw = 2u;
+        expect(ge_vram_view_decode(1, NULL, out, 8u, &w, &h) == GE_VRAM_VIEW_SHOWN &&
+               out[0] == 0xFF223344u && out[1] == 0xFF667788u && w == 2u && h == 1u,
+               "vram_view_sources", "the bound texture decodes opaque at its own size");
+        g_ge_capture_active = 1;
+        expect(ge_vram_view_decode(1, NULL, out, 8u, &w, &h) == GE_VRAM_VIEW_TEXTURE_REFUSED,
+               "vram_view_sources", "no texture is decoded while a GE capture runs");
+        g_ge_capture_active = 0;
+    }
+    *state = saved;
+    printf("VRAM_VIEW sources cases=12\n");
+}
+
 static void test_ge_bounding_box_branch(void) {
     /* Transform-mode boxes under emit_setup's perspective (w = -z) and 480x272 viewport. */
     s_vtx = BBOX_VERTS;
@@ -2554,6 +2653,7 @@ int main(int argc, char **argv) {
     test_ge_vram_depth_bit13_absolute_xor();
     test_ge_bounding_box_branch();
     test_ge_vram_view_decode();
+    test_ge_vram_view_sources();
 
     printf("ge_cpu_profile_validate_selftest: strip_cache=%s scenarios=%u faults=%u failures=%d\n",
            strip_cache ? "on" : "off", s_scenarios, s_faults, s_failures);
