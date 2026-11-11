@@ -347,8 +347,8 @@ enum {
  * freezes with terminal "trigger" and the bundle is written, holding the events just before
  * the divergent checkpoint. Its events, policy and terminal are those a run armed with that
  * spec from the start records; the thread table and the refusal counts are read when the
- * bundle is written, here at the mismatch rather than at the event. An armed mode is never
- * replaced. */
+ * bundle is written, here as the replay stops at the mismatch rather than at the event. An
+ * armed mode is never replaced. */
 int sr_flight_replay_divergence(SrFlightMark *at);
 
 #if defined(SR_HLE_THREAD_SELFTEST) || defined(SR_SCHED_LIVENESS_TEST)

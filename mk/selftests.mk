@@ -829,7 +829,8 @@ domain-mode-selftest: $(GENERIC_TITLE_CONFIG_HEADER)
 # an early stop, an edited or truncated file and the host clock each end in their own named
 # verdict. The record and replay children are processes of their own. Under SR_FLIGHT the first
 # divergent checkpoint freezes the flight record at its newest event, in the same bytes as a run
-# armed with that checkpoint trigger from the start; when the ring lost the last matching
+# armed with that checkpoint trigger from the start (this fixture has no thread table and no
+# refusals, which are read when a bundle is written); when the ring lost the last matching
 # checkpoint, the trigger it names for the next run keeps the first events after that
 # checkpoint. Exit code 0 = all hold.
 nkstate-selftest: $(GENERIC_TITLE_CONFIG_HEADER)

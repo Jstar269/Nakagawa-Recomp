@@ -1180,7 +1180,10 @@ static void test_replay_mismatch_flight(void) {
     set_env("SR_FLIGHT_OUTPUT", RR_FLIGHT);
     remove(RR_FLIGHT);
     log = rr_run(&st);
-    CHECK(st == 1 && strstr(log, "REPLAY_MISMATCH frame=8 index=2 ") != NULL, "next run: exit %d: %.300s", st, log);
+    CHECK(st == 1 && strstr(log, "REPLAY_MISMATCH frame=8 index=2 ") != NULL &&
+              strstr(log, "SR_FLIGHT: the replay mismatch left the armed SR_FLIGHT_TRIGGER mode in charge\n") != NULL &&
+              strstr(log, "replay again") == NULL,
+          "next run: exit %d: %.400s", st, log);
     free(log);
     bundle = slurp_text(RR_FLIGHT);
     CHECK(strstr(bundle, "\"checkpoint\": {\"kind\": 3, \"occurrence\": 5, \"after\": 3}, \"fired\": 1}") != NULL &&

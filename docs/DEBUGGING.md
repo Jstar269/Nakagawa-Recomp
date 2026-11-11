@@ -1481,11 +1481,12 @@ keeps the events just before the divergence:
 - With no `SR_FLIGHT_TRIGGER` mode armed, the mismatch arms the `checkpoint:KIND:N:0` mode at the
   newest recorded event, the `N`th of its kind, and the record freezes there with terminal
   `trigger`. The bundle has the events, policy and terminal of a run armed with that spec from the
-  start. Its thread table and refusal counts are read at the mismatch. stderr says
+  start. Its thread table and refusal counts are read as the replay stops at the mismatch. stderr says
   `SR_FLIGHT: the replay mismatch froze the record at event <seq> (SR_FLIGHT_TRIGGER=checkpoint:<kind>:<n>:0)`.
-- A mode you armed is left in charge, and stderr says so.
-- When more events happened since the last matching checkpoint than the ring holds, the frozen
-  bundle starts after that checkpoint. stderr then also gives the next run's trigger,
+- A mode you armed is left in charge, and stderr says so and nothing more.
+- When the frozen ring no longer holds the newest event before the last matching checkpoint (at
+  least `limit` events happened since), the bundle starts after that checkpoint. stderr then also
+  gives the next run's trigger,
   `SR_FLIGHT_TRIGGER=checkpoint:<kind>:<n>:<limit-1>`. It opens the window at the newest event
   before the last matching checkpoint, so the next replay, with the same `SR_FLIGHT`, keeps the
   first `limit - 1` events after that checkpoint, where the divergence began. The two bundles
