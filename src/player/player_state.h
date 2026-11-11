@@ -193,13 +193,17 @@ typedef enum {
 #define PLAYER_DISC_ID_KEY_LEN 10
 
 /* A title's 60 FPS game-logic enhancement package (docs/ENHANCEMENT_CONTRACT.md
- * section 9): <user data>/enhancements/<disc ID, lowercase>-60hz.json. */
+ * section 9): <user data>/enhancements/<disc ID, lowercase>-60hz.json, else the
+ * published package the source tree ships at assets/enhancements/ (section 5.1). */
 typedef struct {
     /* The file parses, its id is a valid package name
        (nk_title_manifest_enhancement_id_valid) and its target_title_id is the
        title's own. */
     bool available;
     char package_id[NK_MAX_ENHANCEMENT_PACKAGE_ID];
+    /* The file read is the shipped published package, not one in the user's
+       data folder. */
+    bool shipped;
     /* Why a file that exists cannot be used; empty when there is no file or it
        is usable. */
     char problem[160];
@@ -1645,10 +1649,17 @@ const char *player_library_sort_label(PlayerLibrarySort sort);
  * choice to package checks, builds and launches. */
 
 /* Reads <user_root>/enhancements/<disc ID, lowercase>-60hz.json for `game` with
- * nk_json. Returns out->available. A showcase demo, a test program or a disc ID
- * that is not a PSP disc ID has none. */
-bool player_read_title_enhancement(const char *user_root, const GameRecord *game,
-                                   PlayerTitleEnhancement *out);
+ * nk_json; when that file does not exist, the same name in `shipped_root` (the
+ * source tree's assets/enhancements folder, NULL for none), as tools/nk_cli.py
+ * build-package --experimental-60hz does. A file in the user's data folder comes
+ * first, even when it cannot be used. Returns out->available. A showcase demo, a
+ * test program or a disc ID that is not a PSP disc ID has none. */
+bool player_read_title_enhancement(const char *user_root, const char *shipped_root,
+                                   const GameRecord *game, PlayerTitleEnhancement *out);
+/* The folder of published packages the source tree beside this player ships
+ * (<source>/assets/enhancements, the tree package_builder_find_cli finds
+ * tools/nk_cli.py in). False when there is no source tree. */
+bool player_app_shipped_enhancements_root(const PlayerApp *app, char *out, size_t out_size);
 /* Re-reads every title's enhancement package and sets each GameRecord's
  * enhancement_package_id. player_app_sync_library calls it. */
 void player_app_refresh_title_enhancements(PlayerApp *app);
