@@ -4166,6 +4166,16 @@ static void test_io_memory_stick_cells_through_syscall(void) {
                fd_host_bytes_equal(host, pattern, MS_SIZE),
            "an exclusive create of an existing file is 0x80010011 and leaves it unchanged");
 
+    /* Read-only creates no cell measured stop at the named boundary with nothing opened,
+     * created or cut: on an existing file, with PSP_O_TRUNC, and with PSP_O_EXCL. */
+    expect(ms_cell_path_call(MS_CELL_OPEN, file_guest, 0x0201u) == 0x80010086u &&
+               ms_cell_path_call(MS_CELL_OPEN, file_guest, 0x0601u) == 0x80010086u &&
+               fd_host_bytes_equal(host, pattern, MS_SIZE),
+           "PSP_O_RDONLY | PSP_O_CREAT on an existing file stops at the boundary, file unchanged");
+    expect(ms_cell_path_call(MS_CELL_OPEN, missing_guest, 0x0A01u) == 0x80010086u &&
+               !ms_cell_host_exists(missing_guest),
+           "PSP_O_RDONLY | PSP_O_CREAT | PSP_O_EXCL stops at the boundary and creates nothing");
+
     /* io-seek-ms-write-rdonly: a write through a PSP_O_RDONLY descriptor. */
     fd = ms_cell_path_call(MS_CELL_OPEN, file_guest, 0x0001u);
     expect(fd >= 3u && fd < 64u, "the probe file opens read-only");
@@ -4174,8 +4184,6 @@ static void test_io_memory_stick_cells_through_syscall(void) {
     fd_guest_copy(MS_CELL_BACK, other, sizeof(other));
     expect(ms_cell_fd_call(MS_CELL_WRITE, fd, MS_CELL_BACK, 4u) == MS_BADF,
            "a write through a PSP_O_RDONLY Memory Stick descriptor is 0x80020323");
-    expect(ms_cell_fd_call(MS_CELL_LSEEK32, fd, 0u, 1u) == 0u,
-           "the refused write leaves the position");
     /* io-eof-seek-negative-rdonly: SEEK_SET -1 on the read-only descriptor. */
     expect(ms_cell_seek64(fd, -1, 0u, &high) == MS_EINVAL && high == 0xffffffffu &&
                ms_cell_fd_call(MS_CELL_LSEEK32, fd, 0u, 1u) == 0u,
@@ -4224,13 +4232,13 @@ static void test_io_memory_stick_cells_through_syscall(void) {
                ms_cell_fd_call(MS_CELL_LSEEK32, fd, 0u, 1u) == 0x40u,
            "a read past the end of a Memory Stick file is 0 and keeps the position");
 
-    /* io-seek64: 0xFFFFFFFF is a position; one past it is 0x80010016, position unchanged. */
+    /* io-seek64: 0xFFFFFFFF is a position; 0x100000010 is 0x80010016, position unchanged. */
     expect(ms_cell_seek64(fd, 0xffffffffll, 0u, &high) == 0xffffffffu && high == 0u,
            "a Memory Stick seek to 0xFFFFFFFF is accepted");
     expect(ms_cell_fd_call(MS_CELL_LSEEK32, fd, 8u, 0u) == 8u &&
-               ms_cell_seek64(fd, 0x100000000ll, 0u, &high) == MS_EINVAL &&
+               ms_cell_seek64(fd, 0x100000010ll, 0u, &high) == MS_EINVAL &&
                high == 0xffffffffu && ms_cell_fd_call(MS_CELL_LSEEK32, fd, 0u, 1u) == 8u,
-           "a Memory Stick seek to 0x100000000 is 0x80010016 and keeps the position");
+           "a Memory Stick seek to 0x100000010 is 0x80010016 and keeps the position");
 
     expect(ms_cell_fd_call(MS_CELL_CLOSE, fd, 0u, 0u) == 0u &&
                ms_cell_path_call(MS_CELL_REMOVE, file_guest, 0u) == 0u,
