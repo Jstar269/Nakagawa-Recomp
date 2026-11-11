@@ -61,6 +61,7 @@ READINESS_BASE ?= $(shell git merge-base origin/main HEAD)
 READINESS_WORKDIR ?= $(CURDIR)/../.nk-readiness-verify
 
 readiness:
+	$(NK_REQUIRE_POSIX_SHELL)
 ifndef NK_TRUSTED_LEDGER
 	@echo "readiness: BLOCKED -- NK_TRUSTED_LEDGER is unset."
 	@echo "  It must name the detailed development ledger"

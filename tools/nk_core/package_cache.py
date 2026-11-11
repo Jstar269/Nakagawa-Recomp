@@ -1215,14 +1215,17 @@ def ambient_enhancement_package(environment: Mapping[str, str] | None = None) ->
     for which this returns a value: an inherited variable never enhances a build.
     """
     env = os.environ if environment is None else environment
-    if env.get("ENHANCEMENT_PACKAGE", "").strip():
-        return "ENHANCEMENT_PACKAGE"
-    for token in env.get("MAKEFLAGS", "").split():
-        if token.startswith("ENHANCEMENT_PACKAGE=") and token.split("=", 1)[1].strip():
-            return "MAKEFLAGS ENHANCEMENT_PACKAGE"
-    for token in env.get("CODEGEN_USER_ARGS", "").split():
-        if token.startswith("--enhancement-package"):
-            return "CODEGEN_USER_ARGS --enhancement-package"
+    # ENHANCEMENT_CODE_HOOK_PACKAGE, the code-hook package beside it (contract section 9.9), the same.
+    for variable, option in (("ENHANCEMENT_PACKAGE", "--enhancement-package"),
+                             ("ENHANCEMENT_CODE_HOOK_PACKAGE", "--code-hook-package")):
+        if env.get(variable, "").strip():
+            return variable
+        for token in env.get("MAKEFLAGS", "").split():
+            if token.startswith(f"{variable}=") and token.split("=", 1)[1].strip():
+                return f"MAKEFLAGS {variable}"
+        for token in env.get("CODEGEN_USER_ARGS", "").split():
+            if token.startswith(option):
+                return f"CODEGEN_USER_ARGS {option}"
     return None
 
 
@@ -1262,6 +1265,25 @@ def enhancement_package_options(environment: Mapping[str, str] | None = None) ->
     sidecar = pkg_path.with_suffix(".symbols.json")
     if sidecar.is_file():
         result["enhancement_symbol_map_sha256"] = sha256_file(sidecar)
+    # The code-hook package applied beside it (contract section 9.9), named only when there is one,
+    # so the key of a build without one is unchanged.
+    hook_raw = env.get("ENHANCEMENT_CODE_HOOK_PACKAGE", "").strip()
+    if not hook_raw:
+        for token in env.get("CODEGEN_USER_ARGS", "").split():
+            if token.startswith("--code-hook-package="):
+                hook_raw = token.split("=", 1)[1].strip()
+                break
+    if hook_raw:
+        hook_path = Path(hook_raw)
+        try:
+            hook_data = enhancement_package.load_and_validate_package(hook_path)
+        except (OSError, ValueError) as exc:
+            raise PackageCacheError(f"code-hook package is invalid or unreadable: {exc}") from exc
+        result["code_hook_package_id"] = hook_data["id"]
+        result["code_hook_package_sha256"] = enhancement_package.compute_package_digest(hook_data)
+        hook_sidecar = hook_path.with_suffix(".symbols.json")
+        if hook_sidecar.is_file():
+            result["code_hook_symbol_map_sha256"] = sha256_file(hook_sidecar)
     return result
 
 

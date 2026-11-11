@@ -509,6 +509,17 @@ class TestSourcePins(unittest.TestCase):
         source = (ROOT / "src" / "rt" / "perf.c").read_text(encoding="utf-8")
         self.assertIn(r'\"schema\":\"nakagawa-perf-v1\"', source)
 
+    def test_display_period_in_microseconds_has_one_definition(self) -> None:
+        """The scheduler, perf, videorec and audio code share one 16683 us display period (#2361)."""
+        period = re.compile(r"\b16683[uUlL]*\b")
+        rt = ROOT / "src" / "rt"
+        hits = [f"{path.name}:{number}: {line.strip()}"
+                for path in sorted([*rt.glob("*.c"), *rt.glob("*.h")])
+                for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
+                if period.search(line)]
+        self.assertEqual(len(hits), 1, "\n".join(hits))
+        self.assertRegex(hits[0], r"^perf\.h:\d+: #define SR_DISPLAY_PERIOD_US 16683u\b")
+
 
 class TestCli(unittest.TestCase):
     def _write_run(self, directory: Path, name: str, f_values: list[int], doc: dict[str, Any] | None = None,

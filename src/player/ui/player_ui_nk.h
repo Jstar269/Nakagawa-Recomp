@@ -1471,6 +1471,9 @@ unsigned player_ui_nk_test_focus(const PlayerUiNk *player);
 const char *player_ui_nk_test_nickname(const PlayerUiNk *player, char *count, size_t cap);
 /* What the library's find box holds while it is open, else NULL. */
 const char *player_ui_nk_test_find(const PlayerUiNk *player);
+/* Test only: how many of the library's games the last library frame's grid held (the
+   find box's matches while it is open), and in *total how many games it has. */
+size_t player_ui_nk_test_library_grid(const PlayerUiNk *player, size_t *total);
 /* Test only: the next UI's last frame was laid out (nk_ui_laid_out), so the
    next frame takes a move at once; false without a next UI. */
 bool player_ui_nk_test_laid_out(const PlayerUiNk *player);

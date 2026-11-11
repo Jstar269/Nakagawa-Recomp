@@ -260,7 +260,7 @@ def _build_settings(make: str, compiler_path: str, linker: str, build_root: Path
         "GAME_NAME=compiler_compare", "GAME_BASE=0", "GAME_ENTRY=0",
         "GAME_ELF=", "GAME_PSP_HEADER=", "GAME_EXTRA_ELFS=", "TITLE_MANIFEST=",
         "TITLE_EXTRA_SPANS=", "CODEGEN_PROFILE_ARG=", "SYMBOL_MAP=",
-        "NAME_IMPORTS=0", "ENHANCEMENT_PACKAGE=", "ENHANCEMENT_DATA_ROOT=",
+        "NAME_IMPORTS=0", "ENHANCEMENT_PACKAGE=", "ENHANCEMENT_DATA_ROOT=", "ENHANCEMENT_CODE_HOOK_PACKAGE=",
         "NAN_TRAP=0", "FUNCS_PER_CHUNK=1", "CHUNK_TARGET_BYTES=",
         "CODEGEN_TOOL=tools/codegen.py",
         "compiler-info",
@@ -301,7 +301,7 @@ def _build_settings(make: str, compiler_path: str, linker: str, build_root: Path
         "GAME_NAME=compiler_compare", "GAME_BASE=0", "GAME_ENTRY=0",
         "GAME_ELF=", "GAME_PSP_HEADER=", "GAME_EXTRA_ELFS=", "TITLE_MANIFEST=",
         "TITLE_EXTRA_SPANS=", "CODEGEN_PROFILE_ARG=", "SYMBOL_MAP=",
-        "NAME_IMPORTS=0", "ENHANCEMENT_PACKAGE=", "ENHANCEMENT_DATA_ROOT=",
+        "NAME_IMPORTS=0", "ENHANCEMENT_PACKAGE=", "ENHANCEMENT_DATA_ROOT=", "ENHANCEMENT_CODE_HOOK_PACKAGE=",
         "NAN_TRAP=0", "FUNCS_PER_CHUNK=1", "CHUNK_TARGET_BYTES=",
         "CODEGEN_TOOL=tools/codegen.py",
         f"CFLAGS={cflags}", f"RECOMP_FLAGS={recomp_flags}",
@@ -321,6 +321,7 @@ def _build_settings(make: str, compiler_path: str, linker: str, build_root: Path
     settings["NAME_IMPORTS"] = "0"
     settings["ENHANCEMENT_PACKAGE"] = ""
     settings["ENHANCEMENT_DATA_ROOT"] = ""
+    settings["ENHANCEMENT_CODE_HOOK_PACKAGE"] = ""
     settings["NAN_TRAP"] = "0"
     settings["COMPILER_IS_CLANG"] = (
         "1" if "clang" in Path(compiler_path).name.lower() else "0"
@@ -379,6 +380,7 @@ def _make_assignments(compiler: str, settings: dict[str, str], build_root: Path,
         "NAME_IMPORTS=0",
         "ENHANCEMENT_PACKAGE=",
         "ENHANCEMENT_DATA_ROOT=",
+        "ENHANCEMENT_CODE_HOOK_PACKAGE=",
         "CODEGEN_TOOL=tools/codegen.py",
     ]
     return assignments

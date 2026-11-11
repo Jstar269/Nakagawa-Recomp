@@ -1424,7 +1424,8 @@ Use the deterministic clock. Under the paced clock, guest time follows the host,
 from the first checkpoint on by design. To narrow a mismatch:
 
 - a `ram.<addr>` chunk: set a memory watch on that MiB;
-- a `cpu.<uid>` thread: arm `SR_FLIGHT_TRIGGER` near the mismatching vblank on the next run.
+- a `cpu.<uid>` thread: replay the recording with `SR_FLIGHT` set. Its first mismatch freezes the
+  flight record there (see "Recording and replaying a run" below).
 
 Hashing all of RAM takes a noticeable fraction of a second per checkpoint, so raise
 `SR_REPLAY_CHECKPOINT_EVERY` on long runs. A checkpoint file holds no game bytes, but it describes a
@@ -1474,6 +1475,26 @@ reaches it and writes exactly one verdict to stderr:
 | `REPLAY_MISSING_ANSWER call=osk request=<k> frame=<f> detail=<why>` | exit 1: the guest asked for an answer the recording does not hold. Nothing is made up |
 | `REPLAY_COMPLETE frame=<f> checkpoints=<n> answers=<k>` | every checkpoint matched. Input recorded after the last one is still served; the pad and the keyboard each go live when the recording runs out |
 | `REPLAY_NOT_RUN reached=<f> end=<f> checkpoints=<i>/<n>` | at exit, when the run stopped before the recording was used up. This is never a pass |
+
+With the flight recorder on (`SR_FLIGHT`, below), the first mismatch also arms it, so the record
+keeps the events just before the divergence:
+
+- With no `SR_FLIGHT_TRIGGER` mode armed, the mismatch arms the `checkpoint:KIND:N:0` mode at the
+  newest recorded event, the `N`th of its kind, and the record freezes there with terminal
+  `trigger`. The bundle has the events, policy and terminal of a run armed with that spec from the
+  start. Its thread table and refusal counts are read as the replay stops at the mismatch. stderr says
+  `SR_FLIGHT: the replay mismatch froze the record at event <seq> (SR_FLIGHT_TRIGGER=checkpoint:<kind>:<n>:0)`.
+- A mode you armed is left in charge, and stderr says so and nothing more.
+- When the frozen ring no longer holds the newest event before the last matching checkpoint (at
+  least `limit` events happened since), the bundle starts after that checkpoint. stderr then also
+  gives the next run's trigger,
+  `SR_FLIGHT_TRIGGER=checkpoint:<kind>:<n>:<limit-1>`. It opens the window at the newest event
+  before the last matching checkpoint, so the next replay, with the same `SR_FLIGHT`, keeps the
+  first `limit - 1` events after that checkpoint, where the divergence began. The two bundles
+  bracket the span. The position is exact only when the enabled classes record the same events
+  in both replays; check with `tools/flight_diff.py`.
+
+These `SR_FLIGHT:` lines are not verdicts. Without `SR_FLIGHT` the mismatch prints none.
 
 The pad is recorded after the route, the stick mode and the keyboard have shaped it, so a replay needs
 neither the person nor the script, and a pause requested during a replay does not change it. Route
@@ -2369,7 +2390,8 @@ player and game behave as they do for everyone ([#314](https://github.com/Jstar2
   is counted under its rule name (`rule=blend-2lsb`), and a frame with only those reports
   `result=RULE_ONLY`. Each buffer is compared over everything a draw can write there (the scissor,
   or a transfer's rectangle). When a buffer cannot be compared in full (more than 32 buffers, a
-  stride past 1024, a scissor past the 480x272 that ge.c rasterizes, depth past ge.c's 272 rows),
+  stride past 1024, a scissor past 512 columns or 272 rows (both renderers draw up to the target's
+  stride, 512 at most, and compare that), depth past ge.c's 272 rows),
   the tool prints `result=INCOMPLETE` with a
   `GE_FBD_UNCOMPARED` line per buffer and exits 5, and a capture with no draw is `result=NO_DRAWS`
   (exit 6): neither is ever `NO_DIFFERENCE`. A capture of a title is private, and so are its report
@@ -2378,7 +2400,7 @@ player and game behave as they do for everyone ([#314](https://github.com/Jstar2
   executed Vulkan mutants and the overlapping-blend capture (#2109): a known difference on the
   snapshot destination-read path, `NO_DIFFERENCE` on the interlock path. `--dst-read
   snapshot|interlock` picks the path for a replay (`SR_GPU_DST_READ`, `src/rt/gpu_sdl3vk/README.md`).
-  `ge_replay --write-synthetic <path> [basic|overlap|wide|empty|many|deep]` writes those captures.
+  `ge_replay --write-synthetic <path> [basic|overlap|wide|past|empty|many|deep]` writes those captures.
 - **Capture frames unattended.** Set `SR_NOINPUT=1` so the automatic START pulse does not reach the game, bound the run
   with `SR_EXIT_AT_VBLANK` ([where it stops](#where-sr_exit_at_vblank-actually-stops)), and capture with
   `SR_FBSNAP_WINDOWS` ([both ends of a transition](#capturing-both-ends-of-a-transition--snapwindows)).

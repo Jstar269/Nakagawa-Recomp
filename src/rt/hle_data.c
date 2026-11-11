@@ -2114,6 +2114,19 @@ int io_restore_truncated_gap(Fd *f) {
  * a full "disc0:/PSP_GAME/USRDIR/..." path. Returns the fd (>=1) on success or
  * -1 if the path is not in the extracted set (caller should fall through to the
  * real opener). The returned entry is owned by the immutable cache. */
+/* sceIoOpen with PSP_O_CREAT and without write access on the Memory Stick, where no hardware
+ * cell says what the PSP answers (#1380): the file exists, or PSP_O_APPEND, PSP_O_TRUNC or
+ * PSP_O_EXCL is set. Nothing is opened, created or cut. */
+static uint32_t io_open_read_only_create_boundary(const char *path) {
+    static atomic_flag reported = ATOMIC_FLAG_INIT;
+    if (!atomic_flag_test_and_set_explicit(&reported, memory_order_acq_rel))
+        fprintf(stderr,
+                "SEMANTIC_BOUNDARY: IO_OPEN_READ_ONLY_CREATE: sceIoOpen(%s) with PSP_O_CREAT and "
+                "without write access on an existing file, or with PSP_O_APPEND, PSP_O_TRUNC or "
+                "PSP_O_EXCL, is not supported yet (0x80010086)\n", path);
+    return 0x80010086u;
+}
+
 static uint32_t h_io_open_path_stock(const char *path, uint32_t flags, int forced_slot) {
     /* PSP flags: WRONLY=2, RDWR=3, APPEND=0x100, CREAT=0x200, TRUNC=0x400. */
     if (!path) return 0x80010016u;
@@ -2171,6 +2184,17 @@ static uint32_t h_io_open_path_stock(const char *path, uint32_t flags, int force
     int writing = (flags & 0x0002) != 0;        /* WRONLY or RDWR */
     int creating = (flags & 0x0200) != 0;
     int exclusive = creating && (flags & 0x0800) != 0;  /* CREAT | EXCL */
+    /* PSP_O_CREAT without write access on the Memory Stick (ms0: or fatms0:). Measured:
+     * PSP_O_RDONLY | PSP_O_CREAT on a missing file answers 0x80010016 and creates nothing
+     * (PSP-HLE-IO-SEEK-001 io-seek-ms-write-rdonly-creat, PSP-3000). Everything else such an open
+     * can meet is unmeasured and stops at a named boundary with nothing opened or changed: an
+     * existing file, PSP_O_APPEND, PSP_O_TRUNC and PSP_O_EXCL. The file is looked for read-only. */
+    const int read_only_create = creating && !writing && strchr(path, ':') &&
+                                 sr_ms0_classify(path, NULL) == SR_MS0_OWNED;
+    if (read_only_create) {
+        if (flags & 0x0D00u) return io_open_read_only_create_boundary(path);
+        creating = exclusive = 0;
+    }
 #ifndef _WIN32
     sr_cd_status open_status = SR_CD_NOT_FOUND;
 #endif
@@ -2200,7 +2224,8 @@ static uint32_t h_io_open_path_stock(const char *path, uint32_t flags, int force
             exclusive_found = existing != NULL;
             if (existing) fclose(existing);
         }
-        if (!fp && !writing && !creating && hp && ms0_try_legacy_flat_import(path, hp))
+        if (!fp && !writing && !creating && !read_only_create && hp &&
+            ms0_try_legacy_flat_import(path, hp))
             fp = ms0_fopen_existence_utf8(hp, mode, existence);
 #else
         FILE *fp = sr_ms0_classify(path, NULL) == SR_MS0_OWNED ?
@@ -2209,12 +2234,16 @@ static uint32_t h_io_open_path_stock(const char *path, uint32_t flags, int force
             sr_ms0_classify(path, NULL) == SR_MS0_OWNED)
             fp = ms0_fopen_guest_utf8(path, L"w+b", MS0_OPEN_BY_MODE, &open_status);
         exclusive_found = !fp && exclusive && open_status == SR_CD_ALREADY_EXISTS;
-        if (!fp && !writing && !creating && open_status == SR_CD_NOT_FOUND && hp &&
-            ms0_try_legacy_flat_import(path, hp))
+        if (!fp && !writing && !creating && !read_only_create &&
+            open_status == SR_CD_NOT_FOUND && hp && ms0_try_legacy_flat_import(path, hp))
             fp = ms0_fopen_guest_utf8(path, mode, existence, &open_status);
 #endif
         free(hp);
         if (exclusive_found) return io_open_exclusive_existing(path);
+        if (fp && read_only_create) {
+            fclose(fp);
+            return io_open_read_only_create_boundary(path);
+        }
         if (!fp) {
 #ifndef _WIN32
             if (sr_ms0_classify(path, NULL) == SR_MS0_OWNED &&
@@ -2231,6 +2260,7 @@ static uint32_t h_io_open_path_stock(const char *path, uint32_t flags, int force
                 return ms0_posix_psp_error(open_status);
             }
 #endif
+            if (read_only_create) return 0x80010016u;   /* missing: EINVAL, nothing made */
             if (!writing && !creating && s_data_archive_mode &&
                 data_archive_guest_path_allowed(path)) {
                 int wanted_variant = -2;
