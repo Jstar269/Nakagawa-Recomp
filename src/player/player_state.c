@@ -1237,6 +1237,11 @@ static const PlayerEnhancedPartInfo k_enhanced_parts[PLAYER_PART_COUNT] = {
     {"upscale", "Sharper enlarging",
      "AMD FSR 1 sharpens display and recordings; game memory and screenshots do not change.",
      2, k_part_switch_values, k_part_upscale_labels, k_part_upscale_words, 0},
+    /* A guest-visible item (contract 11.3.11): off by default; it acts only for a title whose
+       catalog entry declares the stick dead zone the game ignores. */
+    {"stick", "Stick dead zone",
+     "Ace only, in games that ignore part of the stick. Small pushes count; the feel changes.",
+     2, k_part_switch_values, k_part_switch_labels, k_part_switch_words, 0},
 };
 
 const PlayerEnhancedPartInfo *player_enhanced_part(int part) {
@@ -2293,11 +2298,12 @@ void player_app_cycle_present_scaling(PlayerApp *app, int direction) {
    motion, Widescreen, texture filtering, sound, the readout, the badge or Finer patches
    (which changes GE timing, section 11.3.7): those stay the library's and each game's own. docs/PLAYER_UI_DESIGN.md lists the same values, and
    test_graphics_presets checks that every other part is -1, so a new part needs a choice. */
-#define PRESET_PARTS(text, upscale)                                                        \
-    {[PLAYER_PART_FILTERING] = -1, [PLAYER_PART_TEXT] = (text), [PLAYER_PART_READOUT] = -1, \
-     [PLAYER_PART_NOTICE] = -1, [PLAYER_PART_WIDE] = -1, [PLAYER_PART_SMOOTH] = -1,         \
-     [PLAYER_PART_SAS] = -1, [PLAYER_PART_TESS] = -1, [PLAYER_PART_CULL] = -1,              \
-     [PLAYER_PART_UPSCALE] = (upscale)}
+#define PRESET_PART_LIST(X, text, upscale)                                                \
+    X(FILTERING, -1) X(TEXT, (text)) X(READOUT, -1) X(NOTICE, -1) X(WIDE, -1) X(SMOOTH, -1) \
+    X(SAS, -1) X(TESS, -1) X(CULL, -1) X(UPSCALE, (upscale)) X(STICK, -1)
+#define PRESET_PART_SET(part, value) [PLAYER_PART_##part] = value,
+#define PRESET_PART_ONE(part, value) + 1
+#define PRESET_PARTS(text, upscale) {PRESET_PART_LIST(PRESET_PART_SET, text, upscale)}
 static const PlayerGraphicsPresetRow k_graphics_presets[PLAYER_PRESET_COUNT] = {
     [PLAYER_PRESET_LOW] = {"low", "Low", "Low", 1, NK_PRESENT_SCALING_SHARP, true, -1,
                            PRESET_PARTS(1, 0)},
@@ -2311,11 +2317,15 @@ static const PlayerGraphicsPresetRow k_graphics_presets[PLAYER_PRESET_COUNT] = {
                                 NK_PRESENT_SCALING_SHARP, true, 1, PRESET_PARTS(1, 1)},
 };
 #undef PRESET_PARTS
-/* A new PLAYER_PART_* fails to compile here ("size of array is negative") until PRESET_PARTS
-   gives it a value under each preset (-1 leaves it the library's); update PRESET_PARTS first,
-   then this count. The count catches a new part only; a part PRESET_PARTS leaves out reads 0
-   (off), which test_graphics_presets catches by requiring -1 for every part it does not set. */
-typedef char k_graphics_presets_name_every_part[PLAYER_PART_COUNT == 10 ? 1 : -1];
+/* A new PLAYER_PART_* fails to compile here ("size of array is negative") until
+   PRESET_PART_LIST gives it a value under each preset (-1 leaves it the library's): the list's
+   length is checked against the enum. A part the list leaves out would read 0 (off), which
+   test_graphics_presets also catches by requiring -1 for every part it does not set. */
+typedef char k_graphics_presets_name_every_part[
+    (0 PRESET_PART_LIST(PRESET_PART_ONE, 0, 0)) == PLAYER_PART_COUNT ? 1 : -1];
+#undef PRESET_PART_ONE
+#undef PRESET_PART_SET
+#undef PRESET_PART_LIST
 
 const PlayerGraphicsPresetRow *player_graphics_preset_row(int preset) {
     if (preset <= PLAYER_PRESET_CUSTOM || preset >= PLAYER_PRESET_COUNT) return NULL;
@@ -3027,6 +3037,15 @@ void player_play_resolve(const PlayerSettings *settings, const char *disc_id,
         out->part[p] = enhanced_part_value_index(p, value) >= 0 ? value : 0;
     }
     out->logic_60 = out->mode == PLAYER_PLAY_ACE && (!title || title->logic_60 != 0);
+    /* The stick dead zone is the title's own data, never a value in this file: the input block
+       of the entry found for the disc, a loaded overlay manifest's own or else the public
+       manifest's (carried into the generated catalog). Nothing is merged between the two. */
+    if (disc_id && disc_id[0]) {
+        nk_title_catalog_lock();
+        const NkTitleEntry *entry = nk_title_catalog_find_by_disc_id_locked(disc_id);
+        out->stick_counts = entry ? entry->analog_dead_zone_counts : 0;
+        nk_title_catalog_unlock();
+    }
 }
 
 void player_play_apply_logic_60(PlayerPlayResolved *play, bool logic_60) {
@@ -3053,12 +3072,26 @@ bool player_play_launch_line(const PlayerPlayResolved *play, char *out, size_t c
     used = (size_t)n;
     for (int p = 0; p < PLAYER_PART_COUNT; p++) {
         /* The upscaler travels as SR_PRESENT_UPSCALE (player_play_present_upscale), which the
-           launcher exports for every session; the runtime's SR_ACE line has no such key. */
-        if (p == PLAYER_PART_UPSCALE) continue;
-        /* A missing cull is off (contract 11.2 item 2): the line carries the key only when it is on. */
-        if (p == PLAYER_PART_CULL && (play->part[p] != 1 || play->mode != PLAYER_PLAY_ACE)) continue;
+           launcher exports for every session; the runtime's SR_ACE line has no such key. Stick
+           and cull come last, in the Ace line's own order (src/rt/ace.c), whatever the enum's. */
+        if (p == PLAYER_PART_UPSCALE || p == PLAYER_PART_STICK || p == PLAYER_PART_CULL) continue;
         n = snprintf(out + used, cap - used, ";%s=%s", k_enhanced_parts[p].key,
                      enhanced_part_word(p, play->part[p]));
+        if (n <= 0 || (size_t)n >= cap - used) { out[0] = '\0'; return false; }
+        used += (size_t)n;
+    }
+    /* A missing stick or cull is off (contract 11.2 item 2): the line carries each key only when
+       it is on in an Ace launch. Stick also needs the title's declared dead zone: its value is
+       that count, not the part's word. */
+    if (play->mode == PLAYER_PLAY_ACE && play->part[PLAYER_PART_STICK] == 1 && play->stick_counts >= 1 &&
+        play->stick_counts <= ACE_STICK_COUNTS_MAX) {
+        n = snprintf(out + used, cap - used, ";stick=%d", play->stick_counts);
+        if (n <= 0 || (size_t)n >= cap - used) { out[0] = '\0'; return false; }
+        used += (size_t)n;
+    }
+    if (play->mode == PLAYER_PLAY_ACE && play->part[PLAYER_PART_CULL] == 1) {
+        n = snprintf(out + used, cap - used, ";%s=%s", k_enhanced_parts[PLAYER_PART_CULL].key,
+                     enhanced_part_word(PLAYER_PART_CULL, 1));
         if (n <= 0 || (size_t)n >= cap - used) { out[0] = '\0'; return false; }
         used += (size_t)n;
     }

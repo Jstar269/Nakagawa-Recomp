@@ -67,6 +67,48 @@ static void cell_parse(void) {
         snprintf(spec, sizeof(spec), "%s;tier=ace;cull=on;cull=off", base);
         CHECK(ace_parse(spec, &c, why, sizeof(why)) == 0 && strcmp(why, "duplicate key") == 0, "a duplicate cull");
     }
+    /* stick (contract 11.3.11): optional, a missing key is off, its value is the game's dead zone
+       (1..126) in canonical decimal, it needs an Ace line, and a line without it formats as before. */
+    {
+        static const char base[] = "v1;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off";
+        char spec[ACE_SPEC_MAX], out[ACE_SPEC_MAX];
+        CHECK(ace_parse(base, &c, why, sizeof(why)) == 1 && c.stick == 0, "a missing stick is off");
+        snprintf(spec, sizeof(spec), "%s;tier=ace;stick=64", base);
+        CHECK(ace_parse(spec, &c, why, sizeof(why)) == 1 && c.on && c.stick == 64 && c.tier == ACE_TIER_ACE,
+              "stick=64 in an Ace line (%s)", why);
+        CHECK(ace_format(&c, out, sizeof(out)) && strcmp(out + strlen(out) - 9, ";stick=64") == 0,
+              "an Ace line with stick=64 formats with the key last (%s)", out);
+        {
+            AceConfig back;
+            CHECK(ace_parse(out, &back, why, sizeof(why)) == 1 && back.stick == 64 &&
+                  memcmp(&back, &c, sizeof(c)) == 0, "the stick line round-trips (%s)", out);
+        }
+        c.cull = 1;
+        CHECK(ace_format(&c, out, sizeof(out)) && strcmp(out + strlen(out) - 17, ";stick=64;cull=on") == 0,
+              "cull follows stick (%s)", out);
+        c.cull = 0;
+        c.stick = 0;
+        CHECK(ace_format(&c, out, sizeof(out)) && strstr(out, "stick") == NULL, "off writes no stick key (%s)", out);
+        snprintf(spec, sizeof(spec), "%s;tier=ace;stick=1", base);
+        CHECK(ace_parse(spec, &c, why, sizeof(why)) == 1 && c.stick == 1, "stick=1 is the smallest");
+        snprintf(spec, sizeof(spec), "%s;tier=ace;stick=126", base);
+        CHECK(ace_parse(spec, &c, why, sizeof(why)) == 1 && c.stick == 126, "stick=126 is the largest");
+        snprintf(spec, sizeof(spec), "%s;stick=64", base);
+        CHECK(ace_parse(spec, &c, why, sizeof(why)) == 0 && strcmp(why, "stick needs tier=ace") == 0 &&
+              c.on == 0 && c.stick == 0, "stick=64 without tier=ace is refused (%s)", why);
+        snprintf(spec, sizeof(spec), "%s;tier=enhanced;stick=64", base);
+        CHECK(ace_parse(spec, &c, why, sizeof(why)) == 0 && strcmp(why, "stick needs tier=ace") == 0,
+              "stick=64 in an Enhanced line is refused (%s)", why);
+        static const char *const bad[] = {"0", "127", "255", "-1", "+64", "064", "6x", "x", "on", "off",
+                                          "64.0", " 64", "1000"};
+        for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+            snprintf(spec, sizeof(spec), "%s;tier=ace;stick=%s", base, bad[i]);
+            CHECK(ace_parse(spec, &c, why, sizeof(why)) == 0 && strcmp(why, "bad value") == 0 && c.stick == 0,
+                  "stick=%s is a bad value (%s)", bad[i], why);
+        }
+        snprintf(spec, sizeof(spec), "%s;tier=ace;stick=64;stick=32", base);
+        CHECK(ace_parse(spec, &c, why, sizeof(why)) == 0 && strcmp(why, "duplicate key") == 0, "a duplicate stick");
+    }
     /* Every key but tier is required, whatever its place: leaving out any one of them refuses
        the line, leaving out tier does not (src/rt/ace.c names the required keys one by one). */
     {
@@ -144,7 +186,7 @@ static void cell_parse(void) {
 
     /* format and parse agree */
     char line[ACE_SPEC_MAX];
-    AceConfig a = { 1, 4, 0, 1, 0, 0, 0, ACE_TIER_ENHANCED, ACE_SAS_OFF, 0, 0 }, b;
+    AceConfig a = { 1, 4, 0, 1, 0, 0, 0, ACE_TIER_ENHANCED, ACE_SAS_OFF, 0, 0, 0 }, b;
     CHECK(ace_format(&a, line, sizeof(line)) && ace_parse(line, &b, NULL, 0) &&
           memcmp(&a, &b, sizeof(a)) == 0, "format round trip (%s)", line);
     CHECK(ace_format(&a, line, 8) == 0 && line[0] == '\0', "format refuses a short buffer");
@@ -278,6 +320,258 @@ static void cell_switch(void) {
           "an unavailable tess is off for the run");
     CHECK(ace_init_spec(k_good, NULL) == 1 && ace_effective()->tess == 0, "tess=off is off");
     CHECK(ace_init_spec("off", NULL) == 0 && ace_effective()->tess == 0, "an authentic run has no tess");
+}
+
+/* ---- stick dead-zone remap (contract 11.3.11) ------------------------------------------------ */
+
+/* The title's centring of one stick byte (its own coordinates, -127..127). */
+static int game_x(uint8_t b) { return (int)b - (b > 128 ? 1 : 0) - 127; }
+static int iabs(int v) { return v < 0 ? -v : v; }
+
+/* x / y = hx / hy within each axis's rounding to nearest: x = hx * t / m + ex with |ex| <= 1/2,
+   and the same for y, so |x * hy - y * hx| = |ex * hy - ey * hx| <= (|hx| + |hy|) / 2. */
+static int stick_direction_kept(int hx, int hy, int x, int y) {
+    const long cross = (long)x * hy - (long)y * hx;
+    return 2L * (cross < 0 ? -cross : cross) <= (long)(iabs(hx) + iabs(hy));
+}
+
+/* The game's magnitude for a host push of m counts along +x (byte 128 + m), y at rest. */
+static int remap_x(int m, int g, int d) {
+    uint8_t lx = (uint8_t)(128 + m), ly = 128u;
+    ace_stick_remap(&lx, &ly, g, d);
+    return iabs(game_x(lx));
+}
+
+static void cell_stick_curve(void) {
+    /* Rest is untouched, for any G and D. */
+    for (int d = 0; d <= 63; d++) {
+        uint8_t lx = 128u, ly = 128u;
+        ace_stick_remap(&lx, &ly, 64, d);
+        CHECK(lx == 128u && ly == 128u, "rest stays 128,128 with D=%d", d);
+    }
+    /* Full throw and the keyboard's edges are unchanged. */
+    {
+        static const uint8_t edges[][2] = {{255, 128}, {0, 128}, {128, 255}, {128, 0},
+                                           {255, 255}, {0, 0}, {255, 0}, {0, 255}};
+        for (size_t i = 0; i < sizeof(edges) / sizeof(edges[0]); i++) {
+            for (int d = 0; d <= 63; d += 30) {
+                uint8_t lx = edges[i][0], ly = edges[i][1];
+                ace_stick_remap(&lx, &ly, 64, d);
+                CHECK(lx == edges[i][0] && ly == edges[i][1], "edge %u,%u with D=%d became %u,%u",
+                      edges[i][0], edges[i][1], d, lx, ly);
+            }
+        }
+    }
+    /* G=64, D=30: a push just past D is the game's dead-zone edge (scale 0), the scale rises
+       monotonically, and it is (m - D) / (127 - D) within one count. */
+    {
+        const int g = 64, d = 30;
+        CHECK(remap_x(d + 1, g, d) == 64, "a push just past D gives 64, got %d", remap_x(d + 1, g, d));
+        CHECK(remap_x(127, g, d) == 127, "full throw gives 127");
+        int prev = -1;
+        for (int m = 1; m <= 127; m++) {
+            const int out = remap_x(m, g, d);
+            CHECK(out >= prev, "the curve falls at m=%d (%d after %d)", m, out, prev);
+            prev = out;
+            CHECK((out >= 64) == (m > d), "m=%d: game magnitude %d is %s the game's dead zone", m, out,
+                  m > d ? "inside" : "outside");
+            if (m > d) {
+                /* (out - 64) / 63 against (m - D) / (127 - D), in counts of 63. */
+                const int want_x97 = 63 * (m - d);           /* x (127 - D) = 97 */
+                const int got_x97 = (out - 64) * (127 - d);
+                CHECK(iabs(got_x97 - want_x97) <= (127 - d), "m=%d: game scale %d/63, want %d/97", m,
+                      out - 64, m - d);
+            }
+        }
+    }
+    /* Direction is kept, every quadrant inverts the game's centring exactly, and the game sees
+       a push past its dead zone exactly when the host's push is past D. */
+    {
+        const int g = 64;
+        static const int ds[] = {0, 30, 63, 100};
+        for (size_t k = 0; k < sizeof(ds) / sizeof(ds[0]); k++) {
+            const int d = ds[k];
+            for (int hx = -127; hx <= 127; hx += 3) {
+                for (int hy = -127; hy <= 127; hy += 5) {
+                    const int m = iabs(hx) > iabs(hy) ? iabs(hx) : iabs(hy);
+                    if (m == 0) continue;
+                    uint8_t lx = (uint8_t)(128 + hx), ly = (uint8_t)(128 + hy);
+                    ace_stick_remap(&lx, &ly, g, d);
+                    const int x = hx == 0 ? 0 : game_x(lx), y = hy == 0 ? 0 : game_x(ly);
+                    const int mx = iabs(x) > iabs(y) ? iabs(x) : iabs(y);
+                    CHECK((mx >= 64) == (m > d), "D=%d %d,%d: game magnitude %d", d, hx, hy, mx);
+                    CHECK((hx < 0 ? x <= 0 : x >= 0) && (hy < 0 ? y <= 0 : y >= 0),
+                          "D=%d %d,%d: a sign flipped (%d,%d)", d, hx, hy, x, y);
+                    CHECK(stick_direction_kept(hx, hy, x, y), "D=%d %d,%d: direction %d,%d", d, hx, hy, x, y);
+                    /* A remapped axis goes back through the exact inverse of the centring. */
+                    if (hx != 0) CHECK(lx == (uint8_t)(x >= 1 ? x + 128 : x + 127), "lx inverse %d", x);
+                    if (hy != 0) CHECK(ly == (uint8_t)(y >= 1 ? y + 128 : y + 127), "ly inverse %d", y);
+                    if (hx == 0) CHECK(lx == 128u, "an axis at rest keeps its byte");
+                }
+            }
+        }
+    }
+    /* The negative side: byte 0 is -127 (unchanged), and a push of -(D+1) is the game's -64. */
+    {
+        uint8_t lx = (uint8_t)(128 - 31), ly = 128u;
+        ace_stick_remap(&lx, &ly, 64, 30);
+        CHECK(game_x(lx) == -64 && lx == 63u, "a push of -31 past D=30 is the game's -64 (byte %u)", lx);
+        lx = 1u;                           /* h = -127 */
+        ace_stick_remap(&lx, &ly, 64, 30);
+        CHECK(lx == 0u, "h=-127 is the game's -127 (byte %u)", lx);
+    }
+    /* D clamps: below 0 or 127 and above reads as 0; G out of range does nothing. */
+    CHECK(remap_x(1, 64, 0) == 64 && remap_x(1, 64, -5) == 64 && remap_x(1, 64, 127) == 64,
+          "D=0, D<0 and D>=127 start the game's live range at the first count");
+    CHECK(remap_x(63, 64, 63) == 63 && remap_x(64, 64, 63) == 64, "D=G-1: the first live count is G");
+    {
+        uint8_t lx = 150u, ly = 100u;
+        ace_stick_remap(&lx, &ly, 0, 30);
+        ace_stick_remap(&lx, &ly, 127, 30);
+        CHECK(lx == 150u && ly == 100u, "a dead zone outside 1..126 leaves the sample as it is");
+    }
+    /* The host's dead zone in centred counts: the default profile's 7849 is 30. */
+    CHECK(ace_stick_host_counts(7849, 7849) == 30, "7849 is 30 counts");
+    CHECK(ace_stick_host_counts(0, 7849) == 30 && ace_stick_host_counts(7849, 0) == 30, "the larger axis");
+    CHECK(ace_stick_host_counts(0, 0) == 0 && ace_stick_host_counts(-1, -9) == 0, "none is 0");
+    CHECK(ace_stick_host_counts(32767, 0) == 127, "a full dead zone is 127 (which the remap reads as 0)");
+}
+
+/* A host dead zone at or above the game's (a large user dead zone, or a title with a small one)
+   is used as it is: up to D the game reads below G, past D at G or more, the curve is monotonic
+   and has no gap wider than its own slope at D. */
+static void cell_stick_host_dead_zone_at_or_above_g(void) {
+    static const int cases[][2] = {{10, 30}, {64, 100}, {64, 64}};
+    for (size_t k = 0; k < sizeof(cases) / sizeof(cases[0]); k++) {
+        const int g = cases[k][0], d = cases[k][1];
+        int prev = -1;
+        for (int m = 1; m <= 127; m++) {   /* m = 0 is rest, byte 128, which the title reads as +1 */
+            const int out = remap_x(m, g, d);
+            CHECK(out >= prev, "G=%d D=%d: the curve falls at m=%d (%d after %d)", g, d, m, out, prev);
+            CHECK((out >= g) == (m > d), "G=%d D=%d m=%d: game magnitude %d is %s the game's dead zone",
+                  g, d, m, out, m > d ? "inside" : "outside");
+            prev = out;
+        }
+        /* Continuity at the edge: D is the game's G - 1, D + 1 its G plus at most one slope step. */
+        const int step = (127 - g + (127 - d) - 1) / (127 - d);     /* ceil((127 - G) / (127 - D)) */
+        CHECK(remap_x(d, g, d) == g - 1, "G=%d D=%d: m=D gives G-1, got %d", g, d, remap_x(d, g, d));
+        CHECK(remap_x(d + 1, g, d) >= g && remap_x(d + 1, g, d) <= g + step,
+              "G=%d D=%d: m=D+1 gives %d, want %d..%d", g, d, remap_x(d + 1, g, d), g, g + step);
+        CHECK(remap_x(127, g, d) == 127, "G=%d D=%d: full throw stays 127", g, d);
+    }
+    /* The review's two cases, by value. */
+    CHECK(remap_x(30, 10, 30) == 9 && remap_x(31, 10, 30) == 11, "G=10 D=30: 30 -> 9, 31 -> 11");
+    CHECK(remap_x(100, 64, 100) == 63 && remap_x(101, 64, 100) == 66, "G=64 D=100: 100 -> 63, 101 -> 66");
+    /* The run's remap keeps such a D as it is, for the report too. */
+    {
+        char json[ACE_REPORT_MAX];
+        uint8_t lx = (uint8_t)(128 + 101), ly = 128u;
+        CHECK(ace_init_spec("v1;tier=ace;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;"
+                            "tess=off;stick=64", NULL) == 1, "stick=64 for a large host dead zone");
+        ace_stick_sample(&lx, &ly, 100);
+        CHECK(game_x(lx) == 66 && ly == 128u, "a live push of 101 past D=100 is the game's 66 (%u)", lx);
+        CHECK(ace_report_json(json, sizeof(json)) > 0 && strstr(json, "\"host_dead_zone\": 100") != NULL,
+              "the report keeps D=100:\n%s", json);
+        (void)ace_init_spec("off", NULL);
+    }
+}
+
+/* A round host stick (a gamepad's circular gate): points on rays at every 15 degrees, radius 0 to
+   127. The direction is kept at every point, and the game's magnitude max(|x|, |y|), which sets
+   its movement scale, never falls as the radius grows. A Chebyshev remap pushes the circle
+   outward: the host's full diagonal (90, 90) reaches the game as (102, 102), a scale of 38/63.
+   Each axis also depends on the other: y held at 40 reads 70 with x at 40 and 40 with x at 127. */
+/* cos(15 * step degrees) in thousandths, from a table: the test links no maths library. */
+static int stick_cos15(int step) {
+    static const int q[7] = {1000, 966, 866, 707, 500, 259, 0};   /* 0..90 degrees */
+    step = ((step % 24) + 24) % 24;
+    if (step <= 6) return q[step];
+    if (step <= 12) return -q[12 - step];
+    if (step <= 18) return -q[step - 12];
+    return q[24 - step];
+}
+static int stick_round_milli(int v) { return v >= 0 ? (v + 500) / 1000 : -((-v + 500) / 1000); }
+
+static void cell_stick_round_host(void) {
+    static const int ds[] = {0, 30, 100};
+    for (size_t k = 0; k < sizeof(ds) / sizeof(ds[0]); k++) {
+        const int g = 64, d = ds[k];
+        for (int step = 0; step < 24; step++) {
+            const int deg = step * 15;
+            const int c = stick_cos15(step), sn = stick_cos15(step + 18);   /* sin = cos(deg - 90) */
+            int prev = -1;
+            for (int r = 0; r <= 127; r++) {
+                const int hx = stick_round_milli(r * c), hy = stick_round_milli(r * sn);
+                uint8_t lx = (uint8_t)(128 + hx), ly = (uint8_t)(128 + hy);
+                ace_stick_remap(&lx, &ly, g, d);
+                const int x = hx == 0 ? 0 : game_x(lx), y = hy == 0 ? 0 : game_x(ly);
+                const int mx = iabs(x) > iabs(y) ? iabs(x) : iabs(y);
+                CHECK(stick_direction_kept(hx, hy, x, y), "D=%d %d deg r=%d: %d,%d became %d,%d", d, deg, r,
+                      hx, hy, x, y);
+                CHECK(mx >= prev, "D=%d %d deg: the game's magnitude falls at r=%d (%d after %d)", d, deg, r,
+                      mx, prev);
+                prev = mx;
+            }
+        }
+    }
+    {
+        uint8_t lx = (uint8_t)(128 + 90), ly = (uint8_t)(128 + 90);
+        ace_stick_remap(&lx, &ly, 64, 30);
+        CHECK(game_x(lx) == 102 && game_x(ly) == 102, "the host diagonal 90,90 is the game's 102,102 (%d,%d)",
+              game_x(lx), game_x(ly));
+        lx = (uint8_t)(128 + 40); ly = (uint8_t)(128 + 40);
+        ace_stick_remap(&lx, &ly, 64, 30);
+        CHECK(game_x(ly) == 70, "y=40 with x=40 is the game's 70 (%d)", game_x(ly));
+        lx = 255u; ly = (uint8_t)(128 + 40);
+        ace_stick_remap(&lx, &ly, 64, 30);
+        CHECK(game_x(ly) == 40, "y=40 with x=127 is the game's 40 (%d)", game_x(ly));
+    }
+}
+
+/* The run's remap: off unless the line asked for it; it counts, confirms and reports. */
+static void cell_stick_run(void) {
+    char json[ACE_REPORT_MAX];
+    uint8_t lx = 160u, ly = 128u;
+    CHECK(ace_init_spec("off", NULL) == 0, "an authentic run");
+    ace_stick_sample(&lx, &ly, 30);
+    CHECK(lx == 160u && ly == 128u, "an authentic run leaves the stick as it is");
+    CHECK(ace_init_spec(k_good, NULL) == 1 && ace_effective()->stick == 0, "an Enhanced run has no stick");
+    ace_stick_sample(&lx, &ly, 30);
+    CHECK(lx == 160u && ly == 128u, "a run without stick leaves the stick as it is");
+    CHECK(ace_report_json(json, sizeof(json)) > 0 && strstr(json, "\"stick\"") == NULL,
+          "a run without stick reports none:\n%s", json);
+
+    CHECK(ace_init_spec("v1;tier=ace;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;"
+                        "stick=64", NULL) == 1 && ace_effective()->stick == 64, "stick=64 turns the remap on");
+    CHECK(strstr(ace_spec_text(), ";stick=64") != NULL, "the run's line carries the key (%s)", ace_spec_text());
+    lx = 128u; ly = 128u;
+    ace_stick_sample(&lx, &ly, 30);
+    CHECK(lx == 128u && ly == 128u, "rest is not remapped");
+    CHECK(ace_report_json(json, sizeof(json)) > 0 &&
+          strstr(json, "\"stick\": {\"counts\": 64, \"host_dead_zone\": 30, \"samples_remapped\": 0}") != NULL,
+          "the report names the remap before any sample:\n%s", json);
+    lx = (uint8_t)(128 + 31);
+    ace_stick_sample(&lx, &ly, 30);
+    CHECK(game_x(lx) == 64 && ly == 128u, "a live push just past the host's dead zone is the game's 64 (%u)", lx);
+    lx = 255u;
+    ace_stick_sample(&lx, &ly, 30);
+    CHECK(lx == 255u, "full throw stays full throw");
+    CHECK(ace_report_json(json, sizeof(json)) > 0 && strstr(json, "\"samples_remapped\": 2") != NULL,
+          "the report counts remapped samples:\n%s", json);
+    CHECK(ace_feature_words(json, sizeof(json)) > 0 && strcmp(json, "stick remap") == 0, "stick words: '%s'", json);
+    ace_finish();
+    CHECK(ace_effective()->stick == 64 && ace_report_json(json, sizeof(json)) > 0 &&
+          strstr(json, "\"unavailable\": {}") != NULL, "a run that remapped is confirmed:\n%s", json);
+
+    /* A run whose stick never left rest reports the remap unavailable at its end. */
+    CHECK(ace_init_spec("v1;tier=ace;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;"
+                        "stick=64", NULL) == 1, "stick=64 again");
+    lx = 128u; ly = 128u;
+    ace_stick_sample(&lx, &ly, 30);
+    ace_finish();
+    CHECK(ace_effective()->stick == 0 && ace_requested()->stick == 64 && ace_report_json(json, sizeof(json)) > 0 &&
+          strstr(json, "\"stick\": \"did not run") != NULL, "an unused remap is unavailable:\n%s", json);
+    (void)ace_init_spec("off", NULL);
 }
 
 /* ---- C4: the 30 Hz detector ----------------------------------------------------------------- */
@@ -1197,6 +1491,10 @@ static void cell_pace(void) {
 
 int main(int argc, char **argv) {
     cell_parse();
+    cell_stick_curve();
+    cell_stick_host_dead_zone_at_or_above_g();
+    cell_stick_round_host();
+    cell_stick_run();
     cell_pace();
     cell_switch();
     cell_detector();
@@ -1213,6 +1511,6 @@ int main(int argc, char **argv) {
         fprintf(stderr, "ace-selftest: %d check(s) FAILED\n", s_fail);
         return 1;
     }
-    printf("ace-selftest: PASS (parse, switch, detector, feed, readout, fast forward, report)\n");
+    printf("ace-selftest: PASS (parse, stick, switch, detector, feed, readout, fast forward, report)\n");
     return 0;
 }

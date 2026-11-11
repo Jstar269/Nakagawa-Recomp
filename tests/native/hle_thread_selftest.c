@@ -675,10 +675,15 @@ uint32_t gui_pad_pulses_take(void) {
     s_osk_test_pulse = 0u;
     return pulse;
 }
+/* The window's stick and the input profile's dead zone: at rest and 0, except where the stick
+ * remap test moves them. */
+static uint8_t s_test_gui_lx = 128u, s_test_gui_ly = 128u;
+static int s_test_gui_stick_dead_zone;
 void gui_analog(uint8_t *lx, uint8_t *ly) {
-    if (lx) *lx = 128;
-    if (ly) *ly = 128;
+    if (lx) *lx = s_test_gui_lx;
+    if (ly) *ly = s_test_gui_ly;
 }
+int gui_stick_dead_zone(void) { return s_test_gui_stick_dead_zone; }
 int gui_pad_present(void) { return 0; }
 void gui_ace_vblank(uint32_t vcount) { (void)vcount; }
 int gui_present(uint32_t fbaddr, int fmt, uint32_t stride) {
@@ -42903,6 +42908,83 @@ static void test_route_stick_reaches_the_guest_through_the_controller_sample(voi
  * so a walk recorded with the analog stick replayed standing still. Also here: an unread stick
  * press names the position in its failure, and a long route program loads (the step limit was
  * 256, which a walked level route passes before its first obstacle). */
+/* Ace's stick dead-zone remap (stick=<counts>, contract 11.3.11) in the real latch: the window's
+ * stick goes through it in sr_ctrl_sample before the controller ring stores the sample, so the
+ * guest's sceCtrlReadBufferPositive reads the remapped bytes. Without the key the guest reads the
+ * window's bytes, and a route's stick and a digital-mode sample are never remapped. Driven
+ * through the real vblank episode service and the real dispatch, as the route stick test is. */
+static void test_ace_stick_remap_reaches_the_guest_only_from_the_live_stick(void) {
+    extern int s_ctrl_test_stick;
+    extern int ace_init_spec(const char *spec, const char *report_path);
+    static const char stick_line[] =
+        "v1;tier=ace;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;stick=64";
+    CpuState cpu;
+    RouteStickRead r;
+    const int test_stick = s_ctrl_test_stick;
+
+    reset_fixture();
+    sr_hle_init();
+    sr_route_reset();
+    ctrl_env("1", "", "", "");
+    sr_ctrl_test_reset_live_input();
+    sr_hle_test_ctrl_sampling_reset();
+    starve_reset();
+    route_stick_mode(&cpu, 1u);
+    ctrl_drain(&cpu);
+    s_ctrl_test_stick = 0;            /* the window's stick, not the test build's stand-in */
+    s_test_gui_on = 1;
+    s_test_gui_stick_dead_zone = 30;  /* the default profile's 7849 */
+    s_test_gui_lx = (uint8_t)(128u + 31u);
+    s_test_gui_ly = 128u;
+
+    (void)ace_init_spec("off", NULL);
+    starve_batch(1u);
+    r = route_stick_read(&cpu);
+    expect(route_stick_is(r, 0u, 159u, 128u), "an Authentic run latches the window's stick bytes as they are");
+
+    expect(ace_init_spec(stick_line, NULL) == 1, "an Ace line with stick=64 starts the remap");
+    starve_batch(1u);
+    r = route_stick_read(&cpu);
+    expect(route_stick_is(r, 0u, 192u, 128u),
+           "a live push of 31 past the host's dead zone of 30 is latched as the game's 64 (byte 192)");
+    s_test_gui_lx = (uint8_t)(128u + 90u);
+    s_test_gui_ly = (uint8_t)(128u + 90u);
+    starve_batch(1u);
+    r = route_stick_read(&cpu);
+    expect(route_stick_is(r, 0u, 230u, 230u), "the live diagonal 90,90 is latched as the game's 102,102");
+    s_test_gui_lx = 255u;
+    s_test_gui_ly = 0u;
+    starve_batch(1u);
+    r = route_stick_read(&cpu);
+    expect(route_stick_is(r, 0u, 255u, 0u), "full throw is latched unchanged");
+
+    /* A route step that holds the stick hands the guest its own bytes, remap on or off. */
+    s_test_gui_lx = (uint8_t)(128u + 31u);
+    s_test_gui_ly = 128u;
+    rt_write("STICK 159 128 PRESS 0 2\nEND\n");
+    expect(sr_route_load(RT_PATH) == 1, "a route that holds the stick loads with the remap on");
+    starve_batch(1u);
+    r = route_stick_read(&cpu);
+    expect(route_stick_is(r, 0u, 159u, 128u), "a route's stick reaches the guest unremapped");
+    remove(RT_PATH);
+    sr_route_reset();
+
+    /* Digital mode reads the stick centred, remap or not. */
+    route_stick_mode(&cpu, 0u);
+    ctrl_drain(&cpu);
+    starve_batch(1u);
+    r = route_stick_read(&cpu);
+    expect(route_stick_is(r, 0u, 128u, 128u), "a digital-mode sample is centred, not remapped");
+    route_stick_mode(&cpu, 1u);
+
+    (void)ace_init_spec("off", NULL);
+    s_test_gui_on = 0;
+    s_test_gui_stick_dead_zone = 0;
+    s_test_gui_lx = 128u;
+    s_test_gui_ly = 128u;
+    s_ctrl_test_stick = test_stick;
+}
+
 static void test_route_recording_carries_the_stick_from_log_to_replay(void) {
     extern void sr_hle_test_inlog(int on);
     CpuState cpu;
@@ -51289,6 +51371,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_scripted_input_reaches_a_starved_guest();
     test_route_read_widths_hold_for_their_reads_on_a_starved_host();
     test_route_stick_reaches_the_guest_through_the_controller_sample();
+    test_ace_stick_remap_reaches_the_guest_only_from_the_live_stick();
     test_route_recording_carries_the_stick_from_log_to_replay();
 
     check_coroutine_lifecycle();
