@@ -2550,7 +2550,7 @@ def _tree_binding_findings(
             return [Finding("POLICY_TREE_UNBINDABLE", str(repo_root), "committed-tree audit has no tree reference")]
         try:
             actual = _git_output(
-                ["rev-parse", f"{committed_tree_ref}^{{tree}}"], tree_repo_root or repo_root
+                ["rev-parse", "--verify", "--end-of-options", f"{committed_tree_ref}^{{tree}}"], tree_repo_root or repo_root
             ).strip()
         except RuntimeError as error:
             return [Finding("POLICY_TREE_UNBINDABLE", str(repo_root), str(error))]
@@ -3272,7 +3272,8 @@ def _committed_tree_entries(tree_sha: str, source_repo: Path) -> list[tuple[str,
 def _commit_of(ref: str, source_repo: Path) -> str:
     """The commit ``ref`` names, for the report; ``unknown`` for a bare tree id (also accepted)."""
     try:
-        return _git_output(["rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"], source_repo).strip()
+        return _git_output(["rev-parse", "--verify", "--quiet", "--end-of-options", f"{ref}^{{commit}}"],
+                           source_repo).strip()
     except RuntimeError:
         return "unknown"
 
@@ -3287,7 +3288,7 @@ def _materialize_committed_tree(
     and both attributes come from the ``.gitattributes`` of the tree under audit, so one line there would
     hide a file from the audit. ``entries_out``, when given, receives the tree's ``git ls-tree`` list.
     """
-    tree_sha = _git_output(["rev-parse", f"{ref}^{{tree}}"], source_repo).strip()
+    tree_sha = _git_output(["rev-parse", "--verify", "--end-of-options", f"{ref}^{{tree}}"], source_repo).strip()
     entries = _committed_tree_entries(tree_sha, source_repo)
     if entries_out is not None:
         entries_out[:] = entries

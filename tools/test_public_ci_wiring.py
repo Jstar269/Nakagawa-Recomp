@@ -1992,7 +1992,10 @@ class PublicExportJobTests(unittest.TestCase):
                      'if ! grep -q "PROVENANCE_UNVERIFIED" <<<"$audit"; then'):
             self.assertIn(line, export)
         self.assertNotIn('grep -q "PROVENANCE_UNVERIFIED" <<<"$output"', export)
-        self.assertEqual(export.count('echo "a publication gate failed before the candidate audit ran" >&2'), 2)
+        # Review 2387 (Fable) R2: a gate failing after a forged pass line landed in the audit half.
+        self.assertIn('if grep -qF "[FAILED CLOSED] Public-export gates failed" <<<"$output"; then', export)
+        self.assertLess(export.index("[FAILED CLOSED] Public-export gates failed"), export.index("marker='"))
+        self.assertEqual(export.count('echo "a publication gate failed before the candidate audit ran" >&2'), 3)
         job = "\n".join(self.blocks["public_export"])
         self.assertIn("fetch-depth: 0", job)
         self.assertIn('python-version: "3.15.2"', job)

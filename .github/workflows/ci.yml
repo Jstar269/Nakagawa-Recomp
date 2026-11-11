@@ -333,10 +333,17 @@ jobs:
             exit 1
           fi
           # Every publication gate must pass first, and the expected failure must
-          # come from the candidate audit that follows. A gate's own output (such
-          # as the unprotected SBOM check's) can print any line, but it cannot
-          # remove the [FAIL] status line the tool prints for an earlier gate,
-          # nor write after the tool's last pass line.
+          # come from the candidate audit that follows. A gate's printed output
+          # (the unprotected SBOM check's, say) can hold any line, but it cannot
+          # remove the lines the tool prints itself: a [FAIL] status line for
+          # an earlier gate, the [FAILED CLOSED] line when any gate failed, or
+          # what comes after the tool's last pass line. These checks read output
+          # only; code run in this job could still change files on disk, and
+          # the control against a changed audit is the trusted attestation.
+          if grep -qF "[FAILED CLOSED] Public-export gates failed" <<<"$output"; then
+            echo "a publication gate failed before the candidate audit ran" >&2
+            exit 1
+          fi
           marker='[ALL GATES PASSED] Public-export gates verified.'
           last="$(grep -nxF "$marker" <<<"$output" | tail -n 1 | cut -d: -f1 || true)"
           if [ -z "$last" ]; then

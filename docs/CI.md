@@ -1467,8 +1467,11 @@ check. `GateCodeTests` in `tools/test_ci_trust_verdict.py` fails when one of tho
 import or a `tools/` script it runs that is not protected, or pre-commit gains a hook that is not.
 `tools/verify_sbom.py`, which the public-export job runs to check the SBOM, is exempt: it does not decide
 which files may be published, and it loads the analyzer and code generator. That step accepts its expected
-`PROVENANCE_UNVERIFIED` failure only when no gate printed `[FAIL]` and the token follows the tool's last
-`[ALL GATES PASSED]` line, so an unprotected module cannot turn a failed gate into the expected result.
+`PROVENANCE_UNVERIFIED` failure only when the tool printed no `[FAILED CLOSED]` line and no gate's `[FAIL]`
+line, and the token follows the tool's last `[ALL GATES PASSED]` line. So a gate's printed output cannot
+turn a failed gate into the expected result. Code that runs in the pull request's own job could still change
+files on disk, which no output check sees; the control against a changed audit is the trusted attestation's
+own run of the default branch's audit.
 
 Whatever the `CI_DEFINITION_BEHIND` finding text says, who merges `main`, and when, is decided by
 [`AGENTS.md` section 10](../AGENTS.md#10-pr-and-integration-authorization), as the row above states.
