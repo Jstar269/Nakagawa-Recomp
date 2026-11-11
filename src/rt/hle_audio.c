@@ -231,7 +231,7 @@ extern int sr_audio_played_dry(int ch);
 extern void sr_audio_push_silence(int ch, int nframes);
 
 /* One display period in mixer frames, rounded up (736). */
-#define AUDIO_LATE_WAKE_FRAMES ((HLE_DISPLAY_PERIOD_US * 44100u + 999999u) / 1000000u)
+#define AUDIO_LATE_WAKE_FRAMES ((SR_DISPLAY_PERIOD_US * 44100u + 999999u) / 1000000u)
 
 static uint32_t audio_host_hold_frames(uint32_t n) {
     if (!n) return 0u;   /* no period reserved: nothing paces against this queue */
@@ -451,7 +451,7 @@ void sr_hle_test_audio_wait_hook(void (*hook)(uint32_t us)) { s_audio_wait_hook 
 void sr_hle_test_audio_wait_reset(void) { s_audio_wait_total_us = 0u; }
 uint64_t sr_hle_test_audio_wait_total_us(void) { return s_audio_wait_total_us; }
 /* The late wake the host hold covers, for a fixture that ends every wait that late. */
-uint32_t sr_hle_test_audio_late_wake_us(void) { return HLE_DISPLAY_PERIOD_US; }
+uint32_t sr_hle_test_audio_late_wake_us(void) { return SR_DISPLAY_PERIOD_US; }
 #endif
 static void audio_wait(uint32_t us) {
 #ifdef SR_HLE_THREAD_SELFTEST
