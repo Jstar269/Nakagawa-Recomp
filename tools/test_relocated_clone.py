@@ -317,7 +317,7 @@ class TwoCheckoutIsolationTests(unittest.TestCase):
             # stopped, so it neither keeps building nor holds the temporary tree open.
             self.addCleanup(_stop, run)
             runs[name] = run
-        for name, run in runs.items():
+        for run in runs.values():
             run.wait(timeout=COMMAND_TIMEOUT_S)
         for name, run in runs.items():
             output = (logs / f"{name}.log").read_text(encoding="utf-8", errors="replace")
