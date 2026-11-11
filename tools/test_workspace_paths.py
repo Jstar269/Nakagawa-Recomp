@@ -664,8 +664,8 @@ class OutsideOutputRootInventoryTests(unittest.TestCase):
     ways. The source side is: a path default in src/rt/env_registry.h; an fopen of a
     literal name for writing and a `logs/`, `build/` or `place_game_here/` literal
     anywhere in src/; and a file name with an output extension in src/rt, bare or after
-    `%s/`. Self-test output names and comments are skipped, and a literal split around an inttypes.h format macro is
-    joined with the macro's name in place. A name the code assembles from separate pieces
+    `%s/`. Self-test output names and comments are skipped, and a literal split around
+    an inttypes.h format macro is joined with the macro's name in place. A name the code assembles from separate pieces
     at run time is not seen, nor a literal default in code that env_registry.h does not
     record. Each runtime row's switches must be registered variables, and a literal
     fopen'd for writing must be declared as written. The tools table is checked row by
@@ -679,7 +679,7 @@ class OutsideOutputRootInventoryTests(unittest.TestCase):
     JOINED_HEADER = "| Name | Joined to |"
     TOOLS_HEADER = "| Path | Tool | Why it stays |"
     #: The title catalog's launch candidates and fixture memory-stick roots are joined to
-    #: the checkout src/core/nk_launch.c is given, never to the working directory (the doc
+    #: the root src/core/nk_launch.c is given, never to the working directory (the doc
     #: says so below the tables).
     EXCLUDED_DIRS = ("src/core/generated/",)
     REGISTRY_ROW = re.compile(r'X\("([A-Z0-9_]+)",\s*"([\w-]+)",\s*"([^"]*)"')

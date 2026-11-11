@@ -231,9 +231,9 @@ are listed here, each with the reason it stays. `OutsideOutputRootInventoryTests
 name missing here or a row the source no longer names. It finds a `path` default in
 `src/rt/env_registry.h`, an `fopen` of a literal name for writing, a `logs/`, `build/` or
 `place_game_here/` literal anywhere in `src/`, and a file name with an output extension in
-`src/rt`, bare or after `%s/`, self-test outputs aside. A name split around an `inttypes.h` format macro is joined
-and listed with the macro's name in place, so `"snap_f%05" PRIu32 ".ppm"` is
-`snap_f%05PRIu32.ppm`. Comments are not read. It cannot see a name the code assembles from
+`src/rt`, bare or after `%s/`, self-test outputs aside. A name split around an
+`inttypes.h` format macro is joined and listed with the macro's name in place, so
+`"snap_f%05" PRIu32 ".ppm"` is `snap_f%05PRIu32.ppm`. Comments are not read. It cannot see a name the code assembles from
 separate pieces at run time, or a literal default in code that `env_registry.h` does not
 record. The tools table is not derived: the test checks each of its rows against its
 tool's source, and requires every written path inside the checkout to be gitignored.
@@ -244,7 +244,9 @@ checkout. The player runs a title from its package folder, under the root it was
 (the per-user data by default), when the package is valid, and otherwise from that root.
 Each written path is off until the Switch column's variables turn it on, except
 `memstick`, which is created the first time the guest touches `ms0:` and written when it
-saves. The column says which variable turns an output on and which only moves it.
+saves. The column says which variable turns an output on and which only moves it. The
+four display snapshot rows (`snap_%u`, `snap_v`, `frame_v` and `build/snapshots`) also
+need a presenter, stop while `SR_FBDUMP` is nonzero, and stay off when `SR_FBSNAP` is `0`.
 
 | Path | Switch | Direction | Why it stays |
 | --- | --- | --- | --- |
