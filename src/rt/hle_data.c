@@ -2115,15 +2115,15 @@ int io_restore_truncated_gap(Fd *f) {
  * -1 if the path is not in the extracted set (caller should fall through to the
  * real opener). The returned entry is owned by the immutable cache. */
 /* sceIoOpen with PSP_O_CREAT and without write access on the Memory Stick, where no hardware
- * cell says what the PSP answers (#1380): the file exists, or PSP_O_TRUNC or PSP_O_EXCL is set.
- * Nothing is opened, created or cut. */
+ * cell says what the PSP answers (#1380): the file exists, or PSP_O_APPEND, PSP_O_TRUNC or
+ * PSP_O_EXCL is set. Nothing is opened, created or cut. */
 static uint32_t io_open_read_only_create_boundary(const char *path) {
     static atomic_flag reported = ATOMIC_FLAG_INIT;
     if (!atomic_flag_test_and_set_explicit(&reported, memory_order_acq_rel))
         fprintf(stderr,
                 "SEMANTIC_BOUNDARY: IO_OPEN_READ_ONLY_CREATE: sceIoOpen(%s) with PSP_O_CREAT and "
-                "without write access on an existing file, or with PSP_O_TRUNC or PSP_O_EXCL, is "
-                "not supported yet (0x80010086)\n", path);
+                "without write access on an existing file, or with PSP_O_APPEND, PSP_O_TRUNC or "
+                "PSP_O_EXCL, is not supported yet (0x80010086)\n", path);
     return 0x80010086u;
 }
 
@@ -2188,11 +2188,11 @@ static uint32_t h_io_open_path_stock(const char *path, uint32_t flags, int force
      * PSP_O_RDONLY | PSP_O_CREAT on a missing file answers 0x80010016 and creates nothing
      * (PSP-HLE-IO-SEEK-001 io-seek-ms-write-rdonly-creat, PSP-3000). Everything else such an open
      * can meet is unmeasured and stops at a named boundary with nothing opened or changed: an
-     * existing file, PSP_O_TRUNC and PSP_O_EXCL. The file is looked for read-only. */
+     * existing file, PSP_O_APPEND, PSP_O_TRUNC and PSP_O_EXCL. The file is looked for read-only. */
     const int read_only_create = creating && !writing && strchr(path, ':') &&
                                  sr_ms0_classify(path, NULL) == SR_MS0_OWNED;
     if (read_only_create) {
-        if (flags & 0x0C00u) return io_open_read_only_create_boundary(path);
+        if (flags & 0x0D00u) return io_open_read_only_create_boundary(path);
         creating = exclusive = 0;
     }
 #ifndef _WIN32
