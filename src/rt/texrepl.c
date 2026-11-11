@@ -270,6 +270,8 @@ typedef struct {
     uint8_t state;         /* 0 not read yet, 1 decoded, 2 cannot be used, 3 size known, image not held */
     uint32_t pins;
     uint64_t lru;
+    uint32_t same;         /* 0, or 1 + the row that holds this file's state: the same file under another
+                              name (other case, an 8.3 name, a link), found before its bytes are read */
 } Image;
 
 /* One mip level of a listed texture. */
@@ -334,6 +336,9 @@ struct NkTexRepl {
     size_t alias_n;
     Image *images;             /* every file the levels name, once (images_build) */
     size_t image_n;
+    uint64_t *id_key;          /* files read so far, by identity (ZIP entry, or volume and file ID): */
+    uint32_t *id_row;          /* an open-addressed table, key pairs in id_key, 0 an empty slot */
+    size_t id_cap, id_n;
     HashRange *ranges;
     size_t range_n, range_cap;
     ReduceRange *reduce;
@@ -1043,7 +1048,65 @@ static int parse_ini(NkTexRepl *p, char *text, char *err, size_t err_cap) {
 /* ------------------------------------------------------------------------------- files */
 
 typedef enum { PACK_READ_OK, PACK_READ_MISSING, PACK_READ_TOO_LARGE, PACK_READ_DAMAGED, PACK_READ_NOT_REGULAR,
-               PACK_READ_OUTSIDE } PackRead;
+               PACK_READ_OUTSIDE, PACK_READ_SAME } PackRead;
+
+/* Files already read, by identity, so that one file reached by several names (a ZIP entry under
+ * names that differ in case; a folder file by another case, an 8.3 name or a link) is read once.
+ * The identity is known before the bytes are read: the ZIP entry the name resolves to, or the opened
+ * handle's volume and file ID (device and inode on POSIX). The key is two 64-bit words; a row of 0
+ * in id_row marks an empty slot (a ZIP entry's key starts with all ones). */
+static size_t id_slot(const NkTexRepl *p, const uint64_t id[2]) {
+    uint64_t h = id[0] * 0x9E3779B97F4A7C15ull ^ (id[1] + 0x632BE59BD9B4E019ull) * 0xC2B2AE3D27D4EB4Full;
+    size_t at = (size_t)(h ^ h >> 29) & (p->id_cap - 1u);
+    while (p->id_row[at] && (p->id_key[2 * at] != id[0] || p->id_key[2 * at + 1] != id[1])) at = (at + 1u) & (p->id_cap - 1u);
+    return at;
+}
+
+/* The image already read from file `id` (1 + its row), or 0. */
+static uint32_t id_find(const NkTexRepl *p, const uint64_t id[2]) {
+    return p->id_cap ? p->id_row[id_slot(p, id)] : 0u;
+}
+
+/* Puts a file's identity in `id` (when asked) and says whether an image has read that file already
+ * (when `same` is given; *same is then that image's row plus 1). */
+static int seen_before(const NkTexRepl *p, uint64_t id[2], uint64_t a, uint64_t b, uint32_t *same) {
+    if (!id) return 0;
+    id[0] = a;
+    id[1] = b;
+    return same && (*same = id_find(p, id)) != 0;
+}
+
+/* Records that image `row` read file `id`. Without memory the file is simply read again under its
+ * other names, as before this table: nothing is refused for it. */
+static void id_add(NkTexRepl *p, const uint64_t id[2], uint32_t row) {
+    if ((p->id_n + 1u) * 2u > p->id_cap) {
+        const size_t cap = p->id_cap ? p->id_cap * 2u : 64u;
+        uint64_t *key = (uint64_t *)calloc(cap, 2u * sizeof(uint64_t));
+        uint32_t *rows = (uint32_t *)calloc(cap, sizeof(uint32_t));
+        if (!key || !rows) { free(key); free(rows); return; }
+        uint64_t *old_key = p->id_key;
+        uint32_t *old_row = p->id_row;
+        const size_t old_cap = p->id_cap;
+        p->id_key = key;
+        p->id_row = rows;
+        p->id_cap = cap;
+        for (size_t i = 0; i < old_cap; i++) {
+            if (!old_row[i]) continue;
+            const size_t at = id_slot(p, &old_key[2 * i]);
+            p->id_key[2 * at] = old_key[2 * i];
+            p->id_key[2 * at + 1] = old_key[2 * i + 1];
+            p->id_row[at] = old_row[i];
+        }
+        free(old_key);
+        free(old_row);
+    }
+    const size_t at = id_slot(p, id);
+    if (p->id_row[at]) return;
+    p->id_key[2 * at] = id[0];
+    p->id_key[2 * at + 1] = id[1];
+    p->id_row[at] = row + 1u;
+    p->id_n++;
+}
 
 /* A folder pack's file is read only when the handle it opens is a regular file on a disk, no larger
  * than the cap, whose final path (links and junctions resolved) is inside the pack's resolved root.
@@ -1092,7 +1155,7 @@ static int inside_root(const NkTexRepl *p, const WCHAR *final) {
 }
 
 static unsigned char *read_regular(const NkTexRepl *p, const char *path, size_t cap, size_t *size, PackRead *why,
-                                   int probe) {
+                                   int probe, uint64_t id[2], uint32_t *same) {
     *why = PACK_READ_MISSING;
     WCHAR *w = wide_of(path);
     if (!w) return NULL;
@@ -1110,6 +1173,9 @@ static unsigned char *read_regular(const NkTexRepl *p, const char *path, size_t 
         *why = PACK_READ_OUTSIDE;
     } else if (!GetFileSizeEx(h, &len) || len.QuadPart < 0 || (unsigned long long)len.QuadPart > cap) {
         *why = PACK_READ_TOO_LARGE;
+    } else if (seen_before(p, id, (uint64_t)info.dwVolumeSerialNumber + 1u,
+                           (uint64_t)info.nFileIndexHigh << 32 | info.nFileIndexLow, same)) {
+        *why = PACK_READ_SAME;
     } else if (probe) {
         *why = PACK_READ_OK;
     } else if ((buf = (unsigned char *)malloc(len.QuadPart ? (size_t)len.QuadPart : 1u)) != NULL) {
@@ -1139,7 +1205,7 @@ static int inside_root(const NkTexRepl *p, const char *final) {
 }
 
 static unsigned char *read_regular(const NkTexRepl *p, const char *path, size_t cap, size_t *size, PackRead *why,
-                                   int probe) {
+                                   int probe, uint64_t id[2], uint32_t *same) {
     *why = PACK_READ_MISSING;
     int fd = open(path, O_RDONLY | O_NONBLOCK | O_NOCTTY | O_CLOEXEC);
     if (fd < 0) return NULL;
@@ -1165,6 +1231,8 @@ static unsigned char *read_regular(const NkTexRepl *p, const char *path, size_t 
         *why = PACK_READ_OUTSIDE;
     } else if (st.st_size < 0 || (unsigned long long)st.st_size > cap) {
         *why = PACK_READ_TOO_LARGE;
+    } else if (seen_before(p, id, (uint64_t)st.st_dev + 1u, (uint64_t)st.st_ino, same)) {
+        *why = PACK_READ_SAME;
     } else if (probe) {
         *why = PACK_READ_OK;
     } else if ((buf = (unsigned char *)malloc(st.st_size ? (size_t)st.st_size : 1u)) != NULL) {
@@ -1202,15 +1270,20 @@ static const ZipName *zip_find(const NkTexRepl *p, const char *rel) {
     return NULL;
 }
 
-/* A pack file's bytes, at most `cap`: from the folder, or from the ZIP without writing anything. */
+/* A pack file's bytes, at most `cap`: from the folder, or from the ZIP without writing anything.
+ * With `id`, the file's identity is put there; with `same` too, a file some image has already read
+ * is not read again: *why is PACK_READ_SAME and *same that image's row plus 1. */
 static unsigned char *pack_read(NkTexRepl *p, const char *rel, size_t cap, size_t *size, PackRead *why,
-                                char *zip_why, size_t zip_why_cap) {
+                                char *zip_why, size_t zip_why_cap, uint64_t id[2], uint32_t *same) {
     *why = PACK_READ_MISSING;
     if (zip_why_cap) zip_why[0] = '\0';
     if (p->zip) {
         const ZipName *z = zip_find(p, rel);
         if (!z) return NULL;
         if (z->size > cap) { *why = PACK_READ_TOO_LARGE; return NULL; }
+        if (id) {
+            if (seen_before(p, id, UINT64_MAX, (uint64_t)z->index, same)) { *why = PACK_READ_SAME; return NULL; }
+        }
         unsigned char *buf = (unsigned char *)malloc(z->size ? z->size : 1u);
         if (!buf) { *why = PACK_READ_DAMAGED; return NULL; }
         NkZipError ze;
@@ -1227,7 +1300,7 @@ static unsigned char *pack_read(NkTexRepl *p, const char *rel, size_t cap, size_
     }
     char path[1400];
     if (snprintf(path, sizeof(path), "%s/%s", p->dir, rel) >= (int)sizeof(path)) return NULL;
-    return read_regular(p, path, cap, size, why, 0);
+    return read_regular(p, path, cap, size, why, 0, id, same);
 }
 
 static int ends_with_ci(const char *s, const char *suffix) {
@@ -1419,7 +1492,7 @@ NkTexRepl *nk_texrepl_open(const char *path, uint64_t budget_bytes, char *err, s
          * is the folder's textures.zip) before the ZIP reader opens it. */
         size_t zsize = 0;
         PackRead zwhy;
-        read_regular(p, zip_path, (size_t)-1, &zsize, &zwhy, 1);
+        read_regular(p, zip_path, (size_t)-1, &zsize, &zwhy, 1, NULL, NULL);
         if (zwhy != PACK_READ_OK) {
             snprintf(err, err_cap, "texture pack ZIP '%s' refused: %s",
                      is_dir ? "textures.zip" : last_component(path, name, sizeof(name)), read_reason(zwhy));
@@ -1442,7 +1515,7 @@ NkTexRepl *nk_texrepl_open(const char *path, uint64_t budget_bytes, char *err, s
     size_t size = 0;
     PackRead why;
     char zip_why[40];
-    unsigned char *text = pack_read(p, "textures.ini", 4u << 20, &size, &why, zip_why, sizeof(zip_why));
+    unsigned char *text = pack_read(p, "textures.ini", 4u << 20, &size, &why, zip_why, sizeof(zip_why), NULL, NULL);
     if (!text && why != PACK_READ_MISSING) {
         snprintf(err, err_cap, "textures.ini cannot be read: %s%s%s",
                  why == PACK_READ_TOO_LARGE ? "it is larger than 4 MiB" : read_reason(why), zip_why[0] ? ", " : "",
@@ -1480,6 +1553,8 @@ void nk_texrepl_close(NkTexRepl *p) {
         free(p->images[i].rgba);
     }
     free(p->images);
+    free(p->id_key);
+    free(p->id_row);
     records_free(p);
     for (size_t i = 0; i < p->diag_n; i++) free(p->diag[i]);
     free(p->aliases);
@@ -1996,8 +2071,21 @@ static int image_load(NkTexRepl *p, Image *im, int decode, int want_w, int want_
     size_t size = 0;
     PackRead why;
     char zip_why[40];
-    p->stats.reads++;
-    unsigned char *file = pack_read(p, im->file, 64u << 20, &size, &why, zip_why, sizeof(zip_why));
+    uint64_t id[2] = { 0, 0 };
+    uint32_t same = 0;
+    const uint32_t row = (uint32_t)(im - p->images);
+    /* Only a first read looks for the file under another name: a later one (to decode an image whose
+     * size alone was read, or one evicted) finds this image itself. */
+    unsigned char *file = pack_read(p, im->file, 64u << 20, &size, &why, zip_why, sizeof(zip_why), id,
+                                    im->state == 0 ? &same : NULL);
+    if (why == PACK_READ_SAME) {
+        /* The file another image has read (or refused) under another name: that image holds its
+         * state from now on, for every level naming either. */
+        im->same = same;
+        return image_load(p, &p->images[same - 1u], decode, want_w, want_h);
+    }
+    if (file || why == PACK_READ_DAMAGED) p->stats.reads++;
+    if (file) id_add(p, id, row);
     if (!file) {
         if (zip_why[0])
             diag_add(p, "%s: damaged in the ZIP (%s); texture left as the game draws it", im->file, zip_why);
@@ -2050,6 +2138,12 @@ static int image_load(NkTexRepl *p, Image *im, int decode, int want_w, int want_
     return 1;
 }
 
+/* The image that holds a level's file: its own row, or the row that read the same file first. */
+static Image *image_of(NkTexRepl *p, const Level *v) {
+    Image *im = &p->images[v->image];
+    return im->same ? &p->images[im->same - 1u] : im;
+}
+
 /* Makes a level's image usable as asked (see image_load), and checks once that it is the size the
  * level needs: level 0 any size, level n the size of level 0 halved n times (at least 1). A level
  * whose image cannot be used, or is the wrong size, is skipped (state 2); the image itself may
@@ -2057,14 +2151,14 @@ static int image_load(NkTexRepl *p, Image *im, int decode, int want_w, int want_
 static int load_level(NkTexRepl *p, Alias *a, uint32_t level, int decode) {
     Level *v = &a->levels[level];
     if (v->state == 2) return 0;
-    Image *im = &p->images[v->image];
     int want_w = 0, want_h = 0;
     if (level) {
-        const Image *l0 = &p->images[a->levels[0].image];
+        const Image *l0 = image_of(p, &a->levels[0]);
         want_w = l0->w >> level > 0 ? l0->w >> level : 1;
         want_h = l0->h >> level > 0 ? l0->h >> level : 1;
     }
-    const int r = image_load(p, im, decode, want_w, want_h);
+    const int r = image_load(p, image_of(p, v), decode, want_w, want_h);
+    Image *im = image_of(p, v);   /* image_load may have found the file under another name */
     if (im->state == 2) return skip_level(p, v);
     if (v->state == 0 && (im->state == 1 || im->state == 3)) {
         if (level && (im->w != want_w || im->h != want_h)) {
@@ -2110,8 +2204,11 @@ int nk_texrepl_lookup_level(NkTexRepl *p, const NkTexReplId *id, int level, NkTe
         if (u->state != 1) { p->stats.misses++; return 0; }
     }
     Level *v = &a->levels[level];
-    Image *im = &p->images[v->image];
-    if ((v->state != 1 || im->state != 1) && !load_level(p, a, (uint32_t)level, 1)) { p->stats.misses++; return 0; }
+    if ((v->state != 1 || image_of(p, v)->state != 1) && !load_level(p, a, (uint32_t)level, 1)) {
+        p->stats.misses++;
+        return 0;
+    }
+    Image *im = image_of(p, v);
     if (v->state != 1 || im->state != 1) { p->stats.misses++; return 0; }
     im->pins++;
     im->lru = ++p->clock;

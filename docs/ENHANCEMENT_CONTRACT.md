@@ -926,6 +926,10 @@ memory, no network; ZIP packs through the project's own `src/core/nk_zip.c` and 
   make the reader allocate or work beyond its own size. The memory one decode takes, at most that buffer plus the
   larger of the joined image data and the pixels plus the file, is recorded in the pack's statistics
   (`decode_peak`). `nk_texrepl_decode_png` is the same check and decode, for a caller with bytes of its own.
+  One file is read, checked, decoded, noted and counted against the budget once, however many `[hashes]` lines
+  or names reach it: names are first grouped as written, and before a file's bytes are read its identity (the
+  ZIP entry a name resolves to, case ignored; a folder file's volume and file ID, or device and inode) is looked
+  up among the files already read, so another case, an 8.3 name or a link shares the first name's image.
 - **Sorting.** The index, the hash ranges and the ZIP reader's name and offset checks sort with one project heapsort
   (`nk_zip_sort`, at most about 2n log2 n comparisons whatever the order), not the C library's `qsort`, which
   some C libraries make quadratic for a crafted order.
@@ -970,10 +974,11 @@ memory, no network; ZIP packs through the project's own `src/core/nk_zip.c` and 
   `decode_peak` within the file's size and 4 KiB, the file read and refused once; a ZIP image and a `textures.ini` behind 1 MiB of empty DEFLATE
   blocks are refused at open; the sort is checked on every order up to 7 items, against its comparison bound on
   McIlroy's adversary and on the order that costs the C library's `qsort` most; then 16,384 `[hashes]` lines,
-  16,384 `[indexed]` lines and a 16,384-entry ZIP (names and local headers) in that order open within a bound on
+  16,384 `[indexed]` lines, 16,384 lines each of `[hashranges]` and `[reducehashranges]`, and a 16,384-entry ZIP (names and local headers) in that order open within a bound on
   the comparisons their sorts make, counted at the comparison functions in the selftest's build
   (`NK_SORT_COUNT_COMPARES`), so a sort that went back to `qsort` fails where `qsort` has such an order. A good
-  image and a refused one, each listed under 81 keys, are read once (`reads`), the good one decoded and held once;
+  image and a refused one, each listed under 81 keys, are read once (`reads`), the good one decoded and held once,
+  and so is one file named 81 ways (case spellings in a ZIP and in a Windows folder, links in a POSIX folder);
   `[hashranges]` lines are checked for the last line winning, a non-finite fraction noted, and 175,000 lines in
   reverse order (4.0 MB) read within 5 s and the comparison bound. These cells are fixed and seeded mutations, not coverage-guided fuzzing; the selftest also runs under
   AddressSanitizer and UndefinedBehaviorSanitizer on Linux. A file link needs Developer Mode on Windows, so that

@@ -2193,6 +2193,67 @@ static void test_png_bomb(void) {
               (unsigned long long)st.reads, (unsigned long long)st.loaded, (unsigned long long)st.cache_peak);
         nk_texrepl_close(p);
     }
+
+    /* The same file under 81 names that reach it: in a ZIP, spellings that differ in case (its lookups
+     * ignore case); in a folder, the same on Windows, and links to it on POSIX. Read and decoded once. */
+    char names[81][16];
+    for (unsigned k = 0; k < 81; k++) {
+        static const char base[] = "good.png";
+        for (unsigned c = 0, bit = 0; c < sizeof(base); c++) {
+            const char ch = base[c];
+            names[k][c] = (ch >= 'a' && ch <= 'z' && ((k >> bit++) & 1u)) ? (char)(ch - 32) : ch;
+        }
+    }
+    for (int as_zip = 1; as_zip >= 0; as_zip--) {   /* the ZIP first: on POSIX the folder renames to links */
+        at = (size_t)snprintf(ini, sizeof(ini), "[options]\nhash = quick\n[hashes]\n");
+        for (unsigned k = 0; k < 81; k++) {
+#if !defined(_WIN32)
+            if (!as_zip) snprintf(names[k], sizeof(names[k]), "l%02u.png", k);
+#endif
+            at += (size_t)snprintf(ini + at, sizeof(ini) - at, "%016llx = %s\n",
+                                   (unsigned long long)((k / 9u + 1u) << 8 | (k % 9u + 1u)), names[k]);
+        }
+        char where[600];
+        if (as_zip) {
+            Zw z;
+            memset(&z, 0, sizeof(z));
+            const ZwOpt stored = { 0, 0, NULL, 0, 0, 0 };
+            zw_add(&z, "good.png", png, n, stored);
+            zw_add_text(&z, "textures.ini", ini, 0);
+            snprintf(where, sizeof(where), "%s/texrepl_png_spellings.zip", SR_SELFTEST_BUILD_ROOT);
+            zw_finish(&z, where, 0);
+        } else {
+            make_pack(where, sizeof(where), "texrepl_png_names");
+            pack_path(path, sizeof(path), "texrepl_png_names", "good.png");
+            file_save(path, png, n);
+#if !defined(_WIN32)
+            for (unsigned k = 0; k < 81; k++) {
+                pack_path(path, sizeof(path), "texrepl_png_names", names[k]);
+                remove(path);
+                CHECK(symlink("good.png", path) == 0, "cannot link %s", path);
+            }
+#endif
+            pack_path(path, sizeof(path), "texrepl_png_names", "textures.ini");
+            write_text(path, ini);
+        }
+        err[0] = '\0';
+        p = nk_texrepl_open(where, 0, err, sizeof(err));
+        CHECK(p != NULL, "the %s naming one file 81 ways: %s", as_zip ? "ZIP" : "folder", err);
+        if (!p) continue;
+        int hits = 0;
+        for (unsigned k = 0; k < 81; k++) {
+            NkTexReplHit hit;
+            NkTexReplId id = { 0x08804000u, 3u, (k / 9u + 1u) << 8 | (k % 9u + 1u), 0u, 0x2365u + k };
+            if (nk_texrepl_lookup(p, &id, &hit)) { hits++; nk_texrepl_unpin(p, &hit); }
+        }
+        NkTexReplStats st;
+        nk_texrepl_stats(p, &st);
+        CHECK(hits == 81 && st.reads == 1 && st.loaded == 1 && st.cache_peak == 32u * 32u * 4u,
+              "%s, one file by 81 names: %d hits, read %llu times, decoded %llu times, %llu bytes held",
+              as_zip ? "ZIP" : "folder", hits, (unsigned long long)st.reads, (unsigned long long)st.loaded,
+              (unsigned long long)st.cache_peak);
+        nk_texrepl_close(p);
+    }
     free(png);
 }
 
@@ -2336,7 +2397,7 @@ static void test_sort_adversary(void) {
     /* textures.ini with kL [hashes] lines in that order: the lines are sorted once, and their kL
      * levels once more by file name. Then kL [indexed] lines in that order. */
     char dir[512], path[600];
-    size_t cap = (size_t)kL * 24u + 128u, at = 0;
+    size_t cap = (size_t)kL * 40u + 256u, at = 0;
     char *ini = (char *)malloc(cap);
     double t_ini = 0, t_idx = 0;
     int ok = 0;
@@ -2356,6 +2417,19 @@ static void test_sort_adversary(void) {
     const unsigned long long c_idx = open_counted(dir, &ok, &t_idx);
     CHECK(ok && (double)c_idx <= lbound + 64.0, "the adversary's [indexed] lines: %llu comparisons (at most %.0f)", c_idx,
           lbound + 64.0);
+    /* kL [hashranges] lines and kL [reducehashranges] lines in that order: two sorts of kL. */
+    at = (size_t)snprintf(ini, cap, "[options]\nhash=xxh32\n[hashranges]\n");
+    for (int i = 0; i < kL; i++)
+        at += (size_t)snprintf(ini + at, cap - at, "%08x,16,16 = 16,8\n", 0x08800000u + (unsigned)v[i] * 0x40u);
+    at += (size_t)snprintf(ini + at, cap - at, "[reducehashranges]\n");
+    for (int i = 0; i < kL; i++) at += (size_t)snprintf(ini + at, cap - at, "%u,4 = 0.5\n", (unsigned)v[i] + 1u);
+    write_text(path, ini);
+    double t_rng = 0;
+    const unsigned long long c_rng = open_counted(dir, &ok, &t_rng);
+    CHECK(ok && (double)c_rng <= 2.0 * lbound, "the adversary's range lines: %llu comparisons (at most %.0f)", c_rng,
+          2.0 * lbound);
+    printf("sort: qsort's worst order (n=%d) as [hashranges] and [reducehashranges] lines: %llu comparisons in %.3f s\n",
+           kL, c_rng, t_rng);
     free(ini);
 
     /* A kL-entry ZIP in that order: 200-byte names, local headers laid out in value order too so the
