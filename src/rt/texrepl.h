@@ -63,10 +63,6 @@ extern "C" {
 /* A ZIP pack's entries may declare at most this many unpacked bytes in all (more is refused whole);
  * each image read is capped at 64 MiB and textures.ini at 4 MiB, in a ZIP or a folder. */
 #define NK_TEXREPL_MAX_PACK_BYTES ((uint64_t)8u << 30)
-/* [hashranges] lines, and [reducehashranges] lines, a textures.ini may hold at most (more refuses the
- * pack). A line is needed only for a texture whose hashed area differs from its size; PPSSPP's own
- * dumps write none, and packs list them by hand, one per such texture. */
-#define NK_TEXREPL_MAX_RANGES 16384u
 /* Mip levels a texture's chain holds at most (PPSSPP's MAX_REPLACEMENT_MIP_LEVELS). */
 #define NK_TEXREPL_MAX_LEVELS 12
 
@@ -188,9 +184,12 @@ typedef struct NkTexReplStats {
     uint64_t decode_ns;
     uint64_t open_ns;         /* nk_texrepl_open, by the C clock */
     uint64_t index_bytes;     /* what the open pack's own index holds (not the ZIP reader's directory) */
-    uint64_t skipped;         /* images found unusable and skipped from then on, each counted once */
+    uint64_t skipped;         /* texture levels found unusable and skipped from then on, each counted once
+                                 (a file several levels name is read, noted and counted in load_failed once) */
     uint64_t list_ns;         /* the part of open_ns spent listing the folder, or opening and indexing the ZIP */
     uint64_t decode_peak;     /* the most memory one image's read and decode held at once (file, rows, result) */
+    uint64_t reads;           /* image files read from the pack: once for all the levels that name one file,
+                                 again only after its decoded image was evicted */
 } NkTexReplStats;
 void nk_texrepl_stats(const NkTexRepl *pack, NkTexReplStats *out);
 void nk_texrepl_note_bad_factor(NkTexRepl *pack);

@@ -124,6 +124,16 @@ uint32_t nk_zip_crc32(uint32_t crc, const void *data, size_t size);
    a pack chooses. The ZIP reader sorts with it, and texture packs do. */
 void nk_zip_sort(void *items, size_t count, size_t size, int (*compare)(const void *, const void *));
 
+/* Built with NK_SORT_COUNT_COMPARES (the texture-pack selftest only), every comparison function the ZIP
+   reader and texture packs sort with counts its calls here, whatever sort calls it, so a test can bound
+   what opening a pack in a hostile order costs. Without it the count compiles to nothing. */
+#ifdef NK_SORT_COUNT_COMPARES
+extern unsigned long long nk_sort_compares;
+#define NK_SORT_COMPARE_COUNT() ((void)nk_sort_compares++)
+#else
+#define NK_SORT_COMPARE_COUNT() ((void)0)
+#endif
+
 /* Checks one entry name by the reader's rules. `size` is its byte count (it
    need not be NUL-terminated). A trailing '/' marks a folder: *is_folder says
    so when given. */

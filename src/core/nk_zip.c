@@ -305,6 +305,7 @@ static int zip_fold(unsigned char c) {
 }
 
 static int zip_name_compare(const void *a, const void *b) {
+    NK_SORT_COMPARE_COUNT();
     const ZipNameRef *x = (const ZipNameRef *)a;
     const ZipNameRef *y = (const ZipNameRef *)b;
     size_t n = x->size < y->size ? x->size : y->size;
@@ -347,6 +348,10 @@ static void zip_sort_sift(unsigned char *base, size_t root, size_t n, size_t siz
         root = child;
     }
 }
+
+#ifdef NK_SORT_COUNT_COMPARES
+unsigned long long nk_sort_compares;
+#endif
 
 void nk_zip_sort(void *items, size_t count, size_t size, int (*compare)(const void *, const void *)) {
     unsigned char *base = (unsigned char *)items;
@@ -519,6 +524,7 @@ static NkZipStatus zip_find_end(NkZipReader *r, uint64_t *end_offset, uint8_t re
 }
 
 static int zip_entry_offset_compare(const void *a, const void *b) {
+    NK_SORT_COMPARE_COUNT();
     const ZipEntry *const *x = (const ZipEntry *const *)a;
     const ZipEntry *const *y = (const ZipEntry *const *)b;
     return ((*x)->local_offset > (*y)->local_offset) - ((*x)->local_offset < (*y)->local_offset);
@@ -1513,6 +1519,7 @@ static bool zip_list_add(const char *name, bool is_dir, void *ctx) {
 }
 
 static int zip_listed_compare(const void *a, const void *b) {
+    NK_SORT_COMPARE_COUNT();
     return strcmp(((const ZipListed *)a)->name, ((const ZipListed *)b)->name);
 }
 

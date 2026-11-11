@@ -800,9 +800,8 @@ memory, no network; ZIP packs through the project's own `src/core/nk_zip.c` and 
     the option at its default, as PPSSPP's reader does, with a note. `[hashranges]` (`addr,w,h = newW,newH`; a
     range larger than its texture or empty is not read) and `[reducehashranges]` (`w,h = fraction`; 0 or a value
     that is not a finite number is not read) are read as PPSSPP reads them, a later line for the same texture
-    replacing an earlier one. The lines are sorted once at open and looked up by binary search. Each section takes
-    at most 16,384 lines (`NK_TEXREPL_MAX_RANGES`) and a pack with more is refused: a line is needed only for a
-    texture whose hashed area differs from its size, PPSSPP's dumps write none, and packs list them by hand.
+    replacing an earlier one. The lines are sorted once at open and looked up by binary search, so any number the
+    4 MiB `textures.ini` holds is read.
   - *`[hashes]` keys* are read as PPSSPP reads them, with the C library's `sscanf("%16llx%8x_%d")` and at least
     its first field matched: up to 16 hex digits of key, up to 8 of data hash, then `_<level>`; a field not
     matched is 0. So every form PPSSPP takes is taken: the full `<16><8>` name, `<16><8>_<level>`, a 16-digit
@@ -872,14 +871,18 @@ memory, no network; ZIP packs through the project's own `src/core/nk_zip.c` and 
     (more than 65,534 entries or 4 GiB), encryption, a method other than stored or DEFLATE, or a name
     `nk_zip.c` refuses (a Windows-reserved name or character, a `.` or `..` folder, two names equal when case is
     ignored) is refused; PPSSPP's ZIP library may read it. So is a DEFLATE entry, `textures.ini` included, packed
-    in more than its declared size plus an eighth plus 64 bytes: DEFLATE never needs that much (stored blocks
-    cost 5 bytes in 65,535), so the rest is padding a reader would have to work through. A `textures.ini` over
+    in more than its declared size plus an eighth plus 64 bytes: no archiver we measured (Python `zipfile`, 7-Zip,
+    Windows `tar.exe` and `Compress-Archive`, at every level) comes near that (stored blocks cost 5 bytes in
+    65,535), so the rest is padding a reader would have to work through. An encoder that flushes after every few
+    bytes can pass it, and such an entry is refused. A `textures.ini` over
     4 MiB refuses the pack. Images
     PPSSPP may still read are skipped here: a folder file that is a link or junction leading out of the pack, a
     device or FIFO, a name the ZIP reader refuses (`CON.png`, `CON .png`, `a.png.`), a file over 64 MiB, a PNG with
     any chunk's CRC wrong (libpng, which PPSSPP uses, by default only warns about a bad CRC in an ancillary chunk),
-    and a PNG whose image data unpacks to more or less than its `IHDR` implies or whose Adler-32 is wrong (libpng
-    ignores extra data and, by default, a bad Adler-32).
+    a PNG whose image data unpacks to more or less than its `IHDR` implies or whose Adler-32 is wrong (libpng
+    ignores extra data and, by default, a bad Adler-32), bytes after the Adler-32 inside the image data, and a grey
+    or RGB `tRNS` naming a sample the image's depth cannot hold. A palette longer than the depth can index, and a
+    `PLTE` in a grey image, are taken as libpng takes them (the first ignored past 2^depth, the second ignored).
   - *The skip-last-DXT1 options* (`skipLastDXT1Blocks128x64`, `skipLastDXT1Blocks128x128`) are applied as
     PPSSPP applies them, so they are not a difference.
 - **How it draws.** The image is stored as the entry's scaled copy: an image `factor` times the guest texture,
@@ -958,14 +961,21 @@ memory, no network; ZIP packs through the project's own `src/core/nk_zip.c` and 
   The selftest also writes PNGs of its own (stored and fixed-Huffman DEFLATE, one or several `IDAT` chunks, every
   filter, Adam7, palette and `tRNS`, 1- to 16-bit) and decodes each with this reader and with stb_image
   (`third_party/stb`, used only by the test), which must agree to the byte; image data longer than the image is
-  refused, and 60,000 seeded mutations of those seeds must be refused by both or decoded alike. A 1x1 PNG whose
+  refused, and 60,000 seeded mutations of those seeds must be refused by both or decoded alike. PNGs with their
+  CRCs and Adler-32 right meet each of the decoder's own checks (a palette index past `PLTE`, filter type 5, a
+  wrong Adler-32, a `PLTE` of 4 bytes or 257 entries, an RGB `tRNS` of 4 bytes, a chunk between two `IDAT`s) and
+  are refused for that reason, and a 4-bit palette image with 256 `PLTE` entries and a grey image with a `PLTE`
+  decode as stb_image decodes them. A 1x1 PNG whose
   data unpacks to 64 MiB, listed under 81 wildcard keys, is skipped 81 times within the time bound, nothing cached,
-  `decode_peak` within the file's size and 4 KiB; a ZIP image and a `textures.ini` behind 1 MiB of empty DEFLATE
+  `decode_peak` within the file's size and 4 KiB, the file read and refused once; a ZIP image and a `textures.ini` behind 1 MiB of empty DEFLATE
   blocks are refused at open; the sort is checked on every order up to 7 items, against its comparison bound on
-  McIlroy's adversary, on the order that costs the C library's `qsort` most, and through a 100,000-line
-  `textures.ini` and a 16,384-entry ZIP in that order, opened within 3 s and 10 s; `[hashranges]` lines are checked for
-  the last line winning, a non-finite fraction noted, 16,384 lines in reverse order and a pack with one more
-  refused. These cells are fixed and seeded mutations, not coverage-guided fuzzing; the selftest also runs under
+  McIlroy's adversary and on the order that costs the C library's `qsort` most; then 16,384 `[hashes]` lines,
+  16,384 `[indexed]` lines and a 16,384-entry ZIP (names and local headers) in that order open within a bound on
+  the comparisons their sorts make, counted at the comparison functions in the selftest's build
+  (`NK_SORT_COUNT_COMPARES`), so a sort that went back to `qsort` fails where `qsort` has such an order. A good
+  image and a refused one, each listed under 81 keys, are read once (`reads`), the good one decoded and held once;
+  `[hashranges]` lines are checked for the last line winning, a non-finite fraction noted, and 175,000 lines in
+  reverse order (4.0 MB) read within 5 s and the comparison bound. These cells are fixed and seeded mutations, not coverage-guided fuzzing; the selftest also runs under
   AddressSanitizer and UndefinedBehaviorSanitizer on Linux. A file link needs Developer Mode on Windows, so that
   check is skipped there, and said, without it. `test_nk_zip` checks the
   reader's options: DEFLATE read only when asked, its level bits, damaged, short and long streams, a stream that

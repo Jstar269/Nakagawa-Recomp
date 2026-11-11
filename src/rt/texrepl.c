@@ -260,7 +260,9 @@ static uint64_t now_ns(void) {
 
 /* ======================================================================================= pack */
 
-/* One mip level of a listed texture. */
+/* One image file the pack names, read, checked, decoded and held once for every level that names it:
+ * a file listed under many keys costs one read and one decode, is noted once if it cannot be used, and
+ * counts against the budget once. */
 typedef struct {
     char *file;            /* under the pack's root, '/' between folders */
     uint32_t *rgba;        /* decoded image while state is 1 */
@@ -268,6 +270,13 @@ typedef struct {
     uint8_t state;         /* 0 not read yet, 1 decoded, 2 cannot be used, 3 size known, image not held */
     uint32_t pins;
     uint64_t lru;
+} Image;
+
+/* One mip level of a listed texture. */
+typedef struct {
+    char *file;            /* the image's name: the level's own copy until images_build, then the image's */
+    uint32_t image;        /* its row in the pack's images (images_build) */
+    uint8_t state;         /* 0 not checked yet, 1 its image is the size this level needs, 2 cannot be used */
 } Level;
 
 /* One texture key and its mip chain. level_n 0: a texture the pack leaves alone. */
@@ -323,6 +332,8 @@ struct NkTexRepl {
     size_t nonpng_listed;
     Alias *aliases;
     size_t alias_n;
+    Image *images;             /* every file the levels name, once (images_build) */
+    size_t image_n;
     HashRange *ranges;
     size_t range_n, range_cap;
     ReduceRange *reduce;
@@ -412,6 +423,7 @@ static int record_push(NkTexRepl *p, uint64_t cachekey, uint32_t hash, int level
 }
 
 static int record_cmp(const void *x, const void *y) {
+    NK_SORT_COMPARE_COUNT();
     const Record *a = (const Record *)x, *b = (const Record *)y;
     if (a->cachekey != b->cachekey) return a->cachekey < b->cachekey ? -1 : 1;
     if (a->hash != b->hash) return a->hash < b->hash ? -1 : 1;
@@ -494,6 +506,47 @@ static int aliases_build(NkTexRepl *p) {
     return 1;
 }
 
+static int level_file_cmp(const void *x, const void *y) {
+    NK_SORT_COMPARE_COUNT();
+    return strcmp((*(Level *const *)x)->file, (*(Level *const *)y)->file);
+}
+
+/* Gives every distinct file name the levels hold one row in p->images, and each level its row; the
+ * levels' duplicate copies of a name are freed. All memory is taken before anything changes, so a
+ * failure leaves the levels as they were. */
+static int images_build(NkTexRepl *p) {
+    size_t n = 0;
+    for (size_t i = 0; i < p->alias_n; i++) n += p->aliases[i].level_n;
+    if (!n) return 1;
+    Level **refs = (Level **)malloc(n * sizeof(*refs));
+    Image *images = (Image *)calloc(n, sizeof(*images));
+    if (!refs || !images) {
+        free(refs);
+        free(images);
+        return 0;
+    }
+    size_t k = 0;
+    for (size_t i = 0; i < p->alias_n; i++)
+        for (uint32_t l = 0; l < p->aliases[i].level_n; l++) refs[k++] = &p->aliases[i].levels[l];
+    nk_zip_sort(refs, n, sizeof(*refs), level_file_cmp);
+    size_t m = 0;
+    for (size_t i = 0; i < n; i++) {
+        Level *v = refs[i];
+        if (m == 0 || strcmp(v->file, images[m - 1].file) != 0) {
+            images[m++].file = v->file;
+        } else {
+            free(v->file);
+            v->file = images[m - 1].file;
+        }
+        v->image = (uint32_t)(m - 1);
+    }
+    free(refs);
+    Image *fit = (Image *)realloc(images, m * sizeof(*images));
+    p->images = fit ? fit : images;
+    p->image_n = m;
+    return 1;
+}
+
 /* A sorted table whose rows start with the key (Alias, IndexedKey): the row for one exact key. */
 typedef struct { uint64_t cachekey; uint32_t hash; } KeyHead;
 static const void *key_find(const void *base, size_t n, size_t stride, uint64_t cachekey, uint32_t hash) {
@@ -509,6 +562,7 @@ static const void *key_find(const void *base, size_t n, size_t stride, uint64_t 
 }
 
 static int indexed_cmp(const void *x, const void *y) {
+    NK_SORT_COMPARE_COUNT();
     const IndexedKey *a = (const IndexedKey *)x, *b = (const IndexedKey *)y;
     if (a->cachekey != b->cachekey) return a->cachekey < b->cachekey ? -1 : 1;
     if (a->hash != b->hash) return a->hash < b->hash ? -1 : 1;
@@ -614,9 +668,9 @@ static int parse_hash_name(const char *name, uint64_t *cachekey, uint32_t *hash,
 typedef enum { SEC_NONE, SEC_OPTIONS, SEC_HASHES, SEC_HASHRANGES, SEC_REDUCE, SEC_FILTERING,
                SEC_INDEXED, SEC_GAMES, SEC_UNKNOWN, SEC_REPEATED, SEC_COUNT } Section;
 
-/* [hashranges] and [reducehashranges] lines are kept in file order, at most NK_TEXREPL_MAX_RANGES
- * of each, then sorted once (ranges_finish) with the last line for each texture kept, as PPSSPP's map
- * keeps it, and looked up by binary search. */
+/* [hashranges] and [reducehashranges] lines are kept in file order, then sorted once (ranges_finish)
+ * with the last line for each texture kept, as PPSSPP's map keeps it, and looked up by binary search:
+ * reading them costs O(n log n) and each texture hash O(log n), with n bounded by the 4 MiB ini. */
 static int range_push(NkTexRepl *p, HashRange r) {
     if (p->range_n == p->range_cap) {
         size_t cap = p->range_cap ? p->range_cap * 2 : 16;
@@ -649,6 +703,7 @@ static int range_key_cmp(const HashRange *a, uint32_t addr, uint32_t w, uint32_t
     return 0;
 }
 static int range_cmp(const void *x, const void *y) {
+    NK_SORT_COMPARE_COUNT();
     const HashRange *a = (const HashRange *)x, *b = (const HashRange *)y;
     const int c = range_key_cmp(a, b->addr, b->w, b->h);
     return c ? c : (a->seq < b->seq ? -1 : (a->seq > b->seq));
@@ -659,6 +714,7 @@ static int reduce_key_cmp(const ReduceRange *a, uint32_t w, uint32_t h) {
     return 0;
 }
 static int reduce_cmp(const void *x, const void *y) {
+    NK_SORT_COMPARE_COUNT();
     const ReduceRange *a = (const ReduceRange *)x, *b = (const ReduceRange *)y;
     const int c = reduce_key_cmp(a, b->w, b->h);
     return c ? c : (a->seq < b->seq ? -1 : (a->seq > b->seq));
@@ -898,10 +954,6 @@ static int parse_ini(NkTexRepl *p, char *text, char *err, size_t err_cap) {
                 diag_add(p, "textures.ini: [hashranges] line for '%s' is larger than its texture or empty; not read", kp[0]);
                 break;
             }
-            if (p->range_n >= NK_TEXREPL_MAX_RANGES) {
-                snprintf(err, err_cap, "textures.ini: more than %u [hashranges] lines", (unsigned)NK_TEXREPL_MAX_RANGES);
-                return 0;
-            }
             if (!range_push(p, r)) { snprintf(err, err_cap, "out of memory"); return 0; }
             break;
         }
@@ -925,11 +977,6 @@ static int parse_ini(NkTexRepl *p, char *text, char *err, size_t err_cap) {
             if (r.value == 0.0f) {
                 diag_add(p, "textures.ini: [reducehashranges] line for '%s' is 0; not read", kp[0]);
                 break;
-            }
-            if (p->reduce_n >= NK_TEXREPL_MAX_RANGES) {
-                snprintf(err, err_cap, "textures.ini: more than %u [reducehashranges] lines",
-                         (unsigned)NK_TEXREPL_MAX_RANGES);
-                return 0;
             }
             if (!reduce_push(p, r)) { snprintf(err, err_cap, "out of memory"); return 0; }
             break;
@@ -1138,6 +1185,7 @@ static unsigned char *read_regular(const NkTexRepl *p, const char *path, size_t 
 #endif
 
 static int zip_name_cmp(const void *x, const void *y) {
+    NK_SORT_COMPARE_COUNT();
     return ci_cmp(((const ZipName *)x)->rel, ((const ZipName *)y)->rel);
 }
 
@@ -1296,10 +1344,9 @@ static int open_zip(NkTexRepl *p, const char *path, char *err, size_t err_cap) {
 static uint64_t index_bytes(const NkTexRepl *p) {
     uint64_t b = sizeof(*p) + (uint64_t)p->alias_n * sizeof(Alias) + (uint64_t)p->zip_name_n * sizeof(ZipName) +
                  (uint64_t)p->range_cap * sizeof(HashRange) + (uint64_t)p->reduce_cap * sizeof(ReduceRange);
-    for (size_t i = 0; i < p->alias_n; i++) {
-        b += (uint64_t)p->aliases[i].level_n * sizeof(Level);
-        for (uint32_t l = 0; l < p->aliases[i].level_n; l++) b += strlen(p->aliases[i].levels[l].file) + 1u;
-    }
+    for (size_t i = 0; i < p->alias_n; i++) b += (uint64_t)p->aliases[i].level_n * sizeof(Level);
+    b += (uint64_t)p->image_n * sizeof(Image);
+    for (size_t i = 0; i < p->image_n; i++) b += strlen(p->images[i].file) + 1u;
     return b;
 }
 
@@ -1410,7 +1457,7 @@ NkTexRepl *nk_texrepl_open(const char *path, uint64_t budget_bytes, char *err, s
         free(z);
         if (!ok) return open_fail(p);
     }
-    if (!aliases_build(p)) { snprintf(err, err_cap, "out of memory"); return open_fail(p); }
+    if (!aliases_build(p) || !images_build(p)) { snprintf(err, err_cap, "out of memory"); return open_fail(p); }
     indexed_finish(p);
     ranges_finish(p);
     if (p->nonpng_listed)
@@ -1424,12 +1471,15 @@ NkTexRepl *nk_texrepl_open(const char *path, uint64_t budget_bytes, char *err, s
 void nk_texrepl_close(NkTexRepl *p) {
     if (!p) return;
     for (size_t i = 0; i < p->alias_n; i++) {
-        for (uint32_t l = 0; l < p->aliases[i].level_n; l++) {
-            free(p->aliases[i].levels[l].file);
-            free(p->aliases[i].levels[l].rgba);
-        }
+        if (!p->images)   /* before images_build the levels own their names */
+            for (uint32_t l = 0; l < p->aliases[i].level_n; l++) free(p->aliases[i].levels[l].file);
         free(p->aliases[i].levels);
     }
+    for (size_t i = 0; i < p->image_n; i++) {
+        free(p->images[i].file);
+        free(p->images[i].rgba);
+    }
+    free(p->images);
     records_free(p);
     for (size_t i = 0; i < p->diag_n; i++) free(p->diag[i]);
     free(p->aliases);
@@ -1552,12 +1602,10 @@ static int is_indexed(const NkTexRepl *p, const NkTexReplId *id) {
 
 static void evict_for(NkTexRepl *p, uint64_t need) {
     while (p->used + need > p->budget) {
-        Level *oldest = NULL;
-        for (size_t i = 0; i < p->alias_n; i++) {
-            for (uint32_t l = 0; l < p->aliases[i].level_n; l++) {
-                Level *v = &p->aliases[i].levels[l];
-                if (v->state == 1 && v->pins == 0 && (!oldest || v->lru < oldest->lru)) oldest = v;
-            }
+        Image *oldest = NULL;
+        for (size_t i = 0; i < p->image_n; i++) {
+            Image *v = &p->images[i];
+            if (v->state == 1 && v->pins == 0 && (!oldest || v->lru < oldest->lru)) oldest = v;
         }
         if (!oldest) return;
         free(oldest->rgba);
@@ -1566,16 +1614,6 @@ static void evict_for(NkTexRepl *p, uint64_t need) {
         p->used -= (uint64_t)oldest->w * (uint64_t)oldest->h * 4u;
         p->stats.evicted++;
     }
-}
-
-static int level_size_ok(NkTexRepl *p, const Alias *a, uint32_t level, Level *v) {
-    if (level == 0) return 1;
-    const Level *l0 = &a->levels[0];
-    const int want_w = l0->w >> level > 0 ? l0->w >> level : 1, want_h = l0->h >> level > 0 ? l0->h >> level : 1;
-    if (v->w == want_w && v->h == want_h) return 1;
-    diag_add(p, "%s: mip level %u is %dx%d, not %dx%d (level 0 halved %u times); levels from %u on are not used",
-             v->file, (unsigned)level, v->w, v->h, want_w, want_h, (unsigned)level, (unsigned)level);
-    return 0;
 }
 
 static uint32_t png_be32(const unsigned char *b) {
@@ -1671,13 +1709,16 @@ static int png_check(const unsigned char *d, size_t n, PngInfo *g, char *why, si
             g->interlace = c[12];
             g->channels = color == 2 ? 3u : color == 4 ? 2u : color == 6 ? 4u : 1u;
         } else if (!memcmp(type, "PLTE", 4)) {
-            if (g->plte || g->trns || g->idat_count || len == 0 || len % 3u || len / 3u > 256u ||
-                g->color == 0 || g->color == 4 || (g->color == 3 && len / 3u > (1u << g->depth))) {
+            if (g->plte || g->trns || g->idat_count || len == 0 || len % 3u || len / 3u > 256u) {
                 snprintf(why, why_cap, "PLTE is out of place or of a wrong length");
                 return 0;
             }
-            g->plte = c;
-            g->plte_len = len;
+            /* As libpng takes them: a grey image's PLTE is ignored, and a palette longer than the depth
+             * can index keeps its entries (a pixel can name only the first 2^depth). */
+            if (g->color != 0 && g->color != 4) {
+                g->plte = c;
+                g->plte_len = len;
+            }
         } else if (!memcmp(type, "tRNS", 4)) {
             const int fits = g->color == 3 ? (g->plte && len >= 1 && len <= g->plte_len / 3u)
                              : g->color == 0 ? len == 2
@@ -1786,17 +1827,21 @@ static uint32_t *png_decode(const unsigned char *d, size_t n, const PngInfo *g, 
     }
     uint8_t *raw = NULL;
     size_t raw_n = 0;
-    /* The inflater holds at most raw_size bytes beside the joined data, refused or not. */
-    *scratch = (uint64_t)joined_bytes + (uint64_t)g->raw_size;
+    /* What the inflater may hold beside the joined data, refused or not: raw_size at once when it is
+     * at most 1 MiB (its first block), else blocks doubled up to raw_size, the last move holding the
+     * old block and the new one. */
+    *scratch = (uint64_t)joined_bytes + (g->raw_size <= (1u << 20) ? (uint64_t)g->raw_size : 2u * (uint64_t)g->raw_size);
     const int rc = nk_psp_inflate_raw(z + 2, zn - 2, &raw, &raw_n, g->raw_size, g->raw_size, NULL, 0);
     const uint32_t adler = png_be32(z + zn - 4);
     free(joined);
     if (rc != NK_INFLATE_OK || raw_n != g->raw_size) {
         free(raw);
-        snprintf(why, why_cap, "%s", rc == NK_INFLATE_ERR_OVERFLOW ? "its image data unpacks to more than the image"
-                                     : rc == NK_INFLATE_ERR_MEMORY ? "out of memory"
-                                     : rc == NK_INFLATE_OK         ? "its image data unpacks to less than the image"
-                                                                   : "its image data does not unpack");
+        snprintf(why, why_cap, "%s",
+                 rc == NK_INFLATE_ERR_OVERFLOW || (rc == NK_INFLATE_OK && raw_n > g->raw_size)
+                     ? "its image data unpacks to more than the image"
+                 : rc == NK_INFLATE_ERR_MEMORY ? "out of memory"
+                 : rc == NK_INFLATE_OK         ? "its image data unpacks to less than the image"
+                                               : "its image data does not unpack");
         return NULL;
     }
     if (png_adler32(raw, raw_n) != adler) {
@@ -1907,90 +1952,129 @@ static int skip_level(NkTexRepl *p, Level *v) {
     return 0;
 }
 
-/* Reads a level's file and, with `decode`, its image. Sets state 1 (decoded), 3 (size known) or 2
- * (skipped, with a note). */
-static int load_level(NkTexRepl *p, Alias *a, uint32_t level, int decode) {
-    Level *v = &a->levels[level];
-    if (!path_inside_pack(v->file)) { p->stats.load_failed++; return skip_level(p, v); }
-    if (!ends_with_ci(v->file, ".png")) {
-        diag_add(p, "%s: only PNG replacements are read in this version; not used", v->file);
-        p->stats.load_failed++;
-        return skip_level(p, v);
+/* An image that cannot be used: noted once, and every level naming it is skipped. */
+static int skip_image(NkTexRepl *p, Image *im) {
+    im->state = 2;
+    p->stats.load_failed++;
+    return 0;
+}
+
+/* Reads an image's file and, with `decode`, its pixels, unless its size turns out not to be
+ * want_w x want_h (0: any size), which the level asking checks. Returns 1 when the image is usable
+ * as asked (decoded, or with `decode` 0 its size known); 0 otherwise, with state 2 (and a note) when
+ * it can never be used, or state 3 when only the budget is full now or the size is not the one wanted. */
+static int image_load(NkTexRepl *p, Image *im, int decode, int want_w, int want_h) {
+    if (im->state == 2) return 0;
+    if (im->state == 1 || (im->state == 3 && !decode)) return 1;
+    if (im->state == 3 && want_w && (im->w != want_w || im->h != want_h)) return 0;
+    if (im->state == 3) {   /* its size is known: make room before reading the file again */
+        const uint64_t known = (uint64_t)im->w * (uint64_t)im->h * 4u;
+        evict_for(p, known);
+        if (p->used + known > p->budget) { p->stats.over_budget++; return 0; }
+    }
+    if (!path_inside_pack(im->file)) return skip_image(p, im);
+    if (!ends_with_ci(im->file, ".png")) {
+        diag_add(p, "%s: only PNG replacements are read in this version; not used", im->file);
+        return skip_image(p, im);
     }
     /* The ZIP reader's name rules, for a folder's file too: no device name (CON, COM1), no trailing
      * dot or space, no character Windows refuses. */
     char norm[NK_ZIP_MAX_NAME_BYTES + 1];
-    const size_t fl = strlen(v->file);
+    const size_t fl = strlen(im->file);
     NkZipStatus ns = NK_ZIP_ERR_NAME_TOO_LONG;
     if (fl <= NK_ZIP_MAX_NAME_BYTES) {
-        for (size_t k = 0; k <= fl; k++) norm[k] = v->file[k] == '\\' ? '/' : v->file[k];
+        for (size_t k = 0; k <= fl; k++) norm[k] = im->file[k] == '\\' ? '/' : im->file[k];
         ns = nk_zip_check_name(norm, fl, NULL);
     }
     if (ns != NK_ZIP_OK) {
-        diag_add(p, "%s: not a file name this module opens (%s: %s); not used", v->file, nk_zip_status_code(ns),
+        diag_add(p, "%s: not a file name this module opens (%s: %s); not used", im->file, nk_zip_status_code(ns),
                  nk_zip_status_message(ns));
-        p->stats.load_failed++;
-        return skip_level(p, v);
+        return skip_image(p, im);
     }
     uint64_t t0 = now_ns();
     size_t size = 0;
     PackRead why;
     char zip_why[40];
-    unsigned char *file = pack_read(p, v->file, 64u << 20, &size, &why, zip_why, sizeof(zip_why));
+    p->stats.reads++;
+    unsigned char *file = pack_read(p, im->file, 64u << 20, &size, &why, zip_why, sizeof(zip_why));
     if (!file) {
         if (zip_why[0])
-            diag_add(p, "%s: damaged in the ZIP (%s); texture left as the game draws it", v->file, zip_why);
+            diag_add(p, "%s: damaged in the ZIP (%s); texture left as the game draws it", im->file, zip_why);
         else
-            diag_add(p, "%s: not used: %s%s; texture left as the game draws it", v->file, read_reason(why),
+            diag_add(p, "%s: not used: %s%s; texture left as the game draws it", im->file, read_reason(why),
                      why == PACK_READ_TOO_LARGE ? " of 64 MiB" : "");
-        p->stats.load_failed++;
-        return skip_level(p, v);
+        return skip_image(p, im);
     }
     PngInfo g;
     char bad[96];
     if (!png_check(file, size, &g, bad, sizeof(bad))) {
         free(file);
-        diag_add(p, "%s: not a PNG this module decodes (%s); not used", v->file, bad);
-        p->stats.load_failed++;
-        return skip_level(p, v);
+        diag_add(p, "%s: not a PNG this module decodes (%s); not used", im->file, bad);
+        return skip_image(p, im);
     }
-    const int w = g.w, h = g.h;
-    v->w = w;
-    v->h = h;
-    if (!level_size_ok(p, a, level, v)) { free(file); p->stats.load_failed++; return skip_level(p, v); }
-    const uint64_t bytes = (uint64_t)w * (uint64_t)h * 4u;
+    im->w = g.w;
+    im->h = g.h;
+    im->state = 3;
+    const uint64_t bytes = (uint64_t)g.w * (uint64_t)g.h * 4u;
     if (bytes > p->budget) {
         free(file);
-        diag_add(p, "%s: %dx%d needs %llu KiB, more than the %llu KiB texture budget; not used", v->file, w, h,
+        diag_add(p, "%s: %dx%d needs %llu KiB, more than the %llu KiB texture budget; not used", im->file, g.w, g.h,
                  (unsigned long long)(bytes >> 10), (unsigned long long)(p->budget >> 10));
         p->stats.over_budget++;
-        return skip_level(p, v);
+        im->state = 2;
+        return 0;
     }
-    if (!decode) { free(file); v->state = 3; return 1; }
+    if (!decode || (want_w && (g.w != want_w || g.h != want_h))) { free(file); return !decode; }
     evict_for(p, bytes);
     if (p->used + bytes > p->budget) {
         /* Everything held is in use: draw this texture unreplaced now, and try again on a later lookup. */
         free(file);
-        v->state = 3;
         p->stats.over_budget++;
         return 0;
     }
     uint64_t scratch = 0;
-    v->rgba = png_decode(file, size, &g, &scratch, bad, sizeof(bad));
+    im->rgba = png_decode(file, size, &g, &scratch, bad, sizeof(bad));
     scratch += size;   /* the file was held throughout */
     if (scratch > p->stats.decode_peak) p->stats.decode_peak = scratch;
     free(file);
-    if (!v->rgba) {
-        diag_add(p, "%s: not a PNG this module decodes (%s); not used", v->file, bad);
-        p->stats.load_failed++;
-        return skip_level(p, v);
+    if (!im->rgba) {
+        diag_add(p, "%s: not a PNG this module decodes (%s); not used", im->file, bad);
+        return skip_image(p, im);
     }
-    v->state = 1;
+    im->state = 1;
     p->used += bytes;
     if (p->used > p->stats.cache_peak) p->stats.cache_peak = p->used;
     p->stats.loaded++;
     p->stats.decode_ns += now_ns() - t0;
     return 1;
+}
+
+/* Makes a level's image usable as asked (see image_load), and checks once that it is the size the
+ * level needs: level 0 any size, level n the size of level 0 halved n times (at least 1). A level
+ * whose image cannot be used, or is the wrong size, is skipped (state 2); the image itself may
+ * still serve other levels. Level 0's size must be known when a later level is loaded. */
+static int load_level(NkTexRepl *p, Alias *a, uint32_t level, int decode) {
+    Level *v = &a->levels[level];
+    if (v->state == 2) return 0;
+    Image *im = &p->images[v->image];
+    int want_w = 0, want_h = 0;
+    if (level) {
+        const Image *l0 = &p->images[a->levels[0].image];
+        want_w = l0->w >> level > 0 ? l0->w >> level : 1;
+        want_h = l0->h >> level > 0 ? l0->h >> level : 1;
+    }
+    const int r = image_load(p, im, decode, want_w, want_h);
+    if (im->state == 2) return skip_level(p, v);
+    if (v->state == 0 && (im->state == 1 || im->state == 3)) {
+        if (level && (im->w != want_w || im->h != want_h)) {
+            diag_add(p, "%s: mip level %u is %dx%d, not %dx%d (level 0 halved %u times); levels from %u on are not used",
+                     im->file, (unsigned)level, im->w, im->h, want_w, want_h, (unsigned)level, (unsigned)level);
+            p->stats.load_failed++;
+            return skip_level(p, v);
+        }
+        v->state = 1;
+    }
+    return r;
 }
 
 int nk_texrepl_level_count(const NkTexRepl *p, const NkTexReplId *id) {
@@ -2020,20 +2104,21 @@ int nk_texrepl_lookup_level(NkTexRepl *p, const NkTexReplId *id, int level, NkTe
     /* PPSSPP loads the levels in order and stops at the first it cannot use: every level below this
      * one must be readable, and each the size of level 0 halved, before this one counts. */
     for (uint32_t j = 0; j < (uint32_t)level; j++) {
-        Level *v = &a->levels[j];
-        if (v->state == 0) load_level(p, a, j, 0);
-        if (v->state == 2) { p->stats.misses++; return 0; }
+        Level *u = &a->levels[j];
+        if (u->state == 0) load_level(p, a, j, 0);
+        if (u->state != 1) { p->stats.misses++; return 0; }
     }
     Level *v = &a->levels[level];
-    if ((v->state == 0 || v->state == 3) && !load_level(p, a, (uint32_t)level, 1)) { p->stats.misses++; return 0; }
-    if (v->state != 1) { p->stats.misses++; return 0; }
-    v->pins++;
-    v->lru = ++p->clock;
+    Image *im = &p->images[v->image];
+    if ((v->state != 1 || im->state != 1) && !load_level(p, a, (uint32_t)level, 1)) { p->stats.misses++; return 0; }
+    if (v->state != 1 || im->state != 1) { p->stats.misses++; return 0; }
+    im->pins++;
+    im->lru = ++p->clock;
     p->stats.hits++;
-    out->rgba = v->rgba;
-    out->w = v->w;
-    out->h = v->h;
-    out->pin = v;
+    out->rgba = im->rgba;
+    out->w = im->w;
+    out->h = im->h;
+    out->pin = im;
     return 1;
 }
 
@@ -2044,7 +2129,7 @@ int nk_texrepl_lookup(NkTexRepl *p, const NkTexReplId *id, NkTexReplHit *out) {
 void nk_texrepl_unpin(NkTexRepl *p, NkTexReplHit *hit) {
     (void)p;
     if (!hit || !hit->pin) return;
-    Level *v = (Level *)hit->pin;
+    Image *v = (Image *)hit->pin;
     if (v->pins) v->pins--;
     memset(hit, 0, sizeof(*hit));
 }
