@@ -1187,8 +1187,11 @@ static int coherence_run_wide_raster_one(const char *name, uint32_t stride, int 
     const unsigned long spr_before = s_cnt_spr, tri_before = s_cnt_tri;
     ge_set_gpu_hooks(&k_hooks);
     ge_run_list(coherence_wide_raster_list(base, stride, scis_x2), 0);
-    GeGpuFbDescriptor desc = { .addr = base, .format = 3, .stride = stride, .width = 480, .height = 272 };
-    if (s_cnt_spr != spr_before + 2u || s_cnt_tri != tri_before + 2u || !gegpu_sync_guest_fb(&desc)) {
+    /* the visible width, never past the stride (a narrower one is refused) */
+    GeGpuFbDescriptor desc = { .addr = base, .format = 3, .stride = stride,
+                               .width = stride < 480u ? stride : 480u, .height = 272 };
+    if (s_cnt_spr != spr_before + 2u || s_cnt_tri != tri_before + 2u ||
+        gegpu_sync_guest_fb(&desc) != GEGPU_SYNC_OK) {
         fprintf(stderr, "gpu coherence selftest [%s]: the GPU took %lu sprite(s) and %lu triangle(s), "
                         "want 2 and 2, or the sync failed\n", name, s_cnt_spr - spr_before, s_cnt_tri - tri_before);
         coherence_reset_targets();
