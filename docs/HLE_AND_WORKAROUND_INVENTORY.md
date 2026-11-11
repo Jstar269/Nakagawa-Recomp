@@ -470,22 +470,27 @@ Semantic handler census: **584** handlers across **30** API families, covering *
   - Limitation: request completion uses a deterministic synthetic import-boundary scheduler; PSP ioctl timing and callback ordering remain unmeasured
   - Evidence: tests/native/hle_thread_selftest.c:test_io_async_and_path_imports
 - **`h_IoLseek`** (`sceIo`): `sceIoLseek` (0x27eb27b8)
-  - Limitation: PSP-IO-001 measures 64-bit SEEK_SET 32, SEEK_CUR -16, SEEK_END 0 and the end position after a 32-byte append on one host0 file; PSP-IO-EOF-001 measures a Memory Stick seek before the start as EINVAL with the position unchanged (pspautotests revision f573fe8c9122a8ff5db4f030d74557bed644b4e0 records -1 there, kept for other devices), a seek and write past the end extending the file, and a read past the end returning 0; PSP-KERNEL-SEM-001 measures a Memory Stick position as 32 bits wide (0xFFFFFFFF accepted, beyond it EINVAL with the position unchanged); other devices keep IO_LSEEK_OUT_OF_RANGE there (#1380); invalid whence and error precedence remain unmeasured (#341). UMD block-device seeks follow PSP-UMDRAW-001's captured but not acceptance-qualified cells (sector positions, SEEK_END at the last sector, 0x8001b003 for a negative or far-past-the-disc position); the refusal edge between the last sector and the captured far position is inferred
+  - Limitation: PSP-IO-001 measures 64-bit SEEK_SET 32, SEEK_CUR -16, SEEK_END 0 and the end position after a 32-byte append on one host0 file; PSP-IO-EOF-001 measures a Memory Stick seek before the start as EINVAL with the position unchanged (pspautotests revision f573fe8c9122a8ff5db4f030d74557bed644b4e0 records -1 there, kept for other devices), a seek and write past the end extending the file, and a read past the end returning 0; PSP-KERNEL-SEM-001 measures a Memory Stick position as 32 bits wide (0xFFFFFFFF accepted, beyond it EINVAL with the position unchanged); other devices keep IO_LSEEK_OUT_OF_RANGE there (#1380); PSP-HLE-IO-SEEK-001 measures a read-only flash0: file refusing SEEK_SET and SEEK_END destinations before the start or past the end with 0x80010016 and the position unchanged (high word 0xFFFFFFFF at -1 and size + 16, 0 at 0xFFFFFFFF and 0x100000000 from SEEK_SET), measured on ltn0.pgf; on flash0: SEEK_CUR, the async calls, the 0xFFFFFFFF and 0x100000000 band from SEEK_END, where the high word changes between size + 16 and 0xFFFFFFFF, destinations past 0x100000000 and files other than ltn0.pgf are unmeasured; invalid whence and error precedence remain unmeasured (#341). UMD block-device seeks follow PSP-UMDRAW-001's captured but not acceptance-qualified cells (sector positions, SEEK_END at the last sector, 0x8001b003 for a negative or far-past-the-disc position); the refusal edge between the last sector and the captured far position is inferred
   - Evidence: docs/HARDWARE_ORACLE.md (PSP-IO-001: io-lseek and io-append)
   - Evidence: docs/HARDWARE_ORACLE.md (PSP-KERNEL-SEM-001: io-seek64, io-seek64-rdwr)
   - Evidence: docs/HARDWARE_ORACLE.md (PSP-IO-EOF-001: io-eof-seek-negative, io-eof-seek-negative-rdonly, io-eof-write-past, io-eof-read-past)
+  - Evidence: docs/HARDWARE_ORACLE.md (PSP-HLE-IO-SEEK-001: io-seek-flash-*)
+  - Evidence: tests/native/hle_thread_selftest.c:test_flash0_font_device
   - Evidence: tests/native/hle_thread_selftest.c:test_umd_block_device_sectors
 - **`h_IoLseek32`** (`sceIo`): `sceIoLseek32` (0x68963324)
-  - Limitation: the Memory Stick and disc0: rules are measured; a seek before the start on other devices is not (#341)
+  - Limitation: the Memory Stick, disc0: and flash0: (SEEK_SET and SEEK_END, PSP-HLE-IO-SEEK-001, on ltn0.pgf) rules are measured; a flash0: SEEK_CUR and a seek before the start on other devices are not (#341)
   - Evidence: PSPAutotests tests/io/file/file.expected (sceIoLseek32(fd, -10, SEEK_END) 26 on a 36-byte file)
   - Evidence: docs/HARDWARE_ORACLE.md (PSP-IO-EOF-001 and PSP-IO-EOF-002: a Memory Stick seek before the start answers 0x80010016 and a disc0: seek outside the file 0x80010005, position unchanged)
+  - Evidence: docs/HARDWARE_ORACLE.md (PSP-HLE-IO-SEEK-001: io-seek-flash-*)
   - Evidence: tests/native/hle_thread_selftest.c:test_fd_namespace
+  - Evidence: tests/native/hle_thread_selftest.c:test_flash0_font_device
 - **`h_IoLseek32Async`** (`sceIo`): `sceIoLseek32Async` (0x1b385d8f)
   - Limitation: request completion uses a deterministic synthetic import-boundary scheduler; PSP timing and callback ordering remain unmeasured
   - Evidence: tests/native/hle_thread_selftest.c:test_io_async_and_path_imports
 - **`h_IoLseekAsync`** (`sceIo`): `sceIoLseekAsync` (0x71b19e77)
-  - Limitation: request completion uses a deterministic synthetic import-boundary scheduler; 64-bit seek timing and callback ordering are not hardware-measured
+  - Limitation: request completion uses a deterministic synthetic import-boundary scheduler; 64-bit seek timing and callback ordering are not hardware-measured; a flash0: destination follows sceIoLseek's PSP-HLE-IO-SEEK-001 rule, high word included, which was measured through sceIoLseek and sceIoLseek32 only
   - Evidence: tests/native/hle_thread_selftest.c:test_io_async_and_path_imports
+  - Evidence: tests/native/hle_thread_selftest.c:test_flash0_font_device
 - **`h_IoOpen`** (`sceIo`): `sceIoOpen` (0x109f50bc)
   - Limitation: measured coverage is one host0 file's create/write/read/append/missing-file path, PSP-UMDIO-001's fixed open paths and flags, PSP-KERNEL-SEM-001's Memory Stick exclusive create and PSP-IO-EOF-001's missing-file opens; an open without PSP_O_CREAT never creates a file (write-only, read-write, read-only and write-only with PSP_O_TRUNC each answer 0x80010002), a create under a missing directory is 0x80010002, and PSP_O_CREAT|PSP_O_EXCL on an existing file is EEXIST with the file unchanged (#1380); other flag combinations and general error precedence remain unmeasured (#341). UMD block-device reads and seeks are covered under sceIoRead and sceIoLseek
   - Evidence: docs/HARDWARE_ORACLE.md (PSP-IO-001: io-open-create, io-write, io-read-verify, io-append, io-errors)
