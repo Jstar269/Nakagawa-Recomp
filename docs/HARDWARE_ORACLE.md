@@ -3724,7 +3724,7 @@ not expected PSP values.
 | `ge-rtt` | `PSP-GE-RTT-001` | `MEASURED` (2026-11-06, PSP-3000, boot 137, `cb3702cf`; 126 records) | Render-to-texture CPU reads, flush variants and output pixels. |
 | `hle-std-handles` | `PSP-HLE-STDIO-001` | `MEASURED` (2026-11-06, PSP-3000, boot 135, `d5fed0ba`; 4 records) | Standard-handle write and close results; the probe does not read stdin. |
 | `hle-audio-rest` | `PSP-HLE-AUDIO-REST-001` | `MEASURED` (2026-11-06, PSP-3000, boot 138, `8db3ec9d`; 102 records) | RestLen and RestLength after 32 blocking-output calls at 1024, 2048 and 4096 frames. |
-| `sas-adsr` | `PSP-SAS-002` | `NOT_RUN` (current status encoding) | The current PASS/ERROR status encoding has not been run on hardware. Historical envelope values from 2026-11-05 remain in the fixture index. |
+| `sas-adsr` | `PSP-SAS-002` | `CAPTURED` (2026-11-10, PSP-3000, boot 185, game context, `74acbe42`; 696 records, complete, all PASS; not acceptance-eligible: loaded module not proven unloaded) | The SAS envelope for #1296; every record repeats the 2026-11-05 values. See [PSP-SAS-002 capture 2026-11-10](#psp-sas-002-capture-2026-11-10). |
 | `sas-mix` | `PSP-SAS-003` | `CAPTURED` (2026-11-07, PSP-3000, boot 146, game context, `979de58f`; 205 records, complete, all PASS; not acceptance-eligible: loaded module not proven unloaded) | Synthetic volume, WithMix and pitch cells for #2135 and #2054. See [PSP-SAS-003 capture 2026-11-07](#psp-sas-003-capture-2026-11-07). |
 | `vcodec-words` | `PSP-VCODEC-001` | `NOT_RUN` | Built Media Engine boundary-word cells over synthetic AVC access units; no hardware result is claimed. |
 | `hle-self-stop-unload` | `PSP-HLE-SELFSTOP-001` | `MEASURED` (2026-11-08, PSP-3000, boot 165, `935f225d`; 6 records) | #341: sceKernelSelfStopUnloadModule from a helper PRX's own thread: the call does not return, module_stop runs once and the module is unloaded. |
@@ -3801,6 +3801,24 @@ How to read it. Every other dialog went INIT, VISIBLE, QUIT, NONE, with InitStar
 
 Not shown: mode 10 DELETE of a missing save; what mode 2 LOAD returns after a button press; FILES on a directory
 the utility cannot read (the probe does not construct one); any of this in the XMB context.
+
+### PSP-SAS-002 capture 2026-11-10
+
+`sas-adsr` (case 152, `fixtures/psp_oracle/probe.c`) ran once on 2026-11-10 (UTC) on the PSP-3000, boot 185, in
+the game context (standalone PSPLink), at `74acbe42`, an ancestor of this tree whose `probe.c` and Makefile are
+identical to this tree's. Firmware: system software 6.61 (`flash0:/vsh/etc/version.txt`: `release:6.61:`,
+`system:58401@release_661,0x06060110:`); PSPLink `pspver` 0x06060110, which the runner records as 6.6.1; custom
+firmware ARK-5 with cIPL, version 5.1.0 (operator-declared, not read by a tool). The stream is complete: 696
+records, all PASS, and COMPLETE PASS, after a `transport-write` preflight. The envelope is not
+acceptance-eligible: its one acceptance blocker is "loaded module was not proven unloaded" (the teardown found
+the post-unload module set different from the one before the launch), and the runner's recovery then reset the
+PSP to boot 186. The capture is therefore `CAPTURED` and establishes nothing about PSP behaviour. The raw
+envelope, host0 log and decode stay in the private campaign directory.
+
+It is the first run of the current status encoding, which writes `PASS` or `ERROR` where the 2026-11-05 run of
+the earlier source revision wrote `RC`. The two streams have the same 696 case ids, and every record has the same
+result and out words in both. The values described in `fixtures/psp_oracle/README.md` are therefore what both runs
+show, for an eligible rerun to confirm.
 
 ### PSP-SAS-003 capture 2026-11-07
 

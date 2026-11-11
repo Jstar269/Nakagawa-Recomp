@@ -3537,6 +3537,9 @@ class PspDmacProbeTests(unittest.TestCase):
                 # 2026-11-10: hle-savedata-nodata (dbb47db4, boot 183, game context): 34 PASS and
                 # 1 SKIP; nodir-load stayed VISIBLE to its bound and the console needed a power cycle.
                 "PSP-HLE-SAVEDATA-NODATA-001",
+                # 2026-11-10: sas-adsr (74acbe42, boot 185, game context): a complete all-PASS
+                # stream whose envelope is blocked by "loaded module was not proven unloaded".
+                "PSP-SAS-002",
             },
         )
 
@@ -15800,7 +15803,7 @@ class Record20261015Tests(unittest.TestCase):
             ("ge-through-z", "PSP-GE-THROUGHZ-001", "MEASURED"),
             ("vfpu-reserved-widths", "PSP-VFPU-RESERVED-001", "MEASURED"),
             ("hle-savedata-nodata", "PSP-HLE-SAVEDATA-NODATA-001", "CAPTURED"),
-            ("sas-adsr", "PSP-SAS-002", "NOT_RUN"),
+            ("sas-adsr", "PSP-SAS-002", "CAPTURED"),
             ("sas-mix", "PSP-SAS-003", "CAPTURED"),
             ("vcodec-words", "PSP-VCODEC-001", "NOT_RUN"),
             ("hle-utility-dialogs", "PSP-HLE-UTILITY-DIALOG-001", "NOT_RUN"),
@@ -15815,6 +15818,20 @@ class Record20261015Tests(unittest.TestCase):
                 self.assertEqual(readme[case][1], test_id)
                 self.assertIn(status, readme[case][2])
                 self.assertEqual(self.rows[test_id]["hardware_evidence"], status)
+
+    def test_the_sas_adsr_capture_is_captured_with_its_blocker(self) -> None:
+        row = self.rows["PSP-SAS-002"]
+        self.assertEqual(row["hardware_evidence"], "CAPTURED")
+        self.assertNotIn("measurement_note", row)
+        note = row["evidence_note"]
+        for term in ("2026-11-10", "PSP-3000", "boot 185", "game context", "74acbe42",
+                     "identical to this tree's", "system software 6.61", "0x06060110",
+                     "ARK-5 with cIPL, version 5.1.0", "696 records", "not acceptance-eligible",
+                     "loaded module was not proven unloaded",
+                     "establishes nothing about PSP behaviour", "2026-11-05"):
+            self.assertIn(term, note)
+        self.assertIn("### PSP-SAS-002 capture 2026-11-10", self.doc)
+        self.assertIn("(#psp-sas-002-capture-2026-11-10)", self.doc)
 
     def test_the_sas_mix_capture_is_captured_with_its_blocker(self) -> None:
         row = self.rows["PSP-SAS-003"]
