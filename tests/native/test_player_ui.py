@@ -1749,6 +1749,72 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertEqual(self.find_states(run), ["", "1", "12", "1", "11"],
                          "the keys typed 1 and 2, X deleted the 2, and 1 was typed again")
 
+    @staticmethod
+    def find_grid_trail(run: dict[str, object]) -> list[tuple[str | None, int, int, tuple[str, ...]]]:
+        """The library grid for each thing the find box held, in order: (the box's text,
+        or None while it is closed; the grid's games; the library's games; the disc IDs
+        the page drew). Each is the grid on the last frame of that text, so a keystroke's
+        own frame, which may still draw the grid of the text before, does not count."""
+        stdout = run["stdout"]
+        assert isinstance(stdout, str)
+        finds = {int(frame): bytes.fromhex(text_hex).decode("utf-8") for frame, text_hex in
+                 re.findall(r"^\[PLAYER_UI_TEST\] find_box frame=(\d+) text_hex=([0-9a-f]*)\r?$",
+                            stdout, re.M)}
+        grids = {int(frame): (int(matches), int(total), tuple(filter(None, shown.split(","))))
+                 for frame, matches, total, shown in re.findall(
+                     r"^\[PLAYER_UI_TEST\] library_grid frame=(\d+) matches=(\d+) total=(\d+)"
+                     r" shown=(\S*)\r?$", stdout, re.M)}
+        frames = run["frames"]
+        assert isinstance(frames, list)
+        trail: list[tuple[str | None, int, int, tuple[str, ...]]] = []
+        grid: tuple[int, int, tuple[str, ...]] | None = None
+        for frame in frames:
+            number = int(frame["frame"])
+            grid = grids.get(number, grid)
+            if grid is None:
+                continue
+            text = finds.get(number)
+            if trail and trail[-1][0] == text:
+                trail[-1] = (text, *grid)
+            else:
+                trail.append((text, *grid))
+        return trail
+
+    def test_next_ui_find_filters_the_grid_with_a_controller_alone(self) -> None:
+        """#2206: a controller alone searches the library, and the grid follows the box.
+        The pad opens the box, the d-pad moves to the 1 key, A types 1 and 1 again, X
+        deletes both, A types 11 once more, and B clears and closes the box: each step's
+        grid is the games whose name or disc ID holds the text, and the cleared box gives
+        back the whole library on the page it showed before."""
+        run = self.run_player(
+            "library",
+            ("WAIT_MS=1000", "PAD_WEST", "WAIT_MS=100", "PAD_DPAD_UP", "PAD_SOUTH",
+             "WAIT_MS=100", "PAD_SOUTH", "WAIT_MS=100", "PAD_WEST", "WAIT_MS=100", "PAD_WEST",
+             "WAIT_MS=100", "PAD_SOUTH", "WAIT_MS=100", "PAD_SOUTH", "WAIT_MS=100", "PAD_EAST",
+             "WAIT_MS=200"),
+            library_titles=12, timeout=120.0,
+        )
+        if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in run["stdout"]:
+            self.skipTest("the next UI could not start here (no UI fonts)")
+        trail = self.find_grid_trail(run)
+        self.assertEqual([text for text, *_ in trail],
+                         [None, "", "1", "11", "1", "", "1", "11", None], run["stdout"][-4000:])
+        full = {f"SCAL{index:05d}" for index in range(12)}
+        ones = {"SCAL00001", "SCAL00010", "SCAL00011"}  # Synthetic title 1, 10 and 11
+        for text, matches, total, shown in trail:
+            self.assertEqual(total, 12, f"the library holds 12 games ({text!r})")
+            self.assertTrue(set(shown) <= full, f"the page draws library games ({text!r})")
+            if text == "1":
+                self.assertEqual((matches, set(shown)), (3, ones), "1 keeps titles 1, 10 and 11")
+            elif text == "11":
+                self.assertEqual((matches, shown), (1, ("SCAL00011",)), "11 keeps title 11")
+            else:
+                self.assertEqual(matches, 12, f"{text!r} keeps every game")
+                self.assertGreater(len(shown), len(ones), f"{text!r} draws a full page")
+        self.assertEqual(trail[-1][3], trail[0][3],
+                         "B clears the box, and the page shows what it showed before")
+        self.assertEqual(self.focus_trail(run)[-1], self.FIND, "B returns focus to FIND")
+
     def test_next_ui_is_the_only_launcher(self) -> None:
         """The owner's rule for v0.0.1: the new launcher or nothing.
 
