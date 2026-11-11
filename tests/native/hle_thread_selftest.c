@@ -4173,8 +4173,10 @@ static void test_io_memory_stick_cells_through_syscall(void) {
                fd_host_bytes_equal(host, pattern, MS_SIZE),
            "PSP_O_RDONLY | PSP_O_CREAT on an existing file stops at the boundary, file unchanged");
     expect(ms_cell_path_call(MS_CELL_OPEN, missing_guest, 0x0A01u) == 0x80010086u &&
+               ms_cell_path_call(MS_CELL_OPEN, missing_guest, 0x0301u) == 0x80010086u &&
                !ms_cell_host_exists(missing_guest),
-           "PSP_O_RDONLY | PSP_O_CREAT | PSP_O_EXCL stops at the boundary and creates nothing");
+           "PSP_O_RDONLY | PSP_O_CREAT with PSP_O_EXCL or PSP_O_APPEND stops at the boundary "
+           "and creates nothing");
 
     /* io-seek-ms-write-rdonly: a write through a PSP_O_RDONLY descriptor. */
     fd = ms_cell_path_call(MS_CELL_OPEN, file_guest, 0x0001u);
