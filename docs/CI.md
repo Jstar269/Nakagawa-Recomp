@@ -461,10 +461,25 @@ index update, 8 for the install), moving the head mirror to the end of the list 
 failed one. The list starts with the Azure mirror and `archive.ubuntu.com` and goes on to
 mirrors outside `ubuntu.com`: on 2026-11-11 the hosted runners reached none of Canonical's
 hosts, and the image's own mirror list holds only those. apt checks every index against
-the Ubuntu archive key whichever mirror serves it. When no mirror answers or every attempt
-fails, the step fails; it is never skipped. `tools/test_public_ci_wiring.py`
-(`AptInstallHelperTests`) runs the helper against stubs and fails if a step calls `apt-get`
-itself.
+the Ubuntu archive key whichever mirror serves it: the helper keeps each source's
+`Signed-By`, and no workflow may switch the check off. When no mirror answers or every
+attempt fails, the step fails; it is never skipped.
+
+On a self-hosted `nk-wsl` runner ([below](#self-hosted-linux-runners)) the helper changes
+nothing while the image carries every package. When one is missing, it edits the
+runner's own apt configuration as it does on a hosted runner: it points the Ubuntu
+sources at `/etc/apt/apt-mirrors.txt`, writes that list and
+`/etc/apt/apt.conf.d/79-nk-apt-network`, and installs the package. Those changes last
+until the runner is discarded: each pool runner is a container that takes one job, so they
+never reach the pool's image or the next job, and every job repeats the fetch until the
+image carries the package.
+
+`tools/test_public_ci_wiring.py` (`AptInstallHelperTests`) runs the helper against stubs. It
+fails if a step calls `apt-get` itself, if the helper drops a source's `Signed-By`, or if
+any workflow switches apt's signature check off: `--allow-unauthenticated`,
+`--allow-insecure-repositories`, `--allow-downgrade-to-insecure-repositories`, `force-yes`
+as a flag or setting, a `trusted` source option with any value, or an `AllowInsecure*`,
+`AllowDowngradeToInsecure*` or `AllowUnauthenticated` setting.
 
 ### Android launcher build
 
@@ -647,12 +662,13 @@ capture holds one PRIM of two overlapping translucent sprites on a 16-bit target
 find exactly its overlap as the first bad draw on the snapshot destination-read path (the known
 shader-blend batch-order difference, #2109), and report `NO_DIFFERENCE` on the interlock path. On a
 device that refuses the interlock, the interlock leg is a `SKIP`. Four more generated captures check that the
-tool fails closed: a scissor past ge.c's raster bound (the stride, up to 512 columns, or 480 on a
-stride of 480 or less; a 512 scissor on a 512 stride is compared), 33 targets or a stride of
+tool fails closed: a scissor past 512 columns (both renderers draw up to the stride, 512 at most;
+a 512 scissor on a 512 stride is compared), 33 targets or a stride of
 1088 are `INCOMPLETE`, and a capture with no draw is `NO_DRAWS`. The same step then runs
-`vram-view-identity-selftest` (#314): the GE decoders the pause menu's VRAM viewer calls, run at
-a paused VBLANK, must leave later presented frames, guest memory and the GE state as a run
-without them does, and a mutant viewer that stores one byte must fail. The job also runs
+`vram-view-identity-selftest` (#314): the sources and decode the pause menu's VRAM viewer runs,
+called at a paused VBLANK with the arguments `gui.c` passes, must name the expected surfaces and
+leave later presented frames, guest memory and the GE state as a run without them does, and a
+mutant viewer that stores one byte must fail. The job also runs
 `make CC=gcc player-ui-tests` with SDL's dummy video and software render drivers, configures and
 builds the CMake player with `BUILD_PLAYER=ON`, runs CTest, and requires the `nakagawa_player
 --help` usage marker. It downloads the PSPDEV archive identified by

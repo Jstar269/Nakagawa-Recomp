@@ -660,6 +660,12 @@ VkImage ace_smooth_previous(AceBetween *s, VkCommandBuffer cmd) {
     return im->image;
 }
 
+void ace_smooth_unrecord(AceBetween *s) {
+    if (!s || !s->have[!s->cur]) return;
+    s->have[s->cur] = 0;
+    s->cur = !s->cur;
+}
+
 void ace_smooth_size(const AceBetween *s, int *w, int *h) {
     if (w) *w = s ? s->w : 0;
     if (h) *h = s ? s->h : 0;
