@@ -1097,22 +1097,29 @@ vram-view-identity-selftest: $(VRAM_VIEW_BIN)
 # gpu-dst-read-mutants — the dst-read cells must kill each SR_GPU_DSTREAD_MUTANT in ge_gpu.c (#2109):
 # 1 merges every channel from the loaded destination, so the RMW store has no effect
 # (dst-read-order), 2 swaps the RMW batches' source and destination blend factors (dst-read-order),
-# 3 lets an op the rmwzfb rule refuses take the interlock, so an alpha-rejected fragment writes depth
-# (dst-read-depth), 4 gives colour targets STORAGE_BIT on the snapshot path (dst-read-pins), 5
+# 3 lets every batch the rmwzfb rule names test depth early, so an alpha-rejected fragment writes
+# depth (dst-read-depth), 4 gives colour targets STORAGE_BIT on the snapshot path (dst-read-pins), 5
 # turns the RMW pipelines' depth test off, so a sprite behind the wall blends (dst-read-ztest), 6
 # drops the rmwzfb rule's color-test line, so a fragment the color test rejects writes depth
-# (dst-read-ctest), 7 drops its own-target line, so a sprite that textures from its own target
-# samples texels older than the sprite before it (dst-read-feedback), 8 keeps every op of a run
+# (dst-read-ctest), 7 drops rmw_refuses's own-target line, so a sprite that textures from its own
+# target samples texels older than the sprite before it (dst-read-feedback), 8 keeps every op of a run
 # with the host twin on the snapshot path, so the image blends the pair against the pre-batch
 # destination again (dst-read-order with the native twin), and 9 records the twin's pass of an
 # interlock op as one pass that reads the twin snapshot, so the twin differs from its image
 # (dst-read-order with the native twin).
 # 10 is mutant 9's build run with the full-colour twin, whose check must fail too.
-# Mutants 1 to 3 and 5 to 10 run on the interlock path, 4 on the snapshot path. Each builds its own
+# 11 drops the rmwzfb rule's depth-range line, so a fragment outside the depth range writes depth
+# (dst-read-zrange), 12 its stencil-fail line, so a stencil-rejected fragment writes depth
+# (dst-read-sfail), 13 makes the shader's depth test always pass in a shader-depth run, so a sprite
+# behind the first one in its batch blends over it (dst-read-depth), and 14 skips that run's copy of
+# its depth back to the depth image, so the opaque sprite behind them shows through (dst-read-depth).
+# 15 restores the rule before shader-owned depth, so such an op keeps the snapshot path and its
+# overlapping pair blends against the pre-batch destination (dst-read-depth: the failing-before state).
+# Mutants 1 to 3 and 5 to 15 run on the interlock path, 4 on the snapshot path. Each builds its own
 # binary and must fail with its own message. Exit 77 (no Vulkan device, or a device without the
-# interlock for 1 to 3 and 5 to 10) is a SKIP of that mutant.
+# interlock for 1 to 3 and 5 to 15) is a SKIP of that mutant.
 gpu-dst-read-mutants: shader-verify $(RT_GE_O)
-	@for m in 1 2 3 4 5 6 7 8 9 10; do \
+	@for m in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do \
 		case $$m in \
 			1) args="--dst-read interlock --case dst-read-order"; kill="the RMW store had no effect";; \
 			2) args="--dst-read interlock --case dst-read-order"; kill="differs from ge.c in [0-9]+ pixels .* on the interlock path";; \
@@ -1123,6 +1130,11 @@ gpu-dst-read-mutants: shader-verify $(RT_GE_O)
 			8) args="--twin native --dst-read interlock --case dst-read-order"; kill="differs from ge.c in [1-9][0-9]* pixels \(0 outside the overlap\) on the interlock path \(host twin on\)";; \
 			9) args="--twin native --dst-read interlock --case dst-read-order"; kill="host twin \(native colour\) differs from its image in [1-9][0-9]* device pixels";; \
 			10) args="--twin 1 --dst-read interlock --case dst-read-order"; kill="host twin \(full colour\) differs from the ordered 8-bit blend in [1-9][0-9]* device pixels";; \
+			11) args="--dst-read interlock --case dst-read-zrange"; kill="dst-read-zrange\]: colour differs from ge.c in [0-9]+ pixels, depth differs from ge.c in [1-9]";; \
+			12) args="--dst-read interlock --case dst-read-sfail"; kill="dst-read-sfail\]: colour differs from ge.c in [0-9]+ pixels, depth differs from ge.c in [1-9]";; \
+			13) args="--dst-read interlock --case dst-read-depth"; kill="dst-read-depth\]: colour differs from ge.c in [1-9][0-9]* pixels";; \
+			14) args="--dst-read interlock --case dst-read-depth"; kill="dst-read-depth\]: colour differs from ge.c in [1-9][0-9]* pixels, depth differs from ge.c in [1-9]";; \
+			15) args="--dst-read interlock --case dst-read-depth"; kill="dst-read-depth\]: the alpha-tested depth-writing op took 0 interlock ops";; \
 			*) args="--dst-read snapshot --case dst-read-pins"; kill="the snapshot path made interlock state";; \
 		esac; \
 		bin=$(BUILD_DIR)/gpu_coherence_dstread_mutant$$m.exe; \
