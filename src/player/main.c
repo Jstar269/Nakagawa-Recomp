@@ -1648,6 +1648,9 @@ static void player_ui_settings_apply(PlayerApp *app, PlayerUiSettingsOp op, size
         case PLAYER_UI_SETTINGS_TOGGLE_UPDATE_AT_START:
             player_app_toggle_update_check_at_start(app);
             break;
+        case PLAYER_UI_SETTINGS_TOGGLE_DISCORD:
+            player_app_toggle_discord_presence(app);
+            break;
         case PLAYER_UI_SETTINGS_DOWNLOAD_UPDATE:
             if (app->update.phase == PLAYER_UPDATE_AVAILABLE) {
                 player_update_start(app, PLAYER_UPDATE_JOB_DOWNLOAD);
@@ -5272,6 +5275,9 @@ static void player_frame_game_session(PlayerRun *run) {
             child_exited = player_app_monitor_game_session(app, SDL_GetTicks());
     }
     (void)child_exited;
+    /* Discord status (#2259), when the user turned it on: shows the running game and
+       clears it once the game has exited. Never waits; quiet when Discord is not running. */
+    player_app_discord_tick(app, SDL_GetTicks());
     /* The launcher stays open behind the game (#1298): minimizing it
        unasked surprised users. When the game ends, it comes back to the
        front, and a later launch gets its own handoff. */
@@ -5459,6 +5465,7 @@ static int player_shutdown(PlayerRun *run) {
 
     player_update_shutdown();
     player_report_shutdown();
+    player_app_discord_shutdown(app);
     destroy_staging_job(&run->staging_job);
     destroy_psn_job(&run->psn_job);
     destroy_disc_check_job(&run->disc_check_job);
