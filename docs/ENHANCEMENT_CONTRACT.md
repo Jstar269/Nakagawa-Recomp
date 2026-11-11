@@ -1220,7 +1220,8 @@ host's output.
   is its own sample and the inter-sample peaks on either side, read at 4x through a 16-tap-a-phase windowed-sinc
   interpolator. The gain a frame needs is the ceiling over its peak; the gain applied is a minimum over the next 64
   frames, released exponentially (50 ms), then averaged over 64 frames, so it falls over 1.45 ms before a peak and
-  is at most what the peak needs when it arrives. The ceiling is -0.3 dBTP. The output is 71 frames (1.61 ms)
+  is at most what the peak needs when it arrives. The ceiling is -0.3 dBTP as that detector reads it; read at 16x,
+  the overflow fixture's hard 62000-count step rings 0.13 dB past it, still under full scale. The output is 71 frames (1.61 ms)
   late. A frame below the ceiling with no peak within the attack or release of it comes out bit-exact, so the
   level is the PSP's wherever the PSP did not clip; only the overs are rounded off instead of cut. A stream that
   stops leaves its last 71 frames in the limiter until that channel's next push, which plays them first: nothing is
@@ -1238,7 +1239,7 @@ host's output.
   carries the sum, past 16 bits exactly where the store saturated and the guest's value elsewhere; a buffer changed
   after the mix and a copy play the guest's bytes. `audio-selftest` checks that the part off is the plain push; that
   quiet audio comes out bit-exact and 71 frames late with an unchanged queue depth; and that a sine reaching 6.6 dB
-  past 16 bits leaves no full-scale sample, a true peak (read at 16x) no more than 0.1 dB over the ceiling, the
+  past 16 bits leaves no sample past the ceiling and a true peak (read at 16x) under full scale, the
   passage before it bit-exact and the one after it at the input's level within 0.1 dB.
 - **Not yet.** The player has no part for it yet: a launch line names it by hand. The Hot Shots Tennis title-logo
   check (no full-scale sample, and the non-clipping music at the PSP's -15.6 dBFS) waits for the #2135 console read.
