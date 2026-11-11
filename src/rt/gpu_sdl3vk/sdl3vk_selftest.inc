@@ -1747,8 +1747,9 @@ static int sdl3vk_capture_selftest_body(void) {
     /* ---- the F3 HUD composes over the picture (#314, LIVE_FRAME_OVERLAY) ---------------
      * The performance HUD, and in developer mode the profile HUD, are copied into a rectangle
      * of the window's image after the frame blit: a rectangle inside the window that leaves
-     * the rest of the picture showing, filled with the HUD the software renderer drew. The
-     * frame the game drew is untouched: a capture of the same present is the same bytes as
+     * the rest of the picture showing, at the 16-pixel inset, and the HUD surface the software
+     * renderer drew for it holds the HUD. The frame the game drew, the source the window is
+     * blitted from, is untouched: a capture of the same present is the same bytes as
      * with the HUD off. Off again, nothing is copied. */
     {
         static const int modes[] = { SDL3VK_HUD_PERF, SDL3VK_HUD_PROFILE };
@@ -1780,7 +1781,7 @@ static int sdl3vk_capture_selftest_body(void) {
                 ok = 0;
                 continue;
             }
-            if (s_hud_last.x < 0 || s_hud_last.y < 0 ||
+            if (s_hud_last.x != 16 || s_hud_last.y != 16 ||
                 s_hud_last.x + s_hud_last.w > s_hud_last.swap_w ||
                 s_hud_last.y + s_hud_last.h > s_hud_last.swap_h ||
                 (s_hud_last.w >= s_hud_last.swap_w && s_hud_last.h >= s_hud_last.swap_h)) {

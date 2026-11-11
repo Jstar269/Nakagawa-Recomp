@@ -560,9 +560,6 @@ static void test_pad_lost(void) {
     nk_ui_destroy(ui);
 }
 
-/* Element `id`'s fill and text in `list`, drawn whole: each clip is its bounds
-   (no scroll container or window edge cuts it), between top and bottom. Its
-   borders are not counted: a focused control's ring is drawn outside it. */
 /* The bounds of the first command of `kind` that `id` drew this frame; false when none did. */
 static bool frame_bounds(NkUi *ui, NkOverlayState *state, const NkOverlayModel *model, NkUiId id,
                          int kind, int out[4]) {
@@ -579,6 +576,9 @@ static bool frame_bounds(NkUi *ui, NkOverlayState *state, const NkOverlayModel *
     return false;
 }
 
+/* Element `id`'s fill and text in `list`, drawn whole: each clip is its bounds
+   (no scroll container or window edge cuts it), between top and bottom. Its
+   borders are not counted: a focused control's ring is drawn outside it. */
 static bool list_shows_whole(const NkUiDrawList *list, NkUiId id, int top, int bottom) {
     bool found = false;
     for (uint32_t i = 0u; list != NULL && i < list->ncmd; ++i) {
