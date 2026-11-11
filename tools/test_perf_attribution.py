@@ -511,7 +511,7 @@ class TestSourcePins(unittest.TestCase):
 
     def test_display_period_in_microseconds_has_one_definition(self) -> None:
         """The scheduler, perf, videorec and audio code share one 16683 us display period (#2361)."""
-        period = re.compile(r"\b16683[uU]?\b")
+        period = re.compile(r"\b16683[uUlL]*\b")
         rt = ROOT / "src" / "rt"
         hits = [f"{path.name}:{number}: {line.strip()}"
                 for path in sorted([*rt.glob("*.c"), *rt.glob("*.h")])
