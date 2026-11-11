@@ -190,9 +190,13 @@
               "gate_30hz_hold",
               "gate_30hz_alt",
               "gate_30hz_store",
-              "clip_x_widen"
+              "clip_x_widen",
+              "gate_30hz_phase",
+              "velocity_source_x_kappa",
+              "launch_from_rest_60hz",
+              "value_reference"
             ],
-            "description": "Declarative site transform class: a frame-rate rescale, or (clip_x_widen, category guest_memory_code_hook only) a widening of the title's own visibility test (contract section 10.8)."
+            "description": "Declarative site transform class: a frame-rate rescale, or (clip_x_widen, category guest_memory_code_hook only) a widening of the title's own visibility test (contract section 10.8). value_reference rewrites nothing: the site pins a stock float that other sites reference (contract section 9.2)."
           },
           "clip_register": {
             "type": "string",
@@ -245,6 +249,75 @@
             "type": "string",
             "pattern": "^[a-zA-Z_][a-zA-Z0-9_.-]{0,63}$",
             "description": "launch_velocity_x0.5 only: the accel_x0.25 site of the per-update acceleration; that site must pin its whole float (word_count 2 or low_insn_offset)."
+          },
+          "step_site": {
+            "type": "string",
+            "pattern": "^[a-zA-Z_][a-zA-Z0-9_.-]{0,63}$",
+            "description": "gate_30hz_phase and launch_from_rest_60hz only: the site that pins h, the stock logic step: a value_reference site, or the step_x0.5 site that halves the step (a lui/ori pair, or an lwc1 or lv.s of read-only data). The resolver reads the value from the executable."
+          },
+          "gravity_site": {
+            "type": "string",
+            "pattern": "^[a-zA-Z_][a-zA-Z0-9_.-]{0,63}$",
+            "description": "launch_from_rest_60hz only: the value_reference site that pins g, the stock acceleration on gravity_axis."
+          },
+          "damping_site": {
+            "type": "string",
+            "pattern": "^[a-zA-Z_][a-zA-Z0-9_.-]{0,63}$",
+            "description": "velocity_source_x_kappa and launch_from_rest_60hz only: the value_reference site that pins c, the stock damping coefficient."
+          },
+          "damping_step_site": {
+            "type": "string",
+            "pattern": "^[a-zA-Z_][a-zA-Z0-9_.-]{0,63}$",
+            "description": "velocity_source_x_kappa and launch_from_rest_60hz only: the value_reference site that pins L, the step the stock damping multiplies c by; the stock retention per update is 1 - c*L, which must lie in (0, 1)."
+          },
+          "phase_time": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "register",
+              "offset"
+            ],
+            "properties": {
+              "register": {
+                "type": "string",
+                "enum": [
+                  "s0",
+                  "s1",
+                  "s2",
+                  "s3",
+                  "s4",
+                  "s5",
+                  "s6",
+                  "s7"
+                ]
+              },
+              "offset": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 65532,
+                "multipleOf": 4
+              }
+            },
+            "description": "gate_30hz_phase only: where the state's own time is read, a float at offset from the pointer in a callee-saved register. The phase is the number of updates since that time was zero, found by matching the float against the state's own float32 sum of the 60 Hz step."
+          },
+          "odd_phase_condition": {
+            "type": "boolean",
+            "description": "gate_30hz_phase on a compare only: the value the FPU condition flag takes half a stock step after a stock instant."
+          },
+          "velocity_offset": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 65528,
+            "multipleOf": 4,
+            "description": "launch_from_rest_60hz only: the offset from the pointer in $a0 of the body's two velocity floats, which the called function must store itself. A package with such a site names the capability launch_velocity_write."
+          },
+          "gravity_axis": {
+            "type": "integer",
+            "enum": [
+              0,
+              1
+            ],
+            "description": "launch_from_rest_60hz only: which of the two velocity floats gravity acts on."
           },
           "low_insn_offset": {
             "type": "integer",
@@ -520,6 +593,75 @@
                     "retention_m_to_sqrt(m)",
                     "accel_x0.25"
                   ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "ace_parts": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": false,
+      "description": "Per-title Ace parts (docs/ENHANCEMENT_CONTRACT.md section 9.8), timing packages only. Each part is gated at run time by its own SR_ACE key, never by SR_EXPERIMENTAL_60HZ. Its sites share one id and instruction namespace with sites and update_boundary: an ace_parts site may not reuse an id or cover a word either already covers, may not declare requires, and no requires may name it.",
+      "properties": {
+        "load": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "sites"
+          ],
+          "description": "Short loads (SR_ACE load=fast, section 11.3.10): display waits that only pace a loading screen.",
+          "properties": {
+            "sites": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "id",
+                  "function",
+                  "insn_offset",
+                  "stock_digest",
+                  "transform"
+                ],
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "pattern": "^[a-zA-Z_][a-zA-Z0-9_.-]{0,63}$",
+                    "description": "Symbolic site identifier, unique across sites and every ace part; raw address literals are forbidden."
+                  },
+                  "function": {
+                    "type": "string",
+                    "pattern": "^[a-zA-Z_][a-zA-Z0-9_]{0,127}$",
+                    "description": "Symbolic function name; raw address literals and decompiler stems are forbidden. A vblank_wait_skip site may not be in the update_boundary's function."
+                  },
+                  "insn_offset": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 65536,
+                    "multipleOf": 4,
+                    "description": "Byte offset of the site's instruction word from the function entry; a multiple of 4."
+                  },
+                  "stock_digest": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$",
+                    "description": "Lowercase hex SHA-256 digest of the expected stock 32-bit instruction word (keyed in a published package)."
+                  },
+                  "word_count": {
+                    "const": 1,
+                    "default": 1,
+                    "description": "An ace part site is one instruction word."
+                  },
+                  "transform": {
+                    "type": "string",
+                    "enum": [
+                      "vblank_wait_skip"
+                    ],
+                    "description": "vblank_wait_skip: the site is a jal to the sceDisplayWaitVblankStart import stub; while load=fast is in effect the call is skipped and $v0 is 0."
+                  }
                 }
               }
             }

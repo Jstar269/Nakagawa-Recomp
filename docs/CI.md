@@ -589,16 +589,21 @@ the snapshot path, the known difference must stay inside each overlap, and the d
 state. `stencil-once` runs alone too, at scales 1 and 4 on the snapshot path and at scale 1 on the interlock
 path: a write-once stencil state (the first fragment to pass at a pixel stores a stencil that rejects the later
 ones) must draw overlapping primitives in one batch with no split and equal the software GE bit for bit, over a
-triangle mesh, a 7200-state matrix in each framebuffer format and three depth legs. A device that refuses the
+triangle mesh, a 7200-state matrix in each framebuffer format and three depth legs. The dst-read cells then run
+with the host twin (#2050) on, native and full colour, on both paths at scales 1 and 4, and `stencil-once` with
+the native twin on the interlock path: the image and the path taken must be those of the twin-off run, a native
+twin must equal its image, and a full-colour twin of the overlapping pair must hold the blends at 8 bits per
+channel, in drawing order on the interlock path. A device that refuses the
 interlock prints one SKIP line for each interlock leg. The lavapipe step prints
 the device's interlock features from `vulkaninfo` first, so the log shows which path the hosted legs took. The
 pipeline cache (#2149) runs next, as three processes over one empty data root: cold, warm and reject. Four
 mutant targets follow, and each broken variant must fail its case with its own message:
 `gpu-coherence-selftest-snapbar-mutants` breaks the destination-snapshot copy's barriers three ways
 (`SR_GPU_SNAPBAR_MUTANT`, the submit-batch case), `gpu-coherence-pcache-mutant` makes pipelines bypass the
-pipeline cache (pipeline-cache-cold), and `gpu-dst-read-mutants` breaks the destination-read paths seven ways
-(`SR_GPU_DSTREAD_MUTANT`; mutants 1 to 3 and 5 to 7 run on the interlock path and are a SKIP on a device without it,
-the hosted lavapipe device included),
+pipeline cache (pipeline-cache-cold), and `gpu-dst-read-mutants` breaks the destination-read paths nine ways
+(`SR_GPU_DSTREAD_MUTANT`; mutants 1 to 3 and 5 to 10 run on the interlock path and are a SKIP on a device without it,
+the hosted lavapipe device included; 8 and 9 break the host twin's use of the interlock, and 10 runs mutant 9 with the
+full-colour twin),
 and `gpu-stencil-once-mutants` breaks the write-once stencil batch three ways (`SR_GPU_STENCIL_ONCE_MUTANT`: no
 reordering, every state called write-once, no depth condition).
 `fsr3-pass-selftest` runs FSR 3's eight compute passes on
@@ -1451,7 +1456,11 @@ The publication gate's code is protected because nothing else refuses a file tha
 publication profile and is not implementation, such as game data or a key. The trusted attestation judges
 the profile's paths and new implementation paths only, and the audit runs from the pull request's own
 checkout, in the hygiene and public-export jobs. Without the approval a pull request could loosen the
-audit and pass it in the same change. `GateCodeTests` in `tools/test_ci_trust_verdict.py` fails when one
+audit and pass it in the same change. The trusted attestation (`provenance-attestation.yml`) also runs the
+default branch's own `publish_audit.py --committed-tree` over the candidate, reading its tree from the
+objects (`git ls-tree`, `git cat-file`), so no `.gitattributes` line of the candidate can hide or rewrite a
+file; the merge-group observation (`provenance-attestation-merge-group.yml`) does not, as it is not a
+required check. `GateCodeTests` in `tools/test_ci_trust_verdict.py` fails when one
 of those tools gains a local import that is not protected, or pre-commit gains a hook that is not.
 
 Whatever the `CI_DEFINITION_BEHIND` finding text says, who merges `main`, and when, is decided by
