@@ -1338,6 +1338,21 @@ class GeCorpusGateTests(unittest.TestCase):
             self.assertEqual(corpus_path.read_text(encoding="utf-8"), refused)
             self.assertEqual(sorted(path.name for path in (results / "ge-corpus").iterdir()),
                              [record.name])
+            # The same refusal for the identical run removes nothing it did not create.
+            with self.assertRaisesRegex(ProtocolError, "the gate refuses the corpus"):
+                write_ge_corpus_probe_runs(
+                    corpus_path, schema_path, [self._rtt_runner_report(scratch, raw)], results)
+            self.assertEqual(record.read_text(encoding="utf-8"), raw)
+            self.assertEqual(corpus_path.read_text(encoding="utf-8"), refused)
+            # Two reports of one probe in a single write are refused before anything is written.
+            corpus_path.write_text(written, encoding="utf-8")
+            with self.assertRaisesRegex(ProtocolError, "a second ge-rtt run in one write"):
+                write_ge_corpus_probe_runs(
+                    corpus_path, schema_path,
+                    [self._rtt_runner_report(scratch, raw),
+                     self._rtt_runner_report(other, new_raw, SOURCE_COMMIT=new_commit)], results)
+            self.assertEqual(sorted(path.name for path in (results / "ge-corpus").iterdir()),
+                             [record.name])
 
     def test_a_raster_digest_its_rows_do_not_give_is_refused(self) -> None:
         spec, counts = CAMPAIGN_PROBE_CASES["ge-raster"]

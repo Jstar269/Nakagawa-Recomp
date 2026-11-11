@@ -4195,10 +4195,13 @@ def write_ge_corpus_probe_runs(
     try:
         for target, data in staged.values():
             if target.exists():
-                continue
+                continue  # the same bytes (checked above): an existing record is never removed
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(data)
+            partial = target.with_name(target.name + ".partial")
+            created.append(partial)
+            partial.write_bytes(data)
             created.append(target)
+            os.replace(partial, target)
         report = ge_corpus_report(corpus, schema, results_root)
         statuses = {item["test_id"]: item for item in report["probe_runs"]}
         for test_id in staged:
@@ -4209,11 +4212,14 @@ def write_ge_corpus_probe_runs(
             raise ProtocolError("the gate refuses the corpus: " + "; ".join(
                 f"{item.get('test_id', item.get('case_id'))}: {item['reason']}"
                 for item in (*report["cases"], *report["probe_runs"]) if item["status"] == "REFUSED"))
+        partial_corpus = corpus_path.with_name(corpus_path.name + ".partial")
+        created.append(partial_corpus)
+        partial_corpus.write_text(_dump_ge_corpus(corpus) + "\n", encoding="utf-8", newline="\n")
+        os.replace(partial_corpus, corpus_path)
     except BaseException:
         for target in created:
             target.unlink(missing_ok=True)
         raise
-    corpus_path.write_text(_dump_ge_corpus(corpus) + "\n", encoding="utf-8", newline="\n")
     return report
 
 
