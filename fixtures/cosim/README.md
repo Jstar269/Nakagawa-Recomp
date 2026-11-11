@@ -208,8 +208,8 @@ records the frame list cannot describe are built from the same snapshot, first c
 describe as exactly that list, then changed one field at a time, and each must be refused by
 name; four more refusals are staged at the live park. One more is a live run of its own: a
 callback entered, in a scope, while the thread's own dispatch has begun no call record; its body
-parks and must be refused as `callback-or-interrupt-live` in every build, though its call record
-is the fiber's first and a host entry's own.
+reaches a yield point there and must be refused as `callback-or-interrupt-live` in every build,
+though its call record is the fiber's first and a host entry's own.
 
 The ordinary lanes run the same cases on output without resume points. There every thread must be
 refused, and a hand-written frame for `rs` must be refused as `body-not-resumable`.

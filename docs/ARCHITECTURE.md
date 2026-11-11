@@ -709,9 +709,9 @@ live there and what follows has to be straight-line code. The pass reads the bod
 structure before it writes anything (`_StateResumeScan`). A call gets a point only when its line
 closes every block it sits in and none of them belongs to a loop or a `switch`, so an
 enhancement site that reads a local of its own after the call keeps its text; a loop edge gets
-one only when its target label is at function scope. A body that declares any other
-function-scope local, or that the scan cannot read (a line comment, a preprocessor line), is left
-as it is.
+one only when its target label is at function scope. A body in which the scan finds any other
+function-scope local, or which it cannot read with certainty (a line comment, a preprocessor
+line, a statement that may be a declaration it cannot name), is left as it is.
 
 The body ends with one `switch` over `SR_RESUME_KEY(kind, pc)`: a call point runs
 `sr_resume_inner` (the frame above) and jumps to the call's label, so the drain and the end check

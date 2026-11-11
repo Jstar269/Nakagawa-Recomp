@@ -5201,7 +5201,7 @@ _STATE_RESUME_LABEL = re.compile(r"^\s*L_([0-9a-f]{8}): ;$")
 #: Comments and literals, whose braces and words are not code.
 _STATE_RESUME_NOT_CODE = re.compile(
     r"/\*.*?\*/|\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'", re.S)
-_STATE_RESUME_TOKEN = re.compile(r"[A-Za-z_]\w*|[{};]")
+_STATE_RESUME_TOKEN = re.compile(r"[A-Za-z_]\w*|[{};()]")
 #: Words that open a block which runs again or elsewhere.
 _STATE_RESUME_LOOPS = frozenset(("while", "for", "do", "switch"))
 #: A statement that starts with one of these is not a declaration, whatever follows.
@@ -5215,6 +5215,12 @@ _STATE_RESUME_TYPES = frozenset(
      "double", "typedef"))
 #: After a statement's first word: a second name, so the first was a type.
 _STATE_RESUME_DECLARED = re.compile(r"[\s*]+([A-Za-z_]\w*)")
+#: After a statement's first word: a label's colon, so a new statement starts.
+_STATE_RESUME_COLON = re.compile(r"\s*:(?!:)")
+#: After the parentheses that follow a statement's first word: a name or a bracket, so the
+#: statement is a declaration this reader cannot name (`uint32_t (*p)[2]`, `typeof(e) x`,
+#: an attribute, a macro that hides a type).
+_STATE_RESUME_AFTER_CALL = re.compile(r"\s*(?:[A-Za-z_\[*]|\()")
 STATE_RESUME_STATS = {"bodies": 0, "points": 0, "plain_bodies": 0}
 
 
@@ -5231,8 +5237,9 @@ class _StateResumeScan:
     * ``locals``: the names declared at function scope.
 
     ``readable`` is False when a line cannot be read this way (a comment left open, a line
-    comment, a preprocessor line, a function-scope declaration whose name is not plain); the
-    pass then leaves the whole body alone.
+    comment, a preprocessor line, a function-scope statement that may be a declaration whose
+    name it cannot give, a function-scope statement cut by the end of its line right after
+    its first word); the pass then leaves the whole body alone.
     """
 
     def __init__(self, out):
@@ -5242,7 +5249,10 @@ class _StateResumeScan:
         self._starts = []
         self._code = []
         stack = []          # one flag per open block: opened by a loop word
-        state = {"pending": False, "start": False}
+        # pending: a loop word whose block has not opened; start: the next word begins a
+        # function-scope statement; parens: open parentheses; called: the first word's own
+        # parenthesis depth, while its argument list is open.
+        state = {"pending": False, "start": False, "parens": 0, "called": None}
         for line in out:
             code = _STATE_RESUME_NOT_CODE.sub(lambda m: " " * len(m.group(0)), line)
             if ("/*" in code or "*/" in code or "//" in code
@@ -5258,33 +5268,61 @@ class _StateResumeScan:
         after = 0           # where the statement being read began, in this line
         for token in _STATE_RESUME_TOKEN.finditer(code, 0, end):
             word = token.group(0)
-            if word == "{":
-                stack.append(state["pending"] or (bool(stack) and stack[-1]))
-                state["pending"] = False
-                state["start"] = len(stack) == 1
+            if word == "(":
+                state["parens"] += 1
+                state["start"] = False
+            elif word == ")":
+                state["parens"] = max(0, state["parens"] - 1)
+                if state["called"] == state["parens"]:
+                    # The parentheses after a function-scope statement's first word have
+                    # closed. A call or a macro ends there or goes on with an operator.
+                    state["called"] = None
+                    if _STATE_RESUME_AFTER_CALL.match(code, token.end()):
+                        self.readable = False
+            elif word == "{":
+                # A brace inside parentheses is an expression's, not the loop's block.
+                loop = state["pending"] and state["parens"] == 0
+                stack.append(loop or (bool(stack) and stack[-1]))
+                if loop:
+                    state["pending"] = False
+                state["start"] = len(stack) == 1 and state["parens"] == 0
                 after = token.end()
             elif word == "}":
                 if stack:
                     stack.pop()
-                state["start"] = len(stack) == 1
+                state["start"] = len(stack) == 1 and state["parens"] == 0
                 after = token.end()
             elif word == ";":
-                state["start"] = len(stack) == 1
-                after = token.end()
+                if state["parens"] == 0:
+                    # A loop with no block of its own ends with its statement.
+                    state["pending"] = False
+                    state["start"] = len(stack) == 1
+                    after = token.end()
             else:
                 if word in _STATE_RESUME_LOOPS:
                     state["pending"] = True
                 # The statement's first word, with nothing before it: `(void)x;` opens with
                 # a parenthesis and declares nothing.
-                if (state["start"] and len(stack) == 1
-                        and not code[after:token.start()].strip()):
-                    if word in _STATE_RESUME_TYPES:
-                        self.readable = False
-                    elif word not in _STATE_RESUME_STATEMENTS:
-                        second = _STATE_RESUME_DECLARED.match(code, token.end())
-                        if second is not None:
-                            declared.add(second.group(1))
+                first = (state["start"] and len(stack) == 1 and state["parens"] == 0
+                         and not code[after:token.start()].strip())
                 state["start"] = False
+                if not first:
+                    continue
+                colon = _STATE_RESUME_COLON.match(code, token.end())
+                if colon is not None:
+                    # A label: the statement proper starts after it.
+                    state["start"] = True
+                    after = colon.end()
+                elif word in _STATE_RESUME_TYPES:
+                    self.readable = False
+                elif word not in _STATE_RESUME_STATEMENTS:
+                    second = _STATE_RESUME_DECLARED.match(code, token.end())
+                    if second is not None:
+                        declared.add(second.group(1))
+                    elif not code[token.end():].strip(" \t\n*"):
+                        self.readable = False   # the line ends before the statement says more
+                    elif code[token.end():].lstrip().startswith("("):
+                        state["called"] = state["parens"]
 
     def looped(self, index, column):
         """Whether a block open at ``column`` of line ``index`` belongs to a loop or switch."""

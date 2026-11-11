@@ -1094,6 +1094,9 @@ class StateResumeTests(unittest.TestCase):
         tail = ["    s->r[29] = _sp_entry; return;", "}", ""]
         for middle in (
             ["    while (s->r[8] != 0u) { " + call + " }"],
+            # A brace inside the loop's own header does not use up the loop.
+            ["    for (s->r[8] = (uint32_t){0}; s->r[8] < 2u; s->r[8]++) { " + call + " }"],
+            ["    while (({ s->r[8]; })) { " + call + " }"],
             ["    while (s->r[8] != 0u) {", "      " + call + " }"],
             ["    for (;;) {", "      { " + call + " } }"],
             ["    { s->r[9] = 0u;", "      do {", "        " + call + " } while (s->r[9]); }"],
@@ -1103,9 +1106,12 @@ class StateResumeTests(unittest.TestCase):
                 result = "\n".join(codegen.state_resume_pass(head + middle + tail, 0x1000))
                 self.assertIn("SR_STATE_ENTRY", result)
                 self.assertNotIn("SR_RESUME_POINT_CALL", result)
-        # The same call in a plain block, and after a loop that has closed, has one.
+        # The same call in a plain block, and after a loop that has closed, has one: a
+        # loop with a block, one without, and `do { } while (0);`.
         for middle in (["    if (s->r[8] != 0u) { " + call + " }"],
-                       ["    while (s->r[8] != 0u) { s->r[8]--; }", "    " + call]):
+                       ["    while (s->r[8] != 0u) { s->r[8]--; }", "    " + call],
+                       ["    for (int i = 0; i < 4; i++) s->r[8]++;", "    { " + call + " }"],
+                       ["    do { s->r[8]--; } while (0);", "    { " + call + " }"]):
             with self.subTest(middle=middle[0]):
                 self.assertIn("SR_RESUME_POINT_CALL", "\n".join(
                     codegen.state_resume_pass(head + middle + tail, 0x1000)))
@@ -1131,10 +1137,21 @@ class StateResumeTests(unittest.TestCase):
             "    s->r[2] = 0u; uint32_t _late = 1u;",
             "    { s->r[2] = 0u;\n    }\n    uint32_t _x = 1u;",
             "    { s->r[2] = 0u; } uint32_t _x = 1u;",
+            "  L_00001004: uint32_t _x = s->r[8];",
+            "    uint32_t (*_x)[2] = NULL;",
+            "    __typeof__(s->r[8]) _x = 0u;",
+            "    __attribute__((unused)) uint32_t _x = 0u;",
+            "    _Alignas(8) uint32_t _x = 0u;",
+            "    _Atomic(uint32_t) _x = 0u;",
+            "    SR_NOTE(s) uint32_t _x = 0u;",
+            "    uint32_t\n    _x = 1u;",
         ):
             with self.subTest(declaration=declaration):
                 out = head + [declaration] + tail
                 self.assertIs(codegen.state_resume_pass(out, 0x1000), out)
+        # The same, cut across two lines.
+        out = head + ["    uint32_t", "    _x = 1u;"] + tail
+        self.assertIs(codegen.state_resume_pass(out, 0x1000), out)
         # Statements that only look like one keep the body's points, and so does a local
         # inside a block.
         for statement in (
@@ -1142,6 +1159,13 @@ class StateResumeTests(unittest.TestCase):
             "    goto L_00001004;", "    (void)_sp_entry;", "    s->r[2] = s->r[3] * s->r[4];",
             "    { uint32_t _t = s->r[8]; s->r[9] = _t; }",
             "    if (s->r[8]) { s->r[9] = 0u; } else { s->r[9] = 1u; }",
+            "    sr_begin(s, 0x00001000u, 0x24100003u); s->r[16] = (0u + 3u); sr_end(s, 0u, 0);",
+            "    SR_HOST_STACK_CHECK(0x00001000u);",
+            "    MEM_W32_PC(s->r[29] + 12u, s->r[31], 0x00001004u);",
+            "  L_00001004: ;",
+            "    sr_note(s) ? (void)0 : (void)0;",
+            # A loop header's own local ends with the loop, and no label is granted inside one.
+            "    for (uint32_t _i = (uint32_t){0}; _i < 2u; _i++) { s->r[8]++; }",
         ):
             with self.subTest(statement=statement):
                 out = head + [statement] + tail

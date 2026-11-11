@@ -2944,6 +2944,7 @@ static void run_resume_describe_refusals(void) {
  * open scopes says the thread's own host entry is still underneath. */
 static struct {
     int stage;
+    SrResumeStatus outer;
     SrResumeStatus status;
 } g_resume_nested;
 
@@ -2953,6 +2954,10 @@ static void resume_nested_hook(CpuState *s) {
         g_resume_nested.stage = 1;
         const CpuState saved = *s;
         SrAotReturnBoundaryScope scope;
+        /* The premise: the thread itself has no call record here, so the floor will be 0. */
+        SrResumeFrame none[1];
+        uint32_t none_count = 0u;
+        g_resume_nested.outer = sr_resume_describe(NULL, s, none, 1u, &none_count, NULL, 0u);
         sr_aot_return_boundary_scope_begin(&scope);
         /* The callback's own dispatch counts one yield point; its body's entry is the next. */
         atomic_store_explicit(&sr_timeslice, 2, memory_order_relaxed);
@@ -2984,12 +2989,15 @@ static void run_resume_nested_entry(const char *trace_path) {
     g_cosim_yield_hook = resume_nested_hook;
     dispatch_from_host(&lane->state, COSIM_LEAF_A);
     (void)resume_lane_end(lane, trace_path);
-    if (g_resume_nested.stage != 2 || g_resume_nested.status != SR_RESUME_SCOPE_LIVE) {
-        char detail[200];
+    if (g_resume_nested.stage != 2 || g_resume_nested.outer != SR_RESUME_NO_FRAMES ||
+        g_resume_nested.status != SR_RESUME_SCOPE_LIVE) {
+        char detail[240];
         snprintf(detail, sizeof detail,
-                 "a callback's body parked before the thread's first call record: expected %s, "
-                 "got %s (stage %d)", sr_resume_status_name(SR_RESUME_SCOPE_LIVE),
-                 sr_resume_status_name(g_resume_nested.status), g_resume_nested.stage);
+                 "a callback's body at a yield point before the thread's first call record: "
+                 "expected %s, got %s (stage %d; the thread itself described as %s)",
+                 sr_resume_status_name(SR_RESUME_SCOPE_LIVE),
+                 sr_resume_status_name(g_resume_nested.status), g_resume_nested.stage,
+                 sr_resume_status_name(g_resume_nested.outer));
         resume_fail("callback", 0u, detail);
     } else {
         fprintf(stderr, "  cosim resume OK   describe   %-26s %s" NEWLINE,
