@@ -1216,7 +1216,7 @@ static const PlayerEnhancedPartInfo k_enhanced_parts[PLAYER_PART_COUNT] = {
      "Shows more 3D space; HUD stays shaped. Some objects pop in. Smooth motion disables it.",
      2, k_part_switch_values, k_part_switch_labels, k_part_wide_words, 0},
     {"smooth", "Smooth motion",
-     "Shows steady 30 FPS scenes at 60, others as they are. Adds about 17 ms of delay.",
+     "Smooths steady 30 FPS scenes only where it can follow the motion. Adds about 17 ms of delay.",
      2, k_part_switch_values, k_part_switch_labels, k_part_smooth_words, 0},
     /* A guest-visible item (contract 11.3.1): off by default until its "nothing worse" runs
        exist (11.2 item 4), with its own off switch in the library and each title (item 2). */

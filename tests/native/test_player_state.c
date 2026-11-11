@@ -25,6 +25,7 @@
 #endif
 
 #include "player_state.h"
+#include "player_enhanced_fixture.h"
 #include "ace.h"
 #include "iso_reader.h"
 #include "nk_font.h"
@@ -7729,6 +7730,17 @@ static void test_play_mode_settings(void) {
         assert(has_off);
     }
     assert(player_enhanced_part(PLAYER_PART_COUNT) == NULL);
+    /* The screen test's fixture is the page a new settings file shows: same names, fresh-value
+       words and sentences as the shipped table. */
+    for (int p = 0; p < PLAYER_PART_COUNT; p++) {
+        const PlayerEnhancedPartInfo *info = player_enhanced_part(p);
+        if (strcmp(info->name, k_enhanced_parts[p].name) != 0 ||
+            strcmp(player_enhanced_part_label(p, info->fresh), k_enhanced_parts[p].value) != 0 ||
+            strcmp(info->sentence, k_enhanced_parts[p].sentence) != 0) {
+            fprintf(stderr, "FAIL: part %d (%s) differs from player_enhanced_fixture.h\n", p, info->name);
+            assert(0);
+        }
+    }
     assert(strcmp(player_enhanced_part_label(PLAYER_PART_FILTERING, 8), "8x") == 0 &&
            strcmp(player_enhanced_part_label(PLAYER_PART_FILTERING, 0), "Off") == 0 &&
            strcmp(player_enhanced_part_label(PLAYER_PART_FILTERING, 7), "Off") == 0);
