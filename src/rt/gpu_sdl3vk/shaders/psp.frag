@@ -232,8 +232,9 @@ void main() {
              * filters (given the unwrapped coordinate's gradients) and inside the texture nothing
              * changes. With different filters the shader's choice must hold, and a sampler may
              * judge the footprint another way (Vulkan allows approximations of it), so the shader
-             * fetches every sample itself: the device texel under the position for nearest, the
-             * four taps for linear. */
+             * fetches every sample itself: for nearest the device texel the sampler's nearest
+             * path takes (the guest texel's centre, so one device texel per guest texel), the four
+             * taps for linear. */
             bool rtt_box = (flags & 16384) == 0 && pc.texenv.a > 0.0;
             bool rtt_seam = false, rtt_near = false;
             ivec2 rtt_c0 = ivec2(0), rtt_c1 = ivec2(0);
@@ -255,7 +256,8 @@ void main() {
                     vec2 moved = mix(idx - tsz * floor(idx / tsz), clamp(idx, vec2(0.0), tsz - vec2(1.0)), clampm);
                     uv += moved - idx;
                     rtt_near = mixed;
-                    if (rtt_near) rtt_c0 = clamp(ivec2(floor(uv * sc) + pc.texsize.zw * sc), ivec2(0), lim);
+                    if (rtt_near) rtt_c0 = clamp(ivec2(floor(uv)) * int(sc) + ivec2(int(sc) / 2) +
+                                                 ivec2(pc.texsize.zw * sc), ivec2(0), lim);
                 } else {
                     vec2 lo = vec2(0.5 / sc), hi = tsz - vec2(0.5 / sc);
                     uv = mix(uv - tsz * floor(uv / tsz), clamp(uv, lo, hi), clampm);
@@ -272,7 +274,8 @@ void main() {
             uv += pc.texsize.zw;
             vec4 t;
             if (rtt_box) {
-                t = textureGrad(u_tex, uv / pc.texsize.xy, rtt_gdx, rtt_gdy) * 255.0;
+                t = (rtt_near || rtt_seam) ? vec4(0.0)    /* fetched below */
+                                           : textureGrad(u_tex, uv / pc.texsize.xy, rtt_gdx, rtt_gdy) * 255.0;
             } else if ((flags & 16384) != 0) {
                 /* ge.c tex_detail16: automatic mode is log16 of the footprint (the larger
                  * squared length of the level-0 texel coordinate's screen derivatives, each

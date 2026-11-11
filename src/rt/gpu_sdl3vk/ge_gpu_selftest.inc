@@ -10339,8 +10339,10 @@ static int coherence_run_rtt_scale_at(int offset) {
  * u and v from -8 to 24 (4x and 2x magnified): clamped and linear, repeated and linear, clamped and
  * nearest, repeated and nearest, then repeated with nearest magnification and linear minification
  * and clamped with the reverse (magnified, so each takes its magnification filter: a seam blend of
- * the nearest one is not the PSP's sample), and the same two pairs minified 2:1 (32 texels over 16
- * pixels: each takes its minification filter). The PSP clamps or wraps each texel index at the texture's size
+ * the nearest one is not the PSP's sample), and the same two pairs minified 2:1 (u and v from -7
+ * to 25 over 16 pixels: each pixel centre falls on an even texel index, where a linear sample
+ * blends two texels and a nearest one takes one, across the quadrants' boundary and the seam, so
+ * the minification filter shows). The PSP clamps or wraps each texel index at the texture's size
  * (ge.c sample_tex), so no sample is red. Before the box (psp.frag, texenv.a and fogcol.a), the
  * direct bind clamped at the 512 x 272 image: the samples past the texture read O's red. Checked
  * at 1x, 2x and 4x: no red in M's device image or in guest VRAM, and guest VRAM equals the software
@@ -10381,8 +10383,9 @@ static int coherence_run_rtt_edge(void) {
         cv[3u + 2u * q] = (RttCVtx){ quad_rgba[q], x0 + 8.0f, y0 + 8.0f, 0.0f };
     }
     for (uint32_t k = 0; k < RTE_SPRITES; k++) {
-        sv[2u * k] = (RawSpriteVtx){ -8.0f, -8.0f, (float)rect[k][0], (float)rect[k][1], 0.0f };
-        sv[2u * k + 1u] = (RawSpriteVtx){ 24.0f, 24.0f, (float)(rect[k][0] + rect[k][2]),
+        const float t0 = k >= 6u ? -7.0f : -8.0f;           /* the minified pairs: one texel over */
+        sv[2u * k] = (RawSpriteVtx){ t0, t0, (float)rect[k][0], (float)rect[k][1], 0.0f };
+        sv[2u * k + 1u] = (RawSpriteVtx){ t0 + 32.0f, t0 + 32.0f, (float)(rect[k][0] + rect[k][2]),
                                           (float)(rect[k][1] + rect[k][2]), 0.0f };
     }
 

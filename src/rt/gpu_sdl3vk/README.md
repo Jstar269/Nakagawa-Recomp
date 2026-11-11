@@ -303,8 +303,8 @@ into one target and read it back as a texture keep the scale in these cases:
     26 and 27, lanes the per-fragment level of detail uses only for a mipmapped read, which is
     never bound directly. Each fragment picks its filter from its footprint per guest pixel, as
     `ge.c` does. With different minification and magnification filters the shader fetches every
-    sample itself (the device texel under the position, or the four linear taps), since a Vulkan
-    sampler may judge the footprint another way. A linear tap pair that straddles a repeated texture's seam is
+    sample itself (for nearest the device texel at the guest texel's centre, as below; for linear
+    the four taps), since a Vulkan sampler may judge the footprint another way. A linear tap pair that straddles a repeated texture's seam is
     fetched and blended in the shader, wrapped in device texels. Rows of the texture below the
     target's 272 rows read the image's last row.
   - A texture that starts inside the target, at a pixel-aligned offset, is read through that
