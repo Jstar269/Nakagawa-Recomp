@@ -389,8 +389,8 @@ def build_inventory(sources: dict[str, str], emitter: str | tuple[str, ...], led
             if m.group(2) is not None:
                 if name in helpers:
                     bucket[name][rel] += 1
-                for h in macro_map.get(name, ()):
-                    bucket[h][rel] += 1
+                for macro_helper in macro_map.get(name, ()):
+                    bucket[macro_helper][rel] += 1
             elif name in helpers:
                 address[name][rel] += 1
 

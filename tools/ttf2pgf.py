@@ -1019,7 +1019,7 @@ def _plan_raster(contours: list[list[tuple]], ppem: int, units_per_em: int) -> _
         for first, second in zip(chain, chain[1:], strict=False):
             if first != second:
                 edges.append((first[0], first[1], second[0], second[1]))
-    if min_x is None:
+    if min_x is None or max_x is None or min_y is None or max_y is None:
         return _EMPTY_RASTER
     return _Raster(
         edges=tuple(edges),

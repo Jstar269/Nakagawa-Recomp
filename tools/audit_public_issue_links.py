@@ -478,11 +478,11 @@ def audit_markdown_files(
                 if row_state and row_state.group(1) == "Open":
                     for match in url_matches:
                         num = int(match.group(2))
-                        obj = issues_map.get(num)
-                        if obj is None:
+                        listed = issues_map.get(num)
+                        if listed is None:
                             # An unresolvable number is already reported above.
                             continue
-                        if obj.get("state") != "open":
+                        if listed.get("state") != "open":
                             findings.append(
                                 (
                                     rel,
@@ -490,7 +490,7 @@ def audit_markdown_files(
                                     f"#{num}",
                                     (
                                         "STALE TRACKER STATUS: row declares State 'Open' but "
-                                        f"#{num} is a public {public_status_label(obj)}"
+                                        f"#{num} is a public {public_status_label(listed)}"
                                     ),
                                     False,
                                 )
@@ -511,10 +511,10 @@ def audit_markdown_files(
                 else:
                     for match, label in zip(url_matches, labels, strict=True):
                         num = int(match.group(2))
-                        obj = issues_map.get(num)
-                        if obj is None:
+                        listed = issues_map.get(num)
+                        if listed is None:
                             continue
-                        expected = public_status_label(obj)
+                        expected = public_status_label(listed)
                         if label != expected:
                             findings.append(
                                 (

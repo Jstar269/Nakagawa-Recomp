@@ -442,7 +442,9 @@ def apply_annotations(ir: dict, annotations: list[dict]) -> dict:
     insns = {i["address"]: i for i in ir["instructions"]}
     incoming = {row["target"]: row["refs"] for row in ir["xrefs"]}
     unresolved = {site for f in ir["functions"] for site in f["unresolved_indirect"]}
-    agreements, advisories, disagreements = [], [], []
+    agreements: list[dict[str, Any]] = []
+    advisories: list[dict[str, Any]] = []
+    disagreements: list[dict[str, Any]] = []
 
     def verdict(bucket, row, analyzer, note):
         bucket.append({"annotation": row, "analyzer": analyzer, "note": note})
@@ -646,8 +648,8 @@ def main(argv: list[str] | None = None) -> int:
             _write(args.out, canonical_json(export_annotations(ir)))
         elif args.command == "explain":
             ir = load_ir(Path(args.ir).read_text(encoding="utf-8"))
-            report = _read_json(args.annotation_report) if args.annotation_report else None
-            sys.stdout.write("\n".join(explain(ir, int(args.address, 0), report)) + "\n")
+            annotation_report = _read_json(args.annotation_report) if args.annotation_report else None
+            sys.stdout.write("\n".join(explain(ir, int(args.address, 0), annotation_report)) + "\n")
     except IRError as exc:
         sys.stderr.write(f"{exc}\n")
         return 2

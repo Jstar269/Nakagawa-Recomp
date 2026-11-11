@@ -70,7 +70,7 @@ OWED_ROW = re.compile(
 
 @dataclass
 class Report:
-    checks: list[tuple[str, str | None, str]] = field(default_factory=list)
+    checks: list[tuple[str, bool | None, str]] = field(default_factory=list)
 
     def add(self, name: str, ok: bool | None, detail: str) -> None:
         self.checks.append((name, ok, detail))

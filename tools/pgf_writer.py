@@ -39,6 +39,7 @@ import struct
 import sys
 from dataclasses import dataclass, fields
 from pathlib import Path
+from typing import cast
 
 MAGIC = b"PGF0"
 HEADER_SIZE = 392
@@ -591,7 +592,7 @@ def build_pgf(
 
 def _optional_int(entry: dict[str, object], key: str) -> int | None:
     value = entry.get(key)
-    return None if value is None else int(value)  # type: ignore[arg-type]
+    return None if value is None else int(cast("int | str", value))
 
 
 def _glyph_from_dict(entry: object) -> Glyph:

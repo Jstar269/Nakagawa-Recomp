@@ -72,6 +72,7 @@ from collections.abc import Collection
 from fnmatch import fnmatchcase
 from itertools import groupby
 from pathlib import Path, PurePosixPath
+from typing import TypedDict, cast
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -111,6 +112,11 @@ TOKEN_RE = re.compile(r"[A-Za-z0-9_.+-]+(?:/[A-Za-z0-9_.+-]+)*")
 REFERENCED = "referenced"
 AMBIGUOUS = "ambiguous-basename"
 UNREFERENCED = "unreferenced"
+
+
+class _IndexEntry(TypedDict):
+    status: str
+    referenced_by: set[str]
 
 
 class TreeLintError(RuntimeError):
@@ -215,7 +221,7 @@ def build_reference_index(
                 owners.append(path)
     contested = {key for key, owners in paths_by_spelling.items() if len(owners) > 1}
 
-    index: dict[str, dict[str, object]] = {path: {"status": UNREFERENCED, "referenced_by": set()} for path in tracked}
+    index: dict[str, _IndexEntry] = {path: {"status": UNREFERENCED, "referenced_by": set()} for path in tracked}
     for source in tracked:
         if source in GENERATED_INVENTORIES or source in ignored_sources:
             continue
@@ -234,16 +240,16 @@ def build_reference_index(
             token = raw_token.rstrip(".")
             if not token:
                 continue
-            owners = paths_by_spelling.get(token)
-            if not owners:
+            named_by = paths_by_spelling.get(token)
+            if not named_by:
                 continue
             if token in contested:
                 # A shared spelling says one of these files is named, not which.
-                for target in owners:
+                for target in named_by:
                     if target != source and index[target]["status"] == UNREFERENCED:
                         index[target]["referenced_by"].add(source)
                 continue
-            for target in owners:
+            for target in named_by:
                 if target != source and index[target]["status"] == UNREFERENCED:
                     index[target]["status"] = REFERENCED
                     index[target]["referenced_by"].add(source)
@@ -370,7 +376,7 @@ def report_text(findings: list[dict[str, object]], tracked: list[str], check: bo
     for entry in dead:
         lines.append(f"  unreferenced: {entry['path']}")
     for entry in ambiguous:
-        named = ", ".join(str(source) for source in entry["referenced_by"][:3])
+        named = ", ".join(str(source) for source in cast(list[str], entry["referenced_by"])[:3])
         lines.append(f"  ambiguous-basename: {entry['path']} (its basename is also written in {named})")
     grouped = groupby(sorted(excused, key=lambda entry: str(entry["pattern"])), key=lambda entry: str(entry["pattern"]))
     for pattern, group in grouped:
