@@ -3120,6 +3120,37 @@ class CommandLineTests(unittest.TestCase):
 
 
 class ForkProducerTests(unittest.TestCase):
+    def _main_with_id(self, identity: str | None) -> tuple[mock.MagicMock, str]:
+        """Run main() as the workflow does; return the producer choice's spy and the job log."""
+        import io  # noqa: PLC0415
+
+        scenario = Scenario()
+        gh = FakeGitHub(scenario)
+        environment = {"GITHUB_TOKEN": "token"}
+        if identity is not None:
+            environment["GITHUB_REPOSITORY_ID"] = identity
+        log = io.StringIO()
+        with mock.patch.object(ctv, "git_facts", return_value=_facts()), \
+                mock.patch.object(ctv, "GitHub", return_value=gh), \
+                mock.patch.object(ctv, "producers_for", wraps=ctv.producers_for) as spy, \
+                mock.patch.dict(os.environ, environment), mock.patch("sys.stdout", log):
+            if identity is None:
+                os.environ.pop("GITHUB_REPOSITORY_ID", None)
+            ctv.main(["--repository", gh.repository, "--pull-request", str(PR)])
+        return spy, log.getvalue()
+
+    def test_main_hands_the_runs_repository_and_id_to_the_producer_choice(self) -> None:
+        # Review 2309-4e69563b9228 N9 (C4, C5): no test ran main() with a repository ID, so handing the
+        # choice the wrong values survived. N2: the log names the set that was judged.
+        for identity in ("42", None):
+            with self.subTest(identity=identity):
+                spy, log = self._main_with_id(identity)
+                repository = spy.call_args.args[0]
+                spy.assert_called_once_with(repository, identity)
+                expected = ctv.provenance_mode.mode(repository, identity)
+                self.assertIn(f"Provenance producer set: {expected} (repository {repository}, "
+                              f"ID {identity or 'unknown'})", log)
+
     """The upstream judges the trusted attestation; a fork judges its Fork provenance check (docs/FORKING.md)."""
 
     def test_upstream_producers_are_unchanged(self) -> None:

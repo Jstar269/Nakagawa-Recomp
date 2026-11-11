@@ -627,7 +627,9 @@ jobs:
           for value in "${HEAD_SHA}" "${BASE_SHA}"; do
             [[ "${value}" =~ ^[0-9a-f]{40}$ ]] || { echo "sha malformed" >&2; exit 1; }
           done
-          git fetch --no-tags --no-recurse-submodules --quiet             "https://github.com/${GITHUB_REPOSITORY}.git"             "+refs/pull/${PR_NUMBER}/head:refs/candidate/head"
+          git fetch --no-tags --no-recurse-submodules --quiet \
+            "https://github.com/${GITHUB_REPOSITORY}.git" \
+            "+refs/pull/${PR_NUMBER}/head:refs/candidate/head"
           fetched="$(git rev-parse refs/candidate/head)"
           if [ "${fetched}" != "${HEAD_SHA}" ]; then
             echo "candidate head moved during this run: event named ${HEAD_SHA}, fetched ${fetched}" >&2
@@ -644,7 +646,8 @@ jobs:
           BASE_SHA: ${{ steps.target.outputs.base_sha }}
         run: |
           set -euo pipefail
-          python tools/provenance_mode.py fork-check --repo "${GITHUB_WORKSPACE}"             --base "${BASE_SHA}" --candidate "${HEAD_SHA}" --summary "${GITHUB_STEP_SUMMARY}"
+          python tools/provenance_mode.py fork-check --repo "${GITHUB_WORKSPACE}" \
+            --base "${BASE_SHA}" --candidate "${HEAD_SHA}" --summary "${GITHUB_STEP_SUMMARY}"
 
   showcase_prx:
     name: Showcase demo PRXs (PSPDEV)

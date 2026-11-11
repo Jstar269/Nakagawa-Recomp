@@ -181,6 +181,12 @@ class ModeDecisionTest(unittest.TestCase):
             with self.subTest(repository=repository, repository_id=repository_id):
                 self.assertEqual(pm.mode(repository, repository_id or None), "upstream")
 
+    def test_the_id_is_compared_as_a_number(self) -> None:
+        # Review 2309-4e69563b9228 N6: a zero-padded upstream ID was a fork by string comparison.
+        self.assertTrue(pm.is_upstream("example-user/fork", "0" + pm.UPSTREAM_REPOSITORY_ID))
+        self.assertTrue(pm.is_upstream("example-user/fork", int(pm.UPSTREAM_REPOSITORY_ID)))
+        self.assertFalse(pm.is_upstream("example-user/fork", "1" + pm.UPSTREAM_REPOSITORY_ID))
+
     def test_an_unknown_id_fails_closed_to_upstream(self) -> None:
         for repository_id in (None, "", "  ", "abc", "12a", "-5", "١٢"):
             for repository in (None, "", "example-user/Nakagawa-Recomp"):
@@ -338,6 +344,18 @@ class WorkflowConditionTest(unittest.TestCase):
         self.assertLess(block.index("--require fork"), block.index("refs/candidate/head"))
         # The one token is the job's own read-only one, for the lookup.
         self.assertEqual(re.findall(r"\$\{\{ *(github\.token|secrets\.[A-Z_]+) *\}\}", block), ["github.token"])
+
+    def test_fork_job_only_reads_and_its_check_decides_the_job(self) -> None:
+        # Review 2309-4e69563b9228 N9 (W9, W10): neither the job's permissions nor the check's exit code
+        # deciding the job was pinned.
+        self.assertIn("    permissions:\n      contents: read\n      pull-requests: read\n    steps:\n", self.fork)
+        step = self.fork[self.fork.index("      - name: Check the candidate with the trusted publication audit\n"):]
+        self.assertIn("          set -euo pipefail\n", step)
+        self.assertIn('          python tools/provenance_mode.py fork-check --repo "${GITHUB_WORKSPACE}" \\\n'
+                      '            --base "${BASE_SHA}" --candidate "${HEAD_SHA}" --summary "${GITHUB_STEP_SUMMARY}"\n',
+                      step)
+        for tolerant in ("|| true", "|| :", "continue-on-error", "if: always()", "; exit 0"):
+            self.assertNotIn(tolerant, step)
 
     def test_check_names_are_unique_in_the_workflow(self) -> None:
         self.assertEqual(self.text.count(f"    name: {pm.UPSTREAM_CONTEXT}\n"), 1)
@@ -538,7 +556,9 @@ class ForkCheckRealAuditTest(unittest.TestCase):
         cls.repo.mkdir()
         _git(cls.repo, "init", "--quiet", "--initial-branch=main")
         alternates = cls.repo / ".git" / "objects" / "info" / "alternates"
-        alternates.write_text(objects.as_posix() + "\n", encoding="utf-8")
+        # Bytes, not text: on Windows write_text ends the line with CRLF, and Git then reads a path
+        # ending in CR and borrows nothing.
+        alternates.write_bytes((objects.as_posix() + "\n").encode("utf-8"))
         cls.head_tree = _git(cls.repo, "rev-parse", f"{head}^{{tree}}")
         profile = json.loads(_git(cls.repo, "cat-file", "blob", f"{cls.head_tree}:{pm.POLICY}"))
         assert cls.ADMITTED in profile["include_paths"]

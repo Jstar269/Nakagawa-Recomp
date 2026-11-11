@@ -158,6 +158,38 @@ class AuthorityTest(unittest.TestCase):
                                     text=True, check=True).stdout
             self.assertEqual(status, "")
 
+    def _clone(self, scratch: str) -> Path:
+        authority = Path(scratch) / "authority"
+        subprocess.run(["git", "clone", "--quiet", str(self.authority), str(authority)], check=True)
+        return authority
+
+    def _record(self, authority: Path) -> None:
+        with mock.patch.dict(os.environ, IDENTITY):
+            fork_init.add_record(
+                authority, record_id="fork-example-2026-11-11", paths=["tools/fork_example_tool.py"],
+                classification="project-authored-independent", evidence_tier="S", statement="mine",
+            )
+
+    def test_record_refuses_an_authority_init_did_not_seed(self) -> None:
+        # The upstream's own authority has the same ledger path but no fork README: the tool must not
+        # re-serialise and commit its ledger.
+        with tempfile.TemporaryDirectory(prefix="nk-fork-foreign-") as scratch:
+            authority = self._clone(scratch)
+            (authority / fork_init.AUTHORITY_README).write_text("# Provenance authority\n", encoding="utf-8")
+            before = (authority / fork_init.AUTHORITY_LEDGER).read_bytes()
+            with self.assertRaises(fork_init.ForkInitError) as caught:
+                self._record(authority)
+            self.assertEqual(caught.exception.code, "AUTHORITY_NOT_A_FORK_AUTHORITY")
+            self.assertEqual((authority / fork_init.AUTHORITY_LEDGER).read_bytes(), before)
+
+    def test_record_refuses_an_authority_off_main(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="nk-fork-branch-") as scratch:
+            authority = self._clone(scratch)
+            subprocess.run(["git", "-C", str(authority), "switch", "--quiet", "-c", "side"], check=True)
+            with self.assertRaises(fork_init.ForkInitError) as caught:
+                self._record(authority)
+            self.assertEqual(caught.exception.code, "AUTHORITY_NOT_MAIN")
+
 
 class RefusalTest(unittest.TestCase):
     def test_authority_inside_the_checkout_is_refused(self) -> None:
@@ -171,6 +203,45 @@ class RefusalTest(unittest.TestCase):
             with self.assertRaises(fork_init.ForkInitError) as caught:
                 fork_init.init(ROOT, Path(scratch))
             self.assertEqual(caught.exception.code, "AUTHORITY_NOT_EMPTY")
+
+    def test_authority_inside_another_worktree_of_the_fork_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="nk-fork-worktree-") as scratch:
+            other = Path(scratch)
+            with mock.patch.object(fork_init, "_worktrees", return_value=[ROOT, other]):
+                with self.assertRaises(fork_init.ForkInitError) as caught:
+                    fork_init.init(ROOT, other / "authority")
+            self.assertEqual(caught.exception.code, "AUTHORITY_INSIDE_REPOSITORY")
+            self.assertFalse((other / "authority").exists())
+
+    def test_this_checkout_is_one_of_its_worktrees(self) -> None:
+        trees = {tree.resolve() for tree in fork_init._worktrees(ROOT)}
+        self.assertIn(ROOT.resolve(), trees)
+
+    def test_an_authority_that_is_a_file_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="nk-fork-file-") as scratch:
+            target = Path(scratch) / "authority"
+            target.write_text("x", encoding="utf-8")
+            with self.assertRaises(fork_init.ForkInitError) as caught:
+                fork_init.init(ROOT, target)
+            self.assertEqual(caught.exception.code, "AUTHORITY_NOT_A_DIRECTORY")
+
+    def test_a_failed_verification_leaves_the_target_as_it_was(self) -> None:
+        # Before, the half-written authority stayed and the next init refused AUTHORITY_NOT_EMPTY.
+        with tempfile.TemporaryDirectory(prefix="nk-fork-failed-") as scratch:
+            failing = fork_init.ForkInitError("AUTHORITY_MISMATCH", "simulated")
+            for existed in (False, True):
+                with self.subTest(existed=existed):
+                    target = Path(scratch) / f"authority-{existed}"
+                    if existed:
+                        target.mkdir()
+                    with mock.patch.object(fork_init, "verify", side_effect=failing):
+                        with self.assertRaises(fork_init.ForkInitError):
+                            fork_init.init(ROOT, target)
+                    self.assertEqual(target.exists(), existed)
+                    if existed:
+                        self.assertEqual(list(target.iterdir()), [])
+            self.assertEqual(sorted(path.name for path in Path(scratch).iterdir()),
+                             ["authority-True"])
 
     def test_record_needs_a_statement_and_exact_paths(self) -> None:
         base: dict[str, Any] = {"record_id": "r-1", "paths": ["tools/x.py"], "classification": "project-authored-independent",

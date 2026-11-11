@@ -256,7 +256,6 @@ PRODUCERS: tuple[Producer, ...] = (
 )
 
 
-
 def producers_for(repository: str | None, repository_id: str | None) -> tuple[Producer, ...]:
     """The producers judged for ``repository``: ``PRODUCERS`` unchanged for the upstream.
 
@@ -1744,8 +1743,12 @@ def main(argv: list[str] | None = None) -> int:
                 **({"target_url": args.target_url} if args.target_url else {}),
             })
 
+    identity = os.environ.get("GITHUB_REPOSITORY_ID")
+    judged = (f"Provenance producer set: {provenance_mode.mode(args.repository, identity)} "
+              f"(repository {args.repository}, ID {identity or 'unknown'})")
+    print(judged)
     try:
-        producers = producers_for(args.repository, os.environ.get("GITHUB_REPOSITORY_ID"))
+        producers = producers_for(args.repository, identity)
         raw = collect(gh, args.repo_dir, args.default_branch, head, args.pull_request, producers)
         if raw is None:
             print(f"no open pull request into {args.default_branch} has head {head}; no verdict")
@@ -1767,14 +1770,16 @@ def main(argv: list[str] | None = None) -> int:
         post("error", f"verifier could not judge this head: {type(error).__name__}")
         print(gh.budget_note())
         raise
-    _report(verdict, snapshot, args.summary)
+    _report(verdict, snapshot, args.summary, judged)
     post(verdict.state, verdict.description())
     print(gh.budget_note())
     return 1 if verdict.state == "failure" else 0
 
 
-def _report(verdict: Verdict, snapshot: dict, summary: Path | None) -> None:
+def _report(verdict: Verdict, snapshot: dict, summary: Path | None, judged: str | None = None) -> None:
     report = summary_markdown(verdict, snapshot)
+    if judged:
+        report += f"\n{judged}\n"
     print(report)
     if summary:
         with summary.open("a", encoding="utf-8") as handle:

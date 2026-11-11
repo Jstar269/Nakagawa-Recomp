@@ -167,7 +167,10 @@ your default branch.
 `tools/provenance_mode.py` decides which job runs. A repository is the upstream when its numeric ID
 is the upstream's or its name is `Jstar269/Nakagawa-Recomp`, so renaming or transferring the upstream
 cannot switch it to the fork check, and no variable, secret or pull request takes part in the
-decision. `tools/test_provenance_mode.py` holds the workflow's conditions to the same rule.
+decision. `tools/test_provenance_mode.py` holds the workflow's conditions to the same rule. A
+repository that takes over from the upstream by any other road (a fork promoted to be the main one,
+or a repository created again under another name) has another ID and name, so it is a fork until both
+constants in `tools/provenance_mode.py` are changed to its own.
 
 ## Where Enhanced, Ace and per-title work lives
 

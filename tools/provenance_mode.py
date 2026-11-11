@@ -98,7 +98,7 @@ def is_upstream(repository: str | None, repository_id: str | int | None) -> bool
     folding would let a lookalike match.
     """
     identity = "" if repository_id is None else str(repository_id).strip()
-    if not (identity.isascii() and identity.isdecimal()) or identity == UPSTREAM_REPOSITORY_ID:
+    if not (identity.isascii() and identity.isdecimal()) or int(identity) == int(UPSTREAM_REPOSITORY_ID):
         return True
     return (
         isinstance(repository, str)

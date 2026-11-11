@@ -98,6 +98,30 @@ def _within(path: Path, root: Path) -> bool:
     return True
 
 
+def _worktrees(repo: Path) -> list[Path]:
+    """Every working tree of the fork's repository, this one included."""
+    listing = _git(repo, "worktree", "list", "--porcelain")
+    return [Path(line[len("worktree "):]) for line in listing.splitlines() if line.startswith("worktree ")] or [repo]
+
+
+#: The first line of the README `init` writes; `record` refuses an authority without it.
+AUTHORITY_MARKER = "# Fork provenance authority"
+
+
+def _require_fork_authority(authority: Path) -> None:
+    """Refuse an authority `init` did not seed, such as the upstream's own, and one not on ``main``."""
+    readme = authority / AUTHORITY_README
+    first = readme.read_text(encoding="utf-8").splitlines()[:1] if readme.is_file() else []
+    if first != [AUTHORITY_MARKER]:
+        raise ForkInitError(
+            "AUTHORITY_NOT_A_FORK_AUTHORITY",
+            f"{authority} was not seeded by `fork_init.py init` ({AUTHORITY_README} does not start with "
+            f"{AUTHORITY_MARKER!r}); this tool writes only to a fork's own authority",
+        )
+    if _git(authority, "rev-parse", "--abbrev-ref", "HEAD").strip() != "main":
+        raise ForkInitError("AUTHORITY_NOT_MAIN", "the authority checkout must have main checked out")
+
+
 def _canonical(document: dict) -> bytes:
     return (json.dumps(document, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
 
@@ -190,7 +214,7 @@ def verify(repo: Path, authority: Path, rev: str = "HEAD") -> str:
 
 def _readme(commit: str) -> str:
     return (
-        "# Fork provenance authority\n\n"
+        f"{AUTHORITY_MARKER}\n\n"
         "This repository is the provenance authority of a Nakagawa Recomp fork. Keep it private or\n"
         "public as you choose, but never inside the fork's own checkout.\n\n"
         f"`tools/fork_init.py` seeded `{AUTHORITY_LEDGER}` from the fork's public\n"
@@ -204,9 +228,11 @@ def _readme(commit: str) -> str:
 def init(repo: Path, authority: Path, rev: str = "HEAD", *, assisted_by: str | None = None) -> dict:
     repo = _repo_root(repo)
     authority = authority.absolute()
-    if _within(authority, repo):
+    if any(_within(authority, tree) for tree in _worktrees(repo)):
         raise ForkInitError("AUTHORITY_INSIDE_REPOSITORY",
-                            "the authority must live outside the fork's checkout, or it would be published")
+                            "the authority must live outside every checkout of the fork, or it would be published")
+    if authority.exists() and not authority.is_dir():
+        raise ForkInitError("AUTHORITY_NOT_A_DIRECTORY", f"{authority} exists and is not a directory")
     if authority.exists() and any(authority.iterdir()):
         raise ForkInitError("AUTHORITY_NOT_EMPTY", f"{authority} exists and is not empty")
     sha = _commit_sha(repo, rev)
@@ -216,14 +242,21 @@ def init(repo: Path, authority: Path, rev: str = "HEAD", *, assisted_by: str | N
         raise ForkInitError("PUBLIC_LEDGER_INVALID", f"{PUBLIC_LEDGER} is missing at {sha}")
     records = seed_records(json.loads(raw.stdout), sha)
 
-    authority.mkdir(parents=True, exist_ok=True)
-    _git(authority, "init", "--quiet", "--initial-branch=main")
-    ledger_path = authority / AUTHORITY_LEDGER
-    ledger_path.parent.mkdir(parents=True, exist_ok=True)
-    ledger_path.write_bytes(_canonical({"schema_version": 1, "records": records}))
-    (authority / AUTHORITY_README).write_text(_readme(sha), encoding="utf-8", newline="\n")
-
-    verify(repo, authority, sha)
+    # The authority is built in a staging folder beside it and moved into place only once it
+    # verifies, so a failed run leaves the target as it found it and the next init can start.
+    authority.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".fork-authority-", dir=authority.parent,
+                                     ignore_cleanup_errors=True) as scratch:
+        staging = Path(scratch)
+        _git(staging, "init", "--quiet", "--initial-branch=main")
+        ledger_path = staging / AUTHORITY_LEDGER
+        ledger_path.parent.mkdir(parents=True, exist_ok=True)
+        ledger_path.write_bytes(_canonical({"schema_version": 1, "records": records}))
+        (staging / AUTHORITY_README).write_text(_readme(sha), encoding="utf-8", newline="\n")
+        verify(repo, staging, sha)
+        authority.mkdir(exist_ok=True)
+        for child in staging.iterdir():
+            child.rename(authority / child.name)
 
     _git(authority, "add", "--", AUTHORITY_LEDGER, AUTHORITY_README)
     message = f"Seed the fork provenance authority from the public ledger at {sha}"
@@ -272,6 +305,7 @@ def add_record(
     ledger_path = authority / AUTHORITY_LEDGER
     if not ledger_path.is_file():
         raise ForkInitError("AUTHORITY_MISSING", f"{ledger_path} does not exist; run `fork_init.py init` first")
+    _require_fork_authority(authority)
     if _git(authority, "status", "--porcelain", "--", "docs/provenance").strip():
         raise ForkInitError("AUTHORITY_DIRTY", "docs/provenance in the authority has uncommitted changes")
     document = json.loads(ledger_path.read_text(encoding="utf-8"))
