@@ -2743,6 +2743,21 @@ static void test_ge_vertex_cache(int strip_cache) {
     expect(profile[1].primitive_profile_vertex_cache_hits == 0 &&
            profile[1].primitive_profile_actual_transformed_vertices == total_uses,
            "vertex_cache_off", "with the cache off the profile must transform every use");
+    /* A hit does no decode, transform or lighting, so the sparse profile extrapolates its
+     * samples (drawn from the misses) over the misses alone. */
+    for (int run = 0; run < 2; run++) {
+        uint64_t want = run == 0 ? total_misses[0] : total_uses;
+        char what[200];
+        snprintf(what, sizeof what, "eligible fetch/transform/lighting %" PRIu64 "/%" PRIu64 "/%"
+                 PRIu64 ", want %" PRIu64 " each",
+                 profile[run].primitive_profile_eligible[GE_PRIM_PROFILE_VERTEX_FETCH_DECODE],
+                 profile[run].primitive_profile_eligible[GE_PRIM_PROFILE_TRANSFORM],
+                 profile[run].primitive_profile_eligible[GE_PRIM_PROFILE_LIGHTING], want);
+        expect(profile[run].primitive_profile_eligible[GE_PRIM_PROFILE_VERTEX_FETCH_DECODE] == want &&
+               profile[run].primitive_profile_eligible[GE_PRIM_PROFILE_TRANSFORM] == want &&
+               profile[run].primitive_profile_eligible[GE_PRIM_PROFILE_LIGHTING] == want,
+               run == 0 ? "vertex_cache_on" : "vertex_cache_off", what);
+    }
 
     unsigned long fb_diff = 0, z_diff = 0, drawn = 0, depth = 0;
     for (uint32_t i = 0; i < PIXELS; i++) {
@@ -2947,6 +2962,103 @@ static void test_ge_vertex_cache_changes(void) {
     free(fb2); free(fb1); free(zb2); free(zb1);
 }
 
+/* ---- A draw that renders over its own vertices ----
+ *
+ * The colour target of a 450-triangle indexed draw is placed so that its rows cover the
+ * draw's own vertex buffer: in RAM (render-to-RAM, plain-RAM vertices) and in VRAM (VRAM
+ * vertices), each at three row offsets. Pixels of earlier triangles then rewrite vertices that
+ * later triangles read again, so a vertex cached before the rewrite would differ from a fresh
+ * transform. Every vertex must bypass the cache, the target (vertices included) must be
+ * byte-identical with the cache on and off, and the draw must actually have rewritten some
+ * vertex bytes. ge-vertex-cache-mutants requires mutant 3 (VRAM vertices cached) to fail the
+ * VRAM case and mutant 4 (cached while rendering to RAM) the RAM case, by differing bytes. */
+
+/* The VRAM case's vertices, with its targets 44 to 60 rows (22-30 KiB) below them: clear of
+ * the colour target, and of the depth surface's guest span (VC_ZB, 128 x 272 x 2 bytes), which
+ * a depth writeback may fill. */
+#define VC_VRAM_OVER_VERTS 0x041C0000u
+
+static uint32_t s_vc_target;
+
+static void vc_change_target(void) {
+    W(0x9C, s_vc_target & 0xFFFFFFu);
+    W(0x9D, ((s_vc_target >> 8) & 0xFF0000u) | 128u);
+}
+
+static void test_ge_vertex_cache_overwrite(void) {
+    static const uint32_t rows[] = { 44u, 52u, 60u };
+    enum { R = sizeof rows / sizeof rows[0], REGION = 128 * 128 * 4 };
+    static const struct { const char *name; uint32_t vaddr; } kinds[2] = {
+        { "vertex_cache_overwrite[ram-target]", VC_PLAIN },
+        { "vertex_cache_overwrite[vram-target]", VC_VRAM_OVER_VERTS },
+    };
+    uint8_t *saved = (uint8_t *)malloc(2u * R * REGION);
+    uint8_t *after = (uint8_t *)malloc(2u * 2u * R * REGION);   /* [run][kind][row] */
+    if (!saved || !after) {
+        expect(0, "vertex_cache_overwrite", "no memory for the snapshots");
+        free(saved); free(after);
+        return;
+    }
+    vc_fill();
+    vc_quads(0, 15, 0, 15, s_vc_u16_grid);
+    memcpy(SR_HOST(VC_VRAM_OVER_VERTS), SR_HOST(VC_PLAIN), 256u * VC_PLAIN_STRIDE);
+    for (unsigned k = 0; k < 2u; k++)
+        for (unsigned r = 0; r < R; r++)
+            memcpy(saved + (k * R + r) * (size_t)REGION, SR_HOST(kinds[k].vaddr - rows[r] * 512u), REGION);
+
+    for (int run = 0; run < 2; run++) {
+        int cache_on = run == 0;
+        env_set("SR_GE_VERTEX_CACHE_DISABLE", cache_on ? NULL : "1");
+        ge_vertex_cache_reload_env();
+        for (unsigned k = 0; k < 2u; k++)
+            for (unsigned r = 0; r < R; r++) {
+                VcCase draw = { kinds[k].name, VT_VC_PLAIN | VT_INDEX16, kinds[k].vaddr, 3, 1350,
+                                s_vc_u16_grid, 0, 0.0f, k == 1u, 0, 0, 0 };
+                s_vc_target = kinds[k].vaddr - rows[r] * 512u;
+                vc_clear();   /* the depth buffer; the colour it clears is elsewhere */
+                memcpy(SR_HOST(s_vc_target), saved + (k * R + r) * (size_t)REGION, REGION);
+                s_vc_change = vc_change_target;
+                vc_run_case(&draw);
+                s_vc_change = NULL;
+                memcpy(after + (((size_t)run * 2u + k) * R + r) * REGION, SR_HOST(s_vc_target), REGION);
+                if (cache_on) {
+                    char what[160];
+                    unsigned uses = vc_uses(&draw, 1);
+                    snprintf(what, sizeof what, "a vertex of a draw over its own vertices went through "
+                             "the cache (hits=%lu misses=%lu bypasses=%lu uses=%u)",
+                             draw.hits, draw.misses, draw.bypasses, uses);
+                    expect(draw.hits == 0 && draw.misses == 0 && draw.bypasses == uses, draw.name, what);
+                }
+            }
+    }
+    for (unsigned k = 0; k < 2u; k++)
+        for (unsigned r = 0; r < R; r++)
+            memcpy(SR_HOST(kinds[k].vaddr - rows[r] * 512u), saved + (k * R + r) * (size_t)REGION, REGION);
+    env_set("SR_GE_VERTEX_CACHE_DISABLE", NULL);
+    ge_vertex_cache_reload_env();   /* anything after this sees the cache on */
+
+    for (unsigned k = 0; k < 2u; k++) {
+        unsigned long diff = 0, rewritten = 0;
+        for (unsigned r = 0; r < R; r++) {
+            const uint8_t *on = after + ((size_t)k * R + r) * REGION;
+            const uint8_t *off = after + (((size_t)2u + k) * R + r) * REGION;
+            const uint8_t *orig = saved + ((size_t)k * R + r) * REGION;
+            for (uint32_t i = 0; i < REGION; i++)
+                if (on[i] != off[i]) diff++;
+            for (uint32_t i = rows[r] * 512u; i < rows[r] * 512u + 256u * VC_PLAIN_STRIDE; i++)
+                if (off[i] != orig[i]) rewritten++;
+        }
+        char what[200];
+        snprintf(what, sizeof what, "cache on and off differ: %lu target bytes", diff);
+        expect(diff == 0, kinds[k].name, what);
+        snprintf(what, sizeof what, "the draw rewrote none of its own vertex bytes (%lu)", rewritten);
+        expect(rewritten > 1000u, kinds[k].name, what);
+        printf("VERTEX_CACHE_OVERWRITE %s rewritten_vertex_bytes=%lu differing=%lu\n", kinds[k].name,
+               rewritten, diff);
+    }
+    free(saved); free(after);
+}
+
 int main(int argc, char **argv) {
     int strip_cache = 1;
     if (argc == 3 && strcmp(argv[1], "--bench") == 0) {
@@ -3105,6 +3217,7 @@ int main(int argc, char **argv) {
     test_ge_vram_view_decode();
     test_ge_vertex_cache(strip_cache);
     test_ge_vertex_cache_changes();
+    test_ge_vertex_cache_overwrite();
 
     printf("ge_cpu_profile_validate_selftest: strip_cache=%s vertex_cache=%s scenarios=%u faults=%u "
            "failures=%d\n", strip_cache ? "on" : "off", vertex_cache ? "on" : "off", s_scenarios,

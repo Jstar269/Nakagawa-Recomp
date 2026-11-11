@@ -441,6 +441,20 @@ aggregates the parts, so `CI required` fails when any part fails.
 `tools/test_public_ci_wiring.py` (`NativeToolsPartitionTests`) fails if a serial gate is
 dropped, runs in more than one part, or changes its command.
 
+The native core suite (`native-core-tests`, in `core` and in the Windows `smoke-routes` group)
+includes the software GE's per-draw transformed-vertex cache. `ge-cpu-profile-validate-selftest`
+renders indexed lists, fans and strips with the cache on and off (`SR_GE_VERTEX_CACHE_DISABLE`)
+and requires identical colour and depth. Sixteen pairs draw the same mesh twice with one
+transform input changed in between (vertex bytes, view, projection, bone and texgen matrices,
+lights, material, vertex type, morph weights, viewport, texture scale, fog range): the second
+draw must transform every vertex again and match the cache-off draw. Draws whose colour target
+covers their own vertices, in RAM and in VRAM, must bypass the cache and leave identical bytes.
+`ge-vertex-cache-mutants` then compiles `src/rt/ge.c` four more times with
+`SR_GE_VERTEX_CACHE_MUTANT` (1: no new epoch per draw, 2: no address check, 3: VRAM vertices
+cached, 4: cached while rendering to RAM) and runs the selftest against each; each must fail
+with its own message, mutant 1 must also fail all sixteen state-change pairs with differing
+pixels, and 3 and 4 must fail by differing target bytes.
+
 ### Android launcher build
 
 The `android_build` job (#360) runs whenever the native gates do (`run_native`), beside
@@ -1021,18 +1035,6 @@ and `tools/test_stage_install.py`. A change under `tools/`, `src/core/`, `src/pl
 on Windows. The full local suite builds the native fixtures and takes over an hour on
 Windows. Make-based tests need a POSIX `sh` on `PATH` (MSYS2 `usr/bin` or Git for Windows
 `bin`).
-
-`native-core-tests` runs `ge-cpu-profile-validate-selftest`, whose vertex cache case renders the
-same indexed lists, fans and strips through the software GE with its per-draw transformed-vertex
-cache on and off (`SR_GE_VERTEX_CACHE_DISABLE`) and requires identical colour and depth; vertices
-in VRAM, which a draw can rewrite, must bypass the cache. Sixteen more pairs draw the same mesh
-twice with one transform input changed in between (vertex bytes, view, projection, bone and
-texgen matrices, lights, material, vertex type, morph weights, viewport, texture scale, fog
-range): the second draw must transform every vertex again and match the cache-off draw.
-`native-core-tests` also runs `ge-vertex-cache-mutants`, which rebuilds `src/rt/ge.c` three times
-with `SR_GE_VERTEX_CACHE_MUTANT` (1: no new epoch per draw, 2: no address check, 3: VRAM vertices
-cached); each must fail that case with its own message, and mutant 1 must also fail all sixteen
-state-change pairs with differing pixels.
 
 `make dmac-mutants` is also left to local runs: it builds `hle-thread-selftest` against each mutated copy
 of `src/rt/hle_cache_dma.c`, one selftest build per mutant (`NK_DMAC_MUTANTS_ONLY=<part of a name>` runs one).

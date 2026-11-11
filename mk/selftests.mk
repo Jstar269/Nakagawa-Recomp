@@ -430,16 +430,19 @@ native-core-tests: ge-cpu-profile-validate-selftest ge-vertex-cache-mutants
 # SR_GE_VERTEX_CACHE_MUTANT in ge.c: 1 never starts a new epoch, so a draw reuses vertices an
 # earlier draw transformed at the same address under another world matrix; 2 does not check
 # the address, so a vertex whose index shares a table slot gets another vertex's result; 3
-# caches vertices outside plain RAM, which a draw's own pixels may rewrite in VRAM. Each
-# builds its own ge.c object and binary and must fail with its own message; mutant 1 must
+# caches vertices outside plain RAM, so a draw whose VRAM target covers its own VRAM vertices
+# reuses vertices its pixels rewrote; 4 caches while the colour target is in RAM, the same
+# hazard for RAM vertices. Each builds its own ge.c object and binary and must fail with its
+# own message (3 and 4 by target bytes that differ from the cache-off draw); mutant 1 must
 # also fail every state-change pair (vertex data, matrices, lights, material, vertex type,
 # morph weights and the rest) with pixels that differ from the cache-off draw.
 ge-vertex-cache-mutants: $(RT_GE_O)
-	@for m in 1 2 3; do \
+	@for m in 1 2 3 4; do \
 		case $$m in \
 			1) kill="FAIL vertex_cache\[epoch-second\]: a distinct vertex was not transformed in its draw";; \
 			2) kill="FAIL vertex_cache\[u16-list-texgen1\]: a distinct vertex was not transformed in its draw";; \
-			*) kill="FAIL vertex_cache\[vram-u8-list\]: a VRAM vertex went through the cache";; \
+			3) kill="FAIL vertex_cache_overwrite\[vram-target\]: cache on and off differ";; \
+			*) kill="FAIL vertex_cache_overwrite\[ram-target\]: cache on and off differ";; \
 		esac; \
 		changes=0; if test $$m -eq 1; then changes=16; fi; \
 		obj=$(BUILD_DIR)/ge_vertex_cache_mutant$$m.o; \

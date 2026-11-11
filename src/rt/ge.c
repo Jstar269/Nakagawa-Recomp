@@ -2022,7 +2022,7 @@ void ge_set_frame(uint32_t frame) {
         s_wall_last = now;
         s_ge_ms_acc = 0;
         tnl_gestat_print(frame);
-        /* vcache: this window's per-draw vertex cache hits/misses/bypasses (ge_shared.h). */
+        /* vcache_*: this window's per-draw vertex cache hits, misses and bypasses (ge_shared.h). */
         static unsigned long vcache_hits_last, vcache_misses_last, vcache_bypasses_last;
         unsigned long vcache_hits = g_ge_vertex_cache_hits - vcache_hits_last;
         unsigned long vcache_misses = g_ge_vertex_cache_misses - vcache_misses_last;
@@ -2031,7 +2031,7 @@ void ge_set_frame(uint32_t frame) {
         vcache_misses_last = g_ge_vertex_cache_misses;
         vcache_bypasses_last = g_ge_vertex_cache_bypasses;
         fprintf(stderr,
-            "GESTAT+ f=%" PRIu32 " blk3d=%lu skin=%lu bonew=%lu deg3d=%lu line3d=%lu nonfinite=%lu gpuprim=%lu vcache=%lu/%lu/%lu zrange=%lu zr=[%" PRIu32 ",%" PRIu32 "] fmt=%" PRIu32 " zbp=0x%08" PRIx32 " fb=[0x%08" PRIx32 ":%lu 0x%08" PRIx32 ":%lu 0x%08" PRIx32 ":%lu 0x%08" PRIx32 ":%lu]\n",
+            "GESTAT+ f=%" PRIu32 " blk3d=%lu skin=%lu bonew=%lu deg3d=%lu line3d=%lu nonfinite=%lu gpuprim=%lu vcache_hits=%lu vcache_misses=%lu vcache_bypasses=%lu zrange=%lu zr=[%" PRIu32 ",%" PRIu32 "] fmt=%" PRIu32 " zbp=0x%08" PRIx32 " fb=[0x%08" PRIx32 ":%lu 0x%08" PRIx32 ":%lu 0x%08" PRIx32 ":%lu 0x%08" PRIx32 ":%lu]\n",
             frame, s_stat.blk3d, s_stat.skin, s_stat.bonew, s_stat.deg3d, s_stat.line3d, s_stat.nonfinite, s_stat.gpuprim,
             vcache_hits, vcache_misses, vcache_bypasses, s_stat.zrange, ge.minz, ge.maxz, ge.fbfmt, ge.zbp,
             s_stat.fbs[0], s_stat.fbn[0], s_stat.fbs[1], s_stat.fbn[1],
@@ -4415,13 +4415,19 @@ static void transform_vtx_clip(uint32_t addr, const VFmt *vf, CVtx *o) {
 /* Per-draw transformed-vertex cache for draw_prim_xform_triangles. transform_vtx_clip is a
  * pure function of the vertex bytes at its address, the vertex format and the GE state. The
  * format and the state do not change within one draw, and no guest code runs during a draw,
- * but the draw's own pixels are written to VRAM, so a vertex in VRAM can change under it.
- * Only a vertex wholly in plain RAM (ge_ram_span), which no draw writes, is cached; any other
- * vertex is transformed every time, with no lookup and no store, and counted as a bypass.
- * For a RAM vertex, a CVtx cached for its address earlier in the same draw is bit-identical
- * to transforming that address again.
+ * but the draw's own pixels are written to its colour target, so a vertex under that target
+ * can change mid-draw. Depth surfaces are VRAM only (ge_zbuf_layout_valid). So a vertex is
+ * cached only when it lies wholly in plain RAM (ge_ram_span) and the draw's colour target is
+ * in VRAM; a vertex in VRAM, or any vertex of a draw that renders to RAM, is transformed every
+ * time, with no lookup and no store, and counted as a bypass. For a cached vertex, a CVtx
+ * stored for its address earlier in the same draw is bit-identical to transforming that
+ * address again.
  * Indexed meshes share vertices between triangles and every fan shares its first vertex, so
- * most of those transforms repeat.
+ * most of those transforms repeat. A non-indexed list, and a non-indexed strip that keeps its
+ * rolling pair, never use one address twice: those draws skip the cache (and its counters).
+ * A hit takes itself out of the sparse profile's eligible populations (fetch/decode,
+ * transform, lighting), because it does none of that work; the index read before a miss is
+ * outside the miss's fetch/decode sample.
  *
  * The table is direct mapped and keyed by the vertex address alone: an entry hits only when its
  * full address matches and it was written in the current draw. The slot is the vertex index's
@@ -4431,7 +4437,7 @@ static void transform_vtx_clip(uint32_t addr, const VFmt *vf, CVtx *o) {
  *
  * SR_GE_VERTEX_CACHE_MUTANT (ge-vertex-cache-mutants only; never in a product build) breaks
  * the cache: 1 never starts a new epoch, 2 does not check the address, 3 caches vertices
- * outside plain RAM. */
+ * outside plain RAM, 4 caches vertices while the colour target is in RAM. */
 #ifndef SR_GE_VERTEX_CACHE_MUTANT
 #define SR_GE_VERTEX_CACHE_MUTANT 0
 #endif
@@ -4444,6 +4450,9 @@ typedef struct {
 static GeVertexCacheEntry s_vertex_cache[GE_VERTEX_CACHE_ENTRIES];
 static uint32_t s_vertex_cache_epoch;
 static int s_vertex_cache_on = -1;
+/* This draw: 0 no cache (off, or no address repeats), 1 bypass every vertex (colour target
+ * outside VRAM), 2 cache plain-RAM vertices. Set by vertex_cache_begin_draw. */
+static int s_vertex_cache_draw;
 unsigned long g_ge_vertex_cache_hits, g_ge_vertex_cache_misses, g_ge_vertex_cache_bypasses;
 
 static int vertex_cache_enabled(void) {
@@ -4458,14 +4467,28 @@ void ge_vertex_cache_reload_env(void) {
     s_vertex_cache_on = -1;
 }
 
-/* Start one draw: every entry of earlier draws becomes stale. */
-static void vertex_cache_begin_draw(void) {
+/* Start one draw: every entry of earlier draws becomes stale. `repeats`: the draw can use
+ * one address twice (indexed, a fan, or a strip without its rolling pair). */
+static void vertex_cache_begin_draw(int repeats) {
 #if SR_GE_VERTEX_CACHE_MUTANT != 1
     if (++s_vertex_cache_epoch == 0u) {   /* wrapped: no stale entry may carry the new epoch */
         memset(s_vertex_cache, 0, sizeof s_vertex_cache);
         s_vertex_cache_epoch = 1u;
     }
 #endif
+    if (!vertex_cache_enabled() || !repeats) {
+        s_vertex_cache_draw = 0;
+        return;
+    }
+#if SR_GE_VERTEX_CACHE_MUTANT != 4
+    /* The software rasterizer writes the colour target during the draw (ge_fb_store); in
+     * RAM it may overlap the vertices. */
+    if ((ge_fb_addr() & 0x0F000000u) != 0x04000000u) {
+        s_vertex_cache_draw = 1;
+        return;
+    }
+#endif
+    s_vertex_cache_draw = 2;
 }
 
 /* transform_vtx_clip of the draw's vertex i, through the cache. A miss claims the sparse
@@ -4474,22 +4497,26 @@ static void vertex_cache_begin_draw(void) {
  * vertex_cache_hits. */
 static void transform_vtx_clip_cached(uint32_t vbase, uint32_t ibase, int idxfmt, int i,
                                       const VFmt *vf, CVtx *o) {
-    if (!vertex_cache_enabled()) {
+    if (!s_vertex_cache_draw) {
         transform_vtx_clip(prim_vtx_addr(vbase, ibase, idxfmt, i, vf->stride), vf, o);
         return;
     }
     uint32_t vi = idxfmt ? index_value(ibase, idxfmt, i) : (uint32_t)i;
     uint32_t addr = vbase + vi * (uint32_t)vf->stride;
 #if SR_GE_VERTEX_CACHE_MUTANT != 3
-    if (!ge_ram_span(addr, (uint32_t)vf->stride)) {
-        /* Not plain RAM (VRAM, which this draw's own pixels may rewrite, or a span the
-         * capture path reads): transform it every time, with no lookup and no store. */
+    int cacheable = ge_ram_span(addr, (uint32_t)vf->stride) != NULL;
+#else
+    int cacheable = 1;
+#endif
+    if (s_vertex_cache_draw == 1 || !cacheable) {
+        /* A draw rendering to RAM, or a vertex not in plain RAM (VRAM, which this draw's own
+         * pixels may rewrite, or a span the capture path reads): transform it every time,
+         * with no lookup and no store. */
         g_ge_vertex_cache_bypasses++;
         primitive_profile_begin_vertex();
         transform_vtx_clip(addr, vf, o);
         return;
     }
-#endif
     GeVertexCacheEntry *e = &s_vertex_cache[vi & (GE_VERTEX_CACHE_ENTRIES - 1u)];
     if (e->epoch == s_vertex_cache_epoch
 #if SR_GE_VERTEX_CACHE_MUTANT != 2
@@ -4498,8 +4525,15 @@ static void transform_vtx_clip_cached(uint32_t vbase, uint32_t ibase, int idxfmt
         ) {
         *o = e->v;
         g_ge_vertex_cache_hits++;
-        if (s_primitive_profile_counting)
+        if (s_primitive_profile_counting) {
+            /* primitive_profile_note_draw counted this use as eligible for each phase; a hit
+             * does none of them, and the samples come from the misses alone. */
             s_cpu_profile_stats.primitive_profile_vertex_cache_hits++;
+            s_cpu_profile_stats.primitive_profile_eligible[GE_PRIM_PROFILE_VERTEX_FETCH_DECODE]--;
+            s_cpu_profile_stats.primitive_profile_eligible[GE_PRIM_PROFILE_TRANSFORM]--;
+            if (ge.lighting_enable)
+                s_cpu_profile_stats.primitive_profile_eligible[GE_PRIM_PROFILE_LIGHTING]--;
+        }
         return;
     }
     g_ge_vertex_cache_misses++;
@@ -6302,7 +6336,7 @@ static void draw_prim_xform_triangles(const DrawPrimCtx *c, int rt) {
     }
     int cache_strip = type == 4 && strip_cache_enabled() && count >= 3;
     CVtx strip_prev[2];
-    vertex_cache_begin_draw();
+    vertex_cache_begin_draw(idxfmt != 0 || type == 5 || (type == 4 && !cache_strip));
     if (cache_strip) {
         transform_vtx_clip_cached(vbase,ibase,idxfmt,0,&vf,&strip_prev[0]);
         transform_vtx_clip_cached(vbase,ibase,idxfmt,1,&vf,&strip_prev[1]);
