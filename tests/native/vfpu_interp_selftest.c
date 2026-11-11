@@ -747,6 +747,8 @@ static uint32_t vf2i(unsigned mode, unsigned scale) {
            ((scale & 31u) << 16) | 1u;
 }
 
+static int find_overlap_diff_case(const char *name);
+
 /* PSP-VFPU-CONVERT-001 (PSP-3000, 2026-11-08, issue #326, probe case vfpu-convert, vf2in/vf2iz/
  * vf2iu/vf2id.s at scale 0, both lanes): a denormal input of either sign converts as zero in all four modes,
  * and a negative quiet NaN gives 0x7fffffff. The result must not depend on the host rounding mode. */
