@@ -1167,17 +1167,21 @@ whenever their jobs run; neither can change a gate's result.
   whole and exercised in part). The `src/` row leaves it out, and is the figure for the
   project's own code.
 - **One correction after the run.** Run 43094169097 still counted `src/ref/selftest.cpp`
-  (495 lines at 98.99 %), the C++ interpreter's test source, which the filter now drops. From
-  the same report without it, `c` is 52.65 % and combined 61.75 %; the `src/` row already
-  leaves it out.
+  (495 lines at 98.99 %), the C++ interpreter's test source, which the filter now drops. Run
+  43102622567 on `301ccf224`, without it, measured `c` at 52.64 % of 157,773 lines in 402
+  files and combined at 61.74 % of 233,881 lines in 596 files; the `src/` row already leaves
+  it out.
 
 **Wall time.** `native_tools`' core part took 12 min 33 s in run 43078241056, 4 min 46 s of
 it the coverage build. Without that build it took 6 min 15 s in run 43089041907 and 8 min 10 s
 in run 43094169097. `c_coverage` took 24 min 35 s in run 43094169097:
+
 - 2 min 30 s of setup, 2 min 3 s of it rebuilding SDL3 and SDL3_ttf, because a changed
   workflow file misses their cache;
 - 21 min 32 s measuring (native core suite 6 min 36 s, GPU self-tests 7 min 3 s);
 - 16 s for gcov collection and 14 s for the upload.
+
+It took 19 min 42 s in run 43102622567, on the head that added these figures.
 
 Both reports are uploaded with `codecov/codecov-action` (pinned by commit SHA)
 under `flags: python` and `flags: c`, authenticated with the job's OIDC identity
