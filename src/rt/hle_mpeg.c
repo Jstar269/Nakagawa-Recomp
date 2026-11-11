@@ -1837,7 +1837,7 @@ int psmf_av_queue_frames(int ch) {
 #ifdef SR_MPEG_MEDIA_SELFTEST
     if (s_psmf_av_test_queue_set) return s_psmf_av_test_queue;
 #endif
-    return hle_audio_queued(ch);
+    return hle_audio_play_lead(ch);
 }
 
 /* FNV-1a of [addr, +bytes), 0 when the bytes are all zero or cannot be read: a silent block is

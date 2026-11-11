@@ -67,6 +67,15 @@
       "stage": "comp"
     },
     {
+      "embedded": "ace_measure_comp.inc",
+      "embedded_sha256": "1335a95264de65f0b216f4cb51e3769c1851908464e9bc055dae3482a4b343a4",
+      "source": "shaders/ace_measure.comp",
+      "source_sha256": "552379e86a54d5ed1ed9c2f67e1aebcb9c7c0f46bf0c251447f72f47cf10320a",
+      "spirv_bytes": 5248,
+      "spirv_sha256": "162be822b72bc1a6e30a2fc0568f6a98465e355b2154a4862ee9390e0b1618c4",
+      "stage": "comp"
+    },
+    {
       "embedded": "fsr1_easu_comp.inc",
       "embedded_sha256": "23fda4c8a7dce5b0cc2af48fe6cd10faa272963f844b36d0dd395678beacbe8f",
       "source": "shaders/fsr1_easu.comp",
