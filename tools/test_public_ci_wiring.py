@@ -3247,8 +3247,10 @@ class AptInstallHelperTests(unittest.TestCase):
         (root / "etc" / "apt" / "sources.list.d" / "ubuntu.sources").write_text(
             "Types: deb\nURIs: mirror+file:/etc/apt/apt-mirrors.txt\nSuites: noble noble-updates\n", encoding="utf-8")
         (root / "etc" / "apt" / "sources.list.d" / "plain.sources").write_text(
-            "Types: deb\nURIs: http://azure.archive.ubuntu.com/ubuntu/\nSuites: noble\n\n"
-            "Types: deb\nURIs: https://security.ubuntu.com/ubuntu\nSuites: noble-security\n", encoding="utf-8")
+            "Types: deb\nURIs: http://azure.archive.ubuntu.com/ubuntu/\nSuites: noble\n"
+            "Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n\n"
+            "Types: deb\nURIs: https://security.ubuntu.com/ubuntu\nSuites: noble-security\n"
+            "Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n", encoding="utf-8")
         stubs = scratch / "bin"
         stubs.mkdir()
         for name, body in _APT_STUBS.items():
@@ -3292,6 +3294,8 @@ class AptInstallHelperTests(unittest.TestCase):
         plain = (root / "etc" / "apt" / "sources.list.d" / "plain.sources").read_text(encoding="utf-8")
         self.assertEqual(plain.count(f"URIs: {mirror_list}\n"), 2, plain)
         self.assertNotIn("ubuntu.com", plain)
+        # The rewrite changes where the indexes come from, never the key that must sign them.
+        self.assertEqual(plain.count("Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n"), 2, plain)
         network = (root / "etc" / "apt" / "apt.conf.d" / "79-nk-apt-network").read_text(encoding="utf-8")
         self.assertIn('Acquire::Retries "5";', network)
         for mirror in self.ALL_MIRRORS:
@@ -3333,6 +3337,29 @@ class AptInstallHelperTests(unittest.TestCase):
         done, log, _ = self.run_helper("--no-install-recommends", up=self.ALL_MIRRORS)
         self.assertEqual(done.returncode, 2)
         self.assertEqual(log, [])
+
+    # Each way to switch off or bypass apt's signature check, on the command line, in an apt
+    # configuration item or in a sources entry ("[trusted=yes]", deb822 "Trusted: yes").
+    _APT_TRUST_WEAKENERS = re.compile(
+        r"--allow-unauthenticated|--allow-insecure-repositories|--allow-downgrade-to-insecure-repositories"
+        r"|--force-yes|\btrusted\s*[=:]\s*yes\b|AllowInsecure|AllowDowngradeToInsecure|AllowUnauthenticated",
+        re.IGNORECASE)
+
+    def test_no_workflow_weakens_apt_signature_checks(self) -> None:
+        """docs/CI.md's "a mirror changes speed, not trust" holds only while every index must be signed."""
+        for sample in ("apt-get install --allow-unauthenticated x", "apt-get update --allow-insecure-repositories",
+                       "--allow-downgrade-to-insecure-repositories", "apt-get --force-yes install x",
+                       "deb [trusted=yes] http://m/ubuntu noble main", "Trusted: yes",
+                       'Acquire::AllowInsecureRepositories "true";', "-o APT::Get::AllowUnauthenticated=true",
+                       'Acquire::AllowDowngradeToInsecureRepositories "1";'):
+            with self.subTest(sample=sample):
+                self.assertRegex(sample, self._APT_TRUST_WEAKENERS)
+        files = sorted((ROOT / ".github").rglob("*.yml")) + sorted((ROOT / ".github").rglob("*.yaml"))
+        self.assertIn(ROOT / ".github" / "workflows" / "ci.yml", files)
+        for path in files:
+            for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                with self.subTest(file=path.relative_to(ROOT).as_posix(), line=number):
+                    self.assertNotRegex(line, self._APT_TRUST_WEAKENERS)
 
     def test_every_package_install_goes_through_the_helper(self) -> None:
         """Both apt steps call the helper; no step runs apt-get itself."""
