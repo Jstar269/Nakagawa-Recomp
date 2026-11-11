@@ -38490,13 +38490,15 @@ static void test_vpl_nonblocking_roundtrip(void) {
     cpu.r[4] = 2u; cpu.r[5] = 0u; cpu.r[6] = 0u; cpu.r[7] = 0x100u;
     uint32_t trailer = sr_syscall(&cpu, 0x237dbd4fu);
 
+    /* A 0x100-byte pool hands out 0xE0 bytes and a 0x64-byte block costs 0x70 (PSP-B1-01), so
+     * two blocks fill it. */
     memset(&cpu, 0, sizeof cpu);
-    cpu.r[4] = vpl; cpu.r[5] = 0x80u; cpu.r[6] = VPL_OUTPTR;
+    cpu.r[4] = vpl; cpu.r[5] = 0x64u; cpu.r[6] = VPL_OUTPTR;
     expect(sr_syscall(&cpu, NID_VPL_TRY_ALLOCATE) == 0u, "vpl first allocation succeeds");
     uint32_t first = MEM_R32(VPL_OUTPTR);
     expect(first != 0u, "vpl allocation writes address");
     memset(&cpu, 0, sizeof cpu);
-    cpu.r[4] = vpl; cpu.r[5] = 0x80u; cpu.r[6] = VPL_OUTPTR;
+    cpu.r[4] = vpl; cpu.r[5] = 0x64u; cpu.r[6] = VPL_OUTPTR;
     expect(sr_syscall(&cpu, NID_VPL_TRY_ALLOCATE) == 0u, "vpl pool reaches exhaustion boundary");
     MEM_W32(VPL_OUTPTR, 0xfeedfaceu);
     memset(&cpu, 0, sizeof cpu);
@@ -38510,7 +38512,7 @@ static void test_vpl_nonblocking_roundtrip(void) {
     memset(&cpu, 0, sizeof cpu); cpu.r[4] = vpl; cpu.r[5] = VPL_INFO;
     MEM_W32(VPL_INFO, 0x34u); /* a zero size word leaves the record untouched */
     expect(sr_syscall(&cpu, NID_VPL_REFER) == 0u, "vpl refer status succeeds");
-    expect(MEM_R32(VPL_INFO + 40) == 0x100u && MEM_R32(VPL_INFO + 44) == 0x80u,
+    expect(MEM_R32(VPL_INFO + 40) == 0xe0u && MEM_R32(VPL_INFO + 44) == 0x70u,
            "vpl status reports pool and free sizes");
     memset(&cpu, 0, sizeof cpu); cpu.r[4] = vpl; cpu.r[5] = first;
     expect(sr_syscall(&cpu, NID_VPL_FREE) == VPL_UNKNOWN_ID_ERR, "vpl double free is rejected");
@@ -38529,7 +38531,7 @@ static void test_vpl_nonblocking_roundtrip(void) {
     memset(&cpu, 0, sizeof cpu);
     cpu.r[4] = FPL_NAMEBUF; cpu.r[5] = 2u; cpu.r[6] = 0u; cpu.r[7] = 0x100u;
     uint32_t vpl2 = sr_syscall(&cpu, NID_VPL_CREATE);
-    memset(&cpu, 0, sizeof cpu); cpu.r[4] = vpl2; cpu.r[5] = 0x80u; cpu.r[6] = VPL_OUTPTR;
+    memset(&cpu, 0, sizeof cpu); cpu.r[4] = vpl2; cpu.r[5] = 0x64u; cpu.r[6] = VPL_OUTPTR;
     expect(sr_syscall(&cpu, NID_VPL_TRY_ALLOCATE) == 0u && MEM_R32(VPL_OUTPTR) == first,
            "same-size vpl recreate reuses the released partition address");
     memset(&cpu, 0, sizeof cpu); cpu.r[4] = vpl2; cpu.r[5] = MEM_R32(VPL_OUTPTR);
@@ -38552,7 +38554,8 @@ static void test_vpl_block_count_bounded_by_pool_size(void) {
     sr_hle_test_partition_reset();
     sr_hle_init();
 
-    enum { BLOCKS = 512u, BLOCK = 16u, POOL = BLOCKS * BLOCK };
+    /* Each 16-byte block costs 24 bytes, and the pool keeps 0x20 for itself (PSP-B1-01). */
+    enum { BLOCKS = 512u, BLOCK = 16u, COST = BLOCK + 8u, POOL = BLOCKS * COST + 0x20u };
     static uint32_t addrs[BLOCKS];
     CpuState cpu;
     memset(&cpu, 0, sizeof cpu);
@@ -38585,15 +38588,16 @@ static void test_vpl_block_count_bounded_by_pool_size(void) {
     memset(&cpu, 0, sizeof cpu); cpu.r[4] = vpl; cpu.r[5] = VPL_INFO;
     MEM_W32(VPL_INFO, 0x34u); /* a zero size word leaves the record untouched */
     expect(freed && sr_syscall(&cpu, NID_VPL_REFER) == 0u &&
-           MEM_R32(VPL_INFO + 44) == POOL / 2u,
+           MEM_R32(VPL_INFO + 44) == BLOCKS / 2u * COST,
            "vpl keeps every one of 256 separate free spans");
     for (uint32_t i = 1; i < BLOCKS; i += 2u) {
         memset(&cpu, 0, sizeof cpu); cpu.r[4] = vpl; cpu.r[5] = addrs[i];
         if (sr_syscall(&cpu, NID_VPL_FREE) != 0u) freed = 0;
     }
     memset(&cpu, 0, sizeof cpu);
-    cpu.r[4] = vpl; cpu.r[5] = POOL; cpu.r[6] = VPL_OUTPTR;
-    expect(freed && sr_syscall(&cpu, NID_VPL_TRY_ALLOCATE) == 0u && MEM_R32(VPL_OUTPTR) == addrs[0],
+    cpu.r[4] = vpl; cpu.r[5] = BLOCKS * COST - 8u; cpu.r[6] = VPL_OUTPTR;
+    expect(freed && sr_syscall(&cpu, NID_VPL_TRY_ALLOCATE) == 0u &&
+               MEM_R32(VPL_OUTPTR) == addrs[BLOCKS - 1u],
            "vpl frees coalesce back into the whole pool");
 
     memset(&cpu, 0, sizeof cpu); cpu.r[4] = vpl;
@@ -39425,7 +39429,8 @@ static void test_vpl_blocking_waits(void) {
     uint32_t out3 = 0x00271048u;
 
     /* ---- 1. FreeVpl reuse and validation ---- */
-    uint32_t vpool = selftest_vpl_create(256);
+    /* PSP-B1-01: 0x130 bytes hand out 0x110, two 128-byte blocks of 136. */
+    uint32_t vpool = selftest_vpl_create(0x130u);
     expect(vpool >= 0x600u, "VPL: CreateVpl returns valid UID");
     expect(selftest_vpl_allocate(vpool, 128, out1, 0) == 0, "VPL: first 128B allocation succeeds");
     expect(selftest_vpl_allocate(vpool, 128, out2, 0) == 0, "VPL: second 128B allocation succeeds");
@@ -39451,7 +39456,8 @@ static void test_vpl_blocking_waits(void) {
     /* ---- 2. AllocateVpl blocks then wakes on FreeVpl (FIFO order & CB check) ---- */
     vpool = selftest_vpl_create(256);
     expect(vpool >= 0x600u, "VPL: CreateVpl succeeds");
-    expect(selftest_vpl_allocate(vpool, 256, out1, 0) == 0, "VPL: allocate 256B exhausts pool");
+    /* PSP-B1-01: a 256-byte pool hands out 224 bytes, all of them to one 216-byte block. */
+    expect(selftest_vpl_allocate(vpool, 216, out1, 0) == 0, "VPL: allocate 216B exhausts pool");
     addr1 = MEM_R32(out1);
 
     SelftestPoolWaiterCtx w1; memset(&w1, 0, sizeof w1);
@@ -39508,7 +39514,7 @@ static void test_vpl_blocking_waits(void) {
 
     /* ---- 2b. AllocateVplCB callback wait flag ---- */
     vpool = selftest_vpl_create(256);
-    expect(selftest_vpl_allocate(vpool, 256, out1, 0) == 0, "VPL: allocate exhausts pool for CB test");
+    expect(selftest_vpl_allocate(vpool, 216, out1, 0) == 0, "VPL: allocate exhausts pool for CB test");
     addr1 = MEM_R32(out1);
 
     SelftestPoolWaiterCtx w_cb; memset(&w_cb, 0, sizeof w_cb);
@@ -39539,7 +39545,7 @@ static void test_vpl_blocking_waits(void) {
 
     /* ---- 3. AllocateVpl timeout returns WAIT_TIMEOUT ---- */
     vpool = selftest_vpl_create(256);
-    expect(selftest_vpl_allocate(vpool, 256, out1, 0) == 0, "VPL: allocate exhausts pool for timeout test");
+    expect(selftest_vpl_allocate(vpool, 216, out1, 0) == 0, "VPL: allocate exhausts pool for timeout test");
     addr1 = MEM_R32(out1);
 
     /* Timeout = 0 returns immediately without blocking */
@@ -39583,7 +39589,7 @@ static void test_vpl_blocking_waits(void) {
 
     /* ---- 4. DeleteVpl wakes waiter with WAIT_DELETE (0x800201b5) ---- */
     vpool = selftest_vpl_create(256);
-    expect(selftest_vpl_allocate(vpool, 256, out1, 0) == 0, "VPL: allocate exhausts pool for delete test");
+    expect(selftest_vpl_allocate(vpool, 216, out1, 0) == 0, "VPL: allocate exhausts pool for delete test");
 
     SelftestPoolWaiterCtx w_del; memset(&w_del, 0, sizeof w_del);
     w_del.uid = 0x13bu;
