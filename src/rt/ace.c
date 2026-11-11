@@ -29,7 +29,7 @@ static int value_on_off(const char *v, int *out) {
    nothing: tier is the one key a line may leave out (an Enhanced run). */
 typedef enum {
     ACE_KEY_AF, ACE_KEY_TEXT, ACE_KEY_READOUT, ACE_KEY_NOTICE, ACE_KEY_WIDE, ACE_KEY_SMOOTH,
-    ACE_KEY_SAS, ACE_KEY_TESS, ACE_KEY_TIER, ACE_KEY_STICK, ACE_KEY_CULL
+    ACE_KEY_SAS, ACE_KEY_TESS, ACE_KEY_TIER, ACE_KEY_STICK, ACE_KEY_LOAD, ACE_KEY_CULL
 } AceKey;
 
 static const struct {
@@ -47,6 +47,7 @@ static const struct {
     {"tess", ACE_KEY_TESS, 1},
     {"tier", ACE_KEY_TIER, 0},
     {"stick", ACE_KEY_STICK, 0},
+    {"load", ACE_KEY_LOAD, 0},
     {"cull", ACE_KEY_CULL, 0},
 };
 
@@ -125,6 +126,13 @@ int ace_parse(const char *spec, AceConfig *out, char *why, size_t why_cap) {
                     why_set(why, why_cap, "stick is not part of this build"); return 0;
                 }
                 break;
+            case ACE_KEY_LOAD:
+                if (strcmp(v, "off") == 0) { c.load = 0; ok = 1; }
+                else if (strcmp(v, "fast") == 0) { c.load = 1; ok = 1; }
+                if (ok && c.load && !ACE_HAS_LOAD) {
+                    why_set(why, why_cap, "load is not part of this build"); return 0;
+                }
+                break;
             case ACE_KEY_TIER:
                 if (strcmp(v, "enhanced") == 0) { c.tier = ACE_TIER_ENHANCED; ok = 1; }
                 else if (strcmp(v, "ace") == 0) { c.tier = ACE_TIER_ACE; ok = 1; }
@@ -165,6 +173,8 @@ int ace_parse(const char *spec, AceConfig *out, char *why, size_t why_cap) {
     /* An Ace item (contract 11.3.6): only an Ace-tier line may turn it on. */
     if (c.cull && c.tier != ACE_TIER_ACE) { why_set(why, why_cap, "cull needs tier=ace"); return 0; }
     if (c.stick && c.tier != ACE_TIER_ACE) { why_set(why, why_cap, "stick needs tier=ace"); return 0; }
+    /* An Ace item (contract 11.3.10): it changes guest timing, for one title's declared waits. */
+    if (c.load && c.tier != ACE_TIER_ACE) { why_set(why, why_cap, "load needs tier=ace"); return 0; }
     c.on = 1;
     if (out) *out = c;
     why_set(why, why_cap, "");
@@ -194,6 +204,11 @@ int ace_format(const AceConfig *c, char *out, size_t cap) {
         const int m = snprintf(out + n, cap - (size_t)n, ";stick=%d", c->stick);
         n = m < 0 ? -1 : n + m;
     }
+    /* Likewise load, after stick: a missing load is off. */
+    if (n > 0 && (size_t)n < cap && c && c->on && c->load) {
+        const int m = snprintf(out + n, cap - (size_t)n, ";load=fast");
+        n = m < 0 ? -1 : n + m;
+    }
     /* The same for cull, which stays last: written only when on. */
     if (n > 0 && (size_t)n < cap && c && c->on && c->cull) {
         const int m = snprintf(out + n, cap - (size_t)n, ";cull=on");
@@ -217,9 +232,14 @@ static uint64_t s_af_failures;
 static unsigned long s_cull_untracked;
 static unsigned long long s_stick_samples;   /* samples off rest the stick remap passed through */
 static int s_stick_host;                     /* the host dead zone it used last, in centred counts */
+static unsigned long long s_load_skipped;
+static unsigned s_load_run;          /* consecutive logic updates with a skip, this one included */
+static unsigned s_load_run_max;
+static int s_load_update_skipped;    /* a wait was skipped since the last update began */
+static int s_load_paced;             /* the guard fired: nothing is skipped for the rest of the run */
 
 static const char *const k_feature_key[ACE_FEATURE_COUNT] = {
-    "af", "text", "readout", "notice", "wide", "smooth", "sas", "tess", "stick", "cull"
+    "af", "text", "readout", "notice", "wide", "smooth", "sas", "tess", "stick", "load", "cull"
 };
 
 /* The run's observation state. */
@@ -284,6 +304,11 @@ int ace_init_spec(const char *spec, const char *report_path) {
     s_cull_untracked = 0;
     s_stick_samples = 0;
     s_stick_host = 0;
+    s_load_skipped = 0;
+    s_load_run = 0;
+    s_load_run_max = 0;
+    s_load_update_skipped = 0;
+    s_load_paced = 0;
     s_af_device = 0;
     s_report_path[0] = '\0';
     snprintf(s_spec, sizeof(s_spec), "off");
@@ -307,6 +332,9 @@ int ace_init_spec(const char *spec, const char *report_path) {
         fprintf(stderr, "ACE_MODE: stick remap %d (the host stick starts past the game's square dead "
                         "zone of %d counts; the game reads changed stick values)\n",
                 s_req.stick, s_req.stick);
+    if (s_req.load)
+        fprintf(stderr, "ACE_MODE: load fast (a title's declared loading waits return at once; "
+                        "guest timing changes)\n");
     if (s_req.cull) fprintf(stderr, "ACE_MODE: cull on (a title's own culling is widened to the wings)\n");
     return 1;
 }
@@ -333,8 +361,9 @@ void ace_feature_unavailable(AceFeature feature, const char *reason) {
     case ACE_FEATURE_WIDE: s_eff.wide = 0; break;
     case ACE_FEATURE_SMOOTH: s_eff.smooth = 0; break;
     case ACE_FEATURE_STICK: s_eff.stick = 0; break;
-    case ACE_FEATURE_CULL: s_eff.cull = 0; break;
     case ACE_FEATURE_SAS: s_eff.sas = 0; break;
+    case ACE_FEATURE_LOAD: s_eff.load = 0; break;
+    case ACE_FEATURE_CULL: s_eff.cull = 0; break;
     default: s_eff.tess = 0; break;
     }
     fprintf(stderr, "ACE_MODE: %s unavailable (%s)\n", k_feature_key[feature], s_unavailable[feature]);
@@ -403,6 +432,34 @@ void ace_stick_sample(uint8_t *lx, uint8_t *ly, int host_counts) {
     s_confirmed[ACE_FEATURE_STICK] = 1;
 }
 
+int nk_ace_load_fast(const char *site, uint32_t pc) {
+    if (!g_ace_on || !s_eff.load) return 0;
+    s_confirmed[ACE_FEATURE_LOAD] = 1;   /* a declared wait was reached with the part on */
+    if (s_load_paced) return 0;          /* the guard fired: the stock call runs */
+    if (!s_load_update_skipped) {
+        s_load_update_skipped = 1;
+        if (++s_load_run > s_load_run_max) s_load_run_max = s_load_run;
+    }
+    s_load_skipped++;
+    if (s_load_run >= ACE_LOAD_PACING_UPDATES) {
+        s_load_paced = 1;
+        fprintf(stderr, "ENHANCEMENT_LOAD_PACING: site %s at 0x%08x was skipped in %u logic updates in a row, "
+                        "so it paces logic updates, not a load; every load wait runs as stock for the rest "
+                        "of the run\n", site ? site : "?", (unsigned)pc, s_load_run);
+    }
+    return 1;
+}
+
+void nk_ace_load_update(void) {
+    if (!g_ace_on || !s_eff.load || s_load_paced) return;
+    if (!s_load_update_skipped) s_load_run = 0;   /* the update that ended skipped nothing */
+    s_load_update_skipped = 0;
+}
+
+unsigned long long ace_load_waits_skipped(void) { return s_load_skipped; }
+unsigned ace_load_skip_max_run(void) { return s_load_run_max; }
+int ace_load_paced(void) { return s_load_paced; }
+
 void ace_confirm(AceFeature feature) {
     if (g_ace_on && (unsigned)feature < ACE_FEATURE_COUNT) s_confirmed[feature] = 1;
 }
@@ -446,6 +503,7 @@ size_t ace_feature_words(char *out, size_t cap) {
     if (s_eff.text) used = words_add(out, cap, used, "crisp keyboard");
     if (s_eff.wide) used = words_add(out, cap, used, "ultrawide");
     if (s_eff.stick) used = words_add(out, cap, used, "stick remap");
+    if (s_eff.load) used = words_add(out, cap, used, "short loads");
     if (s_eff.cull) used = words_add(out, cap, used, "wider culling");
     if (s_eff.smooth) used = words_add(out, cap, used, "smooth motion");
     if (s_eff.sas) used = words_add(out, cap, used, "clean pitched sound");
@@ -1041,6 +1099,10 @@ size_t ace_report_json(char *out, size_t cap) {
     if (s_req.stick) ACE_PUT("  \"stick\": {\"counts\": %d, \"host_dead_zone\": %d, "
                              "\"samples_remapped\": %llu},\n",
                              s_req.stick, s_stick_host, s_stick_samples);
+    if (s_req.load) ACE_PUT("  \"load\": %s,\n  \"load_waits_skipped\": %llu,\n  \"load_skip_max_run\": %u,\n"
+                            "  \"load_paced\": %s,\n",
+                            s_eff.load ? "true" : "false", s_load_skipped, s_load_run_max,
+                            s_load_paced ? "true" : "false");
     if (s_req.cull) ACE_PUT("  \"cull\": %s,\n  \"cull_untracked\": %lu,\n",
                             s_eff.cull ? "true" : "false", s_cull_untracked);
     ACE_PUT("  \"unavailable\": {");
@@ -1133,9 +1195,10 @@ void ace_finish(void) {
     if (!g_ace_on) return;
     /* A feature that is on but never ran: its renderer or presenter did not start. */
     static const int has[ACE_FEATURE_COUNT] = { 1, 1, 1, 1, ACE_HAS_WIDE, ACE_HAS_SMOOTH, ACE_HAS_SAS, ACE_HAS_TESS,
-                                                ACE_HAS_STICK, ACE_HAS_CULL };
+                                                ACE_HAS_STICK, ACE_HAS_LOAD, ACE_HAS_CULL };
     const int on[ACE_FEATURE_COUNT] = { s_eff.af > 0, s_eff.text, s_eff.readout, s_eff.notice,
                                         s_eff.wide, s_eff.smooth, s_eff.sas, s_eff.tess, s_eff.stick,
+                                        s_eff.load,
                                         s_eff.cull };
     for (int f = 0; f < ACE_FEATURE_COUNT; f++) {
         if (has[f] && on[f] && !s_confirmed[f])
@@ -1143,10 +1206,15 @@ void ace_finish(void) {
                 ? "did not run: this title has no culling package in its build, or Widescreen is off"
                 : f == ACE_FEATURE_STICK
                 ? "did not run: no live stick sample left its rest position in analog mode"
+                : f == ACE_FEATURE_LOAD
+                ? "did not run: this title's build declares no load part, or none of its waits was reached"
                 : "did not run: its renderer or presenter did not start");
     }
     size_t len = ace_report_json(json, sizeof(json));
     fprintf(stderr, "ACE_MODE: exit (%s; rate %s)\n", s_spec, ace_rate_name(dominant_rate()));
+    if (s_req.load) fprintf(stderr, "ACE_MODE: load waits skipped %llu (longest run %u logic updates; %s)\n",
+                            s_load_skipped, s_load_run_max,
+                            s_load_paced ? "paced updates, skipping stopped" : "no pacing seen");
     if (s_req.smooth && s_have_aux_stats) {
         const AceSmoothAuxStats *a = &s_aux_stats;
         fprintf(stderr, "ACE_MODE: smooth inputs (pairs %llu: HUD mask %llu, depth %llu; HUD boxes kept "

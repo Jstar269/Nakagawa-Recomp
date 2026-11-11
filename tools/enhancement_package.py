@@ -97,6 +97,25 @@ CODE_HOOK_TRANSFORMS = frozenset({
     "clip_x_widen",
 })
 
+# Ace parts (contract section 9.8): per-title items of the Ace tier that a timing package carries
+# beside its 60 Hz sites. Each part is gated at run time by its own SR_ACE key, never by
+# SR_EXPERIMENTAL_60HZ. Their transforms are a set of their own, disjoint from SITE_TRANSFORMS,
+# so a 60 Hz transform in ace_parts, or an ace_parts transform in sites, refuses by construction.
+ACE_PART_NAMES = frozenset({"load"})
+ACE_PART_TRANSFORMS = frozenset({"vblank_wait_skip"})
+ACE_PART_KEYS = frozenset({"sites"})
+ACE_PART_SITE_KEYS = frozenset({
+    "id",
+    "function",
+    "insn_offset",
+    "stock_digest",
+    "word_count",
+    "transform",
+})
+# The one import a vblank_wait_skip site may call: codegen checks the jal's target stub.
+VBLANK_WAIT_SKIP_NID = 0x984C27E7
+VBLANK_WAIT_SKIP_IMPORT = "sceDisplayWaitVblankStart"
+
 # What a site's instruction builds, when its encoding alone cannot say: the upper
 # word of a double is built by a lui like a float, with a different exponent field.
 SITE_OPERANDS = frozenset({
@@ -177,6 +196,7 @@ ROOT_KEYS = frozenset({
     "update_boundary",
     "data_sites",
     "data_files",
+    "ace_parts",
 })
 
 REQUIRED_ROOT_KEYS = frozenset({
@@ -201,6 +221,7 @@ OPTIONAL_TIMING_PACKAGE_KEYS = frozenset({
     "update_boundary",
     "data_sites",
     "data_files",
+    "ace_parts",
 })
 
 # A data site: constants in the executable's loaded data, rescaled once at load.
@@ -717,7 +738,7 @@ def validate_package(data: Any) -> dict[str, Any]:
                 fail(f"sites[{idx}].transform",
                      f"{site['transform']} writes guest memory: the package must name the capability "
                      f"{capability!r} in capabilities")
-        _validate_requires(sites)
+        _validate_requires(sites, _ace_part_ids(data))
 
         # Validate update_boundary: where one logic update begins. Gated sites run on
         # alternate updates counted there, so a package that gates must declare it.
@@ -747,8 +768,110 @@ def validate_package(data: Any) -> dict[str, Any]:
             _validate_data_sites(data["data_sites"])
         if "data_files" in data:
             _validate_data_files(data["data_files"])
+        if "ace_parts" in data:
+            _validate_ace_parts(data, seen_site_ids)
 
     return data
+
+
+def _validate_ace_parts(data: Mapping[str, Any], site_ids: set[str]) -> None:
+    """``ace_parts`` (contract section 9.8): named parts, each a list of one-word sites.
+
+    Site ids and instruction words share one namespace with ``sites`` and the
+    ``update_boundary``: an ace_parts site may not reuse an id or cover a word either
+    already covers, may not declare ``requires``, and no ``requires`` may name it. A
+    ``load`` part needs an ``update_boundary``, and none of its sites may be in that
+    function. Here words and functions are compared by name; a published package's are
+    compared again by site-map address (:func:`_check_ace_part_namespace`), and codegen
+    compares the resolved addresses.
+    """
+    parts = data["ace_parts"]
+    if not isinstance(parts, dict) or not parts:
+        fail("ace_parts", "ace_parts must be a non-empty object of part name -> part")
+    unknown_parts = sorted(set(parts) - ACE_PART_NAMES)
+    if unknown_parts:
+        fail("ace_parts", f"Unknown ace part {unknown_parts}; must be one of {sorted(ACE_PART_NAMES)}")
+    if "load" in parts and "update_boundary" not in data:
+        # The boundary marks the logic update's function, which no skipped wait may pace;
+        # without it nothing would keep a load site out of the update loop.
+        fail("update_boundary", "A package with ace_parts.load must declare update_boundary: no "
+                                "vblank_wait_skip site may be in the function where a logic update begins")
+    for name in sorted(parts):
+        part_path = f"ace_parts.{name}"
+        part = parts[name]
+        _check_keys(part, part_path, ACE_PART_KEYS, ("sites",), "ace part")
+        sites = part["sites"]
+        if not isinstance(sites, list) or not sites:
+            fail(f"{part_path}.sites", "an ace part's sites must be a non-empty array")
+        for idx, site in enumerate(sites):
+            path = f"{part_path}.sites[{idx}]"
+            if isinstance(site, dict) and "requires" in site:
+                fail(f"{path}.requires", "an ace_parts site cannot declare requires: it runs on its own "
+                                         "SR_ACE key, never on another site's applications")
+            _check_keys(site, path, ACE_PART_SITE_KEYS,
+                        ("id", "function", "insn_offset", "stock_digest", "transform"), "ace part site")
+            _check_id(site["id"], f"{path}.id", site_ids, "site")
+            _check_instruction_location(site, path, "site")
+            if "word_count" in site:
+                word_count = site["word_count"]
+                if not isinstance(word_count, int) or isinstance(word_count, bool) or word_count != 1:
+                    fail(f"{path}.word_count", f"an ace_parts site is one word: word_count must be 1, "
+                                               f"got {word_count!r}")
+            else:
+                site["word_count"] = 1
+            transform = site["transform"]
+            if not isinstance(transform, str) or transform not in ACE_PART_TRANSFORMS:
+                fail(f"{path}.transform", f"Unknown ace part transform: {transform!r}; must be one of "
+                                          f"{sorted(ACE_PART_TRANSFORMS)}")
+    _check_ace_part_namespace(data, lambda fn: fn, "by name")
+
+
+def _check_ace_part_namespace(data: Mapping[str, Any], fn_key: Any, how: str) -> None:
+    """Refuse an ``ace_parts`` site on a word that a ``sites`` entry (any of its ``word_count``
+    words) or the ``update_boundary`` covers, or on another part site's word, and a
+    ``vblank_wait_skip`` site in the boundary's function. ``fn_key`` maps a function name to
+    what identifies the function: the name itself, or a published site map's address, so that
+    two names for one address are one function. Only that function is checked: nothing walks
+    the call graph, so a wait in a caller or a callee of it passes here and rests on the site's
+    own evidence (contract section 11.3.10, "What the tools check")."""
+    def word(fn: str, offset: int) -> tuple[Any, int]:
+        key = fn_key(fn)
+        # An address names the word itself; a name stays paired with its offset.
+        return (None, key + offset) if isinstance(key, int) else (key, offset)
+
+    covered: dict[tuple[Any, int], str] = {}
+    for site in data.get("sites", ()):
+        for i in range(int(site.get("word_count", 1))):
+            covered.setdefault(word(site["function"], int(site["insn_offset"]) + 4 * i),
+                               f"site {site['id']!r}" + (f" (its word {i + 1})" if i else ""))
+    boundary = data.get("update_boundary")
+    if boundary is not None:
+        covered.setdefault(word(boundary["function"], int(boundary["insn_offset"])), "the update_boundary")
+    for path, site in ace_part_sites(data):
+        pos = word(site["function"], int(site["insn_offset"]))
+        if pos in covered:
+            fail(path, f"an ace_parts site may not cover a word {covered[pos]} already covers "
+                       f"({site['function']!r}, insn_offset={site['insn_offset']}, compared {how})")
+        covered[pos] = f"site {site['id']!r}"
+        if (site["transform"] == "vblank_wait_skip" and boundary is not None
+                and fn_key(site["function"]) == fn_key(boundary["function"])):
+            # The wait would sit in the loop that runs the logic update: skipping it would run
+            # updates unpaced, so game time and the update counter would run fast.
+            fail(path, f"a vblank_wait_skip site may not be in the update_boundary's function "
+                       f"{boundary['function']!r} (compared {how}): skipping that wait would run "
+                       f"logic updates unpaced")
+
+
+def _ace_part_ids(data: Mapping[str, Any]) -> set[str]:
+    """The site ids an ``ace_parts`` section declares, read before it is validated."""
+    ids: set[str] = set()
+    parts = data.get("ace_parts")
+    if isinstance(parts, dict):
+        for part in parts.values():
+            sites = part.get("sites") if isinstance(part, dict) else None
+            if isinstance(sites, list):
+                ids.update(s["id"] for s in sites if isinstance(s, dict) and isinstance(s.get("id"), str))
+    return ids
 
 
 def _validate_site_extras(site: Mapping[str, Any], path: str) -> None:
@@ -924,8 +1047,9 @@ def _validate_reference_roles(sites: Sequence[Mapping[str, Any]]) -> None:
                 fail(path, f"site {name!r} is named as {roles[name]} and as {key}: one site pins one quantity")
 
 
-def _validate_requires(sites: Sequence[Mapping[str, Any]]) -> None:
-    """``requires`` names other sites of the package that declare ``stock_values``."""
+def _validate_requires(sites: Sequence[Mapping[str, Any]], ace_ids: frozenset[str] | set[str] = frozenset()) -> None:
+    """``requires`` names other sites of the package that declare ``stock_values``, never an
+    ``ace_parts`` site (``ace_ids``)."""
     by_id = {site["id"]: site for site in sites}
     for idx, site in enumerate(sites):
         required = site.get("requires")
@@ -937,6 +1061,9 @@ def _validate_requires(sites: Sequence[Mapping[str, Any]]) -> None:
         for name in required:
             if name == site["id"]:
                 fail(path, f"a site cannot require its own id {name!r}")
+            if name in ace_ids:
+                fail(path, f"requires names {name!r}, an ace_parts site: a 60 Hz site cannot wait "
+                           "on an Ace part, which runs only on its own SR_ACE key")
             target = by_id.get(name)
             if target is None or ("stock_values" not in target and "stock_value_digests" not in target):
                 fail(path, f"requires names sites that declare stock_values or stock_value_digests; "
@@ -1231,12 +1358,23 @@ def _words_bytes(words: Sequence[int]) -> bytes:
     return b"".join(struct.pack("<I", int(w) & 0xFFFFFFFF) for w in words)
 
 
+def ace_part_sites(data: Mapping[str, Any]) -> list[tuple[str, Mapping[str, Any]]]:
+    """Every ``ace_parts`` site of a validated declaration, with its path, in part-name order."""
+    out: list[tuple[str, Mapping[str, Any]]] = []
+    for name in sorted(data.get("ace_parts", {})):
+        for idx, site in enumerate(data["ace_parts"][name]["sites"]):
+            out.append((f"ace_parts.{name}.sites[{idx}]({site['id']})", site))
+    return out
+
+
 def _published_names(data: Mapping[str, Any]) -> set[str]:
     """Every symbolic name a declaration resolves: the names its site map must hold."""
     names: set[str] = set()
     for site in data.get("sites", ()):
         names.add(site["function"])
         names.update(site.get("alternates", ()))
+    for _path, site in ace_part_sites(data):
+        names.add(site["function"])
     if "update_boundary" in data:
         names.add(data["update_boundary"]["function"])
     for site in data.get("data_sites", ()):
@@ -1297,6 +1435,9 @@ def _validate_published_package(data: dict[str, Any]) -> dict[str, Any]:
     unused = sorted(set(site_map) - used)
     if unused:
         fail("site_map", f"site_map names {unused}, which no site uses: publish no other addresses")
+    if "ace_parts" in declaration:
+        # Two names may share an address, so the namespace is checked again by address.
+        _check_ace_part_namespace(declaration, lambda fn: int(site_map[fn], 16), "by site-map address")
     return data
 
 
@@ -1444,6 +1585,9 @@ def _stock_locations(declaration: Mapping[str, Any],
         boundary = declaration["update_boundary"]
         out.append(("update_boundary", boundary, "stock_digest",
                     int(symbols[boundary["function"]]) + int(boundary["insn_offset"]), 1))
+    for path, site in ace_part_sites(declaration):
+        out.append((path, site, "stock_digest",
+                    int(symbols[site["function"]]) + int(site["insn_offset"]), 1))
     return out
 
 
@@ -3001,11 +3145,57 @@ def verify_and_resolve_update_boundary(
     return {"fn_addr": fn_addr, "site_addr": site_addr, "stock_word": int(words[0]) & 0xFFFFFFFF}
 
 
+def verify_and_resolve_ace_parts(
+    pkg_data: Mapping[str, Any],
+    *,
+    symbol_to_addr: Mapping[str, int],
+    read_words_fn: Any,
+    known_functions: Sequence[int] = (),
+) -> dict[int, dict[str, Any]]:
+    """Resolve and verify every ``ace_parts`` site fail-closed (contract section 9.8).
+
+    Returns ``vaddr -> site dict`` augmented with ``part``, ``fn_addr``, ``site_addr``,
+    ``stock_words`` and its ``rewrite``. A ``vblank_wait_skip`` site must be a ``jal``; that
+    its target is the ``sceDisplayWaitVblankStart`` import stub is checked by codegen, which
+    owns the import table. The executable digest is checked by :func:`verify_and_resolve_sites`,
+    which callers run first.
+    """
+    validated = validate_package(dict(pkg_data))
+    known_set = set(int(a) for a in known_functions)
+    cache: dict[str, int] = {}
+    resolved: dict[int, dict[str, Any]] = {}
+    for name in sorted(validated.get("ace_parts", {})):
+        for idx, site in enumerate(validated["ace_parts"][name]["sites"]):
+            path = f"ace_parts.{name}.sites[{idx}]({site['id']})"
+            fn_addr = _resolve_function_address(
+                validated, site["function"], path, symbol_to_addr, read_words_fn, known_functions, cache,
+            )
+            site_addr, words = _read_verified_words(
+                site["function"], fn_addr, int(site["insn_offset"]), 1, site["stock_digest"], path,
+                read_words_fn, known_set,
+            )
+            word = int(words[0]) & 0xFFFFFFFF
+            if site["transform"] == "vblank_wait_skip" and (word >> 26) != 0x03:
+                fail(path, f"a vblank_wait_skip site must be a jal to {VBLANK_WAIT_SKIP_IMPORT}, "
+                           f"got 0x{word:08x} (fail-closed refusal)")
+            if site_addr in resolved:
+                fail(path, f"Duplicate resolved instruction address 0x{site_addr:08x} (fail-closed refusal)")
+            entry = dict(site)
+            entry.update(part=name, fn_addr=fn_addr, site_addr=site_addr, stock_words=[word],
+                         rewrite={"kind": site["transform"]})
+            resolved[site_addr] = entry
+    return resolved
+
+
 def _function_locations(validated: Mapping[str, Any], fn_name: str) -> list[tuple[int, int, str]]:
     """Every (insn_offset, word_count, stock_digest) the package pins inside ``fn_name``."""
     locations = [
         (int(s["insn_offset"]), int(s.get("word_count", 1)), s["stock_digest"])
         for s in validated["sites"] if s["function"] == fn_name
+    ]
+    locations += [
+        (int(s["insn_offset"]), 1, s["stock_digest"])
+        for _path, s in ace_part_sites(validated) if s["function"] == fn_name
     ]
     boundary = validated.get("update_boundary")
     if boundary is not None and boundary["function"] == fn_name:

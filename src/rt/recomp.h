@@ -1558,6 +1558,20 @@ int sr_enhancement_logic_slowed(unsigned *rate);
  * a matrix at every call cannot be scaled twice; the call at the site must leave each listed matrix
  * describing the camera it was built for (rewritten, or unchanged since the last call). */
 void sr_enhancement_widen_clip_x(uint32_t base, const uint32_t *offsets, uint32_t count);
+/* A vblank_wait_skip site of a package's Ace load part (section 9.8), from generated code at the
+ * site's jal to sceDisplayWaitVblankStart, after its delay slot (src/rt/hle_display.c): nonzero
+ * only while the run's Ace line carries load=fast (nk_ace_load_fast(), src/rt/ace.c, which counts
+ * each skip) and waits are permitted, and then that call is skipped, the thread blocks for 1 us
+ * (sceKernelDelayThread(1)'s delay wait, so threads of any priority run) and $v0 = 0. Where waits are
+ * not permitted it returns 0, so the stock call runs and returns CAN_NOT_WAIT. Never gated by
+ * SR_EXPERIMENTAL_60HZ. site and pc are the site's id and its jal's address. It stops skipping
+ * for the rest of the run once a skip has happened in ACE_LOAD_PACING_UPDATES (src/rt/ace.h)
+ * logic updates in a row, as counted by nk_ace_load_update(). */
+int nk_ace_load_skip_wait(CpuState *s, const char *site, uint32_t pc);
+/* One logic update begins: generated code calls it at the package's update_boundary, ungated,
+ * when the package has an Ace load part (src/rt/ace.c; contract 11.3.10). It only feeds the load
+ * part's pacing guard and does nothing unless the run's load=fast is in effect. */
+void nk_ace_load_update(void);
 
 /* The kernel's record of the main module, emitted by tools/codegen.py from the ELF (PT_LOAD
  * segments, SceModuleInfo, section or program headers, and the syslib's

@@ -1194,6 +1194,7 @@ static const int k_part_tess_values[] = {2, 3, 4, 0};
 static const char *const k_part_tess_labels[] = {"2x", "3x", "4x", "Off"};
 static const char *const k_part_tess_words[] = {"2", "3", "4", "off"};
 static const char *const k_part_wide_words[] = {"fill", "off"};
+static const char *const k_part_load_words[] = {"fast", "off"};
 static const char *const k_part_upscale_labels[] = {"FSR 1", "Off"};
 static const char *const k_part_upscale_words[] = {"fsr1", "off"};
 
@@ -1242,6 +1243,11 @@ static const PlayerEnhancedPartInfo k_enhanced_parts[PLAYER_PART_COUNT] = {
     {"stick", "Stick dead zone",
      "Ace only, in games that ignore part of the stick. Small pushes count; the feel changes.",
      2, k_part_switch_values, k_part_switch_labels, k_part_switch_words, 0},
+    /* A guest-visible item (contract 11.3.10) that changes guest timing: off by default and in no
+       preset; it matters only for a title whose own package declares a load part, and only in Ace. */
+    {"load", "Short loads",
+     "Ace only, in games with a loading-wait package. Skips those waits; changes the game's timing.",
+     2, k_part_switch_values, k_part_switch_labels, k_part_load_words, 0},
 };
 
 const PlayerEnhancedPartInfo *player_enhanced_part(int part) {
@@ -2295,12 +2301,13 @@ void player_app_cycle_present_scaling(PlayerApp *app, int direction) {
    its 1x frame is enlarged about 4x or more on any screen of 1080p or more, past that range, on
    the weakest GPUs (Medium's and Handheld's frame passes it too on 1440p and 4K); High
    turns it off as Ultra without it, the plain 4x picture. No row sets frame pacing, Smooth
-   motion, Widescreen, texture filtering, sound, the readout, the badge or Finer patches
-   (which changes GE timing, section 11.3.7): those stay the library's and each game's own. docs/PLAYER_UI_DESIGN.md lists the same values, and
+   motion, Widescreen, texture filtering, sound, the readout, the badge, Finer patches
+   (which changes GE timing, section 11.3.7) or Short loads (which changes guest
+   timing, section 11.3.10): those stay the library's and each game's own. docs/PLAYER_UI_DESIGN.md lists the same values, and
    test_graphics_presets checks that every other part is -1, so a new part needs a choice. */
 #define PRESET_PART_LIST(X, text, upscale)                                                \
     X(FILTERING, -1) X(TEXT, (text)) X(READOUT, -1) X(NOTICE, -1) X(WIDE, -1) X(SMOOTH, -1) \
-    X(SAS, -1) X(TESS, -1) X(CULL, -1) X(UPSCALE, (upscale)) X(STICK, -1)
+    X(SAS, -1) X(TESS, -1) X(CULL, -1) X(UPSCALE, (upscale)) X(STICK, -1) X(LOAD, -1)
 #define PRESET_PART_SET(part, value) [PLAYER_PART_##part] = value,
 #define PRESET_PART_ONE(part, value) + 1
 #define PRESET_PARTS(text, upscale) {PRESET_PART_LIST(PRESET_PART_SET, text, upscale)}
@@ -3072,20 +3079,27 @@ bool player_play_launch_line(const PlayerPlayResolved *play, char *out, size_t c
     used = (size_t)n;
     for (int p = 0; p < PLAYER_PART_COUNT; p++) {
         /* The upscaler travels as SR_PRESENT_UPSCALE (player_play_present_upscale), which the
-           launcher exports for every session; the runtime's SR_ACE line has no such key. Stick
-           and cull come last, in the Ace line's own order (src/rt/ace.c), whatever the enum's. */
-        if (p == PLAYER_PART_UPSCALE || p == PLAYER_PART_STICK || p == PLAYER_PART_CULL) continue;
+           launcher exports for every session; the runtime's SR_ACE line has no such key. Stick,
+           load and cull come last, in the Ace line's own order (src/rt/ace.c), whatever the enum's. */
+        if (p == PLAYER_PART_UPSCALE || p == PLAYER_PART_STICK || p == PLAYER_PART_LOAD ||
+            p == PLAYER_PART_CULL) continue;
         n = snprintf(out + used, cap - used, ";%s=%s", k_enhanced_parts[p].key,
                      enhanced_part_word(p, play->part[p]));
         if (n <= 0 || (size_t)n >= cap - used) { out[0] = '\0'; return false; }
         used += (size_t)n;
     }
-    /* A missing stick or cull is off (contract 11.2 item 2): the line carries each key only when
-       it is on in an Ace launch. Stick also needs the title's declared dead zone: its value is
+    /* A missing stick, load or cull is off (contract 11.2 item 2): the line carries each key only
+       when it is on in an Ace launch. Stick also needs the title's declared dead zone: its value is
        that count, not the part's word. */
     if (play->mode == PLAYER_PLAY_ACE && play->part[PLAYER_PART_STICK] == 1 && play->stick_counts >= 1 &&
         play->stick_counts <= ACE_STICK_COUNTS_MAX) {
         n = snprintf(out + used, cap - used, ";stick=%d", play->stick_counts);
+        if (n <= 0 || (size_t)n >= cap - used) { out[0] = '\0'; return false; }
+        used += (size_t)n;
+    }
+    if (play->mode == PLAYER_PLAY_ACE && play->part[PLAYER_PART_LOAD] == 1) {
+        n = snprintf(out + used, cap - used, ";%s=%s", k_enhanced_parts[PLAYER_PART_LOAD].key,
+                     enhanced_part_word(PLAYER_PART_LOAD, 1));
         if (n <= 0 || (size_t)n >= cap - used) { out[0] = '\0'; return false; }
         used += (size_t)n;
     }
