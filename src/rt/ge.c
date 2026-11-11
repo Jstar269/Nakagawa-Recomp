@@ -1327,13 +1327,14 @@ static void read_pos_one(uint32_t addr, const VFmt *v, float *x, float *y, float
          * through-mode float decoder applies, and which depth the hardware stores for
          * such a z is an open probe. An infinite z saturates as well (+inf to 65535, -inf
          * to 0), so its primitive is drawn, where the non-finite vertex rule dropped it
-         * before. PPSSPP draws a NaN z too, at depth 0; here a NaN stays NaN and the
-         * non-finite vertex rule still drops the primitive. Transform mode is untouched:
-         * its z is a model coordinate. */
+         * before. A NaN z is drawn too: PSP-GE-THROUGHZ-001 (docs/HARDWARE_ORACLE.md,
+         * 2026-11-10, PSP-3000) drew a through-mode sprite with both vertices at z = NaN.
+         * The depth it stores was not read; it takes depth 0 here, UNMEASURED (PPSSPP's
+         * rule too). Transform mode is untouched: its z is a model coordinate. */
         if (v->through) {
             if (*z >= 65535.0f) *z = 65535.0f;
             else if (*z > 0.0f) *z = (float)(int)*z;
-            else if (*z <= 0.0f) *z = 0.0f;
+            else *z = 0.0f;   /* z <= 0, or NaN */
         }
     } else if (v->pos_fmt == 2) {
         if (v->through) {
