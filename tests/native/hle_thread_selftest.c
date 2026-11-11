@@ -28975,15 +28975,15 @@ static void test_savedata_thread_ended_inside_a_parked_save(void) {
  * virtual clock and again under the deterministic clock (SR_DETERMINISTIC_CLOCK=1), and holds
  * on both.
  *
- * MUTANT: drop the sched_delay_current call in h_IoRead -- the long read takes no guest time, and
+ * MUTANT: drop h_IoRead's last sched_delay_current (the rest of the drive's time) -- the long read takes no guest time, and
  *   no block is output and the weaker thread does not count during it.
  * MUTANT: h_IoRead waits whatever the result -- the refused read takes guest time.
  * MUTANT: drop io_read_caller_can_wait from h_IoRead -- the read made with dispatch disabled
  *   takes guest time. MUTANT: drop the on_umd test -- the Memory Stick read takes guest time.
  * MUTANT: hle_io_umd_read_us charges a sector count as bytes -- the long read takes the minimum.
  * MUTANT: io_async_complete_fd calls h_IoRead -- the waited queued read takes the drive's time.
- * MUTANT: sched_idle_wait steps a display period past a wait the slice already reached -- the
- *   one-sector read takes 16.7 ms and more. */
+ * The idle clock's own cases (a wait the slice reaches, a deadline before the VBLANK, a due
+ * source) are sched_selftest's: test_idle_virtual_clock_stops_at_a_deadline_before_the_vblank. */
 enum {
     URW_MAIN_ENTRY = 0x08a71000u,
     URW_SOUND_ENTRY = 0x08a71040u,
@@ -29209,10 +29209,12 @@ static void test_umd_read_parks_its_thread_for_the_drives_time(void) {
            "the long read's drive time spans several sound blocks, and one sector takes less");
 
     for (int deterministic = 0; deterministic <= 1; deterministic++) {
-        /* The fixture's own virtual clock is coarse: a pass with a thread ready adds 10 ms and one
-         * with none a display period, so a 5.8 ms block wait ends several blocks late. There the
-         * bound is one block; the deterministic clock keeps the drive's time in blocks. */
+        /* The fixture's own virtual clock is coarse: every scheduler pass that keeps time adds
+         * 10 ms, so a 5.8 ms block wait ends blocks late and a 100 us wait can take two such
+         * passes. There the bounds are one block and the long read's time; the deterministic
+         * clock keeps the drive's time in blocks and a short read under a display period. */
         const uint32_t expected = deterministic ? blocks - 1u : 1u;
+        const uint32_t brief_us = deterministic ? 16683u : drive_us;
         urw_run(deterministic, 0);
         if (s_urw_read != URW_SECTORS || s_urw_read_us < drive_us || s_urw_read_outputs < expected ||
             !s_urw_read_weak)
@@ -29227,9 +29229,9 @@ static void test_umd_read_parks_its_thread_for_the_drives_time(void) {
         expect(s_urw_read_outputs >= expected,
                "the sound thread outputs its blocks through the long read");
         expect(s_urw_read_weak != 0u, "a weaker thread runs while the reader waits for the drive");
-        expect(s_urw_short == 1u && s_urw_short_us >= minimum_us && s_urw_short_us < 16683u,
+        expect(s_urw_short == 1u && s_urw_short_us >= minimum_us && s_urw_short_us < brief_us,
                "a one-sector read waits the drive's minimum, not a display period");
-        expect(s_urw_file == 1024u && s_urw_file_ok && s_urw_file_us >= minimum_us && s_urw_file_us < 16683u,
+        expect(s_urw_file == 1024u && s_urw_file_ok && s_urw_file_us >= minimum_us && s_urw_file_us < brief_us,
                "a read from the middle of a disc file returns its bytes after the drive's minimum");
         expect(s_urw_refused == 0x80010016u && s_urw_refused_us == 0u,
                "a refused read returns at once");
@@ -29247,8 +29249,8 @@ static void test_umd_read_parks_its_thread_for_the_drives_time(void) {
      * while the host read is blocked. Made on the scheduler's thread, as before, the read
      * holds every thread until its 3 s of host time run out.
      * MUTANT: drop the hle_io_release_thread call in sr_hle_release_thread_resources -- the ended
-     *   reader's fetch stays in flight. MUTANT: io_iso_read drops the fetch's own offset -- the
-     *   disc file's bytes differ.
+     *   reader's fetch stays in flight. MUTANT: io_iso_read copies from half the offset into the
+     *   fetch (data + (offset - fetch->offset) / 2) -- the bytes served differ.
      * MUTANT: h_IoRead never asks for the worker (io_disc_fetch_start returns NULL) -- the
      *   gated read runs out. MUTANT: io_iso_read ignores the fetched bytes -- the disc is read
      *   again on the scheduler's thread, 1024 more reads than the worker's 64. */

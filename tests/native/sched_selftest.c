@@ -3434,6 +3434,30 @@ static void test_idle_virtual_clock_stops_at_a_deadline_before_the_vblank(void) 
     expect(s_vtime_us == 10000u && pick_next() == turbo_brief,
            "idle wait, turbo clock: a wait the 10 ms slice reaches runs with no display-period step");
 
+    /* A deadline that is not a thread's to run (a transfer window's end) and that the slice
+     * reached: the caller serves it now, and the thread still waiting is reached exactly on the
+     * next pass.
+     * MUTANT: the virtual-clock branch ignores a due source -- the clock steps to 16783 us. */
+    reset_sched();
+    begin_clock_fixture(0, 0u);
+    s_det_clock = 1;
+    s_det_slice_us = 100u;
+    s_vbl_next_us = 16683u;
+    int behind = mk(0x23cu, TH_WAIT_DELAY, 16);
+    s_tcb[behind].wake = 300u;
+    s_xfer_obj = 0x5a5a0001u;
+    s_xfer_owner_uid = 0u;
+    s_xfer_reserved = 0;
+    s_xfer_deadline = 50u;
+    s_cur = -1;
+    sched_idle_wait();
+    expect(s_vtime_us == 100u && s_pending_vblanks == 0u,
+           "idle wait, deterministic clock: a due source that is not a thread's is left to the caller, with no step");
+    sched_transfer_reset();
+    sched_idle_wait();
+    expect(s_vtime_us == 300u && pick_next() == behind,
+           "idle wait, deterministic clock: the thread still waiting is then reached exactly");
+
     /* A deadline after the next vblank: the clock steps one display period, as before. */
     reset_sched();
     begin_clock_fixture(0, 0u);
@@ -3460,6 +3484,22 @@ static void test_idle_virtual_clock_stops_at_a_deadline_before_the_vblank(void) 
     sched_idle_wait();
     expect(s_vtime_us == 100u + 16683u,
            "idle wait, deterministic clock: a deadline already passed leaves the display-period step");
+
+    /* The same suspended thread does not hide a later deadline: that one is reached exactly. */
+    reset_sched();
+    begin_clock_fixture(0, 0u);
+    s_det_clock = 1;
+    s_det_slice_us = 100u;
+    s_vbl_next_us = 16683u;
+    int stale = mk(0x23du, TH_WAIT_DELAY, 16);
+    s_tcb[stale].wake = 50u;
+    s_tcb[stale].suspended = 1;
+    int next = mk(0x23eu, TH_WAIT_DELAY, 16);
+    s_tcb[next].wake = 700u;
+    s_cur = -1;
+    sched_idle_wait();
+    expect(s_vtime_us == 700u && pick_next() == next,
+           "idle wait, deterministic clock: a deadline behind the clock does not hide the next one");
     s_det_clock = 0;
     s_det_slice_us = SCHED_DET_SLICE_US_DEFAULT;
     s_host_ns_fn = NULL;

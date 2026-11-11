@@ -228,12 +228,14 @@ zone setting, owned outside the scheduler and never the host's (#1382).
 In turbo mode time is fully
 deterministic at scheduler boundaries and never host-dependent [C1].
 On a virtual clock (turbo or deterministic) a scheduler with nothing to run first charges its
-boundary slice, as at any boundary. A thread whose wait that reaches runs at once. Otherwise
-the clock advances to the earliest wake deadline when that deadline comes before the next
-VBLANK, and by one display period when it does not. So a wait ends late by at most the slice
-(100 us on the deterministic clock, 10 ms on turbo) unless its deadline is past the next VBLANK
-(project decision, #1296: a 100 us device wait used to cost a whole display period whenever its
-thread was the only one).
+boundary slice, as at any boundary. A thread whose wait that charge reaches runs at once, and a
+due alarm, GE completion, VTimer or transfer window is served at once. Otherwise the clock
+advances to the earliest deadline still ahead when that deadline comes before the next VBLANK,
+and by one display period when it does not. So a wait whose deadline comes before the next
+VBLANK ends late by at most the slice (100 us on the deterministic clock, 10 ms on turbo); one
+whose deadline is at or past the next VBLANK can still end up to a display period late, because
+that step is a whole period and not a move to the VBLANK's edge (project decision, #1296: a
+100 us device wait used to cost a whole display period whenever its thread was the only one).
 
 ### 3.5 Sleep/wakeup banking and join
 

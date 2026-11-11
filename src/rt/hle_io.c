@@ -475,8 +475,9 @@ uint32_t io_read_now(CpuState *s) {
  * thread waits: the drive's minimum first, which every read waits anyway, then looking again
  * every IO_DISC_FETCH_POLL_US while the host is still reading. Then the read itself runs as it
  * always did, served from the fetched bytes (io_iso_read), and the rest of the drive's time,
- * if the host was quicker than the drive, is waited out. A read whose destination is not
- * writable guest memory is not fetched: it is refused as before, at once. So the read's results and refusals are the
+ * if the host was quicker than the drive, is waited out. A block-device read that will be
+ * refused (a zero count, a destination that cannot take every sector asked for) is not
+ * fetched: it is refused as before, at once. So the read's results and refusals are the
  * same call's either way, and whatever another thread did to the descriptor while the host
  * read is what the read finds: a span it no longer covers is read directly, as before. Under
  * the turbo and deterministic clocks the host read stays on the scheduler's thread, so guest
@@ -543,23 +544,28 @@ static void io_disc_fetch_drop(void *ctx) { free(ctx); }
 
 /* The span of the disc image a read of `count` to `dst` on `fd` would ask iso_read for, or 0
  * when nothing is to be fetched ahead: the read is not one of the disc image, or it would
- * transfer nothing, or its destination is not writable guest memory for the whole span (the
- * block device refuses such a read, and no host read of a guest-chosen size is made for one;
- * a file read to such a destination goes on as before, piece by piece). io_read_now decides
- * the read's result; this only looks. */
+ * transfer nothing, or it will be refused. For the block device that is hle_io_raw_umd_read's
+ * own test, in its order: the whole count asked for, before it is cut to the disc. For a
+ * file, a destination that leaves guest memory is not fetched for (no host read of a
+ * guest-chosen size is made for one) and the read goes on as before, piece by piece.
+ * io_read_now decides the read's result; this only looks. */
 static int io_disc_read_span(uint32_t fd, uint32_t dst, uint32_t count, uint32_t *lba,
                              uint32_t *offset, uint32_t *bytes) {
     if (fd >= (uint32_t)(sizeof(s_fds) / sizeof(s_fds[0])) || !s_fds[fd].used) return 0;
     const Fd *f = &s_fds[fd];
-    if (f->async.state == IO_ASYNC_PENDING || f->off >= f->size || count == 0u) return 0;
+    if (f->async.state == IO_ASYNC_PENDING || count == 0u) return 0;
     if (f->kind == FD_KIND_RAW_DEVICE && f->raw_umd) {
+        if (count > UINT32_MAX / IO_UMD_SECTOR_BYTES ||
+            !sr_guest_span_writable(dst, count * IO_UMD_SECTOR_BYTES))
+            return 0;
+        if (f->off >= f->size) return 0;
         if (count > f->size - f->off) count = f->size - f->off;
-        if (count > UINT32_MAX / IO_UMD_SECTOR_BYTES) return 0;
         *lba = f->off;
         *offset = 0u;
         *bytes = count * IO_UMD_SECTOR_BYTES;
-        return sr_guest_span_writable(dst, *bytes);
+        return 1;
     }
+    if (f->off >= f->size) return 0;
     if (f->kind != FD_KIND_FILE || f->host || f->flash0 || f->archive_vfs || f->pgd ||
         f->enhancement_data)
         return 0;
@@ -567,7 +573,9 @@ static int io_disc_read_span(uint32_t fd, uint32_t dst, uint32_t count, uint32_t
     *lba = f->lba;
     *offset = f->off;
     *bytes = count;
-    return sr_guest_span_writable(dst, count);
+    /* Any view of guest memory will do: the file loop writes byte by byte, so a span through a
+     * VRAM mirror is a read that works, and asking the bulk-pointer question would report it. */
+    return sr_guest_span_writable_any_view(dst, count);
 }
 
 static IoDiscFetch *io_disc_fetch_start(uint32_t fd, uint32_t dst, uint32_t count) {
@@ -638,7 +646,6 @@ uint32_t h_IoRead(CpuState *s) {
     const int on_umd = fd < (uint32_t)(sizeof(s_fds) / sizeof(s_fds[0])) && s_fds[fd].used &&
                        s_fds[fd].on_umd;
     if (!on_umd || !io_read_caller_can_wait()) return io_read_now(s);
-    const int sectors = s_fds[fd].raw_umd;   /* the block device counts sectors */
     sched_vtime_refresh();
     const uint64_t started = sched_vtime_us();
     IoDiscFetch *fetch = sched_host_work_usable() ? io_disc_fetch_start(fd, A1, A2) : NULL;
@@ -650,6 +657,8 @@ uint32_t h_IoRead(CpuState *s) {
         host_ns = sched_host_work_finish(fetch->work);
         s_io_disc_serving = fetch;
     }
+    /* The descriptor as it is now: another thread may have closed and reopened it meanwhile. */
+    const int sectors = s_fds[fd].used && s_fds[fd].raw_umd;   /* the block device counts sectors */
     const uint32_t result = io_read_now(s);   /* cannot wait: nothing else is served from the fetch */
     if (fetch) {
         s_io_disc_serving = NULL;

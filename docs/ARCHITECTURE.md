@@ -868,10 +868,10 @@ turbo virtual clock charged at the rate of the guest's work: a scheduler boundar
 `SR_DETERMINISTIC_SLICE_US` (default 100 µs, 1000 yield points at 10 million yield points per
 second; an estimate of about 33 cycles per yield point, not a measurement, and it decides guest
 results), a sleeper's deadline is reached by that work, an idle scheduler (no thread can run)
-charges its slice, runs a sleeper that reaches, and otherwise goes to the earliest deadline when
-it comes before the next VBLANK or advances one display period when it does not, as turbo's does,
-so a sleeper whose deadline is past the next VBLANK can wake up to 16.7 ms late but identically on
-every run, and no vblank watchdog reads the host clock. The
+charges its slice, runs a sleeper that charge reaches, and otherwise goes to the earliest deadline
+still ahead when it comes before the next VBLANK or advances one display period when it does not,
+as turbo's does, so a sleeper whose deadline is at or past the next VBLANK can wake up to 16.7 ms
+late but identically on every run, and no vblank watchdog reads the host clock. The
 RTC starts at 2012-01-01 00:00:00 UTC instead of the host's date, and the audio queue the guest
 paces against (`sceAudioOutput*Blocking`, `sceAudioGetChannelRestLength`, the PSMF player's audio
 lead) is a model that plays 44100 frames a second of guest time from the first push, not the host

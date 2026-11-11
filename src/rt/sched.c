@@ -3153,13 +3153,35 @@ static void sched_idle_wait(void) {
     if (s_pace_on && soonest != (uint64_t)-1 && soonest > s_vtime_us &&
         soonest - s_vtime_us < vblank_due_us())
         { sleep_until_us(soonest); scheduler_progress_time(); }
-    else if (!s_pace_on && soonest != (uint64_t)-1 && soonest > s_vtime_us &&
-             soonest < s_vbl_next_us) {
-        /* A virtual clock with nothing to run goes to a deadline that comes before the next
-         * VBLANK, not a whole display period on (#1296): a load of a thousand disc reads, each
-         * waiting for the drive, took a thousand VBLANKs under the deterministic clock. No
-         * VBLANK comes due on the way, so there is nothing to latch. */
-        s_vtime_us = soonest;
+    else if (!s_pace_on) {
+        /* A virtual clock with nothing to run (#1296). A deadline the slice reached that is
+         * not a thread's to run (an alarm, a GE completion, a VTimer, a transfer window's end)
+         * is the caller's to serve now. Otherwise the clock goes to the next deadline still
+         * ahead when that comes before the next VBLANK, and no VBLANK comes due on the way; a
+         * suspended thread's deadline already behind the clock holds nothing. Only when the
+         * next deadline is at or past the next VBLANK does the clock step a display period:
+         * it used to step one every time, so a load of a thousand disc reads, each waiting
+         * for the drive, took a thousand VBLANKs under the deterministic clock. */
+        uint64_t ahead = SCHED_WAIT_FOREVER;
+        int source_due = 0;
+        for (int i = 0; i < s_ntcb; i++)
+            if ((s_tcb[i].state == TH_WAIT_DELAY || s_tcb[i].state == TH_WAIT_OBJ) &&
+                s_tcb[i].wake > s_vtime_us && s_tcb[i].wake < ahead)
+                ahead = s_tcb[i].wake;
+        if (any_waiting) {
+            const uint64_t sources[4] = { sched_alarm_wake_deadline(), sched_ge_wake_deadline(),
+                                          sched_vtimer_wake_deadline(), sched_transfer_wake_deadline() };
+            for (int i = 0; i < 4; i++) {
+                if (sources[i] <= s_vtime_us) source_due = 1;
+                else if (sources[i] < ahead) ahead = sources[i];
+            }
+        }
+        if (source_due) return;
+        if (ahead < s_vbl_next_us) s_vtime_us = ahead;
+        else {
+            vblank_pace();
+            scheduler_latch_due_events();
+        }
     }
     else {
         vblank_pace();
