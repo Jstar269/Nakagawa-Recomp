@@ -387,7 +387,8 @@ void ace_feature_unavailable(AceFeature feature, const char *reason) {
     case ACE_FEATURE_TESS: s_eff.tess = 0; break;
     case ACE_FEATURE_LOAD: s_eff.load = 0; break;
     case ACE_FEATURE_CULL: s_eff.cull = 0; break;
-    default: s_eff.twin = 0; break;
+    case ACE_FEATURE_TWIN: s_eff.twin = 0; break;
+    default: break;
     }
     fprintf(stderr, "ACE_MODE: %s unavailable (%s)\n", k_feature_key[feature], s_unavailable[feature]);
 }

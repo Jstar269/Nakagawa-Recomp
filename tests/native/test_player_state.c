@@ -8337,7 +8337,8 @@ static void test_play_mode_stick_settings(void) {
        sequence: tess, twin, then stick, then cull. */
     r.part[PLAYER_PART_CULL] = 1;
     assert(player_play_launch_line(&r, line, sizeof(line)) &&
-           strcmp(line + strlen(line) - 17, ";stick=64;cull=on") == 0 && strstr(line, ";tess=off;twin=off;stick=64") != NULL);
+           strcmp(line + strlen(line) - 17, ";stick=64;cull=on") == 0 &&
+           strstr(line, ";tess=off;twin=off;stick=64") != NULL);
     /* Short loads too: stick, then load, then cull (contract 11.3.10, 11.3.11). */
     r.part[PLAYER_PART_LOAD] = 1;
     assert(player_play_launch_line(&r, line, sizeof(line)) &&
@@ -8356,7 +8357,7 @@ static void test_play_mode_stick_settings(void) {
     {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"cull\": \"off\", \"upscale\": \"off\", \"stick\": \"on\", "
-                                      "\"load\": \"off\"}") != NULL);
+                                      "\"load\": \"off\", \"twin\": \"off\"}") != NULL);
         free(saved);
     }
 
@@ -8519,7 +8520,7 @@ static void test_play_mode_load_settings(void) {
     {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"cull\": \"off\", \"upscale\": \"off\", \"stick\": \"off\", "
-                                      "\"load\": \"fast\"}") != NULL);
+                                      "\"load\": \"fast\", \"twin\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST95001\": {\"mode\": \"ace\", \"load\": \"off\"}") != NULL);
         free(saved);
     }
@@ -8605,7 +8606,8 @@ static void test_play_mode_tess_settings(void) {
     {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"sas\": \"off\", \"tess\": \"4\", \"cull\": \"off\", "
-                                      "\"upscale\": \"off\", \"stick\": \"off\", \"load\": \"off\"}") != NULL);
+                                      "\"upscale\": \"off\", \"stick\": \"off\", \"load\": \"off\", "
+                                      "\"twin\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST93001\": {\"mode\": \"library\", \"tess\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST93002\": {\"mode\": \"ace\", \"tess\": \"2\"}") != NULL);
         free(saved);

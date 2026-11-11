@@ -96,8 +96,8 @@
  *    resolution, like any upscaler: a readback returns the PSP's value where the device
  *    image holds it (a nearest-filtered 1:1 sprite, hook_sprite) and the top-left device
  *    sample elsewhere (ENHANCEMENT_CONTRACT.md, section 10.3).
- *  - Host twin (32-bit colour, #2050; Ace Mode only, SR_GPU_TWIN_COLOR=1 until the Ace
- *    line carries its key, after #2074): every target and depth surface gets a second,
+ *  - Host twin (32-bit colour, #2050; the launch line's twin=on, with SR_GPU_TWIN_COLOR
+ *    as the developer override): every target and depth surface gets a second,
  *    host-only image. The authentic chain (the images guest VRAM is read from and committed
  *    from) keeps the user's render scale, so guest VRAM is the twin-off run's, and the twin
  *    runs at that scale beside it (ENHANCEMENT_CONTRACT.md 10.11). Each render op is recorded a

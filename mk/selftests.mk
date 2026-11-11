@@ -1107,7 +1107,9 @@ gpu-coherence-twin-mutants: $(GPU_COHERENCE_BIN)
 			GPU_KEY_CONFIRM) kill="FAIL gpu renderer: the report names the twin unavailable: did not run"; args="--twin-key on --case twin-key";; \
 			SOFT_KEY_REQUEST) kill="FAIL software renderer: the launch line's twin=on did not turn the twin on"; args="--twin-key on --case twin-key";; \
 			SOFT_KEY_CONFIRM) kill="FAIL software renderer: the report names the twin unavailable: did not run"; args="--twin-key on --case twin-key";; \
-			GPU_TWIN_REPORT) kill="FAIL gpu renderer: the report names the twin available (effective twin off), want it on and not unavailable"; args="--twin-key off --twin 1 --case twin-key";; 			SOFT_TWIN_REPORT) kill="FAIL software renderer: the report names the twin available (effective twin off), want it on and not unavailable"; args="--twin-key off --twin 1 --case twin-key";; 			*) kill="twin of target 0x000000 differs in"; args="--twin native";; \
+			GPU_TWIN_REPORT) kill="FAIL gpu renderer: the report names the twin available (effective twin off), want it on and not unavailable"; args="--twin-key off --twin 1 --case twin-key";; \
+			SOFT_TWIN_REPORT) kill="FAIL software renderer: the report names the twin available (effective twin off), want it on and not unavailable"; args="--twin-key off --twin 1 --case twin-key";; \
+			*) kill="twin of target 0x000000 differs in"; args="--twin native";; \
 		esac; \
 		geobj=$(RT_GE_O); \
 		case $$m in SOFT_KEY_*|SOFT_TWIN_*) geobj=$(BUILD_DIR)/ge_twin_mutant_$$m.o; \
