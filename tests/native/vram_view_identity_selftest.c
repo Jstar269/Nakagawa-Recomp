@@ -359,8 +359,9 @@ static int run_viewer(uint32_t f) {
     /* The draw target the GE state names (T2 too, after list B). */
     ok &= view("draw", 0, &src.window[GE_VRAM_VIEW_DRAW]);
     ok &= expect_px("draw bar", s_px[258u * PSP_W + 5u], c_bar(f), rgb);
-    /* The display window stepped back once (nk_overlay_vram_step: one window of stride x
-     * height pixels): T1, the texture source, with the CPU stores in it. */
+    /* The display window stepped back once. This reproduces nk_overlay_vram_step (one window
+     * of stride x height pixels back), which this binary does not link: T1, the texture
+     * source, with the CPU stores in it. */
     {
         GeVramWindow stepped = src.window[GE_VRAM_VIEW_DISPLAY];
         stepped.addr -= stepped.stride * stepped.height * 4u;

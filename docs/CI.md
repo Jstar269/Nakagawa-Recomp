@@ -649,8 +649,9 @@ tool fails closed: a scissor past ge.c's raster bound (the stride, up to 512 col
 stride of 480 or less; a 512 scissor on a 512 stride is compared), 33 targets or a stride of
 1088 are `INCOMPLETE`, and a capture with no draw is `NO_DRAWS`. The same step then runs
 `vram-view-identity-selftest` (#314): the sources and decode the pause menu's VRAM viewer runs,
-called at a paused VBLANK as `gui.c` calls them, must name the expected surfaces and leave later presented frames, guest memory and the GE state as a run
-without them does, and a mutant viewer that stores one byte must fail. The job also runs
+called at a paused VBLANK with the arguments `gui.c` passes, must name the expected surfaces and
+leave later presented frames, guest memory and the GE state as a run without them does, and a
+mutant viewer that stores one byte must fail. The job also runs
 `make CC=gcc player-ui-tests` with SDL's dummy video and software render drivers, configures and
 builds the CMake player with `BUILD_PLAYER=ON`, runs CTest, and requires the `nakagawa_player
 --help` usage marker. It downloads the PSPDEV archive identified by

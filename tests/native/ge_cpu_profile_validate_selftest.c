@@ -2224,9 +2224,12 @@ static void test_ge_vram_view_sources(void) {
     state->fbfmt = 1u;
     state->zbp = 0x00110000u;
     ge_vram_view_sources(0, 0, 0, 0, &src);
-    expect(src.present[GE_VRAM_VIEW_DRAW] && src.window[GE_VRAM_VIEW_DRAW].addr == ge_framebuffer() &&
-           src.window[GE_VRAM_VIEW_DRAW].stride == 512u && src.window[GE_VRAM_VIEW_DRAW].format == 1u,
-           "vram_view_sources", "the draw target is ge_framebuffer() at FBW in FBPSM");
+    expect(src.present[GE_VRAM_VIEW_DRAW] && src.window[GE_VRAM_VIEW_DRAW].addr == 0x04044000u &&
+           src.window[GE_VRAM_VIEW_DRAW].stride == 512u && src.window[GE_VRAM_VIEW_DRAW].format == 1u &&
+           src.window[GE_VRAM_VIEW_DRAW].width == 480u && src.window[GE_VRAM_VIEW_DRAW].height == 272u &&
+           src.window[GE_VRAM_VIEW_DEPTH].width == 480u && src.window[GE_VRAM_VIEW_DEPTH].height == 272u,
+           "vram_view_sources", "the draw target is the GE-local FBP folded onto VRAM, 480 x 272 at FBW "
+           "in FBPSM, and the depth buffer is 480 x 272");
     expect(src.present[GE_VRAM_VIEW_DEPTH] && src.window[GE_VRAM_VIEW_DEPTH].addr == 0x04110000u &&
            src.window[GE_VRAM_VIEW_DEPTH].stride == 512u &&
            src.window[GE_VRAM_VIEW_DEPTH].format == GE_VRAM_VIEW_DEPTH16, "vram_view_sources",
@@ -2257,6 +2260,11 @@ static void test_ge_vram_view_sources(void) {
            src.window[GE_VRAM_VIEW_TEXTURE].format == 5u && src.texture_swizzled,
            "vram_view_sources", "the texture is its address, buffer width (else width), size, PSM "
            "and swizzle");
+    state->tex_bufw = 8u;
+    ge_vram_view_sources(0, 0, 0, 0, &src);
+    expect(src.window[GE_VRAM_VIEW_TEXTURE].stride == 8u &&
+           src.window[GE_VRAM_VIEW_TEXTURE].width == 2u, "vram_view_sources",
+           "a texture's buffer width, when set, is its stride and its width stays its own");
 
     /* The decode: a 5551 pixel with alpha clear shows opaque, sized as the window. */
     {
@@ -2290,7 +2298,7 @@ static void test_ge_vram_view_sources(void) {
         g_ge_capture_active = 0;
     }
     *state = saved;
-    printf("VRAM_VIEW sources cases=12\n");
+    printf("VRAM_VIEW sources cases=13\n");
 }
 
 static void test_ge_bounding_box_branch(void) {

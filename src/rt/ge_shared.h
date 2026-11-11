@@ -631,12 +631,14 @@ void      ge_vram_view_sources(uint32_t shown_addr, uint32_t shown_stride, uint3
  * opaque, as the PSP display shows a framebuffer: the bound texture through
  * ge_vram_decode_bound_texture when `texture` is set (the window then only names it), any other
  * window through ge_vram_decode_surface. Stores the decoded size in *width and *height.
- * Returns GE_VRAM_VIEW_SHOWN, or a refusal that writes nothing to `out`. */
+ * Returns GE_VRAM_VIEW_SHOWN, or a refusal; after a refusal `out` holds nothing to show
+ * (a surface whose later row stops being readable mid-copy may have written earlier rows). */
 enum {
     GE_VRAM_VIEW_SHOWN = 0,
     GE_VRAM_VIEW_UNREADABLE,          /* the window cannot be read now */
     GE_VRAM_VIEW_TEXTURE_REFUSED,     /* outside guest memory, over 512 pixels, or a GE capture runs */
-    GE_VRAM_VIEW_NO_ROOM              /* `out` is NULL or smaller than the window */
+    GE_VRAM_VIEW_NO_ROOM              /* `out`, or a surface's window, is NULL; or `out` is
+                                         smaller than the window */
 };
 int       ge_vram_view_decode(int texture, const GeVramWindow *window, uint32_t *out,
                               size_t capacity, uint32_t *width, uint32_t *height);
