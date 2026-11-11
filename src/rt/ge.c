@@ -1327,13 +1327,14 @@ static void read_pos_one(uint32_t addr, const VFmt *v, float *x, float *y, float
          * through-mode float decoder applies, and which depth the hardware stores for
          * such a z is an open probe. An infinite z saturates as well (+inf to 65535, -inf
          * to 0), so its primitive is drawn, where the non-finite vertex rule dropped it
-         * before. PPSSPP draws a NaN z too, at depth 0; here a NaN stays NaN and the
-         * non-finite vertex rule still drops the primitive. Transform mode is untouched:
-         * its z is a model coordinate. */
+         * before. A NaN z is drawn too: PSP-GE-THROUGHZ-001 (docs/HARDWARE_ORACLE.md,
+         * 2026-11-10, PSP-3000) drew a through-mode sprite with both vertices at z = NaN.
+         * The depth it stores was not read; it takes depth 0 here, UNMEASURED (PPSSPP's
+         * rule too). Transform mode is untouched: its z is a model coordinate. */
         if (v->through) {
             if (*z >= 65535.0f) *z = 65535.0f;
             else if (*z > 0.0f) *z = (float)(int)*z;
-            else if (*z <= 0.0f) *z = 0.0f;
+            else *z = 0.0f;   /* z <= 0, or NaN */
         }
     } else if (v->pos_fmt == 2) {
         if (v->through) {
@@ -2719,13 +2720,24 @@ static int blend_chan(int s, int d, int sf, int df, int eq) {
     }
 }
 
+/* The columns the rasteriser may write, before the scissor. #2193 states that a PSP draws
+ * anywhere inside the scissor on a target up to 512 pixels wide (not measured here; the Vulkan
+ * backend already draws there), so a stride past 480 (an offscreen target, or a display
+ * buffer's padding) is drawn up to its last column, 511 at most. Stopping at the stride for a
+ * stride of 481 to 511 is unmeasured too. A stride of 480 or less keeps the screen's 480
+ * columns, as before: what a PSP does past a narrower stride is not measured. */
+static inline int raster_columns(void) {
+    const uint32_t stride = ge.fbw ? ge.fbw : 512u;
+    return stride > 480u ? (stride < 512u ? (int)stride : 512) : 480;
+}
+
 static int pixel_in_bounds(int x, int y) {
     /* A wing pass replaces the screen's columns and the scissor's (which spans the screen:
      * wide_target) with the pass's canvas columns; the scissor's rows still apply. */
     if (__builtin_expect(s_wing != NULL, 0))
         return x >= s_wing_x0 && x <= s_wing_x1 && y >= 0 && y < 272 &&
                y >= ge.scis_y1 && y <= ge.scis_y2;
-    return x >= 0 && x < 480 && y >= 0 && y < 272 &&
+    return x >= 0 && x < raster_columns() && y >= 0 && y < 272 &&
            x >= ge.scis_x1 && x <= ge.scis_x2 && y >= ge.scis_y1 && y <= ge.scis_y2;
 }
 
@@ -3340,7 +3352,8 @@ static double ge_time_row_clk(int w) {
 static void ge_time_scissor(int *x1, int *y1, int *x2, int *y2) {
     *x1 = ge.scis_x1 > 0 ? (int)ge.scis_x1 : 0;
     *y1 = ge.scis_y1 > 0 ? (int)ge.scis_y1 : 0;
-    *x2 = ge.scis_x2 < 479 ? (int)ge.scis_x2 : 479;
+    const int last = raster_columns() - 1;
+    *x2 = (int)ge.scis_x2 < last ? (int)ge.scis_x2 : last;
     *y2 = ge.scis_y2 < 271 ? (int)ge.scis_y2 : 271;
 }
 
@@ -3456,7 +3469,9 @@ static void raster_tri(const Vtx *A, const Vtx *B, const Vtx *C, int persp) {
     int minx=(int)floorf(fminf(A->x,fminf(B->x,C->x))), maxx=(int)ceilf(fmaxf(A->x,fmaxf(B->x,C->x)));
     int miny=(int)floorf(fminf(A->y,fminf(B->y,C->y))), maxy=(int)ceilf(fmaxf(A->y,fmaxf(B->y,C->y)));
     int cx1 = ge.scis_x1 > 0 ? ge.scis_x1 : 0,   cy1 = ge.scis_y1 > 0 ? ge.scis_y1 : 0;
-    int cx2 = ge.scis_x2 < 479 ? ge.scis_x2 : 479, cy2 = ge.scis_y2 < 271 ? ge.scis_y2 : 271;
+    const int last_col = raster_columns() - 1;
+    int cx2 = (int)ge.scis_x2 < last_col ? (int)ge.scis_x2 : last_col;
+    int cy2 = ge.scis_y2 < 271 ? ge.scis_y2 : 271;
     if (wing) { cx1 = s_wing_x0; cx2 = s_wing_x1; }
     if (minx < cx1) minx = cx1;
     if (maxx > cx2) maxx = cx2;
@@ -4663,7 +4678,9 @@ static void dump_xform_debug(uint32_t vbase, uint32_t ibase, int idxfmt, const V
  * constant across the rect, so rows are written directly (no per-pixel state checks). */
 static void fill_rect_clear_fast(int xa, int ya, int xb, int yb, int r, int g, int b, int a) {
     int cx1 = ge.scis_x1 > 0 ? ge.scis_x1 : 0,   cy1 = ge.scis_y1 > 0 ? ge.scis_y1 : 0;
-    int cx2 = ge.scis_x2 < 479 ? ge.scis_x2 : 479, cy2 = ge.scis_y2 < 271 ? ge.scis_y2 : 271;
+    const int last_col = raster_columns() - 1;
+    int cx2 = (int)ge.scis_x2 < last_col ? (int)ge.scis_x2 : last_col;
+    int cy2 = ge.scis_y2 < 271 ? ge.scis_y2 : 271;
     if (s_wing) { cx1 = s_wing_x0; cx2 = s_wing_x1; }
     if (xa < cx1) xa = cx1;
     if (xb > cx2 + 1) xb = cx2 + 1;
