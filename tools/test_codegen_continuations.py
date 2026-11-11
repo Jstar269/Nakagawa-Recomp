@@ -941,5 +941,138 @@ class StraightLineEndTests(unittest.TestCase):
                 self.emit(words, start=base)                       # the slot check holds
 
 
+class StateResumeTests(unittest.TestCase):
+    """``--state-resume`` (#2172): resume points for direct save states.
+
+    The pass rewrites three statement shapes and nothing else, so these pin the shapes, the
+    switch that is the body's one list of its points, the bodies it must leave alone and the
+    default output. The executable proof is ``mingw32-make cosim-selftest-resume``.
+    """
+
+    RANGES = [(0x1000, 0x1100)]
+    KNOWN = {0x1000, 0x1040}
+
+    def words(self):
+        return {
+            0x1000: addiu(16, 0, 3),
+            0x1004: jal(0x1040),
+            0x1008: addiu(2, 2, 1),
+            0x100C: addiu(16, 16, -1),
+            0x1010: bne(16, 0, 0x1010, 0x1004),   # the loop edge: a yield point
+            0x1014: NOP,
+            0x1018: regimm(0x11, 4, 0x1018, 0x1040),   # bgezal: a call inside a block
+            0x101C: NOP,
+            0x1020: JR_RA,
+            0x1024: NOP,
+            0x1040: JR_RA,
+            0x1044: NOP,
+        }
+
+    def emit(self, words=None, start=0x1000, known=None, **kwargs):
+        options = codegen.CodegenOptions(state_resume=kwargs.pop("state_resume", True))
+        return "\n".join(codegen.emit_function(
+            FakeElf(words or self.words()), start, self.RANGES,
+            self.KNOWN if known is None else known, options=options, **kwargs))
+
+    def test_default_output_has_no_resume_point(self):
+        plain = "\n".join(codegen.emit_function(
+            FakeElf(self.words()), 0x1000, self.RANGES, self.KNOWN))
+        self.assertEqual(self.emit(state_resume=False), plain)
+        for token in ("_nk_resume", "_nk_enter", "SR_STATE_ENTRY", "SR_YIELD_PARK",
+                      "sr_aot_return_boundary_begin_at", "sr_resume_"):
+            self.assertNotIn(token, plain)
+
+    def test_entry_tests_the_request_before_the_yield_point(self):
+        text = self.emit()
+        self.assertIn("    SR_STATE_ENTRY(s, 0x00001000u); _nk_enter: ;\n"
+                      "    uint32_t _sp_entry = s->r[29]; (void)_sp_entry;", text)
+        self.assertNotIn("SR_YIELD(s, 0x00001000u);", text)
+        self.assertIn("case SR_RESUME_KEY(SR_RESUME_POINT_ENTRY, 0x00001000u): "
+                      "SR_RESUME_AT(_nk_e, SR_RESUME_POINT_ENTRY, 0u); goto _nk_enter;", text)
+
+    def test_loop_edge_parks_naming_its_target(self):
+        text = self.emit()
+        self.assertIn("if (_c) { SR_YIELD_PARK(s, 0x00001010u, 0x00001000u, 0x00001004u, "
+                      "SR_RESUME_POINT_YIELD, _sp_entry); goto L_00001004; }", text)
+        self.assertIn("case SR_RESUME_KEY(SR_RESUME_POINT_YIELD, 0x00001004u): "
+                      "SR_RESUME_AT(_nk_e, SR_RESUME_POINT_YIELD, 0u); goto L_00001004;", text)
+
+    def test_direct_call_records_the_caller_and_resumes_before_its_own_drain(self):
+        text = self.emit()
+        self.assertIn(
+            "if (sr_aot_return_boundary_begin_at(s, 0x0000100cu, 0x00001004u, 0x00001040u, "
+            "0x00001000u, _sp_entry)) return; f_00001040(s); R_0000100c: SR_TAIL_DRAIN(s); "
+            "if (sr_aot_return_boundary_end(s)) return;", text)
+        self.assertIn("case SR_RESUME_KEY(SR_RESUME_POINT_CALL, 0x0000100cu): "
+                      "SR_RESUME_AT(_nk_e, SR_RESUME_POINT_CALL, 0x00001040u); "
+                      "sr_resume_inner(s); goto R_0000100c;", text)
+        # A linked branch's call sits in the branch's block; nothing after the label reads
+        # the block's local, so it has a point too.
+        self.assertIn("f_00001040(s); R_00001020: SR_TAIL_DRAIN(s); "
+                      "if (sr_aot_return_boundary_end(s)) return; } }", text)
+
+    def test_every_point_is_in_the_switch_once_and_anything_else_is_refused(self):
+        text = self.emit()
+        block = text[text.index("  _nk_resume: {"):]
+        self.assertEqual(block.count("case SR_RESUME_KEY("), 4)
+        self.assertEqual(len(set(re.findall(r"case SR_RESUME_KEY\(([^)]*)\)", block))), 4)
+        self.assertIn("_sp_entry = _nk_e.sp;", block)
+        self.assertIn("default: sr_resume_no_point(s, 0x00001000u, &_nk_e); return;", block)
+        # The body's own exits cannot fall into the resume block.
+        self.assertIn("    return;\n  _nk_resume: {", text)
+        self.assertEqual(text.count("R_0000100c:"), 1)
+
+    def test_pass_only_rewrites_its_three_shapes(self):
+        plain = self.emit(state_resume=False).split("\n")
+        resumed = self.emit().split("\n")
+        body = resumed[:resumed.index("    return;")] + ["}", ""]
+        self.assertEqual(len(body), len(plain))
+        changed = [(a, b) for a, b in zip(plain, body, strict=True) if a != b]
+        self.assertEqual(len(changed), 4)   # the entry, the loop edge, two direct calls
+        for before, after in changed:
+            self.assertTrue(
+                "SR_YIELD(" in before or "sr_aot_return_boundary_begin(" in before, before)
+            self.assertNotEqual(before, after)
+
+    def test_a_body_with_guest_owned_stack_exits_keeps_its_text(self):
+        words = {
+            0x1000: (0x23 << 26) | (4 << 21) | (29 << 16),   # lw sp, 0(a0): the guest owns $sp
+            0x1004: JR_RA,
+            0x1008: NOP,
+        }
+        self.assertEqual(self.emit(words, known={0x1000}),
+                         self.emit(words, known={0x1000}, state_resume=False))
+
+    def test_a_live_frame_resume_entry_keeps_its_text(self):
+        kwargs = {"resume_owners": {0x1040: 0x1000}, "resumable": True}
+        self.assertEqual(self.emit(start=0x1040, known={0x1000}, **kwargs),
+                         self.emit(start=0x1040, known={0x1000}, state_resume=False, **kwargs))
+
+    def test_a_call_followed_by_more_of_its_line_gets_no_point(self):
+        line = ("    if (sr_aot_return_boundary_begin(s, 0x0000100cu, 0x00001004u, 1u)) return; "
+                "f_00001040(s); SR_TAIL_DRAIN(s); if (sr_aot_return_boundary_end(s)) return; "
+                "if (s->flow_kind != 0u) return;")
+        out = ["void f_00001000(CpuState *s) {", "    SR_YIELD(s, 0x00001000u);",
+               "    uint32_t _sp_entry = s->r[29]; (void)_sp_entry;", line, "}", ""]
+        result = codegen.state_resume_pass(out, 0x1000)
+        self.assertIn(line, result)
+        self.assertNotIn("SR_RESUME_POINT_CALL", "\n".join(result))
+
+    def test_option_is_parsed_and_refuses_what_it_cannot_restore(self):
+        options = codegen.CodegenOptions()
+        cli = codegen._command_line_parser().parse_args(["--state-resume"])
+        codegen._apply_options(cli, codegen._validated_options(cli), options)
+        self.assertTrue(options.state_resume)
+        self.assertFalse(codegen.CodegenOptions().state_resume)
+        for other in ("--stack-census", "--promote-registers", "--backend=llvm"):
+            cli = codegen._command_line_parser().parse_args(["--state-resume", other])
+            with self.assertRaises(codegen._Refusal) as refusal:
+                codegen._validated_options(cli)
+            self.assertIn(f"--state-resume cannot be combined with {other}",
+                          str(refusal.exception.args))
+            # Each is accepted alone.
+            codegen._validated_options(codegen._command_line_parser().parse_args([other]))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -36,9 +36,9 @@ does not make this file stale. `--details` prints them to stdout.
 
 ## Summary
 
-- helpers: **487** (declared in `recomp.h`: 415)
-- reach class: emitter-reached 87, production-runtime-only 362, selftest-only 0, address-only 8, none 30
-- provenance class of the home definition: declared-only 1, project_authored_attested 39, upstream_derived 447
+- helpers: **503** (declared in `recomp.h`: 427)
+- reach class: emitter-reached 95, production-runtime-only 367, selftest-only 0, address-only 8, none 33
+- provenance class of the home definition: declared-only 1, project_authored_attested 39, upstream_derived 463
 
 ## Helpers
 
@@ -67,6 +67,7 @@ does not make this file stale. `--details` prints them to stdout.
 | `dispatch_report_normalized_null` | `rt/recomp.c` | no | production-runtime-only | `rt/recomp.c`: upstream_derived |
 | `dispatch_report_null_code_pointer` | `rt/recomp.c` | no | production-runtime-only | `rt/recomp.c`: upstream_derived |
 | `dispatch_report_null_dispatch` | `rt/recomp.c` | no | production-runtime-only | `rt/recomp.c`: upstream_derived |
+| `dispatch_resume_from_host` | `rt/recomp.c` | yes | none | `rt/recomp.c`: upstream_derived |
 | `dispatch_run_interp` | `rt/recomp.c` | no | production-runtime-only | `rt/recomp.c`: upstream_derived |
 | `dispatch_semantic_boundary_name` | `rt/recomp.c` | no | production-runtime-only | `rt/recomp.c`: upstream_derived |
 | `dispatch_tail_step` | `rt/recomp.c` | yes | production-runtime-only | `rt/recomp.c`: upstream_derived |
@@ -115,6 +116,10 @@ does not make this file stale. `--details` prints them to stdout.
 | `nk_ace_load_update` | `rt/ace.c` | yes | emitter-reached (direct) | `rt/ace.c`: project_authored_attested |
 | `prof_find` | `rt/recomp.c` | no | production-runtime-only | `rt/recomp.c`: upstream_derived |
 | `prof_lookup` | `rt/recomp.c` | no | production-runtime-only | `rt/recomp.c`: upstream_derived |
+| `resume_body_fn` | `rt/recomp.c` | no | production-runtime-only | `rt/recomp.c`: upstream_derived |
+| `resume_body_slot` | `rt/recomp.c` | no | production-runtime-only | `rt/recomp.c`: upstream_derived |
+| `resume_fatal` | `rt/recomp.c` | no | production-runtime-only | `rt/recomp.c`: upstream_derived |
+| `resume_refuse` | `rt/recomp.c` | no | production-runtime-only | `rt/recomp.c`: upstream_derived |
 | `sched_alarm_cancel` | `rt/sched.c` | yes | production-runtime-only | `rt/sched.c`: upstream_derived |
 | `sched_alarm_set` | `rt/sched.c` | yes | production-runtime-only | `rt/sched.c`: upstream_derived |
 | `sched_block_on` | `rt/sched.c` | yes | production-runtime-only | `rt/sched.c`: upstream_derived |
@@ -236,6 +241,7 @@ does not make this file stale. `--details` prints them to stdout.
 | `sr_alloc_uid` | `rt/hle.c` | yes | production-runtime-only | `rt/hle.c`: upstream_derived |
 | `sr_aot_return_boundaries_reset` | `rt/recomp.c` | yes | production-runtime-only | `rt/recomp.c`: upstream_derived |
 | `sr_aot_return_boundary_begin` | `rt/recomp.c` | yes | emitter-reached (direct) | `rt/recomp.c`: upstream_derived |
+| `sr_aot_return_boundary_begin_at` | `rt/recomp.h` | yes | emitter-reached (direct) | `rt/recomp.h`: upstream_derived |
 | `sr_aot_return_boundary_capture_resume` | `rt/recomp.c` | yes | production-runtime-only | `rt/recomp.c`: upstream_derived |
 | `sr_aot_return_boundary_capture_return` | `rt/recomp.c` | yes | production-runtime-only | `rt/recomp.c`: upstream_derived |
 | `sr_aot_return_boundary_discard_to_floor` | `rt/recomp.c` | no | production-runtime-only | `rt/recomp.c`: upstream_derived |
@@ -410,7 +416,7 @@ does not make this file stale. `--details` prints them to stdout.
 | `sr_oor` | `rt/ge_replay.c`, `rt/ge_vram_cli.c`, `rt/recomp.c` | yes | production-runtime-only | `rt/ge_replay.c`: project_authored_attested; `rt/ge_vram_cli.c`: upstream_derived; `rt/recomp.c`: upstream_derived |
 | `sr_parse_display_bounds` | `rt/recomp.h` | yes | production-runtime-only | `rt/recomp.h`: upstream_derived |
 | `sr_pick_display` | `rt/recomp.h` | yes | production-runtime-only | `rt/recomp.h`: upstream_derived |
-| `sr_profile_block` | `rt/recomp.c` | yes | emitter-reached (via `SR_YIELD`) | `rt/recomp.c`: upstream_derived |
+| `sr_profile_block` | `rt/recomp.c` | yes | emitter-reached (via `SR_YIELD`, via `SR_YIELD_PARK`) | `rt/recomp.c`: upstream_derived |
 | `sr_profile_dump` | `rt/recomp.c` | yes | production-runtime-only | `rt/recomp.c`: upstream_derived |
 | `sr_profile_dump_final` | `rt/recomp.c` | yes | production-runtime-only | `rt/recomp.c`: upstream_derived |
 | `sr_profile_init` | `rt/recomp.c` | yes | production-runtime-only | `rt/recomp.c`: upstream_derived |
@@ -428,6 +434,16 @@ does not make this file stale. `--details` prints them to stdout.
 | `sr_rcp_approx` | `rt/recomp.c` | no | production-runtime-only | `rt/recomp.c`: upstream_derived |
 | `sr_register` | `rt/recomp.c` | yes | emitter-reached (direct) | `rt/recomp.c`: upstream_derived |
 | `sr_register_count` | `rt/recomp.c` | yes | none | `rt/recomp.c`: upstream_derived |
+| `sr_resume_describe` | `rt/recomp.c` | yes | none | `rt/recomp.c`: upstream_derived |
+| `sr_resume_inner` | `rt/recomp.c` | yes | emitter-reached (direct) | `rt/recomp.c`: upstream_derived |
+| `sr_resume_no_point` | `rt/recomp.c` | yes | emitter-reached (direct) | `rt/recomp.c`: upstream_derived |
+| `sr_resume_park` | `rt/recomp.h` | yes | emitter-reached (via `SR_YIELD_PARK`) | `rt/recomp.h`: upstream_derived |
+| `sr_resume_probe_hit` | `rt/recomp.c` | yes | emitter-reached (via `SR_RESUME_AT`) | `rt/recomp.c`: upstream_derived |
+| `sr_resume_register_body` | `rt/recomp.c` | yes | emitter-reached (direct) | `rt/recomp.c`: upstream_derived |
+| `sr_resume_status_name` | `rt/recomp.c` | yes | none | `rt/recomp.c`: upstream_derived |
+| `sr_resume_take` | `rt/recomp.c` | yes | emitter-reached (direct) | `rt/recomp.c`: upstream_derived |
+| `sr_resume_unpark` | `rt/recomp.h` | yes | emitter-reached (via `SR_YIELD_PARK`) | `rt/recomp.h`: upstream_derived |
+| `sr_resume_validate` | `rt/recomp.c` | yes | production-runtime-only | `rt/recomp.c`: upstream_derived |
 | `sr_rsqrt_fixed` | `rt/recomp.c` | no | production-runtime-only | `rt/recomp.c`: upstream_derived |
 | `sr_rsqrt_floor22` | `rt/recomp.c` | no | production-runtime-only | `rt/recomp.c`: upstream_derived |
 | `sr_sin_fixed` | `rt/recomp.c` | no | production-runtime-only | `rt/recomp.c`: upstream_derived |
@@ -530,4 +546,4 @@ does not make this file stale. `--details` prints them to stdout.
 | `sr_window_title_format` | `rt/recomp.h` | yes | production-runtime-only | `rt/recomp.h`: upstream_derived |
 | `sr_window_title_sanitize` | `rt/recomp.h` | yes | production-runtime-only | `rt/recomp.h`: upstream_derived |
 | `sr_window_title_utf8_len` | `rt/recomp.h` | yes | production-runtime-only | `rt/recomp.h`: upstream_derived |
-| `sr_yield` | `rt/sched.c`, `rt/snapshot_runner.c`, `rt/verify_harness.c` | yes | emitter-reached (via `SR_YIELD`) | `rt/sched.c`: upstream_derived; `rt/snapshot_runner.c`: project_authored_attested; `rt/verify_harness.c`: project_authored_attested |
+| `sr_yield` | `rt/sched.c`, `rt/snapshot_runner.c`, `rt/verify_harness.c` | yes | emitter-reached (via `SR_YIELD`, via `SR_YIELD_PARK`) | `rt/sched.c`: upstream_derived; `rt/snapshot_runner.c`: project_authored_attested; `rt/verify_harness.c`: project_authored_attested |

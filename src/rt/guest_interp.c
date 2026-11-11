@@ -81,6 +81,10 @@ SrHostStackWindow sr_host_stack_window;
 /* The TAIL transfer slot and its drain (#855; see recomp.h). They live here because every
  * build that links generated code or the dispatcher links this file. */
 SrTailTransfer sr_tail_transfer;
+/* Tail drains running a body on the running fiber. A drain keeps its chain's restore and
+ * release on the host stack, which a direct save state cannot hold, so a thread inside one is
+ * not described (sr_resume_describe, #2172). Swapped with the fiber's return-boundary stack. */
+size_t sr_tail_drains_live;
 
 void sr_tail_fatal(const char *what, uint32_t target) {
     fprintf(stderr, "TAIL_TRANSFER_FAULT: %s target=0x%08" PRIx32 "\n", what, target);
@@ -143,11 +147,13 @@ static inline __attribute__((always_inline)) void sr_tail_drain_run(CpuState *s,
             chain.restore_sp = next.restore_sp;
             chain.restores = 1;
         }
+        sr_tail_drains_live++;
         if (next.fn) {
             next.fn(s);
         } else {
             dispatch_tail_step(s, next.target);
         }
+        sr_tail_drains_live--;
         /* A body leaves either through a transfer or through exception flow, never both. */
         if (s->flow_kind != SR_FLOW_NONE && sr_tail_transfer.pending)
             sr_tail_fatal("tail-transfer-with-pending-flow", sr_tail_transfer.target);

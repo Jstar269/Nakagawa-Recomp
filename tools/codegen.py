@@ -130,6 +130,14 @@ class CodegenOptions:
     # generated C byte-identical. RegisterPromotion below owns the rules.
     promote_registers: bool = False
 
+    # Resume points for direct save states (#2172; "Resume at a PC" in docs/ARCHITECTURE.md).
+    # When True, a callable body that keeps the ordinary frame contract can be entered again at
+    # the yield it parked in or at the return of a direct call it made: its entry tests
+    # sr_resume_request, its direct call sites record the body and its entry $sp on the call's
+    # return boundary, and its yields record where it continues (state_resume_pass). Set by
+    # --state-resume; default False leaves the generated C byte-identical.
+    state_resume: bool = False
+
     # --static-verify: compile-time-predicted register assertions (see the SR_SV_CHECK block).
     static_verify: bool = False
 
@@ -5161,9 +5169,113 @@ def emit_function(elf, start, ranges, known, resume_owners=None, resumable=False
             # dispatch-only bodies stay unchecked. Keyed on the CALL's own drain, so every
             # call form that uses emit_body_call is covered. See SR_HOST_STACK_CHECK in recomp.h.
             out.insert(1, emit_host_stack_check(G(start)))
+        if options.state_resume:
+            # A resume point restores one frame local, the entry $sp of a callable body. A
+            # body with another (a checked $sp load's verdict, promoted registers), with none
+            # (a live-frame resume entry) or behind a census wrapper stays as it is, and so
+            # does a runtime-placed module's, whose addresses are not constants.
+            if (resumable or sp_kept or stack_census or promo is not None
+                    or ADDRESS_SPACE.runtime_module):
+                STATE_RESUME_STATS["plain_bodies"] += 1
+            else:
+                before = out
+                out = state_resume_pass(out, start)
+                if out is before:
+                    STATE_RESUME_STATS["plain_bodies"] += 1
     finally:
         _BODY_SP_CHECKS.clear()
     return out
+
+_STATE_RESUME_ENTRY = re.compile(r"^    SR_YIELD\(s, (0x[0-9a-f]{8}u)\);$")
+_STATE_RESUME_YIELD = re.compile(
+    r"SR_YIELD\(s, (0x[0-9a-f]{8}u)\); goto L_([0-9a-f]{8});")
+_STATE_RESUME_CALL = re.compile(
+    r"if \(sr_aot_return_boundary_begin\(s, 0x([0-9a-f]{8})u, (0x[0-9a-f]{8}u), 1u\)\) return; "
+    r"f_([0-9a-f]{8})\(s\); SR_TAIL_DRAIN\(s\); "
+    r"if \(sr_aot_return_boundary_end\(s\)\) return;")
+#: What may follow a direct call in its line for the call to get a resume point: the close of
+#: the blocks it sits in. A point's label is jumped to from the body's resume switch, past
+#: every local those blocks declare, so nothing after the label may read one.
+_STATE_RESUME_CALL_TAIL = re.compile(r"^[\s}]*$")
+STATE_RESUME_STATS = {"bodies": 0, "points": 0, "plain_bodies": 0}
+
+
+def state_resume_pass(out, start):
+    """Give the body in ``out`` (emit_function's lines) its resume points (--state-resume, #2172).
+
+    Three statement shapes get one, and only as emit_function wrote them:
+
+    * the entry yield: ``SR_STATE_ENTRY`` tests ``sr_resume_request`` before it, so a resumed
+      entry counts no yield point, and the entry point continues right after it;
+    * a loop edge's ``SR_YIELD(s, pc); goto L_target;``: the body parks naming ``target``, and
+      the point is that label;
+    * a direct call of a callable body: the call's return boundary records this body and its
+      entry ``$sp``, and the point is a label between the callee and the call's own drain and
+      end check, which run after a resumed callee exactly as after a called one.
+
+    A statement of any other shape keeps its text and has no point, so a thread parked or
+    suspended there is refused when it is described (sr_resume_describe); nothing is guessed.
+    Returns the new lines, or ``out`` itself when the body has no entry yield of the expected
+    shape.
+    """
+    body = f"0x{start:08x}u"
+    entry_at = next((i for i, line in enumerate(out) if _STATE_RESUME_ENTRY.match(line)), None)
+    if entry_at is None or _STATE_RESUME_ENTRY.match(out[entry_at]).group(1) != body:
+        return out
+    if not any(line.startswith("    uint32_t _sp_entry = s->r[29];") for line in out):
+        return out
+    cases = [f"      case SR_RESUME_KEY(SR_RESUME_POINT_ENTRY, {body}): "
+             f"SR_RESUME_AT(_nk_e, SR_RESUME_POINT_ENTRY, 0u); goto _nk_enter;"]
+    yield_targets = set()
+    call_points = set()
+
+    def park(match):
+        site, target = match.group(1), match.group(2)
+        if target not in yield_targets:
+            yield_targets.add(target)
+            cases.append(f"      case SR_RESUME_KEY(SR_RESUME_POINT_YIELD, 0x{target}u): "
+                         f"SR_RESUME_AT(_nk_e, SR_RESUME_POINT_YIELD, 0u); goto L_{target};")
+        return (f"SR_YIELD_PARK(s, {site}, {body}, 0x{target}u, SR_RESUME_POINT_YIELD, _sp_entry); "
+                f"goto L_{target};")
+
+    result = []
+    for index, line in enumerate(out):
+        if index == entry_at:
+            result.append(f"    SR_STATE_ENTRY(s, {body}); _nk_enter: ;")
+            continue
+        line = _STATE_RESUME_YIELD.sub(park, line)
+        calls = list(_STATE_RESUME_CALL.finditer(line))
+        if (len(calls) == 1 and calls[0].group(1) not in call_points
+                and _STATE_RESUME_CALL_TAIL.match(line[calls[0].end():])):
+            call = calls[0]
+            resume, call_pc, callee = call.group(1), call.group(2), call.group(3)
+            call_points.add(resume)
+            cases.append(f"      case SR_RESUME_KEY(SR_RESUME_POINT_CALL, 0x{resume}u): "
+                         f"SR_RESUME_AT(_nk_e, SR_RESUME_POINT_CALL, 0x{callee}u); sr_resume_inner(s); "
+                         f"goto R_{resume};")
+            line = (line[:call.start()]
+                    + f"if (sr_aot_return_boundary_begin_at(s, 0x{resume}u, {call_pc}, "
+                      f"0x{callee}u, {body}, _sp_entry)) return; "
+                      f"f_{callee}(s); R_{resume}: SR_TAIL_DRAIN(s); "
+                      f"if (sr_aot_return_boundary_end(s)) return;"
+                    + line[call.end():])
+        result.append(line)
+    close = max(i for i, line in enumerate(result) if line == "}")
+    result[close:close] = [
+        "    return;",
+        "  _nk_resume: {",
+        f"    const SrResumeEntry _nk_e = sr_resume_take(s, {body});",
+        "    _sp_entry = _nk_e.sp;",
+        "    switch (SR_RESUME_KEY(_nk_e.kind, _nk_e.pc)) {",
+        *cases,
+        f"      default: sr_resume_no_point(s, {body}, &_nk_e); return;",
+        "    }",
+        "  }",
+    ]
+    STATE_RESUME_STATS["bodies"] += 1
+    STATE_RESUME_STATS["points"] += len(cases)
+    return result
+
 
 #: ``--extra-elf=<module>@runtime``: the module is placed by the runtime's guest
 #: allocator when the game loads it, so it is translated position-independently.
@@ -6034,6 +6146,7 @@ def _command_line_parser():
     flag("--lle-import-seam", "route import stubs through sr_import_call")
     flag("--stale-detect", "TD-27 stale-code detection")
     flag("--promote-registers", "#284 register promotion")
+    flag("--state-resume", "#2172 resume points for direct save states")
     flag("--nan-trap", "SR_NAN_TRAP result checks")
     return parser
 
@@ -6079,6 +6192,14 @@ def _validated_options(cli):
         backend = cli.backend
         if backend not in ("c", "llvm"):
             raise _Refusal(2, f"--backend must be c or llvm, not {backend!r}\n")
+    if cli.state_resume:
+        # #2172: a resume point restores a C body's one frame local. A census wrapper, a
+        # promoted register and an LLVM body each hold state a point does not restore.
+        for option, given in (("--stack-census", cli.stack_census),
+                              ("--promote-registers", cli.promote_registers),
+                              ("--backend=llvm", backend == "llvm")):
+            if given:
+                raise _Refusal(2, f"--state-resume cannot be combined with {option}\n")
     threshold_arg = cli.region_split_threshold
     threshold = None
     if threshold_arg is not None:
@@ -6286,6 +6407,10 @@ def _apply_options(cli, checked, options):
         # instructions, written back at every boundary. Default (absent)
         # leaves the generated C byte-identical.
         options.promote_registers = True
+    if cli.state_resume:
+        # #2172: resume points for direct save states. Default (absent) leaves the
+        # generated C byte-identical.
+        options.state_resume = True
     if cli.nan_trap:
         # SR_NAN_TRAP: follow every FPU/VFPU result write with a check that
         # names the instruction whose result went non-finite from all-finite
@@ -6682,6 +6807,9 @@ def _write_chunks(base_name, boundaries, renames, backend, llvm_lowered, llvm_fa
                 prefix = m.group(1)
                 a_val = int(m.group(2), 16)
                 parts.append(f"    sr_register(0x{a_val:08x}u, {prefix}_{a_val:08x});\n")
+                if "\n  _nk_resume: {\n" in ft:
+                    parts.append(f"    sr_resume_register_body(0x{a_val:08x}u, "
+                                 f"{prefix}_{a_val:08x});\n")
         parts.append("}\n")
         with open(f"{base_name}_{i}.c", "w", encoding="ascii", newline="\n") as f:
             f.write(rename_generated_entries("".join(parts), renames))
@@ -6754,6 +6882,10 @@ def _print_summary(out_c, base_name, num_files, funcs_per_chunk, chunk_target_by
               f"across {SV_STATS['funcs']} functions")
     if options.promote_registers:
         print(promotion_summary())
+    if options.state_resume:
+        print(f"state-resume: {STATE_RESUME_STATS['points']} resume points in "
+              f"{STATE_RESUME_STATS['bodies']} bodies; "
+              f"{STATE_RESUME_STATS['plain_bodies']} bodies have none")
 
 
 

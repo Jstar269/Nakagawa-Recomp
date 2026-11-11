@@ -362,7 +362,7 @@ class FixtureLayoutTests(unittest.TestCase):
         either lane.
         """
         register_tail = {"jrtail", "xtail", "xsibtail"}
-        jump_tail = {"xtailmid", "jthunk", "xsibmid"}
+        jump_tail = {"xtailmid", "jthunk", "xsibmid", "rs_tail"}
         for name, (_offset, words) in self.layout.items():
             if name in cosim.NON_PROGRAM_CELLS or name in cosim.AOT_ORACLE_ONLY_CELLS:
                 continue

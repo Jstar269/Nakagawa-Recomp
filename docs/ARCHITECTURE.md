@@ -654,6 +654,121 @@ Some paths still nest:
 - Per-function profile time for a computed target still includes its direct successors, but no
   longer the work after the next computed transfer.
 
+### Resume at a PC (direct save states)
+
+A direct save state (#2172) has to continue a guest thread from data. The thread's registers are
+data (`CpuState`), but a parked thread also sits inside host frames: one generated C function per
+guest call it is in, and under them the dispatcher. Those frames cannot be saved. This section is
+the contract for rebuilding them. It is separate from the interpreter floor above and does not
+extend it.
+
+**Native re-entry, not interpretation.** A restored thread goes back into the same generated
+bodies, at the statement where each one stopped, and from there runs the code an uninterrupted
+run runs. Running the restored frames on the interpreter floor instead was rejected, because the
+two tiers differ in state a save state and a replay checkpoint both hold:
+
+- `CpuState.pc`: generated code writes it at a yield and a few other sites, the interpreter per
+  instruction, and a checkpoint hashes the whole `CpuState` (`nk_ckpt_add_cpu`).
+- yield points: every `SR_YIELD` counts down the slice and, under `SR_DETERMINISTIC_CLOCK=1`, each
+  `sr_yield` charges guest time. Where they sit (a body's entry, a taken backward branch, the
+  dispatcher) is decided by `tools/codegen.py`; the interpreter has none.
+- `$sp` at a return: a callable body ends with `s->r[29] = _sp_entry` and a tail drain applies its
+  chain's restore; the interpreter runs only the instructions present (the `spleak` cell).
+- coverage: the interpreter decodes only the forms a cosimulation cell executes.
+
+Copying host stacks was rejected too: they hold absolute host addresses, so a copy can be neither
+checked nor loaded into another process.
+
+**What a thread is, as data.** A frame list, outermost frame first (`SrResumeFrame` in
+`src/rt/recomp.h`). Each frame names:
+
+| Field | Meaning |
+| --- | --- |
+| `body` | The entry address of the generated body the frame runs in. One guest PC can sit in several bodies, so the PC alone does not name it. |
+| `pc`, `kind` | The resume point. `SR_RESUME_POINT_CALL`: the frame is inside a direct call and continues at the call's return PC once the frame above returns. `SR_RESUME_POINT_YIELD`: the body is parked at a loop edge's yield and continues at the edge's target. `SR_RESUME_POINT_ENTRY`: it is parked at its entry yield and runs from its first instruction. One PC can be two points with two continuations (a loop head that is also a call's return PC), so the kind is part of the key. |
+| `sp` | The body's entry `$sp`, its `_sp_entry`: the one C local a callable body keeps across statements. |
+
+Every frame but the innermost is a call point; the innermost is a parked point. The live `$ra` is
+not part of it, as at a `dispatch_call`.
+
+**Resume points exist only where codegen writes them.** `codegen.py --state-resume` is opt-in and
+the default output is byte-identical. With it, `state_resume_pass` rewrites three statement shapes
+of a callable body and nothing else:
+
+- the entry yield becomes `SR_STATE_ENTRY`, which tests `sr_resume_request` first, so entering a
+  body to resume it counts no yield point;
+- a loop edge's `SR_YIELD(...); goto L_<target>;` becomes `SR_YIELD_PARK`, which counts and sets
+  `s->pc` exactly as `SR_YIELD` does and, around `sr_yield`, records the body, the target and the
+  body's entry `$sp` on the call record the body runs under;
+- a direct call's boundary is begun with `sr_aot_return_boundary_begin_at`, which also records the
+  callee, the calling body and its entry `$sp`, and the call gets a label between the callee and
+  the call's own tail drain and end check.
+
+The body ends with one `switch` over `SR_RESUME_KEY(kind, pc)`: a call point runs
+`sr_resume_inner` (the frame above) and jumps to the call's label, so the drain and the end check
+run after a resumed callee exactly as after a called one; a parked point jumps to its label. That
+switch is the only list of a body's points. A body with guest-owned `$sp` exits, a live-frame
+resume entry (`r_<addr>`), a runtime-placed module's body, and any statement of another shape have
+no point. `--state-resume` refuses `--stack-census`, `--promote-registers` and `--backend=llvm`,
+each of which keeps state a point does not restore.
+
+**Describing a thread** (`sr_resume_describe`) reads the thread's return-boundary records, which
+follow its fiber, and refuses unless the frame list is exact. No refusal is a guess in either
+direction:
+
+| Refusal | The thread is not described because |
+| --- | --- |
+| `no-frames` | it is not inside a host entry |
+| `callback-or-interrupt-live` | a nested host-to-guest entry is on its stack |
+| `tail-chain-live` | a tail drain is running a body: the chain's owed restore and release are on the host stack |
+| `tail-transfer-pending` | a recorded transfer has not been drained |
+| `foreign-cpu-state` | a call record belongs to another `CpuState` |
+| `root-not-host-entry` | its outermost call does not return to `SR_HOST_RETURN_PC` |
+| `return-in-flight` | a call record holds a captured return target or an unwind |
+| `frame-not-described` | a live call was not begun by a direct call site of a state-resumable body: a dispatched call (`jalr`), a call from the interpreter, a runtime call, or a body with no points |
+| `frame-chain` | a call's calling body is not the body the call below entered: a tail transfer changed the body |
+| `frame-sp` | a body's entry `$sp` is not the `$sp` of the call that entered it |
+| `not-parked` | the innermost body is not at a resume point |
+| `too-many-frames` | the list does not fit |
+
+**Resuming** (`dispatch_resume_from_host`) is `dispatch_from_host` for a restored thread. It first
+validates (`sr_resume_validate`), and a refusal comes before any guest or runtime state changes:
+`bad-frames`, `resume-point-kind` (a call point innermost, or a parked point below a frame),
+`body-not-registered`, `body-stale`, `body-not-resumable` (the function registered for the address
+has no points; it is not called), `no-resume-point` (the body is asked; its switch has no such
+key), `frame-chain` (a call point's callee is not the body of the frame above) and `resume-busy`
+(the fiber already holds a call record or a transfer). Then it rebuilds the call records with the
+values the host entry and each call site left, enters the outermost body at its point, and runs
+the rest of the host entry's `dispatch_call` when that body returns. It does not pass through the
+dispatcher's own yield point.
+
+**What is claimed.** After a resume the thread is in the generated bodies, with the host frames, the
+call records, the registers and the slice count an uninterrupted run has at that point, so what
+follows is the same code on the same state. `mingw32-make cosim-selftest-resume` checks it: the
+cosimulation corpus translated with `--state-resume`, where every yield point of five cells
+parks in turn, the thread is described, and a run that starts from the parked registers, the
+parked memory and the frame list, with a rebuilt dispatch table and an empty call-record stack, is
+compared with the uninterrupted run on the whole `CpuState` (`pc` included), the memory window,
+the guest writes and the instruction trace after the park, and the number of yield points counted.
+The same lane refuses each frame list and each set of call records above by name and checks that
+nothing changed. Every other cosimulation lane runs the same cases on ordinary output and requires
+every thread to be refused. The cells, the mutants and the limits of the evidence are in
+[`fixtures/cosim/README.md`](../fixtures/cosim/README.md).
+
+**What is not claimed, and is refused today.** This is the generated-code half of a direct state.
+Not built yet, each a separate change under #2172:
+
+- a thread parked anywhere else: in a blocking import (its continuation is "return this value
+  from the import", data the wait must latch), at the dispatcher's own yield point, under a
+  dispatched call, under a tail drain (the chain's state has to become data on the call record),
+  or in a body with a checked `$sp` load;
+- the scheduler's side of a park (what `sr_yield` does after the switch back), every subsystem's
+  own segment, and the quiet point at which a capture is allowed;
+- the `nkstate` segment that carries the frame lists.
+
+A capture that meets any of them refuses and names it. A resumed thread that parks again is
+described from its rebuilt records like any other.
+
 ### HLE boundary
 
 At a PSP import/HLE boundary:
