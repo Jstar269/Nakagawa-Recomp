@@ -260,6 +260,7 @@ static void sr_audio_pull_reset(void) {
 static int s_test_fail_pause_stash_alloc;
 static int s_test_device_freq;   /* open the device at this rate, so the streams convert */
 static int s_test_pause_failure_messages;
+static int s_test_device_open_attempts;   /* times sr_audio_init went on to open the device */
 #endif
 
 /* SR_AUDIOSTAT gate, matching the other backend: the queue/drift fields are diagnostics and
@@ -662,6 +663,9 @@ int sr_audio_init(void) {
         SDL_SetHintWithPriority(SDL_HINT_AUDIO_DRIVER, "dummy", SDL_HINT_OVERRIDE);
     }
 
+#ifdef SR_AUDIO_SELFTEST
+    s_test_device_open_attempts++;
+#endif
     if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) {
         s_audio_state = AUDIO_STATE_UNAVAILABLE;
         if (!s_reported_unavailable) {
@@ -1345,6 +1349,7 @@ static void test_reset(void) {
     s_test_fail_pause_stash_alloc = 0;
     s_test_pause_failure_messages = 0;
     s_test_device_freq = 0;
+    s_test_device_open_attempts = 0;
     memset(&s_stats, 0, sizeof(s_stats));
     memset(s_push_marks, 0, sizeof(s_push_marks));
     set_test_env("SR_MASTER_VOLUME", "");
@@ -1515,6 +1520,65 @@ static void test_null_backend_env(void) {
     unsetenv("SR_AUDIO_BACKEND");
 #endif
     printf("test_null_backend_env: PASS\n");
+}
+
+/* #2361: the back-end behaviour the driver's start-up open relies on. It does not run the
+ * driver (tools/test_native_driver_hardening.py checks where the driver calls sr_audio_init),
+ * and it passes on the code before #2361 too: it pins what was already true. The seam counts
+ * the times sr_audio_init goes past its state checks to SDL_InitSubSystem. After a successful
+ * init a second init, a push, sr_audio_queued and sr_audio_played_dry open nothing; with no
+ * init the first push opens the device once (a run without the scheduler); after a refused
+ * open the state stays UNAVAILABLE, reported once, and a push does not try again; under a
+ * null back end the state is NULL and nothing reaches the open.
+ *
+ * MUTANT: sr_audio_init does not return early when ACTIVE -- the second init opens again and
+ *   the attempts read 2.
+ * MUTANT: sr_audio_init does not return early when UNAVAILABLE -- the second init after the
+ *   refused open (a LoadExec restart's, were the driver's call inside its loop) tries again
+ *   and the attempts read 2. A push cannot show it: push, queued and played_dry call
+ *   sr_audio_init only while the state is UNINITIALIZED. */
+static void test_start_up_open_is_the_only_open(void) {
+    static const int16_t block[64 * 2];
+    test_reset();
+    SDL_SetHintWithPriority(SDL_HINT_AUDIO_DRIVER, "dummy", SDL_HINT_OVERRIDE);
+    assert(sr_audio_init() == 0 && s_audio_state == AUDIO_STATE_ACTIVE);   /* the driver's call */
+    assert(s_test_device_open_attempts == 1);
+    (void)sr_audio_played_dry(0);
+    assert(sr_audio_queued(0) == 0);
+    sr_audio_push(0, block, 64, 0x8000, 0x8000);
+    sr_audio_push(8, block, 64, 0x8000, 0x8000);
+    assert(s_stats.total_pushed_frames == 128u);
+    assert(sr_audio_init() == 0);
+    assert(s_test_device_open_attempts == 1);
+
+    /* No start-up open: the first push opens the device, and only that one. */
+    test_reset();
+    SDL_SetHintWithPriority(SDL_HINT_AUDIO_DRIVER, "dummy", SDL_HINT_OVERRIDE);
+    sr_audio_push(0, block, 64, 0x8000, 0x8000);
+    assert(s_audio_state == AUDIO_STATE_ACTIVE && s_test_device_open_attempts == 1);
+    sr_audio_push(0, block, 64, 0x8000, 0x8000);
+    assert(s_test_device_open_attempts == 1 && s_stats.total_pushed_frames == 128u);
+
+    /* No device at start-up: reported once, and the run goes on with no output. */
+    test_reset();
+    SDL_SetHintWithPriority(SDL_HINT_AUDIO_DRIVER, "nonexistent_driver_xyz", SDL_HINT_OVERRIDE);
+    assert(sr_audio_init() == -1 && s_audio_state == AUDIO_STATE_UNAVAILABLE);
+    assert(s_reported_unavailable == 1 && s_test_device_open_attempts == 1);
+    sr_audio_push(0, block, 64, 0x8000, 0x8000);
+    assert(sr_audio_queued(0) == -1 && sr_audio_played_dry(0) == 0);
+    assert(s_audio_state == AUDIO_STATE_UNAVAILABLE && s_reported_unavailable == 1);
+    assert(s_test_device_open_attempts == 1 && s_stats.total_pushed_frames == 0u);
+    assert(sr_audio_init() == -1 && s_test_device_open_attempts == 1);   /* a second init does not retry */
+
+    /* A null back end: nothing is opened, at start-up or after. */
+    test_reset();
+    set_test_env("SR_AUDIO_BACKEND", "null");
+    assert(sr_audio_init() == -1 && s_audio_state == AUDIO_STATE_NULL);
+    sr_audio_push(0, block, 64, 0x8000, 0x8000);
+    assert(s_audio_state == AUDIO_STATE_NULL && s_test_device_open_attempts == 0);
+    set_test_env("SR_AUDIO_BACKEND", "");
+    test_reset();
+    printf("test_start_up_open_is_the_only_open: PASS\n");
 }
 
 /* The device block the blocking output sizes its queue against: converted to mixer frames
@@ -2330,6 +2394,7 @@ int main(int argc, char **argv) {
     test_full_mixer_drops_are_counted();
     test_no_device_path();
     test_null_backend_env();
+    test_start_up_open_is_the_only_open();
     test_host_pull_frames();
     test_played_dry_is_exact_and_per_channel();
     test_push_silence_is_not_a_push();
