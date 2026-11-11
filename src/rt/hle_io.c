@@ -115,7 +115,8 @@ static int hle_fd_is_std(uint32_t fd) {
  * sceIoLseek and sceIoLseek32 return the new position in sectors, SEEK_END is relative to the
  * last sector, and sceIoRead takes and returns a count of sectors and advances the position by
  * it. A position below zero or past the last sector is refused with 0x8001b003 and leaves the
- * position where it was; a zero count is refused with 0x80010016. Two cases stay at a named
+ * position where it was (the edge, one and two sectors past the last, SEEK_END +1 and SEEK_SET
+ * 0x100000000, measured on a PSP-3000 by PSP-IO-EOF-002 umd-eof-raw-seek-past); a zero count is refused with 0x80010016. Two cases stay at a named
  * boundary because no capture covers them: a read that would cross the last sector, and every
  * data operation while no disc image is open. The console wrote a whole request even past the
  * end of a smaller buffer; the runtime refuses a destination that is not writable guest memory. */
@@ -330,6 +331,11 @@ uint32_t h_IoWrite(CpuState *s) {
     if (f->kind != FD_KIND_FILE) return SCE_ERROR_KERNEL_BAD_FILE_DESCRIPTOR;
     if (f->flash0) return sr_flash0_font_refuse_write(f->guest_path, "write through a font descriptor");
     if (!f->host) return 0x80010013;                 /* read-only (ISO) fd: not writable */
+    /* A write through a Memory Stick descriptor opened without write access answers the
+     * manager's bad-descriptor error and leaves the file unchanged (PSP-HLE-IO-SEEK-001
+     * io-seek-ms-write-rdonly, measured on a PSP-3000; sceIoWriteAsync shares it, unmeasured). */
+    if (!f->writable && loadexec_ms0_path(f->guest_path))
+        return SCE_ERROR_KERNEL_BAD_FILE_DESCRIPTOR;
     if (count > UINT32_MAX - f->off) {
         /* A seek may leave the position anywhere in 32 bits; a write that would carry it
          * past them stops at the same boundary as such a seek (#1380). */

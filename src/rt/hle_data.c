@@ -2171,6 +2171,13 @@ static uint32_t h_io_open_path_stock(const char *path, uint32_t flags, int force
     int writing = (flags & 0x0002) != 0;        /* WRONLY or RDWR */
     int creating = (flags & 0x0200) != 0;
     int exclusive = creating && (flags & 0x0800) != 0;  /* CREAT | EXCL */
+    /* PSP_O_CREAT without write access never makes a Memory Stick file: PSP_O_RDONLY |
+     * PSP_O_CREAT on a missing file answers 0x80010016 and creates nothing (PSP-HLE-IO-SEEK-001
+     * io-seek-ms-write-rdonly-creat, measured on a PSP-3000). The open goes on as a read-only
+     * open of an existing file; the other read-only create combinations follow that cell
+     * (unmeasured). */
+    const int read_only_create = creating && !writing && loadexec_ms0_path(path);
+    if (read_only_create) creating = exclusive = 0;
 #ifndef _WIN32
     sr_cd_status open_status = SR_CD_NOT_FOUND;
 #endif
@@ -2231,6 +2238,7 @@ static uint32_t h_io_open_path_stock(const char *path, uint32_t flags, int force
                 return ms0_posix_psp_error(open_status);
             }
 #endif
+            if (read_only_create) return 0x80010016u;   /* missing: EINVAL, nothing made */
             if (!writing && !creating && s_data_archive_mode &&
                 data_archive_guest_path_allowed(path)) {
                 int wanted_variant = -2;
