@@ -334,9 +334,10 @@ first page.
 FIND, beside it, opens the find box; so do the screen's Options action (the pad's west button, Space) and, from a
 hardware keyboard, "/" or Ctrl+F. The box takes TEST THIS PC's room: a field showing what is typed ("Type a name or
 disc ID" until then) and, 4 px under it, the player's shared on-screen keyboard (`src/player/ui/ui_keyboard.c`, the
-nickname editor's too). Its 34 px keys sit in rows 4 px apart: digits, three QWERTY rows with `'`, `,`, `.` and `-`,
-a row of symbols, and SHIFT, SPACE, DELETE, CANCEL and DONE. The letters are lower case until SHIFT. The field is a
-key's height, so a row of cards still fits under the box at 1280 x 720; with larger text the grid scrolls under it.
+nickname editor's too). Its keys are small controls (34 px at 100% text) in rows 4 px apart, the last 8 px below
+the others: digits, three QWERTY rows with `'`, `,`, `.` and `-`, a row of symbols, and SHIFT, SPACE, DELETE, CANCEL
+and DONE. The letters are lower case until SHIFT. The field is a key's height, so a row of cards still fits under
+the box at 1280 x 720; with larger text the grid scrolls under it.
 The box takes printable characters, up to 63 bytes. The grid shows the games whose name or disc ID holds what is
 typed, ignoring case, without the add card or the demos; the count reads "3 of 40 titles", and no match says "No
 games match". With a controller the keyboard's shortcuts work while the box is open: X deletes, Y types a space, L
@@ -345,7 +346,7 @@ box stays open. A hardware keyboard types straight in, through the same filter a
 while the box is open, so an input method works too), Backspace deletes, and letters that are launcher shortcuts
 (O, S, D, Q, E) are typed instead. Opened from the keyboard, focus is on DONE, so Enter moves to the first match; from
 a controller or the mouse, on q. CANCEL, Esc or B clears and closes the box and focus returns to FIND. The prompt bar
-reads MOVE, SELECT and CLEAR while it is open.
+reads MOVE, SELECT, DELETE, DONE and CLEAR while it is open.
 
 The sorts are those three. Find is one
 model for every input: a Find action (a button, and a controller button) opens a find box that filters the library

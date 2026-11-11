@@ -2283,12 +2283,11 @@ static void player_ui_find_close(PlayerUiNk *player) {
     player->find_focus = PLAYER_UI_ID_LIBRARY_FIND;
 }
 
-/* A hardware keyboard's character, typed through the on-screen keyboard's filter and
-   cap (player_ui_find_accepts): control characters are not typed. */
-static void player_ui_find_type(PlayerUiNk *player, uint32_t codepoint) {
-    char bytes[5];
-    if (ui_keyboard_utf8(codepoint, bytes) == 0u) return;
-    if (ui_keyboard_type(&player->find_keyboard, bytes)) player->library_page = 0u;
+/* A hardware keyboard's text (SDL's UTF-8), typed through the on-screen keyboard's
+   filter and cap (player_ui_find_accepts): control characters and bytes that are not
+   a whole UTF-8 character are left out. */
+static void player_ui_find_type(PlayerUiNk *player, const char *text) {
+    if (ui_keyboard_type(&player->find_keyboard, text)) player->library_page = 0u;
 }
 
 /* Removes the last character, all of its UTF-8 bytes. */
@@ -2379,20 +2378,7 @@ bool player_ui_nk_handle_event(PlayerUiNk *player, const SDL_Event *event) {
            Backspace deletes one, and a printable key is not also a shortcut
            (D, Q, E). Esc or the pad's B clears and closes it, below. */
         if (event->type == SDL_EVENT_TEXT_INPUT && event->text.text != NULL) {
-            const char *cursor = event->text.text;
-            const unsigned char *bytes = (const unsigned char *)cursor;
-            for (size_t i = 0u; bytes[i] != 0u;) {
-                uint32_t codepoint = bytes[i];
-                size_t extra = codepoint >= 0xF0u ? 3u : codepoint >= 0xE0u ? 2u
-                    : codepoint >= 0xC0u ? 1u : 0u;
-                if (extra > 0u) codepoint &= 0x3Fu >> extra;
-                for (size_t k = 1u; k <= extra && bytes[i + k] != 0u; ++k) {
-                    codepoint = (codepoint << 6) | (bytes[i + k] & 0x3Fu);
-                }
-                player_ui_find_type(player, codepoint);
-                i += 1u + extra;
-                while (bytes[i] != 0u && (bytes[i] & 0xC0u) == 0x80u) ++i;
-            }
+            player_ui_find_type(player, event->text.text);
             return true;
         }
         if (event->type == SDL_EVENT_KEY_DOWN || event->type == SDL_EVENT_KEY_UP) {

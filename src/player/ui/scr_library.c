@@ -301,9 +301,12 @@ static void library_prompts(NkUi *ui, bool has_titles, bool finding) {
         {NK_UI_PROMPT_ACT_OPTIONS, "Find"},
         {NK_UI_PROMPT_ACT_MENU, "Settings"}
     };
+    /* The find box's keyboard shortcuts, as the nickname editor names them. */
     static const NkUiPromptItem find[] = {
         {NK_UI_PROMPT_ACT_MOVE, "Move"},
         {NK_UI_PROMPT_ACT_CONFIRM, "Select"},
+        {NK_UI_PROMPT_ACT_OPTIONS, "Delete"},
+        {NK_UI_PROMPT_ACT_MENU, "Done"},
         {NK_UI_PROMPT_ACT_BACK, "Clear"}
     };
     static const NkUiPromptItem empty[] = {
@@ -341,10 +344,14 @@ static PlayerUiAction library_find_box(NkUi *ui, const PlayerUiLibraryModel *mod
                                      NK_UI_SPACE_3);
         row.align_y = NK_UI_ALIGN_CENTER;
         if (nk_ui_begin_container(ui, LIBRARY_ID_FIND_FIELD, &row, NULL)) {
-            NkUiLayout field = layout_make(NK_UI_LAYOUT_ROW, sizing_grow(),
-                                           sizing_fixed(NK_UI_CONTROL_HEIGHT_SMALL), 0.0f);
-            NkUiStyle style;
             const char *query = safe_text(model->find_query, "");
+            NkUiTextStyle text = nk_ui_type(NK_UI_TYPE_BODY,
+                                            query[0] != '\0' ? theme->paper : theme->muted);
+            /* A key's height (ui_keyboard.c's keys), at every text size. */
+            NkUiLayout field = layout_make(
+                NK_UI_LAYOUT_ROW, sizing_grow(),
+                sizing_fixed(nk_ui_line_box(ui, NK_UI_CONTROL_HEIGHT_SMALL, &text)), 0.0f);
+            NkUiStyle style;
             memset(&style, 0, sizeof(style));
             style.fill_rgba = theme->surface_high;
             style.border_rgba = theme->line_strong;
@@ -355,8 +362,6 @@ static PlayerUiAction library_find_box(NkUi *ui, const PlayerUiLibraryModel *mod
             field.padding_right = NK_UI_SPACE_4;
             if (nk_ui_begin_container(ui, LIBRARY_ID_FIND_BOX, &field, &style)) {
                 char shown[96];
-                NkUiTextStyle text = nk_ui_type(NK_UI_TYPE_BODY,
-                                                query[0] != '\0' ? theme->paper : theme->muted);
                 text.wrap = false;
                 if (query[0] != '\0') {
                     (void)snprintf(shown, sizeof(shown), "%s|", query);

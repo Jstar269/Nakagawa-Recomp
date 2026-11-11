@@ -4007,10 +4007,12 @@ typedef struct {
     bool fits;
     bool keyboard;
     bool card;
+    bool scrolls; /* the page body (scr_library.c's LIBRARY_ID_BODY) has room to scroll */
 } LibraryFindFit;
 
 static LibraryFindFit library_find_fit(int width, int height, int text_size_pct) {
-    LibraryFindFit fit = {false, false, false};
+    LibraryFindFit fit = {false, false, false, false};
+    NkUiScrollState scroll;
     bool key_drawn[UI_KEYBOARD_KEY_COUNT + 2u];
     bool key_cut = false;
     NkUi *ui = NULL;
@@ -4053,6 +4055,9 @@ static LibraryFindFit library_find_fit(int width, int height, int text_size_pct)
     }
     fit.card = card_drawn && !card_cut;
     fit.keyboard = !key_cut;
+    fit.scrolls = ui != NULL &&
+                  nk_ui_scroll_state(ui, NK_UI_ID(NK_UI_ID_SCREEN_LIBRARY, 0x000020u), &scroll) &&
+                  scroll.max_offset > 0.0f;
     for (size_t k = 0u; k < sizeof(key_drawn) / sizeof(key_drawn[0]); ++k) {
         if (!key_drawn[k]) fit.keyboard = false;
     }
@@ -4079,9 +4084,41 @@ static void test_library_find_box_fits(void) {
     }
     {
         LibraryFindFit fit = library_find_fit(853, 480, 150);
-        CHECK(fit.fits && fit.keyboard,
-              "the find box at 853 x 480 with 150% text fits the window with every key row");
+        CHECK(fit.fits && fit.keyboard && fit.scrolls,
+              "the find box at 853 x 480 with 150% text fits the window with every key row, "
+              "and the grid scrolls under it");
     }
+}
+
+/* #2206: the find box's filter takes what a title name or disc ID can hold: printable
+   characters, no C0 or C1 control and no DEL; and the box's keyboard stops at its cap. */
+static void test_library_find_filter_and_cap(void) {
+    static const struct { uint32_t cp; bool accepted; } cases[] = {
+        {0x00u, false}, {0x09u, false}, {0x1Fu, false}, {0x20u, true}, {0x41u, true},
+        {0x7Eu, true}, {0x7Fu, false}, {0x80u, false}, {0x9Fu, false}, {0xA0u, true},
+        {0xE9u, true}, {0x30A2u, true}, {0x1F600u, true}
+    };
+    char query[64] = "";
+    char typed[80];
+    UiKeyboard keyboard;
+    for (size_t i = 0u; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+        char message[96];
+        (void)snprintf(message, sizeof(message), "the find filter %s U+%04X",
+                       cases[i].accepted ? "takes" : "refuses", (unsigned)cases[i].cp);
+        CHECK(player_ui_find_accepts(cases[i].cp, NULL) == cases[i].accepted, message);
+    }
+    /* The player's query buffer and cap (player_ui_nk.c: find_query[64], 63 bytes). */
+    ui_keyboard_init(&keyboard, query, sizeof(query) - 1u, player_ui_find_accepts, NULL);
+    memset(typed, 'a', sizeof(typed) - 1u);
+    typed[sizeof(typed) - 1u] = '\0';
+    CHECK(ui_keyboard_type(&keyboard, typed) && strlen(query) == 63u,
+          "the find box stops at 63 bytes");
+    CHECK(!ui_keyboard_type(&keyboard, "b") && strlen(query) == 63u,
+          "a full find box types nothing more");
+    query[0] = '\0';
+    CHECK(ui_keyboard_type(&keyboard, "a\tb\x7f" "c\xc2\x85" "d\xe3\x82") &&
+              strcmp(query, "abcd") == 0,
+          "the find box leaves out a tab, DEL, a C1 control and a cut-off UTF-8 sequence");
 }
 
 static void test_every_screen_fits_the_window(void) {
@@ -7154,6 +7191,7 @@ int main(int argc, char **argv) {
     test_library_find_box();
     test_library_find_box_is_the_shared_keyboard();
     test_library_find_box_fits();
+    test_library_find_filter_and_cap();
     test_nickname_keyboard();
     CHECK(build_library_golden(library, sizeof(library), &library_size),
           "build Library screen dumps");
