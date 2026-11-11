@@ -884,6 +884,14 @@ static void fold_answer(int answer, const wchar_t *text) {
     MEM_W32(STATE_ADDR + 4u, x);
 }
 
+static unsigned long this_pid(void) {
+#ifdef _WIN32
+    return (unsigned long)GetCurrentProcessId();
+#else
+    return (unsigned long)getpid();
+#endif
+}
+
 static int rr_child(void) {
     const unsigned frames = g_child.frames;
     const int perturb = g_child.perturb;
@@ -894,8 +902,12 @@ static int rr_child(void) {
     FrameTrace t;
     fresh_machine(&s);
     g_visit_cpu = &s;
+    sr_flight_init(); /* as the runtime's startup does; inert while SR_FLIGHT is unset */
     for (unsigned f = 0; f < frames; f++) {
         if (!run_frame(&s, &t)) return 90;
+        /* One flight event per frame, standing in for the scheduler's picks: the record a
+         * replay mismatch freezes. It reads nothing and changes no guest state. */
+        sr_flight_record(SR_FLIGHT_CLASS_SCHED, SR_FLIGHT_KIND_SCHED_PICK, f, 0u, 0u, 0u);
         if ((int)f == perturb) MEM_W32(RR_PERTURB, 0xDEADBEEFu);
         wchar_t out[64] = L"init";
         if ((request == 0u && f >= 2u) || (request == 1u && f >= 9u)) {
@@ -932,8 +944,9 @@ static int rr_child(void) {
             }
         }
     }
-    fprintf(stderr, "CHILD_FINAL v1=%08x h=%08x x=%08x frame=%u live_polls=%u live_abandons=%u\n", s.r[V1],
-            MEM_R32(STATE_ADDR), MEM_R32(STATE_ADDR + 4u), MEM_R32(STATE_ADDR + 8u), g_live_polls, g_live_abandons);
+    fprintf(stderr, "CHILD_FINAL v1=%08x h=%08x x=%08x frame=%u live_polls=%u live_abandons=%u pid=%lu\n", s.r[V1],
+            MEM_R32(STATE_ADDR), MEM_R32(STATE_ADDR + 4u), MEM_R32(STATE_ADDR + 8u), g_live_polls, g_live_abandons,
+            this_pid());
     fflush(stderr);
     exit(0);
 }
@@ -1026,6 +1039,8 @@ static int spit(const char *path, const char *text, size_t len) {
 #define RR_CUT   SR_SELFTEST_BUILD_ROOT "/nkstate_rr_cut.txt"
 #define RR_EDIT  SR_SELFTEST_BUILD_ROOT "/nkstate_rr_edited.txt"
 #define RR_OUT   SR_SELFTEST_BUILD_ROOT "/nkstate_rr_child.log"
+#define RR_FLIGHT     SR_SELFTEST_BUILD_ROOT "/nkstate_rr_flight.json"
+#define RR_FLIGHT_REF SR_SELFTEST_BUILD_ROOT "/nkstate_rr_flight_armed.json"
 
 static char g_child_args[128]; /* the next child's options, comma-separated */
 
@@ -1040,6 +1055,9 @@ static void rr_env(const char *record, const char *replay) {
     set_env("SR_REPLAY_CHECKPOINTS", "");
     set_env("SR_REPLAY_CHECKPOINT_EVERY", "4");
     set_env("SR_DISC_ID", "");
+    set_env("SR_FLIGHT", "");
+    set_env("SR_FLIGHT_TRIGGER", "");
+    set_env("SR_FLIGHT_OUTPUT", "");
     g_child_args[0] = '\0';
 }
 
@@ -1072,11 +1090,107 @@ static const char *final_line(const char *log, char *out, size_t cap) {
     return out;
 }
 
+/* The pid= field of CHILD_FINAL, or 0. */
+static unsigned long final_pid(const char *log) {
+    char line[200];
+    const char *p = strstr(final_line(log, line, sizeof line), " pid=");
+    return p ? strtoul(p + 5, NULL, 10) : 0ul;
+}
+
 /* The state part of CHILD_FINAL, without the live-call counts. */
 static void final_state(const char *log, char *out, size_t cap) {
     final_line(log, out, cap);
     char *live = strstr(out, " live_polls=");
     if (live) *live = '\0';
+}
+
+/* A file's text with CR removed (caller frees), or an empty string. */
+static char *slurp_text(const char *path) {
+    char *text = slurp(path, NULL);
+    if (!text) return calloc(1, 1);
+    char *w = text;
+    for (const char *r = text; *r; r++)
+        if (*r != '\r') *w++ = *r;
+    *w = '\0';
+    return text;
+}
+
+/* The flight recorder at the first divergent checkpoint (#2147). The perturbed replay (one
+ * guest word changed after frame 6) mismatches at the frame-8 checkpoint. The child records
+ * one sched-pick per frame before that frame's VBLANK, so the newest event at the mismatch
+ * is pick 9 (frame 8), and the newest at the last matching checkpoint (frame 4) is pick 5. */
+static void test_replay_mismatch_flight(void) {
+    int st;
+    char *log, *bundle, *armed;
+
+    /* The mismatch arms the checkpoint trigger at the newest event and freezes the record
+     * there: terminal "trigger", not the "exit" a mismatch used to leave. */
+    rr_env("", RR_REC);
+    rr_opt("perturb=6");
+    set_env("SR_FLIGHT", "sched;8");
+    set_env("SR_FLIGHT_OUTPUT", RR_FLIGHT);
+    remove(RR_FLIGHT);
+    log = rr_run(&st);
+    CHECK(st == 1 && strstr(log, "REPLAY_MISMATCH frame=8 index=2 kind=digest digest=ram.08900000\n") != NULL,
+          "perturbed replay under SR_FLIGHT: exit %d: %.300s", st, log);
+    CHECK(strstr(log, "SR_FLIGHT: the replay mismatch froze the record at event 9 (SR_FLIGHT_TRIGGER=checkpoint:3:9:0)\n") != NULL,
+          "the mismatch did not freeze the flight record at its newest event: %.400s", log);
+    CHECK(strstr(log, "SR_FLIGHT: to keep the events from the last matching checkpoint (frame 4) on, replay again with "
+                      "the same SR_FLIGHT and SR_FLIGHT_TRIGGER=checkpoint:3:5:7\n") != NULL,
+          "the mismatch did not name the next run's trigger: %.400s", log);
+    free(log);
+    bundle = slurp_text(RR_FLIGHT);
+    CHECK(strstr(bundle, "\"enabled_classes\": [\"sched\"], \"limit\": 8, \"recorded\": 9, \"dropped\": 1, ") != NULL,
+          "the frozen record does not end at pick 9: %.600s", bundle);
+    CHECK(strstr(bundle, "\"mode\": \"checkpoint\", \"pc\": null, \"ge_draw\": null, "
+                         "\"checkpoint\": {\"kind\": 3, \"occurrence\": 9, \"after\": 0}, \"fired\": 1}") != NULL,
+          "the bundle's policy is not checkpoint:3:9:0: %.600s", bundle);
+    CHECK(strstr(bundle, "\"reason\": \"trigger\"") != NULL && strstr(bundle, "\"reason\": \"exit\"") == NULL,
+          "the bundle's terminal is not the trigger: %.600s", bundle);
+
+    /* A run armed with that spec from the start writes the same bytes: the mismatch armed
+     * the production checkpoint mode; it did not make up a record. */
+    rr_env("", RR_REC);
+    rr_opt("perturb=6");
+    set_env("SR_FLIGHT", "sched;8");
+    set_env("SR_FLIGHT_TRIGGER", "checkpoint:3:9:0");
+    set_env("SR_FLIGHT_OUTPUT", RR_FLIGHT_REF);
+    remove(RR_FLIGHT_REF);
+    log = rr_run(&st);
+    CHECK(st == 1 && strstr(log, "SR_FLIGHT: the replay mismatch left the armed SR_FLIGHT_TRIGGER mode in charge\n") != NULL,
+          "a mismatch overrode the armed mode: exit %d: %.400s", st, log);
+    free(log);
+    armed = slurp_text(RR_FLIGHT_REF);
+    CHECK(armed[0] != '\0' && strcmp(bundle, armed) == 0,
+          "the mismatch's bundle differs from a run armed with checkpoint:3:9:0:\n%.600s\n---\n%.600s", bundle, armed);
+    free(armed);
+    free(bundle);
+
+    /* The next run, armed as the mismatch said, keeps the events from the last matching
+     * checkpoint (pick 5) up to the mismatch, where the run ends inside the window. */
+    rr_env("", RR_REC);
+    rr_opt("perturb=6");
+    set_env("SR_FLIGHT", "sched;8");
+    set_env("SR_FLIGHT_TRIGGER", "checkpoint:3:5:7");
+    set_env("SR_FLIGHT_OUTPUT", RR_FLIGHT);
+    remove(RR_FLIGHT);
+    log = rr_run(&st);
+    CHECK(st == 1 && strstr(log, "REPLAY_MISMATCH frame=8 index=2 ") != NULL, "next run: exit %d: %.300s", st, log);
+    free(log);
+    bundle = slurp_text(RR_FLIGHT);
+    CHECK(strstr(bundle, "\"checkpoint\": {\"kind\": 3, \"occurrence\": 5, \"after\": 7}, \"fired\": 1}") != NULL &&
+              strstr(bundle, "\"reason\": \"trigger\", \"sequence\": 5, \"kind\": 3, \"arg0\": 5") != NULL &&
+              strstr(bundle, "\"recorded\": 9, \"dropped\": 1, ") != NULL,
+          "the next run did not keep the window from pick 5 to the mismatch: %.800s", bundle);
+    free(bundle);
+
+    /* Without SR_FLIGHT the mismatch says nothing about the recorder. */
+    rr_env("", RR_REC);
+    rr_opt("perturb=6");
+    log = rr_run(&st);
+    CHECK(st == 1 && strstr(log, "SR_FLIGHT") == NULL, "a mismatch without SR_FLIGHT mentioned it: %.300s", log);
+    free(log);
+    rr_env("", "");
 }
 
 static void test_record_replay(void) {
@@ -1092,6 +1206,7 @@ static void test_record_replay(void) {
     CHECK(st == 0, "record child exit %d: %.300s", st, log);
     final_state(log, want, sizeof want);
     CHECK(want[0] != '\0', "record child printed no final state: %.300s", log);
+    const unsigned long record_pid = final_pid(log);
     free(log);
     rec = slurp(RR_REC, &rec_len);
     CHECK(rec != NULL, "SR_RECORD wrote no file");
@@ -1131,6 +1246,14 @@ static void test_record_replay(void) {
     CHECK(strcmp(got, want) == 0, "replay ended in a different state:\n  record %s\n  replay %s", want, got);
     CHECK(strstr(final_line(log, line, sizeof line), " live_polls=0 live_abandons=0") != NULL,
           "the replay asked the live keyboard: %s", line);
+    /* The recording was made in one process and replayed in another, started fresh from the
+     * executable after the first had exited; neither is this test process. */
+    {
+        const unsigned long replay_pid = final_pid(log);
+        CHECK(record_pid != 0ul && replay_pid != 0ul && record_pid != replay_pid && record_pid != this_pid() &&
+                  replay_pid != this_pid(),
+              "record pid %lu, replay pid %lu, test pid %lu: not three processes", record_pid, replay_pid, this_pid());
+    }
     free(log);
 
     /* Control: the same live run with the other person's text ends elsewhere, so the answer
@@ -1160,6 +1283,7 @@ static void test_record_replay(void) {
     CHECK(strstr(log, "REPLAY_NOT_RUN") == NULL && strstr(log, "CHILD_FINAL") == NULL,
           "a mismatch did not stop the run with one verdict: %.300s", log);
     free(log);
+    test_replay_mismatch_flight();
 
     /* The guest polls a request the recording abandoned. */
     rr_env("", RR_REC);
