@@ -1091,12 +1091,18 @@ code is `src/rt/gpu_sdl3vk/tex_mips.h` (the chain) and the `tex_hm_*` functions 
   alpha-unused or alpha-tested draws, 1:1 draws or render targets ever meet, such as a loading screen's or a menu's
   textures, cost no build. Two limits keep builds off the frames that cannot afford them, and a draw either limit
   stops binds level 0, as with the part off:
-  - **The build budget.** The builds started in one present stop once they have taken 2 ms, an eighth of a 60 Hz
-    frame; one build may run past it by its own cost. A later bind builds the chain.
+  - **The build budget.** The builds started in one present stop once they have read 131,072 level-0 texels (two
+    256x256 textures); one build may run past it by its own size, and a chain taken from the cache, or contents
+    refused below, charge a sixteenth of their texels. A later bind builds the chain. The budget counts texels,
+    not host time, because a chain changes the frame the guest keeps: which draws bind one is the same on every
+    host and in every deterministic run.
   - **Streaming textures.** A texture address whose contents are decoded anew in three presents in a row, each
     within two presents of the last (a movie on a surface, a palette fade, which makes a new entry at each step, a
-    texture rewritten every frame), would build chains that are replaced before they are seen again. Its draws keep
-    level 0 until the address holds still for longer than two presents.
+    texture rewritten every frame), would build chains that are replaced before they are seen again. While it
+    streams, contents the chain cache holds bind their kept chain, and contents a streaming address has shown once
+    before (a slot several textures share in turn) are built when they come back; contents new to both keep level
+    0, and their hash is noted in a ring of 1,024. Once the address holds still for longer than two presents, its
+    next draw builds as usual.
 - **Which draws.** A draw binds the chain only when it is transformed (through-mode HUDs, menus and text keep
   level 0, as texture filtering's rule has it), its minifying filter is linear, and, for a texture with any alpha
   under 255, the draw blends by the texture's alpha and does not alpha-test it: the texture function is RGBA, the
@@ -1145,9 +1151,9 @@ code is `src/rt/gpu_sdl3vk/tex_mips.h` (the chain) and the `tex_hm_*` functions 
   `HOST_MIPS: on (filter=box in linear light, alpha-weighted, key fill; bias=0 at <S>x; anisotropy=<A>)` and the
   guest-visible line section 11.3.8 describes when the renderer starts; `HOST_MIPS: exit (entries=, sets=, builds=,
   reused=, redecodes=, texels=, build_ms=, bound=, plain_alpha_unused=, plain_alpha_test=, plain_onetoone=,
-  plain_budget=, plain_stream=, plain_target=, set_failures=, chain_peak_kib=, cache_peak_kib=)` (`entries` are the
-  images with a chain, `sets` the ones a draw has bound; `build_ms` is the time of the repeated decodes, the hash,
-  the cache lookup and the builds; `texels` counts built ones; `plain_onetoone` counts draws, the other `plain_`
+  plain_budget=, plain_stream=, plain_target=, set_failures=, chain_peak_kib=, cache_peak_kib=, present_peak_ms=)`
+  (`entries` are the images with a chain, `sets` the ones a draw has bound; `build_ms` is the time of the repeated
+  decodes, the hash, the cache lookup and the builds, and `present_peak_ms` the most of it one present took; `texels` counts built ones; `plain_onetoone` counts draws, the other `plain_`
   fields binds) when it
   stops, or, on the `SR_EXIT_AT_VBLANK` path that skips the renderer's shutdown, from `ace_finish` (once either
   way). The report's `effective` block has `"mips"`, the game badge lists "smooth far textures", and the flight
@@ -1168,8 +1174,10 @@ code is `src/rt/gpu_sdl3vk/tex_mips.h` (the chain) and the `tex_hm_*` functions 
     contents drawn in through mode build nothing, and the first minified draw of them decodes level 0 again and
     builds once, after a submit that closes the command buffer; an alpha-tested draw of a texture with alpha, and a
     transformed draw at 1:1, bind level 0; past the build budget a draw binds level 0 and builds nothing, and with
-    budget it builds; new contents at the address in three presents in a row stop the builds at the third, and the
-    address held still builds again; a colour-keyed edge blended over black takes no key colour; through-mode and
+    budget it builds; with room for two 64x64 textures, two new contents build in one present and the third binds
+    level 0 until the next; new contents at the address in three presents in a row keep level 0 at the third,
+    while it streams contents the cache holds bind their chain, contents refused once build when they come back
+    and contents new again keep level 0, and the address held still builds again; a colour-keyed edge blended over black takes no key colour; through-mode and
     alpha-unused draws keep level 0, and a colour-tested draw stays with the software renderer; the chain bytes
     are 1365 texels an entry. It runs at render
     scales 4, 2 and 1, with 16x texture filtering, and with the part off, where the minified draw must show level

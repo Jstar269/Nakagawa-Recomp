@@ -26,9 +26,12 @@
  *    stencil stay the game's own).
  *  - one-to-one: a transformed draw that maps texels 1:1 onto guest pixels binds level 0.
  *  - budget: past the present's build budget a draw binds level 0 and builds nothing; with
- *    budget it builds.
+ *    budget it builds. The budget counts level-0 texels, not host time: with room for two 64x64
+ *    textures, two new contents build in one present and the third binds level 0 until the next.
  *  - stream: new contents at the texture's address in three presents in a row stop the builds
- *    (the third draw binds level 0); after the address holds still, the next draw builds.
+ *    (the third draw binds level 0). While it streams, contents the cache holds bind their kept
+ *    chain, contents refused once are built when they come back, and contents new again keep
+ *    level 0 until the address holds still, when the next draw builds.
  *  - key-edge: opaque red beside the colour key (entry 2, magenta, alpha 0), blended by source
  *    alpha over black: no device pixel takes any blue, at the edge or anywhere.
  *  - gates: a through-mode draw and a draw whose texture function ignores the alpha of a
@@ -54,6 +57,7 @@ static void hm_fill(int kind) {
         for (uint32_t u = 0; u < 64u; u++)
             t[v * 64u + u] = kind == 0 ? (uint8_t)((u ^ v) & 1u) : kind == 1 ? (uint8_t)1u
                            : kind == 3 ? (uint8_t)(v & 1u)
+                           : kind >= 20 ? (uint8_t)(((u * 3u + v * 5u + (uint32_t)kind) % 7u) == 0u)
                            : kind >= 10 ? (uint8_t)(((u * 7u + v * 13u + (uint32_t)kind) % 5u) == 0u)
                            : (uint8_t)(u < 32u ? 3u : 2u);
     sr_gpu_vram_dirty(HM_TEX, 64u * 64u);
@@ -201,7 +205,7 @@ int gegpu_mips_selftest(void) {
     ge_set_gpu_hooks(&k_hooks);
     /* Every cell but budget builds without a budget, so the cells do not depend on the host's
        speed; the budget cell sets its own. */
-    s_hm_budget_ns = UINT64_MAX;
+    s_hm_budget_texels = UINT64_MAX;
     const uint32_t grey = hm_rgba(188, 188, 188, 0);
     int ok = 1;
     HmRange r;
@@ -380,46 +384,93 @@ int gegpu_mips_selftest(void) {
     /* budget: no budget left, then the budget back. */
     if (ok) {
         const uint64_t builds0 = s_hm_stats.builds, pb0 = s_hm_stats.plain_budget;
+        const uint64_t reused0 = s_hm_stats.reused, ps0 = s_hm_stats.plain_stream, pa0 = s_hm_stats.plain_alpha;
         hm_fill(10);
         hm_state(3u | (1u << 8), 0, 0);
-        s_hm_budget_ns = 0u;
+        s_hm_budget_texels = 0u;
         const int held = hm_quad(270, 5, 64.0f, 0) && !s_tex_bound_hm && s_hm_stats.builds == builds0 &&
                          s_hm_stats.plain_budget == pb0 + 1u;
-        s_hm_budget_ns = UINT64_MAX;
-        ok = held && hm_quad(270, 5, 64.0f, 0) && s_tex_bound_hm && s_hm_stats.builds == builds0 + 1u;
+        s_hm_budget_texels = UINT64_MAX;
+        /* A submit ends the batch, as a present does: a draw with the same state would join it and
+           keep its level-0 set. */
+        const int q2 = held && submit_pending() && hm_quad(270, 5, 64.0f, 0);
+        ok = q2 && s_tex_bound_hm && s_hm_stats.builds == builds0 + 1u;
         if (!ok) {
             fprintf(stderr, "gpu mips selftest [budget]: want level 0 and no build past the budget (%s), then one "
-                            "build (builds +%llu, plain_budget +%llu)\n", held ? "ok" : "BAD",
+                            "build (builds +%llu, plain_budget +%llu; draw %d, bound %d, reused +%llu, "
+                            "plain_stream +%llu, plain_alpha +%llu)\n", held ? "ok" : "BAD",
                     (unsigned long long)(s_hm_stats.builds - builds0),
-                    (unsigned long long)(s_hm_stats.plain_budget - pb0));
+                    (unsigned long long)(s_hm_stats.plain_budget - pb0), q2, s_tex_bound_hm,
+                    (unsigned long long)(s_hm_stats.reused - reused0),
+                    (unsigned long long)(s_hm_stats.plain_stream - ps0),
+                    (unsigned long long)(s_hm_stats.plain_alpha - pa0));
         } else {
             printf("gpu mips selftest: PASS budget     past the budget level 0, then one build\n");
         }
     }
-
-    /* stream: new contents in three presents in a row, then the address holds still. */
+    /* budget in texels: room for two 64x64 builds in one present; the third waits a present. */
     if (ok) {
-        const uint64_t builds0 = s_hm_stats.builds, ps0 = s_hm_stats.plain_stream;
+        const uint64_t builds0 = s_hm_stats.builds, pb0 = s_hm_stats.plain_budget;
         int binds = 0;
-        s_cnt_present_cpu += HM_STREAM_GAP;   /* the earlier cells' decodes are past the gap */
+        s_cnt_present_cpu += HM_STREAM_GAP + 1u;
+        s_hm_budget_texels = 2u * 64u * 64u;
         for (int k = 0; k < 3 && ok; k++) {
-            s_cnt_present_cpu++;
-            hm_fill(11 + k);
+            hm_fill(20 + k);
             hm_state(3u | (1u << 8), 0, 0);
-            ok = hm_quad(280, 5, 64.0f, 0);
+            ok = hm_quad(270, 5, 64.0f, 0);
             binds += s_tex_bound_hm;
         }
-        const int stopped = ok && binds == 2 && s_hm_stats.builds == builds0 + 2u &&
-                            s_hm_stats.plain_stream == ps0 + 1u;
+        const int held = ok && binds == 2 && s_hm_stats.builds == builds0 + 2u &&
+                         s_hm_stats.plain_budget == pb0 + 1u;
         s_cnt_present_cpu += HM_STREAM_GAP + 1u;
-        ok = stopped && hm_quad(280, 5, 64.0f, 0) && s_tex_bound_hm && s_hm_stats.builds == builds0 + 3u;
+        /* A submit ends the batch, as a present does: a draw with the same state would join it. */
+        ok = held && submit_pending() && hm_quad(270, 5, 64.0f, 0) && s_tex_bound_hm &&
+             s_hm_stats.builds == builds0 + 3u;
+        s_hm_budget_texels = UINT64_MAX;
         if (!ok) {
-            fprintf(stderr, "gpu mips selftest [stream]: want two builds, then level 0 at the third present (%s), then "
-                            "a build once it holds still (builds +%llu, plain_stream +%llu, binds %d)\n",
-                    stopped ? "ok" : "BAD", (unsigned long long)(s_hm_stats.builds - builds0),
-                    (unsigned long long)(s_hm_stats.plain_stream - ps0), binds);
+            fprintf(stderr, "gpu mips selftest [budget-texels]: want two builds and level 0 for the third in one "
+                            "present (%s), then a build at the next (builds +%llu, plain_budget +%llu, binds %d)\n",
+                    held ? "ok" : "BAD", (unsigned long long)(s_hm_stats.builds - builds0),
+                    (unsigned long long)(s_hm_stats.plain_budget - pb0), binds);
         } else {
-            printf("gpu mips selftest: PASS stream     the third changing present binds level 0; still, it builds\n");
+            printf("gpu mips selftest: PASS budget-tx  two 64x64 builds fill a present's texels; the third waits\n");
+        }
+    }
+
+    /* stream: new contents in three presents in a row; then contents the cache holds, contents
+       that come back, contents new again, and the address held still. */
+    if (ok) {
+        const uint64_t builds0 = s_hm_stats.builds, ps0 = s_hm_stats.plain_stream, reused0 = s_hm_stats.reused;
+        static const struct { int kind; int bound; const char *what; } k_steps[] = {
+            {11, 1, "first new contents build"},        {12, 1, "second new contents build"},
+            {13, 0, "third new contents keep level 0"}, {11, 1, "cached contents bind their chain"},
+            {13, 1, "contents that come back build"},   {14, 0, "new contents again keep level 0"},
+        };
+        const char *bad = NULL;
+        s_cnt_present_cpu += HM_STREAM_GAP;   /* the earlier cells' decodes are past the gap */
+        for (size_t k = 0; k < sizeof(k_steps) / sizeof(k_steps[0]) && ok && !bad; k++) {
+            s_cnt_present_cpu++;
+            hm_fill(k_steps[k].kind);
+            hm_state(3u | (1u << 8), 0, 0);
+            ok = hm_quad(280, 5, 64.0f, 0);
+            if (ok && s_tex_bound_hm != k_steps[k].bound) bad = k_steps[k].what;
+        }
+        if (ok && !bad && (s_hm_stats.builds != builds0 + 3u || s_hm_stats.reused != reused0 + 1u ||
+                           s_hm_stats.plain_stream != ps0 + 2u))
+            bad = "three builds, one kept chain and two refusals while it streams";
+        s_cnt_present_cpu += HM_STREAM_GAP + 1u;
+        if (ok && !bad &&
+            !(submit_pending() && hm_quad(280, 5, 64.0f, 0) && s_tex_bound_hm && s_hm_stats.builds == builds0 + 4u))
+            bad = "the address held still builds";
+        if (!ok || bad) {
+            fprintf(stderr, "gpu mips selftest [stream]: %s (builds +%llu, reused +%llu, plain_stream +%llu)\n",
+                    bad ? bad : "a draw failed", (unsigned long long)(s_hm_stats.builds - builds0),
+                    (unsigned long long)(s_hm_stats.reused - reused0),
+                    (unsigned long long)(s_hm_stats.plain_stream - ps0));
+            ok = 0;
+        } else {
+            printf("gpu mips selftest: PASS stream     new contents keep level 0 while it streams; kept and "
+                   "returning ones bind\n");
         }
     }
 

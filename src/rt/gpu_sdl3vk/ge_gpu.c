@@ -337,6 +337,7 @@ typedef struct {
     int hm_ready;                          /* levels 1.. hold the chain of level 0's content */
     uint8_t hm_mag, hm_clamp_u, hm_clamp_v; /* the entry's filter and wrap, for hm_smp */
     uint8_t hm_made;                       /* hm_view, hm_smp and hm_set were attempted */
+    uint8_t hm_skip;                       /* streaming: these contents were new at a bind and kept level 0 */
     VkImageView hm_view; VkSampler hm_smp;
     VkDescriptorSet hm_set;
 } TexEnt;
@@ -544,7 +545,8 @@ static float *s_hm_work;
 static int s_tex_bound_hm;                 /* the last tex_get bound a chain */
 static struct {
     uint64_t entries, builds, reused, redecodes, texels, build_ns, bound, plain_alpha, plain_target,
-             plain_alpha_test, plain_onetoone, plain_budget, plain_stream, sets, set_failures, bytes, bytes_peak, cache_peak;
+             plain_alpha_test, plain_onetoone, plain_budget, plain_stream, sets, set_failures, bytes, bytes_peak, cache_peak,
+             present_peak_ns;
 } s_hm_stats;
 /* Built chains by the content of their level 0 (a full 64-bit hash of the decoded texels and the
  * size), so a texture whose contents come back, as when a game streams several textures through
@@ -4350,31 +4352,55 @@ static const TexEnt *s_hm_scratch;
 #endif
 
 /* The build budget: chain builds run on the GE thread, the guest's, so the builds started in one
- * present stop once they have taken HM_BUILD_BUDGET_NS. A draw past it binds level 0, as with
- * the part off, and a later bind builds the chain. 2 ms is an eighth of a 60 Hz frame; one build
- * may run past it by its own cost (a 256x256 texture's is about 1 ms on the measured host).
- * s_hm_budget_ns is a variable for gpu-mips-selftest's budget cell. */
-#define HM_BUILD_BUDGET_NS 2000000u
-static uint64_t s_hm_budget_ns = HM_BUILD_BUDGET_NS;
-static uint64_t s_hm_budget_present = UINT64_MAX, s_hm_budget_used_ns;
+ * present stop once they have read HM_BUILD_BUDGET_TEXELS level-0 texels. A draw past it binds
+ * level 0, as with the part off, and a later bind builds the chain. The budget counts texels, not
+ * time, because a chain changes the frame the guest keeps: which draws bind one must be the same
+ * on every host and in every deterministic run. Two 256x256 textures a present took about 1.6 ms
+ * on the measured host (82 million level-0 texels a second); one build may run past the budget
+ * by its own size, and a kept chain or a hash alone is charged a sixteenth.
+ * s_hm_budget_texels is a variable for gpu-mips-selftest's budget cell. */
+#define HM_BUILD_BUDGET_TEXELS (2u * 256u * 256u)
+static uint64_t s_hm_budget_texels = HM_BUILD_BUDGET_TEXELS;
+static uint64_t s_hm_budget_present = UINT64_MAX, s_hm_budget_used, s_hm_present_ns;
 static int tex_hm_objects(TexEnt *e);
 
 static int tex_hm_budget_left(void) {
     const uint64_t now = xs_now();
-    if (now != s_hm_budget_present) { s_hm_budget_present = now; s_hm_budget_used_ns = 0; }
-    return s_hm_budget_used_ns < s_hm_budget_ns;
+    if (now != s_hm_budget_present) { s_hm_budget_present = now; s_hm_budget_used = 0; s_hm_present_ns = 0; }
+    return s_hm_budget_used < s_hm_budget_texels;
+}
+
+/* Host time a build call spent since `t0`: the run's total, and this present's, whose peak the
+ * exit stamp reports (the most one present's builds held the GE thread). */
+static void tex_hm_spent(uint64_t t0) {
+    const uint64_t d = SDL_GetTicksNS() - t0;
+    s_hm_stats.build_ns += d;
+    s_hm_present_ns += d;
+    if (s_hm_present_ns > s_hm_stats.present_peak_ns) s_hm_stats.present_peak_ns = s_hm_present_ns;
 }
 
 /* Streaming textures: a texture address whose contents are decoded anew in HM_STREAM_PRESENTS
  * presents in a row, each within HM_STREAM_GAP presents of the last (a movie drawn on a surface,
  * a palette fade, which makes a new entry at each step, a texture the game rewrites each frame),
- * would build a chain that is replaced before it is seen again. Its draws bind level 0 until it
- * holds still for longer than the gap. A small table by address, the least recently decoded
- * dropped first. */
+ * would build a chain that is replaced before it is seen again. While it streams, contents bind
+ * a chain only if the chain cache has theirs or they have been at a streaming address before
+ * (s_hm_seen: a slot several textures share in turn is built as each comes back); contents new
+ * to both keep level 0. A small table by address, the least recently decoded dropped first, and
+ * a ring of the content hashes that were refused. */
 #define HM_STREAM_SLOTS 64
 #define HM_STREAM_PRESENTS 3u
 #define HM_STREAM_GAP 2u
+#define HM_SEEN_SLOTS 1024u
 static struct { uint32_t addr; uint32_t streak; uint64_t last; } s_hm_stream[HM_STREAM_SLOTS];
+static uint64_t s_hm_seen[HM_SEEN_SLOTS];
+static uint32_t s_hm_seen_n;
+
+static int tex_hm_seen(uint64_t hash) {
+    const uint32_t n = s_hm_seen_n < HM_SEEN_SLOTS ? s_hm_seen_n : HM_SEEN_SLOTS;
+    for (uint32_t i = 0; i < n; i++)
+        if (s_hm_seen[i] == hash) return 1;
+    return 0;
+}
 
 static void tex_hm_note_decode(uint32_t addr) {
     const uint64_t now = xs_now();
@@ -4414,14 +4440,18 @@ static int tex_hm_any_alpha(const uint32_t *t, size_t n) {
  * s_texscratch (decoded again when this tex_get call's decode was not this entry's), then the
  * cached chain of the same contents, or one built now and kept. Uploads levels 1..hm_levels-1
  * and leaves the image in SHADER_READ_ONLY, as the decode did. A texture only through-mode
- * draws, unused alpha or a render target ever meets costs no build. */
-static int tex_hm_build(TexEnt *e) {
+ * draws, unused alpha or a render target ever meets costs no build. `streaming`: the address is
+ * streaming, so contents the cache does not hold and no streaming address has shown before are
+ * noted and refused (returns 0 with e->hm_skip set).
+ *
+ * The uploads need no submit first: level 0's texels do not change, draws already recorded ran
+ * before the transfer, and batches still pending are recorded after it, when the image is back
+ * in SHADER_READ_ONLY. */
+static int tex_hm_build(TexEnt *e, int streaming) {
     const uint64_t t0 = SDL_GetTicksNS();
     const uint32_t w = (uint32_t)e->w, h = (uint32_t)e->h;
+    const uint64_t level0 = (uint64_t)w * h, light = level0 / 16u + 1u;
     if (s_hm_scratch != e) {
-        /* Draws recorded since the last submit may read level 0, which the transfer below moves
-         * out of SHADER_READ_ONLY: they go first, as for an update in place. */
-        if (e->pending) submit_pending();
         ge_decode_tex_rgba(s_texscratch);
         s_hm_scratch = e;
         s_hm_stats.redecodes++;
@@ -4436,15 +4466,24 @@ static int tex_hm_build(TexEnt *e) {
             e->hm_alpha = c->alpha;
             chain = c->chain;
             s_hm_stats.reused++;
+            s_hm_budget_used += light;
             break;
         }
     }
+    if (!chain && streaming && !tex_hm_seen(hash)) {
+        s_hm_seen[s_hm_seen_n++ % HM_SEEN_SLOTS] = hash;
+        if (s_hm_seen_n >= 2u * HM_SEEN_SLOTS) s_hm_seen_n -= HM_SEEN_SLOTS;
+        e->hm_skip = 1;
+        s_hm_budget_used += light;
+        tex_hm_spent(t0);
+        return 0;
+    }
     if (!chain) {
+        s_hm_budget_used += level0;
         const uint32_t built = nk_tex_mips_build(&s_hm_curve, s_texscratch, w, h, s_hm_work, s_hm_out,
                                                  &e->hm_alpha);
         if (built + 1u != e->hm_levels) {
-            s_hm_stats.build_ns += SDL_GetTicksNS() - t0;
-            s_hm_budget_used_ns += SDL_GetTicksNS() - t0;
+            tex_hm_spent(t0);
             return 0;
         }
         s_hm_stats.builds++;
@@ -4467,15 +4506,12 @@ static int tex_hm_build(TexEnt *e) {
              * TRANSFER_DST, in a command buffer that is still open. */
             if (lay != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL && s_cmd != VK_NULL_HANDLE)
                 to_layout(s_cmd, e->img, VK_IMAGE_ASPECT_COLOR_BIT, &lay, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-            s_hm_stats.build_ns += SDL_GetTicksNS() - t0;
-            s_hm_budget_used_ns += SDL_GetTicksNS() - t0;
+            tex_hm_spent(t0);
             return 0;
         }
         off += (size_t)lw * lh;
     }
-    const uint64_t spent = SDL_GetTicksNS() - t0;
-    s_hm_stats.build_ns += spent;
-    s_hm_budget_used_ns += spent;
+    tex_hm_spent(t0);
     e->hm_ready = 1;
     return 1;
 }
@@ -4509,13 +4545,14 @@ static int tex_decode_upload(VkImage img, int w, int h, uint32_t levels, TexEnt 
     }
     if (chain) {
         hm->hm_ready = 0;
+        hm->hm_skip = 0;
         hm->hm_alpha = tex_hm_any_alpha(s_texscratch, (size_t)w * (size_t)h);
         s_hm_scratch = hm;
         tex_hm_note_decode(s_ge->tex_addr);
 #if SR_GPU_MIPS_MUTANT == 2
         /* gpu-mips-mutant 2: the eager build at every decode, which the deferred cell refuses. */
         if (!hm->hm_made) (void)tex_hm_objects(hm);
-        if (hm->hm_set) (void)tex_hm_build(hm);
+        if (hm->hm_set) (void)tex_hm_build(hm, 0);
 #endif
     }
     return 1;
@@ -5126,15 +5163,17 @@ static int tex_hm_applies(const TexEnt *e) {
     return 1;
 }
 
-/* The chain for a draw it applies to, when it is ready or can be made now: a streaming texture,
- * or a build past this present's budget, binds level 0 for this draw instead. */
+/* The chain for a draw it applies to, when it is ready or can be made now: new contents at a
+ * streaming address, or a build past this present's budget, bind level 0 for this draw instead. */
 static VkDescriptorSet tex_hm_or_entry_set(TexEnt *e) {
     if (s_hm && tex_hm_applies(e)) {
         int ready = e->hm_ready;
         if (!ready) {
-            if (tex_hm_streaming(e->addr)) s_hm_stats.plain_stream++;
+            const int streaming = tex_hm_streaming(e->addr);
+            if (streaming && e->hm_skip) s_hm_stats.plain_stream++;
             else if (!tex_hm_budget_left()) s_hm_stats.plain_budget++;
-            else ready = (e->hm_set || (!e->hm_made && tex_hm_objects(e))) && tex_hm_build(e);
+            else if (tex_hm_build(e, streaming)) ready = e->hm_set || (!e->hm_made && tex_hm_objects(e));
+            else if (streaming && e->hm_skip) s_hm_stats.plain_stream++;
         }
         if (ready) {
             s_tex_bound_hm = 1;
@@ -5169,7 +5208,7 @@ static void tex_hm_report(void) {
     fprintf(stderr, "HOST_MIPS: exit (entries=%llu, sets=%llu, builds=%llu, reused=%llu, redecodes=%llu, texels=%llu, "
                     "build_ms=%.1f, bound=%llu, plain_alpha_unused=%llu, plain_alpha_test=%llu, plain_onetoone=%llu, "
                     "plain_budget=%llu, plain_stream=%llu, plain_target=%llu, set_failures=%llu, "
-                    "chain_peak_kib=%llu, cache_peak_kib=%llu)\n",
+                    "chain_peak_kib=%llu, cache_peak_kib=%llu, present_peak_ms=%.2f)\n",
             (unsigned long long)s_hm_stats.entries, (unsigned long long)s_hm_stats.sets,
             (unsigned long long)s_hm_stats.builds,
             (unsigned long long)s_hm_stats.reused, (unsigned long long)s_hm_stats.redecodes,
@@ -5180,7 +5219,7 @@ static void tex_hm_report(void) {
             (unsigned long long)s_hm_stats.plain_target,
             (unsigned long long)s_hm_stats.set_failures,
             (unsigned long long)(s_hm_stats.bytes_peak >> 10),
-            (unsigned long long)(s_hm_stats.cache_peak >> 10));
+            (unsigned long long)(s_hm_stats.cache_peak >> 10), (double)s_hm_stats.present_peak_ns / 1e6);
 }
 
 static void tex_hm_init(void) {
@@ -5188,8 +5227,10 @@ static void tex_hm_init(void) {
     s_hm_reported = 0;
     memset(&s_hm_stats, 0, sizeof(s_hm_stats));
     memset(s_hm_stream, 0, sizeof(s_hm_stream));
+    s_hm_seen_n = 0;
     s_hm_budget_present = UINT64_MAX;
-    s_hm_budget_used_ns = 0;
+    s_hm_budget_used = 0;
+    s_hm_present_ns = 0;
     if (!g_ace_on || !ace_effective()->mips) return;
     const size_t texels = nk_tex_mips_chain_texels(NK_TEX_MIPS_MAX_DIM, NK_TEX_MIPS_MAX_DIM);
     s_hm_out = (uint32_t *)malloc(texels * sizeof(uint32_t));
