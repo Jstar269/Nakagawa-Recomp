@@ -4152,7 +4152,7 @@ static void test_io_memory_stick_cells_through_syscall(void) {
 
     /* The probe-owned 16-byte file, made by an exclusive create. */
     fd_guest_copy(MS_CELL_DATA, pattern, MS_SIZE);
-    uint32_t fd = ms_cell_path_call(MS_CELL_OPEN, file_guest, 0x0803u);  /* RDWR|CREAT|EXCL */
+    uint32_t fd = ms_cell_path_call(MS_CELL_OPEN, file_guest, 0x0A03u);  /* RDWR|CREAT|EXCL */
     expect(fd >= 3u && fd < 64u, "an exclusive create of a new Memory Stick file opens");
     if (fd < 3u || fd >= 64u) return;
     expect(ms_cell_fd_call(MS_CELL_WRITE, fd, MS_CELL_DATA, MS_SIZE) == MS_SIZE &&
@@ -4161,7 +4161,7 @@ static void test_io_memory_stick_cells_through_syscall(void) {
 
     /* io-excl-existing: with and without PSP_O_TRUNC, the file is left as it was. */
     fd_host_path(host, sizeof(host), file_guest);
-    expect(ms_cell_path_call(MS_CELL_OPEN, file_guest, 0x0803u) == MS_EEXIST &&
+    expect(ms_cell_path_call(MS_CELL_OPEN, file_guest, 0x0A03u) == MS_EEXIST &&
                ms_cell_path_call(MS_CELL_OPEN, file_guest, 0x0E03u) == MS_EEXIST &&
                fd_host_bytes_equal(host, pattern, MS_SIZE),
            "an exclusive create of an existing file is 0x80010011 and leaves it unchanged");
