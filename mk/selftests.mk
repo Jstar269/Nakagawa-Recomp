@@ -1498,9 +1498,11 @@ ge-replay: shader-verify $(RT_GE_O)
 # copy of the target, a known difference no mutant made: it must be found as draw 1, its 100x100
 # overlap and nothing else. On the interlock path the capture must be NO_DIFFERENCE; a device
 # without the interlock refuses that path (sdl3vk prints the reason) and the leg is a SKIP.
-# The wide capture (a 512 scissor on a 512 stride) must compare clean. Then fail-closed cells: a
-# scissor past ge.c's raster bound (the past capture: x2 600 on a 512 stride; ge.c draws up to the
-# stride, 512 at most), 33 targets
+# The wide capture (a 512 scissor on a 512 stride) must compare clean, and so must the narrow one
+# (its draws on a 256 stride under a 480 scissor: both renderers stop at the stride, #2193). Then
+# fail-closed cells: a
+# scissor past 512 columns (the past capture: x2 600 on a 512 stride; both renderers draw up to
+# the stride, 512 at most), 33 targets
 # (one past the limit) and a stride past 1024 are INCOMPLETE (exit 5), and a capture with no
 # draw is NO_DRAWS (exit 6); none is ever NO_DIFFERENCE.
 # Exit 77 (no Vulkan device) is a SKIP, as for gpu-coherence-selftest (GE_FBD_SKIP_STATUS).
@@ -1561,7 +1563,7 @@ ge-first-bad-draw-selftest: ge-replay
 			cat $$log; echo "FAIL ge-first-bad-draw-selftest: the #2109 overlap was not found as draw 1, exactly the overlap ($$mode)" >&2; exit 1; fi; \
 		echo "ge-first-bad-draw-selftest: known difference #2109 on the snapshot path found at draw 1, the 100x100 overlap only ($$mode)"; \
 	done; done
-	@for v in wide past empty many deep; do \
+	@for v in wide narrow past empty many deep; do \
 		$(BUILD_DIR)/ge_replay.exe --write-synthetic $(GE_FBD_DIR)/$$v.ngef $$v || exit 1; \
 	done
 	@log=$(GE_FBD_DIR)/wide.log; result=0; \
@@ -1578,6 +1580,12 @@ ge-first-bad-draw-selftest: ge-replay
 			cat $$log; echo "FAIL ge-first-bad-draw-selftest: mutant $$m's draw right of x 480 was not named as draw 3 on the wide capture" >&2; exit 1; fi; \
 		echo "ge-first-bad-draw-selftest: mutant $$m named as draw 3 on the wide capture, right of x 480"; \
 	done
+	@log=$(GE_FBD_DIR)/narrow.log; result=0; \
+	$(BUILD_DIR)/ge_replay.exe $(GE_FBD_DIR)/narrow.ngef --first-bad-draw --report $(GE_FBD_DIR)/narrow > $$log 2>&1 || result=$$?; \
+	if test $$result -eq 77; then cat $$log; echo "SKIP ge-first-bad-draw-selftest narrow (no Vulkan device)"; exit $(GE_FBD_SKIP_STATUS); fi; \
+	if test $$result -ne 0 || ! grep -Fq "result=NO_DIFFERENCE draws=4 " $$log; then \
+		cat $$log; echo "FAIL ge-first-bad-draw-selftest: the narrow capture (scissor 480 on a 256 stride) was not compared as NO_DIFFERENCE" >&2; exit 1; fi; \
+	echo "ge-first-bad-draw-selftest: the narrow capture is compared up to its stride, NO_DIFFERENCE"
 	@for cell in "past 5 reason=raster-bound" "empty 6 result=NO_DRAWS" "many 5 reason=region-limit" "deep 5 reason=stride"; do \
 		set -- $$cell; log=$(GE_FBD_DIR)/$$1.log; result=0; \
 		$(BUILD_DIR)/ge_replay.exe $(GE_FBD_DIR)/$$1.ngef --first-bad-draw --report $(GE_FBD_DIR)/$$1 > $$log 2>&1 || result=$$?; \

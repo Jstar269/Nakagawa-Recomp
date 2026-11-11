@@ -1580,6 +1580,8 @@ static void rsb_begin(uint32_t fbw, uint32_t zbw, uint32_t scis_x2) {
     W(0xD4, 0u);
     W(0xD5, (271u << 10) | scis_x2);
     for (uint32_t cmd = 0x17; cmd <= 0x28; cmd++) W(cmd, 0u);   /* every unit off */
+    W(0xE8, 0u);                                                  /* colour and alpha masks open */
+    W(0xE9, 0u);
     W(0xD3, 0u);
     W(0xE7, 0u);                                                  /* depth writes on */
     W(0xDE, 1u);                                                  /* depth test ALWAYS */
