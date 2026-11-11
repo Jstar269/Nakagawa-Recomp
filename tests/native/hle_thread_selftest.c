@@ -48020,6 +48020,54 @@ static void test_flash0_font_device(void) {
             snprintf(msg, sizeof(msg), "flash0 sceIoLseek32 %s leaves the position at 8", refused[i].name);
             expect(f0t_seek32(fd, 0, 1u) == 8u, msg);
         }
+        /* The file's own edges are inside it: SET 0 and SET size are made, high word 0. */
+        static const struct { const char *name; int at_end; } edges[] = {{"SET 0", 0}, {"SET size", 1}};
+        for (size_t i = 0; i < sizeof(edges) / sizeof(edges[0]); i++) {
+            const uint32_t want = edges[i].at_end ? (uint32_t)size : 0u;
+            CpuState cpu;
+            expect(f0t_seek32(fd, 8, 0u) == 8u, "a flash0 seek places the descriptor at 8");
+            memset(&cpu, 0, sizeof(cpu));
+            cpu.r[4] = fd;
+            cpu.r[6] = want;
+            cpu.r[7] = 0u;
+            cpu.r[8] = 0u;
+            uint32_t low = sr_hle_test_io_lseek(&cpu);
+            snprintf(msg, sizeof(msg), "flash0 sceIoLseek %s is made (got 0x%08x:%08x)",
+                     edges[i].name, cpu.r[3], low);
+            expect(low == want && cpu.r[3] == 0u && f0t_seek32(fd, 0, 1u) == want, msg);
+        }
+        /* sceIoLseekAsync shares the check, and its 64-bit result carries the same high word. */
+        static const struct { const char *name; int64_t offset; uint32_t high; } async_refused[] = {
+            {"SET -1", -1, 0xffffffffu},
+            {"SET 0xFFFFFFFF", 0xffffffffll, 0u},
+        };
+        for (size_t i = 0; i < sizeof(async_refused) / sizeof(async_refused[0]); i++) {
+            CpuState cpu;
+            expect(f0t_seek32(fd, 8, 0u) == 8u, "a flash0 seek places the descriptor at 8");
+            memset(&cpu, 0, sizeof(cpu));
+            cpu.r[4] = fd;
+            cpu.r[6] = (uint32_t)((uint64_t)async_refused[i].offset & 0xffffffffu);
+            cpu.r[7] = (uint32_t)((uint64_t)async_refused[i].offset >> 32);
+            cpu.r[8] = 0u;
+            snprintf(msg, sizeof(msg), "flash0 sceIoLseekAsync %s is queued", async_refused[i].name);
+            expect(sr_hle_test_io_lseek_async(&cpu) == 0u, msg);
+            sr_hle_test_io_async_import_boundary();
+            sr_hle_test_io_async_import_boundary();
+            memset(&cpu, 0, sizeof(cpu));
+            cpu.r[4] = fd;
+            cpu.r[5] = F0T_BUF_ADDR;
+            uint32_t polled = sr_hle_test_io_poll_async(&cpu);
+            snprintf(msg, sizeof(msg),
+                     "flash0 sceIoLseekAsync %s completes with 0x%08x:80010016 (got %u, 0x%08x:%08x)",
+                     async_refused[i].name, async_refused[i].high, polled,
+                     MEM_R32(F0T_BUF_ADDR + 4u), MEM_R32(F0T_BUF_ADDR));
+            expect(polled == 0u && MEM_R32(F0T_BUF_ADDR) == 0x80010016u &&
+                       MEM_R32(F0T_BUF_ADDR + 4u) == async_refused[i].high,
+                   msg);
+            snprintf(msg, sizeof(msg), "flash0 sceIoLseekAsync %s leaves the position at 8",
+                     async_refused[i].name);
+            expect(f0t_seek32(fd, 0, 1u) == 8u, msg);
+        }
     }
     expect(f0t_close(fd) == 0u && sr_hle_test_fd_kind(fd) == 0,
            "closing a served font releases its descriptor");

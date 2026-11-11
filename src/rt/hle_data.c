@@ -2512,8 +2512,10 @@ uint32_t io_seek_destination(const Fd *f, int64_t offset, uint32_t whence,
          * SEEK_END through sceIoLseek and sceIoLseek32 at -1, size + 16, 0xFFFFFFFF and
          * 0x100000000). sceIoLseek's high word is 0xFFFFFFFF at -1 and size + 16 but 0 at
          * 0xFFFFFFFF and 0x100000000. Unmeasured: where the high word changes between
-         * size + 16 and 0xFFFFFFFF, destinations past 0x100000000 (the boundary below),
-         * SEEK_CUR (the generic path below) and the async calls, which share this check. */
+         * size + 16 and 0xFFFFFFFF; the 0xFFFFFFFF and 0x100000000 band from SEEK_END (measured
+         * from SEEK_SET only); destinations past 0x100000000 (the boundary below); SEEK_CUR
+         * (the generic path below, as before this rule); the async calls, which share this check;
+         * and flash0 files other than ltn0.pgf, which follow it. */
         if (offset < -base) return 0x80010016u;
         if (offset <= (int64_t)f->size - base) {
             *position = (uint32_t)(base + offset);
