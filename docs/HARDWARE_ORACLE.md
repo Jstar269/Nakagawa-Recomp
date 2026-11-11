@@ -1359,7 +1359,9 @@ One console is one data point; see §11. Nothing here closes issue #70
 
 - **PSP-3000 single-case runs of `hle-issues-batch`, `hle-kernel-pool-bounds` and `registry-font` (2026-11-10)**:
   one PSP-3000, all three PRXs built from `979c6a1dd`, XMB context, one launch per boot (boots 172, 173 and 174),
-  each after the `transport-write` preflight (PSP-TRANSPORT-001 is not re-cited). Firmware identity: console
+  each after the `transport-write` preflight (PSP-TRANSPORT-001 is not re-cited). An earlier `hle-issues-batch`
+  launch, on boot 171, was not acceptance-eligible (its declared source commit did not match the clean checkout)
+  and is not cited. Firmware identity: console
   PSP-3000 (`kuKernelGetModel` returned 3 in the boot-172 run); system software 6.61 (`flash0:/vsh/etc/version.txt`:
   `release:6.61:`, `system:58401@release_661,0x06060110:`); the probe's own user-mode `sceKernelDevkitVersion()`
   returned `0x06060110`; PSPLink `pspver` printed `0x06060010` ("6.6.0") in the XMB context on these boots and prints
@@ -3759,8 +3761,11 @@ ARK-5 with cIPL, version 5.1.0 (operator-declared, not read by a tool). The stre
 SKIP (`nodir-delete`, result 2: an earlier dialog timed out), and ends COMPLETE FAIL. The envelope is not
 acceptance-eligible; its blockers are "loaded module was not proven unloaded", "PHYSICAL_INTERVENTION_REQUIRED" and
 "one or more scalar result records did not pass". The capture is therefore `CAPTURED` and establishes nothing about
-PSP behaviour; the values below are what it shows, for a rerun to confirm. The raw envelope, host0 log and decode
-stay in the private campaign directory.
+PSP behaviour; the values below are what it shows, for a rerun to confirm. A rerun of this revision would end the
+same way: the LOAD (mode 2) dialog of a missing save stays VISIBLE because the probe draws no frame, and the
+cells after it are then skipped. LOAD and DELETE (mode 10) have to move into a case of their own before states A
+to C can give an acceptance-eligible envelope. The raw envelope, host0 log and decode stay in the private campaign
+directory.
 
 The `nodir-load` cell (mode 2 LOAD of the missing save `NODIR`, owner present) went INIT then VISIBLE and stayed
 VISIBLE for its whole 1790-poll bound, with 1752 `Update(1)` calls. The probe draws no frame; the operator reports
@@ -3818,7 +3823,9 @@ envelope, host0 log and decode stay in the private campaign directory.
 It is the first run of the current status encoding, which writes `PASS` or `ERROR` where the 2026-11-05 run of
 the earlier source revision wrote `RC`. The two streams have the same 696 case ids, and every record has the same
 result and out words in both. The values described in `fixtures/psp_oracle/README.md` are therefore what both runs
-show, for an eligible rerun to confirm.
+show. A rerun of the same probe meets the same blocker: the case keeps AVCODEC and SASCORE loaded on purpose (as
+`sas-init` does), so the module set after it always differs. It can be promoted only once the runner accepts a
+module set the case declares it leaves loaded.
 
 ### PSP-SAS-003 capture 2026-11-07
 
@@ -3833,8 +3840,9 @@ done record, out0 `0xcc`), all PASS, COMPLETE PASS, after a `transport-write` pr
 acceptance-eligible: its one acceptance blocker is "loaded module was not proven unloaded" (the teardown found
 the post-unload module set different from the one before the launch), and the runner's recovery then reset
 the PSP to boot 147. The capture is therefore `CAPTURED` and establishes nothing about PSP behaviour; the values
-below are what it shows, for the rerun to confirm. The raw envelope, host0 log and decode stay in the private
-campaign directory.
+below are what it shows. A rerun of the same probe meets the same blocker, because the case keeps AVCODEC and
+SASCORE loaded on purpose; it can be promoted only once the runner accepts a module set the case declares it
+leaves loaded. The raw envelope, host0 log and decode stay in the private campaign directory.
 
 The voice is a flat VAG of sample `0x0700`, whose full-scale output is `0x06fe`.
 
@@ -3859,7 +3867,7 @@ The voice is a flat VAG of sample `0x0700`, whose full-scale output is `0x06fe`.
 ### PSP-GE-SIGNAL-001 capture 2026-11-10
 
 `ge-signal` (case 181, `run_ge_signal` in `fixtures/psp_oracle/probe.c`) ran once on 2026-11-10 (UTC) on the
-PSP-3000, boot 179, in the XMB context, at `80e7c9eb`, a pre-publication commit whose `ge-signal` section in
+PSP-3000, boot 179, in the XMB context, at `80e7c9eb`, an ancestor of this tree whose `ge-signal` section in
 `probe.c` and whose Makefile CASE line are identical to this tree's. Firmware: system software 6.61
 (`flash0:/vsh/etc/version.txt`: `release:6.61:`, `system:58401@release_661,0x06060110:`); PSPLink `pspver`
 0x06060010, which the runner records as 6.6.0 and which `pspver` prints in the XMB context on this boot
@@ -3872,8 +3880,11 @@ write came 5.2 s after the launch, the runner's 300 s case timeout expired, the 
 disappeared and the shell did not answer, and the console needed a manual power cycle. The envelope is not
 acceptance-eligible: no completion marker, the loaded module not proven unloaded, the host0 round trip
 failed after it, and 8 records missing. The capture is therefore `CAPTURED` and establishes nothing about PSP
-behaviour; the values below are what it shows, for a rerun to confirm. The raw envelope, host0 log and decode
-stay in the private campaign directory.
+behaviour; the values below are what it shows. A rerun of this revision cannot be acceptance-eligible either:
+the undefined behaviours (cells `b00` and `b04`) leave the GE busy and end `TIMEOUT`, and `rjump-un` stalled the
+console, with `rcall-un` after it. The expected reset has to become an outcome word of a passing record, and the
+two unaligned cells a case of their own, before the other 12 cells can be measured. The raw envelope, host0 log
+and decode stay in the private campaign directory.
 
 POWER RISK: `rjump-un` stalled the console until a power cycle, and `rcall-un` never ran; neither is to be
 re-run unattended. Whether the GE, the driver or something else stalled is not shown.
