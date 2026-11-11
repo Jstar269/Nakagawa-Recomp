@@ -8,11 +8,13 @@
 # Split out of the root Makefile (#1531), text unchanged: the nk_ui and player UI test binaries and the parser fuzz target.
 # The root Makefile includes it where the text used to be, so evaluation order is unchanged.
 
-# $(1) object directory, $(2) compile flags. Objects compile in source order and the first
-# failure stops the line, as it stopped each per-binary compile before.
+# $(1) object directory, $(2) compile flags. Objects compile in source order, one recipe line
+# each, and the first failure stops the recipe, as it stopped each per-binary compile before.
+# Separate lines rather than `cc ... && cc ... && true`: cmd.exe has no `true`, so under the
+# cmd.exe fallback the chain compiled every object and then failed (#368).
 define NC_COMPILE_OBJECTS
 @"$(PYTHON)" -c "import os, sys; os.makedirs(sys.argv[1], exist_ok=True)" $(1)
-$(foreach s,$(NC_SOURCES),$(CC) $(2) -c $(s) -o $(1)/$(notdir $(s:.c=.o)) &&) true
+$(foreach s,$(NC_SOURCES),$(CC) $(2) -c $(s) -o $(1)/$(notdir $(s:.c=.o))$(NEWLINE))
 endef
 
 native-core-objects-core:

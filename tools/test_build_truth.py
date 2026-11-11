@@ -1958,7 +1958,7 @@ _SHELL_STRING = re.compile(r'"(?:\\.|[^"\\])*"|\'[^\']*\'')
 _SHELL_ANYWHERE = {
     "command substitution": re.compile(r"\$\$\(|`"),
     "shell variable": re.compile(r"\$\$(?:\{|[A-Za-z_?#!*0-9])"),
-    "/dev/null": re.compile(r"/dev/null"),
+    "/dev/ device": re.compile(r"/dev/(?:null|stdin|stdout|stderr|tty)\b"),
 }
 #: Words that, in command position, mean sh syntax or a POSIX utility cmd.exe does not have.
 #: A bare `:` is absent on purpose: mingw32-make runs it as a no-op under cmd.exe too.
@@ -1971,6 +1971,30 @@ _POSIX_COMMAND_WORDS = frozenset({
 })
 _SHELL_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 _DATABASE_RECIPE = re.compile(r"^#  recipe to execute \(from '([^']+)', line (\d+)\):$")
+_DATABASE_MACRO = re.compile(r"^define (\S+)\n(.*?)\nendef$", re.S | re.M)
+_MACRO_REFERENCE = re.compile(r"\$\((?:call\s+)?([A-Za-z_][A-Za-z0-9_]*)")
+
+
+def _database_macros(database: str) -> dict[str, str]:
+    """Every multi-line ``define`` in ``make -p`` output: name -> its unexpanded body."""
+    return {match.group(1): match.group(2) for match in _DATABASE_MACRO.finditer(database)}
+
+
+def _macro_commands(text: str, macros: dict[str, str], seen: frozenset[str] = frozenset()
+                    ) -> list[tuple[str, str]]:
+    """(macro name, command) for each line of every macro ``text`` names, nested ones too.
+
+    A recipe such as ``$(call NC_COMPILE_OBJECTS,...)`` takes its commands from the macro's
+    body, which the recipe text hides behind one Make reference.
+    """
+    found: list[tuple[str, str]] = []
+    for name in _MACRO_REFERENCE.findall(text):
+        if name not in macros or name in seen:
+            continue
+        body = macros[name]
+        found.extend((name, command) for command in _recipe_commands(body.splitlines()))
+        found.extend(_macro_commands(body, macros, seen | {name}))
+    return found
 
 
 def _without_make_references(text: str, replacement: str = " MREF ") -> str:
@@ -1978,7 +2002,9 @@ def _without_make_references(text: str, replacement: str = " MREF ") -> str:
 
     ``$$`` is the recipe's literal dollar for the shell and stays. Parentheses inside a
     reference's text (an $(error ...) message, say) are balanced by the scan, so a
-    reference is removed whole.
+    reference is removed whole. A shell operator that ends a reference's text stays after
+    the replacement: `$(foreach s,$(SRCS),cc $(s) &&) true` expands to commands joined by
+    `&&`, so the `true` after it is a command, not an argument.
     """
     out: list[str] = []
     index = 0
@@ -2001,6 +2027,9 @@ def _without_make_references(text: str, replacement: str = " MREF ") -> str:
                         break
                 end += 1
             out.append(replacement)
+            trailing = re.search(r"(&&|\|\||[;|])\s*$", text[index + 2:end])
+            if trailing:
+                out.append(trailing.group(1) + " ")
             index = end + 1
             continue
         out.append(text[index])
@@ -2051,7 +2080,10 @@ def _database_recipes(database: str) -> dict[tuple[str, int], tuple[str, list[st
     while index < len(lines):
         line = lines[index]
         if line and not line.startswith(("#", "\t", " ")) and ":" in line:
-            target = line.split(":", 1)[0]
+            # The first colon followed by a blank or the line end, so a Windows target
+            # such as C:/x/build/a.o keeps its drive.
+            named = re.match(r"^(.*?):(?=\s|$)", line)
+            target = named.group(1) if named else line.split(":", 1)[0]
         match = _DATABASE_RECIPE.match(line)
         if match is None:
             index += 1
@@ -2090,15 +2122,23 @@ class RecipeShellGuardTests(unittest.TestCase):
     new POSIX recipe without the guard fails here, and so does a guard on a recipe that
     cmd.exe runs correctly (it would refuse a build that works, such as the player's
     package build, which has no sh).
+
+    Two limits. The database holds only the conditional branches active on the host that
+    runs the test, so a recipe in a Windows-only or Linux-only branch is checked on that
+    host (hosted CI covers Linux; Windows runs are local). Commands a recipe takes from a
+    multi-line `define` macro are classified with it; a single-line variable that expands
+    to shell syntax is not.
     """
 
     make: ClassVar[str | None]
     recipes: ClassVar[dict[tuple[str, int], tuple[str, list[str]]]]
+    macros: ClassVar[dict[str, str]]
 
     @classmethod
     def setUpClass(cls) -> None:
         cls.make = shutil.which("mingw32-make") or shutil.which("make")
         cls.recipes = {}
+        cls.macros = {}
         if not cls.make:
             return
         scratch = _make_safe_temp_dir("nakagawa-recipe-shell-")
@@ -2110,6 +2150,7 @@ class RecipeShellGuardTests(unittest.TestCase):
         if "# Finished Make data base" not in proc.stdout:
             raise AssertionError("make -p printed no rule database:\n" + proc.stderr[-4000:])
         cls.recipes = _database_recipes(proc.stdout)
+        cls.macros = _database_macros(proc.stdout)
 
     def setUp(self) -> None:
         if not self.make:
@@ -2118,8 +2159,12 @@ class RecipeShellGuardTests(unittest.TestCase):
     def _posix_recipes(self) -> dict[tuple[str, int], tuple[str, list[str]]]:
         found = {}
         for where, (target, body) in self.recipes.items():
-            constructs = sorted({c for command in _recipe_commands(body)
-                                 for c in posix_shell_constructs(command)})
+            direct = {c for command in _recipe_commands(body)
+                      for c in posix_shell_constructs(command)}
+            from_macros = {f"{c} (in {name})"
+                           for name, command in _macro_commands("\n".join(body), self.macros)
+                           for c in posix_shell_constructs(command)}
+            constructs = sorted(direct | from_macros)
             if constructs:
                 found[where] = (target, constructs)
         return found
@@ -2133,6 +2178,7 @@ class RecipeShellGuardTests(unittest.TestCase):
             "@rc=0; $(BIN) || rc=$$?",
             "for f in a b; do echo $$f; done",
             "cat $(LOG) >/dev/null",
+            "$(foreach s,$(NC_SOURCES),$(CC) -c $(s) &&) true",
         )
         cmd_safe = (
             '"$(PYTHON)" -c "import sys; [print(a) for a in sys.argv]" x',

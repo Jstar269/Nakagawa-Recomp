@@ -176,8 +176,11 @@ endif
 # recipe starts with $(NK_REQUIRE_POSIX_SHELL). Make expands a recipe in full before
 # running its first line, so under cmd.exe the guard stops Make, naming the target
 # and the fix, before any line of that recipe runs; with a POSIX sh it expands to
-# nothing. tools/test_build_truth.py::RecipeShellGuardTests lists every recipe with
-# POSIX syntax from Make's own rule database and fails when one lacks the guard.
+# nothing. The guard applies to `make -n` too, which then stops instead of printing.
+# tools/test_build_truth.py::RecipeShellGuardTests classifies the recipes in Make's own
+# rule database, with the `define` macros they call, and fails when one in POSIX syntax
+# lacks the guard; it sees only the conditional branches of the host it runs on. An
+# explicit `SHELL=cmd.exe` on the command line is the caller's choice and is not refused.
 ifeq ($(OS),Windows_NT)
 NK_RECIPE_SHELL := $(if $(filter sh.exe,$(SHELL)),cmd.exe,posix)
 else

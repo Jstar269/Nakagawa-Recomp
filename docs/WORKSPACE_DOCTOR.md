@@ -274,8 +274,10 @@ The state of each build and workspace ergonomics item:
    when `mingw32-make` finds no `sh.exe` on `PATH` it stops before that recipe runs, where it used
    to hand sh syntax to `cmd.exe` (which failed late with an unrelated error, or exited 0 having
    done nothing). `RecipeShellGuardTests` in `tools/test_build_truth.py` reads Make's own rule
-   database and fails on a recipe in sh syntax without the guard, and on a guard over a recipe
-   `cmd.exe` runs correctly;
+   database, with the `define` macros each recipe calls, and fails on a recipe in sh syntax
+   without the guard, and on a guard over a recipe `cmd.exe` runs correctly. It sees only the
+   conditional branches active on the host that runs it, and not a single-line variable that
+   expands to shell syntax;
 2. [DONE - #368] remove hardcoded machine paths from VS Code, `mem_debug`, and tool discovery:
    toolchain lookup honors an explicit `MSYS_PATH` (never `MSYSTEM_PREFIX`, which Git Bash points at its
    own MinGW), with documented defaults in `nk.ps1`, `nk_manager.ps1`, `tools/nk_doctor.py`, and
