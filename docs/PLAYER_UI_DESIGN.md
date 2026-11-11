@@ -788,9 +788,10 @@ Drawn by the runtime over the frozen game frame under the `scrim` while the game
 - Focus ring 7.2:1 on the ground, at least 6.1:1 on any surface, 4.4:1 over the brightest wave point and 3.7:1 on
   the scrim over a white game frame; high-contrast focus for any background, from Settings > Accessibility or a
   Windows contrast theme.
-- Targets are at least 44 px high, except small controls (34 px: the library's heading-row buttons and the
-  on-screen keyboard's keys, which stay a row each at 1280 x 720); the interface size (100 to 200%) scales the whole layout through the density,
-  and the text size (100, 125 or 150%) scales type alone, with the layout reflowing around it.
+- Targets are at least 44 px high, except small controls (34 px at 100% text): the library's heading-row buttons
+  and the on-screen keyboard's keys, small so that a row of cards still fits under the find box at 1280 x 720. The
+  interface size (100 to 200%) scales the whole layout through the density, and the text size (100, 125 or 150%)
+  scales type alone, with the layout reflowing around it.
 - Reduce motion holds the waves and makes transitions cuts; Automatic follows Windows' Animation effects.
 - Launcher sounds are off by default and never replace a visual cue.
 

@@ -112,13 +112,15 @@ bool ui_keyboard_type(UiKeyboard *keyboard, const char *utf8) {
             ++i; /* not a character: left out */
             continue;
         }
-        if (length + n > keyboard->cap) break;
-        if (keyboard->accept == NULL || keyboard->accept(cp, keyboard->user)) {
-            memcpy(keyboard->text + length, s + i, n);
-            length += n;
-            keyboard->text[length] = '\0';
-            typed = true;
+        if (keyboard->accept != NULL && !keyboard->accept(cp, keyboard->user)) {
+            i += n; /* refused by the filter: left out */
+            continue;
         }
+        if (length + n > keyboard->cap) break;
+        memcpy(keyboard->text + length, s + i, n);
+        length += n;
+        keyboard->text[length] = '\0';
+        typed = true;
         i += n;
     }
     return typed;

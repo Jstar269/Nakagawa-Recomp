@@ -1712,9 +1712,11 @@ class NativePlayerUiTests(unittest.TestCase):
 
     def test_next_ui_find_stops_at_its_cap(self) -> None:
         """#2206: what a hardware keyboard types into the find box goes through the shared
-        keyboard's cap: 70 characters typed, 63 bytes kept."""
+        keyboard's cap: 40 characters typed twice (the second time into a box that holds
+        text), 63 bytes kept."""
         run = self.run_player(
-            "library", ("WAIT_MS=1000", "KEY_SLASH", "TEXT=" + "x" * 70, "WAIT_MS=200"),
+            "library", ("WAIT_MS=1000", "KEY_SLASH", "TEXT=" + "x" * 40, "WAIT_MS=200",
+                        "TEXT=" + "x" * 40, "WAIT_MS=200"),
             library_titles=4, timeout=120.0,
         )
         if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in run["stdout"]:

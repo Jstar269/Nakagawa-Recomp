@@ -4009,10 +4009,11 @@ typedef struct {
     bool card;
     bool scrolls; /* the page body (scr_library.c's LIBRARY_ID_BODY) has room to scroll */
     bool cards;   /* every card drawn is whole, and the page's rows fit under the box */
+    bool tight;   /* one more row of cards would not fit under the box */
 } LibraryFindFit;
 
 static LibraryFindFit library_find_fit(int width, int height, int text_size_pct) {
-    LibraryFindFit fit = {false, false, false, false, false};
+    LibraryFindFit fit = {false, false, false, false, false, false};
     bool any_card_cut = false;
     bool card_seen[64];
     size_t cards_whole = 0u;
@@ -4103,6 +4104,12 @@ static LibraryFindFit library_find_fit(int width, int height, int text_size_pct)
                   card_top + (float)page_rows * card_height +
                           (float)(page_rows - 1u) * NK_UI_TILE_ROW_GAP <=
                       body_bottom + 0.5f));
+    /* The page holds every row that fits: one more would end below the body's padding, where
+       library_page_size stops. */
+    fit.tight = card_drawn && card_height > 0.0f &&
+                card_top + (float)(page_rows + 1u) * card_height +
+                        (float)page_rows * NK_UI_TILE_ROW_GAP >
+                    body_bottom - NK_UI_BODY_PAD_BOTTOM - 0.5f;
     fit.card = card_drawn && !card_cut;
     fit.keyboard = !key_cut;
     fit.scrolls = ui != NULL &&
@@ -4140,19 +4147,19 @@ static void test_library_find_box_fits(void) {
               "and the page body scrolls to the cards");
     }
     {
-        /* Larger windows (density 1): the page holds as many rows of cards as fit under the
-           box at the text size, so every card is whole. The box grows with the text, and the
-           page size has to grow it the same way; window heights 20 px apart meet every way
-           a row can be miscounted. */
+        /* Larger windows (density 1): the page holds exactly the rows of cards that fit
+           under the box at the text size, every card whole and no row left out. The box grows
+           with the text, and the page size has to grow it the same way; window heights 4 px
+           apart meet every way a row can be miscounted by a key's growth. */
         static const int text_sizes[] = {100, 125, 150};
         for (size_t t = 0u; t < sizeof(text_sizes) / sizeof(text_sizes[0]); ++t) {
-            for (int h = 900; h <= 1440; h += 20) {
+            for (int h = 900; h <= 1440; h += 4) {
                 char message[160];
                 LibraryFindFit fit = library_find_fit(1920, h, text_sizes[t]);
                 (void)snprintf(message, sizeof(message),
-                               "the find page at 1920 x %d, %d%% text, holds only rows of cards "
-                               "that fit under the box", h, text_sizes[t]);
-                CHECK(fit.fits && fit.keyboard && fit.cards, message);
+                               "the find page at 1920 x %d, %d%% text, holds the rows of cards "
+                               "that fit under the box and no fewer", h, text_sizes[t]);
+                CHECK(fit.fits && fit.keyboard && fit.cards && fit.tight, message);
             }
         }
     }
@@ -4191,6 +4198,10 @@ static void test_library_find_filter_and_cap(void) {
           "typing stops at the character that does not fit, so what follows is not reordered");
     CHECK(ui_keyboard_type(&keyboard, "b") && strlen(query) == 63u && query[62] == 'b',
           "a one-byte character still fills the last byte");
+    query[62] = '\0';
+    CHECK(ui_keyboard_type(&keyboard, "\xc2\x85" "b") && strlen(query) == 63u &&
+              query[62] == 'b',
+          "a character the filter leaves out does not stop the typing, even at the cap");
     query[0] = '\0';
     CHECK(ui_keyboard_type(&keyboard, "a\tb\x7f" "c\xc2\x85" "d\xe3\x82" "e") &&
               strcmp(query, "abcde") == 0,

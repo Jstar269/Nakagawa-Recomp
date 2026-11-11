@@ -74,7 +74,6 @@
    out how much room is left for the grid or the empty card. */
 #define LIBRARY_HEADING_ROW_HEIGHT NK_UI_CONTROL_HEIGHT_SMALL /* its FIND, SORT and pager buttons */
 /* The find box's rows: the shared keyboard's character rows and its Shift row. */
-#define LIBRARY_FIND_KEYBOARD_ROWS (UI_KEYBOARD_CHAR_ROWS + 1u)
 /* The library notice under the heading (two NK_UI_TYPE_BODY lines) and its gap. */
 #define LIBRARY_ID_NOTICE LIBRARY_ID(0x000026u)
 #define LIBRARY_NOTICE_ROW_HEIGHT (44.0f + NK_UI_SPACE_4)
@@ -146,19 +145,28 @@ static float library_demo_row_height(float text_scale) {
     return content > LIBRARY_DEMO_ROW_HEIGHT ? content : LIBRARY_DEMO_ROW_HEIGHT;
 }
 
+/* A control NK_UI_CONTROL_HEIGHT_SMALL high whose text is in `role`: above the design text
+   size it grows to that text's line box (nk_ui_line_box). */
+static float library_small_control(NkUiTypeRole role, float text_scale) {
+    float height = NK_UI_CONTROL_HEIGHT_SMALL;
+    if (text_scale > 1.0f) {
+        float need = ceilf(library_line(role, text_scale) * 1.5f);
+        if (need > height) height = need;
+    }
+    return height;
+}
+
 /* The find box, with the gap above: the field, as tall as a key, and the shared keyboard
    4 px under it (ui_keyboard_draw: its character rows and the Shift row, 4 px apart, the
-   last row 4 px lower). A key is NK_UI_CONTROL_HEIGHT_SMALL, or its BODY line box above the
-   design text size (nk_ui_line_box), so the box grows with the text. At 100% text it is
-   282 px, so a row of cards still fits under it at 1280 x 720. */
+   last row 4 px lower). A character key has BODY text; the Shift row's buttons are small
+   buttons, with LABEL_S text (nk_ui_button_configuration). The box is worked out the way
+   it is drawn at every text size: at 100% text it is 282 px, so a row of cards still fits
+   under it at 1280 x 720. */
 static float library_find_height(float text_scale) {
-    float key = NK_UI_CONTROL_HEIGHT_SMALL;
-    if (text_scale > 1.0f) {
-        float need = ceilf(library_line(NK_UI_TYPE_BODY, text_scale) * 1.5f);
-        if (need > key) key = need;
-    }
+    float key = library_small_control(NK_UI_TYPE_BODY, text_scale);
+    float shift = library_small_control(NK_UI_TYPE_LABEL_S, text_scale);
     return NK_UI_SPACE_4 + key + NK_UI_SPACE_1 +
-           (float)LIBRARY_FIND_KEYBOARD_ROWS * (key + NK_UI_SPACE_1);
+           (float)UI_KEYBOARD_CHAR_ROWS * (key + NK_UI_SPACE_1) + shift + NK_UI_SPACE_1;
 }
 
 static float library_tile_width(float width, size_t columns) {
