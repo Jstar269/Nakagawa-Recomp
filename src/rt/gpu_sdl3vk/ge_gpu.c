@@ -5082,7 +5082,12 @@ static int tex_vram_meets_target(uint32_t addr, uint32_t bytes) {
 
 /* The image levels a new entry gets: a full chain, or 0 for none. */
 static uint32_t tex_hm_levels_for(int w, int h, uint32_t levels, int min_linear) {
+#if SR_GPU_MIPS_MUTANT == 3
+    /* gpu-mips-mutant 3: chain levels with the key off, which the key-off cell refuses. */
+    if (levels != 1u || !min_linear || s_tex_noscale) return 0u;
+#else
     if (!s_hm || levels != 1u || !min_linear || s_tex_noscale) return 0u;
+#endif
     if (tex_vram_meets_target(s_ge->tex_addr, tex_source_size())) return 0u;
     const uint32_t n = nk_tex_mips_levels((uint32_t)w, (uint32_t)h);
     return n > 1u ? n : 0u;

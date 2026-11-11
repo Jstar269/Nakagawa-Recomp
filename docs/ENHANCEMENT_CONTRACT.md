@@ -1181,9 +1181,11 @@ code is `src/rt/gpu_sdl3vk/tex_mips.h` (the chain) and the `tex_hm_*` functions 
     alpha-unused draws keep level 0, and a colour-tested draw stays with the software renderer; the chain bytes
     are 1365 texels an entry. It runs at render
     scales 4, 2 and 1, with 16x texture filtering, and with the part off, where the minified draw must show level
-    0's aliasing and no entry may have a chain. `gpu-mips-mutant` builds it twice, once recording the late build's
-    barrier before a command buffer begins and once building at every decode, and requires the deferred cell to
-    kill each.
+    0's aliasing and no entry may have a chain, and the key-off cell requires the draw the renderer made before
+    the part: an image of the game's one level, no chain view, sampler, set or builder buffers, the entry's own
+    set bound and no chain flag in the batch. `gpu-mips-mutant` builds it three times: recording the late build's
+    barrier before a command buffer begins and building at every decode, which the deferred cell must kill, and
+    giving an entry chain levels with the key off, which the key-off cell must kill.
   - `ace-selftest` pins the key: optional, `on` or `off`, in an Enhanced or Ace line, written only when on, after
     `tess` and before `cull`; the longest line the key table allows (`ace_line_longest`) fits `ACE_SPEC_MAX`, and so
     the flight recorder's field, and every part on, found from that table, has badge words that fit `ACE_WORDS_MAX`;
@@ -1720,8 +1722,12 @@ The feature of section 10.16 (#1273). How it draws is described there; this entr
 - **Timing:** unchanged in guest time: the GE timing model (on or off) charges the draw by its texture and
   footprint, not by the level the host samples, and the VBLANK schedule and the media clocks are unchanged. A chain
   is built on the GE thread, the thread the guest runs on, at the first draw after each upload that samples it, so
-  a frame that brings many new textures into such draws can take longer in host time. The measured cost on a title
-  is in the pull request that brought it.
+  a frame that brings many new textures into such draws can take longer in host time. The build budget
+  (section 10.16) bounds that: on the measured host (Windows 11, 2026-11-10) the builder read about 82 million
+  level-0 texels a second, so a present's budget costs about 1.6 ms, and the worst present, the budget plus one
+  512x512 build that starts just under it, about 4.8 ms. On LittleBigPlanet's first story level at 4x, before the
+  budget, builds took 7.1 s of an 8,740-VBLANK run, all in its intro and loading screens; on Hot Shots Tennis, 25 to
+  31 ms. The figures with the budget are not yet measured.
 - **I/O speed:** unchanged.
 - **Tier:** Enhanced. **Default:** off. It is in no graphics preset.
 - **Nothing worse (section 11.2, item 4):** not shown. It may not be on by default before the runs item 4 lists

@@ -215,7 +215,28 @@ int gegpu_mips_selftest(void) {
     hm_palette(hm_rgba(0, 0, 0, 255), hm_rgba(255, 255, 255, 255));
     hm_state(3u | (1u << 8), 0, 0);
     const uint64_t bound0 = s_hm_stats.bound;
-    ok = hm_quad(20, 5, 64.0f, 0) && hm_read(20, 5, dev, &r);
+    ok = hm_quad(20, 5, 64.0f, 0);
+    /* Key off, the draw is the one the renderer made before the part: an image of the game's one
+       level, no chain objects or builder buffers, the entry's own set bound and no F_HOSTMIP in
+       the batch's flags, so the commands, descriptors and shader path are those of a run without
+       it. */
+    if (ok && !on) {
+        const TexEnt *e = s_tex_cur;
+        const Batch *b = s_nbatch ? &s_batch[s_nbatch - 1u] : NULL;
+        const char *bad = !e ? "no entry bound" : e->hm_levels != 0u ? "the image has chain levels"
+                        : (e->hm_set || e->hm_view || e->hm_smp || e->hm_made) ? "the entry has chain objects"
+                        : (s_hm_out || s_hm_work) ? "the builder's buffers exist"
+                        : !b ? "no batch recorded"
+                        : ((((uint32_t)b->pc.cfg[0] >> 8) & F_HOSTMIP) != 0u) ? "the batch has F_HOSTMIP"
+                        : b->dset != tex_entry_set(s_tex_cur) ? "the batch binds another set" : NULL;
+        if (bad) {
+            fprintf(stderr, "gpu mips selftest [key off]: %s\n", bad);
+            ok = 0;
+        } else {
+            printf("gpu mips selftest: PASS key off    one level, no chain objects, the entry's own set, no flag\n");
+        }
+    }
+    ok = ok && hm_read(20, 5, dev, &r);
     if (ok && on && (!hm_near(&r, grey, 1u) || s_hm_stats.bound != bound0 + 1u || s_hm_stats.entries != 1u)) {
         hm_say("minified", &r);
         fprintf(stderr, "gpu mips selftest [minified]: want every pixel 188 from the chain (bound %llu, entries %llu)\n",

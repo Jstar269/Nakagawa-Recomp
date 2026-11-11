@@ -1221,24 +1221,27 @@ gpu-mips-selftest: shader-verify $(RT_GE_O)
 	@$(call gpu_mips_run,--scale 4 --ace '$(GPU_MIPS_LINE);af=16;mips=on',scale 4 af 16)
 	@$(call gpu_mips_run,--scale 4 --ace '$(GPU_MIPS_LINE);af=0',scale 4 mips off)
 
-# gpu-mips-mutant - the selftest above built with SR_GPU_MIPS_MUTANT, each of which its deferred
-# cell must kill: 1 records the late build's layout barrier before any reservation begins a command
-# buffer (the order that aborted a title in the Vulkan loader once a submit had closed s_cmd), 2
-# builds the chain at every decode instead of at the first bind it applies to.
+# gpu-mips-mutant - the selftest above built with SR_GPU_MIPS_MUTANT, each of which one cell must
+# kill: 1 records the late build's layout barrier before any reservation begins a command buffer (the
+# order that aborted a title in the Vulkan loader once a submit had closed s_cmd), 2 builds the chain
+# at every decode instead of at the first bind it applies to (both the deferred cell), 3 gives an
+# entry chain levels with the key off (the key-off cell, in a run without mips).
 gpu-mips-mutant: shader-verify $(RT_GE_O)
-	@for n in 1 2; do \
-		case $$n in 1) want='Invalid commandBuffer';; 2) want='want no build for the through-mode draw (BAD)';; esac; rc=0; \
+	@for n in 1 2 3; do \
+		args='--scale 4'; \
+		case $$n in 1) want='Invalid commandBuffer';; 2) want='want no build for the through-mode draw (BAD)';; \
+			3) want='[key off]: the image has chain levels'; args="--scale 4 --ace $(GPU_MIPS_LINE);af=0";; esac; rc=0; \
 		$(CC) $(CFLAGS) -DSR_GPU_COHERENCE_SELFTEST -DSR_GPU_MIPS_SELFTEST -DSR_GPU_MIPS_MUTANT=$$n \
 			-DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" -ffunction-sections -fdata-sections $(LDFLAGS) -Wl,--gc-sections \
 			-o $(BUILD_DIR)/gpu_mips_mutant_$$n.exe \
 			tests/native/gpu_coherence_selftest.c src/rt/ge_capture.c src/rt/ge_raster_ref.c $(RT_GE_O) src/rt/flight_recorder.c src/rt/perf.c \
 			$(SDL3VK_SRCS) $(GEGPU_SRCS) $(LIBS) || exit 1; \
-		$(BUILD_DIR)/gpu_mips_mutant_$$n.exe --scale 4 > $(BUILD_DIR)/gpu_mips_mutant_$$n.log 2>&1 || rc=$$?; \
+		$(BUILD_DIR)/gpu_mips_mutant_$$n.exe $$args > $(BUILD_DIR)/gpu_mips_mutant_$$n.log 2>&1 || rc=$$?; \
 		if [ $$rc -eq 77 ]; then echo "SKIP gpu-mips-mutant $$n (exit 77; the reason is printed above)"; \
-		elif [ $$rc -eq 0 ]; then echo "FAIL gpu-mips-mutant $$n (the mutant passed: the deferred cell is untested)"; exit 1; \
+		elif [ $$rc -eq 0 ]; then echo "FAIL gpu-mips-mutant $$n (the mutant passed: its cell is untested)"; exit 1; \
 		elif ! grep -aqF "$$want" $(BUILD_DIR)/gpu_mips_mutant_$$n.log; then \
-			cat $(BUILD_DIR)/gpu_mips_mutant_$$n.log; echo "FAIL gpu-mips-mutant $$n (exit $$rc, but not from the deferred cell)"; exit 1; \
-		else echo "PASS gpu-mips-mutant $$n (killed by the deferred cell, exit $$rc)"; fi; \
+			cat $(BUILD_DIR)/gpu_mips_mutant_$$n.log; echo "FAIL gpu-mips-mutant $$n (exit $$rc, but not from its cell)"; exit 1; \
+		else echo "PASS gpu-mips-mutant $$n (killed by its cell, exit $$rc)"; fi; \
 	done
 
 # glyph-recon-selftest - sharp game text's CPU side (src/rt/gpu_sdl3vk/glyph_recon.h, #2110) on
