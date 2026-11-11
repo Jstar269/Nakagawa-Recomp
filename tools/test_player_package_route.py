@@ -66,6 +66,8 @@ from test_iso_parity import (  # noqa: E402
     create_test_iso_with_executables,
     create_test_iso_with_modules,
 )
+from nk_core.iso_inspect import decrypted_module_dir  # noqa: E402
+from test_psp_decrypt import seal_with_builtin_table  # noqa: E402
 
 SHOWCASE_FIXTURE_DIR = ROOT / "fixtures" / "showcase"
 if str(SHOWCASE_FIXTURE_DIR) not in sys.path:
@@ -1143,6 +1145,158 @@ class TestPlayerPackageRoute(unittest.TestCase):
         self.assertIn("[PLAYER] Launch index 0: PLAY NOW available", launched.stdout, output[-4000:])
         self.assertEqual(launched.returncode, 0, output[-4000:])
         self.assertIn("HEADLESS_ACCEPTANCE status=PASS", launched.stdout)
+        self.assertEqual(tracked_status(), before)
+
+    def test_sealed_disc_goes_from_iso_to_play_through_the_player(self):
+        """#308 item 1: a sealed source-owned disc, from ISO to a checked guest result.
+
+        The disc's EBOOT.BIN is the display-smoke guest sealed in a ``~PSP`` container
+        with a game recipe from the public built-in table (src/core/nk_psp_builtin_keys.c),
+        the way a retail disc ships its program. Every stage runs through the player's
+        own production code, and each one has a check that fails if it is skipped or
+        stubbed:
+
+          1. import: the player's ``--iso`` inspection writes the experimental profile;
+          2. decrypt: the same disc check opens the container with the built-in
+             tables and writes EBOOT.elf, byte-identical to the guest that was sealed
+             (the disc itself holds none of those bytes in the clear);
+          3. the build half refuses the disc while that decrypted EBOOT.elf is absent,
+             so the package cannot come from anywhere else;
+          4. analyze, generate and build: the player's BUILD PACKAGE action runs
+             title_codegen_plan.py and gcc, binds the package to the decrypted
+             program's digest, and the player's validator accepts the package;
+          5. launch: PLAY, headless, reaches the guest, which presents its frames and
+             exits with the code it computed (42).
+
+        No game data and no key outside the built-in table: the guest is generated from
+        the committed fixtures/display_smoke recipe, and the seal reads the table at run
+        time.
+        """
+        self.skip_if_toolchain_unavailable()
+        before = tracked_status()
+
+        elf_bytes = fixed_address_exec_elf(
+            align_executable((self.fixture_dir / "guest.prx").read_bytes()),
+            LOW_FIXED_ADDRESS_BASE,
+        )
+        sealed = seal_with_builtin_table(elf_bytes)
+        self.assertEqual(sealed[:4], b"~PSP")
+        iso_path = self.root / "sealed-disc.iso"
+        create_test_iso_with_executables(
+            iso_path, sealed, disc_id=DISC_ID, title="Synthetic Sealed Disc",
+        )
+        # The program is on the disc only in its sealed form: a route that copied
+        # the guest instead of decrypting it would have no clear bytes to copy.
+        self.assertNotIn(elf_bytes[0x100:0x200], iso_path.read_bytes())
+
+        user_root = self.root / "sealed-user-data"
+        user_root.mkdir()
+        decrypted_dir = decrypted_module_dir(user_root, DISC_ID)
+        assert decrypted_dir is not None
+        decrypted_eboot = decrypted_dir / "EBOOT.elf"
+        self.assertFalse(decrypted_eboot.exists())
+
+        # 1 and 2. Import: the player's own --iso inspection and disc check. An
+        # uncatalogued disc stops --stage-only at the title list after both ran.
+        environment = os.environ.copy()
+        environment["LOCALAPPDATA"] = str(self.local_appdata)
+        environment["APPDATA"] = str(self.root / "appdata")
+        environment["USERPROFILE"] = str(self.root / "userprofile")
+        imported = subprocess.run(
+            [str(self.player), f"--user-data-root={user_root}", f"--iso={iso_path}",
+             "--stage-only"],
+            cwd=ROOT, env=environment, capture_output=True, text=True, timeout=120,
+        )
+        import_output = imported.stdout + imported.stderr
+        self.assertEqual(imported.returncode, 3, import_output)
+        self.assertIn(f"Disc ID: {DISC_ID}, Title: Synthetic Sealed Disc, Supported: 0",
+                      imported.stdout)
+        self.assertIn(f"STAGING_RESULT status=FAIL disc_id={DISC_ID}", imported.stdout)
+        profile_path = user_root / "experimental" / DISC_ID / "profile.json"
+        self.assertTrue(profile_path.is_file(), import_output)
+        profile = json.loads(profile_path.read_text(encoding="utf-8"))
+        self.assertEqual(profile["manifest"]["verification_profile"], "experimental-unverified")
+        self.assertTrue(decrypted_eboot.is_file(),
+                        "the player's disc check did not decrypt EBOOT.BIN:\n" + import_output)
+        self.assertEqual(decrypted_eboot.read_bytes(), elf_bytes,
+                         "the decrypted EBOOT.elf is not the program that was sealed")
+
+        # ADD TO LIBRARY on the Experimental card stores the record the build reads.
+        (user_root / "library.json").write_text(json.dumps({
+            "schema_version": 1,
+            "games": [{
+                "disc_id": DISC_ID, "title_id": profile["manifest"]["id"],
+                "title_name": "Synthetic Sealed Disc", "iso_path": str(iso_path),
+                "selected_executable": "EBOOT.BIN", "is_experimental": True,
+            }],
+        }), encoding="utf-8")
+        build_environment = os.environ.copy()
+        build_environment["SDL_VIDEODRIVER"] = "dummy"
+        build_environment["SDL_AUDIODRIVER"] = "dummy"
+        build_environment["NK_BUILD_ROOT"] = str(self.root / "b")
+
+        # 3. Without the decrypt stage's output the build has nothing to analyze.
+        held = self.root / "held-EBOOT.elf"
+        decrypted_eboot.replace(held)
+        refused = self.run_build_action(user_root, env=build_environment)
+        self.assertNotEqual(refused.returncode, 0, refused.stdout[-4000:])
+        self.assertIn("PACKAGE_BUILD_ROUTE status=FAIL", refused.stdout)
+        self.assertIn("[preflight] FAIL: ENCRYPTED_EXECUTABLE: EBOOT.BIN is encrypted",
+                      refused.stdout)
+        self.assertFalse((user_root / "packages" / DISC_ID).exists())
+        held.replace(decrypted_eboot)
+
+        # 4. BUILD PACKAGE: real analysis, AOT generation and a gcc link.
+        built = self.run_build_action(user_root, env=build_environment)
+        self.assertEqual(built.returncode, 0, self.build_failure_message(built, user_root))
+        self.assertIn("PACKAGE_BUILD_ROUTE status=PASS", built.stdout)
+        self.assertIn("complete=1", built.stdout)
+        build_log = (user_root / "logs" / f"build_{DISC_ID}.log").read_text(
+            encoding="utf-8", errors="replace")
+        self.assertIn("title_codegen_plan.py", build_log)
+        self.assertIn("gcc", build_log)
+        self.assertIn("Build finished:", build_log)
+        package_dir = user_root / "packages" / DISC_ID
+        package = json.loads((package_dir / "package.json").read_text(encoding="utf-8"))
+        self.assertEqual(package.get("format"), "nakagawa-aot-package")
+        self.assertTrue(package.get("generated_objects"), "no AOT code was generated")
+        self.assertTrue((package_dir / package["executable"]["path"]).is_file())
+        identity = package_cache.read_local_title_input_identity(user_root, DISC_ID)
+        self.assertIsNotNone(identity)
+        assert identity is not None
+        self.assertEqual(identity["main_executable"]["sha256"],
+                         hashlib.sha256(elf_bytes).hexdigest(),
+                         "the package is not bound to the decrypted program")
+        validated = subprocess.run(
+            [str(self.validator), "--validate-package", str(user_root), DISC_ID,
+             profile["manifest"]["id"], "1", "EBOOT.BIN"],
+            cwd=ROOT, env=build_environment, capture_output=True, text=True,
+        )
+        self.assertEqual(validated.returncode, 0, validated.stdout + validated.stderr)
+        self.assertIn("PACKAGE_STATUS=OK", validated.stdout)
+
+        # 5. PLAY, headless, through the player's own launch session, to the guest's
+        #    own result: FRAMES presented frames, then the exit code it computed.
+        perf_csv = self.sandbox / "sealed-perf.csv"
+        launched = self.run_launch(perf_csv, user_data_root=user_root,
+                                   accept_presented_frames=FRAMES)
+        output = launched.stdout + launched.stderr
+        self.assertEqual(launched.returncode, 0, output[-4000:])
+        self.assertIn("[PLAYER] Launch index 0: PLAY NOW available", launched.stdout)
+        self.assertIn("HEADLESS_ACCEPTANCE status=PASS", launched.stdout)
+        self.assertIn(f"presented_frames={FRAMES}", launched.stdout)
+        self.assertIn("child_exit=42", launched.stdout)
+        boot_logs = self.player_boot_event_files()
+        self.assertEqual(len(boot_logs), 1, "the player did not retain the child's boot evidence")
+        events = next(iter(boot_logs)).read_text(encoding="utf-8", errors="replace")
+        self.assertIn(
+            f"BOOT_EVENT phase=guest_start mode=scheduler entry=0x{LOW_FIXED_ADDRESS_BASE:08x}",
+            events)
+        for forbidden in ("UNKNOWN NID", "NONPLT_MISS", "INTERP_REJECT"):
+            self.assertNotIn(forbidden, events)
+        rows = perf_csv.read_text(encoding="utf-8", errors="replace").splitlines()
+        self.assertGreaterEqual(int(rows[-1].split(",")[0]), FRAMES)
+
         self.assertEqual(tracked_status(), before)
 
     def test_fixed_address_exec_outside_ram_has_named_builder_boundary(self):
