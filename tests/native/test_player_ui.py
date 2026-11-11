@@ -1781,16 +1781,20 @@ class NativePlayerUiTests(unittest.TestCase):
         return trail
 
     def test_next_ui_find_filters_the_grid_with_a_controller_alone(self) -> None:
-        """#2206: a controller alone searches the library, and the grid follows the box.
-        The pad opens the box, the d-pad moves to the 1 key, A types 1 and 1 again, X
-        deletes both, A types 11 once more, and B clears and closes the box: each step's
-        grid is the games whose name or disc ID holds the text, and the cleared box gives
-        back the whole library on the page it showed before."""
+        """#2206: a controller alone searches the library by name, and the grid follows
+        the box. The pad opens the box on q, the d-pad moves to e and A types it, Y types
+        a space, the d-pad moves to 1 and A types it twice ("e 11"), X deletes back to an
+        empty box, A types 1, and B clears and closes the box. Each step's grid is the
+        games whose name or disc ID holds the text: "e 1" is in the names "Synthetic
+        title 1", "10" and "11" and in no disc ID (SCAL000nn), so it shows the name
+        search; the empty box and the cleared one give back the whole library."""
         run = self.run_player(
             "library",
-            ("WAIT_MS=1000", "PAD_WEST", "WAIT_MS=100", "PAD_DPAD_UP", "PAD_SOUTH",
-             "WAIT_MS=100", "PAD_SOUTH", "WAIT_MS=100", "PAD_WEST", "WAIT_MS=100", "PAD_WEST",
-             "WAIT_MS=100", "PAD_SOUTH", "WAIT_MS=100", "PAD_SOUTH", "WAIT_MS=100", "PAD_EAST",
+            ("WAIT_MS=1000", "PAD_WEST", "WAIT_MS=100", "PAD_DPAD_RIGHT", "PAD_DPAD_RIGHT",
+             "PAD_SOUTH", "WAIT_MS=100", "PAD_NORTH", "WAIT_MS=100", "PAD_DPAD_UP",
+             "PAD_DPAD_LEFT", "PAD_DPAD_LEFT", "PAD_SOUTH", "WAIT_MS=100", "PAD_SOUTH",
+             "WAIT_MS=100", "PAD_WEST", "WAIT_MS=100", "PAD_WEST", "WAIT_MS=100", "PAD_WEST",
+             "WAIT_MS=100", "PAD_WEST", "WAIT_MS=100", "PAD_SOUTH", "WAIT_MS=100", "PAD_EAST",
              "WAIT_MS=200"),
             library_titles=12, timeout=120.0,
         )
@@ -1798,21 +1802,23 @@ class NativePlayerUiTests(unittest.TestCase):
             self.skipTest("the next UI could not start here (no UI fonts)")
         trail = self.find_grid_trail(run)
         self.assertEqual([text for text, *_ in trail],
-                         [None, "", "1", "11", "1", "", "1", "11", None], run["stdout"][-4000:])
+                         [None, "", "e", "e ", "e 1", "e 11", "e 1", "e ", "e", "", "1", None],
+                         run["stdout"][-4000:])
         full = {f"SCAL{index:05d}" for index in range(12)}
         ones = {"SCAL00001", "SCAL00010", "SCAL00011"}  # Synthetic title 1, 10 and 11
         for text, matches, total, shown in trail:
             self.assertEqual(total, 12, f"the library holds 12 games ({text!r})")
             self.assertTrue(set(shown) <= full, f"the page draws library games ({text!r})")
-            if text == "1":
-                self.assertEqual((matches, set(shown)), (3, ones), "1 keeps titles 1, 10 and 11")
-            elif text == "11":
-                self.assertEqual((matches, shown), (1, ("SCAL00011",)), "11 keeps title 11")
+            if text in ("e 1", "1"):
+                self.assertEqual((matches, set(shown)), (3, ones),
+                                 f"{text!r} keeps titles 1, 10 and 11")
+            elif text == "e 11":
+                self.assertEqual((matches, shown), (1, ("SCAL00011",)), "'e 11' keeps title 11")
             else:
                 self.assertEqual(matches, 12, f"{text!r} keeps every game")
                 self.assertGreater(len(shown), len(ones), f"{text!r} draws a full page")
         self.assertEqual(trail[-1][3], trail[0][3],
-                         "B clears the box, and the page shows what it showed before")
+                         "B clears the box, and the first page draws what it drew at the start")
         self.assertEqual(self.focus_trail(run)[-1], self.FIND, "B returns focus to FIND")
 
     def test_next_ui_is_the_only_launcher(self) -> None:
