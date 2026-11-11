@@ -1742,7 +1742,7 @@ static int png_check(const unsigned char *d, size_t n, PngInfo *g, char *why, si
     memset(g, 0, sizeof(*g));
     if (n < 8 || memcmp(d, sig, 8) != 0) { snprintf(why, why_cap, "no PNG signature"); return 0; }
     size_t at = 8;
-    int chunks = 0, idat_done = 0;
+    int chunks = 0, idat_done = 0, plte_seen = 0;
     while (at < n) {
         if (n - at < 12) { snprintf(why, why_cap, "cut short in a chunk header"); return 0; }
         uint32_t len = png_be32(d + at);
@@ -1784,12 +1784,15 @@ static int png_check(const unsigned char *d, size_t n, PngInfo *g, char *why, si
             g->interlace = c[12];
             g->channels = color == 2 ? 3u : color == 4 ? 2u : color == 6 ? 4u : 1u;
         } else if (!memcmp(type, "PLTE", 4)) {
-            if (g->plte || g->trns || g->idat_count || len == 0 || len % 3u || len / 3u > 256u) {
+            if (plte_seen || g->trns || g->idat_count || len == 0 || len % 3u || len / 3u > 256u) {
                 snprintf(why, why_cap, "PLTE is out of place or of a wrong length");
                 return 0;
             }
-            /* As libpng takes them: a grey image's PLTE is ignored, and a palette longer than the depth
-             * can index keeps its entries (a pixel can name only the first 2^depth). */
+            /* A second PLTE is refused, as libpng refuses it. A grey image's PLTE is ignored, as libpng
+             * ignores it. A palette longer than the depth can index keeps its entries, as stb_image
+             * keeps them (a pixel can name only the first 2^depth), and so does a tRNS that long;
+             * libpng cuts the palette to 2^depth and then drops such a tRNS whole. */
+            plte_seen = 1;
             if (g->color != 0 && g->color != 4) {
                 g->plte = c;
                 g->plte_len = len;
@@ -2201,7 +2204,8 @@ int nk_texrepl_lookup_level(NkTexRepl *p, const NkTexReplId *id, int level, NkTe
     for (uint32_t j = 0; j < (uint32_t)level; j++) {
         Level *u = &a->levels[j];
         if (u->state == 0) load_level(p, a, j, 0);
-        if (u->state != 1) { p->stats.misses++; return 0; }
+        /* its image may since have proved unusable through another level naming the same file */
+        if (u->state != 1 || image_of(p, u)->state == 2) { p->stats.misses++; return 0; }
     }
     Level *v = &a->levels[level];
     if ((v->state != 1 || image_of(p, v)->state != 1) && !load_level(p, a, (uint32_t)level, 1)) {

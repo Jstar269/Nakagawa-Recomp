@@ -2048,6 +2048,9 @@ static void test_png_checks_pinned(void) {
     png_chunk_out(&plte_big, "PLTE", pal257, sizeof(pal257));
     png_chunk_out(&trns_bad, "tRNS", trns4, 4);
     png_chunk_out(&mid, "tEXt", text, 5);
+    Bw plte_twice = { 0 };
+    png_chunk_out(&plte_twice, "PLTE", pal2, 6);
+    png_chunk_out(&plte_twice, "PLTE", pal2, 6);
     const uint8_t idx_ok[5] = { 0, 0, 1, 1, 0 }, idx_bad[5] = { 0, 0, 1, 5, 0 };
     const uint8_t rgba_ok[5] = { 0, 1, 2, 3, 4 }, rgba_f5[5] = { 5, 1, 2, 3, 4 };
     const uint8_t rgb_ok[4] = { 0, 9, 8, 7 };
@@ -2070,6 +2073,7 @@ static void test_png_checks_pinned(void) {
         { "an RGB tRNS of 4 bytes", 1, 8, 2, rgb_ok, 4, &trns_bad, NULL, 0, "tRNS is out of place or of a wrong length" },
         { "image data in two IDATs", 1, 8, 6, rgba_ok, 5, NULL, NULL, 0, NULL },
         { "a tEXt between two IDATs", 1, 8, 6, rgba_ok, 5, NULL, &mid, 0, "the IDAT chunks do not follow one another" },
+        { "two PLTEs", 4, 8, 3, idx_ok, 5, &plte_twice, NULL, 0, "PLTE is out of place or of a wrong length" },
     };
     for (size_t k = 0; k < sizeof(cells) / sizeof(cells[0]); k++) {
         size_t n = 0;
@@ -2097,6 +2101,108 @@ static void test_png_checks_pinned(void) {
     free(plte_big.d);
     free(trns_bad.d);
     free(mid.d);
+    free(plte_twice.d);
+}
+
+static void save_png_spec(const char *pack, const char *name, int w, int h, uint32_t seed) {
+    const PngSpec sp = { w, h, 8, 6, 0, 0, 1, 1, 0, seed };
+    size_t n = 0;
+    uint8_t *png = png_build(&sp, &n);
+    char path[600];
+    pack_path(path, sizeof(path), pack, name);
+    file_save(path, png, n);
+    free(png);
+}
+
+static int lookup_unpin(NkTexRepl *p, NkTexReplId id, int level) {
+    NkTexReplHit hit;
+    if (!nk_texrepl_lookup_level(p, &id, level, &hit)) return 0;
+    nk_texrepl_unpin(p, &hit);
+    return 1;
+}
+
+/* The shared images' guards. A full budget: an image the budget cannot hold now is not read again
+ * on each lookup while the held ones stay pinned. A mip level whose image is the wrong size is not
+ * decoded, nor read again once its size is known. A chain whose level 0 image proved unusable
+ * through another key serves no level above it. */
+static void test_image_guards(void) {
+    char dir[512], path[600], err[256] = "";
+    make_pack(dir, sizeof(dir), "texrepl_img_budget");
+    for (int k = 1; k <= 3; k++) {
+        char name[24];
+        snprintf(name, sizeof(name), "b%d.png", k);
+        save_png_spec("texrepl_img_budget", name, 32, 32, 0x100u + (uint32_t)k);
+    }
+    pack_path(path, sizeof(path), "texrepl_img_budget", "textures.ini");
+    write_text(path, "[options]\nhash = quick\n[hashes]\n0880c0000000050500000001 = b1.png\n"
+                     "0880c0000000050500000002 = b2.png\n0880c0000000050500000003 = b3.png\n");
+    NkTexRepl *p = nk_texrepl_open(dir, 2u * 32u * 32u * 4u, err, sizeof(err));
+    CHECK(p != NULL, "the budget pack: %s", err);
+    if (p) {
+        NkTexReplHit h1, h2;
+        NkTexReplId i1 = { 0x0880c000u, 3u, 0x0505u, 0u, 1u }, i2 = i1, i3 = i1;
+        i2.hash = 2u;
+        i3.hash = 3u;
+        const int pinned = nk_texrepl_lookup(p, &i1, &h1) + nk_texrepl_lookup(p, &i2, &h2);
+        int hits3 = 0;
+        for (int k = 0; k < 11; k++) hits3 += lookup_unpin(p, i3, 0);
+        NkTexReplStats st;
+        nk_texrepl_stats(p, &st);
+        CHECK(pinned == 2 && hits3 == 0 && st.reads == 3,
+              "a full budget: %d pinned, %d hits on the third image, %llu reads (3: no read again while full)", pinned,
+              hits3, (unsigned long long)st.reads);
+        nk_texrepl_unpin(p, &h1);
+        nk_texrepl_unpin(p, &h2);
+        CHECK(lookup_unpin(p, i3, 0), "the third image once the others are unpinned");
+        nk_texrepl_close(p);
+    }
+
+    /* F: r (4x4), then s (2x2). D: q (4x4), then r, the wrong size. G: t (4x4), then u (4x4), the wrong
+     * size. A: x (2x1, its Adler-32 wrong), then y (1x1). B: x. */
+    make_pack(dir, sizeof(dir), "texrepl_img_chain");
+    save_png_spec("texrepl_img_chain", "q.png", 4, 4, 0x201u);
+    save_png_spec("texrepl_img_chain", "r.png", 4, 4, 0x202u);
+    save_png_spec("texrepl_img_chain", "s.png", 2, 2, 0x203u);
+    save_png_spec("texrepl_img_chain", "t.png", 4, 4, 0x204u);
+    save_png_spec("texrepl_img_chain", "u.png", 4, 4, 0x205u);
+    save_png_spec("texrepl_img_chain", "y.png", 1, 1, 0x206u);
+    const uint8_t row[9] = { 0, 1, 2, 3, 4, 5, 6, 7, 8 };
+    size_t xn = 0;
+    uint8_t *x = png_raw(2, 1, 8, 6, row, sizeof(row), NULL, NULL, 1u, &xn);
+    pack_path(path, sizeof(path), "texrepl_img_chain", "x.png");
+    file_save(path, x, xn);
+    free(x);
+    pack_path(path, sizeof(path), "texrepl_img_chain", "textures.ini");
+    write_text(path, "[options]\nhash = quick\n[hashes]\n"
+                     "0880d000000002020000000f = r.png\n0880d000000002020000000f_1 = s.png\n"
+                     "0880d000000002020000000d = q.png\n0880d000000002020000000d_1 = r.png\n"
+                     "0880d000000002020000000e = t.png\n0880d000000002020000000e_1 = u.png\n"
+                     "0880d000000002020000000a = x.png\n0880d000000002020000000a_1 = y.png\n"
+                     "0880d000000002020000000b = x.png\n");
+    err[0] = '\0';
+    p = nk_texrepl_open(dir, 0, err, sizeof(err));
+    CHECK(p != NULL, "the chain pack: %s", err);
+    if (p) {
+        const NkTexReplId f = { 0x0880d000u, 3u, 0x0202u, 0u, 0xfu }, d = { 0x0880d000u, 3u, 0x0202u, 0u, 0xdu },
+                          g = { 0x0880d000u, 3u, 0x0202u, 0u, 0xeu }, a = { 0x0880d000u, 3u, 0x0202u, 0u, 0xau },
+                          b = { 0x0880d000u, 3u, 0x0202u, 0u, 0xbu };
+        NkTexReplStats s0, s1, s2;
+        CHECK(lookup_unpin(p, f, 1), "F level 1 (s.png)");
+        nk_texrepl_stats(p, &s0);   /* r's size is known now, its image not held */
+        CHECK(!lookup_unpin(p, d, 1), "D level 1 is r.png, 4x4 where 2x2 is needed");
+        nk_texrepl_stats(p, &s1);
+        CHECK(s1.reads == s0.reads + 1 && s1.loaded == s0.loaded,
+              "D level 1: %llu more reads (1: q only; r's size was known), %llu more decodes (0)",
+              (unsigned long long)(s1.reads - s0.reads), (unsigned long long)(s1.loaded - s0.loaded));
+        CHECK(!lookup_unpin(p, g, 1), "G level 1 is u.png, 4x4 where 2x2 is needed");
+        nk_texrepl_stats(p, &s2);
+        CHECK(s2.loaded == s1.loaded, "a mip level of the wrong size was decoded (%llu more)",
+              (unsigned long long)(s2.loaded - s1.loaded));
+        CHECK(lookup_unpin(p, a, 1), "A level 1 (y.png), x.png's size read");
+        CHECK(!lookup_unpin(p, b, 0) && has_diag(p, "x.png: not a PNG this module decodes"), "B: x.png decodes");
+        CHECK(!lookup_unpin(p, a, 1), "A level 1 served after its level 0 image (x.png) proved unusable");
+        nk_texrepl_close(p);
+    }
 }
 
 /* A 1x1 PNG whose image data unpacks to 64 MiB, listed under 81 keys that every texture of up to
@@ -2724,6 +2830,7 @@ int main(int argc, char **argv) {
     test_png_seeds();
     test_png_plte_lenient();
     test_png_checks_pinned();
+    test_image_guards();
     test_png_bomb();
     test_zip_padding();
     test_hashranges_index();

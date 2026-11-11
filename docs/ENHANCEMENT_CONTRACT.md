@@ -881,8 +881,11 @@ memory, no network; ZIP packs through the project's own `src/core/nk_zip.c` and 
     any chunk's CRC wrong (libpng, which PPSSPP uses, by default only warns about a bad CRC in an ancillary chunk),
     a PNG whose image data unpacks to more or less than its `IHDR` implies or whose Adler-32 is wrong (libpng
     ignores extra data and, by default, a bad Adler-32), bytes after the Adler-32 inside the image data, and a grey
-    or RGB `tRNS` naming a sample the image's depth cannot hold. A palette longer than the depth can index, and a
-    `PLTE` in a grey image, are taken as libpng takes them (the first ignored past 2^depth, the second ignored).
+    or RGB `tRNS` naming a sample the image's depth cannot hold. A second `PLTE` is refused and a `PLTE` in a grey
+    image ignored, as libpng does. A palette longer than its depth can index (more than 16 entries in a 4-bit image)
+    is kept whole, as stb_image keeps it, and so is a `tRNS` of that length, whose alpha values then apply to the
+    entries the pixels name; libpng cuts such a palette to the entries the depth can index and drops that `tRNS`
+    whole, so the same image is opaque there.
   - *The skip-last-DXT1 options* (`skipLastDXT1Blocks128x64`, `skipLastDXT1Blocks128x128`) are applied as
     PPSSPP applies them, so they are not a difference.
 - **How it draws.** The image is stored as the entry's scaled copy: an image `factor` times the guest texture,
@@ -898,7 +901,9 @@ memory, no network; ZIP packs through the project's own `src/core/nk_zip.c` and 
   it, or scaled or drawn as made, and the old image is never drawn. Replaced content that returns is replaced again.
 - **Budget.** Decoded images stay in host memory up to `SR_TEX_REPLACE_BUDGET_MB`, the least recently used dropped
   first and decoded again when next needed; an image the budget cannot hold is counted (`over_budget`) and its
-  texture drawn as made. The copies share the GPU budget of `SR_TEX_SCALE_BUDGET_MB` (512 MiB by default) and its
+  texture drawn as made. Each file is held once, however many keys or mip levels name it. While every held image
+  is in use, an image whose size is known and does not fit is not read again until one is released; one larger
+  than the whole budget is never read again. The copies share the GPU budget of `SR_TEX_SCALE_BUDGET_MB` (512 MiB by default) and its
   reclamation (section 10.10).
 - **Guest memory and files.** Texture bytes are read through the same host view the cache's content hash reads;
   nothing is written to guest memory, the CLUT or a texture source. Files are read only from inside the pack's root,
@@ -921,11 +926,12 @@ memory, no network; ZIP packs through the project's own `src/core/nk_zip.c` and 
   and a pixel format the PNG standard defines, every chunk whole with its CRC right, `PLTE` and `tRNS` where and as
   long as the format allows, the `IDAT` chunks one after another, and `IEND`; its pixels (width x height x 4 bytes)
   must fit the budget. The reader decodes PNG itself: the image data is unpacked by the project's inflater
-  (`nk_psp_inflate.c`) into a buffer of exactly the size `IHDR` implies (each row's filter byte and bytes, each
-  Adam7 pass's rows), and data that would unpack past it stops there and refuses the image, so a small PNG cannot
-  make the reader allocate or work beyond its own size. The memory one decode takes, at most that buffer plus the
-  larger of the joined image data and the pixels plus the file, is recorded in the pack's statistics
-  (`decode_peak`). `nk_texrepl_decode_png` is the same check and decode, for a caller with bytes of its own.
+  (`nk_psp_inflate.c`) capped at exactly the size `IHDR` implies (each row's filter byte and bytes, each Adam7
+  pass's rows), and data that would unpack past it stops there and refuses the image, so a small PNG cannot make
+  the reader allocate or work beyond what its `IHDR` declares. The inflater's buffer starts at that size or 1 MiB, whichever
+  is smaller, and doubles up to that size, so while it grows it may hold the old block and the new one, up to twice the size; the memory
+  one decode takes, at most that plus the joined image data, or the pixels, plus the file, is recorded in the
+  pack's statistics (`decode_peak`). `nk_texrepl_decode_png` is the same check and decode, for a caller with bytes of its own.
   One file is read, checked, decoded, noted and counted against the budget once, however many `[hashes]` lines
   or names reach it: names are first grouped as written, and before a file's bytes are read its identity (the
   ZIP entry a name resolves to, case ignored; a folder file's volume and file ID, or device and inode) is looked
@@ -967,7 +973,7 @@ memory, no network; ZIP packs through the project's own `src/core/nk_zip.c` and 
   (`third_party/stb`, used only by the test), which must agree to the byte; image data longer than the image is
   refused, and 60,000 seeded mutations of those seeds must be refused by both or decoded alike. PNGs with their
   CRCs and Adler-32 right meet each of the decoder's own checks (a palette index past `PLTE`, filter type 5, a
-  wrong Adler-32, a `PLTE` of 4 bytes or 257 entries, an RGB `tRNS` of 4 bytes, a chunk between two `IDAT`s) and
+  wrong Adler-32, a `PLTE` of 4 bytes or 257 entries, an RGB `tRNS` of 4 bytes, a second `PLTE`, a chunk between two `IDAT`s) and
   are refused for that reason, and a 4-bit palette image with 256 `PLTE` entries and a grey image with a `PLTE`
   decode as stb_image decodes them. A 1x1 PNG whose
   data unpacks to 64 MiB, listed under 81 wildcard keys, is skipped 81 times within the time bound, nothing cached,
@@ -978,7 +984,10 @@ memory, no network; ZIP packs through the project's own `src/core/nk_zip.c` and 
   the comparisons their sorts make, counted at the comparison functions in the selftest's build
   (`NK_SORT_COUNT_COMPARES`), so a sort that went back to `qsort` fails where `qsort` has such an order. A good
   image and a refused one, each listed under 81 keys, are read once (`reads`), the good one decoded and held once,
-  and so is one file named 81 ways (case spellings in a ZIP and in a Windows folder, links in a POSIX folder);
+  and so is one file named 81 ways (case spellings in a ZIP and in a Windows folder, links in a POSIX folder).
+  With the budget full of pinned images a third is read once, not on each lookup, and served once they are
+  released; a mip level whose image is the wrong size is not decoded, nor read again when that size is already
+  known; a chain whose level 0 image proved unusable through another key serves none of its higher levels;
   `[hashranges]` lines are checked for the last line winning, a non-finite fraction noted, and 175,000 lines in
   reverse order (4.0 MB) read within 5 s and the comparison bound. These cells are fixed and seeded mutations, not coverage-guided fuzzing; the selftest also runs under
   AddressSanitizer and UndefinedBehaviorSanitizer on Linux. A file link needs Developer Mode on Windows, so that
