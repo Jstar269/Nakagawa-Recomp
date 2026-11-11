@@ -868,7 +868,8 @@ turbo virtual clock charged at the rate of the guest's work: a scheduler boundar
 `SR_DETERMINISTIC_SLICE_US` (default 100 µs, 1000 yield points at 10 million yield points per
 second; an estimate of about 33 cycles per yield point, not a measurement, and it decides guest
 results), a sleeper's deadline is reached by that work, an idle scheduler (no thread can run)
-charges its slice, runs a sleeper that charge reaches, and otherwise goes to the earliest deadline
+charges its slice, runs a sleeper that charge reaches (or serves an alarm, GE completion, VTimer or
+transfer window it reaches, while some thread waits), and otherwise goes to the earliest deadline
 still ahead when it comes before the next VBLANK or advances one display period when it does not,
 as turbo's does, so a sleeper whose deadline is at or past the next VBLANK can wake up to 16.7 ms
 late but identically on every run, and no vblank watchdog reads the host clock. The

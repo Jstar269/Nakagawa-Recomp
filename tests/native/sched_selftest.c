@@ -3435,9 +3435,12 @@ static void test_idle_virtual_clock_stops_at_a_deadline_before_the_vblank(void) 
            "idle wait, turbo clock: a wait the 10 ms slice reaches runs with no display-period step");
 
     /* A deadline that is not a thread's to run (a transfer window's end) and that the slice
-     * reached: the caller serves it now, and the thread still waiting is reached exactly on the
-     * next pass.
-     * MUTANT: the virtual-clock branch ignores a due source -- the clock steps to 16783 us. */
+     * reached: the idle wait returns with the clock at the slice, for its caller to serve it,
+     * and the thread still waiting is reached exactly on the next pass. The window is ended
+     * here by hand (sched_transfer_reset), standing in for the caller's pick_next, whose
+     * sched_transfer_window_step ends it in a run; the window has no owner thread in this cell.
+     * MUTANT: delete `if (source_due) return;` in sched_idle_wait -- the first pass goes on to
+     *   300 us, and the second to 400. */
     reset_sched();
     begin_clock_fixture(0, 0u);
     s_det_clock = 1;

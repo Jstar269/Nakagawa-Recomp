@@ -228,8 +228,9 @@ zone setting, owned outside the scheduler and never the host's (#1382).
 In turbo mode time is fully
 deterministic at scheduler boundaries and never host-dependent [C1].
 On a virtual clock (turbo or deterministic) a scheduler with nothing to run first charges its
-boundary slice, as at any boundary. A thread whose wait that charge reaches runs at once, and a
-due alarm, GE completion, VTimer or transfer window is served at once. Otherwise the clock
+boundary slice, as at any boundary. A thread whose wait that charge reaches runs at once. While
+some thread waits, a due transfer window, and with interrupts enabled a due alarm, GE completion
+or VTimer, is served at once too. Otherwise the clock
 advances to the earliest deadline still ahead when that deadline comes before the next VBLANK,
 and by one display period when it does not. So a wait whose deadline comes before the next
 VBLANK ends late by at most the slice (100 us on the deterministic clock, 10 ms on turbo); one
