@@ -1848,16 +1848,17 @@ static LoadedModule *module_for_guest_pc(const CpuState *s) {
     return NULL;
 }
 
-/* PSPSDK declares the first argument unnamed. The successful homebrew path is
- * deliberately synthetic and accepts only zero there; other values stay behind
- * a named refusal until their meaning is measured. */
+/* PSPSDK declares the first argument unnamed. PSP-HLE-SELFSTOP-001 (docs/HARDWARE_ORACLE.md,
+ * 2026-11-08, PSP-3000) measured 0 and 1 there from a helper module's own thread: both run
+ * module_stop once, unload the module and never return. Other values stay behind a named
+ * refusal until their meaning is measured. */
 static uint32_t h_SelfStopUnloadModule(CpuState *s) {
     uint32_t unknown = A0;
     uint32_t arglen = A1;
     uint32_t argp = A2;
     LoadedModule *mod = module_for_guest_pc(s);
     uint32_t current_uid = sched_current_uid();
-    if (unknown != 0u || !mod || current_uid == 0u || !mod->start_entry_ran ||
+    if (unknown > 1u || !mod || current_uid == 0u || !mod->start_entry_ran ||
         mod->state != MODULE_STATE_STARTED) {
         fprintf(stderr, "PRX_SELFSTOP_UNAVAILABLE_SYNTHETIC: unknown=0x%x module=%s "
                         "thread=0x%x; refusing unsupported caller state\n",

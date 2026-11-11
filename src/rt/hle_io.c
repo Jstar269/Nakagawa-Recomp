@@ -527,6 +527,11 @@ static uint32_t h_IoClose(CpuState *s) {
         return SCE_ERROR_KERNEL_BAD_FILE_DESCRIPTOR;
     if (s_fds[fd].async.state == IO_ASYNC_PENDING)
         return SCE_ERROR_KERNEL_ASYNC_BUSY;
+    /* PSP-HLE-STDIO-001 (docs/HARDWARE_ORACLE.md, 2026-11-06, PSP-3000): closing the Stdout
+     * handle returns 0x800200D1 and closes nothing; a later write still returns its count.
+     * UNMEASURED: closing Stdin or Stderr, which keeps the result it had before. */
+    if (s_fds[fd].kind == FD_KIND_STD && s_fds[fd].std_stream == 1u)
+        return 0x800200d1u;
     hle_fd_release(&s_fds[fd], s_fds[fd].kind == FD_KIND_STD);
     s_closed_res[fd] = 0;
     return 0;
