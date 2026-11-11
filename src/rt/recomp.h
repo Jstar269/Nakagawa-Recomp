@@ -1754,8 +1754,9 @@ typedef struct SrAotReturnBoundary {
 #define SR_BOUNDARY_CALLEE 0x1u /* the dispatcher or a generated call site named the callee */
 #define SR_BOUNDARY_SITE   0x2u /* begun at a direct call site of a state-resumable body */
 #define SR_BOUNDARY_PARKED 0x4u /* the body under this call is inside sr_yield at a resume point */
-/* The host entry's own dispatch entered the callee. Not set when the interpreter ran first and
- * handed the call's frame on (dispatch_call_continue): its run holds what the call still owes. */
+/* The host entry's first dispatch entered the callee. Not set when the interpreter ran first
+ * and handed the call's frame on (dispatch_call_continue), nor when the call was dispatched
+ * again for flow its code raised: the frames below then hold what the call still owes. */
 #define SR_BOUNDARY_HOST_ENTRY 0x8u
 
 /* The active AOT return stack follows the running guest fiber. Each TCB owns

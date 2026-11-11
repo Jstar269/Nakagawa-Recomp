@@ -2154,6 +2154,20 @@ static void code_capture_note(uint32_t target, uint32_t pc, uint32_t ra) {
                 s_code_capture_last);
 }
 
+/* The same call, dispatched again under the frames it already has: exception or ERET flow
+ * its code raised. The boundary says so, because the frames below still hold the call's
+ * entry $sp and a body entered here is not a host entry's own (#2172). */
+static int dispatch_again_for_flow(
+    CpuState *s,
+    uint32_t target,
+    const SrGuestInterpCallBoundary *call_boundary,
+    int drain) {
+    if (call_boundary == NULL) return dispatch_try_with_boundary(s, target, NULL, drain);
+    SrGuestInterpCallBoundary again = *call_boundary;
+    again.redispatch = 1u;
+    return dispatch_try_with_boundary(s, target, &again, drain);
+}
+
 static int dispatch_run_interp(
     CpuState *s,
     uint32_t target,
@@ -2182,7 +2196,7 @@ static int dispatch_run_interp(
         interp_result == SR_GUEST_INTERP_ERET) {
         uint32_t flow_target = s->flow_target;
         sr_cpu_clear_flow(s);
-        return dispatch_try_with_boundary(s, flow_target, call_boundary, drain);
+        return dispatch_again_for_flow(s, flow_target, call_boundary, drain);
     }
     if (interp_result == SR_GUEST_INTERP_NULL_CODE_POINTER) {
         dispatch_report_null_code_pointer(s, fault.pc);
@@ -2572,7 +2586,7 @@ int sr_aot_return_boundary_end(CpuState *s) {
          * so everything it needs is read now. */
         const uint32_t target = (uint32_t)boundary->observed_target;
         const uint32_t resume_pc = boundary->resume_pc;
-        const SrGuestInterpCallBoundary call = { .resume_pc = resume_pc };
+        const SrGuestInterpCallBoundary call = { .resume_pc = resume_pc, .redispatch = 1u };
         /* A host wrapper of an abandoned body (the stack census) may have restored its own
          * entry $sp on the way out; the frame runs on the $sp the guest restored. */
         s->r[29] = boundary->resume_sp;
@@ -2653,9 +2667,10 @@ static void dispatch_call_aot(RecompFn fn, CpuState *s, uint32_t target,
         sr_aot_return_boundary_top->callee = target;
         sr_aot_return_boundary_top->flags |= SR_BOUNDARY_CALLEE;
         /* A host entry whose first code is this body. When the interpreter ran first and
-         * handed the frame on, its run still holds the entry $sp the call owes. */
+         * handed the frame on, or the call is dispatched again for flow its code raised,
+         * the frames below still hold the entry $sp the call owes. */
         if (call_boundary != NULL && !call_boundary->continuation &&
-            call_boundary->resume_pc == SR_HOST_RETURN_PC)
+            !call_boundary->redispatch && call_boundary->resume_pc == SR_HOST_RETURN_PC)
             sr_aot_return_boundary_top->flags |= SR_BOUNDARY_HOST_ENTRY;
     }
 #ifdef SR_VERIFY
@@ -2697,7 +2712,7 @@ static int dispatch_after_aot(
     if (s->flow_kind == SR_FLOW_EXCEPTION || s->flow_kind == SR_FLOW_ERET) {
         uint32_t flow_target = s->flow_target;
         sr_cpu_clear_flow(s);
-        return dispatch_try_with_boundary(s, flow_target, call_boundary, drain);
+        return dispatch_again_for_flow(s, flow_target, call_boundary, drain);
     }
     /* Fatal and currently unhandled flow kinds must not become a successful AOT
      * handoff. Leave the metadata intact for the fail-closed caller boundary. */
@@ -3104,7 +3119,7 @@ int dispatch_call_checked(CpuState *s, uint32_t target, uint32_t resume_pc) {
 int dispatch_call_continue(CpuState *s, uint32_t target, const SrGuestInterpCallBoundary *call) {
     const SrGuestInterpCallBoundary rest = {
         .resume_pc = call->resume_pc, .site_boundary = call->site_boundary,
-        .continuation = 1u };
+        .continuation = 1u, .redispatch = call->redispatch };
     if (dispatch_try_with_boundary(s, target, &rest, SR_DRAIN_CHAIN) < 0) {
         /* The COSIM guest lane refused an import: the interpreter returns with the
          * fatal flow pending, and its dispatch reports it to the lane's entry. */

@@ -193,9 +193,10 @@ reference parks twice too, because a park writes `s->pc`.
 | `rs_tail` | its own entry resumes; `rs_inner` then runs under a tail drain and every park there must be refused as `tail-chain-live` |
 | `linkr` | its own entry resumes; its `jalr` goes through the dispatcher and every park under it must be refused as `frame-not-described` |
 | `xtailmid` | entered by the host with no translation of its own (lane `MIXED`): the interpreter runs it and hands the frame to `xread`, whose park must be refused as `root-not-host-entry` in every build |
+| `flow-again` | the host enters the harness's trampoline, which leaves exception flow to `rs`; the dispatcher dispatches `rs` under the same call, and every park in it and under it must be refused as `root-not-host-entry` in every build |
 
 The first yield point of every case is the dispatcher's own, before any call record exists, and
-must be refused as `no-frames`; `xtailmid` meets two of them.
+must be refused as `no-frames`; `xtailmid` and `flow-again` meet two of them.
 
 Two fail-closed corpora run from one snapshot four frames deep. Frame lists the build cannot
 resume (no frames, an unknown kind, a call point innermost, a parked point below a frame, an
@@ -419,6 +420,9 @@ exists and validates, killed by the comparison), an entry that
 counts its yield point again when it is resumed, a resumed body that takes the live `$sp` for its
 entry `$sp`, and a call whose resume label sits after its drain and end check. The entry mutant
 changes no register and no byte of memory: only the yield-point count and the second park catch it.
+The rule that a point's label sits at function scope has no mutant: the fixture has no body it
+would change, so `StateResumeTests` in `tools/test_codegen_continuations.py` pins it on constructed
+bodies.
 
 Two interpreter guards are not killed by this gate, and each is layering rather than a
 hole:

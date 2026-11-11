@@ -1078,10 +1078,26 @@ class StateResumeTests(unittest.TestCase):
         # A brace in a comment or a string is not a block.
         noisy = out[:3] + ['    /* } */ sr_log("}");', "    " + call.strip()] + out[6:]
         self.assertIn("SR_RESUME_POINT_CALL", "\n".join(codegen.state_resume_pass(noisy, 0x1000)))
-        # A comment left open hides what follows: nothing after it gets a point.
-        hidden = out[:3] + ["    /* open", "    " + call.strip()] + out[6:]
+        # A comment left open hides what follows: nothing after it gets a point. A line
+        # comment and a preprocessor line cannot be counted either.
+        for unreadable in ("    /* open", "    // }", "#if 0"):
+            hidden = out[:3] + [unreadable, "    " + call.strip()] + out[6:]
+            self.assertNotIn("SR_RESUME_POINT_CALL",
+                             "\n".join(codegen.state_resume_pass(hidden, 0x1000)), unreadable)
+        # A call inside a loop on its own line is not at the end of straight-line code.
+        looped = out[:3] + ["    while (s->r[8] != 0u) { " + call.strip() + " }"] + out[6:]
         self.assertNotIn("SR_RESUME_POINT_CALL",
-                         "\n".join(codegen.state_resume_pass(hidden, 0x1000)))
+                         "\n".join(codegen.state_resume_pass(looped, 0x1000)))
+
+    def test_a_body_with_another_function_scope_local_keeps_its_text(self):
+        # The resume switch restores the entry $sp only; any other local would be live at
+        # every label.
+        out = ["void f_00001000(CpuState *s) {", "    SR_YIELD(s, 0x00001000u);",
+               "    uint32_t _sp_entry = s->r[29]; (void)_sp_entry;",
+               "    uint32_t _gpr8 = s->r[8];",
+               "    s->r[29] = _sp_entry; return;", "}", ""]
+        self.assertIs(codegen.state_resume_pass(out, 0x1000), out)
+        self.assertIsNot(codegen.state_resume_pass(out[:3] + out[4:], 0x1000), out)
 
     def test_a_loop_edge_to_a_label_inside_a_block_keeps_its_plain_yield(self):
         edge = "      if (_c) { SR_YIELD(s, 0x00001010u); goto L_00001004; } }"

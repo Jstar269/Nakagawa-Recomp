@@ -5200,6 +5200,13 @@ _STATE_RESUME_CALL = re.compile(
 #: locals on a later line.
 _STATE_RESUME_CALL_TAIL = re.compile(r"^[\s}]*$")
 _STATE_RESUME_LABEL = re.compile(r"^\s*L_([0-9a-f]{8}): ;$")
+#: A construct that runs its block again or elsewhere: a label inside one is not at the end of
+#: straight-line code, whatever the brace count says.
+_STATE_RESUME_LOOP = re.compile(r"\b(?:while|for|do|switch)\b")
+#: A declaration at function scope. The resume switch restores `_sp_entry` and nothing else.
+_STATE_RESUME_LOCAL = re.compile(
+    r"^\s*(?:const\s+)?(?:unsigned\s+|signed\s+)?(?:u?int(?:8|16|32|64)_t|int|long|float|double|"
+    r"char|size_t|Sr\w+|[A-Z]\w*_t)\s*\**\s*(\w+)\s*(?:=|;|\[)")
 #: Comments and literals, whose braces are not blocks.
 _STATE_RESUME_NOT_CODE = re.compile(
     r"/\*.*?\*/|\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'", re.S)
@@ -5209,15 +5216,17 @@ STATE_RESUME_STATS = {"bodies": 0, "points": 0, "plain_bodies": 0}
 def _state_resume_depths(out):
     """The block depth after each of ``out``'s lines, 1 being the function's own scope.
 
-    ``None`` from the first line whose braces cannot be counted (a comment left open), and
-    for every line after it: nothing there gets a resume point.
+    ``None`` from the first line whose braces cannot be counted (a comment left open, a
+    line comment, a preprocessor line), and for every line after it: nothing there gets a
+    resume point.
     """
     depths = []
     depth = 0
     for line in out:
         if depth is not None:
             code = _STATE_RESUME_NOT_CODE.sub("", line)
-            if "/*" in code or "*/" in code:
+            if ("/*" in code or "*/" in code or "//" in code
+                    or any(part.lstrip().startswith("#") for part in code.split("\n"))):
                 depth = None
             else:
                 depth += code.count("{") - code.count("}")
@@ -5257,6 +5266,13 @@ def state_resume_pass(out, start):
     depths = _state_resume_depths(out)
     if depths[entry_at] != 1:
         return out
+    # A function-scope local other than the entry $sp would be live at every label.
+    for index, line in enumerate(out):
+        if index and depths[index - 1] == 1:
+            for part in line.split("\n"):
+                local = _STATE_RESUME_LOCAL.match(part)
+                if local and local.group(1) != "_sp_entry":
+                    return out
     # Loop targets whose label is at function scope, before and after its own line.
     scope_labels = {
         match.group(1) for index, line in enumerate(out)
@@ -5287,6 +5303,8 @@ def state_resume_pass(out, start):
         calls = list(_STATE_RESUME_CALL.finditer(line))
         if (len(calls) == 1 and calls[0].group(1) not in call_points
                 and depths[index] == 1
+                and not _STATE_RESUME_LOOP.search(
+                    _STATE_RESUME_NOT_CODE.sub("", line[:calls[0].start()]))
                 and _STATE_RESUME_CALL_TAIL.match(line[calls[0].end():])):
             call = calls[0]
             resume, call_pc, callee = call.group(1), call.group(2), call.group(3)

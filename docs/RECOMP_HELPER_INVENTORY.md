@@ -36,9 +36,9 @@ does not make this file stale. `--details` prints them to stdout.
 
 ## Summary
 
-- helpers: **503** (declared in `recomp.h`: 427)
-- reach class: emitter-reached 95, production-runtime-only 367, selftest-only 0, address-only 8, none 33
-- provenance class of the home definition: declared-only 1, project_authored_attested 39, upstream_derived 463
+- helpers: **504** (declared in `recomp.h`: 427)
+- reach class: emitter-reached 95, production-runtime-only 368, selftest-only 0, address-only 8, none 33
+- provenance class of the home definition: declared-only 1, project_authored_attested 39, upstream_derived 464
 
 ## Helpers
 
@@ -50,6 +50,7 @@ does not make this file stale. `--details` prints them to stdout.
 | `code_capture_word_free` | `rt/recomp.c` | no | production-runtime-only | `rt/recomp.c`: upstream_derived |
 | `dispatch` | `rt/recomp.c` | yes | production-runtime-only | `rt/recomp.c`: upstream_derived |
 | `dispatch_after_aot` | `rt/recomp.c` | no | production-runtime-only | `rt/recomp.c`: upstream_derived |
+| `dispatch_again_for_flow` | `rt/recomp.c` | no | production-runtime-only | `rt/recomp.c`: upstream_derived |
 | `dispatch_call` | `rt/recomp.c` | yes | production-runtime-only | `rt/recomp.c`: upstream_derived |
 | `dispatch_call_aot` | `rt/recomp.c` | no | production-runtime-only | `rt/recomp.c`: upstream_derived |
 | `dispatch_call_checked` | `rt/recomp.c` | yes | emitter-reached (direct) | `rt/recomp.c`: upstream_derived |

@@ -707,7 +707,8 @@ of a callable body and nothing else:
 A point's label is entered with only the entry `$sp` restored, so it has to sit at function
 scope: a call whose line leaves a block open (an enhancement site that reads a local of its own
 after the call) and a loop edge whose target label is inside a block keep their text and have no
-point.
+point. A body with any other function-scope local has none at all, and the pass gives up on a
+body from the first line whose blocks it cannot count.
 
 The body ends with one `switch` over `SR_RESUME_KEY(kind, pc)`: a call point runs
 `sr_resume_inner` (the frame above) and jumps to the call's label, so the drain and the end check
@@ -728,7 +729,7 @@ direction:
 | `tail-chain-live` | a tail drain is running a body: the chain's owed restore and release are on the host stack |
 | `tail-transfer-pending` | a recorded transfer has not been drained |
 | `foreign-cpu-state` | a call record belongs to another `CpuState` |
-| `root-not-host-entry` | its outermost call is not a host entry's own dispatch of a body: it does not return to `SR_HOST_RETURN_PC`, or the interpreter ran first and handed the frame on, and its run still holds what the call owes |
+| `root-not-host-entry` | its outermost call is not a host entry's first dispatch of a body: it does not return to `SR_HOST_RETURN_PC`, or the interpreter ran first and handed the frame on, or the call was dispatched again for exception or ERET flow its code raised. In the last two the host frames below still hold what the call owes |
 | `return-in-flight` | a call record holds a captured return target or an unwind |
 | `frame-not-described` | a live call above the outermost was not begun by a direct call site of a state-resumable body: a dispatched call (`jalr`), a call from the interpreter, a runtime call, or a body with no points |
 | `frame-chain` | a call's calling body is not the body the call below entered: a tail transfer changed the body |
@@ -750,8 +751,8 @@ dispatcher's own yield point.
 **What is claimed.** After a resume the thread is in the generated bodies, with the host frames, the
 call records, the registers and the slice count an uninterrupted run has at that point, so what
 follows is the same code on the same state. `mingw32-make cosim-selftest-resume` checks it: the
-cosimulation corpus translated with `--state-resume`, where every yield point of five cells
-parks in turn, the thread is described, and a run that starts from the parked registers, the
+cosimulation corpus translated with `--state-resume`, where every yield point of the resume
+cases parks in turn, the thread is described, and a run that starts from the parked registers, the
 parked memory and the frame list, with a rebuilt dispatch table and an empty call-record stack, is
 compared with the uninterrupted run on the whole `CpuState` (`pc` included), the memory window,
 the guest writes and the instruction trace after the park, and the number of yield points counted.

@@ -290,12 +290,23 @@ typedef struct {
 
 static int g_trampoline_hits = 0;
 
+/* One resume case (#2172) needs a native body that leaves exception flow behind, which no
+ * generated body does without the LLE CPU. With g_trampoline_raise set, the trampoline does so
+ * once, and the dispatcher dispatches that target again under the same call. */
+static uint32_t g_trampoline_raise = 0u;
+
 /* The interpreter's handoff destination. It is deliberately inert: it exists so
  * lane INTERP has a REGISTERED AOT target to stop at, and it must not perturb any
- * guest-visible state, or the lanes would differ because of the harness. */
+ * guest-visible state, or the lanes would differ because of the harness. The one
+ * exception is the resume case above, which no lane comparison runs. */
+
 static void cosim_return_trampoline(CpuState *s) {
-    (void)s;
     g_trampoline_hits++;
+    if (g_trampoline_raise != 0u) {
+        s->flow_kind = SR_FLOW_EXCEPTION;
+        s->flow_target = g_trampoline_raise;
+        g_trampoline_raise = 0u;
+    }
 }
 
 static uint32_t g_image_base = 0u;
@@ -2329,12 +2340,13 @@ static int32_t resume_lane_end(CosimLane *lane, const char *trace_path) {
 /* The uninterrupted run, entered as a thread's entry is. `park_at` is the ordinal of the
  * yield point that parks (0: none); `omit` is a body left to the interpreter (0: none).
  * Returns the slice counter the run ended with. */
-static int32_t resume_run_uninterrupted(uint32_t entry, uint32_t omit, int park_at,
-                                        const char *trace_path) {
+static int32_t resume_run_uninterrupted(uint32_t entry, uint32_t omit, uint32_t raise_to,
+                                        int park_at, const char *trace_path) {
     static const CosimCase plain = { "resume", 0u, 0u, "", 0u, 0u, NULL };
     CosimLane *lane = &g_resume_ref;
     if (omit != 0u) install_lane_mixed(omit);
     else install_lane(COSIM_LANE_AOT);
+    g_trampoline_raise = raise_to;
     seed_window();
     seed_state(&lane->state, &plain);
     lane->state.r[31] = SR_HOST_RETURN_PC;
@@ -2513,6 +2525,8 @@ typedef struct {
     unsigned first_body_point;
     /* A body left to the interpreter: the entry itself, so no host entry dispatches a body. */
     uint32_t omit;
+    /* The entry is the harness's trampoline, which raises exception flow to this address. */
+    uint32_t raise_to;
 } CosimResumeCase;
 
 /* Shapes the `rs` sweep must have met, so the cell cannot stop exercising one unnoticed. */
@@ -2526,7 +2540,8 @@ static unsigned g_resume_deep_ordinal;
 
 static unsigned run_resume_case(const CosimResumeCase *test, const char *ref_path,
                                 const char *res_path, int resumable_build) {
-    const int32_t whole = resume_run_uninterrupted(test->entry, test->omit, 0, ref_path);
+    const int32_t whole =
+        resume_run_uninterrupted(test->entry, test->omit, test->raise_to, 0, ref_path);
     const unsigned points = (unsigned)(COSIM_RESUME_SLICE - whole);
     unsigned resumed = 0u;
     static CosimPark parked, reference_next;
@@ -2535,8 +2550,8 @@ static unsigned run_resume_case(const CosimResumeCase *test, const char *ref_pat
         return 0u;
     }
     for (unsigned ordinal = 1u; ordinal <= points; ordinal++) {
-        const int32_t ref_slice =
-            resume_run_uninterrupted(test->entry, test->omit, (int)ordinal, ref_path);
+        const int32_t ref_slice = resume_run_uninterrupted(test->entry, test->omit,
+                                                           test->raise_to, (int)ordinal, ref_path);
         char detail[320];
         if (!g_park.fired) {
             resume_fail(test->name, ordinal, "the yield point did not park");
@@ -2545,7 +2560,7 @@ static unsigned run_resume_case(const CosimResumeCase *test, const char *ref_pat
         SrResumeStatus expected = SR_RESUME_OK;
         if (ordinal < test->first_body_point) {
             expected = SR_RESUME_NO_FRAMES;
-        } else if (test->omit != 0u) {
+        } else if (test->omit != 0u || test->raise_to != 0u) {
             /* The outermost call is refused before anything else is looked at, in any build. */
             expected = test->refusal;
         } else if (!resumable_build) {
@@ -2601,7 +2616,8 @@ static unsigned run_resume_case(const CosimResumeCase *test, const char *ref_pat
         /* The uninterrupted run again, parking at this point and at the next, and the same
          * resume again, parking at its first yield point. */
         g_resume_park_twice = 1;
-        (void)resume_run_uninterrupted(test->entry, test->omit, (int)ordinal, ref_path);
+        (void)resume_run_uninterrupted(test->entry, test->omit, test->raise_to, (int)ordinal,
+                                       ref_path);
         g_resume_park_twice = 0;
         reference_next = g_park_next;
         if (reference_next.fired != (ordinal < points)) {
@@ -2935,20 +2951,24 @@ static int run_resume_cases(const char *trace_dir) {
     }
     const CosimResumeCase cases[] = {
         /* Three frames and a leaf: every yield point in a body resumes. */
-        { "rs", COSIM_RS, 0u, SR_RESUME_OK, 2u, 0u },
+        { "rs", COSIM_RS, 0u, SR_RESUME_OK, 2u, 0u, 0u },
         /* A direct call in a conventional frame, and one behind a taken linked branch. */
-        { "link", link, 0u, SR_RESUME_OK, 2u, 0u },
-        { "zlink", zlink, 0u, SR_RESUME_OK, 2u, 0u },
+        { "link", link, 0u, SR_RESUME_OK, 2u, 0u, 0u },
+        { "zlink", zlink, 0u, SR_RESUME_OK, 2u, 0u, 0u },
         /* rs_tail's own entry resumes (point 2); rs_inner then runs under a tail drain. */
-        { "rs_tail", COSIM_RS_TAIL, 3u, SR_RESUME_TAIL_CHAIN_LIVE, 2u, 0u },
+        { "rs_tail", COSIM_RS_TAIL, 3u, SR_RESUME_TAIL_CHAIN_LIVE, 2u, 0u, 0u },
         /* linkr's own entry resumes (point 2); its `jalr` goes through the dispatcher, whose
          * call record no state-resumable call site began. */
-        { "linkr", linkr, 3u, SR_RESUME_FRAME_NOT_DESCRIBED, 2u, 0u },
+        { "linkr", linkr, 3u, SR_RESUME_FRAME_NOT_DESCRIBED, 2u, 0u, 0u },
         /* The host entry lands on a body with no translation. The interpreter runs it and
          * hands the frame to xread by `j` (points 1 and 2 are the two dispatches); xread's
          * call record returns to the host, but the interpreter's run under it still holds
          * what the call owes, so it is not a host entry's own. */
-        { "xtailmid", COSIM_XTAILMID, 3u, SR_RESUME_ROOT_NOT_HOST_ENTRY, 3u, COSIM_XTAILMID },
+        { "xtailmid", COSIM_XTAILMID, 3u, SR_RESUME_ROOT_NOT_HOST_ENTRY, 3u, COSIM_XTAILMID, 0u },
+        /* The host entry's body leaves exception flow to rs, and the dispatcher dispatches rs
+         * under the same call (points 1 and 2 are the two dispatches). The frames below rs
+         * keep the call's own entry $sp, so every park in rs and under it is refused. */
+        { "flow-again", COSIM_RETURN, 3u, SR_RESUME_ROOT_NOT_HOST_ENTRY, 3u, 0u, COSIM_RS },
     };
     fprintf(stderr, NEWLINE "cosim: resume at a PC (build: %s)" NEWLINE,
             resumable_build ? "state-resumable" : "ordinary; every thread must be refused");
