@@ -37,6 +37,8 @@ static const EnhancedPartFixture k_enhanced_parts[] = {
                              "memory changes."},
     {"Sharper enlarging", "Off", "AMD FSR 1 sharpens display and recordings; game memory and "
                                   "screenshots do not change."},
+    {"Stick dead zone", "Off", "Ace only, in games that ignore part of the stick. Small pushes count; "
+                               "the feel changes."},
 };
 typedef char player_enhanced_fixture_matches_parts[
     sizeof(k_enhanced_parts) / sizeof(k_enhanced_parts[0]) == PLAYER_PART_COUNT ? 1 : -1];

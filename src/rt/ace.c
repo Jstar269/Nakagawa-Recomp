@@ -29,7 +29,7 @@ static int value_on_off(const char *v, int *out) {
    nothing: tier is the one key a line may leave out (an Enhanced run). */
 typedef enum {
     ACE_KEY_AF, ACE_KEY_TEXT, ACE_KEY_READOUT, ACE_KEY_NOTICE, ACE_KEY_WIDE, ACE_KEY_SMOOTH,
-    ACE_KEY_SAS, ACE_KEY_TESS, ACE_KEY_TIER, ACE_KEY_CULL
+    ACE_KEY_SAS, ACE_KEY_TESS, ACE_KEY_TIER, ACE_KEY_STICK, ACE_KEY_CULL
 } AceKey;
 
 static const struct {
@@ -46,8 +46,23 @@ static const struct {
     {"sas", ACE_KEY_SAS, 1},
     {"tess", ACE_KEY_TESS, 1},
     {"tier", ACE_KEY_TIER, 0},
+    {"stick", ACE_KEY_STICK, 0},
     {"cull", ACE_KEY_CULL, 0},
 };
+
+/* stick=<counts>: a decimal 1..ACE_STICK_COUNTS_MAX with no sign and no leading zero, so the
+   line's text is the one ace_format writes. */
+static int value_stick_counts(const char *v, int *out) {
+    int n = 0;
+    if (!v[0] || v[0] == '0' || strlen(v) > 3) return 0;
+    for (const char *c = v; *c; c++) {
+        if (*c < '0' || *c > '9') return 0;
+        n = n * 10 + (*c - '0');
+    }
+    if (n < 1 || n > ACE_STICK_COUNTS_MAX) return 0;
+    *out = n;
+    return 1;
+}
 
 int ace_parse(const char *spec, AceConfig *out, char *why, size_t why_cap) {
     enum { KEYS = (int)(sizeof(k_ace_keys) / sizeof(k_ace_keys[0])) };
@@ -104,6 +119,12 @@ int ace_parse(const char *spec, AceConfig *out, char *why, size_t why_cap) {
                     why_set(why, why_cap, "cull is not part of this build"); return 0;
                 }
                 break;
+            case ACE_KEY_STICK:
+                ok = value_stick_counts(v, &c.stick);
+                if (ok && !ACE_HAS_STICK) {
+                    why_set(why, why_cap, "stick is not part of this build"); return 0;
+                }
+                break;
             case ACE_KEY_TIER:
                 if (strcmp(v, "enhanced") == 0) { c.tier = ACE_TIER_ENHANCED; ok = 1; }
                 else if (strcmp(v, "ace") == 0) { c.tier = ACE_TIER_ACE; ok = 1; }
@@ -143,6 +164,7 @@ int ace_parse(const char *spec, AceConfig *out, char *why, size_t why_cap) {
         if (k_ace_keys[i].required && !seen[i]) { why_set(why, why_cap, "missing key"); return 0; }
     /* An Ace item (contract 11.3.6): only an Ace-tier line may turn it on. */
     if (c.cull && c.tier != ACE_TIER_ACE) { why_set(why, why_cap, "cull needs tier=ace"); return 0; }
+    if (c.stick && c.tier != ACE_TIER_ACE) { why_set(why, why_cap, "stick needs tier=ace"); return 0; }
     c.on = 1;
     if (out) *out = c;
     why_set(why, why_cap, "");
@@ -167,7 +189,12 @@ int ace_format(const AceConfig *c, char *out, size_t cap) {
                       tier_word(c->tier), c->af, on_off(c->text), on_off(c->readout),
                       on_off(c->notice), wide_word(c->wide), smooth_word(c->smooth),
                       sas_word(c->sas), tess_word(c->tess));
-    /* Written only when on: a missing cull is off, so every line without it keeps its text. */
+    /* Written only when on: a missing stick is off, so every line without it keeps its text. */
+    if (n > 0 && (size_t)n < cap && c && c->on && c->stick) {
+        const int m = snprintf(out + n, cap - (size_t)n, ";stick=%d", c->stick);
+        n = m < 0 ? -1 : n + m;
+    }
+    /* The same for cull, which stays last: written only when on. */
     if (n > 0 && (size_t)n < cap && c && c->on && c->cull) {
         const int m = snprintf(out + n, cap - (size_t)n, ";cull=on");
         n = m < 0 ? -1 : n + m;
@@ -188,9 +215,11 @@ static int s_af_device;          /* the device's level when lower than the reque
 static int s_confirmed[ACE_FEATURE_COUNT];
 static uint64_t s_af_failures;
 static unsigned long s_cull_untracked;
+static unsigned long long s_stick_samples;   /* samples off rest the stick remap passed through */
+static int s_stick_host;                     /* the host dead zone it used last, in centred counts */
 
 static const char *const k_feature_key[ACE_FEATURE_COUNT] = {
-    "af", "text", "readout", "notice", "wide", "smooth", "sas", "tess", "cull"
+    "af", "text", "readout", "notice", "wide", "smooth", "sas", "tess", "stick", "cull"
 };
 
 /* The run's observation state. */
@@ -253,6 +282,8 @@ int ace_init_spec(const char *spec, const char *report_path) {
     memset(s_confirmed, 0, sizeof(s_confirmed));
     s_af_failures = 0;
     s_cull_untracked = 0;
+    s_stick_samples = 0;
+    s_stick_host = 0;
     s_af_device = 0;
     s_report_path[0] = '\0';
     snprintf(s_spec, sizeof(s_spec), "off");
@@ -272,6 +303,10 @@ int ace_init_spec(const char *spec, const char *report_path) {
             "smooth=%s, sas=%s, tess=%s)\n", tier_word(s_req.tier), s_req.af, on_off(s_req.text),
             on_off(s_req.readout), on_off(s_req.notice), wide_word(s_req.wide),
             smooth_word(s_req.smooth), sas_word(s_req.sas), tess_word(s_req.tess));
+    if (s_req.stick)
+        fprintf(stderr, "ACE_MODE: stick remap %d (the host stick starts past the game's square dead "
+                        "zone of %d counts; the game reads changed stick values)\n",
+                s_req.stick, s_req.stick);
     if (s_req.cull) fprintf(stderr, "ACE_MODE: cull on (a title's own culling is widened to the wings)\n");
     return 1;
 }
@@ -297,6 +332,7 @@ void ace_feature_unavailable(AceFeature feature, const char *reason) {
     case ACE_FEATURE_NOTICE: s_eff.notice = 0; break;
     case ACE_FEATURE_WIDE: s_eff.wide = 0; break;
     case ACE_FEATURE_SMOOTH: s_eff.smooth = 0; break;
+    case ACE_FEATURE_STICK: s_eff.stick = 0; break;
     case ACE_FEATURE_CULL: s_eff.cull = 0; break;
     case ACE_FEATURE_SAS: s_eff.sas = 0; break;
     default: s_eff.tess = 0; break;
@@ -306,6 +342,65 @@ void ace_feature_unavailable(AceFeature feature, const char *reason) {
 
 void ace_set_cull_untracked(unsigned long n) {
     if (g_ace_on) s_cull_untracked = n;
+}
+
+/* ---- stick dead-zone remap ------------------------------------------------------------------ */
+
+int ace_stick_host_counts(int deadzone_inner_x, int deadzone_inner_y) {
+    const int d = deadzone_inner_x > deadzone_inner_y ? deadzone_inner_x : deadzone_inner_y;
+    if (d <= 0) return 0;
+    return (int)(((long)d * 255L) / 65535L);
+}
+
+/* A host byte as a signed offset from rest (128), at most 127 either way. */
+static int stick_offset(uint8_t b) {
+    const int h = (int)b - 128;
+    return h < -127 ? -127 : h;
+}
+
+/* The inverse of the title's centring x = b - (b > 128) - 127. */
+static uint8_t stick_game_byte(int x) {
+    return (uint8_t)(x >= 1 ? x + 128 : x + 127);
+}
+
+/* One axis scaled by num/den, rounded to nearest, its sign kept, as a byte. An axis at rest
+   keeps its byte. */
+static uint8_t stick_scale_axis(uint8_t b, int h, int num, int den) {
+    if (h == 0) return b;
+    const int a = h < 0 ? -h : h;
+    int s = (2 * a * num + den) / (2 * den);
+    if (s > 127) s = 127;
+    return stick_game_byte(h < 0 ? -s : s);
+}
+
+void ace_stick_remap(uint8_t *lx, uint8_t *ly, int game_counts, int host_counts) {
+    const int g = game_counts;
+    int d = host_counts;
+    if (!lx || !ly || g < 1 || g > ACE_STICK_COUNTS_MAX) return;
+    if (d < 0 || d >= 127) d = 0;
+    const int hx = stick_offset(*lx), hy = stick_offset(*ly);
+    const int ax = hx < 0 ? -hx : hx, ay = hy < 0 ? -hy : hy;
+    const int m = ax > ay ? ax : ay;
+    if (m == 0) return;
+    /* Past the host's dead zone the host's live range maps onto the game's, G..127; up to it
+       (a source with a smaller dead zone than the host's, such as a mouse) it stays below G.
+       Both hold for any D in 0..126, larger than G or not: 127 - D is at least 1, and the
+       second branch runs only with D >= 1. */
+    int target = m > d ? g + (m - d) * (127 - g) / (127 - d) : m * (g - 1) / d;
+    if (target > 127) target = 127;
+    *lx = stick_scale_axis(*lx, hx, target, m);
+    *ly = stick_scale_axis(*ly, hy, target, m);
+}
+
+void ace_stick_sample(uint8_t *lx, uint8_t *ly, int host_counts) {
+    if (!g_ace_on || !s_eff.stick || !lx || !ly) return;
+    int d = host_counts;
+    if (d < 0 || d >= 127) d = 0;
+    s_stick_host = d;
+    if (*lx == 128u && *ly == 128u) return;
+    ace_stick_remap(lx, ly, s_eff.stick, d);
+    s_stick_samples++;
+    s_confirmed[ACE_FEATURE_STICK] = 1;
 }
 
 void ace_confirm(AceFeature feature) {
@@ -350,6 +445,7 @@ size_t ace_feature_words(char *out, size_t cap) {
     }
     if (s_eff.text) used = words_add(out, cap, used, "crisp keyboard");
     if (s_eff.wide) used = words_add(out, cap, used, "ultrawide");
+    if (s_eff.stick) used = words_add(out, cap, used, "stick remap");
     if (s_eff.cull) used = words_add(out, cap, used, "wider culling");
     if (s_eff.smooth) used = words_add(out, cap, used, "smooth motion");
     if (s_eff.sas) used = words_add(out, cap, used, "clean pitched sound");
@@ -942,6 +1038,9 @@ size_t ace_report_json(char *out, size_t cap) {
             s_eff.af, s_eff.text ? "true" : "false", s_eff.readout ? "true" : "false",
             s_eff.notice ? "true" : "false", wide_word(s_eff.wide), smooth_word(s_eff.smooth),
             sas_word(s_eff.sas), tess_word(s_eff.tess));
+    if (s_req.stick) ACE_PUT("  \"stick\": {\"counts\": %d, \"host_dead_zone\": %d, "
+                             "\"samples_remapped\": %llu},\n",
+                             s_req.stick, s_stick_host, s_stick_samples);
     if (s_req.cull) ACE_PUT("  \"cull\": %s,\n  \"cull_untracked\": %lu,\n",
                             s_eff.cull ? "true" : "false", s_cull_untracked);
     ACE_PUT("  \"unavailable\": {");
@@ -1034,13 +1133,16 @@ void ace_finish(void) {
     if (!g_ace_on) return;
     /* A feature that is on but never ran: its renderer or presenter did not start. */
     static const int has[ACE_FEATURE_COUNT] = { 1, 1, 1, 1, ACE_HAS_WIDE, ACE_HAS_SMOOTH, ACE_HAS_SAS, ACE_HAS_TESS,
-                                                ACE_HAS_CULL };
+                                                ACE_HAS_STICK, ACE_HAS_CULL };
     const int on[ACE_FEATURE_COUNT] = { s_eff.af > 0, s_eff.text, s_eff.readout, s_eff.notice,
-                                        s_eff.wide, s_eff.smooth, s_eff.sas, s_eff.tess, s_eff.cull };
+                                        s_eff.wide, s_eff.smooth, s_eff.sas, s_eff.tess, s_eff.stick,
+                                        s_eff.cull };
     for (int f = 0; f < ACE_FEATURE_COUNT; f++) {
         if (has[f] && on[f] && !s_confirmed[f])
             ace_feature_unavailable((AceFeature)f, f == ACE_FEATURE_CULL
                 ? "did not run: this title has no culling package in its build, or Widescreen is off"
+                : f == ACE_FEATURE_STICK
+                ? "did not run: no live stick sample left its rest position in analog mode"
                 : "did not run: its renderer or presenter did not start");
     }
     size_t len = ace_report_json(json, sizeof(json));

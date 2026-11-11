@@ -13,6 +13,7 @@
 #include "hle_internal.h"
 #include "nid_names.h"   /* sr_nid_name(): names unknown NIDs in the trap below */
 #include "replay_checkpoint.h" /* sr_replay_pad_skip, sr_replay_pad_sample */
+#include "ace.h"         /* g_ace_on, ace_stick_sample: Ace's stick dead-zone remap */
 
 #define ROUTE_MAX_CP     32
 #define ROUTE_MAX_ALT    4
@@ -1463,7 +1464,14 @@ void sr_ctrl_sample(void) {
     uint8_t route_lx = 128u, route_ly = 128u;
     int route_stick = s_route_state != ROUTE_OFF && sr_input_stick(&s_input, &route_lx, &route_ly);
     if (s_ctrl_sampling_mode == 1u) {
-        if (gui_on()) gui_analog(&lx, &ly);
+        if (gui_on()) {
+            gui_analog(&lx, &ly);
+            /* Ace's stick dead-zone remap (stick=<counts>, contract 11.3.11) reshapes the live host
+             * stick only. It does nothing unless the run's line asked for it, so every other run
+             * latches the bytes the window gave. A route's stick and a replay's recorded sample
+             * below are already the guest's bytes and pass through unchanged. */
+            if (g_ace_on) ace_stick_sample(&lx, &ly, gui_stick_dead_zone());
+        }
 #ifdef SR_HLE_THREAD_SELFTEST
         if (s_ctrl_test_stick) { lx = s_ctrl_test_lx; ly = s_ctrl_test_ly; }
 #endif

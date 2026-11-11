@@ -11,8 +11,9 @@
  *     SR_ACE=v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off
  *
  * tier (enhanced or ace) only names the run, in the badge, the pause menu and the stamps; a
- * line without it is an Enhanced run. cull is the other key a line may leave out: a missing cull
- * reads as off (section 11.2 item 2), and a line that writes cull=off means the same. Every other
+ * line without it is an Enhanced run. stick and cull are the other keys a line may leave out: a
+ * missing stick or cull reads as off (section 11.2 item 2); stick has no off word, its value is
+ * the game's dead zone (1..126), and a line that writes cull=off means the same as none. Every other
  * key is required in v1, in any order, each once. A key or value for a feature this build
  * does not carry (smooth=match) is still parsed and refused. Anything else (an unknown version, key
  * or value, a duplicate, a missing key, an empty field) refuses the whole line: Ace is off for
@@ -46,6 +47,8 @@
 #define ACE_HAS_SAS 1           /* sas=sinc: band-limited SAS voice resampling (#2054) */
 #define ACE_HAS_TESS 1          /* tess=2..4: finer Bezier and spline patches (#2053) */
 #define ACE_HAS_CULL 1          /* cull=on: widen a title's own view-culling test to the wings (11.3.6) */
+#define ACE_HAS_STICK 1         /* stick=<counts>: start the host stick past the game's dead zone (11.3.11) */
+#define ACE_STICK_COUNTS_MAX 126 /* stick=1..126: the square dead zone, in the game's centred counts */
 
 typedef enum { ACE_WIDE_OFF = 0, ACE_WIDE_FILL = 1 } AceWide;
 typedef enum { ACE_SMOOTH_OFF = 0, ACE_SMOOTH_MATCH = 1, ACE_SMOOTH_X2 = 2 } AceSmooth;
@@ -70,6 +73,8 @@ typedef struct {
     int sas;         /* AceSas: SAS voices mix through a band-limited resampler (host-only) */
     int tess;        /* finer patches (#2053): 0 off, or the factor 2, 3 or 4 on the guest's division */
     int cull;        /* cull=on: a title's culling is widened to the wings (guest-visible, 11.3.6) */
+    int stick;       /* stick=<counts>: 0 off, else the square stick dead zone the title ignores, 1..126
+                        (guest-visible, 11.3.11) */
 } AceConfig;
 
 typedef enum {
@@ -81,6 +86,7 @@ typedef enum {
     ACE_FEATURE_SMOOTH,
     ACE_FEATURE_SAS,
     ACE_FEATURE_TESS,
+    ACE_FEATURE_STICK,
     ACE_FEATURE_CULL,
     ACE_FEATURE_COUNT
 } AceFeature;
@@ -119,6 +125,31 @@ void ace_feature_unavailable(AceFeature feature, const char *reason);
 void ace_confirm(AceFeature feature);
 /* Matrix uses the culling hook left alone (its table was full): the report's cull_untracked. */
 void ace_set_cull_untracked(unsigned long n);
+
+/* ---- stick dead-zone remap (stick=<counts>, contract 11.3.11) ------------------------------- */
+
+/* The host's stick dead zone in centred counts (0..127): the larger of the two axes'
+ * deadzone_inner (0..32767 of a host axis) as (deadzone_inner * 255) / 65535. A negative value
+ * reads as 0. */
+int ace_stick_host_counts(int deadzone_inner_x, int deadzone_inner_y);
+/* Remaps one left-stick sample (bytes 0..255, 128 at rest) so the host's live range starts past
+ * a square dead zone of game_counts (1..126) that the title ignores. host_counts is the host's
+ * own dead zone (ace_stick_host_counts): 127 or more, or below 0, reads as 0; any D in 0..126
+ * is used as it is, at or above game_counts too. With h = byte - 128 (clamped to -127..127) and
+ * m = max(|hx|, |hy|), the target magnitude is G + (m - D) * (127 - G) / (127 - D) past D and
+ * m * (G - 1) / D up to it; both axes scale by that over m, rounded to nearest, signs kept, and
+ * go back to bytes through the inverse of the title's centring (x >= 1: x + 128, else x + 127).
+ * A sample at rest (m == 0), an axis at rest and a game_counts out of range are left as they
+ * are; m == 127 maps to 127, so full throw is unchanged. With D < G no moved axis comes out at
+ * rest. With D >= G an axis can: up to D (a mouse) the target is 0 when m * (G - 1) < D (G 10, D 100,
+ * m 5), and past D the minor axis of a push can scale below half a count (G 10, D 30, (31, 1));
+ * such an axis becomes byte 127, which the title reads as 0 (rest, 128, reads +1), inside its dead
+ * zone either way. Pure: no state, no I/O. */
+void ace_stick_remap(uint8_t *lx, uint8_t *ly, int game_counts, int host_counts);
+/* The run's remap of one live host sample: does nothing unless Ace is on with stick=<counts>.
+ * Counts the samples off rest it passed through the curve (the report's samples_remapped),
+ * confirms the feature at the first one, and keeps host_counts for the report. */
+void ace_stick_sample(uint8_t *lx, uint8_t *ly, int host_counts);
 /* An anisotropic sampler the renderer could not make: that draw kept the plain one. */
 void ace_note_af_failure(void);
 /* The pause menu's live Speed readout switch (Ace on only; a readout this host cannot draw
