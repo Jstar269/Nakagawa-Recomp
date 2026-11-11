@@ -4101,7 +4101,7 @@ static LibraryFindFit library_find_fit(int width, int height, int text_size_pct)
                  (!any_card_cut && cards_whole == page_cards && card_height > 0.0f &&
                   card_top + (float)page_rows * card_height +
                           (float)(page_rows - 1u) * NK_UI_TILE_ROW_GAP <=
-                      body_bottom + 0.5f));
+                      body_bottom - NK_UI_BODY_PAD_BOTTOM + 0.5f));
     /* The page holds every row that fits: one more would end below the body's padding, where
        library_page_size stops. */
     fit.tight = card_drawn && card_height > 0.0f &&

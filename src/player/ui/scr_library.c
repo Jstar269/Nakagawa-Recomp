@@ -73,7 +73,6 @@
 /* The LIBRARY heading's line height (NK_UI_TYPE_DISPLAY), reserved when working
    out how much room is left for the grid or the empty card. */
 #define LIBRARY_HEADING_ROW_HEIGHT NK_UI_CONTROL_HEIGHT_SMALL /* its FIND, SORT and pager buttons */
-/* The find box's rows: the shared keyboard's character rows and its Shift row. */
 /* The library notice under the heading (two NK_UI_TYPE_BODY lines) and its gap. */
 #define LIBRARY_ID_NOTICE LIBRARY_ID(0x000026u)
 #define LIBRARY_NOTICE_ROW_HEIGHT (44.0f + NK_UI_SPACE_4)
