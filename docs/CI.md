@@ -80,7 +80,7 @@ The jobs:
 | `linux_gcc16` | 1 job, 3.3 min | unchanged (not required, a container job on a hosted runner) |
 | `native_tools` | 3 parts, 7.9-9.2 min | unchanged |
 | `python_tools` | 6 shards, 4.2-18.2 min | 4 shards: `test_production_smoke` alone, about 16 min, and three of about 14 min |
-| `windows_runtime` | 6 parts, 4.2-9.7 min (4.5-12.0 in run 42258417250) | 4 groups of parts, planned at about 9.5-14 min each (smoke and routes not yet measured apart) |
+| `windows_runtime` | 6 parts, 4.2-9.7 min (4.5-12.0 in run 42258417250) | 4 groups of parts, 8.1-13.9 min in run 43055225113 (smoke 8.1, routes 13.9, selftests 9.3, ladder-fuzz 9.7) |
 | `windows_installer` | — | 1 `windows-2025` job on installer and Windows-runtime routes; reuses the Windows player package artifact |
 | `android_build` ("Android launcher build") | not present | 1 job, added later |
 | `ci_required` | 1 job | unchanged on a full run; does not run on a quick one |
@@ -113,11 +113,14 @@ The jobs:
   file, so it always relinks and reruns the fuzzer. `smoke` and `routes` ran as one group
   until run 42870221118 measured it at 20 minutes, the longest job of a full run: the shared
   setup about 2.3 minutes, smoke's steps about 7 and routes' about 10.6 (`native-core-tests`
-  alone 6.7). Apart they plan to about 9.5 and 13 minutes; that split is not measured yet. Neither
+  alone 6.7). Apart, run 43055225113 measured `smoke` at 8.1 minutes and `routes` at 13.9,
+  with compiler caches restored from `main` entries of 2026-11-06, when the two last ran apart
+  (79 % and 62 % hits; the 20-minute run had 85 %). Neither
   uses what the other builds: `native-core-tests` and `profile-zero-e2e` build their own inputs,
   and the player targets build the libchdr archive that `native-core-tests` used to leave behind
   (a Make prerequisite). The compiler cache is keyed on the group, so after a change to the groups
-  a group restores no entry until a run on `main` has saved one for it. When `run_installer` applies, the smoke group stages the already-built
+  a group restores only an older entry under its name, if one is left, until a run on `main` has
+  saved a current one. When `run_installer` applies, the smoke group stages the already-built
   player and its runtime closure into a package artifact; an installer-only change therefore
   runs all four Windows groups, and a failed staging or upload step fails `windows_runtime`.
   The separate `windows_installer`

@@ -1716,9 +1716,11 @@ jobs:
     # copy of the shared setup and the runtime-object compile gate (about 2.3
     # minutes). smoke and routes ran as one group until run 42870221118 measured it
     # at 20 minutes, the longest job of a full run (smoke's steps about 7 minutes,
-    # routes' about 10.6, native-core-tests 6.7 of them); apart they plan to about
-    # 9.5 and 13 minutes, beside ladder-fuzz (13.3) and selftests (14.0). Parts in
-    # one group share the checkout and its build tree. The
+    # routes' about 10.6, native-core-tests 6.7 of them). Apart, run 43055225113
+    # measured smoke at 8.1 minutes and routes at 13.9 (compiler caches restored
+    # from main's entries of 2026-11-06, 79 and 62 % hits), beside ladder-fuzz
+    # (9.7) and selftests (9.3). Parts in one group share the checkout and its
+    # build tree. The
     # ladder builds under build/platform-ladder; the two fuzz shards, which used to
     # run on separate runners, now share build/windows-runtime, which is harmless
     # because each regenerates its cases header and vfpu_fuzz_build always relinks
