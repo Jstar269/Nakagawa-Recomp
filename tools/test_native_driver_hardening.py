@@ -49,6 +49,13 @@ static uint32_t g_module_start_argp = 0;
 static char g_module_start_arg[128];
 static int g_direct_stack_below_args = 0;
 static uint32_t g_host_entry_ra = 0;
+/* The host audio opens (sr_audio_init below), and how many had happened when the guest's
+ * first instruction ran, by either boot: the scheduler's or the direct entry's. */
+static int g_audio_init_calls = 0;
+static int g_audio_init_calls_at_guest_start = -1;
+static void note_guest_start(void) {{
+    if (g_audio_init_calls_at_guest_start < 0) g_audio_init_calls_at_guest_start = g_audio_init_calls;
+}}
 
 uint32_t g_sr_debug = 0;
 int sr_hit_hle = 0;
@@ -102,6 +109,7 @@ RecompFn sr_lookup(uint32_t addr) {{
 /* driver.c's direct boot enters through the host entry (recomp.c, #1375); the harness runs
  * the registered body as that entry's native path does. */
 void dispatch_from_host(CpuState *s, uint32_t entry) {{
+    note_guest_start();
     g_host_entry_ra = s->r[31];
     RecompFn fn = sr_lookup(entry);
     if (fn) sr_call_body(fn, s);
@@ -131,6 +139,13 @@ const SrPauseHost *sr_sched_pause_host = NULL;
 void sr_audio_pause_enter(void) {{}}
 void sr_audio_pause_leave(void) {{}}
 int sr_audio_pause_script_ready(void) {{ return 1; }}
+/* Host audio seam (audio_sdl3.c, #2361): counts the opens. HARNESS_AUDIO_OPEN_FAILS=1 answers
+ * as a host with no audio device does. */
+int sr_audio_init(void) {{
+    g_audio_init_calls++;
+    const char *fails = getenv("HARNESS_AUDIO_OPEN_FAILS");
+    return fails && strcmp(fails, "1") == 0 ? -1 : 0;
+}}
 uint32_t sr_newlib_malloc(uint32_t size, uint32_t guest_ra) {{
     (void)guest_ra;
     if (size > sizeof(g_module_start_arg)) return 0;
@@ -167,6 +182,7 @@ static void synthetic_module_start(uint32_t args, uint32_t argp) {{
     }}
 }}
 void sched_run(uint32_t entry, uint32_t arglen, uint32_t argp) {{
+    note_guest_start();
     if (entry == 0x08000010u) synthetic_module_start(arglen, argp);
 }}
 /* Extracted-data preparation seam: this harness links driver.c without hle.c,
@@ -471,6 +487,44 @@ int main(int argc, char **argv) {{
         return 0;
     }}
 
+    if (strcmp(mode, "audio_open_sched") == 0) {{
+        /* #2361: the scheduler path opens the host audio device once, before the guest's first
+         * instruction, and runs on whether or not the open succeeded. */
+        if (argc < 3) return 119;
+        char *argv_fake[] = {{
+            "driver", "--image", argv[2], "0x08000000", "0x08000010", "none", "none", "--sched"
+        }};
+        int result = driver_main(8, argv_fake);
+        if (result != 0) return result;
+        if (g_audio_init_calls_at_guest_start != 1) {{
+            fprintf(stderr, "audio opens before the guest started: %d, expected 1\\n",
+                    g_audio_init_calls_at_guest_start);
+            return 120;
+        }}
+        if (g_audio_init_calls != 1) {{
+            fprintf(stderr, "audio opens by the driver: %d, expected 1\\n", g_audio_init_calls);
+            return 121;
+        }}
+        return 0;
+    }}
+
+    if (strcmp(mode, "audio_open_direct") == 0) {{
+        /* A run without the scheduler opens nothing at start: its first audio call opens the
+         * device, as before #2361. */
+        if (argc < 3) return 122;
+        char *argv_fake[] = {{
+            "driver", "--image", argv[2], "0x08000000", "0x08000010", "none", "none"
+        }};
+        int result = driver_main(7, argv_fake);
+        if (result != 0) return result;
+        if (g_audio_init_calls_at_guest_start != 0 || g_audio_init_calls != 0) {{
+            fprintf(stderr, "the direct boot opened audio: %d before the guest, %d in all\\n",
+                    g_audio_init_calls_at_guest_start, g_audio_init_calls);
+            return 123;
+        }}
+        return 0;
+    }}
+
     if (strcmp(mode, "image_expect_valid") == 0) {{
         if (argc < 3) return 100;
         char *argv_fake[] = {{
@@ -682,6 +736,22 @@ int main(int argc, char **argv) {{
                 direct_boot_args.returncode, 0,
                 direct_boot_args.stderr + direct_boot_args.stdout,
             )
+
+            # 6c. #2361: the scheduler path opens the host audio device before the guest starts,
+            # once, and goes on when the host has no device; the direct boot opens nothing.
+            for fails in ("0", "1"):
+                audio_env = os.environ.copy()
+                audio_env["HARNESS_AUDIO_OPEN_FAILS"] = fails
+                audio_sched = subprocess.run(
+                    [str(exe), "audio_open_sched", str(sample_img)],
+                    capture_output=True, text=True, env=audio_env,
+                )
+                self.assertEqual(audio_sched.returncode, 0,
+                                 f"open fails={fails}: {audio_sched.stderr}{audio_sched.stdout}")
+            audio_direct = subprocess.run(
+                [str(exe), "audio_open_direct", str(sample_img)], capture_output=True, text=True
+            )
+            self.assertEqual(audio_direct.returncode, 0, audio_direct.stderr + audio_direct.stdout)
 
             expected_img = subprocess.run(
                 [str(exe), "image_expect_valid", str(sample_img)], capture_output=True, text=True

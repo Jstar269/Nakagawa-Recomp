@@ -45,6 +45,7 @@ void sr_register_all(void);
 extern void sr_audio_pause_enter(void);
 extern void sr_audio_pause_leave(void);
 extern int sr_audio_pause_script_ready(void);
+extern int sr_audio_init(void);
 
 /* The window's overlay callbacks join once gui_init has a presenter that can draw it. */
 static SrPauseHost s_driver_pause_host = {
@@ -707,7 +708,16 @@ have_image:;
          * package-local sceKernelLoadExec request stops this scheduler at its next
          * guest-thread exit boundary; the outer loop then clears guest state and boots
          * the declared project program from the same runtime module package. sched_init
-         * is process-start-only; LoadExec uses the explicit teardown/rebind seam below. */
+         * is process-start-only; LoadExec uses the explicit teardown/rebind seam below.
+         *
+         * The host audio device opens here, before the guest's first instruction (#2361).
+         * Opening it takes tens of milliseconds, and every guest thread runs on this one host
+         * thread, so an open at the guest's first audio call stalled sound and picture together
+         * just as the game began to play. sr_audio_init makes the same decision it made there:
+         * a null, disabled or headless back end opens nothing, and a failed open is reported once
+         * and the run goes on silently. A run without the scheduler (below) still opens the
+         * device at its first audio call, as before. */
+        (void)sr_audio_init();
         sched_init(&s);
         sched_preempt_timer_start();
         for (;;) {
