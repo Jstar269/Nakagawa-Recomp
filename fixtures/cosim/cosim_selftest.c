@@ -2851,6 +2851,11 @@ static void run_resume_describe_refusals(void) {
                               SR_RESUME_SCOPE_LIVE);
 
     RESUME_STACK_RESET();
+    stack.scopes_live = 1u;
+    resume_expect_undescribed("a callback entered before the first call record", &stack, &state,
+                              SR_RESUME_SCOPE_LIVE);
+
+    RESUME_STACK_RESET();
     stack.drains_live = 1u;
     resume_expect_undescribed("a tail drain running a body", &stack, &state,
                               SR_RESUME_TAIL_CHAIN_LIVE);
@@ -2930,6 +2935,69 @@ static void run_resume_describe_refusals(void) {
 #undef RESUME_STACK_RESET
 }
 
+/* ---- fail-closed: a callback entered before the thread has a call record ---- */
+
+/* A thread whose own code has begun no call record (it is in the dispatcher, or in the
+ * interpreter) takes a callback: a second host entry on the same fiber, in a scope, as
+ * sr_callback_dispatch_one makes it. The callback's body parks. Its call record is the
+ * fiber's first and is a host entry's own, and the scope's floor is 0, so only the count of
+ * open scopes says the thread's own host entry is still underneath. */
+static struct {
+    int stage;
+    SrResumeStatus status;
+} g_resume_nested;
+
+static void resume_nested_hook(CpuState *s) {
+    atomic_store_explicit(&sr_timeslice, COSIM_RESUME_SLICE, memory_order_relaxed);
+    if (g_resume_nested.stage == 0) {
+        g_resume_nested.stage = 1;
+        const CpuState saved = *s;
+        SrAotReturnBoundaryScope scope;
+        sr_aot_return_boundary_scope_begin(&scope);
+        /* The callback's own dispatch counts one yield point; its body's entry is the next. */
+        atomic_store_explicit(&sr_timeslice, 2, memory_order_relaxed);
+        dispatch_from_host(s, COSIM_LEAF_A);
+        (void)sr_aot_return_boundary_scope_end(s, &scope, "cosim resume test");
+        *s = saved;
+        atomic_store_explicit(&sr_timeslice, COSIM_RESUME_SLICE, memory_order_relaxed);
+    } else if (g_resume_nested.stage == 1) {
+        g_resume_nested.stage = 2;
+        SrResumeFrame frames[COSIM_RESUME_FRAMES];
+        uint32_t count = 0u;
+        g_resume_nested.status =
+            sr_resume_describe(NULL, s, frames, COSIM_RESUME_FRAMES, &count, NULL, 0u);
+    }
+}
+
+static void run_resume_nested_entry(const char *trace_path) {
+    static const CosimCase plain = { "resume", 0u, 0u, "", 0u, 0u, NULL };
+    CosimLane *lane = &g_resume_ref;
+    install_lane(COSIM_LANE_AOT);
+    seed_window();
+    seed_state(&lane->state, &plain);
+    lane->state.r[31] = SR_HOST_RETURN_PC;
+    g_trampoline_raise = 0u;
+    memset(&g_resume_nested, 0, sizeof g_resume_nested);
+    /* The thread's own dispatch is the first yield point: no call record exists yet. */
+    atomic_store_explicit(&sr_timeslice, 1, memory_order_relaxed);
+    resume_lane_begin(lane, trace_path, COSIM_LEAF_A);
+    g_cosim_yield_hook = resume_nested_hook;
+    dispatch_from_host(&lane->state, COSIM_LEAF_A);
+    (void)resume_lane_end(lane, trace_path);
+    if (g_resume_nested.stage != 2 || g_resume_nested.status != SR_RESUME_SCOPE_LIVE) {
+        char detail[200];
+        snprintf(detail, sizeof detail,
+                 "a callback's body parked before the thread's first call record: expected %s, "
+                 "got %s (stage %d)", sr_resume_status_name(SR_RESUME_SCOPE_LIVE),
+                 sr_resume_status_name(g_resume_nested.status), g_resume_nested.stage);
+        resume_fail("callback", 0u, detail);
+    } else {
+        fprintf(stderr, "  cosim resume OK   describe   %-26s %s" NEWLINE,
+                sr_resume_status_name(g_resume_nested.status),
+                "a callback's body, entered before the thread's first call record");
+    }
+}
+
 static int run_resume_cases(const char *trace_dir) {
 #if defined(COSIM_STATE_RESUME)
     const int resumable_build = 1;
@@ -2978,6 +3046,7 @@ static int run_resume_cases(const char *trace_dir) {
         resumed += run_resume_case(&cases[i], ref_path, res_path, resumable_build);
     }
     g_resume_stage_refusals = 0;
+    run_resume_nested_entry(ref_path);
 
     SrResumeFrame entry_only = { COSIM_RS, COSIM_RS, SR_RESUME_POINT_ENTRY, COSIM_STACK };
     CpuState probe_state;

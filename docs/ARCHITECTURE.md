@@ -704,11 +704,14 @@ of a callable body and nothing else:
   callee, the calling body and its entry `$sp`, and the call gets a label between the callee and
   the call's own tail drain and end check.
 
-A point's label is entered with only the entry `$sp` restored, so it has to sit at function
-scope: a call whose line leaves a block open (an enhancement site that reads a local of its own
-after the call) and a loop edge whose target label is inside a block keep their text and have no
-point. A body with any other function-scope local has none at all, and the pass gives up on a
-body from the first line whose blocks it cannot count.
+A point's label is entered with only the entry `$sp` restored, so no other C local may be
+live there and what follows has to be straight-line code. The pass reads the body's block
+structure before it writes anything (`_StateResumeScan`). A call gets a point only when its line
+closes every block it sits in and none of them belongs to a loop or a `switch`, so an
+enhancement site that reads a local of its own after the call keeps its text; a loop edge gets
+one only when its target label is at function scope. A body that declares any other
+function-scope local, or that the scan cannot read (a line comment, a preprocessor line), is left
+as it is.
 
 The body ends with one `switch` over `SR_RESUME_KEY(kind, pc)`: a call point runs
 `sr_resume_inner` (the frame above) and jumps to the call's label, so the drain and the end check
@@ -725,7 +728,7 @@ direction:
 | Refusal | The thread is not described because |
 | --- | --- |
 | `no-frames` | it is not inside a host entry |
-| `callback-or-interrupt-live` | a nested host-to-guest entry is on its stack |
+| `callback-or-interrupt-live` | a callback or interrupt scope is open on its fiber: a nested host-to-guest entry is on its stack, above its call records or, when its own code has begun none yet, in their place |
 | `tail-chain-live` | a tail drain is running a body: the chain's owed restore and release are on the host stack |
 | `tail-transfer-pending` | a recorded transfer has not been drained |
 | `foreign-cpu-state` | a call record belongs to another `CpuState` |

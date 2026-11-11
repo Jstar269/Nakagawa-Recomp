@@ -5195,43 +5195,102 @@ _STATE_RESUME_CALL = re.compile(
     r"if \(sr_aot_return_boundary_end\(s\)\) return;")
 #: What may follow a direct call in its line for the call to get a resume point: the close of
 #: the blocks it sits in. A point's label is jumped to from the body's resume switch, past
-#: every local those blocks declare, so nothing after the label may read one. The line must
-#: also end at function scope (_state_resume_depths): a block still open after it can read its
-#: locals on a later line.
+#: every local those blocks declare, so nothing after the label may read one.
 _STATE_RESUME_CALL_TAIL = re.compile(r"^[\s}]*$")
 _STATE_RESUME_LABEL = re.compile(r"^\s*L_([0-9a-f]{8}): ;$")
-#: A construct that runs its block again or elsewhere: a label inside one is not at the end of
-#: straight-line code, whatever the brace count says.
-_STATE_RESUME_LOOP = re.compile(r"\b(?:while|for|do|switch)\b")
-#: A declaration at function scope. The resume switch restores `_sp_entry` and nothing else.
-_STATE_RESUME_LOCAL = re.compile(
-    r"^\s*(?:const\s+)?(?:unsigned\s+|signed\s+)?(?:u?int(?:8|16|32|64)_t|int|long|float|double|"
-    r"char|size_t|Sr\w+|[A-Z]\w*_t)\s*\**\s*(\w+)\s*(?:=|;|\[)")
-#: Comments and literals, whose braces are not blocks.
+#: Comments and literals, whose braces and words are not code.
 _STATE_RESUME_NOT_CODE = re.compile(
     r"/\*.*?\*/|\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'", re.S)
+_STATE_RESUME_TOKEN = re.compile(r"[A-Za-z_]\w*|[{};]")
+#: Words that open a block which runs again or elsewhere.
+_STATE_RESUME_LOOPS = frozenset(("while", "for", "do", "switch"))
+#: A statement that starts with one of these is not a declaration, whatever follows.
+_STATE_RESUME_STATEMENTS = frozenset(
+    ("goto", "return", "else", "case", "default", "break", "continue", "if", "sizeof")
+) | _STATE_RESUME_LOOPS
+#: A statement that starts with one of these is a declaration.
+_STATE_RESUME_TYPES = frozenset(
+    ("void", "const", "volatile", "register", "static", "extern", "auto", "struct", "union",
+     "enum", "unsigned", "signed", "bool", "_Bool", "char", "short", "int", "long", "float",
+     "double", "typedef"))
+#: After a statement's first word: a second name, so the first was a type.
+_STATE_RESUME_DECLARED = re.compile(r"[\s*]+([A-Za-z_]\w*)")
 STATE_RESUME_STATS = {"bodies": 0, "points": 0, "plain_bodies": 0}
 
 
-def _state_resume_depths(out):
-    """The block depth after each of ``out``'s lines, 1 being the function's own scope.
+class _StateResumeScan:
+    """The block structure of a body's lines, as far as resume points need it.
 
-    ``None`` from the first line whose braces cannot be counted (a comment left open, a
-    line comment, a preprocessor line), and for every line after it: nothing there gets a
-    resume point.
+    A label the resume switch jumps to is entered with one local restored, the entry ``$sp``.
+    So the pass has to know, for every place it would put one, that no other C local is live
+    there and that the code after it is straight-line. This reads the lines once and records:
+
+    * ``depth[i]``: the open blocks after line ``i``, 1 being the function's own;
+    * ``looped(i, column)``: whether a block open at that column was opened by ``while``,
+      ``for``, ``do`` or ``switch`` (on this line or an earlier one);
+    * ``locals``: the names declared at function scope.
+
+    ``readable`` is False when a line cannot be read this way (a comment left open, a line
+    comment, a preprocessor line, a function-scope declaration whose name is not plain); the
+    pass then leaves the whole body alone.
     """
-    depths = []
-    depth = 0
-    for line in out:
-        if depth is not None:
-            code = _STATE_RESUME_NOT_CODE.sub("", line)
+
+    def __init__(self, out):
+        self.readable = True
+        self.depth = []
+        self.locals = set()
+        self._starts = []
+        self._code = []
+        stack = []          # one flag per open block: opened by a loop word
+        state = {"pending": False, "start": False}
+        for line in out:
+            code = _STATE_RESUME_NOT_CODE.sub(lambda m: " " * len(m.group(0)), line)
             if ("/*" in code or "*/" in code or "//" in code
                     or any(part.lstrip().startswith("#") for part in code.split("\n"))):
-                depth = None
+                self.readable = False
+                return
+            self._starts.append((list(stack), dict(state)))
+            self._code.append(code)
+            self._advance(code, len(code), stack, state, self.locals)
+            self.depth.append(len(stack))
+
+    def _advance(self, code, end, stack, state, declared):
+        after = 0           # where the statement being read began, in this line
+        for token in _STATE_RESUME_TOKEN.finditer(code, 0, end):
+            word = token.group(0)
+            if word == "{":
+                stack.append(state["pending"] or (bool(stack) and stack[-1]))
+                state["pending"] = False
+                state["start"] = len(stack) == 1
+                after = token.end()
+            elif word == "}":
+                if stack:
+                    stack.pop()
+                state["start"] = len(stack) == 1
+                after = token.end()
+            elif word == ";":
+                state["start"] = len(stack) == 1
+                after = token.end()
             else:
-                depth += code.count("{") - code.count("}")
-        depths.append(depth)
-    return depths
+                if word in _STATE_RESUME_LOOPS:
+                    state["pending"] = True
+                # The statement's first word, with nothing before it: `(void)x;` opens with
+                # a parenthesis and declares nothing.
+                if (state["start"] and len(stack) == 1
+                        and not code[after:token.start()].strip()):
+                    if word in _STATE_RESUME_TYPES:
+                        self.readable = False
+                    elif word not in _STATE_RESUME_STATEMENTS:
+                        second = _STATE_RESUME_DECLARED.match(code, token.end())
+                        if second is not None:
+                            declared.add(second.group(1))
+                state["start"] = False
+
+    def looped(self, index, column):
+        """Whether a block open at ``column`` of line ``index`` belongs to a loop or switch."""
+        stack, state = list(self._starts[index][0]), dict(self._starts[index][1])
+        self._advance(self._code[index], column, stack, state, set())
+        return bool(stack) and stack[-1]
 
 
 def state_resume_pass(out, start):
@@ -5247,15 +5306,16 @@ def state_resume_pass(out, start):
       entry ``$sp``, and the point is a label between the callee and the call's own drain and
       end check, which run after a resumed callee exactly as after a called one.
 
-    A point's label is entered from the resume switch with only the entry ``$sp`` restored,
-    so it must sit at function scope: a loop edge whose target label is inside a block is left
-    alone, and so is a call whose line does not close every block it sits in (an enhancement
-    site that reads a local of its own after the call).
+    A point's label is entered from the resume switch with only the entry ``$sp`` restored
+    (_StateResumeScan). A body that declares any other function-scope local, or that the scan
+    cannot read, is returned as it is. A loop edge whose target label is inside a block is
+    left alone, and so is a call unless its line closes every block it sits in and none of
+    them belongs to a loop or switch: an enhancement site that reads a local of its own after
+    the call keeps its text.
 
     A statement of any other shape keeps its text and has no point, so a thread parked or
     suspended there is refused when it is described (sr_resume_describe); nothing is guessed.
-    Returns the new lines, or ``out`` itself when the body has no entry yield of the expected
-    shape.
+    Returns the new lines, or ``out`` itself when the body gets no point at all.
     """
     body = f"0x{start:08x}u"
     entry_at = next((i for i, line in enumerate(out) if _STATE_RESUME_ENTRY.match(line)), None)
@@ -5263,21 +5323,14 @@ def state_resume_pass(out, start):
         return out
     if not any(line.startswith("    uint32_t _sp_entry = s->r[29];") for line in out):
         return out
-    depths = _state_resume_depths(out)
-    if depths[entry_at] != 1:
+    scan = _StateResumeScan(out)
+    if not scan.readable or scan.locals != {"_sp_entry"} or scan.depth[entry_at] != 1:
         return out
-    # A function-scope local other than the entry $sp would be live at every label.
-    for index, line in enumerate(out):
-        if index and depths[index - 1] == 1:
-            for part in line.split("\n"):
-                local = _STATE_RESUME_LOCAL.match(part)
-                if local and local.group(1) != "_sp_entry":
-                    return out
     # Loop targets whose label is at function scope, before and after its own line.
     scope_labels = {
         match.group(1) for index, line in enumerate(out)
         if (match := _STATE_RESUME_LABEL.match(line))
-        and depths[index] == 1 and depths[index - 1] == 1}
+        and scan.depth[index] == 1 and scan.depth[index - 1] == 1}
     cases = [f"      case SR_RESUME_KEY(SR_RESUME_POINT_ENTRY, {body}): "
              f"SR_RESUME_AT(_nk_e, SR_RESUME_POINT_ENTRY, 0u); goto _nk_enter;"]
     yield_targets = set()
@@ -5299,25 +5352,27 @@ def state_resume_pass(out, start):
         if index == entry_at:
             result.append(f"    SR_STATE_ENTRY(s, {body}); _nk_enter: ;")
             continue
-        line = _STATE_RESUME_YIELD.sub(park, line)
+        # The call is looked for in the line as emit_function wrote it: the scan's columns
+        # are that line's.
         calls = list(_STATE_RESUME_CALL.finditer(line))
-        if (len(calls) == 1 and calls[0].group(1) not in call_points
-                and depths[index] == 1
-                and not _STATE_RESUME_LOOP.search(
-                    _STATE_RESUME_NOT_CODE.sub("", line[:calls[0].start()]))
-                and _STATE_RESUME_CALL_TAIL.match(line[calls[0].end():])):
-            call = calls[0]
+        call = calls[0] if len(calls) == 1 else None
+        if (call is not None and call.group(1) not in call_points
+                and scan.depth[index] == 1
+                and not scan.looped(index, call.start())
+                and _STATE_RESUME_CALL_TAIL.match(line[call.end():])):
             resume, call_pc, callee = call.group(1), call.group(2), call.group(3)
             call_points.add(resume)
             cases.append(f"      case SR_RESUME_KEY(SR_RESUME_POINT_CALL, 0x{resume}u): "
                          f"SR_RESUME_AT(_nk_e, SR_RESUME_POINT_CALL, 0x{callee}u); sr_resume_inner(s); "
                          f"goto R_{resume};")
-            line = (line[:call.start()]
+            line = (_STATE_RESUME_YIELD.sub(park, line[:call.start()])
                     + f"if (sr_aot_return_boundary_begin_at(s, 0x{resume}u, {call_pc}, "
                       f"0x{callee}u, {body}, _sp_entry)) return; "
                       f"f_{callee}(s); R_{resume}: SR_TAIL_DRAIN(s); "
                       f"if (sr_aot_return_boundary_end(s)) return;"
                     + line[call.end():])
+        else:
+            line = _STATE_RESUME_YIELD.sub(park, line)
         result.append(line)
     close = max(i for i, line in enumerate(result) if line == "}")
     result[close:close] = [

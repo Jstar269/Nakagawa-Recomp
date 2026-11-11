@@ -2243,6 +2243,9 @@ static SrAotReturnBoundary *sr_aot_return_boundaries;
 static size_t sr_aot_return_boundary_depth;
 static size_t sr_aot_return_boundary_capacity;
 static size_t sr_aot_return_boundary_floor;
+/* Scopes open on the running fiber (sr_aot_return_boundary_scope_begin). The floor alone does
+ * not show one opened before the fiber's first call record. */
+static size_t sr_aot_return_boundary_scopes_live;
 
 void sr_aot_return_boundaries_reset(void) {
 #ifdef SR_VERIFY
@@ -2251,6 +2254,7 @@ void sr_aot_return_boundaries_reset(void) {
     sr_aot_return_boundary_depth = 0u;
     sr_aot_return_boundary_top = NULL;
     sr_aot_return_boundary_floor = 0u;
+    sr_aot_return_boundary_scopes_live = 0u;
     sr_tail_drains_live = 0u;
 }
 
@@ -2266,8 +2270,10 @@ void sr_aot_return_boundary_stack_swap(SrAotReturnBoundaryStack *other) {
         sr_aot_return_boundary_floor,
         sr_aot_return_boundary_top,
         sr_tail_drains_live,
+        sr_aot_return_boundary_scopes_live,
     };
     sr_tail_drains_live = other->drains_live;
+    sr_aot_return_boundary_scopes_live = other->scopes_live;
     sr_aot_return_boundaries = other->boundaries;
     sr_aot_return_boundary_depth = other->depth;
     sr_aot_return_boundary_capacity = other->capacity;
@@ -2295,12 +2301,14 @@ void sr_aot_return_boundary_scope_begin(SrAotReturnBoundaryScope *scope) {
     scope->depth = sr_aot_return_boundary_depth;
     scope->previous_floor = sr_aot_return_boundary_floor;
     sr_aot_return_boundary_floor = sr_aot_return_boundary_depth;
+    sr_aot_return_boundary_scopes_live++;
 }
 
 int sr_aot_return_boundary_scope_end(CpuState *s,
                                      const SrAotReturnBoundaryScope *scope,
                                      const char *owner) {
     if (!scope) return 0;
+    if (sr_aot_return_boundary_scopes_live != 0u) sr_aot_return_boundary_scopes_live--;
     const int corrupt = sr_aot_return_boundary_depth != scope->depth ||
                         sr_aot_return_boundary_floor != scope->depth;
     if (corrupt) {
@@ -2586,7 +2594,7 @@ int sr_aot_return_boundary_end(CpuState *s) {
          * so everything it needs is read now. */
         const uint32_t target = (uint32_t)boundary->observed_target;
         const uint32_t resume_pc = boundary->resume_pc;
-        const SrGuestInterpCallBoundary call = { .resume_pc = resume_pc, .redispatch = 1u };
+        const SrGuestInterpCallBoundary call = { .resume_pc = resume_pc };
         /* A host wrapper of an abandoned body (the stack census) may have restored its own
          * entry $sp on the way out; the frame runs on the $sp the guest restored. */
         s->r[29] = boundary->resume_sp;
@@ -3243,13 +3251,15 @@ SrResumeStatus sr_resume_describe(const SrAotReturnBoundaryStack *stack, const C
     const size_t depth = stack ? stack->depth : sr_aot_return_boundary_depth;
     const size_t floor = stack ? stack->floor : sr_aot_return_boundary_floor;
     const size_t drains = stack ? stack->drains_live : sr_tail_drains_live;
+    const size_t scopes = stack ? stack->scopes_live : sr_aot_return_boundary_scopes_live;
     if (count != NULL) *count = 0u;
     if (detail != NULL && detail_cap != 0u) detail[0] = '\0';
     if (depth == 0u || records == NULL)
         return resume_refuse(SR_RESUME_NO_FRAMES, detail, detail_cap, "no live call");
-    if (floor != 0u)
+    /* A scope opened before the thread's first call record leaves the floor at 0. */
+    if (floor != 0u || scopes != 0u)
         return resume_refuse(SR_RESUME_SCOPE_LIVE, detail, detail_cap,
-                             "a callback or interrupt entered at depth %zu", floor);
+                             "%zu callback or interrupt scope(s) open, floor %zu", scopes, floor);
     if (drains != 0u)
         return resume_refuse(SR_RESUME_TAIL_CHAIN_LIVE, detail, detail_cap,
                              "%zu tail drain(s) running a body", drains);
@@ -3426,7 +3436,8 @@ SrResumeStatus dispatch_resume_from_host(CpuState *s, const SrResumeFrame *frame
                                          char *detail, size_t detail_cap) {
     if (detail != NULL && detail_cap != 0u) detail[0] = '\0';
     if (sr_aot_return_boundary_depth != 0u || sr_aot_return_boundary_floor != 0u ||
-        sr_tail_drains_live != 0u || sr_tail_transfer.pending)
+        sr_aot_return_boundary_scopes_live != 0u || sr_tail_drains_live != 0u ||
+        sr_tail_transfer.pending)
         return resume_refuse(SR_RESUME_BUSY, detail, detail_cap,
                              "the fiber holds %zu call record(s)", sr_aot_return_boundary_depth);
     const SrResumeStatus status = sr_resume_validate(s, frames, count, detail, detail_cap);

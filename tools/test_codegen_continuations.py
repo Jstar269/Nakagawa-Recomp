@@ -1078,26 +1078,74 @@ class StateResumeTests(unittest.TestCase):
         # A brace in a comment or a string is not a block.
         noisy = out[:3] + ['    /* } */ sr_log("}");', "    " + call.strip()] + out[6:]
         self.assertIn("SR_RESUME_POINT_CALL", "\n".join(codegen.state_resume_pass(noisy, 0x1000)))
-        # A comment left open hides what follows: nothing after it gets a point. A line
-        # comment and a preprocessor line cannot be counted either.
+        # A comment left open, a line comment and a preprocessor line cannot be read: the
+        # body is left as it is.
         for unreadable in ("    /* open", "    // }", "#if 0"):
             hidden = out[:3] + [unreadable, "    " + call.strip()] + out[6:]
-            self.assertNotIn("SR_RESUME_POINT_CALL",
-                             "\n".join(codegen.state_resume_pass(hidden, 0x1000)), unreadable)
-        # A call inside a loop on its own line is not at the end of straight-line code.
-        looped = out[:3] + ["    while (s->r[8] != 0u) { " + call.strip() + " }"] + out[6:]
-        self.assertNotIn("SR_RESUME_POINT_CALL",
-                         "\n".join(codegen.state_resume_pass(looped, 0x1000)))
+            self.assertIs(codegen.state_resume_pass(hidden, 0x1000), hidden, unreadable)
+
+    def test_a_call_inside_a_loop_or_switch_gets_no_point(self):
+        # Wherever the block was opened: a label inside it is not followed by straight-line
+        # code, and the block's header may read a local the resume switch does not restore.
+        call = ("if (sr_aot_return_boundary_begin(s, 0x0000100cu, 0x00001004u, 1u)) return; "
+                "f_00001040(s); SR_TAIL_DRAIN(s); if (sr_aot_return_boundary_end(s)) return;")
+        head = ["void f_00001000(CpuState *s) {", "    SR_YIELD(s, 0x00001000u);",
+                "    uint32_t _sp_entry = s->r[29]; (void)_sp_entry;"]
+        tail = ["    s->r[29] = _sp_entry; return;", "}", ""]
+        for middle in (
+            ["    while (s->r[8] != 0u) { " + call + " }"],
+            ["    while (s->r[8] != 0u) {", "      " + call + " }"],
+            ["    for (;;) {", "      { " + call + " } }"],
+            ["    { s->r[9] = 0u;", "      do {", "        " + call + " } while (s->r[9]); }"],
+            ["    switch (s->r[8]) {", "      case 1: " + call + " }"],
+        ):
+            with self.subTest(middle=middle[0]):
+                result = "\n".join(codegen.state_resume_pass(head + middle + tail, 0x1000))
+                self.assertIn("SR_STATE_ENTRY", result)
+                self.assertNotIn("SR_RESUME_POINT_CALL", result)
+        # The same call in a plain block, and after a loop that has closed, has one.
+        for middle in (["    if (s->r[8] != 0u) { " + call + " }"],
+                       ["    while (s->r[8] != 0u) { s->r[8]--; }", "    " + call]):
+            with self.subTest(middle=middle[0]):
+                self.assertIn("SR_RESUME_POINT_CALL", "\n".join(
+                    codegen.state_resume_pass(head + middle + tail, 0x1000)))
 
     def test_a_body_with_another_function_scope_local_keeps_its_text(self):
         # The resume switch restores the entry $sp only; any other local would be live at
         # every label.
-        out = ["void f_00001000(CpuState *s) {", "    SR_YIELD(s, 0x00001000u);",
-               "    uint32_t _sp_entry = s->r[29]; (void)_sp_entry;",
-               "    uint32_t _gpr8 = s->r[8];",
-               "    s->r[29] = _sp_entry; return;", "}", ""]
-        self.assertIs(codegen.state_resume_pass(out, 0x1000), out)
-        self.assertIsNot(codegen.state_resume_pass(out[:3] + out[4:], 0x1000), out)
+        head = ["void f_00001000(CpuState *s) {", "    SR_YIELD(s, 0x00001000u);",
+                "    uint32_t _sp_entry = s->r[29]; (void)_sp_entry;"]
+        tail = ["    s->r[29] = _sp_entry; return;", "}", ""]
+        for declaration in (
+            "    uint32_t _gpr8 = s->r[8];",
+            "    unsigned _x = 1u;",
+            "    unsigned int _x;",
+            "    bool _x = 0;",
+            "    uintptr_t _x = 0;",
+            "    CpuState *_x = s;",
+            "    RecompFn _x = NULL;",
+            "    struct T _x;",
+            "    volatile uint32_t _x = 0u;",
+            "    long long _x = 0;",
+            "    void (*_x)(void) = NULL;",
+            "    s->r[2] = 0u; uint32_t _late = 1u;",
+            "    { s->r[2] = 0u;\n    }\n    uint32_t _x = 1u;",
+            "    { s->r[2] = 0u; } uint32_t _x = 1u;",
+        ):
+            with self.subTest(declaration=declaration):
+                out = head + [declaration] + tail
+                self.assertIs(codegen.state_resume_pass(out, 0x1000), out)
+        # Statements that only look like one keep the body's points, and so does a local
+        # inside a block.
+        for statement in (
+            "    charge = 1;", "    double_buf[0] = 1;", "    intx = 2;", "    SR_COUNT_total = 1;",
+            "    goto L_00001004;", "    (void)_sp_entry;", "    s->r[2] = s->r[3] * s->r[4];",
+            "    { uint32_t _t = s->r[8]; s->r[9] = _t; }",
+            "    if (s->r[8]) { s->r[9] = 0u; } else { s->r[9] = 1u; }",
+        ):
+            with self.subTest(statement=statement):
+                out = head + [statement] + tail
+                self.assertIn("SR_STATE_ENTRY", "\n".join(codegen.state_resume_pass(out, 0x1000)))
 
     def test_a_loop_edge_to_a_label_inside_a_block_keeps_its_plain_yield(self):
         edge = "      if (_c) { SR_YIELD(s, 0x00001010u); goto L_00001004; } }"

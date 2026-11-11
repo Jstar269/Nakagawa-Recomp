@@ -1770,10 +1770,14 @@ typedef struct {
     size_t floor;
     SrAotReturnBoundary *top;
     size_t drains_live;        /* tail drains running a body on this fiber (sr_tail_drain_run) */
+    size_t scopes_live;        /* callback or interrupt scopes open on this fiber */
 } SrAotReturnBoundaryStack;
 
 /* A same-fiber callback or interrupt may run while caller frames are suspended.
- * Its floor prevents the nested return path from popping those frames. */
+ * Its floor prevents the nested return path from popping those frames. Every host-to-guest
+ * entry made under a thread's own host entry opens one, whether or not that thread has a call
+ * record yet (its code may be running in the interpreter): sr_resume_describe counts the open
+ * scopes and refuses the thread while there is one (#2172). */
 typedef struct {
     size_t depth;
     size_t previous_floor;
