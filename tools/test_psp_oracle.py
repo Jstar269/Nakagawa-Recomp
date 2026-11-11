@@ -2501,7 +2501,7 @@ class PspOracleBuildRouteTests(unittest.TestCase):
         )
         # Sequential probe.c and HLE cases use distinct numbered ranges. The count and
         # the id set are exact: a probe PR bumps both, and an accidental removal fails here.
-        self.assertEqual(len(routes), 159)
+        self.assertEqual(len(routes), 160)
         names = [name for name, _ in routes]
         ids = [int(case_id) for _, case_id in routes]
         self.assertEqual(len(names), len(set(names)))
@@ -2510,7 +2510,7 @@ class PspOracleBuildRouteTests(unittest.TestCase):
                          | {110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126,
                             127}
                          | {128, 129, 130, 132, 133, 134, 135, 136, 137, 138, 139, 140}
-                         | {150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 167, 168, 169, 170, 171, 172, 173, 174, 175, 176, 181, 182, 183, 184, 185},
+                         | {150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 167, 168, 169, 170, 171, 172, 173, 174, 175, 176, 181, 182, 183, 184, 185, 186},
                          set(ids))
         self.assertNotIn("psp_b1_imports.S", self.makefile)
         self.assertNotIn("psp_b2_imports.S", self.makefile)
@@ -2602,6 +2602,7 @@ class PspOracleBuildRouteTests(unittest.TestCase):
             self.assertIn(call, section)
         self.assertIn('"sas-adsr-done", sascore_ok ? "PASS" : "SKIP"', section)
         self.assertNotIn('"RC"', section)
+        self._assert_sas_case_unloads_its_av_modules(section, "sas-adsr-done")
         # The registered stream follows the source tables: 9 pairs of 1024 grains, 32 mode rows
         # and the explicit runs in order, 695 records before the done record, held to a strict
         # golden sequence.
@@ -2631,6 +2632,18 @@ class PspOracleBuildRouteTests(unittest.TestCase):
         self.assertEqual(counts["sas-adsr-m00-calls"], 16)
         self.assertEqual(counts["sas-adsr-load"], 4)
 
+    def _assert_sas_case_unloads_its_av_modules(self, section: str, done_case: str) -> None:
+        # The runner's teardown check compares the module set after the probe's unload with the
+        # one before the launch; SASCORE and AVCODEC left loaded made every capture of these
+        # cases unqualified. Both are unloaded, newest first, after the done record and before
+        # the park.
+        done = section.index(f'"{done_case}"')
+        sascore = section.index("sceUtilityUnloadAvModule(PSP_AV_MODULE_SASCORE)", done)
+        avcodec = section.index("sceUtilityUnloadAvModule(PSP_AV_MODULE_AVCODEC)", done)
+        park = section.index('"park"', done)
+        self.assertLess(sascore, avcodec)
+        self.assertLess(avcodec, park)
+
     def test_sas_mix_case_links_sascore_and_records_every_cell(self) -> None:
         # The case's own LIBS block links the SAS and utility stubs (#2135, #2054).
         block = re.search(r"(?ms)^ifeq \(\$\(CASE\),sas-mix\)\n(.*?)^endif$", self.makefile)
@@ -2658,6 +2671,7 @@ class PspOracleBuildRouteTests(unittest.TestCase):
         self.assertEqual(len(set(edges)), 12)
         self.assertIn('"sas-mix-done", sascore_ok ? "PASS" : "SKIP"', section)
         self.assertNotIn('"RC"', section)
+        self._assert_sas_case_unloads_its_av_modules(section, "sas-mix-done")
         # The registered stream follows the source tables: their names in order, 204 records
         # before the done record, which the runner holds to a strict golden sequence.
         spec, counts = CAMPAIGN_PROBE_CASES["sas-mix"]
@@ -3495,6 +3509,9 @@ class PspDmacProbeTests(unittest.TestCase):
                 "PSP-VFPU-BASICARITH-001", "PSP-VFPU-VUS2I-001",
                 # The 2026-11-08 acceptance-eligible hle-self-stop-unload (#341, boot 165) run.
                 "PSP-HLE-SELFSTOP-001",
+                # The 2026-11-11 acceptance-eligible hle-io-seek-edges (#1380, boot 192, ARK-5
+                # 5.2.0) run of 1a5157e37.
+                "PSP-HLE-IO-SEEK-002",
                 # The 2026-11-10 acceptance-eligible hle-issues-batch (#326, #356, boot 172) and
                 # hle-kernel-pool-bounds (boot 173) runs of 979c6a1dd.
                 "PSP-HLE-ISSUES-001", "PSP-HLE-KERNEL-STATUS-002",
@@ -5422,6 +5439,9 @@ class HleMeasureProbeTests(unittest.TestCase):
          "HLE_CASE_UTILITY_DIALOGS", "PSP-HLE-UTILITY-DIALOG-001"),
         ("hle-io-seek", 162, "hle_io_seek", None,
          "HLE_CASE_IO_SEEK", "PSP-HLE-IO-SEEK-001"),
+        # #1380's cells hle-io-seek left open: flash0: SEEK_CUR and past-2^32 seeks, ms0: flags.
+        ("hle-io-seek-edges", 186, "hle_io_seek_edges", None,
+         "HLE_CASE_IO_SEEK_EDGES", "PSP-HLE-IO-SEEK-002"),
         ("hle-nickname-limit", 164, "hle_nickname_limit", "hle_utility_imports.S",
          "HLE_CASE_NICKNAME_LIMIT", "PSP-HLE-NICKNAME-001"),
         # #341 part 2: loads the helper PRX of case 172 (probe_hle_self_stop_helper.c).
@@ -5545,6 +5565,8 @@ class HleMeasureProbeTests(unittest.TestCase):
         "sceIoDopen", "sceIoDread", "sceIoDclose", "sceIoRmdir",
         # hle-io-seek: the seeks, the ioctl and the probe-owned ms0: directory.
         "sceIoLseek", "sceIoLseek32", "sceIoIoctl", "sceIoMkdir",
+        # hle-io-seek-edges: the async write on a read-only descriptor and its bounded poll.
+        "sceIoWriteAsync", "sceIoPollAsync", "sceIoWaitAsync",
         "sceNetInit", "sceNetTerm", "sceNetInetInit", "sceNetInetTerm",
         "sceNetApctlInit", "sceNetApctlTerm", "sceNetAdhocInit", "sceNetAdhocTerm",
         "sceNetAdhocctlInit", "sceNetAdhocctlTerm",
@@ -5980,7 +6002,10 @@ class HleMeasureProbeTests(unittest.TestCase):
                           "s_ud_path",
                           # hle-io-seek: the probe-owned ms0: file, the same file once more on
                           # its setup failure, and the file its RDONLY|CREAT cell may create.
-                          "HLE_IS_FILE", "HLE_IS_FILE", "HLE_IS_MISSING"])
+                          "HLE_IS_FILE", "HLE_IS_FILE", "HLE_IS_MISSING",
+                          # hle-io-seek-edges: its ms0: file on a setup failure, the file the
+                          # RDONLY|CREAT|EXCL cell created (only when it exists), then cleanup.
+                          "HLE_ISE_FILE", "HLE_ISE_MISSING", "HLE_ISE_FILE", "HLE_ISE_MISSING"])
         issues = (self.fixture / "probe_hle_issues.c").read_text(encoding="utf-8")
         self.assertNotRegex(issues, r"\bsceIoRemove\s*\(")
 
@@ -7692,7 +7717,8 @@ class HleIssuesProbeTests(unittest.TestCase):
 
     def test_pass_only_cases_reject_fail_and_skip_rows(self) -> None:
         helper = HleMeasureProbeTests("test_case_ids_are_registered_once_and_match_the_families")
-        for case in ("hle-io-seek", "hle-nickname-limit", "hle-self-stop-unload", "vfpu-quad-wb"):
+        for case in ("hle-io-seek", "hle-io-seek-edges", "hle-nickname-limit",
+                     "hle-self-stop-unload", "vfpu-quad-wb"):
             spec, counts = CAMPAIGN_PROBE_CASES[case]
             clean = helper._stream(case)
             self.assertTrue(parse_campaign_probe_output(helper._body(clean), case).complete)
@@ -15807,6 +15833,7 @@ class Record20261015Tests(unittest.TestCase):
             ("sas-mix", "PSP-SAS-003", "CAPTURED"),
             ("vcodec-words", "PSP-VCODEC-001", "NOT_RUN"),
             ("hle-utility-dialogs", "PSP-HLE-UTILITY-DIALOG-001", "NOT_RUN"),
+            ("hle-io-seek-edges", "PSP-HLE-IO-SEEK-002", "MEASURED"),
             ("mpeg-ycbcr", "PSP-MPEG-YCBCR-001", "NOT_RUN"),
         )
         docs = {row[0]: row for row in self._table_rows(self.doc) if len(row) == 4}
@@ -15818,6 +15845,28 @@ class Record20261015Tests(unittest.TestCase):
                 self.assertEqual(readme[case][1], test_id)
                 self.assertIn(status, readme[case][2])
                 self.assertEqual(self.rows[test_id]["hardware_evidence"], status)
+
+    def test_the_io_seek_edges_run_is_measured_on_ark_5_2_0(self) -> None:
+        row = self.rows["PSP-HLE-IO-SEEK-002"]
+        self.assertEqual(row["hardware_evidence"], "MEASURED")
+        self.assertNotIn("evidence_note", row)
+        note = row["measurement_note"]
+        for term in ("2026-11-11", "PSP-3000", "boot 192", "XMB context", "1a5157e37",
+                     "ARK-5 5.2.0", "7a0035d9", "acceptance-eligible with 0 blockers",
+                     "0x80020323", "0x80010016", "queues nothing"):
+            self.assertIn(term, note)
+        self.assertIn("- **PSP-3000 single-case run of `hle-io-seek-edges` (2026-11-11 UTC)**", self.doc)
+
+    def test_the_sas_mix_second_capture_keeps_it_captured(self) -> None:
+        row = self.rows["PSP-SAS-003"]
+        self.assertEqual(row["hardware_evidence"], "CAPTURED")
+        self.assertNotIn("measurement_note", row)
+        note = row["evidence_note"]
+        for term in ("2026-11-11", "boot 191", "a39f7a14c", "ARK-5 5.2.0", "same 205 records",
+                     "unloads SASCORE, then AVCODEC", "no such rerun has been made"):
+            self.assertIn(term, note)
+        self.assertNotIn("on purpose", note)
+        self.assertNotIn("on purpose", self.rows["PSP-SAS-002"]["evidence_note"])
 
     def test_the_sas_adsr_capture_is_captured_with_its_blocker(self) -> None:
         row = self.rows["PSP-SAS-002"]
