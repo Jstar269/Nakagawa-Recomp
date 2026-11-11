@@ -4008,10 +4008,19 @@ typedef struct {
     bool keyboard;
     bool card;
     bool scrolls; /* the page body (scr_library.c's LIBRARY_ID_BODY) has room to scroll */
+    bool cards;   /* every card drawn is whole, and the page's rows fit under the box */
 } LibraryFindFit;
 
 static LibraryFindFit library_find_fit(int width, int height, int text_size_pct) {
-    LibraryFindFit fit = {false, false, false, false};
+    LibraryFindFit fit = {false, false, false, false, false};
+    bool any_card_cut = false;
+    bool card_seen[64];
+    size_t cards_whole = 0u;
+    size_t page_cards;
+    size_t page_rows = 0u;
+    float card_top = 0.0f;
+    float card_height = 0.0f;
+    float body_bottom = 0.0f;
     NkUiScrollState scroll;
     bool key_drawn[UI_KEYBOARD_KEY_COUNT + 2u];
     bool key_cut = false;
@@ -4021,6 +4030,26 @@ static LibraryFindFit library_find_fit(int width, int height, int text_size_pct)
     bool card_cut = false;
     int saved = g_flow_text_size_pct;
     memset(key_drawn, 0, sizeof(key_drawn));
+    memset(card_seen, 0, sizeof(card_seen));
+    {
+        /* The page's cards, as draw_page_case works them out (Clay drops a card that is
+           wholly off the body, so a card too many is missing rather than cut). */
+        NkUiViewport viewport = launcher_viewport(width, height, 1.0f);
+        NkUiScale scale;
+        size_t columns = 0u;
+        viewport.text_size_pct = text_size_pct;
+        scale = nk_ui_scale_for_viewport(&viewport);
+        page_cards = player_ui_library_page_size_at(scale.logical_w, scale.logical_h,
+                                                    (float)text_size_pct / 100.0f, true, 0u,
+                                                    &columns);
+        /* The rows the page size claims, whatever the fixture's title count. */
+        page_rows = columns > 0u ? page_cards / columns : 0u;
+        /* The scrolling body ends above the prompt bar (logical px; density 1 here). */
+        body_bottom = (scale.logical_h - NK_UI_PROMPT_BAR_HEIGHT) * scale.density;
+        if (page_cards > sizeof(k_titles) / sizeof(k_titles[0])) {
+            page_cards = sizeof(k_titles) / sizeof(k_titles[0]);
+        }
+    }
     g_flow_text_size_pct = text_size_pct;
     fit.fits = flow_case_fits(FLOW_PAGE_LIBRARY_FIND, width, height, NULL, 0u);
     draw = flow_case_layout(FLOW_PAGE_LIBRARY_FIND, width, height, &ui);
@@ -4049,10 +4078,31 @@ static LibraryFindFit library_find_fit(int width, int height, int text_size_pct)
                 true;
             if (cut) key_cut = true;
         }
+        if (id >= PLAYER_UI_ID_LIBRARY_ITEM(0u) &&
+            id < PLAYER_UI_ID_LIBRARY_ITEM(0u) + PLAYER_UI_ID_LIBRARY_ITEM_BASE_SPAN) {
+            size_t index = (size_t)(id - PLAYER_UI_ID_LIBRARY_ITEM(0u));
+            if (cut) any_card_cut = true;
+            if (index < sizeof(card_seen) / sizeof(card_seen[0]) && !card_seen[index]) {
+                card_seen[index] = true;
+                ++cards_whole;
+            }
+        }
         if (id != PLAYER_UI_ID_LIBRARY_ITEM(0u)) continue;
+        if (!card_drawn || (float)(cmd->bounds[3] - cmd->bounds[1]) > card_height) {
+            card_top = (float)cmd->bounds[1];
+            card_height = (float)(cmd->bounds[3] - cmd->bounds[1]);
+        }
         card_drawn = true;
         if (cut) card_cut = true;
     }
+    /* A page always holds one row (library_page_size); when even that does not fit under
+       the box, the body scrolls to it, which the 853 x 480 case checks. */
+    fit.cards = card_drawn &&
+                (page_rows <= 1u ||
+                 (!any_card_cut && cards_whole == page_cards && card_height > 0.0f &&
+                  card_top + (float)page_rows * card_height +
+                          (float)(page_rows - 1u) * NK_UI_TILE_ROW_GAP <=
+                      body_bottom + 0.5f));
     fit.card = card_drawn && !card_cut;
     fit.keyboard = !key_cut;
     fit.scrolls = ui != NULL &&
@@ -4083,10 +4133,28 @@ static void test_library_find_box_fits(void) {
         CHECK(fit.fits && fit.keyboard && fit.card, message);
     }
     {
+        /* Too short for a row of cards under the box: the body scrolls, so they can be reached. */
         LibraryFindFit fit = library_find_fit(853, 480, 150);
         CHECK(fit.fits && fit.keyboard && fit.scrolls,
               "the find box at 853 x 480 with 150% text fits the window with every key row, "
-              "and the grid scrolls under it");
+              "and the page body scrolls to the cards");
+    }
+    {
+        /* Larger windows (density 1): the page holds as many rows of cards as fit under the
+           box at the text size, so every card is whole. The box grows with the text, and the
+           page size has to grow it the same way; window heights 20 px apart meet every way
+           a row can be miscounted. */
+        static const int text_sizes[] = {100, 125, 150};
+        for (size_t t = 0u; t < sizeof(text_sizes) / sizeof(text_sizes[0]); ++t) {
+            for (int h = 900; h <= 1440; h += 20) {
+                char message[160];
+                LibraryFindFit fit = library_find_fit(1920, h, text_sizes[t]);
+                (void)snprintf(message, sizeof(message),
+                               "the find page at 1920 x %d, %d%% text, holds only rows of cards "
+                               "that fit under the box", h, text_sizes[t]);
+                CHECK(fit.fits && fit.keyboard && fit.cards, message);
+            }
+        }
     }
 }
 
@@ -4115,10 +4183,19 @@ static void test_library_find_filter_and_cap(void) {
           "the find box stops at 63 bytes");
     CHECK(!ui_keyboard_type(&keyboard, "b") && strlen(query) == 63u,
           "a full find box types nothing more");
+    /* A two-byte character with one byte of room is refused whole; a one-byte one fits. */
+    query[62] = '\0';
+    CHECK(!ui_keyboard_type(&keyboard, "\xc3\xa9") && strlen(query) == 62u,
+          "a two-byte character that would cross the cap is refused whole");
+    CHECK(!ui_keyboard_type(&keyboard, "\xc3\xa9" "b") && strlen(query) == 62u,
+          "typing stops at the character that does not fit, so what follows is not reordered");
+    CHECK(ui_keyboard_type(&keyboard, "b") && strlen(query) == 63u && query[62] == 'b',
+          "a one-byte character still fills the last byte");
     query[0] = '\0';
-    CHECK(ui_keyboard_type(&keyboard, "a\tb\x7f" "c\xc2\x85" "d\xe3\x82") &&
-              strcmp(query, "abcd") == 0,
-          "the find box leaves out a tab, DEL, a C1 control and a cut-off UTF-8 sequence");
+    CHECK(ui_keyboard_type(&keyboard, "a\tb\x7f" "c\xc2\x85" "d\xe3\x82" "e") &&
+              strcmp(query, "abcde") == 0,
+          "the find box leaves out a tab, DEL, a C1 control and a cut-off UTF-8 sequence, "
+          "and types what follows it");
 }
 
 static void test_every_screen_fits_the_window(void) {

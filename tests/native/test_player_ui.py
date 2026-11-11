@@ -1710,6 +1710,19 @@ class NativePlayerUiTests(unittest.TestCase):
                 states.append(state)
         return states
 
+    def test_next_ui_find_stops_at_its_cap(self) -> None:
+        """#2206: what a hardware keyboard types into the find box goes through the shared
+        keyboard's cap: 70 characters typed, 63 bytes kept."""
+        run = self.run_player(
+            "library", ("WAIT_MS=1000", "KEY_SLASH", "TEXT=" + "x" * 70, "WAIT_MS=200"),
+            library_titles=4, timeout=120.0,
+        )
+        if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in run["stdout"]:
+            self.skipTest("the next UI could not start here (no UI fonts)")
+        states = self.find_states(run)
+        self.assertTrue(states, run["stdout"])
+        self.assertEqual(states[-1], "x" * 63)
+
     def test_next_ui_find_types_with_a_controller_alone(self) -> None:
         """#2206: the find box's keys are the shared on-screen keyboard, so a controller
         alone searches: the d-pad moves, A types the focused key, X deletes, Start is Done

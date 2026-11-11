@@ -11,6 +11,7 @@
 #include "nk_ui_widgets.h"
 
 #include <stdio.h>
+#include <math.h>
 #include <string.h>
 
 #define LIBRARY_ID(offset) NK_UI_ID(NK_UI_ID_SCREEN_LIBRARY, (offset))
@@ -72,15 +73,8 @@
 /* The LIBRARY heading's line height (NK_UI_TYPE_DISPLAY), reserved when working
    out how much room is left for the grid or the empty card. */
 #define LIBRARY_HEADING_ROW_HEIGHT NK_UI_CONTROL_HEIGHT_SMALL /* its FIND, SORT and pager buttons */
-/* The find box, with the gap above: the field, as tall as a key, and the shared
-   keyboard 4 px under it (ui_keyboard_draw: its character rows and the Shift row of
-   small keys, 4 px apart, the last row 4 px lower). The field is a key's height so a
-   row of cards still fits under the box at 1280 x 720. */
+/* The find box's rows: the shared keyboard's character rows and its Shift row. */
 #define LIBRARY_FIND_KEYBOARD_ROWS (UI_KEYBOARD_CHAR_ROWS + 1u)
-#define LIBRARY_FIND_HEIGHT                                                              \
-    (NK_UI_SPACE_4 + NK_UI_CONTROL_HEIGHT_SMALL + NK_UI_SPACE_1 +                         \
-     (float)LIBRARY_FIND_KEYBOARD_ROWS * NK_UI_CONTROL_HEIGHT_SMALL +                    \
-     (float)LIBRARY_FIND_KEYBOARD_ROWS * NK_UI_SPACE_1)
 /* The library notice under the heading (two NK_UI_TYPE_BODY lines) and its gap. */
 #define LIBRARY_ID_NOTICE LIBRARY_ID(0x000026u)
 #define LIBRARY_NOTICE_ROW_HEIGHT (44.0f + NK_UI_SPACE_4)
@@ -152,6 +146,21 @@ static float library_demo_row_height(float text_scale) {
     return content > LIBRARY_DEMO_ROW_HEIGHT ? content : LIBRARY_DEMO_ROW_HEIGHT;
 }
 
+/* The find box, with the gap above: the field, as tall as a key, and the shared keyboard
+   4 px under it (ui_keyboard_draw: its character rows and the Shift row, 4 px apart, the
+   last row 4 px lower). A key is NK_UI_CONTROL_HEIGHT_SMALL, or its BODY line box above the
+   design text size (nk_ui_line_box), so the box grows with the text. At 100% text it is
+   282 px, so a row of cards still fits under it at 1280 x 720. */
+static float library_find_height(float text_scale) {
+    float key = NK_UI_CONTROL_HEIGHT_SMALL;
+    if (text_scale > 1.0f) {
+        float need = ceilf(library_line(NK_UI_TYPE_BODY, text_scale) * 1.5f);
+        if (need > key) key = need;
+    }
+    return NK_UI_SPACE_4 + key + NK_UI_SPACE_1 +
+           (float)LIBRARY_FIND_KEYBOARD_ROWS * (key + NK_UI_SPACE_1);
+}
+
 static float library_tile_width(float width, size_t columns) {
     float available = width - 2.0f * library_gutter(width);
     float tile;
@@ -211,7 +220,7 @@ static size_t library_page_size(float logical_width, float logical_height, bool 
     grid_height = height - NK_UI_TOP_BAR_HEIGHT - NK_UI_PROMPT_BAR_HEIGHT -
                   NK_UI_BODY_PAD_TOP - NK_UI_BODY_PAD_BOTTOM -
                   library_heading_row_height(text_scale) - NK_UI_SPACE_4 -
-                  (finding ? LIBRARY_FIND_HEIGHT
+                  (finding ? library_find_height(text_scale)
                            : library_demos_height(demo_count, columns, text_scale));
     rows = grid_height > tile_height
         ? (size_t)((grid_height + NK_UI_TILE_ROW_GAP) / (tile_height + NK_UI_TILE_ROW_GAP))
