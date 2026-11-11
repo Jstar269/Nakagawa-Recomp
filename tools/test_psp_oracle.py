@@ -12003,6 +12003,12 @@ class GeRasterProbeTests(unittest.TestCase):
         self.assertIn("lo-*", named)
         self.assertLessEqual(lo, set(software))
         self.assertEqual((named & cells) | lo, set(divergent) | set(software))
+        # Each class's names sit in its own sentence, so a cell moved between the lists is caught.
+        sw_part, div_part = para.split(" are drawn on the GPU and differ")
+        sw_part = sw_part[sw_part.index(" are drawn by the software fallback"):]
+        div_part = div_part[:div_part.index(" The case pins all three classes")]
+        self.assertEqual(set(re.findall(r"`([a-z0-9-]+)`", sw_part)) & cells | lo, set(software))
+        self.assertEqual(set(re.findall(r"`([a-z0-9-]+)`", div_part)) & cells, set(divergent))
         self.assertIn(f"{len(software)} are drawn by the software fallback", para)
         self.assertIn(f"{len(divergent)} are drawn on the GPU and differ", para)
         self.assertIn(f"{len(cells) - len(software) - len(divergent)} cells are drawn on the GPU and equal", para)
