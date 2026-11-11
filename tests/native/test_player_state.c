@@ -25,6 +25,7 @@
 #endif
 
 #include "player_state.h"
+#include "player_enhanced_fixture.h"
 #include "ace.h"
 #include "iso_reader.h"
 #include "nk_font.h"
@@ -1918,9 +1919,17 @@ static void repeat_launch_and_settle(PlayerApp *app, int game_index,
                                      const char *expected_memstick) {
     char error_before[48];
     snprintf(error_before, sizeof(error_before), "%s", app->last_error.error_code);
+    int64_t before_ms = (int64_t)time(NULL) * 1000;
     assert(player_app_launch_game(app, game_index));
     assert(app->is_game_running);
     assert(strcmp(app->launch_session.memstick_root, expected_memstick) == 0);
+    /* Discord status (#2259) shows this game's own title and when it started. */
+    assert(strcmp(app->running_title, app->games[game_index].title_name) == 0);
+    assert(app->running_start_ms >= before_ms &&
+           app->running_start_ms <= (int64_t)time(NULL) * 1000);
+    assert(app->running_play_mode == PLAYER_PLAY_AUTHENTIC ||
+           app->running_play_mode == PLAYER_PLAY_ENHANCED ||
+           app->running_play_mode == PLAYER_PLAY_ACE);
     app->launch_time_ms = launch_tick;
     assert(nk_launch_wait(&app->launch_session, 10000) == 0);
     assert(player_app_monitor_game_session(app, settle_tick));
@@ -7721,6 +7730,17 @@ static void test_play_mode_settings(void) {
         assert(has_off);
     }
     assert(player_enhanced_part(PLAYER_PART_COUNT) == NULL);
+    /* The screen test's fixture is the page a new settings file shows: same names, fresh-value
+       words and sentences as the shipped table. */
+    for (int p = 0; p < PLAYER_PART_COUNT; p++) {
+        const PlayerEnhancedPartInfo *info = player_enhanced_part(p);
+        if (strcmp(info->name, k_enhanced_parts[p].name) != 0 ||
+            strcmp(player_enhanced_part_label(p, info->fresh), k_enhanced_parts[p].value) != 0 ||
+            strcmp(info->sentence, k_enhanced_parts[p].sentence) != 0) {
+            fprintf(stderr, "FAIL: part %d (%s) differs from player_enhanced_fixture.h\n", p, info->name);
+            assert(0);
+        }
+    }
     assert(strcmp(player_enhanced_part_label(PLAYER_PART_FILTERING, 8), "8x") == 0 &&
            strcmp(player_enhanced_part_label(PLAYER_PART_FILTERING, 0), "Off") == 0 &&
            strcmp(player_enhanced_part_label(PLAYER_PART_FILTERING, 7), "Off") == 0);
@@ -7806,6 +7826,45 @@ static void test_play_mode_settings(void) {
             "{\"id\": \"fixture-60hz\", \"target_title_id\": \"fixture-title\"}");
         player_app_refresh_title_enhancements(app);
         assert(app->title_enhancements[2].available);
+    }
+    /* A published package the source tree ships (assets/enhancements, section 5.1) gives a
+       title without one in the user's data folder its Ace; a file in that folder comes first,
+       even one that cannot be used. */
+    {
+        char src_root[760], dir[800], file[860], own[860];
+        bool had_install = false;
+        char *saved_install = capture_environment_value("NK_INSTALL_ROOT", &had_install);
+        snprintf(src_root, sizeof(src_root), "%s%cshipped_src", root, sep);
+        snprintf(dir, sizeof(dir), "%s%ctools", src_root, sep);
+        assert(nk_platform_mkdir_p(dir));
+        snprintf(file, sizeof(file), "%s%cnk_cli.py", dir, sep);
+        write_text_file(file, "# fixture\n");
+        snprintf(dir, sizeof(dir), "%s%cassets%cenhancements", src_root, sep, sep);
+        assert(nk_platform_mkdir_p(dir));
+        snprintf(file, sizeof(file), "%s%ctest90002-60hz.json", dir, sep);
+        write_text_file(file,
+            "{\"id\": \"shipped-60hz\", \"target_title_id\": \"fixture-title-2\"}");
+        snprintf(app->games[1].title_id, sizeof(app->games[1].title_id), "fixture-title-2");
+        set_environment_value("NK_INSTALL_ROOT", src_root);
+        char found[NK_MAX_PATH];
+        assert(player_app_shipped_enhancements_root(app, found, sizeof(found)) &&
+               strstr(found, "shipped_src") && strstr(found, "enhancements"));
+        player_app_refresh_title_enhancements(app);
+        assert(app->title_enhancements[1].available && app->title_enhancements[1].shipped);
+        assert(strcmp(app->title_enhancements[1].package_id, "shipped-60hz") == 0);
+        assert(app->title_enhancements[2].available && !app->title_enhancements[2].shipped);
+        snprintf(own, sizeof(own), "%s%cenhancements%ctest90002-60hz.json", root, sep, sep);
+        write_text_file(own, "{}");
+        player_app_refresh_title_enhancements(app);
+        assert(!app->title_enhancements[1].available && !app->title_enhancements[1].shipped &&
+               app->title_enhancements[1].problem[0]);
+        remove(own);
+        remove(file);
+        player_app_refresh_title_enhancements(app);
+        assert(!app->title_enhancements[1].available);
+        restore_environment_value("NK_INSTALL_ROOT", saved_install, had_install);
+        free(saved_install);
+        app->games[1].title_id[0] = '\0';
     }
 
     /* Per-part off switches at the library's level: a following title gets them. */
@@ -12820,6 +12879,65 @@ int main(int argc, char **argv) {
             char *saved = read_text_file(test_settings_path);
             assert(saved && strstr(saved, "online_updates") == NULL);
             free(saved);
+        }
+
+        /* Discord status (#2259; owner decision 2026-11-08): off by default and written as
+           off; this build has no Discord application ID, so the switch fails closed and the
+           tick never starts a client, even with a stored true. */
+        player_app_init(s_app2);
+        assert(!s_app2->settings.discord_presence);
+        assert(!nk_discord_available());
+        assert(player_app_save_settings(s_app2, test_settings_path) == NK_OK);
+        {
+            char *saved = read_text_file(test_settings_path);
+            assert(saved && strstr(saved, "\"discord_presence\": false") != NULL);
+            free(saved);
+        }
+        s_app2->settings_path[0] = '\0';
+        player_app_toggle_discord_presence(s_app2);
+        assert(!s_app2->settings.discord_presence);
+        write_text_file(test_settings_path,
+                        "{\"schema_version\": 2, \"discord_presence\": \"yes\"}");
+        player_app_init(s_app2);
+        assert(player_app_load_settings(s_app2, test_settings_path) == NK_OK);
+        assert(!s_app2->settings.discord_presence);
+        write_text_file(test_settings_path,
+                        "{\"schema_version\": 2, \"discord_presence\": true}");
+        player_app_init(s_app2);
+        assert(player_app_load_settings(s_app2, test_settings_path) == NK_OK);
+        assert(s_app2->settings.discord_presence);
+        s_app2->is_game_running = true;
+        player_app_discord_tick(s_app2, 1000u);
+        assert(!s_app2->discord_ready);
+        /* A stored On can still be turned off. */
+        s_app2->settings_path[0] = '\0';
+        player_app_toggle_discord_presence(s_app2);
+        assert(!s_app2->settings.discord_presence);
+
+        /* What it would show: the running game's title, play mode and start; nothing
+           when no game runs. A library-default mode reads as Authentic. */
+        {
+            NkDiscordActivity activity;
+            player_app_init(s_app2);
+            assert(!player_app_discord_activity(s_app2, &activity));
+            assert(activity.details[0] == '\0' && activity.state[0] == '\0');
+            s_app2->is_game_running = true;
+            snprintf(s_app2->running_title, sizeof(s_app2->running_title), "%s",
+                     "Synthetic Tennis: Test Grip");
+            s_app2->running_play_mode = PLAYER_PLAY_ENHANCED;
+            s_app2->running_start_ms = 1762560000000;
+            assert(player_app_discord_activity(s_app2, &activity));
+            assert(strcmp(activity.details, "Synthetic Tennis: Test Grip") == 0);
+            assert(strcmp(activity.state, "Enhanced") == 0);
+            assert(activity.start_ms == 1762560000000);
+            s_app2->running_play_mode = PLAYER_PLAY_LIBRARY;
+            assert(player_app_discord_activity(s_app2, &activity));
+            assert(strcmp(activity.state, "Authentic") == 0);
+            s_app2->running_play_mode = PLAYER_PLAY_ACE;
+            assert(player_app_discord_activity(s_app2, &activity));
+            assert(strcmp(activity.state, "Ace") == 0);
+            s_app2->is_game_running = false;
+            assert(!player_app_discord_activity(s_app2, &activity));
         }
 
         remove(test_settings_path);

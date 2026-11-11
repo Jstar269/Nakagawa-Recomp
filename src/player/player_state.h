@@ -18,6 +18,7 @@
 #include "input_settings.h"
 #include "package_builder.h"
 #include "update_check.h"
+#include "discord_presence.h"
 #include "setup_staging.h"
 #include "nk_title_manifest.h"
 #include "generated/nk_title_catalog.h"
@@ -192,13 +193,17 @@ typedef enum {
 #define PLAYER_DISC_ID_KEY_LEN 10
 
 /* A title's 60 FPS game-logic enhancement package (docs/ENHANCEMENT_CONTRACT.md
- * section 9): <user data>/enhancements/<disc ID, lowercase>-60hz.json. */
+ * section 9): <user data>/enhancements/<disc ID, lowercase>-60hz.json, else the
+ * published package the source tree ships at assets/enhancements/ (section 5.1). */
 typedef struct {
     /* The file parses, its id is a valid package name
        (nk_title_manifest_enhancement_id_valid) and its target_title_id is the
        title's own. */
     bool available;
     char package_id[NK_MAX_ENHANCEMENT_PACKAGE_ID];
+    /* The file read is the shipped published package, not one in the user's
+       data folder. */
+    bool shipped;
     /* Why a file that exists cannot be used; empty when there is no file or it
        is usable. */
     char problem[160];
@@ -330,6 +335,10 @@ typedef struct {
     /* Ask GitHub for a newer version once each time the player starts. Off until
        the user turns it on (AGENTS.md section 5; the button needs no switch). */
     bool check_updates_at_start;
+    /* Discord status (#2259): while a game runs, the Discord app on this PC shows its title,
+       play mode and elapsed time. Off by default (owner decision 2026-11-08); it cannot be
+       turned on while the build has no Discord application ID (nk_discord_available). */
+    bool discord_presence;
     /* The folder the last file picker picked from (Add disc, PSP fonts), where
        the next one opens. Empty on a first run: the pickers then open at the
        Desktop (player_app_picker_start_folder). */
@@ -1010,6 +1019,14 @@ struct PlayerApp {
 
     /* The added images waiting for their disc check, and the one running. */
     PlayerDiscCheckState disc_check;
+
+    /* Discord status (#2259): what the running game shows, set when it starts, and the
+       client that sends it (player_app_discord_tick). */
+    char running_title[NK_MAX_TITLE_LEN];
+    PlayerPlayMode running_play_mode;
+    int64_t running_start_ms;      /* Unix time in milliseconds */
+    NkDiscordClient discord;
+    bool discord_ready;            /* discord is initialised */
 };
 
 /* State management API */
@@ -1632,10 +1649,17 @@ const char *player_library_sort_label(PlayerLibrarySort sort);
  * choice to package checks, builds and launches. */
 
 /* Reads <user_root>/enhancements/<disc ID, lowercase>-60hz.json for `game` with
- * nk_json. Returns out->available. A showcase demo, a test program or a disc ID
- * that is not a PSP disc ID has none. */
-bool player_read_title_enhancement(const char *user_root, const GameRecord *game,
-                                   PlayerTitleEnhancement *out);
+ * nk_json; when that file does not exist, the same name in `shipped_root` (the
+ * source tree's assets/enhancements folder, NULL for none), as tools/nk_cli.py
+ * build-package --experimental-60hz does. A file in the user's data folder comes
+ * first, even when it cannot be used. Returns out->available. A showcase demo, a
+ * test program or a disc ID that is not a PSP disc ID has none. */
+bool player_read_title_enhancement(const char *user_root, const char *shipped_root,
+                                   const GameRecord *game, PlayerTitleEnhancement *out);
+/* The folder of published packages the source tree beside this player ships
+ * (<source>/assets/enhancements, the tree package_builder_find_cli finds
+ * tools/nk_cli.py in). False when there is no source tree. */
+bool player_app_shipped_enhancements_root(const PlayerApp *app, char *out, size_t out_size);
 /* Re-reads every title's enhancement package and sets each GameRecord's
  * enhancement_package_id. player_app_sync_library calls it. */
 void player_app_refresh_title_enhancements(PlayerApp *app);
@@ -1841,6 +1865,8 @@ typedef struct {
     NkLaunchDataRootStatus data_root_status;
     char package_error[2048];
     char data_root_reason[1024];
+    /* The play mode the session runs in (Authentic, Enhanced or Ace). */
+    PlayerPlayMode play_mode;
     NkLaunchSession session;
 } PlayerLaunchWork;
 
@@ -2234,6 +2260,17 @@ void player_app_set_build_error(
 void player_app_set_online_mode(PlayerApp *app, bool on);
 void player_app_toggle_online_feature(PlayerApp *app, int feature); /* 0 news, 1 reports */
 void player_app_toggle_update_check_at_start(PlayerApp *app);
+/* Discord status (#2259). The switch stays off while nk_discord_available() is false. */
+void player_app_toggle_discord_presence(PlayerApp *app);
+/* What Discord shows now: the running game's title, play mode and start time. False when no
+   game runs or nothing can be shown. It ignores the setting; player_app_discord_tick checks
+   that. */
+bool player_app_discord_activity(const PlayerApp *app, NkDiscordActivity *out);
+/* Once per frame: with the setting on and the feature available, shows the running game (or
+   clears it when none runs); otherwise closes any connection. */
+void player_app_discord_tick(PlayerApp *app, uint64_t now_ms);
+/* Clear Discord status and close the connection, as the player exits. */
+void player_app_discord_shutdown(PlayerApp *app);
 void player_app_set_developer_mode(PlayerApp *app, bool on);
 /* The wizard's options step: skipping keeps both switches off. */
 void player_app_wizard_skip_options(PlayerApp *app);
