@@ -583,13 +583,18 @@ int gui_on(void) { return s_test_gui_on; }
 /* A real host window with a person at it (not the offscreen sink or an acceptance launch). */
 static int s_test_gui_interactive;
 int gui_interactive(void) { return s_test_gui_interactive; }
-void gui_pump(void) {}
-int gui_headless_acceptance_complete(void) { return 0; }
 /* The live pad: the keyboard tests hold a button on it for one frame; zero elsewhere. The pulse
  * is sdl3vk's: presses since the last VBLANK sample, in gui_buttons() until consumed. */
 static uint32_t s_test_gui_buttons;
 static uint32_t s_test_gui_pulse;
 static uint64_t s_test_gui_poll_ns;
+/* Whether the pump polls the host input and stamps it, as the SDL3 window's does (gui.c
+ * sync_sdl_input); 0 is a pump that reads nothing, as the GDI window's. */
+static int s_test_gui_pump_polls;
+void gui_pump(void) {
+    if (s_test_gui_pump_polls) s_test_gui_poll_ns = sched_host_now_ns();
+}
+int gui_headless_acceptance_complete(void) { return 0; }
 uint32_t gui_buttons(void) { return s_test_gui_buttons | s_test_gui_pulse; }
 uint32_t gui_consume_button_pulses(void) {
     const uint32_t pulses = s_test_gui_pulse;
@@ -44308,13 +44313,14 @@ static void test_ctrl_late_refresh(void) {
            "late refresh: the latch read after the peek sees the same release");
     (void)ctrlc_call(NID_SCE_CTRL_READ_BUFFER_POSITIVE, CTRL_OK_BUF, 64u);
 
-    /* Two unread samples: only the newest changes, the older one keeps its latch. */
+    /* Two unread samples: only the newest changes, the older one keeps its latch. The newest
+     * keeps 0x2, a press new in it (B4: whatever its source, pulse or not). */
     sr_hle_test_ctrl_push_sample(0x1u);
     sr_hle_test_ctrl_push_sample(0x2u);
     expect(ctrl_refresh_newest(0x8u, 128u, 128u, 555u, 0u), "late refresh: the newest of two is refreshed");
     expect(ctrlc_call(NID_SCE_CTRL_READ_BUFFER_POSITIVE, CTRL_OK_BUF, 64u) == 2u &&
-               MEM_R32(CTRL_OK_BUF + 4u) == 0x1u && MEM_R32(CTRL_OK_BUF + 16u + 4u) == 0x8u,
-           "late refresh: the older sample keeps its latch, the count stays 2");
+               MEM_R32(CTRL_OK_BUF + 4u) == 0x1u && MEM_R32(CTRL_OK_BUF + 16u + 4u) == (0x8u | 0x2u),
+           "late refresh: the older sample keeps its latch, the newest its new press, the count stays 2");
 
     /* With a sampling cycle the controller is not sampled per VBLANK: no refresh. */
     expect(ctrlc_call(NID_SCE_CTRL_SET_SAMPLING_CYCLE, 5555u, 0u) == 0u, "late refresh: cycle 5555 is set");
@@ -44358,6 +44364,24 @@ static void test_pad_vblank_deadline(void) {
     s_vbl_next_us = 14000000u;
     expect(sched_vblank_deadline_ns() == 5000u * PAD_MS + PAD_PERIOD_NS,
            "deadline: never more than one period after the last VBLANK latch");
+    /* Speed 1 again after a fast-forward span that left the paced clock 10 s ahead of the host
+     * clock (S7). The next VBLANK is due at paced 15,010 ms, host 5,010 ms. The last one latched
+     * late, at host 4,999 ms, so one period after it (5,015.7 ms) is past the real deadline. */
+    s_ff_host_anchor_ns = 4000u * PAD_MS;
+    s_ff_pace_anchor_ns = 14000u * PAD_MS;
+    s_clock_epoch_ns = 0u;
+    s_vbl_next_us = 15010000u;
+    s_vbl_latch_ns = 4999u * PAD_MS;
+    expect(sched_vblank_deadline_ns() == 5010u * PAD_MS,
+           "deadline: after fast forward, the paced deadline is moved to the host clock");
+    /* In fast forward (speed 4, anchored now) 40 ms of paced time is 10 ms of host time. */
+    s_ff_host_anchor_ns = s_ff_pace_anchor_ns = 5000u * PAD_MS;
+    s_ff_speed = 4u;
+    s_vbl_next_us = 5040000u;
+    expect(sched_vblank_deadline_ns() == 5010u * PAD_MS, "deadline: in fast forward, at the current speed");
+    s_ff_speed = 1u;
+    s_ff_host_anchor_ns = s_ff_pace_anchor_ns = 0u;
+    s_clock_epoch_ns = 1000u * PAD_MS;
     s_vbl_latch_ns = 0u;
     expect(sched_vblank_deadline_ns() == 0u, "deadline: none before the first VBLANK latch");
     s_vbl_latch_ns = 5000u * PAD_MS;
@@ -44387,13 +44411,13 @@ static void pad_vblank(uint64_t at) {
  * test's own context passes ACE_PAD_WARM boundaries, each followed 2 ms later by its VBLANK wait
  * (measured, never held: it is no guest thread). Then the VBLANK of the update under test, and
  * the host clock 1 ms into its period, where the boundary is reached. */
-static void pad_late_fixture(void) {
+static void pad_fixture_line(const char *line) {
     reset_fixture();
     sr_hle_init();
     sr_hle_test_ctrl_sampling_reset();
     sr_hle_test_ctrl_ring_reset();
     sr_ctrl_test_reset_live_input();
-    expect(ace_init_spec(PAD_LATE_LINE, NULL) == 1 && ace_effective()->pad == 1, "pad: pad=late is on");
+    (void)ace_init_spec(line, NULL);
     s_pace_on = 1;
     s_host_ns_fn = pad_host_clock;
     s_clock_epoch_ns = 0u;
@@ -44401,6 +44425,7 @@ static void pad_late_fixture(void) {
     s_test_gui_interactive = 1;
     s_test_gui_buttons = 0u;
     s_test_gui_pulse = 0u;
+    s_test_gui_pump_polls = 1;
     uint64_t t = 10000u * PAD_MS;
     for (uint32_t i = 0; i < ACE_PAD_WARM; i++, t += PAD_PERIOD_NS) {
         pad_vblank(t);
@@ -44409,11 +44434,17 @@ static void pad_late_fixture(void) {
         s_pad_host_ns = t + 3u * PAD_MS;
         sr_enhancement_update_waits();
     }
-    expect(ace_pad_plan()->measured == ACE_PAD_WARM && ace_pad_plan()->held_updates == 0u,
+    /* With Ace on the plan measures every update, whatever pad says; with Ace off it sees none. */
+    expect(ace_pad_plan()->measured == (g_ace_on ? ACE_PAD_WARM : 0u) && ace_pad_plan()->held_updates == 0u,
            "pad: the warm-up updates were measured, none held");
     (void)ctrlc_call(NID_SCE_CTRL_READ_BUFFER_POSITIVE, CTRL_OK_BUF, 64u);   /* the warm-up's samples */
     pad_vblank(t);
     s_pad_host_ns = t + PAD_MS;
+}
+
+static void pad_late_fixture(void) {
+    pad_fixture_line(PAD_LATE_LINE);
+    expect(ace_effective()->pad == 1, "pad: pad=late is on");
 }
 
 static void pad_late_teardown(void) {
@@ -44427,6 +44458,7 @@ static void pad_late_teardown(void) {
     s_test_gui_buttons = 0u;
     s_test_gui_pulse = 0u;
     s_test_gui_poll_ns = 0u;
+    s_test_gui_pump_polls = 0;
     s_cur = -1;
     sr_ctrl_test_reset_live_input();
     sr_hle_test_ctrl_sampling_reset();
@@ -44589,8 +44621,7 @@ static void test_pad_late_through_the_boundary(void) {
         expect(u->wake > s_vtime_us && u->wake - s_vtime_us <= plan->hold_ns_max / 1000u + 1u,
                "pad: the delay wakes after the hold");
         s_test_gui_buttons = NK_PSP_BTN_CROSS_BIT;     /* pressed during the hold */
-        s_test_gui_poll_ns = t + 12u * PAD_MS;
-        pad_update_resume(u, t + 12u * PAD_MS);
+        pad_update_resume(u, t + 12u * PAD_MS);        /* the pump stamps its poll then */
         expect(s_pad_body_done && plan->refreshed == 1u, "pad: the sample is refreshed when the hold ends");
         expect(ctrlc_call(NID_SCE_CTRL_READ_BUFFER_POSITIVE, CTRL_OK_BUF, 64u) == 1u &&
                    MEM_R32(CTRL_OK_BUF + 4u) == NK_PSP_BTN_CROSS_BIT && MEM_R32(CTRL_OK_BUF) == (uint32_t)(t / 1000u),
@@ -44628,6 +44659,79 @@ static void test_pad_late_through_the_boundary(void) {
         expect(pad_read_newest() == 0u, "pad: the next sample has only what is held");
     }
     pad_late_teardown();
+
+    /* B4: a press that raised no pulse (a trigger or a stick bound to a button) stays too. The
+     * sample before has SQUARE; the VBLANK latches SQUARE and R, and both are released during
+     * the hold. R is new in this sample, so a run without the part delivers it here and the
+     * refreshed sample keeps it; SQUARE was already down, so its release may arrive now. */
+    pad_late_fixture();
+    {
+        const uint64_t t = s_pad_vblank_ns + PAD_PERIOD_NS;
+        s_test_gui_buttons = NK_PSP_BTN_SQUARE_BIT;
+        pad_vblank(t);
+        s_test_gui_buttons = NK_PSP_BTN_SQUARE_BIT | NK_PSP_BTN_RTRIGGER_BIT;   /* no pulse */
+        pad_vblank(t + PAD_PERIOD_NS);
+        s_pad_host_ns = t + PAD_PERIOD_NS + PAD_MS;
+        s_ctrlc_ret = 0u;
+        TCB *u = pad_update_start();
+        expect(pad_update_held(u), "pad: the update after the trigger press is held");
+        s_test_gui_buttons = 0u;                       /* both released during the hold */
+        pad_update_resume(u, t + PAD_PERIOD_NS + 12u * PAD_MS);
+        expect(ace_pad_plan()->refreshed == 1u, "pad: the trigger sample is refreshed");
+        expect(pad_read_newest() == NK_PSP_BTN_RTRIGGER_BIT,
+               "pad: the refreshed sample keeps a press new in it that raised no pulse");
+    }
+    pad_late_teardown();
+
+    /* N9: a pump that polls nothing (the GDI window reads its keys when it presents) leaves the
+     * sample as latched, and it is not counted as refreshed. */
+    pad_late_fixture();
+    {
+        const uint64_t t = s_pad_vblank_ns;
+        s_test_gui_pump_polls = 0;
+        TCB *u = pad_update_start();
+        expect(pad_update_held(u), "pad: held before a pump that polls nothing");
+        s_test_gui_buttons = NK_PSP_BTN_CROSS_BIT;
+        pad_update_resume(u, t + 12u * PAD_MS);
+        expect(s_pad_body_done && ace_pad_plan()->refreshed == 0u && pad_read_newest() == 0u,
+               "pad: no refresh when the pump polled no input");
+    }
+    pad_late_teardown();
+
+    /* S8: off means off. Ace without pad=late (the key left out, or pad=off) and Ace off: the
+     * same warm-up, then the boundary. No update is held, no sample refreshed, and a press during
+     * what would be the hold leaves the read with the VBLANK's buttons and timestamp. */
+    {
+        static const char *const off_lines[] = {
+            "v1;tier=ace;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off",
+            "v1;tier=ace;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;pad=off",
+            "off",
+        };
+        for (size_t i = 0; i < sizeof(off_lines) / sizeof(off_lines[0]); i++) {
+            pad_fixture_line(off_lines[i]);
+            char msg[192];
+            const uint64_t t = s_pad_vblank_ns;
+            expect(!ace_effective()->pad, "pad: the off line has no late pad sampling");
+            TCB *u = pad_update_start();
+            snprintf(msg, sizeof msg, "pad: no hold with '%s'", off_lines[i]);
+            expect(u && s_pad_body_done && u->state != TH_WAIT_DELAY && ace_pad_plan()->held_updates == 0u &&
+                       ace_pad_plan()->refreshed == 0u, msg);
+            s_test_gui_buttons = NK_PSP_BTN_CROSS_BIT;   /* pressed where a hold would be */
+            s_pad_host_ns = t + 12u * PAD_MS;
+            gui_pump();
+            s_cur = (int)(u - s_tcb);
+            sr_enhancement_update_waits();
+            liveness_finish_waiter(u);
+            s_cur = -1;
+            const uint32_t n = ctrlc_call(NID_SCE_CTRL_READ_BUFFER_POSITIVE, CTRL_OK_BUF, 64u);
+            snprintf(msg, sizeof msg, "pad: the read has the VBLANK's sample with '%s'", off_lines[i]);
+            expect(n == 1u && MEM_R32(CTRL_OK_BUF + 4u) == 0u && MEM_R32(CTRL_OK_BUF) == (uint32_t)(t / 1000u),
+                   msg);
+            snprintf(msg, sizeof msg, "pad: nothing held or refreshed with '%s'", off_lines[i]);
+            expect(ace_pad_plan()->held_updates == 0u && ace_pad_plan()->refreshed == 0u, msg);
+            pad_late_teardown();
+        }
+    }
 
     /* B2: a latch read during the hold was handed the sample, so the refresh leaves it, and the
      * latch and the buffer reads agree. Likewise a latch peek, and a buffer peek. */

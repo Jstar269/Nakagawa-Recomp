@@ -187,11 +187,12 @@ static uint64_t s_ctrl_cycle_next_us;
 
 /* Host-side only, never guest-visible: what late pad sampling (ace.h, contract 11.3.9) and its
  * latency measure know about the samples. sr_ctrl_sample sets the s_ctrl_live_* values before it
- * pushes a sample: the host time of the input poll behind it, the buttons it carries only from
- * button pulses its latch consumed (a press, or a press and release, since the previous sample),
- * and whether the on-screen keyboard took it (its buttons are then 0). ctrl_push keeps them for
- * the newest sample, with whether that sample was latched at a VBLANK of live input and whether
- * any read, peek or latch call has been handed it. */
+ * pushes a sample: the host time of the input poll behind it, the buttons it carries from button
+ * pulses its latch consumed (a press, or a press and release, since the previous sample), and
+ * whether the on-screen keyboard took it (its buttons are then 0). ctrl_push keeps them for the
+ * newest sample, with every button down in it that was up in the sample before (a press that
+ * raised no pulse: a trigger or a stick bound to a button), whether that sample was latched at a
+ * VBLANK of live input and whether any read, peek or latch call has been handed it. */
 uint64_t s_ctrl_live_poll_ns;
 uint32_t s_ctrl_live_taps;
 int s_ctrl_live_keyboard;
@@ -223,9 +224,9 @@ int ctrl_refresh_allowed(void) {
 }
 
 /* Late pad sampling: the newest sample takes the given input in place when
- * ctrl_refresh_allowed(). It keeps the buttons its latch carried from button pulses, so a press
- * the VBLANK delivered is never lost to a release during the hold; taps are the pulses this
- * refresh consumed, kept the same way. Its timestamp and its scripted-input id stay; the number
+ * ctrl_refresh_allowed(). It keeps every button its latch carried as a press (new since the
+ * sample before, or from a pulse), so a press the VBLANK delivered is never lost to a release
+ * during the hold; taps are the pulses this refresh consumed, kept the same way. Its timestamp and its scripted-input id stay; the number
  * of samples does not change. Returns 1 when the sample was refreshed. */
 int ctrl_refresh_newest(uint32_t buttons, uint8_t lx, uint8_t ly, uint64_t poll_ns, uint32_t taps) {
     if (!ctrl_refresh_allowed()) return 0;
@@ -243,10 +244,13 @@ int ctrl_refresh_newest(uint32_t buttons, uint8_t lx, uint8_t ly, uint64_t poll_
 }
 
 void ctrl_push(const CtrlSample *smp, uint32_t ts) {
+    const uint32_t before = s_ctrl_sample_count ? s_ctrl_ring[(s_ctrl_w - 1 + CTRL_RING) % CTRL_RING].btn : 0u;
     s_ctrl_ring[s_ctrl_w] = *smp;
     s_ctrl_ring[s_ctrl_w].ts = ts;
     s_ctrl_ring_poll_ns[s_ctrl_w] = s_ctrl_live_poll_ns;
-    s_ctrl_newest_taps = s_ctrl_live_taps;
+    /* The presses this sample carries that a refresh must keep: new since the sample before,
+     * or from a pulse (a press released again before this VBLANK). */
+    s_ctrl_newest_taps = s_ctrl_live_taps | (smp->btn & ~before);
     /* A sampling cycle's samples (ctrl_cycle_catch_up pushes them while the cycle is non-zero)
      * are not VBLANK samples, even once the cycle is back to 0. */
     s_ctrl_newest_refreshable = !s_ctrl_sampling_cycle && !s_ctrl_live_keyboard;

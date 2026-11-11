@@ -1584,14 +1584,12 @@ int sched_clock_deterministic(void) { pace_setup(); return s_det_clock; }
  * period on it, and the host time at which the next VBLANK source event falls due, 0 when
  * VBLANKs are not paced to it or no VBLANK has been latched yet.
  *
- * The scheduler keeps no VBLANK deadline on a clock that a change of the paced clock's rate
- * cannot move: the source deadline is s_clock_epoch_ns plus s_vbl_next_us, and that sum is a
- * host time only while the paced clock runs at the host's rate. s_vbl_latch_ns is a reading of
- * the host clock itself at the last VBLANK latch (shifted only by a pause, which stops guest
- * time too), so one period after it bounds the deadline whatever the paced clock does. The
- * deadline is the earlier of the two: on a host-rate paced clock the source deadline is exact
- * and never later than that bound (a latch comes at or after its own deadline); on a paced
- * clock that runs ahead, the bound is at most one period after the last real VBLANK. */
+ * The source deadline, s_clock_epoch_ns plus s_vbl_next_us, is a time on the paced clock
+ * (pace_ns), which runs ahead of the host clock by every fast-forward span so far. It is moved
+ * to the host clock as the paced time left until it, converted at the current speed, from now:
+ * exact at any speed and after any fast forward. s_vbl_latch_ns is a reading of the host clock
+ * itself at the last VBLANK latch (shifted only by a pause, which stops guest time too), and
+ * one period after it caps the deadline, so no deadline is ever more than a period out. */
 uint64_t sched_host_now_ns(void) { return host_now_ns(); }
 uint64_t sched_vblank_period_ns(void) { return 16683333u; }   /* 1001/60 ms, 59.94 Hz */
 uint64_t sched_vblank_deadline_ns(void) {
@@ -1600,9 +1598,13 @@ uint64_t sched_vblank_deadline_ns(void) {
         s_vbl_next_us > (UINT64_MAX - s_clock_epoch_ns) / 1000u)
         return 0u;
     const uint64_t paced = s_clock_epoch_ns + s_vbl_next_us * 1000u;
+    const uint64_t host = host_now_ns();
+    const uint64_t pace_now = pace_ns_at(host);
+    const uint64_t left = paced > pace_now ? pace_to_host_ns(paced - pace_now) : 0u;
+    const uint64_t source = left > UINT64_MAX - host ? UINT64_MAX : host + left;
     const uint64_t period = sched_vblank_period_ns();
     const uint64_t bound = s_vbl_latch_ns > UINT64_MAX - period ? UINT64_MAX : s_vbl_latch_ns + period;
-    return paced < bound ? paced : bound;
+    return source < bound ? source : bound;
 }
 
 static uint64_t host_us(void) {

@@ -1834,17 +1834,22 @@ static atomic_uint s_enh_slow_rate;   /* updates in the last second while slowed
  * update is not held at all, so a scripted run keeps the timing it has with the part off. */
 static uint32_t s_pad_update_uid;   /* the thread that passed the boundary; 0: no update open */
 
-/* Whether a refresh could take live input now. ctrl_pulse_suppressed is the same evidence gate
+/* Whether a refresh could take live input now: a window a person is at (gui_interactive: not
+ * the offscreen sink or a headless presenter). ctrl_pulse_suppressed is the same evidence gate
  * the VBLANK sample runs on these buttons: false while the headless START pulse owns the pad. */
 static int pad_refresh_possible(void) {
     route_load_once();
-    return s_route_state == ROUTE_OFF && gui_on() && sr_replay_pad_live() && !sr_osk_overlay_active() &&
+    return s_route_state == ROUTE_OFF && gui_on() && gui_interactive() && sr_replay_pad_live() && !sr_osk_overlay_active() &&
            !sched_pause_pending() && ctrl_refresh_allowed() && ctrl_pulse_suppressed(gui_buttons());
 }
 
 static int pad_refresh_live(void) {
     if (!pad_refresh_possible()) return 0;
+    const uint64_t polled_before = gui_input_poll_ns();
     gui_pump();
+    /* Only a pump that polled the host input has anything to refresh with: the GDI window reads
+     * its keys when it presents, not here. */
+    if (gui_input_poll_ns() == polled_before) return 0;
     /* The pump can take a pause request (gui.c): the sample is then left as the VBLANK latched
      * it, as sr_ctrl_sample commits none at a pause request. Then every gate again on the
      * buttons the pump read. */
