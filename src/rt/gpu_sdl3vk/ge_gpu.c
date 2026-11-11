@@ -5286,9 +5286,12 @@ static void build_state(int persp, int sprite, Batch *b) {
 
     /* scissor: the GE state drives the rect; only clamp to the target image bounds
      * (512-wide render targets legitimately draw in columns 480..511 — the 480-pixel
-     * crop is a PRESENTATION property, not a rasterization limit) */
+     * crop is a PRESENTATION property, not a rasterization limit). A narrower stride bounds
+     * the rect too, as ge.c's raster_columns does: a column past it is not the target's
+     * (#2193), and the guest sync never copies it. */
+    const int last_col = g->fbw && g->fbw < (uint32_t)FB_W ? (int)g->fbw - 1 : FB_W - 1;
     int sx1 = g->scis_x1 > 0 ? g->scis_x1 : 0, sy1 = g->scis_y1 > 0 ? g->scis_y1 : 0;
-    int sx2 = g->scis_x2 < FB_W - 1 ? g->scis_x2 : FB_W - 1;
+    int sx2 = (int)g->scis_x2 < last_col ? (int)g->scis_x2 : last_col;
     int sy2 = g->scis_y2 < FB_H - 1 ? g->scis_y2 : FB_H - 1;
     if (sx1 > sx2 || sy1 > sy2) { b->sw = 0; return; }   /* nothing drawable */
     b->sx = sx1; b->sy = sy1; b->sw = sx2 - sx1 + 1; b->sh = sy2 - sy1 + 1;
