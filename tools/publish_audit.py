@@ -25,7 +25,7 @@ import tempfile
 import unicodedata
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from nk_core.git_isolation import isolated_git_env  # noqa: E402
+from nk_core.git_isolation import isolated_git_env as _isolated_git_env  # noqa: E402
 from publication_policy import (  # noqa: E402
     INCLUDED,
     Policy,
@@ -304,6 +304,24 @@ def parse_secret_scan_report(report_path: Path) -> list[Finding]:
 def parse_gitleaks_report(report_path: Path) -> list[Finding]:
     """Backward-compatible alias for integrations using the old function name."""
     return parse_secret_scan_report(report_path)
+
+
+def isolated_git_env(root: Path | None = None) -> dict[str, str]:
+    """The shared isolated Git environment, plus ``safe.bareRepository=explicit``.
+
+    A directory this tool audits can be shaped like a bare repository (``HEAD``, ``objects/``,
+    ``refs/``, ``config`` at its root): a committed tree is written out file by file, and a
+    candidate root is whatever the caller built. Git would discover such a directory as a
+    repository and read its ``config``, whose ``core.worktree`` and ``core.excludesFile`` change
+    what Git reports and whose ``core.fsmonitor`` names a command Git runs. With the setting, Git
+    uses a bare repository only when one is named explicitly, which this tool never does.
+    """
+    env = _isolated_git_env(root=root)
+    count = int(env.get("GIT_CONFIG_COUNT", "0"))
+    env[f"GIT_CONFIG_KEY_{count}"] = "safe.bareRepository"
+    env[f"GIT_CONFIG_VALUE_{count}"] = "explicit"
+    env["GIT_CONFIG_COUNT"] = str(count + 1)
+    return env
 
 
 def _git_output(cmd: list[str], repo_root: Path = ROOT) -> str:
@@ -661,6 +679,33 @@ def _get_filesystem_entries(repo_root: Path) -> list[GitEntry]:
                 kind = "lfs_pointer"
             entries.append(GitEntry(mode, "", "0", rel, kind, working_mode=mode))
     entries = _prune_gitignored_untracked(entries, repo_root)
+    return sorted(entries, key=lambda entry: entry.path.lower())
+
+
+def _committed_entries(audit_root: Path, tree_entries: list[tuple[str, str, str]]) -> list[GitEntry]:
+    """Describe a committed tree written out by `_materialize_committed_tree`, from the tree's own list.
+
+    The list is ``git ls-tree``'s, never a walk of ``audit_root``: a walk skips VCS metadata
+    directory names (``.hg``, ``.svn``) and honours ignore rules, and every entry of a commit is
+    content to audit. The directory must hold exactly those files and nothing else.
+    """
+    expected = {path for path, _mode, _object_id in tree_entries}
+    written: set[str] = set()
+    for directory, _dirnames, filenames in os.walk(audit_root, followlinks=False):
+        for name in filenames:
+            written.add((Path(directory) / name).relative_to(audit_root).as_posix())
+    if written != expected:
+        extra = sorted(written - expected)[:5]
+        missing = sorted(expected - written)[:5]
+        raise RuntimeError(f"written committed tree differs from git ls-tree: extra {extra}, missing {missing}")
+    entries: list[GitEntry] = []
+    for path, mode, _object_id in tree_entries:
+        kind = "executable" if mode == "100755" else "file"
+        raw_bytes, _ = read_candidate_file(GitEntry(mode, "", "0", path, kind, working_mode=mode), audit_root)
+        text_value = _decode_text_safe(raw_bytes)
+        if text_value and is_git_lfs_pointer(text_value):
+            kind = "lfs_pointer"
+        entries.append(GitEntry(mode, "", "0", path, kind, working_mode=mode))
     return sorted(entries, key=lambda entry: entry.path.lower())
 
 
@@ -3071,6 +3116,7 @@ def generate_manifest_report(
     secret_scan_report: Path | None = None,
     is_candidate_root: bool = False,
     content_source: str = CONTENT_INDEX,
+    git_commit: str | None = None,
 ) -> dict:
 
     content_source = _resolve_content_source(content_source, is_candidate_root)
@@ -3084,11 +3130,11 @@ def generate_manifest_report(
             content_source=content_source,
         )
 
-    git_commit = ""
-    try:
-        git_commit = _git_output(["rev-parse", "HEAD"], repo_root=repo_root).strip()
-    except Exception:
-        git_commit = "unknown"
+    if git_commit is None:
+        try:
+            git_commit = _git_output(["rev-parse", "HEAD"], repo_root=repo_root).strip()
+        except Exception:
+            git_commit = "unknown"
 
     canonical_entries = [asdict(s) for s in semantics]
     entry_json_canonical = json.dumps(canonical_entries, sort_keys=True)
@@ -3223,6 +3269,14 @@ def _committed_tree_entries(tree_sha: str, source_repo: Path) -> list[tuple[str,
     return entries
 
 
+def _commit_of(ref: str, source_repo: Path) -> str:
+    """The commit ``ref`` names, for the report; ``unknown`` for a bare tree id (also accepted)."""
+    try:
+        return _git_output(["rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"], source_repo).strip()
+    except RuntimeError:
+        return "unknown"
+
+
 def _materialize_committed_tree(ref: str, source_repo: Path) -> tuple[Path, str]:
     """Materialize a commit/tree into a disposable directory for exact-byte audit.
 
@@ -3248,14 +3302,16 @@ def _materialize_committed_tree(ref: str, source_repo: Path) -> tuple[Path, str]
                 raise RuntimeError(f"git cat-file did not return blob {object_id} for {path}")
             size = int(header[2])
             data = batch[newline + 1:newline + 1 + size]
-            position = newline + 1 + size + 1
-            if len(data) != size:
+            if len(data) != size or batch[newline + 1 + size:newline + 2 + size] != b"\n":
                 raise RuntimeError(f"truncated git cat-file payload for {path}")
+            position = newline + 1 + size + 1
             target = destination.joinpath(*path.split("/"))
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(data)
             if mode == "100755":
                 target.chmod(target.stat().st_mode | 0o111)
+        if position != len(batch):
+            raise RuntimeError("git cat-file returned more output than the tree's blobs")
     except BaseException:
         shutil.rmtree(destination, ignore_errors=True)
         raise
@@ -3420,9 +3476,13 @@ def main(argv: list[str] | None = None) -> int:
     audit_repo_root = args.repo_root.absolute() if args.repo_root else ROOT
     committed_audit_root: Path | None = None
     committed_tree_sha: str | None = None
+    committed_tree_list: list[tuple[str, str, str]] = []
+    committed_commit: str | None = None
     if args.committed_tree:
         try:
             committed_audit_root, committed_tree_sha = _materialize_committed_tree(args.committed_tree, audit_repo_root)
+            committed_tree_list = _committed_tree_entries(committed_tree_sha, audit_repo_root)
+            committed_commit = _commit_of(args.committed_tree, audit_repo_root)
         except (OSError, RuntimeError, subprocess.CalledProcessError) as error:
             print(f"publication audit failed: cannot materialize committed tree: {error}", file=sys.stderr)
             return 2
@@ -3447,11 +3507,12 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     try:
-        entries = (
-            _get_filesystem_entries(audit_root)
-            if args.candidate_root or args.committed_tree
-            else _get_git_entries(args.tracked_only, repo_root=audit_root, content_source=content_source)
-        )
+        if args.committed_tree:
+            entries = _committed_entries(audit_root, committed_tree_list)
+        elif args.candidate_root:
+            entries = _get_filesystem_entries(audit_root)
+        else:
+            entries = _get_git_entries(args.tracked_only, repo_root=audit_root, content_source=content_source)
     except (RuntimeError, UnicodeDecodeError) as error:
         print(f"publication audit failed: {error}", file=sys.stderr)
         return 2
@@ -3490,6 +3551,7 @@ def main(argv: list[str] | None = None) -> int:
         secret_scan_report=args.secret_scan_report,
         is_candidate_root=is_cand_root,
         content_source=content_source,
+        git_commit=committed_commit,
     )
 
     if args.manifest_out:

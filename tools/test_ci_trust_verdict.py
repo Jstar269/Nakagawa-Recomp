@@ -3148,6 +3148,11 @@ class GateCodeTests(unittest.TestCase):
         # pure Python over the package's JSON.
         ("tools/enhancement_package.py", "tools/analyze.py"),
         ("tools/enhancement_package.py", "tools/imports.py"),
+        # A subprocess of the public-export job that checks the export's SBOM against the generator's
+        # output. It does not decide whether a file may be published (publish_audit.py and
+        # history_audit.py do), and it loads the analyzer and code generator, about 30 modules that
+        # would all need the approval for every change.
+        ("tools/build_public_export.py", "tools/verify_sbom.py"),
     }
     @classmethod
     def setUpClass(cls) -> None:
@@ -3199,6 +3204,19 @@ class GateCodeTests(unittest.TestCase):
                 found.update(cls._resolve(node.module or "", node.level, file))
                 for alias in node.names:
                     found.update(cls._resolve(f"{node.module or ''}.{alias.name}".strip("."), node.level, file))
+        return found | cls._subprocess_tools(parsed)
+
+    @staticmethod
+    def _subprocess_tools(parsed: ast.AST) -> set[str]:
+        """tools/ scripts named as ``<root> / "tools" / "<name>.py"``, the form the gate tools run them by."""
+        found: set[str] = set()
+        for node in ast.walk(parsed):
+            if (isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div)
+                    and isinstance(node.right, ast.Constant) and isinstance(node.right.value, str)
+                    and node.right.value.endswith(".py")
+                    and isinstance(node.left, ast.BinOp) and isinstance(node.left.right, ast.Constant)
+                    and node.left.right.value == "tools" and (ROOT / "tools" / node.right.value).is_file()):
+                found.add(f"tools/{node.right.value}")
         return found
 
     def _closure(self) -> set[str]:
@@ -3218,8 +3236,31 @@ class GateCodeTests(unittest.TestCase):
         # The roots are real files, and the walk found the modules this change is about.
         self.assertLessEqual(set(self.roots), set(self.tree))
         for path in ("tools/publication_policy.py", "tools/provenance_ledger.py", "tools/public_export.py",
-                     "tools/nk_core/git_isolation.py", "tools/nk_core/__init__.py", "tools/enhancement_package.py"):
+                     "tools/nk_core/git_isolation.py", "tools/nk_core/__init__.py", "tools/enhancement_package.py",
+                     "tools/history_audit.py"):
             self.assertIn(path, closure)
+
+    def test_the_walk_follows_the_scripts_a_gate_runs(self) -> None:
+        # Failing-before (review 2387-22495ab5fee4 S2): only imports were followed, so a script the
+        # public-export job runs as a subprocess, such as history_audit.py, was outside the closure.
+        self.assertEqual(self._imports("tools/build_public_export.py") & {
+            "tools/publish_audit.py", "tools/history_audit.py", "tools/verify_sbom.py"},
+            {"tools/publish_audit.py", "tools/history_audit.py", "tools/verify_sbom.py"})
+
+    def test_a_new_tools_module_named_like_the_standard_library_is_protected(self) -> None:
+        # Failing-before (review 2387-22495ab5fee4 S3): an added tools/fnmatch.py replaced the fnmatch the
+        # audit imports, and no listed path changed.
+        for path in ("tools/fnmatch.py", "tools/json/__init__.py", "tools/tempfile.pyc",
+                     "tools/hashlib.cpython-315-x86_64-linux-gnu.so"):
+            with self.subTest(path=path):
+                protected = ctv.protected_paths({}, {path: "1"}, [])
+                self.assertEqual(ctv.protected_changes({}, {path: "1"}, {}, protected),
+                                 [{"path": path, "kind": "added"}])
+        for path in ("tools/fnmatch_rules.py", "tools/json/data.json", "tools/nk_core/json.py", "docs/json.py"):
+            with self.subTest(path=path):
+                self.assertNotIn(path, ctv.protected_paths({}, {path: "1"}, []))
+        # Nothing in the tree today is named so; the rule costs no approval for an existing file.
+        self.assertEqual(sorted(path for path in self.tree if ctv._shadows_stdlib(path)), [])
 
     def test_the_exemptions_are_real_edges_inside_functions(self) -> None:
         for source, target in sorted(self.NOT_LOADED_BY_A_GATE):
@@ -3230,6 +3271,7 @@ class GateCodeTests(unittest.TestCase):
                 top_level = [node for node in parsed.body if isinstance(node, (ast.Import, ast.ImportFrom))
                              and module in ([alias.name for alias in node.names] + [getattr(node, "module", "")])]
                 self.assertEqual(top_level, [], "an exempt import must not run when the module is loaded")
+                self.assertNotIn(target, self.protected, "an exempt edge to a protected file needs no exemption")
 
     def test_every_local_pre_commit_hook_is_protected(self) -> None:
         # The hooks are read from the configuration, so a new one is a root the day it is added.

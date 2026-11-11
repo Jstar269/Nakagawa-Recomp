@@ -2859,6 +2859,77 @@ class CommittedTreeMaterializationTests(unittest.TestCase):
             self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
             self.assertIn("cannot materialize committed tree", result.stderr)
 
+    def _audit(self, repo: Path) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, str(Path(publish_audit.__file__)), "--repo-root", str(repo),
+             "--committed-tree", "HEAD", "--public-scope"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", check=False,
+        )
+
+    def test_a_root_shaped_like_a_bare_repository_hides_nothing_and_runs_nothing(self) -> None:
+        # Failing-before (review 2387-22495ab5fee4 B1): with HEAD, objects/, refs/ and config at its
+        # root, the written tree was discovered as a bare repository; its config pointed core.worktree
+        # at itself, so its .gitignore removed EBOOT.PBP from the audit (exit 0), and its fsmonitor
+        # command ran.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._repo(tmp)
+            marker = Path(tmp).resolve().parent / f"fsmonitor-ran-{os.getpid()}"
+            self.addCleanup(lambda: marker.unlink(missing_ok=True))
+            (repo / "HEAD").write_bytes(b"ref: refs/heads/main\n")
+            (repo / "objects" / "info").mkdir(parents=True)
+            (repo / "objects" / "info" / "keep").write_bytes(b"")
+            (repo / "refs" / "heads").mkdir(parents=True)
+            (repo / "refs" / "heads" / "keep").write_bytes(b"")
+            (repo / "config").write_bytes(
+                b"[core]\n\trepositoryformatversion = 0\n\tbare = false\n\tworktree = .\n"
+                b"\tfsmonitor = \"echo ran > '" + marker.as_posix().encode("utf-8") + b"'; false\"\n")
+            (repo / ".gitignore").write_bytes(b"/EBOOT.PBP\n/HEAD\n/config\n/objects/\n/refs/\n/.gitignore\n")
+            (repo / ".gitattributes").write_bytes(b"")
+            run_git(["add", "-f", "."], cwd=repo, check=True, capture_output=True)
+            run_git(["commit", "-q", "-m", "bare-shaped root"], cwd=repo, check=True, capture_output=True)
+            result = self._audit(repo)
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn("MAGIC: EBOOT.PBP: PSP PBP", result.stdout + result.stderr)
+            self.assertFalse(marker.exists(), "the candidate's core.fsmonitor command ran")
+
+    def test_vcs_metadata_directory_names_hide_nothing(self) -> None:
+        # Failing-before (review 2387-22495ab5fee4 B2): the walk pruned every directory named .hg or
+        # .svn, so files under them were never audited (exit 0).
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._repo(tmp)
+            (repo / ".gitattributes").write_bytes(b"")
+            (repo / ".hg").mkdir()
+            (repo / ".hg" / "GAME.PBP").write_bytes(self.PBP)
+            (repo / "docs" / ".svn").mkdir(parents=True)
+            (repo / "docs" / ".svn" / "KEY.PBP").write_bytes(self.PBP)
+            run_git(["add", "-A", "."], cwd=repo, check=True, capture_output=True)
+            run_git(["commit", "-q", "-m", "vcs names"], cwd=repo, check=True, capture_output=True)
+            result = self._audit(repo)
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn("MAGIC: .hg/GAME.PBP: PSP PBP", result.stdout + result.stderr)
+            self.assertIn("MAGIC: docs/.svn/KEY.PBP: PSP PBP", result.stdout + result.stderr)
+
+    def test_the_audit_lists_exactly_the_trees_files(self) -> None:
+        import shutil  # noqa: PLC0415
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._repo(tmp)
+            materialized, tree = publish_audit._materialize_committed_tree("HEAD", repo)
+            self.addCleanup(shutil.rmtree, materialized, True)
+            listed = publish_audit._committed_tree_entries(tree, repo)
+            entries = publish_audit._committed_entries(materialized, listed)
+            self.assertEqual(sorted(entry.path for entry in entries), sorted(path for path, _m, _o in listed))
+            self.assertEqual({entry.path: entry.mode for entry in entries}["run.sh"], "100755")
+            (materialized / "extra.txt").write_bytes(b"x")
+            with self.assertRaisesRegex(RuntimeError, "differs from git ls-tree: extra \\['extra.txt'\\]"):
+                publish_audit._committed_entries(materialized, listed)
+
+    def test_git_never_discovers_a_bare_repository_implicitly(self) -> None:
+        env = publish_audit.isolated_git_env()
+        count = int(env["GIT_CONFIG_COUNT"])
+        settings = {env[f"GIT_CONFIG_KEY_{i}"]: env[f"GIT_CONFIG_VALUE_{i}"] for i in range(count)}
+        self.assertEqual(settings.get("safe.bareRepository"), "explicit")
+
 
 class TrustedTreeAuditTests(unittest.TestCase):
     """The attest job's publication audit of a candidate's whole tree, run for real.
@@ -2910,8 +2981,8 @@ class TrustedTreeAuditTests(unittest.TestCase):
         repo = Path(scratch.name) / "repo"
         repo.mkdir()
         run_git(["init", "-q"], cwd=repo, check=True, capture_output=True)
-        (repo / ".git" / "objects" / "info" / "alternates").write_text(
-            Path(objects).as_posix() + "\n", encoding="utf-8")
+        (repo / ".git" / "objects" / "info" / "alternates").write_bytes(
+            (Path(objects).as_posix() + "\n").encode("utf-8"))
 
         def git(*args: str, data: bytes | None = None, index: str = "probe-index") -> str:
             env = isolated_git_env(root=repo) | {

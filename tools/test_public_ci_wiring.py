@@ -2948,7 +2948,17 @@ class TrustedAttestationRouteTests(unittest.TestCase):
                       '            --repo-root "${GITHUB_WORKSPACE}" \\\n'
                       '            --committed-tree "${HEAD_SHA}" \\\n'
                       '            --policy "${RUNNER_TEMP}/tree-audit/public_source_profile.json" \\\n'
-                      '            --public-scope --provenance-self-consistency\n', step)
+                      '            --public-scope --provenance-self-consistency \\\n'
+                      '            | tee "${RUNNER_TEMP}/tree-audit/report.txt"\n'
+                      '          touch "${RUNNER_TEMP}/tree-audit/passed"\n', step)
+        # The head is re-checked here, so a reordered step cannot pass an unchecked value to Git.
+        self.assertIn('          if [[ ! "${HEAD_SHA}" =~ ^[0-9a-f]{40}$ ]]; then\n', step)
+        # A failed tree audit is named in the summary, after the verdict, without its findings.
+        explain = _matched(re.search(
+            r"(?m)^      - name: Explain the verdict in plain words\n((?:(?:        .*)?\n)+)", self.attest)).group(1)
+        self.assertIn("&& [ ! -e \"${RUNNER_TEMP}/tree-audit/passed\" ]; then\n", explain)
+        self.assertIn("### Trusted publication audit: FAIL", explain)
+        self.assertNotIn("report.txt", explain)
         # Its exit code decides the job, it runs only after the verifier passed, and it holds no secret.
         for tolerant in ("|| true", "continue-on-error", "if:", "secrets.", "GH_TOKEN", "GITHUB_TOKEN"):
             self.assertNotIn(tolerant, step)
