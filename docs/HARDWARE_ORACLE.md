@@ -1211,8 +1211,13 @@ One console is one data point; see §11. Nothing here closes issue #70
   destination pattern; the base state turns every per-fragment unit off and draws a 16x4 generated texture 1:1
   with REPLACE/RGBA, so a sprite's source colour is the texel. The table and list builder are one block that
   `tests/native/hle_thread_selftest.c` carries byte for byte; `test_ge_raster_cells_match_psp` runs every cell through
-  the software GE and compares its window digest with the PSP's. What the cells establish, for these exact
-  states only (issue #343):
+  the software GE and compares its window digest with the PSP's. The same test then switches three
+  deliberately wrong raster rules into `src/rt/ge.c` (`ge_test_set_raster_mutant`) and requires each to
+  fail its named cells. A bottom-right fill rule fails `e-tri1`, `e-tri3` and `e-tri5`. A vertex snap of
+  +0.5 instead of +0.375 sixteenths fails `e-tri3`. A dither matrix read at (x + 1, y + 1) fails the seven
+  dithered cells (`dth-*`, `clr-ca-dth565`, `clr-ca-dth8888`). Depth rounding is not pinned: every cell's
+  depth is an integer and the window holds colour only, so rounding depth to nearest instead of
+  truncating passes all 189 cells. What the cells establish, for these exact states only (issue #343):
   - *Blending.* Each colour-times-factor product is floor((2v + 1)(2|f| + 1) / 1024) with the factor's sign
     applied afterwards, computed separately for source and destination before the equation, then clamped to
     0..255. The doubled alphas are not clamped: 2a runs to 510 and 255 - 2a goes negative. Equations 3, 4 and 5

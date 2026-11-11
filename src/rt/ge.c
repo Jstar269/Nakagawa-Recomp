@@ -1184,6 +1184,17 @@ static int ztest_compare_px(int x, int y, uint16_t z) {
     return pass;
 }
 
+/* Test-only (hle_thread_selftest): deliberately wrong raster rules, so the PSP-GE-RASTER-001
+ * cells are shown to catch each of them (#343). 0 is the measured rule set. */
+enum {
+    GE_RASTER_MUTANT_NONE = 0,
+    GE_RASTER_MUTANT_FILL_BOTTOM_RIGHT = 1, /* keep E == 0 pixels on bottom and right edges */
+    GE_RASTER_MUTANT_SNAP_HALF = 2,         /* snap vertices to 28.4 with +0.5, not +0.375 */
+    GE_RASTER_MUTANT_DITHER_SHIFTED = 3,    /* read the dither matrix at (x + 1, y + 1) */
+};
+static int s_raster_mutant;
+void ge_test_set_raster_mutant(int mutant) { s_raster_mutant = mutant; }
+
 /* Clamp interpolated depth to the 16-bit range. minz/maxz are NOT a clamp: the PSP
  * depth-range test DISCARDS transform-mode pixels outside [minz,maxz] (see zrange_ok). */
 static uint16_t clamp_z(float zf) {
@@ -2859,7 +2870,9 @@ static void compose_px_rgba(int x, int y, int r, int g, int b, int src_a, int st
     }
     /* Dither precedes clamping and logic, and applies in clear mode and RGBA8888 too. */
     if (ge.dither_enable) {
-        int d=ge.dith[y&3][x&3]; r=clamp8(r+d); g=clamp8(g+d); b=clamp8(b+d);
+        const int dx = s_raster_mutant == GE_RASTER_MUTANT_DITHER_SHIFTED ? x + 1 : x;
+        const int dy = s_raster_mutant == GE_RASTER_MUTANT_DITHER_SHIFTED ? y + 1 : y;
+        int d=ge.dith[dy&3][dx&3]; r=clamp8(r+d); g=clamp8(g+d); b=clamp8(b+d);
     }
     uint32_t rgba=pack8888(clamp8(r),clamp8(g),clamp8(b),clamp8(stencil));
     if (ge.logic_op_enable && !ge.clear)
@@ -3485,9 +3498,10 @@ static void raster_tri(const Vtx *A, const Vtx *B, const Vtx *C, int persp) {
      * meshes both dropped pixels (cracks -> models dissolve into noise) and double-drew them
      * (blended seams). Integer edges give each edge pixel to exactly one triangle. */
     /* Hardware rounding: (int)(x*16 + 0.375) per PPSSPP ClipToScreenInternal. */
-    long long ax=(long long)floorf(A->x*16.0f+0.375f), ay=(long long)floorf(A->y*16.0f+0.375f);
-    long long bx=(long long)floorf(B->x*16.0f+0.375f), by=(long long)floorf(B->y*16.0f+0.375f);
-    long long cxx=(long long)floorf(C->x*16.0f+0.375f), cyy=(long long)floorf(C->y*16.0f+0.375f);
+    const float snap = s_raster_mutant == GE_RASTER_MUTANT_SNAP_HALF ? 0.5f : 0.375f;
+    long long ax=(long long)floorf(A->x*16.0f+snap), ay=(long long)floorf(A->y*16.0f+snap);
+    long long bx=(long long)floorf(B->x*16.0f+snap), by=(long long)floorf(B->y*16.0f+snap);
+    long long cxx=(long long)floorf(C->x*16.0f+snap), cyy=(long long)floorf(C->y*16.0f+snap);
     long long area2 = (bx-ax)*(cyy-ay) - (cxx-ax)*(by-ay);
     if (area2 == 0) { if (persp) s_stat.deg3d++; return; }
     const Vtx *VA=A, *VB=B, *VC=C;
@@ -3524,6 +3538,11 @@ static void raster_tri(const Vtx *A, const Vtx *B, const Vtx *C, int persp) {
     long long bias0 = (dy0 < 0 || (dy0 == 0 && dx0 > 0)) ? 0 : -1;
     long long bias1 = (dy1 < 0 || (dy1 == 0 && dx1 > 0)) ? 0 : -1;
     long long bias2 = (dy2 < 0 || (dy2 == 0 && dx2 > 0)) ? 0 : -1;
+    if (s_raster_mutant == GE_RASTER_MUTANT_FILL_BOTTOM_RIGHT) {
+        bias0 = (dy0 > 0 || (dy0 == 0 && dx0 < 0)) ? 0 : -1;
+        bias1 = (dy1 > 0 || (dy1 == 0 && dx1 < 0)) ? 0 : -1;
+        bias2 = (dy2 > 0 || (dy2 == 0 && dx2 < 0)) ? 0 : -1;
+    }
     /* raster_tri_lod_span: the level of detail of a triangle (#1373), measured on a PSP-3000
      * (PSP-GE-MIP-001: a-quad-w1to4, s-s1-w1to8 and the varying-w confirmation cells; the
      * largest of all four components, not u along x and v along y only: a-quad-v16-w1to8,
