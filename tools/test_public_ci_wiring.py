@@ -3339,10 +3339,11 @@ class AptInstallHelperTests(unittest.TestCase):
         self.assertEqual(log, [])
 
     # Each way to switch off or bypass apt's signature check, on the command line, in an apt
-    # configuration item or in a sources entry ("[trusted=yes]", deb822 "Trusted: yes").
+    # configuration item or in a sources entry. apt reads `trusted` as a boolean (yes, true,
+    # 1, on), so any value is refused, as is force-yes in either spelling.
     _APT_TRUST_WEAKENERS = re.compile(
         r"--allow-unauthenticated|--allow-insecure-repositories|--allow-downgrade-to-insecure-repositories"
-        r"|--force-yes|\btrusted\s*[=:]\s*yes\b|AllowInsecure|AllowDowngradeToInsecure|AllowUnauthenticated",
+        r"|force-yes|\btrusted\s*[=:]|AllowInsecure|AllowDowngradeToInsecure|AllowUnauthenticated",
         re.IGNORECASE)
 
     def test_no_workflow_weakens_apt_signature_checks(self) -> None:
@@ -3350,6 +3351,8 @@ class AptInstallHelperTests(unittest.TestCase):
         for sample in ("apt-get install --allow-unauthenticated x", "apt-get update --allow-insecure-repositories",
                        "--allow-downgrade-to-insecure-repositories", "apt-get --force-yes install x",
                        "deb [trusted=yes] http://m/ubuntu noble main", "Trusted: yes",
+                       "deb [ trusted=1 ] http://m/ubuntu noble main", "deb [arch=amd64 trusted=true] http://m/ x",
+                       "Trusted: on", "-o APT::Get::force-yes=true",
                        'Acquire::AllowInsecureRepositories "true";', "-o APT::Get::AllowUnauthenticated=true",
                        'Acquire::AllowDowngradeToInsecureRepositories "1";'):
             with self.subTest(sample=sample):

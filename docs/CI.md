@@ -468,9 +468,10 @@ image carries the package.
 
 `tools/test_public_ci_wiring.py` (`AptInstallHelperTests`) runs the helper against stubs. It
 fails if a step calls `apt-get` itself, if the helper drops a source's `Signed-By`, or if
-any workflow passes an option or source setting that weakens apt's signature check
-(`--allow-unauthenticated`, `--allow-insecure-repositories`, `trusted=yes`,
-`AllowInsecure*` and the like).
+any workflow switches apt's signature check off: `--allow-unauthenticated`,
+`--allow-insecure-repositories`, `--allow-downgrade-to-insecure-repositories`, `force-yes`
+as a flag or setting, a `trusted` source option with any value, or an `AllowInsecure*`,
+`AllowDowngradeToInsecure*` or `AllowUnauthenticated` setting.
 
 ### Android launcher build
 
