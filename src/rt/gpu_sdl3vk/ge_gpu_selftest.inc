@@ -10847,11 +10847,13 @@ static int coherence_run_rtt_edge(void) {
  * target's span. C (8888, stride 512, at 0x100000) is drawn magenta; T (at 0x060000) then fills its
  * depth buffer, which lies at 0x140000, inside C's span (C's row 128), with a clear, and two sprites
  * on T read 64 x 32 texels of it in C's own format and buffer width, through the depth buffer's
- * address and through the 0x04200000 VRAM mirror (the PSP's linear depth view, PSP-VRAM-MIRROR-001). Each read passes
- * the direct-bind rules, and before depth aliasing was detected it bound C's image: magenta. The
- * depth buffer was written after C was drawn, so the read is a depth read: it commits the depth to
- * guest VRAM and decodes it there at 1x, the software renderer's picture. Then C is drawn green over the rows those reads
- * took, and a third read of the same address is a colour read: C changed after the depth was
+ * address and through the 0x04200000 VRAM mirror (the PSP's linear depth view,
+ * PSP-VRAM-MIRROR-001). The GE texture path drops the mirror bits (vram_off), so the second read
+ * proves that a mirror address is still found to alias the depth buffer, not that the view's bytes
+ * are linear. Each read passes the direct-bind rules, and before depth aliasing was detected it
+ * bound C's image: magenta. The depth buffer was written after C was drawn, so the read is a depth
+ * read: it commits the depth to guest VRAM and decodes it there at 1x, the software renderer's
+ * picture. Then C is drawn green over the rows those reads took, and a third read of the same address is a colour read: C changed after the depth was
  * written, so it binds C's image directly, as the software renderer reads C's green from VRAM (a
  * title that leaves its depth address on a colour buffer it draws). Nearest and 1:1, so guest
  * VRAM equals the software renderer's exactly at any scale. */
