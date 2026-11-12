@@ -4841,7 +4841,10 @@ static int tex_repl_find(const TexEnt *e, NkTexReplHit *hit, int *factor) {
  * only, like texture scaling: an authentic run names the request and obeys nothing. Replacement
  * changes the committed frame, so it is guest-visible (docs/ENHANCEMENT_CONTRACT.md, section 11.3
  * "Texture Replacement") and says so at start until its launch-line keys exist. A pack that cannot
- * be read, or whose textures.ini is malformed, is refused whole and the run goes on unreplaced. */
+ * be read (gone, unreadable, not a regular file), or whose textures.ini or ZIP is malformed, is
+ * refused whole: one TEX_REPLACE: refused line names why (the pack by its last path component only)
+ * and the run goes on unreplaced, never waiting on the pack. An image that cannot be used later is
+ * skipped on its own, noted, and counted in the exit line's skipped=. */
 static void tex_repl_init(int enhanced) {
     s_repl = NULL;
     const char *dir = getenv("SR_TEX_REPLACE");
@@ -4856,7 +4859,8 @@ static void tex_repl_init(int enhanced) {
         char *end = NULL;
         const unsigned long v = strtoul(mb, &end, 10);
         if (!end || *end || mb[0] < '0' || mb[0] > '9' || v < 1ul || v > 8192ul) {
-            fprintf(stderr, "TEX_REPLACE: refused (SR_TEX_REPLACE_BUDGET_MB takes 1 to 8192)\n");
+            fprintf(stderr, "TEX_REPLACE: refused (SR_TEX_REPLACE_BUDGET_MB takes 1 to 8192); "
+                            "the game runs without the pack\n");
             return;
         }
         budget = (uint64_t)v << 20;
@@ -4864,7 +4868,7 @@ static void tex_repl_init(int enhanced) {
     char err[200];
     s_repl = nk_texrepl_open(dir, budget, err, sizeof(err));
     if (!s_repl) {
-        fprintf(stderr, "TEX_REPLACE: refused (%s)\n", err);
+        fprintf(stderr, "TEX_REPLACE: refused (%s); the game runs without the pack\n", err);
         return;
     }
     /* The copies' VRAM is the scaled-copy budget, which a refused SR_TEX_SCALE setting leaves at 0. */
@@ -4890,12 +4894,12 @@ static void tex_repl_shutdown(void) {
     NkTexReplStats st;
     nk_texrepl_stats(s_repl, &st);
     fprintf(stderr, "TEX_REPLACE: exit (lookups=%llu, hits=%llu, misses=%llu, left_alone=%llu, "
-                    "queued=%llu, bound_draws=%llu, loaded=%llu, load_failed=%llu, over_budget=%llu, "
+                    "queued=%llu, bound_draws=%llu, loaded=%llu, load_failed=%llu, skipped=%llu, over_budget=%llu, "
                     "evicted=%llu, bad_factor=%llu, cache_peak_mb=%llu, decode_ms=%llu)\n",
             (unsigned long long)st.lookups, (unsigned long long)st.hits, (unsigned long long)st.misses,
             (unsigned long long)st.left_alone, (unsigned long long)s_cnt_repl_queued,
             (unsigned long long)s_cnt_repl_bound, (unsigned long long)st.loaded,
-            (unsigned long long)st.load_failed, (unsigned long long)st.over_budget,
+            (unsigned long long)st.load_failed, (unsigned long long)st.skipped, (unsigned long long)st.over_budget,
             (unsigned long long)st.evicted, (unsigned long long)st.bad_factor,
             (unsigned long long)(st.cache_peak >> 20), (unsigned long long)(st.decode_ns / 1000000ull));
     nk_texrepl_close(s_repl);
