@@ -191,6 +191,8 @@ static void gpu_dirty_reset(void) {
  * probe exported by hle.c. */
 extern uint32_t sr_hle_test_io_open(CpuState *s);
 extern uint32_t sr_hle_test_io_read(CpuState *s);
+extern uint32_t hle_io_umd_read_us(uint64_t bytes);   /* the UMD drive's read time (hle_io.c) */
+extern int sr_hle_test_io_disc_fetches_in_flight(void);
 extern uint32_t sr_hle_test_io_write(CpuState *s);
 extern uint32_t sr_hle_test_io_lseek(CpuState *s);
 extern uint32_t sr_hle_test_io_lseek32(CpuState *s);
@@ -781,6 +783,7 @@ int sr_perf_enabled;
  * a "the counters are live" predicate before handing it to a stub, so a constant 0 would
  * silently disable the media-telemetry call sites this harness has to observe. */
 uint64_t sr_perf_now_ns_impl(void) { static uint64_t t = 1000; t += 1000; return t; }
+void sr_perf_exclude_thread(void) {}
 void sr_perf_guest_begin(void) {}
 void sr_perf_guest_end(void) {}
 void sr_perf_guest_idle_wait(uint64_t started_ns) { (void)started_ns; }
@@ -917,6 +920,14 @@ int iso_lookup(const char *guest_path, uint32_t *out_lba, uint32_t *out_size) {
  * the ISO 9660 primary volume descriptor header at the start of sector 16 and every other byte
  * a function of its sector and offset, so a read from the wrong sector is visible. */
 enum { UMD_SYNTHETIC_SECTORS = 64u };
+/* The disc's size in sectors: 64 except while a test that reads more sets it. */
+static uint32_t s_umd_synthetic_sectors = UMD_SYNTHETIC_SECTORS;
+/* A host read that blocks, for the host-worker cell: while the gate is closed (1) a read of the
+ * synthetic disc waits for it to open (2), for 3 s of host time at most, and counts a wait that
+ * ran out. 0 = no gate. */
+static atomic_int s_umd_synthetic_gate;
+static atomic_int s_umd_synthetic_gate_timeouts;
+static atomic_uint s_umd_synthetic_reads;   /* reads of the synthetic disc */
 
 static uint8_t umd_synthetic_byte(uint64_t position) {
     static const uint8_t pvd[8] = {0x01u, 'C', 'D', '0', '0', '1', 0x01u, 0x00u};
@@ -927,14 +938,23 @@ static uint8_t umd_synthetic_byte(uint64_t position) {
 
 int iso_sector_count(uint32_t *out_sectors) {
     if (!s_umd_io_synthetic_enabled || !out_sectors) return -1;
-    *out_sectors = UMD_SYNTHETIC_SECTORS;
+    *out_sectors = s_umd_synthetic_sectors;
     return 0;
 }
 
 int iso_read(uint32_t lba, uint32_t offset, void *dst, uint32_t bytes) {
     if (s_umd_io_synthetic_enabled && dst) {
+        atomic_fetch_add(&s_umd_synthetic_reads, 1u);
+        if (atomic_load(&s_umd_synthetic_gate) == 1) {
+            int waited_ms = 0;
+            while (atomic_load(&s_umd_synthetic_gate) == 1 && waited_ms++ < 3000) SDL_Delay(1);
+            if (atomic_load(&s_umd_synthetic_gate) == 1) {
+                atomic_fetch_add(&s_umd_synthetic_gate_timeouts, 1);
+                atomic_store(&s_umd_synthetic_gate, 2);
+            }
+        }
         const uint64_t start = (uint64_t)lba * 2048u + offset;
-        const uint64_t end = (uint64_t)UMD_SYNTHETIC_SECTORS * 2048u;
+        const uint64_t end = (uint64_t)s_umd_synthetic_sectors * 2048u;
         if (start >= end) return 0;
         uint32_t n = end - start < bytes ? (uint32_t)(end - start) : bytes;
         for (uint32_t i = 0; i < n; i++) ((uint8_t *)dst)[i] = umd_synthetic_byte(start + i);
@@ -16225,6 +16245,43 @@ static void test_route_observer_waits_for_guest_scanout_state(void) {
            "and the full visible extent");
 }
 
+/* The route observer and the FBSNAP snapshot decode the scanout through fb_decode_px. A
+ * 32-bit load of 0x04084000 is answered with the GE status word (sr_get_ge_status, 0x18
+ * when idle), so a decoder that read 8888 pixels through MEM_R32 replaced the pixel stored
+ * there: (0,264) of the usual stride-512 framebuffer at 0x04000000, in every FBSNAP
+ * snapshot of tools/test_player_package_route.py's sealed-disc launch (#308). Here the
+ * framebuffer sits at 0x0400D000, so the default 12x8 grid's sample (0,238) of cell (0,7)
+ * is the word at 0x04084000, and every cell must average to the one colour stored. */
+static void test_route_sample_reads_vram_not_the_ge_status_port(void) {
+    static const uint32_t NID_DISPLAY_SET_FRAME_BUF = 0x289d82feu;
+    static const uint32_t FB = 0x0400D000u;
+    static const uint32_t COLOUR = 0xFF604020u;   /* ABGR: R=0x20 G=0x40 B=0x60 */
+    uint8_t sig[4096];
+    CpuState cpu;
+
+    reset_fixture();
+    sr_hle_init();
+    memset(&cpu, 0, sizeof(cpu));
+    expect(FB + (238u * 512u) * 4u == 0x04084000u,
+           "fixture: cell (0,7)'s first sample is the word at the GE status port");
+    for (uint32_t i = 0; i < 512u * 272u; i++) sr_w32(FB + i * 4u, COLOUR);
+    expect(sr_r8(0x04084000u) == 0x20u && sr_r8(0x04084001u) == 0x40u,
+           "fixture: guest VRAM at 0x04084000 holds the stored pixel");
+    cpu.r[4] = FB; cpu.r[5] = 512; cpu.r[6] = 3; cpu.r[7] = 0;
+    expect(sr_syscall(&cpu, NID_DISPLAY_SET_FRAME_BUF) == 0u,
+           "an immediate SetFrameBuf at 0x0400D000 is accepted");
+    expect(sr_route_test_sample(sig) == 1, "the observer samples the guest's scanout");
+    int cells = sr_route_sig_bytes() / 3;
+    int wrong = -1;
+    for (int k = 0; k < cells && wrong < 0; k++)
+        if (sig[k * 3] != 0x20u || sig[k * 3 + 1] != 0x40u || sig[k * 3 + 2] != 0x60u) wrong = k;
+    if (wrong >= 0)
+        fprintf(stderr, "  cell %d sampled %02x %02x %02x, stored 20 40 60\n", wrong,
+                sig[wrong * 3], sig[wrong * 3 + 1], sig[wrong * 3 + 2]);
+    expect(wrong < 0,
+           "every sampled cell is the stored colour; the GE status word replaced no pixel");
+}
+
 /* ---- extracted-data census preparation seam ---------------------------------
  *
  * The cold extracted-data index census must never begin from a guest HLE call.
@@ -28182,14 +28239,20 @@ static const struct {
     {"fog-k1-c", 0x75e634dc776d8575ull},
 };
 
-/* Every PSP-GE-RASTER-001 cell through production dispatch and the software GE, with the
- * probe's own list, vertices, textures and destination pattern; the window must match the
- * PSP's digest. A diverging cell prints its software window for comparison with the raw
- * hardware rows. */
-static void test_ge_raster_cells_match_psp(void) {
+void ge_test_set_raster_mutant(int mutant);
+
+/* Every PSP-GE-RASTER-001 cell through production dispatch and the software GE under raster
+ * rule set `mutant` (0 the measured rules, ge.c ge_test_set_raster_mutant), with the probe's own
+ * list, vertices, textures and destination pattern. diverged[k] says whether cell k's window
+ * differs from the PSP's digest; returns how many do. Under the measured rules a diverging cell
+ * prints its software window for comparison with the raw hardware rows. */
+static unsigned gr_run_cells(int mutant, unsigned char diverged[GR_CELL_COUNT], unsigned *names_ok,
+                             unsigned *synced)
+{
     CpuState cpu;
     reset_fixture();
     sr_hle_init();
+    ge_test_set_raster_mutant(mutant);
     const uint32_t list = 0x08900000u, vtx = 0x08904000u, clut = 0x08918000u;
     const uint32_t fb = 0x04000000u + GR_FB_OFFSET;
     uint32_t tex[GR_T_COUNT];
@@ -28198,7 +28261,9 @@ static void test_ge_raster_cells_match_psp(void) {
         (void)gr_texture(t, (uint8_t *)SR_HOST(tex[t]));
     }
     gr_clut((uint8_t *)SR_HOST(clut));
-    unsigned diverged = 0, names_ok = 1, synced = 1;
+    unsigned count = 0;
+    *names_ok = 1;
+    *synced = 1;
     for (uint32_t k = 0; k < GR_CELL_COUNT; k++) {
         const struct gr_cell *c = &gr_cells[k];
         uint32_t px[GR_N];
@@ -28216,25 +28281,75 @@ static void test_ge_raster_cells_match_psp(void) {
         memset(&cpu, 0, sizeof(cpu));
         cpu.r[4] = qid;
         if ((qid & 0xFF000000u) != 0x35000000u || sr_syscall(&cpu, NID_SCE_GE_LIST_SYNC) != 0u)
-            synced = 0;
+            *synced = 0;
         for (uint32_t i = 0; i < GR_N; i++) {
             const uint32_t at = (GR_WY + i / GR_WW) * GR_STRIDE + GR_WX + i % GR_WW;
             px[i] = c->psm == 3u ? MEM_R32(fb + at * 4u) : (uint32_t)MEM_R16(fb + at * 2u);
         }
-        if (strcmp(s_gr_psp[k].name, c->name) != 0) names_ok = 0;
+        if (strcmp(s_gr_psp[k].name, c->name) != 0) *names_ok = 0;
         const uint64_t digest = gr_digest(px);
-        if (digest != s_gr_psp[k].psp) {
-            diverged++;
-            fprintf(stderr, "GE-RASTER %s software=0x%016llx psp=0x%016llx", c->name,
-                    (unsigned long long)digest, (unsigned long long)s_gr_psp[k].psp);
-            for (uint32_t i = 0; i < GR_N; i++)
-                fprintf(stderr, "%s%08x", i % GR_WW ? " " : "\n  ", (unsigned)px[i]);
-            fprintf(stderr, "\n");
-        }
+        diverged[k] = digest != s_gr_psp[k].psp;
+        if (!diverged[k]) continue;
+        count++;
+        if (mutant != 0) continue;
+        fprintf(stderr, "GE-RASTER %s software=0x%016llx psp=0x%016llx", c->name,
+                (unsigned long long)digest, (unsigned long long)s_gr_psp[k].psp);
+        for (uint32_t i = 0; i < GR_N; i++)
+            fprintf(stderr, "%s%08x", i % GR_WW ? " " : "\n  ", (unsigned)px[i]);
+        fprintf(stderr, "\n");
     }
+    ge_test_set_raster_mutant(0);
+    return count;
+}
+
+/* Each deliberately wrong raster rule of ge.c and exactly the PSP-GE-RASTER-001 cells it fails.
+ * Depth rounding has no mutant here: every depth a cell draws or clears is an integer, so
+ * rounding to nearest instead of truncating passes all 189 cells (docs/HARDWARE_ORACLE.md). */
+#define GR_MUTANT_CELLS 8
+static const struct {
+    int mutant;
+    const char *rule;
+    const char *cells[GR_MUTANT_CELLS];
+} s_gr_mutants[] = {
+    {1, "top-left fill rule replaced by bottom-right", {"e-tri1", "e-tri3", "e-tri5", NULL}},
+    {2, "vertex snap bias +0.5 instead of +0.375", {"e-tri3", NULL}},
+    {3, "dither matrix read at (x + 1, y + 1)",
+     {"dth-565", "dth-5551", "dth-4444", "dth-8888", "dth-565-b", "clr-ca-dth565",
+      "clr-ca-dth8888", NULL}},
+};
+
+/* Every PSP-GE-RASTER-001 cell matches the PSP's window digest under the measured rules, and
+ * each wrong rule above fails its named cells, so the PSP data, not agreement with the software
+ * GE's own past output, pins those rules (#343). */
+static void test_ge_raster_cells_match_psp(void) {
+    unsigned char diverged[GR_CELL_COUNT];
+    unsigned names_ok = 0, synced = 0;
+    const unsigned count = gr_run_cells(0, diverged, &names_ok, &synced);
     expect(names_ok, "PSP-GE-RASTER-001 digest table rows name the cells in table order");
     expect(synced, "every PSP-GE-RASTER-001 list is accepted and completes");
-    expect(diverged == 0, "every PSP-GE-RASTER-001 cell matches the PSP window digest");
+    expect(count == 0, "every PSP-GE-RASTER-001 cell matches the PSP window digest");
+    for (size_t m = 0; m < sizeof(s_gr_mutants) / sizeof(s_gr_mutants[0]); m++) {
+        unsigned mnames = 0, msynced = 0;
+        const unsigned wrong = gr_run_cells(s_gr_mutants[m].mutant, diverged, &mnames, &msynced);
+        fprintf(stderr, "GE-RASTER mutant %d (%s): %u of %u cells differ from the PSP:",
+                s_gr_mutants[m].mutant, s_gr_mutants[m].rule, wrong, (unsigned)GR_CELL_COUNT);
+        for (uint32_t k = 0; k < GR_CELL_COUNT; k++)
+            if (diverged[k]) fprintf(stderr, " %s", gr_cells[k].name);
+        fprintf(stderr, "\n");
+        unsigned named = 0, caught = 0;
+        for (size_t n = 0; n < GR_MUTANT_CELLS && s_gr_mutants[m].cells[n] != NULL; n++) {
+            named++;
+            unsigned hit = 0;
+            for (uint32_t k = 0; k < GR_CELL_COUNT; k++)
+                if (strcmp(gr_cells[k].name, s_gr_mutants[m].cells[n]) == 0 && diverged[k]) hit = 1;
+            if (!hit)
+                fprintf(stderr, "GE-RASTER mutant %d: named cell %s matches the PSP\n",
+                        s_gr_mutants[m].mutant, s_gr_mutants[m].cells[n]);
+            caught += hit;
+        }
+        expect(msynced && named > 0 && caught == named && wrong == named,
+               "each wrong PSP-GE-RASTER-001 raster rule fails exactly its named PSP cells");
+    }
 }
 
 static void test_ge_guest_sentinel(void) {
@@ -29184,6 +29299,324 @@ static void test_savedata_thread_ended_inside_a_parked_save(void) {
     atomic_store_explicit(&sr_preempt_due, 0, memory_order_relaxed);
     sr_hle_test_osk_slot_reset();
     sr_test_guest_fn_reset();
+    hle_test_setenv("SR_MEMSTICK", save_ms);
+    free(save_ms);
+}
+
+/* #1296, #2361: a read of the disc parks its thread for the drive's time, so the other threads
+ * run through it, as they do on a PSP while the drive transfers. The production path: real
+ * threads on their own coroutines, sceIoRead through the dispatcher, the blocking sound output
+ * and the scheduler's timed waits. A reader at priority 32 reads 4 MiB of the UMD block device
+ * in one call while a sound thread at priority 16 feeds 256-frame blocks and a thread at
+ * priority 48 counts milliseconds. Before the read took guest time it returned at once: no
+ * block was output during it and the weaker thread never ran. The cell runs on the fixture's
+ * virtual clock and again under the deterministic clock (SR_DETERMINISTIC_CLOCK=1), and holds
+ * on both.
+ *
+ * MUTANT: drop h_IoRead's last sched_delay_current (the rest of the drive's time) -- the long read takes no guest time, and
+ *   no block is output and the weaker thread does not count during it.
+ * MUTANT: h_IoRead waits whatever the result -- the refused read takes guest time.
+ * MUTANT: drop io_read_caller_can_wait from h_IoRead -- the read made with dispatch disabled
+ *   takes guest time. MUTANT: drop the on_umd test -- the Memory Stick read takes guest time.
+ * MUTANT: hle_io_umd_read_us charges a sector count as bytes -- the long read takes the minimum.
+ * MUTANT: io_async_complete_fd calls h_IoRead -- the waited queued read takes the drive's time.
+ * The idle clock's own cases (a wait the slice reaches, a deadline before the VBLANK, a due
+ * source) are sched_selftest's: test_idle_virtual_clock_stops_at_a_deadline_before_the_vblank. */
+enum {
+    URW_MAIN_ENTRY = 0x08a71000u,
+    URW_SOUND_ENTRY = 0x08a71040u,
+    URW_WEAK_ENTRY = 0x08a71080u,
+    URW_DOOMED_ENTRY = 0x08a71180u,
+    URW_FILE_LBA = 0x1002u,     /* where the synthetic lookup puts disc0:/UMD_DATA.BIN */
+    URW_DISC_SECTORS = 0x1100u, /* the disc for this cell: past that file */
+    URW_NID_IO_REMOVE = 0xf27a9c51u,
+    URW_NAME = 0x08a710c0u,
+    URW_PATH = 0x08a71100u,
+    URW_ASYNC_RESULT = 0x08a71200u,
+    URW_SOUND_BUF = 0x08a72000u,
+    URW_DST = 0x09000000u,
+    URW_SECTORS = 2048u,        /* 4 MiB in one read */
+    URW_SOUND_FRAMES = 256u,
+    URW_NID_IO_OPEN = 0x109f50bcu,
+    URW_NID_IO_CLOSE = 0x810c4bc3u,
+    URW_NID_IO_READ = 0x6a638d83u,
+    URW_NID_IO_WRITE = 0x42ec03acu,
+    URW_NID_IO_LSEEK32 = 0x68963324u,
+    URW_NID_IO_READ_ASYNC = 0xa0b5a7c2u,
+    URW_NID_IO_WAIT_ASYNC = 0xe23eec33u
+};
+static atomic_int s_urw_stop;
+static uint32_t s_urw_outputs, s_urw_weak;
+static uint32_t s_urw_read, s_urw_read_us, s_urw_read_outputs, s_urw_read_weak;
+static uint32_t s_urw_short, s_urw_short_us, s_urw_refused, s_urw_refused_us;
+static uint32_t s_urw_nodispatch, s_urw_nodispatch_us, s_urw_ms, s_urw_ms_us;
+static uint32_t s_urw_async, s_urw_async_us;
+static int s_urw_bytes_ok, s_urw_gated;
+static uint32_t s_urw_read_calls;   /* disc reads the long read made */
+static uint32_t s_urw_file, s_urw_file_us, s_urw_doomed_fd, s_urw_after_doomed;
+static int s_urw_file_ok, s_urw_doomed_returned, s_urw_in_flight_parked, s_urw_in_flight_ended;
+static int s_urw_after_doomed_ok;
+static uint32_t s_urw_gate_weak;   /* the weaker thread's count when the gated read began */
+
+static uint32_t urw_now(void) { return gsw_call(NID_SCE_KERNEL_GET_SYSTEM_TIME_LOW, 0u, 0u, 0u, 0u); }
+
+static void urw_sound_fn(CpuState *cpu) {
+    (void)gsw_call(NID_SCE_AUDIO_CH_RESERVE, 0u, URW_SOUND_FRAMES, 0u, 0u);
+    while (!atomic_load(&s_urw_stop)) {
+        (void)gsw_call(NID_SCE_AUDIO_OUTPUT_BLOCKING, 0u, 0x8000u, URW_SOUND_BUF, 0u);
+        s_urw_outputs++;
+    }
+    cpu->r[2] = 0u;
+}
+
+static void urw_weak_fn(CpuState *cpu) {
+    while (!atomic_load(&s_urw_stop)) {
+        (void)gsw_call(NID_SCE_KERNEL_DELAY_THREAD, 1000u, 0u, 0u, 0u);
+        s_urw_weak++;
+        /* The host read is still blocked, and this thread has run five times since it began:
+         * let it go on. */
+        if (atomic_load(&s_umd_synthetic_gate) == 1 && s_urw_weak >= s_urw_gate_weak + 5u)
+            atomic_store(&s_umd_synthetic_gate, 2);
+    }
+    cpu->r[2] = 0u;
+}
+
+/* A reader that is ended while the host is still reading for it (the worker pass). */
+static void urw_doomed_fn(CpuState *cpu) {
+    (void)gsw_call(URW_NID_IO_READ, s_urw_doomed_fd, URW_DST + 0x40000u, 8u, 0u);
+    s_urw_doomed_returned = 1;   /* not reached: main ends this thread inside the read */
+    cpu->r[2] = 0u;
+}
+
+static void urw_main_fn(CpuState *cpu) {
+    title_hle_write_cstr(URW_PATH, "umd0:");
+    const uint32_t fd = gsw_call(URW_NID_IO_OPEN, URW_PATH, 0x000f0001u, 0u, 0u);
+    const uint32_t sound = gsw_call(NID_SCE_KERNEL_CREATE_THREAD, URW_NAME, URW_SOUND_ENTRY, 16u, 0x1000u);
+    (void)gsw_call(NID_SCE_KERNEL_START_THREAD, sound, 0u, 0u, 0u);
+    const uint32_t weak = gsw_call(NID_SCE_KERNEL_CREATE_THREAD, URW_NAME, URW_WEAK_ENTRY, 48u, 0x1000u);
+    (void)gsw_call(NID_SCE_KERNEL_START_THREAD, weak, 0u, 0u, 0u);
+    (void)gsw_call(NID_SCE_KERNEL_DELAY_THREAD, 30000u, 0u, 0u, 0u);   /* the sound thread is in step */
+
+    /* The long read. */
+    uint32_t t0 = urw_now(), outputs0 = s_urw_outputs, weak0 = s_urw_weak;
+    s_urw_gate_weak = weak0;
+    if (s_urw_gated) atomic_store(&s_umd_synthetic_gate, 1);
+    const uint32_t reads0 = atomic_load(&s_umd_synthetic_reads);
+    s_urw_read = gsw_call(URW_NID_IO_READ, fd, URW_DST, URW_SECTORS, 0u);
+    s_urw_read_calls = atomic_load(&s_umd_synthetic_reads) - reads0;
+    atomic_store(&s_umd_synthetic_gate, 0);
+    s_urw_read_us = urw_now() - t0;
+    s_urw_read_outputs = s_urw_outputs - outputs0;
+    s_urw_read_weak = s_urw_weak - weak0;
+    s_urw_bytes_ok = umd_test_sectors_match(URW_DST, 0u, URW_SECTORS);
+
+    /* One sector: the drive's minimum. */
+    t0 = urw_now();
+    s_urw_short = gsw_call(URW_NID_IO_READ, fd, URW_DST, 1u, 0u);
+    s_urw_short_us = urw_now() - t0;
+
+    /* A refused read (a zero count) does not wait. */
+    t0 = urw_now();
+    s_urw_refused = gsw_call(URW_NID_IO_READ, fd, URW_DST, 0u, 0u);
+    s_urw_refused_us = urw_now() - t0;
+
+    /* With dispatch disabled the read returns at once (UNMEASURED on a PSP). */
+    const uint32_t dispatch = gsw_call(NID_SCE_KERNEL_SUSPEND_DISPATCH_THREAD, 0u, 0u, 0u, 0u);
+    t0 = urw_now();
+    s_urw_nodispatch = gsw_call(URW_NID_IO_READ, fd, URW_DST, 16u, 0u);
+    s_urw_nodispatch_us = urw_now() - t0;
+    (void)gsw_call(NID_SCE_KERNEL_RESUME_DISPATCH_THREAD, dispatch, 0u, 0u, 0u);
+
+    /* A queued read that is waited for completes on the request queue, with no drive time. */
+    (void)gsw_call(URW_NID_IO_LSEEK32, fd, 0u, 0u, 0u);
+    t0 = urw_now();
+    (void)gsw_call(URW_NID_IO_READ_ASYNC, fd, URW_DST, URW_SECTORS, 0u);
+    (void)gsw_call(URW_NID_IO_WAIT_ASYNC, fd, URW_ASYNC_RESULT, 0u, 0u);
+    s_urw_async_us = urw_now() - t0;
+    s_urw_async = MEM_R32(URW_ASYNC_RESULT);
+
+    if (s_urw_gated) {
+        /* A reader ended while the host read for it is blocked: its fetch is abandoned, the
+         * worker drops it when the host read returns, and the next reader is served. */
+        (void)gsw_call(URW_NID_IO_LSEEK32, fd, 0u, 0u, 0u);
+        s_urw_doomed_fd = fd;
+        s_urw_gate_weak = 0x7ffffff0u;   /* the weaker thread does not open this gate: main does */
+        atomic_store(&s_umd_synthetic_gate, 1);
+        const uint32_t doomed = gsw_call(NID_SCE_KERNEL_CREATE_THREAD, URW_NAME, URW_DOOMED_ENTRY, 24u, 0x1000u);
+        (void)gsw_call(NID_SCE_KERNEL_START_THREAD, doomed, 0u, 0u, 0u);   /* it runs and parks in its read */
+        s_urw_in_flight_parked = sr_hle_test_io_disc_fetches_in_flight();
+        (void)gsw_call(NID_SCE_KERNEL_TERMINATE_DELETE_THREAD, doomed, 0u, 0u, 0u);
+        s_urw_in_flight_ended = sr_hle_test_io_disc_fetches_in_flight();
+        atomic_store(&s_umd_synthetic_gate, 2);   /* the host read returns to nobody */
+        (void)gsw_call(URW_NID_IO_LSEEK32, fd, 32u, 0u, 0u);
+        s_urw_after_doomed = gsw_call(URW_NID_IO_READ, fd, URW_DST + 0x50000u, 4u, 0u);
+        s_urw_after_doomed_ok = umd_test_sectors_match(URW_DST + 0x50000u, 32u, 4u);
+        atomic_store(&s_umd_synthetic_gate, 0);
+    }
+    (void)gsw_call(URW_NID_IO_CLOSE, fd, 0u, 0u, 0u);
+
+    /* A file of the disc, read from the middle: the drive's time, and the right bytes. */
+    title_hle_write_cstr(URW_PATH, "disc0:/UMD_DATA.BIN");
+    const uint32_t file = gsw_call(URW_NID_IO_OPEN, URW_PATH, 1u, 0u, 0u);
+    (void)gsw_call(URW_NID_IO_LSEEK32, file, 512u, 0u, 0u);
+    t0 = urw_now();
+    s_urw_file = gsw_call(URW_NID_IO_READ, file, URW_DST + 0x60000u, 1024u, 0u);
+    s_urw_file_us = urw_now() - t0;
+    s_urw_file_ok = 1;
+    for (uint32_t i = 0; i < 1024u; i++)
+        if (MEM_R8(URW_DST + 0x60000u + i) != umd_synthetic_byte((uint64_t)URW_FILE_LBA * 2048u + 512u + i))
+            s_urw_file_ok = 0;
+    (void)gsw_call(URW_NID_IO_CLOSE, file, 0u, 0u, 0u);
+
+    /* A Memory Stick file is not the drive's: its read returns at once. */
+    title_hle_write_cstr(URW_PATH, "ms0:/urw_read.bin");
+    const uint32_t out = gsw_call(URW_NID_IO_OPEN, URW_PATH, 0x0602u, 0x1ffu, 0u);   /* WRONLY|CREAT|TRUNC */
+    (void)gsw_call(URW_NID_IO_WRITE, out, URW_DST, 4096u, 0u);
+    (void)gsw_call(URW_NID_IO_CLOSE, out, 0u, 0u, 0u);
+    const uint32_t in = gsw_call(URW_NID_IO_OPEN, URW_PATH, 1u, 0u, 0u);
+    t0 = urw_now();
+    s_urw_ms = gsw_call(URW_NID_IO_READ, in, URW_DST + 0x10000u, 4096u, 0u);
+    s_urw_ms_us = urw_now() - t0;
+    (void)gsw_call(URW_NID_IO_CLOSE, in, 0u, 0u, 0u);
+    (void)gsw_call(URW_NID_IO_REMOVE, URW_PATH, 0u, 0u, 0u);
+
+    atomic_store(&s_urw_stop, 1);
+    (void)gsw_call(NID_SCE_KERNEL_DELAY_THREAD, 30000u, 0u, 0u, 0u);   /* both loops see it and end */
+    cpu->r[2] = 0u;
+}
+
+static void urw_run(int deterministic, int host_worker) {
+    reset_fixture();
+    sr_hle_init();
+    sr_hle_test_register_iofilemgr();
+    sr_hle_test_audio_reset();
+    audio_fixture_reset();
+    sr_test_guest_fn_reset();
+    sr_test_register_guest_fn(URW_MAIN_ENTRY, urw_main_fn);
+    sr_test_register_guest_fn(URW_SOUND_ENTRY, urw_sound_fn);
+    sr_test_register_guest_fn(URW_WEAK_ENTRY, urw_weak_fn);
+    sr_test_register_guest_fn(URW_DOOMED_ENTRY, urw_doomed_fn);
+    title_hle_write_cstr(URW_NAME, "urw-thread");
+    s_umd_io_synthetic_enabled = 1;
+    s_umd_synthetic_sectors = URW_DISC_SECTORS;
+    s_det_clock = deterministic;
+    s_host_work_test_force = host_worker;
+    s_urw_gated = host_worker;
+    atomic_store(&s_umd_synthetic_gate, 0);
+    atomic_store(&s_umd_synthetic_gate_timeouts, 0);
+    /* The fixture's virtual clock has no guest-time sound queue: with no host device either,
+     * each output waits its block out, as the deterministic clock's model does once in step. */
+    s_audio_queue_result = -1;
+    atomic_store(&s_urw_stop, 0);
+    s_urw_outputs = s_urw_weak = 0u;
+    s_urw_read = s_urw_short = s_urw_refused = s_urw_nodispatch = s_urw_ms = s_urw_async = 0xdeadbeefu;
+    s_urw_read_us = s_urw_short_us = s_urw_refused_us = s_urw_nodispatch_us = 0xdeadbeefu;
+    s_urw_ms_us = s_urw_async_us = 0xdeadbeefu;
+    s_urw_read_outputs = s_urw_read_weak = 0xdeadbeefu;
+    s_urw_bytes_ok = 0;
+    s_urw_file = s_urw_file_us = s_urw_after_doomed = 0xdeadbeefu;
+    s_urw_file_ok = s_urw_doomed_returned = s_urw_after_doomed_ok = 0;
+    s_urw_in_flight_parked = s_urw_in_flight_ended = -1;
+    g_worker_uid = SR_ROLE_UID_NONE;
+    memset(s_cpu, 0, sizeof(*s_cpu));
+    sched_run(URW_MAIN_ENTRY, 0u, 0u);
+    s_det_clock = 0;
+    s_host_work_test_force = 0;
+    s_urw_gated = 0;
+    s_umd_synthetic_sectors = UMD_SYNTHETIC_SECTORS;
+    s_umd_io_synthetic_enabled = 0;
+    sr_hle_test_audio_reset();
+    audio_fixture_reset();
+    sr_test_guest_fn_reset();
+}
+
+static void test_umd_read_parks_its_thread_for_the_drives_time(void) {
+    static const char ms_root[] = HLE_BUILD_ROOT "/hle_umd_read_wait";
+    const char *old_ms = getenv("SR_MEMSTICK");
+    char *save_ms = old_ms ? (char *)malloc(strlen(old_ms) + 1u) : NULL;
+    if (save_ms) memcpy(save_ms, old_ms, strlen(old_ms) + 1u);
+    nk_platform_mkdir_p(ms_root);
+    hle_test_setenv("SR_MEMSTICK", ms_root);
+
+    const uint32_t drive_us = hle_io_umd_read_us((uint64_t)URW_SECTORS * 2048u);
+    const uint32_t minimum_us = hle_io_umd_read_us(2048u);
+    /* Blocks the sound thread outputs in the drive's time, less one for where in a block the
+     * read begins. */
+    const uint32_t blocks = (uint32_t)((uint64_t)drive_us * 44100u / (URW_SOUND_FRAMES * 1000000ull));
+    expect(blocks >= 4u && minimum_us < drive_us,
+           "the long read's drive time spans several sound blocks, and one sector takes less");
+
+    for (int deterministic = 0; deterministic <= 1; deterministic++) {
+        /* The fixture's own virtual clock is coarse: every scheduler pass that keeps time adds
+         * 10 ms, so a 5.8 ms block wait ends blocks late and a 100 us wait can take two such
+         * passes. There the bounds are one block and the long read's time; the deterministic
+         * clock keeps the drive's time in blocks and a short read under a display period. */
+        const uint32_t expected = deterministic ? blocks - 1u : 1u;
+        const uint32_t brief_us = deterministic ? 16683u : drive_us;
+        urw_run(deterministic, 0);
+        if (s_urw_read != URW_SECTORS || s_urw_read_us < drive_us || s_urw_read_outputs < expected ||
+            !s_urw_read_weak)
+            printf("  UMD read wait (%s clock): read 0x%08x in %u us (drive %u us), %u sound blocks "
+                   "(expected %u or more), weaker thread %u\n", deterministic ? "deterministic" : "virtual",
+                   (unsigned)s_urw_read, (unsigned)s_urw_read_us, (unsigned)drive_us,
+                   (unsigned)s_urw_read_outputs, (unsigned)expected, (unsigned)s_urw_read_weak);
+        expect(s_urw_read == URW_SECTORS && s_urw_bytes_ok,
+               "the long UMD read returns its sector count and the disc's bytes");
+        expect(s_urw_read_us >= drive_us && s_urw_read_us < 2u * drive_us,
+               "the long UMD read takes the drive's time in guest time");
+        expect(s_urw_read_outputs >= expected,
+               "the sound thread outputs its blocks through the long read");
+        expect(s_urw_read_weak != 0u, "a weaker thread runs while the reader waits for the drive");
+        expect(s_urw_short == 1u && s_urw_short_us >= minimum_us && s_urw_short_us < brief_us,
+               "a one-sector read waits the drive's minimum, not a display period");
+        expect(s_urw_file == 1024u && s_urw_file_ok && s_urw_file_us >= minimum_us && s_urw_file_us < brief_us,
+               "a read from the middle of a disc file returns its bytes after the drive's minimum");
+        expect(s_urw_refused == 0x80010016u && s_urw_refused_us == 0u,
+               "a refused read returns at once");
+        expect(s_urw_nodispatch == 16u && s_urw_nodispatch_us == 0u,
+               "a read made with dispatch disabled returns at once");
+        expect(s_urw_async == URW_SECTORS && s_urw_async_us < drive_us,
+               "a queued read that is waited for completes without the drive's time");
+        expect(s_urw_ms == 4096u && s_urw_ms_us == 0u,
+               "a Memory Stick read returns at once: the drive's time is the disc's only");
+    }
+
+    /* #2361: with the host worker (a paced run; forced here on the deterministic clock), a host
+     * read that blocks does not hold the other threads. The synthetic disc's read waits until
+     * the weaker guest thread has run five more times, so it can only end if that thread runs
+     * while the host read is blocked. Made on the scheduler's thread, as before, the read
+     * holds every thread until its 3 s of host time run out.
+     * MUTANT: drop the hle_io_release_thread call in sr_hle_release_thread_resources -- the ended
+     *   reader's fetch stays in flight. MUTANT: io_iso_read copies from half the offset into the
+     *   fetch (data + (offset - fetch->offset) / 2) -- the bytes served differ.
+     * MUTANT: h_IoRead never asks for the worker (io_disc_fetch_start returns NULL) -- the
+     *   gated read runs out. MUTANT: io_iso_read ignores the fetched bytes -- the disc is read
+     *   again on the scheduler's thread, 1024 more reads than the worker's 64. */
+    urw_run(1, 1);
+    if (atomic_load(&s_umd_synthetic_gate_timeouts) || s_urw_read != URW_SECTORS || !s_urw_bytes_ok)
+        printf("  UMD read on the host worker: read 0x%08x in %u us, bytes %s, %d gate waits ran out, "
+               "weaker thread %u, %u disc reads\n", (unsigned)s_urw_read, (unsigned)s_urw_read_us,
+               s_urw_bytes_ok ? "match" : "differ", atomic_load(&s_umd_synthetic_gate_timeouts),
+               (unsigned)s_urw_read_weak, (unsigned)s_urw_read_calls);
+    expect(atomic_load(&s_umd_synthetic_gate_timeouts) == 0 && s_urw_read_weak >= 5u,
+           "a blocked host read of the disc does not hold the other guest threads");
+    expect(s_urw_read == URW_SECTORS && s_urw_bytes_ok,
+           "a read fetched on the host worker returns its sector count and the disc's bytes");
+    expect(s_urw_read_calls == URW_SECTORS * 2048u / 65536u,
+           "the disc is read once, by the worker in 64 KiB pieces, and the read is served from that");
+    expect(s_urw_read_us >= drive_us, "a read fetched on the host worker still takes the drive's time");
+    expect(s_urw_file == 1024u && s_urw_file_ok,
+           "a disc file read from the middle is fetched from the right place on the worker");
+    expect(s_urw_in_flight_parked == 1 && !s_urw_doomed_returned,
+           "a reader parks while the host reads for it, with its fetch in flight");
+    expect(s_urw_in_flight_ended == 0,
+           "ending that reader abandons its fetch: none is left in flight");
+    expect(s_urw_after_doomed == 4u && s_urw_after_doomed_ok && sr_hle_test_io_disc_fetches_in_flight() == 0,
+           "after the abandoned host read returns, the next reader is served the right bytes");
+    expect(s_urw_short == 1u && s_urw_refused == 0x80010016u && s_urw_refused_us == 0u &&
+               s_urw_nodispatch == 16u && s_urw_nodispatch_us == 0u,
+           "with the host worker a short read, a refused one and one with dispatch disabled answer as before");
+
     hle_test_setenv("SR_MEMSTICK", save_ms);
     free(save_ms);
 }
@@ -51963,6 +52396,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_ge_blocking_sync_waits_for_stalled_list();
     test_ge_list_stops_for_a_stronger_thread();
     test_savedata_thread_ended_inside_a_parked_save();
+    test_umd_read_parks_its_thread_for_the_drives_time();
     test_ge_sync_ids_match_psp();
     test_ge_signal_jump_call_ret();
     test_ge_signal_depth_origin_stall();
@@ -52141,6 +52575,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_vcount_freezes_while_cpu_interrupts_are_masked();
     test_vcount_credits_one_deferred_period_on_resume();
     test_route_observer_waits_for_guest_scanout_state();
+    test_route_sample_reads_vram_not_the_ge_status_port();
     test_extracted_data_prepares_before_guest_and_lookup_never_builds();
     test_disc_route_serves_archive_and_loose_content_in_one_namespace();
     test_archive_discovery_skips_unpack_folders_only();

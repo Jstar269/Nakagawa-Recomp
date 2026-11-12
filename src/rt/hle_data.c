@@ -2157,6 +2157,7 @@ static uint32_t h_io_open_path_stock(const char *path, uint32_t flags, int force
         if (raw_device != IO_RAW_DEVICE_MSSTOR0P1) {
             uint32_t sectors = 0;
             s_fds[slot].raw_umd = 1;
+            s_fds[slot].on_umd = 1;
             if (iso_sector_count(&sectors) == 0) s_fds[slot].size = sectors;
         }
         s_fds[slot].used = 1;
@@ -2278,6 +2279,7 @@ static uint32_t h_io_open_path_stock(const char *path, uint32_t flags, int force
                         s_fds[slot].used = 1; s_fds[slot].host = loose; s_fds[slot].lba = 0;
                         s_fds[slot].size = loose_size; s_fds[slot].off = 0;
                         s_fds[slot].writable = writing || creating;
+                        s_fds[slot].on_umd = 1;
                         if (getenv("SR_IOLOG")) fprintf(stderr, "Open(%s) -> loose archive override size=%u\n",
                                                         path, (unsigned)loose_size);
                         free(key);
@@ -2306,6 +2308,7 @@ static uint32_t h_io_open_path_stock(const char *path, uint32_t flags, int force
                     s_fds[slot].size = actual_size;
                     s_fds[slot].off = 0;
                     s_fds[slot].writable = writing || creating;
+                    s_fds[slot].on_umd = 1;
                     return (uint32_t)slot;
                 }
                 /* An indexed extracted asset must not silently fall through to an
@@ -2329,6 +2332,7 @@ static uint32_t h_io_open_path_stock(const char *path, uint32_t flags, int force
                         s_fds[slot].archive_vfs = &s_archive_vfs;
                         s_fds[slot].archive_mount = archive_file.mount_index;
                         s_fds[slot].archive_entry = archive_file.entry_index;
+                        s_fds[slot].on_umd = 1;
                         if (getenv("SR_IOLOG")) fprintf(stderr, "Open(%s) -> XB member size=%u\n",
                                                         path, (unsigned)archive_file.size);
                         free(key);
@@ -2369,6 +2373,7 @@ static uint32_t h_io_open_path_stock(const char *path, uint32_t flags, int force
 from_iso:
     s_fds[slot].used = 1; s_fds[slot].host = NULL;
     s_fds[slot].lba = lba; s_fds[slot].size = size; s_fds[slot].off = 0;
+    s_fds[slot].on_umd = 1;
     return (uint32_t)slot;
 }
 
@@ -2792,7 +2797,7 @@ uint32_t io_async_complete_fd(uint32_t fd) {
         if (request.op == IO_ASYNC_READ) {
             cpu.r[5] = request.a1;
             cpu.r[6] = request.a2;
-            result = io_async_result_u32(h_IoRead(&cpu));
+            result = io_async_result_u32(io_read_now(&cpu));
         } else if (request.op == IO_ASYNC_WRITE) {
             cpu.r[5] = request.a1;
             cpu.r[6] = request.a2;

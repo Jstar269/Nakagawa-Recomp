@@ -7957,7 +7957,10 @@ class HleIssuesProbeTests(unittest.TestCase):
             self.assertTrue(parse_campaign_probe_output(helper._body(clean), case).complete)
             # The first row, a middle row and the last row before the terminal.
             cells = spec.semantic_cases
-            for row in (cells[0], cells[len(cells) // 2], cells[-1]):
+            rows = [cells[0], cells[len(cells) // 2], cells[-1]]
+            # The io-seek cases' cleanup row is FAIL when the probe's ms0: directory survives.
+            rows += [cell for cell in cells if cell.endswith("-ms-cleanup")]
+            for row in rows:
                 for status in ("FAIL", "SKIP"):
                     with self.subTest(case=case, row=row, status=status):
                         text = helper._stream(case, {row: (status, 0, [0] * counts[row])})
@@ -12630,6 +12633,60 @@ class KernelSemanticsProbeTests(unittest.TestCase):
         self.assertIn("changed += s_ku_buf[i] != KU_FILL;", read)
 
 
+class HleIoSeekMemoryStickSetupAndCleanupTests(unittest.TestCase):
+    """hle-io-seek and hle-io-seek-edges touch only the Memory Stick directory they made (#1380)."""
+
+    CASES = (
+        ("hle_is_ms", "io-seek", "HLE_IS_FILE", "HLE_IS_DIR"),
+        ("hle_ise_ms", "io-edge", "HLE_ISE_FILE", "HLE_ISE_DIR"),
+    )
+    probe: str
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        fixture = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        cls.probe = (fixture / "probe_hle_measure.c").read_text(encoding="utf-8")
+
+    def _body(self, function: str) -> str:
+        start = self.probe.index(f"static void {function}(void)\n{{\n")
+        return self.probe[start:self.probe.index("\n}\n", start)]
+
+    def test_the_setup_abort_undoes_only_what_the_probe_made(self) -> None:
+        # Review of #2416, nit 4: the abort removed the file and the directory even when the mkdir
+        # had failed, so the directory might not have been the probe's.
+        for function, prefix, file_macro, dir_macro in self.CASES:
+            with self.subTest(case=prefix):
+                body = self._body(function)
+                abort = body[body.index(f'hle_step("{prefix}-ms-setup-abort");'):]
+                abort = abort[:abort.index("return;")]
+                self.assertIn(f"if (made < 0 || fd < 0 || wrote != (int){file_macro}_SIZE) {{", body)
+                self.assertIn(f"if (fd >= 0) (void)sceIoRemove({file_macro});", abort)
+                self.assertIn(f"if (made >= 0) (void)sceIoRmdir({dir_macro});", abort)
+                self.assertNotRegex(abort, r"\n\s*\(void\)sceIo(Remove|Rmdir)\(")
+
+    def test_a_directory_left_after_the_cleanup_fails_the_cleanup_row(self) -> None:
+        for function, prefix, _file_macro, dir_macro in self.CASES:
+            with self.subTest(case=prefix):
+                body = self._body(function)
+                cleanup = body[body.index(f'hle_step("{prefix}-ms-cleanup");'):]
+                self.assertIn(f"const SceUID post = sceIoDopen({dir_macro});", cleanup)
+                self.assertIn(
+                    f'hle_record("{prefix}-ms-cleanup", post >= 0 ? "FAIL" : "PASS", 0u, w, 4u);',
+                    cleanup,
+                )
+
+    def test_the_write_async_row_names_its_poll_cap_exhaustion_path(self) -> None:
+        # Review of #2416, nit 5: a write still pending when the poll cap runs out leaves the
+        # descriptor open; the comment says so and the cleanup row then reports FAIL.
+        body = self._body("hle_ise_ms")
+        comment = body[body.index("/* B4 io-edge-ms-write-async"):body.index('hle_step("io-edge-ms-write-async");')]
+        self.assertIn("poll cap runs out", comment)
+        self.assertIn("cleanup's remove and rmdir fail", comment)
+        self.assertIn("(unmeasured)", comment)
+        self.assertIn("HLE_ISE_POLL_CAP", body)
+        self.assertNotIn("while (", body)
+
+
 class HleUtilityNoneProbeTests(unittest.TestCase):
     """CASE=hle-utility-none (140, PSP-HLE-UTILITY-NONE-001) in probe_hle_measure.c: #1386's
     utility dialog calls at NONE. The build imports no InitStart, so no dialog can open."""
@@ -15084,6 +15141,35 @@ class IoCasesSourceTests(unittest.TestCase):
     def _code(text: str) -> str:
         return re.sub(r"/\*.*?\*/|//[^\n]*", "", text, flags=re.DOTALL)
 
+    def test_font_copies_are_not_registered_for_teardown_removal(self) -> None:
+        # probe.c maps sceIoOpen to probe_io_open, which records every host0 path opened with
+        # PSP_O_CREAT for teardown to remove, in a 16-entry table. Through it, the 2026-11-11
+        # PSP-3000 run's 21 copies overflowed the table: teardown removed 16, kept 5 and reported
+        # status=FAIL. Inside font_files.h the open tracks the descriptor only.
+        self.assertIn("#define PROBE_TEARDOWN_PATH_CAPACITY 16u", self.probe)
+        generic = self.probe[self.probe.index("SceUID probe_io_open(const char *path"):]
+        generic = generic[:generic.index("\n}\n")]
+        self.assertIn("if ((flags & PSP_O_CREAT) != 0) probe_track_disposable_path(path);", generic)
+        kept = self.probe[self.probe.index("SceUID probe_io_open_kept(const char *path"):]
+        kept = kept[:kept.index("\n}\n")]
+        # Defined before probe.c maps sceIoOpen to probe_io_open, so its call is the real one.
+        self.assertLess(self.probe.index("SceUID probe_io_open_kept("),
+                        self.probe.index("#define sceIoOpen(path, flags, mode) probe_io_open("))
+        self.assertIn("sceIoOpen(path, flags, mode)", kept)
+        block = self.probe[self.probe.index("#if PSP_ORACLE_CASE == PSP_ORACLE_CASE_FONT_FILES\n"):]
+        block = block[:block.index("#endif\n")]
+        self.assertIn("probe_track_uid(s_owned_fds, fd)", kept)
+        self.assertNotIn("probe_track_disposable_path", kept)
+        include = block.index('#include "font_files.h"\n')
+        self.assertTrue(block[:include].endswith(
+            "#undef sceIoOpen\n"
+            "#define sceIoOpen(path, flags, mode) probe_io_open_kept((path), (flags), (mode))\n"))
+        self.assertTrue(block[include:].startswith(
+            '#include "font_files.h"\n#undef sceIoOpen\n'
+            "#define sceIoOpen(path, flags, mode) probe_io_open((path), (flags), (mode))\n"))
+        # The font list holds more files than the path table: the old route always overflowed.
+        self.assertNotIn("copies are opened with sceIoOpen directly", self.probe)
+
     def test_flash0_is_only_listed_and_opened_read_only(self) -> None:
         code = self._code(self.fonts)
         self.assertEqual(set(re.findall(r"\b(sce\w+)\s*\(", code)),
@@ -15338,7 +15424,11 @@ class IoCasesSourceTests(unittest.TestCase):
                 start = self.probe.index(f"#if PSP_ORACLE_CASE == PSP_ORACLE_CASE_{macro}\n")
             block = self.probe[start:]
             block = block[:block.index("\n#endif")]
-            self.assertNotRegex(block, r"\bsce\w+\s*\(")
+            # The font-files block remaps sceIoOpen for its header (#undef, then #define to
+            # probe_io_open_kept and back); apart from those lines the block makes no PSP call.
+            remap = (r"(?m)^(#undef sceIoOpen|"
+                     r"#define sceIoOpen\(path, flags, mode\) probe_io_open(_kept)?\(.*)$")
+            self.assertNotRegex(re.sub(remap, "", block), r"\bsce\w+\s*\(")
 
     def test_raw_device_case_manifest_matches_its_captured_record_contract(self) -> None:
         manifest = json.loads((self.root / "tools" / "psp_oracle" / "manifest.json").read_text(

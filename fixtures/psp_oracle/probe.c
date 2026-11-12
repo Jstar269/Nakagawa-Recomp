@@ -628,6 +628,14 @@ SceUID probe_io_open(const char *path, int flags, SceMode mode) {
     return fd;
 }
 
+/* For a case whose host0 files are its output (font-files): the descriptor is tracked so teardown
+   closes a leaked one, the path is not, so teardown never removes the file. */
+SceUID probe_io_open_kept(const char *path, int flags, SceMode mode) {
+    const SceUID fd = sceIoOpen(path, flags, mode);
+    if (fd >= 0) (void)probe_track_uid(s_owned_fds, fd);
+    return fd;
+}
+
 int probe_io_close(SceUID fd) {
     const int result = sceIoClose(fd);
     if (result >= 0) probe_untrack_uid(s_owned_fds, fd);
@@ -9392,9 +9400,19 @@ static void run_registry_font(int emulated) {
 #if PSP_ORACLE_CASE == PSP_ORACLE_CASE_FONT_FILES
 /* Read-only copy of flash0:/font to host0:/fonts (PSP-FONTFILES-001). The listing, copy and
  * verification live in font_files.h, which a host harness also runs against a fake file system
- * (tools/test_psp_oracle.py). Records and step markers go through the durable host0 writer; the
- * copies are opened with sceIoOpen directly so probe teardown never removes them. */
+ * (tools/test_psp_oracle.py). Records and step markers go through the durable host0 writer.
+ *
+ * The copies are the case's output, so teardown must keep them. probe.c maps sceIoOpen to
+ * probe_io_open, which records every host0 path opened with PSP_O_CREAT for teardown to remove,
+ * and the path table holds PROBE_TEARDOWN_PATH_CAPACITY (16) entries. Through that wrapper, the
+ * 2026-11-11 PSP-3000 run's 21 copies filled the table: teardown removed the first 16, kept the
+ * last 5 and reported status=FAIL. Inside font_files.h, sceIoOpen is therefore probe_io_open_kept,
+ * which tracks only the descriptor (teardown still closes a leaked one) and never the path. */
+#undef sceIoOpen
+#define sceIoOpen(path, flags, mode) probe_io_open_kept((path), (flags), (mode))
 #include "font_files.h"
+#undef sceIoOpen
+#define sceIoOpen(path, flags, mode) probe_io_open((path), (flags), (mode))
 
 static int s_font_files_emulated;
 
