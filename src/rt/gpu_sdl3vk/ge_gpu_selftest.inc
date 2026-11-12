@@ -6085,8 +6085,39 @@ static int coherence_run_fallback_reasons(void) {
             ok = 0;
         }
     }
+    /* Write masks: a channel whose native bits are all masked or all written is the colour write
+     * mask's; any other falls back. Clear mode checks RGB when it writes colour (0x100) and alpha
+     * when it writes alpha (0x200); a draw's alpha is the stencil plane. */
+    struct { const char *what; int clear; uint32_t mode, fmt, rgb, alpha; int want; } wm[] = {
+        {"draw 8888 green masked", 0, 0u, 3u, 0x00ff00u, 0x00u, -1},
+        {"draw 8888 partial green", 0, 0u, 3u, 0x00f000u, 0x00u, GEGPU_FALLBACK_WRITE_MASK},
+        {"draw 8888 partial alpha", 0, 0u, 3u, 0x000000u, 0x7fu, -1},
+        {"clear 8888 alpha 0xff", 1, 0x300u, 3u, 0x000000u, 0xffu, -1},
+        {"clear 8888 alpha 0x7f", 1, 0x300u, 3u, 0x000000u, 0x7fu, GEGPU_FALLBACK_WRITE_MASK},
+        {"clear 4444 alpha 0x0f", 1, 0x300u, 2u, 0x000000u, 0x0fu, -1},
+        {"clear 4444 alpha 0x1f", 1, 0x300u, 2u, 0x000000u, 0x1fu, GEGPU_FALLBACK_WRITE_MASK},
+        {"clear 5551 alpha 0x7f", 1, 0x300u, 1u, 0x000000u, 0x7fu, -1},
+        {"clear 565 rgb 0x070307", 1, 0x300u, 0u, 0x070307u, 0x00u, -1},
+        {"clear 565 rgb 0x070707", 1, 0x300u, 0u, 0x070707u, 0x00u, GEGPU_FALLBACK_WRITE_MASK},
+        {"clear alpha only, partial rgb", 1, 0x200u, 3u, 0x0f55f0u, 0x00u, -1},
+        {"clear colour only, partial alpha", 1, 0x100u, 3u, 0x000000u, 0xc3u, -1},
+        {"clear colour, partial rgb", 1, 0x100u, 3u, 0x0f55f0u, 0x00u, GEGPU_FALLBACK_WRITE_MASK},
+        {"clear depth only, partial masks", 1, 0x400u, 3u, 0x0f55f0u, 0xc3u, -1},
+    };
+    s_ge->stencil_enable = 0; s_ge->ztest_enable = 0;
+    for (unsigned i = 0; i < sizeof(wm) / sizeof(wm[0]); i++) {
+        s_ge->clear = wm[i].clear; s_ge->clear_mode = wm[i].mode; s_ge->fbfmt = wm[i].fmt;
+        s_ge->mask_rgb = wm[i].rgb; s_ge->mask_alpha = (int)wm[i].alpha;
+        const int got = gpu_state_unsupported_reason();
+        if (got != wm[i].want) {
+            fprintf(stderr, "gpu coherence selftest [fallback-reasons]: %s gave %d, want %d\n",
+                    wm[i].what, got, wm[i].want);
+            ok = 0;
+        }
+    }
     *s_ge = saved;
-    if (ok) printf("gpu coherence selftest: PASS %-22s 12 cells\n", "fallback-reasons");
+    if (ok) printf("gpu coherence selftest: PASS %-22s 12 cells, %u write-mask cells\n", "fallback-reasons",
+                   (unsigned)(sizeof(wm) / sizeof(wm[0])));
     return ok;
 }
 
@@ -11399,8 +11430,8 @@ static const struct {
  * divergence can hide:
  *  - drawn on the GPU and equal to the PSP (every cell not named below);
  *  - drawn on the GPU and not equal (k_gr_vk_divergent): the Vulkan blend and texture-function
- *    arithmetic rounds in floating point where the PSP truncates integer products, so these
- *    differ by 1 or 2 per channel; each pixel must stay within GR_VK_DIVERGENT_MAX_DELTA of
+ *    arithmetic most likely rounds in floating point where the PSP truncates integer products
+ *    (not measured), so these differ by 1 or 2 per channel; each pixel must stay within GR_VK_DIVERGENT_MAX_DELTA of
  *    ge.c's, which equals the PSP's (docs/HARDWARE_ORACLE.md, "GE raster pixel corpus");
  *  - drawn by the software fallback (k_gr_vk_software): the backend refuses a primitive and
  *    ge.c draws it, which proves nothing about Vulkan's raster, but the window must still
@@ -11443,8 +11474,8 @@ static uint32_t gr_vk_channel_delta(uint32_t psm, uint32_t a, uint32_t b) {
 
 /* One cell from a clean window: its list through ge.c, with the GPU hooks when gpu is set (the
  * window is then read back from the GPU), into px. */
-static void gr_vk_draw(const struct gr_cell *c, int gpu, const uint32_t *tex, uint32_t clut,
-                       uint32_t px[GR_N], unsigned long long *fell, int *sync) {
+static int gr_vk_draw(const struct gr_cell *c, int gpu, const uint32_t *tex, uint32_t clut,
+                      uint32_t px[GR_N], unsigned long long *fell, int *sync) {
     const uint32_t list = 0x08900000u, vtx = 0x08904000u;
     const uint32_t fb = 0x04000000u + GR_FB_OFFSET;
     coherence_reset_targets();
@@ -11459,7 +11490,7 @@ static void gr_vk_draw(const struct gr_cell *c, int gpu, const uint32_t *tex, ui
     (void)gr_list(c, vtx, tex, clut, (uint32_t *)SR_HOST(list));
     const unsigned long long fallback0 = s_replay_stats.fallback_prims;
     ge_set_gpu_hooks(gpu ? &k_hooks : NULL);
-    ge_run_list(list, 0);
+    const int done = ge_run_list(list, 0) == 0;   /* 0: the list reached its END */
     ge_set_gpu_hooks(&k_hooks);
     *fell = s_replay_stats.fallback_prims - fallback0;
     *sync = GEGPU_SYNC_NO_TARGET;
@@ -11472,14 +11503,81 @@ static void gr_vk_draw(const struct gr_cell *c, int gpu, const uint32_t *tex, ui
         const uint32_t at = (GR_WY + i / GR_WW) * GR_STRIDE + GR_WX + i % GR_WW;
         px[i] = c->psm == 3u ? MEM_R32(fb + at * 4u) : (uint32_t)MEM_R16(fb + at * 2u);
     }
+    return done;
 }
 
 /* Pinned cells differ from the PSP by at most this much in any native colour field. */
 #define GR_VK_DIVERGENT_MAX_DELTA 2u
 
+/* Clears through all-or-nothing pixel masks, one per framebuffer format: the GPU draws them
+ * through its colour write mask and must give ge.c's window (which keeps every masked bit, as
+ * the PSP does for clr-ca-msk). Before #343's fix the GPU wrote every bit of the clear colour. */
+static int coherence_run_clear_masks(void) {
+    static const struct gr_cell k_cells[] = {
+        /* 8888: red and blue masked, alpha written. */
+        {"clr-mask-8888", GR_K_CLEAR, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x5ac3a50fu,
+         {0xd3000301u, 0xe8ff00ffu, 0xe9000000u}},
+        /* 8888: colour written, alpha masked. */
+        {"clr-mask-8888-a", GR_K_CLEAR, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x5ac3a50fu,
+         {0xd3000301u, 0xe8000000u, 0xe90000ffu}},
+        /* 565: red and blue masked (their top five bits), green written. */
+        {"clr-mask-565", GR_K_CLEAR, 0u, GR_T_8888, GR_D_PATTERN, 0u, 0x5ac3a50fu,
+         {0xd3000301u, 0xe8f803f8u}},
+        /* 5551: green masked, the alpha bit masked. */
+        {"clr-mask-5551", GR_K_CLEAR, 1u, GR_T_8888, GR_D_PATTERN, 0u, 0x5ac3a50fu,
+         {0xd3000301u, 0xe800f800u, 0xe9000080u}},
+        /* 4444: red and blue masked, green and alpha written (low nibbles are not stored). */
+        {"clr-mask-4444", GR_K_CLEAR, 2u, GR_T_8888, GR_D_PATTERN, 0u, 0x5ac3a50fu,
+         {0xd3000301u, 0xe8f00ff0u, 0xe900000fu}},
+    };
+    const uint32_t clut = 0x08918000u;
+    uint32_t tex[GR_T_COUNT];
+    for (uint32_t t = 0; t < GR_T_COUNT; t++) {
+        tex[t] = 0x08910000u + t * 0x400u;
+        (void)gr_texture(t, (uint8_t *)SR_HOST(tex[t]));
+    }
+    gr_clut((uint8_t *)SR_HOST(clut));
+    GeState saved = *s_ge;
+    int ok = 1;
+    for (size_t k = 0; k < sizeof(k_cells) / sizeof(k_cells[0]); k++) {
+        const struct gr_cell *c = &k_cells[k];
+        uint32_t px[GR_N], ref[GR_N], plain[GR_N];
+        unsigned long long fell = 0, ref_fell = 0, plain_fell = 0;
+        int sync = 0, ref_sync = 0, plain_sync = 0;
+        /* The same clear with no mask: ge.c's window must differ from it, or the cell keeps no
+         * destination bit and tests nothing. */
+        struct gr_cell unmasked = *c;
+        for (size_t w = 1; w < sizeof(unmasked.w) / sizeof(unmasked.w[0]); w++)
+            if ((unmasked.w[w] >> 24) == 0xe8u || (unmasked.w[w] >> 24) == 0xe9u)
+                unmasked.w[w] &= 0xff000000u;
+        const int done = gr_vk_draw(&unmasked, 0, tex, clut, plain, &plain_fell, &plain_sync) &&
+                         gr_vk_draw(c, 0, tex, clut, ref, &ref_fell, &ref_sync) &&
+                         gr_vk_draw(c, 1, tex, clut, px, &fell, &sync);
+        unsigned differ = 0, kept = 0;
+        for (uint32_t i = 0; i < GR_N; i++) {
+            if (px[i] != ref[i]) differ++;
+            if (ref[i] != plain[i]) kept++;
+        }
+        if (!done || sync != GEGPU_SYNC_OK || fell != 0u || differ != 0u || kept == 0u) {
+            fprintf(stderr, "gpu coherence selftest [clear-masks/%s]: %s, fell %llu, sync %d, %u of %u pixels "
+                            "differ from ge.c, ge.c's mask kept %u pixels\n", c->name,
+                    done ? "drawn" : "the list did not reach its END", fell, sync, differ, (unsigned)GR_N, kept);
+            ok = 0;
+        }
+    }
+    *s_ge = saved;
+    coherence_reset_targets();
+    ge_set_gpu_hooks(&k_hooks);
+    if (ok)
+        printf("gpu coherence selftest: PASS %-22s %u clears through all-or-nothing pixel masks drawn on "
+               "the GPU equal ge.c\n", "clear-masks", (unsigned)(sizeof(k_cells) / sizeof(k_cells[0])));
+    return ok;
+}
+
 static int coherence_run_psp_raster(void) {
     if (s_scale != 1) {
-        fprintf(stderr, "gpu coherence selftest [psp-raster]: needs render scale 1, not %d\n", s_scale);
+        fprintf(stderr, "gpu coherence selftest [psp-raster]: compares PSP pixels, so it runs only at render "
+                        "scale 1, not %d\n", s_scale);
         return 0;
     }
     enum { GR_VK_SOFTWARE = sizeof(k_gr_vk_software) / sizeof(k_gr_vk_software[0]),
@@ -11508,8 +11606,12 @@ static int coherence_run_psp_raster(void) {
         }
         /* ge.c alone gives the PSP's window (test_ge_raster_cells_match_psp): the reference a
          * divergent GPU window is measured against, pixel by pixel. */
-        gr_vk_draw(c, 0, tex, clut, ref, &ref_fell, &ref_sync);
-        gr_vk_draw(c, 1, tex, clut, px, &fell, &sync);
+        if (!gr_vk_draw(c, 0, tex, clut, ref, &ref_fell, &ref_sync) ||
+            !gr_vk_draw(c, 1, tex, clut, px, &fell, &sync)) {
+            fprintf(stderr, "gpu coherence selftest [psp-raster/%s]: the list did not reach its END\n", c->name);
+            ok = 0;
+            continue;
+        }
         const int want_sw = gr_vk_named(k_gr_vk_software, GR_VK_SOFTWARE, c->name);
         const int want_div = gr_vk_named(k_gr_vk_divergent, GR_VK_DIVERGENT, c->name);
         const int ref_ok = gr_digest(ref) == s_gr_psp[k].psp;
@@ -11615,6 +11717,7 @@ static int coherence_selftest_cases(void) {
         if (strcmp(only, "lines") == 0) return coherence_run_lines();
         if (strcmp(only, "wide-raster") == 0) return coherence_run_wide_raster();
         if (strcmp(only, "psp-raster") == 0) return coherence_run_psp_raster();
+        if (strcmp(only, "clear-masks") == 0) return coherence_run_clear_masks();
         fprintf(stderr, "gpu coherence selftest: unknown SR_GPU_COHERENCE_CASE '%s'\n", only);
         return 0;
     }
@@ -11673,6 +11776,7 @@ static int coherence_selftest_cases(void) {
     if (!coherence_run_mip_levels()) ok = 0;
     if (!coherence_run_psp_sample_points()) ok = 0;
     if (!coherence_run_psp_raster()) ok = 0;
+    if (!coherence_run_clear_masks()) ok = 0;
     if (!coherence_run_sprite_scaled()) ok = 0;
     if (!coherence_run_uv_edge_clamp()) ok = 0;
     /* After the mip fixtures: it rewrites the depth buffer they start from. */

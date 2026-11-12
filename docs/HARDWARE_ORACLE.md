@@ -1285,7 +1285,7 @@ One console is one data point; see §11. Nothing here closes issue #70
   the readback, which proves nothing about the Vulkan raster: the depth test with stencil (`z-lt-st`,
   `z-gt-st`), points (`e-points`), partial pixel masks (`msk-8888`, `msk-565`, `clr-ca-msk`) and the logic
   operations (`lo-*`). 20 are drawn on the GPU and differ from the PSP by 1 or 2 per colour field, because
-  Vulkan blends and combines texture and vertex colours in floating point where the PSP truncates integer
+  Vulkan most likely blends and combines texture and vertex colours in floating point where the PSP truncates integer
   products: `b-sa-isa`, `b-dc-sc`, `b-idc-isc`, `b-da-ida`, `b-sub-sa-fix`, `b-rsub-sa-isa`, `tf-mod-rgb`,
   `tf-mod-rgb-x2`, `tf-mod-rgba`, `tf-mod-rgba-x2`, `tf-mod-rgba-1`, `tf-dec-rgba`, `tf-dec-rgba-x2`,
   `tf-bld-rgb`, `tf-bld-rgb-x2`, `tf-bld-rgba`, `tf-bld-rgba-x2`, `tfa-mod-rgba`, `tfa-bld-rgba` and

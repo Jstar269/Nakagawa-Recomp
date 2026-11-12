@@ -12231,11 +12231,14 @@ class GeRasterProbeTests(unittest.TestCase):
         # The case runs in the default (render scale 1) pass and on its own.
         self.assertIn("    if (!coherence_run_psp_raster()) ok = 0;\n", inc)
         self.assertIn('if (strcmp(only, "psp-raster") == 0) return coherence_run_psp_raster();', inc)
+        self.assertIn("    if (!coherence_run_clear_masks()) ok = 0;\n", inc)
+        self.assertIn('if (strcmp(only, "clear-masks") == 0) return coherence_run_clear_masks();', inc)
         bodies = {}
         for name in ("gr_vk_draw", "coherence_run_psp_raster"):
-            body = inc[inc.index(f"static {'void' if name == 'gr_vk_draw' else 'int'} {name}("):]
+            body = inc[inc.index(f"static int {name}("):]
             bodies[name] = body[:body.index("\n}\n")]
-        for term in ("fallback_prims", "gegpu_sync_guest_fb(&desc)", "ge_set_gpu_hooks(gpu ? &k_hooks : NULL);"):
+        for term in ("fallback_prims", "gegpu_sync_guest_fb(&desc)", "ge_set_gpu_hooks(gpu ? &k_hooks : NULL);",
+                     "const int done = ge_run_list(list, 0) == 0;", "return done;"):
             self.assertIn(term, bodies["gr_vk_draw"])
         for term in ("s_scale != 1", "gr_digest(ref) == s_gr_psp[k].psp", "gr_digest(px) == s_gr_psp[k].psp",
                      "else if (want_sw) pass = on_sw && matches;",

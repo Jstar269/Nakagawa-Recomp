@@ -5833,7 +5833,8 @@ static int gpu_state_unsupported_reason(void) {
     if (s_ge->logic_op_enable) return GEGPU_FALLBACK_LOGIC_OP;
     if ((!s_ge->clear || (s_ge->clear_mode & 0x100)) && !native_rgb_mask_exact())
         return GEGPU_FALLBACK_WRITE_MASK;
-    /* Outside clear mode the alpha write mask reaches the stencil value the shader stores. */
+    /* Only clear mode needs this: outside it, the stencil value the shader stores already
+     * carries the alpha write mask. */
     if (s_ge->clear && (s_ge->clear_mode & 0x200) && !native_alpha_mask_exact())
         return GEGPU_FALLBACK_WRITE_MASK;
     /* Framebuffer placements the persistent-target model cannot represent: color
