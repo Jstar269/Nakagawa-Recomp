@@ -253,8 +253,8 @@ Each `sites` entry names a symbolic `function`, a 4-byte-aligned `insn_offset`, 
 | `count_x2` | positive `addi`/`addiu`/`slti`/`sltiu` immediate; `andi` mask $2^n-1$; `lui` of a normal float; `sll`; integer loads; `lwc1`/`swc1`; `sw` (only with `stock_values`, §9.6); `lv.s` (the loaded VFPU register is scaled); single-precision arithmetic and `cvt.s.w`; a unit countdown `addiu rt, rt, -1` | the produced value is doubled (a countdown is gated) |
 | `count_x2_even` | `slti`/`sltiu rt, rs, n` with $0 < n \le$ `0x3FFF` and `rt` neither `$zero` nor `rs` | a bound on a counter of logic updates since an event: true while `rs` $< 2n$ and `rs` is even, so the $n$ events of the stock window still happen, one every second update, at the stock instants (`count_x2` would make $2n$ of them, twice as dense). Under `slti` a negative `rs` stays true, as in stock, so an inactive value such as $-1$ keeps its meaning; under `sltiu` it is a large unsigned value, false in both forms. The resolver refuses the site unless `rs` is loaded from memory (`lb`, `lbu`, `lh`, `lhu` or `lw`) within the 16 instructions before the compare, with no branch, jump or call in between, and not in the delay slot of a jump, a call or a branch-likely. The check reads backward in address order and does not see a branch from elsewhere into those instructions. The site's evidence shows the rest: that the stored count advances by one every update |
 | `step_x0.5`, `probability_per_update_x0.5` | as `count_x2` except integer loads, plus accumulating `+1`/`-1`/`addu`/`subu` updates | the produced value is halved (exactly, or by gating a unit or register step); `add.s fd, fd, ft` halves the addend `ft` |
-| `decay_k_to_1-sqrt(1-k)` | `lui` of a float $k \in (0, 1)$; `lwc1` or `lv.s` of the factor | $k \to 1 - \sqrt{1-k}$, evaluated as $k / (1 + \sqrt{1-k})$ in double so that a small $k$ does not cancel to 0, and rounded to the upper half; after an `lwc1` or `lv.s` the loaded register is mapped at run time, and a value outside $(0, 1)$ keeps its stock value and is reported once per site (`ENHANCEMENT_FACTOR_KEPT`) |
-| `retention_m_to_sqrt(m)` | `lui` of a float $m \in (0, 1)$; `lwc1` or `lv.s` of the factor; `add.s`, `sub.s`, `mul.s` or `div.s` whose result is the factor (such as $1 - cL$) | $m \to \sqrt{m}$, rounded to the upper half; after an `lwc1` or `lv.s` as for `decay_k_to_1-sqrt(1-k)`, and likewise after the arithmetic instruction, whose result register is mapped at run time |
+| `decay_k_to_1-sqrt(1-k)` | `lui` of a float $k \in (0, 1)$; `lwc1` or `lv.s` of the factor; `mov.s` that copies the factor (section 11.3.2.7) | $k \to 1 - \sqrt{1-k}$, evaluated as $k / (1 + \sqrt{1-k})$ in double so that a small $k$ does not cancel to 0, and rounded to the upper half; after an `lwc1` or `lv.s` the loaded register is mapped at run time, after a `mov.s` only the copy, and a value outside $(0, 1)$ keeps its stock value and is reported once per site (`ENHANCEMENT_FACTOR_KEPT`) |
+| `retention_m_to_sqrt(m)` | `lui` of a float $m \in (0, 1)$; `lwc1` or `lv.s` of the factor; `add.s`, `sub.s`, `mul.s` or `div.s` whose result is the factor (such as $1 - cL$); `mov.s` that copies the factor (section 11.3.2.7) | $m \to \sqrt{m}$, rounded to the upper half; after an `lwc1` or `lv.s` as for `decay_k_to_1-sqrt(1-k)`, and likewise after the arithmetic instruction, whose result register is mapped at run time; after a `mov.s` only the copy |
 | `accel_x0.25` | `lui` of a float (or a `lui`/`ori` pair) | the per-update acceleration is divided by 4 (two exponent steps on a lone `lui`) |
 | `launch_velocity_x0.5` | a `lui`/`ori` float pair with `acceleration_site` | the launch velocity $v_0 \to v_0/2 + g/8$, where $g$ is the stock value of the named `accel_x0.25` site |
 | `offset_x2` | `addi`/`addiu` with a nonzero immediate, also when the destination is a source | an additive offset counted in updates (a lookahead, a delay added to a base) doubles: $n \to 2n$ |
@@ -397,6 +397,41 @@ that a player turns on or off apart from the 60 FPS game logic. The field is an 
 | --- | --- | --- |
 | `vblank_wait_skip` | `jal` whose target is the executable's import stub of `sceDisplayWaitVblankStart` (NID `0x984C27E7`); any other target refuses the package | the delay slot runs as stock; the call runs unless the runtime skips it (`nk_ace_load_skip_wait()`), which it does only while the run's `load=fast` is in effect and waits are permitted, that is, where the stock call would block. A skipped call still blocks the thread, for 1 µs, the shortest delay wait the scheduler has (that of `sceKernelDelayThread(1)`), so ready threads of any priority run as during the stock wait, and it leaves `$v0` = 0, the stock function's return there. Where waits are not permitted the stock call runs and returns `CAN_NOT_WAIT`. A package with a `load` part must declare an `update_boundary`, and the site may not be in its function, compared by name, by site-map address in a published package, and by resolved address in codegen. Nothing else about where the site sits is checked: a wait in a caller or a callee of the boundary's function is accepted, and the site's own evidence must show it is reached only while loading (section 11.3.10) |
 
+### 9.9. A Code-Hook Package Beside the Timing Package
+
+A build carries one enhancement package and, beside it, at most one `guest_memory_code_hook` package (section 2.3),
+so a title's Ace items that change guest memory build together with its 60 FPS game logic. The code-hook package
+stays a package of its own: the rule of section 9.2 holds as it is, and a timing package still refuses a code-hook
+transform such as `clip_x_widen` (the decision of 2026-11-10, #2366, under "Guest memory written by a timing
+transform"). A timing transform writes guest memory only where it replaces a value the title's own logic stores
+there; `clip_x_widen` writes the x row of matrices the title built, a value no stock store of that site writes, so
+it is a code hook and keeps that category's declaration and checks. The two are joined only in the build, where
+each keeps its own category, digest and checks.
+
+- **Naming it.** `build-package` takes `--code-hook-package <path>`, or `--ace-cull`, which reads
+  `<user data>/enhancements/<disc_id>-cull.json` (lowercase disc ID), else a published package of that name in
+  `assets/enhancements/` (section 5.1). Make takes `ENHANCEMENT_CODE_HOOK_PACKAGE=<path>` beside
+  `ENHANCEMENT_PACKAGE`, and codegen `--code-hook-package` beside `--enhancement-package`. An environment that
+  names one on its own is refused, as for the enhancement package.
+- **Checks.** The code-hook package is validated, matched to the disc, title and executable, and its sites
+  resolved and verified as the enhancement package's are. Each of these refuses the build by name, and nothing is
+  merged: a second package whose category is not `guest_memory_code_hook`; an enhancement package that is a
+  code-hook package too; a code-hook package for another title; a site id both packages use; a code-hook site at
+  a word the enhancement package rewrites (a 60 Hz site, an Ace part site or the `update_boundary`) or at the delay
+  slot of a rewritten call; a code-hook call whose delay slot is such a word, inside the span the enhancement
+  package rewrites; a code-hook site whose rewrite keeps run-time state; a code-hook call to a function that a
+  `gate_30hz_alt` site of the enhancement package lists as an alternate (on an alternate update that site calls the
+  alternate itself, so the hook would act only on the other updates); and a code-hook package with no sites. Codegen
+  refuses `--code-hook-package` without `--enhancement-package`.
+- **The build.** The code-hook sites join the site table and are emitted as they would be in a build of that
+  package alone; the generated code gains one header line naming the code-hook package's id, version, site count
+  and digest; the package's cache key gains its id, its digest and, when it has one, its symbols sidecar's digest.
+  A build of a timing package with a code-hook package is `packages/<disc_id>-enhanced-<timing id>+<hook id>` (no
+  package id holds a `+`, and the joined name may have at most 64 characters); a code-hook package with no timing
+  package is the build's one package, `packages/<disc_id>-enhanced-<hook id>`.
+- **Without one** the generated output, the package directory and the cache key are byte-identical to a build
+  before this section.
+
 ## 10. Play Modes: Authentic, Enhanced and Ace
 
 The player offers three play modes per game (#2055):
@@ -422,10 +457,11 @@ Code identifiers that say `ace` mean "Enhanced or Ace"; every name a player read
 The launcher always exports `SR_ACE`, so an inherited value cannot opt a launch in: `off` for Authentic, or
 `v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;smooth=x2;sas=off;tess=off`. `tier` (`enhanced` or `ace`) only names the
 run, in the game badge, the pause menu and the stamps; a line without it is an Enhanced run. `stick` (the title's
-stick dead zone, 1 to 126, section 11.3.11), `load` (`fast` or `off`, section 11.3.10) and `cull` (`on` or `off`,
-section 11.3.6) are the other keys a line may leave out: a missing `stick`, `load` or `cull` is off,
-`stick=<counts>`, `load=fast` and `cull=on` need `tier=ace`, and the launcher writes `;load=fast` and `;cull=on`
-only for an Ace launch with that part on. Every
+stick dead zone, 1 to 126, section 11.3.11), `load` (`fast` or `off`, section 11.3.10), `depth` (`32` or `off`,
+section 10.20) and `cull` (`on` or `off`, section 11.3.6) are the other keys a line may leave out: a missing
+`stick`, `load`, `depth` or `cull` is off, `stick=<counts>`, `load=fast` and `cull=on` need `tier=ace` (`depth=32`
+does not), the launcher writes `;load=fast` and `;cull=on` only for an Ace launch with that part on, and no
+launcher writes `depth` yet (section 11.3.12). A line writes them in that order, `cull` last. Every
 other key is required, in any order, each once; a value for a feature this build does not carry (`smooth=match`)
 refuses the line. So does anything else: the run is Authentic and one `ACE_MODE: refused (<reason>)` line says why.
 Unset is off. With Enhanced or Ace on, the launcher also exports `SR_ACE_REPORT`, the per-run report under
@@ -447,7 +483,8 @@ scaling or the smart 2D filter, which names the request and does not obey it (se
 `TWIN: refused` line when `SR_GPU_TWIN_COLOR` is set, which changes nothing else (section 10.11), one line that
 names an unknown or refused `SR_GPU_DST_READ` value, which changes nothing else, and the
 `sdl3vk: destination reads: interlock|snapshot` line that every run prints (below). Finer patches (section 10.14)
-have no environment variable, so an authentic run prints nothing for them.
+have no environment variable, so an authentic run prints nothing for them. Nor has the host depth buffer (section
+10.20): an authentic run makes the 16-bit depth buffer it always made and prints nothing for it.
 `gpu-coherence-selftest` checks the samplers and the pool; `display-smoke` keeps its image hash.
 
 One device feature setting outside Ace applies to every run, Authentic included, because it is a correctness fix and not an
@@ -480,6 +517,9 @@ the device is created with no feature outside Ace.
   never when they are latched. It is a guest-visible item. Its entry is section 11.3.11.
 - **Loads:** `load=fast` (Ace only) shortens the display waits a title's own loading screen paces itself with, so
   it changes guest timing. It is a guest-visible item, not yet admitted. Its entry is section 11.3.10.
+- **Depth:** `depth=32` gives the Vulkan renderer a 32-bit float depth buffer, which changes which surface wins
+  where two lie within one 16-bit depth step, in the frames a present commits to guest VRAM. The depth the guest
+  reads stays 16-bit and unchanged. It is a guest-visible item, not yet admitted. Its entry is section 11.3.12.
 
 ### 10.4. Stamps and Evidence
 
@@ -575,22 +615,29 @@ below). The code is `src/rt/gpu_sdl3vk/ace_smooth.c`, its shaders and the pure p
   frame to overflow the mask prints a warning.
 - **When.** The flip of frame B shows the in-between of A and B; the next VBLANK shows B. Nothing is shown before the
   guest made it, so a frame is never predicted. The cost is one VBLANK of added delay (about 17 ms), reported in the
-  run's report as `added_delay_ms`. A new flip that arrives before B was due replaces it, counted in
-  `presents.superseded`.
+  run's report as `added_delay_ms`. A new flip that arrives before B's present replaces it, counted in
+  `presents.superseded`: one VBLANK of delay does not fit a frame that is on screen for one VBLANK (a title leaving
+  30 FPS), and holding each frame back instead would keep every later frame one VBLANK late.
 - **A busy display never costs a real frame** outside fast forward (see "Only at 30" below). While the guest is
   paced to real time, a present does not wait for the display (`src/rt/gpu_sdl3vk/README.md`): when the display
   cannot take a frame, the present returns at once and shows nothing. When that happens to B's present, B stays
   owed. It is tried again at each later VBLANK until a present shows it: one with no flip, or one whose flip's own
-  present found the display busy too. The flip of the next frame C shows B in place of the in-between of B and C,
-  then C at its own VBLANK. So a frame whose in-between was shown is never dropped for a made-up picture, and a
-  display that takes only every second present shows the real frames, with `SMOOTH OFF` on the readout. A title that
-  flips each frame twice shows its newest frame at the second flip; when flips in between found the display busy
-  too, that frame is newer than the owed one and replaces it. What a present shows changes the pace only once that
-  present has reached the screen. When the present that should show B fails (an out-of-date window, say), B is given
-  up and C is not held: the CPU present that takes over shows C as it is, and no VBLANK shows it again. When the
-  failed present is the CPU one itself (a frame that is not resident, or the software renderer), nothing takes over:
-  C is lost as a failed present loses a frame without smooth motion. `presents.busy` counts the held presents the
-  display could not take, and `presents.superseded` every held frame that never reached the screen.
+  present found the display busy too. The first flip whose present the display takes shows B in place of its
+  in-between, then its own frame at its VBLANK, however many flips the display missed in between. Frames whose
+  presents the display never took are not shown, as without smooth motion; every frame whose present it took is
+  shown, in order. So a frame whose in-between was shown is never dropped for a made-up picture, and a display that
+  takes only every second present shows the real frames, with `SMOOTH OFF` on the readout. A title that flips each
+  frame twice is no different: when the flips in between found the display busy, the second flip of a newer frame
+  is that frame's first present, so it shows B and holds its own frame, owed in turn, for the next present. What a
+  present shows changes the pace only once that present has reached the screen. When the present that shows B fails
+  after its submission (an out-of-date window, say), nothing reached the screen, as with a busy display: B stays
+  owed, the pass drops the frame it recorded with it, and the CPU present that takes over shows B and holds C. When
+  that one fails too, B's VBLANK shows it and C is lost, as a failed present loses a frame without smooth motion.
+  B is given up when a present fails before its submission, when its VBLANK's own present fails (a failure that
+  repeats, such as a minimised window, never leaves an old frame waiting to be shown after newer ones), when the
+  window closes, or when the renderer can present nothing any more. `presents.busy` counts the held presents the
+  display could not take or that failed and were tried again, and `presents.superseded` every held frame that never
+  reached the screen.
 - **Only consecutive frames.** An in-between is made of a frame and the one flipped just before it. When that one
   never reached a present (the presenter's slot rule dropped its flip on a busy PC, or the present failed), the
   pass still holds an older frame, and an in-between of the two would put a fast-moving object in the wrong place
@@ -1188,6 +1235,92 @@ window's keys turn it on, and it never runs in an Authentic run.
   output path, the guest queue seeded from the host's depth once per run and draining in guest time, and the host
   queue and pushes back after it stops. `ace-selftest` pins the readout and the report.
 
+### 10.20. Higher-Precision Host Depth (`depth=32`)
+
+The PSP's depth buffer holds 16 bits, and the Vulkan renderer keeps that format (`D16_UNORM`). Games set their near
+and far planes for the PSP's screen, so surfaces that lie less than one 16-bit step apart, often far away, flicker
+against each other (z-fighting), and the flicker is easier to see above 1x. This feature gives the Vulkan renderer a
+32-bit float depth buffer for every game, with no per-title data (#2051). It is guest-visible (section 11.1):
+section 11.3.12 is its entry and says what the guest can observe; this section says how it tests. The code is in
+`src/rt/gpu_sdl3vk/ge_gpu.c` (`s_depth_fmt`, `depth_unorm`, `depth_texel`, `PipeKey.zbias`).
+
+- **Setting.** The `depth` key of the `SR_ACE` launch line (section 10.1): `depth=32`, or `depth=off`, the same as no
+  key. It is an Enhanced part and needs no `tier=ace`. The renderer reads it once when it starts; there is no
+  environment variable for it. The player has no setting for it yet, so no launcher writes the key (section
+  11.3.12).
+- **The buffer.** The depth attachment is `D32_SFLOAT` on the scale the 16-bit buffer uses: a draw at 16-bit depth z
+  stores z / 65535 (`psp.vert`, `psp_tnl.vert`), now without rounding it to a step. A device that cannot render to and
+  copy that format keeps `D16_UNORM`, and one `ACE_MODE: depth unavailable (...)` line says so. The host twin (section
+  10.11) keeps a depth twin of the same format, and Smooth motion's depth copy (section 10.6) is `R32_SFLOAT` instead
+  of `R16_UNORM`, which its passes sample as the same 0 to 1 values.
+- **How a test decides.** The fixed-function test compares the unrounded values. Rounding is monotonic, so where the
+  two values round to different 16-bit steps the answer is the PSP's. Only where they round to the same step can it
+  differ:
+  - LESS and GREATER, and LEQUAL and GEQUAL with depth writes on: the nearer surface by its unrounded depth wins,
+    where the PSP's test sees two equal values (its strict tests fail them, its or-equal tests pass them). This is
+    what removes z-fighting.
+  - LEQUAL and GEQUAL with depth writes off (decals, shadows and many effect passes): the fragment's depth leans
+    toward passing by a depth bias of 64 units of the primitive's float exponent (`DEPTH32_TIE_BIAS`), at most a
+    quarter of a 16-bit step. A surface drawn on the plane it lies on, from other vertices, then passes as it does at
+    16 bits instead of failing on float rounding, and as the draw writes no depth, no stored value moves. The same
+    lean also passes such a draw where its surface lies less than the bias behind the stored one, across a step
+    boundary too, where the PSP fails it.
+  - EQUAL and NOTEQUAL compare unrounded values. A pass drawn again from the same vertices (a second texture or a
+    lighting pass) has the same depth and gets the PSP's answer. A different surface that rounds to the same step
+    without lying exactly on the stored one fails EQUAL, where the PSP passes it.
+  - A surface with depth writes on, drawn with LEQUAL or GEQUAL on the plane of another from other vertices, is
+    decided by float rounding pixel by pixel where the PSP passes every pixel, so it can speckle. That, and the EQUAL
+    case above, are why the feature is off by default.
+  - Through-mode draws (2D overlays) and every line, 3D lines included, carry whole-step depths (a line's depth is
+    cut to its step), while a 3D surface stores its depth with its fraction. Such a draw at the step a surface
+    rounds to, with LEQUAL or GEQUAL, meets the cases above at each pixel: it fails where it lies on the losing side
+    of the stored value by more than the lean, or by any amount when it writes depth, where the PSP passes it. A
+    cut line can lie almost a whole step from the surface it was drawn on, so lines show this most.
+
+  ALWAYS, NEVER and clear mode are unchanged, and so is the minz/maxz range test, which rounds the fragment's depth
+  to a step in `psp.frag`, except that on a draw with the lean a device may give the shader the leaned depth, which
+  can move a pixel within a quarter step of the range's edge to the other side.
+- **What the guest reads.** Depth crosses to and from guest memory at 16 bits. An upload of guest depth stores step /
+  65535, the value a draw at that step stores (`depth_unorm`), so a draw at that step passes EQUAL against it. A
+  readback rounds each value to the nearest step (`depth_texel`), as the 16-bit attachment's conversion does. The
+  step stored at a pixel is the same with the key on and off: a test whose answer the key changes compares two
+  values of one step, and the value it keeps lies in that step either way, while a draw the lean passes writes no
+  depth. So a depth readback, depth read as a texture through guest memory, and the software renderer when a draw
+  falls back to it see the same 16-bit depth, except for a value near half way between two steps: Vulkan leaves the
+  precision of a 16-bit attachment's conversion to the driver, so such a value may land in the other step with the
+  key off (lavapipe stores 17/32 of a step as the lower step), while `depth_texel` rounds it to the nearest. The
+  colour is what changes.
+- **The software renderer** (`src/rt/ge.c`) keeps its 16-bit depth. It is the PSP's model and the renderer of the
+  fallback paths, so a frame it draws z-fights as on the PSP; this feature is a property of the Vulkan renderer's host
+  buffer.
+- **Cost.** Each depth buffer takes 4 bytes a device pixel instead of 2: at 4x (2048 x 1088 device pixels) about 8.9
+  MB instead of 4.5 MB, and as much again for its host twin. A depth readback or upload moves twice the bytes. A
+  draw that writes no depth with LEQUAL or GEQUAL uses a pipeline with depth bias, so such a state can take one more
+  pipeline.
+- **Stamps.** `ACE_MODE: on (...)` is followed by `ACE_MODE: depth 32 (...)`; the renderer prints
+  `HOST_DEPTH: on (D32_SFLOAT; ...)` when it makes the buffer; the report has `"depth": 32`, or 16 when the device
+  refused it; the badge's words name "32-bit depth"; the flight recorder's `runtime.enhancements` keeps the whole
+  line (its field holds `ACE_SPEC_MAX` characters; at 95 it cut an Enhanced line with `depth=32` to `depth=3`).
+  Section 10.4 applies: the run is an Enhanced or Ace run.
+- **Tests.** `ace-selftest` pins the key, its values, its place in the line, the stamp's line and the report.
+  `gpu-coherence-selftest` runs `host-depth` with the key off and on (`--depth 32`) at scales 1 and 4:
+  - z-fight: a surface drawn after a nearer one with GEQUAL and depth writes, behind it by one step closing to a
+    small fraction of one (1/256 at the last device pixel at scale 1, 1/1024 at scale 4): with the key off the far surface shows where the two round to one step, which is the defect; with the
+    key on the near surface shows at every pixel;
+  - decal: a quad drawn on its base's plane from other vertices with GEQUAL, and with LEQUAL, and depth writes off,
+    covers every pixel it spans, with the key on and off;
+  - depth-equal: the base's own vertices drawn again with EQUAL cover every pixel; one step nearer, none;
+  - upload: every 16-bit value written by the CPU reads back from the device unchanged, and a quad at a written
+    step passes EQUAL against it while one a step away fails, from 0 to 65535;
+  - readback: a scene's depth committed to guest VRAM hashes to the same value with the key on as the key-off run
+    at the same scale (`--depth-ref`). The scene is a z-fight the key changes (the far surface shows at some
+    pixels with the key off and at none with it on, which the test checks), drawn so that every pixel stores the
+    near surface's step either way and that step is whole at each device pixel centre, away from the half steps
+    where a 16-bit conversion's rounding is the driver's.
+
+  The whole suite also runs once with `--depth 32`, and its cells that read the device's depth image read it at
+  either format.
+
 ## 11. Guest-Visible Items
 
 Sections 10.3, 10.6, 10.8 and 10.11 describe host-only features: what the guest reads, in its registers, memory and timing, is the
@@ -1651,6 +1784,31 @@ timing transform").
 - **"Nothing worse".** As section 11.3.2.4; in the double-precision model the arc differs from stock's when the
   retention of half a step is $1 - cL/2$ in place of the square root.
 
+##### 11.3.2.7. Decay and Retention on a Register Copy
+
+`decay_k_to_1-sqrt(1-k)` and `retention_m_to_sqrt(m)` on a `mov.s fd, fs` that copies a per-update factor are
+admitted here by their own entry. A title can load one constant once and use it twice, for example 0.2 as a blend
+factor applied every update and 0.2 as a duration in seconds. A site on the load would change both; a site on the
+copy changes only the factor.
+
+- **Key and off switch.** Those of section 11.3.2. A package leaves the form out for its title by not naming it.
+- **What it changes.** After the stock copy, the destination register `fd` is mapped as the `lwc1` form maps its
+  loaded register: inside $(0, 1)$ to $1 - \sqrt{1-k}$ or $\sqrt{m}$; outside it, `fd` keeps its stock value and the
+  site reports once (`ENHANCEMENT_FACTOR_KEPT`). The source register `fs` keeps its stock value, so a copy onto
+  itself (`fd` equal to `fs`) refuses the package, as do `mov.d` and any other instruction this section and
+  section 9.2 do not name.
+- **What the guest can observe.**
+  - Guest registers and memory: the one FPU register `fd`, and everything computed from it. No memory is written.
+    The map is the one the `lwc1` form uses: the decay in double on the host, the square root the host's
+    `sqrtf` (section 9.2, "Host arithmetic").
+  - VRAM bytes, readbacks, timing the guest can measure and I/O speed: unchanged, as section 11.3.2.4.
+- **Tier and default.** Ace, off by default, as section 11.3.2.
+- **Authentic stays byte-identical.** As section 11.3.2. `test_mapped_register_copy_keeps_its_source_when_run`
+  compiles the emitted statement and runs it: with the toggle off both registers hold the stock copy; with it on,
+  `fd` is the mapped factor and `fs` keeps its stock bits.
+- **Sampled checking.** As section 11.3.2.
+- **"Nothing worse".** As section 11.3.2.4.
+
 #### 11.3.3. Texture Scaling and the Smart 2D Filter (Not Yet Admitted)
 
 The two features of section 10.10 (#1273). Their presentation is described there; this entry is what the guest can
@@ -1777,7 +1935,9 @@ The Layer 2 mechanism of section 10.8, for a title that skips objects outside it
   the key and Widescreen has a wing (`D` > 0); with either missing, the stock call runs and nothing is written. The run
   names it (`ACE_MODE: cull on (...)`, the report's `cull`), and reports it unavailable when no matrix was scaled by
   the end of the run: the title's build has no culling package, or Widescreen is off. The package build is chosen by
-  the title's own data (section 5); the launcher picking it for an Ace launch with the part on is a separate
+  the title's own data (section 5): `build-package --ace-cull` adds the title's culling package, beside the timing
+  package when the build has one (`--experimental-60hz` or `--enhancement-package`) and as the build's one package
+  otherwise (section 9.9); the launcher picking that build for an Ace launch with the part on is a separate
   change. The player cannot tell ahead of a launch which games have a culling build, so the row's text says it
   acts only in games that do, and a run without one says so in the `ACE_MODE: cull unavailable (...)` line and
   the report. The runtime remembers at most 4096 distinct matrices (see Limits below); the report's
@@ -2042,3 +2202,31 @@ zone smaller than the game's, the first live host count reaches the edge of the 
 - **Nothing worse (section 11.2, item 4):** not shown. The tests are synthetic (`ace-selftest`'s stick cells,
   `hle-thread-selftest`'s latch cell, `gui-present-selftest`'s dead-zone cell, the player's
   `test_play_mode_stick_settings`, and the manifest tests).
+
+#### 11.3.12. Higher-Precision Host Depth (`depth=32`, Not Yet Admitted)
+
+The feature of section 10.20 (#2051). How it tests is described there; this entry is what the guest can observe.
+
+- **Status: guest-visible, not admitted under section 11.2.** Each present commits the frame it shows to guest VRAM,
+  so a frame whose z-fighting the key removed is the frame the guest keeps. Its key and this entry are in place
+  (section 11.2, items 3 and 6). The library and per-title settings of item 2 are not: the player does not write the
+  key yet. The runs of item 4 do not exist.
+- **Key and off switch.** `depth=32` or `depth=off` on the launch line (section 10.1), an optional key; a line with
+  any other value is refused, and the run is Authentic. `depth=off` and a line without the key are off. An authentic
+  run has no line, so it never has the 32-bit buffer.
+- **Never silent.** A run with it on prints `ACE_MODE: depth 32 (...)`, and `HOST_DEPTH: on (...)` when the renderer
+  makes the buffer, or `ACE_MODE: depth unavailable (...)` when the device cannot.
+- **What it changes:** the colour of pixels where two surfaces lie within one 16-bit depth step of each other, in the
+  ways section 10.20 lists for each depth test: z-fighting surfaces show the nearer one, a draw that writes no depth
+  with LEQUAL or GEQUAL can pass up to a quarter step behind, an EQUAL pass on a different surface can fail, and a
+  coplanar surface that writes depth can speckle.
+- **VRAM bytes:** the colour bytes of those pixels differ, in the frames a present commits. The depth bytes do not:
+  the step stored at every pixel is the one the 16-bit buffer stores (section 10.20).
+- **Readbacks:** a colour readback, save picture or screenshot that covers those pixels differs the same way. A depth
+  readback, and depth read through guest memory, is unchanged.
+- **Timing:** unchanged. The GE timing model (`SR_GE_TIMING=1`) charges depth-tested spans whatever the host
+  buffer's format. The larger buffer and its readbacks are host GPU time and memory (section 10.20).
+- **I/O speed:** unchanged.
+- **Tier:** Enhanced. **Default:** off, and in no graphics preset.
+- **Nothing worse (section 11.2, item 4):** not shown. The tests are synthetic (`ace-selftest`, and
+  `gpu-coherence-selftest`'s `host-depth`); no title has been run with it.

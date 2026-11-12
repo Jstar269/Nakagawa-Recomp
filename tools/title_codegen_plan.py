@@ -1770,6 +1770,7 @@ def _cache_codegen_options(
     selected_optional: set[str],
     funcs_per_chunk: int,
     enhancement_package_path: Path | None = None,
+    code_hook_package_path: Path | None = None,
 ) -> dict[str, Any]:
     from nk_core import package_cache
 
@@ -1797,6 +1798,8 @@ def _cache_codegen_options(
     env_for_enh = dict(os.environ)
     if enhancement_package_path is not None:
         env_for_enh["ENHANCEMENT_PACKAGE"] = str(enhancement_package_path)
+    if code_hook_package_path is not None:
+        env_for_enh["ENHANCEMENT_CODE_HOOK_PACKAGE"] = str(code_hook_package_path)
     options.update(package_cache.enhancement_package_options(env_for_enh))
     # Named only for the LLVM IR backend (#330), so C-backend keys are unchanged.
     options.update(package_cache.llvm_backend_options(os.environ, repository_root=ROOT))
@@ -2025,6 +2028,7 @@ def _cache_key_for_build(
     public_safe: bool = True,
     compiler_name: str,
     enhancement_package_path: Path | None = None,
+    code_hook_package_path: Path | None = None,
 ) -> dict[str, Any]:
     # Imported lazily: planning (--manager-plan) must not depend on the package cache.
     from nk_core import package_cache
@@ -2034,6 +2038,7 @@ def _cache_key_for_build(
         selected_optional=selected_optional,
         funcs_per_chunk=funcs_per_chunk,
         enhancement_package_path=enhancement_package_path,
+        code_hook_package_path=code_hook_package_path,
     )
     options["planner_sha256"] = package_cache.sha256_file(
         ROOT / "tools" / "title_codegen_plan.py"
@@ -2134,6 +2139,7 @@ def build_package(
     enhancement_package_path: Path | None = None,
     enhancement_data_root: Path | None = None,
     target: str = "host",
+    code_hook_package_path: Path | None = None,
 ) -> dict[str, Any]:
     """Run the canonical two-phase Make build and emit package/report JSON.
 
@@ -2166,6 +2172,12 @@ def build_package(
             "PACKAGE_AMBIENT_ENHANCEMENT",
             f"the environment names an enhancement package ({ambient}); unset it and pass "
             "--enhancement-package instead",
+        )
+    if code_hook_package_path is not None and enhancement_package_path is None:
+        raise PackageRouteError(
+            "PACKAGE_INVALID_ENHANCEMENT",
+            "a code-hook package is applied beside an enhancement package; on its own it is the "
+            "--enhancement-package",
         )
     try:
         normalized = title_manifest.validate_manifest(manifest)
@@ -2250,6 +2262,21 @@ def build_package(
                 shutil.copyfile(
                     sidecar_src, enhancement_package_path.with_suffix(".symbols.json")
                 )
+        if code_hook_package_path is not None:
+            # Staged the same way, under a name of its own so it never overwrites the first.
+            code_hook_package_path = _absolute_path(
+                code_hook_package_path, "code-hook-package", make_safe=False
+            )
+            _require_file(code_hook_package_path, "code-hook package")
+            hook_sidecar = code_hook_package_path.with_suffix(".symbols.json")
+            if _make_unsafe(code_hook_package_path.as_posix()):
+                staged_hook = stage_dir / "code-hook" / (
+                    re.sub(r"[^A-Za-z0-9._-]", "_", code_hook_package_path.name) or "input")
+                staged_hook.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(code_hook_package_path, staged_hook)
+                if hook_sidecar.is_file():
+                    shutil.copyfile(hook_sidecar, staged_hook.with_suffix(".symbols.json"))
+                code_hook_package_path = staged_hook
         if module_dir is not None and _make_unsafe(module_dir.as_posix()):
             staged_modules = stage_dir / "modules"
             for module in _selected_guest_modules(normalized, selected_optional):
@@ -2424,6 +2451,7 @@ def build_package(
                 funcs_per_chunk=funcs_per_chunk,
                 compiler_name=cc_name,
                 enhancement_package_path=enhancement_package_path,
+                code_hook_package_path=code_hook_package_path,
             )
         except package_cache.PackageCacheError as exc:
             raise PackageRouteError("PACKAGE_INVALID_ENHANCEMENT", str(exc)) from exc
@@ -2498,6 +2526,8 @@ def build_package(
             build_environment["ENHANCEMENT_PACKAGE"] = enhancement_package_path.as_posix()
             if enhancement_data_root is not None:
                 build_environment["ENHANCEMENT_DATA_ROOT"] = enhancement_data_root.as_posix()
+            if code_hook_package_path is not None:
+                build_environment["ENHANCEMENT_CODE_HOOK_PACKAGE"] = code_hook_package_path.as_posix()
         jobs_plan = _host_package_build_plan(build_environment["CHUNK_TARGET_BYTES"])
         build_jobs = jobs_plan.jobs
         print(f"PACKAGE_BUILD_JOBS: {build_jobs} ({jobs_plan.reason}; "
@@ -2642,6 +2672,7 @@ def build_package(
             selected_optional=selected_optional,
             funcs_per_chunk=funcs_per_chunk,
             enhancement_package_path=enhancement_package_path,
+            code_hook_package_path=code_hook_package_path,
         )
         cache_options["planner_sha256"] = package_cache.sha256_file(
             ROOT / "tools" / "title_codegen_plan.py"
@@ -2776,6 +2807,12 @@ def main(argv: list[str] | None = None) -> int:
         help="the title's extracted files, where the enhancement package's data_files are read",
     )
     parser.add_argument(
+        "--code-hook-package",
+        type=Path,
+        default=None,
+        help="a guest_memory_code_hook package applied beside --enhancement-package",
+    )
+    parser.add_argument(
         "--profile",
         dest="codegen_profile",
         choices=("none", "hst"),
@@ -2833,6 +2870,7 @@ def main(argv: list[str] | None = None) -> int:
                 reuse_aot_stage=args.reuse_aot_stage,
                 enhancement_package_path=args.enhancement_package,
                 enhancement_data_root=args.enhancement_data_root,
+                code_hook_package_path=args.code_hook_package,
                 target=args.target or default_package_target(),
             )
             return 0
