@@ -2484,7 +2484,8 @@ typedef uint64_t (*SrSchedGeNextDeadline)(void);
 typedef void (*SrSchedGeServiceDue)(void);
 void     sched_set_ge_timing_hooks(SrSchedGeNextDeadline next_deadline, SrSchedGeServiceDue service_due);
 /* GE finish callbacks waiting for an interrupt to be taken (hle_route.c): the step that runs
- * them, called after each owed VBLANK episode before the next one.  NULL: not called. */
+ * every waiting one, called after each owed VBLANK episode before the next one.  NULL: not
+ * called. */
 void     sched_set_ge_waiting_hook(SrSchedGeServiceDue deliver_waiting);
 /* VTimer handlers (hle.c): the earliest guest-time deadline of a running VTimer with a
  * handler (UINT64_MAX when none), and the interrupt-service step that runs the most overdue

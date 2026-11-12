@@ -31001,7 +31001,8 @@ static void test_ge_finish_callback_waits_for_interrupts(void) {
            "handler and nothing stops");
     int handler_gp = s_gp != thread_gp;   /* else the check could pass by coincidence */
     for (unsigned i = 0; i < 70u; i++) handler_gp &= s_gm.cb_gp[i] == s_gp;
-    expect(handler_gp, "GE finish masked: a handler-raised callback runs with the handler's $gp");
+    expect(handler_gp, "GE finish masked: a handler-raised callback runs with the handler's $gp "
+                       "(s_gp, set apart from the thread's)");
     s_cpu->r[28] = saved_gp;
 
     gm_reset();

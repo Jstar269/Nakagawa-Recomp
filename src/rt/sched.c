@@ -2318,9 +2318,10 @@ void sched_set_ge_timing_hooks(SrSchedGeNextDeadline next_deadline, SrSchedGeSer
     s_ge_timing_service = service_due;
 }
 
-/* The GE finish callbacks a VBLANK episode's handlers raised (they wait while the handler
- * runs; hle_route.c ge_finish_callback) run when that episode returns, before the next owed
- * episode, so a backlog of episodes cannot pile completions up behind one another. */
+/* Every waiting GE finish callback (hle_route.c ge_finish_callback: one a VBLANK episode's
+ * handlers raised waits while the handler runs, and one a thread raised under the mask waits for
+ * the resume) runs when each owed VBLANK episode returns, before the next one, so a backlog of
+ * episodes cannot pile completions up behind one another. */
 static SrSchedGeServiceDue s_ge_waiting_deliver;
 
 void sched_set_ge_waiting_hook(SrSchedGeServiceDue deliver_waiting) {
