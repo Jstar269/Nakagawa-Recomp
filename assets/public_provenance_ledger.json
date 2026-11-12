@@ -3968,13 +3968,14 @@
     },
     {
       "path": "src/core/nk_adhoc_net.c",
-      "classification": "project_authored_attested",
+      "classification": "upstream_derived",
       "evidence": {
         "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "nk-adhoc-net-medium-1139",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
+        "record_id": "nk_adhoc_net_lobby_ppsspp_1139_20261112",
+        "evidence_tier": "R",
+        "upstream": "documented upstream family",
+        "license": "GPL-3.0-or-later",
+        "modification_status": "modified_or_translated; see trusted record"
       }
     },
     {
@@ -3990,13 +3991,14 @@
     },
     {
       "path": "src/core/nk_adhoc_relay.c",
-      "classification": "project_authored_attested",
+      "classification": "upstream_derived",
       "evidence": {
         "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "nk-adhoc-relay-wire-1139",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
+        "record_id": "nk_adhoc_relay_codec_1139_20261112",
+        "evidence_tier": "R",
+        "upstream": "documented upstream family",
+        "license": "GPL-3.0-or-later",
+        "modification_status": "modified_or_translated; see trusted record"
       }
     },
     {
