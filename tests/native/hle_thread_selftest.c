@@ -39349,6 +39349,55 @@ static void test_high_requests_take_a_freed_partition_block(void) {
     sr_hle_test_partition_reset();
 }
 
+/* A stack in a freed partition block (#2469) and the arena release hook (partition_arena_released)
+ * meet when a create's arena range is refused over that stack. The refused range never had an
+ * owner, so it goes back to the arena without the hook; the hook would see the live stack as
+ * neither a partition block nor a free entry and give its memory to the free list. Layout: a fixed
+ * reservation F at the partition's top skips a 0x2000-byte gap G, which goes to the free list.
+ * Each 0x2000-byte create first takes the arena range R = [main_top - 0x2000, main_top), which
+ * overlaps F and is refused; the first then takes G, so its stack S covers R's lower half. */
+static void test_refused_arena_range_spares_a_freed_block_stack(void) {
+    extern void sr_hle_test_partition_reset(void);
+    extern uint32_t sr_alloc_block_at(uint32_t addr, uint32_t size, const char *name);
+    const uint32_t NO_MEMORY = 0x80020190u;
+    const uint32_t main_top = 0x0a000000u - 0x8000u;   /* below the main thread's stack */
+
+    reset_fixture();
+    s_fixture_loaded_end = 0x08a00000u;
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+    title_hle_write_cstr(FPB_NAME, "fpb");
+    expect(sched_create_thread(0x2004u, 32, 0x8000u) != 0u, "refused range: a main thread is created");
+
+    uint32_t low = fpb_low(fpb_max_free() - 0x3000u);
+    expect(low < 0x80000000u && fpb_max_free() == 0x3000u,
+           "refused range: a Low block leaves 0x3000 bytes under the main thread");
+    uint32_t fixed = sr_alloc_block_at(main_top - 0x1000u, 0x1000u, "fixed");
+    expect(fixed != 0xFFFFFFFFu && fpb_max_free() == 0x2000u,
+           "refused range: a fixed reservation at the top skips a 0x2000-byte gap to the free list");
+
+    uint32_t s1 = fpb_thread(0x2000u);
+    expect(fpb_stack_base(s1) == main_top - 0x3000u && fpb_max_free() == 0u,
+           "refused range: with the arena range refused, the stack takes the skipped gap");
+    expect(fpb_thread(0x2000u) == NO_MEMORY,
+           "refused range: a second create, its arena range refused over the first stack, has no "
+           "room");
+    expect(fpb_max_free() == 0u,
+           "refused range: the refused arena range gave none of the live stack to the free list");
+    expect(fpb_low(0x100u) >= 0x80000000u,
+           "refused range: no Low block is placed over the live stack");
+    expect(fpb_call(NID_SCE_KERNEL_DELETE_THREAD, s1, 0u, 0u, 0u) == 0u && fpb_max_free() == 0x2000u,
+           "refused range: deleting the thread gives the gap back to the partition once");
+    uint32_t s2 = fpb_thread(0x2000u);
+    expect(fpb_stack_base(s2) == main_top - 0x3000u && fpb_max_free() == 0u,
+           "refused range: the next stack takes the gap again");
+    (void)fpb_call(NID_SCE_KERNEL_DELETE_THREAD, s2, 0u, 0u, 0u);
+    (void)fpb_free(low);
+
+    s_fixture_loaded_end = 0x00400000u;
+    sr_hle_test_partition_reset();
+}
+
 static void test_alloc_block_at_fixed_address(void) {
     extern void sr_hle_test_partition_reset(void);
     extern uint32_t sr_hle_test_partition_heap_ptr(void);
@@ -53350,6 +53399,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_max_free_unchanged_after_top_stack_deleted();
     test_partition_spans_the_whole_user_partition();
     test_high_requests_take_a_freed_partition_block();
+    test_refused_arena_range_spares_a_freed_block_stack();
     test_partition_unknown_block_codes();
     test_module_id_queries_resolve_owning_module();
     test_query_module_info_answers_main_module_record();
