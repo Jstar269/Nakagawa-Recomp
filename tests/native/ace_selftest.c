@@ -341,7 +341,7 @@ static void cell_parse(void) {
 
     /* format and parse agree */
     char line[ACE_SPEC_MAX];
-    AceConfig a = { 1, 4, 0, 1, 0, 0, 0, ACE_TIER_ENHANCED, ACE_SAS_OFF, 0, 0, 0, 0, 0, 0, 0 }, b;
+    AceConfig a = { 1, 4, 0, 1, 0, 0, 0, ACE_TIER_ENHANCED, ACE_SAS_OFF, 0, 0, 0, 0, 0, 0, 0, 0 }, b;
     CHECK(ace_format(&a, line, sizeof(line)) && ace_parse(line, &b, NULL, 0) &&
           memcmp(&a, &b, sizeof(a)) == 0, "format round trip (%s)", line);
     CHECK(ace_format(&a, line, 8) == 0 && line[0] == '\0', "format refuses a short buffer");

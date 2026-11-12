@@ -3349,7 +3349,8 @@ static void test_settings_pages(void) {
     CHECK(flow_case_fits(FLOW_SETTINGS_ACE, 960, 540, dump, sizeof(dump)) &&
               flow_case_has_scroll(FLOW_SETTINGS_ACE, 960, 540),
           "Settings > Enhanced scrolls inside the 960 x 540 window");
-    CHECK(dump_flow_case_sized(FLOW_SETTINGS_ACE, 1600, 1000, dump, sizeof(dump)) &&
+    /* 1100 tall: the fifteenth row (Smooth far textures) is past the bottom of a 1000-tall window. */
+    CHECK(dump_flow_case_sized(FLOW_SETTINGS_ACE, 1600, 1100, dump, sizeof(dump)) &&
               strstr(dump, "\"PLAY MODE: ENHANCED\"") != NULL &&
               strstr(dump, "\"TEXTURE FILTERING: 16X\"") != NULL &&
               strstr(dump, "\"CRISP SYSTEM TEXT: ON\"") != NULL &&
