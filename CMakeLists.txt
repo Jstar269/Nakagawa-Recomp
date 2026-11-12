@@ -19,6 +19,7 @@ endif()
 # Core Recompilation & Platform Library
 # -----------------------------------------------------------------------------
 set(CORE_SOURCES
+    src/core/nk_shared_helpers.c
     src/core/nk_font.c
     src/core/nk_pgf_host.c
     src/rt/pgf_public.c
@@ -43,9 +44,11 @@ set(CORE_SOURCES
     src/core/nk_psp_amctrl.c
     src/core/nk_psp_lzrc.c
     src/core/nk_psp_npumdimg.c
+    src/core/nk_pbp_homebrew.c
     src/core/nk_disc_expand.c
     src/core/nk_disc_verify.c
     src/core/nk_zip.c
+    src/core/nk_steam_shortcuts.c
     src/core/nk_data_migrate.c
     src/core/generated/nk_title_catalog.c
 )
@@ -58,7 +61,11 @@ endif()
 
 add_library(nakagawa_core STATIC ${CORE_SOURCES})
 if(WIN32)
-    target_link_libraries(nakagawa_core PUBLIC shell32 ole32 uuid)
+    target_link_libraries(nakagawa_core PUBLIC shell32 ole32 uuid advapi32)
+elseif(ANDROID)
+    # The Android section of nk_platform_posix.c sends standard output and errors to the
+    # system log (__android_log_write), so everything linking the core needs liblog.
+    target_link_libraries(nakagawa_core PUBLIC log)
 endif()
 
 target_include_directories(nakagawa_core PUBLIC
@@ -122,6 +129,38 @@ enable_testing()
 # Several native CTests write relative scratch files under build/. Keep that
 # directory in the CMake binary tree for out-of-source builds.
 file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/build")
+# NK_TEST_BUILD_ROOT is that scratch directory as the test binaries see it (their
+# SR_SELFTEST_BUILD_ROOT): the binary tree's build/, or its device copy below.
+set(NK_TEST_BUILD_ROOT "${CMAKE_CURRENT_BINARY_DIR}/build")
+
+# Native tests on an Android device (#360, docs/ANDROID_DEVELOPMENT.md#native-tests-on-a-device).
+# With the NDK toolchain and NK_ANDROID_TEST_DIR set to a folder under /data/local/tmp, CTest runs
+# every test executable on the device through tools/android_test_runner.py (CMake's cross-compiling
+# emulator hook), after one setup test copies the tracked source tree there. The results are the
+# device's own exit statuses.
+set(NK_ANDROID_TEST_DIR "" CACHE STRING
+    "Android only: run CTest on the adb device in this folder under /data/local/tmp")
+if(NK_ANDROID_TEST_DIR)
+    if(NOT ANDROID)
+        message(FATAL_ERROR "NK_ANDROID_TEST_DIR needs the Android NDK toolchain "
+            "(CMAKE_TOOLCHAIN_FILE=<ndk>/build/cmake/android.toolchain.cmake)")
+    endif()
+    if(NOT NK_ANDROID_TEST_DIR MATCHES "^/data/local/tmp/[^/]")
+        message(FATAL_ERROR "NK_ANDROID_TEST_DIR must be a folder under /data/local/tmp, "
+            "the adb shell user's scratch area: ${NK_ANDROID_TEST_DIR}")
+    endif()
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    set(NK_TEST_BUILD_ROOT "${NK_ANDROID_TEST_DIR}/work/build")
+    set(CMAKE_CROSSCOMPILING_EMULATOR "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tools/android_test_runner.py" run
+        --device-dir "${NK_ANDROID_TEST_DIR}"
+        --source-root "${CMAKE_CURRENT_SOURCE_DIR}"
+        --binary-root "${CMAKE_CURRENT_BINARY_DIR}" --)
+    add_test(NAME android_device_sync
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/android_test_runner.py"
+            sync --device-dir "${NK_ANDROID_TEST_DIR}" --source-root "${CMAKE_CURRENT_SOURCE_DIR}")
+    set_tests_properties(android_device_sync PROPERTIES FIXTURES_SETUP nk_android_device)
+endif()
 
 add_executable(test_core_catalog
     tests/native/test_core_catalog.c
@@ -129,6 +168,18 @@ add_executable(test_core_catalog
 )
 target_link_libraries(test_core_catalog PRIVATE nakagawa_core)
 add_test(NAME core_catalog_test COMMAND test_core_catalog)
+
+add_executable(test_shared_helpers
+    src/core/nk_shared_helpers.c
+    tests/native/test_shared_helpers.c
+)
+target_include_directories(test_shared_helpers PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+)
+target_compile_definitions(test_shared_helpers PRIVATE
+    SR_SELFTEST_BUILD_ROOT="${NK_TEST_BUILD_ROOT}"
+)
+add_test(NAME shared_helpers_test COMMAND test_shared_helpers)
 
 add_executable(test_parsers_hostile
     tests/native/test_parsers_hostile.c
@@ -147,6 +198,9 @@ add_executable(test_launch_resolution
 )
 target_link_libraries(test_launch_resolution PRIVATE nakagawa_core)
 add_test(NAME launch_resolution_test COMMAND test_launch_resolution)
+# On Android the two subtests that spawn the runtime need the app's TitleActivity; the test
+# runs the rest and exits 77.
+set_tests_properties(launch_resolution_test PROPERTIES SKIP_RETURN_CODE 77)
 
 add_executable(test_pgf_public
     tests/native/test_pgf_public.c
@@ -182,6 +236,13 @@ add_executable(test_nk_zip
 target_link_libraries(test_nk_zip PRIVATE nakagawa_core)
 add_test(NAME nk_zip_test COMMAND test_nk_zip)
 
+add_executable(test_steam_shortcuts
+    tests/native/test_steam_shortcuts.c
+    tests/native/native_test_isolation.c
+)
+target_link_libraries(test_steam_shortcuts PRIVATE nakagawa_core)
+add_test(NAME steam_shortcuts_test COMMAND test_steam_shortcuts)
+
 add_executable(test_xb_parser
     tests/native/test_xb_parser.c
     tests/native/native_test_isolation.c
@@ -202,6 +263,7 @@ add_executable(test_player_state
     tests/native/test_player_state.c
     tests/native/native_test_isolation.c
     src/player/player_state.c
+    src/player/discord_presence.c
     src/player/input_settings.c
     src/player/iso_reader.c
     src/player/package_builder.c
@@ -223,6 +285,19 @@ add_test(NAME player_state_test COMMAND test_player_state)
 set_tests_properties(player_state_test PROPERTIES
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
     ENVIRONMENT "NK_TEST_SCRATCH_DIR=${CMAKE_CURRENT_BINARY_DIR}/build")
+if(ANDROID)
+    # On Android the package rebuild steps need a libnk_python.so in the app's native library
+    # folder, which the test folder does not have (#360); the test runs everything else and
+    # exits 77.
+    set_tests_properties(player_state_test PROPERTIES SKIP_RETURN_CODE 77)
+endif()
+
+# The console nickname rule (src/core/nk_nickname.h) is header-only; its test needs no library.
+add_executable(test_nk_nickname tests/native/test_nk_nickname.c)
+target_include_directories(test_nk_nickname PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+)
+add_test(NAME nk_nickname_test COMMAND test_nk_nickname)
 
 # The nk_ui core and its C3a reserved stubs stay SDL and Vulkan free. Keep this
 # explicit source inventory in sync with mk/nk_ui.mk.
@@ -252,7 +327,8 @@ set(NK_UI_BACKEND_SOURCES
 set(NK_UI_RESERVED_STUB_SOURCES ${NK_UI_EDGE_SOURCES} ${NK_UI_BACKEND_SOURCES})
 # The screens that came out of the old scr_title.c: the title page, the one-card flow pages,
 # About, the setup wizard, the game-found card, Settings, Controls and the developer log, with
-# the frame and form code they share (scr_flow.c, scr_form.c).
+# the frame and form code they share (scr_flow.c, scr_form.c), and the on-screen keyboard
+# the nickname editor uses (ui_keyboard.c).
 set(NK_UI_PLAYER_TITLE_SOURCES
     src/player/ui/scr_title.c
     src/player/ui/scr_flow.c
@@ -269,6 +345,7 @@ set(NK_UI_PLAYER_TITLE_SOURCES
     src/player/ui/scr_settings.c
     src/player/ui/scr_controller.c
     src/player/ui/scr_devlog.c
+    src/player/ui/ui_keyboard.c
 )
 set(NK_UI_PLAYER_SCREEN_SOURCES
     src/player/ui/player_ui_nk.c
@@ -343,12 +420,14 @@ add_executable(test_player_screens
     ${NK_UI_PLAYER_TITLE_SOURCES}
 )
 target_include_directories(test_player_screens PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/player
     ${CMAKE_CURRENT_SOURCE_DIR}/src/ui
     ${CMAKE_CURRENT_SOURCE_DIR}/src/player/ui
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/clay
 )
 target_compile_definitions(test_player_screens PRIVATE
-    SR_SELFTEST_BUILD_ROOT="${CMAKE_CURRENT_BINARY_DIR}/build"
+    SR_SELFTEST_BUILD_ROOT="${NK_TEST_BUILD_ROOT}"
 )
 if(NOT WIN32)
     target_link_libraries(test_player_screens PRIVATE m)
@@ -395,7 +474,7 @@ target_include_directories(test_nk_ui_sdlr PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/clay
 )
 target_compile_definitions(test_nk_ui_sdlr PRIVATE
-    SR_SELFTEST_BUILD_ROOT="${CMAKE_CURRENT_BINARY_DIR}/build"
+    SR_SELFTEST_BUILD_ROOT="${NK_TEST_BUILD_ROOT}"
 )
 if(TARGET SDL3::SDL3 AND TARGET SDL3_ttf::SDL3_ttf)
     target_compile_definitions(test_nk_ui_sdlr PRIVATE NK_UI_WITH_SDL NK_UI_WITH_SDL_TTF)
@@ -545,6 +624,20 @@ endif()
 add_test(NAME update_check_test COMMAND test_update_check)
 set_tests_properties(update_check_test PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
+# Discord status (#2259) on a fake transport and, on Windows, a fake pipe server with a
+# test-only name; it never opens Discord's own pipes.
+add_executable(test_discord_presence
+    tests/native/test_discord_presence.c
+    tests/native/native_test_isolation.c
+    src/player/discord_presence.c
+)
+target_include_directories(test_discord_presence PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/player
+)
+target_link_libraries(test_discord_presence PRIVATE nakagawa_core)
+add_test(NAME discord_presence_test COMMAND test_discord_presence)
+
 add_executable(test_input_settings
     tests/native/test_input_settings.c
     tests/native/native_test_isolation.c
@@ -590,6 +683,57 @@ else()
     add_test(NAME posix_process_test COMMAND test_posix_process)
 endif()
 
+# Host-neutral runtime selftests: the Makefile's coro-selftest, coro-selftest-asm,
+# fp-convert-selftest, ge-float24-selftest and ge-raster-ref-selftest. The sources are the same;
+# the flags are CMake's, not the Makefile's (no -O2, -Wpedantic or runtime CFLAGS), so these
+# results do not stand in for the Make gate. They need no SDL and no game input, so a cross build
+# runs them on its target too: on Android the coroutine test exercises the stack-switch backend
+# bionic needs and the FP test the AArch64 FPCR window, on the device's own CPU.
+set(NK_RUNTIME_SELFTEST_C_OPTIONS $<$<NOT:$<C_COMPILER_ID:MSVC>>:-fno-strict-aliasing>)
+# src/rt/sr_coro.c builds on Windows (fibers), Linux (ucontext) and Android (stack switch), not
+# on macOS: its stack-switch assembly is ELF-only, and its ucontext route lacks the
+# _XOPEN_SOURCE that Apple's <ucontext.h> requires. The macOS port is #329.
+if(NOT APPLE)
+    add_executable(test_sr_coro tests/native/sr_coro_selftest.c src/rt/sr_coro.c)
+    target_include_directories(test_sr_coro PRIVATE src/rt src/core)
+    target_compile_options(test_sr_coro PRIVATE ${NK_RUNTIME_SELFTEST_C_OPTIONS})
+    if(WIN32)
+        target_link_libraries(test_sr_coro PRIVATE psapi)
+    else()
+        target_link_libraries(test_sr_coro PRIVATE m)
+    endif()
+    add_test(NAME sr_coro_test COMMAND test_sr_coro)
+endif()
+if(NOT WIN32 AND NOT ANDROID AND NOT APPLE
+        AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64|aarch64|arm64|ARM64)$")
+    # x86-64 and AArch64 System V (ELF) hosts, as in mk/selftests.mk. Android builds the
+    # stack-switch backend by default; another such host selects it here.
+    add_executable(test_sr_coro_asm tests/native/sr_coro_selftest.c src/rt/sr_coro.c)
+    target_include_directories(test_sr_coro_asm PRIVATE src/rt src/core)
+    target_compile_definitions(test_sr_coro_asm PRIVATE SR_CORO_BACKEND_ASM)
+    target_compile_options(test_sr_coro_asm PRIVATE ${NK_RUNTIME_SELFTEST_C_OPTIONS})
+    target_link_libraries(test_sr_coro_asm PRIVATE m)
+    add_test(NAME sr_coro_asm_test COMMAND test_sr_coro_asm)
+endif()
+
+add_executable(test_fp_convert tests/native/fp_convert_selftest.c)
+target_include_directories(test_fp_convert PRIVATE src/rt src/core)
+target_compile_options(test_fp_convert PRIVATE ${NK_RUNTIME_SELFTEST_C_OPTIONS})
+add_test(NAME fp_convert_test COMMAND test_fp_convert)
+
+add_executable(test_ge_float24 tests/native/ge_float24_selftest.c src/rt/ge_float24.c)
+target_include_directories(test_ge_float24 PRIVATE src/rt)
+add_test(NAME ge_float24_test COMMAND test_ge_float24)
+
+add_executable(test_ge_raster_ref tests/native/ge_raster_ref_selftest.c src/rt/ge_raster_ref.c)
+target_include_directories(test_ge_raster_ref PRIVATE src/rt)
+add_test(NAME ge_raster_ref_test COMMAND test_ge_raster_ref)
+if(NOT WIN32)
+    foreach(nk_runtime_test test_fp_convert test_ge_float24 test_ge_raster_ref)
+        target_link_libraries(${nk_runtime_test} PRIVATE m)
+    endforeach()
+endif()
+
 # -----------------------------------------------------------------------------
 # Native Player Application (SDL3)
 # -----------------------------------------------------------------------------
@@ -622,10 +766,10 @@ if(BUILD_PLAYER)
         src/player/input_settings.c
         src/player/iso_reader.c
         src/player/setup_staging.c
-        src/player/ui_renderer.c
         src/player/package_builder.c
         src/core/nk_disc_chd.c
         src/player/update_check.c
+        src/player/discord_presence.c
         ${NK_UI_CORE_SOURCES}
         ${NK_UI_EDGE_SOURCES}
         src/ui/backend/nk_ui_sdlr.c
@@ -802,6 +946,7 @@ set(NK_RUNTIME_SOURCES
     src/rt/fbcap_policy.c
     src/rt/fbcap.c
     src/rt/videorec.c
+    src/rt/replay_checkpoint.c
     src/rt/ge_capture.c
     src/rt/vfpu_interp.c
     src/rt/hle.c
@@ -831,6 +976,7 @@ set(NK_RUNTIME_SOURCES
     src/rt/hle_system.c
     src/rt/hle_umd.c
     src/rt/hle_utility.c
+    src/rt/hle_videocodec.c
     src/rt/audio_resample.c
     src/rt/flash0_font.c
     src/rt/mp3_bridge.c
@@ -857,15 +1003,19 @@ set(NK_RUNTIME_SOURCES
     src/rt/gpu_sdl3vk/sdl3vk.c
     src/rt/gpu_sdl3vk/ge_gpu.c
     src/rt/gpu_sdl3vk/tex_scale.c
+    src/rt/gpu_sdl3vk/glyph_recon.c
+    src/rt/texrepl.c
     third_party/xbrz/xbrz.c
     src/rt/gpu_sdl3vk/ace_ui.c
     src/rt/gpu_sdl3vk/ace_smooth.c
     src/rt/gpu_sdl3vk/ace_hud.c
     src/rt/gpu_sdl3vk/fsr1_pass.c
+    src/rt/gpu_sdl3vk/anime4k_pass.c
     src/core/nk_input_profile.c
     src/core/nk_font.c
     src/core/nk_json.c
     src/core/nk_platform_posix.c
+    src/core/nk_shared_helpers.c
 )
 set(NK_RUNTIME_GE_SOURCE src/rt/ge.c)
 set(NK_RUNTIME_ATRAC3P_SOURCES
@@ -1052,3 +1202,28 @@ function(nk_add_title_runtime target package_dir title_id)
         target_link_libraries(${target} PRIVATE log android)
     endif()
 endfunction()
+
+# -----------------------------------------------------------------------------
+# Test executables keep assert()
+# -----------------------------------------------------------------------------
+# The native tests check with assert(). A Release, RelWithDebInfo or MinSizeRel configuration
+# defines NDEBUG, which would compile those checks away and let a test pass without testing
+# anything, so every test executable undefines it again (the flag comes after the configuration's
+# flags on the command line). On a device run, every test also needs the source copy the
+# android_device_sync setup test makes.
+get_property(nk_buildsystem_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+foreach(nk_target IN LISTS nk_buildsystem_targets)
+    get_target_property(nk_target_type ${nk_target} TYPE)
+    if(nk_target_type STREQUAL "EXECUTABLE" AND nk_target MATCHES "^test_")
+        if(MSVC)
+            target_compile_options(${nk_target} PRIVATE /UNDEBUG)
+        else()
+            target_compile_options(${nk_target} PRIVATE -UNDEBUG)
+        endif()
+    endif()
+endforeach()
+if(NK_ANDROID_TEST_DIR)
+    get_property(nk_device_tests DIRECTORY PROPERTY TESTS)
+    list(REMOVE_ITEM nk_device_tests android_device_sync)
+    set_tests_properties(${nk_device_tests} PROPERTIES FIXTURES_REQUIRED nk_android_device)
+endif()

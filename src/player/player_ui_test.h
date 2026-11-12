@@ -50,17 +50,15 @@ enum {
     PLAYER_UI_TEST_ACTION_ASSERT_CONSENT = -20260928,
     PLAYER_UI_TEST_ACTION_ASSERT_VIEW = -20260929,
     PLAYER_UI_TEST_ACTION_ASSERT_GAME_RUNNING = -20260930,
-    PLAYER_UI_TEST_ACTION_WAIT_ART_ATTEMPT = -20261001,
-    PLAYER_UI_TEST_ACTION_MOUNT_ART_ISO = -20261002,
-    PLAYER_UI_TEST_ACTION_SATURATE_ART_CACHE = -20261003,
     PLAYER_UI_TEST_ACTION_START_SYNTHETIC_BUILD = -20261004,
     PLAYER_UI_TEST_ACTION_INVALIDATE_AND_START_SYNTHETIC_BUILD = -20261005,
     PLAYER_UI_TEST_ACTION_WAIT_PACKAGE_FAILURE = -20261006,
     PLAYER_UI_TEST_ACTION_INVALIDATE_PACKAGE_CACHE = -20261007,
-    PLAYER_UI_TEST_ACTION_WAIT_ART_DELAY_ACTIVE = -20261008,
     PLAYER_UI_TEST_ACTION_WAIT_PACKAGE_STATUS = -20261009,
     PLAYER_UI_TEST_ACTION_WAIT_REPORT = -20261010,
-    PLAYER_UI_TEST_ACTION_GAME_EXIT = -20261011
+    PLAYER_UI_TEST_ACTION_GAME_EXIT = -20261011,
+    PLAYER_UI_TEST_ACTION_WAIT_UPDATE = -20261012,
+    PLAYER_UI_TEST_ACTION_WAIT_LAID_OUT = -20261110
 };
 
 #define UI_TEST_MAX_PACKAGE_STATUS_THREAD_CREATE_FAILURES 8
@@ -88,7 +86,6 @@ bool player_ui_test_fail_thread_create_for_game(const GameRecord *game);
 int player_ui_test_fail_title_index(const char *disc_id);
 /* The next scripted event: 1 with *event filled, 0 at the end, -1 on a bad step. */
 int player_ui_test_next_event(const char *script, size_t *cursor, SDL_Event *event);
-bool player_ui_test_copy_file(const char *source, const char *destination);
 bool player_ui_test_start_synthetic_build(PlayerApp *app, unsigned game_index);
 const char *player_ui_test_view_name(PlayerView view);
 void player_ui_test_report_frame(int frame_number, const PlayerApp *app,
@@ -103,7 +100,6 @@ typedef struct PlayerUiTest {
     const char *screenshot_path;
     const char *error_code;
     const char *iso_path;
-    const char *art_mount_source;
     bool wait_background;
     bool mode;               /* a --ui-test-* option was given */
     bool failed;
@@ -116,10 +112,10 @@ typedef struct PlayerUiTest {
     NkRuntimePackageStatus wait_package_status_target;
     bool waiting_for_report;
     uint32_t wait_report_mask;   /* bit n set: PlayerReportPhase n ends the wait */
-    bool waiting_for_art_attempt;
-    bool waiting_for_art_delay;
-    uint64_t wait_art_delay_deadline;
-    unsigned wait_art_attempt_target;
+    bool waiting_for_update;     /* WAIT_UPDATE: until app->update.phase is the target */
+    PlayerUpdatePhase wait_update_target;
+    bool waiting_for_layout;     /* WAIT_LAID_OUT: until a frame after it is laid out */
+    int wait_layout_frame;       /* the frame count when WAIT_LAID_OUT began */
     uint64_t wait_deadline;
     uint32_t wait_view_mask;
     bool fake_game_running;
@@ -171,8 +167,8 @@ const char *player_ui_test_report_data_root(void);
 /* True when the script asked the Problem report worker thread to fail to start. */
 bool player_ui_test_fail_report_thread_create(void);
 /* One frame's scripted step: the waits, the assertions and the next event. */
-void player_ui_test_step_script(PlayerUiTest *t, PlayerApp *app, SDL_Renderer *renderer,
-                                bool *running, bool background_pending);
+void player_ui_test_step_script(PlayerUiTest *t, PlayerApp *app, bool *running,
+                                bool background_pending);
 void player_ui_test_event_handled(PlayerUiTest *t, const SDL_Event *event);
 void player_ui_test_begin_frame(PlayerUiTest *t);
 void player_ui_test_end_frame(PlayerUiTest *t, const PlayerApp *app, SDL_Renderer *renderer,
@@ -199,6 +195,7 @@ void player_ui_test_report_post_build_validation(int status, const char *reason,
 void player_ui_test_report_post_build_transition(PlayerApp *app, const char *disc_id,
                                                  int current_index);
 void player_ui_test_hold_disc_check(void);
+void player_ui_test_delay_screenshot(void);
 /* The raw NK_UI_TEST_SLOW_START_MS setting, or NULL. */
 const char *player_ui_test_slow_start_text(void);
 void player_ui_test_slow_start(const PlayerUiTestLaunch *launch);
@@ -258,9 +255,8 @@ static inline void player_ui_test_report_update_phase(const PlayerUiTest *t,
 static inline const char *player_ui_test_report_data_root(void) { return NULL; }
 static inline bool player_ui_test_fail_report_thread_create(void) { return false; }
 static inline void player_ui_test_step_script(PlayerUiTest *t, PlayerApp *app,
-                                              SDL_Renderer *renderer, bool *running,
-                                              bool background_pending) {
-    (void)t; (void)app; (void)renderer; (void)running; (void)background_pending;
+                                              bool *running, bool background_pending) {
+    (void)t; (void)app; (void)running; (void)background_pending;
 }
 static inline void player_ui_test_event_handled(PlayerUiTest *t, const SDL_Event *event) {
     (void)t; (void)event;
@@ -310,6 +306,7 @@ static inline void player_ui_test_report_post_build_transition(PlayerApp *app,
     (void)app; (void)disc_id; (void)current_index;
 }
 static inline void player_ui_test_hold_disc_check(void) {}
+static inline void player_ui_test_delay_screenshot(void) {}
 static inline const char *player_ui_test_slow_start_text(void) { return NULL; }
 static inline void player_ui_test_slow_start(const PlayerUiTestLaunch *launch) {
     (void)launch;

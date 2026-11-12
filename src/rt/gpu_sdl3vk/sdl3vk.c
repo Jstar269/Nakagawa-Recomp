@@ -35,6 +35,7 @@
 #include <SDL3/SDL_vulkan.h>
 #include <vulkan/vulkan.h>
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -51,7 +52,7 @@
 
 #define PSP_W 480
 #define PSP_H 272
-#define PRESENT_FRAMES 3
+#define PRESENT_FRAMES SDL3VK_PRESENT_FRAMES
 #define HUD_W 240
 #define HUD_H 108
 #define LOGIC_NOTICE_H 22
@@ -74,6 +75,7 @@ typedef struct PresentFrame {
     VkDeviceMemory fbimg_mem;
     VkImage source;
     int submitted;
+    uint64_t serial;  /* its latest submission's (sdl3vk_present_completed) */
     int ts_written;   /* SR_GPU_TIMESTAMPS: this recording holds its start/end pair */
 } PresentFrame;
 
@@ -115,6 +117,9 @@ static VkSemaphore    s_swap_sem_done[8];
 
 static int      s_renderer_terminal = 0;
 static int      s_denorm_preserve_f32 = 0;   /* see sdl3vk_init: VK_KHR_shader_float_controls */
+static int      s_dst_read = SDL3VK_DST_READ_SNAPSHOT;   /* see sdl3vk_init: SR_GPU_DST_READ */
+static uint32_t s_dev_extensions = 0;        /* what vkCreateDevice was given (sdl3vk_get_vk) */
+static int      s_dev_features = 0, s_dev_features2 = 0;
 /* A quit request (window close, SDL_EVENT_QUIT, ESC) is sticky. Two call sites drain
  * the SDL event queue -- gui_pump's sdl3vk_poll() and every present -- and only the
  * former exits the process. When a present consumed the quit (the common case: it
@@ -149,6 +154,31 @@ static VkResult pstep_after(int step, VkResult r) {
 }
 
 #define PSTEP_VK(step, expr) (pstep_skips(step) ? s_pstep_fault_result : pstep_after((step), (expr)))
+
+/* Game-frame presents never wait for the presentation engine while this is set
+ * (sdl3vk_set_present_nowait); the s_present_busy_* counts are the frames returned not shown. */
+static int      s_present_nowait = 0;
+static uint64_t s_present_busy_image = 0;  /* acquire: the presentation engine held every image */
+static uint64_t s_present_busy_slot = 0;   /* the frame slot's submission was still pending */
+
+/* Fence-status seam for the same selftest: it stands in a frame slot whose submission is still
+ * pending. NULL in production, like s_acquire_fn below. */
+static VkResult (*s_fence_status_fn)(VkDevice, VkFence) = NULL;
+
+/* Acquire seam for the present-pacing selftest, which stands in a display that holds every
+ * image. File-static with no exported setter: only sdl3vk_selftest.inc, included below, sets it,
+ * and the production path is the NULL branch. */
+typedef VkResult (*Sdl3VkAcquireFn)(VkDevice, VkSwapchainKHR, uint64_t, VkSemaphore, VkFence,
+                                    uint32_t *);
+static Sdl3VkAcquireFn s_acquire_fn = NULL;
+
+static VkResult present_acquire(uint64_t timeout, VkSemaphore sem, uint32_t *idx) {
+    return s_acquire_fn ? s_acquire_fn(s_dev, s_swap, timeout, sem, VK_NULL_HANDLE, idx)
+                        : vkAcquireNextImageKHR(s_dev, s_swap, timeout, sem, VK_NULL_HANDLE, idx);
+}
+
+void sdl3vk_set_present_nowait(int on) { s_present_nowait = on ? 1 : 0; }
+uint64_t sdl3vk_present_busy_count(void) { return s_present_busy_image + s_present_busy_slot; }
 
 int sdl3vk_renderer_terminal(void) {
     return s_renderer_terminal;
@@ -187,6 +217,9 @@ static int (*s_logic_slowed_cb)(unsigned *rate) = NULL;
 static SDL_Surface  *s_hud_surf = NULL;
 static SDL_Renderer *s_hud_ren = NULL;
 static VkFormat      s_hud_fmt = VK_FORMAT_UNDEFINED;
+/* The last HUD composition (#314): how many times a present copied the HUD into the window's
+ * image, the rectangle it covered, and the image's size then. The capture selftest checks it. */
+static struct { unsigned copies; int x, y, w, h, swap_w, swap_h; } s_hud_last;
 
 int sdl3vk_hud_is_enabled(void) {
     return s_hud_enabled != SDL3VK_HUD_OFF;
@@ -230,7 +263,12 @@ void sdl3vk_set_logic_slowed_cb(int (*cb)(unsigned *rate)) {
 
 static void (*s_ui_pass)(const Sdl3VkUiPass *frame);
 static Sdl3VkShowPass s_show_pass;
+static Sdl3VkShowDone s_show_done;
+static uint64_t s_present_submitted;  /* present submissions made, the newest one's serial */
+static uint64_t s_present_completed;  /* sdl3vk_present_completed */
 static Sdl3VkUpscalePass s_upscale_pass;
+static Sdl3VkUpscalePass s_rec_upscale_pass;  /* the recording's own upscaler (#2138) */
+static int s_upscale_cpu_frame;  /* the last source present's kind, for the held presents */
 /* What the last present's frame blit read: its source image and size, its place in the window and
  * its filter. The capture selftest checks the presentation upscaler's image is what reaches the
  * window. */
@@ -244,8 +282,33 @@ void sdl3vk_set_show_pass(Sdl3VkShowPass pass) {
     s_show_pass = pass;
 }
 
+void sdl3vk_set_show_done(Sdl3VkShowDone done) {
+    s_show_done = done;
+}
+
+uint64_t sdl3vk_present_completed(void) {
+    return s_present_completed;
+}
+
+/* A frame's submission has been seen finished: its slot is free, and the completed count moves
+ * up to it (it never moves back, as slots can be waited out of order). */
+static void present_frame_finished(PresentFrame *f) {
+    f->submitted = 0;
+    f->source = VK_NULL_HANDLE;
+    if (f->serial > s_present_completed) s_present_completed = f->serial;
+}
+
+static void present_frame_submitted(PresentFrame *f) {
+    f->submitted = 1;
+    f->serial = ++s_present_submitted;
+}
+
 void sdl3vk_set_upscale_pass(Sdl3VkUpscalePass pass) {
     s_upscale_pass = pass;
+}
+
+void sdl3vk_set_record_upscale_pass(Sdl3VkUpscalePass pass) {
+    s_rec_upscale_pass = pass;
 }
 
 void sdl3vk_set_ui_pass(void (*pass)(const Sdl3VkUiPass *frame)) {
@@ -306,8 +369,7 @@ static int wait_present_frame(PresentFrame *f) {
         s_renderer_terminal = 1;
         return 0;
     }
-    f->submitted=0;
-    f->source=VK_NULL_HANDLE;
+    present_frame_finished(f);
     if (f->ts_written) {
         uint64_t v[2];
         uint32_t q = (uint32_t)(f - s_frame) * 2u;
@@ -322,6 +384,27 @@ static int wait_present_frame(PresentFrame *f) {
         }
     }
     return 1;
+}
+
+/* The no-wait form of wait_present_frame for a game-frame present under
+ * sdl3vk_set_present_nowait: 1 when the frame is free (its bookkeeping done as the wait does),
+ * 0 while its submission is still pending, -1 on failure (the renderer is terminal). The
+ * submission waited on its acquire semaphore, which a FIFO display may signal only at its own
+ * vblank, so a pending frame can be the display holding the guest back; under MAILBOX or
+ * IMMEDIATE it is the GPU running PRESENT_FRAMES presents behind. Either way the guest does
+ * not wait for it. */
+static int poll_present_frame(PresentFrame *f) {
+    if (!f->submitted || s_pstep_fault == PSTEP_FRAME_WAIT) return wait_present_frame(f) ? 1 : -1;
+    VkResult r = s_fence_status_fn ? s_fence_status_fn(s_dev, f->fence)
+                                   : vkGetFenceStatus(s_dev, f->fence);
+    if (r == VK_NOT_READY) return 0;
+    if (r != VK_SUCCESS) {
+        fprintf(stderr, "sdl3vk: present frame fence status failed: %d; the renderer is terminal\n",
+                (int)r);
+        s_renderer_terminal = 1;
+        return -1;
+    }
+    return wait_present_frame(f) ? 1 : -1;
 }
 
 static int wait_all_present_frames(void) {
@@ -844,11 +927,48 @@ int sdl3vk_init(const char *title) {
         VkExtensionProperties *xs = NULL;
         if (vkEnumerateDeviceExtensionProperties(s_pdev, NULL, &nx, NULL) == VK_SUCCESS && nx)
             xs = (VkExtensionProperties *)calloc(nx, sizeof(*xs));
-        int have = 0;
+        int have = 0, have_interlock = 0;
         if (xs && vkEnumerateDeviceExtensionProperties(s_pdev, NULL, &nx, xs) == VK_SUCCESS)
-            for (uint32_t i = 0; i < nx; i++)
+            for (uint32_t i = 0; i < nx; i++) {
                 if (strcmp(xs[i].extensionName, VK_KHR_SHADER_FLOAT_CONTROLS_EXTENSION_NAME) == 0) have = 1;
+                if (strcmp(xs[i].extensionName, VK_EXT_FRAGMENT_SHADER_INTERLOCK_EXTENSION_NAME) == 0)
+                    have_interlock = 1;
+            }
         free(xs);
+        /* The destination-read path (#2109, sdl3vk.h). A forced path the device lacks is refused
+         * with its reason, and the snapshot runs. */
+        s_dst_read = SDL3VK_DST_READ_SNAPSHOT;
+        const char *dst_env = getenv("SR_GPU_DST_READ");
+        int dst_want = sdl3vk_parse_dst_read(dst_env);
+        if (dst_want == -1) {
+            fprintf(stderr, "sdl3vk: unknown SR_GPU_DST_READ '%s' (snapshot or interlock); using the "
+                            "default: the interlock where the device has it\n", dst_env);
+            dst_want = -2;
+        }
+        if (dst_want != SDL3VK_DST_READ_SNAPSHOT) {
+            const char *why = NULL;
+            if (!have_interlock) {
+                why = "no VK_EXT_fragment_shader_interlock";
+            } else {
+                VkPhysicalDeviceFragmentShaderInterlockFeaturesEXT il = {
+                    .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADER_INTERLOCK_FEATURES_EXT };
+                VkPhysicalDeviceFeatures2 f2 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+                                                 .pNext = &il };
+                VkFormatProperties fp;
+                vkGetPhysicalDeviceFeatures2(s_pdev, &f2);
+                vkGetPhysicalDeviceFormatProperties(s_pdev, VK_FORMAT_R8G8B8A8_UNORM, &fp);
+                if (!il.fragmentShaderPixelInterlock) why = "no fragmentShaderPixelInterlock";
+                else if (!f2.features.fragmentStoresAndAtomics) why = "no fragmentStoresAndAtomics";
+                else if (!(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT))
+                    why = "no RGBA8 storage image";
+            }
+            if (!why) s_dst_read = SDL3VK_DST_READ_INTERLOCK;
+            else if (dst_want == SDL3VK_DST_READ_INTERLOCK)
+                fprintf(stderr, "sdl3vk: SR_GPU_DST_READ=interlock refused (%s); destination reads use "
+                                "the snapshot\n", why);
+        }
+        fprintf(stderr, "sdl3vk: destination reads: %s\n",
+                s_dst_read == SDL3VK_DST_READ_INTERLOCK ? "interlock" : "snapshot");
         if (have) {
             VkPhysicalDeviceFloatControlsPropertiesKHR fc = {
                 .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FLOAT_CONTROLS_PROPERTIES_KHR };
@@ -858,17 +978,21 @@ int sdl3vk_init(const char *title) {
             s_denorm_preserve_f32 = fc.shaderDenormPreserveFloat32 == VK_TRUE;
         }
     }
-    const char *dev_ext[] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME,
-                              VK_KHR_SHADER_FLOAT_CONTROLS_EXTENSION_NAME };
+    const char *dev_ext[3] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
+    uint32_t dev_ext_n = 1u;
+    if (s_denorm_preserve_f32) dev_ext[dev_ext_n++] = VK_KHR_SHADER_FLOAT_CONTROLS_EXTENSION_NAME;
+    if (s_dst_read == SDL3VK_DST_READ_INTERLOCK)
+        dev_ext[dev_ext_n++] = VK_EXT_FRAGMENT_SHADER_INTERLOCK_EXTENSION_NAME;
     VkDeviceCreateInfo dci = { .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO };
     dci.queueCreateInfoCount = 1;
     dci.pQueueCreateInfos = &qci;
-    dci.enabledExtensionCount = s_denorm_preserve_f32 ? 2u : 1u;
+    dci.enabledExtensionCount = dev_ext_n;
     dci.ppEnabledExtensionNames = dev_ext;
-    /* Ace Mode's texture filtering (ace.h) is the only device feature the player ever asks
-     * for, and only in an Ace run that wants it: an authentic run creates the device with no
-     * features, as before. A device without it, or with less than 2x, runs without filtering
-     * and the run says why; a lower maximum clamps the level. */
+    /* Ace Mode's texture filtering (ace.h) is the only Ace device feature, asked for only in an
+     * Ace run that wants it. The other device features are the interlock path's (below), in every
+     * run where the device has them (docs/ENHANCEMENT_CONTRACT.md section 10.2); on the snapshot
+     * path an authentic run creates the device with no features. A device without filtering, or
+     * with less than 2x, runs without it and the run says why; a lower maximum clamps the level. */
     VkPhysicalDeviceFeatures ace_features = {0};
     if (g_ace_on && ace_effective()->af > 0) {
         VkPhysicalDeviceFeatures have;
@@ -886,6 +1010,22 @@ int sdl3vk_init(const char *title) {
             ace_set_af_effective(0, "this GPU has no anisotropic filtering");
         }
     }
+    /* The interlock path's features go in one VkPhysicalDeviceFeatures2 chain with Ace's. The
+     * snapshot path keeps the form above: pEnabledFeatures or nothing, and no chain. */
+    VkPhysicalDeviceFragmentShaderInterlockFeaturesEXT il_on = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADER_INTERLOCK_FEATURES_EXT };
+    VkPhysicalDeviceFeatures2 f2_on = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
+    if (s_dst_read == SDL3VK_DST_READ_INTERLOCK) {
+        il_on.fragmentShaderPixelInterlock = VK_TRUE;
+        f2_on.features = ace_features;
+        f2_on.features.fragmentStoresAndAtomics = VK_TRUE;
+        f2_on.pNext = &il_on;
+        dci.pNext = &f2_on;
+        dci.pEnabledFeatures = NULL;
+    }
+    s_dev_extensions = dci.enabledExtensionCount;
+    s_dev_features = dci.pEnabledFeatures != NULL;
+    s_dev_features2 = dci.pNext != NULL;
     INIT_VK(vkCreateDevice(s_pdev, &dci, NULL, &s_dev));
     vkGetDeviceQueue(s_dev, s_qfam, 0, &s_queue);
 
@@ -933,7 +1073,7 @@ int sdl3vk_init(const char *title) {
         INIT_VK(vkCreateSemaphore(s_dev,&sci2,NULL,&f->sem_acq));
 
         VkBufferCreateInfo bci={.sType=VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-        bci.size=PSP_W*PSP_H*4;bci.usage=VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+        bci.size=SDL3VK_UPLOAD_MAX_W*PSP_H*4;bci.usage=VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
         INIT_VK(vkCreateBuffer(s_dev,&bci,NULL,&f->staging));
         VkMemoryRequirements mr;vkGetBufferMemoryRequirements(s_dev,f->staging,&mr);
         VkMemoryAllocateInfo mai={.sType=VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
@@ -961,7 +1101,7 @@ int sdl3vk_init(const char *title) {
 
         VkImageCreateInfo imi={.sType=VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
         imi.imageType=VK_IMAGE_TYPE_2D;imi.format=VK_FORMAT_B8G8R8A8_UNORM;
-        imi.extent.width=PSP_W;imi.extent.height=PSP_H;imi.extent.depth=1;
+        imi.extent.width=SDL3VK_UPLOAD_MAX_W;imi.extent.height=PSP_H;imi.extent.depth=1;
         imi.mipLevels=1;imi.arrayLayers=1;imi.samples=VK_SAMPLE_COUNT_1_BIT;
         imi.tiling=VK_IMAGE_TILING_OPTIMAL;
         imi.usage=VK_IMAGE_USAGE_TRANSFER_DST_BIT|VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
@@ -1160,6 +1300,11 @@ static NkInputGate    s_gate;
 static uint32_t       s_raw_buttons;
 static uint8_t        s_raw_lx = 128, s_raw_ly = 128;
 static uint32_t       s_claim_saved_pulse, s_claim_saved_pad_pulse;
+/* Mouse aiming (#1791): the movement since the last poll, kept as floats so a slow drag
+ * that SDL reports in fractions of a count is not lost, and what carries between polls. */
+static float          s_mouse_fx, s_mouse_fy;
+static NkAimState     s_aim_state;
+static bool           s_mouse_captured;
 #define KEY_QUEUE_CAP 64
 static Sdl3VkKeyEvent s_key_queue[KEY_QUEUE_CAP];
 static int            s_key_head, s_key_count;
@@ -1242,6 +1387,76 @@ static uint32_t gamepad_button(Uint8 button) {
     return psp_btn;
 }
 
+/* Mouse aiming works in counts per reference poll of 1/60 s (NK_AIM_FULL_DEFLECTION_COUNTS),
+ * but the host polls once per presented frame, so the movement is scaled by the time since
+ * the last aim poll: the same hand speed gives the same nub whatever the frame rate, and a
+ * frame hitch does not saturate it. */
+#define AIM_REFERENCE_POLL_NS 16666667ull
+#define AIM_MIN_POLL_NS 4166667ull       /* polls closer than 1/240 s count as 1/240 s */
+#define AIM_STALL_NS 250000000ull        /* a longer gap is a stall, not a hand movement */
+
+static uint64_t aim_clock_ns_default(void) { return SDL_GetTicksNS(); }
+/* Test seams: the clock, and the call that grabs or frees the pointer. */
+static uint64_t (*s_aim_clock_ns)(void) = aim_clock_ns_default;
+static bool aim_relative_mode_default(bool want) {
+    if (!s_win || s_window_hidden) return false;   /* headless runs never grab the pointer */
+    return SDL_SetWindowRelativeMouseMode(s_win, want);
+}
+static bool (*s_aim_relative_mode)(bool) = aim_relative_mode_default;
+static uint64_t s_aim_last_ns;                    /* 0 = no previous aim poll */
+static float    s_aim_rem_x, s_aim_rem_y;         /* scaled fractions kept for the next poll */
+
+/* Scale the raw movement to counts per reference poll and hand over the whole counts; the
+ * fraction stays for the next poll. `scale` is reference period / elapsed. */
+static int32_t aim_take_counts(float *raw, float *rem, float scale) {
+    const float scaled = *raw * scale + *rem;
+    const float whole = truncf(scaled);
+    *raw = 0.0f;
+    *rem = scaled - whole;
+    if (whole > 2147483000.0f) return INT32_MAX;
+    if (whole < -2147483000.0f) return INT32_MIN;
+    return (int32_t)whole;
+}
+
+/* Nothing the mouse did earlier may reach the game later: a focus change, an overlay claim
+ * or a profile that turns aiming off all start the next poll from rest. */
+static void aim_reset(void) {
+    s_mouse_fx = s_mouse_fy = 0.0f;
+    s_aim_rem_x = s_aim_rem_y = 0.0f;
+    s_aim_last_ns = 0;
+    nk_aim_state_reset(&s_aim_state);
+}
+
+/* The window grabs the pointer while aiming is on and the game has the input, and gives it
+ * back as soon as either stops. The flag follows what the window really did, so a request
+ * that could not be applied (no window, hidden window) is asked again next poll instead of
+ * being remembered as done. */
+static void aim_set_capture(bool want) {
+    if (want == s_mouse_captured) return;
+    if (s_aim_relative_mode(want)) s_mouse_captured = want;
+}
+
+/* The nub for this poll's movement. The first poll after a reset, and a stall, count as one
+ * reference poll and drop the movement that built up. */
+static bool aim_poll(const NkAimConfig *cfg, uint8_t *lx, uint8_t *ly) {
+    const uint64_t now = s_aim_clock_ns();
+    uint64_t dt = AIM_REFERENCE_POLL_NS;
+    if (s_aim_last_ns != 0 && now > s_aim_last_ns) {
+        dt = now - s_aim_last_ns;
+        if (dt > AIM_STALL_NS) {
+            s_mouse_fx = s_mouse_fy = 0.0f;
+            s_aim_rem_x = s_aim_rem_y = 0.0f;
+            dt = AIM_REFERENCE_POLL_NS;
+        } else if (dt < AIM_MIN_POLL_NS) {
+            dt = AIM_MIN_POLL_NS;
+        }
+    }
+    s_aim_last_ns = now ? now : 1;
+    const float scale = (float)AIM_REFERENCE_POLL_NS / (float)dt;
+    return nk_aim_apply(cfg, &s_aim_state, aim_take_counts(&s_mouse_fx, &s_aim_rem_x, scale),
+                        aim_take_counts(&s_mouse_fy, &s_aim_rem_y, scale), lx, ly);
+}
+
 static void pause_request_latch(int request) {
     if (s_claim_sink) return;
     /* The person's own request wins over the pad-lost one if both arrive together. */
@@ -1264,6 +1479,9 @@ static void poll_input_on_this_stack(void *arg) {
                 pause_request_latch(SDL3VK_PAUSE_REQUEST_PAD_LOST);
             }
             break;
+        case SDL_EVENT_WINDOW_FOCUS_LOST:
+            aim_reset();
+            break;
         default: break;
         }
         /* While the overlay has the input every event is its own; nothing reaches the game. */
@@ -1283,6 +1501,11 @@ static void poll_input_on_this_stack(void *arg) {
             if (ev.key.key == SDLK_F3 && !ev.key.repeat) {
                 hud_set_mode(sdl3vk_hud_next_mode(s_hud_enabled, s_developer));
             }
+            /* F9 turns fast forward on or off (ace.h); the scheduler ignores it outside an
+             * Enhanced or Ace run on the paced clock. */
+            if (ev.key.key == SDLK_F9 && !ev.key.repeat && !s_text_claim) ace_ff_toggle();
+            /* F12 saves the next presented picture as a PNG (fbcap.h, screenshot key). */
+            if (ev.key.key == SDLK_F12 && !ev.key.repeat) sr_screenshot_request();
             /* While the keyboard is claimed its keys go to the keyboard only: a keyboard Enter that
              * confirms the field must not leave a START pulse behind for the title to see. */
             if (!ev.key.repeat && !s_text_claim) s_button_pulse |= keyboard_button(ev.key.scancode);
@@ -1295,6 +1518,10 @@ static void poll_input_on_this_stack(void *arg) {
             break;
         case SDL_EVENT_TEXT_INPUT:
             if (s_text_claim) queue_text_utf8(ev.text.text);
+            break;
+        case SDL_EVENT_MOUSE_MOTION:
+            s_mouse_fx += ev.motion.xrel;
+            s_mouse_fy += ev.motion.yrel;
             break;
         case SDL_EVENT_GAMEPAD_BUTTON_DOWN: {
             /* Guide asks for the pause and is consumed, whatever the profile binds to it. */
@@ -1317,6 +1544,10 @@ static void poll_input_on_this_stack(void *arg) {
      * (gui.c read_keys); SR_PADSCRIPT keeps the defaults, as it does for the gamepad. */
     const NkInputProfile *key_prof = padscript_active() ? NULL : sdl3vk_get_input_profile();
     uint32_t b = sdl3vk_map_keyboard(key_prof, k, key_count);
+    /* Tab held is fast forward (ace.h), unless the profile binds Tab to a PSP button or the
+     * on-screen keyboard has the keys. */
+    ace_ff_hold(!s_text_claim && SDL_SCANCODE_TAB < key_count && k[SDL_SCANCODE_TAB] &&
+                            sdl3vk_map_key(key_prof, (int)SDL_SCANCODE_TAB) == 0u);
 
     uint8_t lx = 128, ly = 128;
     s_pad_present = s_pad != NULL;
@@ -1345,6 +1576,19 @@ static void poll_input_on_this_stack(void *arg) {
             stick_prof = &def_profile;
         }
         (void)nk_input_profile_eval_key_analog(stick_prof, k, key_count, &lx, &ly);
+    }
+    /* Mouse aiming (#1791): a moving mouse takes the nub; a still one leaves the controller's
+     * and the keyboard's value. Off unless the profile turns it on, and never under SR_PADSCRIPT
+     * or while the overlay has the input. */
+    {
+        const NkInputProfile *aim_prof = padscript_active() ? NULL : sdl3vk_get_input_profile();
+        const bool aim_on = aim_prof && aim_prof->aim.mouse && !s_claim_sink;
+        aim_set_capture(aim_on);
+        if (aim_on) {
+            (void)aim_poll(&aim_prof->aim, &lx, &ly);
+        } else {
+            aim_reset();
+        }
     }
     s_raw_buttons = b;
     s_raw_lx = lx; s_raw_ly = ly;
@@ -1380,6 +1624,10 @@ int sdl3vk_get_vk(Sdl3VkInfo *out) {
     out->queue_family = s_qfam;
     out->denorm_preserve_f32 = s_denorm_preserve_f32;
     out->get_instance_proc_addr = (void *)vkGetInstanceProcAddr;
+    out->dst_read = s_dst_read;
+    out->device_extensions = s_dev_extensions;
+    out->device_features = s_dev_features;
+    out->device_features2 = s_dev_features2;
     return 1;
 }
 
@@ -1735,8 +1983,7 @@ static int recover_unenqueued_present(PresentFrame *f, uint32_t idx) {
             s_renderer_terminal = 1;
             return 0;
         }
-        f->submitted = 0;
-        f->source = VK_NULL_HANDLE;
+        present_frame_finished(f);
     }
     if (s_swap_sem_done[idx]) {
         vkDestroySemaphore(s_dev, s_swap_sem_done[idx], NULL);
@@ -1771,12 +2018,21 @@ int sdl3vk_parse_present_scaling(const char *value) {
     return -1;
 }
 
+int sdl3vk_parse_dst_read(const char *value) {
+    if (!value || !value[0]) return -2;
+    if (strcmp(value, "snapshot") == 0) return SDL3VK_DST_READ_SNAPSHOT;
+    if (strcmp(value, "interlock") == 0) return SDL3VK_DST_READ_INTERLOCK;
+    return -1;
+}
+
 Sdl3VkPresentPlan sdl3vk_present_plan(int mode, int srcw, int srch, int dw, int dh, int max_dim) {
     Sdl3VkPresentPlan p = { 0, 0, 0, 0, 1, 0 };
     if (srcw <= 0 || srch <= 0 || dw <= 0 || dh <= 0) return p;
-    /* Aspect-correct fit of the PSP picture, letterboxed. */
-    int vw = dw, vh = dw * PSP_H / PSP_W;
-    if (vh > dh) { vh = dh; vw = dh * PSP_W / PSP_H; }
+    /* Aspect-correct fit of the source, letterboxed. Every 480k x 272k source fits as the PSP
+     * picture always did (the same ratio, so the same integer results); a widescreen Fill
+     * picture (480 + 2D) x 272 fits its own, wider shape. */
+    int vw = dw, vh = (int)((long long)dw * srch / srcw);
+    if (vh > dh) { vh = dh; vw = (int)((long long)dh * srcw / srch); }
     if (mode == SDL3VK_SCALING_INTEGER) {
         int k = dw / srcw < dh / srch ? dw / srcw : dh / srch;
         if (k >= 1) { vw = k * srcw; vh = k * srch; p.nearest = 1; }
@@ -1870,6 +2126,7 @@ static int s_rec_state = -1;      /* -1 undecided, 0 off, 1 recording */
 static uint32_t s_rec_w, s_rec_h; /* the record target's size, fixed at the first use */
 static RecImage s_rec_target, s_rec_pre;
 static CapBuffer s_rec_buf[PRESENT_FRAMES];
+static int s_rec_filter[PRESENT_FRAMES]; /* the SrVideoRecFilter each slot's picture was made with */
 static PresentFrame *s_rec_pending; /* the slot whose readback holds the newest recorded picture */
 
 static void rec_image_free(RecImage *r) {
@@ -1925,7 +2182,8 @@ static int rec_resolve(void) {
     if (!f) return 0;
     CapBuffer *c = &s_rec_buf[f - s_frame];
     if (!wait_present_frame(f) || !cap_invalidate_readback(c)) return 0;
-    sr_videorec_frame(c->map, s_rec_w, s_rec_h, s_rec_w * 4u, SR_CAP_ORDER_BGRX);
+    sr_videorec_frame_filtered(c->map, s_rec_w, s_rec_h, s_rec_w * 4u, SR_CAP_ORDER_BGRX,
+                               s_rec_filter[f - s_frame]);
     return 1;
 }
 
@@ -1978,7 +2236,22 @@ static int rec_record(VkCommandBuffer cmd, PresentFrame *f, VkImage show, int sh
     blt.dstSubresource = blt.srcSubresource;
     blt.srcOffsets[1].z = 1;
     blt.dstOffsets[1].z = 1;
-    if (plan.prescale > 1 &&
+    /* With the presentation upscaler on, the recording is enlarged by it as the window is, at
+     * the recording's own size, through its own pass (the window's would rebuild its images for
+     * every size change between the two). The blit below then copies the result 1:1. Only an
+     * enlargement, as in the window: EASU is not a downscaler. */
+    VkImage upscaled = VK_NULL_HANDLE;
+    int by_anime4k = 0;
+    if (s_rec_upscale_pass && plan.w >= showw && plan.h >= showh && (plan.w > showw || plan.h > showh))
+        upscaled = (VkImage)s_rec_upscale_pass((void *)cmd, (void *)show, showw, showh, plan.w,
+                                               plan.h, s_upscale_cpu_frame, &by_anime4k);
+    int prescaled = 0;
+    if (upscaled) {
+        blit_src = upscaled;
+        bw = plan.w;
+        bh = plan.h;
+        plan.nearest = 1;
+    } else if (plan.prescale > 1 &&
         rec_image_ensure(&s_rec_pre, plan.prescale * showw, plan.prescale * showh,
                          VK_FORMAT_R8G8B8A8_UNORM)) {
         barrier(cmd, s_rec_pre.img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
@@ -1996,7 +2269,16 @@ static int rec_record(VkCommandBuffer cmd, PresentFrame *f, VkImage show, int sh
         blit_src = s_rec_pre.img;
         bw = s_rec_pre.w;
         bh = s_rec_pre.h;
+        prescaled = 1;
     }
+    /* What record.json says made this picture: the blits issued here, never the scaling
+     * setting's name. Sharp at an exact multiple, and bilinear there too, are one nearest blit;
+     * sharp shrinking, or without its prescale image, is one linear blit. A 1:1 copy is none. */
+    int filter = upscaled ? (by_anime4k ? SR_VIDEOREC_FILTER_ANIME4K : SR_VIDEOREC_FILTER_FSR1)
+               : prescaled ? SR_VIDEOREC_FILTER_SHARP
+               : plan.nearest ? SR_VIDEOREC_FILTER_NEAREST
+               : SR_VIDEOREC_FILTER_LINEAR;
+    if (plan.w == showw && plan.h == showh) filter = SR_VIDEOREC_FILTER_NONE;
     if (plan.w > 0 && plan.h > 0) {
         blt.srcOffsets[1].x = bw;              blt.srcOffsets[1].y = bh;
         blt.dstOffsets[0].x = plan.x;          blt.dstOffsets[0].y = plan.y;
@@ -2012,6 +2294,7 @@ static int rec_record(VkCommandBuffer cmd, PresentFrame *f, VkImage show, int sh
         *why = "record copy failed";
         return 0;
     }
+    s_rec_filter[f - s_frame] = filter;
     return 1;
 }
 
@@ -2190,6 +2473,13 @@ static void draw_hud_overlay(VkCommandBuffer cmd, PresentFrame *f, VkImage dst_i
             VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
     vkCmdCopyBufferToImage(cmd, f->hud_staging, dst_img,
                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &bic);
+    s_hud_last.copies++;
+    s_hud_last.x = ox;
+    s_hud_last.y = oy;
+    s_hud_last.w = hud_w;
+    s_hud_last.h = hud_h;
+    s_hud_last.swap_w = swap_w;
+    s_hud_last.swap_h = swap_h;
 }
 
 static int present_common(VkImage src, int srcw, int srch, const uint32_t *upload) {
@@ -2197,23 +2487,39 @@ static int present_common(VkImage src, int srcw, int srch, const uint32_t *uploa
     const char *why = NULL;
     int quit = 0;
     int presented = 0;
+    int pass_ran = 0;                /* the show pass recorded into this present (Sdl3VkShowDone) */
+    uint64_t pass_submission = 0;
     poll_input(&quit);
     if (quit) { why = "window closed during present"; goto fail_quit; }
     PresentFrame *f = &s_frame[s_frame_cursor];
-    if (!wait_present_frame(f)) { why = "present frame fence wait failed"; goto fail; }
+    if (s_present_nowait) {
+        /* The guest's clock must not wait for the display (sdl3vk_set_present_nowait): a frame
+         * slot the display still holds means the display cannot take this frame now. */
+        int free_slot = poll_present_frame(f);
+        if (free_slot < 0) { why = "present frame fence wait failed"; goto fail; }
+        if (free_slot == 0) { s_present_busy_slot++; goto display_busy; }
+    } else if (!wait_present_frame(f)) { why = "present frame fence wait failed"; goto fail; }
     /* A picture probe read back by an earlier present is published once its frame's fence
      * has signalled; never waited for here, and always before this slot is reused. */
     (void)cap_probe_resolve(0);
     /* A recorded picture still in this slot's readback goes to the recorder before reuse. */
     if (s_rec_pending == f) sr_videorec_resolve_pending();
     int rec_in_submit = 0;
-    if (upload) { memcpy(f->staging_map, upload, PSP_W * PSP_H * 4); src = f->fbimg; }
+    if (upload) { memcpy(f->staging_map, upload, (size_t)srcw * (size_t)srch * 4u); src = f->fbimg; }
+    if (src) s_upscale_cpu_frame = upload != NULL;
     VkCommandBuffer cmd = f->cmd;
 
     for (int attempt = 0; attempt < 2; attempt++) {
         uint32_t idx = 0;
-        VkResult ar = PSTEP_VK(PSTEP_ACQUIRE, vkAcquireNextImageKHR(s_dev, s_swap, UINT64_MAX,
-                                                                    f->sem_acq, VK_NULL_HANDLE, &idx));
+        /* Under no-wait, timeout 0: VK_NOT_READY (or VK_TIMEOUT) means every image is still
+         * held by the presentation engine. Nothing was acquired and f->sem_acq will not be
+         * signalled, so returning leaves no image or semaphore behind (#1377). */
+        VkResult ar = PSTEP_VK(PSTEP_ACQUIRE, present_acquire(s_present_nowait ? 0 : UINT64_MAX,
+                                                              f->sem_acq, &idx));
+        if (s_present_nowait && (ar == VK_NOT_READY || ar == VK_TIMEOUT)) {
+            s_present_busy_image++;
+            goto display_busy;
+        }
         if (ar == VK_ERROR_OUT_OF_DATE_KHR) {
             if (!create_swapchain()) { why = "swapchain recreation failed"; goto fail; }
             continue;
@@ -2262,7 +2568,8 @@ static int present_common(VkImage src, int srcw, int srch, const uint32_t *uploa
             VkBufferImageCopy bic = {0};
             bic.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
             bic.imageSubresource.layerCount = 1;
-            bic.imageExtent.width = PSP_W; bic.imageExtent.height = PSP_H; bic.imageExtent.depth = 1;
+            bic.imageExtent.width = (uint32_t)srcw; bic.imageExtent.height = (uint32_t)srch;
+            bic.imageExtent.depth = 1;
             vkCmdCopyBufferToImage(cmd, f->staging, f->fbimg,
                                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &bic);
             barrier(cmd, f->fbimg, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
@@ -2274,6 +2581,7 @@ static int present_common(VkImage src, int srcw, int srch, const uint32_t *uploa
         VkImage show = src;
         int showw = srcw, showh = srch;
         if (s_show_pass) {
+            pass_ran = 1;
             VkImage alt = (VkImage)s_show_pass((void *)cmd, (void *)src, &showw, &showh);
             if (alt) show = alt;
             else { showw = srcw; showh = srch; }
@@ -2311,7 +2619,8 @@ static int present_common(VkImage src, int srcw, int srch, const uint32_t *uploa
         /* Only a place at least as large on both axes and larger on one: EASU enlarges, it is not a
          * downscaler. */
         if (s_upscale_pass && plan.w >= showw && plan.h >= showh && (plan.w > showw || plan.h > showh))
-            upscaled = (VkImage)s_upscale_pass((void *)cmd, (void *)show, showw, showh, plan.w, plan.h);
+            upscaled = (VkImage)s_upscale_pass((void *)cmd, (void *)show, showw, showh, plan.w, plan.h,
+                                               s_upscale_cpu_frame, NULL);
         if (upscaled) {
             blit_src = upscaled;
             bw = plan.w;
@@ -2432,7 +2741,8 @@ static int present_common(VkImage src, int srcw, int srch, const uint32_t *uploa
         }
         if (perf_submit_started) sr_perf_vulkan_submit(perf_submit_started);
         if (sr_perf_enabled) sr_perf_present_submit();
-        f->submitted = 1;
+        present_frame_submitted(f);
+        if (pass_ran) pass_submission = f->serial;
         f->source = upload ? VK_NULL_HANDLE : src;
         if (cap_in_submit)
             sr_capture_mark_recorded(upload ? SR_CAP_SRC_CPU : SR_CAP_SRC_GPU,
@@ -2532,10 +2842,12 @@ static int present_common(VkImage src, int srcw, int srch, const uint32_t *uploa
         break;
     }
     if (!presented) { why = "swapchain still out of date after recreation"; goto fail; }
-    /* Only a picture that reached the screen is recorded; the recorder reads it at its VBLANK. */
+    /* Only a picture that reached the screen is recorded; the recorder reads it at its VBLANK.
+     * Registering first lets the recorder read a kept picture still pending (an in-between,
+     * sr_videorec_frame_keep) through s_rec_pending before this one takes its place. */
     if (rec_in_submit) {
-        s_rec_pending = f;
         sr_videorec_frame_pending(rec_resolve);
+        s_rec_pending = f;
     }
 
     /* Complete the armed capture only now that this frame is known to have reached the
@@ -2554,8 +2866,7 @@ static int present_common(VkImage src, int srcw, int srch, const uint32_t *uploa
                 why = "capture fence wait failed"; goto fail;
             }
             if (perf_wait_started) sr_perf_vulkan_wait(perf_wait_started, 0);
-            f->submitted = 0;
-            f->source = VK_NULL_HANDLE;
+            present_frame_finished(f);
         }
         /* The frame reached the presentation engine (vkQueuePresentKHR succeeded above):
          * a readback/publication failure must not make the frame itself look unpresented,
@@ -2567,7 +2878,13 @@ static int present_common(VkImage src, int srcw, int srch, const uint32_t *uploa
         else
             sr_capture_publish_recorded(s_cap.map, s_cap_w * 4u, s_cap_order);
     }
+    if (pass_ran && s_show_done) s_show_done(1, pass_submission);
     return 1;
+
+display_busy:
+    /* Not shown and not a failure: the window keeps the frame the display already has, and an
+     * armed capture stays unserviced, so the caller resolves it as nothing attempted (fbcap.h). */
+    return SDL3VK_PRESENT_DISPLAY_BUSY;
 
 fail_acquired:
     /* Between a successful acquire and the submit: the image stays acquired and f->sem_acq
@@ -2577,8 +2894,9 @@ fail_acquired:
     s_renderer_terminal = 1;
 fail:
     /* One exit for every failure above: the armed capture resolves as failed, never as
-     * an invented success. */
+     * an invented success, and a show pass learns its picture was not shown. */
     sr_capture_fail(why);
+    if (pass_ran && s_show_done) s_show_done(-1, pass_submission);
     return -1;
 fail_quit:
     sr_capture_fail(why);
@@ -2590,6 +2908,30 @@ int sdl3vk_present_rgba(const uint32_t *px) {
     int result = present_common(VK_NULL_HANDLE, PSP_W, PSP_H, px);
     if (started) sr_perf_present_done(started, result);
     return result;
+}
+
+int sdl3vk_present_rgba_ex(const uint32_t *px, int w, int h) {
+    if (!px || w < PSP_W || w > SDL3VK_UPLOAD_MAX_W || h != PSP_H) {
+        sr_capture_fail("present_rgba_ex: unsupported picture size");
+        return -1;
+    }
+    uint64_t started = sr_perf_now_ns();
+    int result = present_common(VK_NULL_HANDLE, w, h, px);
+    if (started) sr_perf_present_done(started, result);
+    return result;
+}
+
+int sdl3vk_window_pixel_size(int *w, int *h) {
+    int pw = 0, ph = 0;
+    if (s_swap && s_swap_ext.width && s_swap_ext.height) {
+        pw = (int)s_swap_ext.width;
+        ph = (int)s_swap_ext.height;
+    } else if (s_win) {
+        (void)SDL_GetWindowSizeInPixels(s_win, &pw, &ph);
+    }
+    if (w) *w = pw;
+    if (h) *h = ph;
+    return pw > 0 && ph > 0;
 }
 
 int sdl3vk_present_image(void *vk_image) {
@@ -2901,7 +3243,7 @@ int sdl3vk_present_overlay(const void *px, int pitch) {
         s_renderer_terminal = 1;
         return -1;
     }
-    f->submitted = 1;
+    present_frame_submitted(f);
     f->source = VK_NULL_HANDLE;
 
     VkPresentInfoKHR pi = { .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR };
@@ -2951,6 +3293,15 @@ int sdl3vk_present_overlay(const void *px, int pitch) {
  * SDL_Init is undone with SDL_QuitSubSystem, not SDL_Quit, so the audio backend's subsystem
  * (audio_sdl3.c) stays up until that backend's own cleanup. */
 void sdl3vk_shutdown(void) {
+    if (s_present_busy_image || s_present_busy_slot) {
+        fprintf(stderr, "sdl3vk: %llu game frame(s) not shown rather than waited for: %llu with "
+                        "every swapchain image still held by the presentation engine, %llu with "
+                        "the frame slot's earlier submission still pending\n",
+                (unsigned long long)(s_present_busy_image + s_present_busy_slot),
+                (unsigned long long)s_present_busy_image, (unsigned long long)s_present_busy_slot);
+        s_present_busy_image = 0;
+        s_present_busy_slot = 0;
+    }
     sdl3vk_overlay_release();
     if (s_dev) {
         (void)wait_all_present_frames();
@@ -3028,6 +3379,7 @@ void sdl3vk_shutdown(void) {
     }
     if (s_pad)         { SDL_CloseGamepad(s_pad); s_pad = NULL; }
     if (s_win)         { SDL_DestroyWindow(s_win); s_win = NULL; }
+    s_mouse_captured = false;                      /* the window took its grab with it */
     if (s_sdl_subsystems) {
         SDL_QuitSubSystem(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD);
         s_sdl_subsystems = 0;

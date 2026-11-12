@@ -51,7 +51,7 @@ project-latin-15-font:
 define PROJECT_FONT_RULE
 project-$(1)-font: $(PROJECT_FONT_GENERATED_DIR)/$(2)
 
-$(PROJECT_FONT_GENERATED_DIR)/$(2): $(3) $(4) $(5) tools/ttf2pgf.py tools/pgf_writer.py docs/cleanroom/PGF_CONVERTER_SPEC.md
+$(PROJECT_FONT_GENERATED_DIR)/$(2): $(3) $(4) $(5) tools/ttf2pgf.py tools/pgf_writer.py docs/cleanroom/PGF_CONVERTER_SPEC.md mk/housekeeping.mk
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(PROJECT_FONT_GENERATED_DIR_PY)').mkdir(parents=True, exist_ok=True)"
 	"$(PYTHON)" tools/ttf2pgf.py "$$@" "$(3)" --pin "$(4)" $(6) $(8) --font-name "$(7)" --font-type "$(9)" --manifest "$(PROJECT_FONT_GENERATED_DIR_PY)/$(basename $(2)).json"
 	"$(PYTHON)" -c "import shutil; shutil.copyfile('$(5)', '$(PROJECT_FONT_GENERATED_DIR_PY)/$(basename $(2))-OFL.txt')"
@@ -60,13 +60,20 @@ endef
 # The console's two Latin sizes, 10.125 and 7 points at 128 dpi (#2005, font/README.md). Every face of
 # a size shares its strike: the size and emboldening that put the regular face's ink where the console
 # font of that size has it (x-height, cap height, descender, stem), and the console fonts' header
-# ascender and descender. Each face then has its own spacing, chosen so that its lines are as long as
-# the console face's of the same index; the sans-serif faces also get the console's digit width.
+# ascender and descender. The strike also sets round letters' overshoots of less than 3/8 px on the
+# baseline, x-height and cap height of the face's flat letters, so an e or an o ends on the row an R ends
+# on (#1300, docs/cleanroom/PGF_CONVERTER_SPEC.md section 3, rule 13). Each face then has its own spacing,
+# chosen so that its lines are as long as the console face's of the same index; the sans-serif faces also
+# get the console's digit width.
 LIBERATION := fixtures/fonts/liberation
-PROJECT_LATIN_STRIKE_ARGS := --ppem 20 --embolden-x 4 --embolden-advance 4 --nominal-size 648 --resolution 8192 --header-ascender 863 --header-descender -196
-PROJECT_LATIN_SMALL_STRIKE_ARGS := --ppem 13 --embolden-x 2 --embolden-advance 2 --nominal-size 448 --resolution 8192 --header-ascender 576 --header-descender -131
-# Per index: source face, PGF style, then that face's spacing (--tracking, eighths of a pixel) and,
-# where measured, digit advance (26.6 px).
+PROJECT_LATIN_STRIKE_ARGS := --ppem 20 --snap-overshoot 3 --embolden-x 4 --embolden-advance 4 --nominal-size 648 --resolution 8192 --header-ascender 863 --header-descender -196
+PROJECT_LATIN_SMALL_STRIKE_ARGS := --ppem 13 --snap-overshoot 3 --embolden-x 2 --embolden-advance 2 --nominal-size 448 --resolution 8192 --header-ascender 576 --header-descender -131
+# Per index: source face, PGF style, then that face's spacing (--tracking, eighths of a pixel), where
+# measured its digit advance (26.6 px), and its horizontal-stroke weight (--embolden-y, eighths of a
+# pixel). The weight puts each sans-serif face's ink per letter within 2 % of the console face's (#1300);
+# the serif faces keep none, because they already carry more ink than the console's. The bold sans-serif
+# faces are already at the largest --embolden-y, so their vertical strokes take one sub-sample more
+# --embolden-x than the strike's (a later flag wins) to reach that.
 PROJECT_LATIN_0_FACE := LiberationSans-Regular
 PROJECT_LATIN_1_FACE := LiberationSerif-Regular
 PROJECT_LATIN_2_FACE := LiberationSans-Italic
@@ -83,21 +90,21 @@ PROJECT_LATIN_4_STYLE := Bold
 PROJECT_LATIN_5_STYLE := Bold
 PROJECT_LATIN_6_STYLE := Bold Italic
 PROJECT_LATIN_7_STYLE := Bold Italic
-PROJECT_LATIN_0_SPACING := --tracking 7 --digit-advance 852
+PROJECT_LATIN_0_SPACING := --tracking 7 --digit-advance 852 --embolden-y 3
 PROJECT_LATIN_1_SPACING := --tracking 2
-PROJECT_LATIN_2_SPACING := --tracking 7 --digit-advance 852
+PROJECT_LATIN_2_SPACING := --tracking 7 --digit-advance 852 --embolden-y 3
 PROJECT_LATIN_3_SPACING := --tracking 3
-PROJECT_LATIN_4_SPACING := --tracking 6 --digit-advance 840
+PROJECT_LATIN_4_SPACING := --tracking 6 --digit-advance 840 --embolden-y 8 --embolden-x 5
 PROJECT_LATIN_5_SPACING := --tracking 1
-PROJECT_LATIN_6_SPACING := --tracking 6 --digit-advance 840
+PROJECT_LATIN_6_SPACING := --tracking 6 --digit-advance 840 --embolden-y 8 --embolden-x 5
 PROJECT_LATIN_7_SPACING := --tracking 2
-PROJECT_LATIN_8_SPACING := --tracking 7 --digit-advance 555
+PROJECT_LATIN_8_SPACING := --tracking 7 --digit-advance 555 --embolden-y 5
 PROJECT_LATIN_9_SPACING := --tracking 3
-PROJECT_LATIN_10_SPACING := --tracking 7 --digit-advance 555
+PROJECT_LATIN_10_SPACING := --tracking 7 --digit-advance 555 --embolden-y 4
 PROJECT_LATIN_11_SPACING := --tracking 4
-PROJECT_LATIN_12_SPACING := --tracking 6 --digit-advance 559
+PROJECT_LATIN_12_SPACING := --tracking 6 --digit-advance 559 --embolden-y 8 --embolden-x 3
 PROJECT_LATIN_13_SPACING := --tracking 3
-PROJECT_LATIN_14_SPACING := --tracking 6 --digit-advance 559
+PROJECT_LATIN_14_SPACING := --tracking 6 --digit-advance 559 --embolden-y 8 --embolden-x 3
 PROJECT_LATIN_15_SPACING := --tracking 3
 # $(1) index, $(2) target stem, $(3) output, $(4) the face index within its size (0-7), $(5) strike.
 define PROJECT_LATIN_FACE_RULE
@@ -120,8 +127,19 @@ $(eval $(call PROJECT_LATIN_FACE_RULE,13,latin-13,nkltn13.pgf,5,$(PROJECT_LATIN_
 $(eval $(call PROJECT_LATIN_FACE_RULE,14,latin-14,nkltn14.pgf,6,$(PROJECT_LATIN_SMALL_STRIKE_ARGS)))
 $(eval $(call PROJECT_LATIN_FACE_RULE,15,latin-15,nkltn15.pgf,7,$(PROJECT_LATIN_SMALL_STRIKE_ARGS)))
 
-$(eval $(call PROJECT_FONT_RULE,japanese,nkjpn.pgf,fixtures/fonts/mplus1p/MPLUS1p-Regular.ttf,fixtures/fonts/mplus1p/PIN.json,fixtures/fonts/mplus1p/OFL.txt,--jis-x-0208-japanese,Nakagawa Open Japanese,--ppem 12,Regular))
-$(eval $(call PROJECT_FONT_RULE,korean,nkkr.pgf,fixtures/fonts/gowundodum/GowunDodum-Regular.ttf,fixtures/fonts/gowundodum/PIN.json,fixtures/fonts/gowundodum/OFL.txt,--ks-x-1001-korean,Nakagawa Open Korean,--ppem 12,Regular))
+# Japanese and Korean at the console's 10.125 points (18 pixels per em at 128 dpi). The Japanese
+# font draws CP932 and both JIS kanji levels from Noto Sans JP (the UI font's pinned instance); the
+# one character of that set Noto Sans JP lacks comes from M PLUS 1p. Its licence file carries both
+# licences. The header ascender and descender are the console fonts'.
+PROJECT_JAPANESE_FONT_ARGS := --ppem 18 --nominal-size 648 --resolution 8192 --header-ascender 1013 --header-descender -139 --baseline-ellipsis
+PROJECT_KOREAN_FONT_ARGS := --ppem 20 --tracking 1 --nominal-size 648 --resolution 8192 --header-ascender 1000 --header-descender -250
+NOTO_SANS_JP := assets/fonts/ui/noto-sans-jp
+project-japanese-font: $(PROJECT_FONT_GENERATED_DIR)/nkjpn.pgf
+$(PROJECT_FONT_GENERATED_DIR)/nkjpn.pgf: $(NOTO_SANS_JP)/NotoSansJP-Regular.ttf fixtures/fonts/notosansjp/PIN.json $(NOTO_SANS_JP)/OFL.txt fixtures/fonts/mplus1p/MPLUS1p-Regular.ttf fixtures/fonts/mplus1p/PIN.json fixtures/fonts/mplus1p/OFL.txt tools/ttf2pgf.py tools/pgf_writer.py docs/cleanroom/PGF_CONVERTER_SPEC.md
+	@"$(PYTHON)" -c "from pathlib import Path; Path('$(PROJECT_FONT_GENERATED_DIR_PY)').mkdir(parents=True, exist_ok=True)"
+	"$(PYTHON)" tools/ttf2pgf.py "$@" "$(NOTO_SANS_JP)/NotoSansJP-Regular.ttf" --pin fixtures/fonts/notosansjp/PIN.json --fallback fixtures/fonts/mplus1p/MPLUS1p-Regular.ttf --fallback-pin fixtures/fonts/mplus1p/PIN.json --japanese-text $(PROJECT_JAPANESE_FONT_ARGS) --font-name "Nakagawa Open Japanese" --font-type "Regular" --manifest "$(PROJECT_FONT_GENERATED_DIR_PY)/nkjpn.json"
+	"$(PYTHON)" -c "from pathlib import Path; parts = [Path(p).read_text(encoding='utf-8') for p in ('$(NOTO_SANS_JP)/OFL.txt', 'fixtures/fonts/mplus1p/OFL.txt')]; Path('$(PROJECT_FONT_GENERATED_DIR_PY)/nkjpn-OFL.txt').write_text('Noto Sans JP:\n\n' + parts[0] + '\n\nM PLUS 1p (U+2252 only):\n\n' + parts[1], encoding='utf-8')"
+$(eval $(call PROJECT_FONT_RULE,korean,nkkr.pgf,fixtures/fonts/gowundodum/GowunDodum-Regular.ttf,fixtures/fonts/gowundodum/PIN.json,fixtures/fonts/gowundodum/OFL.txt,--ks-x-1001-korean,Nakagawa Open Korean,$(PROJECT_KOREAN_FONT_ARGS),Regular))
 
 project-fonts: $(PROJECT_FONT_SLOT_TARGETS)
 
@@ -132,13 +150,17 @@ compile: | project-fonts
 # The generated headers a compile reads, built on their own first so
 # tools/title_codegen_plan.py can key every object before Make compiles it (#1306).
 compile-inputs: $(TITLE_CONFIG_HEADER)
-compile: shader-verify $(CHUNK_OBJS) $(LIBRARY_OBJS) $(RT_GE_O) $(RT_OBJS) $(ATRAC3P_OBJS) $(BUILD_DIR)/atrac3p_bridge.o $(BUILD_DIR)/$(GAME_NAME)_recomp.o $(TITLE_ICON_OBJ) | sdl3-check
+compile: shader-verify $(CHUNK_OBJS) $(LIBRARY_OBJS) $(RT_GE_O) $(RT_OBJS) $(ATRAC3P_OBJS) $(BUILD_DIR)/atrac3p_bridge.o $(BUILD_DIR)/$(GAME_NAME)_recomp.o $(TITLE_ICON_OBJ) $(TITLE_ANDROID_OBJ) | sdl3-check
 	$(file >$(LINK_OBJECTS_RSP),$(subst \,/,$(LINK_OBJECTS)))
-	$(CC) $(CFLAGS) $(LDFLAGS) $(LINK_MAP_ARG) $(REPRODUCIBLE_LINK_FLAG) -o $(BUILD_DIR)/$(GAME_NAME)$(EXE_EXT) \
+	$(CC) $(CFLAGS) $(LDFLAGS) $(LINK_MAP_ARG) $(REPRODUCIBLE_LINK_FLAG) $(TITLE_LINK_FLAGS) -o $(TITLE_OUTPUT) \
 		@$(LINK_OBJECTS_RSP) \
 		$(LIBS)
 	$(ASSET_COPY_STEP)
-	@"$(PYTHON)" -c "print('Build finished: $(BUILD_DIR)/$(GAME_NAME)$(EXE_EXT)')"
+	@"$(PYTHON)" -c "print('Build finished: $(TITLE_OUTPUT)')"
+
+# The Android title entry point (TITLE_ANDROID_OBJ in the root Makefile).
+$(BUILD_DIR)/nk_android_title.o: android/app/src/main/cpp/nk_android_title.c $(RUNTIME_PROFILE_STAMP)
+	$(CC) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
 
 clean:
 	"$(PYTHON)" -c "import shutil, sys; from pathlib import Path; p = Path(r'$(BUILD_DIR)'); [shutil.rmtree(p) if p.is_dir() else p.unlink()] if p.exists() else None"

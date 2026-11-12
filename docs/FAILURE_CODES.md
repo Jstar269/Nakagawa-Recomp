@@ -77,11 +77,13 @@ The **Where** column of each table names the places a code can appear:
 | `DISC_NOT_PSP` | disc, player | The disc image is not a PSP game: it has no `PSP_GAME` folder. |
 | `EXECUTABLE_UNSUPPORTED` | report | The disc's executable is missing, encrypted with no decrypted copy, or breaks a PSP layout rule. |
 | `INVALID_ISO` | report | The input is not a readable PSP disc image, or its title information is invalid. |
+| `HOMEBREW_KERNEL_MODE_UNSUPPORTED` | player | The package's homebrew is kernel-mode or a custom-firmware plugin, which needs the PSP's own kernel and firmware. |
 | `ISO_CORRUPT` | player | The picked file is not a PSP disc image. |
 | `MODIFIED_DUMP_CFW_LOADER` | report | The disc image was modified by a custom-firmware patch; its real executable needs a decrypted copy. |
+| `PBP_ENCRYPTED_EXECUTABLE_UNSUPPORTED` | player | The PBP holds an encrypted program; only unencrypted homebrew is imported from a package. |
 | `PBP_HEADER_TRUNCATED` | report, route, disc, player | The PlayStation Store package (PBP) ends inside its header. |
 | `PBP_OFFSETS_INVALID` | report, route, disc, player | The PBP's section offsets are out of order or outside the file. |
-| `PBP_PACKAGE_UNSUPPORTED` | report, route, disc, player | The PBP is not a PSN release of a UMD game, the only kind Nakagawa converts. |
+| `PBP_PACKAGE_UNSUPPORTED` | report, route, disc, player | The PBP is neither a PSN release of a UMD game nor unencrypted homebrew, the only kinds Nakagawa converts. |
 | `PBP_SFO_INVALID` | report, route, disc, player | The PBP's title information (`PARAM.SFO`) cannot be read. |
 | `SOURCE_NOT_FOUND` | player | The game's source file is no longer where the library recorded it. |
 
@@ -100,13 +102,14 @@ The **Where** column of each table names the places a code can appear:
 | `OUTPUT_EXISTS` | decrypt, player | A file is already where the decrypted copy would go. |
 | `PSONE_CLASSIC_UNSUPPORTED` | decrypt, disc, player | The package is a PSOne Classic, a PlayStation game for the PSP's emulator, which is out of scope. |
 | `RESOURCE_LIMIT` | decrypt, player | The file on the disc is empty or over the decryption size limit, or memory for it could not be allocated. |
-| `UNSUPPORTED_SCHEME` | decrypt, player | The file uses an encryption form Nakagawa does not cover yet. |
+| `UNSUPPORTED_SCHEME` | decrypt, player | The file uses an encryption form Nakagawa does not cover. |
 | `VALIDATION_FAILURE` | decrypt, player | The decrypted file failed its check, so it was not kept. |
 
 ## import
 
 | Code | Where | Meaning |
 | --- | --- | --- |
+| `BUILD_KNOWN_BAD` | staging | The disc's executable is a build the title's manifest marks known-bad; the manifest's reason is in the message. |
 | `DISC_FILES_STAGE_FAILED` | report | The game's files on the disc could not be staged; the output says why. |
 | `EXECUTABLE_LOAD_BINDING_REQUIRED` | route | A relocatable executable has no load address bound to it. |
 | `EXPERIMENTAL_CODEGEN_PROFILE_MISSING` | route | An experimental title's profile has no `codegen_profile` setting and is not the player's untouched default profile. |
@@ -185,6 +188,7 @@ The **Where** column of each table names the places a code can appear:
 | `PACKAGE_INVALID_MANIFEST` | route | The title manifest is invalid. |
 | `PACKAGE_INVALID_PATH` | route | A path given to the build is invalid. |
 | `PACKAGE_INVALID_PLAN` | route | The build plan is invalid. |
+| `PACKAGE_INVALID_TARGET` | route | The package target is not one the build supports (the host or an Android ABI). |
 | `PACKAGE_LICENSE_RECORD_MISSING` | route | A bundled component has no licence record. |
 | `PACKAGE_LICENSE_TEXT_MISSING` | route | A bundled component's licence text is missing. |
 | `PACKAGE_OUTPUT_CONFLICT` | route | The output folder holds files from a different build. |
@@ -198,7 +202,7 @@ The **Where** column of each table names the places a code can appear:
 | `PACKAGE_REUSE_REFUSED` | route | The reusable package's cache key differs from this build's, so its generated C is not reused. |
 | `PACKAGE_REVALIDATION_FAILED` | player | The installed package failed its check. |
 | `PACKAGE_ROUTE_FAILED` | route | The package route stopped on a file-system or value error that carries no more specific route code. |
-| `PACKAGE_UNSUPPORTED_PATH` | route | A path has spaces or characters the Make recipes cannot quote, and no short-name or `NK_BUILD_ROOT` alternative exists. |
+| `PACKAGE_UNSUPPORTED_PATH` | route | A path has spaces or characters the Make recipes cannot quote, and no short-name form exists. The output directory can also use `NK_BUILD_ROOT`; an enhancement data root is read in place, so only its short form or a move to another location helps. |
 | `RUNTIME_PACKAGE_NOT_READY` | player | The game's package has not been built yet. |
 
 ## run
@@ -209,7 +213,7 @@ The **Where** column of each table names the places a code can appear:
 | `ENTRY_NOT_COMPILED` | report | The executable's entry has no generated function. |
 | `EXITED_ZERO_BEFORE_FRAMEBUFFER_SETUP` | report | The runtime exited cleanly before the game set up its display. |
 | `EXITED_ZERO_BEFORE_HLE` | report | The runtime exited cleanly before the game's first system call. |
-| `EXPERIMENTAL_LAUNCH_UNAVAILABLE` | player | Launch now was asked for an experimental title; it is refused and the title is not added. |
+| `EXPERIMENTAL_LAUNCH_UNAVAILABLE` | player | Launch now was asked for an experimental title; it is refused and the title is not added. Add and build it from its page, then start it with `--launch-title=<disc ID>` ([Experimental titles from the command line](TITLE_TESTING.md#experimental-titles-from-the-command-line)). |
 | `GUEST_ACTIVITY_UNVERIFIED` | report | The runtime's telemetry did not show a system call. |
 | `HEADLESS_UNAVAILABLE` | report | The run needs video output, and none is available. |
 | `LAUNCH_DETAILS_UNAVAILABLE` | player | The player could not create the boot-event file it follows the launch with, so the game was not started. |
@@ -229,7 +233,7 @@ The **Where** column of each table names the places a code can appear:
 | `RUNTIME_NO_NEW_FRAMES` | player | The game presented no new frame for a long stretch, and it was stopped from the stall notice. |
 | `RUNTIME_NO_PICTURE` | player | The game kept presenting frames, but every one was dark for a long stretch, and it was stopped from the stall notice. |
 | `RUNTIME_PREMATURE_EXIT` | player | The game's process exited within 500 ms of starting, whatever its exit code. |
-| `RUNTIME_SEMANTIC_BOUNDARY` | report, player | The game reached a feature Nakagawa does not run yet; the [stop boundary](#stop-boundaries) names it. |
+| `RUNTIME_SEMANTIC_BOUNDARY` | report, player | The game reached a feature Nakagawa does not run; the [stop boundary](#stop-boundaries) names it. |
 | `RUNTIME_START_TIMEOUT` | player | The game's process wrote no boot event within the start time limit, so the player stopped it. |
 | `RUNTIME_TRACE_UNAVAILABLE` | report | The runtime could not read a usable reference trace. |
 | `RUN_BUDGET_ENDED_BEFORE_FRAMEBUFFER_SETUP` | report | The run's time budget ended while the game was still running, before it set up its display. |
@@ -237,7 +241,7 @@ The **Where** column of each table names the places a code can appear:
 | `TITLE_DATA_MISSING` | player | The data folder the title manifest names was not found when the game was launched. |
 | `TITLE_PROFILE_INVALID` | player | The title's settings file is invalid. |
 | `UNRESOLVED_DISPATCH_TARGET` | report | The runtime refused a jump to code it has no translation for. |
-| `UNSUPPORTED_IMPORT` | report | The game called a system function Nakagawa does not provide yet. |
+| `UNSUPPORTED_IMPORT` | report | The game called a system function Nakagawa does not provide. |
 | `UNSUPPORTED_INSTRUCTION` | report | The game ran an instruction the generated code and the interpreter do not cover. |
 | `WINDOWS_BLOCKED_START` | player | Windows blocked the runtime from starting. |
 | `WINDOWS_DEFENDER_THREAT` | player | Windows Security flagged the runtime and stopped it. |
@@ -304,13 +308,15 @@ The **Where** column of each table names the places a code can appear:
 | `UPDATE_DOWNLOAD_REMOVED` | player | The checked download is no longer in its folder. |
 | `UPDATE_HASH_MISMATCH` | player | The download did not match the release's SHA-256. |
 | `UPDATE_INCOMPLETE_DOWNLOAD` | player | The download is not the size the release lists. |
+| `UPDATE_INSTALLED_BY_SETUP` | player | This copy was installed with Setup, so it updates by running the new release's Setup. |
 | `UPDATE_INSTALL_EXISTS` | player | The new version is already unpacked. |
 | `UPDATE_INSTALL_INCOMPLETE` | player | Unpacking the new version did not finish. |
-| `UPDATE_INSTALL_LEFTOVER` | player | A previous install attempt left files in the way. |
+| `UPDATE_INSTALL_LEFTOVER` | player | A folder Nakagawa did not make is where the new version unpacks. (Nakagawa's own unpack left by an interrupted install is removed on the next try.) |
+| `UPDATE_INSTALL_LEFTOVER_IN_USE` | player | An interrupted install's unpack folder could not be removed; something has it open. |
 | `UPDATE_INSTALL_MOVE_FAILED` | player | The new version could not be moved into place. |
 | `UPDATE_INSTALL_NOT_WRITABLE` | player | The install folder is not writable. |
 | `UPDATE_INSTALL_PATH` | player | The folder for the new version has too long a path. |
-| `UPDATE_NO_RELEASES` | player | GitHub lists no release yet. |
+| `UPDATE_NO_RELEASES` | player | GitHub lists no release. |
 | `UPDATE_NO_SIGNING_KEY` | player | This build carries no update signing key, so it fetches no update. |
 | `UPDATE_NO_WINDOWS_ZIP` | player | The release has no Windows ZIP. |
 | `UPDATE_OFFLINE` | player | GitHub could not be reached. |
@@ -328,7 +334,7 @@ The **Where** column of each table names the places a code can appear:
 
 ## Stop boundaries
 
-When a running game reaches something Nakagawa does not run yet, the runtime stops it at a
+When a running game reaches something Nakagawa does not run, the runtime stops it at a
 named boundary and the player's problem report says `RUNTIME_SEMANTIC_BOUNDARY`. The boundary
 name is written as `BOOT_EVENT phase=stop reason=semantic-boundary boundary=<name>`.
 
@@ -347,7 +353,7 @@ name is written as `BOOT_EVENT phase=stop reason=semantic-boundary boundary=<nam
 | `null-code-pointer` | 1375 | The game jumped to address 0, a null code pointer. |
 | `null-data-pointer` | 363 | The game read or wrote through a null pointer. |
 | `target-not-executable` | 118 | The game jumped to an address outside executable code. |
-| `unsupported-import-<name>` | 308 | The game called the system function `<name>`, which Nakagawa does not provide yet. |
+| `unsupported-import-<name>` | 308 | The game called the system function `<name>`, which Nakagawa does not provide. |
 | `unsupported-interpreter-form` | 118 | The interpreter met an instruction form it does not run. |
 
 ## Adding a code

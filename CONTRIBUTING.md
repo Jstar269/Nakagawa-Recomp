@@ -44,6 +44,7 @@ The rules it links to decide whether a change can land, so read them once.
    change may add it. See [docs/DCO_POLICY.md](docs/DCO_POLICY.md).
 9. **Open the pull request.** Fill in the template. Use a draft only while the change is unfinished, and say what is
    left; mark it **Ready for review** as soon as it is finished, with its tests and checks run.
+   A pull request from a fork runs the full checks on every push.
    Ask questions in the [Help](https://github.com/Jstar269/nakagawa-recomp/discussions/categories/help) category
    of GitHub Discussions, or comment on the issue you are working on.
 
@@ -71,7 +72,9 @@ trusted ledger that contributors don't have, so never edit them by hand. For eac
 ledger records where it came from and the evidence for that (its classification and evidence). It
 carries no content hash: the maintainer's **Trusted provenance attestation** regenerates every file's
 SHA-256 from the private authority at landing and compares the committed claims with it, so editing an
-existing file does not change the ledger. The export records the publication policy and its digest.
+existing file does not change the ledger. The export records what the publication policy decides: the profile, its
+version and the exclusion lists. The policy's digest, like the tree-wide counts, is recomputed when the
+checks run, so admitting a new file does not change the export.
 
 For the ordinary case — you changed the contents of paths that already have public entries, and you
 added and removed nothing — run:
@@ -88,7 +91,9 @@ file's bytes change. Add `CONTRIB_REFRESH_CHECK=--check` to see what would chang
 anything.
 
 **After the ledger lost its hashes (#1673).** A branch made before that change may still carry the
-older ledger with a `sha256` per entry. When you merge `main` and Git reports a conflict in
+older ledger with a `sha256` per entry. A conflict confined to that file is not a reason to merge
+`main`: the integrator resolves it at landing ([AGENTS.md section 10](AGENTS.md#10-pr-and-integration-authorization)).
+If you merge `main` for another reason and Git reports a conflict in
 `assets/public_provenance_ledger.json`, take `main`'s copy (`git checkout --theirs -- <path>` during a
 merge), stage it, finish the merge, then run `make contrib-refresh` and commit what it stages.
 
@@ -143,20 +148,32 @@ approves the new bytes, or re-admits a file that has not landed yet.
 
 ### What the pull-request checks mean
 
+A pull request from a fork runs every check below on each push. A Draft runs only the quick checks (the
+first two rows, the public export audit, `Generated files and repository lints` and `CI quick checks`);
+the Python, native, Windows and Android jobs and `CI required` then show as skipped. A Ready pull request
+from a branch of this repository runs every check below on each push, unless the repository variable
+`NK_CI_TIERS` is `on`. While it is, that pull request runs the quick checks too, and `Trusted CI verdict`
+stays pending with `LIGHT_CI_GREEN` once they pass. That is the normal state of a healthy pull request,
+not a failure. The full checks then run when a maintainer batches it for landing, or earlier when a
+maintainer adds the `ci-full-matrix` label
+([Quick and full checks](docs/CI.md#quick-and-full-checks)).
+
 | Check | What it verifies | If it fails |
 | --- | --- | --- |
 | Classify change | Which areas your change touches, so only relevant jobs run | Rarely fails; ask a maintainer |
-| Hygiene and security | pre-commit hooks: Ruff, whitespace and encoding, publication safety, secret scanning | Run `python -m pre_commit run --files <your files>` locally |
-| Markdown validation | markdownlint on changed Markdown | Run `npx --yes markdownlint-cli2@0.24.0 <file>` |
-| Python tooling gates (0–5) | The `tools/` unit tests, split into six shards | Run the failing test module with `python -m unittest tools.<module>` |
+| Hygiene and security | pre-commit hooks: Ruff, whitespace and encoding, publication safety, secret scanning; then, as later steps of the same job, markdownlint when Markdown changed and, on pushes to `main`, manual runs and merge-queue groups, the main smoke | Run `python -m pre_commit run --files <your files>` locally; for the Markdown step, `npx --yes markdownlint-cli2@0.24.0 <file>` |
+| Python tooling gates (0–3) | The `tools/` unit tests, split into four shards | Run the failing test module with `python -m unittest tools.<module>` |
 | Native and translation gates | Strict C builds (`-std=c99`/`c11 -Werror`) and runtime selftests on Linux | Compile the changed C file with the flags shown in the log |
-| Windows runtime compile gate | The runtime builds with MSYS2 UCRT64 on Windows | Check Windows-only APIs and headers |
+| Windows runtime compile gate (smoke, routes, ladder-fuzz, selftests) | The runtime builds with MSYS2 UCRT64 on Windows; each of the four jobs runs its parts one after another | Check Windows-only APIs and headers; the failing step names the part |
 | Trusted provenance attestation | Your change against the private trusted ledger | Provenance mismatches are handled by a maintainer |
 | dependency-review, OSV, CodeQL | Dependency and static security scans | Read the finding; ask if unsure |
 | CodeQL (waiting) | CodeQL runs when a maintainer batches or dispatches the pull request | Nothing: a waiting CodeQL check is not a failure |
-| Public export candidate audit | The publication gates and the public-safe export candidate, which must fail closed without the trusted ledger and leave nothing at the requested path | Read the failing step in the job log. A provenance finding in the publication audit (a missing or unresolved claim) stops the job before the candidate audit, so the step then says it failed for a reason other than the named fail-closed candidate audit; fix that finding first |
-| Main integration smoke | The compact import and publication smoke (`tools/import_audit_gate.py`) and the provenance record gap check. It runs on pushes to `main`, manual runs and merge-queue groups, and is skipped on pull requests | Run `python tools/import_audit_gate.py` and `python tools/provenance_record_gap.py --check` |
-| CI required | The aggregate of the required jobs above | Fix the failing job it names |
+| Public export audit and profile-zero fixture | The publication gates and the public-safe export candidate, which must fail closed without the trusted ledger and leave nothing at the requested path; then, when the Python or Windows gates run, the profile-zero fixture build from source, checked against its digests | Read the failing step in the job log. A provenance finding in the publication audit (a missing or unresolved claim) stops the job before the candidate audit, so the step then says it failed for a reason other than the named fail-closed candidate audit; fix that finding first |
+| Main smoke steps of Hygiene and security | The compact import and publication smoke (`tools/import_audit_gate.py`) and the provenance record gap check. They run on pushes to `main`, manual runs and merge-queue groups, and are skipped on pull requests | Run `python tools/import_audit_gate.py` and `python tools/provenance_record_gap.py --check` |
+| Android launcher build | The Android launcher builds into an APK with Gradle and the pinned NDK, and the APK carries its native libraries | Read the failing step in the log; [`docs/ANDROID_DEVELOPMENT.md`](docs/ANDROID_DEVELOPMENT.md) has the local build |
+| Generated files and repository lints | On a quick run: every generated file is current, the documentation lints pass, format specifiers in the portable core are 32-bit clean, and the tools mypy baseline holds | Run `python tools/regen_all.py --check`, `python -m unittest tools.test_lint_docs`, `python tools/format_portability_check.py` or `python tools/mypy_baseline.py`, whichever the log names |
+| CI quick checks | The aggregate of the quick checks | Fix the failing job it names |
+| CI required | The aggregate of the full checks; skipped on a quick run | Fix the failing job it names |
 
 Kilo Code Review is an advisory AI review and never blocks a merge.
 
@@ -219,8 +236,9 @@ Two more routes also need no game:
   [docs/SETUP.md](docs/SETUP.md#showcase-demos-on-windows-wsl-2-and-pspdev)). They need no disc either.
 
 The full Python suite (`python -m unittest discover -s tools -p "test_*.py"`) takes about 77 minutes on this
-machine because it also runs heavy native fixtures. Hosted CI runs it in shards on every pull request, so run
-only the modules for the files you changed.
+machine because it also runs heavy native fixtures. Hosted CI runs it in shards before a change lands: on the
+landing batch, and on a pull request that runs the full checks. So run only the modules for the files you
+changed.
 
 What does need your own copy of a game: building or running a title (`nk_manager.ps1 -Action BuildFull` with a
 title manifest, the library sweep, `make verify` and the private-title routes) and matching work in a
@@ -267,7 +285,8 @@ stand in for:
 - **CodeQL, dependency-review and OSV** — the hosted static and dependency security scans.
 - **Trusted provenance attestation** — your head commit checked against the private trusted
   ledger, which only a maintainer can run.
-- **CI required** — the aggregate status that branch protection actually requires.
+- **CI required** and **Trusted CI verdict** — the aggregate of the full checks, and the status the
+  `main` ruleset requires.
 
 `contrib-check` is a `Makefile` target, not a workflow: no hosted job invokes it (the pull-request
 template points contributors at it instead). The evidence a pull request needs is the hosted check
@@ -303,10 +322,24 @@ python tools/publish_audit.py --tracked-only --worktree --public-scope --provena
 python -m pre_commit run --all-files
 ```
 
-These are the gates [AGENTS.md section 9](AGENTS.md#9-validation-and-gate-routing) lists, and its table gives
-the focused gate for each changed surface. The whole Python suite
-(`python -m unittest discover -s tools -p "test_*.py"`) is not on this list: hosted CI runs it in shards on
-every pull request, so run it locally only when hosted CI cannot
+These are the gates [AGENTS.md section 9](AGENTS.md#9-validation-and-gate-routing) requires. Run the
+focused gate for each changed surface first:
+
+| Changed surface | Focused first gate |
+| --- | --- |
+| `tools/codegen.py`, analysis, or imports | relevant `tools/test_codegen_*.py` and `python tools/import_audit_gate.py` |
+| `guest_interp`, `recomp`, or dispatch | `tools/test_dispatch_c.py`, `tools/test_dispatch_call_boundary.py`, cosim tests, then native selftests |
+| scheduler/HLE lifecycle | `tools/test_sched_invariants.py` and `mingw32-make --no-print-directory sched-selftest` |
+| FPU/VFPU conversion | relevant `tools/test_*fpu*.py` plus `fp-convert-selftest`/`vfpu-interp-selftest` |
+| publication/provenance | `tools/policy_sync.py`, both publication-audit legs (the command above, with and without `--worktree`), and `tools/modified_file_notice_audit.py` |
+| docs and agent policy | `python -m unittest tools.test_lint_docs tools.test_dco_policy`, markdownlint (below), and `python tools/audit_public_issue_links.py` |
+| workflow/configuration | `tools/test_ci_paths.py`, pre-commit, and the full applicable hosted matrix |
+| LLE CPU / domain modes | `tools/test_cpu_lle.py`, `tools/test_domain_mode.py`, then `mingw32-make native-core-tests` |
+
+The whole Python suite
+(`python -m unittest discover -s tools -p "test_*.py"`) is not on this list: hosted CI runs it in shards before a
+change lands (on the landing batch, and on a pull request that runs the full checks), so run it locally only
+when hosted CI cannot
 ([what hosted CI does not run](docs/CI.md#what-hosted-ci-does-not-run)).
 
 To rebuild a game you own, pass its local title manifest:

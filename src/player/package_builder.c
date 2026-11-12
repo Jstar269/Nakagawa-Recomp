@@ -20,6 +20,7 @@
 #include "nk_json.h"
 #include "nk_launch.h"
 #include "nk_platform.h"
+#include "nk_shared_helpers.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -331,14 +332,11 @@ static PackageBundleStatus bundle_invalid(char *error, size_t error_size,
 }
 
 static bool bundle_join(char *out, size_t out_size, const char *root, const char *relative) {
-    int n = snprintf(out, out_size, "%s%c%s", root, nk_platform_path_separator(), relative);
-    if (n < 0 || (size_t)n >= out_size) return false;
-    if (nk_platform_path_separator() != '/') {
-        for (char *p = out + strlen(root) + 1; *p; p++) {
-            if (*p == '/') *p = nk_platform_path_separator();
-        }
-    }
-    return true;
+    char separator = nk_platform_path_separator();
+    unsigned int flags = separator != '/' ?
+        NK_SHARED_PATH_NORMALIZE_FORWARD_SLASHES : 0u;
+    return nk_shared_path_join(out, out_size, root, relative, separator,
+                               NK_SHARED_PATH_JOIN_ALWAYS, flags);
 }
 
 /* An inventory path is relative, '/'-separated, inside python/, msys64/ or
@@ -1062,7 +1060,7 @@ static bool bootstrap_expand_python(PackageBootstrapSession *session) {
         NULL
     };
     NkProcessHandle process;
-    if (!nk_platform_spawn_process(tar_exe, argv, NULL, NULL, log_path, &process)) return false;
+    if (!nk_platform_spawn_tool(tar_exe, argv, NULL, NULL, log_path, &process)) return false;
     while (process.is_active && nk_platform_is_process_running(&process)) {
         if (bootstrap_cancel_requested(session)) {
             nk_platform_terminate_process(&process);
@@ -1443,8 +1441,8 @@ NkResult package_builder_start_prerequisite_fetch(
         "'--total-bytes',os.environ['NK_PREREQ_TOTAL_BYTES']]; "
         "runpy.run_module('tools.nk_core.prereq_fetcher',run_name='__main__')";
     const char *argv[] = { python_path, "-c", code, NULL };
-    if (!nk_platform_spawn_process(python_path, argv, envp, source_root,
-                                   session->log_file_path, &session->process)) {
+    if (!nk_platform_spawn_tool(python_path, argv, envp, source_root,
+                                session->log_file_path, &session->process)) {
         NkSpawnBlockReport block;
         if (nk_launch_describe_spawn_block(session->process.spawn_error,
                                            "the build tools' Python", "build tools",
@@ -1486,10 +1484,7 @@ void package_builder_request_prerequisite_cancel(
 }
 
 static inline void safe_str_copy(char *dest, size_t dest_size, const char *src) {
-    if (!dest || dest_size == 0) return;
-    if (!src) { dest[0] = '\0'; return; }
-    strncpy(dest, src, dest_size - 1);
-    dest[dest_size - 1] = '\0';
+    (void)nk_shared_text_copy(dest, dest_size, src, NK_SHARED_TEXT_COPY_TRUNCATE);
 }
 
 static const char *skip_whitespace(const char *s) {
@@ -1609,6 +1604,8 @@ bool package_builder_parse_progress_line(
         }
         const char *notice = nk_json_get_string(nk_json_obj_get(root, "notice"));
         if (notice) safe_str_copy(out_event->notice, sizeof(out_event->notice), notice);
+        const char *speed = nk_json_get_string(nk_json_obj_get(root, "speed"));
+        if (speed) safe_str_copy(out_event->speed, sizeof(out_event->speed), speed);
     }
     nk_json_free(root);
 
@@ -1691,6 +1688,57 @@ float package_builder_compile_fraction(const PackageBuildSession *session) {
     return (float)session->parts_completed / (float)session->parts_total;
 }
 
+const char *package_builder_speed_line(const PackageBuildSession *session) {
+    if (!session || !session->is_building || session->speed_line[0] == '\0') return NULL;
+    return session->speed_line;
+}
+
+static const struct {
+    const char *key;
+    const char *name;
+} kBuildSpeeds[PACKAGE_BUILD_SPEED_COUNT] = {
+    [PACKAGE_BUILD_SPEED_BALANCED] = {"balanced", "Balanced"},
+    [PACKAGE_BUILD_SPEED_BACKGROUND] = {"background", "Background"},
+    [PACKAGE_BUILD_SPEED_FASTEST] = {"fastest", "Fastest"},
+};
+
+static PackageBuildSpeed build_speed_or_default(PackageBuildSpeed speed) {
+    return (int)speed >= 0 && speed < PACKAGE_BUILD_SPEED_COUNT ? speed
+                                                                : PACKAGE_BUILD_SPEED_BALANCED;
+}
+
+const char *package_build_speed_key(PackageBuildSpeed speed) {
+    return kBuildSpeeds[build_speed_or_default(speed)].key;
+}
+
+const char *package_build_speed_name(PackageBuildSpeed speed) {
+    return kBuildSpeeds[build_speed_or_default(speed)].name;
+}
+
+bool package_build_speed_from_key(const char *key, PackageBuildSpeed *out) {
+    if (!key || !out) return false;
+    for (int i = 0; i < PACKAGE_BUILD_SPEED_COUNT; ++i) {
+        if (strcmp(key, kBuildSpeeds[i].key) == 0) {
+            *out = (PackageBuildSpeed)i;
+            return true;
+        }
+    }
+    return false;
+}
+
+PackageBuildSpeed package_build_speed_next(PackageBuildSpeed speed) {
+    switch (build_speed_or_default(speed)) {
+    case PACKAGE_BUILD_SPEED_BACKGROUND: return PACKAGE_BUILD_SPEED_BALANCED;
+    case PACKAGE_BUILD_SPEED_BALANCED: return PACKAGE_BUILD_SPEED_FASTEST;
+    default: return PACKAGE_BUILD_SPEED_BACKGROUND;
+    }
+}
+
+NkProcessPriority package_build_speed_priority(PackageBuildSpeed speed) {
+    return build_speed_or_default(speed) == PACKAGE_BUILD_SPEED_BACKGROUND
+        ? NK_PROCESS_PRIORITY_LOW : NK_PROCESS_PRIORITY_NORMAL;
+}
+
 const char *package_builder_compile_notice(const PackageBuildSession *session) {
     if (!session || session->compile_notice[0] == '\0' ||
         session->current_stage != PACKAGE_BUILD_STAGE_COMPILE) {
@@ -1720,6 +1768,7 @@ void package_builder_apply_event(
         session->total_bytes = event->total_bytes;
     }
     if (event->error_code[0]) safe_str_copy(session->failure_code, sizeof(session->failure_code), event->error_code);
+    if (event->speed[0]) safe_str_copy(session->speed_line, sizeof(session->speed_line), event->speed);
     if (event->install_complete) session->prerequisite_install_complete = true;
     if (event->parts_total > 0) {
         session->parts_completed = event->parts_completed;
@@ -1823,8 +1872,8 @@ static bool python_candidate_runs_required_version(const char *executable_path,
     const char *argv[] = { executable_path, "-c", probe, NULL };
     if (!executable_path || !executable_path[0] ||
         !package_builder_developer_log_path(log_path, sizeof(log_path)) ||
-        !nk_platform_spawn_process(executable_path, argv, NULL, NULL,
-                                   log_path, &process)) {
+        !nk_platform_spawn_tool(executable_path, argv, NULL, NULL,
+                                log_path, &process)) {
         return false;
     }
 
@@ -1942,9 +1991,28 @@ static bool find_python_pass(bool only_315, char *out_path, size_t out_size) {
     return false;
 }
 
+/* A host with a bundled tool folder (Android: the app's native library folder,
+ * nk_platform_get_tool_dir) runs only the programs in it (nk_platform_spawn_tool),
+ * so the one Python a package build can use there is the app's own CPython 3.15
+ * launcher in that folder. PYTHON, PATH and the per-user prerequisites are not
+ * searched: nothing they name could start. */
+#define PACKAGE_BUILDER_BUNDLED_PYTHON "libnk_python.so"
+
+static bool find_bundled_python(const char *tool_dir, char *out_path, size_t out_size) {
+    char candidate[NK_MAX_PATH + sizeof(PACKAGE_BUILDER_BUNDLED_PYTHON) + 1];
+    int n = snprintf(candidate, sizeof(candidate), "%s/%s", tool_dir,
+                     PACKAGE_BUILDER_BUNDLED_PYTHON);
+    return n > 0 && (size_t)n < sizeof(candidate) &&
+           accept_python_candidate(candidate, true, out_path, out_size);
+}
+
 bool package_builder_find_python(char *out_path, size_t out_size) {
     if (!out_path || out_size == 0) return false;
     out_path[0] = '\0';
+    char tool_dir[NK_MAX_PATH];
+    if (nk_platform_get_tool_dir(tool_dir, sizeof(tool_dir))) {
+        return find_bundled_python(tool_dir, out_path, out_size);
+    }
 
     /* CPython 3.15 is the documented default, so search every location for it
      * first. A 3.14 interpreter is accepted only when no runnable 3.15 exists;
@@ -2136,7 +2204,12 @@ PackageBundleStatus package_builder_resolve_bundled_tools(const char *install_ro
                                                           PackageBundledTools *out) {
     if (!out) return PACKAGE_BUNDLE_ABSENT;
     memset(out, 0, sizeof(*out));
-    if (!package_builder_bundled_prerequisites_root(install_root, out->root, sizeof(out->root)) ||
+    /* A host with a bundled tool folder (Android) runs only the programs in it, so a
+       release zip's prereqs/ tree cannot apply there: the app's own folder is its bundle,
+       and package_builder_find_python looks there. */
+    char tool_dir[NK_MAX_PATH];
+    if (nk_platform_get_tool_dir(tool_dir, sizeof(tool_dir)) ||
+        !package_builder_bundled_prerequisites_root(install_root, out->root, sizeof(out->root)) ||
         !nk_platform_dir_exists(out->root)) {
         out->root[0] = '\0';
         out->status = PACKAGE_BUNDLE_ABSENT;
@@ -2191,6 +2264,8 @@ bool package_builder_toolchain_missing(
     const char *tool = NULL;
     const char *fix = NULL;
     const char *make_tool = package_builder_make_tool_name();
+    /* Where the missing tool was looked for; the same card text on every host but Android. */
+    const char *where = "on PATH";
 #if defined(_WIN32) || defined(_WIN64)
     const char *python_fix =
         "Install CPython 3.15 or 3.14 (see docs/SETUP.md) or set the PYTHON environment "
@@ -2218,9 +2293,30 @@ bool package_builder_toolchain_missing(
         "Nakagawa downloads build tools only on Windows; here it uses the ones your system "
         "provides.";
 #endif
+    /* Android text is chosen at run time (nk_platform_host_kind), so it compiles on every host. */
+    const char *python_where = where;
+    if (nk_platform_host_kind() == NK_HOST_ANDROID) {
+        /* package_builder_find_python looks only for the app's own libnk_python.so in the
+           native library folder here (PYTHON and PATH are not searched), and the app ships
+           no CPython, compiler or make; gcc and make are still looked up on PATH. */
+        python_fix =
+            "Android runs only the programs an app ships in its native library folder, and "
+            "this build of the app ships no CPython 3.15 there. PYTHON and PATH are not "
+            "searched for it.";
+        gcc_fix =
+            "This build of the app ships no compiler, and Android has no package to install "
+            "one from. gcc is looked for on PATH only.";
+        make_fix =
+            "This build of the app ships no make, and Android has no package to install one "
+            "from. make is looked for on PATH only.";
+        source =
+            "Nakagawa downloads build tools only on Windows.";
+        python_where = "in the app's native library folder (libnk_python.so)";
+    }
     if (!have_python) {
         tool = "python";
         fix = python_fix;
+        where = python_where;
     } else if (!have_gcc) {
         tool = "gcc";
         fix = gcc_fix;
@@ -2236,9 +2332,163 @@ bool package_builder_toolchain_missing(
     if (out_tool && out_tool_size) snprintf(out_tool, out_tool_size, "%s", tool);
     if (out_message && out_message_size) {
         snprintf(out_message, out_message_size,
-                 "BUILD_TOOLCHAIN_MISSING: %s was not found on PATH. The package build "
+                 "BUILD_TOOLCHAIN_MISSING: %s was not found %s. The package build "
                  "runs python, gcc and %s, so it cannot start. %s %s",
-                 tool, make_tool, fix, source);
+                 tool, where, make_tool, fix, source);
+    }
+    return true;
+}
+
+/* ---- Build child PATH (#2278) ---------------------------------------------
+ * Python, make and gcc must all come from one UCRT64 toolchain. A stray MinGW
+ * (a Chocolatey one, say) ahead of MSYS2 on the user's PATH would otherwise win
+ * for gcc while python still came from the MSYS2 fallback list. */
+
+static bool builder_is_separator(char c) { return c == '/' || c == '\\'; }
+
+static char builder_ascii_lower(char c) {
+    return (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c;
+}
+
+/* The last path component of dir, ignoring trailing separators. */
+static const char *builder_last_component(const char *dir, size_t *len_out) {
+    size_t end = strlen(dir);
+    while (end > 0 && builder_is_separator(dir[end - 1])) end--;
+    size_t begin = end;
+    while (begin > 0 && !builder_is_separator(dir[begin - 1])) begin--;
+    *len_out = end - begin;
+    return dir + begin;
+}
+
+/* Whether dir's last component equals name (lower case), ignoring case. */
+static bool builder_component_is(const char *dir, const char *name) {
+    size_t len = 0;
+    const char *last = builder_last_component(dir, &len);
+    if (len != strlen(name)) return false;
+    for (size_t i = 0; i < len; i++) {
+        if (builder_ascii_lower(last[i]) != name[i]) return false;
+    }
+    return true;
+}
+
+/* Copy dir without its last component and trailing separators. False when
+ * nothing is left or it does not fit. */
+static bool builder_parent_dir(const char *dir, char *out, size_t out_size) {
+    size_t len = 0;
+    const char *last = builder_last_component(dir, &len);
+    size_t keep = (size_t)(last - dir);
+    while (keep > 0 && builder_is_separator(dir[keep - 1])) keep--;
+    if (keep == 0 || keep >= out_size) return false;
+    memcpy(out, dir, keep);
+    out[keep] = '\0';
+    return true;
+}
+
+/* A system UCRT64 prefix: bin/gcc.exe plus include/SDL3/SDL.h, the pair
+ * sdl3-check needs from one toolchain. The headers tell a complete MSYS2 UCRT64
+ * install from a bare MinGW; sdl3-check still validates the rest. */
+static bool builder_ucrt64_prefix_usable(const char *prefix, char *bin_out, size_t bin_size) {
+    char gcc[NK_MAX_PATH * 2];
+    char header[NK_MAX_PATH * 2];
+    const char sep = nk_platform_path_separator();
+    int bin_len = snprintf(bin_out, bin_size, "%s%cbin", prefix, sep);
+    if (bin_len < 0 || (size_t)bin_len >= bin_size) return false;
+    int g = snprintf(gcc, sizeof(gcc), "%s%cgcc.exe", bin_out, sep);
+    int h = snprintf(header, sizeof(header), "%s%cinclude%cSDL3%cSDL.h", prefix, sep, sep, sep);
+    return g > 0 && (size_t)g < sizeof(gcc) && h > 0 && (size_t)h < sizeof(header) &&
+           nk_platform_file_exists(gcc) && nk_platform_file_exists(header);
+}
+
+/* hint is a UCRT64 prefix or its bin folder. */
+static bool builder_ucrt64_from_hint(const char *hint, char *bin_out, size_t bin_size) {
+    if (!hint || !hint[0] || strlen(hint) >= NK_MAX_PATH) return false;
+    char prefix[NK_MAX_PATH];
+    if (builder_component_is(hint, "bin")) {
+        if (!builder_parent_dir(hint, prefix, sizeof(prefix))) return false;
+    } else {
+        safe_str_copy(prefix, sizeof(prefix), hint);
+    }
+    return builder_ucrt64_prefix_usable(prefix, bin_out, bin_size);
+}
+
+/* A tool-root bin (bundle or download) counts when its gcc.exe exists. */
+static bool builder_root_bin_has_gcc(const char *bin) {
+    char gcc[NK_MAX_PATH * 2];
+    int n = snprintf(gcc, sizeof(gcc), "%s%cgcc.exe", bin, nk_platform_path_separator());
+    return n > 0 && (size_t)n < sizeof(gcc) && nk_platform_file_exists(gcc);
+}
+
+bool package_builder_resolve_toolchain_bin(const char *prerequisites_root,
+                                           const char *data_root,
+                                           const char *path_env,
+                                           const char *msys_hint,
+                                           const char *msys_default_prefix,
+                                           char *out, size_t out_size) {
+    if (!out || out_size == 0) return false;
+    out[0] = '\0';
+
+    char bin[NK_MAX_PATH];
+    const char sep = nk_platform_path_separator();
+    if (prerequisites_root && prerequisites_root[0]) {
+        /* A verified release bundle (#1285) alone decides: a bundle without its
+           gcc is not quietly swapped for another toolchain. */
+        int n = snprintf(bin, sizeof(bin), "%s%cmsys64%cucrt64%cbin", prerequisites_root, sep,
+                         sep, sep);
+        if (n <= 0 || (size_t)n >= sizeof(bin) || !builder_root_bin_has_gcc(bin)) return false;
+    } else {
+        bool found = false;
+        if (data_root && data_root[0]) {
+            int n = snprintf(bin, sizeof(bin), "%s%cprerequisites%cmsys64%cucrt64%cbin",
+                             data_root, sep, sep, sep, sep);
+            found = n > 0 && (size_t)n < sizeof(bin) && builder_root_bin_has_gcc(bin);
+        }
+        /* A system MSYS2 UCRT64 install: a UCRT64 gcc already on PATH, then an
+           explicit hint, then the default prefix, the order nk_doctor_checks.py
+           uses. The PATH test is stricter than the doctor's: the doctor accepts
+           any resolved gcc path containing "ucrt64", while this needs a bin folder
+           whose parent folder is named exactly ucrt64. */
+        if (!found && path_env && path_env[0]) {
+            const char list_sep = nk_platform_path_list_separator();
+            const char *entry = path_env;
+            while (!found && entry && *entry) {
+                const char *next = strchr(entry, list_sep);
+                size_t len = next ? (size_t)(next - entry) : strlen(entry);
+                char dir[NK_MAX_PATH];
+                char parent[NK_MAX_PATH];
+                if (len > 0 && len < sizeof(dir)) {
+                    memcpy(dir, entry, len);
+                    dir[len] = '\0';
+                    found = builder_component_is(dir, "bin") &&
+                            builder_parent_dir(dir, parent, sizeof(parent)) &&
+                            builder_component_is(parent, "ucrt64") &&
+                            builder_ucrt64_prefix_usable(parent, bin, sizeof(bin));
+                }
+                entry = next ? next + 1 : NULL;
+            }
+        }
+        if (!found) {
+            found = builder_ucrt64_from_hint(msys_hint, bin, sizeof(bin)) ||
+                    builder_ucrt64_from_hint(msys_default_prefix, bin, sizeof(bin));
+        }
+        if (!found) return false;
+    }
+    if (strlen(bin) >= out_size) return false;
+    safe_str_copy(out, out_size, bin);
+    return true;
+}
+
+bool package_builder_compose_build_path(const char *toolchain_bin, const char *path_env,
+                                        char *out, size_t out_size) {
+    if (!out || out_size == 0) return false;
+    out[0] = '\0';
+    if (!toolchain_bin || !toolchain_bin[0]) return false;
+    const char list_sep = nk_platform_path_list_separator();
+    int n = (path_env && path_env[0])
+        ? snprintf(out, out_size, "%s%c%s", toolchain_bin, list_sep, path_env)
+        : snprintf(out, out_size, "%s", toolchain_bin);
+    if (n <= 0 || (size_t)n >= out_size) {
+        out[0] = '\0';
+        return false;
     }
     return true;
 }
@@ -2289,12 +2539,14 @@ NkResult package_builder_start(
     nk_remove_utf8(session->log_file_path);
     session->progress_file_offset = 0;
 
-    const char *argv[16];
+    const char *argv[20];
     int argc = 0;
     argv[argc++] = python_path;
     argv[argc++] = cli_path;
     argv[argc++] = "build-package";
     argv[argc++] = session->disc_id;
+    argv[argc++] = "--build-speed";
+    argv[argc++] = package_build_speed_key(session->build_speed);
     argv[argc++] = "--progress-json";
     argv[argc++] = session->progress_file_path;
     argv[argc++] = "--log-file";
@@ -2306,7 +2558,8 @@ NkResult package_builder_start(
     }
     if (session->no_shared_libraries) argv[argc++] = "--no-shared-libraries";
     /* The enhanced build: nk_cli.py reads the package at
-       <user data>/enhancements/<disc id>-60hz.json and writes
+       <user data>/enhancements/<disc id>-60hz.json, else the published one the source tree
+       ships at assets/enhancements/<disc id>-60hz.json, and writes
        packages/<disc_id>-enhanced-<id>, never the authentic package. */
     if (session->enhancement_package_id[0]) argv[argc++] = "--experimental-60hz";
     if (session->iso_path[0]) {
@@ -2318,48 +2571,38 @@ NkResult package_builder_start(
     char path_override[32768];
     char path_environment[32784];
     const char *envp[2] = { NULL, NULL };
-    char downloaded_bin[NK_MAX_PATH];
-    int path_len = 0;
-    if (session->prerequisites_root[0]) {
-        /* A verified release bundle (#1285) replaces the per-user download. */
-        path_len = snprintf(downloaded_bin, sizeof(downloaded_bin),
-                            "%s%cmsys64%cucrt64%cbin", session->prerequisites_root,
-                            nk_platform_path_separator(), nk_platform_path_separator(),
-                            nk_platform_path_separator());
-    } else if (user_data_root && user_data_root[0]) {
-        path_len = snprintf(downloaded_bin, sizeof(downloaded_bin),
-                            "%s%cprerequisites%cmsys64%cucrt64%cbin",
-                            user_data_root, nk_platform_path_separator(),
-                            nk_platform_path_separator(), nk_platform_path_separator(),
-                            nk_platform_path_separator());
-    }
-    const char *old_path = getenv("PATH");
-    if (path_len > 0 && (size_t)path_len < sizeof(downloaded_bin)) {
-        char downloaded_gcc[NK_MAX_PATH];
-        int gcc_len = snprintf(downloaded_gcc, sizeof(downloaded_gcc), "%s%cgcc.exe",
-                               downloaded_bin, nk_platform_path_separator());
+    char toolchain_bin[NK_MAX_PATH];
+    const char *msys_hint = NULL;
+    const char *msys_default = NULL;
 #if defined(_WIN32) || defined(_WIN64)
-        const char list_separator = ';';
-#else
-        const char list_separator = ':';
+    /* The system MSYS2 UCRT64 candidates, in the order the resolver tries them:
+       a UCRT64 bin already on PATH, then an explicit MSYS_PATH, then the default
+       install (docs/SETUP.md, "PATH order"). */
+    msys_hint = getenv("MSYS_PATH");
+    msys_default = "C:/msys64/ucrt64";
 #endif
-        int written = gcc_len > 0 && (size_t)gcc_len < sizeof(downloaded_gcc) &&
-                      nk_platform_file_exists(downloaded_gcc)
-            ? snprintf(path_override, sizeof(path_override), "%s%c%s",
-                       downloaded_bin, list_separator, old_path ? old_path : "")
-            : -1;
-        if (written > 0 && (size_t)written < sizeof(path_override)) {
-            snprintf(path_environment, sizeof(path_environment), "PATH=%s", path_override);
+    const char *old_path = getenv("PATH");
+    if (package_builder_resolve_toolchain_bin(session->prerequisites_root, user_data_root,
+                                              old_path, msys_hint, msys_default,
+                                              toolchain_bin, sizeof(toolchain_bin)) &&
+        package_builder_compose_build_path(toolchain_bin, old_path, path_override,
+                                           sizeof(path_override))) {
+        int written = snprintf(path_environment, sizeof(path_environment), "PATH=%s",
+                               path_override);
+        if (written > 0 && (size_t)written < sizeof(path_environment)) {
             envp[0] = path_environment;
         }
     }
 
-    bool spawned = nk_platform_spawn_process(
+    /* Background starts the whole build tree low: Python, Make and every compiler
+       inherit the child's priority. On Android the tool-folder rule still applies. */
+    bool spawned = nk_platform_spawn_tool_at_priority(
         python_path,
         argv,
         envp[0] ? envp : NULL,
         NULL,
         session->log_file_path,
+        package_build_speed_priority(session->build_speed),
         &session->process
     );
 
@@ -2382,6 +2625,8 @@ NkResult package_builder_start(
     session->current_stage = PACKAGE_BUILD_STAGE_PREFLIGHT;
     safe_str_copy(session->current_stage_name, sizeof(session->current_stage_name), "preflight");
     safe_str_copy(session->current_message, sizeof(session->current_message), "Starting package build…");
+    snprintf(session->speed_line, sizeof(session->speed_line), "Build speed: %s",
+             package_build_speed_name(session->build_speed));
 
     char spawn_msg[PACKAGE_BUILD_LINE_LEN];
     snprintf(spawn_msg, sizeof(spawn_msg), "[build] START: Building package for %s", session->disc_id);

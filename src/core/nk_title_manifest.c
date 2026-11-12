@@ -10,6 +10,7 @@
 #include "nk_iso.h"
 #include "nk_json.h"
 #include "nk_platform.h"
+#include "nk_shared_helpers.h"
 #include <ctype.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -52,6 +53,7 @@ static int nk_ascii_casecmp(const char *a, const char *b) {
 /* Mirrors MAX_TITLE_MODULES in tools/title_manifest.py: the disc module-discovery cap. */
 #define MAX_MODULES 256
 #define MAX_COMPAT_DISC_IDS 16
+#define MAX_DISC_BUILDS 16
 #define MAX_LOOSE_CONTENT_ROOTS 16
 #define MAX_LOOSE_CONTENT_EXCLUDES 2
 #define NK_MANIFEST_MAX_OVERLAYS 8
@@ -94,9 +96,16 @@ typedef struct {
     uint32_t expected_data_file_count;
     bool requires_font_firmware;
     bool requires_psmf;
+    uint8_t analog_dead_zone_counts;   /* input.analog_dead_zone.counts; 0 when not declared */
     NkModuleDefinition modules[MAX_MODULES];
     char module_names[MAX_MODULES][129];
     int module_count;
+    /* disc.builds (#2140), kept as text so a by-value copy of the slot stays valid. */
+    char build_sha256[MAX_DISC_BUILDS][65];
+    char build_status[MAX_DISC_BUILDS][16];
+    char build_label[MAX_DISC_BUILDS][65];
+    char build_reason[MAX_DISC_BUILDS][201];
+    int build_count;
     NkTitleEntry entry;
 } OverlayStorageSlot;
 
@@ -154,25 +163,12 @@ static void overlay_slot_anchor(OverlayStorageSlot *dest) {
     dest->entry.expected_data_file_count = dest->expected_data_file_count;
     dest->entry.requires_font_firmware = dest->requires_font_firmware;
     dest->entry.requires_psmf = dest->requires_psmf;
+    dest->entry.analog_dead_zone_counts = dest->analog_dead_zone_counts;
     for (int m = 0; m < dest->module_count; m++) {
         dest->modules[m].name = dest->module_names[m];
     }
     dest->entry.modules = dest->modules;
     dest->entry.module_count = dest->module_count;
-}
-
-static FILE *manifest_fopen(const char *path) {
-#if defined(_WIN32) || defined(_WIN64)
-    if (!path || !*path) return NULL;
-    int wlen = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, NULL, 0);
-    if (wlen <= 0 || wlen > 32768) return NULL;
-    WCHAR wpath[32768];
-    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wpath, wlen) <= 0) return NULL;
-    return _wfopen(wpath, L"rb");
-#else
-    if (!path || !*path) return NULL;
-    return fopen(path, "rb");
-#endif
 }
 
 /* -----------------------------------------------------------------------------
@@ -244,6 +240,95 @@ static bool is_valid_disc_id(const char *s) {
     }
     for (int i = 4; i < 9; i++) {
         if (s[i] < '0' || s[i] > '9') return false;
+    }
+    return true;
+}
+
+/* A build digest: 64 lowercase hexadecimal digits (#2140). */
+static bool is_build_sha256(const char *s) {
+    if (!s || strlen(s) != 64) return false;
+    for (int i = 0; i < 64; i++) {
+        if (!((s[i] >= '0' && s[i] <= '9') || (s[i] >= 'a' && s[i] <= 'f'))) return false;
+    }
+    return true;
+}
+
+/* Printable ASCII with no leading or trailing space, 1..max bytes. */
+static bool is_build_text(const char *s, size_t max) {
+    if (!s) return false;
+    size_t len = strlen(s);
+    if (len < 1 || len > max || s[0] == ' ' || s[len - 1] == ' ') return false;
+    for (size_t i = 0; i < len; i++) {
+        if ((unsigned char)s[i] < 0x20 || (unsigned char)s[i] > 0x7E) return false;
+    }
+    return true;
+}
+
+static bool check_object_keys(const JsonNode *node, const char *path,
+                              const char * const *allowed_keys,
+                              const char * const *required_keys,
+                              char *err_buf, size_t err_len);
+
+/* disc.builds: the executable builds a title records, each named by a digest,
+   a status and a label (#2140). Mirrors validate_disc_builds in
+   tools/title_manifest.py. */
+static bool manifest_parse_disc_builds(const JsonNode *builds, char *error_buf, size_t error_buf_len) {
+    if (!builds || builds->type != JSON_ARRAY) {
+        if (error_buf) snprintf(error_buf, error_buf_len, "$.disc.builds: must be an array");
+        return false;
+    }
+    if (builds->u.arr.count < 1 || builds->u.arr.count > MAX_DISC_BUILDS) {
+        if (error_buf) snprintf(error_buf, error_buf_len, "$.disc.builds: must contain 1..%d items", MAX_DISC_BUILDS);
+        return false;
+    }
+    static const char * const build_allowed[] = {"executable_sha256", "status", "label", "reason", NULL};
+    static const char * const build_required[] = {"executable_sha256", "status", "label", NULL};
+    for (size_t b = 0; b < builds->u.arr.count; b++) {
+        JsonNode *item = builds->u.arr.items[b];
+        char item_path[48];
+        snprintf(item_path, sizeof(item_path), "$.disc.builds[%zu]", b);
+        if (!check_object_keys(item, item_path, build_allowed, build_required, error_buf, error_buf_len)) {
+            return false;
+        }
+        JsonNode *digest = obj_get(item, "executable_sha256");
+        if (digest->type != JSON_STRING || !is_build_sha256(digest->u.str_val)) {
+            if (error_buf) snprintf(error_buf, error_buf_len,
+                "%s.executable_sha256: must be 64 lowercase hexadecimal digits", item_path);
+            return false;
+        }
+        for (size_t prev = 0; prev < b; prev++) {
+            JsonNode *other = obj_get(builds->u.arr.items[prev], "executable_sha256");
+            if (strcmp(other->u.str_val, digest->u.str_val) == 0) {
+                if (error_buf) snprintf(error_buf, error_buf_len,
+                    "%s.executable_sha256: duplicate build digest", item_path);
+                return false;
+            }
+        }
+        JsonNode *status = obj_get(item, "status");
+        if (status->type != JSON_STRING ||
+            (strcmp(status->u.str_val, "supported") != 0 &&
+             strcmp(status->u.str_val, "experimental") != 0 &&
+             strcmp(status->u.str_val, "known-bad") != 0)) {
+            if (error_buf) snprintf(error_buf, error_buf_len, "%s.status: unsupported build status", item_path);
+            return false;
+        }
+        JsonNode *label = obj_get(item, "label");
+        if (label->type != JSON_STRING || !is_build_text(label->u.str_val, 64)) {
+            if (error_buf) snprintf(error_buf, error_buf_len,
+                "%s.label: must be 1..64 printable ASCII characters", item_path);
+            return false;
+        }
+        JsonNode *reason = obj_get(item, "reason");
+        if (reason && (reason->type != JSON_STRING || !is_build_text(reason->u.str_val, 200))) {
+            if (error_buf) snprintf(error_buf, error_buf_len,
+                "%s.reason: must be 1..200 printable ASCII characters", item_path);
+            return false;
+        }
+        if (!reason && strcmp(status->u.str_val, "known-bad") == 0) {
+            if (error_buf) snprintf(error_buf, error_buf_len,
+                "%s.reason: is required for a known-bad build", item_path);
+            return false;
+        }
     }
     return true;
 }
@@ -523,6 +608,7 @@ typedef struct ManifestParse {
     size_t loose_root_count;
     bool has_font_feature;
     bool has_psmf_feature;
+    uint8_t analog_dead_zone_counts;
     uint32_t expected_file_count;
     uint32_t fallback_entry;
 } ManifestParse;
@@ -537,7 +623,7 @@ static bool manifest_parse_identity(ManifestParse *mp) {
         "schema_version", "id", "display_name", "kind", "disc", "executable",
         "modules", "filesystem", "hle_profile", "feature_requirements",
         "compatibility_manifest", "verification_profile", "codegen_profile", "notes",
-        "runtime_contract", "profile_zero", "runtime_bindings", "game_name", NULL
+        "runtime_contract", "profile_zero", "runtime_bindings", "game_name", "input", NULL
     };
     static const char * const required_root_keys[] = {
         "schema_version", "id", "display_name", "kind", "executable",
@@ -610,7 +696,7 @@ static bool manifest_parse_disc(ManifestParse *mp) {
         }
         static const char * const allowed_disc_keys[] = {
             "id", "region", "revision_policy", "compatible_revisions",
-            "require_local_compatibility_record", NULL
+            "require_local_compatibility_record", "builds", NULL
         };
         static const char * const required_disc_keys[] = {"id", "region", "revision_policy", NULL};
         if (!check_object_keys(mp->disc_node, "$.disc", allowed_disc_keys, required_disc_keys, error_buf, error_buf_len)) {
@@ -649,6 +735,11 @@ static bool manifest_parse_disc(ManifestParse *mp) {
         if (local_record_node && local_record_node->type != JSON_BOOL) {
             if (error_buf) snprintf(error_buf, error_buf_len,
                 "$.disc.require_local_compatibility_record: must be a boolean");
+            return false;
+        }
+
+        JsonNode *builds_node = obj_get(mp->disc_node, "builds");
+        if (builds_node && !manifest_parse_disc_builds(builds_node, error_buf, error_buf_len)) {
             return false;
         }
 
@@ -1236,7 +1327,7 @@ static bool manifest_parse_features(ManifestParse *mp) {
     return true;
 }
 
-/* The optional compatibility manifest and notes (checks 13-14). */
+/* The optional compatibility manifest, notes and input (checks 13-14a). */
 static bool manifest_parse_optional_fields(ManifestParse *mp) {
     char *error_buf = mp->error_buf;
     size_t error_buf_len = mp->error_buf_len;
@@ -1257,6 +1348,42 @@ static bool manifest_parse_optional_fields(ManifestParse *mp) {
             if (error_buf) snprintf(error_buf, error_buf_len, "$.notes: must be a string <= 2048 characters");
             return false;
         }
+    }
+
+    /* 14a. input (optional): how the title reads its controls. The rules are
+       tools/title_manifest.py validate_input's. An overlay carries the value in its own
+       entry, as it carries every other field; nothing is merged from a public entry. An
+       overlay that declares no input block has none. */
+    JsonNode *input_node = obj_get(root, "input");
+    if (input_node) {
+        static const char * const input_keys[] = {"analog_dead_zone", NULL};
+        static const char * const zone_keys[] = {"shape", "counts", NULL};
+        if (!check_object_keys(input_node, "$.input", input_keys, input_keys, error_buf, error_buf_len)) {
+            return false;
+        }
+        JsonNode *zone = obj_get(input_node, "analog_dead_zone");
+        if (!check_object_keys(zone, "$.input.analog_dead_zone", zone_keys, zone_keys,
+                               error_buf, error_buf_len)) {
+            return false;
+        }
+        JsonNode *shape = obj_get(zone, "shape");
+        if (shape->type != JSON_STRING || strcmp(shape->u.str_val, "square") != 0) {
+            if (error_buf) snprintf(error_buf, error_buf_len,
+                                    "$.input.analog_dead_zone.shape: unsupported dead-zone shape");
+            return false;
+        }
+        JsonNode *counts = obj_get(zone, "counts");
+        if (counts->type != JSON_NUMBER || !counts->u.num.is_integer) {
+            if (error_buf) snprintf(error_buf, error_buf_len,
+                                    "$.input.analog_dead_zone.counts: must be an integer");
+            return false;
+        }
+        if (counts->u.num.int_val < 1 || counts->u.num.int_val > 126) {
+            if (error_buf) snprintf(error_buf, error_buf_len,
+                                    "$.input.analog_dead_zone.counts: must be in range 1..126");
+            return false;
+        }
+        mp->analog_dead_zone_counts = (uint8_t)counts->u.num.int_val;
     }
     return true;
 }
@@ -1467,6 +1594,25 @@ static void manifest_build_slot(const ManifestParse *mp, OverlayStorageSlot *out
         }
     }
 
+    if (mp->disc_node) {
+        JsonNode *builds_node = obj_get(mp->disc_node, "builds");
+        if (builds_node && builds_node->type == JSON_ARRAY) {
+            for (size_t b = 0; b < builds_node->u.arr.count && b < MAX_DISC_BUILDS; b++) {
+                JsonNode *item = builds_node->u.arr.items[b];
+                JsonNode *reason = obj_get(item, "reason");
+                snprintf(out->build_sha256[b], sizeof(out->build_sha256[b]), "%s",
+                         obj_get(item, "executable_sha256")->u.str_val);
+                snprintf(out->build_status[b], sizeof(out->build_status[b]), "%s",
+                         obj_get(item, "status")->u.str_val);
+                snprintf(out->build_label[b], sizeof(out->build_label[b]), "%s",
+                         obj_get(item, "label")->u.str_val);
+                snprintf(out->build_reason[b], sizeof(out->build_reason[b]), "%s",
+                         reason ? reason->u.str_val : "");
+                out->build_count = (int)b + 1;
+            }
+        }
+    }
+
     out->executable_base = mp->exe_base;
     out->executable_entry = mp->exe_entry; /* Canonical projection: represents executable.entry */
     out->has_executable_base = true;
@@ -1509,6 +1655,7 @@ static void manifest_build_slot(const ManifestParse *mp, OverlayStorageSlot *out
     out->expected_data_file_count = mp->expected_file_count;
     out->requires_font_firmware = mp->has_font_feature;
     out->requires_psmf = mp->has_psmf_feature;
+    out->analog_dead_zone_counts = mp->analog_dead_zone_counts;
 
     out->module_count = (int)mp->mods_node->u.arr.count;
     for (int i = 0; i < out->module_count; i++) {
@@ -1549,6 +1696,7 @@ static void manifest_build_slot(const ManifestParse *mp, OverlayStorageSlot *out
     out->entry.expected_data_file_count = out->expected_data_file_count;
     out->entry.requires_font_firmware = out->requires_font_firmware;
     out->entry.requires_psmf = out->requires_psmf;
+    out->entry.analog_dead_zone_counts = out->analog_dead_zone_counts;
     out->entry.modules = out->modules;
     out->entry.module_count = out->module_count;
 }
@@ -1839,7 +1987,7 @@ bool nk_title_manifest_load_overlay_ext(
         return false;
     }
 
-    FILE *f = manifest_fopen(manifest_path);
+    FILE *f = nk_fopen_utf8(manifest_path, "rb");
     if (!f) {
         if (error_buf) snprintf(error_buf, error_buf_len, "Could not open manifest file: %s", manifest_path);
         return false;
@@ -1968,7 +2116,7 @@ static size_t overlay_declared_disc_ids(
     size_t max_disc_ids
 ) {
     if (!path || !disc_ids || max_disc_ids == 0) return 0;
-    FILE *file = manifest_fopen(path);
+    FILE *file = nk_fopen_utf8(path, "rb");
     if (!file) return 0;
     if (fseek(file, 0, SEEK_END) != 0) {
         fclose(file);
@@ -2701,7 +2849,7 @@ static bool package_read_json(const char *path, size_t max_bytes,
                               char *error, size_t error_size) {
     if (out_exceeds_limit) *out_exceeds_limit = false;
     if (!path || !out_text || !out_length) return false;
-    FILE *file = manifest_fopen(path);
+    FILE *file = nk_fopen_utf8(path, "rb");
     if (!file) {
         if (error && error_size) snprintf(error, error_size, "Could not open %s", path);
         return false;
@@ -2748,12 +2896,11 @@ static bool package_read_json(const char *path, size_t max_bytes,
 static bool package_join_path(char *out, size_t out_size,
                               const char *root, const char *relative) {
     if (!out || out_size == 0 || !root || !*root || !relative || !*relative) return false;
-    size_t root_length = strlen(root);
     char sep = nk_platform_path_separator();
-    bool has_sep = root_length > 0 &&
-        (root[root_length - 1] == '/' || root[root_length - 1] == '\\');
-    int written = snprintf(out, out_size, "%s%s%s", root, has_sep ? "" : (sep == '/' ? "/" : "\\"), relative);
-    return written > 0 && (size_t)written < out_size;
+    return nk_shared_path_join(out, out_size, root, relative,
+                               sep == '/' ? '/' : '\\',
+                               NK_SHARED_PATH_JOIN_IF_LEFT_NEEDS_SEPARATOR,
+                               NK_SHARED_PATH_REQUIRE_POSITIVE_LENGTH);
 }
 
 static bool package_resolved_path(const char *path, char *out, size_t out_size) {
@@ -2834,7 +2981,7 @@ static bool package_direct_file(const char *package_root, const char *relative,
 }
 
 static bool package_hash_file(const char *path, char out_hex[65]) {
-    FILE *file = manifest_fopen(path);
+    FILE *file = nk_fopen_utf8(path, "rb");
     if (!file) return false;
     NkSha256 ctx;
     nk_sha256_init(&ctx);
@@ -4818,6 +4965,160 @@ bool nk_title_manifest_experimental_profile_executable(
     return true;
 }
 
+/* ---- Executable builds (#2140) ----------------------------------------------
+ * A title's runtime_bindings are addresses inside one exact executable. The
+ * manifest may list the builds it knows by the SHA-256 of the executable file
+ * as the disc image holds it; this names the build a user's disc holds. */
+
+typedef struct {
+    char sha256[65];
+    char status[16];
+    char label[65];
+    char reason[201];
+} BuildRow;
+
+/* The builds recorded under a disc ID: the latest overlay naming the ID wins
+   (a user's manifest replaces the built-in one), else the built-in table. */
+static int title_builds_for_disc_id(const char *disc_id, BuildRow rows[MAX_DISC_BUILDS]) {
+    int count = 0;
+    nk_title_catalog_lock();
+    for (int s = s_overlay_slot_count - 1; s >= 0; s--) {
+        const OverlayStorageSlot *slot = &s_overlay_slots[s];
+        bool names_id = strcmp(slot->primary_disc_id, disc_id) == 0;
+        for (int c = 0; !names_id && slot->compat_id_ptrs[c]; c++) {
+            names_id = strcmp(slot->compat_ids_storage[c], disc_id) == 0;
+        }
+        if (!names_id) continue;
+        for (int b = 0; b < slot->build_count; b++) {
+            snprintf(rows[b].sha256, sizeof(rows[b].sha256), "%s", slot->build_sha256[b]);
+            snprintf(rows[b].status, sizeof(rows[b].status), "%s", slot->build_status[b]);
+            snprintf(rows[b].label, sizeof(rows[b].label), "%s", slot->build_label[b]);
+            snprintf(rows[b].reason, sizeof(rows[b].reason), "%s", slot->build_reason[b]);
+        }
+        count = slot->build_count;
+        nk_title_catalog_unlock();
+        return count;
+    }
+    {
+        const NkTitleBuild *builtin = NULL;
+        int builtin_count = nk_title_catalog_builds(disc_id, &builtin);
+        for (int b = 0; b < builtin_count && b < MAX_DISC_BUILDS; b++) {
+            snprintf(rows[b].sha256, sizeof(rows[b].sha256), "%s", builtin[b].executable_digest);
+            snprintf(rows[b].status, sizeof(rows[b].status), "%s", builtin[b].status);
+            snprintf(rows[b].label, sizeof(rows[b].label), "%s", builtin[b].label);
+            snprintf(rows[b].reason, sizeof(rows[b].reason), "%s", builtin[b].reason);
+            count = b + 1;
+        }
+    }
+    nk_title_catalog_unlock();
+    return count;
+}
+
+/* SHA-256 of PSP_GAME/SYSDIR/<name> as stored in the image, as 64 lowercase hex digits. */
+static bool iso_executable_sha256_hex(const char *iso_path, const char *name, char out[65]) {
+    char path[64];
+    uint32_t lba = 0;
+    uint32_t size = 0;
+    bool is_dir = false;
+    uint8_t buffer[65536];
+    uint8_t digest[32];
+    NkSha256 sha;
+    NkIsoReader *reader;
+    bool ok = false;
+    if (!iso_path || !name ||
+        snprintf(path, sizeof(path), "PSP_GAME/SYSDIR/%s", name) >= (int)sizeof(path)) {
+        return false;
+    }
+    reader = nk_iso_reader_open(iso_path);
+    if (!reader) return false;
+    if (nk_iso_reader_lookup(reader, path, &lba, &size, &is_dir) == 0 && !is_dir && size > 0) {
+        if (size > NK_TITLE_MANIFEST_MAX_EXECUTABLE_BYTES) {
+            nk_iso_reader_close(reader);
+            return false;
+        }
+        uint64_t offset = 0;
+        nk_sha256_init(&sha);
+        ok = true;
+        while (offset < size) {
+            uint32_t count = size - offset < sizeof(buffer) ? (uint32_t)(size - offset)
+                                                            : (uint32_t)sizeof(buffer);
+            if (nk_iso_reader_read(reader, lba, offset, buffer, count) != (int)count) {
+                ok = false;
+                break;
+            }
+            nk_sha256_update(&sha, buffer, count);
+            offset += count;
+        }
+        if (ok) {
+            nk_sha256_finish(&sha, digest);
+            for (int i = 0; i < 32; i++) snprintf(out + i * 2, 3, "%02x", digest[i]);
+        }
+    }
+    nk_iso_reader_close(reader);
+    return ok;
+}
+
+bool nk_title_manifest_identify_build(const char *disc_id, const char *iso_path,
+                                      const char *executable_name, NkBuildIdentity *out) {
+    BuildRow rows[MAX_DISC_BUILDS];
+    char normalized[10];
+    int count;
+    if (!out) return false;
+    memset(out, 0, sizeof(*out));
+    if (!nk_manifest_normalize_disc_id(disc_id, normalized)) return false;
+    count = title_builds_for_disc_id(normalized, rows);
+    if (count == 0) {
+        out->status = NK_BUILD_UNTRACKED;
+        return true;
+    }
+    snprintf(out->executable, sizeof(out->executable), "%s", executable_name ? executable_name : "");
+    if (!iso_path || !executable_name ||
+        !iso_executable_sha256_hex(iso_path, executable_name, out->sha256)) {
+        out->sha256[0] = '\0';
+    }
+    for (int b = 0; b < count; b++) {
+        if (strcmp(rows[b].status, "supported") == 0) {
+            size_t used = strlen(out->supported);
+            snprintf(out->supported + used, sizeof(out->supported) - used, "%s%s",
+                     used ? "; " : "", rows[b].label);
+        }
+        if (out->sha256[0] && strcmp(rows[b].sha256, out->sha256) == 0) {
+            snprintf(out->label, sizeof(out->label), "%s", rows[b].label);
+            snprintf(out->reason, sizeof(out->reason), "%s", rows[b].reason);
+            out->status = strcmp(rows[b].status, "known-bad") == 0 ? NK_BUILD_KNOWN_BAD
+                        : strcmp(rows[b].status, "experimental") == 0 ? NK_BUILD_EXPERIMENTAL
+                        : NK_BUILD_SUPPORTED;
+        }
+    }
+    if (out->status == NK_BUILD_UNTRACKED) out->status = NK_BUILD_UNLISTED;
+    return true;
+}
+
+void nk_title_manifest_describe_build(const NkBuildIdentity *id, char *out, size_t out_size) {
+    if (!out || out_size == 0) return;
+    out[0] = '\0';
+    if (!id) return;
+    switch (id->status) {
+    case NK_BUILD_SUPPORTED:
+        snprintf(out, out_size, "Build: %s (supported).", id->label);
+        break;
+    case NK_BUILD_EXPERIMENTAL:
+        snprintf(out, out_size, "Build: %s (experimental).", id->label);
+        break;
+    case NK_BUILD_KNOWN_BAD:
+        snprintf(out, out_size, "Build: %s (refused). %s", id->label, id->reason);
+        break;
+    case NK_BUILD_UNLISTED:
+        snprintf(out, out_size,
+                 "This copy's executable is not a build Nakagawa has recorded for this game, "
+                 "so it runs as experimental and the game's recorded runtime bindings are not applied.%s%s",
+                 id->supported[0] ? " Supported build: " : "", id->supported);
+        break;
+    default:
+        break;
+    }
+}
+
 static bool package_catalog_identity_matches(const char *disc_id,
                                             const char *title_id,
                                             uint64_t *catalog_epoch) {
@@ -5278,14 +5579,7 @@ static char *package_source_copy(const char *text) {
 }
 
 static char *package_source_join(const char *parent, const char *name) {
-    size_t parent_length = strlen(parent);
-    size_t name_length = strlen(name);
-    char *joined = (char *)malloc(parent_length + 1u + name_length + 1u);
-    if (!joined) return NULL;
-    memcpy(joined, parent, parent_length);
-    joined[parent_length] = '/';
-    memcpy(joined + parent_length + 1u, name, name_length + 1u);
-    return joined;
+    return nk_shared_path_join_alloc(parent, name, '/', NK_SHARED_PATH_JOIN_ALWAYS, 0u);
 }
 
 /* Takes ownership of item, which may be NULL (an allocation that failed). */
@@ -5463,7 +5757,7 @@ static bool package_runtime_source_digest(const char *source_root, char out_hex[
     for (size_t i = 0; ok && i < list.count; i++) {
         FILE *file = NULL;
         if (!package_source_absolute(source_root, list.paths[i], absolute, sizeof(absolute)) ||
-            (file = manifest_fopen(absolute)) == NULL) {
+            (file = nk_fopen_utf8(absolute, "rb")) == NULL) {
             ok = false;
             break;
         }

@@ -66,6 +66,8 @@ faithful_abi_bridge/hle_boundary entries, which the temporary-patch gate does
 not cover and which #363 still owns.
 """
 
+from typing import Any
+
 import re
 import sys
 from pathlib import Path
@@ -179,7 +181,12 @@ CODEGEN_TEMPORARY_PATCH_TEST = (
 # 0x00048320 (force single-iteration pass) and 0x00010950 (bypass worker frame-init spin
 # loop) were retired under #363. 0x00010950 sat inside the retail allocator body that the
 # runtime host-bridges, so its patched branch was never emitted into the title C.
-GUEST_PATCHES = [
+# The uninventoried HST emission sites went with them on 2026-11-08: MEMSET_FASTPATH
+# (0x0006ea1c) and ARRSHIFT_FASTPATH (0x00108630), which replaced two guest loops with one
+# native pass, GUEST_ABORT (0x00000a1c), which ended the run with _Exit(9) before the
+# title's abort() body ran, and the four stand-alone --static-verify exclusions. Each now
+# translates as written (tools/test_codegen_profile_isolation.py RetiredLoopSiteTests).
+GUEST_PATCHES: list[dict[str, Any]] = [
 ]
 
 # --- tools/codegen.py: custom per-address stubs -----------------------------
@@ -209,11 +216,11 @@ CODEGEN_CUSTOM_STUBS = [
          reason="the retail body walks, unlinks, and rewrites dlmalloc chunks, so it must share "
                 "the host metadata ABI used by malloc/free/memalign.",
          test="tools/test_codegen_retail_allocator.py"),
-    dict(address=0x000143b0, category="faithful_abi_bridge", name="guest sprintf",
-         reason="the translated original formatter corrupted %s arguments during boot; this "
-                "native implementation preserves PSP EABI varargs placement (r6..r11, then stack), "
-                "including aligned two-word double arguments for floating conversions",
-         test="tools/test_guest_printf.py"),
+    # 0x000143b0 (native sprintf): retired under #363 (2026-11-11). Its recorded reason was
+    # that the translated formatter corrupted %s arguments during boot. On the private
+    # full-match route the title's own sprintf and the native one agreed on every call, so
+    # the title's own now runs (tools/test_codegen_entry_semantics.py
+    # FormatterAtRetiredSprintfBridgeTests).
     # 0x0001034c (heap-statistics walk skip) and 0x001d9eb0 (title backdrop selector
     # postcondition): retired under #363 (2026-10-26). The walk reads the retail
     # allocator's statically linked bins, which nothing writes once malloc/free/memalign/
@@ -316,8 +323,8 @@ RETIRED_DISPATCH_HOOKS = [
          reason="see 0x102e1c (PLT_WALK_1)",
          test="none"),
 ]
-DISPATCH_HOOKS = []  # Trace-only hooks were deleted from generic dispatch.
-DISPATCH_RANGE_HOOKS = []  # Compatibility debt (#363): no generic target-pattern swallowing.
+DISPATCH_HOOKS: list[dict[str, Any]] = []  # Trace-only hooks were deleted from generic dispatch.
+DISPATCH_RANGE_HOOKS: list[dict[str, Any]] = []  # Compatibility debt (#363): no generic target-pattern swallowing.
 RETIRED_DISPATCH_TARGETS = [
     # Decision (c) for every entry: delete. Former broad resource predicates and exact
     # success/no-op cases are preserved only as a guard inventory; each now reaches
@@ -369,6 +376,7 @@ SCHEDULER_HOOKS = [
                  "binding once the guest's reent bring-up needs no host participation.",
          test="make sched-selftest (generic build allocates UID 0x111 and asserts it is ordinary)",
          owner_issue="#363",
+         retired_by="#1580",
          retirement="retired (2026-10-28): a PSP-3000 measurement (docs/HARDWARE_ORACLE.md "
                     "PSP-THREAD-K0-001) shows the kernel hands every new thread a k0 block with "
                     "k0+4 == 0, also over a dirtied stack. sched.c now builds that block and no "
@@ -384,32 +392,38 @@ SCHEDULER_HOOKS = [
 TITLE_CONFIGURED_SCHEDULER_COMPAT: "list[dict]" = []
 
 # --- src/rt/recomp.c: dispatch bindings owned by TITLE CONFIGURATION ----------
-# These three used to be numeric literals compiled into generic dispatch. They are
-# now typed entries in a validated title manifest's runtime_bindings block
-# (dispatch_aliases / callback_terminators), so the addresses below no longer exist
-# anywhere in generic runtime code: they reach dispatch() only as configuration, and
-# an unconfigured build applies none of them.
+# Three bindings used to be numeric literals compiled into generic dispatch. They became
+# typed entries in a validated title manifest's runtime_bindings block
+# (dispatch_aliases / callback_terminators), so they reached dispatch() only as
+# configuration, and an unconfigured build applied none of them.
 #
-# They stay inventoried because the SEMANTIC DEBT did not go away -- moving an
-# override behind configuration makes it honest, not absent. Each entry names the
-# generic mechanism, the executable test that proves it acts only where configured,
-# and what would retire the binding for good.
-TITLE_CONFIGURED_DISPATCH = [
-    dict(address=0x00030950, category="faithful_abi_bridge", name="TC30950",
-         source="src/rt/recomp.c:dispatch (runtime_bindings.dispatch_aliases)",
-         reason="a tail-call target lands at a callee's +8 entry point (past its prologue) "
-                "that codegen does not separately register; the configured alias enters the "
-                "real registered entry instead, with an equivalent net stack delta. The "
-                "mechanism is generic (enter a registered body); only the address pair is "
-                "configured, and an unconfigured build treats this address as an ordinary "
-                "dispatch miss. Retire by registering the mid-function entry point in "
-                "codegen, which removes the need for any alias.",
-         test="make dispatch-isolation-selftest (generic/fixture-a/fixture-b matrix)"),
+# A binding a title still declares is inventoried here, because moving an override
+# behind configuration makes it honest, not absent: its entry names the generic
+# mechanism, the executable test that proves it acts only where configured, and what
+# would retire it. No title declares one now
+# (tools/test_title_runtime_config.py TitleDeclaredDispatchBindings).
+TITLE_CONFIGURED_DISPATCH: "list[dict]" = [
+    # 0x00030950 (TC30950, a dispatch alias into the body registered at 0x00030948):
+    # retired under #363 (2026-11-11). It was recorded as a computed tail call landing 8
+    # bytes into a callee. No such transfer was observed: the title's executable has no
+    # j, jal or branch to 0x00030950 and no data word 0x00030950 or 0x08030950 (a
+    # computed target cannot be ruled out statically), and the alias never fired on the
+    # private full-match route. The binding is gone, so that target is an ordinary
+    # dispatch miss: logged, then run from 0x00030950 itself by the interpreter floor or
+    # refused. Its recorded retirement step, registering the mid-function entry in
+    # codegen, was not needed for a transfer nothing makes.
     # 0x00292fa0 (callback-list walker terminal miss): retired under #363 (2026-11-02). It
     # named a virtual call in the frame loop, not a list walker, and its pc was whatever
     # the previous return left behind. It never fired on the gate route, so the title's
     # binding is gone and -1 at that site is an ordinary dispatch miss.
 ]
+
+#: Addresses TITLE_CONFIGURED_DISPATCH inventoried before each binding was retired: the
+#: alias source, the null terminator's return address and the terminal miss's pc. The
+#: generic-runtime literal guard (tools/test_compat_manifest.py
+#: _runtime_title_diagnostic_inventory) reads this list, so a retirement does not stop
+#: the guard from refusing these addresses in runtime sources.
+RETIRED_TITLE_CONFIGURED_DISPATCH: "tuple[int, ...]" = (0x00030950, 0x0003e06c, 0x00292fa0)
 
 OVERRIDES = (
     GUEST_PATCHES + CODEGEN_CUSTOM_STUBS + HST_SIMPLE_STUBS +
@@ -458,7 +472,7 @@ RETIRED_DIAGNOSTIC_GROUPS = [
          reason="additional HST-only scheduler observations found during the #363 source census; "
                 "generic SR_TRACE_PC/SR_WATCH replaces the bespoke probes"),
 ]
-DIAGNOSTIC_GROUPS = []
+DIAGNOSTIC_GROUPS: list[dict[str, Any]] = []
 
 
 # --- src/rt/hle.c: guest addresses used as addresses ------------------------
@@ -559,7 +573,7 @@ RETIRED_HLE_DIAGNOSTIC_GROUPS = [
          accidental_inheritance="no -- diagnostic output only",
          test="none"),
 ]
-HLE_GUEST_ADDRESS_GROUPS = []
+HLE_GUEST_ADDRESS_GROUPS: list[dict[str, Any]] = []
 
 # These four groups were EXPLICIT_COMPATIBILITY_OVERRIDE in generic hle.c before
 # 2026-08-27, then PROFILE_OWNED_CONFIGURATION via runtime_bindings. All four are now
@@ -583,6 +597,7 @@ HLE_TITLE_CONFIGURED_COMPAT = [
          accidental_inheritance="no -- no host path writes a libfont readiness word",
          test="tools/test_hle_title_config_behavior.py:test_libfont_guest_startup_routes_exports_without_ready_binding",
          owner_issue="#299",
+         retired_by="#767",
          retirement="retired; legacy manifest fields fail with LIBFONT_READY_FLAG_RETIRED"),
     dict(name="frame_ready_latch_assist", category="temporary_compatibility_patch",
          title2_bucket="PROFILE_OWNED_CONFIGURATION",
@@ -600,6 +615,7 @@ HLE_TITLE_CONFIGURED_COMPAT = [
          accidental_inheritance="no -- generic build touches no latch; configured title touches only its own",
          test="tools/test_hle_title_config_behavior.py:test_retired_hle_assist_bindings_have_a_named_migration_error",
          owner_issue="#363",
+         retired_by="#1516",
          retirement="retired (2026-10-27); no runtime path advances a title frame latch, and legacy "
                     "manifest fields fail with HLE_TITLE_ASSIST_RETIRED"),
     dict(name="runtime_sync_callback_config", category="temporary_compatibility_patch",
@@ -620,7 +636,8 @@ HLE_TITLE_CONFIGURED_COMPAT = [
          evidence="title_config gated: generic hle.c has no literal 0x00333138 etc.",
          accidental_inheritance="no -- generic build installs nothing; configured title installs its own pairs",
          test="tools/test_hle_title_config_behavior.py:test_retired_hle_assist_bindings_have_a_named_migration_error",
-         owner_issue="#363"),
+         owner_issue="#363",
+         retired_by="#1516"),
     dict(name="display_setmode_guest_init", category="temporary_compatibility_patch",
          title2_bucket="PROFILE_OWNED_CONFIGURATION",
          title_scope="hst-ucus98701",
@@ -635,6 +652,7 @@ HLE_TITLE_CONFIGURED_COMPAT = [
          accidental_inheritance="no -- generic build calls nothing; configured title calls its own entries",
          test="tools/test_hle_title_config_behavior.py:test_retired_hle_assist_bindings_have_a_named_migration_error",
          owner_issue="#363",
+         retired_by="#1516",
          retirement="retired (2026-10-27); sceDisplaySetMode replays no guest display bring-up, and "
                     "legacy manifest fields fail with HLE_TITLE_ASSIST_RETIRED"),
 ]
@@ -672,6 +690,16 @@ AGGREGATE_COLLECTIONS = frozenset({"OVERRIDES"})
 #: such as "docs/STATUS.md #5.1" is a documentation pointer, not an owner, and does
 #: not satisfy it.
 OWNER_ISSUE_RE = re.compile(r"#\d+\b")
+
+#: A temporary patch whose ``retirement`` text starts with this word has been
+#: retired: its behavior is gone from source, and the entry stays only as
+#: historical provenance (#363 keeps the record instead of deleting it).
+RETIRED_PATCH_PREFIX = "retired"
+#: The merged pull request that retired an entry, e.g. "#1516".
+RETIRED_BY_RE = re.compile(r"#\d+")
+RETIRED_BY_DEFECT = 'retired entry must name the pull request that retired it (retired_by="#N")'
+LIVE_RETIRED_BY_DEFECT = ("retired_by is set but the retirement condition does not start "
+                          f"with {RETIRED_PATCH_PREFIX!r}")
 
 #: Spellings that mean "no regression" exactly as surely as test="none".  A
 #: gate that accepts only one of them can be passed by relabelling the same gap,
@@ -813,6 +841,21 @@ def temporary_compatibility_patches() -> "list[dict]":
     return patches
 
 
+def is_retired_patch(patch: dict) -> bool:
+    """True when a temporary patch is retired and kept only as provenance."""
+    return str(patch.get("retirement") or "").startswith(RETIRED_PATCH_PREFIX)
+
+
+def active_temporary_compatibility_patches() -> "list[dict]":
+    """The census entries that can still fire: the live #363 debt."""
+    return [patch for patch in temporary_compatibility_patches() if not is_retired_patch(patch)]
+
+
+def retired_temporary_compatibility_patches() -> "list[dict]":
+    """Retired census entries: historical provenance with no firing site."""
+    return [patch for patch in temporary_compatibility_patches() if is_retired_patch(patch)]
+
+
 def temporary_patch_defects(patch: dict) -> "list[str]":
     """The #363 census facts a temporary compatibility patch is missing.
 
@@ -828,6 +871,12 @@ def temporary_patch_defects(patch: dict) -> "list[str]":
         problems.append("owner_issue must lead with a live GitHub issue number (e.g. #363)")
     if not str(patch.get("retirement") or "").strip():
         problems.append("no retirement condition")
+    retired_by = str(patch.get("retired_by") or "").strip()
+    if is_retired_patch(patch):
+        if not RETIRED_BY_RE.fullmatch(retired_by):
+            problems.append(RETIRED_BY_DEFECT)
+    elif retired_by:
+        problems.append(LIVE_RETIRED_BY_DEFECT)
     if has_no_test(patch):
         problems.append(NO_TEST_DEFECT)
     else:
@@ -867,13 +916,17 @@ def format_debt_census() -> str:
     """Render the temporary-compatibility debt census (#363).
 
     One block per patch -- id, owner issue, retirement condition and test, the
-    four facts #363's acceptance requires -- followed by a DEFECTS section
+    four facts #363's acceptance requires -- with the active patches first and
+    the retired ones (provenance, with the pull request that retired each)
+    after them, followed by a DEFECTS section
     naming every patch that is missing one of them and a closing section naming
     the untested behavior-changing entries the temporary-patch gate does not
     cover.  Reporting only: the CI gate, which also knows the reviewed no-test
     allowlist, is tools/test_compat_manifest.TemporaryCompatibilityDebtGateTests.
     """
     patches = temporary_compatibility_patches()
+    active = [patch for patch in patches if not is_retired_patch(patch)]
+    retired = [patch for patch in patches if is_retired_patch(patch)]
     found = [(patch, temporary_patch_defects(patch)) for patch in patches]
     defects = [(patch, problems) for patch, problems in found if problems]
     untested_others = untested_non_temporary_entries()
@@ -881,16 +934,30 @@ def format_debt_census() -> str:
     lines = [
         "temporary compatibility patch census (#363)",
         f"collections scanned: {len(scanned)} ({', '.join(scanned)})",
-        f"temporary_compatibility_patch entries: {len(patches)}",
+        f"active temporary_compatibility_patch entries: {len(active)}",
+        f"retired temporary_compatibility_patch entries: {len(retired)}",
         f"defective entries: {len(defects)}",
         "",
+        "ACTIVE (can fire; each firing is named in COMPAT_PATCH_REPORT):",
     ]
-    for patch in patches:
+    for patch in active:
         lines.append(patch["id"])
         lines.append(f"    owner_issue: {patch.get('owner_issue') or '-'}")
         lines.append(f"    retirement:   {patch.get('retirement') or '-'}")
         lines.append(f"    test:         {patch.get('test') or '-'}")
         lines.append("")
+    if not active:
+        lines += ["    none", ""]
+    lines.append("RETIRED (historical provenance; no firing site):")
+    for patch in retired:
+        lines.append(patch["id"])
+        lines.append(f"    owner_issue: {patch.get('owner_issue') or '-'}")
+        lines.append(f"    retired_by:  {patch.get('retired_by') or '-'}")
+        lines.append(f"    retirement:   {patch.get('retirement') or '-'}")
+        lines.append(f"    test:         {patch.get('test') or '-'}")
+        lines.append("")
+    if not retired:
+        lines += ["    none", ""]
     if defects:
         lines.append("DEFECTS (temporary patch missing owner/retirement/test):")
         for patch, problems in defects:

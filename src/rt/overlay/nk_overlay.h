@@ -277,8 +277,14 @@ NkUiSizing nk_overlay_fixed(float value);
 NkUiLayout nk_overlay_layout(NkUiLayoutDirection direction, NkUiSizing width,
                              NkUiSizing height, float gap);
 /* Opens the page frame and its card at most card_width wide; returns the card's
-   inner width, or 0 when nothing was opened (then nothing must be closed). */
+   inner width, or 0 when nothing was opened (then nothing must be closed). The
+   card is never taller than the room between the window's top and the prompt
+   bar (nk_overlay_card_room): a page taller than that scrolls inside its card
+   instead of being centred past both edges and over the prompt bar. */
 float nk_overlay_page_begin(NkUi *ui, const NkOverlayModel *model, float card_width);
+/* The most height a page's card has, in logical px: the window less the prompt
+   bar and the page's margins above and below the card. */
+float nk_overlay_card_room(const NkOverlayModel *model);
 /* Closes the card and the page, then draws the prompt bar. */
 void nk_overlay_page_end(NkUi *ui, const char *hint, const NkUiPromptItem *prompts,
                          size_t count);

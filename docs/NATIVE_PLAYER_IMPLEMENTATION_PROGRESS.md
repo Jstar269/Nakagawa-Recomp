@@ -2,7 +2,7 @@
 
 This page records how the native player was built, with dated sections. The launcher, Settings and the setup
 wizard now draw with the nk_ui library in `src/ui/` ([`PLAYER_UI_DESIGN.md`](PLAYER_UI_DESIGN.md)); the
-`ui_renderer.c` described below is the legacy renderer, due to be removed.
+`ui_renderer.c` described below was the first renderer, removed in #2071.
 
 ## 1. Executive Summary
 
@@ -23,7 +23,6 @@ $$\text{ORIGINAL\_GUEST\_EXECUTION} \succ \text{LLE/GENERIC PSP BEHAVIOR} \succ 
    - `setup_staging.c` / `setup_staging.h`: Native worker-facing staging boundary that keeps cancellation/progress separate from SDL and invokes the source-owned ISO/XB layers.
    - The optional local bridge discovers named plain support PRXs the user has already placed in a recognized local folder and stages them under `EXTRACTED/decrypted/`. The player decrypts a disc's encrypted executable and modules into the per-title folder (#1494); one it can't decrypt and with no user-supplied plain copy there fails closed as `ENCRYPTED_EXECUTABLE` or `ENCRYPTED_MODULE` with a named result
      ([#1494](https://github.com/Jstar269/nakagawa-recomp/pull/1494)).
-   - `ui_renderer.c` / `ui_renderer.h`: the first SDL3 renderer (Dark Court palette, card layouts, scaled text, offscreen screenshots), now legacy.
    - `main.c`: Interactive event loop with native file dialog (`SDL_ShowOpenFileDialog`), reactive SDL worker notifications, gamepad detection and d-pad/shoulder library navigation, arrow-key and scroll-wheel selection across the whole library, drag-and-drop ISO support, and a headless test driver. Demo fixtures are opt-in (`--demo`, or any `--view=` capture run) and are never written to the user's library file.
    - `nk_xb.c` / `nk_xb.h`: Project-authored bounded XB FST parser and native LZS/Huffman/nested tag-0 decoder; no `third_party/libxb` dependency.
    - `nk_iso_extract_game`: ISO directory-record walk that stages `EBOOT.BIN` and `USRDIR/xbdata` without shelling out or requiring Python.
@@ -91,7 +90,6 @@ $$\text{ORIGINAL\_GUEST\_EXECUTION} \succ \text{LLE/GENERIC PSP BEHAVIOR} \succ 
 | Unsupported Title | `native_05_unsupported_game.png` | 1280×720 | Fail-closed boundary preventing unregistered execution |
 | Ready Library | `native_07_ready_library.png` | 1280×720 | Hero game card with "PLAY NOW" & Quick Specs Rail |
 | Settings Dialog | `native_08_settings.png` | 1280×720 | Live resolution/FPS presets, display toggles, reduce-motion switch and volume stepper (persisted to settings.json); keyboard/gamepad focus on every control; single-column flow on narrow windows |
-| Visual Craft | n/a | all | Runtime system-font typography (SDL3_ttf dlopen, zero bundled fonts, DebugText fallback), rounded cards/buttons/pills with shadows, disc ICON0.PNG runtime texture extraction with monogram fallback, dimmed PIC1.PNG hero backdrop, density-aware raster |
 | Missing Source Error | `native_09_missing_source_error.png` | 1280×720 | Structured error recovery for moved or missing ISOs |
 | 1080p Library | `native_10_library_1080p.png` | 1920×1080 | Verified responsive scaling on Full HD displays |
 | 1080p Settings | `native_11_settings_1080p.png` | 1920×1080 | Verified responsive settings modal on Full HD displays |
@@ -183,47 +181,21 @@ plain executable plus a built package.
 
 ## 3b. The ISO art worker contract
 
-The library card's `ICON0.PNG` icon and `PIC1.PNG` backdrop are read from the
-ISO on a worker thread, so a disc image is never parsed on the UI thread.
-`src/player/ui_renderer.c` keeps up to 64 cache entries keyed by ISO path, and each
-image carries its own attempt count and terminal result: loaded, absent, failed,
-or unsupported by a build without a PNG decoder.
+The launcher's art loader (`src/player/ui/player_ui_art.c`, contract in `player_ui_art.h`) reads each library
+title's `ICON0.PNG`, and `PIC1.PNG` for the title being viewed, from the user's own disc image on one background
+thread, one disc at a time, so a disc image is never parsed on the UI thread. The images live in memory only.
 
-| Terminal state | Set when | Retries |
-| :--- | :--- | :--- |
-| `UI_ART_TERMINAL_LOADED` | a texture was created for that image | terminal |
-| `UI_ART_TERMINAL_ABSENT` | the ISO or image entry was missing on the last read after `GAME_ART_MAX_ATTEMPTS` (3) | terminal |
-| `UI_ART_TERMINAL_FAILED` | corrupt/oversized data or a transient decoder/renderer/worker failure persisted through the bounded retry budget | terminal |
-| `UI_ART_TERMINAL_UNSUPPORTED` | the image was read off the disc intact (`NK_ICON_OK` with bytes), but this build has no PNG decoder (SDL < 3.4) | terminal on the **first** attempt |
+- An image is read once a session. A disc without the image, an unreadable disc, or a PNG over the size limits
+  (`PLAYER_UI_ART_ICON_MAX_SIDE`, `PLAYER_UI_ART_PICTURE_MAX_SIDE`, `PLAYER_UI_ART_MAX_BYTES`) has no image, the card
+  keeps its placeholder, and nothing is retried in the same session.
+- The loader keeps up to `PLAYER_UI_ART_SLOTS` (64) discs; the least recently shown goes first.
+- `player_ui_art_pump` runs once per frame: it takes a finished read's images, then starts the next wanted read.
+- `player_ui_art_destroy` waits for a read in flight, then frees every image before the renderer goes away.
 
-- Even without a PNG decoder, an absent or unreadable ISO entry remains a
-  retryable read failure; `unsupported` applies only after intact bytes arrive.
-- A *successful* decode whose texture creation fails keeps the retry budget:
-  that is a VRAM/renderer condition, not a decoder verdict.
-- Retries are spaced by `GAME_ART_RETRY_COOLDOWN_NS` (1 s) shifted by
-  `min(attempt - 1, 2)`, so the delay grows 1 s → 2 s → 4 s and then stops.
-- A retry asks only for the image that is still missing, so a disc without
-  `PIC1.PNG` never re-reads its `ICON0.PNG`.
-- When a completion event cannot be queued, the worker marks the handoff
-  failed, the UI thread reclaims that job, and the entry retries instead of
-  staying pending for the session.
-- `ui_font_shutdown()` joins every in-flight art worker and releases its decoded
-  bytes before the renderer and the SDL event queue go away; the regression
-  harness waits for a worker to enter its test-only delay before quitting, then
-  reports both `art_jobs_active_at_shutdown` and `art_jobs_drained`.
-
-The states are observable from the outside: a build with
-`NK_PLAYER_UI_REGRESSION_TEST` prints `art_attempt index=… icon_loaded=…
-pic1_loaded=… wanted=… icon_state=… pic1_state=…` for every completion, which is
-what `tests/native/test_player_ui.py` reads to distinguish a missing image
-(`absent` after three attempts), corrupt or persistent operational failure
-(`failed` after three attempts), and readable bytes on a build without PNG
-support (`unsupported` on the first attempt). A decoder rejection on a build
-with PNG support is a bounded `failed` result.
-
-The shutdown regression waits for the worker to confirm it is inside a test-only
-delay, quits while that known job is active, and asserts the job is joined before
-renderer/window teardown.
+`tests/native/test_player_ui_art.c` covers the loader (`test_art_loads_once_and_falls_back`,
+`test_art_slots_and_shutdown`), and `tests/native/test_player_ui.py`
+(`test_next_ui_library_card_shows_the_disc_icon_once_read`) checks that the library card shows the icon once it is
+read.
 
 What this does not claim: the suite decodes no retail disc, `unsupported` says
 the build lacks a PNG decoder rather than making a statement about the file, and

@@ -66,7 +66,7 @@ CLASS_SOURCES = {
         "family of handlers. VFPU: the form's AOT body calls a kernel from the `src/rt/recomp.c` section derived "
         "from PPSSPP's table-based kernels (`assets/vfpu/PROVENANCE.json`)."
     ),
-    "game-route": "No public, title-free record of the NIDs or forms a qualified title route exercised exists yet.",
+    "game-route": "No public, title-free record of the NIDs or forms a qualified title route exercised exists.",
     "synthetic": (
         "HLE: an executable host test enters the NID (`src/rt/intr_conformance.h` cells or "
         "`tests/native/hle_thread_selftest.c` dispatch), or the handler's notes cite a selftest, a "
@@ -135,6 +135,49 @@ VFPU_MEASURED_SELFTESTS = {
     "vfpu-interp-selftest:check_vrexp2_measured_words": {
         "oracle_id": "PSP-VFPU-TRANSCENDENTAL-001",
         "reason": "compares vrexp2.s in the AOT body and the interpreter with the 63 measured result words",
+    },
+    "vfpu-interp-selftest:check_vfpu_cc_write_mask": {
+        "oracle_id": "PSP-VFPU-CCCMOV-001",
+        "reason": "mtvc then mfvc on VFPU_CC reads back written & 0x3f in the interpreter lane, as the "
+                  "cc-roundtrip cells of the PSP-3000 run recorded; the generated lane is emitted directly and "
+                  "only tools/test_codegen_vfpu_fallback.py pins its text",
+    },
+    "vfpu-interp-selftest:check_vcmp_denormal_operands": {
+        "oracle_id": "PSP-VFPU-CCCMOV-001",
+        "reason": "runs vcmp.q (all 16 conditions) on the signed-zero and denormal operand set through the AOT "
+                  "body and the interpreter and compares VFPU_CC with the measured vcmp cells",
+    },
+    "vfpu-interp-selftest:check_quad_wb_measured": {
+        "oracle_id": "PSP-VFPU-QUADWB-001",
+        "reason": "runs lv.q and sv.q with the write-back flag at the measured offsets and the four-store run "
+                  "through the interpreter (the generated aligned path is inline and is not run here), and "
+                  "compares the base register and the addressed words with the measured reads",
+    },
+    "vfpu-interp-selftest:check_vfpu_basic_arith_measured": {
+        "oracle_id": "PSP-VFPU-BASICARITH-001",
+        "reason": "runs vadd, vsub, vmul, vscl, vdiv.s, vmin and vmax over the 20 measured operand classes "
+                  "(all 400 ordered pairs) through the AOT body and the interpreter, and the literal cells "
+                  "quoted from the run",
+    },
+    "vfpu-interp-selftest:check_vfpu_unary_arith_measured": {
+        "oracle_id": "PSP-VFPU-BASICARITH-001",
+        "reason": "runs vmov, vabs, vneg, vidt, vzero and vone at .s/.p/.q over the 20 measured operands "
+                  "through the AOT body and the interpreter",
+    },
+    "vfpu-interp-selftest:check_vus2i_vs2i_measured_words": {
+        "oracle_id": "PSP-VFPU-VUS2I-001",
+        "reason": "runs vus2i and vs2i at .s/.p over the twelve measured source words through the AOT body and "
+                  "the interpreter and compares the output words",
+    },
+    "vfpu-interp-selftest:check_vfpu_wide_dot_measured": {
+        "oracle_id": "PSP-VFPU-WIDEDOT-001",
+        "reason": "replays cells of the PSP-3000 vfpu-wide-dot-matrix run (vdot, vhdp, vcrsp, vqmul, vtfm4, "
+                  "vhtfm4, vmmul, vmmov, vrot and the constant fills) through the AOT body and the interpreter",
+    },
+    "vfpu-interp-selftest:check_vf2i_measured_cells": {
+        "oracle_id": "PSP-VFPU-CONVERT-001",
+        "reason": "runs vf2in, vf2iz, vf2iu and vf2id.s on the measured denormal and negative quiet NaN cells "
+                  "through the AOT body and the interpreter under all four host rounding modes",
     },
 }
 

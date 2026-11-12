@@ -69,7 +69,7 @@ PlayerUiAction player_ui_screen_about(NkUi *ui, const PlayerUiAboutModel *model)
     layout.align_x = NK_UI_ALIGN_CENTER;
     layout.padding_top = NK_UI_SPACE_8;
     layout.padding_left = layout.padding_right = NK_UI_GUTTER;
-    layout.scroll = page_scrolls(ui);
+    layout.scroll = SCR_PAGE_BODY_SCROLLS;
     if (nk_ui_begin_container(ui, ABOUT_ID_BODY, &layout, NULL)) {
         float column = width - 2.0f * NK_UI_GUTTER;
         if (column > 880.0f) column = 880.0f;

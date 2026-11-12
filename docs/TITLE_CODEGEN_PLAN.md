@@ -118,7 +118,7 @@ The two public synthetic manifests also carry `profile_zero`, which points to th
 shared source-owned PSPDEV/PSPSDK fixture and a portable Make build path. Every
 implemented acceptance case names `profile-zero-e2e`, which loads the fixture
 built from the fixture source and byte-checked against the committed
-`fixtures/profile_zero/prebuilt/SHA256SUMS` (by CI's `profile_zero_fixture` job, or
+`fixtures/profile_zero/prebuilt/SHA256SUMS` (by the profile-zero steps of CI's `public_export` job, or
 locally whenever PSPDEV is installed), validates
 ProgramImage and AOT package outputs, launches the headless production runtime,
 and asserts the seven declared source-shape, dispatch, and helper cases. The
@@ -200,6 +200,11 @@ runs an ordinary registered function, and if `to` is unregistered the call falls
 to the normal miss path. Validation rejects a self-alias, a duplicate source, and an
 alias whose target is itself an alias source, because the runtime resolves exactly one
 step and a chain would silently stop short.
+
+No title in `assets/titles/` declares a dispatch alias; only the fixtures `pspdev-phase5.json`,
+`synthetic.json` and `synthetic-title2.json` do. Any other manifest there that declares one must
+be inventoried in `TITLE_CONFIGURED_DISPATCH` (`tools/compat_overrides.py`), which
+`TitleDeclaredDispatchBindings` in `tools/test_title_runtime_config.py` checks (#363).
 
 The collection is normalized to a canonical order, so two manifests that mean the
 same thing produce the same digest and are not two different builds.
@@ -415,10 +420,11 @@ The generator's invariant is that **a guest address must never change what
 `--profile=none` emits**. Generic implementation may be core; the binding of a
 numeric address to a semantic is title-owned. Every HST-specific translation in
 `tools/codegen.py` — the address-specific custom stubs (`tools/codegen_hst_stubs.py`), `HST_SIMPLE_STUBS`,
-`GUEST_PATCHES`, the MEMSET/ARRSHIFT fastpaths,
-`GUEST_ABORT`, the `HST_MANUAL_CALLABLES`/`HST_RESUME_OWNERS` entry roles, and the `_SV_SPECIAL`
+`GUEST_PATCHES`, the `HST_MANUAL_CALLABLES`/`HST_RESUME_OWNERS` entry roles, and the `_SV_SPECIAL`
 `--static-verify` exclusion — is therefore reachable only when
-`profile == "hst"`.
+`profile == "hst"`. The MEMSET and ARRSHIFT loop fast paths, the `GUEST_ABORT` exit and the
+four stand-alone `_SV_SPECIAL` entries were retired under #363: those guest loops and the
+title's `abort()` translate as written under every profile.
 
 `tools/test_codegen_profile_isolation.py` proves this differentially rather than
 by sampling output strings. Its synthetic ET_EXEC carries two byte-identical
@@ -439,7 +445,7 @@ name. Within that grammar it is complete — a literal of any magnitude must be
 `hst_profile`-gated and must have a specimen body, and a named comparator must be
 declared either as a title-owned address table or as an image-derived set, with
 an undeclared name failing. Mutation tests hold both halves down, including a
-sub-`0x1000` literal, since `GUEST_ABORT` already sits at `0x00000a1c`.
+sub-`0x1000` literal, since the retired `GUEST_ABORT` site sat at `0x00000a1c`.
 
 The census is a source-shape check over that grammar, not a proof about arbitrary
 Python. A coupling written some other way is invisible to it — the

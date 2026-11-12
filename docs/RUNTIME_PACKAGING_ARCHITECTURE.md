@@ -6,8 +6,9 @@
 > `tools/nk_cli.py build-package <disc_id>` resolves the executable from a library disc
 > image, or from the decrypted `EBOOT.elf` in the title's folder for an encrypted disc (the
 > player decrypts it from the user's disc, #1494), and the
-> player consumes the resulting package. Retail-disc hash validation, installers, and
-> one-click end-user preparation without the developer toolchain (#308) are not built.
+> player consumes the resulting package. The player checks each disc against the user's Redump
+> list, and the release ZIP carries the pinned build tools in `prereqs/`. Installers and a
+> precompiled, compiler-free end-user route (#308) are not built.
 
 ## 1. Context and Goals
 
@@ -84,7 +85,7 @@ list is not evidence that a distributable installer or title package exists:
 * `src/core/nk_platform_win32.c`: Win32 `CreateProcessW` with UTF-16 executable/command-line conversion, environment block generation, and wait handles.
 * `src/core/nk_platform_posix.c`: POSIX `fork` + `execv` with environment configuration.
 * `src/core/nk_launch.h` & `src/core/nk_launch.c`: typed `NkLaunchSession` candidate resolution, environment construction, and process lifecycle management.
-* `src/player/ui/player_ui_nk.c`: the default launcher's "PLAY" / "STOP GAME" action triggers; the older `src/player/ui_renderer.c`, kept only in the regression-test build (`--ui=legacy`), keeps its "PLAY NOW" trigger and active PID indicators.
+* `src/player/ui/player_ui_nk.c`: the launcher's "PLAY" / "STOP GAME" action triggers.
 
 ---
 
@@ -95,10 +96,10 @@ first and each OS is a thin wrapper around them):
 
 | Target Environment | Packaging Strategy | Binary Artifacts |
 | --- | --- | --- |
-| **Windows x86-64** | Portable ZIP now; a per-user Inno Setup wrapper later. No MSI or MSIX | `nakagawa_player.exe`, `bin/nakagawa_core.dll` (or static), `build/<game>/<game>.exe`, SDL3.dll, SDL3_ttf.dll + resolved closure, `THIRD_PARTY_NOTICES/` |
-| **Linux / Steam Deck** | Tarball plus a per-user `.desktop` entry, written by the same stager (`tools/stage_install.py`); AppImage later. No Flatpak: its sandbox conflicts with the host compiler the player needs | `nakagawa_player`, `bin/<game>`, `libSDL3.so` |
-| **macOS ARM64** | App Bundle (`Nakagawa.app`), not yet planned in detail | `Nakagawa.app/Contents/MacOS/nakagawa_player`, helper executables in `MacOS/` |
-| **Android** | Planned later (see `PLATFORM_PORTABILITY.md`); the user may move their own packages and saves to their own device | to be designed |
+| **Windows x86-64** | Portable ZIP, and beside it an optional per-user `Setup.exe` with the same files ([#2208](https://github.com/Jstar269/nakagawa-recomp/issues/2208), [`SETUP.md`](SETUP.md#windows-installer-setupexe)). No MSI or MSIX | `nakagawa_player.exe`, `bin/nakagawa_core.dll` (or static), `build/<game>/<game>.exe`, SDL3.dll, SDL3_ttf.dll + resolved closure, `THIRD_PARTY_NOTICES/` |
+| **Linux / Steam Deck** | Tarball plus a per-user `.desktop` entry, written by the same stager (`tools/stage_install.py`). No AppImage. No Flatpak: its sandbox conflicts with the host compiler the player needs | `nakagawa_player`, `bin/<game>`, `libSDL3.so` |
+| **macOS ARM64** | Not supported; an App Bundle (`Nakagawa.app`) is the intended form | `Nakagawa.app/Contents/MacOS/nakagawa_player`, helper executables in `MacOS/` |
+| **Android** | Not supported for play; a development APK holds the launcher and the showcase demos (see `ANDROID_DEVELOPMENT.md`). The user may move their own packages and saves to their own device | the APK's native libraries |
 
 Roadmap items decided with the table:
 
@@ -114,7 +115,7 @@ Roadmap items decided with the table:
   `src/core/nk_data_migrate.c`: whole-folder renames only, nothing copied or deleted, both-present
   refused with the paths named, a failed move undone, and library.json's stored paths rewritten
   ([#324](https://github.com/Jstar269/nakagawa-recomp/issues/324)). Windows never used another name.
-* **Code signing:** v0.0.1 ships unsigned. Until a build is signed, each
+* **Code signing:** v0.0.1 and v0.0.2 ship unsigned. Until a build is signed, each
   release publishes the ZIP's SHA-256 and GitHub build attestations for every binary, and the release notes
   explain the SmartScreen prompt. The signing procedure is prepared
   ([`RELEASE_SIGNING.md`](RELEASE_SIGNING.md#sign-the-windows-binaries-authenticode)) and waits for the
@@ -154,9 +155,18 @@ bytes of C per translation unit (a value the caller sets wins, and the cache key
 it). Every function's C text, its order and the compile flags stay the same; only the
 boundaries between translation units move (gcc inlines the runtime header's static inline
 helpers into more functions of a smaller unit). Each compile job is then given memory in
-proportion to the target (256 bytes per byte, at least 1 GiB, at most the 3 GiB that
+proportion to the target (200 bytes per byte, at least 768 MiB, at most the 3 GiB that
 count-based chunks need), so a host with little free memory still compiles several chunks
-at once.
+at once. The budget comes from measurement: one cc1 at `-O1` on 4 MB generated units peaked at
+485 to 531 MiB (189 MiB for a 0.9 MB unit, #2284), so 768 MiB keeps a margin of 1.45 times. The
+planner keeps 2 GiB for the player and the OS. When even one job does not fit beside that
+reserve, the build still runs one job and its log says the compiler may fail; the compile
+progress file names what bound the job count (`limit`: `memory`, `cpu`, `override`, `max`,
+`background` for the Background speed's two-job cap, `unknown_memory` for the fixed two jobs
+when the host gives no memory reading, and `unknown_cpus` for one job when it gives no CPU
+count), and a one-job build tells the user in the player why it compiles one part at a time,
+except for `unknown_cpus`, which names no cause.
+The memory figures are GiB (1024^3 bytes), which is what Windows reports as GB.
 
 Only a single body can make its unit larger than the target (#1730). Codegen gives every body
 over `BODY_FALLBACK_BYTES` (4,000,000 bytes of C, the same in every build) a unit of its own
@@ -164,7 +174,7 @@ that compiles at `-O0`: the level most packages used before, at gcc's lowest tim
 level does not bound its memory, which grows with the body at every level (about 170 bytes per
 byte of C, linear up to the 4 MB budget: a generated body chained to 4 MB compiles at `-O2` in
 about a minute and 670 MB). The compile phase therefore budgets each job from the largest
-generated unit at the same 256 bytes per byte, without the 3 GiB cap, so a host runs fewer jobs
+generated unit at 256 bytes per byte (once it is over 125% of the target), without the 3 GiB cap, so a host runs fewer jobs
 while such a unit is in the build. The generated `<game>_recomp_opt.mk` sets the unit's level
 after `RECOMP_FLAGS`, so it is in the compile command and the object's cache key. It is a
 required generated-code output, and any line in it other than a comment, a unit row or that
@@ -173,10 +183,17 @@ under `optimization.fallback_units`, with the level the rest compiled at. These 
 compile flags that differ between units.
 Current Make recipes cannot transport whitespace or shell-sensitive characters
 in bound paths. Inputs at such paths are copied byte-for-byte into
-`<output-dir>/staged-inputs/` (hashes are unchanged). When the output directory
-contains spaces, packaging builds in a Make-safe workspace (`NK_BUILD_ROOT` or
-Windows 8.3 short paths) and atomically promotes into the destination; otherwise
-an unsupported path is rejected as `PACKAGE_UNSUPPORTED_PATH` (#296).
+`<output-dir>/staged-inputs/` (hashes are unchanged); staged guest PRX modules are
+included. When the output directory contains spaces, packaging builds in a Make-safe
+workspace (`NK_BUILD_ROOT` or Windows 8.3 short paths) and atomically promotes into the
+destination; otherwise an unsupported path is rejected as `PACKAGE_UNSUPPORTED_PATH`.
+Paths derived from that workspace are checked as written and never resolved again, because
+resolving a short form expands it back to the spaced name (#2281).
+
+An enhancement data root is read in place, not copied. The rule for it is the one for
+every path Make cannot take: it is used in its short (8.3) form, or refused by name when
+no short form exists, before Make runs. `NK_BUILD_ROOT` moves the build, not an input
+directory, so it does not apply to the data root.
 
 `package.json` is canonical JSON with this versioned shape:
 
@@ -267,12 +284,11 @@ unresolved, it names it. The player target then fails. A package build still
 succeeds with its required SDL3, libiconv and Vulkan runtimes, and prints the
 unresolved import as a warning. The prerequisite installer pins SDL3_ttf and its
 closure (`assets/prereq_manifest.json`), so this happens only on a host without
-them; that player draws with the bitmap fallback and logs why. Licence texts for
+them; that player's launcher cannot start, and it says why and exits with code 4. Licence texts for
 every staged DLL are copied beside them as `THIRD_PARTY_NOTICES/` by `tools/package_notices.py`, driven by
 `assets/third_party_components.json`. Because the closure sits beside the
 executable, launching from Explorer or a plain `cmd.exe` without MSYS2 on `PATH`
-uses the readable TTF font; the 8x8 SDL bitmap font remains only as a logged
-last-resort fallback (`NK_UI_NO_TTF=1` forces it), and the workspace doctor
+uses the launcher's TTF fonts; there is no bitmap-font fallback, and the workspace doctor
 reports `RUNTIME_SDL3_TTF`/`RUNTIME_SDL3_TTF_CLOSURE`.
 
 ## 6. Private content-addressed cache contract (#316)
@@ -437,21 +453,30 @@ What the player does (it suggests a rebuild and never forces one):
 * Each outdated card says "Built by an older Nakagawa. Rebuild for the latest
   fixes.", and the title page offers Rebuild beside PLAY. PLAY asks once a
   session (Rebuild now or Play anyway); Play anyway launches as before.
-* Rebuild all queues the outdated games and builds them one at a time, behind
-  whatever the user is doing, through the same package builder as BUILD
-  PACKAGE. The library line counts ("Rebuilding 2 of 5") and each card shows
-  its state and compile progress. A game can be played until its own rebuild
-  starts; while it runs, that game cannot launch and its card says why. A
-  game whose disc image is missing is skipped and its card asks for the disc
-  again; a failed or cancelled build is noted on its card and the queue moves
-  on.
+* Rebuild all queues the outdated games in the build queue, which builds one
+  game at a time, behind whatever the user is doing, through the same package
+  builder as BUILD PACKAGE. The library line counts ("Rebuilding 2 of 5", or
+  "Building 2 of 5" once the queue holds a first build) and each card shows
+  its state, its place in the queue and its compile progress. A game can be
+  played until its own rebuild starts; while it runs, that game cannot launch
+  and its card says why. A game whose disc image is missing is skipped and its
+  card asks for the disc again; a failed or cancelled build is noted on its
+  card and the queue moves on.
+* The same queue takes first builds: a game with no package offers Add to
+  queue beside BUILD PACKAGE on its page, and Remove from queue while it
+  waits. The library line's Queue opens the queue: the game building first,
+  then the ones that wait, each with Up, Down and Remove, and Resume when a
+  build could not start for a reason outside its game. The build card says how
+  many games follow.
 * The queue survives a restart in `rebuild-queue.json` beside `settings.json`:
-  `{"format": "nakagawa-rebuild-queue", "schema_version": 1, "titles":
-  [{"disc_id": "...", "state": "pending" | "done" | "missing_disc" |
-  "failed"}]}`. A build that was running is saved as `pending` and starts
-  again. A file with a newer `schema_version`, another format or an unknown
-  member is left in place and not resumed. The file goes when nothing is
-  pending.
+  `{"format": "nakagawa-rebuild-queue", "schema_version": 2, "titles":
+  [{"disc_id": "...", "kind": "build" | "rebuild", "state": "pending" |
+  "done" | "missing_disc" | "failed"}]}`, in queue order. A build that was
+  running is saved as `pending` and starts again. A schema 1 file (no `kind`,
+  every title a rebuild) is read as rebuilds and rewritten as schema 2. A file
+  with another format or an unknown member is left in place and not resumed;
+  a file with a newer `schema_version` is not resumed and is never replaced or
+  removed. The file goes when nothing is pending.
 
 A rebuild never removes the old package first. The build runs in the
 content-addressed cache entry, is validated, copied next to the package,
@@ -529,7 +554,7 @@ The folders are the per-user ones of [`SETUP.md`](SETUP.md) (on Windows
 | --- | --- | --- | --- |
 | `<data>/library.json` (`src/core/nk_library.c`; read too by `tools/nk_core/library.py` and `nk_cli`) | `schema_version` 1, the only version so far (v0.0.1 and later). `source_image_path`, added after v0.0.1, is an optional member v0.0.1 skips | (none exist) | Refused; the Library screen names it. The older `.bak` beside it is not loaded in its place, and no save replaces either file |
 | `<config>/settings.json` (`src/player/player_state.c`) | `schema_version` 1 (before v0.0.1), 2 (v0.0.1 and later) | 1 to 2: an `fps_cap` of 30 or 60 becomes PSP timing; `settings.json.v1.bak` on the first save | Refused; this session runs on defaults and every Settings page says changes are not saved |
-| `<config>/input_profile.json` (`src/core/nk_input_profile.c`) | `schema_version` 1, 2 (per-title map, #520), 3 (keyboard keys, #1299; v0.0.1 and later), 4 (analog stick keys) | 1 to 2: no per-title map; 2 to 3: default keys; 3 to 4: default stick keys (I, K, J, L), with a direction left unbound when its default key is already a button's key. `.v1.bak`, `.v2.bak` or `.v3.bak` on the first save | Refused; the Controls page names it and its changes do not replace it |
+| `<config>/input_profile.json` (`src/core/nk_input_profile.c`) | `schema_version` 1, 2 (per-title map, #520), 3 (keyboard keys, #1299; v0.0.1 and later), 4 (analog stick keys), 5 (mouse aiming, #1791) | 1 to 2: no per-title map; 2 to 3: default keys; 3 to 4: default stick keys (I, K, J, L), with a direction left unbound when its default key is already a button's key; 4 to 5: aiming off. `.v1.bak` to `.v4.bak` on the first save | Refused; the Controls page names it and its changes do not replace it |
 | `<saves>/<DISC_ID>/` | The PSP's own Memory Stick layout (`PSP/SAVEDATA/...`), defined by the PSP rather than by Nakagawa; the root rule (`nk_launch.c`) is unchanged since v0.0.1 | n/a | n/a |
 | `<data>/packages/<DISC_ID>/package.json`, `build-report.json`, `completion-manifest.json` | `nakagawa-aot-package` schema 2, cache key and completion schema 2, and the ABI epochs of section 6 (all unchanged since v0.0.1) | Built output, not user data: a package from another epoch is INCOMPATIBLE and its card offers REBUILD PACKAGE | INCOMPATIBLE with the card line "built by a newer Nakagawa (package format N; this player reads 2)". The player never changes it; only a rebuild the user asks for replaces it |
 | `<data>/title-input-identities/<DISC_ID>/title-input-identity.json` | `schema_version` 2 | Rebuilt by the next package build | Read as absent; the package card asks for a rebuild |
@@ -563,8 +588,9 @@ includes is listed.
 
 This section records what the Windows portable ZIP holds today and where the player keeps
 everything it writes ([#324](https://github.com/Jstar269/nakagawa-recomp/issues/324)). The
-installer, upgrade and uninstall rules that #324 also asks for are not built yet; the portable
-ZIP is the one supported distribution form.
+per-user `Setup.exe` that #324 also asks for carries the ZIP's exact files
+([#2208](https://github.com/Jstar269/nakagawa-recomp/issues/2208), [`SETUP.md`](SETUP.md#windows-installer-setupexe)),
+and the upgrade and uninstall rules for both are at the end of this section.
 
 ### The install image (read-only)
 
@@ -581,7 +607,7 @@ layout. Nothing in it is written at run time, so it can sit in a read-only folde
 | `source/` | The public-safe source export BUILD PACKAGE runs from (`tools/nk_cli.py`, the Makefile, `assets/prereq_manifest.json`). |
 | `prereqs/` | The pinned build prerequisites (#1285), checked by the player against `installed.json` and `bundle-inventory.txt` before BUILD PACKAGE uses them. |
 | `docs/`, `README.md`, `LICENSE`, `NOTICE.md`, `START HERE.txt` | User documentation. |
-| `SBOM.*`, `toolchain.json`, `SHA256SUMS.txt` | SPDX 2.3, SPDX 3 and CycloneDX SBOMs, the attested toolchain record, and the SHA-256 of every other file. |
+| `SBOM.*`, `toolchain.json`, `SHA256SUMS.txt` | SPDX 2.3, SPDX 3 and CycloneDX SBOMs, which carry the SHA-256 `bin/runtime-manifest.json` records for each executable and DLL in `bin/` (`verify_sbom.py --package-dir` checks it), the attested toolchain record, and the SHA-256 of every other file. |
 
 The image never holds a game, decrypted module, generated title code, save, key or firmware
 font: the release script's forbidden-file and private-path scans refuse them.
@@ -669,3 +695,27 @@ INSTALL unpacks it into `<folder>.partial` beside the running version, checks ev
 `SHA256SUMS.txt` lists, and renames it into place. It never replaces the running version and
 never touches the per-user folders. Removing an extracted folder removes the install image
 only; the per-user folders above stay until the user deletes them.
+
+### Upgrade and uninstall rules
+
+* **Upgrade is side by side, except a copy `Setup.exe` installed.** A new version is a new folder; the old one keeps running until the user
+  deletes it, so an interrupted update leaves the old version whole and at worst a `.partial` folder
+  that the next update replaces. In-place staging (`tools/stage_install.py --dest`) swaps `bin/` and
+  `source/` by rename and removes the old copy only afterwards. The one in-place upgrade is a copy `Setup.exe`
+  installed: the next release's Setup replaces its files in the same folder, then deletes each file the previous
+  install's own `SHA256SUMS.txt` lists and the new one does not, only while it is unchanged since it was installed
+  and no junction or link lies on its path, and removes the folders that leaves empty. Files the user added or
+  changed, `bin/data`, `bin/portable.txt` and the per-user folders stay (`RealProbeTests` and the upgrade leg of
+  `tools/verify_installer.py`).
+* **A runtime or AOT epoch change forces a rebuild, never a stale launch.** Packages live in the
+  per-user data folder and are keyed on the epochs of Section 6. A package built by another epoch
+  is INCOMPATIBLE: the card offers REBUILD PACKAGE and the old code is never started. Saves and
+  title inputs are not keyed on an epoch and survive.
+* **Uninstall removes only what the install wrote.** `python tools/stage_install.py --uninstall --dest
+  <folder>` removes `bin/`, `source/`, the icon, the install marker and the shortcuts and desktop entries the
+  marker records, and nothing else: it never reads or deletes the per-user folders above, a file
+  the user added beside the install survives, a recorded path with a name the tool does not write is skipped, and
+  a folder with no marker is refused. In portable mode `bin/data` and `bin/portable.txt` stay. An unpacked ZIP is
+  removed by deleting its folder. `tools/test_stage_install.py` (`UninstallTests`) covers each rule. The
+  `Setup.exe` uninstaller follows the same rule: it removes what Setup installed and keeps the per-user folders
+  unless the user ticks the box on its uninstall page and confirms ([`SETUP.md`](SETUP.md#windows-installer-setupexe)).

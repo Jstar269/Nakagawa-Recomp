@@ -106,6 +106,39 @@ class InstallTests(unittest.TestCase):
                                         stage_dlls=_fake_stager)
         self.assertEqual((dest / "keep.txt").read_text(encoding="utf-8"), "keep")
 
+    def test_refuses_a_folder_the_windows_installer_set_up(self):
+        """#2208: Setup.exe leaves unins000.exe beside the program and has its own uninstall; the stager
+        must never share the folder, even though it holds no stager marker."""
+        for name in ("unins000.exe", "unins000.dat"):  # Inno Setup's uninstaller and its data
+            with self.subTest(name=name):
+                dest = self.root / f"installed-{name}"
+                dest.mkdir()
+                (dest / name).write_bytes(b"inno")
+                (dest / "bin").mkdir()
+                with self.assertRaisesRegex(stage_install.InstallError, "INSTALL_DESTINATION_INSTALLER_OWNED"):
+                    stage_install.stage_install(dest, self.player, repo=self.repo, stage_dlls=_fake_stager)
+                self.assertEqual(sorted(path.name for path in dest.iterdir()), sorted([name, "bin"]))
+        # Also when the folder carries a stager marker as well (a mixed folder is never safe to share).
+        dest = self.root / "mixed"
+        stage_install.stage_install(dest, self.player, repo=self.repo, stage_dlls=_fake_stager)
+        (dest / "unins000.exe").write_bytes(b"inno")
+        with self.assertRaisesRegex(stage_install.InstallError, "INSTALL_DESTINATION_INSTALLER_OWNED"):
+            stage_install.stage_install(dest, self.player, repo=self.repo, stage_dlls=_fake_stager)
+
+    def test_uninstall_refuses_a_folder_the_windows_installer_set_up(self):
+        """A mixed folder (stager marker plus Setup's files) must not be uninstalled from here: that would leave
+        Setup's uninstaller and its Apps & features entry pointing at nothing."""
+        dest = self.root / "mixed-uninstall"
+        stage_install.stage_install(dest, self.player, repo=self.repo, stage_dlls=_fake_stager)
+        (dest / "unins000.exe").write_bytes(b"inno")
+        for call in (lambda: stage_install.plan_uninstall(dest),
+                     lambda: stage_install.uninstall(dest),
+                     lambda: stage_install.uninstall(dest, dry_run=True)):
+            with self.assertRaisesRegex(stage_install.InstallError, "INSTALL_DESTINATION_INSTALLER_OWNED"):
+                call()
+        self.assertTrue((dest / "bin" / "nakagawa_player.exe").is_file())
+        self.assertTrue((dest / stage_install.MARKER).is_file())
+
     def test_missing_player_is_named(self):
         with self.assertRaisesRegex(stage_install.InstallError, "INSTALL_PLAYER_MISSING"):
             stage_install.stage_install(self.root / "x", self.root / "absent.exe",
@@ -146,7 +179,7 @@ class InstallTests(unittest.TestCase):
             env={**os.environ, "NK_LNK": str(link)})
         target, arguments, workdir = result.stdout.strip().splitlines()
         self.assertEqual(Path(target), (dest / "bin" / "nakagawa_player.exe").resolve())
-        self.assertEqual(arguments, "--ui=next")
+        self.assertEqual(arguments, "")
         self.assertEqual(Path(workdir), (dest / "bin").resolve())
 
     @unittest.skipUnless(os.name == "nt", "Windows shortcuts")
@@ -158,6 +191,79 @@ class InstallTests(unittest.TestCase):
         link = self.root / "Nakagawa Recomp.lnk"
         stage_install.write_shortcut(link, dest)
         self.assertEqual(stage_install.read_shortcut_app_id(link), "Nakagawa.Recomp")
+
+
+    @unittest.skipUnless(os.name == "nt", "Windows shortcuts")
+    def test_a_shortcut_that_starts_another_copy_is_not_replaced(self):
+        """#2208: the installer writes the same shortcut name; replacing it would break that copy's shortcut."""
+        first, second = self.root / "first", self.root / "second"
+        for dest in (first, second):
+            (dest / "bin").mkdir(parents=True)
+            (dest / "bin" / "nakagawa_player.exe").write_bytes(b"MZ")
+            (dest / "nakagawa.ico").write_bytes(b"ico")
+        link = self.root / "Nakagawa Recomp.lnk"
+        stage_install.write_shortcut(link, first)
+        before = link.read_bytes()
+        with self.assertRaisesRegex(stage_install.InstallError, "INSTALL_SHORTCUT_OTHER_COPY"):
+            stage_install.write_shortcut(link, second)
+        self.assertEqual(link.read_bytes(), before)
+        # The same copy re-stages over its own shortcut.
+        stage_install.write_shortcut(link, first)
+        # A stale shortcut (the other copy's program is gone) is replaced.
+        (first / "bin" / "nakagawa_player.exe").unlink()
+        stage_install.write_shortcut(link, second)
+        self.assertEqual(Path(stage_install.read_shortcut_target(link)),
+                         (second / "bin" / "nakagawa_player.exe").resolve())
+
+
+class ShortcutRefusalThroughMainTests(unittest.TestCase):
+    """main() checks every requested shortcut before it stages or writes anything (#2208)."""
+
+    def setUp(self):
+        self._temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._temp.cleanup)
+        self.root = Path(self._temp.name)
+        self.player = self.root / "player.exe"
+        self.player.write_bytes(b"MZ")
+
+    def _run(self, *arguments):
+        err = io.StringIO()
+        with mock.patch.object(stage_install, "IS_WINDOWS", True), \
+                mock.patch.object(stage_install, "desktop_folder", return_value=self.root / "Desktop"), \
+                mock.patch.object(stage_install, "start_menu_folder", return_value=self.root / "Start"), \
+                mock.patch.object(stage_install, "stage_install") as staging, \
+                mock.patch.object(stage_install, "read_shortcut_target", side_effect=self._target), \
+                mock.patch.object(stage_install, "write_shortcut") as writer, \
+                mock.patch.object(stage_install, "record_integration") as recorder, \
+                contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+            status = stage_install.main(["--dest", str(self.root / "install"), "--player", str(self.player),
+                                         *arguments])
+        return status, err.getvalue(), staging, writer, recorder
+
+    def _target(self, shortcut):
+        return str(self.root / "other" / "bin" / "nakagawa_player.exe")
+
+    def test_a_refused_second_shortcut_leaves_nothing_staged_or_written(self):
+        other = self.root / "other" / "bin"
+        other.mkdir(parents=True)
+        (other / "nakagawa_player.exe").write_bytes(b"MZ")
+        (self.root / "Start").mkdir()
+        (self.root / "Start" / stage_install.SHORTCUT_NAME).write_bytes(b"lnk")  # owned by the other copy
+        status, err, staging, writer, recorder = self._run("--desktop-shortcut", "--start-menu-shortcut")
+        self.assertEqual(status, 1)
+        self.assertIn("INSTALL_SHORTCUT_OTHER_COPY", err)
+        staging.assert_not_called()
+        writer.assert_not_called()
+        recorder.assert_not_called()
+        self.assertFalse((self.root / "install").exists())
+
+    def test_each_shortcut_is_recorded_as_it_is_written(self):
+        status, _, staging, writer, recorder = self._run("--desktop-shortcut", "--start-menu-shortcut")
+        self.assertEqual(status, 0)
+        self.assertEqual(writer.call_count, 2)
+        self.assertEqual([call.args[1] for call in recorder.call_args_list],
+                         [[self.root / "Desktop" / stage_install.SHORTCUT_NAME],
+                          [self.root / "Start" / stage_install.SHORTCUT_NAME]])
 
 
 class ShortcutFlagTests(unittest.TestCase):
@@ -201,12 +307,14 @@ class ShortcutFlagTests(unittest.TestCase):
         self.assertEqual(self.written, [self.programs / "Nakagawa Recomp.lnk"])
         self.assertEqual(self.recorded, [[self.programs / "Nakagawa Recomp.lnk"]])
 
-    def test_both_shortcuts_are_written_and_recorded_together(self):
+    def test_both_shortcuts_are_written_and_each_recorded_as_written(self):
         with mock.patch.object(stage_install, "IS_WINDOWS", True):
             self.assertEqual(self._main("--desktop-shortcut", "--start-menu-shortcut"), 0)
         both = [self.desktop / "Nakagawa Recomp.lnk", self.programs / "Nakagawa Recomp.lnk"]
         self.assertEqual(self.written, both)
-        self.assertEqual(self.recorded, [both], "one marker update lists both shortcuts")
+        # Recorded as each is written (record_integration keeps what was recorded before), so a later failure
+        # still leaves the earlier shortcuts in the marker for --uninstall.
+        self.assertEqual(self.recorded, [[path] for path in both])
 
     def test_no_flag_writes_no_shortcut(self):
         with mock.patch.object(stage_install, "IS_WINDOWS", True):
@@ -344,7 +452,7 @@ class LinuxInstallTests(unittest.TestCase):
         section = parser["Desktop Entry"]
         player = str((dest / "bin" / "nakagawa_player").resolve())
         self.assertEqual(section["Type"], "Application")
-        self.assertEqual(shlex.split(section["Exec"]), [player, "--ui=next"])
+        self.assertEqual(shlex.split(section["Exec"]), [player])
         self.assertEqual(section["TryExec"], player)
         self.assertTrue(Path(section["TryExec"]).is_file())
         self.assertEqual(Path(section["Icon"]), icon)
@@ -392,8 +500,10 @@ class LinuxInstallTests(unittest.TestCase):
 # 2026-10-01T00:00:00Z, an even second (MS-DOS times have two-second resolution).
 _EPOCH = 1790812800
 # Every kind of stage entry: nested files, a space and a non-ASCII name, an empty folder.
+_STAGE_COMMIT = "c0ffee" + "0" * 34
 _STAGE_FILES = {
     "START HERE.txt": b"start\n",
+    "toolchain.json": json.dumps({"candidate": {"commit": _STAGE_COMMIT}}).encode("ascii"),
     "bin/nakagawa_player.exe": b"MZplayer",
     "bin/SDL3.dll": b"MZsdl",
     "bin/runtime-manifest.json": b"{}\n",
@@ -541,6 +651,8 @@ class PortableZipTests(unittest.TestCase):
 
     def test_cli_writes_the_zip_and_reports_it(self):
         stage = _make_stage(self.root / "a", reverse=False, mtime=1_700_000_000)
+        head = stage_install.resolve_commit("HEAD")
+        (stage / "toolchain.json").write_text(json.dumps({"candidate": {"commit": head}}), encoding="utf-8")
         out = self.root / "cli.zip"
         with mock.patch.object(stage_install.stage_runtime_dlls, "verify_runtime_manifest",
                                _no_runtime_check), \
@@ -552,14 +664,394 @@ class PortableZipTests(unittest.TestCase):
         self.assertEqual(report["event"], "portable-zip")
         self.assertEqual(report["sha256"], hashlib.sha256(out.read_bytes()).hexdigest())
         self.assertEqual(report["source_date_epoch"], _EPOCH)
+        self.assertEqual(report["source_commit"], head)
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             stage_install.main(["--portable-zip", str(out)])
+
+    def test_the_summary_names_the_source_commit_and_the_checksum_list(self):
+        stage = _make_stage(self.root / "a", reverse=False, mtime=1_700_000_000)
+        summary = stage_install.write_portable_zip(stage, self.root / "out.zip", source_date_epoch=_EPOCH,
+                                                   verify_runtime=_no_runtime_check,
+                                                   expected_commit=_STAGE_COMMIT)
+        self.assertEqual(summary["source_commit"], _STAGE_COMMIT)
+        with zipfile.ZipFile(self.root / "out.zip") as archive:
+            sums = archive.read("SHA256SUMS.txt")
+            self.assertEqual(json.loads(archive.read("toolchain.json"))["candidate"]["commit"], _STAGE_COMMIT)
+        self.assertEqual(summary["sha256sums_sha256"], hashlib.sha256(sums).hexdigest())
+
+    def test_a_stage_without_its_source_commit_is_refused(self):
+        cases = {
+            "missing": None,
+            "not JSON": b"{",
+            "no candidate": b'{"tools": {}}',
+            "short commit": json.dumps({"candidate": {"commit": _STAGE_COMMIT[:12]}}).encode("ascii"),
+            "upper case": json.dumps({"candidate": {"commit": _STAGE_COMMIT.upper()}}).encode("ascii"),
+        }
+        for label, content in cases.items():
+            with self.subTest(label):
+                stage = _make_stage(self.root / label, reverse=False, mtime=1_700_000_000)
+                record = stage / "toolchain.json"
+                if content is None:
+                    record.unlink()
+                else:
+                    record.write_bytes(content)
+                out = self.root / f"{label}.zip"
+                with self.assertRaisesRegex(stage_install.InstallError, "PORTABLE_SOURCE_COMMIT_MISSING"):
+                    stage_install.write_portable_zip(stage, out, source_date_epoch=_EPOCH,
+                                                     verify_runtime=_no_runtime_check)
+                self.assertFalse(out.exists())
+
+    def test_a_stage_built_from_another_commit_is_refused(self):
+        stage = _make_stage(self.root / "a", reverse=False, mtime=1_700_000_000)
+        out = self.root / "out.zip"
+        with self.assertRaisesRegex(stage_install.InstallError,
+                                    f"PORTABLE_SOURCE_COMMIT_MISMATCH: the stage was built from {_STAGE_COMMIT}"):
+            stage_install.write_portable_zip(stage, out, source_date_epoch=_EPOCH,
+                                             verify_runtime=_no_runtime_check, expected_commit="1" * 40)
+        self.assertFalse(out.exists())
+
+    def _cli_zip(self, stage: Path, out: Path, record: Path, revision: str) -> tuple[int, str]:
+        stderr = io.StringIO()
+        with mock.patch.object(stage_install.stage_runtime_dlls, "verify_runtime_manifest",
+                               _no_runtime_check), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(stderr):
+            status = stage_install.main(["--portable-zip", str(out), "--zip-stage", str(stage),
+                                         "--source-date-epoch", str(_EPOCH), "--revision", revision,
+                                         "--record", str(record)])
+        return status, stderr.getvalue()
+
+    def test_a_release_dry_run_gives_two_identical_records(self):
+        head = stage_install.resolve_commit("HEAD")
+        records = []
+        for side, reverse, mtime in (("a", False, 1_700_000_000), ("b", True, 1_800_000_000)):
+            stage = _make_stage(self.root / side, reverse=reverse, mtime=mtime)
+            (stage / "toolchain.json").write_text(json.dumps({"candidate": {"commit": head}}), encoding="utf-8")
+            out = self.root / side / "nakagawa-recomp-0.0.2-windows-x64.zip"
+            record = self.root / side / "record.json"
+            status, stderr = self._cli_zip(stage, out, record, "HEAD")
+            self.assertEqual(status, 0, stderr)
+            records.append((record.read_bytes(), out))
+        self.assertEqual(records[0][0], records[1][0])
+        self.assertEqual(records[0][1].read_bytes(), records[1][1].read_bytes())
+        record = json.loads(records[0][0])
+        self.assertEqual(record["format"], "nakagawa-portable-zip-record")
+        self.assertEqual(record["zip_name"], "nakagawa-recomp-0.0.2-windows-x64.zip")
+        self.assertEqual(record["sha256"], hashlib.sha256(records[0][1].read_bytes()).hexdigest())
+        self.assertEqual(record["source_commit"], head)
+        self.assertNotIn("zip", record)
+        self.assertNotIn(str(self.root), records[0][0].decode("ascii"))
+        self.assertNotIn(str(self.root).replace("\\", "\\\\"), records[0][0].decode("ascii"))
+
+    def test_the_record_never_lands_on_the_zip_or_in_the_stage(self):
+        head = stage_install.resolve_commit("HEAD")
+        stage = _make_stage(self.root / "a", reverse=False, mtime=1_700_000_000)
+        (stage / "toolchain.json").write_text(json.dumps({"candidate": {"commit": head}}), encoding="utf-8")
+        out = self.root / "out.zip"
+        # The relative and upper-case spellings reach the same files (the latter on a
+        # case-insensitive file system only, where the comparison must agree).
+        cases = [(out, out, "PORTABLE_RECORD_IS_ZIP"),
+                 (out, Path(os.path.relpath(out)), "PORTABLE_RECORD_IS_ZIP"),
+                 (out, out / "record.json", "PORTABLE_RECORD_IS_ZIP"),
+                 (self.root / "rec" / "out.zip", self.root / "rec", "PORTABLE_RECORD_IS_ZIP"),
+                 (out, stage / "record.json", "PORTABLE_RECORD_INSIDE_STAGE")]
+        if os.name == "nt":
+            cases.append((out, Path(str(out).upper()), "PORTABLE_RECORD_IS_ZIP"))
+        for zip_path, record, code in cases:
+            with self.subTest(record=str(record)):
+                status, stderr = self._cli_zip(stage, zip_path, record, "HEAD")
+                self.assertEqual(status, 1)
+                self.assertIn(code, stderr)
+                self.assertFalse(zip_path.exists())
+                self.assertFalse((stage / "record.json").exists())
+
+    def test_record_without_a_portable_zip_is_an_error(self):
+        with contextlib.redirect_stderr(io.StringIO()) as stderr, self.assertRaises(SystemExit):
+            stage_install.main(["--dest", str(self.root / "install"), "--record", str(self.root / "r.json")])
+        self.assertIn("--record goes with --portable-zip", stderr.getvalue())
+
+    def test_an_unknown_revision_writes_nothing(self):
+        stage = _make_stage(self.root / "a", reverse=False, mtime=1_700_000_000)
+        out = self.root / "out.zip"
+        status, stderr = self._cli_zip(stage, out, self.root / "record.json", "no-such-revision-324")
+        self.assertEqual(status, 1)
+        self.assertIn("PORTABLE_REVISION_UNRESOLVED", stderr)
+        self.assertFalse(out.exists())
+        self.assertFalse((self.root / "record.json").exists())
+
+    def test_a_missing_git_is_a_failure_line_with_one_code(self):
+        with mock.patch.object(stage_install.subprocess, "run", side_effect=FileNotFoundError("git")):
+            with self.assertRaises(stage_install.InstallError) as caught:
+                stage_install.resolve_commit("HEAD")
+        message = str(caught.exception)
+        self.assertTrue(message.startswith("PORTABLE_REVISION_UNRESOLVED: "), message)
+        self.assertNotIn("INSTALL_SOURCE_EXPORT_FAILED", message)
+        self.assertIn("could not run", message)
+
+    def test_a_sha256_repository_commit_is_accepted(self):
+        stage = _make_stage(self.root / "a", reverse=False, mtime=1_700_000_000)
+        commit = "ab" * 32
+        (stage / "toolchain.json").write_text(json.dumps({"candidate": {"commit": commit}}), encoding="utf-8")
+        self.assertEqual(stage_install.staged_source_commit(stage), commit)
+
+    def test_the_cli_refuses_another_revision_and_an_existing_record(self):
+        stage = _make_stage(self.root / "a", reverse=False, mtime=1_700_000_000)
+        out = self.root / "out.zip"
+        status, stderr = self._cli_zip(stage, out, self.root / "record.json", "HEAD")
+        self.assertEqual(status, 1)
+        self.assertIn("PORTABLE_SOURCE_COMMIT_MISMATCH", stderr)
+        self.assertFalse(out.exists())
+        self.assertFalse((self.root / "record.json").exists())
+        (self.root / "record.json").write_bytes(b"keep")
+        status, stderr = self._cli_zip(stage, out, self.root / "record.json", "HEAD")
+        self.assertEqual(status, 1)
+        self.assertIn("PORTABLE_RECORD_EXISTS", stderr)
+        self.assertFalse(out.exists())
+        self.assertEqual((self.root / "record.json").read_bytes(), b"keep")
 
 
 _V = "0.0.2"
 _PLAYER = f"nakagawa-recomp-{_V}-windows-x64.zip"
 _SOURCES = f"nakagawa-recomp-{_V}-prerequisite-sources.zip"
 _GOOD_ASSETS = [_PLAYER, f"{_PLAYER}.sha256", f"{_PLAYER}.sha256.minisig", _SOURCES, f"{_SOURCES}.sha256"]
+_SETUP = f"nakagawa-recomp-{_V}-windows-x64-setup.exe"
+_SETUP_ASSETS = [_SETUP, f"{_SETUP}.sha256"]
+
+
+class UninstallTests(unittest.TestCase):
+    """--uninstall removes what the install wrote and never the user's data (#2003, #324)."""
+
+    def setUp(self):
+        self._temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._temp.cleanup)
+        self.root = Path(self._temp.name)
+        self.repo = _fixture_repo(self.root)
+        self.player = self.root / "nakagawa_player.exe"
+        self.player.write_bytes(b"player")
+        self.dest = self.root / "Nakagawa Recomp"
+        stage_install.stage_install(self.dest, self.player, repo=self.repo,
+                                    stage_dlls=_fake_stager)
+        # The per-user folders sit beside the install, as %LOCALAPPDATA%\Nakagawa does.
+        self.user = self.root / "LocalAppData" / "Nakagawa"
+        for leaf, name in (("data", "library.json"), ("saves", "UCUS00000.sav"),
+                           ("config", "settings.json"), ("logs", "game.txt")):
+            (self.user / leaf).mkdir(parents=True)
+            (self.user / leaf / name).write_text(leaf, encoding="utf-8")
+        self.shortcuts = self.root / "Programs"
+        self.shortcuts.mkdir()
+        self.lnk = self.shortcuts / stage_install.SHORTCUT_NAME
+        self.lnk.write_bytes(b"lnk")
+        stage_install.record_integration(self.dest, [self.lnk])
+
+    def _user_files(self):
+        return sorted(str(path.relative_to(self.user)) for path in self.user.rglob("*")
+                      if path.is_file())
+
+    def test_removes_the_install_its_marker_and_its_shortcuts(self):
+        summary = stage_install.uninstall(self.dest)
+        self.assertFalse(self.dest.exists(), "an emptied install folder goes too")
+        self.assertFalse(self.lnk.exists())
+        self.assertEqual(summary["removed_integration"], [str(self.lnk)])
+        self.assertEqual(summary["left_in_folder"], [])
+
+    def test_never_touches_the_per_user_folders(self):
+        before = self._user_files()
+        self.assertEqual(len(before), 4)
+        stage_install.uninstall(self.dest)
+        self.assertEqual(self._user_files(), before)
+
+    def test_a_file_the_user_added_beside_the_install_survives(self):
+        (self.dest / "notes.txt").write_text("mine", encoding="utf-8")
+        summary = stage_install.uninstall(self.dest)
+        self.assertEqual((self.dest / "notes.txt").read_text(encoding="utf-8"), "mine")
+        self.assertFalse((self.dest / "bin").exists())
+        self.assertFalse((self.dest / stage_install.MARKER).exists())
+        self.assertEqual(summary["left_in_folder"], ["notes.txt"])
+
+    def test_dry_run_lists_and_removes_nothing(self):
+        summary = stage_install.uninstall(self.dest, dry_run=True)
+        self.assertTrue(summary["dry_run"])
+        self.assertIn(str(self.dest / "bin"), summary["removed"])
+        self.assertIn(str(self.dest / "source"), summary["removed"])
+        self.assertTrue((self.dest / "bin" / "SDL3.dll").is_file())
+        self.assertTrue(self.lnk.is_file())
+        self.assertTrue((self.dest / stage_install.MARKER).is_file())
+
+    def test_a_folder_without_the_marker_is_refused_untouched(self):
+        other = self.root / "someone-elses"
+        (other / "bin").mkdir(parents=True)
+        (other / "bin" / "keep.dll").write_bytes(b"keep")
+        with self.assertRaisesRegex(stage_install.InstallError, "INSTALL_DESTINATION_NOT_OWNED"):
+            stage_install.uninstall(other)
+        self.assertTrue((other / "bin" / "keep.dll").is_file())
+
+    def test_an_edited_marker_cannot_delete_another_file(self):
+        precious = self.root / "Documents" / "thesis.docx"
+        precious.parent.mkdir()
+        precious.write_bytes(b"thesis")
+        folder = self.root / "somefolder"
+        folder.mkdir()
+        marker = self.dest / stage_install.MARKER
+        record = json.loads(marker.read_text(encoding="utf-8"))
+        record["integration"] += [str(precious), str(folder), "relative/Nakagawa Recomp.lnk"]
+        marker.write_text(json.dumps(record), encoding="utf-8")
+        summary = stage_install.uninstall(self.dest)
+        self.assertTrue(precious.is_file())
+        self.assertTrue(folder.is_dir())
+        self.assertEqual(summary["skipped_integration"],
+                         [str(precious), str(folder), "relative/Nakagawa Recomp.lnk"])
+        self.assertFalse(self.lnk.exists(), "the entry this tool wrote still goes")
+
+    def test_a_shortcut_already_deleted_by_hand_is_not_an_error(self):
+        self.lnk.unlink()
+        summary = stage_install.uninstall(self.dest)
+        self.assertEqual(summary["removed_integration"], [])
+        self.assertFalse(self.dest.exists())
+
+    def test_half_finished_staging_and_old_copies_go(self):
+        (self.dest / ".staging-1234").mkdir()
+        (self.dest / ".staging-1234" / "x").write_bytes(b"x")
+        (self.dest / "bin.old").mkdir()
+        stage_install.uninstall(self.dest)
+        self.assertFalse(self.dest.exists())
+
+    def test_portable_data_and_markers_stay(self):
+        (self.dest / "bin" / "portable.txt").write_text("", encoding="utf-8")
+        (self.dest / "bin" / "data" / "saves").mkdir(parents=True)
+        save = self.dest / "bin" / "data" / "saves" / "UCUS00000.sav"
+        save.write_bytes(b"save")
+        summary = stage_install.uninstall(self.dest)
+        self.assertEqual(save.read_bytes(), b"save")
+        self.assertTrue((self.dest / "bin" / "portable.txt").is_file())
+        self.assertFalse((self.dest / "bin" / "SDL3.dll").exists())
+        self.assertFalse((self.dest / "bin" / "nakagawa_player.exe").exists())
+        self.assertFalse((self.dest / "source").exists())
+        self.assertTrue((self.dest / stage_install.MARKER).is_file())
+        self.assertEqual(sorted(Path(kept).name for kept in summary["kept"]),
+                         ["data", "portable.txt"])
+
+    def test_a_second_uninstall_of_a_finished_one_is_refused(self):
+        stage_install.uninstall(self.dest)
+        with self.assertRaisesRegex(stage_install.InstallError, "INSTALL_DESTINATION_NOT_OWNED"):
+            stage_install.uninstall(self.dest)
+
+    def test_a_link_inside_the_install_is_unlinked_not_followed(self):
+        outside = self.root / "outside"
+        outside.mkdir()
+        (outside / "keep.txt").write_text("keep", encoding="utf-8")
+        try:
+            os.symlink(outside, self.dest / "source" / "escape", target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("this host cannot create symbolic links")
+        stage_install.uninstall(self.dest)
+        self.assertEqual((outside / "keep.txt").read_text(encoding="utf-8"), "keep")
+
+    @unittest.skipUnless(os.name == "nt", "directory junctions are a Windows feature")
+    def test_a_junction_inside_the_install_is_removed_not_followed(self):
+        # A junction needs no privilege on Windows, so this runs where the symlink test is skipped.
+        outside = self.root / "junction-target"
+        outside.mkdir()
+        (outside / "keep.txt").write_text("keep", encoding="utf-8")
+        junction = self.dest / "source" / "escape"
+        made = subprocess.run(["cmd", "/c", "mklink", "/J", str(junction), str(outside)],
+                              capture_output=True, text=True, check=False)
+        self.assertEqual(made.returncode, 0, made.stdout + made.stderr)
+        stage_install.uninstall(self.dest)
+        self.assertEqual((outside / "keep.txt").read_text(encoding="utf-8"), "keep")
+        self.assertFalse(junction.exists())
+
+    def _rewrite_marker(self, change):
+        marker = self.dest / stage_install.MARKER
+        record = json.loads(marker.read_text(encoding="utf-8"))
+        change(record)
+        marker.write_text(json.dumps(record), encoding="utf-8")
+
+    def _refused_untouched(self, dest):
+        before = sorted(str(path) for path in dest.rglob("*"))
+        with self.assertRaisesRegex(stage_install.InstallError, "INSTALL_MARKER_INVALID"):
+            stage_install.uninstall(dest)
+        self.assertEqual(sorted(str(path) for path in dest.rglob("*")), before)
+        self.assertTrue(self.lnk.is_file())
+
+    def test_a_marker_that_is_not_json_is_refused_untouched(self):
+        (self.dest / stage_install.MARKER).write_text("not json {", encoding="utf-8")
+        self._refused_untouched(self.dest)
+
+    def test_a_marker_that_is_not_an_object_is_refused_untouched(self):
+        (self.dest / stage_install.MARKER).write_text("[]", encoding="utf-8")
+        self._refused_untouched(self.dest)
+
+    def test_a_marker_without_the_keys_the_installer_writes_is_refused_untouched(self):
+        (self.dest / stage_install.MARKER).write_text("{}", encoding="utf-8")
+        self._refused_untouched(self.dest)
+
+    def test_a_marker_listing_a_path_outside_the_install_is_refused_untouched(self):
+        for change in (
+            lambda r: r.update(player="bin/../../elsewhere.exe"),
+            lambda r: r.update(player="/abs/nakagawa_player.exe"),
+            lambda r: r.update(runtime_files=["..\\..\\evil.dll"]),
+            lambda r: r.update(runtime_files=["sub/evil.dll"]),
+            lambda r: r.update(schema_version="2"),
+            lambda r: r.update(schema_version=stage_install.SCHEMA_VERSION + 1),
+            lambda r: r.update(integration="not-a-list"),
+        ):
+            with self.subTest(change=change):
+                (self.dest / stage_install.MARKER).unlink()
+                stage_install._write_marker(self.dest, {
+                    "schema_version": stage_install.SCHEMA_VERSION, "source_commit": "x",
+                    "platform": "windows", "player": "bin/nakagawa_player.exe",
+                    "runtime_files": [], "integration": [str(self.lnk)]})
+                self._rewrite_marker(change)
+                self._refused_untouched(self.dest)
+
+    def test_a_drive_root_or_the_home_folder_is_refused(self):
+        root = Path(self.root.anchor)
+        for folder in (root, Path.home(), Path.home().parent):
+            with self.subTest(folder=str(folder)), \
+                    self.assertRaisesRegex(stage_install.InstallError, "UNINSTALL_DESTINATION_REFUSED"):
+                stage_install.plan_uninstall(folder)
+
+    def test_portable_data_in_a_leftover_old_bin_stays(self):
+        old = self.dest / "bin.old"
+        (old / "data" / "saves").mkdir(parents=True)
+        (old / "data" / "saves" / "UCUS00000.sav").write_bytes(b"save")
+        (old / "portable.txt").write_text("", encoding="utf-8")
+        (old / "SDL3.dll").write_bytes(b"old")
+        summary = stage_install.uninstall(self.dest)
+        self.assertEqual((old / "data" / "saves" / "UCUS00000.sav").read_bytes(), b"save")
+        self.assertTrue((old / "portable.txt").is_file())
+        self.assertFalse((old / "SDL3.dll").exists())
+        self.assertTrue((self.dest / stage_install.MARKER).is_file())
+        self.assertEqual(sorted(Path(kept).name for kept in summary["kept"]),
+                         ["data", "portable.txt"])
+
+    def test_the_install_goes_before_its_shortcuts(self):
+        order = []
+        real = stage_install._remove_path
+
+        def spy(path):
+            order.append(Path(path))
+            real(path)
+
+        with mock.patch.object(stage_install, "_remove_path", spy):
+            stage_install.uninstall(self.dest)
+        self.assertEqual(order[-1], self.lnk)
+        self.assertEqual(order[0], self.dest / "bin")
+
+    def test_the_command_line_reports_json_and_flags_misuse(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = stage_install.main(["--uninstall", "--dest", str(self.dest), "--dry-run"])
+        self.assertEqual(code, 0)
+        event = json.loads(out.getvalue())
+        self.assertEqual(event["event"], "uninstall")
+        self.assertTrue(event["dry_run"])
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            code = stage_install.main(["--uninstall", "--dest", str(self.root / "nothing")])
+        self.assertEqual(code, 1)
+        self.assertIn("INSTALL_DESTINATION_NOT_OWNED", err.getvalue())
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            stage_install.main(["--dry-run", "--dest", str(self.dest)])
 
 
 class ReleaseAssetContractTests(unittest.TestCase):
@@ -578,6 +1070,29 @@ class ReleaseAssetContractTests(unittest.TestCase):
         for template in ("nakagawa-recomp-$Version-windows-x64.zip", "nakagawa-recomp-$Version-prerequisite-sources.zip"):
             self.assertIn(template, recipe)
         self.assertIn("--check-assets", recipe)
+        self.assertIn("nakagawa-recomp-$Version-windows-x64-setup.exe", recipe)
+
+    def test_the_installer_is_allowed_only_beside_the_zip(self):
+        # #2208: a launcher ranks a ZIP ahead of an .exe, so the ZIP stays the one candidate.
+        self.assertEqual(stage_install.check_release_assets(_GOOD_ASSETS + _SETUP_ASSETS), [])
+        self.assertEqual(stage_install.check_release_assets(_GOOD_ASSETS + _SETUP_ASSETS + [f"{_SETUP}.sha256.minisig"]),
+                         [])
+        self.assertEqual(self._codes(_GOOD_ASSETS + [_SETUP]), ["ASSET_CHECKSUM_MISSING"])
+        self.assertEqual(self._codes(_GOOD_ASSETS + [f"{_SETUP}.sha256"]), ["ASSET_ORPHAN"])
+        self.assertEqual(self._codes(_GOOD_ASSETS + _SETUP_ASSETS + [f"{_SETUP}.sha256.minisig"][:0]
+                                     + ["nakagawa-recomp-0.0.2-windows-x64-setup.exe.bak"]), ["ASSET_NAME_UNKNOWN"])
+        # Without the ZIP the installer would be the only download, which no launcher or update flow expects.
+        no_zip = [n for n in _GOOD_ASSETS if not n.startswith(_PLAYER)] + _SETUP_ASSETS
+        self.assertEqual(self._codes(no_zip), ["ASSET_INSTALLER_WITHOUT_ZIP", "ASSET_PLAYER_MISSING"])
+        # The installer carries the ZIP's version.
+        other = "nakagawa-recomp-0.0.1-windows-x64-setup.exe"
+        self.assertEqual(self._codes(_GOOD_ASSETS + [other, f"{other}.sha256"]),
+                         ["ASSET_INSTALLER_WITHOUT_ZIP", "ASSET_VERSION_MIXED"])
+        # Only the contract's installer name: a second installer, another platform's or an msi are not listed.
+        self.assertEqual(self._codes(_GOOD_ASSETS + _SETUP_ASSETS + ["nakagawa-recomp-0.0.2-windows-x64-setup.msi"]),
+                         ["ASSET_FILTER_MISMATCH", "ASSET_SECOND_ARCHIVE"])
+        self.assertEqual(self._codes(_GOOD_ASSETS + _SETUP_ASSETS + ["nakagawa-recomp-0.0.2-windows-arm64-setup.exe"]),
+                         ["ASSET_FILTER_MISMATCH", "ASSET_SECOND_ARCHIVE"])
 
     def test_two_archives_for_one_platform_fail(self):
         self.assertEqual(self._codes(_GOOD_ASSETS + ["nakagawa-recomp-0.0.2-windows-x64.zip.bak"]),

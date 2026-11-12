@@ -32,9 +32,8 @@ int64_t nk_ftell64(FILE *f);
  * file opens, removals and renames the player and the shared core make on
  * user-data and install paths go through these, or through an equivalent
  * wide-character open local to a translation unit that is built without this
- * platform layer (the decrypt tool and the NPUMDIMG reader nk_psp_npumdimg.c it
- * links, and the file-local copies in nk_iso.c, nk_xb.c, nk_title_manifest.c,
- * nk_library.c and nk_input_profile.c). Code that
+ * platform layer. The shared nk_fopen_utf8 implementation lives in
+ * nk_shared_helpers.c, which the player, runtime and tools link. Code that
  * opens such a path must not use the narrow fopen/remove/rename on Win32.
  * Win32 converts strictly (invalid UTF-8 fails rather than opening a path
  * where the bad bytes became U+FFFD); POSIX file names are already UTF-8 bytes,
@@ -51,6 +50,8 @@ int nk_rename_utf8(const char *from, const char *to);
 
 /* Filesystem and path utilities (all paths in UTF-8) */
 char nk_platform_path_separator(void);
+/* The separator between entries of a PATH-style list: ';' on Windows, ':' elsewhere. */
+char nk_platform_path_list_separator(void);
 bool nk_platform_file_exists(const char *path);
 bool nk_platform_dir_exists(const char *path);
 /* True only when the OS says the name does not exist: ENOENT or ENOTDIR on POSIX, and
@@ -249,6 +250,10 @@ typedef struct {
        OS said it: GetLastError() after CreateProcessW on Win32, errno on POSIX.
        0 when the spawn succeeded or failed before the OS was asked. */
     int spawn_error;
+    /* Set by nk_platform_spawn_tool on Android, where a tool program is an ordinary forked
+       child and a title is another app process: the process calls below take this handle
+       down the fork/exec route instead of the title route. False everywhere else. */
+    bool tool_child;
 } NkProcessHandle;
 
 /* What the OS error a refused process start carries says about the refusal.
@@ -287,6 +292,76 @@ bool nk_platform_spawn_process(
     const char *output_log_path,
     NkProcessHandle *out_process
 );
+
+/* The scheduling priority a spawned process starts at. Its children inherit it, so a
+ * low-priority package build keeps every compiler it starts low too. */
+typedef enum {
+    NK_PROCESS_PRIORITY_NORMAL = 0,
+    /* Win32 BELOW_NORMAL_PRIORITY_CLASS; POSIX nice NK_PLATFORM_LOW_PRIORITY_NICE. A game
+       at normal priority then always runs first, and the process uses what is left. */
+    NK_PROCESS_PRIORITY_LOW
+} NkProcessPriority;
+
+/* The POSIX nice value of NK_PROCESS_PRIORITY_LOW. */
+#define NK_PLATFORM_LOW_PRIORITY_NICE 10
+
+/* nk_platform_spawn_process, with the child started at `priority`. The child never runs
+ * a single instruction at a higher priority: Win32 sets the class at creation and POSIX
+ * before exec. A priority the OS refuses fails the spawn. */
+bool nk_platform_spawn_process_at_priority(
+    const char *executable_path,
+    const char * const *argv,
+    const char * const *envp,
+    const char *working_directory,
+    const char *output_log_path,
+    NkProcessPriority priority,
+    NkProcessHandle *out_process
+);
+
+/* The priority a running child has now, as NK_PROCESS_PRIORITY_LOW when it runs below
+ * normal (any lower class or nice value counts) and NORMAL otherwise. False when the OS
+ * cannot say, or for an Android title, which runs in another app process rather than as a
+ * child (an Android tool child reads as on the desktop). */
+bool nk_platform_process_priority(const NkProcessHandle *process, NkProcessPriority *out);
+
+/* Starts one of the application's own tool programs (the package build's Python, compiler and
+ * make, an archive tool), with the same arguments and handle as nk_platform_spawn_process.
+ * On the desktop it is nk_platform_spawn_process. On Android an app may run only programs its
+ * APK ships, from the native library folder (it may not execute files it wrote: #360), and a
+ * title is started through TitleActivity instead; there it forks and execs executable_path only
+ * when nk_platform_path_is_tool_in_dir() accepts it for nk_platform_get_tool_dir(), and fails
+ * with spawn_error EACCES for any other program. */
+bool nk_platform_spawn_tool(
+    const char *executable_path,
+    const char * const *argv,
+    const char * const *envp,
+    const char *working_directory,
+    const char *output_log_path,
+    NkProcessHandle *out_process
+);
+
+/* nk_platform_spawn_tool, with the child started at `priority` as
+ * nk_platform_spawn_process_at_priority starts it. On Android the tool-folder rule applies
+ * first, at every priority, and a low tool child is niced before exec as on the desktop. */
+bool nk_platform_spawn_tool_at_priority(
+    const char *executable_path,
+    const char * const *argv,
+    const char * const *envp,
+    const char *working_directory,
+    const char *output_log_path,
+    NkProcessPriority priority,
+    NkProcessHandle *out_process
+);
+
+/* The folder the application's bundled tool programs are in: on Android the folder this code
+ * was loaded from, which is the APK's native library folder. False on hosts that bundle no
+ * tools there (the desktop finds its tools on PATH or in the prerequisites folder). */
+bool nk_platform_get_tool_dir(char *out_path, size_t max_len);
+
+/* True when path resolves, symbolic links followed, to a regular file directly inside dir (not
+ * in a folder below it): the rule nk_platform_spawn_tool applies on Android. Windows has no
+ * bundled tool folder, and its backend answers false. */
+bool nk_platform_path_is_tool_in_dir(const char *dir, const char *path);
 
 bool nk_platform_is_process_running(NkProcessHandle *process);
 int nk_platform_wait_process(NkProcessHandle *process, int timeout_ms);
@@ -344,14 +419,34 @@ const char *nk_platform_env_user_name(void);
 /* This process's id (_getpid on Win32, getpid on POSIX). */
 unsigned long nk_platform_process_id(void);
 
+/* The client end of a named pipe another program on this PC serves: local IPC, never a
+   network connection. Discord Rich Presence (#2259) talks to the Discord app through one.
+   Win32: the named pipe <name> on this PC (the local pipe namespace only), opened for
+   overlapped I/O so a write can give up and no read waits, at identification level only, so
+   the program serving the pipe cannot act as this user. POSIX: unsupported; supported() is
+   false and open fails. */
+typedef struct {
+    void *handle;  /* Win32: the pipe's HANDLE */
+    bool open;
+} NkLocalPipe;
+
+bool nk_platform_local_pipe_supported(void);
+/* Connect to the pipe `name` (no directory: "discord-ipc-0"). False, quietly, when nobody
+   serves it or it is busy. */
+bool nk_platform_local_pipe_open(NkLocalPipe *pipe, const char *name);
+/* Write all `len` bytes within timeout_ms. False on a short write, a broken pipe or the
+   timeout; the caller then closes the pipe. */
+bool nk_platform_local_pipe_write(NkLocalPipe *pipe, const void *data, size_t len,
+                                  unsigned timeout_ms);
+/* Read what has already arrived, up to cap bytes, without waiting: the count read, 0 when
+   nothing is waiting, -1 when the other end closed the pipe or it failed. */
+long nk_platform_local_pipe_read(NkLocalPipe *pipe, void *buf, size_t cap);
+/* Close it; safe on a zeroed or closed pipe. */
+void nk_platform_local_pipe_close(NkLocalPipe *pipe);
+
 /* The OS error code of the last failed nk_platform or nk_*_utf8 file call on this thread:
    GetLastError() on Win32, errno on POSIX. Read it straight after the failing call. */
 int nk_platform_last_os_error(void);
-
-/* The SDL3_ttf shared library's file names, most specific first, NULL-terminated:
-   SDL3_ttf.dll on Win32, libSDL3_ttf.0.dylib then libSDL3_ttf.dylib on macOS, and
-   libSDL3_ttf.so.0 then libSDL3_ttf.so elsewhere. */
-const char *const *nk_platform_sdl3_ttf_library_names(void);
 
 /* The first system UI font file found (Win32: the open-source fonts in the per-user fonts
    folder, then %WINDIR%\Fonts; macOS and Linux: a short table of system font paths).
@@ -378,6 +473,13 @@ void nk_platform_setup_standard_streams(const char *fallback_log_name);
    SDL_GetBasePath() points there. Everywhere else it does nothing and returns true. False when
    the Android folder is missing; the process can still run but finds no bundled files. */
 bool nk_platform_host_startup(const char *log_tag);
+
+/* Process end, for a process that ends without exit()'s cleanup (Android's title process, see
+   android/app/src/main/cpp/nk_android_title.c). Android: flush stdout and stderr, and wait until
+   nk_platform_host_startup's copy has written every line to the system log and the log file, so
+   the last lines of a run are not lost; the streams go nowhere afterwards. Everywhere else it
+   does nothing. */
+void nk_platform_host_shutdown(void);
 
 #ifdef __cplusplus
 }

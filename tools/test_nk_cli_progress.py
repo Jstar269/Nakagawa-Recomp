@@ -4,6 +4,7 @@
 """Unit tests for nk_cli.py build-package --progress-json and --log-file options."""
 
 from __future__ import annotations
+from typing import Any
 
 import json
 import os
@@ -261,6 +262,186 @@ class NkCliProgressTests(unittest.TestCase):
             for alarm in ("!", "warning", "WARNING", "danger", "overheat", "crash"):
                 self.assertNotIn(alarm, text)
 
+    def test_one_job_notice_names_the_planners_reason(self) -> None:
+        import nk_cli
+
+        memory = nk_cli.compile_load_notice(1, 24, "memory", 4.2)
+        cpu = nk_cli.compile_load_notice(1, 1, "cpu", 3.0)
+        override = nk_cli.compile_load_notice(1, 24, "override", 30.0)
+        self.assertIn("one part at a time", memory)
+        self.assertIn("only 4.2 GB of memory is free", memory)
+        self.assertIn("take longer", memory)
+        self.assertNotIn("single processor", memory)
+        self.assertIn("single processor", cpu)
+        self.assertNotIn("memory", cpu)
+        self.assertIn("NK_PACKAGE_JOBS", override)
+        self.assertNotIn("memory is free", override)
+        self.assertIn("low on free memory", nk_cli.compile_load_notice(1, 24, "memory", None))
+        # A one-job row from a planner that names no reason keeps saying nothing.
+        self.assertIsNone(nk_cli.compile_load_notice(1, 24))
+        self.assertIsNone(nk_cli.compile_load_notice(1, 24, "max", 30.0))
+        for text in (memory, cpu, override):
+            for alarm in ("!", "warning", "WARNING", "danger", "overheat", "crash"):
+                self.assertNotIn(alarm, text)
+
+    def test_compile_progress_relay_passes_the_one_job_reason(self) -> None:
+        import nk_cli
+
+        with tempfile.TemporaryDirectory(prefix="nk_cli_compile_notice_") as temp:
+            events_path = Path(temp) / "events.jsonl"
+            progress_path = Path(temp) / "compile-progress.jsonl"
+            reporter = nk_cli._BuildProgressReporter(events_path)
+            progress_path.write_text(
+                '{"completed": 0, "total": 172, "jobs": 1, "cpus": 24, '
+                '"limit": "memory", "free_gb": 4.6}\n',
+                encoding="utf-8",
+            )
+            nk_cli._CompileProgressRelay(reporter, progress_path).drain()
+            reporter.close()
+            rows = [json.loads(line) for line in events_path.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(rows[0]["notice"], nk_cli.compile_load_notice(1, 24, "memory", 4.6))
+        self.assertIn("only 4.6 GB of memory is free", rows[0]["notice"])
+
+    def test_compile_speed_line_names_the_speed_and_what_bound_the_jobs(self) -> None:
+        import nk_cli
+
+        line = nk_cli.compile_speed_line
+        self.assertEqual(line("background", 2, "background"),
+                         "Build speed: Background. 2 parts at a time at low priority.")
+        self.assertEqual(line("balanced", 6, "memory", 14.2),
+                         "Build speed: Balanced. 6 parts at a time, as many as the free "
+                         "memory allows (14.2 GB free).")
+        self.assertEqual(line("balanced", 8, "max", 60.0),
+                         "Build speed: Balanced. 8 parts at a time, the most Balanced runs; "
+                         "Fastest can run more.")
+        self.assertEqual(line("fastest", 24, "cpu", 60.0),
+                         "Build speed: Fastest. 24 parts at a time, one for each processor.")
+        self.assertEqual(line("fastest", 2, "unknown_memory"),
+                         "Build speed: Fastest. 2 parts at a time, because the free memory is "
+                         "unknown.")
+        self.assertEqual(line("background", 1, "memory", 2.4),
+                         "Build speed: Background. 1 part at a time at low priority, as many "
+                         "as the free memory allows (2.4 GB free).")
+        self.assertEqual(line("fastest", 3, "override", 60.0),
+                         "Build speed: Fastest, but NK_PACKAGE_JOBS sets 3 parts at a time.")
+        # A row from a planner that names no speed keeps the card's bare speed name.
+        self.assertIsNone(line(None, 4, "cpu"))
+        self.assertIsNone(line("turbo", 4, "cpu"))
+        self.assertIsNone(line("balanced", None, "cpu"))
+        for speed in ("background", "balanced", "fastest"):
+            self.assertTrue(line(speed, 4, "cpu").isascii())
+
+    def test_a_background_build_notes_that_games_come_first(self) -> None:
+        import nk_cli
+
+        low = nk_cli.compile_load_notice(2, 24, "background", 30.0, "background")
+        self.assertIn("low priority", low)
+        self.assertIn("games and other apps come first", low)
+        self.assertEqual(nk_cli.compile_load_notice(2, 2, "cpu", 30.0, "background"), low)
+        # One job for want of memory still says why: that is what the user can change.
+        self.assertIn("only 1.9 GB of memory is free",
+                      nk_cli.compile_load_notice(1, 24, "memory", 1.9, "background"))
+        self.assertEqual(nk_cli.compile_load_notice(8, 8, "cpu", 30.0, "fastest"),
+                         nk_cli.compile_load_notice(8, 8))
+
+    def test_compile_progress_relay_passes_the_speed_line(self) -> None:
+        import nk_cli
+
+        with tempfile.TemporaryDirectory(prefix="nk_cli_compile_speed_") as temp:
+            events_path = Path(temp) / "events.jsonl"
+            progress_path = Path(temp) / "compile-progress.jsonl"
+            reporter = nk_cli._BuildProgressReporter(events_path)
+            progress_path.write_text(
+                '{"completed": 0, "total": 172, "jobs": 2, "cpus": 24, '
+                '"limit": "background", "speed": "background", "free_gb": 30.0}\n'
+                '{"completed": 1, "total": 172, "jobs": 6, "cpus": 24}\n',
+                encoding="utf-8",
+            )
+            nk_cli._CompileProgressRelay(reporter, progress_path).drain()
+            reporter.close()
+            rows = [json.loads(line) for line in events_path.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(rows[0]["speed"],
+                         "Build speed: Background. 2 parts at a time at low priority.")
+        self.assertIn("low priority", rows[0]["notice"])
+        self.assertNotIn("speed", rows[1])
+
+    def test_build_speed_names_match_the_planner(self) -> None:
+        import nk_cli
+        import title_codegen_plan
+
+        self.assertEqual(nk_cli._BUILD_SPEEDS, title_codegen_plan.PACKAGE_BUILD_SPEEDS)
+        self.assertEqual(nk_cli._BUILD_SPEED_DEFAULT,
+                         title_codegen_plan.PACKAGE_BUILD_SPEED_DEFAULT)
+        self.assertEqual(nk_cli._BUILD_SPEED_ENV, title_codegen_plan.PACKAGE_BUILD_SPEED_ENV)
+        self.assertEqual(nk_cli._PACKAGE_JOBS_ENV, title_codegen_plan.PACKAGE_BUILD_JOBS_ENV)
+        header = (ROOT / "src" / "core" / "nk_platform.h").read_text(encoding="utf-8")
+        self.assertIn(f"#define NK_PLATFORM_LOW_PRIORITY_NICE {nk_cli._LOW_PRIORITY_NICE}\n",
+                      header.replace("\r\n", "\n"))
+
+    def test_build_log_names_the_speed_and_the_override(self) -> None:
+        import nk_cli
+
+        self.assertEqual(nk_cli.build_speed_log_line("background", None),
+                         "BUILD_SPEED: background (at most 2 jobs, below normal priority)\n")
+        self.assertIn("a job for every logical CPU", nk_cli.build_speed_log_line("fastest", ""))
+        overridden = nk_cli.build_speed_log_line("balanced", " 3 ")
+        self.assertTrue(overridden.startswith("BUILD_SPEED: balanced ("))
+        self.assertIn("NK_PACKAGE_JOBS=3 overrides its job count", overridden)
+
+    def test_build_package_takes_a_build_speed(self) -> None:
+        import nk_cli
+        from unittest.mock import patch
+
+        parsed: list[object] = []
+
+        def record(args: Any) -> int:
+            parsed.append(args.build_speed)
+            return 0
+
+        for argv, expected in (
+            ([], "balanced"),
+            (["--build-speed", "background"], "background"),
+            (["--build-speed", "fastest"], "fastest"),
+        ):
+            with patch.object(sys, "argv", ["nk_cli.py", "build-package", "ULUS10000", *argv]), \
+                 patch.object(nk_cli, "_use_utf8_standard_streams"), \
+                 patch.object(nk_cli, "cmd_build_package", side_effect=record):
+                self.assertEqual(nk_cli.main(), 0)
+            self.assertEqual(parsed.pop(), expected)
+        refused = subprocess.run(
+            [sys.executable, str(CLI_PATH), "build-package", "ULUS10000", "--build-speed", "turbo"],
+            capture_output=True, text=True, timeout=120, check=False)
+        self.assertEqual(refused.returncode, 2)
+        self.assertIn("invalid choice: 'turbo'", refused.stderr)
+
+    def test_a_background_build_lowers_its_own_priority(self) -> None:
+        # A Background build started from a terminal runs low as well; the player's child
+        # already starts low (nk_platform_spawn_process_at_priority).
+        probe = (
+            "import os, sys\n"
+            "sys.path.insert(0, sys.argv[1])\n"
+            "import nk_cli\n"
+            "assert nk_cli.lower_build_priority()\n"
+            "assert nk_cli.lower_build_priority()  # already low: unchanged\n"
+            "if os.name == 'nt':\n"
+            "    import ctypes\n"
+            "    k = ctypes.WinDLL('kernel32')\n"
+            "    k.GetCurrentProcess.restype = ctypes.c_void_p\n"
+            "    k.GetPriorityClass.argtypes = [ctypes.c_void_p]\n"
+            "    print(hex(k.GetPriorityClass(k.GetCurrentProcess())))\n"
+            "else:\n"
+            "    print(os.getpriority(os.PRIO_PROCESS, 0))\n"
+        )
+        done = subprocess.run([sys.executable, "-c", probe, str(ROOT / "tools")],
+                              capture_output=True, text=True, timeout=120, check=False)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        value = done.stdout.strip()
+        if os.name == "nt":
+            # Below normal, or idle when the test itself was started at idle priority.
+            self.assertIn(value, ("0x4000", "0x40"))
+        else:
+            self.assertGreaterEqual(int(value), 10)
+
     def test_compile_progress_relay_passes_the_load_notice(self) -> None:
         import nk_cli
 
@@ -491,7 +672,7 @@ class NkCliVramTests(unittest.TestCase):
                 break
         raw = zlib.decompress(compressed)
         row_bytes = width * 4
-        pixels = []
+        pixels: list[Any] = []
         for y in range(height):
             row = raw[y * (row_bytes + 1):(y + 1) * (row_bytes + 1)]
             if row[0] != 0:

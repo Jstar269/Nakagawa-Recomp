@@ -6,7 +6,7 @@
 
 The architecture goal is to keep title identity and title-specific inputs out of generic UI and runtime defaults. Source-owned title data is validated before it reaches the registry, build planner, or launch path.
 
-The current source proves a narrower claim than complete multi-title acceptance: Python and native launch resolution bind a session to a validated title identity, and the test suite covers fail-closed identity/path selection and parity on synthetic fixtures. A second-title bring-up landed under [issue #285](https://github.com/Jstar269/nakagawa-recomp/issues/285): PAC-MAN Championship Edition reaches its menu and plays a stage with generic fixes only ([#552](https://github.com/Jstar269/nakagawa-recomp/pull/552), [#556](https://github.com/Jstar269/nakagawa-recomp/pull/556)). The next milestone, a second title that saves, closes and resumes, is [#1126](https://github.com/Jstar269/nakagawa-recomp/issues/1126). The project does not claim that every title can be supported without presentation or integration work.
+The current source proves a narrower claim than complete multi-title acceptance: Python and native launch resolution bind a session to a validated title identity, and the test suite covers fail-closed identity/path selection and parity on synthetic fixtures. A second-title bring-up landed under [issue #285](https://github.com/Jstar269/nakagawa-recomp/issues/285): PAC-MAN Championship Edition reaches its menu and plays a stage with generic fixes only ([#552](https://github.com/Jstar269/nakagawa-recomp/pull/552), [#556](https://github.com/Jstar269/nakagawa-recomp/pull/556)). The milestone that a second title saves, closes and resumes was met and closed as [#1126](https://github.com/Jstar269/nakagawa-recomp/issues/1126) (2026-10-28). The project does not claim that every title can be supported without presentation or integration work.
 
 ```text
 public title manifest
@@ -182,5 +182,5 @@ For the native player’s current implementation boundary and process lifecycle,
 - Temporary profile-owned compatibility bindings remain visible debt under #363.
 - HST reent-table configuration remains title-gated compatibility debt under #363; generic
   dispatch rejection and diagnostic cleanup do not establish full second-title support.
-- The first release, v0.0.1 (#333), shipped on 2026-10-28; its version was set at the candidate freeze (#513), and `main` now builds 0.0.2-dev.
+- The first release, v0.0.1 (#333), shipped on 2026-10-28, with its version set at the candidate freeze (#513); v0.0.2's version was set the same way, at its own freeze.
 - Private title inputs and private acceptance remain separate from public schema and synthetic-fixture results.

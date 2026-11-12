@@ -316,6 +316,13 @@ void native_test_isolate_user_data_roots(void) {
 #if defined(_WIN32) || defined(_WIN64)
     native_test_set_env("LOCALAPPDATA", g_test_root);
     native_test_set_env("APPDATA", g_test_root);
+#elif defined(__ANDROID__)
+    /* Android has no HOME or XDG folders: the platform layer roots every per-user folder at
+       NK_ANDROID_DATA_DIR, which the activities set to <app files>/Nakagawa. */
+    char android_root[NATIVE_TEST_PATH_MAX + 32];
+    int android_written = snprintf(android_root, sizeof(android_root), "%s/Nakagawa", g_test_root);
+    assert(android_written > 0 && (size_t)android_written < sizeof(android_root));
+    native_test_set_env("NK_ANDROID_DATA_DIR", android_root);
 #else
     static const char *const variables[] = {
         "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"};
@@ -405,6 +412,11 @@ void native_test_capture_real_config_probe(void) {
     if (base) {
         snprintf(g_real_config_probe, sizeof(g_real_config_probe),
                  "%s%cNakagawa%cconfig", base, sep, sep);
+    }
+#elif defined(__ANDROID__)
+    const char *env_android = getenv("NK_ANDROID_DATA_DIR");
+    if (env_android && env_android[0]) {
+        snprintf(g_real_config_probe, sizeof(g_real_config_probe), "%s/config", env_android);
     }
 #elif defined(__APPLE__)
     const char *env_home = getenv("HOME");

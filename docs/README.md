@@ -13,7 +13,7 @@ Start here if you want to play or try the project rather than change it:
 - [`../README.md`](../README.md): what the project is, the download and the quick start.
 - [`YOUR_OWN_GAMES.md`](YOUR_OWN_GAMES.md): playing a game you own.
 - [`COMPATIBILITY.md`](COMPATIBILITY.md): which games work.
-- [`RELEASE_NOTES_v0.0.1.md`](RELEASE_NOTES_v0.0.1.md): what the current release does, and how to check the download.
+- [`RELEASE_NOTES_v0.0.2.md`](RELEASE_NOTES_v0.0.2.md): what the current release does, and how to check the download.
 - [`SETUP.md`](SETUP.md#windows-host-pitfalls): troubleshooting on Windows.
 - [`SHOWCASE.md`](SHOWCASE.md): the two demo programs.
 - [`../ACCESSIBILITY.md`](../ACCESSIBILITY.md): what the player supports for accessibility, and how to report a barrier.
@@ -32,6 +32,7 @@ Each row is something you are about to do. Find yours and read what it points to
 | Check title and subsystem compatibility | [`COMPATIBILITY.md`](COMPATIBILITY.md) |
 | Audit user-supplied parser limits and hostile-input evidence | [`PARSER_SAFETY_INVENTORY.json`](PARSER_SAFETY_INVENTORY.json) — per-boundary evidence for #319; an inventory is not issue completion |
 | Run the release smoke test on a build | [`SMOKE_TEST.md`](SMOKE_TEST.md) |
+| Compare GCC and Clang on the synthetic generated-C corpus | [`COMPILER_COMPARISON.md`](COMPILER_COMPARISON.md) |
 | Qualify a public title through the native player | [`TITLE_TESTING.md`](TITLE_TESTING.md) |
 | Find out what a failure code means, or add one | [`FAILURE_CODES.md`](FAILURE_CODES.md) — every code a report, tool or the player emits, by pipeline stage |
 | Find your way around the code for the first time | [`CODE_TOUR.md`](CODE_TOUR.md) — one game from disc image to a frame on screen, file by file |
@@ -79,6 +80,8 @@ Each row is something you are about to do. Find yours and read what it points to
   external-input gates.
 - [`LLVM_BACKEND.md`](LLVM_BACKEND.md) — the opt-in LLVM IR code generation backend (#330):
   structured IR, explicit MIPS semantics, verification, and the in-process stage.
+- [`COMPILER_COMPARISON.md`](COMPILER_COMPARISON.md) — GCC and Clang comparison
+  results on source-owned synthetic fixtures, with the correctness veto and measured build costs.
 - [`HARDWARE_ORACLE.md`](HARDWARE_ORACLE.md) — bounded proposal and limits;
   source-owned probes are not hardware acceptance without measured provenance.
 - [`research/PSP_THREADING_SEMANTICS.md`](research/PSP_THREADING_SEMANTICS.md) —
@@ -124,8 +127,10 @@ a target and what isn't built yet.
   maintained records; each marks unbuilt behavior inline, so CURRENT does not mean
   the target pipeline exists.
 - [`PREVIEW_RELEASE.md`](PREVIEW_RELEASE.md) — scope, packaging and qualification
-  guide for the v0.0.1 release. Creating a tag or release is a
+  guide for each release. Creating a tag or release is a
   maintainer-only action (`AGENTS.md` section 3), and no agent may perform it.
+- [`RELEASE_NOTES_v0.0.2.md`](RELEASE_NOTES_v0.0.2.md) — the notes of the
+  v0.0.2 release.
 - [`RELEASE_NOTES_v0.0.1.md`](RELEASE_NOTES_v0.0.1.md) — the notes of the
   v0.0.1 release, kept as released.
 - [`RELEASE_SIGNING.md`](RELEASE_SIGNING.md) — the owner's update-signing key and
@@ -206,7 +211,7 @@ Every substantial document carries one status.
 | `CODE_TOUR.md` | CURRENT | Newcomer route through the code, disc image to frame on screen (source remains authoritative) |
 | `ARCHIVE_VFS.md` | CURRENT | Read-only archive-backed VFS: XB mounts, member lookup and loose-content routes (#298) |
 | `SETUP.md` | CURRENT | Supported toolchain; declared authority for setup claims, including the optional local symbol reference (`FindSymbol`) |
-| `YOUR_OWN_GAMES.md` | CURRENT | User guide: own-game input, unencrypted files, ownership and in-the-works boundaries |
+| `YOUR_OWN_GAMES.md` | CURRENT | User guide: own-game input, unencrypted files, ownership and current limits |
 | `COMPATIBILITY.md` | CURRENT | Per-title and subsystem compatibility states and semantic boundaries |
 | `STATUS.md` | CURRENT | Project status summary: live work areas, execution-contract state and evidence boundary; live GitHub Issues win |
 | `SMOKE_TEST.md` | CURRENT | Numbered pass/fail release smoke test for the native player |
@@ -232,6 +237,7 @@ Every substantial document carries one status.
 | `ENHANCEMENT_CONTRACT.md` | CURRENT | Enhancement contract, package validator, and declarative 60 Hz frame-rate rescale AOT epoch |
 | `STATIC_VERIFY.md` | CURRENT | Oracle-free verification and blocked external-input gates |
 | `LLVM_BACKEND.md` | CURRENT | Opt-in LLVM IR backend (#330): design, first-stage scope, verification and the in-process stage |
+| `COMPILER_COMPARISON.md` | CURRENT | GCC/Clang and default/lld experiment results; correctness veto governs performance reporting (#317) |
 | `HARDWARE_ORACLE.md` | CURRENT | Bounded proposal + measured-cells index; trace oracle unbuilt |
 | `HARDWARE_RUNNER_AUTONOMY.md` | CURRENT | Runner autonomy design; simulated-transport conformance suite and the one-command matrix; PSP-side framed runner unbuilt |
 | `PROVENANCE_MERGE_GATE.md` | CURRENT | Merge-path provenance control (observation mode) |
@@ -240,7 +246,7 @@ Every substantial document carries one status.
 | `PROJECT_MODEL.md` | CURRENT | Repository and project model |
 | `WORKSPACE_DOCTOR.md` | CURRENT | Doctor checks and host contract |
 | `DCO_POLICY.md` | CURRENT | Sign-off governance |
-| `DECOMPME_INTEGRATION.md` | CURRENT | Forward-looking integration plan (not built work) |
+| `DECOMPME_INTEGRATION.md` | CURRENT | decomp.me notes and the read-only exporter; the later steps are not built |
 | `AI_USAGE.md` | CURRENT | AI-assistance and review boundaries |
 | `PSPDEV_LOCAL_VERIFICATION.md` | CURRENT | PSPDEV local-verification boundary |
 | `LLE_FIDELITY_ARCHITECTURE.md` | CURRENT | Fidelity doctrine; ranks correctness above convenience |
@@ -248,12 +254,13 @@ Every substantial document carries one status.
 | `TITLE_PROFILE_ARCHITECTURE.md` | CURRENT | No-hardcoded-title rule, enforced by `tools/test_generic_title_planning_proof.py` |
 | `NATIVE_UI_REGRESSION_MATRIX.md` | CURRENT | Authoritative capability disposition table plus the native slice functional checklist |
 | `NATIVE_PLAYER_IMPLEMENTATION_PROGRESS.md` | CURRENT | Native player implementation narrative and launch-path evidence; per-capability status is maintained in `NATIVE_UI_REGRESSION_MATRIX.md` |
-| `PREVIEW_RELEASE.md` | CURRENT | v0.0.1 release scope and qualification guide; tags and releases are maintainer-only |
-| `RELEASE_NOTES_v0.0.1.md` | CURRENT | Notes of the v0.0.1 release, kept as released |
+| `PREVIEW_RELEASE.md` | CURRENT | Release scope and qualification guide; tags and releases are maintainer-only |
+| `RELEASE_NOTES_v0.0.2.md` | CURRENT | Notes of the v0.0.2 release |
+| `RELEASE_NOTES_v0.0.1.md` | HISTORICAL | Notes of the v0.0.1 release, kept as released |
 | `RELEASE_SIGNING.md` | CURRENT | Update-signing key procedure (minisign, offline) and what the player checks before an update download |
-| `NATIVE_PLAYER_ARCHITECTURE.md` | CURRENT | Maintained native-shell architecture; the wizard's bounded ISO/XB staging exists and the player decrypts the user's own disc locally, while retail-disc hash validation and one-click play without the developer toolchain remain unbuilt and are marked inline |
+| `NATIVE_PLAYER_ARCHITECTURE.md` | CURRENT | Maintained native-shell architecture; the wizard's bounded ISO/XB staging exists and the player decrypts the user's own disc locally and checks it against the user's Redump list, while one-click play without compiling on the user's PC is not built and is marked inline |
 | `PLAYER_UI_DESIGN.md` | CURRENT | Player UI design system for the default launcher: tokens, components, and the screen specs C6-C8 build against |
-| `ONLINE_FEATURES.md` | DRAFT | Design for the launcher's opt-in online mode (update check, news, user-sent reports) and developer mode, asked in the setup wizard; the switches, the wizard step and the developer log panel are built, no online feature is yet |
+| `ONLINE_FEATURES.md` | DRAFT | Design for the launcher's opt-in online mode (update check, news, user-sent reports) and developer mode, asked in the setup wizard; the switches, the wizard step, the developer log panel, the update check and Discord status are built; news and in-player reports are not |
 | `AOT_PRODUCTIZATION_ARCHITECTURE.md` | CURRENT | Maintained evaluation of end-user recompilation routes A-G; the zero-toolchain recommended routes remain unimplemented |
 | `RUNTIME_PACKAGING_ARCHITECTURE.md` | CURRENT | Maintained process-isolation decision record; installers and one-click end-user preparation remain unbuilt |
 | `ISO_ONLY_GAP_ANALYSIS.md` | CURRENT | Maintained LLE gap analysis; existing bounded ISO helpers and the remaining retail-preparation stages are distinguished inline |

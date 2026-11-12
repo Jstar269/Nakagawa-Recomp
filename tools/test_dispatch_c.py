@@ -375,6 +375,7 @@ class HostEntriesReturnToTheHost(unittest.TestCase):
         # Generated call sites and the interpreter's handoff only (#1935).
         "dispatch_call_checked": set(),
         "dispatch_call_continue": set(),
+        "dispatch_call_interp": set(),   # the interpreter's linked call only (#2196)
         "dispatch": {("vfpu_fuzz.c", "check_unaligned_dispatch")},  # the VFPU fallback tag
     }
 
@@ -399,9 +400,56 @@ class HostEntriesReturnToTheHost(unittest.TestCase):
                 offenders.append(f"{relative}:{line}")
         self.assertEqual(offenders, [], "a host entry seeds $ra = 0; seed SR_HOST_RETURN_PC")
 
+    def test_only_the_dispatch_boundaries_read_the_cosim_unwind_flag(self):
+        """#2148 review S1, #2196: the COSIM guest lane's refused import unwinds through
+        dispatch_call_checked, dispatch_call_continue, the interpreter's linked call
+        (dispatch_call_interp), dispatch_tail_step and dispatch, and the interpreter's result
+        for it is not reported as a rejection (dispatch_run_interp). Those are the only
+        readers of the flag. #2201: the refusal itself (sr_guest_lane_refuse_import, which the
+        import seam and the late-import bridge call) is its only setter; domain_mode.c only
+        clears it; nothing else names it."""
+        flag = re.compile(r"\bsr_dispatch_unwind_requested\b")
+        recomp = _strip_comments_keep_lines((RT / "recomp.c").read_text(encoding="utf-8"))
+        lines = recomp.split("\n")
+        readers = set()
+        setters = []
+        for match in flag.finditer(recomp):
+            index = recomp.count("\n", 0, match.start())
+            if lines[index].startswith("volatile int sr_dispatch_unwind_requested;"):
+                continue  # the definition
+            function = _enclosing_function(lines, index)
+            if function == "sr_guest_lane_refuse_import":
+                setters.append(lines[index].strip())
+                continue
+            readers.add(function)
+            # A refusal is the only thing the flag lets through: the read is guarded by the
+            # fatal flow the refusal set, so any other failure still ends the run.
+            self.assertIn("sr_dispatch_unwind_requested && s->flow_kind == SR_FLOW_FATAL",
+                          lines[index], f"recomp.c:{index + 1} reads the flag without the "
+                          "fatal-flow guard")
+        self.assertEqual(readers, {"dispatch_call_checked", "dispatch_call_continue",
+                                   "dispatch_call_interp", "dispatch_tail_step", "dispatch",
+                                   "dispatch_run_interp"})
+        self.assertEqual(setters, ["sr_dispatch_unwind_requested = 1;"])
+
+        domain = _strip_comments_keep_lines((RT / "domain_mode.c").read_text(encoding="utf-8"))
+        uses = [domain[m.start():domain.find(";", m.start()) + 1] for m in flag.finditer(domain)]
+        self.assertTrue(uses)
+        self.assertEqual(sorted(set(uses)), ["sr_dispatch_unwind_requested = 0;"])
+        # Cleared twice: after the guest lane returns and in sr_cosim_reset.
+        self.assertGreaterEqual(uses.count("sr_dispatch_unwind_requested = 0;"), 2)
+
+        others = []
+        for _, relative, text in self._runtime_sources():
+            if relative in {"src/rt/domain_mode.c", "src/rt/recomp.h"}:
+                continue
+            if flag.search(_strip_comments_keep_lines(text)):
+                others.append(relative)
+        self.assertEqual(others, [], "only recomp.c's call boundaries read the COSIM unwind flag")
+
     def test_every_host_to_guest_entry_is_an_allowed_helper(self):
         call = re.compile(r"(?<![\w.>])(dispatch_from_host|sr_call_body|dispatch_call_try|"
-                          r"dispatch_call_checked|dispatch_call_continue|"
+                          r"dispatch_call_checked|dispatch_call_continue|dispatch_call_interp|"
                           r"dispatch_call|dispatch)\s*\(")
         found = set()
         stray = []

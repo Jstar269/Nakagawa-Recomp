@@ -36,7 +36,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-PLAN_VERSION = "nakagawa-lowering-plan-2"
+PLAN_VERSION = "nakagawa-lowering-plan-3"
 
 
 class Unsupported(Exception):
@@ -135,6 +135,9 @@ class FunctionPlan:
     entry_label: bool                  # the body starts at a label, not its first word
     steps: list = field(default_factory=list)
     exits: list[ContinuationExit] = field(default_factory=list)
+    #: --static-verify: the (register, expected value) assertions after the straight-line
+    #: word at each address, exactly codegen.sv_plan's points (empty without the option).
+    sv_checks: dict[int, tuple[tuple[int, int], ...]] = field(default_factory=dict)
 
     @property
     def labels(self) -> set[int]:
@@ -233,8 +236,8 @@ def decode_op(addr: int, w: int, *, stale_detect: bool = False) -> Op:
     if op == 0x38:
         return Op(addr, w, "sc", rt, (rs, rt), _sext16(w), width=4)
     if op == 0x2F:
-        if stale_detect:
-            raise Unsupported(f"cache under --stale-detect at 0x{addr:08x}")
+        if stale_detect:                                           # the detector's cache hook
+            return Op(addr, w, "cache_note", None, (rs,), _sext16(w))
         return Op(addr, w, "nop")
     if op == 0x10:
         raise Unsupported(f"COP0 at 0x{addr:08x}")
@@ -264,31 +267,28 @@ def decode_cond(w: int) -> Cond:
 # Function plans
 # ---------------------------------------------------------------------------
 
-#: emit_function's GUEST_ABORT site: the one hst_profile emission site no codegen table
-#: names. tools/test_codegen_llvm.py re-derives every `hst_profile and addr == ...` site
-#: from codegen.py's AST and checks that hst_emission_sites covers it.
-HST_GUEST_ABORT = 0x00000a1c
-
-
 def hst_emission_sites(cg) -> set[int]:
-    """Addresses where emit_function emits HST-profile code instead of the plain word."""
-    return (set(cg._SV_SPECIAL) | set(cg.GUEST_PATCHES) | {HST_GUEST_ABORT})
+    """Addresses where emit_function emits HST-profile code instead of the plain word.
+
+    Only the codegen tables remain: the last stand-alone HST emission site (the guest
+    abort exit) was retired under #363, so tools/test_codegen_llvm.py, which re-derives
+    every `hst_profile and addr == ...` site from codegen.py's AST, finds none."""
+    return set(cg._SV_SPECIAL) | set(cg.GUEST_PATCHES)
 
 
 def plan_function(cg, elf, start, ranges, known, *, resume_owners=None, resumable=False,
-                  profile=None, dispatch_boundaries=None) -> FunctionPlan:
+                  profile=None, dispatch_boundaries=None, options=None) -> FunctionPlan:
     """The plan of the function at ``start``, from the running codegen module ``cg``."""
+    options = cg._options_for_call(options)
     resume_owners = resume_owners or {}
     space = cg.ADDRESS_SPACE
     if space.runtime_module:
         raise Unsupported("runtime-placed module (relocatable addresses)")
-    if cg.OPTIONS.lle_cpu:
+    if options.lle_cpu:
         raise Unsupported("--lle-cpu exception lowering is not in the prototype scope")
-    if cg.OPTIONS.static_verify:
-        raise Unsupported("--static-verify assertions are emitted by the C backend only")
     insns, labels, continuations = cg.function_flow(
         elf, start, ranges, known, resume_owners=resume_owners,
-        dispatch_boundaries=dispatch_boundaries)
+        dispatch_boundaries=dispatch_boundaries, options=options)
     if not insns:
         raise Unsupported("empty body")
     if not space.patched.keys().isdisjoint(insns):
@@ -299,13 +299,20 @@ def plan_function(cg, elf, start, ranges, known, *, resume_owners=None, resumabl
         raise Unsupported("loads $sp, so its exits leave $sp to the guest (kept in C)")
     if cg.ENHANCEMENT_SITES and insns & set(cg.ENHANCEMENT_SITES):
         raise Unsupported("enhancement-package rewrite site")
+    if cg.ENHANCEMENT_ACE_SITES and insns & set(cg.ENHANCEMENT_ACE_SITES):
+        raise Unsupported("enhancement-package ace_parts site")
     if profile == "hst":
         hit = sorted(insns & hst_emission_sites(cg))
         if hit:
             raise Unsupported(f"title-profile special site 0x{hit[0]:08x}")
+    # The same points emit_function asserts, from the same labels (before the planned skip
+    # targets and the entry label join them); the runtime-module and variable-import cases
+    # that carry none in C were refused above.
+    sv_checks = {addr: tuple(checks) for addr, checks in cg.sv_points(
+        elf, insns, labels, hst_profile=profile == "hst", options=options).items()}
 
     def word(addr):
-        return space.instruction_word(addr, cg.read32(elf, addr))
+        return space.instruction_word(addr, cg.read32(elf, addr), options=options)
 
     def symbol(target):
         return space.symbol(target, resume_owners)
@@ -321,7 +328,7 @@ def plan_function(cg, elf, start, ranges, known, *, resume_owners=None, resumabl
             if (w >> 26) in (0x11, 0x12):
                 raise Unsupported(f"coprocessor branch at 0x{addr:08x}")
         else:
-            decode_op(addr, w, stale_detect=cg.OPTIONS.stale_detect)
+            decode_op(addr, w, stale_detect=options.stale_detect)
 
     # A delay slot that is itself a branch target runs inline at its transfer and again
     # under its own label; fall-through past the transfer skips the labelled copy.
@@ -341,7 +348,7 @@ def plan_function(cg, elf, start, ranges, known, *, resume_owners=None, resumabl
         labels.add(start)
 
     plan = FunctionPlan(PLAN_VERSION, start, symbol(start), resumable, start in resume_owners,
-                        entry_label)
+                        entry_label, sv_checks=sv_checks)
     consumed = set()
     for addr in sorted(insns):
         if addr in consumed:
@@ -352,7 +359,7 @@ def plan_function(cg, elf, start, ranges, known, *, resume_owners=None, resumabl
         if w is None:
             continue
         if not cg.is_control(w):
-            plan.steps.append(decode_op(addr, w, stale_detect=cg.OPTIONS.stale_detect))
+            plan.steps.append(decode_op(addr, w, stale_detect=options.stale_detect))
             if addr in continuations:
                 plan.steps.append(FallInto(continuations[addr]))
             continue
@@ -360,24 +367,24 @@ def plan_function(cg, elf, start, ranges, known, *, resume_owners=None, resumabl
         if ds not in labels:
             consumed.add(ds)
         plan.steps.append(_transfer(cg, elf, ranges, addr, w, ds, word(ds), known, resume_owners,
-                                    labels, continuations, dup_slot_skips, symbol))
+                                    labels, continuations, dup_slot_skips, symbol, options))
     for target in sorted(set(continuations.values())):
         boundary = bool(dispatch_boundaries) and target in dispatch_boundaries
         plan.exits.append(ContinuationExit(target, None if boundary else symbol(target)))
     return plan
 
 
-def _slot(cg, ds, dsw):
+def _slot(cg, ds, dsw, options):
     """codegen.delay_slot_lines without --lle-cpu: the slot is a plain word."""
     if dsw is None:
         raise Unsupported(f"unreadable delay slot at 0x{ds:08x}")
     if cg.is_control(dsw):
         raise Unsupported(f"control in delay slot at 0x{ds:08x}")
-    return decode_op(ds, dsw, stale_detect=cg.OPTIONS.stale_detect)
+    return decode_op(ds, dsw, stale_detect=options.stale_detect)
 
 
 def _transfer(cg, elf, ranges, addr, w, ds, dsw, known, resume_owners, labels, continuations,
-              dup_slot_skips, symbol) -> Transfer:
+              dup_slot_skips, symbol, options) -> Transfer:
     op, fn = w >> 26, w & 0x3F
     then = {"then_continuation": continuations.get(addr),
             "then_label": None if addr in continuations else dup_slot_skips.get(addr)}
@@ -389,28 +396,28 @@ def _transfer(cg, elf, ranges, addr, w, ds, dsw, known, resume_owners, labels, c
         cg.ADDRESS_SPACE.check_jump(addr, w)
         target = cg.jump_target(addr, w)
         return Transfer(addr, w, "call", target=target, symbol=callee(target), link_reg=31,
-                        slot=_slot(cg, ds, dsw), **then)
+                        slot=_slot(cg, ds, dsw, options), **then)
     if op == 0 and fn == 0x09:                                     # jalr rd, rs
         rd, rs = (w >> 11) & 31, (w >> 21) & 31
         if rd != 0:
             return Transfer(addr, w, "call-computed", target_reg=rs, link_reg=rd,
-                            slot=_slot(cg, ds, dsw), **then)
-        return Transfer(addr, w, "tail-computed", target_reg=rs, slot=_slot(cg, ds, dsw))
+                            slot=_slot(cg, ds, dsw, options), **then)
+        return Transfer(addr, w, "tail-computed", target_reg=rs, slot=_slot(cg, ds, dsw, options))
     ds_syscall = dsw is not None and (dsw >> 26) == 0 and (dsw & 0x3F) == 0x0C
     if op == 0 and fn == 0x08:                                     # jr rs
         rs = (w >> 21) & 31
         if rs == 31:
             if ds_syscall:
                 return Transfer(addr, w, "return", target_reg=31, slot_syscall=(dsw >> 6) & 0xFFFFF)
-            return Transfer(addr, w, "return", target_reg=31, slot=_slot(cg, ds, dsw))
+            return Transfer(addr, w, "return", target_reg=31, slot=_slot(cg, ds, dsw, options))
         if ds_syscall:
             # Not reachable for import stubs (handled apart); a raw syscall, then a host return.
             return Transfer(addr, w, "return", slot_syscall=(dsw >> 6) & 0xFFFFF)
-        return Transfer(addr, w, "tail-computed", target_reg=rs, slot=_slot(cg, ds, dsw))
+        return Transfer(addr, w, "tail-computed", target_reg=rs, slot=_slot(cg, ds, dsw, options))
     if op == 2:                                                    # j
         cg.ADDRESS_SPACE.check_jump(addr, w)
         target = cg.jump_target(addr, w)
-        slot = _slot(cg, ds, dsw)
+        slot = _slot(cg, ds, dsw, options)
         if target == addr:
             return Transfer(addr, w, "jump-self", target=target, backward=True, slot=slot)
         if (target in known or target in resume_owners) and not (
@@ -423,7 +430,7 @@ def _transfer(cg, elf, ranges, addr, w, ds, dsw, known, resume_owners, labels, c
     target = cg.branch_target(addr, w)
     cond = decode_cond(w)
     link = 31 if cg.is_link(w) else None
-    slot = _slot(cg, ds, dsw)
+    slot = _slot(cg, ds, dsw, options)
     if cg.is_linked_call(elf, addr, w, ranges):
         return Transfer(addr, w, "call", target=target, symbol=callee(target), link_reg=link,
                         cond=cond, slot=slot, **then)

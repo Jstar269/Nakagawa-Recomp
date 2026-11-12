@@ -1,4 +1,10 @@
 name: Trusted CI verdict
+# A dispatch that records an approval is titled with its pull request and head. The verifier
+# finds the run by that title and reads the record from its job names
+# (tools/ci_trust_verdict.py, dispatched_records). Other runs are titled for a person reading
+# the run list. No pull request title, body or branch name is used. One quoted line, as in
+# codeql.yml: unquoted, " #" would start a YAML comment.
+run-name: "${{ (github.event_name == 'workflow_dispatch' && inputs.approve_head_sha != '' && format('CI-change approval of #{0} at {1}', inputs.pull_request_number, inputs.approve_head_sha)) || (github.event_name == 'workflow_dispatch' && format('Trusted CI verdict (PR #{0})', inputs.pull_request_number)) || (github.event_name == 'pull_request_target' && format('Trusted CI verdict (PR #{0})', github.event.pull_request.number)) || format('Trusted CI verdict ({0})', github.event.workflow_run.head_sha) }}"
 
 # The merge-path CI gate (#373, #364). It posts one commit status, "Trusted CI
 # verdict", on a pull request's exact head, and the main ruleset is meant to
@@ -9,12 +15,14 @@ name: Trusted CI verdict
 # a required job's name and make it `exit 0`, or add a workflow with a job of the
 # same name. GitHub matches a required check by name plus the GitHub Actions
 # integration, which both jobs share. This workflow runs only the default
-# branch's copy (pull_request_target and workflow_run always do) and judges the
-# candidate's results with tools/ci_trust_verdict.py, which:
+# branch's copy (pull_request_target and workflow_run always do; a dispatch does
+# from the default branch, and the verifier ignores a record dispatched from any
+# other ref) and judges the candidate's results with tools/ci_trust_verdict.py,
+# which:
 #   * refuses a head that changes a workflow, an action or a CI tool, unless a
-#     maintainer applied the ci-change-approved label after that head arrived,
-#     or the label was carried because every protected file is byte-identical
-#     to the approved head's (the approval jobs below);
+#     maintainer applied the ci-change-approved label and an approval record
+#     for the head's protected files was written after it (the approval jobs
+#     below);
 #   * requires each intended job to exist once, to succeed, and to come from
 #     the intended workflow path and event at exactly this head;
 #   * refuses stale heads, results for other SHAs or pull requests, and any
@@ -41,10 +49,19 @@ name: Trusted CI verdict
 # reserves that name in every other workflow, so it is never listed here),
 # finishes after CI, the verdict stays pending, never success: dispatch this
 # workflow by hand (docs/CI.md, "Trusted CI verdict"). The draft/ready
-# transition is not a re-trigger: the verifier never reads the draft state.
+# transition is not a re-trigger here: CI runs on both (ci.yml), and the
+# completion of that run re-judges the head. The verifier reads the pull
+# request's draft state then and never judges a Draft green (DRAFT_LIGHT_CI).
 # Every label event re-judges, whatever the label: a newer run in this head's
 # concurrency group replaces a pending one, so a run that judged nothing could
 # leave an older verdict standing.
+#
+# GitHub blocks pull_request_target by default in public repositories from
+# 2026-12-02. Judging a head and approving a change do not depend on that
+# event: CI's completion and a dispatch judge a head, and a dispatch records an
+# approval. Withdrawing an approval still does: only its `unlabeled` re-judges
+# the head, so without the event the verdict is dispatched after the label is
+# removed (docs/CI.md, "Withdrawing an approval").
 on:
   pull_request_target:
     types: [opened, synchronize, reopened, labeled, unlabeled]
@@ -57,11 +74,20 @@ on:
         description: Pull request to judge again, by number.
         required: true
         type: string
+      approve_head_sha:
+        description: >-
+          Only to approve a CI change: the full SHA of the head that was reviewed. The
+          ci-change-approved label must be on the pull request. Records the approval, then judges.
+        required: false
+        default: ""
+        type: string
 
 concurrency:
   # One verdict at a time per head, never cancelled mid-post. A newer pending
   # run replaces an older pending one, and every run reads GitHub's state afresh.
-  group: trusted-ci-verdict-${{ github.event.pull_request.head.sha || github.event.workflow_run.head_sha || inputs.pull_request_number }}
+  # A dispatch that records an approval has its own group, so a later dispatch
+  # for the same pull request cannot replace it before the record is written.
+  group: trusted-ci-verdict-${{ github.event.pull_request.head.sha || github.event.workflow_run.head_sha || (inputs.approve_head_sha != '' && format('approval-{0}-{1}', inputs.pull_request_number, inputs.approve_head_sha)) || inputs.pull_request_number }}
   cancel-in-progress: false
 
 permissions: {}
@@ -70,7 +96,7 @@ jobs:
   approval:
     # The label approves one reviewed head, and the same CI-relevant bytes at a
     # later head. Both halves run the default branch's tools/ci_trust_verdict.py
-    # on the candidate's objects as data (docs/CI.md, "Carried approval"):
+    # on the candidate's objects as data (docs/CI.md, "Approval records"):
     #   * labeled: when a user with write access applied the label and the head
     #     is still the one the event named, hash the head's protected paths;
     #   * synchronize: keep the label only if that hash, recomputed for the new
@@ -111,8 +137,8 @@ jobs:
         id: record
         if: ${{ github.event.action == 'labeled' }}
         # Not recorded is not an error: a label from a user without write
-        # access, or on a head that already moved, records nothing and the
-        # verdict then accepts only a label applied after the head arrived.
+        # access, or on a head that already moved, records nothing, and the
+        # verdict then approves nothing until a record is written.
         continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -171,7 +197,7 @@ jobs:
 
   approval_record:
     # The record itself. The pull request number and the digest are in this
-    # job's NAME, and the verifier (tools/ci_trust_verdict.py, record_digests)
+    # job's NAME, and the verifier (tools/ci_trust_verdict.py, head_records)
     # reads them back only from a successful job of a pull_request_target run
     # of this workflow at the exact head, for that pull request. GitHub takes
     # a pull_request_target run's workflow from the pull request's BASE branch,
@@ -189,9 +215,89 @@ jobs:
       - name: State what is recorded
         run: echo "Protected CI content of this head is approved; the digest is in this job's name."
 
+  approval_dispatch:
+    # The approval that needs no pull request event (docs/CI.md, "Approving a CI
+    # change"). A maintainer who reviewed a head applies the label and dispatches
+    # this workflow from the default branch with that head's SHA. The default
+    # branch's tools/ci_trust_verdict.py hashes the head's protected paths, read
+    # as objects only, provided the label's latest event is `labeled` by a user
+    # with write access, the pull request still has exactly that head, and the
+    # label was applied after that head arrived (LABEL_PREDATES_HEAD otherwise:
+    # nothing removes a label on a push once pull_request_target is refused). The
+    # hash is recorded by the next job's name. The inputs reach a shell only
+    # through env:, and the tool checks their form before it uses them.
+    name: Record a dispatched CI-change approval
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.approve_head_sha != '' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+    outputs:
+      number: ${{ steps.record.outputs.number }}
+      head_sha: ${{ steps.record.outputs.head_sha }}
+      digest: ${{ steps.record.outputs.digest }}
+    steps:
+      - name: Check out the trusted default branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.15.2"
+
+      - name: Hash the head the dispatch names
+        id: record
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          VERDICT_READ_TOKEN: ${{ secrets.VERDICT_READ_TOKEN }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          PR_NUMBER: ${{ inputs.pull_request_number }}
+          HEAD_SHA: ${{ inputs.approve_head_sha }}
+        run: |
+          set -euo pipefail
+          # The verifier reads a record only from a default-branch run. Any other ref
+          # fails here, so nobody takes an ignored record for an approval.
+          if [ "${GITHUB_REF}" != "refs/heads/${DEFAULT_BRANCH}" ]; then
+            echo "dispatch an approval from ${DEFAULT_BRANCH}, not ${GITHUB_REF}" >&2
+            exit 1
+          fi
+          case "${PR_NUMBER}" in
+            ''|0*|*[!0-9]*) echo "pull request number is not a plain positive number" >&2; exit 1 ;;
+          esac
+          python tools/ci_trust_verdict.py --repository "${GITHUB_REPOSITORY}" --default-branch "${DEFAULT_BRANCH}" \
+            --approval dispatch --pull-request "${PR_NUMBER}" --head-sha "${HEAD_SHA}"
+
+  approval_record_dispatched:
+    # The dispatched record. The pull request number, the reviewed head and the
+    # digest are in this job's NAME, all three as outputs of the tool above (the
+    # number as an integer, the SHA after its form was checked), never the
+    # dispatch inputs as typed. The verifier reads the name back only from a
+    # successful job of a workflow_dispatch run of this workflow that ran the
+    # default branch's current copy of this file and whose actor has write
+    # access. A dispatch from another ref runs that ref's copy of this file; the
+    # verifier ignores it, so a pull request cannot write a record.
+    name: CI approval record v2 pr${{ needs.approval_dispatch.outputs.number }} ${{ needs.approval_dispatch.outputs.head_sha }} ${{ needs.approval_dispatch.outputs.digest }}
+    needs: [approval_dispatch]
+    if: ${{ needs.approval_dispatch.outputs.digest != '' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: State what is recorded
+        run: echo "Protected CI content of the named head is approved; the digest is in this job's name."
+
   verdict:
     name: Compute trusted CI verdict
-    needs: [approval, approval_record]
+    # After every approval job, so a record this run wrote is read. A dispatched
+    # approval that was refused still gets a verdict, which says why the head is
+    # not approved.
+    needs: [approval, approval_record, approval_dispatch, approval_record_dispatched]
     # Only heads proposed for the default branch, which is the only branch the
     # ruleset protects. workflow_run runs of push or schedule events have no
     # pull request to judge; the verifier also finds none and posts nothing.

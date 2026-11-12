@@ -25,6 +25,7 @@ from tools.lint_docs import (
     lint_doc_truth,
     lint_docs_index_completeness,
     lint_hle_census_counts,
+    lint_pages_url_case,
     lint_readme,
     lint_titles_readme,
     lint_toolchain_baseline_marker,
@@ -157,6 +158,59 @@ class TestDocFreshnessLinter(unittest.TestCase):
             (docs_dir / "BETA.md").write_text("# Beta\n", encoding="utf-8")
             errors = lint_docs_index_completeness(root)
             self.assertTrue(any("docs/BETA.md is not indexed" in e for e in errors))
+
+
+class TestPagesUrlCase(unittest.TestCase):
+    """GitHub Pages paths are case-sensitive: the site is /Nakagawa-Recomp/, and the lowercase form is a 404."""
+
+    # Built from pieces so this file does not match the lint's own search.
+    HOST = "github." + "io/"
+
+    def _lint(self, stdout: str) -> list[str]:
+        result = subprocess.CompletedProcess(args=["git", "grep"], returncode=0, stdout=stdout, stderr="")
+        with patch("tools.lint_docs.subprocess.run", return_value=result):
+            return lint_pages_url_case(ROOT)
+
+    def test_repository_pages_urls_use_the_published_case(self) -> None:
+        self.assertEqual(lint_pages_url_case(ROOT), [])
+
+    def test_wrong_case_pages_path_is_rejected(self) -> None:
+        lines = [
+            f"README.md:13:{self.HOST}nakagawa-recomp",
+            f"docs/index.html:41:{self.HOST}NAKAGAWA-RECOMP",
+        ]
+        errors = self._lint("\n".join(lines) + "\n")
+        self.assertEqual(len(errors), 2)
+        self.assertTrue(errors[0].startswith("README.md:13:"))
+        self.assertTrue(errors[1].startswith("docs/index.html:41:"))
+
+    def test_a_git_grep_error_is_reported_not_passed(self) -> None:
+        result = subprocess.CompletedProcess(args=["git", "grep"], returncode=2, stdout="", stderr="fatal: boom")
+        with patch("tools.lint_docs.subprocess.run", return_value=result):
+            errors = lint_pages_url_case(ROOT)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("git grep failed (exit 2): fatal: boom", errors[0])
+
+    def test_outside_a_git_repository_the_lint_skips(self) -> None:
+        result = subprocess.CompletedProcess(args=["git", "grep"], returncode=128, stdout="",
+                                             stderr="fatal: not a git repository (or any of the parent directories): .git")
+        with patch("tools.lint_docs.subprocess.run", return_value=result):
+            self.assertEqual(lint_pages_url_case(ROOT), [])
+
+    def test_published_case_is_allowed(self) -> None:
+        self.assertEqual(self._lint(f"README.md:13:{self.HOST}Nakagawa-Recomp\n"), [])
+
+    def test_real_git_repository_with_a_wrong_case_url_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            run_git(["init", "-q"], cwd=root, check=True)
+            site = "https://jstar269." + self.HOST
+            (root / "good.md").write_text(site + "Nakagawa-Recomp/\n", encoding="utf-8")
+            (root / "bad.md").write_text(site + "nakagawa-recomp/media/x.mp4\n", encoding="utf-8")
+            run_git(["add", "."], cwd=root, check=True)
+            errors = lint_pages_url_case(root)
+            self.assertEqual(len(errors), 1)
+            self.assertIn("bad.md:1:", errors[0])
 
 
 class TestDocTruthInvariants(unittest.TestCase):
@@ -906,7 +960,7 @@ class RetiredIssueDenylistExpiry(unittest.TestCase):
         mutated = source.replace(
             self.ANCHOR, f"RETIRED_PRIVATE_ISSUE_NUMBERS: tuple[int, ...] = ({numbers},)", 1)
         self.assertNotEqual(mutated, source, "mutation anchor not found")
-        namespace = {"__file__": str(ROOT / "tools" / "lint_docs.py"), "__name__": "x"}
+        namespace = {"__file__": str(ROOT / "tools" / "lint_docs.py"), "__name__": "tools.x", "__package__": "tools"}
         exec(compile(mutated, "lint_docs", "exec"), namespace)  # noqa: S102
         return namespace
 

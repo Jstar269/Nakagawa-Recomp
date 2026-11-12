@@ -395,6 +395,62 @@ static void test_file_backed_archive_is_lazy(void) {
     printf("[XB_TEST] file-backed metadata-only mount and lazy member reads PASSED\n");
 }
 
+/* A lazy mount reads the archive's size through its open handle. It still builds the
+ * index the whole-file reader builds and still refuses what it refused by path: a
+ * missing or empty file, an archive over the byte limit, and truncated metadata. */
+static void test_lazy_mount_size_checks(void) {
+    static const uint8_t first[] = "first member";
+    static const uint8_t second[] = "second member";
+    const FixtureEntry entries[] = {
+        { "data/first.bin", first, sizeof(first) - 1u, NK_XB_COMPRESSION_NONE },
+        { "data/second.bin", second, sizeof(second) - 1u, NK_XB_COMPRESSION_LZS }
+    };
+    ByteBuffer bytes = make_archive(entries, sizeof(entries) / sizeof(entries[0]), false);
+    const char *path = SR_SELFTEST_BUILD_ROOT "/test_xb_lazy_size.xb";
+    write_file_bytes(path, bytes.data, bytes.size);
+    char error[256];
+    NkXbArchive strict;
+    NkXbArchive lazy;
+    assert(nk_xb_open_file(path, false, NULL, &strict, error, sizeof(error)) == NK_OK);
+    assert(nk_xb_open_file_lazy(path, false, NULL, &lazy, error, sizeof(error)) == NK_OK);
+    assert(lazy.source_size == bytes.size && lazy.file_handle == NULL);
+    assert(lazy.entry_count == strict.entry_count && lazy.data_start == strict.data_start);
+    for (size_t i = 0; i < lazy.entry_count; i++) {
+        assert(strcmp(lazy.entries[i].path, strict.entries[i].path) == 0);
+        assert(lazy.entries[i].offset == strict.entries[i].offset);
+        assert(lazy.entries[i].expanded_size == strict.entries[i].expanded_size);
+        assert(lazy.entries[i].span_size == strict.entries[i].span_size);
+        assert(lazy.entries[i].compression == strict.entries[i].compression);
+    }
+    nk_xb_close(&lazy);
+    nk_xb_close(&strict);
+
+    NkXbLimits limits = nk_xb_default_limits();
+    limits.max_archive_bytes = bytes.size - 1u;
+    assert(nk_xb_open_file_lazy(path, false, &limits, &lazy, error, sizeof(error)) != NK_OK);
+    assert(strstr(error, "byte limit") != NULL);
+    limits.max_archive_bytes = bytes.size;
+    assert(nk_xb_open_file_lazy(path, false, &limits, &lazy, error, sizeof(error)) == NK_OK);
+    nk_xb_close(&lazy);
+
+    /* Cut inside the string-table header: the metadata runs past the end of the file. */
+    write_file_bytes(path, bytes.data, 8u + 2u * 8u + 4u);
+    assert(nk_xb_open_file_lazy(path, false, NULL, &lazy, error, sizeof(error)) != NK_OK);
+    /* An empty and a missing archive are refused with the strict reader's text. */
+    write_file_bytes(path, bytes.data, 0u);
+    assert(nk_xb_open_file_lazy(path, false, NULL, &lazy, error, sizeof(error)) != NK_OK);
+    assert(strcmp(error, "cannot stat XB archive") == 0);
+    assert(nk_xb_open_file(path, false, NULL, &strict, error, sizeof(error)) != NK_OK);
+    assert(strcmp(error, "cannot stat XB archive") == 0);
+    assert(remove(path) == 0);
+    assert(nk_xb_open_file_lazy(path, false, NULL, &lazy, error, sizeof(error)) != NK_OK);
+    assert(strcmp(error, "cannot stat XB archive") == 0);
+    assert(nk_xb_open_file(path, false, NULL, &strict, error, sizeof(error)) != NK_OK);
+    assert(strcmp(error, "cannot stat XB archive") == 0);
+    free(bytes.data);
+    printf("[XB_TEST] lazy mount size checks through the open handle PASSED\n");
+}
+
 static void test_file_backed_duplicate_validation(void) {
     static const uint8_t first[] = "same";
     static const uint8_t second[] = "same";
@@ -1974,6 +2030,7 @@ int main(void) {
     printf("[XB_TEST] Starting native clean-room XB parser tests...\n");
     test_roundtrip_all_compression_modes();
     test_file_backed_archive_is_lazy();
+    test_lazy_mount_size_checks();
     test_file_backed_duplicate_validation();
     test_lazy_payload_failure_is_deferred();
     test_stored_entry_shorter_than_expanded_size();

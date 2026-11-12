@@ -570,7 +570,7 @@ allocation, glyph-record metric, shadow reference, composite payload,
 composite component, guest-record, glyph
 resolution, row order, pixel format, and destination geometry are the
 required classes; §7 tracks the missing per-open diagnostic accessor under
-issue #349 and the composite classes under #521.
+issue #349 and the composite classes under #521 (both closed).
 
 ### 3.8 Font information
 
@@ -746,7 +746,7 @@ a component drawn twice. The split between an overwriting first component and
 maximising later ones keeps a composite from inheriting the destination's prior
 contents through its first component. Physical-PSP evidence for the real
 placement, clipping, and combination of components remains required and is named
-as open question O-19 under #521; until it exists this rule is project
+as open question O-19 (first raised under #521, now closed); until it exists this rule is project
 behaviour, not hardware truth, and the source-owned vectors in §8 pin it.
 
 Because the three components share one requested position, a composite's
@@ -846,8 +846,8 @@ runtime reader has since shipped in `src/rt/pgf_public.c` (PR
 [#349](https://github.com/Jstar269/nakagawa-recomp/issues/349)) and is available
 for supported inputs. Composite row-order-3 rendering and the supported
 revision/shadow-width variants were added under
-[#521](https://github.com/Jstar269/nakagawa-recomp/issues/521), which now tracks
-the rows whose evidence is still missing. See
+[#521](https://github.com/Jstar269/nakagawa-recomp/issues/521) (closed); the rows whose evidence is still missing
+are the open questions in §7. See
 [`../YOUR_OWN_GAMES.md`](../YOUR_OWN_GAMES.md) for the current product statement.
 
 | Named boundary | Required product meaning | Tracking |
@@ -964,9 +964,8 @@ maintainer alone supplies any provenance/legal attestation.
 
 The deterministic documentation path is covered by the documentation
 classification and public-source profile once the orchestrator records the new
-path. The future implementation-bearing reader path still requires the normal
-path-specific classifier/provenance process before merge; this specification
-does not pre-empt that human decision.
+path. The implementation-bearing reader path (`src/rt/pgf_public.c`) went through the
+normal path-specific classifier/provenance process before merge.
 
 Open questions are not permission to guess during implementation. A question may
 also be *answered from the public format description*, which closes its
@@ -1059,7 +1058,7 @@ evidence and what remains open:
     orders. Until then §3.10 is an explicit project decision, not hardware
     truth.
 14. **O-14 — style/language.** Can the U+3042 probe misclassify an authentic
-    font, and which region/country/weight values should a future hardware probe
+    font, and which region/country/weight values should a hardware probe
     establish for Korean or Chinese fonts?
 15. **O-15 — pointer cardinality.** Must `charPointerLength` always equal
     `lastGlyph − firstGlyph + 1`, or do firmware fonts use a larger/sparser
@@ -1086,14 +1085,14 @@ evidence and what remains open:
     a row-order-3 record, including whether components share the composite's
     requested position and how a component's transparent area treats an earlier
     component's coverage. Until then §3.10's table is project behaviour pinned by
-    synthetic vectors, tracked with #521.
+    synthetic vectors (first raised under #521, now closed).
 20. **O-20 — revision-3 subcharmap reference semantics.** A source-owned PSP
     probe must establish what the second revision-3 table's pairs mean and
     what the bits-per-entry fields select. The first table's role is measured
     (§3.2). The second table is skipped, which the measured Korean font does
-    not need; tracked with #521.
+    not need (first raised under #521, now closed).
 
-Required future hardware evidence is homebrew-only under campaign §8: a
+Any hardware evidence is homebrew-only under campaign §8: a
 resident-runner probe may open user-supplied fonts and record ABI records,
 fractional/negative placement, format writes, and dirty extents, but fonts,
 traces, derived bytes, and paths remain outside the public tree. No physical

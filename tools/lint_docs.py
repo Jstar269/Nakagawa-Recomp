@@ -40,7 +40,7 @@ from urllib.parse import unquote
 try:
     from .nk_core.git_isolation import isolated_git_env
 except ImportError:
-    from nk_core.git_isolation import isolated_git_env
+    from nk_core.git_isolation import isolated_git_env  # type: ignore[no-redef]
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
@@ -804,6 +804,42 @@ def lint_docs_index_completeness(repo_root: pathlib.Path = ROOT) -> list[str]:
     return errors
 
 
+PAGES_SITE_PATH = "Nakagawa-Recomp"
+# Written as a character class so this file does not match its own search.
+PAGES_SITE_SEARCH = r"github[.]io/nakagawa-recomp"
+
+
+def lint_pages_url_case(repo_root: pathlib.Path = ROOT) -> list[str]:
+    """GitHub Pages paths are case-sensitive: `/nakagawa-recomp/` is a 404, `/Nakagawa-Recomp/` is the site."""
+    try:
+        result = subprocess.run(
+            ["git", "grep", "-n", "-o", "-I", "-i", "-e", PAGES_SITE_SEARCH],
+            cwd=repo_root,
+            env=isolated_git_env(root=repo_root),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+    except OSError:
+        return []
+    if result.returncode not in (0, 1):  # 1: no match
+        stderr = (result.stderr or "").strip()
+        if "not a git repository" in stderr.lower():
+            return []  # no tracked files to check here, as the other git-based lints skip
+        return [f"lint_pages_url_case: git grep failed (exit {result.returncode}): {stderr}"]
+    errors: list[str] = []
+    for line in result.stdout.splitlines():
+        location, _, match = line.rpartition(":")
+        if not match.endswith("/" + PAGES_SITE_PATH):
+            errors.append(
+                f"{location}: GitHub Pages URL '{match}' has the wrong case; "
+                f"use 'github.io/{PAGES_SITE_PATH}' (Pages paths are case-sensitive and the lowercase form is a 404)"
+            )
+    return errors
+
+
 def run_all_doc_lints(repo_root: pathlib.Path = ROOT) -> list[str]:
     errors = lint_readme(repo_root / "README.md")
     md_files = get_tracked_markdown_files(repo_root)
@@ -817,6 +853,7 @@ def run_all_doc_lints(repo_root: pathlib.Path = ROOT) -> list[str]:
     errors.extend(lint_toolchain_baseline_marker(repo_root))
     errors.extend(lint_capability_disposition_table(repo_root))
     errors.extend(lint_docs_index_completeness(repo_root))
+    errors.extend(lint_pages_url_case(repo_root))
     return errors
 
 

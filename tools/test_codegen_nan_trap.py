@@ -48,6 +48,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+from typing import Any
 import unittest
 from pathlib import Path
 
@@ -76,15 +77,12 @@ def vfpu_lane(op: int, sub: int, vt: int, vs: int, vd: int, size: int = 1) -> in
 
 
 class nan_trap_codegen_state:
-    """Turn --nan-trap on for the duration of a block and restore it after."""
+    """Create an isolated --nan-trap option object for a block."""
 
     def __enter__(self):
-        self._previous = codegen.OPTIONS.nan_trap
-        codegen.OPTIONS.nan_trap = True
-        return self
+        return codegen.CodegenOptions(nan_trap=True)
 
     def __exit__(self, *exc):
-        codegen.OPTIONS.nan_trap = self._previous
         return False
 
 
@@ -99,7 +97,7 @@ MATRIX_WRITES = re.compile(r"s->v\[\d+\]=(?:_v\d+|_m\d+_\d+);")
 
 def macro_arguments(text: str, name: str) -> list[str]:
     """The top-level arguments of every `name(...)` call in `text`."""
-    calls = []
+    calls: list[Any] = []
     start = 0
     while True:
         i = text.find(name + "(", start)
@@ -218,28 +216,33 @@ class TestEmissionShape(unittest.TestCase):
 
     # (label, producer, guest PC, mnemonic, expected fragments)
     CASES = [
-        ("add.s", lambda: codegen.effect(0x00001234, cop1(0x10, 5, 6, 7, 0x00))[0],
+        ("add.s", lambda options=None: codegen.effect(
+            0x00001234, cop1(0x10, 5, 6, 7, 0x00), options=options)[0],
          0x00001234, "add.s", ['SR_NAN_TRAP_F(0x00001234u,"add.s",7u,s->f[7],_a,_b)']),
-        ("sub.s", lambda: codegen.effect(0x00001234, cop1(0x10, 5, 6, 7, 0x01))[0],
+        ("sub.s", lambda options=None: codegen.effect(
+            0x00001234, cop1(0x10, 5, 6, 7, 0x01), options=options)[0],
          0x00001234, "sub.s", ['SR_NAN_TRAP_F(0x00001234u,"sub.s",7u,s->f[7],_a,_b)']),
-        ("mul.s", lambda: codegen.effect(0x00001234, cop1(0x10, 5, 6, 7, 0x02))[0],
+        ("mul.s", lambda options=None: codegen.effect(
+            0x00001234, cop1(0x10, 5, 6, 7, 0x02), options=options)[0],
          0x00001234, "mul.s", ['SR_NAN_TRAP_F(0x00001234u,"mul.s",7u,s->f[7],_a,_b)']),
-        ("div.s", lambda: codegen.effect(0x00001234, cop1(0x10, 5, 6, 7, 0x03))[0],
+        ("div.s", lambda options=None: codegen.effect(
+            0x00001234, cop1(0x10, 5, 6, 7, 0x03), options=options)[0],
          0x00001234, "div.s", ['SR_NAN_TRAP_F(0x00001234u,"div.s",7u,s->f[7],_a,_b)']),
-        ("sqrt.s", lambda: codegen.effect(0x00005678, cop1(0x10, 0, 3, 3, 0x04))[0],
+        ("sqrt.s", lambda options=None: codegen.effect(
+            0x00005678, cop1(0x10, 0, 3, 3, 0x04), options=options)[0],
          0x00005678, "sqrt.s", ['SR_NAN_TRAP_F(0x00005678u,"sqrt.s",3u,s->f[3],_a)']),
-        ("vdiv.s", lambda: codegen.effect(0x0000ABCD,
-                                          vfpu_lane(0x18, 7, 1, 2, 3, 1))[0],
+        ("vdiv.s", lambda options=None: codegen.effect(0x0000ABCD,
+                                          vfpu_lane(0x18, 7, 1, 2, 3, 1), options=options)[0],
          0x0000ABCD, "vdiv.s", ['SR_NAN_TRAP_V2(0x0000abcdu,"vdiv.s",3u,_d,1,_s,1,_t,1)']),
-        ("vadd.s", lambda: codegen.effect(0x0000ABCD,
-                                          vfpu_lane(0x18, 0, 1, 2, 3, 2))[0],
+        ("vadd.s", lambda options=None: codegen.effect(0x0000ABCD,
+                                          vfpu_lane(0x18, 0, 1, 2, 3, 2), options=options)[0],
          0x0000ABCD, "vadd.s", ['SR_NAN_TRAP_V2(0x0000abcdu,"vadd.s",3u,_d,2,_s,2,_t,2)']),
-        ("vrcp.s", lambda: codegen.effect(0x0000BEEF,
+        ("vrcp.s", lambda options=None: codegen.effect(0x0000BEEF,
                                           ((0x34 << 26) | (0 << 21) | (16 << 16)
-                                           | (2 << 8) | 3))[0],
+                                           | (2 << 8) | 3), options=options)[0],
          0x0000BEEF, "vrcp.s", ['SR_NAN_TRAP_V(0x0000beefu,"vrcp.s",3u,_d,1,_s,1)']),
-        ("vscl.s", lambda: codegen.effect(0x0000BEEF,
-                                          vfpu_lane(0x19, 2, 1, 2, 3, 2))[0],
+        ("vscl.s", lambda options=None: codegen.effect(0x0000BEEF,
+                                          vfpu_lane(0x19, 2, 1, 2, 3, 2), options=options)[0],
          0x0000BEEF, "vscl.s", ['SR_NAN_TRAP_V2(0x0000beefu,"vscl.s",3u,_d,2,_s,2,(&_sc),1)']),
     ]
 
@@ -256,9 +259,9 @@ class TestEmissionShape(unittest.TestCase):
         failed every one-source VFPU form in a real title build.
         """
         arity = {"SR_NAN_TRAP_V": 7, "SR_NAN_TRAP_V2": 9}
-        with nan_trap_codegen_state():
+        with nan_trap_codegen_state() as options:
             for label, produce, _pc, _op, _want in self.CASES:
-                text = produce()
+                text = produce(options)
                 for name, want in arity.items():
                     start = 0
                     while True:
@@ -280,10 +283,10 @@ class TestEmissionShape(unittest.TestCase):
                             self.assertEqual(args, want, text[i:j])
 
     def test_option_on_names_pc_op_and_destination(self):
-        with nan_trap_codegen_state():
+        with nan_trap_codegen_state() as options:
             for label, produce, _pc, _op, want in self.CASES:
                 with self.subTest(op=label):
-                    text = produce()
+                    text = produce(options)
                     for fragment in want:
                         self.assertIn(fragment, text)
 
@@ -297,21 +300,20 @@ class TestEmissionShape(unittest.TestCase):
                 continue
             with self.subTest(op=label):
                 off_text = produce()
-                with nan_trap_codegen_state():
-                    on_text = produce()
+                with nan_trap_codegen_state() as options:
+                    on_text = produce(options)
                 self.assertEqual(check.sub("", on_text), off_text)
 
     def test_vmmul_gathers_scattered_operands(self):
         # vmmul reads raw v[] elements, so the check materialises them first.
         word = ((0x3C << 26) | (0 << 23) | (0 << 21) | (4 << 16) | (2 << 8) | 4
                 | (1 << 7) | (1 << 15))
-        with nan_trap_codegen_state():
-            text = codegen.vfpu_effect(0x00001111, word)[0]
+        with nan_trap_codegen_state() as options:
+            text = codegen.vfpu_effect(0x00001111, word, options=options)[0]
         self.assertIn('SR_NAN_TRAP_V(0x00001111u,"vmmul",4u,_ntout,16,_ntin,32)', text)
         self.assertIn("float _ntin[32], _ntout[16];", text)
-        codegen.OPTIONS.nan_trap = False
-        self.assertNotIn("SR_NAN_TRAP", codegen.vfpu_effect(0x00001111, word)[0])
-        codegen.OPTIONS.nan_trap = False
+        self.assertNotIn("SR_NAN_TRAP", codegen.vfpu_effect(
+            0x00001111, word, options=codegen.CodegenOptions())[0])
 
     def _matrix_word(self, sub, vt, vs, vd, size):
         size_bits = {1: 0, 2: 1 << 7, 3: 1 << 15, 4: (1 << 7) | (1 << 15)}[size]
@@ -330,8 +332,8 @@ class TestEmissionShape(unittest.TestCase):
         for sub, size in ((1, 2), (2, 3), (3, 4)):
             with self.subTest(vtfm=f"vtfm{sub + 1}"):
                 word = self._matrix_word(sub, 4, 0, 8, size)
-                with nan_trap_codegen_state():
-                    text = codegen.vfpu_effect(0x00001111, word)[0]
+                with nan_trap_codegen_state() as options:
+                    text = codegen.vfpu_effect(0x00001111, word, options=options)[0]
                 side = sub + 1
                 tn = min(codegen.vec_size(word), side)
                 self.assertIn(f"float _ntin[{side * side}], _ntout[{side}], _ntin2[{tn}];", text)
@@ -344,12 +346,12 @@ class TestEmissionShape(unittest.TestCase):
         # is in the operand list, and no element is in the list without being
         # read. A partial gather turns a propagation into a false origin.
         checked = 0
-        with nan_trap_codegen_state():
+        with nan_trap_codegen_state() as options:
             for sub in (0, 1, 2, 3):
                 for size in (1, 2, 3, 4):
                     for vt, vs, vd in ((4, 0, 8), (0, 2, 1), (36, 4, 8), (5, 5, 9)):
                         word = self._matrix_word(sub, vt, vs, vd, size)
-                        text = codegen.vfpu_effect(0x00001111, word)[0]
+                        text = codegen.vfpu_effect(0x00001111, word, options=options)[0]
                         if "SR_NAN_TRAP" not in text:
                             continue
                         checked += 1
@@ -373,10 +375,11 @@ class TestEmissionShape(unittest.TestCase):
             ((0x34 << 26) | (1 << 21) | (28 << 16) | (0 << 8) | 3),  # vi2uc
             ((0x34 << 26) | (16 << 21) | (0 << 16) | (0 << 8) | 3),  # vf2in
         ]
-        with nan_trap_codegen_state():
+        with nan_trap_codegen_state() as options:
             for word in constants:
                 with self.subTest(word=f"0x{word:08x}"):
-                    self.assertNotIn("SR_NAN_TRAP", codegen.vfpu_effect(0x00002222, word)[0])
+                    self.assertNotIn("SR_NAN_TRAP", codegen.vfpu_effect(
+                        0x00002222, word, options=options)[0])
 
 
 class TestGeneratedFixtureIsUnchangedWhenOff(unittest.TestCase):
@@ -469,12 +472,9 @@ class TestMatrixFormsCostNothingWhenOff(unittest.TestCase):
              ("vtfm4", matrix_word(3, 4, 0, 8, 4))]
 
     def statements(self, trapped: bool):
-        previous = codegen.OPTIONS.nan_trap
-        codegen.OPTIONS.nan_trap = trapped
-        try:
-            return [codegen.effect(0x00001111, word)[0] for _name, word in self.FORMS]
-        finally:
-            codegen.OPTIONS.nan_trap = previous
+        options = codegen.CodegenOptions(nan_trap=trapped)
+        return [codegen.effect(0x00001111, word, options=options)[0]
+                for _name, word in self.FORMS]
 
     def test_every_matrix_form_gathers_operands_when_the_option_is_on(self):
         for (name, _word), text in zip(self.FORMS, self.statements(True), strict=True):
@@ -521,7 +521,7 @@ class TestEveryTrappedVfpuFormCompiles(unittest.TestCase):
     def sweep(self) -> dict[str, str]:
         """Every distinct trapped VFPU statement the generator emits, by word."""
         snippets = {}
-        with nan_trap_codegen_state():
+        with nan_trap_codegen_state() as options:
             size_bits = {1: 0, 2: 1 << 7, 3: 1 << 15, 4: (1 << 7) | (1 << 15)}
             for op in range(0x18, 0x40):
                 for field in range(1 << 10):  # bits 16..25: function select and vt
@@ -529,7 +529,7 @@ class TestEveryTrappedVfpuFormCompiles(unittest.TestCase):
                         word = ((op << 26) | (field << 16) | (2 << 8) | 3
                                 | size_bits[size])
                         try:
-                            text = codegen.effect(0x00001000, word)[0]
+                            text = codegen.effect(0x00001000, word, options=options)[0]
                         except Exception:
                             continue
                         if text and "SR_NAN_TRAP" in text and text not in snippets:
@@ -668,9 +668,9 @@ class TestScalarFpuTrap(TrapHarness, unittest.TestCase):
     PC = 0x00001234
 
     def setUp(self):
-        with nan_trap_codegen_state():
+        with nan_trap_codegen_state() as options:
             self.statement = codegen.effect(
-                self.PC, cop1(0x10, 5, 6, 7, 0x03))[0]   # div.s f7, f6, f5
+                self.PC, cop1(0x10, 5, 6, 7, 0x03), options=options)[0]   # div.s f7, f6, f5
         self.assertIn("SR_NAN_TRAP_F", self.statement)
         self.exe = self.compile(
             "div_s",
@@ -789,6 +789,21 @@ float sr_vfpu_log2(float x) { return x; }
 float sr_vfpu_sin(float x) { return x; }
 float sr_vfpu_cos(float x) { return x; }
 float sr_vfpu_exp2(float x) { return x; }
+/* The sum-of-products adder is the real one in recomp.c, which these fixtures do not link.
+ * A plain IEEE chain stands in: the trap tests read which lanes are NaN, not the adder's
+ * rounding. */
+uint32_t sr_vfpu_dot_bits(const uint32_t *a, const uint32_t *b, int n) {
+    float acc = 0.0f;
+    for (int i = 0; i < n; i++) {
+        float fa, fb;
+        memcpy(&fa, &a[i], 4);
+        memcpy(&fb, &b[i], 4);
+        acc += fa * fb;
+    }
+    uint32_t bits;
+    memcpy(&bits, &acc, 4);
+    return bits;
+}
 """
 
 
@@ -800,8 +815,8 @@ class TestVfpuLaneTrap(TrapHarness, unittest.TestCase):
 
     def setUp(self):
         self.word = vfpu_lane(0x18, 7, 1, 2, 3, 1)          # vdiv.s v3, v2, v1
-        with nan_trap_codegen_state():
-            self.statement = codegen.effect(self.PC, self.word)[0]
+        with nan_trap_codegen_state() as options:
+            self.statement = codegen.effect(self.PC, self.word, options=options)[0]
         self.assertIn("SR_NAN_TRAP_V2", self.statement)
         self.s_index = codegen.vreg_indices(2, 1)[0]
         self.t_index = codegen.vreg_indices(1, 1)[0]
@@ -851,8 +866,8 @@ class TestFlightRecorderNanOrigin(TrapHarness, unittest.TestCase):
 
     def setUp(self):
         self.word = vfpu_lane(0x18, 7, 1, 2, 3, 1)          # vdiv.s v3, v2, v1
-        with nan_trap_codegen_state():
-            self.statement = codegen.effect(self.PC, self.word)[0]
+        with nan_trap_codegen_state() as options:
+            self.statement = codegen.effect(self.PC, self.word, options=options)[0]
         self.assertIn("SR_NAN_TRAP_V2", self.statement)
         self.s_index = codegen.vreg_indices(2, 1)[0]
         self.t_index = codegen.vreg_indices(1, 1)[0]
@@ -889,7 +904,9 @@ int main(void) {{
 
     def test_origin_is_one_fault_class_event_between_the_scheduler_marks(self):
         result, reports, bundle = self._run("00000000", "00000000", self.SPEC)
-        self.assertEqual(result.stdout.strip(), "RESULT=0xffc00000", result.stderr)
+        # vdiv(0, 0) gives 0x7f800001 on a PSP-3000 (sign = XOR of the operand signs), not the
+        # host default NaN; tests/native/vfpu_interp_selftest.c pins the console cells.
+        self.assertEqual(result.stdout.strip(), "RESULT=0x7f800001", result.stderr)
         self.assertEqual(len(reports), 1, result.stderr)
         self.assertIsNotNone(bundle, "the recorder writes its bundle at exit")
         classes = [(event["class"], event["kind"]) for event in bundle["events"]]
@@ -939,8 +956,8 @@ int main(void) {{
         # recorded lane is the first non-finite word, the position out=[...] shows in the
         # report, and the result class is +Inf.
         word = vfpu_lane(0x18, 7, 1, 2, 3, 2)
-        with nan_trap_codegen_state():
-            statement = codegen.effect(self.PC, word)[0]
+        with nan_trap_codegen_state() as options:
+            statement = codegen.effect(self.PC, word, options=options)[0]
         s_index = codegen.vreg_indices(2, 2)
         t_index = codegen.vreg_indices(1, 2)
         exe = self.compile(
@@ -1037,7 +1054,8 @@ int main(void) {{
 
     def test_finite_operands_producing_nan_are_reported(self):
         result, reports = self.run_exe(self.exe, {"NUM": "00000000", "DEN": "00000000"})
-        self.assertEqual(result.stdout.strip(), "RC=1 RESULT=0xffc00000")
+        # The interpreter follows the same PSP-3000 vdiv rule as codegen: 0 / 0 is 0x7f800001.
+        self.assertEqual(result.stdout.strip(), "RC=1 RESULT=0x7f800001")
         self.assertEqual(reports, [f"NAN_TRAP pc=0x{self.PC:08x} op=vdiv.s dst=v3 vbl=4711 in=[0,0] out=[nan]"])
 
     def _finite_result_case(self):
@@ -1101,8 +1119,8 @@ class TestVtfmTrap(TrapHarness, unittest.TestCase):
         # vtfm3 m8, v0, v8: matrix 0, vector 4, result matrix 2.
         self.word = matrix_word(2, 4, 0, 8, 3)
         self.matrix, self.vector, self.dest = vtfm_layout(4, 0, 8, 3)
-        with nan_trap_codegen_state():
-            self.statement = codegen.effect(self.PC, self.word)[0]
+        with nan_trap_codegen_state() as options:
+            self.statement = codegen.effect(self.PC, self.word, options=options)[0]
         loads = f"{lane_stores(self.matrix, 'M')} {lane_stores(self.vector, 'V')}"
         self.generated = self.compile(
             "vtfm3",
@@ -1191,8 +1209,8 @@ class TestVmmulTrap(TrapHarness, unittest.TestCase):
     def setUp(self):
         # vmmul.4 p8, v0, v4: S = matrix 0, T = matrix 1, result = matrix 2.
         self.word = matrix_word(0, 4, 0, 8, 4)
-        with nan_trap_codegen_state():
-            self.statement = codegen.effect(self.PC, self.word)[0]
+        with nan_trap_codegen_state() as options:
+            self.statement = codegen.effect(self.PC, self.word, options=options)[0]
         self.assertIn('SR_NAN_TRAP_V(0x00002333u,"vmmul",8u,_ntout,16,_ntin,32)',
                       self.statement)
         self.s_lanes, self.t_lanes, self.dest = vmmul_layout(0, 4, 8, 4)

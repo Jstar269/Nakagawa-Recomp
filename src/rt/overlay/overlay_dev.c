@@ -25,6 +25,7 @@
 #define DEV_ID_INFO DEV_ID(0x006008u)
 #define DEV_ID_NOTE DEV_ID(0x006009u)
 #define DEV_ID_FOOT DEV_ID(0x00600Au)
+#define DEV_ID_DETAIL DEV_ID(0x00600Bu)
 #define DEV_ID_PART DEV_ID(0x006100u)     /* + 0x10 per row, + k per part */
 #define DEV_ID_PART_SPAN 0x800u
 
@@ -241,7 +242,10 @@ static void vram_picture(NkUi *ui, const NkOverlayVram *vram, float width) {
         art.contain_scale = 1.0f;
         (void)nk_ui_image_art(ui, DEV_ID_IMAGE, nk_overlay_grow(), nk_overlay_grow(), &art);
     } else {
-        nk_ui_text_role(ui, DEV_ID_EMPTY, "Nothing to show", NK_UI_TYPE_CAPTION, theme->dim);
+        /* One line, so the box centres it (a wrapping run would fill the box's width). */
+        NkUiTextStyle empty = nk_ui_type(NK_UI_TYPE_CAPTION, theme->dim);
+        empty.wrap = false;
+        nk_ui_text(ui, DEV_ID_EMPTY, "Nothing to show", &empty);
     }
     nk_ui_end_container(ui);
 }
@@ -336,16 +340,25 @@ NkOverlayAction nk_overlay_page_vram(NkUi *ui, NkOverlayState *state, const NkOv
                     nk_overlay_vram_clamp(w);
                     moved = true;
                 }
-                (void)snprintf(text, sizeof(text), "%u \xC3\x97 %u px%s", (unsigned)w->width,
-                               (unsigned)w->height,
-                               view->source == NK_OVERLAY_VRAM_TEXTURE && vram != NULL &&
-                                       vram->texture_swizzled ? ", swizzled" : "");
-                nk_ui_text_role(ui, DEV_ID_INFO, nk_ui_frame_text(ui, text), NK_UI_TYPE_DATA,
-                                theme->muted);
-                if (vram != NULL && vram->note != NULL && vram->note[0] != '\0') {
-                    NkUiTextStyle note = nk_ui_type(NK_UI_TYPE_CAPTION, theme->warning);
-                    note.wrap = true;
-                    nk_ui_text(ui, DEV_ID_NOTE, vram->note, &note);
+                {
+                    /* The size and any note line up with the rows' labels. */
+                    NkUiLayout detail = nk_overlay_layout(NK_UI_LAYOUT_COLUMN, nk_overlay_grow(),
+                                                          nk_overlay_fit(), NK_UI_SPACE_1);
+                    detail.padding_left = detail.padding_right = NK_UI_SPACE_3;
+                    if (nk_ui_begin_container(ui, DEV_ID_DETAIL, &detail, NULL)) {
+                        (void)snprintf(text, sizeof(text), "%u \xC3\x97 %u px%s", (unsigned)w->width,
+                                       (unsigned)w->height,
+                                       view->source == NK_OVERLAY_VRAM_TEXTURE && vram != NULL &&
+                                               vram->texture_swizzled ? ", swizzled" : "");
+                        nk_ui_text_role(ui, DEV_ID_INFO, nk_ui_frame_text(ui, text), NK_UI_TYPE_DATA,
+                                        theme->muted);
+                        if (vram != NULL && vram->note != NULL && vram->note[0] != '\0') {
+                            NkUiTextStyle note = nk_ui_type(NK_UI_TYPE_CAPTION, theme->warning);
+                            note.wrap = true;
+                            nk_ui_text(ui, DEV_ID_NOTE, vram->note, &note);
+                        }
+                        nk_ui_end_container(ui);
+                    }
                 }
                 nk_ui_end_container(ui);
             }

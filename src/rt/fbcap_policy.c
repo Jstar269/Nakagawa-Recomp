@@ -53,3 +53,44 @@ int sr_fbcap_exit_status(int owner, int capture_result) {
     if (capture_result == 1) return 0;
     return 1;
 }
+
+int sr_screenshot_name(const char *disc_id, int year, int month, int day, int hour, int minute,
+                       int second, int seq, char *out, size_t outsz) {
+    if (!out || outsz == 0u) return 0;
+    out[0] = '\0';
+    if (year < 1970 || year > 9999 || month < 1 || month > 12 || day < 1 || day > 31 ||
+        hour < 0 || hour > 23 || minute < 0 || minute > 59 || second < 0 || second > 60 ||
+        seq < 1 || seq > 99)
+        return 0;
+    char disc[33];
+    size_t n = 0;
+    for (const char *p = disc_id ? disc_id : ""; *p && n < sizeof disc - 1u; p++) {
+        char c = *p;
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+            c == '-' || c == '_')
+            disc[n++] = c;
+    }
+    disc[n] = '\0';
+    if (n == 0u) memcpy(disc, "game", 5u);
+    char suffix[4] = "";
+    if (seq > 1) snprintf(suffix, sizeof suffix, "-%d", seq);
+    int w = snprintf(out, outsz, "%s_%04d%02d%02d-%02d%02d%02d%s.png", disc, year, month, day,
+                     hour, minute, second, suffix);
+    if (w < 0 || (size_t)w >= outsz) {
+        out[0] = '\0';
+        return 0;
+    }
+    return 1;
+}
+
+/* ---- screenshot key ----------------------------------------------------------------------- */
+/* Set by the presenter's key handler and taken by the display path (fbcap.h, screenshot key).
+ * Both run on the thread that pumps the presenter's events and presents (the guest thread), so a
+ * plain flag is enough. */
+static volatile int s_screenshot_pending;
+
+void sr_screenshot_request(void) { s_screenshot_pending = 1; }
+
+int sr_screenshot_pending(void) { return s_screenshot_pending != 0; }
+
+void sr_screenshot_clear(void) { s_screenshot_pending = 0; }

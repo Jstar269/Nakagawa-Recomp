@@ -11,6 +11,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifndef _WIN32
+#include <unistd.h>
+#endif
 #include <vulkan/vulkan.h>
 
 /* Standalone support required by recomp.h and the production GE object. The test owns a
@@ -94,6 +97,17 @@ static int host_mem_type_selection_ok(void) {
     return ok;
 }
 
+/* `path` made absolute against the current folder (the folder need not exist yet). */
+static int absolute_path(const char *path, char *out, size_t n) {
+#ifdef _WIN32
+    return _fullpath(out, path, n) != NULL;
+#else
+    if (path[0] == '/') return snprintf(out, n, "%s", path) < (int)n;
+    char cwd[3072];
+    return getcwd(cwd, sizeof cwd) && snprintf(out, n, "%s/%s", cwd, path) < (int)n;
+#endif
+}
+
 /* `value` "unset" removes the variable. */
 static int set_env(const char *name, const char *value) {
     const int unset = strcmp(value, "unset") == 0;
@@ -110,25 +124,91 @@ static int set_env(const char *name, const char *value) {
  * SR_GPU_TWIN_REF (a file the twin cases write in a twin-off run and compare against in a
  * twin-on run). The twin is an Ace Mode feature, so `--twin` also turns Ace Mode on (with no
  * Ace item of its own), unless `--authentic` keeps it off to show that an authentic run
- * ignores the switch. Recipes pass arguments, not a `VAR=value` prefix, which cmd.exe does
- * not accept. */
+ * ignores the switch. `--twin-key on` makes that Ace line carry `twin=on` and sets no variable:
+ * the twin-key case then checks the launch line's own request, in both renderers (with
+ * `--twin 0|off|native` the variable overrides the line and the case checks that).
+ * `--twin-key off` keeps the line at `twin=off`; with `--twin 1|native` the twin-key case then checks
+ * that a twin the variable turned on is reported as running. `--pipeline-cache DIR` turns the pipeline cache (#2149) on and makes DIR,
+ * as an absolute path, the data root (SR_USER_DATA_ROOT), so the cache lives in DIR/cache/gegpu
+ * as it would under a launcher's root; without it the harness turns the cache off, so a
+ * selftest never reads or writes the user's cache folder.
+ * `--dst-read snapshot|interlock` sets SR_GPU_DST_READ (#2109), which sdl3vk_init reads before it
+ * makes the device. `--depth 32` turns Ace Mode on with the line's depth=32 (the 32-bit host depth
+ * buffer, #2051), and `--depth-ref PATH` sets SR_GPU_DEPTH_REF, the file host-depth writes in a
+ * key-off run and compares against with the key on.
+ * `--ssaa 2|4` turns Ace Mode on with that supersampling factor (#2073; it runs the host twin), and
+ * `--ssaa-ref PATH` sets SR_GPU_SSAA_REF (ssaa-edge's reference: a run without supersampling writes
+ * it, a supersampled run at the same scale checks it). `--ssaa-budget-mb N`, `--ssaa-max-dim N` and
+ * `--ssaa-expect F` force the size check's limits and name the factor ssaa-limit expects.
+ * Recipes pass arguments, not a `VAR=value` prefix, which cmd.exe does not accept. */
 int main(int argc, char **argv) {
-    int twin_arg = 0, authentic = 0;
+    int twin_arg = 0, twin_key = 0, twin_key_on = 0, authentic = 0, repl_only = 0, pcache_arg = 0, depth_arg = 0;
+    int ssaa_arg = 0, ssaa_expect = 0;
+    unsigned long long ssaa_budget_mb = 0;
+    unsigned ssaa_dim = 0;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--authentic") == 0) { authentic = 1; continue; }
+        if (strcmp(argv[i], "--twin-key") == 0) {
+            if (i + 1 >= argc || (strcmp(argv[++i], "on") != 0 && strcmp(argv[i], "off") != 0)) {
+                fprintf(stderr, "gpu coherence selftest: --twin-key takes on or off\n");
+                return 2;
+            }
+            twin_key = 1;
+            twin_key_on = strcmp(argv[i], "on") == 0;
+            continue;
+        }
+        if (strcmp(argv[i], "--repl-only") == 0) { repl_only = 1; continue; }
         if (strcmp(argv[i], "--twin") == 0) twin_arg = 1;
+        if (strcmp(argv[i], "--depth") == 0) {
+            if (i + 1 >= argc || strcmp(argv[++i], "32") != 0) {
+                fprintf(stderr, "gpu coherence selftest: --depth takes 32\n");
+                return 2;
+            }
+            depth_arg = 1;
+            continue;
+        }
+        if (strcmp(argv[i], "--ssaa") == 0 || strcmp(argv[i], "--ssaa-budget-mb") == 0 ||
+            strcmp(argv[i], "--ssaa-max-dim") == 0 || strcmp(argv[i], "--ssaa-expect") == 0) {
+            char *end = NULL;
+            const unsigned long long v = i + 1 < argc ? strtoull(argv[i + 1], &end, 10) : 0;
+            if (i + 1 >= argc || !end || *end || end == argv[i + 1]) {
+                fprintf(stderr, "gpu coherence selftest: %s needs a number\n", argv[i]);
+                return 2;
+            }
+            if (strcmp(argv[i], "--ssaa") == 0) ssaa_arg = (int)v;
+            else if (strcmp(argv[i], "--ssaa-budget-mb") == 0) ssaa_budget_mb = v;
+            else if (strcmp(argv[i], "--ssaa-max-dim") == 0) ssaa_dim = (unsigned)v;
+            else ssaa_expect = (int)v;
+            i++;
+            continue;
+        }
+        if (strcmp(argv[i], "--pipeline-cache") == 0) {
+            char root[4096];
+            if (i + 1 >= argc || !absolute_path(argv[++i], root, sizeof root) || !set_env("SR_USER_DATA_ROOT", root)) {
+                fprintf(stderr, "gpu coherence selftest: --pipeline-cache needs a folder it can name absolutely\n");
+                return 2;
+            }
+            pcache_arg = 1;
+            continue;
+        }
         const char *name = strcmp(argv[i], "--scale") == 0 ? "SR_GPU_SCALE"
                          : strcmp(argv[i], "--case") == 0  ? "SR_GPU_COHERENCE_CASE"
                          : strcmp(argv[i], "--readback-full") == 0 ? "SR_GPU_READBACK_FULL"
                          : strcmp(argv[i], "--tex-scale") == 0 ? "SR_TEX_SCALE"
+                         : strcmp(argv[i], "--glyphs") == 0 ? "SR_GLYPHS"
                          : strcmp(argv[i], "--gpu-timestamps") == 0 ? "SR_GPU_TIMESTAMPS"
                          : strcmp(argv[i], "--twin") == 0 ? "SR_GPU_TWIN_COLOR"
-                         : strcmp(argv[i], "--twin-ref") == 0 ? "SR_GPU_TWIN_REF" : NULL;
+                         : strcmp(argv[i], "--twin-ref") == 0 ? "SR_GPU_TWIN_REF"
+                         : strcmp(argv[i], "--depth-ref") == 0 ? "SR_GPU_DEPTH_REF"
+                         : strcmp(argv[i], "--ssaa-ref") == 0 ? "SR_GPU_SSAA_REF"
+                         : strcmp(argv[i], "--dst-read") == 0 ? "SR_GPU_DST_READ" : NULL;
         if (!name || i + 1 >= argc || !set_env(name, argv[++i])) {
             fprintf(stderr, "usage: gpu_coherence_selftest [--scale N] [--case scaled-upload|mip-lod]\n");
             return 2;
         }
     }
+    if (!set_env("SR_GPU_PIPELINE_CACHE", pcache_arg ? "on" : "off")) return 2;
+    (void)repl_only;   /* read only in the texture scaling build */
     if (!host_mem_type_selection_ok()) return 1;
     uint8_t *arena = (uint8_t *)calloc(0x0c000000u, 1);
     if (!arena) return 2;
@@ -136,30 +216,59 @@ int main(int argc, char **argv) {
     sr_perf_init();
 #ifdef SR_GPU_ACE_SELFTEST
     /* Ace Mode with 16x texture filtering, read before the device is made (src/rt/ace.h). */
-    if (!ace_init_spec("v1;af=16;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off", NULL)) {
+    if (!ace_init_spec("v1;af=16;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;twin=off", NULL)) {
         fprintf(stderr, "gpu ace selftest: FAIL the Ace line was refused\n");
         free(arena);
         return 1;
     }
 #else
-    if (twin_arg && !authentic &&
-        !ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off", NULL)) {
-        fprintf(stderr, "gpu coherence selftest: FAIL the Ace line for the host twin was refused\n");
-        free(arena);
-        return 1;
+    {
+        char spec[192];
+        snprintf(spec, sizeof spec, "v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;twin=%s%s%s",
+                 twin_key && twin_key_on ? "on" : "off", depth_arg ? ";depth=32" : "",
+                 ssaa_arg == 4 ? ";ssaa=4" : ssaa_arg == 2 ? ";ssaa=2" : "");
+        if ((twin_arg || twin_key || depth_arg || ssaa_arg) && !authentic && !ace_init_spec(spec, NULL)) {
+            fprintf(stderr, "gpu coherence selftest: FAIL the Ace line for the host twin, depth=32 or "
+                    "supersampling was refused\n");
+            free(arena);
+            return 1;
+        }
     }
 #endif
 #ifdef SR_GPU_TEXSCALE_SELFTEST
     /* Texture scaling and the smart 2D filter take effect only in Ace Mode (tex_scale.h). The
      * factor defaults to 2; `--tex-scale N` picks another. */
-    if (!ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off", NULL) ||
+#ifdef SR_GPU_GLYPH_SELFTEST
+    /* Sharp game text (glyph_recon.h) alone: Ace Mode with no texture scaling, and SR_GLYPHS on
+     * unless `--glyphs VALUE` says otherwise. `--authentic` leaves Ace Mode off. */
+    if ((!authentic && !ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;twin=off", NULL)) ||
+        !set_env("SR_TEX_SCALE", "off") || !set_env("SR_SMART_2D", "off") ||
+        (!authentic && !getenv("SR_GLYPHS") && !set_env("SR_GLYPHS", "on"))) {
+        fprintf(stderr, "gpu glyph selftest: FAIL the Ace line or the settings were refused\n");
+        free(arena);
+        return 1;
+    }
+#else
+    if (repl_only) {
+        /* SR_TEX_REPLACE alone (the documented default use): no texture scaling, no smart 2D, and
+         * the pack written and named before the renderer reads it. */
+        if (!ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;twin=off", NULL) ||
+            !set_env("SR_TEX_SCALE", "off") || !set_env("SR_SMART_2D", "off") ||
+            !gegpu_texrepl_only_prepare(SR_SELFTEST_BUILD_ROOT)) {
+            fprintf(stderr, "gpu texscale selftest: FAIL the Ace line, the settings or the synthetic pack were refused\n");
+            free(arena);
+            return 1;
+        }
+    } else if (!ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;twin=off", NULL) ||
         (!getenv("SR_TEX_SCALE") && !set_env("SR_TEX_SCALE", "2")) || !set_env("SR_SMART_2D", "on")) {
         fprintf(stderr, "gpu texscale selftest: FAIL the Ace line or the settings were refused\n");
         free(arena);
         return 1;
     }
 #endif
+#endif
 
+    gegpu_selftest_ssaa_limits(ssaa_budget_mb << 20, ssaa_dim, ssaa_expect);
     if (!sdl3vk_init("Nakagawa GPU coherence selftest") || !gegpu_init()) {
         fprintf(stderr, "gpu coherence selftest: SKIP (Vulkan initialization unavailable)\n");
         sdl3vk_shutdown();
@@ -178,8 +287,10 @@ int main(int argc, char **argv) {
     }
 #elif defined(SR_GPU_SNAPSHOT_SYNC_SELFTEST)
     ok = gegpu_snapshot_sync_selftest();
+#elif defined(SR_GPU_GLYPH_SELFTEST)
+    ok = authentic ? gegpu_glyph_authentic_selftest() : gegpu_glyph_selftest();
 #elif defined(SR_GPU_TEXSCALE_SELFTEST)
-    ok = gegpu_texscale_selftest();
+    ok = repl_only ? gegpu_texrepl_only_selftest() : gegpu_texscale_selftest();
 #else
     ok = gegpu_coherence_selftest();
     if (ok == 77) {   /* --case gpu-timestamps on a queue without timestamp queries */
@@ -213,6 +324,8 @@ int main(int argc, char **argv) {
     puts("gpu ace selftest: OK");
 #elif defined(SR_GPU_SNAPSHOT_SYNC_SELFTEST)
     puts("gpu snapshot sync selftest: OK");
+#elif defined(SR_GPU_GLYPH_SELFTEST)
+    puts("gpu glyph selftest: OK");
 #elif defined(SR_GPU_TEXSCALE_SELFTEST)
     puts("gpu texscale selftest: OK");
 #else

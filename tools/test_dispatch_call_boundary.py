@@ -485,6 +485,7 @@ def _longjmp_into_live_frame(*, saves_through_its_base: bool = False,
                              tail_called_from_alloca: bool = False,
                              tail_called_plainly: bool = False,
                              through_a_piece: bool = False,
+                             called_from_a_piece: bool = False,
                              eret_into: str | None = None) -> tuple[int, ...]:
     """setjmp in F, longjmp from G called by F: F's setjmp returns again, v0 = 0x107.
 
@@ -499,7 +500,9 @@ def _longjmp_into_live_frame(*, saves_through_its_base: bool = False,
     ``tail_called_from_alloca``, G calls H, which frees an alloca, releases its frame and
     tail-calls longjmp. With ``tail_called_plainly``, H has a frame and no alloca, and
     tail-calls longjmp the same way. With ``through_a_piece``, H lowers $sp and hands its
-    live frame to P with `j`; P, an entry of its own, tail-calls longjmp. With ``eret_into``,
+    live frame to P with `j`; P, an entry of its own, tail-calls longjmp. With
+    ``called_from_a_piece``, P calls longjmp instead: P's call site clears longjmp's note
+    that it left its frame, and H's chain ends above H's record. With ``eret_into``,
     H lowers $sp and executes `break`; the handler at _ERET_VECTOR(...) steps EPC past it and
     erets into M, the rest of H and an entry of its own. M releases H's frame and returns
     ("returns": G returns normally, v0 = 0xee0) or tail-calls longjmp ("longjmp").
@@ -528,6 +531,12 @@ def _longjmp_into_live_frame(*, saves_through_its_base: bool = False,
         _jal(longjmp + 4 * (len(saves) + 8)), _NOP,          # never run: makes P an entry
     ] if through_a_piece else [
         _addiu(_SP, _SP, -0x20), _sw(_RA, 0x1C, _SP),        # H
+        _j(longjmp + 4 * (len(saves) + 8)), _NOP,            # j P
+        _jal(longjmp), _NOP,                                 # P: never returns
+        _lw(_RA, 0x1C, _SP), _jr(_RA), _addiu(_SP, _SP, 0x20),
+        _jal(longjmp + 4 * (len(saves) + 8)), _NOP,          # never run: makes P an entry
+    ] if called_from_a_piece else [
+        _addiu(_SP, _SP, -0x20), _sw(_RA, 0x1C, _SP),        # H
         _BREAK,
         *({"returns": [_lw(_RA, 0x1C, _SP), _jr(_RA), _addiu(_SP, _SP, 0x20)],   # M
            "longjmp": [_j(longjmp), _NOP, _NOP]}[eret_into]),
@@ -545,7 +554,7 @@ def _longjmp_into_live_frame(*, saves_through_its_base: bool = False,
         _lw(_RA, 0x3C, _SP), _jr(_RA), _addiu(_SP, _SP, 0x40),
         _addiu(_SP, _SP, -0x20), _sw(_RA, 0x1C, _SP),        # 0x1044 G
         _jal(h if tail_called_from_alloca or tail_called_plainly or through_a_piece
-             or eret_into else longjmp),                     # 0x104c
+             or called_from_a_piece or eret_into else longjmp),  # 0x104c
         _addiu(_A1, 0, 7),
         _lw(_RA, 0x1C, _SP), _jr(_RA), _addiu(_SP, _SP, 0x20),
         _sw(_SP, 0, _A0), _sw(_RA, 4, _A0),                  # 0x1060 setjmp
@@ -759,10 +768,6 @@ def _call_into_a_live_frame_tail() -> tuple[int, ...]:
 
 _S0 = 16
 _CENSUS = ("--stack-census",)
-# 94c278ec9's rule: a transfer that leaves $sp at the recording body's entry owes no restore.
-_SIBCALL_RECORDS_NOTHING = {"recomp.h": (
-    "    sr_tail_transfer.has_restore = owes_restore ? 1u : 0u;",
-    "    sr_tail_transfer.has_restore = (owes_restore && s->r[29] != restore_sp) ? 1u : 0u;")}
 
 
 def _native_head_into_an_alloca_tail_end(*, crossing: str, frame: int = _FP) -> tuple[int, ...]:
@@ -819,8 +824,9 @@ def _switch_to_a_lower_stack() -> tuple[int, ...]:
 def _a_piece_that_releases_a_guest_bodys_frame() -> tuple[int, ...]:
     """F, a guest-$sp body, hands its live frame to the piece P by a computed TAIL.
 
-    F reloads $sp through a copy, so its only exit is the guest's and it records nothing.
-    P releases F's frame in the slot of a sibcall to the leaf N. P was entered at F's
+    F reloads $sp through a copy, a load the frame walk does not own, so it checks the load
+    when it runs (sp_load_leaves_frame): the load leaves $sp where it was, inside F's frame,
+    and F records its entry $sp. P releases F's frame in the slot of a sibcall to the leaf N. P was entered at F's
     lowered $sp; once the chain completes, $sp must be the released one, F's entry $sp.
     """
     piece, leaf = 0x1030, 0x103C
@@ -837,6 +843,215 @@ def _a_piece_that_releases_a_guest_bodys_frame() -> tuple[int, ...]:
         _jal(piece), _NOP, _jal(leaf), _NOP,                 # both are entries
     ])
     assert len(words) == (leaf + 0x1C - _PROBE_BASE) // 4, "the fixture's labels moved"
+    return words
+
+
+def _switch_then_a_sibcall_into_a_guest_sp_body() -> tuple[int, ...]:
+    """H switches to a lower stack, as _switch_to_a_lower_stack's F does, and sibcalls F there.
+
+    H's load leaves its frame, so H owes no restore. F is
+    _native_head_into_an_alloca_tail_end's F through $s0: its alloca free is a load that
+    stays in its frame, so F owes the $sp it was entered at, the stack H switched to, and
+    hands its live frame to TAIL, whose own return writes back F's lowered $sp. F's record
+    is the chain's only restore: v0 = 0x57, v1 = _PROBE_SP - 0x60.
+    """
+    f, tail = 0x1024, 0x1048
+    words = _probe_program([
+        _addiu(_SP, _SP, -0x20), _addiu(_T8, _SP, -0x40),    # 0x1010 H
+        _sw(_T8, 0x10, _SP), _j(f), _lw(_SP, 0x10, _SP),     # 0x1018 switch in the slot
+        _addiu(_SP, _SP, -0x20), _sw(_RA, 0x1C, _SP),        # 0x1024 F
+        _sw(_S0, 0x18, _SP), _addu(_S0, _SP, 0),
+        _sw(_SP, 0x10, _S0), _addiu(_SP, _SP, -0x30),        # save $sp, alloca
+        _addiu(_V0, 0, 0x57),
+        _j(tail), _lw(_SP, 0x10, _S0),                       # free it in the slot
+        _addu(_SP, _S0, 0),                                  # 0x1048 TAIL
+        _lw(_RA, 0x1C, _SP), _lw(_S0, 0x18, _SP),
+        _jr(_RA), _addiu(_SP, _SP, 0x20),
+        _jal(tail), _NOP, _jal(f), _NOP,                     # both are entries
+    ])
+    assert len(words) == (tail + 0x24 - _PROBE_BASE) // 4, "the fixture's labels moved"
+    return words
+
+
+def _a_load_above_the_entry_then_a_live_frame_tail(*, head: str) -> tuple[int, ...]:
+    """F loads $sp from memory 0x40 above its entry $sp, as a longjmp to an outer frame does.
+
+    The load leaves F's frame upwards (the `>= entry` part of sp_load_leaves_frame and of
+    _sp_load_check), so F owes no restore. F hands on by `j` to G there, a plain body that
+    lowers $sp and hands its live frame to PIECE, whose own return writes back G's lowered
+    $sp. G's record is the chain's restore and gives G's caller the stack F loaded:
+    v0 = 0x5B, v1 = F's entry $sp + 0x40. A record of F's entry $sp would come first and
+    leave PIECE's write-back, 0x20 below. ``head`` "switch" puts
+    _switch_then_a_sibcall_into_a_guest_sp_body's H in front, which owes no restore and
+    reaches F by a sibcall on the stack it switched to (F's entry $sp _PROBE_SP - 0x60), so
+    F, interpreted, runs as a TAIL step. "owing" puts a plain H in front that sibcalls F at
+    its entry $sp and so owes it: H's record comes first, and F's release voids it (#1949's
+    limit 2). "none" has no head.
+    """
+    lead = {
+        "none": [],
+        "switch": [_addiu(_SP, _SP, -0x20), _addiu(_T8, _SP, -0x40),
+                   _sw(_T8, 0x10, _SP), _j(0x1024), _lw(_SP, 0x10, _SP)],
+        "owing": [_j(0x1018), _NOP],
+    }[head]
+    f = 0x1010 + 4 * len(lead)
+    g = f + 0x14
+    piece = g + 0x1C
+    words = _probe_program([
+        *lead,                                               # 0x1010 H
+        _addiu(_SP, _SP, -0x20), _addiu(_T8, _SP, 0x60),     # F
+        _sw(_T8, 0x10, _SP), _j(g), _lw(_SP, 0x10, _SP),     # the load in the slot
+        _addiu(_SP, _SP, -0x20), _sw(_RA, 0x1C, _SP),        # G
+        _sw(_FP, 0x18, _SP), _addu(_FP, _SP, 0),
+        _addiu(_V0, 0, 0x5B),
+        _j(piece), _NOP,
+        _addu(_SP, _FP, 0), _lw(_RA, 0x1C, _SP),             # PIECE
+        _lw(_FP, 0x18, _SP), _jr(_RA), _addiu(_SP, _SP, 0x20),
+        _jal(piece), _NOP, _jal(g), _NOP, _jal(f), _NOP,     # all are entries
+    ])
+    assert len(words) == (piece + 0x2C - _PROBE_BASE) // 4, "the fixture's labels moved"
+    return words
+
+
+def _a_piece_frees_an_alloca_then_hands_the_frame_on() -> tuple[int, ...]:
+    """_alloca_tail_end with its alloca and free in a piece of F (#1935, review B1 of #2238).
+
+    F binds $fp and hands its live frame to P. P saves $sp through F's $fp, allocates and
+    frees through it in the slot of `j TAIL`: a load the walk does not own, which P checks,
+    and which lands on P's entry $sp, inside F's frame. TAIL, the epilogue, returns to F's
+    caller, v0 = 0x56, with F's entry $sp. F owes that restore; P's load leaves P's own
+    frame upwards but stays below F's restore, so it keeps it. All three are entries.
+    """
+    p, tail = 0x1028, 0x103C
+    words = _probe_program([
+        _addiu(_SP, _SP, -0x20), _sw(_RA, 0x1C, _SP),        # 0x1010 F
+        _sw(_FP, 0x18, _SP), _addu(_FP, _SP, 0),
+        _j(p), _NOP,
+        _sw(_SP, 0x10, _FP), _addiu(_SP, _SP, -0x30),        # 0x1028 P: save, alloca
+        _addiu(_V0, 0, 0x56),
+        _j(tail), _lw(_SP, 0x10, _FP),                       # free it in the slot
+        _lw(_RA, 0x1C, _SP), _lw(_FP, 0x18, _SP),            # 0x103C TAIL
+        _jr(_RA), _addiu(_SP, _SP, 0x20),
+        _jal(p), _NOP, _jal(tail), _NOP,
+    ])
+    assert len(words) == (tail + 0x20 - _PROBE_BASE) // 4, "the fixture's labels moved"
+    return words
+
+
+def _a_piece_frees_an_alloca_reached_by_jr(*, hands_on_by_jr: bool) -> tuple[int, ...]:
+    """_a_piece_frees_an_alloca_then_hands_the_frame_on with F reaching P by a computed `jr`.
+
+    P is then a computed step, and its direct transfer to TAIL runs in the step's segment,
+    whose drain hands P's bounded release to the enclosing drain at its end. With
+    ``hands_on_by_jr`` P reaches TAIL by a computed `jr` too, so the segment hands that
+    transfer on with its release (review S1 of #2238 at 73d86c32c). P and TAIL are entries.
+    """
+    p = 0x1030
+    if hands_on_by_jr:
+        tail = p + 4 * 7
+        piece_out = [_lui(_T9, 0), _ori(_T9, _T9, tail), _jr(_T9), _lw(_SP, 0x10, _FP)]
+    else:
+        tail = p + 4 * 5
+        piece_out = [_j(tail), _lw(_SP, 0x10, _FP)]
+    words = _probe_program([
+        _addiu(_SP, _SP, -0x20), _sw(_RA, 0x1C, _SP),        # 0x1010 F
+        _sw(_FP, 0x18, _SP), _addu(_FP, _SP, 0),
+        _lui(_T9, 0), _ori(_T9, _T9, p), _jr(_T9), _NOP,
+        _sw(_SP, 0x10, _FP), _addiu(_SP, _SP, -0x30),        # 0x1030 P: save, alloca
+        _addiu(_V0, 0, 0x56),
+        *piece_out,                                          # free it in the slot
+        _lw(_RA, 0x1C, _SP), _lw(_FP, 0x18, _SP),            # TAIL
+        _jr(_RA), _addiu(_SP, _SP, 0x20),
+        _jal(p), _NOP, _jal(tail), _NOP,
+    ])
+    assert len(words) == (tail + 0x20 - _PROBE_BASE) // 4, "the fixture's labels moved"
+    return words
+
+
+def _a_switch_then_a_live_frame_piece_frees_it() -> tuple[int, ...]:
+    """A frame allocated on a switched stack and freed by a plain piece (#1935).
+
+    F switches to S = _PROBE_SP - 0x60 (a load below where $sp was: a release), allocates a
+    frame on S and hands it live to P. P is plain: it records its entry $sp, S - 0x20, and
+    frees the frame in the slot of `j N`. N, a leaf, returns, v0 = 0x5D, and writes back S.
+    The chain ends above P's restore with no $sp load of its own, so only the drain's
+    raise-only rule leaves $sp at S. P and N are entries.
+    """
+    p, n = 0x1030, 0x103C
+    words = _probe_program([
+        _addiu(_SP, _SP, -0x20), _addiu(_T8, _SP, -0x40),    # 0x1010 F
+        _sw(_T8, 0x10, _SP), _lw(_SP, 0x10, _SP),            # switch to S
+        _addiu(_SP, _SP, -0x20), _sw(_RA, 0x1C, _SP),        # a frame on S
+        _j(p), _NOP,
+        _lw(_RA, 0x1C, _SP), _j(n), _addiu(_SP, _SP, 0x20),  # 0x1030 P
+        _addiu(_V0, 0, 0x5D), _jr(_RA), _NOP,                # 0x103C N
+        _jal(p), _NOP, _jal(n), _NOP,
+    ])
+    assert len(words) == (n + 0x1C - _PROBE_BASE) // 4, "the fixture's labels moved"
+    return words
+
+
+def _an_owing_head_into_a_switch_to_a_lower_stack(*, way_out: str,
+                                                  reach: str = "j") -> tuple[int, ...]:
+    """H sibcalls F at its entry $sp, so H owes it; F switches to a lower stack (#1949 limit 2).
+
+    F is _switch_to_a_lower_stack's F: its $sp load leaves its frame downwards, a context
+    switch. H reaches F by ``reach``: `j`, or a computed `jr`, which makes F a computed step
+    of H's drain (dispatch_tail_step) whose own segment drains F's chain. F leaves by
+    ``way_out``: "tail" hands on by `j` to T, an entry of its own, which returns on the stack
+    F loaded; "return" returns itself, with the load in the slot; "computed" hands on by `j`
+    to T, which hands on by a computed `jr` to U, which returns. H's record comes first in
+    the chain, and F's switch voids it: v0 = 0x5A, v1 = _PROBE_SP - 0x60. Keeping H's
+    record would raise $sp back to _PROBE_SP.
+    """
+    head = {"j": [_j(0), _NOP],
+            "computed": [_lui(_T9, 0), _ori(_T9, _T9, 0), _jr(_T9), _NOP]}[reach]
+    f = 0x1010 + 4 * len(head)
+    head = [_j(f) if word == _j(0) else _ori(_T9, _T9, f) if word == _ori(_T9, _T9, 0) else word
+            for word in head]
+    t_at = f + 0x14
+    u_at = t_at + 0x10
+    tail = {
+        "tail": [_sw(_T8, 0x10, _SP), _j(t_at), _lw(_SP, 0x10, _SP),        # switch in the slot
+                 _addiu(_V0, 0, 0x5A), _jr(_RA), _NOP,                      # T
+                 _jal(t_at), _NOP],                                         # T is an entry
+        "return": [_sw(_T8, 0x10, _SP), _addiu(_V0, 0, 0x5A),
+                   _jr(_RA), _lw(_SP, 0x10, _SP)],                          # switch in the slot
+        "computed": [_sw(_T8, 0x10, _SP), _j(t_at), _lw(_SP, 0x10, _SP),    # switch in the slot
+                     _lui(_T9, 0), _ori(_T9, _T9, u_at), _jr(_T9), _NOP,    # T
+                     _addiu(_V0, 0, 0x5A), _jr(_RA), _NOP,                  # U
+                     _jal(t_at), _NOP, _jal(u_at), _NOP],                   # both are entries
+    }[way_out]
+    return _probe_program([
+        *head,                                               # 0x1010 H
+        _addiu(_SP, _SP, -0x20), _addiu(_T8, _SP, -0x40),    # F
+        *tail,
+        _jal(f), _NOP,                                       # F is an entry
+    ])
+
+
+def _a_coroutine_switch_from_a_yield() -> tuple[int, ...]:
+    """A cooperative yield: H hands its live frame to SWITCH, a swapcontext-style routine.
+
+    H keeps two contexts in its frame: the one it leaves (at 0x10) and the one it resumes
+    (at 0x18), whose stack is 0x100 below H's frame and whose return address is H's own, so
+    the resumed coroutine returns to H's caller. SWITCH saves $sp and $ra in the first,
+    loads $ra and $sp from the second, which leaves its frame downwards, and returns into
+    the resumed coroutine. H's sibcall owes H's entry $sp and its record comes first in
+    the chain; SWITCH's load voids it: v0 = 0x5C, v1 = _PROBE_SP - 0x120.
+    """
+    switch = 0x1030
+    words = _probe_program([
+        _addiu(_SP, _SP, -0x20), _addiu(_T8, _SP, -0x100),   # 0x1010 H
+        _sw(_T8, 0x18, _SP), _sw(_RA, 0x1C, _SP),            # the context it resumes
+        _addiu(_A0, _SP, 0x10), _addiu(_A1, _SP, 0x18),      # 0x1020
+        _j(switch), _addiu(_V0, 0, 0x5C),                    # 0x1028
+        _sw(_SP, 0, _A0), _sw(_RA, 4, _A0),                  # 0x1030 SWITCH: save
+        _lw(_RA, 4, _A1), _lw(_SP, 0, _A1),                  # 0x1038 load: leaves the frame
+        _jr(_RA), _NOP,                                      # 0x1040 into the coroutine
+        _jal(switch), _NOP,                                  # SWITCH is an entry
+    ])
+    assert len(words) == (switch + 0x20 - _PROBE_BASE) // 4, "the fixture's labels moved"
     return words
 
 
@@ -1408,6 +1623,7 @@ class DispatchCallBoundaryMutationTests(unittest.TestCase):
             recomp_old=(
                 "SrGuestInterpResult interp_result = call_boundary\n"
                 "        ? sr_guest_interp_run_with_boundary(s, target, call_boundary, &fault)\n"
+                "        : drain == SR_DRAIN_SEGMENT ? sr_guest_interp_run_tail_step(s, target, &fault)\n"
                 "        : sr_guest_interp_run(s, target, &fault);"
             ),
             recomp_new="SrGuestInterpResult interp_result = sr_guest_interp_run(s, target, &fault);",
@@ -1706,14 +1922,9 @@ class GeneratedCallDepthTests(unittest.TestCase):
                     self.assertEqual(rc, 0, output)
                     self.assertEqual(fields.get("v0"), 0x57, output)
                     self.assertEqual(fields.get("v1"), _PROBE_SP, output)
-        # A1: a transfer at the entry $sp records nothing, as on 94c278ec9.
-        self._assert_mutant_fails(
-            "A1-a-sibcall-at-the-entry-sp-records-nothing",
-            _native_head_into_an_alloca_tail_end(crossing="tail"), (0,),
-            _SIBCALL_RECORDS_NOTHING,
-            lambda r: r[0][0] != 0 or r[0][2].get("v1") != _PROBE_SP,
-            codegen_args=("--omit-aot=0x00001018",),
-        )
+        # A1 (a transfer at the entry $sp records nothing, as on 94c278ec9) no longer changes
+        # this chain: F, native or interpreted as a TAIL step, records the same entry $sp H's
+        # sibcall would have (#1935), so the run cannot tell the two rules apart.
 
     def test_a_sibcall_into_a_guest_sp_body_keeps_the_callers_sp(self):
         # F frees its alloca through $s0, a $sp load the frame walk does not own. On
@@ -1740,24 +1951,17 @@ class GeneratedCallDepthTests(unittest.TestCase):
                     if omitted != f:
                         body = generated[generated.index(f"void f_{f:08x}(CpuState *s) {{"):]
                         body = body[:body.index("\n}")]
-                        self.assertIn("_sp_entry, _sp_kept); return;", body, "F's record")
+                        self.assertIn("_sp_named, _sp_kept); return;", body, "F's record")
         # K2: every checked $sp load counts as leaving the frame: F records nothing again.
         self._assert_mutant_fails(
             "K2-a-checked-sp-load-always-leaves-the-frame",
             _native_head_into_an_alloca_tail_end(crossing="call", frame=_S0), (0,),
-            {"codegen.py": ("if (s->r[29] < _sp_load || s->r[29] >= _sp_entry) _sp_kept = 0u;",
-                            "_sp_kept = 0u;")},
+            {"codegen.py": ("if (s->r[29] < _sp_load || s->r[29] >= _sp_entry) {{",
+                            "if (1) {{")},
             lambda r: r[0][0] != 0 or r[0][2].get("v1") != _PROBE_SP,
         )
-        # A1: H's sibcall at its entry $sp records nothing. Native F's own record now gives
-        # the same $sp back, so only interpreted F, which hands TAIL on unrecorded, tells.
-        self._assert_mutant_fails(
-            "A1-a-sibcall-at-the-entry-sp-records-nothing",
-            _native_head_into_an_alloca_tail_end(crossing="tail", frame=_S0), (0,),
-            _SIBCALL_RECORDS_NOTHING,
-            lambda r: r[0][0] != 0 or r[0][2].get("v1") != _PROBE_SP,
-            codegen_args=("--omit-aot=0x00001018",),
-        )
+        # A1 (H's sibcall at its entry $sp records nothing) no longer changes this chain in
+        # any tier: F's own record, native or interpreted as a TAIL step, gives the same $sp.
 
     def test_a_switch_to_a_lower_stack_keeps_the_stack_it_loaded(self):
         # F's $sp load leaves its frame downwards, as a context switch does, so F owes no
@@ -1773,8 +1977,8 @@ class GeneratedCallDepthTests(unittest.TestCase):
         # K1: the check never clears the verdict: F's record raises $sp back to its entry.
         self._assert_mutant_fails(
             "K1-a-checked-sp-load-never-leaves-the-frame", _switch_to_a_lower_stack(), (0,),
-            {"codegen.py": ("if (s->r[29] < _sp_load || s->r[29] >= _sp_entry) _sp_kept = 0u;",
-                            "(void)_sp_load;")},
+            {"codegen.py": ("if (s->r[29] < _sp_load || s->r[29] >= _sp_entry) {{",
+                            "(void)_sp_load; if (0) {{")},
             lambda r: r[0][0] != 0 or r[0][2].get("v1") != _PROBE_SP - 0x60,
         )
 
@@ -1784,7 +1988,8 @@ class GeneratedCallDepthTests(unittest.TestCase):
         # 9832da426, interpreted, P's run owed the $sp it started at and wrote it back.
         # F's load stays in its frame, so since #1935 F's record of its entry $sp comes
         # first and is the chain's restore: R1 (the drain lowers $sp to its restore) no longer
-        # changes this chain in any tier, and the plain longjmp tail-call below kills it.
+        # changes this chain in any tier, and
+        # test_a_frame_freed_after_a_switch_keeps_the_switched_stack kills it.
         for codegen_args in ((), ("--omit-aot=0x00001030",)):
             with self.subTest(interpreted=bool(codegen_args)):
                 _generated, results = self._probe(
@@ -1793,6 +1998,205 @@ class GeneratedCallDepthTests(unittest.TestCase):
                 self.assertEqual(rc, 0, output)
                 self.assertEqual(fields.get("v0"), 0x58, output)
                 self.assertEqual(fields.get("v1"), _PROBE_SP, output)
+
+    def test_a_sibcall_after_a_stack_switch_keeps_the_switched_sp(self):
+        # Before (#1935, review F1 of #2084): F interpreted ran as a TAIL step with no frame
+        # of its own and handed TAIL a nested dispatch with no record, so TAIL's write-back
+        # of F's lowered $sp reached H's caller (v1=0x09efff80); F native records its entry
+        # $sp (0x09efffa0). Now the interpreted step records what a native body entered
+        # there records. With H interpreted too, one run covers H and F and the runtime does
+        # not know where F begins, so that tier stays open on #1935.
+        for omitted in (None, 0x1010, 0x1024, 0x1048):
+            codegen_args = () if omitted is None else (f"--omit-aot=0x{omitted:08x}",)
+            with self.subTest(omitted=omitted):
+                _generated, results = self._probe(
+                    _switch_then_a_sibcall_into_a_guest_sp_body(), (0,), codegen_args=codegen_args)
+                rc, output, fields = results[0]
+                self.assertEqual(rc, 0, output)
+                self.assertEqual(fields.get("v0"), 0x57, output)
+                self.assertEqual(fields.get("v1"), _PROBE_SP - 0x60, output)
+        # TS1: the interpreted TAIL step records its transfer but owes no restore.
+        self._assert_mutant_fails(
+            "TS1-an-interpreted-tail-step-owes-no-restore",
+            _switch_then_a_sibcall_into_a_guest_sp_body(), (0,),
+            {"guest_interp.c": (
+                "loaded_sp ? SR_TAIL_RELEASES : SR_TAIL_OWES);",
+                "0u); (void)tail_entry_sp;")},
+            lambda r: r[0][0] != 0 or r[0][2].get("v1") != _PROBE_SP - 0x60,
+            codegen_args=("--omit-aot=0x00001024",),
+        )
+
+    def test_a_load_above_the_entry_leaves_the_frame_in_every_tier(self):
+        # F's $sp load lands 0x40 above its entry $sp. Native, interpreted by a linked call
+        # and interpreted as a TAIL step, F owes no restore and G's record gives back the
+        # stack F loaded. Before #1935's review F2 no fixture ran this part of the check.
+        # With both H and F interpreted one run covers both (see the test above): not here.
+        cases = (("none", None), ("none", 0x1010), ("switch", None), ("switch", 0x1010),
+                 ("switch", 0x1024))
+        for head, omitted in cases:
+            loaded = (_PROBE_SP - 0x60 if head == "switch" else _PROBE_SP) + 0x40
+            codegen_args = () if omitted is None else (f"--omit-aot=0x{omitted:08x}",)
+            with self.subTest(head=head, omitted=omitted):
+                _generated, results = self._probe(
+                    _a_load_above_the_entry_then_a_live_frame_tail(head=head), (0,),
+                    codegen_args=codegen_args)
+                rc, output, fields = results[0]
+                self.assertEqual(rc, 0, output)
+                self.assertEqual(fields.get("v0"), 0x5B, output)
+                self.assertEqual(fields.get("v1"), loaded, output)
+
+        def stays(r, loaded=_PROBE_SP + 0x40):
+            return r[0][0] != 0 or r[0][2].get("v1") != loaded
+
+        # U1: generated code's check drops its `>= _sp_entry` part: F's record comes first.
+        self._assert_mutant_fails(
+            "U1-a-checked-sp-load-above-the-entry-stays-in-the-frame",
+            _a_load_above_the_entry_then_a_live_frame_tail(head="none"), (0,),
+            {"codegen.py": ("if (s->r[29] < _sp_load || s->r[29] >= _sp_entry) {{",
+                            "if (s->r[29] < _sp_load) {{")},
+            stays,
+        )
+        # U2: the interpreter's rule drops the same part, by a linked call and as a TAIL step.
+        interp_upward = {"guest_interp.c": (
+            "return frame_sp == NULL || after < before || after >= *frame_sp;",
+            "return frame_sp == NULL || after < before;")}
+        for head, omitted in (("none", 0x1010), ("switch", 0x1024)):
+            loaded = (_PROBE_SP - 0x60 if head == "switch" else _PROBE_SP) + 0x40
+            self._assert_mutant_fails(
+                f"U2-an-interpreted-sp-load-above-the-entry-stays-in-the-frame-head-{head}",
+                _a_load_above_the_entry_then_a_live_frame_tail(head=head), (0,),
+                interp_upward, lambda r, loaded=loaded: stays(r, loaded),
+                codegen_args=(f"--omit-aot=0x{omitted:08x}",),
+            )
+
+    def test_a_switch_after_an_owing_head_keeps_the_stack_it_loaded(self):
+        # #1949's limit 2 (#1935): H owes its entry $sp and its record comes first in the
+        # chain; F's $sp load then leaves F's frame downwards, a context switch. Before
+        # (base 9b69a1d27) the drain raised the switched $sp back to H's record natively
+        # (v1=0x09f00000); the switch voids every restore recorded before it.
+        h, f = 0x1010, 0x1018
+        shapes = (
+            ("tail", "j", (None, h, f, f + 0x14)),
+            ("return", "j", (None, h, f)),
+            ("tail", "computed", (None, 0x1020, 0x1020 + 0x14)),
+            ("computed", "computed", (None, 0x1020, 0x1020 + 0x14, 0x1020 + 0x24)),
+            ("computed", "j", (None, f + 0x14, f + 0x24)),
+        )
+        for way_out, reach, omitted_set in shapes:
+            for omitted in omitted_set:
+                codegen_args = () if omitted is None else (f"--omit-aot=0x{omitted:08x}",)
+                with self.subTest(way_out=way_out, reach=reach, omitted=omitted):
+                    _generated, results = self._probe(
+                        _an_owing_head_into_a_switch_to_a_lower_stack(
+                            way_out=way_out, reach=reach),
+                        (0,), codegen_args=codegen_args)
+                    rc, output, fields = results[0]
+                    self.assertEqual(rc, 0, output)
+                    self.assertEqual(fields.get("v0"), 0x5A, output)
+                    self.assertEqual(fields.get("v1"), _PROBE_SP - 0x60, output)
+
+        def raised(r):
+            return r[0][0] != 0 or r[0][2].get("v1") != _PROBE_SP - 0x60
+
+        mutants = (
+            # S1: the drain keeps the restore recorded before a release.
+            ("S1-a-release-record-keeps-the-earlier-restore", "tail", "j", (), {
+                "guest_interp.c": (
+                    "if (next.has_restore & SR_TAIL_RELEASES) sr_tail_chain_release(&chain, next.release_sp);",
+                    "(void)0;")}),
+            # S2: generated code's check records "owes nothing", as before #1935's limit 2.
+            ("S2-a-checked-sp-load-out-of-the-frame-owes-nothing", "tail", "j", (), {
+                "codegen.py": ("{{ _sp_kept = SR_TAIL_RELEASES;", "{{ _sp_kept = 0u;")}),
+            # S3: a guest exit that returns says nothing to the drain.
+            ("S3-a-returning-guest-exit-keeps-the-earlier-restore", "return", "j", (), {
+                "codegen.py": ('return "sr_tail_note_exit(_sp_kept, _sp_named); return;"',
+                               'return "return;"')}),
+            # S4: the drain ignores a body that returned out of its frame.
+            ("S4-the-drain-ignores-a-returned-release", "return", "j", (), {
+                "guest_interp.c": ("if (sr_tail_transfer.released) {", "if (0) {")}),
+            # S5: a computed step's segment that ends after a release says nothing.
+            ("S5-a-segment-ending-after-a-release-says-nothing", "tail", "computed", (), {
+                "guest_interp.c": ("    if (chain.released) {", "    if (0) {")}),
+            # S6: a segment hands on a computed transfer without its release.
+            ("S6-a-segment-hands-on-without-its-release", "computed", "computed", (), {
+                "guest_interp.c": ("(chain.released ? SR_TAIL_RELEASES : 0u)", "0u")}),
+            # S7: an interpreted TAIL step records "owes nothing" after leaving its frame.
+            ("S7-an-interpreted-tail-step-out-of-its-frame-owes-nothing", "tail", "j",
+             ("--omit-aot=0x00001018",), {
+                 "guest_interp.c": ("loaded_sp ? SR_TAIL_RELEASES : SR_TAIL_OWES",
+                                    "loaded_sp ? 0u : SR_TAIL_OWES")}),
+            # S8: an interpreted TAIL step that returns out of its frame says nothing.
+            ("S8-an-interpreted-tail-step-return-says-nothing", "return", "j",
+             ("--omit-aot=0x00001018",), {
+                 "guest_interp.c": (
+                     "if (tail_step && loaded_sp) sr_tail_note_exit(SR_TAIL_RELEASES, release_sp);",
+                     "(void)loaded_sp;")}),
+        )
+        for name, way_out, reach, codegen_args, mutation in mutants:
+            self._assert_mutant_fails(
+                name, _an_owing_head_into_a_switch_to_a_lower_stack(way_out=way_out, reach=reach),
+                (0,), mutation, raised, codegen_args=codegen_args)
+
+    def test_a_load_above_the_entry_after_an_owing_head_keeps_the_later_restore(self):
+        # #1949's limit 2 (#1935): H owes its entry $sp and its record comes first; F's $sp
+        # load leaves its frame upwards, and G's record of the stack F loaded is the one
+        # PIECE's write-back needs. Before (base 9b69a1d27) H's record shadowed G's and
+        # PIECE's write-back, 0x20 below, reached H's caller (v1=0x09f00020).
+        for omitted in (None, 0x1010, 0x1018, 0x102C):
+            codegen_args = () if omitted is None else (f"--omit-aot=0x{omitted:08x}",)
+            with self.subTest(omitted=omitted):
+                _generated, results = self._probe(
+                    _a_load_above_the_entry_then_a_live_frame_tail(head="owing"), (0,),
+                    codegen_args=codegen_args)
+                rc, output, fields = results[0]
+                self.assertEqual(rc, 0, output)
+                self.assertEqual(fields.get("v0"), 0x5B, output)
+                self.assertEqual(fields.get("v1"), _PROBE_SP + 0x40, output)
+        # S9: the drain keeps the restore recorded before a release.
+        self._assert_mutant_fails(
+            "S9-a-release-record-keeps-the-earlier-restore-upwards",
+            _a_load_above_the_entry_then_a_live_frame_tail(head="owing"), (0,),
+            {"guest_interp.c": (
+                "if (next.has_restore & SR_TAIL_RELEASES) sr_tail_chain_release(&chain, next.release_sp);",
+                "(void)0;")},
+            lambda r: r[0][0] != 0 or r[0][2].get("v1") != _PROBE_SP + 0x40,
+        )
+
+    def test_a_coroutine_switch_from_a_yield_resumes_on_the_other_stack(self):
+        # A real shape of #1949's limit 2 (#1935): a cooperative yield hands its live frame
+        # to a swapcontext-style SWITCH, which loads the resumed coroutine's $sp and returns
+        # into it. Before (base 9b69a1d27) the drain raised $sp back to H's record natively
+        # (v1=0x09f00000), and an interpreted H restored its entry $sp after the
+        # continuation. Native, H interpreted (a linked call's continuation) and SWITCH
+        # interpreted (a TAIL step's return) agree.
+        for omitted in (None, 0x1010, 0x1030):
+            codegen_args = () if omitted is None else (f"--omit-aot=0x{omitted:08x}",)
+            with self.subTest(omitted=omitted):
+                _generated, results = self._probe(
+                    _a_coroutine_switch_from_a_yield(), (0,), codegen_args=codegen_args)
+                rc, output, fields = results[0]
+                self.assertEqual(rc, 0, output)
+                self.assertEqual(fields.get("v0"), 0x5C, output)
+                self.assertEqual(fields.get("v1"), _PROBE_SP - 0x120, output)
+
+        def raised(r):
+            return r[0][0] != 0 or r[0][2].get("v1") != _PROBE_SP - 0x120
+
+        # S10: an interpreted caller's continuation restores its entry $sp after a release.
+        self._assert_mutant_fails(
+            "S10-an-interpreted-continuation-ignores-a-release",
+            _a_coroutine_switch_from_a_yield(), (0,),
+            {"guest_interp.c": ("const int released = sr_tail_transfer.released != 0u &&",
+                                "const int released = 0 &&")},
+            raised, codegen_args=("--omit-aot=0x00001010",))
+        # S11: dispatch clears a continuation's release before the interpreter reads it.
+        self._assert_mutant_fails(
+            "S11-dispatch-clears-a-continuations-release",
+            _a_coroutine_switch_from_a_yield(), (0,),
+            {"recomp.c": ("if (drain == SR_DRAIN_CHAIN && "
+                          "!(call_boundary != NULL && call_boundary->continuation))",
+                          "if (drain == SR_DRAIN_CHAIN)")},
+            raised, codegen_args=("--omit-aot=0x00001010",))
 
     def test_a_call_site_drains_before_the_caller_goes_on(self):
         _generated, results = self._probe(_call_into_a_live_frame_tail(), (0,))
@@ -1827,7 +2231,10 @@ class GeneratedCallDepthTests(unittest.TestCase):
         self.assertGreater(fields.get("unwinds", 0), 0, output)
         body = generated[generated.index("void f_00001070(CpuState *s) {"):]
         body = body[:body.index("\n}")]
-        self.assertNotIn("_sp_entry", body, "longjmp's exits restore its entry $sp")
+        # longjmp checks its $sp load (#1935) and tells the drain that it left its frame,
+        # but no exit restores its entry $sp over the one it loaded.
+        self.assertNotIn("s->r[29] = _sp_entry", body, "longjmp's exits restore its entry $sp")
+        self.assertIn("sr_tail_note_exit(_sp_kept, _sp_named); return;", body)
 
     def test_switch_case_chaining_to_a_loaded_sp_leaves_the_callers_sp(self):
         # Each case is an entry entered at the alloca-lowered $sp. Before: CASE owed that
@@ -2057,25 +2464,112 @@ class GeneratedCallDepthTests(unittest.TestCase):
         # H releases its frame and tail-calls longjmp, after freeing an alloca or with a
         # plain frame. The plain H records its entry $sp, and longjmp ends the chain above
         # it. Before (#1935): the drain lowered $sp to that record, and the run stopped.
-        released_tail_records = {"guest_interp.c": (
-            "    if (chain_restores && s->r[29] < chain_sp) s->r[29] = chain_sp;",
-            "    if (chain_restores) s->r[29] = chain_sp;")}
+        # Since #1949's limit 2, longjmp's checked load also releases H's record. A piece of
+        # H that calls longjmp ("piece") leaves H's chain by unwinding to F's live frame.
         for name, words in (
                 ("alloca", _longjmp_into_live_frame(tail_called_from_alloca=True)),
-                ("plain", _longjmp_into_live_frame(tail_called_plainly=True))):
+                ("plain", _longjmp_into_live_frame(tail_called_plainly=True)),
+                ("piece", _longjmp_into_live_frame(called_from_a_piece=True))):
             with self.subTest(name):
                 _generated, results = self._probe(words, (0,))
                 rc, output, fields = results[0]
                 self.assertEqual(rc, 0, output)
                 self.assertEqual(fields.get("v0"), 0x107, output)
                 self.assertEqual(fields.get("v1"), _PROBE_SP, output)
-        # R1: the drain lowers $sp to its restore too.
+        # R1 (the drain lowers $sp to its restore too) no longer changes these chains: the
+        # release voids H's record in "plain" and "alloca", and in "piece" the unwind leaves
+        # past the drain's end. A frame freed after a switch still ends a chain above its
+        # restore with no load: the next test kills R1 there.
+
+    def test_a_frame_freed_after_a_switch_keeps_the_switched_stack(self):
+        # F switches to S and hands P a frame on S; P records its entry $sp and frees the
+        # frame, and N writes back S. The chain ends above P's restore, and $sp stays at S.
+        p, n = "--omit-aot=0x00001030", "--omit-aot=0x0000103c"
+        for codegen_args in ((), (p,), (n,)):
+            with self.subTest(omitted=codegen_args):
+                _generated, results = self._probe(
+                    _a_switch_then_a_live_frame_piece_frees_it(), (0,), codegen_args=codegen_args)
+                rc, output, fields = results[0]
+                self.assertEqual(rc, 0, output)
+                self.assertEqual(fields.get("v0"), 0x5D, output)
+                self.assertEqual(fields.get("v1"), _PROBE_SP - 0x60, output)
+        # R1: the drain lowers $sp to its restore too: F's caller comes back on S - 0x20.
         self._assert_mutant_fails(
-            "R1-the-drain-lowers-sp", _longjmp_into_live_frame(tail_called_plainly=True),
-            (0,), released_tail_records,
-            lambda r: r[0][0] != 0 or r[0][2].get("v0") != 0x107
-            or r[0][2].get("v1") != _PROBE_SP,
+            "R1-the-drain-lowers-sp", _a_switch_then_a_live_frame_piece_frees_it(), (0,),
+            {"guest_interp.c": (
+                "    if (chain.restores && s->r[29] < chain.restore_sp) s->r[29] = chain.restore_sp;",
+                "    if (chain.restores) s->r[29] = chain.restore_sp;")},
+            lambda r: r[0][0] != 0 or r[0][2].get("v1") != _PROBE_SP - 0x60,
         )
+
+    def test_a_piece_that_frees_an_alloca_keeps_the_heads_restore(self):
+        # F owes its entry $sp; P's checked load frees its alloca back to P's entry $sp,
+        # above P's frame but inside F's, and TAIL returns to F's caller. Before (review B1 of
+        # #2238, at b0b54722d): every tier released F's restore and F's caller came back
+        # 0x20 too low, v1 = _PROBE_SP - 0x20; base 9b69a1d27 was right.
+        words = _a_piece_frees_an_alloca_then_hands_the_frame_on()
+        f, p = "--omit-aot=0x00001010", "--omit-aot=0x00001028"
+        for codegen_args in ((), (p,), (f,)):
+            with self.subTest(omitted=codegen_args):
+                generated, results = self._probe(words, (0,), codegen_args=codegen_args)
+                rc, output, fields = results[0]
+                self.assertEqual(rc, 0, output)
+                self.assertEqual(fields.get("v0"), 0x56, output)
+                self.assertEqual(fields.get("v1"), _PROBE_SP, output)
+                if not codegen_args:
+                    body = generated[generated.index("void f_00001028(CpuState *s) {"):]
+                    body = body[:body.index("\n}")]
+                    self.assertIn("_sp_named = sr_tail_release_bound(_sp_named, _sp_load, s->r[29]);",
+                                  body, "P checks its load")
+
+        def lowered(r):
+            return r[0][0] != 0 or r[0][2].get("v1") != _PROBE_SP
+
+        for name, codegen_args, mutation in (
+            # B1: the drain voids an earlier restore whatever the release's bound.
+            ("B1-the-drain-ignores-the-release-bound", (), {"guest_interp.c": (
+                "if (chain->restores && bound < chain->restore_sp) return;", "(void)bound;")}),
+            # B2: generated code's release leaves every frame.
+            ("B2-a-checked-load-releases-every-frame", (), {"codegen.py": (
+                "_sp_named = sr_tail_release_bound(_sp_named, _sp_load, s->r[29]);",
+                "_sp_named = SR_TAIL_RELEASES_ALL;")}),
+            # B3: the interpreter's release leaves every frame.
+            ("B3-an-interpreted-load-releases-every-frame", (p,), {"guest_interp.c": (
+                "const uint32_t bound = frame_sp == NULL || after < before ? SR_TAIL_RELEASES_ALL : after;",
+                "const uint32_t bound = SR_TAIL_RELEASES_ALL;")}),
+            # B4: an interpreted caller's continuation ignores the release's bound.
+            ("B4-the-continuation-ignores-the-release-bound", (f,), {"guest_interp.c": (
+                "sr_tail_transfer.released != 0u &&\n"
+                "                                  sr_tail_transfer.release_sp >= entry_sp;",
+                "sr_tail_transfer.released != 0u;")}),
+        ):
+            self._assert_mutant_fails(name, words, (0,), mutation, lowered,
+                                      codegen_args=codegen_args)
+
+        # F reaches P by a computed `jr`, so P's release travels out of a computed step's
+        # segment: at the segment's end ("j"), or with the computed transfer it hands on
+        # ("jr"). Native and with P interpreted.
+        by_j = _a_piece_frees_an_alloca_reached_by_jr(hands_on_by_jr=False)
+        by_jr = _a_piece_frees_an_alloca_reached_by_jr(hands_on_by_jr=True)
+        for shape, computed in (("j", by_j), ("jr", by_jr)):
+            for codegen_args in ((), ("--omit-aot=0x00001030",)):
+                with self.subTest(reached_by="jr", hands_on_by=shape, omitted=codegen_args):
+                    _generated, results = self._probe(computed, (0,), codegen_args=codegen_args)
+                    rc, output, fields = results[0]
+                    self.assertEqual(rc, 0, output)
+                    self.assertEqual(fields.get("v0"), 0x56, output)
+                    self.assertEqual(fields.get("v1"), _PROBE_SP, output)
+        for name, computed, mutation in (
+            # B5: a segment that ends after a release passes on no bound.
+            ("B5-a-segment-end-passes-on-no-bound", by_j, {"guest_interp.c": (
+                "        sr_tail_transfer.release_sp = chain.release_sp;",
+                "        sr_tail_transfer.release_sp = SR_TAIL_RELEASES_ALL;")}),
+            # B6: a segment hands on a computed transfer with no bound for its release.
+            ("B6-a-segment-hands-on-no-bound", by_jr, {"guest_interp.c": (
+                "sr_tail_transfer.release_sp = chain.released ? chain.release_sp : 0u;",
+                "sr_tail_transfer.release_sp = chain.released ? SR_TAIL_RELEASES_ALL : 0u;")}),
+        ):
+            self._assert_mutant_fails(name, computed, (0,), mutation, lowered)
 
     def test_a_longjmp_through_an_interpreted_callees_piece_reaches_the_setjmp_frame(self):
         # G calls H, which lowers $sp and hands its live frame to the native piece P, and P
@@ -2084,10 +2578,12 @@ class GeneratedCallDepthTests(unittest.TestCase):
         # dispatch_call, nothing checked the piece's return, and the interpreter wrote H's
         # entry $sp back and handed back as if H had returned: G returned, v0 = 0xee0.
         words = _longjmp_into_live_frame(through_a_piece=True)
+        calls = _longjmp_into_live_frame(called_from_a_piece=True)
         omit_h = ("--omit-aot=0x00001080",)
-        for codegen_args in ((), omit_h):
-            with self.subTest(interpreted=bool(codegen_args)):
-                generated, results = self._probe(words, (0,), codegen_args=codegen_args)
+        for shape, codegen_args in (("tail", ()), ("tail", omit_h), ("call", omit_h)):
+            with self.subTest(shape=shape, interpreted=bool(codegen_args)):
+                generated, results = self._probe(words if shape == "tail" else calls, (0,),
+                                                 codegen_args=codegen_args)
                 rc, output, fields = results[0]
                 self.assertEqual(rc, 0, output)
                 self.assertEqual(fields.get("v0"), 0x107, output)
@@ -2103,15 +2599,15 @@ class GeneratedCallDepthTests(unittest.TestCase):
             lambda r: r[0][0] != 0 or r[0][2].get("v0") != 0x107,
             codegen_args=omit_h,
         )
-        # N2: the handoff writes H's entry $sp back over the $sp longjmp loaded.
-        self._assert_mutant_fails(
-            "N2-the-handoff-restores-after-a-return-elsewhere", words, (0,),
-            {"guest_interp.c": ("if (owes && !returned_elsewhere) s->r[29] = entry_sp;",
-                                "if (owes) s->r[29] = entry_sp;")},
-            lambda r: r[0][0] != 0 or r[0][2].get("v0") != 0x107
-            or r[0][2].get("v1") != _PROBE_SP,
-            codegen_args=omit_h,
-        )
+        # N2 (the handoff writes H's entry $sp back after a return elsewhere) no longer
+        # changes these chains: since #1949's limit 2, P's tail call into longjmp releases
+        # H's restore ("tail"), and when P calls longjmp ("call") F's setjmp frame resumes at
+        # the $sp longjmp loaded either way. Measured at 712f0b630: both
+        # shapes, interpreted H, mutant and source alike end v0 = 0x107, v1 = _PROBE_SP. The
+        # guard is for exits that note no release, the stack census's. The census does tell
+        # them apart on the "tail" shape (source v0 = 0x7, mutant 0x107), but there the source
+        # itself stops fatal=1 before F's continuation, on base 9b69a1d27 as on this branch,
+        # so that tier is no evidence either way.
 
     def test_an_eret_into_the_rest_of_an_interpreted_callee_keeps_its_call(self):
         # H lowers $sp and executes `break`. The handler, native or interpreted, steps EPC
@@ -2216,14 +2712,13 @@ class GeneratedCallDepthTests(unittest.TestCase):
                 body = generated[generated.index("void f_00001010(CpuState *s) {"):]
                 body = body[:body.index("\n}")]
                 self.assertIn("_sp_entry, 1u", body, "F records its entry $sp at the switch")
-        # P1: a $sp load on one path takes the restore from every exit of the body.
-        self._assert_mutant_fails(
-            "P1-the-verdict-is-per-body", _switch_chain_with_another_way_out(other="foreign"),
-            (0,),
-            {"codegen.py": ("        GUEST_SP_ENTRIES.add(start)\n        if guest_exits == exits:",
-                            "        guest_exits = exits\n        if True:")},
-            lambda r: r[0][0] != 0 or r[0][2].get("v1") != _PROBE_SP,
-        )
+        # P1 (a $sp load on one path takes the restore from every exit of the body) no
+        # longer changes this chain: since #1949's limit 2 every body with guest-owned exits
+        # checks its loads when they run, so the switch's record owes F's entry $sp whatever
+        # the static walk claims, as long as the load on the other path never ran. That
+        # covers TAIL exits only: the mutant also drops the write-back of each return and
+        # fall-off end that follows no load, which no fixture here pins (each such return
+        # path is balanced, or an earlier record raises $sp after it).
 
     def test_scoped_arrays_with_a_sibcall_keep_the_callers_sp(self):
         # The shape of real code again, with an error path that releases the frame and
@@ -2256,8 +2751,8 @@ class GeneratedCallDepthTests(unittest.TestCase):
         # I1: the interpreter's handoff owes nothing.
         self._assert_mutant_fails(
             "I1-interpreted-handoff-owes-nothing", _alloca_tail_end(), (0,),
-            {"guest_interp.c": ("            if (owes && !returned_elsewhere) s->r[29] = entry_sp;",
-                                "            (void)entry_sp; (void)returned_elsewhere;")},
+            {"guest_interp.c": ("            if (owes && !returned_elsewhere && !released) s->r[29] = entry_sp;",
+                                "            (void)entry_sp; (void)returned_elsewhere; (void)released;")},
             lambda r: r[0][0] != 0 or r[0][2].get("v1") != _PROBE_SP,
             codegen_args=interpreted_f,
         )
@@ -2265,7 +2760,7 @@ class GeneratedCallDepthTests(unittest.TestCase):
         self._assert_mutant_fails(
             "I2-an-alloca-free-leaves-the-frame", _alloca_tail_end(), (0,),
             {"guest_interp.c": (
-                "    return boundary == NULL || after < before || after >= boundary->entry_sp;",
+                "    return frame_sp == NULL || after < before || after >= *frame_sp;",
                 "    return 1;")},
             lambda r: r[0][0] != 0 or r[0][2].get("v1") != _PROBE_SP,
             codegen_args=interpreted_f,
@@ -2284,8 +2779,8 @@ class GeneratedCallDepthTests(unittest.TestCase):
         # The last recorded restore wins instead of the first: the caller sees C2's SP.
         self._assert_mutant_fails(
             "T1-last-restore-wins", _three_body_chain(), (0,),
-            {"guest_interp.c": ("if (next.has_restore && !chain_restores) {",
-                                "if (next.has_restore) {")},
+            {"guest_interp.c": ("if ((next.has_restore & SR_TAIL_OWES) && !chain.restores) {",
+                                "if (next.has_restore & SR_TAIL_OWES) {")},
             lambda r: r[0][0] == 0 and r[0][2].get("v1") != _PROBE_SP,
         )
         # The owner's SP is restored at the TAIL site, before the target runs in its frame.
@@ -2342,10 +2837,9 @@ class GeneratedCallDepthTests(unittest.TestCase):
         # F runs in H's frame instead of the live one.
         self._assert_mutant_fails(
             "T6-segment-restores-early", _segment_chain(), (0,),
-            {"guest_interp.c": ("                sr_tail_transfer.has_restore = 1u;\n"
-                                "            }\n            return;",
-                                "                sr_tail_transfer.has_restore = 1u;\n"
-                                "            }\n            if (chain_restores) s->r[29] = chain_sp;\n"
+            {"guest_interp.c": ("(chain.released ? SR_TAIL_RELEASES : 0u));\n            return;",
+                                "(chain.released ? SR_TAIL_RELEASES : 0u));\n"
+                                "            if (chain.restores) s->r[29] = chain.restore_sp;\n"
                                 "            return;")},
             lambda r: r[0][0] == 0 and r[0][2].get("v0") != _PROBE_SP - 32,
         )

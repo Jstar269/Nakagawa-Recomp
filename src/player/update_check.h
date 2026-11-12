@@ -47,6 +47,12 @@ extern "C" {
     "https://api.github.com/repos/" NK_UPDATE_REPOSITORY "/releases?per_page=10"
 /* Release assets download from github.com, which redirects to GitHub's asset host. */
 #define NK_UPDATE_DOWNLOAD_HOSTS "github.com;release-assets.githubusercontent.com"
+/* GitHub treats owner and repository names as case-insensitive, and its answers use the
+   repository's current capitalisation (Jstar269/Nakagawa-Recomp since its rename), so this
+   part of a URL compares without case and the rest of the URL exactly. */
+#define NK_UPDATE_REPOSITORY_URL "https://github.com/" NK_UPDATE_REPOSITORY
+/* Both prefixes start with NK_UPDATE_REPOSITORY_URL. They spell it out so that the network
+   egress test in tools/test_prereq_fetcher.py can read each URL from this header. */
 #define NK_UPDATE_RELEASE_PAGE_PREFIX "https://github.com/" NK_UPDATE_REPOSITORY "/releases/tag/"
 #define NK_UPDATE_DOWNLOAD_PREFIX "https://github.com/" NK_UPDATE_REPOSITORY "/releases/download/"
 #define NK_UPDATE_USER_AGENT "NakagawaRecomp/UpdateCheck"
@@ -102,6 +108,10 @@ typedef struct {
     NkSemver current;
     bool newer;               /* newest is newer than the running version */
 } NkUpdateCheckResult;
+
+/* True when url is one of this repository's release pages: NK_UPDATE_RELEASE_PAGE_PREFIX
+   (the repository part in any case) followed by a tag. */
+bool nk_update_is_release_page(const char *url);
 
 /* Picks the newest release in a GitHub Releases API answer (a JSON array).
    Drafts and tags that are not versions are skipped; pre-releases count. Fails
@@ -159,12 +169,39 @@ bool nk_update_download(PackageHttpOpen transport, void *transport_context,
 bool nk_update_install_folder(const char *exe_dir, const char *downloads_dir,
                               const char *zip_name, char *out, size_t out_size);
 
+/* The file nk_update_claim_staging writes into a staging folder: it says the folder is
+   Nakagawa's own unpack in progress, so a later try may remove it. */
+#define NK_UPDATE_STAGING_MARK ".nakagawa-update-partial"
+
+/* Creates staging (the "<target_dir>.partial" folder an install unpacks into) and
+   writes NK_UPDATE_STAGING_MARK in it. A folder left there by an earlier install that
+   was interrupted (power loss, a crash, the player closed mid-unpack) carries the
+   mark and is removed first, so the next try works without the person deleting
+   anything; a folder without the mark is never touched and is refused with
+   UPDATE_INSTALL_LEFTOVER. Any host. */
+bool nk_update_claim_staging(const char *staging, NkUpdateError *error);
+
 /* Unpacks the verified ZIP into target_dir, which must not exist yet: first into
-   "<target_dir>.partial", then checks that every file the release's SHA256SUMS.txt
-   lists arrived, then renames it into place. log_path takes the unpacker's
-   output. Windows only (Windows' own tar.exe unpacks). */
+   "<target_dir>.partial" (nk_update_claim_staging), then checks that every file the
+   release's SHA256SUMS.txt lists arrived, removes the staging mark, then renames it into
+   place. Until that rename the running version's folder is untouched, so an interrupted
+   install leaves it working. log_path takes the unpacker's output. Windows only
+   (Windows' own tar.exe unpacks). */
 bool nk_update_install(const char *zip_path, const char *target_dir, const char *log_path,
                        NkUpdateError *error);
+/* Whether the running player was put in place by the Windows installer (Setup.exe):
+   exe_dir is <install>/bin and Inno's uninstaller "unins000.exe" sits in <install>.
+   Such a copy updates by running the new release's Setup.exe, which upgrades it in
+   place and keeps the person's data, so the Settings page offers the release page
+   and never unpacks a ZIP beside it. False for a ZIP or portable copy, a NULL or
+   empty exe_dir, and any folder not named bin. */
+bool nk_update_installed_by_setup(const char *exe_dir);
+/* Defence in depth for the player's download and install steps: when exe_dir is a copy the
+   installer put in place (nk_update_installed_by_setup), fills error with UPDATE_INSTALLED_BY_SETUP
+   and returns true, and the step must not start. The Settings page already offers only the release
+   page for such a copy, so this is reached only if something starts a step anyway. Returns false and
+   clears error otherwise. */
+bool nk_update_refuse_for_setup_copy(const char *exe_dir, NkUpdateError *error);
 /* Whether nk_update_install can work on this host: Windows only. Elsewhere the
    Settings page offers the release page, not a download. */
 bool nk_update_install_supported(void);

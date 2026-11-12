@@ -89,6 +89,9 @@ float sr_vfpu_log2(float x) { return x; }
 float sr_vfpu_rcp(float x) { return x; }
 float sr_vfpu_rsqrt(float x) { return x; }
 float sr_vfpu_sqrt(float x) { return x; }
+uint32_t sr_vfpu_dot_bits(const uint32_t *a, const uint32_t *b, int n) {
+    (void)a; (void)b; (void)n; return 0u;
+}
 
 int main(void) {
     for (int width = 1; width <= 4; width++) {

@@ -192,6 +192,7 @@ def _runtime_title_diagnostic_inventory() -> dict[str, set[int]]:
     ]
     configured += [item["address"] for item in compat_overrides.TITLE_CONFIGURED_SCHEDULER_COMPAT]
     configured += [item["address"] for item in compat_overrides.TITLE_CONFIGURED_DISPATCH]
+    configured += list(compat_overrides.RETIRED_TITLE_CONFIGURED_DISPATCH)
     configured += [item["address"] for item in compat_overrides.SCHEDULER_HOOKS]
     all_addresses = (set(compat_overrides.RETIRED_DISPATCH_TARGETS) - {0, 0x1000}) | set(configured) | {
         0x0030a0bf, 0x0031101c, 0x0031105c,
@@ -1640,6 +1641,16 @@ class GenericRuntimeTitleAddressGuardTests(unittest.TestCase):
                 contaminated, inventory[relative_path])
             self.assertIn(address, found, relative_path)
 
+    def test_retired_title_configured_dispatch_addresses_stay_in_the_guard(self) -> None:
+        """Retiring a binding empties its inventory entry; the guard keeps its address (#363)."""
+        retired = set(compat_overrides.RETIRED_TITLE_CONFIGURED_DISPATCH)
+        self.assertEqual(retired, {0x00030950, 0x0003e06c, 0x00292fa0})
+        live = {int(item["address"]) for item in compat_overrides.TITLE_CONFIGURED_DISPATCH}
+        self.assertEqual(retired & live, set(), "an address is both live and retired")
+        for relative_path, addresses in _runtime_title_diagnostic_inventory().items():
+            with self.subTest(source=relative_path):
+                self.assertEqual(retired - addresses, set())
+
     def test_init_walker_guard_and_its_restore_are_retired(self) -> None:
         inventory = compat_overrides.RETIRED_INIT_WALKER_GUARD
         self.assertEqual(inventory["decision"], "b")
@@ -1705,9 +1716,12 @@ _EMITTED_COMPAT_FIRED = re.compile(r'sr_compat_fired\("(\w+)", 0x([0-9a-f]{8})u,
 
 
 def _active_census() -> "list[dict]":
-    """The census entries that can still fire: a retired entry has no firing site."""
-    return [patch for patch in compat_overrides.temporary_compatibility_patches()
-            if not str(patch.get("retirement") or "").startswith("retired")]
+    """The census entries that can still fire: a retired entry has no firing site.
+
+    The split is compat_overrides' own, so this gate, the --debt-census report and
+    docs/COMPATIBILITY.md cannot disagree about which patches are live."""
+    active: "list[dict]" = compat_overrides.active_temporary_compatibility_patches()
+    return active
 
 
 def _runtime_compat_fired_sites(sources: "dict[str, str]") -> "set[tuple[str, str]]":
@@ -1814,6 +1828,86 @@ class FiredPatchReportCensusTests(unittest.TestCase):
                         '    notes = (ROOT / "docs" / "RELEASE_NOTES_v0.0.1.md").read_text()\n'
                         '    self.assertIn(str(len(_active_census())), notes)\n')
         self.assertEqual(_functions_comparing_release_notes_with_census(contaminated), ["test_x"])
+
+
+_REPORT_ACTIVE_LINE = re.compile(r"^active temporary_compatibility_patch entries: (\d+)$", re.MULTILINE)
+_REPORT_RETIRED_LINE = re.compile(r"^retired temporary_compatibility_patch entries: (\d+)$", re.MULTILINE)
+_REPORT_RETIRED_HEADER = "RETIRED (historical provenance; no firing site):"
+
+
+class DebtReportActiveCountTests(unittest.TestCase):
+    """#363 acceptance: "a generated debt report can reach zero temporary
+    compatibility patches for the qualified authentic path without deleting
+    historical provenance".
+
+    Retired entries stay in the manifest as provenance, so the report has to
+    split them from live debt itself; docs/COMPATIBILITY.md cites
+    ``--debt-census`` for its active count, so the report and the doc must agree.
+    """
+
+    def _report(self) -> str:
+        report: str = compat_overrides.format_debt_census()
+        return report
+
+    def test_the_report_states_the_active_count(self) -> None:
+        report = self._report()
+        active = _REPORT_ACTIVE_LINE.findall(report)
+        self.assertEqual([int(n) for n in active], [len(_active_census())],
+                         "--debt-census must state how many temporary patches can still fire")
+        retired = _REPORT_RETIRED_LINE.findall(report)
+        expected = len(compat_overrides.temporary_compatibility_patches()) - len(_active_census())
+        self.assertEqual([int(n) for n in retired], [expected])
+
+    def test_the_documented_count_is_the_reported_count(self) -> None:
+        text = LIVE_CENSUS_DOC.read_text(encoding="utf-8")
+        self.assertEqual([int(n) for n in _CENSUS_SENTENCE.findall(text)],
+                         [int(n) for n in _REPORT_ACTIVE_LINE.findall(self._report())])
+
+    def test_retired_patches_are_listed_as_provenance_not_as_debt(self) -> None:
+        report = self._report()
+        self.assertIn(_REPORT_RETIRED_HEADER, report)
+        active_part, retired_part = report.split(_REPORT_RETIRED_HEADER, 1)
+        retired = compat_overrides.retired_temporary_compatibility_patches()
+        self.assertTrue(retired, "the retired provenance list is empty; was it deleted?")
+        for patch in retired:
+            with self.subTest(patch=patch["id"]):
+                self.assertNotIn(patch["id"], active_part)
+                self.assertIn(patch["id"], retired_part)
+                self.assertRegex(retired_part,
+                                 rf"retired_by:\s+{re.escape(patch['retired_by'])}\b")
+        for patch in _active_census():
+            with self.subTest(patch=patch["id"]):
+                self.assertIn(patch["id"], active_part)
+
+    def test_active_and_retired_partition_the_census(self) -> None:
+        every = [patch["id"] for patch in compat_overrides.temporary_compatibility_patches()]
+        active = [patch["id"] for patch in _active_census()]
+        retired = [patch["id"] for patch in compat_overrides.retired_temporary_compatibility_patches()]
+        self.assertEqual(sorted(active + retired), sorted(every))
+        self.assertEqual(set(active) & set(retired), set())
+
+    def test_every_retired_patch_names_the_pull_request_that_retired_it(self) -> None:
+        for patch in compat_overrides.retired_temporary_compatibility_patches():
+            with self.subTest(patch=patch["id"]):
+                self.assertRegex(str(patch.get("retired_by") or ""), r"^#\d+$")
+                self.assertEqual(compat_overrides.temporary_patch_defects(patch), [])
+
+    def test_retirement_state_and_retired_by_must_agree(self) -> None:
+        live = dict(name="x", category="temporary_compatibility_patch", owner_issue="#363",
+                    retirement="Retire once the guest needs no host help.",
+                    test="tools/test_compat_manifest.py")
+        self.assertEqual(compat_overrides.temporary_patch_defects(live), [])
+        self.assertFalse(compat_overrides.is_retired_patch(live))
+        # A retired entry with no retiring pull request has lost its provenance.
+        unnamed = dict(live, retirement="retired (2026-11-07): gone")
+        self.assertTrue(compat_overrides.is_retired_patch(unnamed))
+        self.assertIn(compat_overrides.RETIRED_BY_DEFECT,
+                      compat_overrides.temporary_patch_defects(unnamed))
+        self.assertEqual(compat_overrides.temporary_patch_defects(dict(unnamed, retired_by="#1")), [])
+        # A live entry that claims a retiring pull request is a half-done retirement.
+        claimed = dict(live, retired_by="#1")
+        self.assertIn(compat_overrides.LIVE_RETIRED_BY_DEFECT,
+                      compat_overrides.temporary_patch_defects(claimed))
 
 
 if __name__ == "__main__":

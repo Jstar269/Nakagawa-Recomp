@@ -25,6 +25,32 @@ typedef enum {
     PACKAGE_BUILD_STAGE_CANCELLED
 } PackageBuildStage;
 
+/* Settings > Build speed: how much of the PC a package build takes. Balanced, the
+ * default, is zero so a zeroed session or settings block starts there. */
+typedef enum {
+    /* As many compile jobs as the free memory and the CPUs allow (#2286), at normal
+       priority. */
+    PACKAGE_BUILD_SPEED_BALANCED = 0,
+    /* At most two jobs, and the build's whole process tree at low priority, so a game
+       and other apps stay smooth while it runs. */
+    PACKAGE_BUILD_SPEED_BACKGROUND,
+    /* A job for every logical CPU the free memory allows, at normal priority. */
+    PACKAGE_BUILD_SPEED_FASTEST,
+    PACKAGE_BUILD_SPEED_COUNT
+} PackageBuildSpeed;
+
+/* "balanced", "background" or "fastest": the settings.json value and the
+ * --build-speed argument nk_cli.py takes. */
+const char *package_build_speed_key(PackageBuildSpeed speed);
+/* "Balanced", "Background" or "Fastest": what Settings and the build card show. */
+const char *package_build_speed_name(PackageBuildSpeed speed);
+/* The speed a key names; false (and *out unchanged) for one this build does not know. */
+bool package_build_speed_from_key(const char *key, PackageBuildSpeed *out);
+/* The next speed in Settings' order: Background, Balanced, Fastest, then round. */
+PackageBuildSpeed package_build_speed_next(PackageBuildSpeed speed);
+/* The priority the build child starts at: low for Background only. */
+NkProcessPriority package_build_speed_priority(PackageBuildSpeed speed);
+
 typedef enum {
     PACKAGE_PROGRESS_STATUS_UNKNOWN = 0,
     PACKAGE_PROGRESS_STATUS_START,
@@ -51,6 +77,9 @@ typedef struct {
     /* A calm note that other apps may feel slower while the build runs ("notice"),
        empty when the event carries none. */
     char notice[192];
+    /* The build speed and the job count it gave, with what bound it ("speed"), empty
+       when the event carries none. */
+    char speed[192];
     PackageBuildStage stage_enum;
     PackageProgressStatus status_enum;
 } PackageProgressEvent;
@@ -106,6 +135,12 @@ typedef struct {
     /* The compile stage's note that other apps may feel slower; empty when the
        build runs a single job. */
     char compile_notice[192];
+    /* Set by the caller before package_builder_start: Settings > Build speed. It picks
+       the job count (--build-speed) and the priority the child starts at. */
+    PackageBuildSpeed build_speed;
+    /* The build card's speed line: the mode's name from the start, then the child's
+       own line once it has planned the jobs (an event's "speed"). */
+    char speed_line[192];
     /* Set by the caller before package_builder_start: the build compiles every system
        library itself and leaves the shared library cache untouched (#1306). */
     bool no_shared_libraries;
@@ -168,6 +203,11 @@ float package_builder_compile_fraction(const PackageBuildSession *session);
  * NULL outside that stage or when the build gave none. */
 const char *package_builder_compile_notice(const PackageBuildSession *session);
 
+/* The build speed line the build card shows while a build runs, or NULL when none
+ * runs: "Build speed: Background" until the child plans its jobs, then its own line
+ * with the job count and what bound it. */
+const char *package_builder_speed_line(const PackageBuildSession *session);
+
 /* Apply a progress event to the session state machine. */
 void package_builder_apply_event(
     PackageBuildSession *session,
@@ -187,7 +227,8 @@ const char *package_builder_get_output_line(
 );
 
 /* Locate runnable CPython 3.15.x, or 3.14.x when no 3.15 runs, from PYTHON, UCRT64, or
- * PATH. Candidates must pass a bounded version probe before their paths are returned. */
+ * PATH. Candidates must pass a bounded version probe before their paths are returned.
+ * On Android the only candidate is the APK's libnk_python.so in its native library folder. */
 bool package_builder_find_python(char *out_path, size_t out_size);
 /* Prefer the installed pinned prerequisite under data_root, then use host search. */
 bool package_builder_find_python_in_root(const char *data_root,
@@ -394,7 +435,34 @@ bool package_builder_toolchain_missing(
     char *out_message, size_t out_message_size
 );
 
-/* Start the package build as a child process using nk_platform_spawn_process. */
+/* The UCRT64 bin folder that must lead the build child's PATH, so python, make
+ * and gcc all come from one toolchain (#2278). In order: a verified release
+ * bundle's msys64/ucrt64/bin (prerequisites_root, which alone decides when set),
+ * the per-user download under data_root, then a system MSYS2 UCRT64 install: a
+ * bin on path_env whose parent folder is named ucrt64, msys_hint (a prefix or its
+ * bin, as MSYS_PATH), then msys_default_prefix (NULL off Windows). A candidate
+ * counts only when its bin/gcc.exe exists and, for a system install, so does
+ * include/SDL3/SDL.h. A bin on path_env counts only when its parent folder is
+ * named exactly ucrt64. Returns false, with out empty, when no complete toolchain
+ * is found: PATH is then left alone and sdl3-check names the problem. */
+bool package_builder_resolve_toolchain_bin(const char *prerequisites_root,
+                                           const char *data_root,
+                                           const char *path_env,
+                                           const char *msys_hint,
+                                           const char *msys_default_prefix,
+                                           char *out, size_t out_size);
+
+/* Compose "<toolchain_bin><list separator><path_env>" for the build child's
+ * PATH. False, with out empty, when toolchain_bin is NULL or empty or the result
+ * does not fit out_size; package_builder_start then passes no PATH override, so
+ * the child inherits PATH unchanged. The buffer there is 32768 bytes, the Windows
+ * variable limit, so composing fails only when PATH plus the toolchain folder and
+ * its separator would pass 32767 characters. */
+bool package_builder_compose_build_path(const char *toolchain_bin, const char *path_env,
+                                        char *out, size_t out_size);
+
+/* Start the package build as a child process with nk_platform_spawn_tool (on
+ * Android only a tool in the app's native library folder can start). */
 NkResult package_builder_start(
     PackageBuildSession *session,
     const char *python_path,

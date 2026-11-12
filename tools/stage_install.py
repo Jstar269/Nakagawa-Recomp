@@ -20,9 +20,13 @@ The install uses the release layout the player already searches
                                      console icon)
 
 Only a folder this tool created (it holds ``.nakagawa-install.json``) is ever
-replaced, so pointing ``--dest`` at an unrelated folder fails closed. A
+replaced, so pointing ``--dest`` at an unrelated folder fails closed. A folder the
+Windows installer set up (it holds ``unins000.exe``) is refused for staging and for
+``--uninstall`` (``INSTALL_DESTINATION_INSTALLER_OWNED``), and a shortcut that starts a
+different existing copy is never replaced (``INSTALL_SHORTCUT_OTHER_COPY``, checked for
+every requested shortcut before anything is staged). A
 shortcut is a Windows ``.lnk`` written through ``WScript.Shell``; it starts the
-player with ``--ui=next`` by default, the way Explorer would start it, and
+player with no arguments by default, the way Explorer would start it, and
 carries the player's AppUserModelID (``APP_USER_MODEL_ID``, #2006), so a pinned
 shortcut, the launcher and every game it starts share one taskbar group.
 ``--desktop-shortcut`` puts one on the Desktop and ``--start-menu-shortcut`` one
@@ -30,10 +34,20 @@ in the user's Start menu (#2003); both may be given.
 On Linux, either flag writes a per-user ``.desktop`` entry (which the desktop
 shows in its application menu) and a 256 px icon under ``$XDG_DATA_HOME``
 (``~/.local/share`` when unset). The marker records the paths written outside
-``--dest`` in ``integration`` and keeps them across runs. Nothing removes them
-yet: to uninstall, delete them by hand (docs/SETUP.md). Neither flag runs on its
+``--dest`` in ``integration`` and keeps them across runs. Neither flag runs on its
 own: the portable ZIP writes no shortcut, so a Start-menu entry needs this tool,
 for example ``python tools/stage_install.py --dest <folder> --start-menu-shortcut``.
+
+``--uninstall --dest <folder>`` removes what this tool wrote and nothing else (#2003,
+#324): ``bin/``, ``source/``, the icon, the marker, any half-finished ``.old`` or
+``.staging-*`` copy, and the shortcuts and desktop entries the marker records. It never
+reads or deletes the per-user folders: the library, saves, settings, logs, fonts and
+cache live under ``%LOCALAPPDATA%\\Nakagawa`` (or ``~/.local/share/nakagawa-recomp``),
+not in the install. In portable mode (a ``bin/portable.txt``) the data folder
+``bin/data``, the portable marker and the install marker stay where they are, so the
+user's data is never removed with the program. A recorded path whose name this tool would
+not have written is skipped, so an edited marker cannot make it delete another file. A
+folder with no marker is refused. ``--dry-run`` lists what would go.
 
 The Windows install's ``bin/`` also carries ``runtime-manifest.json``
 (``tools/stage_runtime_dlls.py``): the size, SHA-256 and imports of the player
@@ -73,6 +87,7 @@ import subprocess
 import sys
 import tarfile
 import time
+from typing import NoReturn
 import zipfile
 import zlib
 
@@ -81,6 +96,7 @@ if str(ROOT / "tools") not in sys.path:
     sys.path.insert(0, str(ROOT / "tools"))
 
 import make_app_icon  # noqa: E402
+from nk_powershell import powershell_exe  # noqa: E402
 import stage_runtime_dlls  # noqa: E402
 
 IS_WINDOWS = os.name == "nt"
@@ -94,7 +110,7 @@ APP_USER_MODEL_ID = "Nakagawa.Recomp"
 APP_DESKTOP_ID = "nakagawa-recomp"
 DESKTOP_ENTRY_NAME = f"{APP_DESKTOP_ID}.desktop"
 DESKTOP_ICON_NAME = "nakagawa-recomp.png"
-DEFAULT_ARGUMENTS = "--ui=next"
+DEFAULT_ARGUMENTS = ""
 
 
 class InstallError(RuntimeError):
@@ -120,12 +136,18 @@ def app_icon() -> bytes:
     return returned
 
 
+_GIT_FAILED = "INSTALL_SOURCE_EXPORT_FAILED"
+
+
 def _git(repo: Path, *arguments: str, binary: bool = False):
-    result = subprocess.run(["git", "-C", str(repo), *arguments], capture_output=True,
-                            check=False)
+    try:
+        result = subprocess.run(["git", "-C", str(repo), *arguments], capture_output=True,
+                                check=False)
+    except OSError as exc:  # git missing or not runnable: a FAIL line, not a traceback
+        raise InstallError(f"{_GIT_FAILED}: git {arguments[0]} could not run: {exc}") from exc
     if result.returncode != 0:
         detail = result.stderr.decode("utf-8", "replace").strip()
-        raise InstallError(f"INSTALL_SOURCE_EXPORT_FAILED: git {arguments[0]} failed: {detail}")
+        raise InstallError(f"{_GIT_FAILED}: git {arguments[0]} failed: {detail}")
     return result.stdout if binary else result.stdout.decode("utf-8", "replace").strip()
 
 
@@ -142,9 +164,24 @@ def export_source(repo: Path, destination: Path, revision: str = "HEAD") -> str:
     return returned
 
 
+#: Inno Setup's uninstaller and its data, written beside the program by the Windows installer (#2208).
+INSTALLER_UNINSTALL_FILES = ("unins000.exe", "unins000.dat")
+
+
+def _check_not_installer_owned(dest: Path) -> None:
+    """Refuse a folder the Windows installer set up. Staging into it or uninstalling it from here would leave
+    Setup's uninstaller and its Apps & features entry pointing at a different program, or at nothing."""
+    if any((dest / name).exists() for name in INSTALLER_UNINSTALL_FILES):
+        raise InstallError(
+            f"INSTALL_DESTINATION_INSTALLER_OWNED: {dest} was set up by the Windows installer (Setup.exe), "
+            "which has its own uninstall in Apps & features; two uninstallers must never share a folder. "
+            "Choose another folder")
+
+
 def _check_destination(dest: Path) -> None:
     if dest.exists() and not dest.is_dir():
         raise InstallError(f"INSTALL_DESTINATION_INVALID: {dest} is not a folder")
+    _check_not_installer_owned(dest)
     if dest.is_dir() and any(dest.iterdir()) and not (dest / MARKER).is_file():
         raise InstallError(
             f"INSTALL_DESTINATION_NOT_OWNED: {dest} already holds files this tool did not "
@@ -248,8 +285,7 @@ def _recorded_integration(dest: Path) -> list[str]:
 
 def record_integration(dest: Path, paths) -> None:
     """Add the paths a shortcut wrote outside ``dest`` to the install marker, keeping the
-    ones recorded before. Nothing reads the list back yet: it says what to delete by hand
-    (docs/SETUP.md), and a later uninstall step can use it."""
+    ones recorded before. ``--uninstall`` reads the list back and removes those files."""
     marker = dest.resolve() / MARKER
     record = json.loads(marker.read_text(encoding="utf-8"))
     kept = [str(path) for path in record.get("integration", [])]
@@ -305,7 +341,7 @@ def write_desktop_entry(dest: Path, arguments: str = DEFAULT_ARGUMENTS) -> list[
 
 def _special_folder(name: str, code: str) -> Path:
     result = subprocess.run(
-        ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+        [powershell_exe(), "-NoProfile", "-NonInteractive", "-Command",
          f"[Environment]::GetFolderPath('{name}')"],
         capture_output=True, text=True, check=False)
     folder = result.stdout.strip()
@@ -415,7 +451,7 @@ def read_shortcut_app_id(shortcut: Path) -> str:
         raise InstallError("INSTALL_SHORTCUT_UNSUPPORTED: shortcuts are read on Windows only")
     environment = {**os.environ, "NK_LNK": _shell_path(shortcut), "NK_APP_ID_CS": _APP_ID_CSHARP}
     result = subprocess.run(
-        ["powershell", "-NoProfile", "-NonInteractive", "-Command", _READ_APP_ID_SCRIPT],
+        [powershell_exe(), "-NoProfile", "-NonInteractive", "-Command", _READ_APP_ID_SCRIPT],
         capture_output=True, text=True, env=environment, check=False)
     if result.returncode != 0:
         raise InstallError(
@@ -423,12 +459,50 @@ def read_shortcut_app_id(shortcut: Path) -> str:
     return result.stdout.strip()
 
 
+_READ_TARGET_SCRIPT = (
+    "$ErrorActionPreference = 'Stop'; "
+    "(New-Object -ComObject WScript.Shell).CreateShortcut($env:NK_LNK).TargetPath"
+)
+
+
+def read_shortcut_target(shortcut: Path) -> str:
+    """The program a .lnk starts, or "" when it cannot be read (Windows only)."""
+    if os.name != "nt":
+        raise InstallError("INSTALL_SHORTCUT_UNSUPPORTED: shortcuts are read on Windows only")
+    result = subprocess.run(
+        [powershell_exe(), "-NoProfile", "-NonInteractive", "-Command", _READ_TARGET_SCRIPT],
+        capture_output=True, text=True, env={**os.environ, "NK_LNK": _shell_path(shortcut)}, check=False)
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def _check_shortcut_not_another_copys(shortcut: Path, dest: Path) -> None:
+    """Refuse to replace the shortcut of a different, existing copy (the Windows installer writes the same
+    name with the same taskbar identity, so replacing it would break that copy's shortcut, and removing either
+    copy would remove the other's). The same copy, a stale shortcut whose program is gone, and one that cannot
+    be read are replaced."""
+    if not shortcut.is_file():
+        return
+    target = read_shortcut_target(shortcut)
+    if not target:
+        print(f"stage_install: note: could not read where {shortcut} points, so it is replaced", file=sys.stderr)
+        return
+    ours = dest / "bin" / "nakagawa_player.exe"
+    existing = Path(target)
+    if existing.is_file() and os.path.normcase(os.path.realpath(existing)) != os.path.normcase(
+            os.path.realpath(ours)):
+        raise InstallError(
+            f"INSTALL_SHORTCUT_OTHER_COPY: {shortcut} already starts another copy of Nakagawa ({existing}); "
+            "writing it here would replace that copy's shortcut. Uninstall or delete that copy and its "
+            "shortcut first, or choose another shortcut with --shortcut")
+
+
 def write_shortcut(shortcut: Path, dest: Path, arguments: str = DEFAULT_ARGUMENTS) -> None:
     """Write a .lnk that starts bin/nakagawa_player.exe the way Explorer does, with the
-    player's AppUserModelID."""
+    player's AppUserModelID. Refuses to replace another copy's shortcut."""
     if os.name != "nt":
         raise InstallError("INSTALL_SHORTCUT_UNSUPPORTED: shortcuts are written on Windows only")
     dest = dest.resolve()
+    _check_shortcut_not_another_copys(shortcut, dest)
     environment = os.environ.copy()
     environment.update({
         "NK_LNK": _shell_path(shortcut),
@@ -440,7 +514,7 @@ def write_shortcut(shortcut: Path, dest: Path, arguments: str = DEFAULT_ARGUMENT
         "NK_APP_ID_CS": _APP_ID_CSHARP,
     })
     result = subprocess.run(
-        ["powershell", "-NoProfile", "-NonInteractive", "-Command", _SHORTCUT_SCRIPT],
+        [powershell_exe(), "-NoProfile", "-NonInteractive", "-Command", _SHORTCUT_SCRIPT],
         capture_output=True, text=True, env=environment, check=False)
     if result.returncode != 0 or not shortcut.is_file():
         raise InstallError(
@@ -557,14 +631,44 @@ def _zip_info(name: str, date_time, *, directory: bool, size: int = 0) -> zipfil
     return info
 
 
+#: The attested toolchain record the release recipe copies to the stage root; its
+#: ``candidate.commit`` is the source commit the package was built from (#324).
+TOOLCHAIN_RECORD = "toolchain.json"
+#: A full commit id: SHA-1 (40 hex digits) or SHA-256 (64), as tools/record_toolchain.py records it.
+_COMMIT_SHA = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
+#: The ``--record`` file of a portable ZIP: what a release dry run compares (#324).
+PORTABLE_RECORD_FORMAT = "nakagawa-portable-zip-record"
+PORTABLE_RECORD_SCHEMA_VERSION = 1
+
+
+def staged_source_commit(stage: Path) -> str:
+    """The source commit the stage's ``toolchain.json`` names (``candidate.commit``)."""
+    try:
+        record = json.loads((Path(stage) / TOOLCHAIN_RECORD).read_text(encoding="utf-8"))
+        commit = record["candidate"]["commit"]
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError) as exc:
+        raise InstallError(
+            f"PORTABLE_SOURCE_COMMIT_MISSING: the stage's {TOOLCHAIN_RECORD} names no candidate "
+            f"commit ({type(exc).__name__}: {exc})"
+        ) from exc
+    if not isinstance(commit, str) or not _COMMIT_SHA.fullmatch(commit):
+        raise InstallError(
+            f"PORTABLE_SOURCE_COMMIT_MISSING: the stage's {TOOLCHAIN_RECORD} candidate commit "
+            f"{commit!r} is not a full lower-case commit id (40 or 64 hex digits)"
+        )
+    return commit
+
+
 def write_portable_zip(stage: Path, zip_path: Path, *, source_date_epoch: int,
-                       verify_runtime=None) -> dict:
+                       verify_runtime=None, expected_commit: str | None = None) -> dict:
     """Write ``stage`` as a byte-reproducible ZIP at ``zip_path``; return its summary.
 
     ``SHA256SUMS.txt`` is rewritten first and ``bin/runtime-manifest.json`` is
     verified (``verify_runtime`` replaces that check; tests pass their own).
     Entries carry no root folder, the layout ``ZipFile.CreateFromDirectory``
-    produced for v0.0.1: one per file and one per empty folder.
+    produced for v0.0.1: one per file and one per empty folder. The summary
+    names the source commit from the stage's ``toolchain.json``, which must be
+    ``expected_commit`` when that is given.
     """
     stage = Path(stage).resolve()
     zip_path = Path(zip_path).resolve()
@@ -574,6 +678,12 @@ def write_portable_zip(stage: Path, zip_path: Path, *, source_date_epoch: int,
         raise InstallError(f"PORTABLE_ZIP_EXISTS: {zip_path} already exists; write a new file")
     if zip_path.is_relative_to(stage):
         raise InstallError("PORTABLE_ZIP_INSIDE_STAGE: write the ZIP outside the staged folder")
+    source_commit = staged_source_commit(stage)
+    if expected_commit is not None and source_commit != expected_commit:
+        raise InstallError(
+            f"PORTABLE_SOURCE_COMMIT_MISMATCH: the stage was built from {source_commit}, "
+            f"not from {expected_commit}"
+        )
     bin_dir = stage / "bin"
     try:
         if verify_runtime is None:
@@ -612,13 +722,58 @@ def write_portable_zip(stage: Path, zip_path: Path, *, source_date_epoch: int,
         "empty_folders": len(empty),
         "unpacked_bytes": total,
         "source_date_epoch": source_date_epoch,
+        "source_commit": source_commit,
+        "sha256sums_sha256": _sha256_path(stage / "SHA256SUMS.txt"),
         "zlib": zlib.ZLIB_RUNTIME_VERSION,
     }
+
+
+def portable_zip_record(summary: dict) -> bytes:
+    """The ``--record`` bytes of a portable ZIP summary: no local path, so two builds compare.
+
+    It names the ZIP by file name with its size and SHA-256, the source commit, the
+    SHA-256 of ``SHA256SUMS.txt`` (which covers every other file), the entry time and
+    the zlib that deflated it. Two builds of one package give the same bytes.
+    """
+    record = {key: value for key, value in summary.items() if key != "zip"}
+    record.update({
+        "format": PORTABLE_RECORD_FORMAT,
+        "schema_version": PORTABLE_RECORD_SCHEMA_VERSION,
+        "zip_name": Path(summary["zip"]).name,
+    })
+    return (json.dumps(record, indent=2, sort_keys=True, ensure_ascii=True) + "\n").encode("ascii")
+
+
+def resolve_commit(revision: str, *, repo: Path = ROOT) -> str:
+    """The full commit id ``revision`` names in ``repo`` (this tool's own checkout by default)."""
+    try:
+        return str(_git(repo, "rev-parse", "--verify", f"{revision}^{{commit}}"))
+    except InstallError as exc:
+        detail = str(exc).removeprefix(f"{_GIT_FAILED}: ")
+        raise InstallError(f"PORTABLE_REVISION_UNRESOLVED: {revision!r} names no commit in {repo}: "
+                           f"{detail}") from exc
+
+
+def _check_record_path(record: Path, zip_path: Path, stage: Path) -> Path:
+    """Refuse a ``--record`` path that exists, is or holds the ZIP, or lies in the stage."""
+    record = Path(record).resolve()
+    zip_path = Path(zip_path).resolve()
+    if record.is_relative_to(zip_path) or zip_path.is_relative_to(record):
+        raise InstallError("PORTABLE_RECORD_IS_ZIP: --record and --portable-zip name the same path, "
+                           "or one lies inside the other")
+    if record.is_relative_to(Path(stage).resolve()):
+        raise InstallError("PORTABLE_RECORD_INSIDE_STAGE: write the record outside the staged folder; "
+                           "SHA256SUMS.txt would not list it")
+    if record.exists():
+        raise InstallError(f"PORTABLE_RECORD_EXISTS: {record} already exists; write a new file")
+    return record
 
 
 _VERSION = r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?"
 _PLAYER_ZIP = re.compile(rf"nakagawa-recomp-({_VERSION})-(windows-x64)\.zip")
 _SOURCE_ZIP = re.compile(rf"nakagawa-recomp-({_VERSION})-prerequisite-sources\.zip")
+# The Windows installer (#2208): a second file for the platform that sits beside the ZIP, never in place of it.
+_SETUP_EXE = re.compile(rf"nakagawa-recomp-({_VERSION})-(windows-x64)-setup\.exe")
 # What a catalogue launcher drops before it ranks archives: checksum, signature, source and
 # debug files. Every released file that is not the player archive carries one of these words.
 _AUXILIARY_TOKENS = ("sha256", "checksum", ".minisig", ".sig", ".asc", "source", "src", "debug", "symbols",
@@ -638,24 +793,34 @@ def check_release_assets(names) -> list[str]:
 
     Exactly one player archive per platform, ``nakagawa-recomp-<version>-<os>-<arch>.zip``, with its
     ``.sha256`` (and optionally that file's ``.minisig``); the prerequisite source archive with its
-    ``.sha256``; one version throughout; and nothing else a launcher's name filter would keep as a
-    second candidate.
+    ``.sha256``; optionally the platform's installer ``nakagawa-recomp-<version>-windows-x64-setup.exe``
+    with its ``.sha256`` (and optionally ``.minisig``), only beside that platform's ZIP; one version
+    throughout; and nothing else a launcher's name filter would keep as a second candidate.
+
+    The installer is not a name a filter drops. A launcher ranks the archive formats it can install and
+    puts a ZIP ahead of an ``.exe`` (Quiver Launcher's ``FORMATS``: ``.zip`` first, ``.exe`` near the
+    end), so the ZIP stays the one candidate and the installer is for people on the release page.
     """
     names = sorted(set(names))
     problems: list[str] = []
     players: dict[str, list[str]] = {}
+    setups: list[re.Match[str]] = []
     versions: set[str] = set()
     for name in names:
         player = _PLAYER_ZIP.fullmatch(name)
         source = _SOURCE_ZIP.fullmatch(name)
+        setup = _SETUP_EXE.fullmatch(name)
         if player:
             players.setdefault(player[2], []).append(name)
-        matched = player or source
+        if setup:
+            setups.append(setup)
+        matched = player or source or setup
         if matched:
             versions.add(matched[1])
             continue
-        checked = re.fullmatch(r"(nakagawa-recomp-.+\.zip)\.sha256(\.minisig)?", name)
-        if checked and (_PLAYER_ZIP.fullmatch(checked[1]) or _SOURCE_ZIP.fullmatch(checked[1])):
+        checked = re.fullmatch(r"(nakagawa-recomp-.+\.(?:zip|exe))\.sha256(\.minisig)?", name)
+        if checked and (_PLAYER_ZIP.fullmatch(checked[1]) or _SOURCE_ZIP.fullmatch(checked[1])
+                        or _SETUP_EXE.fullmatch(checked[1])):
             # A signature signs the checksum file, so it needs the checksum and the archive both.
             needed = [checked[1]] + ([f"{checked[1]}.sha256"] if checked[2] else [])
             problems += [f"ASSET_ORPHAN: {name} has no {other}" for other in needed if other not in names]
@@ -672,6 +837,14 @@ def check_release_assets(names) -> list[str]:
         for archive in found:
             if f"{archive}.sha256" not in names:
                 problems.append(f"ASSET_CHECKSUM_MISSING: {archive}.sha256")
+    for setup in setups:
+        installer = setup.group(0)
+        zips = [_PLAYER_ZIP.fullmatch(archive) for archive in players.get(setup[2], [])]
+        if not any(found and found[1] == setup[1] for found in zips):
+            problems.append(f"ASSET_INSTALLER_WITHOUT_ZIP: {installer} needs {setup[2]} ZIP of the same version "
+                            "beside it; the installer is never the only download")
+        if f"{installer}.sha256" not in names:
+            problems.append(f"ASSET_CHECKSUM_MISSING: {installer}.sha256")
     sources = [name for name in names if _SOURCE_ZIP.fullmatch(name)]
     if not sources:
         problems.append("ASSET_SOURCE_MISSING: no nakagawa-recomp-<version>-prerequisite-sources.zip; the ZIP "
@@ -681,11 +854,183 @@ def check_release_assets(names) -> list[str]:
     problems += [f"ASSET_CHECKSUM_MISSING: {name}.sha256" for name in sources if f"{name}.sha256" not in names]
     if len(versions) > 1:
         problems.append(f"ASSET_VERSION_MIXED: {', '.join(sorted(versions))}")
-    kept = [name for name in names if not is_auxiliary_asset(name) and name.lower().endswith(_ARCHIVE_SUFFIXES)]
+    kept = [name for name in names if not is_auxiliary_asset(name) and name.lower().endswith(_ARCHIVE_SUFFIXES)
+            and not _SETUP_EXE.fullmatch(name)]
     if sorted(kept) != sorted(n for found in players.values() for n in found):
         problems.append("ASSET_FILTER_MISMATCH: a name filter that drops checksum, signature, source and debug "
                         f"files would leave {kept}, not the player archives")
     return problems
+
+
+#: What this tool writes directly under ``dest`` (besides the marker). ``--uninstall`` removes
+#: these and nothing else, so a file the user put beside them survives.
+OWNED_ENTRIES = ("bin", "source", "nakagawa.ico")
+#: The file names a recorded integration path may have: the ones this tool writes.
+INTEGRATION_NAMES = frozenset({SHORTCUT_NAME, DESKTOP_ENTRY_NAME, DESKTOP_ICON_NAME})
+#: In portable mode these stay in ``bin/`` (``NK_PORTABLE_MARKER`` and ``NK_PORTABLE_DATA_LEAF``
+#: in src/core/nk_portable.h): the marker the user created and their data folder.
+PORTABLE_MARKER = "portable.txt"
+PORTABLE_DATA_LEAF = "data"
+
+
+def _remove_path(path: Path) -> None:
+    """Delete a file, link or folder tree; a link is unlinked, never followed."""
+    try:
+        if path.is_symlink() or path.is_file():
+            path.unlink()
+        elif path.is_dir():
+            shutil.rmtree(path)
+    except OSError as exc:
+        raise InstallError(
+            f"UNINSTALL_IN_USE: {path} could not be removed ({exc}); close the player and run "
+            "the uninstall again") from exc
+
+
+#: The keys every marker this tool wrote has (``stage_install`` writes more; they are checked
+#: when present).
+MARKER_REQUIRED_KEYS = ("schema_version", "source_commit", "platform", "player")
+
+
+def _plain_name(value) -> bool:
+    """A single file name: no folder part, no drive, no ``.`` or ``..``."""
+    return (isinstance(value, str) and value not in ("", ".", "..")
+            and not any(char in value for char in '/\\:\0'))
+
+
+def _read_marker(dest: Path) -> dict:
+    """The marker of ``dest`` once it passes the checks that make it this tool's own.
+
+    A file named ``.nakagawa-install.json`` is not proof by itself: any folder can hold one.
+    It must be a JSON object with the keys ``stage_install`` writes, and every path it lists
+    must stay inside ``dest``. Anything else raises ``INSTALL_MARKER_INVALID`` and nothing
+    has been touched."""
+    marker = dest / MARKER
+
+    def refuse(why: str) -> NoReturn:
+        raise InstallError(
+            f"INSTALL_MARKER_INVALID: {marker} {why}, so this tool will not trust it; nothing "
+            "was removed. If it is not yours, delete the folder by hand")
+
+    try:
+        record = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        refuse(f"cannot be read as JSON ({exc})")
+    if not isinstance(record, dict):
+        refuse("is not a JSON object")
+    missing = [key for key in MARKER_REQUIRED_KEYS if key not in record]
+    if missing:
+        refuse(f"lacks {', '.join(missing)}")
+    version = record["schema_version"]
+    if not isinstance(version, int) or isinstance(version, bool) or not 1 <= version <= SCHEMA_VERSION:
+        refuse(f"has schema_version {version!r}, not 1 to {SCHEMA_VERSION}")
+    player = record["player"]
+    if not (isinstance(player, str) and player.startswith("bin/") and _plain_name(player[4:])):
+        refuse(f"lists the player {player!r}, not bin/<file name>")
+    files = record.get("runtime_files", [])
+    if not isinstance(files, list) or not all(_plain_name(name) for name in files):
+        refuse("lists a runtime file that is not a plain file name inside bin/")
+    integration = record.get("integration", [])
+    if not isinstance(integration, list) or not all(isinstance(path, str) for path in integration):
+        refuse("lists an integration entry that is not a path")
+    root = dest.resolve()
+    for relative in [player, *(f"bin/{name}" for name in files)]:
+        try:
+            (root / relative).resolve().relative_to(root)
+        except ValueError:
+            refuse(f"lists {relative}, which resolves outside {root}")
+    return record
+
+
+def _check_uninstall_destination(dest: Path) -> None:
+    """Refuse a folder no install of this tool would be in: a drive root, the home folder, or
+    a folder holding the home folder."""
+    home = Path.home().resolve()
+    if dest.parent == dest or dest == home or dest in home.parents:
+        raise InstallError(
+            f"UNINSTALL_DESTINATION_REFUSED: {dest} is a drive root or holds the home folder; "
+            "name the folder the install was staged into")
+
+
+def plan_uninstall(dest: Path) -> dict:
+    """What ``uninstall`` would remove and keep, without touching anything.
+
+    Raises ``INSTALL_DESTINATION_NOT_OWNED`` for a folder without this tool's marker and
+    ``INSTALL_MARKER_INVALID`` for one whose marker is not what ``stage_install`` writes."""
+    dest = dest.resolve()
+    _check_uninstall_destination(dest)
+    _check_not_installer_owned(dest)
+    if not (dest / MARKER).is_file():
+        raise InstallError(
+            f"INSTALL_DESTINATION_NOT_OWNED: {dest} has no {MARKER}, so this tool did not "
+            "create it; remove an unpacked portable ZIP by deleting its folder")
+    record = _read_marker(dest)
+    remove: list[Path] = []
+    keep: list[Path] = []
+    portable = (dest / "bin" / PORTABLE_MARKER).is_file()
+    for name in OWNED_ENTRIES:
+        entry = dest / name
+        if not (entry.exists() or entry.is_symlink()):
+            continue
+        if name == "bin" and portable and entry.is_dir() and not entry.is_symlink():
+            # Portable mode: the program goes, the user's data and their marker stay.
+            for child in sorted(entry.iterdir()):
+                if child.name in (PORTABLE_DATA_LEAF, PORTABLE_MARKER):
+                    keep.append(child)
+                else:
+                    remove.append(child)
+        else:
+            remove.append(entry)
+    leftovers = {f"{name}.old" for name in OWNED_ENTRIES}
+    for child in sorted(dest.iterdir()):
+        if child.name == "bin.old" and child.is_dir() and not child.is_symlink():
+            # A crashed update can leave the previous bin/, with the user's portable data in it.
+            inner = sorted(child.iterdir())
+            if any(item.name in (PORTABLE_DATA_LEAF, PORTABLE_MARKER) for item in inner):
+                for item in inner:
+                    (keep if item.name in (PORTABLE_DATA_LEAF, PORTABLE_MARKER) else remove).append(item)
+            else:
+                remove.append(child)
+        elif child.name.startswith(".staging-") or child.name in leftovers:
+            remove.append(child)
+    integration: list[Path] = []
+    skipped: list[str] = []
+    for recorded in record.get("integration", []):
+        path = Path(recorded)
+        if (not path.is_absolute() or path.name not in INTEGRATION_NAMES
+                or path.is_dir() or path.is_symlink()):
+            skipped.append(recorded)
+        elif path.exists():
+            integration.append(path)
+    return {"dest": dest, "remove": remove, "keep": keep, "integration": integration,
+            "skipped_integration": skipped, "portable": portable}
+
+
+def uninstall(dest: Path, *, dry_run: bool = False) -> dict:
+    """Remove an install this tool made; the module docstring says exactly what goes."""
+    plan = plan_uninstall(dest)
+    dest = plan["dest"]
+    left_in_folder: list[str] = []
+    if not dry_run:
+        # The install first: if it is in use the shortcuts stay, still recorded, and a second
+        # run finishes. The marker goes last so a half-done uninstall can be run again.
+        for path in plan["remove"]:
+            _remove_path(path)
+        for path in plan["integration"]:
+            _remove_path(path)
+        if plan["keep"]:
+            # The user's portable data lives here, so the install marker stays with it.
+            left_in_folder = sorted(child.name for child in dest.iterdir())
+        else:
+            (dest / MARKER).unlink()
+            left_in_folder = sorted(child.name for child in dest.iterdir())
+            if not left_in_folder:
+                dest.rmdir()
+    return {"dest": str(dest), "dry_run": dry_run,
+            "removed": [str(path) for path in plan["remove"]],
+            "removed_integration": [str(path) for path in plan["integration"]],
+            "skipped_integration": plan["skipped_integration"],
+            "kept": [str(path) for path in plan["keep"]],
+            "left_in_folder": left_in_folder}
 
 
 def main(argv=None) -> int:
@@ -700,6 +1045,9 @@ def main(argv=None) -> int:
                              "one-archive-per-platform contract")
     parser.add_argument("--zip-stage", type=Path,
                         help="the staged release folder --portable-zip archives")
+    parser.add_argument("--record", type=Path,
+                        help="with --portable-zip, also write the ZIP's record (file name, size, SHA-256, "
+                             "source commit) to this new file, the evidence a release dry run compares")
     parser.add_argument("--source-date-epoch",
                         help="ZIP entry time as a Unix time (default: $SOURCE_DATE_EPOCH, else "
                              "the commit time of --revision)")
@@ -707,7 +1055,8 @@ def main(argv=None) -> int:
     parser.add_argument("--player", type=Path, default=default_player,
                         help=f"built player executable (default: build/{default_player.name})")
     parser.add_argument("--revision", default="HEAD",
-                        help="committed revision exported as source/ (default: HEAD)")
+                        help="committed revision exported as source/; with --portable-zip, the commit the "
+                             "stage's toolchain.json must name (default: HEAD)")
     parser.add_argument("--desktop-shortcut", action="store_true",
                         help=f"also write '{SHORTCUT_NAME}' on the Desktop (Windows), or a "
                              f"'{DESKTOP_ENTRY_NAME}' entry (Linux)")
@@ -717,8 +1066,27 @@ def main(argv=None) -> int:
     parser.add_argument("--shortcut", type=Path,
                         help="write the Windows shortcut at this exact .lnk path instead")
     parser.add_argument("--arguments", default=DEFAULT_ARGUMENTS,
-                        help=f"player arguments in the shortcut (default: {DEFAULT_ARGUMENTS})")
+                        help="player arguments in the shortcut (default: none)")
+    parser.add_argument("--uninstall", action="store_true",
+                        help="remove the install in --dest and the shortcuts and desktop entries "
+                             "it recorded; never the per-user data folders")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="with --uninstall, list what would be removed and remove nothing")
     args = parser.parse_args(argv)
+    if args.record is not None and args.portable_zip is None:
+        parser.error("--record goes with --portable-zip")
+    if args.dry_run and not args.uninstall:
+        parser.error("--dry-run goes with --uninstall")
+    if args.uninstall:
+        if args.dest is None or args.portable_zip is not None or args.zip_stage is not None:
+            parser.error("--uninstall needs --dest and cannot be combined with --portable-zip")
+        try:
+            summary = uninstall(args.dest, dry_run=args.dry_run)
+        except InstallError as exc:
+            print(f"stage_install: FAIL: {exc}", file=sys.stderr)
+            return 1
+        print(json.dumps({"event": "uninstall", **summary}, sort_keys=True))
+        return 0
     if args.check_assets is not None:
         paths = [Path(item) for item in args.check_assets]
         if len(paths) == 1 and paths[0].is_dir():
@@ -733,8 +1101,20 @@ def main(argv=None) -> int:
         if args.portable_zip is None or args.zip_stage is None or args.dest is not None:
             parser.error("--portable-zip and --zip-stage go together, without --dest")
         try:
+            record_path = (None if args.record is None
+                           else _check_record_path(args.record, args.portable_zip, args.zip_stage))
+            expected_commit = resolve_commit(args.revision)
             epoch = resolve_source_date_epoch(args.source_date_epoch, revision=args.revision)
-            summary = write_portable_zip(args.zip_stage, args.portable_zip, source_date_epoch=epoch)
+            summary = write_portable_zip(args.zip_stage, args.portable_zip, source_date_epoch=epoch,
+                                         expected_commit=expected_commit)
+            if record_path is not None:
+                try:
+                    record_path.parent.mkdir(parents=True, exist_ok=True)
+                    with record_path.open("xb") as output:
+                        output.write(portable_zip_record(summary))
+                except OSError as exc:
+                    raise InstallError(f"PORTABLE_RECORD_UNWRITTEN: {args.record}: {exc}; the ZIP "
+                                       f"{summary['zip']} was written, its record was not") from exc
         except InstallError as exc:
             print(f"stage_install: FAIL: {exc}", file=sys.stderr)
             return 1
@@ -746,6 +1126,19 @@ def main(argv=None) -> int:
         if args.shortcut is not None and not IS_WINDOWS:
             raise InstallError("INSTALL_SHORTCUT_UNSUPPORTED: --shortcut writes a Windows .lnk; "
                                "on Linux use --desktop-shortcut")
+        shortcuts: list[Path] = []
+        if IS_WINDOWS:
+            if args.shortcut is not None:
+                shortcuts.append(args.shortcut)
+            else:
+                if args.desktop_shortcut:
+                    shortcuts.append(desktop_folder() / SHORTCUT_NAME)
+                if args.start_menu_shortcut:
+                    shortcuts.append(start_menu_folder() / SHORTCUT_NAME)
+            # Every requested shortcut is checked before anything is staged or written, so a refusal leaves
+            # nothing half done.
+            for shortcut in shortcuts:
+                _check_shortcut_not_another_copys(shortcut, args.dest.resolve())
         record = stage_install(args.dest, args.player, revision=args.revision)
         print(f"stage_install: staged {record['player']} and source {record['source_commit'][:12]} "
               f"into {args.dest.resolve()}")
@@ -755,19 +1148,11 @@ def main(argv=None) -> int:
                 record_integration(args.dest, [entry, icon])
                 print(f"stage_install: desktop entry {entry}")
         else:
-            shortcuts = []
-            if args.shortcut is not None:
-                shortcuts.append(args.shortcut)
-            else:
-                if args.desktop_shortcut:
-                    shortcuts.append(desktop_folder() / SHORTCUT_NAME)
-                if args.start_menu_shortcut:
-                    shortcuts.append(start_menu_folder() / SHORTCUT_NAME)
             for shortcut in shortcuts:
                 write_shortcut(shortcut, args.dest, args.arguments)
+                # Recorded as each is written, so --uninstall removes it even if a later one fails.
+                record_integration(args.dest, [shortcut])
                 print(f"stage_install: shortcut {shortcut}")
-            if shortcuts:
-                record_integration(args.dest, shortcuts)
     except InstallError as exc:
         print(f"stage_install: FAIL: {exc}", file=sys.stderr)
         return 1

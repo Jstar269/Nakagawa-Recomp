@@ -49,8 +49,8 @@ try:
     from . import ci_paths  # noqa: E402
     from .vulkan_sdk import VulkanSdkError, discover_vulkan_sdk  # noqa: E402
 except ImportError:  # pragma: no cover - direct script execution
-    import ci_paths  # noqa: E402
-    from vulkan_sdk import VulkanSdkError, discover_vulkan_sdk  # noqa: E402
+    import ci_paths  # type: ignore[no-redef]  # noqa: E402
+    from vulkan_sdk import VulkanSdkError, discover_vulkan_sdk  # type: ignore[no-redef]  # noqa: E402
 
 #: Findings the publication audit raises only because the generated controls
 #: have not been regenerated yet.  The ledger is maintained outside the
@@ -146,6 +146,24 @@ STRICT_C_UNITS: dict[str, StrictUnit] = {
     "src/rt/vfpu_oracle_host.c": StrictUnit(
         recipes=("$(PSP_VFPU_ORACLE_EXE)",),
         includes=("fixtures/vfpu_oracle",),
+    ),
+    # FSR 3's host and pass read AMD's resource identifiers from the imported SDK headers.
+    "src/rt/fsr3_host.c": StrictUnit(
+        recipes=("fsr3-host-selftest",),
+        includes=("third_party/fidelityfx_sdk/upscalers/fsr3/include/gpu",),
+    ),
+    "src/rt/gpu_sdl3vk/fsr3_pass.c": StrictUnit(
+        recipes=("fsr3-pass-selftest",),
+        includes=("third_party/fidelityfx_sdk/upscalers/fsr3/include/gpu",),
+    ),
+    # So do frame generation's, from its own headers.
+    "src/rt/fsr3_fg_host.c": StrictUnit(
+        recipes=("fsr3-fg-host-selftest",),
+        includes=("third_party/fidelityfx_sdk/framegeneration/fsr3/include/gpu",),
+    ),
+    "src/rt/gpu_sdl3vk/fsr3_fg_pass.c": StrictUnit(
+        recipes=("fsr3-fg-pass-selftest",),
+        includes=("third_party/fidelityfx_sdk/framegeneration/fsr3/include/gpu",),
     ),
     "src/rt/title_config.c": StrictUnit(
         recipes=("$(BUILD_DIR)/title_config.o",),

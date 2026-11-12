@@ -323,8 +323,11 @@ class AdmitPathsTest(unittest.TestCase):
 
         steps = admit_paths.remaining_steps(result)
         self.assertIn("push origin main", steps[0])
-        self.assertIn(f"merge --no-edit {branch}", steps[1])
-        self.assertIn(f"provenance_refresh.py --base {result['admission_commit']} --trusted-ledger", steps[2])
+        # One refresh on the pull request's own branch: no admit-branch merge, no admission commit as its base.
+        self.assertIn("provenance_refresh.py --trusted-ledger", steps[1])
+        self.assertNotIn("merge --no-edit", " ".join(steps))
+        self.assertNotIn("--base", " ".join(steps))
+        self.assertEqual(len(steps), 4)
         self.assertNotIn(str(fixture.tmp / "nakagawa-admit-"), " ".join(steps))
         self.assertEqual([p for p in fixture.tmp.iterdir() if p.name.startswith("nakagawa-admit-")], [],
                          "the scratch candidate is removed")
@@ -625,54 +628,89 @@ class BatchAdmitPathsTest(unittest.TestCase):
     def test_two_entry_batches_merge_in_both_orders_with_canonical_profiles(self) -> None:
         for order in ((0, 1), (1, 0)):
             with self.subTest(order=order):
-                fixture = _Fixture(self)
-                git(fixture.pr, "checkout", "-q", "main")
-                base_document = json.loads(git_bytes(fixture.pr, "show", f"{fixture.base}:{admit_paths.POLICY}"))
-                base_document["exclude_paths"] = ["docs/private-z.md", "docs/private-a.md"]
-                write(
-                    fixture.pr, admit_paths.POLICY,
-                    json.dumps(base_document, indent=2, ensure_ascii=False) + "\n",
-                )
-                git(fixture.pr, "add", admit_paths.POLICY)
-                git(fixture.pr, "commit", "-qm", "make base exclusion order non-canonical")
-                fixture.base = git(fixture.pr, "rev-parse", "HEAD")
-                git(fixture.pr, "update-ref", "refs/remotes/origin/main", fixture.base)
-                paths = ["docs/order-a.md", "docs/order-b.md"]
-                slugs = ["order-a", "order-b"]
-                prs = [fixture.worktree(slug) for slug in slugs]
-                for index in range(2):
-                    fixture.add_pr_path(prs[index], paths[index], f"# {slugs[index]}\n")
-                batch = admit_paths.admit_batch(
-                    batch=[self.entry(prs[i], paths[i], slugs[i]) for i in range(2)],
-                    private_repo=fixture.authority, base=fixture.base, date=self.DATE,
-                    scratch_root=fixture.tmp,
-                )
+                self._land_two_entry_batch(order, "merge")
 
-                landing = fixture.worktree(f"landing-{order[0]}-{order[1]}")
-                first_commit = git(prs[order[0]], "rev-parse", "HEAD")
-                second_commit = git(prs[order[1]], "rev-parse", "HEAD")
-                git(landing, "merge", "--ff-only", first_commit)
-                first_policy = git_bytes(landing, "show", f"HEAD:{admit_paths.POLICY}")
-                merge = subprocess.run(
-                    ["git", "merge", "--no-commit", "--no-ff", second_commit],
-                    cwd=landing, env={**os.environ, **GIT_ENV}, capture_output=True, check=False,
-                )
-                self.assertTrue(merge.returncode in (0, 1), merge.stderr.decode("utf-8", errors="replace"))
-                git(landing, "rev-parse", "--verify", "MERGE_HEAD")
-                admit_paths.merge_profile(landing)
-                git(landing, "add", admit_paths.POLICY)
-                git(landing, "commit", "-qm", "merge path-adding PR")
+    def test_two_entry_batches_squash_cherry_pick_and_rebase_in_both_orders(self) -> None:
+        """The desk lands with ``merge --squash`` and ``cherry-pick``; neither sets ``MERGE_HEAD``.
 
-                base_policy = git_bytes(fixture.pr, "show", f"{fixture.base}:{admit_paths.POLICY}")
-                expected_profile = self.profile_union(base_policy, set(paths))
-                actual_profile = git_bytes(landing, "show", f"HEAD:{admit_paths.POLICY}")
-                self.assertEqual(actual_profile, expected_profile)
-                # The second PR's own V4 delta, issued against the old base, approves the merge.
-                second = next(delta for delta in batch["deltas"] if delta["paths"] == [paths[order[1]]])
-                self.verify_delta(
-                    fixture, baseline=first_policy, candidate=expected_profile,
-                    path=paths[order[1]], record=second["record"],
-                )
+        Two adjacent new paths make Git conflict on the profile in every mode, and the merge
+        tool reads the three sides from the index stages Git leaves for it."""
+        for mode in ("squash", "cherry-pick", "rebase"):
+            for order in ((0, 1), (1, 0)):
+                with self.subTest(mode=mode, order=order):
+                    self._land_two_entry_batch(order, mode)
+
+    def _land_two_entry_batch(self, order: tuple[int, int], mode: str) -> None:
+        fixture = _Fixture(self)
+        git(fixture.pr, "checkout", "-q", "main")
+        base_document = json.loads(git_bytes(fixture.pr, "show", f"{fixture.base}:{admit_paths.POLICY}"))
+        base_document["exclude_paths"] = ["docs/private-z.md", "docs/private-a.md"]
+        write(
+            fixture.pr, admit_paths.POLICY,
+            json.dumps(base_document, indent=2, ensure_ascii=False) + "\n",
+        )
+        git(fixture.pr, "add", admit_paths.POLICY)
+        git(fixture.pr, "commit", "-qm", "make base exclusion order non-canonical")
+        fixture.base = git(fixture.pr, "rev-parse", "HEAD")
+        git(fixture.pr, "update-ref", "refs/remotes/origin/main", fixture.base)
+        paths = ["docs/order-a.md", "docs/order-b.md"]
+        slugs = ["order-a", "order-b"]
+        prs = [fixture.worktree(slug) for slug in slugs]
+        for index in range(2):
+            fixture.add_pr_path(prs[index], paths[index], f"# {slugs[index]}\n")
+        batch = admit_paths.admit_batch(
+            batch=[self.entry(prs[i], paths[i], slugs[i]) for i in range(2)],
+            private_repo=fixture.authority, base=fixture.base, date=self.DATE,
+            scratch_root=fixture.tmp,
+        )
+
+        landing = fixture.worktree(f"landing-{order[0]}-{order[1]}")
+        first_commit = git(prs[order[0]], "rev-parse", "HEAD")
+        second_commit = git(prs[order[1]], "rev-parse", "HEAD")
+        git(landing, "merge", "--ff-only", first_commit)
+        first_policy = git_bytes(landing, "show", f"HEAD:{admit_paths.POLICY}")
+        env = {**os.environ, **GIT_ENV}
+        if mode == "rebase":
+            # The second pull request's branch replayed onto the first: ours is the
+            # landed side, theirs the commit being replayed.
+            git(landing, "checkout", "-q", "--detach", second_commit)
+            command = ["git", "rebase", first_commit]
+        else:
+            command = {
+                "merge": ["git", "merge", "--no-commit", "--no-ff", second_commit],
+                "squash": ["git", "merge", "--squash", "--no-commit", second_commit],
+                "cherry-pick": ["git", "cherry-pick", "--no-commit", second_commit],
+            }[mode]
+        self.assertEqual(git(prs[order[1]], "rev-list", "--count", f"{fixture.base}..{second_commit}"), "1")
+        merge = subprocess.run(command, cwd=landing, env=env, capture_output=True, check=False)
+        self.assertTrue(merge.returncode in (0, 1), merge.stderr.decode("utf-8", errors="replace"))
+        if mode == "merge":
+            git(landing, "rev-parse", "--verify", "MERGE_HEAD")
+        else:
+            self.assertNotEqual(git(landing, "ls-files", "--unmerged", "--", admit_paths.POLICY), "")
+            self.assertNotEqual(
+                subprocess.run(["git", "rev-parse", "--verify", "-q", "MERGE_HEAD"], cwd=landing, env=env,
+                               capture_output=True, check=False).returncode, 0,
+                "this mode sets no MERGE_HEAD",
+            )
+        admit_paths.merge_profile(landing)
+        git(landing, "add", admit_paths.POLICY)
+        if mode == "rebase":
+            subprocess.run(["git", "-c", "core.editor=true", "rebase", "--continue"], cwd=landing,
+                           env=env, check=True, capture_output=True)
+        else:
+            git(landing, "commit", "-qm", "merge path-adding PR")
+
+        base_policy = git_bytes(fixture.pr, "show", f"{fixture.base}:{admit_paths.POLICY}")
+        expected_profile = self.profile_union(base_policy, set(paths))
+        actual_profile = git_bytes(landing, "show", f"HEAD:{admit_paths.POLICY}")
+        self.assertEqual(actual_profile, expected_profile)
+        # The second PR's own V4 delta, issued against the old base, approves the merge.
+        second = next(delta for delta in batch["deltas"] if delta["paths"] == [paths[order[1]]])
+        self.verify_delta(
+            fixture, baseline=first_policy, candidate=expected_profile,
+            path=paths[order[1]], record=second["record"],
+        )
 
     def test_batch_has_no_entry_count_cap(self) -> None:
         five = [
@@ -810,6 +848,106 @@ class BatchAdmitPathsTest(unittest.TestCase):
         self.assertIn("docs/ours.md", merged["include_paths"])
         self.assertNotIn("docs/guide.md", merged["include_paths"])
         git(ours, "merge", "--abort")
+
+    def test_merge_profile_writes_nothing_when_the_ledger_refuses(self) -> None:
+        """All or nothing: a ledger conflict leaves the profile unmerged too, as the merge left it."""
+        fixture = _Fixture(self)
+        git(fixture.pr, "checkout", "-q", "main")
+        write(fixture.pr, admit_paths.LEDGER, admit_paths.provenance_ledger.claims_ledger_bytes(
+            self._claims(("docs/guide.md", "reviewed_documentation"))).decode("utf-8"))
+        git(fixture.pr, "add", admit_paths.LEDGER)
+        git(fixture.pr, "commit", "-qm", "a claims ledger on the base")
+        fixture.base = git(fixture.pr, "rev-parse", "HEAD")
+        git(fixture.pr, "update-ref", "refs/remotes/origin/main", fixture.base)
+        sides = {}
+        for side, classification in (("ours", "reviewed_other"), ("theirs", "reviewed_configuration")):
+            worktree = sides[side] = fixture.worktree(f"ledger-{side}")
+            fixture.add_pr_path(worktree, f"docs/{side}.md", f"# {side}\n")
+            write(worktree, admit_paths.LEDGER, admit_paths.provenance_ledger.claims_ledger_bytes(
+                self._claims(("docs/guide.md", classification))).decode("utf-8"))
+            git(worktree, "add", admit_paths.LEDGER)
+            git(worktree, "commit", "-qm", f"{side} reclassifies the guide")
+        ours = sides["ours"]
+        subprocess.run(["git", "merge", "--no-commit", "--no-ff", git(sides["theirs"], "rev-parse", "HEAD")],
+                       cwd=ours, env={**os.environ, **GIT_ENV}, capture_output=True, check=False)
+        unmerged_before = git(ours, "ls-files", "--unmerged")
+        self.assertIn(admit_paths.POLICY, unmerged_before)
+        self.assertIn(admit_paths.LEDGER, unmerged_before)
+        with self.assertRaises(AdmitError) as caught:
+            admit_paths.merge_profile(ours)
+        self.assertEqual(caught.exception.code, "MERGE_LEDGER_ENTRY_CONFLICT")
+        self.assertEqual(git(ours, "ls-files", "--unmerged"), unmerged_before)
+        git(ours, "merge", "--abort")
+
+    @staticmethod
+    def _ledger_sides(*documents: dict) -> list:
+        raws = [(json.dumps(document, indent=2) + "\n").encode("utf-8") for document in documents]
+        return [(label, (lambda raw=raw: raw)) for label, raw in zip(("base", "ours", "theirs"), raws, strict=True)]
+
+    @staticmethod
+    def _claims(*entries: tuple[str, str]) -> dict:
+        return {
+            "schema_version": provenance_ledger.CLAIMS_LEDGER_SCHEMA_VERSION,
+            "generated_by": "tools/provenance_ledger.py",
+            "entries": [
+                {"path": path, "classification": classification,
+                 "evidence": {"source": "documentation review", "statement": f"reviewed {path}"}}
+                for path, classification in entries
+            ],
+        }
+
+    def test_merged_ledger_is_the_three_way_merge_of_its_entries(self) -> None:
+        base = self._claims(("docs/a.md", "reviewed_documentation"), ("docs/z.md", "reviewed_documentation"))
+        ours = self._claims(("docs/a.md", "reviewed_documentation"), ("docs/m-ours.md", "reviewed_documentation"),
+                            ("docs/z.md", "reviewed_documentation"))
+        theirs = self._claims(("docs/a.md", "reviewed_other"), ("docs/m-theirs.md", "reviewed_documentation"))
+        merged = json.loads(admit_paths._merged_ledger(self._ledger_sides(base, ours, theirs)))
+        # Each side's addition stays, theirs' edit and theirs' removal win over ours' unchanged copy.
+        self.assertEqual(
+            [(entry["path"], entry["classification"]) for entry in merged["entries"]],
+            [("docs/a.md", "reviewed_other"), ("docs/m-ours.md", "reviewed_documentation"),
+             ("docs/m-theirs.md", "reviewed_documentation")],
+        )
+        # A side in the older hashed form merges by its claims.
+        hashed = json.loads(json.dumps(base))
+        hashed["schema_version"] = 1
+        for entry in hashed["entries"]:
+            entry["sha256"] = "0" * 64
+        self.assertEqual(admit_paths._merged_ledger(self._ledger_sides(hashed, ours, theirs)),
+                         admit_paths._merged_ledger(self._ledger_sides(base, ours, theirs)))
+        # Swapping ours and theirs gives the same bytes.
+        self.assertEqual(admit_paths._merged_ledger(self._ledger_sides(base, ours, theirs)),
+                         admit_paths._merged_ledger(self._ledger_sides(base, theirs, ours)))
+
+    def test_merged_ledger_refuses_what_it_cannot_merge(self) -> None:
+        base = self._claims(("docs/a.md", "reviewed_documentation"))
+        edited = self._claims(("docs/a.md", "reviewed_other"))
+        other_edit = self._claims(("docs/a.md", "reviewed_configuration"))
+        unevidenced = self._claims(("docs/a.md", "reviewed_documentation"))
+        unevidenced["entries"][0]["evidence"] = {}
+        field_changed = dict(edited, generated_by="something else")
+        cases = {
+            "MERGE_LEDGER_ENTRY_CONFLICT": self._ledger_sides(base, edited, other_edit),
+            "MERGE_LEDGER_NON_ENTRY_FIELD_CHANGED": self._ledger_sides(base, base, field_changed),
+            "MERGE_LEDGER_INPUT_INVALID": self._ledger_sides(base, base, unevidenced),
+        }
+        repeated = [(label, (lambda raw=raw: raw)) for label, raw in (
+            ("base", b'{"entries": [], "entries": []}\n'), ("ours", b"{}\n"), ("theirs", b"{}\n"))]
+        for code, sides in [*cases.items(), ("MERGE_LEDGER_INPUT_INVALID", repeated)]:
+            with self.subTest(code=code):
+                with self.assertRaises(AdmitError) as caught:
+                    admit_paths._merged_ledger(sides)
+                self.assertEqual(caught.exception.code, code)
+
+    def test_merged_profile_refuses_a_repeated_key(self) -> None:
+        """A side the verifier's strict JSON would refuse is not merged with its last key winning."""
+        profile = b'{"include_paths": ["docs/a.md"], "exclude_paths": []}\n'
+        smuggled = b'{"include_paths": ["docs/a.md"], "include_paths": ["docs/smuggled.md"], "exclude_paths": []}\n'
+        sides = [(label, (lambda raw=raw: raw)) for label, raw in
+                 (("base", profile), ("ours", profile), ("theirs", smuggled))]
+        with self.assertRaises(AdmitError) as caught:
+            admit_paths._merged_profile(sides)
+        self.assertEqual(caught.exception.code, "MERGE_PROFILE_INPUT_INVALID")
 
     def test_v4_delta_verifies_and_legacy_nested_and_flat_deltas_remain_readable(self) -> None:
         fixture = _Fixture(self)
@@ -1254,6 +1392,375 @@ class ClaimBindingAdmissionTest(unittest.TestCase):
         with self.assertRaises(AdmitError) as caught:
             fixture.admit("docs/b.md", rekey=True, approval_basis=None)
         self.assertEqual(caught.exception.code, "REKEY_ADMISSION_AMBIGUOUS")
+
+
+class ComposeV4Test(unittest.TestCase):
+    """``--compose-v4``: one landing batch carries several admitted profile changes under one V4 name."""
+
+    RECORD = ClaimBindingAdmissionTest.RECORD
+    THIRD_PARTY = ClaimBindingAdmissionTest.THIRD_PARTY
+
+    def setUp(self) -> None:
+        self._worktrees = 0
+
+    @staticmethod
+    def _baseline(fixture: _Fixture) -> bytes:
+        return git_bytes(fixture.pr, "show", f"{fixture.base}:{admit_paths.POLICY}")
+
+    def _component(self, fixture: _Fixture, change, added: dict[str, tuple[str, str]] | None = None,
+                   *, baseline: bytes | None = None) -> str:
+        """Commit the V4 delta of ``change`` on the base profile, as an admission writes it; return its name.
+
+        ``added`` maps each added path to ``(content, binding)``.
+        """
+        baseline = baseline or self._baseline(fixture)
+        document = json.loads(baseline.decode("utf-8"))
+        change(document)
+        candidate = admit_paths._canonical_profile_bytes(document)
+        claims = authority_claims(fixture)
+        record, authority, _delta = admit_paths.policy_delta_authority(baseline, candidate, {
+            path: {"sha256": hashlib.sha256(content.encode()).hexdigest(), "binding": binding, "claim": claims(path)}
+            for path, (content, binding) in (added or {}).items()
+        })
+        target = fixture.authority / record
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(authority)
+        git(fixture.authority, "add", record)
+        git(fixture.authority, "commit", "-qm", f"component {Path(record).stem[:8]}")
+        return Path(record).stem
+
+    def _candidate(self, fixture: _Fixture, changes: list, files: dict[str, str]) -> tuple[Path, bytes]:
+        """A batch worktree on the base whose HEAD carries ``files`` and every profile change."""
+        self._worktrees += 1
+        worktree = fixture.worktree(f"compose-batch-{self._worktrees}")
+        for path, content in files.items():
+            write(worktree, path, content)
+        document = json.loads(self._baseline(fixture).decode("utf-8"))
+        for change in changes:
+            change(document)
+        profile = admit_paths._canonical_profile_bytes(document)
+        (worktree / admit_paths.POLICY).write_bytes(profile)
+        git(worktree, "add", "-A")
+        git(worktree, "commit", "-qm", "synthetic landing batch")
+        return worktree, profile
+
+    @staticmethod
+    def _adds(*paths: str):
+        def change(document: dict) -> None:
+            document["include_paths"] = sorted(set(document["include_paths"]) | set(paths))
+        return change
+
+    def _compose(self, fixture: _Fixture, worktree: Path, keys: list[str], **kwargs) -> dict:
+        returned: dict[str, Any] = admit_paths.compose_policy_delta_v4(
+            worktree=worktree, base=fixture.base, components=keys, private_repo=fixture.authority, **kwargs)
+        return returned
+
+    def _assert_derived(self, fixture: _Fixture, result: dict, *, candidate: bytes, files: dict[str, bytes],
+                        bindings: dict[str, str]) -> None:
+        """The composed delta is the derivation, byte for byte, under the batch's name, and the verifier passes it."""
+        baseline = self._baseline(fixture)
+        baseline_document = json.loads(baseline.decode("utf-8"))
+        candidate_document = json.loads(candidate.decode("utf-8"))
+        record = f"{admit_paths.POLICY_DELTAS_V4}/{result['key']}.json"
+        self.assertEqual(result["records"], [record])
+        self.assertEqual(result["key"], provenance_ledger.policy_delta_v4_key(baseline_document, candidate_document))
+        derived = provenance_ledger.derive_policy_delta_v4(
+            baseline_document, candidate_document,
+            digest_of=lambda path: hashlib.sha256(files[path]).hexdigest() if path in files else None,
+            claim_of=authority_claims(fixture), binding_of=bindings.__getitem__,
+        )
+        self.assertEqual((fixture.authority / record).read_bytes(), provenance_ledger.policy_delta_v3_bytes(derived))
+        verified = assert_policy_delta(self, fixture, record, baseline=baseline, candidate=candidate, files=files)
+        self.assertEqual(verified, provenance_ledger._classify_policy_delta(baseline_document, candidate_document))
+        # One private commit holding only the composed delta, naming every component; nothing pushed.
+        self.assertEqual(git(fixture.authority, "show", "--name-only", "--format=", "HEAD").splitlines(), [record])
+        message = git(fixture.authority, "log", "-1", "--format=%B")
+        for key in result["components"]:
+            self.assertIn(key, message)
+        self.assertIn("no new decision", message)
+        self.assertEqual(git(fixture.authority, "status", "--porcelain"), "")
+        self.assertFalse(result["pushed"])
+
+    def test_two_admitted_pull_requests_compose_into_the_batch_delta(self) -> None:
+        fixture = _Fixture(self)
+        paths = ["docs/compose-a.md", "docs/compose-b.md"]
+        entries = []
+        for path in paths:
+            slug = Path(path).stem
+            pr = fixture.worktree(slug)
+            fixture.add_pr_path(pr, path, f"# {slug}\n")
+            entries.append({"pr_worktree": str(pr), "paths": [path], "slug": slug,
+                            "approval_basis": f"Owner decision: {slug}."})
+        batch = admit_paths.admit_batch(batch=entries, private_repo=fixture.authority, base=fixture.base,
+                                        date="2026-10-22", scratch_root=fixture.tmp)
+        keys = [Path(delta["record"]).stem for delta in batch["deltas"]]
+        admissions = {path: (fixture.authority / path).read_bytes() for path in batch["records"]}
+        remote_before = fixture.remote_main()
+
+        files = {path: f"# {Path(path).stem}\n" for path in paths}
+        worktree, candidate = self._candidate(fixture, [self._adds(*paths)], files)
+        # Without the union, the batch's name selects no delta: the gap this mode fills.
+        self.assertNotIn(provenance_ledger.policy_delta_v4_key(
+            json.loads(self._baseline(fixture)), json.loads(candidate)), keys)
+        result = self._compose(fixture, worktree, keys)
+
+        self._assert_derived(fixture, result, candidate=candidate,
+                             files={path: content.encode() for path, content in files.items()},
+                             bindings=dict.fromkeys(paths, "claim"))
+        self.assertEqual(result["delta"]["include_added"], paths)
+        self.assertEqual(fixture.remote_main(), remote_before)
+        for path, raw in admissions.items():
+            self.assertEqual((fixture.authority / path).read_bytes(), raw, "the components are left as recorded")
+
+        # Composing again records nothing new; --push publishes private main.
+        again = self._compose(fixture, worktree, keys, push=True)
+        self.assertEqual(again["private_commit"], result["private_commit"])
+        self.assertEqual(fixture.remote_main(), result["private_commit"])
+
+    def test_three_components_with_removals_exclusions_rules_and_a_byte_bound_import(self) -> None:
+        fixture = _Fixture(self, records=[self.RECORD])
+
+        def removes_guide(document: dict) -> None:
+            document["include_paths"].remove("docs/guide.md")
+
+        def rule_and_exclusion(document: dict) -> None:
+            document["build_mode"] = "PUBLIC_SAFE=2"
+            document["exclude_paths"].remove("docs/private-notes.md")
+
+        added = {"src/lib/up.h": ("int up(void);\n", "bytes"), "docs/notice.md": ("# Notice\n", "claim")}
+        keys = [
+            self._component(fixture, self._adds(*added), added),
+            self._component(fixture, removes_guide),
+            self._component(fixture, rule_and_exclusion),
+        ]
+        worktree, candidate = self._candidate(
+            fixture, [self._adds(*added), removes_guide, rule_and_exclusion],
+            {path: content for path, (content, _binding) in added.items()})
+        result = self._compose(fixture, worktree, keys, assisted_by="Test Tool (test-model)")
+
+        self._assert_derived(fixture, result, candidate=candidate,
+                             files={path: content.encode() for path, (content, _binding) in added.items()},
+                             bindings={path: binding for path, (_content, binding) in added.items()})
+        self.assertEqual(result["delta"], {
+            "include_added": ["docs/notice.md", "src/lib/up.h"], "include_removed": ["docs/guide.md"],
+            "exclude_added": [], "exclude_removed": ["docs/private-notes.md"], "rule_changes": ["build_mode"],
+        })
+        self.assertIn("Assisted-by: Test Tool (test-model)", git(fixture.authority, "log", "-1", "--format=%B"))
+
+    def _assert_refused(self, fixture: _Fixture, code: str, worktree: Path, keys: list[str]) -> None:
+        before = git(fixture.authority, "rev-parse", "HEAD")
+        with self.assertRaises(AdmitError) as caught:
+            self._compose(fixture, worktree, keys)
+        self.assertEqual(caught.exception.code, code, str(caught.exception))
+        self.assertEqual(git(fixture.authority, "rev-parse", "HEAD"), before)
+        self.assertEqual(git(fixture.authority, "status", "--porcelain"), "")
+
+    def test_refusals(self) -> None:
+        fixture = _Fixture(self, records=[self.RECORD])
+        doc = {path: (f"# {Path(path).stem}\n", "claim") for path in
+               ("docs/a.md", "docs/b.md", "docs/c.md", "docs/shared.md")}
+
+        def pick(*paths: str) -> dict:
+            return {path: doc[path] for path in paths}
+
+        a = self._component(fixture, self._adds("docs/a.md"), pick("docs/a.md"))
+        b = self._component(fixture, self._adds("docs/b.md"), pick("docs/b.md"))
+        both, _ = self._candidate(fixture, [self._adds("docs/a.md", "docs/b.md")],
+                                  {"docs/a.md": doc["docs/a.md"][0], "docs/b.md": doc["docs/b.md"][0]})
+
+        with self.subTest("one component"):
+            self._assert_refused(fixture, "COMPOSE_V4_COMPONENTS_INVALID", both, [a])
+        with self.subTest("a component twice"):
+            self._assert_refused(fixture, "COMPOSE_V4_COMPONENTS_INVALID", both, [a, a])
+        with self.subTest("unknown component"):
+            self._assert_refused(fixture, "COMPOSE_V4_COMPONENT_MISSING", both, [a, "0" * 64])
+        with self.subTest("a component filed under another name"):
+            alias = hashlib.sha256(b"alias").hexdigest()
+            target = fixture.authority / admit_paths.POLICY_DELTAS_V4 / f"{alias}.json"
+            target.write_bytes((fixture.authority / admit_paths.POLICY_DELTAS_V4 / f"{b}.json").read_bytes())
+            git(fixture.authority, "add", "-A")
+            git(fixture.authority, "commit", "-qm", "misfiled delta")
+            self._assert_refused(fixture, "COMPOSE_V4_COMPONENT_KEY_MISMATCH", both, [a, alias])
+
+        with self.subTest("overlapping include_added"):
+            shared_a = self._component(fixture, self._adds("docs/a.md", "docs/shared.md"),
+                                       pick("docs/a.md", "docs/shared.md"))
+            shared_b = self._component(fixture, self._adds("docs/b.md", "docs/shared.md"),
+                                       pick("docs/b.md", "docs/shared.md"))
+            worktree, _ = self._candidate(
+                fixture, [self._adds("docs/a.md", "docs/b.md", "docs/shared.md")],
+                {path: doc[path][0] for path in ("docs/a.md", "docs/b.md", "docs/shared.md")})
+            self._assert_refused(fixture, "COMPOSE_V4_PATH_OVERLAP", worktree, [shared_a, shared_b])
+
+        def removes(*paths: str):
+            def change(document: dict) -> None:
+                document["include_paths"] = sorted(set(document["include_paths"]) - set(paths))
+            return change
+
+        with self.subTest("overlapping include_removed"):
+            first = self._component(fixture, removes("docs/guide.md"))
+            second = self._component(fixture, removes("docs/guide.md", "README.md"))
+            worktree, _ = self._candidate(fixture, [removes("docs/guide.md", "README.md")], {})
+            self._assert_refused(fixture, "COMPOSE_V4_PATH_OVERLAP", worktree, [first, second])
+
+        def unexcludes(document: dict) -> None:
+            document["exclude_paths"].remove("docs/private-notes.md")
+
+        def excludes(path: str):
+            def change(document: dict) -> None:
+                document["exclude_paths"] = sorted(set(document["exclude_paths"]) | {path})
+            return change
+
+        with self.subTest("overlapping exclude entries"):
+            first = self._component(fixture, unexcludes)
+            def unexclude_and_exclude(document: dict) -> None:
+                unexcludes(document)
+                excludes("docs/x.md")(document)
+
+            second = self._component(fixture, unexclude_and_exclude)
+            worktree, _ = self._candidate(fixture, [unexcludes, excludes("docs/x.md")], {})
+            self._assert_refused(fixture, "COMPOSE_V4_EXCLUDE_OVERLAP", worktree, [first, second])
+
+        def build_mode(document: dict) -> None:
+            document["build_mode"] = "PUBLIC_SAFE=2"
+
+        def description(document: dict) -> None:
+            document["description"] = "synthetic"
+
+        with self.subTest("rule changes in two components"):
+            first = self._component(fixture, build_mode)
+            second = self._component(fixture, description)
+            worktree, _ = self._candidate(fixture, [build_mode, description], {})
+            self._assert_refused(fixture, "COMPOSE_V4_RULE_CHANGES_SHARED", worktree, [first, second])
+
+        with self.subTest("a rule admitted against another base value"):
+            other_base = json.loads(self._baseline(fixture))
+            other_base["build_mode"] = "PUBLIC_SAFE=0"
+            stale = self._component(fixture, build_mode,
+                                    baseline=admit_paths._canonical_profile_bytes(other_base))
+            worktree, _ = self._candidate(fixture, [self._adds("docs/a.md"), build_mode],
+                                          {"docs/a.md": doc["docs/a.md"][0]})
+            self._assert_refused(fixture, "COMPOSE_V4_UNION_MISMATCH", worktree, [a, stale])
+
+        with self.subTest("a path no component covers"):
+            worktree, _ = self._candidate(fixture, [self._adds("docs/a.md", "docs/b.md", "docs/c.md")],
+                                          {path: doc[path][0] for path in ("docs/a.md", "docs/b.md", "docs/c.md")})
+            self._assert_refused(fixture, "COMPOSE_V4_PATH_UNCOVERED", worktree, [a, b])
+
+        with self.subTest("a component change the batch does not make"):
+            worktree, _ = self._candidate(fixture, [self._adds("docs/a.md")], {"docs/a.md": doc["docs/a.md"][0]})
+            self._assert_refused(fixture, "COMPOSE_V4_COMPONENT_NOT_IN_CANDIDATE", worktree, [a, b])
+
+        upstream = {"src/lib/up.h": ("int up(void);\n", "bytes")}
+        up = self._component(fixture, self._adds("src/lib/up.h"), upstream)
+        with self.subTest("an edited byte-bound import"):
+            worktree, _ = self._candidate(fixture, [self._adds("src/lib/up.h", "docs/a.md")],
+                                          {"src/lib/up.h": "int up(void);\n\n", "docs/a.md": doc["docs/a.md"][0]})
+            self._assert_refused(fixture, "COMPOSE_V4_BYTES_MISMATCH", worktree, [up, a])
+
+        with self.subTest("a trusted claim changed since its admission"):
+            worktree, _ = self._candidate(fixture, [self._adds("src/lib/up.h", "docs/a.md")],
+                                          {"src/lib/up.h": upstream["src/lib/up.h"][0],
+                                           "docs/a.md": doc["docs/a.md"][0]})
+            ledger_path = fixture.authority / admit_paths.TRUSTED_LEDGER
+            ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
+            for record in ledger["records"]:
+                if record["id"] == self.RECORD["id"]:
+                    record["upstream_revision"] = "commit " + "f" * 40
+            write(fixture.authority, admit_paths.TRUSTED_LEDGER, json.dumps(ledger, indent=2) + "\n")
+            git(fixture.authority, "commit", "-qam", "the upstream record now names another revision")
+            self._assert_refused(fixture, "COMPOSE_V4_CLAIM_MISMATCH", worktree, [up, a])
+
+    def test_more_refusals(self) -> None:
+        fixture = _Fixture(self, records=[self.RECORD])
+        a = self._component(fixture, self._adds("docs/a.md"), {"docs/a.md": ("# a\n", "claim")})
+        b = self._component(fixture, self._adds("docs/b.md"), {"docs/b.md": ("# b\n", "claim")})
+        both, candidate = self._candidate(fixture, [self._adds("docs/a.md", "docs/b.md")],
+                                          {"docs/a.md": "# a\n", "docs/b.md": "# b\n"})
+        v4_dir = fixture.authority / admit_paths.POLICY_DELTAS_V4
+
+        def commit_misfiled(name: str, raw: bytes) -> str:
+            key = hashlib.sha256(name.encode()).hexdigest()
+            (v4_dir / f"{key}.json").write_bytes(raw)
+            git(fixture.authority, "add", "-A")
+            git(fixture.authority, "commit", "-qm", f"misfiled {name}")
+            return key
+
+        with self.subTest("a component that does not parse"):
+            junk = commit_misfiled("junk", b"not a json document\n")
+            self._assert_refused(fixture, "COMPOSE_V4_COMPONENT_INVALID", both, [a, junk])
+        with self.subTest("a component that parses but is not canonical"):
+            raw = (v4_dir / f"{b}.json").read_bytes()
+            loose = commit_misfiled("loose", json.dumps(json.loads(raw), indent=4).encode() + b"\n")
+            self._assert_refused(fixture, "COMPOSE_V4_COMPONENT_INVALID", both, [a, loose])
+        for name in ("not hex", "A" * 64, "a" * 63):
+            with self.subTest(f"a name that is not 64 lowercase hex: {name!r}"):
+                self._assert_refused(fixture, "COMPOSE_V4_COMPONENTS_INVALID", both, [a, name])
+
+        with self.subTest("one path in different lists of two components"):
+            adds_x = self._component(fixture, self._adds("docs/x.md"), {"docs/x.md": ("# x\n", "claim")})
+            excludes_x = self._component(
+                fixture, lambda document: document.__setitem__(
+                    "exclude_paths", sorted({*document["exclude_paths"], "docs/x.md"})))
+            worktree, _ = self._candidate(
+                fixture, [self._adds("docs/x.md"), lambda document: document.__setitem__(
+                    "exclude_paths", sorted({*document["exclude_paths"], "docs/x.md"}))], {"docs/x.md": "# x\n"})
+            self._assert_refused(fixture, "COMPOSE_V4_PATH_OVERLAP", worktree, [adds_x, excludes_x])
+
+        with self.subTest("a base that is not an ancestor of the batch"):
+            elsewhere = git(fixture.pr, "commit-tree", f"{fixture.base}^{{tree}}", "-p", fixture.base,
+                            "-m", "another line of history")
+            before = git(fixture.authority, "rev-parse", "HEAD")
+            with self.assertRaises(AdmitError) as caught:
+                admit_paths.compose_policy_delta_v4(worktree=both, base=elsewhere, components=[a, b],
+                                                    private_repo=fixture.authority)
+            self.assertEqual(caught.exception.code, "TRUSTED_BASE_NOT_ANCESTOR")
+            self.assertEqual(git(fixture.authority, "rev-parse", "HEAD"), before)
+
+        with self.subTest("a batch profile that is not canonical"):
+            worktree = fixture.worktree("compose-loose-profile")
+            write(worktree, "docs/a.md", "# a\n")
+            write(worktree, "docs/b.md", "# b\n")
+            document = json.loads(candidate.decode("utf-8"))
+            (worktree / admit_paths.POLICY).write_text(json.dumps(document, indent=4) + "\n", encoding="utf-8")
+            git(worktree, "add", "-A")
+            git(worktree, "commit", "-qm", "a profile in another format")
+            self._assert_refused(fixture, "POLICY_PROFILE_NOT_CANONICAL", worktree, [a, b])
+
+        with self.subTest("an authority checkout with an uncommitted record"):
+            stray = fixture.authority / "docs/provenance/uncommitted.json"
+            stray.write_text("{}\n", encoding="utf-8")
+            before = git(fixture.authority, "rev-parse", "HEAD")
+            with self.assertRaises(AdmitError) as caught:
+                self._compose(fixture, both, [a, b])
+            self.assertEqual(caught.exception.code, "AUTHORITY_DIRTY")
+            self.assertEqual(git(fixture.authority, "rev-parse", "HEAD"), before)
+            self.assertTrue(stray.is_file(), "the stray file is left as it was")
+            stray.unlink()
+            self.assertEqual(git(fixture.authority, "status", "--porcelain"), "")
+
+    def test_cli_mode(self) -> None:
+        fixture = _Fixture(self)
+        files = {"docs/a.md": "# a\n", "docs/b.md": "# b\n"}
+        keys = [self._component(fixture, self._adds(path), {path: (content, "claim")})
+                for path, content in files.items()]
+        worktree, _ = self._candidate(fixture, [self._adds(*files)], files)
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            refused = admit_paths.main(["--compose-v4", str(worktree), "--components", *keys,
+                                        "--private-repo", str(fixture.authority)])
+            self.assertEqual(refused, 1)
+            self.assertIn("--compose-v4 needs --base and --components", err.getvalue())
+            refused = admit_paths.main(["--compose-v4", str(worktree), "--base", fixture.base, "--components",
+                                        *keys, "--approval-basis", "a new decision",
+                                        "--private-repo", str(fixture.authority)])
+            self.assertEqual(refused, 1)
+            code = admit_paths.main(["--compose-v4", str(worktree), "--base", fixture.base, "--components", *keys,
+                                     "--private-repo", str(fixture.authority)])
+        self.assertEqual(code, 0, err.getvalue())
+        self.assertIn("composed V4 policy delta", out.getvalue())
+        self.assertIn("include_added: docs/a.md, docs/b.md", out.getvalue())
+        self.assertIn("Left to do:", out.getvalue())
 
 
 class HookCheckTest(unittest.TestCase):

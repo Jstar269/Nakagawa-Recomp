@@ -178,18 +178,29 @@ try:
     from .public_export import build_document as _build_export_document
     from .publication_policy import PolicyError, load_policy
 except ImportError:
-    from nk_core.git_isolation import isolated_git_env
-    from provenance_ledger import (
+    from nk_core.git_isolation import isolated_git_env  # type: ignore[no-redef]
+    from provenance_ledger import (  # type: ignore[no-redef]
         ALLOWED_CLASSES as ALLOWED_CLASSES, RefreshError, _admission_requires_implementation,
         _canonical_json_bytes, _class_for, _classify_policy_delta, _read_policy_delta_authority,
         admission_claim, claims_ledger, claims_ledger_bytes, derive_policy_delta_v3, is_claims_ledger,
         is_derived_policy_delta, policy_delta_v3_bytes, policy_delta_v3_name, policy_delta_v4_key,
         validate_ledger, verify_derived_policy_delta,
     )
-    from public_export import EXPORT_TREE_DERIVED_FIELDS as _EXPORT_TREE_DERIVED_FIELDS
-    from public_export import build_control_document as _build_control_document
-    from public_export import build_document as _build_export_document
-    from publication_policy import PolicyError, load_policy
+    from public_export import EXPORT_TREE_DERIVED_FIELDS as _EXPORT_TREE_DERIVED_FIELDS  # type: ignore[no-redef]
+    from public_export import build_control_document as _build_control_document  # type: ignore[no-redef]
+    from public_export import build_document as _build_export_document  # type: ignore[no-redef]
+    from publication_policy import PolicyError, load_policy  # type: ignore[no-redef]
+
+#: The policy digest and the two ``tree_derived_fields`` lists a committed
+#: control may record, derived as ``public_export`` derives them (its
+#: ``POLICY_DIGEST_FIELD`` and ``EXPORT_TREE_DERIVED_FIELDS_WITH(OUT)_POLICY_DIGEST``;
+#: a test pins them equal).  They are built here from the one imported list so
+#: the dual import above stays as it is.
+_POLICY_DIGEST_FIELD = "policy_sha256"
+_TREE_DERIVED_WITH_POLICY_DIGEST = tuple(sorted(set(_EXPORT_TREE_DERIVED_FIELDS) | {_POLICY_DIGEST_FIELD}))
+_TREE_DERIVED_WITHOUT_POLICY_DIGEST = tuple(
+    field for field in _EXPORT_TREE_DERIVED_FIELDS if field != _POLICY_DIGEST_FIELD
+)
 
 #: Paths the ledger deliberately carries without a content hash: they are the
 #: generated outputs whose own bytes depend on the ledger.
@@ -218,6 +229,40 @@ BASELINE_SCHEMA_VERSION = 1
 TRUSTED_WORKFLOW = ".github/workflows/provenance-attestation.yml"
 TRUSTED_CONTEXT = "Trusted provenance attestation"
 WORKFLOW_PREFIX = ".github/workflows/"
+
+#: The only events the trusted workflow may list.  ``pull_request_target`` and
+#: ``workflow_run`` always run the default branch's copy of the workflow.
+#: ``workflow_dispatch`` runs the copy at the ref a write-access user picks; the
+#: CI verdict accepts such a run only from the default branch.  Every other event
+#: is refused: ``pull_request``, ``push`` and ``merge_group`` would run a copy the
+#: candidate controls, and nothing else is needed.
+TRUSTED_WORKFLOW_EVENTS = frozenset({"pull_request_target", "workflow_run", "workflow_dispatch"})
+#: One of these must remain, or no pull request is attested until someone
+#: dispatches the workflow by hand.
+TRUSTED_WORKFLOW_PULL_REQUEST_EVENTS = frozenset({"pull_request_target", "workflow_run"})
+
+# The trusted workflow's top-level keys, each as a plain key at column 0. Anything else at
+# column 0 is refused: a quoted or escaped key, ``true`` (how YAML 1.1 reads a bare ``on``), a
+# merge key, a flow collection, or the tail of a multi-line scalar that hides the real keys.
+_WORKFLOW_KEYS = frozenset({"name", "run-name", "on", "permissions", "concurrency", "env", "defaults", "jobs"})
+# A lone carriage return, which YAML reads as a line break, and the characters ``str.splitlines``
+# breaks at and YAML does not. A file with any of them is refused, so this reader and a YAML
+# reader agree on where each line ends.
+_FOREIGN_LINE_BREAKS = ("\r", "\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029")
+# A whole ``key:`` line whose value, if any, ends on the same line: a plain scalar, a quoted scalar
+# that is closed, or a flow sequence that is closed. A value left open (a quote, a bracket, a block
+# scalar) continues on later lines, and such a line in column 0 can read like a key.
+_QUOTED = r'"[^"\\]*"' + "|" + r"'[^']*'"
+_ITEM = "(?:" + _QUOTED + "|[A-Za-z0-9_.-]+)"
+_ONE_LINE_VALUE = (
+    "(?:" + _QUOTED
+    + r"|\{ *\}"
+    + r"|\[ *(?:" + _ITEM + " *(?:, *" + _ITEM + r" *)*)?\]"
+    + "|[A-Za-z0-9](?:(?!: | #).)*(?<!:)"
+    + ")"
+)
+_KEY_LINE = re.compile("( *)([A-Za-z_][A-Za-z0-9_-]*):(?: +" + _ONE_LINE_VALUE + ")?(?: +#.*)?")
+_EVENT_LINE = re.compile(" {2}([a-z_]+):(?: +#.*)?")
 
 #: Classes that assert something about implementation provenance.  Anything
 #: else is a deterministic statement about what a file *is*.
@@ -1192,7 +1237,28 @@ def _export_field_findings(declared: dict, generated: dict, *, label: str) -> li
     value is recomputed here from the candidate tree and the policy, and a
     declared value that disagrees is refused exactly like any other field.  Every
     other field, and any field the recomputation does not produce, stays required.
+
+    ``policy_sha256`` may be absent on the same terms, but only from a control
+    whose ``tree_derived_fields`` names it.  It is recomputed from the
+    candidate's own policy blob, whose bytes this verifier has already bound to
+    the trusted base policy or to the maintainer's policy-delta authority, so the
+    committed copy was a staleness check and never a trust anchor.  Two
+    committed shapes are accepted, whichever one the generator writes:
+
+    * the list without the digest, and the digest declared -- it is compared;
+    * the list naming the digest, and the digest omitted (or declared, and then
+      compared).
+
+    The list itself is descriptive, so either accepted value matches either
+    generator.  The list without the digest and no declared digest is the shape
+    of neither generator, and is refused naming the refresh.
     """
+    declared_list = declared.get("tree_derived_fields")
+    digest_recomputed = declared_list == list(_TREE_DERIVED_WITH_POLICY_DIGEST)
+    accepted_shape = digest_recomputed or (
+        declared_list == list(_TREE_DERIVED_WITHOUT_POLICY_DIGEST) and _POLICY_DIGEST_FIELD in declared
+    )
+    accepted_lists = (list(_TREE_DERIVED_WITH_POLICY_DIGEST), list(_TREE_DERIVED_WITHOUT_POLICY_DIGEST))
     findings: list[Finding] = []
     for field in sorted(set(generated) | set(declared)):
         if field in EXPORT_ADVISORY_FIELDS:
@@ -1200,21 +1266,35 @@ def _export_field_findings(declared: dict, generated: dict, *, label: str) -> li
         if field not in declared:
             if field in _EXPORT_TREE_DERIVED_FIELDS:
                 continue
-            findings.append(Finding(
-                "EXPORT_FIELD_MISMATCH", EXPORT_PATH,
-                f"{label} omits the required field {field!r}",
-            ))
+            if field == _POLICY_DIGEST_FIELD and digest_recomputed:
+                continue
+            detail = f"{label} omits the required field {field!r}"
+            if field == _POLICY_DIGEST_FIELD:
+                detail += (
+                    "; only a control whose tree_derived_fields names it may omit it. "
+                    "Regenerate it with make contrib-refresh (mingw32-make on Windows) or "
+                    "python tools/regen_all.py"
+                )
+            findings.append(Finding("EXPORT_FIELD_MISMATCH", EXPORT_PATH, detail))
         elif field not in generated:
             findings.append(Finding(
                 "EXPORT_FIELD_MISMATCH", EXPORT_PATH,
                 f"{label} declares {field!r}, which the recomputation does not produce",
             ))
         elif declared[field] != generated[field]:
-            findings.append(Finding(
-                "EXPORT_FIELD_MISMATCH", EXPORT_PATH,
+            if field == "tree_derived_fields" and accepted_shape and generated[field] in accepted_lists:
+                continue
+            detail = (
                 f"{label} field {field!r} does not match the trusted recomputation "
-                "from the candidate tree and the canonical policy",
-            ))
+                "from the candidate tree and the canonical policy"
+            )
+            if field == "tree_derived_fields" and declared[field] == list(_TREE_DERIVED_WITHOUT_POLICY_DIGEST):
+                detail += (
+                    "; a control whose list does not name policy_sha256 must declare it. "
+                    "Regenerate it with make contrib-refresh (mingw32-make on Windows) or "
+                    "python tools/regen_all.py"
+                )
+            findings.append(Finding("EXPORT_FIELD_MISMATCH", EXPORT_PATH, detail))
     return findings
 
 
@@ -2303,6 +2383,72 @@ def _export_findings(candidate: dict[str, bytes], policy) -> list[Finding]:
     return _export_field_findings(declared, canonical, label="export")
 
 
+def _workflow_events(raw: bytes) -> list[str] | None:
+    """The events of a workflow's ``on:`` block, or ``None`` when the file is not in the one plain form.
+
+    Only the form the trusted workflow uses is read. The first content line is at
+    column 0. Every content line at column 0 is one of the workflow's top-level
+    keys (``_WORKFLOW_KEYS``), and exactly one of them is ``on:``. Under it comes
+    one bare event name per line at two spaces, its settings indented below.
+    Every content line of the block, and every line at column 0, is a complete
+    ``key:`` or ``key: value`` whose value ends on its own line (``_KEY_LINE``).
+
+    Anything else gives ``None``: a scalar or flow ``on:``; a quoted, escaped or
+    repeated key; a merge key; a second YAML document; an event line that is not
+    a bare name; a quoted scalar, flow sequence or block scalar left open at the
+    end of a line; a line break that is not a line feed. The last two matter
+    because an open value continues on the following lines, and one of those in
+    column 0 that reads like a key would end the block here while a YAML reader
+    goes on to a real event after it. The caller refuses what this cannot read
+    instead of guessing what GitHub's YAML reader would make of it.
+
+    This is a shape check, not a YAML parser, and it was compared with two YAML
+    libraries, not with GitHub's own reader. Review of the edit and the CI
+    verdict's approval rule remain the controls.
+    """
+    try:
+        text = raw.decode("utf-8").replace("\r\n", "\n")
+    except UnicodeDecodeError:
+        return None
+    if any(separator in text for separator in _FOREIGN_LINE_BREAKS):
+        return None
+    lines = [line.rstrip(" ") for line in text.split("\n")]
+    content = [(index, line) for index, line in enumerate(lines) if line and not line.lstrip(" ").startswith("#")]
+    if not content or content[0][1].startswith(" "):
+        return None
+    on_lines: list[int] = []
+    for index, line in content:
+        if line.startswith(" "):
+            continue
+        key = _KEY_LINE.fullmatch(line)
+        if key is None or key.group(2) not in _WORKFLOW_KEYS:
+            return None
+        if key.group(2) == "on":
+            on_lines.append(index)
+    if len(on_lines) != 1 or not re.fullmatch("on:(?: +#.*)?", lines[on_lines[0]]):
+        return None
+    events: list[str] = []
+    for index, line in content:
+        if index <= on_lines[0]:
+            continue
+        key = _KEY_LINE.fullmatch(line)
+        if key is None:
+            return None
+        indent = len(key.group(1))
+        if indent == 0:
+            break
+        if indent == 2:
+            event = _EVENT_LINE.fullmatch(line)
+            if event is None:
+                return None
+            events.append(event.group(1))
+        elif indent < 2 or not events:
+            return None
+    if not events or len(set(events)) != len(events):
+        return None
+    return events
+
+
 def _ci_findings(candidate: dict[str, bytes], trusted: dict[str, bytes]) -> list[Finding]:
     """Refuse a candidate that disarms this gate or answers to its check name.
 
@@ -2310,6 +2456,11 @@ def _ci_findings(candidate: dict[str, bytes], trusted: dict[str, bytes]) -> list
     workflow declaring a job named like this gate's check therefore produces a
     second, candidate-controlled result under the required context.  That is a
     merge-path bypass whatever the verifier concludes, so the name is reserved.
+
+    The gate's own workflow must keep running the default branch's definition.
+    Its triggers are therefore held to ``TRUSTED_WORKFLOW_EVENTS``, by shape and
+    not by one event's name: the workflow can leave ``pull_request_target`` for
+    ``workflow_run`` without this check changing again.
     """
     findings: list[Finding] = []
     needle = TRUSTED_CONTEXT.encode("utf-8")
@@ -2333,12 +2484,33 @@ def _ci_findings(candidate: dict[str, bytes], trusted: dict[str, bytes]) -> list
         # A workflow the base does not have yet is the change that introduces
         # this gate.  It cannot weaken a predecessor that does not exist, but
         # its content must still be the shape the gate depends on.
-        for token in (b"pull_request_target", needle):
-            if token not in candidate_workflow:
+        events = _workflow_events(candidate_workflow)
+        if events is None:
+            findings.append(Finding(
+                "TRUSTED_WORKFLOW_WEAKENED", TRUSTED_WORKFLOW,
+                "candidate workflow's `on:` block is not one plain event name per line, so its triggers "
+                "cannot be checked",
+            ))
+        else:
+            foreign = sorted(set(events) - TRUSTED_WORKFLOW_EVENTS)
+            if foreign:
                 findings.append(Finding(
                     "TRUSTED_WORKFLOW_WEAKENED", TRUSTED_WORKFLOW,
-                    f"candidate workflow does not carry {token.decode('utf-8')!r}",
+                    f"candidate workflow runs on {', '.join(foreign)}; only "
+                    f"{', '.join(sorted(TRUSTED_WORKFLOW_EVENTS))} are allowed, because any other event can "
+                    "run a workflow definition the pull request controls",
                 ))
+            if not TRUSTED_WORKFLOW_PULL_REQUEST_EVENTS & set(events):
+                findings.append(Finding(
+                    "TRUSTED_WORKFLOW_WEAKENED", TRUSTED_WORKFLOW,
+                    "candidate workflow no longer runs for pull requests: it has neither "
+                    f"{' nor '.join(sorted(TRUSTED_WORKFLOW_PULL_REQUEST_EVENTS))}",
+                ))
+        if needle not in candidate_workflow:
+            findings.append(Finding(
+                "TRUSTED_WORKFLOW_WEAKENED", TRUSTED_WORKFLOW,
+                f"candidate workflow does not carry {TRUSTED_CONTEXT!r}",
+            ))
         if trusted_workflow is not None:
             findings.append(Finding(
                 "TRUSTED_WORKFLOW_MODIFIED", TRUSTED_WORKFLOW,

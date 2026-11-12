@@ -183,12 +183,21 @@ PSMF (PlayStation Stream Media Format) multiplexes AVC/H.264 video and ATRAC3plu
 
 Executing guest PSMF middleware does not require software-emulating an H.264 video decoder on the MIPS CPU.
 
-1. The guest PSMF modules call downward into low-level hardware abstraction libraries: `sceMpeg`, `sceVideocodec`, and `sceAudiocodec`.
-2. On physical hardware, `sceMpeg` delegates bitstream decoding to the PSP's dedicated Media Engine (ME) and AVC hardware decoder.
-3. Therefore, the **correct, natural HLE boundary** is at the `sceMpeg` / `sceVideocodec` interface:
-   - Guest PSMF middleware handles demuxing, buffering, and state transitions.
-   - Nakagawa's runtime intercepts raw compressed NAL packets at the `sceMpeg` boundary and dispatches them to host hardware decoders (Vulkan Video, DXVA2/Media Foundation, or ffmpeg/libavcodec).
-   - Audio packets (ATRAC3plus) are decoded via host audio libraries and fed back into guest ring buffers.
+1. The guest PSMF modules call downward into `sceMpeg`, and `sceMpeg` (the `mpeg.prx` a title
+   ships) calls down into `sceVideocodec`, `sceMpegbase` and `sceAudiocodec`.
+2. On physical hardware, those three libraries hand bitstream decoding to the PSP's dedicated Media
+   Engine (ME), whose code is firmware.
+3. Therefore, the **correct, natural HLE boundary** is the Media Engine floor: `sceVideocodec`,
+   `sceMpegbase` and `sceAudiocodec`:
+   - Guest PSMF middleware and the title's own `mpeg.prx` handle demuxing, ring buffers, access-unit
+     assembly and state transitions as guest code.
+   - `src/rt/hle_videocodec.c` takes each access unit at `sceVideocodecDecode`, decodes it on the host
+     H.264 seam and writes the picture back in JPCSP's band layout; `sceMpegBaseCscAvc` converts it
+     into the guest's RGB buffer.
+   - ATRAC3plus frames reach the project's ATRAC3plus decoder through `sceAudiocodecDecode` and are
+     written back into guest buffers.
+   - The host `sceMpeg` handlers remain for titles that rely on the firmware's own `mpeg.prx`, which
+     the project never carries, and for the synthetic fixtures.
 
 #### Implemented Boundary Today (public source)
 
@@ -201,11 +210,16 @@ end to end by source-owned tests:
   per-track compressed-access-unit queues with backpressure, bounded parsing, and fail-closed
   malformed-input handling. Its H.264 boundary accepts both Annex-B start-code forms:
   `00 00 01` and `00 00 00 01` (the latter keeps its leading zero in the first access unit).
-- The `scePsmfPlayer*` handlers remain host HLE for now: they own the guest control block and the
+- The `scePsmfPlayer*` handlers are host HLE: they own the guest control block and the
   output contract, and drive that producer plus the host codecs (Media Foundation H.264 for
   pictures, the project's ATRAC3plus decoder import for audio). A getter returns success only for
   output a decoder actually produced; a compressed access unit is never presented as a decoded
   frame or PCM block, and a track that runs dry reports `NO_MORE_DATA` rather than silence.
+- `sceMpeg` is a guest-owned library: a title that ships and translates `mpeg.prx` runs it as guest
+  code once it starts (`guest_module_owns_library` in `src/rt/hle_kernel_module.c`), over the
+  Media Engine floor in `src/rt/hle_videocodec.c` (#286). That floor's context words are JPCSP's,
+  synthetic until the PSP request W-LLE-1 measures them; `tests/native/videocodec_selftest.c`
+  covers it with source-authored H.264 and ATRAC3plus fixtures.
 - Evidence tiers: the access-unit, timestamp and queue contract is covered by
   `tests/native/psmf_producer_selftest.c` against fixtures built byte-for-byte by that file (tier S), and
   the decoder seam by `tests/native/psmf_media_selftest.c`, which constructs a baseline-profile H.264
@@ -231,6 +245,63 @@ The guest MIPS program must observe:
 #### Transparent Archive VFS
 
 Directly reading assets from the `data.xb` container without extracting 56,672 files to disk is fully compatible with LLE **if and only if** it is implemented as a transparent block driver in the runtime's disc I/O layer. The shipped archive-backed VFS is `src/rt/archive_vfs.c` ([`ARCHIVE_VFS.md`](ARCHIVE_VFS.md)). The guest continues calling `sceIoOpen("disc0:/PSP_GAME/USRDIR/data.xb", ...)` or standard file APIs, completely unaware that the host is streaming sectors directly from the container.
+
+---
+
+### 3.6 Differential Check: Guest Module Against HLE Handler
+
+Where a title ships a library as its own module and the runtime also has HLE handlers for it, the
+two can be compared call by call (#2148). The check is the `SR_MODE_COSIM` lane of the import seam
+(`src/rt/domain_mode.c`, LLE Phase 1); the guest-export registry
+(`sr_import_register_export`) is its pair table, so only NIDs with a registered export are compared.
+
+- **Guest lane.** The export runs through the production linked-call boundary. An import it
+  reaches, through its stub or a runtime-bound stub the late-import bridge resolves to a
+  built-in handler, is refused and unwinds the lane, so no host-side effect (a kernel object, a
+  file position, a device) happens twice. The unwind passes direct calls, checked computed calls
+  (`dispatch_call_checked`, a generated `jalr` site), the interpreter's handoff of a live frame
+  to a native body (`dispatch_call_continue`), an interpreted linked call into a native body
+  (`dispatch_call_interp`), a computed tail transfer (`dispatch_tail_step`) and an interpreted
+  transfer into a native body with no call boundary (`dispatch`) (#2196). The interpreter stops
+  on the refusal and returns it to the lane's entry; it never runs on past the call with the
+  fatal flow pending. These boundaries honour the refusal only while the guest lane runs;
+  everywhere else they still end the run on any failure. The guest lane also holds the
+  scheduler and interrupt delivery (`sr_guest_lane_hold`, #2201): `sr_yield` switches no fiber
+  while it runs (guest time still advances), no interrupt is taken (the source stays pending
+  and the first safe point after the lane takes it), and a fiber switch, the loss of the
+  lane's thread, or 200000 held yields inside it stop the run by name (`SR_COSIM_FATAL`). So no other thread or
+  handler runs under the lane's refusal or is rolled back with it. The hold is a separate
+  flag, not the guest-visible interrupt state, which the lane leaves untouched.
+- **HLE lane.** Guest memory and CPU state go back to the input state and the handler runs as in
+  `SR_MODE_HLE`. Its result is what the guest keeps, so a difference never changes a run.
+- **Compared.** `v0`, the callee-saved registers (`s0`-`s7`, `gp`, `sp`, `fp`) and every byte of
+  scratchpad, eDRAM and RAM except the dead stack below the caller's `$sp` (64 KiB by default).
+  `v1`, caller-saved registers and FPU results are not compared, so a float-returning call is not
+  checked yet.
+- **Report.** `SR_COSIM_DIFF` names the call, `a0`-`a3`, both `v0` values, the first differing
+  register or byte with both values, and the number of differing bytes. `SR_COSIM_NOT_COMPARED`
+  names the reason: no guest export, the guest lane reached an import, dispatch refused the
+  export, a cosim call inside another, no snapshot memory, or an HLE lane that did not end
+  normally (its guest callback failed or it left a transfer pending). `SR_COSIM_MATCH` is logged
+  once per NID. None of these is ever counted as another.
+- **VRAM.** The eDRAM window is VRAM. The snapshot first reads back what the renderer holds, and
+  every VRAM page the rollback restores is committed to the renderer, so a COSIM call leaves the
+  renderer and the host copy in agreement.
+- **Limits.** Each COSIM call copies and scans about 66 MiB three times, and pacing runs on host
+  time, so guest timing shifts under COSIM; a timing difference is not a handler bug. A guest
+  export that waits for another thread or an interrupt (a spin lock a peer holds, a flag a
+  handler sets) cannot finish while the lane holds them off, so it stops the run after 200000
+  held yields instead of being compared. A handler
+  that switches guest threads inside the call is not a clean comparison: other threads' stores
+  count as the HLE lane's. Arena bytes outside the three windows are neither rolled back nor
+  compared. A started module's export is also what `sr_syscall` runs first
+  (`link_started_export`), so pairing started-module exports needs an HLE-only entry for the HLE
+  lane before it can compare anything.
+- **Scope.** COSIM is off by default and is selected only through the C API, so only the
+  synthetic selftest (`domain-mode-selftest`) runs it. Running it on a title needs a build
+  with `--lle-import-seam` and started-module exports in the registry, which is not done.
+  A match proves only the compared call with those inputs. A difference is evidence for fixing the
+  handler or for moving the library to LLE, not a hardware result.
 
 ---
 

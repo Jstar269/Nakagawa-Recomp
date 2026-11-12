@@ -41,6 +41,11 @@
 #define TITLE_ID_STALL_EYEBROW TITLE_ID(0x000036u)
 #define TITLE_ID_STALL_TEXT TITLE_ID(0x000037u)
 #define TITLE_ID_STALL_ACTIONS TITLE_ID(0x000038u)
+#define TITLE_ID_RENDER_NOTICE TITLE_ID(0x000070u)
+#define TITLE_ID_RENDER_HEAD TITLE_ID(0x000071u)
+#define TITLE_ID_RENDER_EYEBROW TITLE_ID(0x000072u)
+#define TITLE_ID_RENDER_PILL TITLE_ID(0x000073u)
+#define TITLE_ID_RENDER_TEXT TITLE_ID(0x000074u)
 #define TITLE_ID_START_CARD TITLE_ID(0x000039u)
 #define TITLE_ID_START_NAME TITLE_ID(0x00003Au)
 #define TITLE_ID_START_TEXT TITLE_ID(0x00003Bu)
@@ -63,6 +68,7 @@
 #define TITLE_ID_ENH_SESSION TITLE_ID(0x000067u)
 #define TITLE_ID_ACE_ROW TITLE_ID(0x000068u)
 #define TITLE_ID_ACE_TEXT TITLE_ID(0x000069u)
+#define TITLE_ID_ACE_LAST TITLE_ID(0x00006Au)
 #define TITLE_ID_PROMPTS TITLE_ID(0x000040u)
 #define TITLE_ID_WAVES TITLE_ID(0x000050u)
 
@@ -177,7 +183,11 @@ PlayerUiAction player_ui_screen_title(NkUi *ui,
     layout.padding_bottom = NK_UI_BODY_PAD_BOTTOM;
     layout.padding_left = gutter;
     layout.padding_right = gutter;
-    layout.scroll = page_scrolls(ui);
+    /* The body always scrolls between the bars (#2245): what a game's page shows varies
+       (the Enhancements card, the disc check, the compatibility notes, the stall notice), so
+       at the design text size it can still be taller than the room, and a body that did not
+       scroll pushed the prompt bar out of the window. A page that fits does not move. */
+    layout.scroll = SCR_PAGE_BODY_SCROLLS;
     if (nk_ui_begin_container(ui, TITLE_ID_BODY, &layout, NULL)) {
         /* Left column: the art and what the package needs. */
         layout = layout_make(NK_UI_LAYOUT_COLUMN, sizing_fixed(aside), sizing_grow(),
@@ -301,6 +311,30 @@ PlayerUiAction player_ui_screen_title(NkUi *ui,
                 }
                 nk_ui_end_container(ui);
             }
+            /* The render notice (#2151): the slower path the game draws with, as a fact in
+               the brand blue, never a warning colour; Hide keeps it hidden for the session.
+               Never the default focus, which stays on PLAY or STOP GAME. */
+            if (model->render_notice_heading != NULL && model->render_notice_heading[0] != '\0' &&
+                model->render_notice_text != NULL &&
+                nk_ui_card_begin(ui, TITLE_ID_RENDER_NOTICE, sizing_grow(), sizing_fit(),
+                                 NK_UI_SPACE_2)) {
+                row = layout_make(NK_UI_LAYOUT_ROW, sizing_grow(), sizing_fit(), NK_UI_SPACE_3);
+                row.align_y = NK_UI_ALIGN_CENTER;
+                if (nk_ui_begin_container(ui, TITLE_ID_RENDER_HEAD, &row, NULL)) {
+                    nk_ui_eyebrow(ui, TITLE_ID_RENDER_EYEBROW, "Picture");
+                    nk_ui_status_pill(ui, TITLE_ID_RENDER_PILL, "\xE2\x97\x8F",
+                                      model->render_notice_heading, theme->accent_dark);
+                    nk_ui_end_container(ui);
+                }
+                nk_ui_text_role(ui, TITLE_ID_RENDER_TEXT, model->render_notice_text,
+                                NK_UI_TYPE_BODY_S, theme->paper);
+                if (nk_ui_button(ui, PLAYER_UI_ID_TITLE_RENDER_NOTICE_HIDE, "Hide",
+                                 NK_UI_BUTTON_SMALL | NK_UI_BUTTON_NOT_DEFAULT)) {
+                    result = action(PLAYER_UI_ACTION_HIDE_RENDER_NOTICE, model->title_index,
+                                    PLAYER_UI_PRIMARY_NONE);
+                }
+                nk_ui_end_container(ui);
+            }
             /* One action row on the column's left edge, every button the same
                52 px height; the focus ring may spill into the column gap. */
             row = layout_make(NK_UI_LAYOUT_ROW, sizing_fit(), sizing_fit(), NK_UI_SPACE_3);
@@ -338,6 +372,22 @@ PlayerUiAction player_ui_screen_title(NkUi *ui,
                                          NK_UI_BUTTON_LARGE | NK_UI_BUTTON_NOT_DEFAULT)) {
                             result = action(PLAYER_UI_ACTION_REBUILD, model->title_index,
                                             (PlayerUiPrimaryAction)PLAYER_UI_REBUILD_TITLE);
+                        }
+                    }
+                    /* The build queue: Add to queue beside BUILD PACKAGE, or
+                       Remove from queue while it waits (the package card says
+                       its place). */
+                    if (title->queue_add_offered || title->queue_remove_offered) {
+                        const char *queue = title->queue_add_offered ? "Add to queue"
+                                                                     : "Remove from queue";
+                        nk_ui_flow_item(ui, &flow,
+                                        nk_ui_button_width(ui, queue, NK_UI_BUTTON_LARGE));
+                        if (nk_ui_button(ui, PLAYER_UI_ID_TITLE_QUEUE, queue,
+                                         NK_UI_BUTTON_LARGE | NK_UI_BUTTON_NOT_DEFAULT)) {
+                            result = action(PLAYER_UI_ACTION_QUEUE, model->title_index,
+                                            (PlayerUiPrimaryAction)(title->queue_add_offered
+                                                ? PLAYER_UI_QUEUE_ADD
+                                                : PLAYER_UI_QUEUE_REMOVE));
                         }
                     }
                     /* Saves (#1883): back up, restore, add a save, open the folder. */
@@ -512,26 +562,18 @@ PlayerUiAction player_ui_screen_title(NkUi *ui,
                         }
                         nk_ui_flow_end(ui, &buttons);
                     }
-                    /* What the play mode turns on, then what it did last time: one paragraph of
-                       two lines at most. Beside the 60 FPS paragraph it has one line, the last
-                       session when there is one (the button already says the state), so the
-                       card fits the smallest window. */
+                    /* What the play mode turns on, then what it did last time, each its own
+                       paragraph and each whole: the last session shows nowhere else, the parts
+                       list grows with each new part, and the body scrolls (#2245), so the card
+                       grows instead of cutting either sentence short. */
                     if (title->ace_shown && title->ace_line != NULL && title->ace_line[0] != '\0') {
-                        NkUiTextStyle text = nk_ui_type(NK_UI_TYPE_BODY_S, theme->paper);
-                        char paragraph[480];
-                        bool last = title->ace_last_session != NULL &&
-                                    title->ace_last_session[0] != '\0';
-                        if (title->enhancement_shown) {
-                            (void)snprintf(paragraph, sizeof(paragraph), "%s",
-                                           last ? title->ace_last_session : title->ace_line);
-                        } else {
-                            (void)snprintf(paragraph, sizeof(paragraph), "%s%s%s", title->ace_line,
-                                           last ? " " : "", last ? title->ace_last_session : "");
+                        nk_ui_text_role(ui, TITLE_ID_ACE_TEXT, title->ace_line, NK_UI_TYPE_BODY_S,
+                                        theme->paper);
+                        if (title->ace_last_session != NULL &&
+                            title->ace_last_session[0] != '\0') {
+                            nk_ui_text_role(ui, TITLE_ID_ACE_LAST, title->ace_last_session,
+                                            NK_UI_TYPE_BODY_S, theme->muted);
                         }
-                        nk_ui_text(ui, TITLE_ID_ACE_TEXT,
-                                   nk_ui_text_clamp(ui, paragraph, &text, inner,
-                                                    title->enhancement_shown ? 1 : 2),
-                                   &text);
                     }
                 }
                 if (title->enhancement_shown) {
@@ -559,26 +601,44 @@ PlayerUiAction player_ui_screen_title(NkUi *ui,
                 }
                 nk_ui_end_container(ui);
             }
-            /* Report a problem, a link the user's browser opens, and Remove
-               from library (#1304), apart from the play actions: it deletes
-               what Nakagawa built, so it asks first. */
+            /* Add to Steam (#2152), which opens its own dialog; Report a
+               problem, a link the user's browser opens; and Remove from library
+               (#1304), apart from the play actions: it deletes what Nakagawa
+               built, so it asks first. A larger text size wraps the row. */
             bool can_report = title->disc_id != NULL && title->disc_id[0] != '\0';
-            if (can_report || title->can_remove) {
+            if (can_report || title->can_remove || title->can_add_to_steam) {
                 NkUiLayout row = layout_make(NK_UI_LAYOUT_ROW, sizing_fit(), sizing_fit(),
                                              NK_UI_SPACE_3);
-                if (nk_ui_begin_container(ui, TITLE_ID_REMOVE_ROW, &row, NULL)) {
-                    if (can_report &&
-                        nk_ui_button(ui, PLAYER_UI_ID_TITLE_REPORT, "Report a problem", 0u)) {
-                        result = action(PLAYER_UI_ACTION_REPORT_PROBLEM, model->title_index,
-                                        PLAYER_UI_PRIMARY_NONE);
+                NkUiFlowRow flow;
+                if (nk_ui_flow_begin(ui, &flow, TITLE_ID_REMOVE_ROW, &row,
+                                     width - 2.0f * gutter - NK_UI_DETAIL_GAP - aside)) {
+                    if (title->can_add_to_steam) {
+                        nk_ui_flow_item(ui, &flow, nk_ui_button_width(ui, "Add to Steam", 0u));
+                        if (nk_ui_button(ui, PLAYER_UI_ID_TITLE_STEAM, "Add to Steam", 0u)) {
+                            result = action(PLAYER_UI_ACTION_ADD_TO_STEAM, model->title_index,
+                                            PLAYER_UI_PRIMARY_NONE);
+                        }
                     }
-                    if (title->can_remove &&
-                        nk_ui_button(ui, PLAYER_UI_ID_TITLE_REMOVE, "Remove from library",
-                                     NK_UI_BUTTON_DANGER)) {
-                        result = action(PLAYER_UI_ACTION_REMOVE_TITLE, model->title_index,
-                                        PLAYER_UI_PRIMARY_NONE);
+                    if (can_report) {
+                        nk_ui_flow_item(ui, &flow,
+                                        nk_ui_button_width(ui, "Report a problem", 0u));
+                        if (nk_ui_button(ui, PLAYER_UI_ID_TITLE_REPORT, "Report a problem",
+                                         0u)) {
+                            result = action(PLAYER_UI_ACTION_REPORT_PROBLEM,
+                                            model->title_index, PLAYER_UI_PRIMARY_NONE);
+                        }
                     }
-                    nk_ui_end_container(ui);
+                    if (title->can_remove) {
+                        nk_ui_flow_item(ui, &flow,
+                                        nk_ui_button_width(ui, "Remove from library",
+                                                           NK_UI_BUTTON_DANGER));
+                        if (nk_ui_button(ui, PLAYER_UI_ID_TITLE_REMOVE, "Remove from library",
+                                         NK_UI_BUTTON_DANGER)) {
+                            result = action(PLAYER_UI_ACTION_REMOVE_TITLE, model->title_index,
+                                            PLAYER_UI_PRIMARY_NONE);
+                        }
+                    }
+                    nk_ui_flow_end(ui, &flow);
                 }
             }
             nk_ui_end_container(ui);

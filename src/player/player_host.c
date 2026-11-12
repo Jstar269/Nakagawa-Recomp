@@ -100,3 +100,12 @@ void player_host_set_window_icon(SDL_Window *window) {
     SDL_DestroySurface(icon);
 #endif
 }
+
+bool player_host_save_screenshot(SDL_Renderer *renderer, const char *path) {
+    if (!renderer || !path) return false;
+    SDL_Surface *pixels = SDL_RenderReadPixels(renderer, NULL);
+    if (!pixels) return false;
+    bool saved = SDL_SaveBMP(pixels, path);
+    SDL_DestroySurface(pixels);
+    return saved;
+}

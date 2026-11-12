@@ -28,6 +28,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/file.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <dirent.h>
 #include <sys/types.h>
@@ -36,6 +37,7 @@
 #include <unistd.h>
 #if defined(__ANDROID__)
 #include <android/log.h>
+#include <dlfcn.h>
 #include <jni.h>
 #include <pthread.h>
 #include <stdint.h>
@@ -71,14 +73,13 @@ char nk_platform_path_separator(void) {
     return '/';
 }
 
+char nk_platform_path_list_separator(void) {
+    return ':';
+}
+
 /* POSIX file names are byte strings and this project's paths are UTF-8, so the
  * narrow CRT calls already carry the exact name the wide Win32 path would
  * have produced. These exist so host code never has to know that. */
-FILE *nk_fopen_utf8(const char *path, const char *mode) {
-    if (!path || !mode) return NULL;
-    return fopen(path, mode);
-}
-
 int nk_remove_utf8(const char *path) {
     if (!path || !*path) return -1;
     return unlink(path);
@@ -692,13 +693,18 @@ bool nk_platform_get_desktop_dir(char *out_path, size_t max_len) {
     return false;
 }
 
-#if !defined(__ANDROID__)
-bool nk_platform_spawn_process(
+/* ---- fork/exec children ----------------------------------------------------------------------
+ *
+ * Every POSIX process the desktop starts, and on Android the bundled tool programs
+ * (nk_platform_spawn_tool), are ordinary forked children; these posix_child_* functions are the
+ * one implementation of starting, polling, waiting for, ending and closing them. */
+static bool posix_child_spawn(
     const char *executable_path,
     const char * const *argv,
     const char * const *envp,
     const char *working_directory,
     const char *output_log_path,
+    NkProcessPriority priority,
     NkProcessHandle *out_process
 ) {
     if (!executable_path || !out_process) return false;
@@ -723,6 +729,17 @@ bool nk_platform_spawn_process(
     if (pid == 0) {
         /* Child process: establish own process group to allow tree-wide signals */
         (void)setpgid(0, 0);
+
+        /* Lower the priority before exec, so the program never runs above it; what it
+           starts inherits the nice value. A child already nicer keeps its own. */
+        if (priority == NK_PROCESS_PRIORITY_LOW) {
+            errno = 0;
+            int nice_now = getpriority(PRIO_PROCESS, 0);
+            if ((nice_now != -1 || errno == 0) && nice_now < NK_PLATFORM_LOW_PRIORITY_NICE &&
+                setpriority(PRIO_PROCESS, 0, NK_PLATFORM_LOW_PRIORITY_NICE) != 0) {
+                _exit(127);
+            }
+        }
 
         if (output_fd >= 0) {
             if (dup2(output_fd, STDOUT_FILENO) < 0 ||
@@ -767,6 +784,16 @@ bool nk_platform_spawn_process(
 
     /* Parent process: close race by setting child's process group */
     (void)setpgid(pid, pid);
+    /* The same race for the priority: the child lowers its own before exec, and the
+       parent does too, so the child already runs low when this returns. A child that
+       has already exited cannot be found; that is no failure of the spawn. */
+    if (priority == NK_PROCESS_PRIORITY_LOW) {
+        errno = 0;
+        int child_nice = getpriority(PRIO_PROCESS, (id_t)pid);
+        if ((child_nice != -1 || errno == 0) && child_nice < NK_PLATFORM_LOW_PRIORITY_NICE) {
+            (void)setpriority(PRIO_PROCESS, (id_t)pid, NK_PLATFORM_LOW_PRIORITY_NICE);
+        }
+    }
 
     out_process->native_handle = (void *)(intptr_t)pid;
     out_process->job_handle = NULL;
@@ -774,8 +801,6 @@ bool nk_platform_spawn_process(
     out_process->is_active = true;
     return true;
 }
-
-#endif /* !__ANDROID__ */
 
 bool nk_platform_path_exceeds_limit(const char *path, bool is_directory) {
     (void)is_directory;
@@ -803,8 +828,16 @@ bool nk_platform_describe_os_error(int os_error, char *out, size_t out_size) {
     return true;
 }
 
-#if !defined(__ANDROID__)
-bool nk_platform_is_process_running(NkProcessHandle *process) {
+static bool posix_child_priority(const NkProcessHandle *process, NkProcessPriority *out) {
+    if (!process || !process->is_active || process->process_id <= 0 || !out) return false;
+    errno = 0;
+    int nice_now = getpriority(PRIO_PROCESS, (id_t)process->process_id);
+    if (nice_now == -1 && errno != 0) return false;
+    *out = nice_now > 0 ? NK_PROCESS_PRIORITY_LOW : NK_PROCESS_PRIORITY_NORMAL;
+    return true;
+}
+
+static bool posix_child_is_running(NkProcessHandle *process) {
     if (!process || !process->is_active) return false;
     pid_t pid = (pid_t)(intptr_t)process->native_handle;
     int status = 0;
@@ -842,12 +875,7 @@ static bool deadline_passed(const struct timespec *deadline) {
     return now.tv_nsec >= deadline->tv_nsec;
 }
 
-bool nk_platform_bring_process_window_to_front(const NkProcessHandle *process) {
-    (void)process;
-    return false;
-}
-
-int nk_platform_wait_process(NkProcessHandle *process, int timeout_ms) {
+static int posix_child_wait(NkProcessHandle *process, int timeout_ms) {
     if (!process) return -1;
     if (process->has_cached_exit) {
         return process->cached_exit_code;
@@ -911,7 +939,7 @@ int nk_platform_wait_process(NkProcessHandle *process, int timeout_ms) {
 #define NK_TERM_GRACE_MS 2000
 #define NK_KILL_GRACE_MS 1000
 
-void nk_platform_terminate_process(NkProcessHandle *process) {
+static void posix_child_terminate(NkProcessHandle *process) {
     if (!process) return;
     pid_t pid = (pid_t)process->process_id;
     if (pid <= 0) {
@@ -931,19 +959,19 @@ void nk_platform_terminate_process(NkProcessHandle *process) {
        terminating runtime as a zombie until the player itself exited, and left
        a runtime that delays or ignores SIGTERM still running while the UI
        reported it stopped. Reap it, and escalate if it will not go.
-       nk_platform_wait_process leaves is_active true on a timeout and clears
+       posix_child_wait leaves is_active true on a timeout and clears
        it once the child is reaped, which is what distinguishes the two. */
-    nk_platform_wait_process(process, NK_TERM_GRACE_MS);
+    posix_child_wait(process, NK_TERM_GRACE_MS);
     if (process->is_active || kill(-pid, 0) == 0) {
         kill(-pid, SIGKILL);
         if (process->is_active) {
-            nk_platform_wait_process(process, NK_KILL_GRACE_MS);
+            posix_child_wait(process, NK_KILL_GRACE_MS);
         }
     }
     process->is_active = false;
 }
 
-void nk_platform_close_process(NkProcessHandle *process) {
+static void posix_child_close(NkProcessHandle *process) {
     if (!process) return;
     process->native_handle = NULL;
     process->job_handle = NULL;
@@ -951,16 +979,101 @@ void nk_platform_close_process(NkProcessHandle *process) {
     process->is_active = false;
     process->has_cached_exit = false;
     process->cached_exit_code = 0;
+    process->tool_child = false;
 }
 
+/* ---- Bundled tool programs (nk_platform.h) --------------------------------------------------- */
+
+bool nk_platform_path_is_tool_in_dir(const char *dir, const char *path) {
+    if (!dir || !*dir || !path || !*path) return false;
+    char *real_dir = realpath(dir, NULL);
+    char *real_path = realpath(path, NULL);
+    bool ok = false;
+    if (real_dir && real_path) {
+        size_t dir_len = strlen(real_dir);
+        struct stat st;
+        /* Directly inside: the resolved path is "<dir>/<name>" and <name> has no further '/'. */
+        ok = strncmp(real_path, real_dir, dir_len) == 0 && real_path[dir_len] == '/' &&
+             real_path[dir_len + 1u] != '\0' && strchr(real_path + dir_len + 1u, '/') == NULL &&
+             stat(real_path, &st) == 0 && S_ISREG(st.st_mode);
+    }
+    free(real_dir);
+    free(real_path);
+    return ok;
+}
+
+#if !defined(__ANDROID__)
+bool nk_platform_spawn_process(const char *executable_path, const char * const *argv,
+                               const char * const *envp, const char *working_directory,
+                               const char *output_log_path, NkProcessHandle *out_process) {
+    return posix_child_spawn(executable_path, argv, envp, working_directory, output_log_path,
+                             NK_PROCESS_PRIORITY_NORMAL, out_process);
+}
+
+bool nk_platform_spawn_process_at_priority(const char *executable_path, const char * const *argv,
+                                           const char * const *envp,
+                                           const char *working_directory,
+                                           const char *output_log_path,
+                                           NkProcessPriority priority,
+                                           NkProcessHandle *out_process) {
+    return posix_child_spawn(executable_path, argv, envp, working_directory, output_log_path,
+                             priority, out_process);
+}
+
+/* Every desktop program is an ordinary child, a tool included (nk_platform.h). */
+bool nk_platform_spawn_tool(const char *executable_path, const char * const *argv,
+                            const char * const *envp, const char *working_directory,
+                            const char *output_log_path, NkProcessHandle *out_process) {
+    return posix_child_spawn(executable_path, argv, envp, working_directory, output_log_path,
+                             NK_PROCESS_PRIORITY_NORMAL, out_process);
+}
+
+bool nk_platform_spawn_tool_at_priority(const char *executable_path, const char * const *argv,
+                                        const char * const *envp, const char *working_directory,
+                                        const char *output_log_path, NkProcessPriority priority,
+                                        NkProcessHandle *out_process) {
+    return posix_child_spawn(executable_path, argv, envp, working_directory, output_log_path,
+                             priority, out_process);
+}
+
+bool nk_platform_process_priority(const NkProcessHandle *process, NkProcessPriority *out) {
+    return posix_child_priority(process, out);
+}
+
+/* The desktop finds its tools on PATH or in the prerequisites folder, not in one bundled folder. */
+bool nk_platform_get_tool_dir(char *out_path, size_t max_len) {
+    if (out_path && max_len) out_path[0] = '\0';
+    return false;
+}
+
+bool nk_platform_is_process_running(NkProcessHandle *process) {
+    return posix_child_is_running(process);
+}
+
+int nk_platform_wait_process(NkProcessHandle *process, int timeout_ms) {
+    return posix_child_wait(process, timeout_ms);
+}
+
+bool nk_platform_bring_process_window_to_front(const NkProcessHandle *process) {
+    (void)process;
+    return false;
+}
+
+void nk_platform_terminate_process(NkProcessHandle *process) {
+    posix_child_terminate(process);
+}
+
+void nk_platform_close_process(NkProcessHandle *process) {
+    posix_child_close(process);
+}
 #endif /* !__ANDROID__ */
 
 #if defined(__ANDROID__)
 /* ---- Android: a title runs in its own app process ----------------------------------------
  *
- * An Android app cannot fork and exec a program of its own: since API 29 an app may not execute
- * files from its data folder, and a forked copy of the app process is not a supported state. The
- * desktop model, one child process per title, maps onto Android's own process model instead: the
+ * A title is not a forked child here. Since API 29 an app may not execute files from its data
+ * folder, and a title's SDL activity needs an app process of its own. The desktop model, one
+ * child process per title, maps onto Android's own process model instead: the
  * launcher asks Java (LauncherActivity.startTitle) to start TitleActivity, which the manifest puts
  * in the separate ":title" process. TitleActivity loads the title's runtime library and calls its
  * entry point with the argv and environment given here, so the runtime starts exactly as a
@@ -970,7 +1083,63 @@ void nk_platform_close_process(NkProcessHandle *process) {
  * That process is not this one's child, so it cannot be waited for. The title records its pid in
  * NK_ANDROID_PID_FILE when it starts and its exit status in NK_ANDROID_EXIT_FILE when it ends;
  * both are per-launch files in the cache folder. A title process that dies without recording a
- * status (killed, or a crash) reads as exit -1, as a signalled POSIX child does. */
+ * status (killed, or a crash) reads as exit -1, as a signalled POSIX child does.
+ *
+ * The app's own tool programs are the exception (nk_platform_spawn_tool). The APK ships them as
+ * lib*.so files in its native library folder, the one place an app may execute from (measured on
+ * an Android 16 device for #360: a program there runs, a program the app wrote is denied
+ * execute_no_trans). They are ordinary fork/exec children, and every process call below hands a
+ * handle with tool_child set to the posix_child_* implementation. */
+
+static bool android_tool_child(const NkProcessHandle *process) {
+    return process && process->tool_child;
+}
+
+/* The folder this library (or, in a test program, this executable) was loaded from. */
+bool nk_platform_get_tool_dir(char *out_path, size_t max_len) {
+    if (!out_path || max_len == 0) return false;
+    out_path[0] = '\0';
+    Dl_info info;
+    if (!dladdr((void *)nk_platform_get_tool_dir, &info) || !info.dli_fname) return false;
+    char *real = realpath(info.dli_fname, NULL);
+    if (!real) return false;
+    char *slash = strrchr(real, '/');
+    bool ok = slash && slash != real && (size_t)(slash - real) < max_len;
+    if (ok) {
+        memcpy(out_path, real, (size_t)(slash - real));
+        out_path[slash - real] = '\0';
+    }
+    free(real);
+    return ok;
+}
+
+bool nk_platform_spawn_tool(const char *executable_path, const char * const *argv,
+                            const char * const *envp, const char *working_directory,
+                            const char *output_log_path, NkProcessHandle *out_process) {
+    return nk_platform_spawn_tool_at_priority(executable_path, argv, envp, working_directory,
+                                              output_log_path, NK_PROCESS_PRIORITY_NORMAL,
+                                              out_process);
+}
+
+bool nk_platform_spawn_tool_at_priority(const char *executable_path, const char * const *argv,
+                                        const char * const *envp, const char *working_directory,
+                                        const char *output_log_path, NkProcessPriority priority,
+                                        NkProcessHandle *out_process) {
+    if (!executable_path || !out_process) return false;
+    memset(out_process, 0, sizeof(*out_process));
+    char tool_dir[NK_MAX_PATH];
+    if (!nk_platform_get_tool_dir(tool_dir, sizeof(tool_dir)) ||
+        !nk_platform_path_is_tool_in_dir(tool_dir, executable_path)) {
+        out_process->spawn_error = EACCES;
+        return false;
+    }
+    if (!posix_child_spawn(executable_path, argv, envp, working_directory, output_log_path,
+                           priority, out_process)) {
+        return false;
+    }
+    out_process->tool_child = true;
+    return true;
+}
 
 static JavaVM *s_android_vm;
 static jclass s_android_launcher_class;
@@ -1079,8 +1248,28 @@ bool nk_platform_spawn_process(
     const char *output_log_path,
     NkProcessHandle *out_process
 ) {
+    return nk_platform_spawn_process_at_priority(executable_path, argv, envp,
+                                                 working_directory, output_log_path,
+                                                 NK_PROCESS_PRIORITY_NORMAL, out_process);
+}
+
+bool nk_platform_spawn_process_at_priority(
+    const char *executable_path,
+    const char * const *argv,
+    const char * const *envp,
+    const char *working_directory,
+    const char *output_log_path,
+    NkProcessPriority priority,
+    NkProcessHandle *out_process
+) {
     if (!executable_path || !out_process) return false;
     memset(out_process, 0, sizeof(*out_process));
+    /* A title starts as an Android activity, which takes no priority: a low one is
+       refused rather than started at normal priority. */
+    if (priority != NK_PROCESS_PRIORITY_NORMAL) {
+        out_process->spawn_error = ENOTSUP;
+        return false;
+    }
     if (!s_android_vm || !s_android_start_title) {
         out_process->spawn_error = ENOSYS;
         return false;
@@ -1149,7 +1338,13 @@ static bool android_read_int(const char *path, int *out) {
     return ok;
 }
 
+bool nk_platform_process_priority(const NkProcessHandle *process, NkProcessPriority *out) {
+    if (android_tool_child(process)) return posix_child_priority(process, out);
+    return false;
+}
+
 bool nk_platform_is_process_running(NkProcessHandle *process) {
+    if (android_tool_child(process)) return posix_child_is_running(process);
     if (!process || !process->is_active) return false;
     unsigned serial = (unsigned)(uintptr_t)process->native_handle;
     char path[NK_MAX_PATH];
@@ -1181,6 +1376,7 @@ bool nk_platform_is_process_running(NkProcessHandle *process) {
 }
 
 int nk_platform_wait_process(NkProcessHandle *process, int timeout_ms) {
+    if (android_tool_child(process)) return posix_child_wait(process, timeout_ms);
     if (!process) return -1;
     struct timespec start;
     if (clock_gettime(CLOCK_MONOTONIC, &start) != 0) return -1;
@@ -1206,6 +1402,10 @@ bool nk_platform_bring_process_window_to_front(const NkProcessHandle *process) {
 }
 
 void nk_platform_terminate_process(NkProcessHandle *process) {
+    if (android_tool_child(process)) {
+        posix_child_terminate(process);
+        return;
+    }
     if (!process || !process->is_active) return;
     if (process->process_id <= 0) (void)nk_platform_is_process_running(process);
     if (process->process_id > 0) (void)kill((pid_t)process->process_id, SIGKILL);
@@ -1213,6 +1413,10 @@ void nk_platform_terminate_process(NkProcessHandle *process) {
 }
 
 void nk_platform_close_process(NkProcessHandle *process) {
+    if (android_tool_child(process)) {
+        posix_child_close(process);
+        return;
+    }
     if (!process) return;
     unsigned serial = (unsigned)(uintptr_t)process->native_handle;
     char path[NK_MAX_PATH];
@@ -1231,6 +1435,8 @@ void nk_platform_close_process(NkProcessHandle *process) {
 static int s_android_log_pipe[2] = { -1, -1 };
 static char s_android_log_tag[32] = "nakagawa";
 static FILE *s_android_log_file;
+static pthread_t s_android_log_thread;
+static bool s_android_log_thread_running;
 
 static void *android_log_pump(void *arg) {
     (void)arg;
@@ -1238,6 +1444,7 @@ static void *android_log_pump(void *arg) {
     size_t used = 0;
     for (;;) {
         ssize_t n = read(s_android_log_pipe[0], buf + used, sizeof(buf) - 1u - used);
+        if (n < 0 && errno == EINTR) continue;
         if (n <= 0) break;
         used += (size_t)n;
         size_t start = 0;
@@ -1259,6 +1466,14 @@ static void *android_log_pump(void *arg) {
             used = 0;
         }
     }
+    if (used > 0) {   /* a last line with no newline */
+        buf[used] = '\0';
+        __android_log_write(ANDROID_LOG_INFO, s_android_log_tag, buf);
+        if (s_android_log_file) {
+            fprintf(s_android_log_file, "%s\n", buf);
+            fflush(s_android_log_file);
+        }
+    }
     return NULL;
 }
 
@@ -1267,13 +1482,19 @@ bool nk_platform_host_startup(const char *log_tag) {
     if (log_tag && log_tag[0]) snprintf(s_android_log_tag, sizeof(s_android_log_tag), "%s", log_tag);
     const char *log_path = getenv("NK_ANDROID_LOG_FILE");
     if (log_path && log_path[0]) s_android_log_file = fopen(log_path, "a");
-    if (s_android_log_pipe[0] < 0 && pipe(s_android_log_pipe) == 0) {
+    /* O_CLOEXEC: a child the runtime starts keeps no copy of the pipe's own write end, which would
+       hold off the end of file nk_platform_host_shutdown waits for. The standard streams it gets
+       are dup2() copies, inherited as on the desktop. */
+    if (s_android_log_pipe[0] < 0 && pipe2(s_android_log_pipe, O_CLOEXEC) == 0) {
         pthread_t thread;
         setvbuf(stdout, NULL, _IOLBF, 0);
         setvbuf(stderr, NULL, _IOLBF, 0);
         (void)dup2(s_android_log_pipe[1], STDOUT_FILENO);
         (void)dup2(s_android_log_pipe[1], STDERR_FILENO);
-        if (pthread_create(&thread, NULL, android_log_pump, NULL) == 0) pthread_detach(thread);
+        if (pthread_create(&thread, NULL, android_log_pump, NULL) == 0) {
+            s_android_log_thread = thread;
+            s_android_log_thread_running = true;
+        }
     }
     /* SDL_GetBasePath() is "./" on Android: the folder the app unpacked its bundled files to
        (fonts) is made the working directory so that relative base resolves there. */
@@ -1285,11 +1506,35 @@ bool nk_platform_host_startup(const char *log_tag) {
     }
     return true;
 }
+
+void nk_platform_host_shutdown(void) {
+    if (!s_android_log_thread_running) return;
+    s_android_log_thread_running = false;
+    fflush(stdout);
+    fflush(stderr);
+    /* The pump reads until every write end is closed: the two standard streams and the pipe's
+       own. Then it has written every line, and it ends. */
+    int null_fd = open("/dev/null", O_WRONLY | O_CLOEXEC);
+    if (null_fd >= 0) {
+        (void)dup2(null_fd, STDOUT_FILENO);
+        (void)dup2(null_fd, STDERR_FILENO);
+        close(null_fd);
+    }
+    close(s_android_log_pipe[1]);
+    s_android_log_pipe[1] = -1;
+    (void)pthread_join(s_android_log_thread, NULL);
+    if (s_android_log_file) {
+        fclose(s_android_log_file);
+        s_android_log_file = NULL;
+    }
+}
 #else
 bool nk_platform_host_startup(const char *log_tag) {
     (void)log_tag;
     return true;
 }
+
+void nk_platform_host_shutdown(void) {}
 #endif
 
 bool nk_platform_local_time_zone(int *standard_minutes, bool *daylight_now) {
@@ -1356,17 +1601,42 @@ unsigned long nk_platform_process_id(void) {
     return (unsigned long)getpid();
 }
 
-int nk_platform_last_os_error(void) {
-    return errno;
+/* Local pipes are unsupported on POSIX: every open fails and the caller's feature stays
+   off. */
+bool nk_platform_local_pipe_supported(void) {
+    return false;
 }
 
-const char *const *nk_platform_sdl3_ttf_library_names(void) {
-#if defined(__APPLE__)
-    static const char *const names[] = { "libSDL3_ttf.0.dylib", "libSDL3_ttf.dylib", NULL };
-#else
-    static const char *const names[] = { "libSDL3_ttf.so.0", "libSDL3_ttf.so", NULL };
-#endif
-    return names;
+bool nk_platform_local_pipe_open(NkLocalPipe *pipe, const char *name) {
+    (void)name;
+    if (pipe) memset(pipe, 0, sizeof(*pipe));
+    return false;
+}
+
+bool nk_platform_local_pipe_write(NkLocalPipe *pipe, const void *data, size_t len,
+                                  unsigned timeout_ms) {
+    (void)pipe;
+    (void)data;
+    (void)len;
+    (void)timeout_ms;
+    return false;
+}
+
+long nk_platform_local_pipe_read(NkLocalPipe *pipe, void *buf, size_t cap) {
+    (void)pipe;
+    (void)buf;
+    (void)cap;
+    return -1;
+}
+
+void nk_platform_local_pipe_close(NkLocalPipe *pipe) {
+    if (!pipe) return;
+    pipe->handle = NULL;
+    pipe->open = false;
+}
+
+int nk_platform_last_os_error(void) {
+    return errno;
 }
 
 bool nk_platform_find_system_ui_font(char *out_path, size_t out_len) {

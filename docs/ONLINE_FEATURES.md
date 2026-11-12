@@ -2,7 +2,8 @@
 
 Status: step 1 of the implementation order is built (the switches, the wizard step and the developer log panel).
 The update check is built too, as its own opt-in feature outside online mode (see
-[Update check](#update-check)); news and reports are not. The player is offline unless the user asks
+[Update check](#update-check)), and so is [Discord status](#discord-status), which makes no
+network connection; news and reports are not. The player is offline unless the user asks
 ([`SETUP.md`](SETUP.md#network-use)). This page is the contract the implementation follows. The launcher gets an update check, a reporting system and a news feed, all behind an
 **online mode** that the setup wizard asks about, and a **developer mode** that shows a developer log for
 diagnosing new issues.
@@ -17,7 +18,7 @@ diagnosing new issues.
   uses GitHub's hosts for the releases themselves.)
 - **Nothing is sent on its own.** No telemetry, analytics, crash upload or identifier. The only automatic traffic is
   fetching the news feed while online mode is on, and the one update check at start when the user turned it on. Requests carry no cookie and no ID; the
-  user agent names the version and operating system only (`NakagawaRecomp/0.0.1 (Windows)`).
+  update check's user agent is the fixed string `NakagawaRecomp/UpdateCheck`, with no version or system details.
 - **Game data never leaves the PC.** No game code, game data, decrypted module, package, save, guest memory or
   capture is ever uploaded (`AGENTS.md`, section 5). A report sends only the fields the user sees in its preview.
 - **Offline stays complete.** Every feature works without online mode except news and reports. A network failure is
@@ -36,8 +37,9 @@ switches, each with one plain sentence (today the Online mode row is hidden, as 
 | Developer mode | Off | "Show a developer log on screen to help track down problems. Stays on this PC." |
 
 Until news and reports exist, the wizard step and Settings > Online and developer do not show the Online mode
-switch or its two parts (news, reports): they say in one line that online features are not built yet, and
-only the Developer mode switch is there. A user whose stored `online_mode` is On still gets the Online mode
+switch or its two parts (news, reports): they say in one line that online features are not built yet. The
+wizard step then has only the Developer mode switch; Settings > Online and developer has the Developer mode switch
+and, in a build that can show it, the [Discord status](#discord-status) switch. A user whose stored `online_mode` is On still gets the Online mode
 switch (with a sentence that it does nothing yet), so it can be turned off. The `online_mode`, `online_news` and `online_reports` settings are still
 stored and still default to off, so a build that adds the features keeps what the user chose; with online mode
 on, Settings will show its two parts again, each on by default and each switchable alone. The step is skippable;
@@ -64,10 +66,40 @@ already are.
   replaced and nothing runs on its own.
 - A build without the key, a release without a signature, and a signature that does not verify all fail
   closed: no download, a plain card, and the release page link. The signed checksum names the ZIP, whose name
-  carries the version, so an older signed checksum served for a newer release is refused. A build-provenance
-  attestation for the ZIP does not exist yet.
+  carries the version, so an older signed checksum served for a newer release is refused. The ZIP itself carries no
+  build-provenance attestation; the files in it do.
 
 Hosts, the exact request and the failure cards are in [`SETUP.md`](SETUP.md#network-use).
+
+## Discord status
+
+Built for v0.1.0 (#2259; maintainer decision 2026-11-08): Discord Rich Presence, as PPSSPP offers it,
+opt-in and off by default.
+
+- **Settings > Online and developer** has a **Discord status** switch, off by default
+  (`discord_presence` in `settings.json`; anything but `true` reads as off).
+- **No network connection.** The player writes to the Discord app on the same PC through its local
+  named pipe (`discord-ipc-0` to `discord-ipc-9`; `src/player/discord_presence.c`, over
+  `nk_platform_local_pipe_*`). The protocol is written from Discord's public RPC documentation: a
+  framed JSON handshake with the application ID, then `SET_ACTIVITY`. No Discord SDK is used or
+  vendored.
+- **What Discord receives:** the game's title from the disc's own metadata (the disc ID when it
+  names no title), the play mode (Authentic, Enhanced or Ace) and the start time, plus the player's
+  process ID, which the protocol requires. Never a path, save, user name or anything from the
+  game's memory. Discord shows these on the user's profile; that is the disclosure the switch
+  asks about.
+- **Quiet failure.** If Discord isn't running, the player tries each pipe once, at most once a
+  minute, and logs nothing. A write gives up after 250 ms and no read waits, so the launcher never
+  stalls. The status clears when the game exits and when the player closes.
+- **Application ID.** The project's Discord application ID is one constant,
+  `NK_DISCORD_APPLICATION_ID` in `src/player/discord_presence.h`. It is public, not a secret. An
+  empty or malformed value fails closed: the build cannot show Discord status, and the player never
+  opens the pipe.
+- **Which builds show it.** Windows builds with an application ID. Other builds (no application ID,
+  or Linux and macOS, which have no local pipes here) have no Discord status row; one whose stored
+  setting is On still shows the row, saying the build can't show it, so it can be turned off.
+- **Tests** (`tests/native/test_discord_presence.c`) drive the client against a fake transport and,
+  on Windows, a fake pipe server with a test-only name; they never reach Discord.
 
 ## News
 

@@ -18,6 +18,7 @@ PUBLIC_TARGETS := \
 	contrib-refresh \
 	test \
 	native-core-tests \
+	shared-helpers-selftest \
 	player-ui-tests \
 	player-ui-regressions \
 	fuzz-parsers \
@@ -47,6 +48,7 @@ PUBLIC_TARGETS := \
 	display-smoke-picture-gate \
 	display-smoke-gui \
 	display-smoke-fsr1 \
+	display-smoke-anime4k \
 	display-smoke-quit \
 	display-smoke-player \
 	display-smoke-clean \
@@ -96,6 +98,8 @@ PUBLIC_TARGETS := \
 	gui-present-selftest \
 	clay-layout-selftest \
 	ed25519-verify-selftest \
+	achievements-selftest \
+	nk-nickname-selftest \
 	nk-ui-core-selftest \
 	nk-ui-player-screens-selftest \
 	nk-ui-player-screens-capture \
@@ -116,6 +120,8 @@ PUBLIC_TARGETS := \
 	stale-code-selftest \
 	cpu-lle-selftest \
 	domain-mode-selftest \
+	videocodec-selftest \
+	nkstate-selftest \
 	dispatch-isolation-selftest \
 	dispatch-isolation-selftest-one \
 	memory-watch-selftest \
@@ -124,6 +130,9 @@ PUBLIC_TARGETS := \
 	fp-convert-selftest \
 	ge-float24-selftest \
 	ge-cpu-profile-validate-selftest \
+	ge-tnl-census-selftest \
+	xr-selftest \
+	ge-patch-tess-selftest \
 	ge-flight-overhead \
 	vfpu-tables-selftest \
 	watchpoints-file-selftest \
@@ -137,8 +146,21 @@ PUBLIC_TARGETS := \
 	osk-text-entry-selftest \
 	osk-overlay-selftest \
 	ace-selftest \
+	fsr3-host-selftest \
+	dmac-mutants \
+	fsr3-mutants \
+	fsr3-fg-host-selftest \
+	fsr3-fg-state-selftest \
+	fsr3-fg-mutants \
+	fsr3-shader-verify \
+	fsr3-shader-repro-verify \
+	fsr3-pass-selftest \
+	fsr3-pass-mutants \
+	fsr3-fg-pass-selftest \
+	fsr3-fg-pass-mutants \
 	ace-smooth-selftest \
 	fsr1-selftest \
+	anime4k-selftest \
 	ace-ui-selftest \
 	motion-match-selftest \
 	osk-overlay-paint-selftest \
@@ -151,13 +173,27 @@ PUBLIC_TARGETS := \
 	atrac3p-title-accept \
 	gpu-coherence-selftest \
 	gpu-coherence-selftest-snapbar-mutants \
+	gpu-coherence-twin-mutants \
+	gpu-coherence-pcache-mutant \
+	vram-view-identity-selftest \
+	gpu-dst-read-mutants \
+	gpu-stencil-once-mutants \
 	gpu-snapsync-selftest \
 	gpu-ace-selftest \
 	tex-scale-selftest \
+	pipeline-cache-selftest \
 	tex-scale-gate-mutant \
+	texrepl-selftest \
+	texrepl-mutant \
 	gpu-texscale-selftest \
 	gpu-texscale-mutant \
+	gpu-texrepl-mutant \
+	gpu-glyph-selftest \
+	gpu-glyph-mutant \
+	glyph-recon-selftest \
+	glyph-recon-mutant \
 	ge-replay \
+	ge-first-bad-draw-selftest \
 	run \
 	run_elf \
 	vfpu_fuzz \
@@ -190,6 +226,7 @@ HELP_DESCRIPTION_contrib-check := run only the local gates that apply to your ch
 HELP_DESCRIPTION_contrib-refresh := reproduce the public provenance controls for your changed paths
 HELP_DESCRIPTION_test := run the complete Python tooling test suite
 HELP_DESCRIPTION_native-core-tests := build and run host-side native core tests
+HELP_DESCRIPTION_shared-helpers-selftest := build and run the shared core helper tests
 HELP_DESCRIPTION_fuzz-parsers := run bounded native parser mutation fuzzing
 HELP_DESCRIPTION_readiness := run the strict pre-PR gate with external authority
 HELP_DESCRIPTION_provenance-refresh := refresh controls through hosted generation and stage them
@@ -218,6 +255,7 @@ HELP_DESCRIPTION_display-smoke := build the display smoke fixture
 HELP_DESCRIPTION_display-smoke-run := run display smoke and compare its GE/present flight bundle
 HELP_DESCRIPTION_display-smoke-picture-gate := compare display smoke frames with an accepted reference (SKIP, PASS, FAIL)
 HELP_DESCRIPTION_display-smoke-gui := run the display smoke with its GUI
+HELP_DESCRIPTION_display-smoke-anime4k := compare the display smoke with the Anime4K movie upscaler off and on (needs a Vulkan device)
 HELP_DESCRIPTION_display-smoke-fsr1 := compare the display smoke with the FSR 1 presentation upscaler off and on (needs a Vulkan device)
 HELP_DESCRIPTION_display-smoke-quit := close the display smoke window mid-run and check the orderly quit
 HELP_DESCRIPTION_display-smoke-player := build the player and run display smoke
@@ -271,7 +309,9 @@ HELP_DESCRIPTION_heap-selftest := run the heap and allocator selftest
 HELP_DESCRIPTION_profiler-selftest := run the profiler selftest
 HELP_DESCRIPTION_gui-present-selftest := run the host present pacing selftest
 HELP_DESCRIPTION_clay-layout-selftest := build and run the vendored Clay layout selftest
+HELP_DESCRIPTION_achievements-selftest := run the RetroAchievements bridge (vendored rcheevos) against an in-process fake server, with no network
 HELP_DESCRIPTION_ed25519-verify-selftest := check nk_ed25519_verify (vendored Monocypher) against the RFC 8032 vectors and nk_minisign_verify against real minisign output
+HELP_DESCRIPTION_nk-nickname-selftest := check the console nickname rule (src/core/nk_nickname.h): the Player default, the 32-byte cap and the refused values
 HELP_DESCRIPTION_nk-ui-player-screens-selftest := build and run nk_ui Library, Title detail and router snapshots
 HELP_DESCRIPTION_nk-ui-player-screens-capture := save offscreen synthetic Library and Title detail captures (set NK_UI_CAPTURE_DIR)
 HELP_DESCRIPTION_nk-ui-overlay-host-selftest := build and run the in-game overlay host on SDL3_ttf, real key events and the SDL_Renderer backend (#1159)
@@ -292,6 +332,8 @@ HELP_DESCRIPTION_dispatch-selftest := run the production dispatch selftest
 HELP_DESCRIPTION_stale-code-selftest := run the stale translated-code detector selftest
 HELP_DESCRIPTION_cpu-lle-selftest := run the LLE COP0/exception interpreter selftest
 HELP_DESCRIPTION_domain-mode-selftest := run the LLE domain-mode and import-seam selftest
+HELP_DESCRIPTION_videocodec-selftest := run the Media Engine boundary (sceVideocodec, sceMpegbase, sceAudiocodec) selftest
+HELP_DESCRIPTION_nkstate-selftest := run the save-state container, checkpoint and record/replay selftest
 HELP_DESCRIPTION_dispatch-isolation-selftest := run dispatch isolation selftests
 HELP_DESCRIPTION_dispatch-isolation-selftest-one := run one dispatch isolation selftest
 HELP_DESCRIPTION_code-capture-selftest := capture code installed at run time, translate it and bind it by its code
@@ -300,6 +342,9 @@ HELP_DESCRIPTION_asset-index-selftest := run the asset-index selftest
 HELP_DESCRIPTION_fp-convert-selftest := run the FPU conversion selftest
 HELP_DESCRIPTION_ge-float24-selftest := run the GE float24/row-sum/reciprocal reference selftest
 HELP_DESCRIPTION_ge-cpu-profile-validate-selftest := run the GE CPU-profile validator selftest on the production GE object
+HELP_DESCRIPTION_ge-tnl-census-selftest := run the GPU T&L decline census selftest (#318) on the production GE object
+HELP_DESCRIPTION_xr-selftest := run the OpenXR (VR) module selftest (#791) against a fake OpenXR runtime: no headset or loader needed
+HELP_DESCRIPTION_ge-patch-tess-selftest := run the finer Bezier and spline patch selftest on the production GE object (no GPU)
 HELP_DESCRIPTION_ge-flight-overhead := measure the disarmed flight recorder cost on the GE draw path (recorder linked vs absent; no game data)
 HELP_DESCRIPTION_vfpu-tables-selftest := run the VFPU table-loader selftest
 HELP_DESCRIPTION_watchpoints-file-selftest := run the watchpoints-file selftest
@@ -313,8 +358,21 @@ HELP_DESCRIPTION_videorec-selftest := run the run-recorder (video and audio capt
 HELP_DESCRIPTION_osk-text-entry-selftest := run the on-screen keyboard's non-blocking text-entry selftest
 HELP_DESCRIPTION_osk-overlay-selftest := run the in-window keyboard's state-machine selftest (pure C)
 HELP_DESCRIPTION_ace-selftest := run Ace Mode's CPU-only selftest (launch line, 30 Hz detector, readout, report; pure C)
+HELP_DESCRIPTION_fsr3-host-selftest := run FSR 3's host selftest against the record of AMD's host code (pure C)
+HELP_DESCRIPTION_dmac-mutants := run the sceDmacMemcpy mutation campaign (each defect must build and fail the HLE thread selftest)
+HELP_DESCRIPTION_fsr3-mutants := run the FSR 3 host mutation campaign (each defect must build and fail the selftest)
+HELP_DESCRIPTION_fsr3-fg-host-selftest := run FSR 3 frame generation's host selftest against the record of AMD's host code (pure C)
+HELP_DESCRIPTION_fsr3-fg-state-selftest := run FSR 3 frame generation's state machine against the G-S table (pure C)
+HELP_DESCRIPTION_fsr3-fg-mutants := run the FSR 3 frame generation mutation campaign, host and state machine (each defect must build and fail its cell)
+HELP_DESCRIPTION_fsr3-shader-verify := verify the FSR 3 upscaler and frame-generation shader sets against their schema 2 manifests
+HELP_DESCRIPTION_fsr3-shader-repro-verify := recompile both FSR 3 shader sets with the pinned DXC (DXC=...) and compare bytes
+HELP_DESCRIPTION_fsr3-pass-selftest := run FSR 3's passes on a headless Vulkan device against synthetic scenes
+HELP_DESCRIPTION_fsr3-pass-mutants := run the FSR 3 pass mutation campaign on a Vulkan device (each defect must fail its cell)
+HELP_DESCRIPTION_fsr3-fg-pass-selftest := run FSR 3 frame generation's passes on a headless Vulkan device against synthetic scenes
+HELP_DESCRIPTION_fsr3-fg-pass-mutants := run the FSR 3 frame generation pass mutation campaign on a Vulkan device (each defect must fail its cell)
 HELP_DESCRIPTION_ace-smooth-selftest := run Ace Mode's in-between frames selftest on a headless Vulkan device (SKIPs without one)
 HELP_DESCRIPTION_fsr1-selftest := run the FSR 1 presentation upscaler selftest on a headless Vulkan device (SKIPs without one)
+HELP_DESCRIPTION_anime4k-selftest := run the Anime4K movie upscaler selftest on a headless Vulkan device (SKIPs without one)
 HELP_DESCRIPTION_ace-ui-selftest := run Ace Mode's in-game UI selftest (layout, then a headless Vulkan render; SKIPs the GPU leg without Vulkan)
 HELP_DESCRIPTION_motion-match-selftest := run the draw matcher's selftest for render-state motion (synthetic PRIM lists; pure C)
 HELP_DESCRIPTION_osk-overlay-paint-selftest := run the in-window keyboard painter's exact-pixel selftest
@@ -327,13 +385,27 @@ HELP_DESCRIPTION_audio-resampler-bench := run the synthetic-input audio resample
 HELP_DESCRIPTION_atrac3p-title-accept := run the optional ATRAC3+ title acceptance route
 HELP_DESCRIPTION_gpu-coherence-selftest := run the GPU coherence selftest
 HELP_DESCRIPTION_gpu-coherence-selftest-snapbar-mutants := prove the GPU coherence selftest kills three broken snapshot-copy barrier variants
+HELP_DESCRIPTION_gpu-coherence-twin-mutants := prove the GPU coherence selftest kills thirteen broken host-twin variants (builds thirteen binaries; not part of native-core-tests)
+HELP_DESCRIPTION_gpu-coherence-pcache-mutant := prove pipeline-cache-cold fails when pipelines bypass the Vulkan pipeline cache
+HELP_DESCRIPTION_vram-view-identity-selftest := check that the sources and decode the pause menu's VRAM viewer runs name the expected surfaces and leave later frames, guest memory and the GE state unchanged (#314; needs a Vulkan device and fails without one)
+HELP_DESCRIPTION_gpu-dst-read-mutants := prove the GPU coherence dst-read cells kill nine broken destination-read variants
+HELP_DESCRIPTION_gpu-stencil-once-mutants := prove the GPU coherence stencil-once case kills three broken write-once stencil batch variants
 HELP_DESCRIPTION_gpu-snapsync-selftest := run the GPU snapshot-sync selftest
 HELP_DESCRIPTION_gpu-ace-selftest := run Ace Mode's texture filtering selftest on a real Vulkan device (SKIPs without one)
 HELP_DESCRIPTION_tex-scale-selftest := run the xBRZ texture scaling selftest against the pinned upstream goldens (no GPU)
+HELP_DESCRIPTION_pipeline-cache-selftest := run the GPU pipeline cache file checks and their atomic write (no GPU)
 HELP_DESCRIPTION_tex-scale-gate-mutant := prove the texture scaling selftest kills a build without the Ace gate
+HELP_DESCRIPTION_texrepl-selftest := run the texture replacement pack selftest (PPSSPP hashes, pack layout, lookup order, budget; no GPU)
+HELP_DESCRIPTION_texrepl-mutant := prove the texture replacement selftest kills a palette identity without the CLUTFORMAT word
 HELP_DESCRIPTION_gpu-texscale-selftest := run texture scaling and the smart 2D filter on a real Vulkan device (SKIPs without one)
 HELP_DESCRIPTION_gpu-texscale-mutant := prove the texture scaling selftest kills a cache that binds a stale scaled copy
+HELP_DESCRIPTION_gpu-texrepl-mutant := prove the replace cells kill a stub lookup and a palette identity without the CLUTFORMAT word
+HELP_DESCRIPTION_glyph-recon-selftest := run sharp game text's CPU selftest on synthetic glyphs (the Ace gate, the refusals, the rebuild and its downsample check; no GPU)
+HELP_DESCRIPTION_glyph-recon-mutant := prove the glyph selftest kills each removed guard (Ace gate, VRAM, scale 1, mip chain, buffers, downsample check, colour, hard edge, size)
+HELP_DESCRIPTION_gpu-glyph-selftest := run sharp game text on a real Vulkan device (the rebuilt tile, refusals, rewrites, the per-present count, an unchanged authentic picture; SKIPs without one)
+HELP_DESCRIPTION_gpu-glyph-mutant := prove the GPU glyph cells kill a bound stale tile, a missing per-present count, and the removed VRAM, hard-edge, colour and Ace guards
 HELP_DESCRIPTION_ge-replay := run the graphics-engine replay selftest
+HELP_DESCRIPTION_ge-first-bad-draw-selftest := prove ge_replay --first-bad-draw finds the draw an executed Vulkan mutant changes (SKIPs without Vulkan)
 HELP_DESCRIPTION_run := build and launch the current title runtime
 HELP_DESCRIPTION_run_elf := build the reference interpreter runner
 HELP_DESCRIPTION_vfpu_fuzz := build and run the VFPU differential fuzzer

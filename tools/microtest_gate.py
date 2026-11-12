@@ -30,11 +30,11 @@ try:
     from .codegen_gate import pre_exit_record_count
     from .codegen_gate import truncate as _truncate
 except ImportError:
-    from codegen_gate import CoverageError
-    from codegen_gate import find_exit_syscall_pc
-    from codegen_gate import first_syscall_step as _first_syscall_step
-    from codegen_gate import pre_exit_record_count
-    from codegen_gate import truncate as _truncate
+    from codegen_gate import CoverageError  # type: ignore[no-redef]
+    from codegen_gate import find_exit_syscall_pc  # type: ignore[no-redef]
+    from codegen_gate import first_syscall_step as _first_syscall_step  # type: ignore[no-redef]
+    from codegen_gate import pre_exit_record_count  # type: ignore[no-redef]
+    from codegen_gate import truncate as _truncate  # type: ignore[no-redef]
 
 
 def first_syscall_step(oracle_path, exit_pc):

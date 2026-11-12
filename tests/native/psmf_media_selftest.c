@@ -267,14 +267,18 @@ static void emit_nal(ByteOut *o, uint8_t hdr, const BitW *rbsp) {
 #define FIX_W_MBS 4
 #define FIX_H_MBS 4
 
-static void write_sps_ex(BitW *w, uint32_t w_mbs, uint32_t h_mbs) {
+/* reorder != 0 writes the SPS of the picture-reordering stream (#279): 8-bit frame_num and
+ * pic_order_cnt_lsb, so its 90 pictures never wrap either, and a VUI bitstream_restriction that
+ * fixes the output order a conforming decoder must produce (max_num_reorder_frames 1,
+ * max_dec_frame_buffering 2).  Every other stream keeps the 4-bit fields and no VUI. */
+static void write_sps_full(BitW *w, uint32_t w_mbs, uint32_t h_mbs, int reorder) {
     bw_u(w, 66u, 8);          /* profile_idc: baseline */
     bw_u(w, 0u, 8);           /* constraint set flags  */
     bw_u(w, 30u, 8);          /* level_idc 3.0         */
     bw_ue(w, 0u);             /* seq_parameter_set_id */
-    bw_ue(w, 0u);             /* log2_max_frame_num_minus4 */
+    bw_ue(w, reorder ? 4u : 0u);  /* log2_max_frame_num_minus4 */
     bw_ue(w, 0u);             /* pic_order_cnt_type */
-    bw_ue(w, 0u);             /* log2_max_pic_order_cnt_lsb_minus4 */
+    bw_ue(w, reorder ? 4u : 0u);  /* log2_max_pic_order_cnt_lsb_minus4 */
     bw_ue(w, 1u);             /* max_num_ref_frames */
     bw_bit(w, 0);             /* gaps_in_frame_num_value_allowed_flag */
     bw_ue(w, w_mbs - 1u);     /* pic_width_in_mbs_minus1 */
@@ -282,8 +286,27 @@ static void write_sps_ex(BitW *w, uint32_t w_mbs, uint32_t h_mbs) {
     bw_bit(w, 1);             /* frame_mbs_only_flag */
     bw_bit(w, 1);             /* direct_8x8_inference_flag */
     bw_bit(w, 0);             /* frame_cropping_flag */
-    bw_bit(w, 0);             /* vui_parameters_present_flag */
+    bw_bit(w, reorder);       /* vui_parameters_present_flag */
+    if (reorder) {
+        for (int i = 0; i < 5; i++)
+            bw_bit(w, 0);     /* aspect ratio, overscan, video signal, chroma location, timing */
+        bw_bit(w, 0);         /* nal_hrd_parameters_present_flag */
+        bw_bit(w, 0);         /* vcl_hrd_parameters_present_flag */
+        bw_bit(w, 0);         /* pic_struct_present_flag */
+        bw_bit(w, 1);         /* bitstream_restriction_flag */
+        bw_bit(w, 1);         /* motion_vectors_over_pic_boundaries_flag */
+        bw_ue(w, 0u);         /* max_bytes_per_pic_denom */
+        bw_ue(w, 0u);         /* max_bits_per_mb_denom */
+        bw_ue(w, 15u);        /* log2_max_mv_length_horizontal */
+        bw_ue(w, 15u);        /* log2_max_mv_length_vertical */
+        bw_ue(w, 1u);         /* max_num_reorder_frames */
+        bw_ue(w, 2u);         /* max_dec_frame_buffering */
+    }
     bw_trailing(w);
+}
+
+static void write_sps_ex(BitW *w, uint32_t w_mbs, uint32_t h_mbs) {
+    write_sps_full(w, w_mbs, h_mbs, 0);
 }
 
 static void write_pps(BitW *w) {
@@ -309,12 +332,25 @@ static void write_pps(BitW *w) {
  * picture is flat. */
 static int s_fixture_textured;
 
-/* One IDR picture, every macroblock I_PCM, so luma and chroma are exactly (y, cb, cr). */
-static void write_idr_ex(BitW *w, int picture, uint32_t w_mbs, uint32_t h_mbs, uint8_t y, uint8_t cb, uint8_t cr) {
+/* Slice data of one picture: every macroblock I_PCM, so luma and chroma are exactly (y, cb, cr). */
+static void write_pcm_macroblocks(BitW *w, uint32_t w_mbs, uint32_t h_mbs, uint8_t y, uint8_t cb,
+                                  uint8_t cr) {
     uint8_t pcm[256 + 64 + 64];
     memset(pcm, y, 256u);
     memset(pcm + 256, cb, 64u);
     memset(pcm + 320, cr, 64u);
+    for (uint32_t mb = 0; mb < w_mbs * h_mbs; mb++) {
+        if (s_fixture_textured)         /* 1..254: no sample is 0 */
+            for (uint32_t i = 0; i < (uint32_t)sizeof(pcm); i++)
+                pcm[i] = (uint8_t)(1u + (y + i * 7u + mb * 29u) % 254u);
+        bw_ue(w, 25u);                  /* mb_type: I_PCM */
+        bw_raw(w, pcm, (uint32_t)sizeof(pcm));
+    }
+    bw_trailing(w);
+}
+
+/* One IDR picture of (y, cb, cr). */
+static void write_idr_ex(BitW *w, int picture, uint32_t w_mbs, uint32_t h_mbs, uint8_t y, uint8_t cb, uint8_t cr) {
     bw_ue(w, 0u);                       /* first_mb_in_slice */
     bw_ue(w, 2u);                       /* slice_type: I */
     bw_ue(w, 0u);                       /* pic_parameter_set_id */
@@ -324,14 +360,7 @@ static void write_idr_ex(BitW *w, int picture, uint32_t w_mbs, uint32_t h_mbs, u
     bw_bit(w, 0);                       /* dec_ref_pic_marking.no_output_of_prior_pics_flag */
     bw_bit(w, 0);                       /* dec_ref_pic_marking.long_term_reference_flag */
     bw_ue(w, 0u);                       /* slice_qp_delta (se(0)) */
-    for (uint32_t mb = 0; mb < w_mbs * h_mbs; mb++) {
-        if (s_fixture_textured)         /* 1..254: no sample is 0 */
-            for (uint32_t i = 0; i < (uint32_t)sizeof(pcm); i++)
-                pcm[i] = (uint8_t)(1u + (y + i * 7u + mb * 29u) % 254u);
-        bw_ue(w, 25u);                  /* mb_type: I_PCM */
-        bw_raw(w, pcm, (uint32_t)sizeof(pcm));
-    }
-    bw_trailing(w);
+    write_pcm_macroblocks(w, w_mbs, h_mbs, y, cb, cr);
 }
 
 /* Decoded plane values per picture.  Chosen so the BT.601 limited-range conversion lands on
@@ -361,6 +390,76 @@ static void build_au_ex(int picture, uint32_t w_mbs, uint32_t h_mbs,
     write_idr_ex(&w, picture, w_mbs, h_mbs, y, cb, cr);
     CHECK(!w.overflow, "IDR picture fits the scratch buffer");
     emit_nal(out, 0x65, &w);
+}
+
+/* ---- a stream whose display order differs from its decode order (issue #279) -------------
+ *
+ * Decode order: an IDR picture (POC 0), then pairs of a reference I picture and a non-reference
+ * I picture shown before it (POC 4 then 2, 8 then 6, ...).  A conforming decoder outputs them by
+ * POC, so the second and third access units leave it swapped, and so on.  An odd last picture
+ * is a reference picture with no partner.  Every picture is flat, with its own luma, so the
+ * decoded plane says which access unit it came from. */
+static int reorder_display_index(int picture, int pictures) {
+    if (picture == 0) return 0;
+    if (picture & 1) return picture + 1 < pictures ? picture + 1 : picture;   /* reference */
+    return picture - 1;                                                       /* non-reference */
+}
+
+static uint8_t reorder_luma(int picture) { return (uint8_t)(40 + 2 * picture); }
+
+static void build_au_reorder(int picture, int pictures, ByteOut *out) {
+    static const uint8_t aud[5] = { 0, 0, 1, 0x09, 0x10 };
+    const int idr = picture == 0, ref = idr || (picture & 1);
+    BitW w;
+    uint8_t scratch[8192];
+    bo_raw(out, aud, sizeof(aud));
+    if (idr) {
+        w.d = scratch; w.cap = sizeof(scratch); w.n = 0; w.acc = 0; w.bits = 0; w.overflow = 0;
+        write_sps_full(&w, FIX_W_MBS, FIX_H_MBS, 1);
+        CHECK(!w.overflow, "reorder SPS fits the scratch buffer");
+        emit_nal(out, 0x67, &w);
+        w.n = 0; w.acc = 0; w.bits = 0; w.overflow = 0;
+        write_pps(&w);
+        CHECK(!w.overflow, "reorder PPS fits the scratch buffer");
+        emit_nal(out, 0x68, &w);
+    }
+    /* frame_num counts reference pictures; a non-reference picture takes the next value. */
+    const uint32_t frame_num = idr ? 0u : (picture & 1) ? (uint32_t)(picture + 1) / 2u
+                                                        : (uint32_t)picture / 2u + 1u;
+    w.d = scratch; w.cap = sizeof(scratch); w.n = 0; w.acc = 0; w.bits = 0; w.overflow = 0;
+    bw_ue(&w, 0u);                       /* first_mb_in_slice */
+    bw_ue(&w, 2u);                       /* slice_type: I */
+    bw_ue(&w, 0u);                       /* pic_parameter_set_id */
+    bw_u(&w, frame_num, 8);              /* frame_num */
+    if (idr) bw_ue(&w, 0u);              /* idr_pic_id */
+    bw_u(&w, (uint32_t)(2 * reorder_display_index(picture, pictures)), 8); /* pic_order_cnt_lsb */
+    if (idr) {
+        bw_bit(&w, 0);                   /* no_output_of_prior_pics_flag */
+        bw_bit(&w, 0);                   /* long_term_reference_flag */
+    } else if (ref) {
+        bw_bit(&w, 0);                   /* adaptive_ref_pic_marking_mode_flag: sliding window */
+    }
+    bw_ue(&w, 0u);                       /* slice_qp_delta (se(0)) */
+    write_pcm_macroblocks(&w, FIX_W_MBS, FIX_H_MBS, reorder_luma(picture), 128u, 128u);
+    CHECK(!w.overflow, "reorder picture fits the scratch buffer");
+    emit_nal(out, idr ? 0x65 : ref ? 0x61 : 0x01, &w);
+}
+
+/* Each reordering access unit starts with its delimiter and holds exactly one slice: the IDR
+ * slice for picture 0, otherwise a non-IDR slice whose nal_ref_idc says reference or not. */
+static void reorder_picture_marks(const uint8_t *au, uint32_t n, int picture) {
+    CHECK(n >= 5u && au[0] == 0u && au[1] == 0u && au[2] == 1u && (au[3] & 0x1fu) == 9u,
+          "a reorder access unit begins with an access-unit delimiter");
+    int slices = 0, header = -1;
+    for (uint32_t i = 0; i + 4u < n; i++) {
+        if (au[i] == 0u && au[i + 1] == 0u && au[i + 2] == 1u &&
+            ((au[i + 3] & 0x1fu) == 1u || (au[i + 3] & 0x1fu) == 5u)) {
+            slices++;
+            header = au[i + 3];
+        }
+    }
+    CHECK(slices == 1 && header == (picture == 0 ? 0x65 : (picture & 1) ? 0x61 : 0x01),
+          "a reorder access unit carries one slice of its own kind");
 }
 
 /* Build the annex-B elementary stream and report each access unit's byte range, which is what
@@ -470,10 +569,10 @@ static void add_audio_pes(Buf *b, const uint8_t *frame, uint32_t len) {
     add_audio_pes_sub(b, 0x00u, 0, 0, frame, len);
 }
 /* One self-delimiting ATRAC frame (8-byte header + data); the size field is
- * ((code1 & 3) << 8 | code2 * 8) + 0x10 total bytes. */
+ * (((code1 & 3) << 8 | code2) * 8) + 0x10 total bytes. */
 static uint32_t make_audio_frame(uint8_t *dst, uint32_t cap, uint8_t code1, uint8_t code2,
                                  uint8_t fill) {
-    uint32_t total = (uint32_t)(((code1 & 0x03u) << 8) | ((uint32_t)code2 * 8u)) + 0x10u;
+    uint32_t total = (uint32_t)((((code1 & 0x03u) << 8) | (uint32_t)code2) * 8u) + 0x10u;
     if (total > cap) return 0;
     memset(dst, fill, total);
     dst[0] = 0x0f; dst[1] = 0xd0; dst[2] = code1; dst[3] = code2;
@@ -2047,12 +2146,12 @@ static void test_mpeg_ycbcr_measured_contract(void) {
                   "pointers, the rest zero");
     CHECK(guest_bytes_are(YM_FULL + 128u, full_size - 128u, 0xa5u),
           "ycbcr: InitYCbCr leaves every plane byte as it was");
-    CHECK(guest_mpeg_import(NID_INIT_YCBCR, YM_DESC, 2u, 480u, 272u, YM_FULL) == PSP_MPEG_INVALID &&
-              guest_mpeg_import(NID_INIT_YCBCR, YM_DESC, 3u, 480u, 272u, YM_FULL) == PSP_MPEG_INVALID &&
+    CHECK(guest_mpeg_import(NID_INIT_YCBCR, YM_DESC, 4u, 480u, 272u, YM_FULL) == PSP_MPEG_INVALID &&
+              guest_mpeg_import(NID_INIT_YCBCR, YM_DESC, 0u, 480u, 272u, YM_FULL) == PSP_MPEG_INVALID &&
               guest_mpeg_import(NID_INIT_YCBCR, YM_DESC, 1u, 480u, 288u, YM_FULL) == PSP_MPEG_INVALID &&
               guest_mpeg_import(NID_INIT_YCBCR, YM_DESC, 1u, 16u, 16u, YM_FULL) == PSP_MPEG_INVALID &&
               guest_mpeg_import(NID_INIT_YCBCR, YM_DESC, 1u, 480u, 272u, YM_FULL + 4u) == PSP_MPEG_INVALID,
-          "ycbcr: InitYCbCr refuses modes 2 and 3 and an odd strip count (not measured), a size past "
+          "ycbcr: InitYCbCr refuses modes 0 and 4, an odd strip count (not measured), a size past "
           "the mode-1 limits and an unaligned buffer");
     CHECK(MEM_R32(YM_FULL + 16u) == YM_FULL + 0x80u, "ycbcr: a refused InitYCbCr writes nothing");
 
@@ -2166,6 +2265,269 @@ static void test_mpeg_ycbcr_measured_contract(void) {
           "ycbcr: CopyYCbCr refuses a source with no decoded picture");
     mpeg_finish();
     CHECK(ycbcr_find(YM_DESC, YM_SMALL) == NULL, "ycbcr: teardown frees the host YCbCr slots");
+}
+
+/* #302, PSP-MPEG-001 boot 145 (2026-11-07), 480x224 picture, range {16, y, 64, h}: sceMpegAvcCsc's
+ * return values for the y and h the earlier cells did not cover, and its 16-bit output.  Each case
+ * below is a measured cell; a model that ignores y or h alignment, sets the 5551 alpha bit or the
+ * 4444 alpha nibble, or writes 16-bit pixels contiguously fails here. */
+static uint32_t ref_pixel_bytes(int mode, const uint8_t *px, uint8_t out[4]);
+static void test_mpeg_csc_measured_range_and_16bit(void) {
+    enum {
+        YR_DESC = 0x08b00000u, YR_DATA = 0x08b10000u, YR_BUF = 0x08b20000u, YR_RANGE = 0x08b50000u,
+        YR_MODE = 0x08b50100u, YR_DEST = 0x08b60000u, YR_SMALL = 0x08b40000u,
+    };
+    MEM_W32(YR_DESC, 0u);
+    CHECK(mpeg_create(YR_DESC, YR_DATA, 0x10000u, 0, 512u, 0, 0) == 0, "csc-range: a decoder-less context");
+    CHECK(mpeg_avc_init_ycbcr(YR_DESC, 1u, 480u, 272u, YR_BUF) == 0,
+          "csc-range: a 480x272 buffer initializes");
+    ref_ycbcr_fill(YR_BUF, 480u, 224u, 0, 0u, 0u, 0u);   /* the measured picture size, 480x224 */
+    MEM_W32(YR_MODE, 0u);
+    MEM_W32(YR_MODE + 4u, 3u);
+    CHECK(guest_mpeg_import(NID_DECODE_MODE, YR_DESC, YR_MODE, 0u, 0u, 0u) == 0u,
+          "csc-range: RGBA8888 output is selected");
+    static const struct { int32_t x, y, w, h; uint32_t rc; const char *cell; } k_cells[] = {
+        { 16, 0, 64, 64, 0u, "sub-y0" }, { 16, 1, 64, 64, PSP_MPEG_INVALID, "sub-y1" },
+        { 16, 32, 64, 64, 0u, "sub-y32" }, { 16, 160, 64, 64, 0u, "sub-y160" },
+        { 16, 161, 64, 64, PSP_MPEG_INVALID, "sub-y161" }, { 16, 200, 64, 64, PSP_MPEG_INVALID, "sub-y200" },
+        { 16, -16, 64, 64, PSP_CSC_REFUSED, "sub-yneg" }, { 16, 16, 64, 63, PSP_MPEG_INVALID, "sub-h-odd" },
+        { 0, 16, 480, 208, 0u, "y16-hrest" }, { 0, 16, 480, 224, PSP_CSC_REFUSED, "y16-hfull" },
+    };
+    int cells_ok = 1;
+    for (size_t i = 0; i < sizeof(k_cells) / sizeof(k_cells[0]); i++) {
+        set_range(YR_RANGE, k_cells[i].x, k_cells[i].y, k_cells[i].w, k_cells[i].h);
+        const uint32_t rc = guest_mpeg_import(NID_CSC, YR_DESC, YR_BUF, YR_RANGE, 512u, YR_DEST);
+        if (rc != k_cells[i].rc) {
+            fprintf(stderr, "  CSC cell %s: 0x%08x, measured 0x%08x\n", k_cells[i].cell, (unsigned)rc,
+                    (unsigned)k_cells[i].rc);
+            cells_ok = 0;
+        }
+    }
+    CHECK(cells_ok, "csc-range: the y and h cells return the measured codes (a y that is not a multiple "
+                    "of 16 or an odd h is an invalid value, y + h past the picture is a refusal)");
+    /* y never selects source rows: {16, 32, 64, 64} writes the rows from the top, like {16, 0, ...}. */
+    set_range(YR_RANGE, 16, 32, 64, 64);
+    memset(SR_HOST(YR_DEST), 0x5a, 512u * 4u * 64u);
+    CHECK(guest_mpeg_import(NID_CSC, YR_DESC, YR_BUF, YR_RANGE, 512u, YR_DEST) == 0u &&
+              ref_csc_matches(YR_BUF, YR_DEST, 512u, 16u, 64u, 64u),
+          "csc-range: a nonzero y does not move the source rows");
+    mpeg_finish();
+
+    /* The 16-bit pixel modes: a 64x32 picture, range {0, 0, 64, 32}, stride 128. */
+    MEM_W32(YR_DESC, 0u);
+    CHECK(mpeg_create(YR_DESC, YR_DATA, 0x10000u, 0, 128u, 0, 0) == 0, "csc-16bit: a decoder-less context");
+    CHECK(mpeg_avc_init_ycbcr(YR_DESC, 1u, 64u, 32u, YR_SMALL) == 0, "csc-16bit: a 64x32 buffer initializes");
+    ref_ycbcr_fill(YR_SMALL, 64u, 32u, 0, 0u, 0u, 0u);
+    for (int mode = 0; mode <= 2; mode++) {
+        MEM_W32(YR_MODE + 4u, (uint32_t)mode);
+        CHECK(guest_mpeg_import(NID_DECODE_MODE, YR_DESC, YR_MODE, 0u, 0u, 0u) == 0u,
+              "csc-16bit: the 16-bit pixel mode is selected");
+        set_range(YR_RANGE, 0, 0, 64, 32);
+        memset(SR_HOST(YR_DEST), 0x5a, 128u * 32u * 2u);
+        int ok = guest_mpeg_import(NID_CSC, YR_DESC, YR_SMALL, YR_RANGE, 128u, YR_DEST) == 0u;
+        int alpha_clear = 1, gap_kept = 1;
+        for (uint32_t r = 0; r < 32u; r++)
+            for (uint32_t col = 0; col < 128u; col++) {
+                const uint8_t *got = (const uint8_t *)SR_HOST(YR_DEST + (r * 128u + col) * 2u);
+                if (col >= 32u && col < 64u) {   /* between the blocks: never written */
+                    if (got[0] != 0x5au || got[1] != 0x5au) gap_kept = 0;
+                    continue;
+                }
+                if (col >= 96u) continue;
+                const uint32_t src = col < 32u ? col : col - 32u;   /* blocks 0 and 1 of the range */
+                uint8_t px[4], want[4];
+                ref_ycbcr_rgba(YR_SMALL, src, r, px);
+                ref_pixel_bytes(mode, px, want);
+                if (got[0] != want[0] || got[1] != want[1]) ok = 0;
+                const uint16_t v = (uint16_t)(got[0] | (got[1] << 8));
+                if (mode == 1 && (v & 0x8000u)) alpha_clear = 0;
+                if (mode == 2 && (v & 0xF000u)) alpha_clear = 0;
+            }
+        CHECK(ok, "csc-16bit: the colour bits are the measured packing, in 32-pixel blocks 64 pixels apart");
+        CHECK(alpha_clear, "csc-16bit: the 5551 alpha bit and the 4444 alpha nibble are 0, as measured");
+        CHECK(gap_kept, "csc-16bit: the 32 pixels between blocks keep their old bytes");
+    }
+    mpeg_finish();
+
+    /* UNMEASURED beyond the capture ({0, 0, 64, 64}, stride 512): a 16-bit range wider than 64 pixels,
+     * or one whose 64-pixel block spacing passes the stride, is refused and writes nothing; the
+     * measured shape still converts. */
+    MEM_W32(YR_DESC, 0u);
+    CHECK(mpeg_create(YR_DESC, YR_DATA, 0x10000u, 0, 512u, 0, 0) == 0, "csc-16bit-wide: a decoder-less context");
+    CHECK(mpeg_avc_init_ycbcr(YR_DESC, 1u, 480u, 272u, YR_BUF) == 0, "csc-16bit-wide: a 480x272 buffer initializes");
+    ref_ycbcr_fill(YR_BUF, 480u, 224u, 0, 0u, 0u, 0u);
+    MEM_W32(YR_MODE, 0u);
+    MEM_W32(YR_MODE + 4u, 0u);
+    CHECK(guest_mpeg_import(NID_DECODE_MODE, YR_DESC, YR_MODE, 0u, 0u, 0u) == 0u, "csc-16bit-wide: 5650 output");
+    memset(SR_HOST(YR_DEST), 0x5a, 512u * 224u * 2u);
+    set_range(YR_RANGE, 0, 0, 480, 224);
+    CHECK(guest_mpeg_import(NID_CSC, YR_DESC, YR_BUF, YR_RANGE, 512u, YR_DEST) == PSP_CSC_REFUSED &&
+              guest_bytes_are(YR_DEST, 512u * 224u * 2u, 0x5au),
+          "csc-16bit-wide: a 480-wide 16-bit range (928 pixels of reach, past the 512 stride) is refused, nothing written");
+    set_range(YR_RANGE, 0, 0, 128, 16);
+    CHECK(guest_mpeg_import(NID_CSC, YR_DESC, YR_BUF, YR_RANGE, 512u, YR_DEST) == PSP_CSC_REFUSED,
+          "csc-16bit-wide: a 128-wide 16-bit range is refused as not measured");
+    set_range(YR_RANGE, 0, 0, 64, 64);
+    CHECK(guest_mpeg_import(NID_CSC, YR_DESC, YR_BUF, YR_RANGE, 512u, YR_DEST) == 0u,
+          "csc-16bit-wide: the measured {0, 0, 64, 64} at stride 512 still converts");
+    /* Only the reach clause refuses here: w 64 is within the measured width, but its second block ends at
+     * pixel 96, past a stride of 64. */
+    set_range(YR_RANGE, 0, 0, 64, 16);
+    memset(SR_HOST(YR_DEST), 0x5a, 64u * 16u * 2u);
+    CHECK(guest_mpeg_import(NID_CSC, YR_DESC, YR_BUF, YR_RANGE, 64u, YR_DEST) == PSP_CSC_REFUSED &&
+              guest_bytes_are(YR_DEST, 64u * 16u * 2u, 0x5au),
+          "csc-16bit-wide: a 64-wide range at stride 64 (block spacing past the stride) is refused, nothing written");
+    mpeg_finish();
+}
+
+/* #302, PSP-MPEG-001 boot 145: YCbCr modes 2 and 3 (see mpeg_avc_init_ycbcr).  A mode-2 buffer is a
+ * 128-byte handle: Init returns 0 and leaves the bytes past it alone, a decode writes only the header
+ * (height / 16, width / 16, words 4..11 = 2), and a CSC of it writes zero pixels, never the decoded
+ * picture.  A mode-3 buffer is initialized (rc 0) but a decode on it is refused, since the PSP blocked. */
+static void test_mpeg_ycbcr_modes_2_and_3(void) {
+    enum {
+        M2_DESC = 0x08c00000u, M2_DATA = 0x08c10000u, M2_BUF = 0x08c20000u, M2_M3 = 0x08c30000u,
+        M2_RANGE = 0x08c50000u, M2_DEST = 0x08c60000u, M2_PTR = 0x08c50100u, M2_INIT = 0x08c50200u,
+        M2_AU = 0x08c50300u, M2_MODE = 0x08c50400u,
+    };
+    MEM_W32(M2_DESC, 0u);
+    CHECK(mpeg_create(M2_DESC, M2_DATA, 0x10000u, 0, 64u, 0, 0) == 0, "ycbcr-m2: a context");
+    Mpeg *ctx = mpeg_find(M2_DESC);
+    if (!ctx) return;
+    ctx->streamWidth = 64u;
+    ctx->streamHeight = 64u;
+    memset(SR_HOST(M2_BUF), 0xa5, 256u);
+    memset(SR_HOST(M2_M3), 0xa5, 64u * 64u * 3u / 2u + 64u);
+    CHECK(guest_mpeg_import(NID_INIT_YCBCR, M2_DESC, 2u, 480u, 272u, M2_BUF) == 0u &&
+              guest_bytes_are(M2_BUF + 128u, 128u, 0xa5u),
+          "ycbcr-m2: InitYCbCr mode 2 returns 0 and leaves every byte past the 128-byte header alone");
+    CHECK(guest_bytes_are(M2_BUF, 128u, 0u), "ycbcr-m2: the 128 header bytes are zeroed by Init (unmeasured)");
+    CHECK(guest_mpeg_import(NID_INIT_YCBCR, M2_DESC, 3u, 64u, 64u, M2_M3) == 0u &&
+              guest_bytes_are(M2_M3, 64u * 64u * 3u / 2u + 64u, 0xa5u),
+          "ycbcr-m2: InitYCbCr mode 3 returns 0 and writes nothing");
+    CHECK(guest_mpeg_import(NID_INIT_YCBCR, M2_DESC, 3u, 496u, 272u, M2_M3) == PSP_MPEG_INVALID &&
+              guest_mpeg_import(NID_INIT_YCBCR, M2_DESC, 2u, 480u, 272u, M2_BUF + 4u) == PSP_MPEG_INVALID,
+          "ycbcr-m2: a mode-3 size wider than 480 (not modeled) and an unaligned buffer are refused");
+    CHECK(guest_mpeg_import(NID_INIT_YCBCR, M2_DESC, 2u, 0u, 0u, M2_BUF) == PSP_MPEG_INVALID &&
+              guest_mpeg_import(NID_INIT_YCBCR, M2_DESC, 2u, 16u, 16u, M2_BUF) == 0u &&
+              guest_mpeg_import(NID_INIT_YCBCR, M2_DESC, 2u, 65535u, 65535u, M2_BUF) == PSP_MPEG_INVALID &&
+              guest_mpeg_import(NID_INIT_YCBCR, M2_DESC, 2u, 15u, 16u, M2_BUF) == PSP_MPEG_INVALID &&
+              guest_mpeg_import(NID_INIT_YCBCR, M2_DESC, 3u, 0u, 0u, M2_M3) == PSP_MPEG_INVALID,
+          "ycbcr-m2: modes 2 and 3 apply the mode-1 size limits (only 480x272 was measured); 0x0, 65535 and non-multiples of 16 are refused");
+    CHECK(guest_mpeg_import(NID_INIT_YCBCR, M2_DESC, 2u, 480u, 272u, M2_BUF) == 0u,
+          "ycbcr-m2: the measured 480x272 mode 2 buffer is initialized again");
+
+    /* The header a decode of a 480x224 picture left (measured), placed by hand: the decoder-less
+     * context cannot decode, so the header is the measured bytes. */
+    for (uint32_t off = 0; off < 128u; off += 4u)
+        MEM_W32(M2_BUF + off, off == 0u ? 14u : off == 4u ? 30u : (off >= 16u && off < 48u) ? 2u : 0u);
+    MEM_W32(M2_MODE, 0u);
+    MEM_W32(M2_MODE + 4u, 3u);
+    CHECK(guest_mpeg_import(NID_DECODE_MODE, M2_DESC, M2_MODE, 0u, 0u, 0u) == 0u, "ycbcr-m2: 8888 output");
+    set_range(M2_RANGE, 0, 0, 480, 224);
+    memset(SR_HOST(M2_DEST), 0x5a, 512u * 272u * 4u);
+    int zero_rows = 1, kept_rows = 1;
+    const uint32_t rc = guest_mpeg_import(NID_CSC, M2_DESC, M2_BUF, M2_RANGE, 512u, M2_DEST);
+    for (uint32_t r = 0; r < 272u; r++)
+        for (uint32_t c = 0; c < 512u; c++) {
+            const uint8_t *px = (const uint8_t *)SR_HOST(M2_DEST + (r * 512u + c) * 4u);
+            const int in_range = r < 224u && c < 480u;
+            const uint8_t want = in_range ? 0u : 0x5au;
+            if (px[0] != want || px[1] != want || px[2] != want || px[3] != want) {
+                if (in_range) zero_rows = 0; else kept_rows = 0;
+            }
+        }
+    CHECK(rc == 0u && zero_rows && kept_rows,
+          "ycbcr-m2: CSC of a mode-2 buffer writes zero pixels over the range and nothing else, as measured");
+    MEM_W32(M2_MODE + 4u, 0u);
+    CHECK(guest_mpeg_import(NID_DECODE_MODE, M2_DESC, M2_MODE, 0u, 0u, 0u) == 0u &&
+              guest_mpeg_import(NID_CSC, M2_DESC, M2_BUF, M2_RANGE, 512u, M2_DEST) == PSP_CSC_REFUSED,
+          "ycbcr-m2: a 16-bit CSC of a mode-2 buffer is refused as not measured");
+
+    /* A decode into a mode-3 buffer is refused before it reads anything: the PSP blocked there. */
+    MEM_W32(M2_PTR, M2_M3);
+    MEM_W32(M2_INIT, 0xdeadbeefu);
+    memset(SR_HOST(M2_AU), 0, 24u);
+    CHECK(guest_mpeg_import(NID_DECODE_YCBCR, M2_DESC, M2_AU, M2_PTR, M2_INIT, 0u) == PSP_MPEG_INVALID &&
+              MEM_R32(M2_INIT) == 0u && ctx->ycbcrWant == 0 &&
+              guest_bytes_are(M2_M3, 64u * 64u * 3u / 2u + 64u, 0xa5u),
+          "ycbcr-m3: a decode into a mode-3 buffer is refused, consumes no access unit and writes nothing");
+    MEM_W32(M2_INIT, 0xdeadbeefu);
+    CHECK(guest_mpeg_import(NID_STOP_YCBCR, M2_DESC, M2_PTR, M2_INIT, 0u, 0u) == PSP_MPEG_INVALID &&
+              guest_bytes_are(M2_M3, 64u * 64u * 3u / 2u + 64u, 0xa5u),
+          "ycbcr-m3: a stop on a mode-3 buffer is refused as not measured and writes nothing");
+    mpeg_finish();
+}
+
+/* #302: a real decode into a mode-2 buffer writes only the measured header (word 0 = height / 16,
+ * word 1 = width / 16, words 4..11 = 2), keeps the one-unit lag, and no hidden copy of the picture
+ * reaches the guest: a CSC of the buffer is zero. */
+static void test_mpeg_ycbcr_mode2_decode(void) {
+    enum {
+        D2_DESC = 0x08d00000u, D2_DATA = 0x08d10000u, D2_BUF = 0x08d20000u, D2_RANGE = 0x08d30000u,
+        D2_DEST = 0x08d40000u, D2_PTR = 0x08d50000u, D2_INIT = 0x08d50100u, D2_AU = 0x08d50200u,
+        D2_MODE = 0x08d50300u,
+    };
+    uint32_t au_off[FIX_PICTURES], au_len[FIX_PICTURES], es_len = 0;
+    static uint8_t es[65536];
+    s_fixture_textured = 1;
+    int built = build_stream(es, sizeof(es), au_off, au_len, &es_len);
+    s_fixture_textured = 0;
+    CHECK(built, "ycbcr-m2-decode: the textured I_PCM stream builds");
+    if (!built) return;
+    MEM_W32(D2_DESC, 0u);
+    CHECK(mpeg_create(D2_DESC, D2_DATA, 0x10000u, 0, 64u, 0, 0) == 0, "ycbcr-m2-decode: a context");
+    Mpeg *ctx = mpeg_find(D2_DESC);
+    if (!ctx) return;
+    ctx->streamWidth = 64u;
+    ctx->streamHeight = 64u;
+    ctx->h264 = sr_h264_create();
+    ctx->h264Init = 1;
+    ctx->totalPackets = 1u;
+    ctx->fedPackets = 1u;
+    ctx->streamEnded = 1;
+    if (ctx->h264 < 0) {
+        fprintf(stderr, "SKIP: the mode-2 decode needs a real H.264 backend\n");
+        mpeg_finish();
+        return;
+    }
+    for (int i = 0; i < FIX_PICTURES; i++)
+        CHECK(sr_h264_submit_au(ctx->h264, es + au_off[i], au_len[i]) == 0,
+              "ycbcr-m2-decode: each access unit reaches the decoder");
+    memset(SR_HOST(D2_BUF), 0xa5, 256u);
+    CHECK(guest_mpeg_import(NID_INIT_YCBCR, D2_DESC, 2u, 64u, 64u, D2_BUF) == 0u,
+          "ycbcr-m2-decode: a mode-2 buffer initializes");
+    MEM_W32(D2_MODE, 0u);
+    MEM_W32(D2_MODE + 4u, 3u);
+    CHECK(guest_mpeg_import(NID_DECODE_MODE, D2_DESC, D2_MODE, 0u, 0u, 0u) == 0u,
+          "ycbcr-m2-decode: RGBA8888 output is selected");
+    MEM_W32(D2_PTR, D2_BUF);
+    memset(SR_HOST(D2_AU), 0, 24u);
+    MEM_W32(D2_INIT, 0xdeadbeefu);
+    CHECK(guest_mpeg_import(NID_DECODE_YCBCR, D2_DESC, D2_AU, D2_PTR, D2_INIT, 0u) == 0u &&
+              MEM_R32(D2_INIT) == 0u && guest_bytes_are(D2_BUF, 128u, 0u),
+          "ycbcr-m2-decode: the first decode returns 0 with init 0 and leaves the header alone");
+    MEM_W32(D2_INIT, 0xdeadbeefu);
+    CHECK(guest_mpeg_import(NID_DECODE_YCBCR, D2_DESC, D2_AU, D2_PTR, D2_INIT, 0u) == 0u &&
+              MEM_R32(D2_INIT) == 1u,
+          "ycbcr-m2-decode: the second decode hands over the first picture and sets init");
+    int header = 1;
+    for (uint32_t off = 0; off < 128u; off += 4u) {
+        const uint32_t want = off == 0u ? 4u : off == 4u ? 4u : (off >= 16u && off < 48u) ? 2u : 0u;
+        if (MEM_R32(D2_BUF + off) != want) header = 0;
+    }
+    CHECK(header, "ycbcr-m2-decode: the header is the measured one: height / 16, width / 16, eight words of 2, "
+                  "everything else 0");
+    CHECK(guest_bytes_are(D2_BUF + 128u, 128u, 0xa5u),
+          "ycbcr-m2-decode: no byte past the 128-byte header is written (the picture is not in the buffer)");
+    set_range(D2_RANGE, 0, 0, 64, 64);
+    memset(SR_HOST(D2_DEST), 0x5a, 64u * 64u * 4u);
+    CHECK(guest_mpeg_import(NID_CSC, D2_DESC, D2_BUF, D2_RANGE, 64u, D2_DEST) == 0u &&
+              guest_bytes_are(D2_DEST, 64u * 64u * 4u, 0u),
+          "ycbcr-m2-decode: a CSC of the decoded mode-2 buffer writes zero pixels");
+    CHECK(ctx->picDelivered == 1u && ctx->picRejected == 0u,
+          "ycbcr-m2-decode: the picture is counted as delivered");
+    mpeg_finish();
 }
 
 /* A picture's time for the A/V measurement is looked up by its bytes.  Identical pictures
@@ -2652,13 +3014,18 @@ static void test_mpeg_userdata_imports(void) {
  * the whole 2 MiB of physical VRAM against an image built from sr_vram_cpu_address(). */
 
 /* PSP pixel bytes of one RGBA source pixel, written from the public format definitions. */
+/* MEASURED: the 16-bit modes write 32-pixel blocks 64 pixels apart; 8888 is linear. */
+static uint32_t ref_dest_col(int mode, uint32_t col) {
+    return mode == 3 ? col : (col / 32u) * 64u + col % 32u;
+}
 static uint32_t ref_pixel_bytes(int mode, const uint8_t *px, uint8_t out[4]) {
     unsigned r = px[0], g = px[1], b = px[2];
     uint16_t v;
     switch (mode) {
         case 0: v = (uint16_t)((r >> 3) | ((g >> 2) << 5) | ((b >> 3) << 11)); break;
-        case 1: v = (uint16_t)((r >> 3) | ((g >> 3) << 5) | ((b >> 3) << 10) | 0x8000u); break;
-        case 2: v = (uint16_t)((r >> 4) | ((g >> 4) << 4) | ((b >> 4) << 8) | 0xF000u); break;
+        /* MEASURED (PSP-MPEG-001 boot 145): the 5551 alpha bit and the 4444 alpha nibble are 0. */
+        case 1: v = (uint16_t)((r >> 3) | ((g >> 3) << 5) | ((b >> 3) << 10)); break;
+        case 2: v = (uint16_t)((r >> 4) | ((g >> 4) << 4) | ((b >> 4) << 8)); break;
         default: memcpy(out, px, 4u); return 4u;
     }
     out[0] = (uint8_t)v;
@@ -2696,7 +3063,7 @@ static void test_mpeg_csc_swizzled_vram_mirrors(void) {
     /* The measured placement: the destination is written from its first pixel, x selects the
      * source columns and the rows come from the top of the picture. */
     const struct { uint32_t x, y, w, h, frame_width; const char *name; } cases[] = {
-        { 0u, 0u, CSC_W, CSC_H, CSC_W, "whole picture" },
+        { 0u, 0u, CSC_W, CSC_H, 128u, "whole picture" },
         { 16u, 16u, 40u, 6u, 80u, "partial range in a wider buffer" },
     };
 
@@ -2735,7 +3102,7 @@ static void test_mpeg_csc_swizzled_vram_mirrors(void) {
                         uint8_t px[4], bytes[4];
                         ref_ycbcr_rgba(MC_YCBCR, cases[c].x + col, r, px);
                         const uint32_t n = ref_pixel_bytes(mode, px, bytes);
-                        const uint32_t addr = dest + (r * cases[c].frame_width + col) * bpp;
+                        const uint32_t addr = dest + (r * cases[c].frame_width + ref_dest_col(mode, col)) * bpp;
                         if (in_ram) {
                             for (uint32_t i = 0; i < n; i++)
                                 if (*vram_phys_byte(addr + i) != bytes[i]) ok = 0;
@@ -2947,17 +3314,22 @@ static int64_t av_audio_pts(int block) {
 }
 
 /* Packet layouts of the A/V timing container.  SPLIT cuts every picture across two PES
- * packets and gives every ATRAC frame its own packet.  PACKED is the shape of a PSP movie:
+ * packets and gives every ATRAC frame its own packet.  REORDER is SPLIT over the reordering
+ * stream (build_au_reorder), with every picture's first packet carrying that picture's own
+ * display time.  PACKED is the shape of a PSP movie:
  * one timestamped video packet carries two whole pictures and one timestamped audio packet
  * carries up to AV_AUDIO_PER_PES frames, so only the first unit commencing in each packet owns
  * that packet's time (ISO/IEC 13818-1 2.4.3.7) and every later one must be extrapolated. */
-enum { AV_LAYOUT_SPLIT = 0, AV_LAYOUT_PACKED = 1 };
+enum { AV_LAYOUT_SPLIT = 0, AV_LAYOUT_PACKED = 1, AV_LAYOUT_REORDER = 2 };
 #define AV_AUDIO_PER_PES 3
 
 /* Assemble the A/V timing container: a player-valid PSMF header (presentation base and
  * stream table included -- scePsmfPlayer refuses anything else), the authored I_PCM
  * pictures, and decodable ATRAC3+ frames interleaved with PTS anchors on both tracks, in
  * one of the packet layouts above. */
+/* The ATRAC3+ header bytes 2 and 3 of the A/V fixture's audio frames.  0x28/0x00 is a 16-byte frame;
+ * a test sets 0x29/0x00 for a 0x810-byte frame (b2 & 3 != 0) and restores them. */
+static uint8_t s_av_audio_b2 = 0x28u, s_av_audio_b3 = 0x00u;
 static uint8_t *build_psmf_av(uint32_t *size_out, int layout) {
     static uint8_t es[1024u * 1024u];
     uint32_t au_off[AV_PICTURES], au_len[AV_PICTURES];
@@ -2965,15 +3337,18 @@ static uint8_t *build_psmf_av(uint32_t *size_out, int layout) {
     o.d = es; o.cap = sizeof(es); o.n = 0; o.overflow = 0;
     for (int k = 0; k < AV_PICTURES; k++) {
         au_off[k] = o.n;
-        build_au_ex(k, FIX_W_MBS, FIX_H_MBS,
-                    k_y[k % FIX_PICTURES], k_cb[k % FIX_PICTURES], k_cr[k % FIX_PICTURES], &o);
+        if (layout == AV_LAYOUT_REORDER)
+            build_au_reorder(k, AV_PICTURES, &o);
+        else
+            build_au_ex(k, FIX_W_MBS, FIX_H_MBS,
+                        k_y[k % FIX_PICTURES], k_cb[k % FIX_PICTURES], k_cr[k % FIX_PICTURES], &o);
         au_len[k] = o.n - au_off[k];
     }
     CHECK(!o.overflow, "A/V timing elementary stream fits its buffer");
     if (o.overflow) return NULL;
 
     Buf b;
-    b.cap = 2048u + o.n * 2u + 16384u;
+    b.cap = 2048u + o.n * 2u + 16384u + (uint32_t)AV_AUDIO_BLOCKS * 0xb10u;
     b.d = (uint8_t *)calloc(1, b.cap);
     b.at = 2048u;
     b.overflow = 0;
@@ -3001,11 +3376,14 @@ static uint8_t *build_psmf_av(uint32_t *size_out, int layout) {
      * player copies into audioChannels; writing it anywhere else leaves the count zero
      * and every decoded-looking frame is rejected for an implausible channel count. */
     b.d[0x92 + 14] = 2u;                   /* stereo */
-    for (int i = 0; i < AV_PICTURES; i++) mp4_picture_marks(es + au_off[i], au_len[i], i);
+    for (int i = 0; i < AV_PICTURES; i++) {
+        if (layout == AV_LAYOUT_REORDER) reorder_picture_marks(es + au_off[i], au_len[i], i);
+        else mp4_picture_marks(es + au_off[i], au_len[i], i);
+    }
 
-    uint8_t frame[64];
-    uint8_t packed_frames[64u * AV_AUDIO_PER_PES];
-    uint32_t frame_bytes = make_audio_frame(frame, sizeof(frame), 0x28, 0x00, 0x00);
+    uint8_t frame[0xb10];
+    uint8_t packed_frames[0xb10u * AV_AUDIO_PER_PES];
+    uint32_t frame_bytes = make_audio_frame(frame, sizeof(frame), s_av_audio_b2, s_av_audio_b3, 0x00);
     frame[8] = 0x60u;      /* terminator-first ATRAC unit: a frame the project's own
                             * ATRAC3+ bridge really decodes (2048 samples, stereo) */
     for (int i = 0; i < AV_AUDIO_PER_PES; i++)
@@ -3033,8 +3411,12 @@ static uint8_t *build_psmf_av(uint32_t *size_out, int layout) {
     } else {
         for (int k = 0; k < AV_PICTURES; k++) {
             uint32_t half = au_len[k] / 2u;
-            add_video_pes(&b, (k % AV_VIDEO_ANCHOR) == 0,
-                          FIX_BASE + av_video_pts(k), es + au_off[k], half);
+            if (layout == AV_LAYOUT_REORDER)
+                add_video_pes(&b, 1, FIX_BASE + av_video_pts(reorder_display_index(k, AV_PICTURES)),
+                              es + au_off[k], half);
+            else
+                add_video_pes(&b, (k % AV_VIDEO_ANCHOR) == 0,
+                              FIX_BASE + av_video_pts(k), es + au_off[k], half);
             add_video_pes(&b, 0, 0, es + au_off[k] + half, au_len[k] - half);
             int upto = (k + 1) * AV_AUDIO_BLOCKS / AV_PICTURES;
             while (audio_next < upto) {
@@ -3198,6 +3580,43 @@ static void test_player_handle_word(void) {
           "psmf-handle: Delete clears the player word");
     CHECK(guest_mpeg_import(AV_NID_GET_STATUS, AV_PLAYER_COPY, 0, 0, 0, 0) == AV_ERR_STATUS,
           "psmf-handle: a copy of a deleted player's word names no player");
+    s_player_image = NULL;
+    s_player_image_size = 0;
+    free(image);
+}
+
+/* #2205: scePsmfPlayerGetAudioData checks the access unit's length against the size in its header
+ * in psmf_audio_fill (hle_mpeg.c).  A 0x810-byte frame (b2 & 3 = 1) is read as a 0x110-byte one
+ * if the multiply comes before the OR, and the player then refuses every audio block. */
+static void test_player_audio_frame_over_2_kib(void) {
+    if (!sr_h264_backend_available()) {
+        fprintf(stderr, "SKIP: the player audio-size cell needs an H.264 backend\n");
+        return;
+    }
+    s_av_audio_b2 = 0x29u; s_av_audio_b3 = 0x00u;
+    uint32_t size = 0;
+    uint8_t *image = build_psmf_av(&size, AV_LAYOUT_SPLIT);
+    s_av_audio_b2 = 0x28u; s_av_audio_b3 = 0x00u;
+    if (!image) { CHECK(0, "psmf-audio-size stream builds"); return; }
+    av_latch_mpeglog();
+    s_player_image = image;
+    s_player_image_size = size;
+    lc_prepare_guest();
+    CHECK(guest_mpeg_import(AV_NID_CREATE, AV_PLAYER, AV_CREATE, 0, 0, 0) == 0 &&
+              guest_mpeg_import(AV_NID_SET_PSMF, AV_PLAYER, AV_PATH, 0, 0, 0) == 0 &&
+              guest_mpeg_import(AV_NID_START, AV_PLAYER, AV_CONFIG, 0, 0, 0) == 0,
+          "psmf-audio-size: the player starts the stream");
+    memset(SR_HOST(AV_AUDIO), 0xa5, 8192u);
+    int delivered = 0;
+    for (int i = 0; i < 128 && !delivered; i++) {
+        (void)guest_mpeg_import(AV_NID_GET_VIDEO, AV_PLAYER, AV_VIDEO, 0, 0, 0);
+        delivered = guest_mpeg_import(AV_NID_GET_AUDIO, AV_PLAYER, AV_AUDIO, 0, 0, 0) == 0;
+        if (!delivered && guest_mpeg_import(AV_NID_UPDATE, AV_PLAYER, 0, 0, 0, 0) != 0) break;
+    }
+    CHECK(delivered && MEM_R32(AV_AUDIO) != 0xa5a5a5a5u,
+          "psmf-audio-size: a 0x810-byte ATRAC3+ frame decodes and is delivered");
+    CHECK(guest_mpeg_import(AV_NID_DELETE, AV_PLAYER, 0, 0, 0, 0) == 0,
+          "psmf-audio-size: the player is deleted");
     s_player_image = NULL;
     s_player_image_size = 0;
     free(image);
@@ -3716,6 +4135,162 @@ cleanup:
                 failures - failures_before, layout == AV_LAYOUT_PACKED ? "packed" : "split");
 }
 
+/* ---- decoder output order against the time the guest is handed (issue #279) -------------
+ *
+ * A decoder may return pictures in a different order than it took their access units (picture
+ * reordering).  Each decoded picture then carries the time of its own access unit
+ * (SrH264FrameInfo.pts), and that is the displaypts the guest must see.  The player used to hand
+ * out the submit-order time of the n-th delivery instead, so a reordered picture was shown with
+ * a neighbour's time.  This backend swaps every pair of pictures: it needs only the contract
+ * the seam documents, and no bitstream.  With s_ro_report_pts clear it reports no per-picture
+ * time, and the player must fall back to its submit-order ring. */
+#define RO_MAX 256
+static struct { int64_t pts; int has_pts; } s_ro_au[RO_MAX];
+static int s_ro_submitted, s_ro_out, s_ro_report_pts;
+
+static int ro_create(void) { s_ro_submitted = 0; s_ro_out = 0; return 0; }
+static void ro_destroy(int id) { (void)id; }
+static int ro_reset(int id) { (void)id; s_ro_submitted = 0; s_ro_out = 0; return 0; }
+static int ro_submit(int id, const SrH264AccessUnit *au) {
+    (void)id;
+    if (!au || s_ro_submitted >= RO_MAX) return -1;
+    s_ro_au[s_ro_submitted].pts = au->pts;
+    s_ro_au[s_ro_submitted].has_pts = au->has_pts;
+    s_ro_submitted++;
+    return 0;
+}
+static int ro_frame(int id, int eos, const SrH264FrameTarget *target, SrH264FrameInfo *info) {
+    (void)id; (void)target;
+    int src = s_ro_out ^ 1;                       /* pictures leave in swapped pairs */
+    if (src >= s_ro_submitted) {
+        if (!eos) return 0;                       /* the partner has not been submitted yet */
+        src = s_ro_out;
+        if (src >= s_ro_submitted) return 0;
+    }
+    if (info) {
+        info->width = 64;
+        info->height = 16;
+        info->stride = 128;
+        info->native_format = SR_H264_PIXEL_5650;
+        info->delivered_format = SR_H264_PIXEL_5650;
+        info->has_pts = s_ro_report_pts && s_ro_au[src].has_pts;
+        info->pts = info->has_pts ? s_ro_au[src].pts : -1;
+    }
+    s_ro_out++;
+    return 1;
+}
+static const SrH264Backend s_ro_backend = {"reorder-test", ro_create, ro_destroy, ro_reset, ro_submit, ro_frame};
+
+static void test_player_reordered_pictures_keep_their_own_time(int report_pts) {
+    uint32_t size = 0;
+    uint8_t *image = build_psmf_av(&size, AV_LAYOUT_SPLIT);
+    if (!image) { CHECK(0, "psmf-reorder: the A/V container builds"); return; }
+    s_player_image = image;
+    s_player_image_size = size;
+    s_ro_report_pts = report_pts;
+    CHECK(sr_h264_select_backend_object(&s_ro_backend) && sr_h264_backend_available(),
+          "psmf-reorder: the reordering test backend is selected");
+    lc_prepare_guest();
+    CHECK(guest_mpeg_import(AV_NID_CREATE, AV_PLAYER, AV_CREATE, 0, 0, 0) == 0 &&
+              guest_mpeg_import(AV_NID_SET_PSMF, AV_PLAYER, AV_PATH, 0, 0, 0) == 0 &&
+              guest_mpeg_import(AV_NID_START, AV_PLAYER, AV_CONFIG, 0, 0, 0) == 0,
+          "psmf-reorder: the player is created, opened and started");
+    int delivered = 0, mismatches = 0;
+    int64_t seen[AV_PICTURES];
+    for (int guard = 0; guard < 4096 && delivered < AV_PICTURES; guard++) {
+        if (guest_mpeg_import(AV_NID_GET_VIDEO, AV_PLAYER, AV_VIDEO, 0, 0, 0) == 0) {
+            /* A reported time is the picture's own (its swapped partner's access unit); with
+             * none reported, the ring hands out the n-th submitted time. */
+            int64_t want = av_video_pts(report_pts ? delivered ^ 1 : delivered);
+            seen[delivered] = (int64_t)MEM_R32(AV_VIDEO + 8);
+            if (seen[delivered] != want) mismatches++;
+            delivered++;
+        }
+        (void)guest_mpeg_import(AV_NID_GET_AUDIO, AV_PLAYER, AV_AUDIO, 0, 0, 0);
+        if (guest_mpeg_import(AV_NID_UPDATE, AV_PLAYER, 0, 0, 0, 0) != 0) break;
+    }
+    CHECK(delivered == AV_PICTURES, "psmf-reorder: every authored picture reached the guest");
+    if (report_pts) {
+        CHECK(mismatches == 0,
+              "psmf-reorder: each picture is handed the time of its own access unit, not the n-th submit-order time");
+        CHECK(delivered < 2 || (seen[0] == av_video_pts(1) && seen[1] == av_video_pts(0)),
+              "psmf-reorder: the first reordered pair carries its swapped times");
+    } else {
+        CHECK(mismatches == 0,
+              "psmf-reorder: a backend that reports no picture time gets the submit-order ring times");
+    }
+    CHECK(guest_mpeg_import(AV_NID_DELETE, AV_PLAYER, 0, 0, 0, 0) == 0, "psmf-reorder: the player is deleted");
+    (void)sr_h264_select_backend_object(NULL);
+#if defined(SR_H264_FFMPEG)
+    CHECK(sr_h264_select_backend("ffmpeg"), "psmf-reorder: the FFmpeg backend is selected again");
+#endif
+    s_ro_report_pts = 0;
+    s_player_image = NULL;
+    s_player_image_size = 0;
+    free(image);
+}
+
+/* The same rule through the real H.264 backend this build selects (Media Foundation on Windows,
+ * FFmpeg where H264_FFMPEG=1), on a stream whose display order differs from its decode order
+ * (build_au_reorder).  Each delivered picture is identified by its decoded colour, and the
+ * guest must be handed that picture's own access-unit time.  The decoder must also really have
+ * reordered, or the stream could not tell a picture's own time from the ring's. */
+static void test_player_decoder_reorder_keeps_picture_time(void) {
+    if (!sr_h264_backend_available()) {
+        fprintf(stderr, "SKIP: picture reordering through the player needs a real H.264 backend\n");
+        return;
+    }
+    uint32_t size = 0;
+    uint8_t *image = build_psmf_av(&size, AV_LAYOUT_REORDER);
+    if (!image) { CHECK(0, "psmf-reorder-real: the reordering A/V container builds"); return; }
+    s_player_image = image;
+    s_player_image_size = size;
+    lc_prepare_guest();
+    CHECK(guest_mpeg_import(AV_NID_CREATE, AV_PLAYER, AV_CREATE, 0, 0, 0) == 0 &&
+              guest_mpeg_import(AV_NID_SET_PSMF, AV_PLAYER, AV_PATH, 0, 0, 0) == 0 &&
+              guest_mpeg_import(AV_NID_START, AV_PLAYER, AV_CONFIG, 0, 0, 0) == 0,
+          "psmf-reorder-real: the player is created, opened and started");
+    uint8_t ref[AV_PICTURES][4];
+    for (int k = 0; k < AV_PICTURES; k++) ref_psp_rgba(reorder_luma(k), 128, 128, ref[k]);
+    int delivered = 0, unknown = 0, repeated = 0, wrong_time = 0, out_of_submit_order = 0;
+    int got[AV_PICTURES];
+    memset(got, 0, sizeof(got));
+    for (int guard = 0; guard < 4096 && delivered < AV_PICTURES; guard++) {
+        if (guest_mpeg_import(AV_NID_GET_VIDEO, AV_PLAYER, AV_VIDEO, 0, 0, 0) == 0) {
+            int id = -1;
+            for (int k = 0; k < AV_PICTURES && id < 0; k++)
+                if (guest_rgba_matches(GUEST_BUF, 1u, 1u, ref[k])) id = k;
+            int64_t displaypts = (int64_t)MEM_R32(AV_VIDEO + 8);
+            MEDIA_DEBUG("psmf-reorder-real: delivery %d is access unit %d, displaypts %lld\n",
+                        delivered, id, (long long)displaypts);
+            if (id < 0) {
+                unknown++;
+            } else {
+                if (got[id]++) repeated++;
+                if (id != delivered) out_of_submit_order++;
+                if (displaypts != av_video_pts(reorder_display_index(id, AV_PICTURES))) wrong_time++;
+            }
+            delivered++;
+        }
+        (void)guest_mpeg_import(AV_NID_GET_AUDIO, AV_PLAYER, AV_AUDIO, 0, 0, 0);
+        if (guest_mpeg_import(AV_NID_UPDATE, AV_PLAYER, 0, 0, 0, 0) != 0) break;
+    }
+    MEDIA_DEBUG("psmf-reorder-real: backend %s delivered %d, %d out of submit order\n",
+                sr_h264_selected_backend(), delivered, out_of_submit_order);
+    CHECK(delivered == AV_PICTURES, "psmf-reorder-real: every authored picture reached the guest");
+    CHECK(unknown == 0 && repeated == 0,
+          "psmf-reorder-real: every delivered picture is one authored picture, delivered once");
+    CHECK(out_of_submit_order > 0,
+          "psmf-reorder-real: the decoder returns the pictures in display order, not decode order");
+    CHECK(wrong_time == 0,
+          "psmf-reorder-real: each decoded picture is handed the time of its own access unit");
+    CHECK(guest_mpeg_import(AV_NID_DELETE, AV_PLAYER, 0, 0, 0, 0) == 0,
+          "psmf-reorder-real: the player is deleted");
+    s_player_image = NULL;
+    s_player_image_size = 0;
+    free(image);
+}
+
 /* ---- A/V offset at the host presentation boundaries (issue #279) -------------------------
  *
  * The tests above stop at the guest getters.  These drive the same synthetic PSMF fixture
@@ -3759,7 +4334,6 @@ void sr_vblank_tick(void);
 #define PB_AU_B     0x08622000u
 #define PB_AU_NEVER 0x08624000u
 #define PB_FRAMES   2048
-#define PB_LEAD_US  46439                 /* 2048 frames at 44.1 kHz, truncated */
 #define PB_VBASE_US 100000
 #define PB_ABASE_US 20000
 #define PB_VLAG_US  5000                  /* delivery precedes presentation by this much */
@@ -3767,8 +4341,9 @@ void sr_vblank_tick(void);
 #define PB_SKIP_VIDEO 40                  /* never presented: overwritten by picture 42 */
 #define PB_SKIP_AUDIO 30                  /* never played: overwritten by block 32 */
 #define PB_VOFF_US  PB_VBASE_US
-#define PB_AOFF_US  (PB_ABASE_US + PB_LEAD_US)
-#define PB_AV_US    (PB_VOFF_US - PB_AOFF_US)
+/* At the guest boundaries (flip, submit) the offset is the authored interleave alone; the host
+ * queue lead is added after the submit, so it moves av_us and leaves av_submit_us alone. */
+#define PB_SUBMIT_AV_US (PB_VOFF_US - PB_ABASE_US)
 #define PB_AUDIO_TOL_US 36                /* 3 ticks of anchor extrapolation, plus rounding */
 
 typedef struct {
@@ -3787,6 +4362,12 @@ static struct {
 } pb;
 
 static int64_t pb_us(int64_t ticks) { return ticks * 100 / 9; }
+/* The injected host queue lead in microseconds (44.1 kHz frames, truncated: 2048 -> 46439). */
+static int64_t pb_lead_us(const PbScenario *sc) {
+    return sc->lead_frames >= 0 ? (int64_t)sc->lead_frames * 1000000 / 44100 : 0;
+}
+static int64_t pb_aoff_us(const PbScenario *sc) { return PB_ABASE_US + pb_lead_us(sc); }
+static int64_t pb_av_us(const PbScenario *sc) { return PB_VOFF_US - pb_aoff_us(sc); }
 static uint32_t pb_video_buf(int idx) { return (idx & 1) ? PB_FB_B : PB_FB_A; }
 static uint32_t pb_audio_buf(int idx) { return (idx & 1) ? PB_AU_B : PB_AU_A; }
 static int pb_is_na(const char *line, const char *key) {
@@ -3811,17 +4392,26 @@ static void pb_check_new_windows(const PbScenario *sc) {
     if (an > 0 && sc->lead_frames >= 0 && !pb_is_na(w, " aoff_us=")) {
         CHECK(av_log_field(w, " aoff_us=", &ao), "psmf-present: a window carries its audio offset");
         if (sc->stretch_ppm == 0)
-            CHECK(llabs(ao - PB_AOFF_US) <= PB_AUDIO_TOL_US,
+            CHECK(llabs(ao - pb_aoff_us(sc)) <= PB_AUDIO_TOL_US,
                   "psmf-present: a window's audio offset equals submit time plus queue lead minus pts");
+        long long lead = -1;
+        CHECK(av_log_field(w, " alead_us=", &lead) && lead == pb_lead_us(sc),
+              "psmf-present: a window carries the host queue lead its audio blocks met");
     }
     if (sc->lead_frames < 0) {
-        CHECK(an == 0 && pb_is_na(w, " aoff_us=") && pb_is_na(w, " av_us="),
-              "psmf-present: without a host queue the audio offset and the A/V offset are not measured");
+        CHECK(an == 0 && pb_is_na(w, " aoff_us=") && pb_is_na(w, " av_us=") && pb_is_na(w, " alead_us=") &&
+                  pb_is_na(w, " av_submit_us="),
+              "psmf-present: without a host queue the audio offset, its lead and the A/V offsets are not measured");
     } else if (vn > 0 && an > 0) {
-        CHECK(av_log_field(w, " av_us=", &av), "psmf-present: a paired window carries an A/V offset");
-        if (sc->stretch_ppm == 0)
-            CHECK(llabs(av - PB_AV_US) <= PB_AUDIO_TOL_US + 1,
+        long long avsub = 0;
+        CHECK(av_log_field(w, " av_us=", &av) && av_log_field(w, " av_submit_us=", &avsub),
+              "psmf-present: a paired window carries its A/V offset and its offset at the guest boundaries");
+        if (sc->stretch_ppm == 0) {
+            CHECK(llabs(av - pb_av_us(sc)) <= PB_AUDIO_TOL_US + 1,
                   "psmf-present: a window's A/V offset equals the authored video minus audio offset");
+            CHECK(llabs(avsub - PB_SUBMIT_AV_US) <= PB_AUDIO_TOL_US + 1,
+                  "psmf-present: a window's offset at the flip and the submit leaves the host queue lead out");
+        }
         if (pb.nav < (int)(sizeof(pb.av) / sizeof(pb.av[0]))) pb.av[pb.nav++] = av;
     }
 }
@@ -4020,14 +4610,19 @@ static void pb_run(const PbScenario *sc, const char *name) {
           "psmf-present: the undelivered and the repeated submit are the only non-matching submits");
     if (sc->lead_frames >= 0) {
         CHECK(amatch == AV_AUDIO_BLOCKS - 2 && aunmeas == 0, "psmf-present: every played block was matched");
-        CHECK(av_log_field(f, " alat_mean_us=", &alat) && alat == PB_ALAG_US + PB_LEAD_US &&
-                  av_log_field(f, " alat_max_us=", &vlatmax) && vlatmax == PB_ALAG_US + PB_LEAD_US,
+        CHECK(av_log_field(f, " alat_mean_us=", &alat) && alat == PB_ALAG_US + pb_lead_us(sc) &&
+                  av_log_field(f, " alat_max_us=", &vlatmax) && vlatmax == PB_ALAG_US + pb_lead_us(sc),
               "psmf-present: block delivery-to-play latency is the clock lag plus the queue lead");
+        long long lead_mean = -1, lead_max = -1;
+        CHECK(av_log_field(f, " alead_mean_us=", &lead_mean) && lead_mean == pb_lead_us(sc) &&
+                  av_log_field(f, " alead_max_us=", &lead_max) && lead_max == pb_lead_us(sc),
+              "psmf-present: the summary gives the host queue lead the played blocks met");
     } else {
         CHECK(amatch == 0 && aunmeas == AV_AUDIO_BLOCKS - 2,
               "psmf-present: with no host queue every played block is unmeasured, none reads as zero lead");
-        CHECK(pb_is_na(f, " alat_mean_us=") && pb_is_na(f, " av_mean_us=") && pb_is_na(f, " drift_us="),
-              "psmf-present: unmeasured audio leaves the offsets and the drift unmeasured");
+        CHECK(pb_is_na(f, " alat_mean_us=") && pb_is_na(f, " av_mean_us=") && pb_is_na(f, " drift_us=") &&
+                  pb_is_na(f, " alead_mean_us=") && pb_is_na(f, " av_submit_mean_us="),
+              "psmf-present: unmeasured audio leaves the offsets, the lead and the drift unmeasured");
     }
     if (video) {
         CHECK(vdel == AV_PICTURES && vsuper == 1 && vpend == 1 && vevict == 0 && vnospan == 0,
@@ -4045,9 +4640,15 @@ static void pb_run(const PbScenario *sc, const char *name) {
                       av_log_field(f, " av_mean_us=", &avmean),
                   "psmf-present: the summary carries min, max, mean and drift of the A/V offset");
             if (sc->stretch_ppm == 0) {
-                CHECK(llabs(avmin - PB_AV_US) <= PB_AUDIO_TOL_US + 1 && llabs(avmax - PB_AV_US) <= PB_AUDIO_TOL_US + 1 &&
-                          llabs(avmean - PB_AV_US) <= PB_AUDIO_TOL_US + 1,
+                CHECK(llabs(avmin - pb_av_us(sc)) <= PB_AUDIO_TOL_US + 1 &&
+                          llabs(avmax - pb_av_us(sc)) <= PB_AUDIO_TOL_US + 1 &&
+                          llabs(avmean - pb_av_us(sc)) <= PB_AUDIO_TOL_US + 1,
                       "psmf-present: the A/V offset equals the authored interleave at the host boundaries");
+                long long avsub = 0;
+                CHECK(av_log_field(f, " av_submit_mean_us=", &avsub) &&
+                          llabs(avsub - PB_SUBMIT_AV_US) <= PB_AUDIO_TOL_US + 1,
+                      "psmf-present: at the guest boundaries the A/V offset is the authored interleave, "
+                      "whatever the host queue held");
                 CHECK(llabs(drift) <= 2 * PB_AUDIO_TOL_US,
                       "psmf-present: the A/V offset does not drift across the run");
             } else {
@@ -4085,6 +4686,10 @@ static void test_player_av_presentation_boundary(void) {
     pb_run(&in_step, "in-step regular channel");
     PbScenario packed = { 1, PB_FRAMES, 0, AV_LAYOUT_PACKED, 1 };
     pb_run(&packed, "in-step packed layout, Output2");
+    /* Twice the host queue: the heard offset (av_us) moves by the extra lead, the offset at the
+       guest boundaries (av_submit_us) does not (#279). */
+    PbScenario deep = { 1, 2 * PB_FRAMES, 0, AV_LAYOUT_SPLIT, 0 };
+    pb_run(&deep, "in-step, twice the host queue");
     PbScenario slow = { 1, PB_FRAMES, 10000, AV_LAYOUT_SPLIT, 0 };
     pb_run(&slow, "audio 1% slow");
     PbScenario no_queue = { 1, -1, 0, AV_LAYOUT_SPLIT, 0 };
@@ -4726,6 +5331,32 @@ static void test_mpeg_feed_end_without_stream_size(int mode) {
     mpeg_finish();
     free(source);
     free(image);
+}
+
+/* #2205: the frame size is ((b2 & 3) << 8 | b3) * 8 + 0x10, so a frame over 2 KiB has b2 & 3 != 0.
+ * The expression once multiplied b3 before the OR, which read such a frame as a short one and
+ * refused it at the size check, before any decoder was set up.  The held unit's length comes
+ * from the producer, which uses the same sr_psmf_audio_frame_bytes (psmf_producer_selftest). */
+static void test_mpeg_atrac_frame_size_high_bits(void) {
+    static uint8_t frame[0x2010];
+    static const struct { uint8_t b2, b3; uint32_t size; } cases[] = {
+        { 0x29, 0x00, 0x810u }, { 0x29, 0x01, 0x818u }, { 0x29, 0x5f, 0xb08u },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        Mpeg m;
+        memset(&m, 0, sizeof(m));
+        uint32_t n = make_audio_frame(frame, sizeof(frame), cases[i].b2, cases[i].b3, 0x00);
+        CHECK(n == cases[i].size, "mpeg-atrac: the fixture sizes a frame with b2 & 3 != 0 as the format does");
+        uint32_t r = mpeg_audio_decode_frame(&m, frame, n, 1u);
+        /* Past the size check the decoder is built for the full frame (before it decodes, so a
+         * silent frame the decoder then refuses still shows it).  Frames up to the producer's
+         * 0xB08 cap are what a stream can deliver here. */
+        (void)r;
+        CHECK(m.atracAlign == (int)(n - 8u),
+              "mpeg-atrac: a frame over 2 KiB passes the frame-size check");
+        atrac3p_bridge_destroy(m.atrac);
+        free(m.audioPcm);
+    }
 }
 
 /* The sceMpeg ATRAC path a guest PSMF player drives (#286): the registered ATRAC3+ stream is
@@ -5570,6 +6201,9 @@ int main(int argc, char **argv) {
     test_video_eos_waits_for_all_access_units();
     test_mpeg_ps_demux_error_fails_closed();
     test_mpeg_ycbcr_measured_contract();
+    test_mpeg_csc_measured_range_and_16bit();
+    test_mpeg_ycbcr_modes_2_and_3();
+    test_mpeg_ycbcr_mode2_decode();
     test_mpeg_ycbcr_picture_time_by_bytes();
     test_mpeg_ycbcr_guest_decode();
     test_mpeg_ycbcr_restart_after_stop(0);
@@ -5583,17 +6217,22 @@ int main(int argc, char **argv) {
     test_player_lifecycle_releases_what_it_acquired();
     test_player_get_psmf_info();
     test_player_handle_word();
+    test_player_audio_frame_over_2_kib();
     test_psmf_player_display_in_vram_mirrors();
     test_psmf_log_tick_instance_isolation();
     test_psmf_av_timing_first_principles();
     test_player_av_presentation_timing(AV_LAYOUT_SPLIT);
     test_player_av_presentation_timing(AV_LAYOUT_PACKED);
+    test_player_reordered_pictures_keep_their_own_time(1);
+    test_player_reordered_pictures_keep_their_own_time(0);
+    test_player_decoder_reorder_keeps_picture_time();
     test_player_av_presentation_boundary();
     test_player_av_composited_presentation();
     test_mpeg_csc_presentation_boundary(0);
     test_mpeg_csc_presentation_boundary(1);
     test_mpeg_av_audio_followed_by_content();
     test_mpeg_atrac_au_decode();
+    test_mpeg_atrac_frame_size_high_bits();
     test_mpeg_looped_stream_feeds_past_header_size(0u, 0);
     test_mpeg_looped_stream_feeds_past_header_size(4u, 0);
     test_mpeg_looped_stream_feeds_past_header_size(0u, 1);

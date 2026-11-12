@@ -135,11 +135,12 @@ def _sources(recomp_c: str = RECOMP_C_SAMPLE, recomp_h: str = RECOMP_H_SAMPLE, *
 
 
 def _build(sources=None, emitter=EMITTER_SAMPLE, ledger=None) -> dict:
-    return rhi.build_inventory(
+    inventory: dict = rhi.build_inventory(
         sources if sources is not None else _sources(),
         emitter,
         ledger if ledger is not None else LEDGER_SAMPLE,
     )
+    return inventory
 
 
 def _render(**kwargs) -> str:
@@ -431,7 +432,8 @@ class RepositoryInventoryTests(unittest.TestCase):
         for word in words:
             body, _, _ = codegen.vfpu_effect(0x08900000, word)
             called.update(m.group(1) for m in rhi._CALL_RE.finditer(body) if m.group(1) in by_name)
-        self.assertTrue({"sr_vf_add", "sr_vf_sub", "sr_vf_mul", "sr_vf_div"} <= called, sorted(called))
+        self.assertTrue({"sr_vfpu_add", "sr_vfpu_sub", "sr_vfpu_mul", "sr_vfpu_div"} <= called, sorted(called))
+        self.assertIn("sr_vfpu_sop", called)
         for name in sorted(called):
             with self.subTest(helper=name):
                 self.assertEqual(by_name[name]["reach"], "emitter-reached")

@@ -1,5 +1,7 @@
 # Decoupling the Generic Build Orchestrator (`nk_manager`)
 
+> Historical record (2026-09). It describes the tree at that time and is not maintained.
+
 This document records the completed decoupling of Nakagawa Recomp's build,
 test, and verification manager from legacy title-specific coupling (*Hot Shots
 Tennis: Get a Grip!*, UCUS98701). The canonical orchestrator is `nk_manager.ps1`;

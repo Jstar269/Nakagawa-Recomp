@@ -29,8 +29,8 @@ friends in `src/player/player_state.c`), the window (`player_open_window()`), on
 loop per frame (`player_frame_events()`, `player_frame_render()` and their neighbours) and
 `player_shutdown()`. The screens are drawn by the newer UI in `src/player/ui/`
 (`player_ui_nk_render`), one file per screen: `scr_library.c`, `scr_title.c`, `scr_settings.c` and
-so on, with `ui_router.c` deciding which one is showing. `src/player/ui_renderer.c` is the older
-renderer: only the UI regression build still draws with it, under `--ui=legacy`.
+so on, with `ui_router.c` deciding which one is showing. It draws every view; there is no other
+renderer.
 The code in `main.c` under `NK_PLAYER_UI_REGRESSION_TEST` is for the UI regression tests only; their
 scripted-event harness is `src/player/player_ui_test.c`, which only the UI-test player build links.
 

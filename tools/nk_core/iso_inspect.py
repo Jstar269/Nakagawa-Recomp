@@ -921,7 +921,10 @@ def inspect_iso(
         if header[: len(PBP_MAGIC)] == PBP_MAGIC:
             _reject_pbp_package(probe, size_bytes, header)
 
-    if size_bytes < 1024 * 1024:  # Under 1 MiB is not a valid PSP UMD image
+    # An image without a volume descriptor cannot be a disc. The floor is the descriptor's own
+    # sector, as in nk_iso_inspect (src/core/nk_iso.c): the private disc image made from an
+    # imported homebrew package (#2143) is a few hundred KiB, far under a UMD's size.
+    if size_bytes < (PVD_SECTOR + 1) * SECTOR_SIZE:
         raise IsoInspectionError(f"File is too small to be a valid PSP ISO: {size_bytes} bytes")
 
     reg = registry or get_default_registry()
@@ -2222,6 +2225,38 @@ def _classify_iso_executable(stream, file_size: int, path: str) -> dict[str, obj
 # the zero-filled placeholder that prototype and development discs carry (PPSSPP's ISO loader
 # boots BOOT.BIN whenever EBOOT.BIN has neither a ~PSP nor an ELF header).
 _BOOT_FALLBACK_EBOOT_KINDS = frozenset({"PSP_ENCRYPTED_CONTAINER", "EMPTY_OR_ZERO_FILLED"})
+
+
+def iso_executable_sha256(iso_path: Path | str, name: str) -> str | None:
+    """SHA-256 of ``PSP_GAME/SYSDIR/<name>`` as the disc image holds it, or None.
+
+    The file is hashed exactly as stored (an encrypted executable stays
+    encrypted), so the digest names the build on the disc and no key is
+    involved (#2140). None means the image has no such file, it is empty, or it
+    is beyond the supported size bound.
+    """
+    path = Path(iso_path)
+    try:
+        size_bytes = path.stat().st_size
+        with path.open("rb") as stream:
+            entry = _lookup_iso_file(stream, size_bytes, ("PSP_GAME", "SYSDIR", name))
+            if entry is None:
+                return None
+            lba, size = entry
+            if size <= 0 or size > MAX_EXECUTABLE_BYTES:
+                return None
+            digest = hashlib.sha256()
+            offset = 0
+            while offset < size:
+                count = min(64 * 1024, size - offset)
+                chunk = _read_iso_extent(stream, size_bytes, lba, size, offset, count)
+                if len(chunk) != count:
+                    return None
+                digest.update(chunk)
+                offset += count
+            return digest.hexdigest()
+    except (OSError, IsoInspectionError, struct.error):
+        return None
 
 
 def select_boot_executable_source(iso_path: Path | str) -> str | None:

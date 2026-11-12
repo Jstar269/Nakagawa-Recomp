@@ -1,7 +1,8 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /* Copyright (C) 2026 the Nakagawa Recomp authors */
 
-/* Scoped renderer clipping for the player UI.
+/* Scoped renderer clipping for the player UI. Unused since #2071 retired the
+ * legacy launcher renderer, its only user; only tests/native/test_ui_clip.c includes it.
  *
  * SDL_GetRenderClipRect() succeeds -- and hands back an empty rectangle --
  * when clipping is off, so its return value does not say whether a clip was

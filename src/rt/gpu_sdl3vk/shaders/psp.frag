@@ -5,6 +5,17 @@
 // Derived from sal063/PSP-recompilation-project (GPL-2.0-or-later)
 // Modified by Nakagawa Recomp contributors, 2026-08-10.
 // See NOTICE.md for upstream lineage and modification provenance.
+#ifdef SR_DST_INTERLOCK
+/* The ordered destination-read variant (#2109; ge_gpu.c, psp_frag_rmw.inc): the draw reads and
+ * stores its own target as a storage image inside a pixel-ordered interlock, so every primitive of
+ * a batch sees what the primitives before it stored. Early fragment tests: a fragment the depth
+ * test rejects never reaches the store. A run that holds a batch whose shader kill would have to
+ * undo an early depth write (ge_gpu.c rmw_shader_depth) is drawn with k_zfunc set instead: the
+ * pipeline tests no depth, and the shader tests and writes it in the critical section. */
+#extension GL_ARB_fragment_shader_interlock : require
+layout(pixel_interlock_ordered) in;
+layout(early_fragment_tests) in;
+#endif
 
 /* PSP GE fragment stage uber-shader, Phase 1. Mirrors ge.c shade() + zrange_ok():
  * texfunc 0-7 (modulate/decal/blend/replace/add) with the RGBA and color-double bits,
@@ -15,7 +26,8 @@
  * express (doubled DST-alpha factors, absdiff, two distinct FIX constants, post-blend
  * 16-bit quantization/dither) run HERE against a destination snapshot (u_dst, taken at
  * batch-build time -- overlapping primitives inside one batch read the pre-batch
- * destination, the standard shader-blend hazard). Colors are computed in 0..255 space
+ * destination, the standard shader-blend hazard; the SR_DST_INTERLOCK variant reads and
+ * stores the target itself in an ordered interlock instead, #2109). Colors are computed in 0..255 space
  * to track the integer formulas in shade()/blend_chan(). */
 layout(location = 0) noperspective in vec2  v_uv;
 layout(location = 1) noperspective in float v_rw;
@@ -23,13 +35,31 @@ layout(location = 2) noperspective in float v_fog;
 layout(location = 3) noperspective in vec4  v_color;
 layout(location = 4) flat in vec4 v_uvbox;   /* edge clamp range (ge_gpu.c uv_edge_axis) */
 
+#ifndef SR_DST_INTERLOCK
 layout(location = 0) out vec4 o_color;
+#endif
 
 layout(set = 0, binding = 0) uniform sampler2D u_tex;
 /* The destination snapshot (shader blend) has a set of its own, bound once per render op, so the
  * host twin (ge_gpu.c, Enhanced 32-bit colour) binds its own snapshot without a second copy of
  * every texture's set. */
+#ifdef SR_DST_INTERLOCK
+/* The target itself, read and written in the interlock (coherent: a store is visible to the next
+ * critical section's load). The render pass has no colour attachment, so the pipeline's write
+ * mask is this constant, merged into the store. */
+layout(set = 2, binding = 0, rgba8) uniform coherent image2D u_dsti;
+layout(constant_id = 0) const int k_cmask = 15;   /* VkColorComponentFlags: R 1, G 2, B 4, A 8 */
+/* Shader-owned depth (ge_gpu.c, a run that holds a rmw_shader_depth batch): k_zfunc is the batch's
+ * VkCompareOp (0 NEVER .. 7 ALWAYS), -1 where the pipeline tests depth early. u_z holds the run's
+ * depth image, copied in before the pass and out after it: the D16 values two to a word, row by row
+ * at the image's width. Every access is an atomic, so the neighbour that shares a word (another
+ * pixel, outside this pixel's critical section) never loses a write. */
+layout(constant_id = 1) const int k_zfunc = -1;
+layout(constant_id = 2) const bool k_zwrite = false;
+layout(set = 2, binding = 1, std430) buffer ZBuf { uint w[]; } u_z;
+#else
 layout(set = 2, binding = 0) uniform sampler2D u_dst;
+#endif
 
 /* flags bits (pc.cfg.x >> 8): 1 textured, 2 texfunc-RGBA, 4 color-double, 8 fog,
  * 16 persp (apply minz/maxz), 32 clear mode, 64 nearest filter (both TEXFILTER fields),
@@ -55,7 +85,10 @@ layout(set = 2, binding = 0) uniform sampler2D u_dst;
  * snapping it to the 5650/5551/4444 lattice. Its alpha, which holds the stencil, is still
  * snapped, so stencil tests and destination-alpha blending see the authentic values. ge_gpu.c
  * clears bit 512 for the same draws: no dither.
- * Bits 17-19 = factor - 1 of a scaled texture copy (ge_gpu.c, tex_scale.h); 0 otherwise. */
+ * Bits 17-19 = factor - 1 of a scaled texture copy (ge_gpu.c, tex_scale.h); 0 otherwise.
+ * 1048576 (bit 20) color test, bits 21-22 its function (GE_COLORTEST: 0 never, 2 equal,
+ * 3 not equal; ge_gpu.c leaves the test off for 1, always): fixa.a = GE_COLORREF &
+ * GE_COLORTESTMASK, fixb.a = GE_COLORTESTMASK, each a whole number. */
 layout(push_constant) uniform PC {
     ivec4 cfg;      /* x = texfunc | flags<<8, y = alpha test (func|ref<<8|mask<<16),
                        z = minz, w = maxz */
@@ -281,6 +314,19 @@ void main() {
             }
         }
 
+        /* Color test (ge.c color_test, which shade() runs after fog): the colour this pixel
+         * stores, rounded as the attachment and the shader blend round it, against
+         * GE_COLORREF under GE_COLORTESTMASK. The masked reference and the mask ride in
+         * fixa.a and fixb.a as whole numbers below 2^24, which a float holds exactly. */
+        if ((flags & 1048576) != 0) {
+            int cfunc = (flags >> 21) & 3;
+            ivec3 c = ivec3(col.rgb + 0.5);
+            int cmask = int(pc.fixb.a), cref = int(pc.fixa.a);
+            int cval = (c.r | (c.g << 8) | (c.b << 16)) & cmask;
+            if (cfunc == 0 || (cfunc == 2 && cval != cref) || (cfunc == 3 && cval == cref))
+                discard;
+        }
+
         /* doubled-src-alpha blend factors folded into the source color */
         if ((flags & 128) != 0) col.rgb *= clamp(col.a * 2.0, 0.0, 255.0) * (1.0 / 255.0);
         if ((flags & 256) != 0) col.rgb *= clamp(255.0 - col.a * 2.0, 0.0, 255.0) * (1.0 / 255.0);
@@ -293,8 +339,18 @@ void main() {
     bool stencil_fail = false;
     int stencil = 0;
     ivec4 spx = ivec4(0);
+#ifdef SR_DST_INTERLOCK
+    /* Kills before this point stay discards; after it, a kill skips the store, so every
+     * invocation that begins the critical section ends it. */
+    beginInvocationInterlockARB();
+    const vec4 dst_raw = imageLoad(u_dsti, ivec2(gl_FragCoord.xy));
+    bool kill = false;
+#define DST_TEXEL dst_raw
+#else
+#define DST_TEXEL texelFetch(u_dst, ivec2(gl_FragCoord.xy), 0)
+#endif
     if ((flags & 8192) != 0) {
-        spx = ivec4(texelFetch(u_dst, ivec2(gl_FragCoord.xy), 0) * 255.0 + 0.5);
+        spx = ivec4(DST_TEXEL * 255.0 + 0.5);
         if (fbfmt == 0) spx.a = 0;   /* a 565 pixel's stencil reads 0 (ge.c, PSP-GE-RASTER-001) */
         int smask = (pc.bl.z >> 16) & 0xFF, sref = (pc.bl.z >> 8) & 0xFF;
         int ref = sref & smask, val = spx.a & smask, sfunc = pc.bl.z & 7;
@@ -308,7 +364,11 @@ void main() {
         else if (sfunc == 6) pass = ref >  val;
         else                 pass = ref >= val;
         if (!pass) {
+#ifdef SR_DST_INTERLOCK
+            if ((pc.bl.w & 7) == 0) kill = true;
+#else
             if ((pc.bl.w & 7) == 0) discard;
+#endif
             stencil_fail = true;
             col = vec4(spx);
             stencil = stencil_op(pc.bl.w & 7, spx.a, sref, fbfmt);
@@ -317,11 +377,37 @@ void main() {
         }
     }
 
+#ifdef SR_DST_INTERLOCK
+    /* Shader-owned depth, in ge.c's order (put_px_rgba_tested): after the stencil test, before
+     * the blend. The fragment's z is rounded to nearest, as the depth-range test above takes it;
+     * that is assumed to equal the D16 attachment's own conversion, which Vulkan asks for but does
+     * not require, so an EQUAL or NOTEQUAL test between an early-depth run and a shader-depth run
+     * of one op relies on it. A failing fragment is dropped: the depth-fail op is KEEP
+     * wherever the test can fail (ge_gpu.c stencil_gpu_supported). */
+    if (k_zfunc >= 0 && !kill && !stencil_fail) {
+        uint zi = uint(gl_FragCoord.y) * uint(imageSize(u_dsti).x) + uint(gl_FragCoord.x);
+        uint zsh = (zi & 1u) * 16u;
+        uint z = uint(clamp(gl_FragCoord.z * 65535.0 + 0.5, 0.0, 65535.0));
+        uint zold = (atomicOr(u_z.w[zi >> 1u], 0u) >> zsh) & 0xFFFFu;
+        bool zpass;
+        if      (k_zfunc == 0) zpass = false;
+        else if (k_zfunc == 1) zpass = z <  zold;
+        else if (k_zfunc == 2) zpass = z == zold;
+        else if (k_zfunc == 3) zpass = z <= zold;
+        else if (k_zfunc == 4) zpass = z >  zold;
+        else if (k_zfunc == 5) zpass = z != zold;
+        else if (k_zfunc == 6) zpass = z >= zold;
+        else                   zpass = true;
+        if (!zpass) kill = true;
+        else if (k_zwrite) atomicXor(u_z.w[zi >> 1u], (z ^ zold) << zsh);
+    }
+#endif
+
     /* Shader blend: full PSP factor/equation set against the destination snapshot,
      * integer math identical to ge.c blend_chan(). Runs BEFORE dither/quantization so
      * the 16-bit lattice snap applies to the blend RESULT, like the hardware store. */
     if ((flags & 4096) != 0 && !stencil_fail) {
-        ivec4 dpx = ivec4(texelFetch(u_dst, ivec2(gl_FragCoord.xy), 0) * 255.0 + 0.5);
+        ivec4 dpx = ivec4(DST_TEXEL * 255.0 + 0.5);
         if (fbfmt == 0) dpx.a = 0;   /* blending reads a 565 pixel's alpha as 0 (ge.c read_fb_px) */
         ivec3 s   = ivec3(col.rgb + 0.5);
         int   sa  = int(col.a + 0.5);
@@ -383,5 +469,19 @@ void main() {
      * stencil_fixed_alpha, 8888 targets only): ZERO or REPLACE under a full write mask. */
     if ((flags & 32768) != 0) col.a = float(pc.bl.z & 0xFF);
 
+#ifdef SR_DST_INTERLOCK
+    /* The store, under the write mask: a channel the draw does not write keeps the raw loaded
+     * destination (never the blend's 565 alpha of 0). */
+    if (!kill) {
+        vec4 o = col * (1.0 / 255.0);
+        if ((k_cmask & 1) == 0) o.r = dst_raw.r;
+        if ((k_cmask & 2) == 0) o.g = dst_raw.g;
+        if ((k_cmask & 4) == 0) o.b = dst_raw.b;
+        if ((k_cmask & 8) == 0) o.a = dst_raw.a;
+        imageStore(u_dsti, ivec2(gl_FragCoord.xy), o);
+    }
+    endInvocationInterlockARB();
+#else
     o_color = col * (1.0 / 255.0);
+#endif
 }

@@ -12,7 +12,13 @@
  * frame's side, and a vector whose end lands on the HUD in one frame takes only the other
  * frame's side, so the HUD is never dragged into the scene. Such a vector cannot be judged by its
  * fit here, so it is judged by its block's cost, which the search found with the HUD left out. With the pair's depth (aux bit 2): a
- * vector whose two ends land at different depths fits worse. */
+ * vector whose two ends land at different depths fits worse.
+ *
+ * Nothing that both frames show is lost. Where a figure changes its pose so much that no vector
+ * carries it, a vector that carries the floor fits as well as any, and taking whichever frame
+ * shows floor at each pixel would wipe the figure out as a whole. The search marks such a vector as
+ * a guess (field w, ace_match.comp). A changed pixel within two blocks of a guess keeps the old
+ * frame: that region repeats the real old frame, whole, and the new frame follows on its VBLANK. */
 #version 450
 layout(local_size_x = 16, local_size_y = 16) in;
 
@@ -37,6 +43,7 @@ const float FITS = 0.30;       /* the summed channel difference of a good fit */
 const float DEPTH_COST = 3.0;  /* per unit of depth between a vector's two ends (three channels) */
 const ivec2 HUD_SIZE = ivec2(480, 272);
 const float LUMA_TO_FIT = 3.0; /* a block cost (mean luma difference) on the misfit's scale */
+const int GUESS_REACH = 2;     /* blocks around a guess that keep the old frame */
 
 bool on_hud(vec2 uv, bool newer) {
     ivec2 g = ivec2(floor(uv * vec2(HUD_SIZE)));
@@ -93,6 +100,15 @@ void main() {
     }
     ivec2 cells = textureSize(field, 0);
     ivec2 cell = ivec2(uv * vec2(cells));
+    for (int y = -GUESS_REACH; y <= GUESS_REACH; y++) {
+        for (int x = -GUESS_REACH; x <= GUESS_REACH; x++) {
+            if (texelFetch(field, clamp(cell + ivec2(x, y), ivec2(0), cells - 1), 0).w > 0.5) {
+                /* Drawn from a guess: the old frame, as for a cut, over the guess and around it. */
+                imageStore(out_frame, p, vec4(a0.rgb, 1.0));
+                return;
+            }
+        }
+    }
     const ivec2 around[5] = ivec2[5](ivec2(0, 0), ivec2(-1, 0), ivec2(1, 0), ivec2(0, -1), ivec2(0, 1));
     vec2 best = vec2(0.0);
     float best_e = misfit(uv, best, px);

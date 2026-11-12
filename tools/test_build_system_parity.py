@@ -33,6 +33,7 @@ class BuildSystemParityTests(unittest.TestCase):
     def test_core_sources_parity(self) -> None:
         """Verify identical core sources in Makefile and CMakeLists.txt."""
         expected_core = [
+            "src/core/nk_shared_helpers.c",
             "src/core/nk_iso.c",
             "src/core/nk_library.c",
             "src/core/nk_launch.c",
@@ -61,9 +62,9 @@ class BuildSystemParityTests(unittest.TestCase):
             "src/player/player_state.c",
             "src/player/input_settings.c",
             "src/player/iso_reader.c",
-            "src/player/ui_renderer.c",
             "src/player/package_builder.c",
             "src/player/update_check.c",
+            "src/player/discord_presence.c",
         ]
         for src in expected_player:
             self.assertIn(src, self.makefile_text, f"Missing {src} in Makefile")

@@ -16,18 +16,16 @@ import hashlib
 import json
 import os
 import fnmatch
-import io
 from pathlib import Path, PurePosixPath
 import re
 import shutil
 import subprocess
 import sys
-import tarfile
 import tempfile
 import unicodedata
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from nk_core.git_isolation import isolated_git_env  # noqa: E402
+from nk_core.git_isolation import isolated_git_env as _isolated_git_env  # noqa: E402
 from publication_policy import (  # noqa: E402
     INCLUDED,
     Policy,
@@ -52,7 +50,7 @@ def default_policy_path() -> Path:
     return ROOT / "assets" / "public_source_profile.json"
 
 
-#: Generated evidence artifact that must carry the current policy digest.
+#: Generated evidence artifact that must describe the current policy.
 def default_export_path() -> Path:
     return ROOT / "PUBLIC_EXPORT.json"
 
@@ -306,6 +304,24 @@ def parse_secret_scan_report(report_path: Path) -> list[Finding]:
 def parse_gitleaks_report(report_path: Path) -> list[Finding]:
     """Backward-compatible alias for integrations using the old function name."""
     return parse_secret_scan_report(report_path)
+
+
+def isolated_git_env(root: Path | None = None) -> dict[str, str]:
+    """The shared isolated Git environment, plus ``safe.bareRepository=explicit``.
+
+    A directory this tool audits can be shaped like a bare repository (``HEAD``, ``objects/``,
+    ``refs/``, ``config`` at its root): a committed tree is written out file by file, and a
+    candidate root is whatever the caller built. Git would discover such a directory as a
+    repository and read its ``config``, whose ``core.worktree`` and ``core.excludesFile`` change
+    what Git reports and whose ``core.fsmonitor`` names a command Git runs. With the setting, Git
+    uses a bare repository only when one is named explicitly, which this tool never does.
+    """
+    env: dict[str, str] = _isolated_git_env(root=root)
+    count = int(env.get("GIT_CONFIG_COUNT", "0"))
+    env[f"GIT_CONFIG_KEY_{count}"] = "safe.bareRepository"
+    env[f"GIT_CONFIG_VALUE_{count}"] = "explicit"
+    env["GIT_CONFIG_COUNT"] = str(count + 1)
+    return env
 
 
 def _git_output(cmd: list[str], repo_root: Path = ROOT) -> str:
@@ -663,6 +679,33 @@ def _get_filesystem_entries(repo_root: Path) -> list[GitEntry]:
                 kind = "lfs_pointer"
             entries.append(GitEntry(mode, "", "0", rel, kind, working_mode=mode))
     entries = _prune_gitignored_untracked(entries, repo_root)
+    return sorted(entries, key=lambda entry: entry.path.lower())
+
+
+def _committed_entries(audit_root: Path, tree_entries: list[tuple[str, str, str]]) -> list[GitEntry]:
+    """Describe a committed tree written out by `_materialize_committed_tree`, from the tree's own list.
+
+    The list is ``git ls-tree``'s, never a walk of ``audit_root``: a walk skips VCS metadata
+    directory names (``.hg``, ``.svn``) and honours ignore rules, and every entry of a commit is
+    content to audit. The directory must hold exactly those files and nothing else.
+    """
+    expected = {path for path, _mode, _object_id in tree_entries}
+    written: set[str] = set()
+    for directory, _dirnames, filenames in os.walk(audit_root, followlinks=False):
+        for name in filenames:
+            written.add((Path(directory) / name).relative_to(audit_root).as_posix())
+    if written != expected:
+        extra = sorted(written - expected)[:5]
+        missing = sorted(expected - written)[:5]
+        raise RuntimeError(f"written committed tree differs from git ls-tree: extra {extra}, missing {missing}")
+    entries: list[GitEntry] = []
+    for path, mode, _object_id in tree_entries:
+        kind = "executable" if mode == "100755" else "file"
+        raw_bytes, _ = read_candidate_file(GitEntry(mode, "", "0", path, kind, working_mode=mode), audit_root)
+        text_value = _decode_text_safe(raw_bytes)
+        if text_value and is_git_lfs_pointer(text_value):
+            kind = "lfs_pointer"
+        entries.append(GitEntry(mode, "", "0", path, kind, working_mode=mode))
     return sorted(entries, key=lambda entry: entry.path.lower())
 
 
@@ -1277,12 +1320,16 @@ SPDX_BYTE_EXACT_IMPORT_TREES = (
     # AMD FidelityFX SDK headers (MIT): the notice is in each header comment, without an SPDX
     # line upstream; imported byte-identical (third_party/fidelityfx_sdk/PROVENANCE.md).
     "third_party/fidelityfx_sdk/",
+    # rcheevos 12.5.0 (MIT; its MD5 is zlib): the notices are in LICENSE and each header comment,
+    # without SPDX lines upstream; imported byte-identical (third_party/rcheevos/PROVENANCE.md).
+    "third_party/rcheevos/",
 )
 
 SPDX_BYTE_EXACT_IMPORT_PATHS = frozenset({
     "third_party/clay/clay.h",
     "src/rt/minimp3/minimp3.h",
     "third_party/dr_libs/dr_wav.h",
+    "third_party/anime4k/Anime4K_Upscale_CNN_x2_M.glsl",
     "third_party/portable-snippets/safe-math/safe-math.h",
     "third_party/stb/stb_image.h",
     # Monocypher declares its SPDX line below the 8-line header window.
@@ -1334,17 +1381,66 @@ def _spdx_identifiers(raw_bytes: bytes) -> list[str]:
     return [match.group(1) for line in lines if (match := SPDX_IDENTIFIER_LINE.search(line))]
 
 
+# FSR 3's passes, embedded by tools/shader_embed.py from AMD's HLSL with the pinned DXC
+# (FSR3_SHADERS, and FSR3FG_SHADERS for frame generation). Like the GLSL embeddings below they
+# carry no comment text; their sources are imports whose notice is AMD's MIT header
+# (third_party/fidelityfx_sdk/PROVENANCE.md).
+SPDX_DXC_EMBEDDING_SOURCES = {
+    f"src/rt/gpu_sdl3vk/fsr3_{name}_comp.inc":
+        f"third_party/fidelityfx_sdk/upscalers/fsr3/internal/shaders/ffx_fsr3upscaler_{name}_pass.hlsl"
+    for name in (
+        "prepare_inputs", "luma_pyramid", "shading_change_pyramid", "shading_change",
+        "prepare_reactivity", "luma_instability", "accumulate", "rcas",
+    )
+}
+SPDX_DXC_EMBEDDING_SOURCES.update({
+    f"src/rt/gpu_sdl3vk/fsr3fg_{name}_comp.inc":
+        f"third_party/fidelityfx_sdk/framegeneration/fsr3/internal/shaders/{source}.hlsl"
+    for name, source in (
+        ("fi_reconstruct_and_dilate", "ffx_frameinterpolation_reconstruct_and_dilate_pass"),
+        ("fi_setup", "ffx_frameinterpolation_setup_pass"),
+        ("fi_reconstruct_previous_depth", "ffx_frameinterpolation_reconstruct_previous_depth_pass"),
+        ("fi_game_motion_vector_field", "ffx_frameinterpolation_game_motion_vector_field_pass"),
+        ("fi_optical_flow_vector_field", "ffx_frameinterpolation_optical_flow_vector_field_pass"),
+        ("fi_disocclusion_mask", "ffx_frameinterpolation_disocclusion_mask_pass"),
+        ("fi_interpolation", "ffx_frameinterpolation_pass"),
+        ("fi_compute_inpainting_pyramid", "ffx_frameinterpolation_compute_inpainting_pyramid_pass"),
+        ("fi_inpainting", "ffx_frameinterpolation_inpainting_pass"),
+        ("fi_compute_game_vector_field_inpainting_pyramid",
+         "ffx_frameinterpolation_compute_game_vector_field_inpainting_pyramid_pass"),
+        ("of_prepare_luma", "ffx_opticalflow_prepare_luma_pass"),
+        ("of_compute_luminance_pyramid", "ffx_opticalflow_compute_luminance_pyramid_pass"),
+        ("of_generate_scd_histogram", "ffx_opticalflow_generate_scd_histogram_pass"),
+        ("of_compute_scd_divergence", "ffx_opticalflow_compute_scd_divergence_pass"),
+        ("of_compute_optical_flow_advanced_v5", "ffx_opticalflow_compute_optical_flow_advanced_pass_v5"),
+        ("of_filter_optical_flow_v5", "ffx_opticalflow_filter_optical_flow_pass_v5"),
+        ("of_scale_optical_flow_advanced_v5", "ffx_opticalflow_scale_optical_flow_advanced_pass_v5"),
+    )
+})
+
+
 # SPIR-V embeddings generated by tools/shader_embed.py are bare uint32 word
 # arrays whose byte-exact contract admits no comment text. Their lineage is
 # carried by (and audited on) the GLSL source each one is compiled from.
 SPDX_GENERATED_EMBEDDING_SOURCES = {
     "src/rt/gpu_sdl3vk/psp_frag.inc": "src/rt/gpu_sdl3vk/shaders/psp.frag",
+    "src/rt/gpu_sdl3vk/psp_frag_rmw.inc": "src/rt/gpu_sdl3vk/shaders/psp.frag",
     "src/rt/gpu_sdl3vk/psp_vert.inc": "src/rt/gpu_sdl3vk/shaders/psp.vert",
     "src/rt/gpu_sdl3vk/psp_tnl_vert.inc": "src/rt/gpu_sdl3vk/shaders/psp_tnl.vert",
     "src/rt/gpu_sdl3vk/ace_match_comp.inc": "src/rt/gpu_sdl3vk/shaders/ace_match.comp",
     "src/rt/gpu_sdl3vk/ace_compose_comp.inc": "src/rt/gpu_sdl3vk/shaders/ace_compose.comp",
+    "src/rt/gpu_sdl3vk/ace_measure_comp.inc": "src/rt/gpu_sdl3vk/shaders/ace_measure.comp",
     "src/rt/gpu_sdl3vk/fsr1_easu_comp.inc": "src/rt/gpu_sdl3vk/shaders/fsr1_easu.comp",
     "src/rt/gpu_sdl3vk/fsr1_rcas_comp.inc": "src/rt/gpu_sdl3vk/shaders/fsr1_rcas.comp",
+    "src/rt/gpu_sdl3vk/anime4k_cnn_x2_m_0_comp.inc": "src/rt/gpu_sdl3vk/shaders/anime4k_cnn_x2_m_0.comp",
+    "src/rt/gpu_sdl3vk/anime4k_cnn_x2_m_1_comp.inc": "src/rt/gpu_sdl3vk/shaders/anime4k_cnn_x2_m_1.comp",
+    "src/rt/gpu_sdl3vk/anime4k_cnn_x2_m_2_comp.inc": "src/rt/gpu_sdl3vk/shaders/anime4k_cnn_x2_m_2.comp",
+    "src/rt/gpu_sdl3vk/anime4k_cnn_x2_m_3_comp.inc": "src/rt/gpu_sdl3vk/shaders/anime4k_cnn_x2_m_3.comp",
+    "src/rt/gpu_sdl3vk/anime4k_cnn_x2_m_4_comp.inc": "src/rt/gpu_sdl3vk/shaders/anime4k_cnn_x2_m_4.comp",
+    "src/rt/gpu_sdl3vk/anime4k_cnn_x2_m_5_comp.inc": "src/rt/gpu_sdl3vk/shaders/anime4k_cnn_x2_m_5.comp",
+    "src/rt/gpu_sdl3vk/anime4k_cnn_x2_m_6_comp.inc": "src/rt/gpu_sdl3vk/shaders/anime4k_cnn_x2_m_6.comp",
+    "src/rt/gpu_sdl3vk/anime4k_cnn_x2_m_7_comp.inc": "src/rt/gpu_sdl3vk/shaders/anime4k_cnn_x2_m_7.comp",
+    "src/rt/gpu_sdl3vk/anime4k_cnn_x2_m_8_comp.inc": "src/rt/gpu_sdl3vk/shaders/anime4k_cnn_x2_m_8.comp",
 }
 
 
@@ -1361,7 +1457,7 @@ def _spdx_provenance_findings(path: str, record: dict, raw_bytes: bytes) -> list
     if pure.suffix.lower() not in SPDX_PROVENANCE_SOURCE_EXTENSIONS and pure.name not in SPDX_PROVENANCE_SOURCE_NAMES:
         return []
 
-    if path in SPDX_GENERATED_EMBEDDING_SOURCES:
+    if path in SPDX_GENERATED_EMBEDDING_SOURCES or path in SPDX_DXC_EMBEDDING_SOURCES:
         return []
     identifiers = _spdx_identifiers(raw_bytes)
     if classification == "project_authored_attested":
@@ -1446,7 +1542,7 @@ def _lineage_contradiction_findings(
     if pure.suffix.lower() not in SPDX_PROVENANCE_SOURCE_EXTENSIONS and pure.name not in SPDX_PROVENANCE_SOURCE_NAMES:
         return [], False
 
-    if path in SPDX_GENERATED_EMBEDDING_SOURCES:
+    if path in SPDX_GENERATED_EMBEDDING_SOURCES or path in SPDX_DXC_EMBEDDING_SOURCES:
         return [], False
 
     try:
@@ -1703,6 +1799,7 @@ TEXT_HYGIENE_EXEMPT_SUFFIXES = frozenset({".dat", ".bin", ".png", ".jpg", ".jpeg
 # upstream LICENSE.md bytes while keeping the general final-newline check.
 TEXT_HYGIENE_FINAL_NEWLINE_EXCEPTIONS = {
     "third_party/clay/LICENSE.md": "5dd30f9f52093076b7574458f5efb8242fe6cbbd4669d4a2914e7616810d0df8",
+    "third_party/fidelityfx_sdk/LICENSE-AMD.md": "410f9c138e766e846acf2dc93db768198def0293a017d7e3296815b451688dbe",
 }
 
 
@@ -1761,6 +1858,72 @@ def check_text_hygiene(content_map: dict[str, tuple[bytes | None, str | None]]) 
             findings.append(Finding(
                 "TEXT_FINAL_NEWLINE", path,
                 "text file does not end with a newline"))
+    return findings
+
+
+PUBLISHED_PACKAGE_DIR = "assets/enhancements/"
+# Root keys that make a JSON document an enhancement package (or its private symbol map).
+_PACKAGE_MARKERS = (b'"sites"', b'"data_sites"', b'"site_map"', b'"executable_sha256"')
+_PUBLISHED_PACKAGE_NAME = re.compile(r"^[a-z]{4}[0-9]{5}-[a-z0-9][a-z0-9-]{0,31}\.json$")
+
+
+def check_enhancement_packages(content_map: dict[str, tuple[bytes | None, str | None]]) -> list[Finding]:
+    """Refuse any enhancement package that could carry game bytes (ENHANCEMENT_CONTRACT.md 5.1).
+
+    A package is public only as a published package under assets/enhancements/: its disc,
+    a site map of names to addresses, declared transforms and executable-keyed stock
+    digests, every property allowlisted by tools/enhancement_package.py. A private
+    declaration, a `.symbols.json` symbol map, a package elsewhere in the tree, or a
+    published package with values read from the game or bytes written into its text is a
+    finding.
+    """
+    import enhancement_package  # noqa: PLC0415 - only this check needs the package validator
+
+    findings: list[Finding] = []
+    for path in sorted(content_map):
+        data, read_error = content_map[path]
+        name = PurePosixPath(path).name
+        lower = name.lower()
+        in_dir = path.startswith(PUBLISHED_PACKAGE_DIR)
+        if lower.endswith(".symbols.json"):
+            findings.append(Finding(
+                "ENHANCEMENT_SYMBOL_MAP", path,
+                "a package's private symbol map is never published; a published package carries its own site_map"))
+            continue
+        # The folder holds published packages and nothing else, whatever a file's extension.
+        if in_dir and ("/" in path[len(PUBLISHED_PACKAGE_DIR):] or not _PUBLISHED_PACKAGE_NAME.match(name)):
+            findings.append(Finding(
+                "ENHANCEMENT_PACKAGE_NAME", path,
+                f"{PUBLISHED_PACKAGE_DIR} holds only published packages, each named <disc id, lowercase>-<kind>.json "
+                "(for example ucus12345-60hz.json)"))
+            continue
+        if read_error or data is None:
+            if in_dir:
+                findings.append(Finding("ENHANCEMENT_PACKAGE_UNREADABLE", path, f"cannot be read: {read_error}"))
+            continue
+        if not lower.endswith(".json"):
+            continue
+        if not in_dir and not any(marker in data for marker in _PACKAGE_MARKERS):
+            continue
+        try:
+            document = json.loads(data.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            if in_dir:
+                findings.append(Finding("ENHANCEMENT_PACKAGE_UNREADABLE", path, f"not JSON: {error}"))
+            continue
+        if not in_dir:
+            if isinstance(document, dict) and "schema_version" in document and (
+                    "sites" in document or "data_sites" in document or "site_map" in document):
+                findings.append(Finding(
+                    "ENHANCEMENT_PACKAGE_OUTSIDE_DIR", path,
+                    f"an enhancement package is public only as a published package under {PUBLISHED_PACKAGE_DIR}"))
+            continue
+        for problem in enhancement_package.published_package_findings(document):
+            findings.append(Finding("ENHANCEMENT_PACKAGE_GAME_BYTES", path, problem))
+        if (isinstance(document, dict) and isinstance(document.get("disc_id"), str)
+                and not name.startswith(document["disc_id"].lower() + "-")):
+            findings.append(Finding(
+                "ENHANCEMENT_PACKAGE_NAME", path, f"the file name does not start with its disc_id {document['disc_id']}"))
     return findings
 
 
@@ -1957,7 +2120,7 @@ def _default_provenance(
 
     # android/ is the Android host target (#360): Gradle, NDK, Java and manifest
     # sources of the same project, admitted like any other path.
-    if rel_path.startswith(("src/", "tools/", "mk/", "assets/", "fixtures/", "docs/", "android/")) or ext in SOURCE_EXTENSIONS or ext in (".md", ".txt", ".json", ".jsonc", ".yml", ".yaml", ".toml", ".ps1") or rel_path in ("Makefile", "pyproject.toml", "nk.ps1", "nk_manager.ps1"):
+    if rel_path.startswith(("src/", "tools/", "mk/", "assets/", "fixtures/", "docs/", "android/")) or ext in SOURCE_EXTENSIONS or ext in (".md", ".txt", ".json", ".jsonc", ".yml", ".yaml", ".toml", ".ps1", ".glsl") or rel_path in ("Makefile", "pyproject.toml", "nk.ps1", "nk_manager.ps1"):
         gen_kind = "documentation" if (rel_path.startswith("docs/") or ext == ".md") else ("data" if ext in (".json", ".jsonc", ".dat") else ("script" if ext in (".ps1", ".sh") else "source"))
         return "project_authored", "GPL-2.0-or-later", "NOTICE.md", gen_kind, "included", policy_public
 
@@ -1970,11 +2133,23 @@ def _default_provenance(
 def _export_staleness_findings(
     policy: Policy, export_path: Path | None, repo_root: Path, document: dict | None = None
 ) -> list[Finding]:
-    """The generated export must carry the *current* policy digest.
+    """The generated export must describe the *current* policy decision.
 
     ``PUBLIC_EXPORT.json`` is generated evidence, not policy. If the policy has
     changed since the export was produced, the export describes a decision nobody
     made and must not be trusted.
+
+    Two committed shapes are accepted.  A control that declares
+    ``policy_sha256`` is held to it exactly as before.  A control may instead
+    omit it: the digest is that of the policy blob itself, recomputed here as
+    ``policy.digest``, and committing it makes every two profile-changing pull
+    requests conflict.  Such a control must name ``policy_sha256`` in its
+    ``tree_derived_fields`` and still carries every field the policy decides:
+    the profile, its version and the exclusion globs are compared with the
+    policy below, and ``excluded_paths`` by the export-exclusion check, so a
+    control that a policy change would rewrite is still stale.  The exact
+    ``tree_derived_fields`` list is the attestation verifier's to check.  The policy bytes themselves are bound to the
+    externally trusted policy by ``POLICY_SOURCE_MISMATCH``.
     """
     resolved = export_path or (repo_root / "PUBLIC_EXPORT.json")
     if document is None:
@@ -1987,19 +2162,53 @@ def _export_staleness_findings(
             return [Finding("POLICY_EXPORT_UNREADABLE", str(resolved), f"cannot parse generated export: {error}")]
 
     findings: list[Finding] = []
-    recorded = document.get("policy_sha256") or document.get("profile_sha256")
-    if not recorded:
-        findings.append(Finding("POLICY_EXPORT_STALE", str(resolved),
-                                "generated export records no policy digest"))
-    elif recorded != policy.digest:
+    # The shape is chosen by key presence: an empty, null or non-string digest is
+    # a declared digest that does not match, never an omitted one.
+    digest_key = next((key for key in ("policy_sha256", "profile_sha256") if key in document), None)
+    if digest_key is not None:
+        recorded = document[digest_key]
+        if recorded != policy.digest:
+            shown = f"{recorded[:16]}..." if isinstance(recorded, str) and recorded else repr(recorded)
+            findings.append(Finding(
+                "POLICY_EXPORT_STALE", str(resolved),
+                f"generated export was produced against policy digest {shown} but the current "
+                f"policy digest is {policy.digest[:16]}...; regenerate the export and re-audit"))
+        if document.get("profile") not in (None, policy.name):
+            findings.append(Finding("POLICY_EXPORT_STALE", str(resolved),
+                                    f"generated export names profile {document.get('profile')!r}, "
+                                    f"policy is {policy.name!r}"))
+        return findings
+    derived = document.get("tree_derived_fields")
+    if not isinstance(derived, list) or "policy_sha256" not in derived:
         findings.append(Finding(
             "POLICY_EXPORT_STALE", str(resolved),
-            f"generated export was produced against policy digest {recorded[:16]}... but the current "
-            f"policy digest is {policy.digest[:16]}...; regenerate the export and re-audit"))
-    if document.get("profile") not in (None, policy.name):
-        findings.append(Finding("POLICY_EXPORT_STALE", str(resolved),
-                                f"generated export names profile {document.get('profile')!r}, "
-                                f"policy is {policy.name!r}"))
+            "generated export omits the policy digest but its tree_derived_fields does not name "
+            "policy_sha256; regenerate the export and re-audit"))
+    expected = {
+        "profile": policy.name,
+        "policy_version": policy.profile_version,
+        "excluded_globs": sorted(policy.exclude_globs),
+    }
+    for field, value in expected.items():
+        if field not in document:
+            findings.append(Finding(
+                "POLICY_EXPORT_STALE", str(resolved),
+                f"generated export records neither a policy digest nor the policy-decided field {field!r}; "
+                "regenerate the export and re-audit"))
+            continue
+        recorded_value = document[field]
+        if isinstance(recorded_value, list):
+            if not all(isinstance(item, str) for item in recorded_value):
+                findings.append(Finding(
+                    "POLICY_EXPORT_STALE", str(resolved),
+                    f"generated export field {field!r} is not a list of strings; regenerate the export and re-audit"))
+                continue
+            recorded_value = sorted(recorded_value)
+        if recorded_value != value:
+            findings.append(Finding(
+                "POLICY_EXPORT_STALE", str(resolved),
+                f"generated export field {field!r} differs from the current policy "
+                f"{policy.name!r} (digest {policy.digest[:16]}...); regenerate the export and re-audit"))
     return findings
 
 
@@ -2341,7 +2550,7 @@ def _tree_binding_findings(
             return [Finding("POLICY_TREE_UNBINDABLE", str(repo_root), "committed-tree audit has no tree reference")]
         try:
             actual = _git_output(
-                ["rev-parse", f"{committed_tree_ref}^{{tree}}"], tree_repo_root or repo_root
+                ["rev-parse", "--verify", "--end-of-options", f"{committed_tree_ref}^{{tree}}"], tree_repo_root or repo_root
             ).strip()
         except RuntimeError as error:
             return [Finding("POLICY_TREE_UNBINDABLE", str(repo_root), str(error))]
@@ -2565,6 +2774,7 @@ def audit_entries_with_semantics(
             findings.extend(_policy_manifest_findings(policy, manifest_map))
 
     findings.extend(check_text_hygiene(content_map))
+    findings.extend(check_enhancement_packages(content_map))
 
     lfs_patterns, lfs_attribute_findings = _read_git_lfs_attributes(
         repo_root, entries=entries, content_map=content_map, content_source=content_source,
@@ -2906,6 +3116,7 @@ def generate_manifest_report(
     secret_scan_report: Path | None = None,
     is_candidate_root: bool = False,
     content_source: str = CONTENT_INDEX,
+    git_commit: str | None = None,
 ) -> dict:
 
     content_source = _resolve_content_source(content_source, is_candidate_root)
@@ -2919,11 +3130,11 @@ def generate_manifest_report(
             content_source=content_source,
         )
 
-    git_commit = ""
-    try:
-        git_commit = _git_output(["rev-parse", "HEAD"], repo_root=repo_root).strip()
-    except Exception:
-        git_commit = "unknown"
+    if git_commit is None:
+        try:
+            git_commit = _git_output(["rev-parse", "HEAD"], repo_root=repo_root).strip()
+        except Exception:
+            git_commit = "unknown"
 
     canonical_entries = [asdict(s) for s in semantics]
     entry_json_canonical = json.dumps(canonical_entries, sort_keys=True)
@@ -3018,26 +3229,111 @@ def export_csv_manifest_report(
             writer.writerow(row)
 
 
-def _materialize_committed_tree(ref: str, source_repo: Path) -> tuple[Path, str]:
-    """Materialize a commit/tree into a disposable directory for exact-byte audit."""
-    tree_sha = _git_output(["rev-parse", f"{ref}^{{tree}}"], source_repo).strip()
-    destination = Path(tempfile.mkdtemp(prefix="nakagawa-committed-audit-"))
-    archive = subprocess.run(
-        ["git", "archive", "--format=tar", ref], cwd=source_repo,
-        env=isolated_git_env(root=source_repo),
+def _committed_tree_entries(tree_sha: str, source_repo: Path) -> list[tuple[str, str, str]]:
+    """``(path, mode, blob id)`` for every entry of a tree, refusing what cannot be audited as a file.
+
+    Read with ``git ls-tree``, so the list is the tree's own and no attribute of the tree can shorten it.
+    Refused: an entry that is not a regular file (a symlink or a submodule has no file bytes to audit), a
+    path that would leave the destination or name Git's own directory, and two paths that differ only in
+    letter case, which a case-insensitive file system would write as one file and so hide the other.
+    """
+    listing = subprocess.run(
+        ["git", "ls-tree", "-r", "-z", "--full-tree", tree_sha], cwd=source_repo,
+        env=isolated_git_env(root=source_repo), capture_output=True, check=True,
+    ).stdout
+    entries: list[tuple[str, str, str]] = []
+    folded: dict[str, str] = {}
+    for record in listing.split(b"\0"):
+        if not record:
+            continue
+        meta, separator, raw_path = record.partition(b"\t")
+        fields = meta.decode("ascii", errors="replace").split()
+        if not separator or len(fields) != 3:
+            raise RuntimeError(f"unreadable git ls-tree record: {record[:80]!r}")
+        mode, kind, object_id = fields
+        try:
+            path = raw_path.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise RuntimeError(f"committed tree path is not UTF-8: {raw_path[:80]!r}") from error
+        if kind != "blob" or mode not in ("100644", "100755"):
+            raise RuntimeError(f"committed tree entry is not a regular file: {path} (mode {mode}, {kind})")
+        parts = path.split("/")
+        if (path.startswith("/") or "\\" in path or ":" in path
+                or any(part in ("", ".", "..") or part.lower() == ".git" for part in parts)):
+            raise RuntimeError(f"unsafe path in committed tree: {path}")
+        key = path.casefold()
+        if key in folded:
+            raise RuntimeError(f"committed tree paths differ only in letter case: {folded[key]} and {path}")
+        folded[key] = path
+        entries.append((path, mode, object_id))
+    return entries
+
+
+def _commit_of(ref: str, source_repo: Path) -> str:
+    """The commit ``ref`` names, for the report; ``unknown`` for a bare tree id (also accepted)."""
+    try:
+        return _git_output(["rev-parse", "--verify", "--quiet", "--end-of-options", f"{ref}^{{commit}}"],
+                           source_repo).strip()
+    except RuntimeError:
+        return "unknown"
+
+
+def _materialize_committed_tree(
+    ref: str, source_repo: Path, entries_out: list[tuple[str, str, str]] | None = None,
+) -> tuple[Path, str]:
+    """Materialize a commit/tree into a disposable directory for exact-byte audit.
+
+    Every file is written from the tree's own objects (``git ls-tree``, ``git cat-file``). ``git archive``
+    is not used: it leaves out a path marked ``export-ignore`` and rewrites one marked ``export-subst``,
+    and both attributes come from the ``.gitattributes`` of the tree under audit, so one line there would
+    hide a file from the audit. ``entries_out``, when given, receives the tree's ``git ls-tree`` list.
+    """
+    tree_sha = _git_output(["rev-parse", "--verify", "--end-of-options", f"{ref}^{{tree}}"], source_repo).strip()
+    entries = _committed_tree_entries(tree_sha, source_repo)
+    if entries_out is not None:
+        entries_out[:] = entries
+    batch = subprocess.run(
+        ["git", "cat-file", "--batch"], cwd=source_repo, env=isolated_git_env(root=source_repo),
+        input="".join(f"{object_id}\n" for _path, _mode, object_id in entries).encode("ascii"),
         capture_output=True, check=True,
     ).stdout
-    with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as tar:
-        for member in tar.getmembers():
-            rel = PurePosixPath(member.name)
-            if rel.is_absolute() or ".." in rel.parts:
-                shutil.rmtree(destination, ignore_errors=True)
-                raise RuntimeError(f"unsafe path in committed tree archive: {member.name}")
-        tar.extractall(destination, filter="data")
+    destination = Path(tempfile.mkdtemp(prefix="nakagawa-committed-audit-"))
+    try:
+        position = 0
+        for path, mode, object_id in entries:
+            newline = batch.find(b"\n", position)
+            header = batch[position:newline].decode("ascii", errors="replace").split() if newline != -1 else []
+            if len(header) != 3 or header[0] != object_id or header[1] != "blob" or not header[2].isdigit():
+                raise RuntimeError(f"git cat-file did not return blob {object_id} for {path}")
+            size = int(header[2])
+            data = batch[newline + 1:newline + 1 + size]
+            if len(data) != size or batch[newline + 1 + size:newline + 2 + size] != b"\n":
+                raise RuntimeError(f"truncated git cat-file payload for {path}")
+            position = newline + 1 + size + 1
+            target = destination.joinpath(*path.split("/"))
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+            if mode == "100755":
+                target.chmod(target.stat().st_mode | 0o111)
+        if position != len(batch):
+            raise RuntimeError("git cat-file returned more output than the tree's blobs")
+    except BaseException:
+        shutil.rmtree(destination, ignore_errors=True)
+        raise
     return destination, tree_sha
 
 
 def main(argv: list[str] | None = None) -> int:
+    # A materialized committed tree is disposable: remove it however the audit ends.
+    disposable: list[Path] = []
+    try:
+        return _main(argv, disposable)
+    finally:
+        for path in disposable:
+            shutil.rmtree(path, ignore_errors=True)
+
+
+def _main(argv: list[str] | None, disposable: list[Path]) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--tracked-only",
@@ -3139,7 +3435,7 @@ def main(argv: list[str] | None = None) -> int:
         "--export",
         type=Path,
         default=None,
-        help="Path to the generated publication export whose policy digest must be current "
+        help="Path to the generated publication export that must describe the current policy "
              "(default: <audit root>/PUBLIC_EXPORT.json)",
     )
     parser.add_argument(
@@ -3195,9 +3491,17 @@ def main(argv: list[str] | None = None) -> int:
     audit_repo_root = args.repo_root.absolute() if args.repo_root else ROOT
     committed_audit_root: Path | None = None
     committed_tree_sha: str | None = None
+    committed_tree_list: list[tuple[str, str, str]] = []
+    committed_commit: str | None = None
     if args.committed_tree:
         try:
-            committed_audit_root, committed_tree_sha = _materialize_committed_tree(args.committed_tree, audit_repo_root)
+            # Resolve the name once, so the report's commit and the audited tree are the same object.
+            committed_commit = _commit_of(args.committed_tree, audit_repo_root)
+            ref = args.committed_tree if committed_commit == "unknown" else committed_commit
+            committed_audit_root, committed_tree_sha = _materialize_committed_tree(
+                ref, audit_repo_root, entries_out=committed_tree_list,
+            )
+            disposable.append(committed_audit_root)
         except (OSError, RuntimeError, subprocess.CalledProcessError) as error:
             print(f"publication audit failed: cannot materialize committed tree: {error}", file=sys.stderr)
             return 2
@@ -3222,11 +3526,12 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     try:
-        entries = (
-            _get_filesystem_entries(audit_root)
-            if args.candidate_root or args.committed_tree
-            else _get_git_entries(args.tracked_only, repo_root=audit_root, content_source=content_source)
-        )
+        if args.committed_tree:
+            entries = _committed_entries(audit_root, committed_tree_list)
+        elif args.candidate_root:
+            entries = _get_filesystem_entries(audit_root)
+        else:
+            entries = _get_git_entries(args.tracked_only, repo_root=audit_root, content_source=content_source)
     except (RuntimeError, UnicodeDecodeError) as error:
         print(f"publication audit failed: {error}", file=sys.stderr)
         return 2
@@ -3265,6 +3570,7 @@ def main(argv: list[str] | None = None) -> int:
         secret_scan_report=args.secret_scan_report,
         is_candidate_root=is_cand_root,
         content_source=content_source,
+        git_commit=committed_commit,
     )
 
     if args.manifest_out:

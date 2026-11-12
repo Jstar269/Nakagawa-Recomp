@@ -177,7 +177,7 @@ The project builds sixteen open Latin fallbacks, one for each console Latin
 index: `nkltn.pgf` and `nkltn1.pgf`-`nkltn7.pgf` for the larger size, and
 `nkltns.pgf` and `nkltn9.pgf`-`nkltn15.pgf` for the smaller one (section 6.5).
 Sections 6.1-6.4 record the first selections; section 6.5 the current Latin
-inputs (#2005). It does not bundle
+and Japanese inputs and the 10.125-point CJK sizes (#2005). It does not bundle
 firmware Latin files: `ltn0.pgf` through `ltn15.pgf` stay in the user's local
 font cache when imported. The runtime's per-index source and fallback order is
 documented in [`SETUP.md`](../SETUP.md#system-fonts).
@@ -328,15 +328,14 @@ RULE (licence-text hygiene): the OFL text stays alongside the generated build
 payload. It is not added under `THIRD_PARTY_LICENSES/` unless a corresponding
 payload is admitted to the public source tree.
 
-### 6.5 Per-style Latin faces (#2005)
+### 6.5 Per-style Latin faces, wider Japanese coverage and CJK sizes (#2005)
 
 Issue #2005 measured five gaps between the first stand-ins and the console
 fonts they serve (`font/README.md`, "Measured differences"): one face for all
 eight Latin styles, capitals and digits narrower than the console's, 111 of
 the console Latin fonts' 322 non-ASCII characters missing, Japanese coverage
 limited to JIS level 1, and Japanese and Korean fonts set at 12 px where the
-console uses 10.125 points. This section records the Latin inputs, which
-close the first three; the Japanese and Korean gaps are still open.
+console uses 10.125 points. This section records the inputs that close them.
 No console font file is read by the build or the tests: the targets are the
 aggregate line widths, class averages and ink edges already recorded, and they
 are written into `tools/test_ttf2pgf.py`.
@@ -396,12 +395,54 @@ italic), with the PGF style `Regular`, `Italic`, `Bold` or `Bold Italic`. The
 larger size is 20 ppem (nominal 648, 10.125 points at 128 dpi) and the smaller
 13 ppem (nominal 448), each with synthetic emboldening. Each index has its own
 `--tracking`, and the sans-serif faces `--digit-advance` (tabular figures at
-the console's digit width). Every index's sentence and menu line then comes
-within 3 % of the console's.
+the console's digit width) and `--embolden-y` (horizontal strokes as thick as
+the console's: its sans-serif letters carry 9 to 25 % more ink than the source
+faces draw without it). Both sizes set round letters' overshoots of less than
+3/8 px on the face's own baseline, x-height and cap height (`--snap-overshoot
+3`, #1300), and the bold sans-serif faces, already at the largest
+`--embolden-y`, take one sub-sample more `--embolden-x` than their strike.
+Every index's sentence and menu line then comes within 3 % of the console's,
+and each sans-serif face's mean ink per letter within 2 %.
+
+The ink targets (`LETTER_INK` in `tools/test_ttf2pgf.py`) are one number per sans-serif face, measured on
+a PSP-3000's own font files, read locally; no font bytes or glyph data are recorded. To
+reproduce a number, read the console's `ltn<N>.pgf` with the project's PGF reader (`tools/nk_core/fonts.py`),
+decode each glyph's 4-bit coverage samples for the 52 letters `A-Z` and `a-z`, divide each sample by 15, sum the
+samples of each glyph, and average over the 52 glyphs. The test applies the same procedure to the generated
+stand-in and requires a result within 2 % of the recorded number. The measured values are 68.5, 68.4, 104.5 and
+104.4 (indices 0, 2, 4 and 6) and 30.8, 30.8, 46.9 and 46.9 (indices 8, 10, 12 and 14).
+
+**Japanese: Noto Sans JP, with M PLUS 1p for one point.** The Japanese input is
+the project UI font `assets/fonts/ui/noto-sans-jp/NotoSansJP-Regular.ttf`
+(section 8; 5,766,828 bytes, SHA-256
+`a66655d7b24ac6f793f73914c60ad44522b9fbd9e5f9b3706220b66c44fdaad2`), pinned for
+the converter by `fixtures/fonts/notosansjp/PIN.json`, which points at that
+file and its `OFL.txt` instead of carrying a second copy. Its Reserved Font
+Name `Source` is not used; the PGF is named `Nakagawa Open Japanese`. The
+built-in `--japanese-text` set is the first set (section 6.1) widened to all of
+JIS X 0208 (the 6,355 kanji of levels 1 and 2), every character of code page
+932 outside its user-defined area (Python's standard `cp932` table, with its
+NEC and IBM extensions) and the Latin-1 Supplement: 7,575 points, canonical
+SHA-256 `7c737cfedb45385d553dbfeecce9949135f185b5ca31ce486428cd4082904497`.
+Noto Sans JP draws 7,574 of them. The converter's `--fallback` option draws
+the remaining U+2252 from the pinned M PLUS 1p (section 6.1), and the
+conversion manifest lists that one point under `fallback.codes` with M PLUS
+1p's digest and licence. `nkjpn-OFL.txt` carries both licence texts.
+
+**Sizes.** Both CJK fonts carry the console's nominal 10.125 points (648 in
+26.6) at 128 dpi. Japanese is drawn at 18 ppem, so kana and kanji advance
+18 px as on the console. Korean is drawn at 20 ppem with one sub-sample of
+tracking, so Hangul syllables average 18.32 px against the console's 18.36.
+The header ascender and descender are the console fonts' recorded values.
 
 **Converter.** Version 0.4.0 of `tools/ttf2pgf.py` adds `--tracking`,
-`--digit-advance` and the Latin repertoire above
-(`docs/cleanroom/PGF_CONVERTER_SPEC.md`).
+`--digit-advance`, `--fallback` and `--fallback-pin` and the two repertoires
+above (`docs/cleanroom/PGF_CONVERTER_SPEC.md`). It also accepts a `STAT`
+table, which the static Noto Sans JP instance carries, as static family
+members do; the variable-font tables `fvar`, `gvar`, `cvar`, `avar`, `HVAR`,
+`MVAR` and `VVAR` stay refused. Version 0.5.0 adds `--snap-overshoot`
+(section 3, rule 13 of that specification), an outline alignment measured from
+each font's own `H` and `x`; it runs no hint program.
 
 ## 7. Residual unknowns (all marked; none block the chosen route)
 

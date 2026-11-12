@@ -17,9 +17,14 @@ The cross-thread BUSY result is modelled from the PSP-3000 measurement (#303):
 BUSY is returned only by a Try made while another thread's transfer is pending,
 and the blocking form waits through a scheduler block, never a sleep or a spin.
 The executable proof is ``test_dmac_active_transfer_across_threads``.
+
+The last classes are the mutation campaign (``make dmac-mutants``): the executable
+selftest is proven load-bearing by building it against copies of ``hle_cache_dma.c``
+with one defect each, every one of which must fail the assertion it names.
 """
 
 from pathlib import Path
+import os
 import re
 import shutil
 import subprocess
@@ -35,9 +40,9 @@ try:
     from .psp_oracle.parse_golden import parse_dmac_invalid_tail_output
     from .psp_oracle.protocol import ProtocolError
 except ImportError:
-    import scratch_dir
-    from psp_oracle.parse_golden import parse_dmac_invalid_tail_output
-    from psp_oracle.protocol import ProtocolError
+    import scratch_dir  # type: ignore[no-redef]
+    from psp_oracle.parse_golden import parse_dmac_invalid_tail_output  # type: ignore[no-redef]
+    from psp_oracle.protocol import ProtocolError  # type: ignore[no-redef]
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -319,6 +324,141 @@ class TestDmacGpuAliasBoundary(unittest.TestCase):
         )
         self.assertIn('"alias-vram"', selftest)
         self.assertIn("if (tc->dirty_alias)", selftest)
+
+
+# ---- the mutation campaign (#303) -------------------------------------------------------------
+#
+# Each mutant is one semantic defect in a COPY of src/rt/hle_cache_dma.c, never in the tree.  The copy
+# replaces the original in the HLE source list, `hle-thread-selftest-build` compiles and links the real
+# selftest against it, and the selftest runs.  Every mutant must build, and fail with the text it names:
+# a compile error proves the compiler noticed, not the test (INVALID); a run that fails for another
+# reason is WRONG_REASON, not a kill; a run that passes SURVIVED.  The unmutated sources must pass first,
+# in the same build root, which every mutant reuses so only the selftest compile and link repeat.
+#
+# `make dmac-mutants` runs TestDmacMutationCampaign (minutes: one selftest build per mutant).  Plain test
+# runs only check that the list still applies.
+
+DMAC_TARGET = hle_sources.defining_file("dmac_transfer")
+DMAC_SELFTEST = ROOT / "tests" / "native" / "hle_thread_selftest.c"
+
+# (name, old text, new text, text the failure output must contain)
+DMAC_MUTANTS: list[tuple[str, str, str, str]] = [
+    ("a 0xC000 effective-transfer ceiling returns",
+     "    const uint32_t effective = n;\n",
+     "    const uint32_t effective = n > 0xC000u ? 0xC000u : n;\n",
+     "PSP: a hardware-verified transfer size copies every byte"),
+    ("the GPU dirty range stops at 0xC000 bytes",
+     "    sr_guest_vram_write_commit_bytes(dst, n);\n    if (g_sr_heap_watch)",
+     "    sr_guest_vram_write_commit_bytes(dst, n > 0xC000u ? 0xC000u : n);\n    if (g_sr_heap_watch)",
+     "a large DMA reports its whole destination range to the GPU"),
+    ("a refused Try copies nothing of its head and tail",
+     "            dmac_copy(dst, src, head);\n"
+     "            dmac_copy(dst + effective - tail, src + effective - tail, tail);\n",
+     "",
+     "a refused Try copies its 12 head bytes and nothing else"),
+    ("a refused Try copies the whole span",
+     "            dmac_copy(dst, src, head);\n"
+     "            dmac_copy(dst + effective - tail, src + effective - tail, tail);\n",
+     "            dmac_copy(dst, src, effective);\n",
+     "PSP-DMAC-002 c3: a 0x110-byte aligned Try is refused with BUSY and copies nothing"),
+    ("the size check follows the NULL-pointer check",
+     "    if (n == 0u) return SCE_DMAC_ERROR_ILLEGAL_SIZE;\n"
+     "    if (dst == 0u || src == 0u) return SCE_DMAC_ERROR_ILLEGAL_ADDR;\n",
+     "    if (dst == 0u || src == 0u) return SCE_DMAC_ERROR_ILLEGAL_ADDR;\n"
+     "    if (n == 0u) return SCE_DMAC_ERROR_ILLEGAL_SIZE;\n",
+     "PSP: size 0 with a NULL destination returns the illegal-size error"),
+    ("the copy is a forward byte loop, not memmove",
+     "    memmove(SR_HOST(dst), SR_HOST(src), n);\n",
+     "    for (uint32_t i = 0u; i < n; i++) SR_HOST(dst)[i] = SR_HOST(src)[i];\n",
+     "memmove-correct"),
+    ("the channel bypass covers a 0x110-byte body",
+     "#define DMAC_BYPASS_BODY_MAX 0x100u",
+     "#define DMAC_BYPASS_BODY_MAX 0x110u",
+     "PSP-DMAC-002 c3"),
+    ("a VRAM source crossing the end of VRAM is refused",
+     "    if (!sr_guest_span_hits_swizzled_vram_mirror(src, n)) return 0;\n",
+     "    return 0;\n",
+     "PSP: a VRAM source running past the end of VRAM"),
+]
+
+
+def _dmac_hle_srcs() -> list[str]:
+    """The HLE_SRCS list from mk/runtime_sources.mk, in order."""
+    text = (ROOT / "mk" / "runtime_sources.mk").read_text(encoding="utf-8")
+    match = re.search(r"^HLE_SRCS\s*:?=((?:.*\\\n)*.*)$", text, re.M)
+    if not match:
+        raise AssertionError("HLE_SRCS not found in mk/runtime_sources.mk")
+    return match.group(1).replace("\\\n", " ").split()
+
+
+class TestDmacMutantList(unittest.TestCase):
+    def test_every_mutant_applies_exactly_once(self) -> None:
+        source = (ROOT / DMAC_TARGET).read_text(encoding="utf-8")
+        for name, old, new, _expect in DMAC_MUTANTS:
+            with self.subTest(name):
+                self.assertEqual(source.count(old), 1, "the old text must match one place")
+                self.assertNotEqual(old, new)
+
+    def test_every_expected_failure_is_a_selftest_assertion(self) -> None:
+        selftest = DMAC_SELFTEST.read_text(encoding="utf-8")
+        for name, _old, _new, expect in DMAC_MUTANTS:
+            with self.subTest(name):
+                self.assertTrue(expect in selftest, "the failure text must be an assertion it makes")
+
+    def test_names_are_unique_and_the_target_is_an_hle_source(self) -> None:
+        names = [m[0] for m in DMAC_MUTANTS]
+        self.assertEqual(len(names), len(set(names)))
+        self.assertIn(DMAC_TARGET, _dmac_hle_srcs())
+
+    def test_the_gpu_dirty_range_of_a_large_copy_is_asserted(self) -> None:
+        """The clamped-dirty-range mutant survived the selftest before the large-copy cells."""
+        selftest = DMAC_SELFTEST.read_text(encoding="utf-8")
+        self.assertIn("a large DMA reports its whole destination range to the GPU", selftest)
+        self.assertTrue(any("dirty range" in m[0] for m in DMAC_MUTANTS))
+
+
+@unittest.skipUnless(os.environ.get("NK_DMAC_MUTANTS_BUILD_DIR"), "run through `make dmac-mutants`")
+class TestDmacMutationCampaign(unittest.TestCase):
+    """Build the real selftest against each mutant; every mutant must be killed for its stated reason."""
+
+    @staticmethod
+    def _build_and_run(root: Path, srcs: list[str], log: Path) -> tuple[str, str]:
+        """Return (stage, output); stage is BUILD, PASS or FAIL."""
+        make = os.environ.get("NK_DMAC_MUTANTS_MAKE") or shutil.which("mingw32-make") or "make"
+        build = subprocess.run(
+            [make, "--no-print-directory", "hle-thread-selftest-build",
+             f"BUILD_ROOT={root.as_posix()}", "HLE_SRCS=" + " ".join(srcs)],
+            cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False)
+        log.write_text(build.stdout, encoding="utf-8")
+        exes = sorted(root.rglob("hle_thread_selftest.exe")) if build.returncode == 0 else []
+        if not exes:
+            return "BUILD", build.stdout
+        run = subprocess.run([str(exes[0])], cwd=ROOT, text=True, stdout=subprocess.PIPE,
+                             stderr=subprocess.STDOUT, check=False)
+        log.write_text(run.stdout, encoding="utf-8")
+        return ("PASS" if run.returncode == 0 else "FAIL"), run.stdout
+
+    def test_every_mutant_is_killed_for_its_stated_reason(self) -> None:
+        base = Path(os.environ["NK_DMAC_MUTANTS_BUILD_DIR"]).resolve()
+        only = os.environ.get("NK_DMAC_MUTANTS_ONLY", "")
+        base.mkdir(parents=True, exist_ok=True)
+        sources = _dmac_hle_srcs()
+        original = (ROOT / DMAC_TARGET).read_text(encoding="utf-8")
+        shared = base / "build"
+        stage, out = self._build_and_run(shared, sources, base / "unmutated.log")
+        self.assertEqual(stage, "PASS", f"the unmutated sources must pass first:\n{out[-2000:]}")
+        for index, (name, old, new, expect) in enumerate(DMAC_MUTANTS):
+            if only and only not in name:
+                continue
+            with self.subTest(name):
+                copy = base / f"m{index:02d}" / Path(DMAC_TARGET).name
+                copy.parent.mkdir(parents=True, exist_ok=True)
+                copy.write_text(original.replace(old, new), encoding="utf-8")
+                srcs = [copy.as_posix() if s == DMAC_TARGET else s for s in sources]
+                stage, out = self._build_and_run(shared, srcs, copy.parent / "run.log")
+                self.assertNotEqual(stage, "BUILD", "INVALID: the mutant did not build")
+                self.assertNotEqual(stage, "PASS", "SURVIVED: the selftest passed the mutant")
+                self.assertIn(expect, out, "WRONG_REASON: it failed, but not for the stated reason")
 
 
 if __name__ == "__main__":
