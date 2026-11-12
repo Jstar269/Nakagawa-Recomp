@@ -1612,8 +1612,9 @@ def _cell_rs_inner() -> list[int]:
         _i(0x09, T0, T0, 1),                # 0x24 addiu t0, t0, 1  (slot)
         _i(0x23, SP, S0, 8),                # 0x28 lw    s0, 8(sp)
         _i(0x23, SP, RA, 12),               # 0x2c lw    ra, 12(sp)
-        JR_RA,                              # 0x30
-        _i(0x09, SP, SP, 16),               # 0x34 addiu sp, sp, 16 (return slot)
+        _i(0x09, SP, SP, 16),               # 0x30 addiu sp, sp, 16 (not in the return slot)
+        JR_RA,                              # 0x34
+        NOP,                                # 0x38 (return slot)
     ]
 
 
@@ -1634,8 +1635,9 @@ def _cell_rs_mid() -> list[int]:
         _i(0x09, V0, V0, 4),                # 0x1c addiu v0, v0, 4  (slot)
         _i(0x2B, A0, V0, 0x28),             # 0x20 sw    v0, 0x28(a0)
         _i(0x23, SP, RA, 12),               # 0x24 lw    ra, 12(sp)
-        JR_RA,                              # 0x28
-        _i(0x09, SP, SP, 16),               # 0x2c addiu sp, sp, 16 (return slot)
+        _i(0x09, SP, SP, 16),               # 0x28 addiu sp, sp, 16 (not in the return slot)
+        JR_RA,                              # 0x2c
+        NOP,                                # 0x30 (return slot)
     ]
 
 
@@ -1643,9 +1645,18 @@ def _cell_rs() -> list[int]:
     """Resume at a PC (#2172): the outermost frame of a three-deep call chain.
 
     0x14 is two resume points at once: the return PC of the first call, and the target of the
-    loop edge at 0x20. A thread suspended in the first call continues at 0x14 once the frame
+    loop edge at 0x24. A thread suspended in the first call continues at 0x14 once the frame
     above returns; a thread parked at the edge continues at 0x14 at once. The two differ in
     what runs first, so a resume that keyed its points on the PC alone would take the wrong one.
+
+    The three frames of this chain run nested in lane INTERP, so they must end under every
+    interpreter mutant (the mutation gate cannot count a run that never ends as a kill). The
+    loop counter therefore steps at 0x18: outside a delay slot, which `skip-delay-slot` drops;
+    after the loop head, which `wrong-branch-target` jumps past; and before the call, so a
+    wrong link value cannot return around it. For the same reason the three frames pop their
+    stack before `jr $ra`, not in its slot: a callee that kept its frame would hand its caller
+    the callee's own saved $ra, and the caller would return into itself for ever. The `link`
+    and `zlink` resume cases keep the usual pop in the return slot.
     """
     return [
         _i(0x09, SP, SP, -16),              # 0x00 addiu sp, sp, -16
@@ -1654,13 +1665,15 @@ def _cell_rs() -> list[int]:
         _j(0x03, 0x00),                     # 0x0c jal   rs_mid (patched + relocated)
         NOP,                                # 0x10 (slot)
         _r(S2, V0, S2, 0, 0x21),            # 0x14 addu  s2, s2, v0
-        _j(0x03, 0x00),                     # 0x18 jal   rs_mid (patched + relocated)
-        _i(0x09, S1, S1, -1),               # 0x1c addiu s1, s1, -1 (slot)
-        _i(0x07, S1, ZERO, -4),             # 0x20 bgtz  s1, 0x14
-        _i(0x2B, A0, S2, 0x2C),             # 0x24 sw    s2, 0x2c(a0) (slot)
-        _i(0x23, SP, RA, 12),               # 0x28 lw    ra, 12(sp)
-        JR_RA,                              # 0x2c
-        _i(0x09, SP, SP, 16),               # 0x30 addiu sp, sp, 16 (return slot)
+        _i(0x09, S1, S1, -1),               # 0x18 addiu s1, s1, -1
+        _j(0x03, 0x00),                     # 0x1c jal   rs_mid (patched + relocated)
+        _i(0x09, T0, T0, 1),                # 0x20 addiu t0, t0, 1  (slot)
+        _i(0x07, S1, ZERO, -5),             # 0x24 bgtz  s1, 0x14
+        _i(0x2B, A0, S2, 0x2C),             # 0x28 sw    s2, 0x2c(a0) (slot)
+        _i(0x23, SP, RA, 12),               # 0x2c lw    ra, 12(sp)
+        _i(0x09, SP, SP, 16),               # 0x30 addiu sp, sp, 16 (not in the return slot)
+        JR_RA,                              # 0x34
+        NOP,                                # 0x38 (return slot)
     ]
 
 
@@ -1918,7 +1931,7 @@ def build_text_segment() -> bytes:
     # calls leaf A in its loop, and rs_tail leaves by `j` to rs_inner.
     for cell, slot, opcode, target in (
         ("rs", 0x0C, 0x03, "rs_mid"),
-        ("rs", 0x18, 0x03, "rs_mid"),
+        ("rs", 0x1C, 0x03, "rs_mid"),
         ("rs_mid", 0x0C, 0x03, "rs_inner"),
         ("rs_mid", 0x18, 0x03, "rs_inner"),
         ("rs_inner", 0x10, 0x03, "link_leaf"),
