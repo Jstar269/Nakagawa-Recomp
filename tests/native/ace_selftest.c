@@ -386,8 +386,8 @@ static void cell_switch(void) {
           strstr(json, "partial: test") != NULL, "a partial cull run is reported unavailable:\n%s", json);
     /* The finish hook runs before the report, so a table that fills after the last present still reads
      * partial (the exit-at-VBLANK path never goes through the presenter again). "Runs first" is
-     * testable because a feature's first outcome is the one recorded: a hook run after the
-     * never-ran settle would find cull already settled, and "partial: finish" would be missing. */
+     * testable because only a feature's first unavailable reason is kept: a hook run after the
+     * never-ran settle would find cull already marked, and "partial: finish" would be missing. */
     CHECK(ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=fill;smooth=off;sas=off;tess=off;tier=ace;"
                         "cull=on", NULL) == 1 && ace_effective()->cull == 1, "cull=on again for the finish hook");
     s_hook_ran = 0;
