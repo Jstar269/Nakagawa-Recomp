@@ -693,7 +693,8 @@ def resolve_shipped_dlls(
         key = name.lower()
         if key in shipped:
             return
-        slug = re.sub(r"[^A-Za-z0-9._-]", "_", name)
+        # SPDX 2.3 identifiers allow letters, digits, "." and "-" only (SDL3_ttf.dll).
+        slug = re.sub(r"[^A-Za-z0-9.-]", "-", name)
         shipped[key] = {
             "name": name,
             "spdx_id": f"SPDXRef-dll-{slug}",
@@ -761,11 +762,89 @@ def resolve_shipped_dlls(
     return [shipped[k] for k in sorted(shipped)]
 
 
+class RuntimeBindingError(Exception):
+    """The package's runtime manifest and the SBOM's binary inventory disagree (#324)."""
+
+
+def runtime_executable_spdx_id(name: str) -> str:
+    """SPDX identifier of a packaged executable (``bin/<name>``)."""
+    return "SPDXRef-exe-" + re.sub(r"[^A-Za-z0-9.-]", "-", name)
+
+
+def bind_runtime_manifest(
+    package_dir: Path,
+    shipped_dlls: list[dict[str, Any]],
+    *,
+    imports_of: Any = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Bind each shipped binary to its identity in ``runtime-manifest.json`` (#324).
+
+    ``package_dir`` is the package's ``bin/`` folder, the one ``--package-dir`` names. The
+    runtime manifest is checked against that folder first (every listed file's size and
+    SHA-256, no unlisted executable or DLL, the import closure, a licence record for every
+    DLL), so the hashes the SBOM carries are those of the bytes that ship. Every DLL the
+    manifest lists must be a shipped DLL of the SBOM and every shipped DLL of the SBOM must be
+    in the manifest. Returns the shipped DLLs with ``sha256``, ``size`` and ``package_path``
+    added, and one record per executable. Raises :class:`RuntimeBindingError` otherwise.
+    """
+    import package_notices
+    import stage_runtime_dlls
+
+    try:
+        manifest = stage_runtime_dlls.verify_runtime_manifest(
+            package_dir,
+            imports_of=package_notices.get_binary_imports if imports_of is None else imports_of,
+        )
+    except stage_runtime_dlls.RuntimeManifestError as exc:
+        raise RuntimeBindingError(str(exc)) from exc
+    libraries = {entry["path"].lower(): entry for entry in manifest["files"]
+                 if entry["kind"] == "runtime-library"}
+    named = {dll["name"].lower() for dll in shipped_dlls}
+    unrecorded = sorted(libraries[key]["path"] for key in set(libraries) - named)
+    if unrecorded:
+        raise RuntimeBindingError(
+            f"SBOM_DLL_UNRECORDED: {', '.join(unrecorded)} ships in {package_dir.name}/ "
+            "but the SBOM inventory does not name it"
+        )
+    unshipped = sorted(dll["name"] for dll in shipped_dlls if dll["name"].lower() not in libraries)
+    if unshipped:
+        raise RuntimeBindingError(
+            f"SBOM_DLL_NOT_SHIPPED: the SBOM inventory names {', '.join(unshipped)}, "
+            f"which {stage_runtime_dlls.RUNTIME_MANIFEST_NAME} does not list"
+        )
+    bound = []
+    for dll in shipped_dlls:
+        entry = libraries[dll["name"].lower()]
+        bound.append({**dll, "sha256": entry["sha256"], "size": entry["size"],
+                      "package_path": f"bin/{entry['path']}"})
+    executables = [{
+        "name": entry["path"],
+        "spdx_id": runtime_executable_spdx_id(entry["path"]),
+        "package_path": f"bin/{entry['path']}",
+        "sha256": entry["sha256"],
+        "size": entry["size"],
+    } for entry in manifest["files"] if entry["kind"] == "executable"]
+    identifiers = [item["spdx_id"] for item in (*bound, *executables)]
+    shared = sorted({identifier for identifier in identifiers if identifiers.count(identifier) > 1})
+    if shared:
+        raise RuntimeBindingError(
+            f"SBOM_SPDX_ID_COLLISION: two packaged binaries would share the identifier {', '.join(shared)}"
+        )
+    return bound, executables
+
+
 def generate_spdx23(manifest_data: dict, py_packages: list[dict],
                     lock_files: list[dict] | None = None,
                     lock_relationships: list[dict] | None = None,
-                    shipped_dlls: list[dict] | None = None) -> dict:
-    """Build an SPDX 2.3 document with optional Python lock byte binding."""
+                    shipped_dlls: list[dict] | None = None,
+                    shipped_executables: list[dict] | None = None) -> dict:
+    """Build an SPDX 2.3 document with optional Python lock byte binding.
+
+    A shipped DLL that :func:`bind_runtime_manifest` bound carries its SHA-256 and package
+    path, and each bound executable is a package of its own with its SHA-256 and package
+    path, which the root package ``GENERATES``. (A file element would not do: SPDX 2.3
+    forbids a package with ``filesAnalyzed`` false from containing files.)
+    """
     if shipped_dlls is None:
         shipped_dlls = resolve_shipped_dlls(manifest_data=manifest_data)
     doc_id = "SPDXRef-DOCUMENT"
@@ -831,8 +910,13 @@ def generate_spdx23(manifest_data: dict, py_packages: list[dict],
 
     for dll in shipped_dlls:
         if any(p.get("name") in (dll["name"], dll.get("id")) or p.get("SPDXID") == dll["spdx_id"] for p in packages):
+            if "sha256" in dll:
+                raise RuntimeBindingError(
+                    f"SBOM_DLL_NAME_TAKEN: another SPDX package already carries the name or identifier of "
+                    f"{dll['name']}, so its runtime manifest SHA-256 would be lost"
+                )
             continue
-        packages.append({
+        dll_package = {
             "SPDXID": dll["spdx_id"],
             "name": dll["name"],
             "versionInfo": dll.get("version", "unknown"),
@@ -841,7 +925,11 @@ def generate_spdx23(manifest_data: dict, py_packages: list[dict],
             "licenseConcluded": dll["license"],
             "licenseDeclared": dll["license"],
             "copyrightText": "NOASSERTION",
-        })
+        }
+        if "sha256" in dll:
+            dll_package["packageFileName"] = dll["package_path"]
+            dll_package["checksums"] = [{"algorithm": "SHA256", "checksumValue": dll["sha256"]}]
+        packages.append(dll_package)
         relationships.append({
             "spdxElementId": root_pkg_id,
             "relationshipType": "DEPENDS_ON",
@@ -892,6 +980,26 @@ def generate_spdx23(manifest_data: dict, py_packages: list[dict],
         document["files"] = list(lock_files)
     if lock_relationships is not None:
         document["relationships"].extend(lock_relationships)
+    for executable in shipped_executables or []:
+        document["packages"].append({
+            "SPDXID": executable["spdx_id"],
+            "name": executable["name"],
+            "versionInfo": manifest_data.get("version", "0.1.0"),
+            "packageFileName": executable["package_path"],
+            "downloadLocation": "NOASSERTION",
+            "filesAnalyzed": False,
+            "primaryPackagePurpose": "APPLICATION",
+            "checksums": [{"algorithm": "SHA256", "checksumValue": executable["sha256"]}],
+            "licenseConcluded": "NOASSERTION",
+            "licenseDeclared": manifest_data.get("license", "GPL-3.0-or-later"),
+            "copyrightText": "NOASSERTION",
+            "comment": "Packaged executable built from the root package; SHA-256 from bin/runtime-manifest.json.",
+        })
+        document["relationships"].append({
+            "spdxElementId": root_pkg_id,
+            "relationshipType": "GENERATES",
+            "relatedSpdxElement": executable["spdx_id"],
+        })
     return document
 
 
@@ -906,8 +1014,13 @@ def spdx3_root_package_id(version: object) -> str:
     return f"{DOCUMENT_NAMESPACE_BASE}-{version}#Package-nakagawa-recomp"
 
 
+def _spdx3_sha256(value: str) -> list[dict]:
+    return [{"@type": "spdx:Hash", "spdx:algorithm": "sha256", "spdx:hashValue": value}]
+
+
 def generate_spdx301(manifest_data: dict, py_packages: list[dict],
-                     shipped_dlls: list[dict] | None = None) -> dict:
+                     shipped_dlls: list[dict] | None = None,
+                     shipped_executables: list[dict] | None = None) -> dict:
     if shipped_dlls is None:
         shipped_dlls = resolve_shipped_dlls(manifest_data=manifest_data)
     version = manifest_data.get("version", "0.1.0")
@@ -929,12 +1042,22 @@ def generate_spdx301(manifest_data: dict, py_packages: list[dict],
         },
     ]
     for dll in shipped_dlls:
-        graph.append({
+        node = {
             "@id": f"{base_id}#{dll['spdx_id']}",
             "@type": "spdx:Package",
             "spdx:name": dll["name"],
             "spdx:packageVersion": dll.get("version", "unknown"),
             "spdx:concludedLicense": f"http://spdx.org/licenses/{dll['license']}",
+        }
+        if "sha256" in dll:
+            node["spdx:verifiedUsing"] = _spdx3_sha256(dll["sha256"])
+        graph.append(node)
+    for executable in shipped_executables or []:
+        graph.append({
+            "@id": f"{base_id}#{executable['spdx_id']}",
+            "@type": "spdx:File",
+            "spdx:name": executable["package_path"],
+            "spdx:verifiedUsing": _spdx3_sha256(executable["sha256"]),
         })
     for pkg in py_packages:
         graph.append({
@@ -967,7 +1090,8 @@ def generate_spdx301(manifest_data: dict, py_packages: list[dict],
 
 
 def generate_cyclonedx(manifest_data: dict, py_packages: list[dict],
-                       shipped_dlls: list[dict] | None = None) -> dict:
+                       shipped_dlls: list[dict] | None = None,
+                       shipped_executables: list[dict] | None = None) -> dict:
     if shipped_dlls is None:
         shipped_dlls = resolve_shipped_dlls(manifest_data=manifest_data)
     components = [{
@@ -990,10 +1114,19 @@ def generate_cyclonedx(manifest_data: dict, py_packages: list[dict],
             "externalReferences": [{"type": "vcs", "url": family.get("origin", "NOASSERTION")}],
         })
     for dll in shipped_dlls:
-        components.append({
+        component = {
             "type": "library", "name": dll["name"],
             "version": dll.get("version", "unknown"),
             "licenses": [{"license": {"id": dll["license"]}}],
+        }
+        if "sha256" in dll:
+            component["hashes"] = [{"alg": "SHA-256", "content": dll["sha256"]}]
+        components.append(component)
+    for executable in shipped_executables or []:
+        components.append({
+            "type": "file", "name": executable["package_path"],
+            "bom-ref": executable["spdx_id"],
+            "hashes": [{"alg": "SHA-256", "content": executable["sha256"]}],
         })
     for pkg in py_packages:
         entry = {
@@ -1041,7 +1174,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--cyclonedx-out", type=Path, help="Output path for CycloneDX 1.5 JSON")
     parser.add_argument(
         "--package-dir", type=Path,
-        help="Native package directory containing shipped DLLs and notices",
+        help=("The package's bin/ folder: shipped DLLs, notices and runtime-manifest.json, whose "
+              "SHA-256 of every executable and DLL the SBOMs carry (checked against the files first)"),
     )
     args = parser.parse_args(argv)
     if not args.manifest.is_file():
@@ -1070,12 +1204,26 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     py_packages = parsed["py_packages"]
     shipped_dlls = resolve_shipped_dlls(package_dir=args.package_dir, manifest_data=manifest_data)
-    spdx23_doc = generate_spdx23(
-        manifest_data, py_packages, lock_files=parsed["lock_files"],
-        lock_relationships=parsed["lock_relationships"], shipped_dlls=shipped_dlls,
-    )
-    spdx301_doc = generate_spdx301(manifest_data, py_packages, shipped_dlls=shipped_dlls)
-    cyclonedx_doc = generate_cyclonedx(manifest_data, py_packages, shipped_dlls=shipped_dlls)
+    shipped_executables: list[dict] = []
+    if args.package_dir is not None:
+        try:
+            shipped_dlls, shipped_executables = bind_runtime_manifest(args.package_dir, shipped_dlls)
+        except RuntimeBindingError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+    try:
+        spdx23_doc = generate_spdx23(
+            manifest_data, py_packages, lock_files=parsed["lock_files"],
+            lock_relationships=parsed["lock_relationships"], shipped_dlls=shipped_dlls,
+            shipped_executables=shipped_executables,
+        )
+    except RuntimeBindingError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    spdx301_doc = generate_spdx301(manifest_data, py_packages, shipped_dlls=shipped_dlls,
+                                   shipped_executables=shipped_executables)
+    cyclonedx_doc = generate_cyclonedx(manifest_data, py_packages, shipped_dlls=shipped_dlls,
+                                       shipped_executables=shipped_executables)
     if args.spdx_out:
         args.spdx_out.parent.mkdir(parents=True, exist_ok=True)
         args.spdx_out.write_text(json.dumps(spdx23_doc, indent=2) + "\n", encoding="utf-8", newline="\n")

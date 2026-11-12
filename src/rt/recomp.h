@@ -1119,8 +1119,6 @@ uint32_t sr_bitrev(uint32_t x);
  * too: generated code calls it where a codegen temporary compatibility patch applies. */
 void sr_compat_fired(const char *collection, uint32_t anchor, const char *name);
 
-/* PSP-EABI bridge used by the generated guest sprintf entry. */
-void sr_guest_sprintf(CpuState *s);
 /* Format the guest string at `fmt` with variadic words starting in register
  * `first_reg` into a bounded host buffer (NUL-terminated; never guest-visible).
  * Returns the full formatted length, as printf does. */
