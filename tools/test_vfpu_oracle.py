@@ -38,7 +38,9 @@ class SharedInputVectorTests(unittest.TestCase):
                           f"{path.name} must include the shared vector, not define its own")
 
     def test_declared_count_matches_the_literal_list(self) -> None:
-        declared = int(re.search(r"#define VFPU_ORACLE_INPUT_COUNT (\d+)", self.cases).group(1))
+        count_match = re.search(r"#define VFPU_ORACLE_INPUT_COUNT (\d+)", self.cases)
+        assert count_match is not None
+        declared = int(count_match.group(1))
         body = self.cases.split("VFPU_ORACLE_INPUTS[VFPU_ORACLE_INPUT_COUNT] = {", 1)[1].split("};", 1)[0]
         actual = len(re.findall(r"0x[0-9A-Fa-f]{8}u", body))
         self.assertEqual(declared, actual,
@@ -51,7 +53,9 @@ class SharedInputVectorTests(unittest.TestCase):
                             "decimal literals are re-rounded per compiler; use raw IEEE-754 bits")
 
     def test_large_argument_boundary_is_covered(self) -> None:
-        first = int(re.search(r"#define VFPU_ORACLE_LARGE_ARG_FIRST (\d+)", self.cases).group(1))
+        first_match = re.search(r"#define VFPU_ORACLE_LARGE_ARG_FIRST (\d+)", self.cases)
+        assert first_match is not None
+        first = int(first_match.group(1))
         self.assertGreater(first, 0)
         # 2^32 and 2^33 bracket the region upstream (ppsspp#21070) flags as untested.
         for bits in ("0x4F800000u", "0x50000000u"):

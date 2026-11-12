@@ -2545,6 +2545,19 @@ void     sched_preempt(void);                       /* yield now if a higher-pri
 extern atomic_int_least32_t sr_preempt_due;
 void     sched_preempt_point(void);
 void     sched_block_on(uint32_t obj);              /* block current thread until sched_wake(obj) */
+/* Host work a guest thread waits for (#2361, sched.c): a host call that would block the
+ * scheduler's thread runs on one worker thread instead, and the guest thread that asked waits in
+ * the scheduler until it is done, so the other threads run meanwhile. usable is true only in a
+ * paced run, on a guest thread that may wait; otherwise the caller makes its call itself. run
+ * must not touch guest state. The submitter finishes a done item; if its thread ends first the
+ * item is abandoned, and drop (may be NULL) releases ctx once the call has returned. */
+typedef struct SrHostWork SrHostWork;
+typedef void (*SrHostWorkFn)(void *ctx);
+int      sched_host_work_usable(void);
+SrHostWork *sched_host_work_submit(SrHostWorkFn run, SrHostWorkFn drop, void *ctx);   /* NULL: make the call yourself */
+int      sched_host_work_done(SrHostWork *work);
+uint64_t sched_host_work_finish(SrHostWork *work);    /* after done: releases the item, not ctx; the host ns run took */
+void     sched_host_work_abandon(SrHostWork *work);   /* the waiting thread ended */
 void     sched_wait_vblank_start(void);             /* sceDisplayWaitVblankStart: always block to the next vblank start edge */
 int      sched_wait_vblank(void);                   /* sceDisplayWaitVblank: 1 if already inside the vblank interval (no block), else blocks and returns 0 */
 int      sched_wait_vblank_cb(int wait_start);       /* callback-aware display wait; wait_start selects WaitVblankStart semantics */

@@ -486,6 +486,18 @@ int       ge_wide_picture(uint32_t fb_addr, const uint32_t *frame, uint32_t *out
 /* The software canvas of fb_addr: GE_WIDE_CANVAS_W raw framebuffer words per row, in format
  * *fmt (GE pixel format 0..3); NULL when none was drawn by the software rasterizer. */
 const uint32_t *ge_wide_canvas(uint32_t fb_addr, int *fmt);
+/* The software renderer's host twin, Enhanced 32-bit colour (#2050, ENHANCEMENT_CONTRACT.md
+ * 10.11; ge.c's comment at s_twin_mode). ge_twin_present_row fills `width` RGBA8 words (red in
+ * the low byte) of row `y` of the framebuffer at fbaddr (GE format fmt 0..3, stride in pixels,
+ * 0 = 512): the twin's colour where its slot is valid, else the pixel as the CPU presenter
+ * converts it. It returns 0, and writes nothing, while the twin is off, while a GPU backend is
+ * registered, with SR_GPU_TWIN_CAPTURE=authentic, or for a row outside VRAM. ge_twin_mode: -1
+ * not decided yet, 0 off, 1 full colour, 2 native. ge_twin_set_mode (selftests): 1 or 2 turn it
+ * on with every slot empty (returns 0 when it cannot be allocated), 0 turns it off, -1 decides
+ * again from the environment on the next colour write; each frees the slots it no longer needs. */
+int       ge_twin_present_row(uint32_t fbaddr, int fmt, uint32_t stride, int y, uint32_t *out_rgba, int width);
+int       ge_twin_mode(void);
+int       ge_twin_set_mode(int mode);
 /* GPU transform and lighting (#318): on with SR_GPU_TNL=1, or set here (-1 re-reads the
  * environment). The counts are PRIMs the backend drew and PRIMs ge.c found ineligible or the
  * backend declined, since the last reset. */
