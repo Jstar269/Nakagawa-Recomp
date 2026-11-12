@@ -706,7 +706,8 @@ static uint32_t atrac_set_new(uint32_t buf, uint32_t readSize, uint32_t bufSize,
  * host, so the context is a guest copy, written from that state after every call that changes
  * it, and read back where a game may write it.
  *
- * Layout: PPSSPP's SceAtracContext (Core/HLE/AtracBase.h, GPL-2.0-or-later, revision 3bc60270e):
+ * Layout: derived-translated from PPSSPP's SceAtracContext (Core/HLE/AtracBase.h, GPL-2.0-or-later,
+ * revision 3bc60270eae3069f13dfbfdb7292a7e1375de6f6; src/rt/PROVENANCE.md):
  * 0x100 bytes per ID, the codec block in the first 0x80 (left zero: no Media Engine here) and the
  * SceAtracIdInfo block after it, with the ID at +0xfc. The offsets below are into the info block.
  * None of it is measured on a PSP (UNMEASURED; PSP request R2-3 in the lane notes).
