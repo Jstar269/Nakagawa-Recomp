@@ -961,11 +961,12 @@ asset-index-selftest:
 # a quarter-size render target, its own or a sub-rectangle of a larger one, sampled back, linear,
 # at the render scale and not at 1x, then read by the CPU) and rtt-edge (a texture inside a target
 # clamps and repeats at its own size) run alone at scales 2 and 4, rtt-depth-alias (a depth read
-# inside a colour target's span) at 4 (the whole-suite run covers 1x). The 32-bit host depth buffer
-# (#2051) runs host-depth with the key off and then on (`--depth 32`) at scales 1 and 4, the key-off
-# run writing the depth readback's hash that the key-on run must match (`--depth-ref`), then the
-# whole suite with the key on, and host-depth once more with the native twin. Each is selected by
-# arguments: a
+# inside a colour target's span) at 4, and rtt-1x-reads (#2279: the render-target reads that
+# decode guest VRAM at 1x at every scale) at 2 and 4 (the whole-suite run covers 1x). The 32-bit
+# host depth buffer (#2051) runs host-depth with the key off and then on (`--depth 32`) at scales 1
+# and 4, the key-off run writing the depth readback's hash that the key-on run must match
+# (`--depth-ref`), then the whole suite with the key on, and host-depth once more with the native
+# twin. Each is selected by arguments: a
 # VAR=value prefix needs a POSIX shell, and cmd.exe does not take one. The host twin (#2050) runs
 # after them: twin-off runs of twin-scene write reference files that the twin-on runs at the
 # same scale check (guest VRAM always, the shown images for the native twin), `--twin native`
@@ -1039,6 +1040,8 @@ gpu-coherence-selftest: $(GPU_COHERENCE_BIN)
 	$(GPU_COHERENCE_BIN) --scale 2 --case rtt-edge
 	$(GPU_COHERENCE_BIN) --scale 4 --case rtt-edge
 	$(GPU_COHERENCE_BIN) --scale 4 --case rtt-depth-alias
+	$(GPU_COHERENCE_BIN) --scale 2 --case rtt-1x-reads
+	$(GPU_COHERENCE_BIN) --scale 4 --case rtt-1x-reads
 	$(GPU_COHERENCE_BIN) --case host-depth --depth-ref $(BUILD_DIR)/depth_ref_s1.txt
 	$(GPU_COHERENCE_BIN) --depth 32 --case host-depth --depth-ref $(BUILD_DIR)/depth_ref_s1.txt
 	$(GPU_COHERENCE_BIN) --scale 4 --case host-depth --depth-ref $(BUILD_DIR)/depth_ref_s4.txt
