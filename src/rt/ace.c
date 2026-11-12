@@ -1267,9 +1267,13 @@ size_t ace_report_json(char *out, size_t cap) {
     return used;
 }
 
+static void (*s_finish_hook)(void);
+void ace_set_finish_hook(void (*hook)(void)) { s_finish_hook = hook; }
+
 void ace_finish(void) {
     char json[ACE_REPORT_MAX];
     if (!g_ace_on) return;
+    if (s_finish_hook) s_finish_hook();   /* before the never-ran settle below */
     /* A feature that is on but never ran: its renderer or presenter did not start. */
     static const int has[ACE_FEATURE_COUNT] = { 1, 1, 1, 1, ACE_HAS_WIDE, ACE_HAS_SMOOTH, ACE_HAS_SAS, ACE_HAS_TESS,
                                                 ACE_HAS_STICK, ACE_HAS_LOAD, ACE_HAS_CULL,
