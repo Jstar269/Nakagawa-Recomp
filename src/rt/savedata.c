@@ -2705,9 +2705,10 @@ static uint32_t getsize_kb_round_up(uint64_t bytes) {
  *
  * Measured but NOT reproduced: the shortfall figure. On the same run a PSP's
  * neededKB charged three clusters beyond the entry's size and wrapped at 32
- * bits of bytes, so its fit/shortfall boundary and its neededKB and
- * neededString differ from the figures here, which stay PPSSPP's arithmetic
- * (64-bit, no cluster charge, saturating). One measured cell cannot divide
+ * bits of bytes, so its neededKB and neededString differ from the figures
+ * here, which stay PPSSPP's arithmetic (64-bit, no cluster charge,
+ * saturating). By that arithmetic its fit/shortfall boundary would differ
+ * too (UNMEASURED: the one shortfall cell wraps). One measured cell cannot divide
  * those clusters between the entry's rounding and the save's own files, so
  * the model waits for more cells (#308). The cluster size differs too: the
  * runtime writes 0x8000, that PSP-3000's Memory Stick reported 0x10000.
