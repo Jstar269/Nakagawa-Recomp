@@ -839,14 +839,15 @@ class GateInventoryTests(unittest.TestCase):
         )
         self.assertIn("hst_profile", _name_ids(binding[0].value.test))
 
-    def test_sv_special_is_read_only_by_sv_plan(self):
+    def test_sv_special_is_read_only_by_static_verify_planning(self):
+        # sv_points computes the points (sv_plan counts them, the LLVM plan reads them, #330).
         readers = {
             fn.name
             for fn in ast.walk(self.tree)
             if isinstance(fn, ast.FunctionDef)
             and "_SV_SPECIAL" in _name_ids(fn)
         }
-        self.assertEqual(readers, {"sv_plan"})
+        self.assertEqual(readers, {"sv_points"})
 
     def test_address_tables_have_not_grown_silently(self):
         """Every table entry is inside the specimen's covered set."""

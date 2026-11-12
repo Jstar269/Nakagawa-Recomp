@@ -60,8 +60,9 @@ SR_LLVM_ABI void sr_llvm_tail_drain(CpuState *s) {
     SR_TAIL_DRAIN(s);
 }
 
-/* Not always_inline: an inline definition may not hold the static report count. Linked
-   with --internalize, each chunk gets its own copy and count, as each C chunk does.
+/* A cold diagnostic, so not always_inline like the shims above. Linked with --internalize,
+   each chunk's LLVM module gets its own copy and report count; the chunk's C bodies keep
+   their own sr_sv_check and count, so a chunk with both can print up to 50 from each.
    tools/test_codegen_llvm.py holds this body to codegen.SR_SV_CHECK's. */
 void sr_llvm_sv_check(CpuState *s, uint32_t pc, int reg, uint32_t expect) {
     if (s->r[reg] != expect) {

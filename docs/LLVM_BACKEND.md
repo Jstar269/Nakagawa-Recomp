@@ -174,7 +174,8 @@ both empty since #363). A test re-derives every HST-profile address site from
   `opt -passes=verify` on the builder's output and on every chunk module of a real build.
 - `tools/test_lowering_plan.py` holds every plan to `emit_function` over a real build,
   including one with `--static-verify --stale-detect` (each assertion's word, register and
-  value, and each cache hook).
+  value, and that the IR calls it after that word's trace record, before the next word or
+  edge); unit tests place the cache hook in a straight-line word and in a delay slot.
 - `cosim-selftest-llvm` runs the cosimulation corpus with every lowerable cell as an LLVM
   body in the AOT lane, compared with the production interpreter on the instruction trace,
   the ordered guest writes, the memory window and the state vector, and fails if fewer than

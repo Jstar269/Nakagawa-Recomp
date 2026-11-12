@@ -111,6 +111,7 @@ class DriftGuardTests(unittest.TestCase):
 
     def _run(self, *options):
         captured = []
+        self.bodies = {}
         real = codegen_llvm.lower
 
         def recording(cg, elf, start, ranges, known, *, c_text, **kwargs):
@@ -119,6 +120,7 @@ class DriftGuardTests(unittest.TestCase):
             plan = P.plan_function(cg, elf, start, ranges, known, **plan_kwargs)
             body = real(cg, elf, start, ranges, known, c_text=c_text, **kwargs)
             captured.append((start, c_text, plan))
+            self.bodies[start] = body
             return body
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -160,7 +162,26 @@ class DriftGuardTests(unittest.TestCase):
         # lowered body, so the plans carry them all.
         captured = self._run("--funcs-per-chunk=1", "--static-verify", "--stale-detect")
         self._check(captured)
-        self.assertGreater(sum(len(plan.sv_checks) for _, _, plan in captured), 0)
+        placed = 0
+        for start, body in self.bodies.items():
+            lines = codegen_llvm.chunk_module("t.ll", [body], {}).render().splitlines()
+            for i, line in enumerate(lines):
+                match = re.search(r"call void @sr_llvm_sv_check\(ptr %s, i32 (\d+),", line)
+                if not match:
+                    continue
+                # The last trace record before the call is its word's, closed, and nothing
+                # between them leaves the block (the C check comes before any goto).
+                begin = max(j for j in range(i) if "@sr_llvm_begin(ptr %s, i32 " in lines[j])
+                with self.subTest(function=f"0x{start:08x}", line=line):
+                    self.assertIn(f"@sr_llvm_begin(ptr %s, i32 {match.group(1)},", lines[begin])
+                    between = lines[begin + 1:i]
+                    self.assertTrue(any("@sr_llvm_end(" in l for l in between))
+                    self.assertFalse([l for l in between if l.endswith(":")
+                                      or l.strip().startswith(("br ", "ret "))])
+                placed += 1
+        self.assertEqual(placed, sum(len(checks) for _, _, plan in captured
+                                     for checks in plan.sv_checks.values()))
+        self.assertGreater(placed, 0)
 
     def test_plans_match_emit_function_with_every_body_split(self):
         # #1691: a split body's conditional edge into another entry is a TAIL transfer
@@ -188,10 +209,10 @@ class FakeElf:
 NOP, JR_RA = 0x00000000, 0x03E00008
 
 
-def _plan_and_c(words, start=0x1000, known=None):
+def _plan_and_c(words, start=0x1000, known=None, options=None):
     elf, ranges, known = FakeElf(words), [(start, start + 0x100)], known or {start}
-    plan = P.plan_function(codegen, elf, start, ranges, known)
-    c_text = "\n".join(codegen.emit_function(elf, start, ranges, known))
+    plan = P.plan_function(codegen, elf, start, ranges, known, options=options)
+    c_text = "\n".join(codegen.emit_function(elf, start, ranges, known, options=options))
     return plan, c_text
 
 
@@ -234,6 +255,18 @@ class TransferRuleTests(unittest.TestCase):
         self.assertEqual(P.decode_op(0, srav), P.Op(0, srav, "ashrv", 7, (6, 5)))
         self.assertEqual(P.decode_op(0, movz), P.Op(0, movz, "movz", 7, (6, 5)))
         self.assertEqual(P.decode_op(0, lwl), P.Op(0, lwl, "lwl", 6, (6, 5), 0xFFFFFFFC))
+
+    def test_cache_hooks_match_the_c_emitter_in_a_body_and_a_delay_slot(self):
+        # The cosimulation corpus has no `cache`, so the drift guard compares none there.
+        cache = 0x2F << 26 | 4 << 21 | 0x14 << 16 | 0x40          # cache 0x14, 0x40(r4)
+        words = {0x1000: cache, 0x1004: JR_RA, 0x1008: cache}
+        options = codegen.CodegenOptions(stale_detect=True)
+        plan, c_text = _plan_and_c(words, options=options)
+        self.assertEqual(plan_signature(plan)["cache_notes"], [0x1000, 0x1008])
+        self.assertEqual(c_signature(c_text)["cache_notes"], [0x1000, 0x1008])
+        plan, c_text = _plan_and_c(words)
+        self.assertEqual(plan_signature(plan)["cache_notes"], [])
+        self.assertEqual(c_signature(c_text)["cache_notes"], [])
 
     def test_forms_outside_the_plan_are_refused_with_a_reason(self):
         with self.assertRaisesRegex(P.Unsupported, "FPU at 0x00000010"):

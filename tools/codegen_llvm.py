@@ -572,10 +572,7 @@ class FunctionLowering:
 
     def static_verify(self, addr):
         """codegen._emit_non_control_word's sr_sv_check calls after the word at ``addr``."""
-        checks = self.plan.sv_checks.get(addr, ())
-        if checks and self.builder.block.terminator is not None:
-            raise LLVMUnsupported(f"static-verify check after a body exit at 0x{addr:08x}")
-        for reg, expect in checks:
+        for reg, expect in self.plan.sv_checks.get(addr, ()):
             self.call("sr_llvm_sv_check", self.s, self.c32(addr), self.c32(reg),
                       self.c32(expect))
 
