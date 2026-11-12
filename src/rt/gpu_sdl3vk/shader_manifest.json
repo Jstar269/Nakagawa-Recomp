@@ -1,6 +1,6 @@
 {
   "compiler": {
-    "name": "glslc.exe",
+    "name": "glslc",
     "options": [
       "--target-env=vulkan1.1"
     ],
@@ -20,11 +20,11 @@
     },
     {
       "embedded": "psp_frag.inc",
-      "embedded_sha256": "a11b97b54b66a13c561ea5ba82bd7b9e51eaa45533775ef5935c5d228a43de01",
+      "embedded_sha256": "9d0c9f14b709b74e6c729207920ce9bc1e1c6e4359be2be38c78370519ee5137",
       "source": "shaders/psp.frag",
-      "source_sha256": "96038b9fa20d3175869ae936c7942d04748e71ea52f6276408770f061c8c926c",
-      "spirv_bytes": 36756,
-      "spirv_sha256": "ab1795bb84423d027451cb102ad9a72042f1579b79e79cb8752421e7cf92ce20",
+      "source_sha256": "836cb1aa2f28425348fde9e8c38fb73b07decde481dd6f1ec81d00aa09ca2ab6",
+      "spirv_bytes": 44896,
+      "spirv_sha256": "59619bb17ae06ab47c547ee7869505f9f3de700a90af9fafd600b3d97e29fa1a",
       "stage": "frag"
     },
     {
@@ -32,11 +32,11 @@
         "SR_DST_INTERLOCK"
       ],
       "embedded": "psp_frag_rmw.inc",
-      "embedded_sha256": "e80c49e26706b62c5a60fed833a5680862e01ba852e0e7ba19536558814c6e09",
+      "embedded_sha256": "bafe583a4a13e620367f52c0fe8bf166637e58f1d777b3157c284458eb60899b",
       "source": "shaders/psp.frag",
-      "source_sha256": "96038b9fa20d3175869ae936c7942d04748e71ea52f6276408770f061c8c926c",
-      "spirv_bytes": 40456,
-      "spirv_sha256": "4b8dc353bd37e9937edc6dd664dc398d6e56d5601e5ac01f55d8d5799736395e",
+      "source_sha256": "836cb1aa2f28425348fde9e8c38fb73b07decde481dd6f1ec81d00aa09ca2ab6",
+      "spirv_bytes": 48588,
+      "spirv_sha256": "f82daa8ddefca2770025a98ad15d38e75f23a82c94d07bb23f2b1fdc242a6cff",
       "stage": "frag"
     },
     {
