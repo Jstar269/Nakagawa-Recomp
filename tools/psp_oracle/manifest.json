@@ -8039,17 +8039,17 @@
       "id": "PSP-HLE-UTILITY-DIALOG-002",
       "status": "implemented",
       "hardware_evidence": "NOT_RUN",
-      "evidence_note": "Built as case 166: the netconf and game sharing cells of case 161 only, with no savedata and no gamedata install dialog. No hardware run is cited. POWER RISK: a dialog left RUNNING may hang the console; owner present.",
+      "evidence_note": "Built as case 166: the game sharing and netconf cells of case 161 only, game sharing first and netconf last, with no savedata and no gamedata install dialog. Never run on a console; no hardware run is cited. Case 161's netconf dialog, the same block and calls, stayed RUNNING to the poll cap on boot 204 (PSP-HLE-UTILITY-DIALOG-001, not acceptance-eligible), so netconf-timing is expected to stick here too; the sharing cells have no expectation.",
       "group": "system",
       "source": "fixtures/psp_oracle/probe_hle_measure.c",
       "prx": "hle_utility_netconf_sharing.prx",
       "apis": ["sceUtilityNetconfInitStart", "sceUtilityNetconfGetStatus", "sceUtilityNetconfUpdate", "sceUtilityNetconfShutdownStart", "sceUtilityGameSharingInitStart", "sceUtilityGameSharingGetStatus", "sceUtilityGameSharingUpdate", "sceUtilityGameSharingShutdownStart"],
       "diagnostic_case_ids": ["hle-utility-netconf-sharing"],
-      "case_ids": ["netconf-*", "sharing-*"],
-      "invariant": "Each netconf and game sharing timing and wrong-state call has a fixed-shape record and bounded status polling; no network join, setting change, savedata or gamedata install dialog is run.",
+      "case_ids": ["sharing-*", "netconf-*"],
+      "invariant": "Each game sharing and netconf timing and wrong-state call has a fixed-shape record, written to host0 as soon as its cell ends, and bounded status polling; the probe joins no network, changes no setting and runs no savedata or gamedata install dialog. After a stuck dialog (a run at its bound, a GetStatus error or an accepted message dialog InitStart) every later dialog cell and that group's net teardown are SKIP 5, so the net modules stay loaded and the run carries the module-unload blocker.",
       "issues": [1386],
-      "risk": "POWER RISK; a netconf or sharing dialog still RUNNING at the poll cap may hang the console (the gamedata dialog did on boot 147); run only with the owner present",
-      "reset": "one PRX launch; PSPLink soft reset before the next launch, only after the probe ended without a stuck dialog"
+      "risk": "POWER RISK; case 161's netconf dialog stayed RUNNING to the poll cap on boot 204 and PSPLink then went silent until the owner power-cycled the console (its gamedata install dialog did the same on boot 206); case 166 runs that netconf cell last and expects it to stick the same way; run only with the owner present",
+      "reset": "one hle-utility-netconf-sharing launch per boot; after a run that ended with a stuck dialog or a silent PSPLink, the owner power-cycles the console before any further launch, and nothing is retried on that boot; PSPLink soft reset or Nakagawa Link reset before the next launch only after a run that ended with no stuck dialog"
     },
     {
       "id": "PSP-HLE-IO-SEEK-001",

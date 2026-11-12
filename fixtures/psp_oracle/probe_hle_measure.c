@@ -3446,16 +3446,18 @@ static int hle_run(void)
    after a soft reset): under the XMB a dialog stays at INIT (PSP-HLE-UTILITY-NONE-001 note).
 
    Safety rules, all kept in the code below:
-   - Order: savedata (mode 22 GETSIZE, which writes nothing), the gamedata install dialog, then
-     netconf, then game sharing last, so a hang in a radio dialog cannot lose an earlier record.
+   - Order (case 161; case 166's is below): savedata (mode 22 GETSIZE, which writes nothing), the
+     gamedata install dialog, then netconf, then game sharing last, so a hang in a radio dialog
+     cannot lose an earlier record.
      Every record is written as soon as its cell ends.
    - Nothing presses a button. A dialog only ever gets GetStatus, Update(1) and ShutdownStart,
      and the matrix calls below. A run still RUNNING after HLE_UD_CANCEL_POLLS polls is
      cancelled with ShutdownStart; one still at INIT after HLE_UD_INIT_CANCEL_POLLS polls gets one
      ShutdownStart too. Every wait is a vblank-counted bound.
-   - No network is joined, created or scanned for, and no setting or profile is written: netconf
-     runs action 0 (connect to an access point) with hotspot 0 and wifisp 0 and is never answered,
-     so it can only be cancelled. The only net calls are the module load/unload pair and each net
+   - The probe joins, creates and scans for no network and writes no setting or profile (a
+     RUNNING game sharing dialog may still use the radio on its own): netconf runs action 0
+     (connect to an access point) with hotspot 0 and wifisp 0 and is never answered, so it can
+     only be cancelled. The only net calls are the module load/unload pair and each net
      library's Init and Term (the Makefile pins every net library to exactly that pair). No apctl
      connect, ad hoc connect, create or join, scan or registry call is made or linked.
    - Game sharing shares HLE_UD_GS_DATA_BYTES of project-written pattern bytes in memory mode
@@ -3475,7 +3477,8 @@ static int hle_run(void)
      vblank is read after the marker, so the marker cannot lengthen a measured shutdown.
    - Each dialog is back at NONE before the next starts. A run that is not back at NONE by its
      bound is recorded as stuck, makes COMPLETE report FAIL, and every later dialog cell (and net
-     setup) is SKIP with reason HLE_UD_SKIP_STUCK; teardown and cleanup still run.
+     setup) is SKIP with reason HLE_UD_SKIP_STUCK. In case 161 teardown and cleanup still run;
+     case 166 skips the net teardown after a stuck dialog (below).
 
    Left out: every message dialog run. The message dialog refuses ShutdownStart during INIT and
    RUNNING (pspautotests utility/dialog/status.expected, as hle_utility.c cites it), so once open it
@@ -3488,10 +3491,31 @@ static int hle_run(void)
    that came first would answer 0x80110004. An accepted one is recorded as stuck.
 
    Case 166 (hle-utility-netconf-sharing, PSP-HLE-UTILITY-DIALOG-002) compiles this same section
-   with the savedata and gamedata install cells left out (#if HLE_CASE_UTILITY_DIALOGS blocks): the
-   gamedata install dialog left RUNNING hung the console on boot 147 and must never run again, and
-   savedata already has results. It runs netconf, then game sharing, with the helpers, bounds and
-   record shapes below unchanged, so its records are the netconf-* and sharing-* rows of case 161.
+   with the savedata and gamedata install cells left out (#if HLE_CASE_UTILITY_DIALOGS blocks),
+   with the helpers, bounds and record shapes below unchanged, so its records are the sharing-*
+   and netconf-* rows of case 161. Main's record of case 161 (docs/HARDWARE_ORACLE.md,
+   PSP-HLE-UTILITY-DIALOG-001 captures 2026-11-12, neither capture acceptance-eligible): on boot
+   204 the netconf dialog this case runs, same block and calls, stayed RUNNING to the 600-poll cap,
+   a ShutdownStart while RUNNING returned 0x80110001, and PSPLink then went silent until the
+   owner power-cycled the console; on boot 206 the gamedata install dialog did the same. Nothing
+   in this probe presses a button, and ShutdownStart is its only way to end a RUNNING dialog, so
+   netconf-timing is expected to stick here as it did on boot 204. Game sharing has never run on
+   a console (on both boots it was SKIP 5) and has no expectation. So case 166 runs game sharing
+   first and netconf last: every record is written to host0 (opened, written and closed) as soon
+   as its cell ends, so a hang in netconf loses only the cell in flight, never a sharing record.
+   The one launch is meant to measure the sharing cells, and to show whether netconf sticks as
+   on boot 204 when no savedata dialog has run before it. Expected end when netconf sticks:
+   netconf-timing records outcome 1, the netconf state cells and netconf-teardown are SKIP 5,
+   COMPLETE reports FAIL, and the console needs the owner's power cycle; one launch per boot.
+
+   Case 166's net teardown is skipped (SKIP 5) when its own dialog cells set s_ud_stuck: a run
+   stuck at its bound, a GetStatus error, or an accepted message dialog InitStart. In each a
+   dialog may still be active, and the case does not unload the net modules under a dialog that
+   may still use them. This is not because the calls block: on boot 204 netconf-teardown ran
+   under the stuck netconf dialog and undid all five setup calls. Skipping keeps the done record
+   ahead of any call made under a live dialog; it is not expected to avoid the power cycle (boot
+   206 hung with no net module loaded). The modules then stay loaded at exit, so the run is
+   certain to carry the "loaded module was not proven unloaded" blocker.
 
    Records, in order (a SKIP record keeps its word count, all words 0, and carries the reason in
    result: 1 a UMD is present, 2 the gamedata directory exists, 3 sceUmdCheckMedium failed, 4 the
@@ -3557,8 +3581,8 @@ static int hle_run(void)
    - netconf-teardown and sharing-teardown (5 words; result the number of setup calls undone):
      the Term calls and unloads in reverse order (ApctlTerm, InetTerm, NetTerm, unload INET,
      unload COMMON; AdhocctlTerm, AdhocTerm, NetTerm, unload ADHOC, unload COMMON), each made
-     only when its setup call succeeded (HLE_SENTINEL otherwise). They run on every path that
-     ran a setup. */
+     only when its setup call succeeded (HLE_SENTINEL otherwise). In case 161 they run on every
+     path that ran a setup; in case 166 they are SKIP 5 after a stuck dialog (above). */
 
 #include <pspumd.h>
 #include <pspnet.h>
@@ -4330,7 +4354,7 @@ static void hle_ud_netconf(void)
     hle_ud_states("netconf-state-init", "netconf-state-running", "netconf-state-finished",
                   "netconf-state-shutdown", &k_ud_netconf, reason);
 #if PSP_ORACLE_CASE == HLE_CASE_UTILITY_NETCONF_SHARING
-    /* A dialog still active is not met by unloading the net modules under it. */
+    /* Case 166: no unload under a dialog that may still be active (the header says why). */
     hle_ud_netconf_teardown(stage, (reason == HLE_UD_SKIP_STUCK || s_ud_stuck) ? HLE_UD_SKIP_STUCK : 0u);
 #else
     hle_ud_netconf_teardown(stage, reason == HLE_UD_SKIP_STUCK ? reason : 0u);
@@ -4421,6 +4445,7 @@ static void hle_ud_sharing(void)
     hle_ud_states("sharing-state-init", "sharing-state-running", "sharing-state-finished",
                   "sharing-state-shutdown", &k_ud_sharing, reason);
 #if PSP_ORACLE_CASE == HLE_CASE_UTILITY_NETCONF_SHARING
+    /* Case 166: no unload under a dialog that may still be active (the header says why). */
     hle_ud_sharing_teardown(stage, (reason == HLE_UD_SKIP_STUCK || s_ud_stuck) ? HLE_UD_SKIP_STUCK : 0u);
 #else
     hle_ud_sharing_teardown(stage, reason == HLE_UD_SKIP_STUCK ? reason : 0u);
@@ -4441,11 +4466,12 @@ static int hle_run(void)
 #endif
 
 #if PSP_ORACLE_CASE == HLE_CASE_UTILITY_NETCONF_SHARING
-/* Netconf first, then game sharing; no savedata, gamedata install or message dialog opens. */
+/* Game sharing first, netconf last: netconf stuck RUNNING on boot 204 (case 161), so it runs only
+   after every sharing record is written. No savedata, gamedata install or message dialog opens. */
 static int hle_run(void)
 {
-    hle_ud_netconf();
     hle_ud_sharing();
+    hle_ud_netconf();
     return s_ud_fail == 0u;
 }
 #endif

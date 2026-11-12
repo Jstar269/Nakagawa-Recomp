@@ -2052,11 +2052,14 @@ _register_campaign_probe(
     tuple(row for row, _ in HLE_UTILITY_DIALOGS_ROWS), dict(HLE_UTILITY_DIALOGS_ROWS),
 )
 
-# hle-utility-netconf-sharing (166, probe_hle_measure.c): the netconf and game sharing rows of
-# case 161 only, same shapes, netconf first. No savedata, gamedata install or message dialog
-# cell (the gamedata install dialog hung the console on boot 147).
-HLE_UTILITY_NETCONF_SHARING_ROWS = tuple(
-    row for row in HLE_UTILITY_DIALOGS_ROWS if row[0].startswith(("netconf-", "sharing-"))
+# hle-utility-netconf-sharing (166, probe_hle_measure.c): the game sharing and netconf rows of
+# case 161 only, same shapes, game sharing first and netconf last. Case 161's netconf dialog
+# stayed RUNNING to the poll cap on boot 204 and the console needed a power cycle (its gamedata
+# install dialog did the same on boot 206), so netconf runs after every sharing record is
+# written. No savedata, gamedata install or message dialog cell.
+HLE_UTILITY_NETCONF_SHARING_ROWS = (
+    *(row for row in HLE_UTILITY_DIALOGS_ROWS if row[0].startswith("sharing-")),
+    *(row for row in HLE_UTILITY_DIALOGS_ROWS if row[0].startswith("netconf-")),
 )
 _register_campaign_probe(
     "hle-utility-netconf-sharing", "PSP-HLE-UTILITY-DIALOG-002",
