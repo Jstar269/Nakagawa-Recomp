@@ -38628,6 +38628,33 @@ static void test_partition_skipped_gap_space_comes_back(void) {
     expect(rounds == ROUNDS,
            "a stack freed inside a skipped gap comes back: 100 create/reserve/delete/free rounds each "
            "end with the bump pointer and the free list where they started");
+
+    /* A create the partition refuses (its stack would reach a fixed reservation the bump pointer
+     * has passed) gives the range back to the arena only: the bump pointer, the free list and the
+     * reservation stay as they were, and a later Low block lands outside the reservation. */
+    extern uint32_t alloc_block(uint32_t size);
+    extern uint32_t sr_last_alloc_addr;
+    uint32_t keep = sched_create_thread(0x2000u, 32, 0x8000u);
+    uint32_t keep_floor = sched_guest_stack_floor();
+    uint32_t below = sr_alloc_block_at(keep_floor - 0x10000u, 0x10000u, "below-stacks");
+    const uint32_t heap1 = sr_hle_test_partition_heap_ptr();
+    const int free1 = sr_hle_test_partition_free_block_count();
+    uint32_t refused = sched_create_thread(0x2004u, 32, 0x8000u);
+    expect(keep != 0u && below != 0xFFFFFFFFu && below != 0u && heap1 == keep_floor && refused == 0u,
+           "a thread create whose stack would reach a passed fixed reservation is refused");
+    expect(sr_hle_test_partition_heap_ptr() == heap1 && sr_hle_test_partition_free_block_count() == free1,
+           "a refused thread create leaves the bump pointer and the free list as they were");
+    uint32_t low = alloc_block(0x8000u);
+    uint32_t low_addr = sr_last_alloc_addr;
+    expect(low != 0xFFFFFFFFu &&
+               (low_addr + 0x8000u <= keep_floor - 0x10000u || low_addr >= keep_floor),
+           "a Low block after a refused create lands outside the fixed reservation");
+    memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = low;
+    (void)sr_syscall(&cpu, NID_FREE_PART);
+    memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = below;
+    (void)sr_syscall(&cpu, NID_FREE_PART);
+    memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = keep;
+    (void)sr_syscall(&cpu, NID_DELETE_THREAD);
     s_fixture_loaded_end = 0x00400000u;
 }
 

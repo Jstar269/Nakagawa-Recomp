@@ -667,13 +667,17 @@ static int stack_range_alloc(uint32_t size, uint32_t *base_out) {
     return 0;
 }
 
-/* hle.c: told after a range goes back to the arena, so the user partition can take back the part
- * of it that lies below its bump pointer (partition_arena_released). NULL: not told. */
+/* hle.c: told after a thread stack or High block's owner gives it back to the arena, so the user
+ * partition can take back the part of it that lies below its bump pointer
+ * (partition_arena_released). NULL: not told. */
 static SrSchedArenaRelease s_arena_release_hook;
 
 void sched_set_arena_release_hook(SrSchedArenaRelease release) { s_arena_release_hook = release; }
 
-static void stack_range_release(uint32_t base, uint32_t size) {
+/* Put [base, base+size) back among the arena's free ranges. stack_range_release() below is the
+ * owner's release; a create that took a range and then refused it calls this one directly: the
+ * range never had an owner, and the partition is not told. */
+static void stack_range_return(uint32_t base, uint32_t size) {
     if (!s_stack_allocator_ready || base == 0u || size == 0u) return;
     if (base < SR_STACK_ARENA_FLOOR || base > SR_STACK_ARENA_CEIL ||
         size > SR_STACK_ARENA_CEIL - base) {
@@ -715,6 +719,11 @@ static void stack_range_release(uint32_t base, uint32_t size) {
         }
     }
     stack_ranges_update_top();
+}
+
+static void stack_range_release(uint32_t base, uint32_t size) {
+    if (!s_stack_allocator_ready || base == 0u || size == 0u) return;
+    stack_range_return(base, size);
     if (s_arena_release_hook) s_arena_release_hook(base, size);
 }
 
@@ -2807,7 +2816,7 @@ static uint32_t sched_create_thread_finish(TCB *t, uint32_t entry, int priority,
         fprintf(stderr, "sched_create_thread: stack [0x%08x,0x%08x) would overlap live "
                 "user-partition memory -- failing create (maps to SCE_KERNEL_ERROR_NO_MEMORY)\n",
                 user_base, user_base + reservation);
-        stack_range_release(user_base, reservation);
+        stack_range_return(user_base, reservation);
         stack_ok = 0;
     }
     /* The 0xFF fill and the k0/TLS seeding below write through host pointers over the
@@ -2816,7 +2825,7 @@ static uint32_t sched_create_thread_finish(TCB *t, uint32_t entry, int priority,
         fprintf(stderr, "sched_create_thread: stack [0x%08x,0x%08x) is not writable guest "
                 "memory -- failing create (maps to SCE_KERNEL_ERROR_NO_MEMORY)\n",
                 user_base, user_base + reservation);
-        stack_range_release(user_base, reservation);
+        stack_range_return(user_base, reservation);
         stack_ok = 0;
     }
     if (!stack_ok) {
