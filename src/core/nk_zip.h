@@ -1,7 +1,8 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /* Copyright (C) 2026 the Nakagawa Recomp authors */
 
-/* Store-only ZIP archives for save backups (#1883).
+/* Store-only ZIP archives for save backups (#1883), and a reader for archives
+ * other programs made (texture packs, #1880; NkZipReadOptions below).
  *
  * The writer makes ordinary ZIP files (PKWARE APPNOTE 6.3.x): every entry is
  * stored (method 0) with its CRC-32 and sizes in the local header, no data
@@ -27,7 +28,15 @@
  * archive can ask for. Extraction writes only inside the folder it is given.
  *
  * Built with NK_ZIP_NO_HOST_IO (the fuzzer), only the memory reader and the
- * name check are compiled: nothing reads or writes host files. */
+ * name check are compiled: nothing reads or writes host files.
+ *
+ * Opened with NkZipReadOptions, the reader also takes what common ZIP tools
+ * write and the save format never holds: DEFLATE entries (method 8, unpacked
+ * by the project's own inflater, src/core/nk_psp_inflate.h, then CRC-checked),
+ * the DEFLATE level bits (flag bits 1 and 2) on them, data descriptors (flag
+ * bit 3: the local header's CRC and sizes may be zero, and the central
+ * directory's are used), and caps of the caller's choosing. Every other rule
+ * above still holds; ZIP64 is still refused. Without options nothing changes. */
 
 #ifndef NK_ZIP_H
 #define NK_ZIP_H
@@ -91,6 +100,7 @@ typedef enum {
     NK_ZIP_ERR_NAME_CONFLICT,     /* a file whose name another entry uses as a folder */
     NK_ZIP_ERR_EXISTS,            /* extraction: the file is in the folder already */
     NK_ZIP_ERR_LEFT_OUT,          /* writing a folder: an entry in it could not be archived */
+    NK_ZIP_ERR_INFLATE,           /* a DEFLATE entry's data is damaged (NkZipReadOptions only) */
     NK_ZIP_STATUS_COUNT
 } NkZipStatus;
 
@@ -109,6 +119,21 @@ const char *nk_zip_status_message(NkZipStatus status);
 /* CRC-32 (ISO 3309 / ITU-T V.42, the ZIP checksum); start with crc 0. */
 uint32_t nk_zip_crc32(uint32_t crc, const void *data, size_t size);
 
+/* Sorts `count` items of `size` bytes with at most about 2 n log2 n comparisons
+   whatever their order (a heapsort, not stable), for keys whose order an archive or
+   a pack chooses. The ZIP reader sorts with it, and texture packs do. */
+void nk_zip_sort(void *items, size_t count, size_t size, int (*compare)(const void *, const void *));
+
+/* Built with NK_SORT_COUNT_COMPARES (the texture-pack selftest only), every comparison function the ZIP
+   reader and texture packs sort with counts its calls here, whatever sort calls it, so a test can bound
+   what opening a pack in a hostile order costs. Without it the count compiles to nothing. */
+#ifdef NK_SORT_COUNT_COMPARES
+extern unsigned long long nk_sort_compares;
+#define NK_SORT_COMPARE_COUNT() ((void)nk_sort_compares++)
+#else
+#define NK_SORT_COMPARE_COUNT() ((void)0)
+#endif
+
 /* Checks one entry name by the reader's rules. `size` is its byte count (it
    need not be NUL-terminated). A trailing '/' marks a folder: *is_folder says
    so when given. */
@@ -123,6 +148,8 @@ typedef struct {
     uint32_t size;       /* bytes; 0 for a folder */
     uint32_t crc32;
     bool is_folder;
+    bool deflated;       /* stored with DEFLATE (method 8); else stored as is */
+    uint64_t packed_size;/* bytes the entry takes in the archive */
 } NkZipEntryInfo;
 
 /* Opens an archive held in memory, which must outlive the reader. Every
@@ -130,13 +157,30 @@ typedef struct {
    extract. On failure *out is NULL and err (when given) says why. */
 NkZipStatus nk_zip_reader_open_memory(NkZipReader **out, const void *data, size_t size,
                                       NkZipError *err);
+/* Reading archives other programs made (texture packs, #1880). A zero field
+   takes the default cap above. */
+typedef struct {
+    size_t max_entries;        /* files and folders; at most 65534 (more needs ZIP64) */
+    uint64_t max_total_bytes;  /* all entries' unpacked data */
+    bool deflate;              /* also read method 8 entries, with flag bits 1 and 2 */
+    bool data_descriptor;      /* also read entries with flag bit 3 */
+} NkZipReadOptions;
+#define NK_ZIP_READ_MAX_ENTRIES 65534u
+/* nk_zip_reader_open_memory with options (NULL: none). A DEFLATE entry is
+   unpacked whole in memory by read and verify; its declared size bounds the
+   output, and a stream that ends short of it, runs past it or fails its CRC is
+   refused. */
+NkZipStatus nk_zip_reader_open_memory_with(NkZipReader **out, const void *data, size_t size,
+                                           const NkZipReadOptions *options, NkZipError *err);
 size_t nk_zip_reader_count(const NkZipReader *reader);
 uint64_t nk_zip_reader_total_bytes(const NkZipReader *reader);
 bool nk_zip_reader_entry(const NkZipReader *reader, size_t index, NkZipEntryInfo *out);
 /* Reads every entry's data and checks its CRC-32. */
 NkZipStatus nk_zip_reader_verify(NkZipReader *reader, NkZipError *err);
 /* Copies one entry's data into buf (cap bytes at least its size) and checks
-   its CRC-32. */
+   its CRC-32. A DEFLATE entry is unpacked straight into buf, so the read holds
+   buf and the entry's packed bytes, nothing more. On failure buf holds
+   whatever was written, not the entry. */
 NkZipStatus nk_zip_reader_read(NkZipReader *reader, size_t index, void *buf, size_t cap,
                                NkZipError *err);
 void nk_zip_reader_close(NkZipReader *reader);
@@ -144,6 +188,9 @@ void nk_zip_reader_close(NkZipReader *reader);
 #ifndef NK_ZIP_NO_HOST_IO
 /* Opens an archive file (UTF-8 path). The file stays open until close. */
 NkZipStatus nk_zip_reader_open_file(NkZipReader **out, const char *path, NkZipError *err);
+/* The same with options (NULL: none), as nk_zip_reader_open_memory_with. */
+NkZipStatus nk_zip_reader_open_file_with(NkZipReader **out, const char *path,
+                                         const NkZipReadOptions *options, NkZipError *err);
 /* Checks every CRC first, then writes each entry inside `folder`, which must
    exist. A file already there is refused (NK_ZIP_ERR_EXISTS), never
    overwritten. On failure part of the archive may have been written: the

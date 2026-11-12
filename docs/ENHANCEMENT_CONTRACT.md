@@ -459,12 +459,12 @@ The launcher always exports `SR_ACE`, so an inherited value cannot opt a launch 
 `v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;smooth=x2;sas=off;tess=off;twin=off`. `tier` (`enhanced` or `ace`) only names the
 run, in the game badge, the pause menu and the stamps; a line without it is an Enhanced run. `stick` (the title's
 stick dead zone, 1 to 126, section 11.3.11), `load` (`fast` or `off`, section 11.3.10), `depth` (`32` or `off`,
-section 10.20), `ssaa` (`2`, `4` or `off`, section 10.21) and `cull` (`on` or `off`, section 11.3.6) are the other
-keys a line may leave out: a missing `stick`, `load`, `depth`, `ssaa` or `cull` is off, `stick=<counts>`,
-`load=fast` and `cull=on` need `tier=ace` (`depth=32` and `ssaa=2|4` do not), the launcher writes `;load=fast` and
-`;cull=on` only for an Ace launch with that part on and `;ssaa=2` or `;ssaa=4` for an Enhanced or Ace launch with
-supersampling on, and no launcher writes `depth` yet (section 11.3.12). A line writes them in that order, `cull`
-last. Every
+section 10.20), `ssaa` (`2`, `4` or `off`, section 10.21), `peak` (`limit` or `off`, section 10.22) and `cull` (`on`
+or `off`, section 11.3.6) are the other keys a line may leave out: a missing `stick`, `load`, `depth`, `ssaa`,
+`peak` or `cull` is off, `stick=<counts>`, `load=fast` and `cull=on` need `tier=ace` (`depth=32`, `ssaa=2|4` and
+`peak=limit` do not), the launcher writes `;load=fast` and `;cull=on` only for an Ace launch with that part on and
+`;ssaa=2` or `;ssaa=4` for an Enhanced or Ace launch with supersampling on, and no launcher writes `depth` or
+`peak` yet (sections 11.3.12 and 10.22). A line writes them in that order, `cull` last. Every
 other key is required, in any order, each once; a value for a feature this build does not carry (`smooth=match`)
 refuses the line. So does anything else: the run is Authentic and one `ACE_MODE: refused (<reason>)` line says why.
 Unset is off. With Enhanced or Ace on, the launcher also exports `SR_ACE_REPORT`, the per-run report under
@@ -514,7 +514,8 @@ the device is created with no feature outside Ace.
 - **Supersampling:** `ssaa=2` or `ssaa=4` changes only the image the presenter shows; the frames a present commits
   to guest VRAM are those of a run without it (section 10.21).
 - **Sound:** `sas=sinc` writes band-limited sample values into the guest's SAS output buffer, so it is a
-  guest-visible item. Its entry is section 11.3.1.
+  guest-visible item. Its entry is section 11.3.1. `peak=limit` changes only what the host plays: the guest's SAS
+  buffer keeps the PSP's saturated bytes (section 10.22).
 - **Patches:** `tess=2` to `tess=4` draws every triangle patch with finer triangles, which changes the frames a
   present commits to guest VRAM, and under `SR_GE_TIMING=1` it alters the GE timing model's clocks. It is a
   guest-visible item. Its entry is section 11.3.7.
@@ -978,37 +979,143 @@ at `s_twin`) for the Vulkan renderer, and in `src/rt/ge.c` (the comment at `s_tw
 A user-supplied texture pack replaces guest textures in the Vulkan GE renderer (#1880), the way PPSSPP's texture
 packs do. It is guest-visible (section 11.1) and not admitted under section 11.2: section 11.3.4 is its entry, and
 this section says how it draws. The code is `src/rt/texrepl.c` (the pack reader and the hashes: no GPU, no guest
-memory, no network) and its hook in `ge_gpu.c`'s scaled-copy path (`tex_xs_offer`, section 10.10).
+memory, no network; ZIP packs through the project's own `src/core/nk_zip.c` and its inflater
+`src/core/nk_psp_inflate.c`) and its hook in `ge_gpu.c`'s scaled-copy path (`tex_xs_offer`, section 10.10).
 
 - **Settings.** `SR_TEX_REPLACE=<folder>` names the pack and `SR_TEX_REPLACE_BUDGET_MB` (1 to 8192, default 256) bounds
   the host memory its decoded images may hold, both read when the renderer starts. It takes effect only in Ace Mode:
   in an authentic run the pack is not read whatever the environment says, and a request prints one
-  `TEX_REPLACE: off (texture replacement needs Ace Mode)` line. A folder that cannot be read, or whose
-  `textures.ini` is malformed (a line that is no comment, section or `key = value`, no `hash` type, an unknown one),
-  prints `TEX_REPLACE: refused (<reason>)` and loads nothing: a half-read pack would replace some textures and not
-  others in a way nobody asked for. There is no launch-line key, library setting or per-title setting yet; they come
+  `TEX_REPLACE: off (texture replacement needs Ace Mode)` line. A pack whose folder, ZIP or `textures.ini` cannot
+  be read or is malformed (a line that is no comment, section or `key = value`, no `hash` type, an unknown one, a
+  `textures.ini` over 4 MiB or holding a NUL byte, which no text file holds and which would hide the text after
+  it, a damaged or unsafe ZIP) prints
+  `TEX_REPLACE: refused (<reason>); the game runs without the pack` and is refused whole; the reason names the pack
+  by its last path component only, and every control character in a reason or note (C0, DEL and the C1 range,
+  raw or in UTF-8), which a pack could use to send its own escape sequences to the terminal, is printed as `?`;
+  the run goes on unreplaced without waiting on the pack (a stored pack that
+  no longer reads, its folder gone or its ini broken, is refused the same way at the next start). One image that
+  cannot be used (missing, gone since the pack opened, not a regular file, outside the pack folder, over 64 MiB, a
+  bad PNG, the wrong size for its level, over the budget) is skipped: its texture is drawn as the game made it, a
+  note says why, and the exit line's `skipped=` counts it once. That is the whole rule: the pack is used whole or not
+  at all only for what is read at open (the folder or ZIP listing and `textures.ini`); images are read later, one
+  at a time, and each fails alone. There is no launch-line key, library setting or per-title setting yet; they come
   with the launch-line pull request that follows #2074, and only that pull request admits the feature
   (section 11.3.4).
-- **The pack.** The project ships none and never downloads one: it is a folder the user made or took from a
-  community, kept locally. A `textures.ini` is optional. `[options]` takes `hash = quick | xxh32 | xxh64` (required
-  when the file exists; a folder with no ini reads as `quick`), `ignoreAddress`, `reduceHash`,
-  `skipLastDXT1Blocks128x64` and `skipLastDXT1Blocks128x128`; `[hashes]` maps `<16 hex digits><8 hex digits>` to a
-  file, and an empty value marks a texture to leave alone; `[hashranges]` and `[reducehashranges]` are read as
-  PPSSPP reads them. A PNG named `<16 hex digits><8 hex digits>.png` in the folder's root needs no ini line.
-  Everything else (the `[filtering]`, `[indexed]` and `[games]` sections, `saveIndexed`, `ignoreMipmap`, mip-level
-  files, DDS, KTX2 and ZIM files, and any key or section this reader does not know) is reported, one `TEX_REPLACE:
-  note:` line each, and not applied.
+- **The pack.** The project ships none and never downloads one: it is a folder or a ZIP file the user made or took
+  from a community, kept locally. `SR_TEX_REPLACE` names either.
+  - *A folder* is read as it is, unless it holds a `textures.zip`: then that ZIP is the pack and the folder's own
+    files are not read, as in PPSSPP (a `TEX_REPLACE: note:` line says so).
+  - *A ZIP file* (or that `textures.zip`) is read in place: nothing is extracted or written. Its root is the
+    archive's top when `textures.ini` is there; otherwise, when every entry sits in one top-level folder (entries
+    starting with `.` and the `__MACOSX` folder macOS adds are not counted) and `textures.ini` is in that folder,
+    that folder is the root, the way packs are often zipped with their folder. A ZIP with no `textures.ini` in
+    either place is refused, as PPSSPP refuses a ZIP pack without one. Names in a ZIP are matched with case
+    ignored, as PPSSPP's ZIP lookups ignore it. The archive's whole structure is checked when the pack opens, by
+    `nk_zip.c`'s rules (APPNOTE layout, every name safe, no two names equal when case is ignored, no ZIP64, no
+    encryption); stored and DEFLATE entries are read, with data descriptors. A damaged structure or an unsafe name
+    refuses the pack whole with the reader's code (`TEX_REPLACE: refused (texture pack ZIP refused (ZIP_...)...)`).
+    Each file's CRC-32 is checked when it is first read: a damaged image is noted and that texture drawn as the
+    game made it, like a damaged PNG in a folder.
+  - *`textures.ini`* (optional in a folder; a folder with none reads as `quick`). The line rules are PPSSPP's:
+    `;` or `#` starts a comment line, `#` starts a comment after a value unless the value is in double quotes,
+    `\#` is a `#`, the blanks around a key or value and one pair of quotes around a value are removed, a section
+    header starts its line and any text after its `]` is a comment, and only the first section of each name is
+    read (a later one is noted). `[options]` takes `hash = quick | xxh32 | xxh64` (required), `ignoreAddress`,
+    `reduceHash`, `skipLastDXT1Blocks128x64`, `skipLastDXT1Blocks128x128`, `ignoreMipmap` (which PPSSPP uses only
+    when dumping) and `version`; the first line of each counts, and a value that is not a bool or a number leaves
+    the option at its default, as PPSSPP's reader does, with a note. `[hashranges]` (`addr,w,h = newW,newH`; a
+    range larger than its texture or empty is not read) and `[reducehashranges]` (`w,h = fraction`; 0 or a value
+    that is not a finite number is not read) are read as PPSSPP reads them, a later line for the same texture
+    replacing an earlier one. The lines are sorted once at open and looked up by binary search, so any number the
+    4 MiB `textures.ini` holds is read.
+  - *`[hashes]` keys* are read as PPSSPP reads them, with the C library's `sscanf("%16llx%8x_%d")` and at least
+    its first field matched: up to 16 hex digits of key, up to 8 of data hash, then `_<level>`; a field not
+    matched is 0. So every form PPSSPP takes is taken: the full `<16><8>` name, `<16><8>_<level>`, a 16-digit
+    key alone (any data hash), a shorter key, a name with blanks between the two fields, a 25-digit name (the
+    25th digit is no level). A level past an `int`'s range, where `sscanf`'s `%d` is undefined, is read as the
+    largest or smallest `int` (so `_99999999999` is level 2,147,483,647, a chain no image reaches). A key whose
+    part is zero is a wildcard (see **Identity**). A value is a file under
+    the pack's root; an empty value marks a texture to leave alone; a value that leaves the root is not read.
+  - *Hash-named files* in the root need no ini line: a name of 24 characters, or 26 to 27 with `_` as the 25th,
+    before `.png`, `.dds`, `.ktx2` or `.zim`, read with the same `sscanf`. DDS, KTX2 and ZIM files are listed
+    (so a texture they name matches and no wildcard is tried for it) but not decoded: one note counts them, and
+    the texture is drawn as the game made it. A `[hashes]` line for the same key and level replaces a file.
+  - *Mip levels.* The lines and files of one key make its mip chain as PPSSPP's alias map does: the last entry
+    for each level counts; levels are taken from 0 up while they follow one another (a gap ends the chain, with
+    a note); a value holding `|` names several levels, since PPSSPP joins and splits the names with `|`; a blank
+    name ends the chain; at most 12 levels. A key whose entries do not start at level 0 (a negative level sorts
+    first), or whose level 0 is blank, has no chain: the texture is left alone. A level counts only when every
+    level below it is a readable PNG and level *n* is level 0's size halved *n* times (at least 1), as PPSSPP
+    loads a chain. `nk_texrepl_lookup_level` gives each level to the renderer; the renderer draws level 0 only.
+  - *Reported, not applied:* `[filtering]` (the game's own filtering is kept), `[games]` (per-game ini
+    overrides), `saveIndexed`, and any key or section this reader does not know, one `TEX_REPLACE: note:` line
+    each. A texture `[indexed]` marks (`true`, `1` or `gpu`, looked up with the same wildcards) is not
+    replaced: its image holds palette indices for the game's palette to colour, which this build does not draw.
 - **Identity.** A texture is identified as in PPSSPP: its address (30 bits) and size code in the high half of the
   key, its quick (or xxh) hash of the guest bytes in the low half, and for a palette format the palette's XXH32
   hash (seed 0xC0108888) folded into the key together with the CLUTFORMAT command word, opcode byte 0xC5
   included. The bytes hashed are PPSSPP's: the last CLUT load's size plus the format's index start position,
   capped at the largest load seen. A run in which the game has loaded no palette yet hashes the 16 or 256
-  entries the texture can index, which a replayed capture is the only case of. Lookup tries, in PPSSPP's order, the exact key, the palette alone, the key with
-  no data hash, the data hash with no address, and the address alone.
+  entries the texture can index, which a replayed capture is the only case of. Lookup tries, in PPSSPP's order,
+  the exact key, the palette alone, the key with no data hash, the data hash with no address, the address and
+  data hash without the palette, the address alone, and last the data hash alone; with `ignoreAddress` the
+  address is zeroed first and the steps that keep it are skipped.
 - **Which textures.** One level (no mip chain), not a render target, whose guest bytes the renderer can read
   directly. The image must be a whole factor from 2 to 6 of the texture, the same on both axes, and no side may
   pass 2048 texels; any other image is counted (`bad_factor`) and the texture is drawn as the game made it. Only PNG
-  is read, and only level 0.
+  is decoded, and the renderer draws only level 0.
+- **Where an emulator pack cannot match, and why.** Each of these was checked in this build's code; a pack that
+  depends on one replaces less here than in PPSSPP, or is refused.
+  - *512-high textures.* PPSSPP hashes a texture 512 texels high only down to the tallest row the game has drawn
+    from it (`maxSeenV`) when no `[hashranges]` line covers it; the renderer does not track that row and passes 0,
+    so such a texture is hashed whole and its pack name does not match unless a `[hashranges]` line gives the
+    height.
+  - *`[hashranges]` images.* The range changes the hash as in PPSSPP, but the image must still be a whole factor of
+    the whole texture (`nk_texrepl_factor` on the texture's own size): an image drawn for the range only, which
+    PPSSPP stretches over the range, is counted `bad_factor` and not drawn.
+  - *Image size.* PPSSPP draws an image of any size; here it must be 2 to 6 times the texture on both axes and at
+    most 2048 texels a side. Same-size images (factor 1), larger factors and uneven ones are not drawn.
+  - *Mipmapped textures.* A guest texture with more than one level is never replaced, even by a pack that lists
+    its levels: the reader gives the levels, but the renderer does not use them yet.
+  - *Image formats.* DDS, KTX2 and ZIM files match but are not decoded, so their textures are drawn as the game
+    made them; PPSSPP uploads them.
+  - *`[indexed]` and `[filtering]`.* An indexed texture is not replaced (above); a `[filtering]` line's filter
+    is not applied.
+  - *`[games]` overrides.* A pack that keeps per-game settings in a second ini named by `[games]` is read with its
+    main `textures.ini` only.
+  - *The address in the key.* Without `ignoreAddress` (which needs `xxh32` or `xxh64`), a pack names textures
+    by the guest address they were loaded at in the run it was made from. They match here only when the game
+    loads them at the same address, so on the same disc version and with the same memory layout; this project's
+    HLE allocator has not been checked against PPSSPP's placement, so a pack made in PPSSPP without
+    `ignoreAddress` may miss textures here that PPSSPP finds.
+  - *Render targets and unreadable sources.* A texture the game renders to, or whose bytes the renderer cannot
+    read directly (`tex_source_ptr`), is never hashed or replaced.
+  - *Case in a folder.* PPSSPP's folder reader ignores case on every system; this reader opens a folder pack's
+    files by their exact name, so on a case-sensitive file system (Linux, Android) a `[hashes]` value whose case
+    differs from the file's does not load. ZIP packs ignore case everywhere.
+  - *Refused here, loaded there.* Lines PPSSPP keeps as comments refuse the pack here: a line with no `=` or
+    nothing before it, a `#` before the `=`, a line before any section, an indented section header, a `[` with no `]`. A
+    `textures.zip` that is not a valid ZIP refuses the pack (PPSSPP falls back to the folder). A ZIP with ZIP64
+    (more than 65,534 entries or 4 GiB), encryption, a method other than stored or DEFLATE, or a name
+    `nk_zip.c` refuses (a Windows-reserved name or character, a `.` or `..` folder, two names equal when case is
+    ignored) is refused; PPSSPP's ZIP library may read it. So is a DEFLATE entry, `textures.ini` included, packed
+    in more than its declared size plus an eighth plus 64 bytes: no archiver we measured (Python `zipfile`, 7-Zip,
+    Windows `tar.exe` and `Compress-Archive`, at every level) comes near that (stored blocks cost 5 bytes in
+    65,535), so the rest is padding a reader would have to work through. An encoder that flushes after every few
+    bytes can pass it, and such an entry is refused. A `textures.ini` over
+    4 MiB refuses the pack. Images
+    PPSSPP may still read are skipped here: a folder file that is a link or junction leading out of the pack, a
+    device or FIFO, a name the ZIP reader refuses (`CON.png`, `CON .png`, `a.png.`), a file over 64 MiB, a PNG with
+    any chunk's CRC wrong (libpng, which PPSSPP uses, by default only warns about a bad CRC in an ancillary chunk),
+    a PNG whose image data unpacks to more or less than its `IHDR` implies or whose Adler-32 is wrong (libpng
+    ignores extra data and, by default, a bad Adler-32), bytes after the Adler-32 inside the image data, and a grey
+    or RGB `tRNS` naming a sample the image's depth cannot hold. A second `PLTE` is refused and a `PLTE` in a grey
+    image ignored, as libpng does. A palette longer than its depth can index (more than 16 entries in a 4-bit image)
+    is kept whole, as stb_image keeps it, and so is a `tRNS` of that length, whose alpha values then apply to the
+    entries the pixels name; libpng cuts such a palette to the entries the depth can index and drops that `tRNS`
+    whole, so the same image is opaque there.
+  - *The skip-last-DXT1 options* (`skipLastDXT1Blocks128x64`, `skipLastDXT1Blocks128x128`) are applied as
+    PPSSPP applies them, so they are not a difference.
 - **How it draws.** The image is stored as the entry's scaled copy: an image `factor` times the guest texture,
   sampled on its own texel lattice (section 10.10, "Sampling"). It is finished work, so no worker is involved, and
   it is normally stored in the draw that finds it. Storing goes through the collect step scaled copies use, which
@@ -1021,29 +1128,151 @@ memory, no network) and its hook in `ge_gpu.c`'s scaled-copy path (`tex_xs_offer
   do. A texture the guest rewrites is looked up again: its new content is replaced by the image the pack lists for
   it, or scaled or drawn as made, and the old image is never drawn. Replaced content that returns is replaced again.
 - **Budget.** Decoded images stay in host memory up to `SR_TEX_REPLACE_BUDGET_MB`, the least recently used dropped
-  first and decoded again when next needed; an image the budget cannot hold is counted (`over_budget`) and its
-  texture drawn as made. The copies share the GPU budget of `SR_TEX_SCALE_BUDGET_MB` (512 MiB by default) and its
+  first (taken from the tail of a list, so making room never scans the images) and decoded again when next
+  needed; an image the budget cannot hold is counted (`over_budget`) and its texture drawn as made. An image
+  dropped and wanted again is decoded again at once the first time; after its kth decode (k from 2) its next
+  2^(k-1) - 1 lookups, at most 65,535, draw the texture as made and are counted (`deferred`), and a note says it
+  was evicted and decoded again. Two images taking turns in a budget for one thus cost about 2 log2 n decodes
+  over n lookups, not n. Each file is held once, however many keys or mip levels name it. While every held image
+  is in use, an image whose size is known and does not fit is not read again until one is released; one larger
+  than the whole budget is never read again. The copies share the GPU budget of `SR_TEX_SCALE_BUDGET_MB` (512 MiB by default) and its
   reclamation (section 10.10).
 - **Guest memory and files.** Texture bytes are read through the same host view the cache's content hash reads;
-  nothing is written to guest memory, the CLUT or a texture source. Files are read only from inside the pack folder
-  (a name or `[hashes]` value that leaves it is refused); nothing is uploaded and no network connection is made.
+  nothing is written to guest memory, the CLUT or a texture source. Files are read only from inside the pack's root,
+  the folder or the ZIP (a name or `[hashes]` value that leaves it is refused); a ZIP is never extracted, a
+  DEFLATE entry being unpacked in memory straight into a buffer of its declared size; nothing is uploaded and no network
+  connection is made. A folder's files are checked on the handle opened, not the name: one is read only when it is
+  a regular disk file (Windows: `GetFileType` is `FILE_TYPE_DISK` and it is no folder; POSIX: `fstat` says
+  `S_ISREG`, the file opened without blocking so a FIFO is refused at once) whose final path, links and junctions
+  resolved (`GetFinalPathNameByHandleW`; `/proc/self/fd` or `realpath`), is inside the folder's own final path.
+  On Windows every file is opened with `SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION`, so a link to a named
+  pipe gives the pipe's server no more than the user's identity, never the right to act as the user, before the
+  handle check refuses it. A name the ZIP reader refuses (a device name such as `CON.png`, `COM1.png` or `CON .png`, blanks before the
+  extension dropped as Windows drops them; a trailing dot or space; a character Windows refuses) is not opened at
+  all. That rule is a first line only; the handle check above is the guard. Reads are capped: `textures.ini` at 4 MiB, an image at 64 MiB,
+  in a folder or a ZIP alike; a ZIP image's data is unpacked only up to the size it declares, and a ZIP whose
+  entries declare more than 8 GiB unpacked in all (`NK_TEXREPL_MAX_PACK_BYTES`) or hold more than 65,534 entries is
+  refused whole. What a pack holds in memory is its index (about 80 bytes an entry, from the bench below) and the
+  decoded images, which the budget bounds. A folder's `textures.zip`, and a ZIP named as the pack, is opened only when it is a
+  regular file (the folder's inside the folder); the ZIP reader then opens it again by name, on every platform,
+  so a file swapped in that moment is not caught by the handle check, though the ZIP's own checks still apply. A
+  PNG is checked before any pixel memory is allocated: the signature, `IHDR` first with 1 to 2048 texels a side
+  and a pixel format the PNG standard defines, every chunk whole with its CRC right, `PLTE` and `tRNS` where and as
+  long as the format allows, the `IDAT` chunks one after another, and `IEND`; its pixels (width x height x 4 bytes)
+  must fit the budget, and the image data, all `IDAT` chunks together, may be at most R + R/8 + 70 bytes, R being
+  the size `IHDR` implies (each row's filter byte and bytes, each Adam7 pass's rows): stored blocks need R plus 5
+  bytes for each 65,535, and an image whose data is longer is refused by name ("its image data is N bytes, more
+  than R can need"), so a small image cannot carry megabytes of empty blocks for the reader to work through. The
+  reader decodes PNG itself: the image data is unpacked by the project's inflater (`nk_psp_inflate.c`) straight
+  into a buffer of exactly R bytes, and data that would unpack past it stops there and refuses the image, so a
+  small PNG cannot make the reader allocate or work beyond what its `IHDR` declares; the Adler-32 must follow the
+  stream's last block at once. The inflater builds the fixed Huffman tables once per stream, not once per block,
+  and the ZIP reader's CRC-32 table is a constant. The memory one decode takes, at most the file (with a DEFLATE
+  ZIP entry, its packed bytes too, while they are unpacked), then the joined image data and the R-byte buffer,
+  then that buffer and the pixels, is recorded in the pack's statistics (`decode_peak`); for the largest image,
+  2048 x 2048 at 16 bits a channel, R is 32 MiB and the joined data at most 36 MiB, so a 64 MiB file with its
+  data in several `IDAT` chunks peaks at 132 MiB (one `IDAT` chunk is unpacked where it lies, with nothing
+  joined). Reading such a file from a DEFLATE ZIP entry, whose packed size may be 9/8 of the file and 64 bytes
+  more, peaks at 136 MiB and 64 bytes while it is unpacked, before the decode starts. Every DEFLATE stream the
+  shared inflater unpacks (a PNG's, a ZIP entry's, a CSO block's, a module's gzip payload) may have at most 64
+  dynamic Huffman blocks and one more for every 64 bytes it has written (`NK_INFLATE_DYNAMIC_FREE`,
+  `src/core/nk_psp_inflate.h`), so the code tables it costs follow its output. 64 is half zlib's smallest block
+  (127 symbols at memLevel 1), so no stream zlib writes without flushing can be refused; its smallest blocks
+  and a flush every 513 bytes used at most 0.25 of it, measured. A PNG refused by it says so in its note. `nk_texrepl_decode_png` is the same check and decode, for a caller with bytes of its own.
+  One file is read, checked, decoded, noted and counted against the budget once, however many `[hashes]` lines
+  or names reach it: names are first grouped as written, and before a file's bytes are read its identity (the
+  ZIP entry a name resolves to, case ignored; a folder file's volume and 128-bit file ID, or device and inode) is
+  looked up among the files already read or found damaged, so another case, an 8.3 name or a link shares the
+  first name's image, or its refusal. A file whose system gives no file ID has no identity and is read under each
+  name, as distinct files would be. A file refused before it is read (over 64 MiB, not a regular file, outside
+  the pack) is noted once for each name that reaches it, which costs no read. Identities are kept while the pack
+  is open, so a file deleted and replaced meanwhile may share the old file's image under a name not yet read;
+  the table, outside `index_bytes`, takes 36 bytes a slot and is kept at most half full: at least 64 slots, and
+  under four for each file read or found damaged just after it doubles.
+- **Sorting.** The index, the hash ranges and the ZIP reader's name and offset checks sort with one project heapsort
+  (`nk_zip_sort`, at most about 2n log2 n comparisons whatever the order), not the C library's `qsort`, which
+  some C libraries make quadratic for a crafted order.
 - **Stamps.** `TEX_REPLACE: on (hash=, entries=, notes=, budget_mb=)` at start, followed by the line section 11.3.4
   describes and one `TEX_REPLACE: note:` line for each thing read and not applied (a file that cannot be read or decoded is
   noted at its first use, when it is found, not only counted), and at exit `TEX_REPLACE: exit
-  (lookups=, hits=, misses=, left_alone=, queued=, bound_draws=, loaded=, load_failed=, over_budget=, evicted=,
+  (lookups=, hits=, misses=, left_alone=, queued=, bound_draws=, loaded=, load_failed=, skipped=, over_budget=, evicted=,
   bad_factor=, cache_peak_mb=, decode_ms=)`. Section 10.4 applies: the run is an Ace run.
-- **Not yet.** Decoding a PNG runs on the renderer thread the first time an image is needed (a worker thread, as
-  scaling has, and DDS or KTX2 files come after); the tallest row a game draws is not tracked, so a 512-high texture
-  is hashed whole; same-size replacement (factor 1), mip levels, `[filtering]` and `[indexed]`, a dump switch, ZIP
-  packs and a player toggle or per-title pack folder are not done.
+- **Not yet.** Decoding a PNG (and unpacking it from a ZIP) runs on the renderer thread the first time an image is
+  needed (a worker thread, as scaling has, and DDS or KTX2 files come after); the tallest row a game draws is not
+  tracked, so a 512-high texture is hashed whole; the renderer's use of mip levels, same-size, larger or uneven
+  images and a `[hashranges]` image drawn over its range, `[filtering]`, `[indexed]` images, `[games]` overrides,
+  a dump switch and a player toggle or per-title pack folder are not done.
 - **Tests.** `texrepl-selftest` checks the hashes against values taken from PPSSPP's own code and published xxHash
-  vectors, the ini and file-name rules, the lookup order, palette identity (against PPSSPP's formula worked out
-  separately, with a pack file named the way PPSSPP names it), malformed packs, path escapes and the
-  budget, on synthetic packs. `gpu-texscale-selftest`'s `replace` cell runs the production path on a Vulkan device: a
+  vectors, the ini line and file-name rules, every `[hashes]` key form above, the mip chains (from ini lines and
+  from files, gaps, `|`, a negative or missing level 0, a level of the wrong size), the lookup order with its last
+  wildcard, palette identity (against PPSSPP's formula worked out separately, with a pack file named the way PPSSPP
+  names it), `[indexed]`, malformed packs, path escapes and the budget, on synthetic packs; and ZIP packs written by
+  the test: `textures.ini` at the top (DEFLATE-compressed by zlib itself) or in one top-level folder, stored,
+  DEFLATE and data-descriptor entries, names in other case, a folder's `textures.zip`, a damaged image, and
+  ini-less, two-folder, cut, `..`-named, malformed and bzip2 archives refused whole; a small PNG cut at every
+  length and with every byte flipped (all refused), its image-data bytes flipped with the CRC made right (each
+  decodes at its size or is refused), `IHDR` sizes of 0, 4096 and 2^31 and a 2048x2048 one over a 1 MiB cap, and
+  bad images in a pack skipped, noted and counted once; device names, a trailing dot, a junction or link out of
+  the pack (a file link in it still read), a FIFO image and a FIFO `textures.zip` (POSIX), a `textures.ini` over
+  4 MiB, and a missing pack's message carrying no folder above it; every `IHDR` pixel format over the same data,
+  and a seeded pass of 30,000 random mutations (1 to 8 bytes, CRCs made right) over three images, each decoded
+  within its `IHDR` size or refused; images deleted after the pack opened, skipped at once; and, through
+  `nk_texrepl_open`, every ZIP refusal: absolute, drive-letter, backslash, `..` and device names, duplicate names
+  and names equal but for case, ZIP64, encryption, a local header that disagrees with the central directory,
+  overlapping entries, a central directory outside the file, the archive cut at every length, entries declaring
+  12 GiB, and an image declaring 100 MiB or unpacking past its declared size (skipped, the rest of the pack used).
+  The selftest also writes PNGs of its own (stored and fixed-Huffman DEFLATE, one or several `IDAT` chunks, every
+  filter, Adam7, palette and `tRNS`, 1- to 16-bit) and decodes each with this reader and with stb_image
+  (`third_party/stb`, used only by the test), which must agree to the byte; image data longer than the image is
+  refused, and 60,000 seeded mutations of those seeds must be refused by both or decoded alike. PNGs with their
+  CRCs and Adler-32 right meet each of the decoder's own checks (a palette index past `PLTE`, filter type 5, a
+  wrong Adler-32, a `PLTE` of 4 bytes or 257 entries, an RGB `tRNS` of 4 bytes, a second `PLTE`, a chunk between two `IDAT`s) and
+  are refused for that reason, and a 4-bit palette image with 256 `PLTE` entries and a grey image with a `PLTE`
+  decode as stb_image decodes them. A 1x1 PNG whose
+  data unpacks to 64 MiB, listed under 81 wildcard keys, is skipped 81 times within the time bound, nothing cached,
+  `decode_peak` within the file's size and 4 KiB, the file read and refused once (its data, over R + R/8 + 70
+  bytes, refused before it is unpacked), and a 1024 x 1024 one unpacking past its size refused within 5 s; a ZIP
+  image and a `textures.ini` behind 1 MiB of empty DEFLATE blocks are refused at open. The three shapes of the
+  security review's slow decode each have a cell: a 1x1 PNG whose 64 MiB of data is all empty fixed-Huffman
+  blocks, and one all empty dynamic blocks, refused within 2 s by the input bound; 5.6 million empty ancillary
+  chunks before a good 1x1 image, decoded within 2 s (each chunk's CRC-32 from the constant table); 1 MiB of
+  empty fixed blocks building the Huffman tables exactly twice, counted in the selftest's build
+  (`NK_INFLATE_COUNT_BUILDS`), where tables built per block came to about 1.7 million; the Adler-32 one byte late refused;
+  and the largest image the bound lets through, 2048 x 2048 at 16 bits a channel holding 36 MiB of empty dynamic
+  blocks, refused within 2 s by the dynamic-block budget (77 ms measured, 3.1 to 3.4 s before it), and the same image with
+  the most empty dynamic blocks the budget allows (64, then one after every 64 bytes it writes) decoded within 5 s
+  (722 ms measured, 2.05 s under AddressSanitizer); 64 empty
+  dynamic blocks unpack, a 65th is refused after 64 blocks' tables, and 2 KiB written first earns 32 more, not 33;
+  400 KiB in dynamic blocks of 300 bytes, and in blocks of 513 bytes each followed by a flush's empty stored block,
+  unpack. Two images taking turns in a budget for one, 1,000 rounds, are decoded 16 to 24
+  times, every lookup either served or `deferred`; 40,000 held images make room for one 200 x 200 image within
+  0.25 s, all 40,000 evicted; a DEFLATE ZIP image's `decode_peak` counts its packed bytes beside the file. A
+  `textures.ini` key holding ESC, a UTF-8 CSI, a raw CSI byte and a cut UTF-8 sequence, and a refused line holding an OSC sequence, reach the notes and
+  the refusal with `?` for each control character; a level of `_99999999999` is level 2,147,483,647; a NUL byte
+  refuses the pack, naming its line; the sort is checked on every order up to 7 items, against its comparison bound on
+  McIlroy's adversary and on the order that costs the C library's `qsort` most; then 16,384 `[hashes]` lines,
+  16,384 `[indexed]` lines, 16,384 lines each of `[hashranges]` and `[reducehashranges]`, and a 16,384-entry ZIP (names and local headers) in that order open within a bound on
+  the comparisons their sorts make, counted at the comparison functions in the selftest's build
+  (`NK_SORT_COUNT_COMPARES`), so a sort that went back to `qsort` fails where `qsort` has such an order. A good
+  image and a refused one, each listed under 81 keys, are read once (`reads`), the good one decoded and held once,
+  and so is one file named 81 ways (case spellings in a ZIP and in a Windows folder, links in a POSIX folder), and
+  a damaged ZIP entry named 81 ways is unpacked and refused once.
+  With the budget full of pinned images a third is read once, not on each lookup, and served once they are
+  released; a mip level whose image is the wrong size is not decoded, nor read again when that size is already
+  known; a chain whose level 0 image proved unusable through another key serves none of its higher levels;
+  `[hashranges]` lines are checked for the last line winning, a non-finite fraction noted, and 175,000 lines in
+  reverse order (4.0 MB) read within 5 s and the comparison bound. These cells are fixed and seeded mutations, not coverage-guided fuzzing; the selftest also runs under
+  AddressSanitizer and UndefinedBehaviorSanitizer on Linux. A file link needs Developer Mode on Windows, so that
+  check is skipped there, and said, without it. `test_nk_zip` checks the
+  reader's options: DEFLATE read only when asked, its level bits, damaged, short and long streams, a stream that
+  stops at its declared size before a bad block, empty-block padding at and past its limit, data descriptors, device
+  names with blanks before the extension, and the caps. `texrepl_selftest --bench N` measures an N-texture synthetic pack as a folder and as
+  a ZIP (open, lookup and first-use times, index size and process memory). `gpu-texscale-selftest`'s `replace` cell runs the production path on a Vulkan device: a
   listed texture drawn from the pack's image from the draw that finds it, even with the 1:1 rule on, with
   `SR_TEX_REPLACE` alone and with xBRZ also on; a rewrite to unlisted
   content never drawn from the old image; the content returning replaced again; an image of no whole factor counted
-  and not used; and an authentic start reading no pack.
+  and not used; an authentic start reading no pack; and an Ace start whose stored pack no longer reads (its folder
+  gone, its `textures.ini` malformed) refused, the renderer going on without it.
 
 ### 10.13. Sharp Game Text
 
@@ -1429,9 +1658,72 @@ what the guest draws into, reads or waits for. The code is the comment at `s_ssa
   a forced largest side. `ace-selftest` checks the key's parsing,
   order, report and words; `test_player_state` the setting, its presets and its launch line.
 
+### 10.22. Unclipped SAS Mixes Through a True-Peak Limiter (`peak=limit`)
+
+The PSP's SAS core adds a grain's voices, and with `__sceSasCoreWithMix` the caller's own PCM, then stores the sum
+as int16, saturated. Some games clip their own sound this way: #2135 counted 126 full-scale samples in a 4 s burst
+at the Hot Shots Tennis (UCUS98701) title logo on a PSP-3000. Authentic keeps doing exactly that. `peak=limit`
+(#2137) plays the same mix without the hardware's clipping: the unsaturated sum, through a true-peak limiter at the
+host's output.
+
+- **The line.** `peak=limit` sits just before `cull` (after the other optional keys) and is written only when on;
+  a missing `peak` and `peak=off` are off. It is an Enhanced part and needs no `tier=ace`. A build without it
+  (`ACE_HAS_PEAK`) refuses the line.
+- **What the guest sees: nothing.** The guest's SAS buffer gets the PSP's saturated bytes in every mode, because a
+  game may read it back; `hle-thread-selftest` checks them byte for byte against a run with the part off. The
+  limiter keeps a channel's queue depth: a push of n frames queues n frames.
+- **Where the wider mix comes from: provenance, checked by bytes.** The guest reads SAS output from guest memory, so
+  the sum can reach the host only through the buffer the game hands to `sceAudioOutput*`. The other design, a host
+  mix fed beside the guest's in place of that output, would have to guess which output carries which grain and
+  would drop whatever the game does to the buffer after the mix (its own volume, its own music, a copy). So the
+  SAS mixer (`src/rt/hle_audio.c`) keeps, for the host only, the last eight stereo grains whose sum it saturated:
+  the address, the bytes it stored and the sum before saturation, with the same voices, envelopes, resampler
+  (`sas=sinc` included) and input gain as the stored grain. A new mix over a kept grain's span forgets it. An
+  output (`sceAudioOutputBlocking`, `sceAudioOutputPannedBlocking`, `sceAudioOutput2OutputBlocking`, and
+  `sceAudioSRCOutputBlocking` at 44.1 kHz) whose span holds a kept grain's bytes unchanged gives the host that
+  grain's sum for those frames; a span the game changed after the mix, a copy of the grain elsewhere, a mono
+  output, a 48 kHz SRC output and the raw four-plane output mode play the guest's bytes. Where the store did not
+  saturate, the sum is the stored value, so nothing is kept.
+- **The limiter (`src/rt/audio_sdl3.c`).** With the part on, every push of every channel passes through one limiter
+  per channel in place of the per-sample clamp, at the channel volume and master volume as before. Each frame's peak
+  is its own sample and the inter-sample peaks on either side, read at 4x through a 16-tap-a-phase windowed-sinc
+  interpolator. The gain a frame needs is the ceiling over its peak; the gain applied is a minimum over the next 64
+  frames, released exponentially (50 ms), then averaged over 64 frames, so it falls over 1.45 ms before a peak and
+  is at most what the peak needs when it arrives. The ceiling is -0.3 dBTP as that detector reads it; read at 16x,
+  the overflow fixture's hard 62000-count step rings 0.13 dB past it, still under full scale. The output is 71
+  frames (1.61 ms) late. A frame below the ceiling comes out bit-exact unless a peak's attack or release reaches it
+  (the release is back within half a count of unity well inside a second), so the level is the PSP's wherever the
+  PSP did not clip; only the overs are rounded off instead of cut. A stream that stops leaves its last 71 frames in the
+  limiter until that channel's next push or hold of silence (`sr_audio_push_silence`, which passes through the
+  limiter too), which plays them first, in order. A push or hold that finds the channel played dry (a device pull
+  found nothing) drops them instead (after the gap they would be a 1.6 ms fragment ahead of the new sound); a hold
+  also drops the converter's kept-back frames, a push leaves them in place. Nothing is invented. The video
+  recorder (`sr_videorec_audio`) and the counters keep the guest's copy.
+- **Off.** Without `peak=limit` neither side runs: the SAS mixer keeps nothing, `sr_audio_push` is the plain push,
+  and `sr_audio_push_wide` is the plain push of the guest's copy (`audio-selftest` checks the bytes). Fast forward
+  pushes nothing, so nothing is limited while it runs.
+- **Stamps and the report.** `ACE_MODE: peak limit (...)` at start; the badge's words say "unclipped sound"; the
+  report's `"peak"` block gives `on`, `pushes_wide` (pushes that carried a kept sum), `frames_wide` (their frames
+  where the sum and the guest's copy differ), `frames_limited` (output frames whose bytes the gain changed) and
+  `min_gain`. The part
+  is confirmed once the SAS mixer and the audio backend both take the switch (`driver.c`); a link without either,
+  the headless gate, reports it as never run. Section 10.4 applies.
+- **Tests.** `hle-thread-selftest` runs the overflow fixture (twenty full-scale voices over caller PCM through
+  `__sceSasCoreWithMix`): the guest's bytes are identical with the part on and off; the output of that buffer
+  carries the sum, past 16 bits exactly where the store saturated and the guest's value elsewhere; a buffer changed
+  after the mix and a copy play the guest's bytes. `audio-selftest` checks that the part off is the plain push; that
+  quiet audio comes out bit-exact and 71 frames late with an unchanged queue depth; that a hold of silence keeps
+  the order; and that a sine reaching 6.6 dB
+  past 16 bits leaves no sample past the ceiling and a true peak (read at 16x) under full scale, a gain that falls
+  before the overflow arrives, the
+  passage before it bit-exact and the one after it at the input's level within 0.1 dB.
+- **Not yet.** The player has no part for it yet: a launch line names it by hand. The Hot Shots Tennis title-logo
+  check (no full-scale sample, and the non-clipping music at the PSP's -15.6 dBFS) waits for the #2135 console read.
+- **Tier:** Enhanced. **Default:** off, and in no graphics preset.
+
 ## 11. Guest-Visible Items
 
-Sections 10.3, 10.6, 10.8 and 10.11 describe host-only features: what the guest reads, in its registers, memory and timing, is the
+Sections 10.3, 10.6, 10.8, 10.11 and 10.22 describe host-only features: what the guest reads, in its registers, memory and timing, is the
 same with them on or off. The owner's decision of 2026-11-04 (#2055) is that Enhanced does not have to stay fully
 Authentic: a change that improves a game without making anything worse is allowed, even when the guest can observe
 it. This section is the class for those changes. It adds to the classes above and removes none of them.
@@ -1966,12 +2258,13 @@ The feature of section 10.12 (#1880). Its presentation is described there; this 
 - **VRAM bytes:** differ in those frames, at those draws' pixels.
 - **Readbacks:** differ the same way, for a GE or display readback, save picture or screenshot that covers them.
   Texture readbacks and render-to-texture results are unchanged: a render target is never replaced.
-- **Timing:** differs. The first use of an image decodes its PNG on the renderer thread, the thread the guest runs
-  on, and storing the image is an upload there (section 10.10, "Never waited on", bounds it to 8 MiB per present
+- **Timing:** differs. The first use of an image reads it (from a ZIP, unpacking it) and decodes its PNG on the
+  renderer thread, the thread the guest runs on, and storing the image is an upload there (section 10.10, "Never waited on", bounds it to 8 MiB per present
   for scaled copies; a replacement is normally stored in the draw that finds it, so a pack of large images can
   lengthen the frames that first draw them). Not measured on a title. The VBLANK schedule, the GE timing model and the media
   clocks are unchanged.
-- **I/O speed:** unchanged for the guest. The host reads the pack's files from its own disk, inside the folder only.
+- **I/O speed:** unchanged for the guest. The host reads the pack's files from its own disk, inside the
+  pack's folder or ZIP only.
 - **Tier:** Enhanced. **Default:** off, and Ace-only: in an authentic run the pack is not read whatever the
   environment says.
 - **Nothing worse (section 11.2, item 4):** not shown. A pack is the user's own content, so what it does to a title
