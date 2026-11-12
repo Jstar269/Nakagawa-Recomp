@@ -540,10 +540,13 @@ int sr_coro_stack_remaining(size_t *remaining_out) {
         stack_size = s_current->stack_size;
     } else {
         if (!s_current->stack || s_current->stack_size == 0) {
-            /* pthread_getattr_np is a GNU extension (glibc, also musl); a non-GNU
-             * libc reports the main stack as unavailable here, which the dispatcher
-             * turns into the named host-fiber-stack-bounds-unavailable stop rather
-             * than a guess. Guest fibers do not take this path. */
+            /* pthread_getattr_np is a GNU extension (glibc, also musl). macOS has none,
+             * so this file does not build there yet (#329): it needs Apple's
+             * pthread_get_stackaddr_np/pthread_get_stacksize_np here, and _DARWIN_C_SOURCE
+             * for MAP_ANONYMOUS and MAP_NORESERVE under _POSIX_C_SOURCE. When the main
+             * stack's bounds are unavailable, the dispatcher stops with the named
+             * host-fiber-stack-bounds-unavailable reason rather than a guess. Guest fibers
+             * do not take this path. */
             pthread_attr_t attr;
             void *stack_addr = NULL;
             if (pthread_getattr_np(pthread_self(), &attr) != 0) return 0;

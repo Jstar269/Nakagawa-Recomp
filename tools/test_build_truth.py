@@ -4233,7 +4233,7 @@ class LinkerSpellingTests(unittest.TestCase):
                     offenders.append(f"{name}:{number}: {line.strip()}")
         self.assertEqual(offenders, [], "use $(LD_GC_SECTIONS) on link lines")
         users = sum(text.count("$(LD_GC_SECTIONS)") for text in self._make_texts().values())
-        self.assertGreaterEqual(users, 17)
+        self.assertGreaterEqual(users, 25)
 
     def test_each_host_kind_gets_its_linker_spelling(self) -> None:
         make = shutil.which("mingw32-make") or shutil.which("make")
@@ -4241,14 +4241,17 @@ class LinkerSpellingTests(unittest.TestCase):
             self.skipTest("GNU Make is required")
         with tempfile.TemporaryDirectory(prefix="nakagawa-linker-spelling-") as temp:
             # Windows_NT takes the same branch as Linux; each probe parses the whole Makefile,
-            # so the two host kinds that choose differently are the ones probed.
-            for host, expected in (("Darwin", "-Wl,-dead_strip"),
-                                   ("Linux", "-Wl,--gc-sections")):
-                with self.subTest(host=host):
+            # so the cases that choose differently are the ones probed. NK_TARGET_OS=posix stands
+            # for a build for the host itself on a POSIX host; a Mac building for Android links
+            # with the NDK's lld, which takes the GNU spelling.
+            for host, target, expected in (("Darwin", "NK_TARGET_OS=posix", "-Wl,-dead_strip"),
+                                           ("Linux", "NK_TARGET_OS=posix", "-Wl,--gc-sections"),
+                                           ("Darwin", "NK_TARGET=android", "-Wl,--gc-sections")):
+                with self.subTest(host=host, target=target):
                     completed = subprocess.run(
                         [make, "--no-print-directory", "GAME_NAME=probe",
                          f"BUILD_ROOT={Path(temp).as_posix()}",
-                         f"BUILD_DIR={Path(temp).as_posix()}", f"HOST_KIND={host}",
+                         f"BUILD_DIR={Path(temp).as_posix()}", f"HOST_KIND={host}", target,
                          "--eval", "nkprobe: ; @echo LD_GC_SECTIONS=$(LD_GC_SECTIONS)",
                          "nkprobe"],
                         cwd=ROOT, capture_output=True, text=True, check=False,

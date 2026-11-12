@@ -224,11 +224,19 @@ file is the POSIX backend for every non-Windows target.
 
 Some link options are spelled by the linker, not the compiler. The Makefile sets `HOST_KIND` to
 `Windows_NT` on Windows and to what `uname -s` prints elsewhere (`Linux`, `Darwin`), and chooses
-those options from it. Unused-section removal is `$(LD_GC_SECTIONS)`: `-Wl,--gc-sections` for
-GNU ld and the MinGW linker, `-Wl,-dead_strip` for Apple's ld64, which rejects the GNU spelling
-(macOS, [#329](https://github.com/Jstar269/nakagawa-recomp/issues/329)). A link line never names
-the raw option; `tools/test_build_truth.py` (`LinkerSpellingTests`) fails if one does. To see
-another host's choice, pass it on the command line, for example `make HOST_KIND=Darwin`.
+those options from it and from the build's target. Unused-section removal is `$(LD_GC_SECTIONS)`:
+`-Wl,-dead_strip` for a build for the Mac itself, linked by Apple's ld64, which rejects the GNU
+spelling (macOS, [#329](https://github.com/Jstar269/nakagawa-recomp/issues/329)), and
+`-Wl,--gc-sections` everywhere else: GNU ld, the MinGW linker, and the NDK's lld, which a Mac
+building for Android uses. No make link line names the raw option; `tools/test_build_truth.py`
+(`LinkerSpellingTests`) fails if one does. The two Python helpers that link a program,
+`tools/nk_cli.py` (the VRAM decoder) and `tools/test_cpu_lle.py`, choose the same way from
+`sys.platform`. To see another host's link lines, pass `HOST_KIND` with a dry run, for example
+`make -n HOST_KIND=Darwin coro-selftest`.
+
+`src/rt/sr_coro.c` does not build on macOS yet: it reads the main thread's stack with
+`pthread_getattr_np`, which macOS lacks, and needs `_DARWIN_C_SOURCE` for `MAP_ANONYMOUS` and
+`MAP_NORESERVE`.
 
 ## Definition of support
 

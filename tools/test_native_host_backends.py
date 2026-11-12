@@ -714,6 +714,7 @@ class CoroutineAsmTargetTests(unittest.TestCase):
     def test_apple_assembly_carries_no_elf_directive(self) -> None:
         with tempfile.TemporaryDirectory(prefix="nakagawa-coro-asm-") as temp:
             assembly = self._assembly("arm64-apple-macos11", Path(temp))
+        self.assertTrue(assembly.strip(), "no coroutine routine was produced for Apple")
         self.assertNotIn(".type", assembly)
         self.assertNotIn(".size", assembly)
         self.assertNotIn(".hidden", assembly)

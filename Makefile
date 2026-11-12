@@ -367,8 +367,8 @@ endif
 
 # HOST_KIND names the build host's operating system for the few link options whose spelling
 # depends on the linker rather than the compiler: Windows_NT on Windows, otherwise what
-# `uname -s` prints (Linux, Darwin). Set it on the command line to inspect another host's
-# link lines.
+# `uname -s` prints (Linux, Darwin). A value from the command line or the environment wins,
+# so `make -n HOST_KIND=Darwin <target>` shows another host's link lines.
 ifndef HOST_KIND
 ifeq ($(OS),Windows_NT)
 HOST_KIND := Windows_NT
@@ -376,10 +376,12 @@ else
 HOST_KIND := $(shell uname -s 2>/dev/null)
 endif
 endif
-# Unused-section removal for the selftest links. GNU ld and the MinGW linker spell it
-# --gc-sections; Apple's ld64 rejects that option and spells it -dead_strip (#329). Every link
-# line uses this variable, never the raw option.
-ifeq ($(HOST_KIND),Darwin)
+# Unused-section removal for the selftest links. GNU ld, lld and the MinGW linker spell it
+# --gc-sections; Apple's ld64 rejects that option and spells it -dead_strip (#329). ld64 links
+# only a build for the Mac itself: a Mac building for Android links with the NDK's lld, so the
+# choice reads the target (NK_TARGET_OS, #360) as well as the host. Every link line uses this
+# variable, never the raw option.
+ifeq ($(NK_TARGET_OS)-$(HOST_KIND),posix-Darwin)
 LD_GC_SECTIONS := -Wl,-dead_strip
 else
 LD_GC_SECTIONS := -Wl,--gc-sections
