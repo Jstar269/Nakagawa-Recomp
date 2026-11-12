@@ -3566,14 +3566,15 @@ static uint64_t ge_timing_next_deadline_us(void) {
     return next;
 }
 
-/* Scheduler hook, run as an interrupt episode: first the finish callbacks that waited for the
- * CPU's interrupts (those lists completed earlier), then complete every list whose time has
- * passed, in completion order, and run its finish callback. */
-/* Scheduler hook, after each owed VBLANK episode: the finish callbacks its handlers raised. */
+/* Scheduler hook, after each owed VBLANK episode: every waiting finish callback (the ones that
+ * episode's handlers raised, and any a thread raised under the mask before the batch). */
 static void ge_finish_deliver_waiting(void) {
     ge_finish_deliver_masked(s_cpu);
 }
 
+/* Scheduler hook, run as an interrupt episode: first the finish callbacks that waited for the
+ * CPU's interrupts (those lists completed earlier), then complete every list whose time has
+ * passed, in completion order, and run its finish callback. */
 static void ge_timing_service_due(void) {
     ge_finish_deliver_masked(s_cpu);
     while (s_ge_timing_drawing) {

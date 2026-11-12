@@ -2046,7 +2046,8 @@ static GeFinishRun *ge_finish_run_of(uint32_t owner) {
  *   - While an interrupt handler runs (scheduler_service_pending()). UNMEASURED: inferred from the
  *     PSP's interrupt model, in which a handler runs with the CPU's interrupts off.
  *   - The order of a waiting completion against other interrupts owed at the same resume is
- *     UNMEASURED: this runtime delivers VBLANK episodes first (scheduler_service_pending()).
+ *     UNMEASURED: this runtime runs the waiting completions after each owed VBLANK episode, so
+ *     between owed VBLANKs, and the rest after the VBLANK episodes (scheduler_service_pending()).
  * Here the list runs at once inside sceGeListEnQueue, so without this a guest that keeps
  * interrupts off around its own GE queue bookkeeping (enqueue a list, then advance its queue) had
  * the callback run inside that bookkeeping: a callback that runs the same queue again found the
@@ -2055,8 +2056,9 @@ static GeFinishRun *ge_finish_run_of(uint32_t owner) {
  *
  * The completion waits here, first-in first-out, and the list itself is complete at once, as
  * before (its waiters are woken now). The scheduler delivers the waiting completions as a GE
- * interrupt (ge_timing_next_deadline_us reports them as due, ge_timing_service_due runs them),
- * so they run from scheduler_service_pending(), in interrupt context: at the resume, after the
+ * interrupt (ge_timing_next_deadline_us reports them as due, ge_timing_service_due runs them;
+ * after each owed VBLANK episode the waiting hook, ge_finish_deliver_waiting, runs them too), so
+ * they run from scheduler_service_pending(), in interrupt context: at the resume, after the
  * handler that raised them returns, or at the next scheduler boundary with interrupts enabled. A
  * completion raised while its thread is inside a finish callback joins that callback's run
  * instead (ge_finish_callback_now), so it never runs inside it; a run that ends while the
@@ -2072,7 +2074,11 @@ static GeFinishRun *ge_finish_run_of(uint32_t owner) {
  * A waiting completion keeps the $gp of the context that raised it (the handler's s_gp inside
  * an interrupt handler, the thread's otherwise), and its callback runs with that $gp, as it did
  * when it ran inline there; the state it runs in is otherwise the delivering context's
- * (interrupt context, owner 0). Under the mask the list reads complete at once, while the
+ * (interrupt context, owner 0). That keeps this runtime's inline behaviour; it is not measured
+ * on a PSP, whose interrupt manager may instead use a $gp recorded when the callback was
+ * registered (sceGeSetCallback): inferred, not checked. A completion the SR_GE_TIMING=1 model's
+ * GE interrupt raises runs at once with the $gp of the context that interrupt interrupted, as
+ * before this wait existed. Under the mask the list reads complete at once, while the
  * SR_GE_TIMING model (hle.c, ge-timing C3) reads it drawing until its finish interrupt is
  * taken; only the masking thread or the handler itself can see the difference. */
 static struct {

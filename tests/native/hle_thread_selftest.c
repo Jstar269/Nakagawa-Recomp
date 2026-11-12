@@ -30999,7 +30999,7 @@ static void test_ge_finish_callback_waits_for_interrupts(void) {
                sr_hle_test_unmodelled_stops() == stops_before && !ge_finish_masked_pending(),
            "GE finish masked: with 70 VBLANKs owed, each handler's callback runs before the next "
            "handler and nothing stops");
-    int handler_gp = 1;
+    int handler_gp = s_gp != thread_gp;   /* else the check could pass by coincidence */
     for (unsigned i = 0; i < 70u; i++) handler_gp &= s_gm.cb_gp[i] == s_gp;
     expect(handler_gp, "GE finish masked: a handler-raised callback runs with the handler's $gp");
     s_cpu->r[28] = saved_gp;

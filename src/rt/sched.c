@@ -2481,8 +2481,9 @@ static void scheduler_service_pending(void) {
                 break;
             }
             deliver_vblank();
-            /* The GE finish callbacks this episode's handlers raised run at its return, before
-             * the next owed episode, in interrupt context.  Whether a PSP takes a GE finish
+            /* The waiting GE finish callbacks run at this episode's return, before the next
+             * owed episode, in interrupt context: the ones its handlers raised, and any a thread
+             * raised under the mask before this batch.  Whether a PSP takes a GE finish
              * interrupt raised in a VBLANK handler before the next VBLANK edge it still owes
              * is UNMEASURED; this keeps each callback next to the handler that raised it, as
              * when it ran inside that handler. */
