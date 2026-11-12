@@ -1425,7 +1425,7 @@ and not yet admitted under section 11.2: section 11.3.5 is its entry, and this s
   Ace run whose line has no `glyphs` key and in one with `glyphs=off` rebuilds and decodes nothing and has one picture
   hash (the device image and the frame the guest keeps), and with `glyphs=on` it draws rebuilt glyphs and another
   hash. `ace-selftest` checks the key: its values, that `glyphs=off` formats as the line without it, its place after
-  `ssaa` and before `cull`, the stamp's line, the feature words, and the report when the renderer confirms it, names
+  `ssaa` and `peak` and before `cull`, the stamp's line, the feature words, and the report when the renderer confirms it, names
   it unavailable or never starts; and it starts Ace Mode as a run does with `SR_GLYPHS=on` and checks that the
   process stops with exit 1 and the line that names `glyphs=on`. `gpu-glyph-mutant` removes the content check of a bound tile, keys the tiles on the
   cache's sampled content hash instead of its generation, removes the per-present count, and the VRAM, hard-edge and
