@@ -420,6 +420,110 @@ class GradleWiringTests(unittest.TestCase):
         self.assertIn("useLegacyPackaging = true", self.gradle)
 
 
+JAVA_SOURCES = Path(__file__).resolve().parent.parent / "android" / "app" / "src" / "main" / "java"
+ARCHIVE_JAVA = JAVA_SOURCES / "io" / "github" / "jstar269" / "nakagawa" / "ToolchainArchive.java"
+#: Runs ToolchainArchive.unpack(<archive>, <folder>) and prints the file count, or REFUSED and why.
+ARCHIVE_MAIN = """package io.github.jstar269.nakagawa;
+public final class ArchiveMain {
+    public static void main(String[] args) throws Exception {
+        try (java.io.InputStream in = new java.io.FileInputStream(args[0])) {
+            System.out.println("FILES " + ToolchainArchive.unpack(in, new java.io.File(args[1])));
+        } catch (java.io.IOException e) {
+            System.out.println("REFUSED " + e.getMessage());
+            System.exit(3);
+        }
+    }
+}
+"""
+
+
+@unittest.skipIf(shutil.which("javac") is None or shutil.which("java") is None, "needs a JDK")
+class ToolchainArchiveTests(unittest.TestCase):
+    """The app's unpacker for assets/toolchain/*.tar, run on archives the staging step writes."""
+
+    classes: Path
+    _tmp: tempfile.TemporaryDirectory[str]
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls._tmp = tempfile.TemporaryDirectory(prefix="nk-tc-java-")
+        root = Path(cls._tmp.name)
+        main = root / "src" / "io" / "github" / "jstar269" / "nakagawa" / "ArchiveMain.java"
+        main.parent.mkdir(parents=True)
+        main.write_text(ARCHIVE_MAIN, encoding="utf-8")
+        cls.classes = root / "classes"
+        subprocess.run(["javac", "--release", "17", "-Xlint:all", "-Werror", "-d", str(cls.classes),
+                        str(ARCHIVE_JAVA), str(main)], check=True, capture_output=True)
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls._tmp.cleanup()
+
+    def unpack(self, archive: Path, target: Path) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(["java", "-cp", str(self.classes), "io.github.jstar269.nakagawa.ArchiveMain",
+                               str(archive), str(target)], capture_output=True, text=True, check=False)
+
+    def test_a_staged_archive_unpacks_to_the_same_files(self) -> None:
+        long_name = "lib/python3.15/" + "/".join(["deep"] * 30) + "/module.py"  # past ustar's 100 bytes
+        entries = {
+            "usr/include/stdio.h": toolchain.android_sysroot.Entry(b"/* stdio */\n"),
+            "lib/python3.15/lib-dynload/_ssl.so": toolchain.android_sysroot.Entry(b"\x7fELF", executable=True),
+            long_name: toolchain.android_sysroot.Entry(b"x = 1\n" * 300),
+            "empty.txt": toolchain.android_sysroot.Entry(b""),
+        }
+        with tempfile.TemporaryDirectory(prefix="nk-tc-test-") as tmp:
+            archive = Path(tmp) / "a.tar"
+            toolchain.android_sysroot.write_archive(entries, archive)
+            result = self.unpack(archive, Path(tmp) / "out")
+            self.assertEqual(result.stdout.strip(), "FILES 4", result.stdout + result.stderr)
+            for name, entry in entries.items():
+                self.assertEqual((Path(tmp) / "out" / name).read_bytes(), entry.data, name)
+            if os.name != "nt":
+                self.assertTrue(os.access(Path(tmp) / "out" / "lib/python3.15/lib-dynload/_ssl.so", os.X_OK))
+                self.assertFalse(os.access(Path(tmp) / "out" / "usr/include/stdio.h", os.X_OK))
+
+    def refused(self, build: object) -> str:
+        with tempfile.TemporaryDirectory(prefix="nk-tc-test-") as tmp:
+            archive = Path(tmp) / "a.tar"
+            assert callable(build)
+            build(archive)
+            result = self.unpack(archive, Path(tmp) / "out" / "target")
+            self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+            self.assertFalse((Path(tmp) / "out" / "evil").exists())
+            return result.stdout
+
+    @staticmethod
+    def _tar(archive: Path, *infos: tuple[tarfile.TarInfo, bytes]) -> None:
+        with tarfile.open(archive, "w", format=tarfile.PAX_FORMAT) as tar:
+            for info, data in infos:
+                info.size = len(data) if info.isreg() else 0
+                tar.addfile(info, io.BytesIO(data) if info.isreg() else None)
+
+    def test_a_link_is_refused(self) -> None:
+        link = tarfile.TarInfo("usr/lib/libc.so")
+        link.type, link.linkname = tarfile.SYMTYPE, "/system/lib64/libc.so"
+        self.assertIn("is not a folder or a file", self.refused(lambda a: self._tar(a, (link, b""))))
+
+    def test_a_path_out_of_the_folder_is_refused(self) -> None:
+        for name in ("../evil", "usr/../../evil", "/evil", "usr//evil", "./evil"):
+            with self.subTest(name=name):
+                self.assertIn("path", self.refused(lambda a, n=name: self._tar(a, (tarfile.TarInfo(n), b"x"))))
+
+    def test_a_damaged_header_is_refused(self) -> None:
+        def build(archive: Path) -> None:
+            self._tar(archive, (tarfile.TarInfo("usr/a.h"), b"a"))
+            data = bytearray(archive.read_bytes())
+            data[0] ^= 0x01
+            archive.write_bytes(bytes(data))
+        self.assertIn("checksum", self.refused(build))
+
+    def test_an_archive_cut_short_is_refused(self) -> None:
+        def build(archive: Path) -> None:
+            self._tar(archive, (tarfile.TarInfo("usr/a.h"), b"a" * 2000))
+            archive.write_bytes(archive.read_bytes()[:1024])
+        self.assertIn("ends inside a file", self.refused(build))
+
+
 class StampTests(unittest.TestCase):
     def test_a_finished_stage_is_not_run_again(self) -> None:
         with tempfile.TemporaryDirectory(prefix="nk-tc-test-") as tmp:

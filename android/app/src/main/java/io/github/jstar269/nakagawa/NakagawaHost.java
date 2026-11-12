@@ -10,6 +10,7 @@ import android.system.ErrnoException;
 import android.system.Os;
 import android.util.Log;
 
+import java.io.BufferedInputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
@@ -26,6 +27,13 @@ import java.nio.charset.StandardCharsets;
  * data, settings, caches, logs and saves; NK_ANDROID_APP_DIR, the folder the APK's bundled files
  * (the "app" asset tree: UI fonts, bundled titles) are unpacked to, which becomes the working
  * directory; and NK_ANDROID_NATIVE_LIB_DIR, where the title runtime libraries are.
+ *
+ * <p>An APK built with -Pnk.toolchain also carries the on-device C toolchain (#360): its programs
+ * (libnk_clang.so, libnk_ld.so, libnk_make.so, libnk_python.so) are in the native library folder,
+ * and its archives in assets/toolchain/ are unpacked to toolchain/ in the files folder:
+ * sysroot/, clang-resource/ (clang's -resource-dir) and python/ (Python's standard library).
+ * NK_ANDROID_TOOLCHAIN_DIR names that folder, and PYTHONHOME the python/ inside it, which every
+ * program the app starts inherits.
  *
  * <p>The bundled files are unpacked into the app's files folder itself: SDL_GetBasePath() is
  * "./" on Android, and SDL opens a relative path against the files folder
@@ -83,6 +91,12 @@ final class NakagawaHost {
         setenv("NK_ANDROID_DATA_DIR", data.getAbsolutePath());
         setenv("NK_ANDROID_APP_DIR", app.getAbsolutePath());
         setenv("NK_ANDROID_NATIVE_LIB_DIR", context.getApplicationInfo().nativeLibraryDir);
+        File toolchain = new File(app, "toolchain");
+        boolean bundlesToolchain = hasAssets(context.getAssets(), "toolchain");
+        if (bundlesToolchain) {
+            setenv("NK_ANDROID_TOOLCHAIN_DIR", toolchain.getAbsolutePath());
+            setenv("PYTHONHOME", new File(toolchain, "python").getAbsolutePath());
+        }
         String stamp = apkStamp(context);
         File stampFile = new File(app, ".unpacked");
         if (stamp.equals(readText(stampFile))) return;
@@ -95,6 +109,8 @@ final class NakagawaHost {
                     copyAssetTree(context.getAssets(), "app/" + child, new File(app, child));
                 }
             }
+            deleteTree(toolchain);
+            if (bundlesToolchain) unpackToolchain(context.getAssets(), toolchain);
             writeText(stampFile, stamp);
             Log.i(TAG, "BUNDLED_FILES_UNPACKED dir=" + app + " stamp=" + stamp);
         } catch (IOException e) {
@@ -108,6 +124,32 @@ final class NakagawaHost {
             return info.getLongVersionCode() + "-" + info.lastUpdateTime;
         } catch (Exception e) {
             return "unknown";
+        }
+    }
+
+    /** assets/toolchain/'s archives and the folder under toolchain/ each is unpacked to. */
+    private static final String[][] TOOLCHAIN_ARCHIVES = {
+        {"sysroot.tar", "sysroot"},
+        {"clang-resource.tar", "clang-resource"},
+        {"python-stdlib.tar", "python"},
+    };
+
+    private static void unpackToolchain(AssetManager assets, File toolchain) throws IOException {
+        for (String[] archive : TOOLCHAIN_ARCHIVES) {
+            File target = new File(toolchain, archive[1]);
+            try (InputStream in = new BufferedInputStream(assets.open("toolchain/" + archive[0]), 1 << 16)) {
+                int files = ToolchainArchive.unpack(in, target);
+                Log.i(TAG, "TOOLCHAIN_UNPACKED archive=" + archive[0] + " files=" + files + " dir=" + target);
+            }
+        }
+    }
+
+    private static boolean hasAssets(AssetManager assets, String path) {
+        try {
+            String[] children = assets.list(path);
+            return children != null && children.length > 0;
+        } catch (IOException e) {
+            return false;
         }
     }
 

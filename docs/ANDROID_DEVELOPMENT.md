@@ -261,7 +261,8 @@ To compile a title's generated C on the phone, the APK can carry a C toolchain: 
 from the NDK. `tools/android_toolchain.py` builds clang, lld, the runtimes, the sysroot and make
 from pinned sources, and stages the official CPython Android release unchanged
 ([`android/toolchain/PROVENANCE.md`](../android/toolchain/PROVENANCE.md) has every pin and licence).
-The app does not use the toolchain yet; this section covers building it and putting it in the APK.
+The app unpacks it on the first start after an install or update, but nothing runs it yet; this
+section covers building it and putting it in the APK.
 
 1. Build and stage it on the PC, outside the repository. The inputs are the files that
    `PROVENANCE.md` and `android/toolchain/sysroot-inputs.json` pin: the LLVM, make and CPython
@@ -289,8 +290,14 @@ The app does not use the toolchain yet; this section covers building it and putt
 
 Android runs only the `lib*.so` files in an app's native library folder, so each program is
 named that way. lld picks its role from its program name, so `libnk_ld.so` starts `libnk_lld.so`
-as `ld.lld`; clang takes it with `-fuse-ld=<native library folder>/libnk_ld.so`. Python needs
-`PYTHONHOME` set to the folder where the app unpacks `python-stdlib.tar`.
+as `ld.lld`; clang takes it with `-fuse-ld=<native library folder>/libnk_ld.so`.
+
+The app (`NakagawaHost`, with `ToolchainArchive` reading the archives) unpacks
+`assets/toolchain/` into `toolchain/` in its files folder: `sysroot/` (clang's `--sysroot`),
+`clang-resource/` (its `-resource-dir`) and `python/` (Python's standard library). It sets
+`NK_ANDROID_TOOLCHAIN_DIR` to that folder and `PYTHONHOME` to `python/` inside it, and every
+program the app starts inherits both. The unpacker takes only folders and regular files, and
+refuses links, paths that leave the folder, damaged headers and archives that end early.
 
 ## Storage
 
