@@ -1944,7 +1944,8 @@ The Layer 2 mechanism of section 10.8, for a title that skips objects outside it
   `cull_untracked` counts the matrix uses it left alone once that table was full, and cull is confirmed only
   while that count is 0: a run with a nonzero count reports cull unavailable as `partial` (the matrices
   tracked before the table filled were widened, the rest were not), never as a complete run. The count is read
-  again when the run ends, on every exit path, so a table that fills in the last frame still reads partial.
+  again when the run ends, on every exit path that writes the report, so a table that fills in the last frame
+  still reads partial.
 - **What it changes:** for the matrices at `clip_offsets`, 4 floats per listed matrix (its x output row) of guest memory
   per call, only while Widescreen is on and the key is on; and so which objects the title submits, and any logic the
   title gates on the same visibility test (animation or AI updates on visible objects, fixed object or display-list
