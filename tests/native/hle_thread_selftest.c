@@ -51581,6 +51581,212 @@ static void test_aot_return_boundary_thread_isolation(void) {
     test_aot_return_boundary_nonlocal_return();
 }
 
+/* ---- a parked thread is one sr_yield has switched out (#2172) ---------------------------
+ *
+ * "Resume at a PC" in docs/ARCHITECTURE.md. A state-resumable body names the point it
+ * continues at before it enters sr_yield, and the real sr_yield then advances time, services
+ * what is due and only afterwards decides whether to switch. This runs that with the real
+ * scheduler: one thread at a loop edge whose yield services an alarm and then switches to a
+ * peer. Described from the alarm handler, inside the yield, the thread must be refused;
+ * described from the peer, after the yield's own switch, it is its one frame. */
+enum {
+    RESUME_PARK_ENTRY = 0x088a4000u,
+    RESUME_PARK_LOOP  = 0x088a4010u,   /* the loop edge's target */
+    RESUME_PARK_EDGE  = 0x088a4020u,   /* the edge's own PC */
+    RESUME_PARK_PEER  = 0x088a4100u,
+    RESUME_PARK_ALARM = 0x088a4200u,
+};
+
+static uint32_t s_resume_park_uid;
+static uint32_t s_resume_park_sp;
+static unsigned s_resume_park_handler_calls;
+static unsigned s_resume_park_peer_runs;
+static unsigned s_resume_park_passes;
+static int s_resume_park_running_in_handler;
+static int s_resume_park_in_yield;
+static int s_resume_park_marked_out;
+static int s_resume_park_peer_marked;
+static int s_resume_park_marked_after;
+static int s_resume_park_named_in_handler;
+static SrResumeStatus s_resume_park_in_handler;
+static SrResumeStatus s_resume_park_fiber_in_handler;
+static SrResumeStatus s_resume_park_from_peer;
+static SrResumeStatus s_resume_park_peer_itself;
+static SrResumeStatus s_resume_park_other_switch;
+static SrResumeStatus s_resume_park_in_import;
+static uint32_t s_resume_park_peer_uid;
+static int s_resume_park_peer_waited;
+static int s_resume_park_peer_marked_in_wait;
+static char s_resume_park_other_detail[160];
+static SrResumeFrame s_resume_park_frames[4];
+static uint32_t s_resume_park_count;
+static char s_resume_park_detail[160];
+
+static void resume_park_alarm_handler(CpuState *s) {
+    /* Interrupt context, under the parking thread's own sr_yield: its point is named, and
+     * the rest of the yield (this handler, the decision to switch) is still running. */
+    SrResumeFrame frames[4];
+    uint32_t count = 9u;
+    TCB *t = tcb_by_uid(s_resume_park_uid);
+    s_resume_park_handler_calls++;
+    s_resume_park_running_in_handler = t != NULL && t->state == TH_RUNNING;
+    s_resume_park_named_in_handler = s_resume_park_in_yield;
+    s_resume_park_in_handler = sched_resume_describe(s_resume_park_uid, frames, 4u, &count, NULL, 0u);
+    s_resume_park_fiber_in_handler = sr_resume_describe(NULL, s, frames, 4u, &count, NULL, 0u);
+    s->r[2] = 0u;   /* one shot */
+}
+
+static void resume_park_peer(CpuState *s) {
+    /* The parking thread is switched out, by its yield's own switch. */
+    SrResumeFrame frames[4];
+    uint32_t count = 9u;
+    TCB *t = tcb_by_uid(s_resume_park_uid);
+    s_resume_park_peer_runs++;
+    s_resume_park_marked_out = t != NULL && t->yield_switched;
+    s_resume_park_peer_marked = s_cur >= 0 && s_tcb[s_cur].yield_switched;
+    s_resume_park_from_peer = sched_resume_describe(
+        s_resume_park_uid, s_resume_park_frames, 4u, &s_resume_park_count,
+        s_resume_park_detail, sizeof s_resume_park_detail);
+    s_resume_park_peer_itself = sched_resume_describe(sched_current_uid(), frames, 4u, &count, NULL, 0u);
+    if (t != NULL) {
+        /* The same records inside an import (a flag check: a thread at the yield's own
+         * switch is in no import). */
+        t->import_active = 1;
+        s_resume_park_in_import = sched_resume_describe(s_resume_park_uid, frames, 4u, &count, NULL, 0u);
+        t->import_active = 0;
+    }
+    /* A real switch that is not the yield's own: the peer blocks in sceKernelDelayThread, the
+     * parked thread runs again, and it describes the peer (resume_park_body). */
+    s_resume_park_peer_uid = sched_current_uid();
+    CpuState sc;
+    memset(&sc, 0, sizeof sc);
+    sc.r[4] = 1000u;
+    (void)sr_syscall(&sc, NID_SCE_KERNEL_DELAY_THREAD);
+    s_resume_park_peer_waited = 1;
+    s->r[2] = 0u;
+}
+
+static void resume_park_body(CpuState *s) {
+    s_resume_park_uid = sched_current_uid();
+    /* The call record a host entry leaves. This harness enters a thread through its dispatch
+     * stand-in, whose record names no resume PC, so the body gives that record the fields
+     * dispatch_from_host would have left. */
+    SrAotReturnBoundary *root = sr_aot_return_boundary_top;
+    if (root == NULL || root->state != s) return;
+    root->resume_pc = SR_HOST_RETURN_PC;
+    root->has_resume_pc = 1u;
+    root->dispatch_owned = 1u;
+    root->callee = RESUME_PARK_ENTRY;
+    root->flags = SR_BOUNDARY_CALLEE | SR_BOUNDARY_HOST_ENTRY;
+    const uint32_t sp_entry = s->r[29];
+    s_resume_park_sp = sp_entry;
+
+    /* An alarm that is due when the yield services interrupts, and a peer of the same
+     * priority for the yield to switch to afterwards. */
+    CpuState sc;
+    memset(&sc, 0, sizeof sc);
+    sc.r[4] = 1000u;
+    sc.r[5] = RESUME_PARK_ALARM;
+    const uint32_t alarm = sr_syscall(&sc, NID_SCE_KERNEL_SET_ALARM);
+    const uint32_t peer = sched_create_thread(RESUME_PARK_PEER, s_tcb[s_cur].priority, 0x4000u);
+    if (peer != 0u) (void)sched_start_thread(peer, 0u, 0u);
+    for (unsigned i = 0; i < SCHED_ALARM_MAX; i++)
+        if (s_alarms[i].uid == alarm && s_vtime_us < s_alarms[i].deadline)
+            s_vtime_us = s_alarms[i].deadline;
+
+    /* The loop edge: the slice ends here. */
+    atomic_store_explicit(&sr_timeslice, 1, memory_order_relaxed);
+    s_resume_park_in_yield = 1;
+    SR_YIELD_PARK(s, RESUME_PARK_EDGE, RESUME_PARK_ENTRY, RESUME_PARK_LOOP,
+                  SR_RESUME_POINT_YIELD, sp_entry);
+    s_resume_park_in_yield = 0;
+    s_resume_park_marked_after = s_tcb[s_cur].yield_switched;
+    s_resume_park_passes++;
+    if (s_resume_park_peer_uid != 0u && !s_resume_park_peer_waited) {
+        /* The peer is out in its delay, switched by the wait and not by a yield. */
+        SrResumeFrame frames[4];
+        uint32_t count = 9u;
+        TCB *peer = tcb_by_uid(s_resume_park_peer_uid);
+        s_resume_park_peer_marked_in_wait = peer == NULL || peer->yield_switched;
+        s_resume_park_other_switch = sched_resume_describe(
+            s_resume_park_peer_uid, frames, 4u, &count,
+            s_resume_park_other_detail, sizeof s_resume_park_other_detail);
+    }
+}
+
+static void test_resume_describe_from_the_scheduler(void) {
+    reset_fixture();
+    sr_hle_init();
+    sr_test_guest_fn_reset();
+    sr_aot_return_boundaries_reset();
+    s_resume_park_uid = 0u;
+    s_resume_park_sp = 0u;
+    s_resume_park_handler_calls = 0u;
+    s_resume_park_peer_runs = 0u;
+    s_resume_park_passes = 0u;
+    s_resume_park_running_in_handler = 0;
+    s_resume_park_named_in_handler = 0;
+    s_resume_park_in_yield = 0;
+    s_resume_park_marked_out = 0;
+    s_resume_park_peer_marked = 1;
+    s_resume_park_marked_after = 1;
+    s_resume_park_in_handler = s_resume_park_fiber_in_handler = SR_RESUME_OK;
+    s_resume_park_from_peer = s_resume_park_peer_itself = SR_RESUME_BAD_FRAMES;
+    s_resume_park_other_switch = s_resume_park_in_import = SR_RESUME_OK;
+    s_resume_park_peer_uid = 0u;
+    s_resume_park_peer_waited = 0;
+    s_resume_park_peer_marked_in_wait = 1;
+    s_resume_park_other_detail[0] = '\0';
+    s_resume_park_count = 0u;
+    memset(s_resume_park_frames, 0, sizeof s_resume_park_frames);
+    s_resume_park_detail[0] = '\0';
+    sr_test_register_guest_fn(RESUME_PARK_ENTRY, resume_park_body);
+    sr_test_register_guest_fn(RESUME_PARK_PEER, resume_park_peer);
+    sr_test_register_guest_fn(RESUME_PARK_ALARM, resume_park_alarm_handler);
+    g_worker_uid = SR_ROLE_UID_NONE;
+    memset(s_cpu, 0, sizeof(*s_cpu));
+
+    sched_run(RESUME_PARK_ENTRY, 0u, 0u);
+
+    expect(s_resume_park_handler_calls == 1u && s_resume_park_peer_runs == 1u &&
+               s_resume_park_passes == 1u,
+           "resume describe: the yield serviced the alarm, switched to the peer and came back");
+    expect(s_resume_park_named_in_handler,
+           "resume describe: the alarm handler ran inside the yield, after the body named its point");
+    expect(s_resume_park_running_in_handler,
+           "resume describe: the yielding thread was still the running one in the handler");
+    expect(s_resume_park_in_handler == SR_RESUME_NOT_PARKED,
+           "resume describe: a thread inside its own yield, servicing an interrupt, is not parked");
+    expect(s_resume_park_fiber_in_handler == SR_RESUME_NOT_PARKED,
+           "resume describe: the running fiber is refused even with its point named");
+    expect(s_resume_park_from_peer == SR_RESUME_OK && s_resume_park_count == 1u &&
+               s_resume_park_frames[0].body == RESUME_PARK_ENTRY &&
+               s_resume_park_frames[0].pc == RESUME_PARK_LOOP &&
+               s_resume_park_frames[0].kind == SR_RESUME_POINT_YIELD &&
+               s_resume_park_frames[0].sp == s_resume_park_sp,
+           "resume describe: after the yield's own switch the thread is its one frame");
+    if (s_resume_park_from_peer != SR_RESUME_OK)
+        fprintf(stderr, "  resume describe: %s (%s)\n",
+                sr_resume_status_name(s_resume_park_from_peer), s_resume_park_detail);
+    expect(s_resume_park_marked_out && !s_resume_park_peer_marked && !s_resume_park_marked_after,
+           "resume describe: the yield's switch marks the thread it switched out, only that one, "
+           "and only until it runs again");
+    expect(s_resume_park_peer_itself == SR_RESUME_NOT_PARKED,
+           "resume describe: the thread that asks is running and is not parked");
+    expect(s_resume_park_other_switch == SR_RESUME_NOT_PARKED && !s_resume_park_peer_marked_in_wait &&
+               strstr(s_resume_park_other_detail, "not by sr_yield's own switch") != NULL,
+           "resume describe: a thread switched out by a blocking wait is unmarked and not parked");
+    if (s_resume_park_other_switch != SR_RESUME_NOT_PARKED || s_resume_park_peer_marked_in_wait)
+        fprintf(stderr, "  resume describe, blocked peer: %s marked=%d (%s)\n",
+                sr_resume_status_name(s_resume_park_other_switch), s_resume_park_peer_marked_in_wait,
+                s_resume_park_other_detail);
+    expect(s_resume_park_peer_waited, "resume describe: the peer's delay ended and it finished");
+    expect(s_resume_park_in_import == SR_RESUME_NOT_PARKED,
+           "resume describe: a thread inside an import is not parked");
+    sr_aot_return_boundaries_reset();
+    sr_test_guest_fn_reset();
+}
+
 /* #1375: a thread created through sceKernelCreateThread with entry 0 holds a null code
  * pointer. It stops by name when it is first scheduled, through the real coro_body and
  * recomp.c's stop, before any guest code runs; on this zero-based registry the offset-0
@@ -52607,6 +52813,13 @@ static int hle_selftest_main(int argc, char **argv) {
 #ifdef SR_HLE_AOT_BOUNDARY_TEST
     if (argc > 1 && strcmp(argv[1], "--null-thread-entry-child") == 0)
         return run_null_thread_entry_child();
+    if (argc > 1 && strcmp(argv[1], "--resume-describe") == 0) {
+        test_resume_describe_from_the_scheduler();
+        fprintf(stderr, "resume-describe-selftest: %d checks, %d failures\n",
+                s_checks, s_failures);
+        free(g_mem_base);
+        return s_failures ? 1 : 0;
+    }
     if (argc > 1 && strcmp(argv[1], "--aot-return-boundary") == 0) {
         test_aot_return_boundary_thread_isolation();
         test_aot_null_thread_entry(argv[0]);

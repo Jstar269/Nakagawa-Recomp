@@ -1592,6 +1592,91 @@ def _cell_spleak() -> list[int]:
     ]
 
 
+def _cell_rs_inner() -> list[int]:
+    """Resume at a PC (#2172): the innermost frame, a loop that calls a leaf.
+
+    Its loop edge is a yield point whose target, 0x10, is the `jal`: a thread parked there
+    continues by making the call again. Each pass stores its progress, so a resumed run that
+    repeats or skips a pass differs in memory as well as in registers.
+    """
+    return [
+        _i(0x09, SP, SP, -16),              # 0x00 addiu sp, sp, -16
+        _i(0x2B, SP, RA, 12),               # 0x04 sw    ra, 12(sp)
+        _i(0x2B, SP, S0, 8),                # 0x08 sw    s0, 8(sp)
+        _i(0x09, ZERO, S0, 3),              # 0x0c addiu s0, zero, 3
+        _j(0x03, 0x00),                     # 0x10 jal   leafA (patched + relocated)
+        _i(0x09, V0, V0, 1),                # 0x14 addiu v0, v0, 1  (slot)
+        _i(0x2B, A0, V0, 0x20),             # 0x18 sw    v0, 0x20(a0)
+        _i(0x09, S0, S0, -1),               # 0x1c addiu s0, s0, -1
+        _i(0x05, S0, ZERO, -5),             # 0x20 bne   s0, zero, 0x10
+        _i(0x09, T0, T0, 1),                # 0x24 addiu t0, t0, 1  (slot)
+        _i(0x23, SP, S0, 8),                # 0x28 lw    s0, 8(sp)
+        _i(0x23, SP, RA, 12),               # 0x2c lw    ra, 12(sp)
+        JR_RA,                              # 0x30
+        _i(0x09, SP, SP, 16),               # 0x34 addiu sp, sp, 16 (return slot)
+    ]
+
+
+def _cell_rs_mid() -> list[int]:
+    """Resume at a PC (#2172): the middle frame, two call sites of the same callee.
+
+    The frame below resumes at one of two return PCs, so a resume that entered the wrong call
+    point would store 0x28(a0) without 0x24(a0), or store both twice.
+    """
+    return [
+        _i(0x09, SP, SP, -16),              # 0x00 addiu sp, sp, -16
+        _i(0x2B, SP, RA, 12),               # 0x04 sw    ra, 12(sp)
+        _i(0x09, ZERO, V0, 0x100),          # 0x08 addiu v0, zero, 0x100
+        _j(0x03, 0x00),                     # 0x0c jal   rs_inner (patched + relocated)
+        _i(0x09, V0, V0, 2),                # 0x10 addiu v0, v0, 2  (slot)
+        _i(0x2B, A0, V0, 0x24),             # 0x14 sw    v0, 0x24(a0)
+        _j(0x03, 0x00),                     # 0x18 jal   rs_inner (patched + relocated)
+        _i(0x09, V0, V0, 4),                # 0x1c addiu v0, v0, 4  (slot)
+        _i(0x2B, A0, V0, 0x28),             # 0x20 sw    v0, 0x28(a0)
+        _i(0x23, SP, RA, 12),               # 0x24 lw    ra, 12(sp)
+        JR_RA,                              # 0x28
+        _i(0x09, SP, SP, 16),               # 0x2c addiu sp, sp, 16 (return slot)
+    ]
+
+
+def _cell_rs() -> list[int]:
+    """Resume at a PC (#2172): the outermost frame of a three-deep call chain.
+
+    0x14 is two resume points at once: the return PC of the first call, and the target of the
+    loop edge at 0x20. A thread suspended in the first call continues at 0x14 once the frame
+    above returns; a thread parked at the edge continues at 0x14 at once. The two differ in
+    what runs first, so a resume that keyed its points on the PC alone would take the wrong one.
+    """
+    return [
+        _i(0x09, SP, SP, -16),              # 0x00 addiu sp, sp, -16
+        _i(0x2B, SP, RA, 12),               # 0x04 sw    ra, 12(sp)
+        _i(0x09, ZERO, S1, 2),              # 0x08 addiu s1, zero, 2
+        _j(0x03, 0x00),                     # 0x0c jal   rs_mid (patched + relocated)
+        NOP,                                # 0x10 (slot)
+        _r(S2, V0, S2, 0, 0x21),            # 0x14 addu  s2, s2, v0
+        _j(0x03, 0x00),                     # 0x18 jal   rs_mid (patched + relocated)
+        _i(0x09, S1, S1, -1),               # 0x1c addiu s1, s1, -1 (slot)
+        _i(0x07, S1, ZERO, -4),             # 0x20 bgtz  s1, 0x14
+        _i(0x2B, A0, S2, 0x2C),             # 0x24 sw    s2, 0x2c(a0) (slot)
+        _i(0x23, SP, RA, 12),               # 0x28 lw    ra, 12(sp)
+        JR_RA,                              # 0x2c
+        _i(0x09, SP, SP, 16),               # 0x30 addiu sp, sp, 16 (return slot)
+    ]
+
+
+def _cell_rs_tail() -> list[int]:
+    """Resume at a PC (#2172): a body that leaves by a TAIL transfer to `rs_inner`.
+
+    The drain that runs `rs_inner` holds the chain's owed restore on the host stack, which a
+    frame list does not hold, so a thread parked under it must be refused when it is described.
+    """
+    return [
+        _i(0x09, ZERO, V0, 7),              # 0x00 addiu v0, zero, 7
+        _j(0x02, 0x00),                     # 0x04 j     rs_inner (patched + relocated)
+        _i(0x09, V0, V0, 1),                # 0x08 addiu v0, v0, 1  (slot)
+    ]
+
+
 def _cell_negpad() -> list[int]:
     """Scratch canvas for the fail-closed negative corpus.
 
@@ -1697,6 +1782,10 @@ CELLS: tuple[tuple[str, str, object], ...] = (
      _cell_xsibtail),
     ("xsibcall", "cross-tier: a linked call into the same interpreted body",
      _cell_xsibcall),
+    ("rs_inner", "resume at a PC: the innermost frame, a loop calling a leaf", _cell_rs_inner),
+    ("rs_mid", "resume at a PC: the middle frame, two call sites of one callee", _cell_rs_mid),
+    ("rs", "resume at a PC: three frames, a return PC that is also a loop head", _cell_rs),
+    ("rs_tail", "resume at a PC: a TAIL transfer into a body that parks", _cell_rs_tail),
     ("negpad", "fail-closed negative corpus scratch", _cell_negpad),
     ("ret", "cosim return trampoline", _cell_ret),
 )
@@ -1705,6 +1794,7 @@ CELLS: tuple[tuple[str, str, object], ...] = (
 # under test; the AOT/reference oracle enters its generated body directly.
 NON_ENTRY_CELLS = frozenset(
     {"link_leaf", "link_leaf_b", "ret", "negpad", "xstore", "xtailmid", "xread", "fpu_aot",
+     "rs_inner", "rs_mid",
      "xsibmid", "xsibpiece", "xnestmid", "xnestleaf", "rarewrite_callee", "rarewrite_target", "nonlocal_mid",
      "nonlocal_exit", "lj_f", "lj_g", "lj_set", "lj_jmp"}
 )
@@ -1823,6 +1913,18 @@ def build_text_segment() -> bytes:
     text[0 : len(head) * 4] = struct.pack(f"<{len(head)}I", *head)
     for _name, (offset, words) in layout.items():
         text[offset : offset + len(words) * 4] = struct.pack(f"<{len(words)}I", *words)
+
+    # The resume cells (#2172): rs calls rs_mid twice, rs_mid calls rs_inner twice, rs_inner
+    # calls leaf A in its loop, and rs_tail leaves by `j` to rs_inner.
+    for cell, slot, opcode, target in (
+        ("rs", 0x0C, 0x03, "rs_mid"),
+        ("rs", 0x18, 0x03, "rs_mid"),
+        ("rs_mid", 0x0C, 0x03, "rs_inner"),
+        ("rs_mid", 0x18, 0x03, "rs_inner"),
+        ("rs_inner", 0x10, 0x03, "link_leaf"),
+        ("rs_tail", 0x04, 0x02, "rs_inner"),
+    ):
+        struct.pack_into("<I", text, layout[cell][0] + slot, _j(opcode, layout[target][0]))
 
     # Patch every intra-fixture reference that names another cell's address.
     leaf_a = BASE + layout["link_leaf"][0]
@@ -2190,6 +2292,14 @@ def manifest_header() -> bytes:
         f"#define COSIM_XTAILMID      0x{BASE + layout['xtailmid'][0]:08x}u",
         f"#define COSIM_XREAD         0x{BASE + layout['xread'][0]:08x}u",
         f"#define COSIM_NEGPAD        0x{BASE + layout['negpad'][0]:08x}u",
+        f"#define COSIM_RS            0x{BASE + layout['rs'][0]:08x}u",
+        f"#define COSIM_RS_LOOP       0x{BASE + layout['rs'][0] + 0x14:08x}u",
+        f"#define COSIM_RS_MID        0x{BASE + layout['rs_mid'][0]:08x}u",
+        f"#define COSIM_RS_MID_RETURN 0x{BASE + layout['rs_mid'][0] + 0x14:08x}u",
+        f"#define COSIM_RS_INNER      0x{BASE + layout['rs_inner'][0]:08x}u",
+        f"#define COSIM_RS_INNER_LOOP 0x{BASE + layout['rs_inner'][0] + 0x10:08x}u",
+        f"#define COSIM_RS_INNER_RETURN 0x{BASE + layout['rs_inner'][0] + 0x18:08x}u",
+        f"#define COSIM_RS_TAIL       0x{BASE + layout['rs_tail'][0]:08x}u",
         f"#define COSIM_NEGPAD_WORDS  {len(layout['negpad'][1])}u",
         "",
         "/* X(name, guest_address, word_count, description, cross_tier_omit)",

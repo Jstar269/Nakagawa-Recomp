@@ -130,6 +130,14 @@ class CodegenOptions:
     # generated C byte-identical. RegisterPromotion below owns the rules.
     promote_registers: bool = False
 
+    # Resume points for direct save states (#2172; "Resume at a PC" in docs/ARCHITECTURE.md).
+    # When True, a callable body that keeps the ordinary frame contract can be entered again at
+    # the yield it parked in or at the return of a direct call it made: its entry tests
+    # sr_resume_request, its direct call sites record the body and its entry $sp on the call's
+    # return boundary, and its yields record where it continues (state_resume_pass). Set by
+    # --state-resume; default False leaves the generated C byte-identical.
+    state_resume: bool = False
+
     # --static-verify: compile-time-predicted register assertions (see the SR_SV_CHECK block).
     static_verify: bool = False
 
@@ -5174,9 +5182,290 @@ def emit_function(elf, start, ranges, known, resume_owners=None, resumable=False
             # dispatch-only bodies stay unchecked. Keyed on the CALL's own drain, so every
             # call form that uses emit_body_call is covered. See SR_HOST_STACK_CHECK in recomp.h.
             out.insert(1, emit_host_stack_check(G(start)))
+        if options.state_resume:
+            # A resume point restores one frame local, the entry $sp of a callable body. A
+            # body with another (a checked $sp load's verdict, promoted registers), with none
+            # (a live-frame resume entry) or behind a census wrapper stays as it is, and so
+            # does a runtime-placed module's, whose addresses are not constants.
+            if (resumable or sp_kept or stack_census or promo is not None
+                    or ADDRESS_SPACE.runtime_module):
+                STATE_RESUME_STATS["plain_bodies"] += 1
+            else:
+                before = out
+                out = state_resume_pass(out, start)
+                if out is before:
+                    STATE_RESUME_STATS["plain_bodies"] += 1
     finally:
         _BODY_SP_CHECKS.clear()
     return out
+
+_STATE_RESUME_ENTRY = re.compile(r"^    SR_YIELD\(s, (0x[0-9a-f]{8}u)\);$")
+_STATE_RESUME_YIELD = re.compile(
+    r"SR_YIELD\(s, (0x[0-9a-f]{8}u)\); goto L_([0-9a-f]{8});")
+_STATE_RESUME_CALL = re.compile(
+    r"if \(sr_aot_return_boundary_begin\(s, 0x([0-9a-f]{8})u, (0x[0-9a-f]{8}u), 1u\)\) return; "
+    r"f_([0-9a-f]{8})\(s\); SR_TAIL_DRAIN\(s\); "
+    r"if \(sr_aot_return_boundary_end\(s\)\) return;")
+#: What may follow a direct call in its line for the call to get a resume point: the close of
+#: the blocks it sits in. A point's label is jumped to from the body's resume switch, past
+#: every local those blocks declare, so nothing after the label may read one.
+_STATE_RESUME_CALL_TAIL = re.compile(r"^[\s}]*$")
+_STATE_RESUME_LABEL = re.compile(r"^\s*L_([0-9a-f]{8}): ;$")
+#: Comments and literals, whose braces and words are not code.
+_STATE_RESUME_NOT_CODE = re.compile(
+    r"/\*.*?\*/|\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'", re.S)
+_STATE_RESUME_TOKEN = re.compile(r"[A-Za-z_]\w*|[{};()]")
+#: Words that open a block which runs again or elsewhere.
+_STATE_RESUME_LOOPS = frozenset(("while", "for", "do", "switch"))
+#: A statement that starts with one of these is not a declaration, whatever follows.
+_STATE_RESUME_STATEMENTS = frozenset(
+    ("goto", "return", "else", "case", "default", "break", "continue", "if", "sizeof")
+) | _STATE_RESUME_LOOPS
+#: A statement that starts with one of these is a declaration.
+_STATE_RESUME_TYPES = frozenset(
+    ("void", "const", "volatile", "register", "static", "extern", "auto", "struct", "union",
+     "enum", "unsigned", "signed", "bool", "_Bool", "char", "short", "int", "long", "float",
+     "double", "typedef"))
+#: After a statement's first word: a second name, so the first was a type.
+_STATE_RESUME_DECLARED = re.compile(r"[\s*]+([A-Za-z_]\w*)")
+#: The names a function-scope statement may start with and be followed by its parentheses.
+#: Text alone cannot tell a call from a macro that declares a local (`DECLARE(x);`), so a
+#: statement shaped like a call is read as one only when its first word is a callable body
+#: (``f_XXXXXXXX``, a prototype in the generated ``_funcs.h``) or one of these runtime names,
+#: none of which declares anything at the statement's own scope (each is a function, an
+#: expression, or a ``do { } while (0)`` block; src/rt/recomp.h). Any other name leaves the
+#: body without resume points.
+_STATE_RESUME_CALLS = frozenset(
+    ("sr_begin", "sr_end", "sr_tail_record", "sr_swl_pc", "sr_swr_pc", "MEM_W8_PC", "MEM_W16_PC",
+     "MEM_W32_PC", "SR_YIELD", "SR_TAIL_DRAIN", "SR_HOST_STACK_CHECK"))
+_STATE_RESUME_BODY_NAME = re.compile(r"f_[0-9a-f]{8}")
+#: After a statement's first word: a label's colon, so a new statement starts.
+_STATE_RESUME_COLON = re.compile(r"\s*:(?!:)")
+#: After the parentheses that follow a statement's first word: a name or a bracket, so the
+#: statement is a declaration this reader cannot name (`uint32_t (*p)[2]`, `typeof(e) x`,
+#: an attribute, a macro that hides a type).
+_STATE_RESUME_AFTER_CALL = re.compile(r"\s*(?:[A-Za-z_\[*]|\()")
+STATE_RESUME_STATS = {"bodies": 0, "points": 0, "plain_bodies": 0}
+
+
+class _StateResumeScan:
+    """The block structure of a body's lines, as far as resume points need it.
+
+    A label the resume switch jumps to is entered with one local restored, the entry ``$sp``.
+    So the pass has to know, for every place it would put one, that no other C local is live
+    there and that the code after it is straight-line. This reads the lines once and records:
+
+    * ``depth[i]``: the open blocks after line ``i``, 1 being the function's own;
+    * ``looped(i, column)``: whether a block open at that column was opened by ``while``,
+      ``for``, ``do`` or ``switch`` (on this line or an earlier one);
+    * ``locals``: the names declared at function scope.
+
+    ``readable`` is False when a line cannot be read this way (a comment left open, a line
+    comment, a preprocessor line, a function-scope statement that may be a declaration whose
+    name it cannot give, a function-scope statement cut by the end of its line right after
+    its first word, a function-scope call of a name outside ``_STATE_RESUME_CALLS`` and the
+    callable bodies, which could be a macro that declares); the pass then leaves the whole
+    body alone.
+    """
+
+    def __init__(self, out):
+        self.readable = True
+        self.depth = []
+        self.locals = set()
+        self._starts = []
+        self._code = []
+        stack = []          # one flag per open block: opened by a loop word
+        # pending: a loop word whose block has not opened; start: the next word begins a
+        # function-scope statement; parens: open parentheses; called: the first word's own
+        # parenthesis depth, while its argument list is open.
+        state = {"pending": False, "start": False, "parens": 0, "called": None}
+        for line in out:
+            code = _STATE_RESUME_NOT_CODE.sub(lambda m: " " * len(m.group(0)), line)
+            if ("/*" in code or "*/" in code or "//" in code
+                    or any(part.lstrip().startswith("#") for part in code.split("\n"))):
+                self.readable = False
+                return
+            self._starts.append((list(stack), dict(state)))
+            self._code.append(code)
+            self._advance(code, len(code), stack, state, self.locals)
+            self.depth.append(len(stack))
+
+    def _advance(self, code, end, stack, state, declared):
+        after = 0           # where the statement being read began, in this line
+        for token in _STATE_RESUME_TOKEN.finditer(code, 0, end):
+            word = token.group(0)
+            if word == "(":
+                state["parens"] += 1
+                state["start"] = False
+            elif word == ")":
+                state["parens"] = max(0, state["parens"] - 1)
+                if state["called"] == state["parens"]:
+                    # The parentheses after a function-scope statement's first word have
+                    # closed. A call or a macro ends there or goes on with an operator.
+                    state["called"] = None
+                    if _STATE_RESUME_AFTER_CALL.match(code, token.end()):
+                        self.readable = False
+            elif word == "{":
+                # A brace inside parentheses is an expression's, not the loop's block.
+                loop = state["pending"] and state["parens"] == 0
+                stack.append(loop or (bool(stack) and stack[-1]))
+                if loop:
+                    state["pending"] = False
+                state["start"] = len(stack) == 1 and state["parens"] == 0
+                after = token.end()
+            elif word == "}":
+                if stack:
+                    stack.pop()
+                state["start"] = len(stack) == 1 and state["parens"] == 0
+                after = token.end()
+            elif word == ";":
+                if state["parens"] == 0:
+                    # A loop with no block of its own ends with its statement.
+                    state["pending"] = False
+                    state["start"] = len(stack) == 1
+                    after = token.end()
+            else:
+                if word in _STATE_RESUME_LOOPS:
+                    state["pending"] = True
+                # The statement's first word, with nothing before it: `(void)x;` opens with
+                # a parenthesis and declares nothing.
+                first = (state["start"] and len(stack) == 1 and state["parens"] == 0
+                         and not code[after:token.start()].strip())
+                state["start"] = False
+                if not first:
+                    continue
+                colon = _STATE_RESUME_COLON.match(code, token.end())
+                if colon is not None:
+                    # A label: the statement proper starts after it.
+                    state["start"] = True
+                    after = colon.end()
+                elif word in _STATE_RESUME_TYPES:
+                    self.readable = False
+                elif word not in _STATE_RESUME_STATEMENTS:
+                    second = _STATE_RESUME_DECLARED.match(code, token.end())
+                    if second is not None:
+                        declared.add(second.group(1))
+                    elif not code[token.end():].strip(" \t\n*"):
+                        self.readable = False   # the line ends before the statement says more
+                    elif code[token.end():].lstrip().startswith("("):
+                        if (word not in _STATE_RESUME_CALLS
+                                and not _STATE_RESUME_BODY_NAME.fullmatch(word)):
+                            self.readable = False   # a call or a macro that may declare
+                        state["called"] = state["parens"]
+
+    def looped(self, index, column):
+        """Whether a block open at ``column`` of line ``index`` belongs to a loop or switch."""
+        stack, state = list(self._starts[index][0]), dict(self._starts[index][1])
+        self._advance(self._code[index], column, stack, state, set())
+        return bool(stack) and stack[-1]
+
+
+def state_resume_pass(out, start):
+    """Give the body in ``out`` (emit_function's lines) its resume points (--state-resume, #2172).
+
+    Three statement shapes get one, and only as emit_function wrote them:
+
+    * the entry yield: ``SR_STATE_ENTRY`` tests ``sr_resume_request`` before it, so a resumed
+      entry counts no yield point, and the entry point continues right after it;
+    * a loop edge's ``SR_YIELD(s, pc); goto L_target;``: the body parks naming ``target``, and
+      the point is that label;
+    * a direct call of a callable body: the call's return boundary records this body and its
+      entry ``$sp``, and the point is a label between the callee and the call's own drain and
+      end check, which run after a resumed callee exactly as after a called one.
+
+    A point's label is entered from the resume switch with only the entry ``$sp`` restored
+    (_StateResumeScan). A body that declares any other function-scope local, or that the scan
+    cannot read, is returned as it is. A loop edge whose target label is inside a block is
+    left alone, and so is a call unless its line closes every block it sits in and none of
+    them belongs to a loop or switch: an enhancement site that reads a local of its own after
+    the call keeps its text.
+
+    A statement of any other shape keeps its text and has no point, so a thread parked or
+    suspended there is refused when it is described (sr_resume_describe); nothing is guessed.
+    Returns the new lines, or ``out`` itself when the body gets no point at all.
+
+    The body's first statement becomes ``SR_STATE_RESUME_TEST``, ahead of the host-stack check
+    of a body that makes direct calls: a resume makes that check in the switch, and
+    sr_resume_validate's question never reaches it.
+    """
+    body = f"0x{start:08x}u"
+    entry_at = next((i for i, line in enumerate(out) if _STATE_RESUME_ENTRY.match(line)), None)
+    if entry_at is None or _STATE_RESUME_ENTRY.match(out[entry_at]).group(1) != body:
+        return out
+    if not any(line.startswith("    uint32_t _sp_entry = s->r[29];") for line in out):
+        return out
+    scan = _StateResumeScan(out)
+    if not scan.readable or scan.locals != {"_sp_entry"} or scan.depth[entry_at] != 1:
+        return out
+    # Loop targets whose label is at function scope, before and after its own line.
+    scope_labels = {
+        match.group(1) for index, line in enumerate(out)
+        if (match := _STATE_RESUME_LABEL.match(line))
+        and scan.depth[index] == 1 and scan.depth[index - 1] == 1}
+    cases = [f"      case SR_RESUME_KEY(SR_RESUME_POINT_ENTRY, {body}): "
+             f"SR_RESUME_AT(_nk_e, SR_RESUME_POINT_ENTRY, 0u); goto _nk_enter;"]
+    yield_targets = set()
+    call_points = set()
+
+    def park(match):
+        site, target = match.group(1), match.group(2)
+        if target not in scope_labels:
+            return match.group(0)
+        if target not in yield_targets:
+            yield_targets.add(target)
+            cases.append(f"      case SR_RESUME_KEY(SR_RESUME_POINT_YIELD, 0x{target}u): "
+                         f"SR_RESUME_AT(_nk_e, SR_RESUME_POINT_YIELD, 0u); goto L_{target};")
+        return (f"SR_YIELD_PARK(s, {site}, {body}, 0x{target}u, SR_RESUME_POINT_YIELD, _sp_entry); "
+                f"goto L_{target};")
+
+    stack_check = emit_host_stack_check(body)
+    checks_stack = stack_check in out[:entry_at]
+    result = []
+    for index, line in enumerate(out):
+        if index == 1:
+            result.append("    SR_STATE_RESUME_TEST();")
+        if index == entry_at:
+            result.append(f"    SR_STATE_ENTRY(s, {body}); _nk_enter: ;")
+            continue
+        # The call is looked for in the line as emit_function wrote it: the scan's columns
+        # are that line's.
+        calls = list(_STATE_RESUME_CALL.finditer(line))
+        call = calls[0] if len(calls) == 1 else None
+        if (call is not None and call.group(1) not in call_points
+                and scan.depth[index] == 1
+                and not scan.looped(index, call.start())
+                and _STATE_RESUME_CALL_TAIL.match(line[call.end():])):
+            resume, call_pc, callee = call.group(1), call.group(2), call.group(3)
+            call_points.add(resume)
+            cases.append(f"      case SR_RESUME_KEY(SR_RESUME_POINT_CALL, 0x{resume}u): "
+                         f"SR_RESUME_AT(_nk_e, SR_RESUME_POINT_CALL, 0x{callee}u); sr_resume_inner(s); "
+                         f"goto R_{resume};")
+            line = (_STATE_RESUME_YIELD.sub(park, line[:call.start()])
+                    + f"if (sr_aot_return_boundary_begin_at(s, 0x{resume}u, {call_pc}, "
+                      f"0x{callee}u, {body}, _sp_entry)) return; "
+                      f"f_{callee}(s); R_{resume}: SR_TAIL_DRAIN(s); "
+                      f"if (sr_aot_return_boundary_end(s)) return;"
+                    + line[call.end():])
+        else:
+            line = _STATE_RESUME_YIELD.sub(park, line)
+        result.append(line)
+    close = max(i for i, line in enumerate(result) if line == "}")
+    result[close:close] = [
+        "    return;",
+        "  _nk_resume: {",
+        f"    const SrResumeEntry _nk_e = sr_resume_take(s, {body});",
+        *([f"    if (!_nk_e.probe) {{ {stack_check.strip()} }}"] if checks_stack else []),
+        "    _sp_entry = _nk_e.sp;",
+        "    switch (SR_RESUME_KEY(_nk_e.kind, _nk_e.pc)) {",
+        *cases,
+        f"      default: sr_resume_no_point(s, {body}, &_nk_e); return;",
+        "    }",
+        "  }",
+    ]
+    STATE_RESUME_STATS["bodies"] += 1
+    STATE_RESUME_STATS["points"] += len(cases)
+    return result
+
 
 #: ``--extra-elf=<module>@runtime``: the module is placed by the runtime's guest
 #: allocator when the game loads it, so it is translated position-independently.
@@ -6048,6 +6337,7 @@ def _command_line_parser():
     flag("--lle-import-seam", "route import stubs through sr_import_call")
     flag("--stale-detect", "TD-27 stale-code detection")
     flag("--promote-registers", "#284 register promotion")
+    flag("--state-resume", "#2172 resume points for direct save states")
     flag("--nan-trap", "SR_NAN_TRAP result checks")
     return parser
 
@@ -6097,6 +6387,19 @@ def _validated_options(cli):
         backend = cli.backend
         if backend not in ("c", "llvm"):
             raise _Refusal(2, f"--backend must be c or llvm, not {backend!r}\n")
+    if cli.state_resume:
+        # #2172: a resume point restores a C body's one frame local. A census wrapper, a
+        # promoted register and an LLVM body each hold state a point does not restore.
+        # With the LLE CPU every direct call is followed on its line by a flow check, so no
+        # call would get a point: refused by name instead of translating a build in which
+        # only one-frame threads can be described.
+        for option, given in (("--stack-census", cli.stack_census),
+                              ("--promote-registers", cli.promote_registers),
+                              ("--backend=llvm", backend == "llvm"),
+                              ("--lle-cpu", cli.lle_cpu),
+                              ("--lle-import-seam", cli.lle_import_seam)):
+            if given:
+                raise _Refusal(2, f"--state-resume cannot be combined with {option}\n")
     threshold_arg = cli.region_split_threshold
     threshold = None
     if threshold_arg is not None:
@@ -6304,6 +6607,10 @@ def _apply_options(cli, checked, options):
         # instructions, written back at every boundary. Default (absent)
         # leaves the generated C byte-identical.
         options.promote_registers = True
+    if cli.state_resume:
+        # #2172: resume points for direct save states. Default (absent) leaves the
+        # generated C byte-identical.
+        options.state_resume = True
     if cli.nan_trap:
         # SR_NAN_TRAP: follow every FPU/VFPU result write with a check that
         # names the instruction whose result went non-finite from all-finite
@@ -6828,6 +7135,9 @@ def _write_chunks(base_name, boundaries, renames, backend, llvm_lowered, llvm_fa
                 prefix = m.group(1)
                 a_val = int(m.group(2), 16)
                 parts.append(f"    sr_register(0x{a_val:08x}u, {prefix}_{a_val:08x});\n")
+                if "\n  _nk_resume: {\n" in ft:
+                    parts.append(f"    sr_resume_register_body(0x{a_val:08x}u, "
+                                 f"{prefix}_{a_val:08x});\n")
         parts.append("}\n")
         with open(f"{base_name}_{i}.c", "w", encoding="ascii", newline="\n") as f:
             f.write(rename_generated_entries("".join(parts), renames))
@@ -6900,6 +7210,10 @@ def _print_summary(out_c, base_name, num_files, funcs_per_chunk, chunk_target_by
               f"across {SV_STATS['funcs']} functions")
     if options.promote_registers:
         print(promotion_summary())
+    if options.state_resume:
+        print(f"state-resume: {STATE_RESUME_STATS['points']} resume points in "
+              f"{STATE_RESUME_STATS['bodies']} bodies; "
+              f"{STATE_RESUME_STATS['plain_bodies']} bodies have none")
 
 
 

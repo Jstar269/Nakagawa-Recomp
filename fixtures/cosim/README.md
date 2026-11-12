@@ -155,6 +155,84 @@ even though it is also unwound twice: the generated entry epilogue restores it f
 the declaration was written from measurement rather than expectation — the first draft
 named `r29` and the comparator rejected it.
 
+## Resume at a PC
+
+```bash
+mingw32-make cosim-selftest-resume
+```
+
+This lane translates the same cells with `codegen.py --state-resume` and adds the test of the
+resume-at-PC contract (#2172,
+[`docs/ARCHITECTURE.md`](../../docs/ARCHITECTURE.md#resume-at-a-pc-direct-save-states)). It is a
+comparison of generated code with generated code: a run that starts from a parked thread's data
+against the run that was never interrupted.
+
+The harness has no scheduler, so its `sr_yield` is the park. A thread is parked once `sr_yield`'s
+own switch has switched it out, and the harness does what that switch does to the call records:
+it swaps them out of the running side, as `sched_run` does around every fiber switch, describes
+the swapped-out records and swaps them back. A case turns the slice counter on and starts it at
+`n`, so the `n`-th yield point the run passes enters `sr_yield`; there the harness copies the
+registers and the memory window as a save state would, takes the frame list that way, and
+returns. One run is therefore both the uninterrupted reference and the source of the snapshot. The resumed run re-registers every body, empties the return-boundary stack,
+writes the parked memory and registers back and calls `dispatch_resume_from_host` with the frame
+list: no host frame of the first run exists in it. Every yield point of a case is tried.
+
+Compared, all exactly: the whole `CpuState` (`pc` too, since neither run is the interpreter), the
+memory window, the guest writes after the park, the instruction trace after the park, and the
+slice counter, which catches a resume that counted a yield point the uninterrupted run did not.
+The reference run writes its trace to a second file from the park on, so the two traces start at
+the same instruction and must be equal in length and line for line.
+
+Each resume is then repeated with the slice counter at 1, so the resumed thread parks again at
+its first yield point. That second park (registers, memory, the description and the frame list)
+must equal the second park of an uninterrupted run that parked at the same two points. This is the
+check on the rebuilt call records: a resumed thread has to be describable like any other. The
+reference parks twice too, because a park writes `s->pc`.
+
+| case | what its yield points cover |
+| --- | --- |
+| `rs` | `rs` calls `rs_mid` in a loop, `rs_mid` calls `rs_inner` from two call sites, `rs_inner` calls leaf A in a loop: parks at an entry four frames deep, at a loop edge three deep, and at a loop edge in the outermost frame. `rs + 0x14` is a call's return PC and that loop's target, so both kinds of point exist at one PC |
+| `link` | a direct call in a conventional frame |
+| `zlink` | a direct call behind a taken linked branch: the point's label sits inside the branch's block |
+| `rs_tail` | its own entry resumes; `rs_inner` then runs under a tail drain and every park there must be refused as `tail-chain-live` |
+| `linkr` | its own entry resumes; its `jalr` goes through the dispatcher and every park under it must be refused as `frame-not-described` |
+| `xtailmid` | entered by the host with no translation of its own (lane `MIXED`): the interpreter runs it and hands the frame to `xread`, whose park must be refused as `root-not-host-entry` in every build |
+| `flow-again` | the host enters the harness's trampoline, which leaves exception flow to `rs`; the dispatcher dispatches `rs` under the same call, and every park in it and under it must be refused as `root-not-host-entry` in every build |
+
+The first yield point of every case is the dispatcher's own, before any call record exists, and
+must be refused as `no-frames`; `xtailmid` and `flow-again` meet two of them.
+
+Two fail-closed corpora run from one snapshot four frames deep. Frame lists the build cannot
+resume (no frames, an unknown kind, a call point innermost, a parked point below a frame, an
+unregistered body, a registered body with no points, a return PC that is no call's, a call's
+return PC offered as a parked point, a frame the call below did not enter, a resume while one is
+in progress, a fiber that already holds a call record) must each be refused by name with the registers, the memory, the trace, the
+write log and the slice counter untouched; the body with no points must not be called. Call
+records the frame list cannot describe are built from the same snapshot, first checked to
+describe as exactly that list, then changed one field at a time, and each must be refused by
+name. Five more refusals are staged at the live park of each `rs` yield point: another
+`CpuState`, room for one frame, an open callback scope, and two for the running fiber. Inside
+the yield, before any switch, the body has named its point and the running fiber must still be
+refused as `not-parked`; the hook then services an interrupt the way `sr_yield` does (a handler in
+a scope on the same fiber) and the fiber must be refused again. These two show only that the
+running fiber is never described; which switch parks a thread is the scheduler test's to show. One more is a
+live run of its own: a
+callback entered, in a scope, while the thread's own dispatch has begun no call record; its body
+reaches a yield point there and must be refused as `callback-or-interrupt-live` in every build,
+though its call record is the fiber's first and a host entry's own.
+
+The ordinary lanes run the same cases on output without resume points. There every thread must be
+refused, and a hand-written frame for `rs` must be refused as `body-not-resumable`.
+
+What this does not prove: the harness's park is a stub and it has one thread, so nothing here
+runs the real `sr_yield` or describes another fiber's records, and the uninterrupted run and the
+snapshot come from one process. `mingw32-make aot-return-boundary-thread-selftest` covers the
+first two with the real scheduler (`test_resume_describe_from_the_scheduler` in
+`tests/native/hle_thread_selftest.c`): a thread whose yield services an alarm and then switches to
+a peer is refused from the alarm handler and described from the peer, on call records the test
+begins by hand, since that harness has no generated bodies. A thread parked in a blocking import,
+under a dispatched call or under a tail drain is refused, not resumed.
+
 ## Fail-closed negative corpus
 
 The comparison above only ever exercises *successful* execution, so none of the
@@ -233,6 +311,7 @@ returns through its callee's `jr $ra` instead.
 | `fpu_moves` | raw `mtc1`/`mov.s`/`mfc1` and `swc1`/`lwc1` traffic for NaNs, denormals, negative zero and integer aliases |
 | `fpu_compare` | all `c.cond.s` predicates with quiet/signaling NaNs on either operand side; checks FCC0 results |
 | `fpu_aot` | AOT-only instruction inventory checked against the independent scalar-FPU reference |
+| `rs` / `rs_mid` / `rs_inner` / `rs_tail` | **resume at a PC**: a three-deep call chain whose loops park, and a TAIL transfer into a body that parks (see above) |
 | `xcall` / `xtail` / `xnest` | **cross-tier** — a returning call and a tail transfer that each drop into the interpreter mid-run and hand back, and an interpreted caller that calls back into a registered body |
 | `spleak` | **positive control** — an unbalanced `$sp` epilogue |
 
@@ -350,6 +429,18 @@ The campaign counts any divergence as a kill; the first it reports for these is 
 `bjoin` (its not-taken `beq`) and in `bslot` respectively, the cells built for them.
 Making `beql $zero, $zero` a terminator too would be an equivalent mutant (its slot
 and target are the same either way when taken) and is not claimed.
+
+Six more generator mutants damage the pass that writes resume points, and run in a lane of
+their own against the resume lane (`--state-resume`): a call point that continues without running
+the frame above it, a loop edge that parks naming its own PC instead of its target (killed as a
+description the build then refuses), a loop point that runs the body from its entry (a point that
+exists and validates, killed by the comparison), an entry that
+counts its yield point again when it is resumed, a resumed body that takes the live `$sp` for its
+entry `$sp`, and a call whose resume label sits after its drain and end check. The entry mutant
+changes no register and no byte of memory: only the yield-point count and the second park catch it.
+The rule that a point's label sits at function scope has no mutant: the fixture has no body it
+would change, so `StateResumeTests` in `tools/test_codegen_continuations.py` pins it on constructed
+bodies.
 
 Two interpreter guards are not killed by this gate, and each is layering rather than a
 hole:
