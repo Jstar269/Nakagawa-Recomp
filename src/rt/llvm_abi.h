@@ -50,4 +50,8 @@ void sr_llvm_tail_record(CpuState *s, uint32_t target, RecompFn fn,
                          uint32_t restore_sp, uint32_t owes_restore);
 void sr_llvm_tail_drain(CpuState *s);
 
+/* sr_sv_check: a --static-verify register assertion. The C chunks define it as a
+   static function (tools/codegen.py SR_SV_CHECK); this is the same body. */
+void sr_llvm_sv_check(CpuState *s, uint32_t pc, int reg, uint32_t expect);
+
 #endif /* SR_LLVM_ABI_H */
