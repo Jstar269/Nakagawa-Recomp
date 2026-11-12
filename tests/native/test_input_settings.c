@@ -133,13 +133,17 @@ static void test_binding_words_fit(void) {
             check_binding_words("a host axis", words);
         }
     }
-    /* A mouse button (#1791) beside a key, either way round. */
+    /* A mouse button (#1791) alone, and beside Space, either way round. Like two long key
+     * names, a click beside a long key ("Middle Click / Page Down") may end in "...". */
     for (int key = NK_HOST_KEY_MOUSE_FIRST; key < NK_HOST_KEY_LIMIT; key++) {
         state.profile.psp_keys[NK_PSP_BTN_CROSS].primary = key;
-        state.profile.psp_keys[NK_PSP_BTN_CROSS].secondary = nk_host_key_from_name("pagedown");
+        state.profile.psp_keys[NK_PSP_BTN_CROSS].secondary = NK_HOST_KEY_NONE;
+        input_settings_format_key_binding(&state, INPUT_CONTROL_BTN_CROSS, words, sizeof(words));
+        check_binding_words("a mouse button", words);
+        state.profile.psp_keys[NK_PSP_BTN_CROSS].secondary = nk_host_key_from_name("space");
         input_settings_format_key_binding(&state, INPUT_CONTROL_BTN_CROSS, words, sizeof(words));
         check_binding_words("a mouse button and a key", words);
-        state.profile.psp_keys[NK_PSP_BTN_CROSS].primary = nk_host_key_from_name("pagedown");
+        state.profile.psp_keys[NK_PSP_BTN_CROSS].primary = nk_host_key_from_name("space");
         state.profile.psp_keys[NK_PSP_BTN_CROSS].secondary = key;
         input_settings_format_key_binding(&state, INPUT_CONTROL_BTN_CROSS, words, sizeof(words));
         check_binding_words("a key and a mouse button", words);

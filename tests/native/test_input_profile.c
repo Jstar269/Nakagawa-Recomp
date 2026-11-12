@@ -3485,6 +3485,49 @@ static void test_versioned_profile_files(void) {
     versioned_profile_case("fixtures/user_data/input_profile_v2.json", 2, 1);
     versioned_profile_case("fixtures/user_data/v0.0.1/input_profile.json", 3, 1);
 
+    /* Schema 5 -> 6 on disk: a schema 5 profile (this writer's output with no mouse button,
+     * labelled 5, the members a schema 5 player wrote) loads as the same mapping, and the
+     * first save keeps it byte for byte as .v5.bak and writes schema 6. */
+    {
+        static NkInputProfileFile doc;
+        static NkInputProfileFile reloaded;
+        char path[512], backup[560], diag[256];
+        NkInputProfile five;
+        nk_input_profile_init_default(&five);
+        five.aim.mouse = true;
+        five.aim.sensitivity = 300;
+        snprintf(path, sizeof(path), VERSIONED_PROFILE_ROOT "/profile_v5.json");
+        snprintf(backup, sizeof(backup), "%s.v5.bak", path);
+        remove(path);
+        remove(backup);
+        assert(nk_input_profile_save(&five, path, diag, sizeof(diag)) == NK_OK);
+        char *text = versioned_read(path);
+        assert(text != NULL);
+        char *version = strstr(text, "\"schema_version\": 6,");
+        assert(version != NULL);
+        version[strlen("\"schema_version\": ")] = '5';
+        versioned_write(path, text);
+
+        assert(nk_input_profile_file_load(&doc, path, diag, sizeof(diag)) == NK_OK);
+        assert(doc.schema_version == NK_INPUT_PROFILE_SCHEMA_VERSION);
+        assert(memcmp(doc.global.psp_keys, five.psp_keys, sizeof(five.psp_keys)) == 0);
+        assert(memcmp(doc.global.stick_keys, five.stick_keys, sizeof(five.stick_keys)) == 0);
+        assert(memcmp(&doc.global.aim, &five.aim, sizeof(five.aim)) == 0);
+
+        assert(nk_input_profile_file_save(&doc, path, diag, sizeof(diag)) == NK_OK);
+        char *kept = versioned_read(backup);
+        assert(kept != NULL && strcmp(kept, text) == 0);
+        char *saved = versioned_read(path);
+        assert(saved != NULL && strstr(saved, "\"schema_version\": 6,") != NULL);
+        assert(nk_input_profile_file_load(&reloaded, path, diag, sizeof(diag)) == NK_OK);
+        assert(memcmp(&reloaded.global, &doc.global, sizeof(doc.global)) == 0);
+        free(text);
+        free(kept);
+        free(saved);
+        remove(backup);
+        remove(path);
+    }
+
     /* A newer player's profile is refused by name, and a save leaves it as it is. */
     char newer[160];
     snprintf(newer, sizeof(newer),
