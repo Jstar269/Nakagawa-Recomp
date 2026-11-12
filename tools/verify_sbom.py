@@ -637,26 +637,42 @@ def verify_sbom_matches(
     return errors, verified_digests
 
 
+def _binary_name(value: object) -> str:
+    """A name as the binding compares it: forward slashes, no leading ``./``."""
+    name = str(value).replace("\\", "/")
+    while name.startswith("./"):
+        name = name[2:]
+    return name
+
+
+def _is_binary_name(name: str) -> bool:
+    lowered = name.lower()
+    return lowered.endswith(".dll") or lowered.startswith("bin/")
+
+
 def _binary_hashes_spdx23(document: dict) -> list[tuple[str, list[str]]]:
     found = []
     for package in document.get("packages") or []:
         if not isinstance(package, dict):
             continue
-        name = str(package.get("name", ""))
-        file_name = str(package.get("packageFileName", ""))
+        name = _binary_name(package.get("name", ""))
+        file_name = _binary_name(package.get("packageFileName", ""))
         key = None
         if name.lower().endswith(".dll"):
-            # A DLL package names its file in bin/; any other path counts as another binary.
-            key = file_name if file_name and file_name.lower() != f"bin/{name}".lower() else name
-        elif file_name.startswith("bin/"):
+            # A DLL package names its file in bin/; a missing or other path is another element.
+            if not file_name:
+                key = f"{name} (no packageFileName)"
+            else:
+                key = name if file_name.lower() == f"bin/{name}".lower() else file_name
+        elif _is_binary_name(file_name):
             key = file_name
         if key is not None:
             found.append((key, [
                 str(item.get("checksumValue")) for item in package.get("checksums") or []
                 if isinstance(item, dict) and item.get("algorithm") == "SHA256"]))
     for item in document.get("files") or []:
-        if isinstance(item, dict) and str(item.get("fileName", "")).startswith("bin/"):
-            found.append((str(item["fileName"]), [
+        if isinstance(item, dict) and _is_binary_name(_binary_name(item.get("fileName", ""))):
+            found.append((_binary_name(item["fileName"]), [
                 str(checksum.get("checksumValue")) for checksum in item.get("checksums") or []
                 if isinstance(checksum, dict) and checksum.get("algorithm") == "SHA256"]))
     return found
@@ -667,8 +683,8 @@ def _binary_hashes_spdx3(document: dict) -> list[tuple[str, list[str]]]:
     for node in document.get("@graph") or []:
         if not isinstance(node, dict):
             continue
-        name = str(node.get("spdx:name", ""))
-        if name.lower().endswith(".dll") or name.startswith("bin/"):
+        name = _binary_name(node.get("spdx:name", ""))
+        if _is_binary_name(name):
             found.append((name, [
                 str(item.get("spdx:hashValue")) for item in node.get("spdx:verifiedUsing") or []
                 if isinstance(item, dict) and item.get("spdx:algorithm") == "sha256"]))
@@ -680,8 +696,8 @@ def _binary_hashes_cyclonedx(document: dict) -> list[tuple[str, list[str]]]:
     for component in document.get("components") or []:
         if not isinstance(component, dict):
             continue
-        name = str(component.get("name", ""))
-        if name.lower().endswith(".dll") or name.startswith("bin/"):
+        name = _binary_name(component.get("name", ""))
+        if _is_binary_name(name):
             found.append((name, [
                 str(item.get("content")) for item in component.get("hashes") or []
                 if isinstance(item, dict) and item.get("alg") == "SHA-256"]))

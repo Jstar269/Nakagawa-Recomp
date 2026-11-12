@@ -467,9 +467,17 @@ class TestRuntimeManifestBinding(unittest.TestCase):
             "spdx": (lambda d: next(p for p in d["packages"] if p["name"] == "SDL3.dll").update(
                 packageFileName="bin/other.dll"),
                 "SBOM_BINARY_NOT_SHIPPED: SPDX 2.3 SBOM names bin/other.dll"),
+            "spdx-no-path": (lambda d: next(p for p in d["packages"] if p["name"] == "SDL3.dll").pop(
+                "packageFileName"),
+                "SBOM_BINARY_NOT_SHIPPED: SPDX 2.3 SBOM names sdl3.dll (no packagefilename)"),
+            "cyclonedx-case": (lambda d: d["components"].append(
+                {"type": "file", "name": "./BIN/nakagawa_player.exe",
+                 "hashes": [{"alg": "SHA-256", "content": wrong}]}),
+                "SBOM_BINARY_COUNT: CycloneDX SBOM has 2 element(s) for bin/nakagawa_player.exe"),
         }
-        for kind, (change, message) in cases.items():
-            with self.subTest(kind=kind):
+        for case, (change, message) in cases.items():
+            kind = case.split("-")[0]
+            with self.subTest(case=case):
                 original = self.load(kind)
                 document = json.loads(json.dumps(original))
                 change(document)
@@ -484,7 +492,8 @@ class TestRuntimeManifestBinding(unittest.TestCase):
         self.assertEqual(self.generate()[0], 0)
         code, stderr = self.verify()
         self.assertEqual(code, 1)
-        self.assertIn("SBOM_BINARY_HASH: SPDX 2.3 SBOM records SHA-256 [] for SDL3.dll", stderr)
+        self.assertIn("SBOM_BINARY_COUNT: SPDX 2.3 SBOM has 0 element(s) for SDL3.dll", stderr)
+        self.assertIn("SBOM_BINARY_HASH: SPDX 3 SBOM records SHA-256 [] for SDL3.dll", stderr)
         self.assertIn("SBOM_BINARY_COUNT: CycloneDX SBOM has 0 element(s) for bin/nakagawa_player.exe", stderr)
 
     def test_verification_rejects_a_changed_hash_in_each_format(self):
