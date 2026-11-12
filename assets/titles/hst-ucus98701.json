@@ -61,10 +61,7 @@
     "schema_version": 1,
     "fallback_entry": 2728032,
     "worker_thread_entry": 288968,
-    "launcher_thread_entry": 2728308,
-    "dispatch_aliases": [
-      {"from": 198992, "to": 198984}
-    ]
+    "launcher_thread_entry": 2728308
   },
   "input": {
     "analog_dead_zone": {"shape": "square", "counts": 64}
