@@ -459,12 +459,12 @@ The launcher always exports `SR_ACE`, so an inherited value cannot opt a launch 
 `v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;smooth=x2;sas=off;tess=off;twin=off`. `tier` (`enhanced` or `ace`) only names the
 run, in the game badge, the pause menu and the stamps; a line without it is an Enhanced run. `stick` (the title's
 stick dead zone, 1 to 126, section 11.3.11), `load` (`fast` or `off`, section 11.3.10), `depth` (`32` or `off`,
-section 10.20), `ssaa` (`2`, `4` or `off`, section 10.21) and `cull` (`on` or `off`, section 11.3.6) are the other
-keys a line may leave out: a missing `stick`, `load`, `depth`, `ssaa` or `cull` is off, `stick=<counts>`,
-`load=fast` and `cull=on` need `tier=ace` (`depth=32` and `ssaa=2|4` do not), the launcher writes `;load=fast` and
-`;cull=on` only for an Ace launch with that part on and `;ssaa=2` or `;ssaa=4` for an Enhanced or Ace launch with
-supersampling on, and no launcher writes `depth` yet (section 11.3.12). A line writes them in that order, `cull`
-last. Every
+section 10.20), `ssaa` (`2`, `4` or `off`, section 10.21), `peak` (`limit` or `off`, section 10.22) and `cull` (`on`
+or `off`, section 11.3.6) are the other keys a line may leave out: a missing `stick`, `load`, `depth`, `ssaa`,
+`peak` or `cull` is off, `stick=<counts>`, `load=fast` and `cull=on` need `tier=ace` (`depth=32`, `ssaa=2|4` and
+`peak=limit` do not), the launcher writes `;load=fast` and `;cull=on` only for an Ace launch with that part on and
+`;ssaa=2` or `;ssaa=4` for an Enhanced or Ace launch with supersampling on, and no launcher writes `depth` or
+`peak` yet (sections 11.3.12 and 10.22). A line writes them in that order, `cull` last. Every
 other key is required, in any order, each once; a value for a feature this build does not carry (`smooth=match`)
 refuses the line. So does anything else: the run is Authentic and one `ACE_MODE: refused (<reason>)` line says why.
 Unset is off. With Enhanced or Ace on, the launcher also exports `SR_ACE_REPORT`, the per-run report under
@@ -514,7 +514,8 @@ the device is created with no feature outside Ace.
 - **Supersampling:** `ssaa=2` or `ssaa=4` changes only the image the presenter shows; the frames a present commits
   to guest VRAM are those of a run without it (section 10.21).
 - **Sound:** `sas=sinc` writes band-limited sample values into the guest's SAS output buffer, so it is a
-  guest-visible item. Its entry is section 11.3.1.
+  guest-visible item. Its entry is section 11.3.1. `peak=limit` changes only what the host plays: the guest's SAS
+  buffer keeps the PSP's saturated bytes (section 10.22).
 - **Patches:** `tess=2` to `tess=4` draws every triangle patch with finer triangles, which changes the frames a
   present commits to guest VRAM, and under `SR_GE_TIMING=1` it alters the GE timing model's clocks. It is a
   guest-visible item. Its entry is section 11.3.7.
@@ -1429,9 +1430,72 @@ what the guest draws into, reads or waits for. The code is the comment at `s_ssa
   a forced largest side. `ace-selftest` checks the key's parsing,
   order, report and words; `test_player_state` the setting, its presets and its launch line.
 
+### 10.22. Unclipped SAS Mixes Through a True-Peak Limiter (`peak=limit`)
+
+The PSP's SAS core adds a grain's voices, and with `__sceSasCoreWithMix` the caller's own PCM, then stores the sum
+as int16, saturated. Some games clip their own sound this way: #2135 counted 126 full-scale samples in a 4 s burst
+at the Hot Shots Tennis (UCUS98701) title logo on a PSP-3000. Authentic keeps doing exactly that. `peak=limit`
+(#2137) plays the same mix without the hardware's clipping: the unsaturated sum, through a true-peak limiter at the
+host's output.
+
+- **The line.** `peak=limit` sits just before `cull` (after the other optional keys) and is written only when on;
+  a missing `peak` and `peak=off` are off. It is an Enhanced part and needs no `tier=ace`. A build without it
+  (`ACE_HAS_PEAK`) refuses the line.
+- **What the guest sees: nothing.** The guest's SAS buffer gets the PSP's saturated bytes in every mode, because a
+  game may read it back; `hle-thread-selftest` checks them byte for byte against a run with the part off. The
+  limiter keeps a channel's queue depth: a push of n frames queues n frames.
+- **Where the wider mix comes from: provenance, checked by bytes.** The guest reads SAS output from guest memory, so
+  the sum can reach the host only through the buffer the game hands to `sceAudioOutput*`. The other design, a host
+  mix fed beside the guest's in place of that output, would have to guess which output carries which grain and
+  would drop whatever the game does to the buffer after the mix (its own volume, its own music, a copy). So the
+  SAS mixer (`src/rt/hle_audio.c`) keeps, for the host only, the last eight stereo grains whose sum it saturated:
+  the address, the bytes it stored and the sum before saturation, with the same voices, envelopes, resampler
+  (`sas=sinc` included) and input gain as the stored grain. A new mix over a kept grain's span forgets it. An
+  output (`sceAudioOutputBlocking`, `sceAudioOutputPannedBlocking`, `sceAudioOutput2OutputBlocking`, and
+  `sceAudioSRCOutputBlocking` at 44.1 kHz) whose span holds a kept grain's bytes unchanged gives the host that
+  grain's sum for those frames; a span the game changed after the mix, a copy of the grain elsewhere, a mono
+  output, a 48 kHz SRC output and the raw four-plane output mode play the guest's bytes. Where the store did not
+  saturate, the sum is the stored value, so nothing is kept.
+- **The limiter (`src/rt/audio_sdl3.c`).** With the part on, every push of every channel passes through one limiter
+  per channel in place of the per-sample clamp, at the channel volume and master volume as before. Each frame's peak
+  is its own sample and the inter-sample peaks on either side, read at 4x through a 16-tap-a-phase windowed-sinc
+  interpolator. The gain a frame needs is the ceiling over its peak; the gain applied is a minimum over the next 64
+  frames, released exponentially (50 ms), then averaged over 64 frames, so it falls over 1.45 ms before a peak and
+  is at most what the peak needs when it arrives. The ceiling is -0.3 dBTP as that detector reads it; read at 16x,
+  the overflow fixture's hard 62000-count step rings 0.13 dB past it, still under full scale. The output is 71
+  frames (1.61 ms) late. A frame below the ceiling comes out bit-exact unless a peak's attack or release reaches it
+  (the release is back within half a count of unity well inside a second), so the level is the PSP's wherever the
+  PSP did not clip; only the overs are rounded off instead of cut. A stream that stops leaves its last 71 frames in the
+  limiter until that channel's next push or hold of silence (`sr_audio_push_silence`, which passes through the
+  limiter too), which plays them first, in order. A push or hold that finds the channel played dry (a device pull
+  found nothing) drops them instead (after the gap they would be a 1.6 ms fragment ahead of the new sound); a hold
+  also drops the converter's kept-back frames, a push leaves them in place. Nothing is invented. The video
+  recorder (`sr_videorec_audio`) and the counters keep the guest's copy.
+- **Off.** Without `peak=limit` neither side runs: the SAS mixer keeps nothing, `sr_audio_push` is the plain push,
+  and `sr_audio_push_wide` is the plain push of the guest's copy (`audio-selftest` checks the bytes). Fast forward
+  pushes nothing, so nothing is limited while it runs.
+- **Stamps and the report.** `ACE_MODE: peak limit (...)` at start; the badge's words say "unclipped sound"; the
+  report's `"peak"` block gives `on`, `pushes_wide` (pushes that carried a kept sum), `frames_wide` (their frames
+  where the sum and the guest's copy differ), `frames_limited` (output frames whose bytes the gain changed) and
+  `min_gain`. The part
+  is confirmed once the SAS mixer and the audio backend both take the switch (`driver.c`); a link without either,
+  the headless gate, reports it as never run. Section 10.4 applies.
+- **Tests.** `hle-thread-selftest` runs the overflow fixture (twenty full-scale voices over caller PCM through
+  `__sceSasCoreWithMix`): the guest's bytes are identical with the part on and off; the output of that buffer
+  carries the sum, past 16 bits exactly where the store saturated and the guest's value elsewhere; a buffer changed
+  after the mix and a copy play the guest's bytes. `audio-selftest` checks that the part off is the plain push; that
+  quiet audio comes out bit-exact and 71 frames late with an unchanged queue depth; that a hold of silence keeps
+  the order; and that a sine reaching 6.6 dB
+  past 16 bits leaves no sample past the ceiling and a true peak (read at 16x) under full scale, a gain that falls
+  before the overflow arrives, the
+  passage before it bit-exact and the one after it at the input's level within 0.1 dB.
+- **Not yet.** The player has no part for it yet: a launch line names it by hand. The Hot Shots Tennis title-logo
+  check (no full-scale sample, and the non-clipping music at the PSP's -15.6 dBFS) waits for the #2135 console read.
+- **Tier:** Enhanced. **Default:** off, and in no graphics preset.
+
 ## 11. Guest-Visible Items
 
-Sections 10.3, 10.6, 10.8 and 10.11 describe host-only features: what the guest reads, in its registers, memory and timing, is the
+Sections 10.3, 10.6, 10.8, 10.11 and 10.22 describe host-only features: what the guest reads, in its registers, memory and timing, is the
 same with them on or off. The owner's decision of 2026-11-04 (#2055) is that Enhanced does not have to stay fully
 Authentic: a change that improves a game without making anything worse is allowed, even when the guest can observe
 it. This section is the class for those changes. It adds to the classes above and removes none of them.
