@@ -7,6 +7,13 @@
  * Built from ace.c and this file alone, with nothing else of the runtime: a reference from
  * ace.c to any runtime function fails the link, which is invariant S1's link test for ace.c.
  */
+/* glibc hides setenv under strict C99 unless a POSIX feature level is selected before any system
+ * header is included (the --retired-env mode below sets SR_GLYPHS). */
+#ifndef _WIN32
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L
+#endif
+#endif
 #include "ace.h"
 
 #include <stdio.h>
@@ -270,10 +277,13 @@ static void cell_parse(void) {
         char line[256];
         CHECK(ace_retired_env(NULL, line, sizeof(line)) == 0 && line[0] == '\0', "SR_GLYPHS unset passes");
         CHECK(ace_retired_env("", line, sizeof(line)) == 0, "SR_GLYPHS empty passes");
-        for (size_t i = 0; i < sizeof(set) / sizeof(set[0]); i++)
+        for (size_t i = 0; i < sizeof(set) / sizeof(set[0]); i++) {
+            char quoted[32];
+            snprintf(quoted, sizeof(quoted), "'%s'", set[i]);   /* the value itself, not the key's "on" */
             CHECK(ace_retired_env(set[i], line, sizeof(line)) == 1 && strncmp(line, "SR_GLYPHS: retired", 18) == 0 &&
-                      strstr(line, "glyphs=on") != NULL && strstr(line, set[i]) != NULL,
+                      strstr(line, "glyphs=on") != NULL && strstr(line, quoted) != NULL,
                   "SR_GLYPHS=%s refuses the run and names glyphs=on: '%s'", set[i], line);
+        }
         CHECK(ace_retired_env("a-value-much-longer-than-sixteen", line, sizeof(line)) == 1 &&
                   strstr(line, "'a-value-much-lon...'") != NULL, "a long value is cut: '%s'", line);
     }
@@ -2021,6 +2031,23 @@ static void cell_pace(void) {
 }
 
 int main(int argc, char **argv) {
+    /* `--retired-env VALUE`: set SR_GLYPHS to VALUE (and SR_ACE off) and start Ace Mode the way a run does.
+       ace_init_from_env must stop the process with exit 1 and its line; mk/selftests.mk checks both, so a
+       start that ignores the retired variable fails there. Returning here is that failure. */
+    if (argc >= 3 && strcmp(argv[1], "--retired-env") == 0) {
+#ifdef _WIN32
+        const int set_failed = _putenv_s("SR_GLYPHS", argv[2]) != 0 || _putenv_s("SR_ACE", "off") != 0;
+#else
+        const int set_failed = setenv("SR_GLYPHS", argv[2], 1) != 0 || setenv("SR_ACE", "off", 1) != 0;
+#endif
+        if (set_failed) {
+            fprintf(stderr, "ace-selftest: FAIL could not set SR_GLYPHS for --retired-env\n");
+            return 2;
+        }
+        ace_init_from_env();
+        fprintf(stderr, "ace-selftest: FAIL SR_GLYPHS=%s did not stop the run at start\n", argv[2]);
+        return 3;
+    }
     cell_parse();
     cell_stick_curve();
     cell_stick_host_dead_zone_at_or_above_g();

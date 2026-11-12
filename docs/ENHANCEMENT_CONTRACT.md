@@ -1063,8 +1063,8 @@ and not yet admitted under section 11.2: section 11.3.5 is its entry, and this s
 - **Settings.** The launch line's `glyphs` key (section 10.1): `glyphs=on`, or `glyphs=off` or no key for off. It
   is optional and an Enhanced part, so an Enhanced or an Ace line may carry it; any other value refuses the whole
   line (`ACE_MODE: refused (bad value)`), and the run is Authentic. The renderer takes it once when it starts
-  (`nk_glyph_init`). An authentic run has no line, so nothing can turn the feature on there, and the unit's own Ace
-  gate keeps it off even if asked (the `glyph-recon-selftest` settings cell). It needs a render scale of 2 to 4, the
+  (`nk_glyph_init`). An authentic run has no valid line with Ace on, so nothing can turn the feature on there,
+  and the unit's own Ace gate keeps it off even if asked (the `glyph-recon-selftest` settings cell). It needs a render scale of 2 to 4, the
   factor the rebuild is made at (4 is the renderer's largest scale; the rebuild itself is tested up to 6); at 1x
   there is nothing to sharpen, a run prints `GLYPHS: idle (render scale <n> leaves nothing to sharpen; it takes 2
   to 4)`, and the report names `glyphs` unavailable with that reason. A run on the software GE, which has no
@@ -1197,7 +1197,8 @@ and not yet admitted under section 11.2: section 11.3.5 is its entry, and this s
   hash (the device image and the frame the guest keeps), and with `glyphs=on` it draws rebuilt glyphs and another
   hash. `ace-selftest` checks the key: its values, that `glyphs=off` formats as the line without it, its place after
   `ssaa` and before `cull`, the stamp's line, the feature words, and the report when the renderer confirms it, names
-  it unavailable or never starts. `gpu-glyph-mutant` removes the content check of a bound tile, keys the tiles on the
+  it unavailable or never starts; and it starts Ace Mode as a run does with `SR_GLYPHS=on` and checks that the
+  process stops with exit 1 and the line that names `glyphs=on`. `gpu-glyph-mutant` removes the content check of a bound tile, keys the tiles on the
   cache's sampled content hash instead of its generation, removes the per-present count, and the VRAM, hard-edge and
   colour guards, and builds a renderer that ignores the key, each of which must fail its own cell.
 
@@ -2003,9 +2004,10 @@ The feature of section 10.13 (#2110). Its presentation is described there; this 
 - **Key and off switch.** `glyphs=on` on the launch line (section 10.1), an optional key: a line without it, or with
   `glyphs=off`, is off and formats byte for byte as a line from before the key, and any other value refuses the line.
   It needs no `tier=ace`: it is an Enhanced part. Its off switch is the key off or missing, and an authentic run,
-  which has no line. It has no library or per-title setting, and the player never writes it; admission under section
-  11.2 needs both. The `SR_GLYPHS` environment variable it replaces is retired: set, the run refuses to start and
-  names the key (section 10.13).
+  which has no valid line with Ace on. It has no library or per-title setting, and the player never writes it, so a
+  player launch cannot turn it on: only a title's runtime started directly, with `SR_ACE` set by hand to a line that
+  carries `;glyphs=on`, can. Admission under section 11.2 needs both switches. The `SR_GLYPHS` environment
+  variable it replaces is retired: set, the run refuses to start and names the key (section 10.13).
 - **How it relates to the `text` key.** Not at all. `text` (section 10.1) draws the on-screen keyboard at the window's
   resolution on the presented image and changes no guest frame; `glyphs` rebuilds the game's own text inside the
   frame the game draws. Neither reads or implies the other, and `text=on` with `glyphs` off leaves a game's text as
@@ -2036,7 +2038,8 @@ The feature of section 10.13 (#2110). Its presentation is described there; this 
   most 48 per present (section 10.13), so a scene that first draws many new glyphs takes a little longer for its
   first frames. Not measured on a title. The VBLANK schedule, the GE timing model and the media clocks are unchanged.
 - **I/O speed:** unchanged.
-- **Tier:** Enhanced. **Default:** off: only a line with `glyphs=on` turns it on, and an authentic run has no line.
+- **Tier:** Enhanced. **Default:** off: only a line with `glyphs=on` turns it on, and an authentic run has no valid
+  line with Ace on.
   Turning it on by default, or putting it in a preset, needs the owner's decision first, because of the trade-off in
   section 10.13 (some small, dense or filtered text is drawn smooth, and some soft art can still rib).
 - **Nothing worse (section 11.2, item 4):** not shown. The tests are synthetic. The private runs item 4 lists, before

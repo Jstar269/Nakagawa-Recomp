@@ -434,6 +434,7 @@ int ace_init_from_env(void) {
        as an invalid SR_NOVBPACE or SR_DETERMINISTIC_CLOCK does (sched.c). */
     if (ace_retired_env(getenv("SR_GLYPHS"), why, sizeof(why))) {
         fprintf(stderr, "%s\n", why);
+        fflush(stderr);
         exit(1);
     }
     return ace_init_spec(getenv("SR_ACE"), getenv("SR_ACE_REPORT"));
@@ -625,7 +626,6 @@ size_t ace_feature_words(char *out, size_t cap) {
     if (s_eff.cull) used = words_add(out, cap, used, "wider culling");
     if (s_eff.depth) used = words_add(out, cap, used, "32-bit depth");
     if (s_eff.ssaa) used = words_add(out, cap, used, s_eff.ssaa == 4 ? "4x supersampling" : "2x supersampling");
-    if (s_eff.glyphs) used = words_add(out, cap, used, "sharp game text");
     if (s_eff.smooth) used = words_add(out, cap, used, "smooth motion");
     if (s_eff.sas) used = words_add(out, cap, used, "clean pitched sound");
     if (s_eff.tess) {
@@ -635,6 +635,8 @@ size_t ace_feature_words(char *out, size_t cap) {
     }
     if (s_eff.twin) used = words_add(out, cap, used, "full 32-bit colour");
     if (s_eff.readout) used = words_add(out, cap, used, "speed readout");
+    /* Last: a caption too short for every word drops this one, not a word that was there before it (#2110). */
+    if (s_eff.glyphs) used = words_add(out, cap, used, "sharp game text");
     return used;
 }
 

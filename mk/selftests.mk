@@ -174,12 +174,19 @@ osk-text-entry-selftest:
 # ace-selftest - Ace Mode's CPU-only cells (src/rt/ace.c): the SR_ACE line fails closed, the
 # 30 Hz detector's classes, hysteresis and feed, the speed readout's definitions, the per-run
 # report and an off run's silence. Built from ace.c and its test alone: a reference from ace.c
-# to anything but the C library fails this link, which is the S1 link test for ace.c.
+# to anything but the C library fails this link, which is the S1 link test for ace.c. Then the
+# retired SR_GLYPHS (#2110): with it set, starting Ace Mode as a run does stops the process with
+# exit 1 and the line that names glyphs=on, before SR_ACE is read.
 native-core-tests: ace-selftest
 ace-selftest:
+	$(NK_REQUIRE_POSIX_SHELL)
 	$(CC) -std=c99 -O2 -Wall -Wextra -Wpedantic -Werror -Isrc/rt \
 		-o $(BUILD_DIR)/ace_selftest$(EXE_EXT) tests/native/ace_selftest.c src/rt/ace.c
 	$(BUILD_DIR)/ace_selftest$(EXE_EXT) $(BUILD_DIR)
+	@rc=0; $(BUILD_DIR)/ace_selftest$(EXE_EXT) --retired-env on > $(BUILD_DIR)/ace_retired_env.log 2>&1 || rc=$$?; \
+	if [ $$rc -ne 1 ] || ! grep -aq "^SR_GLYPHS: retired, and set to 'on'; .*glyphs=on" $(BUILD_DIR)/ace_retired_env.log; then \
+		cat $(BUILD_DIR)/ace_retired_env.log; echo "FAIL ace-selftest --retired-env (exit $$rc): a set SR_GLYPHS did not stop the run with its line"; exit 1; fi; \
+	echo "PASS ace-selftest --retired-env: SR_GLYPHS=on stops the run at start (exit 1) and names glyphs=on"
 
 # motion-match-selftest - the draw matcher of render-state motion (src/rt/motion_match.c, #2081):
 # anchors, reorder, spawn and despawn, rebuilds at a new address, ties, teleports and each
