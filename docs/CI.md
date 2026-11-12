@@ -99,11 +99,13 @@ The jobs:
   condition; the job and that step still read no path output. The profile-zero steps follow,
   under the former job's condition (`allow_substantive` and `run_python` or `run_windows`,
   carried by the job's `BUILD_PROFILE_ZERO`), and upload the same `profile-zero-fixture`
-  artifact. Under the same condition, the job builds the two homebrew fixtures
+  artifact. Their `python3` is now the job's CPython 3.15.2 rather than the runner image's.
+  Under the same condition, the job then builds the two homebrew fixtures
   (`fixtures/pspdev_phase5`, `fixtures/homebrew_view`) and uploads them as `homebrew-fixtures`
-  for the Windows `routes` part (#2143). Their `python3` is now the job's CPython 3.15.2 rather than the runner image's.
+  for the Windows `routes` part (#2143).
   The Python, native and Windows jobs wait for this job as before; native now also waits for
-  the fixture build, about 25 seconds.
+  the fixture builds: about 25 seconds for the profile-zero fixture, plus the homebrew
+  fixtures' build, to be measured on the first full run.
 - **Python.** Four shards over the full suite, and four over the Makefile-coupled subset
   (see [Python test sharding](#python-test-sharding)). `test_production_smoke` alone takes
   about 16 minutes and has a shard to itself, so a fifth shard would not shorten the job.
@@ -2130,14 +2132,20 @@ developer runs locally, without private inputs:
   `Makefile`. That job puts them in one folder: each program's `EBOOT.PBP` beside the sources
   it was built from, `BUILT_FROM` (the commit) and `SHA256SUMS` over all of them. It uploads
   the folder as the `homebrew-fixtures` artifact, and the step downloads it. The step checks
-  `SHA256SUMS` and that `BUILT_FROM` is its own commit (`SR_SOURCE_COMMIT`); the tests check
-  that the sources are byte for byte the checkout's. The step sets
-  `NK_HOMEBREW_E2E_REQUIRED=1`, so a missing or unreadable folder fails it and never skips,
-  and it fails unless the summary is a bare `OK`, so a skipped test does not pass. Its limit
-  is 12 minutes. The two tests took 422 seconds locally (Windows 11, `-j 4`, on a shared
-  host), most of it the player and package builds; the step's hosted time is measured on the
-  first full run. It adds that time to the `routes` group's 13.9 minutes, under the group's
-  25-minute limit.
+  `SHA256SUMS` and that `BUILT_FROM` is its own commit (`SR_SOURCE_COMMIT`), and the tests
+  check that the sources are byte for byte the checkout's. The artifact comes from this run,
+  so `BUILT_FROM` cannot differ today; it is there so that a folder handed over another way
+  (a cache, another run) is refused rather than trusted. The step sets
+  `NK_HOMEBREW_E2E_REQUIRED=1`, so a missing or unreadable folder, or a tool or player build
+  the route lacks, fails it and never skips, and it fails unless the summary is a bare `OK`,
+  so a skipped test does not pass. The tests build the player themselves, so the step sets
+  `VULKAN_SDK=/ucrt64`, as the other Windows steps pass it, and `MAKEFLAGS=-j4`.
+  **Minutes added:** not yet measured on a hosted runner. Locally the two tests took 422
+  seconds (Windows 11, `-j 4`, a shared host), most of it the player and package builds;
+  the `routes` group compiler cache holds no player objects, since only `smoke` builds the
+  player. The step's limit is 10 minutes, so the group's measured 13.9 minutes stay under
+  its 25-minute limit even if the step takes its whole limit. The first full run records the
+  real figure here.
   The same job builds Nakagawa Font Copy (`src/psp_companion/Makefile`), the PSP app
   behind the player's font import, through its user-mode import gate; nothing from
   that build is uploaded. Public

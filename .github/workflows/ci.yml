@@ -527,7 +527,10 @@ jobs:
         if: ${{ env.BUILD_PROFILE_ZERO == 'true' }}
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          if [ "$(git rev-parse HEAD)" != "$GITHUB_SHA" ]; then
+            echo "the checkout is $(git rev-parse HEAD), not this run's $GITHUB_SHA" >&2
+            exit 1
+          fi
           out="$RUNNER_TEMP/homebrew-fixtures"
           mkdir -p "$out"
           for fixture in pspdev_phase5 homebrew_view; do
@@ -2255,7 +2258,7 @@ jobs:
     # the serial job ran still runs in exactly one part.
     #   smoke:     production pipeline, AOT-gap, staged smoke, player, UI, display
     #   ladder:    full platform ladder
-    #   routes:    profile-zero production routes, native core tests
+    #   routes:    profile-zero production routes, native core tests, homebrew import routes
     #   selftests: cosimulation + mutants, scheduler, dispatch, FP, strbuf, HLE thread,
     #              Media Foundation H.264 media
     #   fuzz-0/1:  synthetic VFPU fuzzer, its cases split between two shards (FUZZ_CASE_SHARD)
@@ -2642,21 +2645,27 @@ jobs:
 
       # #2143: a PSPSDK EBOOT.PBP imports through the player, builds a package, and (the
       # homebrew_view probe) runs from ms0:/PSP/GAME/<folder>/ and checks the files beside it.
-      # The programs are the ones public_export built from this commit; the step checks
-      # their digests and BUILT_FROM, and NK_HOMEBREW_E2E_REQUIRED=1 makes a missing or
-      # unreadable folder fail. A skipped test is not a pass: the summary must be a bare OK.
+      # The programs are the ones public_export built from this commit, handed over in this
+      # run; the step checks their digests and BUILT_FROM. NK_HOMEBREW_E2E_REQUIRED=1 makes a
+      # missing or unreadable folder, or a tool or player build the route lacks, fail rather
+      # than skip, and a skipped test is not a pass either: the summary must be a bare OK.
+      # The tests build the player themselves, so VULKAN_SDK names the UCRT64 Vulkan headers
+      # as every other Windows step does, and MAKEFLAGS lets that build use the runner's cores.
       - name: Run the homebrew import routes on the fixtures built from source
         if: contains(matrix.parts, 'routes')
         shell: msys2 {0}
-        timeout-minutes: 12
+        timeout-minutes: 10
         env:
           MSYS2_PATH_TYPE: inherit
+          VULKAN_SDK: /ucrt64
+          MAKEFLAGS: -j4
           NK_HOMEBREW_E2E_REQUIRED: "1"
           NK_HOMEBREW_EBOOT_DIR: ${{ runner.temp }}/homebrew-fixtures
         run: |
           set -euo pipefail
           command -v git >/dev/null || export PATH="$PATH:/c/Program Files/Git/cmd"
-          command -v pwsh git
+          command -v pwsh
+          command -v git
           dir="$(cygpath -u "$NK_HOMEBREW_EBOOT_DIR")"
           (cd "$dir" && sha256sum --check --strict SHA256SUMS)
           built_from="$(tr -d '\r\n' < "$dir/BUILT_FROM")"

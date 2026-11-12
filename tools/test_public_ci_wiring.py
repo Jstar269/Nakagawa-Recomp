@@ -2069,7 +2069,7 @@ class PublicExportJobTests(unittest.TestCase):
         build = "\n".join(_ci_step(self.blocks["public_export"],
                                    "Build the homebrew fixtures for the Windows routes") or [])
         self.assertIn("for fixture in pspdev_phase5 homebrew_view; do", build)
-        self.assertIn('test "$(git rev-parse HEAD)" = "$GITHUB_SHA"', build)
+        self.assertIn('if [ "$(git rev-parse HEAD)" != "$GITHUB_SHA" ]; then', build)
         self.assertIn('printf \'%s\\n\' "$GITHUB_SHA" > "$out/BUILT_FROM"', build)
         self.assertIn("sha256sum BUILT_FROM */EBOOT.PBP */main.c */Makefile > SHA256SUMS", build)
         self.assertIn("sha256sum --check --strict SHA256SUMS", build)
@@ -2093,7 +2093,13 @@ class PublicExportJobTests(unittest.TestCase):
         step = "\n".join(_ci_step(windows, run) or [])
         self.assertIn('NK_HOMEBREW_E2E_REQUIRED: "1"', step)
         self.assertIn("NK_HOMEBREW_EBOOT_DIR: ${{ runner.temp }}/homebrew-fixtures", step)
-        self.assertIn("timeout-minutes: 12", step)
+        self.assertIn("timeout-minutes: 10", step)
+        # The tests build the player: without the UCRT64 Vulkan headers that build fails
+        # and the route would never run (the bare-OK check below would then fail the step).
+        self.assertIn("VULKAN_SDK: /ucrt64", step)
+        self.assertIn("MAKEFLAGS: -j4", step)
+        self.assertIn("command -v pwsh\n", step)
+        self.assertIn("command -v git\n", step)
         self.assertIn('(cd "$dir" && sha256sum --check --strict SHA256SUMS)', step)
         self.assertIn('if [ "$built_from" != "$SR_SOURCE_COMMIT" ]; then', step)
         self.assertIn("test_homebrew_eboot_imports_and_builds_as_experimental", step)
