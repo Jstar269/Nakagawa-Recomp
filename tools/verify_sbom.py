@@ -33,6 +33,7 @@ EXPECTED_PROVENANCE_FAMILIES = frozenset({
     "vulkan",
     "vfpu",
     "stb-image",
+    "stb-vorbis",
     "kenney-ui-assets",
 })
 

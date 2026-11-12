@@ -414,7 +414,8 @@ static void player_ui_report_layout_error(void *user, const NkUiLayoutError *err
 }
 
 /* The launcher music's track: beside the player, as the fonts are, else from
-   the working folder (a development run from the source tree). A track found in
+   the working folder. The working folder is only for a development run from the
+   source tree; a packaged player has the track beside it. A track found in
    neither is still looked for beside the player, so the missing file is named
    there. */
 static PlayerUiMusic *player_ui_music_create_beside(const char *base_path) {
@@ -423,6 +424,10 @@ static PlayerUiMusic *player_ui_music_create_beside(const char *base_path) {
 #ifdef NK_PLAYER_UI_REGRESSION_TEST
     /* Stands in for a player folder whose track is missing or damaged. */
     const char *test_track = getenv("NK_UI_TEST_MUSIC_FILE");
+    /* A decode that waits until it is cancelled, and an audio device that stops
+       taking data once the music fades out. */
+    player_ui_music_test_hold_decode(getenv("NK_UI_TEST_MUSIC_HOLD_DECODE") != NULL);
+    player_ui_music_test_stall_release(getenv("NK_UI_TEST_MUSIC_STALL") != NULL);
     if (test_track != NULL && test_track[0] != '\0') {
         return player_ui_music_create(test_track, PLAYER_UI_MUSIC_TRACK);
     }
@@ -464,6 +469,10 @@ PlayerUiNk *player_ui_nk_create(SDL_Renderer *renderer, SDL_Window *window, Play
         return NULL;
     }
     player->window = window;
+    /* A launcher that opens behind another window gets no focus event: the music
+       waits for focus (SDL_EVENT_WINDOW_FOCUS_GAINED) rather than assuming it. */
+    player->window_unfocused =
+        window != NULL && (SDL_GetWindowFlags(window) & SDL_WINDOW_INPUT_FOCUS) == 0;
     player->rest_index = SIZE_MAX;
     player->backdrop_index = SIZE_MAX;
     player->router =nk_ui_router_create();
@@ -2503,6 +2512,17 @@ void player_ui_nk_update_music(PlayerUiNk *player, PlayerApp *app) {
     request.focused = !player->window_unfocused;
     request.volume = app->settings.launcher_music_volume;
     player_ui_music_update(player->music, &request, SDL_GetTicks());
+    {
+        uint32_t timeout_ms = player_ui_music_take_release_timeout(player->music);
+        if (timeout_ms != 0u) {
+            fprintf(stderr,
+                    "[PLAYER] LAUNCHER_MUSIC_RELEASE_TIMEOUT: the audio device stopped taking "
+                    "data; released after %u ms\n", (unsigned)timeout_ms);
+            player_dev_log_add(app, "audio",
+                               "LAUNCHER_MUSIC_RELEASE_TIMEOUT: the audio device stopped "
+                               "taking data; released after %u ms", (unsigned)timeout_ms);
+        }
+    }
     state = player_ui_music_state(player->music);
     if ((int)state == player->music_reported) return;
     player->music_reported = (int)state;
@@ -2517,7 +2537,12 @@ void player_ui_nk_update_music(PlayerUiNk *player, PlayerApp *app) {
 }
 
 bool player_ui_nk_launcher_audio_closed(const PlayerUiNk *player) {
-    return player == NULL || !player_ui_music_holds_audio(player->music);
+    return player == NULL || (!player_ui_music_holds_audio(player->music) &&
+                              !player_ui_music_decoding(player->music));
+}
+
+bool player_ui_nk_music_decoding(const PlayerUiNk *player) {
+    return player != NULL && player_ui_music_decoding(player->music);
 }
 
 int player_ui_nk_music_state(const PlayerUiNk *player) {

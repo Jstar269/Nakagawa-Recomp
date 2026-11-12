@@ -6,8 +6,11 @@
    at the seam, fades in and out over the frames it is asked to, and the player
    object reports a missing or damaged file by name, opens no audio while off,
    and lets go of the audio device (and its reference on SDL's audio subsystem)
-   when a game starts or the window loses focus. Runs on SDL's dummy audio
-   driver. Usage: test_player_ui_music <path to ChillLofi.ogg> */
+   when a game starts or the window loses focus. A game that starts during the
+   decode cancels it and joins its worker; a device that stops taking data is
+   released at the time limit and reported; the decoded track is freed while a
+   game runs. Runs on SDL's dummy audio driver, with the module's test seams
+   (PLAYER_UI_MUSIC_TEST_SEAMS). Usage: test_player_ui_music <path to ChillLofi.ogg> */
 
 #include "player_ui_music.h"
 #include "player_ui_vorbis.h"
@@ -54,9 +57,14 @@ static int test_track_decodes_and_loops(const char *track) {
     PlayerUiMusicMix mix;
     char detail[256];
     int16_t out[16 * 2];
+    uint64_t decode_started;
     CHECK(bytes != NULL, "the shipped track is readable");
+    decode_started = SDL_GetTicks();
     CHECK(player_ui_vorbis_decode(bytes, size, NULL, NULL, &pcm, detail, sizeof(detail)) ==
               PLAYER_UI_VORBIS_OK, detail);
+    /* What decoding the track again on the launcher's return costs. */
+    printf("decoded the whole track in %llu ms\n",
+           (unsigned long long)(SDL_GetTicks() - decode_started));
     CHECK(pcm.channels == 2 && pcm.sample_rate == 44100, "the track is 44.1 kHz stereo");
     /* 2:05.15 at 44.1 kHz. */
     CHECK(pcm.frames > 44100u * 125u && pcm.frames < 44100u * 126u, "the whole track decodes");
@@ -164,6 +172,17 @@ static bool wait_for(PlayerUiMusic *music, const PlayerUiMusicRequest *request,
     }
 }
 
+/* Updates `music` until the device has pulled some of the fade-in. */
+static bool wait_audible(PlayerUiMusic *music, const PlayerUiMusicRequest *request) {
+    uint64_t deadline = SDL_GetTicks() + WAIT_LIMIT_MS;
+    while (player_ui_music_gain(music) < 0.05f) {
+        player_ui_music_update(music, request, SDL_GetTicks());
+        if (SDL_GetTicks() > deadline) return false;
+        SDL_Delay(5);
+    }
+    return true;
+}
+
 static int test_player_states(const char *track) {
     PlayerUiMusicRequest off = {false, true, true, 80};
     PlayerUiMusicRequest on = {true, true, true, 80};
@@ -233,10 +252,13 @@ static int test_player_states(const char *track) {
 
     /* Another audio user (the menu sounds) keeps its own reference: the music
        letting go never stops SDL audio under it. */
+    CHECK(wait_audible(music, &on), "audible");
     CHECK(SDL_InitSubSystem(SDL_INIT_AUDIO), "a second audio user");
     player_ui_music_update(music, &off, SDL_GetTicks());
-    CHECK(player_ui_music_state(music) == PLAYER_UI_MUSIC_OFF && !player_ui_music_holds_audio(music),
-          "turning it off stops it at once");
+    CHECK(player_ui_music_state(music) == PLAYER_UI_MUSIC_FADING_OUT,
+          "turning it off fades the music first");
+    CHECK(wait_for(music, &off, PLAYER_UI_MUSIC_OFF) && !player_ui_music_holds_audio(music),
+          "then stops it");
     CHECK(SDL_WasInit(SDL_INIT_AUDIO) != 0, "the other user's audio stays up");
     SDL_QuitSubSystem(SDL_INIT_AUDIO);
     CHECK(SDL_WasInit(SDL_INIT_AUDIO) == 0, "and stops with that user");
@@ -257,13 +279,172 @@ static int test_player_states(const char *track) {
     return 1;
 }
 
+/* Review round 1 of #2536: the decode, the release and the transitions. */
+static int test_decode_release_and_transitions(const char *track) {
+    PlayerUiMusicRequest on = {true, true, true, 80};
+    PlayerUiMusicRequest softer = {true, true, true, 70};
+    PlayerUiMusicRequest quiet = {true, true, true, 0};
+    PlayerUiMusicRequest off = {false, true, true, 80};
+    PlayerUiMusicRequest game = {true, false, true, 80};
+    PlayerUiMusicRequest game_away = {true, false, false, 80};
+    PlayerUiMusic *music;
+    uint64_t t0;
+    uint64_t stopped_at;
+
+    /* A game that starts during the decode cancels it and joins its worker before
+       the launch may go on. The held decode waits for its cancel, so without the
+       cancel this would hang. */
+    player_ui_music_test_hold_decode(true);
+    music = player_ui_music_create(track, PLAYER_UI_MUSIC_TRACK);
+    CHECK(music != NULL, "create");
+    player_ui_music_update(music, &on, SDL_GetTicks());
+    CHECK(player_ui_music_state(music) == PLAYER_UI_MUSIC_LOADING &&
+              player_ui_music_decoding(music), "the decode runs on its worker");
+    player_ui_music_update(music, &game, SDL_GetTicks());
+    CHECK(player_ui_music_state(music) == PLAYER_UI_MUSIC_STOPPED, "a starting game stops it");
+    CHECK(!player_ui_music_decoding(music) && player_ui_music_test_pcm_frames(music) == 0u,
+          "and no decode worker is left, nor any decoded track");
+    CHECK(!player_ui_music_holds_audio(music) && SDL_WasInit(SDL_INIT_AUDIO) == 0,
+          "no audio is held");
+    player_ui_music_update(music, &game, SDL_GetTicks());
+    CHECK(player_ui_music_state(music) == PLAYER_UI_MUSIC_STOPPED &&
+              !player_ui_music_decoding(music), "nothing is read while the game runs");
+
+    /* Quitting during the decode cancels and joins it too. */
+    player_ui_music_update(music, &on, SDL_GetTicks());
+    CHECK(player_ui_music_decoding(music), "back in the launcher the decode starts again");
+    player_ui_music_destroy(music);
+
+    /* Turning the setting on and off quickly during the decode. */
+    music = player_ui_music_create(track, PLAYER_UI_MUSIC_TRACK);
+    for (int i = 0; i < 5; ++i) {
+        player_ui_music_update(music, &on, SDL_GetTicks());
+        CHECK(player_ui_music_state(music) == PLAYER_UI_MUSIC_LOADING &&
+                  player_ui_music_decoding(music), "on: the decode starts");
+        player_ui_music_update(music, &off, SDL_GetTicks());
+        CHECK(player_ui_music_state(music) == PLAYER_UI_MUSIC_OFF &&
+                  !player_ui_music_decoding(music), "off: the decode is cancelled and joined");
+    }
+    player_ui_music_test_hold_decode(false);
+
+    /* A real decode, cancelled part way, stops within one chunk. */
+    player_ui_music_update(music, &on, SDL_GetTicks());
+    SDL_Delay(50);
+    t0 = SDL_GetTicks();
+    player_ui_music_update(music, &game, SDL_GetTicks());
+    printf("a decode cancelled part way was joined in %llu ms\n",
+           (unsigned long long)(SDL_GetTicks() - t0));
+    CHECK(player_ui_music_state(music) == PLAYER_UI_MUSIC_STOPPED &&
+              !player_ui_music_decoding(music), "the cancelled decode is joined");
+    CHECK(SDL_GetTicks() - t0 < 1000u, "promptly");
+
+    CHECK(wait_for(music, &on, PLAYER_UI_MUSIC_PLAYING), "after all that the track plays");
+    /* A volume step during the 1.5 s fade-in keeps the fade's length. */
+    player_ui_music_update(music, &softer, SDL_GetTicks());
+    CHECK(player_ui_music_test_ramp_frames(music) > 44100u,
+          "a volume step during the fade-in does not cut it short");
+    /* Music volume 0 holds no device. */
+    CHECK(wait_for(music, &quiet, PLAYER_UI_MUSIC_PAUSED), "at volume 0 it pauses");
+    CHECK(!player_ui_music_holds_audio(music) && SDL_WasInit(SDL_INIT_AUDIO) == 0,
+          "and holds no audio");
+    CHECK(wait_for(music, &on, PLAYER_UI_MUSIC_PLAYING), "a level above 0 plays again");
+
+    /* Focus lost during the fade before a game: the game still wins. */
+    CHECK(wait_audible(music, &on), "audible");
+    player_ui_music_update(music, &game, SDL_GetTicks());
+    CHECK(player_ui_music_state(music) == PLAYER_UI_MUSIC_FADING_OUT, "PLAY fades the music");
+    CHECK(wait_for(music, &game_away, PLAYER_UI_MUSIC_STOPPED), "focus lost too: it stops");
+    CHECK(!player_ui_music_holds_audio(music) && SDL_WasInit(SDL_INIT_AUDIO) == 0,
+          "and lets go of the device");
+    CHECK(player_ui_music_take_release_timeout(music) == 0u, "a device that took data: no timeout");
+    /* While the game runs the decoded track is freed; it resumes where it stopped. */
+    CHECK(player_ui_music_test_pcm_frames(music) == 0u, "no decoded track is kept for the game");
+    stopped_at = player_ui_music_test_cursor(music);
+    CHECK(stopped_at > 0u, "where the loop stood is kept");
+    CHECK(wait_for(music, &on, PLAYER_UI_MUSIC_PLAYING), "back in the launcher it plays");
+    CHECK(player_ui_music_test_pcm_frames(music) > 0u, "decoded again");
+    CHECK(player_ui_music_test_cursor(music) >= stopped_at &&
+              player_ui_music_test_cursor(music) < stopped_at + 44100u * 10u,
+          "from where it stopped");
+
+    /* A device that stops taking data once the fade starts: the release waits the
+       fade and the grace, no longer, then closes and reports it once. */
+    CHECK(wait_audible(music, &on), "audible");
+    player_ui_music_test_stall_release(true);
+    t0 = SDL_GetTicks();
+    player_ui_music_update(music, &game, t0);
+    CHECK(player_ui_music_state(music) == PLAYER_UI_MUSIC_FADING_OUT, "the fade starts");
+    player_ui_music_update(music, &game, t0 + 700u);
+    CHECK(player_ui_music_state(music) == PLAYER_UI_MUSIC_FADING_OUT, "700 ms: still waiting");
+    player_ui_music_update(music, &game, t0 + 749u);
+    CHECK(player_ui_music_state(music) == PLAYER_UI_MUSIC_FADING_OUT &&
+              player_ui_music_take_release_timeout(music) == 0u, "749 ms: still waiting");
+    player_ui_music_update(music, &game, t0 + 750u);
+    CHECK(player_ui_music_state(music) == PLAYER_UI_MUSIC_STOPPED &&
+              !player_ui_music_holds_audio(music) && SDL_WasInit(SDL_INIT_AUDIO) == 0,
+          "750 ms: the device is closed and SDL audio let go");
+    CHECK(player_ui_music_take_release_timeout(music) == 750u, "the timeout is reported");
+    CHECK(player_ui_music_take_release_timeout(music) == 0u, "once");
+    /* The same limit when the setting turns off: 50 ms and the grace. */
+    CHECK(wait_for(music, &on, PLAYER_UI_MUSIC_PLAYING) && wait_audible(music, &on),
+          "it plays again");
+    t0 = SDL_GetTicks();
+    player_ui_music_update(music, &off, t0);
+    player_ui_music_update(music, &off, t0 + 299u);
+    CHECK(player_ui_music_state(music) == PLAYER_UI_MUSIC_FADING_OUT, "off: 299 ms, waiting");
+    player_ui_music_update(music, &off, t0 + 300u);
+    CHECK(player_ui_music_state(music) == PLAYER_UI_MUSIC_OFF && SDL_WasInit(SDL_INIT_AUDIO) == 0,
+          "off: 300 ms, closed");
+    CHECK(player_ui_music_take_release_timeout(music) == 300u, "and reported");
+    player_ui_music_test_stall_release(false);
+    player_ui_music_destroy(music);
+
+    /* No worker thread: the track decodes on this thread and plays at once. */
+    player_ui_music_test_no_thread(true);
+    music = player_ui_music_create(track, PLAYER_UI_MUSIC_TRACK);
+    player_ui_music_update(music, &on, SDL_GetTicks());
+    CHECK(!player_ui_music_decoding(music) &&
+              player_ui_music_state(music) == PLAYER_UI_MUSIC_PLAYING &&
+              player_ui_music_holds_audio(music), "decoded inline, it plays");
+    player_ui_music_test_no_thread(false);
+    CHECK(wait_for(music, &off, PLAYER_UI_MUSIC_OFF), "and stops");
+    player_ui_music_destroy(music);
+
+    /* A file too large to be the track, and a folder where the file should be. */
+    {
+        const char *big = SR_SELFTEST_BUILD_ROOT "/test_player_ui_music_big.ogg";
+        const char *folder = SR_SELFTEST_BUILD_ROOT "/test_player_ui_music_folder.ogg";
+        SDL_IOStream *io = SDL_IOFromFile(big, "wb");
+        CHECK(io != NULL, "create the large file");
+        CHECK(SDL_SeekIO(io, (Sint64)PLAYER_UI_MUSIC_MAX_FILE_BYTES, SDL_IO_SEEK_SET) >= 0 &&
+                  SDL_WriteIO(io, "x", 1u) == 1u, "grow it past the cap");
+        SDL_CloseIO(io);
+        music = player_ui_music_create(big, PLAYER_UI_MUSIC_TRACK);
+        CHECK(wait_for(music, &on, PLAYER_UI_MUSIC_DAMAGED), "a file over the cap is DAMAGED");
+        CHECK(strstr(player_ui_music_detail(music), "larger than 64 MB") != NULL,
+              "the detail says why");
+        player_ui_music_destroy(music);
+        (void)SDL_RemovePath(big);
+        CHECK(SDL_CreateDirectory(folder), "create the folder");
+        music = player_ui_music_create(folder, PLAYER_UI_MUSIC_TRACK);
+        CHECK(wait_for(music, &on, PLAYER_UI_MUSIC_DAMAGED), "a folder is DAMAGED");
+        CHECK(strstr(player_ui_music_detail(music), "not a file") != NULL, "the detail says why");
+        player_ui_music_destroy(music);
+        (void)SDL_RemovePath(folder);
+    }
+    return 1;
+}
+
 int main(int argc, char **argv) {
     if (argc != 2) {
         fprintf(stderr, "usage: test_player_ui_music <ChillLofi.ogg>\n");
         return 2;
     }
     (void)SDL_SetHint(SDL_HINT_AUDIO_DRIVER, "dummy");
-    if (!test_track_decodes_and_loops(argv[1]) || !test_player_states(argv[1])) return 1;
+    if (!test_track_decodes_and_loops(argv[1]) || !test_player_states(argv[1]) ||
+        !test_decode_release_and_transitions(argv[1])) {
+        return 1;
+    }
     puts("player UI launcher music passed");
     return 0;
 }

@@ -34,10 +34,41 @@ struct PlayerUiMusic {
     SDL_AudioStream *stream;
     bool fading_out;
     uint64_t fade_started_ms;
+    uint32_t fade_ms;                  /* the fade-out's length */
     float volume_gain;
     bool device_failed;                /* the last open failed while the music was wanted */
     bool was_audible;
+    uint32_t release_timeout_ms;       /* a release at the time limit, not yet taken */
+    /* Where the loop stood when the decoded track was freed for a game. */
+    uint64_t resume_cursor;
+    bool have_resume;
 };
+
+#if defined(NK_PLAYER_UI_REGRESSION_TEST) || defined(PLAYER_UI_MUSIC_TEST_SEAMS)
+static SDL_AtomicInt player_ui_music_hold_decode;
+static SDL_AtomicInt player_ui_music_stall_release;
+static SDL_AtomicInt player_ui_music_no_thread;
+
+void player_ui_music_test_hold_decode(bool on) {
+    SDL_SetAtomicInt(&player_ui_music_hold_decode, on ? 1 : 0);
+}
+
+void player_ui_music_test_stall_release(bool on) {
+    SDL_SetAtomicInt(&player_ui_music_stall_release, on ? 1 : 0);
+}
+
+void player_ui_music_test_no_thread(bool on) {
+    SDL_SetAtomicInt(&player_ui_music_no_thread, on ? 1 : 0);
+}
+
+#define PLAYER_UI_MUSIC_HOLD_DECODE() (SDL_GetAtomicInt(&player_ui_music_hold_decode) != 0)
+#define PLAYER_UI_MUSIC_STALL_RELEASE() (SDL_GetAtomicInt(&player_ui_music_stall_release) != 0)
+#define PLAYER_UI_MUSIC_NO_THREAD() (SDL_GetAtomicInt(&player_ui_music_no_thread) != 0)
+#else
+#define PLAYER_UI_MUSIC_HOLD_DECODE() false
+#define PLAYER_UI_MUSIC_STALL_RELEASE() false
+#define PLAYER_UI_MUSIC_NO_THREAD() false
+#endif
 
 static char *player_ui_music_strdup(const char *text) {
     size_t length = strlen(text) + 1u;
@@ -175,28 +206,38 @@ PlayerUiMusic *player_ui_music_create(const char *path, const char *label) {
     return music;
 }
 
+/* The decoder asks this before each 4096-frame chunk (about 93 ms of the
+   track, a few milliseconds of decoding), so a cancelled decode stops promptly. */
 static bool player_ui_music_cancelled(void *user) {
-    return SDL_GetAtomicInt(&((PlayerUiMusic *)user)->cancel) != 0;
+    PlayerUiMusic *music = (PlayerUiMusic *)user;
+    while (PLAYER_UI_MUSIC_HOLD_DECODE() && SDL_GetAtomicInt(&music->cancel) == 0) {
+        SDL_Delay(1);
+    }
+    return SDL_GetAtomicInt(&music->cancel) != 0;
 }
 
 /* The loader: reads the whole file and decodes it. */
 static int SDLCALL player_ui_music_load(void *data) {
     PlayerUiMusic *music = (PlayerUiMusic *)data;
     size_t size = 0u;
-    void *bytes = SDL_LoadFile(music->path, &size);
+    void *bytes = NULL;
+    SDL_PathInfo info;
     music->load_failure = PLAYER_UI_MUSIC_OFF;
     music->load_detail[0] = '\0';
-    if (bytes == NULL) {
-        SDL_PathInfo info;
-        if (!SDL_GetPathInfo(music->path, &info) || info.type == SDL_PATHTYPE_NONE) {
-            music->load_failure = PLAYER_UI_MUSIC_MISSING;
-            (void)snprintf(music->load_detail, sizeof(music->load_detail),
-                           "the file is not there");
-        } else {
-            music->load_failure = PLAYER_UI_MUSIC_DAMAGED;
-            (void)snprintf(music->load_detail, sizeof(music->load_detail),
-                           "the file could not be read (%s)", SDL_GetError());
-        }
+    if (!SDL_GetPathInfo(music->path, &info) || info.type == SDL_PATHTYPE_NONE) {
+        music->load_failure = PLAYER_UI_MUSIC_MISSING;
+        (void)snprintf(music->load_detail, sizeof(music->load_detail), "the file is not there");
+    } else if (info.type != SDL_PATHTYPE_FILE) {
+        music->load_failure = PLAYER_UI_MUSIC_DAMAGED;
+        (void)snprintf(music->load_detail, sizeof(music->load_detail), "it is not a file");
+    } else if (info.size > (Uint64)PLAYER_UI_MUSIC_MAX_FILE_BYTES) {
+        music->load_failure = PLAYER_UI_MUSIC_DAMAGED;
+        (void)snprintf(music->load_detail, sizeof(music->load_detail),
+                       "the file is larger than %u MB", PLAYER_UI_MUSIC_MAX_FILE_BYTES >> 20);
+    } else if ((bytes = SDL_LoadFile(music->path, &size)) == NULL) {
+        music->load_failure = PLAYER_UI_MUSIC_DAMAGED;
+        (void)snprintf(music->load_detail, sizeof(music->load_detail),
+                       "the file could not be read (%s)", SDL_GetError());
     } else {
         PlayerUiVorbisResult result = player_ui_vorbis_decode(
             (const unsigned char *)bytes, size, player_ui_music_cancelled, music,
@@ -224,8 +265,8 @@ static void player_ui_music_close_device(PlayerUiMusic *music) {
     music->mix.ramp_left = 0u;
 }
 
-/* Back to the state of a fresh object: no thread, no device, no track. */
-static void player_ui_music_reset(PlayerUiMusic *music) {
+/* Cancels a running load and waits for its worker, discarding what it read. */
+static void player_ui_music_cancel_load(PlayerUiMusic *music) {
     if (music->loader != NULL) {
         SDL_SetAtomicInt(&music->cancel, 1);
         SDL_WaitThread(music->loader, NULL);
@@ -234,10 +275,27 @@ static void player_ui_music_reset(PlayerUiMusic *music) {
     }
     SDL_SetAtomicInt(&music->cancel, 0);
     SDL_SetAtomicInt(&music->loader_done, 0);
+}
+
+/* Frees the decoded track, keeping where the loop stood. */
+static void player_ui_music_free_track(PlayerUiMusic *music) {
+    if (!music->have_pcm) return;
+    music->resume_cursor = music->mix.cursor;
+    music->have_resume = true;
+    player_ui_pcm_free(&music->pcm);
+    memset(&music->mix, 0, sizeof(music->mix));
+    music->have_pcm = false;
+}
+
+/* Back to the state of a fresh object: no thread, no device, no track. */
+static void player_ui_music_reset(PlayerUiMusic *music) {
+    player_ui_music_cancel_load(music);
     player_ui_music_close_device(music);
     player_ui_pcm_free(&music->pcm);
     memset(&music->mix, 0, sizeof(music->mix));
     music->have_pcm = false;
+    music->have_resume = false;
+    music->resume_cursor = 0u;
     music->failure = PLAYER_UI_MUSIC_OFF;
     music->detail[0] = '\0';
     music->device_failed = false;
@@ -276,13 +334,20 @@ static void player_ui_music_take_load(PlayerUiMusic *music) {
         memset(&music->mix, 0, sizeof(music->mix));
         return;
     }
+    if (music->have_resume && music->resume_cursor >= music->mix.loop_start &&
+        music->resume_cursor < music->mix.loop_end) {
+        music->mix.cursor = music->resume_cursor;
+    }
+    music->have_resume = false;
     music->have_pcm = true;
 }
 
 static void player_ui_music_start_load(PlayerUiMusic *music) {
     SDL_SetAtomicInt(&music->cancel, 0);
     SDL_SetAtomicInt(&music->loader_done, 0);
-    music->loader = SDL_CreateThread(player_ui_music_load, "nakagawa-music", music);
+    music->loader = PLAYER_UI_MUSIC_NO_THREAD()
+                        ? NULL
+                        : SDL_CreateThread(player_ui_music_load, "nakagawa-music", music);
     if (music->loader == NULL) {
         /* No worker: decode here, as a launcher without threads would. */
         (void)player_ui_music_load(music);
@@ -301,6 +366,7 @@ static void SDLCALL player_ui_music_feed(void *user, SDL_AudioStream *stream,
     int16_t chunk[PLAYER_UI_MUSIC_FEED_FRAMES * 2];
     int frame_bytes = music->mix.channels * (int)sizeof(int16_t);
     (void)total_amount;
+    if (PLAYER_UI_MUSIC_STALL_RELEASE() && music->mix.target == 0.0f) return;
     while (additional_amount > 0) {
         int frames = (additional_amount + frame_bytes - 1) / frame_bytes;
         if (frames > PLAYER_UI_MUSIC_FEED_FRAMES) frames = PLAYER_UI_MUSIC_FEED_FRAMES;
@@ -352,14 +418,67 @@ static void player_ui_music_locked_ramp(PlayerUiMusic *music, float target, uint
     }
 }
 
+/* A new level: over the ramp's own short time, or over what is left of a fade
+   that is still running, so a step during the fade-in does not cut it short. */
+static void player_ui_music_locked_retarget(PlayerUiMusic *music, float target) {
+    if (SDL_LockAudioStream(music->stream)) {
+        uint64_t frames = player_ui_music_frames(music, PLAYER_UI_MUSIC_VOLUME_RAMP_MS);
+        if (music->mix.ramp_left > frames) frames = music->mix.ramp_left;
+        player_ui_music_mix_ramp(&music->mix, target, frames);
+        (void)SDL_UnlockAudioStream(music->stream);
+    }
+}
+
+/* Fades the music to silence over `fade_ms` (a fade already running keeps its
+   own length) and closes the device once the music has rendered silence, or
+   once the fade's time and PLAYER_UI_MUSIC_RELEASE_GRACE_MS have passed. A close
+   at that limit is kept for player_ui_music_take_release_timeout. Returns
+   whether the device is closed. */
+static bool player_ui_music_release(PlayerUiMusic *music, uint32_t fade_ms, uint64_t now_ms) {
+    bool silent = false;
+    uint64_t elapsed;
+    if (music->stream == NULL) return true;
+    if (!music->fading_out) {
+        player_ui_music_locked_ramp(music, 0.0f, fade_ms);
+        music->fading_out = true;
+        music->fade_started_ms = now_ms;
+        music->fade_ms = fade_ms;
+    }
+    if (SDL_LockAudioStream(music->stream)) {
+        silent = player_ui_music_mix_silent(&music->mix);
+        (void)SDL_UnlockAudioStream(music->stream);
+    }
+    elapsed = now_ms - music->fade_started_ms;
+    if (!silent) {
+        if (elapsed < (uint64_t)music->fade_ms + PLAYER_UI_MUSIC_RELEASE_GRACE_MS) return false;
+        /* The device stopped taking data: the music closes it unfaded. */
+        music->release_timeout_ms = elapsed > UINT32_MAX ? UINT32_MAX : (uint32_t)elapsed;
+    }
+    player_ui_music_close_device(music);
+    return true;
+}
+
 void player_ui_music_update(PlayerUiMusic *music, const PlayerUiMusicRequest *request,
                             uint64_t now_ms) {
     bool audible;
     float gain;
     if (music == NULL || request == NULL) return;
     if (!request->enabled) {
+        /* Turned off: a short fade first, so the stop makes no click. */
+        if (!player_ui_music_release(music, PLAYER_UI_MUSIC_VOLUME_RAMP_MS, now_ms)) {
+            music->state = PLAYER_UI_MUSIC_FADING_OUT;
+            return;
+        }
         player_ui_music_reset(music);
         music->state = PLAYER_UI_MUSIC_OFF;
+        return;
+    }
+    if (music->loader != NULL && !request->in_launcher) {
+        /* A game is starting: the decode stops, and its worker is joined, before
+           the launch may start the game's process (player_ui_music_decoding).
+           The track loads again when the launcher is back. */
+        player_ui_music_cancel_load(music);
+        music->state = PLAYER_UI_MUSIC_STOPPED;
         return;
     }
     if (music->loader != NULL) {
@@ -383,13 +502,20 @@ void player_ui_music_update(PlayerUiMusic *music, const PlayerUiMusicRequest *re
             return;
         }
         player_ui_music_start_load(music);
-        music->state = music->failure != PLAYER_UI_MUSIC_OFF ? music->failure
-                                                             : PLAYER_UI_MUSIC_LOADING;
-        return;
+        if (music->failure != PLAYER_UI_MUSIC_OFF) {
+            music->state = music->failure;
+            return;
+        }
+        if (music->loader != NULL) {
+            music->state = PLAYER_UI_MUSIC_LOADING;
+            return;
+        }
+        /* Decoded here, with no worker: the track plays from this frame on. */
     }
-    audible = request->in_launcher && request->focused;
     gain = (float)(request->volume < 0 ? 0 : request->volume > 100 ? 100 : request->volume) /
            100.0f;
+    /* At Music volume 0 the music holds no device, as when the window is away. */
+    audible = request->in_launcher && request->focused && gain > 0.0f;
     if (audible) {
         if (music->stream == NULL) {
             if (music->device_failed && music->was_audible) {
@@ -407,7 +533,7 @@ void player_ui_music_update(PlayerUiMusic *music, const PlayerUiMusicRequest *re
         } else if (music->fading_out) {
             player_ui_music_locked_ramp(music, gain, PLAYER_UI_MUSIC_FADE_IN_MS);
         } else if (gain != music->volume_gain) {
-            player_ui_music_locked_ramp(music, gain, PLAYER_UI_MUSIC_VOLUME_RAMP_MS);
+            player_ui_music_locked_retarget(music, gain);
         }
         music->fading_out = false;
         music->volume_gain = gain;
@@ -415,26 +541,17 @@ void player_ui_music_update(PlayerUiMusic *music, const PlayerUiMusicRequest *re
         return;
     }
     music->was_audible = false;
-    if (music->stream != NULL) {
-        bool silent = false;
-        if (!music->fading_out) {
-            player_ui_music_locked_ramp(music, 0.0f, PLAYER_UI_MUSIC_FADE_OUT_MS);
-            music->fading_out = true;
-            music->fade_started_ms = now_ms;
-        }
-        if (SDL_LockAudioStream(music->stream)) {
-            silent = player_ui_music_mix_silent(&music->mix);
-            (void)SDL_UnlockAudioStream(music->stream);
-        }
-        if (!silent && now_ms - music->fade_started_ms <
-                           (uint64_t)(PLAYER_UI_MUSIC_FADE_OUT_MS +
-                                      PLAYER_UI_MUSIC_RELEASE_GRACE_MS)) {
-            music->state = PLAYER_UI_MUSIC_FADING_OUT;
-            return;
-        }
-        player_ui_music_close_device(music);
+    if (!player_ui_music_release(music, PLAYER_UI_MUSIC_FADE_OUT_MS, now_ms)) {
+        music->state = PLAYER_UI_MUSIC_FADING_OUT;
+        return;
     }
-    music->state = request->in_launcher ? PLAYER_UI_MUSIC_PAUSED : PLAYER_UI_MUSIC_STOPPED;
+    if (!request->in_launcher) {
+        /* A game runs: the decoded track is not kept for it. */
+        player_ui_music_free_track(music);
+        music->state = PLAYER_UI_MUSIC_STOPPED;
+        return;
+    }
+    music->state = PLAYER_UI_MUSIC_PAUSED;
 }
 
 PlayerUiMusicState player_ui_music_state(const PlayerUiMusic *music) {
@@ -466,6 +583,45 @@ const char *player_ui_music_row_value(bool on, PlayerUiMusicState state) {
 bool player_ui_music_holds_audio(const PlayerUiMusic *music) {
     return music != NULL && music->stream != NULL;
 }
+
+bool player_ui_music_decoding(const PlayerUiMusic *music) {
+    return music != NULL && music->loader != NULL;
+}
+
+uint32_t player_ui_music_take_release_timeout(PlayerUiMusic *music) {
+    uint32_t elapsed;
+    if (music == NULL) return 0u;
+    elapsed = music->release_timeout_ms;
+    music->release_timeout_ms = 0u;
+    return elapsed;
+}
+
+#if defined(NK_PLAYER_UI_REGRESSION_TEST) || defined(PLAYER_UI_MUSIC_TEST_SEAMS)
+uint64_t player_ui_music_test_pcm_frames(const PlayerUiMusic *music) {
+    return music != NULL && music->have_pcm ? music->pcm.frames : 0u;
+}
+
+uint64_t player_ui_music_test_cursor(const PlayerUiMusic *music) {
+    uint64_t cursor = 0u;
+    if (music == NULL) return 0u;
+    if (music->stream != NULL && SDL_LockAudioStream(music->stream)) {
+        cursor = music->mix.cursor;
+        (void)SDL_UnlockAudioStream(music->stream);
+        return cursor;
+    }
+    return music->have_pcm ? music->mix.cursor : music->resume_cursor;
+}
+
+uint64_t player_ui_music_test_ramp_frames(const PlayerUiMusic *music) {
+    uint64_t frames = 0u;
+    if (music == NULL || music->stream == NULL) return 0u;
+    if (SDL_LockAudioStream(music->stream)) {
+        frames = music->mix.ramp_left;
+        (void)SDL_UnlockAudioStream(music->stream);
+    }
+    return frames;
+}
+#endif
 
 float player_ui_music_gain(const PlayerUiMusic *music) {
     float gain = 0.0f;

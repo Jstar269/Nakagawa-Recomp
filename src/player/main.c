@@ -3393,13 +3393,22 @@ static PlayerLaunchJob *player_launch_job_start(PlayerApp *app, int game_index,
 
 /* Hands a finished launch to the app. Returns the job while it still runs and
  * NULL once it is handed back; `wait` blocks until then (shutdown only). A job
- * waiting for the launcher music starts its worker once `launcher_audio_closed`. */
+ * waiting for the launcher music starts its worker once `launcher_audio_closed`;
+ * at shutdown it is dropped, since no game's process has started for it. */
 static PlayerLaunchJob *player_launch_job_poll(PlayerApp *app, PlayerLaunchJob *job,
                                                bool wait, bool launcher_audio_closed) {
     if (!job) return NULL;
     if (job->awaiting_audio) {
-        if (!wait && !launcher_audio_closed) return job;
-        player_launch_job_spawn(job, launcher_audio_closed);
+        if (wait) {
+            fprintf(stderr, "[PLAYER] Launch of %s dropped: the player closed before the "
+                            "game started.\n", job->work.game.disc_id);
+            app->launch_pending = false;
+            app->launch_pending_disc_id[0] = '\0';
+            free(job);
+            return NULL;
+        }
+        if (!launcher_audio_closed) return job;
+        player_launch_job_spawn(job, true);
     }
     if (!wait && SDL_GetAtomicInt(&job->done) == 0) return job;
     if (job->thread) SDL_WaitThread(job->thread, NULL);

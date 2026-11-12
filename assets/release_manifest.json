@@ -159,6 +159,16 @@
       "disposition": "vendored_source; MIT OR Unlicense upstream, used under Unlicense; linked into the player (PNG only)"
     },
     {
+      "id": "stb-vorbis",
+      "name": "stb_vorbis 1.24 Ogg Vorbis decoder",
+      "license": "Unlicense",
+      "origin": "https://github.com/nothings/stb",
+      "revision": "v1.24 / 9f755b604db3492df2cbeb39bf84b81e3e3932e3",
+      "notice_path": "third_party/stb/stb_vorbis.c",
+      "evidence_path": "third_party/stb/PROVENANCE.md",
+      "disposition": "vendored_source; MIT OR Unlicense upstream, used under Unlicense; linked into the player (launcher music)"
+    },
+    {
       "id": "rcheevos",
       "name": "rcheevos 12.5.0 RetroAchievements client library",
       "license": "MIT AND Zlib",

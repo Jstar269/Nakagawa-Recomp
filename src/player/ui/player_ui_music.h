@@ -18,17 +18,22 @@ extern "C" {
    It plays only while the launcher shows: it fades in over 1.5 s, fades out
    over 0.5 s and releases the audio device before a game starts or when the
    launcher window loses focus, and picks up where it stopped when the launcher
-   is back. The track is decoded once, on a worker thread, and loops between its
-   first and last non-silent frames, so the loop has no gap and no click. While
-   the setting is off nothing is read and no audio device is opened. A missing or
-   damaged file, or no audio device, is a named state, never a pretend play. */
+   is back. The track is decoded on a worker thread and loops between its first
+   and last non-silent frames, so the loop has no gap and no click. A game that
+   starts cancels and joins a decode still running, and the decoded track (about
+   22 MB) is freed while a game runs: it is decoded again on its worker (about
+   half a second) when the launcher is back. While the setting is off, or the Music
+   volume is 0, no audio device is opened; while it is off nothing is read. A
+   missing or damaged file, or no audio device, is a named state, never a
+   pretend play. */
 
 typedef enum {
     PLAYER_UI_MUSIC_OFF = 0,     /* the setting is off: nothing loaded, no audio */
     PLAYER_UI_MUSIC_LOADING,     /* the track is being read and decoded */
     PLAYER_UI_MUSIC_PLAYING,     /* audible, or fading in */
-    PLAYER_UI_MUSIC_FADING_OUT,  /* fading before a game starts or the window loses focus */
-    PLAYER_UI_MUSIC_PAUSED,      /* the launcher window lost focus: no audio device held */
+    PLAYER_UI_MUSIC_FADING_OUT,  /* fading before a game starts, the window loses focus or
+                                    the setting turns off */
+    PLAYER_UI_MUSIC_PAUSED,      /* no focus, or Music volume 0: no audio device held */
     PLAYER_UI_MUSIC_STOPPED,     /* a game starts or runs: no audio device held */
     PLAYER_UI_MUSIC_MISSING,     /* the track file is not there */
     PLAYER_UI_MUSIC_DAMAGED,     /* the file could not be read, decoded, or is silent */
@@ -46,15 +51,20 @@ typedef struct {
 
 #define PLAYER_UI_MUSIC_FADE_IN_MS 1500u
 #define PLAYER_UI_MUSIC_FADE_OUT_MS 500u
-/* A volume step ramps this long, so the change makes no click. */
+/* A volume step, and turning the setting off, ramps this long (or, during a
+   fade, as long as the fade has left), so the change makes no click. */
 #define PLAYER_UI_MUSIC_VOLUME_RAMP_MS 50u
 /* After a fade-out the device is released once the music has rendered silence,
    or once the fade's time and this much more has passed, whichever is first:
-   an audio device that stopped asking for data cannot hold a game back. */
+   an audio device that stopped asking for data cannot hold a game back. A
+   release at the time limit is reported (player_ui_music_take_release_timeout). */
 #define PLAYER_UI_MUSIC_RELEASE_GRACE_MS 250u
+/* A track file larger than this is refused as damaged before it is read. */
+#define PLAYER_UI_MUSIC_MAX_FILE_BYTES (64u * 1024u * 1024u)
 
 /* The track, relative to the player's folder (staged by
-   tools/stage_runtime_dlls.py with the launcher's other assets). */
+   tools/stage_runtime_dlls.py with the launcher's fonts). A development run from
+   the source tree finds it relative to the working folder instead. */
 #define PLAYER_UI_MUSIC_TRACK "assets/music/launcher/ChillLofi.ogg"
 
 typedef struct PlayerUiMusic PlayerUiMusic;
@@ -76,11 +86,32 @@ const char *player_ui_music_state_name(PlayerUiMusicState state);
 const char *player_ui_music_detail(const PlayerUiMusic *music);
 /* Whether the music holds an audio stream (and SDL's audio subsystem). */
 bool player_ui_music_holds_audio(const PlayerUiMusic *music);
+/* Whether a worker is reading or decoding the track. */
+bool player_ui_music_decoding(const PlayerUiMusic *music);
+/* When the last release closed the device at the time limit, before the music
+   had rendered silence (the device stopped taking data): the milliseconds from
+   the fade's start to the close, once; 0 otherwise. */
+uint32_t player_ui_music_take_release_timeout(PlayerUiMusic *music);
 /* The Settings row's words: "Off", "On", or what keeps the music from playing
    while it is on ("On: file missing", "On: file damaged", "On: no sound device"). */
 const char *player_ui_music_row_value(bool on, PlayerUiMusicState state);
 /* The gain the music is rendered at now, 0 to 1 (0 while it holds no stream). */
 float player_ui_music_gain(const PlayerUiMusic *music);
+
+#if defined(NK_PLAYER_UI_REGRESSION_TEST) || defined(PLAYER_UI_MUSIC_TEST_SEAMS)
+/* Test seams, process-wide. hold_decode: a decode waits, before its first
+   frame, until it is cancelled. stall_release: the audio callback stops
+   rendering once the music is told to fade to silence, as a device that stopped
+   taking data would. no_thread: the decode worker cannot start. */
+void player_ui_music_test_hold_decode(bool on);
+void player_ui_music_test_stall_release(bool on);
+void player_ui_music_test_no_thread(bool on);
+/* The decoded track's frames held (0 when none), the loop cursor, and the
+   frames the current gain ramp has left. */
+uint64_t player_ui_music_test_pcm_frames(const PlayerUiMusic *music);
+uint64_t player_ui_music_test_cursor(const PlayerUiMusic *music);
+uint64_t player_ui_music_test_ramp_frames(const PlayerUiMusic *music);
+#endif
 
 /* The loop and the fades, apart from SDL, so they can be checked frame by frame.
    The audio callback renders through these with the stream locked. */

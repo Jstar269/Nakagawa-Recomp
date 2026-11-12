@@ -1780,9 +1780,10 @@ void player_ui_test_slow_start(const PlayerUiTestLaunch *launch) {
 }
 
 void player_ui_test_report_launch_worker(bool launcher_audio_closed) {
-    printf("[PLAYER_UI_TEST] launch_worker_start launcher_audio=%s music=%s\n",
+    printf("[PLAYER_UI_TEST] launch_worker_start launcher_audio=%s music=%s decoder=%s\n",
            launcher_audio_closed ? "closed" : "open",
-           player_ui_nk_music_state_name(g_ui_test_next_ui));
+           player_ui_nk_music_state_name(g_ui_test_next_ui),
+           player_ui_nk_music_decoding(g_ui_test_next_ui) ? "running" : "idle");
 }
 
 /* The headless regression cannot open a modal box, so it reads the dialog

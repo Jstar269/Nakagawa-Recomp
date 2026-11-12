@@ -324,12 +324,16 @@ ships beside the player and is decoded with the vendored stb_vorbis; nothing is 
 launcher shows (the library, Settings, a game's page, the launcher's cards): it fades in over 1.5 s, and loops from the
 recording's first to its last sound, so the loop has no gap and no click. When a game starts it fades out over 0.5 s
 and the launcher lets go of the audio device before the game's process starts, so it never mixes into the game's
-sound; when the launcher is back it fades in again from where it stopped. It also fades out and lets go of the device
-while the launcher window does not have focus. While the setting is off nothing is read and no audio device is
-opened. A track that is missing or cannot be decoded, or an audio device that cannot be opened, is named on the
-setting's row (On: file missing, On: file damaged, On: no sound device) and in the log
-(`LAUNCHER_MUSIC_MISSING`, `LAUNCHER_MUSIC_DAMAGED`, `LAUNCHER_MUSIC_NO_DEVICE`); the launcher stays silent and
-carries on.
+sound. A game started while the track is still decoding stops the decode, and the launch waits for its worker to
+finish first. The decoded track (about 22 MB) is not kept while a game runs: when the launcher is back the track is
+decoded again on its worker (about half a second) and fades in from where it stopped. It also fades out and lets go
+of the device while the launcher window does not have focus (a launcher that opens without focus waits for it), and
+at Music volume 0. Turning the setting off fades it out over 50 ms. If the audio device stops taking data during a
+fade, the launcher closes it at the fade's length plus 0.25 s and logs `LAUNCHER_MUSIC_RELEASE_TIMEOUT` with the time
+it waited. While the setting is off nothing is read and no audio device is opened. A track that is missing, cannot
+be decoded or is larger than 64 MB, or an audio device that cannot be opened, is named on the setting's row (On: file
+missing, On: file damaged, On: no sound device) and in the log (`LAUNCHER_MUSIC_MISSING`, `LAUNCHER_MUSIC_DAMAGED`,
+`LAUNCHER_MUSIC_NO_DEVICE`); the launcher stays silent and carries on.
 
 Only actions the screen handles appear in its prompt bar.
 

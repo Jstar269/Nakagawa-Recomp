@@ -2525,7 +2525,7 @@ class TestRuntimeDllStaging(unittest.TestCase):
             repo = Path(tmp) / "repo"
             shutil.copytree(ROOT / "assets" / "fonts" / "ui", repo / "assets" / "fonts" / "ui")
             with self.assertRaises(stage_runtime_dlls.StageError) as ctx:
-                stage_runtime_dlls.stage_launcher_assets(Path(tmp) / "player", repo_root=repo)
+                stage_runtime_dlls.stage_launcher_music(Path(tmp) / "player", repo_root=repo)
             self.assertIn("LAUNCHER_MUSIC_MISSING", str(ctx.exception))
 
     def test_missing_sdl3_ttf_fails_the_stage_closed(self) -> None:

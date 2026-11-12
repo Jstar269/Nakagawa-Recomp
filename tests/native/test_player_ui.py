@@ -2673,7 +2673,7 @@ class NativePlayerUiTests(unittest.TestCase):
         # then to Music volume.
         run = self.next_ui_run(
             "settings",
-            ("WAIT_MS=100", "KEY_RIGHT") + ("KEY_DOWN",) * 6 +
+            ("FOCUS_GAINED", "WAIT_MS=100", "KEY_RIGHT") + ("KEY_DOWN",) * 6 +
             ("KEY_RETURN", "WAIT_MUSIC=playing,30000", "KEY_DOWN", "KEY_RETURN", "WAIT_MS=100",
              "KEY_ESCAPE"),
             env_extra=self.MUSIC_AUDIO,
@@ -2706,7 +2706,7 @@ class NativePlayerUiTests(unittest.TestCase):
         launch waits for it."""
         run = self.run_player(
             "ready",
-            (*self.PLAY_READY_TITLE, "WAIT_MUSIC=playing,30000", "KEY_RETURN",
+            ("FOCUS_GAINED", *self.PLAY_READY_TITLE, "WAIT_MUSIC=playing,30000", "KEY_RETURN",
              "WAIT_VIEW=error,30000", "WAIT_MUSIC=playing,30000"),
             post_build_ready=True, wait_background=True,
             settings={"launcher_music": True},
@@ -2718,7 +2718,7 @@ class NativePlayerUiTests(unittest.TestCase):
         workers = [line for line in stdout.splitlines()
                    if line.startswith("[PLAYER_UI_TEST] launch_worker_start ")]
         self.assertEqual(workers, ["[PLAYER_UI_TEST] launch_worker_start launcher_audio=closed "
-                                   "music=stopped"], stdout)
+                                   "music=stopped decoder=idle"], stdout)
         # The frames between PLAY and the worker's start: after the press frame the music
         # fades and stops, and it never plays again before the game's process starts.
         lines = stdout.splitlines()
@@ -2749,7 +2749,7 @@ class NativePlayerUiTests(unittest.TestCase):
         ends, pauses when the window loses focus and plays again when it is back."""
         run = self.run_player(
             "ready",
-            ("WAIT_MS=300", "KEY_RETURN", "WAIT_MS=700", "GAME_EXIT=0",
+            ("FOCUS_GAINED", "WAIT_MS=300", "KEY_RETURN", "WAIT_MS=700", "GAME_EXIT=0",
              "WAIT_MUSIC=playing,30000", "FOCUS_LOST", "WAIT_MUSIC=paused,30000",
              "FOCUS_GAINED", "WAIT_MUSIC=playing,30000"),
             post_build_ready=True, wait_background=True,
@@ -2769,6 +2769,116 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertIn("playing", ended)
         self.assertIn("paused", ended)
         self.assertEqual(ended[-1], "playing")
+
+    def music_workers(self, stdout: str) -> list[str]:
+        return [line for line in stdout.splitlines()
+                if line.startswith("[PLAYER_UI_TEST] launch_worker_start ")]
+
+    def test_default_launch_starts_its_worker_on_the_play_frame(self) -> None:
+        """#2207: with the launcher music off (the default) nothing waits for it: the launch
+        worker starts on the PLAY frame, before any frame shows the launch pending."""
+        run = self.run_player(
+            "ready", (*self.PLAY_READY_TITLE, "KEY_RETURN", "WAIT_VIEW=error,30000"),
+            post_build_ready=True, wait_background=True, env_extra=self.MUSIC_AUDIO,
+        )
+        stdout = str(run["stdout"])
+        if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in stdout:
+            self.skipTest("the next UI needs SDL3_ttf, which this host lacks")
+        workers = self.music_workers(stdout)
+        self.assertEqual(workers, ["[PLAYER_UI_TEST] launch_worker_start launcher_audio=closed "
+                                   "music=off decoder=idle"], stdout)
+        lines = stdout.splitlines()
+        before = parse_frames("\n".join(lines[:lines.index(workers[0])]))
+        self.assertTrue(before, stdout)
+        self.assertNotIn("1", {frame["launch_pending"] for frame in before},
+                         "no frame waited for the music")
+
+    def test_launcher_music_waits_for_focus_at_start(self) -> None:
+        """#2207: a launcher window that never had input focus (here the hidden test window,
+        as one that opens behind another would be) does not play until it gets focus."""
+        run = self.next_ui_run(
+            "settings", ("WAIT_MUSIC=paused,30000", "WAIT_MS=200", "FOCUS_GAINED",
+                         "WAIT_MUSIC=playing,30000"),
+            settings={"launcher_music": True}, env_extra=self.MUSIC_AUDIO,
+        )
+        stdout = str(run["stdout"])
+        self.assertIn("wait_music actual=paused result=PASS", stdout)
+        self.assertIn("wait_music actual=playing result=PASS", stdout)
+        states = [frame["music"] for frame in run["frames"]]  # type: ignore[union-attr]
+        self.assertLess(states.index("paused"), states.index("playing"), states)
+
+    def test_launcher_music_play_during_the_decode_joins_it_first(self) -> None:
+        """#2207: PLAY while the track is still decoding cancels the decode and joins its
+        worker before the launch worker starts the game's process. The decode here waits
+        for its cancel, so it is still running at PLAY; the player then quits while the
+        launcher's own decode is held again, and quitting cancels and joins that one."""
+        run = self.run_player(
+            "ready",
+            ("FOCUS_GAINED", *self.PLAY_READY_TITLE, "WAIT_MUSIC=loading,30000", "KEY_RETURN",
+             "WAIT_VIEW=error,30000", "WAIT_MUSIC=loading,30000"),
+            post_build_ready=True, wait_background=True,
+            settings={"launcher_music": True},
+            env_extra={**self.MUSIC_AUDIO, "NK_UI_TEST_MUSIC_HOLD_DECODE": "1"},
+        )
+        stdout = str(run["stdout"])
+        if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in stdout:
+            self.skipTest("the next UI needs SDL3_ttf, which this host lacks")
+        workers = self.music_workers(stdout)
+        self.assertEqual(workers, ["[PLAYER_UI_TEST] launch_worker_start launcher_audio=closed "
+                                   "music=stopped decoder=idle"], stdout)
+        lines = stdout.splitlines()
+        worker_at = lines.index(workers[0])
+        before = parse_frames("\n".join(lines[:worker_at]))
+        after = parse_frames("\n".join(lines[worker_at:]))
+        pending = [i for i, frame in enumerate(before) if frame["launch_pending"] == "1"]
+        self.assertTrue(pending, stdout)
+        self.assertEqual(before[pending[0] - 1]["music"], "loading", "PLAY came during the decode")
+        starting = [frame for frame in after if frame["launch_pending"] == "1"]
+        self.assertEqual({frame["music"] for frame in starting}, {"stopped"})
+        self.assertIn("wait_view actual=error result=PASS", stdout)
+        self.assertEqual(after[-1]["music"], "loading", "back in the launcher it loads again")
+
+    def test_launcher_music_release_timeout_is_named(self) -> None:
+        """#2207: when the audio device stops taking data during the fade before a game,
+        the music closes it at the time limit (0.5 s fade and 0.25 s grace) and says so in
+        one named line; the launch then goes on."""
+        run = self.run_player(
+            "ready",
+            ("FOCUS_GAINED", *self.PLAY_READY_TITLE, "WAIT_MUSIC=playing,30000", "WAIT_MS=300",
+             "KEY_RETURN", "WAIT_VIEW=error,30000"),
+            post_build_ready=True, wait_background=True,
+            settings={"launcher_music": True},
+            env_extra={**self.MUSIC_AUDIO, "NK_UI_TEST_MUSIC_STALL": "1"},
+        )
+        stdout = str(run["stdout"])
+        if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in stdout:
+            self.skipTest("the next UI needs SDL3_ttf, which this host lacks")
+        stderr = str(run["stderr"])
+        lines = [line for line in stderr.splitlines()
+                 if line.startswith("[PLAYER] LAUNCHER_MUSIC_RELEASE_TIMEOUT: ")]
+        self.assertEqual(len(lines), 1, stderr)
+        match = re.search(r"released after (\d+) ms$", lines[0])
+        self.assertIsNotNone(match, lines[0])
+        assert match is not None
+        self.assertGreaterEqual(int(match.group(1)), 750)
+        self.assertEqual(self.music_workers(stdout),
+                         ["[PLAYER_UI_TEST] launch_worker_start launcher_audio=closed "
+                          "music=stopped decoder=idle"], stdout)
+
+    def test_launcher_music_names_no_sound_device(self) -> None:
+        """#2207: with no audio device the music is a named state and one named line."""
+        run = self.next_ui_run(
+            "settings", ("FOCUS_GAINED", "WAIT_MUSIC=no_device,30000", "WAIT_MS=100"),
+            settings={"launcher_music": True},
+            env_extra={"SDL_AUDIO_DRIVER": "nk-no-such-audio-driver"},
+        )
+        self.assertIn("wait_music actual=no_device result=PASS", str(run["stdout"]))
+        stderr = str(run["stderr"])
+        lines = [line for line in stderr.splitlines()
+                 if line.startswith("[PLAYER] LAUNCHER_MUSIC_NO_DEVICE: ")]
+        self.assertEqual(len(lines), 1, stderr)
+        self.assertIn("assets/music/launcher/ChillLofi.ogg", lines[0])
+        self.assertNotIn("playing", {frame["music"] for frame in run["frames"]})  # type: ignore[union-attr]
 
     def test_launcher_music_names_a_missing_or_damaged_track(self) -> None:
         """#2207: a missing or damaged track is a named state and a named log line, never
