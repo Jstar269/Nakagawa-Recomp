@@ -216,11 +216,11 @@ CODEGEN_CUSTOM_STUBS = [
          reason="the retail body walks, unlinks, and rewrites dlmalloc chunks, so it must share "
                 "the host metadata ABI used by malloc/free/memalign.",
          test="tools/test_codegen_retail_allocator.py"),
-    dict(address=0x000143b0, category="faithful_abi_bridge", name="guest sprintf",
-         reason="the translated original formatter corrupted %s arguments during boot; this "
-                "native implementation preserves PSP EABI varargs placement (r6..r11, then stack), "
-                "including aligned two-word double arguments for floating conversions",
-         test="tools/test_guest_printf.py"),
+    # 0x000143b0 (native sprintf): retired under #363 (2026-11-11). Its recorded reason was
+    # that the translated formatter corrupted %s arguments during boot. On the private
+    # full-match route the title's own sprintf and the native one agreed on every call, so
+    # the title's own now runs (tools/test_codegen_entry_semantics.py
+    # FormatterAtRetiredSprintfBridgeTests).
     # 0x0001034c (heap-statistics walk skip) and 0x001d9eb0 (title backdrop selector
     # postcondition): retired under #363 (2026-10-26). The walk reads the retail
     # allocator's statically linked bins, which nothing writes once malloc/free/memalign/

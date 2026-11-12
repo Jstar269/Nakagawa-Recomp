@@ -107,9 +107,10 @@ def _addiu_sp(imm: int) -> int:
 # two loop fast paths, the guest-abort exit and the four --static-verify exclusions
 # followed on 2026-11-08 (#363): RETIRED_HST_ADDRESSES below holds them.
 # 0x000011B0, 0x0000260C, 0x0000FE3C, 0x00015EA0 and 0x000149A8 left this list when their
-# stubs were retired (#363): each now translates as written in both profiles.
+# stubs were retired (#363): each now translates as written in both profiles. 0x000143B0
+# (the native sprintf) followed on 2026-11-11.
 HST_CUSTOM_STUBS = (
-    0x0000F538, 0x000101C4, 0x00010738, 0x00013524, 0x000143B0,
+    0x0000F538, 0x000101C4, 0x00010738, 0x00013524,
     0x00011090, 0x000110DC, 0x000114A8, 0x000114C0,
 )
 HST_GUEST_PATCHES = tuple(sorted(codegen.GUEST_PATCHES))
@@ -482,14 +483,15 @@ class ProfileHstLegacyTests(unittest.TestCase):
             "sr_newlib_free(s->r[5], owner_ra)",
             "sr_newlib_memalign",
             "sr_newlib_realloc",
-            "sr_guest_sprintf(s);",
             "sr_native_memmove(dest, s->r[5], s->r[6], 0x00011090u)",
             "sr_native_memset(dest, (uint8_t)(s->r[5] & 0xFF), s->r[6], 0x000114c0u)",
         )
         missing = [s for s in expected if s not in self.combined]
         self.assertEqual(missing, [], "profile=hst lost legacy HST emission")
         # Retired under #363: the guest's own loops and abort() run as written.
-        for retired in ("MEMSET_FASTPATH", "ARRSHIFT_FASTPATH", "GUEST_ABORT", "_Exit(9)"):
+        # The native sprintf went on 2026-11-11: the title's own formatter runs.
+        for retired in ("MEMSET_FASTPATH", "ARRSHIFT_FASTPATH", "GUEST_ABORT", "_Exit(9)",
+                        "sr_guest_sprintf"):
             self.assertNotIn(retired, self.combined, f"profile=hst still emits {retired}")
 
     def test_diagnostic_probes_stay_compiled_out_in_production(self):
@@ -1164,14 +1166,14 @@ class RetiredAddressGuardTests(unittest.TestCase):
 # 7. Bodies whose HST stubs were retired translate as written (#363)
 # ---------------------------------------------------------------------------
 
-#: Retired under #363 (2026-10-26 and 2026-10-27). Under profile=hst each of these
-#: addresses used to emit a title stub (a static-success simple stub, the
-#: heap-statistics walk skip, or the backdrop chooser's postcondition wrapper) in place
-#: of, or around, its own body. Each now translates its own instructions under every
-#: profile.
+#: Retired under #363 (2026-10-26 and 2026-10-27, and the native sprintf at 0x000143B0
+#: on 2026-11-11). Under profile=hst each of these addresses used to emit a title stub (a
+#: static-success simple stub, the heap-statistics walk skip, the backdrop chooser's
+#: postcondition wrapper, or a native sprintf) in place of, or around, its own body. Each
+#: now translates its own instructions under every profile.
 RETIRED_363_STUB_ADDRESSES: tuple[int, ...] = (
     0x00015F98, 0x0001034C, 0x0001C010, 0x0001C0FC, 0x0001C104, 0x0001C560,
-    0x0001C604, 0x0001C810, 0x0001C818, 0x001D9EB0,
+    0x0001C604, 0x0001C810, 0x0001C818, 0x001D9EB0, 0x000143B0,
 )
 
 
