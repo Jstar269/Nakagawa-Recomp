@@ -21,7 +21,7 @@ static int s_fail;
     } while (0)
 
 static const char *const k_good =
-    "v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off";
+    "v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off;twin=off";
 /* Forty characters, to build lines longer than ACE_SPEC_MAX. */
 #define ACE_TEST_X40 "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 
@@ -32,22 +32,23 @@ static void cell_parse(void) {
     char why[64];
     CHECK(ace_parse(k_good, &c, why, sizeof(why)) == 1, "the canonical line parses (%s)", why);
     CHECK(c.on == 1 && c.af == 16 && c.text == 1 && c.readout == 0 && c.notice == 1 &&
-          c.wide == 0 && c.smooth == 0 && c.sas == ACE_SAS_OFF, "fields of the canonical line");
-    CHECK(ace_parse("v1;tess=off;sas=off;smooth=off;wide=off;notice=off;readout=on;text=off;af=0", &c, why,
-                    sizeof(why)) == 1 && c.on && c.af == 0 && c.readout == 1,
+          c.wide == 0 && c.smooth == 0 && c.sas == ACE_SAS_OFF && c.twin == 0,
+          "fields of the canonical line");
+    CHECK(ace_parse("v1;twin=on;tess=off;sas=off;smooth=off;wide=off;notice=off;readout=on;text=off;af=0",
+                    &c, why, sizeof(why)) == 1 && c.on && c.af == 0 && c.readout == 1 && c.twin == 1,
           "keys in any order");
     CHECK(ace_parse("off", &c, why, sizeof(why)) == 1 && c.on == 0, "off is valid and off");
     /* #2055: tier names the run (Enhanced or Ace); a line without it is an Enhanced run. */
-    CHECK(ace_parse("v1;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off", &c, why,
+    CHECK(ace_parse("v1;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off;twin=off", &c, why,
                     sizeof(why)) == 1 && c.on && c.tier == ACE_TIER_ENHANCED,
           "a line without tier is an Enhanced run");
-    CHECK(ace_parse("v1;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off;tier=ace",
+    CHECK(ace_parse("v1;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off;twin=off;tier=ace",
                     &c, why, sizeof(why)) == 1 && c.on && c.tier == ACE_TIER_ACE,
           "tier=ace names an Ace run");
     /* cull (contract 11.3.6): optional, a missing key and cull=off are both off, cull=on needs an Ace
        line, and a line without it formats as before. */
     {
-        static const char base[] = "v1;af=16;text=on;readout=off;notice=on;wide=fill;smooth=off;sas=off;tess=off";
+        static const char base[] = "v1;af=16;text=on;readout=off;notice=on;wide=fill;smooth=off;sas=off;tess=off;twin=off";
         char spec[ACE_SPEC_MAX], out[ACE_SPEC_MAX];
         CHECK(ace_parse(base, &c, why, sizeof(why)) == 1 && c.cull == 0, "a missing cull is off");
         snprintf(spec, sizeof(spec), "%s;tier=ace;cull=off", base);
@@ -70,7 +71,7 @@ static void cell_parse(void) {
     /* stick (contract 11.3.11): optional, a missing key is off, its value is the game's dead zone
        (1..126) in canonical decimal, it needs an Ace line, and a line without it formats as before. */
     {
-        static const char base[] = "v1;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off";
+        static const char base[] = "v1;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off;twin=off";
         char spec[ACE_SPEC_MAX], out[ACE_SPEC_MAX];
         CHECK(ace_parse(base, &c, why, sizeof(why)) == 1 && c.stick == 0, "a missing stick is off");
         snprintf(spec, sizeof(spec), "%s;tier=ace;stick=64", base);
@@ -112,7 +113,7 @@ static void cell_parse(void) {
     /* load (contract 11.3.10): optional like cull; load=fast needs an Ace line, any other value
        is refused, and a line without it formats as before. */
     {
-        static const char base[] = "v1;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off";
+        static const char base[] = "v1;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off;twin=off";
         char spec[ACE_SPEC_MAX], out[ACE_SPEC_MAX];
         CHECK(ace_parse(base, &c, why, sizeof(why)) == 1 && c.load == 0, "a missing load is off");
         snprintf(spec, sizeof(spec), "%s;tier=ace;load=off", base);
@@ -147,7 +148,7 @@ static void cell_parse(void) {
        depth=off and a missing key are the PSP's 16 bits, any other value is refused, and it is
        written after load and before cull, only when on. */
     {
-        static const char base[] = "v1;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off";
+        static const char base[] = "v1;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off;twin=off";
         char spec[ACE_SPEC_MAX], out[ACE_SPEC_MAX];
         CHECK(ace_parse(base, &c, why, sizeof(why)) == 1 && c.depth == 0, "a missing depth is 16-bit");
         snprintf(spec, sizeof(spec), "%s;depth=off", base);
@@ -183,7 +184,7 @@ static void cell_parse(void) {
     {
         static const char *const fields[] = { "tier=ace", "af=16", "text=on", "readout=off",
                                               "notice=on", "wide=off", "smooth=off",
-                                              "sas=off", "tess=off" };
+                                              "sas=off", "tess=off", "twin=off" };
         enum { FIELDS = (int)(sizeof(fields) / sizeof(fields[0])) };
         for (int skip = 0; skip < FIELDS; skip++) {
             char spec[ACE_SPEC_MAX] = "v1";
@@ -218,13 +219,13 @@ static void cell_parse(void) {
         { "v1;;af=16;text=on;readout=off;notice=on;wide=off;smooth=off", "empty field" },
         { "v1;af;text=on;readout=off;notice=on;wide=off;smooth=off", "field is not key=value" },
         { "v1;af=;text=on;readout=off;notice=on;wide=off;smooth=off", "field is not key=value" },
-        { "v1;af=16;text=on;readout=off;notice=on;wide=Fill;smooth=off;sas=off;tess=off", "bad value" },
-        { "v1;af=16;text=on;readout=off;notice=on;wide=stretch;smooth=off;sas=off;tess=off", "bad value" },
+        { "v1;af=16;text=on;readout=off;notice=on;wide=Fill;smooth=off;sas=off;tess=off;twin=off", "bad value" },
+        { "v1;af=16;text=on;readout=off;notice=on;wide=stretch;smooth=off;sas=off;tess=off;twin=off", "bad value" },
         { "v1;af=16;text=on;readout=off;notice=on;wide=off;smooth=match", "this smooth mode is not part of this build" },
-        { "v1;tier=boost;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off", "bad value" },
-        { "v1;tier=ace;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off;tier=ace",
+        { "v1;tier=boost;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off;twin=off", "bad value" },
+        { "v1;tier=ace;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off;twin=off;tier=ace",
           "duplicate key" },
-        { "v1;tier=ace;af=16;text=on;readout=off;notice=on;smooth=off;sas=off;tess=off", "missing key" },
+        { "v1;tier=ace;af=16;text=on;readout=off;notice=on;smooth=off;sas=off;tess=off;twin=off", "missing key" },
         { "v1;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;" ACE_TEST_X40
           ACE_TEST_X40 ACE_TEST_X40 ACE_TEST_X40, "line too long" },
         /* sas (#2054): required like every key, off or sinc, and nothing else. */
@@ -243,6 +244,15 @@ static void cell_parse(void) {
         { "v1;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=-2", "bad value" },
         { "v1;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off;tess=2", "duplicate key" },
         { "v1;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=", "field is not key=value" },
+        /* twin (#2050): required like every key, on or off, and nothing else. */
+        { "v1;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off", "missing key" },
+        { "v1;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off;twin=maybe", "bad value" },
+        { "v1;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off;twin=On", "bad value" },
+        { "v1;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off;twin=native", "bad value" },
+        { "v1;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off;twin=off;twin=on",
+          "duplicate key" },
+        { "v1;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off;twin=",
+          "field is not key=value" },
     };
     for (size_t i = 0; i < sizeof(refused) / sizeof(refused[0]); i++) {
         memset(&c, 0x5A, sizeof(c));
@@ -255,7 +265,7 @@ static void cell_parse(void) {
 
     /* format and parse agree */
     char line[ACE_SPEC_MAX];
-    AceConfig a = { 1, 4, 0, 1, 0, 0, 0, ACE_TIER_ENHANCED, ACE_SAS_OFF, 0, 0, 0, 0, 0 }, b;
+    AceConfig a = { 1, 4, 0, 1, 0, 0, 0, ACE_TIER_ENHANCED, ACE_SAS_OFF, 0, 0, 0, 0, 0, 0 }, b;
     CHECK(ace_format(&a, line, sizeof(line)) && ace_parse(line, &b, NULL, 0) &&
           memcmp(&a, &b, sizeof(a)) == 0, "format round trip (%s)", line);
     CHECK(ace_format(&a, line, 8) == 0 && line[0] == '\0', "format refuses a short buffer");
@@ -267,10 +277,10 @@ static void cell_parse(void) {
     a.sas = ACE_SAS_SINC;
     CHECK(ace_format(&a, line, sizeof(line)) &&
           strcmp(line, "v1;tier=enhanced;af=4;text=off;readout=on;notice=off;wide=off;smooth=off;"
-                       "sas=sinc;tess=off") == 0 &&
+                       "sas=sinc;tess=off;twin=off") == 0 &&
           ace_parse(line, &b, NULL, 0) && b.sas == ACE_SAS_SINC && memcmp(&a, &b, sizeof(a)) == 0,
           "sas=sinc round trip (%s)", line);
-    CHECK(ace_parse("v1;sas=sinc;tess=off;af=0;text=off;readout=off;notice=off;wide=off;smooth=off", &b, why,
+    CHECK(ace_parse("v1;sas=sinc;tess=off;twin=off;af=0;text=off;readout=off;notice=off;wide=off;smooth=off", &b, why,
                     sizeof(why)) == 1 && b.on && b.sas == ACE_SAS_SINC && b.af == 0,
           "sas=sinc alone is a valid line (%s)", why);
     /* tess=2..4 (#2053): each factor round trips, and a line carrying it is canonical. */
@@ -279,12 +289,61 @@ static void cell_parse(void) {
         char want[ACE_SPEC_MAX];
         a.tess = f;
         snprintf(want, sizeof(want), "v1;tier=enhanced;af=4;text=off;readout=on;notice=off;wide=off;"
-                                     "smooth=off;sas=off;tess=%d", f);
+                                     "smooth=off;sas=off;tess=%d;twin=off", f);
         CHECK(ace_format(&a, line, sizeof(line)) && strcmp(line, want) == 0 &&
               ace_parse(line, &b, NULL, 0) && b.tess == f && memcmp(&a, &b, sizeof(a)) == 0,
               "tess=%d round trip (%s)", f, line);
     }
     a.tess = 0;
+    /* twin=on (#2050) is the line's last key, and formats and parses back. */
+    a.twin = 1;
+    CHECK(ace_format(&a, line, sizeof(line)) &&
+          strcmp(line, "v1;tier=enhanced;af=4;text=off;readout=on;notice=off;wide=off;smooth=off;"
+                       "sas=off;tess=off;twin=on") == 0 &&
+          ace_parse(line, &b, NULL, 0) && b.twin == 1 && memcmp(&a, &b, sizeof(a)) == 0,
+          "twin=on round trip (%s)", line);
+    CHECK(ace_parse("v1;twin=on;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;"
+                    "tess=off",
+                    &b, why, sizeof(why)) == 1 && b.on && b.twin == 1 && b.af == 0,
+          "twin=on alone is a valid line (%s)", why);
+    /* The longest line ace_format writes fits in ACE_SPEC_MAX, the buffer the flight
+     * recorder keeps it in; the parser refuses a line of ACE_SPEC_MAX characters for its
+     * length and reads one of ACE_SPEC_MAX - 1 (the bundle schema's maxLength) on. */
+    /* The longest line comes from the parser's key table (each key at its longest value), so a
+     * part that adds a key moves it without an edit here. The config below gives each field its
+     * longest word; a field it leaves out is 0, whose word ("off") a new key's table row names
+     * unless it has a longer one, and then the two lengths differ here. (The parser refuses
+     * smooth=match in a build without it, so the config is not parsed from the line.) */
+    {
+        const AceConfig l = { .on = 1, .af = 16, .wide = ACE_WIDE_FILL,
+                              .smooth = ACE_SMOOTH_MATCH, .tier = ACE_TIER_ENHANCED,
+                              .sas = ACE_SAS_SINC, .cull = 1, .stick = ACE_STICK_COUNTS_MAX,
+                              .load = 1, .depth = 32 };
+        char longest[512];
+        const size_t longest_len = ace_longest_line(longest, sizeof(longest));
+        char edge[ACE_SPEC_MAX + 1];
+        CHECK(longest_len > 0 && ace_format(&l, line, sizeof(line)) &&
+              strlen(line) == longest_len,
+              "ace_format writes the key table's longest line at its length (%s; %s, %zu)", line,
+              longest, longest_len);
+        CHECK(longest_len < ACE_SPEC_MAX, "the longest line (%zu characters) fits in ACE_SPEC_MAX",
+              longest_len);
+        CHECK(ace_format(&l, line, longest_len) == 0,
+              "a buffer one short of the longest line is refused");
+        CHECK(longest_len + 5 < ACE_SPEC_MAX, "a later key still has room after the longest line");
+        if (longest_len + 5 >= ACE_SPEC_MAX) return;
+        memset(edge, 'a', sizeof(edge));
+        memcpy(edge, longest, longest_len);
+        memcpy(edge + longest_len, ";s2d=", 5);
+        edge[ACE_SPEC_MAX] = '\0';
+        why[0] = '\0';
+        CHECK(ace_parse(edge, &b, why, sizeof(why)) == 0 && strcmp(why, "line too long") == 0,
+              "a line of ACE_SPEC_MAX characters is refused for its length (%s)", why);
+        edge[ACE_SPEC_MAX - 1] = '\0';
+        why[0] = '\0';
+        CHECK(ace_parse(edge, &b, why, sizeof(why)) == 0 && strcmp(why, "line too long") != 0,
+              "a line of ACE_SPEC_MAX - 1 characters passes the length check (%s)", why);
+    }
     a.on = 0;
     CHECK(ace_format(&a, line, sizeof(line)) && strcmp(line, "off") == 0, "off formats as off");
 }
@@ -324,10 +383,10 @@ static void cell_switch(void) {
     CHECK(strcmp(ace_spec_text(), k_good) == 0, "the run's line is canonical");
     CHECK(strcmp(ace_tier_name(), "Enhanced") == 0, "an Enhanced run is called Enhanced");
     CHECK(ace_init_spec("v1;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;"
-                        "tess=off;tier=ace", NULL) == 1 &&
+                        "tess=off;twin=off;tier=ace", NULL) == 1 &&
           strcmp(ace_tier_name(), "Ace") == 0 &&
           strcmp(ace_spec_text(),
-                 "v1;tier=ace;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off") == 0,
+                 "v1;tier=ace;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off;twin=off") == 0,
           "an Ace run is called Ace, and its line is canonical");
     CHECK(ace_init_spec(k_good, NULL) == 1 && strcmp(ace_tier_name(), "Enhanced") == 0,
           "the next Enhanced run is called Enhanced again");
@@ -350,10 +409,10 @@ static void cell_switch(void) {
 
     /* wide=fill (#1881): part of this build, named in the words and the stamp's line; off with
        its feature (the presenter turns it off while smooth motion is on, gui.c). */
-    CHECK(ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=fill;smooth=off;sas=off;tess=off", NULL) == 1 &&
+    CHECK(ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=fill;smooth=off;sas=off;tess=off;twin=off", NULL) == 1 &&
           ace_effective()->wide == ACE_WIDE_FILL, "wide=fill turns Ace on with Fill");
     CHECK(strcmp(ace_spec_text(), "v1;tier=enhanced;af=0;text=off;readout=off;notice=off;wide=fill;"
-                                  "smooth=off;sas=off;tess=off") == 0,
+                                  "smooth=off;sas=off;tess=off;twin=off") == 0,
           "the Fill run's line keeps wide=fill: '%s'", ace_spec_text());
     CHECK(ace_feature_words(words, sizeof(words)) > 0 && strcmp(words, "ultrawide") == 0,
           "wide feature words: '%s'", words);
@@ -362,7 +421,7 @@ static void cell_switch(void) {
           "an unavailable Fill is off for the run");
 
     /* sas=sinc: named in the words, the stamp's line and the report; off with its feature. */
-    CHECK(ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=sinc;tess=off", NULL) == 1 &&
+    CHECK(ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=sinc;tess=off;twin=off", NULL) == 1 &&
           ace_effective()->sas == ACE_SAS_SINC, "sas=sinc turns Ace on");
     CHECK(ace_feature_words(words, sizeof(words)) > 0 && strcmp(words, "clean pitched sound") == 0,
           "sas feature words: '%s'", words);
@@ -375,7 +434,7 @@ static void cell_switch(void) {
     CHECK(ace_init_spec(k_good, NULL) == 1 && ace_effective()->sas == ACE_SAS_OFF, "sas=off is off");
     /* cull: the report counts the matrices the hook left alone once its table was full, and a run with
      * any is partial (cull unavailable), never a complete one (contract 11.3.6). */
-    CHECK(ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=fill;smooth=off;sas=off;tess=off;tier=ace;"
+    CHECK(ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=fill;smooth=off;sas=off;tess=off;twin=off;tier=ace;"
                         "cull=on", NULL) == 1 && ace_effective()->cull == 1, "cull=on with tier=ace turns cull on");
     ace_set_cull_untracked(7);
     CHECK(ace_report_json(json, sizeof(json)) > 0 && strstr(json, "\"cull\": true") != NULL &&
@@ -403,10 +462,10 @@ static void cell_switch(void) {
     CHECK(ace_init_spec(k_good, NULL) == 1 && ace_effective()->depth == 0 &&
           ace_report_json(json, sizeof(json)) > 0 && strstr(json, "\"depth\"") == NULL,
           "a run without depth reports none:\n%s", json);
-    CHECK(ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;depth=32",
+    CHECK(ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;twin=off;depth=32",
                         NULL) == 1 && ace_effective()->depth == 32, "depth=32 in an Enhanced line turns it on");
     CHECK(strcmp(ace_spec_text(), "v1;tier=enhanced;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;"
-                                  "sas=off;tess=off;depth=32") == 0,
+                                  "sas=off;tess=off;twin=off;depth=32") == 0,
           "the stamp's line carries depth=32: '%s'", ace_spec_text());
     CHECK(ace_report_json(json, sizeof(json)) > 0 && strstr(json, "\"depth\": 32") != NULL,
           "the report carries depth 32:\n%s", json);
@@ -426,10 +485,10 @@ static void cell_switch(void) {
           ace_load_waits_skipped() == 0, "an Enhanced run without load skips no wait");
     CHECK(ace_report_json(json, sizeof(json)) > 0 && strstr(json, "\"load") == NULL,
           "a run without load reports none:\n%s", json);
-    CHECK(ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;tier=ace;"
+    CHECK(ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;twin=off;tier=ace;"
                         "load=fast", NULL) == 1 && ace_effective()->load == 1, "load=fast with tier=ace turns load on");
     CHECK(strcmp(ace_spec_text(), "v1;tier=ace;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;"
-                                  "sas=off;tess=off;load=fast") == 0,
+                                  "sas=off;tess=off;twin=off;load=fast") == 0,
           "the stamp's line carries load=fast: '%s'", ace_spec_text());
     CHECK(ace_feature_words(words, sizeof(words)) > 0 && strcmp(words, "short loads") == 0,
           "load feature words: '%s'", words);
@@ -443,7 +502,7 @@ static void cell_switch(void) {
     ace_feature_unavailable(ACE_FEATURE_LOAD, "test");
     CHECK(ace_effective()->load == 0 && ace_requested()->load == 1 && load_fast() == 0 &&
           ace_load_waits_skipped() == 3, "an unavailable load skips no more waits");
-    CHECK(ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;tier=ace;"
+    CHECK(ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;twin=off;tier=ace;"
                         "load=fast", NULL) == 1 && ace_load_waits_skipped() == 0, "a new run counts from 0");
     ace_finish();   /* never reached: no load part in this build, or no declared wait ran */
     CHECK(ace_effective()->load == 0 && ace_report_json(json, sizeof(json)) > 0 &&
@@ -458,7 +517,7 @@ static void cell_switch(void) {
     {
         const unsigned k = ACE_LOAD_PACING_UPDATES;
         CHECK(k >= 2u, "the threshold leaves room for a load tail");
-        CHECK(ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;"
+        CHECK(ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;twin=off;"
                             "tier=ace;load=fast", NULL) == 1 && ace_load_skip_max_run() == 0 && !ace_load_paced(),
               "a new run starts with no run and the guard unfired");
         for (unsigned u = 0; u < 3u; u++) {
@@ -498,7 +557,7 @@ static void cell_switch(void) {
         char want[48];
         snprintf(want, sizeof(want), "\"load_skip_max_run\": %u,", k);
         CHECK(strstr(json, want) != NULL, "the report carries the longest run (%s):\n%s", want, json);
-        CHECK(ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;"
+        CHECK(ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;twin=off;"
                             "tier=ace;load=fast", NULL) == 1 && !ace_load_paced() && ace_load_skip_max_run() == 0 &&
               load_fast() == 1, "a new run clears the guard");
         CHECK(ace_report_json(json, sizeof(json)) > 0 && strstr(json, "\"load_skip_max_run\": 1,") != NULL &&
@@ -507,7 +566,7 @@ static void cell_switch(void) {
 
     /* tess=4 (#2053): named in the words, the stamp's line and the report; off with its feature;
        off in the canonical line and in an authentic run. */
-    CHECK(ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=4", NULL) == 1 &&
+    CHECK(ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=4;twin=off", NULL) == 1 &&
           ace_effective()->tess == 4, "tess=4 turns Ace on");
     CHECK(ace_feature_words(words, sizeof(words)) > 0 && strcmp(words, "4x patches") == 0,
           "tess feature words: '%s'", words);
@@ -518,6 +577,26 @@ static void cell_switch(void) {
           "an unavailable tess is off for the run");
     CHECK(ace_init_spec(k_good, NULL) == 1 && ace_effective()->tess == 0, "tess=off is off");
     CHECK(ace_init_spec("off", NULL) == 0 && ace_effective()->tess == 0, "an authentic run has no tess");
+
+    /* twin=on (#2050): named in the words, the stamp's line and the report; off with its feature. */
+    CHECK(ace_init_spec("v1;tier=ace;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;"
+                        "tess=off;twin=on", NULL) == 1 && ace_effective()->twin == 1, "twin=on turns Ace on");
+    CHECK(strcmp(ace_spec_text(), "v1;tier=ace;af=0;text=off;readout=off;notice=off;wide=off;"
+                                  "smooth=off;sas=off;tess=off;twin=on") == 0,
+          "the run's line carries twin=on: '%s'", ace_spec_text());
+    CHECK(ace_feature_words(words, sizeof(words)) > 0 && strcmp(words, "full 32-bit colour") == 0,
+          "twin feature words: '%s'", words);
+    CHECK(ace_report_json(json, sizeof(json)) > 0 && strstr(json, "\"twin\": true") != NULL &&
+          strstr(json, "twin=on\"") != NULL, "the report names twin=on:\n%s", json);
+    ace_feature_unavailable(ACE_FEATURE_TWIN, "test");
+    CHECK(ace_effective()->twin == 0 && ace_requested()->twin == 1 &&
+          ace_effective()->sas == ACE_SAS_OFF, "an unavailable twin is off for the run only");
+    CHECK(ace_report_json(json, sizeof(json)) > 0 && strstr(json, "\"twin\": false") != NULL &&
+          strstr(json, "\"unavailable\": {\"twin\": \"test\"}") != NULL,
+          "the report names the unavailable twin:\n%s", json);
+    CHECK(ace_init_spec(k_good, NULL) == 1 && ace_effective()->twin == 0, "twin=off is off");
+    CHECK(ace_report_json(json, sizeof(json)) > 0 && strstr(json, "\"twin\": false") != NULL,
+          "the report names twin=off:\n%s", json);
 }
 
 /* ---- stick dead-zone remap (contract 11.3.11) ------------------------------------------------ */
@@ -665,7 +744,7 @@ static void cell_stick_host_dead_zone_at_or_above_g(void) {
         char json[ACE_REPORT_MAX];
         uint8_t lx = (uint8_t)(128 + 101), ly = 128u;
         CHECK(ace_init_spec("v1;tier=ace;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;"
-                            "tess=off;stick=64", NULL) == 1, "stick=64 for a large host dead zone");
+                            "tess=off;twin=off;stick=64", NULL) == 1, "stick=64 for a large host dead zone");
         ace_stick_sample(&lx, &ly, 100);
         CHECK(game_x(lx) == 66 && ly == 128u, "a live push of 101 past D=100 is the game's 66 (%u)", lx);
         CHECK(ace_report_json(json, sizeof(json)) > 0 && strstr(json, "\"host_dead_zone\": 100") != NULL,
@@ -739,7 +818,7 @@ static void cell_stick_run(void) {
     CHECK(ace_report_json(json, sizeof(json)) > 0 && strstr(json, "\"stick\"") == NULL,
           "a run without stick reports none:\n%s", json);
 
-    CHECK(ace_init_spec("v1;tier=ace;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;"
+    CHECK(ace_init_spec("v1;tier=ace;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;twin=off;"
                         "stick=64", NULL) == 1 && ace_effective()->stick == 64, "stick=64 turns the remap on");
     CHECK(strstr(ace_spec_text(), ";stick=64") != NULL, "the run's line carries the key (%s)", ace_spec_text());
     lx = 128u; ly = 128u;
@@ -762,7 +841,7 @@ static void cell_stick_run(void) {
           strstr(json, "\"unavailable\": {}") != NULL, "a run that remapped is confirmed:\n%s", json);
 
     /* A run whose stick never left rest reports the remap unavailable at its end. */
-    CHECK(ace_init_spec("v1;tier=ace;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;"
+    CHECK(ace_init_spec("v1;tier=ace;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;twin=off;"
                         "stick=64", NULL) == 1, "stick=64 again");
     lx = 128u; ly = 128u;
     ace_stick_sample(&lx, &ly, 30);
@@ -1021,7 +1100,7 @@ static void cell_readout_smooth(void) {
     /* The feed: a 30 Hz run with smooth motion asked for counts the pictures that reached the
      * screen, each in-between and held frame the presenter accepted, and weighs each in-between
      * by its measurement. Here every in-between shows the changing content half-way. */
-    (void)ace_init_spec("v1;tier=enhanced;af=16;text=on;readout=on;notice=on;wide=off;smooth=x2;sas=off;tess=off",
+    (void)ace_init_spec("v1;tier=enhanced;af=16;text=on;readout=on;notice=on;wide=off;smooth=x2;sas=off;tess=off;twin=off",
                         NULL);
     uint64_t ns = 0;
     for (uint32_t vc = 1; vc <= 600; vc++) {
@@ -1041,7 +1120,7 @@ static void cell_readout_smooth(void) {
           "fed 30 Hz with smooth motion: '%s'", v.text);
     /* The same presents, but every in-between repeats the old frame over what changes: the
      * readout says 30, though sixty pictures a second reached the screen. */
-    (void)ace_init_spec("v1;tier=enhanced;af=16;text=on;readout=on;notice=on;wide=off;smooth=x2;sas=off;tess=off",
+    (void)ace_init_spec("v1;tier=enhanced;af=16;text=on;readout=on;notice=on;wide=off;smooth=x2;sas=off;tess=off;twin=off",
                         NULL);
     ns = 0;
     for (uint32_t vc = 1; vc <= 600; vc++) {
@@ -1061,7 +1140,7 @@ static void cell_readout_smooth(void) {
           "fed 30 Hz, in-betweens that repeat the old frame: '%s' (%.1f shown)", v.text, v.shown_fps);
     /* The same, but the presenter drops the present of every fourth VBLANK (an in-between on
      * its flip, or a held frame): the readout counts what reached the screen, not every flip. */
-    (void)ace_init_spec("v1;tier=enhanced;af=16;text=on;readout=on;notice=on;wide=off;smooth=x2;sas=off;tess=off",
+    (void)ace_init_spec("v1;tier=enhanced;af=16;text=on;readout=on;notice=on;wide=off;smooth=x2;sas=off;tess=off;twin=off",
                         NULL);
     ns = 0;
     for (uint32_t vc = 1; vc <= 600; vc++) {
@@ -1079,7 +1158,7 @@ static void cell_readout_smooth(void) {
               strcmp(v.text, "100%  30 FPS  SMOOTH 45") == 0,
           "fed 30 Hz, some presents dropped: '%s'", v.text);
     /* The same with no in-between shown (no GPU for it): SMOOTH OFF. */
-    (void)ace_init_spec("v1;tier=enhanced;af=16;text=on;readout=on;notice=on;wide=off;smooth=x2;sas=off;tess=off",
+    (void)ace_init_spec("v1;tier=enhanced;af=16;text=on;readout=on;notice=on;wide=off;smooth=x2;sas=off;tess=off;twin=off",
                         NULL);
     ns = 0;
     for (uint32_t vc = 1; vc <= 600; vc++) {
@@ -1218,7 +1297,7 @@ static void cell_fast_forward(void) {
  * in-between again, made of the frame kept last. */
 static void cell_fast_forward_smooth(void) {
     AcePaceStats st0, st1;
-    (void)ace_init_spec("v1;tier=enhanced;af=16;text=on;readout=on;notice=on;wide=off;smooth=x2;sas=off;tess=off",
+    (void)ace_init_spec("v1;tier=enhanced;af=16;text=on;readout=on;notice=on;wide=off;smooth=x2;sas=off;tess=off;twin=off",
                         NULL);
     uint64_t ns = 0;
     uint32_t vc = 1, betweens = 0, keeps = 0, reals = 0, k2_frames = 0;
@@ -1283,7 +1362,7 @@ static void cell_fast_forward_smooth(void) {
  * new frames, so the held frame's present is the VBLANK between flips. */
 static void cell_fast_forward_owed(void) {
     AcePaceStats st0, st1;
-    (void)ace_init_spec("v1;tier=enhanced;af=16;text=on;readout=on;notice=on;wide=off;smooth=x2;sas=off;tess=off",
+    (void)ace_init_spec("v1;tier=enhanced;af=16;text=on;readout=on;notice=on;wide=off;smooth=x2;sas=off;tess=off;twin=off",
                         NULL);
     uint64_t ns = 0;
     uint32_t vc = 1, owed = 0, keeps = 0, betweens = 0, others = 0, due = 0;
@@ -1404,7 +1483,7 @@ static void cell_report(const char *dir) {
     if (f) fclose(f);
 
     /* Smooth motion's inputs: what the HUD rule and the depth gate did is in the report. */
-    (void)ace_init_spec("v1;af=16;text=on;readout=off;notice=on;wide=off;smooth=x2;sas=off;tess=off", NULL);
+    (void)ace_init_spec("v1;af=16;text=on;readout=off;notice=on;wide=off;smooth=x2;sas=off;tess=off;twin=off", NULL);
     CHECK(ace_report_json(json, sizeof(json)) > 0 && strstr(json, "smooth_aux") == NULL,
           "a smooth run reported inputs before the renderer counted any");
     AceSmoothAuxStats st;
@@ -1440,7 +1519,7 @@ static void cell_report_worst(void) {
     char reason[128];
     memset(reason, 'r', sizeof(reason));
     reason[sizeof(reason) - 1] = '\0';
-    CHECK(ace_init_spec("v1;tier=ace;af=16;text=on;readout=on;notice=on;wide=fill;smooth=x2;sas=sinc;tess=off;stick=126;load=fast;cull=on",
+    CHECK(ace_init_spec("v1;tier=ace;af=16;text=on;readout=on;notice=on;wide=fill;smooth=x2;sas=sinc;tess=off;twin=off;stick=126;load=fast;cull=on",
                         NULL), "the longest line was refused");
     ace_set_af_effective(8, NULL);
     ace_note_af_failure();
@@ -1535,7 +1614,7 @@ static void cell_motion(void) {
      * and nothing in a run without smooth motion. */
     char json[ACE_REPORT_MAX];
     AceMotionStats m;
-    (void)ace_init_spec("v1;af=16;text=on;readout=off;notice=on;wide=off;smooth=x2;sas=off;tess=off", NULL);
+    (void)ace_init_spec("v1;af=16;text=on;readout=off;notice=on;wide=off;smooth=x2;sas=off;tess=off;twin=off", NULL);
     CHECK(ace_report_json(json, sizeof(json)) > 0 && strstr(json, "smooth_motion") == NULL,
           "a smooth run reported motion before any in-between was measured");
     ace_smooth_note_motion(1000u, 900u, 10u, 300u, 9700u, 4u);      /* phase 0.03: weight 60 */
@@ -1568,7 +1647,7 @@ static void cell_pace(void) {
     AceConfig c;
     char why[64];
     AcePace p;
-    CHECK(ace_parse("v1;af=16;text=on;readout=off;notice=on;wide=off;smooth=x2;sas=off;tess=off", &c, why, sizeof(why)) == 1 &&
+    CHECK(ace_parse("v1;af=16;text=on;readout=off;notice=on;wide=off;smooth=x2;sas=off;tess=off;twin=off", &c, why, sizeof(why)) == 1 &&
           c.smooth == ACE_SMOOTH_X2, "smooth=x2 is part of this build");
     ace_pace_reset(&p);
     /* Off: every present is today's and nothing is ever held. */
