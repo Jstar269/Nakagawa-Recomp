@@ -12581,6 +12581,7 @@ class HleIoSeekMemoryStickSetupAndCleanupTests(unittest.TestCase):
         ("hle_is_ms", "io-seek", "HLE_IS_FILE", "HLE_IS_DIR"),
         ("hle_ise_ms", "io-edge", "HLE_ISE_FILE", "HLE_ISE_DIR"),
     )
+    probe: str
 
     @classmethod
     def setUpClass(cls) -> None:
