@@ -2612,7 +2612,7 @@ static void test_ge_bounding_box_branch(void) {
 #define MOTION_CULL      0u          /* the face that keeps the strip's triangles */
 enum {
     MS_UNNAMED = 1, MS_PATCH = 2, MS_IMMEDIATE = 4, MS_PATCH_LINES = 8, MS_PATCH_POINTS = 16, MS_IMM_LINE = 32,
-    MS_IMM_POINT = 64
+    MS_IMM_POINT = 64, MS_SPRITE3D = 128
 };
 
 static uint32_t s_motion_vc;
@@ -2646,6 +2646,7 @@ static void motion_bone1(int frame, float t[3]) {
 }
 static float motion_quad_tx(int frame) { return frame ? 0.25f : 0.125f; }
 static float motion_sprite_dx(int frame) { return frame ? 2.5f : 0.0f; }
+static float motion_sprite3d_dx(int frame) { return frame ? 0.05f : 0.0f; }
 
 static void motion_strip_vertex(int i, float p[3], float *w1, uint32_t *color) {
     p[0] = -0.75f + 0.125f * (float)i;
@@ -2774,6 +2775,21 @@ static void build_motion_list(int flags, int frame) {
     W(0x12, plain);
     W(0x01, at & 0x00FFFFFFu);
     W(0x04, (3u << 16) | 3u);
+
+    if (flags & MS_SPRITE3D) {
+        /* PRIM 5: two transform-mode sprites. The first is dropped on its first corner, which
+         * lies off the GE's screen grid (clip x 10), and does not move. The second moves in its
+         * vertex data; its corners differ in depth and colour, and its left one lies past the
+         * screen's left edge, so with Fill on it is drawn again in the left wing. */
+        at = s_motion_vc;
+        motion_vtx(0xff2040ffu, 10.0f, 0.5f, 0.0f);
+        motion_vtx(0xff2040ffu, 0.25f, 0.6f, 0.0f);
+        motion_vtx(0xff80ff20u, -1.05f + motion_sprite3d_dx(frame), 0.75f, 0.25f);
+        motion_vtx(0xff4010c0u, -0.75f + motion_sprite3d_dx(frame), 0.55f, -0.25f);
+        W(0x12, plain);
+        W(0x01, at & 0x00FFFFFFu);
+        W(0x04, (6u << 16) | 4u);
+    }
 
     if (flags & (MS_UNNAMED | MS_PATCH | MS_PATCH_LINES | MS_PATCH_POINTS)) {
         const uint32_t patch_prim = (flags & MS_PATCH_LINES) ? 1u : (flags & MS_PATCH_POINTS) ? 2u : 0u;
@@ -2936,6 +2952,21 @@ static int motion_hook_point(const GeVtx *a, int persp) {
     (void)persp;
     return motion_see(a, NULL, NULL, 1);
 }
+/* Fill's wing copies: counted, with whether the store called a primitive current then. */
+static unsigned s_motion_wing_calls, s_motion_wing_current;
+static int motion_hook_wing_tri(uint32_t fb, int x0, int x1, const GeVtx *a, const GeVtx *b, const GeVtx *c,
+                                int persp) {
+    (void)fb; (void)x0; (void)x1; (void)a; (void)b; (void)c; (void)persp;
+    s_motion_wing_calls++;
+    if (motion_tap_current(s_motion_store, NULL)) s_motion_wing_current++;
+    return 0;
+}
+static int motion_hook_wing_sprite(uint32_t fb, int x0, int x1, const GeVtx *p0, const GeVtx *p1, int persp) {
+    (void)fb; (void)x0; (void)x1; (void)p0; (void)p1; (void)persp;
+    s_motion_wing_calls++;
+    if (motion_tap_current(s_motion_store, NULL)) s_motion_wing_current++;
+    return 0;
+}
 static void motion_hook_flush(const char *reason) { (void)reason; }
 static void motion_hook_vram_dirty(uint32_t addr, uint32_t bytes) { (void)addr; (void)bytes; }
 
@@ -2947,19 +2978,26 @@ static void motion_expect_store(const MotionTapFrame *f, int flags, int frame) {
         { 6, 1, 2, 1, 1 }, { 4, 0, 6, 4, 4 }, { 3, 0, 6, 2, 2 }, { 6, 1, 2, 1, 1 }, { 3, 0, 3, 1, 2 },
         { 1, 0, 2, 0, 0 }, { 0, 0, 1, 0, 0 },
     };
-    const uint32_t nprims = (flags & MS_UNNAMED) ? 7u : 5u;
+    static const struct { uint8_t type, through; uint32_t count, ntris, submitted; } want_sprite3d = { 6, 0, 4, 2, 1 };
+    const int sprite3d = (flags & MS_SPRITE3D) != 0;
+    const uint32_t nprims = (flags & MS_UNNAMED) ? 7u : sprite3d ? 6u : 5u, ntris = sprite3d ? 11u : 9u;
     const GeState *ge = ge_state_ptr();
     MotionTapView v;
     motion_tap_frame_view(f, &v);
-    expect(v.nprims == nprims && v.ntris == 9u && v.nrefs == ((flags & MS_UNNAMED) ? 22u : 19u) &&
-           !(v.flags & MOTION_TAP_OVERFLOW) && v.dropped == 0u && v.late == 0u, "motion_tap",
+    expect(v.nprims == nprims && v.ntris == ntris &&
+           v.nrefs == ((flags & MS_UNNAMED) ? 22u : sprite3d ? 23u : 19u) && (v.flags & ~MOTION_TAP_CLOSED) == 0u &&
+           v.dropped == 0u && v.late == 0u, "motion_tap",
            "the store holds every PRIM, triangle and sprite of the list");
-    if (v.nprims != nprims || v.ntris != 9u) return;
+    if (v.nprims != nprims || v.ntris != ntris) return;
     for (uint32_t s = 0; s < nprims; s++) {
         const MotionTapPrim *p = &v.prims[s];
-        expect(p->type == want[s].type && p->through == want[s].through && p->count == want[s].count &&
-               p->ntris == want[s].ntris && p->submitted == want[s].submitted, "motion_tap",
-               "a PRIM's type, mode, vertex count, records and raster calls");
+        const uint8_t wtype = sprite3d && s == 5u ? want_sprite3d.type : want[s].type;
+        const uint8_t wthrough = sprite3d && s == 5u ? want_sprite3d.through : want[s].through;
+        const uint32_t wcount = sprite3d && s == 5u ? want_sprite3d.count : want[s].count;
+        const uint32_t wntris = sprite3d && s == 5u ? want_sprite3d.ntris : want[s].ntris;
+        const uint32_t wsub = sprite3d && s == 5u ? want_sprite3d.submitted : want[s].submitted;
+        expect(p->type == wtype && p->through == wthrough && p->count == wcount && p->ntris == wntris &&
+               p->submitted == wsub, "motion_tap", "a PRIM's type, mode, vertex count, records and raster calls");
         expect(p->list_addr == LIST_MOTION && (s == 0 || p->cmd_addr > v.prims[s - 1].cmd_addr) &&
                p->cmd_addr > LIST_MOTION && p->fbp == ge->fbp && p->fbw == 512u && p->zbp == ge->zbp &&
                p->zbw == 512u && p->tex_addr == 0u && p->clut_addr == 0u, "motion_tap",
@@ -3051,7 +3089,21 @@ static void motion_expect_store(const MotionTapFrame *f, int flags, int frame) {
         expect(v.prims[5].ntris == 0u && !v.ref_set[v.prims[5].first_ref] && !v.ref_set[v.prims[5].first_ref + 1u] &&
                v.prims[6].ntris == 0u && !v.ref_set[v.prims[6].first_ref], "motion_tap",
                "the line and point PRIMs hold no record");
-    expect(v.ncameras == 1u && v.cameras[0].verts == ((flags & MS_UNNAMED) ? 18u : 15u) &&
+    /* PRIM 5, the transform-mode sprites: one record each, the first dropped on its first corner
+     * (one corner computed), the second drawn with both corners in order. */
+    if (sprite3d) {
+        const float dx = motion_sprite3d_dx(frame);
+        p = &v.prims[5];
+        r = &v.refs[p->first_ref];
+        const MotionTapTri *t0 = &v.tris[p->first_tri], *t1 = &v.tris[p->first_tri + 1u];
+        expect(p->camera == 0u && t0->decision == GE_MOTION_DROP && t0->pos[0] == 0 && t0->pos[1] == 1 &&
+               t0->pos[2] == 1 && t1->decision == GE_MOTION_DRAW && t1->pos[0] == 2 && t1->pos[1] == 3 &&
+               t1->pos[2] == 2 && v.ref_set[p->first_ref] && !v.ref_set[p->first_ref + 1u] && r[0].clip[0] == 10.0f &&
+               r[2].clip[0] == -1.05f + dx && r[2].clip[2] == 0.25f && r[2].r == 0x20 && r[3].clip[0] == -0.75f + dx &&
+               r[3].clip[2] == -0.25f && r[3].r == 0xc0 && r[3].clip[3] == 1.0f, "motion_tap",
+               "the transform-mode sprites: the first dropped on its first corner, the second's corners as computed");
+    }
+    expect(v.ncameras == 1u && v.cameras[0].verts == ((flags & MS_UNNAMED) ? 18u : sprite3d ? 19u : 15u) &&
            v.cameras[0].view[0] == 1.0f && v.cameras[0].proj[15] == 1.0f && v.cameras[0].proj[11] == 0.0f,
            "motion_tap", "one camera, used by every transform-mode vertex");
     expect(!motion_tap_current(f, NULL), "motion_tap", "nothing is current once the list has ended");
@@ -3158,77 +3210,106 @@ static void test_ge_motion_tap(void) {
            "immediate-mode triangles, the line and the point");
     motion_expect_store(f, MS_UNNAMED, 0);
 
-    /* Two frames, matched, and frame B built at t = 1 against what ge.c handed over for it. */
-    s_motion_store = fa;
-    ge_motion_tap_set(motion_tap_frame_listener(fa));
-    motion_run(0, 0, on);
-    motion_tap_frame_close(fa, NULL);
-    s_motion_store = fb;
-    s_motion_nseen = 0;
-    ge_motion_tap_set(motion_tap_frame_listener(fb));
-    motion_run(0, 1, on);
-    ge_motion_tap_set(NULL);
-    ge_set_gpu_hooks(NULL);
-    motion_tap_frame_close(fb, fa);
-    motion_expect_store(fb, 0, 1);
-
+    /* Two frames, matched, and frame B built at t = 1 against what ge.c handed over for it: the
+     * list with the transform-mode sprites (MS_SPRITE3D), that list again with Fill on, and the
+     * list as it is, which the checks after the loop use. With Fill on the stand-in also takes
+     * the wing hooks, and no primitive may be current during a wing copy. */
     MotionMatchFrame ma, mb;
     MotionMatchParams params;
     MotionMatchResult match;
     MotionTapView vb;
     int32_t pair[8];
-    motion_tap_match_frame(fa, &ma);
-    motion_tap_match_frame(fb, &mb);
-    motion_tap_frame_view(fb, &vb);
-    motion_match_default_params(&params);
-    expect(ma.nprims == 5u && mb.nprims == 5u, "motion_tap", "the matcher's list holds the five PRIMs that drew");
-    if (ma.nprims != 5u || mb.nprims != 5u) goto done;
-    /* The quad at clip x 0.5..0.75, y -0.25..-0.5 in frame 1: screen x 360..420, y 170..204. */
-    expect(mb.prims[2].bbox[0] == 360.0f && mb.prims[2].bbox[1] == 170.0f && mb.prims[2].bbox[2] == 420.0f &&
-           mb.prims[2].bbox[3] == 204.0f && mb.prims[2].iaddr == MOTION_INDICES && mb.prims[2].flags == 0u &&
-           mb.camera.valid, "motion_tap", "a PRIM's box is of the vertices ge.c handed to the rasterizer");
-    expect(motion_match(&ma, &mb, &params, NULL, pair, NULL, &match) == 0 && match.flags == 0u &&
-           pair[0] == 0 && pair[1] == 1 && pair[2] == 2 && pair[3] == 3 && pair[4] == 4, "motion_tap",
-           "the matcher pairs the five PRIMs");
-    const int planned = motion_build_plan(build, fa, fb, pair, &match);
     const MotionBuildResult *res = motion_build_result(build);
-    expect(planned == 1 && res->why == 0u && res->paired == 5u && res->unpaired == 0u, "motion_tap",
-           "the frame between the two can be built");
-    /* Built: 4 strip triangles, 2 quad triangles, the sprite. B's own: the clear and the
-     * triangle across the near plane, neither of which moved. */
-    expect(res->built == 7u && res->copied == 2u, "motion_tap", "seven primitives move, two are B's own");
     unsigned checked = 0, fans = 0;
-    for (unsigned i = 0; i < s_motion_nseen && i < 64u; i++) {
-        const MotionSeen *s = &s_motion_seen[i];
-        MotionBuiltVert sub[3], out[3];
-        expect(s->current, "motion_tap", "every primitive of frame B has a source");
-        if (!s->current) continue;
-        const int kind = motion_build_prim(build, s->cur.tri, 1.0f, out, NULL);
-        if (s->cur.kind == MOTION_CUR_FAN) {
-            expect(kind == MOTION_ITEM_COPY_B, "motion_tap", "a still near-clipped triangle's pieces are B's own");
-            fans++;
-            continue;
+    static const struct { int flags, wing; } runs[3] = { { MS_SPRITE3D, 0 }, { MS_SPRITE3D, 64 }, { 0, 0 } };
+    for (int run = 0; run < 3; run++) {
+        const int rflags = runs[run].flags, sprite3d = (rflags & MS_SPRITE3D) != 0;
+        const uint32_t nlisted = sprite3d ? 6u : 5u;
+        hooks.wing_tri = runs[run].wing ? motion_hook_wing_tri : NULL;
+        hooks.wing_sprite = runs[run].wing ? motion_hook_wing_sprite : NULL;
+        s_motion_wing_calls = s_motion_wing_current = 0;
+        if (runs[run].wing) {
+            expect(ge_wide_set_wing(runs[run].wing) == runs[run].wing, "motion_tap", "Fill takes the wing width");
+            ge_wide_note_display(MOTION_VRAM);
         }
-        if (s->cur.prim == 0u) {
-            expect(kind == MOTION_ITEM_COPY_B, "motion_tap", "the clear is B's own");
-            continue;
+        ge_set_gpu_hooks(&hooks);
+        motion_tap_frame_reset(fa);
+        motion_tap_frame_reset(fb);
+        s_motion_store = fa;
+        ge_motion_tap_set(motion_tap_frame_listener(fa));
+        motion_run(rflags, 0, on);
+        motion_tap_frame_close(fa, NULL);
+        s_motion_store = fb;
+        s_motion_nseen = 0;
+        ge_motion_tap_set(motion_tap_frame_listener(fb));
+        motion_run(rflags, 1, on);
+        ge_motion_tap_set(NULL);
+        ge_set_gpu_hooks(NULL);
+        if (runs[run].wing) {
+            expect(s_motion_wing_calls > 0u && s_motion_wing_current == 0u, "motion_tap",
+                   "Fill copied primitives into a wing, and no wing copy was taken for the primitive it copies");
+            ge_wide_set_wing(0);
         }
-        /* The backend's vertex rule (put_vert) on what ge.c handed over: motion_tap.c's own
-         * statement of it, which motion_tap_selftest checks against its restatement of put_vert. */
-        memset(sub, 0, sizeof sub);
-        motion_backend_vertices((vb.prims[s->cur.prim].flags & GE_MOTION_PRIM_FLAT) != 0, s->v, s->n, sub);
-        expect(kind == MOTION_ITEM_BUILT && motion_build_check(build, s->cur.tri, sub) == 1, "motion_tap",
-               "t = 1 gives the vertices ge.c handed over for frame B, bit for bit");
-        for (int c = 0; kind == MOTION_ITEM_BUILT && c < s->n; c++)
-            expect(memcmp(&out[c].x, &sub[c].x, 4) == 0 && memcmp(&out[c].y, &sub[c].y, 4) == 0 &&
-                   memcmp(&out[c].z, &sub[c].z, 4) == 0 && memcmp(&out[c].rw, &sub[c].rw, 4) == 0 &&
-                   memcmp(&out[c].fog, &sub[c].fog, 4) == 0 && out[c].rgba == sub[c].rgba &&
-                   (s->n == 2 || (memcmp(&out[c].u, &sub[c].u, 4) == 0 && memcmp(&out[c].v, &sub[c].v, 4) == 0)),
-                   "motion_tap", "a vertex built at t = 1 is not the one ge.c handed over");
-        checked++;
+        motion_tap_frame_close(fb, fa);
+        motion_expect_store(fa, rflags, 0);
+        motion_expect_store(fb, rflags, 1);
+
+        motion_tap_match_frame(fa, &ma);
+        motion_tap_match_frame(fb, &mb);
+        motion_tap_frame_view(fb, &vb);
+        motion_match_default_params(&params);
+        expect(ma.nprims == nlisted && mb.nprims == nlisted, "motion_tap",
+               "the matcher's list holds the PRIMs that drew");
+        if (ma.nprims != nlisted || mb.nprims != nlisted) goto done;
+        /* The quad at clip x 0.5..0.75, y -0.25..-0.5 in frame 1: screen x 360..420, y 170..204. */
+        expect(mb.prims[2].bbox[0] == 360.0f && mb.prims[2].bbox[1] == 170.0f && mb.prims[2].bbox[2] == 420.0f &&
+               mb.prims[2].bbox[3] == 204.0f && mb.prims[2].iaddr == MOTION_INDICES && mb.prims[2].flags == 0u &&
+               mb.camera.valid, "motion_tap", "a PRIM's box is of the vertices ge.c handed to the rasterizer");
+        expect(motion_match(&ma, &mb, &params, NULL, pair, NULL, &match) == 0 && match.flags == 0u &&
+               pair[0] == 0 && pair[1] == 1 && pair[2] == 2 && pair[3] == 3 && pair[4] == 4 &&
+               (!sprite3d || pair[5] == 5), "motion_tap", "the matcher pairs every PRIM that drew");
+        const int planned = motion_build_plan(build, fa, fb, pair, &match);
+        if (planned != 1) fprintf(stderr, "motion_tap: run %d: why %#x\n", run, (unsigned)res->why);
+        expect(planned == 1 && res->why == 0u && res->paired == nlisted && res->unpaired == 0u, "motion_tap",
+               "the frame between the two can be built");
+        /* Built: 4 strip triangles, 2 quad triangles, the sprite, and the moving transform-mode
+         * sprite. B's own: the clear and the triangle across the near plane, neither of which
+         * moved. The dropped transform-mode sprite did not move either, so it is nothing. */
+        expect(res->built == (sprite3d ? 8u : 7u) && res->copied == 2u, "motion_tap",
+               "the moving primitives are built, two are B's own");
+        checked = fans = 0;
+        for (unsigned i = 0; i < s_motion_nseen && i < 64u; i++) {
+            const MotionSeen *s = &s_motion_seen[i];
+            MotionBuiltVert sub[3], out[3];
+            expect(s->current, "motion_tap", "every primitive of frame B has a source");
+            if (!s->current) continue;
+            const int kind = motion_build_prim(build, s->cur.tri, 1.0f, out, NULL);
+            if (s->cur.kind == MOTION_CUR_FAN) {
+                expect(kind == MOTION_ITEM_COPY_B, "motion_tap", "a still near-clipped triangle's pieces are B's own");
+                fans++;
+                continue;
+            }
+            if (s->cur.prim == 0u) {
+                expect(kind == MOTION_ITEM_COPY_B, "motion_tap", "the clear is B's own");
+                continue;
+            }
+            /* The backend's vertex rule (put_vert) on what ge.c handed over: motion_tap.c's own
+             * statement of it, which motion_tap_selftest checks against its restatement of put_vert. */
+            memset(sub, 0, sizeof sub);
+            motion_backend_vertices((vb.prims[s->cur.prim].flags & GE_MOTION_PRIM_FLAT) != 0, s->v, s->n, sub);
+            expect(kind == MOTION_ITEM_BUILT && motion_build_check(build, s->cur.tri, sub) == 1, "motion_tap",
+                   "t = 1 gives the vertices ge.c handed over for frame B, bit for bit");
+            for (int c = 0; kind == MOTION_ITEM_BUILT && c < s->n; c++)
+                expect(memcmp(&out[c].x, &sub[c].x, 4) == 0 && memcmp(&out[c].y, &sub[c].y, 4) == 0 &&
+                       memcmp(&out[c].z, &sub[c].z, 4) == 0 && memcmp(&out[c].rw, &sub[c].rw, 4) == 0 &&
+                       memcmp(&out[c].fog, &sub[c].fog, 4) == 0 && out[c].rgba == sub[c].rgba &&
+                       (s->n == 2 || (memcmp(&out[c].u, &sub[c].u, 4) == 0 && memcmp(&out[c].v, &sub[c].v, 4) == 0)),
+                       "motion_tap", "a vertex built at t = 1 is not the one ge.c handed over");
+            checked++;
+        }
+        expect(checked == (sprite3d ? 8u : 7u) && fans == 2u && res->t1_mismatch == 0u && res->why == 0u, "motion_tap",
+               "every moving primitive was compared at t = 1");
     }
-    expect(checked == 7u && fans == 2u && res->t1_mismatch == 0u && res->why == 0u, "motion_tap",
-           "all seven moving primitives were compared at t = 1");
     /* Halfway: the quad's first vertex at clip x 0.25 + 0.1875, screen x 345; the sprite's
      * corners at 301.5 and 342, floored. */
     MotionBuiltVert out[3];

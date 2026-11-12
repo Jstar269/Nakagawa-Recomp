@@ -1165,6 +1165,72 @@ static void cell_reasons(void) {
     motion_build_free(b);
 }
 
+/* A PRIM ge.c drew in one frame and dropped whole in the other is not in that frame's matcher
+ * list, so the matcher cannot pair it. Its triangles are still judged as any other: a moving
+ * one stops the frame as a single dropped triangle does. A moving quad (a strip of four) and a
+ * still one elsewhere, with the same signature. */
+static void cell_whole_drop(void) {
+    static const struct {
+        const char *what;
+        int drop_a, drop_b, still, moved_vbase, inline_key;
+        uint32_t why;
+    } legs[] = {
+        { "B drops one triangle", 0, 1, 0, 0, 0, MOTION_WHY_NOT_PLAIN },
+        { "B drops the whole PRIM", 0, 3, 0, 0, 0, MOTION_WHY_NOT_PLAIN },
+        { "A drops the whole PRIM", 3, 0, 0, 0, 0, MOTION_WHY_NOT_PLAIN },
+        { "both drop it whole, still", 3, 3, 1, 0, 0, 0 },
+        { "both drop it whole, moving", 3, 3, 0, 0, 0, MOTION_WHY_NOT_PLAIN },
+        { "B drops it whole at another vertex address", 0, 3, 0, 1, 0, MOTION_WHY_UNKNOWN },
+        { "B drops it whole, vertices in the list", 0, 3, 0, 0, 1, MOTION_WHY_UNKNOWN },
+    };
+    MotionBuild *b = builder();
+    for (size_t k = 0; k < sizeof legs / sizeof legs[0]; k++) {
+        Draw a[2], d[2];
+        a[0] = draw_any(4, 4, 0, 0);
+        quad_at(&a[0], -0.3f, 0.1f);
+        a[1] = draw_any(4, 4, 1, 0);
+        quad_at(&a[1], 0.4f, -0.3f);
+        if (legs[k].inline_key) a[0].p.vbase = LIST + 0x10u;
+        d[0] = a[0];
+        d[1] = a[1];
+        if (!legs[k].still) quad_at(&d[0], -0.1f, 0.15f);
+        if (legs[k].moved_vbase) d[0].p.vbase += 0x800u;
+        for (int t = 0; t < 2; t++) {
+            if (legs[k].drop_a & (1 << t)) a[0].dec[t] = GE_MOTION_DROP;
+            if (legs[k].drop_b & (1 << t)) d[0].dec[t] = GE_MOTION_DROP;
+        }
+        MotionTapFrame *fa = frame(a, 2), *fb = frame(d, 2);
+        if (legs[k].why) {
+            expect_stopped(legs[k].what, b, fa, fb, legs[k].why);
+        } else {
+            CHECK(plan(b, fa, fb) == 1 && motion_build_result(b)->copied == 2,
+                  "%s: the frame can be built (why %#x)", legs[k].what, (unsigned)motion_build_result(b)->why);
+        }
+        motion_tap_frame_free(fa);
+        motion_tap_frame_free(fb);
+    }
+    motion_build_free(b);
+}
+
+/* Callbacks after a frame's close mean the list drew on into it with nothing recorded. */
+static void cell_late(void) {
+    Draw d[2];
+    MotionBuild *b = builder();
+    two_tris(d, 13, GE_MOTION_DRAW, GE_MOTION_DRAW, 0.05f);
+    for (int which = 0; which < 2; which++) {
+        MotionTapFrame *fa = frame(&d[0], 1), *fb = frame(&d[1], 1);
+        CHECK(plan(b, fa, fb) == 1, "late: the frames build before (why %#x)", (unsigned)motion_build_result(b)->why);
+        emit(which ? fa : fb, &d[which ? 0 : 1]);
+        MotionTapView v;
+        motion_tap_frame_view(which ? fa : fb, &v);
+        CHECK(v.late == 5u && v.ntris == 2u, "late: the calls after the close are counted (%u)", (unsigned)v.late);
+        expect_stopped(which ? "late in A" : "late in B", b, fa, fb, MOTION_WHY_LATE);
+        motion_tap_frame_free(fa);
+        motion_tap_frame_free(fb);
+    }
+    motion_build_free(b);
+}
+
 /* The guard: values that are not what the builder gives at t = 1 stop the frame from then on. */
 static void cell_guard(void) {
     Draw d[2];
@@ -1588,6 +1654,8 @@ int main(void) {
     cell_flat();
     cell_static();
     cell_reasons();
+    cell_whole_drop();
+    cell_late();
     cell_guard();
     cell_unpaired();
     cell_held();

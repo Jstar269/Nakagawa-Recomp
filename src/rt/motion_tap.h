@@ -40,7 +40,14 @@
  * not pair, or whose pair the gates here refuse (different index bytes; a different type, mode,
  * vertex count or vertex type), is drawn as in B and counted. A triangle whose inputs are the
  * same in A and B is drawn with B's own vertices, bit for bit. Only what cannot be built
- * exactly stops the whole frame, each with a named reason (MOTION_WHY_*):
+ * exactly stops the whole frame, each with a named reason (MOTION_WHY_*).
+ *
+ * A PRIM ge.c drew in one frame and dropped whole in the other has no box there, so the matcher
+ * cannot pair it. It is paired by its key instead (signature, vertex and index addresses) when
+ * that key is the only one of its kind in both frames and not inside a list, and its records
+ * are judged as any other's (MOTION_WHY_NOT_PLAIN for a moving one). When a PRIM of A with the
+ * same signature might be it under another key, the frame stops (MOTION_WHY_UNKNOWN). The
+ * reasons:
  *
  *   - the matcher's cut, no previous frame, or a failure;
  *   - a moving triangle or sprite ge.c did not draw whole in both frames (MOTION_WHY_NOT_PLAIN),
@@ -53,6 +60,7 @@
  *     missing (MOTION_WHY_UNKNOWN);
  *   - a store that hit its cap (MOTION_WHY_OVERFLOW), or one given a call that breaks the
  *     tap's contract (MOTION_WHY_BAD_CALL);
+ *   - callbacks after A's or B's close: the list drew on with nothing recorded (MOTION_WHY_LATE);
  *   - t = 1 not giving B's own values (MOTION_WHY_T1_MISMATCH, motion_build_check).
  *
  * With a reason set no values are given at all.
@@ -230,6 +238,7 @@ enum { MOTION_V_UNMATCHED = 0, MOTION_V_MATCHED, MOTION_V_CLIPPED, MOTION_V_THRO
 #define MOTION_WHY_STATE       0x0080u  /* a moving one whose projection state differs between A and B */
 #define MOTION_WHY_T1_MISMATCH 0x0100u  /* motion_build_check: t = 1 did not give B's values */
 #define MOTION_WHY_BAD_CALL    0x0200u  /* A's or B's store was given a call that breaks the tap's contract */
+#define MOTION_WHY_LATE        0x0400u  /* A's or B's store was called after its close */
 
 typedef struct {
     uint32_t flags;                 /* MOTION_F_* */
@@ -237,6 +246,7 @@ typedef struct {
     uint32_t match_flags;           /* the matcher's flags as given */
     uint32_t draws;                 /* B's PRIMs that drew something (the matcher's list) */
     uint32_t paired;                /* of them, paired with a PRIM of A after the gates */
+    uint32_t paired_undrawn;        /* PRIMs of B paired by key because one of the two drew nothing */
     uint32_t unpaired;              /* of them, drawn as in B (motion_build_unpaired lists them) */
     uint32_t unpaired_index;        /*   pairs refused because the index bytes differ or were not seen */
     uint32_t unpaired_shape;        /*   pairs refused because type, mode, vertex count or vertex type differ */

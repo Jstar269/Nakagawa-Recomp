@@ -440,10 +440,12 @@ void      ge_set_draw_observer(GeDrawObserver fn, void *ctx);
  * (src/rt/motion_tap.h keeps them and builds from them).
  *
  * No listener (NULL, the default): each site in ge.c is one test of the listener pointer and
- * nothing else. With one, the sites only read values ge.c already computed, so its pixels,
- * depth, counters and traces are those of a run without it. One thing does change: GPU
- * transform and lighting (#318) declines every PRIM, because that route forms no clip
- * positions; such a PRIM is in neither of ge_tnl_counts' counts.
+ * nothing else. With one, the sites only read values ge.c already computed, so on ge.c's own
+ * (CPU) transform path its pixels, depth, counters and traces are those of a run without it.
+ * A listener does change the route, though: GPU transform and lighting (#318) declines every
+ * PRIM while one is set, because that route forms no clip positions, so ge.c transforms them
+ * instead, and such a PRIM is in neither of ge_tnl_counts' counts. Under SR_GPU_TNL a listener
+ * therefore changes what draws a frame, not only what is counted.
  *
  * Only triangle and sprite PRIMs publish their primitives. A point, a line, a patch and an
  * immediate-mode vertex reach the rasterizer with no primitive published, so a listener reads

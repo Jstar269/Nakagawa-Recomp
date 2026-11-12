@@ -510,6 +510,8 @@ struct MotionBuild {
     uint32_t cls_cap;
     uint32_t *unpaired;
     uint32_t unpaired_cap, nunpaired;
+    uint8_t *a_taken;                   /* per PRIM of A: 1 when the matcher paired it with a PRIM of B */
+    uint32_t taken_cap;
 };
 
 /* One value of the frame at t. A value that does not change stays itself at every t, which
@@ -714,7 +716,13 @@ static int classify_sprite(MotionBuild *b, const MotionTapPrim *pa, const Motion
     return CLS_LERP;
 }
 
-static int build_room(MotionBuild *b, uint32_t nprims, uint32_t ntris) {
+static int build_room(MotionBuild *b, uint32_t nprims, uint32_t ntris, uint32_t na) {
+    if (na > b->taken_cap) {
+        void *p = realloc(b->a_taken, na);
+        if (!p) return 0;
+        b->a_taken = (uint8_t *)p;
+        b->taken_cap = na;
+    }
     if (nprims > b->a_cap) {
         void *p = realloc(b->a_of, (size_t)nprims * sizeof *b->a_of);
         if (!p) return 0;
@@ -742,8 +750,98 @@ static int build_room(MotionBuild *b, uint32_t nprims, uint32_t ntris) {
     return 1;
 }
 
+/* What the matcher keys a PRIM by: its signature, then its vertex and index addresses. */
+static int same_signature(const MotionTapPrim *a, const MotionTapPrim *b) {
+    return same_shape(a, b) && a->tex_addr == b->tex_addr && a->clut_addr == b->clut_addr &&
+           a->state_class == b->state_class;
+}
+
+static int same_key(const MotionTapPrim *a, const MotionTapPrim *b) {
+    const int indexed = (a->flags & GE_MOTION_PRIM_INDEXED) != 0;
+    return same_signature(a, b) && indexed == ((b->flags & GE_MOTION_PRIM_INDEXED) != 0) && a->vbase == b->vbase &&
+           (!indexed || a->ibase == b->ibase);
+}
+
+/* A key whose vertices or indices lie inside a list either frame ran can name another object
+ * in the other frame (motion_match never anchors one). */
+static int inline_key(const MotionBuild *b, const MotionTapPrim *q) {
+    const int indexed = (q->flags & GE_MOTION_PRIM_INDEXED) != 0;
+    return in_lists(b->fb, q->vbase) || in_lists(b->fa, q->vbase) ||
+           (indexed && (in_lists(b->fb, q->ibase) || in_lists(b->fa, q->ibase)));
+}
+
+#define TWIN_NONE  (-1)                 /* no PRIM of A can be it */
+#define TWIN_UNSURE (-2)                /* one might be, and which cannot be told */
+
+/* The PRIM of A that B's PRIM s stands for when one of the two drew nothing, so the matcher
+ * had no box to pair them by. It is the PRIM of A with the same key, when that key is the only
+ * one of its kind in both frames and not inline. `b_drew` says whether B's PRIM drew: then
+ * only PRIMs of A that drew nothing are candidates, the others being the matcher's to pair.
+ * Any other candidate with the same signature (one the matcher left unpaired, or one that
+ * drew nothing) might be the same object under another address, so it makes the answer
+ * unsure. */
+static int32_t twin_in_a(const MotionBuild *b, uint32_t s, int b_drew) {
+    const MotionTapFrame *fa = b->fa, *fb = b->fb;
+    const MotionTapPrim *pb = &fb->prims[s];
+    int32_t twin = TWIN_NONE;
+    uint32_t keyed = 0;
+    int other = 0;
+    for (uint32_t i = 0; i < fa->nprims; i++) {
+        const MotionTapPrim *pa = &fa->prims[i];
+        const int drew = pa->match_index >= 0;
+        if (!pa->ntris || (b_drew && drew) || !same_signature(pa, pb)) continue;
+        if (same_key(pa, pb)) {
+            keyed++;
+            twin = (int32_t)i;
+        } else if (!drew || !b->a_taken[i]) {
+            other = 1;
+        }
+    }
+    if (!keyed) return other ? TWIN_UNSURE : TWIN_NONE;
+    if (keyed > 1 || other || inline_key(b, pb)) return TWIN_UNSURE;
+    for (uint32_t k = 0; k < fb->nprims; k++)
+        if (k != s && same_key(&fb->prims[k], pb)) return TWIN_UNSURE;
+    return twin;
+}
+
+/* B's PRIM s against A's PRIM pa, record by record. */
+static void classify_records(MotionBuild *b, uint32_t s, const MotionTapPrim *pa) {
+    const MotionTapFrame *fa = b->fa, *fb = b->fb;
+    const MotionTapPrim *pb = &fb->prims[s];
+    b->a_of[s] = (int32_t)(pa - fa->prims);
+    for (uint32_t k = 0; k < pb->ntris; k++) {
+        const MotionTapTri *tb = &fb->tris[pb->first_tri + k];
+        if (k >= pa->ntris) {
+            (void)why_unknown(b);
+            continue;
+        }
+        const MotionTapTri *ta = &fa->tris[pa->first_tri + k];
+        b->cls[pb->first_tri + k] = (uint8_t)(pb->type == 6u ? classify_sprite(b, pa, pb, ta, tb)
+                                                             : classify_tri(b, pa, pb, ta, tb));
+    }
+}
+
+/* B's PRIM s and a PRIM of A that drew nothing in one of the two frames, paired by key. */
+static int classify_twin(MotionBuild *b, uint32_t s, int b_drew) {
+    const int32_t ia = twin_in_a(b, s, b_drew);
+    if (ia == TWIN_NONE) return 0;
+    const MotionTapPrim *pa = ia >= 0 ? &b->fa->prims[ia] : NULL;
+    if (!pa || !same_indices(pa, &b->fb->prims[s])) {
+        (void)why_unknown(b);
+        return 1;
+    }
+    b->r.paired_undrawn++;
+    classify_records(b, s, pa);
+    return 1;
+}
+
 static void classify(MotionBuild *b, const int32_t *pair_a) {
     const MotionTapFrame *fa = b->fa, *fb = b->fb;
+    if (fa) {
+        memset(b->a_taken, 0, fa->nprims);
+        for (uint32_t k = 0; pair_a && k < fb->nmprims; k++)
+            if (pair_a[k] >= 0 && (uint32_t)pair_a[k] < fa->nmprims) b->a_taken[fa->mserial[pair_a[k]]] = 1;
+    }
     for (uint32_t s = 0; s < fb->nprims; s++) {
         const MotionTapPrim *pb = &fb->prims[s];
         b->a_of[s] = -1;
@@ -757,9 +855,15 @@ static void classify(MotionBuild *b, const int32_t *pair_a) {
             (void)why_unknown(b);
             continue;
         }
-        if (pb->match_index < 0) continue;
+        /* A PRIM B recorded but drew nothing of: what A drew of it, if anything, is judged
+         * record by record, so a moving one stops the frame as one dropped triangle does. */
+        if (pb->match_index < 0) {
+            if (fa && pb->ntris) (void)classify_twin(b, s, 0);
+            continue;
+        }
         b->r.draws++;
         const MotionTapPrim *pa = NULL;
+        if (fa && pair_a && pair_a[pb->match_index] < 0 && classify_twin(b, s, 1)) continue;
         if (fa && pair_a && pair_a[pb->match_index] >= 0) {
             const uint32_t ia = (uint32_t)pair_a[pb->match_index];
             if (ia >= fa->nmprims) b->r.why |= MOTION_WHY_FAILED;
@@ -784,17 +888,7 @@ static void classify(MotionBuild *b, const int32_t *pair_a) {
             continue;
         }
         b->r.paired++;
-        b->a_of[s] = (int32_t)(pa - fa->prims);
-        for (uint32_t k = 0; k < pb->ntris; k++) {
-            const MotionTapTri *tb = &fb->tris[pb->first_tri + k];
-            if (k >= pa->ntris) {
-                (void)why_unknown(b);
-                continue;
-            }
-            const MotionTapTri *ta = &fa->tris[pa->first_tri + k];
-            b->cls[pb->first_tri + k] = (uint8_t)(pb->type == 6u ? classify_sprite(b, pa, pb, ta, tb)
-                                                                 : classify_tri(b, pa, pb, ta, tb));
-        }
+        classify_records(b, s, pa);
     }
 }
 
@@ -808,6 +902,7 @@ void motion_build_free(MotionBuild *b) {
     free(b->prim_of);
     free(b->cls);
     free(b->unpaired);
+    free(b->a_taken);
     free(b);
 }
 
@@ -819,7 +914,7 @@ int motion_build_plan(MotionBuild *b, const MotionTapFrame *fa, const MotionTapF
     b->fb = fb;
     b->nunpaired = 0;
     if (!fb || !match || !(fb->flags & MOTION_TAP_CLOSED) || (fa && !(fa->flags & MOTION_TAP_CLOSED)) ||
-        (fa && !pair_a) || !build_room(b, fb->nprims, fb->ntris)) {
+        (fa && !pair_a) || !build_room(b, fb->nprims, fb->ntris, fa ? fa->nprims : 0u)) {
         b->fb = NULL;
         b->r.why = MOTION_WHY_FAILED;
         b->r.flags = MOTION_F_NOT_REPLAYABLE;
@@ -833,6 +928,8 @@ int motion_build_plan(MotionBuild *b, const MotionTapFrame *fa, const MotionTapF
         b->r.why |= MOTION_WHY_OVERFLOW;
     if ((fb->flags & MOTION_TAP_BAD_CALL) || (fa && (fa->flags & MOTION_TAP_BAD_CALL)))
         b->r.why |= MOTION_WHY_BAD_CALL;
+    /* Calls after a close: the list drew on into that frame with nothing recorded. */
+    if (fb->late || (fa && fa->late)) b->r.why |= MOTION_WHY_LATE;
     /* What B drew with nothing published for it (points, lines, patches, immediate-mode
      * primitives) cannot be placed; in A alone it does not matter. */
     if (fb->unnamed) {
