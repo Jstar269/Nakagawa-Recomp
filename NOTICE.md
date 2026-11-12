@@ -167,6 +167,15 @@ We aim to respond promptly and will remove material where appropriate.
   built for PNG only into the `nk_ui` core and the player, where it decodes the
   embedded prompt glyphs and the `ICON0.PNG` / `PIC1.PNG` read at run time from the
   user's own disc image; those images are kept in memory only.
+- **stb_vorbis 1.24** — Sean Barrett; upstream offers `MIT OR Unlicense`, and the
+  project uses it under the public-domain (Unlicense) alternative. The byte-identical
+  source, with both licence texts at its end, and the pinned manifest are under
+  `third_party/stb/`. It is built into the player only, where it decodes the optional
+  launcher music.
+- **"Chill lofi inspired" (`ChillLofi.ogg`)** — CC0-1.0, by omfgdude, from OpenGameArt
+  (`https://opengameart.org/content/chill-lofi-inspired`). The optional launcher music,
+  byte-identical to the upload, under `assets/music/launcher/` with its manifest; it ships
+  beside the player.
 - **Kenney "Input Prompts" 1.5 and "Interface Sounds" 1.0** — CC0-1.0, by Kenney
   (kenney.nl). The 32 prompt glyphs and three UI sounds the player uses, each pack's
   `License.txt` and the pinned manifest are under `third_party/kenney/`;

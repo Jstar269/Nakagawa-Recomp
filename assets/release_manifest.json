@@ -2275,6 +2275,24 @@
       "comment": "Kenney Interface Sounds 1.0 clip, decoded once from the archive's Ogg Vorbis to 16-bit PCM WAV (LOCAL DELTA); embedded in the player by tools/gen_ui_assets.py; manifest in third_party/kenney/PROVENANCE.md."
     },
     {
+      "id": "launcher-music-chill-lofi",
+      "name": "Launcher music: ChillLofi.ogg",
+      "type": "asset",
+      "relationship": "CONTAINS",
+      "presence": "required",
+      "source_path": "assets/music/launcher/ChillLofi.ogg",
+      "upstream_origin": "https://opengameart.org/content/chill-lofi-inspired",
+      "license": "CC0-1.0",
+      "notice_path": "assets/music/launcher/PROVENANCE.md",
+      "disposition": "approved_binary",
+      "public_scope_included": true,
+      "optional": false,
+      "hashes": {
+        "sha256": "7ea7fd1b7c95ed1ca5f6ebb796626570137bcb75c7f2ea87b6c61212c7a86694"
+      },
+      "comment": "\"Chill lofi inspired\" by omfgdude, the OpenGameArt page's Ogg Vorbis upload, byte-identical (CC0-1.0); the optional launcher music (#2207), decoded by stb_vorbis and staged beside the player by tools/stage_runtime_dlls.py; manifest in assets/music/launcher/PROVENANCE.md."
+    },
+    {
       "id": "xbrz-golden-generator",
       "name": "xBRZ golden generator (third_party/xbrz/xbrz_golden.cpp)",
       "type": "source",

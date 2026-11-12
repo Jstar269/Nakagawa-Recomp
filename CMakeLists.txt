@@ -361,10 +361,13 @@ set(NK_UI_PLAYER_C5_SOURCES
     src/player/ui/scr_library.c
     ${NK_UI_PLAYER_TITLE_SOURCES}
 )
-# The next UI's SDL host pieces: disc art on a worker thread, launcher sounds.
+# The next UI's SDL host pieces: disc art on a worker thread, launcher sounds, and the
+# optional launcher music with its Ogg Vorbis decoder (#2207).
 set(NK_UI_PLAYER_HOST_SOURCES
     src/player/ui/player_ui_art.c
     src/player/ui/player_ui_sound.c
+    src/player/ui/player_ui_music.c
+    src/player/ui/player_ui_vorbis.c
 )
 set(NK_UI_OVERLAY_SOURCES
     src/rt/overlay/nk_overlay.c
@@ -809,6 +812,13 @@ if(BUILD_PLAYER)
             "${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts/ui"
             "$<TARGET_FILE_DIR:nakagawa_player>/assets/fonts/ui"
         COMMENT "Staging the bundled UI font assets beside nakagawa_player"
+        VERBATIM
+    )
+    add_custom_command(TARGET nakagawa_player POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_CURRENT_SOURCE_DIR}/assets/music/launcher/ChillLofi.ogg"
+            "$<TARGET_FILE_DIR:nakagawa_player>/assets/music/launcher/ChillLofi.ogg"
+        COMMENT "Staging the launcher music's track beside nakagawa_player"
         VERBATIM
     )
     if(WIN32)

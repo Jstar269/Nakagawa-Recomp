@@ -639,7 +639,10 @@ typedef enum {
     PLAYER_UI_SETTINGS_OPEN_LOGS,            /* the folder holding the logs */
     PLAYER_UI_SETTINGS_CYCLE_BUILD_SPEED,    /* Background, Balanced, Fastest */
     PLAYER_UI_SETTINGS_EDIT_NICKNAME,        /* the nickname editor (#2197) */
-    PLAYER_UI_SETTINGS_TOGGLE_DISCORD        /* Settings > Online and developer (#2259) */
+    PLAYER_UI_SETTINGS_TOGGLE_DISCORD,       /* Settings > Online and developer (#2259) */
+    PLAYER_UI_SETTINGS_TOGGLE_LAUNCHER_MUSIC, /* launcher background music (#2207) */
+    PLAYER_UI_SETTINGS_MUSIC_VOLUME_DOWN,
+    PLAYER_UI_SETTINGS_MUSIC_VOLUME_UP
 } PlayerUiSettingsOp;
 
 /* Settings > Enhanced's rows after the play mode: one per Enhanced part (player_state.h
@@ -702,6 +705,11 @@ typedef struct {
     bool fullscreen;
     int volume;                     /* 0-100 */
     bool ui_sounds;
+    /* Launcher music (#2207): the setting, the row's words ("Off", "On", or what
+       stops it: "On: file missing") and its own level, 0-100 */
+    bool launcher_music;
+    const char *launcher_music_value;
+    int music_volume;
     bool launcher_fullscreen;
     /* Accessibility (VIEW_ACCESSIBILITY_SETTINGS): each setting's word, whether it
        is in effect, and what Automatic follows now */
@@ -1148,6 +1156,9 @@ enum {
     PLAYER_UI_ID_SETTINGS_OPEN_LOGS = 0x4554u,        /* Settings: shows the logs folder */
     PLAYER_UI_ID_SETTINGS_BUILD_SPEED = 0x4555u,      /* Build tools and cache: Build speed */
     PLAYER_UI_ID_SETTINGS_DISCORD = 0x4556u,          /* Settings > Online: Discord status */
+    PLAYER_UI_ID_SETTINGS_LAUNCHER_MUSIC = 0x4557u,   /* Settings: launcher music on or off */
+    PLAYER_UI_ID_SETTINGS_MUSIC_VOLUME_DOWN = 0x4558u,
+    PLAYER_UI_ID_SETTINGS_MUSIC_VOLUME_UP = 0x4559u,
     PLAYER_UI_ID_NICKNAME_SAVE = 0x4560u,             /* the nickname editor's Save */
     PLAYER_UI_ID_NICKNAME_SKIP = 0x4561u,             /* its Skip (first launch) or Cancel */
     PLAYER_UI_ID_SETTINGS_NICKNAME = 0x4562u,         /* Settings: opens the nickname editor */
@@ -1502,6 +1513,18 @@ bool player_ui_nk_handle_event(PlayerUiNk *player,
    bar's input chip follow it. `which` is the SDL joystick id. NULL player is a
    no-op. */
 void player_ui_nk_note_gamepad(PlayerUiNk *player, uint32_t which, bool connected);
+/* The launcher window gained or lost input focus: the launcher music pauses
+   while it is away. NULL player is a no-op. */
+void player_ui_nk_note_window_focus(PlayerUiNk *player, bool focused);
+/* Once per loop, whatever view shows: the launcher music follows its setting,
+   whether a game is starting or running, and the window's focus (#2207). */
+void player_ui_nk_update_music(PlayerUiNk *player, PlayerApp *app);
+/* True when the launcher holds no music stream: a game may start. True for a
+   NULL player. */
+bool player_ui_nk_launcher_audio_closed(const PlayerUiNk *player);
+/* The launcher music's state (PlayerUiMusicState) and its name, for reports. */
+int player_ui_nk_music_state(const PlayerUiNk *player);
+const char *player_ui_nk_music_state_name(const PlayerUiNk *player);
 bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
                          struct SDL_Renderer *renderer,
                          struct SDL_Window *window,

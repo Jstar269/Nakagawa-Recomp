@@ -61,10 +61,13 @@ NK_UI_PLAYER_C5_SRCS := \
 	src/player/ui/scr_library.c \
 	$(NK_UI_PLAYER_TITLE_SRCS)
 
-# The next UI's SDL host pieces: disc art on a worker thread, launcher sounds.
+# The next UI's SDL host pieces: disc art on a worker thread, launcher sounds, and
+# the launcher music with its Ogg Vorbis decoder (stb_vorbis, built only here).
 NK_UI_PLAYER_HOST_SRCS := \
 	src/player/ui/player_ui_art.c \
-	src/player/ui/player_ui_sound.c
+	src/player/ui/player_ui_sound.c \
+	src/player/ui/player_ui_music.c \
+	src/player/ui/player_ui_vorbis.c
 
 NK_UI_OVERLAY_SRCS := \
 	src/rt/overlay/nk_overlay.c \

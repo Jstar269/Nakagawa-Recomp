@@ -315,6 +315,22 @@ Optional launcher sounds (Kenney's CC0 "Interface Sounds": a tick when focus mov
 back) are off by default; **UI sounds** in Settings (`ui_sounds` in `settings.json`) turns them on. While they are off
 no audio device is opened, and they never play while a game runs.
 
+Optional launcher music ([#2207](https://github.com/Jstar269/nakagawa-recomp/issues/2207)) is off by default too:
+**Launcher music** in Settings (`launcher_music` in `settings.json`) turns it on, and **Music volume** sets its own
+level (`launcher_music_volume`, 0 to 100%, 80% by default; the track is mastered at about -22 LUFS, so 100% is that
+level). Like the menu sounds it does not follow **Game volume**, which is the game's. The track is "Chill lofi
+inspired" by omfgdude (CC0, from OpenGameArt; [`assets/music/launcher/`](../assets/music/launcher/PROVENANCE.md)). It
+ships beside the player and is decoded with the vendored stb_vorbis; nothing is downloaded. It plays only while the
+launcher shows (the library, Settings, a game's page, the launcher's cards): it fades in over 1.5 s, and loops from the
+recording's first to its last sound, so the loop has no gap and no click. When a game starts it fades out over 0.5 s
+and the launcher lets go of the audio device before the game's process starts, so it never mixes into the game's
+sound; when the launcher is back it fades in again from where it stopped. It also fades out and lets go of the device
+while the launcher window does not have focus. While the setting is off nothing is read and no audio device is
+opened. A track that is missing or cannot be decoded, or an audio device that cannot be opened, is named on the
+setting's row (On: file missing, On: file damaged, On: no sound device) and in the log
+(`LAUNCHER_MUSIC_MISSING`, `LAUNCHER_MUSIC_DAMAGED`, `LAUNCHER_MUSIC_NO_DEVICE`); the launcher stays silent and
+carries on.
+
 Only actions the screen handles appear in its prompt bar.
 
 ## Screens
@@ -551,8 +567,8 @@ it under the action row while BUILD PACKAGE waits for the files, with CHECK AGAI
 
 Built now (#1302): one page under the top bar with SETTINGS active, two cards of named rows, each value on the 34 px
 button that changes it: GAME (resolution, frame pacing, VSync, fullscreen, scaling) and LAUNCHER AND SOUND (game
-volume with - and +, launcher fullscreen, accessibility, menu sounds, controller settings, CHECK FOR UPDATES, then
-the controller and the saves folder as captions; CHECK FOR UPDATES opens the Updates card and asks GitHub, see
+volume with - and +, launcher fullscreen, accessibility, menu sounds, controller settings, CHECK FOR UPDATES,
+launcher music and music volume with - and +, then the controller and the saves folder as captions; CHECK FOR UPDATES opens the Updates card and asks GitHub, see
 [`SETUP.md`](SETUP.md#network-use)). Under them DONE (primary: saves and returns to the Library), ONLINE AND DEVELOPER,
 THIRD-PARTY NOTICES and BUILD TOOLS AND CACHE (#1306: the share libraries switch, CLEAR SHARED LIBRARY CACHE and
 REMOVE BUILD TOOLS); the online options, the notices, build tools and cache and the removal check are dialog cards.

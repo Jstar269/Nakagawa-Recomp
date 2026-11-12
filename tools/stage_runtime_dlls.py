@@ -238,6 +238,42 @@ def stage_ui_font_assets(target_dir: Path, *, repo_root: Path = ROOT) -> list[st
     return staged
 
 
+# The launcher music's track (#2207), staged with the launcher's fonts: the player reads it
+# from beside itself, at this relative path (PLAYER_UI_MUSIC_TRACK in player_ui_music.h).
+LAUNCHER_MUSIC_TRACK = Path("assets") / "music" / "launcher" / "ChillLofi.ogg"
+
+
+def stage_launcher_music(target_dir: Path, *, repo_root: Path = ROOT) -> list[str]:
+    """Copy the launcher music's track beside an opt-in player build.
+
+    Only the track is copied, not its folder's ``PROVENANCE.md``; a missing track
+    fails the stage (``LAUNCHER_MUSIC_MISSING``) rather than shipping a player
+    whose music setting could only report the file missing.
+    """
+    source = repo_root / LAUNCHER_MUSIC_TRACK
+    destination = target_dir / LAUNCHER_MUSIC_TRACK
+    if not source.is_file():
+        raise StageError(f"LAUNCHER_MUSIC_MISSING: expected {source}")
+    if destination.exists() and not destination.is_file():
+        raise StagingCollisionError(
+            f"launcher music staging collision: {destination} is not a file"
+        )
+    try:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, destination)
+    except OSError as exc:
+        raise StageError(
+            f"LAUNCHER_MUSIC_STAGE_FAILED: could not copy {LAUNCHER_MUSIC_TRACK.as_posix()}: {exc}"
+        ) from exc
+    return [LAUNCHER_MUSIC_TRACK.as_posix()]
+
+
+def stage_launcher_assets(target_dir: Path, *, repo_root: Path = ROOT) -> list[str]:
+    """The launcher's files beside the player: its UI fonts and its music track."""
+    return (stage_ui_font_assets(target_dir, repo_root=repo_root)
+            + stage_launcher_music(target_dir, repo_root=repo_root))
+
+
 def _files_equal(first: Path, second: Path) -> bool:
     """Whether two files have identical bytes; a file that cannot be stat'ed counts as different."""
     try:
@@ -276,8 +312,9 @@ def stage_runtime_dlls(
     ``roots`` defaults to :data:`RUNTIME_ROOTS`; ``env`` defaults to the process
     environment and supplies each root's override. A root already present in
     ``target_dir`` is kept (a package may pre-bundle it) but still contributes
-    its closure. ``include_ui_fonts`` copies the project font bundle for the
-    standalone player target. Returns the sorted names of every file staged.
+    its closure. ``include_ui_fonts`` copies the launcher's assets (the project
+    font bundle and the launcher music's track) for the standalone player
+    target. Returns the sorted names of every file staged.
 
     With ``refresh=True``, a root or closure DLL already in ``target_dir`` is
     replaced by the resolved toolchain/override file when their bytes differ
@@ -336,7 +373,7 @@ def stage_runtime_dlls(
             staged.add(source.name)
 
     if include_ui_fonts:
-        staged.update(stage_ui_font_assets(target_dir, repo_root=repo_root))
+        staged.update(stage_launcher_assets(target_dir, repo_root=repo_root))
 
     if notices:
         package_notices.generate_package_notices(
@@ -592,7 +629,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--include-ui-fonts",
         action="store_true",
-        help="also stage the pinned UI font bundle beside the standalone player",
+        help="also stage the launcher's assets (the pinned UI font bundle and the launcher "
+        "music's track) beside the standalone player",
     )
     parser.add_argument(
         "--refresh",
@@ -635,14 +673,14 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if os.name != "nt":
         # POSIX hosts resolve shared libraries through the system loader. The
-        # opt-in player still needs its font assets beside the executable.
+        # opt-in player still needs its launcher assets beside the executable.
         if args.include_ui_fonts:
             try:
-                fonts = stage_ui_font_assets(args.target, repo_root=ROOT)
+                assets = stage_launcher_assets(args.target, repo_root=ROOT)
             except StageError as exc:
                 print(f"stage_runtime_dlls: FAIL: {exc}", file=sys.stderr)
                 return 1
-            print(f"stage_runtime_dlls: staged {len(fonts)} UI font asset(s) into {args.target}")
+            print(f"stage_runtime_dlls: staged {len(assets)} launcher asset(s) into {args.target}")
             return 0
         print(
             "stage_runtime_dlls: non-Windows host; shared libraries resolve "
@@ -661,14 +699,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (StageError, package_notices.PackageRouteError) as exc:
         print(f"stage_runtime_dlls: FAIL: {exc}", file=sys.stderr)
         return 1
-    font_assets = [name for name in staged if name.startswith("assets/fonts/ui/")]
-    dlls = [name for name in staged if name not in font_assets]
+    launcher_assets = [name for name in staged if name.startswith("assets/")]
+    dlls = [name for name in staged if name not in launcher_assets]
     print(
         f"stage_runtime_dlls: staged {len(dlls)} runtime DLL(s) into "
         f"{args.target}: {', '.join(dlls)}"
     )
-    if font_assets:
-        print(f"stage_runtime_dlls: staged {len(font_assets)} UI font asset(s) into {args.target}")
+    if launcher_assets:
+        print(f"stage_runtime_dlls: staged {len(launcher_assets)} launcher asset(s) into "
+              f"{args.target}")
     if args.runtime_manifest:
         print(f"stage_runtime_dlls: wrote {RUNTIME_MANIFEST_NAME} into {args.target}")
     return 0

@@ -5,6 +5,7 @@
 
 #include "player_state.h"
 #include "player_ui_art.h"
+#include "player_ui_music.h"
 #include "player_ui_sound.h"
 #include "iso_reader.h"
 #include "nk_platform.h"
@@ -202,6 +203,9 @@ struct PlayerUiNk {
     NkUiPromptImages prompt_images;  /* Kenney glyphs; empty ones keep the geometry */
     PlayerUiArt *art;                /* disc ICON0 / PIC1, decoded at run time */
     PlayerUiSounds *sounds;          /* optional launcher sounds (ui_sounds) */
+    PlayerUiMusic *music;            /* optional launcher music (launcher_music, #2207) */
+    bool window_unfocused;           /* the launcher window lost input focus */
+    int music_reported;              /* the last PlayerUiMusicState written to the log */
     int pending_sound;               /* a PlayerUiSound for this frame, or -1 */
     NkUiId sound_focus;              /* focus after the last frame, for the move sound */
     /* Remove from library (#1304): the title the dialog is for, what it lists,
@@ -409,6 +413,31 @@ static void player_ui_report_layout_error(void *user, const NkUiLayoutError *err
                        error->fatal ? "frame dropped" : "frame drawn", length, error->text);
 }
 
+/* The launcher music's track: beside the player, as the fonts are, else from
+   the working folder (a development run from the source tree). A track found in
+   neither is still looked for beside the player, so the missing file is named
+   there. */
+static PlayerUiMusic *player_ui_music_create_beside(const char *base_path) {
+    char path[2u * NK_MAX_PATH];
+    const char *track = PLAYER_UI_MUSIC_TRACK;
+#ifdef NK_PLAYER_UI_REGRESSION_TEST
+    /* Stands in for a player folder whose track is missing or damaged. */
+    const char *test_track = getenv("NK_UI_TEST_MUSIC_FILE");
+    if (test_track != NULL && test_track[0] != '\0') {
+        return player_ui_music_create(test_track, PLAYER_UI_MUSIC_TRACK);
+    }
+#endif
+    if (base_path != NULL && player_ui_join_path(base_path, track, path, sizeof(path)) &&
+        player_ui_file_exists(path)) {
+        return player_ui_music_create(path, track);
+    }
+    if (player_ui_file_exists(track)) return player_ui_music_create(track, track);
+    if (base_path != NULL && player_ui_join_path(base_path, track, path, sizeof(path))) {
+        return player_ui_music_create(path, track);
+    }
+    return player_ui_music_create(track, track);
+}
+
 bool player_ui_nk_built_with_launcher(void) {
     return nk_ui_sdlr_available() && nk_ui_ttf_available();
 }
@@ -484,6 +513,8 @@ PlayerUiNk *player_ui_nk_create(SDL_Renderer *renderer, SDL_Window *window, Play
     nk_ui_set_prompt_images(player->ui, &player->prompt_images);
     player->art = player_ui_art_create(player_ui_read_disc_art);
     player->sounds = player_ui_sounds_create();
+    player->music = player_ui_music_create_beside(base_path);
+    player->music_reported = PLAYER_UI_MUSIC_OFF;
     player->pending_sound = -1;
     player->last_view = VIEW_LIBRARY;
 #ifdef NK_PLAYER_UI_REGRESSION_TEST
@@ -507,6 +538,7 @@ PlayerUiNk *player_ui_nk_create(SDL_Renderer *renderer, SDL_Window *window, Play
 
 void player_ui_nk_destroy(PlayerUiNk *player) {
     if (player == NULL) return;
+    player_ui_music_destroy(player->music);
     player_ui_sounds_destroy(player->sounds);
     player_ui_art_destroy(player->art);
     nk_ui_sdlr_destroy(player->backend);
@@ -1061,6 +1093,10 @@ static PlayerUiAction player_ui_render_settings(PlayerUiNk *player, PlayerApp *a
     model.fullscreen = app->settings.fullscreen;
     model.volume = app->settings.master_volume;
     model.ui_sounds = app->settings.ui_sounds;
+    model.launcher_music = app->settings.launcher_music;
+    model.launcher_music_value = player_ui_music_row_value(app->settings.launcher_music,
+                                                           player_ui_music_state(player->music));
+    model.music_volume = app->settings.launcher_music_volume;
     model.launcher_fullscreen = app->settings.launcher_fullscreen;
     model.nickname = app->settings.nickname;
     model.build_speed = package_build_speed_name(app->settings.build_speed);
@@ -2449,6 +2485,47 @@ bool player_ui_nk_handle_event(PlayerUiNk *player, const SDL_Event *event) {
         }
     }
     return true;
+}
+
+void player_ui_nk_note_window_focus(PlayerUiNk *player, bool focused) {
+    if (player == NULL) return;
+    player->window_unfocused = !focused;
+}
+
+void player_ui_nk_update_music(PlayerUiNk *player, PlayerApp *app) {
+    PlayerUiMusicRequest request;
+    PlayerUiMusicState state;
+    if (player == NULL || app == NULL) return;
+    request.enabled = app->settings.launcher_music;
+    /* A game that is starting counts as running: the music fades out and lets go
+       of the audio device before the launch starts the game's process. */
+    request.in_launcher = !app->is_game_running && !app->launch_pending;
+    request.focused = !player->window_unfocused;
+    request.volume = app->settings.launcher_music_volume;
+    player_ui_music_update(player->music, &request, SDL_GetTicks());
+    state = player_ui_music_state(player->music);
+    if ((int)state == player->music_reported) return;
+    player->music_reported = (int)state;
+    if (state == PLAYER_UI_MUSIC_MISSING || state == PLAYER_UI_MUSIC_DAMAGED ||
+        state == PLAYER_UI_MUSIC_NO_DEVICE) {
+        const char *code = state == PLAYER_UI_MUSIC_MISSING ? "LAUNCHER_MUSIC_MISSING"
+                           : state == PLAYER_UI_MUSIC_DAMAGED ? "LAUNCHER_MUSIC_DAMAGED"
+                                                              : "LAUNCHER_MUSIC_NO_DEVICE";
+        fprintf(stderr, "[PLAYER] %s: %s\n", code, player_ui_music_detail(player->music));
+        player_dev_log_add(app, "audio", "%s: %s", code, player_ui_music_detail(player->music));
+    }
+}
+
+bool player_ui_nk_launcher_audio_closed(const PlayerUiNk *player) {
+    return player == NULL || !player_ui_music_holds_audio(player->music);
+}
+
+int player_ui_nk_music_state(const PlayerUiNk *player) {
+    return player != NULL ? (int)player_ui_music_state(player->music) : (int)PLAYER_UI_MUSIC_OFF;
+}
+
+const char *player_ui_nk_music_state_name(const PlayerUiNk *player) {
+    return player_ui_music_state_name((PlayerUiMusicState)player_ui_nk_music_state(player));
 }
 
 void player_ui_nk_note_gamepad(PlayerUiNk *player, uint32_t which, bool connected) {

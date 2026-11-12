@@ -2241,7 +2241,11 @@ class TestRuntimeDllStaging(unittest.TestCase):
                 (Path("assets") / "fonts" / "ui" / path.relative_to(source_root)).as_posix()
                 for path in source_root.rglob("*") if path.is_file()
             }
+            # The launcher music's track ships beside the player with the fonts (#2207),
+            # without its folder's manifest.
+            expected.add("assets/music/launcher/ChillLofi.ogg")
             self.assertEqual(set(staged), expected)
+            self.assertFalse((player_dir / "assets/music/launcher/PROVENANCE.md").exists())
             for relative in expected:
                 source = ROOT / Path(relative)
                 destination = player_dir / Path(relative)
@@ -2249,6 +2253,17 @@ class TestRuntimeDllStaging(unittest.TestCase):
                 self.assertEqual(destination.read_bytes(), source.read_bytes(), relative)
             self.assertTrue((player_dir / "assets/fonts/ui/manifest.json").is_file())
             self.assertTrue((player_dir / "assets/fonts/ui/geist/OFL.txt").is_file())
+
+    def test_player_staging_without_the_launcher_music_fails_closed(self) -> None:
+        """#2207: a source tree without the launcher music's track stages no player."""
+        import stage_runtime_dlls
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            shutil.copytree(ROOT / "assets" / "fonts" / "ui", repo / "assets" / "fonts" / "ui")
+            with self.assertRaises(stage_runtime_dlls.StageError) as ctx:
+                stage_runtime_dlls.stage_launcher_assets(Path(tmp) / "player", repo_root=repo)
+            self.assertIn("LAUNCHER_MUSIC_MISSING", str(ctx.exception))
 
     def test_missing_sdl3_ttf_fails_the_stage_closed(self) -> None:
         import stage_runtime_dlls

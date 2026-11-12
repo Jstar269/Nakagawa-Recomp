@@ -667,6 +667,11 @@ static bool player_dispatch_ui_event(PlayerApp *app, PlayerUiNk *next_ui,
     case SDL_EVENT_WINDOW_MAXIMIZED:
         app->settings.launcher_window_maximized = true;
         return true;
+    case SDL_EVENT_WINDOW_FOCUS_GAINED:
+    case SDL_EVENT_WINDOW_FOCUS_LOST:
+        /* The launcher music pauses while the window is away (#2207). */
+        player_ui_nk_note_window_focus(next_ui, event->type == SDL_EVENT_WINDOW_FOCUS_GAINED);
+        return true;
     case SDL_EVENT_WINDOW_RESTORED:
         app->settings.launcher_window_maximized =
             (SDL_GetWindowFlags(window) & SDL_WINDOW_MAXIMIZED) != 0;
@@ -1699,6 +1704,13 @@ static void player_ui_settings_apply(PlayerApp *app, PlayerUiSettingsOp op, size
         case PLAYER_UI_SETTINGS_VOLUME_DOWN: player_app_adjust_volume(app, -5); break;
         case PLAYER_UI_SETTINGS_VOLUME_UP: player_app_adjust_volume(app, 5); break;
         case PLAYER_UI_SETTINGS_TOGGLE_UI_SOUNDS: player_app_toggle_ui_sounds(app); break;
+        case PLAYER_UI_SETTINGS_TOGGLE_LAUNCHER_MUSIC: player_app_toggle_launcher_music(app); break;
+        case PLAYER_UI_SETTINGS_MUSIC_VOLUME_DOWN:
+            player_app_adjust_launcher_music_volume(app, -5);
+            break;
+        case PLAYER_UI_SETTINGS_MUSIC_VOLUME_UP:
+            player_app_adjust_launcher_music_volume(app, 5);
+            break;
         case PLAYER_UI_SETTINGS_OPEN_ACCESSIBILITY:
             player_app_set_view(app, VIEW_ACCESSIBILITY_SETTINGS);
             break;
@@ -3306,6 +3318,9 @@ static bool player_parse_positive_u32(const char *text, uint32_t maximum,
 typedef struct {
     SDL_Thread *thread;
     SDL_AtomicInt done;
+    /* The launcher music is still fading out (#2207): the worker, which starts the
+       game's process, waits until the launcher holds no audio stream. */
+    bool awaiting_audio;
     PlayerUiTestLaunch test;
     PlayerLaunchWork work;
 } PlayerLaunchJob;
@@ -3321,7 +3336,24 @@ static int SDLCALL player_launch_thread_main(void *data) {
     return 0;
 }
 
-static PlayerLaunchJob *player_launch_job_start(PlayerApp *app, int game_index) {
+/* Starts the launch worker, or runs the launch here when no thread can start. */
+static void player_launch_job_spawn(PlayerLaunchJob *job, bool launcher_audio_closed) {
+    job->awaiting_audio = false;
+    player_ui_test_report_launch_worker(launcher_audio_closed);
+    job->thread = SDL_CreateThread(player_launch_thread_main, "nakagawa-launch", job);
+    if (!job->thread) {
+        /* No worker: run the launch here, as the launcher always did. */
+        fprintf(stderr, "[PLAYER] Launch worker could not start (%s); launching inline.\n",
+                SDL_GetError());
+        player_launch_job_run(job);
+    }
+}
+
+/* `launcher_audio_closed`: the launcher holds no music stream. Otherwise the job
+   waits, launch_pending, while the music fades out, and player_launch_job_poll
+   starts the worker once the music has let go of the device. */
+static PlayerLaunchJob *player_launch_job_start(PlayerApp *app, int game_index,
+                                                bool launcher_audio_closed) {
     if (!app || app->launch_pending || app->is_game_running ||
         game_index < 0 || game_index >= app->game_count) {
         return NULL;
@@ -3345,21 +3377,24 @@ static PlayerLaunchJob *player_launch_job_start(PlayerApp *app, int game_index) 
     app->launch_pending = true;
     snprintf(app->launch_pending_disc_id, sizeof(app->launch_pending_disc_id), "%s",
              job->work.game.disc_id);
-    job->thread = SDL_CreateThread(player_launch_thread_main, "nakagawa-launch", job);
-    if (!job->thread) {
-        /* No worker: run the launch here, as the launcher always did. */
-        fprintf(stderr, "[PLAYER] Launch worker could not start (%s); launching inline.\n",
-                SDL_GetError());
-        player_launch_job_run(job);
+    if (launcher_audio_closed) {
+        player_launch_job_spawn(job, true);
+    } else {
+        job->awaiting_audio = true;
     }
     return job;
 }
 
 /* Hands a finished launch to the app. Returns the job while it still runs and
- * NULL once it is handed back; `wait` blocks until then (shutdown only). */
+ * NULL once it is handed back; `wait` blocks until then (shutdown only). A job
+ * waiting for the launcher music starts its worker once `launcher_audio_closed`. */
 static PlayerLaunchJob *player_launch_job_poll(PlayerApp *app, PlayerLaunchJob *job,
-                                               bool wait) {
+                                               bool wait, bool launcher_audio_closed) {
     if (!job) return NULL;
+    if (job->awaiting_audio) {
+        if (!wait && !launcher_audio_closed) return job;
+        player_launch_job_spawn(job, launcher_audio_closed);
+    }
     if (!wait && SDL_GetAtomicInt(&job->done) == 0) return job;
     if (job->thread) SDL_WaitThread(job->thread, NULL);
     app->launch_pending = false;
@@ -4933,6 +4968,10 @@ static void player_loop_start(PlayerRun *run) {
        process-exit monitoring alive while the user is idle; staging progress
        and normal input still wake the loop immediately. */
     player_ui_test_begin_first_frame(&run->ui_test);
+    /* The launcher music (#2207) starts with the first frame, so that frame
+       already shows its state; a game the player was started with keeps it
+       stopped. */
+    player_ui_nk_update_music(run->next_ui, app);
     player_render_active_ui(run->next_ui, app, run->renderer, run->window);
     if (run->interactive_window && run->have_usable_bounds && !run->window_frame_measured) {
         run->window_frame_measured = player_refit_to_actual_frame(
@@ -5266,8 +5305,12 @@ static void player_frame_requests(PlayerRun *run) {
 /* The running game and the window handoff to it, and the controller's live input. */
 static void player_frame_game_session(PlayerRun *run) {
     PlayerApp *app = &run->app;
+    /* The launcher music follows the launch: a starting game fades it out, and
+       the worker below waits until it has let go of the audio device (#2207). */
+    player_ui_nk_update_music(run->next_ui, app);
     /* A launch the worker finished becomes the running game, or its card. */
-    run->launch_job = player_launch_job_poll(app, run->launch_job, false);
+    run->launch_job = player_launch_job_poll(app, run->launch_job, false,
+                                             player_ui_nk_launcher_audio_closed(run->next_ui));
 
     /* Monitor running game process */
     bool child_exited = false;
@@ -5371,7 +5414,9 @@ static void player_frame_render(PlayerRun *run) {
         app->request_launch = false;
         if (!run->launch_job) {
             player_note_launcher_display(app, run->window);
-            run->launch_job = player_launch_job_start(app, app->request_launch_index);
+            run->launch_job = player_launch_job_start(
+                app, app->request_launch_index,
+                player_ui_nk_launcher_audio_closed(run->next_ui));
         }
     }
     if (app->request_factory_reset) {
@@ -5426,7 +5471,8 @@ static int player_shutdown(PlayerRun *run) {
     run->outdated_scan_job = player_outdated_scan_poll(app, run->outdated_scan_job, true);
 
     /* A launch still on its worker finishes first, so its game is stopped. */
-    run->launch_job = player_launch_job_poll(app, run->launch_job, true);
+    run->launch_job = player_launch_job_poll(app, run->launch_job, true,
+                                             player_ui_nk_launcher_audio_closed(run->next_ui));
     if (app->is_game_running) {
         player_app_stop_game(app);
     }

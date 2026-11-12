@@ -1792,7 +1792,7 @@ STALE_CONTROL_FIX = (
 TEXT_HYGIENE_EXEMPT_SUFFIXES = frozenset({".dat", ".bin", ".png", ".jpg", ".jpeg",
                                           ".gif", ".ico", ".mp4", ".pdf", ".zip", ".ttf",
                                           ".otf", ".woff", ".woff2", ".spv", ".wav",
-                                          ".prx", ".pbp", ".elf"})
+                                          ".ogg", ".prx", ".pbp", ".elf"})
 
 # Upstream byte-identical text can have source formatting that the repository
 # does not control. This exact hash exception preserves Clay's untouched
