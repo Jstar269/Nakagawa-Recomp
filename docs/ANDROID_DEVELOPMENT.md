@@ -295,8 +295,9 @@ as `ld.lld`; clang takes it with `-fuse-ld=<native library folder>/libnk_ld.so`.
 The app (`NakagawaHost`, with `ToolchainArchive` reading the archives) unpacks
 `assets/toolchain/` into `toolchain/` in its files folder: `sysroot/` (clang's `--sysroot`),
 `clang-resource/` (its `-resource-dir`) and `python/` (Python's standard library). It sets
-`NK_ANDROID_TOOLCHAIN_DIR` to that folder and `PYTHONHOME` to `python/` inside it, and every
-program the app starts inherits both. The unpacker takes only folders and regular files, and
+`NK_ANDROID_TOOLCHAIN_DIR` to that folder, `PYTHONHOME` to `python/` inside it, and `TMPDIR`
+to the app's cache folder (clang's temporary files), and every program the app starts inherits
+them. The unpacker takes only folders and regular files, and
 refuses links, paths that leave the folder, damaged headers and archives that end early.
 
 ## Storage

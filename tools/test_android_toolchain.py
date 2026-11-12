@@ -389,6 +389,15 @@ class PythonTests(unittest.TestCase):
             with self.assertRaisesRegex(toolchain.ToolchainError, "release layout"):
                 toolchain.read_python_package(tarball, digest)
 
+    def test_the_launcher_finds_the_release_libraries_beside_itself(self) -> None:
+        cfg = _config(Path(tempfile.gettempdir()) / "nk-tc-py")
+        command = toolchain.python_launcher_command(cfg, ["libcrypto_python.so", "libpython3.15.so"])
+        self.assertIn("-Wl,-rpath,$ORIGIN", command)
+        # Every library is linked, used or not, so the extension modules find it loaded.
+        start = command.index("-Wl,--no-as-needed")
+        self.assertEqual(command[start + 1:start + 4],
+                         ["-l:libcrypto_python.so", "-l:libpython3.15.so", "-Wl,--as-needed"])
+
     def test_a_licence_file_that_changed_is_refused(self) -> None:
         with tempfile.TemporaryDirectory(prefix="nk-tc-test-") as tmp:
             path = Path(tmp) / "LICENSE"
@@ -418,6 +427,11 @@ class GradleWiringTests(unittest.TestCase):
 
     def test_native_libraries_stay_extracted_so_they_can_run(self) -> None:
         self.assertIn("useLegacyPackaging = true", self.gradle)
+
+    def test_the_apk_ships_the_staged_bytes(self) -> None:
+        # AGP's NDK strip rewrites .shstrtab even in a binary linked --strip-all.
+        self.assertIn('File(dir, "jniLibs/arm64-v8a").listFiles()?.forEach { keepDebugSymbols += "**/${it.name}" }',
+                      self.gradle)
 
 
 JAVA_SOURCES = Path(__file__).resolve().parent.parent / "android" / "app" / "src" / "main" / "java"

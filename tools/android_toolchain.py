@@ -517,6 +517,23 @@ def read_pinned(path: Path, expected: str, url: str) -> bytes:
     return data
 
 
+def python_launcher_command(cfg: Config, libraries: list[str]) -> list[str]:
+    """The link of libnk_python.so against the release's libpython and the libraries it bundles.
+
+    A program the app starts is linked by the system's default search path, not the app's
+    native library folder, so the launcher looks beside itself ($ORIGIN). It also needs every
+    lib*_python.so: the extension modules in lib-dynload name them but have no search path of
+    their own, and the linker finds a library that is already loaded by its name.
+    """
+    folder = cfg.build / "python"
+    return [cfg.tool("clang"), f"--target={TRIPLE}", f"--sysroot={cfg.sysroot}",
+            f"-resource-dir={cfg.resource}", "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
+            f"-I{folder / 'include' / f'python{PYTHON_MINOR}'}", "-fPIE", "-pie", "-fuse-ld=lld",
+            "-Wl,--build-id=sha1", "-s", "-Wl,-rpath,$ORIGIN", cfg.prefix_maps(),
+            "-o", str(folder / "libnk_python.so"), str(PYTHON_LAUNCHER), f"-L{folder / 'lib'}",
+            "-Wl,--no-as-needed", *(f"-l:{name}" for name in libraries), "-Wl,--as-needed"]
+
+
 def stage_python(cfg: Config) -> None:
     """The CPython release's libraries and standard library, and the launcher built against them."""
     folder = cfg.build / "python"
@@ -529,11 +546,7 @@ def stage_python(cfg: Config) -> None:
         (folder / relative).parent.mkdir(parents=True, exist_ok=True)
         (folder / relative).write_bytes(data)
     android_sysroot.write_archive(package.stdlib, folder / "python-stdlib.tar")
-    _run([cfg.tool("clang"), f"--target={TRIPLE}", f"--sysroot={cfg.sysroot}",
-          f"-resource-dir={cfg.resource}", "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
-          f"-I{folder / 'include' / f'python{PYTHON_MINOR}'}", "-fPIE", "-pie", "-fuse-ld=lld",
-          "-Wl,--build-id=sha1", "-s", cfg.prefix_maps(), "-o", str(folder / "libnk_python.so"),
-          str(PYTHON_LAUNCHER), f"-L{folder / 'lib'}", f"-lpython{PYTHON_MINOR}"],
+    _run(python_launcher_command(cfg, sorted(package.libraries)),
          cfg.work / "logs" / "python-launcher.log", "building the python launcher")
     check_device_executable((folder / "libnk_python.so").read_bytes(), "libnk_python.so", cfg.work)
     _mark(folder)

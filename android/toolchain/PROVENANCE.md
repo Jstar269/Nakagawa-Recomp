@@ -109,8 +109,12 @@ corresponding source, as for the other bundled GPL programs.
 The library versions are the ones the release's binaries report. `tools/android_toolchain.py` checks every SHA-256
 above, reads the release tarball without extracting it, and refuses one whose files are not where the release puts
 them or are links. It builds `libnk_python.so` from `nk_python_launcher.c` with the host clang against the release's
-headers and `libpython3.15.so`; it needs only that library, `libc.so` and `libdl.so`. The standard library becomes one
-tar with fixed metadata, and two builds give the same bytes.
+headers and libraries. A program the app starts is linked by the system's default search path, not the app's native
+library folder, so the launcher has `DT_RUNPATH` `$ORIGIN`. It also names every `lib*_python.so` as needed: the extension
+modules in `lib-dynload` need them but have no search path of their own, and the dynamic linker finds an already-loaded
+library by its name. Besides those, it needs only `libc.so`. The standard library becomes one tar with fixed metadata,
+and two builds give the same bytes. The APK carries these libraries byte for byte as staged: Gradle keeps the NDK's strip
+away from them.
 
 What the APK carries for Python:
 

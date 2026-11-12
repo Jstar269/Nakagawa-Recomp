@@ -32,8 +32,8 @@ import java.nio.charset.StandardCharsets;
  * (libnk_clang.so, libnk_ld.so, libnk_make.so, libnk_python.so) are in the native library folder,
  * and its archives in assets/toolchain/ are unpacked to toolchain/ in the files folder:
  * sysroot/, clang-resource/ (clang's -resource-dir) and python/ (Python's standard library).
- * NK_ANDROID_TOOLCHAIN_DIR names that folder, and PYTHONHOME the python/ inside it, which every
- * program the app starts inherits.
+ * NK_ANDROID_TOOLCHAIN_DIR names that folder, PYTHONHOME the python/ inside it and TMPDIR the
+ * app's cache folder, which every program the app starts inherits.
  *
  * <p>The bundled files are unpacked into the app's files folder itself: SDL_GetBasePath() is
  * "./" on Android, and SDL opens a relative path against the files folder
@@ -96,6 +96,8 @@ final class NakagawaHost {
         if (bundlesToolchain) {
             setenv("NK_ANDROID_TOOLCHAIN_DIR", toolchain.getAbsolutePath());
             setenv("PYTHONHOME", new File(toolchain, "python").getAbsolutePath());
+            // clang and Python write temporary files; an app may write only its own folders.
+            setenv("TMPDIR", context.getCacheDir().getAbsolutePath());
         }
         String stamp = apkStamp(context);
         File stampFile = new File(app, ".unpacked");

@@ -118,6 +118,12 @@ android {
             // by path (as the desktop names an executable), and so the toolchain's programs
             // (libnk_clang.so and the rest) can be executed from there.
             useLegacyPackaging = true
+            // The toolchain's libraries ship as staged: its own are linked stripped, with a build
+            // ID that names those bytes, and CPython's are the release's. The NDK strip would
+            // rewrite them.
+            toolchain?.let { dir ->
+                File(dir, "jniLibs/arm64-v8a").listFiles()?.forEach { keepDebugSymbols += "**/${it.name}" }
+            }
         }
     }
 
