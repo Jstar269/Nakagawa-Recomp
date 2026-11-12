@@ -66,16 +66,17 @@ hardware label. The current command-word case reports `NOT_RUN`.
 
 **GE raster pixel conformance is partial (#343, open).** In the corpus and measured: the 189
 `ge-raster`, 16 `ge-weight` and 9 `ge-rtt` cells, each for its exact states only. The software GE
-gives every one. On Vulkan at render scale 1 (`gpu_coherence_selftest --case psp-raster`, in the
+gives every `ge-raster` cell (`test_ge_raster_cells_match_psp`); no test yet runs the `ge-weight` or
+`ge-rtt` cells through it. On Vulkan at render scale 1 (`gpu_coherence_selftest --case psp-raster`, in the
 `ge-raster` entry below), 146 `ge-raster` cells drawn on the GPU equal the PSP, 20 differ by 1 or 2
-per colour field, and 23 are drawn by the software fallback. Measured on a PSP but not in
-`ge_corpus.json`: PSP-GE-SAMPLE-001, PSP-GE-THROUGHZ-001, PSP-GE-MIP-001, PSP-GE-MIP-002,
+per colour field, and 23 are drawn by the software fallback. Other pixel evidence measured on a
+PSP but not in `ge_corpus.json`: PSP-GE-SAMPLE-001, PSP-GE-THROUGHZ-001, PSP-GE-MIP-001, PSP-GE-MIP-002,
 PSP-GE-LIGHT-001 and PSP-GE-OVERLAP-001 (their entries below). Not measured at all:
 
 - the command-word case above (`NOT_RUN`);
 - the depth the GE stores for a fractional z: every `ge-raster` depth is an integer and
   PSP-GE-THROUGHZ-001 does not show the stored word, so depth rounding and the transform-mode depth
-  range mapping are not pinned (a PSP read is requested);
+  range mapping are not pinned;
 - clipping, the guard band and back-face culling;
 - scissor rectangles smaller than the surface: every cell scissors to the full surface;
 - index buffers, and vertex formats no cell uses;
