@@ -1395,12 +1395,35 @@ static bool hb_rel_ok(const char *rel)
     }
 }
 
-/* Parse a manifest, splitting text into lines in place. */
+/* Whether the folder holding rel (all of rel up to its last '/') is an earlier D entry: the
+   seed checks each folder for links before it puts anything in it, so a file entry may not reach
+   a folder the list never named (review of #2426, M2). A top-level entry has no such folder. */
+static bool hb_manifest_parent_listed(const HbManifest *manifest, const char *rel)
+{
+    const char *slash = strrchr(rel, '/');
+    size_t length;
+    if (slash == NULL) return true;
+    length = (size_t)(slash - rel);
+    for (size_t i = 0; i < manifest->count; ++i) {
+        const HbEntry *entry = &manifest->items[i];
+        if (entry->kind == 'D' && strlen(entry->rel) == length &&
+            memcmp(entry->rel, rel, length) == 0)
+            return true;
+    }
+    return false;
+}
+
+/* Parse a manifest, splitting text into lines in place. A list longer than the import writes
+   (two header lines and NK_PBP_HOMEBREW_FOLDER_MAX_ENTRIES entries), or whose files add up to
+   more than NK_PBP_HOMEBREW_FOLDER_MAX_BYTES, is refused before its table is made (review of
+   #2426, m3). */
 static bool hb_manifest_parse(char *text, HbManifest *manifest)
 {
     char *line = text;
     size_t lines = 0, capacity = 0;
+    uint64_t total = 0;
     for (const char *c = text; *c; ++c) capacity += *c == '\n';
+    if (capacity > NK_PBP_HOMEBREW_FOLDER_MAX_ENTRIES + 2u) return false;
     manifest->items = (HbEntry *)calloc(capacity + 1u, sizeof(HbEntry));
     if (manifest->items == NULL) return false;
     while (*line) {
@@ -1425,7 +1448,9 @@ static bool hb_manifest_parse(char *text, HbManifest *manifest)
                 unsigned long long size;
                 if (*size_text < '0' || *size_text > '9') return false;
                 size = strtoull(size_text, &size_end, 10);
-                if (*size_end != ' ' || size > NK_PBP_HOMEBREW_FOLDER_MAX_BYTES) return false;
+                if (*size_end != ' ' || size > NK_PBP_HOMEBREW_FOLDER_MAX_BYTES - total)
+                    return false;
+                total += (uint64_t)size;
                 entry->kind = 'F';
                 memcpy(entry->hex, line + 2, HB_HEX_LEN);
                 entry->hex[HB_HEX_LEN] = '\0';
@@ -1435,7 +1460,8 @@ static bool hb_manifest_parse(char *text, HbManifest *manifest)
                 return false;
             }
             if (!hb_rel_ok(entry->rel) ||
-                manifest->count >= NK_PBP_HOMEBREW_FOLDER_MAX_ENTRIES)
+                manifest->count >= NK_PBP_HOMEBREW_FOLDER_MAX_ENTRIES ||
+                !hb_manifest_parent_listed(manifest, entry->rel))
                 return false;
             manifest->count++;
         }
@@ -1639,6 +1665,29 @@ static void hb_record(HbText *record, const char *hex, const char *rel)
     hb_text_add(record, "\n", NULL, NULL);
 }
 
+/* Make path, a folder below root, one missing folder at a time: each folder on the way, made or
+   found, must really be inside root_real before the next is made in it, so a link or junction
+   on the way is refused before anything is made through it (review of #2426, m1). */
+static bool hb_mkdirs_within(const char *root, const char *root_real, const char *path)
+{
+    char prefix[HB_PATH_MAX];
+    size_t root_length = strlen(root);
+    size_t length = strlen(path);
+    if (length >= sizeof(prefix) || length <= root_length || strncmp(path, root, root_length) != 0)
+        return false;
+    for (size_t end = root_length + 1u; end <= length; ++end) {
+        HbState state;
+        if (end < length && path[end] != '/' && path[end] != '\\') continue;
+        memcpy(prefix, path, end);
+        prefix[end] = '\0';
+        state = hb_state(prefix);
+        if (state == HB_FILE || state == HB_UNKNOWN) return false;
+        if (state == HB_MISSING && !nk_platform_mkdir_p_private(prefix)) return false;
+        if (!hb_real_within(prefix, root_real)) return false;
+    }
+    return true;
+}
+
 bool nk_pbp_homebrew_seed_memstick(const char *iso_path, const char *folder,
                                    const char *memstick_root,
                                    char *problem, size_t problem_size)
@@ -1687,16 +1736,24 @@ bool nk_pbp_homebrew_seed_memstick(const char *iso_path, const char *folder,
         return false;
     }
     if (hb_state(target) == HB_FILE || hb_state(target) == HB_UNKNOWN ||
-        !nk_platform_mkdir_p_private(target)) {
+        (hb_state(memstick_root) == HB_MISSING && !nk_platform_mkdir_p_private(memstick_root))) {
         hb_problem(problem, problem_size, "%.400s could not be made on the Memory Stick.",
                    target);
+        ok = false;
+    } else if (!nk_platform_real_path(memstick_root, stick_real, sizeof(stick_real))) {
+        hb_problem(problem, problem_size,
+                   "Where %.400s really is could not be read from the system.", memstick_root);
+        ok = false;
+    } else if (!hb_mkdirs_within(memstick_root, stick_real, target)) {
+        hb_problem(problem, problem_size,
+                   "%.400s could not be made on the Memory Stick, or leads outside it (a link "
+                   "or junction is in the way); nothing was put there.", target);
         ok = false;
     } else if (!nk_platform_real_path(target, target_real, sizeof(target_real))) {
         hb_problem(problem, problem_size,
                    "Where %.400s really is could not be read from the system.", target);
         ok = false;
-    } else if (!nk_platform_real_path(memstick_root, stick_real, sizeof(stick_real)) ||
-               !hb_path_within(target_real, stick_real)) {
+    } else if (!hb_path_within(target_real, stick_real)) {
         hb_problem(problem, problem_size,
                    "%.400s leads outside the title's Memory Stick (a link or junction is in "
                    "the way); nothing was put there.", target);

@@ -1012,7 +1012,9 @@ static void test_no_iso_child_environment(const char *test_executable,
 
         /* A link or junction already on the stick is not written through (review of
            #2426, N2): the seed stops by name and nothing lands outside the program's
-           folder, whether the link is the program's folder or a folder inside it. */
+           folder, whether the link is the program's folder or a folder inside it. Nor is
+           one above the program's folder: with the stick's PSP folder a link, not even an
+           empty folder is made through it (review of #2426, m1). */
         {
             char link_stick[NK_MAX_PATH * 2 + 32];
             char link_folder[NK_MAX_PATH * 2 + 96];
@@ -1020,17 +1022,19 @@ static void test_no_iso_child_environment(const char *test_executable,
             char link_path[NK_MAX_PATH * 2 + 128];
             snprintf(outside, sizeof(outside), "%s%chomebrew-outside", root, sep);
             assert(nk_platform_mkdir_p(outside));
-            for (int level = 0; level < 2; ++level) {
+            for (int level = 0; level < 3; ++level) {
                 snprintf(link_stick, sizeof(link_stick), "%s%chomebrew-stick-linked%d", root, sep,
                          level);
                 snprintf(link_folder, sizeof(link_folder), "%s%cPSP%cGAME", link_stick, sep, sep);
                 if (level == 1) {
                     snprintf(link_path, sizeof(link_path), "%s%cMYHB", link_folder, sep);
                     snprintf(link_folder, sizeof(link_folder), "%s", link_path);
+                } else if (level == 2) {
+                    snprintf(link_folder, sizeof(link_folder), "%s", link_stick);
                 }
                 assert(nk_platform_mkdir_p(link_folder));
                 snprintf(link_path, sizeof(link_path), "%s%c%s", link_folder, sep,
-                         level == 0 ? "MYHB" : "levels");
+                         level == 0 ? "MYHB" : level == 1 ? "levels" : "PSP");
                 if (!make_folder_link(link_path, outside)) {
                     printf("[LAUNCH_TEST] NOT_RUN: this host cannot make a folder link\n");
                     continue;
@@ -1045,14 +1049,19 @@ static void test_no_iso_child_environment(const char *test_executable,
                 assert(nk_platform_path_missing(hb_file));
                 snprintf(hb_file, sizeof(hb_file), "%s%cONE.TXT", outside, sep);
                 assert(nk_platform_path_missing(hb_file));
+                snprintf(hb_file, sizeof(hb_file), "%s%cGAME", outside, sep);
+                assert(nk_platform_path_missing(hb_file));
                 copy_field(session.memstick_root, sizeof(session.memstick_root), hb_stick);
             }
         }
 
         /* A view.manifest naming a path outside the program's folder is damage: the launch
-           stops and nothing is written there (review of #2426). */
+           stops and nothing is written there (review of #2426). So is one naming a file in a
+           folder it never listed, since the seed checks for links only the folders it lists
+           (review of #2426, M2). */
         {
-            static const char *const hostile[] = { "../x", "/x", "a\\x", "C:x", "a//x" };
+            static const char *const hostile[] = { "../x", "/x", "a\\x", "C:x", "a//x",
+                                                   "unlisted/x" };
             char manifest_path[NK_MAX_PATH * 2 + 64];
             char *manifest_text;
             snprintf(manifest_path, sizeof(manifest_path), "%s%cview.manifest", hb_view_root,
