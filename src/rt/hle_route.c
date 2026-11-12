@@ -1971,7 +1971,7 @@ unsigned sr_hle_test_ge_finish_reports(int reset) {
  * callback the same way (PSP-GE-TIMING-001 c4, measured on a PSP-3000); the FINISH id itself
  * is UNMEASURED. A title that marks one kind of frame with its own FINISH id waited forever
  * for a callback that, given the queue ID, never saw it. */
-void ge_finish_callback(CpuState *s, uint32_t cbid, uint32_t finish_id, uint32_t user_arg) {
+static void ge_finish_callback_run(CpuState *s, uint32_t cbid, uint32_t finish_id, uint32_t user_arg) {
     const size_t cb_max = sizeof(s_ge_cb) / sizeof(s_ge_cb[0]);
     /* sceGeListEnQueue's callback ID is a signed int, and a negative one (the SDK's -1) is a
      * list enqueued with no callback, so there is nothing to run and nothing to report. */
@@ -1996,6 +1996,56 @@ void ge_finish_callback(CpuState *s, uint32_t cbid, uint32_t finish_id, uint32_t
     ge_call_guest(s, cb->finish_func, finish_id, cb->finish_arg ? cb->finish_arg : user_arg, cbid);
     if (ge_log_on())
         fprintf(stderr, "GE_FINISH_CB: callback fn=0x%08x returned\n", cb->finish_func);
+}
+
+/* Finish callbacks run one at a time. A PSP runs them from the GE interrupt handler, which does
+ * not re-enter itself, so a list that completes while a finish callback is still running has its
+ * own callback run after that one returns. Here an enqueued list runs at once, so a callback that
+ * enqueues the next list (a common way to chain frames) would otherwise run that list's callback
+ * inside itself, one guest-call frame deeper per list, until no frame is left and the callback is
+ * refused. Completions raised during a callback wait here and run in completion order once it
+ * returns; that order is the GE driver's queue order, and the exact point at which a PSP runs the
+ * next one is UNMEASURED. */
+enum { GE_FINISH_PENDING_MAX = GE_LIST_MAX };
+static struct {
+    uint32_t cbid, finish_id, user_arg;
+} s_ge_finish_pending[GE_FINISH_PENDING_MAX];
+static unsigned s_ge_finish_pending_head, s_ge_finish_pending_count;
+static int s_ge_finish_running;
+
+void ge_finish_callback(CpuState *s, uint32_t cbid, uint32_t finish_id, uint32_t user_arg) {
+    if (s_ge_finish_running) {
+        if (s_ge_finish_pending_count == GE_FINISH_PENDING_MAX) {
+            (void)hle_unmodelled_stop("GE finish callback",
+                                      "with %d list completions already waiting for the running "
+                                      "finish callback to return has no measured result",
+                                      GE_FINISH_PENDING_MAX);
+            return;
+        }
+        unsigned tail = (s_ge_finish_pending_head + s_ge_finish_pending_count) % GE_FINISH_PENDING_MAX;
+        s_ge_finish_pending[tail].cbid = cbid;
+        s_ge_finish_pending[tail].finish_id = finish_id;
+        s_ge_finish_pending[tail].user_arg = user_arg;
+        s_ge_finish_pending_count++;
+        if (ge_log_on())
+            fprintf(stderr, "GE_FINISH_CB: cbid=%u id=0x%04x waits for the running finish callback\n",
+                    cbid, finish_id);
+        return;
+    }
+    s_ge_finish_running = 1;
+    ge_finish_callback_run(s, cbid, finish_id, user_arg);
+    while (s_ge_finish_pending_count && s->flow_kind != SR_FLOW_FATAL) {
+        unsigned head = s_ge_finish_pending_head;
+        s_ge_finish_pending_head = (head + 1u) % GE_FINISH_PENDING_MAX;
+        s_ge_finish_pending_count--;
+        ge_finish_callback_run(s, s_ge_finish_pending[head].cbid, s_ge_finish_pending[head].finish_id,
+                               s_ge_finish_pending[head].user_arg);
+    }
+    if (s_ge_finish_pending_count)
+        fprintf(stderr, "GE_FINISH_CB: %u waiting finish callbacks not run: a finish callback "
+                        "stopped the run\n", s_ge_finish_pending_count);
+    s_ge_finish_pending_head = s_ge_finish_pending_count = 0u;
+    s_ge_finish_running = 0;
 }
 
 void ge_sync_wake(void) { sched_wake(GE_SYNC_WAIT_OBJ); }
