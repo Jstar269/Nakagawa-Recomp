@@ -4493,13 +4493,13 @@ static void vertex_cache_begin_draw(int repeats) {
     }
 #if SR_GE_VERTEX_CACHE_MUTANT != 4
     /* The software rasterizer writes the colour target during the draw (ge_fb_store); in
-     * RAM it may overlap the vertices. A target in VRAM must also end in VRAM: pixels reach
-     * (271 * stride + 479) (fb_px_visible), and a garbage width could carry the last rows
-     * past the 2 MiB into main RAM. */
+     * RAM it may overlap the vertices, which are cached only in plain RAM. A target in the
+     * VRAM window must also end below main RAM: pixels reach (271 * stride + 479)
+     * (pixel_in_bounds), and a garbage width could carry the last rows to SR_RAM_BASE. */
     uint32_t fb = ge_fb_addr();
     uint64_t stride = ge.fbw ? ge.fbw : 512u;
     uint64_t fb_end = (uint64_t)fb + (271u * stride + 480u) * ((ge.fbfmt & 3) == 3 ? 4u : 2u);
-    if ((fb & 0x0F000000u) != 0x04000000u || fb_end > 0x04200000u) {
+    if ((fb & 0x0F000000u) != 0x04000000u || fb_end > SR_RAM_BASE) {
         s_vertex_cache_draw = 1;
         return;
     }
