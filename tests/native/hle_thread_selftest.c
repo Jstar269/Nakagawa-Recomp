@@ -33698,12 +33698,80 @@ static void test_atrac_context_ids_loadexec_322(void) {
     expect(fid < 8u && fill != 0u && !(fill & 0x80000000u) &&
                ctx322_syscall(NID_MAX_FREE, 0u, 0u, 0u, 0u) < 0x800u,
            "context fixture: the partition is full");
-    expect(td24b_dispatch4(NID_SCE_ATRAC_GET_CONTEXT_ADDRESS, fid, 0u, 0u, 0u) == 0u,
-           "_sceAtracGetContextAddress returns 0 when the partition cannot hold the contexts");
+    {
+        FILE *capture = NULL;
+        int saved_fd = -1;
+        char log[1024];
+        log[0] = '\0';
+        int capturing = hle_data_stderr_capture_begin(&capture, &saved_fd);
+        uint32_t r = td24b_dispatch4(NID_SCE_ATRAC_GET_CONTEXT_ADDRESS, fid, 0u, 0u, 0u);
+        if (capturing) hle_data_stderr_capture_end(capture, saved_fd, log, sizeof(log));
+        expect(r == 0u && capturing && strstr(log, "ATRAC_CONTEXT_NO_MEMORY") != NULL,
+               "_sceAtracGetContextAddress returns 0 and prints ATRAC_CONTEXT_NO_MEMORY when the "
+               "partition cannot hold the contexts");
+    }
     expect(ctx322_syscall(NID_FREE_PART, fill, 0u, 0u, 0u) == 0u &&
                td24b_dispatch4(NID_SCE_ATRAC_GET_CONTEXT_ADDRESS, fid, 0u, 0u, 0u) >= 0x08a00000u,
            "once the partition has room the next call allocates the contexts");
     if (fid < 8u) (void)td24b_dispatch4(NID_SCE_ATRAC_RELEASE_ID, fid, 0u, 0u, 0u);
+    s_fixture_loaded_end = loaded_end;
+    sr_hle_test_partition_reset();
+}
+
+/* #322 round 2: an ATRAC3+ prefix with a fact chunk and no fmt chunk is a track whose frame size
+ * is 0, kept as ALL_DATA_LOADED. A streamed state written into its context must stop the run by
+ * name: the remaining-frame and reset arithmetic divide by the frame size. The dividing calls run
+ * only once the stop has been counted, so the old head fails here instead of crashing. */
+static void test_atrac_context_zero_frame_322(void) {
+    enum { TRACK = 0x08002000u, REMAIN = 0x08004220u, RESET_INFO = 0x08004300u };
+    extern void sr_hle_test_partition_reset(void);
+    const uint32_t loaded_end = s_fixture_loaded_end;
+    reset_fixture();
+    s_fixture_loaded_end = 0x08a00000u;
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+
+    for (uint32_t b = 0; b < 0x40u; b++) MEM_W8(TRACK + b, 0u);
+    MEM_W32(TRACK + 0x00u, 0x46464952u);   /* "RIFF" */
+    MEM_W32(TRACK + 0x04u, 0x1000u);
+    MEM_W32(TRACK + 0x08u, 0x45564157u);   /* "WAVE" */
+    MEM_W32(TRACK + 0x0cu, 0x74636166u);   /* "fact" */
+    MEM_W32(TRACK + 0x10u, 8u);
+    MEM_W32(TRACK + 0x14u, 2048u);         /* samples */
+    MEM_W32(TRACK + 0x18u, 0u);            /* delay */
+    uint32_t id = td24b_dispatch4(NID_SCE_ATRAC_GET_ID, 0x1000u /* ATRAC3+ */, 0u, 0u, 0u);
+    uint32_t set = id < 8u ? td24b_dispatch4(NID_SCE_ATRAC_SET_DATA, id, TRACK, 0x40u, 0u) : 1u;
+    uint32_t ctx = set == 0u ? td24b_dispatch4(NID_SCE_ATRAC_GET_CONTEXT_ADDRESS, id, 0u, 0u, 0u) : 0u;
+    const uint32_t info = ctx + 0x80u;
+    int ready = ctx >= 0x08a00000u && ctx < 0x0a000000u;
+    expect(ready && MEM_R8(info + 0x15u) == 2u && MEM_R16(info + 0x18u) == 0u,
+           "zero-frame fixture: a fact-only ATRAC3+ prefix is ALL_DATA_LOADED with frame size 0");
+    if (ready) {
+        uint32_t stops = sr_hle_test_unmodelled_stops();
+        MEM_W8(info + 0x15u, 4u);   /* STREAMED_WITHOUT_LOOP */
+        (void)td24b_dispatch4(NID_SCE_ATRAC_GET_LOOP_STATUS_322, id, REMAIN, REMAIN + 4u, 0u);
+        int stopped = sr_hle_test_unmodelled_stops() == stops + 1u;
+        expect(stopped, "a streamed state written for a track whose frame size is 0 stops the run "
+                        "by name (#322)");
+        if (stopped) {
+            /* Only reached once the read-back refuses the state: these divide by the frame size. */
+            uint32_t r1 = td24b_dispatch4(NID_SCE_ATRAC_GET_REMAIN_FRAME, id, REMAIN, 0u, 0u);
+            MEM_W8(info + 0x15u, 3u);   /* HALFWAY_BUFFER */
+            uint32_t r2 = td24b_dispatch4(NID_SCE_ATRAC_GET_REMAIN_FRAME, id, REMAIN, 0u, 0u);
+            MEM_W8(info + 0x15u, 5u);
+            uint32_t r3 = td24b_dispatch4(NID_SCE_ATRAC_GET_BUFFER_INFO_FOR_RESETTING, id, 0u,
+                                          RESET_INFO, 0u);
+            expect(sr_hle_test_unmodelled_stops() == stops + 4u && r1 != 0u && r2 != 0u && r3 != 0u,
+                   "GetRemainFrame and GetBufferInfoForResetting stop by name instead of dividing "
+                   "by a frame size of 0");
+        }
+        MEM_W8(info + 0x15u, 2u);
+        stops = sr_hle_test_unmodelled_stops();
+        expect(td24b_dispatch4(NID_SCE_ATRAC_GET_REMAIN_FRAME, id, REMAIN, 0u, 0u) == 0u &&
+                   MEM_R32(REMAIN) == 0xffffffffu && sr_hle_test_unmodelled_stops() == stops,
+               "the state the zero-frame track already holds is still taken");
+    }
+    if (id < 8u) (void)td24b_dispatch4(NID_SCE_ATRAC_RELEASE_ID, id, 0u, 0u, 0u);
     s_fixture_loaded_end = loaded_end;
     sr_hle_test_partition_reset();
 }
@@ -52888,6 +52956,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_atrac_aa3_and_reinit_1379();
     test_atrac_guest_context_322();
     test_atrac_context_ids_loadexec_322();
+    test_atrac_context_zero_frame_322();
     test_td24d_hle_batch();
     test_impose_language_mode_pair();
     test_sas_core_mix_preserves_caller_pcm();

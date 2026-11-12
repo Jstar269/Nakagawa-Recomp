@@ -707,8 +707,8 @@ static uint32_t atrac_set_new(uint32_t buf, uint32_t readSize, uint32_t bufSize,
  * it, and read back where a game may write it.
  *
  * Derived-translated from PPSSPP (GPL-2.0-or-later, revision
- * 3bc60270eae3069f13dfbfdb7292a7e1375de6f6; src/rt/PROVENANCE.md): the SceAtracContext layout of
- * Core/HLE/AtracBase.h, the field-by-field write and the read-back of Core/HLE/AtracCtx.cpp
+ * 3bc60270eae3069f13dfbfdb7292a7e1375de6f6; src/rt/PROVENANCE.md): the SceAtracContext and
+ * SceAtracIdInfo layout and the AtracStatus values of Core/HLE/AtracBase.h, the field-by-field write and the read-back of Core/HLE/AtracCtx.cpp
  * (Atrac::WriteContextToPSPMem, Atrac::UpdateContextFromPSPMem, Atrac::NotifyGetContextAddress),
  * and the read-back before every call of Core/HLE/sceAtrac.cpp (getAtrac). Layout:
  * 0x100 bytes per ID, the codec block in the first 0x80 (left zero: no Media Engine here) and the
@@ -730,11 +730,14 @@ static uint32_t atrac_set_new(uint32_t buf, uint32_t readSize, uint32_t bufSize,
  * Read back: state and loopNum, before every call on the ID, as PPSSPP's UpdateContextFromPSPMem
  * does; a game may keep its own loop count there, and may change the state. The runtime's state
  * is the same numbering except that an ID with no track holds 0 where the context says NO_DATA
- * (1). One difference from PPSSPP: the runtime models only NO_DATA and states 2 to 6, and only
- * for an ID that holds a track, so a state it cannot honour (LOW_LEVEL 8, FOR_SCESAS 16 for a
- * SAS voice, any other value, or a data state on an ID with no track, whose frame size is 0)
- * stops the run by name instead of decoding under the wrong model. A guest write to any other
- * field is overwritten by the next call that changes the context. */
+ * (1). One difference from PPSSPP: the runtime models only NO_DATA and states 2 to 6, and a
+ * change of state only for a track whose frame size it knows. A state it cannot honour stops
+ * the run by name instead of decoding under the wrong model: LOW_LEVEL 8, FOR_SCESAS 16 for a
+ * SAS voice, any other value, a data state on an ID with no track, or a new data state on a
+ * track whose frame size is 0 (an ATRAC3+ prefix with a fact chunk and no fmt chunk, which the
+ * runtime keeps as ALL_DATA_LOADED; the ring and remaining-frame arithmetic divide by the frame
+ * size). A guest write to any other field is overwritten by the next call that changes the
+ * context. */
 #define ATRAC_CTX_SIZE 0x100u
 #define ATRAC_CTX_INFO 0x80u              /* SceAtracIdInfo inside SceAtracContext */
 #define ATRAC_CTX_STATE 0x15u             /* u8 */
@@ -779,13 +782,16 @@ static int atrac_ctx_pull(Atrac *a, uint32_t id) {
     a->loopNum = (int)MEM_R32(info + ATRAC_CTX_LOOP_NUM);
     if (state == ATRAC_CTX_STATUS_NO_DATA) {
         a->bufferState = 0;
+    } else if (a->bufferState != 0 && state == (uint32_t)a->bufferState) {
+        /* unchanged */
     } else if (state >= ATRAC_STATE_ALL_DATA_LOADED && state <= ATRAC_STATE_STREAMED_LOOP_TRAILER &&
-               a->bufferState != 0) {
+               a->bufferState != 0 && a->bytesPerFrame != 0u) {
         a->bufferState = (int)state;
     } else {
-        (void)hle_unmodelled_stop("sceAtrac", "ID %u: its context's state is 0x%x, which the "
-                                  "runtime does not model%s (#322)", id, state,
-                                  a->bufferState ? "" : " for an ID with no track");
+        (void)hle_unmodelled_stop(hle_import_name(sr_last_nid), "ID %u: its context's state is "
+                                  "0x%x, which the runtime does not model%s (#322)", id, state,
+                                  !a->bufferState ? " for an ID with no track"
+                                  : !a->bytesPerFrame ? " for a track whose frame size is 0" : "");
         return 0;
     }
     return 1;
@@ -960,11 +966,11 @@ static uint32_t h_AtracReleaseAtracID(CpuState *s) {
  * exposes the ring's internal read cursor, and the defect is precisely that
  * the cursor leaves the frame grid after a wrap -- so the regression needs to
  * see the cursor to assert the invariant. Test builds only; reads state, never
- * changes it. */
+ * changes it (no context read-back, unlike atrac_of). */
 int sr_hle_test_atrac_ring(uint32_t id, uint32_t *pos, uint32_t *base,
                            uint32_t *end, uint32_t *frame, uint32_t *valid) {
-    Atrac *a = atrac_of(id);
-    if (!a) return 0;
+    if (id >= 8u || !s_atrac[id].used) return 0;
+    const Atrac *a = &s_atrac[id];
     if (pos) *pos = a->bufferPos;
     if (base) *base = atrac_stream_buffer_base(a);
     if (end) *end = atrac_stream_buffer_end(a);
@@ -973,10 +979,10 @@ int sr_hle_test_atrac_ring(uint32_t id, uint32_t *pos, uint32_t *base,
     return 1;
 }
 /* Retained second-buffer probe for the TD-24 batch 4 regression. Test builds
- * only; reads state, never changes it. */
+ * only; reads state, never changes it (no context read-back, unlike atrac_of). */
 int sr_hle_test_atrac_second_buffer(uint32_t id, uint32_t *addr, uint32_t *size) {
-    Atrac *a = atrac_of(id);
-    if (!a) return 0;
+    if (id >= 8u || !s_atrac[id].used) return 0;
+    const Atrac *a = &s_atrac[id];
     if (addr) *addr = a->secondBuf;
     if (size) *size = a->secondBufSize;
     return 1;
