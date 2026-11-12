@@ -316,6 +316,175 @@ class TestCliBinding(unittest.TestCase):
             self.assertIn(hashlib.sha256(PY_LOCK.read_bytes()).hexdigest(), output.getvalue())
 
 
+def _fake_imports(path):
+    """The import table the fixture binaries stand for: the player imports SDL3.dll."""
+    return ["SDL3.dll", "KERNEL32.dll"] if path.suffix.lower() == ".exe" else ["KERNEL32.dll"]
+
+
+class TestRuntimeManifestBinding(unittest.TestCase):
+    """The SBOMs carry the SHA-256 bin/runtime-manifest.json records (#324)."""
+
+    def setUp(self):
+        import package_notices
+        import stage_runtime_dlls
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+        self.bin = self.root / "stage" / "bin"
+        (self.bin / "THIRD_PARTY_NOTICES").mkdir(parents=True)
+        (self.bin / "nakagawa_player.exe").write_bytes(b"MZ player bytes")
+        (self.bin / "SDL3.dll").write_bytes(b"MZ sdl3 bytes")
+        (self.bin / "THIRD_PARTY_NOTICES" / "index.json").write_text(json.dumps({
+            "schema_version": 1,
+            "components": [{"name": "SDL3", "binary": "SDL3.dll", "version": "3.4.20",
+                            "spdx_id": "Zlib", "source_path": "share/licenses/SDL3/LICENSE.txt"}],
+        }), encoding="utf-8")
+        stage_runtime_dlls.write_runtime_manifest(self.bin, imports_of=_fake_imports)
+        self.sha = {name: hashlib.sha256((self.bin / name).read_bytes()).hexdigest()
+                    for name in ("nakagawa_player.exe", "SDL3.dll")}
+        patcher = mock.patch.object(package_notices, "get_binary_imports", _fake_imports)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.out = {"spdx": self.root / "sbom.spdx.json", "spdx3": self.root / "sbom.spdx3.jsonld",
+                    "cyclonedx": self.root / "sbom.cyclonedx.json"}
+
+    def generate(self, *extra):
+        stderr = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(stderr):
+            code = generate_sbom.main([
+                "--manifest", str(RELEASE_MANIFEST), "--py-lock", str(PY_LOCK),
+                "--spdx-out", str(self.out["spdx"]), "--spdx3-out", str(self.out["spdx3"]),
+                "--cyclonedx-out", str(self.out["cyclonedx"]), *extra,
+            ])
+        return code, stderr.getvalue()
+
+    def load(self, kind):
+        return json.loads(self.out[kind].read_text(encoding="utf-8"))
+
+    def save(self, kind, document):
+        self.out[kind].write_text(json.dumps(document), encoding="utf-8")
+
+    def verify(self):
+        stderr = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(stderr):
+            code = verify_sbom.main([
+                "--manifest", str(RELEASE_MANIFEST), "--py-lock", str(PY_LOCK),
+                "--spdx", str(self.out["spdx"]), "--spdx3", str(self.out["spdx3"]),
+                "--cyclonedx", str(self.out["cyclonedx"]), "--package-dir", str(self.bin),
+            ])
+        return code, stderr.getvalue()
+
+    def test_all_three_formats_carry_the_manifest_hashes(self):
+        code, stderr = self.generate("--package-dir", str(self.bin))
+        self.assertEqual(code, 0, stderr)
+        spdx = self.load("spdx")
+        dll = next(p for p in spdx["packages"] if p["name"] == "SDL3.dll")
+        self.assertEqual(dll["checksums"], [{"algorithm": "SHA256", "checksumValue": self.sha["SDL3.dll"]}])
+        self.assertEqual(dll["packageFileName"], "bin/SDL3.dll")
+        player = next(f for f in spdx["files"] if f["fileName"] == "bin/nakagawa_player.exe")
+        self.assertEqual(player["checksums"],
+                         [{"algorithm": "SHA256", "checksumValue": self.sha["nakagawa_player.exe"]}])
+        self.assertIn(("SPDXRef-Package-nakagawa-recomp", "CONTAINS", player["SPDXID"]),
+                      {(r["spdxElementId"], r["relationshipType"], r["relatedSpdxElement"])
+                       for r in spdx["relationships"]})
+        graph = self.load("spdx3")["@graph"]
+        dll3 = next(n for n in graph if n.get("spdx:name") == "SDL3.dll")
+        self.assertEqual(dll3["spdx:verifiedUsing"][0]["spdx:hashValue"], self.sha["SDL3.dll"])
+        player3 = next(n for n in graph if n.get("spdx:name") == "bin/nakagawa_player.exe")
+        self.assertEqual(player3["@type"], "spdx:File")
+        self.assertEqual(player3["spdx:verifiedUsing"][0]["spdx:hashValue"], self.sha["nakagawa_player.exe"])
+        components = self.load("cyclonedx")["components"]
+        dllc = next(c for c in components if c["name"] == "SDL3.dll")
+        self.assertEqual(dllc["hashes"], [{"alg": "SHA-256", "content": self.sha["SDL3.dll"]}])
+        playerc = next(c for c in components if c["name"] == "bin/nakagawa_player.exe")
+        self.assertEqual((playerc["type"], playerc["hashes"][0]["content"]),
+                         ("file", self.sha["nakagawa_player.exe"]))
+        self.assertNotIn(str(self.root), json.dumps([spdx, graph, components]))
+        code, stderr = self.verify()
+        self.assertEqual(code, 0, stderr)
+
+    def test_bound_document_validates_against_official_spdx23_schema(self):
+        schema_path = os.environ.get("SPDX23_SCHEMA_PATH")
+        try:
+            import jsonschema
+        except ImportError:
+            self.skipTest("official SPDX 2.3 schema or jsonschema not available")
+        if not (schema_path and Path(schema_path).is_file()):
+            self.skipTest("official SPDX 2.3 schema or jsonschema not available")
+        self.assertEqual(self.generate("--package-dir", str(self.bin))[0], 0)
+        jsonschema.validate(self.load("spdx"), json.loads(Path(schema_path).read_text(encoding="utf-8")))
+
+    def test_generation_fails_closed_when_a_binary_no_longer_matches_the_manifest(self):
+        (self.bin / "SDL3.dll").write_bytes(b"MZ other sdl3 bytes")
+        code, stderr = self.generate("--package-dir", str(self.bin))
+        self.assertEqual(code, 1)
+        self.assertIn("RUNTIME_FILE_CHANGED", stderr)
+        self.assertFalse(any(path.exists() for path in self.out.values()))
+
+    def test_generation_fails_closed_without_a_runtime_manifest(self):
+        (self.bin / "runtime-manifest.json").unlink()
+        code, stderr = self.generate("--package-dir", str(self.bin))
+        self.assertEqual(code, 1)
+        self.assertIn("RUNTIME_MANIFEST_MISSING", stderr)
+
+    def test_inventories_must_agree(self):
+        shipped = generate_sbom.resolve_shipped_dlls(package_dir=self.bin)
+        self.assertEqual([dll["name"] for dll in shipped], ["SDL3.dll"])
+        with self.assertRaisesRegex(generate_sbom.RuntimeBindingError, "SBOM_DLL_UNRECORDED: SDL3.dll"):
+            generate_sbom.bind_runtime_manifest(self.bin, [])
+        extra = dict(shipped[0], name="SDL3_ttf.dll", spdx_id="SPDXRef-dll-SDL3_ttf.dll")
+        with self.assertRaisesRegex(generate_sbom.RuntimeBindingError, "SBOM_DLL_NOT_SHIPPED: .*SDL3_ttf.dll"):
+            generate_sbom.bind_runtime_manifest(self.bin, shipped + [extra])
+
+    def test_verification_rejects_an_sbom_without_the_hashes(self):
+        self.assertEqual(self.generate()[0], 0)
+        code, stderr = self.verify()
+        self.assertEqual(code, 1)
+        self.assertIn("SBOM_BINARY_HASH: SPDX 2.3 SBOM records SHA-256 [] for SDL3.dll", stderr)
+        self.assertIn("SBOM_BINARY_COUNT: CycloneDX SBOM has 0 element(s) for bin/nakagawa_player.exe", stderr)
+
+    def test_verification_rejects_a_changed_hash_in_each_format(self):
+        self.assertEqual(self.generate("--package-dir", str(self.bin))[0], 0)
+        wrong = "0" * 64
+        tamper = {
+            "spdx": lambda d: next(p for p in d["packages"] if p["name"] == "SDL3.dll")
+            ["checksums"][0].update(checksumValue=wrong),
+            "spdx3": lambda d: next(n for n in d["@graph"] if n.get("spdx:name") == "bin/nakagawa_player.exe")
+            ["spdx:verifiedUsing"][0].update({"spdx:hashValue": wrong}),
+            "cyclonedx": lambda d: next(c for c in d["components"] if c["name"] == "SDL3.dll")
+            ["hashes"][0].update(content=wrong),
+        }
+        label = {"spdx": "SPDX 2.3", "spdx3": "SPDX 3", "cyclonedx": "CycloneDX"}
+        for kind, change in tamper.items():
+            with self.subTest(kind=kind):
+                original = self.load(kind)
+                document = json.loads(json.dumps(original))
+                change(document)
+                self.save(kind, document)
+                code, stderr = self.verify()
+                self.save(kind, original)
+                self.assertEqual(code, 1)
+                self.assertIn(f"SBOM_BINARY_HASH: {label[kind]} SBOM records SHA-256 ['{wrong}']", stderr)
+        self.assertEqual(self.verify()[0], 0)
+
+    def test_verification_rejects_a_binary_the_package_does_not_ship(self):
+        self.assertEqual(self.generate("--package-dir", str(self.bin))[0], 0)
+        document = self.load("cyclonedx")
+        document["components"].append({"type": "library", "name": "extra.dll", "version": "1",
+                                       "hashes": [{"alg": "SHA-256", "content": "1" * 64}]})
+        self.save("cyclonedx", document)
+        code, stderr = self.verify()
+        self.assertEqual(code, 1)
+        self.assertIn("SBOM_BINARY_NOT_SHIPPED: CycloneDX SBOM names extra.dll", stderr)
+
+    def test_verification_checks_the_package_against_its_manifest_first(self):
+        self.assertEqual(self.generate("--package-dir", str(self.bin))[0], 0)
+        (self.bin / "stray.dll").write_bytes(b"MZ stray")
+        code, stderr = self.verify()
+        self.assertEqual(code, 1)
+        self.assertIn("RUNTIME_FILE_UNLISTED: stray.dll", stderr)
+
+
 class TestDeclaredLockEnforcement(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
