@@ -249,6 +249,9 @@ typedef enum {
                                   only; a title without a load part ignores it */
     PLAYER_PART_TWIN,          /* full 32-bit colour, the host twin (#2050, section 10.11): 0 off, 1 on.
                                   Appended; the Ace line writes twin after tess */
+    PLAYER_PART_SSAA,          /* supersampling (#2073, section 10.21): 0 off, or the factor 2 or 4 per
+                                  axis on top of the render scale. Host presentation only; off in a
+                                  fresh file and in every preset */
     PLAYER_PART_COUNT
 } PlayerEnhancedPart;
 
