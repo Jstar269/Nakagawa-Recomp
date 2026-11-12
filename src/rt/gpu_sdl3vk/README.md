@@ -362,7 +362,8 @@ PSP's VRAM holds depth).
 ### The reads that decode at 1x (#2279)
 
 Each read below decodes guest VRAM at 1x at every render scale: the GE's own decode of the target's
-memory, exact, but with 1x detail. The reads fall into two groups.
+memory, exact, but with 1x detail (a depth read outside every colour target may then be upscaled by
+texture scaling, below). The reads fall into two groups.
 
 **No scaled form exists.** The texture's texel grid is not the target's pixel grid, so a texel has
 no device samples of its own, and the 1x decode is the read:
@@ -371,18 +372,24 @@ no device samples of its own, and the 1x decode is the read:
   read as 8888 or CLUT32 (a texel spans two pixels);
 - CLUT4 and CLUT8 (a texel is a nibble or a byte of a pixel);
 - DXT (a 4 x 4 block of texels is 8 or 16 bytes of pixels);
-- an address that is not on a pixel boundary of the target (each texel straddles two pixels).
+- an address that is not on a pixel boundary of the target (each texel straddles two pixels);
+- a depth buffer read as 8888, CLUT32, CLUT4, CLUT8 or DXT (a texel is not one depth value).
+
+These stay in this group when the read is also swizzled, mipmapped or at another buffer width.
 
 **A scaled form could exist, but the renderer has none.** Here each texel is one pixel, or one
-depth value, of a buffer the GPU holds at render scale, so a scaled read is possible. These read at
-1x only because no such path is implemented; #2279 stays open for them. What each path would need:
+depth value, of a buffer the GPU holds at render scale: the read is in a format whose texel is one
+of the buffer's values (the target's own format, another format of the same size, CLUT16 of a
+16-bit target or CLUT32 of an 8888 target; for depth, a 16-bit format or CLUT16), so a scaled read
+is possible. These read at 1x only because no such path is implemented; #2279 stays open for them.
+What each path would need:
 
 - a 16-bit target read as another 16-bit format (5650, 5551, 4444): repack each filter tap from
   the target's format into the texture's, in the shader, before filtering;
 - CLUT16 of a 16-bit target, CLUT32 of an 8888 target: take each tap's value in the target's
   format and look it up in the palette, a lookup that runs only in the texture decoder today;
-- a swizzled read, or a read with another buffer width: find the target pixel that holds each
-  tap's texel (a swizzled texture takes the buffer's 16-byte by 8-row blocks in another order;
+- a swizzled read, or a read with another non-zero buffer width: find the target pixel that holds
+  each tap's texel (a swizzled texture takes the buffer's 16-byte by 8-row blocks in another order;
   another width puts texture rows across the target's rows), and filter only between texels,
   whose neighbours are not the target's neighbouring pixels;
 - a mipmapped read (a mipmap filter and a highest level above 0): the texture cache builds the
@@ -400,14 +407,15 @@ at 1x through each of the three views. Like any texture outside every colour tar
 may then be upscaled by texture scaling when it is on; a read inside a colour target never is.
 
 `rtt-1x-reads` in `gpu-coherence-selftest` runs thirteen of these reads at 1x, 2x and 4x: an 8888
-target read as 4444, CLUT8, CLUT4, DXT1, CLUT32, swizzled, mipmapped and at half its buffer width;
-a 5650 target read as 5551 and as 8888; and Z, the targets' depth buffer, outside every colour
-target, through the three views. None binds a target's image, each depth read commits depth the GPU
-wrote since the last commit, and the reading target's guest VRAM equals the software renderer's
-exactly. A control read in the target's own format binds its image directly. A read that gains a
-scaled path leaves this cell for one like `rtt-scale`. The reads the cell does not run, among them
-an unaligned read, CLUT16, DXT3 and DXT5, the other pairs of formats, and swizzled, mipmapped or
-other-width reads of a 16-bit target, take the same 1x path by the bind rule above.
+target read as 4444, CLUT8, CLUT4, DXT1, CLUT32, and in its own format swizzled, mipmapped and at
+half its buffer width; a 5650 target read as 5551 and as 8888; and Z, the targets' depth buffer,
+outside every colour target, as 4444 through the three views. None binds a target's image, each
+depth read commits depth the GPU wrote since the last commit, and the reading target's guest VRAM
+equals the software renderer's exactly. A control read in the target's own format binds its image
+directly. A read that gains a scaled path leaves this cell for one like `rtt-scale`. The reads the
+cell does not run, among them an unaligned read, CLUT16, DXT3 and DXT5, the other pairs of formats,
+and swizzled, mipmapped or other-width reads of a 16-bit target, take the same 1x path by the bind
+rule above.
 
 ## Environment variables
 
