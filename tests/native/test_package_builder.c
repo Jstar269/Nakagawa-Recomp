@@ -1570,9 +1570,10 @@ restore:
 
 /* The build child for test_build_speed_reaches_the_child: this binary, started by
  * package_builder_start in place of Python with argv[1] "--build-speed-probe" in place of
- * nk_cli.py. It writes the --build-speed it was given to <progress file>.speed, then
- * stays until <progress file>.release appears (at most 30 s), so the parent can read
- * the priority it runs at. */
+ * nk_cli.py. It writes the --build-speed it was given to <progress file>.speed and
+ * stays, that file still open, until <progress file>.release appears, so the parent can
+ * read the priority it runs at. The file is complete only once the child exits, so the
+ * parent reads it after that, never while the child runs. */
 static int run_build_speed_probe(int argc, char *argv[]) {
     const char *speed = NULL;
     const char *progress = NULL;
@@ -1582,17 +1583,19 @@ static int run_build_speed_probe(int argc, char *argv[]) {
     }
     if (!speed || !progress) return 2;
     char path[NK_MAX_PATH];
-    char written[NK_MAX_PATH];
-    /* Written whole, then renamed: the parent waits for the name, never a part. */
-    snprintf(written, sizeof(written), "%s.speed.tmp", progress);
     snprintf(path, sizeof(path), "%s.speed", progress);
-    FILE *f = fopen(written, "wb");
+    FILE *f = fopen(path, "wb");
     if (!f) return 3;
-    fputs(speed, f);
-    if (fclose(f) != 0 || nk_rename_utf8(written, path) != 0) return 4;
+    if (fputs(speed, f) == EOF) {
+        fclose(f);
+        return 4;
+    }
     snprintf(path, sizeof(path), "%s.release", progress);
     for (int i = 0; i < 1500 && !nk_platform_file_exists(path); ++i) route_pause_ms(20);
-    return 0;
+    /* Not released within 30 s: exit 5, which the parent's exit-code check reports. */
+    bool released = nk_platform_file_exists(path);
+    if (fclose(f) != 0) return 4;
+    return released ? 0 : 5;
 }
 
 /* Settings > Build speed reaches the build child: nk_cli.py gets --build-speed with the
@@ -1649,15 +1652,6 @@ static void test_build_speed_reaches_the_child(void) {
             assert(strcmp(package_builder_speed_line(&session), expected) == 0);
         }
         assert(nk_platform_process_priority(&session.process, &priority));
-        snprintf(path, sizeof(path), "%s.speed", session.progress_file_path);
-        for (int i = 0; i < 1500 && !nk_platform_file_exists(path); ++i) route_pause_ms(20);
-        {
-            FILE *f = fopen(path, "rb");
-            assert(f != NULL);
-            size_t n = fread(given, 1, sizeof(given) - 1u, f);
-            given[n] = '\0';
-            fclose(f);
-        }
         snprintf(path, sizeof(path), "%s.release", session.progress_file_path);
         {
             FILE *f = fopen(path, "wb");
@@ -1671,6 +1665,15 @@ static void test_build_speed_reaches_the_child(void) {
         }
         assert(!session.is_building);
         assert(session.exit_code == 0);
+        /* The child has exited, so its file is complete. */
+        snprintf(path, sizeof(path), "%s.speed", session.progress_file_path);
+        {
+            FILE *f = fopen(path, "rb");
+            assert(f != NULL);
+            size_t n = fread(given, 1, sizeof(given) - 1u, f);
+            given[n] = '\0';
+            fclose(f);
+        }
         assert(strcmp(given, package_build_speed_key(speeds[s])) == 0);
         if (speeds[s] == PACKAGE_BUILD_SPEED_BALANCED) {
             balanced_priority = priority;
