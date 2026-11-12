@@ -78,6 +78,10 @@ void ace_hud_note(int slot, float xa, float ya, float xb, float yb, int samples_
  * with), because otherwise it holds an older frame's depth, not this picture's. */
 void ace_hud_present(int slot, VkImage src, VkImage depth, VkImageLayout depth_layout, int depth_w,
                      int depth_h, uint32_t depth_gen);
+/* ge_gpu.c at init: 1 when the depth images it hands on are D32_SFLOAT (Ace depth=32, #2051), 0 for
+ * D16_UNORM. ace_smooth.c sizes its depth copies by it. */
+void ace_hud_set_depth_float(int on);
+int ace_hud_depth_float(void);
 /* gui.c's show pass, for the image `src` it is showing: what was published for that image, or
  * NULL (a CPU frame, the feature off, or nothing published for it). It always clears what was
  * published, so an aux never reaches another image. Valid until the next ace_hud_present. */

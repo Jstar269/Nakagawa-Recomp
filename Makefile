@@ -357,12 +357,35 @@ LIBS       ?= -lSDL3 $(VULKAN_LIB_NAME) $(WIN_ONLY_LIBS) $(POSIX_RUNTIME_LIBS)
 ifeq ($(NK_TARGET_OS),android)
 override CFLAGS += -fPIC
 TITLE_OUTPUT = $(BUILD_DIR)/lib$(GAME_NAME).so
-TITLE_LINK_FLAGS := -shared -Wl,--wrap=exit -Wl,--wrap=_exit -Wl,--wrap=_Exit
+TITLE_LINK_FLAGS := -shared -Wl,--wrap=exit -Wl,--wrap=_exit -Wl,--wrap=_Exit -Wl,--wrap=atexit
 TITLE_ANDROID_OBJ = $(BUILD_DIR)/nk_android_title.o
 else
 TITLE_OUTPUT = $(BUILD_DIR)/$(GAME_NAME)$(EXE_EXT)
 TITLE_LINK_FLAGS :=
 TITLE_ANDROID_OBJ :=
+endif
+
+# HOST_KIND names the build host's operating system for the few link options whose spelling
+# depends on the linker rather than the compiler: Windows_NT on Windows, otherwise what
+# `uname -s` prints (Linux, Darwin). A value from the command line or the environment wins,
+# so `make -n OS= HOST_KIND=Darwin <target>` shows a Mac's link lines (on Windows, OS= is
+# needed too, or the target stays Windows).
+ifndef HOST_KIND
+ifeq ($(OS),Windows_NT)
+HOST_KIND := Windows_NT
+else
+HOST_KIND := $(shell uname -s 2>/dev/null)
+endif
+endif
+# Unused-section removal for the selftest links. GNU ld, lld and the MinGW linker spell it
+# --gc-sections; Apple's ld64 rejects that option and spells it -dead_strip (#329). ld64 links
+# only a build for the Mac itself: a Mac building for Android links with the NDK's lld, so the
+# choice reads the target (NK_TARGET_OS, #360) as well as the host. Every link line uses this
+# variable, never the raw option.
+ifeq ($(NK_TARGET_OS)-$(HOST_KIND),posix-Darwin)
+LD_GC_SECTIONS := -Wl,-dead_strip
+else
+LD_GC_SECTIONS := -Wl,--gc-sections
 endif
 
 # Portable H.264 backend (src/rt/h264_ffmpeg.c): the pinned FFmpeg n4.4 H.264 decoder subset

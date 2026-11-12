@@ -178,7 +178,9 @@ def _build_vram_decoder(temp_dir: Path) -> Path:
     command = [
         compiler, "-std=c99", "-O2", "-flto", "-ffunction-sections", "-fdata-sections",
         "-DSR_GE_VRAM_DECODER_CLI", "-Isrc/rt", "-Isrc/core", "-Isrc/core/generated",
-        "-Isrc/player", *map(str, sources), "-Wl,--gc-sections", "-lm", "-o", str(executable),
+        "-Isrc/player", *map(str, sources),
+        "-Wl,-dead_strip" if sys.platform == "darwin" else "-Wl,--gc-sections",
+        "-lm", "-o", str(executable),
     ]
     built = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, check=False)
     if built.returncode:

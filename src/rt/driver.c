@@ -46,6 +46,18 @@ extern void sr_audio_pause_enter(void);
 extern void sr_audio_pause_leave(void);
 extern int sr_audio_pause_script_ready(void);
 extern int sr_audio_init(void);
+/* Ace Mode's peak=limit (#2137): the host audio backend's true-peak limiter (audio_sdl3.c). */
+extern int sr_audio_set_true_peak_limiter(int on);
+extern void sr_audio_true_peak_stats(uint64_t *pushes_wide, uint64_t *frames_wide, uint64_t *frames_limited,
+                                     double *min_gain);
+
+/* peak=limit's totals into the Ace report: registered after ace_finish, so it runs first. */
+static void driver_peak_stats_to_ace(void) {
+    uint64_t pushes = 0, frames = 0, limited = 0;
+    double min_gain = 1.0;
+    sr_audio_true_peak_stats(&pushes, &frames, &limited, &min_gain);
+    ace_set_peak_stats(pushes, frames, limited, min_gain);
+}
 
 /* The window's overlay callbacks join once gui_init has a presenter that can draw it. */
 static SrPauseHost s_driver_pause_host = {
@@ -547,6 +559,13 @@ int main(int argc, char **argv) {
         if (ace_effective()->tess > 1 && ge_patch_tess_init(ace_effective()->tess) > 1)
             ace_confirm(ACE_FEATURE_TESS);
         (void)atexit(ace_finish);
+        /* peak=limit (#2137): the SAS mixer keeps the sums it saturates and the host audio
+         * backend limits them; it runs once both have the switch, before the first grain. A link
+         * without either (the headless gate) refuses it, and ace_finish reports it as never run. */
+        if (ace_effective()->peak && sr_hle_sas_set_wide_mix(1) && sr_audio_set_true_peak_limiter(1)) {
+            ace_confirm(ACE_FEATURE_PEAK);
+            (void)atexit(driver_peak_stats_to_ace);
+        }
     }
 
     for (int i = 1; i < argc; i++) {

@@ -39,6 +39,7 @@ import sys
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import cast
 
 import evidence_model
 import hle_sources
@@ -211,7 +212,7 @@ def _run_metadata(latest: str | None) -> dict:
     meta["identity"] = identity
     meta["identity_bound"] = identity is not None
     meta["evidence_grade"] = _run_evidence_grade(
-        latest, identity is not None, meta["stale_vs_build"]
+        latest, identity is not None, cast("bool | None", meta["stale_vs_build"])
     )
     return meta
 

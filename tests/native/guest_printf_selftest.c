@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 the Nakagawa Recomp authors
 
-/* Behavioral regressions for the PSP-EABI guest sprintf bridge.
+/* Behavioral regressions for the PSP-EABI guest printf-family formatter
+ * (src/rt/guest_printf.c), which formats into a bounded host buffer.
  *
- * The bridge never assembles guest bytes into a host printf format, so these
+ * It never assembles guest bytes into a host printf format, so these
  * cases pin the PSP-visible contract directly: argument consumption, PSP
  * integer widths and sign extension, floating arguments, guest %s/%p/%n, and
  * the deterministic out-of-grammar fallback.
@@ -54,6 +55,8 @@ static CpuState cpu;
 static int failures;
 static int checks;
 static uint32_t last_ret;
+/* The formatted text of the last run_words(); wider than any field the bounds allow. */
+static char g_line[8192];
 
 static uint32_t DST, FMT, TEXT, STACK, COUNTER;
 
@@ -61,26 +64,25 @@ static void put_string(uint32_t addr, const char *text) {
     memcpy(SR_HOST(addr), text, strlen(text) + 1u);
 }
 
+/* Format with the variadic words starting in $6, as an entry whose $4/$5 hold a buffer
+ * and the format passes them; words past $11 continue on the stack. */
 static void run_words(const char *fmtstr, const uint32_t *w, int n) {
-    memset(SR_HOST(DST), 0, 0x200u);
+    memset(g_line, 0, sizeof g_line);
     memset(SR_HOST(STACK), 0, 0x80u);
     put_string(FMT, fmtstr);
     memset(cpu.r, 0, sizeof cpu.r);
-    cpu.r[4] = DST;
     cpu.r[5] = FMT;
     cpu.r[29] = STACK;
-    cpu.r[31] = 0x12345678u;
     for (int i = 0; i < n && i < 6; i++) cpu.r[6 + i] = w[i];
     for (int i = 6; i < n; i++) MEM_W32(STACK + 4u * (uint32_t)(i - 6), w[i]);
-    sr_guest_sprintf(&cpu);
-    last_ret = cpu.r[2];
+    last_ret = (uint32_t)sr_guest_format_host(&cpu, FMT, 6u, g_line, (int)sizeof g_line);
 }
 
 static void expect_words(const char *label, const char *fmtstr,
                          const uint32_t *w, int n, const char *want) {
     checks++;
     run_words(fmtstr, w, n);
-    const char *got = (const char *)SR_HOST(DST);
+    const char *got = g_line;
     if (strcmp(got, want) != 0) {
         failures++;
         fprintf(stderr, "FAIL %-30s fmt=\"%s\" want=\"%s\" got=\"%s\"\n",
@@ -91,11 +93,6 @@ static void expect_words(const char *label, const char *fmtstr,
         failures++;
         fprintf(stderr, "FAIL %-30s fmt=\"%s\" return=%u expected=%zu\n",
                 label, fmtstr, last_ret, strlen(want));
-    }
-    if (cpu.pc != cpu.r[31]) {
-        failures++;
-        fprintf(stderr, "FAIL %-30s fmt=\"%s\" pc=0x%08x not restored\n",
-                label, fmtstr, cpu.pc);
     }
 }
 
@@ -323,50 +320,21 @@ int main(void) {
         }
     }
 
-    /* ---- destination running off the end of the arena ---------------------- */
-    /* sprintf has no destination bound, so the guest can aim it at the last
-     * byte.  Every store goes through the checked accessor; the run must stay
-     * inside the host allocation and still report the full PSP length. */
-    {
-        memset(SR_HOST(STACK), 0, 0x80u);
-        put_string(FMT, "%s");
-        memset(cpu.r, 0, sizeof cpu.r);
-        cpu.r[4] = GUEST_LAST - 1u;   /* two writable bytes remain */
-        cpu.r[5] = FMT;
-        cpu.r[29] = STACK;
-        cpu.r[31] = 0x12345678u;
-        cpu.r[6] = TEXT;              /* "host0" is five bytes plus NUL */
-        g_oor_events = 0;
-        sr_guest_sprintf(&cpu);
-        if (cpu.r[2] != 5u) {
-            failures++;
-            fprintf(stderr, "FAIL %-30s return=%u expected 5\n",
-                    "dst at arena end", cpu.r[2]);
-        }
-        if (g_oor_events == 0) {
-            failures++;
-            fprintf(stderr, "FAIL %-30s expected bounds rejections\n",
-                    "dst at arena end");
-        }
-    }
-
     /* ---- format string whose terminator is the last arena byte ------------- */
     {
         uint32_t fmt_end = GUEST_LAST - 2u;   /* "ab" then the NUL at the end */
         MEM_W8(fmt_end, (uint8_t)'a');
         MEM_W8(fmt_end + 1u, (uint8_t)'b');
         MEM_W8(GUEST_LAST, 0u);
-        memset(SR_HOST(DST), 0, 0x80u);
+        memset(g_line, 0, sizeof g_line);
         memset(cpu.r, 0, sizeof cpu.r);
-        cpu.r[4] = DST;
         cpu.r[5] = fmt_end;
         cpu.r[29] = STACK;
-        cpu.r[31] = 0x12345678u;
-        sr_guest_sprintf(&cpu);
-        if (strcmp((const char *)SR_HOST(DST), "ab") != 0) {
+        (void)sr_guest_format_host(&cpu, fmt_end, 6u, g_line, (int)sizeof g_line);
+        if (strcmp(g_line, "ab") != 0) {
             failures++;
             fprintf(stderr, "FAIL %-30s got=\"%s\"\n", "format ends at arena end",
-                    (const char *)SR_HOST(DST));
+                    g_line);
         }
     }
 
@@ -461,7 +429,7 @@ int main(void) {
            dbl_lo(12.5), dbl_hi(12.5), 9u);
 
     /* ---- host-independent non-finite and hex-float spelling ---------------- */
-    /* These are produced by the bridge rather than the host libc.  Windows UCRT
+    /* These are produced by the formatter rather than the host libc.  Windows UCRT
      * renders a negative quiet NaN as "nan(ind)" and pads %a to full precision,
      * where PSP newlib and glibc use "-nan" and the shortest mantissa, so
      * inheriting the host form would make output depend on the build machine. */
@@ -545,7 +513,7 @@ int main(void) {
     }
 
     /* ---- missing arguments -------------------------------------------------- */
-    /* More conversions than the caller supplied: the bridge keeps reading the
+    /* More conversions than the caller supplied: the formatter keeps reading the
      * ABI word sequence.  Register words are zero here and the stack
      * continuation is read through the checked accessor. */
     EXPECT0("missing register arguments", "%d %d %d %d %d %d %d %d",
@@ -553,19 +521,17 @@ int main(void) {
 
     /* Stack continuation past the end of the arena must be refused by the
      * checked accessor rather than read out of the host allocation. */
-    memset(SR_HOST(DST), 0, 0x200u);
+    memset(g_line, 0, sizeof g_line);
     put_string(FMT, "%d %d %d %d %d %d %d %d");
     memset(cpu.r, 0, sizeof cpu.r);
-    cpu.r[4] = DST;
     cpu.r[5] = FMT;
     cpu.r[29] = 0x0c000000u;   /* every stack word lies past the arena */
-    cpu.r[31] = 0x12345678u;
     g_oor_events = 0;
-    sr_guest_sprintf(&cpu);
-    if (strcmp((const char *)SR_HOST(DST), "0 0 0 0 0 0 0 0") != 0) {
+    (void)sr_guest_format_host(&cpu, FMT, 6u, g_line, (int)sizeof g_line);
+    if (strcmp(g_line, "0 0 0 0 0 0 0 0") != 0) {
         failures++;
         fprintf(stderr, "FAIL %-30s got=\"%s\"\n", "out-of-arena stack args",
-                (const char *)SR_HOST(DST));
+                g_line);
     }
     if (g_oor_events == 0) {
         failures++;

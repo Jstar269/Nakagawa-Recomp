@@ -77,7 +77,10 @@ The **Where** column of each table names the places a code can appear:
 | `DISC_NOT_PSP` | disc, player | The disc image is not a PSP game: it has no `PSP_GAME` folder. |
 | `EXECUTABLE_UNSUPPORTED` | report | The disc's executable is missing, encrypted with no decrypted copy, or breaks a PSP layout rule. |
 | `INVALID_ISO` | report | The input is not a readable PSP disc image, or its title information is invalid. |
+| `HOMEBREW_ALREADY_ADDED` | player | The same homebrew `EBOOT.PBP` was added before from another folder; a program is added from one folder. |
+| `HOMEBREW_FOLDER_UNSUPPORTED` | player | The homebrew program's folder cannot come with it: too large, a link or cloud file inside, a name a Memory Stick cannot hold, a personal folder, or a package not named `EBOOT.PBP`. |
 | `HOMEBREW_KERNEL_MODE_UNSUPPORTED` | player | The package's homebrew is kernel-mode or a custom-firmware plugin, which needs the PSP's own kernel and firmware. |
+| `HOMEBREW_KEY_TAKEN` | player | Another program already has the library key this homebrew program would get. |
 | `ISO_CORRUPT` | player | The picked file is not a PSP disc image. |
 | `MODIFIED_DUMP_CFW_LOADER` | report | The disc image was modified by a custom-firmware patch; its real executable needs a decrypted copy. |
 | `PBP_ENCRYPTED_EXECUTABLE_UNSUPPORTED` | player | The PBP holds an encrypted program; only unencrypted homebrew is imported from a package. |
@@ -265,6 +268,7 @@ The **Where** column of each table names the places a code can appear:
 | `FOLDER_OPEN_FAILED` | player | A folder could not be opened. |
 | `HASH_MISMATCH` | player | A download did not match its pinned SHA-256. |
 | `HASH_UNAVAILABLE` | player | A download's hash could not be computed. |
+| `HOMEBREW_KEPT_COPY_NOT_DELETED` | player | **Delete kept copy** could not remove a homebrew program's kept copy; the message says why. |
 | `INSTALL_CANCELLED` | player | The prerequisite install was cancelled. |
 | `INTERNAL_ERROR` | decrypt, disc, player | A C engine returned a result it has no name for. This is a defect in Nakagawa. |
 | `LIBRARY_WRITE_FAILED` | player | The library could not be saved. |
@@ -311,7 +315,8 @@ The **Where** column of each table names the places a code can appear:
 | `UPDATE_INSTALLED_BY_SETUP` | player | This copy was installed with Setup, so it updates by running the new release's Setup. |
 | `UPDATE_INSTALL_EXISTS` | player | The new version is already unpacked. |
 | `UPDATE_INSTALL_INCOMPLETE` | player | Unpacking the new version did not finish. |
-| `UPDATE_INSTALL_LEFTOVER` | player | A previous install attempt left files in the way. |
+| `UPDATE_INSTALL_LEFTOVER` | player | A folder Nakagawa did not make is where the new version unpacks. (Nakagawa's own unpack left by an interrupted install is removed on the next try.) |
+| `UPDATE_INSTALL_LEFTOVER_IN_USE` | player | An interrupted install's unpack folder could not be removed; something has it open. |
 | `UPDATE_INSTALL_MOVE_FAILED` | player | The new version could not be moved into place. |
 | `UPDATE_INSTALL_NOT_WRITABLE` | player | The install folder is not writable. |
 | `UPDATE_INSTALL_PATH` | player | The folder for the new version has too long a path. |

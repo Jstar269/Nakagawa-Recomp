@@ -135,11 +135,12 @@ def _sources(recomp_c: str = RECOMP_C_SAMPLE, recomp_h: str = RECOMP_H_SAMPLE, *
 
 
 def _build(sources=None, emitter=EMITTER_SAMPLE, ledger=None) -> dict:
-    return rhi.build_inventory(
+    inventory: dict = rhi.build_inventory(
         sources if sources is not None else _sources(),
         emitter,
         ledger if ledger is not None else LEDGER_SAMPLE,
     )
+    return inventory
 
 
 def _render(**kwargs) -> str:

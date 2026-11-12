@@ -290,14 +290,15 @@ class ManifestContractTests(unittest.TestCase):
 class LaunchReportTests(unittest.TestCase):
     """Reports are bring-up-schema documents, and their failure classes are the sweep's blocker codes."""
 
-    def _report(self, output: str = None, **kwargs) -> dict:
+    def _report(self, output: str | None = None, **kwargs) -> dict:
         options = {"returncode": 0, "timed_out": False, "duration_ms": 10}
         options.update(kwargs)
-        return tq.launch_report(
+        report: dict = tq.launch_report(
             title=_public_manifest(),
             output=_pass_output() if output is None else output,
             **options,
         )
+        return report
 
     def _assert_bringup_valid(self, report: dict):
         nk_cli.validate_bringup_report(report)

@@ -4212,5 +4212,73 @@ class DoctorRefusesTrackedCodeCaptureTests(unittest.TestCase):
         self.assertIn(".nkcap", tracked[0].detail or "")
 
 
+class LinkerSpellingTests(unittest.TestCase):
+    """Unused-section removal is spelled by the linker, not the compiler: GNU ld and the MinGW
+    linker take --gc-sections, Apple's ld64 rejects it and takes -dead_strip (#329). Every link
+    line names LD_GC_SECTIONS, which the Makefile chooses from HOST_KIND."""
+
+    RAW = "-Wl,--gc-sections"
+
+    def _make_texts(self) -> dict[str, str]:
+        paths = [ROOT / "Makefile", *sorted((ROOT / "mk").glob("*.mk"))]
+        return {path.relative_to(ROOT).as_posix(): path.read_text(encoding="utf-8")
+                for path in paths}
+
+    def test_no_link_line_names_the_gnu_spelling(self) -> None:
+        offenders = []
+        for name, text in self._make_texts().items():
+            for number, line in enumerate(text.splitlines(), 1):
+                if self.RAW in line and not line.startswith("LD_GC_SECTIONS :="):
+                    offenders.append(f"{name}:{number}: {line.strip()}")
+        self.assertEqual(offenders, [], "use $(LD_GC_SECTIONS) on link lines")
+        users = sum(text.count("$(LD_GC_SECTIONS)") for text in self._make_texts().values())
+        self.assertGreaterEqual(users, 25)
+
+    def test_each_host_kind_gets_its_linker_spelling(self) -> None:
+        make = shutil.which("mingw32-make") or shutil.which("make")
+        if not make:
+            self.skipTest("GNU Make is required")
+        with tempfile.TemporaryDirectory(prefix="nakagawa-linker-spelling-") as temp:
+            # Windows_NT takes the same branch as Linux; each probe parses the whole Makefile,
+            # so the cases that choose differently are the ones probed. OS= clears Windows' own
+            # OS variable, so the Makefile derives a build for the host itself on a POSIX host as
+            # it does there; a Mac building for Android links with the NDK's lld, which takes the
+            # GNU spelling.
+            for host, target, expected in (("Darwin", "OS=", "-Wl,-dead_strip"),
+                                           ("Linux", "OS=", "-Wl,--gc-sections"),
+                                           ("Darwin", "NK_TARGET=android", "-Wl,--gc-sections")):
+                with self.subTest(host=host, target=target):
+                    completed = subprocess.run(
+                        [make, "--no-print-directory", "GAME_NAME=probe",
+                         f"BUILD_ROOT={Path(temp).as_posix()}",
+                         f"BUILD_DIR={Path(temp).as_posix()}", f"HOST_KIND={host}", target,
+                         "--eval", "nkprobe: ; @echo LD_GC_SECTIONS=$(LD_GC_SECTIONS)",
+                         "nkprobe"],
+                        cwd=ROOT, capture_output=True, text=True, check=False,
+                    )
+                    self.assertEqual(completed.returncode, 0,
+                                     completed.stdout + completed.stderr)
+                    self.assertIn(f"LD_GC_SECTIONS={expected}", completed.stdout.splitlines())
+
+    def test_the_build_host_is_detected_when_not_given(self) -> None:
+        make = shutil.which("mingw32-make") or shutil.which("make")
+        if not make:
+            self.skipTest("GNU Make is required")
+        with tempfile.TemporaryDirectory(prefix="nakagawa-linker-host-") as temp:
+            environment = {key: value for key, value in os.environ.items()
+                           if key != "HOST_KIND"}
+            completed = subprocess.run(
+                [make, "--no-print-directory", "GAME_NAME=probe",
+                 f"BUILD_ROOT={Path(temp).as_posix()}", f"BUILD_DIR={Path(temp).as_posix()}",
+                 "--eval", "nkprobe: ; @echo HOST_KIND=$(HOST_KIND)", "nkprobe"],
+                cwd=ROOT, capture_output=True, text=True, check=False, env=environment,
+            )
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        expected = {"win32": "Windows_NT", "linux": "Linux", "darwin": "Darwin"}.get(sys.platform)
+        if expected is None:
+            self.skipTest(f"no expectation for {sys.platform}")
+        self.assertIn(f"HOST_KIND={expected}", completed.stdout.splitlines())
+
+
 if __name__ == "__main__":
     unittest.main()

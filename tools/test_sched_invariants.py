@@ -631,7 +631,9 @@ class HostThreadCreatorAuditTests(unittest.TestCase):
                 creators.append(path)
         self.assertEqual(
             creators, ["src/core/nk_platform_posix.c", "src/rt/debug.c",
-                       "src/rt/gpu_sdl3vk/tex_scale.c", "src/rt/osk_text_entry.c", "src/rt/sched.c"],
+                       "src/rt/gpu_sdl3vk/tex_scale.c", "src/rt/osk_text_entry.c",
+                       "src/rt/sched.c",    # the preemption timer
+                       "src/rt/sched.c"],   # the host worker (#2361)
             "native thread creation needs a documented owner and guest-state quiescence rule",
         )
 

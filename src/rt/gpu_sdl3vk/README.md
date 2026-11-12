@@ -88,13 +88,17 @@ Enabled with `SR_GPU_GE=1`. Implementation:
   target as a storage image, blends, and stores it inside a pixel-ordered interlock, so
   overlapping primitives match `ge.c`. These batches record in a depth-only render pass with
   the colour image in `GENERAL`. The other batches of the op keep the fixed-function pass, with
-  a barrier at each switch, and the op takes no snapshot copy. The variant tests depth early,
-  so an op whose destination-reading batch writes depth and may still kill a fragment in the
-  shader keeps the snapshot path (the alpha test, the color test, the transform-mode depth range
-  when it is narrower than 0–65535, or a stencil-fail KEEP). So does an op whose stencil state
-  also blends in fixed function, an op whose destination-reading batch textures from its own
-  target (the destination copy is its texture), and every op into a widescreen wing canvas (which
-  has no RMW objects). The host twin (#2050) does not change the path: the image is drawn as in a
+  a barrier at each switch, and the op takes no snapshot copy. The variant tests depth early.
+  A run of these batches that holds one that writes depth and may still kill a fragment in the
+  shader (the alpha test, the color test, the transform-mode depth range when it is narrower
+  than 0–65535, or a stencil-fail KEEP) tests and writes depth in the shader instead, inside the
+  interlock and after those kills: the run's box of the D16 depth image is copied into a storage
+  buffer before its pass and back after it, bit for bit, and its pipelines test no depth. With
+  depth=32 (#2051) the depth image is D32, which that copy does not pack, so such an op keeps
+  the snapshot path. An op
+  keeps the snapshot path when its destination-reading batch textures from its own target (the
+  destination copy is its texture), and every op into a widescreen wing canvas does (it has no
+  RMW objects). The host twin (#2050) does not change the path: the image is drawn as in a
   twin-off run, and the twin's pass of an interlock op records the same runs into the twin, which
   it loads and stores as a storage image in place of the twin snapshot. The `submit-batch` and
   `gpu-timestamps` cells hold the
@@ -295,6 +299,25 @@ into one target and read it back as a texture keep the scale in these cases:
     positions fall unevenly across device texels and the detail is finer than 1x but uneven.
   - Nearest filtering takes the centre of each guest texel, as the PSP does, so a nearest read of
     a target shows one device texel per guest texel at any render scale.
+  - The texture's own width and height bound the read, as on the PSP: each texel index is clamped
+    or wrapped at them (the texture's clamp bits), not at the edge of the target's image, so a
+    texture inside a larger target never shows the target's pixels beyond it (`rtt-edge`, clamped
+    and repeated, linear and nearest). `psp.frag` gets the size in `texenv.a` and `fogcol.a`, the
+    clamp bits in `cfg.y` bits 24 and 25 and the minification and magnification filters in bits
+    26 and 27, lanes the per-fragment level of detail uses only for a mipmapped read, which is
+    never bound directly. Each fragment picks its filter from its footprint per guest pixel, as
+    `ge.c` does. With different minification and magnification filters the shader fetches every
+    sample itself (for nearest the device texel at the guest texel's centre, as below; for linear
+    the four taps), since a Vulkan sampler may judge the footprint another way. A linear tap pair that straddles a repeated texture's seam is
+    fetched and blended in the shader, wrapped in device texels. Rows of the texture below the
+    target's 272 rows read the image's last row.
+  - A texture that starts inside the target, at a pixel-aligned offset, is read through that
+    offset (`texsize.zw`): `rtt-scale-offset` runs the bloom-like pass with its buffer as a
+    sub-rectangle of a 512-wide target.
+- **A CPU read of a target a draw sampled** returns its top-left device samples in the target's own
+  format, the readback-rows contract: 1x pixels, the software renderer's except where an edge
+  passes between a guest pixel's centre and its top-left device sample (`rtt-scale` reads its
+  quarter-size buffer back after sampling it).
 - **A block transfer between targets** copies at render scale (`hook_xfer`).
 
 A texture is a render-target read when its address lies inside the span of a colour target the
@@ -316,9 +339,23 @@ the effect shows 1x detail at any render scale. Those reads include:
 - a read of a target whose CPU writes could not be copied into its image.
 
 Depth is matched by address like any texture. A depth buffer read as a texture decodes guest VRAM
-at 1x when its address lies outside every colour target's span. If it lies inside one and the read
-passes the rules above, that colour target's image is bound instead: the renderer does not detect
-depth aliasing.
+at 1x when its address lies outside every colour target's span. When the texture's address lies
+inside both a colour target's span and a depth buffer the renderer holds (its stride times 272 rows
+of 16-bit values from its base; `depth_containing`: the texture's start address decides, as for
+colour targets), the read takes whichever of the two buffers was written last. Each change to a
+target's image takes the next value of one count (`cseq`), a batch that writes depth stamps its
+depth buffer with its own (`zseq`), and queued batches are submitted first. Depth written after the
+target last changed makes it a depth read: it commits what a CPU read would (the targets' drawn
+pixels in the span, then the whole depth buffer) and decodes guest VRAM at 1x, through the depth
+buffer's own address or the 0x04200000 linear view alike (`rtt-depth-alias`). Otherwise the
+target's colour is the newer content and the rules above apply, so a title that leaves its depth
+address on a colour buffer it draws (and writes no depth there) keeps the direct bind
+(`rtt-depth-alias` draws the colour target over the depth buffer's rows and reads it again). The
+choice is per buffer, not per pixel: a depth buffer some batch wrote after the colour target
+changed is read whole, rows that batch did not reach included, as a CPU read of it is; and a
+colour target that changed after the depth was written is bound whole, its rows where depth was
+written later than its last draw there included (those rows show the target's colour where the
+PSP's VRAM holds depth).
 
 `SR_GPU_NORTT=1` sends every render-target read through that 1x path, for bisecting.
 

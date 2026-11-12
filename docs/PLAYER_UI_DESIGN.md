@@ -403,10 +403,13 @@ one or two plain sentences on what to expect on this PC in `BODY_S` `paper`, the
 when there are any. The tier comes from the title's own player record, or else from its `docs/COMPATIBILITY.md`
 status word through the table in [Status words](COMPATIBILITY.md#status-words). The status word itself describes
 the project's test route and read as a claim about the user's game (#1297), so only developer mode names it, in a
-`FOOTNOTE`. A title with an enhancement package then has an ENHANCEMENTS card (eyebrow and an OPTIONAL tag): the
-switch 60 FPS GAME LOGIC: ON or OFF (`PRIMARY` while on, never the default focus, disabled while a game starts or
-runs or the title's package builds), then a `BODY_S` line saying it is an optional enhancement made for this game
-and that off plays the original game as released ([ENHANCEMENT_CONTRACT.md](ENHANCEMENT_CONTRACT.md#9-declarative-frame-rate-rescale-packages-60-hz-logic)
+`FOOTNOTE`. A title with an enhancement package then has an ENHANCEMENTS card (eyebrow and a tag, OPTIONAL for a
+package the maintainer released and EXPERIMENTAL for any other; [ENHANCEMENT_CONTRACT.md](ENHANCEMENT_CONTRACT.md#910-experimental-or-released)
+section 9.10). Only a package found in the source tree's `assets/enhancements/` can read OPTIONAL, never one from
+the user's data folder, which is tagged EXPERIMENTAL whatever it declares. The card holds the switch 60 FPS GAME
+LOGIC: ON or OFF (`PRIMARY` while on, never the default focus, disabled while a game starts or runs or the title's
+package builds), then a `BODY_S` line saying it is an optional enhancement made for this game and that off plays the
+original game as released ([ENHANCEMENT_CONTRACT.md](ENHANCEMENT_CONTRACT.md#9-declarative-frame-rate-rescale-packages-60-hz-logic)
 section 9). When the switch is saved on but the package is gone, the card stays and says why in `error`, and the
 primary action reads ENHANCEMENT UNAVAILABLE. Under the cards, one row that wraps at a larger text size: ADD TO
 STEAM (the [Add to Steam](#add-to-steam-built) dialog), REPORT A PROBLEM, and REMOVE FROM LIBRARY (a `DANGER`
@@ -567,9 +570,10 @@ PLAY MODE closes the GAME card (the play modes, docs/ENHANCEMENT_CONTRACT.md sec
 default (AUTHENTIC: OPTIONS or ENHANCED: OPTIONS; Authentic for a new library), and it opens Settings > Enhanced, a
 dialog card in the same pattern: PLAY MODE, then one row per Enhanced part from the player's part table (TEXTURE
 FILTERING 16x, 8x, 4x, 2x, Off; CRISP SYSTEM TEXT; SPEED READOUT; GAME BADGE; WIDESCREEN; SMOOTH MOTION; CLEAN
-PITCHED SOUND; FINER PATCHES; WIDER CULLING; SHARPER ENLARGING; STICK DEAD ZONE; SHORT LOADS; a new library has
-16x filtering, crisp text and the badge on and the rest off, and a graphics preset sets SHARPER ENLARGING and CRISP
-SYSTEM TEXT in Enhanced and Ace, below), each beside a sentence that says what it does and what it costs. A new part is a new row with no change to the page. While the mode is
+PITCHED SOUND; FINER PATCHES; WIDER CULLING; SHARPER ENLARGING; STICK DEAD ZONE; SHORT LOADS; FULL 32-BIT COLOUR; a
+new library has 16x filtering, crisp text and the badge on and the rest off, and a graphics preset sets SHARPER
+ENLARGING and CRISP SYSTEM TEXT in Enhanced and Ace, below), each beside a sentence that says what it does and what it
+costs. A new part is a new row with no change to the page. While the mode is
 Authentic the part rows are disabled (`dim`, not focusable) and keep their values. The title page's ENHANCEMENTS
 card shows PLAY MODE for every game (LIBRARY DEFAULT, AUTHENTIC, ENHANCED, and ACE only for a game with a usable
 package; `PRIMARY` while Enhanced or Ace is in effect, never the default focus), ENHANCED OPTIONS, which opens the
@@ -616,8 +620,9 @@ about 4x or more on any screen of 1080p or more, past that range everywhere, and
 every pass counts. HIGH turns it off as ULTRA without it, the plain 4x picture. Where the GPU renderer cannot run FSR
 1, the normal scaling filter stays, as for the part. `fsr1-selftest` reports the pass's cost at each of these sizes
 (`docs/SETUP.md`). No preset sets frame pacing, the play mode, SMOOTH MOTION, WIDESCREEN, TEXTURE FILTERING, CLEAN
-PITCHED SOUND, FINER PATCHES, STICK DEAD ZONE, SHORT LOADS, WIDER CULLING, the SPEED READOUT or the GAME BADGE:
-they change timing, framing, input, guest-visible output or the HUD, or have no measured cost on low-end GPUs, so they stay the library's and each game's.
+PITCHED SOUND, FINER PATCHES, STICK DEAD ZONE, SHORT LOADS, WIDER CULLING, FULL 32-BIT COLOUR, the SPEED READOUT or
+the GAME BADGE: they change timing, framing, input, guest-visible output or the HUD, or have no measured cost on
+low-end GPUs, so they stay the library's and each game's.
 
 The parts a preset sets are resolved with the rest (`player_play_resolve`): a game's own value, else the preset's,
 else the library's, so the launch line, `SR_PRESENT_UPSCALE` and both Enhanced pages agree. Settings > Enhanced shows
