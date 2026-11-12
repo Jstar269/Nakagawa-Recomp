@@ -27,14 +27,20 @@ extern "C" {
  * uses is left unbound), and cannot carry stick entries.
  * Schema 5 adds the optional "aim" member to every mapping: mouse movement as an
  * analog-stick source (#1791). A schema 1 to 4 file still loads with aiming off, and
- * cannot carry an "aim" member: an older build would ignore it silently. */
-#define NK_INPUT_PROFILE_SCHEMA_VERSION 5
+ * cannot carry an "aim" member: an older build would ignore it silently.
+ * Schema 6 lets keyboard_bindings name mouse buttons ("mouse:left" and the rest,
+ * NK_HOST_KEY_MOUSE_*), so a keyboard-and-mouse mapping can press a PSP control
+ * with a click (#1791). A schema 1 to 5 file still loads unchanged and cannot name
+ * a mouse button: a build that knows no mouse buttons refuses the name, and the
+ * newer schema_version keeps it from saving over the file. */
+#define NK_INPUT_PROFILE_SCHEMA_VERSION 6
 #define NK_INPUT_PROFILE_MIN_SCHEMA_VERSION 1
 /* The schema that introduced each optional member. */
 #define NK_INPUT_PROFILE_PER_TITLE_SCHEMA_VERSION 2
 #define NK_INPUT_PROFILE_KEYBOARD_SCHEMA_VERSION 3
 #define NK_INPUT_PROFILE_STICK_KEYS_SCHEMA_VERSION 4 /* first version with stick keys */
 #define NK_INPUT_PROFILE_AIM_SCHEMA_VERSION 5 /* first version with the aim member */
+#define NK_INPUT_PROFILE_MOUSE_BUTTONS_SCHEMA_VERSION 6 /* first version with mouse buttons */
 /* The largest profile file the loader reads. A newer schema_version than this
  * build's is refused with NK_ERROR_NEWER_SCHEMA and the save path will not
  * replace it; an older file is kept as <file>.v<n>.bak by the first save. */
@@ -177,9 +183,9 @@ typedef struct {
     NkBindingSourceType type;
     int index; /* NkHostGamepadButton or NkHostGamepadAxis */
     /* A stick direction's own threshold (1-32767), or 0 for the profile's
-     * trigger_threshold. Written "+rightx@20000"; #1791's second-stick and mouse
-     * sources take the same "@threshold" form ("mouse:+x@4" is reserved for it and
-     * refused until it is supported). */
+     * trigger_threshold. Written "+rightx@20000". Mouse movement as a direction
+     * ("mouse:+x@4") is reserved for #1791 and refused until it is supported; the
+     * mouse buttons are keys (NK_HOST_KEY_MOUSE_*), bound in keyboard_bindings. */
     int16_t threshold;
 } NkBindingSource;
 
@@ -200,7 +206,19 @@ typedef struct {
  * left out because the runtime keeps them for the pause and its own overlays.
  */
 #define NK_HOST_KEY_NONE 0
-#define NK_HOST_KEY_LIMIT 512 /* every bindable key code is below this */
+/* The mouse buttons (#1791) are bound like keys, under codes past the keyboard's
+ * 512 usages (SDL_SCANCODE_COUNT, which sdl3vk.c checks), in SDL's button order:
+ * left, middle, right and the two side buttons. A host reports them in the same
+ * key_down array as the keyboard, at these indices. No default mapping binds one,
+ * so a mouse button does nothing until the person binds it. */
+#define NK_HOST_KEY_MOUSE_FIRST 512
+#define NK_HOST_KEY_MOUSE_LEFT   (NK_HOST_KEY_MOUSE_FIRST + 0)
+#define NK_HOST_KEY_MOUSE_MIDDLE (NK_HOST_KEY_MOUSE_FIRST + 1)
+#define NK_HOST_KEY_MOUSE_RIGHT  (NK_HOST_KEY_MOUSE_FIRST + 2)
+#define NK_HOST_KEY_MOUSE_X1     (NK_HOST_KEY_MOUSE_FIRST + 3) /* side button, "back" */
+#define NK_HOST_KEY_MOUSE_X2     (NK_HOST_KEY_MOUSE_FIRST + 4) /* side button, "forward" */
+#define NK_HOST_KEY_MOUSE_COUNT 5
+#define NK_HOST_KEY_LIMIT (NK_HOST_KEY_MOUSE_FIRST + NK_HOST_KEY_MOUSE_COUNT) /* every bindable code is below this */
 
 /**
  * Keyboard binding for one PSP button or stick direction: up to two host keys,
@@ -411,10 +429,13 @@ NkNavAction nk_nav_action_from_name(const char *name);
 /* Name of a bindable host key, or NULL when `key` is not one. */
 const char *nk_host_key_name(int key);
 /* A bindable host key in plain words, as people see it on the keyboard ("Enter",
-   "Left Shift", "Up Arrow", "A"); "None" when `key` is not one. Truncates to buf_sz. */
+   "Left Shift", "Up Arrow", "A") or the mouse ("Left Click", "Mouse 4"); "None" when
+   `key` is not one. Truncates to buf_sz. */
 void nk_host_key_words(int key, char *buf, size_t buf_sz);
 /* Key code for a bindable host key name, or NK_HOST_KEY_NONE when unknown. */
 int nk_host_key_from_name(const char *name);
+/* True when `key` is one of the mouse buttons (NK_HOST_KEY_MOUSE_*). */
+bool nk_host_key_is_mouse(int key);
 
 /**
  * @brief Initialize profile to standard safe defaults matching current runtime.
