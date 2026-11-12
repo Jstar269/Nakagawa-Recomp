@@ -1523,7 +1523,12 @@ def _frame_step(w, regs, slots):
         if op == 0x2B and rt(w) in regs:
             slots[offset] = regs[rt(w)]
     written = _gpr_writes(w)
-    if written == "unknown":
+    if written is None:
+        # A transfer the walk does not model: bltzall/bgezall, which is_control() leaves out, or
+        # any transfer stepped as a delay slot. effect() refuses each by name later; here no
+        # register value survives it.
+        written = frozenset(range(32))
+    elif written == "unknown":
         written = (frozenset({rt(w)}) if op == 0x12 else
                    frozenset() if op in _VFPU_OPCODES else frozenset(range(32)))
     for reg in written:
@@ -1544,7 +1549,7 @@ def _loads_foreign_sp(w, regs, slots):
             and _OWN_SP not in _frame_step(w, {**regs, _OWN_SP: 0}, slots)[0])
 
 
-def _sp_exit_walk(elf, start, insns, labels):
+def _sp_exit_walk(elf, start, insns, labels, work=None):
     """(the exits of a body that leave $sp as the guest set it, all of its exits, the
     addresses of the $sp loads that made them the guest's).
 
@@ -1568,11 +1573,18 @@ def _sp_exit_walk(elf, start, insns, labels):
     to miss the frame. An exit is the address of a transfer that leaves the body, or the
     address outside the body it falls into. Whether such a load really left the frame is
     known only when it runs: emit_function checks each one there (_sp_load_check).
+
+    A computed jump may land on any label, so its state goes to every label. A fan-out that
+    cannot change a label is skipped (`hub`, below), which keeps the walk linear in the body
+    instead of (computed jumps) x (labels) and leaves every state, push and result as they
+    were. `work`, when given, receives the counts: "reach" calls, "fanouts" run in full and
+    "skipped".
     """
     if not any((read32(elf, addr) or 0) >> 26 == 0x23 and rt(read32(elf, addr)) == 29
                for addr in insns):
         return frozenset(), frozenset(), frozenset()
-    states, work, guest, exits, foreign = {}, [], set(), set(), set()
+    states, pending, guest, exits, foreign = {}, [], set(), set(), set()
+    counts = {"reach": 0, "fanouts": 0, "skipped": 0}
 
     def leave(addr, regs):
         exits.add(addr)
@@ -1580,6 +1592,7 @@ def _sp_exit_walk(elf, start, insns, labels):
             guest.add(addr)
 
     def reach(addr, regs, slots, exit_at=None):
+        counts["reach"] += 1
         if addr not in insns:
             leave(addr if exit_at is None else exit_at, regs)
             return
@@ -1590,11 +1603,18 @@ def _sp_exit_walk(elf, start, insns, labels):
             if (regs, slots) == old:
                 return
         states[addr] = (regs, slots)
-        work.append(addr)
+        pending.append(addr)
 
+    # The meet of every state sent to all labels so far. After a full fan-out of state A each
+    # label holds a state at or below A, and states only shrink, so every label is at or
+    # below hub. A state at or above hub would leave each of them as it is: reach() would
+    # return without a push, and for a label outside the body the exit is recorded already,
+    # guest-owned too when _OWN_SP (always 0 while present) is missing, since then it was
+    # missing from a state fanned out before.
+    hub = None
     reach(start, {29: 0, _OWN_SP: 0}, {})
-    while work:
-        addr = work.pop()
+    while pending:
+        addr = pending.pop()
         regs, slots = states[addr]
         w = read32(elf, addr)
         if w is None or is_eret(w):
@@ -1614,14 +1634,25 @@ def _sp_exit_walk(elf, start, insns, labels):
         elif (op == 0 and fn in (0x08, 0x09) and (fn == 0x08 or rd(w) == 0)):
             leave(addr, after[0])
             if rs(w) != 31:
-                for label in labels:
-                    reach(label, *after)
+                if (hub is not None
+                        and all(after[0].get(k) == v for k, v in hub[0].items())
+                        and all(after[1].get(k) == v for k, v in hub[1].items())):
+                    counts["skipped"] += 1
+                else:
+                    counts["fanouts"] += 1
+                    for label in labels:
+                        reach(label, *after)
+                    hub = after if hub is None else (
+                        {k: v for k, v in hub[0].items() if after[0].get(k) == v},
+                        {k: v for k, v in hub[1].items() if after[1].get(k) == v})
         elif op == 3 or (op == 0 and fn == 0x09) or is_link(w):
             kept = {k: v for k, v in after[0].items() if k in _CALL_SAVED_GPRS or k == _OWN_SP}
             reach(addr + 8, kept, after[1])
         else:
             reach(branch_target(addr, w), *after, exit_at=addr)
             reach(addr + 8, *((regs, slots) if is_likely(w) else after))
+    if work is not None:
+        work.update(counts)
     return frozenset(guest), frozenset(exits), frozenset(foreign)
 
 

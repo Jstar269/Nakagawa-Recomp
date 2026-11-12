@@ -459,10 +459,12 @@ The launcher always exports `SR_ACE`, so an inherited value cannot opt a launch 
 `v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;smooth=x2;sas=off;tess=off;twin=off`. `tier` (`enhanced` or `ace`) only names the
 run, in the game badge, the pause menu and the stamps; a line without it is an Enhanced run. `stick` (the title's
 stick dead zone, 1 to 126, section 11.3.11), `load` (`fast` or `off`, section 11.3.10), `depth` (`32` or `off`,
-section 10.20) and `cull` (`on` or `off`, section 11.3.6) are the other keys a line may leave out: a missing
-`stick`, `load`, `depth` or `cull` is off, `stick=<counts>`, `load=fast` and `cull=on` need `tier=ace` (`depth=32`
-does not), the launcher writes `;load=fast` and `;cull=on` only for an Ace launch with that part on, and no
-launcher writes `depth` yet (section 11.3.12). A line writes them in that order, `cull` last. Every
+section 10.20), `ssaa` (`2`, `4` or `off`, section 10.21) and `cull` (`on` or `off`, section 11.3.6) are the other
+keys a line may leave out: a missing `stick`, `load`, `depth`, `ssaa` or `cull` is off, `stick=<counts>`,
+`load=fast` and `cull=on` need `tier=ace` (`depth=32` and `ssaa=2|4` do not), the launcher writes `;load=fast` and
+`;cull=on` only for an Ace launch with that part on and `;ssaa=2` or `;ssaa=4` for an Enhanced or Ace launch with
+supersampling on, and no launcher writes `depth` yet (section 11.3.12). A line writes them in that order, `cull`
+last. Every
 other key is required, in any order, each once; a value for a feature this build does not carry (`smooth=match`)
 refuses the line. So does anything else: the run is Authentic and one `ACE_MODE: refused (<reason>)` line says why.
 Unset is off. With Enhanced or Ace on, the launcher also exports `SR_ACE_REPORT`, the per-run report under
@@ -509,6 +511,8 @@ the device is created with no feature outside Ace.
   the filtered picture: the same class as a render scale above 1x, and the launcher says so. The launch notice, the
   speed readout and the crisp keyboard draw only on the swapchain image, never on the frame a capture reads, and so
   do Smooth motion's in-between frames (section 10.6).
+- **Supersampling:** `ssaa=2` or `ssaa=4` changes only the image the presenter shows; the frames a present commits
+  to guest VRAM are those of a run without it (section 10.21).
 - **Sound:** `sas=sinc` writes band-limited sample values into the guest's SAS output buffer, so it is a
   guest-visible item. Its entry is section 11.3.1.
 - **Patches:** `tess=2` to `tess=4` draws every triangle patch with finer triangles, which changes the frames a
@@ -810,7 +814,8 @@ when `"enhanced"` is absent, maps them as below, and writes the new keys from th
 
 `tests/native/test_player_state.c` (`test_play_mode_settings`, `test_play_mode_settings_mapping`) checks the names,
 the precedence, the off switches at both levels and this mapping; `test_play_mode_upscale_settings` checks sharper
-enlarging (`"upscale"`: `fsr1` or `off`) and the upscaler it sets for the launch.
+enlarging (`"upscale"`: `fsr1` or `off`) and the upscaler it sets for the launch; `test_play_mode_ssaa_settings`
+checks supersampling (`"ssaa"`: `2`, `4` or `off`) and its place on the launch line.
 
 ### 10.10. Texture Scaling and the Smart 2D Filter
 
@@ -947,12 +952,15 @@ at `s_twin`) for the Vulkan renderer, and in `src/rt/ge.c` (the comment at `s_tw
   and any other value prints `TWIN: refused (...)` and leaves it off. When the variable turns off a twin the line
   asked for, the run names `twin` unavailable ("SR_GPU_TWIN_COLOR overrides it") in the report. `gpu-coherence-selftest`
   twin-key turns the twin on through `twin=on` alone, in both renderers, and checks the report, with the variable
-  unset and set. A twin that runs is reported on (`effective.twin` true, and in the pause caption) whatever turned
-  it on, so `SR_GPU_TWIN_COLOR=1` with the key off reports it too; `twin-key --twin-key off --twin 1` checks that. The twin takes effect only in Ace Mode: in an
+  unset and set. A twin that the line or the variable turned on is reported on (`effective.twin` true, and in the
+  pause caption), so `SR_GPU_TWIN_COLOR=1` with the key off reports it too; `twin-key --twin-key off --twin 1` checks that. The twin takes effect only in Ace Mode: in an
   authentic run it stays off whatever the environment says, and a request prints one `TWIN: off (the host twin
   needs Ace Mode)` line. When the key asked for it and it does not come up (the `TWIN: unavailable` and `TWIN: off
   for the rest of the run` cases below), the run names `twin` unavailable on stderr and in the report; a twin that
   ran is confirmed, so a run where the renderer never started it is reported as not run (section 10.4).
+  Supersampling (section 10.21) also runs the twin, with the authentic colour unless the twin was asked
+  for in full colour; a twin that runs only for supersampling is not reported (`effective.twin` stays false,
+  and `twin` is not named unavailable); `twin-key` with `--ssaa 2` checks that.
 - **Cost.** Each render op is drawn twice at the render scale, and the twins use as much GPU memory as the targets.
   In the software renderer each colour write is computed twice, and the slots take 9 MiB of host memory.
 - **Fail-closed.** A GPU without nearest blits of RGBA8 and D16 prints `TWIN: unavailable (...)` and runs without it.
@@ -1355,6 +1363,71 @@ section 11.3.12 is its entry and says what the guest can observe; this section s
 
   The whole suite also runs once with `--depth 32`, and its cells that read the device's depth image read it at
   either format.
+
+### 10.21. Supersampling (`ssaa`)
+
+An Enhanced part (#2073), in the Vulkan GE renderer: each frame is drawn at 2 or 4 times the render scale on each
+axis, and the presenter shows the average of the samples that fall in each pixel. It smooths the edges of
+triangles, alpha-tested cut-outs and shader-made edges, which a higher render scale alone leaves stepped. It is a
+presentation-only change (section 2.2), in the render-scale class: it changes the image the host shows, never
+what the guest draws into, reads or waits for. The code is the comment at `s_ssaa` in
+`src/rt/gpu_sdl3vk/ge_gpu.c`.
+
+- **Setting.** Settings > Enhanced offers **Supersampling** (2x, 4x or Off), for the library or for one game
+  (section 10.5), and the launch line carries it as `ssaa=2` or `ssaa=4` for an Enhanced or Ace launch with it
+  on (section 10.1); a missing key or `ssaa=off` is off. It needs no `tier=ace`. It is off in a fresh settings
+  file and in no graphics preset, because of its cost (below): a preset leaves it as it is. It has no other switch.
+- **How.** It runs the host twin (section 10.11) at the render scale times the factor; the twin keeps the authentic
+  colour unless full colour was asked for. At each present the twin is averaged down to the render scale by
+  halving blits with linear filtering: one at 2x, two at 4x. Each halving step weighs four samples equally and
+  stores 8 bits a channel, so at 2x each shown pixel is the mean of the 4 samples it covers, rounded once, and at
+  4x the mean of the 16 it covers within two such roundings. Dither stays keyed to guest pixels, as at any render
+  scale. At render scale 1 the twin draws from its own copy of the vertices, with the above-1x texture fixes
+  (the render-scale item's edge box and nearest-sprite alignment, section 11.1) applied at the twin's scale; the
+  authentic chain keeps the 1x vertices unchanged. The presenter, the speed readout, Smooth motion and Widescreen
+  Fill take that image at the render scale, as without supersampling, so Fill's wings are drawn as usual.
+- **Guest memory.** The authentic chain keeps the render scale, and nothing reads the twin or its average back,
+  so guest VRAM, every readback, every block transfer into RAM and the frame each present commits to guest VRAM
+  are those of a run without supersampling at the same render scale. The tests: ssaa-edge hashes guest VRAM after
+  its scene is read back and requires the hash of a run without supersampling, at 2x and 4x and render scales 1
+  and 2; twin-scene and the whole suite run with it on at 2x and 4x, so every readback and block-transfer case
+  meets its own expected bytes with it on. Section 11.1's four items are unchanged, as for the twin: the extra GPU
+  work is a host wait, never in the guest timing model.
+- **What the picture shows.** Without it every pixel of a black-and-white scene is black or white; with it, pixels
+  on an edge take the shades between, only within a pixel and a half of the edge, and every other pixel keeps its
+  value (ssaa-edge, which reads the image the production present step, `target_prepare_present`, hands the
+  presenter). 4x gives more shades than 2x can. A nearest-filtered sprite drawn one texel per guest pixel shows
+  the authentic image at every pixel, since each guest pixel's samples hold the same texel (ssaa-sprite, at
+  render scales 1 and 2). Present-source captures follow the shown image, so they hold the averaged picture.
+- **Size check.** At start the renderer checks the twin's images against the GPU: each side at most the device's
+  largest image, framebuffer and viewport (`maxImageDimension2D`, `maxFramebufferWidth` and `Height`,
+  `maxViewportDimensions`), and an estimate of the memory the factor holds within half of the largest
+  device-local memory heap. The estimate counts four render targets (two display buffers and two others), each
+  with its twin and depth twin at the twin's scale (2 bytes a depth sample, 4 with `depth=32`, section 10.20) and
+  its average at the render scale, the twin snapshot, and at 4x the halving step. If 4x does not fit and 2x does, the run uses 2x and says so in one
+  `ACE_MODE: ssaa 2 (asked for 4: <reason>)` line; if nothing fits, supersampling is unavailable for the run
+  (`SSAA: unavailable (<reason>)`, the reason naming each factor tried; the Ace report and stamps say so, the
+  report's reason cut to its 95 characters). It never falls back to 1x without a
+  message. A GPU without linear blits of RGBA8, or one that refuses the twin, makes it unavailable the same way.
+  The estimate is not a promise: a title with more live render targets uses more, and a twin allocation that fails
+  later turns the twin off for the rest of the run with one `TWIN: off ...` line and one
+  `SSAA: off for the rest of the run with the twin` line (section 10.11), and the Ace report then gives
+  `"ssaa": 1` with the factor asked for (twin-alloc-fail with `--ssaa 2`). At render scale 1 a failed allocation of the twin's vertices makes it
+  unavailable the same way. `ssaa-limit` forces small limits and checks the factor chosen, the reason given and
+  the Ace report.
+- **Cost.** Every render op is drawn a second time, into the twin, at factor x factor times the render scale's
+  pixels: 4 times at 2x and 16 times at 4x, plus one or two blits per present. The estimate above, with 16-bit depth, is
+  17 MB at render scale 1 and 2x, 64 MB at 1x and 4x, 68 MB and 255 MB at 2x render scale, and 272 MB and 1020 MB at 4x
+  render scale (render scale 4 with 4x makes 8192 x 4352 images).
+- **Stamps.** `ACE_MODE: ssaa <n>` at start; `SSAA: on (<n>x: the twin renders <w>x<h>, ...)` when the twin starts;
+  the Ace report's `"ssaa"` (the factor in effect, 1 when unavailable) and `"ssaa_requested"` when the size check
+  lowered it; and "2x supersampling" or "4x supersampling" in the pause menu's list of parts. Section 10.4
+  applies.
+- **Tests.** `gpu-coherence-selftest` runs ssaa-edge without supersampling to write a reference at render scales 1
+  and 2 and at 2x and 4x against it, twin-scene, ssaa-sprite at 2x and 4x (render scale 1) and at 4x (render
+  scale 2), the whole suite at 2x and at 4x, twin-gate with it on, and ssaa-limit with a forced memory budget and
+  a forced largest side. `ace-selftest` checks the key's parsing,
+  order, report and words; `test_player_state` the setting, its presets and its launch line.
 
 ## 11. Guest-Visible Items
 
@@ -1978,7 +2051,9 @@ The Layer 2 mechanism of section 10.8, for a title that skips objects outside it
   the report. The runtime remembers at most 4096 distinct matrices (see Limits below); the report's
   `cull_untracked` counts the matrix uses it left alone once that table was full, and cull is confirmed only
   while that count is 0: a run with a nonzero count reports cull unavailable as `partial` (the matrices
-  tracked before the table filled were widened, the rest were not), never as a complete run.
+  tracked before the table filled were widened, the rest were not), never as a complete run. The count is read
+  again when the run ends, on every exit path that writes the report, so a table that fills in the last frame
+  still reads partial.
 - **What it changes:** for the matrices at `clip_offsets`, 4 floats per listed matrix (its x output row) of guest memory
   per call, only while Widescreen is on and the key is on; and so which objects the title submits, and any logic the
   title gates on the same visibility test (animation or AI updates on visible objects, fixed object or display-list
@@ -2060,7 +2135,8 @@ The `load` Ace part of section 9.8, for a title that paces a loading screen with
   the pacing guard (below) has not fired. Then the call is not made. The thread instead blocks for 1 µs, the shortest delay wait the scheduler has (that of
   `sceKernelDelayThread(1)`); for that moment it is visibly in a delay wait, not a display wait. Ready threads of any
   priority, lower ones included, can then run as they would during the stock wait, and the waiter resumes at its
-  next scheduling point instead of the next VBLANK. A zero delay or a ready-queue rotation would not do this: on the
+  next scheduling point instead of the next VBLANK. The decision its block causes always runs another ready thread
+  first, even when the 1 µs is already over by then (`sched_delay_current_dispatching()`, `src/rt/sched.c`). A zero delay or a ready-queue rotation would not do this: on the
   PSP, `sceKernelDelayThread(0)` returns without yielding even to a thread of equal priority (#340), and a rotation
   yields only to threads of equal or higher priority, so a lower-priority thread would not run. `$v0` is then 0,
   which is what the stock function returns after its wait. With the key
