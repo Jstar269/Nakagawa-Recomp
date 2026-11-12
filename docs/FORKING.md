@@ -174,8 +174,9 @@ with its own code. It reads no secret and never contacts any authority. It:
 - lists the paths the pull request adds to or removes from the publication profile, and names each
   path the pull request admits itself (`SELF_ADMITTED`): in the check's title line, as a warning on
   the check and in a list at the top of its summary. An added path must name a file of the pull
-  request (`PROFILE_PATH_MISSING`), and a pull request may admit at most 50 paths itself
-  (`SELF_ADMITTED_LIMIT`), so that every one stays in view; admit more by your own push.
+  request (`PROFILE_PATH_MISSING`), and a pull request may admit at most 50 paths, with 20,000
+  characters of names in all, itself (`SELF_ADMITTED_LIMIT`), so that every one stays in view;
+  admit more by your own push.
 
 A check judges a head once. When you tighten a rule or change the manifest on your default branch,
 an open pull request that already passed is not judged again until its next push: re-run its check

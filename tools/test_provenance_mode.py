@@ -626,8 +626,13 @@ class ForkCheckTest(unittest.TestCase):
         long_report = lines + ["  " + "x" * 1000] * 2000
         summary = pm._summary(long_report, code)
         self.assertLess(len(summary.encode("utf-8")), 1024 * 1024)
-        self.assertIn("- `zzz.md`", summary)
+        self.assertIn("- and 1 more (over the limit; the job log has all)", summary)
         self.assertIn("(report cut to fit the summary; the job log has all of it)", summary)
+        # Over the limit, the list itself is bounded too, and the cut is measured in bytes.
+        many = [f"{pm.SELF_ADMITTED}: \u00e9{index}: admitted" for index in range(5000)]
+        summary = pm._summary(many + ["  " + "\u00e9" * 1000] * 2000, 1)
+        self.assertLess(len(summary.encode("utf-8")), pm.SUMMARY_LIMIT)
+        self.assertIn(f"- and {5000 - pm.SELF_ADMITTED_MAX_PATHS} more (over the limit", summary)
 
     def test_the_command_line_measures_against_the_trusted_checkouts_head(self) -> None:
         head, tip = self._lagging_head_and_stricter_tip()
@@ -696,14 +701,14 @@ class ForkCheckTest(unittest.TestCase):
         self.assertEqual(code, 0, lines)
 
     def test_a_path_the_manifest_names_may_not_become_binary(self) -> None:
-        # Review 2309-913c7747 S1: a binary is not scanned as text, so a NUL byte hid a user path in a file
-        # the manifest describes as a licence.
+        # Review 2309-913c7747 S1 and its delta read: a path the manifest names may not become binary in a
+        # pull request, whatever control character makes it so.
         self._write_manifest([{"id": "stb", "source_path": "LICENSE.txt", "disposition": "included"}])
         (self.repo / "LICENSE.txt").write_text("licence\n", encoding="utf-8")
         self._write_profile(["README.md", "LICENSE.txt"])
         base = self._commit()
         for data, expected in ((b"licence\nmore text\n", 0), (b"licence\x00hidden tail\n", 1), (b"\xff\xfe", 1),
-                               (b"licence\x1b[0m\n", 1)):
+                               (b"licence\x1b[0m\n", 1), (b"licence\x0c\n", 1), (b"tab\tand\r\n", 0)):
             with self.subTest(data=data):
                 _git(self.repo, "reset", "--quiet", "--hard", base)
                 (self.repo / "LICENSE.txt").write_bytes(data)

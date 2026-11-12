@@ -79,6 +79,7 @@ import secrets
 import subprocess
 import sys
 import tempfile
+import traceback
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -293,15 +294,12 @@ def component_paths(manifest: bytes | None) -> list[str]:
 
 
 def _plain_text(data: bytes) -> bool:
-    """True for UTF-8 text without control bytes other than tab, line feed, form feed and carriage return.
-
-    Wider than the audit's own binary test on purpose: whatever the audit could treat as binary is not
-    plain text here."""
+    """True for UTF-8 text whose only control characters are tab, line feed and carriage return."""
     try:
         text = data.decode("utf-8")
     except UnicodeDecodeError:
         return False
-    return not any(ord(ch) < 32 and ch not in "\t\n\f\r" or ch == "\x7f" for ch in text)
+    return not any(ord(ch) < 32 and ch not in "\t\n\r" or ch == "\x7f" for ch in text)
 
 
 def _tree_files(repo: Path, rev: str) -> set[str]:
@@ -393,7 +391,7 @@ def fork_check(repo: Path, base: str, candidate: str, *, tip: str | None = None,
                 "the fork maintainer's own push")
             failed = True
     # A path the manifest names, whatever its disposition, may not become binary in a pull request
-    # either: the manifest's description of it no longer holds, and a binary is not scanned as text.
+    # either: the manifest describes those bytes, and a change of kind reaches the default branch by review.
     for path in sorted(set(component_paths(base_manifest)) - set(waived)):
         before = _blob_id(repo, branch_point, path)
         after = _blob_id(repo, candidate_sha, path)
@@ -483,13 +481,18 @@ def _summary(lines: list[str], code: int) -> str:
         shown = ", ".join(f"`{path}`" for path in admitted[:10])
         more = f" and {len(admitted) - 10} more" if len(admitted) > 10 else ""
         title += f"; this pull request admits {len(admitted)} path(s) itself: {shown}{more}"
-    listed = [f"- `{path}`" for path in admitted]
+    listed = [f"- `{path}`" for path in admitted[:SELF_ADMITTED_MAX_PATHS]]
+    if len(admitted) > SELF_ADMITTED_MAX_PATHS:
+        listed.append(f"- and {len(admitted) - SELF_ADMITTED_MAX_PATHS} more (over the limit; the job log has all)")
     head = [title, "", *(["Paths this pull request admits itself:", "", *listed, ""] if listed else [])]
-    report = list(lines)
-    if sum(len(line) + 1 for line in head + report) > SUMMARY_LIMIT:
-        while report and sum(len(line) + 1 for line in head + report) > SUMMARY_LIMIT - 200:
-            report.pop()
-        report.append("(report cut to fit the summary; the job log has all of it)")
+    budget = SUMMARY_LIMIT - 2_000 - sum(len(line.encode("utf-8")) + 1 for line in head)
+    report = []
+    for line in lines:
+        budget -= len(line.encode("utf-8")) + 1
+        if budget < 0:
+            report.append("(report cut to fit the summary; the job log has all of it)")
+            break
+        report.append(line)
     return "\n".join([
         *head,
         "This repository is not the upstream, so it has no access to the upstream's private trusted",
@@ -563,6 +566,10 @@ def main(argv: list[str] | None = None) -> int:
             code, lines = fork_check(args.repo.resolve(), args.base, args.candidate, tip=args.tip)
         except CheckError as error:
             print(f"{FORK_CONTEXT}: input error: {error}", flush=True)
+            return 2
+        except Exception:  # noqa: BLE001 - reported here, while workflow commands are still stopped
+            traceback.print_exc(file=sys.stdout)
+            print(f"{FORK_CONTEXT}: internal error", flush=True)
             return 2
         print("\n".join(lines), flush=True)
     finally:
