@@ -357,7 +357,7 @@ LIBS       ?= -lSDL3 $(VULKAN_LIB_NAME) $(WIN_ONLY_LIBS) $(POSIX_RUNTIME_LIBS)
 ifeq ($(NK_TARGET_OS),android)
 override CFLAGS += -fPIC
 TITLE_OUTPUT = $(BUILD_DIR)/lib$(GAME_NAME).so
-TITLE_LINK_FLAGS := -shared -Wl,--wrap=exit -Wl,--wrap=_exit -Wl,--wrap=_Exit
+TITLE_LINK_FLAGS := -shared -Wl,--wrap=exit -Wl,--wrap=_exit -Wl,--wrap=_Exit -Wl,--wrap=atexit
 TITLE_ANDROID_OBJ = $(BUILD_DIR)/nk_android_title.o
 else
 TITLE_OUTPUT = $(BUILD_DIR)/$(GAME_NAME)$(EXE_EXT)

@@ -195,7 +195,7 @@ class AndroidAppContractTests(unittest.TestCase):
                 "order": (3, "b a shutdown(no-exit-file) "),
                 "nested": (5, "b nested a shutdown(no-exit-file) "),
                 "_exit": (4, "shutdown(no-exit-file) "),
-                "race": (2, "slow slow-done a shutdown(no-exit-file) "),
+                "race": (2, "slow racer slow-done a shutdown(no-exit-file) "),
                 "foreign": (6, "a shutdown(no-exit-file) "),
             }
             for mode, (status, trace) in cases.items():
@@ -398,7 +398,9 @@ class AndroidMakeTargetTests(unittest.TestCase):
         link = next((line for line in out.splitlines() if f"-o {library}" in line), None)
         self.assertIsNotNone(link, "the compile goal links no libdemo.so")
         link_words = str(link).split()
-        for flag in ("-shared", "-Wl,--wrap=exit", "-Wl,--wrap=_exit", "-Wl,--wrap=_Exit"):
+        # The same four wraps as android/app/CMakeLists.txt: without atexit, the runtime's handlers
+        # would register with the C library, and the shim's _exit() would drop every one.
+        for flag in ("-shared", "-Wl,--wrap=exit", "-Wl,--wrap=_exit", "-Wl,--wrap=_Exit", "-Wl,--wrap=atexit"):
             self.assertIn(flag, link_words)
         rsp = (out.split(f"-o {library}", 1)[1]).split("\n", 3)[:3]
         self.assertIn("-lSDL3 -lvulkan", " ".join(rsp))
@@ -595,6 +597,8 @@ def cast_str(value: str | None) -> str:
 _TITLE_SHIM_HARNESS = r"""
 #include <fcntl.h>
 #include <pthread.h>
+#include <sched.h>
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
@@ -619,11 +623,21 @@ static void handler_a(void) { say("a "); }
 static void handler_b(void) { say("b "); }
 static void handler_foreign(void) { say("foreign "); }   /* registered with the C library itself */
 static void handler_nested(void) { say("nested "); exit(5); }
-static void *racer(void *arg) { (void)arg; exit(9); return NULL; }
+static atomic_int s_racer_started;
+static void *racer(void *arg) {
+    (void)arg;
+    say("racer ");
+    atomic_store(&s_racer_started, 1);
+    exit(9);   /* must wait for the exit the main thread owns */
+    return NULL;
+}
 static void handler_slow(void) {
     say("slow ");
     pthread_t thread;
-    if (pthread_create(&thread, NULL, racer, NULL) == 0) usleep(200000);
+    if (pthread_create(&thread, NULL, racer, NULL) == 0) {
+        while (!atomic_load(&s_racer_started)) sched_yield();
+        usleep(200000);   /* time for the racer to reach the exit lock */
+    }
     say("slow-done ");
 }
 
