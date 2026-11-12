@@ -3317,6 +3317,72 @@
         "reset": "one PRX launch; PSPLink soft reset before the next launch, only after a read-only nkctl probe shows the launch finished"
       },
       {
+        "id": "PSP-GE-RASTER-002",
+        "status": "implemented",
+        "hardware_evidence": "NOT_RUN",
+        "evidence_note": "Built as the fixed-shape case 187 stream of #2193's raster bounds cells: colour writes past the frame-buffer stride (fbw 512, 500 and 256), depth writes past zbw 256, and a depth-only clear under a scissor, each read back as counts of drawn, cleared, fill and other pixels. No hardware run is cited and no measurement is claimed.",
+        "group": "ge",
+        "source": "fixtures/psp_oracle/probe_ge_sample.c",
+        "prx": "ge_raster_bounds.prx",
+        "apis": [
+          "sceGeEdramGetAddr",
+          "sceGeListEnQueue",
+          "sceGeListSync",
+          "sceGeDrawSync",
+          "sceGeBreak",
+          "sceKernelDcacheWritebackAll",
+          "sceKernelDelayThread",
+          "sceKernelGetSystemTimeLow"
+        ],
+        "diagnostic_case_ids": [
+          "ge-raster-bounds"
+        ],
+        "case_ids": [
+          "raster-*",
+          "depth-*",
+          "vram-restore",
+          "ge-raster-bounds-done"
+        ],
+        "invariant": "#2193, per cell in fixed order: the bounded GE wait outcome, then fixed-shape reads of a 0x44000-byte colour block at VRAM 0x100000 (plain uncached mirror) and a 0x44000-byte depth block at 0x144000 (uncached 0x04200000 mirror): per read the pixel count and the counts equal to the drawn, cleared and fill values or anything else, or 16 raw pixels; the 0x88000 bytes are saved first and restored and checked at the end",
+        "issues": [
+          2193
+        ],
+        "risk": "low; project-written through-mode lists into a probe-owned 0x88000-byte VRAM block at 0x100000 that the CPU saves first, fills before each cell and restores at the end; each list is queued with a GE context so the driver restores the GE state, each wait bounded with a sceGeBreak(1) reset after a TIMEOUT",
+        "reset": "one PRX launch; PSPLink soft reset before the next launch, only after a read-only nkctl probe shows the launch finished"
+      },
+      {
+        "id": "PSP-GE-RASTER-003",
+        "status": "implemented",
+        "hardware_evidence": "NOT_RUN",
+        "evidence_note": "Built as the fixed-shape case 188 stream of #343's depth rounding cells (zr-thru-eq, zr-thru-gt, zr-xf-eq) in the ge-raster window and record shape: fractional through-mode and transform-mode depths read as colour through EQUAL and GREATER tests. No hardware run is cited and no measurement is claimed.",
+        "group": "ge",
+        "source": "fixtures/psp_oracle/probe_ge_sample.c",
+        "prx": "ge_depth_round.prx",
+        "apis": [
+          "sceGeEdramGetAddr",
+          "sceGeListEnQueue",
+          "sceGeListSync",
+          "sceGeDrawSync",
+          "sceGeBreak",
+          "sceKernelDcacheWritebackAll",
+          "sceKernelDelayThread",
+          "sceKernelGetSystemTimeLow"
+        ],
+        "diagnostic_case_ids": [
+          "ge-depth-round"
+        ],
+        "case_ids": [
+          "zr-*",
+          "ge-depth-round-done"
+        ],
+        "invariant": "#343, per cell in fixed order: the bounded GE wait outcome and the window digest, the raw pixels of the 16x4 window x 16..31, y 8..11 of a 64x32 8888 buffer at VRAM 0x100000 after a per-pixel depth pass and a depth-tested draw, and the pass mask of the pixels that show their source colour",
+        "issues": [
+          343
+        ],
+        "risk": "low; project-written display lists into the ge-raster VRAM blocks (8 KiB colour at 0x100000 that the CPU clears first, and a depth buffer at 0x110000 that only the GE writes, at its 0x2040-XOR addresses within 0x110000..0x113fff); each list is queued with a GE context so the driver restores the GE state, each wait bounded with a sceGeBreak(1) reset after a TIMEOUT",
+        "reset": "one PRX launch; PSPLink soft reset before the next launch, only after a read-only nkctl probe shows the launch finished"
+      },
+      {
         "id": "PSP-GE-MIP-001",
         "status": "implemented",
         "hardware_evidence": "MEASURED",
