@@ -118,7 +118,7 @@ class AndroidAppContractTests(unittest.TestCase):
             android_pin = re.search(r"set\(" + cmake_name + r" ([0-9a-f]{40})\)", deps)
             self.assertIsNotNone(ci_pin, ci_name)
             self.assertIsNotNone(android_pin, cmake_name)
-            assert android_pin is not None
+            assert ci_pin is not None and android_pin is not None
             self.assertEqual(android_pin.group(1), ci_pin.group(1), cmake_name)
 
     def test_manifest_requests_no_permissions(self) -> None:

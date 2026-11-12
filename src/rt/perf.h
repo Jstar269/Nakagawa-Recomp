@@ -194,6 +194,7 @@ void     sr_perf_test_set_clocks(SrPerfTestClock wall_ns, SrPerfTestClock thread
 void     sr_perf_test_reinit(void);
 void     sr_perf_shutdown(void);
 uint64_t sr_perf_now_ns_impl(void);
+void sr_perf_exclude_thread(void);   /* this host thread's calls account nothing (perf.c) */
 #define sr_perf_now_ns() (sr_perf_enabled ? sr_perf_now_ns_impl() : 0)
 void     sr_perf_guest_begin(void);
 void     sr_perf_guest_end(void);

@@ -191,6 +191,8 @@ static void gpu_dirty_reset(void) {
  * probe exported by hle.c. */
 extern uint32_t sr_hle_test_io_open(CpuState *s);
 extern uint32_t sr_hle_test_io_read(CpuState *s);
+extern uint32_t hle_io_umd_read_us(uint64_t bytes);   /* the UMD drive's read time (hle_io.c) */
+extern int sr_hle_test_io_disc_fetches_in_flight(void);
 extern uint32_t sr_hle_test_io_write(CpuState *s);
 extern uint32_t sr_hle_test_io_lseek(CpuState *s);
 extern uint32_t sr_hle_test_io_lseek32(CpuState *s);
@@ -781,6 +783,7 @@ int sr_perf_enabled;
  * a "the counters are live" predicate before handing it to a stub, so a constant 0 would
  * silently disable the media-telemetry call sites this harness has to observe. */
 uint64_t sr_perf_now_ns_impl(void) { static uint64_t t = 1000; t += 1000; return t; }
+void sr_perf_exclude_thread(void) {}
 void sr_perf_guest_begin(void) {}
 void sr_perf_guest_end(void) {}
 void sr_perf_guest_idle_wait(uint64_t started_ns) { (void)started_ns; }
@@ -917,6 +920,14 @@ int iso_lookup(const char *guest_path, uint32_t *out_lba, uint32_t *out_size) {
  * the ISO 9660 primary volume descriptor header at the start of sector 16 and every other byte
  * a function of its sector and offset, so a read from the wrong sector is visible. */
 enum { UMD_SYNTHETIC_SECTORS = 64u };
+/* The disc's size in sectors: 64 except while a test that reads more sets it. */
+static uint32_t s_umd_synthetic_sectors = UMD_SYNTHETIC_SECTORS;
+/* A host read that blocks, for the host-worker cell: while the gate is closed (1) a read of the
+ * synthetic disc waits for it to open (2), for 3 s of host time at most, and counts a wait that
+ * ran out. 0 = no gate. */
+static atomic_int s_umd_synthetic_gate;
+static atomic_int s_umd_synthetic_gate_timeouts;
+static atomic_uint s_umd_synthetic_reads;   /* reads of the synthetic disc */
 
 static uint8_t umd_synthetic_byte(uint64_t position) {
     static const uint8_t pvd[8] = {0x01u, 'C', 'D', '0', '0', '1', 0x01u, 0x00u};
@@ -927,14 +938,23 @@ static uint8_t umd_synthetic_byte(uint64_t position) {
 
 int iso_sector_count(uint32_t *out_sectors) {
     if (!s_umd_io_synthetic_enabled || !out_sectors) return -1;
-    *out_sectors = UMD_SYNTHETIC_SECTORS;
+    *out_sectors = s_umd_synthetic_sectors;
     return 0;
 }
 
 int iso_read(uint32_t lba, uint32_t offset, void *dst, uint32_t bytes) {
     if (s_umd_io_synthetic_enabled && dst) {
+        atomic_fetch_add(&s_umd_synthetic_reads, 1u);
+        if (atomic_load(&s_umd_synthetic_gate) == 1) {
+            int waited_ms = 0;
+            while (atomic_load(&s_umd_synthetic_gate) == 1 && waited_ms++ < 3000) SDL_Delay(1);
+            if (atomic_load(&s_umd_synthetic_gate) == 1) {
+                atomic_fetch_add(&s_umd_synthetic_gate_timeouts, 1);
+                atomic_store(&s_umd_synthetic_gate, 2);
+            }
+        }
         const uint64_t start = (uint64_t)lba * 2048u + offset;
-        const uint64_t end = (uint64_t)UMD_SYNTHETIC_SECTORS * 2048u;
+        const uint64_t end = (uint64_t)s_umd_synthetic_sectors * 2048u;
         if (start >= end) return 0;
         uint32_t n = end - start < bytes ? (uint32_t)(end - start) : bytes;
         for (uint32_t i = 0; i < n; i++) ((uint8_t *)dst)[i] = umd_synthetic_byte(start + i);
@@ -29282,6 +29302,324 @@ static void test_savedata_thread_ended_inside_a_parked_save(void) {
     free(save_ms);
 }
 
+/* #1296, #2361: a read of the disc parks its thread for the drive's time, so the other threads
+ * run through it, as they do on a PSP while the drive transfers. The production path: real
+ * threads on their own coroutines, sceIoRead through the dispatcher, the blocking sound output
+ * and the scheduler's timed waits. A reader at priority 32 reads 4 MiB of the UMD block device
+ * in one call while a sound thread at priority 16 feeds 256-frame blocks and a thread at
+ * priority 48 counts milliseconds. Before the read took guest time it returned at once: no
+ * block was output during it and the weaker thread never ran. The cell runs on the fixture's
+ * virtual clock and again under the deterministic clock (SR_DETERMINISTIC_CLOCK=1), and holds
+ * on both.
+ *
+ * MUTANT: drop h_IoRead's last sched_delay_current (the rest of the drive's time) -- the long read takes no guest time, and
+ *   no block is output and the weaker thread does not count during it.
+ * MUTANT: h_IoRead waits whatever the result -- the refused read takes guest time.
+ * MUTANT: drop io_read_caller_can_wait from h_IoRead -- the read made with dispatch disabled
+ *   takes guest time. MUTANT: drop the on_umd test -- the Memory Stick read takes guest time.
+ * MUTANT: hle_io_umd_read_us charges a sector count as bytes -- the long read takes the minimum.
+ * MUTANT: io_async_complete_fd calls h_IoRead -- the waited queued read takes the drive's time.
+ * The idle clock's own cases (a wait the slice reaches, a deadline before the VBLANK, a due
+ * source) are sched_selftest's: test_idle_virtual_clock_stops_at_a_deadline_before_the_vblank. */
+enum {
+    URW_MAIN_ENTRY = 0x08a71000u,
+    URW_SOUND_ENTRY = 0x08a71040u,
+    URW_WEAK_ENTRY = 0x08a71080u,
+    URW_DOOMED_ENTRY = 0x08a71180u,
+    URW_FILE_LBA = 0x1002u,     /* where the synthetic lookup puts disc0:/UMD_DATA.BIN */
+    URW_DISC_SECTORS = 0x1100u, /* the disc for this cell: past that file */
+    URW_NID_IO_REMOVE = 0xf27a9c51u,
+    URW_NAME = 0x08a710c0u,
+    URW_PATH = 0x08a71100u,
+    URW_ASYNC_RESULT = 0x08a71200u,
+    URW_SOUND_BUF = 0x08a72000u,
+    URW_DST = 0x09000000u,
+    URW_SECTORS = 2048u,        /* 4 MiB in one read */
+    URW_SOUND_FRAMES = 256u,
+    URW_NID_IO_OPEN = 0x109f50bcu,
+    URW_NID_IO_CLOSE = 0x810c4bc3u,
+    URW_NID_IO_READ = 0x6a638d83u,
+    URW_NID_IO_WRITE = 0x42ec03acu,
+    URW_NID_IO_LSEEK32 = 0x68963324u,
+    URW_NID_IO_READ_ASYNC = 0xa0b5a7c2u,
+    URW_NID_IO_WAIT_ASYNC = 0xe23eec33u
+};
+static atomic_int s_urw_stop;
+static uint32_t s_urw_outputs, s_urw_weak;
+static uint32_t s_urw_read, s_urw_read_us, s_urw_read_outputs, s_urw_read_weak;
+static uint32_t s_urw_short, s_urw_short_us, s_urw_refused, s_urw_refused_us;
+static uint32_t s_urw_nodispatch, s_urw_nodispatch_us, s_urw_ms, s_urw_ms_us;
+static uint32_t s_urw_async, s_urw_async_us;
+static int s_urw_bytes_ok, s_urw_gated;
+static uint32_t s_urw_read_calls;   /* disc reads the long read made */
+static uint32_t s_urw_file, s_urw_file_us, s_urw_doomed_fd, s_urw_after_doomed;
+static int s_urw_file_ok, s_urw_doomed_returned, s_urw_in_flight_parked, s_urw_in_flight_ended;
+static int s_urw_after_doomed_ok;
+static uint32_t s_urw_gate_weak;   /* the weaker thread's count when the gated read began */
+
+static uint32_t urw_now(void) { return gsw_call(NID_SCE_KERNEL_GET_SYSTEM_TIME_LOW, 0u, 0u, 0u, 0u); }
+
+static void urw_sound_fn(CpuState *cpu) {
+    (void)gsw_call(NID_SCE_AUDIO_CH_RESERVE, 0u, URW_SOUND_FRAMES, 0u, 0u);
+    while (!atomic_load(&s_urw_stop)) {
+        (void)gsw_call(NID_SCE_AUDIO_OUTPUT_BLOCKING, 0u, 0x8000u, URW_SOUND_BUF, 0u);
+        s_urw_outputs++;
+    }
+    cpu->r[2] = 0u;
+}
+
+static void urw_weak_fn(CpuState *cpu) {
+    while (!atomic_load(&s_urw_stop)) {
+        (void)gsw_call(NID_SCE_KERNEL_DELAY_THREAD, 1000u, 0u, 0u, 0u);
+        s_urw_weak++;
+        /* The host read is still blocked, and this thread has run five times since it began:
+         * let it go on. */
+        if (atomic_load(&s_umd_synthetic_gate) == 1 && s_urw_weak >= s_urw_gate_weak + 5u)
+            atomic_store(&s_umd_synthetic_gate, 2);
+    }
+    cpu->r[2] = 0u;
+}
+
+/* A reader that is ended while the host is still reading for it (the worker pass). */
+static void urw_doomed_fn(CpuState *cpu) {
+    (void)gsw_call(URW_NID_IO_READ, s_urw_doomed_fd, URW_DST + 0x40000u, 8u, 0u);
+    s_urw_doomed_returned = 1;   /* not reached: main ends this thread inside the read */
+    cpu->r[2] = 0u;
+}
+
+static void urw_main_fn(CpuState *cpu) {
+    title_hle_write_cstr(URW_PATH, "umd0:");
+    const uint32_t fd = gsw_call(URW_NID_IO_OPEN, URW_PATH, 0x000f0001u, 0u, 0u);
+    const uint32_t sound = gsw_call(NID_SCE_KERNEL_CREATE_THREAD, URW_NAME, URW_SOUND_ENTRY, 16u, 0x1000u);
+    (void)gsw_call(NID_SCE_KERNEL_START_THREAD, sound, 0u, 0u, 0u);
+    const uint32_t weak = gsw_call(NID_SCE_KERNEL_CREATE_THREAD, URW_NAME, URW_WEAK_ENTRY, 48u, 0x1000u);
+    (void)gsw_call(NID_SCE_KERNEL_START_THREAD, weak, 0u, 0u, 0u);
+    (void)gsw_call(NID_SCE_KERNEL_DELAY_THREAD, 30000u, 0u, 0u, 0u);   /* the sound thread is in step */
+
+    /* The long read. */
+    uint32_t t0 = urw_now(), outputs0 = s_urw_outputs, weak0 = s_urw_weak;
+    s_urw_gate_weak = weak0;
+    if (s_urw_gated) atomic_store(&s_umd_synthetic_gate, 1);
+    const uint32_t reads0 = atomic_load(&s_umd_synthetic_reads);
+    s_urw_read = gsw_call(URW_NID_IO_READ, fd, URW_DST, URW_SECTORS, 0u);
+    s_urw_read_calls = atomic_load(&s_umd_synthetic_reads) - reads0;
+    atomic_store(&s_umd_synthetic_gate, 0);
+    s_urw_read_us = urw_now() - t0;
+    s_urw_read_outputs = s_urw_outputs - outputs0;
+    s_urw_read_weak = s_urw_weak - weak0;
+    s_urw_bytes_ok = umd_test_sectors_match(URW_DST, 0u, URW_SECTORS);
+
+    /* One sector: the drive's minimum. */
+    t0 = urw_now();
+    s_urw_short = gsw_call(URW_NID_IO_READ, fd, URW_DST, 1u, 0u);
+    s_urw_short_us = urw_now() - t0;
+
+    /* A refused read (a zero count) does not wait. */
+    t0 = urw_now();
+    s_urw_refused = gsw_call(URW_NID_IO_READ, fd, URW_DST, 0u, 0u);
+    s_urw_refused_us = urw_now() - t0;
+
+    /* With dispatch disabled the read returns at once (UNMEASURED on a PSP). */
+    const uint32_t dispatch = gsw_call(NID_SCE_KERNEL_SUSPEND_DISPATCH_THREAD, 0u, 0u, 0u, 0u);
+    t0 = urw_now();
+    s_urw_nodispatch = gsw_call(URW_NID_IO_READ, fd, URW_DST, 16u, 0u);
+    s_urw_nodispatch_us = urw_now() - t0;
+    (void)gsw_call(NID_SCE_KERNEL_RESUME_DISPATCH_THREAD, dispatch, 0u, 0u, 0u);
+
+    /* A queued read that is waited for completes on the request queue, with no drive time. */
+    (void)gsw_call(URW_NID_IO_LSEEK32, fd, 0u, 0u, 0u);
+    t0 = urw_now();
+    (void)gsw_call(URW_NID_IO_READ_ASYNC, fd, URW_DST, URW_SECTORS, 0u);
+    (void)gsw_call(URW_NID_IO_WAIT_ASYNC, fd, URW_ASYNC_RESULT, 0u, 0u);
+    s_urw_async_us = urw_now() - t0;
+    s_urw_async = MEM_R32(URW_ASYNC_RESULT);
+
+    if (s_urw_gated) {
+        /* A reader ended while the host read for it is blocked: its fetch is abandoned, the
+         * worker drops it when the host read returns, and the next reader is served. */
+        (void)gsw_call(URW_NID_IO_LSEEK32, fd, 0u, 0u, 0u);
+        s_urw_doomed_fd = fd;
+        s_urw_gate_weak = 0x7ffffff0u;   /* the weaker thread does not open this gate: main does */
+        atomic_store(&s_umd_synthetic_gate, 1);
+        const uint32_t doomed = gsw_call(NID_SCE_KERNEL_CREATE_THREAD, URW_NAME, URW_DOOMED_ENTRY, 24u, 0x1000u);
+        (void)gsw_call(NID_SCE_KERNEL_START_THREAD, doomed, 0u, 0u, 0u);   /* it runs and parks in its read */
+        s_urw_in_flight_parked = sr_hle_test_io_disc_fetches_in_flight();
+        (void)gsw_call(NID_SCE_KERNEL_TERMINATE_DELETE_THREAD, doomed, 0u, 0u, 0u);
+        s_urw_in_flight_ended = sr_hle_test_io_disc_fetches_in_flight();
+        atomic_store(&s_umd_synthetic_gate, 2);   /* the host read returns to nobody */
+        (void)gsw_call(URW_NID_IO_LSEEK32, fd, 32u, 0u, 0u);
+        s_urw_after_doomed = gsw_call(URW_NID_IO_READ, fd, URW_DST + 0x50000u, 4u, 0u);
+        s_urw_after_doomed_ok = umd_test_sectors_match(URW_DST + 0x50000u, 32u, 4u);
+        atomic_store(&s_umd_synthetic_gate, 0);
+    }
+    (void)gsw_call(URW_NID_IO_CLOSE, fd, 0u, 0u, 0u);
+
+    /* A file of the disc, read from the middle: the drive's time, and the right bytes. */
+    title_hle_write_cstr(URW_PATH, "disc0:/UMD_DATA.BIN");
+    const uint32_t file = gsw_call(URW_NID_IO_OPEN, URW_PATH, 1u, 0u, 0u);
+    (void)gsw_call(URW_NID_IO_LSEEK32, file, 512u, 0u, 0u);
+    t0 = urw_now();
+    s_urw_file = gsw_call(URW_NID_IO_READ, file, URW_DST + 0x60000u, 1024u, 0u);
+    s_urw_file_us = urw_now() - t0;
+    s_urw_file_ok = 1;
+    for (uint32_t i = 0; i < 1024u; i++)
+        if (MEM_R8(URW_DST + 0x60000u + i) != umd_synthetic_byte((uint64_t)URW_FILE_LBA * 2048u + 512u + i))
+            s_urw_file_ok = 0;
+    (void)gsw_call(URW_NID_IO_CLOSE, file, 0u, 0u, 0u);
+
+    /* A Memory Stick file is not the drive's: its read returns at once. */
+    title_hle_write_cstr(URW_PATH, "ms0:/urw_read.bin");
+    const uint32_t out = gsw_call(URW_NID_IO_OPEN, URW_PATH, 0x0602u, 0x1ffu, 0u);   /* WRONLY|CREAT|TRUNC */
+    (void)gsw_call(URW_NID_IO_WRITE, out, URW_DST, 4096u, 0u);
+    (void)gsw_call(URW_NID_IO_CLOSE, out, 0u, 0u, 0u);
+    const uint32_t in = gsw_call(URW_NID_IO_OPEN, URW_PATH, 1u, 0u, 0u);
+    t0 = urw_now();
+    s_urw_ms = gsw_call(URW_NID_IO_READ, in, URW_DST + 0x10000u, 4096u, 0u);
+    s_urw_ms_us = urw_now() - t0;
+    (void)gsw_call(URW_NID_IO_CLOSE, in, 0u, 0u, 0u);
+    (void)gsw_call(URW_NID_IO_REMOVE, URW_PATH, 0u, 0u, 0u);
+
+    atomic_store(&s_urw_stop, 1);
+    (void)gsw_call(NID_SCE_KERNEL_DELAY_THREAD, 30000u, 0u, 0u, 0u);   /* both loops see it and end */
+    cpu->r[2] = 0u;
+}
+
+static void urw_run(int deterministic, int host_worker) {
+    reset_fixture();
+    sr_hle_init();
+    sr_hle_test_register_iofilemgr();
+    sr_hle_test_audio_reset();
+    audio_fixture_reset();
+    sr_test_guest_fn_reset();
+    sr_test_register_guest_fn(URW_MAIN_ENTRY, urw_main_fn);
+    sr_test_register_guest_fn(URW_SOUND_ENTRY, urw_sound_fn);
+    sr_test_register_guest_fn(URW_WEAK_ENTRY, urw_weak_fn);
+    sr_test_register_guest_fn(URW_DOOMED_ENTRY, urw_doomed_fn);
+    title_hle_write_cstr(URW_NAME, "urw-thread");
+    s_umd_io_synthetic_enabled = 1;
+    s_umd_synthetic_sectors = URW_DISC_SECTORS;
+    s_det_clock = deterministic;
+    s_host_work_test_force = host_worker;
+    s_urw_gated = host_worker;
+    atomic_store(&s_umd_synthetic_gate, 0);
+    atomic_store(&s_umd_synthetic_gate_timeouts, 0);
+    /* The fixture's virtual clock has no guest-time sound queue: with no host device either,
+     * each output waits its block out, as the deterministic clock's model does once in step. */
+    s_audio_queue_result = -1;
+    atomic_store(&s_urw_stop, 0);
+    s_urw_outputs = s_urw_weak = 0u;
+    s_urw_read = s_urw_short = s_urw_refused = s_urw_nodispatch = s_urw_ms = s_urw_async = 0xdeadbeefu;
+    s_urw_read_us = s_urw_short_us = s_urw_refused_us = s_urw_nodispatch_us = 0xdeadbeefu;
+    s_urw_ms_us = s_urw_async_us = 0xdeadbeefu;
+    s_urw_read_outputs = s_urw_read_weak = 0xdeadbeefu;
+    s_urw_bytes_ok = 0;
+    s_urw_file = s_urw_file_us = s_urw_after_doomed = 0xdeadbeefu;
+    s_urw_file_ok = s_urw_doomed_returned = s_urw_after_doomed_ok = 0;
+    s_urw_in_flight_parked = s_urw_in_flight_ended = -1;
+    g_worker_uid = SR_ROLE_UID_NONE;
+    memset(s_cpu, 0, sizeof(*s_cpu));
+    sched_run(URW_MAIN_ENTRY, 0u, 0u);
+    s_det_clock = 0;
+    s_host_work_test_force = 0;
+    s_urw_gated = 0;
+    s_umd_synthetic_sectors = UMD_SYNTHETIC_SECTORS;
+    s_umd_io_synthetic_enabled = 0;
+    sr_hle_test_audio_reset();
+    audio_fixture_reset();
+    sr_test_guest_fn_reset();
+}
+
+static void test_umd_read_parks_its_thread_for_the_drives_time(void) {
+    static const char ms_root[] = HLE_BUILD_ROOT "/hle_umd_read_wait";
+    const char *old_ms = getenv("SR_MEMSTICK");
+    char *save_ms = old_ms ? (char *)malloc(strlen(old_ms) + 1u) : NULL;
+    if (save_ms) memcpy(save_ms, old_ms, strlen(old_ms) + 1u);
+    nk_platform_mkdir_p(ms_root);
+    hle_test_setenv("SR_MEMSTICK", ms_root);
+
+    const uint32_t drive_us = hle_io_umd_read_us((uint64_t)URW_SECTORS * 2048u);
+    const uint32_t minimum_us = hle_io_umd_read_us(2048u);
+    /* Blocks the sound thread outputs in the drive's time, less one for where in a block the
+     * read begins. */
+    const uint32_t blocks = (uint32_t)((uint64_t)drive_us * 44100u / (URW_SOUND_FRAMES * 1000000ull));
+    expect(blocks >= 4u && minimum_us < drive_us,
+           "the long read's drive time spans several sound blocks, and one sector takes less");
+
+    for (int deterministic = 0; deterministic <= 1; deterministic++) {
+        /* The fixture's own virtual clock is coarse: every scheduler pass that keeps time adds
+         * 10 ms, so a 5.8 ms block wait ends blocks late and a 100 us wait can take two such
+         * passes. There the bounds are one block and the long read's time; the deterministic
+         * clock keeps the drive's time in blocks and a short read under a display period. */
+        const uint32_t expected = deterministic ? blocks - 1u : 1u;
+        const uint32_t brief_us = deterministic ? 16683u : drive_us;
+        urw_run(deterministic, 0);
+        if (s_urw_read != URW_SECTORS || s_urw_read_us < drive_us || s_urw_read_outputs < expected ||
+            !s_urw_read_weak)
+            printf("  UMD read wait (%s clock): read 0x%08x in %u us (drive %u us), %u sound blocks "
+                   "(expected %u or more), weaker thread %u\n", deterministic ? "deterministic" : "virtual",
+                   (unsigned)s_urw_read, (unsigned)s_urw_read_us, (unsigned)drive_us,
+                   (unsigned)s_urw_read_outputs, (unsigned)expected, (unsigned)s_urw_read_weak);
+        expect(s_urw_read == URW_SECTORS && s_urw_bytes_ok,
+               "the long UMD read returns its sector count and the disc's bytes");
+        expect(s_urw_read_us >= drive_us && s_urw_read_us < 2u * drive_us,
+               "the long UMD read takes the drive's time in guest time");
+        expect(s_urw_read_outputs >= expected,
+               "the sound thread outputs its blocks through the long read");
+        expect(s_urw_read_weak != 0u, "a weaker thread runs while the reader waits for the drive");
+        expect(s_urw_short == 1u && s_urw_short_us >= minimum_us && s_urw_short_us < brief_us,
+               "a one-sector read waits the drive's minimum, not a display period");
+        expect(s_urw_file == 1024u && s_urw_file_ok && s_urw_file_us >= minimum_us && s_urw_file_us < brief_us,
+               "a read from the middle of a disc file returns its bytes after the drive's minimum");
+        expect(s_urw_refused == 0x80010016u && s_urw_refused_us == 0u,
+               "a refused read returns at once");
+        expect(s_urw_nodispatch == 16u && s_urw_nodispatch_us == 0u,
+               "a read made with dispatch disabled returns at once");
+        expect(s_urw_async == URW_SECTORS && s_urw_async_us < drive_us,
+               "a queued read that is waited for completes without the drive's time");
+        expect(s_urw_ms == 4096u && s_urw_ms_us == 0u,
+               "a Memory Stick read returns at once: the drive's time is the disc's only");
+    }
+
+    /* #2361: with the host worker (a paced run; forced here on the deterministic clock), a host
+     * read that blocks does not hold the other threads. The synthetic disc's read waits until
+     * the weaker guest thread has run five more times, so it can only end if that thread runs
+     * while the host read is blocked. Made on the scheduler's thread, as before, the read
+     * holds every thread until its 3 s of host time run out.
+     * MUTANT: drop the hle_io_release_thread call in sr_hle_release_thread_resources -- the ended
+     *   reader's fetch stays in flight. MUTANT: io_iso_read copies from half the offset into the
+     *   fetch (data + (offset - fetch->offset) / 2) -- the bytes served differ.
+     * MUTANT: h_IoRead never asks for the worker (io_disc_fetch_start returns NULL) -- the
+     *   gated read runs out. MUTANT: io_iso_read ignores the fetched bytes -- the disc is read
+     *   again on the scheduler's thread, 1024 more reads than the worker's 64. */
+    urw_run(1, 1);
+    if (atomic_load(&s_umd_synthetic_gate_timeouts) || s_urw_read != URW_SECTORS || !s_urw_bytes_ok)
+        printf("  UMD read on the host worker: read 0x%08x in %u us, bytes %s, %d gate waits ran out, "
+               "weaker thread %u, %u disc reads\n", (unsigned)s_urw_read, (unsigned)s_urw_read_us,
+               s_urw_bytes_ok ? "match" : "differ", atomic_load(&s_umd_synthetic_gate_timeouts),
+               (unsigned)s_urw_read_weak, (unsigned)s_urw_read_calls);
+    expect(atomic_load(&s_umd_synthetic_gate_timeouts) == 0 && s_urw_read_weak >= 5u,
+           "a blocked host read of the disc does not hold the other guest threads");
+    expect(s_urw_read == URW_SECTORS && s_urw_bytes_ok,
+           "a read fetched on the host worker returns its sector count and the disc's bytes");
+    expect(s_urw_read_calls == URW_SECTORS * 2048u / 65536u,
+           "the disc is read once, by the worker in 64 KiB pieces, and the read is served from that");
+    expect(s_urw_read_us >= drive_us, "a read fetched on the host worker still takes the drive's time");
+    expect(s_urw_file == 1024u && s_urw_file_ok,
+           "a disc file read from the middle is fetched from the right place on the worker");
+    expect(s_urw_in_flight_parked == 1 && !s_urw_doomed_returned,
+           "a reader parks while the host reads for it, with its fetch in flight");
+    expect(s_urw_in_flight_ended == 0,
+           "ending that reader abandons its fetch: none is left in flight");
+    expect(s_urw_after_doomed == 4u && s_urw_after_doomed_ok && sr_hle_test_io_disc_fetches_in_flight() == 0,
+           "after the abandoned host read returns, the next reader is served the right bytes");
+    expect(s_urw_short == 1u && s_urw_refused == 0x80010016u && s_urw_refused_us == 0u &&
+               s_urw_nodispatch == 16u && s_urw_nodispatch_us == 0u,
+           "with the host worker a short read, a refused one and one with dispatch disabled answer as before");
+
+    hle_test_setenv("SR_MEMSTICK", save_ms);
+    free(save_ms);
+}
+
 /* #1374: what the sync calls return for ids that name no list, for completed lists and
  * for sync types other than 0 and 1. Every expected value is a PSP-GE-SYNC-001 cell
  * (PSP-3000, probe ge-sync-ids, captured by the runs of 96fe29f6 and f6da6125 on
@@ -39751,6 +40089,35 @@ static void test_fpl_blocking_waits(void) {
     s_cur = (int)(cur - s_tcb);
 }
 
+/* PSP-HLE-STDIO-001 (docs/HARDWARE_ORACLE.md, hle-std-handles, 2026-11-06, PSP-3000): a one-byte
+ * sceIoWrite to Stdout and to Stderr returns 1; sceIoClose of the Stdout handle returns
+ * 0x800200D1 and closes nothing, so a later write returns 1 and sceKernelStdout returns the same
+ * handle. The cells hold whatever value the runtime hands out for the handles. */
+static void test_std_handles_measured(void) {
+    reset_fixture();
+    sr_hle_init();
+    const uint32_t buf = 0x00240c00u;
+    MEM_W8(buf, (uint8_t)'x');
+    CpuState cpu;
+    memset(&cpu, 0, sizeof cpu);
+    const uint32_t out = sr_syscall(&cpu, 0xa6bab2e9u);   /* sceKernelStdout */
+    memset(&cpu, 0, sizeof cpu);
+    const uint32_t err = sr_syscall(&cpu, 0xf78ba90au);   /* sceKernelStderr */
+    memset(&cpu, 0, sizeof cpu); cpu.r[4] = out; cpu.r[5] = buf; cpu.r[6] = 1u;
+    expect(sr_syscall(&cpu, 0x42ec03acu) == 1u, "std handles: a 1-byte write to Stdout returns 1 (PSP-HLE-STDIO-001)");
+    memset(&cpu, 0, sizeof cpu); cpu.r[4] = err; cpu.r[5] = buf; cpu.r[6] = 1u;
+    expect(sr_syscall(&cpu, 0x42ec03acu) == 1u, "std handles: a 1-byte write to Stderr returns 1 (PSP-HLE-STDIO-001)");
+    memset(&cpu, 0, sizeof cpu); cpu.r[4] = out;
+    expect(sr_syscall(&cpu, 0x810c4bc3u) == 0x800200d1u,
+           "std handles: sceIoClose of Stdout returns 0x800200D1 (PSP-HLE-STDIO-001)");
+    memset(&cpu, 0, sizeof cpu); cpu.r[4] = out; cpu.r[5] = buf; cpu.r[6] = 1u;
+    expect(sr_syscall(&cpu, 0x42ec03acu) == 1u,
+           "std handles: Stdout still takes a write after the refused close (PSP-HLE-STDIO-001)");
+    memset(&cpu, 0, sizeof cpu);
+    expect(sr_syscall(&cpu, 0xa6bab2e9u) == out,
+           "std handles: sceKernelStdout returns the same handle after the close (PSP-HLE-STDIO-001)");
+}
+
 static void test_vpl_blocking_waits(void) {
     extern void sr_hle_test_partition_reset(void);
     reset_fixture();
@@ -43665,7 +44032,7 @@ static void test_ace_stick_remap_reaches_the_guest_only_from_the_live_stick(void
     extern int s_ctrl_test_stick;
     extern int ace_init_spec(const char *spec, const char *report_path);
     static const char stick_line[] =
-        "v1;tier=ace;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;stick=64";
+        "v1;tier=ace;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;twin=off;stick=64";
     CpuState cpu;
     RouteStickRead r;
     const int test_stick = s_ctrl_test_stick;
@@ -44493,14 +44860,15 @@ static uint32_t s_selfstop_guest_gp;
 static uint32_t s_selfstop_guest_returned;
 static uint32_t s_selfstop_guest_pc;
 static int s_selfstop_guest_in_scheduler;
+static uint32_t s_selfstop_guest_args[3] = {0u, 4u, SELFSTOP_ARG_ADDR};
 static void selfstop_guest_entry(CpuState *s) {
     s->pc = LIFECYCLE_MOD_B_BASE + LIFECYCLE_START_OFF;
     s->r[28] = s_selfstop_guest_gp;
     s_selfstop_guest_pc = s->pc;
     s_selfstop_guest_in_scheduler = sched_guest_thread_running();
-    s->r[4] = 0u; /* first argument is unnamed in the public PSPSDK declaration */
-    s->r[5] = 4u;
-    s->r[6] = SELFSTOP_ARG_ADDR;
+    s->r[4] = s_selfstop_guest_args[0]; /* unnamed in the public PSPSDK declaration */
+    s->r[5] = s_selfstop_guest_args[1];
+    s->r[6] = s_selfstop_guest_args[2];
     (void)sr_syscall(s, NID_SCE_KERNEL_SELF_STOP_UNLOAD_MODULE);
     s_selfstop_guest_returned = 1u; /* the API is terminal on the modeled success path */
 }
@@ -45037,6 +45405,51 @@ static void test_late_prx_unload_reload_lifecycle(void) {
     expect(sr_hle_test_module_count() == 0u && sr_hle_test_image_count() == 0u &&
                sr_hle_resolve_late_import(LIFECYCLE_EXPORT_B) == 0u,
            "self-stop: caller exit retires the module record, image and exports");
+
+    /* PSP-HLE-SELFSTOP-001 (docs/HARDWARE_ORACLE.md, 2026-11-08, PSP-3000), form (1, 0, NULL):
+     * a first argument of 1 behaves as 0 does. The call does not return, module_stop runs once
+     * with argument size 0 and argp 0, and the module is unloaded. */
+    self_uid = sr_hle_test_load_prx_image(path_b, LIFECYCLE_MOD_B_BASE, LIFECYCLE_EXPORT_B,
+                                          LIFECYCLE_PATCH_OFF_A_1);
+    expect(self_uid != 0u &&
+               sr_hle_test_set_module_image(self_uid, LIFECYCLE_MOD_B_BASE,
+                                            LIFECYCLE_MOD_B_BASE + LIFECYCLE_IMAGE_SIZE, self_gp),
+           "self-stop (1, 0, NULL): module image loads");
+    sr_test_register_guest_fn(LIFECYCLE_MOD_B_BASE + LIFECYCLE_START_OFF, lifecycle_start_fn);
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = self_uid;
+    expect(sr_syscall(&cpu, 0x50f0c1ecu) == 0u, "self-stop (1, 0, NULL): module starts");
+    /* Only (1, 0, NULL) was measured: a first argument of 1 with an argument block stays refused,
+     * so the call returns and the module stays loaded. */
+    s_lifecycle_stop_calls = 0u;
+    s_selfstop_guest_returned = 0u;
+    s_selfstop_guest_args[0] = 1u;
+    s_selfstop_guest_args[1] = 4u;
+    s_selfstop_guest_args[2] = SELFSTOP_ARG_ADDR;
+    sr_test_register_guest_fn(LIFECYCLE_MOD_B_BASE + LIFECYCLE_START_OFF, selfstop_guest_entry);
+    sched_run(LIFECYCLE_MOD_B_BASE + LIFECYCLE_START_OFF, 0u, 0u);
+    expect(s_selfstop_guest_returned == 1u && s_lifecycle_stop_calls == 0u &&
+               sr_hle_test_module_count() == 1u,
+           "self-stop (1, 4, argp): unmeasured form is refused and the module stays loaded");
+    s_lifecycle_stop_calls = 0u;
+    s_lifecycle_stop_arglen = 0xffffffffu;
+    s_lifecycle_stop_argp_word = 0xffffffffu;
+    s_selfstop_guest_returned = 0u;
+    s_selfstop_guest_args[0] = 1u;
+    s_selfstop_guest_args[1] = 0u;
+    s_selfstop_guest_args[2] = 0u;
+    sr_test_register_guest_fn(LIFECYCLE_MOD_B_BASE + LIFECYCLE_START_OFF, selfstop_guest_entry);
+    sched_run(LIFECYCLE_MOD_B_BASE + LIFECYCLE_START_OFF, 0u, 0u);
+    s_selfstop_guest_args[0] = 0u;
+    s_selfstop_guest_args[1] = 4u;
+    s_selfstop_guest_args[2] = SELFSTOP_ARG_ADDR;
+    expect(s_selfstop_guest_returned == 0u,
+           "self-stop (1, 0, NULL): the call does not return (PSP-HLE-SELFSTOP-001)");
+    expect(s_lifecycle_stop_calls == 1u && s_lifecycle_stop_arglen == 0u &&
+               s_lifecycle_stop_argp_word == 0u,
+           "self-stop (1, 0, NULL): module_stop runs once with size 0 and argp 0 (PSP-HLE-SELFSTOP-001)");
+    expect(sr_hle_test_module_count() == 0u && sr_hle_test_image_count() == 0u,
+           "self-stop (1, 0, NULL): the module is unloaded (PSP-HLE-SELFSTOP-001)");
 
     remove(path_a);
     remove(path_b);
@@ -46439,7 +46852,7 @@ static void test_wc_display_getmode_and_start_cb(void) {
 static void test_ace_load_skip_wait_only_where_the_stock_call_blocks(void) {
     enum { NID_WAIT_VBLANK_START = 0x984c27e7u };
     static const char k_load_fast[] =
-        "v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;tier=ace;load=fast";
+        "v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;twin=off;tier=ace;load=fast";
     CpuState cpu;
     reset_fixture();
     sr_hle_init();
@@ -46522,7 +46935,7 @@ static void ace_skip_waiter_guest_fn(CpuState *cpu) {
 
 static void test_ace_load_skip_wait_lets_a_lower_priority_thread_run(void) {
     static const char k_load_fast[] =
-        "v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;tier=ace;load=fast";
+        "v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;twin=off;tier=ace;load=fast";
     reset_fixture();
     sr_hle_init();
     sr_test_guest_fn_reset();
@@ -46591,7 +47004,7 @@ static void ace_pacing_guest_fn(CpuState *cpu) {
 
 static void test_ace_load_skip_wait_stops_once_it_paces_updates(void) {
     static const char k_load_fast[] =
-        "v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;tier=ace;load=fast";
+        "v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;twin=off;tier=ace;load=fast";
     enum { UPDATES = (int)(sizeof(s_ace_pacing_skips) / sizeof(s_ace_pacing_skips[0])) };
     char captured[4096];
     FILE *capture = NULL;
@@ -52270,6 +52683,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_ge_blocking_sync_waits_for_stalled_list();
     test_ge_list_stops_for_a_stronger_thread();
     test_savedata_thread_ended_inside_a_parked_save();
+    test_umd_read_parks_its_thread_for_the_drives_time();
     test_ge_sync_ids_match_psp();
     test_ge_signal_jump_call_ret();
     test_ge_signal_depth_origin_stall();
@@ -52570,6 +52984,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_tlspl_lifecycle_and_thread_isolation();
     test_wb_tlspl_vpl_cells();
     test_vpl_blocking_waits();
+    test_std_handles_measured();
     test_kernel_pool_bounds_measured();
     test_mbx_lifecycle_and_ordering();
     test_intr_context_conformance();

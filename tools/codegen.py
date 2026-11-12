@@ -4438,7 +4438,19 @@ def _sv_step(w, regs, written):
             regs[i] = None
 
 def sv_plan(elf, insns, labels, hst_profile=False, options=None):
-    """Pre-compute {flush_addr: [(reg, expected_value), ...]} for one function."""
+    """Pre-compute {flush_addr: [(reg, expected_value), ...]} for one function.
+
+    Counts the points for the run's summary line; sv_points computes them without
+    counting, for the LLVM lowering plan, which reads the same function again."""
+    points = sv_points(elf, insns, labels, hst_profile=hst_profile, options=options)
+    if points:
+        SV_STATS["funcs"] += 1
+        SV_STATS["checks"] += sum(len(checks) for checks in points.values())
+    return points
+
+
+def sv_points(elf, insns, labels, hst_profile=False, options=None):
+    """sv_plan's {flush_addr: [(reg, expected_value), ...]}, with no side effect."""
     options = _options_for_call(options)
     if not (insns and options.static_verify):
         return {}
@@ -4492,9 +4504,6 @@ def sv_plan(elf, insns, labels, hst_profile=False, options=None):
         run_len += 1
         last_plain = addr
     flush()
-    if points:
-        SV_STATS["funcs"] += 1
-        SV_STATS["checks"] += total
     return points
 
 SR_SV_CHECK = """/* --static-verify support: compile-time-predicted register assertions. */
