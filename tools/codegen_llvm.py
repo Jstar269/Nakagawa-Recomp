@@ -83,6 +83,8 @@ ABI_FUNCTIONS = {
     "sr_raw_syscall": _FN(L.void, (L.ptr, L.i32, L.i32)),
     "sr_break": _FN(L.void, (L.ptr, L.i32, L.i32)),
     "sr_bitrev": _FN(L.i32, (L.i32,)),
+    "sr_llvm_sv_check": _FN(L.void, (L.ptr, L.i32, L.i32, L.i32)),
+    "sr_stale_note_cache_op": _FN(L.void, (L.i32,)),
 }
 
 #: LLVM intrinsics the lowering uses (defined for every input it passes them).
@@ -386,6 +388,8 @@ class FunctionLowering:
             self.call("sr_break", self.s, self.c32(op.imm), self.c32(op.addr))
         elif k == "nop":                                       # sync, cache
             pass
+        elif k == "cache_note":                                # --stale-detect's cache hook
+            self.call("sr_stale_note_cache_op", b.add(self.R(src[0]), self.c32(op.imm)))
         elif k in ("mfhi", "mflo"):
             self.W(d, self.load_field("hi" if k == "mfhi" else "lo"))
         elif k in ("mthi", "mtlo"):
@@ -524,16 +528,23 @@ class FunctionLowering:
         b.br(self.at_label(self.start) if plan.entry_label else body)
         b.position_at_end(body)
 
+        checked = set()
         for step in plan.steps:
             if isinstance(step, P.Label):
                 self.enter(self.at_label(step.addr))
             elif isinstance(step, P.Op):
                 self.instruction(step)
+                self.static_verify(step.addr)
+                checked.add(step.addr)
             elif isinstance(step, P.FallInto):
                 self.goto(self.label(f"cont_{step.target:08x}"))
             else:
                 self.transfer(step)
 
+        unplaced = sorted(set(plan.sv_checks) - checked)
+        if unplaced:
+            raise LLVMUnsupported(f"static-verify check at 0x{unplaced[0]:08x} is not on a "
+                                  "straight-line word")
         if plan.exits:
             if b.block.terminator is None:
                 b.br(self.label("fallthrough_return"))
@@ -558,6 +569,12 @@ class FunctionLowering:
                 self.function.delete_block(block)
         self.function.check()
         return self.function
+
+    def static_verify(self, addr):
+        """codegen._emit_non_control_word's sr_sv_check calls after the word at ``addr``."""
+        for reg, expect in self.plan.sv_checks.get(addr, ()):
+            self.call("sr_llvm_sv_check", self.s, self.c32(addr), self.c32(reg),
+                      self.c32(expect))
 
     def transfer(self, t: P.Transfer):
         """One Transfer, as codegen.emit_function emits its kind."""

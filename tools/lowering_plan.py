@@ -36,7 +36,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-PLAN_VERSION = "nakagawa-lowering-plan-2"
+PLAN_VERSION = "nakagawa-lowering-plan-3"
 
 
 class Unsupported(Exception):
@@ -135,6 +135,9 @@ class FunctionPlan:
     entry_label: bool                  # the body starts at a label, not its first word
     steps: list = field(default_factory=list)
     exits: list[ContinuationExit] = field(default_factory=list)
+    #: --static-verify: the (register, expected value) assertions after the straight-line
+    #: word at each address, exactly codegen.sv_plan's points (empty without the option).
+    sv_checks: dict[int, tuple[tuple[int, int], ...]] = field(default_factory=dict)
 
     @property
     def labels(self) -> set[int]:
@@ -233,8 +236,8 @@ def decode_op(addr: int, w: int, *, stale_detect: bool = False) -> Op:
     if op == 0x38:
         return Op(addr, w, "sc", rt, (rs, rt), _sext16(w), width=4)
     if op == 0x2F:
-        if stale_detect:
-            raise Unsupported(f"cache under --stale-detect at 0x{addr:08x}")
+        if stale_detect:                                           # the detector's cache hook
+            return Op(addr, w, "cache_note", None, (rs,), _sext16(w))
         return Op(addr, w, "nop")
     if op == 0x10:
         raise Unsupported(f"COP0 at 0x{addr:08x}")
@@ -283,8 +286,6 @@ def plan_function(cg, elf, start, ranges, known, *, resume_owners=None, resumabl
         raise Unsupported("runtime-placed module (relocatable addresses)")
     if options.lle_cpu:
         raise Unsupported("--lle-cpu exception lowering is not in the prototype scope")
-    if options.static_verify:
-        raise Unsupported("--static-verify assertions are emitted by the C backend only")
     insns, labels, continuations = cg.function_flow(
         elf, start, ranges, known, resume_owners=resume_owners,
         dispatch_boundaries=dispatch_boundaries, options=options)
@@ -304,6 +305,11 @@ def plan_function(cg, elf, start, ranges, known, *, resume_owners=None, resumabl
         hit = sorted(insns & hst_emission_sites(cg))
         if hit:
             raise Unsupported(f"title-profile special site 0x{hit[0]:08x}")
+    # The same points emit_function asserts, from the same labels (before the planned skip
+    # targets and the entry label join them); the runtime-module and variable-import cases
+    # that carry none in C were refused above.
+    sv_checks = {addr: tuple(checks) for addr, checks in cg.sv_points(
+        elf, insns, labels, hst_profile=profile == "hst", options=options).items()}
 
     def word(addr):
         return space.instruction_word(addr, cg.read32(elf, addr), options=options)
@@ -342,7 +348,7 @@ def plan_function(cg, elf, start, ranges, known, *, resume_owners=None, resumabl
         labels.add(start)
 
     plan = FunctionPlan(PLAN_VERSION, start, symbol(start), resumable, start in resume_owners,
-                        entry_label)
+                        entry_label, sv_checks=sv_checks)
     consumed = set()
     for addr in sorted(insns):
         if addr in consumed:

@@ -120,6 +120,16 @@ the C body. What the C path leaves to a C compiler is explicit here:
   at other entries (`--region-split-threshold`), a conditional branch into another entry is
   a TAIL transfer to that entry's body, and a not-taken one continues into the next entry,
   as in C.
+- **Stale-code detection** (`--stale-detect`): a `cache` instruction reports its effective
+  address to the detector (`sr_stale_note_cache_op`) inside its trace record, as the C
+  emitter's does. The detector's records are kept per guest entry, and an LLVM body has
+  the same entry, symbol and registration as the C body, so a stale or self-modified block
+  is caught at its cache invalidation whichever backend compiled it.
+- **Static verification** (`--static-verify`): the plan carries `codegen.sv_points`, the
+  points `emit_function` asserts, computed from the same labels, and each assertion is a
+  call of `sr_llvm_sv_check` after the same straight-line word. Its body is the C chunks'
+  `sr_sv_check` (a test holds the two equal). A point that would not follow a straight-line
+  word keeps the function in C, by name.
 - **Undefined behavior** in LLVM terms never reaches the IR: variable shifts are masked to
   31 as the C does, rotates are shifts, `div`/`divu` select a safe divisor and then the
   PSP's defined results for division by zero and `INT_MIN / -1`, and `clz`/`clo` use
@@ -145,15 +155,15 @@ splitting the helpers into an inline bounds check and an out-of-line slow path i
 Lowered: the integer ALU and compares (including the Allegrex `max`/`min`, rotates, `ext`,
 `ins`, `wsbh`, `wsbw`, `seb`, `seh`, `bitrev`, `clz`, `clo`), HI/LO multiply, divide and
 multiply-accumulate, integer loads and stores (including `lwl`/`lwr`/`swl`/`swr` and
-`ll`/`sc`), `cache` and `sync`, conditional branches and branch-likely, `j`, `jal`,
-`jalr`, `jr`, the linked-branch CALL form (#968), continuations, the HLE syscall boundary
-and `break`, and the stack census wrapper.
+`ll`/`sc`), `cache` (with the `--stale-detect` hook) and `sync`, conditional branches and
+branch-likely, `j`, `jal`, `jalr`, `jr`, the linked-branch CALL form (#968), continuations,
+the HLE syscall boundary and `break`, the stack census wrapper, and `--static-verify`
+assertions.
 
 Kept in C, with the reason recorded: scalar FPU and VFPU instructions and their branches,
-COP0 and `eret`, `--lle-cpu` (its synchronous exception lowering), `--static-verify`
-assertions, `--stale-detect`'s `cache` hook, enhancement-package rewrite sites,
-runtime-placed modules (their addresses are relocatable expressions), and any HST
-profile address in a codegen table (`hst_emission_sites`: `GUEST_PATCHES` and `_SV_SPECIAL`,
+COP0 and `eret`, `--lle-cpu` (its synchronous exception lowering), enhancement-package
+rewrite sites, runtime-placed modules (their addresses are relocatable expressions), and
+any HST profile address in a codegen table (`hst_emission_sites`: `GUEST_PATCHES` and `_SV_SPECIAL`,
 both empty since #363). A test re-derives every HST-profile address site from
 `emit_function` and requires that none remains.
 
@@ -162,6 +172,10 @@ both empty since #363). A test re-derives every HST-profile address site from
 - `llvm-link` runs LLVM's verifier on each chunk's module and on the linked module before
   Clang sees it, and Clang verifies its IR input again; the tests run
   `opt -passes=verify` on the builder's output and on every chunk module of a real build.
+- `tools/test_lowering_plan.py` holds every plan to `emit_function` over a real build,
+  including one with `--static-verify --stale-detect` (each assertion's word, register and
+  value, and that the IR calls it after that word's trace record, before the next word or
+  edge); unit tests place the cache hook in a straight-line word and in a delay slot.
 - `cosim-selftest-llvm` runs the cosimulation corpus with every lowerable cell as an LLVM
   body in the AOT lane, compared with the production interpreter on the instruction trace,
   the ordered guest writes, the memory window and the state vector, and fails if fewer than
@@ -283,6 +297,3 @@ before a backend dependency becomes a production one.
   at every access ([above](#semantics-in-the-ir)).
 - Runtime-placed (relocatable) modules.
 - The in-process stage, and arm64 hosts (#329).
-- The `--stale-detect` `cache` hook. Stale-code records are kept per guest entry, and an
-  LLVM body has the same entry, symbol and registration as the C body, so the detector
-  already covers lowered bodies; only a function containing the hook stays in C.
