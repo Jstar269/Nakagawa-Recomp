@@ -1646,11 +1646,6 @@ def _cell_rs() -> list[int]:
     loop edge at 0x20. A thread suspended in the first call continues at 0x14 once the frame
     above returns; a thread parked at the edge continues at 0x14 at once. The two differ in
     what runs first, so a resume that keyed its points on the PC alone would take the wrong one.
-
-    The loop counter is stepped at 0x14, outside any delay slot, and the slot at 0x1c carries
-    the sum instead: an interpreter that drops a delay slot then ends the loop with a wrong
-    sum, where a counter kept in the slot would never reach zero (the README's rule that every
-    program terminates under every mutant).
     """
     return [
         _i(0x09, SP, SP, -16),              # 0x00 addiu sp, sp, -16
@@ -1658,9 +1653,9 @@ def _cell_rs() -> list[int]:
         _i(0x09, ZERO, S1, 2),              # 0x08 addiu s1, zero, 2
         _j(0x03, 0x00),                     # 0x0c jal   rs_mid (patched + relocated)
         NOP,                                # 0x10 (slot)
-        _i(0x09, S1, S1, -1),               # 0x14 addiu s1, s1, -1
+        _r(S2, V0, S2, 0, 0x21),            # 0x14 addu  s2, s2, v0
         _j(0x03, 0x00),                     # 0x18 jal   rs_mid (patched + relocated)
-        _r(S2, V0, S2, 0, 0x21),            # 0x1c addu  s2, s2, v0 (slot: v0 of the call before)
+        _i(0x09, S1, S1, -1),               # 0x1c addiu s1, s1, -1 (slot)
         _i(0x07, S1, ZERO, -4),             # 0x20 bgtz  s1, 0x14
         _i(0x2B, A0, S2, 0x2C),             # 0x24 sw    s2, 0x2c(a0) (slot)
         _i(0x23, SP, RA, 12),               # 0x28 lw    ra, 12(sp)
