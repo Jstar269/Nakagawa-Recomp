@@ -556,10 +556,13 @@ def _pid_alive(pid: int) -> bool:
             return True
         return True
     import ctypes
-    kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+    kernel32.OpenProcess.restype = ctypes.c_void_p
+    kernel32.GetExitCodeProcess.argtypes = (ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong))
+    kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
     handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
     if not handle:
-        return bool(kernel32.GetLastError() == 5)  # access denied: it exists
+        return bool(ctypes.get_last_error() == 5)  # type: ignore[attr-defined]  # access denied: it exists
     code = ctypes.c_ulong()
     ok = kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
     kernel32.CloseHandle(handle)
@@ -567,15 +570,36 @@ def _pid_alive(pid: int) -> bool:
 
 
 def _clear_stale_lock(lock: Path, pid_alive: Callable[[int], bool], log: Callable[[str], None]) -> None:
-    """Remove our own lock file when the process named in it is gone (a killed fast run)."""
+    """Remove our own lock file when the process named in it is gone (a killed fast run).
+
+    The lock is moved aside before it is deleted, and deleted only if it still holds the text
+    that named the dead process: a run with the same slot name that took the slot meanwhile keeps
+    its lock, which is moved back. Slot folders are local to one machine (process IDs are)."""
     try:
         text = lock.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return
     match = re.search(r"\bpid=(\d+)", text)
-    if match and not pid_alive(int(match.group(1))):
-        lock.unlink(missing_ok=True)
+    if not match or pid_alive(int(match.group(1))):
+        return
+    aside = lock.with_name(f"{lock.name}.reclaim-{os.getpid()}.lock")
+    try:
+        os.rename(lock, aside)
+    except OSError:
+        return  # gone already, or another run moved it aside first
+    try:
+        taken = aside.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        taken = None
+    if taken == text:
+        aside.unlink(missing_ok=True)
         log(f"reclaimed {lock.name}: process {match.group(1)} is gone")
+        return
+    try:
+        os.link(aside, lock)  # never replaces a lock created meanwhile
+        aside.unlink(missing_ok=True)
+    except OSError:
+        log(f"{aside.name} holds a live lock that could not be moved back; it still counts as a held slot")
 
 
 def _lock_count(slot_dir: Path) -> int:
@@ -588,13 +612,13 @@ def acquire_slot(slot_dir: Path, name: str, max_slots: int, *, quiet_globs: Iter
                  pid_alive: Callable[[int], bool] = _pid_alive) -> Path | None:
     """Hold one title slot: a lock file of our own, created only while fewer than ``max_slots``
     lock files exist and none matches ``quiet_globs`` (a timing run that wants the machine).
-    Our own lock left by a process that is gone is reclaimed first; other jobs' locks never are."""
+    Our own lock left by a process that is gone is reclaimed on each pass; other jobs' locks never are."""
     slot_dir.mkdir(parents=True, exist_ok=True)
     lock = slot_dir / name
-    _clear_stale_lock(lock, pid_alive, log)
     waited = 0.0
     told = False
     while max_wait_seconds is None or waited <= max_wait_seconds:
+        _clear_stale_lock(lock, pid_alive, log)  # every pass: its holder may be killed while we wait
         quiet = next((path.name for pattern in quiet_globs for path in slot_dir.glob(pattern)), None)
         if quiet is None and _lock_count(slot_dir) < max_slots:
             try:

@@ -444,6 +444,28 @@ class SlotTests(unittest.TestCase):
         self.assertIsNone(lock)
         self.assertEqual(held.read_text(encoding="utf-8"), "library-regress pid=424242\n")
 
+    def test_our_lock_whose_process_dies_while_we_wait_is_reclaimed(self) -> None:
+        held = self.slots / "mine.lock"
+        held.write_text("library-regress pid=424242\n", encoding="utf-8")
+        state = {"alive": True}
+        lock = library_regress.acquire_slot(self.slots, "mine.lock", 3, pid_alive=lambda _pid: state["alive"],
+                                            log=lambda _text: None, max_wait_seconds=60, poll_seconds=30,
+                                            sleep=lambda _seconds: state.update(alive=False))
+        self.assertEqual(lock, held)
+        self.assertIn(f"pid={library_regress.os.getpid()} ", held.read_text(encoding="utf-8"))
+
+    def test_a_lock_retaken_by_a_live_run_meanwhile_is_kept(self) -> None:
+        held = self.slots / "mine.lock"
+        held.write_text("library-regress pid=424242\n", encoding="utf-8")
+
+        def dead_but_retaken(_pid: int) -> bool:
+            held.write_text("library-regress pid=525252\n", encoding="utf-8")  # another run took the slot
+            return False
+
+        library_regress._clear_stale_lock(held, dead_but_retaken, lambda _text: None)
+        self.assertEqual(held.read_text(encoding="utf-8"), "library-regress pid=525252\n")
+        self.assertEqual(sorted(path.name for path in self.slots.iterdir()), ["mine.lock"])
+
     def test_a_quiet_lock_holds_the_run(self) -> None:
         (self.slots / "recomp-perf.lock").write_text("x", encoding="utf-8")
         held: list[float] = []
