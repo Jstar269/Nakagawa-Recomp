@@ -29,7 +29,7 @@ def _header_definitions(text):
             macros.setdefault(define.group(1), []).append(define.group(3).strip())
             continue
         function = re.match(r"\s*(?!(?:return|else|case|goto|sizeof)\b)(?:(?:static|inline|extern)\s+)*"
-                            r"[A-Za-z_]\w*(?:\s+|\s*\*+\s*)+"
+                            r"[A-Za-z_]\w*[\s*]+"
                             r"([A-Za-z_]\w*)\s*\(", line)
         if function and not line.lstrip().startswith("#"):
             functions.add(function.group(1))
