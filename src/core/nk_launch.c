@@ -1542,7 +1542,7 @@ NkResult nk_launch_start(NkLaunchSession *session) {
     if (session->iso_path[0]) {
         NkPbpHomebrewView view = nk_pbp_homebrew_find_view(session->iso_path, homebrew_folder,
                                                            sizeof(homebrew_folder));
-        char problem[512];
+        char problem[512] = "";
         if (view == NK_PBP_HB_VIEW_MISSING) {
             snprintf(session->last_error, sizeof(session->last_error),
                      "The homebrew program in %.300s has no copy of its Memory Stick folder "

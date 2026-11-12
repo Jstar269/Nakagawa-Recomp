@@ -206,8 +206,12 @@ the program writes there stays. When a release changes only the files beside the
 folder and pick its `EBOOT.PBP` again: the next start replaces each file the program left as it was, and
 keeps each one it changed or wrote. A release whose program changed is another title, with its own key and
 its own Memory Stick. A program added before its folder came along stops with a message asking you to pick it again.
-Keep each program in its own folder, as `PSP/GAME/<folder>/` on a PSP's Memory Stick has it. The key is made from the program and its title, so the same homebrew is
-the same game wherever you add it from, and the library shows it as **Beta / unofficial**. Homebrew is
+Keep each program in its own folder, as `PSP/GAME/<folder>/` on a PSP's Memory Stick has it, and named
+`EBOOT.PBP` in capitals, the one name a PSP starts a program from; a package with another name is refused with
+a message saying so. The key is made from the program and its title, so the same homebrew is
+the same game wherever you add it from, and the library shows it as **Beta / unofficial**. Two different
+programs can, very rarely, get the same key: the second is then refused by name, and nothing of the first
+is replaced. Homebrew is
 **Experimental**: nobody has checked a program unless [`COMPATIBILITY.md`](COMPATIBILITY.md#homebrew-limits)
 says so. Your `EBOOT.PBP` and its folder are only read, never changed.
 

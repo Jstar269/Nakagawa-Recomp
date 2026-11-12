@@ -92,6 +92,19 @@ static void write_file(const char *path, const char *data) {
 
 /* A disc image as the homebrew import writes it, as far as a launch looks: the primary
    volume descriptor with the import's volume identifier (nk_pbp_homebrew.c). */
+/* A folder link at link_path leading to target: a symlink on POSIX, a junction (which needs
+   no rights) on Windows. False where the host cannot make one. */
+static bool make_folder_link(const char *link_path, const char *target) {
+#ifdef _WIN32
+    char command[NK_MAX_PATH * 8];
+    int written = snprintf(command, sizeof(command), "cmd /c mklink /J \"%s\" \"%s\" >NUL",
+                           link_path, target);
+    return written > 0 && (size_t)written < sizeof(command) && system(command) == 0;
+#else
+    return symlink(target, link_path) == 0;
+#endif
+}
+
 static void write_homebrew_image(const char *path, bool imported) {
     static unsigned char head[17u * 2048u];
     unsigned char *pvd = head + 16u * 2048u;
@@ -836,7 +849,9 @@ static void test_no_iso_child_environment(const char *test_executable,
         char saved_stick[sizeof(session.memstick_root)];
         snprintf(saved_iso, sizeof(saved_iso), "%s", session.iso_path);
         snprintf(saved_stick, sizeof(saved_stick), "%s", session.memstick_root);
-        snprintf(hb_dir, sizeof(hb_dir), "%s%chomebrew-launch", root, sep);
+        /* In the data folder's discs/, the only place the import writes images. */
+        snprintf(hb_dir, sizeof(hb_dir), "%s%cuser_data_override%cdiscs%cXHBT00001", root, sep,
+                 sep, sep);
         snprintf(hb_iso, sizeof(hb_iso), "%s%cXHBT00001.iso", hb_dir, sep);
         snprintf(hb_view_root, sizeof(hb_view_root), "%s%cXHBT00001.ms0", hb_dir, sep);
         snprintf(hb_src, sizeof(hb_src), "%s%chomebrew-source%cMYHB", root, sep, sep);
@@ -995,6 +1010,72 @@ static void test_no_iso_child_environment(const char *test_executable,
         assert(!nk_pbp_homebrew_view_current(hb_pbp, hb_view_root));
         assert(nk_pbp_homebrew_write_view(hb_pbp, hb_view_root, NULL, problem, sizeof(problem)));
 
+        /* A link or junction already on the stick is not written through (review of
+           #2426, N2): the seed stops by name and nothing lands outside the program's
+           folder, whether the link is the program's folder or a folder inside it. */
+        {
+            char link_stick[NK_MAX_PATH * 2 + 32];
+            char link_folder[NK_MAX_PATH * 2 + 96];
+            char outside[NK_MAX_PATH * 2 + 32];
+            char link_path[NK_MAX_PATH * 2 + 128];
+            snprintf(outside, sizeof(outside), "%s%chomebrew-outside", root, sep);
+            assert(nk_platform_mkdir_p(outside));
+            for (int level = 0; level < 2; ++level) {
+                snprintf(link_stick, sizeof(link_stick), "%s%chomebrew-stick-linked%d", root, sep,
+                         level);
+                snprintf(link_folder, sizeof(link_folder), "%s%cPSP%cGAME", link_stick, sep, sep);
+                if (level == 1) {
+                    snprintf(link_path, sizeof(link_path), "%s%cMYHB", link_folder, sep);
+                    snprintf(link_folder, sizeof(link_folder), "%s", link_path);
+                }
+                assert(nk_platform_mkdir_p(link_folder));
+                snprintf(link_path, sizeof(link_path), "%s%c%s", link_folder, sep,
+                         level == 0 ? "MYHB" : "levels");
+                if (!make_folder_link(link_path, outside)) {
+                    printf("[LAUNCH_TEST] NOT_RUN: this host cannot make a folder link\n");
+                    continue;
+                }
+                copy_field(session.memstick_root, sizeof(session.memstick_root), link_stick);
+                assert(nk_launch_start(&session) != NK_OK);
+                /* POSIX already refuses to make a folder through a linked part of its path. */
+                assert(strstr(session.last_error, "leads outside") != NULL ||
+                       strstr(session.last_error, "could not be made on the Memory Stick") !=
+                           NULL);
+                snprintf(hb_file, sizeof(hb_file), "%s%cDATA.TXT", outside, sep);
+                assert(nk_platform_path_missing(hb_file));
+                snprintf(hb_file, sizeof(hb_file), "%s%cONE.TXT", outside, sep);
+                assert(nk_platform_path_missing(hb_file));
+                copy_field(session.memstick_root, sizeof(session.memstick_root), hb_stick);
+            }
+        }
+
+        /* A view.manifest naming a path outside the program's folder is damage: the launch
+           stops and nothing is written there (review of #2426). */
+        {
+            static const char *const hostile[] = { "../x", "/x", "a\\x", "C:x", "a//x" };
+            char manifest_path[NK_MAX_PATH * 2 + 64];
+            char *manifest_text;
+            snprintf(manifest_path, sizeof(manifest_path), "%s%cview.manifest", hb_view_root,
+                     sep);
+            manifest_text = read_text_file(manifest_path);
+            assert(manifest_text != NULL);
+            for (size_t h = 0; h < sizeof(hostile) / sizeof(hostile[0]); ++h) {
+                char *bad = (char *)malloc(strlen(manifest_text) + 128u);
+                assert(bad != NULL);
+                snprintf(bad, strlen(manifest_text) + 128u, "%sF %064d 1 %s\n", manifest_text,
+                         0, hostile[h]);
+                write_file(manifest_path, bad);
+                free(bad);
+                assert(nk_launch_start(&session) != NK_OK);
+                assert(strstr(session.last_error, "is damaged") != NULL);
+                snprintf(hb_file, sizeof(hb_file), "%s%cPSP%cGAME%cx", hb_stick, sep, sep, sep);
+                assert(nk_platform_path_missing(hb_file));
+            }
+            free(manifest_text);
+            assert(nk_pbp_homebrew_write_view(hb_pbp, hb_view_root, NULL, problem,
+                                              sizeof(problem)));
+        }
+
         /* A second folder in the view is not a program's folder: the launch stops. */
         snprintf(hb_view, sizeof(hb_view), "%s%cPSP%cGAME%cOTHER", hb_view_root, sep, sep, sep);
         assert(nk_platform_mkdir_p(hb_view));
@@ -1015,6 +1096,27 @@ static void test_no_iso_child_environment(const char *test_executable,
         assert(nk_launch_start(&session) != NK_OK);
         assert(strstr(session.last_error, "no Memory Stick folder") != NULL);
         copy_field(session.memstick_root, sizeof(session.memstick_root), hb_stick);
+
+        /* An image with the import's volume identifier outside the data folder's discs/ is
+           not the import's: a folder beside it is no view, and the image keeps its disc boot
+           path (review of #2426, N1). Failing before: the folder was trusted as the view
+           and seeded onto the Memory Stick. */
+        {
+            char elsewhere[NK_MAX_PATH * 2 + 32];
+            char odd_iso[NK_MAX_PATH * 2 + 64];
+            char odd_view[NK_MAX_PATH * 2 + 64];
+            snprintf(elsewhere, sizeof(elsewhere), "%s%chomebrew-elsewhere", root, sep);
+            assert(nk_platform_mkdir_p(elsewhere));
+            snprintf(odd_iso, sizeof(odd_iso), "%s%cXHBT00002.iso", elsewhere, sep);
+            snprintf(odd_view, sizeof(odd_view), "%s%cXHBT00002.ms0", elsewhere, sep);
+            write_homebrew_image(odd_iso, true);
+            assert(nk_pbp_homebrew_write_view(hb_pbp, odd_view, NULL, problem, sizeof(problem)));
+            assert(nk_pbp_homebrew_find_view(odd_iso, NULL, 0) == NK_PBP_HB_VIEW_NONE);
+            copy_field(session.iso_path, sizeof(session.iso_path), odd_iso);
+            run_probe(&session, report_path, observed, sizeof(observed));
+            assert(strstr(observed, "SR_BOOT_PATH=ms0:") == NULL);
+            copy_field(session.iso_path, sizeof(session.iso_path), hb_iso);
+        }
 
         /* Any other disc image keeps its disc boot path, whatever lies beside it. */
         write_homebrew_image(hb_iso, false);

@@ -240,8 +240,9 @@ static void hb_u64(NkSha256 *sha, uint64_t value)
    tag (with its terminating NUL, as nk_iso.c hashes it), then PARAM.SFO and
    EBOOT.BIN, each after its length as a little-endian 64-bit integer. */
 static int hb_key(NkPspCtx *ctx, FILE *f, uint64_t program_offset, uint32_t program_size,
-                  const uint8_t sfo[HB_SFO_SIZE], char key[10])
+                  const uint8_t sfo[HB_SFO_SIZE], char key[10], char identity[65])
 {
+    static const char hex[] = "0123456789abcdef";
     static const char domain[] = "nakagawa-non-retail-disc-key-v1";
     NkSha256 sha;
     uint8_t digest[32];
@@ -265,6 +266,11 @@ static int hb_key(NkPspCtx *ctx, FILE *f, uint64_t program_offset, uint32_t prog
     }
     free(buffer);
     nk_sha256_finish(&sha, digest);
+    for (size_t i = 0; i < sizeof(digest); ++i) {
+        identity[i * 2u] = hex[digest[i] >> 4];
+        identity[i * 2u + 1u] = hex[digest[i] & 15u];
+    }
+    identity[64] = '\0';
     nk_non_retail_disc_key(digest, key);
     return NK_PSP_OK;
 }
@@ -359,7 +365,7 @@ int nk_pbp_homebrew_inspect_file(NkPspCtx *ctx, const char *pbp_path, const NkPb
         }
     }
     hb_build_sfo(info->title, sfo);
-    rc = hb_key(ctx, f, program_offset, program_size, sfo, out->key);
+    rc = hb_key(ctx, f, program_offset, program_size, sfo, out->key, out->identity_sha256);
     fclose(f);
     out->kind = NK_PBP_HB_PROGRAM;
     return rc;
@@ -565,7 +571,8 @@ int nk_pbp_homebrew_convert_file(NkPspCtx *ctx, const char *pbp_path, const NkPb
     img = NULL;
     /* The finished image must be the game the inspection named. */
     if (nk_iso_inspect(temp, meta) != NK_OK || !meta->non_retail ||
-        strcmp(meta->disc_id, hb->key) != 0) {
+        strcmp(meta->disc_id, hb->key) != 0 ||
+        strcmp(meta->identity_sha256, hb->identity_sha256) != 0) {
         rc = nk_psp_fail(ctx, NK_PSP_ERR_INTERNAL, NULL,
                          "the disc image written for this package was not read back as "
                          "the same game");
@@ -723,6 +730,28 @@ bool nk_pbp_homebrew_folder_name(const char *pbp_path, char *out, size_t out_siz
         return false;
     }
     memcpy(out, source.picked + source.name_at, length + 1u);
+    return true;
+}
+
+bool nk_pbp_homebrew_program_named(const char *pbp_path, char *problem, size_t problem_size)
+{
+    char real[HB_PATH_MAX];
+    const char *name;
+    if (pbp_path == NULL || !nk_platform_real_path(pbp_path, real, sizeof(real))) {
+        hb_problem(problem, problem_size, "%s",
+                   "The package could not be found, or where it really is could not be read "
+                   "from the system.");
+        return false;
+    }
+    name = real + strlen(real);
+    while (name > real && !hb_is_separator(name[-1])) --name;
+    if (strcmp(name, "EBOOT.PBP") != 0) {
+        hb_problem(problem, problem_size,
+                   "A PSP starts a program only from a file named EBOOT.PBP, in capitals, and "
+                   "this package is named \"%.80s\". Rename it to EBOOT.PBP and add it again.",
+                   name);
+        return false;
+    }
     return true;
 }
 
@@ -1463,6 +1492,26 @@ static bool hb_view_scan(const char *name, bool is_dir, void *ctx)
     return true;
 }
 
+/* Whether path, every link resolved, is folder_real or lies inside it. */
+static bool hb_real_within(const char *path, const char *folder_real)
+{
+    char real[HB_PATH_MAX];
+    return nk_platform_real_path(path, real, sizeof(real)) && hb_path_within(real, folder_real);
+}
+
+/* Whether the image lies in the data folder's discs/, where only the import writes images
+   (review of #2426, N1): the volume identifier alone is a label any image can carry. */
+static bool hb_image_in_data(const char *iso_path)
+{
+    char data[HB_PATH_MAX];
+    char discs[HB_PATH_MAX];
+    char discs_real[HB_PATH_MAX];
+    return nk_platform_get_app_data_dir(data, sizeof(data)) &&
+           hb_join(discs, sizeof(discs), data, "discs") &&
+           nk_platform_real_path(discs, discs_real, sizeof(discs_real)) &&
+           hb_real_within(iso_path, discs_real);
+}
+
 NkPbpHomebrewView nk_pbp_homebrew_find_view(const char *iso_path, char *folder,
                                             size_t folder_size)
 {
@@ -1476,7 +1525,7 @@ NkPbpHomebrewView nk_pbp_homebrew_find_view(const char *iso_path, char *folder,
     bool same;
     if (folder != NULL && folder_size > 0u) folder[0] = '\0';
     if (!nk_pbp_homebrew_view_root(iso_path, root, sizeof(root)) ||
-        hb_image_is_homebrew(iso_path) != 1)
+        hb_image_is_homebrew(iso_path) != 1 || !hb_image_in_data(iso_path))
         return NK_PBP_HB_VIEW_NONE;
     if (nk_platform_path_missing(root)) return NK_PBP_HB_VIEW_MISSING;
     memset(&scan, 0, sizeof(scan));
@@ -1600,6 +1649,7 @@ bool nk_pbp_homebrew_seed_memstick(const char *iso_path, const char *folder,
     char stick_game[HB_PATH_MAX];
     char target[HB_PATH_MAX];
     char target_real[HB_PATH_MAX];
+    char stick_real[HB_PATH_MAX];
     char seeded_dir[HB_PATH_MAX];
     char seeded_path[HB_PATH_MAX];
     char manifest_path[HB_PATH_MAX];
@@ -1645,6 +1695,12 @@ bool nk_pbp_homebrew_seed_memstick(const char *iso_path, const char *folder,
         hb_problem(problem, problem_size,
                    "Where %.400s really is could not be read from the system.", target);
         ok = false;
+    } else if (!nk_platform_real_path(memstick_root, stick_real, sizeof(stick_real)) ||
+               !hb_path_within(target_real, stick_real)) {
+        hb_problem(problem, problem_size,
+                   "%.400s leads outside the title's Memory Stick (a link or junction is in "
+                   "the way); nothing was put there.", target);
+        ok = false;
     } else if (!hb_seeded_record_path(seeded_dir, target_real, seeded_path,
                                       sizeof(seeded_path))) {
         hb_problem(problem, problem_size, "%s",
@@ -1662,7 +1718,10 @@ bool nk_pbp_homebrew_seed_memstick(const char *iso_path, const char *folder,
     kept = (const char **)calloc(manifest.count + 1u, sizeof(*kept));
     memset(&record, 0, sizeof(record));
     if (record_ok) hb_text_add(&record, HB_SEEDED_HEADER "\nstick ", target_real, "\n");
-    if (kept == NULL) ok = false;
+    if (kept == NULL) {
+        hb_problem(problem, problem_size, "%s", "Nakagawa ran out of memory.");
+        ok = false;
+    }
     for (size_t i = 0; ok && i < manifest.count; ++i) {
         const HbEntry *entry = &manifest.items[i];
         char stick[HB_PATH_MAX];
@@ -1689,6 +1748,11 @@ bool nk_pbp_homebrew_seed_memstick(const char *iso_path, const char *folder,
                 kept[kept_count++] = entry->rel; /* the program's file stays */
             } else if (state == HB_MISSING && !nk_platform_mkdir_p_private(stick)) {
                 hb_problem(problem, problem_size, "%.400s could not be made.", stick);
+                ok = false;
+            } else if (!hb_real_within(stick, target_real)) {
+                hb_problem(problem, problem_size,
+                           "%.400s leads outside the program's Memory Stick folder (a link or "
+                           "junction is in the way); nothing was put there.", stick);
                 ok = false;
             }
         } else if (state == HB_FOLDER) {

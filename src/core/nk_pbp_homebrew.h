@@ -44,6 +44,10 @@ typedef struct NkPbpHomebrew {
     NkPbpHomebrewKind kind;
     /* The library key the converted disc will have: X, three letters, five digits. */
     char key[10];
+    /* The full digest the key is cut from (NkIsoMetadata.identity_sha256 of the converted
+       disc), 64 lower-case hex digits. The key keeps about 31 bits of it, so two programs
+       can share a key; this tells them apart. */
+    char identity_sha256[65];
     char title[128];
     uint32_t program_size;
     uint32_t icon_size;
@@ -105,6 +109,12 @@ typedef enum NkPbpHomebrewView {
 bool nk_pbp_homebrew_folder_name(const char *pbp_path, char *out, size_t out_size,
                                  char *problem, size_t problem_size);
 
+/* Whether the package at pbp_path is named EBOOT.PBP, in capitals, as the file has it on
+ * the disk: the one name a PSP starts a program from, and the name the view and the
+ * launch use. False, with a sentence in problem, for any other name (eboot.pbp,
+ * MyGame.PBP). */
+bool nk_pbp_homebrew_program_named(const char *pbp_path, char *problem, size_t problem_size);
+
 /* The view's root for the disc image at iso_path: iso_path with ".iso" replaced
  * by ".ms0". False when iso_path does not end in ".iso" or the result does not fit. */
 bool nk_pbp_homebrew_view_root(const char *iso_path, char *out, size_t out_size);
@@ -116,8 +126,9 @@ bool nk_pbp_homebrew_view_root(const char *iso_path, char *out, size_t out_size)
  * is nor holds one of the user's personal folders (the home folder, the Desktop,
  * Documents, Downloads, Music, Pictures and Videos where the system says they are,
  * and a cloud-sync root), whose files are the user's, not the program's. Folders
- * are compared by the paths they really have, every link resolved. Reads the
- * folder; writes nothing. */
+ * are compared by the paths they really have, every link resolved. A hard link is a
+ * file like any other: its bytes are copied, as the user put them in the folder.
+ * Reads the folder; writes nothing. */
 bool nk_pbp_homebrew_check_folder(const char *pbp_path, const char *view_root,
                                   char *problem, size_t problem_size);
 
@@ -136,9 +147,10 @@ bool nk_pbp_homebrew_write_view(const char *pbp_path, const char *view_root,
 bool nk_pbp_homebrew_view_current(const char *pbp_path, const char *view_root);
 
 /* Look for the view beside the disc image at iso_path. Only an image this import
- * wrote (its volume identifier) has one: any other image is NK_PBP_HB_VIEW_NONE,
- * whatever lies beside it. NK_PBP_HB_VIEW_FOUND puts the folder's name in folder.
- * Reads only. */
+ * wrote has one: an image with the import's volume identifier, in the data folder's
+ * discs/ folder (nk_platform_get_app_data_dir), where only the import writes images.
+ * Any other image is NK_PBP_HB_VIEW_NONE, whatever lies beside it.
+ * NK_PBP_HB_VIEW_FOUND puts the folder's name in folder. Reads only. */
 NkPbpHomebrewView nk_pbp_homebrew_find_view(const char *iso_path, char *folder,
                                             size_t folder_size);
 
@@ -152,8 +164,9 @@ NkPbpHomebrewView nk_pbp_homebrew_find_view(const char *iso_path, char *folder,
  * "<image without .iso>.seeded/", beside the image, also when the seed stops part
  * way. Every file copied is checked against the manifest; a view file that is
  * missing or differs from it removes the manifest, so adding the program again
- * writes the view afresh. False, with a sentence in problem, when a part could not
- * be read or copied. */
+ * writes the view afresh. Nothing is written through a link or junction already on
+ * the stick: a folder whose real path leads outside the program's folder stops the
+ * seed. False, with a sentence in problem, when a part could not be read or copied. */
 bool nk_pbp_homebrew_seed_memstick(const char *iso_path, const char *folder,
                                    const char *memstick_root,
                                    char *problem, size_t problem_size);

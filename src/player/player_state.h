@@ -686,6 +686,8 @@ typedef struct {
     /* An EBOOT.PBP holding unencrypted homebrew (#2143): iso_path is a small private disc
        image written from the package, and disc_id is the library key that image will have. */
     bool homebrew;
+    /* For homebrew, the full digest the key is cut from (NkPbpHomebrew.identity_sha256). */
+    char identity_sha256[65];
     /* NK_DISC_FORMAT_NONE for a PSN package; otherwise the compressed image's
        format, and iso_path and disc_id are known once it is expanded. */
     NkDiscFormat disc_format;

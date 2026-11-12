@@ -8384,8 +8384,8 @@ static void player_psn_result(char *code, size_t code_size, const char *name,
    folder no longer matches the one picked (a newer release copied over it), is made
    again. */
 static bool player_homebrew_iso_ready(const char *iso_path, const char *key,
-                                      const char *folder, const char *pbp_path,
-                                      const char *view_root) {
+                                      const char *identity, const char *folder,
+                                      const char *pbp_path, const char *view_root) {
     NkIsoMetadata *meta;
     bool ready;
     char found[NK_PBP_HOMEBREW_FOLDER_NAME_MAX + 1u];
@@ -8396,9 +8396,34 @@ static bool player_homebrew_iso_ready(const char *iso_path, const char *key,
     meta = (NkIsoMetadata *)calloc(1, sizeof(*meta));
     if (meta == NULL) return false;
     ready = nk_iso_inspect(iso_path, meta) == NK_OK && meta->non_retail &&
-            strcmp(meta->disc_id, key) == 0;
+            strcmp(meta->disc_id, key) == 0 && strcmp(meta->identity_sha256, identity) == 0;
     free(meta);
     return ready;
+}
+
+/* Whether the key's place is free for this program (review of #2426, S3). The key keeps
+   about 31 bits of the program's digest, so another program can have it: an image already
+   under it must be this program's by its full digest, or the import stops by name and
+   replaces nothing (not the image, its folder copy, nor the Memory Stick its title runs
+   on). An image that cannot be read as a disc is not taken for this program's either. */
+static bool player_homebrew_key_free(const char *iso_path, const char *identity) {
+    NkIsoMetadata *meta;
+    bool same;
+    if (nk_platform_path_missing(iso_path)) return true;
+    meta = (NkIsoMetadata *)calloc(1, sizeof(*meta));
+    if (meta == NULL) return false;
+    same = nk_iso_inspect(iso_path, meta) == NK_OK && meta->non_retail &&
+           strcmp(meta->identity_sha256, identity) == 0;
+    free(meta);
+    return same;
+}
+
+static void player_homebrew_key_taken(const char *key, const char *iso_path, char *code,
+                                      size_t code_size, char *message, size_t message_size) {
+    player_psn_result(code, code_size, "HOMEBREW_KEY_TAKEN", message, message_size,
+                      "Another program already has the library key %s that this one would "
+                      "get, so this one can't be added beside it (its disc image is %.300s). "
+                      "Nothing was changed.", key, iso_path);
 }
 
 static bool player_psn_disc_iso_path(char *out, size_t out_size, const char *data_root,
@@ -8478,19 +8503,29 @@ static bool player_homebrew_package_inspect(const char *pbp_path, const NkPbpInf
     }
     if (!nk_pbp_homebrew_check_folder(pbp_path, view_root, problem, sizeof(problem)) ||
         !nk_pbp_homebrew_folder_name(pbp_path, folder, sizeof(folder), problem,
-                                     sizeof(problem))) {
+                                     sizeof(problem)) ||
+        !nk_pbp_homebrew_program_named(pbp_path, problem, sizeof(problem))) {
         package->iso_path[0] = '\0';
         player_psn_result(code, code_size, "HOMEBREW_FOLDER_UNSUPPORTED", message, message_size,
                           "%s", problem);
         return false;
     }
+    if (!player_homebrew_key_free(package->iso_path, program.identity_sha256)) {
+        player_homebrew_key_taken(program.key, package->iso_path, code, code_size, message,
+                                  message_size);
+        package->iso_path[0] = '\0';
+        return false;
+    }
     snprintf(package->pbp_path, sizeof(package->pbp_path), "%s", pbp_path);
     snprintf(package->disc_id, sizeof(package->disc_id), "%s", program.key);
+    snprintf(package->identity_sha256, sizeof(package->identity_sha256), "%s",
+             program.identity_sha256);
     snprintf(package->title, sizeof(package->title), "%s",
              info->title[0] ? info->title : "Homebrew");
     package->homebrew = true;
-    package->iso_ready = player_homebrew_iso_ready(package->iso_path, program.key, folder,
-                                                   pbp_path, view_root);
+    package->iso_ready = player_homebrew_iso_ready(package->iso_path, program.key,
+                                                   program.identity_sha256, folder, pbp_path,
+                                                   view_root);
     return true;
 }
 
@@ -8628,6 +8663,13 @@ static bool player_homebrew_package_convert(const PlayerPsnPackage *package,
         char problem[512];
         bool had_image = !nk_platform_path_missing(package->iso_path);
         problem[0] = '\0';
+        /* Checked again here, before anything is written: another program's image may
+           have arrived under the key since the inspection. */
+        if (!player_homebrew_key_free(package->iso_path, package->identity_sha256)) {
+            player_homebrew_key_taken(package->disc_id, package->iso_path, code, code_size,
+                                      message, message_size);
+            return false;
+        }
         if (!nk_pbp_homebrew_view_root(package->iso_path, view_root, sizeof(view_root)) ||
             !nk_pbp_homebrew_write_view(package->pbp_path, view_root, &hooks, problem,
                                         sizeof(problem))) {
@@ -8646,7 +8688,8 @@ static bool player_homebrew_package_convert(const PlayerPsnPackage *package,
         }
         rc = nk_pbp_homebrew_convert_file(&ctx, package->pbp_path, &info, package->iso_path,
                                           &hooks, &program);
-        if (rc == NK_PSP_OK && strcmp(program.key, package->disc_id) != 0) {
+        if (rc == NK_PSP_OK && (strcmp(program.key, package->disc_id) != 0 ||
+                                strcmp(program.identity_sha256, package->identity_sha256) != 0)) {
             (void)nk_remove_utf8(package->iso_path);
             (void)nk_platform_remove_tree(view_root, NULL);
             player_psn_result(code, code_size, "PBP_PACKAGE_UNSUPPORTED", message, message_size,

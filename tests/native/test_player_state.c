@@ -6953,7 +6953,7 @@ static void test_homebrew_package_becomes_a_private_disc(void) {
     snprintf(pbp_path, sizeof(pbp_path), "%s%cEBOOT.PBP", folder_path, sep);
     snprintf(data_path, sizeof(data_path), "%s%cDATA.TXT", folder_path, sep);
     snprintf(level_path, sizeof(level_path), "%s%clevels%cONE.BIN", folder_path, sep, sep);
-    snprintf(other_path, sizeof(other_path), "%s%cOTHER%cOTHER.PBP", base, sep, sep);
+    snprintf(other_path, sizeof(other_path), "%s%cOTHER%cEBOOT.PBP", base, sep, sep);
     snprintf(view_path, sizeof(view_path), "%s%clevels", folder_path, sep);
     assert(nk_platform_mkdir_p(view_path));
     snprintf(view_path, sizeof(view_path), "%s%cOTHER", base, sep);
@@ -7098,6 +7098,87 @@ static void test_homebrew_package_becomes_a_private_disc(void) {
                                       sizeof(message)));
     assert(strcmp(renamed.disc_id, package.disc_id) != 0 && !renamed.iso_ready);
 
+    /* Two programs with one key (review of #2426, S3): the key keeps about 31 bits of a
+       program's digest, so another program can have it. Here the place of "Another Title"'s
+       key holds "My Homebrew"'s image, as a program padded to collide would find it: the
+       import stops by name at inspection and at conversion, and replaces nothing. Failing
+       before: the conversion wrote its folder copy and its image over the other title's. */
+    {
+        char planted_dir[NATIVE_TEST_PATH_MAX + 192];
+        char planted_view[NATIVE_TEST_PATH_MAX + 192];
+        uint8_t *mine;
+        uint8_t *kept_bytes;
+        size_t mine_len = 0, kept_len = 0;
+        char *slash;
+        snprintf(planted_dir, sizeof(planted_dir), "%s", renamed.iso_path);
+        slash = strrchr(planted_dir, sep);
+        assert(slash != NULL);
+        *slash = '\0';
+        assert(nk_platform_mkdir_p(planted_dir));
+        mine = psn_test_read_file(package.iso_path, &mine_len);
+        assert(mine != NULL);
+        write_binary_file(renamed.iso_path, mine, mine_len);
+        assert(!player_psn_package_convert(&renamed, &hooks, code, sizeof(code), message,
+                                           sizeof(message)));
+        assert(strcmp(code, "HOMEBREW_KEY_TAKEN") == 0);
+        assert(strstr(message, renamed.disc_id) != NULL);
+        kept_bytes = psn_test_read_file(renamed.iso_path, &kept_len);
+        assert(kept_bytes != NULL && kept_len == mine_len &&
+               memcmp(kept_bytes, mine, mine_len) == 0);
+        assert(nk_pbp_homebrew_view_root(renamed.iso_path, planted_view, sizeof(planted_view)));
+        assert(nk_platform_path_missing(planted_view));
+        psn_test_refused(other_path, "HOMEBREW_KEY_TAKEN", "Another program already has");
+        free(kept_bytes);
+        free(mine);
+        assert(test_remove_tree(planted_dir));
+    }
+
+    /* A package not named EBOOT.PBP, in capitals, as the file has it on the disk, is refused
+       by name at import (review of #2426, S1): the view and the launch use that one name, so
+       such a package imported and then never started. */
+    {
+        static const char *const names[] = { "eboot.pbp", "MyGame.PBP" };
+        for (size_t n = 0; n < sizeof(names) / sizeof(names[0]); ++n) {
+            char named_dir[NATIVE_TEST_PATH_MAX + 128];
+            char named_path[NATIVE_TEST_PATH_MAX + 192];
+            char want[64];
+            snprintf(named_dir, sizeof(named_dir), "%s%cNAMED%u", base, sep, (unsigned)n);
+            assert(nk_platform_mkdir_p(named_dir));
+            snprintf(named_path, sizeof(named_path), "%s%c%s", named_dir, sep, names[n]);
+            pbp = homebrew_pbp("Named", program, 88u, NULL, 0, &pbp_len);
+            write_binary_file(named_path, pbp, pbp_len);
+            free(pbp);
+            snprintf(want, sizeof(want), "is named \"%s\"", names[n]);
+            psn_test_refused(named_path, "HOMEBREW_FOLDER_UNSUPPORTED", want);
+        }
+    }
+
+    /* A folder whose path is not ASCII imports (review of #2426, S2): on Windows the path
+       went through the system code page and was refused as a folder that could not be
+       found. The program's own folder keeps an ASCII name. */
+    {
+        char wide_dir[NATIVE_TEST_PATH_MAX + 160];
+        char wide_path[NATIVE_TEST_PATH_MAX + 192];
+        FILE *file;
+        PlayerPsnPackage wide;
+        snprintf(wide_dir, sizeof(wide_dir), "%s%c\xE6\x97\xA5\xE6\x9C\xAC%cWIDE", base, sep,
+                 sep);
+        assert(nk_platform_mkdir_p(wide_dir));
+        snprintf(wide_path, sizeof(wide_path), "%s%cEBOOT.PBP", wide_dir, sep);
+        pbp = homebrew_pbp("Wide", program, 88u, NULL, 0, &pbp_len);
+        file = nk_fopen_utf8(wide_path, "wb");
+        assert(file != NULL);
+        assert(fwrite(pbp, 1, pbp_len, file) == pbp_len);
+        assert(fclose(file) == 0);
+        free(pbp);
+        assert(player_psn_package_inspect(wide_path, &wide, code, sizeof(code), message,
+                                          sizeof(message)));
+        assert(wide.homebrew);
+        /* The test's own tree removal is ANSI on Windows; the platform's is not. */
+        *strrchr(wide_dir, sep) = ' ';
+        assert(nk_platform_remove_tree(wide_dir, NULL));
+    }
+
     /* The wizard says what is happening. */
     app = (PlayerApp *)calloc(1, sizeof(PlayerApp));
     assert(app != NULL);
@@ -7180,6 +7261,51 @@ static void test_homebrew_package_becomes_a_private_disc(void) {
         write_binary_file(entry, (const uint8_t *)"x", 1u);
         psn_test_refused(program_path, "HOMEBREW_FOLDER_UNSUPPORTED",
                          "has a name a PSP's Memory Stick cannot hold");
+        assert(unlink(entry) == 0);
+        /* A linked sub-folder is a link too (review of #2426). */
+        snprintf(entry, sizeof(entry), "%s%cSUB", odd, sep);
+        assert(symlink(folder_path, entry) == 0);
+        psn_test_refused(program_path, "HOMEBREW_FOLDER_UNSUPPORTED", "a link");
+        assert(unlink(entry) == 0);
+        /* A hard link is a file like any other: its bytes are the folder's (review of #2426,
+           N3, accepted as documented in nk_pbp_homebrew.h). */
+        snprintf(entry, sizeof(entry), "%s%cHARD.TXT", odd, sep);
+        assert(link(data_path, entry) == 0);
+        {
+            PlayerPsnPackage linked;
+            assert(player_psn_package_inspect(program_path, &linked, code, sizeof(code),
+                                              message, sizeof(message)));
+        }
+        assert(unlink(entry) == 0);
+        /* The 1 GiB bound, on a sparse file (review of #2426). */
+        snprintf(entry, sizeof(entry), "%s%cBIG.BIN", odd, sep);
+        write_binary_file(entry, (const uint8_t *)"x", 1u);
+        assert(truncate(entry, (off_t)NK_PBP_HOMEBREW_FOLDER_MAX_BYTES + 1) == 0);
+        psn_test_refused(program_path, "HOMEBREW_FOLDER_UNSUPPORTED", "more than 1 GiB");
+        assert(unlink(entry) == 0);
+    }
+#else
+    /* A junction, which needs no rights to make, is refused like a link (review of #2426). */
+    {
+        char odd[NATIVE_TEST_PATH_MAX + 128];
+        char entry[NATIVE_TEST_PATH_MAX + 192];
+        char program_path[NATIVE_TEST_PATH_MAX + 192];
+        char command[3 * NATIVE_TEST_PATH_MAX + 512];
+        snprintf(odd, sizeof(odd), "%s%cJUNCTION", base, sep);
+        assert(nk_platform_mkdir_p(odd));
+        snprintf(program_path, sizeof(program_path), "%s%cEBOOT.PBP", odd, sep);
+        pbp = homebrew_pbp("Junction", program, 88u, NULL, 0, &pbp_len);
+        write_binary_file(program_path, pbp, pbp_len);
+        free(pbp);
+        snprintf(entry, sizeof(entry), "%s%cSUB", odd, sep);
+        snprintf(command, sizeof(command), "cmd /c mklink /J \"%s\" \"%s\" >NUL", entry,
+                 folder_path);
+        if (system(command) == 0) {
+            psn_test_refused(program_path, "HOMEBREW_FOLDER_UNSUPPORTED", "a junction");
+            assert(RemoveDirectoryA(entry));
+        } else {
+            printf("[PLAYER_STATE_TEST] NOT_RUN: mklink /J is unavailable here\n");
+        }
     }
 #endif
     /* A package picked from the user's home folder (or Downloads, Documents and the other

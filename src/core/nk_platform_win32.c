@@ -1398,17 +1398,23 @@ int nk_platform_wait_process(NkProcessHandle *process, int timeout_ms) {
     return -1;
 }
 
+#define NK_FINAL_PATH_CHARS 32768u
+
+/* Wide, as every other path call here: the system code page cannot hold every UTF-8 path
+   (a Japanese folder name on a code page 1252 system, or any non-ASCII one past 932). */
 bool nk_platform_absolute_path(const char *path, char *out_path, size_t max_len) {
     if (!path || !*path || !out_path || max_len == 0) return false;
-    char buffer[MAX_PATH * 2];
-    DWORD written = GetFullPathNameA(path, (DWORD)sizeof(buffer), buffer, NULL);
-    if (written == 0 || written >= sizeof(buffer) || written >= max_len) return false;
-
-    memcpy(out_path, buffer, (size_t)written + 1);
-    return true;
+    WCHAR *wpath = (WCHAR *)malloc(2u * NK_FINAL_PATH_CHARS * sizeof(WCHAR));
+    if (!wpath || !utf8_to_wide(path, wpath, NK_FINAL_PATH_CHARS)) {
+        free(wpath);
+        return false;
+    }
+    WCHAR *full = wpath + NK_FINAL_PATH_CHARS;
+    DWORD written = GetFullPathNameW(wpath, NK_FINAL_PATH_CHARS, full, NULL);
+    bool ok = written > 0 && written < NK_FINAL_PATH_CHARS && wide_to_utf8(full, out_path, max_len);
+    free(wpath);
+    return ok;
 }
-
-#define NK_FINAL_PATH_CHARS 32768u
 
 bool nk_platform_real_path(const char *path, char *out_path, size_t max_len) {
     if (!path || !*path || !out_path || max_len == 0) return false;

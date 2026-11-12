@@ -567,6 +567,22 @@ class TestHomebrewPrebuilt(unittest.TestCase):
             with self.assertRaises(unittest.SkipTest):
                 self.build({})
 
+    def _route_toolchain(self, environment: dict[str, str]) -> None:
+        route = TestPlayerPackageRoute("test_homebrew_finds_its_own_files_in_its_memory_stick_folder")
+        with patch.dict(os.environ, environment, clear=False), patch.object(
+            TestPlayerPackageRoute, "skip_if_toolchain_unavailable",
+            side_effect=unittest.SkipTest("WINDOWS_ONLY: git is not on PATH"),
+        ):
+            route.require_homebrew_toolchain()
+
+    def test_required_route_fails_when_its_toolchain_is_missing(self) -> None:
+        with self.assertRaisesRegex(AssertionError, "the route cannot run: WINDOWS_ONLY"):
+            self._route_toolchain({HOMEBREW_REQUIRED: "1"})
+
+    def test_local_route_skips_when_its_toolchain_is_missing(self) -> None:
+        with self.assertRaises(unittest.SkipTest):
+            self._route_toolchain({HOMEBREW_REQUIRED: "0"})
+
 
 class TestReleaseDocumentation(unittest.TestCase):
     def test_release_docs_match_current_player_boundaries(self):
@@ -928,6 +944,21 @@ class TestPlayerPackageRoute(unittest.TestCase):
                 if not binary.is_file():
                     self.skipTest(f"the player package route needs {binary.name}; build failed")
 
+    def require_homebrew_toolchain(self) -> None:
+        """skip_if_toolchain_unavailable, but a failure under NK_HOMEBREW_E2E_REQUIRED=1.
+
+        A required run (hosted CI's Windows routes) must run the route: a missing tool or a
+        player that does not build fails it rather than skipping it (#2143).
+        """
+        try:
+            self.skip_if_toolchain_unavailable()
+        except unittest.SkipTest as skipped:
+            if os.environ.get(HOMEBREW_REQUIRED) == "1":
+                raise AssertionError(
+                    f"{HOMEBREW_REQUIRED}=1, but the route cannot run: {skipped}"
+                ) from skipped
+            raise
+
     def skip_if_toolchain_unusable(self, run) -> None:
         output = run.stdout + run.stderr
         if run.returncode != 0 and "sdl3 dependency is missing" in output.lower():
@@ -1190,7 +1221,7 @@ class TestPlayerPackageRoute(unittest.TestCase):
         by current PSPDEV, imports snprintf from SysclibForKernel through pspDebugScreen,
         a kernel library no handler serves, so its run stops there by name.
         """
-        self.skip_if_toolchain_unavailable()
+        self.require_homebrew_toolchain()
         eboot = self.homebrew_folder(build_homebrew_eboot(self.root / "homebrew"), "NKPHASE5", {})
         _key, title = self.import_and_build_homebrew(eboot)
         self.assertEqual(title, "Nakagawa PSP Recompilation Oracle")
@@ -1206,7 +1237,7 @@ class TestPlayerPackageRoute(unittest.TestCase):
         and what the program writes lands on its Memory Stick, never in the user's folder or
         the import's copy.
         """
-        self.skip_if_toolchain_unavailable()
+        self.require_homebrew_toolchain()
         eboot = self.homebrew_folder(
             build_homebrew_eboot(self.root / "probe-build", HOMEBREW_VIEW_FIXTURE), "NKHBVIEW",
             {"DATA.TXT": b"shipped beside the program"},
