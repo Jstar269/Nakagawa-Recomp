@@ -2296,6 +2296,10 @@ void     sr_hle_init(void);     /* registers all built-in handlers (idempotent) 
  * authentic. Returns 1 when a SAS mixer took the switch; a link without one (the headless
  * gate's stubs) returns 0, so the feature is never confirmed there. */
 int      sr_hle_sas_set_band_limited(int on);
+/* Ace Mode's peak=limit (src/rt/ace.h, #2137): the SAS mixer also keeps, for the host only, the
+ * stereo sum of each grain the store saturates; the guest's bytes stay the PSP's. 0 (the default)
+ * keeps nothing. Returns 1 when a SAS mixer took the switch, 0 in a link without one. */
+int      sr_hle_sas_set_wide_mix(int on);
 uint32_t sr_syscall(CpuState *s, uint32_t nid);
 typedef struct SrLoadExecRequest {
     char guest_path[256];
@@ -2493,6 +2497,14 @@ void     sched_set_vtimer_hooks(SrSchedVtimerNextDeadline next_deadline,
 /* hle.c's user-partition overlap test: sched.c refuses a thread stack range it reports. */
 typedef int (*SrSchedStackRangeRefusal)(uint32_t base, uint32_t end);
 void     sched_set_stack_range_refusal(SrSchedStackRangeRefusal refusal);
+/* hle.c's free blocks below the user partition's bump pointer: when no range above it holds a
+ * new thread stack, sched.c takes the highest such block that does (carved from its top) and
+ * gives it back to the partition when the thread is deleted. */
+typedef int (*SrSchedPartitionHoleAlloc)(uint32_t size, uint32_t *base_out);
+typedef void (*SrSchedPartitionHoleRelease)(uint32_t base, uint32_t size);
+void     sched_set_partition_hole_allocator(SrSchedPartitionHoleAlloc alloc,
+                                            SrSchedPartitionHoleRelease release);
+int      sched_guest_stack_overlaps(uint32_t base, uint32_t end);   /* any live thread stack */
 CpuState *sr_cpu_for_callbacks(void);               /* the CpuState guest callbacks run on */
 void     sched_dump_threads(void);                  /* the watchdog's thread table, to stderr */
 void     sched_watchdog_summary(uint32_t *ready, uint32_t *delay,
@@ -2528,6 +2540,10 @@ int      sched_current_join_result_pending(uint32_t uid); /* non-consuming join-
 void     sched_raise_interrupt(uint32_t source);     /* latch source; delivery occurs at a scheduler boundary */
 uint32_t sched_pending_interrupts(void);             /* source bits not yet serviced */
 void     sched_delay_current(uint64_t usec);        /* block current thread for usec */
+/* sched_delay_current(), but the wait cannot end inside the scheduling decision its own block
+ * causes: when another thread is ready then, of any priority, that thread is dispatched first.
+ * For the Ace load skip (nk_ace_load_skip_wait); see the definition in sched.c. */
+void     sched_delay_current_dispatching(uint64_t usec);
 void     sched_preempt(void);                       /* yield now if a higher-priority thread is ready */
 /* Set by the preemption timer when a stronger thread's deadline comes. A long HLE call polls it
  * between units of work and, where the thread that runs cannot reach the call's own state (for
@@ -2537,6 +2553,19 @@ void     sched_preempt(void);                       /* yield now if a higher-pri
 extern atomic_int_least32_t sr_preempt_due;
 void     sched_preempt_point(void);
 void     sched_block_on(uint32_t obj);              /* block current thread until sched_wake(obj) */
+/* Host work a guest thread waits for (#2361, sched.c): a host call that would block the
+ * scheduler's thread runs on one worker thread instead, and the guest thread that asked waits in
+ * the scheduler until it is done, so the other threads run meanwhile. usable is true only in a
+ * paced run, on a guest thread that may wait; otherwise the caller makes its call itself. run
+ * must not touch guest state. The submitter finishes a done item; if its thread ends first the
+ * item is abandoned, and drop (may be NULL) releases ctx once the call has returned. */
+typedef struct SrHostWork SrHostWork;
+typedef void (*SrHostWorkFn)(void *ctx);
+int      sched_host_work_usable(void);
+SrHostWork *sched_host_work_submit(SrHostWorkFn run, SrHostWorkFn drop, void *ctx);   /* NULL: make the call yourself */
+int      sched_host_work_done(SrHostWork *work);
+uint64_t sched_host_work_finish(SrHostWork *work);    /* after done: releases the item, not ctx; the host ns run took */
+void     sched_host_work_abandon(SrHostWork *work);   /* the waiting thread ended */
 void     sched_wait_vblank_start(void);             /* sceDisplayWaitVblankStart: always block to the next vblank start edge */
 int      sched_wait_vblank(void);                   /* sceDisplayWaitVblank: 1 if already inside the vblank interval (no block), else blocks and returns 0 */
 int      sched_wait_vblank_cb(int wait_start);       /* callback-aware display wait; wait_start selects WaitVblankStart semantics */

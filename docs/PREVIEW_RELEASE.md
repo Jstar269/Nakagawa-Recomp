@@ -175,6 +175,7 @@ $Bin = Join-Path $Stage 'bin'
 $Source = Join-Path $Stage 'source'
 $PackageDocs = Join-Path $Stage 'docs'
 $Zip = Join-Path $ArtifactRoot "nakagawa-recomp-$Version-windows-x64.zip"
+$ZipRecord = Join-Path $ArtifactRoot 'portable-zip-record.json'
 
 if (Test-Path -LiteralPath $ArtifactRoot) {
     throw "Candidate output already exists; choose a new artifact directory: $ArtifactRoot"
@@ -276,7 +277,10 @@ Remove-Item -LiteralPath (Join-Path $Source '.git') -Recurse -Force
 # sorted entries dated at the candidate commit's time, fixed permissions and no extra fields,
 # so the same commit and staged inputs give the same ZIP bytes. Hidden files (.github,
 # .editorconfig) are included; a link or a .git entry anywhere in the stage is refused.
-python tools/stage_install.py --portable-zip $Zip --zip-stage $Stage --revision $CandidateSha
+# The stage's toolchain.json must name $CandidateSha. The record (outside the stage, never published
+# inside the ZIP) names the ZIP with its size and SHA-256, the source commit and the SHA-256 of
+# SHA256SUMS.txt: the release evidence that ties this ZIP to its commit, and what a dry run compares.
+python tools/stage_install.py --portable-zip $Zip --zip-stage $Stage --revision $CandidateSha --record $ZipRecord
 if ($LASTEXITCODE -ne 0) { throw 'Writing the portable ZIP failed.' }
 # The ZIP itself is a container, not an attested subject: publish its SHA-256 next to it so a
 # download can be checked before it is extracted. The source archive gets the same.
@@ -285,6 +289,8 @@ foreach ($Asset in @($Zip, $SourceZip)) {
     "$AssetHash  $(Split-Path -Leaf $Asset)" | Set-Content -LiteralPath "$Asset.sha256" -Encoding utf8NoBOM
 }
 Write-Output $Zip, "$Zip.sha256", $SourceZip, "$SourceZip.sha256"
+# The record is release evidence for the maintainer, not a release asset: keep it, never upload it.
+Write-Output "Record: $ZipRecord"
 ```
 
 The package contains the native player and synthetic verification binary under `bin/`, the showcase demos under `bin/demos/`, the mechanically resolved SDL3/SDL3_ttf runtime DLL closures and their notices, the public-safe source export under `source/`, setup and smoke instructions, root README/license/notices, `SOURCE.txt`, LGPL relinking material, the third-party notice bundle, three SBOM formats (each records the SHA-256 of every executable and DLL directly in `bin/`, from `bin/runtime-manifest.json`), and `SHA256SUMS.txt`. It does not copy the whole `build/` tree, generated translation units, fixture PRXs, Vulkan SDK files, local databases, or title outputs. `SHA256SUMS.txt` covers every staged file except itself, in ordinal path order. Two runs of this script on the same commit with the same attested bundle, trusted ledger and prerequisite pins give a byte-identical ZIP when the same CPython writes it (Deflate output depends on the zlib build, which `--portable-zip` reports as `zlib`). Attach `nakagawa-recomp-<version>-windows-x64.zip.sha256` to the release next to the ZIP: the release binaries are not Authenticode-signed, so the published checksum and the per-file build attestations are how a user checks a download.
@@ -369,10 +375,20 @@ Two builds of one package must give the same bytes: the same commit, the same at
 trusted ledger copy and the same prerequisite pins. Run the recipe twice, into two different artifact roots (the recipe writes under `$env:TEMP`; set
 `$env:TEMP` to another folder for the second run), and compare the results:
 
+Each run's `$Zip`, `$SourceZip` and `$ZipRecord` are the first and second values below.
+
 ```powershell
 python tools/package_repro_check.py $ZipFirst $ZipSecond
 python tools/package_repro_check.py $SourceZipFirst $SourceZipSecond
+# The two records must be byte-identical: same ZIP SHA-256, same source commit, same zlib.
+if ((Get-FileHash -LiteralPath $ZipRecordFirst).Hash -ne (Get-FileHash -LiteralPath $ZipRecordSecond).Hash) {
+    throw 'The ZIP records differ.'
+}
 ```
+
+This is the release dry run: it publishes nothing. Keep one record with the candidate's release evidence: its
+`sha256` is the ZIP's SHA-256 and its `source_commit` the commit the package was built from, so the published
+`.sha256` traces back to one commit.
 
 Identical files print `IDENTICAL` and the SHA-256 and exit 0. Anything else exits 1 and names each difference
 with its cause: an entry on one side only, an entry stored in another order, different content, a different

@@ -3184,9 +3184,19 @@ class TrustedAttestationRouteTests(unittest.TestCase):
         self.assertIn('          python tools/publish_audit.py \\\n'
                       '            --repo-root "${GITHUB_WORKSPACE}" \\\n'
                       '            --committed-tree "${HEAD_SHA}" \\\n'
+                      '            --trusted-base "${BASE_SHA}" \\\n'
                       '            --policy "${RUNNER_TEMP}/tree-audit/public_source_profile.json" \\\n'
                       '            --public-scope --provenance-self-consistency\n'
                       '          touch "${RUNNER_TEMP}/tree-audit/passed"\n', step)
+        # Failing-before: the release manifest that waives binary findings was the candidate's alone, so a
+        # pull request could put other bytes under an approved binary's path. The audit is given the verdict
+        # base (the merge base with the default branch, resolved by the trusted checkout), re-checked here.
+        self.assertIn("          BASE_SHA: ${{ steps.base.outputs.base_sha }}\n", step)
+        self.assertIn('          if [[ ! "${BASE_SHA}" =~ ^[0-9a-f]{40}$ ]]; then\n', step)
+        self.assertIn('          base_sha="$(git merge-base "${HEAD_SHA}" HEAD)"\n', self.attest)
+        # Nothing of the candidate's stands in for the base: no manifest is read from the head for it.
+        self.assertNotIn("--trusted-manifest", step)
+        self.assertNotIn("release_manifest.json", step)
         # Review 2387-0087347807fa N-F: nothing read a copy of the report; the job log holds it.
         self.assertNotIn("tree-audit/report.txt", self.attest)
         # The head is re-checked here, so a reordered step cannot pass an unchecked value to Git.
@@ -3220,7 +3230,8 @@ class TrustedAttestationRouteTests(unittest.TestCase):
         self.assertEqual(self.attest.count("${{ steps.target.outputs.head_sha }}"), 5)
         # The event's base is only checked to be on the default branch; the verdict base is the merge base.
         self.assertEqual(self.attest.count("${{ steps.target.outputs.base_sha }}"), 1)
-        self.assertEqual(self.attest.count("${{ steps.base.outputs.base_sha }}"), 3)
+        # The trusted tree audit reads it too, to hold the release manifest's binary waivers to the base.
+        self.assertEqual(self.attest.count("${{ steps.base.outputs.base_sha }}"), 4)
         self.assertEqual(self.attest.count("${{ steps.target.outputs.number }}"), 1)
         self.assertIn("--attestation-target)", self.attest)
         # A run that resolves no pull request must fail: nothing in the job tolerates a failed step.

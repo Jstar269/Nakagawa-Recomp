@@ -46,13 +46,13 @@ names #341 on every entry and only shrinks: reviewing a handler retires its entr
 <!-- BEGIN GENERATED HLE STATUS CENSUS -->
 ### HLE Semantic Status Census
 
-Registered NIDs: **708** (dedicated **610**, fake_success **4**, controlled_unsupported **94**).
-Semantic handler census: **584** handlers across **30** API families, covering **617** handler-associated NID registrations.
+Registered NIDs: **711** (dedicated **613**, fake_success **4**, controlled_unsupported **94**).
+Semantic handler census: **587** handlers across **30** API families, covering **620** handler-associated NID registrations.
 
 | Semantic Status | Handlers | NID Registrations |
 | :--- | :---: | :---: |
 | `complete` | 14 | 23 |
-| `partial` | 345 | 357 |
+| `partial` | 348 | 360 |
 | `compatibility` | 1 | 1 |
 | `controlled_unsupported` | 3 | 7 |
 | `unreviewed` | 221 | 229 |
@@ -82,14 +82,14 @@ Semantic handler census: **584** handlers across **30** API families, covering *
 | `scePower` | 0 | 19 | 0 | 0 | 0 | 19 | 24 |
 | `scePsmf` | 0 | 4 | 0 | 0 | 14 | 18 | 18 |
 | `sceReg` | 0 | 15 | 0 | 0 | 0 | 15 | 15 |
-| `sceRtc` | 5 | 12 | 0 | 0 | 1 | 18 | 18 |
+| `sceRtc` | 5 | 15 | 0 | 0 | 1 | 21 | 21 |
 | `sceSas` | 0 | 0 | 0 | 1 | 27 | 28 | 32 |
 | `sceUmd` | 0 | 11 | 1 | 0 | 2 | 14 | 14 |
 | `sceUtility` | 0 | 10 | 0 | 0 | 27 | 37 | 37 |
 | `sceVaudio` | 0 | 3 | 0 | 0 | 0 | 3 | 3 |
 | `sceVideocodec` | 0 | 10 | 0 | 0 | 0 | 10 | 10 |
 | `sceWlan` | 0 | 0 | 0 | 0 | 2 | 2 | 3 |
-| **Total** | **14** | **345** | **1** | **3** | **221** | **584** | **617** |
+| **Total** | **14** | **348** | **1** | **3** | **221** | **587** | **620** |
 
 #### Complete Handlers (Evidence-Backed)
 
@@ -512,10 +512,11 @@ Semantic handler census: **584** handlers across **30** API families, covering *
   - Limitation: the pending interval is a deterministic synthetic import-boundary policy, not PSP-measured timing
   - Evidence: tests/native/hle_thread_selftest.c:test_io_async_and_path_imports
 - **`h_IoRead`** (`sceIo`): `sceIoRead` (0x6a638d83)
-  - Limitation: PSP-IO-001 measures one 64-byte host0 read that returns 64 matching bytes, and that reading descriptor -1 returns a negative result (the exact code is not recorded in public evidence); pspautotests revision f573fe8c9122a8ff5db4f030d74557bed644b4e0 records a read past the end of a file returning 0 (#1380); short reads at end of file, zero-length file reads, partial-read position advance, unreadable buffers, write-only descriptors and standard-stream reads remain unmeasured (#341). UMD block-device reads follow PSP-UMDRAW-001's captured but not acceptance-qualified cells (counts and results in 2048-byte sectors, the position advancing by the count, 0x80010016 for a zero count); a read crossing the last sector stays at the raw-device boundary, and the runtime refuses a destination outside guest memory where the console overran the buffer
+  - Limitation: PSP-IO-001 measures one 64-byte host0 read that returns 64 matching bytes, and that reading descriptor -1 returns a negative result (the exact code is not recorded in public evidence); pspautotests revision f573fe8c9122a8ff5db4f030d74557bed644b4e0 records a read past the end of a file returning 0 (#1380); short reads at end of file, zero-length file reads, partial-read position advance, unreadable buffers, write-only descriptors and standard-stream reads remain unmeasured (#341). UMD block-device reads follow PSP-UMDRAW-001's captured but not acceptance-qualified cells (counts and results in 2048-byte sectors, the position advancing by the count, 0x80010016 for a zero count); a read crossing the last sector stays at the raw-device boundary, and the runtime refuses a destination outside guest memory where the console overran the buffer. A read of a file of the disc parks its thread for a synthetic drive time, the low estimate of PPSSPP's sceIo.cpp (100 bytes per microsecond, at least 100 microseconds, no seek or spin-up time): no UMD read time is measured, nor whether two readers queue, nor a read made with dispatch or interrupts disabled or outside a guest thread, which returns at once (#1296, #2361)
   - Evidence: docs/HARDWARE_ORACLE.md (PSP-IO-001: io-read-verify and io-errors)
   - Evidence: tests/native/hle_thread_selftest.c:test_ms0_unified_namespace
   - Evidence: tests/native/hle_thread_selftest.c:test_umd_block_device_sectors
+  - Evidence: tests/native/hle_thread_selftest.c:test_umd_read_parks_its_thread_for_the_drives_time
 - **`h_IoReadAsync`** (`sceIo`): `sceIoReadAsync` (0xa0b5a7c2)
   - Limitation: request completion uses a deterministic synthetic import-boundary scheduler; PSP timing and callback ordering remain unmeasured
   - Evidence: tests/native/hle_thread_selftest.c:test_io_async_and_path_imports
@@ -1318,14 +1319,26 @@ Semantic handler census: **584** handlers across **30** API families, covering *
   - Limitation: adds the sign-extended 32-bit day count times 86400000000 modulo 2^64 and returns 0, a wrap past year 1 or 9999 included (pspautotests-recorded); a NULL or unmapped source or destination is not measured and stops the run by name
   - Evidence: tests/native/hle_thread_selftest.c:test_rtc_tick_add_day_of_week_check_valid_autotest
   - Evidence: PSPAutotests tests/rtc/arithmetic.expected (f573fe8c, recorded on a PSP): checkRtcTickAddDays
+- **`h_RtcTickAddHours`** (`sceRtc`): `sceRtcTickAddHours` (0x26d7a24a)
+  - Limitation: adds the sign-extended 32-bit hour count times 3600000000 modulo 2^64 and returns 0, a wrap past year 1 or 9999 included (pspautotests-recorded, the fixed rows; the autotest's loop rows are not checked); a NULL or unmapped source or destination is not measured and stops the run by name
+  - Evidence: tests/native/hle_thread_selftest.c:test_rtc_tick_add_minutes_hours_weeks_autotest
+  - Evidence: PSPAutotests tests/rtc/arithmetic.expected (f573fe8c, recorded on a PSP): checkRtcTickAddHours, the 8 fixed rows
 - **`h_RtcTickAddMicroseconds`** (`sceRtc`): `sceRtcTickAddMicroseconds` (0x26d25a5d)
   - Limitation: adds the 64-bit count modulo 2^64 and returns 0, a wrap past year 1 or 9999 included (pspautotests-recorded); a NULL or unmapped source or destination is not measured and stops the run by name
   - Evidence: tests/native/hle_thread_selftest.c:test_rtc_tick_add_day_of_week_check_valid_autotest
   - Evidence: PSPAutotests tests/rtc/arithmetic.expected (f573fe8c, recorded on a PSP): checkRtcTickAddMicroseconds
+- **`h_RtcTickAddMinutes`** (`sceRtc`): `sceRtcTickAddMinutes` (0xe6605bca)
+  - Limitation: adds the 64-bit count times 60000000 modulo 2^64 and returns 0, a wrap past year 1 or 9999 included (pspautotests-recorded, the fixed rows; the autotest's loop rows are not checked); a NULL or unmapped source or destination is not measured and stops the run by name
+  - Evidence: tests/native/hle_thread_selftest.c:test_rtc_tick_add_minutes_hours_weeks_autotest
+  - Evidence: PSPAutotests tests/rtc/arithmetic.expected (f573fe8c, recorded on a PSP): checkRtcTickAddMinutes, the 8 fixed rows
 - **`h_RtcTickAddSeconds`** (`sceRtc`): `sceRtcTickAddSeconds` (0xf2a4afe5)
   - Limitation: adds the 64-bit count times 1000000 modulo 2^64 and returns 0, a wrap past year 1 or 9999 included (pspautotests-recorded); a NULL or unmapped source or destination is not measured and stops the run by name
   - Evidence: tests/native/hle_thread_selftest.c:test_rtc_tick_add_day_of_week_check_valid_autotest
   - Evidence: PSPAutotests tests/rtc/arithmetic.expected (f573fe8c, recorded on a PSP): checkRtcTickAddSeconds
+- **`h_RtcTickAddWeeks`** (`sceRtc`): `sceRtcTickAddWeeks` (0xcf3a2ca8)
+  - Limitation: adds the sign-extended 32-bit week count times 604800000000 modulo 2^64 and returns 0, a wrap past year 1 or 9999 included (pspautotests-recorded, the fixed rows; the autotest's loop rows are not checked); a NULL or unmapped source or destination is not measured and stops the run by name
+  - Evidence: tests/native/hle_thread_selftest.c:test_rtc_tick_add_minutes_hours_weeks_autotest
+  - Evidence: PSPAutotests tests/rtc/arithmetic.expected (f573fe8c, recorded on a PSP): checkRtcTickAddWeeks, the 8 fixed rows
 - **`h_RtcTickAddYears`** (`sceRtc`): `sceRtcTickAddYears` (0x42842c77)
   - Limitation: moves the calendar year with the leap day clamped to February 28, and a result outside years 1..9999 returns 0 with dest unwritten (pspautotests-recorded); a source tick past year 9999 and NULL or unmapped pointers are not measured and stop the run by name
   - Evidence: tests/native/hle_thread_selftest.c:test_rtc_time_t_add_years_resolution_autotest

@@ -996,6 +996,7 @@ class LiveManifestTests(unittest.TestCase):
                     "docs/HARDWARE_ORACLE.md (PSP-IO-001: io-read-verify and io-errors)",
                     "tests/native/hle_thread_selftest.c:test_ms0_unified_namespace",
                     "tests/native/hle_thread_selftest.c:test_umd_block_device_sectors",
+                    "tests/native/hle_thread_selftest.c:test_umd_read_parks_its_thread_for_the_drives_time",
                 ],
             ),
             0x42EC03AC: (
@@ -1957,7 +1958,8 @@ class EvidenceTierTests(unittest.TestCase):
                 "PSP-HLE-VTIMER-003", "PSP-INTR-CAUSE-001", "PSP-IO-001", "PSP-IO-EOF-001", "PSP-IO-EOF-002", "PSP-KERNEL-001",
                 "PSP-KERNEL-002", "PSP-KERNEL-MISC-001", "PSP-KERNEL-SEM-001", "PSP-KERNEL-STATUS-001",
                 "PSP-LLSC-001",
-                "PSP-MODULE-START-001", "PSP-MUTEX-001", "PSP-REGISTRY-001", "PSP-SMOKE-001", "PSP-SYSTEM-001",
+                "PSP-MODULE-START-001", "PSP-MUTEX-001", "PSP-REGISTRY-001", "PSP-SAS-003",
+                "PSP-SMOKE-001", "PSP-SYSTEM-001",
                 "PSP-THREAD-003", "PSP-THREAD-EXIT-001", "PSP-TRACE-001", "PSP-TRANSPORT-001",
                 "PSP-UMDIO-001", "PSP-VFPU-BASICARITH-001", "PSP-VFPU-CCCMOV-001", "PSP-VFPU-CMP-001",
                 "PSP-VFPU-CONSTANTS-001", "PSP-VFPU-CONVERT-001", "PSP-VFPU-FORMS-001",

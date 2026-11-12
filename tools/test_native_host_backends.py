@@ -619,5 +619,106 @@ class NativeHostBackendTests(unittest.TestCase):
                            "the driver must tear down after the scheduler returns")
 
 
+class CoroutineAsmTargetTests(unittest.TestCase):
+    """The stack-switch routine in src/rt/sr_coro.c, assembled for each object format it
+    serves: ELF for Linux and Android, Mach-O for macOS (#329). Mach-O prefixes C names with an
+    underscore and has no .type or .size, so the ELF spelling does not assemble there. No macOS
+    SDK is needed: the source is preprocessed for each target with empty system headers (only
+    the top-level __asm__ statements are kept), and the extracted assembly is assembled by
+    clang's integrated assembler and its symbols read with llvm-nm and llvm-readobj. Android
+    and macOS select the routine themselves; glibc keeps ucontext unless SR_CORO_BACKEND_ASM
+    asks for the routine, as `make coro-selftest-asm` does."""
+
+    TARGETS = {
+        "arm64-apple-macos11": ("_sr_coro_stack_switch", "_sr_coro_call_with_stack"),
+        "x86_64-apple-macos11": ("_sr_coro_stack_switch", "_sr_coro_call_with_stack"),
+        "aarch64-linux-android29": ("sr_coro_stack_switch", "sr_coro_call_with_stack"),
+        "x86_64-linux-gnu": ("sr_coro_stack_switch", "sr_coro_call_with_stack"),
+    }
+    clang: ClassVar[str]
+    nm: ClassVar[str]
+    readobj: ClassVar[str]
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        clang = shutil.which("clang")
+        if clang is None:
+            raise unittest.SkipTest("clang is unavailable; the cross-assembly check did not run")
+        tool_dir = Path(os.path.realpath(clang)).parent
+
+        def llvm_tool(name: str) -> str:
+            found = next((str(candidate) for candidate in (tool_dir / name, tool_dir / f"{name}.exe")
+                          if candidate.is_file()), shutil.which(name))
+            if found is None:
+                raise unittest.SkipTest(f"{name} is unavailable; the cross-assembly check did not run")
+            return found
+
+        cls.clang, cls.nm, cls.readobj = clang, llvm_tool("llvm-nm"), llvm_tool("llvm-readobj")
+
+    def _assembly(self, target: str, stubs: Path) -> str:
+        source = ROOT / "src" / "rt" / "sr_coro.c"
+        for header in re.findall(r"#include <([^>]+)>",
+                                 source.read_text(encoding="utf-8")
+                                 + (ROOT / "src" / "rt" / "sr_coro.h").read_text(encoding="utf-8")):
+            (stubs / header).parent.mkdir(parents=True, exist_ok=True)
+            (stubs / header).touch()
+        selection = ["-DSR_CORO_BACKEND_ASM"] if target.endswith("-linux-gnu") else []
+        completed = subprocess.run(
+            [self.clang, f"--target={target}", "-E", "-P", "-nostdinc", f"-I{stubs}",
+             f"-I{ROOT / 'src' / 'rt'}", *selection, str(source)],
+            capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        blocks = re.findall(r"^__asm__\((.*?)\);", completed.stdout, flags=re.M | re.S)
+        literals = [re.findall(r'"((?:[^"\\]|\\.)*)"', block) for block in blocks]
+        return "".join(part.encode("latin-1").decode("unicode_escape")
+                       for block in literals for part in block)
+
+    def test_each_target_assembles_the_routine_under_its_own_names(self) -> None:
+        for target, symbols in self.TARGETS.items():
+            with self.subTest(target=target), tempfile.TemporaryDirectory(
+                    prefix="nakagawa-coro-asm-") as temp:
+                directory = Path(temp)
+                (directory / "include").mkdir()
+                assembly = self._assembly(target, directory / "include")
+                self.assertTrue(assembly, f"{target} selects no stack-switch routine")
+                (directory / "coro.s").write_text(assembly, encoding="utf-8")
+                assembled = subprocess.run(
+                    [self.clang, f"--target={target}", "-c", str(directory / "coro.s"),
+                     "-o", str(directory / "coro.o")],
+                    capture_output=True, text=True, check=False,
+                )
+                self.assertEqual(assembled.returncode, 0, assembled.stderr)
+                # Each routine is a defined, hidden text symbol: no other image binds to it.
+                for symbol in symbols:
+                    if "apple" in target:
+                        self.assertIn(f"(__TEXT,__text) private external {symbol}",
+                                      self._run(self.nm, "-m", directory / "coro.o"))
+                    else:
+                        listing = self._run(self.readobj, "--symbols", directory / "coro.o")
+                        block = re.search(r"Name: " + re.escape(symbol) + r" \(.*?\n  \}",
+                                          listing, flags=re.S)
+                        self.assertIsNotNone(block, listing)
+                        assert block is not None
+                        for expected in ("Type: Function", "STV_HIDDEN", "Section: .text"):
+                            self.assertIn(expected, block.group(0), symbol)
+
+    def _run(self, *command: object) -> str:
+        completed = subprocess.run([str(part) for part in command],
+                                   capture_output=True, text=True, check=False)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        return completed.stdout
+
+    def test_apple_assembly_carries_no_elf_directive(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="nakagawa-coro-asm-") as temp:
+            assembly = self._assembly("arm64-apple-macos11", Path(temp))
+        self.assertTrue(assembly.strip(), "no coroutine routine was produced for Apple")
+        self.assertNotIn(".type", assembly)
+        self.assertNotIn(".size", assembly)
+        self.assertNotIn(".hidden", assembly)
+        self.assertNotRegex(assembly, r"\bx18\b")
+
+
 if __name__ == "__main__":
     unittest.main()

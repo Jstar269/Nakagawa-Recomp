@@ -3745,6 +3745,7 @@ class PspDmacProbeTests(unittest.TestCase):
                 # The 2026-11-11 acceptance-eligible hle-io-seek-edges (#1380, boot 192, ARK-5
                 # 5.2.0) run of 1a5157e37.
                 "PSP-HLE-IO-SEEK-002",
+                "PSP-SAS-003",
                 # The 2026-11-10 acceptance-eligible hle-issues-batch (#326, #356, boot 172) and
                 # hle-kernel-pool-bounds (boot 173) runs of 979c6a1dd.
                 "PSP-HLE-ISSUES-001", "PSP-HLE-KERNEL-STATUS-002",
@@ -3778,9 +3779,6 @@ class PspDmacProbeTests(unittest.TestCase):
                 # 2026-11-02: memory-edge (bb3f36e4): 33 PASS and 42 intentional SKIP records
                 # (no bottom-of-RAM edge, no scratchpad or VRAM file call, no unproven overrun).
                 "PSP-MEMEDGE-001",
-                # 2026-11-07: sas-mix (979de58f, boot 146, game context): a complete all-PASS
-                # stream whose envelope is blocked by "loaded module was not proven unloaded".
-                "PSP-SAS-003",
                 # 2026-11-10: ge-signal (80e7c9eb, boot 179, XMB context): 37 records, 12 of 14
                 # cells; it stalled at rjump-un and the console needed a power cycle.
                 "PSP-GE-SIGNAL-001",
@@ -12219,6 +12217,68 @@ class GeRasterProbeTests(unittest.TestCase):
         self.assertNotIn("#include", block)
         self.assertIn("test_ge_raster_cells_match_psp();", self.selftest)
 
+    def test_the_vulkan_selftest_carries_the_block_and_the_psp_digests(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        inc = (root / "src" / "rt" / "gpu_sdl3vk" / "ge_gpu_selftest.inc").read_text(encoding="utf-8")
+        self.assertEqual(inc.count(self.START), 1)
+        self.assertEqual(self._block(inc), self._block(self.probe))
+        table_start = "/* PSP-GE-RASTER-001 (#343): the window digest each cell left on a PSP-3000"
+
+        def table(text: str) -> str:
+            start = text.index(table_start)
+            return text[start:text.index("\n};\n", start) + 4]
+
+        self.assertEqual(table(inc), table(self.selftest))
+        # The case runs in the default (render scale 1) pass and on its own.
+        self.assertIn("    if (!coherence_run_psp_raster()) ok = 0;\n", inc)
+        self.assertIn('if (strcmp(only, "psp-raster") == 0) return coherence_run_psp_raster();', inc)
+        self.assertIn("    if (!coherence_run_clear_masks()) ok = 0;\n", inc)
+        self.assertIn('if (strcmp(only, "clear-masks") == 0) return coherence_run_clear_masks();', inc)
+        bodies = {}
+        for name in ("gr_vk_draw", "coherence_run_psp_raster"):
+            body = inc[inc.index(f"static int {name}("):]
+            bodies[name] = body[:body.index("\n}\n")]
+        for term in ("fallback_prims", "gegpu_sync_guest_fb(&desc)", "ge_set_gpu_hooks(gpu ? &k_hooks : NULL);",
+                     "const int done = ge_run_list(list, 0) == 0;", "return done;"):
+            self.assertIn(term, bodies["gr_vk_draw"])
+        for term in ("s_scale != 1", "gr_digest(ref) == s_gr_psp[k].psp", "gr_digest(px) == s_gr_psp[k].psp",
+                     "else if (want_sw) pass = on_sw && matches;",
+                     "else if (want_div) pass = on_gpu && delta <= GR_VK_DIVERGENT_MAX_DELTA;",
+                     "else pass = on_gpu && matches;"):
+            self.assertIn(term, bodies["coherence_run_psp_raster"])
+        self.assertIn("#define GR_VK_DIVERGENT_MAX_DELTA 2u\n", inc)
+        # The two pinned classes name real cells, once each, and no cell is in both.
+        cells = set(re.findall(r'^\s*\{"([a-z0-9-]+)", GR_K_', self._block(inc), re.M))
+        self.assertEqual(len(cells), 189)
+        pinned = []
+        for name in ("k_gr_vk_divergent", "k_gr_vk_software"):
+            start = inc.index(f"static const char *const {name}[] = {{")
+            pinned.append(re.findall(r'"([a-z0-9-]+)"', inc[start:inc.index("};", start)]))
+        divergent, software = pinned
+        self.assertEqual(len(divergent) + len(software), len(set(divergent) | set(software)))
+        self.assertLessEqual(set(divergent) | set(software), cells)
+        # docs/HARDWARE_ORACLE.md names exactly the pinned cells and their counts.
+        doc = (root / "docs" / "HARDWARE_ORACLE.md").read_text(encoding="utf-8")
+        para = doc[doc.index("  The Vulkan backend runs the same cells:"):]
+        para = " ".join(para[:para.index("\n\n")].split())
+        named = set(re.findall(r"`([a-z0-9-]+\*?)`", para))
+        lo = {cell for cell in cells if cell.startswith("lo-")}
+        self.assertIn("lo-*", named)
+        self.assertLessEqual(lo, set(software))
+        self.assertEqual((named & cells) | lo, set(divergent) | set(software))
+        # Each class's names sit in its own sentence, so a cell moved between the lists is caught.
+        sw_part, div_part = para.split(" are drawn on the GPU and differ")
+        sw_part = sw_part[sw_part.index(" are drawn by the software fallback"):]
+        div_part = div_part[:div_part.index(" The case pins all three classes")]
+        self.assertEqual(set(re.findall(r"`([a-z0-9-]+)`", sw_part)) & cells | lo, set(software))
+        self.assertEqual(set(re.findall(r"`([a-z0-9-]+)`", div_part)) & cells, set(divergent))
+        self.assertIn(f"{len(software)} are drawn by the software fallback", para)
+        self.assertIn(f"{len(divergent)} are drawn on the GPU and differ", para)
+        # A rounding cell may land on the PSP's value on one driver and not on another (lavapipe draws
+        # tf-mod-rgba-1 exact): the class is the bound alone, never a required difference.
+        self.assertNotIn("!matches && delta", bodies["coherence_run_psp_raster"])
+        self.assertIn(f"{len(cells) - len(software) - len(divergent)} cells are drawn on the GPU and equal", para)
+
     def test_section_calls_only_the_ge_and_cache_imports_and_is_bounded(self) -> None:
         self.assertEqual(set(re.findall(r"\b(sce\w+)\s*\(", self.section)), {
             "sceGeEdramGetAddr", "sceGeListEnQueue", "sceGeListSync", "sceGeDrawSync",
@@ -16153,7 +16213,7 @@ class Record20261015Tests(unittest.TestCase):
             ("vfpu-reserved-widths", "PSP-VFPU-RESERVED-001", "MEASURED"),
             ("hle-savedata-nodata", "PSP-HLE-SAVEDATA-NODATA-001", "CAPTURED"),
             ("sas-adsr", "PSP-SAS-002", "CAPTURED"),
-            ("sas-mix", "PSP-SAS-003", "CAPTURED"),
+            ("sas-mix", "PSP-SAS-003", "MEASURED"),
             ("vcodec-words", "PSP-VCODEC-001", "NOT_RUN"),
             ("hle-utility-dialogs", "PSP-HLE-UTILITY-DIALOG-001", "NOT_RUN"),
             ("hle-io-seek-edges", "PSP-HLE-IO-SEEK-002", "MEASURED"),
@@ -16180,17 +16240,6 @@ class Record20261015Tests(unittest.TestCase):
             self.assertIn(term, note)
         self.assertIn("- **PSP-3000 single-case run of `hle-io-seek-edges` (2026-11-11 UTC)**", self.doc)
 
-    def test_the_sas_mix_second_capture_keeps_it_captured(self) -> None:
-        row = self.rows["PSP-SAS-003"]
-        self.assertEqual(row["hardware_evidence"], "CAPTURED")
-        self.assertNotIn("measurement_note", row)
-        note = row["evidence_note"]
-        for term in ("2026-11-11", "boot 191", "a39f7a14c", "ARK-5 5.2.0", "same 205 records",
-                     "unloads SASCORE, then AVCODEC", "no such rerun has been made"):
-            self.assertIn(term, note)
-        self.assertNotIn("on purpose", note)
-        self.assertNotIn("on purpose", self.rows["PSP-SAS-002"]["evidence_note"])
-
     def test_the_sas_adsr_capture_is_captured_with_its_blocker(self) -> None:
         row = self.rows["PSP-SAS-002"]
         self.assertEqual(row["hardware_evidence"], "CAPTURED")
@@ -16205,20 +16254,46 @@ class Record20261015Tests(unittest.TestCase):
         self.assertIn("### PSP-SAS-002 capture 2026-11-10", self.doc)
         self.assertIn("(#psp-sas-002-capture-2026-11-10)", self.doc)
 
-    def test_the_sas_mix_capture_is_captured_with_its_blocker(self) -> None:
+    def test_the_sas_mix_rerun_is_measured_and_keeps_its_captures(self) -> None:
         row = self.rows["PSP-SAS-003"]
-        self.assertEqual(row["hardware_evidence"], "CAPTURED")
-        self.assertNotIn("measurement_note", row)
-        self.assertNotIn("evidence_cases", row)
-        note = row["evidence_note"]
-        for term in ("2026-11-07", "PSP-3000", "boot 146", "game context", "979de58f",
-                     "pre-publication commit", "identical to this tree's", "system software 6.61",
-                     "0x06060110", "ARK-5 with cIPL, version 5.1.0", "205 records",
-                     "not acceptance-eligible", "loaded module was not proven unloaded",
-                     "establishes nothing about PSP behaviour", "0x80420018", "0x80000004"):
+        self.assertEqual(row["hardware_evidence"], "MEASURED")
+        self.assertNotIn("evidence_note", row)
+        self.assertEqual(row["evidence_cases"], ["sas-mix-*"])
+        note = row["measurement_note"]
+        for term in ("2026-11-12", "PSP-3000", "boot 197", "game context", "3872796c",
+                     "ARK-5 5.2.0", "7a0035d9", "0x06060110", "acceptance-eligible with 0 blockers",
+                     "unloaded SASCORE, then AVCODEC", "boot 146, 979de58f",
+                     "boot 191, a39f7a14c"):
             self.assertIn(term, note)
+        self.assertIn("- **PSP-3000 single-case run of `sas-mix` (2026-11-12 UTC)**", self.doc)
+        # The 2026-11-07 section keeps the values and both earlier captures.
         self.assertIn("### PSP-SAS-003 capture 2026-11-07", self.doc)
         self.assertIn("(#psp-sas-003-capture-2026-11-07)", self.doc)
+        section = self.doc.split("### PSP-SAS-003 capture 2026-11-07", 1)[1].split("\n### ", 1)[0]
+        for term in ("0x80420018", "0x80000004", "boot 147", "boot 191", "That rerun ran on 2026-11-12"):
+            self.assertIn(term, section)
+        self.assertNotIn("no such rerun has been made", section)
+
+    def test_the_owner_reads_of_2026_11_12_keep_their_evidence_classes(self) -> None:
+        # hle-std-handles: the game-context launch (boot 200) adds to the XMB measurement (boot 135).
+        stdio = self.rows["PSP-HLE-STDIO-001"]
+        self.assertEqual(stdio["hardware_evidence"], "MEASURED")
+        for term in ("boot 135", "0x800200d1", "boot 200", "game context", "3872796c", "0x80020325"):
+            self.assertIn(term, stdio["measurement_note"])
+        self.assertIn("- **PSP-3000 single-case run of `hle-std-handles` in the game context (2026-11-12 UTC)**",
+                      self.doc)
+        # hle-utility-dialogs and mpeg-ycbcr were captured, not measured: neither envelope was eligible.
+        dialogs = self.rows["PSP-HLE-UTILITY-DIALOG-001"]
+        self.assertEqual(dialogs["hardware_evidence"], "NOT_RUN")
+        self.assertTrue(dialogs["risk"].startswith("POWER RISK"))
+        self.assertIn("boots 204 and 206", dialogs["evidence_note"])
+        section = self.doc.split("### PSP-HLE-UTILITY-DIALOG-001 captures 2026-11-12", 1)[1].split("\n### ", 1)[0]
+        for term in ("establish nothing about PSP", "Boot 204", "Boot 206", "0x80110001", "0x80110327"):
+            self.assertIn(term, section)
+        self.assertIn("(#psp-hle-utility-dialog-001-captures-2026-11-12)", self.doc)
+        mpeg = self.rows["PSP-MPEG-YCBCR-001"]
+        self.assertEqual(mpeg["hardware_evidence"], "NOT_RUN")
+        self.assertIn("2026-11-12 boot 202", mpeg["evidence_note"])
 
     def test_the_audio_src_and_timer_comparisons_are_recorded_and_pinned(self) -> None:
         for name in ("test_audio_src_matches_the_measured_contract",
