@@ -44,6 +44,7 @@ ISOLATION_SRC = "tests/native/native_test_isolation.c"
 EXE_EXT = ".exe" if _WINDOWS else ""
 
 CORE_SOURCES = [
+    "src/core/nk_shared_helpers.c",
     "src/core/nk_iso.c",
     "src/core/nk_library.c",
     "src/core/nk_launch.c",
@@ -66,9 +67,11 @@ CORE_SOURCES = [
     "src/core/nk_psp_amctrl.c",
     "src/core/nk_psp_lzrc.c",
     "src/core/nk_psp_npumdimg.c",
+    "src/core/nk_pbp_homebrew.c",
     "src/core/nk_disc_expand.c",
     "src/core/nk_disc_verify.c",
     "src/core/nk_zip.c",
+    "src/core/nk_steam_shortcuts.c",
     "src/core/generated/nk_title_catalog.c",
 ]
 
@@ -220,6 +223,9 @@ class NativeHostBackendTests(unittest.TestCase):
         cls._objects["src/player/player_state.c"] = _compile_object(
             cls, "src/player/player_state.c", "player_state.o", ("-Isrc/player",)
         )
+        cls._objects["src/player/discord_presence.c"] = _compile_object(
+            cls, "src/player/discord_presence.c", "discord_presence.o", ("-Isrc/player",)
+        )
         cls._objects["src/player/input_settings.c"] = _compile_object(
             cls, "src/player/input_settings.c", "input_settings.o", ("-Isrc/player",)
         )
@@ -272,6 +278,7 @@ class NativeHostBackendTests(unittest.TestCase):
             self, "tests/native/test_player_state.c", "test_player_state",
             extra_sources=(
                 "src/player/player_state.c",
+                "src/player/discord_presence.c",
                 "src/player/input_settings.c",
                 "src/player/iso_reader.c",
                 "src/player/package_builder.c",
@@ -476,6 +483,60 @@ class NativeHostBackendTests(unittest.TestCase):
         self.assertLess(fallback.index("sr_perf_shutdown();"), fallback.index("exit(0);"),
                         "the no-scheduler capture exit skips the perf summary")
 
+    def test_every_guest_thread_hard_exit_writes_the_profile_dump_first(self) -> None:
+        """SR_PROFILE=1 prints its hot-path table from an atexit hook, and _Exit skips atexit, so a
+        repro that ends at SR_EXIT_AT_VBLANK, a capture exit, the watchdog or a refused import
+        printed no profile at all. Every _Exit reached on the guest thread in the hle sources calls
+        sr_profile_dump_final right after its perf shutdown. The final dump prints once, the
+        atexit hook uses it too, so a normal exit is not dumped twice, and it is a no-op with
+        profiling off. The periodic SR_PROFILE_DUMP_VBLANKS dump keeps sr_profile_dump.
+
+        The scan covers every source under src/rt and every call that ends the process without
+        atexit: _Exit, _exit, quick_exit, ExitProcess and TerminateProcess. Plain exit() runs the
+        atexit hook, which is the final dump, so its sites need no call of their own; abort() is a
+        crash and out of scope. One site is excluded on purpose: verify_harness.c is the verifier's
+        own test executable, whose main never calls sr_profile_init (driver.c does), so profiling
+        is never on there and its --hard-exit has no table to lose."""
+        hard_exit = re.compile(
+            r"(?<![A-Za-z0-9_])(?:_Exit|_exit|quick_exit|ExitProcess|TerminateProcess)\s*\(")
+        excluded = {"verify_harness.c": "_Exit(0);"}
+        rt = ROOT / "src" / "rt"
+        found = 0
+        seen_excluded = set()
+        for path in sorted(rt.rglob("*")):
+            if path.suffix not in (".c", ".h", ".inc"):
+                continue
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+            name = path.relative_to(rt).as_posix()
+            for index, line in enumerate(lines):
+                code = re.sub(r"/\*.*?\*/", "", line).split("//", 1)[0]
+                if code.lstrip().startswith(("*", "/*")) or not hard_exit.search(code):
+                    continue
+                if excluded.get(name) == line.strip():
+                    seen_excluded.add(name)
+                    continue
+                found += 1
+                window = "\n".join(lines[max(0, index - 7):index + 1])
+                self.assertIn("sr_profile_dump_final();", window,
+                              f"{name}:{index + 1} exits without the profile dump: {line.strip()}")
+                self.assertIn("sr_perf_shutdown();", window,
+                              f"{name}:{index + 1} exits without the perf shutdown: {line.strip()}")
+                self.assertLess(window.index("sr_perf_shutdown();"),
+                                window.index("sr_profile_dump_final();"),
+                                f"{name}:{index + 1}: the profile dump must follow the perf shutdown")
+        self.assertGreater(found, 0, "src/rt has no hard exit site; the pin is stale")
+        self.assertEqual(seen_excluded, set(excluded), "an excluded hard exit is gone; drop it")
+        harness = (rt / "verify_harness.c").read_text(encoding="utf-8")
+        self.assertNotIn("sr_profile_init", harness,
+                         "verify_harness now enables profiling, so its hard exit needs the dump")
+        recomp = (rt / "recomp.c").read_text(encoding="utf-8")
+        init = _function_body(recomp, "void sr_profile_init(void) {")
+        self.assertIn("atexit(sr_profile_dump_final);", init,
+                      "the atexit hook must be the once-only final dump")
+        final = _function_body(recomp, "void sr_profile_dump_final(void) {")
+        self.assertIn("if (!g_prof_enabled || g_prof_final_dumped) return;", final,
+                      "the final dump must print once, and only with profiling on")
+
     def test_quit_requests_stop_the_scheduler_instead_of_exiting(self) -> None:
         """Closing the window (SDL3 quit, a Win32 WM_QUIT, or a presenter that reports the window
         gone) and the pause overlay's Quit are quit requests (#1377, #1392). gui.c exits nowhere:
@@ -513,8 +574,8 @@ class NativeHostBackendTests(unittest.TestCase):
         # own quit helper.
         sites = {"if (!sdl3vk_poll()) gui_quit_request();": 2,
                  "if (msg.message == WM_QUIT) { gui_quit_request(); continue; }": 1,
-                 "if (res == GEGPU_PRESENT_WINDOW_CLOSED) {\n            gui_quit_request();": 1,
-                 "if (present_result == 0) gui_quit_request();": 1,
+                 "if (gpu_action == GUI_GPU_CLOSED) gui_quit_request();": 1,
+                 "if (cpu_result == 0) gui_quit_request();": 1,
                  "if (result == 0) gui_quit_request();": 1,
                  "if (!sdl3vk_poll()) return gui_pause_quit();": 1,
                  "if (presented == 0) return gui_pause_quit();": 1,

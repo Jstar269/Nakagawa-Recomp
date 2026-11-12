@@ -1055,6 +1055,106 @@ def run_quit(build_dir: Path) -> int:
     return 0
 
 
+#: How many consecutive vblanks run_vramdump asks the capture run to dump (SR_VRAMDUMP_MAX_VBLANKS),
+#: from the first vblank the runtime counts. The first presented frame is among them whatever the
+#: load: it has been seen at vblanks 1 to 3.
+VRAMDUMP_WINDOW = 8
+VRAMDUMP_FIRST_VBLANK = 1
+#: The latest vblank the capture run may present its first frame at. Measured on this fixture:
+#: vblank 1 on an idle machine, 2 or 3 with 16 busy processes competing (80 runs) and in both
+#: hosted failures of #2200. 4 leaves a margin; a presenter that slips to 7 is a regression to
+#: report, not a race to absorb, even though the 1..8 window would still hold it.
+VRAMDUMP_FIRST_PRESENT_MAX = 4
+
+
+def first_presented_vblank(output: str) -> int | None:
+    """The vblank of the first ``HOST_PRESENT_SUBMITTED`` line of a ``SR_PRESENT_TRACE`` run."""
+    match = re.search(r"HOST_PRESENT_SUBMITTED f=(\d+)", output)
+    return int(match.group(1)) if match else None
+
+
+def vramdump_capture_failure(output: str, window: range,
+                             latest_first_present: int = VRAMDUMP_FIRST_PRESENT_MAX) -> str | None:
+    """Why a capture run's output does not prove a present-aligned VRAM capture, or None.
+
+    Which vblank a run presents first is not fixed: it moves with how busy the machine is, so
+    the capture run cannot be required to present the vblank the baseline run happened to
+    present first (#2200). What stays strict is what the capture proves, judged on the capture
+    run's own trace (``SR_PRESENT_TRACE``): the window holds the vblank it presented first (the
+    frame ``frame_first.ppm`` is of), every ``VRAMDUMP vblank=N PASS`` is a vblank it presented
+    and one that was requested, that first frame was captured, and none reported FAIL.
+    """
+    presented = {int(value) for value in re.findall(r"HOST_PRESENT_SUBMITTED f=(\d+)", output)}
+    passed = [int(value) for value in re.findall(r"VRAMDUMP vblank=(\d+) PASS", output)]
+    failed = re.findall(r"VRAMDUMP vblank=(\d+) FAIL", output)
+    first, last = window.start, window[-1]
+    if failed:
+        return f"the capture reported FAIL at vblank {failed[0]}"
+    first_presented = first_presented_vblank(output)
+    if first_presented is None or first_presented not in window:
+        return (f"the capture run's first presented vblank ({first_presented}) is not in the "
+                f"requested window {first}..{last}, so its first-frame PPM has no VRAM capture")
+    if first_presented > latest_first_present:
+        return (f"the capture run presented its first frame at vblank {first_presented}, later than "
+                f"the {latest_first_present} this fixture has been seen to need under load")
+    if not passed:
+        return (f"the requested window {first}..{last} presented vblanks "
+                f"{sorted(presented & set(window))} but produced no VRAM capture")
+    for vblank in passed:
+        if vblank not in window:
+            return f"VRAM capture reported PASS for vblank {vblank}, which was not requested"
+        if vblank not in presented:
+            return f"VRAM capture reported PASS for vblank {vblank}, which the run did not present"
+    if len(set(passed)) != len(passed):
+        return f"VRAM capture reported PASS twice for one vblank: {passed}"
+    if first_presented not in passed:
+        return (f"the first presented vblank {first_presented} produced no VRAM capture "
+                f"(captured {sorted(passed)})")
+    return None
+
+
+def first_frame_vram_sidecar(capture_dir: Path, first_presented: int, passes: int,
+                             expected_rgb: bytes) -> Path:
+    """The sidecar of the capture run's first presented vblank, once it proves that frame.
+
+    ``expected_rgb`` is the 480x272 RGB the host sink wrote for that same first present. The
+    sidecar of exactly that vblank must carry the display framebuffer's address, stride and format
+    and hold those pixels, and the run must have written one sidecar per reported PASS. Another
+    vblank's sidecar that happens to match does not stand in for it (#2200).
+    """
+    sidecars = sorted(capture_dir.glob("vram_*.json"))
+    if not sidecars:
+        raise RuntimeError("no selected vblank produced a VRAM sidecar")
+    if len(sidecars) != passes:
+        raise RuntimeError(f"{passes} vblanks reported PASS but {len(sidecars)} VRAM sidecars exist")
+    candidate = capture_dir / f"vram_{first_presented}.json"
+    if not candidate.is_file():
+        raise RuntimeError(f"the first presented vblank {first_presented} has no VRAM sidecar")
+    sidecar = json.loads(candidate.read_text(encoding="utf-8"))
+    display = sidecar.get("display_framebuffer", {})
+    if (display.get("addr") != f"0x{FRAMEBUFFER:08x}" or
+            display.get("stride") != STRIDE or display.get("format_code") != PIXEL_FORMAT):
+        raise RuntimeError(f"captured display framebuffer metadata mismatch: {display}")
+    raw_image = (candidate.parent / sidecar["vram"]["image_file"]).read_bytes()
+    row_bytes = STRIDE * 4
+    for y in range(DISPLAY_HEIGHT):
+        row = raw_image[y * row_bytes:y * row_bytes + DISPLAY_WIDTH * 4]
+        rgb = bytearray(DISPLAY_WIDTH * 3)
+        rgb[0::3], rgb[1::3], rgb[2::3] = row[0::4], row[1::4], row[2::4]
+        if bytes(rgb) != expected_rgb[y * DISPLAY_WIDTH * 3:(y + 1) * DISPLAY_WIDTH * 3]:
+            samples = []
+            for sample_y in (0, 128, 263, 264, 265, 271):
+                raw_at = sample_y * row_bytes
+                ppm_at = sample_y * DISPLAY_WIDTH * 3
+                samples.append(f"y{sample_y}:vram={raw_image[raw_at:raw_at + 4].hex()}"
+                               f"/ppm={expected_rgb[ppm_at:ppm_at + 3].hex()}")
+            raise RuntimeError(
+                f"the VRAM capture of the first presented vblank {first_presented} "
+                f"({len(sidecars)} captured) does not match the offscreen presented PPM at row {y}; "
+                + ",".join(samples))
+    return candidate
+
+
 def run_vramdump(build_dir: Path) -> int:
     """Prove present-aligned VRAM capture and the host PNG decoder on this fixture."""
     build_dir = build_dir.resolve()
@@ -1112,19 +1212,30 @@ def run_vramdump(build_dir: Path) -> int:
                               baseline.stdout + baseline.stderr)
         if not presents:
             raise RuntimeError("display-smoke baseline did not report its first presented vblank")
-        selected_vblank = int(presents[0])
-        selected_vblanks = ",".join(str(vblank) for vblank in range(selected_vblank,
-                                                                     selected_vblank + 8))
+        # The baseline run proves a frame is presented and gives the reference PPM. The capture
+        # run is another process and presents its first frame at whatever vblank the machine's
+        # load lets it, so the window starts at the first vblank and the run is judged on its
+        # own trace (#2200).
+        window = range(VRAMDUMP_FIRST_VBLANK, VRAMDUMP_FIRST_VBLANK + VRAMDUMP_WINDOW)
+        selection = list(window)
+        selected_vblanks = ",".join(str(vblank) for vblank in selection)
         captured = launch(capture_dir, capture_vblank=selected_vblanks)
         baseline_ppm = baseline_dir / "frame_first.ppm"
         capture_ppm = capture_dir / "frame_first.ppm"
         if not baseline_ppm.is_file() or not capture_ppm.is_file():
             raise RuntimeError("offscreen host sink did not publish its first-frame PPM")
-        if baseline_ppm.read_bytes() != capture_ppm.read_bytes():
+        # Each run's first frame must be exactly one guest frame of the stripe pattern (the one
+        # its first pixel names). They are the same frame in every run measured, 0, whatever
+        # vblank was presented first; checking each against its own frame keeps that a fact the
+        # check verifies, not one it assumes (#2200).
+        frames = int(_read_manifest(build_dir / "fixture")["frames"])
+        baseline_frame = _require_exact_present_pixels(baseline_ppm, frames, "baseline")
+        capture_frame = _require_exact_present_pixels(capture_ppm, frames, "capture")
+        if baseline_frame == capture_frame and baseline_ppm.read_bytes() != capture_ppm.read_bytes():
             raise RuntimeError("enabling SR_VRAMDUMP changed the presented PPM bytes")
-        if f"VRAMDUMP vblank={selected_vblank} PASS" not in captured.stdout + captured.stderr:
-            raise RuntimeError(f"requested vblank {selected_vblank} produced no VRAM capture")
-
+        captured_output = captured.stdout + captured.stderr
+        if failure := vramdump_capture_failure(captured_output, window):
+            raise RuntimeError(failure)
         # PASS must mean a presented frame: with no presenter (no --gui) nothing is
         # presented, so the same selection must capture nothing and never say PASS.
         headless_dir = root / "headless-run"
@@ -1151,52 +1262,16 @@ def run_vramdump(build_dir: Path) -> int:
                 (headless_dir / "capture").glob("vram_*")):
             raise RuntimeError("a run with no presenter reported a VRAM capture")
 
-        sidecars = sorted((capture_dir / "capture").glob("vram_*.json"))
-        if not sidecars:
-            raise RuntimeError("no selected vblank produced a VRAM sidecar")
+        passes = len(re.findall(r"VRAMDUMP vblank=\d+ PASS", captured_output))
         ppm_header = b"P6\n480 272\n255\n"
-        ppm = baseline_ppm.read_bytes()
+        ppm = capture_ppm.read_bytes()
         if not ppm.startswith(ppm_header) or len(ppm) - len(ppm_header) != 480 * 272 * 3:
             raise RuntimeError("offscreen host-sink output is not the expected 480x272 P6 frame")
         expected_rgb = ppm[len(ppm_header):]
-        matching_sidecar = None
-        for candidate in sidecars:
-            candidate_sidecar = json.loads(candidate.read_text(encoding="utf-8"))
-            display = candidate_sidecar.get("display_framebuffer", {})
-            if (display.get("addr") != f"0x{FRAMEBUFFER:08x}" or
-                    display.get("stride") != STRIDE or display.get("format_code") != PIXEL_FORMAT):
-                raise RuntimeError(f"captured display framebuffer metadata mismatch: {display}")
-            raw_path = candidate.parent / candidate_sidecar["vram"]["image_file"]
-            raw_image = raw_path.read_bytes()
-            matches = True
-            for y in range(272):
-                for x in range(480):
-                    raw_offset = (y * STRIDE + x) * 4
-                    ppm_offset = (y * 480 + x) * 3
-                    if (raw_image[raw_offset:raw_offset + 3] !=
-                            expected_rgb[ppm_offset:ppm_offset + 3]):
-                        matches = False
-                        break
-                if not matches:
-                    break
-            if matches:
-                matching_sidecar = candidate
-                break
-        if matching_sidecar is None:
-            first_sidecar = json.loads(sidecars[0].read_text(encoding="utf-8"))
-            raw_image = (sidecars[0].parent / first_sidecar["vram"]["image_file"]).read_bytes()
-            samples = []
-            for sample_y in (0, 128, 263, 264, 265, 271):
-                raw_at = (sample_y * STRIDE) * 4
-                ppm_at = sample_y * 480 * 3
-                samples.append(
-                    f"y{sample_y}:vram={raw_image[raw_at:raw_at + 4].hex()}"
-                    f"/ppm={expected_rgb[ppm_at:ppm_at + 3].hex()}"
-                )
-            raise RuntimeError(
-                f"none of {len(sidecars)} bounded VRAM captures matched the offscreen presented PPM; "
-                + ",".join(samples)
-            )
+        first_presented = first_presented_vblank(captured_output)
+        assert first_presented is not None  # vramdump_capture_failure refused a run without one
+        matching_sidecar = first_frame_vram_sidecar(
+            capture_dir / "capture", first_presented, passes, expected_rgb)
 
         output_dir = root / "png"
         decoded = subprocess.run(
@@ -1601,17 +1676,22 @@ def videorec_smoke(build_dir: Path, fake_ffmpeg: Path) -> int:
     return 0
 
 
-def fsr1_smoke(build_dir: Path) -> int:
-    """SR_PRESENT_UPSCALE=fsr1 is presentation only: the guest's frame, guest VRAM and every guest
-    flight event are byte-identical with it on and off.
+def _upscale_smoke(build_dir: Path, key: str, value: str, banner: str, count: str, tag: str,
+                   stamp: str, both_keys: tuple[dict[str, str], str] | None = None) -> int:
+    """An upscaler (`key`=`value`) is presentation only: the guest's frame, guest VRAM and every
+    guest flight event are byte-identical with it on and off.
 
     Two runs on the Vulkan presenter, in a hidden window larger than the guest frame so the upscaler
-    runs on every present: off, then fsr1. Each records the flight bundle, the first presented guest
-    frame and VRAM at a set of VBLANKs. The fsr1 run must say it upscaled presents; the off run must
+    runs on every present: off, then on. Each records the flight bundle, the first presented guest
+    frame and VRAM at a set of VBLANKs. The on run must say it upscaled presents (`banner`, then
+    a count above zero matching `count`) and carry the stamp `stamp`; the off run must
     not. The flight bundles must match after the host-paced present events are projected out, the
     first frames must be the exact stripe pixels and equal, every VRAM dump's framebuffer must be
     exactly the guest frame it names, and the dumps of a guest frame both runs captured must hold
     the same VRAM bytes.
+
+    `both_keys` (environment, stamp) adds a third run with those variables set as well as `key`: its
+    flight bundle must carry that stamp whole, as the window's two upscalers name themselves together.
     """
     build_dir = build_dir.resolve()
     manifest = _read_manifest(build_dir / "fixture")
@@ -1631,11 +1711,11 @@ def fsr1_smoke(build_dir: Path) -> int:
     # where two runs' host pacing has drifted least, so they share guest frames.
     vblanks = ",".join(str(v) for v in range(6, 14))
 
-    def launch(work: Path, upscale: str | None) -> tuple[dict, str]:
+    def launch(work: Path, upscale: str | None, extra: dict[str, str] | None = None) -> tuple[dict, str]:
         (work / "capture").mkdir(parents=True)
         env = os.environ.copy()
         for name in ("SR_VIDEO", "SR_FBDUMP", "SR_EXIT_AT_VBLANK", "SR_FLIGHT_TRIGGER", "SR_WATCH",
-                     "SR_PRESENT_UPSCALE", "SR_PRESENT_SCALING"):
+                     "SR_PRESENT_UPSCALE", "SR_MOVIE_UPSCALE", "SR_PRESENT_SCALING"):
             env.pop(name, None)
         env.update({
             "SR_WINDOW_HIDDEN": "1",
@@ -1648,52 +1728,65 @@ def fsr1_smoke(build_dir: Path) -> int:
             "SR_VRAMDUMP_DIR": str(work / "capture"),
         })
         if upscale:
-            env["SR_PRESENT_UPSCALE"] = upscale
+            env[key] = upscale
+        if extra:
+            env.update(extra)
         done = subprocess.run(command, cwd=work, env=env, capture_output=True, text=True,
                               timeout=120, check=False)
         combined = done.stdout + done.stderr
         (work / "run.log").write_text(combined, encoding="utf-8")
         if done.returncode:
-            raise RuntimeError(f"fsr1 smoke ({upscale or 'off'}) exited {done.returncode}: {combined[-2000:]}")
+            raise RuntimeError(f"{value} smoke ({upscale or 'off'}) exited {done.returncode}: {combined[-2000:]}")
         if "status=PASS" not in combined or "status=FAIL" in combined:
-            raise RuntimeError(f"fsr1 smoke ({upscale or 'off'}) missed its guest check: {combined[-2000:]}")
+            raise RuntimeError(f"{value} smoke ({upscale or 'off'}) missed its guest check: {combined[-2000:]}")
         if "VRAMDUMP enabled selections=8" not in combined:
             raise RuntimeError(f"the {upscale or 'off'} run refused its VRAM dump selection: {combined[-2000:]}")
         bundle = json.loads((work / "flight.json").read_text(encoding="utf-8"))
         _require_vblank_progress(bundle, upscale or "off")
         return bundle, combined
 
-    with tempfile.TemporaryDirectory(prefix="display-smoke-fsr1-") as temporary:
+    with tempfile.TemporaryDirectory(prefix=f"display-smoke-{value}-") as temporary:
         root = Path(temporary)
         runs = {}
-        for label in ("off", "fsr1"):
+        for label in ("off", value):
             work = root / label
-            bundle, combined = launch(work, None if label == "off" else "fsr1")
+            bundle, combined = launch(work, None if label == "off" else value)
             runs[label] = (work, bundle, combined)
-        off_log, fsr_log = runs["off"][2], runs["fsr1"][2]
-        upscaled = re.search(r"sdl3vk: FSR 1 upscaled (\d+) presents", fsr_log)
-        if "FSR 1 upscaling on" not in fsr_log or not upscaled or int(upscaled.group(1)) < 1:
-            raise RuntimeError("the fsr1 run did not upscale any present: " + fsr_log[-2000:])
-        if "FSR 1 upscal" in off_log:
-            raise RuntimeError("the off run reported FSR 1 upscaling")
+        off_log, on_log = runs["off"][2], runs[value][2]
+        upscaled = re.search(count, on_log)
+        if banner not in on_log or not upscaled or int(upscaled.group(1)) < 1:
+            raise RuntimeError(f"the {value} run did not upscale any present: " + on_log[-2000:])
+        # A second count, when the message has one, is the presents the Anime4K stages made (the
+        # others went to FSR 1 alone): the run must show Anime4K ran, not only the movie set.
+        if upscaled.re.groups > 1 and int(upscaled.group(2)) < 1:
+            raise RuntimeError(f"the {value} run counted no present through its first stage: " + on_log[-2000:])
+        if banner in off_log or re.search(count, off_log):
+            raise RuntimeError(f"the off run reported {tag} upscaling")
 
-        first = [runs[label][0] / "frame_first.ppm" for label in ("off", "fsr1")]
-        for path, label in zip(first, ("off", "fsr1"), strict=True):
+        first = [runs[label][0] / "frame_first.ppm" for label in ("off", value)]
+        for path, label in zip(first, ("off", value), strict=True):
             _require_exact_present_pixels(path, frames, label)
         if first[0].read_bytes() != first[1].read_bytes():
-            raise RuntimeError("FSR 1 changed the first presented guest frame")
+            raise RuntimeError(f"{tag} changed the first presented guest frame")
 
         # The upscaled run is stamped as enhanced, in its log and its bundle; the off run is not.
-        if "ACE_MODE: present upscale fsr1" not in fsr_log or "ACE_MODE:" in off_log:
-            raise RuntimeError("the fsr1 run's ACE_MODE stamp is missing, or the off run has one")
+        if f"ACE_MODE: present upscale {stamp} " not in on_log or "ACE_MODE:" in off_log:
+            raise RuntimeError(f"the {value} run's ACE_MODE stamp is missing, or the off run has one")
         # tools/boot_gate.py also reads the boot event, for a run whose stderr lines were silenced.
-        if "BOOT_EVENT phase=present_upscale mode=fsr1" not in fsr_log or "phase=present_upscale" in off_log:
-            raise RuntimeError("the fsr1 run's present_upscale boot event is missing, or the off run has one")
-        stamps = [runs[label][1]["runtime"].get("enhancements") for label in ("off", "fsr1")]
-        if stamps != [None, {"present_upscale": "fsr1"}]:
-            raise RuntimeError(f"flight bundle enhancements are {stamps}, not none and fsr1")
+        if f"BOOT_EVENT phase=present_upscale mode={stamp}" not in on_log or "phase=present_upscale" in off_log:
+            raise RuntimeError(f"the {value} run's present_upscale boot event is missing, or the off run has one")
+        stamps = [runs[label][1]["runtime"].get("enhancements") for label in ("off", value)]
+        if stamps != [None, {"present_upscale": stamp}]:
+            raise RuntimeError(f"flight bundle enhancements are {stamps}, not none and {stamp}")
+        if both_keys:
+            extra, combined_stamp = both_keys
+            both, _log = launch(root / "combined", value, extra)
+            seen = both["runtime"].get("enhancements")
+            if seen != {"present_upscale": combined_stamp}:
+                raise RuntimeError(f"the combined run's flight bundle enhancements are {seen}, "
+                                   f"not {combined_stamp}")
         paths = []
-        for label in ("off", "fsr1"):
+        for label in ("off", value):
             target = root / f"{label}.projected.json"
             projected = _without_host_present_events(runs[label][1])
             # Compared for the guest's events only: the stamp marks the window, not the guest.
@@ -1705,14 +1798,14 @@ def fsr1_smoke(build_dir: Path) -> int:
             capture_output=True, text=True, check=False,
         )
         if match.returncode != 0 or "MATCH:" not in match.stdout:
-            raise RuntimeError(f"FSR 1 changed the guest's flight events: {match.stdout}{match.stderr}")
+            raise RuntimeError(f"{tag} changed the guest's flight events: {match.stdout}{match.stderr}")
 
         # Which guest frame a VBLANK shows depends on host pacing, which differs from run to run. So
         # every dump of both runs must hold, in its framebuffer, exactly the guest frame its first
         # pixel names (VRAM offset 0 is the framebuffer), and every dump of a frame both runs
         # captured must match the other run's byte for byte, the whole of VRAM.
         held = []
-        for label in ("off", "fsr1"):
+        for label in ("off", value):
             by_frame: dict[bytes, list[tuple[str, bytes]]] = {}
             for dump in sorted((runs[label][0] / "capture").glob("vram_*.bin")):
                 data = dump.read_bytes()
@@ -1725,12 +1818,27 @@ def fsr1_smoke(build_dir: Path) -> int:
         changed = [f"{a} (off) vs {b} (on)" for key in common for a, x in held[0][key]
                    for b, y in held[1][key] if x != y]
         if changed:
-            raise RuntimeError(f"FSR 1 changed guest VRAM: {changed}")
+            raise RuntimeError(f"{tag} changed guest VRAM: {changed}")
     print(
-        f"DISPLAY_SMOKE_FSR1 status=PASS upscaled_presents={upscaled.group(1)} guest=MATCH "
+        f"DISPLAY_SMOKE_{value.upper()} status=PASS upscaled_presents={upscaled.group(1)} guest=MATCH "
         f"first_frame=EXACT vram_frames={len(common)} vram=IDENTICAL framebuffers=EXACT"
     )
     return 0
+
+
+def fsr1_smoke(build_dir: Path) -> int:
+    """SR_PRESENT_UPSCALE=fsr1 leaves the guest untouched (see _upscale_smoke)."""
+    return _upscale_smoke(build_dir, "SR_PRESENT_UPSCALE", "fsr1", "FSR 1 upscaling on",
+                          r"sdl3vk: FSR 1 upscaled (\d+) presents", "FSR 1", "fsr1")
+
+
+def anime4k_smoke(build_dir: Path) -> int:
+    """SR_MOVIE_UPSCALE=anime4k leaves the guest untouched (see _upscale_smoke). The fixture's frames
+    are CPU-presented, the movie upscaler's input, so the on run must count them as upscaled."""
+    return _upscale_smoke(build_dir, "SR_MOVIE_UPSCALE", "anime4k", "movie upscaling on (Anime4K CNN x2 + FSR 1",
+                          r"sdl3vk: the movie upscaler made (\d+) presents, (\d+) through Anime4K",
+                          "The Anime4K movie upscaler", "movie-anime4k",
+                          both_keys=({"SR_PRESENT_UPSCALE": "fsr1"}, "fsr1+movie-anime4k"))
 
 
 def run_player(build_dir: Path) -> int:
@@ -1904,6 +2012,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                                  help="the videorec selftest binary, run as a stalling FFmpeg")
     fsr1_parser = subparsers.add_parser("fsr1")
     fsr1_parser.add_argument("--build-dir", type=Path, required=True)
+    anime4k_parser = subparsers.add_parser("anime4k")
+    anime4k_parser.add_argument("--build-dir", type=Path, required=True)
     player_parser = subparsers.add_parser("run-player")
     player_parser.add_argument("--build-dir", type=Path, required=True)
     quit_parser = subparsers.add_parser("quit")
@@ -1931,6 +2041,8 @@ def main(argv: list[str] | None = None) -> int:
             return videorec_smoke(args.build_dir, args.fake_ffmpeg)
         if args.command == "fsr1":
             return fsr1_smoke(args.build_dir)
+        if args.command == "anime4k":
+            return anime4k_smoke(args.build_dir)
         if args.command == "run-player":
             return run_player(args.build_dir)
         if args.command == "quit":

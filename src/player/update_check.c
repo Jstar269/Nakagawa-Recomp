@@ -273,11 +273,37 @@ static bool safe_tag(const char *tag) {
     return true;
 }
 
+#define REPOSITORY_URL_LENGTH (sizeof(NK_UPDATE_REPOSITORY_URL) - 1)
+
+/* The first REPOSITORY_URL_LENGTH characters of url name this repository: GitHub owner and
+   repository names are case-insensitive, so they compare without ASCII case. */
+static bool names_this_repository(const char *url) {
+    if (!url || strlen(url) < REPOSITORY_URL_LENGTH) return false;
+    for (size_t i = 0; i < REPOSITORY_URL_LENGTH; i++) {
+        char a = url[i], b = NK_UPDATE_REPOSITORY_URL[i];
+        if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
+        if (b >= 'A' && b <= 'Z') b = (char)(b - 'A' + 'a');
+        if (a != b) return false;
+    }
+    return true;
+}
+
+/* url is prefix + tag (+ "/" + name), where prefix starts with NK_UPDATE_REPOSITORY_URL; only
+   the repository part ignores case. */
 static bool exact_url(const char *url, const char *prefix, const char *tag, const char *name) {
     char expected[512];
     int n = name ? snprintf(expected, sizeof(expected), "%s%s/%s", prefix, tag, name)
                  : snprintf(expected, sizeof(expected), "%s%s", prefix, tag);
-    return url && n > 0 && (size_t)n < sizeof(expected) && strcmp(url, expected) == 0;
+    return n > 0 && (size_t)n < sizeof(expected) && names_this_repository(url) &&
+           strcmp(url + REPOSITORY_URL_LENGTH, expected + REPOSITORY_URL_LENGTH) == 0;
+}
+
+bool nk_update_is_release_page(const char *url) {
+    static const char page_prefix[] = NK_UPDATE_RELEASE_PAGE_PREFIX;
+    const size_t prefix = sizeof(page_prefix) - 1;
+    return names_this_repository(url) && strlen(url) > prefix &&
+           strncmp(url + REPOSITORY_URL_LENGTH, page_prefix + REPOSITORY_URL_LENGTH,
+                   prefix - REPOSITORY_URL_LENGTH) == 0;
 }
 
 static bool hex64(const char *text) {
@@ -954,6 +980,110 @@ static bool listed_files_present(const char *root, char *missing, size_t missing
 }
 #endif
 
+bool nk_update_installed_by_setup(const char *exe_dir) {
+    char uninstaller[NK_MAX_PATH];
+    size_t bin_end, bin_start, install_end;
+    int n;
+    if (!exe_dir || !exe_dir[0]) return false;
+    /* <install>/bin, with Inno's uninstaller beside bin. */
+    bin_end = trimmed_length(exe_dir);
+    bin_start = last_component(exe_dir, bin_end);
+    if (bin_end - bin_start != 3 || strncmp(exe_dir + bin_start, "bin", 3) != 0 || bin_start < 2) {
+        return false;
+    }
+    install_end = bin_start - 1;
+    n = snprintf(uninstaller, sizeof(uninstaller), "%.*s%cunins000.exe", (int)install_end, exe_dir,
+                 nk_platform_path_separator());
+    return n > 0 && (size_t)n < sizeof(uninstaller) && nk_platform_file_exists(uninstaller);
+}
+
+bool nk_update_refuse_for_setup_copy(const char *exe_dir, NkUpdateError *error) {
+    clear_error(error);
+    if (!nk_update_installed_by_setup(exe_dir)) return false;
+    set_error(error, "UPDATE_INSTALLED_BY_SETUP", "Update with Setup",
+              "This copy was installed with Setup, so it updates by running the new release's Setup, "
+              "not by unpacking a ZIP beside it. Download the new Setup from the release page and "
+              "run it; it keeps your games, saves and settings.");
+    return true;
+}
+
+/* The path of staging's mark file, NK_UPDATE_STAGING_MARK; false if it does not fit. */
+static bool staging_mark_path(const char *staging, char *out, size_t out_size) {
+    int n = snprintf(out, out_size, "%s%c%s", staging, nk_platform_path_separator(),
+                     NK_UPDATE_STAGING_MARK);
+    return n > 0 && (size_t)n < out_size;
+}
+
+/* Writes the mark that says staging is Nakagawa's own unpack in progress. */
+static bool write_staging_mark(const char *mark) {
+    FILE *file = nk_fopen_utf8(mark, "wb");
+    bool written = file != NULL && fputs("Nakagawa is unpacking an update here.\n", file) != EOF;
+    if (file != NULL && fclose(file) != 0) written = false;
+    return written;
+}
+
+/* Removes a staging folder with its mark removed last. When the folder does not go (a
+   file in it held open, a window open on the folder itself, a file still being deleted),
+   it is marked again, so the next try still knows it as Nakagawa's own and removes it
+   then. True once the folder is gone; false is reported by the caller. */
+static bool remove_staging(const char *staging) {
+    char mark[NK_MAX_PATH];
+    if (nk_platform_remove_tree(staging, NK_UPDATE_STAGING_MARK) &&
+        nk_platform_remove_tree(staging, NULL) && nk_platform_path_missing(staging)) {
+        return true;
+    }
+    if (!nk_platform_path_missing(staging) && staging_mark_path(staging, mark, sizeof(mark))) {
+        (void)write_staging_mark(mark);
+    }
+    return false;
+}
+
+bool nk_update_claim_staging(const char *staging, NkUpdateError *error) {
+    char mark[NK_MAX_PATH];
+    char text[512];
+    clear_error(error);
+    if (!staging || !staging[0] || !staging_mark_path(staging, mark, sizeof(mark))) {
+        set_error(error, "UPDATE_INSTALL_PATH", "Couldn't install",
+                  "The folder for the new version has too long a path. Move Nakagawa to a "
+                  "shorter folder, or unpack the ZIP yourself.");
+        return false;
+    }
+    if (!nk_platform_path_missing(staging)) {
+        if (!nk_platform_file_exists(mark)) {
+            snprintf(text, sizeof(text),
+                     "%.300s is in the way and Nakagawa did not make it. Delete it, then try again.",
+                     staging);
+            set_error(error, "UPDATE_INSTALL_LEFTOVER", "Couldn't install", text);
+            return false;
+        }
+        /* Nakagawa's own unpack from an earlier try that never finished: nothing in it
+           was ever in use, and the running version's folder is elsewhere. */
+        if (!remove_staging(staging)) {
+            snprintf(text, sizeof(text),
+                     "%.300s is left from an earlier try and could not be removed. Close any "
+                     "window showing that folder, then try again.", staging);
+            set_error(error, "UPDATE_INSTALL_LEFTOVER_IN_USE", "Couldn't install", text);
+            return false;
+        }
+    }
+    if (!nk_platform_mkdir_p(staging)) {
+        snprintf(text, sizeof(text),
+                 "Nakagawa couldn't create a folder for the new version (%.300s). Unpack the "
+                 "ZIP yourself, or move Nakagawa to a folder you can write to.", staging);
+        set_error(error, "UPDATE_INSTALL_NOT_WRITABLE", "Couldn't install", text);
+        return false;
+    }
+    if (!write_staging_mark(mark)) {
+        (void)nk_platform_remove_tree(staging, NULL);
+        snprintf(text, sizeof(text),
+                 "Nakagawa couldn't write in the folder for the new version (%.300s). Unpack "
+                 "the ZIP yourself, or move Nakagawa to a folder you can write to.", staging);
+        set_error(error, "UPDATE_INSTALL_NOT_WRITABLE", "Couldn't install", text);
+        return false;
+    }
+    return true;
+}
+
 bool nk_update_install_supported(void) {
 #if defined(_WIN32) || defined(_WIN64)
     return true;
@@ -967,6 +1097,7 @@ bool nk_update_install(const char *zip_path, const char *target_dir, const char 
     clear_error(error);
 #if defined(_WIN32) || defined(_WIN64)
     char staging[NK_MAX_PATH];
+    char staging_mark[NK_MAX_PATH];
     char tar_exe[NK_MAX_PATH];
     char player[NK_MAX_PATH];
     char missing[256];
@@ -978,7 +1109,8 @@ bool nk_update_install(const char *zip_path, const char *target_dir, const char 
     int exit_code;
     DWORD length;
     if (!zip_path || !target_dir || !target_dir[0] ||
-        snprintf(staging, sizeof(staging), "%s.partial", target_dir) >= (int)sizeof(staging)) {
+        snprintf(staging, sizeof(staging), "%s.partial", target_dir) >= (int)sizeof(staging) ||
+        !staging_mark_path(staging, staging_mark, sizeof(staging_mark))) {
         set_error(error, "UPDATE_INSTALL_PATH", "Couldn't install",
                   "The folder for the new version has too long a path. Move Nakagawa to a "
                   "shorter folder, or unpack the ZIP yourself.");
@@ -991,19 +1123,7 @@ bool nk_update_install(const char *zip_path, const char *target_dir, const char 
         set_error(error, "UPDATE_INSTALL_EXISTS", "Already unpacked", text);
         return false;
     }
-    if (!nk_platform_path_missing(staging)) {
-        snprintf(text, sizeof(text),
-                 "%.300s is left from an earlier try. Delete it, then try again.", staging);
-        set_error(error, "UPDATE_INSTALL_LEFTOVER", "Couldn't install", text);
-        return false;
-    }
-    if (!nk_platform_mkdir_p(staging)) {
-        snprintf(text, sizeof(text),
-                 "Nakagawa couldn't create a folder next to this version (%.300s). Unpack the "
-                 "ZIP yourself, or move Nakagawa to a folder you can write to.", target_dir);
-        set_error(error, "UPDATE_INSTALL_NOT_WRITABLE", "Couldn't install", text);
-        return false;
-    }
+    if (!nk_update_claim_staging(staging, error)) return false;
     length = GetSystemDirectoryW(system_directory_w,
                                  sizeof(system_directory_w) / sizeof(system_directory_w[0]));
     if (!length || length >= sizeof(system_directory_w) / sizeof(system_directory_w[0]) ||
@@ -1011,7 +1131,7 @@ bool nk_update_install(const char *zip_path, const char *target_dir, const char 
                             system_directory, sizeof(system_directory), NULL, NULL) <= 0 ||
         snprintf(tar_exe, sizeof(tar_exe), "%s\\tar.exe", system_directory) >=
             (int)sizeof(tar_exe)) {
-        (void)nk_platform_remove_tree(staging, NULL);
+        (void)remove_staging(staging);
         set_error(error, "UPDATE_UNPACK_UNAVAILABLE", "Couldn't install",
                   "Windows' own archive tool (tar.exe) was not found. Unpack the ZIP yourself.");
         return false;
@@ -1019,9 +1139,9 @@ bool nk_update_install(const char *zip_path, const char *target_dir, const char 
     {
         const char *argv[] = { tar_exe, "-xf", zip_path, "-C", staging, NULL };
         memset(&process, 0, sizeof(process));
-        if (!nk_platform_spawn_process(tar_exe, argv, NULL, NULL, log_path, &process)) {
+        if (!nk_platform_spawn_tool(tar_exe, argv, NULL, NULL, log_path, &process)) {
             NkSpawnBlockReport block;
-            (void)nk_platform_remove_tree(staging, NULL);
+            (void)remove_staging(staging);
             if (nk_launch_describe_spawn_block(process.spawn_error,
                                                "Windows' archive tool (tar.exe)",
                                                "archive tool", tar_exe, &block)) {
@@ -1037,7 +1157,7 @@ bool nk_update_install(const char *zip_path, const char *target_dir, const char 
     exit_code = nk_platform_wait_process(&process, -1);
     nk_platform_close_process(&process);
     if (exit_code != 0) {
-        (void)nk_platform_remove_tree(staging, NULL);
+        (void)remove_staging(staging);
         snprintf(text, sizeof(text),
                  "Windows' archive tool stopped with code %d while unpacking. Its output is in "
                  "%.300s.", exit_code, log_path ? log_path : "the logs folder");
@@ -1048,7 +1168,7 @@ bool nk_update_install(const char *zip_path, const char *target_dir, const char 
         snprintf(player, sizeof(player), "%s\\bin\\nakagawa_player.exe", staging) >=
             (int)sizeof(player) ||
         !nk_platform_file_exists(player)) {
-        (void)nk_platform_remove_tree(staging, NULL);
+        (void)remove_staging(staging);
         snprintf(text, sizeof(text),
                  "%s%.200s%s Windows Security may have removed a file; Protection history in "
                  "Windows Security names the detection. Don't turn Windows Security off.",
@@ -1058,8 +1178,21 @@ bool nk_update_install(const char *zip_path, const char *target_dir, const char 
         set_error(error, "UPDATE_INSTALL_INCOMPLETE", "Install incomplete", text);
         return false;
     }
+    /* The mark goes before the folder takes the new version's name: the installed
+       folder holds exactly the release's files. */
+    if (nk_remove_utf8(staging_mark) != 0) {
+        (void)remove_staging(staging);
+        snprintf(text, sizeof(text),
+                 "Nakagawa couldn't finish the folder for the new version (%.300s). Close any "
+                 "window showing it and try again.", staging);
+        set_error(error, "UPDATE_INSTALL_MOVE_FAILED", "Couldn't install", text);
+        return false;
+    }
     if (nk_rename_utf8(staging, target_dir) != 0) {
-        (void)nk_platform_remove_tree(staging, NULL);
+        /* Marked again before the clean-up, so a copy the clean-up cannot remove (a file
+           held open) is still Nakagawa's own to remove on the next try. */
+        (void)write_staging_mark(staging_mark);
+        (void)remove_staging(staging);
         snprintf(text, sizeof(text),
                  "Nakagawa couldn't move the unpacked files into %.300s. Close any window "
                  "showing that folder and try again.", target_dir);

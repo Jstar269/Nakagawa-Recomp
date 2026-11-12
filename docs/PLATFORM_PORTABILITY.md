@@ -1,7 +1,7 @@
 # Platform portability
 
-The runtime is currently a Windows application. Several subsystems already have portable seams,
-but a successful object compile is not the same as a linked, running port.
+The player is supported on Windows only. Several subsystems have portable seams, and Linux and Android
+builds exist for development (below), but a successful object compile is not the same as a linked, running port.
 
 ## Current dependency map
 
@@ -38,19 +38,19 @@ caller:
   `player_launcher_unavailable_message_for_host`), so every host's words compile and are tested on
   every host.
 
-`src/player/main.c`, `ui_renderer.c`, `ui/player_ui_nk.c` and `player_state.h` hold no host
+`src/player/main.c`, `ui/player_ui_nk.c` and `player_state.h` hold no host
 conditionals. `tools/test_platform_seam.py` counts `_WIN32`, `__APPLE__`, `__linux__`,
 `__ANDROID__` and similar tests in `src/player`, `src/core` and `src/ui` outside the backends and
 holds every file to its recorded count, with the reason its branches stay. A new branch outside a
 backend fails that test; add the behaviour to the seam instead, or raise the count in review with
 its reason.
 
-What the seam does not cover yet, by file: `package_builder.c` (tool discovery and the Windows
+What the seam does not cover, by file: `package_builder.c` (tool discovery and the Windows
 prerequisite download), `setup_staging.c` (PPSSPP folder discovery and wide file calls), the
 `settings.json` and `library.json` writers' durable replace, and the file-local UTF-8 file
 primitives that `nk_platform.h` lists for units built without the platform layer.
 
-## Staged plan
+## Port steps and status
 
 ### 1. Keep Windows green and expose portable code
 
@@ -61,17 +61,20 @@ primitives that `nk_platform.h` lists for units built without the platform layer
 
 ### 2. Linux desktop
 
-1. Add a CMake target alongside the Makefile and prove object/source parity before switching the
-   canonical build.
+1. Add a CMake target alongside the Makefile. Done (`CMakeLists.txt`); the Makefile stays the
+   canonical Windows build.
 2. Split portable SDL3 GUI code from the GDI fallback.
-3. Introduce host filesystem, time, sleep, and OSK interfaces; implement POSIX backends.
+3. Introduce host filesystem, time, sleep, and OSK interfaces; implement POSIX backends. The platform
+   layer and its POSIX backend exist (`src/core/nk_platform_posix.c`); the files listed above are not on it.
 4. Validate the H.264 backend on Linux: the vendored FFmpeg decoder subset is the default off Windows
    (see the decision record below).
-5. Link and run headless smoke tests, then visually validate SDL3/Vulkan and audio on Linux.
+5. Link and run headless smoke tests, then visually validate SDL3/Vulkan and audio on Linux. The headless
+   smoke runs in hosted CI; visual and audio validation on Linux is not done.
 
 ### 3. Android
 
-Android and similar hosts are a planned target. Every host needs a
+Android is a development target: the launcher and the showcase demos build and run in the Android
+emulator, and retail games do not. Every host needs a
 C toolchain for the user's own game, because the project never publishes recompiled game code; a
 user may build on their PC and move the result to their own device (`AGENTS.md`, section 5).
 
@@ -127,9 +130,9 @@ must not silently weaken this contract.
 
 ### Candidate dependencies
 
-| Candidate | Licence position | Packaging and decision still required |
+| Candidate | Licence position | Packaging notes |
 | --- | --- | --- |
-| Cisco OpenH264 | BSD-2-Clause is generally compatible with GPL-3.0-or-later, subject to the exact binary's notices and any codec/patent terms. | Prefer a pinned shared library or source-built package per host. Verify redistribution terms, notice retention, architecture coverage, and decoder error behavior. **Awaiting maintainer decision.** |
+| Cisco OpenH264 | BSD-2-Clause is generally compatible with GPL-3.0-or-later, subject to the exact binary's notices and any codec/patent terms. | Prefer a pinned shared library or source-built package per host. Verify redistribution terms, notice retention, architecture coverage, and decoder error behavior. Not chosen; the vendored FFmpeg subset is used. |
 | FFmpeg/libavcodec H.264 decoder | **Chosen** (#283). A pinned subset of FFmpeg n4.4 (the pin of the ATRAC3+ import) is vendored under `src/rt/h264_ffmpeg_sub/`: LGPL-2.1-or-later, LGPL configuration only (no `--enable-gpl`, no `--enable-nonfree`), combined with the project's GPL-3.0-or-later terms. | Statically linked with generic C paths only; byte-exact manifest in `src/rt/h264_ffmpeg_sub/PROVENANCE.md`, notices in `NOTICE.md` and `CREDITS.md`. H.264 is patent-encumbered in some jurisdictions: the project ships no encoder and the decoder runs only on the user's own PSP movies. Windows keeps Media Foundation. |
 | dav1d | Not a candidate: it decodes AV1, not H.264. | No H.264 backend may be represented by dav1d. |
 

@@ -42,9 +42,10 @@ A route file is private JSON next to the title's other private inputs:
 Relative paths resolve against the route file's folder. The gate adds the offscreen
 presenter, dummy SDL drivers and the capture window; ``{run}`` in the command and in env
 values is the run's fresh scratch folder (``mkdirs`` creates folders in it); it removes inherited ``SR_FBSNAP*``,
-``SR_PADSCRIPT``, ``SR_FLIGHT*``, ``SR_DATAROOT`` and ``SR_PRESENT_UPSCALE`` so the route file alone decides
-them. The presentation upscaler (#1273) is ``off`` unless the route's ``env`` asks for it, and a reference
-records the value its run used.
+``SR_PADSCRIPT``, ``SR_FLIGHT*``, ``SR_DATAROOT``, ``SR_PRESENT_UPSCALE`` and ``SR_MOVIE_UPSCALE`` so the route
+file alone decides them. The presentation and movie upscalers (#1273) are ``off`` unless the route's ``env`` asks
+for them, and a reference records the values its run used (``<present>+movie-<mode>`` when the movie upscaler
+was on).
 """
 
 from __future__ import annotations
@@ -81,7 +82,7 @@ DEFAULT_TIMEOUT_SECONDS = 600
 # Inherited selectors that would change what the run captures or where it reads input, or would
 # enhance its presentation (SR_PRESENT_UPSCALE, #1273: only the route may ask for it).
 _STRIPPED_ENV = re.compile(r"^(SR_FBSNAP.*|SR_FBDUMP|SR_PADSCRIPT.*|SR_FLIGHT.*|SR_DATAROOT|"
-                           r"SR_EXIT_AT_VBLANK|SR_FIRST_FRAME_DUMP|SR_PRESENT_UPSCALE)$")
+                           r"SR_EXIT_AT_VBLANK|SR_FIRST_FRAME_DUMP|SR_PRESENT_UPSCALE|SR_MOVIE_UPSCALE)$")
 # The presentation upscaler a run uses when its route does not name one: off, as Authentic is.
 DEFAULT_PRESENT_UPSCALE = "off"
 _FRAME_V = re.compile(r"^frame_v(\d+)\.ppm$")
@@ -256,8 +257,11 @@ def slice_us_of(env: Mapping[str, str]) -> int:
 
 
 def present_upscale_of(env: Mapping[str, str]) -> str:
-    """The presentation upscaler a run uses: the route's value, else off."""
-    return env.get("SR_PRESENT_UPSCALE", DEFAULT_PRESENT_UPSCALE)
+    """The presentation upscalers a run uses: the route's values, else off. The movie upscaler
+    (SR_MOVIE_UPSCALE) follows the presentation one as "+movie-<mode>" when it is on."""
+    value = env.get("SR_PRESENT_UPSCALE", DEFAULT_PRESENT_UPSCALE)
+    movie = env.get("SR_MOVIE_UPSCALE", DEFAULT_PRESENT_UPSCALE)
+    return value if movie == DEFAULT_PRESENT_UPSCALE else f"{value}+movie-{movie}"
 
 
 def accept(frame: Path, reference: Path, commit: str | None = None,
@@ -300,6 +304,7 @@ def sandbox_env(base: Mapping[str, str], extra: Mapping[str, str], vblank: int |
         "SR_DETERMINISTIC_CLOCK": "1", "SR_FPS_CAP": "0",
     })
     env.setdefault("SR_PRESENT_UPSCALE", DEFAULT_PRESENT_UPSCALE)
+    env.setdefault("SR_MOVIE_UPSCALE", DEFAULT_PRESENT_UPSCALE)
     if vblank is not None:
         env["SR_FBSNAP_WINDOWS"] = f"{vblank}-{vblank + window - 1}"
         env["SR_EXIT_AT_VBLANK"] = str(vblank + window)

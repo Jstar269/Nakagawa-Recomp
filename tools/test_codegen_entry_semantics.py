@@ -14,6 +14,7 @@ from __future__ import annotations
 from io import StringIO
 import os
 from pathlib import Path
+import random
 import re
 import shutil
 import struct
@@ -21,6 +22,7 @@ import subprocess
 import sys
 import tempfile
 from types import SimpleNamespace
+from typing import ClassVar
 import unittest
 import unittest.mock
 
@@ -496,6 +498,88 @@ int main(void) {{
             self.assertNotIn(f"goto L_{target:08x}", body,
                              "a known function entry must not be treated as an intra-function label")
 
+    def test_untranslated_regimm_words_in_a_body_that_loads_sp_are_walked(self):
+        """REGIMM words codegen does not translate, in a body that loads $sp (#2373).
+
+        The frame walk (_sp_exit_walk) runs only for a body that loads $sp. It steps every
+        word is_control() does not call a transfer, and every delay slot, through _frame_step,
+        which asks _gpr_writes what the word writes. _gpr_writes called every REGIMM word a
+        transfer (None), and bltzall/bgezall are transfers is_control() leaves out, so a trap
+        (tlti) or a bgezall, as a word or in a delay slot, made _frame_step iterate None:
+        codegen died with a TypeError instead of refusing the body. These words have no
+        translation, so the body is refused by name, the fail-closed path every other
+        unsupported form takes.
+        """
+        owner = 0x00001000
+        load_sp = (0x23 << 26) | (29 << 21) | (29 << 16) | 0x10        # lw sp,0x10(sp)
+        cases = {
+            "tlti a1,0x7253": ({owner + 4: 0x04AA7253, owner + 8: load_sp,
+                                owner + 12: 0x03E00008, owner + 16: 0x00000000},
+                               r"opcode 0x01 at 0x00001004"),
+            "bgezall zero": ({owner + 4: 0x04130002, owner + 8: load_sp,
+                              owner + 12: 0x03E00008, owner + 16: 0x00000000},
+                             r"opcode 0x01 at 0x00001004"),
+            "bgezall zero in a jr slot": ({owner + 4: load_sp, owner + 8: 0x03E00008,
+                                           owner + 12: 0x04130002},
+                                          r"opcode 0x01 at 0x0000100c"),
+        }
+        for name, (body, refusal) in cases.items():
+            words = {owner: 0x27BDFFE0, **body}                         # addiu sp,sp,-0x20
+            with self.subTest(name), scratch_dir.TemporaryDirectory(prefix="sp_regimm_") as tmp:
+                path = Path(tmp) / "sp_regimm.elf"
+                path.write_bytes(_synthetic_elf(words, owner))
+                elf = analyze.Elf(os.fspath(path))
+                starts, ranges = analyze.analyze(elf)
+                self.assertIn(owner, starts)
+                with self.assertRaisesRegex(codegen.Unsupported, refusal):
+                    codegen.emit_function(elf, owner, ranges, starts)
+
+    def test_an_unsupported_body_leaves_no_sp_load_checks_behind(self):
+        """An Unsupported raised mid-body clears the body's run-time $sp checks (#1935).
+
+        F loads $sp from its frame below where it was, a load the frame walk does not own, so
+        its emission checks the load (_sp_load_check). delay_slot_lines reads that set from
+        callers outside emit_function too (form_sweep, the codegen unit tests); a set left
+        over from a failed body would wrap their slot in a check naming `_sp_entry` and
+        `_sp_kept`, which only emit_function declares.
+        """
+        owner, target = 0x00001000, 0x00001020
+        load = (0x23 << 26) | (29 << 21) | (29 << 16) | 0x10           # lw sp,0x10(sp)
+
+        def words(refused: bool) -> dict[int, int]:
+            return {
+                owner: 0x27BDFFE0,                                      # addiu sp,sp,-0x20
+                owner + 4: 0x27B8FFC0,                                  # addiu t8,sp,-0x40
+                owner + 8: 0xAFB80010,                                  # sw t8,0x10(sp)
+                # srl with a nonzero rs field, which codegen refuses (or a plain nop)
+                owner + 12: 0x00401082 if refused else 0x00000000,
+                owner + 16: (0x02 << 26) | ((target >> 2) & 0x03FFFFFF),  # j target
+                owner + 20: load,
+                owner + 24: 0x00000000,
+                owner + 28: 0x00000000,
+                target: 0x03E00008,                                     # jr ra
+                target + 4: 0x00000000,
+                target + 8: (0x03 << 26) | ((target >> 2) & 0x03FFFFFF),  # jal target
+                target + 12: 0x00000000,
+            }
+
+        for refused in (False, True):
+            with self.subTest(refused=refused), \
+                    scratch_dir.TemporaryDirectory(prefix="sp_checks_") as tmp:
+                path = Path(tmp) / "sp_checks.elf"
+                path.write_bytes(_synthetic_elf(words(refused), owner))
+                elf = analyze.Elf(os.fspath(path))
+                starts, ranges = analyze.analyze(elf)
+                if not refused:
+                    body = "\n".join(codegen.emit_function(elf, owner, ranges, starts))
+                    self.assertIn("_sp_kept = SR_TAIL_RELEASES;", body, "the control: F checks its load")
+                else:
+                    with self.assertRaises(codegen.Unsupported):
+                        codegen.emit_function(elf, owner, ranges, starts)
+                self.assertEqual(codegen._BODY_SP_CHECKS, set())
+                slot = "\n".join(codegen.delay_slot_lines(owner + 20, load, owner + 16))
+                self.assertNotIn("_sp_kept", slot)
+
     def test_variadic_argument_save_stub_is_an_ordinary_analyzed_function(self):
         owner = 0x00001000
         words = {owner: 0x27BDFFE0}  # addiu sp,sp,-32
@@ -792,6 +876,250 @@ int main(void) {{
             self.assertIn(
                 "resume_sp=0x00001000 owner_sp=0x00001000", ran.stdout
             )
+
+
+_WALK_BASE = 0x08900000
+
+
+class _WalkElf:
+    """A flat run of words from _WALK_BASE, read as the frame walk reads an image."""
+
+    def __init__(self, words: list[int]) -> None:
+        self.words = words
+
+    def read_at_vaddr(self, addr: int, size: int) -> bytes | None:
+        index = (addr - _WALK_BASE) >> 2
+        if size != 4 or addr & 3 or index < 0 or index >= len(self.words):
+            return None
+        return self.words[index].to_bytes(4, "little")
+
+
+def _stock_sp_exit_walk(elf, start, insns, labels):
+    """_sp_exit_walk as it was before the fan-out skip, kept verbatim as the reference."""
+    read32, rt, rs, rd = codegen.read32, codegen.rt, codegen.rs, codegen.rd
+    own_sp = codegen._OWN_SP
+    if not any((read32(elf, addr) or 0) >> 26 == 0x23 and rt(read32(elf, addr)) == 29
+               for addr in insns):
+        return frozenset(), frozenset(), frozenset()
+    states: dict = {}
+    work: list = []
+    guest: set = set()
+    exits: set = set()
+    foreign: set = set()
+
+    def leave(addr, regs):
+        exits.add(addr)
+        if own_sp not in regs:
+            guest.add(addr)
+
+    def reach(addr, regs, slots, exit_at=None):
+        if addr not in insns:
+            leave(addr if exit_at is None else exit_at, regs)
+            return
+        old = states.get(addr)
+        if old is not None:
+            regs = {k: v for k, v in regs.items() if old[0].get(k) == v}
+            slots = {k: v for k, v in slots.items() if old[1].get(k) == v}
+            if (regs, slots) == old:
+                return
+        states[addr] = (regs, slots)
+        work.append(addr)
+
+    reach(start, {29: 0, own_sp: 0}, {})
+    while work:
+        addr = work.pop()
+        regs, slots = states[addr]
+        w = read32(elf, addr)
+        if w is None or codegen.is_eret(w):
+            continue
+        if not codegen.is_control(w):
+            if codegen._loads_foreign_sp(w, regs, slots):
+                foreign.add(addr)
+            reach(addr + 4, *codegen._frame_step(w, regs, slots))
+            continue
+        slot = read32(elf, addr + 4)
+        if codegen._loads_foreign_sp(slot, regs, slots):
+            foreign.add(addr + 4)
+        after = codegen._frame_step(slot, regs, slots) if slot is not None else (regs, slots)
+        op, fn = w >> 26, w & 0x3F
+        if op == 2:
+            reach(codegen.jump_target(addr, w), *after, exit_at=addr)
+        elif (op == 0 and fn in (0x08, 0x09) and (fn == 0x08 or rd(w) == 0)):
+            leave(addr, after[0])
+            if rs(w) != 31:
+                for label in labels:
+                    reach(label, *after)
+        elif op == 3 or (op == 0 and fn == 0x09) or codegen.is_link(w):
+            kept = {k: v for k, v in after[0].items()
+                    if k in codegen._CALL_SAVED_GPRS or k == own_sp}
+            reach(addr + 8, kept, after[1])
+        else:
+            reach(codegen.branch_target(addr, w), *after, exit_at=addr)
+            reach(addr + 8, *((regs, slots) if codegen.is_likely(w) else after))
+    return frozenset(guest), frozenset(exits), frozenset(foreign)
+
+
+def _beq_words(src: int, dst: int, rs_reg: int = 9, rt_reg: int = 10) -> int:
+    """beq rs, rt from word index src to word index dst."""
+    return (4 << 26) | (rs_reg << 21) | (rt_reg << 16) | ((dst - src - 1) & 0xFFFF)
+
+
+_WALK_FILLER = (
+    0x25080001,  # addiu t0, t0, 1
+    0xAFB00010,  # sw s0, 16(sp)
+    0x8FB00010,  # lw s0, 16(sp)
+    0x03A0F021,  # addu fp, sp, zero
+    0x27BDFFF0,  # addiu sp, sp, -16
+    0x27BD0010,  # addiu sp, sp, 16
+    0xAFBD0008,  # sw sp, 8(sp)
+    0x00000000,  # nop
+    0x00851021,  # addu v0, a0, a1
+    0x8C880000,  # lw t0, 0(a0)
+)
+
+
+def _walk_flow(words: list[int]):
+    elf = _WalkElf(words)
+    span = [(_WALK_BASE, _WALK_BASE + 4 * len(words))]
+    with codegen.options_scope(region_split_threshold=None) as options:
+        insns, labels, _ = codegen.function_flow(elf, _WALK_BASE, span, {_WALK_BASE},
+                                                 options=options)
+    return elf, insns, labels
+
+
+_ORDER_EXAMPLE = [
+    0x27BDFFE0,                     # 0  addiu sp, sp, -32
+    0x03A0F021,                     # 1  addu  fp, sp, zero
+    0xAFDD0008,                     # 2  sw    sp, 8(fp)
+    _beq_words(3, 10), 0,           # 3  beq   t1, t2, Q
+    0x03A02021,                     # 5  P: addu a0, sp, zero
+    0xA0880008,                     # 6  S: sb   t0, 8(a0)
+    0x8FDD0008,                     # 7  T: lw   sp, 8(fp)
+    0x03E00008, 0,                  # 8  jr ra; nop
+    _beq_words(10, 6, 0, 0), 0,     # 10 Q: b S
+]
+
+
+class SpExitWalkFanOutTests(unittest.TestCase):
+    """The frame walk sends the state at a computed jump to every label of the body (#2373).
+
+    Done at every computed jump, that costs (computed jumps) x (labels) per body: a runtime
+    module whose bodies hold 267k instructions, 28k labels and 1k computed jumps did not
+    finish code generation in 90 minutes. A fan-out whose state holds every fact of the
+    states already sent to all labels changes no label, so the walk skips it; every state,
+    push and verdict stays as it was.
+    """
+
+    @staticmethod
+    def _blocks_body(blocks: int, seed: int) -> list[int]:
+        """Ten-word blocks ending in a beq within reach or, every fifteenth, a computed
+        jr t0; one lw sp, so the walk runs."""
+        rng = random.Random(seed)
+        words: list[int] = []
+        for b in range(blocks):
+            for _ in range(8):
+                words.append(rng.choice(_WALK_FILLER))
+            at = len(words)
+            if b % 15 == 14:
+                words += [0x01000008, 0]  # jr t0; nop
+            else:
+                lo, hi = max(0, b - 300), min(blocks - 1, b + 300)
+                words += [_beq_words(at, rng.randint(lo, hi) * 10), 0]
+        words[11] = 0x8C9D0000  # lw sp, 0(a0)
+        words += [0x03E00008, 0]  # jr ra; nop
+        return words
+
+    def test_the_walk_is_linear_in_the_body(self):
+        elf, insns, labels = _walk_flow(self._blocks_body(2200, 2200))
+        jumps = sum(1 for a in insns if codegen.read32(elf, a) == 0x01000008)
+        self.assertEqual((len(insns), len(labels), jumps), (20922, 1276, 146))
+        work: dict[str, int] = {}
+        result = codegen._sp_exit_walk(elf, _WALK_BASE, insns, labels, work)
+        # Without the skip all 146 computed jumps fan out, 186,296 reach calls.
+        self.assertLessEqual(work["fanouts"], 2, work)
+        self.assertLessEqual(work["reach"], 3 * len(insns), work)
+        # On this body the walk serves each computed jump once.
+        self.assertEqual(work["fanouts"] + work["skipped"], jumps, work)
+        self.assertEqual(result, _stock_sp_exit_walk(elf, _WALK_BASE, insns, labels))
+
+    def test_the_walk_gives_the_stock_verdicts(self):
+        rng = random.Random(20261112)
+        walked = 0
+        for _ in range(3000):
+            size = rng.randint(4, 60)
+            words: list[int] = []
+            for i in range(size):
+                r = rng.random()
+                if r < 0.45:
+                    words.append(rng.choice(_WALK_FILLER))
+                elif r < 0.55:
+                    words.append(rng.choice([0x01000008, 0x00800008, 0x03E00008, 0x00800009,
+                                             0x0080F809, 0x8C9D0000, 0x8FDD0008, 0xAFDD0008,
+                                             0x8FBD0008]))
+                elif r < 0.70:
+                    words.append(_beq_words(i, rng.randint(0, size)))
+                elif r < 0.75:
+                    words.append((20 << 26) | (9 << 21) | (10 << 16)
+                                 | ((rng.randint(0, size) - i - 1) & 0xFFFF))  # beql
+                elif r < 0.80:
+                    words.append((2 << 26) | (((_WALK_BASE >> 2) + rng.randint(0, size))
+                                              & 0x3FFFFFF))  # j
+                elif r < 0.84:
+                    words.append((3 << 26) | ((_WALK_BASE >> 2) & 0x3FFFFFF))  # jal
+                else:
+                    words.append(rng.getrandbits(32))
+            elf = _WalkElf(words)
+            every = [_WALK_BASE + 4 * i for i in range(size)]
+            insns = (set(every) if rng.random() < 0.5
+                     else set(rng.sample(every, max(1, size * 3 // 4))))
+            start = min(insns)
+            pool = every + [_WALK_BASE + 4 * size + 8, _WALK_BASE - 8]
+            labels = set(rng.sample(pool, rng.randint(0, min(len(pool), 12))))
+            stock = _stock_sp_exit_walk(elf, start, insns, labels)
+            walked += bool(stock[1])
+            with self.subTest(words=[f"{w:08x}" for w in words]):
+                self.assertEqual(codegen._sp_exit_walk(elf, start, insns, labels), stock)
+        self.assertGreater(walked, 1000, "most random bodies must reach the walk itself")
+
+    def test_a_fact_lost_between_fan_outs_is_fanned_out_again(self):
+        """The second jr's state lacks a fact the first one sent to every label: a frame slot
+        (the sw $s0 over the saved $sp), or a register value ($fp moved). Both are a fact
+        of hub missing from the new state, so the second fan-out runs and the reload of $sp
+        at label 8 becomes foreign, as it is for the previous walk."""
+        slot_lost = [
+            0x27BDFFE0,  # 0  addiu sp, sp, -32
+            0x03A0F021,  # 1  addu  fp, sp, zero
+            0xAFDD0008,  # 2  sw    sp, 8(fp)
+            0x01000008,  # 3  jr    t0
+            0x00000000,  # 4  nop
+            0xAFD00008,  # 5  sw    s0, 8(fp): the saved $sp is overwritten
+            0x01000008,  # 6  jr    t0
+            0x00000000,  # 7  nop
+            0x8FDD0008,  # 8  lw    sp, 8(fp)
+            0x03E00008,  # 9  jr    ra
+            0x00000000,  # 10 nop
+        ]
+        value_moved = list(slot_lost)
+        value_moved[5] = 0x27BEFFF0  # 5  addiu fp, fp, -16: $fp is known, at another offset
+        for name, words in (("slot", slot_lost), ("value", value_moved)):
+            elf = _WalkElf(words)
+            insns = {_WALK_BASE + 4 * i for i in range(len(words))}
+            labels = {_WALK_BASE + 20, _WALK_BASE + 32}
+            with self.subTest(name):
+                result = codegen._sp_exit_walk(elf, _WALK_BASE, insns, labels)
+                self.assertEqual(result, _stock_sp_exit_walk(elf, _WALK_BASE, insns, labels))
+                self.assertEqual(tuple([(a - _WALK_BASE) // 4 for a in sorted(part)]
+                                       for part in result), ([9], [3, 6, 9], [8]))
+
+    def test_an_order_dependent_body_keeps_its_stock_verdict(self):
+        """A store through a register a join forgot misses the frame, so the verdict depends
+        on the order the walk serves its worklist in; the skip keeps that order."""
+        elf, insns, labels = _walk_flow(_ORDER_EXAMPLE)
+        result = codegen._sp_exit_walk(elf, _WALK_BASE, insns, labels)
+        self.assertEqual(result, _stock_sp_exit_walk(elf, _WALK_BASE, insns, labels))
+        guest, exits, foreign = ([(a - _WALK_BASE) // 4 for a in sorted(part)]
+                                 for part in result)
+        self.assertEqual((guest, exits, foreign), ([8], [8, 12], [7]))
 
 
 def _minimal_elf_path(words, entry, *, e_type=2, reloc_section=None):
@@ -1175,6 +1503,8 @@ tail_region = 0x{TAIL_REGION:08x}; // type:func size:0x10
 class SymbolMapContainmentTests(unittest.TestCase):
     """An entry inside a sized map function, past its start, is f_<addr>_in_<name>."""
 
+    inside: ClassVar[dict[str, str]]  # Generated files are shared by the class's tests.
+
     @classmethod
     def setUpClass(cls):
         cls._tmp = scratch_dir.TemporaryDirectory(prefix="symbol_map_inside_")
@@ -1305,6 +1635,350 @@ class SymbolMapFileTests(unittest.TestCase):
         entries = re.search(r"^export NK_CODEGEN_PROFILE_ENTRIES := ([^\n]*)", makefile, re.M)
         self.assertIn("$(SYMBOL_MAP_PROFILE_LINE)", entries.group(1))
 
+
+# --- a varargs formatter at the address of the retired native sprintf bridge (#363) ----------
+
+_ZERO, _V0, _A0, _A1, _A2, _A3, _T0, _T1, _T2, _T3 = 0, 2, 4, 5, 6, 7, 8, 9, 10, 11
+_T4, _T5, _T6, _T7, _S0, _T8, _T9, _SP, _RA = 12, 13, 14, 15, 16, 24, 25, 29, 31
+
+
+def _itype(op: int, rs: int, rt: int, imm: int) -> int:
+    return (op << 26) | (rs << 21) | (rt << 16) | (imm & 0xFFFF)
+
+
+def _rtype(rs: int, rt: int, rd: int, funct: int, shamt: int = 0) -> int:
+    return (rs << 21) | (rt << 16) | (rd << 11) | (shamt << 6) | funct
+
+
+def _addiu(rt, rs, imm): return _itype(0x09, rs, rt, imm)
+def _sltiu(rt, rs, imm): return _itype(0x0B, rs, rt, imm)
+def _andi(rt, rs, imm): return _itype(0x0C, rs, rt, imm)
+def _lw(rt, offset, rs): return _itype(0x23, rs, rt, offset)
+def _lbu(rt, offset, rs): return _itype(0x24, rs, rt, offset)
+def _sb(rt, offset, rs): return _itype(0x28, rs, rt, offset)
+def _sw(rt, offset, rs): return _itype(0x2B, rs, rt, offset)
+def _addu(rd, rs, rt): return _rtype(rs, rt, rd, 0x21)
+def _subu(rd, rs, rt): return _rtype(rs, rt, rd, 0x23)
+def _sll(rd, rt, shamt): return _rtype(0, rt, rd, 0x00, shamt)
+def _jr(rs): return _rtype(rs, 0, 0, 0x08)
+
+
+# The label forms take the address map at assembly time.
+def _beq(rs, rt, label): return lambda pc, at: _itype(0x04, rs, rt, (at[label] - pc - 4) >> 2)
+def _jal(label): return lambda pc, at: (0x03 << 26) | ((at[label] >> 2) & 0x03FFFFFF)
+def _lui_hi(rt, label): return lambda pc, at: _itype(0x0F, 0, rt, at[label] >> 16)
+def _ori_lo(rt, rs, label): return lambda pc, at: _itype(0x0D, rs, rt, at[label] & 0xFFFF)
+
+
+def _assemble(base: int, program: list, at: dict[str, int]) -> dict[int, int]:
+    """Lay `program` (words, label-taking callables, and label names) out from `base`."""
+    pc = base
+    for item in program:
+        if isinstance(item, str):
+            at[item] = pc
+        else:
+            pc += 4
+    words, pc = {}, base
+    for item in program:
+        if isinstance(item, str):
+            continue
+        words[pc] = item(pc, at) if callable(item) else item
+        pc += 4
+    return words
+
+
+#: The address where --profile=hst emitted a native sprintf in place of the guest's own.
+FORMATTER = 0x000143B0
+#: A callable the HST profile seeds (tools/compat_overrides.py HST_ENTRY_ROLES); the fixture
+#: keeps it a leaf of its own so the profile's seed does not split the formatter's core.
+FORMATTER_LEAF = 0x00014430
+FORMATTER_CORE = 0x00014438
+FORMATTER_CASES = ("case_char", "case_string", "case_nibble", "case_skip")
+
+# int format(char *dst, const char *fmt, ...), PSP EABI: the variable arguments arrive in
+# a2, a3 and t0..t3, the entry spills them to its frame and passes their address on. After
+# the core returns, the entry ends the text through the destination it kept in its frame, as
+# sprintf does through its stream, so a frame lost across the core's computed transfers
+# shows in the text and in $ra.
+_FORMATTER_ENTRY = [
+    _addiu(_SP, _SP, -0x30),
+    _sw(_RA, 0x14, _SP),
+    _sw(_A0, 0x0C, _SP),
+    _sw(_A2, 0x18, _SP), _sw(_A3, 0x1C, _SP), _sw(_T0, 0x20, _SP),
+    _sw(_T1, 0x24, _SP), _sw(_T2, 0x28, _SP), _sw(_T3, 0x2C, _SP),
+    _jal("core"),
+    _addiu(_A2, _SP, 0x18),
+    _lw(_T0, 0x0C, _SP),
+    _lw(_RA, 0x14, _SP),
+    _addu(_T0, _T0, _V0),
+    _sb(_ZERO, 0, _T0),
+    _jr(_RA),
+    _addiu(_SP, _SP, 0x30),
+]
+# The core walks the format. A byte '0'..'3' selects a conversion through a jump table,
+# inside the loop and with the core's frame live: '0' stores the next argument's low byte,
+# '1' copies the string it points to, '2' stores 'A' plus its low nibble, '3' skips it.
+# Any other byte is copied. It returns the length written, like sprintf, and leaves the
+# terminator to its caller.
+_FORMATTER_CORE = [
+    "core",
+    _addiu(_SP, _SP, -0x20),
+    _sw(_RA, 0x1C, _SP),
+    _sw(_S0, 0x18, _SP),
+    _sw(_A0, 0x10, _SP),
+    _addu(_S0, _A2, _ZERO),
+    "loop",
+    _lbu(_T4, 0, _A1),
+    _addiu(_A1, _A1, 1),
+    _beq(_T4, _ZERO, "done"),
+    0,
+    _addiu(_T5, _T4, -0x30),
+    _sltiu(_T6, _T5, 4),
+    _beq(_T6, _ZERO, "literal"),
+    _sll(_T5, _T5, 2),
+    _lui_hi(_T6, "table"),
+    _ori_lo(_T6, _T6, "table"),
+    _addu(_T5, _T5, _T6),
+    _lw(_T5, 0, _T5),
+    _jr(_T5),
+    0,
+    "literal",
+    _sb(_T4, 0, _A0),
+    _beq(_ZERO, _ZERO, "loop"),
+    _addiu(_A0, _A0, 1),
+    "case_char",
+    _lw(_T7, 0, _S0),
+    _addiu(_S0, _S0, 4),
+    _sb(_T7, 0, _A0),
+    _beq(_ZERO, _ZERO, "loop"),
+    _addiu(_A0, _A0, 1),
+    "case_string",
+    _lw(_T7, 0, _S0),
+    _addiu(_S0, _S0, 4),
+    "copy",
+    _lbu(_T8, 0, _T7),
+    _beq(_T8, _ZERO, "loop"),
+    _addiu(_T7, _T7, 1),
+    _sb(_T8, 0, _A0),
+    _beq(_ZERO, _ZERO, "copy"),
+    _addiu(_A0, _A0, 1),
+    "case_nibble",
+    _lw(_T7, 0, _S0),
+    _addiu(_S0, _S0, 4),
+    _andi(_T7, _T7, 15),
+    _addiu(_T7, _T7, 0x41),
+    _sb(_T7, 0, _A0),
+    _beq(_ZERO, _ZERO, "loop"),
+    _addiu(_A0, _A0, 1),
+    "case_skip",
+    _beq(_ZERO, _ZERO, "loop"),
+    _addiu(_S0, _S0, 4),
+    "done",
+    _lw(_T9, 0x10, _SP),
+    _subu(_V0, _A0, _T9),
+    _lw(_RA, 0x1C, _SP),
+    _lw(_S0, 0x18, _SP),
+    _jr(_RA),
+    _addiu(_SP, _SP, 0x20),
+]
+
+
+def _formatter_fixture() -> tuple[dict[int, int], dict[str, int]]:
+    """The formatter's words and its labels; `table` is where _synthetic_elf puts .data."""
+    at = {"core": FORMATTER_CORE, "table": 0}
+    words: dict[int, int] = {}
+    for _ in range(2):   # the second pass sees the table's address
+        words = _assemble(FORMATTER, _FORMATTER_ENTRY, at)
+        words.update({FORMATTER_LEAF: _jr(_RA), FORMATTER_LEAF + 4: _addu(_V0, _ZERO, _ZERO)})
+        words.update(_assemble(FORMATTER_CORE, _FORMATTER_CORE, at))
+        for addr in range(FORMATTER, max(words), 4):
+            words.setdefault(addr, 0)
+        at["table"] = (max(words) + 4 + 0xFF) & ~0xFF
+    return words, at
+
+
+_FORMATTER_RECOMP_H = """\
+#ifndef TEST_RECOMP_H
+#define TEST_RECOMP_H
+#include <stdint.h>
+#define SR_CPUSTATE_ABI_VERSION 3u
+typedef struct CpuState { uint32_t r[32]; uint32_t pc; } CpuState;
+uint32_t test_mem_r8(uint32_t addr);
+uint32_t test_mem_r32(uint32_t addr);
+void test_mem_w8(uint32_t addr, uint32_t value);
+void test_mem_w32(uint32_t addr, uint32_t value);
+#define MEM_R8(a) test_mem_r8((uint32_t)(a))
+#define MEM_R32(a) test_mem_r32((uint32_t)(a))
+#define MEM_W8_PC(a, v, pc) test_mem_w8((uint32_t)(a), (uint32_t)(v))
+#define MEM_W32_PC(a, v, pc) test_mem_w32((uint32_t)(a), (uint32_t)(v))
+#define SR_YIELD(s, pc) ((void)0)
+#define sr_begin(s, pc, op) ((void)0)
+#define sr_end(s, addr, size) ((void)0)
+void dispatch(CpuState *s, uint32_t target);
+void dispatch_call(CpuState *s, uint32_t target, uint32_t resume_pc);
+int dispatch_call_checked(CpuState *s, uint32_t target, uint32_t resume_pc);
+void sr_register(uint32_t addr, void (*fn)(CpuState *));
+void sr_register_all(void);
+void sr_exec_span_reset(void);
+int sr_exec_span_register(uint32_t start, uint32_t end);
+void sr_raw_syscall(CpuState *s, uint32_t code, uint32_t pc);
+void sr_hle_call(CpuState *s, uint32_t nid);
+void sr_syscall(CpuState *s, uint32_t nid);
+void sr_unimplemented(uint32_t addr, const char *reason);
+""" + _TAIL_PROTOCOL_HEADER + """#endif
+"""
+
+_FORMATTER_DST = 0x0001D000
+_FORMATTER_TEXT = 0x0001E000
+_FORMATTER_STACK = 0x0001F000
+_FORMATTER_OUTCOME = (
+    "out=[Aserve|q|L|set|match] ret=20 sp=0x0001f000 ra=0x12345678 s0=0x5a5a5a5a")
+
+
+def _formatter_harness(at: dict[str, int]) -> str:
+    table = "\n".join(
+        f"    test_mem_w32(0x{at['table'] + 4 * index:08x}u, 0x{at[label]:08x}u);"
+        for index, label in enumerate(FORMATTER_CASES))
+    return f"""\
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "formatter_funcs.h"
+{_TAIL_PROTOCOL_IMPL}
+static uint8_t mem[0x20000];
+static uint8_t *at(uint32_t addr, uint32_t size) {{
+    if (addr > sizeof mem - size) abort();
+    return mem + addr;
+}}
+uint32_t test_mem_r8(uint32_t addr) {{ return *at(addr, 1u); }}
+void test_mem_w8(uint32_t addr, uint32_t value) {{ *at(addr, 1u) = (uint8_t)value; }}
+uint32_t test_mem_r32(uint32_t addr) {{
+    const uint8_t *p = at(addr, 4u);
+    return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
+}}
+void test_mem_w32(uint32_t addr, uint32_t value) {{
+    uint8_t *p = at(addr, 4u);
+    p[0] = (uint8_t)value; p[1] = (uint8_t)(value >> 8);
+    p[2] = (uint8_t)(value >> 16); p[3] = (uint8_t)(value >> 24);
+}}
+/* dispatch() runs what the generated registration recorded, as the runtime's does. */
+static struct {{ uint32_t addr; void (*fn)(CpuState *); }} registered[32];
+static unsigned registered_count;
+void sr_register(uint32_t addr, void (*fn)(CpuState *)) {{
+    if (registered_count == 32u) abort();
+    registered[registered_count].addr = addr;
+    registered[registered_count++].fn = fn;
+}}
+void sr_exec_span_reset(void) {{}}
+int sr_exec_span_register(uint32_t start, uint32_t end) {{ (void)start; (void)end; return 1; }}
+void sr_raw_syscall(CpuState *s, uint32_t code, uint32_t pc) {{ (void)s; (void)code; (void)pc; }}
+void sr_hle_call(CpuState *s, uint32_t nid) {{ (void)s; (void)nid; }}
+void sr_syscall(CpuState *s, uint32_t nid) {{ (void)s; (void)nid; }}
+void sr_unimplemented(uint32_t addr, const char *reason) {{ (void)addr; (void)reason; abort(); }}
+void dispatch(CpuState *s, uint32_t target) {{
+    for (unsigned i = 0; i < registered_count; i++) {{
+        if (registered[i].addr == target) {{ registered[i].fn(s); sr_tail_drain(s); return; }}
+    }}
+    abort();
+}}
+void dispatch_call(CpuState *s, uint32_t target, uint32_t resume_pc) {{
+    (void)resume_pc;
+    dispatch(s, target);
+}}
+int dispatch_call_checked(CpuState *s, uint32_t target, uint32_t resume_pc) {{
+    dispatch_call(s, target, resume_pc);
+    return 0;
+}}
+static uint32_t put(uint32_t addr, const char *text) {{
+    memcpy(at(addr, (uint32_t)strlen(text) + 1u), text, strlen(text) + 1u);
+    return addr;
+}}
+
+int main(void) {{
+    CpuState cpu = {{0}};
+    sr_register_all();
+{table}
+    memset(at(0x{_FORMATTER_DST:08x}u, 48u), '~', 48u);   /* an unterminated text shows */
+    cpu.r[4] = 0x{_FORMATTER_DST:08x}u;
+    cpu.r[5] = put(0x{_FORMATTER_TEXT:08x}u, "A1|0|2|31|1");
+    cpu.r[6] = put(0x{_FORMATTER_TEXT + 0x40:08x}u, "serve");   /* a2: '1' */
+    cpu.r[7] = 0x00000171u;                                     /* a3: '0', low byte 'q' */
+    cpu.r[8] = 0x0000002bu;                                     /* t0: '2', nibble 11 */
+    cpu.r[9] = 0xdeadbeefu;                                     /* t1: '3', skipped */
+    cpu.r[10] = put(0x{_FORMATTER_TEXT + 0x80:08x}u, "set");    /* t2: '1' */
+    cpu.r[11] = put(0x{_FORMATTER_TEXT + 0xc0:08x}u, "match");  /* t3: '1' */
+    cpu.r[16] = 0x5a5a5a5au;
+    cpu.r[29] = 0x{_FORMATTER_STACK:08x}u;
+    cpu.r[31] = 0x12345678u;
+    f_{FORMATTER:08x}(&cpu); sr_tail_drain(&cpu);
+    printf("out=[%s] ret=%u sp=0x%08x ra=0x%08x s0=0x%08x\\n",
+           (const char *)at(0x{_FORMATTER_DST:08x}u, 64u), cpu.r[2], cpu.r[29], cpu.r[31],
+           cpu.r[16]);
+    return 0;
+}}
+"""
+
+
+@unittest.skipUnless(CC, "gcc is required for the generated-C execution regression")
+class FormatterAtRetiredSprintfBridgeTests(unittest.TestCase):
+    """The function at 0x000143b0 runs its own instructions under every profile (#363).
+
+    --profile=hst used to emit a native sprintf there in place of the title's own, recorded
+    as hiding a formatter that corrupted %s arguments. This fixture is a formatter of the
+    same shape at that address: the entry spills the PSP EABI variable arguments (a2, a3,
+    t0..t3) to its frame, and the core picks each conversion through a jump table inside
+    its loop while its own frame is live, so every conversion is a computed transfer that
+    owes the core's frame, and the entry then reads its own frame again. It fails while the
+    profile emits anything but the guest's words there, and if the text, its terminator, the
+    return value, $ra or a callee-saved register come back wrong. The generated entry
+    rebalances $sp itself on every exit, so a lost frame shows in the terminator and $ra,
+    not in $sp. The drain is this harness's stand-in, so the fixture checks the generated
+    code, not the runtime's own drain (src/rt/guest_interp.c)."""
+
+    def _run(self, profile: str, work: Path) -> tuple[str, str]:
+        assert CC is not None
+        words, at = _formatter_fixture()
+        elf = work / "formatter.elf"
+        generated = work / "formatter.c"
+        elf.write_bytes(_synthetic_elf(
+            words, FORMATTER, pointers=tuple(at[label] for label in FORMATTER_CASES)))
+        result = subprocess.run(
+            [sys.executable, str(CODEGEN), str(elf), str(generated), f"--profile={profile}"],
+            cwd=ROOT, capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        chunks = sorted(work.glob("formatter_*.c"))
+        text = "\n".join(path.read_text(encoding="ascii") for path in chunks)
+        start = text.index(f"void f_{FORMATTER:08x}(CpuState *s)")
+        body = text[start:text.index("\nvoid ", start + 1)]
+        self.assertNotIn("custom stub", body,
+                         f"profile={profile} emits a hand-written body at 0x{FORMATTER:08x}")
+        self.assertIn(f"sr_begin(s, 0x{FORMATTER:08x}u, 0x{words[FORMATTER]:08x}u)", body,
+                      f"profile={profile} does not translate the guest's first word")
+        self.assertIn(f"f_{FORMATTER_CORE:08x}(s)", body, "the entry does not call its core")
+        (work / "recomp.h").write_text(_FORMATTER_RECOMP_H, encoding="ascii")
+        (work / "harness.c").write_text(_formatter_harness(at), encoding="ascii")
+        exe = work / "formatter.exe"
+        compiled = subprocess.run(
+            [CC, "-std=c11", "-O0", "-I", str(work), str(work / "harness.c"),
+             str(generated), *(str(path) for path in chunks), "-lm", "-o", str(exe)],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(compiled.returncode, 0, compiled.stderr + compiled.stdout)
+        ran = subprocess.run([str(exe)], capture_output=True, text=True)
+        self.assertEqual(ran.returncode, 0, ran.stderr + ran.stdout)
+        return body, ran.stdout.strip()
+
+    def test_the_guest_formatter_runs_and_formats_under_both_profiles(self):
+        bodies = {}
+        for profile in ("hst", "none"):
+            with self.subTest(profile=profile), \
+                    scratch_dir.TemporaryDirectory(prefix="formatter_") as tmp:
+                bodies[profile], outcome = self._run(profile, Path(tmp))
+                self.assertEqual(outcome, _FORMATTER_OUTCOME)
+        self.assertEqual(bodies.get("hst"), bodies.get("none"),
+                         "the formatter's entry diverged between profiles")
 
 if __name__ == "__main__":
     unittest.main()

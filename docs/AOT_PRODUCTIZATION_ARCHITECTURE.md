@@ -1,6 +1,6 @@
 # AOT Productization Architecture: End-User Recompilation Without Developer Toolchains
 
-> **Status: CURRENT — maintained architecture decision record.** This document evaluates productization routes and records target choices. The public tree still requires the developer toolchain (Python, GNU Make, a C compiler): the library's `BUILD PACKAGE` route connects a staged disc to a validated package and launch ([#487](https://github.com/Jstar269/nakagawa-recomp/pull/487)), but a zero-toolchain end-user route is not built.
+> **Status: CURRENT — maintained architecture decision record.** This document evaluates productization routes and records target choices. Building a package still needs Python, GNU Make and a C compiler, and the game is compiled on the user's PC: the release ZIP carries the pinned tools in `prereqs/`, a source build downloads them after one consent, and the library's `BUILD PACKAGE` route connects a staged disc to a validated package and launch ([#487](https://github.com/Jstar269/nakagawa-recomp/pull/487)). A precompiled, compiler-free end-user route is not built.
 
 ## 1. The Core Problem
 
@@ -44,9 +44,9 @@ Nakagawa Program + User's Game ISO → Play
 > **Implementation status: UNBUILT as a zero-toolchain release route.** The
 > following describes the proposed packaging route. Bounded asset extraction and
 > the library's build-package → validate → launch route are connected
-> ([#487](https://github.com/Jstar269/nakagawa-recomp/pull/487)); what this option
-> still needs is retail disc-hash validation and a precompiled release that runs
-> without a developer toolchain on the user's machine.
+> ([#487](https://github.com/Jstar269/nakagawa-recomp/pull/487)); the player also checks
+> each disc against the user's Redump list. What this option still needs is a
+> precompiled release that runs without a compiler on the user's machine.
 
 In this model, Nakagawa maintainers/packagers compile the verified title executable (or generic recompiled core for supported manifests) into standalone release packages.
 

@@ -34,6 +34,7 @@
 
 #include "hle_internal.h"
 #include "nid_names.h"   /* sr_nid_name(): names unknown NIDs in the trap below */
+#include "nk_nickname.h" /* the owner_name default: SR_NICKNAME or the neutral one */
 #define SR_EVIDENCE_NO_VFPU /* this file reads the NID table only */
 #include "hle_evidence.h" /* generated: NIDs with no recorded evidence (docs/HLE_COVERAGE.md) */
 int sr_thread_has_pending_callbacks(uint32_t thread_uid);
@@ -289,6 +290,8 @@ static uint32_t s_heap_last_bump = 0;     /* mirror of last s_heap value, for th
 uint32_t user_partition_last_heap(void) { return s_heap_last_bump ? s_heap_last_bump : s_heap; }
 
 uint32_t sr_last_alloc_addr = 0;     /* last heap allocation rounded address */
+static int partition_hole_alloc_high(uint32_t size, uint32_t *base_out);
+static void partition_hole_release(uint32_t base, uint32_t size);
 /* Start the user partition after the complete flat image, including zero-filled BSS.
  * tools/prxload.py preserves the original ~PSP header's segment-memory sizes when a
  * stripped ELF has lost them. An explicit override may move the base higher, but may
@@ -317,6 +320,7 @@ void user_partition_init(void) {
     s_heap = base;
     s_heap_base = base;
     sched_set_stack_range_refusal(sr_user_partition_overlaps);
+    sched_set_partition_hole_allocator(partition_hole_alloc_high, partition_hole_release);
     s_part_top = et ? (uint32_t)strtoul(et, NULL, 16) : 0x0A000000u;
     if (s_part_top <= s_heap) {
         fprintf(stderr,
@@ -581,6 +585,67 @@ int partition_high_modelled(void) {
     return s_heap_base >= SR_NESTED_FRAME_END;
 }
 
+/* A High request (a thread stack, a High block) that no range above the bump pointer holds: the
+ * highest free block below it that does, carved from that block's top. This applies the
+ * PSP_SMEM_High rule (sched.c stack_range_alloc, PSP-THREAD-K0-001, measured on a block freed at the
+ * partition's top) to the blocks freed below the bump pointer, which is inferred, not measured. The
+ * carved range leaves the free list, so no Low request reuses it, and partition_hole_release gives
+ * it back. Where the highest placement cannot be taken the request fails rather than going lower. */
+static int partition_high_block_overlaps(uint32_t base, uint32_t end) {
+    for (int i = 0; i < s_nblocks; i++)
+        if (s_blocks[i].uid != 0u && s_blocks[i].high && s_blocks[i].addr < end &&
+            s_blocks[i].addr + s_blocks[i].slot_size > base)
+            return 1;
+    return 0;
+}
+
+static int partition_hole_alloc_high(uint32_t size, uint32_t *base_out) {
+    if (!base_out || size == 0u || (size & 0xFFu) != 0u) return 0;
+    for (int i = s_nfree_blocks - 1; i >= 0; i--) {
+        const uint32_t f_addr = s_free_blocks[i].addr;
+        const uint32_t f_end = f_addr + s_free_blocks[i].size;
+        /* A free block can end unaligned after a fixed block (sr_alloc_block_at keeps its exact
+         * bounds); the request sits 256-aligned like every other partition block. */
+        const uint32_t end = f_end & ~0xFFu;
+        if (end <= f_addr || end - f_addr < size) continue;
+        const uint32_t base = end - size;
+        /* A fixed reservation above the bump pointer returns its skipped gap to the free list
+         * (sr_alloc_block_at) without looking at the stacks and High blocks inside it: never place
+         * a request over one of those. */
+        if (sched_guest_stack_overlaps(base, end) || partition_high_block_overlaps(base, end)) {
+            fprintf(stderr, "partition: High request [0x%08x,0x%08x) in a freed block would overlap a "
+                    "live thread stack or High block -- refused\n", base, end);
+            return 0;
+        }
+        const int head = base > f_addr, tail = end < f_end;
+        if (head && tail) {
+            if (s_nfree_blocks >= HLE_MAX_FREE_BLOCKS) {
+                fprintf(stderr, "partition: High request [0x%08x,0x%08x) would split a freed block "
+                        "and the free-block table is full -- refused\n", base, end);
+                return 0;
+            }
+            for (int j = s_nfree_blocks; j > i + 1; j--) s_free_blocks[j] = s_free_blocks[j - 1];
+            s_free_blocks[i + 1].addr = end;
+            s_free_blocks[i + 1].size = f_end - end;
+            s_nfree_blocks++;
+            s_free_blocks[i].size = base - f_addr;
+        } else if (head) {
+            s_free_blocks[i].size = base - f_addr;
+        } else if (tail) {
+            s_free_blocks[i].addr = end;
+            s_free_blocks[i].size = f_end - end;
+        } else {
+            for (int j = i; j < s_nfree_blocks - 1; j++) s_free_blocks[j] = s_free_blocks[j + 1];
+            s_nfree_blocks--;
+        }
+        *base_out = base;
+        return 1;
+    }
+    return 0;
+}
+
+static void partition_hole_release(uint32_t base, uint32_t size) { partition_free_block(base, size); }
+
 uint32_t alloc_block_high(uint32_t size) {
     user_partition_init();
     if (!partition_high_modelled()) return 0xFFFFFFFFu;
@@ -594,7 +659,8 @@ uint32_t alloc_block_high(uint32_t size) {
         slot = s_nblocks;
     }
     uint32_t addr = 0u;
-    if (!sched_partition_alloc_high(slot_size, user_partition_ceiling(), &addr)) return 0xFFFFFFFFu;
+    int in_arena = sched_partition_alloc_high(slot_size, user_partition_ceiling(), &addr);
+    if (!in_arena && !partition_hole_alloc_high(slot_size, &addr)) return 0xFFFFFFFFu;
     if (slot == s_nblocks) s_nblocks++;
     sr_last_alloc_addr = addr;
     uint32_t uid = sr_alloc_uid();
@@ -604,7 +670,8 @@ uint32_t alloc_block_high(uint32_t size) {
     s_blocks[slot].slot_size = slot_size;
     s_blocks[slot].prev      = 0xFFFFFFFFu;
     s_blocks[slot].next      = 0u;
-    s_blocks[slot].high      = 1;
+    /* A block taken from a free block below the bump pointer goes back to the free list. */
+    s_blocks[slot].high      = in_arena;
     s_blocks[slot].part5     = 0;
     return uid;
 }
@@ -1379,8 +1446,61 @@ int sreg_find_path(const char *path) {
  * key stays a named refusal. An index with no usable served font has no INFO<n> category. */
 void flash0_font_sources(Flash0Sources *out);
 
-/* Build the defaults: the measured tree, then the system-param-backed and measured values. Every
- * other value key keeps its neutral placeholder (INT 0, an empty string, or zero bytes). */
+/* The default of /CONFIG/SYSTEM/owner_name, the console nickname (#2197): SR_NICKNAME, the
+ * nickname the user chose in the player, when it passes nk_nickname_valid, else the neutral
+ * NK_NICKNAME_DEFAULT. It is never taken from the operating system or its user name. Read once per
+ * process; a missing, empty or invalid SR_NICKNAME is named on stderr that once, each in its own
+ * words, and "Player" is served. */
+static char s_sreg_owner_name[NK_NICKNAME_MAX_BYTES + 1u];
+static int s_sreg_owner_name_ready;
+
+static const char *sreg_owner_name_default(void) {
+    char *env = NULL;
+    int present = 0;
+    int read;
+    if (s_sreg_owner_name_ready) return s_sreg_owner_name;
+    s_sreg_owner_name_ready = 1;
+    read = sr_utf8_env_alloc(L"SR_NICKNAME", &env, &present);
+    if (read && present && nk_nickname_valid(env)) {
+        memcpy(s_sreg_owner_name, env, strlen(env) + 1u);
+    } else {
+        char why[96];
+        memcpy(s_sreg_owner_name, NK_NICKNAME_DEFAULT, sizeof(NK_NICKNAME_DEFAULT));
+        if (read && !present) {
+            snprintf(why, sizeof(why), "is not set");
+        } else if (read && env != NULL && env[0] == '\0') {
+            snprintf(why, sizeof(why), "is empty");
+        } else {
+            snprintf(why, sizeof(why), "is not 1 to %u bytes of UTF-8 without control characters, "
+                     "or is only spaces",
+                     (unsigned)NK_NICKNAME_MAX_BYTES);
+        }
+        fprintf(stderr, "sceReg: SR_NICKNAME %s; the nickname (/CONFIG/SYSTEM/owner_name) is the "
+                        "neutral default \"%s\"\n", why, NK_NICKNAME_DEFAULT);
+    }
+    free(env);
+    return s_sreg_owner_name;
+}
+
+/* owner_name holds the nickname default, a modeled value rather than a placeholder. */
+static void sreg_seed_owner_name(void) {
+    int node = sreg_find_path("/CONFIG/SYSTEM/owner_name");
+    const char *nickname = sreg_owner_name_default();
+    uint32_t size = (uint32_t)strlen(nickname) + 1u;
+    uint8_t *value;
+    if (node < 0 || s_sreg_nodes[node].type != SREG_TYPE_STR) return;
+    value = (uint8_t *)malloc(size);
+    if (!value) return; /* it keeps the empty-string placeholder, named on its first read */
+    memcpy(value, nickname, size);
+    free(s_sreg_nodes[node].value);
+    s_sreg_nodes[node].value = value;
+    s_sreg_nodes[node].size = size;
+    s_sreg_nodes[node].flags &= (uint8_t)~SREG_NODE_PLACEHOLDER;
+}
+
+/* Build the defaults: the measured tree, then the system-param-backed and measured values, and
+ * the nickname. Every other value key keeps its neutral placeholder (INT 0, an empty string, or
+ * zero bytes). */
 static void sreg_build_defaults(void) {
     uint32_t err = 0;
     (void)sreg_walk("/CONFIG", 1, SREG_NODE_DEFAULT, &err, NULL);
@@ -1412,6 +1532,7 @@ static void sreg_build_defaults(void) {
         s_sreg_nodes[node].flags &= (uint8_t)~SREG_NODE_PLACEHOLDER;
         sreg_put_le32(s_sreg_nodes[node].value, s_sreg_measured_ints[i].value);
     }
+    sreg_seed_owner_name();
     sreg_build_font_registry();
 }
 
@@ -1424,6 +1545,13 @@ static int sreg_is_default_value(const SregNode *n) {
         if (n->type == SREG_TYPE_INT && n->size == 4u &&
             sreg_find_path(s_sreg_measured_ints[i].path) == (int)(n - s_sreg_nodes))
             return sreg_get_le32(n->value) == s_sreg_measured_ints[i].value;
+    }
+    if (n->type == SREG_TYPE_STR &&
+        sreg_find_path("/CONFIG/SYSTEM/owner_name") == (int)(n - s_sreg_nodes)) {
+        /* This process's nickname default, so the player's choice is never frozen into the
+           overlay: a later SR_NICKNAME is what the next run serves. */
+        const char *nickname = sreg_owner_name_default();
+        return n->size == strlen(nickname) + 1u && memcmp(n->value, nickname, n->size) == 0;
     }
     if (n->type == SREG_TYPE_STR && n->size != 1u) return 0; /* the default is the empty string */
     for (uint32_t i = 0; i < n->size; i++)
@@ -1478,6 +1606,44 @@ static int console_random_bytes(uint8_t *out, size_t n) {
     if (f) fclose(f);
     return ok;
 #endif
+}
+
+/* The seed a deterministic run (SR_DETERMINISTIC_CLOCK=1) derives a fresh profile identity from:
+ * SR_IDENTITY_SEED when set and non-empty, else this fixed default. Not secret, not a console's. */
+#define CONSOLE_IDENTITY_DEFAULT_SEED "nakagawa-deterministic-profile-v1"
+static const char *console_identity_seed(void) {
+    const char *seed = getenv("SR_IDENTITY_SEED");
+    return seed && seed[0] ? seed : CONSOLE_IDENTITY_DEFAULT_SEED;
+}
+
+/* A synthetic identity: SHA-256 of "<field>:<seed>" fills each field. The MAC is unicast with the
+ * locally administered bit set, which no console's own address has (a console's is universally
+ * administered), so it can never be mistaken for a real one; the OpenPSID is never all zero.
+ * A profile the user configured in the overlay, and one persisted by a normal run, are used
+ * as they are and never reach here. */
+static void console_synthetic_identity(uint8_t mac[6], uint8_t psid[16]) {
+    const char *seed = console_identity_seed();
+    size_t seed_len = strlen(seed);
+    uint8_t digest[32];
+    char *buf = (char *)malloc(seed_len + 16u);
+    if (!buf) {   /* cannot happen for a few dozen bytes; keep the values fixed rather than random */
+        memset(mac, 0, 6);
+        memset(psid, 0, 16);
+        mac[0] = 0x02u;
+        psid[15] = 1u;
+        return;
+    }
+    int n = snprintf(buf, seed_len + 16u, "wlan-mac:%s", seed);
+    sr_vfpu_sha256((const uint8_t *)buf, (size_t)n, digest);
+    memcpy(mac, digest, 6);
+    mac[0] = (uint8_t)((mac[0] & 0xfcu) | 0x02u);   /* unicast (bit 0 clear), local (bit 1 set) */
+    n = snprintf(buf, seed_len + 16u, "open-psid:%s", seed);
+    sr_vfpu_sha256((const uint8_t *)buf, (size_t)n, digest);
+    memcpy(psid, digest, 16);
+    int set = 0;
+    for (int i = 0; i < 16; i++) set |= psid[i] != 0u;
+    if (!set) psid[15] = 1u;
+    free(buf);
 }
 
 /* Apply a parsed overlay onto the defaults. Returns 1, or 0 with *why set; the caller discards a
@@ -1772,7 +1938,7 @@ static void sreg_overlay_render(SregText *t) {
         first = 0;
     }
     sreg_text_str(t, "\n  ]");
-    if (s_console.have_identity) {
+    if (s_console.have_identity && !s_console.synthetic) {   /* a derived identity is never saved */
         static const char digits[] = "0123456789abcdef";
         sreg_text_str(t, ",\n  \"console\": {\"wlan_mac_hex\": \"");
         for (size_t b = 0; b < sizeof(s_console.mac); b++) {
@@ -1907,6 +2073,7 @@ void sr_hle_test_sysreg_reset(void) {
     memset(s_sreg_cat, 0, sizeof(s_sreg_cat));
     s_sreg_loaded = 0;
     s_sreg_corrupt_on_disk = 0;
+    s_sreg_owner_name_ready = 0; /* a new process reads SR_NICKNAME again */
 }
 #endif
 
@@ -1942,6 +2109,7 @@ uint32_t hle_unmodelled_stop(const char *import_name, const char *fmt, ...) {
         sr_compat_report();
         (void)sr_videorec_finish_status("an unsupported import stopped the run", 7);
         sr_perf_shutdown();
+        sr_profile_dump_final();
         SR_VERIFY_REPORT_NOW();
         fflush(stderr);
         _Exit(7);
@@ -2346,8 +2514,13 @@ static uint64_t s_quit_stop_deadline_us;
  * running inside that window, so a quit does not cut off a save in progress (the pause
  * overlay's Quit is refused for the same reason). Returns 1 once the run should end; the window
  * bounds the wait, so a guest that never finishes cannot hold the player open. The stop lands
- * only between guest slices, never inside the sceUtilitySavedataUpdate call that writes the
- * save (sr_savedata_execute_sized runs within it), so no write is cut off halfway. */
+ * only between guest slices. A SAVE that hands the CPU over at one of its preemption points
+ * (#1296) is parked inside the sceUtilitySavedataUpdate call that writes it; the driver holds a
+ * stop while that SAVE is parked, for up to its own window of guest time
+ * (sr_savedata_stop_deferred, the same length as this one). Past it the run stops with the SAVE
+ * half done, and the next savedata call rolls it back or finishes it from its journal. A quit
+ * can therefore wait this window and then that one, at most 10 s of guest time. A LoadExec is
+ * not held: it ends the parked SAVE through sr_hle_release_thread_resources. */
 int sr_exit_request_stop_due(void) {
     if (!s_quit_stop_armed) {
         s_quit_stop_armed = 1;
@@ -2568,6 +2741,18 @@ int console_profile_identity(void) {
     if (s_console.have_identity) return 1;
     PspConsoleProfile next;
     memset(&next, 0, sizeof(next));
+    if (sched_clock_deterministic()) {
+        /* #2162: under SR_DETERMINISTIC_CLOCK=1 a fresh profile is derived from a named seed,
+         * never from the host's random source, and is not saved: the run leaves the user's
+         * profile as it found it, and the next run derives the same values again. */
+        console_synthetic_identity(next.mac, next.psid);
+        next.have_identity = 1;
+        next.synthetic = 1;
+        s_console = next;
+        fprintf(stderr, "system profile: deterministic run: derived a synthetic WLAN MAC address "
+                        "and OpenPSID from seed '%s'; not saved\n", console_identity_seed());
+        return 1;
+    }
     if (!console_random_bytes(next.mac, sizeof(next.mac)) ||
         !console_random_bytes(next.psid, sizeof(next.psid)))
         return 0;
@@ -2644,10 +2829,33 @@ static void mbx_remove_thread_waiters(uint32_t thread_uid);
 static void io_cwd_release_thread(uint32_t thread_uid);
 
 
+uint32_t sr_savedata_release_thread(uint32_t thread_uid);   /* savedata.c: a SAVE it left parked */
+
+/* #1296: the thread whose sceUtilitySavedataUpdate was running the dialog's SAVE ended while the
+ * SAVE was parked, so that Update never returns to record a result (hle_utility.c). Finish the
+ * dialog's work with the abandoned SAVE's result (its mode's savedata_access_error code), so the
+ * next Update reports FINISHED and the game can shut the dialog down; the pause overlay's Quit
+ * stays refused until it does (sr_savedata_pause_busy counts FINISHED as busy). On a PSP the
+ * utility's own thread does the save and finishes it whatever happens to the caller; what the
+ * dialog then reports is UNMEASURED. */
+static void savedata_dialog_work_abandoned(uint32_t result) {
+    dialog_lock();
+    if (s_utility_slot == UTILITY_SLOT_SAVEDATA && s_dlg_status == 2 && s_dlg_work_started &&
+        !s_dlg_work_done) {
+        s_dlg_result = result;
+        s_dlg_work_done = 1u;
+    }
+    dialog_unlock();
+}
+
 void sr_hle_release_thread_resources(uint32_t thread_uid) {
     sr_mutex_release_thread(thread_uid);
     if (thread_uid) {
+        ge_finish_release_owner(thread_uid);
+        const uint32_t abandoned = sr_savedata_release_thread(thread_uid);
+        if (abandoned) savedata_dialog_work_abandoned(abandoned);
         io_cwd_release_thread(thread_uid);
+        hle_io_release_thread(thread_uid);
         mbx_remove_thread_waiters(thread_uid);
 
         for (int i = 0; i < FPL_MAX; i++) {
@@ -3517,7 +3725,53 @@ static void mbx_remove_thread_waiters(uint32_t thread_uid) {
         if (s_mbx[i].used) mbx_remove_waiter(&s_mbx[i], thread_uid);
     }
 }
-Sync s_sync[128];
+/* Semaphores, event flags and LwMutexes: one Sync each, tagged with its kind. The PSP has no
+ * fixed number of them: it creates 1024 event flags in a row (PSPAutotests
+ * tests/threads/events/create/create.expected at 2ed7c9c5, "Create 1024: OK"), and a title's
+ * loader can need more than a small fixed table holds (#1892). The table grows by whole chunks
+ * that never move, so a Sync pointer a handler holds across a reschedule stays valid while
+ * another thread creates objects. */
+#define HLE_SYNC_CHUNK 128u
+static Sync **s_sync_chunks = NULL;
+static size_t s_sync_chunk_count = 0u;
+
+size_t hle_sync_slot_count(void) {
+    return s_sync_chunk_count * HLE_SYNC_CHUNK;
+}
+
+Sync *hle_sync_slot(size_t index) {
+    return &s_sync_chunks[index / HLE_SYNC_CHUNK][index % HLE_SYNC_CHUNK];
+}
+
+/* The create then returns its unmeasured 0x80020000; say why on stderr, so the
+ * failure is never silent. */
+static Sync *hle_sync_grow_failed(void) {
+    fprintf(stderr, "HLE: the semaphore/event-flag/LwMutex table cannot grow past %zu objects: "
+            "the host could not allocate more memory\n", hle_sync_slot_count());
+    return NULL;
+}
+
+Sync *hle_sync_grow(void) {
+    if (s_sync_chunk_count >= SIZE_MAX / sizeof(*s_sync_chunks) / HLE_SYNC_CHUNK)
+        return hle_sync_grow_failed();
+    Sync *chunk = (Sync *)calloc(HLE_SYNC_CHUNK, sizeof(Sync));
+    if (!chunk) return hle_sync_grow_failed();
+    Sync **grown = (Sync **)realloc(s_sync_chunks, (s_sync_chunk_count + 1u) * sizeof(*grown));
+    if (!grown) {
+        free(chunk);
+        return hle_sync_grow_failed();
+    }
+    s_sync_chunks = grown;
+    s_sync_chunks[s_sync_chunk_count++] = chunk;
+    return chunk;
+}
+
+void hle_sync_reset(void) {
+    for (size_t i = 0; i < s_sync_chunk_count; i++) free(s_sync_chunks[i]);
+    free(s_sync_chunks);
+    s_sync_chunks = NULL;
+    s_sync_chunk_count = 0u;
+}
 
 /* Measured on a PSP-3000, firmware 6.61 (PSP-B2-01 / PSP-B3-01,
  * docs/HARDWARE_ORACLE.md): cancel/release family, measured by
@@ -3722,7 +3976,6 @@ static void hle_register_unregistered_import_batch(void) {
      * is not established here and it is refused under its name rather than guessed. */
     hle_register_unregistered_import_rtc();
     hle_register_unregistered_import_network_2();
-    hle_register_unregistered_import_audio_codec();
 }
 
 /* What a stalled thread's object wait is on, for the watchdog's thread dump: the kernel
@@ -3730,8 +3983,10 @@ static void hle_register_unregistered_import_batch(void) {
  * has the uid (a thread left waiting on a deleted object, or a wait the HLE does not own). */
 static int hle_describe_wait_object(uint32_t thread_uid, uint32_t obj, char *out, size_t cap) {
     Sync *y = NULL;
-    for (int i = 0; i < (int)(sizeof(s_sync) / sizeof(s_sync[0])); i++)
-        if (s_sync[i].used && s_sync[i].uid == obj) { y = &s_sync[i]; break; }
+    for (size_t i = 0, n = hle_sync_slot_count(); i < n; i++) {
+        Sync *slot = hle_sync_slot(i);
+        if (slot->used && slot->uid == obj) { y = slot; break; }
+    }
     if (y && y->kind == SYNC_KIND_SEMA) {
         snprintf(out, cap, "semaphore 0x%x '%s' count=%d max=%d", obj, y->name, y->count, y->maxc);
         return 1;
@@ -3852,6 +4107,7 @@ void sr_hle_init(void) {
     hle_register_ctrl_sampling_handlers();
     sr_hle_power_register_lock();
     hle_register_gpi_gpo_handlers();
+    hle_register_std_handle_handlers();
     hle_register_mpeg_shared_handlers();
     hle_register_psmf_player_handlers();
     hle_register_partition_savedata_handlers();
@@ -3960,6 +4216,7 @@ void sr_hle_init(void) {
     hle_register_atrac_handlers();
     hle_register_mp3_handlers();
     hle_register_sas_handlers();
+    hle_register_videocodec_handlers();
 #endif
 #ifndef SR_MPEG_MEDIA_SELFTEST
     /* Opt-in GE completion timing: the hooks report nothing unless SR_GE_TIMING=1. */
@@ -4108,7 +4365,7 @@ uint32_t sr_syscall(CpuState *s, uint32_t nid) {
         sr_hit_hle = 1;
         /* Under the fiber scheduler, longjmp across fibers is invalid; stop the process cleanly
          * after flushing the trace. The plain driver (no scheduler) keeps the longjmp boundary. */
-        if (sr_sched_on) { sr_trace_close(); sr_compat_report(); (void)sr_videorec_finish_status("an unregistered NID stopped the run", 7); sr_perf_shutdown(); SR_VERIFY_REPORT_NOW(); fflush(stderr); _Exit(7); }
+        if (sr_sched_on) { sr_trace_close(); sr_compat_report(); (void)sr_videorec_finish_status("an unregistered NID stopped the run", 7); sr_perf_shutdown(); sr_profile_dump_final(); SR_VERIFY_REPORT_NOW(); fflush(stderr); _Exit(7); }
         longjmp(g_hle_jmp, 1);
     }
     if (hle_syslog_on()) {

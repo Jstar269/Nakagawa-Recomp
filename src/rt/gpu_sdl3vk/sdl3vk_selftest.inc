@@ -784,6 +784,218 @@ int sdl3vk_pause_input_selftest(void) {
 }
 #undef PAUSE_CHECK
 
+/* ---- mouse aiming selftest (#1791); no Vulkan needed -----------------------------------
+ * Drives the real event path (poll_input) with pushed mouse events: with the profile's aim
+ * off the nub never moves; with it on, movement since the last poll deflects the nub and a
+ * still mouse returns it to centre; a focus loss or an overlay claim throws the movement
+ * away, so nothing a mouse did before is applied after. */
+#define AIM_CHECK(cond, ...) do { if (!(cond)) { \
+    fprintf(stderr, "mouse_aim_selftest: " __VA_ARGS__); fputc('\n', stderr); ok = 0; } } while (0)
+
+static void aim_test_motion(float dx, float dy) {
+    SDL_Event ev;
+    SDL_zero(ev);
+    ev.type = SDL_EVENT_MOUSE_MOTION;
+    ev.motion.xrel = dx;
+    ev.motion.yrel = dy;
+    SDL_PushEvent(&ev);
+}
+
+/* The clock and the pointer grab are the aim step's seams: the test sets the time between
+ * polls and records what the window was asked to do. */
+static uint64_t aim_test_now, aim_test_step;
+static uint64_t aim_test_clock(void) { aim_test_now += aim_test_step; return aim_test_now; }
+static int aim_test_grab_calls, aim_test_grab_last = -1;
+static bool aim_test_grab_result = true;
+static bool aim_test_grab(bool want) {
+    aim_test_grab_calls++;
+    aim_test_grab_last = want ? 1 : 0;
+    return aim_test_grab_result;
+}
+
+static void aim_test_stick(uint8_t *lx, uint8_t *ly) {
+    int quit = 0;
+    poll_input(&quit);
+    sdl3vk_analog(lx, ly);
+}
+
+static int sdl3vk_mouse_aim_selftest(void) {
+    int ok = 1;
+    if (!SDL_InitSubSystem(SDL_INIT_EVENTS)) {
+        fprintf(stderr, "mouse_aim_selftest: SDL events unavailable: %s\n", SDL_GetError());
+        return 0;
+    }
+    const char *tmp_profile = "selftest_mouse_aim_profile.json";
+    char diag[NK_INPUT_DIAGNOSTIC_MAX_LEN] = {0};
+    uint8_t lx, ly;
+    int quit = 0;
+    NkInputProfile custom;
+    s_aim_clock_ns = aim_test_clock;
+    s_aim_relative_mode = aim_test_grab;
+    aim_test_now = 1000000000ull;
+    aim_test_step = AIM_REFERENCE_POLL_NS;
+    aim_test_grab_calls = 0;
+    aim_test_grab_last = -1;
+    aim_test_grab_result = true;
+
+    /* Off (the default): a moving mouse leaves the nub at centre. */
+    sdl3vk_reset_input_profile();
+    nk_input_profile_init_default(&custom);
+    AIM_CHECK(nk_input_profile_save(&custom, tmp_profile, diag, sizeof(diag)) == NK_OK,
+              "profile save failed: %s", diag);
+    profile_test_setenv("NK_INPUT_PROFILE", tmp_profile);
+    sdl3vk_reset_input_profile();
+    sdl3vk_init_input_profile();
+    poll_input(&quit);
+    aim_test_motion(40.0f, 40.0f);
+    aim_test_stick(&lx, &ly);
+    AIM_CHECK(lx == 128 && ly == 128, "aim off: the mouse moved the nub to %u,%u", lx, ly);
+    AIM_CHECK(aim_test_grab_calls == 0, "aim off: the pointer was grabbed (%d calls)", aim_test_grab_calls);
+
+    /* On: 8 counts right and 16 up at 100% are half and full deflection. */
+    custom.aim.mouse = true;
+    AIM_CHECK(nk_input_profile_save(&custom, tmp_profile, diag, sizeof(diag)) == NK_OK,
+              "profile save failed: %s", diag);
+    sdl3vk_reset_input_profile();
+    sdl3vk_init_input_profile();
+    poll_input(&quit);
+    aim_test_motion(8.0f, -16.0f);
+    aim_test_stick(&lx, &ly);
+    AIM_CHECK(lx == 128 + 63 && ly == 128 - 127, "aim on: nub %u,%u, expected %d,%d", lx, ly,
+              128 + 63, 128 - 127);
+    /* A fraction of a count is kept for the next poll instead of being lost. */
+    aim_test_motion(0.5f, 0.0f);
+    aim_test_stick(&lx, &ly);
+    AIM_CHECK(lx == 128, "aim on: half a count moved the nub to %u", lx);
+    aim_test_motion(0.5f, 0.0f);
+    aim_test_stick(&lx, &ly);
+    AIM_CHECK(lx == 128 + 7, "aim on: two half counts gave %u, expected %d", lx, 128 + 7);
+
+    /* A focus loss in the same poll throws the movement away. */
+    {
+        SDL_Event lost;
+        SDL_zero(lost);
+        lost.type = SDL_EVENT_WINDOW_FOCUS_LOST;
+        aim_test_motion(16.0f, 16.0f);
+        SDL_PushEvent(&lost);
+        aim_test_stick(&lx, &ly);
+        AIM_CHECK(lx == 128 && ly == 128, "a focus loss left the nub at %u,%u", lx, ly);
+    }
+
+    /* While the overlay has the input the mouse is the overlay's, and nothing it did is
+     * applied after the claim ends. */
+    {
+        PauseTestSink sink = {0};
+        sdl3vk_set_input_claim(pause_test_sink, &sink);
+        aim_test_motion(16.0f, 16.0f);
+        aim_test_stick(&lx, &ly);
+        AIM_CHECK(lx == 128 && ly == 128, "a claimed mouse moved the nub to %u,%u", lx, ly);
+        AIM_CHECK(aim_test_grab_last == 0 && !s_mouse_captured,
+                  "the overlay holds the input but the pointer is still grabbed");
+        sdl3vk_set_input_claim(NULL, NULL);
+        aim_test_stick(&lx, &ly);
+        AIM_CHECK(lx == 128 && ly == 128, "the claim's mouse movement reached the game (%u,%u)",
+                  lx, ly);
+        AIM_CHECK(aim_test_grab_last == 1 && s_mouse_captured,
+                  "the pointer was not grabbed again once the game had the input");
+    }
+
+    /* The grab is asked for once, not every poll, and a request that could not be applied
+     * (no window) is not remembered as done: it is asked again until it works. */
+    {
+        int calls = aim_test_grab_calls;
+        aim_test_stick(&lx, &ly);
+        aim_test_stick(&lx, &ly);
+        AIM_CHECK(aim_test_grab_calls == calls, "a held grab was asked for again (%d calls)",
+                  aim_test_grab_calls - calls);
+        PauseTestSink sink = {0};
+        sdl3vk_set_input_claim(pause_test_sink, &sink);
+        aim_test_stick(&lx, &ly);
+        sdl3vk_set_input_claim(NULL, NULL);
+        aim_test_grab_result = false;
+        aim_test_grab_calls = 0;
+        aim_test_stick(&lx, &ly);
+        aim_test_stick(&lx, &ly);
+        AIM_CHECK(!s_mouse_captured && aim_test_grab_calls == 2,
+                  "a failed grab was latched as done (captured=%d, %d calls)", s_mouse_captured,
+                  aim_test_grab_calls);
+        aim_test_grab_result = true;
+        aim_test_stick(&lx, &ly);
+        AIM_CHECK(s_mouse_captured, "the grab was not retried after it could succeed");
+        /* The real call with no window (headless) does nothing and latches nothing. */
+        s_aim_relative_mode = aim_relative_mode_default;
+        s_mouse_captured = false;
+        aim_test_stick(&lx, &ly);
+        AIM_CHECK(!s_mouse_captured, "a run with no window latched a grab");
+        s_aim_relative_mode = aim_test_grab;
+        aim_test_stick(&lx, &ly);
+    }
+
+    /* The nub follows the hand's speed, not the frame rate: the same movement over twice the
+     * time is half the deflection, a frame hitch is not a saturated nub, polls faster than
+     * 1/240 s count as 1/240 s, and a stall throws its movement away. */
+    {
+        aim_reset();
+        aim_test_stick(&lx, &ly);                 /* first poll after a reset: one reference poll */
+        aim_test_step = 2 * AIM_REFERENCE_POLL_NS;
+        aim_test_motion(16.0f, 0.0f);
+        aim_test_stick(&lx, &ly);
+        AIM_CHECK(lx == 128 + 63, "30 fps: 16 counts gave %u, expected %d", lx, 128 + 63);
+        aim_test_step = 6 * AIM_REFERENCE_POLL_NS;
+        aim_test_motion(16.0f, 0.0f);
+        aim_test_stick(&lx, &ly);
+        AIM_CHECK(lx == 128 + 15, "a 100 ms hitch: 16 counts gave %u, expected %d", lx, 128 + 15);
+        aim_test_step = 1000000ull;
+        aim_test_motion(2.0f, 0.0f);
+        aim_test_stick(&lx, &ly);
+        AIM_CHECK(lx == 128 + 63, "1 ms poll: 2 counts gave %u, expected %d", lx, 128 + 63);
+        aim_test_step = AIM_STALL_NS + 1;
+        aim_test_motion(40.0f, 40.0f);
+        aim_test_stick(&lx, &ly);
+        AIM_CHECK(lx == 128 && ly == 128, "a stall's movement reached the game (%u,%u)", lx, ly);
+        aim_test_step = AIM_REFERENCE_POLL_NS;
+    }
+
+    /* SR_PADSCRIPT drives the pad by script: aiming is off and the pointer is not grabbed,
+     * and it comes back when the script ends. */
+    {
+        aim_reset();
+        profile_test_setenv("SR_PADSCRIPT", "synthetic_script_active");
+        aim_test_motion(16.0f, 16.0f);
+        aim_test_stick(&lx, &ly);
+        AIM_CHECK(lx == 128 && ly == 128, "SR_PADSCRIPT: the mouse moved the nub to %u,%u", lx, ly);
+        AIM_CHECK(aim_test_grab_last == 0 && !s_mouse_captured,
+                  "SR_PADSCRIPT: the pointer is still grabbed");
+        profile_test_setenv("SR_PADSCRIPT", NULL);
+        aim_test_stick(&lx, &ly);
+        aim_test_motion(16.0f, 0.0f);
+        aim_test_stick(&lx, &ly);
+        AIM_CHECK(lx == 128 + 127, "aim did not come back after SR_PADSCRIPT ended (%u)", lx);
+    }
+
+    /* One count is about 7 nub units at 100%, and no deadzone hides it. */
+    aim_reset();
+    aim_test_motion(1.0f, 0.0f);
+    aim_test_stick(&lx, &ly);
+    AIM_CHECK(lx == 128 + 7, "one count gave %u, expected %d", lx, 128 + 7);
+
+    profile_test_setenv("NK_INPUT_PROFILE", NULL);
+    remove(tmp_profile);
+    sdl3vk_reset_input_profile();
+    aim_reset();
+    s_aim_clock_ns = aim_clock_ns_default;
+    s_aim_relative_mode = aim_relative_mode_default;
+    s_mouse_captured = false;
+    nk_input_gate_init(&s_gate);
+    s_button_pulse = s_pad_pulse = 0;
+    s_buttons = 0;
+    s_lx = s_ly = 128;
+    SDL_QuitSubSystem(SDL_INIT_EVENTS);
+    if (ok) printf("mouse_aim_selftest: OK\n");
+    return ok;
+}
+#undef AIM_CHECK
+
 /* Set while the lifecycle selftest holds its own SDL video reference: SDL_WasInit cannot tell
  * that reference from one sdl3vk leaked, so the per-step count then checks the gamepad
  * subsystem only, and the selftest checks video once after releasing its reference. */
@@ -941,7 +1153,9 @@ static Fsr1Pass *s_test_fsr;
 static VkImage s_test_fsr_out;
 static int s_test_fsr_calls, s_test_fsr_args[4];
 
-static void *test_fsr_pass(void *cmd, void *src, int w, int h, int out_w, int out_h) {
+static void *test_fsr_pass(void *cmd, void *src, int w, int h, int out_w, int out_h, int cpu_frame,
+                           int *anime4k) {
+    (void)cpu_frame; (void)anime4k;
     s_test_fsr_calls++;
     s_test_fsr_args[0] = w;
     s_test_fsr_args[1] = h;
@@ -950,6 +1164,345 @@ static void *test_fsr_pass(void *cmd, void *src, int w, int h, int out_w, int ou
     s_test_fsr_out = fsr1_record(s_test_fsr, (VkCommandBuffer)cmd, (VkImage)src, w, h, out_w,
                                  out_h, FSR1_SHARPNESS_DEFAULT);
     return (void *)s_test_fsr_out;
+}
+
+#ifdef SR_VIDEOREC_SELFTEST
+/* The recording's upscaler as gui.c registers it (sdl3vk_set_record_upscale_pass), on its own
+ * pass, remembering what it was asked for. */
+static Fsr1Pass *s_test_rec_fsr;
+static int s_test_rec_calls, s_test_rec_args[4];
+
+static void *test_rec_fsr_pass(void *cmd, void *src, int w, int h, int out_w, int out_h,
+                               int cpu_frame, int *anime4k) {
+    (void)cpu_frame; (void)anime4k;
+    s_test_rec_calls++;
+    s_test_rec_args[0] = w;
+    s_test_rec_args[1] = h;
+    s_test_rec_args[2] = out_w;
+    s_test_rec_args[3] = out_h;
+    return (void *)fsr1_record(s_test_rec_fsr, (VkCommandBuffer)cmd, (VkImage)src, w, h, out_w,
+                               out_h, FSR1_SHARPNESS_DEFAULT);
+}
+
+/* The picture the last present recorded (BGRX, tightly packed) and the filter rec_record named
+ * for it, read from its readback once that present has finished. */
+static int test_rec_read(uint8_t *out, size_t bytes, int *filter) {
+    PresentFrame *f = s_rec_pending;
+    if (!f || !wait_present_frame(f)) return 0;
+    CapBuffer *c = &s_rec_buf[f - s_frame];
+    if (!cap_invalidate_readback(c) || c->alloc < bytes) return 0;
+    memcpy(out, c->map, bytes);
+    *filter = s_rec_filter[f - s_frame];
+    return 1;
+}
+
+/* The recording's upscaler when gui.c could not make its pass: asked, it returns nothing. */
+static void *test_rec_null_pass(void *cmd, void *src, int w, int h, int out_w, int out_h,
+                                int cpu_frame, int *anime4k) {
+    (void)cmd; (void)src; (void)w; (void)h; (void)out_w; (void)out_h; (void)cpu_frame; (void)anime4k;
+    s_test_rec_calls++;
+    return NULL;
+}
+
+/* One recorded present of src at a w x h recording under scaling `mode` and the recording
+ * upscaler `pass` (or none): its picture and the filter rec_record named. The slot is then let
+ * go unwritten, so a picture of another size never reaches the recorder. */
+static int test_rec_case(VkImage src, int mode, Sdl3VkUpscalePass pass, int w, int h,
+                         uint8_t *pic, int *filter) {
+    s_scaling = mode;
+    s_rec_w = (uint32_t)w;
+    s_rec_h = (uint32_t)h;
+    s_test_rec_calls = 0;
+    *filter = -1;
+    sdl3vk_set_record_upscale_pass(pass);
+    int ok = sdl3vk_present_image_ex((void *)src, PSP_W, PSP_H) == 1 &&
+             test_rec_read(pic, (size_t)w * (size_t)h * 4u, filter);
+    sdl3vk_set_record_upscale_pass(NULL);
+    s_rec_pending = NULL;
+    return ok;
+}
+
+/* A separate FSR 1 pass's output for src at w x h, read back into ref (RGBA, tightly packed). */
+static int test_rec_reference(Fsr1Pass *pass, CapBuffer *ref, VkImage src, int w, int h) {
+    if (!cap_ensure(ref, (uint32_t)w, (uint32_t)h)) return 0;
+    vkResetCommandBuffer(s_cmd, 0);
+    VkCommandBufferBeginInfo bi = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    if (vkBeginCommandBuffer(s_cmd, &bi) != VK_SUCCESS) return 0;
+    VkImage out = fsr1_record(pass, s_cmd, src, PSP_W, PSP_H, w, h, FSR1_SHARPNESS_DEFAULT);
+    int ok = out && cap_record(s_cmd, ref, out, w, h);
+    ok = vkEndCommandBuffer(s_cmd) == VK_SUCCESS && ok;
+    VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO };
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &s_cmd;
+    return ok && vkQueueSubmit(s_queue, 1, &si, VK_NULL_HANDLE) == VK_SUCCESS &&
+           vkQueueWaitIdle(s_queue) == VK_SUCCESS && cap_invalidate_readback(ref);
+}
+
+/* Pixels of the BGRX picture (pw wide) at x0,y0 that differ from the RGBA reference rw x rh;
+ * the first is put in *first_x, *first_y. */
+static size_t test_rec_diff(const uint8_t *pic, int pw, int x0, int y0, const uint8_t *ref,
+                            int rw, int rh, int *first_x, int *first_y) {
+    size_t bad = 0;
+    for (int y = 0; y < rh; y++)
+        for (int x = 0; x < rw; x++) {
+            const uint8_t *a = pic + ((size_t)(y0 + y) * (size_t)pw + (size_t)(x0 + x)) * 4u;
+            const uint8_t *b = ref + ((size_t)y * (size_t)rw + (size_t)x) * 4u;
+            if (a[0] != b[2] || a[1] != b[1] || a[2] != b[0]) {
+                if (!bad++) { *first_x = x0 + x; *first_y = y0 + y; }
+            }
+        }
+    return bad;
+}
+#endif
+
+/* ---- present pacing: the guest clock never waits for the display ------------------------
+ * A fake display (the acquire seam) holds every swapchain image: an acquire that may wait blocks
+ * for PACE_TEST_BLOCK_MS, as a full FIFO queue does, and one that may not returns VK_NOT_READY.
+ * Presents paced to the guest's 59.94 Hz VBLANK must keep that cadence: none may wait, each is
+ * reported DISPLAY_BUSY and counted, and presents resume once the display frees. With no-wait
+ * off (deterministic-clock and turbo runs) the present still waits and shows the frame. */
+#define PACE_TEST_BLOCK_MS 50u
+#define PACE_TEST_FRAMES   12
+static int s_pace_test_busy;     /* the fake display holds every image */
+static int s_pace_test_waits;    /* acquires that were allowed to wait while it did */
+static int s_pace_test_acquires; /* every acquire the seam saw */
+static int s_pace_test_slot_pending;   /* the fake frame slot's submission has not finished */
+
+static VkResult pace_test_fence_status(VkDevice dev, VkFence fence) {
+    return s_pace_test_slot_pending ? VK_NOT_READY : vkGetFenceStatus(dev, fence);
+}
+
+static VkResult pace_test_acquire(VkDevice dev, VkSwapchainKHR swap, uint64_t timeout,
+                                  VkSemaphore sem, VkFence fence, uint32_t *idx) {
+    s_pace_test_acquires++;
+    if (s_pace_test_busy) {
+        if (timeout == 0) return VK_NOT_READY;
+        s_pace_test_waits++;
+        SDL_Delay(PACE_TEST_BLOCK_MS);
+    }
+    return vkAcquireNextImageKHR(dev, swap, timeout, sem, fence, idx);
+}
+
+/* A show pass that only counts its calls. */
+static int s_pace_test_pass_calls;
+static void *pace_test_show_pass(void *cmd, void *src, int *w, int *h) {
+    (void)cmd; (void)src; (void)w; (void)h;
+    s_pace_test_pass_calls++;
+    return NULL;
+}
+
+static int sdl3vk_present_pacing_selftest(void) {
+    static uint32_t px[PSP_W * PSP_H];
+    const uint64_t period = 16683333u;   /* one guest VBLANK, 1001/60000 s */
+    int ok = 1;
+    sdl3vk_set_present_nowait(1);
+    s_acquire_fn = pace_test_acquire;
+
+    /* The real display may be busy too, so the warm-up only requires no failure. */
+    for (int k = 0; k < PRESENT_FRAMES; k++) {
+        int r = sdl3vk_present_rgba(px);
+        if (r != 1 && r != SDL3VK_PRESENT_DISPLAY_BUSY) {
+            fprintf(stderr, "pacing: warm-up present %d returned %d\n", k, r); ok = 0;
+        }
+    }
+
+    s_pace_test_busy = 1;
+    s_pace_test_waits = 0;
+    const uint64_t busy_before = sdl3vk_present_busy_count();
+    int busy = 0, late = 0;
+    uint64_t worst = 0;
+    const uint64_t t0 = SDL_GetTicksNS();
+    for (int k = 0; k < PACE_TEST_FRAMES; k++) {
+        const uint64_t due = t0 + (uint64_t)k * period;
+        uint64_t now = SDL_GetTicksNS();
+        if (now < due) SDL_DelayPrecise(due - now);
+        if (sdl3vk_present_rgba(px) == SDL3VK_PRESENT_DISPLAY_BUSY) busy++;
+        now = SDL_GetTicksNS();
+        /* The guest's next VBLANK is due one period after this one; past it, it is late. */
+        if (now > due + period) late++;
+        if (now > due && now - due > worst) worst = now - due;
+    }
+    const uint64_t counted = sdl3vk_present_busy_count() - busy_before;
+    if (s_pace_test_waits != 0 || late != 0 || busy != PACE_TEST_FRAMES ||
+        counted != (uint64_t)PACE_TEST_FRAMES) {
+        fprintf(stderr, "pacing: with the display holding every image, %d of %d present(s) waited "
+                        "for it, %d guest VBLANK(s) were late (worst %.1f ms after its slot), %d "
+                        "present(s) reported DISPLAY_BUSY and %llu were counted (want 0, 0, %d, "
+                        "%d)\n", s_pace_test_waits, PACE_TEST_FRAMES, late, (double)worst / 1e6,
+                busy, (unsigned long long)counted, PACE_TEST_FRAMES, PACE_TEST_FRAMES);
+        ok = 0;
+    }
+
+    /* Smooth motion's held present is a game-frame present too: with the display holding every
+     * image it returns DISPLAY_BUSY before its show pass runs. Nothing of the held frame was
+     * shown, so its caller still owes that frame (gui_ace_vblank). */
+    {
+        Sdl3VkShowPass saved = s_show_pass;
+        s_pace_test_pass_calls = 0;
+        sdl3vk_set_show_pass(pace_test_show_pass);
+        const int held = sdl3vk_present_held();
+        sdl3vk_set_show_pass(saved);
+        if (held != SDL3VK_PRESENT_DISPLAY_BUSY || s_pace_test_pass_calls != 0) {
+            fprintf(stderr, "pacing: with the display holding every image, the held present returned %d "
+                            "and ran its show pass %d time(s) (want DISPLAY_BUSY and 0)\n", held,
+                    s_pace_test_pass_calls);
+            ok = 0;
+        }
+    }
+
+    /* The display frees: presents are shown again (the real display may still need a VBLANK). */
+    s_pace_test_busy = 0;
+    int shown = 0;
+    for (int k = 0; k < 30 && !shown; k++) {
+        shown = sdl3vk_present_rgba(px) == 1;
+        if (!shown) SDL_DelayPrecise(period);
+    }
+    if (!shown) { fprintf(stderr, "pacing: presents did not resume once the display freed\n"); ok = 0; }
+
+    /* The frame slot about to be reused is still pending (a FIFO display that has not released
+     * its acquire semaphore, or a GPU frames behind): the present returns DISPLAY_BUSY before
+     * any acquire, keeps the slot, and the next present after it signals is shown. Every slot is
+     * submitted first, so the poll reaches the fence. */
+    int submitted = 0;
+    for (int k = 0; k < 60 && submitted < PRESENT_FRAMES; k++) {
+        if (sdl3vk_present_rgba(px) == 1) submitted++;
+        else SDL_DelayPrecise(period);
+    }
+    s_pace_test_slot_pending = 1;
+    s_fence_status_fn = pace_test_fence_status;
+    const int acquires_before = s_pace_test_acquires;
+    const int cursor_before = s_frame_cursor;
+    const uint64_t slot_busy_before = s_present_busy_slot;
+    const int pending_result = sdl3vk_present_rgba(px);
+    const int slot_acquires = s_pace_test_acquires - acquires_before;
+    const int slot_cursor = s_frame_cursor;
+    const uint64_t slot_counted = s_present_busy_slot - slot_busy_before;
+    s_pace_test_slot_pending = 0;
+    int after_slot = 0;
+    for (int k = 0; k < 30 && after_slot != 1; k++) {
+        after_slot = sdl3vk_present_rgba(px);
+        if (after_slot != 1) SDL_DelayPrecise(period);
+    }
+    s_fence_status_fn = NULL;
+    if (submitted < PRESENT_FRAMES || pending_result != SDL3VK_PRESENT_DISPLAY_BUSY ||
+        slot_acquires != 0 || slot_cursor != cursor_before || slot_counted != 1u ||
+        after_slot != 1) {
+        fprintf(stderr, "pacing: with the frame slot pending (%d of %d slots submitted first), the "
+                        "present returned %d after %d acquire(s), moved the slot cursor %d -> %d, "
+                        "counted %llu slot drop(s), and the next present returned %d (want "
+                        "DISPLAY_BUSY, 0 acquires, the cursor kept, 1 counted, then 1)\n",
+                submitted, PRESENT_FRAMES, pending_result, slot_acquires, cursor_before,
+                slot_cursor, (unsigned long long)slot_counted, after_slot);
+        ok = 0;
+    }
+
+    /* No-wait off: the present waits for the display and shows the frame. */
+    sdl3vk_set_present_nowait(0);
+    s_pace_test_busy = 1;
+    s_pace_test_waits = 0;
+    int r = sdl3vk_present_rgba(px);
+    if (r != 1 || s_pace_test_waits != 1) {
+        fprintf(stderr, "pacing: with no-wait off the present returned %d after %d wait(s) "
+                        "(want 1 after 1)\n", r, s_pace_test_waits);
+        ok = 0;
+    }
+    s_pace_test_busy = 0;
+    s_acquire_fn = NULL;
+    if (ok) printf("gpu capture selftest: present pacing OK (%d presents, none waited for a busy "
+                   "display; worst %.1f ms after its VBLANK)\n", PACE_TEST_FRAMES,
+                   (double)worst / 1e6);
+    return ok;
+}
+
+/* ---- what a show pass learns of its present, and the finished-submission count ---------------
+ * Each show pass is told once how its present ended and which submission carries its commands.
+ * The count of finished submissions moves only when the presenter has seen a fence signalled: it
+ * never passes a pending submission. A present that fails after its submission (an out-of-date
+ * swapchain) keeps its slot and is told it failed; the swapchain rebuild waits for every frame,
+ * so the count then reaches that submission. */
+static int s_done_test_calls, s_done_test_result;
+static uint64_t s_done_test_submission;
+static void done_test_show_done(int result, uint64_t submission) {
+    s_done_test_calls++;
+    s_done_test_result = result;
+    s_done_test_submission = submission;
+}
+
+static int sdl3vk_present_completed_selftest(void) {
+    static uint32_t px[PSP_W * PSP_H];
+    int ok = 1;
+    const Sdl3VkShowPass saved_pass = s_show_pass;
+    const Sdl3VkShowDone saved_done = s_show_done;
+    sdl3vk_set_present_nowait(0);
+    sdl3vk_set_show_pass(pace_test_show_pass);
+    sdl3vk_set_show_done(done_test_show_done);
+    s_done_test_calls = 0;
+
+    const uint64_t first = s_present_submitted + 1u;
+    const int shown = sdl3vk_present_rgba(px);
+    const int shown_calls = s_done_test_calls, shown_result = s_done_test_result;
+    const uint64_t shown_submission = s_done_test_submission;
+    const uint64_t completed_after_shown = sdl3vk_present_completed();   /* its fence not yet seen */
+    const int cursor = s_frame_cursor;
+    sdl3vk_present_fault_inject(VK_ERROR_OUT_OF_DATE_KHR);
+    const int failed = sdl3vk_present_rgba(px);
+    const int failed_calls = s_done_test_calls, failed_result = s_done_test_result;
+    const uint64_t failed_submission = s_done_test_submission;
+    const int failed_cursor = s_frame_cursor;
+    const uint64_t completed_after_fail = sdl3vk_present_completed();
+    const int again = sdl3vk_present_rgba(px);
+    const uint64_t completed_again = sdl3vk_present_completed();
+    if (shown != 1 || shown_calls != 1 || shown_result != 1 || shown_submission != first ||
+        completed_after_shown >= first || failed != -1 || failed_calls != 2 || failed_result != -1 || failed_submission != first + 1u ||
+        failed_cursor != cursor || completed_after_fail != first + 1u || again != 1 ||
+        s_done_test_calls != 3 || s_done_test_submission != first + 2u || completed_again < first + 1u ||
+        completed_again > s_present_submitted) {
+        fprintf(stderr, "show done: shown %d (%d call(s), %d, submission %llu of %llu, %llu finished); out "
+                        "of date %d (%d, submission %llu, cursor %d -> %d, %llu finished); next %d (%d "
+                        "call(s), submission %llu, %llu finished) (want 1, 1 call, 1, the first, an older "
+                        "one finished; -1, -1, the next, "
+                        "the cursor kept, finished by the rebuild; 1, 3 calls, the one after, the "
+                        "failed one finished)\n",
+                shown, shown_calls, shown_result, (unsigned long long)shown_submission,
+                (unsigned long long)first, (unsigned long long)completed_after_shown, failed, failed_result, (unsigned long long)failed_submission,
+                cursor, failed_cursor, (unsigned long long)completed_after_fail, again,
+                s_done_test_calls, (unsigned long long)s_done_test_submission,
+                (unsigned long long)completed_again);
+        ok = 0;
+    }
+
+    /* A slot still pending under no-wait: the present returns DISPLAY_BUSY before its show pass, so
+     * no pass is told anything, and the count does not move. Every slot is submitted first, so the
+     * poll reaches the fence. */
+    for (int k = 0; k < PRESENT_FRAMES; k++) (void)sdl3vk_present_rgba(px);
+    sdl3vk_set_present_nowait(1);
+    s_pace_test_slot_pending = 1;
+    s_fence_status_fn = pace_test_fence_status;
+    const int calls_before = s_done_test_calls;
+    const uint64_t completed_before = sdl3vk_present_completed();
+    const int pending = sdl3vk_present_rgba(px);
+    const uint64_t completed_pending = sdl3vk_present_completed();
+    s_pace_test_slot_pending = 0;
+    s_fence_status_fn = NULL;
+    sdl3vk_set_present_nowait(0);
+    /* Every fence waited: the count is the newest submission. */
+    const int all = wait_all_present_frames();
+    if (pending != SDL3VK_PRESENT_DISPLAY_BUSY || s_done_test_calls != calls_before ||
+        completed_pending != completed_before || !all ||
+        sdl3vk_present_completed() != s_present_submitted) {
+        fprintf(stderr, "show done: with the slot pending the present returned %d, told %d pass(es) and "
+                        "moved the count %llu -> %llu; after every wait the count is %llu of %llu (want "
+                        "DISPLAY_BUSY, none, unmoved, every submission)\n",
+                pending, s_done_test_calls - calls_before, (unsigned long long)completed_before,
+                (unsigned long long)completed_pending, (unsigned long long)sdl3vk_present_completed(),
+                (unsigned long long)s_present_submitted);
+        ok = 0;
+    }
+    sdl3vk_set_show_pass(saved_pass);
+    sdl3vk_set_show_done(saved_done);
+    if (ok) printf("gpu capture selftest: show pass outcomes and the finished-submission count OK\n");
+    return ok;
 }
 
 static int sdl3vk_capture_selftest_body(void) {
@@ -1033,6 +1586,12 @@ static int sdl3vk_capture_selftest_body(void) {
     /* ---- pause input claim and release mask (#1159); no Vulkan needed -------------- */
     if (!sdl3vk_pause_input_selftest()) {
         fprintf(stderr, "gpu capture selftest: pause input selftest failed\n");
+        return 1;
+    }
+
+    /* ---- mouse aiming (#1791); no Vulkan needed ------------------------------------ */
+    if (!sdl3vk_mouse_aim_selftest()) {
+        fprintf(stderr, "gpu capture selftest: mouse aim selftest failed\n");
         return 1;
     }
 
@@ -1185,6 +1744,74 @@ static int sdl3vk_capture_selftest_body(void) {
     }
     remove("selftest_cpu.ppm");
 
+    /* ---- the F3 HUD composes over the picture (#314, LIVE_FRAME_OVERLAY) ---------------
+     * The performance HUD, and in developer mode the profile HUD, are copied into a rectangle
+     * of the window's image after the frame blit: a rectangle inside the window that leaves
+     * the rest of the picture showing, at the 16-pixel inset, and the HUD surface the software
+     * renderer drew for it holds the HUD. The frame the game drew, the source the window is
+     * blitted from, is untouched: a capture of the same present is the same bytes as
+     * with the HUD off. Off again, nothing is copied. */
+    {
+        static const int modes[] = { SDL3VK_HUD_PERF, SDL3VK_HUD_PROFILE };
+        static const int want_w[] = { HUD_W, PROFILE_HUD_W };
+        static const int want_h[] = { HUD_H, PROFILE_HUD_H };
+        const int saved_developer = s_developer;
+        const int saved_mode = s_hud_enabled;
+        s_developer = 1;
+        for (int m = 0; m < 2; m++) {
+            const unsigned before = s_hud_last.copies;
+            const char *what = m ? "profile HUD" : "performance HUD";
+            hud_set_mode(modes[m]);
+            if (!sr_capture_arm("selftest_hud.ppm") || sdl3vk_present_rgba(px) != 1 ||
+                sr_capture_result() != 1) {
+                fprintf(stderr, "hud: %s present or capture failed\n", what); ok = 0;
+                continue;
+            }
+            if (!cap_test_verify_ppm("selftest_hud.ppm", PSP_W, PSP_H)) {
+                fprintf(stderr, "hud: with the %s on, the captured frame is not the frame the "
+                                "game drew\n", what);
+                ok = 0;
+            }
+            remove("selftest_hud.ppm");
+            if (s_hud_last.copies != before + 1u || s_hud_last.w != want_w[m] ||
+                s_hud_last.h != want_h[m]) {
+                fprintf(stderr, "hud: %s copies %u (want %u), %dx%d (want %dx%d)\n", what,
+                        s_hud_last.copies - before, 1u, s_hud_last.w, s_hud_last.h, want_w[m],
+                        want_h[m]);
+                ok = 0;
+                continue;
+            }
+            if (s_hud_last.x != 16 || s_hud_last.y != 16 ||
+                s_hud_last.x + s_hud_last.w > s_hud_last.swap_w ||
+                s_hud_last.y + s_hud_last.h > s_hud_last.swap_h ||
+                (s_hud_last.w >= s_hud_last.swap_w && s_hud_last.h >= s_hud_last.swap_h)) {
+                fprintf(stderr, "hud: %s rectangle (%d,%d %dx%d) in a %dx%d image does not sit "
+                                "over part of the picture\n", what, s_hud_last.x, s_hud_last.y,
+                        s_hud_last.w, s_hud_last.h, s_hud_last.swap_w, s_hud_last.swap_h);
+                ok = 0;
+            }
+            /* What was copied is the HUD: its background and border, as drawn. */
+            Uint8 r = 0, g = 0, b = 0, a = 0, br = 0, bg = 0, bb = 0, ba = 0;
+            if (!s_hud_surf || !SDL_ReadSurfacePixel(s_hud_surf, 2, s_hud_last.h - 2, &r, &g, &b, &a) ||
+                !SDL_ReadSurfacePixel(s_hud_surf, 0, 0, &br, &bg, &bb, &ba) ||
+                r != 20 || g != 24 || b != 32 || br != 70 || bg != 90 || bb != 130) {
+                fprintf(stderr, "hud: %s surface shows %u,%u,%u inside and %u,%u,%u on the "
+                                "border\n", what, r, g, b, br, bg, bb);
+                ok = 0;
+            }
+        }
+        hud_set_mode(SDL3VK_HUD_OFF);
+        {
+            const unsigned before = s_hud_last.copies;
+            if (sdl3vk_present_rgba(px) != 1 || s_hud_last.copies != before) {
+                fprintf(stderr, "hud: with the HUD off a present still copied a HUD\n");
+                ok = 0;
+            }
+        }
+        s_developer = saved_developer;
+        hud_set_mode(saved_mode);
+    }
+
     /* ---- presentation upscaler (#1273, SR_PRESENT_UPSCALE=fsr1) ------------------------
      * The real FSR 1 pass on the present path, under the validation layer. A 480x272 frame in the
      * larger window runs the pass at its place's size, and the frame blit reads the pass's image
@@ -1263,6 +1890,239 @@ static int sdl3vk_capture_selftest_body(void) {
         if (ok) printf("gpu capture selftest: FSR 1 present path OK (%dx%d to %dx%d)\n", PSP_W,
                        PSP_H, plan.w, plan.h);
     }
+
+    /* ---- a recording with the upscaler on (#2138, SR_VIDEOREC_DIR + SR_PRESENT_UPSCALE) -----
+     * A 960x544 recording of a 480x272 GE frame, through the production record path. With the
+     * recording's FSR 1 pass set, the recorded picture is byte for byte what a separate FSR 1
+     * pass makes of the same frame at that size, and rec_record names it fsr1. Without the pass
+     * the same present records sharp scaling's picture, which at exactly 2x is one nearest blit,
+     * so it is named nearest. The recorder counts each written frame under its picture's filter.
+     * Then each size and mode below states the filter its blits are, worked out by hand from
+     * the fit (480x272 into the recording, aspect kept, centred), never from the product's rules. */
+#ifdef SR_VIDEOREC_SELFTEST
+    {
+        enum { RW = 2 * PSP_W, RH = 2 * PSP_H, CW = 1000, CH = 600 };
+        const size_t rbytes = (size_t)RW * (size_t)RH * 4u;
+        const size_t cbytes = (size_t)CW * (size_t)CH * 4u;
+        const char *dir = "selftest_videorec_fsr";
+        const int scaling0 = s_scaling;
+        Sdl3VkInfo vi;
+        memset(&vi, 0, sizeof(vi));
+        char err[160] = "";
+        Fsr1Pass *ref_fsr = NULL;
+        s_test_rec_fsr = NULL;
+        if (sdl3vk_get_vk(&vi) && vi.get_instance_proc_addr) {
+            Fsr1Init init;
+            memset(&init, 0, sizeof(init));
+            init.get_instance_proc_addr = (PFN_vkGetInstanceProcAddr)vi.get_instance_proc_addr;
+            init.instance = (VkInstance)vi.instance;
+            init.physical_device = (VkPhysicalDevice)vi.physical;
+            init.device = (VkDevice)vi.device;
+            init.queue_family = vi.queue_family;
+            s_test_rec_fsr = fsr1_create(&init, err, sizeof(err));
+            if (s_test_rec_fsr) ref_fsr = fsr1_create(&init, err, sizeof(err));
+        }
+        uint8_t *fsr_pic = (uint8_t *)malloc(rbytes);
+        uint8_t *plain_pic = (uint8_t *)malloc(rbytes);
+        uint8_t *case_pic = (uint8_t *)malloc(cbytes);
+        uint8_t *sharp_pic = (uint8_t *)malloc(cbytes);
+        CapBuffer ref;
+        memset(&ref, 0, sizeof(ref));
+        CapTestImage src;
+        memset(&src, 0, sizeof(src));
+        int fsr_filter = -1, plain_filter = -1;
+        if (!s_test_rec_fsr || !ref_fsr || !fsr_pic || !plain_pic || !case_pic || !sharp_pic ||
+            !cap_test_image_create(&src, PSP_W, PSP_H) || !cap_test_image_upload(&src)) {
+            fprintf(stderr, "record upscale: setup failed (%s)\n", err[0] ? err : "memory or image");
+            ok = 0;
+        } else if (!sr_videorec_test_start(dir, "raw")) {
+            fprintf(stderr, "record upscale: the raw recording did not start\n"); ok = 0;
+        } else {
+            s_rec_state = -1;           /* rec_on() asks the recorder again */
+            s_rec_w = RW;               /* as SR_VIDEOREC_SIZE=960x544 would */
+            s_rec_h = RH;
+            s_scaling = SDL3VK_SCALING_SHARP;
+            s_test_rec_calls = 0;
+            sdl3vk_set_record_upscale_pass(test_rec_fsr_pass);
+            if (sdl3vk_present_image_ex((void *)src.img, PSP_W, PSP_H) != 1 ||
+                !test_rec_read(fsr_pic, rbytes, &fsr_filter)) {
+                fprintf(stderr, "record upscale: the upscaled present was not recorded\n"); ok = 0;
+            }
+            sr_videorec_vblank(0u, 0u);
+            sdl3vk_set_record_upscale_pass(NULL);
+            if (sdl3vk_present_image_ex((void *)src.img, PSP_W, PSP_H) != 1 ||
+                !test_rec_read(plain_pic, rbytes, &plain_filter)) {
+                fprintf(stderr, "record upscale: the plain present was not recorded\n"); ok = 0;
+            }
+            sr_videorec_vblank(1u, 16683u);
+            if (s_test_rec_calls != 1 || s_test_rec_args[0] != PSP_W || s_test_rec_args[1] != PSP_H ||
+                s_test_rec_args[2] != RW || s_test_rec_args[3] != RH) {
+                fprintf(stderr, "record upscale: the pass ran %d times for %dx%d to %dx%d (want "
+                                "once, %dx%d to %dx%d)\n", s_test_rec_calls, s_test_rec_args[0],
+                        s_test_rec_args[1], s_test_rec_args[2], s_test_rec_args[3], PSP_W, PSP_H,
+                        RW, RH);
+                ok = 0;
+            }
+            if (fsr_filter != SR_VIDEOREC_FILTER_FSR1 || plain_filter != SR_VIDEOREC_FILTER_NEAREST) {
+                fprintf(stderr, "record upscale: the pictures were named %s and %s (want fsr1, "
+                                "then nearest)\n", sr_videorec_filter_name(fsr_filter),
+                        sr_videorec_filter_name(plain_filter));
+                ok = 0;
+            }
+            /* The reference: a second FSR 1 pass on the same frame, at the recording's size. */
+            int fx = 0, fy = 0;
+            if (!test_rec_reference(ref_fsr, &ref, src.img, RW, RH)) {
+                fprintf(stderr, "record upscale: the reference FSR 1 pass failed\n"); ok = 0;
+            } else if (ok) {
+                size_t bad = test_rec_diff(fsr_pic, RW, 0, 0, (const uint8_t *)ref.map, RW, RH,
+                                           &fx, &fy);
+                if (bad) {
+                    fprintf(stderr, "record upscale: %zu recorded pixels differ from the FSR 1 "
+                                    "pass's own output, first at %d,%d\n", bad, fx, fy);
+                    ok = 0;
+                }
+                if (memcmp(fsr_pic, plain_pic, rbytes) == 0) {
+                    fprintf(stderr, "record upscale: the FSR 1 recording equals the nearest one\n");
+                    ok = 0;
+                }
+            }
+            SrVideoRecStats st;
+            sr_videorec_test_stats(&st);
+            if (st.frames != 2u || st.filter_frames[SR_VIDEOREC_FILTER_FSR1] != 1u ||
+                st.filter_frames[SR_VIDEOREC_FILTER_NEAREST] != 1u || st.width != (uint32_t)RW ||
+                st.height != (uint32_t)RH) {
+                fprintf(stderr, "record upscale: the recorder wrote %llu frames at %ux%u, %llu "
+                                "fsr1 and %llu nearest\n", (unsigned long long)st.frames, st.width,
+                        st.height, (unsigned long long)st.filter_frames[SR_VIDEOREC_FILTER_FSR1],
+                        (unsigned long long)st.filter_frames[SR_VIDEOREC_FILTER_NEAREST]);
+                ok = 0;
+            }
+
+            /* Each case's filter, from the fit worked by hand:
+             * - 960x544 is exactly 2x: any mode but FSR 1 is one nearest blit.
+             * - 1000x600 fits 1000x566 at 0,17 (566 = 1000*272/480, rounded down). Sharp
+             *   prescales nearest to 3x (1440x816) and shrinks it linearly; bilinear is one
+             *   linear blit; integer is 2x, 960x544 at 20,28, nearest; FSR 1 fills 1000x566.
+             * - 320x180 fits 317x180 at 1,0: a shrink, so every mode is one linear blit and
+             *   FSR 1 is not asked (EASU does not shrink).
+             * - With the recording's pass unavailable (gui.c could not make it), the pass is
+             *   asked once, gives nothing, and the picture is sharp's own. */
+            enum { PASS_NONE, PASS_FSR, PASS_NULL };
+            static const struct {
+                const char *what;
+                int mode, pass, w, h, want, calls;
+            } cases[] = {
+                { "bilinear at 960x544", SDL3VK_SCALING_BILINEAR, PASS_NONE, RW, RH,
+                  SR_VIDEOREC_FILTER_NEAREST, 0 },
+                { "integer at 960x544", SDL3VK_SCALING_INTEGER, PASS_NONE, RW, RH,
+                  SR_VIDEOREC_FILTER_NEAREST, 0 },
+                { "sharp at 1000x600", SDL3VK_SCALING_SHARP, PASS_NONE, CW, CH,
+                  SR_VIDEOREC_FILTER_SHARP, 0 },
+                { "bilinear at 1000x600", SDL3VK_SCALING_BILINEAR, PASS_NONE, CW, CH,
+                  SR_VIDEOREC_FILTER_LINEAR, 0 },
+                { "integer at 1000x600", SDL3VK_SCALING_INTEGER, PASS_NONE, CW, CH,
+                  SR_VIDEOREC_FILTER_NEAREST, 0 },
+                { "sharp at 320x180", SDL3VK_SCALING_SHARP, PASS_NONE, 320, 180,
+                  SR_VIDEOREC_FILTER_LINEAR, 0 },
+                { "integer at 320x180", SDL3VK_SCALING_INTEGER, PASS_NONE, 320, 180,
+                  SR_VIDEOREC_FILTER_LINEAR, 0 },
+                { "FSR 1 at 320x180", SDL3VK_SCALING_SHARP, PASS_FSR, 320, 180,
+                  SR_VIDEOREC_FILTER_LINEAR, 0 },
+                { "FSR 1 at 1000x600", SDL3VK_SCALING_SHARP, PASS_FSR, CW, CH,
+                  SR_VIDEOREC_FILTER_FSR1, 1 },
+                { "no FSR 1 pass at 1000x600", SDL3VK_SCALING_SHARP, PASS_NULL, CW, CH,
+                  SR_VIDEOREC_FILTER_SHARP, 1 },
+            };
+            for (size_t i = 0; ok && i < sizeof cases / sizeof cases[0]; i++) {
+                Sdl3VkUpscalePass pass = cases[i].pass == PASS_FSR ? test_rec_fsr_pass
+                                       : cases[i].pass == PASS_NULL ? test_rec_null_pass : NULL;
+                int got = -1;
+                if (!test_rec_case(src.img, cases[i].mode, pass, cases[i].w, cases[i].h, case_pic,
+                                   &got)) {
+                    fprintf(stderr, "record upscale: %s was not recorded\n", cases[i].what);
+                    ok = 0;
+                    break;
+                }
+                if (got != cases[i].want || s_test_rec_calls != cases[i].calls) {
+                    fprintf(stderr, "record upscale: %s was named %s with the pass asked %d "
+                                    "times (want %s, %d)\n", cases[i].what,
+                            sr_videorec_filter_name(got), s_test_rec_calls,
+                            sr_videorec_filter_name(cases[i].want), cases[i].calls);
+                    ok = 0;
+                }
+                if (cases[i].pass == PASS_NONE && cases[i].want == SR_VIDEOREC_FILTER_SHARP)
+                    memcpy(sharp_pic, case_pic, cbytes);
+                if (cases[i].pass == PASS_NULL && memcmp(case_pic, sharp_pic, cbytes) != 0) {
+                    fprintf(stderr, "record upscale: %s differs from sharp's picture\n",
+                            cases[i].what);
+                    ok = 0;
+                }
+                if (cases[i].pass == PASS_FSR && cases[i].want == SR_VIDEOREC_FILTER_FSR1) {
+                    enum { FH = CW * PSP_H / PSP_W, FY = (CH - FH) / 2 };
+                    if (s_test_rec_args[2] != CW || s_test_rec_args[3] != FH) {
+                        fprintf(stderr, "record upscale: %s asked for %dx%d (want %dx%d)\n",
+                                cases[i].what, s_test_rec_args[2], s_test_rec_args[3], CW, FH);
+                        ok = 0;
+                    } else if (!test_rec_reference(ref_fsr, &ref, src.img, CW, FH)) {
+                        fprintf(stderr, "record upscale: the %dx%d reference failed\n", CW, FH);
+                        ok = 0;
+                    } else {
+                        size_t bad = test_rec_diff(case_pic, CW, 0, FY, (const uint8_t *)ref.map,
+                                                   CW, FH, &fx, &fy);
+                        size_t lit = 0;
+                        for (int y = 0; y < CH; y++) {
+                            if (y >= FY && y < FY + FH) continue;
+                            for (int x = 0; x < CW; x++) {
+                                const uint8_t *a = case_pic + ((size_t)y * CW + (size_t)x) * 4u;
+                                lit += a[0] || a[1] || a[2];
+                            }
+                        }
+                        if (bad || lit) {
+                            fprintf(stderr, "record upscale: %s: %zu pixels differ from the pass "
+                                            "at 0,%d (first %d,%d) and %zu bar pixels are lit\n",
+                                    cases[i].what, bad, FY, fx, fy, lit);
+                            ok = 0;
+                        }
+                    }
+                }
+            }
+        }
+        s_scaling = scaling0;
+        sdl3vk_set_record_upscale_pass(NULL);
+        sr_videorec_test_reset();
+        (void)wait_all_present_frames();
+        s_rec_state = -1;
+        s_rec_w = s_rec_h = 0;
+        rec_image_free(&s_rec_target);
+        rec_image_free(&s_rec_pre);
+        cap_free_buffer(&ref);
+        cap_test_image_destroy(&src);
+        fsr1_destroy(ref_fsr);
+        fsr1_destroy(s_test_rec_fsr);
+        s_test_rec_fsr = NULL;
+        free(fsr_pic);
+        free(plain_pic);
+        free(case_pic);
+        free(sharp_pic);
+        {
+            static const char *const files[] = { "record.json", "record.json.tmp", "video.bgr0",
+                                                 "audio.wav", "frames.csv", "logic.srt" };
+            char p[96];
+            for (size_t i = 0; i < sizeof files / sizeof files[0]; i++) {
+                snprintf(p, sizeof p, "%s/%s", dir, files[i]);
+                remove(p);
+            }
+            (void)cap_test_rmdir(dir);
+        }
+        if (ok) printf("gpu capture selftest: FSR 1 recording OK (%dx%d to %dx%d, equals the "
+                       "pass's output, differs from nearest; %u sizes and modes named by their "
+                       "blits)\n", PSP_W, PSP_H, RW, RH, 10u);
+    }
+#else
+    fprintf(stderr, "record upscale: built without SR_VIDEOREC_SELFTEST, so the recording cell "
+                    "cannot run\n");
+    ok = 0;
+#endif
 
     /* ---- pause overlay (#1159): shown, repeated without an upload, never captured ------ */
     {
@@ -1768,6 +2628,9 @@ static int sdl3vk_capture_selftest_body(void) {
         }
         s_quit_requested = 0;
     }
+
+    if (!sdl3vk_present_pacing_selftest()) ok = 0;
+    if (!sdl3vk_present_completed_selftest()) ok = 0;
 
     int errors = sdl3vk_validation_error_count();
     if (errors != 0) {

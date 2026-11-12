@@ -327,6 +327,7 @@ class PowerRegistrationOwnershipTests(unittest.TestCase):
         0xB4432BC8, 0x8EFB3FA2, 0x843FBF43,                                      # charging status, battery life time, CPU clock setter (PSP-3000 6.61, 2026-10-24)
         0xB8D7B3FB,                                                              # scePowerSetBusClockFrequency (pspautotests power/freq.expected)
         0x469989AD, 0xA85880D0,                                                  # scePowerSetClockFrequency630 (PPSSPP c9e2afb6), WLAN coexistence clock (#307)
+        0x23C31FFE, 0xFA97A599, 0xB3EDD801,                                      # scePowerVolatileMem Lock/TryLock/Unlock aliases (pspautotests power/volatile, #341)
     })
 
     def test_power_registrations_are_owned_by_hle_power_c(self) -> None:
@@ -461,7 +462,7 @@ class RegistrationSubsystemTests(unittest.TestCase):
 
     def test_the_longest_prefix_decides(self) -> None:
         self.assertEqual(hle_manifest.subsystem_for("sceAudioChReserve"), "audio")
-        self.assertEqual(hle_manifest.subsystem_for("sceAudiocodecDecode"), "audio_codec")
+        self.assertEqual(hle_manifest.subsystem_for("sceAudiocodecDecode"), "videocodec")
         self.assertEqual(hle_manifest.subsystem_for("sceKernelPowerLock"), "power")
         self.assertEqual(hle_manifest.subsystem_for("sceKernelLockLwMutexCB"), "kernel_sync")
         self.assertEqual(hle_manifest.subsystem_for("_sceKernelLockLwMutex"), "kernel_sync")
@@ -760,7 +761,10 @@ class LiveManifestTests(unittest.TestCase):
                 self.assertEqual(registration["handler"], handler)
                 self.assertEqual(registration["classification"], "dedicated")
                 self.assertEqual(registration["status"], "partial")
-        self.assertIn("project choice", meta.HANDLER_LIMITATIONS["h_UmdUnRegisterUMDCallBack"])
+        # #341: the unregister codes now follow pspautotests tests/umd/register.expected.
+        self.assertTrue(any(
+            "tests/umd/register.expected" in item for item in meta.HANDLER_EVIDENCE["h_UmdUnRegisterUMDCallBack"]
+        ))
 
     def test_findings_and_waivers_are_in_exact_balance(self) -> None:
         findings = [{**f, "nid": int(f["nid"], 16)} for f in self.manifest["findings"]]
@@ -793,9 +797,13 @@ class LiveManifestTests(unittest.TestCase):
                 self.assertEqual(registration["classification"], "dedicated")
                 self.assertEqual(registration["status"], "partial")
                 self.assertTrue(meta.HANDLER_EVIDENCE[handler])
-                self.assertTrue(
-                    all("HARDWARE_ORACLE.md" in item for item in meta.HANDLER_EVIDENCE[handler])
-                )
+                evidence = meta.HANDLER_EVIDENCE[handler]
+                self.assertTrue(any("HARDWARE_ORACLE.md" in item for item in evidence))
+                # A later #341 batch may add the PSPAutotests cell and the selftest that pins it.
+                self.assertTrue(all(
+                    "HARDWARE_ORACLE.md" in item or item.startswith(("PSPAutotests ", "tests/native/"))
+                    for item in evidence
+                ))
                 self.assertTrue(meta.HANDLER_LIMITATIONS[handler])
 
     def test_route_a_kernel_object_batch_three_has_evidence_and_named_limits(self) -> None:
@@ -847,9 +855,13 @@ class LiveManifestTests(unittest.TestCase):
                 self.assertEqual(registration["classification"], "dedicated")
                 self.assertEqual(registration["status"], "partial")
                 self.assertTrue(meta.HANDLER_EVIDENCE[handler])
-                self.assertTrue(
-                    all("HARDWARE_ORACLE.md" in item for item in meta.HANDLER_EVIDENCE[handler])
-                )
+                evidence = meta.HANDLER_EVIDENCE[handler]
+                self.assertTrue(any("HARDWARE_ORACLE.md" in item for item in evidence))
+                # A later #341 batch may add the PSPAutotests cell and the selftest that pins it.
+                self.assertTrue(all(
+                    "HARDWARE_ORACLE.md" in item or item.startswith(("PSPAutotests ", "tests/native/"))
+                    for item in evidence
+                ))
                 self.assertTrue(meta.HANDLER_LIMITATIONS[handler])
                 if handler == "h_ExitDeleteThread":
                     self.assertIn("PSP-TEARDOWN-001", meta.HANDLER_LIMITATIONS[handler])
@@ -941,7 +953,11 @@ class LiveManifestTests(unittest.TestCase):
                     "docs/HARDWARE_ORACLE.md (PSP-IO-001: io-lseek and io-append)",
                     "docs/HARDWARE_ORACLE.md (PSP-KERNEL-SEM-001: io-seek64, io-seek64-rdwr)",
                     "docs/HARDWARE_ORACLE.md (PSP-IO-EOF-001: io-eof-seek-negative, io-eof-seek-negative-rdonly, io-eof-write-past, io-eof-read-past)",
+                    "docs/HARDWARE_ORACLE.md (PSP-HLE-IO-SEEK-001: io-seek-flash-*)",
+                    "docs/HARDWARE_ORACLE.md (PSP-IO-EOF-002: umd-eof-raw-seek-past)",
+                    "tests/native/hle_thread_selftest.c:test_flash0_font_device",
                     "tests/native/hle_thread_selftest.c:test_umd_block_device_sectors",
+                    "tests/native/hle_thread_selftest.c:test_io_memory_stick_cells_through_syscall",
                 ],
             ),
             0x109F50BC: (
@@ -951,7 +967,9 @@ class LiveManifestTests(unittest.TestCase):
                     "docs/HARDWARE_ORACLE.md (PSP-UMDIO-001: io-open-0000..0012)",
                     "docs/HARDWARE_ORACLE.md (PSP-KERNEL-SEM-001: io-missing-parent, io-excl-new, io-excl-existing)",
                     "docs/HARDWARE_ORACLE.md (PSP-IO-EOF-001: io-eof-missing)",
+                    "docs/HARDWARE_ORACLE.md (PSP-HLE-IO-SEEK-001: io-seek-ms-*)",
                     "tests/native/hle_thread_selftest.c:test_ms0_unified_namespace",
+                    "tests/native/hle_thread_selftest.c:test_io_memory_stick_cells_through_syscall",
                 ],
             ),
         }
@@ -997,13 +1015,16 @@ class LiveManifestTests(unittest.TestCase):
                     "docs/HARDWARE_ORACLE.md (PSP-IO-001: io-read-verify and io-errors)",
                     "tests/native/hle_thread_selftest.c:test_ms0_unified_namespace",
                     "tests/native/hle_thread_selftest.c:test_umd_block_device_sectors",
+                    "tests/native/hle_thread_selftest.c:test_umd_read_parks_its_thread_for_the_drives_time",
                 ],
             ),
             0x42EC03AC: (
                 "h_IoWrite",
                 [
                     "docs/HARDWARE_ORACLE.md (PSP-IO-001: io-write and io-append)",
+                    "docs/HARDWARE_ORACLE.md (PSP-HLE-IO-SEEK-001: io-seek-ms-*)",
                     "tests/native/hle_thread_selftest.c:test_ms0_unified_namespace",
+                    "tests/native/hle_thread_selftest.c:test_io_memory_stick_cells_through_syscall",
                 ],
             ),
         }
@@ -1145,7 +1166,8 @@ class LiveManifestTests(unittest.TestCase):
         """Check batch 9's `(PSP-IO-001|PSP-UMDIO-001: io-... cells)` citations.
 
 Scoped to the four IoFileMgr handlers of batch 9 on purpose: the grammar is
-`(<oracle id>: <io- cell names or io-x-NNNN..NNNN ranges>)`, and the ids come
+`(<oracle id>: <io- cell names, io-x-NNNN..NNNN ranges or a cell glob such as
+io-x-* that the oracle row lists itself>)`, and the ids come
 from `tools/psp_oracle/manifest.json`. Any citation naming a PSP id that does
 not parse in that shape fails instead of being skipped. Other handlers' older
 citations (PSP-B1-01, no-colon forms) need their own check.
@@ -1166,7 +1188,7 @@ citations (PSP-B1-01, no-colon forms) need their own check.
             for prefix, first, last in re.findall(r"(io-[a-z]+-)(\d{4})\.\.(\d{4})", cells_text):
                 cited.update(f"{prefix}{n:04d}" for n in range(int(first), int(last) + 1))
             cells_text = re.sub(r"io-[a-z]+-\d{4}\.\.\d{4}", "", cells_text)
-            cited.update(re.findall(r"io-[a-z0-9]+(?:-[a-z0-9]+)*", cells_text))
+            cited.update(re.findall(r"io-[a-z0-9]+(?:-[a-z0-9]+)*(?:-\*)?", cells_text))
             self.assertTrue(cited, citation)
             self.assertLessEqual(cited, cells_by_id[oracle_id], citation)
 
@@ -1416,19 +1438,15 @@ static uint32_t h_SynthReal(CpuState *s) {
                 "0x50647530": ("sceNetFreeThreadinfo", "0x80010086"),
                 "0xcc393e48": ("sceNetGetMallocStat", "0x80010086"),
                 "0xf7d13214": ("sceNetAdhocDiscoverStop", "0x80010086"),
-                "0x29681260": ("sceAudiocodecReleaseEDRAM", "0x80010086"),
                 "0x011f03c1": ("sceRtcGetAccumulativeTime", "0x80020002"),
                 "0x191cdeff": ("sceSslEnd", "0x80010086"),
                 "0x5963991b": ("sceNetApctlDelHandler", "0x80010086"),
                 "0xf9d8eb63": ("sceHttpsEnd", "0x80010086"),
-                "0x3a20a200": ("sceAudiocodecGetEDRAM", "0x80010086"),
                 "0x3eaba285": ("sceHttpAddExtraHeader", "0x80010086"),
-                "0x5b37eb1d": ("sceAudiocodecInit", "0x80010086"),
                 "0x438a385a": ("sceGeSaveContext", "0x80020002"),
                 "0x0bf608fb": ("sceGeRestoreContext", "0x80020002"),
                 "0x08d98894": ("sceNpDrmEdataSetupKey", "0x80020002"),
                 "0xf9275d98": ("sceKernelLoadModuleBufferUsbWlan", "0x80020002"),
-                "0x70a703f8": ("sceAudiocodecDecode", "0x80010086"),
                 "0x72189c48": ("sceImposeSetUMDPopup", "0x80010086"),
                 "0x7ed59bc4": ("sceDisplaySetHoldMode", "0x80020002"),
                 "0x8c943191": ("sceImposeGetBatteryIconStatus", "0x80010086"),
@@ -1783,6 +1801,34 @@ class EvidenceTierTests(unittest.TestCase):
                         "tests": [{"id": "PSP-UNKNOWN-001", "hardware_evidence": evidence}],
                     })
 
+    def test_dmac_note_does_not_call_measured_tier_b_cells_unrun_or_uncited(self) -> None:
+        document = json.loads(hle_manifest.PSP_ORACLE_MANIFEST.read_text(encoding="utf-8"))
+        row = next(test for test in document["tests"] if test["id"] == "PSP-DMAC-001")
+        note = row["measurement_note"]
+        self.assertNotIn("Tier B owned-overrun controls are built but hardware NOT_RUN", note)
+        self.assertNotIn("B1-B4 subcells remain uncited", note)
+        self.assertIn("sixteen Tier B cells", note)
+        self.assertIn("2026-11-06 PSP-3000 runs", note)
+        self.assertIn("Tier E", note)
+        self.assertIn("measured Tier B cells", row["invariant"])
+
+    def test_clut_mip_marks_t32_and_the_mask_order_unmeasured(self) -> None:
+        """#2031 acceptance: the ge-clut-mip cells draw no T32 texture and mask no index at or
+        above the per-level offset, so the manifest and the oracle doc name both unmeasured."""
+        document = json.loads(hle_manifest.PSP_ORACLE_MANIFEST.read_text(encoding="utf-8"))
+        row = next(test for test in document["tests"] if test["id"] == "PSP-GE-MIP-002")
+        self.assertIn("Unmeasured: T32 textures, and whether the per-level offset is added before "
+                      "or after the index mask", row["measurement_note"])
+        self.assertNotIn("t32-", " ".join(row["case_ids"]))
+        doc = (Path(__file__).resolve().parents[1] / "docs" / "HARDWARE_ORACLE.md").read_text(
+            encoding="utf-8")
+        table_row = next(line for line in doc.splitlines() if line.startswith("  | `PSP-GE-MIP-002` |"))
+        not_cited = table_row.split(" | ")[3]
+        self.assertIn("T32 textures", not_cited)
+        self.assertIn("whether the per-level offset comes before or after the index mask", not_cited)
+        self.assertIn("  - *Unmeasured:* T32 textures, and whether the per-level offset is added before or "
+                      "after the index mask\n", doc)
+
     @staticmethod
     def _measured_row(**overrides) -> dict:
         """A MEASURED row citing a committed section that really names its case."""
@@ -1916,23 +1962,30 @@ class EvidenceTierTests(unittest.TestCase):
                 "PSP-DISPLAY-002", "PSP-DISPLAY-003", "PSP-DISPLAY-004", "PSP-DMAC-001",
                 "PSP-DMAC-002",
                 "PSP-EXCEPTION-001", "PSP-FPU-001", "PSP-FPU-CC-001", "PSP-GE-001",
-                "PSP-GE-CONTROL-001", "PSP-GE-MIP-001", "PSP-GE-OVERLAP-001", "PSP-GE-RASTER-001",
+                "PSP-GE-CONTROL-001", "PSP-GE-LIGHT-001", "PSP-GE-MIP-001", "PSP-GE-MIP-002",
+                "PSP-GE-OVERLAP-001", "PSP-GE-RASTER-001", "PSP-GE-RTT-001",
                 "PSP-GE-SAMPLE-001",
-                "PSP-GE-SYNC-001", "PSP-GE-TIMING-001",
-                "PSP-HLE-AUDIO-SRC-001",
+                "PSP-GE-SYNC-001", "PSP-GE-THROUGHZ-001", "PSP-GE-TIMING-001", "PSP-GE-WEIGHT-001",
+                "PSP-HLE-AUDIO-REST-001", "PSP-HLE-AUDIO-SRC-001",
                 "PSP-HLE-CTRL-LATCH-001",
-                "PSP-HLE-GE-EDRAM-001", "PSP-HLE-HPRM-001", "PSP-HLE-INTR-001",
-                "PSP-HLE-KERNEL-STATUS-001",
+                "PSP-HLE-GE-EDRAM-001", "PSP-HLE-HPRM-001", "PSP-HLE-INTR-001", "PSP-HLE-IO-SEEK-001",
+                "PSP-HLE-IO-SEEK-002", "PSP-HLE-ISSUES-001",
+                "PSP-HLE-KERNEL-STATUS-001", "PSP-HLE-KERNEL-STATUS-002", "PSP-HLE-NICKNAME-001",
                 "PSP-HLE-POWER-001", "PSP-HLE-POWER-002", "PSP-HLE-SAVEDATA-GETSIZE-001",
-                "PSP-HLE-SYSPARAM-001",
+                "PSP-HLE-SELFSTOP-001", "PSP-HLE-STDIO-001", "PSP-HLE-SYSPARAM-001",
                 "PSP-HLE-TIMER-ORDER-001", "PSP-HLE-UTILITY-NONE-001", "PSP-HLE-VTIMER-001", "PSP-HLE-VTIMER-002",
                 "PSP-HLE-VTIMER-003", "PSP-INTR-CAUSE-001", "PSP-IO-001", "PSP-IO-EOF-001", "PSP-IO-EOF-002", "PSP-KERNEL-001",
                 "PSP-KERNEL-002", "PSP-KERNEL-MISC-001", "PSP-KERNEL-SEM-001", "PSP-KERNEL-STATUS-001",
                 "PSP-LLSC-001",
-                "PSP-MODULE-START-001", "PSP-MUTEX-001", "PSP-REGISTRY-001", "PSP-SMOKE-001", "PSP-SYSTEM-001",
+                "PSP-MODULE-START-001", "PSP-MUTEX-001", "PSP-REGISTRY-001", "PSP-SAS-003",
+                "PSP-SMOKE-001", "PSP-SYSTEM-001",
                 "PSP-THREAD-003", "PSP-THREAD-EXIT-001", "PSP-TRACE-001", "PSP-TRANSPORT-001",
-                "PSP-UMDIO-001", "PSP-VFPU-CMP-001", "PSP-VFPU-FORMS-001",
-                "PSP-VFPU-FORMS2-001", "PSP-VFPU-FUNNEL-001", "PSP-VFPU-SORT-001", "PSP-VFPU-TRANSCENDENTAL-001", "PSP-VRAM-MIRROR-001", "PSP-WAIT-001",
+                "PSP-UMDIO-001", "PSP-VFPU-BASICARITH-001", "PSP-VFPU-CCCMOV-001", "PSP-VFPU-CMP-001",
+                "PSP-VFPU-CONSTANTS-001", "PSP-VFPU-CONVERT-001", "PSP-VFPU-FORMS-001",
+                "PSP-VFPU-FORMS2-001", "PSP-VFPU-FUNNEL-001", "PSP-VFPU-MFVMTV-001", "PSP-VFPU-PREFIX-001",
+                "PSP-VFPU-QUADWB-001", "PSP-VFPU-RESERVED-001", "PSP-VFPU-ROUNDSEP-001", "PSP-VFPU-SORT-001",
+                "PSP-VFPU-TRANSCENDENTAL-001", "PSP-VFPU-UNMODELED-001", "PSP-VFPU-VUS2I-001", "PSP-VFPU-WIDEDOT-001",
+                "PSP-VFPU-WIDEROPS-001", "PSP-VRAM-MIRROR-001", "PSP-WAIT-001",
             ],
         )
         self.assertIn("sceDmacTryMemcpy", promoted)
@@ -2192,6 +2245,10 @@ class ModuleBucketTests(unittest.TestCase):
     def test_newlib_and_unknown_shapes_are_named_not_guessed(self) -> None:
         self.assertEqual(hle_manifest.derive_module("newlibModuleStreamWrite"), "newlib")
         self.assertEqual(hle_manifest.derive_module("SomethingElse"), "other")
+        # sceMpegBase* calls belong to the sceMpegbase library, not sceMpeg (#286).
+        self.assertEqual(hle_manifest.derive_module("sceMpegBaseCscAvc"), "sceMpegbase")
+        self.assertEqual(hle_manifest.derive_module("sceMpegbase_0530BE4E"), "sceMpegbase")
+        self.assertEqual(hle_manifest.derive_module("sceMpegCreate"), "sceMpeg")
 
 
 class TriageTests(unittest.TestCase):
@@ -2551,9 +2608,9 @@ class CensusTests(unittest.TestCase):
             self.assertIn("has no named limitation", str(ctx.exception))
 
     def test_new_partial_without_evidence_is_rejected(self) -> None:
-        self.assertNotIn("h_DisplayGetFrameBuf", meta.HANDLER_EVIDENCE)
-        with mock.patch.dict(meta.HANDLER_STATUS, {"h_DisplayGetFrameBuf": "partial"}), \
-                mock.patch.dict(meta.HANDLER_LIMITATIONS, {"h_DisplayGetFrameBuf": "a limit (#341)"}):
+        self.assertNotIn("h_AllocateFplCB", meta.HANDLER_EVIDENCE)
+        with mock.patch.dict(meta.HANDLER_STATUS, {"h_AllocateFplCB": "partial"}), \
+                mock.patch.dict(meta.HANDLER_LIMITATIONS, {"h_AllocateFplCB": "a limit (#341)"}):
             with self.assertRaises(ManifestError) as ctx:
                 hle_manifest.validate_meta(self.raw_regs)
         self.assertIn("cites no evidence", str(ctx.exception))

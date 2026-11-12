@@ -45,11 +45,39 @@ from nk_core import (
 )
 
 _ISSUE_REFERENCE_RE = re.compile(r"#[0-9]+")
+# Any conversion after "#" formats an issue number into user-facing text.
+_ISSUE_FORMAT_RE = re.compile(r"#%")
+# The known-issue link is the one issue number the player shows. It comes from
+# the code table k_known_causes through player_known_issue_for_boundary
+# (player_state.c), and only these literals format it: the error screen's
+# sentence and link, and the problem report's line. Matched by file and exact
+# literal, so neither another file nor another wording is let through.
+_KNOWN_ISSUE_LITERALS = frozenset({
+    ("src/player/ui/scr_error.c", '"This is a known issue (#%u)."'),
+    ("src/player/ui/scr_error.c", '"View issue #%u on GitHub"'),
+    ("src/player/player_state.c", '"#%u"'),
+})
 # Character literals are tokens too: an unmatched '"' would otherwise open a
 # phantom string that swallows the code after it.
 _C_TOKEN_RE = re.compile(
     r"""//[^\r\n]*|/\*.*?\*/|'(?:\\.|[^'\\\n])*'|"(?:\\.|[^"\\])*\"""", re.DOTALL
 )
+
+
+def _issue_number_literal_failures(rel_path: str, source: str) -> list[str]:
+    """Each C string literal in source that shows an issue number, as path:line: literal."""
+    failures: list[str] = []
+    # The old renderer drew issue links from a code table; nothing draws them now.
+    if "draw_issue_links" in source:
+        failures.append(f"{rel_path}: draw_issue_links")
+    for match in _C_TOKEN_RE.finditer(source):
+        token = match.group()
+        if not token.startswith('"') or (rel_path, token) in _KNOWN_ISSUE_LITERALS:
+            continue
+        if _ISSUE_REFERENCE_RE.search(token) or _ISSUE_FORMAT_RE.search(token):
+            line = source.count("\n", 0, match.start()) + 1
+            failures.append(f"{rel_path}:{line}: {token}")
+    return failures
 
 
 def _python_non_docstring_literals(path: Path) -> list[tuple[int, str]]:
@@ -187,22 +215,47 @@ class NkCoreTests(unittest.TestCase):
     def tearDown(self) -> None:
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
+    def test_issue_number_guard_allows_only_the_known_issue_literals(self) -> None:
+        """The exception is the three known-issue literals, not a conversion letter."""
+        for rel, literal in sorted(_KNOWN_ISSUE_LITERALS):
+            with self.subTest(allowed=(rel, literal)):
+                self.assertEqual(_issue_number_literal_failures(rel, f"x = {literal};"), [])
+        rejected = [
+            ("src/player/ui/scr_error.c", '"see #%u"'),
+            ("src/player/ui/scr_error.c", '"#%lu"'),
+            ("src/player/ui/scr_error.c", '"#%x"'),
+            ("src/player/ui/scr_error.c", '"#%s"'),
+            ("src/player/ui/scr_error.c", '"#%d"'),
+            ("src/player/ui/scr_error.c", '"Issue #7"'),
+            ("src/player/ui/scr_library.c", '"This is a known issue (#%u)."'),
+            ("src/player/main.c", '"#%u"'),
+        ]
+        for rel, literal in rejected:
+            with self.subTest(rejected=(rel, literal)):
+                self.assertEqual(
+                    len(_issue_number_literal_failures(rel, f"x = {literal};")), 1
+                )
+        self.assertEqual(
+            _issue_number_literal_failures("src/player/x.c", "draw_issue_links();"),
+            ["src/player/x.c: draw_issue_links"],
+        )
+
     def test_user_facing_text_does_not_cite_issue_numbers(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
         failures: list[str] = []
         c_paths = [
             *sorted((repo_root / "src" / "player").glob("*.c")),
+            # The nk launcher draws every view (#2071): its screens are here.
+            *sorted((repo_root / "src" / "player" / "ui").glob("*.c")),
             repo_root / "src" / "core" / "nk_font.c",
             repo_root / "src" / "core" / "nk_launch.c",
             repo_root / "src" / "core" / "nk_title_manifest.c",
         ]
         for path in c_paths:
             source = path.read_text(encoding="utf-8")
-            for match in _C_TOKEN_RE.finditer(source):
-                token = match.group()
-                if token.startswith('"') and _ISSUE_REFERENCE_RE.search(token):
-                    line = source.count("\n", 0, match.start()) + 1
-                    failures.append(f"{path.relative_to(repo_root)}:{line}: {token}")
+            failures.extend(
+                _issue_number_literal_failures(path.relative_to(repo_root).as_posix(), source)
+            )
 
         python_paths = [
             repo_root / "tools" / "nk_cli.py",
@@ -217,11 +270,6 @@ class NkCoreTests(unittest.TestCase):
                         f"{path.relative_to(repo_root)}:{line}: {literal!r}"
                     )
 
-        renderer = (repo_root / "src" / "player" / "ui_renderer.c").read_text(
-            encoding="utf-8"
-        )
-        self.assertNotIn("draw_issue_links", renderer)
-        self.assertNotRegex(renderer, r'"#%[0-9]*[du]"')
         self.assertEqual(failures, [])
 
         summary = nk_cli._bringup_human_summary(
@@ -371,6 +419,27 @@ class NkCoreTests(unittest.TestCase):
             self.assertIn("--register-local-compatibility-record", cli_source[start:end])
         self.assertIn("write packages under the per-user data root", plan_source)
 
+    def test_iso_inspection_size_floor_is_the_first_directory_sector(self) -> None:
+        # A small disc image is an ISO, not "too small": the floor is the end of the primary
+        # volume descriptor sector, the same bound src/core/nk_iso.c uses, not 1 MiB. A homebrew
+        # EBOOT.PBP's private disc image is about 77 KiB (#2143). No PSPDEV is needed here.
+        from test_iso_parity import build_plain_mips_elf, create_test_iso_with_executables
+
+        full = self.temp_dir / "small.iso"
+        create_test_iso_with_executables(full, build_plain_mips_elf())
+        data = full.read_bytes()
+        self.assertGreater(len(data), 34816)
+
+        small = self.temp_dir / "small-77k.iso"
+        small.write_bytes(data[: 77 * 1024])
+        inspect_iso(small)  # no IsoInspectionError
+
+        below = self.temp_dir / "below-floor.iso"
+        below.write_bytes(data[:34815])
+        with self.assertRaises(IsoInspectionError) as caught:
+            inspect_iso(below)
+        self.assertIn("too small", str(caught.exception))
+
     def test_iso_inspection_malformed(self) -> None:
         # File too small
         tiny_file = self.temp_dir / "tiny.iso"
@@ -469,6 +538,59 @@ class NkCoreTests(unittest.TestCase):
         self.assertIn("INSPECTING_ISO", stages)
         self.assertIn("READY", stages)
 
+    def test_package_build_applies_the_executable_build_to_the_titles_bindings(self) -> None:
+        """A build the manifest marks known-bad stops the build, and an unlisted build is built
+        without the title's runtime_bindings (#2140)."""
+        import hashlib
+
+        from test_iso_parity import build_plain_mips_elf, create_test_iso_with_executables
+
+        elf = build_plain_mips_elf()
+        iso_file = self.temp_dir / "bound.iso"
+        create_test_iso_with_executables(iso_file, elf, disc_id="UCUS98701")
+        manifest = title_manifest.validate_manifest(
+            json.loads(
+                (Path(__file__).resolve().parent.parent / "assets" / "titles" / "hst-ucus98701.json")
+                .read_text(encoding="utf-8")
+            )
+        )
+        self.assertIn("runtime_bindings", manifest)
+        digest = hashlib.sha256(elf).hexdigest()
+
+        def with_builds(*builds: dict) -> dict:
+            copy = json.loads(json.dumps(manifest))
+            copy["disc"]["builds"] = list(builds)
+            return dict(title_manifest.validate_manifest(copy))
+
+        class Reporter:
+            def __init__(self) -> None:
+                self.events: list[tuple[str, str, str]] = []
+
+            def report(self, stage: str, status: str, message: str, *args, **kwargs) -> None:
+                self.events.append((stage, status, message))
+
+        listed = {"executable_sha256": digest, "status": "supported", "label": "DISC_VERSION 1.00"}
+        reporter = Reporter()
+        kept = nk_cli._apply_executable_build(iso_file, "EBOOT.BIN", with_builds(listed), reporter)
+        self.assertIn("runtime_bindings", kept)
+        self.assertEqual(reporter.events, [])
+
+        untracked = nk_cli._apply_executable_build(iso_file, "EBOOT.BIN", manifest, reporter)
+        self.assertIn("runtime_bindings", untracked)
+
+        other = {"executable_sha256": "1" * 64, "status": "supported", "label": "DISC_VERSION 1.01"}
+        unbound = nk_cli._apply_executable_build(iso_file, "EBOOT.BIN", with_builds(other), reporter)
+        self.assertNotIn("runtime_bindings", unbound)
+        self.assertEqual(unbound["disc"]["builds"][0]["label"], "DISC_VERSION 1.01")
+        self.assertEqual(reporter.events[0][:2], ("preflight", "WARN"))
+        self.assertIn("not applied", reporter.events[0][2])
+        self.assertIn("DISC_VERSION 1.01", reporter.events[0][2])
+
+        bad = dict(listed, status="known-bad", reason="A patched executable; its addresses differ.")
+        with self.assertRaises(nk_cli.PackageBuildError) as raised:
+            nk_cli._apply_executable_build(iso_file, "EBOOT.BIN", with_builds(bad), reporter)
+        self.assertIn("addresses differ", str(raised.exception))
+
     def test_preparation_names_a_pbp_package_boundary(self) -> None:
         """A PBP package reaches the caller as a named boundary, not PREPARATION_FAILED."""
         from test_iso_parity import build_pbp_package
@@ -498,6 +620,89 @@ class NkCoreTests(unittest.TestCase):
         with result.manifest_path.open("r", encoding="utf-8") as stream:
             manifest = json.load(stream)
         self.assertEqual(manifest["boot_executable"], "EBOOT.BIN")
+
+    def _registry_with_builds(self, elf: bytes, statuses: dict[str, str]) -> TitleRegistry:
+        """The synthetic title with a build list; ``statuses`` maps a label to a status for ``elf``'s digest."""
+        import dataclasses
+        import hashlib
+
+        registry = TitleRegistry(include_defaults=True)
+        base = registry.lookup_by_disc_id("TEST00001")
+        digest = hashlib.sha256(elf).hexdigest()
+        builds = []
+        for index, (label, status) in enumerate(statuses.items()):
+            entry = {
+                "executable_sha256": digest if index == 0 else f"{index:064x}",
+                "status": status,
+                "label": label,
+            }
+            if status == "known-bad":
+                entry["reason"] = "A patched executable; the recorded addresses differ."
+            builds.append(entry)
+        registry.register(dataclasses.replace(base, builds=tuple(builds)), allow_override=True)
+        return registry
+
+    def _prepare_with_elf(self, registry: TitleRegistry, elf: bytes):
+        from test_iso_parity import create_test_iso_with_executables
+
+        iso_file = self.temp_dir / "build-identity.iso"
+        create_test_iso_with_executables(iso_file, elf, disc_id="TEST00001")
+        events: list[ProgressEvent] = []
+        result = PreparationEngine(base_dir=self.temp_dir, registry=registry).prepare_game(
+            iso_file, on_progress=events.append, destination_root=self.temp_dir / "installed_games"
+        )
+        return result, events
+
+    def test_build_identity_records_a_listed_supported_build(self) -> None:
+        from test_iso_parity import build_plain_mips_elf
+
+        elf = build_plain_mips_elf()
+        registry = self._registry_with_builds(elf, {"DISC_VERSION 1.00": "supported"})
+        result, _events = self._prepare_with_elf(registry, elf)
+        self.assertTrue(result.success, result.error_message)
+        self.assertEqual(result.build["status"], "supported")
+        self.assertEqual(result.build["label"], "DISC_VERSION 1.00")
+        self.assertTrue(result.build["bindings_applied"])
+        record = json.loads((result.prepared_root / "build.json").read_text(encoding="utf-8"))
+        self.assertEqual(record, result.build)
+        self.assertEqual(record["executable"], "EBOOT.BIN")
+        self.assertRegex(record["executable_sha256"], r"^[0-9a-f]{64}$")
+
+    def test_build_identity_imports_an_unlisted_build_as_experimental(self) -> None:
+        from test_iso_parity import build_plain_mips_elf
+
+        listed = build_plain_mips_elf()
+        registry = self._registry_with_builds(listed, {"DISC_VERSION 1.00": "supported"})
+        other = listed + b"\x00" * 16  # a different executable under the same disc ID
+        result, events = self._prepare_with_elf(registry, other)
+        self.assertTrue(result.success, result.error_message)
+        self.assertEqual(result.build["status"], "unlisted")
+        self.assertFalse(result.build["bindings_applied"])
+        self.assertEqual(result.build["supported_builds"], ["DISC_VERSION 1.00"])
+        warnings = [e.message for e in events if e.severity.value == "WARN"]
+        self.assertTrue(any("not applied" in m and "DISC_VERSION 1.00" in m for m in warnings), warnings)
+        record = json.loads((result.prepared_root / "build.json").read_text(encoding="utf-8"))
+        self.assertFalse(record["bindings_applied"])
+
+    def test_build_identity_refuses_a_known_bad_build_before_writing_anything(self) -> None:
+        from test_iso_parity import build_plain_mips_elf
+
+        elf = build_plain_mips_elf()
+        registry = self._registry_with_builds(elf, {"patched copy": "known-bad"})
+        result, _events = self._prepare_with_elf(registry, elf)
+        self.assertFalse(result.success)
+        self.assertEqual(result.error_code, "BUILD_KNOWN_BAD")
+        self.assertIn("patched copy", result.error_message)
+        self.assertIn("addresses differ", result.error_message)
+        self.assertFalse((self.temp_dir / "installed_games").exists())
+
+    def test_build_identity_leaves_a_title_without_builds_untracked(self) -> None:
+        from test_iso_parity import build_plain_mips_elf
+
+        result, _events = self._prepare_with_elf(TitleRegistry(include_defaults=True), build_plain_mips_elf())
+        self.assertTrue(result.success, result.error_message)
+        self.assertEqual(result.build["status"], "untracked")
+        self.assertTrue(result.build["bindings_applied"])
 
     def test_preparation_preserves_compatible_revision_identity(self) -> None:
         """A disc matched through a compatible revision keeps its own identity.
@@ -1516,6 +1721,7 @@ int main(int argc, char **argv) {
         harness_c.write_text(cls.HARNESS_C, encoding="utf-8", newline="\n")
         out = class_temp / ("parity_harness.exe" if sys.platform == "win32" else "parity_harness")
         core_srcs = [
+            REPO_ROOT / "src" / "core" / "nk_shared_helpers.c",
             REPO_ROOT / "src" / "core" / "nk_iso.c",
             REPO_ROOT / "src" / "core" / "nk_library.c",
             REPO_ROOT / "src" / "core" / "nk_launch.c",
@@ -1813,6 +2019,7 @@ int main(int argc, char **argv) {
                 "-I", str(REPO_ROOT / "src" / "core"),
                 "-I", str(REPO_ROOT / "src" / "core" / "generated"),
                 str(harness_c),
+                str(REPO_ROOT / "src" / "core" / "nk_shared_helpers.c"),
                 str(REPO_ROOT / "src" / "core" / "nk_iso.c"),
                 str(REPO_ROOT / "src" / "core" / "nk_library.c"),
                 str(src_dir / "nk_launch.c"),
@@ -2029,6 +2236,7 @@ class GenericLauncherReintroductionGateTests(unittest.TestCase):
         )
         out = self.temp_dir / ("mutant.exe" if sys.platform == "win32" else "mutant")
         core_srcs = [
+            REPO_ROOT / "src" / "core" / "nk_shared_helpers.c",
             REPO_ROOT / "src" / "core" / "nk_iso.c",
             REPO_ROOT / "src" / "core" / "nk_library.c",
             mutant_c,
@@ -2531,7 +2739,8 @@ int main(int argc, char **argv) {
         platform_src = core / ("nk_platform_win32.c" if sys.platform == "win32" else "nk_platform_posix.c")
         build = subprocess.run(
             [gcc, "-std=c99", "-Wall", "-Wextra", "-I", str(core), str(harness_c),
-             str(core / "nk_library.c"), str(core / "nk_json.c"), str(platform_src),
+             str(core / "nk_shared_helpers.c"), str(core / "nk_library.c"),
+             str(core / "nk_json.c"), str(platform_src),
              *(["-lshell32", "-lole32", "-luuid"] if sys.platform == "win32" else []),
              "-o", str(exe)],
             capture_output=True, text=True,

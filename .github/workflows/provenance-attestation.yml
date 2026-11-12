@@ -1,16 +1,33 @@
 name: Trusted provenance attestation
+# The head this run attests is in its title. A workflow_run or dispatched run is
+# listed under the default branch, not under the pull request head, so the CI
+# verdict (tools/ci_trust_verdict.py, producer_runs) finds it by this title and
+# accepts it only when it ran the default branch's current copy of this file.
+# The attest job fails unless it attested exactly that head. The candidate jobs
+# keep the plain name. One quoted line, as in codeql.yml.
+run-name: "${{ (github.event_name == 'pull_request_target' && format('Provenance attestation of {0}', github.event.pull_request.head.sha)) || (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request' && format('Provenance attestation of {0}', github.event.workflow_run.head_sha)) || (github.event_name == 'workflow_dispatch' && inputs.pull_request_number != '' && format('Provenance attestation of {0}', inputs.head_sha)) || 'Trusted provenance attestation' }}"
 
 # The merge-path provenance gate.
 #
-# Why pull_request_target and not pull_request: for a `pull_request` event the
-# workflow definition comes from the pull request itself, so a candidate could
-# keep the required check's name and replace its body with `exit 0`. A
-# `pull_request_target` workflow is always the base branch's copy, which is the
-# whole point -- the verifier, its inputs, and this file are all controlled from
-# trusted main while the candidate is treated purely as data.
+# Why not pull_request: for a `pull_request` event the workflow definition comes
+# from the pull request itself, so a candidate could keep the required check's
+# name and replace its body with `exit 0`. Each route below runs a copy the
+# candidate does not control -- the verifier, its inputs, and this file all come
+# from trusted main while the candidate is treated purely as data:
 #
-# pull_request_target hands secrets to the job, so every line below is written
-# on the assumption that the pull request author is hostile:
+#   * pull_request_target: the base branch's copy. GitHub blocks this event by
+#     default in public repositories from 2026-12-02, so the gate must not
+#     depend on it;
+#   * workflow_run, when a CI run is requested for a pull request: always the
+#     default branch's copy. The event names only that run's head SHA; the job
+#     asks GitHub for the one open pull request into the default branch at
+#     exactly that head;
+#   * workflow_dispatch naming a pull request and its head, to attest again
+#     after an admission: the copy at the dispatched ref, which the verdict
+#     accepts only when it is the default branch's current copy.
+#
+# Every route hands secrets to the job, so every line below is written on the
+# assumption that the pull request author is hostile:
 #
 #   * the checkout is pinned to the repository's DEFAULT BRANCH, never to
 #     `base.ref`. A pull request author chooses its own base, so checking out
@@ -23,12 +40,14 @@ name: Trusted provenance attestation
 #     bytes -- no .gitattributes filter, smudge driver, submodule recursion or
 #     checkout hook can run;
 #   * no pull request title, body, or branch name is referenced anywhere. The
-#     only event data used is the PR number and head SHA, both passed through
-#     `env:` and quoted, never interpolated into a script body;
+#     only event data used is the PR number, the head and base SHAs, the
+#     triggering run's event name and head SHA, and the dispatch inputs. Each
+#     is passed through `env:` and quoted, never interpolated into a script
+#     body, and checked for its form before use;
 #   * third-party actions are pinned to immutable commit SHAs.
 #
-# The pull_request_target source-provenance job never uploads an artifact or
-# prints the trusted detailed ledger. The manual candidate-binary job below
+# The source-provenance job never uploads an artifact or prints the trusted
+# detailed ledger. The manual candidate-binary job below
 # has no secrets, runs only from main, uploads a workflow artifact (not a
 # release asset), and publishes build attestations for those exact files. Its
 # showcase demo PRXs come from the manual showcase_prx job, which has the same
@@ -37,15 +56,36 @@ name: Trusted provenance attestation
 on:
   pull_request_target:
     types: [opened, synchronize, reopened, ready_for_review]
+  # CI is requested for every pull request event that can carry a new head, and
+  # for a Draft/Ready transition (ci.yml). `requested` starts this run beside
+  # CI instead of after it. CI's push, schedule and merge-group runs also
+  # arrive here; the attest job skips them.
+  workflow_run:
+    workflows: ["CI"]
+    types: [requested]
   workflow_dispatch:
     inputs:
+      pull_request_number:
+        description: Attest a pull request again, by number. Give head_sha too and leave candidate_sha empty.
+        required: false
+        default: ""
+        type: string
+      head_sha:
+        description: Full 40-character SHA of that pull request's head; the run fails if the head has moved.
+        required: false
+        default: ""
+        type: string
       candidate_sha:
-        description: Full 40-character SHA of the frozen main candidate; must match this run.
-        required: true
+        description: Candidate binaries only. Full 40-character SHA of the frozen main candidate; must match this run.
+        required: false
+        default: ""
         type: string
 
 concurrency:
-  group: provenance-attestation-${{ github.event.pull_request.number || github.run_id }}
+  # One attestation per pull request (pull_request_target) or per head (the
+  # other routes); a newer one replaces it. A candidate-binary dispatch has
+  # neither and is never cancelled.
+  group: provenance-attestation-${{ github.event.pull_request.number || github.event.workflow_run.head_sha || inputs.head_sha || github.run_id }}
   cancel-in-progress: true
 
 permissions:
@@ -68,10 +108,21 @@ jobs:
     name: Trusted provenance attestation
     # Only the default branch is ruleset-protected, and only its content is
     # trusted. A pull request targeting any other branch gets no verdict rather
-    # than a verdict computed from a base the author may control.
-    if: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.base.ref == github.event.repository.default_branch }}
+    # than a verdict computed from a base the author may control: the
+    # pull_request_target route skips it here, and the other two routes fail in
+    # the first step, which finds no pull request into the default branch.
+    # A workflow_run of CI attests only when that CI run is a pull request's.
+    if: >-
+      ${{ (github.event_name == 'pull_request_target' &&
+           github.event.pull_request.base.ref == github.event.repository.default_branch) ||
+          (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request') ||
+          (github.event_name == 'workflow_dispatch' && inputs.pull_request_number != '') }}
     runs-on: ubuntu-26.04
     timeout-minutes: 10
+    # Read-only. pull-requests: read is for the lookup in the first step.
+    permissions:
+      contents: read
+      pull-requests: read
     steps:
       # The TRUSTED side: the default branch, which is also where this file and
       # the verifier came from. Not `base.ref` -- see the header.
@@ -79,9 +130,9 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.repository.default_branch }}
-          # Full history: the run is judged against the event's exact base SHA,
-          # which a depth-1 clone would not contain, and the ancestry check
-          # below needs real history rather than a graft.
+          # Full history: the run is judged against the merge base of the head
+          # with this branch, which a depth-1 clone would not contain, and the
+          # ancestry checks below need real history rather than a graft.
           fetch-depth: 0
           persist-credentials: false
 
@@ -90,28 +141,85 @@ jobs:
         with:
           python-version: "3.15.2"
 
+      # Which pull request, head and base this run attests. A pull_request_target
+      # event names all three. A workflow_run names only the head its CI run was
+      # requested for, and a dispatch is typed by a person, so for both the
+      # trusted checkout's resolver asks GitHub for the one open pull request
+      # into the default branch at exactly that head and takes the number and
+      # the base SHA from that answer. None, or more than one, fails the job:
+      # the verdict accepts a green job from a run titled for a head, so a run
+      # that resolved nothing must never end green. The values below are
+      # numbers and SHAs; none is a title, body or branch name.
+      - name: Resolve the pull request at the named head
+        id: target
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          EVENT_PR_NUMBER: ${{ github.event.pull_request.number }}
+          EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          EVENT_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          INPUT_PR_NUMBER: ${{ inputs.pull_request_number }}
+          INPUT_HEAD_SHA: ${{ inputs.head_sha }}
+        run: |
+          set -euo pipefail
+          resolve=(python tools/ci_trust_verdict.py --repository "${GITHUB_REPOSITORY}"
+                   --default-branch "${DEFAULT_BRANCH}" --attestation-target)
+          case "${EVENT_NAME}" in
+            pull_request_target)
+              case "${EVENT_PR_NUMBER}" in
+                ''|*[!0-9]*) echo "pull request number is not numeric" >&2; exit 1 ;;
+              esac
+              for value in "${EVENT_HEAD_SHA}" "${EVENT_BASE_SHA}"; do
+                [[ "${value}" =~ ^[0-9a-f]{40}$ ]] || { echo "sha malformed" >&2; exit 1; }
+              done
+              {
+                echo "number=${EVENT_PR_NUMBER}"
+                echo "head_sha=${EVENT_HEAD_SHA}"
+                echo "base_sha=${EVENT_BASE_SHA}"
+              } >> "${GITHUB_OUTPUT}"
+              ;;
+            workflow_run)
+              "${resolve[@]}" --head-sha "${RUN_HEAD_SHA}"
+              ;;
+            workflow_dispatch)
+              # The verdict accepts a dispatched attestation only from the default
+              # branch. Any other ref fails here, so nobody waits on an ignored run.
+              if [ "${GITHUB_REF}" != "refs/heads/${DEFAULT_BRANCH}" ]; then
+                echo "dispatch an attestation from ${DEFAULT_BRANCH}, not ${GITHUB_REF}" >&2
+                exit 1
+              fi
+              case "${INPUT_PR_NUMBER}" in
+                ''|0*|*[!0-9]*) echo "pull request number is not a plain positive number" >&2; exit 1 ;;
+              esac
+              "${resolve[@]}" --pull-request "${INPUT_PR_NUMBER}" --head-sha "${INPUT_HEAD_SHA}"
+              ;;
+            *)
+              echo "unsupported event ${EVENT_NAME}" >&2
+              exit 1
+              ;;
+          esac
+
       # Data only. refs/pull/N/head is served by the base repository for fork
       # and same-repository pull requests alike, so this needs no token and no
       # trust in the candidate's remote. The fetched tip must be exactly the
-      # head SHA the event named: if the head moved, this run is judging bytes
-      # that are no longer the ones being merged, and it fails closed rather
+      # head SHA the run was started for: if the head moved, this run is judging
+      # bytes that are no longer the ones being merged, and it fails closed rather
       # than producing a verdict that could be replayed onto different content.
       # codeql[actions/untrusted-checkout/critical]
       - name: Fetch the candidate objects without checking them out
         env:
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_NUMBER: ${{ steps.target.outputs.number }}
+          HEAD_SHA: ${{ steps.target.outputs.head_sha }}
+          BASE_SHA: ${{ steps.target.outputs.base_sha }}
         run: |
           set -euo pipefail
           case "${PR_NUMBER}" in
             ''|*[!0-9]*) echo "pull request number is not numeric" >&2; exit 1 ;;
           esac
           for value in "${HEAD_SHA}" "${BASE_SHA}"; do
-            case "${value}" in
-              [0-9a-f]*) [ "${#value}" -eq 40 ] || { echo "sha malformed" >&2; exit 1; } ;;
-              *) echo "sha malformed" >&2; exit 1 ;;
-            esac
+            [[ "${value}" =~ ^[0-9a-f]{40}$ ]] || { echo "sha malformed" >&2; exit 1; }
           done
           git fetch --no-tags --no-recurse-submodules --quiet \
             "https://github.com/${GITHUB_REPOSITORY}.git" \
@@ -129,7 +237,26 @@ jobs:
             exit 1
           fi
           echo "candidate head ${fetched} fetched as data only (never checked out)"
-          echo "base ${BASE_SHA} confirmed on the default branch"
+          echo "event base ${BASE_SHA} confirmed on the default branch"
+
+      # The verdict base is the merge base of the head with the default branch as it is now,
+      # as in provenance-attestation-merge-group.yml. The event's base SHA is the default
+      # branch's tip when the event fired; a pull request that is merely behind an admission
+      # would be judged as removing every path that admission added. Its fork point is the
+      # main commit its profile and controls were built against, and it is always on the
+      # trusted branch. The landing batch, whose base is the default branch itself, judges
+      # the combination.
+      - name: Resolve the verdict base
+        id: base
+        env:
+          HEAD_SHA: ${{ steps.target.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          [[ "${HEAD_SHA}" =~ ^[0-9a-f]{40}$ ]] || { echo "sha malformed" >&2; exit 1; }
+          base_sha="$(git merge-base "${HEAD_SHA}" HEAD)"
+          [[ "${base_sha}" =~ ^[0-9a-f]{40}$ ]] || { echo "base sha malformed" >&2; exit 1; }
+          echo "base_sha=${base_sha}" >> "${GITHUB_OUTPUT}"
+          echo "verdict base ${base_sha} (merge base of the head with the default branch)"
 
       # The private trusted authority. It lands outside GITHUB_WORKSPACE so it
       # is structurally outside the tree under verification, and the verifier
@@ -139,8 +266,8 @@ jobs:
         id: authority
         env:
           GH_TOKEN: ${{ secrets.PROVENANCE_AUTHORITY_TOKEN }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_SHA: ${{ steps.base.outputs.base_sha }}
+          HEAD_SHA: ${{ steps.target.outputs.head_sha }}
           TRUSTED_REPO: Jstar269/nakagawa-recomp-history-private
           TRUSTED_REF: main
           TRUSTED_LEDGER_PATH: docs/provenance/IMPLEMENTATION_PROVENANCE.json
@@ -157,10 +284,7 @@ jobs:
           # revision. Reading "main" and separately asking what "main" is leaves
           # a window in which the two answers describe different content.
           authority_sha="$(gh api "repos/${TRUSTED_REPO}/commits/${TRUSTED_REF}" --jq .sha)"
-          case "${authority_sha}" in
-            [0-9a-f]*) [ "${#authority_sha}" -eq 40 ] || { echo "authority sha malformed" >&2; exit 1; } ;;
-            *) echo "authority sha malformed" >&2; exit 1 ;;
-          esac
+          [[ "${authority_sha}" =~ ^[0-9a-f]{40}$ ]] || { echo "authority sha malformed" >&2; exit 1; }
           gh api \
             -H "Accept: application/vnd.github.raw" \
             "repos/${TRUSTED_REPO}/contents/${TRUSTED_LEDGER_PATH}?ref=${authority_sha}" \
@@ -293,7 +417,7 @@ jobs:
       # tree and policy, and the verify step checks that binding again.
       - name: Generate the trusted base public baseline from the authority
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BASE_SHA: ${{ steps.base.outputs.base_sha }}
         run: |
           set -euo pipefail
           mkdir -p "${RUNNER_TEMP}/trusted" "${RUNNER_TEMP}/baseline-scratch"
@@ -312,8 +436,8 @@ jobs:
 
       - name: Generate and verify ephemeral provenance controls
         env:
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ steps.target.outputs.head_sha }}
+          BASE_SHA: ${{ steps.base.outputs.base_sha }}
           AUTHORITY_SHA: ${{ steps.authority.outputs.authority_sha }}
           TRUSTED_CANDIDATE_POLICY: ${{ steps.authority.outputs.trusted_candidate_policy }}
           POLICY_DELTA_AUTHORITY: ${{ steps.authority.outputs.policy_delta_authority }}
@@ -323,7 +447,7 @@ jobs:
           # Existing exact path authority is sufficient for normal progress.
           # The legacy per-revision reviewed_blobs policy remains an explicit
           # opt-in via --require-reviewed-blobs for higher-assurance runs.
-          # Exact immutable SHAs from the event, never branch names: resolving
+          # Exact immutable SHAs (the head and its merge base), never branch names: resolving
           # a branch twice can name two different trees.
           policy_args=()
           # A V3 authority comes alone; a V1/V2 authority with its blessed candidate policy. The
@@ -351,6 +475,38 @@ jobs:
             "${policy_args[@]}" \
             | tee "${RUNNER_TEMP}/verify/report.txt"
 
+      # The publication audit of the candidate's whole tree, by the default
+      # branch's own copy of the audit. The verifier above judges the paths the
+      # profile publishes and new implementation paths; a file that is outside
+      # the profile and is not implementation (game data, a key, a private path)
+      # is not its subject. The pull request's own CI runs the audit too, but
+      # from the pull request's checkout, where the pull request could have
+      # changed the audit. Here it is the trusted copy, and it reads the
+      # candidate's tree from its objects (git ls-tree, git cat-file): never a
+      # checkout and never an archive, so no .gitattributes line of the
+      # candidate can hide a file. The profile is the candidate's, which the
+      # step above has just held to the trusted authority: a path it adds,
+      # removes or excludes is one a maintainer admitted. No secret is in this
+      # step's environment. A finding fails the job.
+      - name: Audit the candidate tree with the trusted publication audit
+        env:
+          HEAD_SHA: ${{ steps.target.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          if [[ ! "${HEAD_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::the candidate head is not a full commit SHA"
+            exit 1
+          fi
+          mkdir -p "${RUNNER_TEMP}/tree-audit"
+          git cat-file blob "${HEAD_SHA}:assets/public_source_profile.json" \
+            > "${RUNNER_TEMP}/tree-audit/public_source_profile.json"
+          python tools/publish_audit.py \
+            --repo-root "${GITHUB_WORKSPACE}" \
+            --committed-tree "${HEAD_SHA}" \
+            --policy "${RUNNER_TEMP}/tree-audit/public_source_profile.json" \
+            --public-scope --provenance-self-consistency
+          touch "${RUNNER_TEMP}/tree-audit/passed"
+
       # The first thing the pull-request author reads. The verdict itself is
       # unchanged -- this job still fails closed -- but a failure that only
       # means "a maintainer must admit this path" is now said in one sentence
@@ -369,6 +525,17 @@ jobs:
             echo '### Provenance: no verdict was produced' >> "${GITHUB_STEP_SUMMARY}"
             echo '' >> "${GITHUB_STEP_SUMMARY}"
             echo 'The attestation did not run to completion. That is a gate failure, not a pass.' \
+              >> "${GITHUB_STEP_SUMMARY}"
+            echo '' >> "${GITHUB_STEP_SUMMARY}"
+          fi
+          # The trusted tree audit fails the job on its own; say so here too, without copying its
+          # findings (the candidate's own paths) into the summary. They are in that step's log.
+          if [ -e "${RUNNER_TEMP}/tree-audit/public_source_profile.json" ] \
+            && [ ! -e "${RUNNER_TEMP}/tree-audit/passed" ]; then
+            echo '### Trusted publication audit: FAIL' >> "${GITHUB_STEP_SUMMARY}"
+            echo '' >> "${GITHUB_STEP_SUMMARY}"
+            echo 'The default branch publication audit refused the candidate tree. Its findings are in the log' \
+              'of the step "Audit the candidate tree with the trusted publication audit".' \
               >> "${GITHUB_STEP_SUMMARY}"
             echo '' >> "${GITHUB_STEP_SUMMARY}"
           fi
@@ -403,10 +570,11 @@ jobs:
     # The showcase demos ship in the candidate bundle under bin/demos, where the
     # player finds them. Their PSP programs need PSPDEV, a POSIX toolchain, so this
     # job builds the PRXs on Linux with the distribution pinned by
-    # assets/upstream/pspdev.lock.json, installed as ci.yml's profile_zero_fixture
-    # job installs it. The candidate job builds the packages from them and attests
-    # them with the rest of the bundle. Dispatch only from main, for the candidate.
-    if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' }}
+    # assets/upstream/pspdev.lock.json, installed as ci.yml's public_export
+    # job installs it for the profile-zero fixture. The candidate job builds the packages from them and attests
+    # them with the rest of the bundle. Dispatch only from main, for the candidate: a dispatch
+    # that attests a pull request leaves candidate_sha empty and runs neither candidate job.
+    if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.candidate_sha != '' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 15
     permissions:
@@ -509,7 +677,7 @@ jobs:
     name: Candidate binary build and SLSA Build L2
     # Dispatch only from main. The source digest is checked against the
     # required candidate input before any build or OIDC permission is used.
-    if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.candidate_sha != '' }}
     needs: [showcase_prx]
     runs-on: windows-2025
     # The player, the synthetic smoke and the two showcase demo packages compile
@@ -675,7 +843,7 @@ jobs:
             -Sdl3DllPath "$(cygpath -m "$MINGW_PREFIX/bin/SDL3.dll")" \
             -ExcludeOptionalFonts
           # --include-ui-fonts: the player starts its launcher UI only when assets/fonts/ui is
-          # beside it, and otherwise falls back to the old renderer (the Makefile's player
+          # beside it, and otherwise exits with code 4 (the Makefile's player
           # target stages the same set). --runtime-manifest records the size, SHA-256 and imports
           # of every .exe and .dll in dist/bin and fails when an import is not beside them (#324).
           "$PYTHON" tools/stage_runtime_dlls.py --target dist/bin --include-ui-fonts --runtime-manifest

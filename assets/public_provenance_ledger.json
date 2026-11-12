@@ -750,6 +750,17 @@
       }
     },
     {
+      "path": "android/app/src/main/java/io/github/jstar269/nakagawa/TitleLibrary.java",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "android_host_360_20261029",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
       "path": "android/app/src/main/res/values/strings.xml",
       "classification": "project_authored_attested",
       "evidence": {
@@ -805,6 +816,39 @@
       }
     },
     {
+      "path": "android/toolchain/PROVENANCE.md",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "android_toolchain_360_20261109",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "android/toolchain/nk_ld_launcher.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "android_toolchain_360_20261109",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "android/toolchain/sysroot-inputs.json",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "android_toolchain_360_20261109",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
       "path": "assets/README.md",
       "classification": "reviewed_documentation",
       "evidence": {
@@ -851,6 +895,17 @@
       "evidence": {
         "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
         "record_id": "enhancement-package-schema-327",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "assets/enhancements/ucus98701-60hz.json",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "ace_public_hst_60hz_20261109",
         "evidence_tier": "S",
         "authorship": "independent implementation record",
         "upstream_attribution": null
@@ -1058,6 +1113,17 @@
       }
     },
     {
+      "path": "assets/installer/nakagawa.iss",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "windows-installer-2208",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
       "path": "assets/issue_routing.json",
       "classification": "project_authored_attested",
       "evidence": {
@@ -1217,6 +1283,14 @@
       "evidence": {
         "source": "title-manifest schema and public PSP metadata review",
         "statement": "manifest contains user-supplied title metadata, not retail content"
+      }
+    },
+    {
+      "path": "assets/upstream/innosetup.lock.json",
+      "classification": "reviewed_configuration",
+      "evidence": {
+        "source": "configuration review",
+        "statement": "configuration or dependency metadata reviewed for public release"
       }
     },
     {
@@ -1496,6 +1570,14 @@
       }
     },
     {
+      "path": "docs/COMPILER_COMPARISON.md",
+      "classification": "reviewed_documentation",
+      "evidence": {
+        "source": "public documentation review",
+        "statement": "generic/public documentation; no private operational evidence"
+      }
+    },
+    {
       "path": "docs/DCO_POLICY.md",
       "classification": "reviewed_documentation",
       "evidence": {
@@ -1768,6 +1850,14 @@
     },
     {
       "path": "docs/RELEASE_NOTES_v0.0.1.md",
+      "classification": "reviewed_documentation",
+      "evidence": {
+        "source": "public documentation review",
+        "statement": "generic/public documentation; no private operational evidence"
+      }
+    },
+    {
+      "path": "docs/RELEASE_NOTES_v0.0.2.md",
       "classification": "reviewed_documentation",
       "evidence": {
         "source": "public documentation review",
@@ -2545,6 +2635,36 @@
       }
     },
     {
+      "path": "fixtures/fonts/notosansjp/PIN.json",
+      "classification": "synthetic_fixture",
+      "evidence": {
+        "source": "path-reviewed fixture/test census",
+        "statement": "fixture or test data is synthetic and contains no retail bytes"
+      }
+    },
+    {
+      "path": "fixtures/homebrew_corpus/PROVENANCE.md",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "homebrew_corpus_2144_20261108",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "fixtures/homebrew_corpus/corpus.json",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "homebrew_corpus_2144_20261108",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
       "path": "fixtures/mp3_tone/generate.py",
       "classification": "project_authored_attested",
       "evidence": {
@@ -2974,6 +3094,17 @@
       "evidence": {
         "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
         "record_id": "psp-oracle-hle-measure-probe",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "fixtures/psp_oracle/probe_hle_self_stop_helper.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "psp_oracle_self_stop_helper_20261108",
         "evidence_tier": "S",
         "authorship": "independent implementation record",
         "upstream_attribution": null
@@ -3814,6 +3945,28 @@
       }
     },
     {
+      "path": "src/core/nk_achievements.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "nk-achievements-bridge-1316",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "src/core/nk_achievements.h",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "nk-achievements-bridge-1316",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
       "path": "src/core/nk_adhoc_net.c",
       "classification": "project_authored_attested",
       "evidence": {
@@ -4084,6 +4237,39 @@
         "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
         "record_id": "native-player-009",
         "evidence_tier": "N",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "src/core/nk_nickname.h",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "nk-nickname-2197",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "src/core/nk_pbp_homebrew.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "nk-pbp-homebrew-2143",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "src/core/nk_pbp_homebrew.h",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "nk-pbp-homebrew-2143",
+        "evidence_tier": "S",
         "authorship": "independent implementation record",
         "upstream_attribution": null
       }
@@ -4470,6 +4656,28 @@
       }
     },
     {
+      "path": "src/core/nk_shared_helpers.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "shared-helpers-2068",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "src/core/nk_shared_helpers.h",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "shared-helpers-2068",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
       "path": "src/core/nk_sig.c",
       "classification": "project_authored_attested",
       "evidence": {
@@ -4486,6 +4694,28 @@
       "evidence": {
         "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
         "record_id": "nk-sig-ed25519-verify-20261024",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "src/core/nk_steam_shortcuts.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "nk-steam-shortcuts-2152",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "src/core/nk_steam_shortcuts.h",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "nk-steam-shortcuts-2152",
         "evidence_tier": "S",
         "authorship": "independent implementation record",
         "upstream_attribution": null
@@ -4574,6 +4804,28 @@
       "evidence": {
         "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
         "record_id": "nk-zip-save-backups-1883",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "src/player/discord_presence.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "player-discord-presence-2259",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "src/player/discord_presence.h",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "player-discord-presence-2259",
         "evidence_tier": "S",
         "authorship": "independent implementation record",
         "upstream_attribution": null
@@ -4998,6 +5250,28 @@
       }
     },
     {
+      "path": "src/player/ui/ui_keyboard.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "player-ui-keyboard-2197",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "src/player/ui/ui_keyboard.h",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "player-ui-keyboard-2197",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
       "path": "src/player/ui/ui_router.c",
       "classification": "project_authored_attested",
       "evidence": {
@@ -5015,28 +5289,6 @@
         "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
         "record_id": "player-ui-clip-scope",
         "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "src/player/ui_renderer.c",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "native-player-021",
-        "evidence_tier": "N",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "src/player/ui_renderer.h",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "native-player-022",
-        "evidence_tier": "N",
         "authorship": "independent implementation record",
         "upstream_attribution": null
       }
@@ -6290,6 +6542,100 @@
       }
     },
     {
+      "path": "src/rt/fsr3_fg_host.c",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fsr3-host-pass-translated-2081",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "src/rt/fsr3_fg_host.h",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fsr3-host-pass-translated-2081",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "src/rt/fsr3_fg_state.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fsr3-glue-2081",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "src/rt/fsr3_fg_state.h",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fsr3-glue-2081",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "src/rt/fsr3_host.c",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fsr3-host-pass-translated-2081",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "src/rt/fsr3_host.h",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fsr3-host-pass-translated-2081",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "src/rt/fsr3_jitter.c",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fsr3-host-pass-translated-2081",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "src/rt/fsr3_jitter.h",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fsr3-host-pass-translated-2081",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
       "path": "src/rt/funcdiff.c",
       "classification": "upstream_derived",
       "evidence": {
@@ -6493,6 +6839,17 @@
       }
     },
     {
+      "path": "src/rt/gpu_sdl3vk/ace_measure_comp.inc",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "ace_smooth_measure_20261109",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
       "path": "src/rt/gpu_sdl3vk/ace_smooth.c",
       "classification": "project_authored_attested",
       "evidence": {
@@ -6559,6 +6916,149 @@
       }
     },
     {
+      "path": "src/rt/gpu_sdl3vk/anime4k_cnn_x2_m_0_comp.inc",
+      "classification": "generated_from_public_source",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "anime4k-generated-1273",
+        "evidence_tier": "S",
+        "generator": "documented public-source data path",
+        "source_family": "public source data"
+      }
+    },
+    {
+      "path": "src/rt/gpu_sdl3vk/anime4k_cnn_x2_m_1_comp.inc",
+      "classification": "generated_from_public_source",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "anime4k-generated-1273",
+        "evidence_tier": "S",
+        "generator": "documented public-source data path",
+        "source_family": "public source data"
+      }
+    },
+    {
+      "path": "src/rt/gpu_sdl3vk/anime4k_cnn_x2_m_2_comp.inc",
+      "classification": "generated_from_public_source",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "anime4k-generated-1273",
+        "evidence_tier": "S",
+        "generator": "documented public-source data path",
+        "source_family": "public source data"
+      }
+    },
+    {
+      "path": "src/rt/gpu_sdl3vk/anime4k_cnn_x2_m_3_comp.inc",
+      "classification": "generated_from_public_source",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "anime4k-generated-1273",
+        "evidence_tier": "S",
+        "generator": "documented public-source data path",
+        "source_family": "public source data"
+      }
+    },
+    {
+      "path": "src/rt/gpu_sdl3vk/anime4k_cnn_x2_m_4_comp.inc",
+      "classification": "generated_from_public_source",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "anime4k-generated-1273",
+        "evidence_tier": "S",
+        "generator": "documented public-source data path",
+        "source_family": "public source data"
+      }
+    },
+    {
+      "path": "src/rt/gpu_sdl3vk/anime4k_cnn_x2_m_5_comp.inc",
+      "classification": "generated_from_public_source",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "anime4k-generated-1273",
+        "evidence_tier": "S",
+        "generator": "documented public-source data path",
+        "source_family": "public source data"
+      }
+    },
+    {
+      "path": "src/rt/gpu_sdl3vk/anime4k_cnn_x2_m_6_comp.inc",
+      "classification": "generated_from_public_source",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "anime4k-generated-1273",
+        "evidence_tier": "S",
+        "generator": "documented public-source data path",
+        "source_family": "public source data"
+      }
+    },
+    {
+      "path": "src/rt/gpu_sdl3vk/anime4k_cnn_x2_m_7_comp.inc",
+      "classification": "generated_from_public_source",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "anime4k-generated-1273",
+        "evidence_tier": "S",
+        "generator": "documented public-source data path",
+        "source_family": "public source data"
+      }
+    },
+    {
+      "path": "src/rt/gpu_sdl3vk/anime4k_cnn_x2_m_8_comp.inc",
+      "classification": "generated_from_public_source",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "anime4k-generated-1273",
+        "evidence_tier": "S",
+        "generator": "documented public-source data path",
+        "source_family": "public source data"
+      }
+    },
+    {
+      "path": "src/rt/gpu_sdl3vk/anime4k_pass.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "anime4k-pass-1273",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "src/rt/gpu_sdl3vk/anime4k_pass.h",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "anime4k-pass-1273",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "src/rt/gpu_sdl3vk/anime4k_pass_selftest.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "anime4k-pass-1273",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "src/rt/gpu_sdl3vk/anime4k_passes.h",
+      "classification": "generated_from_public_source",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "anime4k-generated-1273",
+        "evidence_tier": "S",
+        "generator": "documented public-source data path",
+        "source_family": "public source data"
+      }
+    },
+    {
       "path": "src/rt/gpu_sdl3vk/fsr1_easu_comp.inc",
       "classification": "generated_from_public_source",
       "evidence": {
@@ -6614,6 +7114,371 @@
       }
     },
     {
+      "path": "src/rt/gpu_sdl3vk/fsr3_accumulate_comp.inc",
+      "classification": "generated_from_public_source",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fsr3-shaders-generated-2081",
+        "evidence_tier": "S",
+        "generator": "documented public-source data path",
+        "source_family": "public source data"
+      }
+    },
+    {
+      "path": "src/rt/gpu_sdl3vk/fsr3_fg_pass.c",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fsr3-host-pass-translated-2081",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "src/rt/gpu_sdl3vk/fsr3_fg_pass.h",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fsr3-glue-2081",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "src/rt/gpu_sdl3vk/fsr3_fg_pass_selftest.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fsr3-glue-2081",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "src/rt/gpu_sdl3vk/fsr3_luma_instability_comp.inc",
+      "classification": "generated_from_public_source",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fsr3-shaders-generated-2081",
+        "evidence_tier": "S",
+        "generator": "documented public-source data path",
+        "source_family": "public source data"
+      }
+    },
+    {
+      "path": "src/rt/gpu_sdl3vk/fsr3_luma_pyramid_comp.inc",
+      "classification": "generated_from_public_source",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fsr3-shaders-generated-2081",
+        "evidence_tier": "S",
+        "generator": "documented public-source data path",
+        "source_family": "public source data"
+      }
+    },
+    {
+      "path": "src/rt/gpu_sdl3vk/fsr3_pass.c",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fsr3-host-pass-translated-2081",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "src/rt/gpu_sdl3vk/fsr3_pass.h",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fsr3-glue-2081",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "src/rt/gpu_sdl3vk/fsr3_pass_selftest.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fsr3-glue-2081",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "src/rt/gpu_sdl3vk/fsr3_prepare_inputs_comp.inc",
+      "classification": "generated_from_public_source",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fsr3-shaders-generated-2081",
+        "evidence_tier": "S",
+        "generator": "documented public-source data path",
+        "source_family": "public source data"
+      }
+    },
+    {
+      "path": "src/rt/gpu_sdl3vk/fsr3_prepare_reactivity_comp.inc",
+      "classification": "generated_from_public_source",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fsr3-shaders-generated-2081",
+        "evidence_tier": "S",
+        "generator": "documented public-source data path",
+        "source_family": "public source data"
+      }
+    },
+    {
+      "path": "src/rt/gpu_sdl3vk/fsr3_rcas_comp.inc",
+      "classification": "generated_from_public_source",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fsr3-shaders-generated-2081",
+        "evidence_tier": "S",
+        "generator": "documented public-source data path",
+        "source_family": "public source data"
+      }
+    },
+    {
+      "path": "src/rt/gpu_sdl3vk/fsr3_shader_manifest.json",
+      "classification": "generated_from_public_source",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fsr3-shaders-generated-2081",
+        "evidence_tier": "S",
+        "generator": "documented public-source data path",
+        "source_family": "public source data"
+      }
+    },
+    {
+      "path": "src/rt/gpu_sdl3vk/fsr3_shading_change_comp.inc",
+      "classification": "generated_from_public_source",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fsr3-shaders-generated-2081",
+        "evidence_tier": "S",
+        "generator": "documented public-source data path",
+        "source_family": "public source data"
+      }
+    },
+    {
+      "path": "src/rt/gpu_sdl3vk/fsr3_shading_change_pyramid_comp.inc",
+      "classification": "generated_from_public_source",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fsr3-shaders-generated-2081",
+        "evidence_tier": "S",
+        "generator": "documented public-source data path",
+        "source_family": "public source data"
+      }
+    },
+    {
+      "path": "src/rt/gpu_sdl3vk/fsr3fg_fi_compute_game_vector_field_inpainting_pyramid_comp.inc",
+      "classification": "generated_from_public_source",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fsr3-shaders-generated-2081",
+        "evidence_tier": "S",
+        "generator": "documented public-source data path",
+        "source_family": "public source data"
+      }
+    },
+    {
+      "path": "src/rt/gpu_sdl3vk/fsr3fg_fi_compute_inpainting_pyramid_comp.inc",
+      "classification": "generated_from_public_source",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fsr3-shaders-generated-2081",
+        "evidence_tier": "S",
+        "generator": "documented public-source data path",
+        "source_family": "public source data"
+      }
+    },
+    {
+      "path": "src/rt/gpu_sdl3vk/fsr3fg_fi_disocclusion_mask_comp.inc",
+      "classification": "generated_from_public_source",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fsr3-shaders-generated-2081",
+        "evidence_tier": "S",
+        "generator": "documented public-source data path",
+        "source_family": "public source data"
+      }
+    },
+    {
+      "path": "src/rt/gpu_sdl3vk/fsr3fg_fi_game_motion_vector_field_comp.inc",
+      "classification": "generated_from_public_source",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fsr3-shaders-generated-2081",
+        "evidence_tier": "S",
+        "generator": "documented public-source data path",
+        "source_family": "public source data"
+      }
+    },
+    {
+      "path": "src/rt/gpu_sdl3vk/fsr3fg_fi_inpainting_comp.inc",
+      "classification": "generated_from_public_source",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fsr3-shaders-generated-2081",
+        "evidence_tier": "S",
+        "generator": "documented public-source data path",
+        "source_family": "public source data"
+      }
+    },
+    {
+      "path": "src/rt/gpu_sdl3vk/fsr3fg_fi_interpolation_comp.inc",
+      "classification": "generated_from_public_source",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fsr3-shaders-generated-2081",
+        "evidence_tier": "S",
+        "generator": "documented public-source data path",
+        "source_family": "public source data"
+      }
+    },
+    {
+      "path": "src/rt/gpu_sdl3vk/fsr3fg_fi_optical_flow_vector_field_comp.inc",
+      "classification": "generated_from_public_source",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fsr3-shaders-generated-2081",
+        "evidence_tier": "S",
+        "generator": "documented public-source data path",
+        "source_family": "public source data"
+      }
+    },
+    {
+      "path": "src/rt/gpu_sdl3vk/fsr3fg_fi_reconstruct_and_dilate_comp.inc",
+      "classification": "generated_from_public_source",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fsr3-shaders-generated-2081",
+        "evidence_tier": "S",
+        "generator": "documented public-source data path",
+        "source_family": "public source data"
+      }
+    },
+    {
+      "path": "src/rt/gpu_sdl3vk/fsr3fg_fi_reconstruct_previous_depth_comp.inc",
+      "classification": "generated_from_public_source",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fsr3-shaders-generated-2081",
+        "evidence_tier": "S",
+        "generator": "documented public-source data path",
+        "source_family": "public source data"
+      }
+    },
+    {
+      "path": "src/rt/gpu_sdl3vk/fsr3fg_fi_setup_comp.inc",
+      "classification": "generated_from_public_source",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fsr3-shaders-generated-2081",
+        "evidence_tier": "S",
+        "generator": "documented public-source data path",
+        "source_family": "public source data"
+      }
+    },
+    {
+      "path": "src/rt/gpu_sdl3vk/fsr3fg_of_compute_luminance_pyramid_comp.inc",
+      "classification": "generated_from_public_source",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fsr3-shaders-generated-2081",
+        "evidence_tier": "S",
+        "generator": "documented public-source data path",
+        "source_family": "public source data"
+      }
+    },
+    {
+      "path": "src/rt/gpu_sdl3vk/fsr3fg_of_compute_optical_flow_advanced_v5_comp.inc",
+      "classification": "generated_from_public_source",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fsr3-shaders-generated-2081",
+        "evidence_tier": "S",
+        "generator": "documented public-source data path",
+        "source_family": "public source data"
+      }
+    },
+    {
+      "path": "src/rt/gpu_sdl3vk/fsr3fg_of_compute_scd_divergence_comp.inc",
+      "classification": "generated_from_public_source",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fsr3-shaders-generated-2081",
+        "evidence_tier": "S",
+        "generator": "documented public-source data path",
+        "source_family": "public source data"
+      }
+    },
+    {
+      "path": "src/rt/gpu_sdl3vk/fsr3fg_of_filter_optical_flow_v5_comp.inc",
+      "classification": "generated_from_public_source",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fsr3-shaders-generated-2081",
+        "evidence_tier": "S",
+        "generator": "documented public-source data path",
+        "source_family": "public source data"
+      }
+    },
+    {
+      "path": "src/rt/gpu_sdl3vk/fsr3fg_of_generate_scd_histogram_comp.inc",
+      "classification": "generated_from_public_source",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fsr3-shaders-generated-2081",
+        "evidence_tier": "S",
+        "generator": "documented public-source data path",
+        "source_family": "public source data"
+      }
+    },
+    {
+      "path": "src/rt/gpu_sdl3vk/fsr3fg_of_prepare_luma_comp.inc",
+      "classification": "generated_from_public_source",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fsr3-shaders-generated-2081",
+        "evidence_tier": "S",
+        "generator": "documented public-source data path",
+        "source_family": "public source data"
+      }
+    },
+    {
+      "path": "src/rt/gpu_sdl3vk/fsr3fg_of_scale_optical_flow_advanced_v5_comp.inc",
+      "classification": "generated_from_public_source",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fsr3-shaders-generated-2081",
+        "evidence_tier": "S",
+        "generator": "documented public-source data path",
+        "source_family": "public source data"
+      }
+    },
+    {
+      "path": "src/rt/gpu_sdl3vk/fsr3fg_shader_manifest.json",
+      "classification": "generated_from_public_source",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fsr3-shaders-generated-2081",
+        "evidence_tier": "S",
+        "generator": "documented public-source data path",
+        "source_family": "public source data"
+      }
+    },
+    {
       "path": "src/rt/gpu_sdl3vk/ge_gpu.c",
       "classification": "upstream_derived",
       "evidence": {
@@ -6650,11 +7515,100 @@
       }
     },
     {
+      "path": "src/rt/gpu_sdl3vk/glyph_gpu.inc",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "gegpu-glyph-recon-2110",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "src/rt/gpu_sdl3vk/glyph_gpu_selftest.inc",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "gegpu-glyph-recon-2110",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "src/rt/gpu_sdl3vk/glyph_recon.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "gegpu-glyph-recon-2110",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "src/rt/gpu_sdl3vk/glyph_recon.h",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "gegpu-glyph-recon-2110",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "src/rt/gpu_sdl3vk/glyph_recon_selftest.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "gegpu-glyph-recon-2110",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "src/rt/gpu_sdl3vk/pipeline_cache.h",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "gegpu-pipeline-cache-2149",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "src/rt/gpu_sdl3vk/pipeline_cache_selftest.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "gegpu-pipeline-cache-2149",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
       "path": "src/rt/gpu_sdl3vk/psp_frag.inc",
       "classification": "upstream_derived",
       "evidence": {
         "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
         "record_id": "ge-shader-embeds",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "GPL-2.0-or-later",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "src/rt/gpu_sdl3vk/psp_frag_rmw.inc",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "ge-shader-embed-rmw-2109",
         "evidence_tier": "S",
         "upstream": "documented upstream family",
         "license": "GPL-2.0-or-later",
@@ -6753,6 +7707,125 @@
         "evidence_tier": "S",
         "authorship": "independent implementation record",
         "upstream_attribution": null
+      }
+    },
+    {
+      "path": "src/rt/gpu_sdl3vk/shaders/ace_measure.comp",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "ace_smooth_measure_20261109",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "src/rt/gpu_sdl3vk/shaders/anime4k_cnn_x2_m_0.comp",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "anime4k-shaders-1273",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "src/rt/gpu_sdl3vk/shaders/anime4k_cnn_x2_m_1.comp",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "anime4k-shaders-1273",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "src/rt/gpu_sdl3vk/shaders/anime4k_cnn_x2_m_2.comp",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "anime4k-shaders-1273",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "src/rt/gpu_sdl3vk/shaders/anime4k_cnn_x2_m_3.comp",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "anime4k-shaders-1273",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "src/rt/gpu_sdl3vk/shaders/anime4k_cnn_x2_m_4.comp",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "anime4k-shaders-1273",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "src/rt/gpu_sdl3vk/shaders/anime4k_cnn_x2_m_5.comp",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "anime4k-shaders-1273",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "src/rt/gpu_sdl3vk/shaders/anime4k_cnn_x2_m_6.comp",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "anime4k-shaders-1273",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "src/rt/gpu_sdl3vk/shaders/anime4k_cnn_x2_m_7.comp",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "anime4k-shaders-1273",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "src/rt/gpu_sdl3vk/shaders/anime4k_cnn_x2_m_8.comp",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "anime4k-shaders-1273",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
       }
     },
     {
@@ -9924,6 +10997,18 @@
       }
     },
     {
+      "path": "src/rt/hle_videocodec.c",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "hle-videocodec-me-286",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "GPL-3.0-or-later AND MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
       "path": "src/rt/intr_conformance.h",
       "classification": "project_authored_attested",
       "evidence": {
@@ -10131,6 +11216,28 @@
       "evidence": {
         "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
         "record_id": "snapshot-exec-1842",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "src/rt/nkstate.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "nkstate-replay-checkpoints-2146",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "src/rt/nkstate.h",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "nkstate-replay-checkpoints-2146",
         "evidence_tier": "S",
         "authorship": "independent implementation record",
         "upstream_attribution": null
@@ -10448,6 +11555,28 @@
       }
     },
     {
+      "path": "src/rt/replay_checkpoint.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "nkstate-replay-checkpoints-2146",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "src/rt/replay_checkpoint.h",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "nkstate-replay-checkpoints-2146",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
       "path": "src/rt/sas_envelope.h",
       "classification": "upstream_derived",
       "evidence": {
@@ -10600,6 +11729,29 @@
       "evidence": {
         "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
         "record_id": "strbuf-format-helper-20260827",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "src/rt/texrepl.c",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "texrepl-hash-lookup-1880",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "GPL-2.0-or-later",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "src/rt/texrepl.h",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "texrepl-api-tests-1880",
         "evidence_tier": "S",
         "authorship": "independent implementation record",
         "upstream_attribution": null
@@ -10781,6 +11933,143 @@
         "evidence_tier": "S",
         "authorship": "independent implementation record",
         "upstream_attribution": null
+      }
+    },
+    {
+      "path": "src/rt/xr/nk_xr.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "nk-xr-module-791",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "src/rt/xr/nk_xr.h",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "nk-xr-module-791",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "src/rt/xr/nk_xr_layout.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "nk-xr-module-791",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "src/rt/xr/nk_xr_layout.h",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "nk-xr-module-791",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "src/rt/xr/nk_xr_mailbox.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "nk-xr-module-791",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "src/rt/xr/nk_xr_mailbox.h",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "nk-xr-module-791",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "src/rt/xr/openxr/Apache-2.0.txt",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "openxr-sdk-11165-headers-import-791",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "Apache-2.0 OR MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "src/rt/xr/openxr/MIT.txt",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "openxr-sdk-11165-headers-import-791",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "Apache-2.0 OR MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "src/rt/xr/openxr/PROVENANCE.md",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "nk-xr-module-791",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "src/rt/xr/openxr/openxr.h",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "openxr-sdk-11165-headers-import-791",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "Apache-2.0 OR MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "src/rt/xr/openxr/openxr_platform.h",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "openxr-sdk-11165-headers-import-791",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "Apache-2.0 OR MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "src/rt/xr/openxr/openxr_platform_defines.h",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "openxr-sdk-11165-headers-import-791",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "Apache-2.0 OR MIT",
+        "modification_status": "modified_or_translated; see trusted record"
       }
     },
     {
@@ -11346,6 +12635,83 @@
       }
     },
     {
+      "path": "tests/native/fsr3_fg_host_oracle.md",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fsr3-glue-2081",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/native/fsr3_fg_host_oracle.txt",
+      "classification": "generated_from_public_source",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fsr3-host-oracle-records-2081",
+        "evidence_tier": "S",
+        "generator": "documented public-source data path",
+        "source_family": "public source data"
+      }
+    },
+    {
+      "path": "tests/native/fsr3_fg_host_selftest.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fsr3-glue-2081",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/native/fsr3_fg_state_selftest.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fsr3-glue-2081",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/native/fsr3_host_oracle.md",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fsr3-glue-2081",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/native/fsr3_host_oracle.txt",
+      "classification": "generated_from_public_source",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fsr3-host-oracle-records-2081",
+        "evidence_tier": "S",
+        "generator": "documented public-source data path",
+        "source_family": "public source data"
+      }
+    },
+    {
+      "path": "tests/native/fsr3_host_selftest.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fsr3-glue-2081",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
       "path": "tests/native/ge_capture_selftest.c",
       "classification": "project_authored_attested",
       "evidence": {
@@ -11379,6 +12745,17 @@
       }
     },
     {
+      "path": "tests/native/ge_patch_tess_selftest.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "ge-patch-tess-selftest-2053",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
       "path": "tests/native/ge_raster_ref_selftest.c",
       "classification": "project_authored_attested",
       "evidence": {
@@ -11395,6 +12772,17 @@
       "evidence": {
         "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
         "record_id": "ge-texture-ref-703-moved-1531",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/native/ge_tnl_census_selftest.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "ge-tnl-census-selftest-318",
         "evidence_tier": "S",
         "authorship": "independent implementation record",
         "upstream_attribution": null
@@ -11511,6 +12899,17 @@
       }
     },
     {
+      "path": "tests/native/nkstate_selftest.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "nkstate-replay-checkpoints-2146",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
       "path": "tests/native/osk_overlay_paint_selftest.c",
       "classification": "project_authored_attested",
       "evidence": {
@@ -11582,6 +12981,17 @@
       "evidence": {
         "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
         "record_id": "pgf-validate-parity-harness",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/native/player_enhanced_fixture.h",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "ace_smooth_measure_20261109",
         "evidence_tier": "S",
         "authorship": "independent implementation record",
         "upstream_attribution": null
@@ -11687,6 +13097,17 @@
       }
     },
     {
+      "path": "tests/native/synthetic_png.h",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "texrepl-api-tests-1880",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
       "path": "tests/native/test_clay_layout.c",
       "classification": "project_authored_attested",
       "evidence": {
@@ -11725,6 +13146,17 @@
       "evidence": {
         "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
         "record_id": "disc-verify-compat-table-20261031",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/native/test_discord_presence.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "player-discord-presence-2259",
         "evidence_tier": "S",
         "authorship": "independent implementation record",
         "upstream_attribution": null
@@ -11786,6 +13218,17 @@
       }
     },
     {
+      "path": "tests/native/test_nk_achievements.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "nk-achievements-bridge-1316",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
       "path": "tests/native/test_nk_adhoc_net.c",
       "classification": "project_authored_attested",
       "evidence": {
@@ -11802,6 +13245,17 @@
       "evidence": {
         "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
         "record_id": "nk-adhoc-relay-wire-1139",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/native/test_nk_nickname.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "nk-nickname-2197",
         "evidence_tier": "S",
         "authorship": "independent implementation record",
         "upstream_attribution": null
@@ -12028,6 +13482,28 @@
       }
     },
     {
+      "path": "tests/native/test_shared_helpers.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "shared-helpers-2068",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/native/test_steam_shortcuts.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "nk-steam-shortcuts-2152",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
       "path": "tests/native/test_ui_clip.c",
       "classification": "project_authored_attested",
       "evidence": {
@@ -12078,6 +13554,17 @@
         "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
         "record_id": "native-player-055",
         "evidence_tier": "N",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/native/texrepl_selftest.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "texrepl-api-tests-1880",
+        "evidence_tier": "S",
         "authorship": "independent implementation record",
         "upstream_attribution": null
       }
@@ -12138,6 +13625,17 @@
       }
     },
     {
+      "path": "tests/native/videocodec_selftest.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "videocodec-selftest-286",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
       "path": "tests/native/videorec_selftest.c",
       "classification": "project_authored_attested",
       "evidence": {
@@ -12149,11 +13647,68 @@
       }
     },
     {
+      "path": "tests/native/vram_view_identity_selftest.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "vram-view-identity-selftest-314",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
       "path": "tests/native/watchpoints_file_selftest.c",
       "classification": "project_authored_attested",
       "evidence": {
         "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
         "record_id": "watchpoint-artifact-parser-moved-1531",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/native/xr_selftest.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "nk-xr-module-791",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "third_party/anime4k/Anime4K_Upscale_CNN_x2_M.glsl",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "anime4k-import-1273",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/anime4k/LICENSE.txt",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "anime4k-import-1273",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/anime4k/PROVENANCE.md",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "anime4k-pass-1273",
         "evidence_tier": "S",
         "authorship": "independent implementation record",
         "upstream_attribution": null
@@ -12226,6 +13781,18 @@
         "evidence_tier": "S",
         "upstream": "documented upstream family",
         "license": "Unlicense OR MIT-0",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/fidelityfx_sdk/LICENSE-AMD.md",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fidelityfx-sdk-240-fsr3-import",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
         "modification_status": "modified_or_translated; see trusted record"
       }
     },
@@ -12313,6 +13880,18 @@
       }
     },
     {
+      "path": "third_party/fidelityfx_sdk/api/internal/gpu/ffx_core_hlsl.h",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fidelityfx-sdk-240-fsr3-import",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
       "path": "third_party/fidelityfx_sdk/api/internal/gpu/ffx_core_portability.h",
       "classification": "upstream_derived",
       "evidence": {
@@ -12325,11 +13904,779 @@
       }
     },
     {
+      "path": "third_party/fidelityfx_sdk/framegeneration/fsr3/include/gpu/frameinterpolation/ffx_frameinterpolation.h",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fidelityfx-sdk-240-fsr3-import",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/fidelityfx_sdk/framegeneration/fsr3/include/gpu/frameinterpolation/ffx_frameinterpolation_callbacks_hlsl.h",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fidelityfx-sdk-240-fsr3-local-delta",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/fidelityfx_sdk/framegeneration/fsr3/include/gpu/frameinterpolation/ffx_frameinterpolation_common.h",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fidelityfx-sdk-240-fsr3-import",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/fidelityfx_sdk/framegeneration/fsr3/include/gpu/frameinterpolation/ffx_frameinterpolation_compute_game_vector_field_inpainting_pyramid.h",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fidelityfx-sdk-240-fsr3-import",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/fidelityfx_sdk/framegeneration/fsr3/include/gpu/frameinterpolation/ffx_frameinterpolation_compute_inpainting_pyramid.h",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fidelityfx-sdk-240-fsr3-import",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/fidelityfx_sdk/framegeneration/fsr3/include/gpu/frameinterpolation/ffx_frameinterpolation_disocclusion_mask.h",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fidelityfx-sdk-240-fsr3-import",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/fidelityfx_sdk/framegeneration/fsr3/include/gpu/frameinterpolation/ffx_frameinterpolation_game_motion_vector_field.h",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fidelityfx-sdk-240-fsr3-import",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/fidelityfx_sdk/framegeneration/fsr3/include/gpu/frameinterpolation/ffx_frameinterpolation_inpainting.h",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fidelityfx-sdk-240-fsr3-import",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/fidelityfx_sdk/framegeneration/fsr3/include/gpu/frameinterpolation/ffx_frameinterpolation_optical_flow_vector_field.h",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fidelityfx-sdk-240-fsr3-import",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/fidelityfx_sdk/framegeneration/fsr3/include/gpu/frameinterpolation/ffx_frameinterpolation_reconstruct_dilated_velocity_and_previous_depth.h",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fidelityfx-sdk-240-fsr3-import",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/fidelityfx_sdk/framegeneration/fsr3/include/gpu/frameinterpolation/ffx_frameinterpolation_reconstruct_previous_depth.h",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fidelityfx-sdk-240-fsr3-import",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/fidelityfx_sdk/framegeneration/fsr3/include/gpu/frameinterpolation/ffx_frameinterpolation_resources.h",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fidelityfx-sdk-240-fsr3-import",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/fidelityfx_sdk/framegeneration/fsr3/include/gpu/frameinterpolation/ffx_frameinterpolation_setup.h",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fidelityfx-sdk-240-fsr3-import",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/fidelityfx_sdk/framegeneration/fsr3/include/gpu/opticalflow/ffx_opticalflow_callbacks_hlsl.h",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fidelityfx-sdk-240-fsr3-local-delta",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/fidelityfx_sdk/framegeneration/fsr3/include/gpu/opticalflow/ffx_opticalflow_common.h",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fidelityfx-sdk-240-fsr3-import",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/fidelityfx_sdk/framegeneration/fsr3/include/gpu/opticalflow/ffx_opticalflow_compute_luminance_pyramid.h",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fidelityfx-sdk-240-fsr3-import",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/fidelityfx_sdk/framegeneration/fsr3/include/gpu/opticalflow/ffx_opticalflow_compute_optical_flow_v5.h",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fidelityfx-sdk-240-fsr3-import",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/fidelityfx_sdk/framegeneration/fsr3/include/gpu/opticalflow/ffx_opticalflow_compute_scd_divergence.h",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fidelityfx-sdk-240-fsr3-import",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/fidelityfx_sdk/framegeneration/fsr3/include/gpu/opticalflow/ffx_opticalflow_filter_optical_flow_v5.h",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fidelityfx-sdk-240-fsr3-import",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/fidelityfx_sdk/framegeneration/fsr3/include/gpu/opticalflow/ffx_opticalflow_generate_scd_histogram.h",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fidelityfx-sdk-240-fsr3-import",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/fidelityfx_sdk/framegeneration/fsr3/include/gpu/opticalflow/ffx_opticalflow_prepare_luma.h",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fidelityfx-sdk-240-fsr3-import",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/fidelityfx_sdk/framegeneration/fsr3/include/gpu/opticalflow/ffx_opticalflow_resources.h",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fidelityfx-sdk-240-fsr3-import",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/fidelityfx_sdk/framegeneration/fsr3/include/gpu/opticalflow/ffx_opticalflow_scale_optical_flow_advanced_v5.h",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fidelityfx-sdk-240-fsr3-import",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/fidelityfx_sdk/framegeneration/fsr3/include/gpu/spd/ffx_spd.h",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fidelityfx-sdk-240-fsr3-import",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/fidelityfx_sdk/framegeneration/fsr3/internal/shaders/ffx_frameinterpolation_compute_game_vector_field_inpainting_pyramid_pass.hlsl",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fidelityfx-sdk-240-fsr3-import",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/fidelityfx_sdk/framegeneration/fsr3/internal/shaders/ffx_frameinterpolation_compute_inpainting_pyramid_pass.hlsl",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fidelityfx-sdk-240-fsr3-import",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/fidelityfx_sdk/framegeneration/fsr3/internal/shaders/ffx_frameinterpolation_disocclusion_mask_pass.hlsl",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fidelityfx-sdk-240-fsr3-import",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/fidelityfx_sdk/framegeneration/fsr3/internal/shaders/ffx_frameinterpolation_game_motion_vector_field_pass.hlsl",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fidelityfx-sdk-240-fsr3-import",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/fidelityfx_sdk/framegeneration/fsr3/internal/shaders/ffx_frameinterpolation_inpainting_pass.hlsl",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fidelityfx-sdk-240-fsr3-import",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/fidelityfx_sdk/framegeneration/fsr3/internal/shaders/ffx_frameinterpolation_optical_flow_vector_field_pass.hlsl",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fidelityfx-sdk-240-fsr3-import",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/fidelityfx_sdk/framegeneration/fsr3/internal/shaders/ffx_frameinterpolation_pass.hlsl",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fidelityfx-sdk-240-fsr3-import",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/fidelityfx_sdk/framegeneration/fsr3/internal/shaders/ffx_frameinterpolation_reconstruct_and_dilate_pass.hlsl",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fidelityfx-sdk-240-fsr3-import",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/fidelityfx_sdk/framegeneration/fsr3/internal/shaders/ffx_frameinterpolation_reconstruct_previous_depth_pass.hlsl",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fidelityfx-sdk-240-fsr3-import",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/fidelityfx_sdk/framegeneration/fsr3/internal/shaders/ffx_frameinterpolation_setup_pass.hlsl",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fidelityfx-sdk-240-fsr3-import",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/fidelityfx_sdk/framegeneration/fsr3/internal/shaders/ffx_opticalflow_compute_luminance_pyramid_pass.hlsl",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fidelityfx-sdk-240-fsr3-import",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/fidelityfx_sdk/framegeneration/fsr3/internal/shaders/ffx_opticalflow_compute_optical_flow_advanced_pass_v5.hlsl",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fidelityfx-sdk-240-fsr3-import",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/fidelityfx_sdk/framegeneration/fsr3/internal/shaders/ffx_opticalflow_compute_scd_divergence_pass.hlsl",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fidelityfx-sdk-240-fsr3-import",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/fidelityfx_sdk/framegeneration/fsr3/internal/shaders/ffx_opticalflow_filter_optical_flow_pass_v5.hlsl",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fidelityfx-sdk-240-fsr3-import",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/fidelityfx_sdk/framegeneration/fsr3/internal/shaders/ffx_opticalflow_generate_scd_histogram_pass.hlsl",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fidelityfx-sdk-240-fsr3-import",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/fidelityfx_sdk/framegeneration/fsr3/internal/shaders/ffx_opticalflow_prepare_luma_pass.hlsl",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fidelityfx-sdk-240-fsr3-import",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/fidelityfx_sdk/framegeneration/fsr3/internal/shaders/ffx_opticalflow_scale_optical_flow_advanced_pass_v5.hlsl",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fidelityfx-sdk-240-fsr3-import",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
       "path": "third_party/fidelityfx_sdk/upscalers/fsr3/include/gpu/fsr1/ffx_fsr1.h",
       "classification": "upstream_derived",
       "evidence": {
         "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
         "record_id": "fidelityfx-sdk-240-fsr1-import",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/fidelityfx_sdk/upscalers/fsr3/include/gpu/fsr3upscaler/ffx_fsr3upscaler_accumulate.h",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fidelityfx-sdk-240-fsr3-import",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/fidelityfx_sdk/upscalers/fsr3/include/gpu/fsr3upscaler/ffx_fsr3upscaler_callbacks_hlsl.h",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fidelityfx-sdk-240-fsr3-local-delta",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/fidelityfx_sdk/upscalers/fsr3/include/gpu/fsr3upscaler/ffx_fsr3upscaler_common.h",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fidelityfx-sdk-240-fsr3-import",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/fidelityfx_sdk/upscalers/fsr3/include/gpu/fsr3upscaler/ffx_fsr3upscaler_luma_instability.h",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fidelityfx-sdk-240-fsr3-import",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/fidelityfx_sdk/upscalers/fsr3/include/gpu/fsr3upscaler/ffx_fsr3upscaler_luma_pyramid.h",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fidelityfx-sdk-240-fsr3-import",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/fidelityfx_sdk/upscalers/fsr3/include/gpu/fsr3upscaler/ffx_fsr3upscaler_prepare_inputs.h",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fidelityfx-sdk-240-fsr3-import",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/fidelityfx_sdk/upscalers/fsr3/include/gpu/fsr3upscaler/ffx_fsr3upscaler_prepare_reactivity.h",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fidelityfx-sdk-240-fsr3-import",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/fidelityfx_sdk/upscalers/fsr3/include/gpu/fsr3upscaler/ffx_fsr3upscaler_rcas.h",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fidelityfx-sdk-240-fsr3-import",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/fidelityfx_sdk/upscalers/fsr3/include/gpu/fsr3upscaler/ffx_fsr3upscaler_reproject.h",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fidelityfx-sdk-240-fsr3-import",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/fidelityfx_sdk/upscalers/fsr3/include/gpu/fsr3upscaler/ffx_fsr3upscaler_resources.h",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fidelityfx-sdk-240-fsr3-import",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/fidelityfx_sdk/upscalers/fsr3/include/gpu/fsr3upscaler/ffx_fsr3upscaler_sample.h",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fidelityfx-sdk-240-fsr3-import",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/fidelityfx_sdk/upscalers/fsr3/include/gpu/fsr3upscaler/ffx_fsr3upscaler_shading_change.h",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fidelityfx-sdk-240-fsr3-import",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/fidelityfx_sdk/upscalers/fsr3/include/gpu/fsr3upscaler/ffx_fsr3upscaler_shading_change_pyramid.h",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fidelityfx-sdk-240-fsr3-import",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/fidelityfx_sdk/upscalers/fsr3/include/gpu/fsr3upscaler/ffx_fsr3upscaler_upsample.h",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fidelityfx-sdk-240-fsr3-import",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/fidelityfx_sdk/upscalers/fsr3/include/gpu/spd/ffx_spd.h",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fidelityfx-sdk-240-fsr3-import",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/fidelityfx_sdk/upscalers/fsr3/internal/shaders/ffx_fsr3upscaler_accumulate_pass.hlsl",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fidelityfx-sdk-240-fsr3-import",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/fidelityfx_sdk/upscalers/fsr3/internal/shaders/ffx_fsr3upscaler_luma_instability_pass.hlsl",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fidelityfx-sdk-240-fsr3-import",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/fidelityfx_sdk/upscalers/fsr3/internal/shaders/ffx_fsr3upscaler_luma_pyramid_pass.hlsl",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fidelityfx-sdk-240-fsr3-import",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/fidelityfx_sdk/upscalers/fsr3/internal/shaders/ffx_fsr3upscaler_prepare_inputs_pass.hlsl",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fidelityfx-sdk-240-fsr3-import",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/fidelityfx_sdk/upscalers/fsr3/internal/shaders/ffx_fsr3upscaler_prepare_reactivity_pass.hlsl",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fidelityfx-sdk-240-fsr3-import",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/fidelityfx_sdk/upscalers/fsr3/internal/shaders/ffx_fsr3upscaler_rcas_pass.hlsl",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fidelityfx-sdk-240-fsr3-import",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/fidelityfx_sdk/upscalers/fsr3/internal/shaders/ffx_fsr3upscaler_shading_change_pass.hlsl",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fidelityfx-sdk-240-fsr3-import",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/fidelityfx_sdk/upscalers/fsr3/internal/shaders/ffx_fsr3upscaler_shading_change_pyramid_pass.hlsl",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fidelityfx-sdk-240-fsr3-import",
         "evidence_tier": "S",
         "upstream": "documented upstream family",
         "license": "MIT",
@@ -13545,6 +15892,569 @@
       }
     },
     {
+      "path": "third_party/rcheevos/LICENSE",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "rcheevos-1250-import-1316",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/rcheevos/PROVENANCE.md",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "nk-achievements-bridge-1316",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "third_party/rcheevos/include/rc_api_info.h",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "rcheevos-1250-import-1316",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/rcheevos/include/rc_api_request.h",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "rcheevos-1250-import-1316",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/rcheevos/include/rc_api_runtime.h",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "rcheevos-1250-import-1316",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/rcheevos/include/rc_api_user.h",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "rcheevos-1250-import-1316",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/rcheevos/include/rc_client.h",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "rcheevos-1250-import-1316",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/rcheevos/include/rc_consoles.h",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "rcheevos-1250-import-1316",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/rcheevos/include/rc_error.h",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "rcheevos-1250-import-1316",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/rcheevos/include/rc_export.h",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "rcheevos-1250-import-1316",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/rcheevos/include/rc_hash.h",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "rcheevos-1250-import-1316",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/rcheevos/include/rc_runtime.h",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "rcheevos-1250-import-1316",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/rcheevos/include/rc_runtime_types.h",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "rcheevos-1250-import-1316",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/rcheevos/include/rc_util.h",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "rcheevos-1250-import-1316",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/rcheevos/include/rcheevos.h",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "rcheevos-1250-import-1316",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/rcheevos/src/rapi/rc_api_common.c",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "rcheevos-1250-import-1316",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/rcheevos/src/rapi/rc_api_common.h",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "rcheevos-1250-import-1316",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/rcheevos/src/rapi/rc_api_info.c",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "rcheevos-1250-import-1316",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/rcheevos/src/rapi/rc_api_runtime.c",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "rcheevos-1250-import-1316",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/rcheevos/src/rapi/rc_api_user.c",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "rcheevos-1250-import-1316",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/rcheevos/src/rc_client.c",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "rcheevos-1250-import-1316",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/rcheevos/src/rc_client_external.h",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "rcheevos-1250-import-1316",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/rcheevos/src/rc_client_external_versions.h",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "rcheevos-1250-import-1316",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/rcheevos/src/rc_client_internal.h",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "rcheevos-1250-import-1316",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/rcheevos/src/rc_compat.c",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "rcheevos-1250-import-1316",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/rcheevos/src/rc_compat.h",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "rcheevos-1250-import-1316",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/rcheevos/src/rc_util.c",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "rcheevos-1250-import-1316",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/rcheevos/src/rc_version.c",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "rcheevos-1250-import-1316",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/rcheevos/src/rc_version.h",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "rcheevos-1250-import-1316",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/rcheevos/src/rcheevos/alloc.c",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "rcheevos-1250-import-1316",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/rcheevos/src/rcheevos/condition.c",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "rcheevos-1250-import-1316",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/rcheevos/src/rcheevos/condset.c",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "rcheevos-1250-import-1316",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/rcheevos/src/rcheevos/consoleinfo.c",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "rcheevos-1250-import-1316",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/rcheevos/src/rcheevos/format.c",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "rcheevos-1250-import-1316",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/rcheevos/src/rcheevos/lboard.c",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "rcheevos-1250-import-1316",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/rcheevos/src/rcheevos/memref.c",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "rcheevos-1250-import-1316",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/rcheevos/src/rcheevos/operand.c",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "rcheevos-1250-import-1316",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/rcheevos/src/rcheevos/rc_internal.h",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "rcheevos-1250-import-1316",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/rcheevos/src/rcheevos/rc_validate.c",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "rcheevos-1250-import-1316",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/rcheevos/src/rcheevos/rc_validate.h",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "rcheevos-1250-import-1316",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/rcheevos/src/rcheevos/richpresence.c",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "rcheevos-1250-import-1316",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/rcheevos/src/rcheevos/runtime.c",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "rcheevos-1250-import-1316",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/rcheevos/src/rcheevos/runtime_progress.c",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "rcheevos-1250-import-1316",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/rcheevos/src/rcheevos/trigger.c",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "rcheevos-1250-import-1316",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/rcheevos/src/rcheevos/value.c",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "rcheevos-1250-import-1316",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/rcheevos/src/rhash/md5.c",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "rcheevos-1250-md5-1316",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "Zlib",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "third_party/rcheevos/src/rhash/md5.h",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "rcheevos-1250-md5-1316",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "Zlib",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
       "path": "third_party/stb/LICENSE",
       "classification": "upstream_derived",
       "evidence": {
@@ -13707,6 +16617,61 @@
       }
     },
     {
+      "path": "tools/android_stubgen.py",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "android_toolchain_360_20261109",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tools/android_sysroot.py",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "android_toolchain_360_20261109",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tools/android_test_runner.py",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "android_host_360_20261029",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tools/android_toolchain.py",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "android_toolchain_360_20261109",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tools/anime4k_port.py",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "anime4k-pass-1273",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
       "path": "tools/audit_public_issue_links.py",
       "classification": "project_authored_attested",
       "evidence": {
@@ -13756,6 +16721,17 @@
       "evidence": {
         "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
         "record_id": "build-and-ci-gate-tooling-20260909",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tools/build_installer.py",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "windows-installer-2208",
         "evidence_tier": "S",
         "authorship": "independent implementation record",
         "upstream_attribution": null
@@ -14106,6 +17082,17 @@
       }
     },
     {
+      "path": "tools/fsr3_mutants.py",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fsr3-glue-2081",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
       "path": "tools/funcdiff_cmp.py",
       "classification": "upstream_derived",
       "evidence": {
@@ -14383,6 +17370,17 @@
       }
     },
     {
+      "path": "tools/homebrew_corpus.py",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "homebrew_corpus_2144_20261108",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
       "path": "tools/host_stubs.py",
       "classification": "project_authored_attested",
       "evidence": {
@@ -14587,6 +17585,17 @@
       "evidence": {
         "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
         "record_id": "debug-and-analysis-tooling-20260909",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tools/merge_append.py",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "merge-append-driver",
         "evidence_tier": "S",
         "authorship": "independent implementation record",
         "upstream_attribution": null
@@ -14925,6 +17934,17 @@
       }
     },
     {
+      "path": "tools/nk_powershell.py",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "tools_prefer_pwsh_20261109",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
       "path": "tools/nk_safety.ps1",
       "classification": "project_authored_attested",
       "evidence": {
@@ -14941,6 +17961,17 @@
       "evidence": {
         "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
         "record_id": "snapshot-exec-1842",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tools/nkstate.py",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "nkstate-replay-checkpoints-2146",
         "evidence_tier": "S",
         "authorship": "independent implementation record",
         "upstream_attribution": null
@@ -15078,6 +18109,17 @@
         "upstream": "documented upstream family",
         "license": "GPL-2.0-or-later",
         "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "tools/ppsspp_ref.py",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "ppsspp-ref-capture-1882",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
       }
     },
     {
@@ -15670,6 +18712,50 @@
       "evidence": {
         "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
         "record_id": "android_host_360_20261029",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tools/test_android_stubgen.py",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "android_toolchain_360_20261109",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tools/test_android_sysroot.py",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "android_toolchain_360_20261109",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tools/test_android_toolchain.py",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "android_toolchain_360_20261109",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tools/test_anime4k_port.py",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "anime4k-pass-1273",
         "evidence_tier": "S",
         "authorship": "independent implementation record",
         "upstream_attribution": null
@@ -16436,6 +19522,17 @@
       }
     },
     {
+      "path": "tools/test_fsr3_port.py",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "fsr3-glue-2081",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
       "path": "tools/test_funcdiff_cmp.py",
       "classification": "project_authored_attested",
       "evidence": {
@@ -16701,6 +19798,17 @@
       }
     },
     {
+      "path": "tools/test_homebrew_corpus.py",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "homebrew_corpus_2144_20261108",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
       "path": "tools/test_hst_doctor.py",
       "classification": "project_authored_attested",
       "evidence": {
@@ -16805,6 +19913,17 @@
       "evidence": {
         "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
         "record_id": "insn-trace-differential-20261029",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tools/test_installer.py",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "windows-installer-2208",
         "evidence_tier": "S",
         "authorship": "independent implementation record",
         "upstream_attribution": null
@@ -16987,6 +20106,17 @@
       }
     },
     {
+      "path": "tools/test_merge_append.py",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "merge-append-driver",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
       "path": "tools/test_microtest_gate.py",
       "classification": "project_authored_attested",
       "evidence": {
@@ -17136,6 +20266,28 @@
         "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
         "record_id": "native-player-041",
         "evidence_tier": "N",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tools/test_nk_powershell.py",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "tools_prefer_pwsh_20261109",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tools/test_nkstate.py",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "nkstate-replay-checkpoints-2146",
+        "evidence_tier": "S",
         "authorship": "independent implementation record",
         "upstream_attribution": null
       }
@@ -17344,6 +20496,17 @@
       "evidence": {
         "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
         "record_id": "ppmdiff-coverage-fail-closed-382",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tools/test_ppsspp_ref.py",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "ppsspp-ref-capture-1882",
         "evidence_tier": "S",
         "authorship": "independent implementation record",
         "upstream_attribution": null
@@ -18600,6 +21763,17 @@
       "evidence": {
         "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
         "record_id": "build-and-ci-gate-tooling-20260909",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tools/verify_installer.py",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "windows-installer-2208",
         "evidence_tier": "S",
         "authorship": "independent implementation record",
         "upstream_attribution": null

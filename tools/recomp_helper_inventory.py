@@ -389,8 +389,8 @@ def build_inventory(sources: dict[str, str], emitter: str | tuple[str, ...], led
             if m.group(2) is not None:
                 if name in helpers:
                     bucket[name][rel] += 1
-                for h in macro_map.get(name, ()):
-                    bucket[h][rel] += 1
+                for macro_helper in macro_map.get(name, ()):
+                    bucket[macro_helper][rel] += 1
             elif name in helpers:
                 address[name][rel] += 1
 
@@ -482,7 +482,7 @@ def render_markdown(inv: dict) -> str:
         "",
         "<!-- markdownlint-disable MD013 -->",
         "",
-        "Tracking issue #346 (independence: replace inherited CPU runtime semantics). One row per",
+        "Written for issue #346 (independence: replace inherited CPU runtime semantics; closed). One row per",
         "helper of `src/rt/recomp.c` and `src/rt/recomp.h`: where it is defined, whether `recomp.h`",
         "declares it, how generated code and the runtime reach it, and the provenance class of its",
         "defining file. It is a text inventory, not a call graph, a semantic review or a provenance",

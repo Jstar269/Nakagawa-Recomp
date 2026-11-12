@@ -11,6 +11,7 @@
 #include "nk_ui_widgets.h"
 
 #include <stdio.h>
+#include <math.h>
 #include <string.h>
 
 #define LIBRARY_ID(offset) NK_UI_ID(NK_UI_ID_SCREEN_LIBRARY, (offset))
@@ -56,7 +57,6 @@
 #define LIBRARY_ID_FIND_FIELD LIBRARY_ID(0x000091u)
 #define LIBRARY_ID_FIND_BOX LIBRARY_ID(0x000191u)
 #define LIBRARY_ID_FIND_TEXT LIBRARY_ID(0x000092u)
-#define LIBRARY_ID_FIND_KEYS LIBRARY_ID(0x000093u)
 #define LIBRARY_ID_FIND_ROW_BASE LIBRARY_ID(0x0000A0u)
 #define LIBRARY_ID_FIND_ROW_BASE_SPAN 0x10u
 #define LIBRARY_ID_NO_MATCH LIBRARY_ID(0x0000B0u)
@@ -73,13 +73,6 @@
 /* The LIBRARY heading's line height (NK_UI_TYPE_DISPLAY), reserved when working
    out how much room is left for the grid or the empty card. */
 #define LIBRARY_HEADING_ROW_HEIGHT NK_UI_CONTROL_HEIGHT_SMALL /* its FIND, SORT and pager buttons */
-/* The find box: the field row and four rows of keys, with the gap above. */
-#define LIBRARY_FIND_KEY_ROWS 4u
-#define LIBRARY_FIND_KEYS_PER_ROW 10u
-#define LIBRARY_FIND_HEIGHT                                                              \
-    (NK_UI_SPACE_4 + NK_UI_CONTROL_HEIGHT + NK_UI_SPACE_2 +                               \
-     (float)LIBRARY_FIND_KEY_ROWS * NK_UI_CONTROL_HEIGHT +                               \
-     (float)(LIBRARY_FIND_KEY_ROWS - 1u) * NK_UI_SPACE_1)
 /* The library notice under the heading (two NK_UI_TYPE_BODY lines) and its gap. */
 #define LIBRARY_ID_NOTICE LIBRARY_ID(0x000026u)
 #define LIBRARY_NOTICE_ROW_HEIGHT (44.0f + NK_UI_SPACE_4)
@@ -151,6 +144,30 @@ static float library_demo_row_height(float text_scale) {
     return content > LIBRARY_DEMO_ROW_HEIGHT ? content : LIBRARY_DEMO_ROW_HEIGHT;
 }
 
+/* A control NK_UI_CONTROL_HEIGHT_SMALL high whose text is in `role`: above the design text
+   size it grows to that text's line box (nk_ui_line_box). */
+static float library_small_control(NkUiTypeRole role, float text_scale) {
+    float height = NK_UI_CONTROL_HEIGHT_SMALL;
+    if (text_scale > 1.0f) {
+        float need = ceilf(library_line(role, text_scale) * 1.5f);
+        if (need > height) height = need;
+    }
+    return height;
+}
+
+/* The find box, with the gap above: the field, as tall as a key, and the shared keyboard
+   4 px under it (ui_keyboard_draw: its character rows and the Shift row, 4 px apart, the
+   last row 4 px lower). A character key has BODY text; the Shift row's buttons are small
+   buttons, with LABEL_S text (nk_ui_button_configuration). The box is worked out the way
+   it is drawn at every text size: at 100% text it is 282 px, so a row of cards still fits
+   under it at 1280 x 720. */
+static float library_find_height(float text_scale) {
+    float key = library_small_control(NK_UI_TYPE_BODY, text_scale);
+    float shift = library_small_control(NK_UI_TYPE_LABEL_S, text_scale);
+    return NK_UI_SPACE_4 + key + NK_UI_SPACE_1 +
+           (float)UI_KEYBOARD_CHAR_ROWS * (key + NK_UI_SPACE_1) + shift + NK_UI_SPACE_1;
+}
+
 static float library_tile_width(float width, size_t columns) {
     float available = width - 2.0f * library_gutter(width);
     float tile;
@@ -210,7 +227,7 @@ static size_t library_page_size(float logical_width, float logical_height, bool 
     grid_height = height - NK_UI_TOP_BAR_HEIGHT - NK_UI_PROMPT_BAR_HEIGHT -
                   NK_UI_BODY_PAD_TOP - NK_UI_BODY_PAD_BOTTOM -
                   library_heading_row_height(text_scale) - NK_UI_SPACE_4 -
-                  (finding ? LIBRARY_FIND_HEIGHT
+                  (finding ? library_find_height(text_scale)
                            : library_demos_height(demo_count, columns, text_scale));
     rows = grid_height > tile_height
         ? (size_t)((grid_height + NK_UI_TILE_ROW_GAP) / (tile_height + NK_UI_TILE_ROW_GAP))
@@ -300,9 +317,12 @@ static void library_prompts(NkUi *ui, bool has_titles, bool finding) {
         {NK_UI_PROMPT_ACT_OPTIONS, "Find"},
         {NK_UI_PROMPT_ACT_MENU, "Settings"}
     };
+    /* The find box's keyboard shortcuts, as the nickname editor names them. */
     static const NkUiPromptItem find[] = {
         {NK_UI_PROMPT_ACT_MOVE, "Move"},
         {NK_UI_PROMPT_ACT_CONFIRM, "Select"},
+        {NK_UI_PROMPT_ACT_OPTIONS, "Delete"},
+        {NK_UI_PROMPT_ACT_MENU, "Done"},
         {NK_UI_PROMPT_ACT_BACK, "Clear"}
     };
     static const NkUiPromptItem empty[] = {
@@ -319,28 +339,35 @@ static void library_prompts(NkUi *ui, bool has_titles, bool finding) {
                                 : sizeof(empty) / sizeof(empty[0]));
 }
 
-/* The on-screen keyboard's keys, row by row; a space is the space key. */
-static const char *const k_find_rows[LIBRARY_FIND_KEY_ROWS] = {
-    "1234567890", "QWERTYUIOP", "ASDFGHJKL-", "ZXCVBNM.' "
-};
+bool player_ui_find_accepts(uint32_t codepoint, void *user) {
+    (void)user;
+    return codepoint >= 0x20u && codepoint != 0x7Fu && !(codepoint >= 0x80u && codepoint < 0xA0u);
+}
 
-/* The find box: what is typed, DONE, and the keyboard for a controller or the
-   mouse. A hardware keyboard types straight into it. */
-static PlayerUiAction library_find_box(NkUi *ui, const PlayerUiLibraryModel *model) {
+/* The find box: what is typed, and the shared on-screen keyboard (#2206) for a
+   controller or the mouse, the nickname editor's, with its Done and Cancel. A
+   hardware keyboard types straight into it, through the same filter and cap. `pad`
+   holds the pad's shortcuts, taken before the top bar could take L / R or Start. */
+static PlayerUiAction library_find_box(NkUi *ui, const PlayerUiLibraryModel *model,
+                                       const UiKeyboardPad *pad) {
     const NkUiTheme *theme = nk_ui_theme(ui);
     PlayerUiAction result = action(PLAYER_UI_ACTION_NONE, 0u);
     NkUiLayout layout = layout_make(NK_UI_LAYOUT_COLUMN, sizing_grow(), sizing_fit(),
-                                    NK_UI_SPACE_2);
+                                    NK_UI_SPACE_1);
     if (!nk_ui_begin_container(ui, LIBRARY_ID_FIND, &layout, NULL)) return result;
     {
         NkUiLayout row = layout_make(NK_UI_LAYOUT_ROW, sizing_grow(), sizing_fit(),
                                      NK_UI_SPACE_3);
         row.align_y = NK_UI_ALIGN_CENTER;
         if (nk_ui_begin_container(ui, LIBRARY_ID_FIND_FIELD, &row, NULL)) {
-            NkUiLayout field = layout_make(NK_UI_LAYOUT_ROW, sizing_grow(),
-                                           sizing_fixed(NK_UI_CONTROL_HEIGHT), 0.0f);
-            NkUiStyle style;
             const char *query = safe_text(model->find_query, "");
+            NkUiTextStyle text = nk_ui_type(NK_UI_TYPE_BODY,
+                                            query[0] != '\0' ? theme->paper : theme->muted);
+            /* A key's height (ui_keyboard.c's keys), at every text size. */
+            NkUiLayout field = layout_make(
+                NK_UI_LAYOUT_ROW, sizing_grow(),
+                sizing_fixed(nk_ui_line_box(ui, NK_UI_CONTROL_HEIGHT_SMALL, &text)), 0.0f);
+            NkUiStyle style;
             memset(&style, 0, sizeof(style));
             style.fill_rgba = theme->surface_high;
             style.border_rgba = theme->line_strong;
@@ -351,8 +378,6 @@ static PlayerUiAction library_find_box(NkUi *ui, const PlayerUiLibraryModel *mod
             field.padding_right = NK_UI_SPACE_4;
             if (nk_ui_begin_container(ui, LIBRARY_ID_FIND_BOX, &field, &style)) {
                 char shown[96];
-                NkUiTextStyle text = nk_ui_type(NK_UI_TYPE_BODY,
-                                                query[0] != '\0' ? theme->paper : theme->muted);
                 text.wrap = false;
                 if (query[0] != '\0') {
                     (void)snprintf(shown, sizeof(shown), "%s|", query);
@@ -362,43 +387,30 @@ static PlayerUiAction library_find_box(NkUi *ui, const PlayerUiLibraryModel *mod
                 nk_ui_text(ui, LIBRARY_ID_FIND_TEXT, shown, &text);
                 nk_ui_end_container(ui);
             }
-            if (nk_ui_button(ui, PLAYER_UI_ID_LIBRARY_FIND_DONE, "Done", NK_UI_BUTTON_PRIMARY)) {
-                result = action(PLAYER_UI_ACTION_FIND_KEY, PLAYER_UI_FIND_DONE);
-            }
             nk_ui_end_container(ui);
         }
     }
-    /* Key rows sit 4 px apart, so a row of cards still fits under the box at
-       the 1280 x 720 design size. */
-    layout = layout_make(NK_UI_LAYOUT_COLUMN, sizing_fit(), sizing_fit(), NK_UI_SPACE_1);
-    if (nk_ui_begin_container(ui, LIBRARY_ID_FIND_KEYS, &layout, NULL)) {
-        for (uint32_t r = 0u; r < LIBRARY_FIND_KEY_ROWS; ++r) {
-            NkUiLayout row = layout_make(NK_UI_LAYOUT_ROW, sizing_fit(), sizing_fit(),
-                                         NK_UI_SPACE_2);
-            if (!nk_ui_begin_container(ui, LIBRARY_ID_FIND_ROW_BASE + r, &row, NULL)) continue;
-            for (uint32_t k = 0u; k < LIBRARY_FIND_KEYS_PER_ROW; ++k) {
-                char label[8];
-                char key = k_find_rows[r][k];
-                NkUiId id = (NkUiId)(PLAYER_UI_ID_LIBRARY_FIND_KEY_BASE +
-                                     r * LIBRARY_FIND_KEYS_PER_ROW + k);
-                (void)snprintf(label, sizeof(label), "%s", key == ' ' ? "Space" : "");
-                if (key != ' ') {
-                    label[0] = key;
-                    label[1] = '\0';
-                }
-                if (nk_ui_button(ui, id, label, NK_UI_BUTTON_ROW)) {
-                    result = action(PLAYER_UI_ACTION_FIND_KEY, (size_t)(unsigned char)key);
-                }
-            }
-            if (r + 1u == LIBRARY_FIND_KEY_ROWS &&
-                nk_ui_button(ui, PLAYER_UI_ID_LIBRARY_FIND_KEY_BASE + LIBRARY_FIND_KEY_ROWS *
-                                                                       LIBRARY_FIND_KEYS_PER_ROW,
-                             "Delete", NK_UI_BUTTON_ROW)) {
-                result = action(PLAYER_UI_ACTION_FIND_KEY, PLAYER_UI_FIND_DELETE);
-            }
-            nk_ui_end_container(ui);
+    if (model->find_keyboard != NULL) {
+        UiKeyboardView view;
+        memset(&view, 0, sizeof(view));
+        view.key_base = PLAYER_UI_ID_LIBRARY_FIND_KEY_BASE;
+        view.part_base = LIBRARY_ID_FIND_ROW_BASE;
+        view.done_id = PLAYER_UI_ID_LIBRARY_FIND_DONE;
+        view.cancel_id = PLAYER_UI_ID_LIBRARY_FIND_CANCEL;
+        view.pad = pad;
+        switch (ui_keyboard_draw(ui, model->find_keyboard, &view)) {
+        case UI_KEYBOARD_EDITED:
+            result = action(PLAYER_UI_ACTION_FIND_KEY, PLAYER_UI_FIND_EDITED);
+            break;
+        case UI_KEYBOARD_DONE:
+            result = action(PLAYER_UI_ACTION_FIND_KEY, PLAYER_UI_FIND_DONE);
+            break;
+        case UI_KEYBOARD_CANCEL:
+            result = action(PLAYER_UI_ACTION_FIND_KEY, PLAYER_UI_FIND_CANCEL);
+            break;
+        default:
+            break;
         }
-        nk_ui_end_container(ui);
     }
     nk_ui_end_container(ui);
     return result;
@@ -640,6 +652,9 @@ static bool library_heading_fits(NkUi *ui, const PlayerUiLibraryModel *model,
             used += 2.0f * NK_UI_SPACE_3 + nk_ui_button_width(ui, "Rebuild all", small) +
                     nk_ui_button_width(ui, "Hide", small);
         }
+        if (model->rebuild_notice_offers_queue) {
+            used += NK_UI_SPACE_3 + nk_ui_button_width(ui, "Queue", small);
+        }
     }
     if (page_count > 1u) {
         used += NK_UI_SPACE_4 + nk_ui_button_width(ui, "Previous", small) + NK_UI_SPACE_3 +
@@ -661,6 +676,8 @@ PlayerUiAction player_ui_screen_library(NkUi *ui,
     size_t demo_count;
     size_t game_count;
     bool has_games;
+    UiKeyboardPad find_pad;
+    memset(&find_pad, 0, sizeof(find_pad));
     if (ui == NULL || model == NULL) {
         return result;
     }
@@ -685,6 +702,11 @@ PlayerUiAction player_ui_screen_library(NkUi *ui,
     if (!nk_ui_begin_container(ui, LIBRARY_ID_ROOT, &layout, NULL)) {
         return result;
     }
+    /* While the find box's keyboard is up, its pad shortcuts are taken before the top
+       bar is drawn: L / R is Shift, not the next tab, and Start is Done, not Settings. */
+    if (model->find_open && model->find_keyboard != NULL) {
+        ui_keyboard_take_pad(ui, &find_pad);
+    }
     {
         PlayerUiActionKind tab = player_ui_top_bar(ui, LIBRARY_ID_TOP, PLAYER_UI_ROUTE_LIBRARY);
         if (tab != PLAYER_UI_ACTION_NONE) result = action(tab, 0u);
@@ -696,10 +718,10 @@ PlayerUiAction player_ui_screen_library(NkUi *ui,
     layout.padding_left = gutter;
     layout.padding_right = gutter;
     /* A page holds as many cards as fit at the text size, at least one row. In a
-       window too short for even that at a larger text size, the body scrolls
-       instead of pushing the prompt bar off the window; at the design text size
-       every page fits. */
-    layout.scroll = nk_ui_text_scale(ui) > 1.0f;
+       window too short for even that, the body scrolls instead of pushing the
+       prompt bar off the window, at any text size (the other pages do the same:
+       SCR_PAGE_BODY_SCROLLS in scr_shared.h). */
+    layout.scroll = true;
     if (nk_ui_begin_container(ui, LIBRARY_ID_BODY, &layout, NULL)) {
         size_t columns = model->columns > 0u ? model->columns : 1u;
         size_t page_size;
@@ -800,8 +822,9 @@ PlayerUiAction player_ui_screen_library(NkUi *ui,
                 }
             }
             /* Games an older Nakagawa built: one line with Rebuild all and
-               Hide, or the queue's count while it runs. Never the default
-               focus: that stays on the first card. */
+               Hide, or the build queue's count while it runs, with Queue,
+               which opens it. Never the default focus: that stays on the
+               first card. */
             if (model->rebuild_notice != NULL && model->rebuild_notice[0] != '\0') {
                 NkUiLayout notice = layout_make(NK_UI_LAYOUT_ROW, sizing_fit(), sizing_fit(),
                                                 NK_UI_SPACE_3);
@@ -820,6 +843,13 @@ PlayerUiAction player_ui_screen_library(NkUi *ui,
                                          NK_UI_BUTTON_SMALL | NK_UI_BUTTON_NOT_DEFAULT)) {
                             result.kind = PLAYER_UI_ACTION_REBUILD;
                             result.primary = (PlayerUiPrimaryAction)PLAYER_UI_REBUILD_HIDE_BANNER;
+                        }
+                    }
+                    if (model->rebuild_notice_offers_queue) {
+                        if (nk_ui_button(ui, PLAYER_UI_ID_LIBRARY_QUEUE, "Queue",
+                                         NK_UI_BUTTON_SMALL | NK_UI_BUTTON_NOT_DEFAULT)) {
+                            result.kind = PLAYER_UI_ACTION_QUEUE;
+                            result.primary = (PlayerUiPrimaryAction)PLAYER_UI_QUEUE_OPEN;
                         }
                     }
                     nk_ui_end_container(ui);
@@ -861,7 +891,7 @@ PlayerUiAction player_ui_screen_library(NkUi *ui,
         }
 
         if (model->find_open) {
-            PlayerUiAction key = library_find_box(ui, model);
+            PlayerUiAction key = library_find_box(ui, model, &find_pad);
             if (key.kind != PLAYER_UI_ACTION_NONE) result = key;
         }
         if (model->find_open && game_count == 0u) {

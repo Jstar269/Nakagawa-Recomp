@@ -4,10 +4,10 @@
 > launch/session core, bounded ISO/XB staging pipeline, and the library's
 > build-package / validate / launch route exist in the public source
 > ([#465](https://github.com/Jstar269/nakagawa-recomp/pull/465),
-> [#487](https://github.com/Jstar269/nakagawa-recomp/pull/487)). Module
-> decryption, retail-disc hash validation, progress reporting for every
-> preparation route, and end-user productization without the developer
-> toolchain remain unbuilt and are marked as targets below.
+> [#487](https://github.com/Jstar269/nakagawa-recomp/pull/487)), and so are local decryption of the user's own UMD
+> disc (#1494) and the disc check against the user's Redump list. Progress
+> reporting for every preparation route, and end-user play without compiling
+> on the user's PC, are not built and are marked as targets below.
 >
 > **Current build boundary:** The native player connects a bounded ISO/XB
 > staging pipeline for the first-time setup wizard. It records the extracted
@@ -20,9 +20,7 @@
 > without scripts: **BUILD PACKAGE** runs `tools/nk_cli.py build-package` with
 > live stage progress, and **PLAY NOW** starts a validated package (or a
 > non-experimental catalog title's developer runtime,
-> [#483](https://github.com/Jstar269/nakagawa-recomp/pull/483)). The legacy
-> `VIEW_PREPARING` screen is still an honest unavailable state, reachable today
-> only as a captured view.
+> [#483](https://github.com/Jstar269/nakagawa-recomp/pull/483)).
 
 ## 1. Goal: the "Program + ISO" contract
 
@@ -59,8 +57,8 @@ The player must never be forced to install MSYS2, Python, PowerShell 7, Git, or 
 ### 1.2 Truthful Prerequisite Discipline
 
 Where genuine LLE fidelity requires resources not found on the game disc (specifically, Sony firmware PGF fonts from `flash0:/font/`), the UI must **never fake success or silently substitute inferior host approximations**.
-Instead, the player UI honestly informs the user:
-> *"Authentic font rendering requires PSP firmware font assets. Place your `jpn0.pgf` in `%LOCALAPPDATA%\Nakagawa\fonts\` or click 'Continue with Synthetic Preview Font'."*
+Instead, the player says so: Settings > PSP fonts imports the fonts from the user's own PSP, and until then the
+runtime uses the project's open stand-in fonts and says they are not the PSP's.
 
 ---
 
@@ -75,9 +73,9 @@ The native player uses the existing SDL3 and Vulkan runtime to render its in-win
 | **Runtime Dependencies** | **None** (Self-contained) | Extensive shared libraries | Rust runtime | OS Webview (WebKitGTK on Linux) |
 | **Couch / Controller Navigation** | **First-Class** (SDL3 Gamepad API) | Complex focus management | Moderate | Web Gamepad API limits |
 | **Unified Game Window** | **Target** (launcher and title currently run as separate processes) | No (Separate launcher & render window) | No | No |
-| **In-Game Overlay Capable** | **Yes** (the pause overlay draws with nk_ui inside the runtime; the HUD and toasts are not ported yet) | No | No | No |
-| **Linux / Steam Deck Parity** | **Target** (SDL3/Vulkan; platform acceptance not run) | Good | Good | WebKitGTK packaging fragmentation |
-| **macOS (Metal/MoltenVK)** | **Target** (framework path; project acceptance not run) | Framework capability; project acceptance not run | Framework capability; project acceptance not run | Framework capability; project acceptance not run |
+| **In-Game Overlay Capable** | **Yes** (the pause overlay draws with nk_ui inside the runtime; the F3 performance HUD draws with SDL debug text) | No | No | No |
+| **Linux / Steam Deck Parity** | **Not supported** (the player builds on Linux for development; there is no Linux release and platform acceptance has not run) | Good | Good | WebKitGTK packaging fragmentation |
+| **macOS (Metal/MoltenVK)** | **Not supported** (framework capability only; project acceptance not run) | Framework capability; project acceptance not run | Framework capability; project acceptance not run | Framework capability; project acceptance not run |
 | **Build-System Burden** | **Target: native Makefile path** (developer toolchain still required today) | Heavy (CMake + MOC + UIC) | Heavy (Requires Cargo / Rustc) | Heavy (Node + Rust toolchains) |
 | **Startup Latency** | **Target estimate; not acceptance evidence** | ~300–600 ms | ~100 ms | ~400–800 ms |
 
@@ -86,22 +84,22 @@ The native player uses the existing SDL3 and Vulkan runtime to render its in-win
 **SDL3 with an in-engine retained/immediate UI layer** was decisively chosen because:
 
 1. **Unified Installation Experience (Target)**: The product goal is one install with a coherent launcher and game experience. The current source starts a prepared title as a separate child through `nk_launch_start`; it does not make the launcher and game a single executable.
-2. **Future Outside/Inside Presence**: A shared UI system is intended to drive the launcher outside the game and an in-game pause overlay (`Esc`, `F1` or the gamepad's `Guide`). The pause is implemented (a scheduler stall with the overlay holding all input, [Clocks](ARCHITECTURE.md#clocks)), and so are its screens, drawn with nk_ui by the runtime ([In-game overlay](PLAYER_UI_DESIGN.md#in-game-overlay-c9c-built)).
+2. **Outside/Inside Presence**: A shared UI system drives the launcher outside the game and an in-game pause overlay (`Esc`, `F1` or the gamepad's `Guide`). The pause is implemented (a scheduler stall with the overlay holding all input, [Clocks](ARCHITECTURE.md#clocks)), and so are its screens, drawn with nk_ui by the runtime ([In-game overlay](PLAYER_UI_DESIGN.md#in-game-overlay-c9c-built)).
 3. **No Web / Server Overhead**: Eliminates Node.js, localhost HTTP listeners, port collisions, browser sandbox restrictions, and security boundary headaches.
 
 ### Layout library and language
 
 The native player's UI is written in C on SDL3 and Vulkan, and its layout uses **Clay**, a single-header C layout library ([github.com/nicbarker/clay](https://github.com/nicbarker/clay)). Upstream's `LICENSE.md` identifies the license as zlib/libpng (`Zlib`); the pinned header, license, and provenance are recorded under `third_party/clay/`. This has three parts:
 
-1. **One UI system (target)**: the launcher, the in-game overlay and the settings screens are planned to share one UI system. It is drawn at the window's real pixel size (the UI half of [#1129](https://github.com/Jstar269/nakagawa-recomp/issues/1129)) and is controller-first.
-2. **Rust is not adopted for the UI**: Rust may be used later, behind a C ABI, only for isolated parsers of untrusted input (ISO, SFO, PGF), and only if fuzzing justifies it.
+1. **One UI system**: the launcher, the in-game overlay and the settings screens share one UI system. It is drawn at the window's real pixel size (the UI half of [#1129](https://github.com/Jstar269/nakagawa-recomp/issues/1129)) and is controller-first.
+2. **Rust is not used**: the UI and the parsers of untrusted input (ISO, SFO, PGF) are written in C.
 3. **Reasons**: one interface serves both the overlay and the launcher; SDL3 already supports Android, a platform the roadmap names; and a Rust UI framework would add hundreds of crates to track under the project's provenance rules, while Clay is one C header.
 
-Not done yet:
+Status:
 
 - **Clay is vendored at upstream `main` (`e6cc36941ab2`, 2026-05-20; no release is tagged after v0.14) and its paths have trusted provenance admission.** `src/ui/` (nk_ui) wraps it with the theme, text, focus, input and SDL_Renderer layers.
-- **The nk_ui launcher is the default.** It draws the Library, Title detail, About, the setup wizard, package build progress, the build-tool download, the error card, the card a disc gets when it is added, Settings with its online, notices and removal pages, the controller settings screen with its calibration steps, and the developer log, with the design system in section 8. It is the only launcher: the shipped player has no switch to the old renderer, and when the launcher cannot start (its fonts missing from an incomplete ZIP extraction) the player says why in a message box, tells the user to extract the ZIP again, and exits with code 4. The old `ui_renderer.c` stays only for regression tests that still pin it (`--ui=legacy`, in the `NK_PLAYER_UI_REGRESSION_TEST` build).
-- The in-game overlay is built on nk_ui inside the runtime (`src/rt/overlay/`); settings, first run and error dialogs on nk_ui are targets, specified in section 8.
+- **The nk_ui launcher is the only launcher.** It draws the Library, Title detail, About, the setup wizard, package build progress, the build-tool download, the error card, the card a disc gets when it is added, Settings with its online, notices and removal pages, the controller settings screen with its calibration steps, and the developer log, with the design system in section 8. The shipped player has no switch to the old renderer (an old shortcut's `--ui=next` or `--ui=legacy` is named on stderr and ignored), and when the launcher cannot start (its fonts missing from an incomplete ZIP extraction) the player says why in a message box, tells the user to extract the ZIP again, and exits with code 4. The old renderer, `ui_renderer.c`, and its `--ui=legacy` switch were removed in #2071; the shipped player keeps the `--screenshot` capture (`player_host_save_screenshot`).
+- The in-game overlay is built on nk_ui inside the runtime (`src/rt/overlay/`), and so are Settings, the setup wizard and the error card, specified in section 8.
 
 ---
 
@@ -110,8 +108,7 @@ Not done yet:
 The diagram below is the target separation. The implemented public slice currently reaches
 title lookup, bounded ISO inspection and ISO/XB staging, library package build and
 validation, launch-session validation, and child-process lifecycle. The player decrypts
-a UMD disc's encrypted program files locally with built-in tables (#1494); retail-disc hash
-validation and overlay parity remain unbuilt.
+a UMD disc's encrypted program files locally with built-in tables (#1494) and checks it against the user's Redump list.
 
 ```text
 ┌────────────────────────────────────────────────────────┐
@@ -154,11 +151,11 @@ The flow below is the complete productization target, not a description of the c
 executable. Today the player opens a native SDL file picker, inspects a selected ISO, runs
 bounded ISO/XB staging for supported inputs, builds a runtime package from the library with
 live stage progress, and launches a validated package ([#487](https://github.com/Jstar269/nakagawa-recomp/pull/487)). The player decrypts the encrypted
-executable and modules of a UMD disc image you own, locally, when it checks the disc ([#1494](https://github.com/Jstar269/nakagawa-recomp/pull/1494)); retail-disc hash validation
-and one-click play from an arbitrary ISO without the developer toolchain remain unbuilt
+executable and modules of a UMD disc image you own, locally, when it checks the disc ([#1494](https://github.com/Jstar269/nakagawa-recomp/pull/1494)); one-click play from an arbitrary ISO without the developer toolchain
+is not built
 ([#308](https://github.com/Jstar269/nakagawa-recomp/issues/308)).
 
-1. **Immediate Window Appearance**: The SDL3 window initializes and presents the UI in under 100 milliseconds.
+1. **Immediate Window Appearance**: The SDL3 window presents the UI before any disc read, indexing or extraction. Its latency is not measured.
 2. **Game Library View**: Displays supported games. If no game is configured, the prominent hero card invites the player: *"Select a PSP ISO you own"*.
 3. **Native File Selection**: Clicking *"Add Game"* invokes SDL3's native file-dialog API; the platform backend supplies the operating-system picker behavior.
 4. **Instant ISO Qualification**: The inspector reads the ISO9660 PVD and `PARAM.SFO` in memory, extracting `DISC_ID` (e.g. `UCUS98701`), Title, and Region.
@@ -228,7 +225,7 @@ update carries only:
   staging transaction, not emitted as per-event progress data.
 - **Truthfulness**: Percentages are derived from the bounded ISO byte/file walk and XB
   entry completion. Stage labels such as `DECRYPTING_MODULES`, elapsed time, and richer
-  preparation-route metrics are a future contract, not fields populated by this worker.
+  preparation-route metrics are not fields populated by this worker.
 
 ### Transactional Integrity
 
@@ -242,16 +239,16 @@ update carries only:
 Instead of exposing raw exception stack traces or compiler lines, errors provide a stable code, human explanation, and actionable remediation:
 
 - `ISO_UNSUPPORTED_TITLE`: *"This PSP title (DISC_ID) is not currently supported by Nakagawa."*
-- `ISO_UNREADABLE`: *"The selected file could not be read. Ensure the image is a valid ISO9660 disc."*
+- `ISO_CORRUPT`: *"The picked file is not a PSP disc image."*
 - `STAGED_EXECUTABLE_INVALID`: *"The staged executable does not match the selected title's ELF/load contract."*
 - `LIBRARY_WRITE_FAILED`: *"The game was staged, but the library record could not be saved."*
-- `MISSING_FIRMWARE_FONT`: *"Authentic typography requires jpn0.pgf in %LOCALAPPDATA%\Nakagawa\fonts\."*
+- `SOURCE_NOT_FOUND`: *"The game's source file is no longer where the library recorded it."*
 
 ---
 
 ## 6. Controller & High-DPI Navigation
 
-- **Gamepad First**: D-Pad and mapped buttons provide navigation; Cross (A) selects and Circle (B) goes back. Left-stick navigation remains a target until axis events are handled.
+- **Gamepad First**: D-Pad and mapped buttons provide navigation; Cross (A) selects and Circle (B) goes back. The left stick navigates too.
 - **High-DPI Scaling**: DPI-aware raster text uses density-specific SDL_ttf size buckets. Vector/SDF typography remains a target.
 - **Theme**: Modern dark court palette with crisp contrast, soft glass panels, and clear visual hierarchy.
 
@@ -265,14 +262,16 @@ The native player provides a dedicated Controller Settings screen (`VIEW_CONTROL
 - **Live Input Monitor**: A real-time visualizer panel displays active host button presses, numerical stick coordinates, and an interactive 2D deadzone box so users can immediately observe calibration effects.
 - **Safe Navigation & Defaults**: Keyboard Escape always backs out or cancels capture, preventing navigation lockouts. "RESET DEFAULTS" restores the baseline profile.
 - **Per-Title Mapping Choice**: the screen states which mapping it is editing, and a "USE GLOBAL MAPPING" / "USE THIS GAME MAPPING" control switches scope for the selected library disc ([#520](https://github.com/Jstar269/nakagawa-recomp/issues/520)). A disc's own mapping is seeded from the global one, so the first edit in that scope changes only what the user changed; choosing the global mapping again drops that disc's entry. The library card carries the same choice as a "MAPPING: GLOBAL" / "MAPPING: THIS GAME" button.
-- **Unified Atomic Persistence**: every change is saved as it is made: the whole profile document is written atomically (the global mapping plus the per-disc entries, profile schema 4) via a temporary file and rename to `<config>/input_profile.json`, shared with the runtime. An interrupted write leaves the previous file intact, and an invalid entry is refused before anything is written.
+- **Unified Atomic Persistence**: every change is saved as it is made: the whole profile document is written atomically (the global mapping plus the per-disc entries, profile schema 5) via a temporary file and rename to `<config>/input_profile.json`, shared with the runtime. An interrupted write leaves the previous file intact, and an invalid entry is refused before anything is written.
 - **Guided Stick & Trigger Calibration**: A multi-stage calibration wizard ("CALIBRATE STICK & TRIGGERS") guides the user through:
   1. *Resting state*: sampling resting analog stick and trigger axes for 1000 ms to establish neutral/center points.
   2. *Extremes state*: interactive live sampling where the user presses each trigger fully and rotates analog sticks in circles to capture maximum physical excursions.
   3. *Review & Accept*: visual summary of captured resting and extreme values with Accept or Cancel actions.
-  Values are stored in the unified `input_profile.json` (schema 4; schema 1 to 3 files still load) and applied during analog and trigger transform evaluations. Keyboard Escape or gamepad East button safely cancels at any point.
-- **In-game pause**: `Esc`, `F1` or the gamepad's `Guide` pauses a running game, and so does disconnecting its controller. The scheduler stops the guest ([issue #1171](https://github.com/Jstar269/nakagawa-recomp/issues/1171), the [Clocks section](ARCHITECTURE.md#clocks)); the window shows the last game frame under the scrim and holds all input, and a button held as the pause closes does not reach the game as a press. Focus loss and window minimization do not auto-pause in v0.0.1.
+  Values are stored in the unified `input_profile.json` (schema 5; schema 1 to 4 files still load) and applied during analog and trigger transform evaluations. Keyboard Escape or gamepad East button safely cancels at any point.
+- **In-game pause**: `Esc`, `F1` or the gamepad's `Guide` pauses a running game, and so does disconnecting its controller. The scheduler stops the guest ([issue #1171](https://github.com/Jstar269/nakagawa-recomp/issues/1171), the [Clocks section](ARCHITECTURE.md#clocks)); the window shows the last game frame under the scrim and holds all input, and a button held as the pause closes does not reach the game as a press. Focus loss and window minimization do not auto-pause.
+- **Screenshots**: `F12` in the game window saves the next picture the game presents as a PNG in the `screenshots` folder of the user data folder, named `<disc ID>_<YYYYMMDD>-<HHMMSS>.png` (`-2`, `-3` and so on for more in the same second). The picture is the game's frame at its render scale, before the presentation upscaler and without the pause overlay or the performance HUD. While the game is paused nothing is presented, so a press then saves the first frame after it resumes. The file stays on your PC. A run that a developer capture (`SR_FBDUMP`, `SR_FBSNAP`) owns prints `SCREENSHOT: not saved` instead. The key is in the SDL3/Vulkan window only; the GDI presenter has none (`src/rt/fbcap.c`, `src/rt/hle_display.c`).
 - **Pause overlay** ([issue #1159](https://github.com/Jstar269/nakagawa-recomp/issues/1159)): the runtime draws the pause menu (resume, settings, controls, quit to library) and the controller-disconnected dialog with nk_ui over the frozen frame (`src/rt/overlay/`, hosted by `src/rt/gui.c`). Fullscreen, game scaling, frame pacing (PSP timing or no extra cap) and the performance HUD change for the rest of the run; the library's Settings keep what a game starts with. The controls page shows the mapping in force. Quitting is refused while the game is saving. The launcher passes the game's name, its disc ID and the player's folder (`SR_GAME_TITLE`, `SR_DISC_ID`, `SR_UI_ROOT`), where the runtime finds the UI fonts and SDL3_ttf; without them the pause shows the frozen frame alone.
+- **Fast forward**: in an Enhanced or Ace run, holding `Tab` (unless your controls bind it to a PSP button) or pressing `F9` runs the game three times as fast, with its sound muted until it returns to normal speed. It has no effect in Authentic mode or while the game is paused ([Fast Forward](ENHANCEMENT_CONTRACT.md#1015-fast-forward)).
 
 ---
 
@@ -287,7 +286,7 @@ Selecting the right open-source fonts for nakagawa-recomp depends on whether you
 - [Nunito](https://fonts.google.com/specimen/Nunito) (SIL OFL): A clean, rounded display sans that provides high legibility on lower rendering resolutions and handheld screens.
 - [Teko](https://fonts.google.com/specimen/Teko) or [Bebas Neue](https://fonts.google.com/specimen/Bebas+Neue) (SIL OFL): Condensed, high-impact athletic display fonts suited for scoreboards, serve speed readouts, and game-point banners.
 
-### Launcher, Overlay & Settings UI (Clay on SDL3, planned)
+### Launcher, Overlay & Settings UI (Clay on SDL3)
 
 The player ships Chakra Petch, Geist, Geist Mono and Noto Sans JP (`assets/fonts/ui/`, section 8); the faces below
 were the initial survey.
@@ -309,26 +308,3 @@ were the initial survey.
 
 The visual spec the player UI lanes (C5-C10) build against, with its tokens, components and the screen specs for
 Settings, first run, error dialogs and the in-game overlay, is [`PLAYER_UI_DESIGN.md`](PLAYER_UI_DESIGN.md).
-
-## 9. System check (planned)
-
-A **System check** page verifies that this PC can run every part of Nakagawa. It
-is a button in Settings, and the setup wizard's last step offers it ("Check this PC, about 2 minutes", skippable). Each
-row shows a pass or a named failure with the fix, in plain words:
-
-| Check | How |
-| --- | --- |
-| Graphics | Vulkan starts and the GPU and driver are named; the software fallback is reported when Vulkan does not start |
-| Display and fonts | The UI fonts load and text draws at the display's scaling |
-| Audio | The output device opens and a short tone plays, which the user confirms |
-| Input | A controller is detected, and a "press each button" test fills in a picture |
-| Storage | The data folders are writable and there is room for a typical package |
-| Build tools | Python, the compiler and make are found with their versions, or the consented download is offered |
-| Full pipeline | The project's own showcase demo is analysed, recompiled, built and launched for a few frames, proving the whole route works on this PC without any game |
-| Online | Only with online mode on: the host answers and the update notice's signature verifies |
-| Nakagawa Link | Later, only when the user has it: the PSP is found over USB |
-
-It never claims that a particular game works: game compatibility stays on each title's card. It reuses the
-prerequisite preflight, the showcase fixtures (project-made, no game data), the developer log from developer mode
-([`ONLINE_FEATURES.md`](ONLINE_FEATURES.md#developer-mode)), and, once online mode exists, the report flow with its
-preview ("Send this result").

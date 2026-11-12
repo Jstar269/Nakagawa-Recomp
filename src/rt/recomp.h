@@ -207,6 +207,14 @@ static inline uint32_t sr_vfpu_uc2i(uint32_t b) {
     return ((b & 0xffu) * 0x01010101u) >> 1;
 }
 
+/* vus2i: one unsigned 16-bit half h to the word h << 15 (zero-extended, not the vuc2i
+ * replicate); vs2i's twin is h << 16. Unrecorded PSP read (PSP-3000, 2026-11-08, issue #326,
+ * probe case vfpu-vus2i): 0x0000ffff -> 0x7fff8000, 0x8000 -> 0x40000000 and
+ * 0x12345678 -> 0x2b3c0000 (low half) and 0x091a0000 (high half). */
+static inline uint32_t sr_vfpu_us2i(uint32_t h) {
+    return (h & 0xffffu) << 15;
+}
+
 /* vwbn.s with exponent imm8 e: a word whose exponent field is 0xff passes unchanged.
  * Otherwise the significand (implicit bit included for a normal, the raw mantissa for a
  * zero or denormal) shifts left by (x_exp - e) & 15 when x_exp > e, right by
@@ -1111,8 +1119,6 @@ uint32_t sr_bitrev(uint32_t x);
  * too: generated code calls it where a codegen temporary compatibility patch applies. */
 void sr_compat_fired(const char *collection, uint32_t anchor, const char *name);
 
-/* PSP-EABI bridge used by the generated guest sprintf entry. */
-void sr_guest_sprintf(CpuState *s);
 /* Format the guest string at `fmt` with variadic words starting in register
  * `first_reg` into a bounded host buffer (NUL-terminated; never guest-visible).
  * Returns the full formatted length, as printf does. */
@@ -1126,24 +1132,42 @@ int sr_guest_format_host(CpuState *s, uint32_t fmt, uint32_t first_reg,
 void sr_vread(float *r, const CpuState *s, const uint8_t *idx, int n, uint32_t prefix);
 void sr_vwrite(CpuState *s, const uint8_t *idx, float *d, int n, uint32_t dprefix);
 
+/* The VFPU sum-of-products adder (sr_vfpu_dot_bits in recomp.c, PSP-VFPU-FUNNEL-001 and
+ * the unrecorded vfpu-wide-dot-matrix read): sum(a[i] * b[i]) for i < n <= 4, with the products aligned and
+ * summed in integers, not as a chain of float adds. sr_vfpu_interp and the generated code
+ * call it for vdot, vhdp, vcrsp, vqmul, vmmul, vtfm and vhtfm; vfad and vavg run on it too.
+ * The caller negates an operand for a subtracted term. It is out of line: inlined, a
+ * 16-lane vmmul.q body grew about twenty-fold. */
+uint32_t sr_vfpu_dot_bits(const uint32_t *a, const uint32_t *b, int n);
+static inline float sr_vfpu_sop(const float *fa, const float *fb, int n) {
+    uint32_t a[4], b[4];
+    for (int i = 0; i < n; i++) {
+        memcpy(&a[i], &fa[i], 4);
+        memcpy(&b[i], &fb[i], 4);
+    }
+    const uint32_t r = sr_vfpu_dot_bits(a, b, n);
+    float out;
+    memcpy(&out, &r, 4);
+    return out;
+}
+
 /* VFPU lane arithmetic with the NaN result fixed by rule (issue #326). C leaves the NaN
  * that a NaN-producing operation returns to the host: x86-64 SSE keeps the first NaN
  * source, and an optimiser may swap the operands of a commutative + or *. So the
  * generated code and sr_vfpu_interp, each compiled on its own, kept different NaNs when
  * two met (the alias-edge sweep in tests/native/vfpu_interp_selftest.c, built at -O1 or
- * -O2). Both lanes call these helpers for every lane operation of vadd, vsub, vmul, vdiv,
- * vscl, vdot, vhdp, vcrs, vcrsp, vqmul, vmmul, vtfm and vmscl. The rule: the first NaN
+ * -O2). Both lanes call these helpers for every lane operation of vcrs (vadd, vsub, vmul,
+ * vscl, vdiv and vmscl use the measured sr_vfpu_* rule below, and vdot, vhdp, vcrsp, vqmul,
+ * vmmul and vtfm the sum-of-products adder above). The rule: the first NaN
  * operand, quieted, else the invalid-operation NaN 0xFFC00000 (Inf - Inf, 0 * Inf, 0 / 0,
  * Inf / Inf). That is what x86-64 SSE returns for the operands in source order, but it is a
  * change for default builds too: even at -O0 (RECOMP_OPT, the Makefile default) GCC may
  * evaluate a plain + or * with its operands swapped, as MSYS2 GCC 16.2 does for the old
- * vadd and vmul lane loops, so NaN-with-NaN lanes of vadd, vmul, vcrsp and vqmul now keep
- * the first source where they used to keep the second. Results without a NaN are unchanged.
+ * vadd and vmul lane loops, so NaN-with-NaN lanes of vadd and vmul now keep the first
+ * source where they used to keep the second. Results without a NaN are unchanged.
  * It is project semantics, not PSP evidence: the PSP's NaN word for these forms is
- * unmeasured or contested. docs/HARDWARE_ORACLE.md PSP-GE-001 and the issue #40 fixture
- * fixtures/vfpu_nan_payload/vfpu_nan_cases.h disagree, and the dot-product adder measured
- * as PSP-VFPU-FUNNEL-001 (vfpu_dot_bits in vfpu_interp.c, used by vfad and vavg) returns
- * the fixed 0x7F800001 for any NaN operand, which this rule for vdot does not follow.
+ * unmeasured. The sum-of-products forms follow sr_vfpu_dot_bits above instead, which
+ * returns the fixed 0x7F800001 for any NaN operand as the console did.
  * At -O0 GCC does not inline these static inline helpers, so an ad-hoc build makes one
  * call per lane operation; package builds (-O1, PACKAGE_RECOMP_OPT) inline them. */
 static inline float sr_vf_nan(float a, float b) {
@@ -1159,7 +1183,55 @@ static inline float sr_vf_nan(float a, float b) {
 static inline float sr_vf_add(float a, float b) { const float r = a + b; return r == r ? r : sr_vf_nan(a, b); }
 static inline float sr_vf_sub(float a, float b) { const float r = a - b; return r == r ? r : sr_vf_nan(a, b); }
 static inline float sr_vf_mul(float a, float b) { const float r = a * b; return r == r ? r : sr_vf_nan(a, b); }
-static inline float sr_vf_div(float a, float b) { const float r = a / b; return r == r ? r : sr_vf_nan(a, b); }
+
+/* vadd, vsub, vmul, vscl and vdiv lane arithmetic as a PSP-3000 returned it (unrecorded PSP
+ * read, 2026-11-08, issue #326; probe case vfpu-basic-arith, 20 operand classes, all 400
+ * ordered pairs, .s/.p/.t/.q identical). IEEE float32 with denormals flushed to a zero of
+ * their sign on input. The output flush is measured only for vdiv (1 / 2^127 and 1 / FLT_MAX
+ * give +0); the 20 classes reach no denormal result of vadd, vsub or vmul, so their output
+ * flush extends the vdiv result by rule and is pinned by derived cells, not console ones. A NaN result
+ * is never an input payload: vadd and vsub give 0x7f800001 for a NaN operand or Inf - Inf,
+ * and vmul, vscl and vdiv give 0x7f800001 with the sign bit XOR of the two operand signs
+ * for a NaN operand, 0 * Inf, 0 / 0 or Inf / Inf. vdiv was measured at .s only; the other
+ * widths use the same lane rule. The other forms that call sr_vf_* keep the project rule
+ * above until they are measured. */
+static inline uint32_t sr_vfpu_bits(float x) {
+    uint32_t u;
+    memcpy(&u, &x, 4);
+    return u;
+}
+static inline float sr_vfpu_from_bits(uint32_t u) {
+    float x;
+    memcpy(&x, &u, 4);
+    return x;
+}
+static inline float sr_vfpu_daz(float x) {
+    const uint32_t u = sr_vfpu_bits(x);
+    return (u & 0x7f800000u) == 0u ? sr_vfpu_from_bits(u & 0x80000000u) : x;
+}
+static inline float sr_vfpu_nan_signed(float a, float b) {
+    return sr_vfpu_from_bits(0x7f800001u | ((sr_vfpu_bits(a) ^ sr_vfpu_bits(b)) & 0x80000000u));
+}
+static inline float sr_vfpu_add(float a, float b) {
+    a = sr_vfpu_daz(a); b = sr_vfpu_daz(b);
+    const float r = a + b;
+    return r == r ? sr_vfpu_daz(r) : sr_vfpu_from_bits(0x7f800001u);
+}
+static inline float sr_vfpu_sub(float a, float b) {
+    a = sr_vfpu_daz(a); b = sr_vfpu_daz(b);
+    const float r = a - b;
+    return r == r ? sr_vfpu_daz(r) : sr_vfpu_from_bits(0x7f800001u);
+}
+static inline float sr_vfpu_mul(float a, float b) {
+    a = sr_vfpu_daz(a); b = sr_vfpu_daz(b);
+    const float r = a * b;
+    return r == r ? sr_vfpu_daz(r) : sr_vfpu_nan_signed(a, b);
+}
+static inline float sr_vfpu_div(float a, float b) {
+    a = sr_vfpu_daz(a); b = sr_vfpu_daz(b);
+    const float r = a / b;
+    return r == r ? sr_vfpu_daz(r) : sr_vfpu_nan_signed(a, b);
+}
 
 /* VFPU transcendentals, exact ports of PPSSPP's table-based kernels (the PSP hardware does
  * not compute these with IEEE math). The lookup tables are loaded once from assets/vfpu/
@@ -1474,6 +1546,30 @@ int sr_enhancement_file_register(const char *disc_path, const uint8_t stock_sha2
  * sr_enhancement_logic_slowed() may be called from the presenter thread. */
 void sr_enhancement_register_updates(const volatile uint32_t *counter);
 int sr_enhancement_logic_slowed(unsigned *rate);
+/* A clip_x_widen site (section 10.8), from generated code right after the call at the site
+ * returns: the guest pointer `base` plus each of the `count` offsets addresses a column-major 4x4
+ * float clip matrix, and its x output row (elements 0, 4, 8, 12) is scaled by 480 / (480 + 2 * wing),
+ * so a title's own visibility test accepts the same extra width the Widescreen wings draw. It does
+ * nothing while Widescreen is off (wing 0) or the run's cull key is off, so the guest sees its stock
+ * matrices; a matrix outside guest RAM is reported once on stderr and left alone. A matrix whose x
+ * row still holds the words this function wrote is not scaled again, so a title that does not rebuild
+ * a matrix at every call cannot be scaled twice; the call at the site must leave each listed matrix
+ * describing the camera it was built for (rewritten, or unchanged since the last call). */
+void sr_enhancement_widen_clip_x(uint32_t base, const uint32_t *offsets, uint32_t count);
+/* A vblank_wait_skip site of a package's Ace load part (section 9.8), from generated code at the
+ * site's jal to sceDisplayWaitVblankStart, after its delay slot (src/rt/hle_display.c): nonzero
+ * only while the run's Ace line carries load=fast (nk_ace_load_fast(), src/rt/ace.c, which counts
+ * each skip) and waits are permitted, and then that call is skipped, the thread blocks for 1 us
+ * (sceKernelDelayThread(1)'s delay wait, so threads of any priority run) and $v0 = 0. Where waits are
+ * not permitted it returns 0, so the stock call runs and returns CAN_NOT_WAIT. Never gated by
+ * SR_EXPERIMENTAL_60HZ. site and pc are the site's id and its jal's address. It stops skipping
+ * for the rest of the run once a skip has happened in ACE_LOAD_PACING_UPDATES (src/rt/ace.h)
+ * logic updates in a row, as counted by nk_ace_load_update(). */
+int nk_ace_load_skip_wait(CpuState *s, const char *site, uint32_t pc);
+/* One logic update begins: generated code calls it at the package's update_boundary, ungated,
+ * when the package has an Ace load part (src/rt/ace.c; contract 11.3.10). It only feeds the load
+ * part's pacing guard and does nothing unless the run's load=fast is in effect. */
+void nk_ace_load_update(void);
 
 /* The kernel's record of the main module, emitted by tools/codegen.py from the ELF (PT_LOAD
  * segments, SceModuleInfo, section or program headers, and the syslib's
@@ -1590,6 +1686,16 @@ void     dispatch_call(CpuState *s, uint32_t target, uint32_t resume_pc);
  * call's own return boundary, as a direct call has. Returns 1 when the caller must
  * return without running its continuation (sr_aot_return_boundary_end). */
 int      dispatch_call_checked(CpuState *s, uint32_t target, uint32_t resume_pc);
+/* The interpreter's linked call (guest_interp.c): 1 when the COSIM guest lane refused an
+ * import under it and the interpreter must return with that fatal flow, else 0 (#2196). */
+int      dispatch_call_interp(CpuState *s, uint32_t target, uint32_t resume_pc);
+/* Set only by the COSIM guest lane (domain_mode.c): its refused import unwinds through
+ * dispatch_call_checked, dispatch_call_continue, dispatch_call_interp, dispatch_tail_step
+ * and dispatch instead of ending the run. */
+extern volatile int sr_dispatch_unwind_requested;
+/* The COSIM guest lane's import refusal (recomp.c, #2201): 1 when the lane holds and the
+ * import `nid` was refused (fatal flow and the unwind flag set), else 0 and nothing changes. */
+int      sr_guest_lane_refuse_import(CpuState *s, uint32_t nid);
 
 /* A computed jr/jalr whose target register holds 0 is a null code pointer (#1375): report
  * it and stop the run. Generated code tests the latched target before the transfer's link
@@ -1726,7 +1832,23 @@ int sr_aot_return_boundary_capture_return(CpuState *s, uint32_t target, const ui
  * restore of its entry SP once the chain completes; the drain applies the first restore
  * recorded in its chain, which is the value the nested native returns used to leave. It
  * gives back a frame the chain handed on live, so it only raises SP: a chain that ends
- * above it left through a longjmp or an unwind, and the guest's SP stands (#1935).
+ * above it left through a longjmp or an unwind, or freed a frame that a body owing no
+ * restore (one that switched stacks) allocated and handed on, and the guest's SP stands
+ * (#1935).
+ *
+ * A body whose $sp load left its frame, a context switch or a longjmp, may have moved the
+ * guest out of frames the chain entered before it, so its record releases them
+ * (SR_TAIL_RELEASES) with a bound, `release_sp`: a load below where $sp was (a switch) leaves
+ * every frame, and one at or above the body's entry $sp leaves those whose restore is at or
+ * below the $sp it loaded. A load that stays inside an earlier body's frame, such as an
+ * alloca free in a piece of it, keeps that body's restore. At the load, a switch to a stack
+ * that itself lies inside that frame (a coroutine stack in a caller's locals) looks the same,
+ * so it also keeps the restore, and the chain ends at that body's entry SP instead of on the
+ * switched stack; that case stays open (#1935). A voided restore is no longer the
+ * first, and a later body's restore is again. A body that ends that way by returning, with no
+ * record, says so in `released` (sr_tail_note_exit) for the drain that ran it; every other
+ * invoker clears it, since the body's caller is then native code that goes on in its own
+ * frame (#1935).
  *
  * A transfer to a computed target is one dispatch (dispatch_tail_step). The direct transfers
  * that follow it used to nest inside that dispatch, so the step drains them itself
@@ -1738,9 +1860,19 @@ typedef struct {
     CpuState *state;        /* the CpuState that recorded the transfer */
     uint32_t target;        /* guest target address */
     uint32_t restore_sp;    /* the recording body's entry SP, when it owes the restore */
+    uint32_t release_sp;    /* the release's bound: earlier restores at or below it are void */
     uint8_t pending;
-    uint8_t has_restore;
+    uint8_t has_restore;    /* SR_TAIL_OWES and SR_TAIL_RELEASES */
+    uint8_t released;       /* the body just run returned out of its frame (no record) */
 } SrTailTransfer;
+/* The recording body owes `restore_sp` once the chain completes. */
+#define SR_TAIL_OWES 1u
+/* The recording body loaded $sp out of its frame: the restores recorded before it at or below
+ * `release_sp` are void. A drain segment passes on both bits for its part of the chain, the
+ * release first. */
+#define SR_TAIL_RELEASES 2u
+/* The bound of a load below where $sp was: it leaves every frame. */
+#define SR_TAIL_RELEASES_ALL 0xFFFFFFFFu
 extern SrTailTransfer sr_tail_transfer;    /* defined in guest_interp.c */
 /* Fatal, named stop for a broken protocol (double record, leaked slot, foreign state). */
 void sr_tail_fatal(const char *what, uint32_t target);
@@ -1753,24 +1885,47 @@ void sr_tail_drain_segment(CpuState *s);
  * successors; the enclosing drain loop runs the next computed transfer. */
 void dispatch_tail_step(CpuState *s, uint32_t target);
 
+/* `verdict` is SR_TAIL_OWES, SR_TAIL_RELEASES or 0, and `sp` the SP it names: the entry SP
+ * owed, or the release's bound. */
 static inline void sr_tail_record(CpuState *s, uint32_t target, RecompFn fn,
-                                  uint32_t restore_sp, uint32_t owes_restore) {
+                                  uint32_t sp, uint32_t verdict) {
     if (sr_tail_transfer.pending) sr_tail_fatal("tail-transfer-recorded-twice", target);
     sr_tail_transfer.fn = fn;
     sr_tail_transfer.state = s;
     sr_tail_transfer.target = target;
-    sr_tail_transfer.restore_sp = restore_sp;
-    sr_tail_transfer.has_restore = owes_restore ? 1u : 0u;
+    sr_tail_transfer.restore_sp = (verdict & SR_TAIL_OWES) ? sp : 0u;
+    sr_tail_transfer.release_sp = (verdict & SR_TAIL_RELEASES) ? sp : 0u;
+    sr_tail_transfer.has_restore =
+        (uint8_t)(verdict & (SR_TAIL_OWES | SR_TAIL_RELEASES));
     sr_tail_transfer.pending = 1u;
 }
+/* The bound of the release a generated body's checked $sp load from `before` to `after` makes
+ * (_sp_load_check in tools/codegen.py), given the SP the body named so far, its entry SP or
+ * an earlier release's bound: a load below where $sp was leaves every frame, and one at or
+ * above the entry SP the frames whose restore is at or below `after` (#1935). */
+static inline uint32_t sr_tail_release_bound(uint32_t named, uint32_t before, uint32_t after) {
+    if (after < before) return SR_TAIL_RELEASES_ALL;
+    return after > named ? after : named;
+}
+/* A guest exit that returns with no record: `verdict` and `sp` are the body's _sp_kept and
+ * _sp_named (#1935). */
+static inline void sr_tail_note_exit(uint32_t verdict, uint32_t sp) {
+    if (verdict & SR_TAIL_RELEASES) {
+        sr_tail_transfer.released = 1u;
+        sr_tail_transfer.release_sp = sp;
+    }
+}
+/* A direct CALL completes the callee's chain; a release at its end is the callee's own. */
 #define SR_TAIL_DRAIN(s) do { \
     if (__builtin_expect(sr_tail_transfer.pending != 0u, 0)) sr_tail_drain(s); \
+    sr_tail_transfer.released = 0u; \
 } while (0)
 /* Invoke a native body and complete its tail chain (runtime direct calls). */
 static inline void sr_call_body(RecompFn fn, CpuState *s) {
     if (sr_aot_return_boundary_begin(s, 0u, s->pc, 0u)) return;
     fn(s);
     if (sr_tail_transfer.pending) sr_tail_drain(s);
+    sr_tail_transfer.released = 0u;
     if (sr_aot_return_boundary_end(s)) return;
 }
 /* A recorded transfer must never survive to a yield, syscall or new dispatch. */
@@ -2039,6 +2194,8 @@ void     gui_consume_button_pulses(void);          /* after one PSP VBLANK sampl
  * when no SDL3 presenter is up (the GDI and offscreen presenters have no SDL3 gamepad). */
 uint32_t gui_pad_pulses_take(void);
 void     gui_analog(uint8_t *lx, uint8_t *ly);   /* live left-stick (0..255, 128=centre) */
+int      gui_stick_dead_zone(void);              /* the input profile's stick dead zone in centred
+                                                    counts (ace_stick_host_counts); 0 without one */
 int      gui_pad_present(void);                  /* 1 when a game controller is connected */
 void     gui_ace_vblank(uint32_t vcount);        /* Ace Mode's smooth motion: a held frame's VBLANK */
 /* Returns 1 only when the selected presenter accepted the validated frame. */
@@ -2229,6 +2386,17 @@ int sr_vblank_quantum_due(void);
 /* True when guest time is deterministic (SR_DETERMINISTIC_CLOCK, #2037): a function of the guest's
  * own work, never of the host clock. The RTC then starts at a fixed date. */
 int sched_clock_deterministic(void);
+/* Fast forward (docs/ENHANCEMENT_CONTRACT.md section 10.15). While the game window's keys ask
+ * for it (ace_ff_requested(), ace.h) in an Enhanced or Ace run on the paced clock, guest time,
+ * VBLANKs and timed waits run SCHED_FAST_FORWARD_SPEED times as fast as the host clock, and the
+ * host audio device is given no audio. It is off during the pause, and it never runs in an
+ * Authentic run or under the deterministic or turbo clocks: there the keys change nothing and
+ * pacing is as before. The scheduler applies a change at its next VBLANK. */
+#define SCHED_FAST_FORWARD_SPEED 3u
+/* 1 while guest time runs fast. */
+int sched_fast_forward_on(void);
+/* How many times fast forward has started in this run (0 before the first). */
+uint32_t sched_fast_forward_epoch(void);
 /* f_00065c60 field-writer intercept: the container walker reads count from
  * r18+0x04 but f_0005a500's control block init puts count at r18+0x00 and
  * cursor at r18+0x04.  Since both functions are called directly (not via
@@ -2238,6 +2406,10 @@ int sched_clock_deterministic(void);
 extern int g_prof_enabled;
 void sr_profile_init(void);
 void sr_profile_dump(void);
+/* The end-of-run SR_PROFILE dump, printed once: from atexit, and from every hard exit (_Exit)
+ * that skips atexit, such as SR_EXIT_AT_VBLANK. A no-op when profiling is off. The periodic
+ * SR_PROFILE_DUMP_VBLANKS dumps call sr_profile_dump. */
+void sr_profile_dump_final(void);
 void sr_profile_block(uint32_t target_pc);
 /* Test accessors: defined only in SR_PROFILER_SELFTEST builds (recomp.c), but
  * declared unconditionally so no translation unit ever sees an implicit
@@ -2280,7 +2452,7 @@ int sr_host_data_prepare(void);
 size_t sr_host_data_entry_count(void);      /* valid after READY */
 
 void     sched_init(CpuState *cpu);                 /* CpuState the running thread reads/writes */
-void     sched_preempt_timer_start(void);          /* paced runs: a stronger due thread preempts at once (#1296) */
+void     sched_preempt_timer_start(void);          /* paced runs: a stronger due thread preempts at once; asks for high host priority (#1296) */
 int      sched_reset_for_loadexec(void);            /* retire the old guest threads after scheduler return */
 void     sched_set_guest_process_gp(uint32_t gp);    /* seed the replacement program's initial $gp */
 /* The module-start thread sched_run creates: priority, stack size (0 = the 256 KiB default),
@@ -2333,6 +2505,14 @@ void     sched_set_vtimer_hooks(SrSchedVtimerNextDeadline next_deadline,
 /* hle.c's user-partition overlap test: sched.c refuses a thread stack range it reports. */
 typedef int (*SrSchedStackRangeRefusal)(uint32_t base, uint32_t end);
 void     sched_set_stack_range_refusal(SrSchedStackRangeRefusal refusal);
+/* hle.c's free blocks below the user partition's bump pointer: when no range above it holds a
+ * new thread stack, sched.c takes the highest such block that does (carved from its top) and
+ * gives it back to the partition when the thread is deleted. */
+typedef int (*SrSchedPartitionHoleAlloc)(uint32_t size, uint32_t *base_out);
+typedef void (*SrSchedPartitionHoleRelease)(uint32_t base, uint32_t size);
+void     sched_set_partition_hole_allocator(SrSchedPartitionHoleAlloc alloc,
+                                            SrSchedPartitionHoleRelease release);
+int      sched_guest_stack_overlaps(uint32_t base, uint32_t end);   /* any live thread stack */
 CpuState *sr_cpu_for_callbacks(void);               /* the CpuState guest callbacks run on */
 void     sched_dump_threads(void);                  /* the watchdog's thread table, to stderr */
 void     sched_watchdog_summary(uint32_t *ready, uint32_t *delay,
@@ -2368,13 +2548,32 @@ int      sched_current_join_result_pending(uint32_t uid); /* non-consuming join-
 void     sched_raise_interrupt(uint32_t source);     /* latch source; delivery occurs at a scheduler boundary */
 uint32_t sched_pending_interrupts(void);             /* source bits not yet serviced */
 void     sched_delay_current(uint64_t usec);        /* block current thread for usec */
+/* sched_delay_current(), but the wait cannot end inside the scheduling decision its own block
+ * causes: when another thread is ready then, of any priority, that thread is dispatched first.
+ * For the Ace load skip (nk_ace_load_skip_wait); see the definition in sched.c. */
+void     sched_delay_current_dispatching(uint64_t usec);
 void     sched_preempt(void);                       /* yield now if a higher-priority thread is ready */
 /* Set by the preemption timer when a stronger thread's deadline comes. A long HLE call polls it
- * between units of work and, holding nothing another guest thread could trip on, calls
- * sched_preempt_point(): that thread then runs inside the call, as it would on the PSP (#1296). */
+ * between units of work and, where the thread that runs cannot reach the call's own state (for
+ * a SAVE, its savedata state), calls sched_preempt_point(): that thread then runs inside the
+ * call, as it would on the PSP (#1296). Callers: the GE list run, and a savedata SAVE, which
+ * refuses another savedata call while parked and is released if its thread ends (savedata.c). */
 extern atomic_int_least32_t sr_preempt_due;
 void     sched_preempt_point(void);
 void     sched_block_on(uint32_t obj);              /* block current thread until sched_wake(obj) */
+/* Host work a guest thread waits for (#2361, sched.c): a host call that would block the
+ * scheduler's thread runs on one worker thread instead, and the guest thread that asked waits in
+ * the scheduler until it is done, so the other threads run meanwhile. usable is true only in a
+ * paced run, on a guest thread that may wait; otherwise the caller makes its call itself. run
+ * must not touch guest state. The submitter finishes a done item; if its thread ends first the
+ * item is abandoned, and drop (may be NULL) releases ctx once the call has returned. */
+typedef struct SrHostWork SrHostWork;
+typedef void (*SrHostWorkFn)(void *ctx);
+int      sched_host_work_usable(void);
+SrHostWork *sched_host_work_submit(SrHostWorkFn run, SrHostWorkFn drop, void *ctx);   /* NULL: make the call yourself */
+int      sched_host_work_done(SrHostWork *work);
+uint64_t sched_host_work_finish(SrHostWork *work);    /* after done: releases the item, not ctx; the host ns run took */
+void     sched_host_work_abandon(SrHostWork *work);   /* the waiting thread ended */
 void     sched_wait_vblank_start(void);             /* sceDisplayWaitVblankStart: always block to the next vblank start edge */
 int      sched_wait_vblank(void);                   /* sceDisplayWaitVblank: 1 if already inside the vblank interval (no block), else blocks and returns 0 */
 int      sched_wait_vblank_cb(int wait_start);       /* callback-aware display wait; wait_start selects WaitVblankStart semantics */

@@ -40,6 +40,31 @@ static PlayerUiAction settings_op(PlayerUiSettingsOp op) {
     return result;
 }
 
+/* Of a row's value now, its other values, its library value and the value another setting
+   can give it (any may be NULL), the one whose button, "name: value", is widest. */
+static const char *settings_widest_value(NkUi *ui, const char *name, const char *value,
+                                         const char *const *others, int other_count,
+                                         const char *library_value, const char *other_value) {
+    const char *widest = value;
+    float widest_width = -1.0f;
+    char label[96];
+    for (int i = -3; i < other_count; i++) {
+        const char *candidate = i == -3 ? value
+                                : i == -2 ? library_value
+                                : i == -1 ? other_value
+                                          : others[i];
+        float width;
+        if (candidate == NULL || (i >= 0 && others == NULL)) continue;
+        (void)snprintf(label, sizeof(label), "%s: %s", name, candidate);
+        width = nk_ui_button_width(ui, label, 0u);
+        if (width > widest_width) {
+            widest = candidate;
+            widest_width = width;
+        }
+    }
+    return widest;
+}
+
 static const char *settings_on_off(bool on) {
     return on ? "On" : "Off";
 }
@@ -124,7 +149,8 @@ static void settings_main(NkUi *ui, const PlayerUiSettingsModel *model, float wi
            design 190 px; at a larger text size the names wrap instead. */
         const char *values[] = {
             safe_text(model->resolution, "2x"), safe_text(model->pacing, "PSP timing"),
-            safe_text(model->scaling, "Sharp"), "Size, contrast, motion",
+            safe_text(model->scaling, "Sharp"), safe_text(model->preset, "Custom"),
+            "Size, contrast, motion",
             "Controller and keyboard", "Check for updates", "Off", "Off: options"
         };
         float buttons = 190.0f;
@@ -151,13 +177,18 @@ static void settings_main(NkUi *ui, const PlayerUiSettingsModel *model, float wi
                 nk_ui_text_role(ui, SET_ID_TEXT + 0u, "SETTINGS", NK_UI_TYPE_DISPLAY,
                                 theme->paper);
             }
+            /* A notice (a failed save) comes first, then the graphics preset's note
+               (#2150), then the page's own line. */
+            bool has_notice = model->notice != NULL && model->notice[0] != '\0';
+            bool has_preset = !has_notice && model->preset_notice != NULL &&
+                              model->preset_notice[0] != '\0';
             nk_ui_text_role(ui, SET_ID_TEXT + 1u,
-                            safe_text(model->notice,
-                                      "Changes are saved as you make them. Game settings apply "
-                                      "the next time a game starts."),
+                            has_notice ? model->notice
+                            : has_preset ? model->preset_notice
+                                         : "Changes are saved as you make them. Game settings "
+                                           "apply the next time a game starts.",
                             NK_UI_TYPE_BODY_S,
-                            model->notice != NULL && model->notice[0] != '\0'
-                                ? theme->warning : theme->muted);
+                            has_notice ? theme->warning : theme->muted);
             if (advisory[0] != '\0') {
                 nk_ui_text_role(ui, SET_ID_TEXT + 2u, advisory, NK_UI_TYPE_BODY_S,
                                 theme->warning);
@@ -197,6 +228,14 @@ static void settings_main(NkUi *ui, const PlayerUiSettingsModel *model, float wi
                                                         : "Authentic: options",
                              model->enhanced_library_on, name_width)) {
                 *result = settings_op(PLAYER_UI_SETTINGS_OPEN_ACE);
+            }
+            /* A graphics preset (#2150) stands in for the display rows above it in Enhanced
+               and Ace sessions; Authentic keeps those rows, and editing one makes the preset
+               Custom. Last on the card, so the rows above keep their places beside the
+               LAUNCHER AND SOUND rows. */
+            if (settings_row(ui, 13u, PLAYER_UI_ID_SETTINGS_PRESET, "Graphics preset",
+                             safe_text(model->preset, "Custom"), false, name_width)) {
+                *result = settings_op(PLAYER_UI_SETTINGS_CYCLE_PRESET);
             }
             nk_ui_end_container(ui);
         }
@@ -549,6 +588,11 @@ static void settings_updates(NkUi *ui, const PlayerUiSettingsModel *model, float
                     (void)snprintf(line, sizeof(line),
                                    "This release has no Windows download. Its page on GitHub "
                                    "lists what it offers.");
+                } else if (model->update_installed_by_setup) {
+                    (void)snprintf(line, sizeof(line),
+                                   "This copy was installed with Setup. Download the new "
+                                   "Setup from the release page on GitHub and run it: it "
+                                   "updates this copy and keeps your games and saves.");
                 } else if (model->update_unverifiable) {
                     (void)snprintf(line, sizeof(line),
                                    "This build can't check update signatures, so it doesn't "
@@ -740,7 +784,7 @@ static void settings_accessibility(NkUi *ui, const PlayerUiSettingsModel *model,
         };
         /* The four buttons line up on one column at every text size. */
         WizardColumn column = scr_wizard_column(ui, rows, sizeof(rows) / sizeof(rows[0]),
-                                            inner - 32.0f);
+                                                inner - 32.0f, false);
         if (scr_wizard_value(ui, PLAYER_UI_ID_SETTINGS_INTERFACE_SIZE, SET_ID_TEXT + 0x300u,
                          rows[0].name, rows[0].value, rows[0].sentence, false, inner - 32.0f,
                          &column)) {
@@ -812,14 +856,30 @@ static void settings_ace(NkUi *ui, const PlayerUiSettingsModel *model, float inn
             rows[i + 1].value = safe_text(model->enhanced_rows[i].value, "Off");
             rows[i + 1].sentence = safe_text(model->enhanced_rows[i].sentence, "");
         }
-        WizardColumn column = scr_wizard_column(ui, rows, (size_t)count + 1u, inner - 32.0f);
+        /* The column is sized from the widest value each row can show on this page, not
+           the one it shows now, so stepping a setting (Smooth motion turning Widescreen
+           off, say) never moves or restacks the rows. */
+        WizardRow widest[1 + PLAYER_UI_ENHANCED_ROWS];
+        memcpy(widest, rows, sizeof(rows[0]) * ((size_t)count + 1u));
+        widest[0].value = settings_widest_value(ui, rows[0].name, rows[0].value,
+                                                model->enhanced_modes,
+                                                model->enhanced_mode_count, NULL, NULL);
+        for (int i = 0; i < count; i++) {
+            const PlayerUiEnhancedRow *row = &model->enhanced_rows[i];
+            widest[i + 1].value = settings_widest_value(ui, rows[i + 1].name, rows[i + 1].value,
+                                                        row->labels, row->label_count,
+                                                        row->library_value,
+                                                        row->other_value);
+        }
+        WizardColumn column = scr_wizard_column(ui, widest, (size_t)count + 1u, inner - 32.0f,
+                                                true);
         if (scr_wizard_value(ui, PLAYER_UI_ID_SETTINGS_ACE_MODE, SET_ID_TEXT + 0x400u, rows[0].name,
                              rows[0].value, rows[0].sentence, model->enhanced_on, inner - 32.0f,
                              &column)) {
             *result = settings_op(PLAYER_UI_SETTINGS_CYCLE_PLAY_MODE);
         }
         for (int i = 0; i < count; i++) {
-            if (scr_wizard_value_state(ui, PLAYER_UI_ID_SETTINGS_ENHANCED_PART + (NkUiId)i,
+            if (scr_wizard_value_state(ui, PLAYER_UI_ID_ENHANCED_PART(i),
                                        SET_ID_TEXT + 0x404u + 4u * (NkUiId)i, rows[i + 1].name,
                                        rows[i + 1].value, rows[i + 1].sentence,
                                        model->enhanced_rows[i].on, off, inner - 32.0f, &column)) {
@@ -861,9 +921,30 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
         nk_ui_text_role(ui, FLOW_ID_LEAD, SCR_ONLINE_NOT_BUILT_LINE, NK_UI_TYPE_BODY_S,
                         theme->warning);
         if (scr_wizard_box_begin(ui, 0u)) {
-            WizardColumn column = scr_online_developer_column(ui, model->online_mode,
-                                                              model->developer_mode,
-                                                              inner - 32.0f);
+            /* Discord status shows when this build can show it, or while it is stored On
+               (so it can be turned off), as the Online mode row does (#2007). */
+            bool discord_row = model->discord_available || model->discord_presence;
+            const char *discord_sentence = model->discord_available
+                ? SCR_DISCORD_SENTENCE : SCR_DISCORD_STORED_ON_SENTENCE;
+            /* One button column for every row the page shows, so a sentence of any of them
+               that would be cut makes them all stack. The Nickname button's value is clamped
+               to half the column, so only its name counts for the column's width. */
+            WizardRow rows[4];
+            size_t row_count = 0u;
+            if (model->online_mode) {
+                rows[row_count++] = (WizardRow){"Online mode", "On",
+                                                SCR_ONLINE_STORED_ON_SENTENCE};
+            }
+            rows[row_count++] = (WizardRow){"Developer mode",
+                                            model->developer_mode ? "On" : "Off",
+                                            WIZARD_DEVELOPER_SENTENCE};
+            if (discord_row) {
+                rows[row_count++] = (WizardRow){"Discord status",
+                                                model->discord_presence ? "On" : "Off",
+                                                discord_sentence};
+            }
+            rows[row_count++] = (WizardRow){"Nickname", "", SCR_NICKNAME_SENTENCE};
+            WizardColumn column = scr_wizard_column(ui, rows, row_count, inner - 32.0f, false);
             if (model->online_mode &&
                 scr_wizard_switch(ui, PLAYER_UI_ID_SETTINGS_ONLINE_MODE, SET_ID_TEXT + 0x80u,
                                   "Online mode", SCR_ONLINE_STORED_ON_SENTENCE, true,
@@ -874,6 +955,26 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                               "Developer mode", WIZARD_DEVELOPER_SENTENCE,
                               model->developer_mode, inner - 32.0f, &column)) {
                 *result = settings_op(PLAYER_UI_SETTINGS_TOGGLE_DEVELOPER);
+            }
+            if (discord_row &&
+                scr_wizard_switch(ui, PLAYER_UI_ID_SETTINGS_DISCORD, SET_ID_TEXT + 0xB0u,
+                                  "Discord status", discord_sentence, model->discord_presence,
+                                  inner - 32.0f, &column)) {
+                *result = settings_op(PLAYER_UI_SETTINGS_TOGGLE_DISCORD);
+            }
+            {
+                /* The console nickname games read (#2197); its button opens the nickname
+                   editor. A long one is shortened here. */
+                NkUiTextStyle value = nk_ui_type(NK_UI_TYPE_BODY, theme->paper);
+                if (scr_wizard_value(ui, PLAYER_UI_ID_SETTINGS_NICKNAME, SET_ID_TEXT + 0xB4u,
+                                     "Nickname",
+                                     nk_ui_text_clamp(ui, safe_text(model->nickname,
+                                                                    NK_NICKNAME_DEFAULT),
+                                                      &value, column.cell * 0.5f, 1),
+                                     SCR_NICKNAME_SENTENCE,
+                                     false, inner - 32.0f, &column)) {
+                    *result = settings_op(PLAYER_UI_SETTINGS_EDIT_NICKNAME);
+                }
             }
             nk_ui_end_container(ui);
         }
@@ -953,12 +1054,26 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
         if (scr_wizard_box_begin(ui, 0u)) {
             NkUiLayout row = layout_make(NK_UI_LAYOUT_ROW, sizing_fit(), sizing_fit(),
                                          NK_UI_SPACE_3);
+            const WizardRow rows[] = {
+                {"Share libraries", settings_on_off(model->share_system_libraries),
+                 "Builds keep each compiled library and reuse it for another game "
+                 "with the same one, so those builds finish sooner."},
+                {"Build speed", safe_text(model->build_speed, "Balanced"),
+                 safe_text(model->build_speed_sentence, "")}
+            };
+            /* The two buttons line up on one column at every text size. */
+            WizardColumn column = scr_wizard_column(ui, rows, sizeof(rows) / sizeof(rows[0]),
+                                                    inner - 32.0f, false);
             if (scr_wizard_switch(ui, PLAYER_UI_ID_SETTINGS_SHARE_LIBRARIES, SET_ID_TEXT + 0xC0u,
-                              "Share libraries",
-                              "Builds keep each compiled library and reuse it for another game "
-                              "with the same one, so those builds finish sooner.",
-                              model->share_system_libraries, inner - 32.0f, NULL)) {
+                              rows[0].name, rows[0].sentence,
+                              model->share_system_libraries, inner - 32.0f, &column)) {
                 *result = settings_op(PLAYER_UI_SETTINGS_TOGGLE_SHARE_LIBRARIES);
+            }
+            /* How much of the PC a game build takes: Background keeps a game smooth. */
+            if (scr_wizard_value(ui, PLAYER_UI_ID_SETTINGS_BUILD_SPEED, SET_ID_TEXT + 0xC4u,
+                                 rows[1].name, rows[1].value, rows[1].sentence, false,
+                                 inner - 32.0f, &column)) {
+                *result = settings_op(PLAYER_UI_SETTINGS_CYCLE_BUILD_SPEED);
             }
             if (nk_ui_begin_container(ui, SET_ID_TEXT + 0xC8u, &row, NULL)) {
                 if (nk_ui_button(ui, PLAYER_UI_ID_SETTINGS_CLEAR_LIBRARIES,
@@ -1003,13 +1118,17 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
         nk_ui_text_role(ui, FLOW_ID_TITLE, "PSP fonts", NK_UI_TYPE_TITLE, theme->paper);
         nk_ui_text_role(ui, FLOW_ID_LEAD,
                         /* #2005: what the stand-in fonts change, as font/README.md
-                           describes them (shapes, widths) and the converter's Latin set
-                           (tools/ttf2pgf.py, no Cyrillic). */
+                           describes them: letter shapes, Latin line widths within 3 %, and the
+                           characters they lack. The Latin stand-ins have every character
+                           of the PSP's Latin fonts, Cyrillic included (--latin-cyrillic-text
+                           in mk/housekeeping.mk); the Japanese one lacks about 2,200 of the
+                           PSP font's characters, all outside code page 932, and the Korean
+                           one 512, none of them Hangul. */
                         "Optional. Without your PSP's own fonts, every game still runs and "
                         "shows its text in open stand-in fonts. They look different: the "
                         "letters are shaped differently, English lines come out a little wider "
-                        "or narrower, and a few characters such as Cyrillic letters are "
-                        "missing. For the PSP's own look, "
+                        "or narrower, and some rarely used characters of the PSP's Japanese "
+                        "and Korean fonts are missing. For the PSP's own look, "
                         "connect your PSP by USB and choose Get fonts from my PSP, or copy the "
                         ".pgf files from flash0:/font on your PSP to a folder on this PC "
                         "(docs/SETUP.md, \"Copying the fonts from your PSP\") and choose them "
@@ -1190,7 +1309,7 @@ PlayerUiAction player_ui_screen_settings(NkUi *ui, const PlayerUiSettingsModel *
     layout = layout_make(NK_UI_LAYOUT_ROW, sizing_grow(), sizing_grow(), 0.0f);
     layout.align_x = NK_UI_ALIGN_CENTER;
     layout.padding_top = height >= 680.0f ? NK_UI_SPACE_7 : NK_UI_SPACE_4;
-    layout.scroll = page_scrolls(ui);
+    layout.scroll = SCR_PAGE_BODY_SCROLLS;
     if (nk_ui_begin_container(ui, SET_ID_BODY, &layout, NULL)) {
         settings_main(ui, model, width, height, &result);
         nk_ui_end_container(ui);

@@ -37,11 +37,35 @@
 static uint64_t g_test_host_ns;
 static uint64_t test_host_ns(void);
 static void sched_selftest_delay_precise(uint64_t ns);
+static bool sched_selftest_set_priority(SDL_ThreadPriority priority);
 #define SDL_DelayPrecise sched_selftest_delay_precise
+#define SDL_SetCurrentThreadPriority sched_selftest_set_priority
 #include "sched.c"   /* white-box: statics (s_tcb, s_ntcb, s_last_pick, ...) visible */
 #undef SDL_DelayPrecise
+#undef SDL_SetCurrentThreadPriority
+
+/* Every priority request sched.c makes, by thread; the request itself is not passed on. */
+static SDL_AtomicInt g_prio_high_calls;
+static SDL_AtomicInt g_prio_other_calls;
+static SDL_AtomicInt g_prio_recorded;
+static SDL_ThreadID g_prio_first_thread, g_prio_second_thread;
+static bool sched_selftest_set_priority(SDL_ThreadPriority priority) {
+    if (priority != SDL_THREAD_PRIORITY_HIGH) {
+        SDL_AddAtomicInt(&g_prio_other_calls, 1);
+        return true;
+    }
+    const int n = SDL_AddAtomicInt(&g_prio_high_calls, 1);
+    if (n == 0) g_prio_first_thread = SDL_GetCurrentThreadID();
+    else if (n == 1) g_prio_second_thread = SDL_GetCurrentThreadID();
+    SDL_AddAtomicInt(&g_prio_recorded, 1);   /* after the ID: a reader that sees it sees the ID */
+    return true;
+}
 
 #include <stdlib.h>
+#include <time.h>
+#ifndef _WIN32
+#include <sys/wait.h>
+#endif
 
 static void sched_selftest_delay_precise(uint64_t ns) {
     if (s_host_ns_fn == test_host_ns) {
@@ -204,6 +228,7 @@ void sr_tail_fatal(const char *what, uint32_t target) {
     abort();
 }
 uint64_t sr_perf_now_ns_impl(void) { return 0; }
+void sr_perf_exclude_thread(void) {}
 void sr_perf_guest_begin(void) {}
 void sr_perf_guest_end(void) {}
 void sr_perf_guest_idle_wait(uint64_t started_ns) { (void)started_ns; }
@@ -216,6 +241,9 @@ void sr_exec_interp_exit(int returned_to_aot, int call_return) { (void)returned_
 void sr_exec_slice_begin(int tier) { sr_exec_tier = tier; }
 int sr_exec_slice_end(void) { int tier = sr_exec_tier; sr_exec_tier = 0; return tier; }
 uint64_t sr_exec_now_ns(void) { return 0; }
+/* cpu_lle.c owns the COSIM guest lane's hold (#2201); the cells below set it as
+ * domain_mode.c does around a cosim call's guest lane. */
+SrGuestLaneHold sr_guest_lane_hold;
 void sr_exec_idle(uint64_t started_ns) { (void)started_ns; }
 void sr_exec_share_arm(void) {}
 void sr_exec_share_report(void) {}
@@ -1259,6 +1287,217 @@ static void test_stop_request_returns_a_lone_runner_to_the_scheduler(void) {
 }
 
 
+/* The COSIM guest lane holds the scheduler (#2201). A cosim call's guest lane runs the game's
+ * own export and refuses any import it reaches; its refusal and memory rollback are
+ * process-wide, so no other thread or interrupt handler may run inside it. Here the lane's
+ * thread has an equal-priority peer ready and VBLANK periods elapse at each yield. While held,
+ * sr_yield switches to no other fiber and delivers no VBLANK, but guest time still follows the
+ * host clock; the first yield after the lane switches to the peer and delivers what came due.
+ *
+ * MUTANT: drop the hold's early return in sr_yield -- the peer runs and VBLANKs are delivered
+ *   inside the held lane. */
+enum { GL_ENTRY = 0x09370000u, GL_PEER = 0x09370100u, GL_START_US = 1000u, GL_HELD_YIELDS = 6,
+       GL_STEP_US = 20000u };
+static int g_gl_peer_ran, g_gl_done;
+static int g_gl_peer_ran_held, g_gl_peer_ran_after;
+static unsigned g_gl_vblank_held, g_gl_vblank_after;
+static uint64_t g_gl_vtime_before, g_gl_vtime_held;
+
+static void guest_lane_body(CpuState *s) {
+    if (s_tcb[s_cur].entry == GL_PEER) {
+        g_gl_peer_ran++;
+        return;
+    }
+    const uint32_t peer = sched_create_thread(GL_PEER, 32, 0x4000u);
+    sched_start_thread(peer, 0u, 0u);
+    const unsigned vblank_before = g_test_vblank_delivered;
+    uint64_t host_us = GL_START_US;
+    g_gl_vtime_before = s_vtime_us;
+    sr_guest_lane_hold.uid = s_tcb[s_cur].uid;
+    sr_guest_lane_hold.held = 1;
+    for (int i = 0; i < GL_HELD_YIELDS; i++) {
+        host_us += GL_STEP_US;            /* more than one display period per yield */
+        set_host_us(host_us);
+        sr_yield(s);
+    }
+    g_gl_peer_ran_held = g_gl_peer_ran;
+    g_gl_vblank_held = g_test_vblank_delivered - vblank_before;
+    g_gl_vtime_held = s_vtime_us;
+    sr_guest_lane_hold.held = 0;
+    sr_guest_lane_hold.uid = 0u;
+    host_us += GL_STEP_US;
+    set_host_us(host_us);
+    sr_yield(s);
+    g_gl_peer_ran_after = g_gl_peer_ran;
+    g_gl_vblank_after = g_test_vblank_delivered - vblank_before;
+    g_gl_done = 1;
+}
+static int guest_lane_stop(void) { return g_gl_done; }
+
+static void test_guest_lane_hold_defers_switches_and_interrupts(void) {
+    reset_sched();
+    begin_clock_fixture(1, GL_START_US);
+    g_gl_peer_ran = g_gl_done = 0;
+    g_test_body = guest_lane_body;
+    sr_sched_stop_requested = guest_lane_stop;
+    sched_run(GL_ENTRY, 0u, 0u);
+    sr_sched_stop_requested = NULL;
+    sr_guest_lane_hold.held = 0;
+    sr_guest_lane_hold.uid = 0u;
+    s_host_ns_fn = NULL;
+    expect(g_gl_done == 1, "guest lane: the lane's thread ran to the end");
+    expect(g_gl_peer_ran_held == 0,
+           "guest lane: no other thread runs while the lane holds the scheduler");
+    expect(g_gl_vblank_held == 0u,
+           "guest lane: no VBLANK is delivered while the lane holds the scheduler");
+    expect(g_gl_vtime_held > g_gl_vtime_before,
+           "guest lane: guest time still follows the host clock while held");
+    expect(g_gl_peer_ran_after == 1,
+           "guest lane: the first yield after the lane switches to the ready peer");
+    expect(g_gl_vblank_after > 0u,
+           "guest lane: the first yield after the lane delivers the VBLANKs that came due");
+}
+
+/* The three named stops (#2201), each in a child process because each ends the run: a fiber
+ * switch inside a held lane (here the lane's thread blocks in a delay, which a lane cannot
+ * reach since its imports are refused), a held lane that spins on a word only a ready peer
+ * writes (it can never finish), and destroying the lane's thread while the lane is held (its
+ * fiber never parks, so nothing can; the backstop covers anything that ever does).
+ * Without the stops the switch would run another thread under the lane's refusal, and a
+ * destroyed lane would leave its state set for every later import.
+ *
+ * MUTANT: drop the stop in switch_to_scheduler -- the child's lane blocks and runs on.
+ * MUTANT: drop the backstop in sched_destroy_thread_coro -- the child destroys the lane's
+ *   thread and runs on.
+ * MUTANT: drop the held-yield bound in sr_yield -- the spinning child's lane never finishes;
+ *   the child gives up at twice the bound and runs on. */
+static const char *g_self_path;
+static int g_glc_ran_on;
+static void guest_lane_switch_body(CpuState *s) {
+    (void)s;
+    sr_guest_lane_hold.uid = s_tcb[s_cur].uid;
+    sr_guest_lane_hold.held = 1;
+    sched_delay_current(100u);
+    sr_guest_lane_hold.held = 0;
+    g_glc_ran_on = 1;
+}
+static int guest_lane_switch_stop(void) { return g_glc_ran_on; }
+
+/* A held lane that waits for a ready peer: the flag it spins on is set only by the peer,
+ * which the hold never runs. The child spins to twice the bound, so a missing bound shows as
+ * the child running on rather than as a hang. */
+enum { GL_SPIN_PEER = 0x09370200u };
+static volatile int g_glc_peer_flag;
+static unsigned g_glc_spins;
+static void guest_lane_spin_body(CpuState *s) {
+    if (s_tcb[s_cur].entry == GL_SPIN_PEER) {
+        g_glc_peer_flag = 1;
+        return;
+    }
+    const uint32_t peer = sched_create_thread(GL_SPIN_PEER, 32, 0x4000u);
+    sched_start_thread(peer, 0u, 0u);
+    sr_guest_lane_hold.uid = s_tcb[s_cur].uid;
+    sr_guest_lane_hold.yields = 0u;
+    sr_guest_lane_hold.held = 1;
+    for (g_glc_spins = 0; !g_glc_peer_flag && g_glc_spins < 2u * SCHED_GUEST_LANE_YIELD_LIMIT;
+         g_glc_spins++)
+        sr_yield(s);
+    sr_guest_lane_hold.held = 0;
+    g_glc_ran_on = 1;
+}
+static int guest_lane_spin_stop(void) { return g_glc_ran_on; }
+
+static int guest_lane_child(const char *mode) {
+    if (strcmp(mode, "switch") == 0) {
+        reset_sched();
+        begin_clock_fixture(0, 0u);
+        g_test_body = guest_lane_switch_body;
+        sr_sched_stop_requested = guest_lane_switch_stop;
+        sched_run(GL_ENTRY, 0u, 0u);
+        fprintf(stderr, "guest lane child: the held lane switched fibers and ran on\n");
+        return 0;
+    }
+    if (strcmp(mode, "spin") == 0) {
+        reset_sched();
+        begin_clock_fixture(0, 0u);
+        g_test_body = guest_lane_spin_body;
+        sr_sched_stop_requested = guest_lane_spin_stop;
+        sched_run(GL_ENTRY, 0u, 0u);
+        fprintf(stderr, "guest lane child: the held lane spun %u yields and ran on\n",
+                g_glc_spins);
+        return 0;
+    }
+    if (strcmp(mode, "destroy") == 0) {
+        reset_sched();
+        const int lane = mk(0x240u, TH_RUNNING, 32);
+        s_cur = lane;
+        sr_guest_lane_hold.uid = s_tcb[lane].uid;
+        sr_guest_lane_hold.held = 1;
+        sched_destroy_thread_coro(&s_tcb[lane]);
+        sr_guest_lane_hold.held = 0;
+        fprintf(stderr, "guest lane child: the lane's thread was destroyed and the run went on\n");
+        return 0;
+    }
+    fprintf(stderr, "guest lane child: unknown mode %s\n", mode);
+    return 2;
+}
+
+/* Runs this executable as `--guest-lane-child <mode>`; returns its exit code and its stderr. */
+static int run_guest_lane_child(const char *mode, char *log, size_t log_size) {
+    char out_path[512], command[2048];
+    const char *tmp = getenv("TEMP") ? getenv("TEMP") : getenv("TMPDIR");
+    snprintf(out_path, sizeof out_path, "%s/nk_sched_guest_lane_%s_%lu.txt", tmp ? tmp : ".",
+             mode, (unsigned long)time(NULL));
+    log[0] = '\0';
+#ifdef _WIN32
+    snprintf(command, sizeof command, "\"\"%s\" --guest-lane-child %s 2>\"%s\"\"", g_self_path,
+             mode, out_path);
+    const int code = system(command);
+#else
+    snprintf(command, sizeof command, "'%s' --guest-lane-child %s 2>'%s'", g_self_path, mode,
+             out_path);
+    const int status = system(command);
+    const int code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+#endif
+    FILE *f = fopen(out_path, "rb");
+    if (f) {
+        const size_t n = fread(log, 1, log_size - 1u, f);
+        log[n] = '\0';
+        fclose(f);
+    }
+    remove(out_path);
+    return code;
+}
+
+static void test_guest_lane_stops_by_name(void) {
+    char log[8192];
+    /* A lane entered with no current thread records uid 0, which every never-used TCB slot
+     * also has: destroying such a slot (sched_create_thread's reuse path) is not the lane's
+     * thread and must not stop the run. */
+    reset_sched();
+    sr_guest_lane_hold.uid = 0u;
+    sr_guest_lane_hold.held = 1;
+    TCB unused_slot;
+    memset(&unused_slot, 0, sizeof unused_slot);
+    sched_destroy_thread_coro(&unused_slot);
+    sr_guest_lane_hold.held = 0;
+    expect(1, "guest lane: destroying a never-used slot under a threadless lane is no stop");
+    int code = run_guest_lane_child("switch", log, sizeof log);
+    expect(code == 1 && strstr(log, "SR_COSIM_FATAL: a fiber switch inside the COSIM guest lane"),
+           "guest lane: a fiber switch inside the held lane stops the run by name");
+    code = run_guest_lane_child("spin", log, sizeof log);
+    expect(code == 1 &&
+               strstr(log, "SR_COSIM_FATAL: 200000 held yields without finishing (a wait on "
+                           "another thread or an interrupt, which the hold defers) inside the "
+                           "COSIM guest lane"),
+           "guest lane: a held lane that waits on a peer stops by name instead of hanging");
+    code = run_guest_lane_child("destroy", log, sizeof log);
+    expect(code == 1 &&
+               strstr(log, "SR_COSIM_FATAL: the lane's thread was destroyed inside the COSIM "
+                           "guest lane"),
+           "guest lane: destroying the held lane's thread stops the run by name");
+}
+
 /* Turbo guest time is a function of what the guest did, never of the host clock (#2037): two
  * identical runs must see the same timeline however fast the host ran them. The runner here
  * burns the same number of yields in every run while the host clock behind the seam moves by
@@ -1640,6 +1879,37 @@ static void test_preempt_timer_hands_cpu_to_stronger_due_thread(void) {
     const unsigned equal = preempt_timer_run(32);
     expect(equal != UINT32_MAX && equal > PT_DUE_AT_YIELD,
            "an equal-priority waiter whose delay ran out does not take the CPU early");
+}
+
+/* #1296: the paced scheduler's thread and the preemption timer's thread each ask for high host
+ * priority; a turbo run asks for none. MUTANT: drop the raise in sched_preempt_timer_start --
+ * no request from this thread. MUTANT: drop it in sched_preempt_timer_main -- no second thread
+ * asks. The timer thread this starts stays parked on its condition (no deadline is published
+ * while the mode is restored to OFF), so main() runs this case last. */
+static void test_paced_host_threads_ask_for_high_priority(void) {
+    const int saved_pace = s_pace_on;
+    s_pace_on = 0;
+    sched_preempt_timer_start();
+    expect(SDL_GetAtomicInt(&g_prio_high_calls) == 0 && s_preempt_timer_mode == SCHED_PREEMPT_TIMER_OFF,
+           "a turbo run starts no timer and asks for no host priority");
+    s_pace_on = 1;
+    sched_preempt_timer_start();
+    const uint64_t give_up = SDL_GetTicksNS() + 5000000000ull;
+    while (SDL_GetAtomicInt(&g_prio_recorded) < 2 && SDL_GetTicksNS() < give_up) SDL_Delay(1);
+    expect(SDL_GetAtomicInt(&g_prio_recorded) == 2 && SDL_GetAtomicInt(&g_prio_high_calls) == 2 &&
+           SDL_GetAtomicInt(&g_prio_other_calls) == 0,
+           "a paced start asks for high priority twice, and for nothing else");
+    const SDL_ThreadID self = SDL_GetCurrentThreadID();
+    expect(g_prio_first_thread == self || g_prio_second_thread == self,
+           "the scheduler's own thread asks for high priority");
+    expect(g_prio_first_thread != g_prio_second_thread,
+           "the preemption timer's thread asks for itself");
+    SDL_LockMutex(s_preempt_timer_mutex);
+    s_preempt_timer_at_ns = UINT64_MAX;
+    s_preempt_timer_published = UINT64_MAX;
+    s_preempt_timer_mode = SCHED_PREEMPT_TIMER_OFF;
+    SDL_UnlockMutex(s_preempt_timer_mutex);
+    s_pace_on = saved_pace;
 }
 
 static void test_preempt_point_hands_cpu_over_inside_an_hle_call(void) {
@@ -3114,6 +3384,217 @@ static void test_idle_wait_runs_a_wait_that_came_due(void) {
     expect(g_test_host_ns == 5000000u,
            "idle wait: a future deadline before the vblank is slept to exactly");
     s_host_ns_fn = NULL;
+}
+
+/* #1296: a virtual clock with nothing to run goes to a deadline that comes before the next
+ * VBLANK, as the paced clock sleeps to it. It used to add a whole display period, so a thread
+ * that waited 100 us for the UMD drive woke up to 16.7 ms late whenever it was the only one.
+ * MUTANT: without the virtual-clock branch in sched_idle_wait, the first check reads 16783 us
+ * (the slice and a display period), not 300. A deadline past the next VBLANK keeps the step. */
+static void test_idle_virtual_clock_stops_at_a_deadline_before_the_vblank(void) {
+    reset_sched();
+    begin_clock_fixture(0, 0u);
+    s_det_clock = 1;
+    s_det_slice_us = 100u;
+    s_vbl_next_us = 16683u;
+    int waiter = mk(0x237u, TH_WAIT_DELAY, 16);
+    s_tcb[waiter].wake = 300u;
+    s_cur = -1;
+    sched_idle_wait();
+    expect(s_vtime_us == 300u,
+           "idle wait, deterministic clock: a deadline before the vblank is reached exactly");
+    expect(s_pending_vblanks == 0u && !(s_pending_interrupts & SCHED_INTR_VBLANK),
+           "idle wait, deterministic clock: no vblank is raised on the way to that deadline");
+    expect(pick_next() == waiter && s_tcb[waiter].state == TH_READY,
+           "idle wait, deterministic clock: the thread whose wait ended runs next");
+
+    /* A deadline the slice itself reaches: the thread runs, with no display-period step. On
+     * turbo the slice is 10 ms.
+     * MUTANT: the due-waiter return in sched_idle_wait stays paced-only -- 16783 us, and a
+     *   vblank, where 100 us pass; on turbo 26683 us where 10 ms pass. */
+    reset_sched();
+    begin_clock_fixture(0, 0u);
+    s_det_clock = 1;
+    s_det_slice_us = 100u;
+    s_vbl_next_us = 16683u;
+    int brief = mk(0x23au, TH_WAIT_DELAY, 16);
+    s_tcb[brief].wake = 100u;
+    s_cur = -1;
+    sched_idle_wait();
+    expect(s_vtime_us == 100u && s_pending_vblanks == 0u && pick_next() == brief,
+           "idle wait, deterministic clock: a wait the slice reaches runs with no display-period step");
+    reset_sched();
+    begin_clock_fixture(0, 0u);
+    s_det_clock = 0;
+    s_vbl_next_us = 16683u;
+    int turbo_brief = mk(0x23bu, TH_WAIT_DELAY, 16);
+    s_tcb[turbo_brief].wake = 5000u;
+    s_cur = -1;
+    sched_idle_wait();
+    expect(s_vtime_us == 10000u && pick_next() == turbo_brief,
+           "idle wait, turbo clock: a wait the 10 ms slice reaches runs with no display-period step");
+
+    /* A deadline that is not a thread's to run (a transfer window's end) and that the slice
+     * reached: the idle wait returns with the clock at the slice, for its caller to serve it,
+     * and the thread still waiting is reached exactly on the next pass. The window is ended
+     * here by hand (sched_transfer_reset), standing in for the caller's pick_next, whose
+     * sched_transfer_window_step ends it in a run; the window has no owner thread in this cell.
+     * MUTANT: delete `if (source_due) return;` in sched_idle_wait -- the first pass goes on to
+     *   300 us, and the second to 400. */
+    reset_sched();
+    begin_clock_fixture(0, 0u);
+    s_det_clock = 1;
+    s_det_slice_us = 100u;
+    s_vbl_next_us = 16683u;
+    int behind = mk(0x23cu, TH_WAIT_DELAY, 16);
+    s_tcb[behind].wake = 300u;
+    s_xfer_obj = 0x5a5a0001u;
+    s_xfer_owner_uid = 0u;
+    s_xfer_reserved = 0;
+    s_xfer_deadline = 50u;
+    s_cur = -1;
+    sched_idle_wait();
+    expect(s_vtime_us == 100u && s_pending_vblanks == 0u,
+           "idle wait, deterministic clock: a due source that is not a thread's is left to the caller, with no step");
+    sched_transfer_reset();
+    sched_idle_wait();
+    expect(s_vtime_us == 300u && pick_next() == behind,
+           "idle wait, deterministic clock: the thread still waiting is then reached exactly");
+
+    /* A deadline after the next vblank: the clock steps one display period, as before. */
+    reset_sched();
+    begin_clock_fixture(0, 0u);
+    s_det_clock = 1;
+    s_det_slice_us = 100u;
+    s_vbl_next_us = 16683u;
+    int late = mk(0x238u, TH_WAIT_DELAY, 16);
+    s_tcb[late].wake = 20000u;
+    s_cur = -1;
+    sched_idle_wait();
+    expect(s_vtime_us == 100u + 16683u && s_tcb[late].state == TH_WAIT_DELAY,
+           "idle wait, deterministic clock: a deadline past the vblank keeps the display-period step");
+
+    /* A deadline already behind the clock (its thread is suspended) does not hold it. */
+    reset_sched();
+    begin_clock_fixture(0, 0u);
+    s_det_clock = 1;
+    s_det_slice_us = 100u;
+    s_vbl_next_us = 16683u;
+    int held = mk(0x239u, TH_WAIT_DELAY, 16);
+    s_tcb[held].wake = 50u;
+    s_tcb[held].suspended = 1;
+    s_cur = -1;
+    sched_idle_wait();
+    expect(s_vtime_us == 100u + 16683u,
+           "idle wait, deterministic clock: a deadline already passed leaves the display-period step");
+
+    /* The same suspended thread does not hide a later deadline: that one is reached exactly. */
+    reset_sched();
+    begin_clock_fixture(0, 0u);
+    s_det_clock = 1;
+    s_det_slice_us = 100u;
+    s_vbl_next_us = 16683u;
+    int stale = mk(0x23du, TH_WAIT_DELAY, 16);
+    s_tcb[stale].wake = 50u;
+    s_tcb[stale].suspended = 1;
+    int next = mk(0x23eu, TH_WAIT_DELAY, 16);
+    s_tcb[next].wake = 700u;
+    s_cur = -1;
+    sched_idle_wait();
+    expect(s_vtime_us == 700u && pick_next() == next,
+           "idle wait, deterministic clock: a deadline behind the clock does not hide the next one");
+    s_det_clock = 0;
+    s_det_slice_us = SCHED_DET_SLICE_US_DEFAULT;
+    s_host_ns_fn = NULL;
+}
+
+/* #2361: host work runs on the worker's thread, never the caller's; an item is done only when
+ * its call has returned; finishing reports how long the call took; and an abandoned item's
+ * context is dropped exactly once, by the worker when the call was still running and by the
+ * abandoning thread when it had finished.
+ * MUTANT: sched_host_work_abandon drops at once whatever the state -- the blocked call's
+ *   context is dropped while the call still uses it (dropped-while-running reads 1).
+ * MUTANT: the worker never drops an abandoned item -- its drop count stays 0.
+ * MUTANT: sched_host_work_done reads done before the call returns -- the first check fails. */
+typedef struct {
+    SDL_Semaphore *gate;       /* the call blocks on it; NULL = returns at once */
+    SDL_AtomicInt ran, running, dropped, dropped_while_running;
+    SDL_ThreadID thread;
+} HostWorkProbe;
+
+static void host_work_probe_run(void *ctx) {
+    HostWorkProbe *p = (HostWorkProbe *)ctx;
+    p->thread = SDL_GetCurrentThreadID();
+    SDL_SetAtomicInt(&p->running, 1);
+    if (p->gate) SDL_WaitSemaphore(p->gate);
+    SDL_AddAtomicInt(&p->ran, 1);
+    SDL_SetAtomicInt(&p->running, 0);
+}
+
+static void host_work_probe_drop(void *ctx) {
+    HostWorkProbe *p = (HostWorkProbe *)ctx;
+    if (SDL_GetAtomicInt(&p->running)) SDL_AddAtomicInt(&p->dropped_while_running, 1);
+    SDL_AddAtomicInt(&p->dropped, 1);
+}
+
+/* Wait (host time, 5 s at most) until *value reaches `want`. */
+static int host_work_probe_reaches(SDL_AtomicInt *value, int want) {
+    const uint64_t give_up = SDL_GetTicksNS() + 5000000000ull;
+    while (SDL_GetAtomicInt(value) < want && SDL_GetTicksNS() < give_up) SDL_Delay(1);
+    return SDL_GetAtomicInt(value) >= want;
+}
+
+static void test_host_work_runs_off_the_scheduler_thread(void) {
+    reset_sched();
+    begin_clock_fixture(0, 0u);
+    s_host_ns_fn = NULL;
+    expect(!sched_host_work_usable(),
+           "host work: a virtual clock, or no guest thread, keeps the caller's own call");
+
+    /* A call that blocks: not done until it returns, and it runs on another thread. */
+    static HostWorkProbe blocked;
+    memset(&blocked, 0, sizeof(blocked));
+    blocked.gate = SDL_CreateSemaphore(0);
+    SrHostWork *work = sched_host_work_submit(host_work_probe_run, host_work_probe_drop, &blocked);
+    expect(work != NULL && blocked.gate != NULL, "host work: an item is accepted");
+    if (!work || !blocked.gate) return;
+    expect(host_work_probe_reaches(&blocked.running, 1) && !sched_host_work_done(work),
+           "host work: the call is running and the item is not done while it blocks");
+    SDL_SignalSemaphore(blocked.gate);
+    expect(host_work_probe_reaches(&blocked.ran, 1), "host work: the released call returns");
+    const uint64_t give_up = SDL_GetTicksNS() + 5000000000ull;
+    while (!sched_host_work_done(work) && SDL_GetTicksNS() < give_up) SDL_Delay(1);
+    expect(sched_host_work_done(work) && blocked.thread != SDL_GetCurrentThreadID(),
+           "host work: the item is done once the call returned, on the worker's thread");
+    (void)sched_host_work_finish(work);
+    expect(SDL_GetAtomicInt(&blocked.dropped) == 0 && SDL_GetAtomicInt(&blocked.ran) == 1,
+           "host work: a finished item is not dropped: its context stays the submitter's");
+
+    /* Abandoned while the call still runs: the worker drops it after the call returns. */
+    static HostWorkProbe orphan;
+    memset(&orphan, 0, sizeof(orphan));
+    orphan.gate = blocked.gate;
+    work = sched_host_work_submit(host_work_probe_run, host_work_probe_drop, &orphan);
+    expect(work != NULL && host_work_probe_reaches(&orphan.running, 1), "host work: a second call is running");
+    sched_host_work_abandon(work);
+    expect(SDL_GetAtomicInt(&orphan.dropped) == 0,
+           "host work: an item abandoned while its call runs is not dropped yet");
+    SDL_SignalSemaphore(orphan.gate);
+    expect(host_work_probe_reaches(&orphan.dropped, 1) && SDL_GetAtomicInt(&orphan.dropped) == 1 &&
+               SDL_GetAtomicInt(&orphan.dropped_while_running) == 0 && SDL_GetAtomicInt(&orphan.ran) == 1,
+           "host work: the worker drops an abandoned item once, after its call returned");
+
+    /* Abandoned after the call returned: dropped at once, by the abandoning thread. */
+    static HostWorkProbe late;
+    memset(&late, 0, sizeof(late));
+    work = sched_host_work_submit(host_work_probe_run, host_work_probe_drop, &late);
+    expect(work != NULL && host_work_probe_reaches(&late.ran, 1), "host work: a third call returns");
+    const uint64_t give_up_late = SDL_GetTicksNS() + 5000000000ull;
+    while (!sched_host_work_done(work) && SDL_GetTicksNS() < give_up_late) SDL_Delay(1);
+    sched_host_work_abandon(work);
+    expect(SDL_GetAtomicInt(&late.dropped) == 1 && SDL_GetAtomicInt(&late.ran) == 1,
+           "host work: an item abandoned after its call returned is dropped at once, once");
+    SDL_DestroySemaphore(blocked.gate);
 }
 
 static void test_paced_vtime_is_host_anchored(void) {
@@ -5955,7 +6436,119 @@ static void test_service_thread_waits_calls_and_ends(void) {
     expect(g_svc.done, "service thread: the cell ran to its end");
 }
 
+/* ---- fast forward (recomp.h) ----------------------------------------------------------- */
+
+static void ff_reset(void) {
+    s_ff_speed = 1u;
+    s_ff_host_anchor_ns = 0u;
+    s_ff_pace_anchor_ns = 0u;
+    s_ff_epoch = 0u;
+    ace_ff_hold(0);
+    if (ace_ff_requested()) ace_ff_toggle();
+}
+
+/* The keys change nothing in an Authentic run or on the turbo clock. In an Enhanced or Ace run
+ * on the paced clock, guest time runs SCHED_FAST_FORWARD_SPEED times the host clock from the
+ * VBLANK that applies it, continuous across each change, VBLANK waits take that share of host
+ * time, and the pause and a released key bring it back to the host rate. */
+static void test_fast_forward_paces_the_guest_clock(void) {
+    const int ace_was = g_ace_on;
+    reset_sched();
+    ff_reset();
+    begin_clock_fixture(1, 0u);
+    disable_vblank_sources();
+    s_det_clock = 0;
+    s_pause_active = 0;
+
+    g_ace_on = 0;
+    ace_ff_hold(1);
+    ace_ff_toggle();
+    set_host_us(1000u);
+    vblank_pace();
+    expect(!sched_fast_forward_on() && sched_fast_forward_epoch() == 0u,
+           "fast forward: an Authentic run ignores the hold and the toggle");
+    expect(pace_ns() == g_test_host_ns,
+           "fast forward: never used, the paced clock is the host clock exactly");
+    ace_ff_toggle();
+    ace_ff_hold(0);
+
+    g_ace_on = 1;
+    vblank_pace();
+    expect(!sched_fast_forward_on(), "fast forward: no key, no fast forward in an Ace run");
+
+    /* Hold: applied at the next VBLANK, which then waits a third of the host time. */
+    const uint64_t deadline = s_vbl_next_ns;
+    const uint64_t host_at_switch = g_test_host_ns;
+    ace_ff_hold(1);
+    vblank_pace();
+    expect(sched_fast_forward_on() && sched_fast_forward_epoch() == 1u,
+           "fast forward: the hold starts it at the next VBLANK");
+    expect(s_ff_pace_anchor_ns == host_at_switch,
+           "fast forward: guest time is continuous where it starts");
+    expect(g_test_host_ns - host_at_switch ==
+               (deadline - host_at_switch) / SCHED_FAST_FORWARD_SPEED,
+           "fast forward: the VBLANK wait takes the fast-forward share of host time");
+    const uint64_t p0 = pace_ns();
+    const uint64_t h0 = g_test_host_ns;
+    g_test_host_ns = h0 + 3000000u;
+    expect(pace_ns() - p0 == 3000000u * SCHED_FAST_FORWARD_SPEED,
+           "fast forward: 3 ms of host time is SCHED_FAST_FORWARD_SPEED times that of guest time");
+    vtime_refresh();
+    expect(s_vtime_us == (pace_ns() - s_clock_epoch_ns) / 1000u,
+           "fast forward: guest virtual time samples the paced clock");
+
+    /* The pause runs at the host rate: its entry drops to speed 1 where guest time stands, and
+     * its exit shifts the anchors by the host interval, so no guest time passes while paused. */
+    const uint64_t p_pause = pace_ns();
+    const uint64_t vtime_pause = host_us();
+    const uint64_t t0 = sched_pause_begin();
+    expect(!sched_fast_forward_on(), "fast forward: off while paused");
+    expect(s_ff_pace_anchor_ns == p_pause, "fast forward: guest time is continuous into the pause");
+    g_test_host_ns += 2000000u;
+    sched_pause_end(t0, SR_PAUSE_EXIT_RESUME);
+    expect(host_us() == vtime_pause, "fast forward: no guest time passes while paused");
+
+    /* Released, then the toggle: a second start counts. */
+    ace_ff_hold(0);
+    vblank_pace();
+    expect(!sched_fast_forward_on(), "fast forward: releasing the hold stops it");
+    ace_ff_toggle();
+    vblank_pace();
+    expect(sched_fast_forward_on() && sched_fast_forward_epoch() == 2u,
+           "fast forward: the toggle starts it again");
+    ace_ff_toggle();
+    vblank_pace();
+    expect(!sched_fast_forward_on(), "fast forward: the toggle stops it");
+
+    /* A run on the deterministic clock has no paced clock, so its VBLANK returns where the turbo
+     * clock's does (below); the gate's own deterministic term refuses it even on a paced clock. */
+    reset_sched();
+    ff_reset();
+    begin_clock_fixture(1, 0u);
+    disable_vblank_sources();
+    s_det_clock = 1;
+    ace_ff_hold(1);
+    vblank_pace();
+    expect(!sched_fast_forward_on() && sched_fast_forward_epoch() == 0u,
+           "fast forward: the deterministic clock ignores the hold");
+    s_det_clock = 0;
+
+    /* The turbo clock never fast forwards: the VBLANK returns before the paced clock. */
+    reset_sched();
+    ff_reset();
+    begin_clock_fixture(0, 0u);
+    disable_vblank_sources();
+    ace_ff_hold(1);
+    vblank_pace();
+    expect(!sched_fast_forward_on(), "fast forward: the turbo clock ignores the hold");
+
+    ff_reset();
+    s_host_ns_fn = NULL;
+    g_ace_on = ace_was;
+}
+
 int main(int argc, char **argv) {
+    g_self_path = argv[0];
     if (argc > 1 && strcmp(argv[1], "--test-pace-setup") == 0) {
         s_pace_on = -1;
         pace_setup();
@@ -5978,6 +6571,9 @@ int main(int argc, char **argv) {
     sched_init(&g_cpu_store);
     expect(s_sched_coro != NULL, "repeat sr_coro_main adoption (ERROR_ALREADY_FIBER path)");
 
+    if (argc > 2 && strcmp(argv[1], "--guest-lane-child") == 0) {
+        return guest_lane_child(argv[2]);
+    }
     if (argc > 1 && strcmp(argv[1], "--pause-forbidden-vtime") == 0) {
         pause_test_reset(1, 2000u);
         sr_sched_pause_host = &s_pause_test_forbidden_time_host;
@@ -6053,6 +6649,8 @@ int main(int argc, char **argv) {
     test_vblank_runs_every_enabled_subintr();
     test_waiting_guest_keeps_host_window_pumped();
     test_stop_request_returns_a_lone_runner_to_the_scheduler();
+    test_guest_lane_hold_defers_switches_and_interrupts();
+    test_guest_lane_stops_by_name();
     test_turbo_timeline_does_not_depend_on_the_host_clock();
     test_deterministic_clock_charges_the_work_not_the_host();
     test_deterministic_clock_does_not_jump_to_a_sleepers_deadline();
@@ -6062,7 +6660,10 @@ int main(int argc, char **argv) {
     test_module_start_thread_uses_declared_parameters();
     test_module_start_thread_is_deleted_on_return();
     test_paced_vtime_is_host_anchored();
+    test_fast_forward_paces_the_guest_clock();
     test_idle_wait_runs_a_wait_that_came_due();
+    test_idle_virtual_clock_stops_at_a_deadline_before_the_vblank();
+    test_host_work_runs_off_the_scheduler_thread();
     test_paced_vblank_has_one_authority();
     test_busy_guest_observes_every_display_period();
     test_masked_window_keeps_the_enabled_backlog();
@@ -6127,6 +6728,7 @@ int main(int argc, char **argv) {
     test_pause_s14_idle_vblank_request_enters_before_guest_resumes();
     test_pause_s15_scripted_length_with_presenter_frame();
     test_loadexec_retires_scheduler_world();
+    test_paced_host_threads_ask_for_high_priority();   /* last: leaves a parked timer thread */
 
     fprintf(stderr, "sched_selftest: title config \"%s\" (valid=0x%x)\n",
             sr_title_config()->source_id, sr_title_config()->valid);

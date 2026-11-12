@@ -113,6 +113,15 @@ display-smoke-fsr1:
 	$(MAKE) display-smoke
 	"$(PYTHON)" $(DISPLAY_SMOKE_GENERATOR) fsr1 --build-dir $(DISPLAY_SMOKE_DIR)
 
+# display-smoke-anime4k is the same two runs with SR_MOVIE_UPSCALE off and anime4k, plus a third with
+# SR_PRESENT_UPSCALE=fsr1 as well, whose flight bundle must carry the stamp fsr1+movie-anime4k: the
+# fixture's frames are CPU-presented, the movie upscaler's input, so the on run must count presents
+# through Anime4K (#1273). Like display-smoke-fsr1 it needs a Vulkan device and a display and is part
+# of no aggregate gate.
+display-smoke-anime4k:
+	$(MAKE) display-smoke
+	"$(PYTHON)" $(DISPLAY_SMOKE_GENERATOR) anime4k --build-dir $(DISPLAY_SMOKE_DIR)
+
 # display-smoke-quit closes the window while the long guest still runs: the quit must stop the
 # scheduler and end through the driver's teardown with exit 0 (#1377). It needs a display, so it
 # is not part of any aggregate gate either. SR_VIDEO=gdi runs it on the GDI fallback.
@@ -340,6 +349,11 @@ platform-ladder-overlay:
 platform-ladder-clean:
 	$(MAKE) BUILD_DIR=$(PLATFORM_LADDER_DIR) clean
 
+# This target is the explicit request to run the profile-zero package and runtime route, so it
+# runs the route case that the Python discover suite defers to its nightly tier (docs/CI.md,
+# "Python test tiers"). Without NK_TEST_TIER=full here, the hosted Windows routes step and every
+# local `make profile-zero-e2e` skipped the route itself (#306).
+profile-zero-e2e: export NK_TEST_TIER := full
 profile-zero-e2e:
 	"$(PYTHON)" -m unittest tools.test_profile_zero_e2e -v
 
@@ -382,6 +396,12 @@ RECOMP_OPT ?= -O0
 RECOMP_CC_IS_CLANG := $(findstring clang version,$(shell "$(CC)" --version 2>&1))
 RECOMP_GCC_ONLY_FLAGS := $(if $(RECOMP_CC_IS_CLANG),,-ftrack-macro-expansion=0)
 RECOMP_FLAGS ?= $(RECOMP_OPT) -w -fno-strict-aliasing -fno-var-tracking $(RECOMP_GCC_ONLY_FLAGS) $(NAN_TRAP_CFLAG)
+# An Android title is a shared library: its generated and GE objects are position
+# independent like the runtime's (the root Makefile adds -fPIC to CFLAGS).
+ifeq ($(NK_TARGET_OS),android)
+override GE_CFLAGS += -fPIC
+override RECOMP_FLAGS += -fPIC
+endif
 override RECOMP_FLAGS += $(STACK_CENSUS_CFLAG)
 override RECOMP_FLAGS += -DSR_FLIGHT_RECORDER_LINKED
 ifeq ($(TRACE),1)

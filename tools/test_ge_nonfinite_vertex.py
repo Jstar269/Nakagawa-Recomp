@@ -454,7 +454,7 @@ def compile_ge_harness(tmp: Path, source: str, stem: str) -> Path:
     result = subprocess.run(
         [CC, "-std=c11", "-O1", "-Isrc/rt", "-DSR_SDL3VK", "-o", os.fspath(exe),
          os.fspath(harness_c), os.fspath(RT / "ge.c"), os.fspath(RT / "ge_capture.c"),
-         os.fspath(RT / "perf.c"), "-lm"],
+         os.fspath(RT / "perf.c"), os.fspath(RT / "ace.c"), "-lm"],
         capture_output=True, text=True, cwd=ROOT,
     )
     if result.returncode != 0:

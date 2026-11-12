@@ -7,7 +7,7 @@ and records an evidence envelope. It follows the L0-L4 recovery contract tested
 in [`tools/test_hardware_runner_protocol.py`](../tools/test_hardware_runner_protocol.py).
 Dynamic `usbipd` discovery/attach and the bounded L0-L2 host recovery path are
 already implemented for this scalar adapter. Boot-time PSPLink autostart,
-standalone L3 relaunch, and the resident framed runner are not yet qualified.
+standalone L3 relaunch, and the resident framed runner are not qualified.
 Campaigns require the source-owned `transport-write` case first. It failed in
 the 2026-09-23 W1-psplink3 live run (`HOST0_ROUNDTRIP_FAILED`, no envelope
 accepted; see the table below), and has passed on hardware since: it is
@@ -36,7 +36,7 @@ dual-path protocol remain unbuilt here, and every PSP case still runs through
 `run_psplink.py`. [`tools/psp_oracle/oracle_matrix.py`](#10-one-command-matrix)
 now builds, stages, qualifies and runs a multi-case matrix around that runner in
 one command (issue [#352](https://github.com/Jstar269/nakagawa-recomp/issues/352); see
-[What still requires a human / build order](#9-build-order-and-open-attestation)).
+[Build order and open attestation](#9-build-order-and-open-attestation)).
 This document extends, and defers to, the implemented scalar-probe subset
 described in [HARDWARE_ORACLE.md](HARDWARE_ORACLE.md) and
 [`fixtures/psp_oracle/README.md`](../fixtures/psp_oracle/README.md).
@@ -115,7 +115,7 @@ HOST ORCHESTRATOR (state machine, this doc §4)
    '-- recovery ladder driver (§5)
           |  qualified command protocol (framed, §3)
           v
-   PSP RESIDENT ORACLE RUNNER (future PRX, source-owned)
+   PSP RESIDENT ORACLE RUNNER (framed PRX, not built; source-owned)
           |-- experiment cells: META, VFPU, kernel/user API, later cache
           |-- per-case isolated execution + controlled reset between cases
           '-- heartbeat + watchdog state
@@ -283,7 +283,7 @@ physical power intervention. The system says so plainly instead of looping.
 
 1. Conformance suite (landed): `tools/test_hardware_runner_protocol.py`
    implements the reference state machine, codec, fake transport, and every
-   mandated fault scenario. Future implementations must pass it unchanged.
+   mandated fault scenario. Any implementation must pass it unchanged.
 2. PSPLink boot autostart: stage the complete, compatible PSPLink PRX set in one
    dedicated Memory Stick folder. ARK passes the plugin path to the PRX, and
    PSPLINK uses that path to locate its sidecars; add a VSH entry to the active
@@ -302,7 +302,7 @@ physical power intervention. The system says so plainly instead of looping.
    remains absent; exhaustion stops at L4 and requires physical intervention.
 5. Resident runner PRX: new implementation path; require a trusted
    detailed-ledger record before commit (`PROVENANCE_UNRESOLVED` otherwise).
-   The resident framed protocol and per-case fault containment are still absent.
+   The resident framed protocol and per-case fault containment are absent.
    Campaigns use repeated `--campaign-case CASE_ID=PRX_PATH` arguments, put
    `transport-write` first, and set one bounded `--timeout` shared by each case.
    An optional `--out` must be inside the host0 scratch directory. Like
@@ -314,8 +314,8 @@ physical power intervention. The system says so plainly instead of looping.
 7. Additional model-source discriminator (bounded): compare plain syscall
    paths and other identity sources with `kuKernelGetModel`. The PSPSDK ordinal
    mapping already interprets raw value 3 as PSP-3000 generation 04g under
-   `PSPSDK_PMODEL_ORDINAL_V1`; remaining cross-API distinctions are still in
-   the works under issue #356. Measure each source first and generalize never.
+   `PSPSDK_PMODEL_ORDINAL_V1` (issue #356, closed). Compare any further identity source the
+   same way: measure each source first and generalize never.
 
 ## 10. One-command matrix
 

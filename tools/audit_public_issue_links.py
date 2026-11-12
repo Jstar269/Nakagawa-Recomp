@@ -6,8 +6,8 @@
 
 The audit has two purposes:
 
-* full ``github.com/Jstar269/nakagawa-recomp/{issues,pull}/N`` URLs are checked
-  in every tracked Markdown document;
+* full ``github.com/Jstar269/Nakagawa-Recomp/{issues,pull}/N`` URLs, in any letter
+  case, are checked in every tracked Markdown document;
 * shorthand ``#N`` references are checked in explicitly current-facing documents
   (including ``.github/copilot-instructions.md``);
 * docs/STATUS.md ``## At a glance`` rows whose State cell is ``Open`` must not link to a
@@ -84,14 +84,17 @@ HISTORICAL_EVIDENCE_DOCS = {
     "docs/provenance/MODIFIED_FILE_NOTICES.md",
 }
 
+# GitHub resolves the owner and repository name in any letter case, so the canonical
+# ``Jstar269/Nakagawa-Recomp`` and the lowercase spelling both name this tracker.
+REPOSITORY_PAT = r"(?i:Jstar269/nakagawa-recomp)"
 FULL_URL_PAT = re.compile(
-    r"https://github\.com/Jstar269/nakagawa-recomp/(issues|pull)/(\d+)\b"
+    rf"https://github\.com/{REPOSITORY_PAT}/(issues|pull)/(\d+)\b"
 )
 # GitHub answers ``issues/N-suffix`` with a redirect to an unrelated filtered list and
 # ``issues/N/suffix`` with a 404, so those tails are malformed, not references to N.
 # ``pull/N/<path>`` (for example ``/files``) is valid GitHub and stays a PR reference.
 MALFORMED_TRACKER_URL_PAT = re.compile(
-    r"https://github\.com/Jstar269/nakagawa-recomp/"
+    rf"https://github\.com/{REPOSITORY_PAT}/"
     r"(?:issues/(?P<issue>\d+)(?:[A-Za-z_-]|/\w)|pull/(?P<pull>\d+)[A-Za-z_-])[^\s)\]>]*"
 )
 # Any GitHub issue/PR link, Markdown-labelled or bare. Such a link is checked by the URL rules
@@ -475,11 +478,11 @@ def audit_markdown_files(
                 if row_state and row_state.group(1) == "Open":
                     for match in url_matches:
                         num = int(match.group(2))
-                        obj = issues_map.get(num)
-                        if obj is None:
+                        listed = issues_map.get(num)
+                        if listed is None:
                             # An unresolvable number is already reported above.
                             continue
-                        if obj.get("state") != "open":
+                        if listed.get("state") != "open":
                             findings.append(
                                 (
                                     rel,
@@ -487,7 +490,7 @@ def audit_markdown_files(
                                     f"#{num}",
                                     (
                                         "STALE TRACKER STATUS: row declares State 'Open' but "
-                                        f"#{num} is a public {public_status_label(obj)}"
+                                        f"#{num} is a public {public_status_label(listed)}"
                                     ),
                                     False,
                                 )
@@ -508,10 +511,10 @@ def audit_markdown_files(
                 else:
                     for match, label in zip(url_matches, labels, strict=True):
                         num = int(match.group(2))
-                        obj = issues_map.get(num)
-                        if obj is None:
+                        listed = issues_map.get(num)
+                        if listed is None:
                             continue
-                        expected = public_status_label(obj)
+                        expected = public_status_label(listed)
                         if label != expected:
                             findings.append(
                                 (

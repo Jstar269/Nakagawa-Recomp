@@ -133,7 +133,7 @@ PLAYER_SOURCES = (
 #: Uppercase literals in those sources that are not failure codes.
 PLAYER_NOT_CODES = {
     # preflight check names (the bring-up report's preflight_checks[].code)
-    "AUDIO_OUTPUT", "DATA_ROOT", "DISC_SFO", "GUEST_MODULES", "RUNTIME_PACKAGE", "SYSTEM_FONTS",
+    "AUDIO_OUTPUT", "DATA_ROOT", "DISC_SFO", "GAME_BUILD", "GUEST_MODULES", "RUNTIME_PACKAGE", "SYSTEM_FONTS",
     "TITLE_PROFILE",
     # PARAM.SFO keys, disc folders and placeholders
     "DISC_ID", "DISC_VERSION", "PSP_GAME",
@@ -145,7 +145,8 @@ PLAYER_NOT_CODES = {
     "DPAD_DOWN", "DPAD_LEFT", "DPAD_RIGHT", "DPAD_UP", "LEFT_SHOULDER", "RIGHT_SHOULDER",
     "MOUSE_DOWN", "MOUSE_UP", "MOUSE_X1", "MOUSE_X1_DOWN", "MOUSE_X1_UP", "OPEN_FOLDER",
     "ASSERT_GAME_RUNNING", "DROP_BEGIN", "DROP_COMPLETE", "INVALIDATE_PACKAGE_CACHE",
-    "MOUNT_ART_ISO", "SATURATE_ART_CACHE", "WAIT_ART_DELAY_ACTIVE", "UI_TEST_LONG_ERROR",
+    # an environment variable the package builder reads to find the MSYS2 UCRT64 bin
+    "MSYS_PATH",
 }
 #: Environment variable names.
 PLAYER_NOT_CODE_PREFIXES = ("NK_", "SR_", "XDG_", "NAKAGAWA_", "PLAYER_UI_TEST_")

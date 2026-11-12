@@ -16,6 +16,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import publication_policy
+import public_export
 import publish_audit
 from nk_core.git_isolation import isolated_git_env, run_git
 
@@ -1957,6 +1958,17 @@ class TextHygieneTests(unittest.TestCase):
         self.assertNotIn("TEXT_FINAL_NEWLINE", self._codes(data, path=path))
         self.assertIn("TEXT_FINAL_NEWLINE", self._codes(data + b" ", path=path))
 
+    def test_exact_fidelityfx_upstream_license_keeps_its_byte_identity(self):
+        # AMD's docs/license.md at the pinned SDK commit has no final newline.
+        path = "third_party/fidelityfx_sdk/LICENSE-AMD.md"
+        data = (publish_audit.ROOT / path).read_bytes()
+        self.assertEqual(
+            hashlib.sha256(data).hexdigest(),
+            "410f9c138e766e846acf2dc93db768198def0293a017d7e3296815b451688dbe",
+        )
+        self.assertNotIn("TEXT_FINAL_NEWLINE", self._codes(data, path=path))
+        self.assertIn("TEXT_FINAL_NEWLINE", self._codes(data + b" ", path=path))
+
     def test_binary_content_is_never_reported(self):
         # NUL-bearing data is binary; CRLF inside it is not a line-ending defect.
         self.assertEqual(self._codes(NUL + b"payload" + CRLF), [])
@@ -2413,6 +2425,17 @@ class GeneratedEmbeddingSpdxTests(unittest.TestCase):
             head = (Path(publish_audit.ROOT) / source).read_text(encoding="utf-8").splitlines()[:8]
             self.assertTrue(any("SPDX-License-Identifier:" in line for line in head), source)
 
+    def test_dxc_embeddings_match_the_fsr3_shader_table_and_their_sources_are_byte_exact_imports(self) -> None:
+        import shader_embed
+        contract = {embedded.as_posix(): source.as_posix()
+                    for _stage, source, embedded in shader_embed.FSR3_SHADERS + shader_embed.FSR3FG_SHADERS}
+        self.assertEqual(publish_audit.SPDX_DXC_EMBEDDING_SOURCES, contract)
+        for embedded, source in contract.items():
+            self.assertNotIn(embedded, publish_audit.SPDX_GENERATED_EMBEDDING_SOURCES)
+            self.assertTrue(source.startswith(publish_audit.SPDX_BYTE_EXACT_IMPORT_TREES), source)
+            head = (Path(publish_audit.ROOT) / source).read_text(encoding="utf-8").splitlines()[:8]
+            self.assertTrue(any("Advanced Micro Devices" in line for line in head), source)
+
 
 class RetailDiscIdTests(unittest.TestCase):
     """A game's disc id is not game data: the audit leaves it alone.
@@ -2580,9 +2603,503 @@ class AndroidTreeMetadataTests(unittest.TestCase):
                 self.assertEqual(disp, "included")
                 self.assertFalse(public, "metadata alone must never make a path public")
 
+    def test_a_vendored_glsl_shader_is_classified_like_other_third_party_source(self):
+        # Anime4K's upstream shader is a .glsl file under third_party/ (#1273); a path with no
+        # classification is an UNCLASSIFIED_PATH finding, so the extension must be known.
+        prov, *_rest = publish_audit._default_provenance(
+            "third_party/anime4k/Anime4K_Upscale_CNN_x2_M.glsl", None)
+        self.assertEqual(prov, "project_authored")
+
     def test_unknown_top_level_files_stay_unclassified(self):
         prov, *_rest = publish_audit._default_provenance("elsewhere/app/build.gradle.kts", None)
         self.assertEqual(prov, "unclassified")
+
+
+class ExportPolicyDigestTests(unittest.TestCase):
+    """A committed export control may declare ``policy_sha256`` or omit it.
+
+    Without it, the publication audit holds the control to the policy through
+    the fields the policy decides; with it, the digest is compared as before.
+    """
+
+    def setUp(self) -> None:
+        self.policy = publication_policy.load_policy(
+            Path(__file__).resolve().parent.parent / "assets" / "public_source_profile.json"
+        )
+        self.control = {
+            "profile": self.policy.name,
+            "policy_version": self.policy.profile_version,
+            "excluded_paths": sorted(self.policy.exclude_paths),
+            "excluded_globs": sorted(self.policy.exclude_globs),
+            "tree_derived_fields": list(public_export.EXPORT_TREE_DERIVED_FIELDS_WITH_POLICY_DIGEST),
+        }
+
+    def _codes(self, document: dict) -> list[str]:
+        findings = publish_audit._export_staleness_findings(
+            self.policy, Path("PUBLIC_EXPORT.json"), Path("."), document=document,
+        )
+        return [finding.code for finding in findings]
+
+    def test_the_committed_control_is_current(self) -> None:
+        committed = json.loads(
+            (Path(__file__).resolve().parent.parent / "PUBLIC_EXPORT.json").read_text(encoding="utf-8")
+        )
+        self.assertNotIn("policy_sha256", committed)
+        self.assertEqual(self._codes(committed), [])
+
+    def test_a_control_without_a_digest_is_current_when_its_policy_fields_match(self) -> None:
+        self.assertEqual(self._codes(self.control), [])
+
+    def test_a_policy_decided_field_from_another_policy_is_stale(self) -> None:
+        for field, value in (
+            ("profile", "another-profile"),
+            ("policy_version", "1.0.0"),
+            ("excluded_globs", sorted(self.policy.exclude_globs) + ["smuggled/**"]),
+        ):
+            self.assertEqual(self._codes(dict(self.control, **{field: value})), ["POLICY_EXPORT_STALE"], field)
+
+    def test_a_control_with_neither_a_digest_nor_the_policy_fields_is_stale(self) -> None:
+        for field in ("profile", "policy_version", "excluded_globs"):
+            control = dict(self.control)
+            del control[field]
+            self.assertEqual(self._codes(control), ["POLICY_EXPORT_STALE"], field)
+        self.assertEqual(self._codes({}), ["POLICY_EXPORT_STALE"] * 4)
+
+    def test_a_control_that_declares_the_current_digest_verifies(self) -> None:
+        self.assertEqual(self._codes(dict(self.control, policy_sha256=self.policy.digest)), [])
+
+    def test_a_control_that_declares_a_stale_digest_is_stale(self) -> None:
+        codes = self._codes(dict(self.control, policy_sha256="0" * 64))
+        self.assertEqual(codes, ["POLICY_EXPORT_STALE"])
+        self.assertIn("POLICY_EXPORT_STALE", publish_audit.STALE_CONTROL_CODES)
+
+    def test_a_falsy_declared_digest_is_stale(self) -> None:
+        # Shape is decided by key presence: an empty, null or numeric digest is a
+        # declared digest that does not match, not an omitted one.
+        for value in ("", None, 0):
+            for key in ("policy_sha256", "profile_sha256"):
+                self.assertEqual(self._codes(dict(self.control, **{key: value})), ["POLICY_EXPORT_STALE"],
+                                 f"{key}={value!r}")
+
+    def test_an_omitted_digest_needs_tree_derived_fields_to_name_it(self) -> None:
+        for derived in (None, list(public_export.EXPORT_TREE_DERIVED_FIELDS_WITHOUT_POLICY_DIGEST), "policy_sha256"):
+            control = dict(self.control)
+            if derived is None:
+                del control["tree_derived_fields"]
+            else:
+                control["tree_derived_fields"] = derived
+            self.assertEqual(self._codes(control), ["POLICY_EXPORT_STALE"], repr(derived))
+
+    def test_unorderable_excluded_globs_are_stale_not_a_crash(self) -> None:
+        self.assertEqual(self._codes(dict(self.control, excluded_globs=[1, "a"])), ["POLICY_EXPORT_STALE"])
+
+
+class ArchiveAttributeTests(unittest.TestCase):
+    """A ``.gitattributes`` line cannot hide a file from the gates that judge a pull request.
+
+    ``git archive`` leaves out a path marked ``export-ignore`` and rewrites one marked ``export-subst``.
+    The hygiene audit, the public-export job and the trusted attestation read the index or the tree's
+    objects instead, so the file is audited with its exact bytes whatever the attributes say.
+    """
+
+    PBP = b"\x00PBP\x00\x00\x01\x00" + bytes(32)
+
+    def _repo(self, tmp: str) -> Path:
+        repo = Path(tmp)
+        (repo / "EBOOT.PBP").write_bytes(self.PBP)
+        (repo / "stamp.txt").write_bytes(b"$Format:%H$\n")
+        (repo / ".gitattributes").write_bytes(b"EBOOT.PBP export-ignore\nstamp.txt export-subst\n")
+        run_git(["init", "-q"], cwd=repo, check=True, capture_output=True)
+        run_git(["add", "."], cwd=repo, check=True, capture_output=True)
+        run_git(["commit", "-q", "-m", "init"], cwd=repo, check=True, capture_output=True)
+        return repo
+
+    def test_the_premise_git_archive_hides_and_rewrites(self) -> None:
+        import io  # noqa: PLC0415
+        import tarfile  # noqa: PLC0415
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._repo(tmp)
+            archive = run_git(["archive", "--format=tar", "HEAD"], cwd=repo, check=True, capture_output=True).stdout
+            with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as tar:
+                names = sorted(member.name for member in tar.getmembers())
+                stamp = tar.extractfile("stamp.txt")
+                assert stamp is not None
+                self.assertNotEqual(stamp.read(), b"$Format:%H$\n")
+            self.assertEqual(names, [".gitattributes", "stamp.txt"])
+
+    def test_the_hygiene_audit_lists_and_reads_the_hidden_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._repo(tmp)
+            entries = publish_audit._get_git_entries(True, repo_root=repo)
+            self.assertEqual(sorted(entry.path for entry in entries), [".gitattributes", "EBOOT.PBP", "stamp.txt"])
+            findings = publish_audit.audit_entries(entries, repo_root=repo)
+            self.assertIn(("MAGIC", "EBOOT.PBP"), {(finding.code, finding.path) for finding in findings})
+
+    def test_the_public_export_job_reads_the_index_blobs(self) -> None:
+        import build_public_export  # noqa: PLC0415
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._repo(tmp)
+            _tree, snapshot = build_public_export._index_snapshot(repo)
+            blobs = {path: data for path, _mode, data in snapshot}
+            self.assertEqual(blobs["EBOOT.PBP"], self.PBP)
+            self.assertEqual(blobs["stamp.txt"], b"$Format:%H$\n")
+
+    def test_the_trusted_attestation_lists_the_tree(self) -> None:
+        import provenance_attest_verify  # noqa: PLC0415
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._repo(tmp)
+            tree = run_git(["rev-parse", "HEAD^{tree}"], cwd=repo, check=True, capture_output=True,
+                           text=True).stdout.strip()
+            listed = sorted(path for path, _object_id in provenance_attest_verify._stream_tree_entries(repo, tree))
+            self.assertEqual(listed, [".gitattributes", "EBOOT.PBP", "stamp.txt"])
+
+
+class CommittedTreeMaterializationTests(unittest.TestCase):
+    """``--committed-tree`` audits the tree's own objects, so no attribute of that tree can hide a file.
+
+    Failing-before: the tree was materialized with ``git archive``, which leaves out a path marked
+    ``export-ignore`` and rewrites one marked ``export-subst``. One ``.gitattributes`` line in the commit
+    under audit removed a file from the audit.
+    """
+
+    PBP = b"\x00PBP\x00\x00\x01\x00" + bytes(32)
+
+    def _repo(self, tmp: str) -> Path:
+        repo = Path(tmp).resolve()
+        (repo / "sub").mkdir()
+        (repo / "EBOOT.PBP").write_bytes(self.PBP)
+        (repo / "sub" / "stamp.txt").write_bytes(b"$Format:%H$\r\n")
+        (repo / "run.sh").write_bytes(b"#!/bin/sh\n")
+        (repo / ".gitattributes").write_bytes(
+            b"EBOOT.PBP export-ignore\nsub/stamp.txt export-subst -text\nsub export-ignore\n")
+        run_git(["init", "-q"], cwd=repo, check=True, capture_output=True)
+        run_git(["add", "."], cwd=repo, check=True, capture_output=True)
+        run_git(["update-index", "--chmod=+x", "run.sh"], cwd=repo, check=True, capture_output=True)
+        run_git(["commit", "-q", "-m", "init"], cwd=repo, check=True, capture_output=True)
+        return repo
+
+    def _commit_index(self, repo: Path, *cacheinfo: str) -> str:
+        """Commit the current index plus ``mode,blob,path`` entries no checkout could hold, and return it."""
+        for item in cacheinfo:
+            run_git(["update-index", "--add", "--cacheinfo", item], cwd=repo, check=True, capture_output=True)
+        tree = run_git(["write-tree"], cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
+        return str(run_git(["commit-tree", tree, "-p", "HEAD", "-m", "probe"], cwd=repo, check=True,
+                           capture_output=True, text=True).stdout.strip())
+
+    def test_every_file_of_the_tree_is_written_with_its_exact_bytes(self) -> None:
+        import shutil  # noqa: PLC0415
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._repo(tmp)
+            listed = run_git(["ls-tree", "-r", "--name-only", "HEAD"], cwd=repo, check=True, capture_output=True,
+                             text=True).stdout.split()
+            materialized, tree = publish_audit._materialize_committed_tree("HEAD", repo)
+            try:
+                written = sorted(path.relative_to(materialized).as_posix()
+                                 for path in materialized.rglob("*") if path.is_file())
+                self.assertEqual(written, sorted(listed))
+                self.assertEqual((materialized / "EBOOT.PBP").read_bytes(), self.PBP)
+                self.assertEqual((materialized / "sub" / "stamp.txt").read_bytes(), b"$Format:%H$\r\n")
+                self.assertEqual(tree, run_git(["rev-parse", "HEAD^{tree}"], cwd=repo, check=True,
+                                               capture_output=True, text=True).stdout.strip())
+                modes = {entry.path: entry.mode for entry in publish_audit._get_filesystem_entries(materialized)}
+                if os.name != "nt":
+                    self.assertEqual(modes["run.sh"], "100755")
+                self.assertEqual(modes["EBOOT.PBP"], "100644")
+            finally:
+                shutil.rmtree(materialized, ignore_errors=True)
+
+    def test_the_command_line_audit_finds_a_file_the_attributes_hide(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._repo(tmp)
+            result = subprocess.run(
+                [sys.executable, str(Path(publish_audit.__file__)), "--repo-root", str(repo),
+                 "--committed-tree", "HEAD", "--public-scope"],
+                capture_output=True, text=True, encoding="utf-8", errors="replace", check=False,
+            )
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn("MAGIC: EBOOT.PBP: PSP PBP", result.stdout + result.stderr)
+
+    def test_a_symlink_or_submodule_entry_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._repo(tmp)
+            blob = run_git(["hash-object", "-w", "run.sh"], cwd=repo, check=True, capture_output=True,
+                           text=True).stdout.strip()
+            head = run_git(["rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
+            for item, word in ((f"120000,{blob},link", "mode 120000"), (f"160000,{head},module", "mode 160000")):
+                with self.subTest(entry=item):
+                    commit = self._commit_index(repo, item)
+                    with self.assertRaisesRegex(RuntimeError, f"not a regular file: .*{word}"):
+                        publish_audit._materialize_committed_tree(commit, repo)
+                    run_git(["read-tree", "HEAD"], cwd=repo, check=True, capture_output=True)
+
+    def test_paths_that_differ_only_in_case_are_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._repo(tmp)
+            blob = run_git(["hash-object", "-w", "run.sh"], cwd=repo, check=True, capture_output=True,
+                           text=True).stdout.strip()
+            commit = self._commit_index(repo, f"100644,{blob},eboot.pbp")
+            with self.assertRaisesRegex(RuntimeError, "differ only in letter case: EBOOT.PBP and eboot.pbp"):
+                publish_audit._materialize_committed_tree(commit, repo)
+
+    def test_a_refused_tree_fails_the_command_line_audit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._repo(tmp)
+            blob = run_git(["hash-object", "-w", "run.sh"], cwd=repo, check=True, capture_output=True,
+                           text=True).stdout.strip()
+            commit = self._commit_index(repo, f"120000,{blob},link")
+            result = subprocess.run(
+                [sys.executable, str(Path(publish_audit.__file__)), "--repo-root", str(repo),
+                 "--committed-tree", commit, "--public-scope"],
+                capture_output=True, text=True, encoding="utf-8", errors="replace", check=False,
+            )
+            self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+            self.assertIn("cannot materialize committed tree", result.stderr)
+
+    def _audit(self, repo: Path) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, str(Path(publish_audit.__file__)), "--repo-root", str(repo),
+             "--committed-tree", "HEAD", "--public-scope"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", check=False,
+        )
+
+    def test_a_root_shaped_like_a_bare_repository_hides_nothing_and_runs_nothing(self) -> None:
+        # Failing-before (review 2387-22495ab5fee4 B1): with HEAD, objects/, refs/ and config at its
+        # root, the written tree was discovered as a bare repository; its config pointed core.worktree
+        # at itself, so its .gitignore removed EBOOT.PBP from the audit (exit 0), and its fsmonitor
+        # command ran.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._repo(tmp)
+            marker = Path(tmp).resolve().parent / f"fsmonitor-ran-{os.getpid()}"
+            self.addCleanup(lambda: marker.unlink(missing_ok=True))
+            (repo / "HEAD").write_bytes(b"ref: refs/heads/main\n")
+            (repo / "objects" / "info").mkdir(parents=True)
+            (repo / "objects" / "info" / "keep").write_bytes(b"")
+            (repo / "refs" / "heads").mkdir(parents=True)
+            (repo / "refs" / "heads" / "keep").write_bytes(b"")
+            (repo / "config").write_bytes(
+                b"[core]\n\trepositoryformatversion = 0\n\tbare = false\n\tworktree = .\n"
+                b"\tfsmonitor = \"echo ran > '" + marker.as_posix().encode("utf-8") + b"'; false\"\n")
+            (repo / ".gitignore").write_bytes(b"/EBOOT.PBP\n/HEAD\n/config\n/objects/\n/refs/\n/.gitignore\n")
+            (repo / ".gitattributes").write_bytes(b"")
+            run_git(["add", "-f", "."], cwd=repo, check=True, capture_output=True)
+            run_git(["commit", "-q", "-m", "bare-shaped root"], cwd=repo, check=True, capture_output=True)
+            result = self._audit(repo)
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn("MAGIC: EBOOT.PBP: PSP PBP", result.stdout + result.stderr)
+            self.assertFalse(marker.exists(), "the candidate's core.fsmonitor command ran")
+
+    def test_vcs_metadata_directory_names_hide_nothing(self) -> None:
+        # Failing-before (review 2387-22495ab5fee4 B2): the walk pruned every directory named .hg or
+        # .svn, so files under them were never audited (exit 0).
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._repo(tmp)
+            (repo / ".gitattributes").write_bytes(b"")
+            (repo / ".hg").mkdir()
+            (repo / ".hg" / "GAME.PBP").write_bytes(self.PBP)
+            (repo / "docs" / ".svn").mkdir(parents=True)
+            (repo / "docs" / ".svn" / "KEY.PBP").write_bytes(self.PBP)
+            run_git(["add", "-A", "."], cwd=repo, check=True, capture_output=True)
+            run_git(["commit", "-q", "-m", "vcs names"], cwd=repo, check=True, capture_output=True)
+            result = self._audit(repo)
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn("MAGIC: .hg/GAME.PBP: PSP PBP", result.stdout + result.stderr)
+            self.assertIn("MAGIC: docs/.svn/KEY.PBP: PSP PBP", result.stdout + result.stderr)
+
+    def test_the_audit_lists_exactly_the_trees_files(self) -> None:
+        import shutil  # noqa: PLC0415
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._repo(tmp)
+            materialized, tree = publish_audit._materialize_committed_tree("HEAD", repo)
+            self.addCleanup(shutil.rmtree, materialized, True)
+            listed = publish_audit._committed_tree_entries(tree, repo)
+            entries = publish_audit._committed_entries(materialized, listed)
+            self.assertEqual(sorted(entry.path for entry in entries), sorted(path for path, _m, _o in listed))
+            self.assertEqual({entry.path: entry.mode for entry in entries}["run.sh"], "100755")
+            (materialized / "extra.txt").write_bytes(b"x")
+            with self.assertRaisesRegex(RuntimeError, "differs from git ls-tree: extra \\['extra.txt'\\]"):
+                publish_audit._committed_entries(materialized, listed)
+
+    def test_git_never_discovers_a_bare_repository_implicitly(self) -> None:
+        env = publish_audit.isolated_git_env()
+        count = int(env["GIT_CONFIG_COUNT"])
+        settings = {env[f"GIT_CONFIG_KEY_{i}"]: env[f"GIT_CONFIG_VALUE_{i}"] for i in range(count)}
+        self.assertEqual(settings.get("safe.bareRepository"), "explicit")
+        # Review 2387-0087347807fa N-D: the setting's effect, not only its presence. Git, run inside a
+        # directory shaped like a bare repository, finds it as one without the setting and refuses it with.
+        with tempfile.TemporaryDirectory() as tmp:
+            bare = Path(tmp).resolve() / "candidate"
+            for folder in ("objects/info", "refs/heads"):
+                (bare / folder).mkdir(parents=True)
+            (bare / "HEAD").write_bytes(b"ref: refs/heads/main\n")
+            (bare / "config").write_bytes(b"[core]\n\trepositoryformatversion = 0\n\tbare = true\n")
+            found = subprocess.run(
+                ["git", "-c", "safe.bareRepository=all", "rev-parse", "--absolute-git-dir"], cwd=bare,
+                env=isolated_git_env(), capture_output=True, text=True, check=False)
+            self.assertEqual(found.returncode, 0, found.stderr)
+            self.assertEqual(Path(found.stdout.strip()).resolve(), bare)
+            refused = subprocess.run(["git", "rev-parse", "--absolute-git-dir"], cwd=bare,
+                                     env=publish_audit.isolated_git_env(), capture_output=True, text=True,
+                                     check=False)
+            self.assertEqual(refused.returncode, 128, refused.stdout)
+            self.assertIn("bare repository", refused.stderr)
+
+    def test_the_written_tree_is_removed_after_the_audit(self) -> None:
+        # Review 2387-0087347807fa N-F: main() removed the written tree only when writing it failed, so
+        # every audit left a copy of the candidate in the temporary directory.
+        import contextlib  # noqa: PLC0415
+        import io  # noqa: PLC0415
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._repo(tmp)
+            written: list[Path] = []
+            materialize = publish_audit._materialize_committed_tree
+
+            def spy(*args: object, **kwargs: object) -> tuple[Path, str]:
+                root, tree = materialize(*args, **kwargs)  # type: ignore[arg-type]
+                written.append(root)
+                return root, tree
+
+            with mock.patch.object(publish_audit, "_materialize_committed_tree", side_effect=spy), \
+                    contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                code = publish_audit.main(["--repo-root", str(repo), "--committed-tree", "HEAD", "--public-scope"])
+            self.assertEqual(code, 1)
+            self.assertEqual(len(written), 1)
+            self.assertFalse(written[0].exists(), written[0])
+
+
+class TrustedTreeAuditTests(unittest.TestCase):
+    """The attest job's publication audit of a candidate's whole tree, run for real.
+
+    The candidate is this checkout's committed tree, read from its objects through a scratch repository
+    that borrows them; nothing is checked out. Three candidates are audited with the command the workflow
+    step runs (``--committed-tree``, the candidate's own profile as ``--policy``):
+
+    * the tree as committed passes;
+    * the tree plus an ``EBOOT.PBP`` fails;
+    * the same plus an ``export-ignore`` line for that file fails with the same findings.
+
+    Failing-before: no trusted job ran this audit, and ``--committed-tree`` read a ``git archive``, which
+    the third candidate's ``.gitattributes`` line empties of the file.
+
+    The three audits run side by side, each over every tracked file.
+    """
+
+    FORBIDDEN = b"\x00PBP\x00\x00\x01\x00" + bytes(64)
+    # Reports the tools/ modules the audit loaded, so the protected list can be held to what really runs.
+    WRAPPER = (
+        "import atexit, json, os, runpy, sys\n"
+        "tool = os.path.abspath(sys.argv[1])\n"
+        "tools = os.path.dirname(tool)\n"
+        "def report():\n"
+        "    files = {os.path.abspath(module.__file__) for module in list(sys.modules.values())\n"
+        "             if getattr(module, '__file__', None)}\n"
+        "    local = sorted(os.path.relpath(path, os.path.dirname(tools)).replace(os.sep, '/')\n"
+        "                   for path in files | {tool} if path.startswith(tools + os.sep))\n"
+        "    sys.stderr.write('LOADED ' + json.dumps(local) + '\\n')\n"
+        "atexit.register(report)\n"
+        "sys.argv = sys.argv[1:]\n"
+        "runpy.run_path(tool, run_name='__main__')\n"
+    )
+    results: dict[str, subprocess.CompletedProcess]
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        root = Path(publish_audit.__file__).resolve().parents[1]
+        try:
+            head = run_git(["rev-parse", "--verify", "--quiet", "HEAD^{commit}"], cwd=root, check=True,
+                           capture_output=True, text=True).stdout.strip()
+            objects = run_git(["rev-parse", "--path-format=absolute", "--git-path", "objects"], cwd=root,
+                              check=True, capture_output=True, text=True).stdout.strip()
+        except (OSError, subprocess.CalledProcessError) as error:
+            raise unittest.SkipTest("needs this checkout's Git objects") from error
+        scratch = tempfile.TemporaryDirectory(prefix="nk-tree-audit-")
+        cls.addClassCleanup(scratch.cleanup)
+        repo = Path(scratch.name) / "repo"
+        repo.mkdir()
+        run_git(["init", "-q"], cwd=repo, check=True, capture_output=True)
+        (repo / ".git" / "objects" / "info" / "alternates").write_bytes(
+            (Path(objects).as_posix() + "\n").encode("utf-8"))
+
+        def git(*args: str, data: bytes | None = None, index: str = "probe-index") -> str:
+            env = isolated_git_env(root=repo) | {
+                "GIT_INDEX_FILE": str(repo / ".git" / index),
+                "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
+                "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid",
+            }
+            return subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, input=data,
+                                  env=env).stdout.decode("utf-8").strip()
+
+        def commit(files: dict[str, bytes]) -> str:
+            git("read-tree", f"{head}^{{tree}}")
+            for path, data in files.items():
+                blob = git("hash-object", "-w", "--stdin", data=data)
+                git("update-index", "--add", "--cacheinfo", f"100644,{blob},{path}")
+            return git("commit-tree", git("write-tree"), "-m", "probe")
+
+        attributes = git("cat-file", "blob", f"{head}:.gitattributes").encode("utf-8")
+        candidates = {
+            "clean": commit({}),
+            "control": commit({"EBOOT.PBP": cls.FORBIDDEN}),
+            "hidden": commit({"EBOOT.PBP": cls.FORBIDDEN,
+                              ".gitattributes": attributes + b"\nEBOOT.PBP export-ignore\n"}),
+        }
+        running = {}
+        for name, sha in candidates.items():
+            policy = Path(scratch.name) / f"{name}.profile.json"
+            policy.write_bytes(subprocess.run(
+                ["git", "cat-file", "blob", f"{sha}:assets/public_source_profile.json"], cwd=repo, check=True,
+                capture_output=True, env=isolated_git_env(root=repo)).stdout)
+            # The command of the workflow step "Audit the candidate tree with the trusted publication audit".
+            running[name] = subprocess.Popen(
+                [sys.executable, "-c", cls.WRAPPER, str(Path(publish_audit.__file__)),
+                 "--repo-root", str(repo), "--committed-tree", sha, "--policy", str(policy),
+                 "--public-scope", "--provenance-self-consistency"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace")
+        cls.results = {}
+        for name, process in running.items():
+            out, err = process.communicate()
+            cls.results[name] = subprocess.CompletedProcess(process.args, process.returncode, out, err)
+
+    def _findings(self, name: str) -> set[str]:
+        result = self.results[name]
+        return {line.split(":", 2)[0] for line in (result.stdout + result.stderr).splitlines()
+                if ": EBOOT.PBP: " in line}
+
+    def test_the_committed_tree_passes(self) -> None:
+        result = self.results["clean"]
+        self.assertEqual(result.returncode, 0, (result.stdout + result.stderr)[-2000:])
+        self.assertIn("publication audit: OK", result.stdout + result.stderr)
+
+    def test_a_forbidden_file_fails_the_trusted_audit(self) -> None:
+        result = self.results["control"]
+        self.assertEqual(result.returncode, 1, (result.stdout + result.stderr)[-2000:])
+        self.assertLessEqual({"MAGIC", "PATH", "POLICY_UNCLASSIFIED"}, self._findings("control"))
+
+    def test_an_export_ignore_line_changes_nothing(self) -> None:
+        result = self.results["hidden"]
+        self.assertEqual(result.returncode, 1, (result.stdout + result.stderr)[-2000:])
+        self.assertEqual(self._findings("hidden"), self._findings("control"))
+        self.assertLessEqual({"MAGIC", "PATH", "POLICY_UNCLASSIFIED"}, self._findings("hidden"))
+
+    def test_every_module_the_audit_really_loaded_is_a_protected_path(self) -> None:
+        import ci_trust_verdict  # noqa: PLC0415
+
+        root = Path(publish_audit.__file__).resolve().parents[1]
+        loaded: set[str] = set()
+        for result in self.results.values():
+            (line,) = [line for line in result.stderr.splitlines() if line.startswith("LOADED ")]
+            loaded |= set(json.loads(line[len("LOADED "):]))
+        self.assertIn("tools/publish_audit.py", loaded)
+        self.assertIn("tools/publication_policy.py", loaded)
+        texts = [path.read_text(encoding="utf-8") for path in sorted((root / ".github" / "workflows").glob("*.y*ml"))]
+        tree = {path: "x" for path in loaded}
+        protected = ci_trust_verdict.protected_paths(tree, tree, texts)
+        self.assertEqual(sorted(loaded - protected), [])
 
 
 if __name__ == "__main__":

@@ -107,6 +107,154 @@ class ShaderEmbedTests(unittest.TestCase):
             self.assertTrue(errors)
 
 
+# ---- schema 2: the FSR 3 sets, compiled by the pinned DXC (third_party/fidelityfx_sdk) -----------
+
+
+def _fsr3_copy(root: Path, manifest_path: Path = shader_embed.FSR3_MANIFEST) -> Path:
+    """A DXC set's manifest and every file it names, under a scratch root; the manifest's new path."""
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest_rel = manifest_path.relative_to(shader_embed.ROOT)
+    paths = {manifest_rel.as_posix()}
+    for entry in manifest["shaders"]:
+        paths |= {entry["source"], entry["embedded"], *(inc["path"] for inc in entry["includes"])}
+    for rel in paths:
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(shader_embed.ROOT / rel, root / rel)
+    return root / manifest_rel
+
+
+class Fsr3ShaderSetTests(unittest.TestCase):
+    def test_checked_in_set_matches_its_manifest(self) -> None:
+        errors, skipped = shader_embed.verify_dxc(shader_embed.ROOT, shader_embed.FSR3_MANIFEST)
+        self.assertEqual(errors, [])
+        self.assertIsNone(skipped)
+        manifest = json.loads(shader_embed.FSR3_MANIFEST.read_text(encoding="utf-8"))
+        self.assertEqual(manifest["schema_version"], 2)
+        self.assertEqual(manifest["compiler"]["release"], shader_embed.DXC_RELEASE)
+        self.assertTrue(shader_embed.dxc_is_pinned(manifest["compiler"]["version"]))
+        for entry in manifest["shaders"]:
+            self.assertTrue(entry["includes"], entry["source"])
+            for inc in entry["includes"]:
+                self.assertTrue(inc["path"].startswith("third_party/fidelityfx_sdk/"), inc["path"])
+
+    def test_a_changed_include_source_or_embedding_is_rejected(self) -> None:
+        manifest = json.loads(shader_embed.FSR3_MANIFEST.read_text(encoding="utf-8"))
+        first = manifest["shaders"][0]
+        cases = (
+            (first["includes"][0]["path"], "include", f"include {first['includes'][0]['path']} SHA-256 mismatch"),
+            (first["source"], "source", "source SHA-256 mismatch"),
+            (first["embedded"], "embedded", "embedded SHA-256 mismatch"),
+        )
+        for rel, what, expect in cases:
+            with self.subTest(changed=what), tempfile.TemporaryDirectory(prefix="nakagawa-fsr3-test-") as temp:
+                root = Path(temp)
+                manifest_path = _fsr3_copy(root)
+                target = root / rel
+                if what == "embedded":  # one word changed, still a valid embedding
+                    text = target.read_text(encoding="ascii")
+                    self.assertIn("0x07230203", text)
+                    target.write_text(text.replace("0x07230203", "0x07230202", 1), encoding="ascii")
+                else:
+                    target.write_bytes(target.read_bytes() + b"\n// changed\n")
+                errors, _ = shader_embed.verify_dxc(root, manifest_path)
+                self.assertTrue(any(expect in error for error in errors), errors)
+
+    def test_a_changed_build_contract_is_rejected(self) -> None:
+        for key, value in (("defines", ["FFX_FSR3UPSCALER_OPTION_INVERTED_DEPTH=0"]), ("options", ["-O0"]),
+                           ("release", {"tag": "v1.8.2505"})):
+            with self.subTest(field=key), tempfile.TemporaryDirectory(prefix="nakagawa-fsr3-test-") as temp:
+                manifest_path = _fsr3_copy(Path(temp))
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                manifest["compiler"][key] = value
+                manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+                errors, _ = shader_embed.verify_dxc(Path(temp), manifest_path)
+                self.assertIn(f"compiler {key} does not match the build contract", errors)
+
+    def test_a_missing_include_closure_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="nakagawa-fsr3-test-") as temp:
+            manifest_path = _fsr3_copy(Path(temp))
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["shaders"][0]["includes"] = []
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            errors, _ = shader_embed.verify_dxc(Path(temp), manifest_path)
+            self.assertTrue(any("no include closure recorded" in error for error in errors), errors)
+
+    def test_only_the_pinned_dxc_regenerates_or_reproduces(self) -> None:
+        self.assertTrue(shader_embed.dxc_is_pinned("dxcompiler.dll: 1.9(5512-01b62ad4)(1.9.2609.5) - 1.9.2609.5 (01b62ad47)"))
+        self.assertTrue(shader_embed.dxc_is_pinned("libdxcompiler.so: 1.9(5512-01b62ad4)(1.9.2609.5)"))
+        self.assertFalse(shader_embed.dxc_is_pinned("dxcompiler.dll: 1.8 - 1.8.2505.1 (b9b7f4e3c)"))
+        self.assertFalse(shader_embed.dxc_is_pinned("libdxcompiler.so: 1.9(5512-01b62ad4)(1.9.2610.1)"))
+        self.assertFalse(shader_embed.dxc_is_pinned("libdxcompiler.so: 1.9(5512-0badc0de)(1.9.2609.5)"))
+        real = shader_embed.dxc_version
+        shader_embed.dxc_version = lambda dxc: "dxcompiler.dll: 1.8 - 1.8.2505.1 (b9b7f4e3c)"
+        try:
+            with tempfile.TemporaryDirectory(prefix="nakagawa-fsr3-test-") as temp:
+                manifest_path = _fsr3_copy(Path(temp))
+                with self.assertRaises(ValueError):
+                    shader_embed.regenerate_dxc(Path(temp), manifest_path, "dxc")
+                errors, skipped = shader_embed.verify_dxc(Path(temp), manifest_path, "dxc")
+                self.assertEqual(errors, [])
+                self.assertIn("not the pinned", skipped or "")
+        finally:
+            shader_embed.dxc_version = real
+
+    def test_embeddings_recompile_with_the_pinned_dxc(self) -> None:
+        dxc = os.environ.get("NK_DXC") or shutil.which("dxc")
+        if not dxc:
+            self.skipTest("no DXC (set NK_DXC to the pinned release)")
+        if not shader_embed.dxc_is_pinned(shader_embed.dxc_version(dxc)):
+            self.skipTest(f"{dxc} is not the pinned {shader_embed.DXC_RELEASE['tag']}")
+        errors, skipped = shader_embed.verify_dxc(shader_embed.ROOT, shader_embed.FSR3_MANIFEST, dxc)
+        self.assertEqual(errors, [])
+        self.assertIsNone(skipped)
+
+
+class Fsr3FrameGenerationShaderSetTests(unittest.TestCase):
+    """The fsr3fg set: the same compiler and options as fsr3, its own defines, sources and manifest."""
+
+    SET = shader_embed.DXC_SETS["fsr3fg"]
+
+    def test_checked_in_set_matches_its_manifest(self) -> None:
+        manifest_path, shaders, defines = self.SET
+        errors, skipped = shader_embed.verify_dxc(shader_embed.ROOT, manifest_path, None, shaders, defines)
+        self.assertEqual(errors, [])
+        self.assertIsNone(skipped)
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        self.assertEqual(manifest["compiler"]["options"], list(shader_embed.DXC_OPTIONS))
+        self.assertEqual(manifest["compiler"]["defines"], list(defines))
+        self.assertEqual(len(manifest["shaders"]), 17)
+        for entry in manifest["shaders"]:
+            self.assertTrue(entry["source"].startswith("third_party/fidelityfx_sdk/framegeneration/"), entry)
+            self.assertNotIn("debug_view", entry["source"])
+
+    def test_the_upscaler_defines_do_not_verify_the_frame_generation_set(self) -> None:
+        manifest_path, shaders, _ = self.SET
+        errors, _ = shader_embed.verify_dxc(shader_embed.ROOT, manifest_path, None, shaders)
+        self.assertIn("compiler defines does not match the build contract", errors)
+
+    def test_a_changed_callbacks_header_is_rejected(self) -> None:
+        manifest_path, shaders, defines = self.SET
+        rel = "third_party/fidelityfx_sdk/framegeneration/fsr3/include/gpu/opticalflow/ffx_opticalflow_callbacks_hlsl.h"
+        with tempfile.TemporaryDirectory(prefix="nakagawa-fsr3fg-test-") as temp:
+            root = Path(temp)
+            copied = _fsr3_copy(root, manifest_path)
+            target = root / rel
+            target.write_bytes(target.read_bytes().replace(b'[[vk::image_format("r32ui")]] ', b"", 1))
+            errors, _ = shader_embed.verify_dxc(root, copied, None, shaders, defines)
+            self.assertTrue(any(f"include {rel} SHA-256 mismatch" in error for error in errors), errors)
+
+    def test_embeddings_recompile_with_the_pinned_dxc(self) -> None:
+        dxc = os.environ.get("NK_DXC") or shutil.which("dxc")
+        if not dxc:
+            self.skipTest("no DXC (set NK_DXC to the pinned release)")
+        if not shader_embed.dxc_is_pinned(shader_embed.dxc_version(dxc)):
+            self.skipTest(f"{dxc} is not the pinned {shader_embed.DXC_RELEASE['tag']}")
+        manifest_path, shaders, defines = self.SET
+        errors, skipped = shader_embed.verify_dxc(shader_embed.ROOT, manifest_path, dxc, shaders, defines)
+        self.assertEqual(errors, [])
+        self.assertIsNone(skipped)
+
+
 # ---- ge_powf: one text in src/rt/ge.c and shaders/psp_tnl.vert (#318, #1732) ----------------
 
 GE_C = shader_embed.ROOT / "src" / "rt" / "ge.c"
@@ -253,6 +401,83 @@ int main(int argc, char **argv) {
     return 0;
 }
 """
+
+
+# SPIR-V opcodes and operands the destination-read checks read (SPIR-V 1.0 with
+# SPV_EXT_fragment_shader_interlock).
+SPV_OP_CAPABILITY, SPV_OP_EXECUTION_MODE, SPV_OP_DECORATE, SPV_OP_VARIABLE = 17, 16, 71, 59
+SPV_OP_BEGIN_INTERLOCK, SPV_OP_END_INTERLOCK = 5364, 5365
+SPV_OP_ATOMIC_OR, SPV_OP_ATOMIC_XOR = 241, 242
+SPV_CAP_PIXEL_INTERLOCK = 5378
+SPV_MODE_EARLY_FRAGMENT_TESTS, SPV_MODE_PIXEL_ORDERED, SPV_MODE_PIXEL_UNORDERED = 9, 5366, 5367
+SPV_DECORATION_COHERENT = 23
+
+
+def spirv_instructions(embedded: str) -> list[tuple[int, tuple[int, ...]]]:
+    """(opcode, operands) of every instruction of a checked-in embedding."""
+    data = shader_embed.parse_embedding((shader_embed.GPU_DIR / embedded).read_text(encoding="ascii"))
+    words = struct.unpack(f"<{len(data) // 4}I", data)
+    out = []
+    i = 5                                    # after the header
+    while i < len(words):
+        count = words[i] >> 16
+        if count == 0:
+            raise ValueError(f"{embedded}: zero-length instruction at word {i}")
+        out.append((words[i] & 0xFFFF, tuple(words[i + 1:i + count])))
+        i += count
+    return out
+
+
+class DstReadVariantTests(unittest.TestCase):
+    """psp.frag's ordered destination-read variant (#2109) and the default module beside it."""
+
+    # The default module, psp.frag built without SR_DST_INTERLOCK: a change meant for the variant
+    # alone (an #ifdef) must not change it. A deliberate change to the default fragment stage
+    # updates this hash; the last one added the color test, and the module is the same with and
+    # without the variant's #ifdef blocks in the source.
+    DEFAULT_FRAG_SPIRV_SHA256 = "ab1795bb84423d027451cb102ad9a72042f1579b79e79cb8752421e7cf92ce20"
+
+    def manifest_entry(self, embedded: str) -> dict:
+        manifest = shader_embed.load_manifest(shader_embed.MANIFEST)
+        entries = [e for e in manifest["shaders"] if e.get("embedded") == embedded]
+        self.assertEqual(len(entries), 1, embedded)
+        entry: dict = entries[0]
+        return entry
+
+    def test_default_module_is_unchanged(self) -> None:
+        entry = self.manifest_entry("psp_frag.inc")
+        self.assertEqual(entry["spirv_sha256"], self.DEFAULT_FRAG_SPIRV_SHA256)
+        self.assertNotIn("defines", entry)
+        ops = {op for op, _ in spirv_instructions("psp_frag.inc")}
+        self.assertFalse(ops & {SPV_OP_BEGIN_INTERLOCK, SPV_OP_END_INTERLOCK})
+
+    def test_variant_is_ordered_early_and_coherent(self) -> None:
+        entry = self.manifest_entry("psp_frag_rmw.inc")
+        self.assertEqual(entry["source"], "shaders/psp.frag")
+        self.assertEqual(entry["defines"], ["SR_DST_INTERLOCK"])
+        ins = spirv_instructions("psp_frag_rmw.inc")
+        ops = [op for op, _ in ins]
+        self.assertEqual(ops.count(SPV_OP_BEGIN_INTERLOCK), 1)
+        self.assertEqual(ops.count(SPV_OP_END_INTERLOCK), 1)
+        self.assertLess(ops.index(SPV_OP_BEGIN_INTERLOCK), ops.index(SPV_OP_END_INTERLOCK))
+        self.assertIn((SPV_OP_CAPABILITY, (SPV_CAP_PIXEL_INTERLOCK,)), ins)
+        modes = {operands[1] for op, operands in ins if op == SPV_OP_EXECUTION_MODE}
+        self.assertIn(SPV_MODE_PIXEL_ORDERED, modes)
+        self.assertIn(SPV_MODE_EARLY_FRAGMENT_TESTS, modes)
+        self.assertNotIn(SPV_MODE_PIXEL_UNORDERED, modes)
+        # The one storage image (the target) is Coherent: a store is visible to the next critical
+        # section's load without the Vulkan memory model.
+        coherent = {operands[0] for op, operands in ins
+                    if op == SPV_OP_DECORATE and operands[1] == SPV_DECORATION_COHERENT}
+        variables = {operands[1] for op, operands in ins if op == SPV_OP_VARIABLE}
+        self.assertEqual(len(coherent & variables), 1)
+        # Shader-owned depth (#2109): the packed D16 buffer is read and written only by atomics
+        # (two pixels share a word, outside each other's critical sections), and only in the
+        # critical section: one atomic read and one atomic XOR, both between begin and end.
+        begin, end = ops.index(SPV_OP_BEGIN_INTERLOCK), ops.index(SPV_OP_END_INTERLOCK)
+        atomics = [i for i, op in enumerate(ops) if op in (SPV_OP_ATOMIC_OR, SPV_OP_ATOMIC_XOR)]
+        self.assertEqual(sorted(ops[i] for i in atomics), [SPV_OP_ATOMIC_OR, SPV_OP_ATOMIC_XOR])
+        self.assertTrue(all(begin < i < end for i in atomics))
 
 
 class GePowfSharedTextTests(unittest.TestCase):

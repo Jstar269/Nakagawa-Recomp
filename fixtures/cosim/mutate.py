@@ -388,12 +388,12 @@ MUTANTS: tuple[Mutant, ...] = (
                 "    out.append(f\"      {emit_code_pointer_check('_t', addr)}\")\n"
                 "    out.append(f\"      sr_begin(s, {G(addr)}, 0x{w:08x}u); "
                 "{link}sr_end(s, 0u, 0);\")\n"
-                "    out.extend(delay_slot_lines(ds, dsw, addr, lle_cpu=lle_cpu, resumable=resumable,\n"
-                "                                indent=\"      \"))",
+                "    out.extend(delay_slot_lines(ds, dsw, addr, resumable=resumable,\n"
+                "                                indent=\"      \", options=ctx.options))",
                 "    out.append(f\"    sr_begin(s, {G(addr)}, 0x{w:08x}u); "
                 "{link}sr_end(s, 0u, 0);\")\n"
-                "    out.extend(delay_slot_lines(ds, dsw, addr, lle_cpu=lle_cpu, resumable=resumable,\n"
-                "                                indent=\"      \"))\n"
+                "    out.extend(delay_slot_lines(ds, dsw, addr, resumable=resumable,\n"
+                "                                indent=\"      \", options=ctx.options))\n"
                 "    out.append(f\"    {{ uint32_t _t = {R(a)};\")\n"
                 "    out.append(f\"      {emit_code_pointer_check('_t', addr)}\")",
                 1,
@@ -586,7 +586,7 @@ LLVM_MUTANTS: tuple[Mutant, ...] = (
         "LLVM BACKEND: a conditional branch drops its delay slot",
         [(
             "            if not t.likely:\n"
-            "                self.instruction(t.slot)\n",
+            "                self.instruction(_require_delay_slot(t))\n",
             "            if not t.likely:\n"
             "                pass\n",
             1,
@@ -597,11 +597,14 @@ LLVM_MUTANTS: tuple[Mutant, ...] = (
         "llvm-likely-slot-always-runs",
         "LLVM BACKEND: a not-taken branch-likely still runs its delay slot",
         [
-            ("            if not t.likely:\n", "            if True:\n", 1),
+            ("            if not t.likely:\n"
+             "                self.instruction(_require_delay_slot(t))\n",
+             "            if True:\n"
+             "                self.instruction(_require_delay_slot(t))\n", 1),
             ("            if t.likely:\n"
-             "                self.instruction(t.slot)\n",
+             "                self.instruction(_require_delay_slot(t))\n",
              "            if False:\n"
-             "                self.instruction(t.slot)\n", 1),
+             "                self.instruction(_require_delay_slot(t))\n", 1),
         ],
         target="llvm-backend",
     ),
@@ -632,20 +635,22 @@ LLVM_MUTANTS: tuple[Mutant, ...] = (
     ),
     Mutant(
         "llvm-computed-transfer-timing",
-        "LLVM BACKEND: jalr reads its target after the delay slot (PR #126 regression)",
+        "LLVM BACKEND: jalr/jr read their target after the delay slot (PR #126 regression)",
         [(
             "            latched = self.R(t.target_reg)                     # PR #126: latched at the transfer\n"
+            "            self.code_pointer_check(latched, t.addr)\n"
             "            self.begin(t.addr, t.word)\n"
             "            if t.link_reg is not None:\n"
             "                self.W(t.link_reg, link_value)\n"
             "            self.end()\n"
-            "            self.instruction(t.slot)\n",
+            "            self.instruction(_require_delay_slot(t))\n",
             "            self.begin(t.addr, t.word)\n"
             "            if t.link_reg is not None:\n"
             "                self.W(t.link_reg, link_value)\n"
             "            self.end()\n"
-            "            self.instruction(t.slot)\n"
-            "            latched = self.R(t.target_reg)\n",
+            "            self.instruction(_require_delay_slot(t))\n"
+            "            latched = self.R(t.target_reg)\n"
+            "            self.code_pointer_check(latched, t.addr)\n",
             1,
         )],
         target="llvm-backend",

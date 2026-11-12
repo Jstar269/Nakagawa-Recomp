@@ -694,6 +694,8 @@ class LibrarySweepTests(unittest.TestCase):
         # authentic evidence, so every route runs with it off and the private report says so.
         with mock.patch.dict(library_sweep.os.environ, {"SR_PRESENT_UPSCALE": "fsr1"}):
             self.assertEqual(library_sweep._route_environment()["SR_PRESENT_UPSCALE"], "off")
+        with mock.patch.dict(library_sweep.os.environ, {"SR_MOVIE_UPSCALE": "anime4k"}):
+            self.assertEqual(library_sweep._route_environment()["SR_MOVIE_UPSCALE"], "off")
         path, _ = self._write_checkpoint(library_sweep._default_comparison_identity())
         private = json.loads(path.read_text(encoding="utf-8"))
         self.assertEqual(private["present_upscale"], "off")

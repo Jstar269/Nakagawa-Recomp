@@ -220,7 +220,8 @@ class NamedBoundaryTests(unittest.TestCase):
         row = self._vfpu_row()
         self.assertIn("measured VASIN at the arc-sine domain boundary", row)
         self.assertIn("downstream graphics paths drop and count non-finite primitives", row)
-        self.assertIn("in the works", row)
+        self.assertIn("Coverage for a second title's instruction forms is not finished", row)
+        self.assertIn("issues/326", row)
         self.assertIn("issues/69", row)
 
 

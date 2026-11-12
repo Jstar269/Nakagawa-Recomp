@@ -9,7 +9,7 @@
 #ifdef NK_PLAYER_UI_REGRESSION_TEST
 
 #include "package_builder.h"
-#include "ui_renderer.h"
+#include "player_host.h"
 
 #include <limits.h>
 #include <stdio.h>
@@ -96,6 +96,32 @@ static bool player_ui_test_parse_package_status(
         return false;
     }
     return true;
+}
+
+/* The name each update phase has in the "update=" lines and WAIT_UPDATE steps. */
+static const char *player_update_phase_name(PlayerUpdatePhase phase) {
+    switch (phase) {
+        case PLAYER_UPDATE_CHECKING: return "checking";
+        case PLAYER_UPDATE_CURRENT: return "current";
+        case PLAYER_UPDATE_AVAILABLE: return "available";
+        case PLAYER_UPDATE_DOWNLOADING: return "downloading";
+        case PLAYER_UPDATE_DOWNLOADED: return "downloaded";
+        case PLAYER_UPDATE_INSTALLING: return "installing";
+        case PLAYER_UPDATE_INSTALLED: return "installed";
+        case PLAYER_UPDATE_FAILED: return "failed";
+        case PLAYER_UPDATE_IDLE:
+        default: return "idle";
+    }
+}
+
+static bool player_ui_test_parse_update_phase(const char *text, PlayerUpdatePhase *out_phase) {
+    for (int phase = PLAYER_UPDATE_IDLE; phase <= PLAYER_UPDATE_FAILED; ++phase) {
+        if (strcmp(text, player_update_phase_name((PlayerUpdatePhase)phase)) == 0) {
+            *out_phase = (PlayerUpdatePhase)phase;
+            return true;
+        }
+    }
+    return false;
 }
 
 bool player_ui_test_parse_fail_attempts(const char *text) {
@@ -206,6 +232,18 @@ int player_ui_test_next_event(const char *script, size_t *cursor,
         event->user.windowID = (Uint32)duration;
         return 1;
     }
+    /* WAIT_LAID_OUT=<timeout ms>: until a frame drawn after this step leaves the
+       next UI's focus graph laid out, so a move or Tab that follows runs in its
+       own frame instead of waiting one with the input after it. */
+    if (strncmp(token, "WAIT_LAID_OUT=", 14) == 0) {
+        uint64_t timeout = 0;
+        if (!player_ui_test_parse_positive_u64(token + 14, &timeout) ||
+            timeout > UINT32_MAX) return -1;
+        event->type = SDL_EVENT_USER;
+        event->user.code = PLAYER_UI_TEST_ACTION_WAIT_LAID_OUT;
+        event->user.timestamp = timeout;
+        return 1;
+    }
     if (strncmp(token, "WAIT_VIEW=", 10) == 0) {
         char *comma = strchr(token + 10, ',');
         if (!comma) return -1;
@@ -236,6 +274,23 @@ int player_ui_test_next_event(const char *script, size_t *cursor,
         event->user.timestamp = timeout;
         return 1;
     }
+    if (strncmp(token, "WAIT_UPDATE=", 12) == 0) {
+        /* "installed,30000": the update phase by its "update=" name, and the
+           most the background step may take before the run fails. */
+        char *comma = strchr(token + 12, ',');
+        PlayerUpdatePhase target = PLAYER_UPDATE_IDLE;
+        uint64_t timeout = 0;
+        if (!comma) return -1;
+        *comma = '\0';
+        if (!player_ui_test_parse_update_phase(token + 12, &target) ||
+            !player_ui_test_parse_positive_u64(comma + 1, &timeout) ||
+            timeout > UINT32_MAX) return -1;
+        event->type = SDL_EVENT_USER;
+        event->user.code = PLAYER_UI_TEST_ACTION_WAIT_UPDATE;
+        event->user.windowID = (Uint32)target;
+        event->user.timestamp = timeout;
+        return 1;
+    }
     if (strncmp(token, "WAIT_REPORT=", 12) == 0) {
         char *comma = strchr(token + 12, ',');
         uint32_t mask = 0;
@@ -262,20 +317,6 @@ int player_ui_test_next_event(const char *script, size_t *cursor,
         event->user.timestamp = timeout;
         return 1;
     }
-    if (strncmp(token, "WAIT_ART_ATTEMPT=", 17) == 0) {
-        uint64_t attempt = 0;
-        if (!player_ui_test_parse_positive_u64(token + 17, &attempt) ||
-            attempt > UINT32_MAX) return -1;
-        event->type = SDL_EVENT_USER;
-        event->user.code = PLAYER_UI_TEST_ACTION_WAIT_ART_ATTEMPT;
-        event->user.windowID = (Uint32)attempt;
-        return 1;
-    }
-    if (strcmp(token, "WAIT_ART_DELAY_ACTIVE") == 0) {
-        event->type = SDL_EVENT_USER;
-        event->user.code = PLAYER_UI_TEST_ACTION_WAIT_ART_DELAY_ACTIVE;
-        return 1;
-    }
     if (strncmp(token, "WAIT_PACKAGE_FAILURE=", 21) == 0) {
         char *comma = strchr(token + 21, ',');
         uint64_t target = 0;
@@ -295,16 +336,6 @@ int player_ui_test_next_event(const char *script, size_t *cursor,
     if (strcmp(token, "INVALIDATE_PACKAGE_CACHE") == 0) {
         event->type = SDL_EVENT_USER;
         event->user.code = PLAYER_UI_TEST_ACTION_INVALIDATE_PACKAGE_CACHE;
-        return 1;
-    }
-    if (strcmp(token, "MOUNT_ART_ISO") == 0) {
-        event->type = SDL_EVENT_USER;
-        event->user.code = PLAYER_UI_TEST_ACTION_MOUNT_ART_ISO;
-        return 1;
-    }
-    if (strcmp(token, "SATURATE_ART_CACHE") == 0) {
-        event->type = SDL_EVENT_USER;
-        event->user.code = PLAYER_UI_TEST_ACTION_SATURATE_ART_CACHE;
         return 1;
     }
     if (strncmp(token, "START_SYNTHETIC_BUILD=", 22) == 0) {
@@ -464,29 +495,6 @@ int player_ui_test_next_event(const char *script, size_t *cursor,
     return -1;
 }
 
-bool player_ui_test_copy_file(const char *source, const char *destination) {
-    if (!source || !source[0] || !destination || !destination[0]) return false;
-    FILE *input = fopen(source, "rb");
-    if (!input) return false;
-    FILE *output = fopen(destination, "wb");
-    if (!output) {
-        fclose(input);
-        return false;
-    }
-    char buffer[8192];
-    bool ok = true;
-    size_t count;
-    while ((count = fread(buffer, 1, sizeof(buffer), input)) > 0) {
-        if (fwrite(buffer, 1, count, output) != count) {
-            ok = false;
-            break;
-        }
-    }
-    if (ferror(input) || fclose(input) != 0) ok = false;
-    if (fclose(output) != 0) ok = false;
-    return ok;
-}
-
 bool player_ui_test_start_synthetic_build(PlayerApp *app,
                                                   unsigned game_index) {
     if (!app || game_index >= (unsigned)app->game_count) return false;
@@ -569,8 +577,6 @@ void player_ui_test_report_frame(int frame_number, const PlayerApp *app,
         selected = &app->games[app->selected_game_index];
         package_status = player_app_cached_runtime_package_status(app, selected);
     }
-    SDL_FRect badge = { 0.0f, 0.0f, 0.0f, 0.0f };
-    bool badge_valid = ui_last_status_badge_rect(&badge);
     /* Every unchecked title is pending or explicitly unresolved. An
        unclaimed title would otherwise make its card offer a build for a
        package that may already exist. */
@@ -594,9 +600,6 @@ void player_ui_test_report_frame(int frame_number, const PlayerApp *app,
             titles_unclaimed++;
         }
     }
-    int settings_two_col = app->active_view == VIEW_SETTINGS
-        ? (player_settings_uses_two_columns(app->window_width,
-                                             app->window_height) ? 1 : 0) : -1;
     /* The selected title's primary action as the next UI's model holds it
      * (spaces become underscores): -1 and "none" with the existing UI. */
     int next_primary = -1;
@@ -636,24 +639,22 @@ void player_ui_test_report_frame(int frame_number, const PlayerApp *app,
             for (char *q = next_detail; *q; q++) if (*q == ' ') *q = '_';
             for (char *q = next_preflight; *q; q++) if (*q == ' ') *q = '_';
             for (char *q = next_expect; *q; q++) if (*q == ' ') *q = '_';
-        } else if (selected != NULL && g_ui_test_next_ui == NULL) {
-            const PlayerPreflightCheck *blocker =
-                player_app_package_build_preflight_blocker(
-                    app, app->selected_game_index);
-            if (blocker) {
-                snprintf(next_preflight, sizeof(next_preflight), "%s",
-                         player_preflight_plain_message(blocker));
-                snprintf(next_preflight_code, sizeof(next_preflight_code), "%s",
-                         blocker->code[0] ? blocker->code : "unknown");
-                snprintf(next_preflight_detail, sizeof(next_preflight_detail), "%.639s",
-                         blocker->message[0] ? blocker->message : "unknown");
-                if (app->package_build_preflight.action_folder[0]) {
-                    snprintf(next_preflight_action,
-                             sizeof(next_preflight_action), "OPEN_FOLDER");
-                }
-                for (char *q = next_preflight; *q; q++) if (*q == ' ') *q = '_';
-                for (char *q = next_preflight_detail; *q; q++) if (*q == ' ') *q = '_';
-            }
+        }
+        /* The check that holds the build back, as the title page's sentence
+           comes from it: its code and the validator's own words. Reported only
+           where the page shows a blocker, so "none" matches a page with none. */
+        const PlayerPreflightCheck *blocker =
+            selected != NULL && model != NULL &&
+                    model->build_preflight_message != NULL &&
+                    model->build_preflight_message[0]
+            ? player_app_package_build_preflight_blocker(app, app->selected_game_index)
+            : NULL;
+        if (blocker != NULL) {
+            snprintf(next_preflight_code, sizeof(next_preflight_code), "%s",
+                     blocker->code[0] ? blocker->code : "unknown");
+            snprintf(next_preflight_detail, sizeof(next_preflight_detail), "%.639s",
+                     blocker->message[0] ? blocker->message : "unknown");
+            for (char *q = next_preflight_detail; *q; q++) if (*q == ' ') *q = '_';
         }
     }
     /* The selected title's program input from its last build check (#308). */
@@ -676,55 +677,32 @@ void player_ui_test_report_frame(int frame_number, const PlayerApp *app,
          strcmp(app->wizard.status_message, invalid_disc_message) == 0) ||
         (app->active_view == VIEW_ERROR &&
          strcmp(app->last_error.message, invalid_disc_message) == 0);
-    char incompatible_reason[256];
-    snprintf(incompatible_reason, sizeof(incompatible_reason), "%s",
-             ui_test_last_incompatible_reason()[0] ? ui_test_last_incompatible_reason() : "none");
-    for (char *q = incompatible_reason; *q; q++) if (*q == ' ') *q = '_';
-    /* The build badge as a single token (spaces become underscores), so the
-     * frame record stays parseable. "none" outside the build screen. */
-    char build_badge[64];
-    if (app->active_view == VIEW_BUILDING_PACKAGE) {
-        snprintf(build_badge, sizeof(build_badge), "%s", ui_test_build_badge());
-        for (char *q = build_badge; *q; q++) {
-            if (*q == ' ') *q = '_';
-        }
-    } else {
-        snprintf(build_badge, sizeof(build_badge), "none");
-    }
-    /* The build bar's fill in thousandths, -1 for the sweep or off the build screen. */
-    int build_bar_permille = -1;
-    if (app->active_view == VIEW_BUILDING_PACKAGE && ui_test_build_bar_fraction() >= 0.0f) {
-        build_bar_permille = (int)(ui_test_build_bar_fraction() * 1000.0f + 0.5f);
-    }
     bool backdrop_shown = false;
     int backdrop_index = g_ui_test_next_ui != NULL
         ? player_ui_nk_test_backdrop(g_ui_test_next_ui, &backdrop_shown) : -1;
     printf("[PLAYER_UI_TEST] frame=%d ticks_ms=%llu view=%s "
            "selected=%d selected_disc=%s selected_title_id=%s "
-           "focus=%d focus_count=%d settings_two_col=%d wizard_step=%s "
+           "wizard_step=%s "
            "font_confirmed=%d extracting=%d extraction_percent=%d extraction_cancel=%d error=%s "
            "bad_disc_notice=%d "
            "picker=%d package_building=%d package_cancelled=%d profile_fallback=%d "
            "controller_capturing=%d controller_conflicts=%d calibrating=%d "
-           "error_text_complete=%d error_text_lines=%d "
-           "error_details_complete=%d error_details_lines=%d error_details_available=%d "
+           "error_details_available=%d "
            "select_binding=%d start_binding=%d circle_binding=%d profile_save_notice=%d "
            "input_scope=%s input_titles=%d input_notice=%d "
            "input_device=%s start_key=%d key_note=%d "
            "selected_experimental=%d selected_prepared=%d selected_staged=%d "
            "selected_runtime=%d selected_package_status=%d "
-           "selected_package_check_failed=%d package_check_failed_badge=%d games=%d "
+           "selected_package_check_failed=%d games=%d "
            "package_status_thread_attempts=%u "
            "titles_pending=%d titles_failed=%d titles_unclaimed=%d "
            "prereq_items=%zu prereq_bytes=%llu game_running=%d build_stage=%d "
-           "font=%s font_reason=%s bitmap_text_draws=%u build_badge=%s build_bar_permille=%d "
-           "build_notice=%d "
-           "badge=%d,%d,%d,%d running=%d pixels=%016llx "
+           "running=%d pixels=%016llx "
            "render_ns=%llu package_validations=%llu online_mode=%d developer_mode=%d "
            "dev_log_lines=%zu next_primary=%d next_primary_label=%s next_detail=%s "
            "next_preflight=%s next_preflight_code=%s next_preflight_detail=%s "
-           "next_preflight_action=%s "
-           "incompatible_reason=%s next_at_root=%d next_route=%d "
+           "next_preflight_action=%s next_build_built=%d "
+           "next_at_root=%d next_route=%d "
            "error_title=%s error_badge=%s error_retry=%s error_copied=%d "
            "next_package=%d next_expect=%s launch_pending=%d next_focus=%u "
            "outdated=%d outdated_scanned=%d rebuild_prompt=%d rebuild_banner=%d "
@@ -737,7 +715,6 @@ void player_ui_test_report_frame(int frame_number, const PlayerApp *app,
            app->selected_game_index,
            selected ? selected->disc_id : "NONE",
            selected ? selected->title_id : "NONE",
-           app->focus_index, ui_focus_count(app), settings_two_col,
            player_ui_test_wizard_step_name(app->wizard.step),
            app->wizard.font_confirmed ? 1 : 0,
            app->wizard.is_extracting ? 1 : 0, app->wizard.extraction_percent,
@@ -751,10 +728,6 @@ void player_ui_test_report_frame(int frame_number, const PlayerApp *app,
            input_settings_is_capturing(&app->input_settings) ? 1 : 0,
            input_settings_has_conflicts(&app->input_settings) ? 1 : 0,
            input_settings_is_calibrating(&app->input_settings) ? 1 : 0,
-           ui_test_error_text_complete() ? 1 : 0,
-           ui_test_error_text_lines(),
-           ui_test_error_details_complete() ? 1 : 0,
-           ui_test_error_details_lines(),
            app->last_error.details[0] ? 1 : 0,
            app->input_settings.profile.psp_buttons[INPUT_CONTROL_BTN_SELECT].primary.index,
            app->input_settings.profile.psp_buttons[INPUT_CONTROL_BTN_START].primary.index,
@@ -773,8 +746,6 @@ void player_ui_test_report_frame(int frame_number, const PlayerApp *app,
            selected && player_app_cached_game_has_runtime(app, selected) ? 1 : 0,
            (int)package_status,
            selected && player_app_runtime_package_check_failed(app, selected) ? 1 : 0,
-           selected && strcmp(ui_test_last_status_badge_label(),
-                               "PACKAGE CHECK FAILED") == 0 ? 1 : 0,
            app->game_count,
            g_ui_test_package_status_thread_create_attempts,
            titles_pending, titles_failed, titles_unclaimed,
@@ -782,11 +753,6 @@ void player_ui_test_report_frame(int frame_number, const PlayerApp *app,
            (unsigned long long)app->prerequisites.total_bytes,
            app->is_game_running ? 1 : 0,
            (int)app->build_session.current_stage,
-           ui_font_mode(), ui_font_fallback_reason(),
-           ui_test_bitmap_text_draws(), build_badge, build_bar_permille,
-           app->active_view == VIEW_BUILDING_PACKAGE && ui_test_build_notice_drawn() ? 1 : 0,
-           badge_valid ? (int)badge.x : -1, badge_valid ? (int)badge.y : -1,
-           badge_valid ? (int)badge.w : 0, badge_valid ? (int)badge.h : 0,
            running ? 1 : 0,
            (unsigned long long)player_ui_test_frame_hash(renderer),
            (unsigned long long)render_elapsed_ns,
@@ -795,7 +761,8 @@ void player_ui_test_report_frame(int frame_number, const PlayerApp *app,
            player_dev_log_count(app), next_primary, next_primary_label, next_detail,
            next_preflight, next_preflight_code, next_preflight_detail,
            next_preflight_action,
-           incompatible_reason,
+           app->active_view == VIEW_BUILDING_PACKAGE && g_ui_test_next_ui != NULL
+               ? player_ui_nk_test_build_built(g_ui_test_next_ui) : -1,
            g_ui_test_next_ui != NULL ? (player_ui_nk_at_library_root(g_ui_test_next_ui) ? 1 : 0) : -1,
            g_ui_test_next_ui != NULL ? player_ui_nk_test_route(g_ui_test_next_ui) : -1,
            error_title, error_badge, error_retry,
@@ -818,6 +785,54 @@ void player_ui_test_report_frame(int frame_number, const PlayerApp *app,
            app->drop_count > app->drop_next ? app->drop_count - app->drop_next : (size_t)0,
            !app->drop_notice[0] ? "none"
                : strstr(app->drop_notice, "being set up") ? "busy" : "summary");
+
+    if (g_ui_test_next_ui != NULL) {
+        /* The nickname editor (#2197) while it is open: what it holds, in hex so a
+           space or any byte reads back exactly, and the count it shows. */
+        char count[32];
+        const char *nickname = player_ui_nk_test_nickname(g_ui_test_next_ui, count,
+                                                          sizeof(count));
+        if (nickname != NULL) {
+            printf("[PLAYER_UI_TEST] nickname_editor frame=%d text_hex=", frame_number);
+            for (size_t i = 0; nickname[i] != '\0'; i++) {
+                printf("%02x", (unsigned)(unsigned char)nickname[i]);
+            }
+            printf(" count=%s\n", count);
+        }
+        /* The library's find box (#2206) while it is open, in hex the same way. */
+        const char *find = player_ui_nk_test_find(g_ui_test_next_ui);
+        if (find != NULL) {
+            printf("[PLAYER_UI_TEST] find_box frame=%d text_hex=", frame_number);
+            for (size_t i = 0; find[i] != '\0'; i++) {
+                printf("%02x", (unsigned)(unsigned char)find[i]);
+            }
+            printf("\n");
+        }
+        /* The library grid at its root, each time it changes: how many games it holds
+           (the find box's matches while it is open), of how many, and the disc IDs of
+           the titles the frame drew, in order (player_ui_nk_shown_titles). */
+        if (player_ui_nk_at_library_root(g_ui_test_next_ui)) {
+            static char last_grid[PLAYER_UI_SHOWN_TITLES_MAX * MAX_DISC_ID_LEN + 64];
+            char grid[sizeof(last_grid)];
+            int shown[PLAYER_UI_SHOWN_TITLES_MAX];
+            size_t total = 0u;
+            size_t matches = player_ui_nk_test_library_grid(g_ui_test_next_ui, &total);
+            size_t shown_count = player_ui_nk_shown_titles(g_ui_test_next_ui, shown,
+                                                           PLAYER_UI_SHOWN_TITLES_MAX);
+            size_t used = (size_t)snprintf(grid, sizeof(grid), "matches=%zu total=%zu shown=",
+                                           matches, total);
+            for (size_t i = 0u; i < shown_count && used < sizeof(grid); i++) {
+                const char *disc = shown[i] >= 0 && shown[i] < app->game_count
+                    ? app->games[shown[i]].disc_id : "?";
+                used += (size_t)snprintf(grid + used, sizeof(grid) - used, "%s%s",
+                                         i > 0u ? "," : "", disc[0] ? disc : "?");
+            }
+            if (strcmp(grid, last_grid) != 0) {
+                memcpy(last_grid, grid, strlen(grid) + 1u);
+                printf("[PLAYER_UI_TEST] library_grid frame=%d %s\n", frame_number, grid);
+            }
+        }
+    }
 
     static bool consent_items_reported = false;
     if (app->active_view == VIEW_PREREQ_CONSENT && !consent_items_reported) {
@@ -871,9 +886,6 @@ bool player_ui_test_parse_arg(PlayerUiTest *t, const char *arg) {
     } else if (strncmp(arg, "--ui-test-iso-path=", 19) == 0) {
         t->iso_path = arg + 19;
         t->mode = true;
-    } else if (strncmp(arg, "--ui-test-art-mount-source=", 27) == 0) {
-        t->art_mount_source = arg + 27;
-        t->mode = true;
     } else if (strcmp(arg, "--ui-test-wait-background") == 0) {
         t->wait_background = true;
         t->mode = true;
@@ -922,7 +934,6 @@ void player_ui_test_check_environment(PlayerUiTest *t) {
            reclaim path is exercised by the same harness that drives the real
            event loop. */
         s_ui_test_drop_worker_event = true;
-        ui_renderer_test_drop_art_events(true);
     }
     if ((s_ui_test_catalog_reload_count > 0) !=
         (s_ui_test_catalog_reload_path &&
@@ -995,18 +1006,6 @@ void player_ui_test_prepare_app(PlayerUiTest *t, PlayerApp *app) {
         if (strcmp(t->error_code, "CLI_NOT_FOUND") == 0) {
             player_app_set_cli_not_found_error(app, "Back to library",
                                                VIEW_LIBRARY);
-        } else if (strcmp(t->error_code, "UI_TEST_LONG_ERROR") == 0) {
-            static const char long_error_message[] =
-                "Build setup could not continue because a required file was missing. "
-                "Check the message, follow the suggested recovery steps, and try again. "
-                "If the application files are incomplete, reinstall the app and keep "
-                "its folder together. Return to the library after correcting the issue. "
-                "This final sentence confirms the full message remains visible beyond "
-                "the old four-line limit. Keep every recovery step on this card so the "
-                "player can read the complete instruction before leaving this screen.";
-            player_app_set_error(app, t->error_code,
-                                 "Synthetic Long Error", long_error_message,
-                                 "Back to library", VIEW_LIBRARY);
         } else if (strcmp(t->error_code, "RUNTIME_SEMANTIC_BOUNDARY") == 0 ||
                    strcmp(t->error_code, "RUNTIME_PREMATURE_EXIT") == 0 ||
                    strcmp(t->error_code, "RUNTIME_ERROR_EXIT") == 0) {
@@ -1130,21 +1129,6 @@ void player_ui_test_end_first_frame(PlayerUiTest *t, const PlayerApp *app,
     }
 }
 
-static const char *player_update_phase_name(PlayerUpdatePhase phase) {
-    switch (phase) {
-        case PLAYER_UPDATE_CHECKING: return "checking";
-        case PLAYER_UPDATE_CURRENT: return "current";
-        case PLAYER_UPDATE_AVAILABLE: return "available";
-        case PLAYER_UPDATE_DOWNLOADING: return "downloading";
-        case PLAYER_UPDATE_DOWNLOADED: return "downloaded";
-        case PLAYER_UPDATE_INSTALLING: return "installing";
-        case PLAYER_UPDATE_INSTALLED: return "installed";
-        case PLAYER_UPDATE_FAILED: return "failed";
-        case PLAYER_UPDATE_IDLE:
-        default: return "idle";
-    }
-}
-
 const char *player_ui_test_report_data_root(void) {
     const char *root = getenv("NK_UI_TEST_REPORT_DATA_ROOT");
     return root != NULL && root[0] != '\0' ? root : NULL;
@@ -1184,8 +1168,8 @@ void player_ui_test_report_update_phase(const PlayerUiTest *t, const PlayerApp *
     }
 }
 
-void player_ui_test_step_script(PlayerUiTest *t, PlayerApp *app, SDL_Renderer *renderer,
-                                bool *running, bool background_pending) {
+void player_ui_test_step_script(PlayerUiTest *t, PlayerApp *app, bool *running,
+                                bool background_pending) {
     if (!t->mode) return;
     uint64_t ui_test_now = SDL_GetTicks();
     bool ui_test_block_script = false;
@@ -1229,6 +1213,37 @@ void player_ui_test_step_script(PlayerUiTest *t, PlayerApp *app, SDL_Renderer *r
             ui_test_block_script = true;
         }
     }
+    if (t->waiting_for_update) {
+        if (app->update.phase == t->wait_update_target) {
+            printf("[PLAYER_UI_TEST] wait_update target=%s result=PASS\n",
+                   player_update_phase_name(t->wait_update_target));
+            t->waiting_for_update = false;
+        } else if (ui_test_now >= t->wait_deadline) {
+            fprintf(stderr, "[PLAYER_UI_TEST] wait_update result=FAIL target=%s actual=%s\n",
+                    player_update_phase_name(t->wait_update_target),
+                    player_update_phase_name(app->update.phase));
+            t->failed = true;
+            t->quit_queued = true;
+            *running = false;
+        } else {
+            ui_test_block_script = true;
+        }
+    }
+    if (t->waiting_for_layout) {
+        if (t->frame > t->wait_layout_frame && g_ui_test_next_ui != NULL &&
+            player_ui_nk_test_laid_out(g_ui_test_next_ui)) {
+            printf("[PLAYER_UI_TEST] wait_laid_out result=PASS frame=%d\n", t->frame);
+            t->waiting_for_layout = false;
+        } else if (ui_test_now >= t->wait_deadline) {
+            fprintf(stderr, "[PLAYER_UI_TEST] wait_laid_out result=FAIL frame=%d\n",
+                    t->frame);
+            t->failed = true;
+            t->quit_queued = true;
+            *running = false;
+        } else {
+            ui_test_block_script = true;
+        }
+    }
     if (t->waiting_for_report) {
         if ((t->wait_report_mask >> (unsigned)app->report.phase) & 1u) {
             printf("[PLAYER_UI_TEST] wait_report phase=%d result=PASS\n", (int)app->report.phase);
@@ -1238,31 +1253,6 @@ void player_ui_test_step_script(PlayerUiTest *t, PlayerApp *app, SDL_Renderer *r
                     t->wait_report_mask, (int)app->report.phase);
             t->failed = true;
             t->quit_queued = true;
-            *running = false;
-        } else {
-            ui_test_block_script = true;
-        }
-    }
-    if (t->waiting_for_art_attempt) {
-        unsigned completed = ui_renderer_test_art_attempt_count();
-        if (completed >= t->wait_art_attempt_target) {
-            printf("[PLAYER_UI_TEST] wait_art_attempt target=%u result=PASS\n",
-                   t->wait_art_attempt_target);
-            t->waiting_for_art_attempt = false;
-        } else {
-            ui_test_block_script = true;
-        }
-    }
-    if (t->waiting_for_art_delay) {
-        if (ui_renderer_test_art_delay_active()) {
-            printf("[PLAYER_UI_TEST] wait_art_delay_active result=PASS\n");
-            t->waiting_for_art_delay = false;
-        } else if (ui_test_now >= t->wait_art_delay_deadline) {
-            fprintf(stderr,
-                    "[PLAYER_UI_TEST] wait_art_delay_active result=FAIL\n");
-            t->failed = true;
-            t->quit_queued = true;
-            t->waiting_for_art_delay = false;
             *running = false;
         } else {
             ui_test_block_script = true;
@@ -1299,18 +1289,7 @@ void player_ui_test_step_script(PlayerUiTest *t, PlayerApp *app, SDL_Renderer *r
         t->events, &t->event_cursor, &scripted_event);
     if (next_event > 0) {
         if (scripted_event.type == SDL_EVENT_USER &&
-            scripted_event.user.code == PLAYER_UI_TEST_ACTION_WAIT_ART_ATTEMPT) {
-            t->wait_art_attempt_target = scripted_event.user.windowID;
-            t->waiting_for_art_attempt = true;
-            printf("[PLAYER_UI_TEST] wait_art_attempt target=%u started\n",
-                   t->wait_art_attempt_target);
-        } else if (scripted_event.type == SDL_EVENT_USER &&
-                   scripted_event.user.code == PLAYER_UI_TEST_ACTION_WAIT_ART_DELAY_ACTIVE) {
-            t->waiting_for_art_delay = true;
-            t->wait_art_delay_deadline = ui_test_now + 10000;
-            printf("[PLAYER_UI_TEST] wait_art_delay_active started\n");
-        } else if (scripted_event.type == SDL_EVENT_USER &&
-                   scripted_event.user.code == PLAYER_UI_TEST_ACTION_WAIT_PACKAGE_FAILURE) {
+            scripted_event.user.code == PLAYER_UI_TEST_ACTION_WAIT_PACKAGE_FAILURE) {
             g_ui_test_waiting_for_package_failure = true;
             printf("[PLAYER_UI_TEST] wait_package_failure disc=%s "
                    "target=%u started\n",
@@ -1321,22 +1300,6 @@ void player_ui_test_step_script(PlayerUiTest *t, PlayerApp *app, SDL_Renderer *r
             player_app_runtime_package_cache_invalidate(app);
             printf("[PLAYER_UI_TEST] invalidate_package_cache generation=%llu\n",
                    (unsigned long long)app->runtime_package_cache_generation);
-        } else if (scripted_event.type == SDL_EVENT_USER &&
-                   scripted_event.user.code == PLAYER_UI_TEST_ACTION_MOUNT_ART_ISO) {
-            bool mounted = player_ui_test_copy_file(
-                t->art_mount_source, t->iso_path);
-            printf("[PLAYER_UI_TEST] mount_art_iso result=%s\n",
-                   mounted ? "PASS" : "FAIL");
-            if (!mounted) {
-                t->failed = true;
-                t->quit_queued = true;
-                *running = false;
-            }
-        } else if (scripted_event.type == SDL_EVENT_USER &&
-                   scripted_event.user.code == PLAYER_UI_TEST_ACTION_SATURATE_ART_CACHE) {
-            if (!ui_renderer_test_saturate_art_cache(renderer, t->iso_path)) {
-                t->failed = true;
-            }
         } else if (scripted_event.type == SDL_EVENT_USER &&
                    scripted_event.user.code == PLAYER_UI_TEST_ACTION_START_SYNTHETIC_BUILD) {
             bool started = player_ui_test_start_synthetic_build(
@@ -1374,6 +1337,11 @@ void player_ui_test_step_script(PlayerUiTest *t, PlayerApp *app, SDL_Renderer *r
             printf("[PLAYER_UI_TEST] wait_ms=%u started\n",
                    scripted_event.user.windowID);
         } else if (scripted_event.type == SDL_EVENT_USER &&
+                   scripted_event.user.code == PLAYER_UI_TEST_ACTION_WAIT_LAID_OUT) {
+            t->wait_layout_frame = t->frame;
+            t->wait_deadline = ui_test_now + scripted_event.user.timestamp;
+            t->waiting_for_layout = true;
+        } else if (scripted_event.type == SDL_EVENT_USER &&
                    scripted_event.user.code == PLAYER_UI_TEST_ACTION_WAIT_VIEW) {
             t->wait_view_mask = scripted_event.user.windowID;
             t->wait_deadline = ui_test_now + scripted_event.user.timestamp;
@@ -1386,6 +1354,13 @@ void player_ui_test_step_script(PlayerUiTest *t, PlayerApp *app, SDL_Renderer *r
             t->waiting_for_package_status = true;
             printf("[PLAYER_UI_TEST] wait_package_status target=%u started\n",
                    scripted_event.user.windowID);
+        } else if (scripted_event.type == SDL_EVENT_USER &&
+                   scripted_event.user.code == PLAYER_UI_TEST_ACTION_WAIT_UPDATE) {
+            t->wait_update_target = (PlayerUpdatePhase)scripted_event.user.windowID;
+            t->wait_deadline = ui_test_now + scripted_event.user.timestamp;
+            t->waiting_for_update = true;
+            printf("[PLAYER_UI_TEST] wait_update target=%s started\n",
+                   player_update_phase_name(t->wait_update_target));
         } else if (scripted_event.type == SDL_EVENT_USER &&
                    scripted_event.user.code == PLAYER_UI_TEST_ACTION_WAIT_REPORT) {
             t->wait_report_mask = scripted_event.user.windowID;
@@ -1533,7 +1508,7 @@ void player_ui_test_end_frame(PlayerUiTest *t, const PlayerApp *app, SDL_Rendere
                                    validations, invalid_disc_message);
         if (!running || app->should_quit) {
             bool captured = t->screenshot_path &&
-                ui_capture_screenshot(renderer, t->screenshot_path);
+                player_host_save_screenshot(renderer, t->screenshot_path);
             printf("[PLAYER_UI_TEST] screenshot=%s width=%d height=%d\n",
                    captured ? "PASS" : "FAIL", app->window_width, app->window_height);
             if (!captured) t->failed = true;
@@ -1732,6 +1707,13 @@ void player_ui_test_hold_disc_check(void) {
     if (hold && hold[0]) SDL_Delay((Uint32)strtoul(hold, NULL, 10));
 }
 
+/* NK_UI_TEST_SCREENSHOT_DELAY_MS waits before --screenshot draws its frame, so a test can
+   capture one view at two different times since SDL started (#2124). */
+void player_ui_test_delay_screenshot(void) {
+    const char *delay = getenv("NK_UI_TEST_SCREENSHOT_DELAY_MS");
+    if (delay && delay[0]) SDL_Delay((Uint32)strtoul(delay, NULL, 10));
+}
+
 /* The launch worker's synthetic slow start: the launch takes this long before its checks. */
 const char *player_ui_test_slow_start_text(void) {
     return getenv("NK_UI_TEST_SLOW_START_MS");
@@ -1816,6 +1798,20 @@ static bool player_update_test_open(void *context, const char *url, const char *
     (void)context;
     (void)allowed_hosts;
     if (!dir || !name) return false;
+    /* A busy machine: each download request (not the release list) answers only
+       after NK_UI_TEST_UPDATE_REQUEST_DELAY_MS, so a script that waits a fixed
+       time instead of for the update phase presses on before the step ends. */
+    if (strcmp(url, NK_UPDATE_RELEASES_URL) != 0) {
+        const char *delay_text = getenv("NK_UI_TEST_UPDATE_REQUEST_DELAY_MS");
+        uint64_t delay_ms = 0;
+        if (delay_text && player_ui_test_parse_positive_u64(delay_text, &delay_ms) &&
+            delay_ms <= 60000u) {
+            SDL_Delay((Uint32)delay_ms);
+        } else if (delay_text && delay_text[0]) {
+            fprintf(stderr, "[PLAYER_UI_TEST] Ignoring NK_UI_TEST_UPDATE_REQUEST_DELAY_MS=%s: "
+                            "expected 1 to 60000.\n", delay_text);
+        }
+    }
     name = strcmp(url, NK_UPDATE_RELEASES_URL) == 0 ? "releases.json" : name + 1;
     if (snprintf(path, sizeof(path), "%s%c%s", dir, nk_platform_path_separator(), name) >=
         (int)sizeof(path)) {

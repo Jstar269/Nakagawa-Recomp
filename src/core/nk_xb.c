@@ -61,8 +61,6 @@ typedef struct {
     uint8_t symbol;
 } XbHuffmanSymbol;
 
-static FILE *xb_fopen(const char *path, const char *mode);
-
 /* Opens the archive for the cached member-read handle. On Windows the handle shares
  * delete as well as read and write, so a mounted archive can still be deleted or
  * replaced, as on POSIX; the next read then fails its size check. */
@@ -638,6 +636,26 @@ static bool xb_file_read_at(FILE *file, uint64_t offset, void *output,
     return amount == 0u || fread(output, 1, amount, file) == amount;
 }
 
+#ifdef SR_HLE_THREAD_SELFTEST
+/* Selftest observability: the host filesystem calls a lazy mount makes by path. Each
+ * is a full name lookup, and a title mounts every archive it ships at boot. */
+static unsigned long long s_xb_test_lazy_path_calls;
+unsigned long long nk_xb_test_lazy_path_calls(void);
+void nk_xb_test_reset_lazy_path_calls(void);
+unsigned long long nk_xb_test_lazy_path_calls(void) { return s_xb_test_lazy_path_calls; }
+void nk_xb_test_reset_lazy_path_calls(void) { s_xb_test_lazy_path_calls = 0u; }
+#define XB_TEST_COUNT_LAZY_PATH_CALL() (s_xb_test_lazy_path_calls++)
+#else
+#define XB_TEST_COUNT_LAZY_PATH_CALL() ((void)0)
+#endif
+
+/* The size of an open archive, through the handle: the file the metadata is read
+ * from, at the cost of one seek instead of a lookup by path. */
+static int64_t xb_file_handle_size(FILE *file) {
+    if (!file || nk_fseek64(file, 0, SEEK_END) != 0) return -1;
+    return nk_ftell64(file);
+}
+
 static int xb_file_load_metadata(FILE *file, NkXbArchive *archive) {
     if (!file || !archive || !archive->data || archive->source_size < 8u) return 0;
     uint8_t fixed[8];
@@ -1139,21 +1157,6 @@ NkResult nk_xb_open_memory(const void *data, size_t data_size,
     return result;
 }
 
-static FILE *xb_fopen(const char *path, const char *mode) {
-#if defined(_WIN32) || defined(_WIN64)
-    WCHAR wpath[32768];
-    WCHAR wmode[32];
-    if (!path || !mode ||
-        MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wpath, (int)(sizeof(wpath) / sizeof(wpath[0]))) <= 0 ||
-        MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, mode, -1, wmode, (int)(sizeof(wmode) / sizeof(wmode[0]))) <= 0) {
-        return NULL;
-    }
-    return _wfopen(wpath, wmode);
-#else
-    return fopen(path, mode);
-#endif
-}
-
 /* Archive member identifiers are stored as Shift-JIS bytes. On POSIX those
  * bytes remain the filesystem name, matching the format-native VFS view. The
  * Win32 path backend is UTF-8, so transcode the validated identifier before
@@ -1223,7 +1226,7 @@ NkResult nk_xb_open_file(const char *path, bool big_endian,
     size_t size = (size_t)file_size;
     uint8_t *data = (uint8_t *)malloc(size);
     if (!data) return NK_ERROR_OUT_OF_MEMORY;
-    FILE *file = xb_fopen(path, "rb");
+    FILE *file = nk_fopen_utf8(path, "rb");
     if (!file) {
         free(data);
         return xb_fail(error_message, error_message_size,
@@ -1264,25 +1267,33 @@ NkResult nk_xb_open_file_lazy(const char *path, bool big_endian,
                        "invalid XB file input");
     }
     NkXbLimits effective = normalized_limits(limits);
-    int64_t file_size = nk_platform_get_file_size(path);
+    /* The open is the mount's only lookup by path: both size checks, before the
+     * metadata read and after it, ask the handle. */
+    XB_TEST_COUNT_LAZY_PATH_CALL();
+    FILE *file = nk_fopen_utf8(path, "rb");
+    if (!file) {
+        /* The strict reader's text for the same input (a missing path or a directory). */
+        return xb_fail(error_message, error_message_size,
+                       "cannot stat XB archive");
+    }
+    int64_t file_size = xb_file_handle_size(file);
     if (file_size <= 0) {
+        fclose(file);
         return xb_fail(error_message, error_message_size,
                        "cannot stat XB archive");
     }
     if ((uint64_t)file_size > effective.max_archive_bytes ||
         (uint64_t)file_size > NK_XB_MAX_ARCHIVE_BYTES ||
         (uint64_t)file_size > SIZE_MAX) {
+        fclose(file);
         return xb_fail(error_message, error_message_size,
                        "archive exceeds the configured byte limit");
     }
     size_t size = (size_t)file_size;
     uint8_t *data = (uint8_t *)malloc(size);
-    if (!data) return NK_ERROR_OUT_OF_MEMORY;
-    FILE *file = xb_fopen(path, "rb");
-    if (!file) {
-        free(data);
-        return xb_fail(error_message, error_message_size,
-                       "cannot open XB archive");
+    if (!data) {
+        fclose(file);
+        return NK_ERROR_OUT_OF_MEMORY;
     }
     memset(out_archive, 0, sizeof(*out_archive));
     out_archive->data = data;
@@ -1300,7 +1311,7 @@ NkResult nk_xb_open_file_lazy(const char *path, bool big_endian,
         return xb_fail(error_message, error_message_size,
                        "XB archive metadata could not be read");
     }
-    int64_t size_after = nk_platform_get_file_size(path);
+    int64_t size_after = xb_file_handle_size(file);
     if (size_after != file_size) {
         nk_xb_close(out_archive);
         return xb_fail(error_message, error_message_size,

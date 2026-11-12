@@ -20,11 +20,23 @@
     },
     {
       "embedded": "psp_frag.inc",
-      "embedded_sha256": "2ec844b12bca1e428173038fb742132dd7b7c13ea5afb6457ea8d9ec6a4c39a9",
+      "embedded_sha256": "a11b97b54b66a13c561ea5ba82bd7b9e51eaa45533775ef5935c5d228a43de01",
       "source": "shaders/psp.frag",
-      "source_sha256": "135f7d908cca971ccf4493c3d5d22dd51492c323ac02d5a0562f71cf2894cda0",
-      "spirv_bytes": 35408,
-      "spirv_sha256": "4c4b160805e64c10fcd49f53a31d40523cd71606ea2ebd1070da26973c16dc6e",
+      "source_sha256": "96038b9fa20d3175869ae936c7942d04748e71ea52f6276408770f061c8c926c",
+      "spirv_bytes": 36756,
+      "spirv_sha256": "ab1795bb84423d027451cb102ad9a72042f1579b79e79cb8752421e7cf92ce20",
+      "stage": "frag"
+    },
+    {
+      "defines": [
+        "SR_DST_INTERLOCK"
+      ],
+      "embedded": "psp_frag_rmw.inc",
+      "embedded_sha256": "e80c49e26706b62c5a60fed833a5680862e01ba852e0e7ba19536558814c6e09",
+      "source": "shaders/psp.frag",
+      "source_sha256": "96038b9fa20d3175869ae936c7942d04748e71ea52f6276408770f061c8c926c",
+      "spirv_bytes": 40456,
+      "spirv_sha256": "4b8dc353bd37e9937edc6dd664dc398d6e56d5601e5ac01f55d8d5799736395e",
       "stage": "frag"
     },
     {
@@ -38,20 +50,29 @@
     },
     {
       "embedded": "ace_match_comp.inc",
-      "embedded_sha256": "2d036847942f691456607e997003f34b8fca60957a14cd9852f0557b4980b1d9",
+      "embedded_sha256": "9236dc4fa1f4caffd0b0c487351d1aae2bf9fd4c66a351fec3a9062d3f6d4be1",
       "source": "shaders/ace_match.comp",
-      "source_sha256": "51fac42f5c9c7a5472e1a16bb78e8ebfebd479c50118a4e4eecbc1477a90de06",
-      "spirv_bytes": 13236,
-      "spirv_sha256": "b6be1c9bc17ee2980dee04e28dc927aafab35328978590e9143c0fbedd5066dd",
+      "source_sha256": "dd56133da4cccdabd8b262d43dd5d728001bc7a7c7133aeecd43ed2222c0552c",
+      "spirv_bytes": 24960,
+      "spirv_sha256": "20c92b1569f0d2126e987423c58eb39f88032bfa0c6e8e3fa8c96ad226dc60dc",
       "stage": "comp"
     },
     {
       "embedded": "ace_compose_comp.inc",
-      "embedded_sha256": "af044b956de3b7fedea71189f59f0c3a9fd62b3bc8b4f4b034600fc4840a4545",
+      "embedded_sha256": "dedd20fc7fe95a3541757aa0809590f0bc6c87764c8c52907f2e09c7a802e2d0",
       "source": "shaders/ace_compose.comp",
-      "source_sha256": "491b9ca632a0eec1d0cc0894e56a5cf1894b394a54353a19ac17b5529adcb2e0",
-      "spirv_bytes": 13680,
-      "spirv_sha256": "0557845987290e399b109eb0d40457bea0831b8b2351595dc597d584314e79f6",
+      "source_sha256": "f17b7a976f50a0c190b59513fde1f945eadd28d2895fad7e2b09faea1178dc9b",
+      "spirv_bytes": 14660,
+      "spirv_sha256": "caf0c02b61f2a6f4510bc7f5265f9f87ba74d76b076eb7700d2b12f12db7b28a",
+      "stage": "comp"
+    },
+    {
+      "embedded": "ace_measure_comp.inc",
+      "embedded_sha256": "1335a95264de65f0b216f4cb51e3769c1851908464e9bc055dae3482a4b343a4",
+      "source": "shaders/ace_measure.comp",
+      "source_sha256": "552379e86a54d5ed1ed9c2f67e1aebcb9c7c0f46bf0c251447f72f47cf10320a",
+      "spirv_bytes": 5248,
+      "spirv_sha256": "162be822b72bc1a6e30a2fc0568f6a98465e355b2154a4862ee9390e0b1618c4",
       "stage": "comp"
     },
     {
@@ -70,6 +91,87 @@
       "source_sha256": "4bbd5513d9acfb4fb73e0db36bc034e1150c087b6514ff31374ba9d62ecbc2fa",
       "spirv_bytes": 16976,
       "spirv_sha256": "492a9dd7802bc46ab219022f044cf3c619dbaf769fde542fdcc8b9417f0656cd",
+      "stage": "comp"
+    },
+    {
+      "embedded": "anime4k_cnn_x2_m_0_comp.inc",
+      "embedded_sha256": "6028c48ed7f58829d58fa24edcd2686db8d5f60570b7fc3e6a5bd20be9e2fce7",
+      "source": "shaders/anime4k_cnn_x2_m_0.comp",
+      "source_sha256": "86233a317def05d87d74f76548262706c1aa01db8610a56aacc09d1c0862ff6a",
+      "spirv_bytes": 7080,
+      "spirv_sha256": "23fe88d4b10a0e51e3bcfaeb84d094f1e0c7b963ba9ef81556314a2888fae3e9",
+      "stage": "comp"
+    },
+    {
+      "embedded": "anime4k_cnn_x2_m_1_comp.inc",
+      "embedded_sha256": "8f3d9ac074c862e1adcf4fd1b21a3a63c6f4cc6f69f5714b4fe490d652d3dc0e",
+      "source": "shaders/anime4k_cnn_x2_m_1.comp",
+      "source_sha256": "b0f24f9dff7ee14f3d050b6bfbc2c4126a4804804fed26d1e0f90580daebeb13",
+      "spirv_bytes": 14900,
+      "spirv_sha256": "7fd5355af0b6430844880830159b046f86f39c114595540abf15e3565477513c",
+      "stage": "comp"
+    },
+    {
+      "embedded": "anime4k_cnn_x2_m_2_comp.inc",
+      "embedded_sha256": "a1613ead97aff0c2d0c624a43c4f5f12ca3a383c1371c66140b338ee9efbdda3",
+      "source": "shaders/anime4k_cnn_x2_m_2.comp",
+      "source_sha256": "91a781ceb9775fd0baeb24fa3d2987415e161c26d67e842ca75ce6a6d69746e7",
+      "spirv_bytes": 14900,
+      "spirv_sha256": "6046fa4a8fdc26d83ddb2df85679b8966e815f8ece166b433aeebc708063dd39",
+      "stage": "comp"
+    },
+    {
+      "embedded": "anime4k_cnn_x2_m_3_comp.inc",
+      "embedded_sha256": "53b8a80ef08e414f89c58b0cebecb59dbf09b397bfed9e20277dccfe424229ea",
+      "source": "shaders/anime4k_cnn_x2_m_3.comp",
+      "source_sha256": "4347216d7d0723d6568a296b3f75f705cf3bb31b2900be4de624b803d53552ae",
+      "spirv_bytes": 14900,
+      "spirv_sha256": "8f189b533cb7b5e6135d0830aec42bab98d7832a6f426038e95fc6cf0eff7edc",
+      "stage": "comp"
+    },
+    {
+      "embedded": "anime4k_cnn_x2_m_4_comp.inc",
+      "embedded_sha256": "de3fffccb451fb470546d7b1c3d9a33f896a9c516acb23318b10b4860f19f614",
+      "source": "shaders/anime4k_cnn_x2_m_4.comp",
+      "source_sha256": "8f29006e73653e8a9dd883245407b29a4beb29c5d049d1c71ced44428a945f40",
+      "spirv_bytes": 14900,
+      "spirv_sha256": "e7c91413779605271331fa7dae0e565b6906d51cb0992a98abb09defa2a81b02",
+      "stage": "comp"
+    },
+    {
+      "embedded": "anime4k_cnn_x2_m_5_comp.inc",
+      "embedded_sha256": "8961a5e7d1336ba21eff39a61caf80abbaa5b2a7b208da5b2dad07ab45651cfd",
+      "source": "shaders/anime4k_cnn_x2_m_5.comp",
+      "source_sha256": "49e9a03daeaa0dd357e15fddb9044a7fa1d26b54242cc2451ceafe3d67543484",
+      "spirv_bytes": 14900,
+      "spirv_sha256": "0d2e3c725c24be1ffbbdcd3bf084e4d9742c4ba52407aaf8a0b89680073c83dc",
+      "stage": "comp"
+    },
+    {
+      "embedded": "anime4k_cnn_x2_m_6_comp.inc",
+      "embedded_sha256": "813a2d630ede9b5d513ea6a4f2e882264a9008c1ca7df1e5a189d3313e1f36dd",
+      "source": "shaders/anime4k_cnn_x2_m_6.comp",
+      "source_sha256": "d4384490b4ee18d2fd3fb8648e91bfae87b366dd3b8fef57c47cdb08d466298b",
+      "spirv_bytes": 14900,
+      "spirv_sha256": "443ba649f412baa58bcd170e13555faef83b3ae0e974a611e21dd18dc2847c11",
+      "stage": "comp"
+    },
+    {
+      "embedded": "anime4k_cnn_x2_m_7_comp.inc",
+      "embedded_sha256": "9a9bb42d8e50a4ad4ee5dd601087df8f53861e723915d04a827b202fc04a37a9",
+      "source": "shaders/anime4k_cnn_x2_m_7.comp",
+      "source_sha256": "d046874474b356764b1ba663b9d2c4d83ba8f3d45658fb81c366aeb22a0b9bc9",
+      "spirv_bytes": 10408,
+      "spirv_sha256": "ba1a506a2a1e011567af8818b1f07e15b97f843cd7c567bd9525784e91af5a75",
+      "stage": "comp"
+    },
+    {
+      "embedded": "anime4k_cnn_x2_m_8_comp.inc",
+      "embedded_sha256": "d161848395932112e04a14d5899778047cfea9c6a1bd0f2a378817f8530844b8",
+      "source": "shaders/anime4k_cnn_x2_m_8.comp",
+      "source_sha256": "0d137f6ffc12f18da826c4739ecd5c0d07821b5b155b0cfc658104dc01cee99d",
+      "spirv_bytes": 2848,
+      "spirv_sha256": "6743abaf8c31fee01fed007164b1c0d05fd5ed27a2c8bc5a48124d6fbdc68cd1",
       "stage": "comp"
     }
   ]

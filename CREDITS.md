@@ -26,12 +26,17 @@ Nakagawa has since substantially extended and modified that codebase. This repos
   `Core/FileSystems/tlzrc.cpp` (based on benhur's code, rewritten by tpu; Copyright (c) 2012- PPSSPP Project,
   GPL-2.0-or-later) and the block reader from `Core/FileSystems/BlockDevices.cpp` (GPL-2.0-or-later).
 - **PPSSPP SAS envelope** — the sceSasCore voice envelope (ADSR) model in [`src/rt/sas_envelope.h`](src/rt/PROVENANCE.md) is adapted from PPSSPP at `3bc60270eae3069f13dfbfdb7292a7e1375de6f6` (`Core/HW/SasAudio.cpp`, `Core/HW/SasAudio.h` and `Core/HLE/sceSas.cpp`, Copyright (c) 2012- PPSSPP Project, GPL-2.0-or-later).
+- **JPCSP — the jpcsp authors** — GPL-3.0-or-later. The Media Engine video boundary (sceVideocodec, sceMpegbase) in [`src/rt/hle_videocodec.c`](src/rt/PROVENANCE.md) is adapted from JPCSP at `00ac4d6daedd89c0492093ae83fb0d3d819af414` (`sceVideocodec.java`, `sceMpegbase.java`, `SceMp4AvcCscStruct.java`, `mediaengine/MEMemory.java` and `mediaengine/MEEmulator.java`); none of JPCSP's Media Engine code emulation is used. The sceAudiocodec handlers in the same file also take the ATRAC3plus work-area words from JPCSP's `sceMeAudio.java` and `sceAudiocodec.java`.
+- **uOFW — the uOFW team** — MIT. The sceAudiocodec wrapper checks in [`src/rt/hle_videocodec.c`](src/rt/PROVENANCE.md) (codec range, EDRAM words and error codes, the output-size rule) are adapted from uOFW at `28306bb5bd4fcdcc0c1d469bf1f3bdb885dde3e9` (`src/kd/avcodec/audiocodec.c`, Copyright (c) 2011, 2012 The uOFW team).
+- **PPSSPP texture replacement** — the quick texture hash and the replacement-pack key and lookup order in [`src/rt/texrepl.c`](src/rt/texrepl.c) are translated from PPSSPP at `3bc60270eae3069f13dfbfdb7292a7e1375de6f6` (`GPU/Common/TextureDecoder.cpp`, `GPU/Common/TextureReplacer.cpp` and `GPU/Common/TextureCacheCommon.cpp`, Copyright (c) 2012- PPSSPP Project, GPL-2.0-or-later); the texture pack layout is PPSSPP's.
 - **PPSSPP ad hoc server** — the lobby of the in-process ad hoc medium in [`src/core/nk_adhoc_net.c`](src/core/PROVENANCE.md) is translated from PPSSPP at `3bc60270eae3069f13dfbfdb7292a7e1375de6f6` (`Core/HLE/proAdhocServer.cpp`, Copyright (c) 2014- PPSSPP Project, GPL-2.0-or-later; PPSSPP's port of Coldbird's aemu ad hoc server), and the relay codec's login checks and port offset in `src/core/nk_adhoc_relay.c` come from the same file and `Core/HLE/sceNetAdhoc.cpp` (Copyright (c) 2013- PPSSPP Project) at that revision.
 - **aemu_postoffice — Kethen** — the ad hoc relay protocol that `src/core/nk_adhoc_relay.c` encodes, at commit `02abf18fd161a1639d9f93c48c4c46638c7c6d15`; the codec follows its packet layouts and limits, and no code is imported.
 - **minimp3 — lieff (Lion) and contributors** — CC0-1.0 public-domain dedication. The MPEG audio decoder header in [`src/rt/minimp3/`](src/rt/minimp3/), pinned to upstream commit `ea99364f61c14656440e8d77e9c233ccf3124633` and kept byte-identical; it backs the `sceMp3` library.
+- **OpenXR-SDK headers — The Khronos Group Inc.** — Apache-2.0 OR MIT. The OpenXR C headers (`openxr.h`, `openxr_platform.h`, `openxr_platform_defines.h`) in [`src/rt/xr/openxr/`](src/rt/xr/openxr/PROVENANCE.md), pinned to tag `release-1.1.65` (commit `24a1f2b92d212501a2b1b8d30ffd53abf55fcfa8`) and kept byte-identical; they type the optional VR module, which loads the OpenXR loader at run time.
 - **Clay — Nic Barker** — zlib. The layout library in [`third_party/clay/`](third_party/clay/).
 - **Portable Snippets — Evan Nemerson** — CC0-1.0 (public domain). The overflow-checked arithmetic header in [`third_party/portable-snippets/`](third_party/portable-snippets/).
 - **AMD FidelityFX SDK (FSR 1) — Advanced Micro Devices, Inc.** — MIT. EASU and RCAS, the optional presentation upscaler (`SR_PRESENT_UPSCALE=fsr1`), in [`third_party/fidelityfx_sdk/`](third_party/fidelityfx_sdk/): FSR 1 and the `ffx_core` headers from FidelityFX SDK v2.4.0 (commit `7539ae8b6568ad29ed78a753404351daf3b5cca7`), and the GLSL portability header `ffx_core_glsl.h` from FidelityFX SDK v1.1.4 (commit `c6efa6bf7f2027b3ec94f28578bb5965eabb9e55`), the last release that ships one. Every file is imported byte-identical.
+- **Anime4K — bloc97** — MIT. The CNN x2 (M) upscaler, the optional movie upscaler (`SR_MOVIE_UPSCALE=anime4k`), in [`third_party/anime4k/`](third_party/anime4k/), pinned to upstream commit `4029bf701ecaa15f163cdc49cffe5501c1acf410` (v4.0.1) and kept byte-identical; `tools/anime4k_port.py` wraps its passes as the compute shaders `src/rt/gpu_sdl3vk/shaders/anime4k_cnn_x2_m_*.comp`.
 - **dr_libs (dr_wav) — David Reid** — public domain (Unlicense), elected from its Unlicense or MIT-0 choice. The WAV writer selftests use, in [`third_party/dr_libs/`](third_party/dr_libs/).
 - **libchdr — Romain Tisserand and contributors** — BSD-3-Clause, pinned at
   `47d794151b2b64f6aba60304e6480f4f5a2bc24b`, with the codecs it carries: miniz 3.1.2 (RAD Game Tools, Valve Software,
@@ -41,16 +46,42 @@ Nakagawa has since substantially extended and modified that codebase. This repos
 - **xBRZ 1.9 — Zenju** — GPL-3.0, with the author's linking exception kept unchanged. The pixel-art scaler behind
   Ace Mode's texture scaling, translated from C++ to C (a LOCAL DELTA, checked against the upstream release's output)
   in [`third_party/xbrz/`](third_party/xbrz/PROVENANCE.md).
+- **AMD FidelityFX SDK (FSR 3) — Advanced Micro Devices, Inc.** — MIT. The FSR 3.1.6 upscaler's eight compute passes,
+  frame generation's seventeen (frame interpolation and optical flow) and the headers they include, from FidelityFX
+  SDK v2.4.0 (commit `7539ae8b6568ad29ed78a753404351daf3b5cca7`), in
+  [`third_party/fidelityfx_sdk/`](third_party/fidelityfx_sdk/PROVENANCE.md): each file is on the SDK's MIT list, which
+  [`LICENSE-AMD.md`](third_party/fidelityfx_sdk/LICENSE-AMD.md) carries, and is imported byte-identical, except three
+  headers with recorded local changes. The C host in `src/rt/fsr3_host.c`, `src/rt/fsr3_jitter.c`,
+  `src/rt/fsr3_fg_host.c`, `src/rt/gpu_sdl3vk/fsr3_pass.c` and `src/rt/gpu_sdl3vk/fsr3_fg_pass.c` is translated from
+  the SDK's C++ and keeps AMD's notice.
 - **Monocypher 4.0.3 — Loup Vaillant, Michael Savage, Fabio Scotoni and contributors** — dual BSD-2-Clause or
   CC0-1.0; the project uses it under CC0-1.0. The Ed25519 signature check in
   [`third_party/monocypher/`](third_party/monocypher/).
+- **rcheevos 12.5.0 — RetroAchievements.org and contributors** — MIT. RetroAchievements' C library for opt-in
+  achievements ([#1316](https://github.com/Jstar269/nakagawa-recomp/issues/1316)), in
+  [`third_party/rcheevos/`](third_party/rcheevos/PROVENANCE.md). Its MD5 (`src/rhash/md5.c`, `md5.h`) is
+  L. Peter Deutsch's (Aladdin Enterprises), under the zlib licence.
 - **PSPSDK / PSPDEV contributors** — BSD-family notices for public ABI definitions and source-owned fixtures ([`THIRD_PARTY_LICENSES/PSPSDK.txt`](THIRD_PARTY_LICENSES/PSPSDK.txt)).
+- **PSPSDK sample programs — Jesper Svennevid, Donour Sizemore, James Forshaw, John Kelley, Marcus R. Brown, Frank Buss and weltall** — BSD-3-Clause. The public homebrew corpus ([#2144](https://github.com/Jstar269/nakagawa-recomp/issues/2144)) names four PSPSDK samples, pinned to the PSPDEV release; nothing is built or copied into the repository ([`fixtures/homebrew_corpus/PROVENANCE.md`](fixtures/homebrew_corpus/PROVENANCE.md)).
 - **SDL, SDL_ttf and their dependencies** — staged beside the player with their licence texts (listed in [`NOTICE.md`](NOTICE.md)).
 - **stb_image 2.30 — Sean Barrett** — public domain (Unlicense), the alternative to MIT that upstream offers. The PNG
   decoder in [`third_party/stb/`](third_party/stb/), for the player's prompt glyphs and the disc art read from your own disc.
 - **Kenney "Input Prompts" and "Interface Sounds" — Kenney Vleugels ([kenney.nl](https://kenney.nl))** — CC0-1.0. The
-  next UI's button prompt glyphs and its optional launcher sounds, in [`third_party/kenney/`](third_party/kenney/).
-- **Font fixtures** — Gudea (Agustina Mingote), Gowun Dodum (The Gowun Dodum Project Authors), M+ 1p (The M+ Project Authors) and Liberation Sans and Liberation Serif 2.1.5 (Google Corporation and Red Hat, Inc.; Reserved Font Names Arimo, Tinos, Cousine and Liberation), all SIL Open Font License 1.1 ([`fixtures/fonts/`](fixtures/fonts/)). The build converts Liberation (Latin), M+ 1p (Japanese) and Gowun Dodum (Korean) into the project's stand-in PSP fonts; Gudea is used only by tests.
+  launcher's button prompt glyphs and its optional launcher sounds, in [`third_party/kenney/`](third_party/kenney/).
+- **Inno Setup 6.7.3 — Jordan Russell and Martijn Laan** — the Inno Setup License (a permissive, no-copyleft licence; text pinned by hash in [`assets/upstream/innosetup.lock.json`](assets/upstream/innosetup.lock.json)). A build tool for the Windows installer, not vendored: `tools/build_installer.py` runs the user's own pinned copy. The installer's `Setup.exe` embeds Inno's unmodified loader, whose copyright notice and web addresses stay intact.
+- **LLVM 21.1.8 — the LLVM Project** — Apache-2.0 WITH LLVM-exception. clang, lld, compiler-rt builtins, libunwind,
+  libc++abi and libc++, built by `tools/android_toolchain.py` from the pinned release tarball for the on-device C
+  toolchain of the Android build ([`android/toolchain/`](android/toolchain/PROVENANCE.md)). Not vendored.
+- **LLVM, MSYS2 UCRT64 build — the LLVM Project** — Apache-2.0 WITH LLVM-exception in MSYS2's metadata. The opt-in
+  LLVM IR backend (`CODEGEN_BACKEND=llvm`, [#330](https://github.com/Jstar269/nakagawa-recomp/issues/330)) runs the
+  developer's own `clang` and `llvm-link`; nothing from LLVM is vendored, linked or shipped
+  ([`docs/LLVM_BACKEND.md`](docs/LLVM_BACKEND.md#third-party-toolchain-licence-provenance-and-security)).
+- **Android Open Source Project, `android-16.0.0_r4`** — bionic's headers, crt sources and symbol files (BSD-style
+  and Apache-2.0; the kernel uapi headers GPL-2.0-only WITH Linux-syscall-note), and the liblog, libandroid and
+  libvulkan symbol files and `android/log.h` (Apache-2.0), read by `tools/android_sysroot.py` to build that
+  toolchain's sysroot. **Khronos Vulkan-Headers v1.4.363** — Apache-2.0 OR MIT, the sysroot's Vulkan headers. None is
+  vendored; the pins and SHA-256 values are in [`android/toolchain/`](android/toolchain/PROVENANCE.md).
+- **Font fixtures** — Gudea (Agustina Mingote), Gowun Dodum (The Gowun Dodum Project Authors), M+ 1p (The M+ Project Authors) and Liberation Sans and Liberation Serif 2.1.5 (Google Corporation and Red Hat, Inc.; Reserved Font Names Arimo, Tinos, Cousine and Liberation), all SIL Open Font License 1.1 ([`fixtures/fonts/`](fixtures/fonts/)). The build converts Liberation (Latin), Gowun Dodum (Korean) and Noto Sans JP with M+ 1p (Japanese) into the project's stand-in PSP fonts; Gudea is used only by tests.
 
 The authoritative, component-by-component provenance records are [`NOTICE.md`](NOTICE.md) and the
 [`public provenance ledger`](assets/public_provenance_ledger.json).

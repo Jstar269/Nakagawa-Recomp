@@ -12,6 +12,12 @@
 extern "C" {
 #endif
 
+/* One PSP display period in microseconds (60000/1001 Hz, rounded down): the one definition the
+ * scheduler, perf, video recording and audio code share. It lives here because recomp.h already
+ * includes this header. The scheduler itself carries each period's 1/3 us remainder
+ * (scheduler_vblank_delta, vblank_pace). */
+#define SR_DISPLAY_PERIOD_US 16683u
+
 typedef enum SrPerfGeReason {
     SR_PERF_GE_RENDER_BATCH = 0,
     SR_PERF_GE_SNAPSHOT_COPY,
@@ -188,6 +194,7 @@ void     sr_perf_test_set_clocks(SrPerfTestClock wall_ns, SrPerfTestClock thread
 void     sr_perf_test_reinit(void);
 void     sr_perf_shutdown(void);
 uint64_t sr_perf_now_ns_impl(void);
+void sr_perf_exclude_thread(void);   /* this host thread's calls account nothing (perf.c) */
 #define sr_perf_now_ns() (sr_perf_enabled ? sr_perf_now_ns_impl() : 0)
 void     sr_perf_guest_begin(void);
 void     sr_perf_guest_end(void);
@@ -265,6 +272,9 @@ void     sr_perf_present_submit(void);
 void     sr_perf_present_wait(uint64_t started_ns);
 void     sr_perf_present_done(uint64_t started_ns, int result);
 void     sr_perf_present_skip(void);
+/* A game frame the presenter returned not shown because the presentation engine could not take it
+ * without waiting (SDL3VK_PRESENT_DISPLAY_BUSY); kept apart from the output-cap skips above. */
+void     sr_perf_present_busy(void);
 /* One guest framebuffer the window received, at VBLANK `vcount`. A buffer that differs from the
  * previous present's is a new game frame; the same buffer again is a re-present. Called on the
  * scheduler thread, which runs the guest, GE lists and the presenter: the CPU time that thread

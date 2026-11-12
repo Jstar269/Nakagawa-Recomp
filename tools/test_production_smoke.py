@@ -491,6 +491,53 @@ class TestProductionSmoke(unittest.TestCase):
             finally:
                 os.chdir(cwd)
 
+    def test_verify_accepts_lld_link_map_input_sections(self):
+        with tempfile.TemporaryDirectory(prefix="nk_prod_smoke_lld_") as tmp_dir:
+            temp_root = Path(tmp_dir)
+            relative_dir = "sub_build"
+            build_dir = self._fabricated_aot_tree(temp_root, relative_dir)
+            map_path = build_dir / "production_smoke.map"
+            paths = map_path.read_text(encoding="utf-8").splitlines()
+            map_path.write_text(
+                "Address  Size     Align Out     In      Symbol\n"
+                + "\n".join(
+                    f"00001000 00000020 16 {path}:(.text)" for path in paths
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            cwd = os.getcwd()
+            try:
+                os.chdir(temp_root)
+                generator.verify(Path(relative_dir), mode="aot")
+            finally:
+                os.chdir(cwd)
+
+    def test_verify_lld_link_map_reports_an_omitted_object(self):
+        with tempfile.TemporaryDirectory(prefix="nk_prod_smoke_lld_missing_") as tmp_dir:
+            temp_root = Path(tmp_dir)
+            relative_dir = "sub_build"
+            build_dir = self._fabricated_aot_tree(temp_root, relative_dir)
+            map_path = build_dir / "production_smoke.map"
+            paths = map_path.read_text(encoding="utf-8").splitlines()
+            omitted_object = paths.pop(0).rsplit("/", 1)[-1]
+            retained_object = paths[0].rsplit("/", 1)[-1]
+            map_path.write_text(
+                "Address  Size     Align Out     In      Symbol\n"
+                + "\n".join(f"00001000 00000020 16 {path}:(.text)" for path in paths)
+                + "\n",
+                encoding="utf-8",
+            )
+            cwd = os.getcwd()
+            try:
+                os.chdir(temp_root)
+                with self.assertRaisesRegex(RuntimeError, "production link map omits") as raised:
+                    generator.verify(Path(relative_dir), mode="aot")
+            finally:
+                os.chdir(cwd)
+            self.assertIn(omitted_object, str(raised.exception))
+            self.assertNotIn(retained_object, str(raised.exception))
+
     def _assert_title_link_uses_response_file(self, makefile):
         """The title link reads its objects from a response file, never the command line.
 
@@ -770,6 +817,191 @@ class TestProductionSmokePackage(unittest.TestCase):
             )
         self.assertEqual(caught.exception.code, "PACKAGE_UNSUPPORTED_PATH")
         self.assertIn("characters the Make recipes cannot quote", str(caught.exception))
+
+    def test_spaced_profile_keeps_short_build_root_to_make(self):
+        """#2281: a package whose data folder has a space builds in the 8.3 short form
+        of that folder, and every path the planner derives from it, the staged guest
+        PRXs included, reaches Make in that form. On Windows Path.resolve() expands
+        an 8.3 alias back to the long, spaced name; this resolve does the same on any
+        host, so a check that resolves a staged path refuses a Make-safe build.
+        The enhancement package is staged and the spaced enhancement data root is named
+        by its short form, so both reach Make unsafe-free."""
+        long_root = self.root / "Spaced Profile"
+        alias_root = self.root / "short_alias_root"
+        for directory in (long_root, alias_root):
+            directory.mkdir()
+        module_dir = long_root / "disc modules"
+        module_dir.mkdir()
+        (module_dir / "block.i3d.prx").write_bytes(build_synthetic_decrypted_prx())
+        output_dir = long_root / "packages" / "pkg"
+        manifest = json.loads(json.dumps(self.manifest))
+        manifest["modules"] = [{
+            "name": "block.i3d.prx",
+            "role": "guest-prx",
+            "required": True,
+            "placement": "runtime",
+            "guest_path": "disc0:/PSP_GAME/USRDIR/block.i3d.prx",
+        }]
+        # Every input lives under the spaced folder, as a cached disc's do, so each
+        # one is staged into the build workspace.
+        inputs = long_root / "disc files"
+        inputs.mkdir()
+        manifest_path = inputs / "title manifest.json"
+        manifest_path.write_text(json.dumps(manifest, sort_keys=True) + "\n", encoding="utf-8")
+        game_elf = inputs / "EBOOT.BIN"
+        shutil.copyfile(self.fixture_dir / "guest.prx", game_elf)
+        psp_header = inputs / "EBOOT header.psp"
+        shutil.copyfile(self.fixture_dir / "guest.psp", psp_header)
+        enhancement_package = inputs / "enhancement package.json"
+        enhancement_package.write_text("{}", encoding="utf-8")
+        # A code-hook package beside it (contract section 9.9), with its symbols sidecar.
+        code_hook_package = inputs / "enhancement package.cull.json"
+        code_hook_package.write_text("{}", encoding="utf-8")
+        code_hook_package.with_suffix(".symbols.json").write_text("{}", encoding="utf-8")
+        enhancement_data_root = long_root / "enhancement data"
+        enhancement_data_root.mkdir()
+        data_root_alias = alias_root / "ENHDAT~1"
+
+        path_class = type(self.root)
+        real_resolve = path_class.resolve
+        real_which = shutil.which
+        real_run = subprocess.run
+
+        def short_path(path):
+            # GetShortPathNameW: the alias of the spaced folder, absolute, not resolved.
+            if Path(path) == enhancement_data_root:
+                return data_root_alias
+            relative = Path(path).relative_to(long_root)
+            return alias_root.joinpath(relative)
+
+        def expanding_resolve(path, strict=False):
+            resolved = real_resolve(path, strict=strict)
+            if resolved.is_relative_to(alias_root):
+                return long_root.joinpath(resolved.relative_to(alias_root))
+            return resolved
+
+        make_calls = []
+        hook_sidecars = []
+        option_environments = []
+
+        def record_make(command, *args, **kwargs):
+            if command and command[0] == "/toolchain/make":
+                make_calls.append((list(command), dict(kwargs["env"])))
+                # The staged workspace is gone once build_package returns: look at Make time.
+                hook = kwargs["env"].get("ENHANCEMENT_CODE_HOOK_PACKAGE")
+                hook_sidecars.append(bool(hook) and Path(hook).with_suffix(".symbols.json").is_file())
+                return subprocess.CompletedProcess(command, 0)
+            return real_run(command, *args, **kwargs)
+
+        def record_options(environment):
+            option_environments.append(dict(environment))
+            return {}
+
+        with (
+            mock.patch.dict(os.environ, {}, clear=False),
+            mock.patch.object(title_codegen_plan, "_windows_short_path", side_effect=short_path),
+            mock.patch.object(path_class, "resolve", expanding_resolve),
+            mock.patch.object(title_codegen_plan.shutil, "which", side_effect=lambda name, **kw: (
+                f"/toolchain/{name}" if name in {"make", "gcc"} else real_which(name, **kw))),
+            mock.patch.object(title_codegen_plan, "_version_identity",
+                              return_value=("synthetic 1.0", "synthetic 1.0")),
+            # The package file is staged, not parsed, by this route test.
+            mock.patch("nk_core.package_cache.enhancement_package_options", side_effect=record_options),
+            mock.patch.object(title_codegen_plan.subprocess, "run", side_effect=record_make),
+            contextlib.redirect_stdout(io.StringIO()),
+            self.assertRaises(title_codegen_plan.PackageRouteError) as caught,
+        ):
+            os.environ.pop("NK_BUILD_ROOT", None)
+            os.environ["CC"] = "gcc"
+            title_codegen_plan.build_package(
+                manifest,
+                manifest_path=manifest_path,
+                game_elf=game_elf,
+                psp_header=psp_header,
+                module_dir=module_dir,
+                output_dir=output_dir,
+                make_command="make",
+                enhancement_package_path=enhancement_package,
+                enhancement_data_root=enhancement_data_root,
+                code_hook_package_path=code_hook_package,
+            )
+        # Make was recorded, not run, so the package is incomplete; any path refusal
+        # would have stopped the route before Make with PACKAGE_UNSUPPORTED_PATH.
+        self.assertEqual(caught.exception.code, "PACKAGE_BUILD_INCOMPLETE", caught.exception)
+        self.assertTrue(make_calls)
+        path_keys = (
+            "GAME_ELF", "GAME_PSP_HEADER", "TITLE_MANIFEST", "BUILD_DIR", "LINK_MAP",
+            "ENHANCEMENT_PACKAGE", "ENHANCEMENT_DATA_ROOT", "ENHANCEMENT_CODE_HOOK_PACKAGE",
+        )
+        for command, environment in make_calls:
+            for argument in command[1:]:
+                self.assertFalse(title_codegen_plan._make_unsafe(argument), argument)
+            for key in path_keys:
+                value = environment[key]
+                self.assertFalse(title_codegen_plan._make_unsafe(value), (key, value))
+                self.assertTrue(Path(value).is_relative_to(alias_root), (key, value))
+            # The code-hook package is staged under a name of its own.
+            self.assertNotEqual(environment["ENHANCEMENT_CODE_HOOK_PACKAGE"], environment["ENHANCEMENT_PACKAGE"])
+            # The data root is read in place: its short form is passed on as written.
+            self.assertEqual(environment["ENHANCEMENT_DATA_ROOT"], data_root_alias.as_posix())
+            extra = environment["GAME_EXTRA_ELFS"].split(" ")
+            self.assertEqual(len(extra), 1, extra)
+            module_path = extra[0].rsplit("@", 1)[0]
+            self.assertTrue(Path(module_path).is_relative_to(alias_root), module_path)
+            self.assertEqual(Path(module_path).name, "block.i3d.prx")
+            self.assertEqual(Path(module_path).parent.name, "modules")
+        # Its sidecar was staged beside it, and the cache key was computed with it named.
+        self.assertEqual(hook_sidecars, [True] * len(make_calls))
+        self.assertTrue(option_environments)
+        for environment in option_environments:
+            self.assertEqual(Path(environment["ENHANCEMENT_CODE_HOOK_PACKAGE"]).name,
+                             "enhancement_package.cull.json", environment)
+
+    def test_spaced_enhancement_data_root_uses_short_form_or_is_refused(self):
+        """#2281: the data root is read in place and interpolated into the codegen
+        recipe, so a spaced one is named by its short form, or refused by name."""
+        spaced = self.root / "Spaced Data" / "title files"
+        spaced.mkdir(parents=True)
+        alias = self.root / "short_alias_data"
+        path_class = type(self.root)
+        real_resolve = path_class.resolve
+
+        def expanding_resolve(path, strict=False):
+            # Windows expands an 8.3 alias back to its long, spaced name when resolved.
+            resolved = real_resolve(path, strict=strict)
+            if resolved.is_relative_to(alias):
+                return spaced.joinpath(resolved.relative_to(alias))
+            return resolved
+
+        with (
+            mock.patch.object(title_codegen_plan, "_windows_short_path", return_value=alias),
+            mock.patch.object(path_class, "resolve", expanding_resolve),
+        ):
+            named = title_codegen_plan._make_safe_directory(spaced, "enhancement data root")
+        self.assertEqual(named, alias)
+        self.assertFalse(title_codegen_plan._make_unsafe(named.as_posix()), named)
+        for unavailable in (None, self.root / "Still Spaced"):
+            with (
+                mock.patch.object(title_codegen_plan, "_windows_short_path",
+                                  return_value=unavailable),
+                self.assertRaises(title_codegen_plan.PackageRouteError) as caught,
+            ):
+                title_codegen_plan._make_safe_directory(spaced, "enhancement data root")
+            self.assertEqual(caught.exception.code, "PACKAGE_UNSUPPORTED_PATH")
+            self.assertIn("enhancement data root", str(caught.exception))
+        safe = self.root / "safe_data"
+        safe.mkdir()
+        self.assertEqual(
+            title_codegen_plan._make_safe_directory(safe, "enhancement data root"),
+            safe.resolve(),
+        )
+
+    def test_unsafe_path_refusal_does_not_claim_pending_work(self):
+        with self.assertRaises(title_codegen_plan.PackageRouteError) as caught:
+            title_codegen_plan._require_make_safe(self.root / "has space.prx", "guest PRX x")
+        self.assertEqual(caught.exception.code, "PACKAGE_UNSUPPORTED_PATH")
+        self.assertNotIn("in the works", str(caught.exception))
+        self.assertNotIn("#296", str(caught.exception))
 
     def test_package_builds_to_spaced_destination_via_nk_build_root(self):
         required = ("mingw32-make", "gcc", "pwsh")
@@ -1528,7 +1760,7 @@ class TestPresenterContract(unittest.TestCase):
     def test_gdi_acceptance_requires_window_dc_and_positive_scanlines(self):
         """The headless suite cannot open GDI, so pin its acceptance contract in source."""
         source = (ROOT / "src" / "rt" / "gui.c").read_text(encoding="utf-8")
-        presenter = source[source.index("int gui_present"):]
+        presenter = source[source.index("int gui_present("):]
         accepted = presenter[:presenter.index("#else")]
         # The present accepts a GDI frame only when the blit drew it; a failed blit
         # resolves an armed capture as failed and reports the frame as not presented.
@@ -1536,7 +1768,7 @@ class TestPresenterContract(unittest.TestCase):
             accepted,
             r"if \(!gdi_blit\(\)\)\s*\{\s*sr_capture_fail\([^;]*\);\s*return 0;\s*\}",
         )
-        gdi = source[source.index("static int gdi_blit(void)"):source.index("int gui_present")]
+        gdi = source[source.index("static int gdi_blit(void)"):source.index("int gui_present(")]
         self.assertIn("if (!s_hwnd) return 0;", gdi)
         self.assertIn("HDC dc = GetDC(s_hwnd);", gdi)
         self.assertIn("if (!dc) return 0;", gdi)
@@ -1554,7 +1786,7 @@ class TestPresenterContract(unittest.TestCase):
 
     def test_offscreen_frame_event_is_quiet_without_present_trace(self):
         source = (ROOT / "src" / "rt" / "gui.c").read_text(encoding="utf-8")
-        presenter = source[source.index("int gui_present"):]
+        presenter = source[source.index("int gui_present("):]
         offscreen = presenter[presenter.index("if (s_offscreen)"):presenter.index("int accepted")]
         self.assertRegex(
             offscreen,
@@ -1568,8 +1800,8 @@ class TestPresenterContract(unittest.TestCase):
         convert_fb reads it, and a failed sync must decline the frame instead of drawing the
         keyboard over stale pixels."""
         source = (ROOT / "src" / "rt" / "gui.c").read_text(encoding="utf-8")
-        presenter = source[source.index("int gui_present"):]
-        sdl = presenter[presenter.index("if (s_sdl3) {"):presenter.index("int present_result")]
+        presenter = source[source.index("int gui_present("):]
+        sdl = presenter[presenter.index("if (s_sdl3) {"):presenter.index("cpu_result = sdl3vk_present_rgba")]
         # One keyboard decision gates both the skipped fast path and the sync that replaces it,
         # so sync_sdl_input() cannot open or close the keyboard between the two.
         self.assertIn("int osk_open = sr_osk_overlay_active();", sdl)
@@ -1596,8 +1828,8 @@ class TestPresenterContract(unittest.TestCase):
         present result is remapped only from -1; 0 (close) and 1 (shown) pass through."""
         root = ROOT / "src" / "rt"
         gui = (root / "gui.c").read_text(encoding="utf-8")
-        presenter = gui[gui.index("int gui_present"):]
-        sdl = presenter[presenter.index("if (s_sdl3) {"):presenter.index("int present_result")]
+        presenter = gui[gui.index("int gui_present("):]
+        sdl = presenter[presenter.index("if (s_sdl3) {"):presenter.index("cpu_result = sdl3vk_present_rgba")]
         # The fall-through convert_fb reads guest VRAM. The target-failed branch must sync it
         # first, and it must be the only branch that does so for the decline code.
         marker = "if (res == GEGPU_PRESENT_TARGET_FAILED) {"
@@ -1623,11 +1855,15 @@ class TestPresenterContract(unittest.TestCase):
         # Only -1 from sdl3vk_present_image_ex is remapped; 0 (close) and 1 (shown) are returned
         # unchanged. The mapping is the last statement, after the present call. The image shown
         # is the target's own, or its host twin at the twin's scale while the twin is in step (#2050).
+        # With widescreen Fill on, it is the composed picture (left wing, that image, right wing) at
+        # the same scale; only a frame actually shown marks its wings shown (#1881).
         self.assertIn("VkImage shown = present_image(t);", present)
-        self.assertIn(
-            "int pr = sdl3vk_present_image_ex((void *)shown, DRAW_W * present_scale(t), FB_H * present_scale(t));",
-            present,
-        )
+        self.assertIn("int show_w = DRAW_W * present_scale(t), show_h = FB_H * present_scale(t);", present)
+        self.assertIn("VkImage wide = wide_compose(t, fbaddr, &show_w, &show_h);", present)
+        self.assertIn("int pr = sdl3vk_present_image_ex((void *)(wide ? wide : shown), show_w, show_h);", present)
+        self.assertIn("if (pr == GEGPU_PRESENT_SHOWN) ge_wide_shown(fbaddr);", present)
+        self.assertLess(present.index("wide_compose(t, fbaddr"), present.index("sdl3vk_present_image_ex("))
+        self.assertLess(present.index("sdl3vk_present_image_ex("), present.index("ge_wide_shown(fbaddr)"))
         self.assertIn("    if (pr == -1) return GEGPU_PRESENT_TARGET_FAILED;\n    return pr;\n}", present)
         # Only the two intended returns carry the code: the unprepared target and the failed present.
         self.assertEqual(present.count("GEGPU_PRESENT_TARGET_FAILED"), 2)
@@ -3777,23 +4013,28 @@ class TestProductStatusCopy(unittest.TestCase):
     def _source(self, relative: str) -> str:
         return (ROOT / relative).read_text(encoding="utf-8")
 
-    def test_about_screen_carries_the_licence_and_no_endorsement_notice(self):
-        ui = self._source("src/player/ui_renderer.c")
-        start = ui.index("static void render_prerequisite_about(")
-        about = ui[start:ui.index("\n}\n", start)]
-        self.assertIn("GPL-3.0-or-later; see LICENSE and NOTICE.md", about)
-        self.assertIn("Not affiliated with or endorsed by Sony Interactive Entertainment", about)
+    def _c_text(self, relative: str) -> str:
+        """A C source with adjacent string literals joined, as the compiler joins them."""
+        return re.sub(r'"\s*\n\s*"', "", self._source(relative))
 
-    def test_wizard_names_the_package_builder_and_the_open_boundaries(self):
-        ui = self._source("src/player/ui_renderer.c")
-        self.assertIn("Nakagawa decrypts your own disc on this PC; it never downloads games "
-                      "or touches firmware. ", ui)
-        self.assertIn("It builds runtime packages from the library.", ui)
-        self.assertNotIn("key file", ui)
-        self.assertIn("packages from the library. Verify also lists font and audio status.", ui)
-        self.assertNotIn("or create runtime packages", ui)
-        self.assertNotIn("draw_issue_links", ui)
-        self.assertEqual(ui.count("Build the runtime package from the library."), 3)
+    def test_about_screen_carries_the_licence_and_no_endorsement_notice(self):
+        # The launcher's notices page (Settings > Third-party notices) and its About page.
+        notices = self._c_text("src/player/ui/scr_settings.c")
+        self.assertIn("Nakagawa Recomp is free software (GPL-3.0-or-later; see LICENSE and "
+                      "NOTICE.md). Not affiliated with or endorsed by Sony Interactive "
+                      "Entertainment; PlayStation and PSP are its trademarks.", notices)
+        about = self._c_text("src/player/ui/scr_about.c")
+        self.assertIn("Not affiliated with or endorsed by Sony Interactive Entertainment. "
+                      "PSP is a trademark of its owner. No game data is included.", about)
+
+    def test_wizard_states_the_open_boundaries(self):
+        wizard = self._c_text("src/player/ui/scr_wizard.c")
+        self.assertIn("Your games stay on this PC. Nakagawa never uploads anything, and "
+                      "downloads only the build tools you approve. It decrypts your own disc "
+                      "here and never touches firmware.", wizard)
+        self.assertNotIn("key file", wizard)
+        self.assertNotIn("or create runtime packages", wizard)
+        self.assertNotIn("draw_issue_links", wizard)
 
     def test_library_checklist_points_at_the_library_package_builder(self):
         inspect = self._source("tools/nk_core/iso_inspect.py")
@@ -3821,6 +4062,171 @@ class TestProductStatusCopy(unittest.TestCase):
             report_source,
         )
         self.assertNotIn("public font reader in the works (#349)", report_source)
+
+
+# The display-smoke VRAM capture check judges the capture run on its own trace (#2200).
+# generate.py vramdump runs the fixture twice: once for a reference first frame and once with
+# SR_VRAMDUMP asking for the first eight vblanks. Which vblank a run presents first moves with
+# machine load, so the second run cannot be required to present the vblank the first one did;
+# it must still prove that what it dumped was a presented frame.
+
+
+def _vramdump_output(presented, passed=(), failed=(), extra=""):
+    lines = [f"HOST_PRESENT_SUBMITTED f={vblank} buf=0x04000000 fmt=3 stride=512"
+             for vblank in presented]
+    lines += [f"VRAMDUMP vblank={vblank} PASS" for vblank in passed]
+    lines += [f"VRAMDUMP vblank={vblank} FAIL (see diagnostic above)" for vblank in failed]
+    return "\n".join(lines) + extra
+
+
+class DisplaySmokeFirstFrameSidecarTests(unittest.TestCase):
+    """first_frame_vram_sidecar proves the first presented vblank's own VRAM capture (#2200)."""
+
+    WIDTH, HEIGHT, STRIDE = 480, 272, display_generator.STRIDE
+
+    def setUp(self):
+        self._temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._temp.cleanup)
+        self.dir = Path(self._temp.name)
+        self.rgb = bytes((x * 7 + y * 3) & 0xFF for y in range(self.HEIGHT)
+                         for x in range(self.WIDTH) for _ in range(3))
+
+    def _write(self, vblank, *, rgb=None, stride=None, addr=None):
+        """vram_<vblank>.json + .bin holding ``rgb`` (the expected picture by default)."""
+        rgb = self.rgb if rgb is None else rgb
+        raw = bytearray(self.STRIDE * 4 * self.HEIGHT)
+        for y in range(self.HEIGHT):
+            for x in range(self.WIDTH):
+                at = (y * self.STRIDE + x) * 4
+                src = (y * self.WIDTH + x) * 3
+                raw[at:at + 3] = rgb[src:src + 3]
+                raw[at + 3] = 255
+        (self.dir / f"vram_{vblank}.bin").write_bytes(raw)
+        (self.dir / f"vram_{vblank}.json").write_text(json.dumps({
+            "display_framebuffer": {
+                "addr": addr or f"0x{display_generator.FRAMEBUFFER:08x}",
+                "stride": self.STRIDE if stride is None else stride,
+                "format_code": display_generator.PIXEL_FORMAT,
+            },
+            "vram": {"image_file": f"vram_{vblank}.bin"},
+        }), encoding="utf-8")
+
+    def _differing(self):
+        changed = bytearray(self.rgb)
+        changed[(100 * self.WIDTH + 200) * 3 + 1] ^= 0x40
+        return bytes(changed)
+
+    def check(self, first, passes):
+        return display_generator.first_frame_vram_sidecar(self.dir, first, passes, self.rgb)
+
+    def test_the_first_presented_vblanks_matching_sidecar_is_returned(self):
+        self._write(3)
+        self._write(5, rgb=self._differing())
+        self.assertEqual(self.check(3, 2), self.dir / "vram_3.json")
+
+    def test_another_vblanks_matching_sidecar_does_not_stand_in(self):
+        # The old check accepted any sidecar that matched; here only vblank 5 does.
+        self._write(3, rgb=self._differing())
+        self._write(5)
+        with self.assertRaisesRegex(RuntimeError, "first presented vblank 3 .*does not match"):
+            self.check(3, 2)
+
+    def test_one_differing_pixel_in_the_first_sidecar_is_refused(self):
+        self._write(2, rgb=self._differing())
+        with self.assertRaisesRegex(RuntimeError, "does not match the offscreen presented PPM at row 100"):
+            self.check(2, 1)
+
+    def test_a_sidecar_count_that_differs_from_the_reported_passes_is_refused(self):
+        self._write(2)
+        self._write(3)
+        with self.assertRaisesRegex(RuntimeError, "3 vblanks reported PASS but 2 VRAM sidecars"):
+            self.check(2, 3)
+        with self.assertRaisesRegex(RuntimeError, "1 vblanks reported PASS but 2 VRAM sidecars"):
+            self.check(2, 1)
+
+    def test_a_first_vblank_without_a_sidecar_is_refused(self):
+        self._write(4)
+        with self.assertRaisesRegex(RuntimeError, "first presented vblank 2 has no VRAM sidecar"):
+            self.check(2, 1)
+
+    def test_no_sidecars_is_refused(self):
+        with self.assertRaisesRegex(RuntimeError, "no selected vblank produced a VRAM sidecar"):
+            self.check(2, 0)
+
+    def test_the_display_framebuffer_metadata_must_match(self):
+        self._write(2, addr="0x04200000")
+        with self.assertRaisesRegex(RuntimeError, "metadata mismatch"):
+            self.check(2, 1)
+        self._write(2, stride=256)
+        with self.assertRaisesRegex(RuntimeError, "metadata mismatch"):
+            self.check(2, 1)
+
+
+class DisplaySmokeVramdumpCaptureTests(unittest.TestCase):
+    #: The capture run asks for the first eight vblanks whatever the baseline run did.
+    WINDOW = range(display_generator.VRAMDUMP_FIRST_VBLANK,
+                   display_generator.VRAMDUMP_FIRST_VBLANK + display_generator.VRAMDUMP_WINDOW)
+
+    def failure(self, output):
+        return display_generator.vramdump_capture_failure(output, self.WINDOW)
+
+    def test_a_capture_that_presents_from_the_first_vblank_passes(self):
+        self.assertIsNone(self.failure(_vramdump_output([1, 3, 5], passed=[1, 3, 5])))
+
+    def test_a_capture_run_whose_first_present_is_later_than_the_baselines_passes(self):
+        # The hosted failure: the baseline presented vblank 2 first and the old check demanded
+        # "VRAMDUMP vblank=2 PASS"; under load the capture run presented vblank 3 first and
+        # vblank 2 was never presented.
+        output = _vramdump_output([3, 5, 7], passed=[3, 5, 7])
+        self.assertNotIn("VRAMDUMP vblank=2 PASS", output)
+        self.assertIsNone(self.failure(output))
+
+    def test_a_first_frame_that_was_not_captured_is_refused(self):
+        # Later frames were dumped, but frame_first.ppm is the frame of vblank 3.
+        message = self.failure(_vramdump_output([3, 5], passed=[5]))
+        self.assertIn("first presented vblank 3 produced no VRAM capture", message)
+
+    def test_a_pass_for_a_vblank_that_was_not_presented_is_refused(self):
+        message = self.failure(_vramdump_output([3, 5], passed=[3, 4]))
+        self.assertIn("vblank 4", message)
+        self.assertIn("did not present", message)
+
+    def test_a_pass_outside_the_requested_window_is_refused(self):
+        message = self.failure(_vramdump_output([3, 12], passed=[3, 12]))
+        self.assertIn("vblank 12", message)
+        self.assertIn("not requested", message)
+
+    def test_a_reported_failure_is_refused_even_beside_a_pass(self):
+        message = self.failure(_vramdump_output([3, 5], passed=[3], failed=[5]))
+        self.assertIn("FAIL at vblank 5", message)
+
+    def test_presented_frames_with_no_capture_are_refused(self):
+        message = self.failure(_vramdump_output([3, 5]))
+        self.assertIn("no VRAM capture", message)
+
+    def test_a_run_whose_first_present_is_outside_the_window_is_refused(self):
+        message = self.failure(_vramdump_output([20, 22], passed=[]))
+        self.assertIn("is not in the requested window 1..8", message)
+
+    def test_a_run_that_presents_nothing_is_refused(self):
+        message = self.failure(_vramdump_output([]))
+        self.assertIn("first presented vblank", message)
+        self.assertIn("is not in the requested window 1..8", message)
+
+    def test_a_first_present_later_than_the_measured_bound_is_refused(self):
+        # Vblank 7 is inside the 1..8 window, but the fixture has only been seen to need 1 to 3.
+        late = display_generator.VRAMDUMP_FIRST_PRESENT_MAX + 3
+        message = self.failure(_vramdump_output([late, late + 1], passed=[late, late + 1]))
+        self.assertIn(f"first frame at vblank {late}", message)
+        edge = display_generator.VRAMDUMP_FIRST_PRESENT_MAX
+        self.assertIsNone(self.failure(_vramdump_output([edge], passed=[edge])))
+
+    def test_a_vblank_that_passes_twice_is_refused(self):
+        self.assertIn("twice", self.failure(_vramdump_output([3], passed=[3, 3])))
+
+    def test_the_window_is_the_runtimes_vramdump_limit(self):
+        limit = (ROOT / "src" / "rt" / "hle_internal.h").read_text(encoding="utf-8")
+        self.assertIn(f"#define SR_VRAMDUMP_MAX_VBLANKS {display_generator.VRAMDUMP_WINDOW}", limit)
 
 
 if __name__ == "__main__":

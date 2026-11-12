@@ -83,7 +83,7 @@ class BootGateTests(unittest.TestCase):
 
     def test_ace_mode_run_is_never_boot_evidence(self) -> None:
         # An Ace Mode run (src/rt/ace.h) is enhanced, so a clean boot still fails (C6).
-        stamp = "ACE_MODE: on (af=16, text=on, readout=off, notice=on, wide=off, smooth=off, sas=off)\n"
+        stamp = "ACE_MODE: on (af=16, text=on, readout=off, notice=on, wide=off, smooth=off, sas=off, tess=off, twin=off)\n"
         result = self.parse(
             [stamp] + self.ordered_prefix() + [event("first_frame", source="cpu", nonzero_pixels=9)]
         )
@@ -109,7 +109,7 @@ class BootGateTests(unittest.TestCase):
         # SR_PRESENT_UPSCALE=fsr1 (#1273) enhances the window; src/rt/gui.c stamps the run with
         # an ACE_MODE line and a phase=present_upscale boot event, so a clean boot still fails.
         clean_tail = [event("first_frame", source="cpu", nonzero_pixels=9)]
-        stamp = "ACE_MODE: present upscale fsr1 (the window only; captures hold the guest's frame)\n"
+        stamp = "ACE_MODE: present upscale fsr1 (the window and its recording; captures hold the guest's frame)\n"
         result = self.parse([stamp] + self.ordered_prefix() + clean_tail)
         self.assertFalse(result["ok"])
         self.assertFalse(result["aceMode"])

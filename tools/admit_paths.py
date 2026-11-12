@@ -20,6 +20,9 @@ or misordered step failed with its own code (``CANDIDATE_TREE_STALE``,
     python tools/admit_paths.py --policy-delta <pr-worktree> \\
         --approval-basis "Owner decision of <date>: ..." --private-repo <authority checkout>
 
+    python tools/admit_paths.py --compose-v4 <batch-worktree> --base <main> \\
+        --components <key> <key> [<key> ...] --private-repo <authority checkout>
+
 ``--policy-delta`` issues only the policy delta for a profile change that adds
 no path: removed paths, exclude-list changes, and rule changes (bound to each
 changed field's exact before and after values).
@@ -30,6 +33,15 @@ removed paths, the exclude-list changes and the rule changes -- under
 ``docs/provenance/policy-deltas-v4/<sha256 of its selector>.json``. It is not
 bound to the base profile's bytes (#1673), so it stays valid when another
 path-adding pull request lands first, and any landing order works.
+
+``--compose-v4`` is for a landing batch that carries several pull requests with
+profile changes. The attestation looks up one V4 delta, named after the
+batch's whole change from ``--base`` to the worktree's ``HEAD``; this writes
+the union of the pull requests' admitted V4 deltas under that name. Like
+``--rekey`` it records no new decision, only the component names, and it
+refuses unless the components are disjoint, cover the batch's change exactly,
+still carry each added path's current trusted claim, and their union equals the
+delta derived from the two profiles byte for byte.
 
 An added path's origin claim is what the trusted record says about it: the
 public class, the record id, and the record's classification, upstream,
@@ -61,17 +73,25 @@ The command does the mechanical parts and nothing else:
    valid in any landing order, with no batch-size cap;
 5. builds a clean candidate commit holding only the base, the new paths and
    their profile entries, runs ``admit-new-reviewed`` on it, and commits the
-   generated controls on a local ``admit/<slug>-<date>`` branch;
-6. prints exactly what is left: the private push, the merge and the refresh.
+   generated controls on a local ``admit/<slug>-<date>`` branch, which shows
+   the admitted result; the pull request does not need to merge it;
+6. prints exactly what is left: the private push and one refresh on the pull
+   request's branch, which finds the V4 delta beside the trusted ledger.
 
-``--rekey`` is for a pull request admitted before V4 deltas existed: a V3 delta
+``--rekey`` is only for a pull request admitted before V4 deltas existed: a V3 delta
 binds every added path to its bytes, and a nested V1/V2 delta expires when
 another path-adding pull request lands first. It reuses the admission already
 recorded for exactly these paths (with the recorded bytes for a byte-bound
 path), records no new decision, and writes the V4 delta, so no later edit or
 landing needs another re-key. ``--batch-resume`` does the same for a list of
-entries. Run ``--merge-profile`` during a merge to write the three-way merge of
-the path lists before staging the profile.
+entries. A V4 admission never needs it, whatever lands first.
+
+Run ``--merge-profile`` when Git conflicts on the profile, ledger or export. It
+writes and stages the three-way merge of the profile's path lists and of the
+ledger's entries, and the export for the merged profile, so the merge commit
+passes the commit-stage publication audit; the refresh after it regenerates both
+controls. It reads the sides from the index stages, so it works in a merge, a
+squash merge, a cherry-pick or a rebase.
 
 It pushes nothing unless ``--push`` is given, and then only the private
 ``main``. The approval basis is the human decision and is taken verbatim from
@@ -82,7 +102,9 @@ the caller; the command never invents one, a record, an identity, or a
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable
 import datetime
+import functools
 import hashlib
 import json
 import os
@@ -104,6 +126,7 @@ from publication_policy import load_policy  # noqa: E402
 
 POLICY = "assets/public_source_profile.json"
 EXPORT = "PUBLIC_EXPORT.json"
+LEDGER = "assets/public_provenance_ledger.json"
 TRUSTED_LEDGER = "docs/provenance/IMPLEMENTATION_PROVENANCE.json"
 ADMISSIONS = "docs/provenance/admissions"
 #: Nested and flat V1/V2 deltas from before #1673; the attestation still reads them, nothing writes them.
@@ -1136,36 +1159,272 @@ def issue_policy_delta(
     }
 
 
-def merge_profile(worktree: Path) -> dict:
-    """Write the three-way merge of both sides' include and exclude path lists.
+#: The path lists of a V4 authority, in the order its document carries them.
+_V4_PATH_LISTS = ("include_added", "include_removed", "exclude_added", "exclude_removed")
 
-    Each list keeps the merge base's paths, adds what either side added and drops what
-    either side removed, so a path one side moved between the lists or dropped is not
-    brought back by the other side's copy of the list."""
+
+def _v4_selector_of(document: dict) -> dict:
+    """The selector a stored V4 document is named after: its added entries reduced to their paths."""
+    return {**document, "include_added": [item["path"] for item in document["include_added"]]}
+
+
+def _load_v4_component(authority_root: Path, key: str) -> dict:
+    """Read one committed V4 delta strictly and check that it is filed under its own selector."""
+    if not re.fullmatch(r"[0-9a-f]{64}", key):
+        raise AdmitError("COMPOSE_V4_COMPONENTS_INVALID", f"component {key!r} is not a 64-hex V4 delta name")
+    path = authority_root / POLICY_DELTAS_V4 / f"{key}.json"
+    if not path.is_file():
+        raise AdmitError("COMPOSE_V4_COMPONENT_MISSING", f"no V4 delta {key} in the authority checkout")
+    raw = path.read_bytes()
+    try:
+        document: dict = provenance_ledger._read_policy_delta_v4_document(raw)
+    except RefreshError as error:
+        raise AdmitError("COMPOSE_V4_COMPONENT_INVALID", f"V4 delta {key[:12]}: {error}") from error
+    if raw != provenance_ledger.policy_delta_v3_bytes(document):
+        raise AdmitError("COMPOSE_V4_COMPONENT_INVALID", f"V4 delta {key[:12]} is not in canonical form")
+    if hashlib.sha256(provenance_ledger.policy_delta_v3_bytes(_v4_selector_of(document))).hexdigest() != key:
+        raise AdmitError("COMPOSE_V4_COMPONENT_KEY_MISMATCH", f"V4 delta {key[:12]} is not named after its selector")
+    return document
+
+
+def compose_policy_delta_v4(
+    *,
+    worktree: Path,
+    base: str,
+    components: list[str],
+    private_repo: Path,
+    assisted_by: str | None = None,
+    push: bool = False,
+) -> dict:
+    """Write the V4 delta of a landing batch that carries several admitted profile changes.
+
+    The attestation looks up one V4 delta, named after the batch's whole profile change from
+    ``base`` to the worktree's ``HEAD``. Each pull request in the batch already has its own
+    admitted V4 delta (``components``); this writes their union under the batch's name. It
+    makes no new decision, like ``--rekey``: it refuses unless the components are disjoint
+    (no added, removed or excluded path in two of them, rule changes in at most one), cover
+    the batch's profile change exactly, and still carry each added path's current trusted
+    claim, and unless their union equals ``derive_policy_delta_v4`` of the two profiles byte
+    for byte. The private commit records the component names.
+    """
+    keys = list(components)
+    if len(keys) < 2 or len(keys) != len(set(keys)):
+        raise AdmitError("COMPOSE_V4_COMPONENTS_INVALID", "name two or more distinct component V4 deltas")
+    authority_root, _ledger, records = _authority_inputs(private_repo)
     repo = Path(_text(worktree, "rev-parse", "--show-toplevel"))
+    head = _text(repo, "rev-parse", "--verify", "HEAD^{commit}")
+    resolved_base = _text(repo, "rev-parse", "--verify", f"{base}^{{commit}}")
+    try:
+        _git(repo, "merge-base", "--is-ancestor", resolved_base, head)
+    except AdmitError:
+        raise AdmitError("TRUSTED_BASE_NOT_ANCESTOR", f"base {resolved_base[:12]} is not an ancestor of HEAD") from None
+    baseline_policy = _git(repo, "cat-file", "blob", f"{resolved_base}:{POLICY}")
+    candidate_policy = _git(repo, "cat-file", "blob", f"{head}:{POLICY}")
+    try:
+        baseline_document = json.loads(baseline_policy.decode("utf-8"))
+        candidate_document = json.loads(candidate_policy.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise AdmitError("POLICY_PROFILE_INVALID", f"cannot read the profiles: {error}") from error
+    if _canonical_profile_bytes(candidate_document) != candidate_policy:
+        raise AdmitError("POLICY_PROFILE_NOT_CANONICAL", f"{POLICY} at HEAD is not in canonical form")
+
+    documents = {key: _load_v4_component(authority_root, key) for key in keys}
+    owner: dict[str, tuple[str, str]] = {}
+    with_rules = []
+    for key, document in documents.items():
+        for field in _V4_PATH_LISTS:
+            names = _v4_selector_of(document)[field]
+            for path in names:
+                # Within one component a path may sit in two lists as a move; across components never.
+                if path in owner and owner[path][0] != key:
+                    other_key, other_field = owner[path]
+                    both_exclude = field.startswith("exclude_") and other_field.startswith("exclude_")
+                    raise AdmitError(
+                        "COMPOSE_V4_EXCLUDE_OVERLAP" if both_exclude else "COMPOSE_V4_PATH_OVERLAP",
+                        f"{path} is in {other_field} of {other_key[:12]} and {field} of {key[:12]}; "
+                        "overlapping changes need one admission of the combined change",
+                    )
+                owner.setdefault(path, (key, field))
+        if document["rule_changes"]:
+            with_rules.append(key)
+    if len(with_rules) > 1:
+        raise AdmitError(
+            "COMPOSE_V4_RULE_CHANGES_SHARED",
+            f"rule changes in more than one component ({', '.join(key[:12] for key in with_rules)}); "
+            "land them in separate batches",
+        )
+
+    actual = provenance_ledger._classify_policy_delta(baseline_document, candidate_document)
+    for field in (*_V4_PATH_LISTS, "rule_changes"):
+        approved: set[str] = set()
+        for document in documents.values():
+            approved |= {item["key"] for item in document["rule_changes"]} if field == "rule_changes" \
+                else set(_v4_selector_of(document)[field])
+        uncovered = sorted(set(actual[field]) - approved)
+        if uncovered:
+            raise AdmitError("COMPOSE_V4_PATH_UNCOVERED",
+                             f"the batch's {field} {', '.join(uncovered)} is in no component; admit it first")
+        absent = sorted(approved - set(actual[field]))
+        if absent:
+            raise AdmitError("COMPOSE_V4_COMPONENT_NOT_IN_CANDIDATE",
+                             f"a component's {field} {', '.join(absent)} is not in the batch's profile change")
+
+    entries = {item["path"]: item for document in documents.values() for item in document["include_added"]}
+    digests: dict[str, str] = {}
+    for path, item in sorted(entries.items()):
+        try:
+            current = provenance_ledger.admission_claim(path, records.get(path))
+        except RefreshError as error:
+            raise AdmitError("COMPOSE_V4_CLAIM_MISMATCH", f"{path}: {error}") from error
+        if current != item["claim"]:
+            raise AdmitError(
+                "COMPOSE_V4_CLAIM_MISMATCH",
+                f"{path}: its component records claim {item['claim']}, the trusted ledger now gives {current}; "
+                "a changed claim needs a new admission",
+            )
+        try:
+            digests[path] = hashlib.sha256(_git(repo, "cat-file", "blob", f"{head}:{path}")).hexdigest()
+        except AdmitError:
+            raise AdmitError("POLICY_DELTA_ADDED_PATH_MISSING", f"HEAD does not carry {path}") from None
+        if item["binding"] == "bytes" and item["sha256"] != digests[path]:
+            raise AdmitError(
+                "COMPOSE_V4_BYTES_MISMATCH",
+                f"{path} is bound to sha256 {item['sha256']} and HEAD carries {digests[path]}",
+            )
+
+    union = {
+        "kind": provenance_ledger.POLICY_DELTA_KIND,
+        "schema_version": provenance_ledger.POLICY_DELTA_V4_SCHEMA_VERSION,
+        "include_added": [entries[path] for path in sorted(entries)],
+        **{field: sorted(path for document in documents.values() for path in document[field])
+           for field in _V4_PATH_LISTS[1:]},
+        "rule_changes": sorted((item for document in documents.values() for item in document["rule_changes"]),
+                               key=lambda item: item["key"]),
+    }
+    try:
+        derived = provenance_ledger.derive_policy_delta_v4(
+            baseline_document, candidate_document,
+            digest_of=digests.get,
+            claim_of=lambda path: provenance_ledger.admission_claim(path, records.get(path)),
+            binding_of=lambda path: entries[path]["binding"],
+        )
+        key = provenance_ledger.policy_delta_v4_key(baseline_document, candidate_document)
+    except RefreshError as error:
+        raise AdmitError(error.code, str(error)) from error
+    authority = provenance_ledger.policy_delta_v3_bytes(derived)
+    if provenance_ledger.policy_delta_v3_bytes(union) != authority:
+        raise AdmitError(
+            "COMPOSE_V4_UNION_MISMATCH",
+            "the components' union differs from the delta derived from the two profiles (a rule changed on the "
+            "base since its admission?)",
+        )
+    record = f"{POLICY_DELTAS_V4}/{key}.json"
+    record_paths, private_commit, pushed = _write_authority_commit(
+        authority_root=authority_root,
+        records={record: authority},
+        message=(
+            f"provenance: compose V4 policy delta {key[:8]} from {len(keys)} admitted deltas\n\n"
+            "The union of these admitted V4 deltas, for one landing batch; no new decision:\n"
+            + "".join(f"- {component}\n" for component in keys)
+            + f"\nBase {resolved_base}, candidate profile {hashlib.sha256(candidate_policy).hexdigest()}."
+        ),
+        assisted_by=assisted_by, push=push,
+    )
+    return {
+        "base": resolved_base,
+        "head": head,
+        "key": key,
+        "components": keys,
+        "records": record_paths,
+        "private_commit": private_commit,
+        "pushed": pushed,
+        "authority_root": authority_root,
+        "delta": provenance_ledger._normalized_derived_delta(derived),
+    }
+
+
+def _unmerged_sides(repo: Path, path: str, code: str) -> list[tuple[str, Callable[[], bytes]]] | None:
+    """The merge base, ours and theirs Git left in the index for an unmerged ``path``, or ``None``.
+
+    Each side is (label, reader of its bytes), from index stages 1, 2 and 3, which a merge, a
+    squash merge, a cherry-pick and a rebase all leave for a conflicted file."""
+    listed = _git(repo, "ls-files", "--unmerged", "-z", "--", path).decode("utf-8")
+    stages: dict[str, str] = {}
+    for record in filter(None, listed.split("\0")):
+        meta, _, name = record.partition("\t")
+        fields = meta.split()
+        if name != path or len(fields) != 3 or fields[2] in stages:
+            raise AdmitError(code, f"unexpected unmerged index entry for {path}")
+        stages[fields[2]] = fields[1]
+    if not stages:
+        return None
+    if set(stages) != {"1", "2", "3"}:
+        raise AdmitError(
+            code, f"{path} must be unmerged with a merge base, ours and theirs (index stages 1, 2 and 3)",
+        )
+    return [
+        (f"index stage {stage} ({name})", functools.partial(_git, repo, "cat-file", "blob", stages[stage]))
+        for stage, name in (("1", "merge base"), ("2", "ours"), ("3", "theirs"))
+    ]
+
+
+def _merge_head_sides(repo: Path) -> list[tuple[str, Callable[[], bytes]]] | None:
+    """The profile's merge base, ours and theirs from ``HEAD`` and ``MERGE_HEAD``, or ``None`` with no merge."""
     try:
         head = _text(repo, "rev-parse", "--verify", "HEAD")
         merge_head = _text(repo, "rev-parse", "--verify", "MERGE_HEAD")
-    except AdmitError as error:
-        raise AdmitError("MERGE_PROFILE_NOT_IN_PROGRESS", "--merge-profile requires an active git merge") from error
+    except AdmitError:
+        return None
     try:
         merge_base = _text(repo, "merge-base", head, merge_head)
     except AdmitError as error:
         raise AdmitError("MERGE_PROFILE_INPUT_INVALID", "the merge sides have no merge base") from error
-    side_documents = []
-    for revision in (merge_base, head, merge_head):
+    return [
+        (revision[:12], functools.partial(_git, repo, "show", f"{revision}:{POLICY}"))
+        for revision in (merge_base, head, merge_head)
+    ]
+
+
+def _strict_side_json(raw: bytes, *, code: str, label: str) -> object:
+    """Parse one merge side as the verifier reads a control: UTF-8, JSON, no repeated key."""
+    def reject_duplicates(pairs: list[tuple[str, object]]) -> dict:
+        result: dict = {}
+        for key, value in pairs:
+            if key in result:
+                raise AdmitError(code, f"{label} repeats the key {key!r}")
+            result[key] = value
+        return result
+
+    try:
+        returned: object = json.loads(raw.decode("utf-8"), object_pairs_hook=reject_duplicates)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise AdmitError(code, f"cannot read {label}") from error
+    return returned
+
+
+def _read_sides(sides: list[tuple[str, Callable[[], bytes]]], *, path: str, code: str) -> list[dict]:
+    documents = []
+    for label, read in sides:
         try:
-            document = json.loads(_git(repo, "show", f"{revision}:{POLICY}").decode("utf-8"))
-        except (AdmitError, UnicodeDecodeError, json.JSONDecodeError) as error:
-            raise AdmitError("MERGE_PROFILE_INPUT_INVALID", f"cannot read {POLICY} from merge side {revision[:12]}") from error
+            raw = read()
+        except AdmitError as error:
+            raise AdmitError(code, f"cannot read {path} from merge side {label}") from error
+        document = _strict_side_json(raw, code=code, label=f"{path} from merge side {label}")
         if not isinstance(document, dict):
-            raise AdmitError("MERGE_PROFILE_INPUT_INVALID", f"{POLICY} must be a JSON object on both merge sides")
+            raise AdmitError(code, f"{path} must be a JSON object on every merge side")
+        documents.append(document)
+    return documents
+
+
+def _merged_profile(sides: list[tuple[str, Callable[[], bytes]]]) -> bytes:
+    """The three-way merge of the profile's include and exclude path lists."""
+    side_documents = _read_sides(sides, path=POLICY, code="MERGE_PROFILE_INPUT_INVALID")
+    for document in side_documents:
         for field in ("include_paths", "exclude_paths"):
             if not isinstance(document.get(field), list) or not all(
                 isinstance(path, str) for path in document[field]
             ):
                 raise AdmitError("MERGE_PROFILE_INPUT_INVALID", f"{POLICY} {field} must be a list of strings")
-        side_documents.append(document)
     base, ours, theirs = side_documents
     path_fields = {"include_paths", "exclude_paths"}
     ours_other = {key: value for key, value in ours.items() if key not in path_fields}
@@ -1175,11 +1434,6 @@ def merge_profile(worktree: Path) -> dict:
             "MERGE_PROFILE_NON_PATH_FIELD_CHANGED",
             "merge sides changed a profile field other than include_paths or exclude_paths",
         )
-    current = repo
-    for part in PurePosixPath(POLICY).parts:
-        current /= part
-        if current.is_symlink():
-            raise AdmitError("MERGE_PROFILE_UNSAFE_PATH", f"refusing symlinked profile path component: {current}")
     merged = dict(ours)
     for field in path_fields:
         before, mine, other = set(base[field]), set(ours[field]), set(theirs[field])
@@ -1190,16 +1444,125 @@ def merge_profile(worktree: Path) -> dict:
             "MERGE_PROFILE_PATH_CONFLICT",
             f"the merge would include and exclude the same path: {', '.join(both)}",
         )
-    raw = _canonical_profile_bytes(merged)
-    profile_path = repo.joinpath(*PurePosixPath(POLICY).parts)
-    profile_path.write_bytes(raw)
-    return {
-        "worktree": repo,
-        "profile": profile_path,
-        "profile_sha256": hashlib.sha256(raw).hexdigest(),
-        "include_count": len(merged["include_paths"]),
-        "exclude_count": len(merged["exclude_paths"]),
-    }
+    return _canonical_profile_bytes(merged)
+
+
+def _merged_ledger(sides: list[tuple[str, Callable[[], bytes]]]) -> bytes:
+    """The three-way merge of the claims ledger's entries, one path at a time.
+
+    An entry keeps the merge base's form unless one side changed it (added, edited or dropped
+    it); both sides changing the same entry differently refuses. Every other field must agree
+    on both sides. Each side is read in its claims form (:func:`provenance_ledger.claims_ledger`),
+    and the result is that form, which every refresh writes, in path order."""
+    # A side may still be in the hashed form an older branch committed; its claims are the same.
+    documents = [
+        provenance_ledger.claims_ledger(document)
+        for document in _read_sides(sides, path=LEDGER, code="MERGE_LEDGER_INPUT_INVALID")
+    ]
+    for (label, _read), document in zip(sides, documents, strict=True):
+        if provenance_ledger.validate_ledger(document):
+            raise AdmitError(
+                "MERGE_LEDGER_INPUT_INVALID", f"{LEDGER} on merge side {label} is not a valid claims ledger",
+            )
+    base, ours, theirs = documents
+    if {key: value for key, value in ours.items() if key != "entries"} != {
+        key: value for key, value in theirs.items() if key != "entries"
+    }:
+        raise AdmitError(
+            "MERGE_LEDGER_NON_ENTRY_FIELD_CHANGED", "merge sides changed a ledger field other than its entries",
+        )
+    by_path = [{entry["path"]: entry for entry in document["entries"]} for document in documents]
+    entries, conflicts = [], []
+    for path in sorted(set(by_path[0]) | set(by_path[1]) | set(by_path[2])):
+        before, mine, other = (side.get(path) for side in by_path)
+        if mine == other or other == before:
+            chosen = mine
+        elif mine == before:
+            chosen = other
+        else:
+            conflicts.append(path)
+            continue
+        if chosen is not None:
+            entries.append(chosen)
+    if conflicts:
+        raise AdmitError(
+            "MERGE_LEDGER_ENTRY_CONFLICT",
+            "both merge sides changed the ledger entry differently for: " + ", ".join(conflicts),
+        )
+    merged = dict(ours)
+    merged["entries"] = entries
+    errors = provenance_ledger.validate_ledger(merged)
+    if errors:
+        raise AdmitError("MERGE_LEDGER_INPUT_INVALID", "the merged ledger is not valid: " + "; ".join(errors))
+    returned: bytes = provenance_ledger.claims_ledger_bytes(merged)
+    return returned
+
+
+def _control_target(repo: Path, path: str) -> Path:
+    """Where ``merge_profile`` writes ``path``; refuses a symlinked component."""
+    current = repo
+    for part in PurePosixPath(path).parts:
+        current /= part
+        if current.is_symlink():
+            raise AdmitError("MERGE_PROFILE_UNSAFE_PATH", f"refusing symlinked control path component: {current}")
+    return repo.joinpath(*PurePosixPath(path).parts)
+
+
+def merge_profile(worktree: Path) -> dict:
+    """Resolve a conflict on the generated controls: write and stage the profile, ledger and export.
+
+    - The profile: the three-way merge of both sides' include and exclude path lists. Each
+      list keeps the merge base's paths, adds what either side added and drops what either
+      side removed, so a path one side moved between the lists or dropped is not brought back
+      by the other side's copy of the list.
+    - The ledger, when unmerged: the three-way merge of its entries by path
+      (:func:`_merged_ledger`), so the merge commit already records every path either side
+      admitted and passes the commit-stage publication audit.
+    - The export, when unmerged: the control for the merged profile, which depends on the
+      profile alone.
+
+    The sides come from the index stages Git leaves for an unmerged file (``:1:`` the merge
+    base, ``:2:`` ours, ``:3:`` theirs), so this works the same under ``git merge``,
+    ``git merge --squash``, ``git cherry-pick`` and ``git rebase``. When Git merged the profile
+    cleanly during a real merge, its sides are read from ``HEAD``, ``MERGE_HEAD`` and their
+    merge base instead. The refresh that follows regenerates both controls from the trusted
+    inputs; these merged bytes only have to be consistent until then."""
+    repo = Path(_text(worktree, "rev-parse", "--show-toplevel"))
+    profile_sides = _unmerged_sides(repo, POLICY, "MERGE_PROFILE_INPUT_INVALID") or _merge_head_sides(repo)
+    ledger_sides = _unmerged_sides(repo, LEDGER, "MERGE_LEDGER_INPUT_INVALID")
+    export_unmerged = bool(_git(repo, "ls-files", "--unmerged", "-z", "--", EXPORT))
+    if profile_sides is None and ledger_sides is None and not export_unmerged:
+        raise AdmitError(
+            "MERGE_PROFILE_NOT_IN_PROGRESS",
+            f"--merge-profile needs {POLICY}, {LEDGER} or {EXPORT} unmerged in the index (a merge, squash "
+            "merge, cherry-pick or rebase that conflicts on it) or an active git merge",
+        )
+    # Everything is computed and checked before anything is written, so a refusal leaves the
+    # index exactly as the merge left it.
+    writes: dict[str, bytes] = {}
+    result: dict = {"worktree": repo, "profile": None, "ledger": None, "export": None}
+    if profile_sides is not None:
+        profile_raw = writes[POLICY] = _merged_profile(profile_sides)
+        merged = json.loads(profile_raw)
+        result.update(
+            profile_sha256=hashlib.sha256(profile_raw).hexdigest(),
+            include_count=len(merged["include_paths"]),
+            exclude_count=len(merged["exclude_paths"]),
+        )
+    else:
+        profile_raw = _git(repo, "show", f":{POLICY}")
+    if ledger_sides is not None:
+        writes[LEDGER] = _merged_ledger(ledger_sides)
+        result["ledger_sha256"] = hashlib.sha256(writes[LEDGER]).hexdigest()
+    if export_unmerged:
+        writes[EXPORT] = _control_export(repo, profile_raw)
+    targets = {path: _control_target(repo, path) for path in writes}
+    for path, raw in writes.items():
+        targets[path].write_bytes(raw)
+        _git(repo, "add", "--", path)
+    for path, key in ((POLICY, "profile"), (LEDGER, "ledger"), (EXPORT, "export")):
+        result[key] = targets.get(path)
+    return result
 
 
 def _read_batch_file(path: Path) -> object:
@@ -1210,15 +1573,29 @@ def _read_batch_file(path: Path) -> object:
     return document
 
 
+#: What to do when main moves under an admitted pull request and Git conflicts on its controls.
+CONFLICT_PROCEDURE = (
+    "If main moves and Git conflicts on the profile, ledger or export: merge origin/main; run "
+    "python tools/admit_paths.py --merge-profile <worktree>, which writes and stages the three-way merge of the "
+    "profile and of the ledger's entries, and the export for the merged profile; commit the merge (its ledger "
+    "already records every path either side admitted, so the commit-stage publication audit passes); then run "
+    "the same refresh and commit what it changes. No --rekey and no private push: the V4 delta holds on the new "
+    "base."
+)
+
+
 def remaining_steps(result: dict) -> list[str]:
-    """The exact commands left after ``admit``, in order."""
+    """The exact commands left after ``admit``, in order.
+
+    One refresh on the pull request's own branch: it finds the V4 delta just written beside the
+    trusted ledger, on whatever base the branch has merged, so neither the ``admit/`` branch nor
+    its admission commit is needed."""
     pr = result["pr_worktree"]
     steps = []
     if not result["pushed"]:
         steps.append(f'git -C "{result["authority_root"]}" push origin main')
     steps += [
-        f'git -C "{pr}" merge --no-edit {result["admit_branch"]}',
-        f'cd "{pr}" && python tools/provenance_refresh.py --base {result["admission_commit"]} '
+        f'cd "{pr}" && python tools/provenance_refresh.py '
         f'--trusted-ledger "{result["authority_root"] / TRUSTED_LEDGER}"',
         f'git -C "{pr}" commit -m "provenance: refresh controls after admitting {", ".join(result["paths"])}"',
         f'git -C "{pr}" push',
@@ -1254,10 +1631,15 @@ def main(argv: list[str] | None = None) -> int:
                        help="JSON list of entries admitted before V4; re-issue their V4 deltas from recorded "
                             "admissions")
     modes.add_argument("--merge-profile", type=Path, metavar="WORKTREE",
-                       help="write the three-way merge of the profile paths during an active merge")
+                       help="resolve a conflict on the controls: write and stage the three-way merge of the "
+                            "profile and the ledger, and the export for the merged profile")
     modes.add_argument("--policy-delta", type=Path, metavar="WORKTREE",
                        help="issue the policy delta for a profile change that adds no path "
                             "(removed paths, exclude changes, rule changes)")
+    modes.add_argument("--compose-v4", type=Path, metavar="WORKTREE",
+                       help="write the union of admitted V4 deltas (--components) for the batch at WORKTREE's HEAD")
+    parser.add_argument("--components", nargs="+", metavar="KEY",
+                        help="--compose-v4: the admitted V4 delta names (64 hex) of the batch's pull requests")
     parser.add_argument("--approval-basis", help="the human decision, recorded verbatim (not with --rekey)")
     parser.add_argument(
         "--rekey", action="store_true",
@@ -1289,10 +1671,46 @@ def main(argv: list[str] | None = None) -> int:
             if args.pr_worktree is not None or args.paths:
                 raise AdmitError("ADMIT_ARGUMENT_INVALID", "--merge-profile cannot be combined with admission arguments")
             result = merge_profile(args.merge_profile)
-            print(f"admit paths: wrote canonical merge profile {result['profile']}")
-            print(f"  profile sha256 {result['profile_sha256']}")
-            print("  git add assets/public_source_profile.json")
+            if result["profile"] is not None:
+                print(f"admit paths: wrote and staged the merged profile {result['profile']}")
+                print(f"  profile sha256 {result['profile_sha256']}")
+            if result["ledger"] is not None:
+                print(f"admit paths: wrote and staged the merged ledger {result['ledger']}")
+                print(f"  ledger sha256 {result['ledger_sha256']}")
+            if result["export"] is not None:
+                print(f"admit paths: wrote and staged the export for the merged profile {result['export']}")
+            print("  next: commit the merge, then run the refresh and commit what it changes")
             return 0
+
+        if args.compose_v4 is not None:
+            if args.pr_worktree is not None or args.paths or args.approval_basis or args.rekey or args.slug \
+                    or args.origin_kind or args.origin or args.license or args.origin_json is not None \
+                    or args.binding is not None:
+                raise AdmitError("ADMIT_ARGUMENT_INVALID", "--compose-v4 records no decision; pass only "
+                                 "--base, --components, --private-repo, --assisted-by and --push")
+            if not args.base or not args.components:
+                raise AdmitError("ADMIT_ARGUMENT_INVALID", "--compose-v4 needs --base and --components")
+            if args.private_repo is None:
+                raise AdmitError("AUTHORITY_REQUIRED", "pass --private-repo or set NK_PRIVATE_AUTHORITY")
+            result = compose_policy_delta_v4(
+                worktree=args.compose_v4, base=args.base, components=args.components,
+                private_repo=args.private_repo, assisted_by=args.assisted_by, push=args.push,
+            )
+            print(f"admit paths: composed V4 policy delta {result['key']} from {len(result['components'])} "
+                  f"components on base {result['base']}")
+            for key, values in result["delta"].items():
+                if values:
+                    print(f"  {key}: {', '.join(values)}")
+            print(f"  private records ({'pushed' if result['pushed'] else 'committed locally'} at "
+                  f"{result['private_commit'][:12]}):")
+            for record in result["records"]:
+                print(f"    {record}")
+            if not result["pushed"]:
+                print(f'\nLeft to do: git -C "{result["authority_root"]}" push origin main')
+            return 0
+
+        if args.components:
+            raise AdmitError("ADMIT_ARGUMENT_INVALID", "--components is only for --compose-v4")
 
         if args.policy_delta is not None:
             if args.pr_worktree is not None or args.paths or args.rekey or args.slug or args.origin_kind \
@@ -1346,19 +1764,10 @@ def main(argv: list[str] | None = None) -> int:
                 print(f'  {number}. git -C "{authority_root}" push origin main')
                 number += 1
             for entry in result["entries"]:
-                print(f'  {number}. git -C "{entry["pr_worktree"]}" merge --no-edit {entry["admit_branch"]}')
-                number += 1
-                print(f'  {number}. cd "{entry["pr_worktree"]}" && python tools/provenance_refresh.py '
-                      f'--base {entry["admission_commit"]} --trusted-ledger '
-                      f'"{entry["authority_root"] / TRUSTED_LEDGER}"')
-                number += 1
-                print(f'  {number}. git -C "{entry["pr_worktree"]}" commit -m '
-                      f'"provenance: refresh controls after admitting {", ".join(entry["paths"])}"')
-                number += 1
-                print(f'  {number}. git -C "{entry["pr_worktree"]}" push')
-                number += 1
-            print("During each merge to main, run python tools/admit_paths.py --merge-profile <worktree>, then git add "
-                  "assets/public_source_profile.json.")
+                for step in remaining_steps({**entry, "pushed": True}):
+                    print(f"  {number}. {step}")
+                    number += 1
+            print(CONFLICT_PROCEDURE)
             return 0
 
         if args.pr_worktree is None or not args.paths:
@@ -1387,8 +1796,7 @@ def main(argv: list[str] | None = None) -> int:
     print("\nLeft to do, in order:")
     for number, step in enumerate(remaining_steps(result), 1):
         print(f"  {number}. {step}")
-    print("If the merge conflicts only in the generated ledger, export or profile, take the admission branch's copy "
-          f"(git checkout {result['admit_branch']} -- <file>); the refresh regenerates them.")
+    print(CONFLICT_PROCEDURE)
     return 0
 
 

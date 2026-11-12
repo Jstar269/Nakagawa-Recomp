@@ -82,6 +82,16 @@ CENSUS_GAP_WORDS: tuple[int, ...] = (
 )
 
 
+# The probe words of the vfpu-wide-dot-matrix read (PSP-VFPU-WIDEDOT-001), by the name check_vfpu_wide_dot_measured() looks up.
+WIDE_DOT_WORDS: tuple[tuple[str, int], ...] = (
+    ("vdot-p", 0x64810088), ("vdot-q", 0x64818088), ("vhdp-q", 0x66018088),
+    ("vcrsp-t", 0xF2818008), ("vqmul-q", 0xF2818088), ("vtfm-q", 0xF1808488),
+    ("vhtfm-q", 0xF1808408), ("vmmul-q", 0xF0008488), ("vmmul-qt", 0xF000A488),
+    ("vmzero-q", 0xF3868088), ("vmidt-q", 0xF3838088),
+    ("vmone-q", 0xF3878088), ("vmmov-q", 0xF3808488), ("vrot-q", 0xF3A48088),
+)
+
+
 def census_gap_size(word: int) -> int:
     """Vector size 1..4 from bit 7 (low) and bit 15 (high)."""
     return ((word >> 7) & 1 | ((word >> 15) & 1) << 1) + 1
@@ -121,6 +131,20 @@ def build_cases() -> tuple[list[tuple[int, str, int]], int, tuple[int, int]]:
     # PSP-3000 returned.
     cases.append((_vv2_word(28, 1, 0x40, 0x00), "vrexp2-s-measured", 1))
 
+    # vcmp.q C000 against C010, all 16 conditions (PSP-VFPU-CCCMOV-001, probe case vfpu-cc-cmov, PSP-3000,
+    # 2026-11-08, issue #326):
+    # check_vcmp_denormal_operands() finds them by name and pins both lanes to the CC the
+    # PSP read back for the signed-zero and denormal operand set.
+    for cond in range(16):
+        cases.append((_bin_word(0x1B, 0, 4, cond, 0x00, 0x01), f"vcmp-q-c{cond:02d}-measured", 4))
+
+    # vus2i / vs2i .s and .p (PSP-VFPU-VUS2I-001, issue #326, probe case vfpu-vus2i, PSP-3000, 2026-11-08):
+    # check_vus2i_vs2i_measured_words() finds them by name and pins both lanes to the words
+    # the PSP returned for twelve source words.
+    for name, word in (("vus2i-s-measured", 0xD03A0008), ("vus2i-p-measured", 0xD03A0088),
+                       ("vs2i-s-measured", 0xD03B0008), ("vs2i-p-measured", 0xD03B0088)):
+        cases.append((word, name, 1 if name.endswith("-s-measured") else 2))
+
     # vrndi.s (issue #326): the PSP-HLE-ISSUES-001 probe word vrndi.s S000, and the same draw
     # into S323 (vd=0x6E) so the destination decode is exercised off lane 0.
     # check_vrndi_rule_cells() finds them by name and steps both lanes from the probe's states.
@@ -143,6 +167,12 @@ def build_cases() -> tuple[list[tuple[int, str, int]], int, tuple[int, int]]:
     cases.append((0xD0220000, "rndf1-s-forms", 1))
     cases.append((0xD0230000, "rndf2-s-forms", 1))
 
+    # vf2in/vf2iz/vf2iu/vf2id.s at scale 0 (PSP-VFPU-CONVERT-001, probe case vfpu-convert, PSP-3000,
+    # 2026-11-08): check_vf2i_measured_cells() finds them by name and runs the measured denormal and
+    # NaN cells through both lanes. Physical source v[0], destination v[4].
+    for mode, name in enumerate(("vf2in", "vf2iz", "vf2iu", "vf2id")):
+        cases.append((0xD2000001 | (mode << 21), f"{name}-s-measured", 1))
+
     # vmscl.t (op 0x3C sub 4 size 3): scalar inside destination matrix
     cases.append((_bin_word(0x3C, 4, 3, 0x20, 0x20, 0x00), "vmscl-t-scalar-in-dest", 2))
 
@@ -164,6 +194,34 @@ def build_cases() -> tuple[list[tuple[int, str, int]], int, tuple[int, int]]:
         for size, suffix in ((1, "s"), (2, "p"), (3, "t"), (4, "q")):
             cases.append((_bin_word(0x1B, sub, size, 0x00, 0x04, 0x08), f"{op}-{suffix}", size))
     cmp_range = (cmp_first, len(cases) - cmp_first)
+
+    # vadd/vsub/vmul/vdiv/vscl/vmin/vmax at .s and .q (PSP-VFPU-BASICARITH-001, issue #326, probe case
+    # vfpu-basic-arith, PSP-3000, 2026-11-08): check_vfpu_basic_arith_measured() finds them by name and runs the
+    # 20 x 20 operand grid through both lanes. Destination matrix 0, sources matrices 1 and 2.
+    for opname, op6, sub in (("vadd", 0x18, 0), ("vsub", 0x18, 1), ("vmul", 0x19, 0),
+                             ("vdiv", 0x18, 7), ("vscl", 0x19, 2), ("vmin", 0x1B, 2),
+                             ("vmax", 0x1B, 3)):
+        for size, suffix in ((1, "s"), (4, "q")):
+            cases.append((_bin_word(op6, sub, size, 0x00, 0x04, 0x08), f"arith-{opname}-{suffix}", size))
+
+    # vmscl.q at its probe registers (PSP-VFPU-WIDEDOT-001 and vfpu-round-sep, issue #326, PSP-3000):
+    # check_vmscl_measured() finds it by name. A vmscl lane is a vmul lane.
+    cases.append((0xF2018488, "arith-vmscl-q", 4))
+
+    # vmov/vabs/vneg/vidt/vzero/vone at .s, .p and .q, same probe: bitwise copies and the constant
+    # fills, which write only the lanes of the width. Destination matrix 0, source matrix 1.
+    for opname, optype in (("vmov", 0), ("vabs", 1), ("vneg", 2), ("vidt", 3), ("vzero", 6),
+                           ("vone", 7)):
+        for size, suffix in ((1, "s"), (2, "p"), (4, "q")):
+            cases.append((_vv2_word(optype, size, 0x00, 0x04), f"arith-{opname}-{suffix}", size))
+
+    # Dot, cross, quaternion and matrix forms (PSP-VFPU-WIDEDOT-001, issue #326, probe case
+    # vfpu-wide-dot-matrix, PSP-3000, 2026-11-08): check_vfpu_wide_dot_measured() finds each
+    # word by name and runs the console's cells through both lanes. The registers are the
+    # probe's: vectors at columns 0 and 1 of matrix 0, the matrix operand at matrix 1, the
+    # destination at matrix 2.
+    for name, word in WIDE_DOT_WORDS:
+        cases.append((word, f"wide-{name}", census_gap_size(word)))
 
     # Census-gap forms (issue #326): supported VFPU3 compare/min/max and VFPU6 matrix forms
     # that the synthetic fuzz corpus (minimal registers) does not reach. Each is one
@@ -302,7 +360,7 @@ def sweep_words() -> frozenset[int]:
 # the difference, so check_alias_edge_sweep() requires exactly those to mismatch.
 _MUTANT_HEAD = "{ float _s[4],_t[4],_d[4]; "
 _MUTANT_TAIL = "s->vfpuCtrl[0]=0xe4u;"
-_MUTANT_MARK = "_d[_i]=sr_vf_add(_s[_i],_t[_i]);"
+_MUTANT_MARK = "_d[_i]=sr_vfpu_add(_s[_i],_t[_i]);"
 
 
 def mutant_body(body: str) -> str | None:

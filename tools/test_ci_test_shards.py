@@ -177,10 +177,31 @@ class LiveRepositoryPlanTests(unittest.TestCase):
         bound = sum(plan.loads) / self.num_shards + max(cost(name) for name in self.modules)
         self.assertLessEqual(max(plan.loads), bound + 1e-6)
 
+    def test_each_shard_count_is_the_fewest_at_which_the_heaviest_module_sets_the_job(self) -> None:
+        """A shard cannot finish before its heaviest module, so the classifier's counts
+        are the fewest shards whose slowest shard is within 5% of that module's weight:
+        one shard fewer must leave a slower shard, and more would only add runners."""
+
+        def slowest(modules: list[str], num_shards: int) -> float:
+            loads: tuple[float, ...] = ci_test_shards.plan_shards(modules, self.data, num_shards).loads
+            return max(loads)
+
+        for select, modules, count in (
+            ("all", self.modules, ci_paths.PYTHON_SHARDS_FULL),
+            ("makefile", ci_test_shards.makefile_coupled_modules(self.modules), ci_paths.PYTHON_SHARDS_MAKEFILE),
+        ):
+            with self.subTest(select=select):
+                floor = max(cast(float, self.data.weights.get(name, self.data.default_seconds)) for name in modules)
+                self.assertLessEqual(slowest(modules, count), floor * 1.05,
+                                     f"{count} shards leave the slowest shard well above its heaviest module")
+                self.assertGreater(slowest(modules, count - 1), floor * 1.05,
+                                   f"{count - 1} shards already reach the heaviest module; {count} wastes a runner")
+        self.assertEqual(ci_test_shards.DEFAULT_NUM_SHARDS, ci_paths.PYTHON_SHARDS_FULL)
+
     def test_workflow_takes_its_shards_from_the_classifier_and_fails_closed(self) -> None:
         self.assertNotIn("(NR-1)%4", self.python_job, "the alphabetical round-robin must be gone")
         self.assertIn(
-            "shard: ${{ fromJSON(needs.classify.outputs.python_shards || '[0, 1, 2, 3, 4, 5]') }}", self.python_job
+            "shard: ${{ fromJSON(needs.classify.outputs.python_shards || '[0, 1, 2, 3]') }}", self.python_job
         )
         fallback = re.search(r"python_shards \|\| '(\[[^']*\])'", self.python_job)
         self.assertIsNotNone(fallback)

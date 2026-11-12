@@ -1,6 +1,6 @@
 # PROVENANCE.md — `src/rt/h264_ffmpeg_sub/`
 
-Portable H.264 video decoder for the Nakagawa recomp runtime (PSMF movies on Linux, later
+Portable H.264 video decoder for the Nakagawa recomp runtime (PSMF movies on Linux and
 Android; Windows keeps Media Foundation). The decoder is FFmpeg's libavcodec H.264 decoder,
 imported byte-exact together with the libavcodec/libavutil framework files it needs, built
 from generic C only. A thin C API written for this project (`nk_h264_api.h`) wraps it.

@@ -65,9 +65,16 @@ typedef struct {
     int stride;
     SrH264PixelFormat native_format;
     SrH264PixelFormat delivered_format;
-    /* Optional backend-reported output-frame PTS in normalized 90 kHz units. This describes
-     * decoded-frame timing, not proof that the source access unit carried a PTS; consumers that
-     * need source provenance must retain the producer's AU metadata. */
+    /* The time of the access unit this picture was decoded from (its SrH264AccessUnit.pts, 90
+     * kHz), carried through the decoder's reordering.  A backend that can return pictures out of
+     * submit order must report it (has_pts = 1) whenever it can name the picture's unit, because
+     * the consumer otherwise knows only submit order.  FFmpeg reports the packet time it carried.
+     * Media Foundation reports a time only when the output sample time matches a remembered unit
+     * that had a time and every other pending unit with that sample time carries the same time;
+     * an ambiguous, evicted or unmatched sample time reports none.  has_pts = 0 (pts = -1) means the backend cannot name the picture's unit, and the
+     * consumer falls back to its own submit-order bookkeeping.  The time may be one the player
+     * extrapolated, so it is not proof that the source packet carried a PTS; consumers that need
+     * source provenance must retain the producer's AU metadata. */
     int64_t pts;
     int has_pts;
 } SrH264FrameInfo;
@@ -85,8 +92,9 @@ typedef struct {
     /* One complete H.264 access unit in Annex-B form, beginning with a 3- or 4-byte start code. */
     const uint8_t *data;
     uint32_t size;
-    int64_t pts;       /* optional source PTS normalized by the host-neutral producer to 90 kHz */
-    int has_pts;       /* exactly 0 or 1; zero means the AU's presentation time is unknown */
+    int64_t pts;       /* 90 kHz time of the unit: a source PTS the producer normalized, or a
+                        * time the player extrapolated for a unit whose packet carried none */
+    int has_pts;       /* exactly 0 or 1; zero means the unit has no time at all */
 } SrH264AccessUnit;
 
 typedef struct SrH264Backend {
@@ -102,6 +110,8 @@ typedef struct SrH264Backend {
 } SrH264Backend;
 
 int sr_h264_select_backend(const char *name);
+/* Test seam: select a backend object directly (NULL = automatic).  Production never calls it. */
+int sr_h264_select_backend_object(const SrH264Backend *backend);
 const char *sr_h264_selected_backend(void);
 int sr_h264_backend_available(void);
 const char *sr_h264_backend_unavailable_reason(void);

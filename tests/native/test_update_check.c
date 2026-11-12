@@ -31,6 +31,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(_WIN32) || defined(_WIN64)
+#include <windows.h>
+#else
+#include <unistd.h>
+#endif
 
 #define RECORDED_ZIP_SHA256 "032afce5b9b4713e6c4fa065c299f72ab732f59967624cffc25484f83516ab9f"
 /* The v0.0.1 ZIP's published .sha256 asset, byte for byte. */
@@ -332,6 +337,28 @@ static void test_synthetic_release_lists(void) {
     /* A release with no Windows ZIP is still the newest release. */
     assert(parse("[{\"tag_name\":\"v1.0.0\",\"html_url\":\"" PAGE "v1.0.0\"}]", &release, &error));
     assert(!release.has_zip && strcmp(release.version, "1.0.0") == 0);
+    /* GitHub answers with the repository's current capitalisation (Jstar269/Nakagawa-Recomp
+       since its rename). Owner and repository names are case-insensitive; the rest of a
+       URL is not. */
+#define PAGE_CASED "https://github.com/Jstar269/Nakagawa-Recomp/releases/tag/"
+#define DOWNLOAD_CASED "https://github.com/Jstar269/Nakagawa-Recomp/releases/download/"
+    assert(parse("[{\"tag_name\":\"v1.0.0\",\"html_url\":\"" PAGE_CASED "v1.0.0\",\"assets\":"
+                 "[{\"name\":\"nakagawa-recomp-1.0.0-windows-x64.zip\",\"state\":\"uploaded\","
+                 "\"size\":10,\"browser_download_url\":\"" DOWNLOAD_CASED
+                 "v1.0.0/nakagawa-recomp-1.0.0-windows-x64.zip\"}]}]", &release, &error));
+    assert(release.has_zip && strcmp(release.page_url, PAGE_CASED "v1.0.0") == 0);
+    assert(nk_update_is_release_page(release.page_url));
+    assert(nk_update_is_release_page(PAGE "v0.0.1"));
+    /* A look-alike repository, a different owner or a changed path stays outside. */
+    assert(!parse("[{\"tag_name\":\"v1.0.0\",\"html_url\":\"https://github.com/Jstar269/"
+                  "Nakagawa-Recomp-fork/releases/tag/v1.0.0\"}]", &release, &error));
+    assert(!parse("[{\"tag_name\":\"v1.0.0\",\"html_url\":\"https://github.com/Jstar269/"
+                  "Nakagawa-Recomp/Releases/tag/v1.0.0\"}]", &release, &error));
+    assert(!nk_update_is_release_page("https://github.com/Jstar269/Nakagawa-Recomp-fork/"
+                                      "releases/tag/v1.0.0"));
+    assert(!nk_update_is_release_page("https://github.com/other/nakagawa-recomp/releases/tag/v1"));
+    assert(!nk_update_is_release_page("https://github.com/Jstar269/Nakagawa-Recomp"));
+    assert(!nk_update_is_release_page(NULL));
     /* Pages and files outside this repository fail closed. */
     assert(!parse("[{\"tag_name\":\"v1.0.0\",\"html_url\":\"https://github.com/other/"
                   "nakagawa-recomp/releases/tag/v1.0.0\"}]", &release, &error));
@@ -838,6 +865,20 @@ static void write_file(const char *path) {
     fclose(file);
 }
 
+/* A directory link at link to target: a junction on Windows (no privilege needed), a
+   symlink elsewhere. False when the host will not make one; the caller says SKIP. */
+static bool make_dir_link(const char *link, const char *target) {
+#if defined(_WIN32) || defined(_WIN64)
+    char cmd[2 * NATIVE_TEST_PATH_MAX + 64];
+    snprintf(cmd, sizeof(cmd), "cmd /c mklink /J \"%s\" \"%s\" >nul 2>&1", link, target);
+    if (system(cmd) != 0) return false;
+    DWORD attributes = GetFileAttributesA(link);
+    return attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+#else
+    return symlink(target, link) == 0;
+#endif
+}
+
 static void test_install_folder(void) {
     char sep = nk_platform_path_separator();
     char games[NATIVE_TEST_PATH_MAX + 8];
@@ -878,6 +919,37 @@ static void test_install_folder(void) {
     assert(!nk_update_install_folder(bin, downloads, "../x.zip", out, sizeof(out)));
     assert(!nk_update_install_folder(bin, downloads, ".zip", out, sizeof(out)));
 
+    /* A copy the Windows installer put in place has Inno's uninstaller beside bin: it
+       updates through the next Setup.exe, not a ZIP. A ZIP copy never does. */
+    {
+        char uninstaller[NATIVE_TEST_PATH_MAX + 72];
+        char other[NATIVE_TEST_PATH_MAX + 80];
+        snprintf(uninstaller, sizeof(uninstaller), "%s%cunins000.exe", install, sep);
+        assert(!nk_update_installed_by_setup(bin));
+        write_file(uninstaller);
+        assert(nk_update_installed_by_setup(bin));            /* without a trailing separator */
+        snprintf(other, sizeof(other), "%s%c", bin, sep);
+        assert(nk_update_installed_by_setup(other));
+        assert(!nk_update_installed_by_setup(install));       /* not the bin folder */
+        assert(!nk_update_installed_by_setup(NULL));
+        assert(!nk_update_installed_by_setup(""));
+        assert(!nk_update_installed_by_setup("bin"));
+        snprintf(other, sizeof(other), "%s%cnotbin", install, sep);
+        assert(!nk_update_installed_by_setup(other));
+        /* The player's download and install steps refuse such a copy with a named error, and a
+           check (which writes nothing) is not asked. */
+        {
+            NkUpdateError refused;
+            memset(&refused, 'x', sizeof(refused));
+            assert(nk_update_refuse_for_setup_copy(bin, &refused));
+            assert(strcmp(refused.code, "UPDATE_INSTALLED_BY_SETUP") == 0);
+            assert(strstr(refused.message, "Setup") != NULL);
+            assert(!nk_update_refuse_for_setup_copy(install, &refused));  /* not the bin folder */
+            assert(refused.code[0] == '\0');
+            assert(!nk_update_refuse_for_setup_copy(NULL, &refused));
+        }
+    }
+
     {
         NkUpdateError error;
         char log_path[NATIVE_TEST_PATH_MAX + 16];
@@ -898,6 +970,155 @@ static void test_install_folder(void) {
     printf("[UPDATE_CHECK_TEST] install folder: PASS\n");
 }
 
+/* An install interrupted mid-unpack leaves "<target>.partial" behind; the next try must
+   work without the person deleting it, and must never remove a folder Nakagawa did not
+   make (#324). */
+static void test_interrupted_install_staging(void) {
+    char sep = nk_platform_path_separator();
+    char staging[NATIVE_TEST_PATH_MAX + 48];
+    char mark[NATIVE_TEST_PATH_MAX + 80];
+    char half[NATIVE_TEST_PATH_MAX + 96];
+    char theirs[NATIVE_TEST_PATH_MAX + 96];
+    NkUpdateError error;
+    snprintf(staging, sizeof(staging), "%s%cnakagawa-recomp-0.0.3-windows-x64.partial",
+             native_test_get_root(), sep);
+    snprintf(mark, sizeof(mark), "%s%c%s", staging, sep, NK_UPDATE_STAGING_MARK);
+    snprintf(half, sizeof(half), "%s%cbin%cSDL3.dll", staging, sep, sep);
+    snprintf(theirs, sizeof(theirs), "%s%cnotes.txt", staging, sep);
+
+    /* A fresh claim makes the folder and marks it. */
+    memset(&error, 'x', sizeof(error));
+    assert(nk_update_claim_staging(staging, &error));
+    assert(error.code[0] == '\0');
+    assert(nk_platform_file_exists(mark));
+
+    /* The unpack stopped half way: the next claim clears the folder and marks it again. */
+    {
+        char bin[NATIVE_TEST_PATH_MAX + 56];
+        snprintf(bin, sizeof(bin), "%s%cbin", staging, sep);
+        assert(nk_platform_mkdir_p(bin));
+        write_file(half);
+    }
+    assert(nk_update_claim_staging(staging, &error));
+    assert(!nk_platform_file_exists(half));
+    assert(nk_platform_file_exists(mark));
+
+#if defined(_WIN32) || defined(_WIN64)
+    /* A file in the leftover is held open (a window or a scanner has it): the claim is
+       refused as in use, and the mark stays, so the next try still knows the folder as
+       Nakagawa's own and removes it. */
+    {
+        FILE *held;
+        write_file(theirs);
+        held = fopen(theirs, "rb");
+        assert(held != NULL);
+        assert(!nk_update_claim_staging(staging, &error));
+        assert(strcmp(error.code, "UPDATE_INSTALL_LEFTOVER_IN_USE") == 0);
+        assert(nk_platform_file_exists(mark));
+        fclose(held);
+        assert(nk_update_claim_staging(staging, &error));
+        assert(!nk_platform_file_exists(theirs));
+        assert(nk_platform_file_exists(mark));
+    }
+
+    /* A window open on the leftover folder itself: every file goes but the folder does
+       not. The claim is refused as in use, and the folder is marked again, so the next
+       try still removes it rather than calling it someone else's. */
+    {
+        HANDLE held;
+        write_file(theirs);
+        held = CreateFileA(staging, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                           OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+        assert(held != INVALID_HANDLE_VALUE);
+        assert(!nk_update_claim_staging(staging, &error));
+        assert(strcmp(error.code, "UPDATE_INSTALL_LEFTOVER_IN_USE") == 0);
+        assert(!nk_platform_file_exists(theirs));
+        assert(nk_platform_file_exists(mark));
+        CloseHandle(held);
+        assert(nk_update_claim_staging(staging, &error));
+        assert(nk_platform_file_exists(mark));
+    }
+#endif
+
+    /* Links never lead the removal out of the leftover: a link inside it, and the staging
+       path itself as a link, go as themselves and their targets keep their files. */
+    {
+        char outside[NATIVE_TEST_PATH_MAX + 48];
+        char outside_file[NATIVE_TEST_PATH_MAX + 64];
+        char outside_mark[NATIVE_TEST_PATH_MAX + 80];
+        char inner_link[NATIVE_TEST_PATH_MAX + 64];
+        snprintf(outside, sizeof(outside), "%s%cnot-the-update", native_test_get_root(), sep);
+        snprintf(outside_file, sizeof(outside_file), "%s%ckeep.txt", outside, sep);
+        snprintf(outside_mark, sizeof(outside_mark), "%s%c%s", outside, sep, NK_UPDATE_STAGING_MARK);
+        snprintf(inner_link, sizeof(inner_link), "%s%clinked", staging, sep);
+        assert(nk_platform_mkdir_p(outside));
+        write_file(outside_file);
+        /* The leftover is marked (the claim above made it). */
+        if (!make_dir_link(inner_link, outside)) {
+            printf("[UPDATE_CHECK_TEST] SKIP links: this host would not make a directory link\n");
+        } else {
+            assert(nk_update_claim_staging(staging, &error));
+            assert(nk_platform_path_missing(inner_link));
+            assert(nk_platform_file_exists(outside_file));
+            assert(nk_platform_file_exists(mark));
+
+            /* The staging path itself a link to a folder that holds a mark and a file. */
+            assert(nk_platform_remove_tree(staging, NULL));
+            write_file(outside_mark);
+            assert(make_dir_link(staging, outside));
+            assert(nk_update_claim_staging(staging, &error));
+            assert(nk_platform_file_exists(outside_file));
+            assert(nk_platform_file_exists(outside_mark));
+            assert(nk_platform_file_exists(mark));
+#if defined(_WIN32) || defined(_WIN64)
+            assert((GetFileAttributesA(staging) & FILE_ATTRIBUTE_REPARSE_POINT) == 0);
+#endif
+        }
+        assert(nk_platform_remove_tree(outside, NULL));
+    }
+
+    /* A folder of that name without the mark is not Nakagawa's: refused, left as it is. */
+    assert(nk_platform_remove_tree(staging, NULL));
+    assert(nk_platform_mkdir_p(staging));
+    write_file(theirs);
+    assert(!nk_update_claim_staging(staging, &error));
+    assert(strcmp(error.code, "UPDATE_INSTALL_LEFTOVER") == 0);
+    assert(strstr(error.message, "Delete it") != NULL);
+    assert(nk_platform_file_exists(theirs));
+    assert(!nk_platform_file_exists(mark));
+    assert(nk_platform_remove_tree(staging, NULL));
+
+    /* No folder, no path. */
+    assert(!nk_update_claim_staging(NULL, &error));
+    assert(strcmp(error.code, "UPDATE_INSTALL_PATH") == 0);
+    assert(!nk_update_claim_staging("", &error));
+
+#if defined(_WIN32) || defined(_WIN64)
+    /* Through the install itself: a marked leftover beside a new target no longer stops
+       it; the unpack of a missing ZIP fails next, and removes the staging folder. */
+    {
+        char target[NATIVE_TEST_PATH_MAX + 40];
+        char log_path[NATIVE_TEST_PATH_MAX + 24];
+        snprintf(target, sizeof(target), "%s%cnakagawa-recomp-0.0.3-windows-x64",
+                 native_test_get_root(), sep);
+        snprintf(log_path, sizeof(log_path), "%s%cinstall-retry.log", native_test_get_root(), sep);
+        assert(nk_update_claim_staging(staging, &error));
+        assert(!nk_update_install("missing.zip", target, log_path, &error));
+        assert(strcmp(error.code, "UPDATE_UNPACK_FAILED") == 0);
+        assert(nk_platform_path_missing(staging));
+        assert(nk_platform_path_missing(target));
+        /* An unmarked folder still stops it, untouched. */
+        assert(nk_platform_mkdir_p(staging));
+        write_file(theirs);
+        assert(!nk_update_install("missing.zip", target, log_path, &error));
+        assert(strcmp(error.code, "UPDATE_INSTALL_LEFTOVER") == 0);
+        assert(nk_platform_file_exists(theirs));
+        assert(nk_platform_remove_tree(staging, NULL));
+    }
+#endif
+    printf("[UPDATE_CHECK_TEST] interrupted install staging: PASS\n");
+}
+
 int main(void) {
     native_test_create_root("update-check");
     native_test_isolate_user_data_roots();
@@ -910,6 +1131,7 @@ int main(void) {
     test_check_failures();
     test_download();
     test_install_folder();
+    test_interrupted_install_staging();
     printf("[UPDATE_CHECK_TEST] all: PASS\n");
     return 0;
 }

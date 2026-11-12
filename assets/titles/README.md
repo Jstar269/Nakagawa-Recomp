@@ -116,9 +116,8 @@ Titles that omit the key are unaffected.
 - `showcase-scene.json` (TEST00007) and `showcase-breakout.json` (TEST00008) are
   the source-owned showcase demos: a lit, textured 3D scene and Breakout, built
   from `fixtures/showcase/` with PSPDEV and packaged by `fixtures/showcase/showcase.py`
-  (see [`docs/SHOWCASE.md`](../../docs/SHOWCASE.md)). Their acceptance profiles stay
-  `scaffold` until their public evidence matrix is complete; no open issue tracks
-  that yet. Publication-safe and deterministic.
+  (see [`docs/SHOWCASE.md`](../../docs/SHOWCASE.md)). Their acceptance profiles are
+  `scaffold`: no public evidence matrix exists for them. Publication-safe and deterministic.
 
 The analyzer applies **no** title-specific executable span by default: a raw
 base-zero image never silently inherits another title's span. An extra executable
@@ -153,6 +152,50 @@ around it), `fuzzy` (changed code, 0.75 similarity or more and clearly ahead of 
 `CHECK BY HAND`. An alias pair with an unresolved end is dropped whole, and the exit status
 is non-zero while anything is left out. The analysis inputs and the report come from a title: keep
 them private.
+
+## Recording executable builds
+
+A disc ID names a release, not an executable: a reprint, a budget re-release or a patched copy can
+carry a different `EBOOT.BIN` under the same ID, and a title's `runtime_bindings` are addresses
+inside one exact executable. A retail manifest may therefore list the builds it knows in
+`disc.builds`, each named by the SHA-256 of the executable file exactly as the disc image holds it
+(an encrypted executable stays encrypted, so no key is involved). Like a redump checksum, a digest
+names a build and is not game data.
+
+```json
+"builds": [
+  {"executable_sha256": "<64 lowercase hex digits>", "status": "supported", "label": "DISC_VERSION 1.00"},
+  {"executable_sha256": "<64 lowercase hex digits>", "status": "known-bad", "label": "patched copy",
+   "reason": "Why this build is refused."}
+]
+```
+
+`status` is `supported`, `experimental` or `known-bad`; a `known-bad` entry needs a `reason`. `label`
+and `reason` are printable ASCII. At most 16 builds, no duplicate digest. Both the Python and the C
+parser check the list. When a user imports a disc, `tools/nk_core/prep_engine.py` hashes the
+executable locally and writes the result to `build.json` in the title's private folder:
+
+| Import finds | Result |
+| :--- | :--- |
+| a `supported` or `experimental` digest | the build and its status are recorded |
+| a `known-bad` digest | the import is refused (`BUILD_KNOWN_BAD`) with the reason |
+| a digest not in a non-empty list | recorded as `unlisted`: experimental, and runtime bindings are stripped at package build time (`build-package` via `tools/nk_cli.py` `_apply_executable_build`) |
+| a title with no `builds` list | recorded as `untracked`: neither confirmed nor questioned |
+
+The same check runs where the build happens and where the user looks:
+
+- `build-package` (and the player's BUILD PACKAGE) hashes the disc's executable again. A `known-bad`
+  build stops the build with its reason. An unlisted build is built without the manifest's
+  `runtime_bindings` and `required_runtime_bindings` (`tools/nk_cli.py` `_apply_executable_build`),
+  with a warning that names the supported
+  builds, so another build's addresses are never applied.
+- The game card gets a "Program version" row for a title that lists builds (`GAME_BUILD`, from
+  `nk_title_manifest_identify_build`): Ready with the build's label, "Not recorded" for an unlisted
+  build, and "Can't use" (it blocks Play) for a known-bad one. A title that lists no builds gets no row.
+
+For an unlisted build, `tools/binding_carry.py` (above) can propose bindings for review; once they
+are reviewed, the build becomes a new entry. Adding the entry for a title the maintainer owns is a
+private step.
 
 ## Qualification
 

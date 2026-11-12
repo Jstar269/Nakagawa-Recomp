@@ -251,6 +251,11 @@ void sr_heap_note_bulk_write(uint32_t a, uint32_t w, uint32_t p)
     { (void)a; (void)w; (void)p; }
 uint32_t sched_current_uid(void) { return 0; }
 uint32_t sr_get_ge_status(void) { return 0; }
+/* src/rt/sched.c supplies the preemption timer's flag, its edge inside a long call and the
+ * driver's stop check (#1296); no thread is ever due in these cases. */
+atomic_int_least32_t sr_preempt_due;
+int (*sr_sched_stop_requested)(void);
+void sched_preempt_point(void) {}
 /* src/rt/hle.c supplies the host Memory Stick free space; these cases do not size it. */
 int sr_hle_memstick_free_bytes(uint64_t *free_bytes) { *free_bytes = 0; return 0; }
 /* src/rt/hle.c supplies the guest clock and the console time zone for save times. */
@@ -554,8 +559,10 @@ def _build(tmp, savedata_override=None):
     exe = os.path.join(tmp, "sfo_selftest.exe")
     rt = str(ROOT / "src" / "rt")
     build = subprocess.run(
-        [CC, "-std=c11", "-O1"] + _POSIX_PROFILE + ["-I", tmp, "-I", rt, "-o", exe, harness,
-         os.path.join(rt, "debug.c"), os.path.join(rt, "watchpoints_file.c")],
+        [CC, "-std=c11", "-O1"] + _POSIX_PROFILE + [
+            "-I", tmp, "-I", rt, "-I", str(ROOT / "src" / "core"),
+            "-o", exe, harness, str(ROOT / "src" / "core" / "nk_shared_helpers.c"),
+            os.path.join(rt, "debug.c"), os.path.join(rt, "watchpoints_file.c")],
         capture_output=True, text=True,
     )
     if build.returncode != 0:

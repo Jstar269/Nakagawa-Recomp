@@ -36,6 +36,7 @@ COSIM_FP_CONVERT_PRELUDE ?=
 COSIM_FP_CONVERT_PRELUDE_FLAG = $(if $(strip $(COSIM_FP_CONVERT_PRELUDE)),-include "$(COSIM_FP_CONVERT_PRELUDE)",)
 COSIM_FPU_REFERENCE_SRC ?= fixtures/cosim/fpu_reference.c
 COSIM_CODEGEN_ARGS ?= --stack-census
+COSIM_LDFLAGS ?= $(filter -fuse-ld=lld,$(LDFLAGS))
 
 # The loader and codegen rules are named directly rather than through `pipeline`.
 # This guest deliberately imports nothing, and tools/imports.py fails closed on an
@@ -104,11 +105,15 @@ cosim-selftest-promoted:
 # the comparison links with neither SDL3 nor Vulkan. Keeping it that way is
 # deliberate -- this gate should stay runnable anywhere the toolchain is,
 # not inherit the graphics stack's environment requirements.
+# The object list goes through a response file: with one function per chunk it holds
+# over a hundred paths, and a long lane directory pushed the link line past the Windows
+# command-line limit, which truncated it mid-path ("cannot find build/cosim-l", #2227).
 cosim-selftest-run: $(GENERIC_TITLE_CONFIG_HEADER) $(CHUNK_OBJS) $(LIBRARY_OBJS) $(BUILD_DIR)/$(GAME_NAME)_recomp.o
-	$(CC) $(CFLAGS) $(COSIM_FP_CONVERT_PRELUDE_FLAG) -DSR_INSTRUCTION_TRACE \
+	$(file >$(BUILD_DIR)/cosim_link_objs.rsp,$(CHUNK_OBJS) $(LIBRARY_OBJS) $(BUILD_DIR)/$(GAME_NAME)_recomp.o)
+	$(CC) $(CFLAGS) $(COSIM_LDFLAGS) $(COSIM_FP_CONVERT_PRELUDE_FLAG) -DSR_INSTRUCTION_TRACE \
 		-I$(GENERIC_TITLE_CONFIG_DIR) -I$(BUILD_DIR) -I$(COSIM_FIXTURE) \
 		-o $(BUILD_DIR)/cosim_selftest.exe \
-		$(COSIM_HARNESS) $(COSIM_FPU_REFERENCE_SRC) $(CHUNK_OBJS) $(LIBRARY_OBJS) $(BUILD_DIR)/$(GAME_NAME)_recomp.o \
+		$(COSIM_HARNESS) $(COSIM_FPU_REFERENCE_SRC) @$(BUILD_DIR)/cosim_link_objs.rsp \
 		$(COSIM_INTERP_SRC) src/rt/sr_coro.c src/rt/flight_recorder.c src/rt/cpu_lle.c src/rt/domain_mode.c src/rt/stale_code.c src/rt/title_config.c src/rt/vfpu_tables.c src/rt/perf.c -lm
 	$(BUILD_DIR)/cosim_selftest.exe $(BUILD_DIR)/$(GAME_NAME)_image.bin \
 		$(COSIM_BASE_ADDR) $(COSIM_TRACES)

@@ -31,7 +31,7 @@ unit tests instead:
 * ``HST_MANUAL_CALLABLES`` / ``HST_RESUME_OWNERS`` change entry *roles*
   (:func:`codegen.build_entry_catalog`);
 * ``_SV_SPECIAL`` suppresses ``--static-verify`` emission
-  (:func:`codegen.sv_plan`) -- the differential covers it too, because the
+  (:func:`codegen.sv_points`) -- the differential covers it too, because the
   differential runs with ``--static-verify`` enabled;
 * the address literals and named address tables themselves, which
   :class:`GateInventoryTests` re-derives from ``tools/codegen.py``'s AST.  That
@@ -103,15 +103,14 @@ def _addiu_sp(imm: int) -> int:
 # --- the address-coupled inventory, taken from codegen's own tables ---------
 
 # The SR_BOOT_DIAG entry and inline probes were retired with the generic-runtime
-# HST cleanup (#363), and the TOKENSCAN_DIAG and F3G_ENTRY probes with #1531.  These
-# two addresses are now coupled only through the --static-verify exclusion.
-HST_SV_ONLY = (0x0010433C, 0x0006E9BC)
-HST_FASTPATHS = (0x0006EA1C, 0x00108630)
-HST_ABORT = (0x00000A1C,)
+# HST cleanup (#363), and the TOKENSCAN_DIAG and F3G_ENTRY probes with #1531.  The
+# two loop fast paths, the guest-abort exit and the four --static-verify exclusions
+# followed on 2026-11-08 (#363): RETIRED_HST_ADDRESSES below holds them.
 # 0x000011B0, 0x0000260C, 0x0000FE3C, 0x00015EA0 and 0x000149A8 left this list when their
-# stubs were retired (#363): each now translates as written in both profiles.
+# stubs were retired (#363): each now translates as written in both profiles. 0x000143B0
+# (the native sprintf) followed on 2026-11-11.
 HST_CUSTOM_STUBS = (
-    0x0000F538, 0x000101C4, 0x00010738, 0x00013524, 0x000143B0,
+    0x0000F538, 0x000101C4, 0x00010738, 0x00013524,
     0x00011090, 0x000110DC, 0x000114A8, 0x000114C0,
 )
 HST_GUEST_PATCHES = tuple(sorted(codegen.GUEST_PATCHES))
@@ -120,10 +119,7 @@ HST_SIMPLE_STUB_ADDRS = tuple(sorted(HST_SIMPLE_STUBS))
 # Bodies whose emission differs between the two profiles.  These are the pairs
 # the differential compares.
 BODY_COUPLED = (
-    HST_SV_ONLY
-    + HST_FASTPATHS
-    + HST_ABORT
-    + HST_CUSTOM_STUBS
+    HST_CUSTOM_STUBS
     + HST_GUEST_PATCHES
     + HST_SIMPLE_STUB_ADDRS
 )
@@ -150,30 +146,14 @@ def _body_leaf() -> list[int]:
     return [JR_RA, NOP]
 
 
-def _body_sv_leaf() -> list[int]:
-    """Leaf that also yields a --static-verify prediction point."""
-    return [LUI_T0, ORI_T0, JR_RA, NOP]
-
-
 def _body_guest_patch() -> list[int]:
     """Branch at the first instruction, then a predictable run for sv_plan."""
     return [_beq_fwd(8), NOP, LUI_T0, ORI_T0, JR_RA, NOP]
 
 
-def _body_fastpath(consumed_words: int) -> list[int]:
-    """Long enough that the hst fastpath's `consumed` skip range stays inside."""
-    return [NOP] * (consumed_words + 1) + [LUI_T0, ORI_T0, JR_RA, NOP]
-
-
 def _shape_for(addr: int) -> list[int]:
     if addr in HST_GUEST_PATCHES:
         return _body_guest_patch()
-    if addr == 0x0006EA1C:
-        return _body_fastpath(10)   # consumed 0x6ea20..0x6ea44
-    if addr == 0x00108630:
-        return _body_fastpath(24)   # consumed 0x108634..0x108690
-    if addr in HST_SV_ONLY:
-        return _body_sv_leaf()
     return _body_leaf()
 
 
@@ -315,7 +295,6 @@ class _CodegenRun:
 def _codegen_functions(words: dict[int, int], profile: str,
                        static_verify: bool = False) -> dict[str, str]:
     """Run codegen.main in process over `words` and return its emitted functions."""
-    sv_was = codegen.OPTIONS.static_verify
     with tempfile.TemporaryDirectory(prefix="nakagawa-profile-isolation-") as tmp:
         tmp_path = Path(tmp)
         elf_path = tmp_path / "specimen.elf"
@@ -334,8 +313,6 @@ def _codegen_functions(words: dict[int, int], profile: str,
             captured = sys.stdout.getvalue() + sys.stderr.getvalue()
         finally:
             sys.stdout, sys.stderr = orig_out, orig_err
-            # --static-verify flips a module global; never let it escape.
-            codegen.OPTIONS.static_verify = sv_was
         assert rc == 0, f"codegen failed profile={profile}: {captured}"
         texts = []
         if out_c.is_file():
@@ -345,6 +322,72 @@ def _codegen_functions(words: dict[int, int], profile: str,
     combined = "\n".join(texts)
     assert combined.strip(), f"empty codegen output for profile={profile}"
     return _split_functions(combined)
+
+
+class CodegenOptionsIsolationTests(unittest.TestCase):
+    """A codegen.main call owns its option object, even after another call."""
+
+    @staticmethod
+    def _generated_files(out_dir: Path, flags: tuple[str, ...], *, in_process: bool) -> dict[str, bytes]:
+        out_dir.mkdir(parents=True)
+        elf_path = out_dir / "specimen.elf"
+        add_s = (0x11 << 26) | (0x10 << 21) | (2 << 16) | (1 << 11) | (3 << 6)
+        words = {
+            0x1000: LUI_T0,
+            0x1004: ORI_T0,
+            0x1008: add_s,
+            0x100C: JR_RA,
+            0x1010: NOP,
+        }
+        _write_elf(elf_path, words, entry=0x1000)
+        out_c = out_dir / "out.c"
+        argv = ["codegen.py", str(elf_path), str(out_c), "--base=0", "--funcs-per-chunk=4000", *flags]
+        if in_process:
+            saved_out, saved_err = sys.stdout, sys.stderr
+            try:
+                sys.stdout, sys.stderr = StringIO(), StringIO()
+                status = codegen.main(argv)
+                detail = sys.stdout.getvalue() + sys.stderr.getvalue()
+            finally:
+                sys.stdout, sys.stderr = saved_out, saved_err
+            if status != 0:
+                raise AssertionError(f"in-process codegen failed: {detail}")
+        else:
+            result = subprocess.run(
+                [sys.executable, str(TOOLS / "codegen.py"), *argv[1:]],
+                cwd=ROOT, capture_output=True, text=True, check=False,
+            )
+            if result.returncode != 0:
+                raise AssertionError(
+                    f"separate-process codegen failed: {result.stdout}{result.stderr}")
+        return {
+            path.name: path.read_bytes()
+            for path in sorted(out_dir.glob("out*")) if path.is_file()
+        }
+
+    def test_two_in_process_main_calls_match_separate_processes_after_option_switch(self):
+        options = {
+            "nan-trap": ("--nan-trap",),
+            "static-verify": ("--static-verify",),
+        }
+        with tempfile.TemporaryDirectory(prefix="codegen-options-isolation-") as tmp:
+            root = Path(tmp)
+            in_process = {
+                name: self._generated_files(root / f"in-process-{name}", flags, in_process=True)
+                for name, flags in options.items()
+            }
+            separate = {
+                name: self._generated_files(root / f"separate-{name}", flags, in_process=False)
+                for name, flags in options.items()
+            }
+
+        self.assertIn(b"SR_NAN_TRAP_F", b"".join(in_process["nan-trap"].values()))
+        self.assertIn(b"sr_sv_check", b"".join(in_process["static-verify"].values()))
+        self.assertNotIn(b"SR_NAN_TRAP_F", b"".join(in_process["static-verify"].values()))
+        self.assertEqual(set(in_process["nan-trap"]), set(separate["nan-trap"]))
+        self.assertEqual(set(in_process["static-verify"]), set(separate["static-verify"]))
+        self.assertEqual(in_process["nan-trap"], separate["nan-trap"])
+        self.assertEqual(in_process["static-verify"], separate["static-verify"])
 
 
 # ---------------------------------------------------------------------------
@@ -440,16 +483,16 @@ class ProfileHstLegacyTests(unittest.TestCase):
             "sr_newlib_free(s->r[5], owner_ra)",
             "sr_newlib_memalign",
             "sr_newlib_realloc",
-            "sr_guest_sprintf(s);",
             "sr_native_memmove(dest, s->r[5], s->r[6], 0x00011090u)",
             "sr_native_memset(dest, (uint8_t)(s->r[5] & 0xFF), s->r[6], 0x000114c0u)",
-            "MEMSET_FASTPATH",
-            "ARRSHIFT_FASTPATH",
-            "GUEST_ABORT",
-            "_Exit(9)",
         )
         missing = [s for s in expected if s not in self.combined]
         self.assertEqual(missing, [], "profile=hst lost legacy HST emission")
+        # Retired under #363: the guest's own loops and abort() run as written.
+        # The native sprintf went on 2026-11-11: the title's own formatter runs.
+        for retired in ("MEMSET_FASTPATH", "ARRSHIFT_FASTPATH", "GUEST_ABORT", "_Exit(9)",
+                        "sr_guest_sprintf"):
+            self.assertNotIn(retired, self.combined, f"profile=hst still emits {retired}")
 
     def test_diagnostic_probes_stay_compiled_out_in_production(self):
         # The TOKENSCAN_DIAG and F3G_ENTRY probes were deleted with the #1531
@@ -503,38 +546,12 @@ class NonBodyCouplingTests(unittest.TestCase):
             self.assertTrue(catalog[resume].resumable)
             self.assertEqual(catalog[resume].owner, owner)
 
-    def _sv_words(self, base):
-        # lui/ori is a two-instruction predictable run -> one flush point.
-        return {base: LUI_T0, base + 4: ORI_T0}
-
-    def test_sv_special_addresses_are_only_excluded_under_hst(self):
-        was, codegen.OPTIONS.static_verify = codegen.OPTIONS.static_verify, True
-        try:
-            for addr in sorted(codegen._SV_SPECIAL):
-                words = self._sv_words(addr)
-                elf = _FakeElf(words)
-                none_pts = codegen.sv_plan(elf, set(words), set(), hst_profile=False)
-                hst_pts = codegen.sv_plan(elf, set(words), set(), hst_profile=True)
-                self.assertTrue(
-                    none_pts,
-                    f"profile=none suppressed --static-verify at 0x{addr:08x} "
-                    f"solely because that address is in _SV_SPECIAL",
-                )
-                self.assertEqual(
-                    hst_pts, {},
-                    f"profile=hst no longer excludes 0x{addr:08x} from "
-                    f"--static-verify; that is a legacy behavior change",
-                )
-                control = addr + CONTROL_DELTA
-                ctl_words = self._sv_words(control)
-                ctl_pts = codegen.sv_plan(
-                    _FakeElf(ctl_words), set(ctl_words), set(), hst_profile=False)
-                self.assertEqual(
-                    {a - addr: v for a, v in none_pts.items()},
-                    {a - control: v for a, v in ctl_pts.items()},
-                )
-        finally:
-            codegen.OPTIONS.static_verify = was
+    def test_sv_special_holds_only_guest_patch_addresses(self):
+        # The four stand-alone HST exclusions were retired under #363, so _SV_SPECIAL
+        # holds only GUEST_PATCHES addresses, and there are none. RetiredLoopSiteTests
+        # checks that --static-verify covers the retired functions under profile=hst.
+        self.assertEqual(codegen._SV_SPECIAL, set(codegen.GUEST_PATCHES))
+        self.assertEqual(codegen._SV_SPECIAL, set(), "a static-verify exclusion is back")
 
 
 class _FakeElf:
@@ -557,7 +574,7 @@ ADDR_OPERANDS = frozenset({"addr", "a", "start"})
 
 #: Functions whose bodies decide what translated C is emitted.
 EMITTERS = frozenset({
-    "effect", "normal_line", "emit_function", "main", "sv_plan",
+    "effect", "normal_line", "emit_function", "main", "sv_plan", "sv_points",
     # The steps emit_function and main were split into (#1531).
     "_translate", "_dup_slot_skips", "_emit_hst_patch_site", "_emit_non_control_word", "_emit_eret",
     "_emit_slot_exit", "_emit_unrelocated_jal", "_emit_jal", "_emit_jalr", "_emit_jr",
@@ -579,7 +596,6 @@ EMITTERS = frozenset({
 ADDRESS_TABLES = {
     "GUEST_PATCHES": "hst_profile",
     "_SV_SPECIAL": "hst_profile",
-    "_HST_INLINE_SITES": "hst_profile",
     "SIMPLE_STUBS": "empty-under-none",
     "HST_CUSTOM_STUBS": "hst_profile",
     "HST_MANUAL_CALLABLES": "catalog-early-return",
@@ -606,7 +622,7 @@ IMAGE_DERIVED_TABLES = {
 #:
 #: This registry replaced a blanket ``value >= 0x1000`` filter.  A numeric
 #: threshold cannot tell an address from a register number, and it silently
-#: excused every future site below 0x1000 -- ``GUEST_ABORT`` already lives at
+#: excused every future site below 0x1000 -- the retired ``GUEST_ABORT`` site lived at
 #: 0x00000a1c, well inside the range that threshold discarded.
 NON_ADDRESS_CONSTANTS = {
     ("_emit_jr", "a", 31):
@@ -825,14 +841,15 @@ class GateInventoryTests(unittest.TestCase):
         )
         self.assertIn("hst_profile", _name_ids(binding[0].value.test))
 
-    def test_sv_special_is_read_only_by_sv_plan(self):
+    def test_sv_special_is_read_only_by_static_verify_planning(self):
+        # sv_points computes the points (sv_plan counts them, the LLVM plan reads them, #330).
         readers = {
             fn.name
             for fn in ast.walk(self.tree)
             if isinstance(fn, ast.FunctionDef)
             and "_SV_SPECIAL" in _name_ids(fn)
         }
-        self.assertEqual(readers, {"sv_plan"})
+        self.assertEqual(readers, {"sv_points"})
 
     def test_address_tables_have_not_grown_silently(self):
         """Every table entry is inside the specimen's covered set."""
@@ -892,7 +909,12 @@ class GateInventoryTests(unittest.TestCase):
 
 #: Independent inventory of retired HST override addresses that must NEVER be
 #: reintroduced as custom stubs, manual callables, resume points, or gated emitters.
-RETIRED_HST_ADDRESSES: frozenset[int] = frozenset({0x00010950, 0x00046D14, 0x00048320, 0x0004CDC8})
+RETIRED_HST_ADDRESSES: frozenset[int] = frozenset({
+    0x00010950, 0x00046D14, 0x00048320, 0x0004CDC8,
+    # 2026-11-08 (#363): the MEMSET and ARRSHIFT loop fast paths, the function holding
+    # the first, the retired TOKENSCAN_DIAG probe's function, and the guest-abort exit.
+    0x0006EA1C, 0x00108630, 0x0006E9BC, 0x0010433C, 0x00000A1C,
+})
 
 
 def scan_ast_literals_for_addrs(tree: ast.AST, forbidden_addrs: frozenset[int]) -> list[str]:
@@ -1145,16 +1167,156 @@ class RetiredAddressGuardTests(unittest.TestCase):
 # 7. Bodies whose HST stubs were retired translate as written (#363)
 # ---------------------------------------------------------------------------
 
-#: Retired under #363 (2026-10-26 and 2026-10-27). Under profile=hst each of these
-#: addresses used to emit a title stub (a static-success simple stub, the
-#: heap-statistics walk skip, or the backdrop chooser's postcondition wrapper) in place
-#: of, or around, its own body. Each now translates its own instructions under every
-#: profile.
+#: Retired under #363 (2026-10-26 and 2026-10-27, and the native sprintf at 0x000143B0
+#: on 2026-11-11). Under profile=hst each of these addresses used to emit a title stub (a
+#: static-success simple stub, the heap-statistics walk skip, the backdrop chooser's
+#: postcondition wrapper, or a native sprintf) in place of, or around, its own body. Each
+#: now translates its own instructions under every profile.
 RETIRED_363_STUB_ADDRESSES: tuple[int, ...] = (
     0x00015F98, 0x0001034C, 0x0001C010, 0x0001C0FC, 0x0001C104, 0x0001C560,
-    0x0001C604, 0x0001C810, 0x0001C818, 0x001D9EB0,
+    0x0001C604, 0x0001C810, 0x0001C818, 0x001D9EB0, 0x000143B0,
 )
 
+
+
+def _itype(op: int, rs: int, rt: int, imm: int) -> int:
+    return (op << 26) | (rs << 21) | (rt << 16) | (imm & 0xFFFF)
+
+
+def _rtype(rs: int, rt: int, rd: int, funct: int, sa: int = 0) -> int:
+    return (rs << 21) | (rt << 16) | (rd << 11) | (sa << 6) | funct
+
+
+def _branch(op: int, rs: int, rt: int, at: int, target: int) -> int:
+    return _itype(op, rs, rt, (target - (at + 4)) >> 2)
+
+
+def _zero_fill_loop_words() -> dict[int, int]:
+    """A count/base zero fill whose count load sits where MEMSET_FASTPATH fired."""
+    lw, sb, addiu, beq, bne = 0x23, 0x28, 0x09, 4, 5
+    v1, a0, a1, at, s0 = 3, 4, 5, 1, 16
+    return {
+        0x0006EA14: LUI_T0,
+        0x0006EA18: ORI_T0,
+        0x0006EA1C: _itype(lw, s0, v1, 0),                        # lw $v1, 0($s0)  count
+        0x0006EA20: _branch(beq, v1, 0, 0x0006EA20, 0x0006EA48),  # beq $v1, $zero, done
+        0x0006EA24: _rtype(0, 0, a0, 0x21),                       # addu $a0, $zero, $zero
+        0x0006EA28: _itype(lw, s0, a1, 8),                        # loop: lw $a1, 8($s0)  base
+        0x0006EA2C: _rtype(a1, a0, a1, 0x21),                     # addu $a1, $a1, $a0
+        0x0006EA30: _itype(sb, a1, 0, 0),                         # sb $zero, 0($a1)
+        0x0006EA34: _itype(addiu, a0, a0, 1),                     # addiu $a0, $a0, 1
+        0x0006EA38: _rtype(a0, v1, at, 0x2B),                     # sltu $at, $a0, $v1
+        0x0006EA3C: _branch(bne, at, 0, 0x0006EA3C, 0x0006EA28),  # bne $at, $zero, loop
+        0x0006EA40: NOP,
+        0x0006EA44: NOP,
+        0x0006EA48: JR_RA,                                        # done
+        0x0006EA4C: NOP,
+    }
+
+
+def _reverse_shift_loop_words() -> dict[int, int]:
+    """A reverse 8-byte element copy laid over the range ARRSHIFT_FASTPATH consumed."""
+    lw, sw, addiu, beq, bne = 0x23, 0x2B, 0x09, 4, 5
+    v0, v1, a0, a1, a2, s3, sp = 2, 3, 4, 5, 6, 19, 29
+    words = {
+        0x00108628: LUI_T0,
+        0x0010862C: ORI_T0,
+        0x00108630: _itype(lw, s3, a0, 4),                          # lw $a0, 4($s3)  n
+        0x00108634: _itype(lw, s3, a1, 0),                          # lw $a1, 0($s3)  source base
+        0x00108638: _rtype(0, a0, a2, 0x00, 3),                     # sll $a2, $a0, 3
+        0x0010863C: _rtype(a1, a2, a2, 0x21),                       # addu $a2, $a1, $a2  source end
+        0x00108640: _itype(lw, sp, a0, 0x4C),                       # lw $a0, 0x4c($sp)  dest base
+        0x00108644: _itype(lw, sp, v0, 0x5C),                       # lw $v0, 0x5c($sp)
+        0x00108648: _rtype(0, v0, v0, 0x00, 3),                     # sll $v0, $v0, 3
+        0x0010864C: _rtype(a0, v0, a0, 0x21),                       # addu $a0, $a0, $v0  dest end
+        0x00108650: _branch(beq, a2, a1, 0x00108650, 0x00108694),  # beq $a2, $a1, done
+        0x00108654: NOP,
+        0x00108658: _itype(addiu, a2, a2, -8),                      # loop: addiu $a2, $a2, -8
+        0x0010865C: _itype(addiu, a0, a0, -8),                      # addiu $a0, $a0, -8
+        0x00108660: _itype(lw, a2, v0, 0),                          # lw $v0, 0($a2)
+        0x00108664: _itype(lw, a2, v1, 4),                          # lw $v1, 4($a2)
+        0x00108668: _itype(sw, a0, v0, 0),                          # sw $v0, 0($a0)
+        0x0010866C: _itype(sw, a0, v1, 4),                          # sw $v1, 4($a0)
+    }
+    for addr in range(0x00108670, 0x0010868C, 4):
+        words[addr] = NOP
+    words[0x0010868C] = _branch(bne, a2, a1, 0x0010868C, 0x00108658)  # bne $a2, $a1, loop
+    words[0x00108690] = NOP
+    words[0x00108694] = JR_RA                                          # done
+    words[0x00108698] = NOP
+    return words
+
+
+def _guest_abort_words() -> dict[int, int]:
+    """The title's abort() shape: call the handler walk, then branch to itself forever."""
+    return {
+        0x00000A1C: _jal(0x000015EC),
+        0x00000A20: NOP,
+        0x00000A24: _branch(4, 0, 0, 0x00000A24, 0x00000A24),  # beq $zero, $zero, .
+        0x00000A28: NOP,
+        0x000015EC: JR_RA,
+        0x000015F0: NOP,
+    }
+
+
+class RetiredLoopSiteTests(unittest.TestCase):
+    """The last stand-alone HST emission sites translate their guest words (#363).
+
+    Under profile=hst, MEMSET_FASTPATH replaced a zero-fill loop with one native memset,
+    ARRSHIFT_FASTPATH replaced a reverse element copy with memmove (not the same result
+    when the destination lies below an overlapping source), and GUEST_ABORT ended the run
+    with _Exit(9) at the title's abort() before its body ran. The --static-verify pass
+    also skipped four HST functions. Each test fails on the pre-retirement codegen and
+    passes once the guest's own instructions run under every profile."""
+
+    RANGES = [(0, 0x00200000)]
+
+    def _both(self, words, start, known=None):
+        elf = _FakeElf(words)
+        known = known or {start}
+        none_lines = codegen.emit_function(elf, start, self.RANGES, known, profile="none")
+        hst_lines = codegen.emit_function(elf, start, self.RANGES, known, profile="hst")
+        return none_lines, hst_lines
+
+    def test_zero_fill_loop_runs_its_own_instructions_under_hst(self):
+        none_lines, hst_lines = self._both(_zero_fill_loop_words(), 0x0006EA14)
+        hst_text = "\n".join(hst_lines)
+        self.assertNotIn("MEMSET_FASTPATH", hst_text)
+        self.assertNotIn("memset(", hst_text, "profile=hst still fills the span natively")
+        self.assertIn("L_0006ea28:", hst_text, "the loop head label is missing")
+        self.assertIn("MEM_W8", hst_text, "the guest's own byte store is missing")
+        self.assertEqual(none_lines, hst_lines, "the zero-fill loop diverged between profiles")
+
+    def test_reverse_shift_loop_runs_its_own_instructions_under_hst(self):
+        none_lines, hst_lines = self._both(_reverse_shift_loop_words(), 0x00108628)
+        hst_text = "\n".join(hst_lines)
+        self.assertNotIn("ARRSHIFT_FASTPATH", hst_text)
+        self.assertNotIn("memmove(", hst_text, "profile=hst still copies the span natively")
+        self.assertIn("L_00108658:", hst_text, "the loop head label is missing")
+        self.assertEqual(none_lines, hst_lines, "the element-shift loop diverged between profiles")
+
+    def test_guest_abort_runs_its_own_body_under_hst(self):
+        none_lines, hst_lines = self._both(_guest_abort_words(), 0x00000A1C,
+                                           known={0x00000A1C, 0x000015EC})
+        hst_text = "\n".join(hst_lines)
+        self.assertNotIn("GUEST_ABORT", hst_text)
+        self.assertNotIn("_Exit(", hst_text, "profile=hst still ends the run at abort()")
+        self.assertIn("L_00000a24:", hst_text, "the abort body's own loop is missing")
+        self.assertEqual(none_lines, hst_lines, "abort() diverged between profiles")
+
+    def test_retired_static_verify_exclusions_are_checked_under_hst(self):
+        options = codegen.CodegenOptions(static_verify=True)
+        for addr in (0x0006E9BC, 0x0006EA1C, 0x00108630, 0x0010433C):
+            with self.subTest(addr=f"0x{addr:08x}"):
+                words = {addr: LUI_T0, addr + 4: ORI_T0}
+                elf = _FakeElf(words)
+                none_pts = codegen.sv_plan(elf, set(words), set(), hst_profile=False,
+                                           options=options)
+                hst_pts = codegen.sv_plan(elf, set(words), set(), hst_profile=True,
+                                          options=options)
+                self.assertTrue(none_pts)
+                self.assertEqual(hst_pts, none_pts,
+                                 "profile=hst still skips --static-verify here")
 
 #: The four word loads that read 0 from a null base under the HST profile (#363). None
 #: took its null path on the gate route, so the title no longer has per-address load
@@ -1277,14 +1439,10 @@ class NullPageGuardTests(unittest.TestCase):
         self.assertNotIn("sr_r32(", chunks)
 
     def test_a_body_reading_its_own_code_is_not_a_guest_data_access(self):
-        was = codegen.OPTIONS.null_page_guard
-        try:
-            codegen.OPTIONS.null_page_guard = True
-            guarded = codegen.emit_decoded_jump_target(0x100)
-            codegen.OPTIONS.null_page_guard = False
-            plain = codegen.emit_decoded_jump_target(0x100)
-        finally:
-            codegen.OPTIONS.null_page_guard = was
+        guarded = codegen.emit_decoded_jump_target(
+            0x100, options=codegen.CodegenOptions(null_page_guard=True))
+        plain = codegen.emit_decoded_jump_target(
+            0x100, options=codegen.CodegenOptions(null_page_guard=False))
         self.assertIn("sr_r32(", guarded)
         self.assertNotIn("MEM_R32(", guarded)
         self.assertIn("MEM_R32(", plain)
@@ -1323,7 +1481,7 @@ class NullPageGuardTests(unittest.TestCase):
         if cc is None:
             self.skipTest("no C compiler")
         bodies = _CodegenRun.functions("hst")
-        self.assertIn("ARRSHIFT_FASTPATH", "".join(bodies.values()))
+        self.assertIn("sr_native_memmove(", "".join(bodies.values()))
         marker = "int nk_guarded_bodies_start;"
         source = ('#define SR_NULL_PAGE_GUARD 1\n#include "recomp.h"\n' + marker + "\n"
                   + "\n".join(bodies.values()) + "\n")

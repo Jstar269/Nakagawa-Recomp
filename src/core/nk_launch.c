@@ -12,6 +12,7 @@
  */
 
 #include "nk_launch.h"
+#include "nk_shared_helpers.h"
 #include "nk_font_slots.h"
 #include "../rt/prx_loader.h"
 #include "generated/nk_title_catalog.h"
@@ -27,10 +28,7 @@
 #define NK_ELF_PF_X 1u
 
 static inline void safe_copy_path(char *dest, size_t dest_size, const char *src) {
-    if (!dest || dest_size == 0) return;
-    if (!src) { dest[0] = '\0'; return; }
-    strncpy(dest, src, dest_size - 1);
-    dest[dest_size - 1] = '\0';
+    (void)nk_shared_text_copy(dest, dest_size, src, NK_SHARED_TEXT_COPY_TRUNCATE);
 }
 
 static uint16_t launch_read_u16(const uint8_t *p) {
@@ -60,11 +58,10 @@ static bool launch_join_path(const char *base, const char *relative,
                              char *out_path, size_t out_size) {
     if (!base || !base[0] || !relative || !relative[0] ||
         !out_path || out_size == 0) return false;
-    if (relative[0] == '/' || relative[0] == '\\' ||
-        (relative[0] && relative[1] == ':')) return false;
-    int written = snprintf(out_path, out_size, "%s%c%s", base,
-                           nk_platform_path_separator(), relative);
-    return written >= 0 && (size_t)written < out_size;
+    return nk_shared_path_join(out_path, out_size, base, relative,
+                               nk_platform_path_separator(), NK_SHARED_PATH_JOIN_ALWAYS,
+                               NK_SHARED_PATH_REJECT_ABSOLUTE_RIGHT |
+                                   NK_SHARED_PATH_REQUIRE_POSITIVE_LENGTH);
 }
 
 /* The title's code-capture folder (#1933), <user_data_root>/cache/bringup/<DISC>/captures, the
@@ -1105,6 +1102,7 @@ NkResult nk_launch_prepare_session(
     session->config.master_volume = 100;
     snprintf(session->config.ace_spec, sizeof(session->config.ace_spec), "off");
     session->config.ace_report_path[0] = '\0';
+    snprintf(session->config.nickname, sizeof(session->config.nickname), "%s", NK_NICKNAME_DEFAULT);
 
     NkRuntimePackageInfo package_info;
     char package_error[1024] = "";
@@ -1198,10 +1196,26 @@ NkResult nk_launch_prepare_session(
        launch at 0 0 as documented -- not an unknown-address guess, and the
        Python planner reads the same fields identically. */
     session->base_address = entry->executable_base;
-    /* The run entry, not the raw executable.entry: a title that declares a
-       fallback entry must start there (the manager and package planner do the
-       same through title_codegen_plan._resolve_run_entry). */
-    session->entry_point = entry->run_entry;
+    /* A title's runtime bindings name addresses inside one exact executable.
+       Reuse the catalog's build identity (the same on-disc SHA-256 used by the
+       card and package builder): a listed or untracked build uses its declared
+       run entry, while an unlisted build starts at its own executable entry. */
+    const char *build_disc_id = game->disc_id[0]
+        ? game->disc_id : entry->primary_disc_id;
+    /* identify_build fails only for a disc id that does not normalize; no build
+       row can name such an id, so the title records no builds for it (untracked)
+       and its run entry stands, as before builds were recorded. */
+    bool unlisted_build = false;
+    if (build_disc_id && build_disc_id[0]) {
+        NkBuildIdentity build_identity;
+        if (nk_title_manifest_identify_build(
+                build_disc_id, game->iso_path,
+                game->selected_executable[0] ? game->selected_executable : NULL,
+                &build_identity))
+            unlisted_build = build_identity.status == NK_BUILD_UNLISTED;
+    }
+    session->entry_point = unlisted_build
+        ? entry->executable_entry : entry->run_entry;
 
     /* A completed native staging transaction carries the source EBOOT under
      * prepared_root. Validate it before any launch environment is assembled;
@@ -1487,6 +1501,7 @@ NkResult nk_launch_start(NkLaunchSession *session) {
     char env_ace_report[NK_MAX_PATH + 16];
     char env_ui_root[NK_MAX_PATH + 16];
     char env_launcher_display[96];
+    char env_nickname[sizeof(session->config.nickname) + 16];
     char sep = nk_platform_path_separator();
 
     if (session->config.fps_cap == -1) {
@@ -1537,6 +1552,10 @@ NkResult nk_launch_start(NkLaunchSession *session) {
         bool authentic = !session->enhancement_package_id[0] && strcmp(ace_line, "off") == 0;
         envp[env_count++] = !authentic && session->config.present_upscale == NK_PRESENT_UPSCALE_FSR1
                                 ? "SR_PRESENT_UPSCALE=fsr1" : "SR_PRESENT_UPSCALE=off";
+        /* The movie upscaler (SR_MOVIE_UPSCALE) has no setting: an authentic session runs it off
+           whatever the environment says, and an enhanced or Ace Mode session keeps the
+           inherited value. */
+        if (authentic) envp[env_count++] = "SR_MOVIE_UPSCALE=off";
     }
     envp[env_count++] = env_vsync;
     envp[env_count++] = env_fs;
@@ -1626,6 +1645,9 @@ NkResult nk_launch_start(NkLaunchSession *session) {
     snprintf(env_user_data_root, sizeof(env_user_data_root), "SR_USER_DATA_ROOT=%s",
              session->user_data_root);
     envp[env_count++] = env_user_data_root;
+    /* The console nickname (#2197), always exported so an inherited value cannot name it. */
+    snprintf(env_nickname, sizeof(env_nickname), "SR_NICKNAME=%s", session->config.nickname);
+    envp[env_count++] = env_nickname;
     /* What the pause overlay shows and draws with, beside the game's name (SR_GAME_TITLE
      * below): the disc ID and the player's folder for the UI fonts. Always exported, so an
      * empty value masks an inherited one instead of naming another game. */

@@ -116,7 +116,7 @@ Corrections to the mission list:
    **absent from the public tree**. The public-source profile
    (`assets/public_source_profile.json`, `exclude_paths`) excludes them;
    the public build links project-authored seams instead
-   (`iso_unavailable.c`, `audio_sdl3.c` (formerly `audio_unavailable.c`) and `pgd_unavailable.c`, all
+   (`iso_public.c`, `audio_sdl3.c` (formerly `audio_unavailable.c`) and `pgd_unavailable.c`, all
    `project_authored_attested`, and the project-authored PGF reader `pgf_public.c`,
    #349). They remain
    campaign items — a platform without ISO/VFS, audio, fonts, and
@@ -190,6 +190,10 @@ Sizes are `wc -l` at base `6a4f359`, as above, and are not refreshed.
 | G16 | Plain AT3 decoder subset `src/rt/atrac3p/libavcodec/atrac3.c` + `src/rt/atrac3p/libavcodec/atrac3data.h` + `src/rt/atrac3p/libavcodec/bytestream.h` | FFmpeg n4.4, LGPL-2.1-or-later (exact pin and file deltas in `src/rt/atrac3p/PROVENANCE.md`) | 1,360 | `hle.c` sceAtrac codecType `0x1001` bridge | `atrac3p-bridge-selftest`, `hle-thread-selftest` (synthetic RIFF/header and decode bookkeeping) | Low: host decoder at the explicit sceAtrac boundary; first-frame `fact` delay remains `NOT_MEASURED` pending a PSP measurement |
 | G17 | H.264 decoder subset `src/rt/h264_ffmpeg_sub/*` (208 byte-identical upstream files, authored configuration stand-ins and the `nk_h264_api` layer) | FFmpeg n4.4, LGPL-2.1-or-later (exact pin and blob manifest in `src/rt/h264_ffmpeg_sub/PROVENANCE.md`) | ~210 files | `src/rt/h264_ffmpeg.c` (`sr_h264` seam backend on Linux, later Android) | `psmf-media-selftest` (`H264_FFMPEG=1`, source-authored H.264 fixture) | Low: host decoder at the `sceMpeg`/`sceVideocodec` boundary; Media Foundation stays the Windows backend |
 | G18 | MP3 frame decoder `src/rt/minimp3/minimp3.h` + `src/rt/minimp3/LICENSE` (byte-identical upstream) | minimp3, CC0-1.0 (exact pin and blob manifest in `src/rt/minimp3/PROVENANCE.md`) | 1 header | `src/rt/mp3_bridge.c` (project-authored) for the `hle.c` sceMp3 handlers | `hle-thread-selftest`, `tools/test_mp3_tone_fixture.py` (synthetic tone fixture) | Low: host decoder at the `sceMp3` boundary |
+| G19 | Texture replacement `src/rt/texrepl.c` (quick hash, palette hash and pack lookup; added 2026-11-06, #1880) | PPSSPP (`GPU/Common/TextureDecoder.cpp`, `GPU/Common/TextureReplacer.cpp`, `GPU/Common/TextureCacheCommon.cpp`) at 3bc60270, derived-translated | 965 | Ace texture replacement (`tex_xs_offer` in `ge_gpu.c`) | `texrepl-selftest` (PPSSPP hash vectors), `gpu-texscale-selftest` replace cell | None: host-only lookup of user packs; must stay bit-compatible with PPSSPP packs |
+| G20 | FSR 3.1.6 host and passes `src/rt/fsr3_host.c` + `src/rt/fsr3_host.h` + `src/rt/fsr3_jitter.c` + `src/rt/fsr3_jitter.h` + `src/rt/gpu_sdl3vk/fsr3_pass.c` (upscaler) and `src/rt/fsr3_fg_host.c` + `src/rt/fsr3_fg_host.h` + `src/rt/gpu_sdl3vk/fsr3_fg_pass.c` (frame generation); added 2026-11-06, #2081 | AMD FidelityFX SDK v2.4.0 at 7539ae8b6, MIT, derived-translated from its C++ host and Vulkan backend (sources named in each file and in `third_party/fidelityfx_sdk/PROVENANCE.md`) | 3,857 | The imported FSR 3 HLSL passes (`third_party/fidelityfx_sdk/`) and their `fsr3*_comp.inc` embeddings | `fsr3-host-selftest` and `fsr3-fg-host-selftest` (records of AMD's unmodified code on synthetic inputs), `fsr3-mutants`, `fsr3-fg-mutants`, `fsr3-pass-selftest` | None: opt-in host presentation; must stay equivalent to AMD's host so the passes get the inputs they were designed for |
+| G21 | Media Engine boundary `src/rt/hle_videocodec.c` (sceVideocodec, sceMpegbase, sceAudiocodec under a disc `mpeg.prx`; added 2026-11-07, #286) | JPCSP at 00ac4d6d (GPL-3.0-or-later; context words of `sceVideocodec.java`, `sceMpegbase.java`, `sceMeAudio.java`, `sceAudiocodec.java`) and uOFW at 28306bb5 (MIT; `audiocodec.c` wrapper checks), derived-translated (`src/rt/PROVENANCE.md`) | 1260 | A title's own `mpeg.prx` once started (guest-owned `sceMpeg`), the host H.264 seam and the ATRAC3plus decoder beneath it | `videocodec-selftest` (synthetic I_PCM H.264 and ATRAC3plus fixtures), the guest-owned `sceMpeg` cell in `hle-thread-selftest` | It is the HLE floor under LLE `mpeg.prx`: the Media Engine image is firmware and is never run, so this boundary stays; its synthetic words are replaced by PSP measurements (W-LLE-1), not rewritten |
+| G22 | OpenXR API headers `src/rt/xr/openxr/openxr.h` + `src/rt/xr/openxr/openxr_platform.h` + `src/rt/xr/openxr/openxr_platform_defines.h` (added 2026-11-08, #791) | Khronos OpenXR-SDK release-1.1.65 at 24a1f2b9, Apache-2.0 OR MIT, byte-identical imports (`src/rt/xr/openxr/PROVENANCE.md`) | 16,196 | The project-authored OpenXR module `src/rt/xr/nk_xr*.c`, which loads the runtime at run time | `xr-selftest` (fake runtime), byte identity against the pinned upstream blobs | None: opt-in VR presentation; public API declarations, kept identical to the pin |
 
 ## 3. Third-party dependencies — keep, with reasons
 
@@ -328,6 +332,22 @@ replacement by an LLE path that makes the component unnecessary ·
   byte-identical under the 2026-10-24 public-domain rule; keep `mp3_bridge` and the sceMp3
   handlers as separate records. Validate decoding with the synthetic tone fixture; claim
   hardware-equivalent sceMp3 timing only after a PSP result.
+- **G19 texture replacement → evidence, not rewrite.** The hash and lookup must match PPSSPP's bit
+  for bit, because pack file names depend on them, so the derived code stays labelled `derived-translated`
+  with its upstream notice. Validate with the selftest's PPSSPP hash vectors and synthetic packs.
+- **G20 FSR 3 host and passes → evidence, not rewrite.** The C host is a translation of AMD's MIT
+  C++, kept labelled `derived-translated` with AMD's notice; the passes themselves stay byte-identical
+  imports (three recorded LOCAL DELTAs). Validate against the records of AMD's unmodified host code
+  and the pass selftest's cells.
+- **G21 Media Engine boundary → evidence, not rewrite.** The handlers sit beneath a title's own
+  `mpeg.prx` in place of the Media Engine, whose image is firmware the project never runs, so the
+  boundary stays HLE. It stays labelled `derived-translated` with the JPCSP and uOFW notices; its
+  synthetic context words are replaced by PSP measurements (W-LLE-1), and the synthetic fixtures in
+  `videocodec-selftest` validate the decode and conversion paths.
+- **G22 OpenXR API headers → evidence, not rewrite.** Khronos's public API declarations,
+  imported byte-identical from the pinned OpenXR-SDK release with both licence texts beside them;
+  like the Vulkan headers they are submission API, not independence-relevant code. Validate by
+  byte identity against the pin and the module's `xr-selftest`.
 
 ## 5. Clean-room protocol for AI-agent work
 
@@ -361,8 +381,7 @@ typed it).
    or repository history. Enforced by workspace construction (§5.2), not by
    asking nicely.
 3. **Similarity check before admission.** Proposed
-   `tools/similarity_check.py` (design, not yet built — building it is a
-   docs-allowed tooling task for a later session): token-sequence and
+   `tools/similarity_check.py` (a design; the tool does not exist): token-sequence and
    line-overlap comparison of the candidate against the removed derived
    file(s) plus pinned upstream blobs where available. Suggested admission
    thresholds (to be calibrated on G1 before they bind): normalised
@@ -537,7 +556,7 @@ issue and rationale, ensuring the set of untriaged gaps can shrink but never
 grow; a new unlisted gap fails, and stale baseline entries whose gaps have been
 resolved fail closed until pruned. The gate is wired into `make check`,
 `make readiness`, `make provenance-record-gap-check`, pre-commit hooks, and
-hosted CI (`native_tools` and `main_smoke`).
+hosted CI (`native_tools` and the main smoke steps of `hygiene`).
 
 In addition, the proposed `LEDGER_DERIVED_ADMISSION` merge-gate posture
 extends this to trusted-ledger admission: the check loads the trusted ledger

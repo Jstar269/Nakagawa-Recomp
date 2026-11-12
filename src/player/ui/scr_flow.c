@@ -145,13 +145,11 @@ float scr_flow_begin(NkUi *ui, float width, float height, float card_width) {
     }
     card = width - 2.0f * NK_UI_GUTTER_NARROW;
     if (card > card_width) card = card_width;
-    /* A card taller than the room between the bars scrolls there instead of
-       covering them (page_scrolls). */
-    if (!nk_ui_dialog_begin_scroll(ui, FLOW_ID_CARD, card,
-                                   page_scrolls(ui)
-                                       ? height - NK_UI_TOP_BAR_HEIGHT - NK_UI_PROMPT_BAR_HEIGHT -
-                                             2.0f * NK_UI_SPACE_4
-                                       : 0.0f)) {
+    /* The card fits its content up to the room between the bars; a taller one
+       scrolls there (SCR_PAGE_BODY_SCROLLS) instead of covering them. */
+    if (!nk_ui_dialog_begin_scroll(
+            ui, FLOW_ID_CARD, card,
+            height - NK_UI_TOP_BAR_HEIGHT - NK_UI_PROMPT_BAR_HEIGHT - 2.0f * NK_UI_SPACE_4)) {
         nk_ui_end_container(ui);
         nk_ui_end_container(ui);
         return 0.0f;

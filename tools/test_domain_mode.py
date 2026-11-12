@@ -43,7 +43,7 @@ class DefaultStubsUnchangedTests(unittest.TestCase):
         )
 
     def test_seam_is_off_by_default(self):
-        self.assertFalse(codegen.OPTIONS.lle_import_seam)
+        self.assertFalse(codegen.CodegenOptions().lle_import_seam)
 
     def test_default_stub_has_no_seam_call(self):
         text = codegen.import_stub_text(0x1000, "ThreadManForUser", 0x27A6B7CD)
@@ -82,31 +82,23 @@ class ImportSeamCodegenTests(unittest.TestCase):
         self.assertTrue(text.rstrip().endswith("sr_end(s, 0u, 0);\n}"))
 
     def test_module_flag_drives_the_helper_default(self):
-        previous = codegen.OPTIONS.lle_import_seam
-        try:
-            codegen.OPTIONS.lle_import_seam = True
-            text = codegen.import_stub_text(0x1000, "ThreadManForUser", 0x27A6B7CD)
-            self.assertIn("sr_import_call(s, 0x27a6b7cdu, 0x00001000u);", text)
-        finally:
-            codegen.OPTIONS.lle_import_seam = previous
+        options = codegen.CodegenOptions(lle_import_seam=True)
+        text = codegen.import_stub_text(
+            0x1000, "ThreadManForUser", 0x27A6B7CD, options=options)
+        self.assertIn("sr_import_call(s, 0x27a6b7cdu, 0x00001000u);", text)
 
     def test_seam_cli_flag_exists(self):
         source = (ROOT / "tools" / "codegen.py").read_text(encoding="utf-8")
         self.assertIn('"--lle-import-seam"', source)
-        self.assertIn("enable_lle_import_seam()", source)
+        self.assertIn("enable_lle_import_seam(options)", source)
 
     def test_seam_flag_also_enables_caller_flow_propagation(self):
         # A fail-closed seam stub returns with flow_kind set; only --lle-cpu
         # output checks flow_kind after direct calls, so the seam implies it.
-        previous = (codegen.OPTIONS.lle_import_seam, codegen.OPTIONS.lle_cpu)
-        try:
-            codegen.OPTIONS.lle_import_seam = False
-            codegen.OPTIONS.lle_cpu = False
-            codegen.enable_lle_import_seam()
-            self.assertTrue(codegen.OPTIONS.lle_import_seam)
-            self.assertTrue(codegen.OPTIONS.lle_cpu)
-        finally:
-            codegen.OPTIONS.lle_import_seam, codegen.OPTIONS.lle_cpu = previous
+        options = codegen.CodegenOptions()
+        codegen.enable_lle_import_seam(options)
+        self.assertTrue(options.lle_import_seam)
+        self.assertTrue(options.lle_cpu)
 
 
 class DomainSourcesTests(unittest.TestCase):
@@ -156,9 +148,75 @@ class DomainSourcesTests(unittest.TestCase):
         self.assertIn("SR_IMPORT_FALLBACK_HLE", text)
         self.assertIn("s_fallback_count++", text)
 
-    def test_cosim_arm_records_without_dual_execution(self):
+    def test_cosim_arm_records_and_runs_both_lanes(self):
+        # PR 8 (#2148): the COSIM arm runs the guest export and the HLE
+        # handler from one input state and keeps the HLE lane's result.
         text = DOMAIN_C.read_text(encoding="utf-8")
         self.assertIn("s_cosim_count++", text)
+        self.assertIn("return sr_import_call_cosim(s, nid, stub_pc);", text)
+        body = text.split("static int sr_import_call_cosim(", 1)[1]
+        body = body.split("\nint sr_import_call(", 1)[0]
+        guest = body.index("rc = sr_import_call_guest(s, nid, stub_pc, 1);")
+        restore = body.index("*s = input;")
+        hle = body.index("ret = sr_syscall(s, nid);")
+        self.assertLess(guest, restore)
+        self.assertLess(restore, hle)
+        for marker in ("SR_COSIM_DIFF:", "SR_COSIM_NOT_COMPARED:", "SR_COSIM_MATCH:"):
+            self.assertIn(marker, text)
+
+    def test_cosim_guest_lane_refuses_nested_imports(self):
+        # An import reached from the guest lane would apply a host effect the
+        # HLE lane applies again; the seam refuses it before any mode lookup.
+        # The refusal is recomp.c's, shared with the late-import bridge (#2201).
+        text = DOMAIN_C.read_text(encoding="utf-8")
+        seam = text.split("\nint sr_import_call(", 1)[1]
+        refuse = seam.index("if (sr_guest_lane_refuse_import(s, nid)) {")
+        lookup = seam.index("domain = sr_domain_lookup_nid(nid);")
+        self.assertLess(refuse, lookup)
+        self.assertNotIn("sr_syscall", seam[refuse:lookup])
+        recomp = (DOMAIN_C.parent / "recomp.c").read_text(encoding="utf-8")
+        late = recomp.split("if (late == SR_HLE_LATE_BUILTIN) {", 1)[1]
+        self.assertLess(late.index("if (sr_guest_lane_refuse_import(s, target))"),
+                        late.index("sr_hle_call(s, target);"),
+                        "the late-import bridge refuses the guest lane before any handler runs")
+
+    def test_header_declares_the_cosim_result_api(self):
+        text = DOMAIN_H.read_text(encoding="utf-8")
+        for proto in (r"sr_domain_cosim_match_count\s*\(",
+                      r"sr_domain_cosim_diff_count\s*\(",
+                      r"sr_domain_cosim_not_compared_count\s*\(",
+                      r"sr_domain_cosim_last_result\s*\(",
+                      r"sr_domain_cosim_set_dead_stack\s*\(",
+                      r"SR_COSIM_REASON_NESTED_IMPORT",
+                      r"SR_COSIM_REASON_UNPAIRED"):
+            self.assertRegex(text, proto)
+
+    def test_cosim_keeps_the_vram_contract(self):
+        # Review S2 on #2171: the snapshot reads back what the renderer holds,
+        # and a rolled-back VRAM page is bracketed by write prepare and commit.
+        text = DOMAIN_C.read_text(encoding="utf-8")
+        snap = text.split("static int sr_cosim_snapshot_take(", 1)[1].split("\n}\n", 1)[0]
+        self.assertLess(snap.index("sr_cosim_vram_current();"), snap.index("memcpy("))
+        self.assertIn("sr_guest_vram_read_prepare_bytes(SR_COSIM_VRAM_BASE, SR_COSIM_VRAM_SIZE)", text)
+        cap = text.split("static int sr_cosim_capture_guest_and_restore(", 1)[1].split("\n}\n", 1)[0]
+        prepare = cap.index("sr_guest_vram_write_prepare_bytes(phys, SR_COSIM_PAGE);")
+        copy = cap.index("memcpy(live, before, SR_COSIM_PAGE);")
+        commit = cap.index("sr_guest_vram_write_commit_bytes(phys, SR_COSIM_PAGE);")
+        self.assertLess(prepare, copy)
+        self.assertLess(copy, commit)
+
+    def test_cosim_does_not_compare_an_unfinished_hle_lane(self):
+        # Review N2 on #2171: a pending flow after the HLE lane is NOT_COMPARED.
+        text = DOMAIN_C.read_text(encoding="utf-8")
+        body = text.split("static int sr_import_call_cosim(", 1)[1].split("\nint sr_import_call(", 1)[0]
+        check = body.index("sr_cosim_not_compared(SR_COSIM_REASON_HLE_FLOW);")
+        self.assertLess(body.index("ret = sr_syscall(s, nid);"), check)
+        self.assertLess(check, body.index("sr_cosim_compare_memory("))
+        self.assertIn("SR_COSIM_REASON_HLE_FLOW", DOMAIN_H.read_text(encoding="utf-8"))
+
+    def test_selftest_covers_the_dual_run(self):
+        selftest = ROOT / "tests" / "native" / "domain_mode_selftest.c"
+        self.assertIn("test_cosim_dual_run();", selftest.read_text(encoding="utf-8"))
 
     def test_library_table_covers_the_preflight_mapping(self):
         text = DOMAIN_C.read_text(encoding="utf-8")

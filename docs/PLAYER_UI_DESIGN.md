@@ -1,7 +1,7 @@
 # Player UI design system
 
-The visual spec for the native player's launcher UI (the only launcher since v0.0.1; the old renderer survives only in the regression-test build for
-one release). It is the reference every
+The visual spec for the native player's launcher UI (the only launcher since v0.0.1; the old renderer was removed
+in #2071). It is the reference every
 screen lane builds against: Library and Title detail (C5, built), Settings (C6), first run (C7) and error dialogs
 (C8). The tokens and components it names live in code:
 
@@ -186,20 +186,26 @@ not from constants. At a larger text size:
 - a row of buttons wraps onto a second row when it would run past its column (`nk_ui_flow_begin`: the Settings
   actions, the title page's actions);
 - the setting rows on Accessibility, the online options, Updates and build tools put each sentence under its
-  button, at the full width, when beside it a sentence would be cut;
+  button, at the full width, when beside it a sentence would be cut, and there it wraps whole;
 - the Library's narrowest card grows with the text, so fewer columns fit and a page holds fewer cards
   (`player_ui_library_page_size_at`), and its heading row leaves the LIBRARY heading out when the row's controls
   would not fit beside it (the tab names the page);
 - the prompt bar's hint ends in an ellipsis in the room the prompts leave;
 - a page body (Library, title page, Settings, About) or a flow card taller than the room between the bars scrolls
-  there, and a control taking focus scrolls into view; at 100% every page fits, as the screen tests check.
+  there, and a control taking focus scrolls into view. The title page's body scrolls at any text size, because what
+  a game's page shows varies (#2245); the screen tests check that its fullest form scrolls at 1280x720 with the
+  prompt bar whole.
 
 The launcher offers it as Settings > Accessibility > Text size; the in-game overlay stays at 100%. The launcher's
 screens are laid out on at least its
 1280 x 720 design size (`NkUiViewport.min_logical_w` / `min_logical_h`): a smaller window, down to the 960 x 540
 minimum, lowers the density so the same layout is drawn smaller, instead of pushing buttons and the prompt bar off
 the window. A larger window keeps its density and gains room. Clay clips at most 100 containers per layout: shorten
-long text with `nk_ui_text_clamp` instead of clipping it.
+long text with `nk_ui_text_clamp` instead of clipping it, but only text the player can read whole another way (a
+value with its own editor or detail page); text with no other place to be read wraps whole on a page that scrolls.
+One exception is by design: at the design text size a setting's sentence beside its button is clamped to two lines,
+so the rows keep their side-by-side layout (Settings > Enhanced stacks its rows at every size instead). Above it, a sentence that would be cut makes the rows stack, and under
+its button the sentence wraps whole.
 
 Wrapped text keeps its wrapped height when its page is overfull. Clay took a paragraph's minimum height before
 wrapping, as one line, so compressing an overfull column squeezed the paragraph back and the next block painted over
@@ -331,16 +337,22 @@ first page.
 
 FIND, beside it, opens the find box; so do the screen's Options action (the pad's west button, Space) and, from a
 hardware keyboard, "/" or Ctrl+F. The box takes TEST THIS PC's room: a field showing what is typed ("Type a name or
-disc ID" until then), a primary DONE, and an on-screen keyboard of 44 px keys in four rows 4 px apart (digits, three
-QWERTY rows with `-`, `.`, `'`, SPACE and DELETE), so a row of cards still fits at 1280 x 720. The grid shows the
-games whose name or disc ID holds what is typed, ignoring case, without the add card or the demos; the count reads
-"3 of 40 titles", and no match says "No games match". A hardware keyboard types straight in (SDL's text input is on
+disc ID" until then) and, 4 px under it, the player's shared on-screen keyboard (`src/player/ui/ui_keyboard.c`, the
+nickname editor's too). Its keys are small controls (34 px at 100% text) in rows 4 px apart, the last 8 px below
+the others: digits, three QWERTY rows with `'`, `,`, `.` and `-`, a row of symbols, and SHIFT, SPACE, DELETE, CANCEL
+and DONE. The letters are lower case until SHIFT. The field is a key's height, so a row of cards still fits under
+the box at 1280 x 720; with larger text the grid scrolls under it.
+The box takes printable characters, up to 63 bytes. The grid shows the games whose name or disc ID holds what is
+typed, ignoring case, without the add card or the demos; the count reads "3 of 40 titles", and no match says "No
+games match". With a controller the keyboard's shortcuts work while the box is open: X deletes, Y types a space, L
+or R is SHIFT and Start is DONE (instead of the next tab and Settings). DONE moves focus to the first match, and the
+box stays open. A hardware keyboard types straight in, through the same filter and limit (SDL's text input is on
 while the box is open, so an input method works too), Backspace deletes, and letters that are launcher shortcuts
 (O, S, D, Q, E) are typed instead. Opened from the keyboard, focus is on DONE, so Enter moves to the first match; from
-a controller or the mouse, on Q. Esc or B clears and closes the box and focus returns to FIND. The prompt bar reads
-MOVE, SELECT and CLEAR while it is open.
+a controller or the mouse, on q. CANCEL, Esc or B clears and closes the box and focus returns to FIND. The prompt bar
+reads MOVE, SELECT, DELETE, DONE and CLEAR while it is open.
 
-The sorts are those three, with room for a compatibility tier later (#1731). Find is one
+The sorts are those three. Find is one
 model for every input: a Find action (a button, and a controller button) opens a find box that filters the library
 as you type, with an on-screen keyboard for controllers, and Esc or B clears and closes it. Typing a letter to open it
 would collide with the letter shortcuts, so "/" and Ctrl+F open it from a hardware keyboard and every letter shortcut stays (#1742). A library holds up to 4096 games; only the page shown reads
@@ -379,7 +391,11 @@ Stop the game to rebuild or change settings." The input note about decrypted fil
 still needs them. Main column: eyebrow LIBRARY › TITLE, the name in `TITLE_XL`, the disc ID in `DATA`, the status
 pill and tag (YOUR DISC, BETA / UNOFFICIAL or the disc check's word, as on the card), then for a checked disc
 one `BODY_S` `muted` sentence on what the check found (for UNKNOWN DUMP: not shown to be retail, not modified,
-since Redump's PSP list names no disc IDs), one action row on the column's left edge with every button 52 px (the primary action, PLAY when
+since Redump's PSP list names no disc IDs), then a PICTURE card when the last run of this game fell back to a
+slower drawing path (#2151): a DRAWN IN SOFTWARE pill in the brand blue, as a fact and not a warning, one `BODY_S`
+`paper` paragraph naming the renderer that did not start and what that costs (Internal resolution has no effect, the
+game may run slower, a graphics driver update may help), and a small Hide button, never the default focus, that hides
+that fallback's notice for the rest of the session; then one action row on the column's left edge with every button 52 px (the primary action, PLAY when
 the package is ready, STARTING… while the launch starts, STOP GAME while a game runs, then SAVES (the
 [Saves](#saves-built) dialog) and BACK), and the WHAT TO EXPECT card. Its eyebrow carries a player tier chip (PERFECT and PLAYABLE `ready`, IN-GAME
 and MENU `info`, TITLE SCREEN `warning`, WON'T BOOT `error`; no chip for a title no one has tried). Below it come
@@ -392,9 +408,12 @@ switch 60 FPS GAME LOGIC: ON or OFF (`PRIMARY` while on, never the default focus
 runs or the title's package builds), then a `BODY_S` line saying it is an optional enhancement made for this game
 and that off plays the original game as released ([ENHANCEMENT_CONTRACT.md](ENHANCEMENT_CONTRACT.md#9-declarative-frame-rate-rescale-packages-60-hz-logic)
 section 9). When the switch is saved on but the package is gone, the card stays and says why in `error`, and the
-primary action reads ENHANCEMENT UNAVAILABLE. Under the cards, REMOVE FROM LIBRARY (a `DANGER` button) for a disc the user added. It is left off
-the showcase demos, and also while that game starts or runs, a package builds or a disc is being copied. Prompt
-bar: MOVE, SELECT, BACK.
+primary action reads ENHANCEMENT UNAVAILABLE. Under the cards, one row that wraps at a larger text size: ADD TO
+STEAM (the [Add to Steam](#add-to-steam-built) dialog), REPORT A PROBLEM, and REMOVE FROM LIBRARY (a `DANGER`
+button). ADD TO STEAM and REMOVE FROM LIBRARY are for a disc the user added and are left off the showcase demos;
+ADD TO STEAM is also left off a disc whose ID is not letters, digits, `-` and `_`, which a shortcut cannot name.
+REMOVE FROM LIBRARY is also left off while that game starts or runs, a package builds or a disc is being copied.
+Prompt bar: MOVE, SELECT, BACK.
 
 ### Stop game (built)
 
@@ -460,13 +479,36 @@ runs." The save folder is `<saves>/<DISC_ID>`, the game's Memory Stick; backups 
 `-before-add` or `-before-remove` ending for the automatic ones. Nothing is uploaded and nothing is deleted
 automatically. Prompt bar: MOVE, SELECT, BACK.
 
+### Add to Steam (built)
+
+ADD TO STEAM on the title page opens a flow card, 640 px wide, over it (#2152). It finds Steam and its accounts on
+this PC when it opens and writes nothing until ADD TO STEAM is chosen. The eyebrow is ADD TO STEAM with an
+`accent_dark` diamond, then the game's name in `TITLE` and one `BODY_S` `muted` line: "Adds a shortcut to your
+Steam library that starts this game directly, for Steam Input and Big Picture. Nakagawa changes only Steam's list
+of non-Steam games on this PC, after saving a copy of it, and downloads nothing." A box follows: STARTS in
+`LABEL_S` `muted` over the command in `DATA` (the program's file name and its launch options, such as
+`nakagawa_player.exe --launch-title=ULUS10041`), and, for a single account, STEAM ACCOUNT over its name. With
+several accounts, WHICH STEAM ACCOUNT? in `LABEL_S` `muted` heads a row of small buttons, one per account, named
+with the account's Steam name (or "Account *ID*" when Steam has no name for it); the chosen one is `PRIMARY` and
+reads "CHOSEN: *name*", so colour is not the only sign. One `BODY_S` `muted` line says "Exit Steam first: it
+rewrites this list when it exits."; a portable copy adds that moving its folder needs Add to Steam again here. Then
+ADD TO STEAM (`PRIMARY`, the first focus: it only adds, after a backup) and BACK.
+
+A `BODY_S` line under the buttons says what the last add did and what to do, in `ready` for an added or updated
+shortcut and `warning` for a refusal: added (start Steam to find it; no restart is needed; where the copy of the
+list from before is), updated (the game's shortcut from another Nakagawa folder now starts this one; its play time
+and collections stay), already there (nothing changed), Steam running (nothing changed; exit Steam, then choose
+Add to Steam again; no restart follows), the list unreadable (left as it was), or no verified backup (nothing
+changed). With no Steam, no signed-in account, or a system where Nakagawa cannot find Steam itself, the card shows
+only that sentence in `warning` and BACK. Back closes the card. Prompt bar: MOVE, SELECT, BACK.
+
 ### About (built)
 
 Reached from the top bar's ABOUT tab (L / R or Q / E switch tabs; Back returns to the screen it was opened from). A centred
 880 px column:
 
 - the N1 mark at 72 px beside `NAKAGAWA RECOMP` in `DISPLAY_XL`, with the version line under it in `LABEL_L`
-  accent, exactly `v0.0.1 (MM-DD-YYYY)`;
+  accent: `v`, then `NK_PLAYER_VERSION`, then the build date as `(MM-DD-YYYY)`, for example `v0.0.2 (11-07-2026)`;
 - a `BODY_L` `muted` line saying what it is (a PSP static recompiler: your own game, recompiled to run natively),
   followed by the privacy promise;
 - a LICENCE card (GPL-3.0-or-later, and a THIRD-PARTY NOTICES button that opens the existing licences screen) beside
@@ -524,21 +566,74 @@ is as wide as the widest label, and the sentences go under the buttons when besi
 PLAY MODE closes the GAME card (the play modes, docs/ENHANCEMENT_CONTRACT.md section 10): its value is the library's
 default (AUTHENTIC: OPTIONS or ENHANCED: OPTIONS; Authentic for a new library), and it opens Settings > Enhanced, a
 dialog card in the same pattern: PLAY MODE, then one row per Enhanced part from the player's part table (TEXTURE
-FILTERING 16x, 8x, 4x, 2x, Off; CRISP SYSTEM TEXT; SPEED READOUT; GAME BADGE; SMOOTH MOTION; CLEAN PITCHED SOUND,
-off by default), each beside a sentence
-that says what it does and what it costs. A new part is a new row with no change to the page. While the mode is
+FILTERING 16x, 8x, 4x, 2x, Off; CRISP SYSTEM TEXT; SPEED READOUT; GAME BADGE; WIDESCREEN; SMOOTH MOTION; CLEAN
+PITCHED SOUND; FINER PATCHES; WIDER CULLING; SHARPER ENLARGING; STICK DEAD ZONE; SHORT LOADS; FULL 32-BIT COLOUR; a
+new library has 16x filtering, crisp text and the badge on and the rest off, and a graphics preset sets SHARPER
+ENLARGING and CRISP SYSTEM TEXT in Enhanced and Ace, below), each beside a sentence that says what it does and what it
+costs. A new part is a new row with no change to the page. While the mode is
 Authentic the part rows are disabled (`dim`, not focusable) and keep their values. The title page's ENHANCEMENTS
 card shows PLAY MODE for every game (LIBRARY DEFAULT, AUTHENTIC, ENHANCED, and ACE only for a game with a usable
 package; `PRIMARY` while Enhanced or Ace is in effect, never the default focus), ENHANCED OPTIONS, which opens the
 same page for that game alone (its play mode, and each part on LIBRARY (16X) or its own value; Done returns
-to the title page), one or two lines of what is on and the last session, and, while Ace is in effect, Ace's 60 FPS
-switch beside them. A library card where Enhanced or Ace is in effect carries an `ENHANCED` or `ACE` badge at the
+to the title page), and, while Ace is in effect, Ace's 60 FPS switch in the same row. Under the buttons come what is
+on and, as its own `BODY_S` `muted` paragraph, the last session. Both sentences wrap whole, however many parts are
+on: the page body scrolls, so the card grows instead of ending either one in an ellipsis. A library card where Enhanced or Ace is in effect carries an `ENHANCED` or `ACE` badge at the
 art's top right. In game, the pause menu's caption names the mode and its parts and its Settings page has a live
 SPEED READOUT row; the launch notice (ENHANCED or ACE, top right, 3 s, a cut with Reduce motion) and the readout
 (top left) are chips on the 16 px safe area.
+GRAPHICS PRESET is the GAME card's last row (#2150). It steps through LOW, MEDIUM, HIGH, ULTRA and HANDHELD.
+A preset is used only by Enhanced and Ace sessions, where its values take the place of the RESOLUTION, SCALING,
+VSYNC and GAME FULLSCREEN rows and of two Enhanced parts' library values, CRISP SYSTEM TEXT and SHARPER ENLARGING
+(the FSR 1 upscaler). Choosing one changes none of those rows or parts, and an Authentic session always runs with
+the rows as the user set them, whatever the preset. The reason is that a render scale above 1x is not host-only: every
+present commits the frame to guest VRAM, so a game that copies its screen (a save picture) keeps the larger picture
+(`docs/ENHANCEMENT_CONTRACT.md` section 10.3, Pixels), and Authentic launch output must not change with a
+preset. Editing one of the rows a preset sets makes it CUSTOM, which means the rows apply in every session and
+the parts the preset set keep its values as the library's (below); GAME FULLSCREEN does so only under HANDHELD, the
+one preset that sets it. While a preset is chosen, the page's notice
+line says that it is used in Enhanced and Ace, names the parts it turns on and off, and says that Authentic uses
+the rows, in short words (`High is used in Enhanced and Ace, with crisp text on and FSR 1 off. Authentic uses your
+settings.`, the longest, on one line at 960 x 540 and 853 x 480). The settings file keeps the
+preset's name beside the rows, and a file without it, or with a name this build doesn't know, loads as CUSTOM. The
+values are the project's choice, and FSR 1's cost is measured only on an RTX 3080 (`docs/SETUP.md`). They live in one
+table, `k_graphics_presets` in `src/player/player_state.c`:
+
+| Preset | Resolution | Scaling | VSync | Game fullscreen | Crisp system text | Sharper enlarging |
+| --- | --- | --- | --- | --- | --- | --- |
+| LOW | 1x (480x272) | Sharp | On | the row's | On | Off |
+| MEDIUM | 2x | Sharp | On | the row's | On | On |
+| HIGH | 4x | Sharp | On | the row's | On | Off |
+| ULTRA | 4x | Sharp | On | the row's | On | On |
+| HANDHELD | 2x | Sharp | On | On | On | On |
+
+A preset sets only presentation parts, which never reach the guest. CRISP SYSTEM TEXT draws the on-screen keyboard at
+the window's size and costs nothing while the keyboard is down, so every preset turns it on. SHARPER ENLARGING runs
+only where the window enlarges the frame on both axes. AMD's published FSR 1 quality modes span 1.3x (Ultra Quality)
+to 2x (Performance) per axis ([GPUOpen: FidelityFX Super Resolution
+1](https://gpuopen.com/fidelityfx-superresolution/)). MEDIUM's and HANDHELD's 2x frame on a 1080p or handheld screen
+and ULTRA's 4x frame on a 1440p or 4K screen are in that range; on a 1440p or 4K screen MEDIUM's and HANDHELD's frame
+is enlarged 2.7x to 4x, past it, where HIGH or ULTRA is the better choice. LOW turns it off: its 1x frame is enlarged
+about 4x or more on any screen of 1080p or more, past that range everywhere, and LOW is for the weakest GPUs, where
+every pass counts. HIGH turns it off as ULTRA without it, the plain 4x picture. Where the GPU renderer cannot run FSR
+1, the normal scaling filter stays, as for the part. `fsr1-selftest` reports the pass's cost at each of these sizes
+(`docs/SETUP.md`). No preset sets frame pacing, the play mode, SMOOTH MOTION, WIDESCREEN, TEXTURE FILTERING, CLEAN
+PITCHED SOUND, FINER PATCHES, STICK DEAD ZONE, SHORT LOADS, WIDER CULLING, FULL 32-BIT COLOUR, the SPEED READOUT or
+the GAME BADGE: they change timing, framing, input, guest-visible output or the HUD, or have no measured cost on
+low-end GPUs, so they stay the library's and each game's.
+
+The parts a preset sets are resolved with the rest (`player_play_resolve`): a game's own value, else the preset's,
+else the library's, so the launch line, `SR_PRESENT_UPSCALE` and both Enhanced pages agree. Settings > Enhanced shows
+a part the preset sets with the preset's value and name (`ON (ULTRA)`), and a game's page following the library shows
+that value (`LIBRARY (ON)`). With an Authentic library the rows are dimmed but keep those values, for when a game
+plays in Enhanced. Editing such a part on Settings > Enhanced steps from the value shown and sets the preset to
+CUSTOM. Going CUSTOM by any edit keeps what the pages showed: the parts the preset set become the library's values
+(`graphics_preset_row_edited`), so editing RESOLUTION under ULTRA leaves SHARPER ENLARGING on. Editing a part for one
+game keeps the preset, since the game's own value wins over it. A settings file from v0.0.2 with a preset chosen keeps
+its library parts as written, and an Enhanced session takes the preset's parts over them (HIGH with SHARPER ENLARGING
+on in the library launches with FSR 1 off; the page says `OFF (HIGH)`).
 Left and Right move between the two cards along a row (`NK_UI_BUTTON_ROW`), so CONTROLLER SETTINGS is reached from
 SCALING. Every change is saved as it is made. Below a 680 px tall window the `SETTINGS` heading is left out (the tab names the
-page) so every row fits 960 x 540. The tabbed layout below is the target for a later pass:
+page) so every row fits 960 x 540. The tabbed layout below is a design that is not built:
 
 - Top bar with SETTINGS active; `SETTINGS` in `DISPLAY`; a tab row (`LABEL`, 10/12 px padding, 3 px accent rule
   under the active tab, `line` underneath): DISPLAY, AUDIO, CONTROLS, PATHS AND STORAGE, ACCESSIBILITY, ABOUT.
@@ -621,13 +716,12 @@ developer mode ends. The screens keep their width, so the panel covers their rig
 Built now: the setup wizard's four steps (Welcome, Options, Game, Verify) on the existing wizard state, in the
 dialog card the build and error screens use. Copying the disc's files at Verify ends on the library card, where the
 game is built and played, and the PSP fonts are imported in Settings > PSP fonts, so the step chips name only those
-four steps. The older Fonts and Ready step states remain only for state-only callers and the old renderer.
-Options ("Online and developer options", [`ONLINE_FEATURES.md`](ONLINE_FEATURES.md)) comes right after Welcome because it needs no game: one plain line that online features aren't built yet (the
-Online mode switch returns with them), one switch row (a 220 px button reading "Developer mode: On" or "Off",
+four steps. The older Fonts and Ready step states remain only for state-only callers.
+Options ("Online and developer options", [`ONLINE_FEATURES.md`](ONLINE_FEATURES.md)) comes right after Welcome because it needs no game: one plain line that online features aren't built (an Online mode switch shows only when a stored setting has online mode on), one switch row (a 220 px button reading "Developer mode: On" or "Off",
 accent while on, with its sentence beside it), then CONTINUE (the default focus, so Enter never flips a switch), SKIP and BACK. A strip of step chips sits at the top (current: accent fill; done:
 `ready` edge and a check); each step has one primary action first, then Back and Cancel. Every control returns
 `PLAYER_UI_ACTION_WIZARD` with an op that `main.c` runs through the handlers the existing wizard calls. The Welcome
-step says the privacy promise once. The left rail below is the target layout for a later pass:
+step says the privacy promise once. The left rail below is a design that is not built:
 
 - Left rail 260 px (32/24 px padding, `line` edge on the right) listing the steps: Welcome, Disc image, System
   fonts, Build, Play. There is no key-file step. Each step is 44 px with a 26 px numbered circle (`line_strong`
@@ -699,8 +793,10 @@ Drawn by the runtime over the frozen game frame under the `scrim` while the game
 - Focus ring 7.2:1 on the ground, at least 6.1:1 on any surface, 4.4:1 over the brightest wave point and 3.7:1 on
   the scrim over a white game frame; high-contrast focus for any background, from Settings > Accessibility or a
   Windows contrast theme.
-- Targets are at least 44 px high; the interface size (100 to 200%) scales the whole layout through the density,
-  and the text size (100, 125 or 150%) scales type alone, with the layout reflowing around it.
+- Targets are at least 44 px high, except small controls (34 px at 100% text): the library's heading-row buttons
+  and the on-screen keyboard's keys, small so that a row of cards still fits under the find box at 1280 x 720. The
+  interface size (100 to 200%) scales the whole layout through the density, and the text size (100, 125 or 150%)
+  scales type alone, with the layout reflowing around it.
 - Reduce motion holds the waves and makes transitions cuts; Automatic follows Windows' Animation effects.
 - Launcher sounds are off by default and never replace a visual cue.
 

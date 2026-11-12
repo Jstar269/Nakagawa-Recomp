@@ -8,11 +8,13 @@
 # Split out of the root Makefile (#1531), text unchanged: the nk_ui and player UI test binaries and the parser fuzz target.
 # The root Makefile includes it where the text used to be, so evaluation order is unchanged.
 
-# $(1) object directory, $(2) compile flags. Objects compile in source order and the first
-# failure stops the line, as it stopped each per-binary compile before.
+# $(1) object directory, $(2) compile flags. Objects compile in source order, one recipe line
+# each, and the first failure stops the recipe, as it stopped each per-binary compile before.
+# Separate lines rather than `cc ... && cc ... && true`: cmd.exe has no `true`, so under the
+# cmd.exe fallback the chain compiled every object and then failed (#368).
 define NC_COMPILE_OBJECTS
 @"$(PYTHON)" -c "import os, sys; os.makedirs(sys.argv[1], exist_ok=True)" $(1)
-$(foreach s,$(NC_SOURCES),$(CC) $(2) -c $(s) -o $(1)/$(notdir $(s:.c=.o)) &&) true
+$(foreach s,$(NC_SOURCES),$(CC) $(2) -c $(s) -o $(1)/$(notdir $(s:.c=.o))$(NEWLINE))
 endef
 
 native-core-objects-core:
@@ -24,7 +26,7 @@ native-core-objects-player:
 # Test-binary recipes, shared by the standalone *-test-bin targets and native-core-tests.
 define PLAYER_STATE_TEST_BIN_CMD
 $(CC) -std=c99 -Wall -Wextra -DNK_TITLE_MANIFEST_TEST_SEAMS -DNK_SAVES_TEST_SEAMS -Isrc/core -Isrc/core/generated -Isrc/rt -Isrc/player -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" \
-	$(PLAYER_CORE_SOURCES) $(PLAYER_PLAT_SOURCES) src/player/input_settings.c src/player/player_state.c src/player/iso_reader.c src/player/package_builder.c src/player/setup_staging.c \
+	$(PLAYER_CORE_SOURCES) $(PLAYER_PLAT_SOURCES) src/player/input_settings.c src/player/player_state.c src/player/discord_presence.c src/player/iso_reader.c src/player/package_builder.c src/player/setup_staging.c \
 	tests/native/native_test_isolation.c tests/native/test_player_state.c $(PLAYER_EXTRA_LIBS) -o $(BUILD_ROOT)/test_player_state$(EXE_EXT)
 endef
 
@@ -42,6 +44,13 @@ endef
 # never the internet (AGENTS.md section 5). Runs from the repository root for the fixture.
 # It signs with a TEST-ONLY key of its own and, when the build embeds the update-signing
 # key, checks that the embedded key reads back.
+# Discord status (#2259): the protocol on a fake transport, and on Windows a fake pipe
+# server of its own (a test-only pipe name). It never opens Discord's own pipes.
+define DISCORD_PRESENCE_TEST_BIN_CMD
+$(CC) $(NC_CFLAGS_PLAYER) -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(NC_OBJS_PLAYER) src/player/discord_presence.c \
+	tests/native/native_test_isolation.c tests/native/test_discord_presence.c $(PLAYER_PLATFORM_LIBS) -o $(BUILD_ROOT)/test_discord_presence$(EXE_EXT)
+endef
+
 define UPDATE_CHECK_TEST_BIN_CMD
 $(CC) $(NC_CFLAGS_PLAYER) -Ithird_party/monocypher $(NK_UPDATE_KEY_DEFS) -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(NC_OBJS_PLAYER) src/player/package_builder.c src/player/update_check.c $(UPDATE_SIG_SRCS) \
 	tests/native/native_test_isolation.c tests/native/test_update_check.c $(PLAYER_EXTRA_LIBS) -o $(BUILD_ROOT)/test_update_check$(EXE_EXT)
@@ -104,14 +113,14 @@ player-ui-tests: osk-overlay-paint-selftest ui-font-selftest nk-ui-player-screen
 ifeq ($(SDL3_TTF_AVAILABLE),yes)
 ifeq ($(strip $(NK_UI_CAPTURE_DIR)),)
 nk-ui-player-screens-capture:
-	@echo "ERROR: set NK_UI_CAPTURE_DIR to a directory for synthetic screen captures"; exit 2
+	$(error set NK_UI_CAPTURE_DIR to a directory for synthetic screen captures)
 else
 nk-ui-player-screens-capture: export SDL_VIDEODRIVER := dummy
 nk-ui-player-screens-capture: export SDL_RENDER_DRIVER := software
 nk-ui-player-screens-capture:
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_ROOT)').mkdir(parents=True, exist_ok=True)"
 	$(CC) -std=c99 -Wall -Wextra -Wpedantic -Werror -DNK_UI_WITH_SDL -DNK_UI_WITH_SDL_TTF -DNK_UI_SCREEN_CAPTURE \
-		-Isrc/ui -Isrc/player/ui -Ithird_party/clay $(SDL3_TTF_CFLAGS) \
+		-Isrc/core -Isrc/player -Isrc/ui -Isrc/player/ui -Ithird_party/clay $(SDL3_TTF_CFLAGS) \
 		-DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" \
 		$(NK_UI_CORE_SRCS) src/ui/nk_ui_ttf.c src/ui/backend/nk_ui_sdlr.c \
 		src/player/ui/ui_router.c src/player/ui/scr_library.c $(NK_UI_PLAYER_TITLE_SRCS) \
@@ -156,7 +165,7 @@ ed25519-verify-selftest:
 	$(call ED25519_VERIFY_SELFTEST_CMD)
 
 # The ad hoc relay's wire format (src/core/nk_adhoc_relay.c, #1139): every lobby and relay packet
-# byte by byte, the server's login rules, partial and refused input, and the port offset. No socket
+# byte by byte, PPSSPP's login checks, partial and refused input, and the port offset. No socket
 # and no network.
 RELAY_CODEC_SELFTEST_SRCS := src/core/nk_adhoc_relay.c tests/native/test_nk_adhoc_relay.c
 define RELAY_CODEC_SELFTEST_CMD
@@ -184,6 +193,37 @@ adhoc-net-selftest:
 relay-codec-selftest:
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_ROOT)').mkdir(parents=True, exist_ok=True)"
 	$(call RELAY_CODEC_SELFTEST_CMD)
+# The console nickname rule (#2197, src/core/nk_nickname.h) that the player's Nickname setting
+# and the runtime's SR_NICKNAME share: the default, the 32-byte cap and the refused values.
+define NK_NICKNAME_SELFTEST_CMD
+	$(CC) -std=c99 -Wall -Wextra -Wpedantic -Werror -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" -Isrc/core tests/native/test_nk_nickname.c \
+		-o $(BUILD_ROOT)/test_nk_nickname$(EXE_EXT)
+	$(BUILD_ROOT_RUN)/test_nk_nickname$(EXE_EXT)
+endef
+
+.PHONY: nk-nickname-selftest
+nk-nickname-selftest:
+	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_ROOT)').mkdir(parents=True, exist_ok=True)"
+	$(call NK_NICKNAME_SELFTEST_CMD)
+
+# The RetroAchievements bridge (src/core/nk_achievements.c, #1316) on the vendored rcheevos
+# rc_client, against an in-process fake server: login, game load, a softcore unlock on synthetic
+# guest memory, the PSP memory map's bounds and the retroachievements.org-only request gate.
+# No socket and no network. gnu99, not c99: rcheevos calls strdup and strcasecmp, which glibc
+# declares only outside strict ISO mode; its runtime needs libm (fmod).
+ACHIEVEMENTS_SELFTEST_SRCS := src/core/nk_achievements.c $(wildcard third_party/rcheevos/src/*.c) \
+	$(wildcard third_party/rcheevos/src/rapi/*.c) $(wildcard third_party/rcheevos/src/rcheevos/*.c) \
+	third_party/rcheevos/src/rhash/md5.c tests/native/test_nk_achievements.c
+define ACHIEVEMENTS_SELFTEST_CMD
+	$(CC) -std=gnu99 -Wall -Wextra -Isrc/core -Ithird_party/rcheevos/include $(ACHIEVEMENTS_SELFTEST_SRCS) \
+		-lm -o $(BUILD_ROOT)/test_nk_achievements$(EXE_EXT)
+	$(BUILD_ROOT_RUN)/test_nk_achievements$(EXE_EXT)
+endef
+
+.PHONY: achievements-selftest
+achievements-selftest:
+	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_ROOT)').mkdir(parents=True, exist_ok=True)"
+	$(call ACHIEVEMENTS_SELFTEST_CMD)
 
 .PHONY: nk-ui-core-selftest
 nk-ui-core-selftest:
@@ -197,7 +237,8 @@ nk-ui-core-selftest:
 .PHONY: nk-ui-player-screens-selftest
 nk-ui-player-screens-selftest:
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_ROOT)').mkdir(parents=True, exist_ok=True)"
-	$(CC) -std=c99 -Wall -Wextra -Wpedantic -Werror -Isrc/ui -Isrc/player/ui -Ithird_party/clay \
+	$(CC) -std=c99 -Wall -Wextra -Wpedantic -Werror \
+		-Isrc/core -Isrc/player -Isrc/ui -Isrc/player/ui -Ithird_party/clay \
 		-DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" \
 		$(NK_UI_CORE_SRCS) $(filter-out src/player/ui/player_ui_nk.c,$(NK_UI_PLAYER_C5_SRCS)) \
 		tests/native/test_player_screens.c -lm -o $(BUILD_ROOT)/test_player_screens$(EXE_EXT)
@@ -221,7 +262,7 @@ nk-ui-overlay-screens-selftest:
 ifeq ($(SDL3_TTF_AVAILABLE),yes)
 ifeq ($(strip $(NK_UI_CAPTURE_DIR)),)
 nk-ui-overlay-screens-capture:
-	@echo "ERROR: set NK_UI_CAPTURE_DIR to a directory for overlay captures"; exit 2
+	$(error set NK_UI_CAPTURE_DIR to a directory for overlay captures)
 else
 nk-ui-overlay-screens-capture: export SDL_VIDEODRIVER := dummy
 nk-ui-overlay-screens-capture: export SDL_RENDER_DRIVER := software
@@ -248,6 +289,7 @@ endif
 # The host is runtime code and always needs SDL3, so the SKIP variant builds the test alone.
 .PHONY: nk-ui-overlay-host-selftest
 nk-ui-overlay-host-selftest:
+	$(NK_REQUIRE_POSIX_SHELL)
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_ROOT)').mkdir(parents=True, exist_ok=True)"
 	@sdl_defs=""; sdl_libs=""; host_srcs=""; \
 	if printf '%s\n' '#include <SDL3/SDL.h>' '#include <SDL3_ttf/SDL_ttf.h>' '#include <SDL3_ttf/SDL_textengine.h>' | $(CC) -E -x c $(SDL3_INC_FLAGS) - >/dev/null 2>&1; then \
@@ -272,6 +314,7 @@ nk-ui-overlay-host-selftest:
 # succeeds, so a skip is visible in the log but does not fail native-core-tests.
 .PHONY: nk-ui-sdlr-selftest
 nk-ui-sdlr-selftest:
+	$(NK_REQUIRE_POSIX_SHELL)
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_ROOT)').mkdir(parents=True, exist_ok=True)"
 	@sdl_defs=""; sdl_libs=""; \
 	if printf '%s\n' '#include <SDL3/SDL.h>' '#include <SDL3_ttf/SDL_ttf.h>' '#include <SDL3_ttf/SDL_textengine.h>' | $(CC) -E -x c $(SDL3_INC_FLAGS) - >/dev/null 2>&1; then \
@@ -299,6 +342,7 @@ NK_UI_VK_REQUIRE ?=
 NK_UI_VK_SELFTEST_LIBS := $(if $(filter Windows_NT,$(OS)),,-ldl)
 .PHONY: nk-ui-vk-selftest
 nk-ui-vk-selftest:
+	$(NK_REQUIRE_POSIX_SHELL)
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_ROOT)').mkdir(parents=True, exist_ok=True)"
 	@vk_defs=""; \
 	if printf '%s\n' '#include <vulkan/vulkan.h>' | $(CC) -E -x c $(VULKAN_INC_FLAGS) - >/dev/null 2>&1; then \
@@ -326,6 +370,7 @@ nk-ui-vk-selftest:
 native-core-tests: ace-smooth-selftest
 .PHONY: ace-smooth-selftest
 ace-smooth-selftest: shader-verify
+	$(NK_REQUIRE_POSIX_SHELL)
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_ROOT)').mkdir(parents=True, exist_ok=True)"
 	@if ! printf '%s\n' '#include <vulkan/vulkan.h>' | $(CC) -E -x c $(VULKAN_INC_FLAGS) - >/dev/null 2>&1; then \
 		echo "SKIP ace-smooth-selftest (the Vulkan headers were not found)"; \
@@ -352,6 +397,7 @@ ace-smooth-selftest: shader-verify
 native-core-tests: fsr1-selftest
 .PHONY: fsr1-selftest
 fsr1-selftest: shader-verify
+	$(NK_REQUIRE_POSIX_SHELL)
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_ROOT)').mkdir(parents=True, exist_ok=True)"
 	@if ! printf '%s\n' '#include <vulkan/vulkan.h>' | $(CC) -E -x c $(VULKAN_INC_FLAGS) - >/dev/null 2>&1; then \
 		echo "SKIP fsr1-selftest (the Vulkan headers were not found)"; \
@@ -366,6 +412,31 @@ fsr1-selftest: shader-verify
 	elif [ $$rc -eq 77 ]; then echo "SKIP fsr1-selftest (exit 77)"; \
 	elif [ $$rc -ne 0 ]; then echo "FAIL fsr1-selftest (exit $$rc)"; exit $$rc; fi
 
+# anime4k-selftest - the movie upscaler (src/rt/gpu_sdl3vk/anime4k_pass.c, Anime4K CNN x2 M from
+# third_party/anime4k) on a headless Vulkan device, beside FSR 1: one stage at 2x lands closer to a
+# supersampled line-art truth than FSR 1 at 2x by a measured margin; a flat colour stays within 2
+# through two stages; the source image is never written; the stage rule and SR_MOVIE_UPSCALE values
+# hold; a size past the device's image limit is refused without building images and the last good
+# size is kept; a size whose images cannot be made is built once, not tried again. Linked from the two passes, the C library and libm alone. No Vulkan headers, loader or
+# device: SKIP (exit 77), visible in the log; NK_UI_VK_REQUIRE=1 makes a skip fail.
+native-core-tests: anime4k-selftest
+.PHONY: anime4k-selftest
+anime4k-selftest: shader-verify
+	$(NK_REQUIRE_POSIX_SHELL)
+	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_ROOT)').mkdir(parents=True, exist_ok=True)"
+	@if ! printf '%s\n' '#include <vulkan/vulkan.h>' | $(CC) -E -x c $(VULKAN_INC_FLAGS) - >/dev/null 2>&1; then \
+		echo "SKIP anime4k-selftest (the Vulkan headers were not found)"; \
+		if [ "$(NK_UI_VK_REQUIRE)" = 1 ]; then exit 1; fi; exit 0; \
+	fi; \
+	$(CC) -std=c99 -O2 -Wall -Wextra -Wpedantic -Werror -Isrc/rt -Isrc/rt/gpu_sdl3vk $(VULKAN_INC_FLAGS) \
+		src/rt/gpu_sdl3vk/fsr1_pass.c src/rt/gpu_sdl3vk/anime4k_pass.c src/rt/gpu_sdl3vk/anime4k_pass_selftest.c \
+		$(NK_UI_VK_SELFTEST_LIBS) -lm -o $(BUILD_ROOT)/anime4k_selftest$(EXE_EXT) || exit 1; \
+	rc=0; $(BUILD_ROOT_RUN)/anime4k_selftest$(EXE_EXT) || rc=$$?; \
+	if [ $$rc -eq 77 ] && [ "$(NK_UI_VK_REQUIRE)" = 1 ]; then \
+		echo "FAIL anime4k-selftest (skipped, but NK_UI_VK_REQUIRE=1 requires a Vulkan device)"; exit 1; \
+	elif [ $$rc -eq 77 ]; then echo "SKIP anime4k-selftest (exit 77)"; \
+	elif [ $$rc -ne 0 ]; then echo "FAIL anime4k-selftest (exit $$rc)"; exit $$rc; fi
+
 # ace-ui-selftest - Ace Mode's in-game UI (src/rt/gpu_sdl3vk/ace_ui.c): the readout, the launch
 # notice and the crisp keyboard laid out at the overlay's sizes and two ultrawide windows (inside
 # the 16 px safe area, apart from each other), then drawn on a headless Vulkan device over a
@@ -376,6 +447,7 @@ fsr1-selftest: shader-verify
 native-core-tests: ace-ui-selftest
 .PHONY: ace-ui-selftest
 ace-ui-selftest:
+	$(NK_REQUIRE_POSIX_SHELL)
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_ROOT)').mkdir(parents=True, exist_ok=True)"
 	@if ! printf '%s\n' '#include <vulkan/vulkan.h>' | $(CC) -E -x c $(VULKAN_INC_FLAGS) - >/dev/null 2>&1; then \
 		echo "SKIP ace-ui-selftest (the Vulkan headers were not found)"; \
@@ -404,6 +476,7 @@ NK_UI_FOCUS_SDL_READY := $(and $(filter-out none,$(SDL3_PROVIDER)),$(if $(strip 
 NK_UI_FOCUS_SDL_CFLAGS := $(if $(NK_UI_FOCUS_SDL_READY),-DNK_UI_WITH_SDL3 $(SDL3_INC_FLAGS),)
 NK_UI_FOCUS_SDL_LIBS := $(if $(NK_UI_FOCUS_SDL_READY),$(SDL3_LDFLAGS) -lSDL3,)
 nk-ui-focus-selftest:
+	$(NK_REQUIRE_POSIX_SHELL)
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_ROOT)').mkdir(parents=True, exist_ok=True)"
 	$(CC) -std=c99 -Wall -Wextra -Wpedantic -Werror -Isrc/ui -Ithird_party/clay \
 		-DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" \
@@ -418,7 +491,15 @@ nk-ui-focus-selftest:
 		if [ "$$rc" = 77 ]; then echo "SKIP nk-ui-focus-selftest SDL translation leg (exit 77): SDL3 not found by build discovery"; \
 		elif [ "$$rc" != 0 ]; then exit "$$rc"; fi
 
-native-core-tests: cpu-lle-selftest domain-mode-selftest native-core-objects-core native-core-objects-player $(LIBCHDR_LIB) clay-layout-selftest nk-ui-core-selftest nk-ui-player-screens-selftest nk-ui-overlay-screens-selftest nk-ui-overlay-host-selftest nk-ui-sdlr-selftest nk-ui-vk-selftest nk-ui-focus-selftest
+.PHONY: shared-helpers-selftest
+shared-helpers-selftest:
+	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_ROOT)').mkdir(parents=True, exist_ok=True)"
+	$(CC) $(NC_CFLAGS_CORE) -Werror -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" \
+		src/core/nk_shared_helpers.c tests/native/test_shared_helpers.c \
+		-o $(BUILD_ROOT)/test_shared_helpers$(EXE_EXT)
+	$(BUILD_ROOT_RUN)/test_shared_helpers$(EXE_EXT)
+
+native-core-tests: cpu-lle-selftest domain-mode-selftest nkstate-selftest native-core-objects-core native-core-objects-player $(LIBCHDR_LIB) clay-layout-selftest nk-ui-core-selftest nk-ui-player-screens-selftest nk-ui-overlay-screens-selftest nk-ui-overlay-host-selftest nk-ui-sdlr-selftest nk-ui-vk-selftest nk-ui-focus-selftest shared-helpers-selftest
 	$(CC) -std=c99 -Wall -Wextra -Isrc/rt -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" src/rt/pgf_public.c \
 		tests/native/test_pgf_public.c -o $(BUILD_ROOT)/test_pgf_public$(EXE_EXT)
 	$(BUILD_ROOT_RUN)/test_pgf_public$(EXE_EXT)
@@ -434,6 +515,7 @@ native-core-tests: cpu-lle-selftest domain-mode-selftest native-core-objects-cor
 	$(CC) $(NC_CFLAGS_CORE) -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(NC_OBJS_CORE) \
 		tests/native/native_test_isolation.c tests/native/test_launch_resolution.c $(PLAYER_PLATFORM_LIBS) -o $(BUILD_ROOT)/test_launch_resolution$(EXE_EXT)
 	$(BUILD_ROOT_RUN)/test_launch_resolution$(EXE_EXT)
+	$(call NK_NICKNAME_SELFTEST_CMD)
 	$(call PLAYER_STATE_TEST_BIN_CMD)
 	$(BUILD_ROOT_RUN)/test_player_state$(EXE_EXT)
 	$(call INPUT_SETTINGS_TEST_BIN_CMD)
@@ -442,6 +524,8 @@ native-core-tests: cpu-lle-selftest domain-mode-selftest native-core-objects-cor
 	$(BUILD_ROOT_RUN)/test_package_builder$(EXE_EXT)
 	$(call UPDATE_CHECK_TEST_BIN_CMD)
 	$(BUILD_ROOT_RUN)/test_update_check$(EXE_EXT)
+	$(call DISCORD_PRESENCE_TEST_BIN_CMD)
+	$(BUILD_ROOT_RUN)/test_discord_presence$(EXE_EXT)
 	$(CC) -std=c99 -Wall -Wextra -Isrc/core -Isrc/core/generated -Isrc/rt -Isrc/player -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" \
 		$(PLAYER_CORE_SOURCES) $(PLAYER_PLAT_SOURCES) src/player/setup_staging.c src/rt/archive_vfs.c \
 		tests/native/native_test_isolation.c tests/native/test_xb_parser.c $(PLAYER_PLATFORM_LIBS) -o $(BUILD_ROOT)/test_xb_parser$(EXE_EXT)
@@ -454,6 +538,9 @@ native-core-tests: cpu-lle-selftest domain-mode-selftest native-core-objects-cor
 	$(CC) $(NC_CFLAGS_CORE) -Wpedantic -Werror -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(NC_OBJS_CORE) \
 		tests/native/native_test_isolation.c tests/native/test_nk_zip.c $(PLAYER_PLATFORM_LIBS) -o $(BUILD_ROOT)/test_nk_zip$(EXE_EXT)
 	$(BUILD_ROOT_RUN)/test_nk_zip$(EXE_EXT)
+	$(CC) $(NC_CFLAGS_CORE) -Wpedantic -Werror -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(NC_OBJS_CORE) \
+		tests/native/native_test_isolation.c tests/native/test_steam_shortcuts.c $(PLAYER_PLATFORM_LIBS) -o $(BUILD_ROOT)/test_steam_shortcuts$(EXE_EXT)
+	$(BUILD_ROOT_RUN)/test_steam_shortcuts$(EXE_EXT)
 	$(CC) -std=c99 -O2 -Wall -Wextra -Wpedantic -Werror -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" tests/native/test_safe_math.c \
 		-o $(BUILD_ROOT)/test_safe_math$(EXE_EXT)
 	$(BUILD_ROOT_RUN)/test_safe_math$(EXE_EXT)
@@ -471,6 +558,7 @@ native-core-tests: cpu-lle-selftest domain-mode-selftest native-core-objects-cor
 	$(call ED25519_VERIFY_SELFTEST_CMD)
 	$(call RELAY_CODEC_SELFTEST_CMD)
 	$(call ADHOC_NET_SELFTEST_CMD)
+	$(call ACHIEVEMENTS_SELFTEST_CMD)
 	$(CC) $(NC_CFLAGS_CORE) -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(NC_OBJS_CORE) \
 		tests/native/native_test_isolation.c tests/native/test_portable_mode.c $(PLAYER_PLATFORM_LIBS) -o $(BUILD_ROOT)/test_portable_mode$(EXE_EXT)
 	$(BUILD_ROOT_RUN)/test_portable_mode$(EXE_EXT)

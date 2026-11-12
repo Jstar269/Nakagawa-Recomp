@@ -1,7 +1,8 @@
 # SDL3 + Vulkan GPU renderer
 
-New GPU renderer for the recompiled runtime, replacing the Win32/GDI presentation path and
-(eventually) the software GE rasterizer in `src/rt/ge.c`. Built from scratch in this
+GPU renderer for the recompiled runtime. It replaces the Win32/GDI presentation path and, with
+`SR_GPU_GE=1` (which the player sets for every launch), the software GE rasterizer in `src/rt/ge.c`,
+which stays as the fallback. Built from scratch in this
 directory — it is the project's own Vulkan backend and does **not** reuse PPSSPP's GPU. (An
 earlier PPSSPP-GPU bridge under `src/rt/gpu_vk/` was a frozen experiment and has been removed.)
 
@@ -70,8 +71,41 @@ Enabled with `SR_GPU_GE=1`. Implementation:
   (analytic bound: truncation of two products plus round-to-nearest). Shader blends are
   bit-exact to `ge.c` for non-overlapping primitives. Measured by the
   `gpu-coherence-selftest` blend-parity matrix (726 factor/equation states on synthetic
-  draws). The shader reads a batch-start destination snapshot, so overlapping primitives
-  inside one batch are not bit-exact on the shader path; the matrix does not exercise that.
+  draws). Overlapping primitives inside one batch (#2109) depend on the destination-read
+  path below.
+- Destination reads (shader blends and the stencil test, #2109). On the snapshot path every
+  primitive of a batch reads one copy of the target taken before the batch, so a primitive
+  drawn over an earlier one of the same batch blends against the pre-batch pixels, not
+  against what that primitive stored. A stencil state that reads its own writes therefore
+  starts a new batch, with a new copy, wherever a primitive's box meets the earlier ones. A
+  write-once stencil state is the exception (`stencil_write_once`: the first fragment to pass
+  at a pixel stores a stencil that rejects every later one, with no depth write that could
+  change which fragment passes): the pixel is that one fragment over the pre-batch
+  destination, so its primitives share the batch, drawn last to first, and match `ge.c` with
+  one copy. On the interlock path (`VK_EXT_fragment_shader_interlock`
+  with `fragmentShaderPixelInterlock` and `fragmentStoresAndAtomics`) such batches run
+  `psp_frag_rmw.inc`, `psp.frag` built with `-DSR_DST_INTERLOCK`. Each fragment loads the
+  target as a storage image, blends, and stores it inside a pixel-ordered interlock, so
+  overlapping primitives match `ge.c`. These batches record in a depth-only render pass with
+  the colour image in `GENERAL`. The other batches of the op keep the fixed-function pass, with
+  a barrier at each switch, and the op takes no snapshot copy. The variant tests depth early.
+  A run of these batches that holds one that writes depth and may still kill a fragment in the
+  shader (the alpha test, the color test, the transform-mode depth range when it is narrower
+  than 0–65535, or a stencil-fail KEEP) tests and writes depth in the shader instead, inside the
+  interlock and after those kills: the run's box of the D16 depth image is copied into a storage
+  buffer before its pass and back after it, bit for bit, and its pipelines test no depth. With
+  depth=32 (#2051) the depth image is D32, which that copy does not pack, so such an op keeps
+  the snapshot path. An op
+  keeps the snapshot path when its destination-reading batch textures from its own target (the
+  destination copy is its texture), and every op into a widescreen wing canvas does (it has no
+  RMW objects). The host twin (#2050) does not change the path: the image is drawn as in a
+  twin-off run, and the twin's pass of an interlock op records the same runs into the twin, which
+  it loads and stores as a storage image in place of the twin snapshot. The `submit-batch` and
+  `gpu-timestamps` cells hold the
+  snapshot path on every device, since they count and time snapshot copies. The interlock path is
+  taken where the device has it; `SR_GPU_DST_READ` forces a path. On the snapshot path the
+  device, images, render passes and default shader are made exactly as before. The
+  `gpu-coherence-selftest` dst-read cells check both paths against `ge.c`.
 - Source-premultiplied states (src factor 2·α or 1−2α with a dst factor that reads the
   source colour, and min/max with those src factors) go through the shader or drop the
   premultiply, because fixed-function blending would otherwise read the premultiplied
@@ -115,7 +149,14 @@ Enabled with `SR_GPU_GE=1`. Implementation:
   `shaderDenormPreserveFloat32`. On other devices, NVIDIA's among them, ge.c keeps T&L and
   `SR_GPU_TNL=1` says so once. Everything else, and a draw the fragment state sends to
   software, keeps ge.c's T&L. The `tnl-parity` cells of `gpu-coherence-selftest` compare the
-  two routes byte for byte (on a device without the feature, every cell on ge.c's route). Left:
+  two routes byte for byte (on a device without the feature, every cell on ge.c's route).
+  `ge_tnl_reason_counts` counts each draw ge.c keeps under the first reason that rules the route
+  out (clear, flat, diagnostic, texgen, matrix, viewport, texcoord, fog, specular, light, alloc,
+  vertex, clip, backend). With `SR_GESTAT=1` as well, each stat window from the first
+  transform-mode triangle draw prints that window's counts as
+  `GESTAT-TNL f=N taken=N cpu=N: clear=N flat=N ... backend=N`, every reason in that order.
+  `ge-tnl-census-selftest` drives one draw per reason through ge.c and checks the line over two
+  windows. Left:
   texgen, flat shading, specular light by default, sprites, lines, points, clipped draws, and
   devices that flush fp32 subnormals.
 - `ge_powf`, the specular and powered-diffuse power, is one text in ge.c and `psp_tnl.vert`
@@ -126,11 +167,11 @@ Enabled with `SR_GPU_GE=1`. Implementation:
   `ge-light` oracle case). `tools/test_shader_embed.py` keeps the two copies identical and runs
   the shader's copy as C against ge.c's, and the `specular-ge-powf` and `light-4-ge-powf`
   parity cells compare the routes on a device that runs the T&L stage.
-- Render-to-texture chains (the hangar uses fbp swaps), depth readbacks if any game code
+- Not done: render-to-texture chains (the hangar uses fbp swaps), depth readbacks if any game code
   reads zbuf, small-tri rasterization rules (top-left bias already documented in
   raster_tri) via conservative settings.
-- Only after Phase 3 ships does GDI/software become optional at build time. The software
-  GE is never deleted: it is the documentation of GE semantics.
+- The GDI presenter and the software GE stay in the build. The software GE is never deleted:
+  it is the documentation of GE semantics.
 
 ## Files
 
@@ -141,6 +182,9 @@ Enabled with `SR_GPU_GE=1`. Implementation:
   validation messenger, and the present-truthful frame capture.
 - `ge_gpu.h` / `ge_gpu.c` — Phase 1+2: capture, batching, pipeline/texture caches,
   flush + guest-VRAM writeback. Hooks defined in `src/rt/ge_shared.h`.
+- `pipeline_cache.h` — the on-disk Vulkan pipeline cache (#2149): the file's header (GPU,
+  driver, pipeline cache UUID and shader set), its checks, and the atomic write. `ge_gpu.c`
+  loads it at start and saves it at exit; `pipeline_cache_selftest.c` checks every refusal.
 - `shaders/psp.vert`, `shaders/psp.frag` — compiled by glslc (`GLSLC` in the Makefile)
   into `psp_{vert,frag}.inc` at build time.
 - `shaders/psp_tnl.vert` — the GPU transform-and-lighting vertex stage (`SR_GPU_TNL=1`, #318), a GLSL
@@ -170,8 +214,21 @@ UNDEFINED-layout image and published a PPM under a `.png` name. It is gone. In i
   `src/rt/fbcap_policy.{h,c}`; the hle.c integration is `fbcap_arm_for_present`.
 - `sdl3vk_capture_selftest()` (standalone binary via the Makefile `gpu-capture-selftest` target)
   exercises policy, CPU- and GPU-source captures, cancel, scale, and byte-checks the published
-  PPMs; under `SR_VULKAN_VALIDATION=1` it also asserts zero validation-layer errors. Exit 77
-  means SKIP (Vulkan unavailable). `fbcap-selftest` covers the presenter-neutral service itself
+  PPMs; under `SR_VULKAN_VALIDATION=1` it also asserts zero validation-layer errors. It also
+  checks present pacing (below) against a fake display that holds every image. Exit 77
+  means SKIP (Vulkan unavailable).
+- Present pacing: while the scheduler paces the guest to real time (the default), a game-frame
+  present never waits for the presentation engine (`sdl3vk_set_present_nowait`, set by
+  `gui_present`). The present polls its frame slot's fence and acquires with timeout 0; when a
+  FIFO (VSync) display still holds every image, or the frame slot's earlier submission is still
+  pending (under MAILBOX, a GPU frames behind), it returns `SDL3VK_PRESENT_DISPLAY_BUSY`. The
+  window keeps the frame it has, and the guest's VBLANK clock goes on. These frames count as
+  `vblanks.present_busy` in the perf JSON (apart from the output cap's `present_skips`), and
+  shutdown prints how many there were, by cause. A frame not shown is not recorded either, so a
+  VSync-on video recording repeats the previous picture at that VBLANK. Two kinds of present
+  still wait: a frame an armed file or evidence capture is waiting for (the picture probe is not
+  one), and every present in a deterministic-clock or turbo run (`SR_DETERMINISTIC_CLOCK=1`,
+  `SR_NOVBPACE=1`), which has no real-time clock to protect and keeps every frame. `fbcap-selftest` covers the presenter-neutral service itself
   without a GPU.
 
 ## Widescreen Fill wings (#1881)
@@ -185,11 +242,17 @@ batches after the target's own, so every resource a pending batch names is relea
 boundaries as before. A canvas (`WingEnt`) is a 512x272 colour and depth pair at render scale,
 the size of every target, so both wings of up to 256 columns each fit (32:9 uses 240). It is never
 in `s_tgts` or `s_deps`: no readback, upload, coherence or texture path reaches it. It is cleared
-whenever ge.c clears its own (`ge_wide_epoch`), which ge.c does on the first wing draw after the
-canvas was shown. A state this backend would draw in software is dropped from the wings with no
-flush or readback: `wing_drop` counts it and names each cause once on stderr, and the wing hook
-returns 0, so ge.c does not mark the canvas drawn. `gegpu_wide_read` reads a canvas back for
-`gpu-coherence-selftest`'s `wide-fill` case, which compares it with the software rasterizer's.
+whenever ge.c clears its own (`ge_wide_epoch`), which ge.c does on the first draw into the
+framebuffer after it was shown. A state this backend would draw in software is dropped from the
+wings with no flush or readback: `wing_drop` counts it and names each cause once on stderr, and the
+wing hook returns 0, so ge.c does not mark the canvas drawn. `gegpu_wide_read` reads a canvas back
+for `gpu-coherence-selftest`'s `wide-fill` case, which compares it with the software rasterizer's.
+
+With Fill on, `gegpu_present` blits the left wing, the shown image and the right wing into one
+(480 + 2D) x 272 image at the shown image's scale (`wide_compose`, on the GE chain ahead of the
+presenter's work) and presents that; wings the frame did not draw are black. The window fits it
+by its own shape (`sdl3vk_present_plan`). The software renderer's picture is composed in
+`src/rt/gui.c` and presented with `sdl3vk_present_rgba_ex`.
 
 ## Present and swapchain failures (#1377)
 
@@ -218,9 +281,58 @@ validation layer on, and expects no leaked object and no validation error from e
 - an init failure at each step;
 - a failure at each checked present step, through a one-shot present-step fault seam.
 
+## Render scale and render targets read as textures (#2052)
+
+At a render scale above 1x (`SR_GPU_SCALE`, the player's Internal Render Resolution) every render
+target and its depth buffer are allocated at that scale. Guest VRAM keeps the 1x frame: a CPU
+readback takes the top-left device pixel of each guest pixel (`readback-rows`). Effects that draw
+into one target and read it back as a texture keep the scale in these cases:
+
+- **A target sampled as a texture** is bound directly: the draw samples the target's own image at
+  render scale, with no readback and no decode. A draw that samples the target it renders into
+  reads a snapshot copy of it. Sample positions keep the PSP's lattice in guest texels
+  (`psp.frag`):
+  - Linear filtering steps in sixteenths of a guest texel and blends the device texels around
+    each position. A bloom-like pass into a quarter-size buffer, sampled back with linear
+    filtering, keeps its render-scale detail (`rtt-scale` in `gpu-coherence-selftest`, at 1x, 2x
+    and 4x). At 3x a device texel is not a whole number of sixteenths (16/3), so the sample
+    positions fall unevenly across device texels and the detail is finer than 1x but uneven.
+  - Nearest filtering takes the centre of each guest texel, as the PSP does, so a nearest read of
+    a target shows one device texel per guest texel at any render scale.
+- **A block transfer between targets** copies at render scale (`hook_xfer`).
+
+A texture is a render-target read when its address lies inside the span of a colour target the
+GPU has drawn (one whose image is valid): from the target's base address, its stride times 272
+rows (`target_containing` in `ge_gpu.c`). The direct
+bind then needs all of these: the texture format equals the target's pixel format, the texture is
+not swizzled and mipmapping is not active (a mipmap filter with a maximum level above 0), its
+buffer width equals the target's stride (or is 0), the texture address is pixel-aligned inside the
+target, and the target's image holds the guest's latest CPU writes. Any other read of a render
+target reads the target back to guest VRAM and decodes it there at 1x, the way the GE drew it, so
+the effect shows 1x detail at any render scale. Those reads include:
+
+- a read in any texture format other than the target's pixel format: CLUT4, CLUT8, CLUT16,
+  CLUT32, DXT, or another direct-colour format (a 16-bit target read as 8888 or as another 16-bit
+  format, an 8888 target read as 16-bit);
+- a swizzled read;
+- a read with mipmapping active;
+- a read with another buffer width;
+- a read of a target whose CPU writes could not be copied into its image.
+
+Depth is matched by address like any texture. A depth buffer read as a texture decodes guest VRAM
+at 1x when its address lies outside every colour target's span. If it lies inside one and the read
+passes the rules above, that colour target's image is bound instead: the renderer does not detect
+depth aliasing.
+
+`SR_GPU_NORTT=1` sends every render-target read through that 1x path, for bisecting.
+
 ## Environment variables
 
 - `SR_GPU_GE=1` — enable the GPU rasterizer (SDL3 build only; default off).
+- `SR_GPU_SCALE=1..4` — the integer render scale (`SR_RESOLUTION_SCALE` is the other spelling);
+  default 1. See [Render scale and render targets read as textures](#render-scale-and-render-targets-read-as-textures-2052).
+- `SR_GPU_NORTT=1` — read every render target used as a texture back through guest VRAM at 1x,
+  instead of binding the target image (debug bisect).
 - `SR_GPU_LOG=1` — one line per flush (reason, batches, verts, target).
 - `SR_GPU_SUBMIT_BATCH=1..128` — recorded GE ops (render batches, destination snapshot
   copies, ring uploads) that share one `vkQueueSubmit`; default 128, out-of-range values keep
@@ -230,8 +342,16 @@ validation layer on, and expects no leaked object and no validation error from e
   software fallback) closes the open command buffer itself. A larger limit trades CPU/GPU
   overlap inside one command buffer for fewer submits and fence waits.
 - `SR_GPU_SYNC_SUBMIT=1` — exact synchronous fallback: one op per submit, each waited on.
+- `SR_GPU_DST_READ=snapshot|interlock` — the destination-read path (#2109), read before the
+  device is made. Unset, the interlock is taken where the device has it; an unknown value says
+  so once and gets the same default. A forced path the device lacks is refused with its reason,
+  and the snapshot path runs.
 - `SR_GPU_READBACK_FULL=1` — copy the whole scaled target on a readback to guest memory, the
   reference path for the default copy of the rows guest memory keeps (#323).
+- `SR_GPU_PIPELINE_CACHE=0` — run without the pipeline cache in `<data root>/cache/gegpu`
+  (on by default; `on` or `1` keep it, any other value is refused). One start line says
+  whether the file was loaded, absent or discarded and why; one exit line says whether it was
+  saved and how long pipeline creation took.
 - `SR_VIDEO=gdi` — Phase-0 fallback to the classic GDI window.
 - `SR_VULKAN_VALIDATION=1` — enable the `VK_LAYER_KHRONOS_validation` messenger (fail-closed
   if the layer is requested but missing). See `docs/DEBUGGING.md` for FBSNAP/FBDUMP capture
