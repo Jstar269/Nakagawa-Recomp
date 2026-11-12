@@ -470,6 +470,7 @@ class TitleManifestTests(unittest.TestCase):
             re.DOTALL,
         )
         self.assertIsNotNone(section, "manifest documentation must retain its typed-root example")
+        assert section is not None
         documented_roots = json.loads("{" + section.group(1) + "}")[
             "loose_content_roots"
         ]

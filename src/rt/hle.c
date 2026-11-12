@@ -2788,6 +2788,7 @@ void sr_hle_release_thread_resources(uint32_t thread_uid) {
         const uint32_t abandoned = sr_savedata_release_thread(thread_uid);
         if (abandoned) savedata_dialog_work_abandoned(abandoned);
         io_cwd_release_thread(thread_uid);
+        hle_io_release_thread(thread_uid);
         mbx_remove_thread_waiters(thread_uid);
 
         for (int i = 0; i < FPL_MAX; i++) {
@@ -4039,6 +4040,7 @@ void sr_hle_init(void) {
     hle_register_ctrl_sampling_handlers();
     sr_hle_power_register_lock();
     hle_register_gpi_gpo_handlers();
+    hle_register_std_handle_handlers();
     hle_register_mpeg_shared_handlers();
     hle_register_psmf_player_handlers();
     hle_register_partition_savedata_handlers();

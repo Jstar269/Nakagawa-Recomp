@@ -146,9 +146,17 @@ void hle_register_init_kernel_utils_1(void) {
 void hle_register_init_kernel_utils_2(void) {
     sr_hle_register(0x13a5abef, "sceKernelPrintf", h_KernelPrintf);
     sr_hle_register(0xcab439df, "printf", h_KernelPrintf);
+    hle_register_std_handle_handlers();
+}
+#endif
+#endif
+
+#ifndef SR_MPEG_MEDIA_SELFTEST
+/* The std handles, shared by sr_hle_init() and the ThreadMan harness so the
+ * PSP-HLE-STDIO-001 cells dispatch the production mapping. */
+void hle_register_std_handle_handlers(void) {
     sr_hle_register(0x172d316e, "sceKernelStdin", h_StdFd);
     sr_hle_register(0xa6bab2e9, "sceKernelStdout", h_StdFd);
     sr_hle_register(0xf78ba90a, "sceKernelStderr", h_StdFd);
 }
-#endif
 #endif
