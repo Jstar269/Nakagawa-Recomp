@@ -791,6 +791,9 @@ _WINDOWS_SERIAL_GATES = {
     "Build and run the full platform ladder": "VULKAN_SDK=/ucrt64 platform-ladder",
     "Build and run profile-zero production routes": "VULKAN_SDK=/ucrt64 profile-zero-e2e",
     "Fetch the profile-zero fixture built from source": "name: profile-zero-fixture",
+    "Fetch the homebrew fixtures built from source": "name: homebrew-fixtures",
+    "Run the homebrew import routes on the fixtures built from source":
+        "test_player_package_route.TestPlayerPackageRoute.test_homebrew_finds_its_own_files_in_its_memory_stick_folder",
     "Build and run display presentation smoke": "VULKAN_SDK=/ucrt64 display-smoke-run",
     "Build and run AOT/interpreter cosimulation gate": "VULKAN_SDK=/ucrt64 cosim-selftest",
     "Prove the cosimulation comparator is load-bearing": "VULKAN_SDK=/ucrt64 cosim-mutants",
@@ -1859,6 +1862,8 @@ class PublicExportJobTests(unittest.TestCase):
         "Upload the verified fixture",
         "Gate profile-zero imports on HLE review status",
         "Build Nakagawa Font Copy",
+        "Build the homebrew fixtures for the Windows routes",
+        "Upload the homebrew fixtures",
     )
     PROFILE_ZERO_CONDITION = "if: ${{ env.BUILD_PROFILE_ZERO == 'true' }}"
 
@@ -2058,6 +2063,44 @@ class PublicExportJobTests(unittest.TestCase):
                 self.assertIn("needs.public_export.result == 'success'", consumer)
                 self.assertIn("name: profile-zero-fixture", consumer)
                 self.assertIn("path: fixtures/profile_zero/prebuilt", consumer)
+
+    def test_homebrew_fixtures_are_built_from_source_for_the_windows_routes(self) -> None:
+        """#2143: the homebrew route tests run on Windows on programs this run built."""
+        build = "\n".join(_ci_step(self.blocks["public_export"],
+                                   "Build the homebrew fixtures for the Windows routes") or [])
+        self.assertIn("for fixture in pspdev_phase5 homebrew_view; do", build)
+        self.assertIn('test "$(git rev-parse HEAD)" = "$GITHUB_SHA"', build)
+        self.assertIn('printf \'%s\\n\' "$GITHUB_SHA" > "$out/BUILT_FROM"', build)
+        self.assertIn("sha256sum BUILT_FROM */EBOOT.PBP */main.c */Makefile > SHA256SUMS", build)
+        self.assertIn("sha256sum --check --strict SHA256SUMS", build)
+        upload = "\n".join(_ci_step(self.blocks["public_export"], "Upload the homebrew fixtures") or [])
+        self.assertIn("name: homebrew-fixtures", upload)
+        self.assertIn("if-no-files-found: error", upload)
+
+        windows = self.blocks["windows_runtime"]
+        fetch = "Fetch the homebrew fixtures built from source"
+        run = "Run the homebrew import routes on the fixtures built from source"
+        # The routes part, after the profile-zero routes; the fetch comes first.
+        self.assertLess(_ci_step_index(windows, "Build and run profile-zero production routes"),
+                        _ci_step_index(windows, fetch))
+        names = self._step_names(windows)
+        self.assertEqual(names[names.index(fetch) + 1], run)
+        for name in (fetch, run):
+            with self.subTest(step=name):
+                self.assertIn("        if: contains(matrix.parts, 'routes')", _ci_step(windows, name) or [])
+        self.assertIn("path: ${{ runner.temp }}/homebrew-fixtures",
+                      "\n".join(_ci_step(windows, fetch) or []))
+        step = "\n".join(_ci_step(windows, run) or [])
+        self.assertIn('NK_HOMEBREW_E2E_REQUIRED: "1"', step)
+        self.assertIn("NK_HOMEBREW_EBOOT_DIR: ${{ runner.temp }}/homebrew-fixtures", step)
+        self.assertIn("timeout-minutes: 12", step)
+        self.assertIn('(cd "$dir" && sha256sum --check --strict SHA256SUMS)', step)
+        self.assertIn('if [ "$built_from" != "$SR_SOURCE_COMMIT" ]; then', step)
+        self.assertIn("test_homebrew_eboot_imports_and_builds_as_experimental", step)
+        self.assertIn("test_homebrew_finds_its_own_files_in_its_memory_stick_folder", step)
+        # A skip is not a pass.
+        self.assertIn("tail -n 1 \"$log\" | tr -d '\\r' | grep -qx 'OK'", step)
+        self.assertIn("    SR_SOURCE_COMMIT: ${{ github.sha }}", "\n".join(windows))
 
     def test_ci_required_still_requires_hygiene_and_export(self) -> None:
         required = "\n".join(self.blocks["ci_required"])

@@ -99,7 +99,9 @@ The jobs:
   condition; the job and that step still read no path output. The profile-zero steps follow,
   under the former job's condition (`allow_substantive` and `run_python` or `run_windows`,
   carried by the job's `BUILD_PROFILE_ZERO`), and upload the same `profile-zero-fixture`
-  artifact. Their `python3` is now the job's CPython 3.15.2 rather than the runner image's.
+  artifact. Under the same condition, the job builds the two homebrew fixtures
+  (`fixtures/pspdev_phase5`, `fixtures/homebrew_view`) and uploads them as `homebrew-fixtures`
+  for the Windows `routes` part (#2143). Their `python3` is now the job's CPython 3.15.2 rather than the runner image's.
   The Python, native and Windows jobs wait for this job as before; native now also waits for
   the fixture build, about 25 seconds.
 - **Python.** Four shards over the full suite, and four over the Makefile-coupled subset
@@ -2120,6 +2122,22 @@ developer runs locally, without private inputs:
   result file, save and first rasterized frame with the values pinned in
   `tools/test_profile_zero_e2e.py` (`CROSS_HOST_DIGESTS`), so Windows and Linux must
   produce the same bytes (#306).
+  The `routes` part also runs the homebrew import route tests (#2143,
+  `tools/test_player_package_route.py`): a PSPSDK `EBOOT.PBP` imports through the player and
+  builds a package, and the `homebrew_view` probe runs from `ms0:/PSP/GAME/<folder>/` and
+  checks the files beside it. The Windows runner has no PSPDEV, so the programs come from the
+  `public_export` job, built with the locked PSPDEV from the fixtures' own `main.c` and
+  `Makefile`. That job puts them in one folder: each program's `EBOOT.PBP` beside the sources
+  it was built from, `BUILT_FROM` (the commit) and `SHA256SUMS` over all of them. It uploads
+  the folder as the `homebrew-fixtures` artifact, and the step downloads it. The step checks
+  `SHA256SUMS` and that `BUILT_FROM` is its own commit (`SR_SOURCE_COMMIT`); the tests check
+  that the sources are byte for byte the checkout's. The step sets
+  `NK_HOMEBREW_E2E_REQUIRED=1`, so a missing or unreadable folder fails it and never skips,
+  and it fails unless the summary is a bare `OK`, so a skipped test does not pass. Its limit
+  is 12 minutes. The two tests took 422 seconds locally (Windows 11, `-j 4`, on a shared
+  host), most of it the player and package builds; the step's hosted time is measured on the
+  first full run. It adds that time to the `routes` group's 13.9 minutes, under the group's
+  25-minute limit.
   The same job builds Nakagawa Font Copy (`src/psp_companion/Makefile`), the PSP app
   behind the player's font import, through its user-mode import gate; nothing from
   that build is uploaded. Public

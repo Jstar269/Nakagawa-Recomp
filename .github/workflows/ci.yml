@@ -517,6 +517,41 @@ jobs:
         # uploaded: the EBOOT is not published by CI.
         run: make --no-print-directory -C src/psp_companion BUILD_DIR="$RUNNER_TEMP/fontcopy"
 
+      # #2143: the homebrew import route tests (tools/test_player_package_route.py) run in the
+      # Windows routes part, which has no PSPDEV, on programs built here from the fixtures'
+      # own sources with the same locked PSPDEV. The folder holds each fixture's EBOOT.PBP
+      # beside the main.c and Makefile it was built from, BUILT_FROM (the commit), and
+      # SHA256SUMS over all of them; the tests check the sources against their checkout
+      # and the routes step checks BUILT_FROM against its own commit. Nothing is committed.
+      - name: Build the homebrew fixtures for the Windows routes
+        if: ${{ env.BUILD_PROFILE_ZERO == 'true' }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          out="$RUNNER_TEMP/homebrew-fixtures"
+          mkdir -p "$out"
+          for fixture in pspdev_phase5 homebrew_view; do
+            build="$RUNNER_TEMP/homebrew-build/$fixture"
+            mkdir -p "$build" "$out/$fixture"
+            make --no-print-directory -B -f "$PWD/fixtures/$fixture/Makefile" -C "$build" \
+              VPATH="$PWD/fixtures/$fixture" EBOOT.PBP
+            cp "$build/EBOOT.PBP" "fixtures/$fixture/main.c" "fixtures/$fixture/Makefile" \
+              "$out/$fixture/"
+          done
+          printf '%s\n' "$GITHUB_SHA" > "$out/BUILT_FROM"
+          cd "$out"
+          sha256sum BUILT_FROM */EBOOT.PBP */main.c */Makefile > SHA256SUMS
+          sha256sum --check --strict SHA256SUMS
+
+      - name: Upload the homebrew fixtures
+        if: ${{ env.BUILD_PROFILE_ZERO == 'true' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: homebrew-fixtures
+          path: ${{ runner.temp }}/homebrew-fixtures
+          if-no-files-found: error
+          retention-days: 7
+
   quick_checks:
     # Light runs only. Each check here is one the full tier already runs inside a
     # long job, and each was a real failure that a light run would otherwise hide
@@ -2597,6 +2632,45 @@ jobs:
           set -euo pipefail
           command -v pwsh
           mingw32-make --no-print-directory CC=gcc VULKAN_SDK=/ucrt64 profile-zero-e2e
+
+      - name: Fetch the homebrew fixtures built from source
+        if: contains(matrix.parts, 'routes')
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: homebrew-fixtures
+          path: ${{ runner.temp }}/homebrew-fixtures
+
+      # #2143: a PSPSDK EBOOT.PBP imports through the player, builds a package, and (the
+      # homebrew_view probe) runs from ms0:/PSP/GAME/<folder>/ and checks the files beside it.
+      # The programs are the ones public_export built from this commit; the step checks
+      # their digests and BUILT_FROM, and NK_HOMEBREW_E2E_REQUIRED=1 makes a missing or
+      # unreadable folder fail. A skipped test is not a pass: the summary must be a bare OK.
+      - name: Run the homebrew import routes on the fixtures built from source
+        if: contains(matrix.parts, 'routes')
+        shell: msys2 {0}
+        timeout-minutes: 12
+        env:
+          MSYS2_PATH_TYPE: inherit
+          NK_HOMEBREW_E2E_REQUIRED: "1"
+          NK_HOMEBREW_EBOOT_DIR: ${{ runner.temp }}/homebrew-fixtures
+        run: |
+          set -euo pipefail
+          command -v git >/dev/null || export PATH="$PATH:/c/Program Files/Git/cmd"
+          command -v pwsh git
+          dir="$(cygpath -u "$NK_HOMEBREW_EBOOT_DIR")"
+          (cd "$dir" && sha256sum --check --strict SHA256SUMS)
+          built_from="$(tr -d '\r\n' < "$dir/BUILT_FROM")"
+          if [ "$built_from" != "$SR_SOURCE_COMMIT" ]; then
+            echo "the homebrew fixtures were built from $built_from, not $SR_SOURCE_COMMIT" >&2
+            exit 1
+          fi
+          py="$(cygpath -u "$PYTHON")"
+          log="$(cygpath -u "$RUNNER_TEMP")/homebrew-routes.log"
+          PYTHONPATH=tools "$py" -m unittest -v \
+            test_player_package_route.TestPlayerPackageRoute.test_homebrew_eboot_imports_and_builds_as_experimental \
+            test_player_package_route.TestPlayerPackageRoute.test_homebrew_finds_its_own_files_in_its_memory_stick_folder \
+            2>&1 | tee "$log"
+          tail -n 1 "$log" | tr -d '\r' | grep -qx 'OK'
 
       # Presentation path on a source-owned guest: fill the PSP framebuffer, hand
       # it to sceDisplaySetFrameBuf and wait for vblank, once per frame. The other
