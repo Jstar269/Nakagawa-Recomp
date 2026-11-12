@@ -2130,7 +2130,6 @@ static int coherence_run_sprite_scaled(void) {
     const int ncells = (int)(sizeof(k_spr_cells) / sizeof(k_spr_cells[0])), y0 = 10;
     coherence_sprite_list(cells, ncells, y0, fba, stride);
 
-    const uint32_t s = (uint32_t)s_scale;
     uint32_t *dev = (uint32_t *)malloc((size_t)SCL_W * SCL_H * 4u);
     if (!dev) return 0;
     coherence_reset_targets();
