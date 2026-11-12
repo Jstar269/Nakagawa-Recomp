@@ -12,14 +12,28 @@
  *   - the data relay ("postoffice", port 27313): one connection per ad hoc socket, carrying the
  *     game's own PDP datagrams and PTP streams between consoles.
  *
- * This file is project-authored. It speaks the protocol of Kethen/aemu_postoffice at commit
- * 02abf18fd161a1639d9f93c48c4c46638c7c6d15 (the commit PPSSPP 3bc60270 pins), written from that
- * project's design.md and its packed packet layouts (aemu_postoffice_packets.h,
- * adhocctl/packets_v1.h, adhocctl/pspstructs.h); no code is copied. Every multi-byte field is
- * little-endian. It encodes and decodes bytes only: it opens no connection and holds no host
- * name. The owner's decision on #1139 (2026-11-06) allows exactly these fields to leave the PC:
- * the disc ID, the nickname, the console profile's random MAC and the group name in the lobby,
- * and the game's own ad hoc packets with their MAC and port addressing in the relay. */
+ * This file and nk_adhoc_relay.c are this project's own code that encodes and decodes a wire
+ * format: no upstream code is copied (src/core/PROVENANCE.md). The protocol is that of
+ * Kethen/aemu_postoffice at commit 02abf18fd161a1639d9f93c48c4c46638c7c6d15 (the commit PPSSPP
+ * 3bc60270 pins). What the code was written from:
+ *   - the packet layouts, opcode and init-type numbers and the 10 KiB and 50 KiB limits: that
+ *     project's aemu_postoffice_packets.h (marked GPL-3.0-only) and adhocctl/packets_v1.h and
+ *     adhocctl/pspstructs.h (PRO ONLINE notice, GPL version 3 or later); the lobby layouts are
+ *     also in PPSSPP's Core/HLE/proAdhoc.h; its design.md gives the two ports and the order of
+ *     the connections;
+ *   - that a PDP or PTP length over its limit ends the session: the client in that project's
+ *     client/postoffice.c (marked GPL-3.0-only), which does the same;
+ *   - the login checks (nk_relay_mac_ok, nk_relay_product_ok, nk_lobby_login): PPSSPP's
+ *     Core/HLE/proAdhocServer.cpp login_user_data at 3bc60270eae3069f13dfbfdb7292a7e1375de6f6
+ *     (GPL-2.0-or-later), rewritten from it on 2026-11-12;
+ *   - the port offset (nk_relay_port_out, nk_relay_port_in): PPSSPP's Core/HLE/sceNetAdhoc.cpp
+ *     offset_port_simple and reverse_port_simple at the same revision (GPL-2.0-or-later,
+ *     Copyright (c) 2013- PPSSPP Project), and its PortOffset default in Core/Config.cpp.
+ * Every multi-byte field is little-endian. It encodes and decodes bytes only: it opens no
+ * connection and holds no host name. The owner's decision on #1139 (2026-11-06) allows exactly
+ * these fields to leave the PC: the disc ID, the nickname, the console profile's random MAC and
+ * the group name in the lobby, and the game's own ad hoc packets with their MAC and port
+ * addressing in the relay. */
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -67,13 +81,14 @@ typedef enum NkLobbyOpcode {
 #define NK_LOBBY_S2C_CONNECT_BSSID_SIZE 7u  /* opcode, group leader MAC 6 */
 #define NK_LOBBY_S2C_CHAT_SIZE 193u         /* opcode, message 64, nickname 128 */
 
-/* True when the server would accept this MAC: it refuses one whose last five bytes are zero. */
+/* True when PPSSPP's ad hoc server accepts this MAC at login: neither all zero nor all ones. */
 bool nk_relay_mac_ok(const uint8_t mac[NK_RELAY_MAC_LEN]);
-/* True for exactly nine characters, each A-Z or 0-9, as the server requires of a product code. */
+/* True for exactly nine characters, each A-Z or 0-9, as PPSSPP's ad hoc server requires of a
+ * product code (nine is the field's size). */
 bool nk_relay_product_ok(const char *product);
 
 /* The LOGIN packet. Returns NK_LOBBY_LOGIN_SIZE, or 0 (out untouched) when the MAC or product
- * code would be refused or the nickname is NULL or 128 bytes or longer. The nickname is
+ * code would be refused or the nickname is NULL, empty, or 128 bytes or longer. The nickname is
  * zero-padded; the field's last byte is always zero. */
 size_t nk_lobby_login(uint8_t out[NK_LOBBY_LOGIN_SIZE], const uint8_t mac[NK_RELAY_MAC_LEN],
                       const char *nickname, const char *product);

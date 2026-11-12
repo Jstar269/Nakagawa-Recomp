@@ -2,9 +2,11 @@
 // Copyright (C) 2026 the Nakagawa Recomp authors
 
 /* The ad hoc relay's wire format (src/core/nk_adhoc_relay.c, #1139): every packet byte by byte,
- * the server's login rules, the decoder's partial and refused input, and the port offset. The
- * expected bytes are written out from the packed layouts of aemu_postoffice 02abf18f
- * (aemu_postoffice_packets.h, adhocctl/packets_v1.h): little-endian, no padding. No socket and no
+ * the login checks of PPSSPP's ad hoc server (proAdhocServer.cpp login_user_data at 3bc60270),
+ * the decoder's partial and refused input, and the port offset (PPSSPP's offset_port_simple).
+ * The expected bytes are written out by hand from the packet layouts the relay protocol uses
+ * (aemu_postoffice 02abf18f aemu_postoffice_packets.h and adhocctl/packets_v1.h; the lobby
+ * layouts are also PPSSPP's Core/HLE/proAdhoc.h): little-endian, no padding. No socket and no
  * network. MACs, names and IDs are synthetic. */
 
 #include "nk_adhoc_relay.h"
@@ -68,14 +70,24 @@ static void test_login(void) {
     CHECK(nk_lobby_login(p, k_mac, too_long, "ULUS10000") == 0u && p[0] == 0xee,
           "a 128-byte nickname is refused and nothing is written");
     CHECK(nk_lobby_login(p, k_mac, NULL, "ULUS10000") == 0u, "NULL nickname");
+    memset(p, 0xee, sizeof p);
+    CHECK(nk_lobby_login(p, k_mac, "", "ULUS10000") == 0u && p[0] == 0xee,
+          "an empty nickname is refused, as PPSSPP's server refuses one");
 
-    const uint8_t zero_tail[6] = {0x02, 0, 0, 0, 0, 0};
+    /* PPSSPP's server refuses exactly the all-zero and the all-ones MAC. */
     const uint8_t zero[6] = {0};
-    const uint8_t first_byte_zero[6] = {0x00, 0x11, 0, 0, 0, 0};
-    CHECK(!nk_relay_mac_ok(zero_tail) && !nk_relay_mac_ok(zero) && !nk_relay_mac_ok(NULL),
-          "a MAC whose last five bytes are zero is refused");
-    CHECK(nk_relay_mac_ok(first_byte_zero), "only bytes 1 to 5 count");
-    CHECK(nk_lobby_login(p, zero_tail, "Player", "ULUS10000") == 0u, "login with a refused MAC");
+    const uint8_t ones[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+    const uint8_t zero_tail[6] = {0x02, 0, 0, 0, 0, 0};
+    const uint8_t one_bit[6] = {0, 0, 0, 0, 0, 0x01};
+    const uint8_t ones_but_one[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xfe};
+    CHECK(!nk_relay_mac_ok(zero) && !nk_relay_mac_ok(ones) && !nk_relay_mac_ok(NULL),
+          "the all-zero and all-ones MACs are refused");
+    CHECK(nk_relay_mac_ok(zero_tail) && nk_relay_mac_ok(one_bit) && nk_relay_mac_ok(ones_but_one),
+          "any other MAC is accepted");
+    CHECK(nk_lobby_login(p, zero, "Player", "ULUS10000") == 0u &&
+              nk_lobby_login(p, ones, "Player", "ULUS10000") == 0u,
+          "login with a refused MAC");
+    CHECK(nk_lobby_login(p, zero_tail, "Player", "ULUS10000") == 144u, "login with an accepted MAC");
 
     static const char *bad[] = {"ulus10000", "ULUS1000", "ULUS100000", "ULUS-0000", "", NULL};
     for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++)

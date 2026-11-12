@@ -1,4 +1,4 @@
-# PROVENANCE.md — `src/core/nk_psp_*` (built-in PSP game decryption)
+# PROVENANCE.md — `src/core/nk_psp_*` (built-in PSP game decryption) and `src/core/nk_adhoc_*` (ad hoc transport)
 
 The decryption boundary that turns the encrypted executable and modules of a game the user owns into plain ELF files,
 locally, from the user's own disc image (issue #295). It was added in PRs #548 and #550, removed as a temporary measure
@@ -113,3 +113,43 @@ key-file loading, no PSAR entry name), `nk_psp_crypto.c/.h` (the error contract 
 `nk_psp_inflate.c/.h` and `nk_decrypt_main.c` (the `nk_decrypt` command line, with its `npumdimg` subcommand) are
 project-authored from the format rules
 and the standards their headers cite (FIPS 197, RFC 4493, FIPS 180, RFC 1950-1952, SEC 1).
+
+## Ad hoc transport (`nk_adhoc_*`, issue #1139)
+
+The transport seam of the PSP's ad hoc services, its in-process medium, and the codec of the ad hoc relay's wire
+format. None of these files opens a socket, resolves a name or connects.
+
+- Upstream for the medium's lobby: PPSSPP, `https://github.com/hrydgard/ppsspp`, revision
+  `3bc60270eae3069f13dfbfdb7292a7e1375de6f6` (the revision `src/rt/PROVENANCE.md` pins for the SAS envelope and
+  CREDITS.md for texture replacement), `Core/HLE/proAdhocServer.cpp` (SHA-256
+  `aa9f7546c881f5b7b47fafbfe2ffd14e5612d49bdc236617e24055ee29907525`, blob
+  `bd32875a2fc00fde1529a91f7c9291439e8cf5a8`), Copyright (c) 2014- PPSSPP Project, GPL-2.0-or-later. That file is
+  PPSSPP's port of Coldbird's aemu ad hoc server. Also used, at the same revision: `Core/HLE/sceNetAdhoc.cpp`
+  (SHA-256 `36b4f0c4b9aaa1241ac10292eff4252e7f29413510ca4d50ea540a705f7594a3`, blob
+  `4ec5b5bc43e9878d20326b853ae054fbc88fe606`, Copyright (c) 2013- PPSSPP Project) for the port offset, and
+  `Core/HLE/proAdhoc.h` (SHA-256 `58d08305844211df95c7fb99183d86c16b620d01d79bd540297b82af253523ea`, blob
+  `26f574ef1b34c7787a56bbf129117e8d269291b2`) for the lobby packet layouts.
+- Protocol: Kethen/aemu_postoffice, `https://github.com/Kethen/aemu_postoffice`, commit
+  `02abf18fd161a1639d9f93c48c4c46638c7c6d15`, the commit PPSSPP `3bc60270` pins. The relay codec takes from it facts
+  only, as interoperation needs them: the packet layouts, opcode and init-type numbers and size limits in
+  `aemu_postoffice_packets.h` (marked GPL-3.0-only) and `adhocctl/packets_v1.h` and `adhocctl/pspstructs.h` (PRO ONLINE
+  notice, GPL version 3 or later), the two ports and the connection order in `design.md`, and the rule that a PDP
+  or PTP length over its limit ends the session, which its client `client/postoffice.c` (marked GPL-3.0-only) also
+  applies. No code is copied: a comparison on 2026-11-12 of the new files against every aemu_postoffice text file
+  outside `ext/` and PPSSPP's ad hoc files found no copied line. The owner accepted aemu_postoffice's licence for
+  imports on #1139 (2026-11-06); nothing is imported from it.
+- Rewritten on 2026-11-12: the lobby of `nk_adhoc_net.c` and the login checks of `nk_adhoc_relay.c` were deleted
+  and written again from PPSSPP, replacing the 2026-11-06 version, which followed the aemu_postoffice adhocctl
+  server (`adhocctl/server_cpp/server.cpp` and `client.cpp`, marked GPL-3.0-only). The session that rewrote them did
+  not open aemu_postoffice's source.
+
+| Path (under `src/`) | Lineage | Classification | PPSSPP pin | Local modifications | Notice lines in the file header | Commits here |
+| --- | --- | --- | --- | --- | --- | --- |
+| `core/nk_adhoc_net.c` | lobby: PPSSPP `Core/HLE/proAdhocServer.cpp` (`login_user_data`, `logout_user`, `connect_user`, `disconnect_user`, `send_scan_results`, the opcode rules of `server_loop`); PDP half: this project | derived-translated (lobby); project-authored (PDP half) | `3bc60270eae3069f13dfbfdb7292a7e1375de6f6` | C99 over fixed arrays (members newest first, groups by creation number, as PPSSPP's head-linked lists); a server send is an event on the receiver's queue, and a full queue drops and counts it as PPSSPP logs a failed send; peer id is the console index plus one instead of an IP; BSSIDs are numbered (`02:00` then the group count) instead of drawn at random; a MAC already logged in is refused; a request PPSSPP answers with a logout logs the console out and answers `NK_NET_NOT_LOGGED_IN`; product-code overrides, chat, status log and timeouts left out. The file header lists them. | SPDX GPL-3.0-or-later; PPSSPP copyright line (2014-); Nakagawa Recomp authors copyright; derivation line naming the file, revision and functions; derived-translated label; "conveyed as GPL-3.0-or-later" line; modification list dated 2026-11-12 | 4 |
+| `core/nk_adhoc_net.h` | this project; its comment describes the lobby rules of PPSSPP's server | project-authored | N/A | the transport interface (`NkAdhocTransportOps`), result codes and the medium's test trace | SPDX GPL-3.0-or-later; Nakagawa Recomp authors copyright | 4 |
+| `core/nk_adhoc_relay.c` | this project, encoding the aemu_postoffice wire format above; `nk_relay_mac_ok`, `nk_relay_product_ok` and the checks in `nk_lobby_login` from PPSSPP `proAdhocServer.cpp` `login_user_data`; `nk_relay_port_out`/`nk_relay_port_in` from PPSSPP `sceNetAdhoc.cpp` `offset_port_simple`/`reverse_port_simple` | project-authored, with those two parts derived-translated | `3bc60270eae3069f13dfbfdb7292a7e1375de6f6` | C99; the offset passed in rather than read from settings; a product code must also end after nine characters, the field's size | SPDX GPL-3.0-or-later; PPSSPP copyright lines (2013-, 2014-); Nakagawa Recomp authors copyright; derivation and "conveyed as GPL-3.0-or-later" lines | 2 |
+| `core/nk_adhoc_relay.h` | this project; its header lists what each part was written from | project-authored | N/A | none | SPDX GPL-3.0-or-later; Nakagawa Recomp authors copyright | 2 |
+
+The tests `tests/native/test_nk_adhoc_net.c` and `tests/native/test_nk_adhoc_relay.c` are project-authored with
+synthetic MACs, names and product codes; their expected lobby sequences follow PPSSPP's server, and their expected
+bytes are written out by hand from the layouts above.

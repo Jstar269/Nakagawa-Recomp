@@ -1,7 +1,11 @@
-/* SPDX-License-Identifier: GPL-3.0-or-later */
-/* Copyright (C) 2026 the Nakagawa Recomp authors */
-
-/* The ad hoc relay's wire format (#1139): see nk_adhoc_relay.h. */
+/* SPDX-License-Identifier: GPL-3.0-or-later
+ * Copyright (c) 2013- PPSSPP Project (the port offset), (c) 2014- PPSSPP Project (the login checks)
+ * Copyright (C) 2026 the Nakagawa Recomp authors
+ *
+ * The ad hoc relay's wire format (#1139): see nk_adhoc_relay.h, which says what each part was
+ * written from. The login checks and the port offset are translated from PPSSPP at
+ * 3bc60270eae3069f13dfbfdb7292a7e1375de6f6 (GPL-2.0-or-later), modified for this project
+ * (2026-11-12): C99, the offset passed in. This file is conveyed as GPL-3.0-or-later. */
 
 #include "nk_adhoc_relay.h"
 
@@ -25,28 +29,30 @@ static uint32_t get32(const uint8_t *p) {
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
+/* The login checks of PPSSPP's ad hoc server (Core/HLE/proAdhocServer.cpp login_user_data at
+ * 3bc60270, GPL-2.0-or-later): it refuses the all-zero and the all-ones MAC, a product code with a
+ * character outside A-Z and 0-9, and an empty nickname. */
 bool nk_relay_mac_ok(const uint8_t mac[NK_RELAY_MAC_LEN]) {
-    if (!mac) return false;
-    /* The server compares bytes 1 to 5 only: some games change the first byte. */
-    for (unsigned i = 1; i < NK_RELAY_MAC_LEN; i++)
-        if (mac[i] != 0u) return true;
-    return false;
+    static const uint8_t k_zero[NK_RELAY_MAC_LEN] = {0, 0, 0, 0, 0, 0};
+    static const uint8_t k_ones[NK_RELAY_MAC_LEN] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+    return mac && memcmp(mac, k_zero, NK_RELAY_MAC_LEN) != 0 && memcmp(mac, k_ones, NK_RELAY_MAC_LEN) != 0;
 }
 
 bool nk_relay_product_ok(const char *product) {
     if (!product) return false;
-    for (unsigned i = 0; i < NK_RELAY_PRODUCT_LEN; i++) {
-        const char c = product[i];
-        if (!((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9'))) return false;
+    for (size_t i = 0; i < NK_RELAY_PRODUCT_LEN; i++) {
+        const char ch = product[i];
+        if (!((ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9'))) return false;
     }
-    return product[NK_RELAY_PRODUCT_LEN] == '\0';
+    return product[NK_RELAY_PRODUCT_LEN] == '\0'; /* the field holds nine characters, no more */
 }
 
 size_t nk_lobby_login(uint8_t out[NK_LOBBY_LOGIN_SIZE], const uint8_t mac[NK_RELAY_MAC_LEN],
                       const char *nickname, const char *product) {
-    if (!out || !nk_relay_mac_ok(mac) || !nk_relay_product_ok(product) || !nickname) return 0u;
-    const size_t name_len = strlen(nickname);
-    if (name_len >= NK_RELAY_NICKNAME_LEN) return 0u;
+    if (!out || !nickname || !nk_relay_mac_ok(mac) || !nk_relay_product_ok(product)) return 0u;
+    size_t name_len = 0;
+    while (name_len < NK_RELAY_NICKNAME_LEN && nickname[name_len] != '\0') name_len++;
+    if (name_len == 0u || name_len == NK_RELAY_NICKNAME_LEN) return 0u;
     memset(out, 0, NK_LOBBY_LOGIN_SIZE);
     out[0] = NK_LOBBY_LOGIN;
     memcpy(out + 1, mac, NK_RELAY_MAC_LEN);
@@ -187,6 +193,10 @@ bool nk_relay_parse_ptp_data_header(const uint8_t in[NK_RELAY_PTP_DATA_HEADER_SI
     return true;
 }
 
+/* Translated from PPSSPP's offset_port_simple and reverse_port_simple (Core/HLE/sceNetAdhoc.cpp
+ * at 3bc60270eae3069f13dfbfdb7292a7e1375de6f6, GPL-2.0-or-later, Copyright (c) 2013- PPSSPP
+ * Project); modified for this project: C99, the offset passed in rather than read from the
+ * settings. */
 uint16_t nk_relay_port_out(uint16_t port, uint16_t offset) {
     if (port == 0u) return 0u;
     const uint16_t shifted = (uint16_t)(port + offset);

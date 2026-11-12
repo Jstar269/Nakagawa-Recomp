@@ -166,8 +166,8 @@ define RELAY_CODEC_SELFTEST_CMD
 endef
 
 # The ad hoc transport seam and its in-process medium (src/core/nk_adhoc_net.c, #1139 phase 2): a
-# console alone and simulated consoles in one process, under the relay server's lobby rules. No
-# socket and no network.
+# console alone and simulated consoles in one process, under the lobby rules of PPSSPP's ad hoc
+# server, which the medium's lobby is translated from. No socket and no network.
 ADHOC_NET_SELFTEST_SRCS := src/core/nk_adhoc_net.c src/core/nk_adhoc_relay.c tests/native/test_nk_adhoc_net.c
 define ADHOC_NET_SELFTEST_CMD
 	$(CC) -std=c99 -Wall -Wextra -Wpedantic -Werror -Isrc/core $(ADHOC_NET_SELFTEST_SRCS) \

@@ -22,28 +22,31 @@
  * This file also holds the first transport: an in-process medium (NkAdhocLoopNet) that up to
  * NK_LOOPNET_CONSOLES consoles share. One console alone on it is a PSP with no peers in range, the
  * default with Online play off. Several on it are a simulation for tests, labelled as such: they
- * share one process, and no host socket or network API is used. The medium follows the lobby
- * rules of the relay server Nakagawa speaks to (aemu_postoffice 02abf18f, adhocctl server), so a
- * game sees the same event order on the loopback as through the relay:
+ * share one process, and no host socket or network API is used. Its lobby is translated from
+ * PPSSPP's ad hoc server (Core/HLE/proAdhocServer.cpp at 3bc60270; see nk_adhoc_net.c), which
+ * speaks the same lobby protocol as the relay, so a game meets the same rules on both:
  *   - groups belong to one product code (disc ID) and are found by name;
- *   - a join first leaves the current group; each existing member and the newcomer then learn of
- *     each other, members in MAC order; last the newcomer gets CONNECT_BSSID with the leader's MAC;
- *   - the leader is the group's creator and stays so; an empty group is removed;
- *   - a scan lists every group of the product in name order, then SCAN_COMPLETE;
- *   - leaving tells each remaining member (DISCONNECT with the leaver's id), and the leaver
- *     nothing;
- *   - a console whose event queue is full is removed from the lobby, as the server removes a client
- *     it cannot send to: it leaves its group (the members are told), its sockets close, the event
- *     is counted in events_dropped, and its lobby and socket calls then answer NK_NET_NOT_LOGGED_IN.
- *     The call whose own events overflowed the queue (a scan, or a connect's ack) answers
- *     NK_NET_NOT_LOGGED_IN too. That answer is this project's choice: the server only closes the
- *     client, and no PSP recording or relay rule gives a result for the call that caused it. The
- *     events it was already sent stay for it to take.
- * Two server rules have no counterpart here. The server keys a group by channel and name, but every
- * client of the protocol version Nakagawa speaks (adhocctl v1) is on its one default channel
- * (client.cpp V1_PROTOCOL_DEFAULT_CHANNEL), so the name alone decides. The server's crosslinks,
- * which let some product codes share groups, are not modelled: a game meets only consoles running
- * its own product code.
+ *   - a join: for each member already in the group, newest member first, the member hears of the
+ *     newcomer and then the newcomer of the member (CONNECT); last the newcomer gets CONNECT_BSSID
+ *     with the group's BSSID;
+ *   - a group's BSSID is a locally administered address of its own, not a member's MAC; it stays
+ *     when the creator leaves, and a group created again gets a new one;
+ *   - an empty group is removed;
+ *   - a scan lists every group of the product, newest group first, each with its BSSID, then
+ *     SCAN_COMPLETE;
+ *   - leaving tells each remaining member, newest first (DISCONNECT with the leaver's id), and the
+ *     leaver nothing; logging out leaves the group the same way;
+ *   - a join while in a group, a group name with a character outside A-Z, a-z and 0-9 (up to the
+ *     first zero byte), a leave outside a group and a scan inside one are protocol errors: the
+ *     server logs the console out (it leaves its group, its sockets close), and the call answers
+ *     NK_NET_NOT_LOGGED_IN. The HLE layer refuses such calls itself before they reach a transport.
+ *   - an event a console's full queue cannot hold is dropped and counted in events_dropped, as
+ *     PPSSPP's server logs a failed send and carries on. A console whose count is above zero has an
+ *     incomplete view of the lobby; the HLE layer must treat that as a fault, never carry on.
+ * The medium's own rules: a MAC already logged in is refused (PPSSPP's server accepts it), and the
+ * peer id is the console's index plus one. The server's product-code overrides, which let some
+ * product codes share groups, are not modelled: a game meets only consoles running its own
+ * product code.
  * Datagrams follow UDP: one to a MAC or port nobody holds in the sender's group is dropped and
  * the send still succeeds; a full receive queue drops the datagram and counts it. Broadcast is
  * the caller's to fan out over the peer list, as PPSSPP does, so a group-address destination is
@@ -58,9 +61,10 @@ typedef enum NkNetResult {
     NK_NET_OK = 0,
     NK_NET_AGAIN = -1,          /* nothing has arrived yet */
     NK_NET_BAD_ARG = -2,
-    NK_NET_NOT_LOGGED_IN = -3,  /* also the call that got its caller removed (a full event queue):
-                                 * the project's choice, with no PSP or relay counterpart; the HLE
-                                 * layer maps it by name, measured or UNMEASURED, before using it */
+    NK_NET_NOT_LOGGED_IN = -3,  /* also the call the lobby answered by logging its caller out (a
+                                 * protocol error, as PPSSPP's server treats it); the HLE layer
+                                 * refuses those calls first and maps this by name, measured or
+                                 * UNMEASURED, before using it */
     NK_NET_NOT_IN_GROUP = -4,
     NK_NET_PORT_IN_USE = -5,
     NK_NET_TOO_BIG = -6,        /* a datagram over NK_RELAY_PDP_MAX */
@@ -109,5 +113,18 @@ NkAdhocLoopNet *nk_loopnet_create(void);
 void nk_loopnet_destroy(NkAdhocLoopNet *net);
 /* Console index's endpoint on the medium, or NULL past NK_LOOPNET_CONSOLES. */
 NkAdhocTransport *nk_loopnet_console(NkAdhocLoopNet *net, unsigned index);
+
+/* Test aid: one lobby event as the medium queued it. */
+typedef struct NkLoopTrace {
+    unsigned console;   /* the receiving console's index */
+    NkLobbyOpcode kind;
+    uint32_t peer_id;   /* CONNECT and DISCONNECT */
+} NkLoopTrace;
+#define NK_LOOPNET_TRACE 64u
+/* The lobby events the medium queued on any console since the last call, in the order it queued
+ * them, which is the order the server sends them. Copies the first min(max, NK_LOOPNET_TRACE)
+ * and returns how many were queued; a return above NK_LOOPNET_TRACE means some were not kept.
+ * Dropped events (events_dropped) are not in it. */
+size_t nk_loopnet_trace(NkAdhocLoopNet *net, NkLoopTrace *out, size_t max);
 
 #endif

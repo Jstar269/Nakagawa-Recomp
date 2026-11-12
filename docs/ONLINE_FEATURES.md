@@ -153,16 +153,21 @@ so it is its own explicit choice with its own sentence in Settings. It is off by
     project's PSP. A call stays a named refusal until its sequence is measured.
   - **Transport:** the services talk to their peers through one small transport interface
     (`src/core/nk_adhoc_net.h`): the lobby and PDP sockets now, PTP streams later. Its first implementation is an
-    in-process medium that follows the relay server's lobby rules. One console alone on it is a PSP with no peers
-    in range, the default with Online play off. Two to four consoles on it are a simulation for tests, labelled
-    as such. The relay is the second implementation.
+    in-process medium whose lobby is translated from PPSSPP's ad hoc server, which speaks the same lobby protocol.
+    One console alone on it is a PSP with no peers in range, the default with Online play off. Two to four consoles
+    on it are a simulation for tests, labelled as such. The relay is the second implementation.
   - **The relay client** is one module in the game process (`src/core/nk_adhoc_relay*`), because a game's
     datagrams cannot wait for a trip through the launcher. The player starts a game with the server only when the
     user turned Online play on. That module is the only runtime file the egress allowlist test lets use the network.
-- **Licence.** The client is project-authored code that speaks the protocol. It is written from aemu_postoffice's
-  `design.md` and packet layouts, and copies none of its GPL-3.0-only code. Importing it later under `AGENTS.md`
-  section 4 is approved. That would make binaries that link it distributable under GPL-3.0 only, and its
-  `PROVENANCE.md` would say so.
+- **Where the code comes from** (`src/core/PROVENANCE.md` has the details).
+  - The relay codec (`src/core/nk_adhoc_relay.c/.h`) is this project's own code that encodes and decodes the
+    protocol's packets; no upstream code is copied. The packet layouts and limits come from aemu_postoffice's
+    headers, its login checks and port offset from PPSSPP.
+  - The in-process medium's lobby (`src/core/nk_adhoc_net.c`) is translated from PPSSPP's ad hoc server
+    (`Core/HLE/proAdhocServer.cpp`, GPL-2.0-or-later) and labelled derived-translated. Its PDP half is this
+    project's own.
+  - Importing aemu_postoffice's client code later under `AGENTS.md` section 4 is approved by the owner. That code is
+    marked GPL-3.0-only, and its `PROVENANCE.md` entry would record that.
 - **Infrastructure revivals, per title, later.** A game whose official servers are gone can be revived only by
   rebuilding that game's own server protocol, one title at a time, from interoperability study of the game itself.
 - **Never:** anything that needs the console vendor's online-account sign-in or DNAS authentication. Those depend on

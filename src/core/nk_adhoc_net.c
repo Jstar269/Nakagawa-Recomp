@@ -1,7 +1,43 @@
-/* SPDX-License-Identifier: GPL-3.0-or-later */
-/* Copyright (C) 2026 the Nakagawa Recomp authors */
-
-/* The in-process ad hoc medium (nk_adhoc_net.h): no host socket, no network API. */
+/* SPDX-License-Identifier: GPL-3.0-or-later
+ * Copyright (c) 2014- PPSSPP Project
+ * Copyright (C) 2026 the Nakagawa Recomp authors
+ *
+ * The in-process ad hoc medium (nk_adhoc_net.h): no host socket, no network API.
+ *
+ * The lobby (lo_login, lo_logout, lo_connect, lo_disconnect, lo_scan and the helpers between
+ * here and lo_take_events) is translated from PPSSPP's ad hoc server
+ * (https://github.com/hrydgard/ppsspp) Core/HLE/proAdhocServer.cpp at revision
+ * 3bc60270eae3069f13dfbfdb7292a7e1375de6f6 (GPL-2.0-or-later; that file is PPSSPP's port of
+ * Coldbird's aemu server): login_user_data, logout_user, connect_user, disconnect_user and
+ * send_scan_results, with the opcode rules of server_loop. Label: derived-translated
+ * (docs/provenance/INDEPENDENCE_MODEL.md). This file is conveyed as GPL-3.0-or-later.
+ *
+ * Modified for this project (2026-11-12; see src/core/PROVENANCE.md):
+ *   - C99 over fixed arrays instead of linked lists of user, game and group nodes. A group's
+ *     members are an array kept newest first, as PPSSPP links each joiner at the head of the
+ *     group's player list; groups carry a creation number, and a scan lists them newest first,
+ *     as PPSSPP links each new group at the head of its game's group list.
+ *   - A packet the server sends is an event queued on the receiving console. PPSSPP logs a send
+ *     that fails and carries on; the medium likewise drops an event its receiver's full queue
+ *     cannot hold, and counts it in events_dropped.
+ *   - The peer id in CONNECT and DISCONNECT is the console's index plus one, where PPSSPP sends
+ *     the client's IP address.
+ *   - A group's BSSID is a locally administered address of its own, kept when its creator leaves
+ *     and new for a group created again, as in PPSSPP. PPSSPP draws its bytes at random; the
+ *     medium numbers them (02:00 then the medium's group count, big-endian), so every group it
+ *     creates has its own and a test run is reproducible.
+ *   - A MAC already logged in is refused (NK_NET_BAD_ARG). PPSSPP logs it and accepts it; the
+ *     medium delivers datagrams by MAC, and two consoles with one MAC would make that ambiguous.
+ *   - Where PPSSPP logs a client out for a request (a join while in a group, a group name with a
+ *     character outside A-Z, a-z and 0-9, a leave outside a group, a scan inside one), the medium
+ *     logs the console out the same way: it leaves its group (the members are told) and its
+ *     sockets close. The call answers NK_NET_NOT_LOGGED_IN, and the events it was already sent
+ *     stay for it to take, as bytes already sent reach a client before its connection closes.
+ *   - Left out: the product-code overrides (game_product_override), chat, the status log, the
+ *     login timeout and the server's own sockets.
+ *
+ * The PDP half (sockets, datagram queues, delivery by MAC and port inside the sender's group,
+ * counted drops) is this project's own: PPSSPP's lobby server has no counterpart. */
 
 #include "nk_adhoc_net.h"
 
@@ -24,9 +60,12 @@ typedef struct Socket {
 
 typedef struct Group {
     int used;
+    uint32_t number; /* creation order: a larger number is a newer group */
     char product[NK_RELAY_PRODUCT_LEN + 1u];
     uint8_t name[NK_RELAY_GROUP_LEN];
-    uint8_t leader[NK_RELAY_MAC_LEN];
+    uint8_t bssid[NK_RELAY_MAC_LEN];
+    unsigned members[NK_LOOPNET_CONSOLES]; /* console indices, newest first */
+    unsigned count;
 } Group;
 
 typedef struct Console {
@@ -34,7 +73,6 @@ typedef struct Console {
     NkAdhocLoopNet *net;
     unsigned index;
     int logged_in;
-    int lost; /* its event queue overflowed: the lobby removes it */
     uint8_t mac[NK_RELAY_MAC_LEN];
     char nickname[NK_RELAY_NICKNAME_LEN];
     char product[NK_RELAY_PRODUCT_LEN + 1u];
@@ -49,208 +87,245 @@ typedef struct Console {
 struct NkAdhocLoopNet {
     Console consoles[NK_LOOPNET_CONSOLES];
     Group groups[NK_LOOPNET_CONSOLES]; /* each console is in one group at most */
+    uint32_t groups_made;
+    NkLoopTrace trace[NK_LOOPNET_TRACE];
+    size_t trace_count; /* events queued since the last nk_loopnet_trace, kept or not */
 };
 
 static Console *as_console(NkAdhocTransport *t) { return (Console *)t; }
 static const Console *as_const_console(const NkAdhocTransport *t) { return (const Console *)t; }
 
-static void push_event(Console *c, const NkLobbyEvent *ev) {
-    if (!c->logged_in || c->lost) {
-        if (c->lost) c->ev_dropped++;
-        return;
-    }
-    if (c->ev_count == NK_NET_EVENT_QUEUE) {
-        c->ev_dropped++;
-        c->lost = 1; /* removed from the lobby once the current call ends (reap_lost) */
-        return;
-    }
-    c->events[(c->ev_head + c->ev_count) % NK_NET_EVENT_QUEUE] = *ev;
-    c->ev_count++;
-}
-
-static void push_peer(Console *to, NkLobbyOpcode kind, const Console *peer) {
-    NkLobbyEvent ev;
-    memset(&ev, 0, sizeof ev);
-    ev.kind = kind;
-    memcpy(ev.mac, peer->mac, NK_RELAY_MAC_LEN);
-    memcpy(ev.nickname, peer->nickname, sizeof ev.nickname);
-    ev.peer_id = peer->index + 1u;
-    push_event(to, &ev);
-}
-
-/* Members of group g, in MAC order (the relay server keeps them in a map keyed by MAC). */
-static unsigned members_in_mac_order(NkAdhocLoopNet *net, int g, Console *out[NK_LOOPNET_CONSOLES]) {
-    unsigned n = 0;
-    for (unsigned i = 0; i < NK_LOOPNET_CONSOLES; i++)
-        if (net->consoles[i].logged_in && net->consoles[i].group == g) out[n++] = &net->consoles[i];
-    for (unsigned i = 1; i < n; i++)
-        for (unsigned j = i; j > 0 && memcmp(out[j - 1]->mac, out[j]->mac, NK_RELAY_MAC_LEN) > 0; j--) {
-            Console *tmp = out[j];
-            out[j] = out[j - 1];
-            out[j - 1] = tmp;
-        }
-    return n;
-}
-
-static void leave_group(Console *c) {
-    if (c->group < 0) return;
-    NkAdhocLoopNet *net = c->net;
-    int g = c->group;
-    c->group = -1;
-    Console *members[NK_LOOPNET_CONSOLES];
-    unsigned n = members_in_mac_order(net, g, members);
-    for (unsigned i = 0; i < n; i++) {
-        NkLobbyEvent ev;
-        memset(&ev, 0, sizeof ev);
-        ev.kind = NK_LOBBY_DISCONNECT;
-        ev.peer_id = c->index + 1u;
-        push_event(members[i], &ev);
-    }
-    if (n == 0) memset(&net->groups[g], 0, sizeof net->groups[g]);
-}
+static uint32_t peer_id(const Console *c) { return c->index + 1u; }
 
 static void free_queue(Socket *s) {
-    for (unsigned i = 0; i < s->count; i++) free(s->queue[(s->head + i) % NK_NET_PDP_QUEUE].data);
+    for (unsigned i = 0; i < s->count; i++) {
+        Datagram *d = &s->queue[(s->head + i) % NK_NET_PDP_QUEUE];
+        free(d->data);
+        d->data = NULL;
+    }
     s->head = s->count = 0;
 }
 
 static void close_sockets(Console *c) {
-    for (unsigned i = 0; i < NK_NET_PDP_SOCKETS; i++) {
-        free_queue(&c->sockets[i]);
-        c->sockets[i].used = 0;
+    for (unsigned k = 0; k < NK_NET_PDP_SOCKETS; k++) {
+        free_queue(&c->sockets[k]);
+        c->sockets[k].used = 0;
     }
 }
 
-/* Removes every console whose event queue overflowed during the call that just ran. Telling its
- * group may overflow another console in turn, so this repeats until none is left. */
-static void reap_lost(NkAdhocLoopNet *net) {
-    for (int again = 1; again;) {
-        again = 0;
-        for (unsigned i = 0; i < NK_LOOPNET_CONSOLES; i++) {
-            Console *c = &net->consoles[i];
-            if (!c->logged_in || !c->lost) continue;
-            leave_group(c);
-            close_sockets(c);
-            c->logged_in = 0;
-            again = 1;
-        }
+/* One server packet to one console (PPSSPP: send() on the client's stream). */
+static void send_event(Console *to, const NkLobbyEvent *ev) {
+    NkAdhocLoopNet *net = to->net;
+    if (to->ev_count == NK_NET_EVENT_QUEUE) {
+        to->ev_dropped++;
+        return;
     }
+    to->events[(to->ev_head + to->ev_count) % NK_NET_EVENT_QUEUE] = *ev;
+    to->ev_count++;
+    if (net->trace_count < NK_LOOPNET_TRACE) {
+        NkLoopTrace *tr = &net->trace[net->trace_count];
+        tr->console = to->index;
+        tr->kind = ev->kind;
+        tr->peer_id = ev->peer_id;
+    }
+    net->trace_count++;
 }
 
+/* OPCODE_CONNECT: tells `to` that `who` is in its group. */
+static void send_connect(Console *to, const Console *who) {
+    NkLobbyEvent ev;
+    memset(&ev, 0, sizeof ev);
+    ev.kind = NK_LOBBY_CONNECT;
+    memcpy(ev.nickname, who->nickname, sizeof ev.nickname);
+    memcpy(ev.mac, who->mac, NK_RELAY_MAC_LEN);
+    ev.peer_id = peer_id(who);
+    send_event(to, &ev);
+}
+
+/* PPSSPP disconnect_user, for a console in a group: it leaves the member list, each remaining
+ * member (newest first) hears OPCODE_DISCONNECT with its id, and an empty group is deleted. The
+ * leaver hears nothing. */
+static void leave_group(Console *c) {
+    NkAdhocLoopNet *net = c->net;
+    Group *g = &net->groups[c->group];
+    unsigned at = 0;
+    while (at < g->count && g->members[at] != c->index) at++;
+    if (at < g->count) {
+        for (unsigned i = at; i + 1u < g->count; i++) g->members[i] = g->members[i + 1u];
+        g->count--;
+    }
+    for (unsigned i = 0; i < g->count; i++) {
+        NkLobbyEvent ev;
+        memset(&ev, 0, sizeof ev);
+        ev.kind = NK_LOBBY_DISCONNECT;
+        ev.peer_id = peer_id(c);
+        send_event(&net->consoles[g->members[i]], &ev);
+    }
+    if (g->count == 0u) memset(g, 0, sizeof *g);
+    c->group = -1;
+}
+
+/* PPSSPP logout_user: leave the group, then the connection closes. On the medium that closes the
+ * console's sockets too. */
+static void log_out(Console *c) {
+    if (c->group >= 0) leave_group(c);
+    close_sockets(c);
+    c->logged_in = 0;
+}
+
+/* A request PPSSPP's server answers by logging the client out. */
+static int drop_client(Console *c) {
+    log_out(c);
+    return NK_NET_NOT_LOGGED_IN;
+}
+
+/* connect_user's group name check: up to the first zero byte, A-Z, a-z and 0-9 only. */
+static int group_name_ok(const uint8_t name[NK_RELAY_GROUP_LEN]) {
+    for (unsigned i = 0; i < NK_RELAY_GROUP_LEN; i++) {
+        const uint8_t ch = name[i];
+        if (ch == 0u) break;
+        if ((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9')) continue;
+        return 0;
+    }
+    return 1;
+}
+
+/* A group of this product with this name, compared as PPSSPP does (strncmp, so bytes after a
+ * zero byte do not count), or -1. */
+static int find_group(const NkAdhocLoopNet *net, const char *product,
+                      const uint8_t name[NK_RELAY_GROUP_LEN]) {
+    for (unsigned i = 0; i < NK_LOOPNET_CONSOLES; i++) {
+        const Group *g = &net->groups[i];
+        if (g->used && strncmp(g->product, product, NK_RELAY_PRODUCT_LEN) == 0 &&
+            strncmp((const char *)g->name, (const char *)name, NK_RELAY_GROUP_LEN) == 0)
+            return (int)i;
+    }
+    return -1;
+}
+
+static int make_group(NkAdhocLoopNet *net, const char *product, const uint8_t name[NK_RELAY_GROUP_LEN]) {
+    for (unsigned i = 0; i < NK_LOOPNET_CONSOLES; i++) {
+        Group *g = &net->groups[i];
+        if (g->used) continue;
+        memset(g, 0, sizeof *g);
+        g->used = 1;
+        g->number = ++net->groups_made;
+        memcpy(g->product, product, NK_RELAY_PRODUCT_LEN);
+        memcpy(g->name, name, NK_RELAY_GROUP_LEN);
+        g->bssid[0] = 0x02u; /* locally administered, unicast */
+        g->bssid[1] = 0x00u;
+        g->bssid[2] = (uint8_t)(g->number >> 24);
+        g->bssid[3] = (uint8_t)(g->number >> 16);
+        g->bssid[4] = (uint8_t)(g->number >> 8);
+        g->bssid[5] = (uint8_t)g->number;
+        return (int)i;
+    }
+    return -1;
+}
+
+/* login_user_data: the relay codec applies PPSSPP's login checks (nk_relay_mac_ok,
+ * nk_relay_product_ok, a nickname of 1 to 127 bytes); a refused login stays logged out. */
 static int lo_login(NkAdhocTransport *t, const uint8_t mac[NK_RELAY_MAC_LEN], const char *nickname,
                     const char *product) {
     Console *c = as_console(t);
-    if (c->logged_in || !mac || !nickname || !product) return NK_NET_BAD_ARG;
-    if (!nk_relay_mac_ok(mac) || !nk_relay_product_ok(product)) return NK_NET_BAD_ARG;
-    if (strlen(nickname) >= NK_RELAY_NICKNAME_LEN) return NK_NET_BAD_ARG;
+    uint8_t packet[NK_LOBBY_LOGIN_SIZE];
+    if (c->logged_in || nk_lobby_login(packet, mac, nickname, product) == 0u) return NK_NET_BAD_ARG;
     for (unsigned i = 0; i < NK_LOOPNET_CONSOLES; i++) {
         const Console *o = &c->net->consoles[i];
         if (o != c && o->logged_in && memcmp(o->mac, mac, NK_RELAY_MAC_LEN) == 0) return NK_NET_BAD_ARG;
     }
     memcpy(c->mac, mac, NK_RELAY_MAC_LEN);
     memset(c->nickname, 0, sizeof c->nickname);
-    memcpy(c->nickname, nickname, strlen(nickname));
+    memcpy(c->nickname, nickname, strlen(nickname)); /* nk_lobby_login checked: under 128 bytes */
     memcpy(c->product, product, NK_RELAY_PRODUCT_LEN);
     c->product[NK_RELAY_PRODUCT_LEN] = '\0';
     c->group = -1;
     c->ev_head = c->ev_count = 0;
-    c->lost = 0;
     c->logged_in = 1;
     return NK_NET_OK;
 }
 
+/* The client ends its connection: the server runs logout_user, and what was not yet read goes
+ * with the connection. */
 static int lo_logout(NkAdhocTransport *t) {
     Console *c = as_console(t);
     if (!c->logged_in) return NK_NET_NOT_LOGGED_IN;
-    leave_group(c);
-    close_sockets(c);
+    log_out(c);
     c->ev_head = c->ev_count = 0;
-    c->logged_in = 0;
-    reap_lost(c->net);
     return NK_NET_OK;
 }
 
+/* connect_user. For each member already in the group, newest first: the member hears of the
+ * joiner, then the joiner hears of the member. The joiner then joins the head of the member list
+ * and hears the group's BSSID (OPCODE_CONNECT_BSSID). A new group gets a BSSID of its own. */
 static int lo_connect(NkAdhocTransport *t, const uint8_t group[NK_RELAY_GROUP_LEN]) {
     Console *c = as_console(t);
-    if (!group) return NK_NET_BAD_ARG;
     if (!c->logged_in) return NK_NET_NOT_LOGGED_IN;
+    if (!group) return NK_NET_BAD_ARG;
+    if (!group_name_ok(group) || c->group >= 0) return drop_client(c);
     NkAdhocLoopNet *net = c->net;
-    leave_group(c);
-    int g = -1, free_slot = -1;
-    for (unsigned i = 0; i < NK_LOOPNET_CONSOLES; i++) {
-        Group *gr = &net->groups[i];
-        if (!gr->used) {
-            if (free_slot < 0) free_slot = (int)i;
-        } else if (strcmp(gr->product, c->product) == 0 &&
-                   memcmp(gr->name, group, NK_RELAY_GROUP_LEN) == 0) {
-            g = (int)i;
-        }
+    int gi = find_group(net, c->product, group);
+    if (gi < 0) gi = make_group(net, c->product, group);
+    /* Cannot fail: a console outside every group leaves a free slot. PPSSPP logs the client out
+     * when it cannot allocate a group. */
+    if (gi < 0) return drop_client(c);
+    Group *g = &net->groups[gi];
+    for (unsigned i = 0; i < g->count; i++) {
+        Console *member = &net->consoles[g->members[i]];
+        send_connect(member, c);
+        send_connect(c, member);
     }
-    if (g < 0) {
-        /* A free slot always exists: c has just left its group, so at most NK_LOOPNET_CONSOLES-1
-         * groups are in use. */
-        g = free_slot;
-        Group *gr = &net->groups[g];
-        gr->used = 1;
-        memcpy(gr->product, c->product, sizeof gr->product);
-        memcpy(gr->name, group, NK_RELAY_GROUP_LEN);
-        memcpy(gr->leader, c->mac, NK_RELAY_MAC_LEN);
-    }
-    Console *members[NK_LOOPNET_CONSOLES];
-    unsigned n = members_in_mac_order(net, g, members);
-    for (unsigned i = 0; i < n; i++) {
-        push_peer(members[i], NK_LOBBY_CONNECT, c);
-        push_peer(c, NK_LOBBY_CONNECT, members[i]);
-    }
-    NkLobbyEvent ack;
-    memset(&ack, 0, sizeof ack);
-    ack.kind = NK_LOBBY_CONNECT_BSSID;
-    memcpy(ack.mac, net->groups[g].leader, NK_RELAY_MAC_LEN);
-    push_event(c, &ack);
-    c->group = g;
-    reap_lost(net);
-    /* Its own ack can overflow its queue: then the lobby has just removed it, as the relay
-     * closes a client it cannot send to, and the call says so. Its queued events stay to take. */
-    return c->logged_in ? NK_NET_OK : NK_NET_NOT_LOGGED_IN;
+    for (unsigned i = g->count; i > 0u; i--) g->members[i] = g->members[i - 1u];
+    g->members[0] = c->index;
+    g->count++;
+    c->group = gi;
+    NkLobbyEvent ev;
+    memset(&ev, 0, sizeof ev);
+    ev.kind = NK_LOBBY_CONNECT_BSSID;
+    memcpy(ev.mac, g->bssid, NK_RELAY_MAC_LEN);
+    send_event(c, &ev);
+    return NK_NET_OK;
 }
 
 static int lo_disconnect(NkAdhocTransport *t) {
     Console *c = as_console(t);
     if (!c->logged_in) return NK_NET_NOT_LOGGED_IN;
+    if (c->group < 0) return drop_client(c);
     leave_group(c);
-    reap_lost(c->net);
     return NK_NET_OK;
 }
 
+/* send_scan_results: for a console outside every group, one OPCODE_SCAN per group of its product,
+ * newest group first, each with the group's BSSID, then OPCODE_SCAN_COMPLETE. */
 static int lo_scan(NkAdhocTransport *t) {
     Console *c = as_console(t);
     if (!c->logged_in) return NK_NET_NOT_LOGGED_IN;
-    const Group *found[NK_LOOPNET_CONSOLES];
-    unsigned n = 0;
-    for (unsigned i = 0; i < NK_LOOPNET_CONSOLES; i++) {
-        const Group *gr = &c->net->groups[i];
-        if (gr->used && strcmp(gr->product, c->product) == 0) found[n++] = gr;
-    }
-    for (unsigned i = 1; i < n; i++)
-        for (unsigned j = i; j > 0 && memcmp(found[j - 1]->name, found[j]->name, NK_RELAY_GROUP_LEN) > 0; j--) {
-            const Group *tmp = found[j];
-            found[j] = found[j - 1];
-            found[j - 1] = tmp;
+    if (c->group >= 0) return drop_client(c);
+    NkAdhocLoopNet *net = c->net;
+    uint32_t below = UINT32_MAX;
+    for (;;) {
+        int next = -1;
+        for (unsigned i = 0; i < NK_LOOPNET_CONSOLES; i++) {
+            const Group *g = &net->groups[i];
+            if (!g->used || g->number >= below || strncmp(g->product, c->product, NK_RELAY_PRODUCT_LEN) != 0)
+                continue;
+            if (next < 0 || g->number > net->groups[next].number) next = (int)i;
         }
-    for (unsigned i = 0; i < n; i++) {
+        if (next < 0) break;
+        const Group *g = &net->groups[next];
         NkLobbyEvent ev;
         memset(&ev, 0, sizeof ev);
         ev.kind = NK_LOBBY_SCAN;
-        memcpy(ev.group, found[i]->name, NK_RELAY_GROUP_LEN);
-        memcpy(ev.mac, found[i]->leader, NK_RELAY_MAC_LEN);
-        push_event(c, &ev);
+        memcpy(ev.group, g->name, NK_RELAY_GROUP_LEN);
+        memcpy(ev.mac, g->bssid, NK_RELAY_MAC_LEN);
+        send_event(c, &ev);
+        below = g->number;
     }
     NkLobbyEvent done;
     memset(&done, 0, sizeof done);
     done.kind = NK_LOBBY_SCAN_COMPLETE;
-    push_event(c, &done);
-    reap_lost(c->net);
-    return c->logged_in ? NK_NET_OK : NK_NET_NOT_LOGGED_IN;   /* removed by its own overflow */
+    send_event(c, &done);
+    return NK_NET_OK;
 }
 
 static size_t lo_take_events(NkAdhocTransport *t, NkLobbyEvent *out, size_t max) {
@@ -378,4 +453,13 @@ void nk_loopnet_destroy(NkAdhocLoopNet *net) {
 NkAdhocTransport *nk_loopnet_console(NkAdhocLoopNet *net, unsigned index) {
     if (!net || index >= NK_LOOPNET_CONSOLES) return NULL;
     return &net->consoles[index].base;
+}
+
+size_t nk_loopnet_trace(NkAdhocLoopNet *net, NkLoopTrace *out, size_t max) {
+    if (!net) return 0;
+    const size_t kept = net->trace_count < NK_LOOPNET_TRACE ? net->trace_count : NK_LOOPNET_TRACE;
+    for (size_t i = 0; out && i < kept && i < max; i++) out[i] = net->trace[i];
+    const size_t queued = net->trace_count;
+    net->trace_count = 0;
+    return queued;
 }
