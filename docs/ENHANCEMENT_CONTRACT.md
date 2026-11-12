@@ -2397,8 +2397,9 @@ The Layer 2 mechanism of section 10.8, for a title that skips objects outside it
   wing cap of section 10.8 is unchanged. The table that keeps a matrix from being scaled twice is keyed by the
   matrix's address and holds 4096 entries. An entry matters only while guest memory at its address still holds
   the x row the hook wrote: once the title writes anything else there, the next call at that address scales what
-  it finds with or without the entry. So when a new address would take the table past three-quarters full, the
-  entries whose words are gone are dropped first, which changes no call's outcome; a title that builds its
+  it finds with or without the entry. So when a new address would take the table to three-quarters full, the
+  entries whose words are gone are dropped first (at most once per call), which changes no call's outcome while
+  package obligation (1) holds (no widened copy is put back where it was); a title that builds its
   matrices in per-frame scratch memory, at addresses that move from frame to frame, reuses that room instead of
   filling the table. Only when more than 4096 widened matrices are all still in guest memory at once is a new
   matrix left unscaled (said once on stderr, counted in the report's `cull_untracked`) instead of being scaled

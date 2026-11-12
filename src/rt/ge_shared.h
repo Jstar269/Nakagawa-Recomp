@@ -463,7 +463,10 @@ unsigned long ge_wide_cull_calls(void);
 /* Matrix uses left unscaled because the hook's 4096-entry table was full of matrices whose widened
  * words were all still in guest memory (contract 11.3.6). */
 unsigned long ge_wide_cull_untracked(void);
-/* Entries the hook's table holds now (at most 4096; the self-test checks it stays bounded). */
+/* The hook's table: its size, and the fill at which a new address first drops the entries whose
+ * words are gone from guest memory; and the entries it holds now (the self-test checks the bound). */
+#define GE_CULL_SEEN 4096u
+#define GE_CULL_SWEEP_AT (GE_CULL_SEEN / 4u * 3u)
 unsigned  ge_wide_cull_table_live(void);
 int       ge_wide_wing(void);
 /* The display was given framebuffer `fb_addr`: its canvas exists from now on. The last two

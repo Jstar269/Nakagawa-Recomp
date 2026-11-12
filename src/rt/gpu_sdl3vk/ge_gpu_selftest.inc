@@ -7297,11 +7297,12 @@ static int wide_clip_x_fill_check(int wing) {
 
 /* A title that builds its camera record in per-frame scratch memory (#2308): two frame slices used in turn,
  * each a top-down bump allocator that first hands out a varying amount of other scratch, so every record
- * lands at an address that moves from frame to frame, and the frame two later writes over it. Over far more
- * than 4096 frames and distinct addresses each record must be widened exactly once (a repeat call in its
- * frame changes nothing), none may be left untracked, and the table must stay at or below the point where it
- * reclaims entries. Run after wide_clip_x_fill_check: its matrices are first overwritten, as a title reusing
- * that memory would, so their entries stop deciding any call and must make room too. */
+ * lands at an address that moves from frame to frame, and a later frame in that slice writes over it. Over
+ * 12000 frames and more than GE_CULL_SEEN distinct addresses each record must be widened exactly once (a
+ * repeat call in its frame changes nothing) and none may be left untracked; the table must reach the point
+ * where it drops entries whose words are gone, do so more than once, and never pass it. Run after
+ * wide_clip_x_fill_check: its matrices are first overwritten, as a title reusing that memory would, so their
+ * entries stop deciding any call and must make room too. */
 #define MOVE_FRAMES 12000u
 #define MOVE_RECORDS 3u
 #define MOVE_RECORD_BYTES 1184u
@@ -7310,19 +7311,22 @@ static int wide_clip_x_moving_check(int wing) {
     const uint32_t base = SR_RAM_BASE + 0x00f00000u, first = 0x20000u;   /* the fill check's matrices start here */
     const uint32_t offsets[1] = {640u};
     const float scale = 480.0f / (480.0f + 2.0f * (float)wing);
+    static unsigned char seen[2u * MOVE_SLICE / 16u];   /* the record addresses used, one byte per 16 bytes */
+    memset(seen, 0, sizeof seen);
     memset(SR_HOST(base + first), 0x5a, 64u * FILL_N);
     const unsigned long u0 = ge_wide_cull_untracked(), c0 = ge_wide_cull_calls();
-    unsigned peak = 0;
+    unsigned peak = 0, live_before = ge_wide_cull_table_live(), drops = 0, distinct = 0;
     int ok = 1;
     for (uint32_t f = 0; ok && f < MOVE_FRAMES; f++) {
         const uint32_t top = base + first + ((f & 1u) + 1u) * MOVE_SLICE;
-        uint32_t cur = top - 16u * ((f * 37u + 11u) % 1024u);   /* the frame's other scratch, up to 16 KiB */
+        uint32_t cur = top - 16u * ((f * 37u + 11u) % 4096u);   /* the frame's other scratch, up to 64 KiB */
         for (uint32_t a = cur; a < top; a += 4u) {
             const uint32_t w = 0xa5a5a5a5u ^ f ^ a;
             memcpy(SR_HOST(a), &w, sizeof w);
         }
         for (uint32_t j = 0; ok && j < MOVE_RECORDS; j++) {
             cur -= 16u * ((f + 3u * j) % 8u) + MOVE_RECORD_BYTES;
+            if (!seen[(cur - (base + first)) / 16u]++) distinct++;
             for (uint32_t b = 0; b < MOVE_RECORD_BYTES; b += 4u) {
                 const float v = 1.0f + (float)(b / 4u % 16u) + 0.25f * (float)(f % 97u) + (float)j;
                 memcpy(SR_HOST(cur + b), &v, sizeof v);
@@ -7344,12 +7348,17 @@ static int wide_clip_x_moving_check(int wing) {
                 }
             }
         }
-        if (ge_wide_cull_table_live() > peak) peak = ge_wide_cull_table_live();
+        const unsigned live = ge_wide_cull_table_live();
+        if (live > peak) peak = live;
+        if (live < live_before) drops++;   /* a sweep dropped entries whose words were gone */
+        live_before = live;
     }
     const unsigned long untracked = ge_wide_cull_untracked() - u0, scaled = ge_wide_cull_calls() - c0;
-    if (!ok || untracked != 0 || scaled != MOVE_FRAMES * MOVE_RECORDS || peak > 4096u / 4u * 3u) {
+    if (!ok || untracked != 0 || scaled != MOVE_FRAMES * MOVE_RECORDS || distinct <= GE_CULL_SEEN ||
+        peak > GE_CULL_SWEEP_AT || drops < 2) {
         fprintf(stderr, "gpu coherence selftest [wide-fill]: clip_x_widen moving records: scaled %lu of %u, "
-                        "untracked %lu, table peak %u\n", scaled, MOVE_FRAMES * MOVE_RECORDS, untracked, peak);
+                        "untracked %lu, distinct addresses %u, table peak %u (sweep at %u), sweeps %u\n", scaled,
+                MOVE_FRAMES * MOVE_RECORDS, untracked, distinct, peak, GE_CULL_SWEEP_AT, drops);
         ok = 0;
     }
     return ok;

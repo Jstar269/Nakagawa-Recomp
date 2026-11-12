@@ -5331,17 +5331,19 @@ unsigned long ge_wide_cull_untracked(void) { return s_cull_untracked; }
  *
  * An entry decides a call only while guest memory at its address still holds the words it records:
  * once the title has written anything else there, a call at that address scales what it finds,
- * with or without the entry. So when a new address would take the table past three-quarters full,
- * the entries whose words are gone are dropped and the rest re-inserted in slot order (deterministic),
- * which changes the outcome of no call unless the title later puts those very bits back at that
- * address (package obligation (1) of contract 11.3.6 rules out restoring a widened copy). A title that builds its matrices in per-frame scratch memory,
- * at an address that moves with whatever else the frame allocated, so reuses the room its earlier
- * frames' matrices took instead of filling the table. Only matrices whose widened words are all still
- * in guest memory hold an entry; if more than GE_CULL_SEEN of those exist at once, a new matrix is
- * left alone (said once, and counted in s_cull_untracked for the run report), never scaled
- * untracked. */
-#define GE_CULL_SEEN 4096u
-#define GE_CULL_SWEEP_AT (GE_CULL_SEEN / 4u * 3u)
+ * with or without the entry. So when a new address would take the table to GE_CULL_SWEEP_AT
+ * entries or more, the entries whose words are gone are dropped and the rest re-inserted in slot
+ * order (deterministic). That changes the outcome of no call unless the title later puts those very
+ * bits back at that address (package obligation (1) of contract 11.3.6 rules out restoring a
+ * widened copy). A title that builds its matrices in per-frame scratch memory, at addresses that
+ * move with whatever else the frame allocated, therefore reuses the room its earlier frames'
+ * matrices took instead of filling the table.
+ *
+ * Only matrices whose widened words are all still in guest memory hold an entry. If more than
+ * GE_CULL_SEEN of those exist at once, a new matrix is left alone (said once, and counted in
+ * s_cull_untracked for the run report), never scaled untracked. A sweep runs at most once per
+ * hook call, which bounds its cost while the table stays full: the guest runs between two calls,
+ * and a second sweep within one call could find only entries the call's own writes overwrote. */
 typedef struct { uint32_t addr; uint32_t row[4]; } GeCullSeen;
 static GeCullSeen s_cull_seen[GE_CULL_SEEN];
 static uint32_t s_cull_live;   /* entries in use */
@@ -5366,6 +5368,7 @@ static void cull_sweep(void) {   /* drop the entries whose words the title has s
         for (uint32_t k = 0; k < 4u; k++) memcpy(&now[k], SR_HOST(e->addr + 16u * k), sizeof now[k]);
         if (memcmp(now, e->row, sizeof now) == 0) keep[n++] = *e;
     }
+    if (n == s_cull_live) return;   /* every entry still decides a call: nothing to drop */
     memset(s_cull_seen, 0, sizeof s_cull_seen);
     for (uint32_t j = 0; j < n; j++) s_cull_seen[cull_find(keep[j].addr)] = keep[j];
     s_cull_live = n;
@@ -5375,6 +5378,7 @@ void sr_enhancement_widen_clip_x(uint32_t base, const uint32_t *offsets, uint32_
     const int wing = s_wide_d;
     if (!s_cull_on || wing <= 0 || base == 0u || !offsets) return;
     const float inv = 480.0f / (480.0f + 2.0f * (float)wing);
+    int swept = 0;
     for (uint32_t i = 0; i < count; i++) {
         const uint32_t m = base + offsets[i];
         if (!sr_guest_span_writable_at(m, 64u, "clip_x_widen")) {
@@ -5389,8 +5393,10 @@ void sr_enhancement_widen_clip_x(uint32_t base, const uint32_t *offsets, uint32_
         uint32_t row[4];   /* the x output row of a column-major matrix: elements 0, 4, 8 and 12 */
         for (uint32_t k = 0; k < 4u; k++) memcpy(&row[k], SR_HOST(m + 16u * k), sizeof row[k]);
         uint32_t slot = cull_find(m);
-        if ((slot == GE_CULL_SEEN || s_cull_seen[slot].addr == 0u) && s_cull_live >= GE_CULL_SWEEP_AT) {
+        if ((slot == GE_CULL_SEEN || s_cull_seen[slot].addr == 0u) && s_cull_live >= GE_CULL_SWEEP_AT &&
+            !swept) {
             cull_sweep();   /* a new address: make room from the entries that no longer decide a call */
+            swept = 1;
             slot = cull_find(m);
         }
         if (slot == GE_CULL_SEEN) {
