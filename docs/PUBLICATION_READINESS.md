@@ -695,7 +695,9 @@ contributor's pull request only says where each new file came from
 | Hosted check: HTTP 404 fetching the policy delta | The private records are not on the private `main` | Step 3 |
 | `ADMIT_HOOKS_WOULD_REWRITE` | A pre-commit hook would change a byte of a path being admitted | Fix it on the pull request branch, then admit |
 | `POLICY_DELTA_CLAIM_MISMATCH` | A new path's class, record, upstream, revision or licence differs from its admission | Restore the claim, or admit the new claim (a new decision) |
-| `POLICY_DELTA_ADDED_BYTES_MISMATCH` | A byte-bound import changed after its admission | Restore the upstream bytes, or admit it again as a LOCAL DELTA with `--binding claim` |
+| `POLICY_DELTA_ADDED_BYTES_MISMATCH` | A byte-bound import changed after its admission | Restore the upstream bytes, or admit it again: as a LOCAL DELTA with `--binding claim`, or, for a binary file, a path under `assets/vfpu/` or a path the release manifest waives, bound to its new bytes |
+| `ADMISSION_BINDING_BYTES_REQUIRED` | A binary file, a path under `assets/vfpu/` or a path the release manifest waives was to be admitted bound to its claim only | Admit it bound to its bytes; under `--rekey`, admit it again without `--rekey` |
+| `ADMIT_MANIFEST_UNREADABLE` | The pull request's `assets/release_manifest.json` cannot be read, so the admission cannot tell which paths it waives | Fix the manifest on the pull request branch, then admit |
 | `VENDORED_BYTES_DRIFT` | A `PROVENANCE.md` row says byte-identical but the file differs | Restore the upstream bytes, or move the row to LOCAL DELTA |
 | `POLICY_DELTA_UNAUTHORIZED` | The profile changes something the admission did not approve | Remove the extra change, or admit it |
 | `TRUSTED_BASELINE_INVALID` | The local private authority checkout is behind its `main` | Fast-forward it and rerun |
@@ -729,9 +731,9 @@ profile order and the claims-form ledger.
 Each path is bound to its claim unless its origin is `third_party`, which is bound to its bytes. Override that per
 path with `"binding"` in `--origin-json`, or for every path with `--binding claim|bytes`. Bind an authored or
 adapted file to its claim. Bind a file imported unchanged to its bytes, because there the bytes are the claim.
-A binary file, a path under `assets/vfpu/` and a path the candidate's release manifest waives are always bound to
-their bytes, and a claim binding for one is refused (`ADMISSION_BINDING_BYTES_REQUIRED`): for a new path the
-publication audit holds such bytes only to the pull request's own pin
+A binary file, any new file under `assets/vfpu/` (text included) and a path the candidate's release manifest waives
+are always bound to their bytes, and a claim binding for one is refused (`ADMISSION_BINDING_BYTES_REQUIRED`): for a
+new path the publication audit holds such bytes only to the pull request's own pin, or exempts them by their path
 ([Approved binaries in the release manifest](#approved-binaries-in-the-release-manifest)).
 
 For path-adding pull requests approved together, use `--batch <file.json>` with entries shaped like:
@@ -878,6 +880,7 @@ the fetched bytes to equal the derived document exactly. Beyond the V3 refusals 
 | `POLICY_DELTA_CLAIM_UNRESOLVED` | an added path no longer resolves to any class (for example, its record no longer covers it) |
 | `POLICY_DELTA_ADDED_BYTES_MISMATCH` | a byte-bound path's bytes differ from the digest its admission approved |
 | `POLICY_DELTA_BINARY_CLAIM_BOUND` | a binary file, a path under `assets/vfpu/` or a path the release manifest waives is admitted bound to its claim only |
+| `POLICY_DELTA_MANIFEST_UNREADABLE` | a V4 delta binds a path to its claim and the candidate's `assets/release_manifest.json` cannot be read, so the verifier cannot tell whether it waives that path |
 
 What it still protects:
 
@@ -889,9 +892,10 @@ What it still protects:
 * A byte-identical import cannot drift. Its delta binds its bytes. After it lands, the `PROVENANCE.md` manifest
   check holds it (see below).
 
-Limit: a claim-bound delta accepts any content for its paths, as long as the claim holds. It does so in every pull
-request whose profile change is exactly the one it records, and the verdict is for the exact head it ran on. That
-is the authority a landed path already has. Hosted CI, review and the publication audit still check the content.
+Limit: a claim-bound delta accepts any content for its paths, as long as the claim holds, except that a binary
+file, a path under `assets/vfpu/` or a path the release manifest waives is never claim-bound
+(`POLICY_DELTA_BINARY_CLAIM_BOUND`). It does so in every pull request whose profile change is exactly the one it
+records, and the verdict is for the exact head it ran on. That is the authority a landed path already has. Hosted CI, review and the publication audit still check the content.
 To withdraw an approval before the pull request lands, delete the V4 file from the private `main`.
 
 ### Byte-identical manifest rows
@@ -965,8 +969,9 @@ manifest already waives or its profile (`assets/public_source_profile.json`) alr
 
 A path the base neither carries, waives nor declares is new. The candidate's own pin applies to it, a new VFPU
 table is exempt by its path, and whether the path may be published is the admission's decision. A new waived
-file, VFPU table or other binary is therefore admitted bound to its bytes (`"binding": "bytes"`), which approves
-exactly one file; the verifier refuses a claim-bound admission for it ([V4 policy deltas](#v4-policy-deltas)).
+file, any new file under `assets/vfpu/` (text included) and any other new binary is therefore admitted bound to
+its bytes (`"binding": "bytes"`), which approves exactly one file; the verifier refuses a claim-bound admission
+for it ([V4 policy deltas](#v4-policy-deltas)).
 
 The audit has no input that approves new binary bytes at a path the base already holds. Replacing an approved
 binary or a VFPU table in place with other binary bytes, or changing the kind of a waiver in place for such

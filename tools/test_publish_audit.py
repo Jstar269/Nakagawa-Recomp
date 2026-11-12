@@ -3377,6 +3377,8 @@ class ByteBindingTests(unittest.TestCase):
         self.assertTrue(needs("assets/vfpu/table.dat", b"text\n", {}))
         self.assertTrue(needs("docs/shot.png", b"\x89PNG\r\n\x1a\n", {}))
         self.assertTrue(needs("docs/data.bin", bytes([0x13, 0x37, 0x00, 0x01]) * 10, {}))
+        # Known binary magic counts even when the rest of the file reads as text.
+        self.assertTrue(needs("docs/readme.txt", b"MZ this file otherwise reads as plain text\n", {}))
         self.assertFalse(needs("docs/page.md", b"# Page\n", waived))
         self.assertFalse(needs("docs/other.md", None, {}))
 

@@ -1051,7 +1051,7 @@ class TrustedWaiverBase:
     paths: frozenset[str]
     waivers: dict[str, tuple[str, str]]
     blob_sha256: dict[str, str]
-    declared: frozenset[str] = frozenset()
+    declared: frozenset[str]
 
     def holds(self, rel: str) -> bool:
         """Whether the base already has ``rel``: it carries the file, waives it or declares it."""
@@ -1167,8 +1167,9 @@ def requires_byte_binding(rel: str, data: bytes | None, manifest_map: dict[str, 
 
     For a path new to the trusted base the audit holds a waived file only to the pin the tree under
     audit records, and exempts a VFPU table by its path, so the admission is the only trusted
-    decision about such bytes. That holds for a path the release manifest waives, a path under
-    ``VFPU_TABLE_PREFIX``, and bytes the audit classes as binary.
+    decision about such bytes. That holds for a path the release manifest waives, any path under
+    ``VFPU_TABLE_PREFIX`` (text included: the exemption is by path, so every new file there is
+    byte-bound), and bytes the audit classes as binary.
     """
     return (
         (manifest_map.get(rel) or {}).get("disposition") in BINARY_WAIVER_DISPOSITIONS

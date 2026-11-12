@@ -787,7 +787,9 @@ def _prepare_admission(
             raise AdmitError(
                 "ADMISSION_BINDING_BYTES_REQUIRED",
                 f"{statement['path']} is binary, under assets/vfpu/ or waived by the release manifest, so its "
-                "admission must bind its bytes (--binding bytes)",
+                "admission must bind its bytes; "
+                + ("a re-key reuses the recorded claim binding, so admit the path again without --rekey"
+                   if rekey else "omit the claim binding or pass --binding bytes"),
             )
     candidate_policy, delta_record, authority_bytes, admission_bytes = build_records(
         base_policy=base_policy, paths=paths, digests=digests,

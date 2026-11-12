@@ -1367,9 +1367,10 @@ class ClaimBindingAdmissionTest(unittest.TestCase):
         # A claim binding chosen for such a path is refused.
         git(fixture.pr, "branch", "-q", "-D", result["admit_branch"])
         for path in (shot, mark):
-            with self.subTest(path), self.assertRaises(AdmitError) as caught:
-                fixture.admit(path, slug="claim", origins={path: {"binding": "claim"}})
-            self.assertEqual(caught.exception.code, "ADMISSION_BINDING_BYTES_REQUIRED")
+            with self.subTest(path):
+                with self.assertRaises(AdmitError) as caught:
+                    fixture.admit(path, slug="claim", origins={path: {"binding": "claim"}})
+                self.assertEqual(caught.exception.code, "ADMISSION_BINDING_BYTES_REQUIRED")
 
     def test_cli_binding_flag(self) -> None:
         fixture = _Fixture(self)

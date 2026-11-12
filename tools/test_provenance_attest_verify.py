@@ -3973,6 +3973,21 @@ class PolicyDeltaV4Tests(_PolicyDeltaV4Fixture):
         self._refused("POLICY_DELTA_BINARY_CLAIM_BOUND", head, self.base, self._v4(self.base, head, "claim"))
         self._land(head, self.base, self._v4(self.base, head, "bytes", bindings={shot: "bytes"}))
 
+    def test_a_path_the_release_manifest_waives_admitted_bound_to_its_claim_only_fails(self) -> None:
+        mark = "docs/new-mark.svg"
+        svg = b'<svg xmlns="http://www.w3.org/2000/svg"/>\n'
+        waived = {"components": [{"id": mark, "source_path": mark, "disposition": "approved_binary",
+                                  "hashes": {"sha256": _sha(svg)}}]}
+        manifests = (
+            ("waived", json.dumps(waived).encode("utf-8") + b"\n", "POLICY_DELTA_BINARY_CLAIM_BOUND"),
+            ("unreadable", b"{\n", "POLICY_DELTA_MANIFEST_UNREADABLE"),
+        )
+        for label, manifest, code in manifests:
+            with self.subTest(label):
+                head = self._change(f"pr-mark-{label}", self.base,
+                                    {mark: svg, verifier.MANIFEST_PATH: manifest}, include=[mark])
+                self._refused(code, head, self.base, self._v4(self.base, head, f"claim-{label}"))
+
     def test_a_byte_identical_import_edited_after_admission_fails(self) -> None:
         head = self._vendored_pr()
         v4 = self._v4(self.base, head, bindings={self.LIB: "bytes"})
