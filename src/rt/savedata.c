@@ -2698,9 +2698,9 @@ static uint32_t getsize_kb_round_up(uint64_t bytes) {
  *
  * A save that does not exist fills in the free figures and neededKB, with
  * neededString on a shortfall, and reports ERR_RW_NO_DATA; overwriteKB and
- * overwriteString stay as the game left them. A NULL sizeInfo reports 0 whether
- * or not the save exists (PSP-3000, docs/HARDWARE_ORACLE.md,
- * PSP-HLE-SAVEDATA-GETSIZE-001). A game reads RW_NO_DATA as "no save yet, and
+ * overwriteString stay as the game left them, and a NULL sizeInfo reports 0
+ * (PSP-3000, docs/HARDWARE_ORACLE.md, PSP-HLE-SAVEDATA-GETSIZE-001). A NULL
+ * sizeInfo for a save that exists reports 0 here too (UNMEASURED). A game reads RW_NO_DATA as "no save yet, and
  * this much room to make one", and success as "there is a save to load".
  *
  * Measured but NOT reproduced: the shortfall figure. On the same run a PSP's
