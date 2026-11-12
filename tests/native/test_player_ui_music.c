@@ -12,6 +12,11 @@
    game runs. Runs on SDL's dummy audio driver, with the module's test seams
    (PLAYER_UI_MUSIC_TEST_SEAMS). Usage: test_player_ui_music <path to ChillLofi.ogg> */
 
+/* The module's test seams (the module itself is built with the same define). */
+#ifndef PLAYER_UI_MUSIC_TEST_SEAMS
+#define PLAYER_UI_MUSIC_TEST_SEAMS
+#endif
+
 #include "player_ui_music.h"
 #include "player_ui_vorbis.h"
 
