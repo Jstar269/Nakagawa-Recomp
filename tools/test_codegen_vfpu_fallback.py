@@ -293,13 +293,13 @@ int main(void) {{
         self.assertNotIn("s->r[4] + 0x00000001u",effect)
 
     def test_quad_write_back_flag_leaves_the_base_register_alone(self):
-        # An unrecorded PSP read (PSP-3000, 2026-11-08, issue #326, probe case vfpu-quad-wb;
-        # its register entry, PSP-VFPU-QUADWB-001, is not in this tree yet): bit 1 of an
+        # PSP-VFPU-QUADWB-001 (PSP-3000, 2026-11-08, issue #326, probe case vfpu-quad-wb):
+        # bit 1 of an
         # aligned lv.q/sv.q, the write-back flag, did not change the base register in any
         # form (offsets 0, +16, +32, -16; four in a row from one base did not drift), and
         # the access used base + offset. The generated code therefore emits the same access
-        # as the plain word and never assigns the base register. Not hardware evidence until
-        # the register entry lands.
+        # as the plain word and never assigns the base register (the register entry is
+        # PSP-VFPU-QUADWB-001).
         for op, plain_word in ((0x36, 0xD9400000), (0x3E, 0xF9400000)):
             for offset in (0x0000, 0x0010, 0x0020, 0xFFF0):
                 for lle_cpu in (False, True):
@@ -313,8 +313,8 @@ int main(void) {{
                         self.assertIn("s->r[10] + ", wb)
 
     def test_mtvc_to_the_condition_code_register_keeps_six_bits(self):
-        # Unrecorded PSP read (PSP-3000, 2026-11-08, issue #326, probe case vfpu-cc-cmov; its
-        # register entry is not in this tree yet): mtvc then mfvc on VFPU_CC read back the
+        # PSP-VFPU-CCCMOV-001 (PSP-3000, 2026-11-08, issue #326, probe case vfpu-cc-cmov):
+        # mtvc then mfvc on VFPU_CC read back the
         # written value and 0x3f in every cell. Only control register 3 is masked here.
         mtvc = lambda reg: (0x12 << 26) | (7 << 21) | (5 << 16) | (128 + reg)
         effect, _, _ = codegen.vfpu_effect(0x3000, mtvc(3))
@@ -435,7 +435,7 @@ int main(void) {{
                 self.assertNotIn("sr_vfpu_interp", effect)
                 self.assertRegex(effect, r"sr_vf(pu)?_")
                 if name in ("vadd.q", "vsub.t", "vdiv.p", "vmul.s", "vscl.q", "vmscl.t", "vmscl alias"):
-                    # The PSP-3000 lane rule of the unrecorded vfpu-basic-arith read (2026-11-08), not the
+                    # The PSP-3000 lane rule of the vfpu-basic-arith read (PSP-VFPU-BASICARITH-001, 2026-11-08), not the
                     # project NaN rule the unmeasured forms still use.
                     self.assertIn("sr_vfpu_", effect)
                     self.assertNotIn("sr_vf_", effect)

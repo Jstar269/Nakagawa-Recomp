@@ -29,10 +29,10 @@ than a lenient pass.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 import re
-from typing import cast
+from typing import Any, cast
 
 from .protocol import ProtocolError, SequenceReport, StreamSpec, TestResult, parse_output, parse_sequence
 
@@ -1535,6 +1535,26 @@ GE_SYNC_IDS_OUT_COUNTS = {
 _register_campaign_probe(
     "ge-sync-ids", "PSP-GE-SYNC-001", GE_SYNC_IDS_CASES, GE_SYNC_IDS_OUT_COUNTS,
 )
+# ge-signal (181, probe.c): GE SIGNAL handler behaviours and RJUMP/RCALL offset alignment.
+# Every record is emitted on every run, so the stream is fixed-shape: a setup record, three
+# records per cell in the order the probe runs them (-cb the handler calls, -run the first
+# 100 ms of list states and the markers, -end the bounded continue, the second 100 ms, the
+# reset and the final markers) and a teardown record. Format and completion only.
+GE_SIGNAL_CELLS = (
+    "ctl", "b01", "b02", "b03", "b01-nocb", "b02-nocb", "b03-nocb", "b02-block", "b00", "b04",
+    "rjump-al", "rcall-al", "rjump-un", "rcall-un",
+)
+GE_SIGNAL_PARTS = (("cb", 24), ("run", 19), ("end", 27))
+GE_SIGNAL_ROWS = (
+    (("gsg-setup", 7),)
+    + tuple((f"gsg-{cell}-{part}", count) for cell in GE_SIGNAL_CELLS
+            for part, count in GE_SIGNAL_PARTS)
+    + (("gsg-teardown", 12),)
+)
+GE_SIGNAL_CASES = tuple(case for case, _count in GE_SIGNAL_ROWS)
+_register_campaign_probe(
+    "ge-signal", "PSP-GE-SIGNAL-001", GE_SIGNAL_CASES, dict(GE_SIGNAL_ROWS),
+)
 _register_campaign_probe(
     "kernel-misc", "PSP-KERNEL-MISC-001",
     ("sysclock-wide", "ctrl-sampling-mode", "thread-profiler",
@@ -1757,6 +1777,32 @@ _register_campaign_probe(
         **{case_id: 1 for case_id in _HLE_SAVEDATA_GETSIZE_ABSENT_CASES},
         "volatile-lock-before": 2,
     },
+)
+# hle-savedata-nodata (180, probe_hle_measure.c): savedata modes on a save that does not exist
+# (nodir), a save directory without PARAM.SFO (nosfo) and a probe-made save (data), then LOAD
+# and DELETE of the missing save last. Each dialog cell carries InitStart's return and 11
+# driver words plus its mode's output words; a cell skipped by the precheck or after a TIMEOUT
+# keeps its word count. Every word is an observation; no PSP value is asserted.
+HLE_SAVEDATA_NODATA_ROWS = (
+    ("nodata-precheck", 4),
+    ("nodir-autoload", 15), ("nodir-sizes", 24), ("nodir-list", 22), ("nodir-files", 24),
+    ("nodir-readsecure", 15), ("nodir-read", 15), ("nodir-erasesecure", 13),
+    ("nodir-erase", 13), ("nodir-deletedata", 13), ("nodir-autodelete", 13),
+    ("nodir-getsize", 19),
+    ("nosfo-setup", 5),
+    ("nosfo-autoload", 15), ("nosfo-sizes", 24), ("nosfo-list", 22), ("nosfo-files", 24),
+    ("nosfo-readsecure", 15), ("nosfo-read", 15), ("nosfo-erase", 13),
+    ("nosfo-deletedata", 13), ("nosfo-autodelete", 13),
+    ("nosfo-cleanup", 3),
+    ("data-autosave", 14), ("data-autoload", 15), ("data-sizes", 24), ("data-list", 22),
+    ("data-files", 24), ("data-readsecure", 15), ("data-erase-missing", 13),
+    ("data-autodelete", 13),
+    ("data-cleanup", 8),
+    ("nodir-load", 15), ("nodir-delete", 13),
+)
+_register_campaign_probe(
+    "hle-savedata-nodata", "PSP-HLE-SAVEDATA-NODATA-001",
+    tuple(row for row, _ in HLE_SAVEDATA_NODATA_ROWS), dict(HLE_SAVEDATA_NODATA_ROWS),
 )
 _HLE_TIMER_ORDER_CASES = (
     "alarm-same-delay-set", "alarm-same-delay-a", "alarm-same-delay-b",
@@ -2034,6 +2080,32 @@ HLE_IO_SEEK_ROWS = (
 _register_campaign_probe(
     "hle-io-seek", "PSP-HLE-IO-SEEK-001",
     tuple(row for row, _ in HLE_IO_SEEK_ROWS), dict(HLE_IO_SEEK_ROWS),
+)
+# hle-io-seek-edges (186, probe_hle_measure.c): #1380's cells hle-io-seek left open. flash0:
+# SEEK_CUR seeks (64- and 32-bit), 64-bit SEEK_SET and SEEK_END past 0x100000000 and around the
+# high-word boundaries, each from a position of 8; then on a probe-owned ms0: file the
+# PSP_O_RDONLY | PSP_O_CREAT open with and without PSP_O_TRUNC or PSP_O_EXCL, and sceIoWriteAsync
+# on a PSP_O_RDONLY descriptor with a bounded poll. No disc0: call. Every row is emitted on every
+# run with a fixed word count; SKIP rows keep it.
+HLE_IO_SEEK_EDGES_ROWS = (
+    ("io-edge-flash-open", 3),
+    ("io-edge-flash-s64-cur-neg9", 5), ("io-edge-flash-s64-cur-past16", 5),
+    ("io-edge-flash-s64-cur-to-ffffffff", 5), ("io-edge-flash-s64-cur-to-2p32", 5),
+    ("io-edge-flash-s32-cur-neg9", 5), ("io-edge-flash-s32-cur-past16", 5),
+    ("io-edge-flash-s64-set-2p32-plus1", 5), ("io-edge-flash-s64-set-2p33", 5),
+    ("io-edge-flash-s64-set-max", 5), ("io-edge-flash-s64-end-to-ffffffff", 5),
+    ("io-edge-flash-s64-end-to-2p32", 5), ("io-edge-flash-s64-set-10000", 5),
+    ("io-edge-flash-s64-set-7fffffff", 5), ("io-edge-flash-s64-set-80000000", 5),
+    ("io-edge-flash-s64-set-fffffffe", 5),
+    ("io-edge-flash-close", 1),
+    ("io-edge-ms-setup", 4),
+    ("io-edge-ms-rdonly-creat-write", 4), ("io-edge-ms-rdonly-creat-trunc", 4),
+    ("io-edge-ms-rdonly-creat-excl", 4), ("io-edge-ms-write-async", 10),
+    ("io-edge-ms-cleanup", 4),
+)
+_register_campaign_probe(
+    "hle-io-seek-edges", "PSP-HLE-IO-SEEK-002",
+    tuple(row for row, _ in HLE_IO_SEEK_EDGES_ROWS), dict(HLE_IO_SEEK_EDGES_ROWS),
 )
 # hle-nickname-limit (164, probe_hle_measure.c): W-NET-1, read-only. The registry walk to the
 # owner_name key (type and size only; no value call and no value bytes), then the system-parameter
@@ -2344,6 +2416,238 @@ _register_campaign_probe(
     dict(VFPU_BASIC_ARITH_ROWS),
 )
 
+# vfpu-wide-dot-matrix (173, probe_hle_issues.c): the #326 wide dot-product and matrix VFPU forms,
+# two passes, register-only. Every row is emitted on every run, so the stream is fixed-shape. Per
+# pass, in the order the probe runs them, each form is a run of cells packed into records of at
+# most 80 words; a cell is its recorded source image words followed by its destination words.
+# A form with one record is <stem>-p<pass>, else <stem>-p<pass>-<record>.
+VFPU_WIDE_DOT_PASSES = 2
+VFPU_WIDE_DOT_MAX_WORDS = 80
+#: (stem, source words per cell, destination words per cell, cells).
+VFPU_WIDE_DOT_FORMS = (
+    ("vdot-p", 4, 1, 33), ("vdot-q", 8, 1, 73), ("vhdp-q", 8, 1, 73), ("vcrsp-t", 6, 3, 57),
+    ("vqmul-q", 8, 4, 73), ("vtfm-q", 20, 4, 73), ("vhtfm-q", 19, 4, 65),
+    ("vmmul-q", 32, 16, 73), ("vmmul-qt", 32, 16, 1), ("vmscl-q", 17, 16, 17),
+    ("vmzero-q", 0, 16, 1), ("vmidt-q", 0, 16, 1), ("vmone-q", 0, 16, 1),
+    ("vmmov-q", 16, 16, 9), ("vrot-q", 1, 4, 16),
+)
+
+
+def _vfpu_wide_dot_pass_rows(p: int) -> list[tuple[str, int]]:
+    rows: list[tuple[str, int]] = []
+    for stem, nin, nout, cells in VFPU_WIDE_DOT_FORMS:
+        width = nin + nout
+        per = VFPU_WIDE_DOT_MAX_WORDS // width
+        records = -(-cells // per)
+        for rec in range(records):
+            count = min(per, cells - rec * per)
+            name = f"{stem}-p{p}" if records == 1 else f"{stem}-p{p}-{rec}"
+            rows.append((name, count * width))
+    return rows
+
+
+VFPU_WIDE_DOT_ROWS = tuple(
+    row for p in range(VFPU_WIDE_DOT_PASSES) for row in _vfpu_wide_dot_pass_rows(p))
+VFPU_WIDE_DOT_CASES = tuple(case for case, _count in VFPU_WIDE_DOT_ROWS)
+_register_campaign_probe(
+    "vfpu-wide-dot-matrix", "PSP-VFPU-WIDEDOT-001", VFPU_WIDE_DOT_CASES,
+    dict(VFPU_WIDE_DOT_ROWS),
+)
+
+
+# vfpu-mfv-mtv (174, probe_hle_issues.c): the #326 mtv.s/mfv.s word round trip, two passes,
+# register-only. Per pass: mtv-mfv-p<pass> (result = the mtv S000 word, 17 read-back words) and
+# mtv-mfv2-p<pass> (the mtv S733 word, 17 read-back words).
+VFPU_MFV_MTV_WORDS = 17
+VFPU_MFV_MTV_ROWS = tuple((f"{stem}-p{p}", VFPU_MFV_MTV_WORDS)
+                          for p in range(2) for stem in ("mtv-mfv", "mtv-mfv2"))
+VFPU_MFV_MTV_CASES = tuple(case for case, _count in VFPU_MFV_MTV_ROWS)
+_register_campaign_probe(
+    "vfpu-mfv-mtv", "PSP-VFPU-MFVMTV-001", VFPU_MFV_MTV_CASES, dict(VFPU_MFV_MTV_ROWS),
+)
+
+
+# vfpu-constants (175, probe_hle_issues.c): the #326 vcst.s/vcst.q constants, two passes, register-only.
+# Per pass: vcst-s-p<pass> (indices 0-19, 20 words + a guard word) and vcst-q-p<pass> (80 words +
+# a guard word); after both passes, vcst-s-res-p<pass> (indices 20-31, 12 words + a guard word)
+# and vcst-q-res-p<pass> (48 words + a guard word), p0 .s, p0 .q, p1 .s, p1 .q. The reserved
+# indices may raise an exception (POWER RISK).
+VFPU_CONSTANTS_ROWS = tuple(
+    [(f"vcst-{size}-p{p}", lanes * 20 + 1) for p in range(2) for size, lanes in (("s", 1), ("q", 4))]
+    + [(f"vcst-{size}-res-p{p}", lanes * 12 + 1)
+       for p in range(2) for size, lanes in (("s", 1), ("q", 4))])
+VFPU_CONSTANTS_CASES = tuple(case for case, _count in VFPU_CONSTANTS_ROWS)
+_register_campaign_probe(
+    "vfpu-constants", "PSP-VFPU-CONSTANTS-001", VFPU_CONSTANTS_CASES, dict(VFPU_CONSTANTS_ROWS),
+)
+
+
+# vfpu-round-sep (176, probe_hle_issues.c): the #326 rounding separation of vdot.q, vmscl.q, vmul.s,
+# vadd.s and vsub.s, two passes, register-only. Every row is emitted on every run, so the stream is
+# fixed-shape. Per pass, in the order the probe runs them, each form is a run of cells packed into
+# records of at most 80 words; a cell is its recorded source image words followed by its destination
+# words. A form with one record is <stem>-p<pass>, else <stem>-p<pass>-<record>.
+VFPU_ROUND_SEP_PASSES = 2
+VFPU_ROUND_SEP_MAX_WORDS = 80
+#: (stem, source words per cell, destination words per cell, cells).
+VFPU_ROUND_SEP_FORMS = (
+    ("vdot-rs", 8, 1, 7), ("vmscl-rs", 17, 16, 6), ("vmul-rs", 2, 1, 4),
+    ("vadd-rs", 2, 1, 3), ("vsub-rs", 2, 1, 1),
+)
+
+
+def _vfpu_round_sep_pass_rows(p: int) -> list[tuple[str, int]]:
+    rows: list[tuple[str, int]] = []
+    for stem, nin, nout, cells in VFPU_ROUND_SEP_FORMS:
+        width = nin + nout
+        per = VFPU_ROUND_SEP_MAX_WORDS // width
+        records = -(-cells // per)
+        for rec in range(records):
+            count = min(per, cells - rec * per)
+            name = f"{stem}-p{p}" if records == 1 else f"{stem}-p{p}-{rec}"
+            rows.append((name, count * width))
+    return rows
+
+
+VFPU_ROUND_SEP_ROWS = tuple(
+    row for p in range(VFPU_ROUND_SEP_PASSES) for row in _vfpu_round_sep_pass_rows(p))
+VFPU_ROUND_SEP_CASES = tuple(case for case, _count in VFPU_ROUND_SEP_ROWS)
+_register_campaign_probe(
+    "vfpu-round-sep", "PSP-VFPU-ROUNDSEP-001", VFPU_ROUND_SEP_CASES,
+    dict(VFPU_ROUND_SEP_ROWS),
+)
+
+
+# vfpu-prefix-state (182, probe_hle_issues.c): the #326 VFPU prefix state, two passes,
+# register-only. Every row is emitted on every run, so the stream is fixed-shape. Per pass p, in
+# run order: operands-p<p> (the three operand sets, 24 words); <pfxs|pfxt|pfxd>-<form>-<k>-p<p>
+# (the instruction word, then C200 lanes 0-3 for each operand set, 13 words); life-<cell>-p<p>
+# (PFXS/PFXT/PFXD before, between and after, S200, S201: 11 words); vfim-<d>-p<p> (8 immediates x
+# word and S200, 16 words) and viim-<d>-p<p> (5 x 2, 10 words) for each pending vpfxd d.
+VFPU_PREFIX_STATE_SFORMS = ("vadd-q", "vmul-q", "vdot-q", "vmin-q", "vmov-q")
+VFPU_PREFIX_STATE_DFORMS = ("vadd-q", "vmov-q", "vneg-q", "vzero-q", "vidt-q")
+VFPU_PREFIX_STATE_ARITH = tuple(
+    [f"pfxs-{form}-{k}" for form in VFPU_PREFIX_STATE_SFORMS for k in range(6)]
+    + [f"pfxt-{form}-{k}" for form in VFPU_PREFIX_STATE_SFORMS for k in range(5)]
+    + [f"pfxd-{form}-{k}" for form in VFPU_PREFIX_STATE_DFORMS for k in range(4)])
+VFPU_PREFIX_STATE_LIFE = (
+    "s-direct", "s-vnop", "s-vsync", "s-vflush", "s-branch", "s-adds", "s-mtv", "s-mfv", "s-lvq",
+    "s-vpfxt", "s-mfvc", "d-direct", "d-vnop", "d-vsync", "d-vflush",
+)
+VFPU_PREFIX_STATE_IMMD = ("none", "sat01", "sat11", "mask")
+VFPU_PREFIX_STATE_ROWS = tuple(
+    row for p in range(2) for row in (
+        [(f"operands-p{p}", 24)]
+        + [(f"{cell}-p{p}", 13) for cell in VFPU_PREFIX_STATE_ARITH]
+        + [(f"life-{cell}-p{p}", 11) for cell in VFPU_PREFIX_STATE_LIFE]
+        + [(f"vfim-{d}-p{p}", 16) for d in VFPU_PREFIX_STATE_IMMD]
+        + [(f"viim-{d}-p{p}", 10) for d in VFPU_PREFIX_STATE_IMMD]))
+VFPU_PREFIX_STATE_CASES = tuple(case for case, _count in VFPU_PREFIX_STATE_ROWS)
+_register_campaign_probe(
+    "vfpu-prefix-state", "PSP-VFPU-PREFIX-001", VFPU_PREFIX_STATE_CASES,
+    dict(VFPU_PREFIX_STATE_ROWS),
+)
+
+
+# vfpu-wider-ops (183, probe_hle_issues.c): the #326 wider VFPU forms, two passes, register-only.
+# Every row is emitted on every run, so the stream is fixed-shape. Per pass p, in run order:
+# <vdiv>-p<p>-<rec> (two records of 50 lane-packed pairs, ceil(50 / n) * n destination words);
+# <form>-p<p> for the transcendental-corpus forms (ceil(20 / n) * n words); then each cell form:
+# <form>-c<cell>-p<p> for a four-cell form, <form>-p<p> for a one-cell form (source words, then
+# destination words).
+VFPU_WIDER_OPS_DIV = (("vdiv-p", 2), ("vdiv-t", 3), ("vdiv-q", 4))
+VFPU_WIDER_OPS_UNARY = (
+    ("vsin-p", 2), ("vsin-t", 3), ("vsin-q", 4), ("vcos-p", 2), ("vcos-t", 3), ("vcos-q", 4),
+    ("vrcp-p", 2), ("vrcp-t", 3), ("vrcp-q", 4), ("vrsq-q", 4), ("vsqrt-q", 4), ("vocp-s", 1),
+    ("vocp-q", 4),
+)
+#: (stem, source words, destination words, cells).
+VFPU_WIDER_OPS_CELL_FORMS = (
+    ("vdot-t", 6, 4, 4),
+    ("vhdp-p", 4, 4, 4),
+    ("vhdp-t", 6, 4, 4),
+    ("vscl-t", 4, 4, 4),
+    ("vcrs-t", 6, 4, 4),
+    ("vmmul-p", 8, 16, 4),
+    ("vmmul-t", 18, 16, 4),
+    ("vtfm2-p", 6, 4, 4),
+    ("vtfm3-t", 12, 4, 4),
+    ("vhtfm2-p", 5, 4, 4),
+    ("vhtfm3-t", 11, 4, 4),
+    ("vmscl-p", 5, 16, 4),
+    ("vmscl-t", 10, 16, 4),
+    ("vmmov-p", 4, 16, 4),
+    ("vmmov-t", 9, 16, 4),
+    ("vmidt-p", 0, 16, 1),
+    ("vmidt-t", 0, 16, 1),
+    ("vmzero-p", 0, 16, 1),
+    ("vmzero-t", 0, 16, 1),
+    ("vmone-p", 0, 16, 1),
+    ("vmone-t", 0, 16, 1),
+    ("vidt-q-c200", 0, 16, 1),
+    ("vidt-q-c210", 0, 16, 1),
+    ("vidt-q-c220", 0, 16, 1),
+    ("vidt-q-c230", 0, 16, 1),
+    ("vidt-q-r200", 0, 16, 1),
+    ("vidt-q-r201", 0, 16, 1),
+    ("vidt-q-r202", 0, 16, 1),
+    ("vidt-q-r203", 0, 16, 1),
+    ("vidt-p-c200", 0, 16, 1),
+    ("vidt-p-c202", 0, 16, 1),
+    ("vidt-p-c210", 0, 16, 1),
+    ("vidt-p-c212", 0, 16, 1),
+    ("vidt-p-c220", 0, 16, 1),
+    ("vidt-p-c222", 0, 16, 1),
+    ("vidt-p-c230", 0, 16, 1),
+    ("vidt-p-c232", 0, 16, 1),
+    ("vidt-p-r200", 0, 16, 1),
+    ("vidt-p-r201", 0, 16, 1),
+    ("vidt-p-r202", 0, 16, 1),
+    ("vidt-p-r203", 0, 16, 1),
+    ("vidt-p-r220", 0, 16, 1),
+    ("vidt-p-r221", 0, 16, 1),
+    ("vidt-p-r222", 0, 16, 1),
+    ("vidt-p-r223", 0, 16, 1),
+    ("vzero-t", 0, 4, 1),
+    ("vone-t", 0, 4, 1),
+)
+
+
+def _vfpu_wider_ops_pass_rows(p: int) -> list[tuple[str, int]]:
+    rows: list[tuple[str, int]] = []
+    for stem, lanes in VFPU_WIDER_OPS_DIV:
+        rows.extend((f"{stem}-p{p}-{rec}", -(-50 // lanes) * lanes) for rec in range(2))
+    for stem, lanes in VFPU_WIDER_OPS_UNARY:
+        rows.append((f"{stem}-p{p}", -(-20 // lanes) * lanes))
+    for stem, nsrc, ndst, cells in VFPU_WIDER_OPS_CELL_FORMS:
+        if cells == 1:
+            rows.append((f"{stem}-p{p}", nsrc + ndst))
+        else:
+            rows.extend((f"{stem}-c{cell}-p{p}", nsrc + ndst) for cell in range(cells))
+    return rows
+
+
+VFPU_WIDER_OPS_ROWS = tuple(row for p in range(2) for row in _vfpu_wider_ops_pass_rows(p))
+VFPU_WIDER_OPS_CASES = tuple(case for case, _count in VFPU_WIDER_OPS_ROWS)
+_register_campaign_probe(
+    "vfpu-wider-ops", "PSP-VFPU-WIDEROPS-001", VFPU_WIDER_OPS_CASES,
+    dict(VFPU_WIDER_OPS_ROWS),
+)
+
+
+# vfpu-reserved-widths (184, probe_hle_issues.c): the #326 vus2i/vs2i words at the reserved
+# widths .t and .q, two passes, register-only, every word hand-encoded (psp-as refuses them).
+# Per pass: vus2i-t, vus2i-q, vs2i-t, vs2i-q (-p<pass>), each 20 words (M200, then C000). A
+# reserved word may raise an exception that stops the launch (POWER RISK).
+VFPU_RESERVED_WIDTHS_FORMS = ("vus2i-t", "vus2i-q", "vs2i-t", "vs2i-q")
+VFPU_RESERVED_WIDTHS_ROWS = tuple((f"{stem}-p{p}", 20)
+                                  for p in range(2) for stem in VFPU_RESERVED_WIDTHS_FORMS)
+VFPU_RESERVED_WIDTHS_CASES = tuple(case for case, _count in VFPU_RESERVED_WIDTHS_ROWS)
+_register_campaign_probe(
+    "vfpu-reserved-widths", "PSP-VFPU-RESERVED-001", VFPU_RESERVED_WIDTHS_CASES,
+    dict(VFPU_RESERVED_WIDTHS_ROWS),
+)
+
 # ge-sample (109, probe_ge_sample.c): the #282 GE texture sample-point cells. Every draw is
 # emitted on every run, so the stream is fixed-shape: per mapping, primitive (triangle pair
 # or sprite), filter and texture, one `-draw` record (the GE wait outcome, 7 words) and one
@@ -2508,6 +2812,21 @@ for _fetch_case in (
         _fetch_case, "PSP-EXCEPTION-FETCH-001", (), {"fetch-armed": 1},
         terminal_case="fetch-armed",
     )
+
+# ge-through-z (185, probe_ge_sample.c): through-mode vertex z outside 0..65535, fractional,
+# infinite and NaN. Per cell, in order, one `-draw` record (16 words: the GE wait outcome, the
+# list length, the z bits, the colour pixels written, the colour at the sprite centre and the
+# changed depth words) and one `-z` record (the depth words of the sprite's centre row).
+GE_THROUGH_Z_CELLS = (
+    "zm1", "zm0p5", "z0", "z0p5", "z1p5", "z65535", "z65535p5", "z65536", "z70000", "zinf",
+    "znan",
+)
+GE_THROUGH_Z_ROWS = tuple(
+    row for cell in GE_THROUGH_Z_CELLS for row in ((f"{cell}-draw", 16), (f"{cell}-z", 16)))
+GE_THROUGH_Z_CASES = tuple(case for case, _count in GE_THROUGH_Z_ROWS)
+_register_campaign_probe(
+    "ge-through-z", "PSP-GE-THROUGHZ-001", GE_THROUGH_Z_CASES, dict(GE_THROUGH_Z_ROWS),
+)
 
 # ge-raster (123, probe_ge_sample.c): the #343 GE raster corpus. The cells are the gr_cells
 # table of the block probe_ge_sample.c shares with tests/native/hle_thread_selftest.c, in order. Per
@@ -2761,6 +3080,67 @@ _register_campaign_probe(
     "ge-rtt", "PSP-GE-RTT-001", GE_RTT_CASES,
     {case: (10 if case.endswith("-draw") else 16) for case in GE_RTT_CASES},
 )
+
+# The #343 GE pixel corpus (fixtures/psp_oracle/ge_corpus.json, `probe_runs`) carries the measured
+# results of these three probes. Per probe: its test id, its cells in stream order, and the record
+# suffixes the corpus keeps for each cell. A `-draw` record holds the GE wait outcome and timings and
+# is not kept, except the ge-raster window digest the PSP computed, which must equal the digest of
+# the kept rows. The window digest is FNV-1a 64 over the `-rN` rows' words, low byte first, as
+# gr_digest in probe_ge_sample.c computes it.
+GE_CORPUS_PROBES: dict[str, tuple[str, tuple[str, ...], tuple[str, ...]]] = {
+    "ge-raster": ("PSP-GE-RASTER-001", GE_RASTER_CELLS, tuple(f"r{y}" for y in GE_RASTER_ROWS)),
+    "ge-weight": ("PSP-GE-WEIGHT-001", GE_WEIGHT_CELLS, tuple(f"r{y}" for y in range(17))),
+    "ge-rtt": ("PSP-GE-RTT-001", GE_RTT_CELLS, ("t0", *(f"r{y}" for y in range(12)))),
+}
+GE_CORPUS_ROW_WORDS = 16
+
+
+def ge_window_fnv1a64(rows: Iterable[str]) -> str:
+    """FNV-1a 64 over corpus rows (space-separated 8-digit hex words), each word low byte first."""
+
+    digest = 0xCBF29CE484222325
+    for row in rows:
+        for word_text in row.split(" "):
+            word = int(word_text, 16)
+            for shift in (0, 8, 16, 24):
+                digest ^= (word >> shift) & 0xFF
+                digest = (digest * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
+    return f"0x{digest:016x}"
+
+
+def ge_corpus_cells(sequence: SequenceReport, probe_case: str) -> list[dict[str, Any]]:
+    """The corpus cells of one complete, all-PASS stream of a GE corpus probe.
+
+    Raises ProtocolError when the stream is partial, has a record that did not pass, or (ge-raster)
+    reports a window digest its own rows do not give.
+    """
+
+    try:
+        test_id, cells, suffixes = GE_CORPUS_PROBES[probe_case]
+    except KeyError as exc:
+        raise ProtocolError(f"{probe_case!r} is not a GE corpus probe") from exc
+    if sequence.spec.test_id != test_id:
+        raise ProtocolError(f"{probe_case}: stream test_id {sequence.spec.test_id} is not {test_id}")
+    if not sequence.complete or not sequence.all_passed:
+        raise ProtocolError(f"{test_id}: the corpus takes only a complete stream whose records all PASS")
+    corpus_cells: list[dict[str, Any]] = []
+    for cell in cells:
+        records = []
+        for suffix in suffixes:
+            case_id = f"{cell}-{suffix}"
+            values = dict(sequence.results[case_id].values)
+            words = " ".join(f"{int(values[f'out{i}'], 0):08x}" for i in range(GE_CORPUS_ROW_WORDS))
+            records.append({"case_id": case_id, "words": words})
+        digest = ge_window_fnv1a64(
+            record["words"] for record, suffix in zip(records, suffixes, strict=True) if suffix.startswith("r"))
+        if probe_case == "ge-raster":
+            draw = dict(sequence.results[f"{cell}-draw"].values)
+            reported = f"0x{(int(draw['out8'], 0) << 32) | int(draw['out7'], 0):016x}"
+            if reported != digest:
+                raise ProtocolError(
+                    f"{test_id}: {cell} reports window digest {reported} but its rows give {digest}")
+        corpus_cells.append({"cell": cell, "window_fnv1a64": digest, "records": records})
+    return corpus_cells
 
 # module-start (124, probe_module_start.c): the module_start thread cell. A fixed-shape
 # stream of raw words: module_start's own sceKernelReferThreadStatus (return code and the
@@ -3020,16 +3400,22 @@ def validate_hle_edram_restore(text: str) -> None:
 HLE_MACHINERY_STATUS_CASES = frozenset({
     "hle-vtimer-unit", "hle-vtimer-errors", "hle-kernel-pool-bounds", "hle-power-float-v0",
     "hle-null-out-pointers", "hle-audio-src", "hle-timer-order", "hle-savedata-getsize",
+    "hle-savedata-nodata",
 })
 VFPU_RAW_WORD_CASES = frozenset({"vfpu-transcendental-corpus"})
 #: Cases whose every cell is an unconditional observation: each record is PASS. hle-io-seek,
-#: hle-nickname-limit and hle-self-stop-unload are in this set too: their SKIP rows only keep the
+#: hle-io-seek-edges, hle-nickname-limit and hle-self-stop-unload are in this set too: their SKIP rows only keep the
 #: word count when a precondition is missing (the ms0: directory already exists, the registry
-#: does not open) and their FAIL rows mean a probe-owned object could not be set up, so a stream
-#: with either is not a measurement of the cells it names.
+#: does not open) and their FAIL rows mean a probe-owned object could not be set up or, for the
+#: two io-seek cases' ms cleanup row, that the probe's ms0: directory is still there afterwards; a
+#: stream with either is not a measurement of the cells it names.
 HLE_OBSERVATION_CASES = frozenset({"hle-issues-batch", "vfpu-forms", "intr-cause", "vfpu-forms2",
                                    "vfpu-funnel", "vfpu-sort", "vfpu-unmodeled", "vfpu-quad-wb", "vfpu-convert", "vfpu-cc-cmov", "vfpu-vus2i", "vfpu-basic-arith",
-                                   "hle-io-seek", "hle-nickname-limit", "hle-self-stop-unload"})
+                                   "hle-io-seek", "hle-io-seek-edges", "hle-nickname-limit", "hle-self-stop-unload", "vfpu-wide-dot-matrix",
+                                   "vfpu-mfv-mtv", "vfpu-constants", "vfpu-round-sep",
+                                   "vfpu-prefix-state",
+                                   "vfpu-wider-ops",
+                                   "vfpu-reserved-widths"})
 
 #: hle-kernel-pool-bounds fixed-pool (create, delete) cell pairs.
 HLE_POOL_BOUNDS_FPL_PAIRS = (
