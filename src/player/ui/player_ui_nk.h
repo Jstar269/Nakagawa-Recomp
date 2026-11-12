@@ -644,7 +644,7 @@ typedef enum {
 
 /* Settings > Enhanced's rows after the play mode: one per Enhanced part (player_state.h
    PlayerEnhancedPart), in that order. */
-#define PLAYER_UI_ENHANCED_ROWS 13
+#define PLAYER_UI_ENHANCED_ROWS 14
 typedef struct {
     const char *name;           /* "Texture filtering" */
     const char *value;          /* "16x", "Off", "Library (On)" on a title's page */
@@ -1135,9 +1135,12 @@ enum {
     PLAYER_UI_ID_SETTINGS_ACE = 0x4540u,              /* retired: the GAME card's old switch */
     PLAYER_UI_ID_SETTINGS_ACE_OPEN = 0x4541u,         /* the GAME card's row that opens Enhanced */
     PLAYER_UI_ID_SETTINGS_ACE_MODE = 0x4542u,         /* the Enhanced page's play mode */
-    /* + the part (PlayerEnhancedPart): 0x4543 to 0x454F, PLAYER_UI_ENHANCED_ROWS of them; the
-       range is full, so a fourteenth part needs new ids */
+    /* The part rows (PlayerEnhancedPart), PLAYER_UI_ENHANCED_ROWS of them, take their ids from
+       PLAYER_UI_ID_ENHANCED_PART(part): parts 0 to 12 at 0x4543 to 0x454F (the range ends before
+       0x4550), parts 13 and on at 0x4680 to 0x469F (room for PLAYER_UI_ENHANCED_MORE_IDS, 32
+       parts), so adding a part moves no other part's id */
     PLAYER_UI_ID_SETTINGS_ENHANCED_PART = 0x4543u,
+    PLAYER_UI_ID_SETTINGS_ENHANCED_PART_MORE = 0x4680u,
     PLAYER_UI_ID_SETTINGS_PROBLEM_REPORT = 0x4550u,   /* Settings: opens the Problem report page */
     PLAYER_UI_ID_REPORT_CREATE = 0x4551u,
     PLAYER_UI_ID_REPORT_FOLDER = 0x4552u,
@@ -1189,6 +1192,16 @@ enum {
 
 #define PLAYER_UI_ID_LIBRARY_ITEM(index) \
     ((NkUiId)(PLAYER_UI_ID_LIBRARY_ITEM_BASE + (uint32_t)(index)))
+
+/* Settings > Enhanced's part rows: the first PLAYER_UI_ENHANCED_FIRST_IDS parts in the first
+   range, the rest in the second (player_ui_nk.c checks that both hold every row). */
+#define PLAYER_UI_ENHANCED_FIRST_IDS 13u
+#define PLAYER_UI_ENHANCED_MORE_IDS 32u
+#define PLAYER_UI_ID_ENHANCED_PART(part)                                                     \
+    ((NkUiId)((uint32_t)(part) < PLAYER_UI_ENHANCED_FIRST_IDS                                  \
+                  ? PLAYER_UI_ID_SETTINGS_ENHANCED_PART + (uint32_t)(part)                     \
+                  : PLAYER_UI_ID_SETTINGS_ENHANCED_PART_MORE +                                 \
+                        ((uint32_t)(part) - PLAYER_UI_ENHANCED_FIRST_IDS)))
 
 NkUiRouter *nk_ui_router_create(void);
 void nk_ui_router_destroy(NkUiRouter *router);
