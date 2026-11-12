@@ -721,7 +721,7 @@ static uint32_t atrac_set_new(uint32_t buf, uint32_t readSize, uint32_t bufSize,
  * Derived-translated from PPSSPP (GPL-2.0-or-later, revision
  * 3bc60270eae3069f13dfbfdb7292a7e1375de6f6; src/rt/PROVENANCE.md): the SceAtracContext and
  * SceAtracIdInfo layout and the AtracStatus values of Core/HLE/AtracBase.h; the field-by-field
- * write and the read-back of PPSSPP's legacy Atrac class in Core/HLE/AtracCtx.cpp
+ * write and the loopNum read-back of PPSSPP's legacy Atrac class in Core/HLE/AtracCtx.cpp
  * (Atrac::WriteContextToPSPMem, Atrac::UpdateContextFromPSPMem, Atrac::NotifyGetContextAddress);
  * and the read-back before every call of Core/HLE/sceAtrac.cpp (getAtrac). Layout: 0x100 bytes
  * per ID, the codec block in the first 0x80 (left zero: no Media Engine here) and the
@@ -742,17 +742,14 @@ static uint32_t atrac_set_new(uint32_t buf, uint32_t readSize, uint32_t bufSize,
  * firstValidSample, numSkipFrames), which count from the first-sample offset the runtime keeps
  * only for plain AT3, and the streaming cursors (curFileOff, streamDataByte, streamOff,
  * secondStreamOff, curBuffer), whose PSP meaning differs from the runtime's ring view.
- * Read back: state and loopNum, before every call on the ID, as PPSSPP's UpdateContextFromPSPMem
- * does; a game may keep its own loop count there, and may change the state. The runtime's state
- * is the same numbering except that an ID with no track holds 0 where the context says NO_DATA
- * (1). One difference from PPSSPP: the runtime models only NO_DATA and states 2 to 6, and a
- * change of state only for a track whose frame size it knows. A state it cannot honour stops
- * the run by name instead of decoding under the wrong model: LOW_LEVEL 8, FOR_SCESAS 16 for a
- * SAS voice, any other value, a data state on an ID with no track, or a new data state on a
- * track whose frame size is 0 (an ATRAC3+ prefix with a fact chunk and no fmt chunk, which the
- * runtime keeps as ALL_DATA_LOADED; the ring and remaining-frame arithmetic divide by the frame
- * size). A guest write to any other field is overwritten by the next call that changes the
- * context. */
+ * Read back: loopNum, before every call on the ID, as PPSSPP's UpdateContextFromPSPMem does; a
+ * game may keep its own loop count there. PPSSPP also takes back a state the game writes; this
+ * runtime does not. Its buffer bookkeeping (ring or linear cursors, the stream window) belongs to
+ * the state it set, so a written state would decode under the wrong model, and what a PSP does
+ * with one is unmeasured. Before every call the state byte is compared with the one the runtime
+ * would write (an ID with no track holds 0 where the context says NO_DATA, 1); when they differ,
+ * the call stops the run by name. A guest write to any other field is overwritten by the next
+ * call that changes the context. */
 #define ATRAC_CTX_SIZE 0x100u
 #define ATRAC_CTX_INFO 0x80u              /* SceAtracIdInfo inside SceAtracContext */
 #define ATRAC_CTX_STATE 0x15u             /* u8 */
@@ -770,10 +767,14 @@ static uint32_t atrac_set_new(uint32_t buf, uint32_t readSize, uint32_t bufSize,
 #define ATRAC_CTX_STATUS_NO_DATA 1u       /* the PSP's state for an ID with no track yet */
 static uint32_t s_atrac_ctx_uid;          /* partition block of the eight contexts, 0 = none */
 
+/* The state byte the runtime writes for an ID. */
+static uint32_t atrac_ctx_state(const Atrac *a) {
+    return a->bufferState ? (uint32_t)a->bufferState : ATRAC_CTX_STATUS_NO_DATA;
+}
 static void atrac_ctx_push(const Atrac *a) {
     if (!a->ctxAddr) return;
     const uint32_t info = a->ctxAddr + ATRAC_CTX_INFO;
-    MEM_W8(info + ATRAC_CTX_STATE, a->bufferState ? (uint32_t)a->bufferState : ATRAC_CTX_STATUS_NO_DATA);
+    MEM_W8(info + ATRAC_CTX_STATE, atrac_ctx_state(a));
     MEM_W8(info + ATRAC_CTX_NUM_CHAN, (uint32_t)a->channels);
     MEM_W16(info + ATRAC_CTX_SAMPLE_SIZE, a->bytesPerFrame);
     MEM_W16(info + ATRAC_CTX_CODEC, a->codecType);
@@ -789,26 +790,19 @@ static void atrac_ctx_push(const Atrac *a) {
 static void atrac_ctx_clear(uint32_t addr) {
     for (uint32_t off = 0; off < ATRAC_CTX_SIZE; off += 4u) MEM_W32(addr + off, 0u);
 }
-/* The read-back before a call (above). Returns 0 when the context names a state the runtime
- * cannot honour; the run has stopped by name then. */
+/* The check and read-back before a call (above). Returns 0 when the game wrote the state byte;
+ * the run has stopped by name then, and nothing of the ID has changed. */
 static int atrac_ctx_pull(Atrac *a, uint32_t id) {
     const uint32_t info = a->ctxAddr + ATRAC_CTX_INFO;
     const uint32_t state = MEM_R8(info + ATRAC_CTX_STATE);
-    a->loopNum = (int)MEM_R32(info + ATRAC_CTX_LOOP_NUM);
-    if (state == ATRAC_CTX_STATUS_NO_DATA) {
-        a->bufferState = 0;
-    } else if (a->bufferState != 0 && state == (uint32_t)a->bufferState) {
-        /* unchanged */
-    } else if (state >= ATRAC_STATE_ALL_DATA_LOADED && state <= ATRAC_STATE_STREAMED_LOOP_TRAILER &&
-               a->bufferState != 0 && a->bytesPerFrame != 0u) {
-        a->bufferState = (int)state;
-    } else {
-        (void)hle_unmodelled_stop(hle_import_name(sr_last_nid), "ID %u: its context's state is "
-                                  "0x%x, which the runtime does not model%s (#322)", id, state,
-                                  !a->bufferState ? " for an ID with no track"
-                                  : !a->bytesPerFrame ? " for a track whose frame size is 0" : "");
+    const uint32_t held = atrac_ctx_state(a);
+    if (state != held) {
+        (void)hle_unmodelled_stop(hle_import_name(sr_last_nid), "ID %u: the context's state is "
+                                  "0x%x where the runtime holds 0x%x; honouring a state the game "
+                                  "writes is unmeasured (#322)", id, state, held);
         return 0;
     }
+    a->loopNum = (int)MEM_R32(info + ATRAC_CTX_LOOP_NUM);
     return 1;
 }
 static Atrac *atrac_of(uint32_t id) {
