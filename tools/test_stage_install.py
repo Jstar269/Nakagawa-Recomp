@@ -747,13 +747,21 @@ class PortableZipTests(unittest.TestCase):
         stage = _make_stage(self.root / "a", reverse=False, mtime=1_700_000_000)
         (stage / "toolchain.json").write_text(json.dumps({"candidate": {"commit": head}}), encoding="utf-8")
         out = self.root / "out.zip"
-        for record, code in ((out, "PORTABLE_RECORD_IS_ZIP"),
-                             (stage / "record.json", "PORTABLE_RECORD_INSIDE_STAGE")):
-            with self.subTest(code=code):
-                status, stderr = self._cli_zip(stage, out, record, "HEAD")
+        # The relative and upper-case spellings reach the same files (the latter on a
+        # case-insensitive file system only, where the comparison must agree).
+        cases = [(out, out, "PORTABLE_RECORD_IS_ZIP"),
+                 (out, Path(os.path.relpath(out)), "PORTABLE_RECORD_IS_ZIP"),
+                 (out, out / "record.json", "PORTABLE_RECORD_IS_ZIP"),
+                 (self.root / "rec" / "out.zip", self.root / "rec", "PORTABLE_RECORD_IS_ZIP"),
+                 (out, stage / "record.json", "PORTABLE_RECORD_INSIDE_STAGE")]
+        if os.name == "nt":
+            cases.append((out, Path(str(out).upper()), "PORTABLE_RECORD_IS_ZIP"))
+        for zip_path, record, code in cases:
+            with self.subTest(record=str(record)):
+                status, stderr = self._cli_zip(stage, zip_path, record, "HEAD")
                 self.assertEqual(status, 1)
                 self.assertIn(code, stderr)
-                self.assertFalse(out.exists())
+                self.assertFalse(zip_path.exists())
                 self.assertFalse((stage / "record.json").exists())
 
     def test_record_without_a_portable_zip_is_an_error(self):
@@ -769,6 +777,15 @@ class PortableZipTests(unittest.TestCase):
         self.assertIn("PORTABLE_REVISION_UNRESOLVED", stderr)
         self.assertFalse(out.exists())
         self.assertFalse((self.root / "record.json").exists())
+
+    def test_a_missing_git_is_a_failure_line_with_one_code(self):
+        with mock.patch.object(stage_install.subprocess, "run", side_effect=FileNotFoundError("git")):
+            with self.assertRaises(stage_install.InstallError) as caught:
+                stage_install.resolve_commit("HEAD")
+        message = str(caught.exception)
+        self.assertTrue(message.startswith("PORTABLE_REVISION_UNRESOLVED: "), message)
+        self.assertNotIn("INSTALL_SOURCE_EXPORT_FAILED", message)
+        self.assertIn("could not run", message)
 
     def test_a_sha256_repository_commit_is_accepted(self):
         stage = _make_stage(self.root / "a", reverse=False, mtime=1_700_000_000)

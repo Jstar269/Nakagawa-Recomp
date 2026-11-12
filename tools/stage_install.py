@@ -136,12 +136,18 @@ def app_icon() -> bytes:
     return returned
 
 
+_GIT_FAILED = "INSTALL_SOURCE_EXPORT_FAILED"
+
+
 def _git(repo: Path, *arguments: str, binary: bool = False):
-    result = subprocess.run(["git", "-C", str(repo), *arguments], capture_output=True,
-                            check=False)
+    try:
+        result = subprocess.run(["git", "-C", str(repo), *arguments], capture_output=True,
+                                check=False)
+    except OSError as exc:  # git missing or not runnable: a FAIL line, not a traceback
+        raise InstallError(f"{_GIT_FAILED}: git {arguments[0]} could not run: {exc}") from exc
     if result.returncode != 0:
         detail = result.stderr.decode("utf-8", "replace").strip()
-        raise InstallError(f"INSTALL_SOURCE_EXPORT_FAILED: git {arguments[0]} failed: {detail}")
+        raise InstallError(f"{_GIT_FAILED}: git {arguments[0]} failed: {detail}")
     return result.stdout if binary else result.stdout.decode("utf-8", "replace").strip()
 
 
@@ -743,15 +749,18 @@ def resolve_commit(revision: str, *, repo: Path = ROOT) -> str:
     try:
         return str(_git(repo, "rev-parse", "--verify", f"{revision}^{{commit}}"))
     except InstallError as exc:
+        detail = str(exc).removeprefix(f"{_GIT_FAILED}: ")
         raise InstallError(f"PORTABLE_REVISION_UNRESOLVED: {revision!r} names no commit in {repo}: "
-                           f"{exc}") from exc
+                           f"{detail}") from exc
 
 
 def _check_record_path(record: Path, zip_path: Path, stage: Path) -> Path:
-    """Refuse a ``--record`` path that exists, is the ZIP, or lies in the stage."""
+    """Refuse a ``--record`` path that exists, is or holds the ZIP, or lies in the stage."""
     record = Path(record).resolve()
-    if record == Path(zip_path).resolve():
-        raise InstallError("PORTABLE_RECORD_IS_ZIP: --record and --portable-zip name the same file")
+    zip_path = Path(zip_path).resolve()
+    if record.is_relative_to(zip_path) or zip_path.is_relative_to(record):
+        raise InstallError("PORTABLE_RECORD_IS_ZIP: --record and --portable-zip name the same path, "
+                           "or one lies inside the other")
     if record.is_relative_to(Path(stage).resolve()):
         raise InstallError("PORTABLE_RECORD_INSIDE_STAGE: write the record outside the staged folder; "
                            "SHA256SUMS.txt would not list it")
@@ -1092,16 +1101,16 @@ def main(argv=None) -> int:
         if args.portable_zip is None or args.zip_stage is None or args.dest is not None:
             parser.error("--portable-zip and --zip-stage go together, without --dest")
         try:
-            record = (None if args.record is None
-                      else _check_record_path(args.record, args.portable_zip, args.zip_stage))
+            record_path = (None if args.record is None
+                           else _check_record_path(args.record, args.portable_zip, args.zip_stage))
             expected_commit = resolve_commit(args.revision)
             epoch = resolve_source_date_epoch(args.source_date_epoch, revision=args.revision)
             summary = write_portable_zip(args.zip_stage, args.portable_zip, source_date_epoch=epoch,
                                          expected_commit=expected_commit)
-            if record is not None:
+            if record_path is not None:
                 try:
-                    record.parent.mkdir(parents=True, exist_ok=True)
-                    with record.open("xb") as output:
+                    record_path.parent.mkdir(parents=True, exist_ok=True)
+                    with record_path.open("xb") as output:
                         output.write(portable_zip_record(summary))
                 except OSError as exc:
                     raise InstallError(f"PORTABLE_RECORD_UNWRITTEN: {args.record}: {exc}; the ZIP "
