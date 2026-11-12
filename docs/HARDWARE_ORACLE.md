@@ -21,28 +21,51 @@ same sense as
 
 ## GE raster pixel corpus (#343)
 
-`assets/ge_corpus.schema.json` defines version 1 of the source-owned GE case corpus. The first
-case is an untextured solid triangle in a 16×16 8888 framebuffer. Its selected pixels and full
-framebuffer digest are deliberately unset until a qualified PSP run records them. The case uses
-the PSP GE command word layout; address operands are explicit relocations to its source-owned
-vertex words. A result records `framebuffer_sha256` and one `pixel_<x>_<y>` value for each selected
-coordinate, packed according to the case framebuffer format.
+`assets/ge_corpus.schema.json` defines version 2 of the source-owned GE corpus,
+`fixtures/psp_oracle/ge_corpus.json`. It has two parts.
 
-The measured raster corpus is the `ge-raster` probe (`PSP-GE-RASTER-001`, in the measured index
-below): 189 cells whose window digests `tests/native/hle_thread_selftest.c` compares with the software GE. The schema corpus below does not cite
-those runs yet.
+`probe_runs` holds the measured results of the three #343 probes in `probe_ge_sample.c`, one
+acceptance-eligible PSP-3000 run each (see the measured index below): `ge-raster`
+(`PSP-GE-RASTER-001`, 189 cells, a 16x4 window each), `ge-weight` (`PSP-GE-WEIGHT-001`, 16 cells,
+a 16x17 window each) and `ge-rtt` (`PSP-GE-RTT-001`, 9 cells, the CPU's read of the target's first
+row and a 16x12 window each). Per cell it keeps every record except `-draw` (the GE wait outcome
+and timings), as the sixteen words the PSP reported, and the window's FNV-1a 64 digest over its
+`rN` rows. For `ge-raster` that digest is the one the PSP computed, and
+`test_ge_raster_cells_match_psp` in `tests/native/hle_thread_selftest.c` compares the software GE
+with the same values (`tools/test_psp_oracle.py` keeps the two in step). Each run's envelope names
+its runner commit, model, firmware and PRX digest, and its `RESULT_RECORD` names the private raw
+stream.
+
+`cases` holds command-word cases. The first is an untextured solid triangle in a 16×16 8888
+framebuffer. Its selected pixels and full framebuffer digest are deliberately unset until a
+qualified PSP run records them. The case uses the PSP GE command word layout; address operands are
+explicit relocations to its source-owned vertex words. A result records `framebuffer_sha256` and
+one `pixel_<x>_<y>` value for each selected coordinate, packed according to the case framebuffer
+format.
+
+`python tools/psp_oracle/run_psplink.py --ge-corpus-write RUN_REPORT...` writes a probe run from
+the runner's report of a `ge-raster`, `ge-weight` or `ge-rtt` launch. It takes only a qualified,
+acceptance-eligible `PSP_HARDWARE` envelope with no blockers whose raw result is a complete stream
+with every record `PASS` (and, for `ge-raster`, whose reported digests match their rows), and whose
+model, firmware, source commit and PRX SHA-256 are the envelope's. It checks every report before it
+writes anything. It stores each raw result as `ge-corpus/<test id>-<first 12 digits of the
+commit>.txt` in the private results directory and never replaces a record with different bytes. It
+writes the corpus only when the gate then refuses nothing and reports each written run `MEASURED`;
+otherwise it removes the records it created.
 
 Run `python tools/psp_oracle/run_psplink.py --ge-corpus-gate` to validate the corpus and report each
-case. A case is `MEASURED` only when its source tier is `PSP_HARDWARE`, the oracle envelope is
-acceptance-eligible, and the raw result protocol identifies `source=psp`. The public corpus never
-inlines raw hardware result text: its envelope's `RESULT_RECORD` names a file under the private
-results directory (`--results-directory`, default `oracle/hardware-results/`) by relative path and
-SHA-256, and the gate verifies that file. Without that directory a hardware claim reports
-`NOT_RUN`, never `MEASURED`. Software, Vulkan, or
-PPSSPP data cannot be promoted by setting a hardware label. The current case reports `NOT_RUN`.
-**GE raster pixel conformance is partial (#343, open):** the
-`ge-raster` cells are measured; the schema corpus case, the Vulkan comparison and the families no cell covers
-are not.
+case and probe run. A case is `MEASURED` only when its source tier is `PSP_HARDWARE`, the oracle
+envelope is acceptance-eligible, and the raw result protocol identifies `source=psp`; a probe run
+is `MEASURED` only when its raw result, identity included, gives every one of its cells exactly. The
+public corpus never inlines raw hardware result text: its envelope's `RESULT_RECORD` names a file
+under the private results directory (`--results-directory`, default `oracle/hardware-results/`) by
+relative path and SHA-256, and the gate verifies that file. Without that directory a hardware
+claim reports `NOT_RUN`, never `MEASURED`; the public checks (cell names and order, record names,
+window digests) still run. Software, Vulkan, or PPSSPP data cannot be promoted by setting a
+hardware label. The current command-word case reports `NOT_RUN`.
+**GE raster pixel conformance is partial (#343, open):** the `ge-raster`, `ge-weight` and
+`ge-rtt` cells are measured and in the corpus; the command-word case, the Vulkan comparison and
+the families no cell covers are not.
 
 ## Measured to date (index — exact cells only, do not generalize)
 
@@ -1211,8 +1234,13 @@ One console is one data point; see §11. Nothing here closes issue #70
   destination pattern; the base state turns every per-fragment unit off and draws a 16x4 generated texture 1:1
   with REPLACE/RGBA, so a sprite's source colour is the texel. The table and list builder are one block that
   `tests/native/hle_thread_selftest.c` carries byte for byte; `test_ge_raster_cells_match_psp` runs every cell through
-  the software GE and compares its window digest with the PSP's. What the cells establish, for these exact
-  states only (issue #343):
+  the software GE and compares its window digest with the PSP's. The same test then switches three
+  deliberately wrong raster rules into `src/rt/ge.c` (`ge_test_set_raster_mutant`) and requires each to
+  fail exactly its named cells. A bottom-right fill rule fails `e-tri1`, `e-tri3` and `e-tri5`. Snapping
+  vertices to sixteenths of a pixel with a +0.5 instead of a +0.375 bias fails `e-tri3`. A dither matrix
+  read at (x + 1, y + 1) fails the seven dithered cells (`dth-*`, `clr-ca-dth565`, `clr-ca-dth8888`).
+  Depth rounding is not pinned: every depth a cell draws or clears is an integer, so rounding depth to
+  nearest instead of truncating passes all 189 cells. What the cells establish, for these exact states only (issue #343):
   - *Blending.* Each colour-times-factor product is floor((2v + 1)(2|f| + 1) / 1024) with the factor's sign
     applied afterwards, computed separately for source and destination before the equation, then clamped to
     0..255. The doubled alphas are not clamped: 2a runs to 510 and 255 - 2a goes negative. Equations 3, 4 and 5

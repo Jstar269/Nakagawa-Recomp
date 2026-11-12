@@ -960,7 +960,7 @@ class RetiredIssueDenylistExpiry(unittest.TestCase):
         mutated = source.replace(
             self.ANCHOR, f"RETIRED_PRIVATE_ISSUE_NUMBERS: tuple[int, ...] = ({numbers},)", 1)
         self.assertNotEqual(mutated, source, "mutation anchor not found")
-        namespace = {"__file__": str(ROOT / "tools" / "lint_docs.py"), "__name__": "x"}
+        namespace = {"__file__": str(ROOT / "tools" / "lint_docs.py"), "__name__": "tools.x", "__package__": "tools"}
         exec(compile(mutated, "lint_docs", "exec"), namespace)  # noqa: S102
         return namespace
 

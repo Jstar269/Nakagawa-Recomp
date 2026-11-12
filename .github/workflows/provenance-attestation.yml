@@ -475,6 +475,38 @@ jobs:
             "${policy_args[@]}" \
             | tee "${RUNNER_TEMP}/verify/report.txt"
 
+      # The publication audit of the candidate's whole tree, by the default
+      # branch's own copy of the audit. The verifier above judges the paths the
+      # profile publishes and new implementation paths; a file that is outside
+      # the profile and is not implementation (game data, a key, a private path)
+      # is not its subject. The pull request's own CI runs the audit too, but
+      # from the pull request's checkout, where the pull request could have
+      # changed the audit. Here it is the trusted copy, and it reads the
+      # candidate's tree from its objects (git ls-tree, git cat-file): never a
+      # checkout and never an archive, so no .gitattributes line of the
+      # candidate can hide a file. The profile is the candidate's, which the
+      # step above has just held to the trusted authority: a path it adds,
+      # removes or excludes is one a maintainer admitted. No secret is in this
+      # step's environment. A finding fails the job.
+      - name: Audit the candidate tree with the trusted publication audit
+        env:
+          HEAD_SHA: ${{ steps.target.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          if [[ ! "${HEAD_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::the candidate head is not a full commit SHA"
+            exit 1
+          fi
+          mkdir -p "${RUNNER_TEMP}/tree-audit"
+          git cat-file blob "${HEAD_SHA}:assets/public_source_profile.json" \
+            > "${RUNNER_TEMP}/tree-audit/public_source_profile.json"
+          python tools/publish_audit.py \
+            --repo-root "${GITHUB_WORKSPACE}" \
+            --committed-tree "${HEAD_SHA}" \
+            --policy "${RUNNER_TEMP}/tree-audit/public_source_profile.json" \
+            --public-scope --provenance-self-consistency
+          touch "${RUNNER_TEMP}/tree-audit/passed"
+
       # The first thing the pull-request author reads. The verdict itself is
       # unchanged -- this job still fails closed -- but a failure that only
       # means "a maintainer must admit this path" is now said in one sentence
@@ -493,6 +525,17 @@ jobs:
             echo '### Provenance: no verdict was produced' >> "${GITHUB_STEP_SUMMARY}"
             echo '' >> "${GITHUB_STEP_SUMMARY}"
             echo 'The attestation did not run to completion. That is a gate failure, not a pass.' \
+              >> "${GITHUB_STEP_SUMMARY}"
+            echo '' >> "${GITHUB_STEP_SUMMARY}"
+          fi
+          # The trusted tree audit fails the job on its own; say so here too, without copying its
+          # findings (the candidate's own paths) into the summary. They are in that step's log.
+          if [ -e "${RUNNER_TEMP}/tree-audit/public_source_profile.json" ] \
+            && [ ! -e "${RUNNER_TEMP}/tree-audit/passed" ]; then
+            echo '### Trusted publication audit: FAIL' >> "${GITHUB_STEP_SUMMARY}"
+            echo '' >> "${GITHUB_STEP_SUMMARY}"
+            echo 'The default branch publication audit refused the candidate tree. Its findings are in the log' \
+              'of the step "Audit the candidate tree with the trusted publication audit".' \
               >> "${GITHUB_STEP_SUMMARY}"
             echo '' >> "${GITHUB_STEP_SUMMARY}"
           fi

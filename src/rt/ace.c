@@ -29,7 +29,8 @@ static int value_on_off(const char *v, int *out) {
    nothing: tier is the one key a line may leave out (an Enhanced run). */
 typedef enum {
     ACE_KEY_AF, ACE_KEY_TEXT, ACE_KEY_READOUT, ACE_KEY_NOTICE, ACE_KEY_WIDE, ACE_KEY_SMOOTH,
-    ACE_KEY_SAS, ACE_KEY_TESS, ACE_KEY_TIER, ACE_KEY_STICK, ACE_KEY_LOAD, ACE_KEY_CULL, ACE_KEY_PEAK
+    ACE_KEY_SAS, ACE_KEY_TESS, ACE_KEY_TIER, ACE_KEY_STICK, ACE_KEY_LOAD, ACE_KEY_DEPTH,
+    ACE_KEY_CULL, ACE_KEY_PEAK
 } AceKey;
 
 static const struct {
@@ -49,6 +50,7 @@ static const struct {
     {"tier", ACE_KEY_TIER, 0},
     {"stick", ACE_KEY_STICK, 0},
     {"load", ACE_KEY_LOAD, 0},
+    {"depth", ACE_KEY_DEPTH, 0},
     {"cull", ACE_KEY_CULL, 0},
 };
 
@@ -132,6 +134,13 @@ int ace_parse(const char *spec, AceConfig *out, char *why, size_t why_cap) {
                 else if (strcmp(v, "fast") == 0) { c.load = 1; ok = 1; }
                 if (ok && c.load && !ACE_HAS_LOAD) {
                     why_set(why, why_cap, "load is not part of this build"); return 0;
+                }
+                break;
+            case ACE_KEY_DEPTH:
+                if (strcmp(v, "off") == 0) { c.depth = 0; ok = 1; }
+                else if (strcmp(v, "32") == 0) { c.depth = 32; ok = 1; }
+                if (ok && c.depth && !ACE_HAS_DEPTH) {
+                    why_set(why, why_cap, "depth is not part of this build"); return 0;
                 }
                 break;
             case ACE_KEY_TIER:
@@ -219,7 +228,12 @@ int ace_format(const AceConfig *c, char *out, size_t cap) {
         const int m = snprintf(out + n, cap - (size_t)n, ";load=fast");
         n = m < 0 ? -1 : n + m;
     }
-    /* Likewise peak, the last optional key before cull: a missing peak is off. */
+    /* Likewise depth, after load: a missing depth is the PSP's 16 bits. */
+    if (n > 0 && (size_t)n < cap && c && c->on && c->depth) {
+        const int m = snprintf(out + n, cap - (size_t)n, ";depth=%d", c->depth);
+        n = m < 0 ? -1 : n + m;
+    }
+    /* Likewise peak, after depth and ssaa, before glyphs and cull: a missing peak is off. */
     if (n > 0 && (size_t)n < cap && c && c->on && c->peak) {
         const int m = snprintf(out + n, cap - (size_t)n, ";peak=limit");
         n = m < 0 ? -1 : n + m;
@@ -256,7 +270,8 @@ static uint64_t s_peak_pushes, s_peak_frames_wide, s_peak_frames_limited;   /* p
 static double s_peak_min_gain = 1.0;
 
 static const char *const k_feature_key[ACE_FEATURE_COUNT] = {
-    "af", "text", "readout", "notice", "wide", "smooth", "sas", "tess", "stick", "load", "cull", "peak"
+    "af", "text", "readout", "notice", "wide", "smooth", "sas", "tess", "stick", "load", "cull",
+    "depth", "peak"
 };
 
 /* The run's observation state. */
@@ -354,6 +369,10 @@ int ace_init_spec(const char *spec, const char *report_path) {
     if (s_req.load)
         fprintf(stderr, "ACE_MODE: load fast (a title's declared loading waits return at once; "
                         "guest timing changes)\n");
+    if (s_req.depth)
+        fprintf(stderr, "ACE_MODE: depth %d (the host depth buffer keeps unrounded depth, so surfaces "
+                        "within one 16-bit step of each other can draw in a different order; guest "
+                        "depth reads stay 16-bit)\n", s_req.depth);
     if (s_req.cull) fprintf(stderr, "ACE_MODE: cull on (a title's own culling is widened to the wings)\n");
     if (s_req.peak)
         fprintf(stderr, "ACE_MODE: peak limit (the host hears SAS mixes unsaturated, through a true-peak "
@@ -386,6 +405,7 @@ void ace_feature_unavailable(AceFeature feature, const char *reason) {
     case ACE_FEATURE_SAS: s_eff.sas = 0; break;
     case ACE_FEATURE_LOAD: s_eff.load = 0; break;
     case ACE_FEATURE_CULL: s_eff.cull = 0; break;
+    case ACE_FEATURE_DEPTH: s_eff.depth = 0; break;
     case ACE_FEATURE_PEAK: s_eff.peak = 0; break;
     default: s_eff.tess = 0; break;
     }
@@ -536,6 +556,7 @@ size_t ace_feature_words(char *out, size_t cap) {
     if (s_eff.stick) used = words_add(out, cap, used, "stick remap");
     if (s_eff.load) used = words_add(out, cap, used, "short loads");
     if (s_eff.cull) used = words_add(out, cap, used, "wider culling");
+    if (s_eff.depth) used = words_add(out, cap, used, "32-bit depth");
     if (s_eff.smooth) used = words_add(out, cap, used, "smooth motion");
     if (s_eff.sas) used = words_add(out, cap, used, "clean pitched sound");
     if (s_eff.peak) used = words_add(out, cap, used, "unclipped sound");
@@ -869,12 +890,21 @@ void ace_pace_reset(AcePace *p) {
 void ace_pace_flip(AcePace *p, int new_frame, AceRate rate, int smooth, uint64_t now_ns) {
     p->flip_ns = now_ns;
     if (smooth && new_frame) p->frame_seq++;
+    /* An owed frame is shown before anything newer, never replaced (ace.h). */
+    const int owed = smooth && p->held && p->owed;
     if (!new_frame) {
         /* The frame on the screen's buffer is shown again. It is the held frame only when the
-         * pass kept the newest frame flipped: after flips whose presents were dropped it is a
-         * newer real frame, and that one replaces the held frame. Otherwise the held frame
-         * stays held until a present shows it. */
+         * pass kept the newest frame flipped. After flips whose presents were dropped it is a
+         * newer real frame, and this present is that frame's first: it shows an owed frame and
+         * holds the newer one, owed in turn, or replaces a held frame not yet due. Otherwise the
+         * held frame stays held until a present shows it. */
         if (p->held && p->taken_seq != p->frame_seq) {
+            p->reflip = 0;
+            if (owed) {
+                p->show = ACE_SHOW_OWED;
+                p->owed_next = 1;
+                return;
+            }
             p->superseded++;
             p->held = 0;
             p->owed = 0;
@@ -884,8 +914,9 @@ void ace_pace_flip(AcePace *p, int new_frame, AceRate rate, int smooth, uint64_t
         return;
     }
     p->reflip = 0;
-    if (smooth && p->held && p->owed) {
+    if (owed) {
         p->show = ACE_SHOW_OWED;
+        p->owed_next = 0;
         return;
     }
     if (p->held) {
@@ -905,14 +936,21 @@ AceShow ace_pace_take(AcePace *p) {
     if (show == ACE_SHOW_BETWEEN && !consecutive) {
         show = ACE_SHOW_KEEP;
         p->unpaired++;
-    } else if (show == ACE_SHOW_OWED && !consecutive) {
+    } else if (show == ACE_SHOW_OWED && !p->held) {
+        /* A verdict no present took before a VBLANK showed the held frame: nothing is owed. */
         show = ACE_SHOW_KEEP;
-        p->superseded++;
-        p->held = 0;
-        p->owed = 0;
     }
+    if (show == ACE_SHOW_OWED) p->owed_seq = p->taken_seq;
     p->taken_seq = p->frame_seq;
     return show;
+}
+
+void ace_pace_owed_failed(AcePace *p) {
+    if (!p->held) return;
+    p->show = ACE_SHOW_OWED;
+    p->taken_seq = p->owed_seq;
+    p->owed = 1;
+    p->busy++;
 }
 
 void ace_pace_shown_between(AcePace *p, uint32_t vcount, uint64_t now_ns) {
@@ -926,7 +964,9 @@ void ace_pace_shown_owed(AcePace *p, uint32_t vcount, uint64_t now_ns) {
     p->owed_ns = p->held_ns;
     p->owed_shown = 1;
     p->held = 1;
-    p->owed = 0;
+    /* Shown by a re-flip of the frame now held, whose own present that was: it is owed. */
+    p->owed = p->owed_next;
+    p->owed_next = 0;
     p->held_after = vcount;
     p->held_ns = now_ns;
 }
@@ -950,9 +990,9 @@ uint64_t ace_pace_held_shown(AcePace *p) {
     return p->held_ns;
 }
 
-void ace_pace_held_missed(AcePace *p, int busy) {
+void ace_pace_held_missed(AcePace *p, int retry) {
     if (!p->held) return;
-    if (busy) {
+    if (retry) {
         p->owed = 1;
         p->busy++;
     } else {
@@ -976,12 +1016,16 @@ void ace_smooth_shown_owed(uint64_t now_ns) {
     ace_pace_shown_owed(&s_pace, s_pace_vcount, now_ns);
 }
 
+void ace_smooth_owed_failed(void) {
+    if (g_ace_on) ace_pace_owed_failed(&s_pace);
+}
+
 int ace_smooth_vblank(uint32_t vcount) {
     return g_ace_on && ace_pace_vblank(&s_pace, vcount);
 }
 
-void ace_smooth_held_missed(int busy) {
-    if (g_ace_on) ace_pace_held_missed(&s_pace, busy);
+void ace_smooth_held_missed(int retry) {
+    if (g_ace_on) ace_pace_held_missed(&s_pace, retry);
 }
 
 void ace_smooth_flip_busy(void) {
@@ -1135,6 +1179,7 @@ size_t ace_report_json(char *out, size_t cap) {
                             "  \"load_paced\": %s,\n",
                             s_eff.load ? "true" : "false", s_load_skipped, s_load_run_max,
                             s_load_paced ? "true" : "false");
+    if (s_req.depth) ACE_PUT("  \"depth\": %d,\n", s_eff.depth ? s_eff.depth : 16);
     if (s_req.cull) ACE_PUT("  \"cull\": %s,\n  \"cull_untracked\": %lu,\n",
                             s_eff.cull ? "true" : "false", s_cull_untracked);
     if (s_req.peak) ACE_PUT("  \"peak\": {\"on\": %s, \"pushes_wide\": %llu, \"frames_wide\": %llu, "
@@ -1233,11 +1278,12 @@ void ace_finish(void) {
     if (!g_ace_on) return;
     /* A feature that is on but never ran: its renderer or presenter did not start. */
     static const int has[ACE_FEATURE_COUNT] = { 1, 1, 1, 1, ACE_HAS_WIDE, ACE_HAS_SMOOTH, ACE_HAS_SAS, ACE_HAS_TESS,
-                                                ACE_HAS_STICK, ACE_HAS_LOAD, ACE_HAS_CULL, ACE_HAS_PEAK };
+                                                ACE_HAS_STICK, ACE_HAS_LOAD, ACE_HAS_CULL,
+                                                ACE_HAS_DEPTH, ACE_HAS_PEAK };
     const int on[ACE_FEATURE_COUNT] = { s_eff.af > 0, s_eff.text, s_eff.readout, s_eff.notice,
                                         s_eff.wide, s_eff.smooth, s_eff.sas, s_eff.tess, s_eff.stick,
                                         s_eff.load,
-                                        s_eff.cull, s_eff.peak };
+                                        s_eff.cull, s_eff.depth, s_eff.peak };
     for (int f = 0; f < ACE_FEATURE_COUNT; f++) {
         if (has[f] && on[f] && !s_confirmed[f])
             ace_feature_unavailable((AceFeature)f, f == ACE_FEATURE_CULL

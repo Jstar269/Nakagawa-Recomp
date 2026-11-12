@@ -152,6 +152,9 @@ const struct SrPauseHost *sr_sched_pause_host = NULL;
 void sr_audio_pause_enter(void) {}
 void sr_audio_pause_leave(void) {}
 int sr_audio_pause_script_ready(void) { return 1; }
+/* driver.c opens the host audio device before the scheduler starts (#2361); the microtest never
+ * enters the scheduler, and this link has no audio backend: no device. */
+int sr_audio_init(void) { return -1; }
 /* No audio backend: Ace Mode's peak=limit is refused, so driver.c never confirms it. */
 int sr_audio_set_true_peak_limiter(int on) { (void)on; return 0; }
 void sr_audio_true_peak_stats(uint64_t *pushes_wide, uint64_t *frames_wide, uint64_t *frames_limited,
