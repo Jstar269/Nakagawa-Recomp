@@ -26589,8 +26589,9 @@ static void test_ge_linear_filter_stays_inside_region(void) {
 
 /* ==== GE raster cells (PSP-GE-RASTER-001, #343) ====
  * This block is carried byte for byte by fixtures/psp_oracle/probe_ge_sample.c (the PSP
- * side, CASE=ge-raster) and tests/native/hle_thread_selftest.c (the software GE side);
- * tools/test_psp_oracle.py pins the copy. Each cell is one display list of project-written
+ * side, CASE=ge-raster), tests/native/hle_thread_selftest.c (the software GE side) and
+ * src/rt/gpu_sdl3vk/ge_gpu_selftest.inc (the Vulkan side); tools/test_psp_oracle.py pins
+ * the copies. Each cell is one display list of project-written
  * command words over generated patterns (no game data). It draws into the 16x4 window
  * x 16..31, y 8..11 of a 64x32 colour buffer at VRAM offset GR_FB_OFFSET whose other pixels
  * are 0 and whose window holds gr_dst() before the list runs. The base state turns every
