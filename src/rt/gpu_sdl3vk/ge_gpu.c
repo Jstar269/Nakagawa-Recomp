@@ -5538,6 +5538,17 @@ static int stencil_write_once(uint32_t fmt, uint32_t test, uint32_t ops) {
     return 1;
 }
 
+/* Whether a stencil state under the depth test takes append_depth_blind's two batches: its
+ * depth-fail and depth-pass ops agree and are not KEEP, and the single batch cannot draw it. One
+ * batch is exact when the depth test always passes (the depth-fail op never runs) and the
+ * stencil-fail op is KEEP or never runs (stencil_gpu_supported's rule). `func` is the stencil test
+ * function, `ops` the packed ops (sfail | zfail << 8 | zpass << 16). */
+static int stencil_split_needed(int ztest_on, int zalways, uint32_t func, uint32_t ops) {
+    const uint32_t sfail = ops & 7u, zfail = (ops >> 8) & 7u;
+    if (!ztest_on || zfail == 0u || zfail != ((ops >> 16) & 7u)) return 0;
+    return !(zalways && (sfail == 0u || (func & 7u) == 1u));
+}
+
 /* Find the target that holds VRAM offset `a` (gpu_valid not required). The GE has no buffer height
  * register, so a target's span below is its widest case, 272 rows: a title that stacks short
  * targets puts the next target's base inside that span. The nearest base at or below `a` owns the
@@ -5748,8 +5759,8 @@ static void build_state(int persp, int sprite, Batch *b) {
          * stencil, so a later primitive of the run does not see an earlier one's stencil there:
          * drawn last to first, it would keep a colour ge.c rejects. Such a state is not
          * write-once; its primitives split where they meet (stencil_reads_own_writes). */
-        const uint32_t zfail_op = ((uint32_t)b->pc.bl[3] >> 8) & 7u;
-        const int depth_blind = k->ztest && zfail_op != 0u && zfail_op == (((uint32_t)b->pc.bl[3] >> 16) & 7u);
+        const int depth_blind = stencil_split_needed(k->ztest, k->zfunc == VK_COMPARE_OP_ALWAYS,
+                                                     g->stencil_test, (uint32_t)b->pc.bl[3]);
         b->once = (uint8_t)(depth_fixed && !depth_blind &&
                             stencil_write_once(g->fbfmt & 3u, (uint32_t)b->pc.bl[2], (uint32_t)b->pc.bl[3]));
     } else if (sfix >= 0 && k->blend_on) {
@@ -6055,9 +6066,9 @@ static void append_wing(Batch *b, uint32_t first, uint32_t count) {
  * the draw; primitives join a pair only where the state does not read its own writes or
  * their boxes do not meet, as in append. */
 static int stencil_depth_blind(const Batch *b) {
-    const uint32_t flags = (uint32_t)b->pc.cfg[0] >> 8, ops = (uint32_t)b->pc.bl[3];
-    const uint32_t zfail = (ops >> 8) & 7u;
-    return (flags & F_STENCIL) && b->key.ztest && zfail != 0u && zfail == ((ops >> 16) & 7u);
+    const uint32_t flags = (uint32_t)b->pc.cfg[0] >> 8;
+    return (flags & F_STENCIL) && stencil_split_needed(b->key.ztest, b->key.zfunc == VK_COMPARE_OP_ALWAYS,
+                                                       (uint32_t)b->pc.bl[2], (uint32_t)b->pc.bl[3]);
 }
 
 static int batch_extends(const Batch *last, const Batch *b, uint32_t first) {
@@ -6199,7 +6210,8 @@ static int stencil_gpu_supported(void) {
     if (!s_ge->stencil_enable || s_ge->clear || !s_ge->ztest_enable) return 1;
     const uint32_t func = s_ge->stencil_test & 7u, sfail = s_ge->stencil_op & 7u;
     const uint32_t zfail = (s_ge->stencil_op >> 8) & 7u;
-    if (zfail != 0u && zfail == ((s_ge->stencil_op >> 16) & 7u)) return !tex_reads_own_fb_tested();
+    if (stencil_split_needed(1, (s_ge->ztest & 7u) == 1u, func, s_ge->stencil_op))
+        return !tex_reads_own_fb_tested();
     return (sfail == 0u || func == 1u) && (zfail == 0u || (s_ge->ztest & 7u) == 1u);
 }
 
@@ -6624,6 +6636,12 @@ static int hook_tnl_prim(const GeTnlPrim *p) {
     state_get(1, 0, &b);
     if (nocull) b.key.cull = VK_CULL_MODE_NONE;
     b.key.tnl = 1;
+    /* A depth-blind state whose stencil reads its own writes (append_depth_blind) splits primitives
+     * that meet, but a T&L primitive is one append: its colour batch would test every triangle
+     * against the stencil from before the primitive. Decline: ge.c's T&L then sends each
+     * triangle to hook_tri, which splits them. */
+    if (p->ntri > 1u && stencil_depth_blind(&b) && stencil_reads_own_writes(&b))
+        return cpu_profile_hook_leave(0);
     /* Without a target, decline: ge.c's own T&L then reaches hook_tri, which decides the
      * draw exactly as it does when GPU T&L is off. */
     if (!begin_target()) return cpu_profile_hook_leave(0);
