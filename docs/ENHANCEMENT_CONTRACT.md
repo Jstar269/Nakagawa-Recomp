@@ -253,8 +253,8 @@ Each `sites` entry names a symbolic `function`, a 4-byte-aligned `insn_offset`, 
 | `count_x2` | positive `addi`/`addiu`/`slti`/`sltiu` immediate; `andi` mask $2^n-1$; `lui` of a normal float; `sll`; integer loads; `lwc1`/`swc1`; `sw` (only with `stock_values`, §9.6); `lv.s` (the loaded VFPU register is scaled); single-precision arithmetic and `cvt.s.w`; a unit countdown `addiu rt, rt, -1` | the produced value is doubled (a countdown is gated) |
 | `count_x2_even` | `slti`/`sltiu rt, rs, n` with $0 < n \le$ `0x3FFF` and `rt` neither `$zero` nor `rs` | a bound on a counter of logic updates since an event: true while `rs` $< 2n$ and `rs` is even, so the $n$ events of the stock window still happen, one every second update, at the stock instants (`count_x2` would make $2n$ of them, twice as dense). Under `slti` a negative `rs` stays true, as in stock, so an inactive value such as $-1$ keeps its meaning; under `sltiu` it is a large unsigned value, false in both forms. The resolver refuses the site unless `rs` is loaded from memory (`lb`, `lbu`, `lh`, `lhu` or `lw`) within the 16 instructions before the compare, with no branch, jump or call in between, and not in the delay slot of a jump, a call or a branch-likely. The check reads backward in address order and does not see a branch from elsewhere into those instructions. The site's evidence shows the rest: that the stored count advances by one every update |
 | `step_x0.5`, `probability_per_update_x0.5` | as `count_x2` except integer loads, plus accumulating `+1`/`-1`/`addu`/`subu` updates | the produced value is halved (exactly, or by gating a unit or register step); `add.s fd, fd, ft` halves the addend `ft` |
-| `decay_k_to_1-sqrt(1-k)` | `lui` of a float $k \in (0, 1)$; `lwc1` or `lv.s` of the factor | $k \to 1 - \sqrt{1-k}$, evaluated as $k / (1 + \sqrt{1-k})$ in double so that a small $k$ does not cancel to 0, and rounded to the upper half; after an `lwc1` or `lv.s` the loaded register is mapped at run time, and a value outside $(0, 1)$ keeps its stock value and is reported once per site (`ENHANCEMENT_FACTOR_KEPT`) |
-| `retention_m_to_sqrt(m)` | `lui` of a float $m \in (0, 1)$; `lwc1` or `lv.s` of the factor; `add.s`, `sub.s`, `mul.s` or `div.s` whose result is the factor (such as $1 - cL$) | $m \to \sqrt{m}$, rounded to the upper half; after an `lwc1` or `lv.s` as for `decay_k_to_1-sqrt(1-k)`, and likewise after the arithmetic instruction, whose result register is mapped at run time |
+| `decay_k_to_1-sqrt(1-k)` | `lui` of a float $k \in (0, 1)$; `lwc1` or `lv.s` of the factor; `mov.s` that copies the factor (section 11.3.2.7) | $k \to 1 - \sqrt{1-k}$, evaluated as $k / (1 + \sqrt{1-k})$ in double so that a small $k$ does not cancel to 0, and rounded to the upper half; after an `lwc1` or `lv.s` the loaded register is mapped at run time, after a `mov.s` only the copy, and a value outside $(0, 1)$ keeps its stock value and is reported once per site (`ENHANCEMENT_FACTOR_KEPT`) |
+| `retention_m_to_sqrt(m)` | `lui` of a float $m \in (0, 1)$; `lwc1` or `lv.s` of the factor; `add.s`, `sub.s`, `mul.s` or `div.s` whose result is the factor (such as $1 - cL$); `mov.s` that copies the factor (section 11.3.2.7) | $m \to \sqrt{m}$, rounded to the upper half; after an `lwc1` or `lv.s` as for `decay_k_to_1-sqrt(1-k)`, and likewise after the arithmetic instruction, whose result register is mapped at run time; after a `mov.s` only the copy |
 | `accel_x0.25` | `lui` of a float (or a `lui`/`ori` pair) | the per-update acceleration is divided by 4 (two exponent steps on a lone `lui`) |
 | `launch_velocity_x0.5` | a `lui`/`ori` float pair with `acceleration_site` | the launch velocity $v_0 \to v_0/2 + g/8$, where $g$ is the stock value of the named `accel_x0.25` site |
 | `offset_x2` | `addi`/`addiu` with a nonzero immediate, also when the destination is a source | an additive offset counted in updates (a lookahead, a delay added to a base) doubles: $n \to 2n$ |
@@ -396,6 +396,41 @@ that a player turns on or off apart from the 60 FPS game logic. The field is an 
 | Transform | Instructions with a defined rewrite | Rewrite |
 | --- | --- | --- |
 | `vblank_wait_skip` | `jal` whose target is the executable's import stub of `sceDisplayWaitVblankStart` (NID `0x984C27E7`); any other target refuses the package | the delay slot runs as stock; the call runs unless the runtime skips it (`nk_ace_load_skip_wait()`), which it does only while the run's `load=fast` is in effect and waits are permitted, that is, where the stock call would block. A skipped call still blocks the thread, for 1 µs, the shortest delay wait the scheduler has (that of `sceKernelDelayThread(1)`), so ready threads of any priority run as during the stock wait, and it leaves `$v0` = 0, the stock function's return there. Where waits are not permitted the stock call runs and returns `CAN_NOT_WAIT`. A package with a `load` part must declare an `update_boundary`, and the site may not be in its function, compared by name, by site-map address in a published package, and by resolved address in codegen. Nothing else about where the site sits is checked: a wait in a caller or a callee of the boundary's function is accepted, and the site's own evidence must show it is reached only while loading (section 11.3.10) |
+
+### 9.9. A Code-Hook Package Beside the Timing Package
+
+A build carries one enhancement package and, beside it, at most one `guest_memory_code_hook` package (section 2.3),
+so a title's Ace items that change guest memory build together with its 60 FPS game logic. The code-hook package
+stays a package of its own: the rule of section 9.2 holds as it is, and a timing package still refuses a code-hook
+transform such as `clip_x_widen` (the decision of 2026-11-10, #2366, under "Guest memory written by a timing
+transform"). A timing transform writes guest memory only where it replaces a value the title's own logic stores
+there; `clip_x_widen` writes the x row of matrices the title built, a value no stock store of that site writes, so
+it is a code hook and keeps that category's declaration and checks. The two are joined only in the build, where
+each keeps its own category, digest and checks.
+
+- **Naming it.** `build-package` takes `--code-hook-package <path>`, or `--ace-cull`, which reads
+  `<user data>/enhancements/<disc_id>-cull.json` (lowercase disc ID), else a published package of that name in
+  `assets/enhancements/` (section 5.1). Make takes `ENHANCEMENT_CODE_HOOK_PACKAGE=<path>` beside
+  `ENHANCEMENT_PACKAGE`, and codegen `--code-hook-package` beside `--enhancement-package`. An environment that
+  names one on its own is refused, as for the enhancement package.
+- **Checks.** The code-hook package is validated, matched to the disc, title and executable, and its sites
+  resolved and verified as the enhancement package's are. Each of these refuses the build by name, and nothing is
+  merged: a second package whose category is not `guest_memory_code_hook`; an enhancement package that is a
+  code-hook package too; a code-hook package for another title; a site id both packages use; a code-hook site at
+  a word the enhancement package rewrites (a 60 Hz site, an Ace part site or the `update_boundary`) or at the delay
+  slot of a rewritten call; a code-hook call whose delay slot is such a word, inside the span the enhancement
+  package rewrites; a code-hook site whose rewrite keeps run-time state; a code-hook call to a function that a
+  `gate_30hz_alt` site of the enhancement package lists as an alternate (on an alternate update that site calls the
+  alternate itself, so the hook would act only on the other updates); and a code-hook package with no sites. Codegen
+  refuses `--code-hook-package` without `--enhancement-package`.
+- **The build.** The code-hook sites join the site table and are emitted as they would be in a build of that
+  package alone; the generated code gains one header line naming the code-hook package's id, version, site count
+  and digest; the package's cache key gains its id, its digest and, when it has one, its symbols sidecar's digest.
+  A build of a timing package with a code-hook package is `packages/<disc_id>-enhanced-<timing id>+<hook id>` (no
+  package id holds a `+`, and the joined name may have at most 64 characters); a code-hook package with no timing
+  package is the build's one package, `packages/<disc_id>-enhanced-<hook id>`.
+- **Without one** the generated output, the package directory and the cache key are byte-identical to a build
+  before this section.
 
 ## 10. Play Modes: Authentic, Enhanced and Ace
 
@@ -576,22 +611,29 @@ below). The code is `src/rt/gpu_sdl3vk/ace_smooth.c`, its shaders and the pure p
   frame to overflow the mask prints a warning.
 - **When.** The flip of frame B shows the in-between of A and B; the next VBLANK shows B. Nothing is shown before the
   guest made it, so a frame is never predicted. The cost is one VBLANK of added delay (about 17 ms), reported in the
-  run's report as `added_delay_ms`. A new flip that arrives before B was due replaces it, counted in
-  `presents.superseded`.
+  run's report as `added_delay_ms`. A new flip that arrives before B's present replaces it, counted in
+  `presents.superseded`: one VBLANK of delay does not fit a frame that is on screen for one VBLANK (a title leaving
+  30 FPS), and holding each frame back instead would keep every later frame one VBLANK late.
 - **A busy display never costs a real frame** outside fast forward (see "Only at 30" below). While the guest is
   paced to real time, a present does not wait for the display (`src/rt/gpu_sdl3vk/README.md`): when the display
   cannot take a frame, the present returns at once and shows nothing. When that happens to B's present, B stays
   owed. It is tried again at each later VBLANK until a present shows it: one with no flip, or one whose flip's own
-  present found the display busy too. The flip of the next frame C shows B in place of the in-between of B and C,
-  then C at its own VBLANK. So a frame whose in-between was shown is never dropped for a made-up picture, and a
-  display that takes only every second present shows the real frames, with `SMOOTH OFF` on the readout. A title that
-  flips each frame twice shows its newest frame at the second flip; when flips in between found the display busy
-  too, that frame is newer than the owed one and replaces it. What a present shows changes the pace only once that
-  present has reached the screen. When the present that should show B fails (an out-of-date window, say), B is given
-  up and C is not held: the CPU present that takes over shows C as it is, and no VBLANK shows it again. When the
-  failed present is the CPU one itself (a frame that is not resident, or the software renderer), nothing takes over:
-  C is lost as a failed present loses a frame without smooth motion. `presents.busy` counts the held presents the
-  display could not take, and `presents.superseded` every held frame that never reached the screen.
+  present found the display busy too. The first flip whose present the display takes shows B in place of its
+  in-between, then its own frame at its VBLANK, however many flips the display missed in between. Frames whose
+  presents the display never took are not shown, as without smooth motion; every frame whose present it took is
+  shown, in order. So a frame whose in-between was shown is never dropped for a made-up picture, and a display that
+  takes only every second present shows the real frames, with `SMOOTH OFF` on the readout. A title that flips each
+  frame twice is no different: when the flips in between found the display busy, the second flip of a newer frame
+  is that frame's first present, so it shows B and holds its own frame, owed in turn, for the next present. What a
+  present shows changes the pace only once that present has reached the screen. When the present that shows B fails
+  after its submission (an out-of-date window, say), nothing reached the screen, as with a busy display: B stays
+  owed, the pass drops the frame it recorded with it, and the CPU present that takes over shows B and holds C. When
+  that one fails too, B's VBLANK shows it and C is lost, as a failed present loses a frame without smooth motion.
+  B is given up when a present fails before its submission, when its VBLANK's own present fails (a failure that
+  repeats, such as a minimised window, never leaves an old frame waiting to be shown after newer ones), when the
+  window closes, or when the renderer can present nothing any more. `presents.busy` counts the held presents the
+  display could not take or that failed and were tried again, and `presents.superseded` every held frame that never
+  reached the screen.
 - **Only consecutive frames.** An in-between is made of a frame and the one flipped just before it. When that one
   never reached a present (the presenter's slot rule dropped its flip on a busy PC, or the present failed), the
   pass still holds an older frame, and an in-between of the two would put a fast-moving object in the wrong place
@@ -1686,6 +1728,31 @@ timing transform").
 - **"Nothing worse".** As section 11.3.2.4; in the double-precision model the arc differs from stock's when the
   retention of half a step is $1 - cL/2$ in place of the square root.
 
+##### 11.3.2.7. Decay and Retention on a Register Copy
+
+`decay_k_to_1-sqrt(1-k)` and `retention_m_to_sqrt(m)` on a `mov.s fd, fs` that copies a per-update factor are
+admitted here by their own entry. A title can load one constant once and use it twice, for example 0.2 as a blend
+factor applied every update and 0.2 as a duration in seconds. A site on the load would change both; a site on the
+copy changes only the factor.
+
+- **Key and off switch.** Those of section 11.3.2. A package leaves the form out for its title by not naming it.
+- **What it changes.** After the stock copy, the destination register `fd` is mapped as the `lwc1` form maps its
+  loaded register: inside $(0, 1)$ to $1 - \sqrt{1-k}$ or $\sqrt{m}$; outside it, `fd` keeps its stock value and the
+  site reports once (`ENHANCEMENT_FACTOR_KEPT`). The source register `fs` keeps its stock value, so a copy onto
+  itself (`fd` equal to `fs`) refuses the package, as do `mov.d` and any other instruction this section and
+  section 9.2 do not name.
+- **What the guest can observe.**
+  - Guest registers and memory: the one FPU register `fd`, and everything computed from it. No memory is written.
+    The map is the one the `lwc1` form uses: the decay in double on the host, the square root the host's
+    `sqrtf` (section 9.2, "Host arithmetic").
+  - VRAM bytes, readbacks, timing the guest can measure and I/O speed: unchanged, as section 11.3.2.4.
+- **Tier and default.** Ace, off by default, as section 11.3.2.
+- **Authentic stays byte-identical.** As section 11.3.2. `test_mapped_register_copy_keeps_its_source_when_run`
+  compiles the emitted statement and runs it: with the toggle off both registers hold the stock copy; with it on,
+  `fd` is the mapped factor and `fs` keeps its stock bits.
+- **Sampled checking.** As section 11.3.2.
+- **"Nothing worse".** As section 11.3.2.4.
+
 #### 11.3.3. Texture Scaling and the Smart 2D Filter (Not Yet Admitted)
 
 The two features of section 10.10 (#1273). Their presentation is described there; this entry is what the guest can
@@ -1812,7 +1879,9 @@ The Layer 2 mechanism of section 10.8, for a title that skips objects outside it
   the key and Widescreen has a wing (`D` > 0); with either missing, the stock call runs and nothing is written. The run
   names it (`ACE_MODE: cull on (...)`, the report's `cull`), and reports it unavailable when no matrix was scaled by
   the end of the run: the title's build has no culling package, or Widescreen is off. The package build is chosen by
-  the title's own data (section 5); the launcher picking it for an Ace launch with the part on is a separate
+  the title's own data (section 5): `build-package --ace-cull` adds the title's culling package, beside the timing
+  package when the build has one (`--experimental-60hz` or `--enhancement-package`) and as the build's one package
+  otherwise (section 9.9); the launcher picking that build for an Ace launch with the part on is a separate
   change. The player cannot tell ahead of a launch which games have a culling build, so the row's text says it
   acts only in games that do, and a run without one says so in the `ACE_MODE: cull unavailable (...)` line and
   the report. The runtime remembers at most 4096 distinct matrices (see Limits below); the report's

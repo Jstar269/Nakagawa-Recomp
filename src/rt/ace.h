@@ -359,31 +359,46 @@ typedef struct {
     uint64_t owed_ns;      /* the same for an owed frame the next flip's present shows */
     int owed_shown;        /* that present is on its way: its HELD note is the owed frame's */
     int reflip;            /* this flip shows the held frame again: it is the held present */
+    int owed_next;         /* this OWED verdict is a re-flip's: the frame it holds is owed too */
     uint64_t frame_seq;    /* new frames flipped with smooth motion on */
     uint64_t taken_seq;    /* the newest of them whose verdict a present took */
+    uint64_t owed_seq;     /* taken_seq before an OWED verdict was taken, for its present's failure */
     uint64_t unpaired;     /* in-betweens refused: the frame before never reached a present */
-    uint64_t superseded;   /* held frames never shown: replaced by a later flip, or given up
-                            * when the present that should show them failed */
-    uint64_t busy;         /* held presents the display could not take */
+    uint64_t superseded;   /* held frames never shown: replaced by a flip before their VBLANK's
+                            * present, at fast forward, or given up when a present failed and
+                            * none can be tried again */
+    uint64_t busy;         /* held presents the display could not take: busy, or failed and tried
+                            * again by the present that takes over */
 } AcePace;
 
 void ace_pace_reset(AcePace *p);
 /* A flip. The verdict stands until ace_pace_take. A flip of the unchanged frame (a title that
  * flips each frame twice) shows the held frame, so that present is the held one. A new frame
- * that arrives before the held frame was due supersedes it. A new frame that arrives while the
- * held frame is owed (its present came due and the display could not take it) does not: the
- * verdict is OWED, the present shows the owed frame in place of an in-between, and the new
- * frame is held as usual. So a game frame whose in-between was shown is never dropped for a
- * made-up picture, and a display that takes only every second present gets the real frames. */
+ * that arrives before the held frame's present supersedes it: smooth motion's one VBLANK of
+ * delay does not fit a frame shown for one VBLANK. A flip that arrives while the held frame is
+ * owed (its present came due and the display could not take it) never replaces it: the
+ * verdict is OWED, the present shows the owed frame in place of an in-between, and the flip's
+ * own frame is held. That holds for a new frame, and for a re-flip whose frame is newer than
+ * the held one (the flips in between found the display busy, so no present took it). The
+ * re-flip's present was that frame's own, so the frame it holds is owed in turn and the next
+ * present shows it. So every frame whose present the display took is shown, in order, and a
+ * display that takes only every second present gets the real frames. */
 void ace_pace_flip(AcePace *p, int new_frame, AceRate rate, int smooth, uint64_t now_ns);
 /* The flip's present: returns the verdict and clears it. An in-between is made only of two
  * consecutive frames: when the frame before this one never reached a present (the presenter's
  * slot rule dropped its flip, or the present failed), the pass holds an older frame, and an
  * in-between of the two would put whatever moved between them in the wrong place, or lose it.
  * Such a verdict becomes KEEP (the real frame is shown and kept) and is counted in `unpaired`.
- * An OWED verdict needs the same: when the pass does not hold the frame just before this one,
- * the owed frame is older still, so it is superseded and this frame is shown as it is. */
+ * An OWED verdict shows the held frame, which is always the pass's newest before this record,
+ * however many flips the display missed; one left over after a present showed the held frame
+ * becomes KEEP. */
 AceShow ace_pace_take(AcePace *p);
+/* The present that showed the owed frame failed after its submission, and the renderer can
+ * present again: nothing reached the screen, and the pass has dropped the frame it recorded
+ * (ace_smooth_unrecord). As when the display is busy, the frame stays owed and the OWED verdict
+ * stands, so the present that takes over (gui_present's CPU present of the same flip) shows it;
+ * failing that, the next VBLANK or the next flip. Counted in `busy`. */
+void ace_pace_owed_failed(AcePace *p);
 /* The in-between went to the screen at now_ns (the presenter's clock): the frame is held for the
  * VBLANK after `vcount`. Without smooth motion the frame would have been shown then, so the
  * held present's time less this one is the delay smooth motion adds. */
@@ -396,10 +411,12 @@ void ace_pace_shown_owed(AcePace *p, uint32_t vcount, uint64_t now_ns);
 int ace_pace_vblank(AcePace *p, uint32_t vcount);
 /* A present showed a held frame. Returns when that frame's in-between was presented. */
 uint64_t ace_pace_held_shown(AcePace *p);
-/* The held frame's present was due and did not show it. `busy`: the display could not take a
- * frame, so the frame is owed and tried again at the next VBLANK, or shown by the next new
- * flip. Otherwise the present failed or the window closed, and the frame is given up. */
-void ace_pace_held_missed(AcePace *p, int busy);
+/* The held frame's present was due and did not show it. `retry`: the display was too busy to
+ * take a frame, so the frame is owed and tried again at the next VBLANK, or shown by the next
+ * flip. Otherwise the present failed or the window closed, and the frame is given up and
+ * counted: a failure that repeats (a minimised window, say) must not leave an old frame waiting
+ * to be shown after the newer ones. */
+void ace_pace_held_missed(AcePace *p, int retry);
 
 typedef enum {
     ACE_PRESENT_REAL = 0,  /* the flip's own frame */
@@ -435,13 +452,17 @@ AceShow ace_smooth_take(void);
  * VBLANK after. It counts nothing; ace_smooth_note_present counts what the swapchain accepted. */
 void ace_smooth_shown_between(uint64_t now_ns);
 /* The present that showed the owed frame in place of an in-between reached the screen, and the
- * show pass kept the new frame: that one is held for the VBLANK after. When that present fails,
- * the owed frame is given up instead (ace_smooth_held_missed with busy 0). */
+ * show pass kept the new frame: that one is held for the VBLANK after. When that present fails
+ * after its submission, the owed frame stays owed for the present that takes over
+ * (ace_smooth_owed_failed); when it failed before, or the renderer can present nothing any more,
+ * it is given up (ace_smooth_held_missed with retry 0). */
 void ace_smooth_shown_owed(uint64_t now_ns);
+/* ace_pace_owed_failed for the run. */
+void ace_smooth_owed_failed(void);
 /* One VBLANK: 1 when the held frame should be presented now. Off, it reads nothing. */
 int ace_smooth_vblank(uint32_t vcount);
 /* The held frame's present did not show it (ace_pace_held_missed). */
-void ace_smooth_held_missed(int busy);
+void ace_smooth_held_missed(int retry);
 /* A flip's own present found the display busy. When that flip re-showed the held frame, the
  * frame is owed. */
 void ace_smooth_flip_busy(void);

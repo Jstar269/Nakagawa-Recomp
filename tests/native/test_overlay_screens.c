@@ -560,6 +560,22 @@ static void test_pad_lost(void) {
     nk_ui_destroy(ui);
 }
 
+/* The bounds of the first command of `kind` that `id` drew this frame; false when none did. */
+static bool frame_bounds(NkUi *ui, NkOverlayState *state, const NkOverlayModel *model, NkUiId id,
+                         int kind, int out[4]) {
+    const NkUiDrawList *list;
+    nk_ui_begin(ui, 0.0);
+    (void)nk_overlay_frame(ui, state, model);
+    list = nk_ui_end(ui);
+    for (uint32_t i = 0u; list != NULL && i < list->ncmd; ++i) {
+        const NkUiDrawCmd *cmd = &list->cmd[i];
+        if (cmd->element_id != id || (int)cmd->kind != kind) continue;
+        for (int k = 0; k < 4; ++k) out[k] = (int)cmd->bounds[k];
+        return true;
+    }
+    return false;
+}
+
 /* Element `id`'s fill and text in `list`, drawn whole: each clip is its bounds
    (no scroll container or window edge cuts it), between top and bottom. Its
    borders are not counted: a focused control's ring is drawn outside it. */
@@ -979,6 +995,24 @@ static void test_vram_page(void) {
     model.vram = NULL;
     CHECK(frame_has_text(ui, &state, &model, "Nothing to show"),
           "vram: no host data shows an empty picture, not a stale one");
+    {
+        /* Design pass (#314): the empty picture's words sit in the middle of the box, and the
+           window's size lines up with the rows' labels. */
+        int box[4], words[4], label[4], size[4];
+        CHECK(frame_bounds(ui, &state, &model, NK_OVERLAY_ID(0x006004u), NK_UI_DRAW_RECTANGLE,
+                           box) &&
+                  frame_bounds(ui, &state, &model, NK_OVERLAY_ID(0x006006u), NK_UI_DRAW_TEXT,
+                               words) &&
+                  abs((words[0] + words[2]) - (box[0] + box[2])) <= 2 &&
+                  abs((words[1] + words[3]) - (box[1] + box[3])) <= 2,
+              "vram: an empty picture centres its words in the box");
+        model.vram = &vram;
+        CHECK(frame_bounds(ui, &state, &model, NK_OVERLAY_ID(0x006101u), NK_UI_DRAW_TEXT, label) &&
+                  frame_bounds(ui, &state, &model, NK_OVERLAY_ID(0x006008u), NK_UI_DRAW_TEXT,
+                               size) &&
+                  size[0] == label[0],
+              "vram: the window's size starts where the rows' labels start");
+    }
     model.vram = &vram;
     action = frame_with(ui, &state, &model, NK_UI_EV_BACK, NK_UI_DIR_NONE);
     CHECK(action.kind == NK_OVERLAY_ACT_NONE && state.screen == NK_OVERLAY_SCREEN_MENU,

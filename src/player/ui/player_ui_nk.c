@@ -1895,6 +1895,11 @@ const char *player_ui_nk_test_find(const PlayerUiNk *player) {
     return player_ui_nk_find_open(player) ? player->find_query : NULL;
 }
 
+size_t player_ui_nk_test_library_grid(const PlayerUiNk *player, size_t *total) {
+    if (total != NULL) *total = player != NULL ? player->library_game_total : 0u;
+    return player != NULL ? player->library_grid_count : 0u;
+}
+
 const char *player_ui_nk_test_nickname(const PlayerUiNk *player, char *count, size_t cap) {
     if (count != NULL && cap > 0u) count[0] = '\0';
     if (player == NULL || !player->nickname_open) return NULL;

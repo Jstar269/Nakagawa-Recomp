@@ -3577,9 +3577,16 @@ static void test_psp_fonts_page(void) {
           "Remove imported fonts removes them");
     CHECK(dump_flow_case(FLOW_SETTINGS_FONTS, dump, sizeof(dump)) &&
               strstr(dump, "Optional.") != NULL && strstr(dump, "flash0:/font") != NULL &&
-              strstr(dump, "Copying the fonts from your PSP") != NULL &&
-              /* #2005: what a player without the PSP's fonts sees, before they decide. */
-              strstr(dump, "Cyrillic") != NULL && strstr(dump, "narrower") != NULL &&
+              /* The dump holds one run per wrapped line, so each phrase is short
+                 enough to stay on one line. */
+              strstr(dump, "Copying the") != NULL &&
+              strstr(dump, "fonts from your PSP") != NULL &&
+              /* #2005: what a player without the PSP's fonts sees, before they decide.
+                 The Latin stand-ins have the PSP's Cyrillic letters; only rare Japanese
+                 and Korean characters are missing. */
+              strstr(dump, "Cyrillic") == NULL && strstr(dump, "rarely used characters") != NULL &&
+              strstr(dump, "Japanese and Korean fonts") != NULL &&
+              strstr(dump, "narrower") != NULL &&
               strstr(dump, "Japanese: synthetic fallback") != NULL &&
               strstr(dump, "Korean: synthetic fallback") != NULL &&
               strstr(dump, "Latin 16: synthetic fallback") != NULL &&
