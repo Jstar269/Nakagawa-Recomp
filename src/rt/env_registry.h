@@ -91,6 +91,8 @@
     X("SR_GELOG", "flag-presence", "off", "debug.h,ge.c,hle.c,hle_ge.c", "Enables GE command-list logging, including a message when a GE stall address is reached.") \
     X("SR_GEMAT", "flag-presence", "off", "ge.c", "When set, prints the world and view matrices of the first 16 primitives to stderr.") \
     X("SR_GEMATW", "flag-presence", "off", "ge.c", "Traces the first 120 GE matrix register writes to stderr.") \
+    X("SR_GESCENE", "number", "unset (no dump)", "ge.c", "GE frame number whose scene records (one per PRIM: identity, state, model-space vertices) are dumped to SR_GESCENE_DIR.") \
+    X("SR_GESCENE_DIR", "path", "unset (scene dump refused)", "ge.c", "Output directory for the SR_GESCENE dump, gescene_f<frame>.bin.") \
     X("SR_GESIGNALLOG", "flag-presence", "off", "ge.c", "Logs the first few GE signal command occurrences per behavior to stderr.") \
     X("SR_GESTAT", "flag-presence", "off", "ge.c", "Prints per-frame GE statistics once per 60-vblank window to diagnose culled or rejected geometry.") \
     X("SR_GEUNK", "flag-nonzero", "on", "ge.c", "Unhandled GE commands are reported once each unless this is set to 0.") \
@@ -125,6 +127,7 @@
     X("SR_GPU_PRESENT_DBG", "flag-presence", "off (first 3 early exits still logged)", "gpu_sdl3vk/ge_gpu.c", "Logs every GPU present call and every early-exit decline to stderr.") \
     X("SR_GPU_READBACK_FULL", "flag-nonzero", "off (only the rows guest memory keeps are copied)", "gpu_sdl3vk/ge_gpu.c", "When enabled, a readback to guest memory copies the whole scaled target, the reference path for the narrowed copy.") \
     X("SR_GPU_SCALE", "number", "1 (falls back to SR_RESOLUTION_SCALE)", "gpu_sdl3vk/ge_gpu.c", "Internal render scale multiplier for the GPU GE renderer.") \
+    X("SR_GPU_SSAA_REF", "path", "unset (no reference check)", "gpu_sdl3vk/ge_gpu_selftest.inc", "Reference file for the coherence self-test ssaa-edge case: a run without supersampling writes it, a supersampled run at that scale checks it.") \
     X("SR_GPU_STATS", "flag-nonzero", "off", "gpu_sdl3vk/ge_gpu.c", "Enables statistics output in the Vulkan GE backend.") \
     X("SR_GPU_SUBMIT_BATCH", "number", "SUBMIT_BATCH_MAX", "gpu_sdl3vk/ge_gpu.c", "Number of GPU ops per submit batch; values outside 1 to the maximum are ignored.") \
     X("SR_GPU_SYNC_SUBMIT", "flag-nonzero", "off (asynchronous submit)", "gpu_sdl3vk/ge_gpu.c", "When enabled, GPU command submission is synchronous instead of asynchronous.") \

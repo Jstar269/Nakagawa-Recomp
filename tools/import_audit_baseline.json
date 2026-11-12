@@ -640,6 +640,12 @@
     "name": "sceRtcTickAddMicroseconds",
     "status": "partial"
   },
+  "0x26d7a24a": {
+    "classification": "dedicated",
+    "handler": "h_RtcTickAddHours",
+    "name": "sceRtcTickAddHours",
+    "status": "partial"
+  },
   "0x278c0df5": {
     "classification": "dedicated",
     "handler": "h_WaitThreadEnd",
@@ -3480,6 +3486,12 @@
     "name": "sceMpegFreeAvcEsBuf",
     "status": "unreviewed"
   },
+  "0xcf3a2ca8": {
+    "classification": "dedicated",
+    "handler": "h_RtcTickAddWeeks",
+    "name": "sceRtcTickAddWeeks",
+    "status": "partial"
+  },
   "0xcf561893": {
     "classification": "dedicated",
     "handler": "h_RtcGetWin32FileTime",
@@ -3883,6 +3895,12 @@
     "classification": "dedicated",
     "handler": "h_RtcTickAddDays",
     "name": "sceRtcTickAddDays",
+    "status": "partial"
+  },
+  "0xe6605bca": {
+    "classification": "dedicated",
+    "handler": "h_RtcTickAddMinutes",
+    "name": "sceRtcTickAddMinutes",
     "status": "partial"
   },
   "0xe7282cb6": {

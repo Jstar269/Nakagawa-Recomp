@@ -2296,6 +2296,10 @@ void     sr_hle_init(void);     /* registers all built-in handlers (idempotent) 
  * authentic. Returns 1 when a SAS mixer took the switch; a link without one (the headless
  * gate's stubs) returns 0, so the feature is never confirmed there. */
 int      sr_hle_sas_set_band_limited(int on);
+/* Ace Mode's peak=limit (src/rt/ace.h, #2137): the SAS mixer also keeps, for the host only, the
+ * stereo sum of each grain the store saturates; the guest's bytes stay the PSP's. 0 (the default)
+ * keeps nothing. Returns 1 when a SAS mixer took the switch, 0 in a link without one. */
+int      sr_hle_sas_set_wide_mix(int on);
 uint32_t sr_syscall(CpuState *s, uint32_t nid);
 typedef struct SrLoadExecRequest {
     char guest_path[256];
@@ -2493,6 +2497,14 @@ void     sched_set_vtimer_hooks(SrSchedVtimerNextDeadline next_deadline,
 /* hle.c's user-partition overlap test: sched.c refuses a thread stack range it reports. */
 typedef int (*SrSchedStackRangeRefusal)(uint32_t base, uint32_t end);
 void     sched_set_stack_range_refusal(SrSchedStackRangeRefusal refusal);
+/* hle.c's free blocks below the user partition's bump pointer: when no range above it holds a
+ * new thread stack, sched.c takes the highest such block that does (carved from its top) and
+ * gives it back to the partition when the thread is deleted. */
+typedef int (*SrSchedPartitionHoleAlloc)(uint32_t size, uint32_t *base_out);
+typedef void (*SrSchedPartitionHoleRelease)(uint32_t base, uint32_t size);
+void     sched_set_partition_hole_allocator(SrSchedPartitionHoleAlloc alloc,
+                                            SrSchedPartitionHoleRelease release);
+int      sched_guest_stack_overlaps(uint32_t base, uint32_t end);   /* any live thread stack */
 CpuState *sr_cpu_for_callbacks(void);               /* the CpuState guest callbacks run on */
 void     sched_dump_threads(void);                  /* the watchdog's thread table, to stderr */
 void     sched_watchdog_summary(uint32_t *ready, uint32_t *delay,

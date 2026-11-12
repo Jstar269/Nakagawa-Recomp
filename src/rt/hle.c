@@ -33,6 +33,7 @@
  */
 
 #include "hle_internal.h"
+#include "ge_scene.h"
 #include "nid_names.h"   /* sr_nid_name(): names unknown NIDs in the trap below */
 #include "nk_nickname.h" /* the owner_name default: SR_NICKNAME or the neutral one */
 #define SR_EVIDENCE_NO_VFPU /* this file reads the NID table only */
@@ -290,6 +291,8 @@ static uint32_t s_heap_last_bump = 0;     /* mirror of last s_heap value, for th
 uint32_t user_partition_last_heap(void) { return s_heap_last_bump ? s_heap_last_bump : s_heap; }
 
 uint32_t sr_last_alloc_addr = 0;     /* last heap allocation rounded address */
+static int partition_hole_alloc_high(uint32_t size, uint32_t *base_out);
+static void partition_hole_release(uint32_t base, uint32_t size);
 /* Start the user partition after the complete flat image, including zero-filled BSS.
  * tools/prxload.py preserves the original ~PSP header's segment-memory sizes when a
  * stripped ELF has lost them. An explicit override may move the base higher, but may
@@ -318,6 +321,7 @@ void user_partition_init(void) {
     s_heap = base;
     s_heap_base = base;
     sched_set_stack_range_refusal(sr_user_partition_overlaps);
+    sched_set_partition_hole_allocator(partition_hole_alloc_high, partition_hole_release);
     s_part_top = et ? (uint32_t)strtoul(et, NULL, 16) : 0x0A000000u;
     if (s_part_top <= s_heap) {
         fprintf(stderr,
@@ -582,6 +586,67 @@ int partition_high_modelled(void) {
     return s_heap_base >= SR_NESTED_FRAME_END;
 }
 
+/* A High request (a thread stack, a High block) that no range above the bump pointer holds: the
+ * highest free block below it that does, carved from that block's top. This applies the
+ * PSP_SMEM_High rule (sched.c stack_range_alloc, PSP-THREAD-K0-001, measured on a block freed at the
+ * partition's top) to the blocks freed below the bump pointer, which is inferred, not measured. The
+ * carved range leaves the free list, so no Low request reuses it, and partition_hole_release gives
+ * it back. Where the highest placement cannot be taken the request fails rather than going lower. */
+static int partition_high_block_overlaps(uint32_t base, uint32_t end) {
+    for (int i = 0; i < s_nblocks; i++)
+        if (s_blocks[i].uid != 0u && s_blocks[i].high && s_blocks[i].addr < end &&
+            s_blocks[i].addr + s_blocks[i].slot_size > base)
+            return 1;
+    return 0;
+}
+
+static int partition_hole_alloc_high(uint32_t size, uint32_t *base_out) {
+    if (!base_out || size == 0u || (size & 0xFFu) != 0u) return 0;
+    for (int i = s_nfree_blocks - 1; i >= 0; i--) {
+        const uint32_t f_addr = s_free_blocks[i].addr;
+        const uint32_t f_end = f_addr + s_free_blocks[i].size;
+        /* A free block can end unaligned after a fixed block (sr_alloc_block_at keeps its exact
+         * bounds); the request sits 256-aligned like every other partition block. */
+        const uint32_t end = f_end & ~0xFFu;
+        if (end <= f_addr || end - f_addr < size) continue;
+        const uint32_t base = end - size;
+        /* A fixed reservation above the bump pointer returns its skipped gap to the free list
+         * (sr_alloc_block_at) without looking at the stacks and High blocks inside it: never place
+         * a request over one of those. */
+        if (sched_guest_stack_overlaps(base, end) || partition_high_block_overlaps(base, end)) {
+            fprintf(stderr, "partition: High request [0x%08x,0x%08x) in a freed block would overlap a "
+                    "live thread stack or High block -- refused\n", base, end);
+            return 0;
+        }
+        const int head = base > f_addr, tail = end < f_end;
+        if (head && tail) {
+            if (s_nfree_blocks >= HLE_MAX_FREE_BLOCKS) {
+                fprintf(stderr, "partition: High request [0x%08x,0x%08x) would split a freed block "
+                        "and the free-block table is full -- refused\n", base, end);
+                return 0;
+            }
+            for (int j = s_nfree_blocks; j > i + 1; j--) s_free_blocks[j] = s_free_blocks[j - 1];
+            s_free_blocks[i + 1].addr = end;
+            s_free_blocks[i + 1].size = f_end - end;
+            s_nfree_blocks++;
+            s_free_blocks[i].size = base - f_addr;
+        } else if (head) {
+            s_free_blocks[i].size = base - f_addr;
+        } else if (tail) {
+            s_free_blocks[i].addr = end;
+            s_free_blocks[i].size = f_end - end;
+        } else {
+            for (int j = i; j < s_nfree_blocks - 1; j++) s_free_blocks[j] = s_free_blocks[j + 1];
+            s_nfree_blocks--;
+        }
+        *base_out = base;
+        return 1;
+    }
+    return 0;
+}
+
+static void partition_hole_release(uint32_t base, uint32_t size) { partition_free_block(base, size); }
+
 uint32_t alloc_block_high(uint32_t size) {
     user_partition_init();
     if (!partition_high_modelled()) return 0xFFFFFFFFu;
@@ -595,7 +660,8 @@ uint32_t alloc_block_high(uint32_t size) {
         slot = s_nblocks;
     }
     uint32_t addr = 0u;
-    if (!sched_partition_alloc_high(slot_size, user_partition_ceiling(), &addr)) return 0xFFFFFFFFu;
+    int in_arena = sched_partition_alloc_high(slot_size, user_partition_ceiling(), &addr);
+    if (!in_arena && !partition_hole_alloc_high(slot_size, &addr)) return 0xFFFFFFFFu;
     if (slot == s_nblocks) s_nblocks++;
     sr_last_alloc_addr = addr;
     uint32_t uid = sr_alloc_uid();
@@ -605,7 +671,8 @@ uint32_t alloc_block_high(uint32_t size) {
     s_blocks[slot].slot_size = slot_size;
     s_blocks[slot].prev      = 0xFFFFFFFFu;
     s_blocks[slot].next      = 0u;
-    s_blocks[slot].high      = 1;
+    /* A block taken from a free block below the bump pointer goes back to the free list. */
+    s_blocks[slot].high      = in_arena;
     s_blocks[slot].part5     = 0;
     return uid;
 }
@@ -2041,6 +2108,7 @@ uint32_t hle_unmodelled_stop(const char *import_name, const char *fmt, ...) {
     sr_hit_hle = 1;
     if (sr_sched_on) {
         sr_trace_close();
+        ge_scene_dump_finish();
         sr_compat_report();
         (void)sr_videorec_finish_status("an unsupported import stopped the run", 7);
         sr_perf_shutdown();
@@ -4300,7 +4368,7 @@ uint32_t sr_syscall(CpuState *s, uint32_t nid) {
         sr_hit_hle = 1;
         /* Under the fiber scheduler, longjmp across fibers is invalid; stop the process cleanly
          * after flushing the trace. The plain driver (no scheduler) keeps the longjmp boundary. */
-        if (sr_sched_on) { sr_trace_close(); sr_compat_report(); (void)sr_videorec_finish_status("an unregistered NID stopped the run", 7); sr_perf_shutdown(); sr_profile_dump_final(); SR_VERIFY_REPORT_NOW(); fflush(stderr); _Exit(7); }
+        if (sr_sched_on) { sr_trace_close(); ge_scene_dump_finish(); sr_compat_report(); (void)sr_videorec_finish_status("an unregistered NID stopped the run", 7); sr_perf_shutdown(); sr_profile_dump_final(); SR_VERIFY_REPORT_NOW(); fflush(stderr); _Exit(7); }
         longjmp(g_hle_jmp, 1);
     }
     if (hle_syslog_on()) {

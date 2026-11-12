@@ -252,18 +252,19 @@ class TestPublishAudit(unittest.TestCase):
         self.assertIsNotNone(reason)
         pinned = "ab" * 32
         comp = {"disposition": "approved_binary", "hashes": {"sha256": pinned}}
-        self.assertTrue(publish_audit._approved_binary_matches(
-            reason, "approved_binary", comp, pinned))
+
+        def passes(reason: str, disp: str, component: dict, sha256: str) -> bool:
+            return (publish_audit._waives_extension_rule(reason, disp)
+                    and publish_audit._binary_waiver_refusal(rel, disp, component, sha256) is None)
+
+        self.assertTrue(passes(reason, "approved_binary", comp, pinned))
         # A different file under the approved name is still a finding.
-        self.assertFalse(publish_audit._approved_binary_matches(
-            reason, "approved_binary", comp, "cd" * 32))
+        self.assertFalse(passes(reason, "approved_binary", comp, "cd" * 32))
         # No manifest approval, or no pinned hash, keeps the finding.
-        self.assertFalse(publish_audit._approved_binary_matches(reason, "included", comp, pinned))
-        self.assertFalse(publish_audit._approved_binary_matches(
-            reason, "approved_binary", {"disposition": "approved_binary"}, pinned))
+        self.assertFalse(passes(reason, "included", comp, pinned))
+        self.assertFalse(passes(reason, "approved_binary", {"disposition": "approved_binary"}, pinned))
         # Only the extension rule can be approved; private-path rules never are.
-        self.assertFalse(publish_audit._approved_binary_matches(
-            "private/generated path", "approved_binary", comp, pinned))
+        self.assertFalse(passes("private/generated path", "approved_binary", comp, pinned))
 
     def test_local_only_keystore_path_class_fails_closed(self):
         # A key file can never be committed or packaged, under
@@ -2972,24 +2973,341 @@ class CommittedTreeMaterializationTests(unittest.TestCase):
             self.assertFalse(written[0].exists(), written[0])
 
 
+class BinaryWaiverPinTests(unittest.TestCase):
+    """A binary waiver approves bytes, not a path.
+
+    Each test commits a small tree and audits it with ``--committed-tree``, as the attest job does.
+    ``base`` is the trusted commit: an ``approved_binary`` screenshot whose pin is its SHA-256.
+
+    What the audit requires:
+
+    * a release-manifest waiver covers only the SHA-256 it pins, and only a waiver that holds drops a
+      binary finding (MAGIC, MAGIC_UNKNOWN, PATH for a prohibited extension);
+    * with ``--trusted-base``, a path the base holds is held to the base: the same waiver, and bytes the
+      base vouches for, whatever the audited manifest says;
+    * with ``--trusted-base``, every refused waiver is reported, binary finding or not;
+    * with ``--trusted-base``, the ``assets/vfpu/`` exemption covers only the file the base carries.
+    """
+
+    SHOT = "docs/shot.png"
+    PNG = b"\x89PNG\r\n\x1a\n" + bytes(range(32))
+    OTHER_PNG = b"\x89PNG\r\n\x1a\n" + bytes(range(1, 33))
+    PBP = b"\x00PBP\x00\x00\x01\x00" + bytes(32)
+    OPAQUE = bytes([0x13, 0x37, 0x00, 0x01]) * 10  # binary, with no magic the audit knows
+    OTHER_OPAQUE = bytes([0x01, 0x00, 0x02, 0x00]) * 10
+    MARK = "docs/mark.svg"  # a waived file the audit reads as text
+    SVG = b'<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>\n'
+    OTHER_SVG = b'<svg xmlns="http://www.w3.org/2000/svg" width="2" height="2"/>\n'
+    TABLE = "assets/vfpu/table.dat"
+    MANIFEST = "assets/release_manifest.json"
+
+    def setUp(self) -> None:
+        scratch = tempfile.TemporaryDirectory(prefix="nk-waiver-pin-")
+        self.addCleanup(scratch.cleanup)
+        self.repo = Path(scratch.name) / "repo"
+        self.outside = Path(scratch.name) / "outside"
+        self.repo.mkdir()
+        self.outside.mkdir()
+        run_git(["init", "-q"], cwd=self.repo, check=True, capture_output=True)
+        self.base = self._commit({self.SHOT: self.PNG}, [self._component(self.SHOT, self.PNG)])
+
+    @staticmethod
+    def _component(path: str, data: bytes, disposition: str = "approved_binary",
+                   pin: str | None = None, pinned: bool = True) -> dict:
+        component: dict = {
+            "id": path, "type": "asset", "presence": "required", "source_path": path,
+            "license": "NOASSERTION", "disposition": disposition, "public_scope_included": True,
+        }
+        if pinned:
+            component["hashes"] = {"sha256": pin or hashlib.sha256(data).hexdigest()}
+        return component
+
+    def _commit(self, files: dict[str, bytes], components: list[dict] | None) -> str:
+        """Commit exactly ``files`` plus a manifest of ``components`` (none when ``None``)."""
+        for path in sorted(self.repo.rglob("*"), reverse=True):
+            if ".git" in path.relative_to(self.repo).parts:
+                continue
+            if path.is_file():
+                path.unlink()
+            else:
+                path.rmdir()
+        tree = dict(files)
+        if components is not None:
+            tree[self.MANIFEST] = (json.dumps({"components": components}, indent=2) + "\n").encode("utf-8")
+        for rel, data in tree.items():
+            target = self.repo.joinpath(*rel.split("/"))
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+        run_git(["add", "-A"], cwd=self.repo, check=True, capture_output=True)
+        run_git(["commit", "-q", "--allow-empty", "-m", "tree"], cwd=self.repo, check=True, capture_output=True)
+        head: str = run_git(["rev-parse", "HEAD"], cwd=self.repo, check=True, capture_output=True,
+                            text=True).stdout.strip()
+        return head
+
+    def _run(self, candidate: str, base: str | None, public_scope: bool = True) -> tuple[int, str]:
+        import contextlib  # noqa: PLC0415
+        import io  # noqa: PLC0415
+
+        listing = run_git(["ls-tree", "-r", "--name-only", candidate], cwd=self.repo, check=True,
+                          capture_output=True, text=True).stdout.split()
+        policy, _export = hermetic_policy(self.outside, listing)
+        argv = ["--repo-root", str(self.repo), "--committed-tree", candidate, "--policy", str(policy)]
+        if public_scope:
+            argv.append("--public-scope")
+        if base is not None:
+            argv += ["--trusted-base", base]
+        err = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            code = publish_audit.main(argv)
+        return code, err.getvalue()
+
+    def _codes(self, candidate: str, base: str | None, path: str | None = None,
+               public_scope: bool = True) -> set[str]:
+        """The finding codes the audit reports for ``path``."""
+        code, output = self._run(candidate, base, public_scope)
+        self.assertIn(code, (0, 1), output)
+        marker = f": {path or self.SHOT}: "
+        return {line.split(":", 1)[0] for line in output.splitlines() if marker in line}
+
+    def test_the_pinned_bytes_keep_the_waiver(self) -> None:
+        candidate = self._commit({self.SHOT: self.PNG}, [self._component(self.SHOT, self.PNG)])
+        self.assertEqual(self._codes(candidate, None), set())
+        self.assertEqual(self._codes(candidate, self.base), set())
+
+    def test_an_executable_under_an_approved_path_loses_the_waiver(self) -> None:
+        # The waiver covers the pinned screenshot, not other bytes at its path.
+        candidate = self._commit({self.SHOT: self.PBP}, [self._component(self.SHOT, self.PNG)])
+        for base in (None, self.base):
+            with self.subTest(trusted_base=base is not None):
+                self.assertEqual(self._codes(candidate, base), {"MAGIC", "APPROVED_BINARY_CHANGED"})
+
+    def test_a_pull_request_cannot_repin_a_binary_the_base_carries(self) -> None:
+        # With a base, the base's record decides; the audited manifest's pin is not an approval.
+        candidate = self._commit({self.SHOT: self.PBP}, [self._component(self.SHOT, self.PBP)])
+        self.assertEqual(self._codes(candidate, self.base), {"MAGIC", "APPROVED_BINARY_CHANGED"})
+        # Without a base the audit has only the tree's own pin to compare.
+        self.assertEqual(self._codes(candidate, None), set())
+
+    def test_a_replacement_screenshot_is_refused_until_the_base_pins_it(self) -> None:
+        # Fail closed: the audit cannot tell a wanted replacement from an unwanted one.
+        candidate = self._commit({self.SHOT: self.OTHER_PNG}, [self._component(self.SHOT, self.OTHER_PNG)])
+        self.assertEqual(self._codes(candidate, self.base), {"MAGIC", "APPROVED_BINARY_CHANGED"})
+
+    def test_bytes_with_no_known_magic_lose_the_waiver_too(self) -> None:
+        for name, component in (("pin kept", self._component(self.SHOT, self.PNG)),
+                                ("pin rewritten", self._component(self.SHOT, self.OPAQUE))):
+            with self.subTest(name):
+                candidate = self._commit({self.SHOT: self.OPAQUE}, [component])
+                self.assertEqual(self._codes(candidate, self.base), {"MAGIC_UNKNOWN", "APPROVED_BINARY_CHANGED"})
+        candidate = self._commit({self.SHOT: self.OPAQUE}, [self._component(self.SHOT, self.PNG)])
+        self.assertEqual(self._codes(candidate, None), {"MAGIC_UNKNOWN", "APPROVED_BINARY_CHANGED"})
+
+    def test_a_changed_pin_alone_is_reported(self) -> None:
+        candidate = self._commit({self.SHOT: self.PNG}, [self._component(self.SHOT, self.PNG, pin="ab" * 32)])
+        for base in (None, self.base):
+            with self.subTest(trusted_base=base is not None):
+                self.assertEqual(self._codes(candidate, base), {"MAGIC", "APPROVED_BINARY_CHANGED"})
+
+    def test_a_waiver_without_a_pin_approves_nothing(self) -> None:
+        candidate = self._commit({self.SHOT: self.PNG}, [self._component(self.SHOT, self.PNG, pinned=False)])
+        for base in (None, self.base):
+            with self.subTest(trusted_base=base is not None):
+                self.assertEqual(self._codes(candidate, base), {"MAGIC", "APPROVED_BINARY_UNPINNED"})
+
+    def test_a_pin_is_compared_without_regard_to_letter_case(self) -> None:
+        upper = hashlib.sha256(self.PNG).hexdigest().upper()
+        candidate = self._commit({self.SHOT: self.PNG}, [self._component(self.SHOT, self.PNG, pin=upper)])
+        self.assertEqual(self._codes(candidate, None), set())
+        self.assertEqual(self._codes(candidate, self.base), set())
+        self.assertEqual(self._codes(self.base, candidate), set())
+        # The comparison is still a comparison: other bytes under an upper-case pin are refused.
+        other = self._commit({self.SHOT: self.OTHER_PNG}, [self._component(self.SHOT, self.PNG, pin=upper)])
+        self.assertEqual(self._codes(other, None), {"MAGIC", "APPROVED_BINARY_CHANGED"})
+        self.assertEqual(self._codes(other, candidate), {"MAGIC", "APPROVED_BINARY_CHANGED"})
+
+    def test_only_a_waiver_drops_a_binary_finding(self) -> None:
+        # A component of any other disposition approves no bytes, at a path the base holds or a new one.
+        included = dict(self._component(self.SHOT, self.OPAQUE), disposition="included")
+        kept_pin = dict(self._component(self.SHOT, self.PNG), disposition="included")
+        for name, components in (("another disposition", [included]), ("another disposition, base pin", [kept_pin]),
+                                 ("no component", [])):
+            with self.subTest(name):
+                candidate = self._commit({self.SHOT: self.OPAQUE}, components)
+                self.assertEqual(self._codes(candidate, self.base), {"MAGIC_UNKNOWN"})
+                self.assertEqual(self._codes(candidate, None), {"MAGIC_UNKNOWN"})
+        candidate = self._commit({self.SHOT: self.PBP}, [included])
+        self.assertEqual(self._codes(candidate, self.base), {"MAGIC"})
+        new = "docs/new.png"
+        components = [self._component(self.SHOT, self.PNG), dict(self._component(new, self.OPAQUE), disposition="included")]
+        candidate = self._commit({self.SHOT: self.PNG, new: self.OPAQUE}, components)
+        self.assertEqual(self._codes(candidate, self.base, new), {"MAGIC_UNKNOWN"})
+        self.assertEqual(self._codes(candidate, self.base), set())
+
+    def test_a_trusted_base_checks_unknown_binaries_in_every_scope(self) -> None:
+        included = dict(self._component(self.SHOT, self.OPAQUE), disposition="included")
+        candidate = self._commit({self.SHOT: self.OPAQUE}, [included])
+        self.assertEqual(self._codes(candidate, self.base, public_scope=False), {"MAGIC_UNKNOWN"})
+
+    def test_a_refused_waiver_is_reported_for_a_file_the_audit_reads_as_text(self) -> None:
+        notes = "docs/notes.md"
+        mark = self._component(self.MARK, self.SVG)
+        base = self._commit({self.MARK: self.SVG, notes: b"notes\n"}, [mark])
+        self.assertEqual(self._codes(base, base, self.MARK), set())
+        cases = {
+            "pin changed, file kept": ({self.MARK: self.SVG}, self._component(self.MARK, self.OTHER_SVG)),
+            "file changed, pin kept": ({self.MARK: self.OTHER_SVG}, mark),
+            "file and pin changed": ({self.MARK: self.OTHER_SVG}, self._component(self.MARK, self.OTHER_SVG)),
+        }
+        for name, (files, component) in cases.items():
+            with self.subTest(name):
+                candidate = self._commit({**files, notes: b"notes\n"}, [component])
+                self.assertEqual(self._codes(candidate, base, self.MARK), {"APPROVED_BINARY_CHANGED"})
+        # A waiver the base does not record is refused before any file depends on it.
+        gained = self._commit({self.MARK: self.SVG, notes: b"notes\n"}, [mark, self._component(notes, self.OPAQUE)])
+        self.assertEqual(self._codes(gained, base, notes), {"APPROVED_BINARY_UNPINNED"})
+        self.assertEqual(self._codes(gained, base, self.MARK), set())
+        # A pin the base holds for a file it carries approves no other bytes.
+        other_pin = self._component(self.MARK, self.OTHER_SVG)
+        pinned_base = self._commit({self.MARK: self.SVG, notes: b"notes\n"}, [other_pin])
+        self.assertEqual(self._codes(pinned_base, pinned_base, self.MARK), set())
+        follows_pin = self._commit({self.MARK: self.OTHER_SVG, notes: b"notes\n"}, [other_pin])
+        self.assertEqual(self._codes(follows_pin, pinned_base, self.MARK), {"APPROVED_BINARY_CHANGED"})
+        # A file whose waiver is dropped is audited as the text it is.
+        plain = dict(mark, disposition="included")
+        dropped = self._commit({self.MARK: self.OTHER_SVG, notes: b"notes\n"}, [plain])
+        self.assertEqual(self._codes(dropped, base, self.MARK), set())
+        # Without a base a refusal is reported with the binary finding it restores, and text raises none.
+        stale = self._commit({self.MARK: self.OTHER_SVG, notes: b"notes\n"}, [mark])
+        self.assertEqual(self._codes(stale, None, self.MARK), set())
+
+    def test_a_vfpu_table_the_base_carries_is_exempt_only_as_the_bases_bytes(self) -> None:
+        shot = self._component(self.SHOT, self.PNG)
+        base = self._commit({self.SHOT: self.PNG, self.TABLE: self.OPAQUE}, [shot])
+        self.assertEqual(self._codes(base, base, self.TABLE), set())
+        changed = self._commit({self.SHOT: self.PNG, self.TABLE: self.OTHER_OPAQUE}, [shot])
+        self.assertEqual(self._codes(changed, base, self.TABLE), {"MAGIC_UNKNOWN"})
+        self.assertEqual(self._codes(changed, base, self.TABLE, public_scope=False), {"MAGIC_UNKNOWN"})
+        # A table new to the base is the admission's decision, and without a base the exemption is by path.
+        new = "assets/vfpu/new_table.dat"
+        added = self._commit({self.SHOT: self.PNG, self.TABLE: self.OPAQUE, new: self.OTHER_OPAQUE}, [shot])
+        self.assertEqual(self._codes(added, base, new), set())
+        self.assertEqual(self._codes(added, base, self.TABLE), set())
+        self.assertEqual(self._codes(changed, None, self.TABLE), set())
+
+    def test_an_optional_binary_is_held_to_its_pin_as_well(self) -> None:
+        disposition = "optional_excluded_if_unverified"
+        base = self._commit({self.SHOT: self.PNG}, [self._component(self.SHOT, self.PNG, disposition)])
+        self.assertEqual(self._codes(base, base), set())
+        swapped = self._commit({self.SHOT: self.PBP}, [self._component(self.SHOT, self.PBP, disposition)])
+        self.assertEqual(self._codes(swapped, base), {"MAGIC", "APPROVED_BINARY_CHANGED"})
+        kept_pin = self._commit({self.SHOT: self.PBP}, [self._component(self.SHOT, self.PNG, disposition)])
+        self.assertEqual(self._codes(kept_pin, None), {"MAGIC", "APPROVED_BINARY_CHANGED"})
+        # The base records a different waiver for the path than the one the pull request claims.
+        self.assertEqual(self._codes(base, self.base), {"MAGIC", "APPROVED_BINARY_UNPINNED"})
+
+    def test_a_newly_admitted_binary_passes_on_its_own_pin(self) -> None:
+        # The base does not carry the path, so there is nothing of the base's to hold it to. Whether
+        # the path may be published at all is the admission's decision, which the verifier checks.
+        new = "docs/new-shot.png"
+        components = [self._component(self.SHOT, self.PNG), self._component(new, self.OTHER_PNG)]
+        candidate = self._commit({self.SHOT: self.PNG, new: self.OTHER_PNG}, components)
+        self.assertEqual(self._codes(candidate, self.base, new), set())
+        self.assertEqual(self._codes(candidate, self.base), set())
+        # Its own pin still has to be its bytes.
+        components = [self._component(self.SHOT, self.PNG), self._component(new, self.PNG)]
+        candidate = self._commit({self.SHOT: self.PNG, new: self.PBP}, components)
+        self.assertEqual(self._codes(candidate, self.base, new), {"MAGIC", "APPROVED_BINARY_CHANGED"})
+
+    def test_a_path_the_base_carries_cannot_gain_a_waiver(self) -> None:
+        # A waiver for a path the base holds comes from the base, never from the audited manifest.
+        notes = "docs/notes.md"
+        base = self._commit({self.SHOT: self.PNG, notes: b"notes\n"}, [self._component(self.SHOT, self.PNG)])
+        components = [self._component(self.SHOT, self.PNG), self._component(notes, self.PBP)]
+        candidate = self._commit({self.SHOT: self.PNG, notes: self.PBP}, components)
+        self.assertEqual(self._codes(candidate, base, notes), {"MAGIC", "APPROVED_BINARY_UNPINNED"})
+        self.assertEqual(self._codes(candidate, base), set())
+
+    def test_a_waiver_the_base_records_for_an_absent_file_still_binds_the_path(self) -> None:
+        # The base's manifest pins a binary its tree does not carry, as it does for the optional fonts.
+        absent = "docs/later.png"
+        recorded = [self._component(self.SHOT, self.PNG), self._component(absent, self.OTHER_PNG)]
+        base = self._commit({self.SHOT: self.PNG}, recorded)
+        pinned = self._commit({self.SHOT: self.PNG, absent: self.OTHER_PNG}, recorded)
+        self.assertEqual(self._codes(pinned, base, absent), set())
+        repinned = [self._component(self.SHOT, self.PNG), self._component(absent, self.PBP)]
+        candidate = self._commit({self.SHOT: self.PNG, absent: self.PBP}, repinned)
+        self.assertEqual(self._codes(candidate, base, absent), {"MAGIC", "APPROVED_BINARY_CHANGED"})
+
+    def test_a_prohibited_extension_is_held_to_the_base_as_well(self) -> None:
+        guest = "fixtures/guest.prx"
+        built = b"\x7fELF" + bytes(36)
+        base = self._commit({guest: built}, [self._component(guest, built)])
+        self.assertEqual(self._codes(base, base, guest), set())
+        candidate = self._commit({guest: self.PBP}, [self._component(guest, self.PBP)])
+        self.assertEqual(self._codes(candidate, base, guest), {"PATH", "MAGIC", "APPROVED_BINARY_CHANGED"})
+        # Without a base the audited manifest's pin decides, as it did before.
+        self.assertEqual(self._codes(candidate, None, guest), set())
+
+    def test_a_stale_pin_on_the_base_is_not_charged_to_a_pull_request_that_left_it_alone(self) -> None:
+        # The base itself carries bytes its manifest does not pin. A pull request that touches neither
+        # still passes, and so does the one that corrects the pin. The base vouches for the file it
+        # carries, not for its pin: other bytes are refused, the pinned ones included.
+        stale = [self._component(self.SHOT, self.OTHER_PNG)]
+        base = self._commit({self.SHOT: self.PNG}, stale)
+        untouched = self._commit({self.SHOT: self.PNG, "docs/readme.md": b"text\n"}, stale)
+        self.assertEqual(self._codes(untouched, base), set())
+        self.assertEqual(self._codes(untouched, None), {"MAGIC", "APPROVED_BINARY_CHANGED"})
+        corrected = self._commit({self.SHOT: self.PNG}, [self._component(self.SHOT, self.PNG)])
+        self.assertEqual(self._codes(corrected, base), set())
+        pinned = self._commit({self.SHOT: self.OTHER_PNG}, stale)
+        self.assertEqual(self._codes(pinned, base), {"MAGIC", "APPROVED_BINARY_CHANGED"})
+        swapped = self._commit({self.SHOT: self.PBP}, [self._component(self.SHOT, self.PBP)])
+        self.assertEqual(self._codes(swapped, base), {"MAGIC", "APPROVED_BINARY_CHANGED"})
+
+    def test_a_base_that_cannot_be_read_stops_the_audit(self) -> None:
+        candidate = self._commit({self.SHOT: self.PNG}, [self._component(self.SHOT, self.PNG)])
+        code, output = self._run(candidate, "0" * 40)
+        self.assertEqual(code, 2, output)
+        self.assertIn("cannot read the trusted base", output)
+        no_manifest = self._commit({self.SHOT: self.PNG}, None)
+        code, output = self._run(candidate, no_manifest)
+        self.assertEqual(code, 2, output)
+        self.assertIn("the trusted base has no assets/release_manifest.json", output)
+        broken = self._commit({self.SHOT: self.PNG, self.MANIFEST: b"{"}, None)
+        code, output = self._run(candidate, broken)
+        self.assertEqual(code, 2, output)
+        self.assertIn("is unusable", output)
+        # A base that is named must be a commit: an empty value is not "no base".
+        for empty in ("", "  "):
+            code, output = self._run(candidate, empty)
+            self.assertEqual(code, 2, output)
+            self.assertIn("--trusted-base names no commit", output)
+
+
 class TrustedTreeAuditTests(unittest.TestCase):
     """The attest job's publication audit of a candidate's whole tree, run for real.
 
     The candidate is this checkout's committed tree, read from its objects through a scratch repository
-    that borrows them; nothing is checked out. Three candidates are audited with the command the workflow
-    step runs (``--committed-tree``, the candidate's own profile as ``--policy``):
+    that borrows them; nothing is checked out. Seven candidates are audited with the command the workflow
+    step runs (``--committed-tree``, the committed tree as ``--trusted-base``, the candidate's own profile
+    as ``--policy``):
 
     * the tree as committed passes;
     * the tree plus an ``EBOOT.PBP`` fails;
-    * the same plus an ``export-ignore`` line for that file fails with the same findings.
+    * the same plus an ``export-ignore`` line for that file fails with the same findings;
+    * other bytes at the path of a binary the release manifest approves fail, whatever the candidate's
+      manifest then says of that path: the pin kept, the pin moved, or the component no longer a waiver;
+    * other bytes at the path of a VFPU table the base carries fail.
 
     Failing-before: no trusted job ran this audit, and ``--committed-tree`` read a ``git archive``, which
-    the third candidate's ``.gitattributes`` line empties of the file.
+    the third candidate's ``.gitattributes`` line empties of the file. The binary waivers were applied by
+    path, and the manifest is the candidate's own.
 
-    The three audits run side by side, each over every tracked file.
+    The seven audits run side by side, each over every tracked file.
     """
 
     FORBIDDEN = b"\x00PBP\x00\x00\x01\x00" + bytes(64)
+    OPAQUE = bytes([0x13, 0x37, 0x00, 0x01]) * 16  # binary, with no magic the audit knows
     # Reports the tools/ modules the audit loaded, so the protected list can be held to what really runs.
     WRAPPER = (
         "import atexit, json, os, runpy, sys\n"
@@ -3006,6 +3324,8 @@ class TrustedTreeAuditTests(unittest.TestCase):
         "runpy.run_path(tool, run_name='__main__')\n"
     )
     results: dict[str, subprocess.CompletedProcess]
+    approved: str
+    table: str
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -3042,11 +3362,32 @@ class TrustedTreeAuditTests(unittest.TestCase):
             return git("commit-tree", git("write-tree"), "-m", "probe")
 
         attributes = git("cat-file", "blob", f"{head}:.gitattributes").encode("utf-8")
+        # A binary the committed release manifest approves, and the manifest with its pin moved.
+        manifest = git("cat-file", "blob", f"{head}:assets/release_manifest.json")
+        cls.approved, pin = min(
+            (component["source_path"], component["hashes"]["sha256"])
+            for component in json.loads(manifest)["components"]
+            if component.get("disposition") == "approved_binary" and component["source_path"].endswith(".png")
+        )
+        repinned = manifest.replace(pin, hashlib.sha256(cls.FORBIDDEN).hexdigest())
+        assert repinned != manifest
+        document = json.loads(manifest)
+        for component in document["components"]:
+            if component.get("source_path") == cls.approved:
+                component["disposition"] = "included"
+        relabelled = (json.dumps(document, indent=2) + "\n").encode("utf-8")
+        cls.table = min(path for path in git("ls-tree", "-r", "--name-only", head).splitlines()
+                        if path.startswith("assets/vfpu/") and path.endswith(".dat"))
         candidates = {
             "clean": commit({}),
             "control": commit({"EBOOT.PBP": cls.FORBIDDEN}),
             "hidden": commit({"EBOOT.PBP": cls.FORBIDDEN,
                               ".gitattributes": attributes + b"\nEBOOT.PBP export-ignore\n"}),
+            "swapped": commit({cls.approved: cls.FORBIDDEN}),
+            "repinned": commit({cls.approved: cls.FORBIDDEN,
+                                "assets/release_manifest.json": (repinned + "\n").encode("utf-8")}),
+            "relabelled": commit({cls.approved: cls.OPAQUE, "assets/release_manifest.json": relabelled}),
+            "table": commit({cls.table: cls.OPAQUE}),
         }
         running = {}
         for name, sha in candidates.items():
@@ -3057,18 +3398,18 @@ class TrustedTreeAuditTests(unittest.TestCase):
             # The command of the workflow step "Audit the candidate tree with the trusted publication audit".
             running[name] = subprocess.Popen(
                 [sys.executable, "-c", cls.WRAPPER, str(Path(publish_audit.__file__)),
-                 "--repo-root", str(repo), "--committed-tree", sha, "--policy", str(policy),
-                 "--public-scope", "--provenance-self-consistency"],
+                 "--repo-root", str(repo), "--committed-tree", sha, "--trusted-base", head,
+                 "--policy", str(policy), "--public-scope", "--provenance-self-consistency"],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace")
         cls.results = {}
         for name, process in running.items():
             out, err = process.communicate()
             cls.results[name] = subprocess.CompletedProcess(process.args, process.returncode, out, err)
 
-    def _findings(self, name: str) -> set[str]:
+    def _findings(self, name: str, path: str = "EBOOT.PBP") -> set[str]:
         result = self.results[name]
         return {line.split(":", 2)[0] for line in (result.stdout + result.stderr).splitlines()
-                if ": EBOOT.PBP: " in line}
+                if f": {path}: " in line}
 
     def test_the_committed_tree_passes(self) -> None:
         result = self.results["clean"]
@@ -3085,6 +3426,27 @@ class TrustedTreeAuditTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1, (result.stdout + result.stderr)[-2000:])
         self.assertEqual(self._findings("hidden"), self._findings("control"))
         self.assertLessEqual({"MAGIC", "PATH", "POLICY_UNCLASSIFIED"}, self._findings("hidden"))
+
+    def test_an_executable_over_an_approved_binary_fails_the_trusted_audit(self) -> None:
+        result = self.results["swapped"]
+        self.assertEqual(result.returncode, 1, (result.stdout + result.stderr)[-2000:])
+        self.assertEqual(self._findings("swapped", self.approved), {"MAGIC", "APPROVED_BINARY_CHANGED"})
+
+    def test_rewriting_the_pin_with_the_bytes_changes_nothing(self) -> None:
+        result = self.results["repinned"]
+        self.assertEqual(result.returncode, 1, (result.stdout + result.stderr)[-2000:])
+        self.assertEqual(self._findings("repinned", self.approved), self._findings("swapped", self.approved))
+        self.assertEqual(self._findings("repinned", self.approved), {"MAGIC", "APPROVED_BINARY_CHANGED"})
+
+    def test_only_a_waiver_the_base_records_covers_an_approved_binary(self) -> None:
+        result = self.results["relabelled"]
+        self.assertEqual(result.returncode, 1, (result.stdout + result.stderr)[-2000:])
+        self.assertEqual(self._findings("relabelled", self.approved), {"MAGIC_UNKNOWN"})
+
+    def test_a_vfpu_table_is_exempt_only_as_the_file_the_base_carries(self) -> None:
+        result = self.results["table"]
+        self.assertEqual(result.returncode, 1, (result.stdout + result.stderr)[-2000:])
+        self.assertEqual(self._findings("table", self.table), {"MAGIC_UNKNOWN"})
 
     def test_every_module_the_audit_really_loaded_is_a_protected_path(self) -> None:
         import ci_trust_verdict  # noqa: PLC0415
