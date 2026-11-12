@@ -9713,6 +9713,14 @@ static void test_utility_dialog_refused_cancel(void) {
                    utility_status(&cpu, dialogs[i].status) == 4u &&
                    utility_status(&cpu, dialogs[i].status) == 0u,
                what);
+        /* Nothing may write into the block once the dialog is back at NONE. */
+        MEM_W32(block + 0x1cu, UTILITY_RESULT_UNTOUCHED);
+        for (int k = 0; k < 4; k++) {
+            (void)utility_call(&cpu, dialogs[i].update, 0u);
+            (void)utility_status(&cpu, dialogs[i].status);
+        }
+        snprintf(what, sizeof(what), "%s writes nothing into its block after NONE", dialogs[i].name);
+        expect(MEM_R32(block + 0x1cu) == UTILITY_RESULT_UNTOUCHED, what);
         snprintf(what, sizeof(what), "%s starts again from INIT with its result word cleared",
                  dialogs[i].name);
         expect(utility_call(&cpu, dialogs[i].init, block) == 0u &&
@@ -11744,8 +11752,8 @@ static void test_osk_nested_ranges(void) {
 /* #1386: wrong-state results for the dialogs the OSK measurements do not cover. Netconf, gamedata
  * and sharing have no capture of their own (PSPAutotests utility/dialog measures message and
  * savedata, #363 the OSK); each refuses Update and ShutdownStart at NONE and a repeated
- * ShutdownStart, as every measured type does. Their results from INIT, RUNNING and FINISHED are
- * unmeasured and not asserted here. */
+ * ShutdownStart, as every measured type does. Their refusals during INIT and RUNNING are
+ * test_utility_dialog_refused_cancel's (UNMEASURED or captured only). */
 static void test_utility_dialog_wrong_states_unmeasured_types(void) {
     static const UtilityDialogNids dialogs[] = {
         { "sceUtilityNetconf", NID_NETCONF_DIALOG_INIT, NID_NETCONF_DIALOG_UPDATE,

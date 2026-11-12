@@ -320,7 +320,7 @@ static uint32_t utility_slot_claim_locked(int type) {
  * INVALID_PARAM_SIZE once nothing is active (PSPAutotests tests/utility/dialog/status.expected,
  * hrydgard/pspautotests master). A refused block never takes the slot: every type still reports
  * WRONG_TYPE after it. Measured for game sharing; the other dialogs share the one slot and are
- * checked in the same order. */
+ * checked in the same order (UNMEASURED for them). */
 static int utility_slot_busy(void) {
     dialog_lock();
     const int busy = utility_slot_active_locked();
@@ -416,9 +416,9 @@ static uint32_t h_SavedataUpdate(CpuState *s) {
     } else if (s_dlg_status == 2 && s_dlg_work_done) {
         /* The work completed: FINISHED on the next Update. The Update count is a model and
          * UNMEASURED: the 2026-11-12 captures (mode 22 GETSIZE on a save that does not exist,
-         * not acceptance-eligible) took 4 Updates in four runs and 116 to 118 in the other two,
-         * each run ending with the common result 0x80110327, the value src/rt/savedata.c writes
-         * for that mode. */
+         * not acceptance-eligible) record 4 Updates in two runs and 116 in a third on boot 204,
+         * and the same shape on boot 206, each run ending with the common result 0x80110327, the
+         * value src/rt/savedata.c writes for that mode. */
         s_dlg_status = 3;
         if (s_dlg_param) MEM_W32(s_dlg_param + 0x1c, s_dlg_result);
         if (getenv("SR_DLGLOG")) fprintf(stderr, "SavedataUpdate: FINISHED result=0x%08x written to 0x%08x\n",
@@ -453,14 +453,23 @@ static uint32_t h_SavedataUpdate(CpuState *s) {
  * 0x80110001. So every type refuses it the same way. Savedata, netconf and gamedata during INIT,
  * and game sharing in any state, are UNMEASURED and follow the message dialog's measured rule: an
  * answer of 0 would let a dialog the PSP keeps running give up the slot. Caller holds dialog_lock. */
-static int utility_shutdown_refused(int type, int status) {
+static int utility_shutdown_refused(int type, int status, uint32_t generation) {
     if (status == 0 || status == 4) return 1;  /* at NONE, and again once shutdown has begun */
     if (status == 3) return 0;                 /* FINISHED */
-    if (getenv("SR_DLGLOG"))
+    /* The message dialog's refusal is measured. For the other types it is UNMEASURED or captured
+     * only, and a game that ignores it and waits for NONE without calling Update would wait for
+     * ever, so it is named on stderr, once per dialog. */
+    static uint32_t named[UTILITY_SLOT_GAMESHARING + 1];
+    const int unmeasured = type != UTILITY_SLOT_MSG;
+    const int once = unmeasured && type >= 0 && type <= UTILITY_SLOT_GAMESHARING &&
+                     named[type] != generation;
+    if (once) named[type] = generation;
+    if (once || getenv("SR_DLGLOG"))
         fprintf(stderr, "utility ShutdownStart (type %d) refused in %s: INVALID_STATUS%s\n", type,
                 status == 1 ? "INIT" : "RUNNING",
-                type == UTILITY_SLOT_MSG ? "" : " (UNMEASURED for this type and state, or captured "
-                                               "only; PSP-HLE-UTILITY-DIALOG-001)");
+                unmeasured ? " (UNMEASURED for this type and state, or captured only, "
+                             "PSP-HLE-UTILITY-DIALOG-001; the dialog keeps running until Update "
+                             "finishes it)" : "");
     return 1;
 }
 static uint32_t h_DlgShutdown(CpuState *s) {
@@ -474,11 +483,11 @@ static uint32_t h_DlgShutdown(CpuState *s) {
     utility_slot_settle_locked();
     /* PSPAutotests tests/utility/dialog/status.expected: repeated shutdown and
      * shutdown after NONE return INVALID_STATUS; so do INIT and RUNNING (utility_shutdown_refused). */
-    if (utility_shutdown_refused(UTILITY_SLOT_SAVEDATA, s_dlg_status)) {
+    if (utility_shutdown_refused(UTILITY_SLOT_SAVEDATA, s_dlg_status, s_dlg_generation)) {
         dialog_unlock();
         return SCE_ERROR_UTILITY_INVALID_STATUS;
     }
-    if (s_dlg_status == 3 && caller_priority > UTILITY_SAVEDATA_SHUTDOWN_PRIORITY)
+    if (caller_priority > UTILITY_SAVEDATA_SHUTDOWN_PRIORITY)  /* FINISHED, the only state left */
         s_dlg_status = 0;                /* the shutdown ran before the caller got the CPU back */
     else {
         s_dlg_status = 4;                /* NONE on the next vblank (utility_slot_settle_locked) */
@@ -551,7 +560,7 @@ static uint32_t utility_dialog_update(UtilityDialog *d) {
      * done: INVALID_STATUS", PSPAutotests tests/utility/dialog/status.expected) and so does the
      * OSK (#363). Netconf, gamedata and sharing have no capture of their own; they follow every
      * measured type and refuse it too, rather than answer 0 to a call with nothing to update
-     * (unmeasured for those three). */
+     * (UNMEASURED for those three). */
     if (d->status == 1 || d->status == 0) {
         dialog_unlock();
         return SCE_ERROR_UTILITY_INVALID_STATUS;
@@ -617,7 +626,7 @@ static uint32_t utility_dialog_shutdown(UtilityDialog *d) {
      * at NONE, and savedata again once the shutdown has begun ("savedata ShutdownStart again:
      * INVALID_STATUS"). Netconf and gamedata while RUNNING are captured only; their other refusals,
      * and every game-sharing one, are UNMEASURED. */
-    if (utility_shutdown_refused((int)d->kind, d->status)) {
+    if (utility_shutdown_refused((int)d->kind, d->status, d->generation)) {
         dialog_unlock();
         return SCE_ERROR_UTILITY_INVALID_STATUS;
     }
@@ -655,7 +664,7 @@ static uint32_t utility_dialog_abort(UtilityDialog *d) {
 static uint32_t h_MsgDialogAbort(CpuState *s);
 /* PSPAutotests tests/utility/dialog/sizes.expected: the message dialog accepts the 0x23c (V1),
  * 0x244 (V2) and 0x2c4 (V3) blocks and every other size from 0 to 0x800 is INVALID_PARAM_SIZE;
- * larger sizes are unmeasured and refused the same way. */
+ * larger sizes are UNMEASURED and refused the same way. */
 static uint32_t h_MsgDialogInit(CpuState *s) {
     static const uint32_t sizes[] = { 0x23cu, 0x244u, 0x2c4u };
     if (utility_slot_busy()) return SCE_ERROR_UTILITY_INVALID_STATUS;
@@ -730,7 +739,7 @@ static int utility_slot_active_locked(void) {
  * The one-vblank steps are a model: how many vblanks a PSP takes is UNMEASURED. The captures of
  * 2026-11-12 (PSP-HLE-UTILITY-DIALOG-001, not acceptance-eligible) saw savedata (mode 22) reach
  * RUNNING at vblank 6 or 7 after InitStart, netconf at 44 and gamedata install at 48, and savedata
- * reach NONE one or two vblanks after its ShutdownStart at FINISHED. No guest that polls
+ * reach NONE one or two vblanks after it reported FINISHED, with ShutdownStart in between. No guest that polls
  * GetStatus can tell a shorter step from a longer one by the states it sees, only by the frames
  * it counts. Caller holds dialog_lock. */
 static void utility_dialog_settle(UtilityDialog *d) {
