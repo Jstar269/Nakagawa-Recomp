@@ -1,14 +1,16 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 the Nakagawa Recomp authors
 
-/* Focused PSP-EABI bridge for the retail sprintf entry.  The translated
- * formatter previously corrupted string arguments, so generated code routes
- * that entry here; the bridge must also preserve floating conversions used by
- * UI animation code.
+/* PSP-EABI printf-family formatter for HLE boundaries that take a guest format
+ * string and variadic words (the kernel's printf import).  The text goes into
+ * a bounded host buffer; the only guest store is `%n`'s count, through the
+ * checked accessors.  A title's own sprintf is
+ * guest code and runs as translated: the native sprintf entry that once stood
+ * in for one title's formatter was retired under #363.
  *
  * Host-format safety contract
  * ---------------------------
- * The guest owns every byte of the format string.  This bridge therefore never
+ * The guest owns every byte of the format string.  This file therefore never
  * assembles guest bytes into a host printf-family format.  The format string is
  * parsed into an explicit `gp_spec`, and every host `snprintf()` call in this
  * file uses a *compile-time string literal* whose conversion and length
@@ -24,7 +26,8 @@
  * PSP ABI (measured, not assumed)
  * -------------------------------
  * Proven with the PSPSDK compiler (psp-gcc 15.2.0, default `-mabi=eabi`) by
- * inspecting emitted MIPS for variadic `sprintf` calls:
+ * inspecting emitted MIPS for variadic `sprintf` calls, whose first variadic
+ * word is $6; printf's is $5, and the rules below are otherwise the same:
  *   - int/long/size_t/ptrdiff_t/pointer are 32 bits and take one argument word;
  *   - long long / intmax_t are 64 bits and take two words at an even slot;
  *   - long double is identical to double (8 bytes) and travels as two words;
@@ -61,13 +64,13 @@
  * -----------------------------------------
  * GP_MAX_WIDTH / GP_MAX_PREC are this project's denial-of-service bounds, not
  * PSP behavior: measured PSP newlib formats `%20000d` and `%5000.4000f`
- * successfully.  Padding here is written straight into guest memory one checked
- * byte at a time, so an unbounded width would be an effective hang.  A spec
+ * successfully.  Padding here is produced one byte at a time, so an unbounded
+ * width would be an effective hang.  A spec
  * exceeding either bound consumes its argument normally (keeping the cursor
  * correct) and emits a visible `%<conversion>` marker instead of the field.
  * The bounds sit far above observed title usage.  Note also that measured PSP
  * newlib itself terminates abnormally on `%*d` with an INT32_MIN width, which
- * this bridge refuses deterministically instead.
+ * this file refuses deterministically instead.
  */
 
 #include "recomp.h"
@@ -103,9 +106,9 @@ typedef struct {
 
 /* ---------------------------------------------------------------- ABI cursor */
 
-/* Variadic words start in register `first_reg` ($6 for sprintf, whose $4/$5 hold the
- * buffer and format; $5 for printf) and continue through $11, then on the stack at
- * the caller's $sp. */
+/* Variadic words start in register `first_reg` ($5 for printf, whose $4 holds the
+ * format; $6 for an entry whose $4/$5 hold a buffer and the format) and continue
+ * through $11, then on the stack at the caller's $sp. */
 static uint32_t guest_printf_next_word(CpuState *s, uint32_t entry_sp,
                                        uint32_t first_reg, uint32_t *argi) {
     uint32_t index = (*argi)++;
@@ -134,10 +137,9 @@ static double guest_printf_next_double(CpuState *s, uint32_t entry_sp,
 
 /* ---------------------------------------------------------------- output sink */
 
-/* Output goes to guest memory at `dst` (sprintf), or, when `host` is set, into a
- * bounded host buffer that is never guest-visible (printf's log line). */
+/* Output goes into a bounded host buffer that is never guest-visible (printf's log
+ * line); `total` counts every byte the format produces, kept or not. */
 typedef struct {
-    uint32_t dst;
     int total;
     char *host;
     int host_cap;
@@ -147,12 +149,7 @@ typedef struct {
 /* The PSP return value is an int.  Saturate rather than overflow it; signed
  * overflow would be host UB and the guest cannot represent more anyway. */
 static void gp_put(gp_out *o, char c) {
-    if (o->host) {
-        if (o->host_len < o->host_cap - 1) o->host[o->host_len++] = c;
-    } else {
-        MEM_W8(o->dst, (uint8_t)c);
-        o->dst++;
-    }
+    if (o->host_len < o->host_cap - 1) o->host[o->host_len++] = c;
     if (o->total < INT_MAX) o->total++;
 }
 
@@ -282,7 +279,7 @@ static int gp_conv_is_upper(char c) {
 /* Infinities and NaNs are spelled by this file rather than by the host libc.
  * Host spellings diverge (Windows UCRT renders a negative quiet NaN as
  * "nan(ind)" where PSP newlib and glibc render "-nan"), and %f reaches this
- * bridge from title code, so the bytes must not depend on the build host.
+ * formatter from guest code, so the bytes must not depend on the build host.
  * Measured PSP newlib: "inf"/"nan", uppercase for F/E/G/A, sign from the sign
  * bit, '+'/' ' flags honoured, and never zero-padded. */
 static void gp_emit_nonfinite(gp_out *o, const gp_spec *sp, double v) {
@@ -525,7 +522,7 @@ static int gp_is_known_conv(char c) {
 
 /* ---------------------------------------------------------------- entry point */
 
-/* The formatter shared by sprintf and printf: `fmt` is the guest format string and
+/* The formatter: `fmt` is the guest format string and
  * the variadic words start in register `first_reg`. */
 static void gp_format(CpuState *s, uint32_t fmt, uint32_t first_reg, gp_out *out) {
     uint32_t argi = 0;
@@ -728,17 +725,9 @@ static void gp_format(CpuState *s, uint32_t fmt, uint32_t first_reg, gp_out *out
 
 int sr_guest_format_host(CpuState *s, uint32_t fmt, uint32_t first_reg,
                          char *buf, int cap) {
-    gp_out out = { 0u, 0, buf, cap, 0 };
+    gp_out out = { 0, buf, cap, 0 };
     if (!buf || cap <= 0) return 0;
     gp_format(s, fmt, first_reg, &out);
     buf[out.host_len] = '\0';
     return out.total;
-}
-
-void sr_guest_sprintf(CpuState *s) {
-    gp_out out = { s->r[4], 0, NULL, 0, 0 };
-    gp_format(s, s->r[5], 6u, &out);
-    MEM_W8(out.dst, 0u);
-    s->r[2] = (uint32_t)out.total;
-    s->pc = s->r[31];
 }

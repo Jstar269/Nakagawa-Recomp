@@ -16225,6 +16225,43 @@ static void test_route_observer_waits_for_guest_scanout_state(void) {
            "and the full visible extent");
 }
 
+/* The route observer and the FBSNAP snapshot decode the scanout through fb_decode_px. A
+ * 32-bit load of 0x04084000 is answered with the GE status word (sr_get_ge_status, 0x18
+ * when idle), so a decoder that read 8888 pixels through MEM_R32 replaced the pixel stored
+ * there: (0,264) of the usual stride-512 framebuffer at 0x04000000, in every FBSNAP
+ * snapshot of tools/test_player_package_route.py's sealed-disc launch (#308). Here the
+ * framebuffer sits at 0x0400D000, so the default 12x8 grid's sample (0,238) of cell (0,7)
+ * is the word at 0x04084000, and every cell must average to the one colour stored. */
+static void test_route_sample_reads_vram_not_the_ge_status_port(void) {
+    static const uint32_t NID_DISPLAY_SET_FRAME_BUF = 0x289d82feu;
+    static const uint32_t FB = 0x0400D000u;
+    static const uint32_t COLOUR = 0xFF604020u;   /* ABGR: R=0x20 G=0x40 B=0x60 */
+    uint8_t sig[4096];
+    CpuState cpu;
+
+    reset_fixture();
+    sr_hle_init();
+    memset(&cpu, 0, sizeof(cpu));
+    expect(FB + (238u * 512u) * 4u == 0x04084000u,
+           "fixture: cell (0,7)'s first sample is the word at the GE status port");
+    for (uint32_t i = 0; i < 512u * 272u; i++) sr_w32(FB + i * 4u, COLOUR);
+    expect(sr_r8(0x04084000u) == 0x20u && sr_r8(0x04084001u) == 0x40u,
+           "fixture: guest VRAM at 0x04084000 holds the stored pixel");
+    cpu.r[4] = FB; cpu.r[5] = 512; cpu.r[6] = 3; cpu.r[7] = 0;
+    expect(sr_syscall(&cpu, NID_DISPLAY_SET_FRAME_BUF) == 0u,
+           "an immediate SetFrameBuf at 0x0400D000 is accepted");
+    expect(sr_route_test_sample(sig) == 1, "the observer samples the guest's scanout");
+    int cells = sr_route_sig_bytes() / 3;
+    int wrong = -1;
+    for (int k = 0; k < cells && wrong < 0; k++)
+        if (sig[k * 3] != 0x20u || sig[k * 3 + 1] != 0x40u || sig[k * 3 + 2] != 0x60u) wrong = k;
+    if (wrong >= 0)
+        fprintf(stderr, "  cell %d sampled %02x %02x %02x, stored 20 40 60\n", wrong,
+                sig[wrong * 3], sig[wrong * 3 + 1], sig[wrong * 3 + 2]);
+    expect(wrong < 0,
+           "every sampled cell is the stored colour; the GE status word replaced no pixel");
+}
+
 /* ---- extracted-data census preparation seam ---------------------------------
  *
  * The cold extracted-data index census must never begin from a guest HLE call.
@@ -52198,6 +52235,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_vcount_freezes_while_cpu_interrupts_are_masked();
     test_vcount_credits_one_deferred_period_on_resume();
     test_route_observer_waits_for_guest_scanout_state();
+    test_route_sample_reads_vram_not_the_ge_status_port();
     test_extracted_data_prepares_before_guest_and_lookup_never_builds();
     test_disc_route_serves_archive_and_loose_content_in_one_namespace();
     test_archive_discovery_skips_unpack_folders_only();
