@@ -879,7 +879,7 @@ static void settings_ace(NkUi *ui, const PlayerUiSettingsModel *model, float inn
             *result = settings_op(PLAYER_UI_SETTINGS_CYCLE_PLAY_MODE);
         }
         for (int i = 0; i < count; i++) {
-            if (scr_wizard_value_state(ui, PLAYER_UI_ID_SETTINGS_ENHANCED_PART + (NkUiId)i,
+            if (scr_wizard_value_state(ui, PLAYER_UI_ID_ENHANCED_PART(i),
                                        SET_ID_TEXT + 0x404u + 4u * (NkUiId)i, rows[i + 1].name,
                                        rows[i + 1].value, rows[i + 1].sentence,
                                        model->enhanced_rows[i].on, off, inner - 32.0f, &column)) {
