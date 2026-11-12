@@ -4525,6 +4525,15 @@ Nakagawa Font Copy app (`src/psp_companion/fontcopy.c`) runs the same code with 
 own settings: `.pgf` files only, its Memory Stick folder in place of `host0:/fonts`,
 and the firmware font names opened one by one when the listing is refused.
 
+On the PSP-3000 (ARK-5 5.2.0, XMB context), the case listed `flash0:/font` from
+user mode: 23 entries, 21 of them regular files, each copy verified. The
+2026-11-11 boot-190 run (`a39f7a14c`) still ended with `status=FAIL`. probe.c
+records every host0 path opened with `PSP_O_CREAT` for teardown to remove, in a
+16-entry table; the 21 copies overflowed it, and teardown removed 16 of them. The
+copies now track only their descriptors. The boot-193 run of the fixed source
+(`e7eb9987`) completed with `status=PASS` and was acceptance-eligible, and all 21
+copies stayed on host0.
+
 The campaign queue is ordered in `tools/psp_oracle/run_psplink.py`. It starts
 with the host0 `transport-write` preflight, then the new cases above, followed
 by the remaining README `NOT_RUN` cases: smoke, thread exit/delete, teardown,
