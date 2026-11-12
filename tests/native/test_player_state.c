@@ -7175,7 +7175,7 @@ static void test_homebrew_package_becomes_a_private_disc(void) {
                                           sizeof(message)));
         assert(wide.homebrew);
         /* The test's own tree removal is ANSI on Windows; the platform's is not. */
-        *strrchr(wide_dir, sep) = ' ';
+        *strrchr(wide_dir, sep) = '\0';
         assert(nk_platform_remove_tree(wide_dir, NULL));
     }
 
