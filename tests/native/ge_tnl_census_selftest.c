@@ -159,7 +159,7 @@ static void hook_flush(const char *reason) { (void)reason; }
 static void hook_vram_dirty(uint32_t addr, uint32_t bytes) { (void)addr; (void)bytes; }
 
 /* A motion tap that only counts what it is told. */
-static unsigned s_tap_prims, s_tap_drawn, s_tap_rastered;
+static unsigned s_tap_prims, s_tap_drawn, s_tap_rastered, s_tap_line_points;
 
 static void tap_prim(void *user, const GeMotionPrim *p) { (void)user; (void)p; s_tap_prims++; }
 static void tap_tri(void *user, const uint16_t pos[3], const GeMotionVtx v[3], int decision) {
@@ -174,6 +174,7 @@ static void tap_rastered(void *user, const GeVtx *v0, const GeVtx *v1, const GeV
     (void)user; (void)v0; (void)v1; (void)v2;
     s_tap_rastered++;
 }
+static void tap_line_point(void *user, int nv) { (void)user; (void)nv; s_tap_line_points++; }
 
 /* ---- Source-owned display lists ---- */
 
@@ -472,7 +473,7 @@ int main(void) {
     /* A motion tap (#2081) needs ge.c's clip positions, which this route never forms: while one
      * is set the eligible PRIM is not offered and is in neither count, ge.c's own T&L draws it,
      * and the tap is told its triangle. With the tap removed the PRIM is taken as before. */
-    static const GeMotionTap tap = { NULL, tap_prim, tap_tri, tap_fan, tap_sprite, tap_rastered };
+    static const GeMotionTap tap = { NULL, tap_prim, tap_tri, tap_fan, tap_sprite, tap_rastered, tap_line_point };
     put_vtx(VERTS, -0.4f, -0.4f, -5.0f);
     put_vtx(VERTS + 28u, 0.4f, -0.4f, -5.0f);
     put_vtx(VERTS + 56u, 0.0f, 0.4f, -5.0f);
@@ -493,7 +494,8 @@ int main(void) {
     for (int i = 0; i < GE_TNL_WHY_COUNT; i++) sum += why[i];
     expect(s_tnl_calls == 0u && taken == 0u && cpu == 0u && sum == 0u, "motion-tap",
            "the route offered or counted a PRIM while a motion tap was set");
-    expect(s_cpu_tris == 1u && s_tap_prims == 1u && s_tap_drawn == 1u && s_tap_rastered == 1u, "motion-tap",
+    expect(s_cpu_tris == 1u && s_tap_prims == 1u && s_tap_drawn == 1u && s_tap_rastered == 1u &&
+               s_tap_line_points == 0u, "motion-tap",
            "ge.c's own T&L did not draw the PRIM and tell the tap");
     expect(ge_run_list(LIST, 0) == 0, "motion-tap", "list did not reach END");
     ge_tnl_counts(&taken, &cpu, 0);

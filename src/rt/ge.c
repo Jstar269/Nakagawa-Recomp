@@ -3730,7 +3730,10 @@ static void raster_tri_and_wings(const Vtx *A, const Vtx *B, const Vtx *C, int p
 }
 
 /* Line rasterizer (DDA), used for prim types 1/2 in both modes. */
+/* Motion tap: every point and line raster call is reported on entry, so what the tap cannot
+ * place is seen whichever path drew it (a PRIM, a patch, immediate mode). */
 static void draw_line_vtx(const Vtx *A, const Vtx *B, int persp) {
+    if (s_motion_tap) s_motion_tap->line_point(s_motion_tap->user, 2);
     if (vtx_nonfinite(A, B, NULL)) return;
     if (s_ge_timing_model) ge_time_line(A, B);
     if (s_gpu && s_gpu->line) {
@@ -3795,6 +3798,7 @@ static void draw_line_vtx(const Vtx *A, const Vtx *B, int persp) {
 }
 
 static void draw_point_vtx(const Vtx *A, int persp) {
+    if (s_motion_tap) s_motion_tap->line_point(s_motion_tap->user, 1);
     if (vtx_nonfinite(A, NULL, NULL)) return;
     if (s_ge_timing_model) ge_time_point();
     if (s_gpu && s_gpu->point) {

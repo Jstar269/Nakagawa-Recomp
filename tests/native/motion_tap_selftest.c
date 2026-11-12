@@ -233,6 +233,10 @@ static void emit(MotionTapFrame *f, const Draw *d) {
             tap->sprite(tap->user, pos, v, d->corners[k] ? d->corners[k] : 2, dec);
             if (dec == GE_MOTION_DRAW) tap->rastered(tap->user, &g[0], &g[1], NULL);
         }
+    } else if (type <= 2) {
+        /* Points and lines: each raster call is reported, and nothing is published for it. */
+        const int calls = type == 0 ? count : type == 1 ? count / 2 : count - 1;
+        for (int k = 0; k < calls; k++) tap->line_point(tap->user, type == 0 ? 1 : 2);
     }
 }
 
@@ -253,8 +257,9 @@ static MotionTapFrame *frame(const Draw *d, uint32_t n) {
 
 /* A frame whose list, after its PRIMs, also drew what the tap names nothing for: `tris` raster
  * calls for triangles (a Bezier or spline patch's) and `sprites` for rectangles (an
- * immediate-mode one). */
-static MotionTapFrame *frame_unnamed(const Draw *d, uint32_t n, int tris, int sprites) {
+ * immediate-mode one), then `lines` and `points` (a patch drawn as lines or points, or
+ * immediate-mode ones). */
+static MotionTapFrame *frame_unnamed(const Draw *d, uint32_t n, int tris, int sprites, int lines, int points) {
     MotionTapFrame *f = motion_tap_frame_create(0);
     if (!f) {
         fprintf(stderr, "motion_tap_selftest: no memory\n");
@@ -271,6 +276,8 @@ static MotionTapFrame *frame_unnamed(const Draw *d, uint32_t n, int tris, int sp
     for (uint32_t i = 0; i < n; i++) emit(f, &d[i]);
     for (int k = 0; k < tris; k++) tap->rastered(tap->user, &g[0], &g[1], &g[2]);
     for (int k = 0; k < sprites; k++) tap->rastered(tap->user, &g[0], &g[1], NULL);
+    for (int k = 0; k < lines; k++) tap->line_point(tap->user, 2);
+    for (int k = 0; k < points; k++) tap->line_point(tap->user, 1);
     motion_tap_frame_close(f, NULL);
     return f;
 }
@@ -869,6 +876,14 @@ static void cell_flat(void) {
           "flat: 300 to 100 an eighth of the way is 275, clamped to 255, and 255 to -20 is 221 (%08x)",
           (unsigned)out[0].rgba);
     CHECK(check_t1("flat", b, fb) == 1, "flat: checked at t = 1");
+    motion_tap_frame_free(fb);
+    /* A channel of B above 255: B's backend stores 255, and so does t = 1. */
+    set_rgba(&d[1].v[2], 0, 400, 100, -20);
+    fb = frame(&d[1], 1);
+    CHECK(plan(b, fa, fb) == 1 && motion_build_prim(b, 0, 1.0f, out, NULL) == MOTION_ITEM_BUILT &&
+          out[0].rgba == 0x0064FF00u && out[2].rgba == 0x0064FF00u, "flat: green 400 in B is 255 at t = 1 (%08x)",
+          (unsigned)out[0].rgba);
+    CHECK(check_t1("flat above 255", b, fb) == 1, "flat: a channel above 255 checked at t = 1");
     motion_build_free(b);
     motion_tap_frame_free(fa);
     motion_tap_frame_free(fb);
@@ -1057,7 +1072,8 @@ static void cell_reasons(void) {
     fa = frame(with_line[0], 2);
     fb = frame(with_line[1], 2);
     expect_stopped("line", b, fa, fb, MOTION_WHY_UNKNOWN);
-    CHECK(motion_build_result(b)->unknown == 1 && motion_build_result(b)->built == 2, "line: counted once");
+    CHECK(motion_build_result(b)->unknown == 2 && motion_build_result(b)->built == 2,
+          "line: the PRIM and its one line counted (%u)", (unsigned)motion_build_result(b)->unknown);
     motion_tap_frame_free(fb);
     with_line[1][1].p.count = 1;
     fb = frame(with_line[1], 2);
@@ -1075,7 +1091,7 @@ static void cell_reasons(void) {
      * matter. */
     two_tris(d, 10, GE_MOTION_DRAW, GE_MOTION_DRAW, 0.05f);
     fa = frame(&d[0], 1);
-    fb = frame_unnamed(&d[1], 1, 2, 0);
+    fb = frame_unnamed(&d[1], 1, 2, 0, 0, 0);
     MotionTapView vu;
     motion_tap_frame_view(fb, &vu);
     CHECK(vu.unnamed == 2 && vu.ntris == 2 && vu.prims[0].submitted == 2 && vu.flags == MOTION_TAP_CLOSED,
@@ -1084,13 +1100,30 @@ static void cell_reasons(void) {
     CHECK(motion_build_result(b)->unknown == 2 && motion_build_result(b)->built == 2,
           "patch: each of its triangles is counted (%u)", (unsigned)motion_build_result(b)->unknown);
     motion_tap_frame_free(fb);
-    fb = frame_unnamed(&d[1], 1, 0, 1);
+    fb = frame_unnamed(&d[1], 1, 0, 1, 0, 0);
     expect_stopped("immediate mode", b, fa, fb, MOTION_WHY_UNKNOWN);
     CHECK(motion_build_result(b)->unknown == 1, "immediate mode: counted once (%u)",
           (unsigned)motion_build_result(b)->unknown);
-    motion_tap_frame_free(fa);
     motion_tap_frame_free(fb);
-    fa = frame_unnamed(&d[0], 1, 2, 1);
+    /* A patch drawn as lines (three per quad) or as points, an immediate-mode line or point:
+     * no triangle or sprite raster call at all, each still counted. */
+    static const struct { const char *what; int lines, points; } lp[4] = {
+        { "patch as lines", 3, 0 }, { "patch as points", 0, 4 }, { "immediate-mode line", 1, 0 },
+        { "immediate-mode point", 0, 1 },
+    };
+    for (int k = 0; k < 4; k++) {
+        fb = frame_unnamed(&d[1], 1, 0, 0, lp[k].lines, lp[k].points);
+        motion_tap_frame_view(fb, &vu);
+        const uint32_t want = (uint32_t)(lp[k].lines + lp[k].points);
+        CHECK(vu.unnamed == want && vu.prims[0].submitted == 2, "%s: the store counts %u (%u)", lp[k].what,
+              (unsigned)want, (unsigned)vu.unnamed);
+        expect_stopped(lp[k].what, b, fa, fb, MOTION_WHY_UNKNOWN);
+        CHECK(motion_build_result(b)->unknown == want && motion_build_result(b)->built == 2, "%s: counted (%u)",
+              lp[k].what, (unsigned)motion_build_result(b)->unknown);
+        motion_tap_frame_free(fb);
+    }
+    motion_tap_frame_free(fa);
+    fa = frame_unnamed(&d[0], 1, 2, 1, 1, 1);
     fb = frame(&d[1], 1);
     CHECK(plan(b, fa, fb) == 1, "patch: one in A alone stops nothing (why %#x)", (unsigned)motion_build_result(b)->why);
     motion_tap_frame_free(fa);

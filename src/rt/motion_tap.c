@@ -331,6 +331,13 @@ static void on_sprite(void *user, const uint16_t pos[2], const GeMotionVtx *v, i
     if (decision == GE_MOTION_DRAW) set_current(f, tri, MOTION_CUR_SPRITE, 0);
 }
 
+/* A point or line: nothing is ever published for one, so what it draws cannot be placed. */
+static void on_line_point(void *user, int nv) {
+    MotionTapFrame *f = (MotionTapFrame *)user;
+    (void)nv;
+    if (recording(f)) f->unnamed++;
+}
+
 static void box_add(float *box, const GeVtx *v) {
     if (v->x < box[0]) box[0] = v->x;
     if (v->y < box[1]) box[1] = v->y;
@@ -366,6 +373,7 @@ MotionTapFrame *motion_tap_frame_create(size_t cap_bytes) {
     f->tap.fan = on_fan;
     f->tap.sprite = on_sprite;
     f->tap.rastered = on_rastered;
+    f->tap.line_point = on_line_point;
     motion_tap_frame_reset(f);
     return f;
 }
@@ -825,8 +833,8 @@ int motion_build_plan(MotionBuild *b, const MotionTapFrame *fa, const MotionTapF
         b->r.why |= MOTION_WHY_OVERFLOW;
     if ((fb->flags & MOTION_TAP_BAD_CALL) || (fa && (fa->flags & MOTION_TAP_BAD_CALL)))
         b->r.why |= MOTION_WHY_BAD_CALL;
-    /* What B drew with nothing published for it (patches, immediate-mode primitives) cannot be
-     * placed, as with points and lines; in A alone it does not matter. */
+    /* What B drew with nothing published for it (points, lines, patches, immediate-mode
+     * primitives) cannot be placed; in A alone it does not matter. */
     if (fb->unnamed) {
         b->r.unknown += fb->unnamed;
         b->r.why |= MOTION_WHY_UNKNOWN;

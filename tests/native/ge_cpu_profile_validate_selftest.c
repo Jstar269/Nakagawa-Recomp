@@ -2599,8 +2599,9 @@ static void test_ge_bounding_box_branch(void) {
  * the list, with the bone, the quad's world matrix and the sprite moved, are matched by
  * motion_match, and the builder at t = 1 must give, bit for bit, what ge.c handed the
  * stand-in for frame B after the backend's vertex rule (the 28.4 snap, the flat-shading colour,
- * the sprite's floored corners). A frame B that also holds the patch (MS_PATCH), or the
- * immediate-mode triangle (MS_IMMEDIATE), cannot be built: the plan refuses it as unknown. */
+ * the sprite's floored corners). A frame B that also holds the patch (MS_PATCH, and drawn as
+ * lines or points), or an immediate-mode triangle, line or point, cannot be built: the plan
+ * refuses it as unknown. */
 #define LIST_MOTION      0x08160000u
 #define MOTION_VERTS     0x08168000u
 #define MOTION_INDICES   0x0816C000u
@@ -2609,7 +2610,10 @@ static void test_ge_bounding_box_branch(void) {
 #define MOTION_ZBP       0x04110000u
 #define MOTION_BG        0xff302010u
 #define MOTION_CULL      0u          /* the face that keeps the strip's triangles */
-enum { MS_UNNAMED = 1, MS_PATCH = 2, MS_IMMEDIATE = 4 };
+enum {
+    MS_UNNAMED = 1, MS_PATCH = 2, MS_IMMEDIATE = 4, MS_PATCH_LINES = 8, MS_PATCH_POINTS = 16, MS_IMM_LINE = 32,
+    MS_IMM_POINT = 64
+};
 
 static uint32_t s_motion_vc;
 
@@ -2771,7 +2775,8 @@ static void build_motion_list(int flags, int frame) {
     W(0x01, at & 0x00FFFFFFu);
     W(0x04, (3u << 16) | 3u);
 
-    if (flags & (MS_UNNAMED | MS_PATCH)) {
+    if (flags & (MS_UNNAMED | MS_PATCH | MS_PATCH_LINES | MS_PATCH_POINTS)) {
+        const uint32_t patch_prim = (flags & MS_PATCH_LINES) ? 1u : (flags & MS_PATCH_POINTS) ? 2u : 0u;
         /* A 4x4 Bezier patch over clip x 0.625..0.8125, y 0.6875..0.875: triangles, no PRIM.
          * It and the immediate-mode triangle follow PRIM 4's last fan piece with no PRIM
          * command between: only the end of that piece's raster call keeps them from being
@@ -2782,8 +2787,9 @@ static void build_motion_list(int flags, int frame) {
                 motion_vtx(0xff40ff40u, 0.625f + 0.0625f * (float)col, 0.875f - 0.0625f * (float)row, 0.0f);
         W(0x01, at & 0x00FFFFFFu);
         W(0x36, (1u << 8) | 1u);           /* PATCHDIVISION 1x1 */
-        W(0x37, 0u);                       /* PATCHPRIMITIVE triangles */
+        W(0x37, patch_prim);               /* PATCHPRIMITIVE triangles, lines or points */
         W(0x05, 0x0404u);                  /* BEZIER 4x4 */
+        if (patch_prim) W(0x37, 0u);       /* back to triangles for whatever runs next */
     }
     if (flags & (MS_UNNAMED | MS_IMMEDIATE)) {
         /* An immediate-mode triangle: vertices latched by commands, no PRIM. */
@@ -2793,6 +2799,19 @@ static void build_motion_list(int flags, int frame) {
         immediate_vertex(3u, 20, 150);
         immediate_vertex(7u, 60, 150);
         immediate_vertex(7u, 20, 180);
+    }
+    if (flags & (MS_IMM_LINE | MS_IMM_POINT)) {
+        /* An immediate-mode line or point, flushed by a NOP. */
+        W(0x12, through);
+        W(0xF6, 0x00FFFFFFu);
+        W(0xF8, 255u);
+        if (flags & MS_IMM_LINE) {
+            immediate_vertex(1u, 20, 150);
+            immediate_vertex(7u, 60, 170);
+        } else {
+            immediate_vertex(0u, 30, 160);
+        }
+        W(0x00, 0u);
     }
     if (flags & MS_UNNAMED) {
         /* PRIM 5, a line, and PRIM 6, a point. */
@@ -3134,8 +3153,9 @@ static void test_ge_motion_tap(void) {
            "the line, the point, the patch and the immediate-mode triangle each reached the stand-in");
     MotionTapView vu;
     motion_tap_frame_view(f, &vu);
-    expect(vu.unnamed == unnamed_tris && vu.flags == 0u && vu.dropped == 0u, "motion_tap",
-           "the store counts each raster call the tap named nothing for: the patch's and the immediate-mode triangles");
+    expect(vu.unnamed == unnamed_tris + unnamed_lines + unnamed_points && vu.flags == 0u && vu.dropped == 0u,
+           "motion_tap", "the store counts each raster call the tap named nothing for: the patch's and the "
+           "immediate-mode triangles, the line and the point");
     motion_expect_store(f, MS_UNNAMED, 0);
 
     /* Two frames, matched, and frame B built at t = 1 against what ge.c handed over for it. */
@@ -3218,32 +3238,44 @@ static void test_ge_motion_tap(void) {
     expect(motion_build_prim(build, vb.prims[3].first_tri, 0.5f, out, NULL) == MOTION_ITEM_BUILT &&
            out[0].x == 301.0f && out[0].y == 20.0f && out[1].x == 342.0f && out[1].y == 60.0f &&
            out[0].z == 1000.0f && out[0].rgba == 0xff10b0e0u, "motion_tap", "the sprite halfway between the frames");
-    /* Frame B again, with the Bezier patch, then with the immediate-mode triangle: ge.c draws
-     * them with no PRIM, so nothing places them in the frame between, and the plan refuses it. */
-    for (int leg = 0; leg < 2; leg++) {
-        const char *what = leg ? "an immediate-mode triangle" : "a Bezier patch";
+    /* Frame B again, with the Bezier patch drawn as triangles, lines and points, then with an
+     * immediate-mode triangle, line and point: ge.c draws them with no PRIM, so nothing places
+     * them in the frame between, and the plan refuses it. The patch is one quad: two
+     * triangles, three lines or one point. */
+    static const struct { int flags; const char *what; uint32_t unnamed; } legs[6] = {
+        { MS_PATCH, "a Bezier patch", 2u },
+        { MS_IMMEDIATE, "an immediate-mode triangle", 1u },
+        { MS_PATCH_LINES, "a Bezier patch drawn as lines", 3u },
+        { MS_PATCH_POINTS, "a Bezier patch drawn as points", 1u },
+        { MS_IMM_LINE, "an immediate-mode line", 1u },
+        { MS_IMM_POINT, "an immediate-mode point", 1u },
+    };
+    for (int leg = 0; leg < 6; leg++) {
+        const char *what = legs[leg].what;
+        const uint32_t want = legs[leg].unnamed;
         MotionMatchFrame mu;
         MotionMatchResult mres;
         int32_t upair[8];
         motion_tap_frame_reset(f);
         ge_motion_tap_set(motion_tap_frame_listener(f));
-        motion_run(leg ? MS_IMMEDIATE : MS_PATCH, 1, on);
+        motion_run(legs[leg].flags, 1, on);
         ge_motion_tap_set(NULL);
         motion_tap_frame_close(f, fa);
         motion_tap_match_frame(f, &mu);
         MotionTapView vl;
         motion_tap_frame_view(f, &vl);
-        expect(mu.nprims == 5u && vl.unnamed == (leg ? 1u : 2u), "motion_tap",
+        if (vl.unnamed != want) fprintf(stderr, "motion_tap: %s: unnamed %u\n", what, (unsigned)vl.unnamed);
+        expect(mu.nprims == 5u && vl.unnamed == want, "motion_tap",
                "the unnamed draw adds nothing to the matcher's list, and the store counts its raster calls");
         if (mu.nprims != 5u) continue;
         expect(motion_match(&ma, &mu, &params, NULL, upair, NULL, &mres) == 0 && mres.flags == 0u &&
                upair[0] == 0 && upair[4] == 4, "motion_tap", "the matcher pairs the five PRIMs");
         const int ok = motion_build_plan(build, fa, f, upair, &mres);
-        if (ok != 0 || res->why != MOTION_WHY_UNKNOWN || res->unknown != (leg ? 1u : 2u) || res->built != 7u)
+        if (ok != 0 || res->why != MOTION_WHY_UNKNOWN || res->unknown != want || res->built != 7u)
             fprintf(stderr, "motion_tap: %s: plan %d why %#x unknown %u built %u\n", what, ok, (unsigned)res->why,
                     (unsigned)res->unknown, (unsigned)res->built);
-        expect(ok == 0 && res->why == MOTION_WHY_UNKNOWN && res->unknown == (leg ? 1u : 2u) && res->built == 7u,
-               "motion_tap", "a frame B holding a patch or an immediate-mode triangle is refused as unknown");
+        expect(ok == 0 && res->why == MOTION_WHY_UNKNOWN && res->unknown == want && res->built == 7u,
+               "motion_tap", "a frame B holding a patch or an immediate-mode primitive is refused as unknown");
     }
     printf("MOTION_TAP identical=3 legs x 2 timing models, built_at_t1=%u prims=%u refs=%u tris=%u bytes=%zu\n",
            checked, (unsigned)vb.nprims, (unsigned)vb.nrefs, (unsigned)vb.ntris, vb.bytes);

@@ -512,8 +512,10 @@ enum {
  *           next raster call draws it.
  * rastered  a triangle or sprite raster call returned (v2 NULL for a sprite), with the
  *           vertices it was given. It ends the primitive published for it, if one was:
- *           points and lines make no such call, and patches and immediate-mode vertices
- *           make it with nothing published. */
+ *           patches and immediate-mode vertices make it with nothing published.
+ * line_point  a point (nv = 1) or line (nv = 2) raster call begins. Nothing is ever published
+ *           for one, whatever issued it: a point or line PRIM, a patch drawn as points or
+ *           lines, an immediate-mode point or line. */
 typedef struct GeMotionTap {
     void *user;
     void (*prim)(void *user, const GeMotionPrim *p);
@@ -521,6 +523,7 @@ typedef struct GeMotionTap {
     void (*fan)(void *user, int piece);
     void (*sprite)(void *user, const uint16_t pos[2], const GeMotionVtx *v, int nv, int decision);
     void (*rastered)(void *user, const GeVtx *v0, const GeVtx *v1, const GeVtx *v2);
+    void (*line_point)(void *user, int nv);
 } GeMotionTap;
 
 /* Set the listener, or NULL for none. `tap` must stay valid until it is replaced. Call it
