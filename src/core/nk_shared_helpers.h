@@ -97,4 +97,47 @@ int nk_render_path_event_format(const NkRenderPath *path, char *out, size_t out_
  * end are allowed). False, with out untouched, for any other line or an unknown value. */
 bool nk_render_path_event_parse(const char *line, NkRenderPath *out);
 
+/* What the GPU GE renderer, while it runs, hands to the software renderer instead of drawing it
+ * (#2151), in the order of ge_gpu.h's GEGPU_FALLBACK_* reasons (gui.c checks that they agree).
+ * When one of them takes a large share of a scene for long enough (the rule in
+ * src/rt/gpu_sdl3vk/README.md), the runtime reports it once per run as
+ *   BOOT_EVENT phase=render_fallback reason=<name> frames=<n> sw_prims=<n> gpu_prims=<n>
+ *              readbacks=<n> share_pm=<n>
+ * (one line): the presents the rule watched, the reason's software primitives, the primitives the
+ * GPU drew, the reason's synchronous readbacks, and its share of all primitives in per mille. */
+typedef enum NkRenderEffect {
+    NK_RENDER_EFFECT_STENCIL,      /* stencil tests and operations the GPU path cannot match */
+    NK_RENDER_EFFECT_COLOR_TEST,   /* colour tests on a colour the shader computes inexactly */
+    NK_RENDER_EFFECT_LOGIC_OP,     /* logic operations */
+    NK_RENDER_EFFECT_WRITE_MASK,   /* partial colour write masks */
+    NK_RENDER_EFFECT_RAM_FB,       /* drawing into a frame buffer in main memory */
+    NK_RENDER_EFFECT_WIDE_STRIDE,  /* frame buffers wider than 512 pixels */
+    NK_RENDER_EFFECT_MIPS,         /* mipmap levels no Vulkan texture holds */
+    NK_RENDER_EFFECT_LINE,         /* lines the GPU path does not draw */
+    NK_RENDER_EFFECT_POINT,        /* points */
+    NK_RENDER_EFFECT_COUNT
+} NkRenderEffect;
+
+typedef struct NkRenderFallbackEvent {
+    NkRenderEffect reason;
+    uint32_t frames;
+    uint64_t sw_prims;
+    uint64_t gpu_prims;
+    uint64_t readbacks;
+    uint32_t share_pm;
+} NkRenderFallbackEvent;
+
+/* The reason's name in the event ("stencil", "color_test", ...); NULL when out of range. */
+const char *nk_render_effect_name(NkRenderEffect effect);
+
+/* Formats the event's text (without "t_ns"); returns its length, or 0 with out cleared when the
+ * reason is out of range or the text does not fit. */
+int nk_render_fallback_event_format(const NkRenderFallbackEvent *event, char *out,
+                                    size_t out_capacity);
+
+/* Reads a line the runtime wrote with nk_render_fallback_event_format (a trailing " t_ns=" and
+ * line end are allowed). False, with out untouched, for any other line, an unknown reason, or a
+ * missing or malformed number. */
+bool nk_render_fallback_event_parse(const char *line, NkRenderFallbackEvent *out);
+
 #endif

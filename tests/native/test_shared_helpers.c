@@ -408,6 +408,81 @@ static void test_render_path(void) {
     }
 }
 
+/* The render_fallback event (#2151): every reason's name, a round trip through the line the
+ * runtime writes, and the lines the player must not take for one. */
+static void test_render_fallback_event(void) {
+    static const char *const names[NK_RENDER_EFFECT_COUNT] = {
+        "stencil", "color_test", "logic_op", "write_mask", "ram_fb", "wide_stride", "mips",
+        "line", "point"
+    };
+    static const char *const refused[] = {
+        "BOOT_EVENT phase=render_path presenter=vulkan ge=gpu fallback=none",
+        "BOOT_EVENT phase=render_fallback reason=fog frames=360 sw_prims=1 gpu_prims=2 "
+        "readbacks=0 share_pm=5",
+        "BOOT_EVENT phase=render_fallback reason=stencil frames=360 sw_prims=1 gpu_prims=2 "
+        "readbacks=0",
+        "BOOT_EVENT phase=render_fallback reason=stencil frames=-1 sw_prims=1 gpu_prims=2 "
+        "readbacks=0 share_pm=5",
+        "BOOT_EVENT phase=render_fallback reason=stencil frames=4294967296 sw_prims=1 "
+        "gpu_prims=2 readbacks=0 share_pm=5",
+        "BOOT_EVENT phase=render_fallback reason=stencil frames=360 sw_prims=1 gpu_prims=2 "
+        "readbacks=0 share_pm=1001",
+        "BOOT_EVENT phase=render_fallback reason=stencil frames=360 sw_prims= gpu_prims=2 "
+        "readbacks=0 share_pm=5",
+        "BOOT_EVENT phase=render_fallback reason=stencil frames=360 sw_prims=18446744073709551616 "
+        "gpu_prims=2 readbacks=0 share_pm=5",
+        "stderr: BOOT_EVENT phase=render_fallback reason=stencil frames=360 sw_prims=1 "
+        "gpu_prims=2 readbacks=0 share_pm=5",
+    };
+    for (int i = 0; i < NK_RENDER_EFFECT_COUNT; ++i) {
+        NkRenderFallbackEvent event = {(NkRenderEffect)i, 360u, 18446744073709551615ull,
+                                       123456u, (uint64_t)i, 1000u};
+        NkRenderFallbackEvent read;
+        char line[256];
+        char want[256];
+        char timed[300];
+        CHECK(nk_render_effect_name((NkRenderEffect)i) != NULL &&
+                  strcmp(nk_render_effect_name((NkRenderEffect)i), names[i]) == 0,
+              "each fallback reason has its event name");
+        (void)snprintf(want, sizeof(want),
+                       "BOOT_EVENT phase=render_fallback reason=%s frames=360 "
+                       "sw_prims=18446744073709551615 gpu_prims=123456 readbacks=%d "
+                       "share_pm=1000",
+                       names[i], i);
+        CHECK(nk_render_fallback_event_format(&event, line, sizeof(line)) ==
+                      (int)strlen(want) &&
+                  strcmp(line, want) == 0,
+              "render fallback event names the reason and its counts");
+        (void)snprintf(timed, sizeof(timed), "%s t_ns=99\r\n", line);
+        memset(&read, 0, sizeof(read));
+        CHECK(nk_render_fallback_event_parse(timed, &read) && read.reason == event.reason &&
+                  read.frames == event.frames && read.sw_prims == event.sw_prims &&
+                  read.gpu_prims == event.gpu_prims && read.readbacks == event.readbacks &&
+                  read.share_pm == event.share_pm,
+              "render fallback event reads back, timestamp and line end included");
+    }
+    for (size_t i = 0u; i < sizeof(refused) / sizeof(refused[0]); ++i) {
+        NkRenderFallbackEvent read = {NK_RENDER_EFFECT_POINT, 7u, 7u, 7u, 7u, 7u};
+        CHECK(!nk_render_fallback_event_parse(refused[i], &read) &&
+                  read.reason == NK_RENDER_EFFECT_POINT && read.frames == 7u &&
+                  read.share_pm == 7u,
+              "another line, an unknown reason or a bad number is not a render fallback");
+    }
+    {
+        NkRenderFallbackEvent event = {NK_RENDER_EFFECT_STENCIL, 360u, 1u, 2u, 0u, 5u};
+        NkRenderFallbackEvent bad = {NK_RENDER_EFFECT_COUNT, 360u, 1u, 2u, 0u, 5u};
+        char small[24] = "old";
+        char line[256] = "old";
+        CHECK(nk_render_fallback_event_format(&event, small, sizeof(small)) == 0 &&
+                  small[0] == '\0',
+              "render fallback formatter clears an output too small for it");
+        CHECK(nk_render_fallback_event_format(&bad, line, sizeof(line)) == 0 && line[0] == '\0',
+              "render fallback formatter refuses an unknown reason");
+        CHECK(nk_render_effect_name(NK_RENDER_EFFECT_COUNT) == NULL,
+              "an out-of-range reason has no name");
+    }
+}
+
 int main(void) {
     test_path_joins();
     test_legacy_path_contracts();
@@ -416,6 +491,7 @@ int main(void) {
     test_size_format();
     test_boot_events();
     test_render_path();
+    test_render_fallback_event();
     if (failures != 0) {
         fprintf(stderr, "shared helper selftest: %d failure(s)\n", failures);
         return 1;

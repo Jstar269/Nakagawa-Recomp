@@ -268,13 +268,12 @@ void gegpu_cpu_profile_stats_get(GeGpuCpuProfileStats *out);
  * ready 0, while the GPU GE is not running. */
 typedef struct GeGpuFallbackCounts {
     int ready;                                           /* the GPU GE is running */
-    uint32_t gpu_prims;   /* triangles, sprites and T&L primitives drawn on the GPU, mod 2^32 */
+    uint32_t gpu_prims;   /* triangles, sprites, lines, points and T&L primitives drawn on the
+                             GPU, mod 2^32 */
     unsigned long long sw_prims[GEGPU_FALLBACK_REASONS];  /* drawn by ge.c instead, by reason */
     unsigned long long readbacks[GEGPU_FALLBACK_REASONS]; /* fallback_readbacks above */
 } GeGpuFallbackCounts;
 void gegpu_fallback_counts(GeGpuFallbackCounts *out);
-/* The host twin (Enhanced 32-bit colour, #2050) was asked for but this GPU could not make it. */
-int gegpu_twin_unavailable(void);
 
 /* Selftest entry points: defined only in selftest builds (see ge_gpu.c), but
  * declared unconditionally so no translation unit ever sees an implicit

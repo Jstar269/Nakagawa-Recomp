@@ -7047,14 +7047,12 @@ void gegpu_fallback_counts(GeGpuFallbackCounts *out) {
     memset(out, 0, sizeof(*out));
     if (!s_ready) return;
     out->ready = 1;
-    out->gpu_prims = (uint32_t)(s_cnt_tri + s_cnt_spr + s_cnt_tnl_prims);
+    out->gpu_prims = (uint32_t)(s_cnt_tri + s_cnt_spr + s_cnt_line + s_cnt_tnl_prims);
     for (int i = 0; i < GEGPU_FALLBACK_REASONS; i++) {
         out->sw_prims[i] = s_fallback_sw_prims[i];
         out->readbacks[i] = s_replay_stats.fallback_readbacks[i];
     }
 }
-
-int gegpu_twin_unavailable(void) { return s_twin_unavailable; }
 
 /* Cumulative SR_GPU_STATS replay counters for the perf CSV (perf.c samples this once per
  * interval).  Only the per-interval counts are exported; see SrPerfGpuReplayCounter. */

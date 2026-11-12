@@ -319,6 +319,80 @@ bool nk_render_path_event_parse(const char *line, NkRenderPath *out) {
     return true;
 }
 
+static const char *const k_render_effect_names[NK_RENDER_EFFECT_COUNT] = {
+    "stencil", "color_test", "logic_op", "write_mask", "ram_fb", "wide_stride", "mips", "line",
+    "point"
+};
+
+const char *nk_render_effect_name(NkRenderEffect effect) {
+    return (unsigned)effect < NK_RENDER_EFFECT_COUNT ? k_render_effect_names[effect] : NULL;
+}
+
+int nk_render_fallback_event_format(const NkRenderFallbackEvent *event, char *out,
+                                    size_t out_capacity) {
+    const char *reason = event ? nk_render_effect_name(event->reason) : NULL;
+    if (!out || out_capacity == 0u) return 0;
+    out[0] = '\0';
+    if (!reason) return 0;
+    int written = snprintf(out, out_capacity,
+                           "BOOT_EVENT phase=render_fallback reason=%s frames=%lu sw_prims=%llu "
+                           "gpu_prims=%llu readbacks=%llu share_pm=%lu",
+                           reason, (unsigned long)event->frames,
+                           (unsigned long long)event->sw_prims,
+                           (unsigned long long)event->gpu_prims,
+                           (unsigned long long)event->readbacks,
+                           (unsigned long)event->share_pm);
+    if (written <= 0 || (size_t)written >= out_capacity) {
+        out[0] = '\0';
+        return 0;
+    }
+    return written;
+}
+
+/* A value of only decimal digits that fits max; false for an empty or longer one. */
+static bool event_number(const char *line, const char *key, uint64_t max, uint64_t *out) {
+    const char *value;
+    size_t length;
+    uint64_t n = 0u;
+    if (!event_value(line, key, &value, &length) || length == 0u) return false;
+    for (size_t i = 0u; i < length; ++i) {
+        if (value[i] < '0' || value[i] > '9') return false;
+        unsigned digit = (unsigned)(value[i] - '0');
+        if (n > (max - digit) / 10u) return false;
+        n = n * 10u + digit;
+    }
+    *out = n;
+    return true;
+}
+
+bool nk_render_fallback_event_parse(const char *line, NkRenderFallbackEvent *out) {
+    static const char prefix[] = "BOOT_EVENT phase=render_fallback ";
+    const char *value;
+    size_t length;
+    uint64_t frames, share_pm;
+    NkRenderFallbackEvent event;
+    if (!line || !out || strncmp(line, prefix, sizeof(prefix) - 1u) != 0) return false;
+    if (!event_value(line, "reason", &value, &length)) return false;
+    event.reason = NK_RENDER_EFFECT_COUNT;
+    for (int i = 0; i < NK_RENDER_EFFECT_COUNT; ++i) {
+        if (event_value_is(value, length, k_render_effect_names[i])) {
+            event.reason = (NkRenderEffect)i;
+        }
+    }
+    if (event.reason == NK_RENDER_EFFECT_COUNT) return false;
+    if (!event_number(line, "frames", UINT32_MAX, &frames) ||
+        !event_number(line, "sw_prims", UINT64_MAX, &event.sw_prims) ||
+        !event_number(line, "gpu_prims", UINT64_MAX, &event.gpu_prims) ||
+        !event_number(line, "readbacks", UINT64_MAX, &event.readbacks) ||
+        !event_number(line, "share_pm", 1000u, &share_pm)) {
+        return false;
+    }
+    event.frames = (uint32_t)frames;
+    event.share_pm = (uint32_t)share_pm;
+    *out = event;
+    return true;
+}
+
 int nk_shared_boot_event_format_path(char *out, size_t out_capacity,
                                     const char *cache_dir, char separator,
                                     unsigned long process_id, unsigned int sequence) {
