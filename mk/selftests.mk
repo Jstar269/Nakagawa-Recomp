@@ -174,12 +174,19 @@ osk-text-entry-selftest:
 # ace-selftest - Ace Mode's CPU-only cells (src/rt/ace.c): the SR_ACE line fails closed, the
 # 30 Hz detector's classes, hysteresis and feed, the speed readout's definitions, the per-run
 # report and an off run's silence. Built from ace.c and its test alone: a reference from ace.c
-# to anything but the C library fails this link, which is the S1 link test for ace.c.
+# to anything but the C library fails this link, which is the S1 link test for ace.c. Then the
+# retired SR_GLYPHS (#2110): with it set, starting Ace Mode as a run does stops the process with
+# exit 1 and the line that names glyphs=on, before SR_ACE is read.
 native-core-tests: ace-selftest
 ace-selftest:
+	$(NK_REQUIRE_POSIX_SHELL)
 	$(CC) -std=c99 -O2 -Wall -Wextra -Wpedantic -Werror -Isrc/rt \
 		-o $(BUILD_DIR)/ace_selftest$(EXE_EXT) tests/native/ace_selftest.c src/rt/ace.c
 	$(BUILD_DIR)/ace_selftest$(EXE_EXT) $(BUILD_DIR)
+	@rc=0; $(BUILD_DIR)/ace_selftest$(EXE_EXT) --retired-env on > $(BUILD_DIR)/ace_retired_env.log 2>&1 || rc=$$?; \
+	if [ $$rc -ne 1 ] || ! grep -aq "^SR_GLYPHS: retired, and set to 'on'; .*glyphs=on" $(BUILD_DIR)/ace_retired_env.log; then \
+		cat $(BUILD_DIR)/ace_retired_env.log; echo "FAIL ace-selftest --retired-env (exit $$rc): a set SR_GLYPHS did not stop the run with its line"; exit 1; fi; \
+	echo "PASS ace-selftest --retired-env: SR_GLYPHS=on stops the run at start (exit 1) and names glyphs=on"
 
 # motion-match-selftest - the draw matcher of render-state motion (src/rt/motion_match.c, #2081):
 # anchors, reorder, spawn and despawn, rebuilds at a new address, ties, teleports and each
@@ -1393,7 +1400,7 @@ native-core-tests: glyph-recon-selftest glyph-recon-mutant
 # (a two-texel ramp becomes two edges), a soft-art threshold of 1.0 (real text with strokes goes smooth), and a
 # rebuild that does not keep each block's mean.
 GLYPH_RECON_MUTANTS := \
-	NO_ACE_GATE:"FAIL settings: SR_GLYPHS=on with Ace Mode off" \
+	NO_ACE_GATE:"FAIL settings: glyphs=on with Ace Mode off" \
 	ALLOW_VRAM:"FAIL refuse-vram: a page in VRAM is refused" \
 	ALLOW_SCALE1:"FAIL refuse-scale: render scale 1 is refused" \
 	ALLOW_MIP:"FAIL refuse-mip: a mip chain is refused" \
@@ -1550,10 +1557,11 @@ gpu-texscale-mutant: shader-verify $(RT_GE_O)
 # and a too-small or off-page rectangle draw exactly as without the feature and make no image; fade bars of
 # one colour (shallow, steep, four texels, two) draw without a ribbed row; a rewritten page draws its
 # new tile, never the old, also when the rewrite misses the bytes the cache's content hash samples; more new rectangles than the per-present count are rebuilt over two presents;
-# no guest byte changes. At render scale 1 the setting is idle. An authentic run (Ace Mode off) rebuilds
-# nothing and draws byte for byte the same picture with SR_GLYPHS unset and on. In an Ace run with the
-# setting off (`--glyphs off`) the sharp cell must fail, which shows it is not vacuous. Exit 77 (SKIP)
-# without Vulkan.
+# no guest byte changes. At render scale 1 the setting is idle. The key off is byte-identical: one scene drawn
+# in an authentic run, in an Ace run whose line has no glyphs key and in one with glyphs=off rebuilds and
+# decodes nothing and has one picture hash; with glyphs=on it draws rebuilt glyphs and another hash, so the
+# hash can tell. In an Ace run with the key off (`--glyphs off`) the sharp cell must fail, which shows it is
+# not vacuous. Exit 77 (SKIP) without Vulkan.
 GPU_GLYPH_BUILD = $(CC) $(CFLAGS) -DSR_GPU_COHERENCE_SELFTEST -DSR_GPU_TEXSCALE_SELFTEST -DSR_GPU_GLYPH_SELFTEST \
 		-DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" -ffunction-sections -fdata-sections $(LDFLAGS) $(LD_GC_SECTIONS) \
 		tests/native/gpu_coherence_selftest.c src/rt/ge_capture.c src/rt/ge_raster_ref.c $(RT_GE_O) src/rt/flight_recorder.c src/rt/perf.c \
@@ -1571,21 +1579,24 @@ gpu-glyph-selftest: shader-verify $(RT_GE_O)
 	elif [ $$rc -eq 0 ]; then echo "FAIL gpu-glyph-selftest --glyphs off (the sharp cell passes without the feature: it is vacuous)"; exit 1; \
 	elif ! grep -aq "FAIL sharp: " $(BUILD_DIR)/gpu_glyph_off.log; then cat $(BUILD_DIR)/gpu_glyph_off.log; echo "FAIL gpu-glyph-selftest --glyphs off (exit $$rc, but not from the sharp cell)"; exit 1; \
 	else grep -a "FAIL sharp: " $(BUILD_DIR)/gpu_glyph_off.log; echo "PASS gpu-glyph-selftest --glyphs off (the sharp cell fails without the feature, exit $$rc)"; fi
-	@rc=0; $(BUILD_DIR)/gpu_glyph_selftest.exe --authentic --scale 4 > $(BUILD_DIR)/gpu_glyph_auth_unset.log 2>&1 || rc=$$?; \
-	if [ $$rc -eq 77 ]; then echo "SKIP gpu-texscale gpu-glyph-selftest --authentic (exit 77; the reason is printed above)"; exit 0; \
-	elif [ $$rc -ne 0 ]; then cat $(BUILD_DIR)/gpu_glyph_auth_unset.log; echo "FAIL gpu-glyph-selftest --authentic (exit $$rc)"; exit $$rc; fi; \
-	rc=0; $(BUILD_DIR)/gpu_glyph_selftest.exe --authentic --scale 4 --glyphs on > $(BUILD_DIR)/gpu_glyph_auth_on.log 2>&1 || rc=$$?; \
-	if [ $$rc -eq 77 ]; then echo "SKIP gpu-texscale gpu-glyph-selftest --authentic --glyphs on (exit 77; the reason is printed above)"; exit 0; \
-	elif [ $$rc -ne 0 ]; then cat $(BUILD_DIR)/gpu_glyph_auth_on.log; echo "FAIL gpu-glyph-selftest --authentic --glyphs on (exit $$rc)"; exit $$rc; fi; \
-	a=$$(grep -a '^GLYPH-AUTH-HASH' $(BUILD_DIR)/gpu_glyph_auth_unset.log); b=$$(grep -a '^GLYPH-AUTH-HASH' $(BUILD_DIR)/gpu_glyph_auth_on.log); \
-	if [ -z "$$a" ] || [ "$$a" != "$$b" ]; then echo "FAIL gpu-glyph-selftest authentic: the picture differs with SR_GLYPHS set ('$$a' against '$$b')"; exit 1; fi; \
-	grep -aq 'GLYPHS: off (sharp game text needs Ace Mode)' $(BUILD_DIR)/gpu_glyph_auth_on.log || { echo "FAIL gpu-glyph-selftest authentic: an authentic run did not name the request it ignored"; exit 1; }; \
-	echo "PASS gpu-glyph-selftest authentic: the same picture with SR_GLYPHS unset and on ($$a)"
+	@for run in "authentic:--authentic" "absent:--scene-hash --glyphs absent" "off:--scene-hash --glyphs off" "on:--scene-hash --glyphs on"; do \
+		name=$${run%%:*}; args=$${run#*:}; rc=0; \
+		$(BUILD_DIR)/gpu_glyph_selftest.exe $$args --scale 4 > $(BUILD_DIR)/gpu_glyph_scene_$$name.log 2>&1 || rc=$$?; \
+		if [ $$rc -eq 77 ]; then echo "SKIP gpu-texscale gpu-glyph-selftest scene $$name (exit 77; the reason is printed above)"; exit 0; \
+		elif [ $$rc -ne 0 ]; then cat $(BUILD_DIR)/gpu_glyph_scene_$$name.log; echo "FAIL gpu-glyph-selftest scene $$name (exit $$rc)"; exit $$rc; fi; \
+	done; \
+	h() { grep -a '^GLYPH-SCENE-HASH ' $(BUILD_DIR)/gpu_glyph_scene_$$1.log; }; \
+	a=$$(h authentic); b=$$(h absent); c=$$(h off); d=$$(h on); \
+	if [ -z "$$a" ] || [ "$$a" != "$$b" ] || [ "$$a" != "$$c" ]; then echo "FAIL gpu-glyph-selftest key-off: the picture differs (authentic '$$a', no key '$$b', glyphs=off '$$c')"; exit 1; fi; \
+	if [ -z "$$d" ] || [ "$$d" = "$$a" ]; then echo "FAIL gpu-glyph-selftest key-on: glyphs=on draws the same picture ('$$d'): the hash cannot see the feature"; exit 1; fi; \
+	echo "PASS gpu-glyph-selftest key-off: the same picture authentic, with no glyphs key and with glyphs=off ($$a); glyphs=on differs ($$d)"
 
 # gpu-glyph-mutant - the selftest above built with one guard removed per build, each of which must fail
 # the cell that names it: no entry-content check on a bound tile (rewrite), tiles keyed on the cache's sampled
 # content hash instead of its generation (rewrite-gap), no per-present count (cap), no
-# VRAM refusal, no hard-edge check, no colour check (refuse), and the Ace gate removed (authentic).
+# VRAM refusal, no hard-edge check, no colour check (refuse), and a renderer that ignores the line's glyphs key
+# (key-off). The unit's own Ace gate is glyph-recon-mutant's NO_ACE_GATE: an authentic run has no line to carry
+# the key, so the renderer cannot ask for the feature there.
 GPU_GLYPH_MUTANTS := \
 	NK_GLYPH_GPU_MUTANT_NO_HASH_CHECK@--scale,4@"FAIL rewrite:" \
 	NK_GLYPH_GPU_MUTANT_KEY_ON_HASH@--scale,4@"FAIL rewrite-gap:" \
@@ -1593,7 +1604,7 @@ GPU_GLYPH_MUTANTS := \
 	NK_GLYPH_MUTANT_ALLOW_VRAM@--scale,4@"FAIL refuse: a page in VRAM" \
 	NK_GLYPH_MUTANT_NO_HARD_EDGE_CHECK@--scale,4@"FAIL refuse: a hard-edged page" \
 	NK_GLYPH_MUTANT_NO_COLOUR_CHECK@--scale,4@"FAIL refuse: a two-colour page" \
-	NK_GLYPH_MUTANT_NO_ACE_GATE@--authentic,--glyphs,on,--scale,4@"FAIL authentic:"
+	NK_GLYPH_GPU_MUTANT_IGNORE_KEY@--scene-hash,--glyphs,absent,--scale,4@"FAIL key-off:"
 gpu-glyph-mutant: shader-verify $(RT_GE_O)
 	$(NK_REQUIRE_POSIX_SHELL)
 	@for m in $(GPU_GLYPH_MUTANTS); do \
