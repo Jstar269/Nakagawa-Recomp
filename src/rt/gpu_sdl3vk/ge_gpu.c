@@ -708,8 +708,8 @@ static VkDescriptorSet s_dst_set, s_tdst_set;
 
 /* ---- the host twin (Enhanced: 32-bit colour, #2050) ----------------------------------------
  * With the twin on (Ace Mode only), each render target and depth buffer has a host-only twin at
- * s_tscale (the user's render scale, which the authentic images keep too, so s_tscale ==
- * s_scale), and every write to the authentic image also reaches
+ * s_tscale (the user's render scale, which the authentic images keep too, times the supersampling
+ * factor s_ssaa, 1 without it), and every write to the authentic image also reaches
  * its twin: each render op is recorded a second time into the twin at the twin's scale; each
  * upload from guest VRAM, CPU-write patch and depth upload reaches it as a nearest-filtered blit
  * of the rectangle the authentic image took (exact pixel replication); a block transfer is
@@ -7418,8 +7418,9 @@ int gegpu_init(void) {
     /* The host twin (#2050), from the internal switch until the Ace line carries its key (after
      * #2074): SR_GPU_TWIN_COLOR=1 full colour, =native the twin with native colour (the identity
      * selftests). It is an Ace Mode feature: in an authentic run it stays off whatever the
-     * environment says. The twin runs at the user's render scale beside the authentic chain,
-     * which keeps that scale too, so guest VRAM and every readback are the twin-off run's
+     * environment says. The twin runs at the user's render scale (times the supersampling factor,
+     * s_tscale) beside the authentic chain, which keeps the render scale, so guest VRAM and every
+     * readback are the twin-off run's
      * (ENHANCEMENT_CONTRACT.md 10.11). It needs nearest blits of the colour and depth formats
      * (seeding). */
     int twin_req = 0;

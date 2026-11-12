@@ -1278,7 +1278,8 @@ what the guest draws into, reads or waits for. The code is the comment at `s_ssa
   with its twin and depth twin at the twin's scale and its average at the render scale, the twin snapshot, and at
   4x the halving step. If 4x does not fit and 2x does, the run uses 2x and says so in one
   `ACE_MODE: ssaa 2 (asked for 4: <reason>)` line; if nothing fits, supersampling is unavailable for the run
-  (`SSAA: unavailable (<reason>)`, the reason naming each factor tried, and the Ace report and stamps say so). It never falls back to 1x without a
+  (`SSAA: unavailable (<reason>)`, the reason naming each factor tried; the Ace report and stamps say so, the
+  report's reason cut to its 95 characters). It never falls back to 1x without a
   message. A GPU without linear blits of RGBA8, or one that refuses the twin, makes it unavailable the same way.
   The estimate is not a promise: a title with more live render targets uses more, and a twin allocation that fails
   later turns the twin off for the rest of the run with one `TWIN: off ...` line and one
