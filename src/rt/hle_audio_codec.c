@@ -706,8 +706,11 @@ static uint32_t atrac_set_new(uint32_t buf, uint32_t readSize, uint32_t bufSize,
  * host, so the context is a guest copy, written from that state after every call that changes
  * it, and read back where a game may write it.
  *
- * Layout: derived-translated from PPSSPP's SceAtracContext (Core/HLE/AtracBase.h, GPL-2.0-or-later,
- * revision 3bc60270eae3069f13dfbfdb7292a7e1375de6f6; src/rt/PROVENANCE.md):
+ * Derived-translated from PPSSPP (GPL-2.0-or-later, revision
+ * 3bc60270eae3069f13dfbfdb7292a7e1375de6f6; src/rt/PROVENANCE.md): the SceAtracContext layout of
+ * Core/HLE/AtracBase.h, the field-by-field write and the read-back of Core/HLE/AtracCtx.cpp
+ * (Atrac::WriteContextToPSPMem, Atrac::UpdateContextFromPSPMem, Atrac::NotifyGetContextAddress),
+ * and the read-back before every call of Core/HLE/sceAtrac.cpp (getAtrac). Layout:
  * 0x100 bytes per ID, the codec block in the first 0x80 (left zero: no Media Engine here) and the
  * SceAtracIdInfo block after it, with the ID at +0xfc. The offsets below are into the info block.
  * None of it is measured on a PSP (UNMEASURED; PSP request R2-3 in the lane notes).
@@ -715,7 +718,8 @@ static uint32_t atrac_set_new(uint32_t buf, uint32_t readSize, uint32_t bufSize,
  * Where it lives: on a PSP the contexts sit in the ATRAC library module's data, in the user
  * partition. sceUtilityLoadModule records module state only and reserves no memory
  * (hle_utility.c), so the eight contexts are one user-partition block, allocated by the first
- * _sceAtracGetContextAddress. A title that never calls it keeps the partition layout it had.
+ * _sceAtracGetContextAddress (PPSSPP's Atrac allocates one context per ID in kernel memory
+ * instead). A title that never calls it keeps the partition layout it had.
  *
  * Written: buffer, bufferByte, secondBuffer, secondBufferByte, state, numChan, sampleSize, codec,
  * dataOff, fileDataEnd and loopNum, which map one to one onto the runtime's state. Not modelled,
@@ -723,9 +727,14 @@ static uint32_t atrac_set_new(uint32_t buf, uint32_t readSize, uint32_t bufSize,
  * firstValidSample, numSkipFrames), which count from the first-sample offset the runtime keeps
  * only for plain AT3, and the streaming cursors (curFileOff, streamDataByte, streamOff,
  * secondStreamOff, curBuffer), whose PSP meaning differs from the runtime's ring view.
- * Read back: loopNum, before every call on the ID, as PPSSPP does (Core/HLE/sceAtrac.cpp
- * getAtrac); a game may keep its own value there. A guest write to any other field is
- * overwritten by the next call that changes the context. */
+ * Read back: state and loopNum, before every call on the ID, as PPSSPP's UpdateContextFromPSPMem
+ * does; a game may keep its own loop count there, and may change the state. The runtime's state
+ * is the same numbering except that an ID with no track holds 0 where the context says NO_DATA
+ * (1). One difference from PPSSPP: the runtime models only NO_DATA and states 2 to 6, and only
+ * for an ID that holds a track, so a state it cannot honour (LOW_LEVEL 8, FOR_SCESAS 16 for a
+ * SAS voice, any other value, or a data state on an ID with no track, whose frame size is 0)
+ * stops the run by name instead of decoding under the wrong model. A guest write to any other
+ * field is overwritten by the next call that changes the context. */
 #define ATRAC_CTX_SIZE 0x100u
 #define ATRAC_CTX_INFO 0x80u              /* SceAtracIdInfo inside SceAtracContext */
 #define ATRAC_CTX_STATE 0x15u             /* u8 */
@@ -762,11 +771,33 @@ static void atrac_ctx_push(const Atrac *a) {
 static void atrac_ctx_clear(uint32_t addr) {
     for (uint32_t off = 0; off < ATRAC_CTX_SIZE; off += 4u) MEM_W32(addr + off, 0u);
 }
+/* The read-back before a call (above). Returns 0 when the context names a state the runtime
+ * cannot honour; the run has stopped by name then. */
+static int atrac_ctx_pull(Atrac *a, uint32_t id) {
+    const uint32_t info = a->ctxAddr + ATRAC_CTX_INFO;
+    const uint32_t state = MEM_R8(info + ATRAC_CTX_STATE);
+    a->loopNum = (int)MEM_R32(info + ATRAC_CTX_LOOP_NUM);
+    if (state == ATRAC_CTX_STATUS_NO_DATA) {
+        a->bufferState = 0;
+    } else if (state >= ATRAC_STATE_ALL_DATA_LOADED && state <= ATRAC_STATE_STREAMED_LOOP_TRAILER &&
+               a->bufferState != 0) {
+        a->bufferState = (int)state;
+    } else {
+        (void)hle_unmodelled_stop("sceAtrac", "ID %u: its context's state is 0x%x, which the "
+                                  "runtime does not model%s (#322)", id, state,
+                                  a->bufferState ? "" : " for an ID with no track");
+        return 0;
+    }
+    return 1;
+}
 static Atrac *atrac_of(uint32_t id) {
     Atrac *a = id < 8 && s_atrac[id].used ? &s_atrac[id] : 0;
-    if (a && a->ctxAddr) a->loopNum = (int)MEM_R32(a->ctxAddr + ATRAC_CTX_INFO + ATRAC_CTX_LOOP_NUM);
+    if (a && a->ctxAddr && !atrac_ctx_pull(a, id)) return 0;
     return a;
 }
+/* A new program (sceKernelLoadExec) starts with an empty user partition and restarts UIDs, so
+ * the old table's UID may name one of the new program's blocks: forget it (hle_utility.c). */
+void hle_atrac_context_reset(void) { s_atrac_ctx_uid = 0u; }
 /* The calls that change an ID's state publish it to its context before they return: the ID is
  * their first argument, read before the call's work. */
 static uint32_t atrac_published(uint32_t id, uint32_t ret) {
@@ -784,8 +815,8 @@ static uint32_t h_AtracGetContextAddress(CpuState *s) {
     if (!a->ctxAddr) {
         uint32_t table = s_atrac_ctx_uid ? block_addr(s_atrac_ctx_uid) : 0u;
         if (!table) {
-            /* A new program (sceKernelLoadExec) starts with a fresh partition, which drops the
-             * old block: block_addr no longer finds it, and the table is allocated again. */
+            /* No table yet, or a new program (sceKernelLoadExec) emptied the partition and
+             * hle_atrac_context_reset forgot the old table's UID: allocate one. */
             const uint32_t uid = alloc_block(8u * ATRAC_CTX_SIZE);
             table = uid != 0xFFFFFFFFu ? block_addr(uid) : 0u;
             if (!table) {

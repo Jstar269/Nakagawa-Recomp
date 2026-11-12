@@ -1297,6 +1297,7 @@ extern int g_atrac_out_nbufs;
 void atrac_release_decoder(Atrac *a);
 extern int s_atrac_caps_configured;
 extern uint32_t s_atrac_slot_codec[8];
+void hle_atrac_context_reset(void);
 void dialog_lock(void);
 void dialog_unlock(void);
 extern int s_utility_slot;

@@ -33545,10 +33545,12 @@ static void test_atrac_guest_context_322(void) {
                MEM_R32(info + 0x3cu) == 0u && MEM_R32(info + 0x44u) == 0u,
            "clearing the second buffer clears it in the context");
 
-    /* DecodeData publishes too: a state the game overwrote is the library's again. */
-    MEM_W8(info + 0x15u, 0x10u);
+    /* DecodeData publishes too: a field that is not read back is the library's again. */
+    MEM_W32(info + 0x38u, 0x0badf00du);
+    MEM_W32(ctx + 0xfcu, 0xffu);
     (void)td1096_decode(id, PCM_OUT, OUT_N, OUT_END, OUT_REMAIN);
-    expect(MEM_R8(info + 0x15u) == 4u && MEM_R32(info + 0x28u) == 0u && MEM_R32(ctx + 0xfcu) == id,
+    expect(MEM_R8(info + 0x15u) == 4u && MEM_R32(info + 0x28u) == 0u &&
+               MEM_R32(info + 0x38u) == TRACK && MEM_R32(ctx + 0xfcu) == id,
            "sceAtracDecodeData rewrites the context from the library's state");
 
     /* AddStreamData: the context keeps naming the same buffer and file. */
@@ -33565,6 +33567,36 @@ static void test_atrac_guest_context_322(void) {
                "sceAtracAddStreamData publishes the context");
     }
 
+    /* state is read back before a call as well as loopNum, as PPSSPP's UpdateContextFromPSPMem
+     * (Core/HLE/AtracCtx.cpp at 3bc60270) does. PPSSPP behaviour, not PSP-measured (UNMEASURED). */
+    {
+        enum { REMAIN = 0x08004220u };
+        MEM_W8(info + 0x15u, 2u);
+        expect(td24b_dispatch4(NID_SCE_ATRAC_GET_REMAIN_FRAME, id, REMAIN, 0u, 0u) == 0u &&
+                   MEM_R32(REMAIN) == 0xffffffffu,
+               "a state the game writes into the context (ALL_DATA_LOADED) is the one the library acts on");
+        MEM_W8(info + 0x15u, 4u);
+        expect(td24b_dispatch4(NID_SCE_ATRAC_GET_REMAIN_FRAME, id, REMAIN, 0u, 0u) == 0u &&
+                   MEM_R32(REMAIN) != 0xffffffffu,
+               "writing the streamed state back makes the ID a stream again");
+        /* The runtime's own choice, not PPSSPP's: a state it does not model stops the run. */
+        uint32_t stops = sr_hle_test_unmodelled_stops();
+        MEM_W8(info + 0x15u, 0x10u);   /* FOR_SCESAS: the source of a SAS voice */
+        uint32_t ret = td1096_decode(id, PCM_OUT, OUT_N, OUT_END, OUT_REMAIN);
+        expect(sr_hle_test_unmodelled_stops() == stops + 1u && ret != 0u,
+               "a context state the runtime does not model (FOR_SCESAS) stops the run by name");
+        MEM_W8(info + 0x15u, 1u);
+        expect(td1096_decode(id, PCM_OUT, OUT_N, OUT_END, OUT_REMAIN) == 0x80630010u &&
+                   MEM_R8(info + 0x15u) == 1u,
+               "NO_DATA written into the context makes DecodeData return ATRAC_ERROR_NO_DATA");
+        stops = sr_hle_test_unmodelled_stops();
+        MEM_W8(info + 0x15u, 4u);
+        (void)td24b_dispatch4(NID_SCE_ATRAC_GET_REMAIN_FRAME, id, REMAIN, 0u, 0u);
+        expect(sr_hle_test_unmodelled_stops() == stops + 1u,
+               "a data state written for an ID that holds no track stops the run by name");
+        MEM_W8(info + 0x15u, 1u);
+    }
+
     /* Release clears the context; the slot's next owner starts from NO_DATA. */
     expect(td24b_dispatch4(NID_SCE_ATRAC_RELEASE_ID, id, 0u, 0u, 0u) == 0u,
            "context fixture: release the ID");
@@ -33578,6 +33610,100 @@ static void test_atrac_guest_context_322(void) {
                MEM_R8(info + 0x15u) == 1u && MEM_R32(info + 0x38u) == 0u,
            "the slot's next ID gets the same context, back at NO_DATA");
     (void)td24b_dispatch4(NID_SCE_ATRAC_RELEASE_ID, again, 0u, 0u, 0u);
+    s_fixture_loaded_end = loaded_end;
+    sr_hle_test_partition_reset();
+}
+
+/* #322: two IDs, a program switch, and a partition that cannot hold the contexts. */
+static uint32_t ctx322_syscall(uint32_t nid, uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3) {
+    CpuState cpu;
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = a0; cpu.r[5] = a1; cpu.r[6] = a2; cpu.r[7] = a3;
+    return sr_syscall(&cpu, nid);
+}
+static void test_atrac_context_ids_loadexec_322(void) {
+    enum { NID_ALLOC_PART = 0x237dbd4fu, NID_FREE_PART = 0xb6d61d02u, NID_GET_HEAD = 0x9d9a5ba1u,
+           NID_MAX_FREE = 0xa291f107u, GAME_BYTES = 0x800u };
+    extern void sr_hle_test_partition_reset(void);
+    const uint32_t loaded_end = s_fixture_loaded_end;
+    reset_fixture();
+    s_fixture_loaded_end = 0x08a00000u;
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+
+    /* Two IDs: separate contexts 0x100 apart in one table, each with its own ID at +0xfc. */
+    uint32_t id0 = td24b_dispatch4(NID_SCE_ATRAC_GET_ID, ATRAC_CODEC_AT3, 0u, 0u, 0u);
+    uint32_t id1 = td24b_dispatch4(NID_SCE_ATRAC_GET_ID, ATRAC_CODEC_AT3, 0u, 0u, 0u);
+    expect(id0 < 8u && id1 < 8u && id0 != id1, "context fixture: two AT3 IDs");
+    uint32_t ctx0 = td24b_dispatch4(NID_SCE_ATRAC_GET_CONTEXT_ADDRESS, id0, 0u, 0u, 0u);
+    uint32_t ctx1 = td24b_dispatch4(NID_SCE_ATRAC_GET_CONTEXT_ADDRESS, id1, 0u, 0u, 0u);
+    uint32_t table = ctx0 - id0 * 0x100u;
+    expect(ctx0 >= 0x08a00000u && ctx0 < 0x0a000000u && ctx1 >= 0x08a00000u && ctx1 < 0x0a000000u &&
+               ctx0 != ctx1 && ctx1 - id1 * 0x100u == table &&
+               MEM_R32(ctx0 + 0xfcu) == id0 && MEM_R32(ctx1 + 0xfcu) == id1,
+           "two ATRAC IDs get separate contexts, 0x100 apart in one table, each with its ID at +0xfc");
+    if (!(ctx0 >= 0x08a00000u && ctx0 < 0x0a000000u)) {
+        s_fixture_loaded_end = loaded_end;
+        sr_hle_test_partition_reset();
+        return;
+    }
+    uint8_t before[0x100];
+    for (uint32_t b = 0; b < 0x100u; b++) before[b] = (uint8_t)MEM_R8(ctx0 + b);
+    expect(td24b_dispatch4(NID_SCE_ATRAC_SET_LOOP_NUM_322, id1, 3u, 0u, 0u) == 0u &&
+               MEM_R32(ctx1 + 0x80u + 0x28u) == 3u,
+           "context fixture: SetLoopNum on the second ID");
+    int same = 1;
+    for (uint32_t b = 0; b < 0x100u; b++) if (MEM_R8(ctx0 + b) != before[b]) same = 0;
+    expect(same, "a call on one ID leaves another ID's context untouched");
+
+    /* The table's block UID, found the way a game could: the block whose head is the table. */
+    uint32_t table_uid = 0u;
+    for (uint32_t u = 0x100u; u < 0x4000u && !table_uid; u++)
+        if (ctx322_syscall(NID_GET_HEAD, u, 0u, 0u, 0u) == table) table_uid = u;
+    expect(table_uid != 0u, "context fixture: the context table is a partition block");
+
+    /* sceKernelLoadExec: the next program's partition is empty and its UIDs start again, so one
+     * of its blocks takes the old table's UID. Its next context must not land in that block. */
+    sr_hle_loadexec_reset_guest_state();
+    uint32_t game_uid = 0u;
+    for (int n = 0; n < 0x4000 && game_uid < table_uid; n++) {
+        uint32_t u = ctx322_syscall(NID_ALLOC_PART, 2u, 0u, 0u, GAME_BYTES);
+        if (u == 0u || (u & 0x80000000u)) break;
+        game_uid = u;
+        if (u < table_uid) (void)ctx322_syscall(NID_FREE_PART, u, 0u, 0u, 0u);
+    }
+    uint32_t game = game_uid == table_uid ? ctx322_syscall(NID_GET_HEAD, game_uid, 0u, 0u, 0u) : 0u;
+    expect(game_uid == table_uid && game != 0u && !(game & 0x80000000u),
+           "context fixture: after LoadExec a block of the next program takes the old table's UID");
+    if (game) for (uint32_t b = 0; b < GAME_BYTES; b++) MEM_W8(game + b, 0xa5u);
+    uint32_t nid = td24b_dispatch4(NID_SCE_ATRAC_GET_ID, ATRAC_CODEC_AT3, 0u, 0u, 0u);
+    uint32_t nctx = nid < 8u ? td24b_dispatch4(NID_SCE_ATRAC_GET_CONTEXT_ADDRESS, nid, 0u, 0u, 0u) : 0u;
+    int intact = game != 0u;
+    for (uint32_t b = 0; game && b < GAME_BYTES; b++) if (MEM_R8(game + b) != 0xa5u) intact = 0;
+    expect(nid < 8u && nctx >= 0x08800000u && nctx < 0x0a000000u &&
+               (nctx + 0x100u <= game || nctx >= game + GAME_BYTES) && intact,
+           "after LoadExec the next program's context table is a new block, and the block that "
+           "reused the old table's UID is left untouched (#322)");
+
+    /* A partition that cannot hold the 0x800 bytes of contexts: the call returns 0 and says so
+     * (ATRAC_CONTEXT_NO_MEMORY on stderr). */
+    if (nid < 8u) (void)td24b_dispatch4(NID_SCE_ATRAC_RELEASE_ID, nid, 0u, 0u, 0u);
+    reset_fixture();
+    s_fixture_loaded_end = 0x08a00000u;
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+    uint32_t fid = td24b_dispatch4(NID_SCE_ATRAC_GET_ID, ATRAC_CODEC_AT3, 0u, 0u, 0u);
+    uint32_t max_free = ctx322_syscall(NID_MAX_FREE, 0u, 0u, 0u, 0u);
+    uint32_t fill = max_free >= 0x100u ? ctx322_syscall(NID_ALLOC_PART, 2u, 0u, 0u, max_free) : 0u;
+    expect(fid < 8u && fill != 0u && !(fill & 0x80000000u) &&
+               ctx322_syscall(NID_MAX_FREE, 0u, 0u, 0u, 0u) < 0x800u,
+           "context fixture: the partition is full");
+    expect(td24b_dispatch4(NID_SCE_ATRAC_GET_CONTEXT_ADDRESS, fid, 0u, 0u, 0u) == 0u,
+           "_sceAtracGetContextAddress returns 0 when the partition cannot hold the contexts");
+    expect(ctx322_syscall(NID_FREE_PART, fill, 0u, 0u, 0u) == 0u &&
+               td24b_dispatch4(NID_SCE_ATRAC_GET_CONTEXT_ADDRESS, fid, 0u, 0u, 0u) >= 0x08a00000u,
+           "once the partition has room the next call allocates the contexts");
+    if (fid < 8u) (void)td24b_dispatch4(NID_SCE_ATRAC_RELEASE_ID, fid, 0u, 0u, 0u);
     s_fixture_loaded_end = loaded_end;
     sr_hle_test_partition_reset();
 }
@@ -52761,6 +52887,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_atrac_set_entry_points_1379();
     test_atrac_aa3_and_reinit_1379();
     test_atrac_guest_context_322();
+    test_atrac_context_ids_loadexec_322();
     test_td24d_hle_batch();
     test_impose_language_mode_pair();
     test_sas_core_mix_preserves_caller_pcm();

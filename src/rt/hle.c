@@ -786,6 +786,7 @@ void sr_hle_test_partition_reset(void) {
     memset(s_memory_blocks, 0, sizeof(s_memory_blocks));
     s_nfree_blocks = 0;
     memset(s_free_blocks, 0, sizeof(s_free_blocks));
+    hle_atrac_context_reset();   /* the ATRAC context table's block is gone with the partition */
 }
 int sr_hle_test_partition_free_block_count(void) { return s_nfree_blocks; }
 int sr_hle_test_partition_get_free_block(int idx, uint32_t *addr_out, uint32_t *size_out) {
