@@ -11857,6 +11857,11 @@ static void reset_fixture(void) {
     s_stack_top = SR_STACK_ARENA_CEIL;
     stack_ranges_reset();
     s_vtime_us = 0;
+    /* The turbo clock charges its 10 ms quantum every TIMESLICE dispatches, counted on from the
+     * case before; some cases dispatch a host-dependent number of times, so a case's quantum fell
+     * where its predecessors left it. Each case starts the count afresh, so the quantum falls a
+     * whole TIMESLICE of dispatches in (PSP-DMAC-002 b3 failed when it fell inside the scenario). */
+    s_dispatches_since_time = 0u;
     s_tick = 0;
     s_interrupts_enabled = 1;
     s_dispatch_enabled = 1;
@@ -32311,6 +32316,40 @@ static void dch_scenario_fifo(void) {
     s_dch_pending_after[0] = dch_pending(0) && dch_pending(1);
     dch_start(2, 0x18u);   /* queues second, the stronger */
     s_dch_pending_after[1] = dch_pending(0) && dch_pending(2);
+}
+
+/* Whatever dispatch count the cases before leave, the arrival-order scenario runs the same. Each
+ * round leaves a count that puts the clock's quantum on one of the scenario's first 64 dispatches
+ * (counted from 0); reset_fixture starts the count afresh, so every round is the same run. Before
+ * it did, a quantum on dispatches 2 to 6 failed the queueing check and one on dispatch 11 the
+ * order and timing checks. The scenario itself takes fewer than 64 dispatches, so these phases
+ * cover it. */
+#define DCH_FIFO_PHASES 64u
+
+static void test_dmac_fifo_whatever_the_inherited_clock_phase(void) {
+    const uint32_t dispatches = s_dispatches_since_time;
+    unsigned failed = 0u;
+    uint32_t longest = 0u;
+    for (uint32_t phase = 0u; phase < DCH_FIFO_PHASES; phase++) {
+        memset(s_dch_pending_after, 0, sizeof s_dch_pending_after);
+        s_dispatches_since_time = TIMESLICE - 1u - phase;
+        dch_setup(dch_scenario_fifo);
+        if (s_dispatches_since_time > longest) longest = s_dispatches_since_time;
+        const int ok = s_dch_pending_after[0] && s_dch_pending_after[1] && s_dch[0].order == 1 &&
+                       s_dch[1].order == 2 && s_dch[2].order == 3 &&
+                       s_dch[1].exit_us >= s_dch[0].deadline_us + 58u &&
+                       s_dch[2].exit_us >= s_dch[1].exit_us + 58u;
+        if (!ok && failed++ == 0u)
+            printf("dmac fifo: first failing inherited phase %u: orders %d/%d/%d, exits %llu/%llu/%llu us\n",
+                   phase, s_dch[0].order, s_dch[1].order, s_dch[2].order,
+                   (unsigned long long)s_dch[0].exit_us, (unsigned long long)s_dch[1].exit_us,
+                   (unsigned long long)s_dch[2].exit_us);
+    }
+    printf("dmac fifo: %u of %u inherited clock phases failed; the scenario took %u dispatches\n", failed,
+           (unsigned)DCH_FIFO_PHASES, (unsigned)longest);
+    expect(failed == 0u, "PSP-DMAC-002 b3: the arrival-order scenario holds at every inherited clock phase");
+    expect(longest < DCH_FIFO_PHASES, "the inherited phases cover every dispatch of the scenario");
+    s_dispatches_since_time = dispatches;
 }
 
 static void test_dmac_queued_callers_are_served_in_arrival_order(void) {
@@ -52792,6 +52831,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_dmac_small_body_bypasses_the_channel();
     test_dmac_refused_try_copies_head_and_tail();
     test_dmac_queued_callers_are_served_in_arrival_order();
+    test_dmac_fifo_whatever_the_inherited_clock_phase();
     test_display_framebuf_latch();
     test_time_domains_are_coherent();
     test_kernel_import_sweep_sysclock_conversion();
