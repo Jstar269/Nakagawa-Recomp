@@ -760,6 +760,7 @@ public final class InstallMain {
                     print("skip", install.skip());  // Continue without the build tools
                     waiter.join();
                     print("skip-again", install.skip());
+                    print("start-after-skip", install.start(executor));  // held until the next process
                     print("state", install.status().state);
                     print("folder", new File(work, "toolchain").exists());
                     print("stamp", new File(work, ".toolchain-unpacked").exists());
@@ -773,6 +774,7 @@ public final class InstallMain {
                     break;
                 }
                 case "unknown-version": {
+                    // The work folder holds a complete unpack stamped v1.
                     ToolchainArchive.Install install = install(null);
                     print("complete-before", install.isComplete());
                     install.start(executor);
@@ -780,7 +782,9 @@ public final class InstallMain {
                     print("end", end.state);
                     print("error", end.error);
                     print("opens", opens.get());
-                    print("leftover", new File(work, "toolchain").exists());
+                    print("left-as-is", new File(work, "toolchain/a/a.h").isFile()
+                        && ToolchainArchive.readText(new File(work, ".toolchain-unpacked")).equals("v1"));
+                    print("complete-for-v1", install("v1").isComplete());
                     break;
                 }
                 default:
@@ -883,6 +887,7 @@ class ToolchainInstallTests(unittest.TestCase):
         self.assertEqual(seen["skip"], "true")
         self.assertEqual(seen["player"], "false []")             # the player starts; nothing is set
         self.assertEqual(seen["skip-again"], "false")
+        self.assertEqual(seen["start-after-skip"], "false")      # Continue holds in this process
         self.assertEqual(seen["state"], "SKIPPED")
         self.assertEqual(seen["folder"], "false")                # the partial folder is gone
         self.assertEqual(seen["stamp"], "false")
@@ -939,16 +944,18 @@ class ToolchainInstallTests(unittest.TestCase):
         self.assertEqual(seen["opens"], "0")
 
     def test_an_unknown_app_version_fails(self) -> None:
-        def prepare(work: Path) -> None:
-            (work / ".toolchain-unpacked").write_text("unknown", encoding="utf-8")
+        def prepare(work: Path) -> None:   # a complete unpack from an earlier start
+            (work / ".toolchain-unpacked").write_text("v1", encoding="utf-8")
             (work / "toolchain" / "a").mkdir(parents=True)
-            (work / "toolchain" / "a" / "leftover.h").write_bytes(b"partial")
+            (work / "toolchain" / "a" / "a.h").write_bytes(b"a")
         seen = self.run_scenario("unknown-version", prepare)
         self.assertEqual(seen["complete-before"], "false")
         self.assertEqual(seen["end"], "FAILED")
         self.assertEqual(seen["error"], "the app's version cannot be read")
         self.assertEqual(seen["opens"], "0")
-        self.assertEqual(seen["leftover"], "false")              # its space comes back too
+        # Not knowing the version is no evidence against the toolchain: it is left as it is.
+        self.assertEqual(seen["left-as-is"], "true")
+        self.assertEqual(seen["complete-for-v1"], "true")
 
 
 class StampTests(unittest.TestCase):

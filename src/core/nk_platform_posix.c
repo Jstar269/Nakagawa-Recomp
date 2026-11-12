@@ -1108,8 +1108,21 @@ static void android_import_environment(JNIEnv *env) {
     if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
     jsize count = entries ? (*env)->GetArrayLength(env, entries) : 0;
     for (jsize i = 0; i < count; i++) {
+        /* No JNI call may follow one that left an exception pending: each is cleared here,
+           and the entry it concerns is named in the log as not applied. */
         jstring entry = (jstring)(*env)->GetObjectArrayElement(env, entries, i);
+        if ((*env)->ExceptionCheck(env)) {
+            (*env)->ExceptionClear(env);
+            __android_log_print(ANDROID_LOG_ERROR, "nakagawa", "NK_ENV_IMPORT_FAILED entry=%d", (int)i);
+            continue;
+        }
         const char *text = entry ? (*env)->GetStringUTFChars(env, entry, NULL) : NULL;
+        if (entry && !text) {   /* GetStringUTFChars threw OutOfMemoryError */
+            (*env)->ExceptionClear(env);
+            __android_log_print(ANDROID_LOG_ERROR, "nakagawa", "NK_ENV_IMPORT_FAILED entry=%d", (int)i);
+            (*env)->DeleteLocalRef(env, entry);
+            continue;
+        }
         const char *eq = text ? strchr(text, '=') : NULL;
         if (eq && eq != text && (size_t)(eq - text) < 256u) {
             char name[256];

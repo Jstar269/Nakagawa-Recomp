@@ -310,7 +310,8 @@ final class ToolchainArchive {
      * folder, counts the archives' files, unpacks each, and writes the stamp last, synced. A run
      * that fails, or a process that dies part way, therefore leaves no matching stamp, and the
      * next start unpacks again. A failure deletes the stamp and the partial folder, so its space
-     * comes back, and becomes FAILED with its reason; {@link #start} then tries again, or
+     * comes back (except when the app's version cannot be read: then nothing can be decided and
+     * the files are left as they are), and becomes FAILED with its reason; {@link #start} then tries again, or
      * {@link #skip} lets the caller go on without the toolchain (SKIPPED, which no later check
      * reads as complete).
      */
@@ -346,12 +347,15 @@ final class ToolchainArchive {
         }
 
         /**
-         * Starts the unpack on {@code executor} unless it is running or done; returns whether it
-         * started one.
+         * Starts the unpack on {@code executor} unless it is running, done, or skipped (which holds
+         * until the next process start); returns whether it started one.
          */
         boolean start(Executor executor) {
             synchronized (this) {
-                if (state == Status.State.RUNNING || state == Status.State.DONE) return false;
+                if (state == Status.State.RUNNING || state == Status.State.DONE
+                        || state == Status.State.SKIPPED) {
+                    return false;
+                }
                 state = Status.State.RUNNING;
                 done = 0;
                 total = 0;
@@ -423,6 +427,9 @@ final class ToolchainArchive {
         }
 
         private void unpackAll() throws IOException {
+            // Without the app's version nothing can be decided: the toolchain there, complete or
+            // not, is left as it is, and the next start with a readable version decides.
+            if (stamp == null) throw new IOException("the app's version cannot be read");
             try (RandomAccessFile lock = new RandomAccessFile(lockFile, "rw");
                  FileChannel channel = lock.getChannel()) {
                 channel.lock();  // released when the channel closes
@@ -444,7 +451,6 @@ final class ToolchainArchive {
         }
 
         private void unpackLocked() throws IOException {
-            if (stamp == null) throw new IOException("the app's version cannot be read");
             if (isComplete()) return;  // another process finished it while this one waited
             if (stampFile.exists() && !stampFile.delete()) throw new IOException("cannot delete " + stampFile);
             deleteTree(folder);

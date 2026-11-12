@@ -172,7 +172,6 @@ public class LauncherActivity extends SDLActivity {
         private final LinearLayout panel;
         private final ProgressBar bar;
         private final TextView detail;
-        private final TextView unavailable;
         private final LinearLayout actions;
         private final Button retry;
         private final Button skip;
@@ -192,7 +191,6 @@ public class LauncherActivity extends SDLActivity {
             TextView title = text(activity.getString(R.string.toolchain_unpack_title), 22);
             bar = new ProgressBar(activity, null, android.R.attr.progressBarStyleHorizontal);
             detail = text("", 16);
-            unavailable = text(activity.getString(R.string.toolchain_unpack_unavailable), 16);
             retry = new Button(activity);
             retry.setText(R.string.toolchain_unpack_retry);
             retry.setOnClickListener(v -> NakagawaHost.retryToolchain(install));
@@ -207,7 +205,6 @@ public class LauncherActivity extends SDLActivity {
             panel.addView(title);
             panel.addView(bar, new LinearLayout.LayoutParams(dp(360), ViewGroup.LayoutParams.WRAP_CONTENT));
             panel.addView(detail);
-            panel.addView(unavailable);
             panel.addView(actions);
             mLayout.addView(panel, new ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
@@ -232,17 +229,17 @@ public class LauncherActivity extends SDLActivity {
                     break;
                 case FAILED:
                     bar.setVisibility(View.GONE);
-                    // Announced once, on the failure, not on each of the thousands of progress steps.
+                    // Announced once, on the failure, not on each of the thousands of progress
+                    // steps; the reason and the note are one text, so both are read.
                     detail.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
-                    detail.setText(activity.getString(R.string.toolchain_unpack_failed, status.error));
-                    unavailable.setVisibility(View.VISIBLE);
+                    detail.setText(activity.getString(R.string.toolchain_unpack_failed, status.error) + "\n\n"
+                        + activity.getString(R.string.toolchain_unpack_unavailable));
                     actions.setVisibility(View.VISIBLE);
                     retry.requestFocus();
                     break;
                 default:  // IDLE before a retry starts, RUNNING
                     bar.setVisibility(View.VISIBLE);
                     detail.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_NONE);
-                    unavailable.setVisibility(View.GONE);
                     actions.setVisibility(View.GONE);
                     bar.setIndeterminate(status.total == 0);
                     if (status.total == 0) {

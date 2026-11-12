@@ -149,7 +149,7 @@ final class NakagawaHost {
             PackageInfo info = context.getPackageManager().getPackageInfo(context.getPackageName(), 0);
             return info.getLongVersionCode() + "-" + info.lastUpdateTime;
         } catch (Exception e) {
-            Log.e(TAG, "cannot read the app's version", e);
+            Log.e(TAG, "APP_VERSION_UNREADABLE: the toolchain unpack cannot decide and leaves the files as they are", e);
             return null;
         }
     }
