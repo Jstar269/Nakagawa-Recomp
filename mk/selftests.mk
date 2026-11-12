@@ -1143,7 +1143,7 @@ gpu-coherence-twin-mutants: $(GPU_COHERENCE_BIN)
 			$(CC) $(GE_CFLAGS) -DSR_TWIN_SELFTEST_$$m -c src/rt/ge.c -o $$geobj || exit 1;; esac; \
 		bin=$(BUILD_DIR)/gpu_coherence_twin_mutant_$$m.exe; \
 		$(CC) $(CFLAGS) -DSR_GPU_COHERENCE_SELFTEST -DSR_TWIN_SELFTEST_$$m -ffunction-sections -fdata-sections \
-			-DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(LDFLAGS) -Wl,--gc-sections -o $$bin \
+			-DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(LDFLAGS) $(LD_GC_SECTIONS) -o $$bin \
 			tests/native/gpu_coherence_selftest.c src/rt/ge_capture.c src/rt/ge_raster_ref.c $$geobj src/rt/flight_recorder.c src/rt/perf.c \
 			$(SDL3VK_SRCS) $(GEGPU_SRCS) $(LIBS) || exit 1; \
 		$$bin $$args > $$bin.log 2>&1; result=$$?; \
