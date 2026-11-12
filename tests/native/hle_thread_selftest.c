@@ -30520,9 +30520,9 @@ static void test_ge_finish_callbacks_do_not_nest(void) {
  * that ends with a completion still waiting stops the run by name instead of dropping it.
  * Real scheduler threads, real sceGeListEnQueue and sceKernelExitThread.
  * MUTANT: one process-wide "callback running" flag, never cleared by the exit, leaves the main
- * thread's later callback waiting forever (it never runs; reasoned, not built); dropping ge_finish_release_owner()
- * from thread teardown leaves the dead worker's run open and loses its waiting completion
- * without a stop (2 checks fail, measured). */
+ * thread's later callback waiting forever (it never runs; reasoned, not built); dropping
+ * ge_finish_release_owner() from thread teardown leaves the dead worker's run open and loses its
+ * waiting completion without a stop (2 checks fail, measured). */
 #define GX_MAIN_ENTRY   0x08a38080u
 #define GX_WORKER_ENTRY 0x08a380c0u
 

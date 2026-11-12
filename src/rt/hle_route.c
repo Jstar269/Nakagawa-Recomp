@@ -2017,8 +2017,9 @@ static void ge_finish_callback_run(CpuState *s, uint32_t cbid, uint32_t finish_i
  *
  * Both bounds are this runtime's, not the PSP's: a run holds up to GE_LIST_MAX waiting
  * completions (a waiting completion no longer holds a list slot) and up to
- * GE_FINISH_RUNS_MAX threads may be inside a finish callback at once. Past either bound the run
- * stops by name; the compatibility report records the import that completed the list. */
+ * GE_FINISH_RUNS_MAX contexts (threads, and owner 0 for interrupt or no-thread context) may be
+ * inside a finish callback at once. Past either bound the run stops by name; the compatibility
+ * report records the import that completed the list. */
 enum { GE_FINISH_PENDING_MAX = GE_LIST_MAX, GE_FINISH_RUNS_MAX = 8 };
 typedef struct {
     int active;
@@ -2061,7 +2062,7 @@ void ge_finish_callback(CpuState *s, uint32_t cbid, uint32_t finish_id, uint32_t
         if (!s_ge_finish_runs[i].active) run = &s_ge_finish_runs[i];
     if (!run) {
         (void)hle_unmodelled_stop("GE finish callback",
-                                  "on a thread while %d other threads are inside finish callbacks "
+                                  "while %d other contexts are inside finish callbacks "
                                   "has no measured result", GE_FINISH_RUNS_MAX);
         return;
     }
@@ -2069,7 +2070,16 @@ void ge_finish_callback(CpuState *s, uint32_t cbid, uint32_t finish_id, uint32_t
     run->owner = owner;
     run->head = run->count = 0u;
     ge_finish_callback_run(s, cbid, finish_id, user_arg);
-    while (run->count && s->flow_kind != SR_FLOW_FATAL) {
+    for (;;) {
+        /* A thread that ended inside the callback gave this run back, and the slot may be
+         * another thread's by now; a scheduler that resumed it here must not touch the slot. */
+        if (!run->active || run->owner != owner) {
+            (void)hle_unmodelled_stop("GE finish callback",
+                                      "returned on uid 0x%x after its thread's run was given back "
+                                      "has no measured result", owner);
+            return;
+        }
+        if (!run->count || s->flow_kind == SR_FLOW_FATAL) break;
         unsigned head = run->head;
         run->head = (head + 1u) % GE_FINISH_PENDING_MAX;
         run->count--;
@@ -2085,8 +2095,9 @@ void ge_finish_callback(CpuState *s, uint32_t cbid, uint32_t finish_id, uint32_t
 
 /* The thread `owner` is ending (exit, termination, or an unwind out of a finish callback that
  * skipped the end of ge_finish_callback): give its run back. Completions still waiting in it
- * have no thread left to run their callbacks on, which a PSP cannot reach (an interrupt handler
- * does not end a thread), so the run stops by name rather than dropping them. */
+ * have no thread left to run their callbacks on. A PSP runs these callbacks in interrupt context,
+ * which is not expected to end a thread (inferred, not measured), so this state has no PSP
+ * counterpart and the run stops by name rather than dropping them. */
 void ge_finish_release_owner(uint32_t owner) {
     GeFinishRun *run = ge_finish_run_of(owner);
     if (!run) return;
