@@ -57,9 +57,14 @@ def plan_signature(plan: P.FunctionPlan) -> dict:
         if t.kind in ("jump-self", "jump-label", "branch-label") and t.backward:
             yields.append(t.addr)
     tails += [(e.target, e.symbol) for e in plan.exits]
+    ops = [step for step in plan.steps if isinstance(step, P.Op)]
+    ops += [step.slot for step in plan.steps if isinstance(step, P.Transfer) and step.slot]
     return {"labels": sorted(labels), "continuations": sorted(e.target for e in plan.exits),
             "calls": sorted(calls), "dispatches": Counter(dispatches), "tails": Counter(tails),
-            "returns": returns, "yields": sorted(yields)}
+            "returns": returns, "yields": sorted(yields),
+            "sv_checks": sorted((addr, reg, value) for addr, checks in plan.sv_checks.items()
+                                for reg, value in checks),
+            "cache_notes": sorted(op.addr for op in ops if op.kind == "cache_note")}
 
 
 def _addr(text: str) -> int:
@@ -89,11 +94,16 @@ def c_signature(text: str) -> dict:
                   re.findall(r"dispatch_call_checked\(s, (0x[0-9a-f]{8}u|_t), (0x[0-9a-f]{8}u)\)\) return;",
                              text)]
     yields = [_addr(pc) for pc in re.findall(r"SR_YIELD\(s, (0x[0-9a-f]{8}u)\); goto", text)]
+    sv_checks = [(_addr(pc), int(reg), _addr(value)) for pc, reg, value in re.findall(
+        r"sr_sv_check\(s, (0x[0-9a-f]{8}u), (\d+), (0x[0-9a-f]{8}u)\);", text)]
+    cache_notes = [_addr(pc) for pc in re.findall(
+        r"sr_begin\(s, (0x[0-9a-f]{8}u), 0x[0-9a-f]{8}u\); sr_stale_note_cache_op\(", text)]
     return {"labels": sorted(int(a, 16) for a in re.findall(r"^  L_([0-9a-f]{8}): ;$", text, re.M)),
             "continuations": sorted(int(a, 16) for a in re.findall(r"^  _sr_cont_([0-9a-f]{8}): ;$",
                                                                    text, re.M)),
             "calls": sorted(calls), "dispatches": Counter(dispatches), "tails": Counter(tails),
-            "returns": text.count("SR_AOT_RETURN_CAPTURE(s,"), "yields": sorted(yields)}
+            "returns": text.count("SR_AOT_RETURN_CAPTURE(s,"), "yields": sorted(yields),
+            "sv_checks": sorted(sv_checks), "cache_notes": sorted(cache_notes)}
 
 
 class DriftGuardTests(unittest.TestCase):
@@ -101,6 +111,7 @@ class DriftGuardTests(unittest.TestCase):
 
     def _run(self, *options):
         captured = []
+        self.bodies = {}
         real = codegen_llvm.lower
 
         def recording(cg, elf, start, ranges, known, *, c_text, **kwargs):
@@ -109,6 +120,7 @@ class DriftGuardTests(unittest.TestCase):
             plan = P.plan_function(cg, elf, start, ranges, known, **plan_kwargs)
             body = real(cg, elf, start, ranges, known, c_text=c_text, **kwargs)
             captured.append((start, c_text, plan))
+            self.bodies[start] = body
             return body
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -144,6 +156,33 @@ class DriftGuardTests(unittest.TestCase):
     def test_plans_match_emit_function_under_the_stack_census(self):
         self._check(self._run("--funcs-per-chunk=1", "--stack-census"))
 
+    def test_plans_match_emit_function_under_static_verify_and_stale_detect(self):
+        # #330: --static-verify and --stale-detect bodies are lowered, with each assertion
+        # after the same word as in C. The plans carry every static-verify point of the
+        # lowered bodies; a function kept in C keeps its points in its C body.
+        captured = self._run("--funcs-per-chunk=1", "--static-verify", "--stale-detect")
+        self._check(captured)
+        placed = 0
+        for start, body in self.bodies.items():
+            lines = codegen_llvm.chunk_module("t.ll", [body], {}).render().splitlines()
+            for i, line in enumerate(lines):
+                match = re.search(r"call void @sr_llvm_sv_check\(ptr %s, i32 (\d+),", line)
+                if not match:
+                    continue
+                # The last trace record before the call is its word's, closed, and nothing
+                # between them leaves the block (the C check comes before any goto).
+                begin = max(j for j in range(i) if "@sr_llvm_begin(ptr %s, i32 " in lines[j])
+                with self.subTest(function=f"0x{start:08x}", line=line):
+                    self.assertIn(f"@sr_llvm_begin(ptr %s, i32 {match.group(1)},", lines[begin])
+                    between = lines[begin + 1:i]
+                    self.assertTrue(any("@sr_llvm_end(" in l for l in between))
+                    self.assertFalse([l for l in between if l.endswith(":")
+                                      or l.strip().startswith(("br ", "ret "))])
+                placed += 1
+        self.assertEqual(placed, sum(len(checks) for _, _, plan in captured
+                                     for checks in plan.sv_checks.values()))
+        self.assertGreater(placed, 0)
+
     def test_plans_match_emit_function_with_every_body_split(self):
         # #1691: a split body's conditional edge into another entry is a TAIL transfer
         # to that entry's symbol, and a not-taken branch continues into the next entry.
@@ -170,10 +209,10 @@ class FakeElf:
 NOP, JR_RA = 0x00000000, 0x03E00008
 
 
-def _plan_and_c(words, start=0x1000, known=None):
+def _plan_and_c(words, start=0x1000, known=None, options=None):
     elf, ranges, known = FakeElf(words), [(start, start + 0x100)], known or {start}
-    plan = P.plan_function(codegen, elf, start, ranges, known)
-    c_text = "\n".join(codegen.emit_function(elf, start, ranges, known))
+    plan = P.plan_function(codegen, elf, start, ranges, known, options=options)
+    c_text = "\n".join(codegen.emit_function(elf, start, ranges, known, options=options))
     return plan, c_text
 
 
@@ -216,6 +255,23 @@ class TransferRuleTests(unittest.TestCase):
         self.assertEqual(P.decode_op(0, srav), P.Op(0, srav, "ashrv", 7, (6, 5)))
         self.assertEqual(P.decode_op(0, movz), P.Op(0, movz, "movz", 7, (6, 5)))
         self.assertEqual(P.decode_op(0, lwl), P.Op(0, lwl, "lwl", 6, (6, 5), 0xFFFFFFFC))
+
+    def test_cache_hooks_match_the_c_emitter_in_a_body_and_a_delay_slot(self):
+        # The cosimulation corpus has no `cache`, so the drift guard compares none there.
+        cache = 0x2F << 26 | 4 << 21 | 0x14 << 16 | 0x40          # cache 0x14, 0x40(r4)
+        words = {0x1000: cache, 0x1004: JR_RA, 0x1008: cache}
+        options = codegen.CodegenOptions(stale_detect=True)
+        plan, c_text = _plan_and_c(words, options=options)
+        self.assertEqual(plan_signature(plan)["cache_notes"], [0x1000, 0x1008])
+        self.assertEqual(c_signature(c_text)["cache_notes"], [0x1000, 0x1008])
+        plan, c_text = _plan_and_c(words)
+        self.assertEqual(plan_signature(plan)["cache_notes"], [])
+        self.assertEqual(c_signature(c_text)["cache_notes"], [])
+        # The address is the base register (rs, not the op in rt) plus the sign-extended
+        # displacement, as codegen._effect_cache computes it.
+        back = 0x2F << 26 | 4 << 21 | 0x14 << 16 | 0xFFF8        # cache 0x14, -8(r4)
+        self.assertEqual(P.decode_op(0, back, stale_detect=True),
+                         P.Op(0, back, "cache_note", None, (4,), 0xFFFFFFF8))
 
     def test_forms_outside_the_plan_are_refused_with_a_reason(self):
         with self.assertRaisesRegex(P.Unsupported, "FPU at 0x00000010"):

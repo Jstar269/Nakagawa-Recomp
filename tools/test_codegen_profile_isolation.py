@@ -31,7 +31,7 @@ unit tests instead:
 * ``HST_MANUAL_CALLABLES`` / ``HST_RESUME_OWNERS`` change entry *roles*
   (:func:`codegen.build_entry_catalog`);
 * ``_SV_SPECIAL`` suppresses ``--static-verify`` emission
-  (:func:`codegen.sv_plan`) -- the differential covers it too, because the
+  (:func:`codegen.sv_points`) -- the differential covers it too, because the
   differential runs with ``--static-verify`` enabled;
 * the address literals and named address tables themselves, which
   :class:`GateInventoryTests` re-derives from ``tools/codegen.py``'s AST.  That
@@ -574,7 +574,7 @@ ADDR_OPERANDS = frozenset({"addr", "a", "start"})
 
 #: Functions whose bodies decide what translated C is emitted.
 EMITTERS = frozenset({
-    "effect", "normal_line", "emit_function", "main", "sv_plan",
+    "effect", "normal_line", "emit_function", "main", "sv_plan", "sv_points",
     # The steps emit_function and main were split into (#1531).
     "_translate", "_dup_slot_skips", "_emit_hst_patch_site", "_emit_non_control_word", "_emit_eret",
     "_emit_slot_exit", "_emit_unrelocated_jal", "_emit_jal", "_emit_jalr", "_emit_jr",
@@ -841,14 +841,15 @@ class GateInventoryTests(unittest.TestCase):
         )
         self.assertIn("hst_profile", _name_ids(binding[0].value.test))
 
-    def test_sv_special_is_read_only_by_sv_plan(self):
+    def test_sv_special_is_read_only_by_static_verify_planning(self):
+        # sv_points computes the points (sv_plan counts them, the LLVM plan reads them, #330).
         readers = {
             fn.name
             for fn in ast.walk(self.tree)
             if isinstance(fn, ast.FunctionDef)
             and "_SV_SPECIAL" in _name_ids(fn)
         }
-        self.assertEqual(readers, {"sv_plan"})
+        self.assertEqual(readers, {"sv_points"})
 
     def test_address_tables_have_not_grown_silently(self):
         """Every table entry is inside the specimen's covered set."""
