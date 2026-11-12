@@ -72,6 +72,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -363,6 +364,11 @@ def compare(old: dict[str, Any], new: dict[str, Any], *, keys: Iterable[str] | N
                                          "title": (after or {}).get("title"), "old": None,
                                          "new": after, "reason": "not in the old run"})
             continue
+        if before["end"] in NO_VERDICT_ENDS:
+            row = _row(key, before, after, untested_titles.get(key))
+            row["reason"] = f"old run: {before.get('stop') or before['end']}"
+            rows["not_compared"].append(row)
+            continue
         if after is None:
             if partial:
                 skipped += 1
@@ -376,10 +382,6 @@ def compare(old: dict[str, Any], new: dict[str, Any], *, keys: Iterable[str] | N
         if after["end"] in NO_VERDICT_ENDS:
             row["reason"] = after.get("stop") or after["end"]
             rows["no_verdict"].append(row)
-            continue
-        if before["end"] in NO_VERDICT_ENDS:
-            row["reason"] = f"old run: {before.get('stop') or before['end']}"
-            rows["not_compared"].append(row)
             continue
         old_score, new_score = _score(before, ceiling, like), _score(after, ceiling, like)
         if new_score < old_score:
@@ -542,20 +544,137 @@ def select_fast(baseline: dict[str, Any], *, budget_seconds: int, jobs: int,
             "estimated_seconds": round(max(lanes))}
 
 
+def _pid_alive(pid: int) -> bool:
+    """Whether a process exists, without a signal: os.kill(pid, 0) on Windows ends the process."""
+    if pid <= 0:
+        return False
+    if os.name != "nt":
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
+    import ctypes
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+    kernel32.OpenProcess.restype = ctypes.c_void_p
+    kernel32.GetExitCodeProcess.argtypes = (ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong))
+    kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
+    handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        # ERROR_INVALID_PARAMETER (87) means no process has that ID. Any other failure, access
+        # denied included, says nothing, so the process counts as alive and its lock is kept.
+        return bool(ctypes.get_last_error() != 87)  # type: ignore[attr-defined]
+    code = ctypes.c_ulong()
+    ok = kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
+    kernel32.CloseHandle(handle)
+    return not ok or code.value == 259  # STILL_ACTIVE; a failed query keeps the lock
+
+
+def _host_id() -> str:
+    """The host and OS a lock's process ID belongs to (a Windows run and a WSL run differ)."""
+    return f"{socket.gethostname()}/{sys.platform}"
+
+
+#: Windows refuses to delete a file another process has open (ERROR_SHARING_VIOLATION), and a
+#: waiting run opens the slot files to read them for a moment.
+_SHARING_VIOLATION = 32
+
+
+def _remove_slot_file(path: Path, sleep: Callable[[float], None] = time.sleep) -> None:
+    """Delete a lock or guard file; a missing one is not an error. A Windows sharing violation,
+    a reader holding the file for microseconds, is tried again for up to a second before the
+    error is raised."""
+    for attempt in range(50):
+        try:
+            path.unlink()
+            return
+        except FileNotFoundError:
+            return
+        except PermissionError as error:
+            if getattr(error, "winerror", None) != _SHARING_VIOLATION or attempt == 49:
+                raise
+            sleep(0.02)
+
+
+def _clear_stale_lock(lock: Path, pid_alive: Callable[[int], bool], log: Callable[[str], None]) -> None:
+    """Remove our own lock file when the process named in it is gone (a killed fast run).
+
+    Reclaiming runs take ``<lock>.reclaim`` (created exclusively; it does not count as a slot)
+    and delete the lock only if it still holds the text that named the dead process. While a lock
+    file exists no run can create one of the same name, and only a holder of ``.reclaim`` deletes
+    another run's lock, so a lock taken by a live run meanwhile is never touched. A process ID
+    only means something on its own host and OS, so a lock that names another host or OS (a
+    Windows run and a WSL run sharing a folder, or two machines) is never reclaimed here."""
+    try:
+        text = lock.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return
+    match = re.search(r"\bpid=(\d+)", text)
+    host = re.search(r"\bhost=(\S+)", text)
+    if not match or (host and host.group(1) != _host_id()) or pid_alive(int(match.group(1))):
+        return
+    guard = lock.with_name(f"{lock.name}.reclaim")
+    try:
+        descriptor = os.open(guard, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        _report_stale_guard(guard, pid_alive, log)
+        return
+    except OSError as error:
+        log(f"cannot reclaim {lock.name}: {guard.name}: {error}")
+        return
+    try:
+        os.write(descriptor, f"library-regress pid={os.getpid()} host={_host_id()}\n".encode())
+        os.close(descriptor)
+        try:
+            current = lock.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return  # another reclaimer removed it first
+        if current != text:
+            return  # a live run took the slot after the dead one was reclaimed
+        try:
+            _remove_slot_file(lock)
+        except OSError as error:
+            log(f"cannot reclaim {lock.name} from process {match.group(1)}, which is gone: {error}")
+            return
+        log(f"reclaimed {lock.name}: process {match.group(1)} is gone")
+    finally:
+        try:
+            _remove_slot_file(guard)
+        except OSError as error:
+            log(f"cannot remove {guard.name}: {error}; reclaiming {lock.name} stops until it is removed")
+
+
+def _report_stale_guard(guard: Path, pid_alive: Callable[[int], bool], log: Callable[[str], None]) -> None:
+    """Name a reclaim guard whose run is gone: it stops reclaiming until someone removes it."""
+    try:
+        text = guard.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return  # its run finished meanwhile
+    match = re.search(r"\bpid=(\d+)", text)
+    host = re.search(r"\bhost=(\S+)", text)
+    if match and (not host or host.group(1) == _host_id()) and not pid_alive(int(match.group(1))):
+        log(f"{guard} was left by process {match.group(1)}, which is gone; remove it to let stale locks be reclaimed")
+
+
 def _lock_count(slot_dir: Path) -> int:
     return len(list(slot_dir.glob("*.lock")))
 
 
 def acquire_slot(slot_dir: Path, name: str, max_slots: int, *, quiet_globs: Iterable[str] = (),
                  sleep: Callable[[float], None] = time.sleep, log: Callable[[str], None] = print,
-                 max_wait_seconds: float | None = None, poll_seconds: float = 30.0) -> Path | None:
+                 max_wait_seconds: float | None = None, poll_seconds: float = 30.0,
+                 pid_alive: Callable[[int], bool] = _pid_alive) -> Path | None:
     """Hold one title slot: a lock file of our own, created only while fewer than ``max_slots``
-    lock files exist and none matches ``quiet_globs`` (a timing run that wants the machine)."""
+    lock files exist and none matches ``quiet_globs`` (a timing run that wants the machine).
+    Our own lock left by a process that is gone is reclaimed on each pass; other jobs' locks never are."""
     slot_dir.mkdir(parents=True, exist_ok=True)
     lock = slot_dir / name
     waited = 0.0
     told = False
     while max_wait_seconds is None or waited <= max_wait_seconds:
+        _clear_stale_lock(lock, pid_alive, log)  # every pass: its holder may be killed while we wait
         quiet = next((path.name for pattern in quiet_globs for path in slot_dir.glob(pattern)), None)
         if quiet is None and _lock_count(slot_dir) < max_slots:
             try:
@@ -563,11 +682,12 @@ def acquire_slot(slot_dir: Path, name: str, max_slots: int, *, quiet_globs: Iter
             except FileExistsError:
                 descriptor = None
             if descriptor is not None:
-                os.write(descriptor, f"library-regress pid={os.getpid()} start={_utc_now()}\n".encode())
+                os.write(descriptor,
+                         f"library-regress pid={os.getpid()} host={_host_id()} start={_utc_now()}\n".encode())
                 os.close(descriptor)
                 if _lock_count(slot_dir) <= max_slots:
                     return lock
-                lock.unlink(missing_ok=True)  # another job took the last slot at the same moment
+                _remove_slot_file(lock)  # another job took the last slot at the same moment
         if not told:
             log(f"waiting for a title slot ({quiet + ' held' if quiet else f'{_lock_count(slot_dir)} held'})")
             told = True
@@ -622,7 +742,10 @@ def run_fast(args: argparse.Namespace, *,
         completed = run(command, check=False)
     finally:
         if lock is not None:
-            lock.unlink(missing_ok=True)
+            try:
+                _remove_slot_file(lock)
+            except OSError as error:  # the run's result still counts; a later run reclaims the lock
+                log(f"fast: could not remove {lock}: {error}; it is reclaimed once this process is gone")
     manifest_path = run_dir / "library-build.json"
     if completed.returncode != 0 or not manifest_path.is_file():
         log(f"fast: library_build.py ended {completed.returncode}; no verdict")
@@ -635,8 +758,10 @@ def run_fast(args: argparse.Namespace, *,
         result["commit_ranges"] = commit_ranges(result, args.repo, run=run)
     _write_json(run_dir / "comparison.json", result)
     sys.stdout.write(render_comparison(result))
-    state.update(cursor=choice["next_cursor"], runs=int(state.get("runs", 0)) + 1, last_run=run_id,
-                 last_snapshot=path.name)
+    if result["verdict"] != "no_verdict":
+        state["cursor"] = choice["next_cursor"]  # a run without a verdict tries the same titles again
+    state.update(runs=int(state.get("runs", 0)) + 1, last_run=run_id, last_snapshot=path.name,
+                 last_verdict=result["verdict"])
     _write_json(state_path, state)
     if not args.keep_scratch:
         shutil.rmtree(scratch, ignore_errors=True)
