@@ -819,6 +819,12 @@ static void settings_accessibility(NkUi *ui, const PlayerUiSettingsModel *model,
     }
 }
 
+/* Settings > Enhanced's text ids: the play mode at 0x400, part row i at 0x404 + 4i, room for every
+   part PLAYER_UI_ID_ENHANCED_PART can name, then the texture pack rows at 0x500 and 0x504. */
+#define SET_ID_ENHANCED_TEXT_END \
+    (0x404u + 4u * (PLAYER_UI_ENHANCED_FIRST_IDS + PLAYER_UI_ENHANCED_MORE_IDS))
+typedef char settings_texpack_text_after_parts[SET_ID_ENHANCED_TEXT_END <= 0x500u ? 1 : -1];
+
 /* Settings > Enhanced (#2055; src/rt/ace.h): the play mode, then one row per Enhanced part, with a
    sentence beside each that says what it does and what it costs. The library's page sets the
    default; a title's page (opened from its Enhanced options) sets that game's choice, where a
@@ -903,16 +909,18 @@ static void settings_ace(NkUi *ui, const PlayerUiSettingsModel *model, float inn
                 result->title_index = (size_t)i;
             }
         }
-        /* A title's page: its texture pack's folder, which can be chosen in any play mode. */
+        /* A title's page: its texture pack's folder, which can be chosen in any play mode. Its
+           rows' text ids sit past every part row's (SET_ID_ENHANCED_TEXT_END), so a later part
+           takes the next part id and moves no other row's text. */
         if (model->texpack_row) {
             const size_t at = (size_t)count + 1u;
-            if (scr_wizard_value(ui, PLAYER_UI_ID_SETTINGS_TEXPACK_CHOOSE, SET_ID_TEXT + 0x440u,
+            if (scr_wizard_value(ui, PLAYER_UI_ID_SETTINGS_TEXPACK_CHOOSE, SET_ID_TEXT + 0x500u,
                                  rows[at].name, rows[at].value, rows[at].sentence,
                                  model->texpack_chosen, inner - 32.0f, &column)) {
                 *result = settings_op(PLAYER_UI_SETTINGS_CHOOSE_TEXPACK);
             }
             if (model->texpack_chosen &&
-                scr_wizard_value(ui, PLAYER_UI_ID_SETTINGS_TEXPACK_REMOVE, SET_ID_TEXT + 0x444u,
+                scr_wizard_value(ui, PLAYER_UI_ID_SETTINGS_TEXPACK_REMOVE, SET_ID_TEXT + 0x504u,
                                  rows[at + 1u].name, rows[at + 1u].value, rows[at + 1u].sentence,
                                  false, inner - 32.0f, &column)) {
                 *result = settings_op(PLAYER_UI_SETTINGS_REMOVE_TEXPACK);
