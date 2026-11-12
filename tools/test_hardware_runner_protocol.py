@@ -263,7 +263,7 @@ class FakeUsbHostFsProcess:
 
     def __init__(self, lines=(), *, exits: bool = False):
         self.stdout = LiveServerOutput(lines)
-        self.returncode = None
+        self.returncode: int | None = None
         self.terminated = False
         if exits:
             self.stdout.close()
@@ -292,11 +292,14 @@ class _CommandInput:
     def __init__(self, on_close):
         self.written = ""
         self.closed = False
+        self.fail_write: OSError | None = None
         self._on_close = on_close
 
     def write(self, text: str) -> int:
         if self.closed:
             raise ValueError("write to closed file")
+        if self.fail_write is not None:
+            raise self.fail_write
         self.written += text
         return len(text)
 
@@ -2325,6 +2328,56 @@ class HardwareRunnerProtocolTests(unittest.TestCase):
         self.assertTrue(process.terminated)
         self.assertIn("did not exit", adapter.stop_detail)
         self.assertIn("not released", adapter.stop_detail)
+
+    @patch.object(run_psplink_module, "_read_hardware_lock", _lock_held)
+    def test_stop_of_a_usbhostfs_that_already_exited_sends_nothing(self):
+        process, adapter, scratch = self._started_command_input_server()
+        with scratch:
+            adapter.start()
+            process.returncode = 1
+            process.stdout.close()
+            adapter.stop()
+
+        self.assertEqual(process.stdin.written, "")
+        self.assertFalse(process.terminated)
+        self.assertEqual(adapter.stop_detail, "usbhostfs_pc had already exited")
+
+    @patch.object(run_psplink_module, "_read_hardware_lock", _lock_held)
+    def test_stop_terminates_a_usbhostfs_whose_exit_command_cannot_be_sent(self):
+        # On Windows a broken stdin pipe raises OSError(22) from write while wsl.exe lives on.
+        process, adapter, scratch = self._started_command_input_server()
+        process.stdin.fail_write = OSError(22, "Invalid argument")
+        with scratch:
+            adapter.start()
+            adapter.stop()
+
+        self.assertTrue(process.terminated)
+        self.assertEqual(
+            adapter.stop_detail,
+            "usbhostfs_pc's `exit` command could not be sent (OSError); terminated, so the "
+            "PSPLink USB interface was not released",
+        )
+
+    def _started_command_input_server(self):
+        fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        scratch = tempfile.TemporaryDirectory(prefix="runner-exit-", dir=fixture_dir)
+        process = CommandInputUsbHostFsProcess(USBHOSTFS_BANNER)
+
+        def command_runner(command, timeout):
+            if command == ["usbipd", "list"]:
+                process.stdout.emit("Connected to device")
+                return 0, "2-1 054c:01c9 PSP Type B Attached\n", "", "PROCESS_EXITED"
+            raise AssertionError(f"unexpected command: {command}")
+
+        adapter = PsplinkProcessTransport(
+            session_id="synthetic-session",
+            pspsh_argv=["fake-pspsh", "-e", "{remote_command}"],
+            usbhostfs_argv=["fake-usbhostfs", "{host0_root}"],
+            host0_root=Path(scratch.name),
+            command_runner=command_runner,
+            popen_factory=lambda _command, **_kwargs: process,
+        )
+        return process, adapter, scratch
 
     def test_l1_records_how_the_owned_usbhostfs_stopped_and_restarted(self):
         class DetailedRestartTransport(SimulatedPsplinkTransport):

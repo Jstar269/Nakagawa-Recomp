@@ -1211,6 +1211,7 @@ _SERVER_OUTPUT_TAIL_LINES = 8
 # USB interface and resets the device before the process ends (psplinkusb usbhostfs_pc/main.c).
 USBHOSTFS_EXIT_COMMAND = "exit\n"
 USBHOSTFS_EXIT_TIMEOUT = 5.0
+_USBHOSTFS_NOT_RELEASED = "terminated, so the PSPLink USB interface was not released"
 
 
 class TransportStartError(RuntimeError):
@@ -1582,19 +1583,15 @@ class PsplinkProcessTransport:
             return
         if server.poll() is not None:
             self.stop_detail = "usbhostfs_pc had already exited"
-        elif self._request_server_exit(server):
-            self.stop_detail = "usbhostfs_pc exited after its `exit` command"
         else:
-            self.stop_detail = (
-                f"usbhostfs_pc did not exit within {USBHOSTFS_EXIT_TIMEOUT:g}s of its `exit` "
-                "command; terminated, so the PSPLink USB interface was not released"
-            )
-            server.terminate()
-            try:
-                server.wait(timeout=2.0)
-            except subprocess.TimeoutExpired:
-                server.kill()
-                server.wait(timeout=2.0)
+            exited, self.stop_detail = self._request_server_exit(server)
+            if not exited:
+                server.terminate()
+                try:
+                    server.wait(timeout=2.0)
+                except subprocess.TimeoutExpired:
+                    server.kill()
+                    server.wait(timeout=2.0)
         stdin = getattr(server, "stdin", None)
         if stdin is not None and not stdin.closed:
             try:
@@ -1612,26 +1609,35 @@ class PsplinkProcessTransport:
             self._server_state.notify_all()
 
     @staticmethod
-    def _request_server_exit(server: subprocess.Popen) -> bool:
-        """Send `exit` on the server's stdin; True once the process has ended.
+    def _request_server_exit(server: subprocess.Popen) -> tuple[bool, str]:
+        """Send `exit` on the server's stdin; return (process ended, what happened).
 
         The exit status is not checked: after exit_app has released and reset
         the device, libusb can abort the process during exit (status 134).
         """
         stdin = getattr(server, "stdin", None)
         if stdin is None or stdin.closed:
-            return False
+            return False, f"usbhostfs_pc has no command input; {_USBHOSTFS_NOT_RELEASED}"
         try:
             stdin.write(USBHOSTFS_EXIT_COMMAND)
             stdin.flush()
             stdin.close()
-        except (OSError, ValueError):
-            return server.poll() is not None
+        except (OSError, ValueError) as exc:
+            if server.poll() is not None:
+                # It ended on its own: whether exit_app ran is not known.
+                return True, "usbhostfs_pc ended before its `exit` command could be sent"
+            return False, (
+                f"usbhostfs_pc's `exit` command could not be sent ({type(exc).__name__}); "
+                f"{_USBHOSTFS_NOT_RELEASED}"
+            )
         try:
             server.wait(timeout=USBHOSTFS_EXIT_TIMEOUT)
         except subprocess.TimeoutExpired:
-            return False
-        return True
+            return False, (
+                f"usbhostfs_pc did not exit within {USBHOSTFS_EXIT_TIMEOUT:g}s of its `exit` "
+                f"command; {_USBHOSTFS_NOT_RELEASED}"
+            )
+        return True, "usbhostfs_pc exited after its `exit` command"
 
 
 class PsplinkCampaignRunner:
