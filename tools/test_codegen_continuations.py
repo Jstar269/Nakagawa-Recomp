@@ -11,6 +11,64 @@ sys.path.insert(0, str(ROOT / "tools"))
 
 import codegen
 
+#: The runtime header whose definitions the --state-resume allow-list (codegen._STATE_RESUME_CALLS)
+#: rests on. A module-level name, so a check can point the test at a copy of the header.
+RECOMP_H = ROOT / "src" / "rt" / "recomp.h"
+
+
+def _header_definitions(text):
+    """Every ``#define`` of a function-like macro (name -> bodies) and every name a C line
+    declares or defines as a function, from header text with comments and line splices removed."""
+    text = re.sub(r"/\*.*?\*/", " ", text, flags=re.S)
+    text = re.sub(r"//[^\n]*", "", text)
+    text = text.replace("\\\n", " ")
+    macros, functions = {}, set()
+    for line in text.splitlines():
+        define = re.match(r"\s*#\s*define\s+([A-Za-z_]\w*)\(([^)]*)\)\s*(.*)$", line)
+        if define:
+            macros.setdefault(define.group(1), []).append(define.group(3).strip())
+            continue
+        function = re.match(r"\s*(?!(?:return|else|case|goto|sizeof)\b)(?:(?:static|inline|extern)\s+)*"
+                            r"[A-Za-z_]\w*(?:\s+|\s*\*+\s*)+"
+                            r"([A-Za-z_]\w*)\s*\(", line)
+        if function and not line.lstrip().startswith("#"):
+            functions.add(function.group(1))
+    return macros, functions
+
+
+def _closes_at_end(body, opening):
+    """Whether the bracket at ``opening`` is closed by the body's last character."""
+    pair = {"(": ")", "{": "}"}[body[opening]]
+    depth = 0
+    for index in range(opening, len(body)):
+        if body[index] == body[opening]:
+            depth += 1
+        elif body[index] == pair:
+            depth -= 1
+            if depth == 0:
+                return index == len(body) - 1
+    return False
+
+
+def _declares_nothing(name, macros, functions, seen=()):
+    """Whether a statement ``name(...);`` can declare nothing at its own scope: ``name`` is a
+    function, or every definition of it is a parenthesized expression, a body that is exactly
+    ``do { ... } while (0)``, or a call ``other(...)`` of a name that itself declares nothing."""
+    if name in seen or name not in macros:
+        return name in functions
+    for body in macros[name]:
+        if body.startswith("(") and _closes_at_end(body, 0):
+            continue
+        loop = re.fullmatch(r"do\s*(\{.*\})\s*while\s*\(\s*0\s*\)", body, re.S)
+        if loop and _closes_at_end(loop.group(1), 0):
+            continue
+        call = re.match(r"([A-Za-z_]\w*)\s*\(", body)
+        if (call and _closes_at_end(body, call.end() - 1)
+                and _declares_nothing(call.group(1), macros, functions, (*seen, name))):
+            continue
+        return False
+    return True
+
 
 class FakeElf:
     def __init__(self, words):
@@ -1129,6 +1187,33 @@ class StateResumeTests(unittest.TestCase):
             with self.subTest(middle=middle[0]):
                 self.assertIn("SR_RESUME_POINT_CALL", "\n".join(
                     codegen.state_resume_pass(head + middle + tail, 0x1000)))
+
+    def test_the_call_allow_list_declares_nothing_in_the_runtime_header(self):
+        # A function-scope `NAME(args);` keeps a body's resume points only for these names
+        # (codegen._STATE_RESUME_CALLS); a macro among them that declared a local would leave
+        # that local live, unrestored, at every resume label. Each is pinned to its definitions.
+        macros, functions = _header_definitions(RECOMP_H.read_text(encoding="utf-8"))
+        for name in sorted(codegen._STATE_RESUME_CALLS):
+            with self.subTest(name=name):
+                self.assertTrue(name in macros or name in functions, f"{name} is not in recomp.h")
+                self.assertTrue(_declares_nothing(name, macros, functions),
+                                f"{name} may declare a name at the statement's scope: {macros.get(name)}")
+        # The reading itself: a declaring body, one hidden behind another macro, a block that
+        # is not the whole body, and a name defined nowhere are each caught.
+        for header, name in (
+            ("#define SR_X(pc) uint32_t _chk = (pc)\n", "SR_X"),
+            ("#define SR_X(pc) SR_Y((pc))\n#define SR_Y(v) uint32_t _y = (v)\n", "SR_X"),
+            ("#define SR_X(pc) do { (void)(pc); } while (0); uint32_t _z = 0\n", "SR_X"),
+            ("#define SR_X(pc) (void)(pc), uint32_t _z\n", "SR_X"),
+            ("", "SR_X"),
+        ):
+            with self.subTest(header=header):
+                self.assertFalse(_declares_nothing(name, *_header_definitions(header)))
+        for header in ("#define SR_X(pc) do { uint32_t _t = (pc); (void)_t; } while (0)\n",
+                       "#define SR_X(pc) ((void)(pc))\n",
+                       "static inline void sr_x(uint32_t pc) { (void)pc; }\n#define SR_X(pc) sr_x((pc))\n"):
+            with self.subTest(header=header):
+                self.assertTrue(_declares_nothing("SR_X", *_header_definitions(header)))
 
     def test_a_body_with_another_function_scope_local_keeps_its_text(self):
         # The resume switch restores the entry $sp only; any other local would be live at
