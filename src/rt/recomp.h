@@ -2724,6 +2724,10 @@ int      sched_current_join_result_pending(uint32_t uid); /* non-consuming join-
 void     sched_raise_interrupt(uint32_t source);     /* latch source; delivery occurs at a scheduler boundary */
 uint32_t sched_pending_interrupts(void);             /* source bits not yet serviced */
 void     sched_delay_current(uint64_t usec);        /* block current thread for usec */
+/* sched_delay_current(), but the wait cannot end inside the scheduling decision its own block
+ * causes: when another thread is ready then, of any priority, that thread is dispatched first.
+ * For the Ace load skip (nk_ace_load_skip_wait); see the definition in sched.c. */
+void     sched_delay_current_dispatching(uint64_t usec);
 void     sched_preempt(void);                       /* yield now if a higher-priority thread is ready */
 /* Set by the preemption timer when a stronger thread's deadline comes. A long HLE call polls it
  * between units of work and, where the thread that runs cannot reach the call's own state (for

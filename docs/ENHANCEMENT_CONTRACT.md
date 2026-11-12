@@ -2060,7 +2060,8 @@ The `load` Ace part of section 9.8, for a title that paces a loading screen with
   the pacing guard (below) has not fired. Then the call is not made. The thread instead blocks for 1 µs, the shortest delay wait the scheduler has (that of
   `sceKernelDelayThread(1)`); for that moment it is visibly in a delay wait, not a display wait. Ready threads of any
   priority, lower ones included, can then run as they would during the stock wait, and the waiter resumes at its
-  next scheduling point instead of the next VBLANK. A zero delay or a ready-queue rotation would not do this: on the
+  next scheduling point instead of the next VBLANK. The decision its block causes always runs another ready thread
+  first, even when the 1 µs is already over by then (`sched_delay_current_dispatching()`, `src/rt/sched.c`). A zero delay or a ready-queue rotation would not do this: on the
   PSP, `sceKernelDelayThread(0)` returns without yielding even to a thread of equal priority (#340), and a rotation
   yields only to threads of equal or higher priority, so a lower-priority thread would not run. `$v0` is then 0,
   which is what the stock function returns after its wait. With the key
