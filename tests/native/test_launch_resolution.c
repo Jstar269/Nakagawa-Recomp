@@ -856,6 +856,8 @@ static void test_no_iso_child_environment(const char *test_executable,
         write_file(hb_file, "shipped settings");
         snprintf(hb_file, sizeof(hb_file), "%s%clevels%cONE.TXT", hb_src, sep, sep);
         write_file(hb_file, "level one");
+        snprintf(hb_file, sizeof(hb_file), "%s%cZED.TXT", hb_src, sep);
+        write_file(hb_file, "zed one");
         assert(nk_pbp_homebrew_write_view(hb_pbp, hb_view_root, NULL, problem, sizeof(problem)));
         /* What the program wrote on an earlier run stays. */
         snprintf(hb_file, sizeof(hb_file), "%s%cSETTINGS.INI", hb_stick_folder, sep);
@@ -878,6 +880,8 @@ static void test_no_iso_child_environment(const char *test_executable,
         assert_file_text(hb_file, "the player's own settings");
         snprintf(hb_file, sizeof(hb_file), "%s%cDATA.TXT.nkcopy", hb_stick_folder, sep);
         assert_file_text(hb_file, "the program's own");
+        snprintf(hb_file, sizeof(hb_file), "%s%cZED.TXT", hb_stick_folder, sep);
+        assert_file_text(hb_file, "zed one");
         /* Nothing the folder does not hold appears: a path it lacks stays missing. */
         snprintf(hb_file, sizeof(hb_file), "%s%cMISSING.BIN", hb_stick_folder, sep);
         assert(nk_platform_path_missing(hb_file));
@@ -906,7 +910,9 @@ static void test_no_iso_child_environment(const char *test_executable,
         /* A seed that stops part way still records what it placed, so a later release
            reaches those files; a view file that differs from the manifest stops the launch
            and leaves the view to be written afresh (review of #2426, M-new-1, m-new-4).
-           Sorted, DATA.TXT is seeded before NEW.TXT, whose view copy is damaged. */
+           Sorted, DATA.TXT is seeded before NEW.TXT, whose view copy is damaged; ZED.TXT,
+           after it, is not reached and keeps its earlier record (review of #2426, m-new2-1),
+           so release four's ZED.TXT replaces it. */
         snprintf(hb_file, sizeof(hb_file), "%s%cDATA.TXT", hb_src, sep);
         write_file(hb_file, "release three");
         snprintf(hb_file, sizeof(hb_file), "%s%cNEW.TXT", hb_src, sep);
@@ -925,12 +931,16 @@ static void test_no_iso_child_environment(const char *test_executable,
         assert(nk_platform_path_missing(hb_file));
         snprintf(hb_file, sizeof(hb_file), "%s%cDATA.TXT", hb_src, sep);
         write_file(hb_file, "release four");
+        snprintf(hb_file, sizeof(hb_file), "%s%cZED.TXT", hb_src, sep);
+        write_file(hb_file, "zed two");
         assert(nk_pbp_homebrew_write_view(hb_pbp, hb_view_root, NULL, problem, sizeof(problem)));
         run_probe(&session, report_path, observed, sizeof(observed));
         snprintf(hb_file, sizeof(hb_file), "%s%cDATA.TXT", hb_stick_folder, sep);
         assert_file_text(hb_file, "release four");
         snprintf(hb_file, sizeof(hb_file), "%s%cNEW.TXT", hb_stick_folder, sep);
         assert_file_text(hb_file, "a new file");
+        snprintf(hb_file, sizeof(hb_file), "%s%cZED.TXT", hb_stick_folder, sep);
+        assert_file_text(hb_file, "zed two");
 
         /* Each Memory Stick keeps its own record: a run on another stick does not make the
            title's own stick take its old files for current ones (review of #2426, m-new-1). */
@@ -949,6 +959,41 @@ static void test_no_iso_child_environment(const char *test_executable,
             snprintf(hb_file, sizeof(hb_file), "%s%cDATA.TXT", hb_stick_folder, sep);
             assert_file_text(hb_file, "release five");
         }
+
+        /* A file on a stick that already holds the view's bytes, with no record (the folder
+           copied there by hand), is the seed's: a later release replaces it (review of
+           #2426, m-new2-1). */
+        {
+            char hb_third[NK_MAX_PATH * 2 + 32];
+            char hb_third_folder[NK_MAX_PATH * 2 + 96];
+            snprintf(hb_third, sizeof(hb_third), "%s%chomebrew-stick-third", root, sep);
+            snprintf(hb_third_folder, sizeof(hb_third_folder), "%s%cPSP%cGAME%cMYHB", hb_third,
+                     sep, sep, sep);
+            assert(nk_platform_mkdir_p(hb_third_folder));
+            snprintf(hb_file, sizeof(hb_file), "%s%cDATA.TXT", hb_third_folder, sep);
+            write_file(hb_file, "release five");
+            copy_field(session.memstick_root, sizeof(session.memstick_root), hb_third);
+            run_probe(&session, report_path, observed, sizeof(observed));
+            assert_file_text(hb_file, "release five");
+            snprintf(hb_file, sizeof(hb_file), "%s%cDATA.TXT", hb_src, sep);
+            write_file(hb_file, "release six");
+            assert(nk_pbp_homebrew_write_view(hb_pbp, hb_view_root, NULL, problem,
+                                              sizeof(problem)));
+            run_probe(&session, report_path, observed, sizeof(observed));
+            snprintf(hb_file, sizeof(hb_file), "%s%cDATA.TXT", hb_third_folder, sep);
+            assert_file_text(hb_file, "release six");
+            copy_field(session.memstick_root, sizeof(session.memstick_root), hb_stick);
+        }
+
+        /* A view file of another size than the manifest says is damage too: the launch stops
+           and the view is no longer current (review of #2426, m-new2-1). */
+        snprintf(hb_file, sizeof(hb_file), "%s%cPSP%cGAME%cMYHB%cZED.TXT", hb_view_root, sep, sep,
+                 sep, sep);
+        write_file(hb_file, "a longer, damaged zed");
+        assert(nk_launch_start(&session) != NK_OK);
+        assert(strstr(session.last_error, "is damaged") != NULL);
+        assert(!nk_pbp_homebrew_view_current(hb_pbp, hb_view_root));
+        assert(nk_pbp_homebrew_write_view(hb_pbp, hb_view_root, NULL, problem, sizeof(problem)));
 
         /* A second folder in the view is not a program's folder: the launch stops. */
         snprintf(hb_view, sizeof(hb_view), "%s%cPSP%cGAME%cOTHER", hb_view_root, sep, sep, sep);

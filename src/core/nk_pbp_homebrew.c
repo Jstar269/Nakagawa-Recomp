@@ -1637,10 +1637,13 @@ bool nk_pbp_homebrew_seed_memstick(const char *iso_path, const char *folder,
         return false;
     }
     if (hb_state(target) == HB_FILE || hb_state(target) == HB_UNKNOWN ||
-        !nk_platform_mkdir_p_private(target) ||
-        !nk_platform_real_path(target, target_real, sizeof(target_real))) {
+        !nk_platform_mkdir_p_private(target)) {
         hb_problem(problem, problem_size, "%.400s could not be made on the Memory Stick.",
                    target);
+        ok = false;
+    } else if (!nk_platform_real_path(target, target_real, sizeof(target_real))) {
+        hb_problem(problem, problem_size,
+                   "Where %.400s really is could not be read from the system.", target);
         ok = false;
     } else if (!hb_seeded_record_path(seeded_dir, target_real, seeded_path,
                                       sizeof(seeded_path))) {
@@ -1666,6 +1669,8 @@ bool nk_pbp_homebrew_seed_memstick(const char *iso_path, const char *folder,
         char view[HB_PATH_MAX];
         char hex[HB_HEX_LEN + 1u];
         HbState state;
+        HbState view_state;
+        int64_t view_size = -1;
         done = i;
         if (hb_under(entry->rel, kept, kept_count)) continue;
         if (!hb_join_rel(stick, sizeof(stick), target, entry->rel) ||
@@ -1688,8 +1693,13 @@ bool nk_pbp_homebrew_seed_memstick(const char *iso_path, const char *folder,
             }
         } else if (state == HB_FOLDER) {
             /* a folder where the view has a file: the program's, it stays */
-        } else if (hb_state(view) != HB_FILE ||
-                   nk_platform_get_file_size(view) != (int64_t)entry->size) {
+        } else if ((view_state = hb_state(view)) == HB_UNKNOWN ||
+                   (view_state == HB_FILE &&
+                    (view_size = nk_platform_get_file_size(view)) < 0)) {
+            /* not damage: the view stays, and the next start tries again */
+            hb_problem(problem, problem_size, "%.400s could not be read.", view);
+            ok = false;
+        } else if (view_state != HB_FILE || view_size != (int64_t)entry->size) {
             view_damaged = true;
             ok = false;
         } else if (state == HB_MISSING) {
