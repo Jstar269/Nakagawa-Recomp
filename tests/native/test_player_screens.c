@@ -53,7 +53,8 @@ static const EnhancedWords k_enhanced_words[PLAYER_PART_COUNT] = {
     [PLAYER_PART_CULL] = ENHANCED_WORDS(k_enhanced_switch_labels),
     [PLAYER_PART_UPSCALE] = ENHANCED_WORDS(k_enhanced_upscale_labels),
     [PLAYER_PART_STICK] = ENHANCED_WORDS(k_enhanced_switch_labels),
-    [PLAYER_PART_LOAD] = ENHANCED_WORDS(k_enhanced_switch_labels)};
+    [PLAYER_PART_LOAD] = ENHANCED_WORDS(k_enhanced_switch_labels),
+    [PLAYER_PART_TWIN] = ENHANCED_WORDS(k_enhanced_switch_labels)};
 #undef ENHANCED_WORDS
 /* The most words any part has, for the stays-put test's steps. */
 enum { ENHANCED_MAX_WORDS = 5 };
@@ -3964,8 +3965,8 @@ static EnhancedRowPlaces enhanced_row_places(FlowCase which) {
     NkUi *ui = NULL;
     /* As wide as the design window and tall enough that no row is scrolled away: a game's page
        stacks each row's sentence under its button at this width, so its last row starts below
-       1300 pixels. */
-    const NkUiDrawList *draw = flow_case_layout(which, 1280, 1600, &ui);
+       1300 pixels, and the window leaves room for parts still to come. */
+    const NkUiDrawList *draw = flow_case_layout(which, 1280, 2400, &ui);
     memset(&places, -1, sizeof(places));
     for (uint32_t i = 0u; draw != NULL && i < draw->ncmd; ++i) {
         const NkUiDrawCmd *cmd = &draw->cmd[i];
