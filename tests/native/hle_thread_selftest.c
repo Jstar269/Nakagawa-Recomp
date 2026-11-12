@@ -38653,7 +38653,7 @@ static void test_partition_skipped_gap_space_comes_back(void) {
     uint32_t low_addr = sr_last_alloc_addr;
     expect(low != 0xFFFFFFFFu &&
                (low_addr + 0x8000u <= keep_floor - 0x10000u || low_addr >= keep_floor),
-           "a Low block after a refused create lands outside the fixed reservation");
+           "a Low block after the create in the skipped gap lands outside the fixed reservation");
     memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = low;
     (void)sr_syscall(&cpu, NID_FREE_PART);
     memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = in_gap;
