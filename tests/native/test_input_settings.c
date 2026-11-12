@@ -841,7 +841,14 @@ static void test_per_title_scope_and_atomic_save(void) {
         const char *saved = getenv(config_root_env);
         char saved_copy[1024];
         if (saved) snprintf(saved_copy, sizeof(saved_copy), "%s", saved);
+#if defined(_WIN32) || defined(_WIN64) || defined(__ANDROID__)
         test_setenv(config_root_env, blocker_file);
+#else
+        /* An absolute path: a relative XDG value is ignored, as the XDG spec says (#324). */
+        static char blocker_absolute[4096];
+        assert(realpath(blocker_file, blocker_absolute) != NULL);
+        test_setenv(config_root_env, blocker_absolute);
+#endif
         char blocked_path[NK_MAX_PATH];
         blocked_path[0] = 'x';
         assert(input_settings_write_disc_profile(&after_failed, "UCUS98701", blocked_path,
