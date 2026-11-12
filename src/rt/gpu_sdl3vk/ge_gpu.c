@@ -347,6 +347,7 @@ typedef struct {
     VkImageLayout tlayout;
     uint64_t wgen, tgen;
     uint32_t hud_zgen;                     /* batches that wrote it (Ace smooth motion, ace_hud.h) */
+    uint64_t zseq;                         /* s_write_seq of the last batch that wrote depth to it */
 } DepthEnt;
 
 /* CPU writes into a resident target are held as up to this many byte spans and applied
@@ -397,6 +398,7 @@ typedef struct Target {
     uint64_t wgen, tgen;
     uint32_t tseed;
     int tshow;                             /* the coming present shows the twin */
+    uint64_t cseq;                         /* s_write_seq of the image's last change (render_gen) */
 } Target;
 
 /* Ordered destination reads (#2109). On the interlock path (sdl3vk.h SDL3VK_DST_READ_INTERLOCK)
@@ -847,7 +849,10 @@ unsigned long s_cnt_present_gpu = 0;
 /* Public read-only accessor: number of GE list submissions since process start.
  * Unused by the recomp/runtime; kept available for downstream tools/diffing. */
 unsigned long sr_submit_count(void) { return s_cnt_submit; }
-static unsigned long s_cnt_present_cpu = 0, s_cnt_rtt = 0;
+static unsigned long s_cnt_present_cpu = 0, s_cnt_rtt = 0, s_cnt_rtt_direct = 0;
+/* One count over every target image change and depth write, so a texture read whose address lies
+ * in both a colour target and a depth buffer can tell which was written last (depth_containing). */
+static uint64_t s_write_seq = 0;
 static unsigned long s_cnt_readback = 0, s_cnt_upload = 0, s_cnt_dirty = 0;
 static unsigned long s_cnt_snap = 0, s_cnt_texup = 0, s_cnt_xferblit = 0;
 static uint64_t s_cnt_tex_invalidations = 0;
@@ -2891,13 +2896,13 @@ static int submit_range(Target *t, const Batch *arr, uint32_t b0, uint32_t b1, i
     if (ntverts) s_cmd_slot->pused = param_base + (p1 - p0);
     int ok = cmd_batch_record(SR_PERF_GE_RENDER_BATCH);
     t->gpu_valid = 1;
-    t->render_gen++;
+    t->render_gen++; t->cseq = ++s_write_seq;
     /* Only a batch that writes depth (a depth test with writes on, or a clear that fills depth)
      * makes the depth surface newer than guest VRAM. A title that writes no depth may leave zbp on
      * a colour buffer, and writing the untouched surface back would overwrite those pixels. */
     int zwrite = 0;
     for (uint32_t i = b0; i < b1 && !zwrite; i++) zwrite = arr[i].key.zwrite;
-    if (t->dep && zwrite) { t->dep->guest_dirty = 1; t->dep->hud_zgen++; }
+    if (t->dep && zwrite) { t->dep->guest_dirty = 1; t->dep->hud_zgen++; t->dep->zseq = t->cseq; }
     sr_vram_mark_renderer_pending();
     s_cnt_submit++;
     if (s_stats) {
@@ -3241,7 +3246,7 @@ static int target_upload(Target *t) {
     if (!upload_finish(&upload, SR_PERF_GE_TARGET_UPLOAD)) return 0;
     t->gpu_valid = 1;
     t->cpu_n = 0;                          /* the whole image now holds guest VRAM */
-    t->render_gen++;                       /* image content changed (snapshot reuse check) */
+    t->render_gen++; t->cseq = ++s_write_seq;                       /* image content changed (snapshot reuse check) */
     target_note_clean(t);                  /* VRAM is the source: in sync by definition */
     s_cnt_upload++;
     return 1;
@@ -3429,7 +3434,7 @@ static int target_patch_vram_dirty(Target *t, uint32_t dirty_addr, uint32_t dirt
     if (!upload_finish(&upload, SR_PERF_GE_TARGET_UPLOAD)) return 0;
 
     t->gpu_valid = 1;
-    t->render_gen++;
+    t->render_gen++; t->cseq = ++s_write_seq;
     if (was_clean || (overlap0 == target0 && overlap1 == target1))
         target_note_clean(t);
     s_cnt_upload++;
@@ -5452,6 +5457,19 @@ static Target *target_containing(uint32_t a) {
     return best;
 }
 
+/* The depth buffer the renderer holds whose span (its stride times 272 rows of 16-bit values from
+ * its base) holds VRAM offset `a`, or NULL. A texture that starts there and inside a colour target
+ * reads whichever of the two was written last (build_state). */
+static DepthEnt *depth_containing(uint32_t a) {
+    for (int i = 0; i < MAX_DEP; i++) {
+        DepthEnt *d = &s_deps[i];
+        if (d->used && a >= d->zba && (uint64_t)a < (uint64_t)d->zba + (uint64_t)d->zstride * FB_H * 2u) return d;
+    }
+    return NULL;
+}
+
+static int hook_vram_read(uint32_t addr, uint32_t bytes);
+
 /* Build pipeline key + push constants for the current GE state. Always succeeds. */
 static void build_state(int persp, int sprite, Batch *b) {
     uint64_t key_started = cpu_profile_now();
@@ -5694,9 +5712,27 @@ static void build_state(int persp, int sprite, Batch *b) {
              * image has no mip levels, so a draw with mip levels on (#1373) reads the target
              * back and samples its chain from the texture cache. */
             (void)target_sync_cpu_writes(src);   /* a failure leaves it invalid: decoded from VRAM */
-            if (src->gpu_valid && !nortt && !ge_tex_mip_active(g) && g->tex_fmt == src->fmt && !g->tex_swizzle &&
-                (g->tex_bufw == src->stride || g->tex_bufw == 0) && (toff % bpp_s) == 0) {
+            /* Depth aliasing (#2052): the texture also starts inside a depth buffer the renderer
+             * holds. Depth written after the target's image last changed makes it a depth read,
+             * decoded from guest VRAM at 1x once the depth is committed there; otherwise the
+             * target's colour is the newer content and the rules below apply. Queued batches are
+             * submitted first, so both write counts include them. */
+            DepthEnt *zsrc = depth_containing(vram_off(g->tex_addr));
+            if (zsrc && s_nbatch && !submit_pending())
+                fprintf(stderr, "gegpu: a texture read inside depth buffer 0x%06x: the queued batches did not "
+                        "submit, so the newer of colour and depth is judged without them\n", zsrc->zba);
+            const int depth_read = zsrc && zsrc->zseq > src->cseq;
+            if (src->gpu_valid && !depth_read && !nortt && !ge_tex_mip_active(g) && g->tex_fmt == src->fmt &&
+                !g->tex_swizzle && (g->tex_bufw == src->stride || g->tex_bufw == 0) && (toff % bpp_s) == 0) {
                 uint32_t pix = toff / bpp_s;
+                /* The texture's own size and clamp bits (#2052): psp.frag clamps or wraps each texel
+                 * index at them, as ge.c does, not at the image's edge. A direct bind never has mip
+                 * levels, so these per-fragment LOD lanes are free (F_LODFRAG is off). */
+                b->pc.texenv[3] = (float)g->tex_w;
+                b->pc.fogcol[3] = (float)g->tex_h;
+                b->pc.cfg[1] |= (int32_t)(((g->tex_wrap & 1u) | (((g->tex_wrap >> 8) & 1u) << 1) |
+                                           ((g->tex_filter & 1u) << 2) | (((g->tex_filter >> 8) & 1u) << 3)) << 24);
+                s_cnt_rtt_direct++;
                 if (src == s_cur) {
                     /* feedback loop: sample a snapshot copy; reuse the previous snapshot
                      * while nothing new has rendered into the target */
@@ -5739,9 +5775,16 @@ static void build_state(int persp, int sprite, Batch *b) {
                 b->pc.texsize[3] = (float)(pix / src->stride);
             } else {
                 /* incompatible stride/format reinterpretation, or mip levels: VRAM + decoder.
-                 * A render target is drawn as the GE drew it: never from a scaled copy. */
-                (void)target_readback_span(src, vram_off(g->tex_addr),
-                                           tex_span_size(g->tex_bufw, g->tex_w, g->tex_h));
+                 * A render target is drawn as the GE drew it: never from a scaled copy. A depth
+                 * read commits what a CPU read would (the targets' pixels, then the depth). */
+                const uint32_t span = tex_span_size(g->tex_bufw, g->tex_w, g->tex_h);
+                if (depth_read) {
+                    if (!hook_vram_read(0x04000000u + vram_off(g->tex_addr), span))
+                        fprintf(stderr, "gegpu: a depth read at 0x%06x could not commit the depth to guest "
+                                "VRAM: it decodes what guest VRAM holds\n", vram_off(g->tex_addr));
+                } else {
+                    (void)target_readback_span(src, vram_off(g->tex_addr), span);
+                }
                 s_tex_noscale = 1;
                 b->dset = tex_get();
                 s_tex_noscale = 0;
@@ -6844,7 +6887,7 @@ static int hook_xfer(uint32_t startdata) {
     twin_note_write(&dst->wgen, &dst->tgen, twin_copy, "a block transfer the twins could not repeat");
 #endif
     if (!cmd_submit_wait(SR_PERF_GE_TRANSFER_BLIT)) return 0;
-    dst->render_gen++;                       /* content changed (snapshot/present tracking) */
+    dst->render_gen++; dst->cseq = ++s_write_seq;                       /* content changed (snapshot/present tracking) */
     target_note_drawn(dst, (int)dx, (int)dy, (int)(dx + w), (int)(dy + h));
     if (g_ace_on) ace_note_target_draw(dst->fba);
     sr_vram_mark_renderer_pending();
