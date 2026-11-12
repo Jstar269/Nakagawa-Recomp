@@ -431,6 +431,102 @@ typedef int (*GeDrawObserver)(void *ctx, unsigned long index, uint32_t op,
                               uint32_t cmd_addr, uint32_t list_addr);
 void      ge_set_draw_observer(GeDrawObserver fn, void *ctx);
 
+/* ---- render-state motion tap (#2081) ------------------------------------------------------
+ *
+ * A listener for what ge.c computes on a PRIM's way to the rasterizer: the PRIM's identity and
+ * projection state, each vertex reference before the perspective divide, every triangle and
+ * sprite it assembles with the acceptance decision, and which of them a raster call draws.
+ * Render-state motion pairs these between two frames to place an in-between frame's vertices
+ * (src/rt/motion_tap.h keeps them and builds from them).
+ *
+ * No listener (NULL, the default): each site in ge.c is one test of the listener pointer and
+ * nothing else. With one, the sites only read values ge.c already computed, so its pixels,
+ * depth, counters and traces are those of a run without it. One thing does change: GPU
+ * transform and lighting (#318) declines every PRIM, because that route forms no clip
+ * positions; such a PRIM is in neither of ge_tnl_counts' counts.
+ *
+ * Only triangle and sprite PRIMs publish their primitives. A point, a line, a patch and an
+ * immediate-mode vertex reach the rasterizer with no primitive published, so a listener reads
+ * what they draw as unknown, never as the primitive before them. */
+
+/* One vertex reference before the perspective divide. */
+typedef struct GeMotionVtx {
+    float clip[4];                     /* clip x, y, z, w; through mode: screen x, y, z and 1 */
+    float u, v;                        /* texel coordinate, not yet multiplied by 1/w */
+    float fog_arg;                     /* the fog factor before its clamp to 0..1 (1 with fog off) */
+    int   r, g, b, a;                  /* lit colour */
+} GeMotionVtx;
+
+/* GeMotionPrim.flags */
+#define GE_MOTION_PRIM_DEPTH_CLIP 0x01u   /* GE_CLIPENABLE is on */
+#define GE_MOTION_PRIM_CULL       0x02u   /* back faces are culled (never in clear mode) */
+#define GE_MOTION_PRIM_FLAT       0x04u   /* a triangle takes its last vertex's colour: flat shading or clear mode */
+#define GE_MOTION_PRIM_FOG        0x08u   /* fog is on */
+#define GE_MOTION_PRIM_INDEXED    0x10u   /* the vertex type has an index format */
+
+/* GeMotionPrim.state_class: clear mode alone, or the fragment units that are on. */
+#define GE_MOTION_CLASS_BLEND     0x01u
+#define GE_MOTION_CLASS_ZTEST     0x02u
+#define GE_MOTION_CLASS_ZWRITE    0x04u
+#define GE_MOTION_CLASS_ATEST     0x08u
+#define GE_MOTION_CLASS_CLEAR     0x10u
+
+/* One PRIM command, as draw_prim decoded it. The pointers are valid during the call only. */
+typedef struct GeMotionPrim {
+    uint8_t  type;                     /* GE PRIM type, 0..7 */
+    uint8_t  through;                  /* 1: through mode */
+    uint16_t flags;                    /* GE_MOTION_PRIM_* */
+    uint32_t count;                    /* vertex count of the command */
+    uint32_t vtype;                    /* GE vertex type, index format included */
+    uint32_t vbase, ibase;             /* vertex and index source address; ibase 0 when not indexed */
+    uint32_t list_addr, cmd_addr;      /* where the running list started, and this command's address */
+    uint32_t fbp, fbw, zbp, zbw;       /* colour and depth target, as GeState */
+    uint32_t tex_addr;                 /* 0 when untextured */
+    uint32_t clut_addr;                /* 0 when the texture has no CLUT */
+    uint32_t state_class;              /* GE_MOTION_CLASS_* */
+    float    viewport[6];              /* x, y, z scale, then x, y, z centre (decoded float24) */
+    float    offset[2];                /* screen offset x, y in pixels */
+    const float *view, *proj;          /* GeState's view (12 floats) and proj (16) */
+    const uint8_t *index_bytes;        /* the PRIM's index bytes when they lie in main RAM, else NULL */
+    uint32_t index_size;               /* count << (index format - 1); 0 when not indexed */
+} GeMotionPrim;
+
+/* What ge.c did with an assembled triangle or sprite. */
+enum {
+    GE_MOTION_DRAW = 0,                /* handed to the rasterizer whole */
+    GE_MOTION_CLIP,                    /* a triangle across the near plane: handed over as fan pieces */
+    GE_MOTION_DROP                     /* an acceptance test dropped it: never handed over */
+};
+
+/* Every callback must be set. They run on the thread that runs the GE list, inside the PRIM.
+ *
+ * prim      a PRIM command begins (every type, both modes).
+ * tri       one assembled triangle of that PRIM: its three PRIM positions (0..count-1) in the
+ *           order ge.c submits them, after the cull and strip-parity swap, the vertex
+ *           references at those positions, and the decision. With GE_MOTION_DRAW the next
+ *           raster call draws it.
+ * fan       the next raster call draws piece `piece` (0 or 1) of the triangle last given with
+ *           GE_MOTION_CLIP. Its vertices are made by the clip, not vertex references.
+ * sprite    one assembled sprite: its two PRIM positions and corners. `nv` corners are given:
+ *           2, or 1 when ge.c dropped the sprite on its first corner. With GE_MOTION_DRAW the
+ *           next raster call draws it.
+ * rastered  a triangle or sprite raster call returned (v2 NULL for a sprite), with the
+ *           vertices it was given. It ends the primitive published for it, if one was:
+ *           points and lines make no such call, and patches and immediate-mode vertices
+ *           make it with nothing published. */
+typedef struct GeMotionTap {
+    void *user;
+    void (*prim)(void *user, const GeMotionPrim *p);
+    void (*tri)(void *user, const uint16_t pos[3], const GeMotionVtx v[3], int decision);
+    void (*fan)(void *user, int piece);
+    void (*sprite)(void *user, const uint16_t pos[2], const GeMotionVtx *v, int nv, int decision);
+    void (*rastered)(void *user, const GeVtx *v0, const GeVtx *v1, const GeVtx *v2);
+} GeMotionTap;
+
+/* Set the listener, or NULL for none. `tap` must stay valid until it is replaced. Call it
+ * between lists, never from a callback. */
+void      ge_motion_tap_set(const GeMotionTap *tap);
+
 /* ---- widescreen Fill (#1881), the renderer layer ------------------------------------------
  *
  * Fill shows more of the 3D scene left and right of the PSP's 480x272 picture, which itself is
@@ -496,8 +592,9 @@ void      ge_tnl_counts(unsigned long long *taken, unsigned long long *cpu, int 
  * ALLOC, then each vertex in turn (VERTEX_RANGE for its position, normal or weights before
  * TEXCOORD_RANGE for its UV), then CLIP, then BACKEND. The counts sum to `cpu`, and a reset
  * through either function clears both.
- * A PRIM never offered (the switch off, no tnl_prim hook, fewer than 3 vertices, Fill on) is in
- * neither, nor is one dropped because its depth surface could not be prepared.
+ * A PRIM never offered (the switch off, no tnl_prim hook, fewer than 3 vertices, Fill on, a
+ * motion tap set) is in neither, nor is one dropped because its depth surface could not be
+ * prepared.
  * With SR_GESTAT, while the route is on (SR_GPU_TNL=1 and a backend with tnl_prim, as with
  * SR_GPU_GE=1, from the first transform-mode triangle draw), each stat window prints
  *   GESTAT-TNL f=<vblank> taken=<n> cpu=<n>: clear=<n> flat=<n> ... backend=<n>

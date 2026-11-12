@@ -24,6 +24,11 @@
 // The Makefile runs this twice, once with --strip-cache-disabled, because ge.c latches
 // the strip-cache switch once per process.
 //
+// The file also holds tests of other GE seams on the same object.  The last of them is the
+// render-state motion tap (#2081, test_ge_motion_tap): a list drawn with no listener, with one
+// and with none again leaves byte-identical VRAM, depth, GE state, counters and GE clock, and
+// the listener's store rebuilds the vertices ge.c handed over, bit for bit.
+//
 // `--bench ROUNDS` is not a test.  It times the same production GE object on two source-owned
 // workloads with the flight recorder compiled in but disarmed, or compiled out when the
 // build passes -USR_FLIGHT_RECORDER_LINKED, and prints one line per workload plus a
@@ -37,6 +42,7 @@
 #include "debug.h"
 #include "ge_capture.h"
 #include "ge_shared.h"
+#include "motion_tap.h"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -2572,6 +2578,689 @@ static void test_ge_bounding_box_branch(void) {
     printf("BBOX cases=%u (software and GPU hooks)\n", (unsigned)(sizeof cases / sizeof cases[0]));
 }
 
+/* ---- Render-state motion tap (#2081) on the production GE object ----
+ *
+ * One list on a display framebuffer with depth: a clear sprite, a triangle strip skinned by two
+ * bones under fog and culling, an indexed flat-shaded quad, a through-mode sprite and a triangle
+ * across the near plane; with MS_UNNAMED also the kinds the tap publishes no primitive for: a
+ * line, a point, a Bezier patch and an immediate-mode triangle.
+ *
+ * The bar for the tap is that with no listener each of its sites in ge.c is a pointer test and
+ * nothing else. So the list drawn with no listener, with one, and with none again must leave
+ * byte-identical guest VRAM (colour), depth, GE state, profile counters (every counter on, on
+ * this file's stepping clock, so one more clock read or count shows), frame counters and GE
+ * clock, with the timing model off and on; and a listener that was removed is not called.
+ *
+ * With the listener (a MotionTapFrame, motion_tap.h) the store must hold the PRIMs, vertex
+ * references, triangles and decisions ge.c produced. A backend stand-in that declines every
+ * primitive, so the software rasterizer still draws it, must find the published primitive
+ * during each call for a PRIM's triangle or sprite, and none during a call for the line, the
+ * point, the patch's triangles or the immediate-mode triangle. Then two frames of
+ * the list, with the bone, the quad's world matrix and the sprite moved, are matched by
+ * motion_match, and the builder at t = 1 must give, bit for bit, what ge.c handed the
+ * stand-in for frame B after the backend's vertex rule (the 28.4 snap, the flat-shading colour,
+ * the sprite's floored corners). */
+#define LIST_MOTION      0x08160000u
+#define MOTION_VERTS     0x08168000u
+#define MOTION_INDICES   0x0816C000u
+#define MOTION_VRAM      0x04000000u
+#define MOTION_VRAM_SIZE 0x00200000u
+#define MOTION_ZBP       0x04110000u
+#define MOTION_BG        0xff302010u
+#define MOTION_CULL      0u          /* the face that keeps the strip's triangles */
+enum { MS_UNNAMED = 1 };
+
+static uint32_t s_motion_vc;
+
+/* col 8888 and a float position: 16 bytes. */
+static void motion_vtx(uint32_t color, float x, float y, float z) {
+    uint8_t *d = (uint8_t *)SR_HOST(s_motion_vc);
+    const float pos[3] = { x, y, z };
+    memcpy(d, &color, 4);
+    memcpy(d + 4, pos, 12);
+    s_motion_vc += 16u;
+}
+
+/* Two float weights before them: 24 bytes. */
+static void motion_skin_vtx(float w1, uint32_t color, float x, float y, float z) {
+    uint8_t *d = (uint8_t *)SR_HOST(s_motion_vc);
+    const float w[2] = { 1.0f - w1, w1 }, pos[3] = { x, y, z };
+    memcpy(d, w, 8);
+    memcpy(d + 8, &color, 4);
+    memcpy(d + 12, pos, 12);
+    s_motion_vc += 24u;
+}
+
+/* What differs between frame 0 and frame 1: bone 1's translation, the quad's world x and the
+ * sprite's x. Every value is a short binary fraction, so ge.c's sums are exact and the
+ * expectations below can be too. */
+static void motion_bone1(int frame, float t[3]) {
+    t[0] = frame ? 0.25f : 0.125f;
+    t[1] = frame ? 0.125f : 0.0f;
+    t[2] = frame ? -0.125f : 0.0f;
+}
+static float motion_quad_tx(int frame) { return frame ? 0.25f : 0.125f; }
+static float motion_sprite_dx(int frame) { return frame ? 2.5f : 0.0f; }
+
+static void motion_strip_vertex(int i, float p[3], float *w1, uint32_t *color) {
+    p[0] = -0.75f + 0.125f * (float)i;
+    p[1] = (i & 1) ? 0.25f : 0.5f;
+    p[2] = -0.5f + 0.125f * (float)i;
+    *w1 = 0.125f * (float)i;
+    *color = 0xff800000u | ((uint32_t)(255 - 40 * i) << 8) | (uint32_t)(40 * i);
+}
+
+static const float k_motion_quad[4][3] = {
+    { 0.25f, -0.25f, 0.25f }, { 0.5f, -0.25f, 0.25f }, { 0.25f, -0.5f, 0.25f }, { 0.5f, -0.5f, 0.25f },
+};
+static const uint8_t k_motion_quad_index[6] = { 0, 1, 2, 2, 1, 3 };
+static const uint32_t k_motion_quad_color[4] = { 0xff0000ffu, 0xff00ff00u, 0xffff0000u, 0xff00ffffu };
+
+static void build_motion_list(int flags, int frame) {
+    static const float ident43[12] = { 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0 };
+    static const float ident44[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+    const uint32_t plain = (7u << 2) | (3u << 7), through = plain | (1u << 23);
+    const uint32_t skin = plain | (3u << 9) | (1u << 14);   /* two float weights */
+    s_pc = LIST_MOTION;
+    s_motion_vc = MOTION_VERTS;
+    W(0x10, 0x080000u);                    /* BASE: vertices at 0x08xxxxxx */
+    W(0x13, 0u);
+    W(0x9C, MOTION_VRAM & 0x00FFFFFFu);
+    W(0x9D, 512u);
+    W(0xD2, 3u);
+    W(0x9E, MOTION_ZBP & 0x00FFFFFFu);
+    W(0x9F, 512u);
+    W(0x15, 0u);
+    W(0x16, (271u << 10) | 479u);
+    W(0xD4, 0u);
+    W(0xD5, (271u << 10) | 479u);
+    W(0xD6, 0u);
+    W(0xD7, 0xFFFFu);
+    for (uint32_t cmd = 0x17; cmd <= 0x28; cmd++) W(cmd, 0u);   /* every unit off */
+    W(0x1C, 1u);                           /* CLIPENABLE: the near plane clips */
+    W(0x50, 1u);                           /* gouraud */
+    W(0xDE, 7u);                           /* ZTEST: greater or equal */
+    W(0xE7, 0u);                           /* depth writes on */
+    W(0xE8, 0u);
+    W(0xE9, 0u);
+
+    /* PRIM 0: the clear, colour, alpha and depth. */
+    uint32_t at = s_motion_vc;
+    motion_vtx(MOTION_BG, 0.0f, 0.0f, 0.0f);
+    motion_vtx(MOTION_BG, 480.0f, 272.0f, 0.0f);
+    W(0xD3, 0x701u);
+    W(0x12, through);
+    W(0x01, at & 0x00FFFFFFu);
+    W(0x04, (6u << 16) | 2u);
+    W(0xD3, 0u);
+
+    /* Clip is the model position: identity matrices, w = 1. Clip x -1..1 is screen x 0..480,
+     * clip y 1..-1 is screen y 0..272. */
+    wide_matrix(0x3A, ident43, 12);
+    wide_matrix(0x3C, ident43, 12);
+    wide_matrix(0x3E, ident44, 16);
+    W(0x42, f24(240.0f));
+    W(0x43, f24(-136.0f));
+    W(0x44, f24(-16000.0f));
+    W(0x45, f24(2048.0f));
+    W(0x46, f24(2048.0f));
+    W(0x47, f24(32768.0f));
+    W(0x4C, (2048u - 240u) << 4);
+    W(0x4D, (2048u - 136u) << 4);
+    W(0x23, 1u);                           /* ZTESTENABLE */
+
+    /* PRIM 1: the skinned strip. Bone 0 is the identity, bone 1 a translation; fog ends inside
+     * the strip, so some of its factors are saturated. */
+    float bone[24], t[3];
+    motion_bone1(frame, t);
+    memcpy(bone, ident43, sizeof ident43);
+    memcpy(bone + 12, ident43, sizeof ident43);
+    memcpy(bone + 21, t, sizeof t);
+    wide_matrix(0x2A, bone, 24);
+    W(0x1F, 1u);
+    W(0xCD, f24(0.25f));
+    W(0xCE, f24(1.0f));
+    W(0xCF, 0x00404040u);
+    W(0x1D, 1u);
+    W(0x9B, MOTION_CULL);
+    at = s_motion_vc;
+    for (int i = 0; i < 6; i++) {
+        float p[3], w1;
+        uint32_t color;
+        motion_strip_vertex(i, p, &w1, &color);
+        motion_skin_vtx(w1, color, p[0], p[1], p[2]);
+    }
+    W(0x12, skin);
+    W(0x01, at & 0x00FFFFFFu);
+    W(0x04, (4u << 16) | 6u);
+    W(0x1D, 0u);
+    W(0x1F, 0u);
+
+    /* PRIM 2: the quad, indexed and flat-shaded, moved by the world matrix. */
+    float world[12];
+    memcpy(world, ident43, sizeof world);
+    world[9] = motion_quad_tx(frame);
+    wide_matrix(0x3A, world, 12);
+    W(0x50, 0u);
+    at = s_motion_vc;
+    for (int i = 0; i < 4; i++)
+        motion_vtx(k_motion_quad_color[i], k_motion_quad[i][0], k_motion_quad[i][1], k_motion_quad[i][2]);
+    memcpy(SR_HOST(MOTION_INDICES), k_motion_quad_index, sizeof k_motion_quad_index);
+    W(0x12, plain | VT_INDEX8);
+    W(0x01, at & 0x00FFFFFFu);
+    W(0x02, MOTION_INDICES & 0x00FFFFFFu);
+    W(0x04, (3u << 16) | 6u);
+    W(0x50, 1u);
+    wide_matrix(0x3A, ident43, 12);
+
+    /* PRIM 3: the through-mode sprite, moved in its vertex data. */
+    at = s_motion_vc;
+    motion_vtx(0xff00a0f0u, 300.25f + motion_sprite_dx(frame), 20.5f, 9000.0f);
+    motion_vtx(0xff10b0e0u, 340.75f + motion_sprite_dx(frame), 60.25f, 1000.0f);
+    W(0x12, through);
+    W(0x01, at & 0x00FFFFFFu);
+    W(0x04, (6u << 16) | 2u);
+
+    /* PRIM 4: a triangle whose third vertex is behind the near plane (z + w < 0). */
+    at = s_motion_vc;
+    motion_vtx(0xffc0c0c0u, -0.5f, -0.5f, 0.0f);
+    motion_vtx(0xffc0c0c0u, -0.25f, -0.5f, 0.0f);
+    motion_vtx(0xffc0c0c0u, -0.375f, -0.25f, -3.0f);
+    W(0x12, plain);
+    W(0x01, at & 0x00FFFFFFu);
+    W(0x04, (3u << 16) | 3u);
+
+    if (flags & MS_UNNAMED) {
+        /* A 4x4 Bezier patch over clip x 0.625..0.8125, y 0.6875..0.875: triangles, no PRIM.
+         * It and the immediate-mode triangle follow PRIM 4's last fan piece with no PRIM
+         * command between: only the end of that piece's raster call keeps them from being
+         * taken for it. */
+        at = s_motion_vc;
+        for (int row = 0; row < 4; row++)
+            for (int col = 0; col < 4; col++)
+                motion_vtx(0xff40ff40u, 0.625f + 0.0625f * (float)col, 0.875f - 0.0625f * (float)row, 0.0f);
+        W(0x01, at & 0x00FFFFFFu);
+        W(0x36, (1u << 8) | 1u);           /* PATCHDIVISION 1x1 */
+        W(0x37, 0u);                       /* PATCHPRIMITIVE triangles */
+        W(0x05, 0x0404u);                  /* BEZIER 4x4 */
+        /* An immediate-mode triangle: vertices latched by commands, no PRIM. */
+        W(0x12, through);
+        W(0xF6, 0x00FFFFFFu);
+        W(0xF8, 255u);
+        immediate_vertex(3u, 20, 150);
+        immediate_vertex(7u, 60, 150);
+        immediate_vertex(7u, 20, 180);
+        /* PRIM 5, a line, and PRIM 6, a point. */
+        at = s_motion_vc;
+        motion_vtx(0xffffffffu, 0.0f, 0.875f, 0.0f);
+        motion_vtx(0xffffffffu, 0.5f, 0.875f, 0.0f);
+        motion_vtx(0xffffffffu, -0.875f, 0.875f, 0.0f);
+        W(0x12, plain);
+        W(0x01, at & 0x00FFFFFFu);
+        W(0x04, (1u << 16) | 2u);
+        W(0x04, (0u << 16) | 1u);
+    }
+    W(0x0F, 0u);
+    W(0x0C, 0u);
+}
+
+/* Everything one run of the list left behind. */
+typedef struct {
+    uint8_t vram[MOTION_VRAM_SIZE];
+    uint16_t depth[272 * 512];
+    GeState state;
+    GeCpuProfileStats profile;
+    uint32_t prims;
+    unsigned long pixels, list[6];
+    double clk;
+} MotionRun;
+
+static void motion_run(int flags, int frame, MotionRun *r) {
+    memset(r, 0, sizeof *r);
+    memset(SR_HOST(MOTION_VRAM), 0, MOTION_VRAM_SIZE);
+    build_motion_list(flags, frame);
+    configure("1", "1", "1", "1");         /* both profiles, every sample: all counters, from zero */
+    const uint32_t prims = g_frame_prims;
+    const unsigned long pixels = g_ge_pixels;
+    expect(ge_run_list(LIST_MOTION, 0) == 0, "motion_tap", "list did not reach END");
+    r->prims = g_frame_prims - prims;
+    r->pixels = g_ge_pixels - pixels;
+    r->list[0] = g_ge_list_through_cmds;
+    r->list[1] = g_ge_list_transform_cmds;
+    r->list[2] = g_ge_list_through_vertices;
+    r->list[3] = g_ge_list_transform_vertices;
+    r->list[4] = g_ge_list_through_sprites;
+    r->list[5] = g_ge_list_transform_sprites;
+    r->clk = ge_timing_run_clk();
+    r->profile = snapshot();
+    memcpy(&r->state, ge_state_ptr(), sizeof r->state);
+    memcpy(r->vram, SR_HOST(MOTION_VRAM), MOTION_VRAM_SIZE);
+    const uint16_t *depth = ge_zbuf_ptr();
+    expect(depth != NULL, "motion_tap", "no depth surface");
+    if (depth) memcpy(r->depth, depth, sizeof r->depth);
+}
+
+/* 1 when the two runs left the same of everything; says what differs otherwise. */
+static int motion_same(const MotionRun *a, const MotionRun *b, const char *legs) {
+    const struct { int same; const char *what; } part[] = {
+        { memcmp(a->vram, b->vram, sizeof a->vram) == 0, "guest VRAM" },
+        { memcmp(a->depth, b->depth, sizeof a->depth) == 0, "depth" },
+        { memcmp(&a->state, &b->state, sizeof a->state) == 0, "GE state" },
+        { same_profile(&a->profile, &b->profile), "profile counters" },
+        { a->prims == b->prims && a->pixels == b->pixels && memcmp(a->list, b->list, sizeof a->list) == 0,
+          "frame and list counters" },
+        { a->clk == b->clk, "GE clock" },
+    };
+    int same = 1;
+    for (size_t i = 0; i < sizeof part / sizeof part[0]; i++)
+        if (!part[i].same) {
+            char what[128];
+            snprintf(what, sizeof what, "%s: %s differs", legs, part[i].what);
+            expect(0, "motion_tap", what);
+            same = 0;
+        }
+    return same;
+}
+
+static uint32_t motion_px(const MotionRun *r, unsigned x, unsigned y) {
+    uint32_t px;
+    memcpy(&px, r->vram + ((size_t)y * 512u + x) * 4u, 4u);
+    return px;
+}
+
+/* The backend's vertex rule, as ge_gpu.c's put_vert, hook_tri and hook_sprite apply it. */
+static float motion_snap(float v) { return floorf(v * 16.0f + 0.375f) * (1.0f / 16.0f); }
+
+static uint32_t motion_pack(const GeVtx *g) {
+    const uint32_t r = (uint32_t)(g->r < 0 ? 0 : g->r > 255 ? 255 : g->r);
+    const uint32_t gg = (uint32_t)(g->g < 0 ? 0 : g->g > 255 ? 255 : g->g);
+    const uint32_t b = (uint32_t)(g->b < 0 ? 0 : g->b > 255 ? 255 : g->b);
+    const uint32_t a = (uint32_t)(g->a < 0 ? 0 : g->a > 255 ? 255 : g->a);
+    return r | (gg << 8) | (b << 16) | (a << 24);
+}
+
+static void motion_backend(int flat, const GeVtx *g, int n, MotionBuiltVert *o) {
+    if (n == 2) {
+        const float xa = floorf(fminf(g[0].x, g[1].x)), xb = floorf(fmaxf(g[0].x, g[1].x));
+        const float ya = floorf(fminf(g[0].y, g[1].y)), yb = floorf(fmaxf(g[0].y, g[1].y));
+        for (int c = 0; c < 2; c++) {
+            o[c].x = motion_snap(c ? xb : xa);
+            o[c].y = motion_snap(c ? yb : ya);
+            o[c].z = g[1].z;
+            o[c].rw = 1.0f;
+            o[c].u = o[c].v = 0.0f;
+            o[c].fog = g[1].fog;
+            o[c].rgba = motion_pack(&g[1]);
+        }
+        return;
+    }
+    for (int c = 0; c < 3; c++) {
+        o[c].x = motion_snap(g[c].x);
+        o[c].y = motion_snap(g[c].y);
+        o[c].z = g[c].z;
+        o[c].rw = g[c].rw;
+        o[c].u = g[c].u;
+        o[c].v = g[c].v;
+        o[c].fog = g[c].fog;
+        o[c].rgba = motion_pack(&g[flat ? 2 : c]);
+    }
+}
+
+/* The backend stand-in: it notes what it was handed and what the store called current, and
+ * declines, so the software rasterizer draws the primitive. */
+typedef struct {
+    int n;                          /* vertices: 3 a triangle, 2 a sprite or a line, 1 a point */
+    int line;
+    int current;                    /* the store named a primitive for this call */
+    MotionTapCurrent cur;
+    GeVtx v[3];
+} MotionSeen;
+
+static MotionSeen s_motion_seen[64];
+static unsigned s_motion_nseen;
+static MotionTapFrame *s_motion_store;
+
+static int motion_see(const GeVtx *a, const GeVtx *b, const GeVtx *c, int line) {
+    if (s_motion_nseen < sizeof s_motion_seen / sizeof s_motion_seen[0]) {
+        MotionSeen *s = &s_motion_seen[s_motion_nseen];
+        memset(s, 0, sizeof *s);
+        s->v[0] = *a;
+        s->n = 1;
+        if (b) s->v[s->n++] = *b;
+        if (c) s->v[s->n++] = *c;
+        s->line = line;
+        s->current = motion_tap_current(s_motion_store, &s->cur);
+    }
+    s_motion_nseen++;
+    return 0;
+}
+static int motion_hook_tri(const GeVtx *a, const GeVtx *b, const GeVtx *c, int persp) {
+    (void)persp;
+    return motion_see(a, b, c, 0);
+}
+static int motion_hook_sprite(const GeVtx *a, const GeVtx *b, int persp) {
+    (void)persp;
+    return motion_see(a, b, NULL, 0);
+}
+static int motion_hook_line(const GeVtx *a, const GeVtx *b, int persp) {
+    (void)persp;
+    return motion_see(a, b, NULL, 1);
+}
+static int motion_hook_point(const GeVtx *a, int persp) {
+    (void)persp;
+    return motion_see(a, NULL, NULL, 1);
+}
+static void motion_hook_flush(const char *reason) { (void)reason; }
+static void motion_hook_vram_dirty(uint32_t addr, uint32_t bytes) { (void)addr; (void)bytes; }
+
+static const float k_motion_viewport[6] = { 240.0f, -136.0f, -16000.0f, 2048.0f, 2048.0f, 32768.0f };
+
+/* The store after frame `frame` of the list: the PRIMs, references, triangles and decisions. */
+static void motion_expect_store(const MotionTapFrame *f, int flags, int frame) {
+    static const struct { uint8_t type, through; uint32_t count, ntris, submitted; } want[7] = {
+        { 6, 1, 2, 1, 1 }, { 4, 0, 6, 4, 4 }, { 3, 0, 6, 2, 2 }, { 6, 1, 2, 1, 1 }, { 3, 0, 3, 1, 2 },
+        { 1, 0, 2, 0, 0 }, { 0, 0, 1, 0, 0 },
+    };
+    const uint32_t nprims = (flags & MS_UNNAMED) ? 7u : 5u;
+    const GeState *ge = ge_state_ptr();
+    MotionTapView v;
+    motion_tap_frame_view(f, &v);
+    expect(v.nprims == nprims && v.ntris == 9u && v.nrefs == ((flags & MS_UNNAMED) ? 22u : 19u) &&
+           !(v.flags & MOTION_TAP_OVERFLOW) && v.dropped == 0u && v.late == 0u, "motion_tap",
+           "the store holds every PRIM, triangle and sprite of the list");
+    if (v.nprims != nprims || v.ntris != 9u) return;
+    for (uint32_t s = 0; s < nprims; s++) {
+        const MotionTapPrim *p = &v.prims[s];
+        expect(p->type == want[s].type && p->through == want[s].through && p->count == want[s].count &&
+               p->ntris == want[s].ntris && p->submitted == want[s].submitted, "motion_tap",
+               "a PRIM's type, mode, vertex count, records and raster calls");
+        expect(p->list_addr == LIST_MOTION && (s == 0 || p->cmd_addr > v.prims[s - 1].cmd_addr) &&
+               p->cmd_addr > LIST_MOTION && p->fbp == ge->fbp && p->fbw == 512u && p->zbp == ge->zbp &&
+               p->zbw == 512u && p->tex_addr == 0u && p->clut_addr == 0u, "motion_tap",
+               "a PRIM's list, command address and target");
+        /* The clear comes before the list sets the viewport and offset. */
+        expect((p->flags & GE_MOTION_PRIM_DEPTH_CLIP) &&
+               (s == 0 || (p->offset[0] == 1808.0f && p->offset[1] == 1912.0f &&
+                           memcmp(p->viewport, k_motion_viewport, sizeof p->viewport) == 0)),
+               "motion_tap", "a PRIM's projection state");
+    }
+    /* PRIM 0, the clear: a through-mode sprite in clear mode, its corners as stored. */
+    const MotionTapPrim *p = &v.prims[0];
+    const GeMotionVtx *r = &v.refs[p->first_ref];
+    expect(p->state_class == GE_MOTION_CLASS_CLEAR && (p->flags & GE_MOTION_PRIM_FLAT) &&
+           !(p->flags & (GE_MOTION_PRIM_CULL | GE_MOTION_PRIM_FOG | GE_MOTION_PRIM_INDEXED)) &&
+           p->camera == MOTION_TAP_NO_CAMERA && p->index_state == MOTION_INDEX_NONE && p->ibase == 0u, "motion_tap",
+           "the clear's state");
+    expect(v.tris[p->first_tri].decision == GE_MOTION_DRAW && v.tris[p->first_tri].pos[0] == 0 &&
+           v.tris[p->first_tri].pos[1] == 1 && v.tris[p->first_tri].pos[2] == 2 && r[1].clip[0] == 480.0f &&
+           r[1].clip[1] == 272.0f && r[1].clip[3] == 1.0f && r[0].fog_arg == 1.0f && r[1].r == 0x10 &&
+           r[1].g == 0x20 && r[1].b == 0x30 && r[1].a == 0xff, "motion_tap", "the clear's sprite record and corners");
+
+    /* PRIM 1, the strip: every triangle drawn, positions in submission order (the cull swap on
+     * every other triangle), and each reference the skinned position, fog argument and colour. */
+    p = &v.prims[1];
+    r = &v.refs[p->first_ref];
+    expect(p->state_class == (GE_MOTION_CLASS_ZTEST | GE_MOTION_CLASS_ZWRITE) &&
+           (p->flags & GE_MOTION_PRIM_CULL) && (p->flags & GE_MOTION_PRIM_FOG) && !(p->flags & GE_MOTION_PRIM_FLAT) &&
+           p->camera == 0u && p->vtype == ((7u << 2) | (3u << 7) | (3u << 9) | (1u << 14)) &&
+           p->vbase == MOTION_VERTS + 32u, "motion_tap", "the strip's state");
+    for (int i = 2; i < 6; i++) {
+        const MotionTapTri *t = &v.tris[p->first_tri + (uint32_t)(i - 2)];
+        const int swap = ((MOTION_CULL & 1u) == 0u) ^ (i & 1);
+        expect(t->decision == GE_MOTION_DRAW && t->pieces == 0u && t->pos[0] == (swap ? i - 1 : i - 2) &&
+               t->pos[1] == (swap ? i - 2 : i - 1) && t->pos[2] == i, "motion_tap",
+               "a strip triangle's decision and submission order");
+    }
+    float bone1[3];
+    motion_bone1(frame, bone1);
+    for (int i = 0; i < 6; i++) {
+        float pos[3], w1, clip[3];
+        uint32_t color;
+        motion_strip_vertex(i, pos, &w1, &color);
+        for (int a = 0; a < 3; a++) clip[a] = pos[a] * (1.0f - w1) + (pos[a] + bone1[a]) * w1;
+        expect(v.ref_set[p->first_ref + (uint32_t)i] && r[i].clip[0] == clip[0] && r[i].clip[1] == clip[1] &&
+               r[i].clip[2] == clip[2] && r[i].clip[3] == 1.0f, "motion_tap", "a strip reference's clip position");
+        expect(r[i].fog_arg == clip[2] + 0.25f && r[i].r == (int)(color & 0xffu) &&
+               r[i].g == (int)((color >> 8) & 0xffu) && r[i].b == 0x80 && r[i].a == 0xff, "motion_tap",
+               "a strip reference's unclamped fog argument and colour");
+    }
+    expect(r[0].fog_arg < 0.0f && r[5].fog_arg > 0.0f && r[5].fog_arg < 1.0f, "motion_tap",
+           "the strip has a fog argument below the clamp and one inside it");
+
+    /* PRIM 2, the quad: indexed, so position i is the vertex its index names. */
+    p = &v.prims[2];
+    r = &v.refs[p->first_ref];
+    expect((p->flags & GE_MOTION_PRIM_INDEXED) && (p->flags & GE_MOTION_PRIM_FLAT) && !(p->flags & GE_MOTION_PRIM_CULL) &&
+           p->index_state == MOTION_INDEX_HASHED && p->index_size == 6u && p->ibase == MOTION_INDICES &&
+           p->vtype == ((7u << 2) | (3u << 7) | VT_INDEX8), "motion_tap", "the quad's state and index bytes");
+    for (int i = 0; i < 6; i++) {
+        const float *q = k_motion_quad[k_motion_quad_index[i]];
+        expect(r[i].clip[0] == q[0] + motion_quad_tx(frame) && r[i].clip[1] == q[1] && r[i].clip[2] == q[2] &&
+               r[i].clip[3] == 1.0f && r[i].fog_arg == 1.0f &&
+               r[i].r == (int)(k_motion_quad_color[k_motion_quad_index[i]] & 0xffu), "motion_tap",
+               "a quad reference is the vertex its index names, moved by the world matrix");
+    }
+    expect(v.tris[p->first_tri].decision == GE_MOTION_DRAW && v.tris[p->first_tri + 1u].decision == GE_MOTION_DRAW &&
+           v.tris[p->first_tri + 1u].pos[0] == 3 && v.tris[p->first_tri + 1u].pos[2] == 5, "motion_tap",
+           "the quad's two triangles");
+
+    /* PRIM 3, the sprite. */
+    p = &v.prims[3];
+    r = &v.refs[p->first_ref];
+    expect(v.tris[p->first_tri].decision == GE_MOTION_DRAW && r[0].clip[0] == 300.25f + motion_sprite_dx(frame) &&
+           r[0].clip[1] == 20.5f && r[0].clip[2] == 9000.0f && r[1].clip[0] == 340.75f + motion_sprite_dx(frame) &&
+           r[1].clip[1] == 60.25f && r[1].clip[2] == 1000.0f && r[1].clip[3] == 1.0f && r[1].r == 0xe0, "motion_tap",
+           "the sprite's corners");
+
+    /* PRIM 4, across the near plane: one record, clipped, both fan pieces handed over. */
+    p = &v.prims[4];
+    r = &v.refs[p->first_ref];
+    expect(v.tris[p->first_tri].decision == GE_MOTION_CLIP && v.tris[p->first_tri].pieces == 3u &&
+           r[2].clip[2] == -3.0f && r[2].clip[3] == 1.0f && r[0].clip[0] == -0.5f, "motion_tap",
+           "the near-clipped triangle's decision, fan pieces and source vertices");
+
+    /* PRIMs 5 and 6, the line and the point: PRIMs with no record and nothing handed over under
+     * their name. The patch and the immediate-mode triangle are not PRIMs and leave nothing. */
+    if (flags & MS_UNNAMED)
+        expect(v.prims[5].ntris == 0u && !v.ref_set[v.prims[5].first_ref] && !v.ref_set[v.prims[5].first_ref + 1u] &&
+               v.prims[6].ntris == 0u && !v.ref_set[v.prims[6].first_ref], "motion_tap",
+               "the line and point PRIMs hold no record");
+    expect(v.ncameras == 1u && v.cameras[0].verts == ((flags & MS_UNNAMED) ? 18u : 15u) &&
+           v.cameras[0].view[0] == 1.0f && v.cameras[0].proj[15] == 1.0f && v.cameras[0].proj[11] == 0.0f,
+           "motion_tap", "one camera, used by every transform-mode vertex");
+    expect(!motion_tap_current(f, NULL), "motion_tap", "nothing is current once the list has ended");
+}
+
+static void test_ge_motion_tap(void) {
+    MotionRun *off = (MotionRun *)malloc(sizeof *off), *on = (MotionRun *)malloc(sizeof *on);
+    MotionRun *again = (MotionRun *)malloc(sizeof *again);
+    MotionTapFrame *f = motion_tap_frame_create(0), *fa = motion_tap_frame_create(0);
+    MotionTapFrame *fb = motion_tap_frame_create(0);
+    MotionBuild *build = motion_build_create();
+    if (!off || !on || !again || !f || !fa || !fb || !build) {
+        expect(0, "motion_tap", "no memory");
+        goto done;
+    }
+
+    /* No listener, a listener, no listener again: nothing ge.c produces may differ. */
+    for (int timing = 0; timing < 2; timing++) {
+        MotionTapView before, after;
+        ge_timing_set_enabled(timing);
+        motion_tap_frame_reset(f);
+        /* One run first, so every leg starts from what a run of this list leaves: GE state the
+         * list does not set, the depth mirror, the immediate-mode stream. */
+        motion_run(MS_UNNAMED, 0, off);
+        motion_run(MS_UNNAMED, 0, off);
+        ge_motion_tap_set(motion_tap_frame_listener(f));
+        motion_run(MS_UNNAMED, 0, on);
+        ge_motion_tap_set(NULL);
+        motion_tap_frame_view(f, &before);
+        motion_run(MS_UNNAMED, 0, again);
+        motion_tap_frame_view(f, &after);
+        const int same_on = motion_same(off, on, timing ? "no listener against a listener, timing model on"
+                                                        : "no listener against a listener");
+        const int same_again = motion_same(off, again, timing ? "no listener against a removed one, timing model on"
+                                                              : "no listener against a removed one");
+        expect(same_on && same_again, "motion_tap",
+               "a listener changes none of ge.c's results: VRAM, depth, GE state, counters and clock");
+        expect(before.nprims == 7u && after.nprims == before.nprims && after.ntris == before.ntris &&
+               after.nrefs == before.nrefs && after.late == 0u && after.dropped == 0u, "motion_tap",
+               "a removed listener is not called");
+        expect(off->prims >= 7u && off->pixels > 0ul && (!timing || off->clk > 0.0) && off->list[0] >= 2ul &&
+               off->list[1] >= 5ul, "motion_tap", "the list drew its seven PRIMs");
+        /* The scene is really there: each shape left pixels, so a draw the tap suppressed or
+         * a clip that drew nothing could not pass as identical. */
+        expect(motion_px(off, 10u, 260u) == MOTION_BG && motion_px(off, 120u, 80u) != MOTION_BG &&
+               motion_px(off, 350u, 190u) != MOTION_BG && motion_px(off, 320u, 40u) == 0xff10b0e0u &&
+               motion_px(off, 145u, 195u) != MOTION_BG &&
+               (motion_px(off, 300u, 17u) == 0xffffffffu || motion_px(off, 300u, 16u) == 0xffffffffu) &&
+               motion_px(off, 410u, 30u) != MOTION_BG, "motion_tap",
+               "the strip, quad, sprite, clipped triangle, line and patch are in the frame");
+        if (!timing) motion_expect_store(f, MS_UNNAMED, 0);
+    }
+    ge_timing_set_enabled(0);
+
+    /* The stand-in backend: what is current during each hook call. */
+    GeGpuHooks hooks;
+    memset(&hooks, 0, sizeof hooks);
+    hooks.tri = motion_hook_tri;
+    hooks.sprite = motion_hook_sprite;
+    hooks.line = motion_hook_line;
+    hooks.point = motion_hook_point;
+    hooks.flush = motion_hook_flush;
+    hooks.vram_dirty = motion_hook_vram_dirty;
+    ge_set_gpu_hooks(&hooks);
+    motion_tap_frame_reset(f);
+    s_motion_store = f;
+    s_motion_nseen = 0;
+    ge_motion_tap_set(motion_tap_frame_listener(f));
+    motion_run(MS_UNNAMED, 0, on);
+    ge_motion_tap_set(NULL);
+    expect(memcmp(on->vram, off->vram, sizeof on->vram) == 0 && memcmp(on->depth, off->depth, sizeof on->depth) == 0,
+           "motion_tap", "a declining backend and a listener leave the software frame as it was");
+    /* The PRIMs' own: 1 clear, 4 strip triangles, 2 quad triangles, 1 sprite, 2 fan pieces. Then
+     * the unnamed ones: the patch's triangles, the immediate-mode triangle, the line, the point. */
+    static const struct { int n, kind; uint32_t prim, tri; int piece; } named[10] = {
+        { 2, MOTION_CUR_SPRITE, 0, 0, 0 }, { 3, MOTION_CUR_TRI, 1, 1, 0 }, { 3, MOTION_CUR_TRI, 1, 2, 0 },
+        { 3, MOTION_CUR_TRI, 1, 3, 0 },    { 3, MOTION_CUR_TRI, 1, 4, 0 }, { 3, MOTION_CUR_TRI, 2, 5, 0 },
+        { 3, MOTION_CUR_TRI, 2, 6, 0 },    { 2, MOTION_CUR_SPRITE, 3, 7, 0 }, { 3, MOTION_CUR_FAN, 4, 8, 0 },
+        { 3, MOTION_CUR_FAN, 4, 8, 1 },
+    };
+    unsigned unnamed_lines = 0, unnamed_points = 0, unnamed_tris = 0;
+    expect(s_motion_nseen >= 14u && s_motion_nseen <= 64u, "motion_tap", "the stand-in was offered every primitive");
+    for (unsigned i = 0; i < s_motion_nseen && i < 64u; i++) {
+        const MotionSeen *s = &s_motion_seen[i];
+        if (i < 10u) {
+            expect(s->n == named[i].n && !s->line && s->current && s->cur.kind == named[i].kind &&
+                   s->cur.prim == named[i].prim && s->cur.tri == named[i].tri && s->cur.piece == named[i].piece,
+                   "motion_tap", "during a hook call the store names the PRIM's primitive being drawn");
+            continue;
+        }
+        expect(!s->current, "motion_tap",
+               "a line, a point, a patch triangle or an immediate-mode triangle has no current primitive");
+        if (s->line && s->n == 2) unnamed_lines++;
+        else if (s->line) unnamed_points++;
+        else if (s->n == 3) unnamed_tris++;
+    }
+    /* A 1x1 patch is two triangles; the immediate-mode triangle is the third. */
+    expect(unnamed_lines == 1u && unnamed_points == 1u && unnamed_tris >= 3u, "motion_tap",
+           "the line, the point, the patch and the immediate-mode triangle each reached the stand-in");
+    motion_expect_store(f, MS_UNNAMED, 0);
+
+    /* Two frames, matched, and frame B built at t = 1 against what ge.c handed over for it. */
+    s_motion_store = fa;
+    ge_motion_tap_set(motion_tap_frame_listener(fa));
+    motion_run(0, 0, on);
+    motion_tap_frame_close(fa, NULL);
+    s_motion_store = fb;
+    s_motion_nseen = 0;
+    ge_motion_tap_set(motion_tap_frame_listener(fb));
+    motion_run(0, 1, on);
+    ge_motion_tap_set(NULL);
+    ge_set_gpu_hooks(NULL);
+    motion_tap_frame_close(fb, fa);
+    motion_expect_store(fb, 0, 1);
+
+    MotionMatchFrame ma, mb;
+    MotionMatchParams params;
+    MotionMatchResult match;
+    MotionTapView vb;
+    int32_t pair[8];
+    motion_tap_match_frame(fa, &ma);
+    motion_tap_match_frame(fb, &mb);
+    motion_tap_frame_view(fb, &vb);
+    motion_match_default_params(&params);
+    expect(ma.nprims == 5u && mb.nprims == 5u, "motion_tap", "the matcher's list holds the five PRIMs that drew");
+    if (ma.nprims != 5u || mb.nprims != 5u) goto done;
+    /* The quad at clip x 0.5..0.75, y -0.25..-0.5 in frame 1: screen x 360..420, y 170..204. */
+    expect(mb.prims[2].bbox[0] == 360.0f && mb.prims[2].bbox[1] == 170.0f && mb.prims[2].bbox[2] == 420.0f &&
+           mb.prims[2].bbox[3] == 204.0f && mb.prims[2].iaddr == MOTION_INDICES && mb.prims[2].flags == 0u &&
+           mb.camera.valid, "motion_tap", "a PRIM's box is of the vertices ge.c handed to the rasterizer");
+    expect(motion_match(&ma, &mb, &params, NULL, pair, NULL, &match) == 0 && match.flags == 0u &&
+           pair[0] == 0 && pair[1] == 1 && pair[2] == 2 && pair[3] == 3 && pair[4] == 4, "motion_tap",
+           "the matcher pairs the five PRIMs");
+    const int planned = motion_build_plan(build, fa, fb, pair, &match);
+    const MotionBuildResult *res = motion_build_result(build);
+    expect(planned == 1 && res->why == 0u && res->paired == 5u && res->unpaired == 0u, "motion_tap",
+           "the frame between the two can be built");
+    /* Built: 4 strip triangles, 2 quad triangles, the sprite. B's own: the clear and the
+     * triangle across the near plane, neither of which moved. */
+    expect(res->built == 7u && res->copied == 2u, "motion_tap", "seven primitives move, two are B's own");
+    unsigned checked = 0, fans = 0;
+    for (unsigned i = 0; i < s_motion_nseen && i < 64u; i++) {
+        const MotionSeen *s = &s_motion_seen[i];
+        MotionBuiltVert sub[3], out[3];
+        expect(s->current, "motion_tap", "every primitive of frame B has a source");
+        if (!s->current) continue;
+        const int kind = motion_build_prim(build, s->cur.tri, 1.0f, out, NULL);
+        if (s->cur.kind == MOTION_CUR_FAN) {
+            expect(kind == MOTION_ITEM_COPY_B, "motion_tap", "a still near-clipped triangle's pieces are B's own");
+            fans++;
+            continue;
+        }
+        if (s->cur.prim == 0u) {
+            expect(kind == MOTION_ITEM_COPY_B, "motion_tap", "the clear is B's own");
+            continue;
+        }
+        motion_backend((vb.prims[s->cur.prim].flags & GE_MOTION_PRIM_FLAT) != 0, s->v, s->n, sub);
+        expect(kind == MOTION_ITEM_BUILT && motion_build_check(build, s->cur.tri, sub) == 1, "motion_tap",
+               "t = 1 gives the vertices ge.c handed over for frame B, bit for bit");
+        for (int c = 0; kind == MOTION_ITEM_BUILT && c < s->n; c++)
+            expect(memcmp(&out[c].x, &sub[c].x, 4) == 0 && memcmp(&out[c].y, &sub[c].y, 4) == 0 &&
+                   memcmp(&out[c].z, &sub[c].z, 4) == 0 && memcmp(&out[c].rw, &sub[c].rw, 4) == 0 &&
+                   memcmp(&out[c].fog, &sub[c].fog, 4) == 0 && out[c].rgba == sub[c].rgba &&
+                   (s->n == 2 || (memcmp(&out[c].u, &sub[c].u, 4) == 0 && memcmp(&out[c].v, &sub[c].v, 4) == 0)),
+                   "motion_tap", "a vertex built at t = 1 is not the one ge.c handed over");
+        checked++;
+    }
+    expect(checked == 7u && fans == 2u && res->t1_mismatch == 0u && res->why == 0u, "motion_tap",
+           "all seven moving primitives were compared at t = 1");
+    /* Halfway: the quad's first vertex at clip x 0.25 + 0.1875, screen x 345; the sprite's
+     * corners at 301.5 and 342, floored. */
+    MotionBuiltVert out[3];
+    expect(motion_build_prim(build, vb.prims[2].first_tri, 0.5f, out, NULL) == MOTION_ITEM_BUILT &&
+           out[0].x == 345.0f && out[0].y == 170.0f && out[0].rw == 1.0f, "motion_tap",
+           "the quad halfway between the frames");
+    expect(motion_build_prim(build, vb.prims[3].first_tri, 0.5f, out, NULL) == MOTION_ITEM_BUILT &&
+           out[0].x == 301.0f && out[0].y == 20.0f && out[1].x == 342.0f && out[1].y == 60.0f &&
+           out[0].z == 1000.0f && out[0].rgba == 0xff10b0e0u, "motion_tap", "the sprite halfway between the frames");
+    printf("MOTION_TAP identical=3 legs x 2 timing models, built_at_t1=%u prims=%u refs=%u tris=%u bytes=%zu\n",
+           checked, (unsigned)vb.nprims, (unsigned)vb.nrefs, (unsigned)vb.ntris, vb.bytes);
+
+done:
+    ge_motion_tap_set(NULL);
+    ge_set_gpu_hooks(NULL);
+    ge_timing_set_enabled(0);
+    configure(NULL, NULL, NULL, NULL);
+    motion_build_free(build);
+    motion_tap_frame_free(f);
+    motion_tap_frame_free(fa);
+    motion_tap_frame_free(fb);
+    free(off);
+    free(on);
+    free(again);
+}
+
 /* ---- --bench: disarmed flight recorder cost on the GE paths (#320) ---- */
 
 #define LIST_BENCH       0x08120000u
@@ -2822,6 +3511,7 @@ int main(int argc, char **argv) {
     test_ge_bounding_box_branch();
     test_ge_vram_view_decode();
     test_ge_vram_view_sources();
+    test_ge_motion_tap();
 
     printf("ge_cpu_profile_validate_selftest: strip_cache=%s scenarios=%u faults=%u failures=%d\n",
            strip_cache ? "on" : "off", s_scenarios, s_faults, s_failures);

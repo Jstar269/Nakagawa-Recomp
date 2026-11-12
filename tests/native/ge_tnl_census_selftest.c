@@ -17,6 +17,9 @@
 // GESTAT-TNL line is read back from ge_set_frame over two stat windows: its exact text, and the
 // second window's counts only.
 //
+// Last, a render-state motion tap (#2081, GeMotionTap in ge_shared.h): while one is set the route
+// is not offered the eligible PRIM and counts nothing, and ge.c's own T&L draws it.
+//
 // The test removes every SR_ variable from its environment first (ge.c latches SR_NOLIGHT,
 // SR_NOFOG, SR_RTRACE, SR_GE_PRIM_PROFILE and others once per process), then sets SR_GESTAT.
 //
@@ -154,6 +157,23 @@ static int hook_line(const GeVtx *a, const GeVtx *b, int persp) { (void)a; (void
 static int hook_point(const GeVtx *a, int persp) { (void)a; (void)persp; return 1; }
 static void hook_flush(const char *reason) { (void)reason; }
 static void hook_vram_dirty(uint32_t addr, uint32_t bytes) { (void)addr; (void)bytes; }
+
+/* A motion tap that only counts what it is told. */
+static unsigned s_tap_prims, s_tap_drawn, s_tap_rastered;
+
+static void tap_prim(void *user, const GeMotionPrim *p) { (void)user; (void)p; s_tap_prims++; }
+static void tap_tri(void *user, const uint16_t pos[3], const GeMotionVtx v[3], int decision) {
+    (void)user; (void)pos; (void)v;
+    if (decision == GE_MOTION_DRAW) s_tap_drawn++;
+}
+static void tap_fan(void *user, int piece) { (void)user; (void)piece; }
+static void tap_sprite(void *user, const uint16_t pos[2], const GeMotionVtx *v, int nv, int decision) {
+    (void)user; (void)pos; (void)v; (void)nv; (void)decision;
+}
+static void tap_rastered(void *user, const GeVtx *v0, const GeVtx *v1, const GeVtx *v2) {
+    (void)user; (void)v0; (void)v1; (void)v2;
+    s_tap_rastered++;
+}
 
 /* ---- Source-owned display lists ---- */
 
@@ -448,6 +468,37 @@ int main(void) {
     expect_window_line(120u, "window-2",
         "GESTAT-TNL f=120 taken=1 cpu=1: clear=0 flat=0 diagnostic=0 texgen=1 matrix=0 viewport=0"
         " texcoord=0 fog=0 specular=0 light=0 alloc=0 vertex=0 clip=0 backend=0");
+
+    /* A motion tap (#2081) needs ge.c's clip positions, which this route never forms: while one
+     * is set the eligible PRIM is not offered and is in neither count, ge.c's own T&L draws it,
+     * and the tap is told its triangle. With the tap removed the PRIM is taken as before. */
+    static const GeMotionTap tap = { NULL, tap_prim, tap_tri, tap_fan, tap_sprite, tap_rastered };
+    put_vtx(VERTS, -0.4f, -0.4f, -5.0f);
+    put_vtx(VERTS + 28u, 0.4f, -0.4f, -5.0f);
+    put_vtx(VERTS + 56u, 0.0f, 0.4f, -5.0f);
+    s_pc = LIST;
+    base_state();
+    W(0x01, VERTS);
+    W(0x04, (3u << 16) | 3u);
+    W(0x0F, 0);
+    W(0x0C, 0);
+    ge_tnl_counts(NULL, NULL, 1);
+    s_tnl_calls = s_cpu_tris = 0;
+    ge_motion_tap_set(&tap);
+    expect(ge_run_list(LIST, 0) == 0, "motion-tap", "list did not reach END");
+    ge_motion_tap_set(NULL);
+    ge_tnl_counts(&taken, &cpu, 0);
+    ge_tnl_reason_counts(why, 0);
+    sum = 0;
+    for (int i = 0; i < GE_TNL_WHY_COUNT; i++) sum += why[i];
+    expect(s_tnl_calls == 0u && taken == 0u && cpu == 0u && sum == 0u, "motion-tap",
+           "the route offered or counted a PRIM while a motion tap was set");
+    expect(s_cpu_tris == 1u && s_tap_prims == 1u && s_tap_drawn == 1u && s_tap_rastered == 1u, "motion-tap",
+           "ge.c's own T&L did not draw the PRIM and tell the tap");
+    expect(ge_run_list(LIST, 0) == 0, "motion-tap", "list did not reach END");
+    ge_tnl_counts(&taken, &cpu, 0);
+    expect(s_tnl_calls == 1u && taken == 1u && cpu == 0u && s_tap_prims == 1u, "motion-tap",
+           "with the tap removed the eligible PRIM was not taken, or the tap was still called");
     ge_set_gpu_hooks(NULL);
 
     if (s_failures) {

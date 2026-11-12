@@ -163,6 +163,7 @@ PUBLIC_TARGETS := \
 	anime4k-selftest \
 	ace-ui-selftest \
 	motion-match-selftest \
+	motion-tap-selftest \
 	osk-overlay-paint-selftest \
 	psmf-producer-selftest \
 	psmf-media-selftest \
@@ -374,6 +375,7 @@ HELP_DESCRIPTION_fsr1-selftest := run the FSR 1 presentation upscaler selftest o
 HELP_DESCRIPTION_anime4k-selftest := run the Anime4K movie upscaler selftest on a headless Vulkan device (SKIPs without one)
 HELP_DESCRIPTION_ace-ui-selftest := run Ace Mode's in-game UI selftest (layout, then a headless Vulkan render; SKIPs the GPU leg without Vulkan)
 HELP_DESCRIPTION_motion-match-selftest := run the draw matcher's selftest for render-state motion (synthetic PRIM lists; pure C)
+HELP_DESCRIPTION_motion-tap-selftest := run the frame store and in-between builder selftest for render-state motion (synthetic tap records; pure C)
 HELP_DESCRIPTION_osk-overlay-paint-selftest := run the in-window keyboard painter's exact-pixel selftest
 HELP_DESCRIPTION_psmf-producer-selftest := run the source-owned bounded PSMF producer selftest
 HELP_DESCRIPTION_psmf-media-selftest := run the source-owned PSMF-to-decoder media selftest

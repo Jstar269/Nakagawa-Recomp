@@ -746,6 +746,12 @@ static int s_bbox_visible = 1;
  * never registers any; the SDL3 build registers them only under SR_GPU_GE=1). */
 static const GeGpuHooks *s_gpu = NULL;
 
+/* Render-state motion tap (#2081, ge_shared.h). NULL = no listener: every site below that
+ * names it is this one pointer test. */
+static const GeMotionTap *s_motion_tap = NULL;
+
+void ge_motion_tap_set(const GeMotionTap *tap) { s_motion_tap = tap; }
+
 /* ---- widescreen Fill (#1881), the renderer layer ------------------------------------------
  * Fill shows more of the 3D scene to the left and right of the PSP's picture. The authentic
  * frame is never touched: each display framebuffer gets a host-only wing canvas, 512x272 like
@@ -3708,14 +3714,19 @@ static void raster_tri(const Vtx *A, const Vtx *B, const Vtx *C, int persp) {
 static void wide_fresh(void);
 static void wide_tri(const Vtx *A, const Vtx *B, const Vtx *C, int persp);
 
+/* Motion tap: the primitive a PRIM published for a raster call ends when raster_tri returns,
+ * on every path through it (a backend that took it, the software rasterizer, a drop), and
+ * before any wing copy, which is not the target's draw. */
 static void raster_tri_and_wings(const Vtx *A, const Vtx *B, const Vtx *C, int persp) {
     if (__builtin_expect(s_wide_d != 0, 0)) {
         wide_fresh();
         raster_tri(A, B, C, persp);
+        if (s_motion_tap) s_motion_tap->rastered(s_motion_tap->user, A, B, C);
         wide_tri(A, B, C, persp);
         return;
     }
     raster_tri(A, B, C, persp);
+    if (s_motion_tap) s_motion_tap->rastered(s_motion_tap->user, A, B, C);
 }
 
 /* Line rasterizer (DDA), used for prim types 1/2 in both modes. */
@@ -4294,6 +4305,10 @@ typedef struct {
     /* Projected screen-grid coords (pre-offset) kept for SR_RTRACE decision logging; only
      * meaningful when cw != 0. */
     float sx, sy, sz;
+    /* The value `fog` was clamped from. Written, and read, only while a motion tap is set:
+     * an in-between vertex needs the argument, because two clamped factors cannot say where
+     * between them fog begins. */
+    float fog_arg;
 } CVtx;
 
 static void transform_model_vtx_clip(const ModelVtx *m, CVtx *o) {
@@ -4332,12 +4347,18 @@ static void transform_model_vtx_clip(const ModelVtx *m, CVtx *o) {
             if (signbit(fslope)) sign = !sign;   /* the multiply would flip it */
             if (fslope == 0.0f) sign = 1;        /* *0 clamps to zero regardless of sign */
             o->fog = sign ? 0.0f : 1.0f;
+            if (s_motion_tap) o->fog_arg = o->fog;   /* a constant factor is its own argument */
         } else {
             if (isinf(fslope) || isnan(fslope))
                 fslope = signbit(fslope) ? -262144.0f : 262144.0f;
-            o->fog = clampf01((cz + fend) * fslope);
+            const float arg = (cz + fend) * fslope;
+            o->fog = clampf01(arg);
+            if (s_motion_tap) o->fog_arg = arg;
         }
-    } else o->fog = 1.0f;
+    } else {
+        o->fog = 1.0f;
+        if (s_motion_tap) o->fog_arg = 1.0f;
+    }
 
     /* Texcoords. Mode 0: vertex UVs with TEXSCALE/TEXOFFSET. Mode 1: texgen matrix applied
      * to a source picked by bits 8-9 (0=model position, 1=vertex uv, 2=normalized normal,
@@ -4483,10 +4504,74 @@ static void project_cvtx(const CVtx *c, Vtx *o) {
     o->r = c->r; o->g = c->g; o->b = c->b; o->a = c->a;
 }
 
+/* ---- render-state motion tap (#2081): what the sites hand to the listener -----------------
+ * Each helper runs only behind a test of s_motion_tap and only copies values out. */
+
+static void motion_tap_cvtx(const CVtx *c, GeMotionVtx *o) {
+    o->clip[0] = c->cx; o->clip[1] = c->cy; o->clip[2] = c->cz; o->clip[3] = c->cw;
+    o->u = c->u; o->v = c->v;
+    o->fog_arg = c->fog_arg;
+    o->r = c->r; o->g = c->g; o->b = c->b; o->a = c->a;
+}
+
+/* A through-mode vertex is already a screen position: it stands in for the clip position with
+ * w = 1, and its fog factor (always 1) for the argument. */
+static void motion_tap_vtx(const Vtx *v, GeMotionVtx *o) {
+    o->clip[0] = v->x; o->clip[1] = v->y; o->clip[2] = v->z; o->clip[3] = 1.0f;
+    o->u = v->u; o->v = v->v;
+    o->fog_arg = v->fog;
+    o->r = v->r; o->g = v->g; o->b = v->b; o->a = v->a;
+}
+
+/* Whether the triangle ending at PRIM position i is submitted with its first two vertices
+ * swapped: the cull rule of draw_prim_through and draw_prim_xform_triangles. */
+static int motion_tap_swapped(int type, int i) {
+    return ge.cull_enable && !ge.clear && (((ge.cull & 1) == 0) ^ ((type == 4) ? (i & 1) : 0));
+}
+
+/* v[] is in submission order already; the positions follow it. */
+static void motion_tap_tri(int type, int i, int i0, int i1, int i2, const GeMotionVtx *v, int decision) {
+    const int swapped = motion_tap_swapped(type, i);
+    const uint16_t pos[3] = { (uint16_t)(swapped ? i1 : i0), (uint16_t)(swapped ? i0 : i1), (uint16_t)i2 };
+    s_motion_tap->tri(s_motion_tap->user, pos, v, decision);
+}
+
+static void motion_tap_tri_clip(int type, int i, int i0, int i1, int i2, const CVtx *cv, int decision) {
+    GeMotionVtx v[3];
+    for (int k = 0; k < 3; k++) motion_tap_cvtx(&cv[k], &v[k]);
+    motion_tap_tri(type, i, i0, i1, i2, v, decision);
+}
+
+static void motion_tap_tri_through(int type, int i, int i0, int i1, int i2,
+                                   const Vtx *a, const Vtx *b, const Vtx *c) {
+    GeMotionVtx v[3];
+    motion_tap_vtx(a, &v[0]); motion_tap_vtx(b, &v[1]); motion_tap_vtx(c, &v[2]);
+    motion_tap_tri(type, i, i0, i1, i2, v, GE_MOTION_DRAW);
+}
+
+static void motion_tap_sprite_through(int i, const Vtx *p0, const Vtx *p1) {
+    const uint16_t pos[2] = { (uint16_t)(i - 1), (uint16_t)i };
+    GeMotionVtx v[2];
+    motion_tap_vtx(p0, &v[0]); motion_tap_vtx(p1, &v[1]);
+    s_motion_tap->sprite(s_motion_tap->user, pos, v, 2, GE_MOTION_DRAW);
+}
+
+/* The corners transform_vtx_3d computed for the transform-mode sprite being assembled (its
+ * Vtx result is already projected). A PRIM starts with none; a sprite uses up its own. */
+static GeMotionVtx s_motion_corner[2];
+static unsigned s_motion_corners;
+
+static void motion_tap_sprite_clip(int i, int decision) {
+    const uint16_t pos[2] = { (uint16_t)(i - 1), (uint16_t)i };
+    s_motion_tap->sprite(s_motion_tap->user, pos, s_motion_corner, (int)s_motion_corners, decision);
+    s_motion_corners = 0;
+}
+
 /* Compatibility wrapper for points/lines/sprites: reject behind-camera vertices. */
 static int transform_vtx_3d(uint32_t addr, const VFmt *vf, Vtx *o) {
     CVtx c;
     transform_vtx_clip(addr, vf, &c);
+    if (s_motion_tap) motion_tap_cvtx(&c, &s_motion_corner[s_motion_corners++ & 1u]);
     /* Fail closed on a non-finite position (see CVtx::nf): the tests below all compare false
      * against NaN, so a NaN point or sprite corner would project to a NaN rect. */
     if (c.nf) {
@@ -4866,10 +4951,12 @@ static void fill_sprite_and_wings(const Vtx *p0, const Vtx *p1, int persp) {
     if (__builtin_expect(s_wide_d != 0, 0)) {
         wide_fresh();
         fill_sprite(p0, p1, persp);
+        if (s_motion_tap) s_motion_tap->rastered(s_motion_tap->user, p0, p1, NULL);   /* as raster_tri_and_wings */
         wide_sprite(p0, p1, persp);
         return;
     }
     fill_sprite(p0, p1, persp);
+    if (s_motion_tap) s_motion_tap->rastered(s_motion_tap->user, p0, p1, NULL);
 }
 
 /* ---- widescreen Fill: which primitives reach a wing canvas ------------------------------- */
@@ -5658,8 +5745,9 @@ static void tnl_params(const VFmt *vf, GeTnlParams *p) {
  * for every triangle, the depth surface could not be prepared), 0 to run the CPU path. */
 static int ge_tnl_try_prim(int type, int count, const VFmt *vf, uint32_t vbase, uint32_t ibase,
                            int idxfmt) {
-    /* Fill's wings (wide_tri) need ge.c's own screen-space triangles. */
-    if (!s_gpu || !s_gpu->tnl_prim || !tnl_enabled() || count < 3 || s_wide_d) return 0;
+    /* Fill's wings (wide_tri) need ge.c's own screen-space triangles, and a motion tap needs
+     * its clip positions. */
+    if (!s_gpu || !s_gpu->tnl_prim || !tnl_enabled() || count < 3 || s_wide_d || s_motion_tap) return 0;
     int why = tnl_state_why(type, vf);
     if (why >= 0) { tnl_decline(why); return 0; }
     uint32_t ntri = type == 3 ? (uint32_t)(count / 3) : (uint32_t)(count - 2);
@@ -5979,6 +6067,7 @@ static void draw_prim_through(const DrawPrimCtx *c) {
             if (assembly_started)
                 primitive_profile_end(GE_PRIM_PROFILE_ASSEMBLY, assembly_started);
             primitive_profile_finish_total();
+            if (s_motion_tap) motion_tap_tri_through(type, i, i0, i1, i2, &a, &b, &c);
             raster_tri_and_wings(&a,&b,&c,0);
         }
     } else if (type == 6) {   /* sprites */
@@ -6018,6 +6107,7 @@ static void draw_prim_through(const DrawPrimCtx *c) {
             if (s_gelog&&(ge.tex_enable&&!ge.clear)) { static int sn=0; if(sn++<12)
                 fprintf(stderr,"  texspr (%.0f,%.0f)-(%.0f,%.0f) uv(%.0f,%.0f)-(%.0f,%.0f) tex=0x%08" PRIx32 " %dx%d fmt=%" PRIu32 " bufw=%" PRIu32 "\n",
                     p0.x,p0.y,p1.x,p1.y,p0.u,p0.v,p1.u,p1.v,ge.tex_addr,ge.tex_w,ge.tex_h,ge.tex_fmt,ge.tex_bufw); }
+            if (s_motion_tap) motion_tap_sprite_through(i, &p0, &p1);
             fill_sprite_and_wings(&p0,&p1,0);
         }
     }
@@ -6325,6 +6415,11 @@ static void draw_prim_xform_triangles(const DrawPrimCtx *c, int rt) {
             clip_m = clip_poly_near(cv, 3, cl);
         if (acceptance_started)
             primitive_profile_end(GE_PRIM_PROFILE_CLIPPING_ACCEPTANCE, acceptance_started);
+        /* Motion tap: every assembled triangle with its decision, dropped ones included, so a
+         * triangle ge.c drew in one of two frames is known to exist in the other. */
+        if (s_motion_tap)
+            motion_tap_tri_clip(type, i, i0, i1, i2, cv, dec == D_DRAW ? GE_MOTION_DRAW :
+                                dec == D_CLIP ? GE_MOTION_CLIP : GE_MOTION_DROP);
 
         /* TRIDEC: per-triangle decision log. First 12 per draw, plus EVERY triangle whose
          * screen bbox covers the SR_PIXWHO probe pixel (drawn or dropped) — the probe
@@ -6406,8 +6501,10 @@ static void draw_prim_xform_triangles(const DrawPrimCtx *c, int rt) {
                             s_ge_frame, s_rt_draw, i, m, buf);
                 }
                 for (int k = 2; k < m && k < 4; k++)
-                    if (!bad[0] && !bad[k-1] && !bad[k])
+                    if (!bad[0] && !bad[k-1] && !bad[k]) {
+                        if (s_motion_tap) s_motion_tap->fan(s_motion_tap->user, k - 2);
                         raster_tri_and_wings(&p[0], &p[k-1], &p[k], 1);
+                    }
             }
             if (m < 3)
                 primitive_profile_finish_total();
@@ -6440,10 +6537,61 @@ static void draw_prim_xform_sprites(const DrawPrimCtx *c) {
      * The Z/depth comes from the second vertex. */
     for (int i = 1; i < count; i += 2) {
         Vtx p0, p1;
-        if (!transform_vtx_3d(prim_vtx_addr(vbase,ibase,idxfmt,i-1,vf.stride),&vf,&p0)) continue;
-        if (!transform_vtx_3d(prim_vtx_addr(vbase,ibase,idxfmt,i,  vf.stride),&vf,&p1)) continue;
+        if (!transform_vtx_3d(prim_vtx_addr(vbase,ibase,idxfmt,i-1,vf.stride),&vf,&p0)) {
+            if (s_motion_tap) motion_tap_sprite_clip(i, GE_MOTION_DROP);
+            continue;
+        }
+        if (!transform_vtx_3d(prim_vtx_addr(vbase,ibase,idxfmt,i,  vf.stride),&vf,&p1)) {
+            if (s_motion_tap) motion_tap_sprite_clip(i, GE_MOTION_DROP);
+            continue;
+        }
+        if (s_motion_tap) motion_tap_sprite_clip(i, GE_MOTION_DRAW);
         fill_sprite_and_wings(&p0,&p1,1);
     }
+}
+
+/* Motion tap: the PRIM's identity and the state its vertices are projected with. The index
+ * bytes are handed over only where ge_ram_span gives them with no side effect; from anywhere
+ * else the listener is told there are indices it cannot see. */
+static void motion_tap_prim(const DrawPrimCtx *c, uint32_t list_addr, uint32_t cmd_addr) {
+    GeMotionPrim p;
+    memset(&p, 0, sizeof p);
+    p.type = (uint8_t)c->type;
+    p.through = c->vf.through ? 1u : 0u;
+    p.count = (uint32_t)c->count;
+    p.vtype = ge.vtype;
+    p.vbase = c->vbase;
+    p.list_addr = list_addr;
+    p.cmd_addr = cmd_addr;
+    p.fbp = ge.fbp; p.fbw = ge.fbw; p.zbp = ge.zbp; p.zbw = ge.zbw;
+    const int textured = ge.tex_enable && !ge.clear;
+    p.tex_addr = textured ? ge.tex_addr : 0u;
+    p.clut_addr = textured && ge.tex_fmt >= 4u && ge.tex_fmt <= 7u ? ge.clut_addr : 0u;
+    if (ge.clear) {
+        p.state_class = GE_MOTION_CLASS_CLEAR;
+    } else {
+        if (ge.blend_enable) p.state_class |= GE_MOTION_CLASS_BLEND;
+        if (ge.ztest_enable) p.state_class |= GE_MOTION_CLASS_ZTEST;
+        if (!ge.zwrite_disable) p.state_class |= GE_MOTION_CLASS_ZWRITE;
+        if (ge.atest_enable) p.state_class |= GE_MOTION_CLASS_ATEST;
+    }
+    if (ge.depth_clip) p.flags |= GE_MOTION_PRIM_DEPTH_CLIP;
+    if (ge.cull_enable && !ge.clear) p.flags |= GE_MOTION_PRIM_CULL;
+    if (!ge.shade_gouraud || ge.clear) p.flags |= GE_MOTION_PRIM_FLAT;
+    if (ge.fog_enable && !ge_env_nofog()) p.flags |= GE_MOTION_PRIM_FOG;
+    for (int k = 0; k < 6; k++) p.viewport[k] = decode_float24(ge.viewport_raw[k]);
+    p.offset[0] = (float)(ge.offsetx & 0xFFFF) / 16.0f;
+    p.offset[1] = (float)(ge.offsety & 0xFFFF) / 16.0f;
+    p.view = ge.view;
+    p.proj = ge.proj;
+    if (c->idxfmt) {
+        p.flags |= GE_MOTION_PRIM_INDEXED;
+        p.ibase = c->ibase;
+        p.index_size = (uint32_t)c->count << (c->idxfmt - 1);
+        p.index_bytes = ge_ram_span(c->ibase, p.index_size);
+    }
+    s_motion_corners = 0;
+    s_motion_tap->prim(s_motion_tap->user, &p);
 }
 
 static void draw_prim(uint32_t op, unsigned long prim_index, uint32_t list_addr, uint32_t cmd_addr) {
@@ -6491,6 +6639,7 @@ static void draw_prim(uint32_t op, unsigned long prim_index, uint32_t list_addr,
 #ifdef SR_GE_FRONTEND_PROFILE
     primitive_profile_draw_setup_end(draw_setup_started);
 #endif
+    if (s_motion_tap) motion_tap_prim(&c, list_addr, cmd_addr);
     s_primitive_profile_through = vf.through;
     s_primitive_profile_counting = s_primitive_profile;
     if (vf.through) {

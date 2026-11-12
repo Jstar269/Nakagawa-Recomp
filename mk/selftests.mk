@@ -191,6 +191,20 @@ motion-match-selftest:
 		src/rt/motion_match.c -lm
 	$(BUILD_DIR)/motion_match_selftest$(EXE_EXT)
 
+# motion-tap-selftest - the frame store, the bridge to the matcher and the in-between builder of
+# render-state motion (src/rt/motion_tap.c, #2081) on synthetic tap records, with the real matcher
+# between the two frames: built positions against a double-precision reference (a translating
+# quad, a strip skinned by two bones, a morph), the 28.4 tie, the sprite floor rule, fog, t = 1
+# giving B bit for bit, the index-hash gate, an unpaired draw drawn as in B, a held frame, each
+# reason that stops a frame, and overflow. Built from motion_tap.c, motion_match.c and its test
+# alone (pure C); ge-cpu-profile-validate-selftest runs the tap and the builder on the real ge.o.
+native-core-tests: motion-tap-selftest
+motion-tap-selftest:
+	$(CC) -std=c99 -O2 -Wall -Wextra -Wpedantic -Werror -Isrc/rt \
+		-o $(BUILD_DIR)/motion_tap_selftest$(EXE_EXT) tests/native/motion_tap_selftest.c \
+		src/rt/motion_tap.c src/rt/motion_match.c -lm
+	$(BUILD_DIR)/motion_tap_selftest$(EXE_EXT)
+
 # fsr3-host-selftest - FSR 3's CPU side (src/rt/fsr3_host.c, src/rt/fsr3_jitter.c) against the record
 # of AMD's own host code (tests/native/fsr3_host_oracle.md): every clear, discard and dispatch, the
 # resource behind each binding, the staged constants, the jitter and the f16 and RCAS helpers. Pure C,
@@ -418,12 +432,16 @@ native-core-tests: ge-float24-selftest
 # each profile switch; then faults injected into copies of those blocks, each of which
 # must fail exactly the checks it breaks.  Run twice because ge.c latches the strip-cache
 # switch per process.  No game input.
+# It is also where the render-state motion tap (#2081) meets that object: one list drawn with
+# no listener, with one and with none again must leave the same guest VRAM, depth, GE state,
+# counters and GE clock, and the listener's store (src/rt/motion_tap.c) must hold what ge.c
+# drew and give frame B's own vertices back at t = 1, bit for bit.
 GE_CPU_PROFILE_VALIDATE_SELFTEST := $(BUILD_DIR)/ge_cpu_profile_validate_selftest$(EXE_EXT)
 
 ge-cpu-profile-validate-selftest: $(RT_GE_O)
 	$(CC) $(CFLAGS) -Werror $(LDFLAGS) -o $(GE_CPU_PROFILE_VALIDATE_SELFTEST) \
 		tests/native/ge_cpu_profile_validate_selftest.c $(RT_GE_O) src/rt/ge_capture.c \
-		src/rt/flight_recorder.c src/rt/perf.c -lm
+		src/rt/flight_recorder.c src/rt/perf.c src/rt/motion_tap.c src/rt/motion_match.c -lm
 	$(GE_CPU_PROFILE_VALIDATE_SELFTEST)
 	$(GE_CPU_PROFILE_VALIDATE_SELFTEST) --strip-cache-disabled
 
@@ -472,7 +490,7 @@ native-core-tests: ge-patch-tess-selftest
 GE_FLIGHT_DIR := $(BUILD_DIR)/ge-flight-overhead
 GE_FLIGHT_ROUNDS ?= 30
 GE_FLIGHT_PAIRS ?= 5
-GE_FLIGHT_SRCS := tests/native/ge_cpu_profile_validate_selftest.c src/rt/ge_capture.c src/rt/flight_recorder.c src/rt/perf.c
+GE_FLIGHT_SRCS := tests/native/ge_cpu_profile_validate_selftest.c src/rt/ge_capture.c src/rt/flight_recorder.c src/rt/perf.c src/rt/motion_tap.c src/rt/motion_match.c
 
 ge-flight-overhead:
 	"$(PYTHON)" -c "import os, sys; [os.makedirs(d, exist_ok=True) for d in sys.argv[1:]]" $(GE_FLIGHT_DIR)/linked $(GE_FLIGHT_DIR)/absent
