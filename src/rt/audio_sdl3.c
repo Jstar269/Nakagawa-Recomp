@@ -542,6 +542,188 @@ static int sr_audio_apply_master_volume(int channel_volume) {
     return (int)(((int64_t)channel_volume * s_master_volume_percent) / 100);
 }
 
+/* ---- Ace Mode's true-peak limiter (peak=limit, #2137, docs/ENHANCEMENT_CONTRACT.md 10.22) ------
+ *
+ * Off unless the run turns it on (sr_audio_set_true_peak_limiter); off, sr_audio_push is what it
+ * was. On, every push of every channel passes through one limiter per channel instead of the
+ * per-sample clamp, and a push may carry the SAS grain's unsaturated sum (sr_audio_push_wide,
+ * from hle_audio.c) in place of the int16 copy the guest holds. The guest sees nothing of it: the
+ * guest's buffers are only read, and a push of n frames still queues n frames.
+ *
+ * The limiter, per channel, in mixer frames at 44.1 kHz:
+ *   - detection: each frame's peak is its own sample and the inter-sample peaks on either side of
+ *     it, read at 4x through a windowed-sinc interpolator (SR_TPL_TAPS taps a phase);
+ *   - the gain a frame needs is ceiling / peak, or 1 below the ceiling (SR_TPL_CEILING, -0.3 dBTP);
+ *   - a minimum over the next SR_TPL_LOOKAHEAD frames, then an exponential release
+ *     (SR_TPL_RELEASE_S), then a moving average over SR_TPL_LOOKAHEAD frames. Every frame the
+ *     average covers looks ahead past the peak, so the gain at a peak is at most what that peak
+ *     needs and the gain falls over SR_TPL_LOOKAHEAD frames before it, never in one step;
+ *   - the output is the input SR_TPL_DELAY frames late (1.6 ms), so the channel's queue holds the
+ *     same number of frames as without the limiter. Frames below the ceiling, with no peak within
+ *     the attack or release of them, come out bit-exact (a gain of exactly 1).
+ * A stream that stops leaves its last SR_TPL_DELAY frames in the limiter until the channel's next
+ * push or hold of silence (sr_audio_push_silence), which plays them first, in order. A push or hold
+ * that finds the channel played dry drops them instead, as a hold drops the converter's kept-back
+ * frames: after the gap they would play as a fragment ahead of the new sound. Nothing is invented. */
+#define SR_TPL_TAPS 16                       /* interpolator taps a phase; it reads 8 frames ahead */
+#define SR_TPL_PHASES 4                      /* 4x oversampled peak detection */
+#define SR_TPL_LOOKAHEAD 64                  /* attack, in frames (1.45 ms) */
+#define SR_TPL_DELAY (SR_TPL_LOOKAHEAD - 1 + SR_TPL_TAPS / 2)   /* 71 frames, 1.61 ms */
+#define SR_TPL_RING 256u                     /* a power of two above every reach back */
+#define SR_TPL_CEILING (0.9660508789898133 * 32768.0)   /* -0.3 dBTP, in int16 counts */
+#define SR_TPL_RELEASE_S 0.050
+#define SR_TPL_WIDE_LIMIT (1 << 24)          /* the widest sample a push can carry (float-exact) */
+
+typedef struct {
+    uint64_t next;                       /* index of the next input frame (starts at SR_TPL_RING) */
+    float x[SR_TPL_RING][2];             /* input, in int16 counts after the channel volume */
+    float isp[SR_TPL_RING];              /* inter-sample peak between frame i and i + 1 */
+    double need[SR_TPL_RING];            /* the gain frame i needs */
+    double held[SR_TPL_RING];            /* minimum ahead, released */
+} AudioPeakLimiter;
+
+typedef struct {
+    uint64_t pushes_wide;     /* pushes that carried an unsaturated SAS sum */
+    uint64_t frames_wide;     /* frames of those whose sum differs from the guest's copy */
+    uint64_t frames_limited;  /* output frames whose bytes the gain changed */
+    double min_gain;          /* the lowest gain applied; 1 when none was */
+} AudioPeakStats;
+
+static int s_tpl_on;
+static AudioPeakLimiter s_tpl[SR_AUDIO_CHANNELS];
+static AudioPeakStats s_tpl_stats = {0, 0, 0, 1.0};
+static double s_tpl_fir[SR_TPL_PHASES][SR_TPL_TAPS];
+static double s_tpl_release;
+
+/* One channel's limiter back to silence: no frames held, unity gain. */
+static void sr_audio_tpl_reset_channel(int ch) {
+    AudioPeakLimiter *l = &s_tpl[ch];
+    memset(l, 0, sizeof(*l));
+    l->next = SR_TPL_RING;
+    for (uint32_t i = 0; i < SR_TPL_RING; i++) l->need[i] = l->held[i] = 1.0;
+}
+
+static void sr_audio_tpl_reset(void) {
+    for (int ch = 0; ch < SR_AUDIO_CHANNELS; ch++) sr_audio_tpl_reset_channel(ch);
+    memset(&s_tpl_stats, 0, sizeof(s_tpl_stats));
+    s_tpl_stats.min_gain = 1.0;
+}
+
+/* Phase k reads the value at fraction k / SR_TPL_PHASES past frame m from frames
+ * m - SR_TPL_TAPS / 2 + 1 .. m + SR_TPL_TAPS / 2: a Blackman-windowed sinc, each phase scaled
+ * to a DC gain of 1. Phase 0 is the frame itself and is not used. */
+static void sr_audio_tpl_design(void) {
+    const double pi = 3.14159265358979323846;
+    for (int k = 0; k < SR_TPL_PHASES; k++) {
+        const double f = (double)k / SR_TPL_PHASES;
+        double sum = 0.0;
+        for (int t = 0; t < SR_TPL_TAPS; t++) {
+            const double u = f - (double)(t - (SR_TPL_TAPS / 2 - 1));   /* distance to tap */
+            const double sinc = fabs(u) < 1e-12 ? 1.0 : sin(pi * u) / (pi * u);
+            const double w = 0.42 + 0.5 * cos(2.0 * pi * u / SR_TPL_TAPS) +
+                             0.08 * cos(4.0 * pi * u / SR_TPL_TAPS);
+            s_tpl_fir[k][t] = sinc * w;
+            sum += s_tpl_fir[k][t];
+        }
+        for (int t = 0; t < SR_TPL_TAPS; t++) s_tpl_fir[k][t] /= sum;
+    }
+    s_tpl_release = exp(-1.0 / (SR_TPL_RELEASE_S * SR_AUDIO_SAMPLE_RATE));
+}
+
+/* Turns the limiter on or off for the run, before the first push (driver.c, from the Ace line).
+ * Returns 1: this backend carries it. */
+int sr_audio_set_true_peak_limiter(int on) {
+    s_tpl_on = on ? 1 : 0;
+    sr_audio_tpl_design();
+    sr_audio_tpl_reset();
+    return 1;
+}
+
+/* The run's totals, for the Ace report (driver.c hands them to ace.c at exit). */
+void sr_audio_true_peak_stats(uint64_t *pushes_wide, uint64_t *frames_wide, uint64_t *frames_limited,
+                              double *min_gain) {
+    if (pushes_wide) *pushes_wide = s_tpl_stats.pushes_wide;
+    if (frames_wide) *frames_wide = s_tpl_stats.frames_wide;
+    if (frames_limited) *frames_limited = s_tpl_stats.frames_limited;
+    if (min_gain) *min_gain = s_tpl_stats.min_gain;
+}
+
+static float sr_audio_tpl_scaled(int64_t sample, int volume) {
+    int64_t v = (sample * volume) >> 15;   /* the authentic scale, before its clamp */
+    if (v > SR_TPL_WIDE_LIMIT) v = SR_TPL_WIDE_LIMIT;
+    if (v < -SR_TPL_WIDE_LIMIT) v = -SR_TPL_WIDE_LIMIT;
+    return (float)v;
+}
+
+/* Feeds one frame and returns the frame SR_TPL_DELAY earlier, limited. */
+static void sr_audio_tpl_frame(AudioPeakLimiter *l, float in_l, float in_r, int16_t out[2]) {
+    const uint32_t M = SR_TPL_RING - 1u;
+    const uint64_t j = l->next++;
+    l->x[j & M][0] = in_l;
+    l->x[j & M][1] = in_r;
+
+    /* Frame m's inter-sample peak toward m + 1: the interpolator now has every frame it reads. */
+    const uint64_t m = j - SR_TPL_TAPS / 2;
+    float isp = 0.0f;
+    for (int k = 1; k < SR_TPL_PHASES; k++) {
+        for (int c = 0; c < 2; c++) {
+            double y = 0.0;
+            for (int t = 0; t < SR_TPL_TAPS; t++)
+                y += s_tpl_fir[k][t] * l->x[(m - (SR_TPL_TAPS / 2 - 1) + (uint64_t)t) & M][c];
+            const float a = (float)fabs(y);
+            if (a > isp) isp = a;
+        }
+    }
+    l->isp[m & M] = isp;
+    float peak = fabsf(l->x[m & M][0]);
+    if (fabsf(l->x[m & M][1]) > peak) peak = fabsf(l->x[m & M][1]);
+    if (isp > peak) peak = isp;
+    if (l->isp[(m - 1u) & M] > peak) peak = l->isp[(m - 1u) & M];
+    l->need[m & M] = peak > SR_TPL_CEILING ? SR_TPL_CEILING / peak : 1.0;
+
+    /* Frame q's minimum over q .. q + SR_TPL_LOOKAHEAD - 1 (= m), released from frame q - 1's. */
+    const uint64_t q = m - (SR_TPL_LOOKAHEAD - 1);
+    double h = 1.0;
+    for (uint64_t i = q; i <= m; i++)
+        if (l->need[i & M] < h) h = l->need[i & M];
+    double released = 1.0 - (1.0 - l->held[(q - 1u) & M]) * s_tpl_release;
+    if (1.0 - released < 1e-9) released = 1.0;
+    l->held[q & M] = h < released ? h : released;
+
+    /* The gain at q: the mean of the held gains over the SR_TPL_LOOKAHEAD frames up to q. A run of
+     * ones sums to exactly SR_TPL_LOOKAHEAD, so a frame no peak reaches keeps its value. */
+    double sum = 0.0;
+    for (uint64_t i = q - (SR_TPL_LOOKAHEAD - 1); i <= q; i++) sum += l->held[i & M];
+    const double gain = sum / SR_TPL_LOOKAHEAD;
+    if (gain < s_tpl_stats.min_gain) s_tpl_stats.min_gain = gain;
+    int changed = 0;
+    for (int c = 0; c < 2; c++) {
+        double y = (double)l->x[q & M][c] * gain;
+        y = y < 0.0 ? y - 0.5 : y + 0.5;               /* to nearest, ties away from zero */
+        const long v = (long)y;
+        out[c] = (int16_t)(v > 32767 ? 32767 : v < -32768 ? -32768 : v);
+        if ((float)out[c] != l->x[q & M][c]) changed = 1;   /* the gain changed this frame's bytes */
+    }
+    if (changed) s_tpl_stats.frames_limited++;
+}
+
+/* n frames of `lr` (or of `wide` where given) at the channel volumes, through the channel's
+ * limiter into `buf`. */
+static void sr_audio_tpl_block(int ch, const int16_t *lr, const int32_t *wide, int nframes,
+                               int volL, int volR, int16_t *buf) {
+    AudioPeakLimiter *l = &s_tpl[ch];
+    if (wide) {
+        s_tpl_stats.pushes_wide++;
+        for (int i = 0; i < nframes; i++)
+            if (wide[i * 2] != lr[i * 2] || wide[i * 2 + 1] != lr[i * 2 + 1]) s_tpl_stats.frames_wide++;
+    }
+    for (int i = 0; i < nframes; i++) {
+        const int64_t sl = wide ? wide[i * 2] : lr[i * 2];
+        const int64_t sr = wide ? wide[i * 2 + 1] : lr[i * 2 + 1];
+        sr_audio_tpl_frame(l, sr_audio_tpl_scaled(sl, volL), sr_audio_tpl_scaled(sr, volR), buf + i * 2);
+    }
+}
+
 static int sr_audio_shadow_reserve(AudioShadowQueue *queue, uint32_t needed_frames) {
     if (!queue || !queue->valid || needed_frames > SR_AUDIO_MAX_QUEUED_FRAMES) return 0;
     if (needed_frames <= queue->capacity_frames) return 1;
@@ -800,8 +982,11 @@ void sr_audio_push_silence(int ch, int nframes) {
     }
     /* A stream that can give nothing may still hold the last frames of what it played, kept back
      * by its converter. Ahead of the silence they would play as a fragment between two silences,
-     * so they go: nothing a pull could take is lost. */
-    if (queued_bytes > 0 && sr_audio_takeable_frames(ch, queued_bytes / 4) == 0) {
+     * so they go: nothing a pull could take is lost. The frames Ace Mode's limiter holds back go
+     * for the same reason; on a channel still playing they stay, and leave ahead of the silence. */
+    const int dry = queued_bytes == 0 || sr_audio_takeable_frames(ch, queued_bytes / 4) == 0;
+    if (s_tpl_on && dry) sr_audio_tpl_reset_channel(ch);
+    if (queued_bytes > 0 && dry) {
         if (!SDL_ClearAudioStream(s_streams[ch])) {
             fprintf(stderr, "audio: SDL_ClearAudioStream failed: %s\n", SDL_GetError());
             return;
@@ -813,11 +998,19 @@ void sr_audio_push_silence(int ch, int nframes) {
     SDL_SetAtomicInt(&s_played_dry[ch], 0);
     while (nframes > 0) {
         const int chunk = nframes < 1024 ? nframes : 1024;
-        if (!SDL_PutAudioStreamData(s_streams[ch], zeros, chunk * 4)) {
+        /* With Ace Mode's limiter on, the hold is pushed through it like any frames: the last
+         * SR_TPL_DELAY frames of what played before leave ahead of the silence, in order. */
+        int16_t limited[1024 * 2];
+        const int16_t *data = zeros;
+        if (s_tpl_on) {
+            sr_audio_tpl_block(ch, zeros, NULL, chunk, 0x8000, 0x8000, limited);
+            data = limited;
+        }
+        if (!SDL_PutAudioStreamData(s_streams[ch], data, chunk * 4)) {
             fprintf(stderr, "audio: SDL_PutAudioStreamData failed: %s\n", SDL_GetError());
             return;
         }
-        (void)sr_audio_shadow_append(ch, zeros, chunk);
+        (void)sr_audio_shadow_append(ch, data, chunk);
         s_primed_frames[ch] += (uint32_t)chunk;
         nframes -= chunk;
     }
@@ -847,7 +1040,22 @@ static void audio_note_underrun(int ch) {
             ch, (unsigned long long)n);
 }
 
+static void sr_audio_push_frames(int ch, const int16_t *lr, const int32_t *wide, int nframes,
+                                 int volL, int volR);
+
 void sr_audio_push(int ch, const int16_t *lr, int nframes, int volL, int volR) {
+    sr_audio_push_frames(ch, lr, NULL, nframes, volL, volR);
+}
+
+/* sr_audio_push with the SAS grain's unsaturated sum for the same frames (hle_audio.c, Ace Mode's
+ * peak=limit). `lr` is still the guest's copy, for everything but the sound: the recorder and the
+ * counters. Without the limiter on, the wide values are not used. */
+void sr_audio_push_wide(int ch, const int16_t *lr, const int32_t *wide, int nframes, int volL, int volR) {
+    sr_audio_push_frames(ch, lr, s_tpl_on ? wide : NULL, nframes, volL, volR);
+}
+
+static void sr_audio_push_frames(int ch, const int16_t *lr, const int32_t *wide, int nframes,
+                                 int volL, int volR) {
     if (ch < 0 || ch >= SR_AUDIO_CHANNELS || !lr || nframes <= 0) {
         return;
     }
@@ -897,9 +1105,28 @@ void sr_audio_push(int ch, const int16_t *lr, int nframes, int volL, int volR) {
 
     const int16_t *submitted = lr;
     int push_ok;
-    SDL_SetAtomicInt(&s_played_dry[ch], 0);   /* before the data, as in sr_audio_push_silence */
+    /* Before the data, as in sr_audio_push_silence. Played dry: a device pull found nothing (an
+     * empty queue a pull just emptied is still playing). Read and cleared in one step, so a pull
+     * that finds nothing in between is not lost. */
+    const int played_dry = SDL_SetAtomicInt(&s_played_dry[ch], 0) && takeable_frames == 0;
     /* Volume scaling and submission */
-    if (volL == 0x8000 && volR == 0x8000) {
+    if (s_tpl_on) {
+        /* Ace Mode's limiter in place of the per-sample clamp: n frames in, n frames out. On a
+         * channel played dry with no hold ahead of this push, the frames the limiter still holds
+         * would play as a fragment ahead of the new sound, so they go (as in the hold). A queue the
+         * last pull emptied without coming up short is still playing: its frames stay. */
+        if (played_dry) sr_audio_tpl_reset_channel(ch);
+        int16_t stack_buf[1024 * 2];
+        int16_t *buf = stack_buf;
+        if (nframes > 1024) {
+            buf = (int16_t *)malloc((size_t)nframes * 4);
+            if (!buf) return;
+        }
+        sr_audio_tpl_block(ch, lr, wide, nframes, volL, volR, buf);
+        push_ok = SDL_PutAudioStreamData(s_streams[ch], buf, nframes * 4);
+        if (push_ok) (void)sr_audio_shadow_append(ch, buf, nframes);
+        if (buf != stack_buf) free(buf);
+    } else if (volL == 0x8000 && volR == 0x8000) {
         push_ok = SDL_PutAudioStreamData(s_streams[ch], lr, nframes * 4);
     } else {
         int16_t stack_buf[1024 * 2];
@@ -923,7 +1150,7 @@ void sr_audio_push(int ch, const int16_t *lr, int nframes, int volL, int volR) {
         fprintf(stderr, "audio: SDL_PutAudioStreamData failed: %s\n", SDL_GetError());
         return;
     }
-    if (volL == 0x8000 && volR == 0x8000)
+    if (!s_tpl_on && volL == 0x8000 && volR == 0x8000)
         (void)sr_audio_shadow_append(ch, submitted, nframes);
     s_stats.total_pushed_frames += (uint64_t)nframes;
     s_stats.channel_pushed_frames[ch] += (uint64_t)nframes;
@@ -1352,6 +1579,8 @@ static void test_reset(void) {
     s_test_device_open_attempts = 0;
     memset(&s_stats, 0, sizeof(s_stats));
     memset(s_push_marks, 0, sizeof(s_push_marks));
+    s_tpl_on = 0;
+    sr_audio_tpl_reset();
     set_test_env("SR_MASTER_VOLUME", "");
 }
 
@@ -2294,6 +2523,255 @@ static void test_volume_above_16_bits_is_clamped(void) {
     printf("test_volume_above_16_bits_is_clamped: PASS\n");
 }
 
+/* ---- #2137: Ace Mode's peak=limit, the host side ------------------------------------------------ */
+
+/* Frame i of what channel ch queued (the shadow copy of the SDL stream, device paused). */
+static int16_t test_queued_sample(int ch, uint32_t frame, int c) {
+    const AudioShadowQueue *q = &s_shadow_queues[ch];
+    assert(q->valid && frame < q->frames);
+    return q->samples[((q->head_frame + frame) % q->capacity_frames) * 2u + (uint32_t)c];
+}
+
+/* The true peak of a stereo int16 run, read at 16x through a 64-tap Blackman-windowed sinc a
+ * phase: a far finer reading than the limiter's own 4x detector, so the bound below is the
+ * limiter's and not this check's. */
+static double test_true_peak(int ch, uint32_t from, uint32_t to) {
+    const double pi = 3.14159265358979323846;
+    double peak = 0.0;
+    for (int c = 0; c < 2; c++)
+        for (uint32_t i = from + 32u; i + 32u < to; i++)
+            for (int k = 0; k < 16; k++) {
+                const double f = k / 16.0;
+                double y = 0.0;
+                for (int n = -31; n <= 32; n++) {
+                    const double u = f - n;
+                    const double sinc = fabs(u) < 1e-12 ? 1.0 : sin(pi * u) / (pi * u);
+                    const double w = 0.42 + 0.5 * cos(2.0 * pi * u / 64.0) + 0.08 * cos(4.0 * pi * u / 64.0);
+                    y += sinc * w * test_queued_sample(ch, (uint32_t)((int)i + n), c);
+                }
+                if (fabs(y) > peak) peak = fabs(y);
+            }
+    return peak;
+}
+
+/* Off (every run but peak=limit), a wide push is the plain push of the guest's copy: the same
+ * bytes reach the stream, the per-sample clamp included. This is the Authentic path. */
+static void test_peak_limiter_off_is_the_plain_push(void) {
+    test_reset();
+    SDL_SetHintWithPriority(SDL_HINT_AUDIO_DRIVER, "dummy", SDL_HINT_OVERRIDE);
+    assert(sr_audio_init() == 0 && s_audio_state == AUDIO_STATE_ACTIVE);
+    assert(SDL_PauseAudioDevice(s_device_id));
+    static int16_t lr[256 * 2];
+    static int32_t wide[256 * 2];
+    for (int i = 0; i < 256 * 2; i++) {
+        wide[i] = (i & 1 ? -1 : 1) * (i * 300);
+        lr[i] = (int16_t)(wide[i] > 32767 ? 32767 : wide[i] < -32768 ? -32768 : wide[i]);
+    }
+    sr_audio_push_wide(0, lr, wide, 256, 0x8000, 0x8000);
+    sr_audio_push(1, lr, 256, 0x8000, 0x8000);
+    sr_audio_push_wide(2, lr, wide, 256, 0x6000, 0xA000);
+    sr_audio_push(3, lr, 256, 0x6000, 0xA000);
+    assert(sr_audio_queued(0) == 256 && sr_audio_queued(2) == 256);
+    for (uint32_t i = 0; i < 256u; i++)
+        for (int c = 0; c < 2; c++) {
+            assert(test_queued_sample(0, i, c) == lr[i * 2 + (uint32_t)c]);
+            assert(test_queued_sample(0, i, c) == test_queued_sample(1, i, c));
+            assert(test_queued_sample(2, i, c) == test_queued_sample(3, i, c));
+        }
+    uint64_t pushes = 1, frames = 1, limited = 1;
+    double min_gain = 0.0;
+    sr_audio_true_peak_stats(&pushes, &frames, &limited, &min_gain);
+    assert(pushes == 0 && frames == 0 && limited == 0 && min_gain == 1.0);
+    test_reset();
+    printf("test_peak_limiter_off_is_the_plain_push: PASS\n");
+}
+
+/* On, audio under the ceiling with no peak near it comes out bit-exact, SR_TPL_DELAY frames late,
+ * and a push of n frames still queues n frames (the guest's queue depth is unchanged).
+ * The sines start at zero and peak at 30000 and 28000 counts, 0.47 dB and more under the ceiling.
+ * MUTANT: SR_TPL_CEILING at -1 dBTP -- the sine is turned down and the bit-exact cell fails. */
+static void test_peak_limiter_passes_quiet_audio_bit_exact(void) {
+    test_reset();
+    SDL_SetHintWithPriority(SDL_HINT_AUDIO_DRIVER, "dummy", SDL_HINT_OVERRIDE);
+    assert(sr_audio_init() == 0 && s_audio_state == AUDIO_STATE_ACTIVE);
+    assert(SDL_PauseAudioDevice(s_device_id));
+    assert(sr_audio_set_true_peak_limiter(1) == 1);
+    enum { N = 4000, BLOCK = 500 };
+    static int16_t in[N * 2];
+    for (int i = 0; i < N; i++) {
+        in[i * 2] = (int16_t)lrint(30000.0 * sin(2.0 * 3.14159265358979323846 * 1000.0 * i / 44100.0));
+        in[i * 2 + 1] = (int16_t)lrint(28000.0 * sin(2.0 * 3.14159265358979323846 * 1500.0 * i / 44100.0));
+    }
+    for (int b = 0; b < N; b += BLOCK) {
+        sr_audio_push(0, in + b * 2, BLOCK, 0x8000, 0x8000);
+        assert(sr_audio_queued(0) == b + BLOCK);
+    }
+    for (uint32_t i = 0; i < (uint32_t)N; i++)
+        for (int c = 0; c < 2; c++) {
+            const int16_t want = i < SR_TPL_DELAY ? 0 : in[(i - SR_TPL_DELAY) * 2u + (uint32_t)c];
+            assert(test_queued_sample(0, i, c) == want);
+        }
+    uint64_t limited = 1;
+    sr_audio_true_peak_stats(NULL, NULL, &limited, NULL);
+    assert(limited == 0);
+    test_reset();
+    printf("test_peak_limiter_passes_quiet_audio_bit_exact: PASS (delay %d frames)\n", SR_TPL_DELAY);
+}
+
+/* The overflow fixture: a 997 Hz sine whose sum reaches 70000 counts (6.6 dB past 16 bits) for
+ * 4000 frames between two passages at 8000 counts, pushed as the SAS mixer hands it over (the
+ * guest's saturated copy beside the sum). The PSP's copy clips; the limiter's output must not:
+ * no sample past the -0.3 dBTP ceiling, a true peak under full scale, the passage
+ * before the overflow bit-exact, and the one after it, once the release is over, at the input's
+ * level within 0.1 dB.
+ * MUTANT: use the gain frame q needs (l->need) instead of the moving average -- the gain no longer
+ *   falls before the overflow arrives and the attack cell fails.
+ * The true-peak bound is full scale, not the ceiling: at the fixture's hard 62000-count steps
+ * the 16x reading here shows more ringing than the limiter's 4x detector (16 taps a phase,
+ * finer than BS.1770's 12) and lands 0.13 dB over the ceiling (measured), still under 0 dBTP. */
+static void test_peak_limiter_rounds_off_an_overflow(void) {
+    test_reset();
+    SDL_SetHintWithPriority(SDL_HINT_AUDIO_DRIVER, "dummy", SDL_HINT_OVERRIDE);
+    assert(sr_audio_init() == 0 && s_audio_state == AUDIO_STATE_ACTIVE);
+    assert(SDL_PauseAudioDevice(s_device_id));
+    assert(sr_audio_set_true_peak_limiter(1) == 1);
+    enum { N = 30208, BLOCK = 256, OVER_FROM = 4000, OVER_TO = 8000 };
+    static int32_t wide[N * 2];
+    static int16_t lr[N * 2];
+    uint32_t psp_clipped = 0;
+    for (int i = 0; i < N; i++) {
+        const double a = i >= OVER_FROM && i < OVER_TO ? 70000.0 : 8000.0;
+        for (int c = 0; c < 2; c++) {
+            const double ph = 2.0 * 3.14159265358979323846 * 997.0 * i / 44100.0 + c * 0.7;
+            wide[i * 2 + c] = (int32_t)lrint(a * sin(ph));
+            const int32_t w = wide[i * 2 + c];
+            lr[i * 2 + c] = (int16_t)(w > 32767 ? 32767 : w < -32768 ? -32768 : w);
+            if (lr[i * 2 + c] == 32767 || lr[i * 2 + c] == -32768) psp_clipped++;
+        }
+    }
+    assert(psp_clipped > 1000);   /* the fixture overflows 16 bits, as the PSP's mix would */
+    for (int b = 0; b < N; b += BLOCK)
+        sr_audio_push_wide(0, lr + b * 2, wide + b * 2, BLOCK, 0x8000, 0x8000);
+    assert(sr_audio_queued(0) == N);
+
+    int out_max = 0;
+    for (uint32_t i = 0; i < (uint32_t)N; i++)
+        for (int c = 0; c < 2; c++) {
+            const int v = abs(test_queued_sample(0, i, c));
+            if (v > out_max) out_max = v;
+        }
+    assert(out_max < 32767);
+    assert(out_max <= (int)(SR_TPL_CEILING + 0.5));   /* the ceiling, to the nearest count */
+    const double tp = test_true_peak(0, 0u, (uint32_t)N);
+    const double tp_db = 20.0 * log10(tp / 32768.0);
+    assert(tp_db < 0.0);
+
+    /* Before the attack reaches it, the quiet passage is the input, SR_TPL_DELAY frames late. */
+    for (uint32_t i = 0; i < SR_TPL_DELAY; i++)
+        assert(test_queued_sample(0, i, 0) == 0 && test_queued_sample(0, i, 1) == 0);
+    for (uint32_t i = 0; i < OVER_FROM - SR_TPL_LOOKAHEAD - SR_TPL_TAPS; i++)
+        for (int c = 0; c < 2; c++)
+            assert(test_queued_sample(0, i + SR_TPL_DELAY, c) == lr[i * 2u + (uint32_t)c]);
+    /* The attack: frames 16 to 48 before the overflow, out of the interpolator's reach of it, are
+     * already turned down, so the gain falls over the look-ahead instead of in one step. */
+    uint32_t attacked = 0;
+    for (uint32_t i = OVER_FROM - 48u; i < OVER_FROM - 16u; i++)
+        for (int c = 0; c < 2; c++) {
+            const int x = lr[i * 2u + (uint32_t)c], y = test_queued_sample(0, i + SR_TPL_DELAY, c);
+            if (abs(x) > 1000 && abs(y) < abs(x) - 1) attacked++;
+        }
+    assert(attacked > 32u);
+    /* A quarter second after the overflow (five release time constants), the level is back. */
+    double sum_in = 0.0, sum_out = 0.0;
+    for (uint32_t i = OVER_TO + 11025u; i + SR_TPL_DELAY < (uint32_t)N; i++)
+        for (int c = 0; c < 2; c++) {
+            const double x = wide[i * 2u + (uint32_t)c];
+            const double y = test_queued_sample(0, i + SR_TPL_DELAY, c);
+            sum_in += x * x;
+            sum_out += y * y;
+        }
+    const double level_db = 10.0 * log10(sum_out / sum_in);
+    assert(fabs(level_db) <= 0.1);
+
+    uint64_t pushes = 0, frames = 0, limited = 0;
+    double min_gain = 1.0;
+    sr_audio_true_peak_stats(&pushes, &frames, &limited, &min_gain);
+    assert(pushes == (uint64_t)(N / BLOCK) && frames > 1000u && limited > (uint64_t)(OVER_TO - OVER_FROM));
+    assert(min_gain < 0.5);
+    test_reset();
+    printf("test_peak_limiter_rounds_off_an_overflow: PASS (PSP clipped %u samples; output peak %d, "
+           "true peak %.2f dBTP, level after %.3f dB, lowest gain %.3f)\n",
+           psp_clipped, out_max, tp_db, level_db, min_gain);
+}
+
+/* A hold of silence (sr_audio_push_silence) with the limiter on. On a channel still playing it
+ * keeps the order: what played before, then the silence, then the new push, each SR_TPL_DELAY
+ * frames late. Pushed past the limiter, the silence played first and the old stream's last frames
+ * came after it. On a channel the device played dry (the hold's real case, hle_audio.c), the held
+ * frames go, as the converter's kept-back frames do: after the gap they were a 1.6 ms fragment
+ * between two silences.
+ * MUTANT: put the zeros straight into the stream -- the order cell fails.
+ * A push to a dry channel with no hold ahead of it (hle_audio.c holds only when the pull is long
+ * against the block) drops them the same way.
+ * MUTANT: drop the limiter reset on a dry channel in sr_audio_push_silence -- the dry cell fails.
+ * A queue a pull emptied without coming up short is still playing: a push there keeps the frames.
+ * MUTANT: drop it in sr_audio_push_frames -- the no-hold cell fails.
+ * MUTANT: reset on any empty queue, played dry or not -- the still-playing cell fails. */
+static void test_peak_limiter_keeps_a_hold_in_order(void) {
+    test_reset();
+    SDL_SetHintWithPriority(SDL_HINT_AUDIO_DRIVER, "dummy", SDL_HINT_OVERRIDE);
+    assert(sr_audio_init() == 0 && s_audio_state == AUDIO_STATE_ACTIVE);
+    assert(SDL_PauseAudioDevice(s_device_id));
+    assert(sr_audio_set_true_peak_limiter(1) == 1);
+    static int16_t a[300 * 2], b[200 * 2];
+    for (int i = 0; i < 300 * 2; i++) a[i] = 10000;
+    for (int i = 0; i < 200 * 2; i++) b[i] = -5000;
+    sr_audio_push(0, a, 300, 0x8000, 0x8000);
+    sr_audio_push_silence(0, 500);
+    sr_audio_push(0, b, 200, 0x8000, 0x8000);
+    assert(sr_audio_queued(0) == 1000);
+    for (uint32_t i = 0; i < 1000u; i++) {
+        const uint32_t in = i < SR_TPL_DELAY ? 0xFFFFFFFFu : i - SR_TPL_DELAY;
+        const int16_t want = in == 0xFFFFFFFFu ? 0 : in < 300u ? 10000 : in < 800u ? 0 : -5000;
+        assert(test_queued_sample(0, i, 0) == want && test_queued_sample(0, i, 1) == want);
+    }
+    /* Dry: the device took everything queued (cleared here); the limiter still holds a's last
+     * SR_TPL_DELAY frames. The hold is silence only, and b follows it. */
+    sr_audio_push(1, a, 300, 0x8000, 0x8000);
+    assert(SDL_ClearAudioStream(s_streams[1]));
+    sr_audio_push_silence(1, 500);
+    sr_audio_push(1, b, 200, 0x8000, 0x8000);
+    assert(sr_audio_queued(1) == 700);
+    for (uint32_t i = 0; i < 700u; i++) {
+        const int16_t want = i < 500u + SR_TPL_DELAY ? 0 : -5000;
+        assert(test_queued_sample(1, i, 0) == want && test_queued_sample(1, i, 1) == want);
+    }
+    /* Dry with no hold (a pull found nothing): b follows the limiter's delay at once, with none
+     * of a's frames ahead. */
+    sr_audio_push(2, a, 300, 0x8000, 0x8000);
+    assert(SDL_ClearAudioStream(s_streams[2]));
+    SDL_SetAtomicInt(&s_played_dry[2], 1);
+    sr_audio_push(2, b, 200, 0x8000, 0x8000);
+    assert(sr_audio_queued(2) == 200);
+    for (uint32_t i = 0; i < 200u; i++) {
+        const int16_t want = i < SR_TPL_DELAY ? 0 : -5000;
+        assert(test_queued_sample(2, i, 0) == want && test_queued_sample(2, i, 1) == want);
+    }
+    /* Still playing: a pull took the last queued frame without coming up short. a's last frames
+     * still play ahead of b, with no hole between them. */
+    sr_audio_push(3, a, 300, 0x8000, 0x8000);
+    assert(SDL_ClearAudioStream(s_streams[3]));
+    assert(SDL_GetAtomicInt(&s_played_dry[3]) == 0);
+    sr_audio_push(3, b, 200, 0x8000, 0x8000);
+    assert(sr_audio_queued(3) == 200);
+    for (uint32_t i = 0; i < 200u; i++) {
+        const int16_t want = i < SR_TPL_DELAY ? 10000 : -5000;
+        assert(test_queued_sample(3, i, 0) == want && test_queued_sample(3, i, 1) == want);
+    }
+    test_reset();
+    printf("test_peak_limiter_keeps_a_hold_in_order: PASS\n");
+}
+
 static void test_pause_fade_has_no_dumped_click(void) {
     const char *dir = getenv("TEMP");
     if (!dir || !*dir) dir = getenv("TMPDIR");
@@ -2390,6 +2868,10 @@ int main(int argc, char **argv) {
     test_pause_queue_hold_and_fades();
     test_pause_master_gain_applied_once();
     test_volume_above_16_bits_is_clamped();
+    test_peak_limiter_off_is_the_plain_push();
+    test_peak_limiter_passes_quiet_audio_bit_exact();
+    test_peak_limiter_rounds_off_an_overflow();
+    test_peak_limiter_keeps_a_hold_in_order();
     test_pause_fade_has_no_dumped_click();
     test_full_mixer_drops_are_counted();
     test_no_device_path();

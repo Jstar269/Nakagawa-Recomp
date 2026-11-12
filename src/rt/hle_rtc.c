@@ -10,6 +10,7 @@
 /* The real-time clock: sceRtc. Extracted from hle.c on 2026-10-31 (#307). */
 
 #include "hle_internal.h"
+#include "ge_scene.h"
 
 static int rtc_read_u64(uint32_t addr, uint64_t *out) {
     if (!addr || !out || !sr_guest_span_readable(addr, 8u)) return 0;
@@ -224,6 +225,7 @@ static void hle_guest_fault(CpuState *s, const char *name, uint32_t addr, int st
 #else
     if (sr_sched_on) {
         sr_trace_close();
+        ge_scene_dump_finish();
         sr_compat_report();
         (void)sr_videorec_finish_status("a guest fault stopped the run", HLE_GUEST_FAULT_EXIT);
         sr_perf_shutdown();
@@ -328,14 +330,16 @@ static uint32_t h_RtcTickAddYears(CpuState *s) {
     if (value.month == 2u && value.day == 29u && !rtc_is_leap(value.year)) value.day = 28u;
     return rtc_write_u64(A0, rtc_datetime_to_tick(&value)) ? 0u : RTC_ILLEGAL_ADDR;
 }
-/* sceRtcTickAddMicroseconds / Seconds / Days: the source tick plus a whole number of units,
- * written to dest. PSPAutotests tests/rtc/arithmetic.expected (rev f573fe8c, recorded on a PSP,
- * checkRtcTickAddMicroseconds, -Seconds and -Days) shows plain modulo-2^64 arithmetic with a result
- * of 0 on every row: 0001-01-01 00:00:10 - 11 seconds wraps to year 60267, 9999-12-31 23:59:50
- * + 10 seconds reaches year 10000 and the huge counts wrap (e.g. + 62135596800000445 seconds
- * reaches year 26003). The count is a 64-bit value in $a2/$a3 for microseconds and seconds and a
- * sign-extended int in $a2 for days (the day rows pass a 64-bit constant truncated to int). A NULL
- * or unmapped pointer is not measured, so it stops the run by name, as sceRtcTickAddYears does. */
+/* sceRtcTickAddMicroseconds / Seconds / Minutes / Hours / Days / Weeks: the source tick plus a
+ * whole number of units, written to dest. PSPAutotests tests/rtc/arithmetic.expected (rev
+ * f573fe8c, recorded on a PSP, checkRtcTickAddMicroseconds, -Seconds, -Minutes, -Hours, -Days and
+ * -Weeks) shows plain modulo-2^64 arithmetic with a result of 0 on every row: 0001-01-01 00:00:10
+ * - 11 seconds wraps to year 60267, 9999-12-31 23:59:50 + 10 seconds reaches year 10000 and the
+ * huge counts wrap (e.g. + 62135596800000445 seconds reaches year 26003). The count is a 64-bit
+ * value in $a2/$a3 for microseconds, seconds and minutes and a sign-extended int in $a2 for
+ * hours, days and weeks (those rows pass a 64-bit constant truncated to int: + 62135596800000445
+ * hours lands in year 383). A NULL or unmapped pointer is not measured, so it stops the run by
+ * name, as sceRtcTickAddYears does. */
 static uint32_t rtc_tick_add(const char *name, uint32_t dest, uint32_t src, uint64_t delta) {
     uint64_t tick;
     if (!rtc_read_u64(src, &tick))
@@ -355,6 +359,18 @@ static uint32_t h_RtcTickAddSeconds(CpuState *s) {
 static uint32_t h_RtcTickAddDays(CpuState *s) {
     (void)s;
     return rtc_tick_add("sceRtcTickAddDays", A0, A1, (uint64_t)(int64_t)(int32_t)A2 * 86400000000ull);
+}
+static uint32_t h_RtcTickAddMinutes(CpuState *s) {
+    (void)s;
+    return rtc_tick_add("sceRtcTickAddMinutes", A0, A1, ((uint64_t)A2 | ((uint64_t)A3 << 32)) * 60000000u);
+}
+static uint32_t h_RtcTickAddHours(CpuState *s) {
+    (void)s;
+    return rtc_tick_add("sceRtcTickAddHours", A0, A1, (uint64_t)(int64_t)(int32_t)A2 * 3600000000ull);
+}
+static uint32_t h_RtcTickAddWeeks(CpuState *s) {
+    (void)s;
+    return rtc_tick_add("sceRtcTickAddWeeks", A0, A1, (uint64_t)(int64_t)(int32_t)A2 * 604800000000ull);
 }
 
 /* sceRtcCheckValid(const pspTime *): 0 for a valid date, else the first failing field as a negative
@@ -496,6 +512,9 @@ void hle_register_unregistered_import_rtc(void) {
     sr_hle_register(0xf2a4afe5, "sceRtcTickAddSeconds", h_RtcTickAddSeconds);
     sr_hle_register(0x26d25a5d, "sceRtcTickAddMicroseconds", h_RtcTickAddMicroseconds);
     sr_hle_register(0xe51b4b7a, "sceRtcTickAddDays", h_RtcTickAddDays);
+    sr_hle_register(0xe6605bca, "sceRtcTickAddMinutes", h_RtcTickAddMinutes);
+    sr_hle_register(0x26d7a24a, "sceRtcTickAddHours", h_RtcTickAddHours);
+    sr_hle_register(0xcf3a2ca8, "sceRtcTickAddWeeks", h_RtcTickAddWeeks);
     sr_hle_register(0x57726bc1, "sceRtcGetDayOfWeek", h_RtcGetDayOfWeek);
     sr_hle_register(0x4b1b5e82, "sceRtcCheckValid", h_RtcCheckValid);
     sr_hle_register_unsupported(0x011f03c1u, "sceRtcGetAccumulativeTime", 0x80020002u);
