@@ -908,6 +908,23 @@ static uint64_t s_write_seq = 0;
 static unsigned long s_cnt_readback = 0, s_cnt_upload = 0, s_cnt_dirty = 0;
 static unsigned long s_cnt_snap = 0, s_cnt_texup = 0, s_cnt_xferblit = 0;
 static uint64_t s_cnt_tex_invalidations = 0;
+static int s_tmpl_ok;   /* the cached state template (state_get) is current; defined below */
+
+/* A readback wrote guest VRAM [a0, a1) (canonical addresses) without hook_vram_dirty: mark every
+ * cached texture that reads those bytes stale, as a notified write does. A source with a content
+ * hash then revalidates against its shadow; one without (read through a reordering VRAM view, or
+ * a mip level without a host pointer) decodes again. The state template may carry such a
+ * texture's descriptor, so it goes too. */
+static void tex_invalidate_span(uint64_t a0, uint64_t a1) {
+    for (int i = 0; i < s_tex_n; i++) {
+        TexEnt *e = &s_tex[i];
+        if (e->content_valid && tex_ent_overlaps(e, a0, a1)) {
+            s_cnt_tex_invalidations++;
+            e->content_valid = 0;
+            s_tmpl_ok = 0;
+        }
+    }
+}
 static uint64_t s_cnt_tex_clean_skips = 0;   /* CPU stores that skipped the texture scan (#282): */
 static uint64_t s_cnt_tex_quiet_skips = 0;   /* clean pages, and quiet pages */
 static uint64_t s_cnt_shadow_checks = 0, s_cnt_shadow_hits = 0, s_cnt_shadow_misses = 0;
@@ -1746,6 +1763,8 @@ static int write_guest_fb(const uint32_t *src, uint32_t fba, uint32_t stride, ui
                 dst[x] = (uint16_t)fb_pack(sl[x * s_scale], fmt);
         }
     }
+    const uint64_t row = (uint64_t)stride * ((fmt & 3) == 3 ? 4u : 2u), base = tex_canonical(rba);
+    tex_invalidate_span(base + (uint64_t)y0 * row, base + (uint64_t)y1 * row);
     return 1;
 }
 
@@ -4021,6 +4040,7 @@ static int depth_readback_to_guest(DepthEnt *d) {
     }
     d->guest_dirty = 0;
     ge_zbuf_invalidate_guest_span(depth_first, depth_end - depth_first);
+    tex_invalidate_span(tex_canonical(depth_first), tex_canonical(depth_first) + (depth_end - depth_first));
     if (sr_perf_enabled) sr_perf_vulkan_readback((uint32_t)readback_bytes(DEPTH_BPP));
     return 1;
 }
@@ -4761,10 +4781,11 @@ static int tex_mip_chain_supported(void) {
 static void tex_mip_targets_readback(const TexMipKey *mip, const uint32_t *level_bytes) {
     for (uint32_t i = 0; i < mip->max_level; i++) {
         if (!is_vram(mip->addr[i])) continue;
-        uint32_t off = vram_off(mip->addr[i]);
+        uint32_t off = vram_off(mip->addr[i]), bytes = level_bytes[i];
+        if (mip->addr[i] & 0x00200000u) vram_view_envelope(off, bytes, &off, &bytes);   /* a reordering view */
         for (int t = 0; t < MAX_TGT; t++) {
             Target *tg = &s_tgts[t];
-            if (tg->used && tg->gpu_valid) (void)target_readback_span(tg, off, level_bytes[i]);
+            if (tg->used && tg->gpu_valid) (void)target_readback_span(tg, off, bytes);
         }
     }
 }
@@ -5594,18 +5615,6 @@ static DepthEnt *depth_containing(uint32_t a) {
 
 static int hook_vram_read(uint32_t addr, uint32_t bytes);
 
-/* Mark every cached texture that reads canonical [a0, a1) stale, for a write to guest VRAM that
- * no hook_vram_dirty reported. */
-static void tex_invalidate_span(uint64_t a0, uint64_t a1) {
-    for (int i = 0; i < s_tex_n; i++) {
-        TexEnt *e = &s_tex[i];
-        if (e->content_valid && tex_ent_overlaps(e, a0, a1)) {
-            s_cnt_tex_invalidations++;
-            e->content_valid = 0;
-        }
-    }
-}
-
 /* Build pipeline key + push constants for the current GE state. Always succeeds. */
 static void build_state(int persp, int sprite, Batch *b) {
     uint64_t key_started = cpu_profile_now();
@@ -5899,8 +5908,8 @@ static void build_state(int persp, int sprite, Batch *b) {
                      * are the twin sampling rule too (same psm, so no CLUT; no swizzle; no
                      * mips; bufw == stride; pixel-aligned; no reordering view): any other read
                      * goes through VRAM in both passes. The source's twin may still be the
-                     * presenter's blit source,
-                     * and one that is behind its image is re-seeded first. */
+                     * presenter's blit source, and one that is behind its image is re-seeded
+                     * first. */
                     if (s_twin && src->timg && (src->tlayout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL ||
                                                 src->tgen != src->wgen)) {
                         if (s_nbatch) submit_pending();
@@ -5936,16 +5945,20 @@ static void build_state(int persp, int sprite, Batch *b) {
                 } else {
                     (void)target_readback_span(src, off, span);
                 }
-                /* A source read through a view has no content hash (tex_source_ptr), and the
-                 * readbacks above (a presentation copy's included) write guest VRAM without
-                 * hook_vram_dirty, so a decode cached before them may be stale: decode again. */
-                if (view_read)
-                    tex_invalidate_span(SR_VRAM_CPU_BASE + (uint64_t)off, SR_VRAM_CPU_BASE + (uint64_t)off + span);
                 s_tex_noscale = 1;
                 b->dset = tex_get();
                 s_tex_noscale = 0;
             }
         } else {
+            if (is_vram(g->tex_addr) && (g->tex_addr & 0x00200000u)) {
+                /* Through a reordering view, a texture that starts in no target may still read
+                 * bytes of one (vram_view_envelope): those target pixels are read back first. */
+                uint32_t off, span;
+                vram_view_envelope(vram_off(g->tex_addr), tex_span_size(g->tex_bufw, g->tex_w, g->tex_h),
+                                   &off, &span);
+                for (int i = 0; i < MAX_TGT; i++)
+                    if (s_tgts[i].used && s_tgts[i].gpu_valid) (void)target_readback_span(&s_tgts[i], off, span);
+            }
             b->dset = tex_get();
             /* A scaled copy (tex_scale.h) samples on its own texel lattice in psp.frag. */
             if (s_tex_bound_scale > 1) {

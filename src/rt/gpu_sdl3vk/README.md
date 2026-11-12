@@ -344,19 +344,21 @@ The PSP maps its 2 MiB of VRAM four times. Measured with CPU loads and stores
 (`docs/HARDWARE_ORACLE.md`, `PSP-VRAM-MIRROR-001`): the 0x04000000 and 0x04400000 views read each
 offset where it is, the 0x04200000 view reads offset `o` at `o ^ 0x2040`, and the 0x04600000 view
 rotates bits 5..9 of `o` left one and then XORs `0x2040` (the uncached 0x44xxxxxx aliases alike).
-`ge.c` decodes a texture given through a view with the same transforms
-(`sr_vram_cpu_address`, #1049). That the GE's own texel fetch applies them is inferred, not measured: a title draws its
-movie as a texture through a view after writing the frames there with the CPU (#1049), which shows
-only if the fetch undoes the write's transform. A read through 0x04200000 or 0x04600000 therefore
-never binds the target's image, whose pixels are in plain order: it reads back every target's
-pixels in the 16 KiB-aligned blocks the view can reach and decodes guest VRAM through the view at
-1x. A source read through a view has no content hash, so the texture cache keeps its decode current
-another way: its source range is those blocks, so a notified CPU write to any byte the view reads
-makes it stale, and a render-target read through a view decodes again after the readbacks. The
-cell `rtt-vram-view` in `gpu-coherence-selftest` runs at 1x, 2x and 4x against the software
-renderer: an 8888 and a 5650 target read through each view, then the 8888 target redrawn and read
-through 0x04200000 again, and a texture in no target read through 0x04200000 before and after a CPU
-write to bytes that only the 16 KiB blocks cover.
+`ge.c` decodes a texture given through a view with the same transforms (`sr_vram_cpu_address`, issue
+1049). That the GE's own texel fetch applies them is inferred, not measured: a title draws its movie
+as a texture through a view after writing the frames there with the CPU (#1049), which shows only if
+the fetch undoes the write's transform. A read through 0x04200000 or 0x04600000 therefore never
+binds the target's image, whose pixels are in plain order. Both views change only offset bits 5..9
+and 13, so a texture read through one reads bytes of the 16 KiB-aligned blocks around it: the read,
+from a target or not, first reads back every target's pixels in those blocks, then decodes guest
+VRAM through the view at 1x. Such a source usually has no content hash, so the texture cache keeps
+its decode current another way: its source range is those blocks, so a notified CPU write to any
+byte the view reads makes it stale, and so does a readback, which marks every cached texture over
+the guest VRAM it writes stale (one with a content hash revalidates against its copy). The cell
+`rtt-vram-view` in `gpu-coherence-selftest` runs at 1x, 2x and 4x against the software renderer: an
+8888 and a 5650 target read through each view, then the 8888 target redrawn and read through
+0x04200000 again, and a texture in no target read through 0x04200000 before and after a CPU write to
+bytes that only the 16 KiB blocks cover.
 
 Depth is matched by address like any texture. A depth buffer read as a texture decodes guest VRAM
 at 1x when its address lies outside every colour target's span. When the texture's address lies
