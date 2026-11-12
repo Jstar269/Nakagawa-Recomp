@@ -578,6 +578,18 @@ void sr_audio_push(int ch, const int16_t *lr, int nframes, int volL, int volR) {
     }
 }
 
+/* Ace Mode's peak=limit (#2137): a push that carries the SAS grain's unsaturated sum. It is a push
+ * like any other for the counters above; the sum is kept for the provenance cells. */
+static unsigned long s_audio_push_wide_calls;
+static int32_t s_audio_push_wide_capture[8192u * 2u];
+void sr_audio_push_wide(int ch, const int16_t *lr, const int32_t *wide, int nframes, int volL, int volR) {
+    s_audio_push_wide_calls++;
+    if (wide && nframes > 0)
+        memcpy(s_audio_push_wide_capture, wide,
+               ((size_t)nframes < 8192u ? (size_t)nframes : 8192u) * 2u * sizeof(*wide));
+    sr_audio_push(ch, lr, nframes, volL, volR);
+}
+
 void sr_audio_push_silence(int ch, int nframes) {
     s_audio_silence_calls++;
     if (nframes <= 0 || ch < 0 || ch >= 9) return;
@@ -633,6 +645,7 @@ int sr_audio_queued(int ch) {
 static void audio_fixture_reset(void) {
     s_oor_calls = 0;
     s_audio_push_calls = 0;
+    s_audio_push_wide_calls = 0;
     s_audio_queue_calls = 0;
     s_audio_push_frames = 0;
     s_audio_push_first_l = 0;
@@ -34327,6 +34340,112 @@ static void test_sas_mix_saturates_without_wrapping(void) {
            "__sceSasCoreWithMix saturates twenty full-scale voices at +32767 once every envelope is up");
 }
 
+/* ---- #2137: Ace Mode's peak=limit, the SAS side -------------------------------------------------
+ *
+ * The overflow fixture: twenty full-scale PCM voices over caller PCM of -1000 through
+ * __sceSasCoreWithMix, so the sum passes 16 bits once the envelopes rise and stays under it on
+ * the first samples, then sceAudioOutputBlocking of that same buffer. With the wide mix on, the
+ * guest's bytes must be the PSP's, saturated, exactly as with it off; the host's push must carry
+ * the unsaturated sum where the store saturated and the guest's value everywhere else; and a
+ * buffer the game changed after the mix, or a copy of it elsewhere, must play as the guest has it.
+ *
+ * MUTANT: store the wide sum into guest memory (sas_output_write(out, i, 0, wl)) -- the guest
+ *   bytes differ from the run with the switch off and the first cell fails.
+ * MUTANT: drop the memcmp in sas_wide_for_output -- the changed buffer still plays the kept sum
+ *   and the provenance cell fails. */
+static void sas_peak_overflow_grain(CpuState *cpu, int wide, int16_t *guest) {
+    const uint32_t core = 0x08030000u, out = 0x08010000u, pcm = 0x08040000u;
+    const uint32_t grain = 256u, voices = 20u, pcm_samples = 512u;
+    reset_fixture();
+    sr_hle_init();
+    sr_hle_test_sas_reset();
+    sr_hle_test_audio_reset();
+    audio_fixture_reset();
+    sr_hle_sas_set_wide_mix(wide);
+    memset(cpu, 0, sizeof(*cpu));
+    cpu->r[29] = 0x09012000u;
+    cpu->r[4] = core; cpu->r[5] = grain; cpu->r[6] = 32; cpu->r[7] = 0; cpu->r[8] = 44100;
+    expect(sr_syscall(cpu, NID_SAS_INIT) == 0, "peak fixture: __sceSasInit accepts the 256-sample grain");
+    for (uint32_t i = 0; i < pcm_samples; i++) MEM_W16(pcm + i * 2u, 0x7fffu);
+    for (uint32_t v = 0; v < voices; v++) {
+        cpu->r[4] = core; cpu->r[5] = v; cpu->r[6] = pcm; cpu->r[7] = pcm_samples; cpu->r[8] = 0xffffffffu;
+        expect(sr_syscall(cpu, NID_SAS_SET_VOICE_PCM) == 0, "peak fixture: __sceSasSetVoicePCM");
+        cpu->r[4] = core; cpu->r[5] = v; cpu->r[6] = 0x1000; cpu->r[7] = 0x1000;
+        cpu->r[8] = 0x1000; cpu->r[9] = 0x1000;
+        expect(sr_syscall(cpu, NID_SAS_SET_VOLUME) == 0, "peak fixture: __sceSasSetVolume");
+        cpu->r[4] = core; cpu->r[5] = v;
+        expect(sr_syscall(cpu, NID_SAS_SET_KEY_ON) == 0, "peak fixture: __sceSasSetKeyOn");
+    }
+    int16_t bgm[256 * 2];
+    for (uint32_t i = 0; i < grain * 2u; i++) bgm[i] = -1000;
+    sas_write_pcm(out, bgm, grain);
+    cpu->r[4] = core; cpu->r[5] = out; cpu->r[6] = 0x1000; cpu->r[7] = 0x1000;
+    expect(sr_syscall(cpu, NID_SAS_CORE_WITH_MIX) == 0, "peak fixture: __sceSasCoreWithMix");
+    sas_read_pcm(out, guest, grain);
+    expect(audio_dispatch(cpu, NID_SCE_AUDIO_CH_RESERVE, 0u, grain, 0u) == 0u,
+           "peak fixture: the regular channel takes 256-frame stereo blocks");
+}
+
+static void test_sas_peak_limit_keeps_guest_bytes_and_hands_the_host_the_sum(void) {
+    const uint32_t out = 0x08010000u, copy = 0x08050000u;
+    CpuState cpu;
+    int16_t off[256 * 2], on[256 * 2];
+
+    /* Off: the PSP's bytes, and a plain push of them. */
+    sas_peak_overflow_grain(&cpu, 0, off);
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT_BLOCKING, 0u, 0x8000u, out) == 256u,
+           "peak off: the output plays the grain");
+    expect(s_audio_push_calls == 1 && s_audio_push_wide_calls == 0,
+           "peak off: the output is a plain push (no wide sum is kept)");
+    uint32_t saturated = 0, unsaturated = 0;
+    for (uint32_t i = 0; i < 256u * 2u; i++) {
+        if (off[i] == 32767) saturated++;
+        else if (off[i] > -32768) unsaturated++;
+    }
+    expect(saturated > 0 && unsaturated > 0,
+           "peak fixture: the grain saturates once the envelopes rise and not before");
+
+    /* On: the same bytes in guest memory, and the sum for the host. */
+    sas_peak_overflow_grain(&cpu, 1, on);
+    expect(memcmp(off, on, sizeof(off)) == 0,
+           "peak on: the guest's SAS bytes are byte-identical to the run with the switch off");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT_BLOCKING, 0u, 0x8000u, out) == 256u,
+           "peak on: the output plays the grain");
+    expect(s_audio_push_calls == 1 && s_audio_push_wide_calls == 1,
+           "peak on: the unchanged SAS buffer reaches the host as one wide push");
+    expect(memcmp(s_audio_push_capture, on, sizeof(on)) == 0,
+           "peak on: the wide push still carries the guest's own bytes beside the sum");
+    uint32_t past = 0, wrong = 0;
+    for (uint32_t i = 0; i < 256u * 2u; i++) {
+        const int32_t w = s_audio_push_wide_capture[i];
+        if (on[i] == 32767) { if (w > 32767) past++; else wrong++; }
+        else if (w != on[i]) wrong++;
+    }
+    expect(wrong == 0, "peak on: the sum differs from the guest only where the store saturated");
+    expect(past == saturated, "peak on: every saturated sample carries a sum past 16 bits");
+    /* Twenty unity voices at full scale over -1000: once the envelopes are up the sum is
+     * 20 * 32767 - 1000, far past what any int16 holds. */
+    expect(s_audio_push_wide_capture[255 * 2] > 20 * 30000,
+           "peak on: the sum keeps all twenty voices");
+
+    /* The game changed the buffer after the mix: it plays as the guest has it. */
+    sas_peak_overflow_grain(&cpu, 1, on);
+    MEM_W16(out + 255u * 4u, 0x1234u);
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT_BLOCKING, 0u, 0x8000u, out) == 256u,
+           "peak on, changed buffer: the output plays");
+    expect(s_audio_push_calls == 1 && s_audio_push_wide_calls == 0,
+           "peak on, changed buffer: a span the game wrote after the mix gets no kept sum");
+
+    /* A copy elsewhere is the game's own buffer: it plays as the guest has it. */
+    sas_peak_overflow_grain(&cpu, 1, on);
+    sas_write_pcm(copy, on, 256u);
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT_BLOCKING, 0u, 0x8000u, copy) == 256u,
+           "peak on, copy: the output plays");
+    expect(s_audio_push_calls == 1 && s_audio_push_wide_calls == 0,
+           "peak on, copy: a buffer the SAS mixer never wrote gets no kept sum");
+    sr_hle_sas_set_wide_mix(0);
+}
+
 /* Production-dispatch SAS state regressions.  Each case uses only synthetic
  * guest data and starts from a fresh core so one voice cannot mask another. */
 static void sas_test_init(CpuState *cpu, uint32_t core, uint32_t output_mode) {
@@ -53168,6 +53287,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_impose_language_mode_pair();
     test_sas_core_mix_preserves_caller_pcm();
     test_sas_mix_saturates_without_wrapping();
+    test_sas_peak_limit_keeps_guest_bytes_and_hands_the_host_the_sum();
     test_sas_state_contracts();
     test_sas_set_volume_accepts_negative();
     test_sas_voice_volume_defaults();
