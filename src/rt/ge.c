@@ -646,16 +646,27 @@ uint32_t ge_cpu_profile_validate(const GeCpuProfileStats *s, char *detail, size_
             uint64_t transform_uses = s->primitive_profile_transform_vertex_uses;
             uint64_t transformed = s->primitive_profile_actual_transformed_vertices;
             uint64_t hits = s->primitive_profile_vertex_cache_hits;
+            /* note_draw adds every use to primitive_profile_vertices and to the fetch/decode
+             * eligible population, and a cache hit takes itself out of the eligible ones (lit
+             * draws' lighting included), so eligible + hits is the uses exactly. */
+            uint64_t fetch_eligible =
+                s->primitive_profile_eligible[GE_PRIM_PROFILE_VERTEX_FETCH_DECODE];
             if ((s->primitive_profile_actual_through_vertices != through_uses ||
                  transformed > transform_uses ||
                  hits > transform_uses - transformed ||
-                 transform_uses - transformed - hits > s->primitive_profile_vertex_rejects) &&
+                 transform_uses - transformed - hits > s->primitive_profile_vertex_rejects ||
+                 !ge_profile_sum_eq(ge_profile_sum2(fetch_eligible, hits),
+                                    s->primitive_profile_vertices) ||
+                 s->primitive_profile_eligible[GE_PRIM_PROFILE_LIGHTING] >
+                     s->primitive_profile_eligible[GE_PRIM_PROFILE_TRANSFORM]) &&
                 ge_profile_fail(&v, GE_PROFILE_CHECK_DECODE_COVERAGE))
                 snprintf(detail, detail_size, "decode_coverage: through decoded=%" PRIu64
                          " uses=%" PRIu64 ", transform decoded=%" PRIu64 " uses=%" PRIu64
-                         " vertex_cache_hits=%" PRIu64 " rejects=%" PRIu64,
+                         " vertex_cache_hits=%" PRIu64 " rejects=%" PRIu64
+                         " fetch_eligible=%" PRIu64 " vertices=%" PRIu64,
                          s->primitive_profile_actual_through_vertices, through_uses, transformed,
-                         transform_uses, hits, s->primitive_profile_vertex_rejects);
+                         transform_uses, hits, s->primitive_profile_vertex_rejects,
+                         fetch_eligible, s->primitive_profile_vertices);
         }
 
         /* draw_prim's transform triangle loop records one acceptance verdict per candidate
@@ -4482,8 +4493,13 @@ static void vertex_cache_begin_draw(int repeats) {
     }
 #if SR_GE_VERTEX_CACHE_MUTANT != 4
     /* The software rasterizer writes the colour target during the draw (ge_fb_store); in
-     * RAM it may overlap the vertices. */
-    if ((ge_fb_addr() & 0x0F000000u) != 0x04000000u) {
+     * RAM it may overlap the vertices. A target in VRAM must also end in VRAM: pixels reach
+     * (271 * stride + 479) (fb_px_visible), and a garbage width could carry the last rows
+     * past the 2 MiB into main RAM. */
+    uint32_t fb = ge_fb_addr();
+    uint64_t stride = ge.fbw ? ge.fbw : 512u;
+    uint64_t fb_end = (uint64_t)fb + (271u * stride + 480u) * ((ge.fbfmt & 3) == 3 ? 4u : 2u);
+    if ((fb & 0x0F000000u) != 0x04000000u || fb_end > 0x04200000u) {
         s_vertex_cache_draw = 1;
         return;
     }

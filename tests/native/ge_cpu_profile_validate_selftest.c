@@ -1768,6 +1768,10 @@ static void m_vertex_cache_hit_overcount(GeCpuProfileStats *s) {
     s->primitive_profile_vertex_cache_hits = s->primitive_profile_transform_vertex_uses -
                                              s->primitive_profile_actual_transformed_vertices + 1u;
 }
+static void m_vertex_cache_eligible_kept(GeCpuProfileStats *s) {
+    /* A use left in the fetch/decode eligible population though no use explains it. */
+    s->primitive_profile_eligible[GE_PRIM_PROFILE_VERTEX_FETCH_DECODE]++;
+}
 static void m_calibration_bound_exceeds(GeCpuProfileStats *s) {
     /* Decodes just large enough that decoded + candidates exceeds UINT64_MAX, with more
      * control samples than decodes: a bound past UINT64_MAX holds for any count, so only
@@ -1862,6 +1866,7 @@ static const Fault s_full_faults[] = {
     { "transform_decode_overcount", m_transform_decode_overcount, BIT(DECODE_COVERAGE) },
     { "skipped_decode_without_reject", m_skipped_decode_without_reject, BIT(DECODE_COVERAGE) },
     { "vertex_cache_hit_overcount", m_vertex_cache_hit_overcount, BIT(DECODE_COVERAGE) },
+    { "vertex_cache_eligible_kept", m_vertex_cache_eligible_kept, BIT(DECODE_COVERAGE) },
     { "calibration_bound_exceeds", m_calibration_bound_exceeds, BIT(DECODE_COVERAGE) },
     { "decision_overcount", m_decision_overcount, BIT(TRIANGLE_DECISIONS) },
     { "decision_sum_wraps", m_decision_sum_wraps, BIT(TRIANGLE_DECISIONS) },
@@ -2391,7 +2396,10 @@ static int bench_main(uint32_t rounds) {
 #define VC_INDICES    0x08530000u
 #define VC_TEX        0x08540000u   /* 16x16 8888 */
 #define VC_CLEAR_VERTS 0x08541000u
-#define VC_VRAM_VERTS 0x041A0000u   /* a copy of the plain grid in VRAM, past the colour and depth */
+/* A copy of the plain grid in VRAM, past the colour target. Its first 4 KiB lie inside the
+ * depth surface's 272-row guest span (VC_ZB to 0x041A1000), whose rows past 127 are loaded and
+ * written back unchanged. */
+#define VC_VRAM_VERTS 0x041A0000u
 #define VC_FB         0x04180000u   /* 128x128 8888 */
 #define VC_ZB         0x04190000u   /* 128x128 16-bit */
 #define VC_CLEAR      0xFF203040u
@@ -2531,7 +2539,8 @@ typedef struct {
     const void *indices;      /* NULL: not indexed */
     uint32_t tex_map_mode;
     float world_angle;
-    int vram;                 /* the vertices are in VRAM: never cached */
+    int vram;                 /* 1: the vertices are in VRAM, every use bypasses the cache;
+                               * 2: the draw never repeats an address and skips the cache */
     unsigned long hits, misses, bypasses;   /* this run's counts */
 } VcCase;
 
@@ -2669,8 +2678,14 @@ static void test_ge_vertex_cache(int strip_cache) {
         { "vertex_cache[epoch-second]", VT_VC_PLAIN | VT_INDEX8, VC_PLAIN, 3, 96, s_vc_u8_list, 0, -0.6f, 0, 0, 0, 0 },
         { "vertex_cache[vram-u8-list]", VT_VC_PLAIN | VT_INDEX8, VC_VRAM_VERTS, 3, 96, s_vc_u8_list, 0,
           0.2f, 1, 0, 0, 0 },
+        { "vertex_cache[plain-list]", VT_VC_PLAIN, VC_PLAIN + 32u * VC_PLAIN_STRIDE, 3, 48, NULL, 0,
+          0.1f, 2, 0, 0, 0 },
+        { "vertex_cache[plain-strip]", VT_VC_PLAIN, VC_PLAIN + 96u * VC_PLAIN_STRIDE, 4, 32, NULL, 0,
+          -0.1f, 0, 0, 0, 0 },
     };
     enum { N = sizeof cases / sizeof cases[0] };
+    /* A non-indexed strip repeats addresses only without the strip cache's rolling pair. */
+    cases[N - 1].vram = strip_cache ? 2 : 0;
     /* Colour from guest VRAM (the linear view maps one to one), depth from the GE's own depth
      * buffer for the target (ge_zbuf_ptr), 128x128 each. */
     enum { PIXELS = 128 * 128 };
@@ -2700,7 +2715,12 @@ static void test_ge_vertex_cache(int strip_cache) {
             vc_run_case(c);
             total_hits[run] += c->hits;
             total_misses[run] += c->misses + c->bypasses;
-            if (cache_on && c->vram) {
+            if (c->vram == 2) {
+                /* Every use is transformed outside the cache and counts nothing. */
+                total_misses[run] += vc_uses(c, strip_cache);
+                expect(c->hits == 0 && c->misses == 0 && c->bypasses == 0, c->name,
+                       "a draw that never repeats an address went through the cache");
+            } else if (cache_on && c->vram) {
                 /* The draw's own pixels may rewrite VRAM, so no VRAM vertex is ever cached. */
                 char what[160];
                 snprintf(what, sizeof what, "a VRAM vertex went through the cache (hits=%lu misses=%lu "

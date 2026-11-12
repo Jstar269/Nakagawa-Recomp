@@ -441,8 +441,9 @@ aggregates the parts, so `CI required` fails when any part fails.
 `tools/test_public_ci_wiring.py` (`NativeToolsPartitionTests`) fails if a serial gate is
 dropped, runs in more than one part, or changes its command.
 
-The native core suite (`native-core-tests`, in `core` and in the Windows `smoke-routes` group)
-includes the software GE's per-draw transformed-vertex cache. `ge-cpu-profile-validate-selftest`
+The native core suite (`native-core-tests`: in `core`, again there with coverage, in
+`linux_gcc16`, and in the Windows `smoke-routes` group) includes the software GE's per-draw
+transformed-vertex cache. `ge-cpu-profile-validate-selftest`
 renders indexed lists, fans and strips with the cache on and off (`SR_GE_VERTEX_CACHE_DISABLE`)
 and requires identical colour and depth. Sixteen pairs draw the same mesh twice with one
 transform input changed in between (vertex bytes, view, projection, bone and texgen matrices,
@@ -453,7 +454,8 @@ covers their own vertices, in RAM and in VRAM, must bypass the cache and leave i
 `SR_GE_VERTEX_CACHE_MUTANT` (1: no new epoch per draw, 2: no address check, 3: VRAM vertices
 cached, 4: cached while rendering to RAM) and runs the selftest against each; each must fail
 with its own message, mutant 1 must also fail all sixteen state-change pairs with differing
-pixels, and 3 and 4 must fail by differing target bytes.
+pixels, and 3 and 4 must fail by differing target bytes. The four mutant builds and runs took
+40 to 70 seconds on a 12-core Windows desktop under load (2026-11-11), once per suite run.
 
 ### Android launcher build
 
