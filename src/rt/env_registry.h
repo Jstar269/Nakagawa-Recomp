@@ -91,6 +91,8 @@
     X("SR_GELOG", "flag-presence", "off", "debug.h,ge.c,hle.c,hle_ge.c", "Enables GE command-list logging, including a message when a GE stall address is reached.") \
     X("SR_GEMAT", "flag-presence", "off", "ge.c", "When set, prints the world and view matrices of the first 16 primitives to stderr.") \
     X("SR_GEMATW", "flag-presence", "off", "ge.c", "Traces the first 120 GE matrix register writes to stderr.") \
+    X("SR_GESCENE", "number", "unset (no dump)", "ge.c", "GE frame number whose scene records (one per PRIM: identity, state, model-space vertices) are dumped to SR_GESCENE_DIR.") \
+    X("SR_GESCENE_DIR", "path", "unset (scene dump refused)", "ge.c", "Output directory for the SR_GESCENE dump, gescene_f<frame>.bin.") \
     X("SR_GESIGNALLOG", "flag-presence", "off", "ge.c", "Logs the first few GE signal command occurrences per behavior to stderr.") \
     X("SR_GESTAT", "flag-presence", "off", "ge.c", "Prints per-frame GE statistics once per 60-vblank window to diagnose culled or rejected geometry.") \
     X("SR_GEUNK", "flag-nonzero", "on", "ge.c", "Unhandled GE commands are reported once each unless this is set to 0.") \
