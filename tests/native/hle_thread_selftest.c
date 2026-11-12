@@ -10511,7 +10511,8 @@ static void test_savedata_getsize_free_space(void) {
                "GETSIZE overwriteKB and overwriteString discount the files the save already holds");
     }
     /* A shortfall on a missing save writes the needed fields and leaves the overwrite fields
-     * alone, and a text field stops at its NUL. */
+     * alone, and a text field stops at its NUL (the write mask PSP-HLE-SAVEDATA-GETSIZE-001
+     * measured). The figures are not the PSP's: see do_getsize. */
     {
         getsize_param(22u, "_GameData0");
         getsize_entry(GETSIZE_SECURE_ADDR, 0x20000u, "DATA.BIN");
@@ -10521,7 +10522,9 @@ static void test_savedata_getsize_free_space(void) {
         expect(sr_savedata_execute(GETSIZE_PARAM_ADDR) == 0x80110327u &&
                    getsize_guest_bytes_are(GETSIZE_INFO_ADDR + 28u, "64 KB\0\xA5\xA5"),
                "GETSIZE on a missing save reports RW_NO_DATA and writes freeString through its NUL only");
-        /* write = 0x20010, free = 0x10000: 0x10010 bytes short, 65 KB rounded up. */
+        /* write = 0x20010, free = 0x10000: 0x10010 bytes short, 65 KB rounded up. PPSSPP's
+         * arithmetic, not the measured one (a PSP charges three clusters more and wraps at 32
+         * bits; do_getsize). This cell pins which fields are written, not the PSP's figure. */
         expect(MEM_R32(GETSIZE_INFO_ADDR + 36u) == 65u &&
                    getsize_guest_bytes_are(GETSIZE_INFO_ADDR + 40u, "65 KB\0\xA5\xA5"),
                "GETSIZE on a missing save writes the shortfall to neededKB and neededString");

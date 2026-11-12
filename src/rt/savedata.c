@@ -2669,8 +2669,9 @@ static int getsize_sum_entries(uint32_t count, uint32_t entries, uint64_t per_en
     return 1;
 }
 
-/* A sizeInfo text field: written through its NUL and no further, as on a PSP
- * (PSP-HLE-SAVEDATA-GETSIZE-001). */
+/* A sizeInfo text field: written through its NUL and no further. Measured for a save that does
+ * not exist (PSP-HLE-SAVEDATA-GETSIZE-001); a save that exists uses the same rule by analogy
+ * (UNMEASURED there). */
 static void wr_size_text(uint32_t addr, const char *s, int n) {
     for (int i = 0; i < n; i++) {
         MEM_W8(addr + (uint32_t)i, (uint8_t)s[i]);
@@ -2702,10 +2703,16 @@ static uint32_t getsize_kb_round_up(uint64_t bytes) {
  * PSP-HLE-SAVEDATA-GETSIZE-001). A game reads RW_NO_DATA as "no save yet, and
  * this much room to make one", and success as "there is a save to load".
  *
- * UNMEASURED: the overwrite fields of a save that exists. The same run shows a
- * PSP's neededKB charging three clusters beyond the entry's size and wrapping
- * at 32 bits of bytes; one figure cannot divide those clusters between the
- * entry's rounding and the save's own files, so the arithmetic stays PPSSPP's. */
+ * Measured but NOT reproduced: the shortfall figure. On the same run a PSP's
+ * neededKB charged three clusters beyond the entry's size and wrapped at 32
+ * bits of bytes, so its fit/shortfall boundary and its neededKB and
+ * neededString differ from the figures here, which stay PPSSPP's arithmetic
+ * (64-bit, no cluster charge, saturating). One measured cell cannot divide
+ * those clusters between the entry's rounding and the save's own files, so
+ * the model waits for more cells (#308). The cluster size differs too: the
+ * runtime writes 0x8000, that PSP-3000's Memory Stick reported 0x10000.
+ *
+ * UNMEASURED: the overwrite fields and text of a save that exists. */
 static uint32_t do_getsize(uint32_t param, uint32_t size, const char *game, const char *save) {
     uint32_t si = savedata_optional_pointer(param, size, SDP_sizeInfo);
     if (!si) return 0;
