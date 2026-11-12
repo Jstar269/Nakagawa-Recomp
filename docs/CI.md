@@ -99,7 +99,9 @@ The jobs:
   condition; the job and that step still read no path output. The profile-zero steps follow,
   under the former job's condition (`allow_substantive` and `run_python` or `run_windows`,
   carried by the job's `BUILD_PROFILE_ZERO`), and upload the same `profile-zero-fixture`
-  artifact. Their `python3` is now the job's CPython 3.15.2 rather than the runner image's.
+  artifact. `BUILD_PROFILE_ZERO` also holds for `run_installer`: an installer-only change
+  (`assets/installer/**`, say) starts the Windows job with `run_python` and `run_windows`
+  both false, and its `routes` part downloads this job's artifacts. Their `python3` is now the job's CPython 3.15.2 rather than the runner image's.
   Under the same condition, the job then builds the two homebrew fixtures
   (`fixtures/pspdev_phase5`, `fixtures/homebrew_view`) and uploads them as `homebrew-fixtures`
   for the Windows `routes` part (#2143).

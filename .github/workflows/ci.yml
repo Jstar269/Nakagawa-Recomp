@@ -368,8 +368,10 @@ jobs:
   #
   # The job also builds the profile-zero fixture, the steps of the former
   # profile_zero_fixture job (docs/CI.md, "Jobs per run"). They run after the export
-  # step, so the export still sees the clean checkout, and only under that job's old
-  # condition, which BUILD_PROFILE_ZERO carries unchanged. The steps never gate the
+  # step, so the export still sees the clean checkout, and only under BUILD_PROFILE_ZERO:
+  # that job's old condition, plus run_installer, which also starts the Windows job whose
+  # routes part downloads these fixtures (an installer-only change starts it with
+  # run_python and run_windows both false). The steps never gate the
   # export: the job-level condition and the export step name no path output.
   public_export:
     name: Public export audit and profile-zero fixture
@@ -384,7 +386,8 @@ jobs:
       BUILD_PROFILE_ZERO: >-
         ${{ needs.classify.outputs.allow_substantive == 'true' &&
             (needs.classify.outputs.run_python == 'true' ||
-             needs.classify.outputs.run_windows == 'true') }}
+             needs.classify.outputs.run_windows == 'true' ||
+             needs.classify.outputs.run_installer == 'true') }}
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -2668,7 +2671,9 @@ jobs:
           path: ${{ runner.temp }}/homebrew-fixtures
 
       # #2143: a PSPSDK EBOOT.PBP imports through the player, builds a package, and (the
-      # homebrew_view probe) runs from ms0:/PSP/GAME/<folder>/ and checks the files beside it.
+      # homebrew_view probe) runs from ms0:/PSP/GAME/<folder>/ and checks the files beside it;
+      # the same program added again from a second folder stops by name, and the problem
+      # report keeps both folders out (#2426).
       # The programs are the ones public_export built from this commit, handed over in this
       # run; the step checks their digests and BUILT_FROM. NK_HOMEBREW_E2E_REQUIRED=1 makes a
       # missing or unreadable folder, or a tool or player build the route lacks, fail rather
@@ -2702,6 +2707,7 @@ jobs:
           PYTHONPATH=tools "$py" -m unittest -v \
             test_player_package_route.TestPlayerPackageRoute.test_homebrew_eboot_imports_and_builds_as_experimental \
             test_player_package_route.TestPlayerPackageRoute.test_homebrew_finds_its_own_files_in_its_memory_stick_folder \
+            test_player_package_route.TestPlayerPackageRoute.test_homebrew_second_folder_stop_keeps_folders_out_of_the_report \
             2>&1 | tee "$log"
           tail -n 1 "$log" | tr -d '\r' | grep -qx 'OK'
 

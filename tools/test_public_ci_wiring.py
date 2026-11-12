@@ -2018,7 +2018,8 @@ class PublicExportJobTests(unittest.TestCase):
             " ".join(line.strip() for line in block[env_start:steps_start]),
             "env: BUILD_PROFILE_ZERO: >- ${{ needs.classify.outputs.allow_substantive == 'true' && "
             "(needs.classify.outputs.run_python == 'true' || "
-            "needs.classify.outputs.run_windows == 'true') }}",
+            "needs.classify.outputs.run_windows == 'true' || "
+            "needs.classify.outputs.run_installer == 'true') }}",
         )
         ungated = "\n".join(block[:env_start] + block[steps_start:])
         for gate in ("run_python", "run_native", "run_windows", "run_markdown", "run_main_smoke",
@@ -2118,6 +2119,7 @@ class PublicExportJobTests(unittest.TestCase):
         self.assertIn('if [ "$built_from" != "$SR_SOURCE_COMMIT" ]; then', step)
         self.assertIn("test_homebrew_eboot_imports_and_builds_as_experimental", step)
         self.assertIn("test_homebrew_finds_its_own_files_in_its_memory_stick_folder", step)
+        self.assertIn("test_homebrew_second_folder_stop_keeps_folders_out_of_the_report", step)
         # A skip is not a pass.
         self.assertIn("tail -n 1 \"$log\" | tr -d '\\r' | grep -qx 'OK'", step)
         self.assertIn("    SR_SOURCE_COMMIT: ${{ github.sha }}", "\n".join(windows))
@@ -4022,6 +4024,27 @@ class CiRunHarness(unittest.TestCase):
         block = "\n".join(_workflow_job_blocks("ci.yml")["public_export"])
         expression = _matched(re.search(r"BUILD_PROFILE_ZERO: >-\s*\$\{\{(.*?)\}\}", block, re.S)).group(1)
         return _actions_eval(expression, {"needs": {"classify": {"outputs": outputs}}})
+
+
+class WindowsRoutesFixtureTests(CiRunHarness):
+    """Every run that starts the Windows job also builds the fixtures its routes part downloads."""
+
+    def test_the_fixtures_are_built_whenever_the_windows_routes_run(self) -> None:
+        # Failing before: an installer-only change starts windows_runtime (run_installer) with
+        # run_python and run_windows false, so public_export built neither the profile-zero nor
+        # the homebrew fixtures, and the routes part's downloads failed.
+        event = {"action": "synchronize", "pull_request": {"number": 7, "draft": False,
+                                                           "base": {"sha": "a" * 40}}}
+        cases = (["assets/installer/nakagawa.iss"], ["assets/upstream/innosetup.lock.json"],
+                 ["tools/build_installer.py"], ["LICENSE"], ["src/rt/driver.c"], ["docs/CI.md"])
+        for paths in cases:
+            with self.subTest(paths=paths):
+                run = self._evaluate("pull_request", event, paths=paths)
+                if "windows_runtime" in run.ran:
+                    self.assertTrue(self._profile_zero(run.outputs))
+        installer = self._evaluate("pull_request", event, paths=["assets/installer/nakagawa.iss"])
+        self.assertIn("windows_runtime", installer.ran)
+        self.assertEqual(installer.outputs["run_windows"], "false")
 
 
 class DraftLightCiWiringTests(CiRunHarness):
