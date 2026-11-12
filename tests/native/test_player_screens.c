@@ -28,6 +28,14 @@ static const uint8_t k_test_glyph_pixel = 0xFFu;
 typedef char player_screens_enhanced_rows_fit[
     PLAYER_PART_COUNT <= PLAYER_UI_ENHANCED_ROWS ? 1 : -1];
 
+/* The longest render notice (#2151): player_render_effects_text with every effect named;
+   test_player_state.c checks the player writes exactly this. */
+static const char k_render_effects_all[] =
+    "Some of this game's drawing is done in software because the GPU renderer cannot draw "
+    "it: stencil effects, colour-test effects, logic operations, partial colour writes, "
+    "pictures drawn in main memory, wide frame buffers, mipmapped textures, lines and "
+    "points. The game may run slower.";
+
 /* Each part's words, as player_state.c's k_enhanced_parts gives them. */
 static const char *const k_enhanced_af_labels[] = {"16x", "8x", "4x", "2x", "Off"};
 static const char *const k_enhanced_switch_labels[] = {"On", "Off"};
@@ -274,6 +282,7 @@ typedef enum { FLOW_NONE = 0, FLOW_BUILD, FLOW_BUILT, FLOW_BUILD_PARTS, FLOW_CON
                FLOW_PAGE_REMOVE,
                FLOW_PAGE_STOP, FLOW_PAGE_TITLE_ACE, FLOW_PAGE_TITLE_ENHANCED,
                FLOW_PAGE_TITLE_AUTHENTIC, FLOW_PAGE_TITLE_RENDER,
+               FLOW_PAGE_TITLE_RENDER_EFFECTS,
                FLOW_PAGE_SAVES, FLOW_PAGE_SAVES_RESTORE, FLOW_PAGE_SAVES_REPLACE,
                FLOW_PAGE_TITLE_STEAM, FLOW_PAGE_STEAM, FLOW_PAGE_STEAM_ACCOUNTS,
                FLOW_PAGE_STEAM_BLOCKED, FLOW_PAGE_TITLE_TALL,
@@ -891,13 +900,14 @@ static PlayerUiAction draw_page_case(NkUi *ui, FlowCase which) {
         return player_ui_screen_title(ui, &title);
     }
     if (which == FLOW_PAGE_TITLE_ENHANCED || which == FLOW_PAGE_TITLE_AUTHENTIC ||
-        which == FLOW_PAGE_TITLE_RENDER) {
+        which == FLOW_PAGE_TITLE_RENDER || which == FLOW_PAGE_TITLE_RENDER_EFFECTS) {
         /* #2245: a game's page as the player fills it for the user's own disc on Enhanced (or
            Authentic): every Enhanced part on, the longest last-session line the runtime's
            report gives, the disc check, the compatibility notes with the developer view, and
            Rebuild beside PLAY. On main the page did not scroll at the design text size, so
            this page pushed the prompt bar off the window. The render case adds #2151's notice
-           with the longer of its two sentences (player_render_notice_text). */
+           with the longer of its two sentences (player_render_notice_text); the effects case
+           the longest sentence player_render_effects_text writes, every effect named. */
         static PlayerUiTitle fixture;
         PlayerUiTitleModel title;
         bool enhanced = which != FLOW_PAGE_TITLE_AUTHENTIC;
@@ -936,6 +946,9 @@ static PlayerUiAction draw_page_case(NkUi *ui, FlowCase which) {
                 "Vulkan did not start on this PC, so this game is drawn in software and shown "
                 "in a basic Windows window. The Internal resolution setting has no effect, and "
                 "the game may run slower. Updating the graphics driver may help.";
+        } else if (which == FLOW_PAGE_TITLE_RENDER_EFFECTS) {
+            title.render_notice_heading = "Partly drawn in software";
+            title.render_notice_text = k_render_effects_all;
         }
         return player_ui_screen_title(ui, &title);
     }
@@ -3492,6 +3505,17 @@ static void test_settings_pages(void) {
                            "software") != NULL &&
               strstr(dump, "\"DRAWN IN SOFTWARE\"") != NULL && strstr(dump, "\"HIDE\"") != NULL,
           "the render notice shows its heading, its sentence and Hide on the game's page");
+    CHECK(flow_case_fits(FLOW_PAGE_TITLE_RENDER_EFFECTS, 1280, 720, dump, sizeof(dump)) &&
+              strstr(dump, "Some of this game's drawing is done in software") != NULL &&
+              strstr(dump, "\"PARTLY DRAWN IN SOFTWARE\"") != NULL &&
+              strstr(dump, "\"HIDE\"") != NULL,
+          "the render notice names every effect the GPU renderer hands to software, with Hide");
+    CHECK(flow_case_fits(FLOW_PAGE_TITLE_RENDER_EFFECTS, 960, 540, dump, sizeof(dump)),
+          "the longest render notice fits the 960 x 540 minimum window");
+    CHECK(activate_flow_button(PLAYER_UI_ID_TITLE_RENDER_NOTICE_HIDE,
+                               FLOW_PAGE_TITLE_RENDER_EFFECTS).kind ==
+              PLAYER_UI_ACTION_HIDE_RENDER_NOTICE,
+          "the effects notice's Hide asks to hide it");
     CHECK(dump_flow_case(FLOW_PAGE_TITLE_ENHANCED, dump, sizeof(dump)) &&
               strstr(dump, "DRAWN IN SOFTWARE") == NULL && strstr(dump, "\"HIDE\"") == NULL,
           "without a fallback the game's page has no render notice");
@@ -5356,7 +5380,8 @@ static int capture_screens(const char *directory) {
             {FLOW_DEVLOG, "developer-log", PLAYER_UI_ID_DEVELOPER_LOG_CLOSE},
             /* #2245 and #2151: the fullest Enhanced page, and with the render notice. */
             {FLOW_PAGE_TITLE_ENHANCED, "title-enhanced-full", PLAYER_UI_ID_TITLE_PRIMARY},
-            {FLOW_PAGE_TITLE_RENDER, "title-render-notice", PLAYER_UI_ID_TITLE_PRIMARY}
+            {FLOW_PAGE_TITLE_RENDER, "title-render-notice", PLAYER_UI_ID_TITLE_PRIMARY},
+            {FLOW_PAGE_TITLE_RENDER_EFFECTS, "title-render-effects", PLAYER_UI_ID_TITLE_PRIMARY}
         };
         for (size_t i = 0u; i < sizeof(flows) / sizeof(flows[0]); ++i) {
             g_flow_case = flows[i].which;
