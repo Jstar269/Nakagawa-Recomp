@@ -3745,6 +3745,7 @@ class PspDmacProbeTests(unittest.TestCase):
                 # The 2026-11-11 acceptance-eligible hle-io-seek-edges (#1380, boot 192, ARK-5
                 # 5.2.0) run of 1a5157e37.
                 "PSP-HLE-IO-SEEK-002",
+                "PSP-SAS-003",
                 # The 2026-11-10 acceptance-eligible hle-issues-batch (#326, #356, boot 172) and
                 # hle-kernel-pool-bounds (boot 173) runs of 979c6a1dd.
                 "PSP-HLE-ISSUES-001", "PSP-HLE-KERNEL-STATUS-002",
@@ -3778,9 +3779,6 @@ class PspDmacProbeTests(unittest.TestCase):
                 # 2026-11-02: memory-edge (bb3f36e4): 33 PASS and 42 intentional SKIP records
                 # (no bottom-of-RAM edge, no scratchpad or VRAM file call, no unproven overrun).
                 "PSP-MEMEDGE-001",
-                # 2026-11-07: sas-mix (979de58f, boot 146, game context): a complete all-PASS
-                # stream whose envelope is blocked by "loaded module was not proven unloaded".
-                "PSP-SAS-003",
                 # 2026-11-10: ge-signal (80e7c9eb, boot 179, XMB context): 37 records, 12 of 14
                 # cells; it stalled at rjump-un and the console needed a power cycle.
                 "PSP-GE-SIGNAL-001",
@@ -16215,7 +16213,7 @@ class Record20261015Tests(unittest.TestCase):
             ("vfpu-reserved-widths", "PSP-VFPU-RESERVED-001", "MEASURED"),
             ("hle-savedata-nodata", "PSP-HLE-SAVEDATA-NODATA-001", "CAPTURED"),
             ("sas-adsr", "PSP-SAS-002", "CAPTURED"),
-            ("sas-mix", "PSP-SAS-003", "CAPTURED"),
+            ("sas-mix", "PSP-SAS-003", "MEASURED"),
             ("vcodec-words", "PSP-VCODEC-001", "NOT_RUN"),
             ("hle-utility-dialogs", "PSP-HLE-UTILITY-DIALOG-001", "NOT_RUN"),
             ("hle-io-seek-edges", "PSP-HLE-IO-SEEK-002", "MEASURED"),
@@ -16242,17 +16240,6 @@ class Record20261015Tests(unittest.TestCase):
             self.assertIn(term, note)
         self.assertIn("- **PSP-3000 single-case run of `hle-io-seek-edges` (2026-11-11 UTC)**", self.doc)
 
-    def test_the_sas_mix_second_capture_keeps_it_captured(self) -> None:
-        row = self.rows["PSP-SAS-003"]
-        self.assertEqual(row["hardware_evidence"], "CAPTURED")
-        self.assertNotIn("measurement_note", row)
-        note = row["evidence_note"]
-        for term in ("2026-11-11", "boot 191", "a39f7a14c", "ARK-5 5.2.0", "same 205 records",
-                     "unloads SASCORE, then AVCODEC", "no such rerun has been made"):
-            self.assertIn(term, note)
-        self.assertNotIn("on purpose", note)
-        self.assertNotIn("on purpose", self.rows["PSP-SAS-002"]["evidence_note"])
-
     def test_the_sas_adsr_capture_is_captured_with_its_blocker(self) -> None:
         row = self.rows["PSP-SAS-002"]
         self.assertEqual(row["hardware_evidence"], "CAPTURED")
@@ -16267,20 +16254,46 @@ class Record20261015Tests(unittest.TestCase):
         self.assertIn("### PSP-SAS-002 capture 2026-11-10", self.doc)
         self.assertIn("(#psp-sas-002-capture-2026-11-10)", self.doc)
 
-    def test_the_sas_mix_capture_is_captured_with_its_blocker(self) -> None:
+    def test_the_sas_mix_rerun_is_measured_and_keeps_its_captures(self) -> None:
         row = self.rows["PSP-SAS-003"]
-        self.assertEqual(row["hardware_evidence"], "CAPTURED")
-        self.assertNotIn("measurement_note", row)
-        self.assertNotIn("evidence_cases", row)
-        note = row["evidence_note"]
-        for term in ("2026-11-07", "PSP-3000", "boot 146", "game context", "979de58f",
-                     "pre-publication commit", "identical to this tree's", "system software 6.61",
-                     "0x06060110", "ARK-5 with cIPL, version 5.1.0", "205 records",
-                     "not acceptance-eligible", "loaded module was not proven unloaded",
-                     "establishes nothing about PSP behaviour", "0x80420018", "0x80000004"):
+        self.assertEqual(row["hardware_evidence"], "MEASURED")
+        self.assertNotIn("evidence_note", row)
+        self.assertEqual(row["evidence_cases"], ["sas-mix-*"])
+        note = row["measurement_note"]
+        for term in ("2026-11-12", "PSP-3000", "boot 197", "game context", "3872796c",
+                     "ARK-5 5.2.0", "7a0035d9", "0x06060110", "acceptance-eligible with 0 blockers",
+                     "unloaded SASCORE, then AVCODEC", "boot 146, 979de58f",
+                     "boot 191, a39f7a14c"):
             self.assertIn(term, note)
+        self.assertIn("- **PSP-3000 single-case run of `sas-mix` (2026-11-12 UTC)**", self.doc)
+        # The 2026-11-07 section keeps the values and both earlier captures.
         self.assertIn("### PSP-SAS-003 capture 2026-11-07", self.doc)
         self.assertIn("(#psp-sas-003-capture-2026-11-07)", self.doc)
+        section = self.doc.split("### PSP-SAS-003 capture 2026-11-07", 1)[1].split("\n### ", 1)[0]
+        for term in ("0x80420018", "0x80000004", "boot 147", "boot 191", "That rerun ran on 2026-11-12"):
+            self.assertIn(term, section)
+        self.assertNotIn("no such rerun has been made", section)
+
+    def test_the_owner_reads_of_2026_11_12_keep_their_evidence_classes(self) -> None:
+        # hle-std-handles: the game-context launch (boot 200) adds to the XMB measurement (boot 135).
+        stdio = self.rows["PSP-HLE-STDIO-001"]
+        self.assertEqual(stdio["hardware_evidence"], "MEASURED")
+        for term in ("boot 135", "0x800200d1", "boot 200", "game context", "3872796c", "0x80020325"):
+            self.assertIn(term, stdio["measurement_note"])
+        self.assertIn("- **PSP-3000 single-case run of `hle-std-handles` in the game context (2026-11-12 UTC)**",
+                      self.doc)
+        # hle-utility-dialogs and mpeg-ycbcr were captured, not measured: neither envelope was eligible.
+        dialogs = self.rows["PSP-HLE-UTILITY-DIALOG-001"]
+        self.assertEqual(dialogs["hardware_evidence"], "NOT_RUN")
+        self.assertTrue(dialogs["risk"].startswith("POWER RISK"))
+        self.assertIn("boots 204 and 206", dialogs["evidence_note"])
+        section = self.doc.split("### PSP-HLE-UTILITY-DIALOG-001 captures 2026-11-12", 1)[1].split("\n### ", 1)[0]
+        for term in ("establish nothing about PSP", "Boot 204", "Boot 206", "0x80110001", "0x80110327"):
+            self.assertIn(term, section)
+        self.assertIn("(#psp-hle-utility-dialog-001-captures-2026-11-12)", self.doc)
+        mpeg = self.rows["PSP-MPEG-YCBCR-001"]
+        self.assertEqual(mpeg["hardware_evidence"], "NOT_RUN")
+        self.assertIn("2026-11-12 boot 202", mpeg["evidence_note"])
 
     def test_the_audio_src_and_timer_comparisons_are_recorded_and_pinned(self) -> None:
         for name in ("test_audio_src_matches_the_measured_contract",
