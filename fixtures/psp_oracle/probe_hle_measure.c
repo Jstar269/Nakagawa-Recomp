@@ -5000,11 +5000,11 @@ static void hle_ise_ms(void)
        (low, high), called only when a poll returned 0 (complete), and the close's result. Each
        word that was not reached is HLE_SENTINEL. The open is the probe's setup, so the row is
        FAIL when it fails.
-       If the poll cap runs out while sceIoPollAsync still returns 1 (pending), no wait is made:
-       the close then fails with the write still pending and leaves the descriptor open, so the
-       cleanup's remove and rmdir fail and its row reports FAIL with the directory left behind.
-       Nothing waits without a bound on that path. The 2026-11-11 PSP-3000 run never reached it
-       (sceIoWriteAsync refused the write at once). */
+       If the poll cap runs out while sceIoPollAsync still returns 1 (pending), no wait is made.
+       The close is then expected to fail with the write still pending and leave the descriptor
+       open (unmeasured), in which case the cleanup's remove and rmdir fail and its row reports
+       FAIL with the directory left behind. Nothing waits without a bound on that path. The
+       2026-11-11 PSP-3000 run never reached it (sceIoWriteAsync refused the write at once). */
     hle_step("io-edge-ms-write-async");
     fd = sceIoOpen(HLE_ISE_FILE, PSP_O_RDONLY, 0777);
     for (unsigned i = 1; i < 10u; i++) w[i] = HLE_SENTINEL;

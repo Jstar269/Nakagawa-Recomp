@@ -7957,7 +7957,10 @@ class HleIssuesProbeTests(unittest.TestCase):
             self.assertTrue(parse_campaign_probe_output(helper._body(clean), case).complete)
             # The first row, a middle row and the last row before the terminal.
             cells = spec.semantic_cases
-            for row in (cells[0], cells[len(cells) // 2], cells[-1]):
+            rows = [cells[0], cells[len(cells) // 2], cells[-1]]
+            # The io-seek cases' cleanup row is FAIL when the probe's ms0: directory survives.
+            rows += [cell for cell in cells if cell.endswith("-ms-cleanup")]
+            for row in rows:
                 for status in ("FAIL", "SKIP"):
                     with self.subTest(case=case, row=row, status=status):
                         text = helper._stream(case, {row: (status, 0, [0] * counts[row])})
@@ -12619,6 +12622,7 @@ class HleIoSeekMemoryStickSetupAndCleanupTests(unittest.TestCase):
         comment = body[body.index("/* B4 io-edge-ms-write-async"):body.index('hle_step("io-edge-ms-write-async");')]
         self.assertIn("poll cap runs out", comment)
         self.assertIn("cleanup's remove and rmdir fail", comment)
+        self.assertIn("(unmeasured)", comment)
         self.assertIn("HLE_ISE_POLL_CAP", body)
         self.assertNotIn("while (", body)
 
@@ -15360,9 +15364,11 @@ class IoCasesSourceTests(unittest.TestCase):
                 start = self.probe.index(f"#if PSP_ORACLE_CASE == PSP_ORACLE_CASE_{macro}\n")
             block = self.probe[start:]
             block = block[:block.index("\n#endif")]
-            # Preprocessor lines may remap a call for the included header (font-files maps
-            # sceIoOpen to probe_io_open_kept); the block itself makes no PSP call.
-            self.assertNotRegex(re.sub(r"(?m)^#.*$", "", block), r"\bsce\w+\s*\(")
+            # The font-files block remaps sceIoOpen for its header (#undef, then #define to
+            # probe_io_open_kept and back); apart from those lines the block makes no PSP call.
+            remap = (r"(?m)^(#undef sceIoOpen|"
+                     r"#define sceIoOpen\(path, flags, mode\) probe_io_open(_kept)?\(.*)$")
+            self.assertNotRegex(re.sub(remap, "", block), r"\bsce\w+\s*\(")
 
     def test_raw_device_case_manifest_matches_its_captured_record_contract(self) -> None:
         manifest = json.loads((self.root / "tools" / "psp_oracle" / "manifest.json").read_text(
