@@ -971,11 +971,18 @@ def run_gate(source: Path, target: str = "interpreter",
 
 def gate_options(mutant: Mutant) -> dict[str, bool | str | None]:
     """The verdict rules one mutant's gate runs under."""
+    # The rewritten-$ra cells print the same named stop in every run, so a mutant judged by
+    # that stop runs without them: the line it is killed by has to be its own.
     skip_ra_return_cases = mutant.name in {
-        "wrong-call-resume", "wrong-jump-target", "alter-link-value", "llvm-wrong-call-resume"
+        "wrong-call-resume", "wrong-jump-target", "alter-link-value", "llvm-wrong-call-resume",
+        "resume-loop-point-restarts-the-body"
     }
+    # A body resumed at a loop edge that runs from its entry instead saves the wrong $ra a
+    # second time, so its own return is the located failure: the run stops by name inside
+    # the first resumed run that takes the point, before any comparison.
     accepted_boundary = "AOT_RETURN_TARGET_MISMATCH" if mutant.name in {
-        "wrong-call-resume", "alter-link-value", "llvm-wrong-call-resume"
+        "wrong-call-resume", "alter-link-value", "llvm-wrong-call-resume",
+        "resume-loop-point-restarts-the-body"
     } else None
     if mutant.target == "scheduler":
         accepted_boundary = "AOT_RETURN_TARGET_MISMATCH"

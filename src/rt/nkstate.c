@@ -499,6 +499,63 @@ NkStateStatus nkstate_cpu_load(const NkStateThread *threads, uint32_t count,
     return NKSTATE_OK;
 }
 
+NkStateStatus nkstate_frames_save(const NkStateThreadFrames *threads, uint32_t count,
+                                  NkStateBuf *out, char *detail, size_t detail_cap) {
+    if (!nkstate_buf_put_u32(out, count)) return refuse(NKSTATE_NO_MEMORY, detail, detail_cap, "FRMS segment");
+    for (uint32_t i = 0; i < count; i++) {
+        if (!nkstate_buf_put_u32(out, threads[i].uid) || !nkstate_buf_put_u32(out, threads[i].count))
+            return refuse(NKSTATE_NO_MEMORY, detail, detail_cap, "FRMS segment");
+        for (uint32_t f = 0; f < threads[i].count; f++) {
+            const SrResumeFrame *frame = &threads[i].frames[f];
+            if (!nkstate_buf_put_u32(out, frame->body) || !nkstate_buf_put_u32(out, frame->pc) ||
+                !nkstate_buf_put_u32(out, frame->kind) || !nkstate_buf_put_u32(out, frame->sp))
+                return refuse(NKSTATE_NO_MEMORY, detail, detail_cap, "FRMS segment");
+        }
+    }
+    return NKSTATE_OK;
+}
+
+_Static_assert(sizeof(SrResumeFrame) == 16u, "a resume frame is serialized as four 32-bit words");
+
+NkStateStatus nkstate_frames_load(NkStateThreadFrames *threads, uint32_t count,
+                                  const uint8_t *payload, size_t len, char *detail, size_t detail_cap) {
+    if (len < 4u) return refuse(NKSTATE_TRUNCATED, detail, detail_cap, "no thread count");
+    const uint32_t n = rd32(payload);
+    if (n != count)
+        return refuse(NKSTATE_SEGMENT_PAYLOAD, detail, detail_cap, "%u threads in the state, %u here", n, count);
+    /* Check every thread's header and extent before writing a frame. */
+    size_t off = 4u;
+    for (uint32_t i = 0; i < n; i++) {
+        if (len - off < 8u) return refuse(NKSTATE_TRUNCATED, detail, detail_cap, "thread %u header", i);
+        const uint32_t uid = rd32(payload + off), frames = rd32(payload + off + 4u);
+        off += 8u;
+        if (uid != threads[i].uid)
+            return refuse(NKSTATE_SEGMENT_PAYLOAD, detail, detail_cap, "thread %u is uid 0x%x in the state, 0x%x here",
+                          i, uid, threads[i].uid);
+        if (frames > threads[i].capacity)
+            return refuse(NKSTATE_SEGMENT_PAYLOAD, detail, detail_cap, "thread 0x%x has %u frames, room for %u",
+                          uid, frames, threads[i].capacity);
+        if ((len - off) / 16u < frames)
+            return refuse(NKSTATE_TRUNCATED, detail, detail_cap, "thread 0x%x: %u frames", uid, frames);
+        off += (size_t)frames * 16u;
+    }
+    if (off != len)
+        return refuse(NKSTATE_TRUNCATED, detail, detail_cap, "%zu payload bytes, %zu used", len, off);
+    off = 4u;
+    for (uint32_t i = 0; i < n; i++) {
+        const uint32_t frames = rd32(payload + off + 4u);
+        off += 8u;
+        for (uint32_t f = 0; f < frames; f++, off += 16u) {
+            threads[i].frames[f].body = rd32(payload + off);
+            threads[i].frames[f].pc = rd32(payload + off + 4u);
+            threads[i].frames[f].kind = rd32(payload + off + 8u);
+            threads[i].frames[f].sp = rd32(payload + off + 12u);
+        }
+        threads[i].count = frames;
+    }
+    return NKSTATE_OK;
+}
+
 NkStateStatus nkstate_mem_save(const NkStateMemRegion *regions, uint32_t count, NkStateBuf *out,
                                char *detail, size_t detail_cap) {
     if (!nkstate_buf_put_u32(out, count)) return refuse(NKSTATE_NO_MEMORY, detail, detail_cap, "MEM segment");

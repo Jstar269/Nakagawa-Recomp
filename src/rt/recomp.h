@@ -1753,7 +1753,11 @@ typedef struct SrAotReturnBoundary {
 
 #define SR_BOUNDARY_CALLEE 0x1u /* the dispatcher or a generated call site named the callee */
 #define SR_BOUNDARY_SITE   0x2u /* begun at a direct call site of a state-resumable body */
-#define SR_BOUNDARY_PARKED 0x4u /* the body under this call is inside sr_yield at a resume point */
+/* The body under this call is inside sr_yield and has named the point it continues at. That
+ * is not yet a parked thread: sr_yield services interrupts and callbacks and decides whether
+ * to switch while this is set. The thread is parked once sr_yield's own switch has switched
+ * it out, which the scheduler knows (sched_resume_describe). */
+#define SR_BOUNDARY_PARKED 0x4u
 /* The host entry's first dispatch entered the callee. Not set when the interpreter ran first
  * and handed the call's frame on (dispatch_call_continue), nor when the call was dispatched
  * again for flow its code raised: the frames below then hold what the call still owes. */
@@ -1842,7 +1846,12 @@ int sr_aot_return_boundary_capture_return(CpuState *s, uint32_t target, const ui
  * resume points. Everything else is refused by name: sr_resume_describe refuses a thread it
  * cannot describe exactly, and sr_resume_validate refuses a frame list before any guest or
  * runtime state changes. Guest code runs on one host thread at a time, so the request and the
- * descent below are process state, not per-fiber state: nothing yields during a descent. */
+ * descent below are process state, not per-fiber state: nothing yields during a descent.
+ *
+ * A thread is parked when sr_yield's own switch has switched it out. The running fiber is
+ * never parked, even inside sr_yield with its point named: the rest of that yield (interrupt
+ * and callback service, the decision to switch) has not run. A capture therefore describes
+ * threads from the scheduler's side, sched_resume_describe. */
 #define SR_RESUME_POINT_ENTRY 1u /* parked at the body's entry yield: it runs from its first word */
 #define SR_RESUME_POINT_YIELD 2u /* parked at a loop edge's yield: it continues at the edge's target */
 #define SR_RESUME_POINT_CALL  3u /* inside a direct call: it continues when the frame above returns */
@@ -1863,14 +1872,13 @@ typedef enum SrResumeStatus {
     SR_RESUME_NO_FRAMES,           /* "no-frames": no live call; the thread is not in guest code */
     SR_RESUME_SCOPE_LIVE,          /* "callback-or-interrupt-live": a nested host-to-guest entry */
     SR_RESUME_TAIL_CHAIN_LIVE,     /* "tail-chain-live": a tail drain's chain state is on the host stack */
-    SR_RESUME_TAIL_PENDING,        /* "tail-transfer-pending" */
     SR_RESUME_FOREIGN_STATE,       /* "foreign-cpu-state": a call record of another CpuState */
     SR_RESUME_ROOT_NOT_HOST_ENTRY, /* "root-not-host-entry": the outermost call is not a host entry's own */
     SR_RESUME_RETURN_IN_FLIGHT,    /* "return-in-flight": a call record holds a captured return or an unwind */
     SR_RESUME_FRAME_NOT_DESCRIBED, /* "frame-not-described": a call no state-resumable call site began */
     SR_RESUME_FRAME_CHAIN,         /* "frame-chain": a frame's body is not the one the call below it entered */
     SR_RESUME_FRAME_SP,            /* "frame-sp": a body's entry $sp is not its call's $sp */
-    SR_RESUME_NOT_PARKED,          /* "not-parked": the innermost body is not at a resume point */
+    SR_RESUME_NOT_PARKED,          /* "not-parked": running, switched out inside a call, or at no resume point */
     SR_RESUME_TOO_MANY_FRAMES,     /* "too-many-frames" */
     /* sr_resume_validate: the frame list is not one this build can resume. */
     SR_RESUME_BAD_FRAMES,          /* "bad-frames": no frames, or a kind this build does not know */
@@ -1884,12 +1892,17 @@ typedef enum SrResumeStatus {
 
 const char *sr_resume_status_name(SrResumeStatus status);
 
-/* The frames of the thread whose return-boundary stack is `stack` (NULL: the running fiber's)
- * and whose registers are `s`, outermost first. Refuses unless the outermost call is a host
+/* The frames of the switched-out thread whose return-boundary stack is `stack` and whose call
+ * records name the CpuState `s`, outermost first. Refuses unless the outermost call is a host
  * entry's own dispatch of a body, every other live call was begun by a direct call site of a
  * state-resumable body, each body is the one its call entered, no tail drain, callback or
- * captured return is live, and the innermost body is parked at a resume point. `detail` (may
- * be NULL) names the frame that refused. */
+ * captured return is live, and the innermost body named a resume point before the switch.
+ * `detail` (may be NULL) names the frame that refused.
+ *
+ * `stack` is the descriptor the scheduler swapped out. NULL names the running fiber, which is
+ * refused: "no-frames" when it has no call record, else "not-parked". This function cannot
+ * tell which switch put a thread out; sched_resume_describe adds that (the switch was
+ * sr_yield's own, and the thread is in no import). */
 SrResumeStatus sr_resume_describe(const SrAotReturnBoundaryStack *stack, const CpuState *s,
                                   SrResumeFrame *frames, uint32_t capacity, uint32_t *count,
                                   char *detail, size_t detail_cap);
@@ -1897,7 +1910,9 @@ SrResumeStatus sr_resume_describe(const SrAotReturnBoundaryStack *stack, const C
 /* Whether this build can resume `frames`: every body registered, current and state-resumable,
  * every point one the body has, a call point in every frame but the innermost and a parked
  * point there, and each call point's callee the body of the frame above. Asks each body about
- * its point; runs no guest instruction and changes no guest state. */
+ * its point: the body's first statement takes the question to its switch, so no guest
+ * instruction, yield point or host-stack check runs, no guest state changes, and it may be
+ * called from any host context. */
 SrResumeStatus sr_resume_validate(CpuState *s, const SrResumeFrame *frames, uint32_t count,
                                   char *detail, size_t detail_cap);
 
@@ -2609,12 +2624,16 @@ uint64_t sr_profile_test_lookup_drops(void);
         } \
     } \
 } while (0)
-/* The entry of a state-resumable body: a resume enters at the point's label instead, and
- * counts no yield point the uninterrupted run did not count. */
-#define SR_STATE_ENTRY(s, body) do { \
+/* The first statement of a state-resumable body: a resume (or sr_resume_validate's question)
+ * goes to the body's switch instead, before the host-stack check and the entry yield, so it
+ * counts no yield point the uninterrupted run did not count and validating runs nothing that
+ * could stop the process. The switch makes the host-stack check for a real resume. */
+#define SR_STATE_RESUME_TEST() do { \
     if (__builtin_expect(sr_resume_request != NULL, 0)) goto _nk_resume; \
-    SR_YIELD_PARK((s), (body), (body), (body), SR_RESUME_POINT_ENTRY, (s)->r[29]); \
 } while (0)
+/* The entry yield of a state-resumable body. */
+#define SR_STATE_ENTRY(s, body) \
+    SR_YIELD_PARK((s), (body), (body), (body), SR_RESUME_POINT_ENTRY, (s)->r[29])
 
 
 
@@ -2906,6 +2925,28 @@ int      sched_take_current_join_result(uint32_t uid, uint32_t *result_out);
 int      sched_current_priority(void);
 int      sched_is_dormant(uint32_t uid);
 uint32_t sched_current_uid(void);                   /* 0 when no thread is current */
+/* The scheduler's half of describing thread `uid` (#2172): SR_RESUME_OK and its switched-out
+ * call records, or the refusal and why. A thread is refused while it is running (the current
+ * one, including while its own sr_yield services an interrupt), when it was switched out
+ * inside a call and not by sr_yield's own switch, and when it is inside an import. */
+SrResumeStatus sched_resume_switched_out(uint32_t uid, const SrAotReturnBoundaryStack **stack_out,
+                                         const char **why_out);
+/* The resume frames of thread `uid`, from the scheduler's side: the check above, then
+ * sr_resume_describe on the thread's call records. */
+static inline SrResumeStatus sched_resume_describe(uint32_t uid, SrResumeFrame *frames,
+                                                   uint32_t capacity, uint32_t *count,
+                                                   char *detail, size_t detail_cap) {
+    const SrAotReturnBoundaryStack *stack = NULL;
+    const char *why = "";
+    const SrResumeStatus status = sched_resume_switched_out(uid, &stack, &why);
+    if (status != SR_RESUME_OK) {
+        if (count != NULL) *count = 0u;
+        if (detail != NULL && detail_cap != 0u)
+            snprintf(detail, detail_cap, "thread 0x%" PRIx32 " %s", uid, why);
+        return status;
+    }
+    return sr_resume_describe(stack, s_cpu, frames, capacity, count, detail, detail_cap);
+}
 void     sched_run(uint32_t entry, uint32_t arglen, uint32_t argp);  /* run from the entry thread */
 
 /* PSP callback ABI: SceKernelCallbackFunction(int count, int arg, void *common).

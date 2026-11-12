@@ -167,17 +167,21 @@ resume-at-PC contract (#2172,
 comparison of generated code with generated code: a run that starts from a parked thread's data
 against the run that was never interrupted.
 
-The harness has no scheduler, so its `sr_yield` is the park. A case turns the slice counter on
-and starts it at `n`, so the `n`-th yield point the run passes enters `sr_yield`; there the harness
-copies the registers and the memory window as a save state would, asks `sr_resume_describe` for
-the frame list, and returns. One run is therefore both the uninterrupted reference and the source
-of the snapshot. The resumed run re-registers every body, empties the return-boundary stack,
+The harness has no scheduler, so its `sr_yield` is the park. A thread is parked once `sr_yield`'s
+own switch has switched it out, and the harness does what that switch does to the call records:
+it swaps them out of the running side, as `sched_run` does around every fiber switch, describes
+the swapped-out records and swaps them back. A case turns the slice counter on and starts it at
+`n`, so the `n`-th yield point the run passes enters `sr_yield`; there the harness copies the
+registers and the memory window as a save state would, takes the frame list that way, and
+returns. One run is therefore both the uninterrupted reference and the source of the snapshot. The resumed run re-registers every body, empties the return-boundary stack,
 writes the parked memory and registers back and calls `dispatch_resume_from_host` with the frame
 list: no host frame of the first run exists in it. Every yield point of a case is tried.
 
 Compared, all exactly: the whole `CpuState` (`pc` too, since neither run is the interpreter), the
 memory window, the guest writes after the park, the instruction trace after the park, and the
 slice counter, which catches a resume that counted a yield point the uninterrupted run did not.
+The reference run writes its trace to a second file from the park on, so the two traces start at
+the same instruction and must be equal in length and line for line.
 
 Each resume is then repeated with the slice counter at 1, so the resumed thread parks again at
 its first yield point. That second park (registers, memory, the description and the frame list)
@@ -206,7 +210,12 @@ in progress, a fiber that already holds a call record) must each be refused by n
 write log and the slice counter untouched; the body with no points must not be called. Call
 records the frame list cannot describe are built from the same snapshot, first checked to
 describe as exactly that list, then changed one field at a time, and each must be refused by
-name; four more refusals are staged at the live park. One more is a live run of its own: a
+name. Five more refusals are staged at the live park of each `rs` yield point: another
+`CpuState`, room for one frame, an open callback scope, and the two that pin when a thread is
+parked. Inside the yield, before any switch, the body has named its point and the running fiber
+must still be refused as `not-parked`; the hook then services an interrupt the way `sr_yield`
+does (a handler in a scope on the same fiber) and the fiber must be refused again. One more is a
+live run of its own: a
 callback entered, in a scope, while the thread's own dispatch has begun no call record; its body
 reaches a yield point there and must be refused as `callback-or-interrupt-live` in every build,
 though its call record is the fiber's first and a host entry's own.
@@ -214,9 +223,14 @@ though its call record is the fiber's first and a host entry's own.
 The ordinary lanes run the same cases on output without resume points. There every thread must be
 refused, and a hand-written frame for `rs` must be refused as `body-not-resumable`.
 
-What this does not prove: the harness's park is a stub, so the scheduler's side of a park is not
-exercised, and the uninterrupted run and the snapshot come from one process. A thread parked in a
-blocking import, under a dispatched call or under a tail drain is refused, not resumed.
+What this does not prove: the harness's park is a stub and it has one thread, so nothing here
+runs the real `sr_yield` or describes another fiber's records, and the uninterrupted run and the
+snapshot come from one process. `mingw32-make aot-return-boundary-thread-selftest` covers the
+first two with the real scheduler (`test_resume_describe_from_the_scheduler` in
+`tests/native/hle_thread_selftest.c`): a thread whose yield services an alarm and then switches to
+a peer is refused from the alarm handler and described from the peer, on call records the test
+begins by hand, since that harness has no generated bodies. A thread parked in a blocking import,
+under a dispatched call or under a tail drain is refused, not resumed.
 
 ## Fail-closed negative corpus
 

@@ -36,9 +36,9 @@ does not make this file stale. `--details` prints them to stdout.
 
 ## Summary
 
-- helpers: **504** (declared in `recomp.h`: 427)
-- reach class: emitter-reached 95, production-runtime-only 368, selftest-only 0, address-only 8, none 33
-- provenance class of the home definition: declared-only 1, project_authored_attested 39, upstream_derived 464
+- helpers: **506** (declared in `recomp.h`: 429)
+- reach class: emitter-reached 95, production-runtime-only 370, selftest-only 0, address-only 8, none 33
+- provenance class of the home definition: declared-only 1, project_authored_attested 39, upstream_derived 466
 
 ## Helpers
 
@@ -173,8 +173,10 @@ does not make this file stale. `--details` prints them to stdout.
 | `sched_raise_interrupt` | `rt/sched.c` | yes | production-runtime-only | `rt/sched.c`: upstream_derived |
 | `sched_request_guest_reset` | `rt/sched.c` | yes | production-runtime-only | `rt/sched.c`: upstream_derived |
 | `sched_reset_for_loadexec` | `rt/sched.c` | yes | production-runtime-only | `rt/sched.c`: upstream_derived |
+| `sched_resume_describe` | `rt/recomp.h` | yes | none | `rt/recomp.h`: upstream_derived |
 | `sched_resume_dispatch` | `rt/sched.c` | yes | production-runtime-only | `rt/sched.c`: upstream_derived |
 | `sched_resume_interrupts` | `rt/sched.c` | yes | production-runtime-only | `rt/sched.c`: upstream_derived |
+| `sched_resume_switched_out` | `rt/sched.c` | yes | production-runtime-only | `rt/sched.c`: upstream_derived |
 | `sched_resume_thread` | `rt/sched.c` | yes | production-runtime-only | `rt/sched.c`: upstream_derived |
 | `sched_role_uid_captured` | `rt/sched.c` | yes | none | `rt/sched.c`: upstream_derived |
 | `sched_root_uid` | `rt/sched.c` | yes | none | `rt/sched.c`: upstream_derived |
@@ -435,7 +437,7 @@ does not make this file stale. `--details` prints them to stdout.
 | `sr_rcp_approx` | `rt/recomp.c` | no | production-runtime-only | `rt/recomp.c`: upstream_derived |
 | `sr_register` | `rt/recomp.c` | yes | emitter-reached (direct) | `rt/recomp.c`: upstream_derived |
 | `sr_register_count` | `rt/recomp.c` | yes | none | `rt/recomp.c`: upstream_derived |
-| `sr_resume_describe` | `rt/recomp.c` | yes | none | `rt/recomp.c`: upstream_derived |
+| `sr_resume_describe` | `rt/recomp.c` | yes | production-runtime-only | `rt/recomp.c`: upstream_derived |
 | `sr_resume_inner` | `rt/recomp.c` | yes | emitter-reached (direct) | `rt/recomp.c`: upstream_derived |
 | `sr_resume_no_point` | `rt/recomp.c` | yes | emitter-reached (direct) | `rt/recomp.c`: upstream_derived |
 | `sr_resume_park` | `rt/recomp.h` | yes | emitter-reached (via `SR_YIELD_PARK`) | `rt/recomp.h`: upstream_derived |

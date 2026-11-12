@@ -674,10 +674,24 @@ two tiers differ in state a save state and a replay checkpoint both hold:
   dispatcher) is decided by `tools/codegen.py`; the interpreter has none.
 - `$sp` at a return: a callable body ends with `s->r[29] = _sp_entry`, where an interpreted
   `jr $ra` leaves `$sp` as the instructions set it (the `spleak` cell).
-- coverage: the interpreter decodes only the forms a cosimulation cell executes.
+- coverage: the interpreter decodes only the forms a cosimulation cell executes. This one decides
+  alone: a restored frame with any other instruction stops.
+- the way back: the interpreter hands over to generated code only at a body's entry, so a restored
+  frame stays interpreted until it returns, and a thread's main loop never does.
 
-Copying host stacks was rejected too: they hold absolute host addresses, so a copy can be neither
-checked nor loaded into another process.
+Copying host stacks was rejected too, for a state file and for in-process rewind alike. A file
+cannot hold them: they are absolute host addresses, so a copy can be neither checked nor loaded
+into another process. In one process the addresses stay valid, but the copy still cannot be
+checked, and it holds pointers into runtime state that a rewind would have to put back in place.
+
+**When a thread is parked.** A state-resumable body names the point it continues at before it
+enters `sr_yield`. That does not park it. `sr_yield` then advances guest time, latches and
+services interrupts and callbacks, and only afterwards decides whether to switch; most often it
+returns without switching. A thread is parked once `sr_yield`'s own switch has switched it out.
+The scheduler records exactly that switch (`pc_stale == 0`), so a capture describes threads from
+the scheduler's side, `sched_resume_describe`, and the running fiber is never described, not even
+inside its yield: a frame list taken there would skip the rest of the yield. After that switch
+`sr_yield` does nothing more, so the point's label is the whole continuation.
 
 **What a thread is, as data.** A frame list, outermost frame first (`SrResumeFrame` in
 `src/rt/recomp.h`). Each frame names:
@@ -691,12 +705,32 @@ checked nor loaded into another process.
 Every frame but the innermost is a call point; the innermost is a parked point. The live `$ra` is
 not part of it, as at a `dispatch_call`.
 
-**Resume points exist only where codegen writes them.** `codegen.py --state-resume` is opt-in and
-the default output is byte-identical. With it, `state_resume_pass` rewrites three statement shapes
-of a callable body and nothing else:
+A frame list means something only to the generated code that wrote it: it names bodies and
+points in them, and another build has other bodies. `sr_resume_validate` checks structure, not
+origin, so the binding is the state file's. An `nkstate` file carries the SHA-256 of the generated
+code and refuses another build as `executable-identity` before any loader runs. The frame lists
+travel only in that file, in its `FRMS` segment (`nkstate_frames_save`, `nkstate_frames_load`),
+whose version (`NKSTATE_FRAMES_VERSION`) changes with what a frame holds. `nkstate-selftest` loads
+a state with that segment under its own identity and requires `executable-identity` under another,
+with the frames loader not reached.
 
-- the entry yield becomes `SR_STATE_ENTRY`, which tests `sr_resume_request` first, so entering a
-  body to resume it counts no yield point;
+What a describable thread implies about the per-thread state the scheduler keeps outside its
+registers: it is in no import (`hle_depth` 0, no import active), which `sched_resume_describe`
+checks; it runs generated code; and interrupts and thread dispatch are enabled, or `sr_yield`
+would not have switched. Its outermost frame is a thread's own entry (`coro_body`): a callback or
+interrupt entry opens a scope and is refused. Whoever resumes the thread therefore owes what
+`coro_body` does after `dispatch_from_host` returns.
+
+**Resume points exist only where codegen writes them.** `codegen.py --state-resume` is opt-in and
+the default output is byte-identical. It is not a default build: its cost (a test of
+`sr_resume_request` per body entry, four more stores per direct call, a `switch` per body, and a
+second entry into every loop that contains a direct call) has not been measured on a title, and
+builds with promoted registers, the LLVM backend or the LLE CPU have no direct states at all.
+With it, `state_resume_pass` rewrites three statement shapes of a callable body and nothing else:
+
+- the body's first statement becomes `SR_STATE_RESUME_TEST`, which sends a resume to the body's
+  `switch` before the host-stack check and the entry yield, so entering a body to resume it counts
+  no yield point; the entry yield becomes `SR_STATE_ENTRY`, which names the entry point;
 - a loop edge's `SR_YIELD(...); goto L_<target>;` becomes `SR_YIELD_PARK`, which counts and sets
   `s->pc` exactly as `SR_YIELD` does and, around `sr_yield`, records the body, the target and the
   body's entry `$sp` on the call record the body runs under;
@@ -719,25 +753,33 @@ run after a resumed callee exactly as after a called one; a parked point jumps t
 switch is the only list of a body's points. A body with guest-owned `$sp` exits, a live-frame
 resume entry (`r_<addr>`), a runtime-placed module's body, and any statement of another shape have
 no point. `--state-resume` refuses `--stack-census`, `--promote-registers` and `--backend=llvm`,
-each of which keeps state a point does not restore.
+each of which keeps state a point does not restore, and `--lle-cpu` and `--lle-import-seam`,
+under which every direct call is followed by a flow check and would get no point.
 
-**Describing a thread** (`sr_resume_describe`) reads the thread's return-boundary records, which
-follow its fiber, and refuses unless the frame list is exact. No refusal is a guess in either
-direction:
+**Where the points are written.** Today a pass over the emitted lines writes them. That is the
+form this contract was proved in, not the form it keeps. The pass has to read back C it did not
+write, and there are things it cannot do at all: flush a promoted register at a point, reach an
+LLVM body, or give a call a point when the emitter put a flow check after it. The emitters know
+each of these by construction. The points therefore move into the emitters, for the entry, the
+loop edge and the direct call and in both backends, before any new park shape is added (#2172).
+The frame list, the refusals and the test below do not change with that move.
+
+**Describing a thread** (`sched_resume_describe`, then `sr_resume_describe`) reads the
+switched-out thread's return-boundary records, which follow its fiber, and refuses unless the
+frame list is exact. No refusal is a guess in either direction:
 
 | Refusal | The thread is not described because |
 | --- | --- |
 | `no-frames` | it is not inside a host entry |
 | `callback-or-interrupt-live` | a callback or interrupt scope is open on its fiber: a nested host-to-guest entry is on its stack, above its call records or, when its own code has begun none yet, in their place |
 | `tail-chain-live` | a tail drain is running a body: the chain's owed restore and release are on the host stack |
-| `tail-transfer-pending` | a recorded transfer has not been drained |
-| `foreign-cpu-state` | a call record belongs to another `CpuState` |
+| `foreign-cpu-state` | a call record belongs to another `CpuState`. Under the scheduler every thread's records name the one shared `CpuState`, so this separates threads only where each has its own, as in the cosimulation harness |
 | `root-not-host-entry` | its outermost call is not a host entry's first dispatch of a body: it does not return to `SR_HOST_RETURN_PC`, or the interpreter ran first and handed the frame on, or the call was dispatched again for exception or ERET flow its code raised. In the last two the host frames below still hold what the call owes |
 | `return-in-flight` | a call record holds a captured return target or an unwind |
 | `frame-not-described` | a live call above the outermost was not begun by a direct call site of a state-resumable body: a dispatched call (`jalr`), a call from the interpreter, a runtime call, or a body with no points |
 | `frame-chain` | a call's calling body is not the body the call below entered: a tail transfer changed the body |
 | `frame-sp` | a body's entry `$sp` is not the `$sp` of the call that entered it |
-| `not-parked` | the innermost body is not at a resume point |
+| `not-parked` | the thread is running (the fiber that asks, or one inside its own `sr_yield`), or was switched out inside a call and not by `sr_yield`'s own switch, or is inside an import, or its innermost body named no resume point |
 | `too-many-frames` | the list does not fit |
 
 **Resuming** (`dispatch_resume_from_host`) is `dispatch_from_host` for a restored thread. It first
@@ -746,7 +788,10 @@ validates (`sr_resume_validate`), and a refusal comes before any guest or runtim
 `body-not-registered`, `body-stale`, `body-not-resumable` (the function registered for the address
 has no points; it is not called), `no-resume-point` (the body is asked; its switch has no such
 key), `frame-chain` (a call point's callee is not the body of the frame above) and `resume-busy`
-(the fiber already holds a call record or a transfer). Then it rebuilds the call records with the
+(the fiber already holds a call record or a transfer). Asking a body runs its first statement and
+its `switch` only, so validation may be called from any host context. `body-stale` is a refusal
+at load only: describing a thread does not look at staleness, so a state can be written that the
+same build then refuses, where the uninterrupted run would have gone on in its native frame. Then it rebuilds the call records with the
 values the host entry and each call site left, enters the outermost body at its point, and runs
 the rest of the host entry's `dispatch_call` when that body returns. It does not pass through the
 dispatcher's own yield point.
@@ -759,6 +804,9 @@ cases parks in turn, the thread is described, and a run that starts from the par
 parked memory and the frame list, with a rebuilt dispatch table and an empty call-record stack, is
 compared with the uninterrupted run on the whole `CpuState` (`pc` included), the memory window,
 the guest writes and the instruction trace after the park, and the number of yield points counted.
+`mingw32-make aot-return-boundary-thread-selftest` checks the definition of parked with the real
+scheduler: a thread whose yield services an alarm and then switches to a peer is refused when it
+is described from the alarm handler and is its one frame when it is described from the peer.
 The same lane refuses each frame list and each set of call records above by name and checks that
 nothing changed, except `body-stale`: stale-code detection is an environment switch the fixture
 runs without. Every other cosimulation lane runs the same cases on ordinary output and requires
@@ -772,9 +820,11 @@ Not built yet, each a separate change under #2172:
   from the import", data the wait must latch), at the dispatcher's own yield point, under a
   dispatched call, under a tail drain (the chain's state has to become data on the call record),
   or in a body with a checked `$sp` load;
-- the scheduler's side of a park (what `sr_yield` does after the switch back), every subsystem's
-  own segment, and the quiet point at which a capture is allowed;
-- the `nkstate` segment that carries the frame lists.
+- the scheduler's side of a restore: making a thread from its saved registers and frame list,
+  starting its fiber in `dispatch_resume_from_host`, and the state the scheduler holds for it
+  outside both (the slice counter, the wait and wake fields);
+- every subsystem's own segment, and the quiet point at which a capture is allowed. Nothing
+  writes a state with a `FRMS` segment yet; the segment and its binding exist.
 
 A capture that meets any of them refuses and names it. A resumed thread that parks again is
 described from its rebuilt records like any other.

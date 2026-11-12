@@ -214,4 +214,32 @@ NkStateStatus nkstate_mem_save(const NkStateMemRegion *regions, uint32_t count, 
 NkStateStatus nkstate_mem_load(const NkStateMemRegion *regions, uint32_t count,
                                const uint8_t *payload, size_t len, char *detail, size_t detail_cap);
 
+/* "FRMS": the resume frames of each parked guest thread, keyed by thread uid, outermost
+ * frame first (#2172; "Resume at a PC" in docs/ARCHITECTURE.md). A frame names a generated
+ * body and a point inside it, so it means something only to the generated code that wrote it.
+ * The file's executable identity is that binding: a state from another build is refused as
+ * "executable-identity" before any loader runs, this one included, and a build that changes
+ * what a frame holds raises NKSTATE_FRAMES_VERSION and is refused as "segment-version".
+ *
+ * Layout: u32 thread count; per thread u32 uid, u32 frame count, then the frames, each four
+ * u32 (body, pc, kind, sp). */
+#define NKSTATE_FRAMES_TAG "FRMS"
+#define NKSTATE_FRAMES_VERSION 1u
+
+typedef struct {
+    uint32_t uid;
+    uint32_t count;        /* frames held */
+    uint32_t capacity;     /* room in `frames`, for a load */
+    SrResumeFrame *frames;
+} NkStateThreadFrames;
+
+NkStateStatus nkstate_frames_save(const NkStateThreadFrames *threads, uint32_t count,
+                                  NkStateBuf *out, char *detail, size_t detail_cap);
+/* The payload must name exactly the given uids, in the same order, and no thread more frames
+ * than it has room for. Nothing is written unless the whole payload is accepted. Whether this
+ * build can resume the frames is sr_resume_validate's question, asked when each thread is
+ * resumed. */
+NkStateStatus nkstate_frames_load(NkStateThreadFrames *threads, uint32_t count,
+                                  const uint8_t *payload, size_t len, char *detail, size_t detail_cap);
+
 #endif /* NKSTATE_H */

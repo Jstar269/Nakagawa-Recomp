@@ -984,9 +984,21 @@ class StateResumeTests(unittest.TestCase):
 
     def test_entry_tests_the_request_before_the_yield_point(self):
         text = self.emit()
-        self.assertIn("    SR_STATE_ENTRY(s, 0x00001000u); _nk_enter: ;\n"
+        # The request is tested first, before the host-stack check and the entry yield, so
+        # a resume counts no yield point and sr_resume_validate's question runs neither.
+        self.assertIn("void f_00001000(CpuState *s) {\n"
+                      "    SR_STATE_RESUME_TEST();\n"
+                      "    SR_HOST_STACK_CHECK(0x00001000u);\n"
+                      "    SR_STATE_ENTRY(s, 0x00001000u); _nk_enter: ;\n"
                       "    uint32_t _sp_entry = s->r[29]; (void)_sp_entry;", text)
         self.assertNotIn("SR_YIELD(s, 0x00001000u);", text)
+        # A real resume makes the host-stack check in the switch; the question does not.
+        self.assertIn("    const SrResumeEntry _nk_e = sr_resume_take(s, 0x00001000u);\n"
+                      "    if (!_nk_e.probe) { SR_HOST_STACK_CHECK(0x00001000u); }\n", text)
+        # A body with no direct call has no host-stack check to make.
+        leaf = self.emit({0x1000: JR_RA, 0x1004: NOP}, known={0x1000})
+        self.assertIn("    SR_STATE_RESUME_TEST();\n    SR_STATE_ENTRY(s, 0x00001000u);", leaf)
+        self.assertNotIn("SR_HOST_STACK_CHECK", leaf)
         self.assertIn("case SR_RESUME_KEY(SR_RESUME_POINT_ENTRY, 0x00001000u): "
                       "SR_RESUME_AT(_nk_e, SR_RESUME_POINT_ENTRY, 0u); goto _nk_enter;", text)
 
@@ -1025,6 +1037,8 @@ class StateResumeTests(unittest.TestCase):
     def test_pass_only_rewrites_its_three_shapes(self):
         plain = self.emit(state_resume=False).split("\n")
         resumed = self.emit().split("\n")
+        self.assertEqual(resumed[1], "    SR_STATE_RESUME_TEST();")
+        del resumed[1]
         body = resumed[:resumed.index("    return;")] + ["}", ""]
         self.assertEqual(len(body), len(plain))
         changed = [(a, b) for a, b in zip(plain, body, strict=True) if a != b]
@@ -1191,7 +1205,8 @@ class StateResumeTests(unittest.TestCase):
         codegen._apply_options(cli, codegen._validated_options(cli), options)
         self.assertTrue(options.state_resume)
         self.assertFalse(codegen.CodegenOptions().state_resume)
-        for other in ("--stack-census", "--promote-registers", "--backend=llvm"):
+        for other in ("--stack-census", "--promote-registers", "--backend=llvm", "--lle-cpu",
+                      "--lle-import-seam"):
             cli = codegen._command_line_parser().parse_args(["--state-resume", other])
             with self.assertRaises(codegen._Refusal) as refusal:
                 codegen._validated_options(cli)

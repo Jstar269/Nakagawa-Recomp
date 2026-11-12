@@ -5354,6 +5354,10 @@ def state_resume_pass(out, start):
     A statement of any other shape keeps its text and has no point, so a thread parked or
     suspended there is refused when it is described (sr_resume_describe); nothing is guessed.
     Returns the new lines, or ``out`` itself when the body gets no point at all.
+
+    The body's first statement becomes ``SR_STATE_RESUME_TEST``, ahead of the host-stack check
+    of a body that makes direct calls: a resume makes that check in the switch, and
+    sr_resume_validate's question never reaches it.
     """
     body = f"0x{start:08x}u"
     entry_at = next((i for i, line in enumerate(out) if _STATE_RESUME_ENTRY.match(line)), None)
@@ -5385,8 +5389,12 @@ def state_resume_pass(out, start):
         return (f"SR_YIELD_PARK(s, {site}, {body}, 0x{target}u, SR_RESUME_POINT_YIELD, _sp_entry); "
                 f"goto L_{target};")
 
+    stack_check = emit_host_stack_check(body)
+    checks_stack = stack_check in out[:entry_at]
     result = []
     for index, line in enumerate(out):
+        if index == 1:
+            result.append("    SR_STATE_RESUME_TEST();")
         if index == entry_at:
             result.append(f"    SR_STATE_ENTRY(s, {body}); _nk_enter: ;")
             continue
@@ -5417,6 +5425,7 @@ def state_resume_pass(out, start):
         "    return;",
         "  _nk_resume: {",
         f"    const SrResumeEntry _nk_e = sr_resume_take(s, {body});",
+        *([f"    if (!_nk_e.probe) {{ {stack_check.strip()} }}"] if checks_stack else []),
         "    _sp_entry = _nk_e.sp;",
         "    switch (SR_RESUME_KEY(_nk_e.kind, _nk_e.pc)) {",
         *cases,
@@ -6347,9 +6356,14 @@ def _validated_options(cli):
     if cli.state_resume:
         # #2172: a resume point restores a C body's one frame local. A census wrapper, a
         # promoted register and an LLVM body each hold state a point does not restore.
+        # With the LLE CPU every direct call is followed on its line by a flow check, so no
+        # call would get a point: refused by name instead of translating a build in which
+        # only one-frame threads can be described.
         for option, given in (("--stack-census", cli.stack_census),
                               ("--promote-registers", cli.promote_registers),
-                              ("--backend=llvm", backend == "llvm")):
+                              ("--backend=llvm", backend == "llvm"),
+                              ("--lle-cpu", cli.lle_cpu),
+                              ("--lle-import-seam", cli.lle_import_seam)):
             if given:
                 raise _Refusal(2, f"--state-resume cannot be combined with {option}\n")
     threshold_arg = cli.region_split_threshold

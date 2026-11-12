@@ -3213,7 +3213,6 @@ const char *sr_resume_status_name(SrResumeStatus status) {
     case SR_RESUME_NO_FRAMES: return "no-frames";
     case SR_RESUME_SCOPE_LIVE: return "callback-or-interrupt-live";
     case SR_RESUME_TAIL_CHAIN_LIVE: return "tail-chain-live";
-    case SR_RESUME_TAIL_PENDING: return "tail-transfer-pending";
     case SR_RESUME_FOREIGN_STATE: return "foreign-cpu-state";
     case SR_RESUME_ROOT_NOT_HOST_ENTRY: return "root-not-host-entry";
     case SR_RESUME_RETURN_IN_FLIGHT: return "return-in-flight";
@@ -3256,6 +3255,12 @@ SrResumeStatus sr_resume_describe(const SrAotReturnBoundaryStack *stack, const C
     if (detail != NULL && detail_cap != 0u) detail[0] = '\0';
     if (depth == 0u || records == NULL)
         return resume_refuse(SR_RESUME_NO_FRAMES, detail, detail_cap, "no live call");
+    /* The running fiber is not parked, whatever its records say: inside sr_yield the rest
+     * of that yield has still to run. */
+    if (stack == NULL)
+        return resume_refuse(SR_RESUME_NOT_PARKED, detail, detail_cap,
+                             "the running fiber; a thread is parked once sr_yield has switched "
+                             "it out");
     /* A scope opened before the thread's first call record leaves the floor at 0. */
     if (floor != 0u || scopes != 0u)
         return resume_refuse(SR_RESUME_SCOPE_LIVE, detail, detail_cap,
@@ -3263,10 +3268,6 @@ SrResumeStatus sr_resume_describe(const SrAotReturnBoundaryStack *stack, const C
     if (drains != 0u)
         return resume_refuse(SR_RESUME_TAIL_CHAIN_LIVE, detail, detail_cap,
                              "%zu tail drain(s) running a body", drains);
-    /* The slot is one per process, so a recorded transfer belongs to the running fiber. */
-    if (stack == NULL && sr_tail_transfer.pending)
-        return resume_refuse(SR_RESUME_TAIL_PENDING, detail, detail_cap,
-                             "target 0x%08" PRIx32, sr_tail_transfer.target);
     if (depth > SR_RESUME_MAX_FRAMES || depth > capacity)
         return resume_refuse(SR_RESUME_TOO_MANY_FRAMES, detail, detail_cap,
                              "%zu frames, room for %" PRIu32, depth, capacity);

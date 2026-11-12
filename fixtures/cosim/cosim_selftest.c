@@ -2204,16 +2204,22 @@ static int run_negative_corpus(void) {
  * nothing but the parked registers, the parked memory and that frame list
  * (dispatch_resume_from_host) must end exactly where the uninterrupted run ended.
  *
- * The harness's sr_yield is the park: it copies the state the way a save state would and
- * returns, so one run is both the uninterrupted reference and the source of the snapshot.
+ * The harness's sr_yield is the park. A thread is parked once sr_yield's own switch has
+ * switched it out, so the hook does what that switch does to the call records: it swaps them
+ * out of the running side (sr_aot_return_boundary_stack_swap, as sched_run does around every
+ * fiber switch), describes the swapped-out descriptor and swaps it back. It copies the rest of
+ * the state the way a save state would and returns, so one run is both the uninterrupted
+ * reference and the source of the snapshot.
  * Every yield point the run passes is tried in turn, by starting the slice counter at its
  * ordinal. The resumed run begins with an empty return-boundary stack and a rebuilt dispatch
  * table: no host frame of the first run exists in it.
  *
  * What is compared: the whole CpuState, pc included (both runs are generated code, so
  * unlike the two-lane comparison above no field is lane-specific); the memory window; the
- * guest writes after the park; the instruction trace after the park; and the slice counter,
- * so a resume that counted a yield point the uninterrupted run did not, or skipped one, fails.
+ * guest writes after the park; the instruction trace after the park, which the reference run
+ * writes to a file of its own from the park on, so the two traces must be equal line for
+ * line and in length; and the slice counter, so a resume that counted a yield point the
+ * uninterrupted run did not, or skipped one, fails.
  *
  * A resumed thread must also be a thread like any other. Each resumed run is repeated with the
  * slice counter at 1, so it parks again at the very next yield point, and that second park --
@@ -2237,15 +2243,32 @@ typedef struct {
     SrResumeFrame frames[COSIM_RESUME_FRAMES];
     uint32_t frame_count;
     /* Refusals staged at the live park (g_resume_stage_refusals). */
-    SrResumeStatus foreign_state, short_capacity, scope_live, tail_pending;
+    SrResumeStatus foreign_state, short_capacity, scope_live, inside_yield, after_interrupt;
 } CosimPark;
 
 static CosimPark g_park;
 /* With g_resume_park_twice, the yield point after the park parks too, into g_park_next. */
 static CosimPark g_park_next;
 static int g_resume_park_twice;
-/* Set for the `rs` sweep: each park also asks for four refusals only a live thread can show. */
+/* Set for the `rs` sweep: each park also asks for five refusals only a live thread can show. */
 static int g_resume_stage_refusals;
+/* Set for an uninterrupted run: from its park on, the trace goes to this file. */
+static const char *g_resume_after_park_trace;
+static uint32_t g_resume_trace_entry;
+
+/* Describe the fiber as the scheduler would after sr_yield's switch: with its call records
+ * swapped out of the running side. */
+static SrResumeStatus resume_describe_switched_out(const CpuState *s, SrResumeFrame *frames,
+                                                   uint32_t capacity, uint32_t *count,
+                                                   char *detail, size_t detail_cap) {
+    SrAotReturnBoundaryStack parked;
+    memset(&parked, 0, sizeof parked);
+    sr_aot_return_boundary_stack_swap(&parked);
+    const SrResumeStatus status =
+        sr_resume_describe(&parked, s, frames, capacity, count, detail, detail_cap);
+    sr_aot_return_boundary_stack_swap(&parked);
+    return status;
+}
 static CosimLane g_resume_ref, g_resume_res;
 static int g_resume_failures = 0;
 
@@ -2263,8 +2286,9 @@ static void resume_park_capture(CosimPark *park, CpuState *s) {
         park->window[address - COSIM_WINDOW_LO] = MEM_R8(address);
     }
     park->writes_before = g_active_write_log ? g_active_write_log->count : 0u;
-    park->status = sr_resume_describe(NULL, s, park->frames, COSIM_RESUME_FRAMES,
-                                      &park->frame_count, park->detail, sizeof park->detail);
+    park->status = resume_describe_switched_out(s, park->frames, COSIM_RESUME_FRAMES,
+                                                &park->frame_count, park->detail,
+                                                sizeof park->detail);
 }
 
 static void resume_park_hook(CpuState *s) {
@@ -2275,26 +2299,47 @@ static void resume_park_hook(CpuState *s) {
         return;
     }
     resume_park_capture(&g_park, s);
-    if (g_resume_park_twice) {
-        g_park_next.armed = 1;
-        atomic_store_explicit(&sr_timeslice, 1, memory_order_relaxed);
-    }
     if (g_resume_stage_refusals) {
         SrResumeFrame scratch[COSIM_RESUME_FRAMES];
         uint32_t scratch_count = 0u;
         CpuState other = *s;
-        g_park.foreign_state = sr_resume_describe(NULL, &other, scratch, COSIM_RESUME_FRAMES,
-                                                  &scratch_count, NULL, 0u);
-        g_park.short_capacity = sr_resume_describe(NULL, s, scratch, 1u, &scratch_count, NULL, 0u);
+        g_park.foreign_state = resume_describe_switched_out(&other, scratch, COSIM_RESUME_FRAMES,
+                                                            &scratch_count, NULL, 0u);
+        g_park.short_capacity =
+            resume_describe_switched_out(s, scratch, 1u, &scratch_count, NULL, 0u);
         SrAotReturnBoundaryScope scope;
         sr_aot_return_boundary_scope_begin(&scope);
-        g_park.scope_live = sr_resume_describe(NULL, s, scratch, COSIM_RESUME_FRAMES,
-                                               &scratch_count, NULL, 0u);
+        g_park.scope_live = resume_describe_switched_out(s, scratch, COSIM_RESUME_FRAMES,
+                                                         &scratch_count, NULL, 0u);
         (void)sr_aot_return_boundary_scope_end(s, &scope, "cosim resume test");
-        sr_tail_transfer.pending = 1u;
-        g_park.tail_pending = sr_resume_describe(NULL, s, scratch, COSIM_RESUME_FRAMES,
+        /* Inside the yield, before any switch: the body has named its point, and the thread
+         * is still the running one. A capture here would skip the rest of the yield. */
+        g_park.inside_yield = sr_resume_describe(NULL, s, scratch, COSIM_RESUME_FRAMES,
                                                  &scratch_count, NULL, 0u);
-        sr_tail_transfer.pending = 0u;
+        /* The yield services an interrupt, as sr_yield does before it decides to switch: a
+         * handler runs in a scope on this fiber and returns. The thread is still running. */
+        {
+            const CpuState saved = *s;
+            sr_aot_return_boundary_scope_begin(&scope);
+            s->r[31] = SR_HOST_RETURN_PC;   /* a host entry's own link */
+            dispatch_from_host(s, COSIM_LEAF_A);
+            (void)sr_aot_return_boundary_scope_end(s, &scope, "cosim resume test");
+            *s = saved;
+        }
+        g_park.after_interrupt = sr_resume_describe(NULL, s, scratch, COSIM_RESUME_FRAMES,
+                                                    &scratch_count, NULL, 0u);
+        atomic_store_explicit(&sr_timeslice, COSIM_RESUME_SLICE, memory_order_relaxed);
+    }
+    if (g_resume_park_twice) {
+        g_park_next.armed = 1;
+        atomic_store_explicit(&sr_timeslice, 1, memory_order_relaxed);
+    }
+    if (g_resume_after_park_trace != NULL) {
+        sr_trace_close();
+        if (sr_trace_open(g_resume_after_park_trace, "cosim", g_resume_trace_entry) != 0) {
+            fprintf(stderr, "cosim: cannot open trace file %s\n", g_resume_after_park_trace);
+            exit(2);
+        }
     }
 }
 
@@ -2355,9 +2400,15 @@ static int32_t resume_run_uninterrupted(uint32_t entry, uint32_t omit, uint32_t 
     g_park.armed = park_at > 0;
     atomic_store_explicit(&sr_timeslice, park_at > 0 ? park_at : COSIM_RESUME_SLICE,
                           memory_order_relaxed);
+    static char after_park[560];
+    snprintf(after_park, sizeof after_park, "%s.after-park", trace_path);
+    g_resume_after_park_trace = after_park;
+    g_resume_trace_entry = entry;
     resume_lane_begin(lane, trace_path, entry);
     dispatch_from_host(&lane->state, entry);
-    return resume_lane_end(lane, trace_path);
+    g_resume_after_park_trace = NULL;
+    /* The reference trace is what the run wrote after its park. */
+    return resume_lane_end(lane, g_park.fired ? after_park : trace_path);
 }
 
 /* A run that starts from the snapshot alone: a rebuilt dispatch table, an empty
@@ -2481,23 +2532,21 @@ static void resume_compare(const CosimPark *from, const char *name, unsigned ord
             }
         }
     }
+    /* Both traces start at the park, so they are equal in length and line for line, each
+     * line's ordinal included. */
     if (ref->trace.truncated || res->trace.truncated || res->trace.count == 0u ||
-        res->trace.count > ref->trace.count) {
+        res->trace.count != ref->trace.count) {
         snprintf(detail, sizeof detail,
-                 "instruction trace: uninterrupted %u lines, resumed %u lines",
+                 "instruction trace after the park: uninterrupted %u lines, resumed %u lines",
                  ref->trace.count, res->trace.count);
         resume_fail(name, ordinal, detail);
     } else {
-        /* A line opens with its ordinal in its own trace; the record is what follows it. */
-        const unsigned skip = ref->trace.count - res->trace.count;
         for (unsigned i = 0; i < res->trace.count; i++) {
-            const char *a = strchr(ref->trace.lines[skip + i], ' ');
-            const char *b = strchr(res->trace.lines[i], ' ');
-            if (a == NULL || b == NULL || strcmp(a, b) != 0) {
+            if (strcmp(ref->trace.lines[i], res->trace.lines[i]) != 0) {
                 snprintf(detail, sizeof detail,
                          "trace line %u after the park differs:" NEWLINE
                          "    uninterrupted: %.110s" NEWLINE "    resumed:       %.110s",
-                         i, ref->trace.lines[skip + i], res->trace.lines[i]);
+                         i, ref->trace.lines[i], res->trace.lines[i]);
                 resume_fail(name, ordinal, detail);
                 break;
             }
@@ -2545,11 +2594,15 @@ static unsigned run_resume_case(const CosimResumeCase *test, const char *ref_pat
     const unsigned points = (unsigned)(COSIM_RESUME_SLICE - whole);
     unsigned resumed = 0u;
     static CosimPark parked, reference_next;
+    const int failures_before = g_resume_failures;
     if (points < 2u || g_park.fired) {
         resume_fail(test->name, 0u, "the run passed no yield point in a body");
         return 0u;
     }
-    for (unsigned ordinal = 1u; ordinal <= points; ordinal++) {
+    /* The first divergence of a case ends its sweep: it is the located one, and a resumed
+     * run that has gone wrong once can end the process at a later point. */
+    for (unsigned ordinal = 1u; ordinal <= points && g_resume_failures == failures_before;
+         ordinal++) {
         const int32_t ref_slice = resume_run_uninterrupted(test->entry, test->omit,
                                                            test->raise_to, (int)ordinal, ref_path);
         char detail[320];
@@ -2631,8 +2684,11 @@ static unsigned run_resume_case(const CosimResumeCase *test, const char *ref_pat
         }
         resume_compare_repark(test->name, ordinal, &parked, &reference_next, &g_park);
     }
-    fprintf(stderr, "  cosim resume OK   %-10s %u yield points, %u resumed and compared" NEWLINE,
-            test->name, points, resumed);
+    if (g_resume_failures == failures_before) {
+        fprintf(stderr,
+                "  cosim resume OK   %-10s %u yield points, %u resumed and compared" NEWLINE,
+                test->name, points, resumed);
+    }
     return resumed;
 }
 
@@ -2970,7 +3026,7 @@ static void resume_nested_hook(CpuState *s) {
         SrResumeFrame frames[COSIM_RESUME_FRAMES];
         uint32_t count = 0u;
         g_resume_nested.status =
-            sr_resume_describe(NULL, s, frames, COSIM_RESUME_FRAMES, &count, NULL, 0u);
+            resume_describe_switched_out(s, frames, COSIM_RESUME_FRAMES, &count, NULL, 0u);
     }
 }
 
@@ -3091,20 +3147,27 @@ static int run_resume_cases(const char *trace_dir) {
         resume_fail("rs", 0u, detail);
         return g_resume_failures;
     }
-    /* Each park of the rs sweep staged four refusals; these are the four-deep park's. */
+    /* Each park of the rs sweep staged five refusals; these are the four-deep park's. */
     if (g_resume_deep.foreign_state != SR_RESUME_FOREIGN_STATE ||
         g_resume_deep.short_capacity != SR_RESUME_TOO_MANY_FRAMES ||
         g_resume_deep.scope_live != SR_RESUME_SCOPE_LIVE ||
-        g_resume_deep.tail_pending != SR_RESUME_TAIL_PENDING) {
-        char detail[240];
+        g_resume_deep.inside_yield != SR_RESUME_NOT_PARKED ||
+        g_resume_deep.after_interrupt != SR_RESUME_NOT_PARKED) {
+        char detail[320];
         snprintf(detail, sizeof detail,
                  "live refusals at the four-deep park: another CpuState %s, room for one frame "
-                 "%s, a callback scope %s, a recorded tail transfer %s",
+                 "%s, a callback scope %s, the running fiber inside its yield %s, the same after "
+                 "the yield serviced an interrupt %s",
                  sr_resume_status_name(g_resume_deep.foreign_state),
                  sr_resume_status_name(g_resume_deep.short_capacity),
                  sr_resume_status_name(g_resume_deep.scope_live),
-                 sr_resume_status_name(g_resume_deep.tail_pending));
+                 sr_resume_status_name(g_resume_deep.inside_yield),
+                 sr_resume_status_name(g_resume_deep.after_interrupt));
         resume_fail("describe", g_resume_deep_ordinal, detail);
+    } else {
+        fprintf(stderr, "  cosim resume OK   describe   %-26s %s" NEWLINE,
+                sr_resume_status_name(g_resume_deep.after_interrupt),
+                "the running fiber inside its yield, before and after it serviced an interrupt");
     }
     run_resume_refusals(res_path);
     run_resume_describe_refusals();
