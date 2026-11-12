@@ -4673,6 +4673,24 @@ class TestPublishedPackages(_SynthTimingElfFixture):
             with self.assertRaisesRegex(EnhancementPackageError, "does not match the executable"):
                 self._publish(elf_bytes, wrong)
 
+    def test_shipped_packages_validate_and_pass_the_publication_check(self) -> None:
+        """Every package in assets/enhancements/ is a valid published package with no findings.
+
+        The validator also refuses a site_map name that no site, data site, hook or update
+        boundary uses, so a republished package must drop the names it no longer needs.
+        """
+        import publish_audit
+
+        shipped = sorted((ROOT / "assets" / "enhancements").glob("*.json"))
+        self.assertTrue(shipped)
+        for path in shipped:
+            rel = path.relative_to(ROOT).as_posix()
+            with self.subTest(package=rel):
+                data = path.read_bytes()
+                package = json.loads(data.decode("utf-8"))
+                validate_package(copy.deepcopy(package))
+                self.assertEqual(publish_audit.check_enhancement_packages({rel: (data, None)}), [])
+
     def test_validator_refuses_malformed_published_packages(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             elf_bytes = _write_synthetic_mips_elf(Path(tmp_dir) / "synth.elf", self.words, self.entry)

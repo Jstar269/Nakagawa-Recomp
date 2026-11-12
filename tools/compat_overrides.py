@@ -392,32 +392,38 @@ SCHEDULER_HOOKS = [
 TITLE_CONFIGURED_SCHEDULER_COMPAT: "list[dict]" = []
 
 # --- src/rt/recomp.c: dispatch bindings owned by TITLE CONFIGURATION ----------
-# These three used to be numeric literals compiled into generic dispatch. They are
-# now typed entries in a validated title manifest's runtime_bindings block
-# (dispatch_aliases / callback_terminators), so the addresses below no longer exist
-# anywhere in generic runtime code: they reach dispatch() only as configuration, and
-# an unconfigured build applies none of them.
+# Three bindings used to be numeric literals compiled into generic dispatch. They became
+# typed entries in a validated title manifest's runtime_bindings block
+# (dispatch_aliases / callback_terminators), so they reached dispatch() only as
+# configuration, and an unconfigured build applied none of them.
 #
-# They stay inventoried because the SEMANTIC DEBT did not go away -- moving an
-# override behind configuration makes it honest, not absent. Each entry names the
-# generic mechanism, the executable test that proves it acts only where configured,
-# and what would retire the binding for good.
-TITLE_CONFIGURED_DISPATCH = [
-    dict(address=0x00030950, category="faithful_abi_bridge", name="TC30950",
-         source="src/rt/recomp.c:dispatch (runtime_bindings.dispatch_aliases)",
-         reason="a tail-call target lands at a callee's +8 entry point (past its prologue) "
-                "that codegen does not separately register; the configured alias enters the "
-                "real registered entry instead, with an equivalent net stack delta. The "
-                "mechanism is generic (enter a registered body); only the address pair is "
-                "configured, and an unconfigured build treats this address as an ordinary "
-                "dispatch miss. Retire by registering the mid-function entry point in "
-                "codegen, which removes the need for any alias.",
-         test="make dispatch-isolation-selftest (generic/fixture-a/fixture-b matrix)"),
+# A binding a title still declares is inventoried here, because moving an override
+# behind configuration makes it honest, not absent: its entry names the generic
+# mechanism, the executable test that proves it acts only where configured, and what
+# would retire it. No title declares one now
+# (tools/test_title_runtime_config.py TitleDeclaredDispatchBindings).
+TITLE_CONFIGURED_DISPATCH: "list[dict]" = [
+    # 0x00030950 (TC30950, a dispatch alias into the body registered at 0x00030948):
+    # retired under #363 (2026-11-11). It was recorded as a computed tail call landing 8
+    # bytes into a callee. No such transfer was observed: the title's executable has no
+    # j, jal or branch to 0x00030950 and no data word 0x00030950 or 0x08030950 (a
+    # computed target cannot be ruled out statically), and the alias never fired on the
+    # private full-match route. The binding is gone, so that target is an ordinary
+    # dispatch miss: logged, then run from 0x00030950 itself by the interpreter floor or
+    # refused. Its recorded retirement step, registering the mid-function entry in
+    # codegen, was not needed for a transfer nothing makes.
     # 0x00292fa0 (callback-list walker terminal miss): retired under #363 (2026-11-02). It
     # named a virtual call in the frame loop, not a list walker, and its pc was whatever
     # the previous return left behind. It never fired on the gate route, so the title's
     # binding is gone and -1 at that site is an ordinary dispatch miss.
 ]
+
+#: Addresses TITLE_CONFIGURED_DISPATCH inventoried before each binding was retired: the
+#: alias source, the null terminator's return address and the terminal miss's pc. The
+#: generic-runtime literal guard (tools/test_compat_manifest.py
+#: _runtime_title_diagnostic_inventory) reads this list, so a retirement does not stop
+#: the guard from refusing these addresses in runtime sources.
+RETIRED_TITLE_CONFIGURED_DISPATCH: "tuple[int, ...]" = (0x00030950, 0x0003e06c, 0x00292fa0)
 
 OVERRIDES = (
     GUEST_PATCHES + CODEGEN_CUSTOM_STUBS + HST_SIMPLE_STUBS +

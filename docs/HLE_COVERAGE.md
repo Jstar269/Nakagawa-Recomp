@@ -26,8 +26,8 @@ Classes are listed strongest first. A path takes the first class whose source na
 | `hardware-measured` | 64 | 73 |
 | `ppsspp-derived` | 125 | 88 |
 | `game-route` | 0 | 0 |
-| `synthetic` | 357 | 183 |
-| `unverified` | 162 | 22 |
+| `synthetic` | 359 | 183 |
+| `unverified` | 160 | 22 |
 | total | 708 | 366 |
 
 The VFPU census also lists 307 forms the runtime refuses at the
@@ -544,7 +544,7 @@ a title that translates none has generated code unchanged.
 | `0xa5da2406` | `sceUtilityGetSystemParamInt` | utility | `hardware-measured` | PSP oracle PSP-HLE-SYSPARAM-001 |
 | `0xa62c6f57` | `sceNetAdhocTerm` | network | `unverified` | no recorded evidence |
 | `0xa66b0120` | `sceKernelReferEventFlagStatus` | kernel_sync | `synthetic` | HLE selftest dispatch; note |
-| `0xa6bab2e9` | `sceKernelStdout` | kernel_utils | `unverified` | no recorded evidence |
+| `0xa6bab2e9` | `sceKernelStdout` | kernel_utils | `synthetic` | HLE selftest dispatch |
 | `0xa703fe0f` | `sceMp3GetInfoToAddStreamData` | audio_codec | `ppsspp-derived` | handler comment names PPSSPP; sceMp3 block: derived-translated from PPSSPP at a pinned revision |
 | `0xa7144800` | `sceCtrlSetIdleCancelThreshold` | input | `synthetic` | HLE selftest dispatch |
 | `0xa780cf7e` | `sceMpegMallocAvcEsBuf` | mpeg | `ppsspp-derived` | sceMpeg banner: wrappers over the PPSSPP sceMpeg port in src/rt/mpeg.c |
@@ -752,7 +752,7 @@ a title that translates none has generated code unchanged.
 | `0xf64910f0` | `sceUtilityUnloadUsbModule` | utility | `unverified` | no recorded evidence |
 | `0xf6837a1a` | `sceAtracSetMOutData` | audio_codec | `ppsspp-derived` | sceAtrac block: stream bookkeeping ported from PPSSPP sceAtrac.cpp |
 | `0xf77d77cb` | `sceKernelSetCompilerVersion` | kernel_memory | `synthetic` | registry evidence `tools/test_sdkver_c.py` |
-| `0xf78ba90a` | `sceKernelStderr` | kernel_utils | `unverified` | no recorded evidence |
+| `0xf78ba90a` | `sceKernelStderr` | kernel_utils | `synthetic` | HLE selftest dispatch |
 | `0xf79472d7` | `sceNetAdhocMatchingSendData` | network | `unverified` | no recorded evidence |
 | `0xf7d13214` | `sceNetAdhocDiscoverStop` | network | `unverified` | no recorded evidence |
 | `0xf7d8d092` | `sceUtilityUnloadAvModule` | utility | `synthetic` | HLE selftest dispatch |
