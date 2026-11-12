@@ -1190,7 +1190,7 @@ memory, no network; ZIP packs through the project's own `src/core/nk_zip.c` and 
   (`NK_INFLATE_COUNT_BUILDS`), where tables built per block came to about 1.7 million; the Adler-32 one byte late refused;
   and the largest image the bound lets through, 2048 x 2048 at 16 bits a channel holding 36 MiB of empty dynamic
   blocks, refused within 2 s by the dynamic-block budget (77 ms measured, 3.1 to 3.4 s before it), and the same image with
-  an empty dynamic block after every 128 bytes it writes, the most the budget allows, decoded within 2 s; 64 empty
+  the most empty dynamic blocks the budget allows (64, then one after every 128 bytes it writes) decoded within 2 s; 64 empty
   dynamic blocks unpack, a 65th is refused after 64 blocks' tables, and 2 KiB written first earns 16 more, not 17;
   400 KiB in dynamic blocks of 300 bytes, and in blocks of 513 bytes each followed by a flush's empty stored block,
   unpack. Two images taking turns in a budget for one, 1,000 rounds, are decoded 16 to 24

@@ -2741,13 +2741,14 @@ static void test_png_work(void) {
         free(px);
         free(png);
     }
-    {   /* the most dynamic blocks the budget lets the largest image have: after every 128 bytes it
-         * writes (a fixed block of matches), one empty dynamic block, 262,160 in all, then the image
-         * decodes. Measured, and bounded like the cell above. */
+    {   /* the most dynamic blocks the budget lets the largest image have: the 64 free ones first,
+         * then after every 128 bytes it writes (a fixed block of matches) one more, 262,224 in all;
+         * then the image decodes. Measured, and bounded like the cell above. */
         const size_t raw_n = (1u + 2048u * 8u) * 2048u;
         Bw z = { 0 };
         bw_byte(&z, 0x78);
         bw_byte(&z, 0x01);
+        for (unsigned i = 0; i < NK_INFLATE_DYNAMIC_FREE; i++) empty_dynamic_block(&z);
         for (size_t at = 0; at < raw_n; at += NK_INFLATE_DYNAMIC_BYTES) {
             unsigned left = NK_INFLATE_DYNAMIC_BYTES;
             bw_bits(&z, 0, 1);
@@ -2785,11 +2786,11 @@ static void test_png_work(void) {
         const double t0 = wall_s();
         const int ok = nk_texrepl_decode_png(png, n, 0, &px, &w, &h, why, sizeof(why));
         const double t = wall_s() - t0;
-        const size_t blocks = raw_n / NK_INFLATE_DYNAMIC_BYTES;
+        const size_t blocks = NK_INFLATE_DYNAMIC_FREE + raw_n / NK_INFLATE_DYNAMIC_BYTES;
         CHECK(ok && w == 2048 && h == 2048 && nk_inflate_table_builds == 3u * blocks + 2u && t < NK_PNG_WORK_SECONDS,
-              "the largest image with %zu empty dynamic blocks between its writes: %d in %.2f s, %llu tables, '%s'", blocks,
+              "the largest image with %zu empty dynamic blocks, 64 then one after every 128 bytes: %d in %.2f s, %llu tables, '%s'", blocks,
               ok, t, nk_inflate_table_builds, why);
-        printf("png work: the largest image with an empty dynamic block after every %u bytes (%zu) decoded in %.0f ms\n",
+        printf("png work: the largest image with 64 empty dynamic blocks, then one after every %u bytes (%zu) decoded in %.0f ms\n",
                NK_INFLATE_DYNAMIC_BYTES, blocks, t * 1e3);
         free(px);
         free(png);
