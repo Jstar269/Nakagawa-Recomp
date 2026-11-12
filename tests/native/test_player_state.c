@@ -8772,7 +8772,8 @@ static void test_graphics_presets(void) {
     char note[192];
     PlayerPlayResolved r, custom_r;
     NkRuntimeConfig config, custom_config;
-    PlayerSettings custom;
+    /* static: PlayerSettings is some 450 KB, and three on the stack overflow Windows' 1 MB main stack */
+    static PlayerSettings custom;
     assert(nk_platform_get_path(NK_PATH_CACHE, cache_root, sizeof(cache_root)));
     snprintf(root, sizeof(root), "%s%cgraphics_preset_probe", cache_root, sep);
     assert(nk_platform_mkdir_p(root));
@@ -8795,7 +8796,7 @@ static void test_graphics_presets(void) {
         const PlayerGraphicsPresetRow *row = player_graphics_preset_row(p);
         assert(row && row->word && row->label && row->value);
         for (int fs = 0; fs < 2; fs++) {
-            PlayerSettings expected;
+            static PlayerSettings expected;   /* static: see custom above */
             player_app_settings_init_default(&app->settings);
             app->settings.fullscreen = fs != 0;
             app->settings.resolution_scale = row->resolution_scale == 1 ? 2 : 1;
@@ -8889,7 +8890,8 @@ static void test_graphics_presets(void) {
 
             /* A game's own value for a part wins over the preset. */
             {
-                PlayerSettings own = app->settings;
+                static PlayerSettings own;   /* static: see custom above */
+                own = app->settings;
                 PlayerTitlePlay *t = &own.title_play[0];
                 memset(t, 0, sizeof(*t));
                 snprintf(t->key, sizeof(t->key), "TEST92150"); /* its settings key */
@@ -11083,7 +11085,7 @@ int main(int argc, char **argv) {
     printf("[PLAYER_STATE_TEST] Subtest 9b: settings apply to the launch session\n");
     fflush(stdout);
     {
-        PlayerSettings applied;
+        static PlayerSettings applied;   /* static: PlayerSettings is some 450 KB */
         memset(&applied, 0, sizeof(applied));
         player_app_settings_init_default(&applied);
         applied.resolution_scale = 2;
@@ -14986,7 +14988,8 @@ int main(int argc, char **argv) {
            only. An Authentic launch exports the user's own display rows under every preset,
            exactly as with Custom; an Enhanced launch exports the preset's values. */
         {
-            PlayerSettings kept = rep->settings;
+            static PlayerSettings kept;   /* static: PlayerSettings is some 450 KB */
+            kept = rep->settings;
             char custom_display[256];
             rep->settings.resolution_scale = 2;
             rep->settings.present_scaling = NK_PRESENT_SCALING_INTEGER;
