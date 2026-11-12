@@ -646,6 +646,12 @@ class IsoParityTests(unittest.TestCase):
         ]
         if has_launch:
             core_srcs.append(ROOT / "src" / "core" / "nk_launch.c")
+            # nk_launch.c starts a homebrew program from its Memory Stick folder
+            # (nk_pbp_homebrew.c), whose package reader reports through the PSP crypto
+            # engine (nk_psp_fail), which reads the key store.
+            core_srcs.extend(ROOT / "src" / "core" / name
+                             for name in ("nk_pbp_homebrew.c", "nk_psp_crypto.c",
+                                          "nk_psp_keystore.c", "nk_psp_builtin_keys.c"))
         if sys.platform == "win32":
             core_srcs.append(ROOT / "src" / "core" / "nk_platform_win32.c")
         else:

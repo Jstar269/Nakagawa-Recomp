@@ -913,8 +913,58 @@ claim) are therefore both `maintainer_action` findings. They stay fatal until th
 candidate's exact bytes in the trusted ledger. The approval is a `reviewed_blobs` entry for the path, at the
 SHA-256 of the new bytes, citing the path's own exact record. The verifier reads those entries only when such a
 change needs one. The trusted record's `upstream_revision` should be updated in the same private commit. A
-byte-identical file outside any manifest (for example a font) has no row to check, so after it lands it is held
-only by review.
+byte-identical file outside any manifest (for example a font) has no row to check. After it lands it is held by
+review, and by the next section when the release manifest approves it as a binary.
+
+### Approved binaries in the release manifest
+
+The publication audit reports binary content: `MAGIC` for a known binary format, `MAGIC_UNKNOWN` for other
+binary bytes, and `PATH` for a prohibited extension. Two things waive those findings, and each approves bytes,
+not a path:
+
+* a component of `assets/release_manifest.json` whose disposition is `approved_binary` (a screenshot, a font, a
+  clip, a prebuilt fixture) or `optional_excluded_if_unverified`. It pins the approved bytes in `hashes.sha256`,
+  and only `approved_binary` waives the extension rule;
+* the `assets/vfpu/` exemption from `MAGIC_UNKNOWN`, for the VFPU lookup tables.
+
+A component of any other disposition waives nothing. When a waived file's bytes are not the approved ones, the
+findings the waiver would have dropped are reported, with one more that says why:
+
+| Finding | What happened |
+| --- | --- |
+| `APPROVED_BINARY_CHANGED` | the file's bytes are not the approved ones, or the manifest's pin is not the file's SHA-256 |
+| `APPROVED_BINARY_UNPINNED` | the component has no `hashes.sha256`, or the trusted base does not record that waiver |
+
+The manifest is part of the tree under audit, so its own pin is not an approval: it shows only that a file and
+its pin still agree. The trusted attestation therefore runs the audit with `--trusted-base <verdict base>`, the
+merge base of the head with the default branch, and the base decides for every path it already carries or its
+manifest already waives:
+
+* The base's manifest must record the same waiver for the path. A component the base does not have, or whose
+  disposition differs from the base's, waives nothing there.
+* The bytes must be the ones the base vouches for: the file it carries, or, for a path it waives without
+  carrying the file, the SHA-256 its manifest pins. No pin, the base's included, approves other bytes at a path
+  whose file the base has.
+* The pin must be as the base has it, so the pull request did not touch the approval, or be exactly the file's
+  SHA-256; the second is how a pull request corrects a pin that does not match the file the base carries.
+* Every refused waiver for a file the audited tree carries is reported, whether or not its bytes raise a binary
+  finding, so the base never comes to hold such a waiver or pin that this check refuses. A component for a path
+  the tree does not carry is not compared with the base: the path can only appear later with an admission, and
+  that pull request is held to the base like any other.
+* A VFPU table the base carries is exempt only as the bytes the base carries.
+
+A path the base neither carries nor waives is new. The candidate's own pin applies to it, a new VFPU table is
+exempt by its path, and whether the path may be published is the admission's decision. A claim-bound admission
+accepts any content for its path until the pull request lands ([V4 policy deltas](#v4-policy-deltas)); a
+byte-bound one (`"binding": "bytes"`) approves exactly one file.
+
+The audit has no input that approves new binary bytes at a path the base already holds. Replacing an approved
+binary or a VFPU table in place with other binary bytes, or changing the kind of a waiver in place for such
+bytes, therefore fails the trusted attestation; text in its place is audited as text. Until
+the trusted side records such an approval, a replacement lands as a new path: the new file under a new name with
+its own manifest component, the old file and its component removed, and the profile change admitted by the
+maintainer. A local run without `--trusted-base` (pre-commit, `contrib-check`, the hygiene job) compares the
+tree's own pins and applies the path exemption as it stands; it is a tripwire, not this check.
 
 ### V3 policy deltas
 

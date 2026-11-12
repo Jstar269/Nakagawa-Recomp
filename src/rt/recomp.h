@@ -2296,6 +2296,10 @@ void     sr_hle_init(void);     /* registers all built-in handlers (idempotent) 
  * authentic. Returns 1 when a SAS mixer took the switch; a link without one (the headless
  * gate's stubs) returns 0, so the feature is never confirmed there. */
 int      sr_hle_sas_set_band_limited(int on);
+/* Ace Mode's peak=limit (src/rt/ace.h, #2137): the SAS mixer also keeps, for the host only, the
+ * stereo sum of each grain the store saturates; the guest's bytes stay the PSP's. 0 (the default)
+ * keeps nothing. Returns 1 when a SAS mixer took the switch, 0 in a link without one. */
+int      sr_hle_sas_set_wide_mix(int on);
 uint32_t sr_syscall(CpuState *s, uint32_t nid);
 typedef struct SrLoadExecRequest {
     char guest_path[256];

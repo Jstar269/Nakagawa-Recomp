@@ -10,6 +10,7 @@
 #include <shlobj.h>
 #include <objbase.h>
 #include <ctype.h>
+#include <fcntl.h>
 #include <io.h>
 #include <process.h>
 #include <stdio.h>
@@ -683,6 +684,23 @@ bool nk_platform_get_desktop_dir(char *out_path, size_t max_len) {
     out_path[0] = '\0';
     PWSTR wide_path = NULL;
     HRESULT result = SHGetKnownFolderPath(&FOLDERID_Desktop, KF_FLAG_DEFAULT, NULL, &wide_path);
+    bool resolved = SUCCEEDED(result) && wide_path &&
+        wide_to_utf8(wide_path, out_path, max_len) && nk_platform_dir_exists(out_path);
+    if (wide_path) CoTaskMemFree(wide_path);
+    if (!resolved) out_path[0] = '\0';
+    return resolved;
+}
+
+bool nk_platform_get_personal_dir(NkPersonalDir which, char *out_path, size_t max_len) {
+    static const KNOWNFOLDERID *const folders[NK_PERSONAL_COUNT] = {
+        &FOLDERID_Documents, &FOLDERID_Downloads, &FOLDERID_Music, &FOLDERID_Pictures,
+        &FOLDERID_Videos, &FOLDERID_Desktop
+    };
+    if (!out_path || max_len == 0) return false;
+    out_path[0] = '\0';
+    if ((unsigned)which >= (unsigned)NK_PERSONAL_COUNT) return false;
+    PWSTR wide_path = NULL;
+    HRESULT result = SHGetKnownFolderPath(folders[which], KF_FLAG_DEFAULT, NULL, &wide_path);
     bool resolved = SUCCEEDED(result) && wide_path &&
         wide_to_utf8(wide_path, out_path, max_len) && nk_platform_dir_exists(out_path);
     if (wide_path) CoTaskMemFree(wide_path);
@@ -1380,14 +1398,88 @@ int nk_platform_wait_process(NkProcessHandle *process, int timeout_ms) {
     return -1;
 }
 
+#define NK_FINAL_PATH_CHARS 32768u
+
+/* Wide, as every other path call here: the system code page cannot hold every UTF-8 path
+   (a Japanese folder name on a code page 1252 system, or any non-ASCII one past 932). */
 bool nk_platform_absolute_path(const char *path, char *out_path, size_t max_len) {
     if (!path || !*path || !out_path || max_len == 0) return false;
-    char buffer[MAX_PATH * 2];
-    DWORD written = GetFullPathNameA(path, (DWORD)sizeof(buffer), buffer, NULL);
-    if (written == 0 || written >= sizeof(buffer) || written >= max_len) return false;
+    WCHAR *wpath = (WCHAR *)malloc(2u * NK_FINAL_PATH_CHARS * sizeof(WCHAR));
+    if (!wpath || !utf8_to_wide(path, wpath, NK_FINAL_PATH_CHARS)) {
+        free(wpath);
+        return false;
+    }
+    WCHAR *full = wpath + NK_FINAL_PATH_CHARS;
+    DWORD written = GetFullPathNameW(wpath, NK_FINAL_PATH_CHARS, full, NULL);
+    bool ok = written > 0 && written < NK_FINAL_PATH_CHARS && wide_to_utf8(full, out_path, max_len);
+    free(wpath);
+    return ok;
+}
 
-    memcpy(out_path, buffer, (size_t)written + 1);
-    return true;
+bool nk_platform_real_path(const char *path, char *out_path, size_t max_len) {
+    if (!path || !*path || !out_path || max_len == 0) return false;
+    WCHAR *wpath = (WCHAR *)malloc(NK_FINAL_PATH_CHARS * sizeof(WCHAR));
+    if (!wpath || !utf8_to_wide(path, wpath, NK_FINAL_PATH_CHARS)) {
+        free(wpath);
+        return false;
+    }
+    HANDLE handle = CreateFileW(wpath, FILE_READ_ATTRIBUTES,
+                                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+                                OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    free(wpath);
+    if (handle == INVALID_HANDLE_VALUE) return false;
+    WCHAR *final_path = (WCHAR *)malloc(NK_FINAL_PATH_CHARS * sizeof(WCHAR));
+    DWORD length = final_path == NULL ? 0 :
+        GetFinalPathNameByHandleW(handle, final_path, NK_FINAL_PATH_CHARS,
+                                  FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+    CloseHandle(handle);
+    bool ok = length > 0 && length < NK_FINAL_PATH_CHARS;
+    if (ok) {
+        WCHAR *start = final_path;
+        if (wcsncmp(start, L"\\\\?\\UNC\\", 8) == 0) {
+            start += 6; /* a share: the prefix becomes the two leading separators */
+            start[0] = L'\\';
+        } else if (wcsncmp(start, L"\\\\?\\", 4) == 0) {
+            start += 4;
+        }
+        ok = wide_to_utf8(start, out_path, max_len);
+    }
+    free(final_path);
+    return ok;
+}
+
+#ifndef FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS
+#define FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS 0x00400000
+#endif
+
+FILE *nk_platform_open_regular_file(const char *path) {
+    if (!path || !*path) return NULL;
+    WCHAR *wpath = (WCHAR *)malloc(NK_FINAL_PATH_CHARS * sizeof(WCHAR));
+    if (!wpath || !utf8_to_wide(path, wpath, NK_FINAL_PATH_CHARS)) {
+        free(wpath);
+        return NULL;
+    }
+    HANDLE handle = CreateFileW(wpath, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
+                                FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_SEQUENTIAL_SCAN, NULL);
+    free(wpath);
+    if (handle == INVALID_HANDLE_VALUE) return NULL;
+    BY_HANDLE_FILE_INFORMATION info;
+    if (!GetFileInformationByHandle(handle, &info) ||
+        (info.dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY |
+                                  FILE_ATTRIBUTE_DEVICE | FILE_ATTRIBUTE_OFFLINE |
+                                  FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS)) != 0 ||
+        GetFileType(handle) != FILE_TYPE_DISK) {
+        CloseHandle(handle);
+        return NULL;
+    }
+    int fd = _open_osfhandle((intptr_t)handle, _O_RDONLY | _O_BINARY);
+    if (fd < 0) {
+        CloseHandle(handle);
+        return NULL;
+    }
+    FILE *file = _fdopen(fd, "rb");
+    if (!file) _close(fd);
+    return file;
 }
 
 void nk_platform_terminate_process(NkProcessHandle *process) {
@@ -1462,6 +1554,13 @@ NkHostKind nk_platform_host_kind(void) {
 
 bool nk_platform_is_path_separator(char c) {
     return c == '\\' || c == '/';
+}
+
+bool nk_platform_path_is_absolute(const char *path) {
+    if (path == NULL || path[0] == '\0') return false;
+    return (((path[0] >= 'A' && path[0] <= 'Z') || (path[0] >= 'a' && path[0] <= 'z')) &&
+            path[1] == ':' && nk_platform_is_path_separator(path[2])) ||
+           (nk_platform_is_path_separator(path[0]) && nk_platform_is_path_separator(path[1]));
 }
 
 bool nk_platform_path_chars_equal(char a, char b) {

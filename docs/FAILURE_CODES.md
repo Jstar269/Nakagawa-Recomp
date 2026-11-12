@@ -79,7 +79,10 @@ The **Where** column of each table names the places a code can appear:
 | `DISC_NOT_PSP` | disc, player | The disc image is not a PSP game: it has no `PSP_GAME` folder. |
 | `EXECUTABLE_UNSUPPORTED` | report | The disc's executable is missing, encrypted with no decrypted copy, or breaks a PSP layout rule. |
 | `INVALID_ISO` | report | The input is not a readable PSP disc image, or its title information is invalid. |
+| `HOMEBREW_ALREADY_ADDED` | player | The same homebrew `EBOOT.PBP` was added before from another folder; a program is added from one folder. |
+| `HOMEBREW_FOLDER_UNSUPPORTED` | player | The homebrew program's folder cannot come with it: too large, a link or cloud file inside, a name a Memory Stick cannot hold, a personal folder, or a package not named `EBOOT.PBP`. |
 | `HOMEBREW_KERNEL_MODE_UNSUPPORTED` | player | The package's homebrew is kernel-mode or a custom-firmware plugin, which needs the PSP's own kernel and firmware. |
+| `HOMEBREW_KEY_TAKEN` | player | Another program already has the library key this homebrew program would get. |
 | `ISO_CORRUPT` | player | The picked file is not a PSP disc image. |
 | `MODIFIED_DUMP_CFW_LOADER` | report | The disc image was modified by a custom-firmware patch; its real executable needs a decrypted copy. |
 | `PBP_ENCRYPTED_EXECUTABLE_UNSUPPORTED` | player | The PBP holds an encrypted program; only unencrypted homebrew is imported from a package. |
@@ -267,6 +270,7 @@ The **Where** column of each table names the places a code can appear:
 | `FOLDER_OPEN_FAILED` | player | A folder could not be opened. |
 | `HASH_MISMATCH` | player | A download did not match its pinned SHA-256. |
 | `HASH_UNAVAILABLE` | player | A download's hash could not be computed. |
+| `HOMEBREW_KEPT_COPY_NOT_DELETED` | player | **Delete kept copy** could not remove a homebrew program's kept copy; the message says why. |
 | `INSTALL_CANCELLED` | player | The prerequisite install was cancelled. |
 | `INTERNAL_ERROR` | decrypt, disc, player | A C engine returned a result it has no name for. This is a defect in Nakagawa. |
 | `LIBRARY_WRITE_FAILED` | player | The library could not be saved. |
