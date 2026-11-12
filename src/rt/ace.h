@@ -47,7 +47,7 @@
 #define ACE_SPEC_MAX 192         /* SR_ACE value, terminator included; room for later parts */
 /* ace_feature_words with every part on, terminator included. ace-selftest turns every part on and
    fails when the words, or the launch line in ACE_SPEC_MAX, would no longer fit. */
-#define ACE_WORDS_MAX 256
+#define ACE_WORDS_MAX 288
 
 /* Features that are part of this build. A feature that is not must be off in SR_ACE. */
 #define ACE_HAS_WIDE 1          /* wide=fill: widescreen Fill (#1881), the 3D scene in wings */
