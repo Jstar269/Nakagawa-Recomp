@@ -1027,8 +1027,8 @@ static void test_no_iso_child_environment(const char *test_executable,
                          level);
                 snprintf(link_folder, sizeof(link_folder), "%s%cPSP%cGAME", link_stick, sep, sep);
                 if (level == 1) {
-                    snprintf(link_path, sizeof(link_path), "%s%cMYHB", link_folder, sep);
-                    snprintf(link_folder, sizeof(link_folder), "%s", link_path);
+                    snprintf(link_folder, sizeof(link_folder), "%s%cPSP%cGAME%cMYHB", link_stick,
+                             sep, sep, sep);
                 } else if (level == 2) {
                     snprintf(link_folder, sizeof(link_folder), "%s", link_stick);
                 }
