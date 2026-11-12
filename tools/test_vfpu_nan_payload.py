@@ -30,7 +30,9 @@ class SharedInputVectorTests(unittest.TestCase):
         self.cases = CASES.read_text(encoding="utf-8")
 
     def test_declared_count_matches_the_literal_list(self) -> None:
-        declared = int(re.search(r"#define VFPU_NAN_CASE_COUNT (\d+)", self.cases).group(1))
+        count_match = re.search(r"#define VFPU_NAN_CASE_COUNT (\d+)", self.cases)
+        assert count_match is not None
+        declared = int(count_match.group(1))
         body = self.cases.split("VFPU_NAN_CASES[VFPU_NAN_CASE_COUNT] = {", 1)[1].split("};", 1)[0]
         actual = len(re.findall(r"0x[0-9A-Fa-f]{8}u", body))
         self.assertEqual(declared * 18, actual,
