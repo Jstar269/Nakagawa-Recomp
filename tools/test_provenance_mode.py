@@ -474,9 +474,10 @@ class ForkCheckTest(unittest.TestCase):
         self.assertEqual(code, 1, lines)
         self.assertTrue(any(line.startswith("PROFILE_RULES_CHANGED") and "exclude_paths" in line for line in lines))
 
-    def test_a_head_that_lags_the_base_shows_only_its_own_changes(self) -> None:
-        # The default branch admits a path after the pull request branched. Measured against the base's
-        # tip that looks like a removal by the pull request; measured from the merge base it is nothing.
+    def test_a_head_without_the_tip_is_refused(self) -> None:
+        # Review 2309-82a49cb3d6ca S1 and S2: a head that lags the tip was judged against its merge base, so
+        # what the tip changed since was the check's to reconcile. Now every head contains the tip; this one
+        # only adds a path, and the tip only admits another and adds an exclusion.
         _git(self.repo, "checkout", "--quiet", "-b", "topic", self.base)
         (self.repo / "TOPIC.md").write_text("topic\n", encoding="utf-8")
         self._write_profile(["README.md", "TOPIC.md"])
@@ -486,16 +487,10 @@ class ForkCheckTest(unittest.TestCase):
         self._write_profile(["LATER.md", "README.md"], exclude_paths=["x"])
         tip = self._commit()
         code, lines = pm.fork_check(self.repo, tip, head, audit_tool=self._stub_audit(0))
-        self.assertIn(f"merge base {self.base}", lines)
-        self.assertIn("profile: 1 path(s) added, 0 removed", lines)
-        self.assertIn("  added TOPIC.md", lines)
-        self.assertFalse([line for line in lines if line.startswith("PROFILE_RULES_CHANGED")], lines)
-        self.assertEqual(self._policy_seen(lines)["include_paths"], ["README.md", "TOPIC.md"])
-        # Failing-before: the audit judged the lagging head by its branch point's rules, so the
-        # exclusion added on the tip after it branched never applied to it, and the check passed.
+        # Failing-before: the head passed, judged against its merge base.
         self.assertEqual(code, 1, lines)
-        (finding,) = [line for line in lines if line.startswith("PROFILE_RULES_BEHIND")]
-        self.assertIn("the default branch changed exclude_paths after", finding)
+        self.assertEqual(lines[3:], [f"NOT_UP_TO_DATE: the pull request does not contain the default branch's tip "
+                                     f"{tip}; merge the default branch into it", f"{pm.FORK_CONTEXT}: FAIL"])
         # Merged with the tip, the head carries the tip's rules and passes.
         _git(self.repo, "checkout", "--quiet", "topic")
         _git(self.repo, "merge", "--quiet", "--no-edit", "-X", "theirs", "main")
@@ -503,6 +498,9 @@ class ForkCheckTest(unittest.TestCase):
         merged = self._commit()
         code, lines = pm.fork_check(self.repo, tip, merged, audit_tool=self._stub_audit(0))
         self.assertEqual(code, 0, lines)
+        self.assertIn("profile: 1 path(s) added, 0 removed", lines)
+        self.assertIn("  added TOPIC.md", lines)
+        self.assertEqual(self._policy_seen(lines)["include_paths"], ["LATER.md", "README.md", "TOPIC.md"])
 
     def _lagging_head_and_stricter_tip(self) -> tuple[str, str]:
         _git(self.repo, "checkout", "--quiet", "-b", "topic", self.base)
@@ -520,8 +518,8 @@ class ForkCheckTest(unittest.TestCase):
         code, lines = pm.fork_check(self.repo, self.base, head, tip=tip, audit_tool=self._stub_audit(0))
         self.assertEqual(code, 1, lines)
         self.assertIn(f"default branch tip {tip}", lines)
-        (finding,) = [line for line in lines if line.startswith("PROFILE_RULES_BEHIND")]
-        self.assertIn("changed exclude_paths after", finding)
+        self.assertTrue(any(line.startswith(f"NOT_UP_TO_DATE: the pull request does not contain the default branch's "
+                                            f"tip {tip}") for line in lines), lines)
         # Failing-before: measured against the stale base alone, the check passed.
         code, lines = pm.fork_check(self.repo, self.base, head, audit_tool=self._stub_audit(0))
         self.assertEqual(code, 0, lines)
@@ -702,18 +700,10 @@ class ForkCheckTest(unittest.TestCase):
                 code, lines = pm.fork_check(self.repo, base, head, audit_tool=self._stub_audit(0))
                 self.assertEqual(code, 1, lines)
                 self.assertTrue(any(line.startswith(code_text) for line in lines), lines)
-        # The default branch drops the approval after a pull request branched: the head must merge it.
+        # An edit elsewhere with the manifest and the approved bytes untouched passes.
         _git(self.repo, "reset", "--quiet", "--hard", base)
-        _git(self.repo, "checkout", "--quiet", "-b", "lagging", base)
         (self.repo / "README.md").write_text("edited\n", encoding="utf-8")
         head = self._commit()
-        _git(self.repo, "checkout", "--quiet", "main")
-        self._write_manifest([])
-        tip = self._commit()
-        code, lines = pm.fork_check(self.repo, base, head, tip=tip, audit_tool=self._stub_audit(0))
-        self.assertEqual(code, 1, lines)
-        self.assertTrue(any(line.startswith("MANIFEST_BEHIND") for line in lines), lines)
-        # An edit elsewhere with the manifest and the approved bytes untouched passes.
         code, lines = pm.fork_check(self.repo, base, head, audit_tool=self._stub_audit(0))
         self.assertEqual(code, 0, lines)
 
@@ -759,7 +749,7 @@ class ForkCheckTest(unittest.TestCase):
 
     def test_every_held_disposition_and_a_first_file_at_a_held_path(self) -> None:
         # Review 2309-66fce005c252 answer 6 (M4, M13): each held disposition, and a file added at a path the
-        # manifest holds that the merge base does not carry yet.
+        # manifest holds that the tip does not carry yet.
         for disposition in sorted(pm.HELD_PATH_DISPOSITIONS):
             with self.subTest(disposition=disposition):
                 _git(self.repo, "reset", "--quiet", "--hard", self.base)
@@ -803,6 +793,26 @@ class ForkCheckTest(unittest.TestCase):
         self.assertEqual(pm.self_admitted(lines), ["README.md"])
         self.assertIn("README.md", pm._summary(lines, code).splitlines()[0])
         self.assertEqual(len(pm.warning_annotations(lines)), 1)
+        # A claim the default branch did not have, for a path it admits, is named the same way.
+        (self.repo / pm.LEDGER).write_text(json.dumps({"entries": []}), encoding="utf-8")
+        bare = self._commit()
+        ledger("project_authored_attested")
+        claimed = self._commit()
+        code, lines = pm.fork_check(self.repo, bare, claimed, audit_tool=self._stub_audit(0))
+        self.assertEqual((code, pm.self_admitted(lines)), (0, ["README.md"]), lines)
+        # A path the pull request removes, with its claim, is listed as removed and not named.
+        (self.repo / "OTHER.md").write_text("other\n", encoding="utf-8")
+        self._write_profile(["OTHER.md", "README.md"])
+        (self.repo / pm.LEDGER).write_text(json.dumps({"entries": [
+            {"path": "OTHER.md", "classification": "upstream_derived", "evidence": {"record_id": "o"}}]}),
+            encoding="utf-8")
+        both = self._commit()
+        self._write_profile(["README.md"])
+        (self.repo / pm.LEDGER).write_text(json.dumps({"entries": []}), encoding="utf-8")
+        dropped = self._commit()
+        code, lines = pm.fork_check(self.repo, both, dropped, audit_tool=self._stub_audit(0))
+        self.assertEqual((code, pm.self_admitted(lines)), (0, []), lines)
+        self.assertIn("  removed OTHER.md", lines)
 
     def test_the_trusted_audits_binary_test_is_loaded_once(self) -> None:
         # Review 2309-82a49cb3d6ca S4 and N5: the module is registered while it runs (its dataclasses need
@@ -814,9 +824,9 @@ class ForkCheckTest(unittest.TestCase):
         self.assertTrue(first(b"\x00"))
         self.assertFalse(first(b"text\n"))
 
-    def test_a_pull_request_with_two_merge_bases_is_refused(self) -> None:
+    def test_a_criss_cross_head_is_refused_until_it_contains_the_tip(self) -> None:
         # Review 2309-66fce005c252 S1: the check compared with one merge base, while a merge applies the pull
-        # request to a tree built from all of them. A criss-cross history has two.
+        # request to a tree built from all of them. A criss-cross history has two, and lacks the tip.
         def branch(name: str, file: str) -> str:
             _git(self.repo, "checkout", "--quiet", "-b", name, self.base)
             (self.repo / file).write_text(f"{name}\n", encoding="utf-8")
@@ -832,8 +842,7 @@ class ForkCheckTest(unittest.TestCase):
         self.assertEqual(sorted(_git(self.repo, "merge-base", "--all", tip, head).split()), sorted([first, second]))
         code, lines = pm.fork_check(self.repo, self.base, head, tip=tip, audit_tool=self._stub_audit(0))
         self.assertEqual(code, 1, lines)
-        (finding,) = [line for line in lines if line.startswith("MULTIPLE_MERGE_BASES: ")]
-        self.assertIn("have 2 merge bases", finding)
+        self.assertTrue(any(line.startswith("NOT_UP_TO_DATE: ") for line in lines), lines)
         # Merging the default branch in leaves the tip as the only merge base, and the check passes.
         _git(self.repo, "merge", "--quiet", "--no-edit", tip)
         code, lines = pm.fork_check(self.repo, self.base, _git(self.repo, "rev-parse", "HEAD"), tip=tip,
@@ -854,6 +863,20 @@ class ForkCheckTest(unittest.TestCase):
         self.assertIn("\n`````text\n", summary)
         self.assertTrue(summary.rstrip("\n").endswith("`````"))
 
+    def test_a_rule_value_of_another_json_type_is_a_change(self) -> None:
+        # Review 2309-82a49cb3d6ca N6: parsed values compared equal across types (``1``, ``1.0``, ``true``).
+        for before, after in ((1, True), (1, 1.0), (0, False)):
+            with self.subTest(before=before, after=after):
+                _git(self.repo, "checkout", "--quiet", "--detach", self.base)
+                self._write_profile(["README.md"], strict=before)
+                base = self._commit()
+                self._write_profile(["README.md"], strict=after)
+                head = self._commit()
+                code, lines = pm.fork_check(self.repo, base, head, audit_tool=self._stub_audit(0))
+                self.assertEqual(code, 1, lines)
+                self.assertTrue(any(line.startswith("PROFILE_RULES_CHANGED: ") and "strict" in line
+                                    for line in lines), lines)
+
     def test_the_name_limit_counts_characters_too(self) -> None:
         # Review 2309-66fce005c252 answer 6 (M1): few paths, long names.
         _git(self.repo, "checkout", "--quiet", "-b", "long", self.base)
@@ -873,23 +896,12 @@ class ForkCheckTest(unittest.TestCase):
         self.assertEqual(code, 1, lines)
         self.assertTrue(any(line.startswith("SELF_ADMITTED_LIMIT: ") for line in lines), lines)
 
-    def test_a_head_that_lags_only_the_bases_paths_passes(self) -> None:
-        _git(self.repo, "checkout", "--quiet", "-b", "topic", self.base)
-        (self.repo / "TOPIC.md").write_text("topic\n", encoding="utf-8")
-        self._write_profile(["README.md", "TOPIC.md"])
-        head = self._commit()
-        _git(self.repo, "checkout", "--quiet", "main")
-        (self.repo / "LATER.md").write_text("later\n", encoding="utf-8")
-        self._write_profile(["LATER.md", "README.md"])
-        tip = self._commit()
-        code, lines = pm.fork_check(self.repo, tip, head, audit_tool=self._stub_audit(0))
-        self.assertEqual(code, 0, lines)
-
-    def test_unrelated_histories_are_an_input_error(self) -> None:
+    def test_unrelated_histories_are_not_up_to_date(self) -> None:
         _git(self.repo, "checkout", "--quiet", "--orphan", "island")
         head = self._commit()
-        with self.assertRaisesRegex(pm.CheckError, "no common ancestor"):
-            pm.fork_check(self.repo, self.base, head, audit_tool=self._stub_audit(0))
+        code, lines = pm.fork_check(self.repo, self.base, head, audit_tool=self._stub_audit(0))
+        self.assertEqual(code, 1, lines)
+        self.assertTrue(any(line.startswith("NOT_UP_TO_DATE: ") for line in lines), lines)
 
     def test_a_failing_publication_audit_fails_the_check(self) -> None:
         code, lines = pm.fork_check(self.repo, self.base, self.base, audit_tool=self._stub_audit(1))
@@ -950,6 +962,12 @@ class ForkCheckTest(unittest.TestCase):
         workflow.write_bytes(b"name: gate v2\n")
         tip = self._commit()
         code, lines = pm.fork_check(self.repo, tip, head, audit_tool=self._stub_audit(0))
+        self.assertTrue(any(line.startswith("NOT_UP_TO_DATE: ") for line in lines), lines)
+        # With the tip merged in, the head carries the tip's workflow and changes nothing of it.
+        _git(self.repo, "checkout", "--quiet", "topic")
+        _git(self.repo, "merge", "--quiet", "--no-edit", "main")
+        code, lines = pm.fork_check(self.repo, tip, _git(self.repo, "rev-parse", "HEAD"),
+                                    audit_tool=self._stub_audit(0))
         self.assertEqual(code, 0, lines)
 
     def test_the_real_audit_runs_against_the_candidate_tree(self) -> None:

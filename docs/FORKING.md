@@ -157,21 +157,18 @@ with its own code. It reads no secret and never contacts any authority. It:
   a job name built by an expression escapes it. So when you add a ruleset, require **Trusted CI
   verdict**, which accepts the check only from the trusted run, not **Fork provenance check** by
   name;
+- refuses a pull request that does not contain your default branch as the job checked it out
+  (`NOT_UP_TO_DATE`): merge the default branch into it. Everything below is judged against that
+  tip, and nothing else is judged until the pull request contains it;
 - runs the trusted publication audit on the pull request's exact tree with `--public-scope
   --provenance-self-consistency`, which refuses game data, keys, firmware, private and user paths,
   unclassified paths and an inconsistent public ledger exactly as upstream. The audit judges the
   tree by the pull request's own profile, so the check refuses a pull request that changes the
-  profile's rules (`PROFILE_RULES_CHANGED`; it may change `include_paths` only) or whose rules differ
-  from your default branch's as the job checked it out, not as it was when the pull request opened
-  (`PROFILE_RULES_BEHIND`): after you tighten a rule, merge the default branch into older pull
-  requests;
+  profile's rules (`PROFILE_RULES_CHANGED`; it may change `include_paths` only);
 - holds the release manifest (`assets/release_manifest.json`) the same way: a pull request may not
-  change it (`MANIFEST_CHANGED`), and it must equal your default branch's (`MANIFEST_BEHIND`). Nor
-  may a pull request change the bytes of a path the manifest marks approved or of a table under
+  change it (`MANIFEST_CHANGED`). Nor may a pull request change the bytes of a path the manifest marks approved or of a table under
   `assets/vfpu/`, or their mode (`HELD_BYTES_CHANGED`), or add or change any binary file
   (`BINARY_CHANGED`). You change those by your own push to the default branch, after review;
-- refuses a pull request that has more than one merge base with your default branch
-  (`MULTIPLE_MERGE_BASES`): merge the default branch into it first;
 - lists the paths the pull request adds to or removes from the publication profile, and names each
   path the pull request admits itself or whose claim in the public ledger it changes
   (`SELF_ADMITTED`): the first ten in the check's title line,
@@ -180,9 +177,22 @@ with its own code. It reads no secret and never contacts any authority. It:
   characters of names in all, itself (`SELF_ADMITTED_LIMIT`), so that every one stays in view;
   admit more by your own push.
 
-A check judges a head once. When you tighten a rule or change the manifest on your default branch,
-an open pull request that already passed is not judged again until its next push: re-run its check
-(or merge the default branch into it) before you merge it.
+#### Two settings the check requires
+
+The check judges a pull request's final tree against your default branch as it stood when the job
+ran. Two settings make that the change that reaches your default branch. The check cannot set them,
+and a fork does not copy rulesets, so add a branch ruleset for your default branch that:
+
+1. **Requires branches to be up to date before merging** (under **Require status checks to pass**,
+   with **Trusted CI verdict** required). Without it, a pull request that passed before you changed a
+   rule, the release manifest or a held file merges without being judged against that change.
+2. **Allows squash merging only** (**Allowed merge methods** under **Require a pull request before
+   merging**). Without it, a merge commit or a rebase brings each of the pull request's commits into
+   your default branch's history, and the check judged none of them: a file one commit adds and a
+   later one removes reaches your history unchecked.
+
+A fork without both settings has no guarantee from the check: a pass then covers only the tree it
+judged, at the tip it judged, and your review of each commit has to cover the rest.
 
 **A green Fork provenance check does not mean you admitted anything.** The check cannot tell your
 admission from anyone else's: it passes a pull request that adds a path to `include_paths` and the

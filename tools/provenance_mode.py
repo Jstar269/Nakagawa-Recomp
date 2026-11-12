@@ -25,14 +25,16 @@ upstream job does, and never contacts the private authority. What comes from whe
 * the tools are the trusted checkout's: this module and ``tools/publish_audit.py``;
 * the tree, the publication profile and the public ledger are the candidate's, read from its
   commit's objects. The profile a pull request carries is the one its own tree is judged by,
-  so an admission inside the pull request is honoured and a head that lags the default branch
-  is still judged by its own list of paths;
+  so an admission inside the pull request is honoured;
 * the default branch is the trusted checkout's ``HEAD`` (``--tip``), not the event's base, which can
   lag it; the base must be an ancestor of it;
-* the pull request and the default branch have one merge base (``MULTIPLE_MERGE_BASES``), so the
-  tree the check compares with is the one a merge applies the pull request to;
+* the candidate must contain the tip (``NOT_UP_TO_DATE``), so every comparison below is with the
+  tip itself, the tree a squash merge applies the pull request to. A head that lags is refused
+  before anything else is judged; the fix is to merge the default branch in. The fork's ruleset
+  requires branches to be up to date, so a head that passed against an older tip is checked again
+  before it merges (docs/FORKING.md);
 * the release manifest (``assets/release_manifest.json``) is held like the profile's rules: it may not
-  change (``MANIFEST_CHANGED``) and must equal the tip's (``MANIFEST_BEHIND``). The bytes of the paths
+  change (``MANIFEST_CHANGED``). The bytes of the paths
   it marks approved (``HELD_PATH_DISPOSITIONS``) and of the tables under ``assets/vfpu/`` may not
   change (``HELD_BYTES_CHANGED``), and no file the pull request adds or changes may be binary as
   the trusted audit decides it (``BINARY_CHANGED``). These change by the fork maintainer's own push;
@@ -45,10 +47,7 @@ upstream job does, and never contacts the private authority. What comes from whe
   listed, because on a fork the fork maintainer's admission and review are the provenance
   authority. Any other change to the profile, such as an exclusion or the default disposition,
   fails the check (``PROFILE_RULES_CHANGED``): the rules a tree is judged by are not the pull
-  request's to change. The change is measured from the merge base of the base and the candidate;
-* the candidate's rules, every profile key but ``include_paths``, must also equal the tip's
-  (``PROFILE_RULES_BEHIND``), so a rule tightened on the default branch after the pull request
-  branched is not escaped by a head that lags it. The fix is to merge the default branch in.
+  request's to change. The change is measured from the tip.
 
 The check itself:
 
@@ -189,7 +188,7 @@ def context_findings(workflows: dict[str, bytes], trusted_gate: bytes | None) ->
 
     A second job under the check's name would give a candidate-controlled result under the
     context a fork maintainer reads, whatever the real check concluded. The gate's own workflow
-    names both checks, so it is held to the copy the candidate branched from (``trusted_gate``)
+    names both checks, so it is held to the default branch tip's copy (``trusted_gate``)
     instead: a pull request that edits it could add a job under either name. The name match is
     a byte search, a tripwire; the verdict, which binds each check to the trusted run, is what a
     ruleset should require.
@@ -220,36 +219,23 @@ def _profile_paths(repo: Path, rev: str) -> set[str]:
 
 
 def profile_changes(repo: Path, base: str, candidate: str) -> tuple[list[str], list[str], list[str]]:
-    """Added and removed ``include_paths``, and the name of every other profile key that differs."""
+    """Added and removed ``include_paths``, and the name of every other profile key that differs.
+
+    Values are compared in their canonical JSON form, so ``true``, ``1`` and ``1.0`` differ."""
     before = _profile_paths(repo, base)
     after = _profile_paths(repo, candidate)
     base_document = json.loads(_git(repo, "cat-file", "blob", f"{base}:{POLICY}"))
     candidate_document = json.loads(_git(repo, "cat-file", "blob", f"{candidate}:{POLICY}"))
     if not isinstance(base_document, dict) or not isinstance(candidate_document, dict):
         raise CheckError(f"{POLICY} is not a JSON object")
+    def canonical(document: dict[str, object], key: str) -> str | None:
+        return json.dumps(document[key], sort_keys=True) if key in document else None
+
     changed = sorted(
         key for key in set(base_document) | set(candidate_document)
-        if key != "include_paths" and (
-            key not in base_document or key not in candidate_document
-            or base_document[key] != candidate_document[key])
+        if key != "include_paths" and canonical(base_document, key) != canonical(candidate_document, key)
     )
     return sorted(after - before), sorted(before - after), changed
-
-
-def _merge_bases(repo: Path, base: str, candidate: str) -> list[str]:
-    """Every best common ancestor of the two commits, in Git's order (the first is ``merge-base``'s)."""
-    try:
-        shas = _git(repo, "merge-base", "--all", base, candidate).decode("ascii").split()
-    except CheckError as error:
-        raise CheckError(f"{candidate} and {base} have no common ancestor") from error
-    if not shas or any(len(sha) != 40 for sha in shas):
-        raise CheckError(f"{candidate} and {base} have no common ancestor")
-    return shas
-
-
-def _merge_base(repo: Path, base: str, candidate: str) -> str:
-    """The commit the candidate branched from, so a head that lags the base shows only its own changes."""
-    return _merge_bases(repo, base, candidate)[0]
 
 
 def _changed_blobs(repo: Path, older: str, newer: str) -> list[tuple[str, str]]:
@@ -371,25 +357,23 @@ def fork_check(repo: Path, base: str, candidate: str, *, tip: str | None = None,
     if not _is_ancestor(repo, base_sha, tip_sha):
         raise CheckError(f"base {base_sha} is not an ancestor of the default branch tip {tip_sha}")
     candidate_sha = _commit(repo, candidate)
-    merge_bases = _merge_bases(repo, tip_sha, candidate_sha)
-    branch_point = merge_bases[0]
-    lines = [f"base {base_sha}", f"default branch tip {tip_sha}", f"candidate {candidate_sha}",
-             f"merge base {branch_point}"]
-    failed = False
-    if len(merge_bases) > 1:
-        # Every comparison below is with one tree; a merge applies the pull request to a tree built from
-        # all of them. With the default branch merged in, the tip is the only merge base.
+    lines = [f"base {base_sha}", f"default branch tip {tip_sha}", f"candidate {candidate_sha}"]
+    if not _is_ancestor(repo, tip_sha, candidate_sha):
+        # Every comparison below is with the tip itself, the tree a squash merge applies the pull request
+        # to. A head without it is judged against nothing else: it merges the default branch first.
         lines.append(
-            f"MULTIPLE_MERGE_BASES: the pull request and the default branch have {len(merge_bases)} merge bases "
-            f"({', '.join(merge_bases)}); merge the default branch into the pull request")
-        failed = True
+            f"NOT_UP_TO_DATE: the pull request does not contain the default branch's tip {tip_sha}; merge the "
+            "default branch into it")
+        lines.append(f"{FORK_CONTEXT}: FAIL")
+        return 1, lines
+    failed = False
 
     collisions = context_findings(_workflow_blobs(repo, candidate_sha),
-                                  _workflow_blobs(repo, branch_point).get(WORKFLOW))
+                                  _workflow_blobs(repo, tip_sha).get(WORKFLOW))
     lines.extend(collisions)
     failed |= bool(collisions)
 
-    added, removed, rule_keys = profile_changes(repo, branch_point, candidate_sha)
+    added, removed, rule_keys = profile_changes(repo, tip_sha, candidate_sha)
     lines.append(f"profile: {len(added)} path(s) added, {len(removed)} removed")
     lines.extend(f"  added {shown_path(path)}" for path in added)
     lines.extend(f"  removed {shown_path(path)}" for path in removed)
@@ -399,40 +383,23 @@ def fork_check(repo: Path, base: str, candidate: str, *, tip: str | None = None,
             "may change include_paths only. A change to the publication rules reaches the default branch by "
             "the fork maintainer's own push, after review")
         failed = True
-    else:
-        # The audit below judges the candidate by its own profile, so its rules must be the default
-        # branch's as the trusted checkout holds them now: a rule tightened there after the pull
-        # request branched would otherwise never apply to it, and a fork has no landing batch to
-        # judge the merged result. The event's base can lag the tip, so it is not the measure.
-        behind = profile_changes(repo, tip_sha, candidate_sha)[2]
-        if behind:
-            lines.append(
-                f"PROFILE_RULES_BEHIND: {POLICY}: the default branch changed {', '.join(map(shown_path, behind))} after this "
-                "pull request branched; merge the default branch into it so its tree is judged by the "
-                "current rules")
-            failed = True
 
     # The release manifest is held like the profile's rules, and so are the bytes of the paths it marks
     # approved, the tables under HELD_PREFIX, and every binary: each changes by the fork maintainer's
     # own push, after review.
     manifest = _blob(repo, candidate_sha, MANIFEST)
-    if manifest != _blob(repo, branch_point, MANIFEST):
+    if manifest != _blob(repo, tip_sha, MANIFEST):
         lines.append(
             f"MANIFEST_CHANGED: {MANIFEST}: the pull request changes the release manifest, which is held like "
             "the profile's rules; it reaches the default branch by the fork maintainer's own push")
         failed = True
-    elif manifest != _blob(repo, tip_sha, MANIFEST):
-        lines.append(
-            f"MANIFEST_BEHIND: {MANIFEST}: the default branch changed the release manifest after this pull "
-            "request branched; merge the default branch into it")
-        failed = True
     tool = audit_tool or (ROOT / "tools" / "publish_audit.py")
-    held = set(held_paths(_blob(repo, branch_point, MANIFEST)))
-    changed = _changed_blobs(repo, branch_point, candidate_sha)
-    held |= {path for path in _tree_files(repo, branch_point) if path.startswith(HELD_PREFIX)}
+    held = set(held_paths(_blob(repo, tip_sha, MANIFEST)))
+    changed = _changed_blobs(repo, tip_sha, candidate_sha)
+    held |= {path for path in _tree_files(repo, tip_sha) if path.startswith(HELD_PREFIX)}
     held |= {path for path, _ in changed if path.startswith(HELD_PREFIX)}
     for path in sorted(held):
-        if _entry(repo, candidate_sha, path) != _entry(repo, branch_point, path):
+        if _entry(repo, candidate_sha, path) != _entry(repo, tip_sha, path):
             lines.append(
                 f"HELD_BYTES_CHANGED: {shown_path(path)}: the pull request adds, changes or removes this path, "
                 "whose bytes and mode only the fork maintainer's own push changes")
@@ -454,9 +421,9 @@ def fork_check(repo: Path, base: str, candidate: str, *, tip: str | None = None,
                  "and its tree has no such file; admit a path together with its file" for path in missing)
     failed |= bool(missing)
     # A changed ledger claim for a path already admitted is an admission too: it is named the same way.
-    before, after = _ledger_claims(repo, branch_point), _ledger_claims(repo, candidate_sha)
-    reclaimed = sorted(path for path in before.keys() & after.keys() if before[path] != after[path]
-                       and path not in added)
+    before, after = _ledger_claims(repo, tip_sha), _ledger_claims(repo, candidate_sha)
+    reclaimed = sorted(path for path in before.keys() | after.keys() if before.get(path) != after.get(path)
+                       and path not in added and path not in removed)
     named = [*added, *reclaimed]
     if len(named) > SELF_ADMITTED_MAX_PATHS or sum(len(shown_path(path)) for path in named) > SELF_ADMITTED_MAX_CHARS:
         lines.append(
@@ -470,8 +437,8 @@ def fork_check(repo: Path, base: str, candidate: str, *, tip: str | None = None,
                  "review it as an admission" for path in reclaimed)
 
     # The audit takes its policy from the candidate's commit, not from the checkout it runs in. The
-    # checkout is the default branch, whose profile lacks what this pull request admits and may list
-    # what a lagging head does not have yet. Its rules equal the tip's, checked above.
+    # checkout is the default branch, whose profile lacks what this pull request admits. Its rules equal
+    # the tip's, checked above.
     with tempfile.TemporaryDirectory(prefix="nakagawa-fork-policy-") as scratch:
         policy = Path(scratch) / "public_source_profile.json"
         policy.write_bytes(_git(repo, "cat-file", "blob", f"{candidate_sha}:{POLICY}"))
