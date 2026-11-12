@@ -996,6 +996,7 @@ class LiveManifestTests(unittest.TestCase):
                     "docs/HARDWARE_ORACLE.md (PSP-IO-001: io-read-verify and io-errors)",
                     "tests/native/hle_thread_selftest.c:test_ms0_unified_namespace",
                     "tests/native/hle_thread_selftest.c:test_umd_block_device_sectors",
+                    "tests/native/hle_thread_selftest.c:test_umd_read_parks_its_thread_for_the_drives_time",
                 ],
             ),
             0x42EC03AC: (
