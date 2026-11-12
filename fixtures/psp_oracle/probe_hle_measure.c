@@ -4606,10 +4606,13 @@ static void hle_is_ms(void)
     w[2] = (uint32_t)fd;
     w[3] = (uint32_t)wrote;
     hle_record("io-seek-ms-setup", "PASS", (uint32_t)fd, w, 4u);
-    if (fd < 0 || wrote != (int)HLE_IS_FILE_SIZE) {
+    /* Go on only when this probe made the directory and the file. The abort undoes only what
+       the probe made: the file only when its O_EXCL open created it, the directory only when
+       the mkdir above created it (a failed mkdir may mean the directory is someone else's). */
+    if (made < 0 || fd < 0 || wrote != (int)HLE_IS_FILE_SIZE) {
         hle_step("io-seek-ms-setup-abort");
-        (void)sceIoRemove(HLE_IS_FILE);
-        (void)sceIoRmdir(HLE_IS_DIR);
+        if (fd >= 0) (void)sceIoRemove(HLE_IS_FILE);
+        if (made >= 0) (void)sceIoRmdir(HLE_IS_DIR);
         hle_is_ms_skip_rest((uint32_t)fd);
         return;
     }
@@ -4683,7 +4686,8 @@ static void hle_is_ms(void)
     const SceUID post = sceIoDopen(HLE_IS_DIR);
     w[3] = (uint32_t)post;
     if (post >= 0) (void)sceIoDclose(post);
-    hle_record("io-seek-ms-cleanup", "PASS", 0u, w, 4u);
+    /* A directory that is still there after the cleanup is left on the Memory Stick: FAIL. */
+    hle_record("io-seek-ms-cleanup", post >= 0 ? "FAIL" : "PASS", 0u, w, 4u);
 }
 
 /* disc0:/UMD_DATA.BIN, read-only: the ioctl seek to -1, to the size and to size + 1, each from
@@ -4919,10 +4923,13 @@ static void hle_ise_ms(void)
     w[2] = (uint32_t)fd;
     w[3] = (uint32_t)wrote;
     hle_record("io-edge-ms-setup", "PASS", (uint32_t)fd, w, 4u);
-    if (fd < 0 || wrote != (int)HLE_ISE_FILE_SIZE) {
+    /* Go on only when this probe made the directory and the file. The abort undoes only what
+       the probe made: the file only when its O_EXCL open created it, the directory only when
+       the mkdir above created it (a failed mkdir may mean the directory is someone else's). */
+    if (made < 0 || fd < 0 || wrote != (int)HLE_ISE_FILE_SIZE) {
         hle_step("io-edge-ms-setup-abort");
-        (void)sceIoRemove(HLE_ISE_FILE);
-        (void)sceIoRmdir(HLE_ISE_DIR);
+        if (fd >= 0) (void)sceIoRemove(HLE_ISE_FILE);
+        if (made >= 0) (void)sceIoRmdir(HLE_ISE_DIR);
         hle_ise_ms_skip_rest((uint32_t)fd);
         return;
     }
@@ -4992,7 +4999,12 @@ static void hle_ise_ms(void)
        (low, high; preset to HLE_SENTINEL), then sceIoWaitAsync's return and its 64-bit result
        (low, high), called only when a poll returned 0 (complete), and the close's result. Each
        word that was not reached is HLE_SENTINEL. The open is the probe's setup, so the row is
-       FAIL when it fails. */
+       FAIL when it fails.
+       If the poll cap runs out while sceIoPollAsync still returns 1 (pending), no wait is made.
+       The close is then expected to fail with the write still pending and leave the descriptor
+       open (unmeasured), in which case the cleanup's remove and rmdir fail and its row reports
+       FAIL with the directory left behind. Nothing waits without a bound on that path. The
+       2026-11-11 PSP-3000 run never reached it (sceIoWriteAsync refused the write at once). */
     hle_step("io-edge-ms-write-async");
     fd = sceIoOpen(HLE_ISE_FILE, PSP_O_RDONLY, 0777);
     for (unsigned i = 1; i < 10u; i++) w[i] = HLE_SENTINEL;
@@ -5034,7 +5046,8 @@ static void hle_ise_ms(void)
     const SceUID post = sceIoDopen(HLE_ISE_DIR);
     w[3] = (uint32_t)post;
     if (post >= 0) (void)sceIoDclose(post);
-    hle_record("io-edge-ms-cleanup", "PASS", 0u, w, 4u);
+    /* A directory that is still there after the cleanup is left on the Memory Stick: FAIL. */
+    hle_record("io-edge-ms-cleanup", post >= 0 ? "FAIL" : "PASS", 0u, w, 4u);
 }
 
 static int hle_run(void)

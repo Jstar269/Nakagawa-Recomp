@@ -21,11 +21,16 @@ pipeline: $(BUILD_DIR)/$(GAME_NAME)_image.bin $(BUILD_DIR)/$(GAME_NAME)_recomp.c
 $(BUILD_DIR)/$(GAME_NAME)_image.bin: $(GAME_INPUT_PREREQ) tools/prxload.py
 	"$(PYTHON)" tools/prxload.py --env-elf $(GAME_BASE) $(PSP_HEADER_ENV_ARG) --out=$@
 
+# An LLVM build's .ll files also come from the LLVM lowering (#330), so editing it
+# regenerates them; a C build does not depend on these files. CODEGEN_BACKEND=llvm adds
+# --backend=llvm to CODEGEN_USER_ARGS (Makefile), so this sees either spelling.
+CODEGEN_LLVM_PREREQ := $(if $(filter --backend=llvm,$(CODEGEN_USER_ARGS)),tools/codegen_llvm.py tools/llvm_ir.py tools/lowering_plan.py)
+
 ifeq ($(NK_AOT_PREGENERATED),1)
 $(BUILD_DIR)/$(GAME_NAME)_recomp.c $(BUILD_DIR)/$(GAME_NAME)_recomp_funcs.h:
 	$(if $(wildcard $@),,$(error NK_AOT_PREGENERATED requires $@))
 else
-$(BUILD_DIR)/$(GAME_NAME)_recomp.c $(BUILD_DIR)/$(GAME_NAME)_recomp_funcs.h: $(GAME_INPUT_PREREQ) $(CODEGEN_TOOL) tools/codegen.py tools/analyze.py tools/analyze_cfg.py tools/entry_frame_balance.py tools/prxload.py tools/host_stubs.py tools/codegen_hst_stubs.py tools/imports.py $(CODEGEN_PROFILE_STAMP) $(SYMBOL_MAP) $(NAME_IMPORTS_PREREQ)
+$(BUILD_DIR)/$(GAME_NAME)_recomp.c $(BUILD_DIR)/$(GAME_NAME)_recomp_funcs.h: $(GAME_INPUT_PREREQ) $(CODEGEN_TOOL) tools/codegen.py tools/analyze.py tools/analyze_cfg.py tools/entry_frame_balance.py tools/prxload.py tools/host_stubs.py tools/codegen_hst_stubs.py tools/imports.py $(CODEGEN_LLVM_PREREQ) $(CODEGEN_PROFILE_STAMP) $(SYMBOL_MAP) $(NAME_IMPORTS_PREREQ)
 	"$(PYTHON)" $(CODEGEN_TOOL) --env-elf $(BUILD_DIR)/$(GAME_NAME)_recomp.c --base=$(GAME_BASE) $(CODEGEN_PROFILE_ARG) $(EXTRA_SPAN_ARG) $(EXTRA_ELF_ENV_ARG) --funcs-per-chunk=$(FUNCS_PER_CHUNK) $(CHUNK_BYTES_ARG) $(SYMBOL_MAP_ARG) $(NAME_IMPORTS_ARG) $(ENHANCEMENT_PACKAGE_ARG) $(CODEGEN_USER_ARGS)
 endif
 

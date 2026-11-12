@@ -247,6 +247,11 @@ typedef enum {
     PLAYER_PART_LOAD,          /* short loads (section 11.3.10): 0 off, 1 fast. The display waits
                                   a title's package declares return at once; guest timing changes. Ace
                                   only; a title without a load part ignores it */
+    PLAYER_PART_TWIN,          /* full 32-bit colour, the host twin (#2050, section 10.11): 0 off, 1 on.
+                                  Appended; the Ace line writes twin after tess */
+    PLAYER_PART_SSAA,          /* supersampling (#2073, section 10.21): 0 off, or the factor 2 or 4 per
+                                  axis on top of the render scale. Host presentation only; off in a
+                                  fresh file and in every preset */
     PLAYER_PART_COUNT
 } PlayerEnhancedPart;
 
@@ -458,7 +463,10 @@ typedef struct {
 typedef enum {
     PLAYER_ERROR_RETRY_NONE = 0,
     PLAYER_ERROR_RETRY_RESTART_GAME,  /* "Restart game": launch subject_disc_id again */
-    PLAYER_ERROR_RETRY_BUILD          /* "Try again": build subject_disc_id again */
+    PLAYER_ERROR_RETRY_BUILD,         /* "Try again": build subject_disc_id again */
+    PLAYER_ERROR_RETRY_DELETE_KEPT    /* "Delete kept copy": delete what the import of the
+                                         program subject_disc_id kept after it left the
+                                         library (player_app_delete_kept_homebrew) */
 } PlayerErrorRetry;
 
 typedef struct {
@@ -686,6 +694,8 @@ typedef struct {
     /* An EBOOT.PBP holding unencrypted homebrew (#2143): iso_path is a small private disc
        image written from the package, and disc_id is the library key that image will have. */
     bool homebrew;
+    /* For homebrew, the full digest the key is cut from (NkPbpHomebrew.identity_sha256). */
+    char identity_sha256[65];
     /* NK_DISC_FORMAT_NONE for a PSN package; otherwise the compressed image's
        format, and iso_path and disc_id are known once it is expanded. */
     NkDiscFormat disc_format;
@@ -1717,7 +1727,7 @@ void player_play_resolve(const PlayerSettings *settings, const char *disc_id,
  * Authentic resolution stays off. */
 void player_play_apply_logic_60(PlayerPlayResolved *play, bool logic_60);
 /* The SR_ACE line for a resolution: "off", or "v1;tier=enhanced;af=16;text=on;readout=off;
- * notice=on;wide=off;smooth=off;sas=off;tess=off" (tier=ace for Ace; smooth=match is never written).
+ * notice=on;wide=off;smooth=off;sas=off;tess=off;twin=off" (tier=ace for Ace; smooth=match is never written).
  * ";stick=<counts>" follows only for Ace with the Stick dead zone part on and a title whose
  * catalog entry declares a dead zone (stick_counts > 0); a missing stick is off.
  * ";load=fast" follows only for Ace with the Short loads part on; a missing load is off.
@@ -1994,6 +2004,23 @@ bool player_app_psn_conversion_take_request(PlayerApp *app);
 void player_app_psn_conversion_progress(PlayerApp *app, uint64_t done_bytes,
                                         uint64_t total_bytes);
 void player_app_psn_conversion_finish(PlayerApp *app);
+
+/* HOMEBREW_ALREADY_ADDED (review of #2426, S1): the program in package (its pbp_path,
+ * iso_path, disc_id and title, which the inspection or the conversion filled in) was added
+ * before from another folder. Shows the stop on the error card, naming what clears it:
+ * while the title is in the library, its removal with "Also delete the decrypted files and
+ * disc copy" ticked; once it has left the library, the card's "Delete kept copy". The
+ * other folder's path is shown with the profile folder as "~". Nothing is changed. */
+void player_app_refuse_homebrew_elsewhere(PlayerApp *app, const PlayerPsnPackage *package,
+                                          char *log_line, size_t log_line_size);
+/* Delete what the import of the program whose library key is key kept after the title left
+ * the library (nk_pbp_homebrew_delete_import): its disc image, the copy of its folder and
+ * their records. Its Memory Stick, with the files the program wrote, stays. False, with a
+ * sentence in error and nothing deleted, while the title is in this library or the library
+ * file, or when the library file cannot be read; false too when a part could not be
+ * deleted. */
+bool player_app_delete_kept_homebrew(PlayerApp *app, const char *key, char *error,
+                                     size_t error_size);
 
 /* Compressed disc images (.cso, .zso, .chd), expanded once at import. */
 /* Check a picked compressed image and fingerprint it. iso_ready is true when

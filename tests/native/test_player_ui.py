@@ -1273,6 +1273,7 @@ class NativePlayerUiTests(unittest.TestCase):
                 event_script.insert(0, f"DROP_FILE={package_iso}")
             elif drop_bytes is not None:
                 dropped = scratch / drop_bytes[0]
+                dropped.parent.mkdir(parents=True, exist_ok=True)
                 dropped.write_bytes(drop_bytes[1])
                 event_script.insert(0, f"DROP_FILE={dropped}")
             args.append("--ui-test-events=" + ";".join(event_script))
@@ -1858,7 +1859,12 @@ class NativePlayerUiTests(unittest.TestCase):
             self.assertNotIn("ZIP", completed.stderr)
             self.assertIn("tools/stage_install.py", completed.stderr)
         self.assertNotIn("compiled without", completed.stderr)
-        self.assertIn("assets\\fonts\\ui", completed.stderr)
+        # The folder is named the way this platform writes paths (#306).
+        if sys.platform == "win32":
+            self.assertIn("assets\\fonts\\ui", completed.stderr)
+        else:
+            self.assertIn("assets/fonts/ui", completed.stderr)
+            self.assertNotIn("assets\\fonts", completed.stderr)
         self.assertNotIn(marker, completed.stdout)
         self.assertNotIn("frame=", completed.stdout, "nothing is drawn after the message")
 
@@ -4410,7 +4416,10 @@ class NativePlayerUiTests(unittest.TestCase):
             package = eboot.read_bytes()
         events = ("WAIT_VIEW=experimental|unsupported|supported|error,20000", "WAIT_MS=100",
                   "KEY_RETURN", "WAIT_MS=2000")
-        run = self.next_ui_run("library", events, drop_bytes=("EBOOT.PBP", package),
+        # The program's folder comes with it, so the package sits in a folder of its own, as
+        # on a Memory Stick: the run's scratch folder holds the home and data folders, which
+        # an import refuses to copy (HOMEBREW_FOLDER_UNSUPPORTED).
+        run = self.next_ui_run("library", events, drop_bytes=("MYHB/EBOOT.PBP", package),
                                wait_background=True)
         frames = run["frames"]
         stdout = run["stdout"]

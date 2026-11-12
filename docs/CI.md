@@ -622,13 +622,20 @@ each device pixel's own position, and so does its uv-edge-clamp case (also at sc
 device pixels outside a screen-aligned strip's or sprite's first and last pixel centres must show
 that edge pixel's 1x sample, with linear and nearest filtering and with repeat and clamp wrapping,
 while a sheared strip stays unclamped.
-The dst-read cells (#2109: order, mask, alpha, mixed, depth, ctest, feedback, ztest and pins) run alone at render scales 1 and 4,
+The dst-read cells (#2109: order, mask, alpha, mixed, depth, ctest, zrange, sfail, feedback, ztest and pins) run alone at render scales 1 and 4,
 once forced to the snapshot destination-read path and once to the interlock path (`--dst-read`). On the
 interlock path, overlapping shader-blend primitives must equal the software GE in colour with no snapshot copy,
-and the depth-tested pair of `dst-read-ztest` must equal it in depth too. `dst-read-depth` and `dst-read-ctest`, an
-alpha-tested and a colour-tested op that write depth, must keep the snapshot path on both paths and equal the
-software GE in colour and depth. `dst-read-feedback`, a stencil state that textures from its own target, must
-keep it too: the destination copy is the texture its second sprite samples. On
+and the depth-tested pair of `dst-read-ztest` must equal it in depth too. `dst-read-depth`, `dst-read-ctest`,
+`dst-read-zrange` and `dst-read-sfail` write depth under a kill the early depth test cannot undo (the alpha test,
+the color test, a narrow transform-mode depth range, a stencil-fail KEEP): on the interlock path their op must take
+the interlock with depth tested and written in the shader and equal the software GE in colour and depth, an
+overlapping pair, a primitive behind another in the same batch, a blended primitive under another depth test with
+depth writes off, and an opaque sprite behind the rejected one included; on the snapshot path their depth must equal it, and `dst-read-sfail` its colour too (a stencil
+batch that blends splits where its primitives overlap, a snapshot copy each). The cells run once more on the
+interlock path with `--depth 32` (#2051): there those four keep the snapshot path, with no depth run in the
+shader, because the shader's depth copy is 16-bit. `dst-read-feedback`, a stencil state that textures from
+its own target, must keep the snapshot path on both paths: the destination copy is the texture its second sprite
+samples. On
 the snapshot path, the known difference must stay inside each overlap, and the device must hold no interlock
 state. `stencil-once` runs alone too, at scales 1 and 4 on the snapshot path and at scale 1 on the interlock
 path: a write-once stencil state (the first fragment to pass at a pixel stores a stencil that rejects the later
@@ -644,10 +651,13 @@ pipeline cache (#2149) runs next, as three processes over one empty data root: c
 mutant targets follow, and each broken variant must fail its case with its own message:
 `gpu-coherence-selftest-snapbar-mutants` breaks the destination-snapshot copy's barriers three ways
 (`SR_GPU_SNAPBAR_MUTANT`, the submit-batch case), `gpu-coherence-pcache-mutant` makes pipelines bypass the
-pipeline cache (pipeline-cache-cold), and `gpu-dst-read-mutants` breaks the destination-read paths nine ways
-(`SR_GPU_DSTREAD_MUTANT`; mutants 1 to 3 and 5 to 10 run on the interlock path and are a SKIP on a device without it,
-the hosted lavapipe device included; 8 and 9 break the host twin's use of the interlock, and 10 runs mutant 9 with the
-full-colour twin),
+pipeline cache (pipeline-cache-cold), and `gpu-dst-read-mutants` breaks the destination-read paths sixteen ways
+(`SR_GPU_DSTREAD_MUTANT`; mutants 1 to 3 and 5 to 17 run on the interlock path and are a SKIP on a device without it,
+the hosted lavapipe device included; 8 and 9 break the host twin's use of the interlock, 10 runs mutant 9 with the
+full-colour twin, 3 sends all four kills back to the early depth test and 6, 11 and 12 one each, 13 makes the shader's depth
+test always pass, 14 skips the copy of the shader's depth back to the depth image, and 15 keeps such an op on the
+snapshot path as before the shader owned depth, 16 copies the twin's shader depth back into the image's, and 17
+writes depth for a batch whose depth writes are off),
 and `gpu-stencil-once-mutants` breaks the write-once stencil batch three ways (`SR_GPU_STENCIL_ONCE_MUTANT`: no
 reordering, every state called write-once, no depth condition).
 `fsr3-pass-selftest` runs FSR 3's eight compute passes on
@@ -1578,7 +1588,7 @@ and each token's remaining budget.
 
 | Code | Fails when |
 | --- | --- |
-| `CI_CHANGE_UNAPPROVED` | the head changes `.github/workflows/**`, `.github/actions/**`, `.pre-commit-config.yaml`, a CI tool (`tools/ci_paths.py`, `tools/ci_required.py`, `tools/ci_test_shards.py`, `tools/ci_test_weights.json`, `tools/requirements-lock.txt`, `tools/ci_trust_verdict.py`) or any `tools/` file a default-branch workflow runs, without a current approval: the `ci-change-approved` label and a record of this head's protected content written after it |
+| `CI_CHANGE_UNAPPROVED` | the head changes `.github/workflows/**`, `.github/actions/**`, `.pre-commit-config.yaml`, a CI tool (`tools/ci_paths.py`, `tools/ci_required.py`, `tools/ci_test_shards.py`, `tools/ci_test_weights.json`, `tools/requirements-lock.txt`, `tools/ci_trust_verdict.py`), the publication gate's code (`.gitattributes`, `tools/publish_audit.py`, `tools/policy_sync.py`, `tools/modified_file_notice_audit.py`, `tools/provenance_record_gap.py`, `tools/history_audit.py` and every module they load or run; `PROTECTED_EXTRA` in the verifier is the list), a `tools/` module named like a standard-library one (it would be imported in place of it) or any `tools/` file a default-branch workflow runs, without a current approval: the `ci-change-approved` label and a record of this head's protected content written after it |
 | `CI_DEFINITION_BEHIND` | `main` changed one of those files after the branch point; the integrator merges `main` when it lands the pull request; the author merges it only for a real conflict in content that is not generated, or when asked (`AGENTS.md` section 10). No label waives it |
 | `CI_CONTEXT_COLLISION` | another workflow names `Trusted CI verdict`, or a check run uses that name |
 | `FOREIGN_PRODUCER` | a check run or status under an intended context is not from the intended workflow path and event at this head |
@@ -1593,6 +1603,30 @@ quick one: `CI required` did not run and `CI quick checks` succeeded. The verdic
 description starts with the code, which is how the landing desk tells a head that is ready for a batch from
 one whose checks are still running. Any other way for `CI required` not to succeed stays `JOB_FAILED`, which
 names `CI quick checks` when that is the job that failed ([Quick and full checks](#quick-and-full-checks)).
+
+The publication gate's code is protected because nothing else refuses a file that is outside the
+publication profile and is not implementation, such as game data or a key. The trusted attestation judges
+the profile's paths and new implementation paths only, and the audit runs from the pull request's own
+checkout, in the hygiene and public-export jobs. Without the approval a pull request could loosen the
+audit and pass it in the same change. The trusted attestation (`provenance-attestation.yml`) also runs the
+default branch's own `publish_audit.py --committed-tree` over the candidate, reading its tree from the
+objects (`git ls-tree`, `git cat-file`) and auditing exactly the files that tree lists. No `.gitattributes`
+or `.gitignore` line, VCS-looking directory name or repository-shaped root of the candidate can hide or
+rewrite a file, and the audit runs no Git command in the written tree; its own Git commands use a bare
+repository only when they name one (`safe.bareRepository=explicit`). The audit is also given the verdict base
+(`--trusted-base`): at a path that base already holds, a binary waiver covers only bytes the base vouches for,
+and the pull request's own manifest approves nothing there
+([Approved binaries](PUBLICATION_READINESS.md#approved-binaries-in-the-release-manifest)). The
+merge-group observation (`provenance-attestation-merge-group.yml`) does not run it, as it is not a required
+check. `GateCodeTests` in `tools/test_ci_trust_verdict.py` fails when one of those tools gains a local
+import or a `tools/` script it runs that is not protected, or pre-commit gains a hook that is not.
+`tools/verify_sbom.py`, which the public-export job runs to check the SBOM, is exempt: it does not decide
+which files may be published, and it loads the analyzer and code generator. That step accepts its expected
+`PROVENANCE_UNVERIFIED` failure only when the tool printed no `[FAILED CLOSED]` line and no gate's `[FAIL]`
+line, and the token follows the tool's last `[ALL GATES PASSED]` line. So a gate's printed output cannot
+turn a failed gate into the expected result. Code that runs in the pull request's own job could still change
+files on disk, which no output check sees; the control against a changed audit is the trusted attestation's
+own run of the default branch's audit.
 
 Whatever the `CI_DEFINITION_BEHIND` finding text says, who merges `main`, and when, is decided by
 [`AGENTS.md` section 10](../AGENTS.md#10-pr-and-integration-authorization), as the row above states.

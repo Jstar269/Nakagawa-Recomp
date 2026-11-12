@@ -996,6 +996,8 @@ set(NK_RUNTIME_SOURCES
     src/rt/gpu_sdl3vk/tex_scale.c
     src/rt/gpu_sdl3vk/glyph_recon.c
     src/rt/texrepl.c
+    src/core/nk_zip.c
+    src/core/nk_psp_inflate.c
     third_party/xbrz/xbrz.c
     src/rt/gpu_sdl3vk/ace_ui.c
     src/rt/gpu_sdl3vk/ace_smooth.c
