@@ -18,6 +18,9 @@
  *     in reverse order and the result is FAILED. If an undo fails too, the message says where each
  *     folder is.
  *   - After a successful run the old folders are gone, so a second run finds nothing to do.
+ *   - A run stopped part-way (power lost, the process killed) is finished by the next one: the folders
+ *     not yet moved still are, Linux's data/saves still moves up when the data folder had already
+ *     moved, and library.json paths into an old data folder that is gone are still rewritten.
  *   - The stored absolute paths in library.json that pointed into the old data folder are rewritten to
  *     the new one (the original is kept as library.json.pre-migration).
  *

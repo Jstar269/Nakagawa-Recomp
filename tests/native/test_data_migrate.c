@@ -293,6 +293,64 @@ static void test_old_without_saves(void) {
     CHECK(r.status == NK_MIGRATE_DONE && r.moved == 1u, "an old data folder with no saves still moves");
 }
 
+/* A run stopped right after its first move (power lost, the process killed): the old data folder
+   is already root/data, its saves are still in root/data/saves, and the rest has not moved. The
+   next run must lift the saves out; nothing else would ever look in data/saves again. */
+static void test_resume_after_the_data_move(void) {
+    Fixture fx;
+    build_fixture(&fx, true);
+    NkDataMigrationPlan plan;
+    build_plan(&fx, &plan);
+    CHECK(nk_platform_mkdir_p(fx.new_root), "make the new root");
+    CHECK(nk_rename_utf8(fx.old_data, plan.moves[0].to) == 0, "the interrupted run's first move");
+    NkDataMigration r;
+    nk_data_migrate_run(&plan, &r);
+    CHECK(r.status == NK_MIGRATE_DONE, "the next run finishes the migration");
+    char path[NATIVE_TEST_PATH_MAX];
+    join(path, sizeof(path), fx.new_root, "saves/UCUS98744/SAVE.bin");
+    CHECK(file_is(path, "save bytes"), "the saves left in data/saves move up to the root's saves");
+    join(path, sizeof(path), fx.new_root, "data/saves");
+    CHECK(!exists(path), "and are no longer under data");
+    join(path, sizeof(path), fx.new_root, "config/settings.json");
+    CHECK(file_is(path, "{\"a\":1}"), "the folders not yet moved are moved");
+    char *library = slurp(plan.library_file);
+    char want_iso[NATIVE_TEST_PATH_MAX + 64];
+    snprintf(want_iso, sizeof(want_iso), "\"%s/discs/UCUS98744/UCUS98744.iso\"", plan.remap_to);
+    CHECK(r.library_rewritten && library && strstr(library, want_iso) != NULL,
+          "and the library's stored paths are rewritten");
+    free(library);
+}
+
+/* A run stopped after its last move and before the library rewrite: every folder is in place, but
+   library.json still points into the old data folder, which is gone. The next run rewrites it. */
+static void test_resume_library_rewrite(void) {
+    Fixture fx;
+    build_fixture(&fx, true);
+    NkDataMigrationPlan plan;
+    build_plan(&fx, &plan);
+    CHECK(nk_platform_mkdir_p(fx.new_root), "make the new root");
+    for (size_t i = 0; i < plan.move_count; i++) {
+        CHECK(nk_rename_utf8(plan.moves[i].from, plan.moves[i].to) == 0, "the interrupted run's moves");
+    }
+    CHECK(file_is(plan.library_file, fx.library_text), "the library still has the old paths");
+    NkDataMigration r;
+    nk_data_migrate_run(&plan, &r);
+    CHECK(r.status == NK_MIGRATE_DONE && r.moved == 0u && r.library_rewritten,
+          "the next run moves nothing and rewrites the library");
+    char *library = slurp(plan.library_file);
+    char want_iso[NATIVE_TEST_PATH_MAX + 64];
+    snprintf(want_iso, sizeof(want_iso), "\"%s/discs/UCUS98744/UCUS98744.iso\"", plan.remap_to);
+    CHECK(library && strstr(library, want_iso) != NULL, "a stored path now points at the new folder");
+    free(library);
+    char path[NATIVE_TEST_PATH_MAX];
+    snprintf(path, sizeof(path), "%s.pre-migration", plan.library_file);
+    CHECK(file_is(path, fx.library_text), "the original library is kept");
+    NkDataMigration again;
+    nk_data_migrate_run(&plan, &again);
+    CHECK(again.status == NK_MIGRATE_NOTHING && again.message[0] == '\0' && !again.library_rewritten,
+          "a run after that finds nothing to do");
+}
+
 static void test_failed_move_is_undone(void) {
     for (int fail_at = 1; fail_at <= 4; fail_at++) {
         Fixture fx;
@@ -487,6 +545,8 @@ int main(void) {
     test_both_present_through_a_later_folder();
     test_empty_new_folders_do_not_block();
     test_old_without_saves();
+    test_resume_after_the_data_move();
+    test_resume_library_rewrite();
     test_failed_move_is_undone();
     test_failed_undo_is_reported();
     test_root_that_cannot_be_made();

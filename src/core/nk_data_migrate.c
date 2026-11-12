@@ -231,7 +231,10 @@ void nk_data_migrate_run(const NkDataMigrationPlan *plan, NkDataMigration *resul
         const NkMigrateMove *move = &plan->moves[i];
         bool previous_active = i > 0u && state[i - 1u].active;
         if (move->after_previous) {
-            state[i].active = previous_active;
+            /* Its folder is normally made by the move before it. A run stopped between the two
+               (power lost, the process killed) leaves that folder holding data and the earlier
+               old folder gone, so it still moves then; else no later run would find it. */
+            state[i].active = previous_active || tree_state(move->from, 0) == TREE_CONTENT;
         } else {
             state[i].active = tree_state(move->from, 0) == TREE_CONTENT;
         }
@@ -251,6 +254,21 @@ void nk_data_migrate_run(const NkDataMigrationPlan *plan, NkDataMigration *resul
         state[i].clear_to = to == TREE_EMPTY;
     }
     if (!any) {
+        /* A run stopped after its last move and before the library rewrite leaves stored paths
+           into an old data folder that no longer exists; finish the rewrite. Nothing moved in
+           this run, so a library that cannot be read or written is left to the library loader. */
+        char unused[NK_MAX_PATH + 96];
+        if (plan->remap_from[0] && nk_platform_path_missing(plan->remap_from) &&
+            rewrite_library(plan, &result->library_rewritten, unused, sizeof(unused)) &&
+            result->library_rewritten) {
+            result->status = NK_MIGRATE_DONE;
+            snprintf(result->message, sizeof(result->message),
+                     "Nakagawa finished an earlier move of your data to %s: your library's stored "
+                     "paths were updated (a copy of the old file is library.json.pre-migration).",
+                     plan->new_root[0] ? plan->new_root : "its new folder");
+            return;
+        }
+        result->library_rewritten = false;
         result->status = NK_MIGRATE_NOTHING;
         return;
     }
