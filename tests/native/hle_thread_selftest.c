@@ -32129,6 +32129,33 @@ static void dch_scenario_fifo(void) {
     s_dch_pending_after[1] = dch_pending(0) && dch_pending(2);
 }
 
+/* Whatever dispatch count the cases before leave, the arrival-order scenario runs the same:
+ * on main, an inherited count that put the clock's quantum on the scenario's dispatches 2 to 6
+ * failed its queueing check, and one on dispatch 11 its order and timing checks. */
+#define DCH_FIFO_PHASES 64u
+
+static void test_dmac_fifo_whatever_the_inherited_clock_phase(void) {
+    const uint32_t dispatches = s_dispatches_since_time;
+    unsigned failed = 0u;
+    for (uint32_t phase = 0u; phase < DCH_FIFO_PHASES; phase++) {
+        memset(s_dch_pending_after, 0, sizeof s_dch_pending_after);
+        s_dispatches_since_time = TIMESLICE - 1u - phase;
+        dch_setup(dch_scenario_fifo);
+        const int ok = s_dch_pending_after[0] && s_dch_pending_after[1] && s_dch[0].order == 1 &&
+                       s_dch[1].order == 2 && s_dch[2].order == 3 &&
+                       s_dch[1].exit_us >= s_dch[0].deadline_us + 58u &&
+                       s_dch[2].exit_us >= s_dch[1].exit_us + 58u;
+        if (!ok && failed++ == 0u)
+            printf("dmac fifo: first failing inherited phase %u: orders %d/%d/%d, exits %llu/%llu/%llu us\n",
+                   phase, s_dch[0].order, s_dch[1].order, s_dch[2].order,
+                   (unsigned long long)s_dch[0].exit_us, (unsigned long long)s_dch[1].exit_us,
+                   (unsigned long long)s_dch[2].exit_us);
+    }
+    printf("dmac fifo: %u of %u inherited clock phases failed\n", failed, (unsigned)DCH_FIFO_PHASES);
+    expect(failed == 0u, "PSP-DMAC-002 b3: the arrival-order scenario holds at every inherited clock phase");
+    s_dispatches_since_time = dispatches;
+}
+
 static void test_dmac_queued_callers_are_served_in_arrival_order(void) {
     memset(s_dch_pending_after, 0, sizeof s_dch_pending_after);
     dch_setup(dch_scenario_fifo);
@@ -52531,6 +52558,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_dmac_small_body_bypasses_the_channel();
     test_dmac_refused_try_copies_head_and_tail();
     test_dmac_queued_callers_are_served_in_arrival_order();
+    test_dmac_fifo_whatever_the_inherited_clock_phase();
     test_display_framebuf_latch();
     test_time_domains_are_coherent();
     test_kernel_import_sweep_sysclock_conversion();
