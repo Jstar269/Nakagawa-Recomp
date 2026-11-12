@@ -1660,8 +1660,8 @@ LAUNCH_HOMEBREW_SOURCES = tuple(
     for name in ("nk_pbp_homebrew.c", "nk_psp_crypto.c", "nk_psp_keystore.c",
                  "nk_psp_builtin_keys.c")
 )
-#: The Windows libraries those harnesses link; the key store's random source is BCrypt.
-LAUNCH_WINDOWS_LIBS = ("-lshell32", "-lole32", "-luuid", "-lbcrypt")
+#: The Windows libraries those harnesses link.
+LAUNCH_WINDOWS_LIBS = ("-lshell32", "-lole32", "-luuid")
 
 
 class GenericLauncherParityTests(unittest.TestCase):

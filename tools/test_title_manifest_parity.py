@@ -66,8 +66,7 @@ class TitleManifestParityTests(unittest.TestCase):
             "src/core/nk_psp_builtin_keys.c",
             PLATFORM_SRC,
             "tests/native/test_manifest_parser.c",
-            # The key store's random source is BCrypt.
-            *(["-lshell32", "-lole32", "-luuid", "-lbcrypt"] if _WINDOWS else []),
+            *(["-lshell32", "-lole32", "-luuid"] if _WINDOWS else []),
             "-o", str(cls.native_exe)
         ]
         subprocess.check_call(cmd, cwd=ROOT)

@@ -1037,8 +1037,7 @@ int main(int argc, char **argv) {{
             "-I", str(ROOT / "src" / "core" / "generated"),
             str(cls.harness_c),
         ] + [str(s) for s in core_srcs] + [
-            # The key store's random source is BCrypt.
-            *(["-lshell32", "-lole32", "-luuid", "-lbcrypt"] if sys.platform == "win32" else []),
+            *(["-lshell32", "-lole32", "-luuid"] if sys.platform == "win32" else []),
             "-o", str(cls.harness_exe),
         ]
         res = subprocess.run(cmd, capture_output=True, text=True)
