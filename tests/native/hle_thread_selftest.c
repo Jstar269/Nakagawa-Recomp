@@ -38584,7 +38584,8 @@ static void test_high_requests_take_a_freed_partition_block(void) {
     (void)fpb_free(a);
 
     /* A fixed reservation above a live High block returns the skipped gap, High block inside, to
-     * the free list (sr_alloc_block_at). A stack is never carved over that High block. */
+     * the free list (sr_alloc_block_at). A stack is never carved over that High block: the
+     * runtime refuses the request (fail closed) where a PSP could place it lower in the gap. */
     reset_fixture();
     s_fixture_loaded_end = 0x08a00000u;
     sr_hle_test_partition_reset();

@@ -586,10 +586,11 @@ int partition_high_modelled(void) {
 }
 
 /* A High request (a thread stack, a High block) that no range above the bump pointer holds: the
- * highest free block below it that does, carved from that block's top, which is the PSP_SMEM_High
- * rule applied to the rest of the partition. The carved range leaves the free list, so no Low
- * request reuses it, and partition_hole_release gives it back. */
-extern int sched_guest_stack_overlaps(uint32_t base, uint32_t end);
+ * highest free block below it that does, carved from that block's top. This applies the
+ * PSP_SMEM_High rule (sched.c stack_range_alloc, PSP-THREAD-K0-001, measured on a block freed at the
+ * partition's top) to the blocks freed below the bump pointer, which is inferred, not measured. The
+ * carved range leaves the free list, so no Low request reuses it, and partition_hole_release gives
+ * it back. Where the highest placement cannot be taken the request fails rather than going lower. */
 static int partition_high_block_overlaps(uint32_t base, uint32_t end) {
     for (int i = 0; i < s_nblocks; i++)
         if (s_blocks[i].uid != 0u && s_blocks[i].high && s_blocks[i].addr < end &&
@@ -611,10 +612,18 @@ static int partition_hole_alloc_high(uint32_t size, uint32_t *base_out) {
         /* A fixed reservation above the bump pointer returns its skipped gap to the free list
          * (sr_alloc_block_at) without looking at the stacks and High blocks inside it: never place
          * a request over one of those. */
-        if (sched_guest_stack_overlaps(base, end) || partition_high_block_overlaps(base, end)) continue;
+        if (sched_guest_stack_overlaps(base, end) || partition_high_block_overlaps(base, end)) {
+            fprintf(stderr, "partition: High request [0x%08x,0x%08x) in a freed block would overlap a "
+                    "live thread stack or High block -- refused\n", base, end);
+            return 0;
+        }
         const int head = base > f_addr, tail = end < f_end;
         if (head && tail) {
-            if (s_nfree_blocks >= HLE_MAX_FREE_BLOCKS) continue;
+            if (s_nfree_blocks >= HLE_MAX_FREE_BLOCKS) {
+                fprintf(stderr, "partition: High request [0x%08x,0x%08x) would split a freed block "
+                        "and the free-block table is full -- refused\n", base, end);
+                return 0;
+            }
             for (int j = s_nfree_blocks; j > i + 1; j--) s_free_blocks[j] = s_free_blocks[j - 1];
             s_free_blocks[i + 1].addr = end;
             s_free_blocks[i + 1].size = f_end - end;

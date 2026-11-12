@@ -2500,6 +2500,7 @@ typedef int (*SrSchedPartitionHoleAlloc)(uint32_t size, uint32_t *base_out);
 typedef void (*SrSchedPartitionHoleRelease)(uint32_t base, uint32_t size);
 void     sched_set_partition_hole_allocator(SrSchedPartitionHoleAlloc alloc,
                                             SrSchedPartitionHoleRelease release);
+int      sched_guest_stack_overlaps(uint32_t base, uint32_t end);   /* any live thread stack */
 CpuState *sr_cpu_for_callbacks(void);               /* the CpuState guest callbacks run on */
 void     sched_dump_threads(void);                  /* the watchdog's thread table, to stderr */
 void     sched_watchdog_summary(uint32_t *ready, uint32_t *delay,
