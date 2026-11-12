@@ -149,8 +149,10 @@ The jobs:
 only when `run_installer` is true. The Markdown lint, the main smoke and the fixture build reach it through the
 two always-required jobs they now belong to, so `tools/ci_required.py` no longer takes a result
 or run flag of their own. Each merged job's `timeout-minutes` covers its parts: hygiene 35
-(15 + 10 + 10), public export 30 (15 + 15), each Windows group 25 per part (50, 75 and
-25), and each Python shard 60, twice the former 30 because it does about twice the work.
+(15 + 10 + 10), public export 30 (15 + 15), each Windows group 25 per part plus the own
+limit of a step added to a part since (smoke 25, routes 40 with the homebrew import routes'
+15, ladder-fuzz 75, selftests 25), and each Python shard 60, twice the former 30 because it
+does about twice the work.
 
 The trade-offs: a step that fails stops the later steps of its own job, so a pull request that
 fails, for example, the Windows smoke part does not learn about its routes part in the same run
@@ -2145,7 +2147,7 @@ developer runs locally, without private inputs:
   validates the guest ProgramImage, generates a public AOT package, launches it
   through the headless production runtime, and checks all seven named
   guest-service cases for each manifest. It runs in the `routes` part, in the
-  `routes` group (25 minutes) of the `windows_runtime` job, and took about 123 seconds locally for both package
+  `routes` group (40 minutes) of the `windows_runtime` job, and took about 123 seconds locally for both package
   builds and runtime launches. The guest bytes are built from the fixture's own
   `main.c` and `Makefile` by the profile-zero steps of the `public_export` job (pinned PSPDEV, checked
   against the committed `fixtures/profile_zero/prebuilt/SHA256SUMS`) and downloaded
@@ -2161,27 +2163,47 @@ developer runs locally, without private inputs:
   `tools/test_profile_zero_e2e.py` (`CROSS_HOST_DIGESTS`), so Windows and Linux must
   produce the same bytes (#306).
   The `routes` part also runs the homebrew import route tests (#2143,
-  `tools/test_player_package_route.py`): a PSPSDK `EBOOT.PBP` imports through the player and
-  builds a package, and the `homebrew_view` probe runs from `ms0:/PSP/GAME/<folder>/` and
-  checks the files beside it. The Windows runner has no PSPDEV, so the programs come from the
-  `public_export` job, built with the locked PSPDEV from the fixtures' own `main.c` and
-  `Makefile`. That job puts them in one folder: each program's `EBOOT.PBP` beside the sources
-  it was built from, `BUILT_FROM` (the commit) and `SHA256SUMS` over all of them. It uploads
-  the folder as the `homebrew-fixtures` artifact, and the step downloads it. The step checks
-  `SHA256SUMS` and that `BUILT_FROM` is its own commit (`SR_SOURCE_COMMIT`), and the tests
-  check that the sources are byte for byte the checkout's. The artifact comes from this run,
-  so `BUILT_FROM` cannot differ today; it is there so that a folder handed over another way
-  (a cache, another run) is refused rather than trusted. The step sets
-  `NK_HOMEBREW_E2E_REQUIRED=1`, so a missing or unreadable folder, or a tool or player build
-  the route lacks, fails it and never skips, and it fails unless the summary is a bare `OK`,
-  so a skipped test does not pass. The tests build the player themselves, so the step sets
-  `VULKAN_SDK=/ucrt64`, as the other Windows steps pass it, and `MAKEFLAGS=-j4`.
-  **Minutes added:** not yet measured on a hosted runner. Locally the two tests took 422
-  seconds (Windows 11, `-j 4`, a shared host), most of it the player and package builds;
-  the `routes` group compiler cache holds no player objects, since only `smoke` builds the
-  player. The step's limit is 10 minutes, so the group's measured 13.9 minutes stay under
-  its 25-minute limit even if the step takes its whole limit. The first full run records the
-  real figure here.
+  `tools/test_player_package_route.py`), on the player the tests build, through the code the
+  player's library uses when a user picks a homebrew `EBOOT.PBP`
+  (`player_psn_package_inspect` and `player_psn_package_convert`) and its launch
+  (`--launch-index`, `nk_launch_start`):
+  - `test_homebrew_eboot_imports_and_builds_as_experimental`: `fixtures/pspdev_phase5`
+    imports and builds a package as an Experimental title.
+  - `test_homebrew_finds_its_own_files_in_its_memory_stick_folder`: `fixtures/homebrew_view`,
+    imported from a folder that also holds `DATA.TXT`, builds, launches and runs. The test
+    checks what the program writes on its Memory Stick: `NAKAGAWA_TEST/HOMEBREW_VIEW.TXT` must
+    say it was started as `ms0:/PSP/GAME/NKHBVIEW/EBOOT.PBP`, read `DATA.TXT` beside itself and
+    not found `MISSING.TXT`, and the `WRITTEN.TXT` it writes beside itself must be there and
+    nowhere else.
+  - `test_homebrew_second_folder_stop_keeps_folders_out_of_the_report`: the same program added
+    from a second folder stops with `HOMEBREW_ALREADY_ADDED`, and a problem report built from
+    that run names neither folder.
+
+  The Windows runner has no PSPDEV, so the programs come from the `public_export` job, built
+  with the locked PSPDEV from the fixtures' own `main.c` and `Makefile`. That job puts them in
+  one folder: each program's `EBOOT.PBP` beside the sources it was built from, `BUILT_FROM`
+  (the commit) and `SHA256SUMS` over all of them. It uploads the folder as the
+  `homebrew-fixtures` artifact, and the step downloads it. The step checks `SHA256SUMS` and
+  that `BUILT_FROM` is its own commit (`SR_SOURCE_COMMIT`), and the tests check that the
+  sources are byte for byte the checkout's. The artifact comes from this run, so `BUILT_FROM`
+  cannot differ today; it is there so that a folder handed over another way (a cache, another
+  run) is refused rather than trusted. The step sets `NK_HOMEBREW_E2E_REQUIRED=1`, so a missing
+  or unreadable folder, or a tool or player build the route lacks, fails it and never skips
+  (a failed player build reports the build's last lines), and it fails unless the summary is a
+  bare `OK`, so a skipped test does not pass. The tests build the player themselves, so the
+  step sets `VULKAN_SDK=/ucrt64`, as the other Windows steps pass it, and `MAKEFLAGS=-j4`.
+  Before it was added, the route was checked to fail for the right reason with each half
+  broken in turn: with the import keeping no copy of the program's folder, the folder probe
+  found no Memory Stick folder in the import and the second-folder test was not stopped; with
+  the launch booting the program from its disc image, the probe wrote
+  `ARGV0=disc0:/PSP_GAME/SYSDIR/EBOOT.BIN` and `DATA_BYTES=-1`, and the test failed on it.
+  **Minutes added:** not yet measured on a hosted runner. Locally the step took 419 seconds
+  (Windows 11, `-j4`, a shared host, no compiler cache), most of it the player build and the
+  two package builds; the `routes` group compiler cache holds no player objects until a run on
+  `main` saves them, since only `smoke` built the player before. The step's own limit is 15
+  minutes and the `routes` group's limit is 40, its former 25 plus those 15, so the group's
+  measured 13.9 minutes and the step's whole limit fit. The first full run records the real
+  figure here.
   The same job builds Nakagawa Font Copy (`src/psp_companion/Makefile`), the PSP app
   behind the player's font import, through its user-mode import gate; nothing from
   that build is uploaded. Public

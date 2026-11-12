@@ -915,11 +915,20 @@ class WindowsRuntimePartitionTests(unittest.TestCase):
         self.assertIn("    name: Windows runtime compile gate (${{ matrix.group }})", text)
         self.assertNotIn("matrix.part ", text)
         self.assertNotIn("matrix.part}", text)
-        # A group's limit is the sum of its parts' former 25-minute limits.
+        # A group's limit is the sum of its parts' former 25-minute limits, plus the own
+        # limit of each step added to one of its parts since (#2143).
         self.assertIn("    timeout-minutes: ${{ matrix.timeout }}", text)
+        step_limits: dict[str, int] = {}
+        for name, step in self.steps.items():
+            limit = re.search(r"(?m)^ {8}timeout-minutes: (\d+)$", "\n".join(step or []))
+            if limit:
+                part = self.part_of(name)
+                self.assertIsNotNone(part, f"{name}: a step with its own limit must be in a part")
+                step_limits[cast(str, part)] = step_limits.get(cast(str, part), 0) + int(limit.group(1))
+        self.assertEqual(step_limits, {"routes": 15})
         for group, (parts, timeout) in _windows_matrix_entries(self.block).items():
             with self.subTest(group=group):
-                self.assertEqual(timeout, 25 * len(parts))
+                self.assertEqual(timeout, sum(25 + step_limits.get(part, 0) for part in parts))
         self.assertIn("      fail-fast: false", text)
 
     def test_grouped_fuzz_shards_rebuild_and_rerun_in_order(self) -> None:
@@ -2108,7 +2117,7 @@ class PublicExportJobTests(unittest.TestCase):
         step = "\n".join(_ci_step(windows, run) or [])
         self.assertIn('NK_HOMEBREW_E2E_REQUIRED: "1"', step)
         self.assertIn("NK_HOMEBREW_EBOOT_DIR: ${{ runner.temp }}/homebrew-fixtures", step)
-        self.assertIn("timeout-minutes: 10", step)
+        self.assertIn("timeout-minutes: 15", step)
         # The tests build the player: without the UCRT64 Vulkan headers that build fails
         # and the route would never run (the bare-OK check below would then fail the step).
         self.assertIn("VULKAN_SDK: /ucrt64", step)

@@ -2310,7 +2310,9 @@ jobs:
     # time anyway.
     # needs.windows_runtime.result aggregates all groups, and a failing step fails
     # its group's job.
-    # A group's timeout is the sum of its parts' former 25-minute limits.
+    # A group's timeout is the sum of its parts' former 25-minute limits, plus the own
+    # limit of any step added to a part since: routes has the homebrew import routes'
+    # 15 minutes (#2143), so 40.
     strategy:
       fail-fast: false
       matrix:
@@ -2320,7 +2322,7 @@ jobs:
             timeout: 25
           - group: routes
             parts: [routes]
-            timeout: 25
+            timeout: 40
           - group: ladder-fuzz
             parts: [ladder, fuzz-0, fuzz-1]
             timeout: 75
@@ -2683,7 +2685,7 @@ jobs:
       - name: Run the homebrew import routes on the fixtures built from source
         if: contains(matrix.parts, 'routes')
         shell: msys2 {0}
-        timeout-minutes: 10
+        timeout-minutes: 15
         env:
           MSYS2_PATH_TYPE: inherit
           VULKAN_SDK: /ucrt64
