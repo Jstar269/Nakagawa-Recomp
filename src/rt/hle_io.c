@@ -115,7 +115,8 @@ static int hle_fd_is_std(uint32_t fd) {
  * sceIoLseek and sceIoLseek32 return the new position in sectors, SEEK_END is relative to the
  * last sector, and sceIoRead takes and returns a count of sectors and advances the position by
  * it. A position below zero or past the last sector is refused with 0x8001b003 and leaves the
- * position where it was; a zero count is refused with 0x80010016. Two cases stay at a named
+ * position where it was (the edge, one and two sectors past the last, SEEK_END +1 and SEEK_SET
+ * 0x100000000, measured on a PSP-3000 by PSP-IO-EOF-002 umd-eof-raw-seek-past); a zero count is refused with 0x80010016. Two cases stay at a named
  * boundary because no capture covers them: a read that would cross the last sector, and every
  * data operation while no disc image is open. The console wrote a whole request even past the
  * end of a smaller buffer; the runtime refuses a destination that is not writable guest memory. */
@@ -133,6 +134,8 @@ static uint32_t hle_io_raw_async_fd_boundary(uint32_t fd, IoRawDeviceBoundary op
     return hle_io_raw_fd_boundary(fd, operation, api);
 }
 
+static int io_iso_read(uint32_t lba, uint32_t offset, void *dst, uint32_t bytes);
+
 static uint32_t hle_io_raw_umd_read(uint32_t fd, uint32_t dst, uint32_t sectors) {
     Fd *f = &s_fds[fd];
     if (sectors == 0u) return 0x80010016u;
@@ -149,7 +152,7 @@ static uint32_t hle_io_raw_umd_read(uint32_t fd, uint32_t dst, uint32_t sectors)
     for (uint32_t done = 0; done < bytes;) {
         uint32_t n = bytes - done;
         if (n > sizeof(tmp)) n = (uint32_t)sizeof(tmp);
-        if (iso_read(f->off, done, tmp, n) != (int)n) return 0x80010005u;
+        if (io_iso_read(f->off, done, tmp, n) != (int)n) return 0x80010005u;
         for (uint32_t k = 0; k < n; k++) MEM_W8(dst + done + k, tmp[k]);
         done += n;
     }
@@ -330,6 +333,13 @@ uint32_t h_IoWrite(CpuState *s) {
     if (f->kind != FD_KIND_FILE) return SCE_ERROR_KERNEL_BAD_FILE_DESCRIPTOR;
     if (f->flash0) return sr_flash0_font_refuse_write(f->guest_path, "write through a font descriptor");
     if (!f->host) return 0x80010013;                 /* read-only (ISO) fd: not writable */
+    /* A write through a Memory Stick (ms0: or fatms0:) descriptor opened without write access
+     * answers the manager's bad-descriptor error and leaves the file unchanged
+     * (PSP-HLE-IO-SEEK-001 io-seek-ms-write-rdonly, measured on a PSP-3000; sceIoWriteAsync
+     * shares it, unmeasured). */
+    if (!f->writable && strchr(f->guest_path, ':') &&
+        sr_ms0_classify(f->guest_path, NULL) == SR_MS0_OWNED)
+        return SCE_ERROR_KERNEL_BAD_FILE_DESCRIPTOR;
     if (count > UINT32_MAX - f->off) {
         /* A seek may leave the position anywhere in 32 bits; a write that would carry it
          * past them stops at the same boundary as such a seek (#1380). */
@@ -354,7 +364,7 @@ uint32_t h_IoWrite(CpuState *s) {
     f->off += done; if (f->off > f->size) f->size = f->off;
     return done;
 }
-uint32_t h_IoRead(CpuState *s) {
+uint32_t io_read_now(CpuState *s) {
     /* a0=fd, a1=dst, a2=count. Returns bytes read. */
     uint32_t fd = A0, dst = A1, count = A2;
     if (fd < 3 && s_fds[fd].used && s_fds[fd].kind == FD_KIND_STD)
@@ -435,7 +445,7 @@ uint32_t h_IoRead(CpuState *s) {
         uint32_t n = count - done; if (n > sizeof(tmp)) n = sizeof(tmp);
         if (f->host) { size_t got = fread(tmp, 1, n, f->host); if (got < n) n = (uint32_t)got; }
         else {
-            int got = iso_read(f->lba, f->off + done, tmp, n);
+            int got = io_iso_read(f->lba, f->off + done, tmp, n);
             n = got > 0 ? (uint32_t)got : 0;
         }
         for (uint32_t k = 0; k < n; k++) MEM_W8(dst + done + k, tmp[k]);
@@ -452,6 +462,228 @@ uint32_t h_IoRead(CpuState *s) {
                     s_vcount_fwd, fd, f->off - done, count, dst, done);
     }
     return done;
+}
+
+/* The UMD drive's read time (#1296, #2361). On a PSP a thread that reads from the disc waits
+ * while the drive transfers, and every other thread runs meanwhile: a game's sound thread keeps
+ * feeding its output through a load. Here the read itself is a host call that took no guest
+ * time, so the reading thread never waited, and a title that loads on its main thread held the
+ * CPU from one read to the next.
+ *
+ * So a read of a file of the disc parks its thread for the time the drive takes
+ * (hle_io_umd_read_us): the call returns that long after it was made. The wait is in guest
+ * time, so it is the same under the deterministic clock, and it ends like any other timed wait.
+ * Each read's drive time is its own: two threads reading at once do not wait out one another's
+ * (their host reads, below, do run one after the other on the one worker).
+ *
+ * In a paced run the host's own read is kept off the scheduler's thread as well (#2361): a
+ * first read of a disc image on a USB hard disk held that thread, and with it every guest
+ * thread, for 341 to 604 ms. The bytes the read will need are fetched from the disc image by
+ * the scheduler's host worker (io_disc_fetch_start, sched_host_work_*) while the reading
+ * thread waits: the drive's minimum first, which every read waits anyway, then looking again
+ * every IO_DISC_FETCH_POLL_US while the host is still reading. Then the read itself runs as it
+ * always did, served from the fetched bytes (io_iso_read), and the rest of the drive's time,
+ * if the host was quicker than the drive, is waited out. A block-device read that will be
+ * refused (a zero count, a destination that cannot take every sector asked for) is not
+ * fetched: it is refused as before, at once. So the read's results and refusals are the
+ * same call's either way, and whatever another thread did to the descriptor while the host
+ * read is what the read finds: a span it no longer covers is read directly, as before. Under
+ * the turbo and deterministic clocks the host read stays on the scheduler's thread, so guest
+ * time does not depend on the host. Only a read of the disc image itself is fetched ahead (a
+ * disc file's extent or the block device); a file the runtime serves in the disc's place from
+ * the host is still read directly.
+ *
+ * SYNTHETIC, not measured on a PSP (docs/HARDWARE_ORACLE.md: no UMD read or seek time is
+ * measured): the time is the public behaviour reference's low estimate, PPSSPP
+ * Core/HLE/sceIo.cpp __IoReadDelayUs (revision 45a5e3b7223c), 100 bytes per microsecond and
+ * never under 100 microseconds, with no seek and no spin-up time. That is far faster than a
+ * real drive: it adds about 10 ms of guest time for each MiB read and 100 us for each call,
+ * which a host that reads faster than that now waits out. Taken from that reference too: a
+ * read that returns 0 bytes waits the minimum, a refused one does not wait. UNMEASURED: the
+ * drive's rate, seek and spin-up, whether two readers queue, the reader's wait type as another
+ * thread sees it, and a read made with dispatch or interrupts disabled, which keeps today's
+ * call that returns at once, as does a read outside a guest thread. A queued read
+ * (sceIoReadAsync) completes on the request queue's own synthetic schedule, not this one. */
+#define IO_UMD_READ_BYTES_PER_US 100u
+#define IO_UMD_READ_MIN_US 100u
+/* How often a reader looks again while the host is still reading its bytes (a runtime choice,
+ * not the drive's): short against a display period, long enough that a stronger reader does not
+ * end the weaker threads' slices more than 2000 times a second. */
+#define IO_DISC_FETCH_POLL_US 500u
+
+uint32_t hle_io_umd_read_us(uint64_t bytes) {
+    const uint64_t us = bytes / IO_UMD_READ_BYTES_PER_US;
+    if (us < IO_UMD_READ_MIN_US) return IO_UMD_READ_MIN_US;
+    return us > UINT32_MAX ? UINT32_MAX : (uint32_t)us;
+}
+
+/* Bytes of the disc image fetched ahead for one read, on the host worker. */
+typedef struct {
+    uint32_t lba, offset, bytes;   /* the span asked for, in iso_read's terms */
+    uint32_t got;                  /* how much of it the host read (the worker's, until done) */
+    uint32_t owner_uid;            /* the waiting thread */
+    SrHostWork *work;
+    uint8_t data[];
+} IoDiscFetch;
+
+enum { IO_DISC_FETCH_CHUNK = 65536, IO_DISC_FETCH_MAX = 16 };
+/* Fetches in flight, so one whose thread ends while it waits can be abandoned. */
+static IoDiscFetch *s_io_disc_fetches[IO_DISC_FETCH_MAX];
+/* The fetch the read now running is served from; NULL outside that call. */
+static const IoDiscFetch *s_io_disc_serving;
+
+/* The worker's side: the host read, in chunks, so a read the scheduler's thread makes for itself
+ * meanwhile waits for one chunk at most (iso_read serialises its callers). */
+static void io_disc_fetch_run(void *ctx) {
+    IoDiscFetch *fetch = (IoDiscFetch *)ctx;
+    uint32_t got = 0u;
+    while (got < fetch->bytes) {
+        uint32_t n = fetch->bytes - got;
+        if (n > IO_DISC_FETCH_CHUNK) n = IO_DISC_FETCH_CHUNK;
+        const int r = iso_read(fetch->lba, fetch->offset + got, fetch->data + got, n);
+        if (r <= 0) break;
+        got += (uint32_t)r;
+        if ((uint32_t)r < n) break;
+    }
+    fetch->got = got;
+}
+
+static void io_disc_fetch_drop(void *ctx) { free(ctx); }
+
+/* The span of the disc image a read of `count` to `dst` on `fd` would ask iso_read for, or 0
+ * when nothing is to be fetched ahead: the read is not one of the disc image, or it would
+ * transfer nothing, or it will be refused. For the block device that is hle_io_raw_umd_read's
+ * own test, in its order: the whole count asked for, before it is cut to the disc. For a
+ * file, a destination that leaves guest memory is not fetched for (no host read of a
+ * guest-chosen size is made for one) and the read goes on as before, piece by piece.
+ * io_read_now decides the read's result; this only looks. */
+static int io_disc_read_span(uint32_t fd, uint32_t dst, uint32_t count, uint32_t *lba,
+                             uint32_t *offset, uint32_t *bytes) {
+    if (fd >= (uint32_t)(sizeof(s_fds) / sizeof(s_fds[0])) || !s_fds[fd].used) return 0;
+    const Fd *f = &s_fds[fd];
+    if (f->async.state == IO_ASYNC_PENDING || count == 0u) return 0;
+    if (f->kind == FD_KIND_RAW_DEVICE && f->raw_umd) {
+        if (count > UINT32_MAX / IO_UMD_SECTOR_BYTES ||
+            !sr_guest_span_writable(dst, count * IO_UMD_SECTOR_BYTES))
+            return 0;
+        if (f->off >= f->size) return 0;
+        if (count > f->size - f->off) count = f->size - f->off;
+        *lba = f->off;
+        *offset = 0u;
+        *bytes = count * IO_UMD_SECTOR_BYTES;
+        return 1;
+    }
+    if (f->off >= f->size) return 0;
+    if (f->kind != FD_KIND_FILE || f->host || f->flash0 || f->archive_vfs || f->pgd ||
+        f->enhancement_data)
+        return 0;
+    if (count > f->size - f->off) count = f->size - f->off;
+    *lba = f->lba;
+    *offset = f->off;
+    *bytes = count;
+    /* Any view of guest memory will do: the file loop writes byte by byte, so a span through a
+     * VRAM mirror is a read that works, and asking the bulk-pointer question would report it. */
+    return sr_guest_span_writable_any_view(dst, count);
+}
+
+static IoDiscFetch *io_disc_fetch_start(uint32_t fd, uint32_t dst, uint32_t count) {
+    uint32_t lba, offset, bytes;
+    if (!io_disc_read_span(fd, dst, count, &lba, &offset, &bytes)) return NULL;
+    int slot = 0;
+    while (slot < IO_DISC_FETCH_MAX && s_io_disc_fetches[slot]) slot++;
+    if (slot == IO_DISC_FETCH_MAX) return NULL;
+    IoDiscFetch *fetch = (IoDiscFetch *)malloc(sizeof(*fetch) + bytes);
+    if (!fetch) return NULL;
+    fetch->lba = lba;
+    fetch->offset = offset;
+    fetch->bytes = bytes;
+    fetch->got = 0u;
+    fetch->owner_uid = sched_current_uid();
+    fetch->work = sched_host_work_submit(io_disc_fetch_run, io_disc_fetch_drop, fetch);
+    if (!fetch->work) {
+        free(fetch);
+        return NULL;
+    }
+    s_io_disc_fetches[slot] = fetch;
+    return fetch;
+}
+
+static void io_disc_fetch_forget(const IoDiscFetch *fetch) {
+    for (int i = 0; i < IO_DISC_FETCH_MAX; i++)
+        if (s_io_disc_fetches[i] == fetch) s_io_disc_fetches[i] = NULL;
+}
+
+#ifdef SR_HLE_THREAD_SELFTEST
+/* Fetches no reader has finished or abandoned yet. */
+int sr_hle_test_io_disc_fetches_in_flight(void) {
+    int n = 0;
+    for (int i = 0; i < IO_DISC_FETCH_MAX; i++) n += s_io_disc_fetches[i] != NULL;
+    return n;
+}
+#endif
+
+/* A thread ended (sr_hle_release_thread_resources): the fetch it was waiting for has no reader
+ * left. The worker may still be inside the host read, so the bytes go when that returns. */
+void hle_io_release_thread(uint32_t thread_uid) {
+    for (int i = 0; i < IO_DISC_FETCH_MAX; i++) {
+        IoDiscFetch *fetch = s_io_disc_fetches[i];
+        if (!fetch || fetch->owner_uid != thread_uid) continue;
+        s_io_disc_fetches[i] = NULL;
+        sched_host_work_abandon(fetch->work);
+    }
+}
+
+/* iso_read for the read loops above: from the bytes fetched ahead when they cover the request. */
+static int io_iso_read(uint32_t lba, uint32_t offset, void *dst, uint32_t bytes) {
+    const IoDiscFetch *fetch = s_io_disc_serving;
+    if (fetch && lba == fetch->lba && offset >= fetch->offset &&
+        bytes <= fetch->got && offset - fetch->offset <= fetch->got - bytes) {
+        memcpy(dst, fetch->data + (offset - fetch->offset), bytes);
+        return (int)bytes;
+    }
+    return iso_read(lba, offset, dst, bytes);
+}
+
+/* Only a guest thread on its own coroutine, with interrupts and dispatch enabled, can wait. */
+static int io_read_caller_can_wait(void) {
+    return sched_guest_thread_running() && sched_wait_permitted();
+}
+
+uint32_t h_IoRead(CpuState *s) {
+    const uint32_t fd = A0;
+    const int on_umd = fd < (uint32_t)(sizeof(s_fds) / sizeof(s_fds[0])) && s_fds[fd].used &&
+                       s_fds[fd].on_umd;
+    if (!on_umd || !io_read_caller_can_wait()) return io_read_now(s);
+    sched_vtime_refresh();
+    const uint64_t started = sched_vtime_us();
+    IoDiscFetch *fetch = sched_host_work_usable() ? io_disc_fetch_start(fd, A1, A2) : NULL;
+    uint64_t host_ns = 0u;
+    if (fetch) {
+        sched_delay_current(IO_UMD_READ_MIN_US);
+        while (!sched_host_work_done(fetch->work)) sched_delay_current(IO_DISC_FETCH_POLL_US);
+        io_disc_fetch_forget(fetch);
+        host_ns = sched_host_work_finish(fetch->work);
+        s_io_disc_serving = fetch;
+    }
+    /* The descriptor as it is now: another thread may have closed and reopened it meanwhile. */
+    const int sectors = s_fds[fd].used && s_fds[fd].raw_umd;   /* the block device counts sectors */
+    const uint32_t result = io_read_now(s);   /* cannot wait: nothing else is served from the fetch */
+    if (fetch) {
+        s_io_disc_serving = NULL;
+        const uint64_t now_ns = sr_perf_now_ns();
+        if (now_ns)
+            sr_perf_storage_read(SR_PERF_STORAGE_ISO, fetch->got,
+                                 now_ns > host_ns ? now_ns - host_ns : 1u,
+                                 fetch->got == fetch->bytes);
+        free(fetch);
+    }
+    if (result & 0x80000000u) return result;
+    const uint64_t drive_us = hle_io_umd_read_us(
+        (uint64_t)result * (sectors ? IO_UMD_SECTOR_BYTES : 1u));
+    sched_vtime_refresh();   /* a paced run: the host time the read itself took counts as waited */
+    const uint64_t waited_us = sched_vtime_us() - started;
+    if (waited_us < drive_us) sched_delay_current(drive_us - waited_us);
+    return result;
 }
 uint32_t h_IoLseek32(CpuState *s) {
     /* a0=fd, a1=offset, a2=whence. Returns new position (32-bit). */
@@ -527,6 +759,14 @@ static uint32_t h_IoClose(CpuState *s) {
         return SCE_ERROR_KERNEL_BAD_FILE_DESCRIPTOR;
     if (s_fds[fd].async.state == IO_ASYNC_PENDING)
         return SCE_ERROR_KERNEL_ASYNC_BUSY;
+    /* PSP-HLE-STDIO-001 (docs/HARDWARE_ORACLE.md, 2026-11-06, PSP-3000): closing the Stdout
+     * handle returns 0x800200D1 and closes nothing; a later write still returns its count.
+     * sceKernelStdin and sceKernelStderr hand out the Stdout handle too (the PSP's three distinct
+     * handles are not modelled yet, #2397), so a close through them answers the same.
+     * UNMEASURED: closing the Stdin or Stderr stream itself (descriptors 0 and 2), which keeps
+     * the result it had before, and sceIoCloseAsync of any std stream, which still closes it. */
+    if (s_fds[fd].kind == FD_KIND_STD && s_fds[fd].std_stream == 1u)
+        return 0x800200d1u;
     hle_fd_release(&s_fds[fd], s_fds[fd].kind == FD_KIND_STD);
     s_closed_res[fd] = 0;
     return 0;

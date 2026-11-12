@@ -21,7 +21,7 @@
           "additionalProperties": false,
           "minProperties": 1,
           "properties": {
-            "ace": {"type": "string", "pattern": "^v1(;[a-z]+=[a-z0-9]+)+$", "maxLength": 95},
+            "ace": {"type": "string", "pattern": "^v1(;[a-z][a-z0-9]*=[a-z0-9]+)+$", "maxLength": 191},
             "present_upscale": {"type": "string", "enum": ["fsr1", "movie-fsr1", "movie-anime4k", "fsr1+movie-fsr1", "fsr1+movie-anime4k"]}
           }
         }

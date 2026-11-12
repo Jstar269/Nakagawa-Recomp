@@ -644,7 +644,7 @@ typedef enum {
 
 /* Settings > Enhanced's rows after the play mode: one per Enhanced part (player_state.h
    PlayerEnhancedPart), in that order. */
-#define PLAYER_UI_ENHANCED_ROWS 12
+#define PLAYER_UI_ENHANCED_ROWS 13
 typedef struct {
     const char *name;           /* "Texture filtering" */
     const char *value;          /* "16x", "Off", "Library (On)" on a title's page */
@@ -1135,7 +1135,8 @@ enum {
     PLAYER_UI_ID_SETTINGS_ACE = 0x4540u,              /* retired: the GAME card's old switch */
     PLAYER_UI_ID_SETTINGS_ACE_OPEN = 0x4541u,         /* the GAME card's row that opens Enhanced */
     PLAYER_UI_ID_SETTINGS_ACE_MODE = 0x4542u,         /* the Enhanced page's play mode */
-    /* + the part (PlayerEnhancedPart): 0x4543 to 0x454E, PLAYER_UI_ENHANCED_ROWS of them */
+    /* + the part (PlayerEnhancedPart): 0x4543 to 0x454F, PLAYER_UI_ENHANCED_ROWS of them; the
+       range is full, so a fourteenth part needs new ids */
     PLAYER_UI_ID_SETTINGS_ENHANCED_PART = 0x4543u,
     PLAYER_UI_ID_SETTINGS_PROBLEM_REPORT = 0x4550u,   /* Settings: opens the Problem report page */
     PLAYER_UI_ID_REPORT_CREATE = 0x4551u,
@@ -1470,6 +1471,9 @@ unsigned player_ui_nk_test_focus(const PlayerUiNk *player);
 const char *player_ui_nk_test_nickname(const PlayerUiNk *player, char *count, size_t cap);
 /* What the library's find box holds while it is open, else NULL. */
 const char *player_ui_nk_test_find(const PlayerUiNk *player);
+/* Test only: how many of the library's games the last library frame's grid held (the
+   find box's matches while it is open), and in *total how many games it has. */
+size_t player_ui_nk_test_library_grid(const PlayerUiNk *player, size_t *total);
 /* Test only: the next UI's last frame was laid out (nk_ui_laid_out), so the
    next frame takes a move at once; false without a next UI. */
 bool player_ui_nk_test_laid_out(const PlayerUiNk *player);

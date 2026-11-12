@@ -165,6 +165,28 @@ POWERSHELL ?= powershell.exe
 else
 POWERSHELL ?= pwsh
 endif
+# RECIPE SHELL (#368). GNU Make runs recipes with sh. On Windows, mingw32-make looks
+# for sh.exe on PATH when it starts and, when it finds one, sets SHELL to its full
+# path. When it finds none, SHELL keeps the bare default `sh.exe` and every recipe
+# runs under cmd.exe instead, with no warning. Most recipes are written for both,
+# and the player's package build (a bundled toolchain with no sh) relies on that.
+# The rest use POSIX syntax (if/then, for loops, `[`, `VAR=value cmd`, `$$var`, `;`
+# between commands), which cmd.exe misreads: it fails with an unrelated error, or
+# worse, exits 0 (`echo ...; exit 2` prints the whole line and succeeds). Each such
+# recipe starts with $(NK_REQUIRE_POSIX_SHELL). Make expands a recipe in full before
+# running its first line, so under cmd.exe the guard stops Make, naming the target
+# and the fix, before any line of that recipe runs; with a POSIX sh it expands to
+# nothing. The guard applies to `make -n` too, which then stops instead of printing.
+# tools/test_build_truth.py::RecipeShellGuardTests classifies the recipes in Make's own
+# rule database, with the `define` macros they call, and fails when one in POSIX syntax
+# lacks the guard; it sees only the conditional branches of the host it runs on. An
+# explicit `SHELL=cmd.exe` on the command line is the caller's choice and is not refused.
+ifeq ($(OS),Windows_NT)
+NK_RECIPE_SHELL := $(if $(filter sh.exe,$(SHELL)),cmd.exe,posix)
+else
+NK_RECIPE_SHELL := posix
+endif
+NK_REQUIRE_POSIX_SHELL = $(if $(filter cmd.exe,$(NK_RECIPE_SHELL)),$(error $@ needs a POSIX sh, and mingw32-make found no sh.exe on PATH, so it would run this recipe with cmd.exe. Put the usr\bin folder of Git for Windows or MSYS2 on PATH and run it again; see "PATH order" in docs/SETUP.md))
 # glslc from the Vulkan SDK is used ONLY by the opt-in shaders target.
 GLSLC ?= glslc
 
@@ -335,7 +357,7 @@ LIBS       ?= -lSDL3 $(VULKAN_LIB_NAME) $(WIN_ONLY_LIBS) $(POSIX_RUNTIME_LIBS)
 ifeq ($(NK_TARGET_OS),android)
 override CFLAGS += -fPIC
 TITLE_OUTPUT = $(BUILD_DIR)/lib$(GAME_NAME).so
-TITLE_LINK_FLAGS := -shared -Wl,--wrap=exit -Wl,--wrap=_exit -Wl,--wrap=_Exit
+TITLE_LINK_FLAGS := -shared -Wl,--wrap=exit -Wl,--wrap=_exit -Wl,--wrap=_Exit -Wl,--wrap=atexit
 TITLE_ANDROID_OBJ = $(BUILD_DIR)/nk_android_title.o
 else
 TITLE_OUTPUT = $(BUILD_DIR)/$(GAME_NAME)$(EXE_EXT)
@@ -529,6 +551,13 @@ ENHANCEMENT_PACKAGE_PROFILE_LINE :=
 else
 ENHANCEMENT_PACKAGE_ARG := --enhancement-package=$(ENHANCEMENT_PACKAGE)
 ENHANCEMENT_PACKAGE_PROFILE_LINE := $(NEWLINE)ENHANCEMENT_PACKAGE=$(ENHANCEMENT_PACKAGE)
+endif
+# A guest_memory_code_hook package applied beside ENHANCEMENT_PACKAGE (docs/ENHANCEMENT_CONTRACT.md
+# section 9.9). Passed whenever set: codegen refuses it without ENHANCEMENT_PACKAGE.
+ENHANCEMENT_CODE_HOOK_PACKAGE ?=
+ifneq ($(strip $(ENHANCEMENT_CODE_HOOK_PACKAGE)),)
+ENHANCEMENT_PACKAGE_ARG += --code-hook-package=$(ENHANCEMENT_CODE_HOOK_PACKAGE)
+ENHANCEMENT_PACKAGE_PROFILE_LINE := $(ENHANCEMENT_PACKAGE_PROFILE_LINE)$(NEWLINE)ENHANCEMENT_CODE_HOOK_PACKAGE=$(ENHANCEMENT_CODE_HOOK_PACKAGE)
 endif
 # The title's extracted files, where a package's data_files are read and checked.
 # Only a package build passes it; the package digest already names those files.

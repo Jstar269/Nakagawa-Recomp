@@ -2576,6 +2576,73 @@ class TestEnhancementBuildPackageWiring(unittest.TestCase):
                             )
                     self.assertEqual(ctx.exception.code, "PACKAGE_AMBIENT_ENHANCEMENT")
 
+    def test_the_build_route_names_the_code_hook_package(self) -> None:
+        timing = self._write_pkg("pkg.json")
+        hook = self._write_pkg("hook.json", category="guest_memory_code_hook", id="synth.widen.clip",
+                               capabilities=["widen_visibility"], sites=[{
+                                   "id": "SYNTH_WIDEN", "function": "synth_scene_cache", "insn_offset": 0,
+                                   "stock_digest": compute_stock_words_digest([0x0C000440]),
+                                   "transform": "clip_x_widen", "clip_register": "v0", "clip_offsets": [640]}])
+        for key in ("rng_policy",):
+            data = json.loads(hook.read_text(encoding="utf-8"))
+            data.pop(key, None)
+            hook.write_text(json.dumps(data), encoding="utf-8")
+        # nk_cli: the planner arguments and the cache key's environment, unchanged without one.
+        self.assertEqual(self.nk_cli._planner_package_args(timing, None, ""), ["--enhancement-package", str(timing)])
+        self.assertEqual(self.nk_cli._planner_package_args(timing, hook, ""),
+                         ["--enhancement-package", str(timing), "--code-hook-package", str(hook)])
+        self.assertEqual(self.nk_cli._planner_package_args(None, None, str(self.root)), [])
+        self.assertEqual(self.nk_cli._package_environment(timing, None), {"ENHANCEMENT_PACKAGE": str(timing)})
+        self.assertEqual(self.nk_cli._package_environment(timing, hook),
+                         {"ENHANCEMENT_PACKAGE": str(timing), "ENHANCEMENT_CODE_HOOK_PACKAGE": str(hook)})
+        # nk_cli's cache key is computed with both packages named.
+        class Stop(Exception):
+            pass
+
+        seen: list[dict[str, str]] = []
+
+        def capture(_manifest: Any, environment: dict[str, str]) -> Any:
+            seen.append(dict(environment))
+            raise Stop
+
+        manifest_path = self.root / "manifest.json"
+        manifest_path.write_text("{}", encoding="utf-8")
+        with mock.patch.object(self.nk_cli, "_package_codegen_options", side_effect=capture):
+            with self.assertRaises(Stop):
+                self.nk_cli._current_package_cache_key(
+                    {"modules": []}, manifest_path, self.EXE_SHA, None, None, {},
+                    enhancement_package_path=timing, code_hook_package_path=hook)
+        self.assertEqual(seen[0]["ENHANCEMENT_PACKAGE"], str(timing))
+        self.assertEqual(seen[0]["ENHANCEMENT_CODE_HOOK_PACKAGE"], str(hook))
+        # The planner's cache options: the code-hook package is named only when there is one.
+        plan = {"environment": {"GAME_BASE": "0x08804000", "GAME_ENTRY": "0x08804000", "TITLE_EXTRA_SPANS": ""},
+                "codegen_profile": "none"}
+        with mock.patch.dict(os.environ, {}, clear=False):
+            for name in ("ENHANCEMENT_PACKAGE", "ENHANCEMENT_CODE_HOOK_PACKAGE", "CODEGEN_USER_ARGS"):
+                os.environ.pop(name, None)
+            alone = self.plan._cache_codegen_options(plan, selected_optional=set(), funcs_per_chunk=2000,
+                                                     enhancement_package_path=timing)
+            both = self.plan._cache_codegen_options(plan, selected_optional=set(), funcs_per_chunk=2000,
+                                                    enhancement_package_path=timing, code_hook_package_path=hook)
+        self.assertNotIn("code_hook_package_id", alone)
+        self.assertEqual({k: v for k, v in both.items() if not k.startswith("code_hook_")}, alone)
+        self.assertEqual(both["code_hook_package_id"], "synth.widen.clip")
+
+    def test_planner_refuses_a_code_hook_package_without_an_enhancement_package(self) -> None:
+        hook = self._write_pkg("hook.json", category="guest_memory_code_hook")
+        with self.assertRaises(self.plan.PackageRouteError) as ctx:
+            self.plan.build_package(
+                {}, manifest_path=self.root / "manifest.json", game_elf=self.root / "game.elf",
+                output_dir=self.root / "out", code_hook_package_path=hook)
+        self.assertEqual(ctx.exception.code, "PACKAGE_INVALID_ENHANCEMENT")
+        self.assertIn("beside an enhancement package", str(ctx.exception))
+        with mock.patch.dict(os.environ, {"ENHANCEMENT_CODE_HOOK_PACKAGE": str(hook)}):
+            with self.assertRaises(self.plan.PackageRouteError) as ctx:
+                self.plan.build_package(
+                    {}, manifest_path=self.root / "manifest.json", game_elf=self.root / "game.elf",
+                    output_dir=self.root / "out", enhancement_package_path=self._write_pkg("pkg.json"))
+        self.assertEqual(ctx.exception.code, "PACKAGE_AMBIENT_ENHANCEMENT")
+
     def test_invalid_explicit_package_refuses_the_cache_key(self) -> None:
         path = self._write_pkg("pkg.json", sites=[])
         with self.assertRaises(package_cache.PackageCacheError):
@@ -2668,6 +2735,119 @@ class TestEnhancementBuildPackageWiring(unittest.TestCase):
             with self.subTest(sfo_disc_id=sfo_disc_id, disc_version=disc_version):
                 with self.assertRaisesRegex(self.nk_cli.PackageBuildError, "DISC_ID and DISC_VERSION"):
                     self._select_published(sfo_disc_id, disc_version)
+
+    # The code-hook package beside the timing package (contract section 9.9).
+
+    def _hook_pkg(self, name: str, **changes: Any) -> Path:
+        hook = {
+            "schema_version": 1, "id": "synth.widen.clip", "display_name": "Synthetic clip widen",
+            "version": "1.0.0", "category": "guest_memory_code_hook", "target_title_id": self.TITLE,
+            "game_version": "1.00", "executable_sha256": self.EXE_SHA, "capabilities": ["widen_visibility"],
+            "sites": [{"id": "SYNTH_WIDEN", "function": "synth_scene_cache", "insn_offset": 0,
+                       "stock_digest": compute_stock_words_digest([0x0C000440]),
+                       "transform": "clip_x_widen", "clip_register": "v0", "clip_offsets": [640]}],
+        }
+        hook.update(changes)
+        path = self.root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(hook), encoding="utf-8")
+        return path
+
+    def _select_hook(self, package: Path | None = None, ace_cull: bool = False) -> Any:
+        return self.nk_cli._select_code_hook_package(
+            self.root, self.DISC, title_id=self.TITLE, executable_sha256=self.EXE_SHA,
+            code_hook_package=package, ace_cull=ace_cull, shipped_enhancements=self.root / "shipped")
+
+    def _stacked(self, timing: Path | None, hook: Path | None) -> Any:
+        selected, target = self._select(timing)
+        return self.nk_cli._stack_code_hook_package(self.root, self.DISC, selected, self._select_hook(hook), target)
+
+    def test_without_a_code_hook_package_the_selection_is_unchanged(self) -> None:
+        self.assertIsNone(self._select_hook())
+        timing = self._write_pkg("pkg.json")
+        self.assertEqual(self._stacked(timing, None),
+                         (timing.resolve(), None, self.root / "packages" / f"{self.DISC}-enhanced-synth.timing.60hz"))
+        self.assertEqual(self._stacked(None, None), (None, None, self.root / "packages" / self.DISC))
+
+    def test_ace_cull_finds_the_lowercase_culling_package(self) -> None:
+        with self.assertRaisesRegex(self.nk_cli.PackageBuildError, "--ace-cull requires a culling package"):
+            self._select_hook(ace_cull=True)
+        own = self._hook_pkg(f"enhancements/{self.DISC.lower()}-cull.json")
+        self.assertEqual(self._select_hook(ace_cull=True), own.resolve())
+
+    def test_a_code_hook_package_beside_a_timing_package_builds_their_joint_directory(self) -> None:
+        timing, hook = self._write_pkg("pkg.json"), self._hook_pkg("hook.json")
+        self.assertEqual(self._stacked(timing, hook), (
+            timing.resolve(), hook.resolve(),
+            self.root / "packages" / f"{self.DISC}-enhanced-synth.timing.60hz+synth.widen.clip"))
+
+    def test_a_code_hook_package_alone_is_the_one_package(self) -> None:
+        hook = self._hook_pkg("hook.json")
+        self.assertEqual(self._stacked(None, hook), (
+            hook.resolve(), None, self.root / "packages" / f"{self.DISC}-enhanced-synth.widen.clip"))
+
+    def test_a_code_hook_package_with_no_sites_is_refused(self) -> None:
+        path = self._hook_pkg("no-sites.json")
+        data = json.loads(path.read_text(encoding="utf-8"))
+        for key in ("sites", "game_version", "executable_sha256"):
+            del data[key]
+        path.write_text(json.dumps(data), encoding="utf-8")
+        with self.assertRaisesRegex(self.nk_cli.PackageBuildError, "has no sites"):
+            self._select_hook(path)
+
+    def test_a_code_hook_package_is_checked_like_the_enhancement_package(self) -> None:
+        cases = {
+            "not 'guest_memory_code_hook'": self._write_pkg("timing-as-hook.json"),
+            "target_title_id": self._hook_pkg("other-title.json", target_title_id="other-title"),
+            "executable_sha256": self._hook_pkg("other-exe.json", executable_sha256="cd" * 32),
+        }
+        for pattern, path in cases.items():
+            with self.subTest(pattern):
+                with self.assertRaisesRegex(self.nk_cli.PackageBuildError, pattern):
+                    self._select_hook(path)
+
+    def test_two_code_hook_packages_are_refused(self) -> None:
+        first = self._hook_pkg("first.json", id="synth.first.hook")
+        with self.assertRaisesRegex(self.nk_cli.PackageBuildError, "is a code-hook package too"):
+            self.nk_cli._stack_code_hook_package(self.root, self.DISC, first.resolve(),
+                                                 self._hook_pkg("hook.json").resolve(), self.root)
+
+    def test_a_joint_name_over_64_characters_is_refused(self) -> None:
+        timing = self._write_pkg("pkg.json", id="t" * 40)
+        with self.assertRaisesRegex(self.nk_cli.PackageBuildError, "more than the 64"):
+            self._stacked(timing, self._hook_pkg("hook.json", id="h" * 30))
+
+    def test_the_cache_key_names_the_code_hook_package_only_when_there_is_one(self) -> None:
+        from nk_core import package_cache
+
+        timing, hook = self._write_pkg("pkg.json"), self._hook_pkg("hook.json")
+        alone = package_cache.enhancement_package_options({"ENHANCEMENT_PACKAGE": str(timing)})
+        self.assertEqual(sorted(alone), ["enhancement_package_epoch", "enhancement_package_id",
+                                         "enhancement_package_sha256"])
+        both = package_cache.enhancement_package_options(
+            {"ENHANCEMENT_PACKAGE": str(timing), "ENHANCEMENT_CODE_HOOK_PACKAGE": str(hook)})
+        self.assertEqual({k: v for k, v in both.items() if k in alone}, alone)
+        self.assertEqual(both["code_hook_package_id"], "synth.widen.clip")
+        self.assertEqual(both["code_hook_package_sha256"],
+                         enhancement_package.compute_package_digest(enhancement_package.load_and_validate_package(hook)))
+        self.assertNotIn("code_hook_symbol_map_sha256", both)
+        # Its symbols sidecar names its sites, so an edited one is a different build.
+        hook.with_suffix(".symbols.json").write_text('{"synth_scene_cache": "0x00001200"}', encoding="utf-8")
+        named = package_cache.enhancement_package_options(
+            {"ENHANCEMENT_PACKAGE": str(timing), "ENHANCEMENT_CODE_HOOK_PACKAGE": str(hook)})
+        self.assertEqual(named["code_hook_symbol_map_sha256"], package_cache.sha256_file(hook.with_suffix(".symbols.json")))
+
+    def test_an_inherited_code_hook_package_is_ambient(self) -> None:
+        from nk_core import package_cache
+
+        for env, named in (({"ENHANCEMENT_CODE_HOOK_PACKAGE": "x.json"}, "ENHANCEMENT_CODE_HOOK_PACKAGE"),
+                           ({"MAKEFLAGS": "-j4 ENHANCEMENT_CODE_HOOK_PACKAGE=x.json"},
+                            "MAKEFLAGS ENHANCEMENT_CODE_HOOK_PACKAGE"),
+                           ({"CODEGEN_USER_ARGS": "--code-hook-package=x.json"},
+                            "CODEGEN_USER_ARGS --code-hook-package")):
+            with self.subTest(named):
+                self.assertEqual(package_cache.ambient_enhancement_package(env), named)
+        self.assertIsNone(package_cache.ambient_enhancement_package({"MAKEFLAGS": "-j4"}))
 
 
 def _sample_csv(path: Path, *, hz: int, seconds: int, columns: dict[str, Any]) -> None:
@@ -4059,6 +4239,255 @@ class TestClipXWiden(unittest.TestCase):
             validate_package(timing_site)
 
 
+class TestCodeHookBesideTiming(unittest.TestCase):
+    """A build carries one timing package and at most one code-hook package beside it (contract
+    section 9.9): codegen's --code-hook-package. Without it the output is as before; each way the
+    two could clash is refused by name, never merged."""
+
+    ENTRY = 0x1000
+    BUILD = 0x1100     # returns a pointer in $v0
+    CALLER = 0x1200    # jal BUILD; its delay slot loads a count
+    TIMER = 0x1300     # a count the timing package doubles; its return's delay slot is the boundary
+    PAIR = 0x1400      # jal TIMER, then jal BUILD in its delay slot
+    RELAY = 0x1500     # jal BUILD, passing its own $a0 on
+    COUNT = 0x2404001E  # addiu $a0, $zero, 30
+
+    def setUp(self) -> None:
+        self.words = _program({
+            self.ENTRY: [_jal(self.CALLER), _NOP, _jal(self.TIMER), _NOP, _jal(self.RELAY), _NOP,
+                         _jal(self.PAIR), _NOP, _JR_RA, _NOP],
+            self.BUILD: [_i(0x09, _ZERO, _V0, 0x0400), _JR_RA, _NOP],       # addiu v0, zero, 0x400
+            self.CALLER: [_jal(self.BUILD), self.COUNT, _JR_RA, _NOP],
+            self.TIMER: [self.COUNT, _JR_RA, _NOP],
+            self.PAIR: [_jal(self.TIMER), _jal(self.BUILD), _NOP, _JR_RA, _NOP],
+            self.RELAY: [_jal(self.BUILD), _NOP, _JR_RA, _NOP],
+        })
+        self.symbols = {"synth_entry": f"0x{self.ENTRY:08x}", "synth_scene_build": f"0x{self.BUILD:08x}",
+                        "synth_scene_cache": f"0x{self.CALLER:08x}", "synth_timer": f"0x{self.TIMER:08x}",
+                        "synth_pair": f"0x{self.PAIR:08x}", "synth_relay": f"0x{self.RELAY:08x}"}
+
+    def _timing(self, *sites: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "schema_version": 1,
+            "id": "synth.timing.60hz",
+            "display_name": "Synthetic 60 Hz",
+            "version": "1.0.0",
+            "category": "timing_frame_presentation",
+            "target_title_id": "synthetic-allegrex-v1",
+            "game_version": "1.00",
+            "executable_sha256": hashlib.sha256(self.elf_bytes).hexdigest(),
+            "capabilities": ["count_x2", "gate_30hz"],
+            "rng_policy": {"mode": "rescale_probability", "reason": "synthetic"},
+            "sites": list(sites) or [self._count_site("SYNTH_TIMER", "synth_timer", 0)],
+            "update_boundary": {"function": "synth_timer", "insn_offset": 8,
+                                "stock_digest": compute_stock_words_digest([_NOP])},
+        }
+
+    @staticmethod
+    def _count_site(site_id: str, function: str, offset: int) -> dict[str, Any]:
+        return {"id": site_id, "function": function, "insn_offset": offset,
+                "stock_digest": compute_stock_words_digest([TestCodeHookBesideTiming.COUNT]),
+                "transform": "count_x2"}
+
+    def _hook(self, **fields: Any) -> dict[str, Any]:
+        pkg = {
+            "schema_version": 1,
+            "id": "synth.widen.clip",
+            "display_name": "Synthetic clip widen",
+            "version": "1.0.0",
+            "category": "guest_memory_code_hook",
+            "target_title_id": "synthetic-allegrex-v1",
+            "game_version": "1.00",
+            "executable_sha256": hashlib.sha256(self.elf_bytes).hexdigest(),
+            "capabilities": ["widen_visibility"],
+            "sites": [{
+                "id": "SYNTH_WIDEN", "function": "synth_scene_cache", "insn_offset": 0,
+                "stock_digest": compute_stock_words_digest([self.words[self.CALLER]]),
+                "transform": "clip_x_widen", "clip_register": "v0", "clip_offsets": [640, 448],
+            }],
+        }
+        pkg.update(fields)
+        return pkg
+
+    def _build(self, tmp: Path, name: str, timing: dict[str, Any] | None = None,
+               hook: dict[str, Any] | None = None) -> tuple[int, str, dict[str, bytes]]:
+        elf_path = tmp / "synth.elf"
+        if not elf_path.exists():
+            self.elf_bytes = _write_synthetic_mips_elf(elf_path, self.words, self.ENTRY)
+        out_dir = tmp / name
+        out_dir.mkdir()
+        extra = []
+        for flag, pkg, leaf in (("--enhancement-package", timing, "timing"), ("--code-hook-package", hook, "hook")):
+            if pkg is not None:
+                path = tmp / f"{name}-{leaf}.json"
+                path.write_text(json.dumps(pkg), encoding="utf-8")
+                path.with_suffix(".symbols.json").write_text(json.dumps(self.symbols), encoding="utf-8")
+                extra.append(f"{flag}={path}")
+        return TestEnhancementAotCodegenAndCache._run_codegen(elf_path, out_dir / "out.c", extra)
+
+    def _elf(self, tmp: Path) -> None:
+        self.elf_bytes = _write_synthetic_mips_elf(tmp / "synth.elf", self.words, self.ENTRY)
+
+    def test_the_hook_package_adds_only_its_site_and_its_header_line(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            self._elf(tmp)
+            rc, out, timing_only = self._build(tmp, "timing", self._timing())
+            self.assertEqual(rc, 0, out)
+            rc, out, stacked = self._build(tmp, "stacked", self._timing(), self._hook())
+            self.assertEqual(rc, 0, out)
+            self.assertEqual(sorted(timing_only), sorted(stacked))
+            text = b"\n".join(stacked.values()).decode("utf-8")
+            self.assertEqual(text.count("sr_enhancement_widen_clip_x(s->r[2], _nk_clip_off, 2u);"), 1)
+            self.assertIn("/* AOT Code-Hook Package: id=synth.widen.clip v=1.0.0 sites=1 sha256=", text)
+            self.assertIn("/* AOT Enhancement Epoch: aot-enhancement-package-v1 id=synth.timing.60hz", text)
+            # Every line the timing-only build writes is still there, in order; the stacked build adds
+            # the header line and the site's widening lines, and nothing else.
+            added = []
+            for leaf in sorted(stacked):
+                old = timing_only[leaf].decode("utf-8").splitlines()
+                new = stacked[leaf].decode("utf-8").splitlines()
+                matcher = difflib.SequenceMatcher(a=old, b=new, autojunk=False)
+                for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+                    self.assertIn(tag, ("equal", "insert"), (leaf, old[i1:i2], new[j1:j2]))
+                    if tag == "insert":
+                        added.extend(new[j1:j2])
+            self.assertTrue(added)
+            for line in added:
+                self.assertTrue("Code-Hook Package" in line or "_nk_clip_off" in line, line)
+
+    def test_a_stacked_build_leaves_nothing_behind_for_the_next_build(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            self._elf(tmp)
+            rc, out, first = self._build(tmp, "first", self._timing())
+            self.assertEqual(rc, 0, out)
+            # A stacked build leaves module state behind; the next timing-only run is byte-identical.
+            rc, out, _ = self._build(tmp, "stacked", self._timing(), self._hook())
+            self.assertEqual(rc, 0, out)
+            rc, out, again = self._build(tmp, "again", self._timing())
+            self.assertEqual(rc, 0, out)
+            self.assertEqual(first, again)
+            self.assertNotIn(b"Code-Hook", b"".join(first.values()))
+
+    def _refused(self, pattern: str, timing: dict[str, Any] | None, hook: dict[str, Any],
+                 status: int = 1) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            self._elf(tmp)
+            rc, out, files = self._build(tmp, "refused", timing, hook)
+            self.assertEqual(rc, status, out)
+            self.assertRegex(out, pattern)
+            self.assertEqual(files, {})
+
+    def test_a_second_package_that_is_not_a_code_hook_is_refused(self) -> None:
+        self._elf_bytes_for_packages()
+        second = self._timing(self._count_site("SYNTH_OTHER", "synth_scene_cache", 4))
+        second["id"] = "synth.other.timing"
+        self._refused(r"code-hook package 'synth.other.timing': category 'timing_frame_presentation' "
+                      r"is not 'guest_memory_code_hook'", self._timing(), second)
+
+    def test_two_code_hook_packages_are_refused(self) -> None:
+        self._elf_bytes_for_packages()
+        first = self._hook(id="synth.first.hook")
+        first["sites"][0]["id"] = "SYNTH_FIRST"
+        self._refused(r"the enhancement package 'synth.first.hook' is a code-hook package too",
+                      first, self._hook())
+
+    def test_an_address_collision_is_refused(self) -> None:
+        self._elf_bytes_for_packages()
+        gate = {"id": "SYNTH_GATE", "function": "synth_scene_cache", "insn_offset": 0,
+                "stock_digest": compute_stock_words_digest([self.words[self.CALLER]]),
+                "transform": "gate_30hz"}
+        self._refused(r"code-hook site SYNTH_WIDEN: address 0x00001200 collides with site SYNTH_GATE",
+                      self._timing(gate), self._hook())
+
+    def test_a_hook_whose_delay_slot_the_timing_package_rewrites_is_refused(self) -> None:
+        self._elf_bytes_for_packages()
+        slot = self._count_site("SYNTH_SLOT", "synth_scene_cache", 4)
+        self._refused(r"code-hook site SYNTH_WIDEN at 0x00001200: its delay slot 0x00001204 is site "
+                      r"SYNTH_SLOT of the enhancement package, inside a span it rewrites",
+                      self._timing(slot), self._hook())
+
+    def test_a_hook_at_the_delay_slot_of_a_rewritten_call_is_refused(self) -> None:
+        self._elf_bytes_for_packages()
+        gate = {"id": "SYNTH_GATE", "function": "synth_pair", "insn_offset": 0,
+                "stock_digest": compute_stock_words_digest([self.words[self.PAIR]]), "transform": "gate_30hz"}
+        hook = self._hook()
+        hook["sites"][0].update(function="synth_pair", insn_offset=4,
+                                stock_digest=compute_stock_words_digest([self.words[self.PAIR + 4]]))
+        self._refused(r"code-hook site SYNTH_WIDEN: address 0x00001404 collides with the delay slot of site "
+                      r"SYNTH_GATE of the enhancement package", self._timing(gate), hook)
+
+    def test_a_hook_on_a_call_an_alternate_gate_bypasses_is_refused(self) -> None:
+        # The timing package gates jal synth_relay with the alternate synth_scene_build, so on an alternate
+        # update it calls synth_scene_build itself and the hooked jal inside synth_relay never runs.
+        self._elf_bytes_for_packages()
+        alt = {"id": "SYNTH_ALT", "function": "synth_entry", "insn_offset": 16,
+               "stock_digest": compute_stock_words_digest([self.words[self.ENTRY + 16]]),
+               "transform": "gate_30hz_alt", "alternates": ["synth_scene_build"]}
+        hook = self._hook()
+        hook["sites"][0].update(function="synth_relay", insn_offset=0,
+                                stock_digest=compute_stock_words_digest([self.words[self.RELAY]]))
+        self._refused(r"code-hook site SYNTH_WIDEN at 0x00001500: its call to 0x00001100 is an alternate that "
+                      r"site SYNTH_ALT of the enhancement package calls itself on alternate updates",
+                      self._timing(alt), hook)
+
+    def test_a_hook_package_with_no_sites_is_refused(self) -> None:
+        self._elf_bytes_for_packages()
+        hook = self._hook()
+        for key in ("sites", "game_version", "executable_sha256"):
+            del hook[key]
+        validate_package(copy.deepcopy(hook))
+        self._refused(r"code-hook package 'synth.widen.clip' has no sites", self._timing(), hook)
+
+    def test_a_hook_whose_delay_slot_is_the_update_boundary_is_refused(self) -> None:
+        self._elf_bytes_for_packages()
+        timing = self._timing()
+        timing["update_boundary"] = {"function": "synth_scene_cache", "insn_offset": 4,
+                                     "stock_digest": compute_stock_words_digest([self.COUNT])}
+        self._refused(r"code-hook site SYNTH_WIDEN at 0x00001200: its delay slot 0x00001204 is the "
+                      r"update_boundary of the enhancement package", timing, self._hook())
+
+    def test_a_hook_rewrite_that_keeps_run_time_state_is_refused(self) -> None:
+        # No code-hook transform keeps state today; this pins the guard for the first one that does.
+        self._elf_bytes_for_packages()
+        real = enhancement_package.verify_and_resolve_sites
+
+        def with_state(pkg: dict[str, Any], **kwargs: Any) -> Any:
+            sites = real(pkg, **kwargs)
+            if pkg["category"] == "guest_memory_code_hook":
+                for site in sites.values():
+                    site["rewrite"]["requires"] = ["SYNTH_TIMER"]
+            return sites
+
+        with mock.patch.object(enhancement_package, "verify_and_resolve_sites", side_effect=with_state):
+            self._refused(r"code-hook site SYNTH_WIDEN: transform 'clip_x_widen' keeps run-time state",
+                          self._timing(), self._hook())
+
+    def test_a_hook_for_another_title_is_refused(self) -> None:
+        self._elf_bytes_for_packages()
+        self._refused(r"target_title_id 'another-title-v1' is not the enhancement package's",
+                      self._timing(), self._hook(target_title_id="another-title-v1"))
+
+    def test_a_site_id_both_packages_use_is_refused(self) -> None:
+        self._elf_bytes_for_packages()
+        hook = self._hook()
+        hook["sites"][0]["id"] = "SYNTH_TIMER"
+        self._refused(r"code-hook site SYNTH_TIMER: the enhancement package has a site with that id",
+                      self._timing(), hook)
+
+    def test_a_hook_package_alone_is_refused(self) -> None:
+        self._elf_bytes_for_packages()
+        self._refused(r"--code-hook-package is applied beside --enhancement-package", None, self._hook(),
+                      status=2)
+
+    def _elf_bytes_for_packages(self) -> None:
+        # The packages carry the executable's SHA-256: write the ELF once to learn it.
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            self._elf(Path(tmp_dir))
+
+
 class TestPublishedPackages(_SynthTimingElfFixture):
     """Published packages (ENHANCEMENT_CONTRACT.md section 5.1): site data with no game bytes.
 
@@ -4243,6 +4672,24 @@ class TestPublishedPackages(_SynthTimingElfFixture):
             wrong["sites"][1]["stock_digest"] = compute_stock_words_digest([0x24040028])
             with self.assertRaisesRegex(EnhancementPackageError, "does not match the executable"):
                 self._publish(elf_bytes, wrong)
+
+    def test_shipped_packages_validate_and_pass_the_publication_check(self) -> None:
+        """Every package in assets/enhancements/ is a valid published package with no findings.
+
+        The validator also refuses a site_map name that no site, data site, hook or update
+        boundary uses, so a republished package must drop the names it no longer needs.
+        """
+        import publish_audit
+
+        shipped = sorted((ROOT / "assets" / "enhancements").glob("*.json"))
+        self.assertTrue(shipped)
+        for path in shipped:
+            rel = path.relative_to(ROOT).as_posix()
+            with self.subTest(package=rel):
+                data = path.read_bytes()
+                package = json.loads(data.decode("utf-8"))
+                validate_package(copy.deepcopy(package))
+                self.assertEqual(publish_audit.check_enhancement_packages({rel: (data, None)}), [])
 
     def test_validator_refuses_malformed_published_packages(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -6197,7 +6644,7 @@ class TestAcePartsLoad(unittest.TestCase):
         return names
 
     def _codegen(self, tmp: Path, name: str, pkg: dict[str, Any] | None,
-                 symbols: dict[str, str] | None = None) -> tuple[int, str, dict[str, str]]:
+                 symbols: dict[str, str] | None = None, extra: tuple[str, ...] = ()) -> tuple[int, str, dict[str, str]]:
         elf_path = tmp / "load.elf"
         elf_path.write_bytes(self.elf)
         out_dir = tmp / name
@@ -6210,11 +6657,53 @@ class TestAcePartsLoad(unittest.TestCase):
             if symbols is not None:
                 pkg_path.with_suffix(".symbols.json").write_text(json.dumps(symbols), encoding="utf-8")
             argv.append(f"--enhancement-package={pkg_path}")
+        argv.extend(extra)
         out, err = StringIO(), StringIO()
         with mock.patch("sys.stdout", new=out), mock.patch("sys.stderr", new=err):
             rc = codegen.main(argv)
         files = {p.name: p.read_text(encoding="utf-8") for p in sorted(out_dir.glob("out*")) if p.is_file()}
         return rc, out.getvalue() + err.getvalue(), files if rc == 0 else {}
+
+    def _codegen_with_hook(self, tmp: Path, offset: int, site_id: str) -> tuple[int, str, dict[str, str]]:
+        """Codegen with the load package and a code-hook package whose clip_x_widen site is the jal at
+        synth_loader+offset (contract section 9.9)."""
+        hook = {
+            "schema_version": 1, "id": "synth.widen.clip", "display_name": "Synthetic clip widen",
+            "version": "1.0.0", "category": "guest_memory_code_hook", "target_title_id": "synthetic-allegrex-v1",
+            "game_version": "1.00", "executable_sha256": hashlib.sha256(self.elf).hexdigest(),
+            "capabilities": ["widen_visibility"],
+            "sites": [{"id": site_id, "function": "synth_loader", "insn_offset": offset,
+                       "stock_digest": self._digest("synth_loader", offset), "transform": "clip_x_widen",
+                       "clip_register": "v0", "clip_offsets": [640]}],
+        }
+        hook_path = tmp / "hook.json"
+        hook_path.write_text(json.dumps(hook), encoding="utf-8")
+        hook_path.with_suffix(".symbols.json").write_text(json.dumps(self.symbols()), encoding="utf-8")
+        return self._codegen(tmp, "stacked", self.package(), self.symbols(),
+                             extra=(f"--code-hook-package={hook_path}",))
+
+    def test_a_code_hook_site_on_an_ace_part_site_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            rc, out, files = self._codegen_with_hook(Path(tmp_dir), 8, "SYNTH_WIDEN")
+        self.assertEqual(rc, 1, out)
+        self.assertRegex(out, rf"code-hook site SYNTH_WIDEN: address 0x{self.loader + 8:08x} collides with "
+                              r"site SYNTH_LOAD_WAIT of the enhancement package")
+        self.assertEqual(files, {})
+
+    def test_a_code_hook_site_id_an_ace_part_uses_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            rc, out, files = self._codegen_with_hook(Path(tmp_dir), 24, "SYNTH_LOAD_WAIT")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("code-hook site SYNTH_LOAD_WAIT: the enhancement package has a site with that id", out)
+        self.assertEqual(files, {})
+
+    def test_a_code_hook_site_beside_an_ace_part_builds(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            rc, out, files = self._codegen_with_hook(Path(tmp_dir), 24, "SYNTH_WIDEN")
+        self.assertEqual(rc, 0, out)
+        text = "\n".join(files.values())
+        self.assertEqual(text.count("sr_enhancement_widen_clip_x(s->r[2], _nk_clip_off, 1u);"), 1)
+        self.assertIn('nk_ace_load_skip_wait(s, "SYNTH_LOAD_WAIT"', text)
 
     # ---- the validator ------------------------------------------------------------------------
 

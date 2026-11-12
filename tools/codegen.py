@@ -173,6 +173,10 @@ PROMOTION_STATS = {"functions": 0, "promoted": 0, "spans": 0, "loads": 0, "write
 # Empty (the default) keeps authentic emission byte-identical.
 ENHANCEMENT_SITES: dict[int, dict] = {}
 ENHANCEMENT_PKG_META: dict | None = None
+# The --code-hook-package applied beside the enhancement package (contract section 9.9): its id,
+# version, digest and site count for the generated header, or None. Its sites are in
+# ENHANCEMENT_SITES with the enhancement package's.
+ENHANCEMENT_HOOK_META: dict | None = None
 # Verified ace_parts sites (contract section 9.8; addr -> resolved site dict with its "rewrite").
 # Each runs only on its own SR_ACE key at run time, never on SR_EXPERIMENTAL_60HZ.
 ENHANCEMENT_ACE_SITES: dict[int, dict] = {}
@@ -1511,7 +1515,12 @@ def _frame_step(w, regs, slots):
         if op == 0x2B and rt(w) in regs:
             slots[offset] = regs[rt(w)]
     written = _gpr_writes(w)
-    if written == "unknown":
+    if written is None:
+        # A transfer the walk does not model: bltzall/bgezall, which is_control() leaves out, or
+        # any transfer stepped as a delay slot. effect() refuses each by name later; here no
+        # register value survives it.
+        written = frozenset(range(32))
+    elif written == "unknown":
         written = (frozenset({rt(w)}) if op == 0x12 else
                    frozenset() if op in _VFPU_OPCODES else frozenset(range(32)))
     for reg in written:
@@ -1532,7 +1541,7 @@ def _loads_foreign_sp(w, regs, slots):
             and _OWN_SP not in _frame_step(w, {**regs, _OWN_SP: 0}, slots)[0])
 
 
-def _sp_exit_walk(elf, start, insns, labels):
+def _sp_exit_walk(elf, start, insns, labels, work=None):
     """(the exits of a body that leave $sp as the guest set it, all of its exits, the
     addresses of the $sp loads that made them the guest's).
 
@@ -1556,11 +1565,18 @@ def _sp_exit_walk(elf, start, insns, labels):
     to miss the frame. An exit is the address of a transfer that leaves the body, or the
     address outside the body it falls into. Whether such a load really left the frame is
     known only when it runs: emit_function checks each one there (_sp_load_check).
+
+    A computed jump may land on any label, so its state goes to every label. A fan-out that
+    cannot change a label is skipped (`hub`, below), which keeps the walk linear in the body
+    instead of (computed jumps) x (labels) and leaves every state, push and result as they
+    were. `work`, when given, receives the counts: "reach" calls, "fanouts" run in full and
+    "skipped".
     """
     if not any((read32(elf, addr) or 0) >> 26 == 0x23 and rt(read32(elf, addr)) == 29
                for addr in insns):
         return frozenset(), frozenset(), frozenset()
-    states, work, guest, exits, foreign = {}, [], set(), set(), set()
+    states, pending, guest, exits, foreign = {}, [], set(), set(), set()
+    counts = {"reach": 0, "fanouts": 0, "skipped": 0}
 
     def leave(addr, regs):
         exits.add(addr)
@@ -1568,6 +1584,7 @@ def _sp_exit_walk(elf, start, insns, labels):
             guest.add(addr)
 
     def reach(addr, regs, slots, exit_at=None):
+        counts["reach"] += 1
         if addr not in insns:
             leave(addr if exit_at is None else exit_at, regs)
             return
@@ -1578,11 +1595,18 @@ def _sp_exit_walk(elf, start, insns, labels):
             if (regs, slots) == old:
                 return
         states[addr] = (regs, slots)
-        work.append(addr)
+        pending.append(addr)
 
+    # The meet of every state sent to all labels so far. After a full fan-out of state A each
+    # label holds a state at or below A, and states only shrink, so every label is at or
+    # below hub. A state at or above hub would leave each of them as it is: reach() would
+    # return without a push, and for a label outside the body the exit is recorded already,
+    # guest-owned too when _OWN_SP (always 0 while present) is missing, since then it was
+    # missing from a state fanned out before.
+    hub = None
     reach(start, {29: 0, _OWN_SP: 0}, {})
-    while work:
-        addr = work.pop()
+    while pending:
+        addr = pending.pop()
         regs, slots = states[addr]
         w = read32(elf, addr)
         if w is None or is_eret(w):
@@ -1602,14 +1626,25 @@ def _sp_exit_walk(elf, start, insns, labels):
         elif (op == 0 and fn in (0x08, 0x09) and (fn == 0x08 or rd(w) == 0)):
             leave(addr, after[0])
             if rs(w) != 31:
-                for label in labels:
-                    reach(label, *after)
+                if (hub is not None
+                        and all(after[0].get(k) == v for k, v in hub[0].items())
+                        and all(after[1].get(k) == v for k, v in hub[1].items())):
+                    counts["skipped"] += 1
+                else:
+                    counts["fanouts"] += 1
+                    for label in labels:
+                        reach(label, *after)
+                    hub = after if hub is None else (
+                        {k: v for k, v in hub[0].items() if after[0].get(k) == v},
+                        {k: v for k, v in hub[1].items() if after[1].get(k) == v})
         elif op == 3 or (op == 0 and fn == 0x09) or is_link(w):
             kept = {k: v for k, v in after[0].items() if k in _CALL_SAVED_GPRS or k == _OWN_SP}
             reach(addr + 8, kept, after[1])
         else:
             reach(branch_target(addr, w), *after, exit_at=addr)
             reach(addr + 8, *((regs, slots) if is_likely(w) else after))
+    if work is not None:
+        work.update(counts)
     return frozenset(guest), frozenset(exits), frozenset(foreign)
 
 
@@ -3159,7 +3194,7 @@ def _vfpu_cop2_effect(addr, w, options, delay_branch_pc):
         raise Unsupported(f"cop2 sub {sub} or register {imm} at 0x{addr:08x}")
     if sub == 7 and imm == 131:
         # VFPU_CC keeps only bits 0..5: mtvc then mfvc read back written & 0x3f in every cell
-        # (unrecorded PSP read, PSP-3000, 2026-11-08, issue #326, probe case vfpu-cc-cmov).
+        # (PSP-VFPU-CCCMOV-001, PSP-3000, 2026-11-08, issue #326, probe case vfpu-cc-cmov).
         return f"{dst} = {R(rt(w))} & 0x3fu;", None, 0
     return handler(w, src, dst)
 
@@ -4426,7 +4461,19 @@ def _sv_step(w, regs, written):
             regs[i] = None
 
 def sv_plan(elf, insns, labels, hst_profile=False, options=None):
-    """Pre-compute {flush_addr: [(reg, expected_value), ...]} for one function."""
+    """Pre-compute {flush_addr: [(reg, expected_value), ...]} for one function.
+
+    Counts the points for the run's summary line; sv_points computes them without
+    counting, for the LLVM lowering plan, which reads the same function again."""
+    points = sv_points(elf, insns, labels, hst_profile=hst_profile, options=options)
+    if points:
+        SV_STATS["funcs"] += 1
+        SV_STATS["checks"] += sum(len(checks) for checks in points.values())
+    return points
+
+
+def sv_points(elf, insns, labels, hst_profile=False, options=None):
+    """sv_plan's {flush_addr: [(reg, expected_value), ...]}, with no side effect."""
     options = _options_for_call(options)
     if not (insns and options.static_verify):
         return {}
@@ -4480,9 +4527,6 @@ def sv_plan(elf, insns, labels, hst_profile=False, options=None):
         run_len += 1
         last_plain = addr
     flush()
-    if points:
-        SV_STATS["funcs"] += 1
-        SV_STATS["checks"] += total
     return points
 
 SR_SV_CHECK = """/* --static-verify support: compile-time-predicted register assertions. */
@@ -6027,6 +6071,7 @@ def _command_line_parser():
     parser.add_argument("--omit-aot", action="append", default=[], metavar="ADDR[,ADDR...]",
                         help="leave these entries to the dispatcher instead of direct C calls")
     value("--enhancement-package", "enhancement package to apply")
+    value("--code-hook-package", "a guest_memory_code_hook package applied beside --enhancement-package")
     value("--enhancement-data-root", "the title's extracted files, for package data_files")
     value("--region-split-threshold", "split regions at this many conditional edges, or off")
     flag("--static-verify", "emit the static-verify prediction table")
@@ -6066,11 +6111,15 @@ def _validated_options(cli):
     """
     for option, given in (("--enhancement-data-root", cli.enhancement_data_root),
                           ("--enhancement-package", cli.enhancement_package),
+                          ("--code-hook-package", cli.code_hook_package),
                           ("--symbol-map", cli.symbol_map),
                           ("--miss-seeds", cli.miss_seeds),
                           ("--cfg-report", cli.cfg_report)):
         if given == "":
             raise _Refusal(2, f"{option} requires a path\n")
+    if cli.code_hook_package is not None and cli.enhancement_package is None:
+        raise _Refusal(2, "--code-hook-package is applied beside --enhancement-package; a code-hook "
+                          "package on its own is the --enhancement-package\n")
     backend = "c"
     if cli.backend is not None:
         # #330: --backend=llvm lowers each function the LLVM backend supports to
@@ -6294,19 +6343,162 @@ def _apply_options(cli, checked, options):
         options.nan_trap = True
 
 
+def _package_symbol_map(elf, pkg_validated, pkg_path, symbols, symbol_map_path, data_root,
+                        read_words, read_loaded_data):
+    """The validated package and the {symbol: address} map its sites resolve through.
+
+    A published package (ENHANCEMENT_CONTRACT.md section 5.1) resolves only through its own
+    site map, after its keyed digests match this executable. A private one uses the ELF's own
+    function symbols, plus the guest symbol map when the run has one, else the
+    ``<package>.symbols.json`` sidecar beside the package.
+    """
+    from pathlib import Path
+    if enhancement_package.is_published_package(pkg_validated):
+        return enhancement_package.resolve_published_package(
+            pkg_validated, executable=elf.data, read_words_fn=read_words,
+            read_data_fn=read_loaded_data, data_root=data_root,
+        )
+    sym_map = enhancement_package.extract_elf_func_symbols(elf)
+    if symbol_map_path is not None:
+        # The guest symbol map names the package's sites too, in place of the
+        # <package>.symbols.json sidecar.
+        sym_map.update(site_names_from_symbol_map(symbols))
+    else:
+        sidecar = Path(pkg_path).with_suffix(".symbols.json")
+        if sidecar.is_file():
+            sym_map.update(enhancement_package.load_symbol_map(sidecar))
+    return pkg_validated, sym_map
+
+
+def _refuse_uncallable_control_sites(sites):
+    """Among control transfers, only a jal call site can be rewritten (fail closed)."""
+    for site in sites.values():
+        stock = site["stock_words"][0]
+        if is_control(stock) and not (
+            (stock >> 26) == 3 and site["rewrite"]["kind"] in (
+                "gate", "clip_x_widen", "gate_phase", "launch_from_rest")
+        ):
+            raise enhancement_package.EnhancementPackageError(
+                f"site {site['id']}: only a jal call site can be rewritten among "
+                "control transfers (fail-closed refusal)"
+            )
+
+
+def _rewritten_words():
+    """{word address: what rewrites it} for every word the enhancement package's statements
+    change: each rewritten site word and, for a control transfer, its delay slot (emitted with
+    the call), each ace_parts site and its delay slot, and the update_boundary."""
+    words: dict[int, str] = {}
+    for table in (ENHANCEMENT_SITES, ENHANCEMENT_ACE_SITES):
+        for addr, site in table.items():
+            words[addr] = f"site {site['id']}"
+            if is_control(site["stock_words"][0]):
+                words.setdefault(addr + 4, f"the delay slot of site {site['id']}")
+    if ENHANCEMENT_UPDATE_BOUNDARY is not None:
+        words.setdefault(ENHANCEMENT_UPDATE_BOUNDARY, "the update_boundary")
+    return words
+
+
+def _load_code_hook_package(elf, known, symbols, code_hook_pkg_path, symbol_map_path, read_words,
+                            read_loaded_data, enhancement_pkg):
+    """Load, verify and resolve the ``--code-hook-package`` and add its sites to ENHANCEMENT_SITES.
+
+    A build carries one enhancement package (``--enhancement-package``) and at most one
+    code-hook package beside it (ENHANCEMENT_CONTRACT.md section 9.9). The second package must
+    be a ``guest_memory_code_hook`` package for the same title and executable, the first must
+    not be one, and no site of the second may touch a word the first rewrites: each is refused
+    by name, never merged. Returns the package's header metadata.
+    """
+    import hashlib
+    pkg = enhancement_package.validate_package(enhancement_package.load_package(code_hook_pkg_path))
+    if pkg["category"] == "guest_memory_code_hook" and not pkg.get("sites"):
+        raise enhancement_package.EnhancementPackageError(
+            f"code-hook package {pkg['id']!r} has no sites (fail-closed refusal)")
+    if pkg["category"] != "guest_memory_code_hook":
+        raise enhancement_package.EnhancementPackageError(
+            f"code-hook package {pkg['id']!r}: category {pkg['category']!r} is not "
+            "'guest_memory_code_hook' (fail-closed refusal)")
+    if enhancement_pkg["category"] == "guest_memory_code_hook":
+        raise enhancement_package.EnhancementPackageError(
+            f"code-hook package {pkg['id']!r}: the enhancement package {enhancement_pkg['id']!r} "
+            "is a code-hook package too, and a build carries at most one (fail-closed refusal)")
+    if pkg["target_title_id"] != enhancement_pkg["target_title_id"]:
+        raise enhancement_package.EnhancementPackageError(
+            f"code-hook package {pkg['id']!r}: target_title_id {pkg['target_title_id']!r} is not "
+            f"the enhancement package's {enhancement_pkg['target_title_id']!r} (fail-closed refusal)")
+    pkg, sym_map = _package_symbol_map(elf, pkg, code_hook_pkg_path, symbols, symbol_map_path, None,
+                                       read_words, read_loaded_data)
+    sites = enhancement_package.verify_and_resolve_sites(
+        pkg,
+        executable_sha256=hashlib.sha256(elf.data).hexdigest(),
+        symbol_to_addr=sym_map,
+        read_words_fn=read_words,
+        known_functions=sorted(known),
+        read_const_fn=enhancement_package.elf_constant_reader(elf),
+    )
+    _refuse_uncallable_control_sites(sites)
+    for site in sites.values():
+        # Run-time state is numbered over the enhancement package's sites before these join the
+        # table (_number_enhancement_store_sites), so a code-hook site may not carry any.
+        rw = site["rewrite"]
+        if (rw["kind"] == "launch_from_rest"
+                or {"requires", "stock_values", "stock_value_digests", "half_step"} & set(rw)):
+            raise enhancement_package.EnhancementPackageError(
+                f"code-hook site {site['id']}: transform {site['transform']!r} keeps run-time state, "
+                "which a code-hook package beside an enhancement package cannot carry (fail-closed refusal)")
+    first_ids = {site["id"] for site in enhancement_pkg.get("sites", ())}
+    for part in enhancement_pkg.get("ace_parts", {}).values():
+        first_ids.update(site["id"] for site in part["sites"])
+    for site in pkg["sites"]:
+        if site["id"] in first_ids:
+            raise enhancement_package.EnhancementPackageError(
+                f"code-hook site {site['id']}: the enhancement package has a site with that id; "
+                "site ids are one namespace across both packages (fail-closed refusal)")
+    taken = _rewritten_words()
+    # A gate_30hz_alt site calls its alternates itself on alternate updates, bypassing the gated
+    # function's own call to them: a hook on such a call would act only on the other updates.
+    alternates = {alt: f"site {s['id']}" for s in ENHANCEMENT_SITES.values()
+                  for alt in s["rewrite"].get("alternates", ())}
+    for addr, site in sorted(sites.items()):
+        stock = site["stock_words"][0]
+        if (stock >> 26) == 3 and jump_target(addr, stock) in alternates:
+            raise enhancement_package.EnhancementPackageError(
+                f"code-hook site {site['id']} at 0x{addr:08x}: its call to 0x{jump_target(addr, stock):08x} "
+                f"is an alternate that {alternates[jump_target(addr, stock)]} of the enhancement package "
+                "calls itself on alternate updates, where the hook would not run (fail-closed refusal)")
+        if addr in taken:
+            raise enhancement_package.EnhancementPackageError(
+                f"code-hook site {site['id']}: address 0x{addr:08x} collides with {taken[addr]} of "
+                f"the enhancement package (fail-closed refusal)")
+        if is_control(site["stock_words"][0]) and addr + 4 in taken:
+            raise enhancement_package.EnhancementPackageError(
+                f"code-hook site {site['id']} at 0x{addr:08x}: its delay slot 0x{addr + 4:08x} is "
+                f"{taken[addr + 4]} of the enhancement package, inside a span it rewrites "
+                "(fail-closed refusal)")
+    ENHANCEMENT_SITES.update(sites)
+    return {
+        "id": pkg["id"],
+        "version": pkg["version"],
+        "digest": enhancement_package.compute_package_digest(pkg),
+        "sites_count": len(sites),
+    }
+
+
 def _load_enhancement_package(elf, known, symbols, enhancement_pkg_path, enhancement_data_root,
-                              symbol_map_path):
-    """Load, verify and resolve the ``--enhancement-package`` into the ``ENHANCEMENT_*`` tables.
+                              symbol_map_path, code_hook_pkg_path=None):
+    """Load, verify and resolve the ``--enhancement-package`` into the ``ENHANCEMENT_*`` tables,
+    then the ``--code-hook-package`` beside it, if any (``_load_code_hook_package``).
 
     The tables are reset first, so a run without a package starts empty. A package that fails
     verification refuses the run (fail closed).
     """
     global ENHANCEMENT_SITES, ENHANCEMENT_PKG_META, ENHANCEMENT_UPDATE_BOUNDARY, ENHANCEMENT_STORE_KEY
-    global ENHANCEMENT_ACE_SITES
+    global ENHANCEMENT_ACE_SITES, ENHANCEMENT_HOOK_META
     ENHANCEMENT_SITES = {}
     ENHANCEMENT_ACE_SITES = {}
     ENHANCEMENT_STORE_KEY = None
     ENHANCEMENT_PKG_META = None
+    ENHANCEMENT_HOOK_META = None
     ENHANCEMENT_UPDATE_BOUNDARY = None
     ENHANCEMENT_APPLIED.clear()
     ENHANCEMENT_DATA_PATCHES.clear()
@@ -6314,7 +6506,6 @@ def _load_enhancement_package(elf, known, symbols, enhancement_pkg_path, enhance
     ENHANCEMENT_STORE_SITES.clear()
     if enhancement_pkg_path is not None:
         import hashlib
-        from pathlib import Path
         try:
             pkg_raw = enhancement_package.load_package(enhancement_pkg_path)
             pkg_validated = enhancement_package.validate_package(pkg_raw)
@@ -6322,24 +6513,9 @@ def _load_enhancement_package(elf, known, symbols, enhancement_pkg_path, enhance
             # Instruction words as codegen reads them, and initialised data as the loader
             # places it (enhancement_package.elf_readers).
             _read_words, _read_loaded_data = enhancement_package.elf_readers(elf)
-            if enhancement_package.is_published_package(pkg_validated):
-                # A published package (ENHANCEMENT_CONTRACT.md section 5.1) resolves only
-                # through its own site map, after its keyed digests match this executable.
-                pkg_validated, sym_map = enhancement_package.resolve_published_package(
-                    pkg_validated, executable=elf.data, read_words_fn=_read_words,
-                    read_data_fn=_read_loaded_data, data_root=enhancement_data_root,
-                )
-            else:
-                sym_map = enhancement_package.extract_elf_func_symbols(elf)
-                if symbol_map_path is not None:
-                    # The guest symbol map names the package's sites too, in place of the
-                    # <package>.symbols.json sidecar.
-                    sym_map.update(site_names_from_symbol_map(symbols))
-                else:
-                    pkg_p = Path(enhancement_pkg_path)
-                    sidecar = pkg_p.with_suffix(".symbols.json")
-                    if sidecar.is_file():
-                        sym_map.update(enhancement_package.load_symbol_map(sidecar))
+            pkg_validated, sym_map = _package_symbol_map(
+                elf, pkg_validated, enhancement_pkg_path, symbols, symbol_map_path,
+                enhancement_data_root, _read_words, _read_loaded_data)
 
             ENHANCEMENT_SITES = enhancement_package.verify_and_resolve_sites(
                 pkg_validated,
@@ -6353,16 +6529,7 @@ def _load_enhancement_package(elf, known, symbols, enhancement_pkg_path, enhance
             # it is resolved and checked above, and no statement is emitted for it.
             ENHANCEMENT_SITES = {a: site for a, site in ENHANCEMENT_SITES.items()
                                  if site["rewrite"]["kind"] != "reference"}
-            for site in ENHANCEMENT_SITES.values():
-                stock = site["stock_words"][0]
-                if is_control(stock) and not (
-                    (stock >> 26) == 3 and site["rewrite"]["kind"] in (
-                        "gate", "clip_x_widen", "gate_phase", "launch_from_rest")
-                ):
-                    raise enhancement_package.EnhancementPackageError(
-                        f"site {site['id']}: only a jal call site can be rewritten among "
-                        "control transfers (fail-closed refusal)"
-                    )
+            _refuse_uncallable_control_sites(ENHANCEMENT_SITES)
             _number_enhancement_store_sites()
             if any(row["digests"] for row in ENHANCEMENT_STORE_SITES):
                 ENHANCEMENT_STORE_KEY = enhancement_package.published_digest_key(elf.data)
@@ -6411,6 +6578,10 @@ def _load_enhancement_package(elf, known, symbols, enhancement_pkg_path, enhance
                 "data_sites_count": len(ENHANCEMENT_DATA_PATCHES),
                 "data_files_count": len(ENHANCEMENT_DATA_FILES),
             }
+            if code_hook_pkg_path is not None:
+                ENHANCEMENT_HOOK_META = _load_code_hook_package(
+                    elf, known, symbols, code_hook_pkg_path, symbol_map_path, _read_words,
+                    _read_loaded_data, pkg_validated)
         except enhancement_package.EnhancementPackageError as exc:
             raise _Refusal(1, f"codegen: enhancement package refused (fail-closed): {exc}\n") from None
 
@@ -6525,6 +6696,12 @@ def _registration_lines(elf, ranges, known, base_name, num_files, emitted, resum
             f"sites={ENHANCEMENT_PKG_META['sites_count']} "
             f"sha256={ENHANCEMENT_PKG_META['digest']} */"
         )
+        if ENHANCEMENT_HOOK_META is not None:
+            main_out.append(
+                f"/* AOT Code-Hook Package: id={ENHANCEMENT_HOOK_META['id']} "
+                f"v={ENHANCEMENT_HOOK_META['version']} sites={ENHANCEMENT_HOOK_META['sites_count']} "
+                f"sha256={ENHANCEMENT_HOOK_META['digest']} */"
+            )
         main_out += [
             "int nk_enhancement_on(void) {",
             "    static int on = -1;",
@@ -6808,6 +6985,7 @@ def _translate(argv):
     stack_census = cli.stack_census
     enhancement_pkg_path = cli.enhancement_package
     enhancement_data_root = cli.enhancement_data_root
+    code_hook_pkg_path = cli.code_hook_package
     cli_extra_specs = cli.extra_elf  # raw "ELF@BASE" strings from --extra-elf=
     cfg_report_path = cli.cfg_report
     symbol_map_path = cli.symbol_map
@@ -6886,7 +7064,7 @@ def _translate(argv):
 
     GUEST_SP_ENTRIES.clear()
     _load_enhancement_package(elf, known, symbols, enhancement_pkg_path, enhancement_data_root,
-                              symbol_map_path)
+                              symbol_map_path, code_hook_pkg_path)
 
     try:
         impmap = primary_import_map(elf)

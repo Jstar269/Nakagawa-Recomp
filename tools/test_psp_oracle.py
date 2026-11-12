@@ -64,6 +64,7 @@ from psp_oracle.run_psplink import (
     annotate_terminal_outcome,
     evaluate_teardown_snapshots,
     main as run_psplink_main,
+    write_ge_corpus_probe_runs,
     parse_psplink_meminfo,
     parse_psplink_module_list,
     parse_psplink_module_threads,
@@ -1085,7 +1086,12 @@ class GeCorpusGateTests(unittest.TestCase):
         self.assertIn("not present", self._report(completed)["cases"][0]["reason"])
 
     def test_schema_requires_a_record_reference_not_inline_raw_text(self) -> None:
-        envelope = self._schema()["$defs"]["case"]["properties"]["evidence_envelope"]
+        schema = self._schema()
+        self.assertEqual(schema["$defs"]["case"]["properties"]["evidence_envelope"],
+                         {"$ref": "#/$defs/evidence_envelope"})
+        self.assertEqual(schema["$defs"]["probe_run"]["properties"]["evidence_envelope"],
+                         {"$ref": "#/$defs/evidence_envelope"})
+        envelope = schema["$defs"]["evidence_envelope"]
         self.assertIn("RESULT_RECORD", envelope["required"])
         self.assertNotIn("RAW_RESULT", envelope["properties"])
         document = self._hardware_case(stream("psp"))
@@ -1134,6 +1140,233 @@ class GeCorpusGateTests(unittest.TestCase):
             capture_output=True, text=True, check=False)
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("must be assets/ge_corpus.schema.json", completed.stderr)
+
+    # ---- probe runs: the measured ge-raster, ge-weight and ge-rtt results (#343) ----
+
+    def test_probe_runs_are_the_three_measured_probes_in_order(self) -> None:
+        runs = self.corpus["probe_runs"]
+        self.assertEqual([run["probe_case"] for run in runs], list(parse_golden.GE_CORPUS_PROBES))
+        manifest = json.loads(
+            (self.root / "tools" / "psp_oracle" / "manifest.json").read_text(encoding="utf-8"))
+        entries = {entry["id"]: entry for entry in manifest["tests"]}
+        for run in runs:
+            test_id, cells, suffixes = parse_golden.GE_CORPUS_PROBES[run["probe_case"]]
+            self.assertEqual(run["test_id"], test_id)
+            self.assertEqual(tuple(cell["cell"] for cell in run["cells"]), cells)
+            for cell in run["cells"]:
+                self.assertEqual([record["case_id"] for record in cell["records"]],
+                                 [f"{cell['cell']}-{suffix}" for suffix in suffixes])
+            # The run each corpus entry cites is the measurement the manifest records.
+            self.assertEqual(entries[test_id]["hardware_evidence"], "MEASURED")
+            self.assertIn(f"of commit {run['evidence_envelope']['SOURCE_COMMIT'][:8]}",
+                          entries[test_id]["measurement_note"])
+
+    def test_raster_window_digests_are_the_selftest_psp_table(self) -> None:
+        selftest = (self.root / "tests" / "native" / "hle_thread_selftest.c").read_text(encoding="utf-8")
+        table = selftest[selftest.index("} s_gr_psp[GR_CELL_COUNT] = {"):]
+        table = table[:table.index("\n};")]
+        pinned = re.findall(r'\{"([a-z0-9-]+)", (0x[0-9a-f]{16})ull\}', table)
+        raster = self.corpus["probe_runs"][0]
+        self.assertEqual(raster["test_id"], "PSP-GE-RASTER-001")
+        self.assertEqual([(cell["cell"], cell["window_fnv1a64"]) for cell in raster["cells"]], pinned)
+
+    def test_probe_runs_pass_the_public_checks_and_need_the_record_to_be_measured(self) -> None:
+        report = ge_corpus_report(self.corpus, self._schema(), None)
+        self.assertEqual(report["status"], "IN_THE_WORKS")
+        self.assertEqual([item["status"] for item in report["probe_runs"]], ["NOT_RUN"] * 3)
+
+    def test_a_changed_pixel_breaks_the_window_digest(self) -> None:
+        document = json.loads(json.dumps(self.corpus))
+        record = document["probe_runs"][1]["cells"][3]["records"][5]
+        head = "00000000" if record["words"].startswith("ffffffff") else "ffffffff"
+        record["words"] = head + record["words"][8:]
+        result = ge_corpus_report(document, self._schema(), None)
+        self.assertEqual(result["status"], "REFUSED")
+        self.assertIn("window_fnv1a64: is not the digest", result["probe_runs"][1]["reason"])
+
+    def test_a_dropped_or_moved_cell_or_record_is_refused(self) -> None:
+        dropped = json.loads(json.dumps(self.corpus))
+        del dropped["probe_runs"][2]["cells"][4]
+        moved = json.loads(json.dumps(self.corpus))
+        cells = moved["probe_runs"][0]["cells"]
+        cells[0], cells[1] = cells[1], cells[0]
+        renamed = json.loads(json.dumps(self.corpus))
+        renamed["probe_runs"][2]["cells"][0]["records"][0]["case_id"] = "cpu-r0"
+        swapped = json.loads(json.dumps(self.corpus))
+        swapped["probe_runs"][0]["test_id"] = "PSP-GE-RTT-001"
+        for document, needle in ((dropped, "cells in stream order"), (moved, "cells in stream order"),
+                                 (renamed, "must be cpu-t0"), (swapped, "records PSP-GE-RASTER-001")):
+            with self.subTest(needle=needle):
+                result = ge_corpus_report(document, self._schema(), None)
+                self.assertEqual(result["status"], "REFUSED")
+                self.assertIn(needle, " ".join(item["reason"] for item in result["probe_runs"]))
+
+    @staticmethod
+    def _rtt_stream(word: int = 0) -> str:
+        spec, counts = CAMPAIGN_PROBE_CASES["ge-rtt"]
+        lines = [META.format(source="psp", model="PSP-3000", firmware="6.61-ARK",
+                             binary=MEASURED_SHA, commit=MEASURED_COMMIT)]
+        for index, case in enumerate(spec.semantic_cases):
+            outs = " ".join(f"out{i}=0x{(index * 0x10001 + i * 0x101 + word) & 0xffffffff:08x}"
+                            for i in range(counts[case]))
+            lines.append(f"NAKAGAWA_PSP_TEST schema=1 test_id=PSP-GE-RTT-001 case_id={case} "
+                         f"status=PASS result=0x00000000 {outs}\n")
+        lines.append("NAKAGAWA_PSP_TEST schema=1 test_id=PSP-GE-RTT-001 case_id=ge-rtt-done "
+                     f"status=PASS result=0x00000000 out0=0x{len(spec.semantic_cases):08x}\n")
+        return "".join(lines)
+
+    @staticmethod
+    def _rtt_runner_report(scratch: Path, raw: str, **changes: Any) -> Path:
+        envelope = {"CASE_ID": "ge-rtt", "EVIDENCE_CLASS": "PSP_HARDWARE", "ACCEPTANCE_ELIGIBLE": True,
+                    "QUALIFICATION_STATUS": "QUALIFIED", "ACCEPTANCE_BLOCKERS": [],
+                    "PHYSICAL_MODEL_LABEL": "PSP-3000", "FW": "6.61-ARK",
+                    "SOURCE_COMMIT": MEASURED_COMMIT, "BINARY_SHA256": MEASURED_SHA,
+                    "RAW_RESULT": raw, **changes}
+        path = scratch / "runner.json"
+        path.write_text(json.dumps({"envelopes": [{"CASE_ID": "transport-write"}, envelope]}),
+                        encoding="utf-8")
+        return path
+
+    def _scratch_corpus(self, scratch: Path) -> Path:
+        document = json.loads(json.dumps(self.corpus))
+        del document["probe_runs"]
+        path = scratch / "corpus.json"
+        path.write_text(json.dumps(document), encoding="utf-8")
+        return path
+
+    def test_writer_writes_a_run_the_gate_rederives_from_its_record(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ge-corpus-write-") as scratch_text:
+            scratch = Path(scratch_text)
+            results = scratch / "results"
+            corpus_path = self._scratch_corpus(scratch)
+            schema_path = self.root / "assets" / "ge_corpus.schema.json"
+            raw = self._rtt_stream()
+            report = write_ge_corpus_probe_runs(
+                corpus_path, schema_path, [self._rtt_runner_report(scratch, raw)], results)
+            self.assertEqual(report["probe_runs"], [{
+                "test_id": "PSP-GE-RTT-001", "status": "MEASURED",
+                "reason": "acceptance-eligible PSP_HARDWARE record gives all 9 cells of "
+                          "PSP-GE-RTT-001 exactly."}])
+            written = json.loads(corpus_path.read_text(encoding="utf-8"))
+            run = written["probe_runs"][0]
+            record_ref = run["evidence_envelope"]["RESULT_RECORD"]
+            self.assertEqual(record_ref, {
+                "path": f"ge-corpus/PSP-GE-RTT-001-{MEASURED_COMMIT[:12]}.txt",
+                "sha256": hashlib.sha256(raw.encode("utf-8")).hexdigest()})
+            self.assertEqual((results / record_ref["path"]).read_text(encoding="utf-8"), raw)
+            self.assertEqual(run["cells"][0]["records"][0]["words"],
+                             " ".join(f"{(1 * 0x10001 + i * 0x101):08x}" for i in range(16)))
+            # A corpus row that is not the record's, with its digest made consistent, is refused.
+            edited = json.loads(json.dumps(written))
+            cell = edited["probe_runs"][0]["cells"][1]
+            cell["records"][3]["words"] = "0" * 8 + cell["records"][3]["words"][8:]
+            cell["window_fnv1a64"] = parse_golden.ge_window_fnv1a64(
+                record["words"] for record in cell["records"][1:])
+            result = ge_corpus_report(edited, self._schema(), results)["probe_runs"][0]
+            self.assertEqual(result["status"], "REFUSED")
+            self.assertIn("corpus cell flush differs from the result record", result["reason"])
+            # A record that is not the one the envelope names is refused.
+            (results / record_ref["path"]).write_text(self._rtt_stream(word=1), encoding="utf-8",
+                                                      newline="")
+            result = ge_corpus_report(written, self._schema(), results)["probe_runs"][0]
+            self.assertEqual(result["status"], "REFUSED")
+            self.assertIn("sha256 does not match", result["reason"])
+
+    def test_writer_refuses_a_run_that_is_not_accepted_hardware(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ge-corpus-write-") as scratch_text:
+            scratch = Path(scratch_text)
+            corpus_path = self._scratch_corpus(scratch)
+            before = corpus_path.read_text(encoding="utf-8")
+            schema_path = self.root / "assets" / "ge_corpus.schema.json"
+            raw = self._rtt_stream()
+            partial = raw[:raw.index("case_id=warm-noflush-draw")].rsplit("\n", 1)[0] + "\n"
+            failed = raw.replace("case_id=cpu-r0 status=PASS", "case_id=cpu-r0 status=FAIL")
+            for changes, text, needle in (
+                    ({"ACCEPTANCE_ELIGIBLE": False}, raw, "acceptance-eligible"),
+                    ({"QUALIFICATION_STATUS": "UNQUALIFIED"}, raw, "acceptance-eligible"),
+                    ({"ACCEPTANCE_BLOCKERS": ["stale log"]}, raw, "acceptance-eligible"),
+                    ({"EVIDENCE_CLASS": "UNQUALIFIED_CAPTURE"}, raw, "acceptance-eligible"),
+                    ({"PHYSICAL_MODEL_LABEL": "PSP-2000"}, raw, "PHYSICAL_MODEL_LABEL"),
+                    ({"FW": "6.60"}, raw, "envelope's FW"),
+                    ({"SOURCE_COMMIT": "c" * 40}, raw, "envelope's SOURCE_COMMIT"),
+                    ({"BINARY_SHA256": "c" * 64}, raw, "envelope's BINARY_SHA256"),
+                    ({}, partial, "stream incomplete"), ({}, failed, "all PASS")):
+                with self.subTest(changes=changes, needle=needle):
+                    with self.assertRaises(ProtocolError) as caught:
+                        write_ge_corpus_probe_runs(
+                            corpus_path, schema_path,
+                            [self._rtt_runner_report(scratch, text, **changes)], scratch / "results")
+                    self.assertIn(needle, str(caught.exception))
+            self.assertEqual(corpus_path.read_text(encoding="utf-8"), before)
+            self.assertFalse((scratch / "results").exists())
+
+    def test_a_refused_write_keeps_the_records_already_there(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ge-corpus-write-") as scratch_text:
+            scratch = Path(scratch_text)
+            results = scratch / "results"
+            corpus_path = self._scratch_corpus(scratch)
+            schema_path = self.root / "assets" / "ge_corpus.schema.json"
+            raw = self._rtt_stream()
+            write_ge_corpus_probe_runs(
+                corpus_path, schema_path, [self._rtt_runner_report(scratch, raw)], results)
+            written = corpus_path.read_text(encoding="utf-8")
+            record = results / "ge-corpus" / f"PSP-GE-RTT-001-{MEASURED_COMMIT[:12]}.txt"
+            # The same commit with other words would replace the record behind a measured run.
+            other = scratch / "other"
+            other.mkdir()
+            with self.assertRaisesRegex(ProtocolError, "already holds a different result record"):
+                write_ge_corpus_probe_runs(
+                    corpus_path, schema_path,
+                    [self._rtt_runner_report(other, self._rtt_stream(word=1))], results)
+            self.assertEqual(record.read_text(encoding="utf-8"), raw)
+            self.assertEqual(corpus_path.read_text(encoding="utf-8"), written)
+            # Rewriting the identical run is allowed and leaves both in place.
+            write_ge_corpus_probe_runs(
+                corpus_path, schema_path, [self._rtt_runner_report(scratch, raw)], results)
+            self.assertEqual(corpus_path.read_text(encoding="utf-8"), written)
+            # A corpus the gate refuses elsewhere is not written, and a new record is removed again.
+            document = json.loads(written)
+            document["cases"][0]["source_tier"] = "PSP_HARDWARE"
+            corpus_path.write_text(json.dumps(document), encoding="utf-8")
+            refused = corpus_path.read_text(encoding="utf-8")
+            new_commit = "d" * 40
+            new_raw = self._rtt_stream().replace(MEASURED_COMMIT, new_commit)
+            with self.assertRaisesRegex(ProtocolError, "the gate refuses the corpus"):
+                write_ge_corpus_probe_runs(
+                    corpus_path, schema_path,
+                    [self._rtt_runner_report(other, new_raw, SOURCE_COMMIT=new_commit)], results)
+            self.assertEqual(corpus_path.read_text(encoding="utf-8"), refused)
+            self.assertEqual(sorted(path.name for path in (results / "ge-corpus").iterdir()),
+                             [record.name])
+            # The same refusal for the identical run removes nothing it did not create.
+            with self.assertRaisesRegex(ProtocolError, "the gate refuses the corpus"):
+                write_ge_corpus_probe_runs(
+                    corpus_path, schema_path, [self._rtt_runner_report(scratch, raw)], results)
+            self.assertEqual(record.read_text(encoding="utf-8"), raw)
+            self.assertEqual(corpus_path.read_text(encoding="utf-8"), refused)
+            # Two reports of one probe in a single write are refused before anything is written.
+            corpus_path.write_text(written, encoding="utf-8")
+            with self.assertRaisesRegex(ProtocolError, "a second ge-rtt run in one write"):
+                write_ge_corpus_probe_runs(
+                    corpus_path, schema_path,
+                    [self._rtt_runner_report(scratch, raw),
+                     self._rtt_runner_report(other, new_raw, SOURCE_COMMIT=new_commit)], results)
+            self.assertEqual(sorted(path.name for path in (results / "ge-corpus").iterdir()),
+                             [record.name])
+
+    def test_a_raster_digest_its_rows_do_not_give_is_refused(self) -> None:
+        spec, counts = CAMPAIGN_PROBE_CASES["ge-raster"]
+        lines = [META.format(source="psp", model="PSP-3000", firmware="6.61-ARK",
+                             binary=MEASURED_SHA, commit=MEASURED_COMMIT)]
+        for case in spec.semantic_cases:
+            outs = " ".join(f"out{i}=0x00000000" for i in range(counts[case]))
+            lines.append(f"NAKAGAWA_PSP_TEST schema=1 test_id=PSP-GE-RASTER-001 case_id={case} "
+                         f"status=PASS result=0x00000000 {outs}\n")
+        lines.append("NAKAGAWA_PSP_TEST schema=1 test_id=PSP-GE-RASTER-001 case_id=ge-raster-done "
+                     f"status=PASS result=0x00000000 out0=0x{len(spec.semantic_cases):08x}\n")
+        sequence = parse_golden.parse_campaign_probe_output("".join(lines), "ge-raster")
+        with self.assertRaisesRegex(ProtocolError, "b-sa-isa reports window digest 0x0000000000000000"):
+            parse_golden.ge_corpus_cells(sequence, "ge-raster")
 
     def test_schema_violation_is_refused_with_case_field_name(self) -> None:
         document = json.loads(json.dumps(self.corpus))
@@ -7724,7 +7957,10 @@ class HleIssuesProbeTests(unittest.TestCase):
             self.assertTrue(parse_campaign_probe_output(helper._body(clean), case).complete)
             # The first row, a middle row and the last row before the terminal.
             cells = spec.semantic_cases
-            for row in (cells[0], cells[len(cells) // 2], cells[-1]):
+            rows = [cells[0], cells[len(cells) // 2], cells[-1]]
+            # The io-seek cases' cleanup row is FAIL when the probe's ms0: directory survives.
+            rows += [cell for cell in cells if cell.endswith("-ms-cleanup")]
+            for row in rows:
                 for status in ("FAIL", "SKIP"):
                     with self.subTest(case=case, row=row, status=status):
                         text = helper._stream(case, {row: (status, 0, [0] * counts[row])})
@@ -11983,6 +12219,68 @@ class GeRasterProbeTests(unittest.TestCase):
         self.assertNotIn("#include", block)
         self.assertIn("test_ge_raster_cells_match_psp();", self.selftest)
 
+    def test_the_vulkan_selftest_carries_the_block_and_the_psp_digests(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        inc = (root / "src" / "rt" / "gpu_sdl3vk" / "ge_gpu_selftest.inc").read_text(encoding="utf-8")
+        self.assertEqual(inc.count(self.START), 1)
+        self.assertEqual(self._block(inc), self._block(self.probe))
+        table_start = "/* PSP-GE-RASTER-001 (#343): the window digest each cell left on a PSP-3000"
+
+        def table(text: str) -> str:
+            start = text.index(table_start)
+            return text[start:text.index("\n};\n", start) + 4]
+
+        self.assertEqual(table(inc), table(self.selftest))
+        # The case runs in the default (render scale 1) pass and on its own.
+        self.assertIn("    if (!coherence_run_psp_raster()) ok = 0;\n", inc)
+        self.assertIn('if (strcmp(only, "psp-raster") == 0) return coherence_run_psp_raster();', inc)
+        self.assertIn("    if (!coherence_run_clear_masks()) ok = 0;\n", inc)
+        self.assertIn('if (strcmp(only, "clear-masks") == 0) return coherence_run_clear_masks();', inc)
+        bodies = {}
+        for name in ("gr_vk_draw", "coherence_run_psp_raster"):
+            body = inc[inc.index(f"static int {name}("):]
+            bodies[name] = body[:body.index("\n}\n")]
+        for term in ("fallback_prims", "gegpu_sync_guest_fb(&desc)", "ge_set_gpu_hooks(gpu ? &k_hooks : NULL);",
+                     "const int done = ge_run_list(list, 0) == 0;", "return done;"):
+            self.assertIn(term, bodies["gr_vk_draw"])
+        for term in ("s_scale != 1", "gr_digest(ref) == s_gr_psp[k].psp", "gr_digest(px) == s_gr_psp[k].psp",
+                     "else if (want_sw) pass = on_sw && matches;",
+                     "else if (want_div) pass = on_gpu && delta <= GR_VK_DIVERGENT_MAX_DELTA;",
+                     "else pass = on_gpu && matches;"):
+            self.assertIn(term, bodies["coherence_run_psp_raster"])
+        self.assertIn("#define GR_VK_DIVERGENT_MAX_DELTA 2u\n", inc)
+        # The two pinned classes name real cells, once each, and no cell is in both.
+        cells = set(re.findall(r'^\s*\{"([a-z0-9-]+)", GR_K_', self._block(inc), re.M))
+        self.assertEqual(len(cells), 189)
+        pinned = []
+        for name in ("k_gr_vk_divergent", "k_gr_vk_software"):
+            start = inc.index(f"static const char *const {name}[] = {{")
+            pinned.append(re.findall(r'"([a-z0-9-]+)"', inc[start:inc.index("};", start)]))
+        divergent, software = pinned
+        self.assertEqual(len(divergent) + len(software), len(set(divergent) | set(software)))
+        self.assertLessEqual(set(divergent) | set(software), cells)
+        # docs/HARDWARE_ORACLE.md names exactly the pinned cells and their counts.
+        doc = (root / "docs" / "HARDWARE_ORACLE.md").read_text(encoding="utf-8")
+        para = doc[doc.index("  The Vulkan backend runs the same cells:"):]
+        para = " ".join(para[:para.index("\n\n")].split())
+        named = set(re.findall(r"`([a-z0-9-]+\*?)`", para))
+        lo = {cell for cell in cells if cell.startswith("lo-")}
+        self.assertIn("lo-*", named)
+        self.assertLessEqual(lo, set(software))
+        self.assertEqual((named & cells) | lo, set(divergent) | set(software))
+        # Each class's names sit in its own sentence, so a cell moved between the lists is caught.
+        sw_part, div_part = para.split(" are drawn on the GPU and differ")
+        sw_part = sw_part[sw_part.index(" are drawn by the software fallback"):]
+        div_part = div_part[:div_part.index(" The case pins all three classes")]
+        self.assertEqual(set(re.findall(r"`([a-z0-9-]+)`", sw_part)) & cells | lo, set(software))
+        self.assertEqual(set(re.findall(r"`([a-z0-9-]+)`", div_part)) & cells, set(divergent))
+        self.assertIn(f"{len(software)} are drawn by the software fallback", para)
+        self.assertIn(f"{len(divergent)} are drawn on the GPU and differ", para)
+        # A rounding cell may land on the PSP's value on one driver and not on another (lavapipe draws
+        # tf-mod-rgba-1 exact): the class is the bound alone, never a required difference.
+        self.assertNotIn("!matches && delta", bodies["coherence_run_psp_raster"])
+        self.assertIn(f"{len(cells) - len(software) - len(divergent)} cells are drawn on the GPU and equal", para)
+
     def test_section_calls_only_the_ge_and_cache_imports_and_is_bounded(self) -> None:
         self.assertEqual(set(re.findall(r"\b(sce\w+)\s*\(", self.section)), {
             "sceGeEdramGetAddr", "sceGeListEnQueue", "sceGeListSync", "sceGeDrawSync",
@@ -12336,6 +12634,60 @@ class KernelSemanticsProbeTests(unittest.TestCase):
         self.assertNotIn("sceKernelDcacheInvalidateRange", read)
         self.assertEqual(re.findall(r"s_ku_buf\[(\w+)\]", section), ["KU_BUF", "i"])
         self.assertIn("changed += s_ku_buf[i] != KU_FILL;", read)
+
+
+class HleIoSeekMemoryStickSetupAndCleanupTests(unittest.TestCase):
+    """hle-io-seek and hle-io-seek-edges touch only the Memory Stick directory they made (#1380)."""
+
+    CASES = (
+        ("hle_is_ms", "io-seek", "HLE_IS_FILE", "HLE_IS_DIR"),
+        ("hle_ise_ms", "io-edge", "HLE_ISE_FILE", "HLE_ISE_DIR"),
+    )
+    probe: str
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        fixture = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        cls.probe = (fixture / "probe_hle_measure.c").read_text(encoding="utf-8")
+
+    def _body(self, function: str) -> str:
+        start = self.probe.index(f"static void {function}(void)\n{{\n")
+        return self.probe[start:self.probe.index("\n}\n", start)]
+
+    def test_the_setup_abort_undoes_only_what_the_probe_made(self) -> None:
+        # Review of #2416, nit 4: the abort removed the file and the directory even when the mkdir
+        # had failed, so the directory might not have been the probe's.
+        for function, prefix, file_macro, dir_macro in self.CASES:
+            with self.subTest(case=prefix):
+                body = self._body(function)
+                abort = body[body.index(f'hle_step("{prefix}-ms-setup-abort");'):]
+                abort = abort[:abort.index("return;")]
+                self.assertIn(f"if (made < 0 || fd < 0 || wrote != (int){file_macro}_SIZE) {{", body)
+                self.assertIn(f"if (fd >= 0) (void)sceIoRemove({file_macro});", abort)
+                self.assertIn(f"if (made >= 0) (void)sceIoRmdir({dir_macro});", abort)
+                self.assertNotRegex(abort, r"\n\s*\(void\)sceIo(Remove|Rmdir)\(")
+
+    def test_a_directory_left_after_the_cleanup_fails_the_cleanup_row(self) -> None:
+        for function, prefix, _file_macro, dir_macro in self.CASES:
+            with self.subTest(case=prefix):
+                body = self._body(function)
+                cleanup = body[body.index(f'hle_step("{prefix}-ms-cleanup");'):]
+                self.assertIn(f"const SceUID post = sceIoDopen({dir_macro});", cleanup)
+                self.assertIn(
+                    f'hle_record("{prefix}-ms-cleanup", post >= 0 ? "FAIL" : "PASS", 0u, w, 4u);',
+                    cleanup,
+                )
+
+    def test_the_write_async_row_names_its_poll_cap_exhaustion_path(self) -> None:
+        # Review of #2416, nit 5: a write still pending when the poll cap runs out leaves the
+        # descriptor open; the comment says so and the cleanup row then reports FAIL.
+        body = self._body("hle_ise_ms")
+        comment = body[body.index("/* B4 io-edge-ms-write-async"):body.index('hle_step("io-edge-ms-write-async");')]
+        self.assertIn("poll cap runs out", comment)
+        self.assertIn("cleanup's remove and rmdir fail", comment)
+        self.assertIn("(unmeasured)", comment)
+        self.assertIn("HLE_ISE_POLL_CAP", body)
+        self.assertNotIn("while (", body)
 
 
 class HleUtilityNoneProbeTests(unittest.TestCase):
@@ -14792,6 +15144,35 @@ class IoCasesSourceTests(unittest.TestCase):
     def _code(text: str) -> str:
         return re.sub(r"/\*.*?\*/|//[^\n]*", "", text, flags=re.DOTALL)
 
+    def test_font_copies_are_not_registered_for_teardown_removal(self) -> None:
+        # probe.c maps sceIoOpen to probe_io_open, which records every host0 path opened with
+        # PSP_O_CREAT for teardown to remove, in a 16-entry table. Through it, the 2026-11-11
+        # PSP-3000 run's 21 copies overflowed the table: teardown removed 16, kept 5 and reported
+        # status=FAIL. Inside font_files.h the open tracks the descriptor only.
+        self.assertIn("#define PROBE_TEARDOWN_PATH_CAPACITY 16u", self.probe)
+        generic = self.probe[self.probe.index("SceUID probe_io_open(const char *path"):]
+        generic = generic[:generic.index("\n}\n")]
+        self.assertIn("if ((flags & PSP_O_CREAT) != 0) probe_track_disposable_path(path);", generic)
+        kept = self.probe[self.probe.index("SceUID probe_io_open_kept(const char *path"):]
+        kept = kept[:kept.index("\n}\n")]
+        # Defined before probe.c maps sceIoOpen to probe_io_open, so its call is the real one.
+        self.assertLess(self.probe.index("SceUID probe_io_open_kept("),
+                        self.probe.index("#define sceIoOpen(path, flags, mode) probe_io_open("))
+        self.assertIn("sceIoOpen(path, flags, mode)", kept)
+        block = self.probe[self.probe.index("#if PSP_ORACLE_CASE == PSP_ORACLE_CASE_FONT_FILES\n"):]
+        block = block[:block.index("#endif\n")]
+        self.assertIn("probe_track_uid(s_owned_fds, fd)", kept)
+        self.assertNotIn("probe_track_disposable_path", kept)
+        include = block.index('#include "font_files.h"\n')
+        self.assertTrue(block[:include].endswith(
+            "#undef sceIoOpen\n"
+            "#define sceIoOpen(path, flags, mode) probe_io_open_kept((path), (flags), (mode))\n"))
+        self.assertTrue(block[include:].startswith(
+            '#include "font_files.h"\n#undef sceIoOpen\n'
+            "#define sceIoOpen(path, flags, mode) probe_io_open((path), (flags), (mode))\n"))
+        # The font list holds more files than the path table: the old route always overflowed.
+        self.assertNotIn("copies are opened with sceIoOpen directly", self.probe)
+
     def test_flash0_is_only_listed_and_opened_read_only(self) -> None:
         code = self._code(self.fonts)
         self.assertEqual(set(re.findall(r"\b(sce\w+)\s*\(", code)),
@@ -15046,7 +15427,11 @@ class IoCasesSourceTests(unittest.TestCase):
                 start = self.probe.index(f"#if PSP_ORACLE_CASE == PSP_ORACLE_CASE_{macro}\n")
             block = self.probe[start:]
             block = block[:block.index("\n#endif")]
-            self.assertNotRegex(block, r"\bsce\w+\s*\(")
+            # The font-files block remaps sceIoOpen for its header (#undef, then #define to
+            # probe_io_open_kept and back); apart from those lines the block makes no PSP call.
+            remap = (r"(?m)^(#undef sceIoOpen|"
+                     r"#define sceIoOpen\(path, flags, mode\) probe_io_open(_kept)?\(.*)$")
+            self.assertNotRegex(re.sub(remap, "", block), r"\bsce\w+\s*\(")
 
     def test_raw_device_case_manifest_matches_its_captured_record_contract(self) -> None:
         manifest = json.loads((self.root / "tools" / "psp_oracle" / "manifest.json").read_text(

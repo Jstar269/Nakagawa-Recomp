@@ -486,6 +486,18 @@ int       ge_wide_picture(uint32_t fb_addr, const uint32_t *frame, uint32_t *out
 /* The software canvas of fb_addr: GE_WIDE_CANVAS_W raw framebuffer words per row, in format
  * *fmt (GE pixel format 0..3); NULL when none was drawn by the software rasterizer. */
 const uint32_t *ge_wide_canvas(uint32_t fb_addr, int *fmt);
+/* The software renderer's host twin, Enhanced 32-bit colour (#2050, ENHANCEMENT_CONTRACT.md
+ * 10.11; ge.c's comment at s_twin_mode). ge_twin_present_row fills `width` RGBA8 words (red in
+ * the low byte) of row `y` of the framebuffer at fbaddr (GE format fmt 0..3, stride in pixels,
+ * 0 = 512): the twin's colour where its slot is valid, else the pixel as the CPU presenter
+ * converts it. It returns 0, and writes nothing, while the twin is off, while a GPU backend is
+ * registered, with SR_GPU_TWIN_CAPTURE=authentic, or for a row outside VRAM. ge_twin_mode: -1
+ * not decided yet, 0 off, 1 full colour, 2 native. ge_twin_set_mode (selftests): 1 or 2 turn it
+ * on with every slot empty (returns 0 when it cannot be allocated), 0 turns it off, -1 decides
+ * again from the environment on the next colour write; each frees the slots it no longer needs. */
+int       ge_twin_present_row(uint32_t fbaddr, int fmt, uint32_t stride, int y, uint32_t *out_rgba, int width);
+int       ge_twin_mode(void);
+int       ge_twin_set_mode(int mode);
 /* GPU transform and lighting (#318): on with SR_GPU_TNL=1, or set here (-1 re-reads the
  * environment). The counts are PRIMs the backend drew and PRIMs ge.c found ineligible or the
  * backend declined, since the last reset. */
@@ -600,6 +612,48 @@ int       ge_vram_cli_decode(uint32_t addr, uint32_t width, uint32_t height, uin
  * while a GE capture is active, when the texture's bytes are not all readable, when it is
  * larger than GE_VRAM_VIEW_MAX_*, or when `capacity` words cannot hold it. */
 int       ge_vram_decode_bound_texture(uint32_t *out, size_t capacity);
+/* The developer VRAM viewer's sources and its decode (#314), shared by gui.c's pause page and
+ * vram-view-identity-selftest so both run the same code. A window is an address, a row stride
+ * and a size in pixels, and a format: a colour PSM 0-3, GE_VRAM_VIEW_DEPTH16, or for the
+ * texture source its own PSM 0-10. */
+#define GE_VRAM_VIEW_DEPTH16 11u
+enum {
+    GE_VRAM_VIEW_DISPLAY = 0,   /* the framebuffer on screen (the display's, not the GE's) */
+    GE_VRAM_VIEW_DRAW,          /* the GE's render target */
+    GE_VRAM_VIEW_DEPTH,         /* the GE's depth buffer */
+    GE_VRAM_VIEW_TEXTURE,       /* level 0 of the texture the last draw bound */
+    GE_VRAM_VIEW_SOURCES
+};
+typedef struct {
+    uint32_t addr, stride, width, height, format;
+} GeVramWindow;
+typedef struct {
+    GeVramWindow window[GE_VRAM_VIEW_SOURCES];
+    uint8_t present[GE_VRAM_VIEW_SOURCES];   /* the display or the GE state names that surface */
+    uint8_t texture_swizzled;
+} GeVramSources;
+/* The surfaces the viewer offers, as the VRAMDUMP sidecar names them: the displayed
+ * framebuffer (shown_valid, at shown_addr with shown_stride and colour format shown_fmt,
+ * 480 x 272), the draw target (ge_framebuffer(), FBW, FBPSM), the depth buffer (ZBP folded onto
+ * 0x04000000, ZBW or else FBW or else 512, DEPTH16) and the bound texture (its address, buffer
+ * width, size and PSM). A surface the state does not name is absent. Reads only. */
+void      ge_vram_view_sources(uint32_t shown_addr, uint32_t shown_stride, uint32_t shown_fmt,
+                               int shown_valid, GeVramSources *out);
+/* Decodes what the viewer shows for `window` into `out` (`capacity` words) with alpha made
+ * opaque, as the PSP display shows a framebuffer: the bound texture through
+ * ge_vram_decode_bound_texture when `texture` is set (the window then only names it), any other
+ * window through ge_vram_decode_surface. Stores the decoded size in *width and *height.
+ * Returns GE_VRAM_VIEW_SHOWN, or a refusal; after a refusal `out` holds nothing to show
+ * (a surface whose later row stops being readable mid-copy may have written earlier rows). */
+enum {
+    GE_VRAM_VIEW_SHOWN = 0,
+    GE_VRAM_VIEW_UNREADABLE,          /* the window cannot be read now */
+    GE_VRAM_VIEW_TEXTURE_REFUSED,     /* outside guest memory, over 512 pixels, or a GE capture runs */
+    GE_VRAM_VIEW_NO_ROOM              /* `out`, or a surface's window, is NULL; or `out` is
+                                         smaller than the window */
+};
+int       ge_vram_view_decode(int texture, const GeVramWindow *window, uint32_t *out,
+                              size_t capacity, uint32_t *width, uint32_t *height);
 /* The CLUT loads seen so far: the size of the last one and the largest, in bytes (0 before the
  * first). PPSSPP's palette identity for texture replacement is built from them. */
 void      ge_clut_load_extent(uint32_t *last_bytes, uint32_t *max_bytes);

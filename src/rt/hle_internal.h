@@ -758,6 +758,7 @@ typedef struct {
     FdKind kind;                 /* descriptor identity is independent of its number */
     uint8_t std_stream;          /* 0=stdin, 1=stdout, 2=stderr for FD_KIND_STD */
     uint8_t raw_umd;             /* 1 = UMD block device: size and off count 2048-byte sectors */
+    uint8_t on_umd;              /* 1 = a file of the disc, or one served in its place: a read takes the drive's time */
     uint32_t lba, size, off;
     int64_t async_res;
     int writable;
@@ -1212,10 +1213,6 @@ extern int s_psmf_av_test_queue;
 #endif
 int64_t psmf_av_now_us(void);
 int psmf_av_queue_frames(int ch);
-/* One PSP display period in microseconds (60000/1001 Hz, rounded down). The scheduler delivers
- * VBLANKs at this period and ordinarily reaches a boundary at least that often; sched.c, perf.c
- * and videorec.c each still spell the figure out themselves. */
-#define HLE_DISPLAY_PERIOD_US 16683u
 /* The audio queue depth in frames the guest sees on `ch` (-1: no host output). Under the
  * deterministic clock it is a model that drains in guest time (#2037), not the host mixer's.
  * Otherwise it leaves out what the host mixer holds for its device (hle_audio.c). */
@@ -1369,6 +1366,9 @@ int io_host_seek(FILE *host, uint32_t offset);
 int io_restore_truncated_gap(Fd *f);
 uint32_t h_IoWrite(CpuState *s);
 uint32_t h_IoRead(CpuState *s);
+uint32_t io_read_now(CpuState *s);   /* the read itself, with no drive time: a queued request's completion */
+uint32_t hle_io_umd_read_us(uint64_t bytes);   /* how long the UMD drive takes to transfer that much (hle_io.c) */
+void hle_io_release_thread(uint32_t thread_uid);   /* a thread ended: abandon the disc fetch it waited for */
 uint32_t io_seek_destination(const Fd *f, int64_t offset, uint32_t whence, const char *api, uint32_t *position, uint32_t *error_high);
 uint32_t h_IoLseek32(CpuState *s);
 /* The volatile-memory lock handlers (hle_kernel_memory.c); hle_power.c registers their scePower
@@ -1431,6 +1431,7 @@ void hle_state_sample_close(void);
 void hle_enhancement_speed_vblank(uint32_t vcount);
 extern GeCallback s_ge_cb[16];
 void ge_finish_callback(CpuState *s, uint32_t cbid, uint32_t finish_id, uint32_t user_arg);
+void ge_finish_release_owner(uint32_t owner);
 void ge_sync_wake(void);
 extern GeListInfo s_ge_lists[GE_LIST_MAX];
 extern uint64_t s_ge_list_done_bits;
@@ -1480,6 +1481,7 @@ void hle_register_exit_game_handler(void);
 void hle_register_devkit_version_handler(void);
 void hle_register_ctrl_sampling_handlers(void);
 void hle_register_gpi_gpo_handlers(void);
+void hle_register_std_handle_handlers(void);
 void hle_register_mpeg_shared_handlers(void);
 void hle_register_mpeg_avc_decode_handler(void);
 void hle_register_mpeg_userdata_handlers(void);

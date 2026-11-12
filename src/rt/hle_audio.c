@@ -231,7 +231,7 @@ extern int sr_audio_played_dry(int ch);
 extern void sr_audio_push_silence(int ch, int nframes);
 
 /* One display period in mixer frames, rounded up (736). */
-#define AUDIO_LATE_WAKE_FRAMES ((HLE_DISPLAY_PERIOD_US * 44100u + 999999u) / 1000000u)
+#define AUDIO_LATE_WAKE_FRAMES ((SR_DISPLAY_PERIOD_US * 44100u + 999999u) / 1000000u)
 
 static uint32_t audio_host_hold_frames(uint32_t n) {
     if (!n) return 0u;   /* no period reserved: nothing paces against this queue */
@@ -451,7 +451,7 @@ void sr_hle_test_audio_wait_hook(void (*hook)(uint32_t us)) { s_audio_wait_hook 
 void sr_hle_test_audio_wait_reset(void) { s_audio_wait_total_us = 0u; }
 uint64_t sr_hle_test_audio_wait_total_us(void) { return s_audio_wait_total_us; }
 /* The late wake the host hold covers, for a fixture that ends every wait that late. */
-uint32_t sr_hle_test_audio_late_wake_us(void) { return HLE_DISPLAY_PERIOD_US; }
+uint32_t sr_hle_test_audio_late_wake_us(void) { return SR_DISPLAY_PERIOD_US; }
 #endif
 static void audio_wait(uint32_t us) {
 #ifdef SR_HLE_THREAD_SELFTEST
@@ -555,6 +555,17 @@ void hle_register_regular_audio_handlers(void) {
     sr_hle_register(0xe2d56b2d, "sceAudioOutputPanned", h_AudioOutputPannedBlocking);
     sr_hle_register(0x95fd0c2d, "sceAudioChangeChannelConfig", h_AudioChangeChannelConfig);
     sr_hle_register(0xb011922f, "sceAudioGetChannelRestLength", h_AudioRestLen);
+    /* sceAudioGetChannelRestLen (#2361) shares the handler. Measured on a PSP-3000
+     * (PSP-HLE-AUDIO-REST-001): with the channel in $a0, read right after each of 32 blocking
+     * outputs on stereo channels of F = 1024, 2048 and 4096 frames, the two calls agree and
+     * return F or F - 64, and RestLen alone, polled after the last output, reaches 0. That
+     * run is evidence that the two calls are one answer; the value itself is not reproduced
+     * here: this runtime's blocking output returns with up to two blocks queued (#67), so in
+     * that state both calls can read up to 2F where the console read one block (#279, open).
+     * The PSP-AUDIO-001 query cells also read both calls on channel 0 (before and after
+     * output, just after release). UNMEASURED, for both calls, and taken from RestLength:
+     * the invalid-channel code (negative or >= 8) and any other queue state. */
+    sr_hle_register(0xe9d97901, "sceAudioGetChannelRestLen", h_AudioRestLen);
     sr_hle_register(0xb7e1d8e7, "sceAudioChangeChannelVolume", h_AudioChangeChannelVolume);
     sr_hle_register(0xcb2e439e, "sceAudioSetChannelDataLen", h_AudioSetChannelDataLen);
 }

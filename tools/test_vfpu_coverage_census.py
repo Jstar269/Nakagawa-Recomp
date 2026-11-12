@@ -308,6 +308,55 @@ class VfpuCoverageCensusTests(unittest.TestCase):
         self.assertEqual(verify("aot-direct", [], semantic), "hardware")
         self.assertEqual(verify("unsupported-encoding", ["t"], semantic), "not-applicable")
 
+    def test_measured_oracle_rows_are_cited_by_their_forms(self):
+        # Issue #326: each measured VFPU oracle row whose probe words a selftest replays is cited by
+        # the census forms that replay runs, and a form drops back to unmeasured when its citation
+        # goes. One representative word per replay; the neighbour is a width or form the check
+        # does not replay (the PSP read itself may have measured some of them).
+        from unittest import mock
+
+        import verification_ledger as ledger
+
+        cited = {
+            "PSP-VFPU-CCCMOV-001": ((0x48610083, 0x48E10083, 0x6C018080), (0x48610084, 0x6C000000)),
+            "PSP-VFPU-QUADWB-001": ((0xD9400002, 0xF9400002), (0xD9400000, 0xF9400000, 0xD821800F, 0xD8018102)),
+            "PSP-VFPU-BASICARITH-001": ((0x60000000, 0x60008080, 0x63880400, 0xD0000400, 0xD0070480),
+                                        (0x60000080, 0x63888480)),
+            "PSP-VFPU-VUS2I-001": ((0xD03A0008, 0xD03B0088), (0xD03A8008, 0xD03A8088)),
+            "PSP-VFPU-WIDEDOT-001": ((0x64810088, 0x66018088, 0xF2818008, 0xF3A48088), (0x66010088, 0xF3B48090)),
+            "PSP-VFPU-CONVERT-001": ((0xD2000001, 0xD2200001), (0xD2000081, 0xD2008001)),
+        }
+        table = ledger.VFPU_MEASURED_SELFTESTS
+        for oracle_id, (credited, uncredited) in cited.items():
+            tests = {name for name, entry in table.items() if entry["oracle_id"] == oracle_id}
+            self.assertTrue(tests, f"no VFPU_MEASURED_SELFTESTS entry cites {oracle_id}")
+            for word in credited:
+                record = census.classify_words([word])[0]
+                self.assertTrue(record["interpreter_supported"], f"0x{word:08x}")
+                self.assertTrue(tests & set(census._differential_tests(record, set())),
+                                f"0x{word:08x} is not credited to {oracle_id}")
+                self.assertEqual(census.form_disposition(record)["psp"], "measured-cells", f"0x{word:08x}")
+                self.assertIn(oracle_id, census.form_disposition(record)["psp_evidence"])
+                without = {name: entry for name, entry in table.items() if name not in tests}
+                with mock.patch.dict(table, without, clear=True):
+                    self.assertNotIn(oracle_id, census.form_disposition(record)["psp_evidence"],
+                                     f"0x{word:08x} still cites {oracle_id} without its table entry")
+            for word in uncredited:
+                record = census.classify_words([word])[0]
+                self.assertFalse(tests & set(census._differential_tests(record, set())),
+                                 f"0x{word:08x} is credited to {oracle_id}")
+
+    def test_wide_dot_measured_forms_are_the_words_the_selftest_replays(self):
+        import vfpu_overlap_diff_gen as gen
+
+        keys = set()
+        for name, word in gen.WIDE_DOT_WORDS:
+            record = census.classify_words([word])[0]
+            self.assertIn("vfpu-interp-selftest:check_vfpu_wide_dot_measured",
+                          census._differential_tests(record, set()), name)
+            keys.add(census._wide_dot_key(word, word >> 26, record["vector_size"]))
+        self.assertEqual(keys, set(census.WIDE_DOT_MEASURED_FORMS))
+
     def test_differential_evidence_names_real_selftest_checks(self):
         source = (ROOT / "tests" / "native" / "vfpu_interp_selftest.c").read_text(encoding="utf-8")
         for row in self.census["rows"]:
@@ -516,16 +565,20 @@ class VfpuRouteCensusTests(unittest.TestCase):
         # Issue #326: a route report lists each census form it emits once, with how its
         # result is checked and whether a PSP oracle row measured it.
         vadd_other_registers = 0x60010203 & ~0x8080
+        vadd_pair = 0x60000080  # vadd.p: the basic-arithmetic check replays .s and .q only
         vscmp_measured = 0x6EA00040  # vscmp.s S002, S000, S001 (PSP-VFPU-CMP-001)
-        rc, report = self._run_route([ROUTE_CLEAN_WORD, vadd_other_registers, vscmp_measured, *ROUTE_TAIL])
+        rc, report = self._run_route(
+            [ROUTE_CLEAN_WORD, vadd_other_registers, vadd_pair, vscmp_measured, *ROUTE_TAIL])
         self.assertEqual(rc, 0)
         forms = {form["form_id"]: form for form in report["forms"]}
-        self.assertEqual(len(forms), 2)
+        self.assertEqual(len(forms), 3)
         entries = {entry["word"]: entry for entry in report["entries"]}
         vadd = forms[entries[f"0x{ROUTE_CLEAN_WORD:08x}"]["form_id"]]
         self.assertEqual(vadd["words"], 2)
         self.assertEqual(vadd["semantic_verification"], "differential")
-        self.assertEqual(vadd["psp"], "unmeasured")
+        self.assertEqual(vadd["psp"], "measured-cells")
+        self.assertEqual(vadd["psp_evidence"], ["PSP-VFPU-BASICARITH-001"])
+        self.assertEqual(forms[entries[f"0x{vadd_pair:08x}"]["form_id"]]["psp"], "unmeasured")
         vscmp = forms[entries[f"0x{vscmp_measured:08x}"]["form_id"]]
         self.assertEqual(vscmp["psp"], "measured-cells")
         self.assertEqual(vscmp["psp_evidence"], ["PSP-VFPU-CMP-001"])

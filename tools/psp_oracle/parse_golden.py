@@ -29,10 +29,10 @@ than a lenient pass.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 import re
-from typing import cast
+from typing import Any, cast
 
 from .protocol import ProtocolError, SequenceReport, StreamSpec, TestResult, parse_output, parse_sequence
 
@@ -3081,6 +3081,67 @@ _register_campaign_probe(
     {case: (10 if case.endswith("-draw") else 16) for case in GE_RTT_CASES},
 )
 
+# The #343 GE pixel corpus (fixtures/psp_oracle/ge_corpus.json, `probe_runs`) carries the measured
+# results of these three probes. Per probe: its test id, its cells in stream order, and the record
+# suffixes the corpus keeps for each cell. A `-draw` record holds the GE wait outcome and timings and
+# is not kept, except the ge-raster window digest the PSP computed, which must equal the digest of
+# the kept rows. The window digest is FNV-1a 64 over the `-rN` rows' words, low byte first, as
+# gr_digest in probe_ge_sample.c computes it.
+GE_CORPUS_PROBES: dict[str, tuple[str, tuple[str, ...], tuple[str, ...]]] = {
+    "ge-raster": ("PSP-GE-RASTER-001", GE_RASTER_CELLS, tuple(f"r{y}" for y in GE_RASTER_ROWS)),
+    "ge-weight": ("PSP-GE-WEIGHT-001", GE_WEIGHT_CELLS, tuple(f"r{y}" for y in range(17))),
+    "ge-rtt": ("PSP-GE-RTT-001", GE_RTT_CELLS, ("t0", *(f"r{y}" for y in range(12)))),
+}
+GE_CORPUS_ROW_WORDS = 16
+
+
+def ge_window_fnv1a64(rows: Iterable[str]) -> str:
+    """FNV-1a 64 over corpus rows (space-separated 8-digit hex words), each word low byte first."""
+
+    digest = 0xCBF29CE484222325
+    for row in rows:
+        for word_text in row.split(" "):
+            word = int(word_text, 16)
+            for shift in (0, 8, 16, 24):
+                digest ^= (word >> shift) & 0xFF
+                digest = (digest * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
+    return f"0x{digest:016x}"
+
+
+def ge_corpus_cells(sequence: SequenceReport, probe_case: str) -> list[dict[str, Any]]:
+    """The corpus cells of one complete, all-PASS stream of a GE corpus probe.
+
+    Raises ProtocolError when the stream is partial, has a record that did not pass, or (ge-raster)
+    reports a window digest its own rows do not give.
+    """
+
+    try:
+        test_id, cells, suffixes = GE_CORPUS_PROBES[probe_case]
+    except KeyError as exc:
+        raise ProtocolError(f"{probe_case!r} is not a GE corpus probe") from exc
+    if sequence.spec.test_id != test_id:
+        raise ProtocolError(f"{probe_case}: stream test_id {sequence.spec.test_id} is not {test_id}")
+    if not sequence.complete or not sequence.all_passed:
+        raise ProtocolError(f"{test_id}: the corpus takes only a complete stream whose records all PASS")
+    corpus_cells: list[dict[str, Any]] = []
+    for cell in cells:
+        records = []
+        for suffix in suffixes:
+            case_id = f"{cell}-{suffix}"
+            values = dict(sequence.results[case_id].values)
+            words = " ".join(f"{int(values[f'out{i}'], 0):08x}" for i in range(GE_CORPUS_ROW_WORDS))
+            records.append({"case_id": case_id, "words": words})
+        digest = ge_window_fnv1a64(
+            record["words"] for record, suffix in zip(records, suffixes, strict=True) if suffix.startswith("r"))
+        if probe_case == "ge-raster":
+            draw = dict(sequence.results[f"{cell}-draw"].values)
+            reported = f"0x{(int(draw['out8'], 0) << 32) | int(draw['out7'], 0):016x}"
+            if reported != digest:
+                raise ProtocolError(
+                    f"{test_id}: {cell} reports window digest {reported} but its rows give {digest}")
+        corpus_cells.append({"cell": cell, "window_fnv1a64": digest, "records": records})
+    return corpus_cells
+
 # module-start (124, probe_module_start.c): the module_start thread cell. A fixed-shape
 # stream of raw words: module_start's own sceKernelReferThreadStatus (return code and the
 # 26-word SceKernelThreadInfo), the user-partition free sizes before and after the helper
@@ -3345,8 +3406,9 @@ VFPU_RAW_WORD_CASES = frozenset({"vfpu-transcendental-corpus"})
 #: Cases whose every cell is an unconditional observation: each record is PASS. hle-io-seek,
 #: hle-io-seek-edges, hle-nickname-limit and hle-self-stop-unload are in this set too: their SKIP rows only keep the
 #: word count when a precondition is missing (the ms0: directory already exists, the registry
-#: does not open) and their FAIL rows mean a probe-owned object could not be set up, so a stream
-#: with either is not a measurement of the cells it names.
+#: does not open) and their FAIL rows mean a probe-owned object could not be set up or, for the
+#: two io-seek cases' ms cleanup row, that the probe's ms0: directory is still there afterwards; a
+#: stream with either is not a measurement of the cells it names.
 HLE_OBSERVATION_CASES = frozenset({"hle-issues-batch", "vfpu-forms", "intr-cause", "vfpu-forms2",
                                    "vfpu-funnel", "vfpu-sort", "vfpu-unmodeled", "vfpu-quad-wb", "vfpu-convert", "vfpu-cc-cmov", "vfpu-vus2i", "vfpu-basic-arith",
                                    "hle-io-seek", "hle-io-seek-edges", "hle-nickname-limit", "hle-self-stop-unload", "vfpu-wide-dot-matrix",

@@ -152,6 +152,9 @@ const struct SrPauseHost *sr_sched_pause_host = NULL;
 void sr_audio_pause_enter(void) {}
 void sr_audio_pause_leave(void) {}
 int sr_audio_pause_script_ready(void) { return 1; }
+/* driver.c opens the host audio device before the scheduler starts (#2361); the microtest never
+ * enters the scheduler, and this link has no audio backend: no device. */
+int sr_audio_init(void) { return -1; }
 CpuState *sr_cpu_for_callbacks(void) { return NULL; }
 int     sr_vblank_quantum_due(void) { return 0; }
 void    sr_hle_advance_time(uint32_t us) { (void)us; }
