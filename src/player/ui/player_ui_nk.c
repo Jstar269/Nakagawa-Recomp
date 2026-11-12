@@ -285,7 +285,8 @@ struct PlayerUiNk {
     char play_reported[PLAYER_UI_TITLE_CAP][16];   /* the play mode badge last printed */
     char enhanced_reported[512];                    /* Settings > Enhanced as last printed */
     char ace_line_reported[PLAYER_PART_COUNT * 64 + 192]; /* the play line last printed */
-    char preset_note_reported[200];                 /* the main Settings page's preset note */
+    char enhancement_tag_reported[PLAYER_UI_TITLE_CAP][16]; /* the ENHANCEMENTS tag printed */
+    char preset_note_reported[200];                /* the main Settings page's preset note */
     int disc_reported_view;  /* the game-found card whose rows were printed, or -1 */
 #endif
     bool ready;
@@ -360,6 +361,17 @@ static bool player_ui_add_font(NkUiTtf *ttf, int font, const char *base_path,
     return false;
 }
 
+/* The launcher-unavailable reason names the fonts folder the way this
+   platform writes paths: assets\fonts\ui on Windows, assets/fonts/ui
+   elsewhere (#306). */
+static void player_ui_set_fonts_missing(char *error, size_t error_size) {
+    char sep = nk_platform_path_separator();
+    char message[96];
+    snprintf(message, sizeof(message), "its fonts (assets%cfonts%cui) are missing or damaged",
+             sep, sep);
+    player_ui_set_error(error, error_size, message);
+}
+
 /* The design system's eight font slots (nk_ui_theme.h). Every face falls back
    to Geist for Latin it lacks and to Noto Sans JP for Japanese titles. */
 static bool player_ui_register_fonts(NkUiTtf *ttf, const char *base_path,
@@ -367,15 +379,13 @@ static bool player_ui_register_fonts(NkUiTtf *ttf, const char *base_path,
 #ifdef NK_PLAYER_UI_REGRESSION_TEST
     /* Stands in for a ZIP extracted without its fonts folder. */
     if (getenv("NK_UI_TEST_HIDE_UI_FONTS") != NULL) {
-        player_ui_set_error(error, error_size,
-                            "its fonts (assets\\fonts\\ui) are missing or damaged");
+        player_ui_set_fonts_missing(error, error_size);
         return false;
     }
 #endif
     for (int font = 0; font < NK_UI_FONT_COUNT; ++font) {
         if (!player_ui_add_font(ttf, font, base_path, nk_ui_font_path(font))) {
-            player_ui_set_error(error, error_size,
-                                "its fonts (assets\\fonts\\ui) are missing or damaged");
+            player_ui_set_fonts_missing(error, error_size);
             return false;
         }
     }
@@ -856,6 +866,17 @@ static double player_ui_display_refresh_hz(SDL_Window *window) {
 }
 
 typedef char player_ui_enhanced_rows_fit[PLAYER_PART_COUNT <= PLAYER_UI_ENHANCED_ROWS ? 1 : -1];
+/* The part rows' element ids (PLAYER_UI_ID_ENHANCED_PART): each range ends before the next id in
+   use, and the two hold every row. */
+typedef char player_ui_enhanced_row_ids_fit[
+    PLAYER_UI_ID_SETTINGS_ENHANCED_PART + PLAYER_UI_ENHANCED_FIRST_IDS <= PLAYER_UI_ID_SETTINGS_PROBLEM_REPORT
+        ? 1 : -1];
+typedef char player_ui_enhanced_more_row_ids_fit[
+    PLAYER_UI_ID_SETTINGS_ENHANCED_PART_MORE + PLAYER_UI_ENHANCED_MORE_IDS <= PLAYER_UI_ID_DEVELOPER_LOG_COPY &&
+            PLAYER_UI_ID_CONTROLLER_GLYPH_BASE + PLAYER_UI_ID_CONTROLLER_GLYPH_BASE_SPAN <=
+                PLAYER_UI_ID_SETTINGS_ENHANCED_PART_MORE &&
+            PLAYER_UI_ENHANCED_ROWS <= PLAYER_UI_ENHANCED_FIRST_IDS + PLAYER_UI_ENHANCED_MORE_IDS
+        ? 1 : -1];
 
 /* Why a title offers no Ace: it has no usable package of its own (#2055). */
 #define PLAYER_UI_ACE_NEEDS_PACKAGE "Ace needs a package made for this game."
@@ -2876,6 +2897,18 @@ static PlayerUiPrimaryAction player_ui_fill_title(PlayerUiNk *player,
         out->enhancement_on = player_app_title_60hz_on(app, index);
         out->enhancement_session = app->experimental_60hz_session &&
                                    enhancement->available && !saved;
+        out->enhancement_released = player_app_title_60hz_released(app, index);
+#ifdef NK_PLAYER_UI_REGRESSION_TEST
+        /* The word scr_title.c tags the card with, from the value the screen reads. */
+        const char *tag = !out->enhancement_shown ? "none"
+                          : out->enhancement_released ? "Optional" : "Experimental";
+        if (strcmp(player->enhancement_tag_reported[index], tag) != 0) {
+            snprintf(player->enhancement_tag_reported[index],
+                     sizeof(player->enhancement_tag_reported[index]), "%s", tag);
+            printf("[PLAYER_UI_TEST] next_ui_enhancement_tag disc=%s tag=%s\n", game->disc_id,
+                   tag);
+        }
+#endif
         out->enhancement_enabled = !app->launch_pending && !app->is_game_running &&
             !out->enhancement_session &&
             !(app->build_session.is_building &&

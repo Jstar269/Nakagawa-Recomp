@@ -146,6 +146,10 @@ static int depth_fresh(VkImage depth, uint32_t gen) {
     return 1;
 }
 
+static int s_depth_float;
+void ace_hud_set_depth_float(int on) { s_depth_float = on ? 1 : 0; }
+int ace_hud_depth_float(void) { return s_depth_float; }
+
 void ace_hud_present(int slot, VkImage src, VkImage depth, VkImageLayout depth_layout, int depth_w,
                      int depth_h, uint32_t depth_gen) {
     if (s_aux_ready) s_stats.published_unshown++;

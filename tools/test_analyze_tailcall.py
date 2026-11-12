@@ -292,6 +292,17 @@ class TestGprWrites(unittest.TestCase):
             0x00200008: None,                  # jr $at
             0x0040F809: None,                  # jalr $v0
             0x45000002: None,                  # bc1f
+            0x04110002: None,                  # bal (bgezal $zero)
+            0x04130002: None,                  # bgezall $zero
+            0x04AA7253: frozenset(),           # tlti $a1, 0x7253: a trap writes no GPR
+            0x048C0007: frozenset(),           # teqi $a0, 7
+            0x04850000: "unknown",             # REGIMM rt 5: no such instruction
+            0x04AD0000: "unknown",             # REGIMM rt 0xD: no such instruction
+            0x04AF0000: "unknown",             # REGIMM rt 0xF: no such instruction
+            0x18A00002: None,                  # blez $a1
+            0x18A10002: "unknown",             # blez with rt != 0: not a branch
+            0x58A10002: "unknown",             # blezl with rt != 0
+            0x5CA10002: "unknown",             # bgtzl with rt != 0
             0x0000000C: frozenset(),           # syscall
             0x00850018: frozenset(),           # mult $a0, $a1
             0x00000011: frozenset(),           # mthi $zero
@@ -323,6 +334,15 @@ class TestGprWrites(unittest.TestCase):
         sparse = FakeElf({0x1000: 0x30C3000C, 0x1008: 0x00000000})
         self.assertIsNone(analyze._defining_word(sparse, 0x1000, 0x1008, 3))
 
+    def test_a_trap_still_ends_the_backward_walk(self):
+        # teqi writes no GPR, but reading through it would change the analysis of inputs that
+        # analyzed before this change, so it still ends the walk (a nop does not).
+        words = {0x1000: 0x30C3000C, 0x1004: 0x048C0007, 0x1008: 0x00000000}
+        self.assertIsNone(analyze._defining_word(FakeElf(words), 0x1000, 0x1008, 3))
+        words[0x1004] = 0x00000000
+        self.assertEqual(analyze._defining_word(FakeElf(words), 0x1000, 0x1008, 3),
+                         (0x1000, 0x30C3000C))
+
 
 class TestBoundedComputedGoto(unittest.TestCase):
     PADS = {0x1024, 0x1028, 0x102C, 0x1030}
@@ -335,6 +355,19 @@ class TestBoundedComputedGoto(unittest.TestCase):
     def test_shifted_index_names_the_scaled_pads(self):
         # andi $v1, $a2, 3; sll $v1, $v1, 2 -> the same four pads.
         words = _computed_goto_words(0x30C30003, inserted=(0x00031880,))  # sll $v1, $v1, 2
+        targets = analyze.bounded_computed_goto_targets(FakeElf(words), self.RANGES)
+        self.assertEqual(set(targets), self.PADS)
+
+    def test_a_trap_in_the_window_keeps_the_ladder_unresolved(self):
+        # teqi $a0, 7 between the index definition and the jump: the ladder stays unresolved and
+        # the analysis gains no entries, as before the REGIMM decoder classified traps.
+        words = _computed_goto_words(inserted=(0x048C0007,))
+        elf = FakeElf(words)
+        self.assertEqual(set(analyze.bounded_computed_goto_targets(elf, self.RANGES)), set())
+        starts, _ = analyze.analyze(elf)
+        self.assertEqual(self.PADS & set(starts), set())
+        # With a nop in the same place the ladder resolves.
+        words = _computed_goto_words(inserted=(0x00000000,))
         targets = analyze.bounded_computed_goto_targets(FakeElf(words), self.RANGES)
         self.assertEqual(set(targets), self.PADS)
 
