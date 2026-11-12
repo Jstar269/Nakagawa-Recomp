@@ -1516,8 +1516,9 @@ def _frame_step(w, regs, slots):
             slots[offset] = regs[rt(w)]
     written = _gpr_writes(w)
     if written is None:
-        # A transfer is_control() leaves out (bltzall/bgezall: effect() refuses them by name),
-        # stepped as a word or as a delay slot: it may link, so nothing written stays known.
+        # A transfer the walk does not model: bltzall/bgezall, which is_control() leaves out, or
+        # any transfer stepped as a delay slot. effect() refuses each by name later; here no
+        # register value survives it.
         written = frozenset(range(32))
     elif written == "unknown":
         written = (frozenset({rt(w)}) if op == 0x12 else

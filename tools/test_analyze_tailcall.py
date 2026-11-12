@@ -297,8 +297,12 @@ class TestGprWrites(unittest.TestCase):
             0x04AA7253: frozenset(),           # tlti $a1, 0x7253: a trap writes no GPR
             0x048C0007: frozenset(),           # teqi $a0, 7
             0x04850000: "unknown",             # REGIMM rt 5: no such instruction
+            0x04AD0000: "unknown",             # REGIMM rt 0xD: no such instruction
+            0x04AF0000: "unknown",             # REGIMM rt 0xF: no such instruction
             0x18A00002: None,                  # blez $a1
             0x18A10002: "unknown",             # blez with rt != 0: not a branch
+            0x58A10002: "unknown",             # blezl with rt != 0
+            0x5CA10002: "unknown",             # bgtzl with rt != 0
             0x0000000C: frozenset(),           # syscall
             0x00850018: frozenset(),           # mult $a0, $a1
             0x00000011: frozenset(),           # mthi $zero
@@ -329,6 +333,13 @@ class TestGprWrites(unittest.TestCase):
         self.assertIsNone(analyze._defining_word(FakeElf(words), 0x1000, 0x1008, 3))
         sparse = FakeElf({0x1000: 0x30C3000C, 0x1008: 0x00000000})
         self.assertIsNone(analyze._defining_word(sparse, 0x1000, 0x1008, 3))
+
+    def test_a_trap_does_not_end_the_backward_walk(self):
+        # teqi either raises an exception or falls through, writing no GPR: the definition
+        # before it still reaches the use after it.
+        words = {0x1000: 0x30C3000C, 0x1004: 0x048C0007, 0x1008: 0x00000000}
+        self.assertEqual(analyze._defining_word(FakeElf(words), 0x1000, 0x1008, 3),
+                         (0x1000, 0x30C3000C))
 
 
 class TestBoundedComputedGoto(unittest.TestCase):
