@@ -983,6 +983,9 @@ class TitleDeclaredDispatchBindings(unittest.TestCase):
                                  "synthetic", f"{name} is exempt as a fixture but is a title")
 
     def test_the_inventory_holds_no_alias_no_title_declares(self) -> None:
+        # dispatch_aliases is the only binding collection, so every inventory entry is an
+        # alias source. A second collection needs its own comparison here.
+        self.assertEqual(set(title_manifest.RUNTIME_BINDING_COLLECTIONS), {"dispatch_aliases"})
         declared = {alias["from"]
                     for path in (ROOT / "assets" / "titles").glob("*.json")
                     if path.name not in BINDING_FIXTURES
