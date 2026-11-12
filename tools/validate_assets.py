@@ -404,7 +404,7 @@ def validate_inventory_shape(inv: dict) -> list[str]:
             elif isinstance(path, str) and not _path_is_contained(path):
                 problems.append(f"{cat}[{idx}]: 'path' {path!r} escapes the inventory directory")
             size = item.get("size_bytes")
-            if "size_bytes" in item and not (_is_int(size) and size >= 0):
+            if "size_bytes" in item and not (isinstance(size, int) and _is_int(size) and size >= 0):
                 problems.append(f"{cat}[{idx}]: 'size_bytes' must be a non-negative integer")
 
     rejected = inv.get("rejected")
