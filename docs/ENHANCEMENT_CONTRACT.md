@@ -1273,8 +1273,8 @@ The render-target reads that decode at 1x do so by decision (#2279). The format,
 cases reinterpret the target's memory, which the 1x decode does exactly; the mipmapped and depth cases have their own
 reasons. The README gives each reason in full:
 
-- no scaled form, because the texture's texels are not the target's pixels: 8888 read as 16-bit, 16-bit as 8888,
-  CLUT4, CLUT8, DXT, and an address off the target's pixel boundaries;
+- no scaled form, because the texture's texels are not the target's pixels: 8888 read as 16-bit or CLUT16, 16-bit
+  as 8888 or CLUT32, CLUT4, CLUT8, DXT, and an address off the target's pixel boundaries;
 - a scaled form that would redo the reinterpretation for every filter tap in the shader, kept at 1x because the 1x
   read is exact and each would be its own shader path: a 16-bit target read as another 16-bit format (a repack),
   CLUT16 and CLUT32 at the target's pixel size (a palette lookup), a swizzled read and another buffer width (an

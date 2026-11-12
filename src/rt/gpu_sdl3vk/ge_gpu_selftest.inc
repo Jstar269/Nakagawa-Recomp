@@ -10466,7 +10466,7 @@ static int coherence_run_rtt_1x_reads(void) {
     const char *name = "rtt-1x-reads";
     const uint32_t ta = 0x04000000u | R1X_T, ua = 0x04000000u | R1X_U, ma = 0x04000000u | R1X_M;
     const uint32_t za = 0x04000000u | R1X_Z;
-    const uint32_t stride = 512u, bytes = stride * FB_H * 4u, zbytes = stride * FB_H * 2u;
+    const uint32_t stride = 512u, bytes = stride * FB_H * 4u, half_bytes = stride * FB_H * 2u;
     static const char *const read_name[R1X_READS] = {
         "4444 read of the 8888 target", "CLUT8 read", "CLUT4 read", "DXT1 read", "CLUT32 read", "swizzled read",
         "mipmapped read", "read at half the buffer width", "5551 read of the 5650 target",
@@ -10590,13 +10590,13 @@ static int coherence_run_rtt_1x_reads(void) {
     coherence_reset_targets();
     coherence_reset_depths();
     memset(SR_HOST(ta), 0, bytes);
-    memset(SR_HOST(ua), 0, zbytes);
+    memset(SR_HOST(ua), 0, half_bytes);
     memset(SR_HOST(ma), 0, bytes);
-    memset(SR_HOST(za), 0, zbytes);
+    memset(SR_HOST(za), 0, half_bytes);
     sr_gpu_vram_dirty(ta, bytes);
-    sr_gpu_vram_dirty(ua, zbytes);
+    sr_gpu_vram_dirty(ua, half_bytes);
     sr_gpu_vram_dirty(ma, bytes);
-    sr_gpu_vram_dirty(za, zbytes);
+    sr_gpu_vram_dirty(za, half_bytes);
     ge_set_gpu_hooks(&k_hooks);
     const uint64_t rtt0 = s_cnt_rtt, direct0 = s_cnt_rtt_direct, commit0 = s_cnt_depth_commit;
     int ok = ge_run_list(COH_SAMPLE_LIST, 0) == 0;
@@ -10625,13 +10625,13 @@ static int coherence_run_rtt_1x_reads(void) {
     if (ok) {
         coherence_reset_depths();
         memset(SR_HOST(ta), 0, bytes);
-        memset(SR_HOST(ua), 0, zbytes);
+        memset(SR_HOST(ua), 0, half_bytes);
         memset(SR_HOST(ma), 0, bytes);
-        memset(SR_HOST(za), 0, zbytes);
-        sr_gpu_vram_dirty(ua, zbytes);
+        memset(SR_HOST(za), 0, half_bytes);
+        sr_gpu_vram_dirty(ua, half_bytes);
         sr_gpu_vram_dirty(ta, bytes);
         sr_gpu_vram_dirty(ma, bytes);
-        sr_gpu_vram_dirty(za, zbytes);
+        sr_gpu_vram_dirty(za, half_bytes);
         ge_set_gpu_hooks(NULL);
         ok = ge_run_list(COH_SAMPLE_LIST, 0) == 0;
         ge_set_gpu_hooks(&k_hooks);

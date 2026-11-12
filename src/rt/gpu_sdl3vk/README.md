@@ -332,8 +332,8 @@ depth cases have their own reasons below.
 **No scaled form.** The texture's texel grid is not the target's pixel grid, so a texel has no
 device samples of its own:
 
-- an 8888 target read as a 16-bit format (a texel is half a pixel), and a 16-bit target read as
-  8888 (a texel spans two pixels);
+- an 8888 target read as a 16-bit format or CLUT16 (a texel is half a pixel), and a 16-bit target
+  read as 8888 or CLUT32 (a texel spans two pixels);
 - CLUT4 and CLUT8 (a texel is a nibble or a byte of a pixel);
 - DXT (a 4 x 4 block of texels is 8 or 16 bytes of pixels);
 - an address that is not on a pixel boundary of the target (each texel straddles two pixels).
@@ -364,11 +364,13 @@ detail.
 samples; a scaled read would sample it and repack each depth value into the texture's format.
 The read goes through the GE's CPU-read path (`sr_ge_vram_read_prepare`), which commits the GPU's
 depth to guest VRAM first, and decodes there at 1x, through the depth address (swizzled storage),
-the 0x04200000 linear view and the 0x04600000 view alike.
+the 0x04200000 linear view and the 0x04600000 view alike. Like any texture outside every colour
+target, that 1x decode may then be upscaled by texture scaling when it is on.
 
 `rtt-1x-reads` in `gpu-coherence-selftest` runs thirteen of these reads at 1x, 2x and 4x: an 8888
 target read as 4444, CLUT8, CLUT4, DXT1, CLUT32, swizzled, mipmapped and at half its buffer width;
-a 5650 target read as 5551 and as 8888; and its depth through the three views. None binds a
+a 5650 target read as 5551 and as 8888; and Z, the depth buffer all three share, through the
+three views. None binds a
 target's image, each depth read commits depth the GPU wrote since the last commit, and the reading
 target's guest VRAM equals the software renderer's exactly. A control read in the target's own
 format binds its image directly. The other cases, among them an unaligned read, CLUT16, DXT3 and
