@@ -1431,6 +1431,7 @@ void hle_state_sample_close(void);
 void hle_enhancement_speed_vblank(uint32_t vcount);
 extern GeCallback s_ge_cb[16];
 void ge_finish_callback(CpuState *s, uint32_t cbid, uint32_t finish_id, uint32_t user_arg);
+void ge_finish_release_owner(uint32_t owner);
 void ge_sync_wake(void);
 extern GeListInfo s_ge_lists[GE_LIST_MAX];
 extern uint64_t s_ge_list_done_bits;
