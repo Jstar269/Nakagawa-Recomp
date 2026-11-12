@@ -589,16 +589,47 @@ int partition_high_modelled(void) {
  * highest free block below it that does, carved from that block's top, which is the PSP_SMEM_High
  * rule applied to the rest of the partition. The carved range leaves the free list, so no Low
  * request reuses it, and partition_hole_release gives it back. */
+extern int sched_guest_stack_overlaps(uint32_t base, uint32_t end);
+static int partition_high_block_overlaps(uint32_t base, uint32_t end) {
+    for (int i = 0; i < s_nblocks; i++)
+        if (s_blocks[i].uid != 0u && s_blocks[i].high && s_blocks[i].addr < end &&
+            s_blocks[i].addr + s_blocks[i].slot_size > base)
+            return 1;
+    return 0;
+}
+
 static int partition_hole_alloc_high(uint32_t size, uint32_t *base_out) {
-    if (!base_out || size == 0u) return 0;
+    if (!base_out || size == 0u || (size & 0xFFu) != 0u) return 0;
     for (int i = s_nfree_blocks - 1; i >= 0; i--) {
-        if (s_free_blocks[i].size < size) continue;
-        s_free_blocks[i].size -= size;
-        *base_out = s_free_blocks[i].addr + s_free_blocks[i].size;
-        if (s_free_blocks[i].size == 0u) {
+        const uint32_t f_addr = s_free_blocks[i].addr;
+        const uint32_t f_end = f_addr + s_free_blocks[i].size;
+        /* A free block can end unaligned after a fixed block (sr_alloc_block_at keeps its exact
+         * bounds); the request sits 256-aligned like every other partition block. */
+        const uint32_t end = f_end & ~0xFFu;
+        if (end <= f_addr || end - f_addr < size) continue;
+        const uint32_t base = end - size;
+        /* A fixed reservation above the bump pointer returns its skipped gap to the free list
+         * (sr_alloc_block_at) without looking at the stacks and High blocks inside it: never place
+         * a request over one of those. */
+        if (sched_guest_stack_overlaps(base, end) || partition_high_block_overlaps(base, end)) continue;
+        const int head = base > f_addr, tail = end < f_end;
+        if (head && tail) {
+            if (s_nfree_blocks >= HLE_MAX_FREE_BLOCKS) continue;
+            for (int j = s_nfree_blocks; j > i + 1; j--) s_free_blocks[j] = s_free_blocks[j - 1];
+            s_free_blocks[i + 1].addr = end;
+            s_free_blocks[i + 1].size = f_end - end;
+            s_nfree_blocks++;
+            s_free_blocks[i].size = base - f_addr;
+        } else if (head) {
+            s_free_blocks[i].size = base - f_addr;
+        } else if (tail) {
+            s_free_blocks[i].addr = end;
+            s_free_blocks[i].size = f_end - end;
+        } else {
             for (int j = i; j < s_nfree_blocks - 1; j++) s_free_blocks[j] = s_free_blocks[j + 1];
             s_nfree_blocks--;
         }
+        *base_out = base;
         return 1;
     }
     return 0;

@@ -634,6 +634,16 @@ uint32_t sched_guest_stack_floor_above(uint32_t addr) {
 
 uint32_t sched_guest_stack_floor(void) { return sched_guest_stack_floor_above(0u); }
 
+/* 1 when a live thread stack, from either source, touches [base, end). */
+int sched_guest_stack_overlaps(uint32_t base, uint32_t end) {
+    for (int i = 0; i < s_ntcb; i++) {
+        const TCB *t = &s_tcb[i];
+        if (t->stack_reservation == 0u || t->stack_released) continue;
+        if (t->stack_base < end && t->stack_base + t->stack_reservation > base) return 1;
+    }
+    return 0;
+}
+
 /* The HLE user partition (hle.c) installs a check that refuses a stack range it has
  * handed out. A callback rather than a link-time reference: several fixtures link
  * sched.c without hle.c, and with no check installed every range is accepted. */
@@ -2806,8 +2816,7 @@ static uint32_t sched_create_thread_finish(TCB *t, uint32_t entry, int priority,
     }
     if (!stack_ok && s_partition_hole_alloc && s_partition_hole_alloc(reservation, &user_base)) {
         /* The PSP's rule (stack_range_alloc) is the highest free block that holds the stack,
-         * and a block the guest freed below the bump pointer is one: a title that keeps the
-         * partition full frees exactly the stack's size before it creates the thread. */
+         * and a block the guest freed below the bump pointer is one. */
         in_partition = 1;
         stack_ok = 1;
     }
