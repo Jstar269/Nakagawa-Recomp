@@ -30,9 +30,11 @@ upstream job does, and never contacts the private authority. What comes from whe
   lag it; the base must be an ancestor of it;
 * the candidate must contain the tip (``NOT_UP_TO_DATE``), so every comparison below is with the
   tip itself, the tree a squash merge applies the pull request to. A head that lags is refused
-  before anything else is judged; the fix is to merge the default branch in. The fork's ruleset
-  requires branches to be up to date, so a head that passed against an older tip is checked again
-  before it merges (docs/FORKING.md);
+  before anything else is judged; the fix is to merge the default branch in. ``SCOPE`` says what a
+  pass covers: one pair of commits, the head and the tip named in the summary. GitHub keeps the
+  result on the head commit and does not judge it again when the default branch moves, so after
+  the fork maintainer's own push to the default branch the check is run again by hand for each open
+  pull request (docs/FORKING.md, "After your own push");
 * the release manifest (``assets/release_manifest.json``) is held like the profile's rules: it may not
   change (``MANIFEST_CHANGED``). The bytes of the paths
   it marks approved (``HELD_PATH_DISPOSITIONS``) and of the tables under ``assets/vfpu/`` may not
@@ -115,6 +117,16 @@ SELF_ADMITTED_MAX_CHARS = 20_000
 WARNING_LIMIT = 10
 #: The summary's size limit, with room to spare under GitHub's 1 MiB.
 SUMMARY_LIMIT = 900_000
+#: What a pass covers, word for word as ``docs/FORKING.md`` states it (``tools/test_provenance_mode.py`` holds the
+#: two equal).
+SCOPE = ("A pass is for one pair of commits, the head and the default branch tip named here; it does not cover a "
+         "merge onto any other tip, a merge method other than squash, or who made an admission.")
+#: The summary of a run that could not read its inputs. Fixed text: nothing from the pull request.
+INPUT_ERROR_SUMMARY = (
+    f"### {FORK_CONTEXT}: failed, inputs unreadable\n\n"
+    "The check could not read the pull request's head, the default branch's tip or a file it compares, so it "
+    "judged nothing. This is a failure, not a pass; the job log has the details.\n"
+)
 
 #: The job conditions in ``WORKFLOW``. GitHub's ``==`` ignores letter case for strings, as
 #: ``is_upstream`` does. They are exact complements, so exactly one of the two jobs runs, and an
@@ -489,10 +501,23 @@ def _fence(lines: list[str]) -> str:
     return "`" * max(3, longest + 1)
 
 
+def _judged_pair(lines: list[str]) -> tuple[str, str]:
+    """The tip and the head a report judged: ``fork_check`` opens every report with the base, the tip and the
+    candidate, each a full SHA it resolved itself."""
+    tip_prefix, head_prefix = "default branch tip ", "candidate "
+    if len(lines) < 3 or not lines[1].startswith(tip_prefix) or not lines[2].startswith(head_prefix):
+        raise CheckError("the report does not open with the tip and the candidate")
+    tip, head = lines[1][len(tip_prefix):], lines[2][len(head_prefix):]
+    if not (re.fullmatch(r"[0-9a-f]{40}", tip) and re.fullmatch(r"[0-9a-f]{40}", head)):
+        raise CheckError("the report's tip or candidate is not a full commit SHA")
+    return tip, head
+
+
 def _summary(lines: list[str], code: int) -> str:
     verdict = "passed" if code == 0 else "failed"
     admitted = self_admitted(lines)
-    title = f"### {FORK_CONTEXT}: {verdict}"
+    tip, head = _judged_pair(lines)
+    title = f"### {FORK_CONTEXT}: {verdict} for head `{head}` against default branch tip `{tip}`"
     if admitted:
         shown = ", ".join(f"`{path}`" for path in admitted[:10])
         more = f" and {len(admitted) - 10} more" if len(admitted) > 10 else ""
@@ -500,8 +525,8 @@ def _summary(lines: list[str], code: int) -> str:
     listed = [f"- `{path}`" for path in admitted[:SELF_ADMITTED_MAX_PATHS]]
     if len(admitted) > SELF_ADMITTED_MAX_PATHS:
         listed.append(f"- and {len(admitted) - SELF_ADMITTED_MAX_PATHS} more (over the limit; the job log has all)")
-    head = [title, "", *(["Paths this pull request admits itself:", "", *listed, ""] if listed else [])]
-    budget = SUMMARY_LIMIT - 2_000 - sum(len(line.encode("utf-8")) + 1 for line in head)
+    top = [title, "", SCOPE, "", *(["Paths this pull request admits itself:", "", *listed, ""] if listed else [])]
+    budget = SUMMARY_LIMIT - 2_000 - sum(len(line.encode("utf-8")) + 1 for line in top)
     report = []
     for line in lines:
         budget -= len(line.encode("utf-8")) + 1
@@ -509,18 +534,27 @@ def _summary(lines: list[str], code: int) -> str:
             report.append("(report cut to fit the summary; the job log has all of it)")
             break
         report.append(line)
+    if any(line.startswith("NOT_UP_TO_DATE: ") for line in lines):
+        body = [
+            "The pull request does not contain the default branch's tip, so nothing else was judged. Merge",
+            "the default branch into the pull request; the check runs again on the new head.",
+        ]
+    else:
+        body = [
+            "This repository is not the upstream, so it has no access to the upstream's private trusted",
+            "ledger. This check ran the trusted default branch's publication audit on the candidate's exact",
+            "tree, under the candidate's own publication profile, whose rules and release manifest must",
+            "equal the default branch's, and checked the public ledger's self-consistency. A pull request",
+            "may change the profile's include_paths only, and not the release manifest, the paths it",
+            "approves, the VFPU tables, any binary, or this check's own workflow. A pass does not mean the",
+            "fork maintainer admitted anything: the paths a pull request admits or re-claims itself are named",
+            "above, for review. The",
+            "fork maintainer's admission (`tools/fork_init.py`, `tools/admit_paths.py`) and review are this",
+            "fork's provenance authority; see docs/FORKING.md.",
+        ]
     return "\n".join([
-        *head,
-        "This repository is not the upstream, so it has no access to the upstream's private trusted",
-        "ledger. This check ran the trusted default branch's publication audit on the candidate's exact",
-        "tree, under the candidate's own publication profile, whose rules and release manifest must",
-        "equal the default branch's, and checked the public ledger's self-consistency. A pull request",
-        "may change the profile's include_paths only, and not the release manifest, the paths it",
-        "approves, the VFPU tables, any binary, or this check's own workflow. A pass does not mean the",
-        "fork maintainer admitted anything: the paths a pull request admits or re-claims itself are named",
-        "above, for review. The",
-        "fork maintainer's admission (`tools/fork_init.py`, `tools/admit_paths.py`) and review are this",
-        "fork's provenance authority; see docs/FORKING.md.",
+        *top,
+        *body,
         "",
         _fence(report) + "text",
         *report,
@@ -582,21 +616,29 @@ def main(argv: list[str] | None = None) -> int:
         try:
             code, lines = fork_check(args.repo.resolve(), args.base, args.candidate, tip=args.tip)
         except CheckError as error:
-            print(f"{FORK_CONTEXT}: input error: {error}", flush=True)
+            # The detail can quote the pull request's own names (a Git error about one of its paths), so it is
+            # shown as a path is: on one line, never starting one of its own.
+            print(f"{FORK_CONTEXT}: input error: {shown_path(str(error))}", flush=True)
+            _write_summary(args.summary, INPUT_ERROR_SUMMARY)
             return 2
         except Exception:  # noqa: BLE001 - reported here, while workflow commands are still stopped
             traceback.print_exc(file=sys.stdout)
             print(f"{FORK_CONTEXT}: internal error", flush=True)
+            _write_summary(args.summary, INPUT_ERROR_SUMMARY)
             return 2
         print("\n".join(lines), flush=True)
     finally:
         print(f"::{token}::", flush=True)
     for command in warning_annotations(lines):
         print(command)
-    if args.summary:
-        with args.summary.open("a", encoding="utf-8") as handle:
-            handle.write(_summary(lines, code))
+    _write_summary(args.summary, _summary(lines, code))
     return code
+
+
+def _write_summary(path: Path | None, text: str) -> None:
+    if path:
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(text)
 
 
 if __name__ == "__main__":

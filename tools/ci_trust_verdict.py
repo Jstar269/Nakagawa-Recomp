@@ -270,6 +270,23 @@ def status_description(verdict: Verdict, producers: tuple[Producer, ...]) -> str
     return verdict.description()
 
 
+def fork_run_note(snapshot: dict, producers: tuple[Producer, ...], repository: str) -> str:
+    """In a fork, the link to the Fork provenance check run this verdict judged; empty for the upstream.
+
+    That run's summary names the head and the tip it judged and the paths the pull request admits itself. On the
+    routes that need no ``pull_request_target`` it is listed under the default branch, not on the pull request, so
+    the verdict's report links it. The URL is built from the repository name and the run's numeric ID only.
+    """
+    if producers is PRODUCERS:
+        return ""
+    producer = next(item for item in producers if item.context == provenance_mode.FORK_CONTEXT)
+    run = latest_live_run(snapshot["workflow_runs"], producer, snapshot["head_sha"], snapshot["default_branch"])
+    if run is None:
+        return f"; no {provenance_mode.FORK_CONTEXT} run was judged"
+    return (f"; judged {provenance_mode.FORK_CONTEXT} run: "
+            f"https://github.com/{repository}/actions/runs/{int(run['id'])}")
+
+
 def producers_for(repository: str | None, repository_id: str | None) -> tuple[Producer, ...]:
     """The producers judged for ``repository``: ``PRODUCERS`` unchanged for the upstream.
 
@@ -1837,7 +1854,7 @@ def main(argv: list[str] | None = None) -> int:
         post("error", f"verifier could not judge this head: {type(error).__name__}")
         print(gh.budget_note())
         raise
-    _report(verdict, snapshot, args.summary, judged)
+    _report(verdict, snapshot, args.summary, judged + fork_run_note(snapshot, producers, args.repository))
     post(verdict.state, status_description(verdict, producers))
     print(gh.budget_note())
     return 1 if verdict.state == "failure" else 0

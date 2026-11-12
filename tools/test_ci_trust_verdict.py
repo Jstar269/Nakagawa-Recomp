@@ -3227,6 +3227,76 @@ class ForkProducerTests(unittest.TestCase):
         self.assertIn("tools/provenance_mode.py", ctv.PROTECTED_EXTRA)
         self.assertIn("tools/provenance_mode.py", ctv.protected_paths({}, {}, []))
 
+    @staticmethod
+    def _fork_scenario() -> Scenario:
+        """A healthy fork head: the provenance workflow's job is the Fork provenance check."""
+        scenario = Scenario()
+        for job in scenario.raw["jobs"]["4"]:
+            job["name"] = "Fork provenance check"
+        for check in scenario.raw["check_runs"]:
+            if check["name"] == "Trusted provenance attestation":
+                check["name"] = "Fork provenance check"
+        return scenario
+
+    def _run_main(self, scenario: Scenario, repository: str, identity: str,
+                  summary: Path) -> tuple[FakeGitHub, int, str]:
+        import io  # noqa: PLC0415
+
+        gh = FakeGitHub(scenario)
+        log = io.StringIO()
+        with mock.patch.object(ctv, "git_facts", return_value=_facts()), \
+                mock.patch.object(ctv, "GitHub", return_value=gh), \
+                mock.patch.dict(os.environ, {"GITHUB_TOKEN": "token", "GITHUB_REPOSITORY_ID": identity}), \
+                mock.patch("sys.stdout", log):
+            code = ctv.main(["--repository", repository, "--post", "--target-url", "https://run",
+                             "--pull-request", str(PR), "--summary", str(summary)])
+        return gh, code, log.getvalue()
+
+    def test_a_forks_verdict_reaches_success_through_main_and_links_the_judged_run(self) -> None:
+        # Review 2309-b91191b7b7a2 S1 and N5 (c4, c5, c7): main hands the fork's producers to collect and evaluate,
+        # posts the fork text, and its report links the Fork provenance check run it judged.
+        with tempfile.TemporaryDirectory() as scratch:
+            summary = Path(scratch) / "summary.md"
+            gh, code, log = self._run_main(self._fork_scenario(), "example-user/nakagawa-recomp", "42", summary)
+            report = summary.read_text(encoding="utf-8")
+        self.assertEqual(code, 0, log)
+        self.assertEqual(gh.posts, [(f"statuses/{HEAD}", {
+            "state": "success", "context": ctv.VERDICT_CONTEXT, "description": ctv.FORK_SUCCESS_DESCRIPTION,
+            "target_url": "https://run",
+        })])
+        line = ("Provenance producer set: fork (repository example-user/nakagawa-recomp, ID 42); judged Fork provenance "
+                "check run: https://github.com/example-user/nakagawa-recomp/actions/runs/4")
+        self.assertTrue(report.endswith(f"\n{line}\n"), report)
+        self.assertIn(line, log)
+
+    def test_a_forks_pending_verdict_names_its_own_check(self) -> None:
+        # Review 2309-b91191b7b7a2 N5 (c5): collect waits for the fork's producer, not the upstream's.
+        scenario = self._fork_scenario()
+        run = next(item for item in scenario.raw["workflow_runs"] if item["id"] == 4)
+        run["status"], run["conclusion"] = "in_progress", None
+        with tempfile.TemporaryDirectory() as scratch:
+            gh, code, _ = self._run_main(scenario, "example-user/nakagawa-recomp", "42", Path(scratch) / "s.md")
+        self.assertEqual(code, 0)
+        ((_, body),) = gh.posts
+        self.assertEqual(body["state"], "pending")
+        self.assertIn("Fork provenance check", body["description"])
+        self.assertNotIn("Trusted provenance attestation", body["description"])
+
+    def test_the_upstreams_report_and_status_are_unchanged(self) -> None:
+        with tempfile.TemporaryDirectory() as scratch:
+            summary = Path(scratch) / "summary.md"
+            gh, code, _ = self._run_main(Scenario(), "Jstar269/Nakagawa-Recomp", "1330183186", summary)
+            report = summary.read_text(encoding="utf-8")
+        self.assertEqual(code, 0)
+        self.assertEqual(gh.posts, [(f"statuses/{HEAD}", {
+            "state": "success", "context": ctv.VERDICT_CONTEXT, "description": ctv.Verdict("success").description(),
+            "target_url": "https://run",
+        })])
+        self.assertTrue(report.endswith(
+            "\n\nProvenance producer set: upstream (repository Jstar269/Nakagawa-Recomp, ID 1330183186)\n"), report)
+        self.assertNotIn("actions/runs/", report)
+        self.assertEqual(ctv.fork_run_note(ctv.normalise(Scenario().raw), ctv.PRODUCERS, "Jstar269/Nakagawa-Recomp"), "")
+
     def test_a_skipped_upstream_job_fails_the_upstream_verdict(self) -> None:
         # On the upstream the fork job is skipped and the attestation must still succeed: a skipped
         # attestation is a failure, never a pass.

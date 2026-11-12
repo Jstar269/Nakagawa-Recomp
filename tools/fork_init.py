@@ -20,8 +20,11 @@ admits new paths with the same ``tools/admit_paths.py`` flow the upstream uses
 with ``docs/provenance/IMPLEMENTATION_PROVENANCE.json``. Every record in it is rebuilt from a public
 ledger entry that names a record id: its id, its exact paths, the classification and evidence tier
 the entry publishes, and the licence of an upstream-derived file. Each record says that it adopts the
-claim the upstream published at that commit; it is not a new attestation and adds nothing the public
-ledger does not say. Documentation, configuration, fixtures and other deterministic paths need no
+claim the upstream published at that commit; it is not a new attestation. It makes one choice of its
+own: every project-authored entry gets the detailed class ``project-authored-independent``, because the
+public ledger does not say which of the two detailed classes behind its project-authored class
+(``project-authored-independent`` or ``behavior-informed``) the upstream recorded. Documentation,
+configuration, fixtures and other deterministic paths need no
 record. ``init`` then checks that the trusted verifier, given only the new authority, regenerates the
 committed public ledger byte for byte, and commits the seed with your Git identity.
 

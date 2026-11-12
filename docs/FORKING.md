@@ -70,6 +70,7 @@ hosted rows come from reading each workflow, because a clone that is never pushe
    Push the merge to your default branch yourself: as a pull request it fails the Fork provenance
    check whenever the upstream changed that check's workflow, the release manifest, an approved
    binary, a VFPU table, any other binary or a publication rule, which only your own push may change.
+   Then follow [After your own push](#after-your-own-push).
 
 ## Become your fork's provenance authority
 
@@ -84,8 +85,11 @@ python tools/fork_init.py init --authority ..\my-fork-authority
 This creates a Git repository next to your checkout (never inside it: the tool refuses that). It
 holds `docs/provenance/IMPLEMENTATION_PROVENANCE.json`, seeded from your fork's public ledger: one
 record per record id the ledger names, with the same paths, classification, evidence tier and licence.
-Each seeded record says that it adopts the claim the upstream published at that commit; it adds
-nothing the public ledger does not already say. The tool then checks that the trusted verifier,
+Each seeded record says that it adopts the claim the upstream published at that commit. It makes
+one choice of its own: every project-authored entry gets the detailed class
+`project-authored-independent`, because the public ledger does not say which of the two detailed
+classes behind its project-authored class, `project-authored-independent` or `behavior-informed`,
+the upstream recorded. The tool then checks that the trusted verifier,
 given only your authority, regenerates the committed public ledger byte for byte, and commits the
 seed with your Git identity. `python tools/fork_init.py verify --authority ..\my-fork-authority`
 repeats that check at any time.
@@ -171,28 +175,83 @@ with its own code. It reads no secret and never contacts any authority. It:
   (`BINARY_CHANGED`). You change those by your own push to the default branch, after review;
 - lists the paths the pull request adds to or removes from the publication profile, and names each
   path the pull request admits itself or whose claim in the public ledger it changes
-  (`SELF_ADMITTED`): the first ten in the check's title line,
-  the first nine as warnings on the check, and all of them in a list at the top of its summary. An added path must name a file of the pull
+  (`SELF_ADMITTED`): the first ten in the check's title line; as warnings on the check, all of them
+  when there are ten or fewer, otherwise the first nine and a count of the rest; and all of them in
+  a list at the top of its summary. An added path must name a file of the pull
   request (`PROFILE_PATH_MISSING`), and a pull request may admit at most 50 paths, with 20,000
   characters of names in all, itself (`SELF_ADMITTED_LIMIT`), so that every one stays in view;
   admit more by your own push.
 
-#### Two settings the check requires
+"Named" covers exactly two things: the paths a pull request adds to `include_paths`, and the paths
+whose claim in the public ledger it changes. An edit to a path that is already admitted is not
+named. That includes a file put back at an admitted path that had lost its file: the path is
+admitted already, so nothing about it is new to the profile or the ledger.
 
-The check judges a pull request's final tree against your default branch as it stood when the job
-ran. Two settings make that the change that reaches your default branch. The check cannot set them,
-and a fork does not copy rulesets, so add a branch ruleset for your default branch that:
+#### What a pass covers, and what it does not
 
-1. **Requires branches to be up to date before merging** (under **Require status checks to pass**,
-   with **Trusted CI verdict** required). Without it, a pull request that passed before you changed a
-   rule, the release manifest or a held file merges without being judged against that change.
-2. **Allows squash merging only** (**Allowed merge methods** under **Require a pull request before
-   merging**). Without it, a merge commit or a rebase brings each of the pull request's commits into
-   your default branch's history, and the check judged none of them: a file one commit adds and a
-   later one removes reaches your history unchecked.
+A passing **Fork provenance check** says one thing. When the job ran, the pull request's head commit
+contained your default branch's tip, and judged against that tip with that tip's tools, the head's
+tree had nothing the publication audit refuses and changed nothing the check holds. The summary
+names both commits and every path the pull request admits itself.
 
-A fork without both settings has no guarantee from the check: a pass then covers only the tree it
-judged, at the tip it judged, and your review of each commit has to cover the rest.
+The summary's first lines say the same in one sentence:
+
+> A pass is for one pair of commits, the head and the default branch tip named here; it does not
+> cover a merge onto any other tip, a merge method other than squash, or who made an admission.
+
+Squash-merged while your default branch is still at that tip, the commit that lands has exactly the
+tree that was judged. In every other case the pass does not cover what lands:
+
+- **Your default branch moved after the check ran.** The pass is stored on the head commit and
+  GitHub does not judge it again. With "Require branches to be up to date before merging", GitHub
+  refuses the merge when the head lacks the new tip, and updating the branch starts the check again.
+  That rule cannot help when the new tip is a commit the pull request already contained, which
+  happens when you push a commit that was public before it reached your default branch: an upstream
+  commit, a branch of yours, another pull request's head.
+- **Another merge method.** A merge commit or a rebase brings the pull request's earlier commits
+  into your history; only the head's tree was judged.
+- **Admissions.** The check names what a pull request admits; it does not decide whether to admit
+  it. Your review of the named paths is the admission.
+- **People the check does not bind.** You, everyone on your ruleset's bypass list, and everyone with
+  write access, who can set a commit status.
+
+After each merge, the `CI` run on your default branch (it runs on a branch named `main`) audits the
+tree that landed, with that tree's own tools. It reports; it cannot undo.
+
+#### Settings that narrow the gap
+
+None of these closes the gap above; each makes one part of it smaller. The check cannot set them,
+and a fork does not copy settings or rulesets. What each setting does is GitHub's behaviour, as
+GitHub documents it on the pages linked here.
+
+- **Squash merging only**, as a repository setting: in **Settings**, **General**, **Pull Requests**,
+  leave **Allow squash merging** on and turn the other two methods off. GitHub offers this on every
+  plan ([About merge methods on GitHub](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/configuring-pull-request-merges/about-merge-methods-on-github)).
+- **Optionally, a branch ruleset** for your default branch that requires **Trusted CI verdict** to
+  pass, with **Require branches to be up to date before merging**
+  ([Available rules for rulesets](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/available-rules-for-rulesets)).
+  Rulesets are available in public repositories on GitHub Free
+  ([About rulesets](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/about-rulesets)).
+  Require **Trusted CI verdict**, never **Fork provenance check** by name (above). The ruleset also
+  refuses your own direct push to the default branch, such as the upstream merge in
+  [Fork, build and test](#fork-build-and-test), unless you are on its bypass list
+  ([Creating rulesets for a repository](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/creating-rulesets-for-a-repository)).
+  Everyone on that list lands changes without the check, so keep it to the people you would trust
+  with the provenance authority itself.
+
+#### After your own push
+
+After every push of your own to the default branch, run the check again for each open pull request
+before you merge it, and wait for the second run to post:
+
+```bash
+gh pr list --base <default branch> --state open --json number,headRefOid
+gh workflow run provenance-attestation.yml -f pull_request_number=<n> -f head_sha=<head SHA>
+gh workflow run ci-trust-verdict.yml -f pull_request_number=<n>
+```
+
+The first command lists each open pull request's number and head; the other two run the check and
+then the verdict for one of them, against the tip your push made.
 
 **A green Fork provenance check does not mean you admitted anything.** The check cannot tell your
 admission from anyone else's: it passes a pull request that adds a path to `include_paths` and the
@@ -206,6 +265,17 @@ a dispatch that names a pull request and its head. GitHub blocks `pull_request_t
 public repositories from 2026-12-02. Your fork needs no Actions policy for it: the `workflow_run` route
 checks each pushed head, and the verdict judges the run titled `Provenance attestation of <head>` on
 your default branch.
+
+Where to read the check's summary, with its title line and its list of named paths:
+
+- **`pull_request_target`**: on the pull request's **Checks** tab, under **Fork provenance check**.
+- **`workflow_run` and a dispatch**: GitHub lists these runs under your default branch, not on the
+  pull request. Open the run titled `Provenance attestation of <head>` in the **Actions** tab; the
+  **Trusted CI verdict**'s report names that run's link in its line `Provenance producer set: fork`.
+
+The check needs a public repository. It fetches the pull request's head without credentials, which a
+private repository refuses, so on a private copy the check fails at that fetch and never passes.
+GitHub Free also offers rulesets only in public repositories.
 
 `tools/provenance_mode.py` decides which job runs. A repository is the upstream when its numeric ID
 is the upstream's or its name is `Jstar269/Nakagawa-Recomp`, so renaming or transferring the upstream
