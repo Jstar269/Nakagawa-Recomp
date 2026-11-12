@@ -438,7 +438,8 @@ native-core-tests: ge-cpu-profile-validate-selftest ge-vertex-cache-mutants
 # caches vertices outside plain RAM, so a draw whose VRAM target covers its own VRAM vertices
 # reuses vertices its pixels rewrote; 4 caches while the colour target is in RAM, the same
 # hazard for RAM vertices. Each builds its own ge.c object and binary and must fail with its
-# own message (3 and 4 by target bytes that differ from the cache-off draw); mutant 1 must
+# own message (2 also by pixels, 3 and 4 by target bytes that differ from the cache-off draw);
+# mutant 1 must
 # also fail every state-change pair (vertex data, matrices, lights, material, vertex type,
 # morph weights and the rest) with pixels that differ from the cache-off draw.
 ge-vertex-cache-mutants: $(RT_GE_O)
@@ -450,6 +451,7 @@ ge-vertex-cache-mutants: $(RT_GE_O)
 			*) kill="FAIL vertex_cache_overwrite\[ram-target\]: cache on and off differ";; \
 		esac; \
 		changes=0; if test $$m -eq 1; then changes=16; fi; \
+		pixels=""; if test $$m -eq 2; then pixels="^FAIL vertex_cache: cache on and off differ: [1-9][0-9]* framebuffer pixels"; fi; \
 		obj=$(BUILD_DIR)/ge_vertex_cache_mutant$$m.o; \
 		bin=$(BUILD_DIR)/ge_vertex_cache_mutant$$m$(EXE_EXT); \
 		$(CC) $(GE_CFLAGS) -DSR_GE_VERTEX_CACHE_MUTANT=$$m -c src/rt/ge.c -o $$obj || exit 1; \
@@ -458,6 +460,7 @@ ge-vertex-cache-mutants: $(RT_GE_O)
 		$$bin > $$bin.log 2>&1; result=$$?; \
 		if test $$result -eq 0; then cat $$bin.log; echo "vertex cache mutant $$m unexpectedly passed" >&2; exit 1; fi; \
 		if ! grep -Eq "$$kill" $$bin.log; then cat $$bin.log; echo "vertex cache mutant $$m failed for another reason" >&2; exit 1; fi; \
+		if test -n "$$pixels" && ! grep -Eq "$$pixels" $$bin.log; then cat $$bin.log; echo "vertex cache mutant $$m: no pixel differs from the cache-off draw" >&2; exit 1; fi; \
 		differ=$$(grep -Ec "^FAIL vertex_cache_change\[[a-z-]+\]: cache on and off differ" $$bin.log); \
 		if test $$changes -ne 0 && test "$$differ" -ne $$changes; then cat $$bin.log; echo "vertex cache mutant $$m: $$differ of $$changes state-change pairs differ" >&2; exit 1; fi; \
 		echo "ge-vertex-cache-mutants: mutant $$m killed ($$kill)"; \
