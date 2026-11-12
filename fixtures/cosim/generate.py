@@ -1649,8 +1649,8 @@ def _cell_rs() -> list[int]:
     above returns; a thread parked at the edge continues at 0x14 at once. The two differ in
     what runs first, so a resume that keyed its points on the PC alone would take the wrong one.
 
-    The three frames of this chain run nested in lane INTERP, so they must end under every
-    interpreter mutant (the mutation gate cannot count a run that never ends as a kill). The
+    The three frames of this chain run nested in lane INTERP, so they must end under each
+    interpreter mutant the campaign has (the gate cannot count a run that never ends as a kill). The
     loop counter therefore steps at 0x18: outside a delay slot, which `skip-delay-slot` drops;
     after the loop head, which `wrong-branch-target` jumps past; and before the call, so a
     wrong link value cannot return around it. For the same reason the three frames pop their

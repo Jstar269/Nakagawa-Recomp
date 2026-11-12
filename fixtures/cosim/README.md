@@ -230,10 +230,10 @@ that has already failed keeps its `cosim: FAIL` verdict instead of entering resu
 have no step bound of their own.
 
 The three frames of the `rs` chain run nested in lane INTERP during the cell comparison, so they
-are written to end under every interpreter mutant: the loop counter of `rs` steps outside a delay
+are written to end under every interpreter mutant the campaign has: the loop counter of `rs` steps outside a delay
 slot, after the loop head and before the call, and the three frames pop their stack before
 `jr $ra` instead of in its slot. With the counter in a `jal` slot and the pops in the return
-slots, the `skip-delay-slot` mutant never left `rs` (a callee that keeps its frame hands its caller
+slots, the `skip-delay-slot` mutant never left the `rs` chain (a callee that keeps its frame hands its caller
 the callee's saved `$ra`), and the mutation gate could not count the run as a kill.
 
 What this does not prove: the harness's park is a stub and it has one thread, so nothing here
