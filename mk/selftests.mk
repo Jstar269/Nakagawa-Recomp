@@ -423,7 +423,7 @@ GE_CPU_PROFILE_VALIDATE_SELFTEST := $(BUILD_DIR)/ge_cpu_profile_validate_selftes
 ge-cpu-profile-validate-selftest: $(RT_GE_O)
 	$(CC) $(CFLAGS) -Werror $(LDFLAGS) -o $(GE_CPU_PROFILE_VALIDATE_SELFTEST) \
 		tests/native/ge_cpu_profile_validate_selftest.c $(RT_GE_O) src/rt/ge_capture.c \
-		src/rt/flight_recorder.c src/rt/perf.c -lm
+		src/rt/flight_recorder.c src/rt/perf.c src/rt/ace.c -lm
 	$(GE_CPU_PROFILE_VALIDATE_SELFTEST)
 	$(GE_CPU_PROFILE_VALIDATE_SELFTEST) --strip-cache-disabled
 
@@ -440,7 +440,7 @@ GE_TNL_CENSUS_SELFTEST := $(BUILD_DIR)/ge_tnl_census_selftest$(EXE_EXT)
 ge-tnl-census-selftest: $(RT_GE_O)
 	$(CC) $(CFLAGS) -Werror $(LDFLAGS) -o $(GE_TNL_CENSUS_SELFTEST) \
 		tests/native/ge_tnl_census_selftest.c $(RT_GE_O) src/rt/ge_capture.c \
-		src/rt/flight_recorder.c src/rt/perf.c -lm
+		src/rt/flight_recorder.c src/rt/perf.c src/rt/ace.c -lm
 	$(GE_TNL_CENSUS_SELFTEST)
 
 native-core-tests: ge-tnl-census-selftest
@@ -459,7 +459,7 @@ GE_PATCH_TESS_SELFTEST := $(BUILD_DIR)/ge_patch_tess_selftest$(EXE_EXT)
 ge-patch-tess-selftest: $(RT_GE_O)
 	$(CC) $(CFLAGS) -Werror -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(LDFLAGS) -o $(GE_PATCH_TESS_SELFTEST) \
 		tests/native/ge_patch_tess_selftest.c $(RT_GE_O) src/rt/ge_capture.c \
-		src/rt/flight_recorder.c src/rt/perf.c -lm
+		src/rt/flight_recorder.c src/rt/perf.c src/rt/ace.c -lm
 	$(GE_PATCH_TESS_SELFTEST)
 
 native-core-tests: ge-patch-tess-selftest
@@ -472,7 +472,7 @@ native-core-tests: ge-patch-tess-selftest
 GE_FLIGHT_DIR := $(BUILD_DIR)/ge-flight-overhead
 GE_FLIGHT_ROUNDS ?= 30
 GE_FLIGHT_PAIRS ?= 5
-GE_FLIGHT_SRCS := tests/native/ge_cpu_profile_validate_selftest.c src/rt/ge_capture.c src/rt/flight_recorder.c src/rt/perf.c
+GE_FLIGHT_SRCS := tests/native/ge_cpu_profile_validate_selftest.c src/rt/ge_capture.c src/rt/flight_recorder.c src/rt/perf.c src/rt/ace.c
 
 ge-flight-overhead:
 	"$(PYTHON)" -c "import os, sys; [os.makedirs(d, exist_ok=True) for d in sys.argv[1:]]" $(GE_FLIGHT_DIR)/linked $(GE_FLIGHT_DIR)/absent
@@ -941,15 +941,21 @@ asset-index-selftest:
 # after them: twin-off runs of twin-scene write reference files that the twin-on runs at the
 # same scale check (guest VRAM always, the shown images for the native twin), `--twin native`
 # runs the whole suite with every twin checked against its image after each case, twin-gate
-# checks the switch's values and its Ace gate (`--authentic`), and twin-alloc-fail injects a
-# failed twin allocation, and gpu-timestamps runs once more with the twin shown. Supersampling
+# checks the switch's values and its Ace gate (`--authentic`), twin-alloc-fail injects a
+# failed twin allocation, twin-drain-fail one whose drain fails too (nothing may be freed),
+# twin-soft runs the software renderer's twin (ge.c) on twin-scene's list against the twin-off
+# software run and the Vulkan twin, twin-key turns the twin on through the launch line's `twin=on`
+# (`--twin-key on`) in both renderers and checks the Ace report, with the variable unset and set
+# (`--twin-key off --twin 1` has the variable alone turn it on, and the report must say it runs),
+# and gpu-timestamps runs once more with the twin shown. Supersampling
 # (#2073) follows: ssaa-edge runs without it to write a reference at scales 1 and 2 and at 2x and
 # 4x against it (guest VRAM identical, edges filtered only when on), twin-scene and the whole
 # suite run with it at 2x and 4x, ssaa-sprite checks that textured one-texel-per-pixel sprites are
 # shown as the authentic image (at render scale 1, where the twin draws from its own vertices, and
 # at 2), twin-alloc-fail with it on checks that the Ace report gives it as off once the twin is,
-# ssaa-limit checks the size check with forced limits, and host-depth runs with depth=32 and
-# ssaa=4 against the key-off depth reference (a 4-byte depth twin, guest depth unchanged). The dst-read
+# ssaa-limit checks the size check with forced limits, host-depth runs with depth=32 and
+# ssaa=4 against the key-off depth reference (a 4-byte depth twin, guest depth unchanged), and
+# twin-key with ssaa=2 checks that supersampling's own twin is not reported as full colour. The dst-read
 # cells (#2109) run alone at scales 1 and 4 on each destination-read path (`--dst-read snapshot`,
 # `--dst-read interlock`; a device that refuses the interlock prints a SKIP line), and so does
 # stencil-once (write-once stencil batches: at scales 1 and 4 on the snapshot path, where they are
@@ -957,7 +963,8 @@ asset-index-selftest:
 # the interlock path with depth=32 (`--depth 32`): the depth-writing kill cells must keep the
 # snapshot path there, since the shader's depth copy is 16-bit. The dst-read cells then run with the
 # host twin on, native and full colour, on both paths at scales 1 and 4 (the twin's pass takes the
-# path the op took), and stencil-once with the native twin on the interlock path. The pipeline
+# path the op took), and stencil-once with the native twin on the interlock path.
+# gpu-coherence-twin-mutants (below) proves the twin cells kill the twin's mutants. The pipeline
 # cache (#2149) runs last, as three processes over one empty data root: a cold run saves the
 # cache, a warm run must start from it and draw the same frames, and a reject run re-opens it
 # over damaged, foreign and other-driver files and with the switch off or refused.
@@ -1020,6 +1027,17 @@ gpu-coherence-selftest: $(GPU_COHERENCE_BIN)
 	$(GPU_COHERENCE_BIN) --twin yes --case twin-gate
 	$(GPU_COHERENCE_BIN) --twin 1 --scale 4 --case twin-alloc-fail --twin-ref $(BUILD_DIR)/twin_ref_s4.txt
 	$(GPU_COHERENCE_BIN) --twin native --scale 2 --case twin-alloc-fail --twin-ref $(BUILD_DIR)/twin_ref_s2.txt
+	$(GPU_COHERENCE_BIN) --twin 1 --scale 4 --case twin-drain-fail --twin-ref $(BUILD_DIR)/twin_ref_s4.txt
+	$(GPU_COHERENCE_BIN) --twin native --scale 2 --case twin-drain-fail --twin-ref $(BUILD_DIR)/twin_ref_s2.txt
+	$(GPU_COHERENCE_BIN) --twin 1 --case twin-soft
+	$(GPU_COHERENCE_BIN) --twin native --case twin-soft
+	$(GPU_COHERENCE_BIN) --twin-key on --case twin-key
+	$(GPU_COHERENCE_BIN) --twin-key on --twin native --case twin-key
+	$(GPU_COHERENCE_BIN) --twin-key on --twin 0 --case twin-key
+	$(GPU_COHERENCE_BIN) --twin-key on --twin off --case twin-key
+	$(GPU_COHERENCE_BIN) --twin-key off --twin 1 --case twin-key
+	$(GPU_COHERENCE_BIN) --twin-key off --twin native --case twin-key
+	$(GPU_COHERENCE_BIN) --twin-key off --case twin-key
 	$(GPU_COHERENCE_BIN) --case ssaa-edge --ssaa-ref $(BUILD_DIR)/ssaa_ref_s1.txt
 	$(GPU_COHERENCE_BIN) --ssaa 2 --case ssaa-edge --ssaa-ref $(BUILD_DIR)/ssaa_ref_s1.txt
 	$(GPU_COHERENCE_BIN) --ssaa 4 --case ssaa-edge --ssaa-ref $(BUILD_DIR)/ssaa_ref_s1.txt
@@ -1038,6 +1056,8 @@ gpu-coherence-selftest: $(GPU_COHERENCE_BIN)
 	$(GPU_COHERENCE_BIN) --ssaa 2 --ssaa-budget-mb 8 --ssaa-expect 1 --case ssaa-limit
 	$(GPU_COHERENCE_BIN) --ssaa 4 --scale 4 --ssaa-max-dim 4096 --ssaa-expect 2 --case ssaa-limit
 	$(GPU_COHERENCE_BIN) --depth 32 --ssaa 4 --case host-depth --depth-ref $(BUILD_DIR)/depth_ref_s1.txt
+	$(GPU_COHERENCE_BIN) --ssaa 2 --twin-key off --case twin-key
+	$(GPU_COHERENCE_BIN) --ssaa 2 --twin-key on --case twin-key
 	@rc=0; $(GPU_COHERENCE_BIN) --twin 1 --gpu-timestamps 1 --case gpu-timestamps || rc=$$?; \
 	if [ $$rc -eq 77 ]; then echo "SKIP gpu-coherence-selftest twin gpu-timestamps (exit 77; the reason is printed above)"; \
 	elif [ $$rc -ne 0 ]; then echo "FAIL gpu-coherence-selftest twin gpu-timestamps (exit $$rc)"; exit $$rc; fi
@@ -1109,6 +1129,59 @@ gpu-coherence-selftest-snapbar-mutants: shader-verify $(RT_GE_O)
 		if test $$result -eq 0; then cat $$bin.log; echo "snapbar mutant $$m unexpectedly passed" >&2; exit 1; fi; \
 		if ! grep -Fq "$$kill" $$bin.log; then cat $$bin.log; echo "snapbar mutant $$m failed for another reason" >&2; exit 1; fi; \
 		echo "gpu-coherence-selftest-snapbar-mutants: mutant $$m killed ($$kill)"; \
+	done
+
+# gpu-coherence-twin-mutants - the host twin's (#2050) selftest cells must kill each compile-time
+# mutant in ge_gpu.c. SR_TWIN_SELFTEST_NATIVE_MUTANT keeps the 16-bit colour snap in the
+# full-colour twin: twin-scene at scale 2 against a twin-off reference. Each
+# SR_TWIN_SELFTEST_SKIP_SITE_<site> leaves one authentic write without its mirror
+# (RENDER, UPLOAD, PATCH, DEPTH_UPLOAD, XFER, SNAPSHOT): the whole suite with `--twin native` (its
+# identity checks). SR_TWIN_SELFTEST_GPU_KEY_REQUEST and SR_TWIN_SELFTEST_SOFT_KEY_REQUEST leave the
+# launch line's twin=on unread in ge_gpu.c and in ge.c, and the two KEY_CONFIRM mutants leave a
+# running twin unconfirmed: the twin-key case. The two TWIN_REPORT mutants leave a running twin
+# unreported (the call to ace_set_twin_running) when only SR_GPU_TWIN_COLOR turned it on:
+# `--twin-key off --twin 1`. GPU_SSAA_REPORT reports the twin that supersampling runs for its
+# samples as full colour: `--ssaa 2 --twin-key off`. The ge.c mutants build their own ge.o. Each builds
+# its own binary, so fourteen are built; the target is not part of
+# gpu-coherence-selftest or native-core-tests. Each mutant must fail with its own message; exit 77
+# (no Vulkan device) is a SKIP, as for the selftest itself.
+gpu-coherence-twin-mutants: $(GPU_COHERENCE_BIN)
+	$(NK_REQUIRE_POSIX_SHELL)
+	@rc=0; $(GPU_COHERENCE_BIN) --scale 2 --case twin-scene --twin-ref $(BUILD_DIR)/twin_ref_mutant_s2.txt || rc=$$?; \
+	if [ $$rc -eq 77 ]; then echo "twin mutants: SKIP (no Vulkan device)"; exit 77; fi; \
+	if [ $$rc -ne 0 ]; then echo "twin mutants: the twin-off reference run failed (exit $$rc)" >&2; exit $$rc; fi
+	@for m in NATIVE_MUTANT SKIP_SITE_RENDER SKIP_SITE_UPLOAD SKIP_SITE_PATCH SKIP_SITE_DEPTH_UPLOAD SKIP_SITE_XFER SKIP_SITE_SNAPSHOT \
+			GPU_KEY_REQUEST GPU_KEY_CONFIRM SOFT_KEY_REQUEST SOFT_KEY_CONFIRM GPU_TWIN_REPORT SOFT_TWIN_REPORT \
+			GPU_SSAA_REPORT; do \
+		case $$m in \
+			NATIVE_MUTANT) kill="the shown gradient is not full colour"; args="--twin 1 --scale 2 --case twin-scene --twin-ref $(BUILD_DIR)/twin_ref_mutant_s2.txt";; \
+			SKIP_SITE_RENDER) kill="twin of target 0x100000 differs in 100 pixels"; args="--twin native";; \
+			SKIP_SITE_UPLOAD) kill="twin of target 0x100000 is behind"; args="--twin native";; \
+			SKIP_SITE_PATCH) kill="differs in 1 pixels, first (137,91)"; args="--twin native";; \
+			SKIP_SITE_DEPTH_UPLOAD) kill="twin of depth 0x080000 differs"; args="--twin native";; \
+			SKIP_SITE_XFER) kill="twin of target 0x060000 differs in 65280 pixels"; args="--twin native";; \
+			GPU_KEY_REQUEST) kill="FAIL gpu renderer: the launch line's twin=on did not turn the twin on"; args="--twin-key on --case twin-key";; \
+			GPU_KEY_CONFIRM) kill="FAIL gpu renderer: the report names the twin unavailable: did not run"; args="--twin-key on --case twin-key";; \
+			SOFT_KEY_REQUEST) kill="FAIL software renderer: the launch line's twin=on did not turn the twin on"; args="--twin-key on --case twin-key";; \
+			SOFT_KEY_CONFIRM) kill="FAIL software renderer: the report names the twin unavailable: did not run"; args="--twin-key on --case twin-key";; \
+			GPU_TWIN_REPORT) kill="FAIL gpu renderer: the report names the twin available (effective twin off), want it on and not unavailable"; args="--twin-key off --twin 1 --case twin-key";; \
+			GPU_SSAA_REPORT) kill="FAIL gpu renderer: the report names the twin available (effective twin on), want it off and not unavailable"; args="--ssaa 2 --twin-key off --case twin-key";; \
+			SOFT_TWIN_REPORT) kill="FAIL software renderer: the report names the twin available (effective twin off), want it on and not unavailable"; args="--twin-key off --twin 1 --case twin-key";; \
+			*) kill="twin of target 0x000000 differs in"; args="--twin native";; \
+		esac; \
+		geobj=$(RT_GE_O); \
+		case $$m in SOFT_KEY_*|SOFT_TWIN_*) geobj=$(BUILD_DIR)/ge_twin_mutant_$$m.o; \
+			$(CC) $(GE_CFLAGS) -DSR_TWIN_SELFTEST_$$m -c src/rt/ge.c -o $$geobj || exit 1;; esac; \
+		bin=$(BUILD_DIR)/gpu_coherence_twin_mutant_$$m.exe; \
+		$(CC) $(CFLAGS) -DSR_GPU_COHERENCE_SELFTEST -DSR_TWIN_SELFTEST_$$m -ffunction-sections -fdata-sections \
+			-DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(LDFLAGS) -Wl,--gc-sections -o $$bin \
+			tests/native/gpu_coherence_selftest.c src/rt/ge_capture.c src/rt/ge_raster_ref.c $$geobj src/rt/flight_recorder.c src/rt/perf.c \
+			$(SDL3VK_SRCS) $(GEGPU_SRCS) $(LIBS) || exit 1; \
+		$$bin $$args > $$bin.log 2>&1; result=$$?; \
+		if test $$result -eq 77; then echo "twin mutant $$m: SKIP (no Vulkan device)"; exit 77; fi; \
+		if test $$result -eq 0; then cat $$bin.log; echo "twin mutant $$m unexpectedly passed" >&2; exit 1; fi; \
+		if ! grep -Fq "$$kill" $$bin.log; then cat $$bin.log; echo "twin mutant $$m failed for another reason" >&2; exit 1; fi; \
+		echo "gpu-coherence-twin-mutants: mutant $$m killed ($$kill)"; \
 	done
 
 # vram-view-identity-selftest — the sources and decode the pause menu's VRAM viewer runs

@@ -96,8 +96,8 @@
  *    resolution, like any upscaler: a readback returns the PSP's value where the device
  *    image holds it (a nearest-filtered 1:1 sprite, hook_sprite) and the top-left device
  *    sample elsewhere (ENHANCEMENT_CONTRACT.md, section 10.3).
- *  - Host twin (32-bit colour, #2050; Ace Mode only, SR_GPU_TWIN_COLOR=1 until the Ace
- *    line carries its key, after #2074): every target and depth surface gets a second,
+ *  - Host twin (32-bit colour, #2050; the launch line's twin=on, with SR_GPU_TWIN_COLOR
+ *    as the developer override): every target and depth surface gets a second,
  *    host-only image. The authentic chain (the images guest VRAM is read from and committed
  *    from) keeps the user's render scale, so guest VRAM is the twin-off run's, and the twin
  *    runs at that scale beside it (ENHANCEMENT_CONTRACT.md 10.11). Each render op is recorded a
@@ -110,8 +110,8 @@
  *    and the twin records the count it mirrors (tgen). A twin that is behind is re-seeded
  *    from the authentic image before its next pass, and the presenter shows the authentic
  *    image until it is. Nothing reads a twin back, so nothing the guest reads changes
- *    (gpu-coherence-selftest twin-*). The software backend has no twin and shows the
- *    authentic image. Off (the default), no twin is made and every path is the one above.
+ *    (gpu-coherence-selftest twin-*). The software renderer has a twin of its own (ge.c,
+ *    s_twin_mode). Off (the default), no twin is made and every path is the one above.
  */
 #include "ge_gpu.h"
 #include "sdl3vk.h"
@@ -778,8 +778,10 @@ static uint64_t s_ssaa_test_budget = 0;
 static uint32_t s_ssaa_test_dim = 0;
 #endif
 static int s_twin_unavailable = 0;         /* asked for and allowed, but this GPU refused it at init */
+static int s_twin_from_key = 0;            /* the launch line asks for the twin (twin=on): its report names the outcome */
 #ifdef SR_GPU_COHERENCE_SELFTEST
 static int s_twin_inject_fail = 0;         /* the selftest: fail the Nth twin allocation from now */
+static int s_twin_inject_drain_fail = 0;   /* the selftest: twin_off_for_run's drain reports a failure */
 #endif
 
 /* SR_GPU_TWIN_COLOR: unset, empty, "0" or "off" is 0 (off); "1" is 1 (full colour); "native" is 2
@@ -3572,7 +3574,16 @@ static void twin_off_for_run(const char *what) {
         /* The report, stamps and pause-menu words follow: supersampling is unavailable from here. */
         ace_set_ssaa_effective(1, "the host twin, which renders its samples, was turned off for the rest of the run");
     }
-    if (!cmd_drain(GEGPU_BOUNDARY_LIFETIME)) {
+    if (ace_effective()->twin) {   /* the line asked for it, or SR_GPU_TWIN_COLOR ran it (ace_set_twin_running) */
+        char why[96];
+        snprintf(why, sizeof(why), "%s could not be allocated", what);
+        ace_feature_unavailable(ACE_FEATURE_TWIN, why);
+    }
+    int drained = cmd_drain(GEGPU_BOUNDARY_LIFETIME);
+#ifdef SR_GPU_COHERENCE_SELFTEST
+    if (s_twin_inject_drain_fail) drained = 0;   /* the drain ran; the selftest says it failed */
+#endif
+    if (!drained) {
         /* Work may still be in flight (a lost device): record no more twin passes and show no
          * twin, but free nothing here; gegpu_shutdown waits for the device before it frees the
          * twins and their pool. */
@@ -7606,19 +7617,25 @@ int gegpu_init(void) {
         }
     }
     ace_hud_set_depth_float(s_depth32);
-    /* The host twin (#2050), from the internal switch until the Ace line carries its key (after
-     * #2074): SR_GPU_TWIN_COLOR=1 full colour, =native the twin with native colour (the identity
-     * selftests). It is an Ace Mode feature: in an authentic run it stays off whatever the
-     * environment says. The twin runs at the user's render scale (times the supersampling factor,
-     * s_tscale) beside the authentic chain, which keeps the render scale, so guest VRAM and every
-     * readback are the twin-off run's
+    /* The host twin (#2050): the launch line's twin=on asks for full colour. SR_GPU_TWIN_COLOR is
+     * the developer override and wins when it is set: =1 full colour, =native the twin with
+     * native colour (the identity selftests), =off or =0 no twin. It is an Ace Mode feature: in
+     * an authentic run it stays off whatever the environment says. The twin runs at the user's
+     * render scale (times the supersampling factor, s_tscale) beside the authentic chain, which
+     * keeps the render scale, so guest VRAM and every readback are the twin-off run's
      * (ENHANCEMENT_CONTRACT.md 10.11). It needs nearest blits of the colour and depth formats
      * (seeding). */
-    int twin_req = 0;
+    int twin_req = 0, twin_asked = 0;
     s_tscale = s_scale;                    /* set after the render scale is read */
+    s_twin_from_key = 0;
     {
         const char *tc = getenv("SR_GPU_TWIN_COLOR");
         twin_req = twin_mode_parse(tc);
+        s_twin_from_key = g_ace_on && ace_effective()->twin;
+#ifdef SR_TWIN_SELFTEST_GPU_KEY_REQUEST   /* the selftest's failing-before: the line's twin=on is not read */
+        s_twin_from_key = 0;
+#endif
+        if (!(tc && tc[0]) && s_twin_from_key) twin_req = 1;
         if (twin_req < 0) {
             fprintf(stderr, "TWIN: refused (SR_GPU_TWIN_COLOR=%s: the values are 1, native, off and 0)\n", tc);
             twin_req = 0;
@@ -7626,9 +7643,12 @@ int gegpu_init(void) {
             fprintf(stderr, "TWIN: off (the host twin needs Ace Mode)\n");
             twin_req = 0;
         }
+        if (s_twin_from_key && !twin_req)
+            ace_feature_unavailable(ACE_FEATURE_TWIN, "SR_GPU_TWIN_COLOR overrides it");
         const char *cap = getenv("SR_GPU_TWIN_CAPTURE");
         s_twin_authentic_shown = cap && strcmp(cap, "authentic") == 0;
     }
+    twin_asked = twin_req;   /* the line or SR_GPU_TWIN_COLOR, before supersampling adds its own */
     /* Supersampling (#2073, 10.21): the Ace line's ssaa=2|4 runs the twin at that many times the
      * render scale, with native colour unless the twin was asked for in full colour. The largest
      * factor up to the request whose images fit the device (ssaa_choose) is used, and a lower one
@@ -7676,6 +7696,9 @@ int gegpu_init(void) {
         if ((cf.optimalTilingFeatures & blit) != blit || (df.optimalTilingFeatures & blit) != blit) {
             fprintf(stderr, "TWIN: unavailable (no nearest blit of RGBA8 and %s on this GPU): native "
                     "colour at render scale %dx\n", s_depth32 ? "D32" : "D16", s_scale);
+            if (s_twin_from_key)
+                ace_feature_unavailable(ACE_FEATURE_TWIN, s_depth32 ? "no nearest blit of RGBA8 and D32 on this GPU"
+                                                                    : "no nearest blit of RGBA8 and D16 on this GPU");
             twin_req = 0;
             s_twin_unavailable = 1;
             if (s_ssaa > 1) ace_set_ssaa_effective(1, "the host twin, which renders its samples, is unavailable");
@@ -7925,6 +7948,7 @@ int gegpu_init(void) {
     if (twin_req && !twin_init(twin_req == 1)) {
         fprintf(stderr, "TWIN: unavailable (the GPU could not make it): native colour at render "
                 "scale %dx\n", s_scale);
+        if (s_twin_from_key) ace_feature_unavailable(ACE_FEATURE_TWIN, "the GPU could not make it");
         twin_release();
         s_twin_unavailable = 1;
         if (s_ssaa > 1) ace_set_ssaa_effective(1, "the host twin, which renders its samples, could not be made");
@@ -7937,12 +7961,26 @@ int gegpu_init(void) {
         if (!s_tvcpu) {
             fprintf(stderr, "TWIN: unavailable (no memory for its vertices): native colour at render scale "
                     "%dx\n", s_scale);
+            if (s_twin_from_key) ace_feature_unavailable(ACE_FEATURE_TWIN, "no memory for its vertices");
             twin_release();
             s_twin_unavailable = 1;
             ace_set_ssaa_effective(1, "no memory for the host twin's vertices");
             s_ssaa = 1;
             s_tscale = s_scale;
         }
+    }
+    /* A twin the line or SR_GPU_TWIN_COLOR asked for runs: the report says so. A twin that runs only
+     * for supersampling (twin_asked 0) is its machinery, not full colour, and is not reported.
+     * The selftest's failing-befores: a running twin is never confirmed (KEY_CONFIRM, the line asked
+     * for it), a twin the line did not ask for is not reported (TWIN_REPORT, SR_GPU_TWIN_COLOR), or
+     * supersampling's own twin is reported as full colour (SSAA_REPORT). */
+#ifdef SR_TWIN_SELFTEST_GPU_SSAA_REPORT
+    twin_asked = 1;
+#endif
+    if (s_twin && twin_asked) {
+#if !defined(SR_TWIN_SELFTEST_GPU_KEY_CONFIRM) && !defined(SR_TWIN_SELFTEST_GPU_TWIN_REPORT)
+        ace_set_twin_running();
+#endif
     }
 
     /* 1x1 white texture for untextured draws */

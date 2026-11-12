@@ -319,7 +319,7 @@ class ComparabilityContractTests(unittest.TestCase):
         reasons = flight_diff._comparability_reasons(left, right)
         self.assertTrue(any("runtime" in reason for reason in reasons))
 
-    ACE_LINE = "v1;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off"
+    ACE_LINE = "v1;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off;twin=off"
 
     def test_ace_mode_bundle_is_never_comparable(self):
         # An Ace Mode run (src/rt/ace.h) carries runtime.enhancements. It is refused
@@ -350,7 +350,7 @@ class ComparabilityContractTests(unittest.TestCase):
         # characters (its field is declared with ACE_SPEC_MAX, which ace-selftest checks against the
         # longest line the key table formats), and the schema allows as many.
         long_line = ("v1;tier=ace;af=16;text=on;readout=off;notice=on;wide=fill;smooth=x2;sas=sinc;tess=4;"
-                     "stick=126;load=fast;depth=32;ssaa=4;cull=on")
+                     "twin=off;stick=126;load=fast;depth=32;ssaa=4;cull=on")
         self.assertGreater(len(long_line), 95)
         ace["runtime"]["enhancements"] = {"ace": long_line}
         flight_diff.validate_bundle(ace)
@@ -384,6 +384,49 @@ class ComparabilityContractTests(unittest.TestCase):
             broken["runtime"]["enhancements"] = bad
             with self.assertRaises(ValueError):
                 flight_diff.validate_bundle(broken)
+
+    def test_ace_line_limit_is_the_parsers_limit(self):
+        # The bundle keeps any line the runtime accepts (#2050): ace_parse refuses a
+        # line of ACE_SPEC_MAX characters or more, flight_recorder.c stores the line
+        # in a buffer of ACE_SPEC_MAX bytes, so the schema's maxLength is ACE_SPEC_MAX - 1.
+        header = (ROOT / "src" / "rt" / "ace.h").read_text(encoding="utf-8")
+        match = re.search(r"^#define ACE_SPEC_MAX (\d+)\b", header, re.MULTILINE)
+        self.assertIsNotNone(match, "ACE_SPEC_MAX not found in src/rt/ace.h")
+        spec_max = int(match.group(1))
+        schema = json.loads(
+            (ROOT / "assets" / "flight_recorder_schema.json").read_text(encoding="utf-8"))
+        ace_schema = schema["properties"]["runtime"]["properties"]["enhancements"][
+            "properties"]["ace"]
+        self.assertEqual(ace_schema["maxLength"], spec_max - 1)
+        recorder = (ROOT / "src" / "rt" / "flight_recorder.c").read_text(encoding="utf-8")
+        self.assertIn("static char s_flight_ace[ACE_SPEC_MAX];", recorder)   # ace.h's, spec_max
+
+        _, candidate = self._comparable_pair()
+
+        def bundle_with(line):
+            ace = copy.deepcopy(candidate)
+            ace["runtime"]["enhancements"] = {"ace": line}
+            return ace
+
+        # The longest line, built as ace_longest_line builds it from ace.c's key table
+        # (each key at its longest value), so a part that adds a key moves it here too;
+        # then a line padded to the limit with a later key whose name carries a digit.
+        ace_c = (ROOT / "src" / "rt" / "ace.c").read_text(encoding="utf-8")
+        table = re.search(r"\} k_ace_keys\[\] = \{(.*?)\n\};", ace_c, re.S)
+        assert table is not None
+        rows = re.findall(r'\{"([a-z][a-z0-9]*)", ACE_KEY_[A-Z0-9_]+, [01], "([a-z0-9]+)"\}',
+                          table.group(1))
+        self.assertEqual(len(rows), table.group(1).count("ACE_KEY_"),
+                         "every key table row names its longest value")
+        longest_now = "v1" + "".join(f";{name}={value}" for name, value in rows)
+        flight_diff.validate_bundle(bundle_with(longest_now))
+        pad = spec_max - 1 - len(longest_now) - len(";s2d=")
+        self.assertGreater(pad, 0)
+        at_limit = longest_now + ";s2d=" + "a" * pad
+        self.assertEqual(len(at_limit), spec_max - 1)
+        flight_diff.validate_bundle(bundle_with(at_limit))
+        with self.assertRaises(ValueError):
+            flight_diff.validate_bundle(bundle_with(at_limit + "a"))
 
     def test_incomparability_reasons_are_cumulative(self):
         baseline, candidate = self._comparable_pair()

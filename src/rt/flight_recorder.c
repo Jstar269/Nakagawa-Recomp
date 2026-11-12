@@ -225,8 +225,8 @@ static uint64_t s_flight_kind_recorded[SR_FLIGHT_KIND_WATCH_CHANGE + 1u];
 static int s_flight_init_state;
 /* Ace Mode's line for an enhanced run, else empty. It holds ACE_SPEC_MAX bytes, the size of every line
  * the runtime accepts (ace-selftest checks that the longest line the key table formats fits it), so a
- * line is kept whole: at 96 an Enhanced line with sas=sinc, wide=fill and ssaa=4 (100 characters) lost
- * its last key. tools/test_flight_diff.py checks the declaration and the schema's maxLength. */
+ * line is kept whole: at 96 an Enhanced line with depth=32 was cut to "depth=3". The bundle schema's
+ * maxLength is ACE_SPEC_MAX - 1. tools/test_flight_diff.py checks the declaration and the schema. */
 static char s_flight_ace[ACE_SPEC_MAX];
 /* The window's upscale stamp (gui.c gui_upscale_init): "fsr1", "movie-anime4k", "movie-fsr1",
  * "fsr1+movie-anime4k" or "fsr1+movie-fsr1". 32 holds the longest (18) with room to spare. */

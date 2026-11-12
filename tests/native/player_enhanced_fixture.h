@@ -41,6 +41,7 @@ static const EnhancedPartFixture k_enhanced_parts[] = {
                                "the feel changes."},
     {"Short loads", "Off", "Ace only, in games with a loading-wait package. Skips those waits; changes "
                            "the game's timing."},
+    {"Full 32-bit colour", "Off", "Shows 16-bit games in full colour, without dither. Uses more memory."},
     {"Supersampling", "Off", "Smooths jagged edges. 2x takes 4 times the GPU work, 4x 16 times."},
 };
 typedef char player_enhanced_fixture_matches_parts[

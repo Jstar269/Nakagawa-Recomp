@@ -8,7 +8,7 @@
  * value can never opt a launch in:
  *
  *     SR_ACE=off
- *     SR_ACE=v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off
+ *     SR_ACE=v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off;twin=off
  *
  * tier (enhanced or ace) only names the run, in the badge, the pause menu and the stamps; a
  * line without it is an Enhanced run. stick, load, depth, ssaa and cull are the other keys a line
@@ -85,6 +85,7 @@ typedef struct {
     int load;        /* load=fast: the waits a title's load part declares are skipped (guest timing, 11.3.10) */
     int depth;       /* depth=32: 0 off (the PSP's 16-bit depth), else 32: the Vulkan renderer's depth
                         buffer holds unrounded depth (guest-visible, 10.20 and 11.3.12) */
+    int twin;        /* full 32-bit colour: 16-bit games drawn on a host twin, no dither (host-only) */
     int ssaa;        /* ssaa=2|4: 0 off, else the supersampling factor per axis on top of render scale;
                         host presentation only (10.21) */
 } AceConfig;
@@ -102,6 +103,7 @@ typedef enum {
     ACE_FEATURE_LOAD,
     ACE_FEATURE_CULL,
     ACE_FEATURE_DEPTH,
+    ACE_FEATURE_TWIN,
     ACE_FEATURE_SSAA,
     ACE_FEATURE_COUNT
 } AceFeature;
@@ -114,6 +116,10 @@ typedef enum {
 int ace_parse(const char *spec, AceConfig *out, char *why, size_t why_cap);
 /* Writes the canonical line for a config ("off" when !c->on). Returns 0 when it does not fit. */
 int ace_format(const AceConfig *c, char *out, size_t cap);
+/* Writes a line that gives every key of the parser's table its longest value, in the table's
+   order, and returns its length (0 when it does not fit). ace_format writes the same length
+   for the config it parses to: the longest line there is, whatever keys later parts add. */
+size_t ace_longest_line(char *out, size_t cap);
 
 /* ---- the run's switch ----------------------------------------------------------------------- */
 
@@ -123,7 +129,8 @@ extern int g_ace_on;   /* the run's switch: 1 only after a valid line with Ace o
  * sets g_ace_on. Returns g_ace_on. ace_init_spec does the same for a given value (tests). */
 int ace_init_from_env(void);
 int ace_init_spec(const char *spec, const char *report_path);
-/* The requested line, and what this host gave (a feature it cannot provide is off here). */
+/* The requested line, and what this host gave (a feature it cannot provide is off here). A host twin
+ * that SR_GPU_TWIN_COLOR turned on counts as given (ace_set_twin_running). */
 const AceConfig *ace_requested(void);
 const AceConfig *ace_effective(void);
 /* The canonical line of the run ("off" for an authentic run). */
@@ -200,6 +207,10 @@ void ace_note_af_failure(void);
 /* The pause menu's live Speed readout switch (Ace on only; a readout this host cannot draw
  * stays off). */
 void ace_set_readout(int on);
+/* A host twin (full 32-bit colour) that is running, whatever turned it on, the launch line or
+ * SR_GPU_TWIN_COLOR: the effective config and the report say so, and it counts as confirmed. A
+ * twin already named unavailable stays off. */
+void ace_set_twin_running(void);
 /* The anisotropy the device gives, at most the requested level (0 = none). */
 void ace_set_af_effective(int af, const char *reason);
 /* The supersampling factor the renderer could give (ENHANCEMENT_CONTRACT.md 10.21): below the
@@ -564,9 +575,9 @@ void ace_smooth_aux_report(const AceSmoothAuxStats *s);
 
 /* ---- the per-run report -------------------------------------------------------------------- */
 
-/* The worst case, every block present and every number at its widest, is about 4.8 KB with
- * stick and load in the spec; ace_selftest's cell_report_worst checks that it fits. */
-#define ACE_REPORT_MAX 5120u
+/* The worst case, every block present and every number at its widest, is about 5.2 KB with
+ * stick, load, twin and ssaa in the spec; ace_selftest's cell_report_worst checks that it fits. */
+#define ACE_REPORT_MAX 6144u
 /* The report's JSON for the run so far; 0 when it would not fit. */
 size_t ace_report_json(char *out, size_t cap);
 /* Settles the features that never ran (ace_confirm), then writes the report (SR_ACE_REPORT,

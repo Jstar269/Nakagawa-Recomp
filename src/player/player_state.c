@@ -1251,6 +1251,9 @@ static const PlayerEnhancedPartInfo k_enhanced_parts[PLAYER_PART_COUNT] = {
     {"load", "Short loads",
      "Ace only, in games with a loading-wait package. Skips those waits; changes the game's timing.",
      2, k_part_switch_values, k_part_switch_labels, k_part_load_words, 0},
+    {"twin", "Full 32-bit colour",
+     "Shows 16-bit games in full colour, without dither. Uses more memory.",
+     2, k_part_switch_values, k_part_switch_labels, k_part_switch_words, 0},
     /* Host presentation only (contract 10.21): the picture the window shows, never guest memory.
        Off by default and in every preset: it multiplies the GPU's work by 4 or 16. */
     {"ssaa", "Supersampling",
@@ -2310,13 +2313,14 @@ void player_app_cycle_present_scaling(PlayerApp *app, int direction) {
    the weakest GPUs (Medium's and Handheld's frame passes it too on 1440p and 4K); High
    turns it off as Ultra without it, the plain 4x picture. No row sets frame pacing, Smooth
    motion, Widescreen, texture filtering, sound, the readout, the badge, Finer patches
-   (which changes GE timing, section 11.3.7) or Short loads (which changes guest
-   timing, section 11.3.10): those stay the library's and each game's own. docs/PLAYER_UI_DESIGN.md lists the same values, and
-   test_graphics_presets checks that every other part is -1, so a new part needs a choice. */
+   (which changes GE timing, section 11.3.7), Short loads (which changes guest timing, section
+   11.3.10) or Full 32-bit colour (the host twin, section 10.11): those stay the library's and
+   each game's own. docs/PLAYER_UI_DESIGN.md lists the same values, and test_graphics_presets
+   checks that every other part is -1, so a new part needs a choice. */
 #define PRESET_PART_LIST(X, text, upscale)                                                \
     X(FILTERING, -1) X(TEXT, (text)) X(READOUT, -1) X(NOTICE, -1) X(WIDE, -1) X(SMOOTH, -1) \
-    X(SAS, -1) X(TESS, -1) X(CULL, -1) X(UPSCALE, (upscale)) X(STICK, -1) X(LOAD, -1) \
-    X(SSAA, -1)
+    X(SAS, -1) X(TESS, -1) X(CULL, -1) X(UPSCALE, (upscale)) X(STICK, -1) X(LOAD, -1)    \
+    X(TWIN, -1) X(SSAA, -1)
 #define PRESET_PART_SET(part, value) [PLAYER_PART_##part] = value,
 #define PRESET_PART_ONE(part, value) + 1
 #define PRESET_PARTS(text, upscale) {PRESET_PART_LIST(PRESET_PART_SET, text, upscale)}

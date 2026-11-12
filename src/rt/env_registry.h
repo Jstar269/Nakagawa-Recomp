@@ -32,7 +32,7 @@
     X("SCHED_DUMP", "flag-presence", "off", "sched.c", "Diagnostic switch read in sched.c that enables scheduler state dumping in the idle loop.") \
     X("SDL_VIDEODRIVER", "system", "unset (SDL picks the driver)", "gui.c", "Read with SDL_VIDEO_DRIVER to detect the offscreen driver for the headless presented-frames acceptance mode.") \
     X("SDL_VIDEO_DRIVER", "system", "unset", "gui.c", "Alias of SDL_VIDEODRIVER; a value of offscreen makes headless acceptance fail because a real presenter is required.") \
-    X("SR_ACE", "string", "off", "ace.c", "Spec string that turns on the optional enhancements (filtering, text, readout, notice, wide, smooth, band-limited SAS resampling).") \
+    X("SR_ACE", "string", "off", "ace.c", "Spec string that turns on the optional enhancements (filtering, text, readout, notice, wide, smooth, band-limited SAS resampling, full 32-bit colour).") \
     X("SR_ACE_REPORT", "path", "unset (no report written)", "ace.c", "Output path for the per-run Enhanced or Ace JSON report.") \
     X("SR_ACE_SMOOTH_DEPTH", "string", "on", "gpu_sdl3vk/ace_hud.c", "Exactly 0 stops Ace Smooth reading the GE's depth for its in-betweens.") \
     X("SR_ACE_SMOOTH_HUD", "string", "on", "gpu_sdl3vk/ace_hud.c", "Exactly 0 stops Ace Smooth reading the HUD mask of through-mode draws for its in-betweens.") \
@@ -132,8 +132,8 @@
     X("SR_GPU_TEX_SHADOW_DISABLE", "flag-nonzero", "off (texture shadow enabled)", "gpu_sdl3vk/ge_gpu.c", "Disables the GPU texture shadow when set to a non-empty value other than 0.") \
     X("SR_GPU_TIMESTAMPS", "flag-nonzero", "off", "gpu_sdl3vk/ge_gpu.c,gpu_sdl3vk/sdl3vk.c", "Times GE command buffers by op kind and the presentation blit with GPU timestamp queries (GEGPU_TS lines, SR_PERF_FRAMES gpu_* columns).") \
     X("SR_GPU_TNL", "string", "off", "ge.c", "Set to exactly 1 to hand eligible transform-mode triangles to the GPU backend for vertex transform.") \
-    X("SR_GPU_TWIN_CAPTURE", "string", "unset (captures follow the shown image)", "gpu_sdl3vk/ge_gpu.c", "Set to authentic to make the presenter show, and so capture, the authentic image while the host twin is on.") \
-    X("SR_GPU_TWIN_COLOR", "string", "off", "gpu_sdl3vk/ge_gpu.c", "Host twin (#2050), Ace Mode only: 1 presents full 32-bit colour without dither, native keeps authentic colour; other values but 0 and off are refused.") \
+    X("SR_GPU_TWIN_CAPTURE", "string", "unset (captures follow the shown image)", "ge.c,gpu_sdl3vk/ge_gpu.c", "Set to authentic to make the presenter show, and so capture, the authentic image while the host twin is on.") \
+    X("SR_GPU_TWIN_COLOR", "string", "off", "ge.c,gpu_sdl3vk/ge_gpu.c", "Overrides the player's Full 32-bit colour in both renderers, Ace Mode only: 1 full colour, native authentic colour, 0 or off none; others refused.") \
     X("SR_GPU_TWIN_DUMP", "path", "unset (no dump)", "gpu_sdl3vk/ge_gpu_selftest.inc", "File prefix where the coherence self-test's twin-scene case writes each shown frame as raw RGBA.") \
     X("SR_GPU_TWIN_REF", "path", "unset (no reference check)", "gpu_sdl3vk/ge_gpu_selftest.inc", "Reference file for the coherence self-test's twin cases: a twin-off run writes it, a twin-on run at the same scale checks it.") \
     X("SR_GPU_XFER_RING_KB", "number", "built-in default ring size", "gpu_sdl3vk/ge_gpu.c", "Transfer ring size in KiB (0 disables, above 65536 ignored).") \
