@@ -4708,9 +4708,11 @@ class TestPublishedPackages(_SynthTimingElfFixture):
                 self.assertEqual(publish_audit.check_enhancement_packages({rel: (data, None)}), [])
 
     def test_shipped_packages_are_experimental_until_released(self) -> None:
-        """Section 9.10: no package the project ships is released yet, so none declares
-        "experimental": false. Releasing one adds its entry under section 9.10 and its name here."""
-        released: frozenset[str] = frozenset()
+        """Section 9.10: a package the project ships declares "experimental": false only when
+        its release entry under section 9.10 names it. Hot Shots Tennis was released by the
+        owner's decision of 2026-11-12 (section 9.10.1); a re-export from a declaration without
+        the flag would put it back to Experimental."""
+        released = frozenset({"ucus98701-60hz.json"})
         shipped = sorted((ROOT / "assets" / "enhancements").glob("*.json"))
         self.assertTrue(shipped)
         for path in shipped:
