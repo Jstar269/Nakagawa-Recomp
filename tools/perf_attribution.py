@@ -603,6 +603,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.diff is not None:
             result = diff_runs(args.diff[0], args.diff[1], args.diff[2], args.diff[3])
         else:
+            assert args.perf is not None and args.stderr is not None  # parser.error above exits otherwise
             result = analyze(args.perf, args.stderr)
     except (PerfAttributionError, PerfSummaryError) as exc:
         print(f"error: {exc}", file=sys.stderr)
