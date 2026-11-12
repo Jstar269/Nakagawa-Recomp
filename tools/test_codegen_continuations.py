@@ -11,6 +11,64 @@ sys.path.insert(0, str(ROOT / "tools"))
 
 import codegen
 
+#: The runtime header whose definitions the --state-resume allow-list (codegen._STATE_RESUME_CALLS)
+#: rests on. A module-level name, so a check can point the test at a copy of the header.
+RECOMP_H = ROOT / "src" / "rt" / "recomp.h"
+
+
+def _header_definitions(text):
+    """Every ``#define`` of a function-like macro (name -> bodies) and every name a C line
+    declares or defines as a function, from header text with comments and line splices removed."""
+    text = re.sub(r"/\*.*?\*/", " ", text, flags=re.S)
+    text = re.sub(r"//[^\n]*", "", text)
+    text = text.replace("\\\n", " ")
+    macros, functions = {}, set()
+    for line in text.splitlines():
+        define = re.match(r"\s*#\s*define\s+([A-Za-z_]\w*)\(([^)]*)\)\s*(.*)$", line)
+        if define:
+            macros.setdefault(define.group(1), []).append(define.group(3).strip())
+            continue
+        function = re.match(r"\s*(?!(?:return|else|case|goto|sizeof)\b)(?:(?:static|inline|extern)\s+)*"
+                            r"[A-Za-z_]\w*(?:\s+|\s*\*+\s*)+"
+                            r"([A-Za-z_]\w*)\s*\(", line)
+        if function and not line.lstrip().startswith("#"):
+            functions.add(function.group(1))
+    return macros, functions
+
+
+def _closes_at_end(body, opening):
+    """Whether the bracket at ``opening`` is closed by the body's last character."""
+    pair = {"(": ")", "{": "}"}[body[opening]]
+    depth = 0
+    for index in range(opening, len(body)):
+        if body[index] == body[opening]:
+            depth += 1
+        elif body[index] == pair:
+            depth -= 1
+            if depth == 0:
+                return index == len(body) - 1
+    return False
+
+
+def _declares_nothing(name, macros, functions, seen=()):
+    """Whether a statement ``name(...);`` can declare nothing at its own scope: ``name`` is a
+    function, or every definition of it is a parenthesized expression, a body that is exactly
+    ``do { ... } while (0)``, or a call ``other(...)`` of a name that itself declares nothing."""
+    if name in seen or name not in macros:
+        return name in functions
+    for body in macros[name]:
+        if body.startswith("(") and _closes_at_end(body, 0):
+            continue
+        loop = re.fullmatch(r"do\s*(\{.*\})\s*while\s*\(\s*0\s*\)", body, re.S)
+        if loop and _closes_at_end(loop.group(1), 0):
+            continue
+        call = re.match(r"([A-Za-z_]\w*)\s*\(", body)
+        if (call and _closes_at_end(body, call.end() - 1)
+                and _declares_nothing(call.group(1), macros, functions, (*seen, name))):
+            continue
+        return False
+    return True
+
 
 class FakeElf:
     def __init__(self, words):
@@ -939,6 +997,314 @@ class StraightLineEndTests(unittest.TestCase):
                 insns, _labels, _continuations = self.flow(words, start=base)
                 self.assertEqual(insns, reachable(words, base))
                 self.emit(words, start=base)                       # the slot check holds
+
+
+class StateResumeTests(unittest.TestCase):
+    """``--state-resume`` (#2172): resume points for direct save states.
+
+    The pass rewrites three statement shapes and nothing else, so these pin the shapes, the
+    switch that is the body's one list of its points, the bodies it must leave alone and the
+    default output. The executable proof is ``mingw32-make cosim-selftest-resume``.
+    """
+
+    RANGES = [(0x1000, 0x1100)]
+    KNOWN = {0x1000, 0x1040}
+
+    def words(self):
+        return {
+            0x1000: addiu(16, 0, 3),
+            0x1004: jal(0x1040),
+            0x1008: addiu(2, 2, 1),
+            0x100C: addiu(16, 16, -1),
+            0x1010: bne(16, 0, 0x1010, 0x1004),   # the loop edge: a yield point
+            0x1014: NOP,
+            0x1018: regimm(0x11, 4, 0x1018, 0x1040),   # bgezal: a call inside a block
+            0x101C: NOP,
+            0x1020: JR_RA,
+            0x1024: NOP,
+            0x1040: JR_RA,
+            0x1044: NOP,
+        }
+
+    def emit(self, words=None, start=0x1000, known=None, **kwargs):
+        options = codegen.CodegenOptions(state_resume=kwargs.pop("state_resume", True))
+        return "\n".join(codegen.emit_function(
+            FakeElf(words or self.words()), start, self.RANGES,
+            self.KNOWN if known is None else known, options=options, **kwargs))
+
+    def test_default_output_has_no_resume_point(self):
+        plain = "\n".join(codegen.emit_function(
+            FakeElf(self.words()), 0x1000, self.RANGES, self.KNOWN))
+        self.assertEqual(self.emit(state_resume=False), plain)
+        for token in ("_nk_resume", "_nk_enter", "SR_STATE_ENTRY", "SR_YIELD_PARK",
+                      "sr_aot_return_boundary_begin_at", "sr_resume_"):
+            self.assertNotIn(token, plain)
+
+    def test_entry_tests_the_request_before_the_yield_point(self):
+        text = self.emit()
+        # The request is tested first, before the host-stack check and the entry yield, so
+        # a resume counts no yield point and sr_resume_validate's question runs neither.
+        self.assertIn("void f_00001000(CpuState *s) {\n"
+                      "    SR_STATE_RESUME_TEST();\n"
+                      "    SR_HOST_STACK_CHECK(0x00001000u);\n"
+                      "    SR_STATE_ENTRY(s, 0x00001000u); _nk_enter: ;\n"
+                      "    uint32_t _sp_entry = s->r[29]; (void)_sp_entry;", text)
+        self.assertNotIn("SR_YIELD(s, 0x00001000u);", text)
+        # A real resume makes the host-stack check in the switch; the question does not.
+        self.assertIn("    const SrResumeEntry _nk_e = sr_resume_take(s, 0x00001000u);\n"
+                      "    if (!_nk_e.probe) { SR_HOST_STACK_CHECK(0x00001000u); }\n", text)
+        # A body with no direct call has no host-stack check to make.
+        leaf = self.emit({0x1000: JR_RA, 0x1004: NOP}, known={0x1000})
+        self.assertIn("    SR_STATE_RESUME_TEST();\n    SR_STATE_ENTRY(s, 0x00001000u);", leaf)
+        self.assertNotIn("SR_HOST_STACK_CHECK", leaf)
+        self.assertIn("case SR_RESUME_KEY(SR_RESUME_POINT_ENTRY, 0x00001000u): "
+                      "SR_RESUME_AT(_nk_e, SR_RESUME_POINT_ENTRY, 0u); goto _nk_enter;", text)
+
+    def test_loop_edge_parks_naming_its_target(self):
+        text = self.emit()
+        self.assertIn("if (_c) { SR_YIELD_PARK(s, 0x00001010u, 0x00001000u, 0x00001004u, "
+                      "SR_RESUME_POINT_YIELD, _sp_entry); goto L_00001004; }", text)
+        self.assertIn("case SR_RESUME_KEY(SR_RESUME_POINT_YIELD, 0x00001004u): "
+                      "SR_RESUME_AT(_nk_e, SR_RESUME_POINT_YIELD, 0u); goto L_00001004;", text)
+
+    def test_direct_call_records_the_caller_and_resumes_before_its_own_drain(self):
+        text = self.emit()
+        self.assertIn(
+            "if (sr_aot_return_boundary_begin_at(s, 0x0000100cu, 0x00001004u, 0x00001040u, "
+            "0x00001000u, _sp_entry)) return; f_00001040(s); R_0000100c: SR_TAIL_DRAIN(s); "
+            "if (sr_aot_return_boundary_end(s)) return;", text)
+        self.assertIn("case SR_RESUME_KEY(SR_RESUME_POINT_CALL, 0x0000100cu): "
+                      "SR_RESUME_AT(_nk_e, SR_RESUME_POINT_CALL, 0x00001040u); "
+                      "sr_resume_inner(s); goto R_0000100c;", text)
+        # A linked branch's call sits in the branch's block; nothing after the label reads
+        # the block's local, so it has a point too.
+        self.assertIn("f_00001040(s); R_00001020: SR_TAIL_DRAIN(s); "
+                      "if (sr_aot_return_boundary_end(s)) return; } }", text)
+
+    def test_every_point_is_in_the_switch_once_and_anything_else_is_refused(self):
+        text = self.emit()
+        block = text[text.index("  _nk_resume: {"):]
+        self.assertEqual(block.count("case SR_RESUME_KEY("), 4)
+        self.assertEqual(len(set(re.findall(r"case SR_RESUME_KEY\(([^)]*)\)", block))), 4)
+        self.assertIn("_sp_entry = _nk_e.sp;", block)
+        self.assertIn("default: sr_resume_no_point(s, 0x00001000u, &_nk_e); return;", block)
+        # The body's own exits cannot fall into the resume block.
+        self.assertIn("    return;\n  _nk_resume: {", text)
+        self.assertEqual(text.count("R_0000100c:"), 1)
+
+    def test_pass_only_rewrites_its_three_shapes(self):
+        plain = self.emit(state_resume=False).split("\n")
+        resumed = self.emit().split("\n")
+        self.assertEqual(resumed[1], "    SR_STATE_RESUME_TEST();")
+        del resumed[1]
+        body = resumed[:resumed.index("    return;")] + ["}", ""]
+        self.assertEqual(len(body), len(plain))
+        changed = [(a, b) for a, b in zip(plain, body, strict=True) if a != b]
+        self.assertEqual(len(changed), 4)   # the entry, the loop edge, two direct calls
+        for before, after in changed:
+            self.assertTrue(
+                "SR_YIELD(" in before or "sr_aot_return_boundary_begin(" in before, before)
+            self.assertNotEqual(before, after)
+
+    def test_a_body_with_guest_owned_stack_exits_keeps_its_text(self):
+        words = {
+            0x1000: (0x23 << 26) | (4 << 21) | (29 << 16),   # lw sp, 0(a0): the guest owns $sp
+            0x1004: JR_RA,
+            0x1008: NOP,
+        }
+        self.assertEqual(self.emit(words, known={0x1000}),
+                         self.emit(words, known={0x1000}, state_resume=False))
+
+    def test_a_live_frame_resume_entry_keeps_its_text(self):
+        kwargs = {"resume_owners": {0x1040: 0x1000}, "resumable": True}
+        self.assertEqual(self.emit(start=0x1040, known={0x1000}, **kwargs),
+                         self.emit(start=0x1040, known={0x1000}, state_resume=False, **kwargs))
+
+    def test_a_call_followed_by_more_of_its_line_gets_no_point(self):
+        line = ("    if (sr_aot_return_boundary_begin(s, 0x0000100cu, 0x00001004u, 1u)) return; "
+                "f_00001040(s); SR_TAIL_DRAIN(s); if (sr_aot_return_boundary_end(s)) return; "
+                "if (s->flow_kind != 0u) return;")
+        out = ["void f_00001000(CpuState *s) {", "    SR_YIELD(s, 0x00001000u);",
+               "    uint32_t _sp_entry = s->r[29]; (void)_sp_entry;", line, "}", ""]
+        result = codegen.state_resume_pass(out, 0x1000)
+        self.assertIn(line, result)
+        self.assertNotIn("SR_RESUME_POINT_CALL", "\n".join(result))
+
+    def test_a_call_in_a_block_that_stays_open_gets_no_point(self):
+        # An enhancement site declares locals, calls, and reads them on a later line. A
+        # label after the call would be entered past their initializers.
+        call = ("      if (sr_aot_return_boundary_begin(s, 0x0000100cu, 0x00001004u, 1u)) return; "
+                "f_00001040(s); SR_TAIL_DRAIN(s); if (sr_aot_return_boundary_end(s)) return;")
+        out = ["void f_00001000(CpuState *s) {", "    SR_YIELD(s, 0x00001000u);",
+               "    uint32_t _sp_entry = s->r[29]; (void)_sp_entry;",
+               "    { uint32_t _nk_a0 = s->r[4];", call,
+               "      MEM_W32_PC(_nk_a0 + 16u, 0u, 0x00001004u); }",
+               "    s->r[29] = _sp_entry; return;", "}", ""]
+        result = "\n".join(codegen.state_resume_pass(out, 0x1000))
+        self.assertIn(call, result)
+        self.assertNotIn("SR_RESUME_POINT_CALL", result)
+        self.assertIn("SR_STATE_ENTRY", result)
+        # The same call with its block closed on its own line has one.
+        closed = out[:4] + [call + " }"] + out[6:]
+        self.assertIn("SR_RESUME_POINT_CALL", "\n".join(codegen.state_resume_pass(closed, 0x1000)))
+        # A brace in a comment or a string is not a block.
+        noisy = out[:3] + ["    /* } */ s->r[2] = (uint32_t)sizeof(\"}\") + (uint32_t)'}';", "    " + call.strip()] + out[6:]
+        self.assertIn("SR_RESUME_POINT_CALL", "\n".join(codegen.state_resume_pass(noisy, 0x1000)))
+        # A comment left open, a line comment and a preprocessor line cannot be read: the
+        # body is left as it is.
+        for unreadable in ("    /* open", "    // }", "#if 0"):
+            hidden = out[:3] + [unreadable, "    " + call.strip()] + out[6:]
+            self.assertIs(codegen.state_resume_pass(hidden, 0x1000), hidden, unreadable)
+
+    def test_a_call_inside_a_loop_or_switch_gets_no_point(self):
+        # Wherever the block was opened: a label inside it is not followed by straight-line
+        # code, and the block's header may read a local the resume switch does not restore.
+        call = ("if (sr_aot_return_boundary_begin(s, 0x0000100cu, 0x00001004u, 1u)) return; "
+                "f_00001040(s); SR_TAIL_DRAIN(s); if (sr_aot_return_boundary_end(s)) return;")
+        head = ["void f_00001000(CpuState *s) {", "    SR_YIELD(s, 0x00001000u);",
+                "    uint32_t _sp_entry = s->r[29]; (void)_sp_entry;"]
+        tail = ["    s->r[29] = _sp_entry; return;", "}", ""]
+        for middle in (
+            ["    while (s->r[8] != 0u) { " + call + " }"],
+            # A brace inside the loop's own header does not use up the loop.
+            ["    for (s->r[8] = (uint32_t){0}; s->r[8] < 2u; s->r[8]++) { " + call + " }"],
+            ["    while (({ s->r[8]; })) { " + call + " }"],
+            ["    while (s->r[8] != 0u) {", "      " + call + " }"],
+            ["    for (;;) {", "      { " + call + " } }"],
+            ["    { s->r[9] = 0u;", "      do {", "        " + call + " } while (s->r[9]); }"],
+            ["    switch (s->r[8]) {", "      case 1: " + call + " }"],
+        ):
+            with self.subTest(middle=middle[0]):
+                result = "\n".join(codegen.state_resume_pass(head + middle + tail, 0x1000))
+                self.assertIn("SR_STATE_ENTRY", result)
+                self.assertNotIn("SR_RESUME_POINT_CALL", result)
+        # The same call in a plain block, and after a loop that has closed, has one: a
+        # loop with a block, one without, and `do { } while (0);`.
+        for middle in (["    if (s->r[8] != 0u) { " + call + " }"],
+                       ["    while (s->r[8] != 0u) { s->r[8]--; }", "    " + call],
+                       ["    for (int i = 0; i < 4; i++) s->r[8]++;", "    { " + call + " }"],
+                       ["    do { s->r[8]--; } while (0);", "    { " + call + " }"]):
+            with self.subTest(middle=middle[0]):
+                self.assertIn("SR_RESUME_POINT_CALL", "\n".join(
+                    codegen.state_resume_pass(head + middle + tail, 0x1000)))
+
+    def test_the_call_allow_list_declares_nothing_in_the_runtime_header(self):
+        # A function-scope `NAME(args);` keeps a body's resume points only for these names
+        # (codegen._STATE_RESUME_CALLS); a macro among them that declared a local would leave
+        # that local live, unrestored, at every resume label. Each is pinned to its definitions.
+        macros, functions = _header_definitions(RECOMP_H.read_text(encoding="utf-8"))
+        for name in sorted(codegen._STATE_RESUME_CALLS):
+            with self.subTest(name=name):
+                self.assertTrue(name in macros or name in functions, f"{name} is not in recomp.h")
+                self.assertTrue(_declares_nothing(name, macros, functions),
+                                f"{name} may declare a name at the statement's scope: {macros.get(name)}")
+        # The reading itself: a declaring body, one hidden behind another macro, a block that
+        # is not the whole body, and a name defined nowhere are each caught.
+        for header, name in (
+            ("#define SR_X(pc) uint32_t _chk = (pc)\n", "SR_X"),
+            ("#define SR_X(pc) SR_Y((pc))\n#define SR_Y(v) uint32_t _y = (v)\n", "SR_X"),
+            ("#define SR_X(pc) do { (void)(pc); } while (0); uint32_t _z = 0\n", "SR_X"),
+            ("#define SR_X(pc) (void)(pc), uint32_t _z\n", "SR_X"),
+            ("", "SR_X"),
+        ):
+            with self.subTest(header=header):
+                self.assertFalse(_declares_nothing(name, *_header_definitions(header)))
+        for header in ("#define SR_X(pc) do { uint32_t _t = (pc); (void)_t; } while (0)\n",
+                       "#define SR_X(pc) ((void)(pc))\n",
+                       "static inline void sr_x(uint32_t pc) { (void)pc; }\n#define SR_X(pc) sr_x((pc))\n"):
+            with self.subTest(header=header):
+                self.assertTrue(_declares_nothing("SR_X", *_header_definitions(header)))
+
+    def test_a_body_with_another_function_scope_local_keeps_its_text(self):
+        # The resume switch restores the entry $sp only; any other local would be live at
+        # every label.
+        head = ["void f_00001000(CpuState *s) {", "    SR_YIELD(s, 0x00001000u);",
+                "    uint32_t _sp_entry = s->r[29]; (void)_sp_entry;"]
+        tail = ["    s->r[29] = _sp_entry; return;", "}", ""]
+        for declaration in (
+            "    uint32_t _gpr8 = s->r[8];",
+            "    unsigned _x = 1u;",
+            "    unsigned int _x;",
+            "    bool _x = 0;",
+            "    uintptr_t _x = 0;",
+            "    CpuState *_x = s;",
+            "    RecompFn _x = NULL;",
+            "    struct T _x;",
+            "    volatile uint32_t _x = 0u;",
+            "    long long _x = 0;",
+            "    void (*_x)(void) = NULL;",
+            "    s->r[2] = 0u; uint32_t _late = 1u;",
+            "    { s->r[2] = 0u;\n    }\n    uint32_t _x = 1u;",
+            "    { s->r[2] = 0u; } uint32_t _x = 1u;",
+            "  L_00001004: uint32_t _x = s->r[8];",
+            "    uint32_t (*_x)[2] = NULL;",
+            "    __typeof__(s->r[8]) _x = 0u;",
+            "    __attribute__((unused)) uint32_t _x = 0u;",
+            "    _Alignas(8) uint32_t _x = 0u;",
+            "    _Atomic(uint32_t) _x = 0u;",
+            "    SR_NOTE(s) uint32_t _x = 0u;",
+            "    uint32_t\n    _x = 1u;",
+            # A call-shaped statement whose name could be a macro that declares a local.
+            "    NK_DECLARE_LOCAL(_x);",
+            "    sr_note(s);",
+            "    sr_note(s) ? (void)0 : (void)0;",
+            "    f_0000100(s);",
+        ):
+            with self.subTest(declaration=declaration):
+                out = head + [declaration] + tail
+                self.assertIs(codegen.state_resume_pass(out, 0x1000), out)
+        # The same, cut across two lines.
+        out = head + ["    uint32_t", "    _x = 1u;"] + tail
+        self.assertIs(codegen.state_resume_pass(out, 0x1000), out)
+        # Statements that only look like one keep the body's points, and so does a local
+        # inside a block.
+        for statement in (
+            "    charge = 1;", "    double_buf[0] = 1;", "    intx = 2;", "    SR_COUNT_total = 1;",
+            "    goto L_00001004;", "    (void)_sp_entry;", "    s->r[2] = s->r[3] * s->r[4];",
+            "    { uint32_t _t = s->r[8]; s->r[9] = _t; }",
+            "    if (s->r[8]) { s->r[9] = 0u; } else { s->r[9] = 1u; }",
+            "    sr_begin(s, 0x00001000u, 0x24100003u); s->r[16] = (0u + 3u); sr_end(s, 0u, 0);",
+            "    SR_HOST_STACK_CHECK(0x00001000u);",
+            "    MEM_W32_PC(s->r[29] + 12u, s->r[31], 0x00001004u);",
+            "  L_00001004: ;",
+            "    f_00001040(s);",
+            "    sr_tail_record(s, 0x00001040u);",
+            # A loop header's own local ends with the loop, and no label is granted inside one.
+            "    for (uint32_t _i = (uint32_t){0}; _i < 2u; _i++) { s->r[8]++; }",
+        ):
+            with self.subTest(statement=statement):
+                out = head + [statement] + tail
+                self.assertIn("SR_STATE_ENTRY", "\n".join(codegen.state_resume_pass(out, 0x1000)))
+
+    def test_a_loop_edge_to_a_label_inside_a_block_keeps_its_plain_yield(self):
+        edge = "      if (_c) { SR_YIELD(s, 0x00001010u); goto L_00001004; } }"
+        out = ["void f_00001000(CpuState *s) {", "    SR_YIELD(s, 0x00001000u);",
+               "    uint32_t _sp_entry = s->r[29]; (void)_sp_entry;",
+               "    { uint32_t _t = s->r[8];", "  L_00001004: ;", "      s->r[9] = _t; }",
+               "    { uint32_t _c = (s->r[16] != 0u);", edge,
+               "    s->r[29] = _sp_entry; return;", "}", ""]
+        result = "\n".join(codegen.state_resume_pass(out, 0x1000))
+        self.assertIn(edge, result)
+        self.assertNotIn("SR_RESUME_POINT_YIELD", result)
+        scoped = out[:3] + ["  L_00001004: ;"] + out[6:]
+        self.assertIn("SR_RESUME_KEY(SR_RESUME_POINT_YIELD, 0x00001004u)",
+                      "\n".join(codegen.state_resume_pass(scoped, 0x1000)))
+
+    def test_option_is_parsed_and_refuses_what_it_cannot_restore(self):
+        options = codegen.CodegenOptions()
+        cli = codegen._command_line_parser().parse_args(["--state-resume"])
+        codegen._apply_options(cli, codegen._validated_options(cli), options)
+        self.assertTrue(options.state_resume)
+        self.assertFalse(codegen.CodegenOptions().state_resume)
+        for other in ("--stack-census", "--promote-registers", "--backend=llvm", "--lle-cpu",
+                      "--lle-import-seam"):
+            cli = codegen._command_line_parser().parse_args(["--state-resume", other])
+            with self.assertRaises(codegen._Refusal) as refusal:
+                codegen._validated_options(cli)
+            self.assertIn(f"--state-resume cannot be combined with {other}",
+                          str(refusal.exception.args))
+            # Each is accepted alone.
+            codegen._validated_options(codegen._command_line_parser().parse_args([other]))
 
 
 if __name__ == "__main__":

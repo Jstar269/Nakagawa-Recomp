@@ -56,6 +56,10 @@ typedef struct SrGuestInterpCallBoundary {
     /* Native code an interpreted linked call handed its live frame to: the rest of that
      * call, not a call of its own (dispatch_call_continue). */
     uint8_t continuation;
+    /* The call is dispatched again under frames it already has, for exception or ERET flow
+     * its code raised. The frames below hold the call's own entry $sp, so a body entered this
+     * way is not the host entry's (SR_BOUNDARY_HOST_ENTRY in recomp.h). */
+    uint8_t redispatch;
 } SrGuestInterpCallBoundary;
 
 /* The interpreter hands the live frame of the linked call `call` to the native body at
