@@ -121,6 +121,11 @@ def production_vfpu_opcodes() -> tuple[tuple[int, ...], tuple[int, ...]]:
     return tuple(sorted(routed)), tuple(sorted(direct_controls))
 
 
+#: Words a PSP-3000 probe ran that the systematic sampling below does not reach: lv.q and sv.q
+#: with the write-back flag, vt = C000 and base $t2 (PSP-VFPU-QUADWB-001, probe case vfpu-quad-wb).
+MEASURED_PROBE_WORDS = (0xD9400002, 0xF9400002)
+
+
 def systematic_words() -> tuple[int, ...]:
     routed, controls = production_vfpu_opcodes()
     words: set[int] = set()
@@ -142,6 +147,7 @@ def systematic_words() -> tuple[int, ...]:
         words.update({op << 26, 0xFFFFFFFF})
     words.update(generate_synthetic_corpus())
     words.update(generate_memory_cop2_corpus())
+    words.update(MEASURED_PROBE_WORDS)
     return tuple(sorted(words))
 
 
@@ -613,15 +619,54 @@ def _differential_tests(record: Record, synthetic_words: set[int]) -> list[str]:
     return sorted(set(tests))
 
 
+#: The forms check_vfpu_wide_dot_measured replays (probe case vfpu-wide-dot-matrix,
+#: PSP-VFPU-WIDEDOT-001), as `_wide_dot_key` gives them. tools/test_vfpu_coverage_census.py
+#: checks the set against the words tools/vfpu_overlap_diff_gen.py builds for that check.
+WIDE_DOT_MEASURED_FORMS = frozenset({
+    (0x19, 1, 0, 0, 2), (0x19, 1, 0, 0, 4), (0x19, 4, 0, 0, 4),  # vdot.p, vdot.q, vhdp.q
+    (0x3C, 5, 0, 0, 3), (0x3C, 5, 0, 0, 4),  # vcrsp.t, vqmul.q
+    (0x3C, 3, 0, 0, 4), (0x3C, 3, 0, 0, 3), (0x3C, 0, 0, 0, 4),  # vtfm4.q, vhtfm4.q, vmmul.q
+    (0x3C, 7, 28, 6, 4), (0x3C, 7, 28, 3, 4), (0x3C, 7, 28, 7, 4),  # vmzero.q, vmidt.q, vmone.q
+    (0x3C, 7, 28, 0, 4), (0x3C, 7, 29, 4, 4),  # vmmov.q, vrot.q
+})
+
+
+def _wide_dot_key(word: int, op: int, size: object) -> tuple[int, int, int, int, object]:
+    sub3 = (word >> 23) & 7
+    matrix_misc = op == 0x3C and sub3 == 7
+    return (op, sub3, (word >> 21) & 0x1F if matrix_misc else 0, (word >> 16) & 0x1F if matrix_misc else 0, size)
+
+
 def _measured_selftests(word: int, op: int, size: object) -> list[str]:
     """Selftests that pin a form's results to the words a PSP-3000 returned, by the forms and
     widths each one runs in tests/native/vfpu_interp_selftest.c (issue #326). The oracle row
     of each is named in tools/verification_ledger.py VFPU_MEASURED_SELFTESTS; the widths and
     prefixes a check refuses as unmeasured are not credited."""
     tests: list[str] = []
+    sub3 = (word >> 23) & 7
     # vscmp.s / vsge.s / vslt.s on the 15 measured operand pairs, both lanes (PSP-VFPU-CMP-001).
-    if op == 0x1B and ((word >> 23) & 7) in {5, 6, 7} and size == 1:
+    if op == 0x1B and sub3 in {5, 6, 7} and size == 1:
         tests.append("vfpu-interp-selftest:check_vfpu_compare_measured_words")
+    # mtvc / mfvc of VFPU_CC (control 3) and vcmp.q, all 16 conditions (PSP-VFPU-CCCMOV-001).
+    if op == 0x12 and ((word >> 21) & 0x1F) in {3, 7} and (word & 0xFF) == 0x83:
+        tests.append("vfpu-interp-selftest:check_vfpu_cc_write_mask")
+    if op == 0x1B and sub3 == 0 and size == 4:
+        tests.append("vfpu-interp-selftest:check_vcmp_denormal_operands")
+    # lv.q / sv.q with the write-back flag (bit 1) and vt below 32 (bit 0 clear), off the zero base
+    # register: the probe's words and the check's (base $t2, C000). Rows visited only with r0 keep
+    # their own, unverified decode (PSP-VFPU-QUADWB-001). Row-level, like every census credit: other base
+    # registers and offsets of the same form are credited with the measured ones.
+    if op in {0x36, 0x3E} and word & 3 == 2 and (word >> 21) & 0x1F:
+        tests.append("vfpu-interp-selftest:check_quad_wb_measured")
+    # vadd/vsub/vmul/vmin/vmax at .s and .q, vscl.q, vdiv.s (PSP-VFPU-BASICARITH-001); the wider
+    # vdiv widths are PSP-VFPU-WIDEROPS-001 cells no check replays, so they are not credited.
+    if ((op in {0x18, 0x19, 0x1B} and (op, sub3) in {(0x18, 0), (0x18, 1), (0x19, 0), (0x1B, 2), (0x1B, 3)}
+         and size in {1, 4})
+            or (op, sub3, size) in {(0x18, 7, 1), (0x19, 2, 4)}):
+        tests.append("vfpu-interp-selftest:check_vfpu_basic_arith_measured")
+    # The dot, cross, quaternion and matrix forms at their measured widths (PSP-VFPU-WIDEDOT-001).
+    if _wide_dot_key(word, op, size) in WIDE_DOT_MEASURED_FORMS:
+        tests.append("vfpu-interp-selftest:check_vfpu_wide_dot_measured")
     if op != 0x34:
         return tests
     jump, sel = (word >> 21) & 0x1F, (word >> 16) & 0x1F
@@ -638,6 +683,15 @@ def _measured_selftests(word: int, op: int, size: object) -> list[str]:
     # vrexp2.s over the 63 measured inputs, both lanes (PSP-VFPU-TRANSCENDENTAL-001).
     if jump == 0 and sel == 28 and size == 1:
         tests.append("vfpu-interp-selftest:check_vrexp2_measured_words")
+    # vmov, vabs, vneg, vidt, vzero and vone at .s/.p/.q (PSP-VFPU-BASICARITH-001).
+    if jump == 0 and sel in {0, 1, 2, 3, 6, 7} and size in {1, 2, 4}:
+        tests.append("vfpu-interp-selftest:check_vfpu_unary_arith_measured")
+    # vus2i and vs2i at .s/.p (PSP-VFPU-VUS2I-001).
+    if jump == 1 and sel in {26, 27} and size in {1, 2}:
+        tests.append("vfpu-interp-selftest:check_vus2i_vs2i_measured_words")
+    # vf2in, vf2iz, vf2iu and vf2id at .s (PSP-VFPU-CONVERT-001).
+    if 16 <= jump <= 19 and size == 1:
+        tests.append("vfpu-interp-selftest:check_vf2i_measured_cells")
     return tests
 
 
@@ -679,7 +733,7 @@ def _hardware_evidence(record: Record, vector_size: int | None) -> list[dict[str
                 "kind": "semantic",
                 "coverage": (
                     "measured vdot/vhdp cells; its NaN words and the zero sign of a flushed sum "
-                    "are superseded by the unrecorded vfpu-wide-dot-matrix read (PSP-3000, 2026-11-08)"
+                    "are superseded by the vfpu-wide-dot-matrix read (PSP-VFPU-WIDEDOT-001, PSP-3000, 2026-11-08)"
                 ),
             }
         )
@@ -700,7 +754,7 @@ def _hardware_evidence(record: Record, vector_size: int | None) -> list[dict[str
             }
         )
     # The issue #40 vmmul.t / vtfm3.t NaN cells (sNaN quieted to 0x7FC00001, inf*0 to 0x7FC00000) are
-    # superseded: the unrecorded vfpu-wide-dot-matrix read and PSP-VFPU-FUNNEL-001 returned 0x7F800001 for every NaN
+    # superseded: the vfpu-wide-dot-matrix read (PSP-VFPU-WIDEDOT-001) and PSP-VFPU-FUNNEL-001 returned 0x7F800001 for every NaN
     # operand and 0 * Inf. Those rows no longer claim hardware evidence from them.
     immediate_vfpu = op == 0x37 and ((word >> 24) & 3) == 3
     uses_vector_addressing = op in VECTOR_SIZE_OPS or op == 0x12 or immediate_vfpu
