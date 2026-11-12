@@ -1108,8 +1108,13 @@ memory, no network; ZIP packs through the project's own `src/core/nk_zip.c` and 
   pack's statistics (`decode_peak`). `nk_texrepl_decode_png` is the same check and decode, for a caller with bytes of its own.
   One file is read, checked, decoded, noted and counted against the budget once, however many `[hashes]` lines
   or names reach it: names are first grouped as written, and before a file's bytes are read its identity (the
-  ZIP entry a name resolves to, case ignored; a folder file's volume and file ID, or device and inode) is looked
-  up among the files already read, so another case, an 8.3 name or a link shares the first name's image.
+  ZIP entry a name resolves to, case ignored; a folder file's volume and 128-bit file ID, or device and inode) is
+  looked up among the files already read or found damaged, so another case, an 8.3 name or a link shares the
+  first name's image, or its refusal. A file whose system gives no file ID has no identity and is read under each
+  name, as distinct files would be. A file refused before it is read (over 64 MiB, not a regular file, outside
+  the pack) is noted once for each name that reaches it, which costs no read. Identities are kept while the pack
+  is open, so a file deleted and replaced meanwhile may share the old file's image under a name not yet read;
+  the table takes 36 bytes a slot, at most two slots a file read, outside `index_bytes`.
 - **Sorting.** The index, the hash ranges and the ZIP reader's name and offset checks sort with one project heapsort
   (`nk_zip_sort`, at most about 2n log2 n comparisons whatever the order), not the C library's `qsort`, which
   some C libraries make quadratic for a crafted order.
@@ -1158,7 +1163,8 @@ memory, no network; ZIP packs through the project's own `src/core/nk_zip.c` and 
   the comparisons their sorts make, counted at the comparison functions in the selftest's build
   (`NK_SORT_COUNT_COMPARES`), so a sort that went back to `qsort` fails where `qsort` has such an order. A good
   image and a refused one, each listed under 81 keys, are read once (`reads`), the good one decoded and held once,
-  and so is one file named 81 ways (case spellings in a ZIP and in a Windows folder, links in a POSIX folder).
+  and so is one file named 81 ways (case spellings in a ZIP and in a Windows folder, links in a POSIX folder), and
+  a damaged ZIP entry named 81 ways is unpacked and refused once.
   With the budget full of pinned images a third is read once, not on each lookup, and served once they are
   released; a mip level whose image is the wrong size is not decoded, nor read again when that size is already
   known; a chain whose level 0 image proved unusable through another key serves none of its higher levels;

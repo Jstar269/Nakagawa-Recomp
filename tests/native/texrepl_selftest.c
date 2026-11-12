@@ -2074,6 +2074,8 @@ static void test_png_checks_pinned(void) {
         { "image data in two IDATs", 1, 8, 6, rgba_ok, 5, NULL, NULL, 0, NULL },
         { "a tEXt between two IDATs", 1, 8, 6, rgba_ok, 5, NULL, &mid, 0, "the IDAT chunks do not follow one another" },
         { "two PLTEs", 4, 8, 3, idx_ok, 5, &plte_twice, NULL, 0, "PLTE is out of place or of a wrong length" },
+        { "two PLTEs in a grey image", 4, 8, 0, idx_ok, 5, &plte_twice, NULL, 0, "PLTE is out of place or of a wrong length" },
+        { "one PLTE in a grey image", 4, 8, 0, idx_ok, 5, &plte2, NULL, 0, NULL },
     };
     for (size_t k = 0; k < sizeof(cells) / sizeof(cells[0]); k++) {
         size_t n = 0;
@@ -2360,6 +2362,47 @@ static void test_png_bomb(void) {
               (unsigned long long)st.cache_peak);
         nk_texrepl_close(p);
     }
+
+    /* A damaged ZIP entry (its CRC wrong) under 81 spellings: unpacked and refused once, not once a
+     * spelling. */
+    {
+        at = (size_t)snprintf(ini, sizeof(ini), "[options]\nhash = quick\n[hashes]\n");
+        for (unsigned k = 0; k < 81; k++) {
+            static const char base[] = "damaged.png";
+            char bad[sizeof(base)];
+            for (unsigned c = 0, bit = 0; c < sizeof(base); c++) {
+                const char ch = base[c];
+                bad[c] = (ch >= 'a' && ch <= 'z' && ((k >> bit++) & 1u)) ? (char)(ch - 32) : ch;
+            }
+            at +=(size_t)snprintf(ini + at, sizeof(ini) - at, "%016llx = %s\n",
+                                   (unsigned long long)((k / 9u + 1u) << 8 | (k % 9u + 1u)), bad);
+        }
+        Zw z;
+        memset(&z, 0, sizeof(z));
+        const ZwOpt damaged = { 8, 0, NULL, 0, 1, 0 };
+        zw_add(&z, "damaged.png", png, n, damaged);
+        zw_add_text(&z, "textures.ini", ini, 0);
+        char where[600];
+        snprintf(where, sizeof(where), "%s/texrepl_png_damaged_spellings.zip", SR_SELFTEST_BUILD_ROOT);
+        zw_finish(&z, where, 0);
+        err[0] = '\0';
+        p = nk_texrepl_open(where, 0, err, sizeof(err));
+        CHECK(p != NULL, "the ZIP naming one damaged entry 81 ways: %s", err);
+        if (p) {
+            int hits = 0;
+            for (unsigned k = 0; k < 81; k++) {
+                NkTexReplHit hit;
+                NkTexReplId id = { 0x08804000u, 3u, (k / 9u + 1u) << 8 | (k % 9u + 1u), 0u, 0x2365u + k };
+                if (nk_texrepl_lookup(p, &id, &hit)) { hits++; nk_texrepl_unpin(p, &hit); }
+            }
+            NkTexReplStats st;
+            nk_texrepl_stats(p, &st);
+            CHECK(hits == 0 && st.reads == 1 && st.load_failed == 1 && has_diag(p, "damaged in the ZIP"),
+                  "one damaged entry by 81 names: %d hits, unpacked %llu times, %llu noted", hits,
+                  (unsigned long long)st.reads, (unsigned long long)st.load_failed);
+            nk_texrepl_close(p);
+        }
+    }
     free(png);
 }
 
@@ -2532,8 +2575,9 @@ static void test_sort_adversary(void) {
     write_text(path, ini);
     double t_rng = 0;
     const unsigned long long c_rng = open_counted(dir, &ok, &t_rng);
-    CHECK(ok && (double)c_rng <= 2.0 * lbound, "the adversary's range lines: %llu comparisons (at most %.0f)", c_rng,
-          2.0 * lbound);
+    /* at least 2 (kL - 1): both sorts ran, over every line */
+    CHECK(ok && (double)c_rng <= 2.0 * lbound && c_rng >= 2ull * (unsigned long long)(kL - 1),
+          "the adversary's range lines: %llu comparisons (from %d to %.0f)", c_rng, 2 * (kL - 1), 2.0 * lbound);
     printf("sort: qsort's worst order (n=%d) as [hashranges] and [reducehashranges] lines: %llu comparisons in %.3f s\n",
            kL, c_rng, t_rng);
     free(ini);
