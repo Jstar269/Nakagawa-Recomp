@@ -25,7 +25,10 @@
  * Guest threads call exit() too (sceKernelExitGame). The first thread to end the process owns
  * the exit; any other thread that calls exit(), _exit() or _Exit() meanwhile waits for the
  * process to end. A handler that calls exit() itself goes on with the handlers not yet run, then
- * ends the process with its own status, as each handler runs once.
+ * ends the process with its own status, as each handler runs once. So a handler must not wait for
+ * a thread that ends the process or registers a handler meanwhile: that thread waits on the exit
+ * lock, and the two never finish (no handler the runtime registers does). The wrapped _exit()
+ * and _Exit() take the lock too, so they are not for signal handlers.
  * See nk_platform_spawn_process in src/core/nk_platform_posix.c for the launcher side.
  */
 

@@ -174,7 +174,8 @@ class AndroidAppContractTests(unittest.TestCase):
     @unittest.skipUnless(sys.platform.startswith("linux") and shutil.which("cc"), "needs a Linux C compiler")
     def test_the_title_shim_ends_the_process_as_exit_would(self) -> None:
         """The shim built for Linux with the Android link's --wrap flags, around a stub runtime:
-        handlers run last-registered-first and once, a handler's own exit() goes on with the rest,
+        only the runtime's handlers run (one registered with the C library itself does not), last
+        registered first and once, a handler's own exit() goes on with the rest,
         a second thread's exit() waits for the first, and the exit file is written after the log
         is drained, with the status the process ends with."""
         shim = ANDROID / "app" / "src" / "main" / "cpp" / "nk_android_title.c"
@@ -195,6 +196,7 @@ class AndroidAppContractTests(unittest.TestCase):
                 "nested": (5, "b nested a shutdown(no-exit-file) "),
                 "_exit": (4, "shutdown(no-exit-file) "),
                 "race": (2, "slow slow-done a shutdown(no-exit-file) "),
+                "foreign": (6, "a shutdown(no-exit-file) "),
             }
             for mode, (status, trace) in cases.items():
                 with self.subTest(mode=mode):
@@ -599,6 +601,7 @@ _TITLE_SHIM_HARNESS = r"""
 #include <unistd.h>
 
 int nk_android_title_main(int argc, char **argv);
+int __real_atexit(void (*handler)(void));
 
 static void say(const char *text) {
     int fd = open(getenv("NK_TEST_TRACE"), O_WRONLY | O_CREAT | O_APPEND, 0600);
@@ -614,6 +617,7 @@ void nk_platform_host_shutdown(void) {
 
 static void handler_a(void) { say("a "); }
 static void handler_b(void) { say("b "); }
+static void handler_foreign(void) { say("foreign "); }   /* registered with the C library itself */
 static void handler_nested(void) { say("nested "); exit(5); }
 static void *racer(void *arg) { (void)arg; exit(9); return NULL; }
 static void handler_slow(void) {
@@ -629,6 +633,7 @@ int nk_shim_runtime_main(int argc, char **argv) {
     if (strcmp(mode, "nested") == 0) { atexit(handler_a); atexit(handler_nested); atexit(handler_b); exit(1); }
     if (strcmp(mode, "_exit") == 0) { atexit(handler_a); _exit(4); }
     if (strcmp(mode, "race") == 0) { atexit(handler_a); atexit(handler_slow); exit(2); }
+    if (strcmp(mode, "foreign") == 0) { __real_atexit(handler_foreign); atexit(handler_a); exit(6); }
     return 99;
 }
 
