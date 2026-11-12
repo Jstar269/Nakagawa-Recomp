@@ -11485,7 +11485,8 @@ static uint32_t gr_vk_channel_delta(uint32_t psm, uint32_t a, uint32_t b) {
  * window is then read back from the GPU), into px. */
 static int gr_vk_draw(const struct gr_cell *c, int gpu, const uint32_t *tex, uint32_t clut,
                       uint32_t px[GR_N], unsigned long long *fell, int *sync) {
-    const uint32_t list = 0x08900000u, vtx = 0x08904000u;
+    /* synthetic main RAM below the user partition (the purity gate keeps game addresses out) */
+    const uint32_t list = 0x08600000u, vtx = 0x08604000u;
     const uint32_t fb = 0x04000000u + GR_FB_OFFSET;
     coherence_reset_targets();
     memset(SR_HOST(fb), 0, GR_STRIDE * GR_ROWS * 4u);
@@ -11539,10 +11540,10 @@ static int coherence_run_clear_masks(void) {
         {"clr-mask-4444", GR_K_CLEAR, 2u, GR_T_8888, GR_D_PATTERN, 0u, 0x5ac3a50fu,
          {0xd3000301u, 0xe8f00ff0u, 0xe900000fu}},
     };
-    const uint32_t clut = 0x08918000u;
+    const uint32_t clut = 0x08618000u;
     uint32_t tex[GR_T_COUNT];
     for (uint32_t t = 0; t < GR_T_COUNT; t++) {
-        tex[t] = 0x08910000u + t * 0x400u;
+        tex[t] = 0x08610000u + t * 0x400u;
         (void)gr_texture(t, (uint8_t *)SR_HOST(tex[t]));
     }
     gr_clut((uint8_t *)SR_HOST(clut));
@@ -11591,10 +11592,10 @@ static int coherence_run_psp_raster(void) {
     }
     enum { GR_VK_SOFTWARE = sizeof(k_gr_vk_software) / sizeof(k_gr_vk_software[0]),
            GR_VK_DIVERGENT = sizeof(k_gr_vk_divergent) / sizeof(k_gr_vk_divergent[0]) };
-    const uint32_t clut = 0x08918000u;
+    const uint32_t clut = 0x08618000u;
     uint32_t tex[GR_T_COUNT];
     for (uint32_t t = 0; t < GR_T_COUNT; t++) {
-        tex[t] = 0x08910000u + t * 0x400u;
+        tex[t] = 0x08610000u + t * 0x400u;
         (void)gr_texture(t, (uint8_t *)SR_HOST(tex[t]));
     }
     gr_clut((uint8_t *)SR_HOST(clut));
