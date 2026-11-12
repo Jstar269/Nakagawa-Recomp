@@ -32,6 +32,14 @@ uint32_t g_sr_store_context_pc;
 int g_sr_store_context_mem_gpr = -1;
 uint32_t g_sr_store_context_mem_offset;
 unsigned g_sr_store_context_mem_words;
+/* Read by recomp.h's sr_log_mem_watch_context, which ge.o's checked stores call. At -O2 the
+ * optimizer folds the reference away, which hid the missing definitions; an instrumented
+ * (--coverage) build keeps it in a .constprop clone, and the link failed (#2394). */
+uint32_t g_sr_mem_watch_context_pc;
+unsigned g_sr_mem_watch_context_limit;
+unsigned g_sr_mem_watch_context_count;
+int g_sr_mem_watch_context_fpr = -1;
+uint32_t g_sr_mem_watch_context_fpr_value;
 
 void sr_note_mem_write(uint32_t addr, uint32_t width, uint32_t value, uint32_t pc) {
     (void)addr; (void)width; (void)value; (void)pc;
@@ -134,6 +142,7 @@ static void usage(const char *exe) {
 #define FBD_MAX_SIDE 1024u      /* scissor and transfer coordinates are 10 bits */
 #define FBD_DEPTH_STRIDE 512u   /* ge.c's software depth buffer: 272 rows of 512 */
 #define FBD_DEPTH_ROWS 272u
+#define FBD_RASTER_W 512u       /* the widest target either renderer draws (ge.c raster_columns) */
 #define FBD_RASTER_H 272u       /* ge.c rasterizes rows 0..271 (the scissor clamp in tri, */
                                 /* sprite and the clear fill) */
 
@@ -255,11 +264,11 @@ static void fbd_finalize(FbdRun *run) {
     }
 }
 
-/* The columns ge.c rasterizes on this target (ge.c's raster_columns): a stride past 480 up to
- * its last column, 512 at most; otherwise the screen's 480. */
+/* The columns ge.c rasterizes on this target (ge.c's raster_columns): up to the stride's last
+ * column, 512 at most. */
 static uint32_t fbd_raster_w(const GeState *st) {
     const uint32_t stride = st->fbw ? st->fbw : 512u;
-    return stride > 480u ? (stride < 512u ? stride : 512u) : 480u;
+    return stride < 512u ? stride : 512u;   /* ge.c's raster_columns (#2193) */
 }
 
 /* The scissor's extent from the buffer's origin: the pixels a draw can write. */
@@ -297,14 +306,15 @@ static int fbd_observer(void *ctx, unsigned long index, uint32_t op, uint32_t cm
                        need_w, need_h);
         return 0;
     }
-    /* ge.c, the reference, rasterizes only inside its raster bound (fbd_raster_w, 272 rows), so
-     * a scissor past that has pixels with no reference to compare (the Vulkan backend draws
-     * them): a gap, not a difference. */
+    /* Both renderers draw only inside the target's columns (fbd_raster_w: the stride, 512 at
+     * most) and 272 rows, so that is what a draw can write. A scissor past 512 columns or 272
+     * rows reaches pixels neither renderer has (their targets are 512x272) and whose PSP
+     * result is unmeasured: a gap, not a difference. */
     const uint32_t raster_w = fbd_raster_w(st);
     const uint32_t scis_w = fbd_extent(st->scis_x2), scis_h = fbd_extent(st->scis_y2);
     const uint32_t need_w = scis_w < raster_w ? scis_w : raster_w;
     const uint32_t need_h = scis_h < FBD_RASTER_H ? scis_h : FBD_RASTER_H;
-    if (scis_w > raster_w || scis_h > FBD_RASTER_H)
+    if (scis_w > FBD_RASTER_W || scis_h > FBD_RASTER_H)
         fbd_gap(run, FBD_KIND_COLOR, fb_addr(st), st->fbw, scis_w, scis_h, need_w, need_h,
                 "raster-bound");
     fbd_add_region(run, FBD_KIND_COLOR, fb_addr(st), st->fbw, st->fbfmt & 3u, need_w, need_h);
@@ -313,7 +323,9 @@ static int fbd_observer(void *ctx, unsigned long index, uint32_t op, uint32_t cm
     const int writes_depth = st->clear ? (st->clear_mode & 0x400u) != 0
                                        : st->ztest_enable && !st->zwrite_disable;
     if (writes_depth)
-        fbd_add_region(run, FBD_KIND_DEPTH, fbd_depth_base(st), st->zbw, 0u, need_w, need_h);
+        /* and only inside the depth buffer's zbw columns (ge.c's zbuf_write_index) */
+        fbd_add_region(run, FBD_KIND_DEPTH, fbd_depth_base(st), st->zbw, 0u,
+                       st->zbw && st->zbw < need_w ? st->zbw : need_w, need_h);
     if (st->blend_enable && !st->clear) run->blended = 1;
     return 0;
 }
@@ -774,6 +786,9 @@ static int fbd_self_check(void) {
  *   draw, lies right of x 480, in the stride's columns ge.c rasterizes too (#2193).
  * - "past": "wide" with the scissor to x 600, past the 512-pixel stride, where ge.c does not
  *   rasterize.
+ * - "narrow": "wide"'s draws on a 256-stride target under a 480-pixel scissor. Both renderers
+ *   stop at the stride (#2193), so draw 2 is cut at x 255 and draw 3 draws nothing; a column
+ *   past the stride would land on the next row.
  * - "empty": a list with no draw.
  * - "many": 33 colour targets, one sprite each: one more than the tool compares.
  * - "deep": one sprite into a target of stride 1088, past the widest the tool compares. */
@@ -842,6 +857,12 @@ static int fbd_write_synthetic(const char *path, const char *variant) {
         sprite, sprite, sprite,                                 /* 1-3 */
         0x0F000000u, 0x0C000000u,
     };
+    const uint32_t narrow_tail[] = {
+        0xD2000003u, 0x9D000000u | 256u,                        /* 8888, stride 256 */
+        0xD3000301u, sprite, 0xD3000000u,                       /* 0: clear colour and stencil */
+        sprite, sprite, sprite,                                 /* 1-3 */
+        0x0F000000u, 0x0C000000u,
+    };
     const uint32_t empty_tail[] = { 0xD2000003u, 0x0F000000u, 0x0C000000u };
     const uint32_t deep_tail[] = {
         0xD2000003u, 0x9D000000u | 1088u,                       /* stride 1088 */
@@ -878,6 +899,9 @@ static int fbd_write_synthetic(const char *path, const char *variant) {
     } else if (strcmp(variant, "past") == 0) {
         sprites = wide; nsprites = 4; tail = past_tail;
         ntail = (unsigned)(sizeof past_tail / sizeof past_tail[0]);
+    } else if (strcmp(variant, "narrow") == 0) {
+        sprites = wide; nsprites = 4; tail = narrow_tail;
+        ntail = (unsigned)(sizeof narrow_tail / sizeof narrow_tail[0]);
     } else if (strcmp(variant, "empty") == 0) {
         sprites = one; nsprites = 0; tail = empty_tail;
         ntail = (unsigned)(sizeof empty_tail / sizeof empty_tail[0]);

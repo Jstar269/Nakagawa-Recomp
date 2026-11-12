@@ -143,6 +143,41 @@ static void cell_parse(void) {
         snprintf(spec, sizeof(spec), "%s;tier=ace;load=fast;load=off", base);
         CHECK(ace_parse(spec, &c, why, sizeof(why)) == 0 && strcmp(why, "duplicate key") == 0, "a duplicate load");
     }
+    /* depth (contract 10.20, 11.3.12): optional; depth=32 is an Enhanced part (no tier=ace needed),
+       depth=off and a missing key are the PSP's 16 bits, any other value is refused, and it is
+       written after load and before cull, only when on. */
+    {
+        static const char base[] = "v1;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off";
+        char spec[ACE_SPEC_MAX], out[ACE_SPEC_MAX];
+        CHECK(ace_parse(base, &c, why, sizeof(why)) == 1 && c.depth == 0, "a missing depth is 16-bit");
+        snprintf(spec, sizeof(spec), "%s;depth=off", base);
+        CHECK(ace_parse(spec, &c, why, sizeof(why)) == 1 && c.on && c.depth == 0, "depth=off is 16-bit");
+        snprintf(spec, sizeof(spec), "%s;depth=32", base);
+        CHECK(ace_parse(spec, &c, why, sizeof(why)) == 1 && c.on && c.depth == 32 && c.tier == ACE_TIER_ENHANCED,
+              "depth=32 in an Enhanced line");
+        CHECK(ace_format(&c, out, sizeof(out)) && strcmp(out + strlen(out) - 9, ";depth=32") == 0,
+              "a line with depth=32 formats with the key last (%s)", out);
+        c.tier = ACE_TIER_ACE;
+        c.load = 1;
+        c.cull = 1;
+        CHECK(ace_format(&c, out, sizeof(out)) && strcmp(out + strlen(out) - 27, ";load=fast;depth=32;cull=on") == 0,
+              "load, then depth, then cull, which stays last (%s)", out);
+        CHECK(ace_parse(out, &c, why, sizeof(why)) == 1 && c.depth == 32 && c.load == 1 && c.cull == 1,
+              "the formatted line parses back (%s)", why);
+        c.depth = 0;
+        CHECK(ace_format(&c, out, sizeof(out)) && strstr(out, "depth") == NULL, "off writes no depth key (%s)", out);
+        snprintf(spec, sizeof(spec), "%s;tier=ace;depth=32", base);
+        CHECK(ace_parse(spec, &c, why, sizeof(why)) == 1 && c.depth == 32 && c.tier == ACE_TIER_ACE,
+              "depth=32 in an Ace line");
+        static const char *const bad[] = { "16", "24", "on", "1", "32f", "D32", "" };
+        for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+            snprintf(spec, sizeof(spec), "%s;depth=%s", base, bad[i]);
+            CHECK(ace_parse(spec, &c, why, sizeof(why)) == 0 && c.on == 0 && c.depth == 0,
+                  "depth=%s is refused (%s)", bad[i], why);
+        }
+        snprintf(spec, sizeof(spec), "%s;depth=32;depth=off", base);
+        CHECK(ace_parse(spec, &c, why, sizeof(why)) == 0 && strcmp(why, "duplicate key") == 0, "a duplicate depth");
+    }
     /* Every key but tier is required, whatever its place: leaving out any one of them refuses
        the line, leaving out tier does not (src/rt/ace.c names the required keys one by one). */
     {
@@ -220,7 +255,7 @@ static void cell_parse(void) {
 
     /* format and parse agree */
     char line[ACE_SPEC_MAX];
-    AceConfig a = { 1, 4, 0, 1, 0, 0, 0, ACE_TIER_ENHANCED, ACE_SAS_OFF, 0, 0, 0, 0 }, b;
+    AceConfig a = { 1, 4, 0, 1, 0, 0, 0, ACE_TIER_ENHANCED, ACE_SAS_OFF, 0, 0, 0, 0, 0 }, b;
     CHECK(ace_format(&a, line, sizeof(line)) && ace_parse(line, &b, NULL, 0) &&
           memcmp(&a, &b, sizeof(a)) == 0, "format round trip (%s)", line);
     CHECK(ace_format(&a, line, 8) == 0 && line[0] == '\0', "format refuses a short buffer");
@@ -343,6 +378,25 @@ static void cell_switch(void) {
     CHECK(ace_effective()->cull == 0 && ace_requested()->cull == 1 &&
           ace_report_json(json, sizeof(json)) > 0 && strstr(json, "\"cull\": false") != NULL &&
           strstr(json, "partial: test") != NULL, "a partial cull run is reported unavailable:\n%s", json);
+
+    /* depth=32 (contract 10.20): the stamp's line and the report carry it; a device without the
+       format (ge_gpu.c) makes it unavailable, and the report says 16. */
+    CHECK(ace_init_spec(k_good, NULL) == 1 && ace_effective()->depth == 0 &&
+          ace_report_json(json, sizeof(json)) > 0 && strstr(json, "\"depth\"") == NULL,
+          "a run without depth reports none:\n%s", json);
+    CHECK(ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;depth=32",
+                        NULL) == 1 && ace_effective()->depth == 32, "depth=32 in an Enhanced line turns it on");
+    CHECK(strcmp(ace_spec_text(), "v1;tier=enhanced;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;"
+                                  "sas=off;tess=off;depth=32") == 0,
+          "the stamp's line carries depth=32: '%s'", ace_spec_text());
+    CHECK(ace_report_json(json, sizeof(json)) > 0 && strstr(json, "\"depth\": 32") != NULL,
+          "the report carries depth 32:\n%s", json);
+    CHECK(ace_feature_words(json, sizeof(json)) > 0 && strstr(json, "32-bit depth") != NULL,
+          "the badge words name 32-bit depth: '%s'", json);
+    ace_feature_unavailable(ACE_FEATURE_DEPTH, "no D32: test");
+    CHECK(ace_effective()->depth == 0 && ace_requested()->depth == 32 &&
+          ace_report_json(json, sizeof(json)) > 0 && strstr(json, "\"depth\": 16") != NULL &&
+          strstr(json, "no D32: test") != NULL, "a device without D32 reports depth 16:\n%s", json);
 
     /* load=fast (contract 11.3.10): the switch nk_ace_load_skip_wait() asks at a declared wait that
        would block (src/rt/hle_display.c, tested in hle-thread-selftest). Off, and in an
@@ -1568,24 +1622,66 @@ static void cell_pace(void) {
     CHECK(ace_pace_flip_kind(&p) == ACE_PRESENT_HELD && p.held, "a re-flip leaves the frame held until shown");
     ace_pace_held_missed(&p, 1);
     CHECK(p.held && p.owed && p.busy == 2u, "a busy re-flip leaves the frame owed");
-    /* Owed, but the frame after it never reached a show pass either (its present was busy too):
-     * the pass holds a frame two steps back, so the next frame is shown as it is and kept, and
-     * the owed frame is counted as never shown. */
-    ace_pace_flip(&p, 1, ACE_RATE_K2, 1, 900u);          /* verdict OWED, never taken */
+    /* Owed, and the frame after it never reached a show pass either (its present was busy too).
+     * The owed frame is still the pass's newest, so the next present that takes a flip shows it
+     * and holds that flip's frame: in order, and nothing is superseded. */
+    ace_pace_flip(&p, 1, ACE_RATE_K2, 1, 900u);     /* verdict OWED, never taken */
     CHECK(p.held && p.owed, "a flip whose present is dropped leaves the owed frame owed");
     ace_pace_flip(&p, 1, ACE_RATE_K2, 1, 933u);
-    CHECK(ace_pace_take(&p) == ACE_SHOW_KEEP && p.superseded == 1u && !p.held && !p.owed && p.unpaired == 0u,
-          "an owed frame two steps back is superseded, not shown late");
-    /* A present that failed, or a closed window, gives the frame up, and it is counted. */
+    CHECK(ace_pace_take(&p) == ACE_SHOW_OWED && p.superseded == 0u && p.unpaired == 0u,
+          "an owed frame is shown however many flips the display missed (superseded %llu)",
+          (unsigned long long)p.superseded);
+    ace_pace_shown_owed(&p, 38u, 934u);
+    CHECK(ace_pace_held_shown(&p) == 868u, "the owed frame's delay runs from its own in-between");
+    CHECK(ace_pace_vblank(&p, 39u) && ace_pace_held_shown(&p) == 934u && !p.held,
+          "the frame of the flip that showed it is held for its VBLANK");
+    /* A title that flips each frame twice. The display is busy at the held frame's re-flip and
+     * VBLANK and at the next frame's flip, so that frame's re-flip is its first present: it
+     * shows the owed frame and holds its own, never replaces the owed one. */
     ace_pace_flip(&p, 1, ACE_RATE_K2, 1, 967u);
     CHECK(ace_pace_take(&p) == ACE_SHOW_BETWEEN, "consecutive again");
     ace_pace_shown_between(&p, 40u, 968u);
+    ace_pace_flip(&p, 0, ACE_RATE_K2, 1, 984u);
+    CHECK(ace_pace_flip_kind(&p) == ACE_PRESENT_HELD, "the re-flip is the held present");
+    ace_pace_held_missed(&p, 1);                         /* the re-flip's present: busy */
+    ace_pace_held_missed(&p, 1);                         /* its VBLANK: busy */
+    ace_pace_flip(&p, 1, ACE_RATE_K2, 1, 1000u);    /* verdict OWED, its present busy */
+    ace_pace_flip(&p, 0, ACE_RATE_K2, 1, 1017u);
+    CHECK(ace_pace_take(&p) == ACE_SHOW_OWED && ace_pace_flip_kind(&p) == ACE_PRESENT_REAL && p.held &&
+              p.superseded == 0u && p.busy == 4u,
+          "the re-flip of a newer frame shows the owed frame (superseded %llu, busy %llu)",
+          (unsigned long long)p.superseded, (unsigned long long)p.busy);
+    /* That present fails, and the renderer can present again: nothing reached the screen, so the
+     * frame stays owed and the verdict stands for the present that takes over. */
+    ace_pace_owed_failed(&p);
+    CHECK(p.held && p.owed && p.busy == 5u && p.superseded == 0u, "a failed present leaves the frame owed");
+    CHECK(ace_pace_take(&p) == ACE_SHOW_OWED, "the present that takes over shows the owed frame");
+    ace_pace_shown_owed(&p, 43u, 1018u);
+    CHECK(ace_pace_held_shown(&p) == 968u && p.held && p.owed,
+          "the re-flip's own frame is owed: its present showed the older one");
+    CHECK(ace_pace_vblank(&p, 44u) && ace_pace_held_shown(&p) == 1018u && !p.held,
+          "then the newer frame at its VBLANK");
+    /* An OWED verdict that no present took before a VBLANK showed the held frame owes nothing:
+     * the present that takes it shows its own frame and keeps it. */
+    ace_pace_flip(&p, 1, ACE_RATE_K2, 1, 1050u);
+    CHECK(ace_pace_take(&p) == ACE_SHOW_BETWEEN, "consecutive after the re-flip");
+    ace_pace_shown_between(&p, 46u, 1051u);
+    ace_pace_held_missed(&p, 1);
+    ace_pace_flip(&p, 1, ACE_RATE_K2, 1, 1083u);    /* verdict OWED, its present busy */
+    CHECK(ace_pace_vblank(&p, 48u) && ace_pace_held_shown(&p) == 1051u && !p.held, "its VBLANK shows it");
+    CHECK(ace_pace_take(&p) == ACE_SHOW_KEEP && p.superseded == 0u, "a stale OWED verdict shows its own frame");
+    /* A failed held present, or a closed window, gives the frame up, and it is counted. */
+    ace_pace_flip(&p, 1, ACE_RATE_K2, 1, 1117u);
+    CHECK(ace_pace_take(&p) == ACE_SHOW_BETWEEN, "consecutive again");
+    ace_pace_shown_between(&p, 50u, 1118u);
     ace_pace_held_missed(&p, 0);
-    CHECK(!p.held && !p.owed && p.superseded == 2u && !ace_pace_vblank(&p, 41u),
+    CHECK(!p.held && !p.owed && p.superseded == 1u && !ace_pace_vblank(&p, 51u),
           "a failed held present gives the frame up");
     /* Nothing held: a miss changes nothing. */
+    const uint64_t busy_before = p.busy;
     ace_pace_held_missed(&p, 1);
-    CHECK(!p.held && !p.owed && p.busy == 2u, "a miss with nothing held counted something");
+    ace_pace_owed_failed(&p);
+    CHECK(!p.held && !p.owed && p.busy == busy_before, "a miss with nothing held counted something");
     /* An in-between is made only of consecutive frames. The frame flipped at 700 never reached
      * a present (the presenter's slot rule dropped it): the pass still holds the one before, so
      * the next frame is shown as it is and kept, never blended with a frame two steps back. */

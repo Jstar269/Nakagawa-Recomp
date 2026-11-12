@@ -662,6 +662,7 @@ publishes their words.
 | `hle-self-stop-unload` | `PSP-HLE-SELFSTOP-001` | Built case 167 from `probe_hle_measure.c`, with its helper PRX built as case 172 `hle-self-stop-helper` (`probe_hle_self_stop_helper.c`); both PRXs must sit in the host0 directory. #341 `sceKernelSelfStopUnloadModule` from the helper's thread, three argument forms. **MEASURED** on 2026-11-08 (PSP-3000, boot 165, `935f225d`; 6 records, all PASS, acceptance-eligible). |
 | `hle-utility-dialogs` | `PSP-HLE-UTILITY-DIALOG-001` | Built case 161 from `probe_hle_measure.c`. #1386 dialog timing and wrong-state cells. **NOT_RUN**; no hardware result is claimed. |
 | `hle-io-seek` | `PSP-HLE-IO-SEEK-001` | Built case 162 from `probe_hle_measure.c`. #1380 flash0: seeks, sceIoIoctl file commands on ms0: and disc0:, and writes on read-only descriptors. **MEASURED** on 2026-11-08 (PSP-3000, boot 156, `59520eb0`; 30 records, all PASS, acceptance-eligible). |
+| `hle-io-seek-edges` | `PSP-HLE-IO-SEEK-002` | Built case 186 from `probe_hle_measure.c`. #1380 cells `hle-io-seek` left open: flash0: SEEK_CUR (64- and 32-bit) and 64-bit seeks past 0x100000000 and around the high-word boundaries, then on a probe-owned `ms0:/NKIOSK02` file `PSP_O_RDONLY` with `PSP_O_CREAT`, alone and with `PSP_O_TRUNC` or `PSP_O_EXCL`, and `sceIoWriteAsync` on a read-only descriptor with a bounded poll; no disc0: call. **MEASURED** 2026-11-11 (PSP-3000, boot 192, `1a5157e37`, 24 records, acceptance-eligible); see `docs/HARDWARE_ORACLE.md`. |
 | `hle-nickname-limit` | `PSP-HLE-NICKNAME-001` | Built case 164 from `probe_hle_measure.c`. W-NET-1 (#2197), read-only: the `owner_name` key's return, type and size under `/CONFIG/SYSTEM` (opened only after `/CONFIG` listed it as a directory; no `sceRegGetKeyValue`), then the return of `sceUtilityGetSystemParamString(1, ...)` at buffer lengths 0x10, 0x11, 0x20, 0x21, 0x40, 0x41, 0x80 and 0x81 and a summary row (key size, nickname byte length as a number, success mask, agreement counts). No value bytes are recorded or written. **MEASURED** on 2026-11-08 (PSP-3000, boot 155, `07e58170`; 16 records, all PASS, acceptance-eligible). |
 | `mpeg-ycbcr` | `PSP-MPEG-YCBCR-001` | Modes 2 and 3 are built and now use fresh stream setup per mode. **NOT_RUN** pending an owner-present hardware rerun; no new result is claimed. |
 
@@ -797,8 +798,10 @@ the flash0 read, a host0 read-back and a second flash0 read (`font-copy-*`
 `out8` bits). Only names of 1 to 63 bytes of `[A-Za-z0-9_.-]` not starting with
 `.` and files up to 16 MiB are copied; other entries are recorded and skipped.
 Nothing writes to `flash0:`. The copies and digests are the maintainer's private
-evidence and are never committed. `io_cases_host.c` runs both cases against a
-fake file system for the tests in `tools/test_psp_oracle.py`.
+evidence and are never committed. Inside `font_files.h` the copies' opens track
+only their descriptors, so probe teardown keeps the copies (`docs/HARDWARE_ORACLE.md`
+has the 2026-11-11 runs). `io_cases_host.c` runs both cases against a fake file
+system for the tests in `tools/test_psp_oracle.py`.
 
 The font-list case (`font-list`, `PSP-FONTLIST-001`, `font_list.h`) is not in the
 campaign queue; it runs only on the maintainer's request, with a user-mode

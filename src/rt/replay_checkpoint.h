@@ -126,7 +126,9 @@ void sr_replay_checkpoint_vblank(uint32_t vcount);
  *
  *   REPLAY_REFUSED reason=<name> line=<n>             exit 1, before the guest runs
  *   REPLAY_MISMATCH frame=<f> index=<i> kind=<k> digest=<name>
- *                                                     exit 1, at the first differing checkpoint
+ *                                                     exit 1, at the first differing checkpoint;
+ *                                                     under SR_FLIGHT it first arms the flight
+ *                                                     recorder (sr_flight_replay_divergence)
  *   REPLAY_MISSING_ANSWER call=osk request=<k> frame=<f> detail=<why>
  *   REPLAY_MISSING_ANSWER call=pad sample=<k> frame=<f> detail=<why>
  *                                                     exit 1: the guest asked for an answer
@@ -142,7 +144,14 @@ void sr_replay_checkpoint_vblank(uint32_t vcount);
  *
  * The pad is recorded as the sample the guest was handed, after the route, the stick mode and
  * the keyboard's masking, so a replay needs neither the person nor the script. Scripted-input
- * bookkeeping still runs during a replay, so an SR_ROUTE run replays with the same route. */
+ * bookkeeping still runs during a replay, so an SR_ROUTE run replays with the same route.
+ *
+ * With SR_FLIGHT set, the first divergent checkpoint arms the flight recorder's checkpoint mode
+ * at the newest recorded event (unless SR_FLIGHT_TRIGGER armed a mode already), so the bundle
+ * freezes with the events just before the divergence. When it froze the record and the ring no
+ * longer holds the newest event before the last matching checkpoint, one more stderr line names the
+ * SR_FLIGHT_TRIGGER=checkpoint:KIND:N:AFTER that makes the next replay keep the first events
+ * after that checkpoint. These SR_FLIGHT lines are not verdicts. */
 
 /* sr_ctrl_sample's entry points (hle_route.c). At its top, sr_replay_pad_skip(live_skip)
  * says whether this sample is skipped: the live answer, written down under SR_RECORD; the
