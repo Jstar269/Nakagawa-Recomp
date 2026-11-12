@@ -126,7 +126,8 @@ We aim to respond promptly and will remove material where appropriate.
   (Boost Software License 1.0), the Unicode conversion code and name tables (Unicode
   licence), MD5 (public domain or cut-down BSD), `strlcpy` (ISC) and xxHash
   (BSD-2-Clause). The same tool builds GNU make 4.4.1 (GPL-3.0-or-later) from its
-  pinned release tarball and ships its `COPYING`; a release that ships the APK
+  pinned release tarball and ships its `COPYING` and a `SOURCE.txt` that names the
+  tarball, its SHA-256 and the build scripts' commit; a release that ships the APK
   carries that tarball, and `tools/android_toolchain.py` at the release's revision
   (it holds make's configure and build settings), as make's corresponding source.
   It also stages the official CPython 3.15.2 Android release unchanged (PSF-2.0,

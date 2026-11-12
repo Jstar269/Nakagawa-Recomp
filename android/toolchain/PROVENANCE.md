@@ -94,7 +94,9 @@ folder. Two builds in different folders give the same bytes. make needs only `li
 
 make is GPL-3.0-or-later, so the release that ships the APK also carries its corresponding source: the pinned
 `make-4.4.1.tar.gz` and `tools/android_toolchain.py` at the release's revision, which holds make's configure and build
-settings. make is the toolchain's only GPL program.
+settings. make is the toolchain's only GPL program. The APK itself carries `NOTICES/make/SOURCE.txt` beside make's
+`COPYING`: the tarball's name, URL and SHA-256, the configure options, and the repository and commit of
+`tools/android_toolchain.py` and `tools/android_sysroot.py`.
 
 ## Python
 

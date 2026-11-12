@@ -411,6 +411,38 @@ class PythonTests(unittest.TestCase):
             self.assertEqual(toolchain.read_pinned(path, hashlib.sha256(b"changed").hexdigest(), "u"), b"changed")
 
 
+class MakeNoticeTests(unittest.TestCase):
+    """make's notices in the APK: its licence and where its corresponding source is."""
+
+    reference = {"repository": "https://example.invalid/nakagawa", "commit": "0123abc", "local_changes": False}
+
+    def test_the_staged_notices_say_where_make_s_source_is(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="nk-tc-test-") as tmp:
+            source = Path(tmp) / "make-src"
+            source.mkdir()
+            (source / "COPYING").write_bytes(b"GPL-3.0 text")
+            toolchain.stage_make_notices(source, Path(tmp) / "NOTICES", self.reference)
+            folder = Path(tmp) / "NOTICES" / "make"
+            self.assertEqual(sorted(path.name for path in folder.iterdir()), ["COPYING", "SOURCE.txt"])
+            self.assertEqual((folder / "COPYING").read_bytes(), b"GPL-3.0 text")
+            text = (folder / "SOURCE.txt").read_text(encoding="utf-8")
+        for expected in (toolchain.MAKE_TARBALL, toolchain.MAKE_URL, toolchain.MAKE_SHA256,
+                         "tools/android_toolchain.py", "tools/android_sysroot.py",
+                         "https://example.invalid/nakagawa", "0123abc", *toolchain.MAKE_CONFIGURE):
+            self.assertIn(expected, text)
+        self.assertNotIn("local changes", text)
+
+    def test_a_build_with_local_changes_says_so(self) -> None:
+        text = toolchain.make_source_notice({**self.reference, "local_changes": True})
+        self.assertIn("local changes", text)
+
+    def test_stage_output_stages_them(self) -> None:
+        # stage_output needs a full toolchain build; it must use this step, not copy COPYING alone.
+        source = Path(toolchain.__file__).read_text(encoding="utf-8")
+        body = source[source.index("def stage_output("):source.index("def main(")]
+        self.assertIn('stage_make_notices(cfg.make_src, assets / "NOTICES"', body)
+
+
 class GradleWiringTests(unittest.TestCase):
     """The app bundles the staged toolchain only when nk.toolchain names a staged folder."""
 

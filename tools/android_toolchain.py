@@ -463,6 +463,53 @@ def stage_make(cfg: Config) -> None:
     _mark(folder)
 
 
+def make_source_notice(reference: dict[str, object]) -> str:
+    """NOTICES/make/SOURCE.txt: where make's complete corresponding source is (GPL-3.0 section 6).
+
+    *reference* is package_notices.source_reference(): the repository and commit that hold the
+    scripts controlling make's build, as the desktop packages' SOURCE.txt names them.
+    """
+    commit = reference.get("commit") or "unknown (built without git metadata)"
+    lines = [
+        "GNU MAKE: COMPLETE CORRESPONDING SOURCE",
+        "",
+        f"libnk_make.so in this app is GNU make {MAKE_VERSION}, licensed under the GNU General",
+        "Public License version 3 or later (COPYING, beside this file). It is built, unmodified,",
+        "from this release tarball:",
+        "",
+        f"  File:    {MAKE_TARBALL}",
+        f"  From:    {MAKE_URL}",
+        f"  SHA-256: {MAKE_SHA256}",
+        "",
+        "It is configured with make's own configure and these options:",
+        "",
+        *(f"  {option}" for option in MAKE_CONFIGURE),
+        "",
+        "and compiled with make's own build.sh. The scripts that control the build are part of",
+        "Nakagawa Recomp: tools/android_toolchain.py (the configure options, the compiler and its",
+        "CC, CFLAGS and LDFLAGS) and tools/android_sysroot.py (the sysroot make is compiled and",
+        "linked against), at:",
+        "",
+        f"  Repository: {reference.get('repository')}",
+        f"  Commit:     {commit}",
+    ]
+    if reference.get("local_changes"):
+        lines.extend([
+            "",
+            "This build was made from a working tree with local changes to tracked files; its",
+            "scripts are the commit above plus those changes.",
+        ])
+    return "\n".join(lines) + "\n"
+
+
+def stage_make_notices(make_src: Path, notices: Path, reference: dict[str, object]) -> None:
+    """make's licence and source statement under *notices*/make/."""
+    folder = notices / "make"
+    folder.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(make_src / "COPYING", folder / "COPYING")
+    (folder / "SOURCE.txt").write_text(make_source_notice(reference), encoding="utf-8", newline="\n")
+
+
 @dataclass(frozen=True)
 class PythonPackage:
     """What the APK takes from the CPython release, by path."""
@@ -600,8 +647,8 @@ def stage_output(cfg: Config, out: Path) -> dict[str, str]:
           "-o", str(libs / "libnk_ld.so"), str(LAUNCHER)],
          cfg.work / "logs" / "launcher.log", "building the ld launcher")
     shutil.copyfile(cfg.build / "sysroot.tar", assets / "sysroot.tar")
-    (assets / "NOTICES" / "make").mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(cfg.make_src / "COPYING", assets / "NOTICES" / "make" / "COPYING")
+    import package_notices  # the desktop packages' source reference; imported only to stage
+    stage_make_notices(cfg.make_src, assets / "NOTICES", package_notices.source_reference())
     notices = assets / "NOTICES" / "llvm"
     for project in LLVM_LICENSED:
         (notices / project).mkdir(parents=True, exist_ok=True)
