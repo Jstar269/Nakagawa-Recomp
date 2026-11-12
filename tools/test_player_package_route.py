@@ -957,7 +957,11 @@ class TestPlayerPackageRoute(unittest.TestCase):
                 )
                 self.skip_if_toolchain_unusable(built)
                 if not binary.is_file():
-                    self.skipTest(f"the player package route needs {binary.name}; build failed")
+                    # The build's own last lines, so a run that must not skip (hosted CI's
+                    # homebrew routes, NK_HOMEBREW_E2E_REQUIRED=1) says why it failed.
+                    tail = "\n".join((built.stdout + built.stderr).splitlines()[-25:])
+                    self.skipTest(f"the player package route needs {binary.name}; build failed "
+                                  f"(exit {built.returncode}):\n{tail}")
 
     def require_homebrew_toolchain(self) -> None:
         """skip_if_toolchain_unavailable, but a failure under NK_HOMEBREW_E2E_REQUIRED=1.
