@@ -1405,7 +1405,7 @@ gpu_mips_run = rc=0; $(BUILD_DIR)/gpu_mips_selftest.exe $(1) || rc=$$?; \
 	elif [ $$rc -ne 0 ]; then echo "FAIL gpu-mips-selftest $(2) (exit $$rc)"; exit $$rc; fi
 gpu-mips-selftest: shader-verify $(RT_GE_O)
 	$(CC) $(CFLAGS) -DSR_GPU_COHERENCE_SELFTEST -DSR_GPU_MIPS_SELFTEST -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" \
-		-ffunction-sections -fdata-sections $(LDFLAGS) -Wl,--gc-sections \
+		-ffunction-sections -fdata-sections $(LDFLAGS) $(LD_GC_SECTIONS) \
 		-o $(BUILD_DIR)/gpu_mips_selftest.exe \
 		tests/native/gpu_coherence_selftest.c src/rt/ge_capture.c src/rt/ge_raster_ref.c $(RT_GE_O) src/rt/flight_recorder.c src/rt/perf.c \
 		$(SDL3VK_SRCS) $(GEGPU_SRCS) $(LIBS)
@@ -1429,7 +1429,7 @@ gpu-mips-mutant: shader-verify $(RT_GE_O)
 			3) want='[key off]: the image has chain levels'; args="--scale 4 --ace $(GPU_MIPS_LINE);af=0";; \
 			4) want='gpu mips selftest [budget-texels]:';; esac; rc=0; \
 		$(CC) $(CFLAGS) -DSR_GPU_COHERENCE_SELFTEST -DSR_GPU_MIPS_SELFTEST -DSR_GPU_MIPS_MUTANT=$$n \
-			-DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" -ffunction-sections -fdata-sections $(LDFLAGS) -Wl,--gc-sections \
+			-DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" -ffunction-sections -fdata-sections $(LDFLAGS) $(LD_GC_SECTIONS) \
 			-o $(BUILD_DIR)/gpu_mips_mutant_$$n.exe \
 			tests/native/gpu_coherence_selftest.c src/rt/ge_capture.c src/rt/ge_raster_ref.c $(RT_GE_O) src/rt/flight_recorder.c src/rt/perf.c \
 			$(SDL3VK_SRCS) $(GEGPU_SRCS) $(LIBS) || exit 1; \
