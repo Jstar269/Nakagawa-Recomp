@@ -92,31 +92,37 @@ final class NakagawaHost {
         setenv("NK_ANDROID_APP_DIR", app.getAbsolutePath());
         setenv("NK_ANDROID_NATIVE_LIB_DIR", context.getApplicationInfo().nativeLibraryDir);
         File toolchain = new File(app, "toolchain");
-        boolean bundlesToolchain = hasAssets(context.getAssets(), "toolchain");
+        String stamp = apkStamp(context);
+        File stampFile = new File(app, ".unpacked");
+        boolean bundlesToolchain;
+        try {
+            bundlesToolchain = hasAssets(context.getAssets(), "toolchain");
+            if (!stamp.equals(readText(stampFile))) {
+                // Replace only what the APK bundles (assets/, titles/), never the user's data.
+                String[] bundled = context.getAssets().list("app");
+                if (bundled != null) {
+                    for (String child : bundled) {
+                        deleteTree(new File(app, child));
+                        copyAssetTree(context.getAssets(), "app/" + child, new File(app, child));
+                    }
+                }
+                deleteTree(toolchain);
+                if (bundlesToolchain) unpackToolchain(context.getAssets(), toolchain);
+                // Written last: without it, the next start deletes and unpacks everything again.
+                writeText(stampFile, stamp);
+                Log.i(TAG, "BUNDLED_FILES_UNPACKED dir=" + app + " stamp=" + stamp);
+            }
+        } catch (IOException e) {
+            // The toolchain variables stay unset, so nothing is pointed at a partial toolchain/.
+            Log.e(TAG, "BUNDLED_FILES_UNPACK_FAILED dir=" + app, e);
+            return;
+        }
+        // Only after a complete unpack, by this start or by an earlier one with the same stamp.
         if (bundlesToolchain) {
             setenv("NK_ANDROID_TOOLCHAIN_DIR", toolchain.getAbsolutePath());
             setenv("PYTHONHOME", new File(toolchain, "python").getAbsolutePath());
             // clang and Python write temporary files; an app may write only its own folders.
             setenv("TMPDIR", context.getCacheDir().getAbsolutePath());
-        }
-        String stamp = apkStamp(context);
-        File stampFile = new File(app, ".unpacked");
-        if (stamp.equals(readText(stampFile))) return;
-        try {
-            // Replace only what the APK bundles (assets/, titles/), never the user's data.
-            String[] bundled = context.getAssets().list("app");
-            if (bundled != null) {
-                for (String child : bundled) {
-                    deleteTree(new File(app, child));
-                    copyAssetTree(context.getAssets(), "app/" + child, new File(app, child));
-                }
-            }
-            deleteTree(toolchain);
-            if (bundlesToolchain) unpackToolchain(context.getAssets(), toolchain);
-            writeText(stampFile, stamp);
-            Log.i(TAG, "BUNDLED_FILES_UNPACKED dir=" + app + " stamp=" + stamp);
-        } catch (IOException e) {
-            Log.e(TAG, "BUNDLED_FILES_UNPACK_FAILED dir=" + app, e);
         }
     }
 
@@ -146,13 +152,10 @@ final class NakagawaHost {
         }
     }
 
-    private static boolean hasAssets(AssetManager assets, String path) {
-        try {
-            String[] children = assets.list(path);
-            return children != null && children.length > 0;
-        } catch (IOException e) {
-            return false;
-        }
+    /** Whether the APK has assets under {@code path}; a failed listing is a failure, not "no". */
+    private static boolean hasAssets(AssetManager assets, String path) throws IOException {
+        String[] children = assets.list(path);
+        return children != null && children.length > 0;
     }
 
     private static void copyAssetTree(AssetManager assets, String path, File target) throws IOException {
@@ -173,10 +176,11 @@ final class NakagawaHost {
         for (String child : children) copyAssetTree(assets, path + "/" + child, new File(target, child));
     }
 
-    private static void deleteTree(File file) {
+    /** Deletes {@code file} and everything under it; a file that stays is a failure. */
+    private static void deleteTree(File file) throws IOException {
         File[] children = file.listFiles();
         if (children != null) for (File child : children) deleteTree(child);
-        if (file.exists() && !file.delete()) Log.w(TAG, "cannot delete " + file);
+        if (file.exists() && !file.delete()) throw new IOException("cannot delete " + file);
     }
 
     private static String readText(File file) {

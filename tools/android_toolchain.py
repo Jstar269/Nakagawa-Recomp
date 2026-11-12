@@ -211,9 +211,13 @@ class Config:
     def tool(self, name: str) -> str:
         return str(self.host_bin / f"{name}{EXE}")
 
-    def prefix_maps(self) -> str:
+    def prefix_map_args(self) -> list[str]:
         """Build paths out of the binaries: the source and work folders get fixed names."""
-        return f"-ffile-prefix-map={self.src}=/llvm-src -ffile-prefix-map={self.build}=/llvm-build"
+        return [f"-ffile-prefix-map={self.src}=/llvm-src", f"-ffile-prefix-map={self.build}=/llvm-build"]
+
+    def prefix_maps(self) -> str:
+        """prefix_map_args() as one string, for a CMake flags variable (not for an argv list)."""
+        return " ".join(self.prefix_map_args())
 
 
 def sha256_file(path: Path) -> str:
@@ -529,7 +533,7 @@ def python_launcher_command(cfg: Config, libraries: list[str]) -> list[str]:
     return [cfg.tool("clang"), f"--target={TRIPLE}", f"--sysroot={cfg.sysroot}",
             f"-resource-dir={cfg.resource}", "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
             f"-I{folder / 'include' / f'python{PYTHON_MINOR}'}", "-fPIE", "-pie", "-fuse-ld=lld",
-            "-Wl,--build-id=sha1", "-s", "-Wl,-rpath,$ORIGIN", cfg.prefix_maps(),
+            "-Wl,--build-id=sha1", "-s", "-Wl,-rpath,$ORIGIN", *cfg.prefix_map_args(),
             "-o", str(folder / "libnk_python.so"), str(PYTHON_LAUNCHER), f"-L{folder / 'lib'}",
             "-Wl,--no-as-needed", *(f"-l:{name}" for name in libraries), "-Wl,--as-needed"]
 
@@ -592,7 +596,7 @@ def stage_output(cfg: Config, out: Path) -> dict[str, str]:
         (assets / "NOTICES" / "python" / name).write_bytes(read_pinned(cfg.extra / relative, digest, url))
     _run([cfg.tool("clang"), f"--target={TRIPLE}", f"--sysroot={cfg.sysroot}",
           f"-resource-dir={cfg.resource}", "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
-          "-fPIE", "-pie", "-fuse-ld=lld", "-Wl,--build-id=sha1", "-s", cfg.prefix_maps(),
+          "-fPIE", "-pie", "-fuse-ld=lld", "-Wl,--build-id=sha1", "-s", *cfg.prefix_map_args(),
           "-o", str(libs / "libnk_ld.so"), str(LAUNCHER)],
          cfg.work / "logs" / "launcher.log", "building the ld launcher")
     shutil.copyfile(cfg.build / "sysroot.tar", assets / "sysroot.tar")

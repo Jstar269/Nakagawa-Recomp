@@ -393,6 +393,10 @@ class PythonTests(unittest.TestCase):
         cfg = _config(Path(tempfile.gettempdir()) / "nk-tc-py")
         command = toolchain.python_launcher_command(cfg, ["libcrypto_python.so", "libpython3.15.so"])
         self.assertIn("-Wl,-rpath,$ORIGIN", command)
+        # Each prefix map is its own argument; joined, clang reads one map with a garbage value.
+        self.assertIn(f"-ffile-prefix-map={cfg.src}=/llvm-src", command)
+        self.assertIn(f"-ffile-prefix-map={cfg.build}=/llvm-build", command)
+        self.assertFalse([option for option in command if option.count("-ffile-prefix-map=") > 1])
         # Every library is linked, used or not, so the extension modules find it loaded.
         start = command.index("-Wl,--no-as-needed")
         self.assertEqual(command[start + 1:start + 4],
@@ -536,6 +540,27 @@ class ToolchainArchiveTests(unittest.TestCase):
             self._tar(archive, (tarfile.TarInfo("usr/a.h"), b"a" * 2000))
             archive.write_bytes(archive.read_bytes()[:1024])
         self.assertIn("ends inside a file", self.refused(build))
+
+    def test_a_pax_record_length_that_overflows_is_refused(self) -> None:
+        # The second record's length, added to its offset, passes Integer.MAX_VALUE; the bound
+        # check must refuse it with an IOException, not index the array with the wrapped sum.
+        def header(name: bytes, size: int, kind: bytes) -> bytes:
+            block = bytearray(512)
+            block[0:len(name)] = name
+            block[100:124] = b"0000644\0" b"0000000\0" b"0000000\0"
+            block[124:136] = b"%011o\0" % size
+            block[136:148] = b"00000000000\0"
+            block[156:157] = kind
+            block[257:265] = b"ustar\x0000"
+            block[148:156] = b" " * 8
+            block[148:156] = b"%06o\0 " % sum(block)
+            return bytes(block)
+
+        def build(archive: Path) -> None:
+            data = b"6 a=b\n" b"2147483647 path=x\n"
+            archive.write_bytes(header(b"pax", len(data), b"x") + data + bytes(512 - len(data))
+                                + header(b"f", 0, b"0") + bytes(1024))
+        self.assertIn("bad PAX record", self.refused(build))
 
 
 class StampTests(unittest.TestCase):

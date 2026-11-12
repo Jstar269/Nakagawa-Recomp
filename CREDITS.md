@@ -73,8 +73,9 @@ Nakagawa has since substantially extended and modified that codebase. This repos
 - **GNU make 4.4.1 — the Free Software Foundation** — GPL-3.0-or-later. Built by `tools/android_toolchain.py` from the
   pinned release tarball for the same toolchain. Not vendored.
 - **CPython 3.15.2 — the Python Software Foundation** — PSF-2.0. The official Android release's `libpython3.15.so`,
-  its bundled OpenSSL 3.5.9 (Apache-2.0) and SQLite 3.53.4 (public domain) libraries and its standard library, shipped
-  unchanged in the Android build's toolchain, with the licences listed in
+  its bundled OpenSSL 3.5.9 (Apache-2.0) and SQLite 3.53.4 (public domain) libraries, the bzip2 1.0.8 (bzip2-1.0.6
+  licence), XZ Utils 5.4.6 (liblzma, public domain) and Zstandard 1.5.7 (BSD-3-Clause) code in its `_bz2`, `_lzma` and
+  `_zstd` modules, and its standard library, shipped unchanged in the Android build's toolchain, with the licences listed in
   [`android/toolchain/PROVENANCE.md`](android/toolchain/PROVENANCE.md). Not vendored.
 - **Android Open Source Project, `android-16.0.0_r4`** — bionic's headers, crt sources and symbol files (BSD-style
   and Apache-2.0; the kernel uapi headers GPL-2.0-only WITH Linux-syscall-note), and the liblog, libandroid and

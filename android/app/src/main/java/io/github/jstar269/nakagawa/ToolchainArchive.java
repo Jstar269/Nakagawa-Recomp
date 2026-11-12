@@ -109,7 +109,9 @@ final class ToolchainArchive {
             } catch (NumberFormatException e) {
                 throw new IOException("bad PAX record length");
             }
-            if (length <= space - at + 1 || at + length > records.length || records[at + length - 1] != '\n') {
+            // length > records.length - at, not at + length > records.length: the sum can pass
+            // Integer.MAX_VALUE and wrap.
+            if (length <= space - at + 1 || length > records.length - at || records[at + length - 1] != '\n') {
                 throw new IOException("bad PAX record");
             }
             String record = new String(records, space + 1, at + length - space - 2, StandardCharsets.UTF_8);

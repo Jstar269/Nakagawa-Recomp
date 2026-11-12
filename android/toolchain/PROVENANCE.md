@@ -92,8 +92,9 @@ are make's own: no NLS, Guile or `load`, and no `posix_spawn`, because bionic ha
 position-independent and stripped, and the build refuses one that is not an AArch64 PIE or that names the build
 folder. Two builds in different folders give the same bytes. make needs only `libc.so` and `libdl.so`.
 
-make is GPL-3.0-or-later, so the release that ships the APK also carries the pinned `make-4.4.1.tar.gz` as its
-corresponding source, as for the other bundled GPL programs.
+make is GPL-3.0-or-later, so the release that ships the APK also carries its corresponding source: the pinned
+`make-4.4.1.tar.gz` and `tools/android_toolchain.py` at the release's revision, which holds make's configure and build
+settings. make is the toolchain's only GPL program.
 
 ## Python
 
