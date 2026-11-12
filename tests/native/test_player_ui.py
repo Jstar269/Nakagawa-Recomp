@@ -5422,14 +5422,16 @@ class NativePlayerUiTests(unittest.TestCase):
         for words in self.EVERY_PART_WORDS:
             self.assertIn(words, ace)
 
-    def culling_play_line(self, mode: str, culling: dict[str, object]) -> str:
+    def culling_play_line(self, steps: int, culling: dict[str, object]) -> str:
         """The packaged TEST00006's play line with every part on in the library (Wider culling
-        among them), its own play mode stepped once from `mode` (which reads its packages, as
-        in the ENHANCEMENTS tag test), and `culling` as its culling package."""
-        settings = {"enhanced": dict(self.EVERY_PART_ON), "title_play": {"TEST00006": {"mode": mode}}}
+        among them) and `culling` as its culling package, its own play mode stepped `steps`
+        times from Authentic: once to Enhanced, which reads its packages (the "ready" fixture
+        reads none at start, so Ace is offered only after that), twice to Ace."""
+        settings = {"enhanced": dict(self.EVERY_PART_ON),
+                    "title_play": {"TEST00006": {"mode": "authentic"}}}
         run = self.next_ui_run(
             "ready", ("WAIT_MS=300", "KEY_RETURN", "WAIT_MS=300", *self.DOWN_TO_PLAY_MODE,
-                      "KEY_RETURN", "WAIT_MS=200"),
+                      *(("KEY_RETURN", "WAIT_MS=200") * steps)),
             post_build_ready=True, wait_background=True, settings=settings,
             enhancement_packages={"TEST00006": "display-smoke-v1"},
             culling_packages={"TEST00006": culling})
@@ -5445,15 +5447,15 @@ class NativePlayerUiTests(unittest.TestCase):
         Enhanced, adds nothing to the line."""
         other_game = {"id": "fixture-cull", "target_title_id": "other-title",
                       "category": "guest_memory_code_hook"}
-        ace = self.culling_play_line("enhanced", other_game)   # Enhanced -> Ace
+        ace = self.culling_play_line(2, other_game)   # Authentic -> Enhanced -> Ace
         self.assertTrue(ace.startswith("Ace for this game: "), ace)
         self.assertTrue(ace.endswith(" Wider culling does nothing in this game. Its culling "
                                      "package is for another game."), ace)
-        usable = self.culling_play_line("enhanced", {**other_game,
-                                                     "target_title_id": "display-smoke-v1"})
+        usable = self.culling_play_line(2, {**other_game,
+                                            "target_title_id": "display-smoke-v1"})
         self.assertTrue(usable.startswith("Ace for this game: "), usable)
         self.assertNotIn("Wider culling does nothing", usable)
-        enhanced = self.culling_play_line("authentic", other_game)   # Authentic -> Enhanced
+        enhanced = self.culling_play_line(1, other_game)   # Authentic -> Enhanced
         self.assertTrue(enhanced.startswith("Enhanced for this game: "), enhanced)
         self.assertNotIn("Wider culling does nothing", enhanced)
 
