@@ -742,6 +742,40 @@ class PortableZipTests(unittest.TestCase):
         self.assertNotIn(str(self.root), records[0][0].decode("ascii"))
         self.assertNotIn(str(self.root).replace("\\", "\\\\"), records[0][0].decode("ascii"))
 
+    def test_the_record_never_lands_on_the_zip_or_in_the_stage(self):
+        head = stage_install.resolve_commit("HEAD")
+        stage = _make_stage(self.root / "a", reverse=False, mtime=1_700_000_000)
+        (stage / "toolchain.json").write_text(json.dumps({"candidate": {"commit": head}}), encoding="utf-8")
+        out = self.root / "out.zip"
+        for record, code in ((out, "PORTABLE_RECORD_IS_ZIP"),
+                             (stage / "record.json", "PORTABLE_RECORD_INSIDE_STAGE")):
+            with self.subTest(code=code):
+                status, stderr = self._cli_zip(stage, out, record, "HEAD")
+                self.assertEqual(status, 1)
+                self.assertIn(code, stderr)
+                self.assertFalse(out.exists())
+                self.assertFalse((stage / "record.json").exists())
+
+    def test_record_without_a_portable_zip_is_an_error(self):
+        with contextlib.redirect_stderr(io.StringIO()) as stderr, self.assertRaises(SystemExit):
+            stage_install.main(["--dest", str(self.root / "install"), "--record", str(self.root / "r.json")])
+        self.assertIn("--record goes with --portable-zip", stderr.getvalue())
+
+    def test_an_unknown_revision_writes_nothing(self):
+        stage = _make_stage(self.root / "a", reverse=False, mtime=1_700_000_000)
+        out = self.root / "out.zip"
+        status, stderr = self._cli_zip(stage, out, self.root / "record.json", "no-such-revision-324")
+        self.assertEqual(status, 1)
+        self.assertIn("PORTABLE_REVISION_UNRESOLVED", stderr)
+        self.assertFalse(out.exists())
+        self.assertFalse((self.root / "record.json").exists())
+
+    def test_a_sha256_repository_commit_is_accepted(self):
+        stage = _make_stage(self.root / "a", reverse=False, mtime=1_700_000_000)
+        commit = "ab" * 32
+        (stage / "toolchain.json").write_text(json.dumps({"candidate": {"commit": commit}}), encoding="utf-8")
+        self.assertEqual(stage_install.staged_source_commit(stage), commit)
+
     def test_the_cli_refuses_another_revision_and_an_existing_record(self):
         stage = _make_stage(self.root / "a", reverse=False, mtime=1_700_000_000)
         out = self.root / "out.zip"

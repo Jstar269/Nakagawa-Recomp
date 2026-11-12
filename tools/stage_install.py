@@ -628,7 +628,8 @@ def _zip_info(name: str, date_time, *, directory: bool, size: int = 0) -> zipfil
 #: The attested toolchain record the release recipe copies to the stage root; its
 #: ``candidate.commit`` is the source commit the package was built from (#324).
 TOOLCHAIN_RECORD = "toolchain.json"
-_COMMIT_SHA = re.compile(r"[0-9a-f]{40}")
+#: A full commit id: SHA-1 (40 hex digits) or SHA-256 (64), as tools/record_toolchain.py records it.
+_COMMIT_SHA = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 #: The ``--record`` file of a portable ZIP: what a release dry run compares (#324).
 PORTABLE_RECORD_FORMAT = "nakagawa-portable-zip-record"
 PORTABLE_RECORD_SCHEMA_VERSION = 1
@@ -647,7 +648,7 @@ def staged_source_commit(stage: Path) -> str:
     if not isinstance(commit, str) or not _COMMIT_SHA.fullmatch(commit):
         raise InstallError(
             f"PORTABLE_SOURCE_COMMIT_MISSING: the stage's {TOOLCHAIN_RECORD} candidate commit "
-            f"{commit!r} is not a full lower-case commit SHA"
+            f"{commit!r} is not a full lower-case commit id (40 or 64 hex digits)"
         )
     return commit
 
@@ -738,8 +739,25 @@ def portable_zip_record(summary: dict) -> bytes:
 
 
 def resolve_commit(revision: str, *, repo: Path = ROOT) -> str:
-    """The full commit SHA ``revision`` names in ``repo``."""
-    return str(_git(repo, "rev-parse", "--verify", f"{revision}^{{commit}}"))
+    """The full commit id ``revision`` names in ``repo`` (this tool's own checkout by default)."""
+    try:
+        return str(_git(repo, "rev-parse", "--verify", f"{revision}^{{commit}}"))
+    except InstallError as exc:
+        raise InstallError(f"PORTABLE_REVISION_UNRESOLVED: {revision!r} names no commit in {repo}: "
+                           f"{exc}") from exc
+
+
+def _check_record_path(record: Path, zip_path: Path, stage: Path) -> Path:
+    """Refuse a ``--record`` path that exists, is the ZIP, or lies in the stage."""
+    record = Path(record).resolve()
+    if record == Path(zip_path).resolve():
+        raise InstallError("PORTABLE_RECORD_IS_ZIP: --record and --portable-zip name the same file")
+    if record.is_relative_to(Path(stage).resolve()):
+        raise InstallError("PORTABLE_RECORD_INSIDE_STAGE: write the record outside the staged folder; "
+                           "SHA256SUMS.txt would not list it")
+    if record.exists():
+        raise InstallError(f"PORTABLE_RECORD_EXISTS: {record} already exists; write a new file")
+    return record
 
 
 _VERSION = r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?"
@@ -1046,6 +1064,8 @@ def main(argv=None) -> int:
     parser.add_argument("--dry-run", action="store_true",
                         help="with --uninstall, list what would be removed and remove nothing")
     args = parser.parse_args(argv)
+    if args.record is not None and args.portable_zip is None:
+        parser.error("--record goes with --portable-zip")
     if args.dry_run and not args.uninstall:
         parser.error("--dry-run goes with --uninstall")
     if args.uninstall:
@@ -1072,15 +1092,17 @@ def main(argv=None) -> int:
         if args.portable_zip is None or args.zip_stage is None or args.dest is not None:
             parser.error("--portable-zip and --zip-stage go together, without --dest")
         try:
-            if args.record is not None and args.record.exists():
-                raise InstallError(f"PORTABLE_RECORD_EXISTS: {args.record} already exists; write a new file")
+            record = (None if args.record is None
+                      else _check_record_path(args.record, args.portable_zip, args.zip_stage))
+            expected_commit = resolve_commit(args.revision)
             epoch = resolve_source_date_epoch(args.source_date_epoch, revision=args.revision)
             summary = write_portable_zip(args.zip_stage, args.portable_zip, source_date_epoch=epoch,
-                                         expected_commit=resolve_commit(args.revision))
-            if args.record is not None:
+                                         expected_commit=expected_commit)
+            if record is not None:
                 try:
-                    args.record.parent.mkdir(parents=True, exist_ok=True)
-                    args.record.write_bytes(portable_zip_record(summary))
+                    record.parent.mkdir(parents=True, exist_ok=True)
+                    with record.open("xb") as output:
+                        output.write(portable_zip_record(summary))
                 except OSError as exc:
                     raise InstallError(f"PORTABLE_RECORD_UNWRITTEN: {args.record}: {exc}; the ZIP "
                                        f"{summary['zip']} was written, its record was not") from exc

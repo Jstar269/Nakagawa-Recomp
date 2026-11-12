@@ -283,7 +283,9 @@ foreach ($Asset in @($Zip, $SourceZip)) {
     $AssetHash = (Get-FileHash -LiteralPath $Asset -Algorithm SHA256).Hash.ToLowerInvariant()
     "$AssetHash  $(Split-Path -Leaf $Asset)" | Set-Content -LiteralPath "$Asset.sha256" -Encoding utf8NoBOM
 }
-Write-Output $Zip, "$Zip.sha256", $ZipRecord, $SourceZip, "$SourceZip.sha256"
+Write-Output $Zip, "$Zip.sha256", $SourceZip, "$SourceZip.sha256"
+# The record is release evidence for the maintainer, not a release asset: keep it, never upload it.
+Write-Output "Record: $ZipRecord"
 ```
 
 The package contains the native player and synthetic verification binary under `bin/`, the showcase demos under `bin/demos/`, the mechanically resolved SDL3/SDL3_ttf runtime DLL closures and their notices, the public-safe source export under `source/`, setup and smoke instructions, root README/license/notices, `SOURCE.txt`, LGPL relinking material, the third-party notice bundle, three SBOM formats, and `SHA256SUMS.txt`. It does not copy the whole `build/` tree, generated translation units, fixture PRXs, Vulkan SDK files, local databases, or title outputs. `SHA256SUMS.txt` covers every staged file except itself, in ordinal path order. Two runs of this script on the same commit with the same attested bundle, trusted ledger and prerequisite pins give a byte-identical ZIP when the same CPython writes it (Deflate output depends on the zlib build, which `--portable-zip` reports as `zlib`). Attach `nakagawa-recomp-<version>-windows-x64.zip.sha256` to the release next to the ZIP: the release binaries are not Authenticode-signed, so the published checksum and the per-file build attestations are how a user checks a download.
@@ -368,11 +370,15 @@ Two builds of one package must give the same bytes: the same commit, the same at
 trusted ledger copy and the same prerequisite pins. Run the recipe twice, into two different artifact roots (the recipe writes under `$env:TEMP`; set
 `$env:TEMP` to another folder for the second run), and compare the results:
 
+Each run's `$Zip`, `$SourceZip` and `$ZipRecord` are the first and second values below.
+
 ```powershell
 python tools/package_repro_check.py $ZipFirst $ZipSecond
 python tools/package_repro_check.py $SourceZipFirst $SourceZipSecond
 # The two records must be byte-identical: same ZIP SHA-256, same source commit, same zlib.
-if ((Get-FileHash $ZipRecordFirst).Hash -ne (Get-FileHash $ZipRecordSecond).Hash) { throw 'The ZIP records differ.' }
+if ((Get-FileHash -LiteralPath $ZipRecordFirst).Hash -ne (Get-FileHash -LiteralPath $ZipRecordSecond).Hash) {
+    throw 'The ZIP records differ.'
+}
 ```
 
 This is the release dry run: it publishes nothing. Keep one record with the candidate's release evidence: its
