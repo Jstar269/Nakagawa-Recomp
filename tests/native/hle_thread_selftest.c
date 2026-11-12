@@ -38629,9 +38629,11 @@ static void test_partition_skipped_gap_space_comes_back(void) {
            "a stack freed inside a skipped gap comes back: 100 create/reserve/delete/free rounds each "
            "end with the bump pointer and the free list where they started");
 
-    /* A create the partition refuses (its stack would reach a fixed reservation the bump pointer
-     * has passed) gives the range back to the arena only: the bump pointer, the free list and the
-     * reservation stay as they were, and a later Low block lands outside the reservation. */
+    /* A create whose arena range would reach a fixed reservation the bump pointer has passed gives
+     * that range back to the arena only, and takes the top of the gap the reservation skipped, the
+     * highest free block (#2469): the bump pointer and the reservation stay as they were, and a
+     * later Low block lands outside the reservation. A refused range over a live stack in such a
+     * gap: test_refused_arena_range_spares_a_freed_block_stack. */
     extern uint32_t alloc_block(uint32_t size);
     extern uint32_t sr_last_alloc_addr;
     uint32_t keep = sched_create_thread(0x2000u, 32, 0x8000u);
@@ -38639,11 +38641,14 @@ static void test_partition_skipped_gap_space_comes_back(void) {
     uint32_t below = sr_alloc_block_at(keep_floor - 0x10000u, 0x10000u, "below-stacks");
     const uint32_t heap1 = sr_hle_test_partition_heap_ptr();
     const int free1 = sr_hle_test_partition_free_block_count();
-    uint32_t refused = sched_create_thread(0x2004u, 32, 0x8000u);
-    expect(keep != 0u && below != 0xFFFFFFFFu && below != 0u && heap1 == keep_floor && refused == 0u,
-           "a thread create whose stack would reach a passed fixed reservation is refused");
+    uint32_t in_gap = sched_create_thread(0x2004u, 32, 0x8000u);
+    TCB *in_gap_tcb = in_gap ? tcb_by_uid(in_gap) : NULL;
+    expect(keep != 0u && below != 0xFFFFFFFFu && below != 0u && heap1 == keep_floor && in_gap_tcb &&
+               in_gap_tcb->stack_base == keep_floor - 0x18000u,
+           "a thread create whose arena range would reach a passed fixed reservation takes the top "
+           "of the skipped gap");
     expect(sr_hle_test_partition_heap_ptr() == heap1 && sr_hle_test_partition_free_block_count() == free1,
-           "a refused thread create leaves the bump pointer and the free list as they were");
+           "the stack in the skipped gap leaves the bump pointer and the free-list count as they were");
     uint32_t low = alloc_block(0x8000u);
     uint32_t low_addr = sr_last_alloc_addr;
     expect(low != 0xFFFFFFFFu &&
@@ -38651,6 +38656,8 @@ static void test_partition_skipped_gap_space_comes_back(void) {
            "a Low block after a refused create lands outside the fixed reservation");
     memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = low;
     (void)sr_syscall(&cpu, NID_FREE_PART);
+    memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = in_gap;
+    (void)sr_syscall(&cpu, NID_DELETE_THREAD);
     memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = below;
     (void)sr_syscall(&cpu, NID_FREE_PART);
     memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = keep;
@@ -39324,9 +39331,9 @@ static void test_high_requests_take_a_freed_partition_block(void) {
            "freed block: deleting that thread joins its block to the free space above");
     (void)fpb_free(a);
 
-    /* A fixed reservation above a live High block returns the skipped gap, High block inside, to
-     * the free list (sr_alloc_block_at). A stack is never carved over that High block: the
-     * runtime refuses the request (fail closed) where a PSP could place it lower in the gap. */
+    /* A fixed reservation above a live High block returns the skipped gap to the free list, all of
+     * it but the High block (sr_alloc_block_at, skipped_gap_pieces). A stack is never carved over
+     * that High block: it takes the highest free block, the gap below the High block. */
     reset_fixture();
     s_fixture_loaded_end = 0x08a00000u;
     sr_hle_test_partition_reset();
@@ -39341,8 +39348,11 @@ static void test_high_requests_take_a_freed_partition_block(void) {
            "freed block: two High blocks at the top, the upper one freed");
     uint32_t fixed = sr_alloc_block_at(main_top - 0x100u, 0x100u, "fixed");
     expect(fixed != 0xFFFFFFFFu, "freed block: a fixed reservation where the upper High block was");
-    expect(fpb_thread(0x200u) == NO_MEMORY && memblock_addr(h2, FPB_ADDR_OUT) == h2_addr,
-           "freed block: no stack is carved over the live High block in the skipped gap");
+    uint32_t under = fpb_thread(0x200u);
+    expect(fpb_stack_base(under) == h2_addr - 0x200u && memblock_addr(h2, FPB_ADDR_OUT) == h2_addr,
+           "freed block: no stack is carved over the live High block in the skipped gap; it goes "
+           "below it");
+    (void)fpb_call(NID_SCE_KERNEL_DELETE_THREAD, under, 0u, 0u, 0u);
     (void)memblock_free(h2);
 
     s_fixture_loaded_end = 0x00400000u;
