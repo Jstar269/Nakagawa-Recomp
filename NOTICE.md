@@ -126,6 +126,13 @@ We aim to respond promptly and will remove material where appropriate.
   (Boost Software License 1.0), the Unicode conversion code and name tables (Unicode
   licence), MD5 (public domain or cut-down BSD), `strlcpy` (ISC) and xxHash
   (BSD-2-Clause).
+- **Opt-in LLVM IR backend toolchain (#330)** — nothing vendored, linked or shipped.
+  `CODEGEN_BACKEND=llvm` runs the developer's own `clang` and `llvm-link` (MSYS2 UCRT64
+  `mingw-w64-ucrt-x86_64-clang` and `mingw-w64-ucrt-x86_64-llvm-tools`, Apache-2.0 WITH
+  LLVM-exception) on IR that the project-authored `tools/codegen_llvm.py` writes. The
+  executable is linked by the C toolchain with GCC's runtime libraries, as a C build is;
+  the player, its package builder and the release builds use the C backend. The facts and
+  the security notes are in `docs/LLVM_BACKEND.md`.
 - **VFPU tables** — PPSSPP-origin lookup data with the exact source and checksums
   recorded in `assets/vfpu/PROVENANCE.json`; inclusion is a provenance decision,
   not a claim about PSP firmware ownership.

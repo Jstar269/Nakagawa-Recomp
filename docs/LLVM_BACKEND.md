@@ -198,10 +198,49 @@ in-process stage, which is not built, would replace the delivery and nothing els
    compile at load time for the player's first-run path
    ([`AOT_PRODUCTIZATION_ARCHITECTURE.md`](AOT_PRODUCTIZATION_ARCHITECTURE.md), option E).
 
-LLVM is Apache-2.0 with the LLVM exception, which is compatible with GPL-3.0-or-later. The
-current stage vendors nothing: it uses the MSYS2 toolchain the user installs. Any LLVM
-header or library vendored or shipped later gets the usual pin, `PROVENANCE.md` entry,
-`CREDITS.md` credit and admission.
+The current stage vendors and ships nothing from LLVM
+([below](#third-party-toolchain-licence-provenance-and-security)).
+
+## Third-party toolchain: licence, provenance and security
+
+This records what the backend takes from LLVM, as facts; it is the review #330 asks for
+before a backend dependency becomes a production one.
+
+- **What runs.** An LLVM build runs two programs from the developer's own toolchain:
+  `clang` and `llvm-link` from MSYS2 UCRT64 (the `mingw-w64-ucrt-x86_64-clang` and
+  `mingw-w64-ucrt-x86_64-llvm-tools` packages, with their dependency
+  `mingw-w64-ucrt-x86_64-llvm-libs`), or the programs `LLVM_CLANG` and `LLVM_LINK` name.
+  The measurements on #330 used 23.1.3. MSYS2's package metadata gives each of the three
+  packages the licence `Apache-2.0 WITH LLVM-exception`, which is the licence of LLVM's own
+  `LICENSE.TXT`.
+- **What the repository holds.** No LLVM source, header, library or binary. The IR builder
+  (`tools/llvm_ir.py`), the renderer (`tools/codegen_llvm.py`), the plan
+  (`tools/lowering_plan.py`) and the ABI shim (`src/rt/llvm_abi.c`, `llvm_abi.h`) are
+  project-authored and GPL-3.0-or-later; the builder prints LLVM's textual IR, following
+  the LLVM Language Reference, and calls no LLVM code.
+- **What a build links.** Clang compiles each chunk's IR, linked with the shim's bitcode,
+  into an object; the executable is linked by `$(CC)`, as in a C build. MSYS2's Clang
+  targets `x86_64-w64-windows-gnu` and uses GCC's `libgcc` as its runtime library
+  (`clang -print-libgcc-file-name`), so the executable links the same runtime libraries as
+  a C build and no LLVM library (`libLLVM`, `compiler-rt`, `libc++`, `libunwind`). What an
+  LLVM chunk object contains from LLVM is the machine code Clang generated for it.
+- **What ships.** Nothing from LLVM. The player builds packages with the C backend; nothing
+  in the player, the package builder or the release tooling selects `CODEGEN_BACKEND=llvm`,
+  and the player's prerequisite download (`assets/prereq_manifest.json`) fetches GCC, not
+  Clang or LLVM. The Android build's on-device Clang is a separate component, recorded in
+  [`NOTICE.md`](../NOTICE.md) and [`android/toolchain/PROVENANCE.md`](../android/toolchain/PROVENANCE.md);
+  it compiles C and does not run this backend.
+- **Security.** The backend runs the two programs it finds on `PATH` (or the ones
+  `LLVM_CLANG` and `LLVM_LINK` name) on files codegen wrote; it downloads nothing and
+  needs no network. An LLVM build's cache key holds each program's SHA-256 and version
+  report ([Build identity](#build-identity)), so a changed toolchain never reuses a
+  package, and a missing program fails the build and the key closed. `llvm-link` runs
+  LLVM's verifier on every module before Clang compiles it.
+- **Where it is recorded.** Here, and in [`NOTICE.md`](../NOTICE.md) and
+  [`CREDITS.md`](../CREDITS.md). The in-process stage above would link LLVM's libraries
+  into a project tool or the player; before it lands it needs the usual pin, a
+  `PROVENANCE.md` manifest, `NOTICE.md` and `CREDITS.md` records and the maintainer's
+  admission, as the Android toolchain has.
 
 ## Not done
 
