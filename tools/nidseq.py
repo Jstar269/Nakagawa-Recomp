@@ -49,10 +49,10 @@ def load_imports(path):
         raise NidseqError(f"import map {path}: missing or non-list top-level 'import' table")
     m = {}
     stubs = []
-    for i, e in enumerate(table):
-        if not isinstance(e, dict) or not {"stub", "lib", "nid"} <= set(e):
+    for i, entry in enumerate(table):
+        if not isinstance(entry, dict) or not {"stub", "lib", "nid"} <= set(entry):
             raise NidseqError(f"import map {path}: entry {i} lacks stub/lib/nid fields")
-        stub, lib, nid = e["stub"], e["lib"], e["nid"]
+        stub, lib, nid = entry["stub"], entry["lib"], entry["nid"]
         if type(stub) is not int or not 0 <= stub < 2**32:
             raise NidseqError(f"import map {path}: entry {i} has a non-u32 stub value {stub!r}")
         if type(lib) is not str:

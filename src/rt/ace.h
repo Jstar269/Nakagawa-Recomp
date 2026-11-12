@@ -11,12 +11,13 @@
  *     SR_ACE=v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off;twin=off
  *
  * tier (enhanced or ace) only names the run, in the badge, the pause menu and the stamps; a
- * line without it is an Enhanced run. stick, load, depth, ssaa, glyphs and cull are the other keys
- * a line may leave out: a missing stick, load, depth, ssaa, glyphs or cull reads as off (section
- * 11.2 item 2); stick has no off word, its value is the game's dead zone (1..126), and a line that
- * writes load=off, depth=off, ssaa=off, glyphs=off or cull=off means the same as none;
- * stick=<counts>, load=fast and cull=on need tier=ace, and depth=32 (the 32-bit host depth buffer,
- * #2051), ssaa=2|4 (supersampling, #2073) and glyphs=on (sharp game text, #2110) do not. Every other
+ * line without it is an Enhanced run. stick, load, depth, ssaa, peak, glyphs and cull are the other
+ * keys a line may leave out: a missing stick, load, depth, ssaa, peak, glyphs or cull reads as off
+ * (section 11.2 item 2); stick has no off word, its value is the game's dead zone (1..126), and a
+ * line that writes load=off, depth=off, ssaa=off, peak=off, glyphs=off or cull=off means the same
+ * as none; stick=<counts>, load=fast and cull=on need tier=ace, and depth=32 (the 32-bit host depth
+ * buffer, #2051), ssaa=2|4 (supersampling, #2073), peak=limit and glyphs=on (sharp game text,
+ * #2110) do not. Every other
  * key is required in v1, in any order, each once. A key or value for a feature this build
  * does not carry (smooth=match) is still parsed and refused. Anything else (an unknown version, key
  * or value, a duplicate, a missing key, an empty field) refuses the whole line: Ace is off for
@@ -28,8 +29,9 @@
  * unchanged; host presentation changes (and, with sas=sinc, the mixed SAS sample values; with
  * tess=2..4, the pixels of every triangle patch and the GE timing model's clocks under
  * SR_GE_TIMING=1; with load=fast, the guest timing of a title's declared loading waits; with
- * depth=32, which surface wins where two lie within one 16-bit depth step; with glyphs=on at a
- * render scale of 2 to 4, the pixels of small text sprites in the frames the guest keeps), and
+ * depth=32, which surface wins where two lie within one 16-bit depth step; with peak=limit, only
+ * the host's sound: the guest's SAS bytes stay the PSP's; with glyphs=on at a render scale of 2 to
+ * 4, the pixels of small text sprites in the frames the guest keeps), and
  * the run says so ("ACE_MODE: on (...)" at start, an exit line, and the flight recorder's
  * runtime.enhancements block).
  *
@@ -57,6 +59,7 @@
 #define ACE_STICK_COUNTS_MAX 126 /* stick=1..126: the square dead zone, in the game's centred counts */
 #define ACE_HAS_LOAD 1          /* load=fast: a title's declared loading waits return at once (11.3.10) */
 #define ACE_HAS_DEPTH 1         /* depth=32: a 32-bit float host depth buffer (#2051, 10.20, 11.3.12) */
+#define ACE_HAS_PEAK 1          /* peak=limit: SAS mixes unsaturated through a true-peak limiter (#2137, 10.22) */
 #define ACE_HAS_GLYPHS 1        /* glyphs=on: sharp game text, glyphs rebuilt at the render scale (10.13, 11.3.5) */
 
 typedef enum { ACE_WIDE_OFF = 0, ACE_WIDE_FILL = 1 } AceWide;
@@ -90,6 +93,8 @@ typedef struct {
     int twin;        /* full 32-bit colour: 16-bit games drawn on a host twin, no dither (host-only) */
     int ssaa;        /* ssaa=2|4: 0 off, else the supersampling factor per axis on top of render scale;
                         host presentation only (10.21) */
+    int peak;        /* peak=limit: the host hears SAS mixes unsaturated, through a true-peak limiter
+                        (host-only, 10.22) */
     int glyphs;      /* glyphs=on: small text sprites draw from glyphs rebuilt at the render scale
                         (guest-visible, 10.13 and 11.3.5) */
 } AceConfig;
@@ -109,6 +114,7 @@ typedef enum {
     ACE_FEATURE_DEPTH,
     ACE_FEATURE_TWIN,
     ACE_FEATURE_SSAA,
+    ACE_FEATURE_PEAK,
     ACE_FEATURE_GLYPHS,
     ACE_FEATURE_COUNT
 } AceFeature;
@@ -156,6 +162,10 @@ void ace_feature_unavailable(AceFeature feature, const char *reason);
 void ace_confirm(AceFeature feature);
 /* Matrix uses the culling hook left alone (its table was full): the report's cull_untracked. */
 void ace_set_cull_untracked(unsigned long n);
+/* peak=limit's totals for the report (driver.c reads them from the audio backend at exit): pushes
+ * that carried a SAS sum past 16 bits, the frames of those that differ from the guest's saturated
+ * copy, the output frames the limiter turned down, and its lowest gain (1 when it never acted). */
+void ace_set_peak_stats(uint64_t pushes_wide, uint64_t frames_wide, uint64_t frames_limited, double min_gain);
 
 /* ---- stick dead-zone remap (stick=<counts>, contract 11.3.11) ------------------------------- */
 
@@ -584,8 +594,9 @@ void ace_smooth_aux_report(const AceSmoothAuxStats *s);
 
 /* ---- the per-run report -------------------------------------------------------------------- */
 
-/* The worst case, every block present and every number at its widest, is about 5.2 KB with
- * stick, load, twin and ssaa in the spec; ace_selftest's cell_report_worst checks that it fits. */
+/* The worst case, every block present and every number at its widest, is about 5.7 KB with
+ * stick, load, depth, twin, ssaa, peak and glyphs in the spec; ace_selftest's cell_report_worst
+ * checks that it fits. */
 #define ACE_REPORT_MAX 6144u
 /* The report's JSON for the run so far; 0 when it would not fit. */
 size_t ace_report_json(char *out, size_t cap);
