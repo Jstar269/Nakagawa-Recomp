@@ -153,14 +153,14 @@ know to be true, and never record someone else's code as your own.
 On a fork, the **Fork provenance check** job in `.github/workflows/provenance-attestation.yml` takes
 the place of the trusted attestation. Like it, the job runs from your default branch's copy of the
 workflow and tools and reads the pull request as data, so a pull request cannot replace the check
-with its own code. It reads no secret and never contacts any authority. It:
+with its own code. It reads no repository secret, only the job's own token (`github.token`) to read
+the pull request, and never contacts any authority. It:
 
 - refuses a pull request that changes `provenance-attestation.yml` itself, or whose other workflows
   spell the name **Fork provenance check** or **Trusted provenance attestation**, either of which
-  could give a second result under the check's name. The name match is a byte search, a tripwire:
-  a job name built by an expression escapes it. So when you add a ruleset, require **Trusted CI
-  verdict**, which accepts the check only from the trusted run, not **Fork provenance check** by
-  name;
+  could give a second result under the check's name. The name match is a byte search, a tripwire,
+  not the gate. So when you add a ruleset, require **Trusted CI verdict**, which accepts the check
+  only from the trusted run, not **Fork provenance check** by name;
 - refuses a pull request that does not contain your default branch as the job checked it out
   (`NOT_UP_TO_DATE`): merge the default branch into it. Everything below is judged against that
   tip, and nothing else is judged until the pull request contains it;
@@ -241,17 +241,64 @@ GitHub documents it on the pages linked here.
 
 #### After your own push
 
-After every push of your own to the default branch, run the check again for each open pull request
-before you merge it, and wait for the second run to post:
+Whenever your default branch has moved since a pull request's check ran, by your own push or by a
+merge, run the check again for that pull request before you merge it. Do the steps in this order,
+one pull request at a time, and do not start a step before the one above it has finished:
 
-```bash
-gh pr list --base <default branch> --state open --json number,headRefOid
-gh workflow run provenance-attestation.yml -f pull_request_number=<n> -f head_sha=<head SHA>
-gh workflow run ci-trust-verdict.yml -f pull_request_number=<n>
-```
+1. List the open pull requests with their numbers and heads:
 
-The first command lists each open pull request's number and head; the other two run the check and
-then the verdict for one of them, against the tip your push made.
+   ```bash
+   gh pr list --base <default branch> --state open --json number,headRefOid
+   ```
+
+2. Start the check for one of them, with its number and its head:
+
+   ```bash
+   gh workflow run provenance-attestation.yml -f pull_request_number=<n> -f head_sha=<head SHA>
+   ```
+
+3. Wait until that run has completed. Find its run ID in the list below: it is titled
+   `Provenance attestation of <head SHA>` and was created after you ran step 2. Then wait for it:
+
+   ```bash
+   gh run list --workflow provenance-attestation.yml --event workflow_dispatch --limit 5 \
+     --json databaseId,displayTitle,status,conclusion,createdAt
+   gh run watch <run ID>
+   ```
+
+   GitHub can take a few seconds to list a run it has just been asked for: if the run is not in the
+   list yet, run the first command again. The run has completed when its `status` is `completed`
+   (`gh run watch` returns then). Its `conclusion` may be `success` or `failure`; go on to step 4
+   either way, because the result already on the pull request is the older one until the verdict
+   replaces it.
+
+4. Only then start the verdict, and wait for it the same way (its runs are titled
+   `Trusted CI verdict (PR #<n>)`):
+
+   ```bash
+   gh workflow run ci-trust-verdict.yml -f pull_request_number=<n>
+   gh run list --workflow ci-trust-verdict.yml --event workflow_dispatch --limit 5 \
+     --json databaseId,displayTitle,status,createdAt
+   gh run watch <verdict run ID>
+   ```
+
+5. Confirm what the verdict judged. Its report (the run's summary, also printed in its log by
+   `gh run view <verdict run ID> --log`) has a line that begins `Provenance producer set: fork` and
+   goes on `judged Fork provenance check run:` with a link. The number at the end of that link must
+   be the run ID from step 3. Check that the pull request's **Trusted CI verdict** now shows the
+   new result with `gh pr checks <n>`.
+
+If the order is not kept, the result on the pull request is not the one you asked for:
+
+- **The verdict starts while the check is still queued or running.** The verdict posts `pending`,
+  "Waiting for: Fork provenance check", and nothing starts it again when the check finishes: only a
+  `CI` run that completes starts the verdict by itself ("Re-running" under
+  [Trusted CI verdict](CI.md#trusted-ci-verdict)). The pull request stays pending until you start
+  the verdict again (step 4).
+- **The verdict starts before GitHub lists the check's run at all.** The verdict judges the newest
+  run it can see, which is the older one judged against your previous tip, and can post that older
+  success again. The link in step 5 then names that older run, not the one from step 3: start the
+  verdict again once step 3 is done.
 
 **A green Fork provenance check does not mean you admitted anything.** The check cannot tell your
 admission from anyone else's: it passes a pull request that adds a path to `include_paths` and the
@@ -272,6 +319,20 @@ Where to read the check's summary, with its title line and its list of named pat
 - **`workflow_run` and a dispatch**: GitHub lists these runs under your default branch, not on the
   pull request. Open the run titled `Provenance attestation of <head>` in the **Actions** tab; the
   **Trusted CI verdict**'s report names that run's link in its line `Provenance producer set: fork`.
+
+The verdict's report and the check's summary each name a default branch commit, and the two can
+differ:
+
+- The verdict's first sentence, "Head `<head>` of #<n>, judged with the default branch at
+  `<commit>`", names the tip the verdict itself ran at. That is the default branch as it stood when
+  the verdict started, which can be later than the tip the check judged: the verdict judges the
+  newest check run for the head, whenever that run started.
+- The check's summary, in the run the verdict links, names the head and the default branch tip that
+  check judged, in its title line.
+
+A pass of the Fork provenance check applies only to the pair in the linked run's summary: that head
+and that tip. If that tip is not your default branch's tip now, the pass does not cover your
+current tip; run the check again ([After your own push](#after-your-own-push)).
 
 The check needs a public repository. It fetches the pull request's head without credentials, which a
 private repository refuses, so on a private copy the check fails at that fetch and never passes.

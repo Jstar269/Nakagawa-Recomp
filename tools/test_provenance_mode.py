@@ -182,7 +182,7 @@ class ModeDecisionTest(unittest.TestCase):
                 self.assertEqual(pm.mode(repository, repository_id or None), "upstream")
 
     def test_the_id_is_compared_as_a_number(self) -> None:
-        # Review 2309-4e69563b9228 N6: a zero-padded upstream ID was a fork by string comparison.
+        # The ID is compared as a number: a zero-padded or integer upstream ID is the upstream.
         self.assertTrue(pm.is_upstream("example-user/fork", "0" + pm.UPSTREAM_REPOSITORY_ID))
         self.assertTrue(pm.is_upstream("example-user/fork", int(pm.UPSTREAM_REPOSITORY_ID)))
         self.assertFalse(pm.is_upstream("example-user/fork", "1" + pm.UPSTREAM_REPOSITORY_ID))
@@ -350,12 +350,11 @@ class WorkflowConditionTest(unittest.TestCase):
         self.assertEqual(re.findall(r"\$\{\{ *(github\.token|secrets\.[A-Z_]+) *\}\}", block), ["github.token"])
 
     def test_fork_job_only_reads_and_its_check_decides_the_job(self) -> None:
-        # Review 2309-4e69563b9228 N9 (W9, W10): neither the job's permissions nor the check's exit code
-        # deciding the job was pinned.
+        # The job's permissions are read-only, and the check's exit code decides the job.
         self.assertIn("    permissions:\n      contents: read\n      pull-requests: read\n    steps:\n", self.fork)
         step = self.fork[self.fork.index("      - name: Check the candidate with the trusted publication audit\n"):]
         self.assertIn("          set -euo pipefail\n", step)
-        # Review 2309-36f775933693 S1: the default branch is the trusted checkout's HEAD, not the event's base.
+        # The default branch is the trusted checkout's HEAD, not the event's base.
         self.assertIn('          python tools/provenance_mode.py fork-check --repo "${GITHUB_WORKSPACE}" \\\n'
                       '            --base "${BASE_SHA}" --tip HEAD --candidate "${HEAD_SHA}" '
                       '--summary "${GITHUB_STEP_SUMMARY}"\n',
@@ -368,7 +367,7 @@ class WorkflowConditionTest(unittest.TestCase):
         self.assertEqual(self.text.count(f"    name: {pm.FORK_CONTEXT}\n"), 1)
 
     def test_the_fork_job_reads_the_candidate_as_data_only(self) -> None:
-        # Review 2309-b91191b7b7a2 N5 (w7, w8, w9): the one checkout is the default branch without stored
+        # The one checkout is the default branch without stored
         # credentials, the fetched head must be the named one, and the candidate is never checked out.
         code = _code(self.fork)
         self.assertEqual(code.count("uses: actions/checkout@"), 1)
@@ -448,7 +447,7 @@ class ForkCheckTest(unittest.TestCase):
         self.assertIn("  added NEW.md", lines)
         self.assertFalse([line for line in lines if line.startswith("PROFILE_RULES_CHANGED")])
         self.assertEqual(lines[-1], f"{pm.FORK_CONTEXT}: PASS")
-        # Review 2309-36f775933693 S3: a pass that covers a pull request's own admission says so, by path.
+        # A pass that covers a pull request's own admission says so, by path.
         self.assertEqual(pm.self_admitted(lines), ["NEW.md"])
         self.assertTrue(pm._summary(lines, code).startswith(
             f"### {pm.FORK_CONTEXT}: passed for head `{head}` against default branch tip `{self.base}`; this pull "
@@ -464,8 +463,8 @@ class ForkCheckTest(unittest.TestCase):
         self.assertEqual(pm.warning_annotations(lines), [])
 
     def test_the_audit_judges_the_candidate_by_the_candidates_own_profile(self) -> None:
-        # Failing-before: the audit took the profile from the checkout it ran in. On hosted CI that is the
-        # default branch, so the path a pull request admits was refused as unclassified.
+        # The audit judges by the candidate's profile, not by the checkout it runs in. On hosted CI that
+        # checkout is the default branch, whose profile lacks the path a pull request admits.
         (self.repo / "NEW.md").write_text("new\n", encoding="utf-8")
         self._write_profile(["NEW.md", "README.md"])
         head = self._commit()
@@ -499,9 +498,8 @@ class ForkCheckTest(unittest.TestCase):
         self.assertTrue(any(line.startswith("PROFILE_RULES_CHANGED") and "exclude_paths" in line for line in lines))
 
     def test_a_head_without_the_tip_is_refused(self) -> None:
-        # Review 2309-82a49cb3d6ca S1 and S2: a head that lags the tip was judged against its merge base, so
-        # what the tip changed since was the check's to reconcile. Now every head contains the tip; this one
-        # only adds a path, and the tip only admits another and adds an exclusion.
+        # A head must contain the tip before anything else is judged; this one only adds a path, and the tip
+        # only admits another and adds an exclusion.
         _git(self.repo, "checkout", "--quiet", "-b", "topic", self.base)
         (self.repo / "TOPIC.md").write_text("topic\n", encoding="utf-8")
         self._write_profile(["README.md", "TOPIC.md"])
@@ -511,7 +509,7 @@ class ForkCheckTest(unittest.TestCase):
         self._write_profile(["LATER.md", "README.md"], exclude_paths=["x"])
         tip = self._commit()
         code, lines = pm.fork_check(self.repo, tip, head, audit_tool=self._stub_audit(0))
-        # Failing-before: the head passed, judged against its merge base.
+        # Without the tip the head fails, whatever else it changes.
         self.assertEqual(code, 1, lines)
         self.assertEqual(lines[3:], [f"NOT_UP_TO_DATE: the pull request does not contain the default branch's tip "
                                      f"{tip}; merge the default branch into it", f"{pm.FORK_CONTEXT}: FAIL"])
@@ -536,15 +534,15 @@ class ForkCheckTest(unittest.TestCase):
         return head, self._commit()
 
     def test_a_stale_event_base_does_not_hide_a_rule_tightened_on_the_tip(self) -> None:
-        # Review 2309-36f775933693 S1: the event's base can lag the default branch and equal the merge
-        # base, so a rule tightened on the tip was compared with nothing. The tip is the measure.
+        # The event's base can lag the default branch and equal the merge base. The tip is the measure, so
+        # a rule tightened on the tip is compared with the head.
         head, tip = self._lagging_head_and_stricter_tip()
         code, lines = pm.fork_check(self.repo, self.base, head, tip=tip, audit_tool=self._stub_audit(0))
         self.assertEqual(code, 1, lines)
         self.assertIn(f"default branch tip {tip}", lines)
         self.assertTrue(any(line.startswith(f"NOT_UP_TO_DATE: the pull request does not contain the default branch's "
                                             f"tip {tip}") for line in lines), lines)
-        # Failing-before: measured against the stale base alone, the check passed.
+        # Given the stale base alone, the check still measures against the tip and fails.
         code, lines = pm.fork_check(self.repo, self.base, head, audit_tool=self._stub_audit(0))
         self.assertEqual(code, 0, lines)
 
@@ -593,7 +591,7 @@ class ForkCheckTest(unittest.TestCase):
                                     + suffix])
 
     def test_the_resume_line_follows_an_input_error(self) -> None:
-        # Review 2309-913c7747 N2: commands stayed stopped when the check ended early.
+        # Workflow commands resume even when the check ends early.
         out = io.StringIO()
         with mock.patch("sys.stdout", out):
             code = pm.main(["fork-check", "--repository", "example-user/Nakagawa-Recomp", "--repository-id", "42",
@@ -603,8 +601,7 @@ class ForkCheckTest(unittest.TestCase):
         stop = re.fullmatch(r"::stop-commands::([0-9a-f]{32})", printed[0])
         assert stop is not None
         self.assertEqual(printed[-1], f"::{stop.group(1)}::")
-        # Review 2309-66fce005c252 answer 6 (M2, M3): the token differs on every run, and an unexpected error
-        # is printed before the resume line.
+        # The token differs on every run, and an unexpected error is printed before the resume line.
         out = io.StringIO()
         with mock.patch.object(pm, "fork_check", side_effect=RuntimeError("x\n::error::forged")), \
                 mock.patch("sys.stdout", out):
@@ -621,8 +618,8 @@ class ForkCheckTest(unittest.TestCase):
         self.assertIn(f"{pm.FORK_CONTEXT}: internal error", again[1:resume])
 
     def test_a_profile_entry_names_a_file_of_the_pull_request(self) -> None:
-        # Review 2309-913c7747 S3: an entry with no file passed, and a later pull request could then add the
-        # file with nothing named.
+        # An entry added to include_paths names a file of the pull request, so a later pull request cannot add
+        # the file unnamed.
         _git(self.repo, "checkout", "--quiet", "-b", "entry", self.base)
         self._write_profile(["README.md", "LATER.md"])
         head = self._commit()
@@ -637,8 +634,8 @@ class ForkCheckTest(unittest.TestCase):
         self.assertEqual(pm.self_admitted(lines), ["LATER.md"])
 
     def test_many_self_admitted_paths_cannot_hide_one(self) -> None:
-        # Review 2309-913c7747 S2: the title showed ten, GitHub shows ten warnings per step and drops a summary
-        # over 1 MiB, so decoys could push a path out of sight.
+        # GitHub shows ten warnings per step and drops a summary over 1 MiB, so the number of paths a pull
+        # request admits itself is limited and every one stays in view.
         _git(self.repo, "checkout", "--quiet", "-b", "many", self.base)
         names = [f"d{index:03}.md" for index in range(pm.SELF_ADMITTED_MAX_PATHS)]
         for name in names:
@@ -701,8 +698,7 @@ class ForkCheckTest(unittest.TestCase):
         path.write_text(json.dumps({"components": components}), encoding="utf-8")
 
     def test_the_release_manifest_and_the_paths_it_approves_are_held(self) -> None:
-        # Review 2309-36f775933693 S2: the release manifest and the bytes of the paths it marks approved are
-        # held in a fork pull request.
+        # The release manifest and the bytes of the paths it marks approved are held in a fork pull request.
         approved: dict[str, object] = {"id": "image", "source_path": "image.gif", "disposition": "approved_binary"}
         self._write_manifest([approved])
         (self.repo / "image.gif").write_bytes(b"GIF89a" + bytes(8))
@@ -725,6 +721,16 @@ class ForkCheckTest(unittest.TestCase):
                 code, lines = pm.fork_check(self.repo, base, head, audit_tool=self._stub_audit(0))
                 self.assertEqual(code, 1, lines)
                 self.assertTrue(any(line.startswith(code_text) for line in lines), lines)
+        # A change to the manifest's text alone, with the same components and nothing else changed, fails the
+        # check on its own: the manifest is held byte for byte.
+        _git(self.repo, "reset", "--quiet", "--hard", base)
+        (self.repo / pm.MANIFEST).write_text(json.dumps({"components": [approved]}, indent=2), encoding="utf-8")
+        head = self._commit()
+        code, lines = pm.fork_check(self.repo, base, head, audit_tool=self._stub_audit(0))
+        self.assertEqual(code, 1, lines)
+        self.assertEqual([line.split(": ", 1)[0] for line in lines if re.match(r"[A-Z][A-Z_]+: ", line)],
+                         ["MANIFEST_CHANGED"], lines)
+        self.assertEqual(lines[-1], f"{pm.FORK_CONTEXT}: FAIL")
         # An edit elsewhere with the manifest and the approved bytes untouched passes.
         _git(self.repo, "reset", "--quiet", "--hard", base)
         (self.repo / "README.md").write_text("edited\n", encoding="utf-8")
@@ -733,8 +739,8 @@ class ForkCheckTest(unittest.TestCase):
         self.assertEqual(code, 0, lines)
 
     def test_no_file_the_pull_request_adds_or_changes_may_be_binary(self) -> None:
-        # Reviews 2309-913c7747 S1 and 2309-66fce005c252 S2: no file a fork pull request adds or changes may
-        # be binary, as the trusted audit's own test decides it; text with the odd control character passes.
+        # No file a fork pull request adds or changes may be binary, as the trusted audit's own test decides
+        # it; text with the odd control character passes.
         self._write_manifest([{"id": "stb", "source_path": "LICENSE.txt", "disposition": "included"}])
         (self.repo / "LICENSE.txt").write_text("licence\n", encoding="utf-8")
         self._write_profile(["README.md", "LICENSE.txt"])
@@ -755,8 +761,7 @@ class ForkCheckTest(unittest.TestCase):
                                  bool(expected), lines)
 
     def test_the_vfpu_tables_are_held(self) -> None:
-        # Review 2309-66fce005c252 S2: a table under assets/vfpu/ may not change, as text or as bytes, and none
-        # may be added.
+        # A table under assets/vfpu/ may not change, as text or as bytes, and none may be added.
         table = self.repo / "assets" / "vfpu" / "sin.dat"
         table.parent.mkdir(parents=True, exist_ok=True)
         table.write_bytes(bytes(range(1, 64)))
@@ -773,8 +778,7 @@ class ForkCheckTest(unittest.TestCase):
                               "this path, whose bytes and mode only the fork maintainer's own push changes", lines)
 
     def test_every_held_disposition_and_a_first_file_at_a_held_path(self) -> None:
-        # Review 2309-66fce005c252 answer 6 (M4, M13): each held disposition, and a file added at a path the
-        # manifest holds that the tip does not carry yet.
+        # Each held disposition, and a file added at a path the manifest holds that the tip does not carry yet.
         for disposition in sorted(pm.HELD_PATH_DISPOSITIONS):
             with self.subTest(disposition=disposition):
                 _git(self.repo, "reset", "--quiet", "--hard", self.base)
@@ -791,7 +795,7 @@ class ForkCheckTest(unittest.TestCase):
                     self.assertTrue(any(line.startswith(f"HELD_BYTES_CHANGED: {path}: ") for line in lines), lines)
 
     def test_a_held_paths_mode_is_held(self) -> None:
-        # Review 2309-82a49cb3d6ca N1: the executable bit on a held path.
+        # The executable bit on a held path is held.
         self._write_manifest([{"id": "image", "source_path": "image.gif", "disposition": "approved_binary"}])
         (self.repo / "image.gif").write_bytes(b"GIF89a" + bytes(8))
         base = self._commit()
@@ -803,7 +807,7 @@ class ForkCheckTest(unittest.TestCase):
         self.assertTrue(any(line.startswith("HELD_BYTES_CHANGED: image.gif: ") for line in lines), lines)
 
     def test_a_changed_ledger_claim_is_named_like_an_admission(self) -> None:
-        # Review 2309-82a49cb3d6ca S3: rewriting the claim of a path already admitted passed with nothing named.
+        # A changed ledger claim for a path already admitted is named like an admission.
         def ledger(classification: str) -> None:
             (self.repo / pm.LEDGER).write_text(json.dumps({"entries": [
                 {"path": "README.md", "classification": classification, "evidence": {"record_id": "r"}}]}),
@@ -840,7 +844,7 @@ class ForkCheckTest(unittest.TestCase):
         self.assertIn("  removed OTHER.md", lines)
 
     def test_the_trusted_audits_binary_test_is_loaded_once(self) -> None:
-        # Review 2309-82a49cb3d6ca S4 and N5: the module is registered while it runs (its dataclasses need
+        # The module is registered while it runs (its dataclasses need
         # that on Python 3.14) and loaded once.
         tool = pm.ROOT / "tools" / "publish_audit.py"
         first = pm._audit_binary_test(tool)
@@ -850,8 +854,8 @@ class ForkCheckTest(unittest.TestCase):
         self.assertFalse(first(b"text\n"))
 
     def test_a_criss_cross_head_is_refused_until_it_contains_the_tip(self) -> None:
-        # Review 2309-66fce005c252 S1: the check compared with one merge base, while a merge applies the pull
-        # request to a tree built from all of them. A criss-cross history has two, and lacks the tip.
+        # A merge applies the pull request to a tree built from every merge base. A criss-cross history has
+        # two and lacks the tip, so it is refused until it contains the tip, which is then the only one.
         def branch(name: str, file: str) -> str:
             _git(self.repo, "checkout", "--quiet", "-b", name, self.base)
             (self.repo / file).write_text(f"{name}\n", encoding="utf-8")
@@ -875,7 +879,7 @@ class ForkCheckTest(unittest.TestCase):
         self.assertEqual(code, 0, lines)
 
     def test_rule_keys_and_the_report_fence_are_shown_safely(self) -> None:
-        # Review 2309-66fce005c252 answer 6 (M5, M6): a hostile profile key is escaped, and the summary's fence
+        # A hostile profile key is escaped, and the summary's fence
         # outruns the report's backticks.
         _git(self.repo, "checkout", "--quiet", "-b", "keys", self.base)
         self._write_profile(["README.md"], **{"x\n::error::k`": 1})
@@ -889,7 +893,7 @@ class ForkCheckTest(unittest.TestCase):
         self.assertTrue(summary.rstrip("\n").endswith("`````"))
 
     def test_a_rule_value_of_another_json_type_is_a_change(self) -> None:
-        # Review 2309-82a49cb3d6ca N6: parsed values compared equal across types (``1``, ``1.0``, ``true``).
+        # Values of different JSON types differ (``1``, ``1.0``, ``true``).
         for before, after in ((1, True), (1, 1.0), (0, False)):
             with self.subTest(before=before, after=after):
                 _git(self.repo, "checkout", "--quiet", "--detach", self.base)
@@ -903,7 +907,7 @@ class ForkCheckTest(unittest.TestCase):
                                     for line in lines), lines)
 
     def test_the_name_limit_counts_characters_too(self) -> None:
-        # Review 2309-66fce005c252 answer 6 (M1): few paths, long names.
+        # Few paths, long names.
         _git(self.repo, "checkout", "--quiet", "-b", "long", self.base)
         # Names this long cannot sit in every file system, so they go into the index only.
         names = [f"{index}/" + "/".join(["n" * 200] * 5) + ".md"
@@ -920,6 +924,146 @@ class ForkCheckTest(unittest.TestCase):
         code, lines = pm.fork_check(self.repo, self.base, head, audit_tool=self._stub_audit(0))
         self.assertEqual(code, 1, lines)
         self.assertTrue(any(line.startswith("SELF_ADMITTED_LIMIT: ") for line in lines), lines)
+
+    def _admit_in_the_index(self, names: list[str]) -> str:
+        """A head that admits ``names`` itself, each with a file; the files go into the index only."""
+        _git(self.repo, "reset", "--quiet", "--hard", self.base)
+        blob = subprocess.run(["git", "-C", str(self.repo), "hash-object", "-w", "--stdin"], input=b"named\n",
+                              capture_output=True, check=True).stdout.decode("ascii").strip()
+        for name in names:
+            _git(self.repo, "update-index", "--add", "--cacheinfo", f"100644,{blob},{name}")
+        self._write_profile(["README.md", *names])
+        _git(self.repo, "add", pm.POLICY)
+        _git(self.repo, "commit", "--quiet", "-m", "names")
+        return _git(self.repo, "rev-parse", "HEAD")
+
+    def test_the_name_limits_are_exact(self) -> None:
+        # At most SELF_ADMITTED_MAX_PATHS paths and SELF_ADMITTED_MAX_CHARS characters of names: the limit
+        # itself passes, one more path or one more character fails.
+        def name(index: int, length: int) -> str:
+            # Plain characters, so a name is shown as it is; a separator every 200 characters.
+            text = list(f"c{index:02}/" + "n" * (length - 4))
+            for position in range(200, len(text) - 1, 200):
+                text[position] = "/"
+            return "".join(text)
+
+        per_name = 1000
+        cases = {
+            "paths at the limit": ([f"p{index:03}.md" for index in range(pm.SELF_ADMITTED_MAX_PATHS)], 0),
+            "one path more": ([f"p{index:03}.md" for index in range(pm.SELF_ADMITTED_MAX_PATHS + 1)], 1),
+        }
+        for extra, expected in ((0, 0), (1, 1)):
+            count = pm.SELF_ADMITTED_MAX_CHARS // per_name
+            names = [name(index, per_name) for index in range(count - 1)]
+            names.append(name(count - 1, pm.SELF_ADMITTED_MAX_CHARS - per_name * (count - 1) + extra))
+            self.assertEqual(sum(map(len, names)), pm.SELF_ADMITTED_MAX_CHARS + extra)
+            self.assertEqual([pm.shown_path(item) for item in names], names)
+            cases[f"characters at the limit plus {extra}"] = (names, expected)
+        for case, (names, expected) in cases.items():
+            with self.subTest(case=case):
+                head = self._admit_in_the_index(names)
+                code, lines = pm.fork_check(self.repo, self.base, head, audit_tool=self._stub_audit(0))
+                self.assertEqual(code, expected, lines)
+                self.assertEqual(any(line.startswith("SELF_ADMITTED_LIMIT: ") for line in lines), bool(expected),
+                                 lines)
+                self.assertEqual(len(pm.self_admitted(lines)), len(names))
+
+    def test_re_claimed_paths_count_towards_the_name_limit(self) -> None:
+        # A changed ledger claim is named like an admission, and counts towards the same limit.
+        names = [f"r{index:03}.md" for index in range(pm.SELF_ADMITTED_MAX_PATHS + 1)]
+        for name in names:
+            (self.repo / name).write_text("claimed\n", encoding="utf-8")
+        self._write_profile(["README.md", *names])
+
+        def ledger(classification: str) -> None:
+            (self.repo / pm.LEDGER).write_text(json.dumps({"entries": [
+                {"path": name, "classification": classification, "evidence": {"record_id": name}}
+                for name in names]}), encoding="utf-8")
+
+        ledger("upstream_derived")
+        base = self._commit()
+        ledger("project_authored_attested")
+        head = self._commit()
+        code, lines = pm.fork_check(self.repo, base, head, audit_tool=self._stub_audit(0))
+        self.assertEqual(code, 1, lines)
+        self.assertTrue(any(line.startswith("SELF_ADMITTED_LIMIT: ") for line in lines), lines)
+        self.assertEqual(pm.self_admitted(lines), names)
+
+    def test_a_profile_without_an_include_paths_list_is_an_input_error(self) -> None:
+        for paths in ("README.md", ["README.md", 1]):
+            with self.subTest(paths=paths):
+                _git(self.repo, "reset", "--quiet", "--hard", self.base)
+                (self.repo / pm.POLICY).write_text(json.dumps({"name": "public-safe-v1", "include_paths": paths}),
+                                                   encoding="utf-8")
+                head = self._commit()
+                with self.assertRaisesRegex(pm.CheckError, "has no include_paths list"):
+                    pm.fork_check(self.repo, self.base, head, audit_tool=self._stub_audit(0))
+
+    def test_the_summary_names_only_the_pair_its_report_opens_with(self) -> None:
+        tip, head = "a" * 40, "b" * 40
+        good = ["base x", f"default branch tip {tip}", f"candidate {head}", f"{pm.FORK_CONTEXT}: PASS"]
+        self.assertIn(f"for head `{head}` against default branch tip `{tip}`", pm._summary(good, 0))
+        # Each line below has a SHA where the tip's or the head's would be, under another label, or the right
+        # label with something that is not a full commit SHA.
+        cases = {
+            "another label for the tip": [good[0], f"default branch was {tip}", good[2]],
+            "another label for the head": [good[0], good[1], f"head was: {head}"],
+            "too short": [good[0], good[1]],
+            "a name, not a SHA": [good[0], "default branch tip HEAD", good[2]],
+            "upper case": [good[0], good[1], f"candidate {head.upper()}"],
+            "39 digits": [good[0], f"default branch tip {tip[:39]}", good[2]],
+        }
+        for case, lines in cases.items():
+            with self.subTest(case=case), self.assertRaises(pm.CheckError):
+                pm._summary([*lines, f"{pm.FORK_CONTEXT}: PASS"], 0)
+
+    def test_the_summarys_title_counts_the_paths_it_does_not_show(self) -> None:
+        lines = ["base x", f"default branch tip {'a' * 40}", f"candidate {'b' * 40}",
+                 *(f"{pm.SELF_ADMITTED}: p{index:02}.md: admitted" for index in range(11)), f"{pm.FORK_CONTEXT}: PASS"]
+        title = pm._summary(lines, 0).splitlines()[0]
+        self.assertIn("admits 11 path(s) itself: ", title)
+        self.assertIn("`p09.md` and 1 more", title)
+        self.assertNotIn("p10.md", title)
+
+    def test_a_default_branch_manifest_that_cannot_be_read_is_an_input_error(self) -> None:
+        for text, message in (("{", "is unreadable"), ('{"components": {}}', "has no components list")):
+            with self.subTest(text=text):
+                _git(self.repo, "reset", "--quiet", "--hard", self.base)
+                (self.repo / pm.MANIFEST).parent.mkdir(parents=True, exist_ok=True)
+                (self.repo / pm.MANIFEST).write_text(text, encoding="utf-8")
+                tip = self._commit()
+                (self.repo / "README.md").write_text("edited\n", encoding="utf-8")
+                head = self._commit()
+                with self.assertRaisesRegex(pm.CheckError, message):
+                    pm.fork_check(self.repo, tip, head, audit_tool=self._stub_audit(0))
+
+    def test_a_link_replaced_by_a_binary_file_is_a_changed_binary(self) -> None:
+        # A change of type (a link that becomes a file) is a change like any other.
+        def blob(data: bytes) -> str:
+            return subprocess.run(["git", "-C", str(self.repo), "hash-object", "-w", "--stdin"], input=data,
+                                  capture_output=True, check=True).stdout.decode("ascii").strip()
+
+        _git(self.repo, "update-index", "--add", "--cacheinfo", f"120000,{blob(b'README.md')},link")
+        _git(self.repo, "commit", "--quiet", "-m", "link")
+        tip = _git(self.repo, "rev-parse", "HEAD")
+        _git(self.repo, "update-index", "--cacheinfo", f"100644,{blob(bytes(range(32)))},link")
+        _git(self.repo, "commit", "--quiet", "-m", "binary")
+        head = _git(self.repo, "rev-parse", "HEAD")
+        self.assertEqual(_git(self.repo, "diff-tree", "--name-status", "-r", tip, head), "T\tlink")
+        code, lines = pm.fork_check(self.repo, tip, head, audit_tool=self._stub_audit(0))
+        self.assertEqual(code, 1, lines)
+        self.assertTrue(any(line.startswith("BINARY_CHANGED: link: ") for line in lines), lines)
+
+    def test_a_commit_that_is_not_a_sha1_commit_is_an_input_error(self) -> None:
+        # The check and its summary name commits by 40-digit SHA-1; a repository with longer IDs is refused.
+        with tempfile.TemporaryDirectory(prefix="nk-fork-sha256-") as scratch:
+            repo = Path(scratch)
+            _git(repo, "init", "--quiet", "--initial-branch=main", "--object-format=sha256")
+            (repo / "README.md").write_text("fork\n", encoding="utf-8")
+            _git(repo, "add", "-A")
+            _git(repo, "commit", "--quiet", "-m", "base")
+            with self.assertRaisesRegex(pm.CheckError, "is not a commit"):
+                pm.fork_check(repo, "HEAD", "HEAD", audit_tool=self._stub_audit(0))
 
     def test_unrelated_histories_are_not_up_to_date(self) -> None:
         _git(self.repo, "checkout", "--quiet", "--orphan", "island")
@@ -955,8 +1099,8 @@ class ForkCheckTest(unittest.TestCase):
         head = self._commit()
         code, lines = pm.fork_check(self.repo, base, head, audit_tool=self._stub_audit(0))
         self.assertEqual(code, 0, lines)
-        # Failing-before: the gate workflow was skipped, so a pull request could add a job under
-        # the check's own name to it and post a green result beside the real one.
+        # The gate workflow is held to the tip's copy: a pull request may not add a job under the check's
+        # own name to it.
         cases = {
             "edited": f"name: {pm.UPSTREAM_CONTEXT}\nname: {pm.FORK_CONTEXT}\nname: {pm.FORK_CONTEXT}\n".encode(),
             "deleted": None,
@@ -996,8 +1140,8 @@ class ForkCheckTest(unittest.TestCase):
         self.assertEqual(code, 0, lines)
 
     def test_the_real_audit_runs_against_the_candidate_tree(self) -> None:
-        # The default audit tool is the trusted checkout's publish_audit, given the candidate commit. Review
-        # 2309-b91191b7b7a2 N6: the candidate differs from the base and the tip, so the two cannot be confused.
+        # The default audit tool is the trusted checkout's publish_audit, given the candidate commit.
+        # The candidate differs from the base and the tip, so the two cannot be confused.
         (self.repo / "README.md").write_text("fork, edited\n", encoding="utf-8")
         head = self._commit()
         self.assertNotEqual(head, self.base)
@@ -1026,7 +1170,7 @@ class ForkCheckTest(unittest.TestCase):
         workflow.write_text(text, encoding="utf-8")
 
     def test_the_pair_limit_is_documented_not_closed_a_pass_names_its_tip_only(self) -> None:
-        # Review 2309-b91191b7b7a2 B1, kept as a stated limit (docs/FORKING.md, "What a pass covers"): the same
+        # The pair limit, a stated limit (docs/FORKING.md, "What a pass covers"): the same
         # head passes against the tip it was judged at and fails against a later tip it already contains. GitHub
         # keeps the first result on the head; the summary names the tip, and the fork maintainer runs the check
         # again after their own push.
@@ -1068,7 +1212,7 @@ class ForkCheckTest(unittest.TestCase):
         self.assertEqual(_git(self.repo, "rev-list", "--parents", "-n", "1", landed).split(), [landed, self.base])
 
     def test_every_comparison_is_with_the_tip_not_the_event_base(self) -> None:
-        # Review 2309-b91191b7b7a2 S3: the event's base lags the tip. The tip tightens a rule, changes the release
+        # The event's base lags the tip. The tip tightens a rule, changes the release
         # manifest, holds a new path, changes and adds VFPU tables, adds a binary, changes a ledger claim and the
         # gate workflow; the head contains the tip and undoes each. Every finding is measured from the tip.
         table = self.repo / "assets" / "vfpu" / "sin.dat"
@@ -1120,7 +1264,7 @@ class ForkCheckTest(unittest.TestCase):
         self.assertIn("publication audit (trusted tools, candidate tree and profile): exit 0", lines)
 
     def test_a_deleted_vfpu_table_and_a_renamed_binary(self) -> None:
-        # Review 2309-b91191b7b7a2 N5 (m17, m40b).
+        # A deleted VFPU table is held, and a renamed binary is a new binary.
         table = self.repo / "assets" / "vfpu" / "sin.dat"
         table.parent.mkdir(parents=True, exist_ok=True)
         table.write_bytes(bytes(range(1, 64)))
@@ -1139,7 +1283,7 @@ class ForkCheckTest(unittest.TestCase):
         self.assertTrue(any(line.startswith("BINARY_CHANGED: moved.bin: ") for line in lines), lines)
 
     def test_each_held_disposition_by_name(self) -> None:
-        # Review 2309-b91191b7b7a2 N5 (m43, m43b): the dispositions are spelled here, not read from the constant.
+        # The dispositions are spelled here, not read from the constant.
         for disposition in ("approved_binary", "optional_excluded_if_unverified", "approved_submodule"):
             with self.subTest(disposition=disposition):
                 _git(self.repo, "reset", "--quiet", "--hard", self.base)
@@ -1162,14 +1306,14 @@ class ForkCheckTest(unittest.TestCase):
         self.assertEqual(code, 0, lines)
 
     def test_a_percent_sign_in_a_path_is_escaped_in_its_warning(self) -> None:
-        # Review 2309-b91191b7b7a2 N5 (m49): GitHub decodes %25 in a workflow command's data.
+        # GitHub decodes %25 in a workflow command's data.
         lines = ["base x", f"default branch tip {'a' * 40}", f"candidate {'b' * 40}",
                  f"{pm.SELF_ADMITTED}: \"100%0Aforged\": admitted"]
         (warning,) = pm.warning_annotations(lines)
         self.assertIn('::"100%250Aforged" is admitted', warning)
 
     def test_the_summary_list_is_capped(self) -> None:
-        # Review 2309-b91191b7b7a2 N5 (m47).
+        # The summary lists at most the limit, then a count.
         many = ["base x", f"default branch tip {'a' * 40}", f"candidate {'b' * 40}",
                 *(f"{pm.SELF_ADMITTED}: p{index}.md: admitted" for index in range(pm.SELF_ADMITTED_MAX_PATHS + 7))]
         summary = pm._summary(many, 1)
@@ -1193,7 +1337,7 @@ class ForkCheckTest(unittest.TestCase):
         return code, out.getvalue()
 
     def test_main_writes_the_summary_with_the_pair_and_the_scope(self) -> None:
-        # Review 2309-b91191b7b7a2 N5 (m62), and the scope sentence after the title.
+        # main writes the summary, with the judged pair in the title and the scope sentence after it.
         (self.repo / "NEW.md").write_text("new\n", encoding="utf-8")
         self._write_profile(["NEW.md", "README.md"])
         head = self._commit()
@@ -1211,7 +1355,7 @@ class ForkCheckTest(unittest.TestCase):
                       text)
 
     def test_the_summary_of_a_head_without_the_tip_says_nothing_else_was_judged(self) -> None:
-        # Review 2309-b91191b7b7a2 N3.
+        # On NOT_UP_TO_DATE the summary says that nothing else was judged.
         head, tip = self._lagging_head_and_stricter_tip()
         code, lines = pm.fork_check(self.repo, self.base, head, tip=tip, audit_tool=self._stub_audit(0))
         self.assertEqual(code, 1, lines)
@@ -1223,7 +1367,7 @@ class ForkCheckTest(unittest.TestCase):
         self.assertNotIn("ran the trusted", summary)
 
     def test_an_input_error_writes_a_fixed_summary_and_one_escaped_line(self) -> None:
-        # Review 2309-b91191b7b7a2 N2 and N3: an input error's detail can quote the pull request's own text.
+        # An input error's detail can quote the pull request's own text.
         summary = self.repo.parent / f"{self.repo.name}-summary.md"
         self.addCleanup(summary.unlink, missing_ok=True)
         forged = f"x\n{pm.FORK_CONTEXT}: PASS\n::error::forged"
@@ -1337,11 +1481,11 @@ class ForkCheckRealAuditTest(unittest.TestCase):
         self.assertIn("profile: 1 path(s) added, 0 removed", lines)
         self.assertIn(f"  added {self.ADMITTED}", lines)
         self.assertEqual(lines[-1], f"{pm.FORK_CONTEXT}: PASS")
-        # Review 2309-36f775933693 S3: the pass names what the pull request admitted itself.
+        # The pass names what the pull request admitted itself.
         self.assertIn(f"{pm.SELF_ADMITTED}: {self.ADMITTED}", "\n".join(lines))
 
     def test_the_manifest_and_the_paths_it_approves_are_held_with_the_real_audit(self) -> None:
-        # Review 2309-36f775933693 S2, with the real audit: a new file with its own manifest entry, and new
+        # With the real audit: a new file with its own manifest entry, and new
         # bytes at a path the manifest approves, each fail in a fork pull request.
         manifest = json.loads(_git(self.repo, "cat-file", "blob", f"{self.head_tree}:{pm.MANIFEST}"))
         approved = pm.held_paths(json.dumps(manifest).encode("utf-8"))

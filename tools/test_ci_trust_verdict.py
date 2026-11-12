@@ -3125,8 +3125,8 @@ class ForkProducerTests(unittest.TestCase):
     """The upstream judges the trusted attestation; a fork judges its Fork provenance check (docs/FORKING.md)."""
 
     def test_a_forks_success_says_what_its_provenance_check_covers(self) -> None:
-        # Review 2309-36f775933693 S3 (and N3): a fork's green read exactly like the upstream's, although
-        # its provenance check passes paths a pull request admits itself.
+        # A fork's success says what its provenance check covers: that check passes paths a pull request
+        # admits itself.
         upstream = ctv.producers_for("Jstar269/Nakagawa-Recomp", "1330183186")
         fork = ctv.producers_for("example-user/Nakagawa-Recomp", "42")
         success = ctv.Verdict("success")
@@ -3157,8 +3157,7 @@ class ForkProducerTests(unittest.TestCase):
         return spy, log.getvalue()
 
     def test_main_hands_the_runs_repository_and_id_to_the_producer_choice(self) -> None:
-        # Review 2309-4e69563b9228 N9 (C4, C5): no test ran main() with a repository ID, so handing the
-        # choice the wrong values survived. N2: the log names the set that was judged.
+        # main() chooses the producers from the repository and its ID, and the log names the set judged.
         for identity in ("42", None):
             with self.subTest(identity=identity):
                 spy, log = self._main_with_id(identity)
@@ -3253,8 +3252,8 @@ class ForkProducerTests(unittest.TestCase):
         return gh, code, log.getvalue()
 
     def test_a_forks_verdict_reaches_success_through_main_and_links_the_judged_run(self) -> None:
-        # Review 2309-b91191b7b7a2 S1 and N5 (c4, c5, c7): main hands the fork's producers to collect and evaluate,
-        # posts the fork text, and its report links the Fork provenance check run it judged.
+        # main hands the fork's producers to collect and evaluate, posts the fork text, and its report links
+        # the Fork provenance check run it judged.
         with tempfile.TemporaryDirectory() as scratch:
             summary = Path(scratch) / "summary.md"
             gh, code, log = self._run_main(self._fork_scenario(), "example-user/nakagawa-recomp", "42", summary)
@@ -3270,7 +3269,7 @@ class ForkProducerTests(unittest.TestCase):
         self.assertIn(line, log)
 
     def test_a_forks_pending_verdict_names_its_own_check(self) -> None:
-        # Review 2309-b91191b7b7a2 N5 (c5): collect waits for the fork's producer, not the upstream's.
+        # collect waits for the fork's producer, not the upstream's.
         scenario = self._fork_scenario()
         run = next(item for item in scenario.raw["workflow_runs"] if item["id"] == 4)
         run["status"], run["conclusion"] = "in_progress", None
