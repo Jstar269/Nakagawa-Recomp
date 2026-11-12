@@ -947,8 +947,10 @@ manifest already waives:
   whose file the base has.
 * The pin must be as the base has it, so the pull request did not touch the approval, or be exactly the file's
   SHA-256; the second is how a pull request corrects a pin that does not match the file the base carries.
-* Every refused waiver is reported, whether or not the file's bytes raise a binary finding, so the base never
-  comes to hold a waiver or a pin that this check refuses.
+* Every refused waiver for a file the audited tree carries is reported, whether or not its bytes raise a binary
+  finding, so the base never comes to hold such a waiver or pin that this check refuses. A component for a path
+  the tree does not carry is not compared with the base: the path can only appear later with an admission, and
+  that pull request is held to the base like any other.
 * A VFPU table the base carries is exempt only as the bytes the base carries.
 
 A path the base neither carries nor waives is new. The candidate's own pin applies to it, a new VFPU table is
@@ -956,8 +958,9 @@ exempt by its path, and whether the path may be published is the admission's dec
 accepts any content for its path until the pull request lands ([V4 policy deltas](#v4-policy-deltas)); a
 byte-bound one (`"binding": "bytes"`) approves exactly one file.
 
-The audit has no input that approves new bytes at a path the base already holds. Replacing an approved binary or
-a VFPU table in place, or changing the kind of a waiver in place, therefore fails the trusted attestation. Until
+The audit has no input that approves new binary bytes at a path the base already holds. Replacing an approved
+binary or a VFPU table in place with other binary bytes, or changing the kind of a waiver in place for such
+bytes, therefore fails the trusted attestation; text in its place is audited as text. Until
 the trusted side records such an approval, a replacement lands as a new path: the new file under a new name with
 its own manifest component, the old file and its component removed, and the profile change admitted by the
 maintainer. A local run without `--trusted-base` (pre-commit, `contrib-check`, the hygiene job) compares the
