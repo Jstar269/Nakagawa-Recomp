@@ -144,6 +144,41 @@ static void cell_parse(void) {
         snprintf(spec, sizeof(spec), "%s;tier=ace;load=fast;load=off", base);
         CHECK(ace_parse(spec, &c, why, sizeof(why)) == 0 && strcmp(why, "duplicate key") == 0, "a duplicate load");
     }
+    /* depth (contract 10.20, 11.3.12): optional; depth=32 is an Enhanced part (no tier=ace needed),
+       depth=off and a missing key are the PSP's 16 bits, any other value is refused, and it is
+       written after load and before cull, only when on. */
+    {
+        static const char base[] = "v1;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off;twin=off";
+        char spec[ACE_SPEC_MAX], out[ACE_SPEC_MAX];
+        CHECK(ace_parse(base, &c, why, sizeof(why)) == 1 && c.depth == 0, "a missing depth is 16-bit");
+        snprintf(spec, sizeof(spec), "%s;depth=off", base);
+        CHECK(ace_parse(spec, &c, why, sizeof(why)) == 1 && c.on && c.depth == 0, "depth=off is 16-bit");
+        snprintf(spec, sizeof(spec), "%s;depth=32", base);
+        CHECK(ace_parse(spec, &c, why, sizeof(why)) == 1 && c.on && c.depth == 32 && c.tier == ACE_TIER_ENHANCED,
+              "depth=32 in an Enhanced line");
+        CHECK(ace_format(&c, out, sizeof(out)) && strcmp(out + strlen(out) - 9, ";depth=32") == 0,
+              "a line with depth=32 formats with the key last (%s)", out);
+        c.tier = ACE_TIER_ACE;
+        c.load = 1;
+        c.cull = 1;
+        CHECK(ace_format(&c, out, sizeof(out)) && strcmp(out + strlen(out) - 27, ";load=fast;depth=32;cull=on") == 0,
+              "load, then depth, then cull, which stays last (%s)", out);
+        CHECK(ace_parse(out, &c, why, sizeof(why)) == 1 && c.depth == 32 && c.load == 1 && c.cull == 1,
+              "the formatted line parses back (%s)", why);
+        c.depth = 0;
+        CHECK(ace_format(&c, out, sizeof(out)) && strstr(out, "depth") == NULL, "off writes no depth key (%s)", out);
+        snprintf(spec, sizeof(spec), "%s;tier=ace;depth=32", base);
+        CHECK(ace_parse(spec, &c, why, sizeof(why)) == 1 && c.depth == 32 && c.tier == ACE_TIER_ACE,
+              "depth=32 in an Ace line");
+        static const char *const bad[] = { "16", "24", "on", "1", "32f", "D32", "" };
+        for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+            snprintf(spec, sizeof(spec), "%s;depth=%s", base, bad[i]);
+            CHECK(ace_parse(spec, &c, why, sizeof(why)) == 0 && c.on == 0 && c.depth == 0,
+                  "depth=%s is refused (%s)", bad[i], why);
+        }
+        snprintf(spec, sizeof(spec), "%s;depth=32;depth=off", base);
+        CHECK(ace_parse(spec, &c, why, sizeof(why)) == 0 && strcmp(why, "duplicate key") == 0, "a duplicate depth");
+    }
     /* Every key but tier is required, whatever its place: leaving out any one of them refuses
        the line, leaving out tier does not (src/rt/ace.c names the required keys one by one). */
     {
@@ -230,7 +265,7 @@ static void cell_parse(void) {
 
     /* format and parse agree */
     char line[ACE_SPEC_MAX];
-    AceConfig a = { 1, 4, 0, 1, 0, 0, 0, ACE_TIER_ENHANCED, ACE_SAS_OFF, 0, 0, 0, 0, 0 }, b;
+    AceConfig a = { 1, 4, 0, 1, 0, 0, 0, ACE_TIER_ENHANCED, ACE_SAS_OFF, 0, 0, 0, 0, 0, 0 }, b;
     CHECK(ace_format(&a, line, sizeof(line)) && ace_parse(line, &b, NULL, 0) &&
           memcmp(&a, &b, sizeof(a)) == 0, "format round trip (%s)", line);
     CHECK(ace_format(&a, line, 8) == 0 && line[0] == '\0', "format refuses a short buffer");
@@ -283,7 +318,7 @@ static void cell_parse(void) {
         const AceConfig l = { .on = 1, .af = 16, .wide = ACE_WIDE_FILL,
                               .smooth = ACE_SMOOTH_MATCH, .tier = ACE_TIER_ENHANCED,
                               .sas = ACE_SAS_SINC, .cull = 1, .stick = ACE_STICK_COUNTS_MAX,
-                              .load = 1 };
+                              .load = 1, .depth = 32 };
         char longest[512];
         const size_t longest_len = ace_longest_line(longest, sizeof(longest));
         char edge[ACE_SPEC_MAX + 1];
@@ -402,6 +437,25 @@ static void cell_switch(void) {
     CHECK(ace_effective()->cull == 0 && ace_requested()->cull == 1 &&
           ace_report_json(json, sizeof(json)) > 0 && strstr(json, "\"cull\": false") != NULL &&
           strstr(json, "partial: test") != NULL, "a partial cull run is reported unavailable:\n%s", json);
+
+    /* depth=32 (contract 10.20): the stamp's line and the report carry it; a device without the
+       format (ge_gpu.c) makes it unavailable, and the report says 16. */
+    CHECK(ace_init_spec(k_good, NULL) == 1 && ace_effective()->depth == 0 &&
+          ace_report_json(json, sizeof(json)) > 0 && strstr(json, "\"depth\"") == NULL,
+          "a run without depth reports none:\n%s", json);
+    CHECK(ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;twin=off;depth=32",
+                        NULL) == 1 && ace_effective()->depth == 32, "depth=32 in an Enhanced line turns it on");
+    CHECK(strcmp(ace_spec_text(), "v1;tier=enhanced;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;"
+                                  "sas=off;tess=off;twin=off;depth=32") == 0,
+          "the stamp's line carries depth=32: '%s'", ace_spec_text());
+    CHECK(ace_report_json(json, sizeof(json)) > 0 && strstr(json, "\"depth\": 32") != NULL,
+          "the report carries depth 32:\n%s", json);
+    CHECK(ace_feature_words(json, sizeof(json)) > 0 && strstr(json, "32-bit depth") != NULL,
+          "the badge words name 32-bit depth: '%s'", json);
+    ace_feature_unavailable(ACE_FEATURE_DEPTH, "no D32: test");
+    CHECK(ace_effective()->depth == 0 && ace_requested()->depth == 32 &&
+          ace_report_json(json, sizeof(json)) > 0 && strstr(json, "\"depth\": 16") != NULL &&
+          strstr(json, "no D32: test") != NULL, "a device without D32 reports depth 16:\n%s", json);
 
     /* load=fast (contract 11.3.10): the switch nk_ace_load_skip_wait() asks at a declared wait that
        would block (src/rt/hle_display.c, tested in hle-thread-selftest). Off, and in an

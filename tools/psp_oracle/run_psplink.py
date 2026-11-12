@@ -1207,6 +1207,11 @@ def _parse_usbipd_psplink_devices(output: str) -> list[tuple[str, str]]:
 
 DEFAULT_TRANSPORT_START_TIMEOUT = 60.0
 _SERVER_OUTPUT_TAIL_LINES = 8
+# usbhostfs_pc reads shell commands on stdin; `exit` runs its exit_app, which releases the PSPLink
+# USB interface and resets the device before the process ends (psplinkusb usbhostfs_pc/main.c).
+USBHOSTFS_EXIT_COMMAND = "exit\n"
+USBHOSTFS_EXIT_TIMEOUT = 5.0
+_USBHOSTFS_NOT_RELEASED = "terminated, so the PSPLink USB interface was not released"
 
 
 class TransportStartError(RuntimeError):
@@ -1255,6 +1260,7 @@ class PsplinkProcessTransport:
         self.popen_factory = popen_factory
         self.start_timeout = start_timeout
         self.start_detail: str | None = None
+        self.stop_detail: str | None = None
         self.server: subprocess.Popen | None = None
         self._server_output_thread: threading.Thread | None = None
         self._server_state = threading.Condition()
@@ -1304,7 +1310,7 @@ class PsplinkProcessTransport:
         self.server = self.popen_factory(
             self._server_argv(),
             cwd=self.host0_root,
-            stdin=subprocess.DEVNULL,
+            stdin=subprocess.PIPE,  # stop() sends usbhostfs_pc its own `exit` command
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -1560,16 +1566,38 @@ class PsplinkProcessTransport:
         self.start()
 
     def stop(self) -> None:
+        """Stop the owned usbhostfs_pc, through its own `exit` command first.
+
+        `exit` makes usbhostfs_pc release the PSPLink USB interface and reset the
+        device before it ends. Terminating it skips that: on Windows the runner
+        owns the wsl.exe that started it, and terminating wsl.exe ends the Linux
+        process with SIGHUP, which usbhostfs_pc does not handle. The next
+        usbhostfs_pc then finds the device in its old state; its first connection
+        drops and reconnects about a second later, and the first PSPLink command
+        sent in that window gets no reply (PSP-3000, 2026-11-11, #352). Terminate
+        and kill stay as the fallback for a server that does not exit.
+        """
         server, self.server = self.server, None
+        self.stop_detail = None
         if server is None:
             return
-        if server.poll() is None:
-            server.terminate()
+        if server.poll() is not None:
+            self.stop_detail = "usbhostfs_pc had already exited"
+        else:
+            exited, self.stop_detail = self._request_server_exit(server)
+            if not exited:
+                server.terminate()
+                try:
+                    server.wait(timeout=2.0)
+                except subprocess.TimeoutExpired:
+                    server.kill()
+                    server.wait(timeout=2.0)
+        stdin = getattr(server, "stdin", None)
+        if stdin is not None and not stdin.closed:
             try:
-                server.wait(timeout=2.0)
-            except subprocess.TimeoutExpired:
-                server.kill()
-                server.wait(timeout=2.0)
+                stdin.close()
+            except OSError:
+                pass
         if self._server_output_thread is not None:
             self._server_output_thread.join(timeout=0.2)
             self._server_output_thread = None
@@ -1579,6 +1607,37 @@ class PsplinkProcessTransport:
             self._server_polling = False
             self._link_up = False
             self._server_state.notify_all()
+
+    @staticmethod
+    def _request_server_exit(server: subprocess.Popen) -> tuple[bool, str]:
+        """Send `exit` on the server's stdin; return (process ended, what happened).
+
+        The exit status is not checked: after exit_app has released and reset
+        the device, libusb can abort the process during exit (status 134).
+        """
+        stdin = getattr(server, "stdin", None)
+        if stdin is None or stdin.closed:
+            return False, f"usbhostfs_pc has no command input; {_USBHOSTFS_NOT_RELEASED}"
+        try:
+            stdin.write(USBHOSTFS_EXIT_COMMAND)
+            stdin.flush()
+            stdin.close()
+        except (OSError, ValueError) as exc:
+            if server.poll() is not None:
+                # It ended on its own: whether exit_app ran is not known.
+                return True, "usbhostfs_pc ended before its `exit` command could be sent"
+            return False, (
+                f"usbhostfs_pc's `exit` command could not be sent ({type(exc).__name__}); "
+                f"{_USBHOSTFS_NOT_RELEASED}"
+            )
+        try:
+            server.wait(timeout=USBHOSTFS_EXIT_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            return False, (
+                f"usbhostfs_pc did not exit within {USBHOSTFS_EXIT_TIMEOUT:g}s of its `exit` "
+                f"command; {_USBHOSTFS_NOT_RELEASED}"
+            )
+        return True, "usbhostfs_pc exited after its `exit` command"
 
 
 class PsplinkCampaignRunner:
@@ -1733,6 +1792,14 @@ class PsplinkCampaignRunner:
             self._ok(usbstat) and "established" in usbstat[1].lower()
             and self._ok(pwd) and "host0:/" in pwd[1]
         )
+
+    def _record_restart_details(self) -> None:
+        """Record how L1 stopped the owned usbhostfs_pc and how the new one started."""
+
+        for label, attribute in (("stop", "stop_detail"), ("transport start", "start_detail")):
+            detail = getattr(self.transport, attribute, None)
+            if isinstance(detail, str) and detail:
+                self.recovery_events.append(f"L1: {label}: {detail}")
 
     def _qualify(self) -> bool:
         if not self._shell_qualified():
@@ -2108,11 +2175,13 @@ class PsplinkCampaignRunner:
                 try:
                     self.transport.restart()
                 except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+                    self._record_restart_details()
                     self.recovery_events.append(
                         "L1: host stack restart raised "
                         f"{type(exc).__name__}; continue to L2"
                     )
                 else:
+                    self._record_restart_details()
                     restart_succeeded = True
                 if self.terminal_reason is not None:
                     return False

@@ -3406,8 +3406,9 @@ VFPU_RAW_WORD_CASES = frozenset({"vfpu-transcendental-corpus"})
 #: Cases whose every cell is an unconditional observation: each record is PASS. hle-io-seek,
 #: hle-io-seek-edges, hle-nickname-limit and hle-self-stop-unload are in this set too: their SKIP rows only keep the
 #: word count when a precondition is missing (the ms0: directory already exists, the registry
-#: does not open) and their FAIL rows mean a probe-owned object could not be set up, so a stream
-#: with either is not a measurement of the cells it names.
+#: does not open) and their FAIL rows mean a probe-owned object could not be set up or, for the
+#: two io-seek cases' ms cleanup row, that the probe's ms0: directory is still there afterwards; a
+#: stream with either is not a measurement of the cells it names.
 HLE_OBSERVATION_CASES = frozenset({"hle-issues-batch", "vfpu-forms", "intr-cause", "vfpu-forms2",
                                    "vfpu-funnel", "vfpu-sort", "vfpu-unmodeled", "vfpu-quad-wb", "vfpu-convert", "vfpu-cc-cmov", "vfpu-vus2i", "vfpu-basic-arith",
                                    "hle-io-seek", "hle-io-seek-edges", "hle-nickname-limit", "hle-self-stop-unload", "vfpu-wide-dot-matrix",

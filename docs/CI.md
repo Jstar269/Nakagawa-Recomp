@@ -1574,7 +1574,7 @@ and each token's remaining budget.
 
 | Code | Fails when |
 | --- | --- |
-| `CI_CHANGE_UNAPPROVED` | the head changes `.github/workflows/**`, `.github/actions/**`, `.pre-commit-config.yaml`, a CI tool (`tools/ci_paths.py`, `tools/ci_required.py`, `tools/ci_test_shards.py`, `tools/ci_test_weights.json`, `tools/requirements-lock.txt`, `tools/ci_trust_verdict.py`) or any `tools/` file a default-branch workflow runs, without a current approval: the `ci-change-approved` label and a record of this head's protected content written after it |
+| `CI_CHANGE_UNAPPROVED` | the head changes `.github/workflows/**`, `.github/actions/**`, `.pre-commit-config.yaml`, a CI tool (`tools/ci_paths.py`, `tools/ci_required.py`, `tools/ci_test_shards.py`, `tools/ci_test_weights.json`, `tools/requirements-lock.txt`, `tools/ci_trust_verdict.py`), the publication gate's code (`.gitattributes`, `tools/publish_audit.py`, `tools/policy_sync.py`, `tools/modified_file_notice_audit.py`, `tools/provenance_record_gap.py`, `tools/history_audit.py` and every module they load or run; `PROTECTED_EXTRA` in the verifier is the list), a `tools/` module named like a standard-library one (it would be imported in place of it) or any `tools/` file a default-branch workflow runs, without a current approval: the `ci-change-approved` label and a record of this head's protected content written after it |
 | `CI_DEFINITION_BEHIND` | `main` changed one of those files after the branch point; the integrator merges `main` when it lands the pull request; the author merges it only for a real conflict in content that is not generated, or when asked (`AGENTS.md` section 10). No label waives it |
 | `CI_CONTEXT_COLLISION` | another workflow names `Trusted CI verdict`, or a check run uses that name |
 | `FOREIGN_PRODUCER` | a check run or status under an intended context is not from the intended workflow path and event at this head |
@@ -1589,6 +1589,27 @@ quick one: `CI required` did not run and `CI quick checks` succeeded. The verdic
 description starts with the code, which is how the landing desk tells a head that is ready for a batch from
 one whose checks are still running. Any other way for `CI required` not to succeed stays `JOB_FAILED`, which
 names `CI quick checks` when that is the job that failed ([Quick and full checks](#quick-and-full-checks)).
+
+The publication gate's code is protected because nothing else refuses a file that is outside the
+publication profile and is not implementation, such as game data or a key. The trusted attestation judges
+the profile's paths and new implementation paths only, and the audit runs from the pull request's own
+checkout, in the hygiene and public-export jobs. Without the approval a pull request could loosen the
+audit and pass it in the same change. The trusted attestation (`provenance-attestation.yml`) also runs the
+default branch's own `publish_audit.py --committed-tree` over the candidate, reading its tree from the
+objects (`git ls-tree`, `git cat-file`) and auditing exactly the files that tree lists. No `.gitattributes`
+or `.gitignore` line, VCS-looking directory name or repository-shaped root of the candidate can hide or
+rewrite a file, and the audit runs no Git command in the written tree; its own Git commands use a bare
+repository only when they name one (`safe.bareRepository=explicit`). The
+merge-group observation (`provenance-attestation-merge-group.yml`) does not run it, as it is not a required
+check. `GateCodeTests` in `tools/test_ci_trust_verdict.py` fails when one of those tools gains a local
+import or a `tools/` script it runs that is not protected, or pre-commit gains a hook that is not.
+`tools/verify_sbom.py`, which the public-export job runs to check the SBOM, is exempt: it does not decide
+which files may be published, and it loads the analyzer and code generator. That step accepts its expected
+`PROVENANCE_UNVERIFIED` failure only when the tool printed no `[FAILED CLOSED]` line and no gate's `[FAIL]`
+line, and the token follows the tool's last `[ALL GATES PASSED]` line. So a gate's printed output cannot
+turn a failed gate into the expected result. Code that runs in the pull request's own job could still change
+files on disk, which no output check sees; the control against a changed audit is the trusted attestation's
+own run of the default branch's audit.
 
 Whatever the `CI_DEFINITION_BEHIND` finding text says, who merges `main`, and when, is decided by
 [`AGENTS.md` section 10](../AGENTS.md#10-pr-and-integration-authorization), as the row above states.
