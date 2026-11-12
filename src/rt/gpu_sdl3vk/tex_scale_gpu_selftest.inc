@@ -970,6 +970,31 @@ static int xst_cell_replace(int f) {
     xst_setenv("SR_TEX_REPLACE", dir);
     tex_repl_init(0);
     const int authentic_read = s_repl != NULL;
+    /* Contract 11.2 item 1: the listed texture drawn after that authentic start leaves the guest
+     * framebuffer byte for byte as a start without SR_TEX_REPLACE does. */
+    const size_t fb_bytes = (size_t)XST_STRIDE * FB_H * 4u;
+    uint8_t *fb_named = (uint8_t *)malloc(fb_bytes);
+    int authentic_same = 0;
+    if (fb_named) {
+        nk_tex_scale_set_sync(1);
+        xst_reset();
+        xst_upload(a);
+        xst_state(XST_BASE, XST_TEX, 3u, 1, 1);
+        s_tmpl_ok = 0;
+        int drew = xst_draw(20.0f, 140.0f);
+        memcpy(fb_named, SR_HOST(XST_BASE), fb_bytes);
+        tex_repl_shutdown();
+        xst_setenv("SR_TEX_REPLACE", NULL);
+        tex_repl_init(0);
+        xst_reset();
+        xst_upload(a);
+        xst_state(XST_BASE, XST_TEX, 3u, 1, 1);
+        s_tmpl_ok = 0;
+        drew = drew && xst_draw(20.0f, 140.0f);
+        authentic_same = drew && memcmp(fb_named, SR_HOST(XST_BASE), fb_bytes) == 0;
+        xst_setenv("SR_TEX_REPLACE", dir);
+        free(fb_named);
+    }
     tex_repl_shutdown();
     /* The off switch (contract 11.2 item 2): this harness's Enhanced line has no texpack=on, so an
      * Enhanced start with SR_TEX_REPLACE set reads no pack either. */
@@ -977,9 +1002,11 @@ static int xst_cell_replace(int f) {
     tex_repl_shutdown();
     xst_setenv("SR_TEX_REPLACE", NULL);
     s_repl = saved;
-    if (authentic_read || off_read || ace_requested()->texpack) {
+    if (authentic_read || !authentic_same || off_read || ace_requested()->texpack) {
         fprintf(stderr, "gpu texscale selftest: FAIL replace: %s\n",
                 authentic_read ? "an authentic start read SR_TEX_REPLACE"
+                : !authentic_same ? "an authentic start with SR_TEX_REPLACE set drew other framebuffer bytes "
+                                    "than one without it"
                 : off_read ? "an Enhanced start without texpack=on read SR_TEX_REPLACE"
                 : "the harness line carries texpack=on, so the off switch is not tested");
         free(rimg); free(wide);
@@ -1292,23 +1319,43 @@ int gegpu_texrepl_only_selftest(void) {
     tex_repl_init(1);
     const int named_game_read = s_repl != NULL;
     tex_repl_shutdown();
+    /* A folder whose name is outside any one ANSI code page (an accented letter and a CJK
+     * ideograph), named the way the launcher names it (the wide environment on Windows), is read:
+     * the runtime does not take the folder through the narrow getenv's code-page bytes. */
+    char wide_dir[400], wide_ini[480];
+    snprintf(wide_dir, sizeof(wide_dir), "%s/texrepl_gpu_pack_\xC3\xA9\xE6\xBC\xA2", SR_SELFTEST_BUILD_ROOT);
+    snprintf(wide_ini, sizeof(wide_ini), "%s/textures.ini", wide_dir);
+    FILE *fwide = nk_platform_mkdir_p(wide_dir) ? nk_fopen_utf8(wide_ini, "wb") : NULL;
+    const int wide_ok = fwide && fputs("[options]\nhash = quick\n", fwide) >= 0;
+    if (fwide) fclose(fwide);
+#ifdef _WIN32
+    wchar_t wide_value[400];
+    const int wide_set = swprintf(wide_value, 400, L"%hs/texrepl_gpu_pack_é漢", SR_SELFTEST_BUILD_ROOT) > 0 &&
+                         _wputenv_s(L"SR_TEX_REPLACE", wide_value) == 0;
+#else
+    const int wide_set = xst_setenv("SR_TEX_REPLACE", wide_dir);
+#endif
+    tex_repl_init(1);
+    const int wide_read = s_repl != NULL;
+    tex_repl_shutdown();
     xst_setenv("SR_DISC_ID", disc_copy[0] ? disc_copy : NULL);
     xst_setenv("SR_TEX_REPLACE", pack_copy);
     s_repl = drawn;
-    if (!ini_ok || !other_ok || unnamed_read || budget_read || malformed_read || other_game_read ||
-        no_disc_read || !named_game_read) {
+    if (!ini_ok || !other_ok || !wide_ok || !wide_set || unnamed_read || budget_read || malformed_read ||
+        other_game_read || no_disc_read || !named_game_read || !wide_read) {
         fprintf(stderr, "gpu texscale selftest: FAIL replace-only: %s\n",
-                !ini_ok || !other_ok ? "cannot write the refused packs"
+                !ini_ok || !other_ok || !wide_ok || !wide_set ? "cannot write the refused packs"
                 : unnamed_read ? "texpack=on with no SR_TEX_REPLACE read a pack"
                 : budget_read ? "SR_TEX_REPLACE_BUDGET_MB=0 read a pack"
                 : malformed_read ? "a textures.ini with no hash type read a pack"
                 : other_game_read ? "a pack whose [games] names another game was read"
                 : no_disc_read ? "a pack whose [games] names a game was read by a run with no SR_DISC_ID"
-                : "a pack was refused for the game its [games] names");
+                : !named_game_read ? "a pack was refused for the game its [games] names"
+                : "a pack in a folder with a non-ASCII name was refused");
         return 0;
     }
     printf("gpu texscale selftest: PASS %-12s texpack=on with no folder, a bad budget, a malformed pack or "
-           "another game's pack reads none; a pack is read for the game it names\n",
+           "another game's pack reads none; a pack is read for the game it names and from a non-ASCII folder\n",
            "replace-only");
     return 1;
 }

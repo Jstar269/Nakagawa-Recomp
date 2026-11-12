@@ -4850,9 +4850,12 @@ static int tex_repl_find(const TexEnt *e, NkTexReplHit *hit, int *factor) {
  * skipped=. */
 static void tex_repl_init(int enhanced) {
     s_repl = NULL;
-    const char *dir = getenv("SR_TEX_REPLACE");
+    /* Read through the wide environment on Windows: the player names the folder in UTF-8 and the
+     * launcher passes it as UTF-16, which the narrow getenv would turn into code-page bytes. */
+    static char dir[4096];
+    const int named = nk_platform_env_utf8("SR_TEX_REPLACE", dir, sizeof(dir));
     const int wanted = enhanced && ace_requested()->texpack;
-    if (!dir || !dir[0]) {
+    if (named == 0 || (named > 0 && !dir[0])) {
         if (wanted) {
             fprintf(stderr, "TEX_REPLACE: refused (texpack=on, but SR_TEX_REPLACE names no pack)\n");
             ace_feature_unavailable(ACE_FEATURE_TEXPACK, "no pack folder was named");
@@ -4865,6 +4868,12 @@ static void tex_repl_init(int enhanced) {
     }
     if (!wanted) {
         fprintf(stderr, "TEX_REPLACE: off (the launch line does not carry texpack=on)\n");
+        return;
+    }
+    if (named < 0) {
+        fprintf(stderr, "TEX_REPLACE: refused (SR_TEX_REPLACE is longer than %u bytes or not valid text); "
+                        "the game runs without the pack\n", (unsigned)(sizeof(dir) - 1u));
+        ace_feature_unavailable(ACE_FEATURE_TEXPACK, "the pack folder's name could not be read");
         return;
     }
     uint64_t budget = 0;

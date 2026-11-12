@@ -567,15 +567,17 @@ PLAY MODE closes the GAME card (the play modes, docs/ENHANCEMENT_CONTRACT.md sec
 default (AUTHENTIC: OPTIONS or ENHANCED: OPTIONS; Authentic for a new library), and it opens Settings > Enhanced, a
 dialog card in the same pattern: PLAY MODE, then one row per Enhanced part from the player's part table (TEXTURE
 FILTERING 16x, 8x, 4x, 2x, Off; CRISP SYSTEM TEXT; SPEED READOUT; GAME BADGE; WIDESCREEN; SMOOTH MOTION; CLEAN
-PITCHED SOUND; FINER PATCHES; WIDER CULLING; SHARPER ENLARGING; STICK DEAD ZONE; SHORT LOADS; FULL 32-BIT COLOUR; a
+PITCHED SOUND; FINER PATCHES; WIDER CULLING; SHARPER ENLARGING; STICK DEAD ZONE; SHORT LOADS; FULL 32-BIT COLOUR;
+SUPERSAMPLING; TEXTURE PACK; a
 new library has 16x filtering, crisp text and the badge on and the rest off, and a graphics preset sets SHARPER
 ENLARGING and CRISP SYSTEM TEXT in Enhanced and Ace, below), each beside a sentence that says what it does and what it
 costs. A new part is a new row with no change to the page. While the mode is
 Authentic the part rows are disabled (`dim`, not focusable) and keep their values. The title page's ENHANCEMENTS
 card shows PLAY MODE for every game (LIBRARY DEFAULT, AUTHENTIC, ENHANCED, and ACE only for a game with a usable
 package; `PRIMARY` while Enhanced or Ace is in effect, never the default focus), ENHANCED OPTIONS, which opens the
-same page for that game alone (its play mode, and each part on LIBRARY (16X) or its own value; Done returns
-to the title page), and, while Ace is in effect, Ace's 60 FPS switch in the same row. Under the buttons come what is
+same page for that game alone (its play mode, and each part on LIBRARY (16X) or its own value, then TEXTURE PACK
+FOLDER, which picks the game's pack folder and shows its name and texture count or None, and, with a pack chosen,
+REMOVE TEXTURE PACK; Done returns to the title page), and, while Ace is in effect, Ace's 60 FPS switch in the same row. Under the buttons come what is
 on and, as its own `BODY_S` `muted` paragraph, the last session. Both sentences wrap whole, however many parts are
 on: the page body scrolls, so the card grows instead of ending either one in an ellipsis. A library card where Enhanced or Ace is in effect carries an `ENHANCED` or `ACE` badge at the
 art's top right. In game, the pause menu's caption names the mode and its parts and its Settings page has a live

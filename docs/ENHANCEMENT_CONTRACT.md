@@ -2295,14 +2295,16 @@ The feature of section 10.12 (#1880). Its presentation is described there; this 
   the pack is not read whatever the environment says.
 - **Authentic stays byte-identical (section 11.2, item 1).** With the line `off`, `g_ace_on` stays 0 and
   `tex_repl_init` reads no pack; `gpu-texscale-selftest`'s `replace` cell starts the renderer authentic and with an
-  Enhanced line without the key, with `SR_TEX_REPLACE` set, and checks that neither reads the pack.
+  Enhanced line without the key, with `SR_TEX_REPLACE` set, and checks that neither reads the pack; it also draws a
+  texture the pack lists after the authentic start and compares the guest framebuffer, byte for byte, with the same
+  draw after a start without `SR_TEX_REPLACE`.
 - **Nothing worse (section 11.2, item 4):** not shown. A pack is the user's own content, so what it does to a title
   is the pack's; the runs item 4 lists, for a title and a pack, do not exist yet, and the feature may not be on by
   default before they do.
 - **Per-title off switch (section 11.2, item 5).** None. No title is known to regress with a pack on, and a pack is
   chosen title by title.
 - **Evidence tools (section 11.2, item 6).** The flight recorder's `runtime.enhancements` carries `texpack=on` with the
-  rest of the launch line (its `ace` string now holds the parser's 191 characters, so a line with `cull=on` and
+  rest of the launch line (its `ace` string holds the parser's 191 characters, so a line with `cull=on` and
   `texpack=on` is kept whole), the run's report names `texpack` and whether it was available, and section 10.4's
   refusals apply to the run unchanged.
 

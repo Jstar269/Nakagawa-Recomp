@@ -224,8 +224,9 @@ typedef enum {
 
 /* Enhanced's parts. Each is one row of player_enhanced_part(), and the enum's order is the
    Enhanced pages' row order and the settings file's order, so a new part is appended at the end.
-   The SR_ACE line has its own fixed key order (k_launch_line_order in player_state.c), where a
-   part that the line carries takes its place. A part's value 0 is off. */
+   The SR_ACE line has its own fixed key order (ace_format's; player_play_launch_line writes the
+   later keys, stick to cull, in that order after the others), where a part that the line carries
+   takes its place. A part's value 0 is off. */
 typedef enum {
     PLAYER_PART_FILTERING = 0, /* texture filtering: 0, 2, 4, 8 or 16 */
     PLAYER_PART_TEXT,          /* crisp system text (the on-screen keyboard): 0 or 1 */
