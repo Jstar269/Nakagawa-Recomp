@@ -228,6 +228,7 @@ void sr_tail_fatal(const char *what, uint32_t target) {
     abort();
 }
 uint64_t sr_perf_now_ns_impl(void) { return 0; }
+void sr_perf_exclude_thread(void) {}
 void sr_perf_guest_begin(void) {}
 void sr_perf_guest_end(void) {}
 void sr_perf_guest_idle_wait(uint64_t started_ns) { (void)started_ns; }
@@ -3385,6 +3386,217 @@ static void test_idle_wait_runs_a_wait_that_came_due(void) {
     s_host_ns_fn = NULL;
 }
 
+/* #1296: a virtual clock with nothing to run goes to a deadline that comes before the next
+ * VBLANK, as the paced clock sleeps to it. It used to add a whole display period, so a thread
+ * that waited 100 us for the UMD drive woke up to 16.7 ms late whenever it was the only one.
+ * MUTANT: without the virtual-clock branch in sched_idle_wait, the first check reads 16783 us
+ * (the slice and a display period), not 300. A deadline past the next VBLANK keeps the step. */
+static void test_idle_virtual_clock_stops_at_a_deadline_before_the_vblank(void) {
+    reset_sched();
+    begin_clock_fixture(0, 0u);
+    s_det_clock = 1;
+    s_det_slice_us = 100u;
+    s_vbl_next_us = 16683u;
+    int waiter = mk(0x237u, TH_WAIT_DELAY, 16);
+    s_tcb[waiter].wake = 300u;
+    s_cur = -1;
+    sched_idle_wait();
+    expect(s_vtime_us == 300u,
+           "idle wait, deterministic clock: a deadline before the vblank is reached exactly");
+    expect(s_pending_vblanks == 0u && !(s_pending_interrupts & SCHED_INTR_VBLANK),
+           "idle wait, deterministic clock: no vblank is raised on the way to that deadline");
+    expect(pick_next() == waiter && s_tcb[waiter].state == TH_READY,
+           "idle wait, deterministic clock: the thread whose wait ended runs next");
+
+    /* A deadline the slice itself reaches: the thread runs, with no display-period step. On
+     * turbo the slice is 10 ms.
+     * MUTANT: the due-waiter return in sched_idle_wait stays paced-only -- 16783 us, and a
+     *   vblank, where 100 us pass; on turbo 26683 us where 10 ms pass. */
+    reset_sched();
+    begin_clock_fixture(0, 0u);
+    s_det_clock = 1;
+    s_det_slice_us = 100u;
+    s_vbl_next_us = 16683u;
+    int brief = mk(0x23au, TH_WAIT_DELAY, 16);
+    s_tcb[brief].wake = 100u;
+    s_cur = -1;
+    sched_idle_wait();
+    expect(s_vtime_us == 100u && s_pending_vblanks == 0u && pick_next() == brief,
+           "idle wait, deterministic clock: a wait the slice reaches runs with no display-period step");
+    reset_sched();
+    begin_clock_fixture(0, 0u);
+    s_det_clock = 0;
+    s_vbl_next_us = 16683u;
+    int turbo_brief = mk(0x23bu, TH_WAIT_DELAY, 16);
+    s_tcb[turbo_brief].wake = 5000u;
+    s_cur = -1;
+    sched_idle_wait();
+    expect(s_vtime_us == 10000u && pick_next() == turbo_brief,
+           "idle wait, turbo clock: a wait the 10 ms slice reaches runs with no display-period step");
+
+    /* A deadline that is not a thread's to run (a transfer window's end) and that the slice
+     * reached: the idle wait returns with the clock at the slice, for its caller to serve it,
+     * and the thread still waiting is reached exactly on the next pass. The window is ended
+     * here by hand (sched_transfer_reset), standing in for the caller's pick_next, whose
+     * sched_transfer_window_step ends it in a run; the window has no owner thread in this cell.
+     * MUTANT: delete `if (source_due) return;` in sched_idle_wait -- the first pass goes on to
+     *   300 us, and the second to 400. */
+    reset_sched();
+    begin_clock_fixture(0, 0u);
+    s_det_clock = 1;
+    s_det_slice_us = 100u;
+    s_vbl_next_us = 16683u;
+    int behind = mk(0x23cu, TH_WAIT_DELAY, 16);
+    s_tcb[behind].wake = 300u;
+    s_xfer_obj = 0x5a5a0001u;
+    s_xfer_owner_uid = 0u;
+    s_xfer_reserved = 0;
+    s_xfer_deadline = 50u;
+    s_cur = -1;
+    sched_idle_wait();
+    expect(s_vtime_us == 100u && s_pending_vblanks == 0u,
+           "idle wait, deterministic clock: a due source that is not a thread's is left to the caller, with no step");
+    sched_transfer_reset();
+    sched_idle_wait();
+    expect(s_vtime_us == 300u && pick_next() == behind,
+           "idle wait, deterministic clock: the thread still waiting is then reached exactly");
+
+    /* A deadline after the next vblank: the clock steps one display period, as before. */
+    reset_sched();
+    begin_clock_fixture(0, 0u);
+    s_det_clock = 1;
+    s_det_slice_us = 100u;
+    s_vbl_next_us = 16683u;
+    int late = mk(0x238u, TH_WAIT_DELAY, 16);
+    s_tcb[late].wake = 20000u;
+    s_cur = -1;
+    sched_idle_wait();
+    expect(s_vtime_us == 100u + 16683u && s_tcb[late].state == TH_WAIT_DELAY,
+           "idle wait, deterministic clock: a deadline past the vblank keeps the display-period step");
+
+    /* A deadline already behind the clock (its thread is suspended) does not hold it. */
+    reset_sched();
+    begin_clock_fixture(0, 0u);
+    s_det_clock = 1;
+    s_det_slice_us = 100u;
+    s_vbl_next_us = 16683u;
+    int held = mk(0x239u, TH_WAIT_DELAY, 16);
+    s_tcb[held].wake = 50u;
+    s_tcb[held].suspended = 1;
+    s_cur = -1;
+    sched_idle_wait();
+    expect(s_vtime_us == 100u + 16683u,
+           "idle wait, deterministic clock: a deadline already passed leaves the display-period step");
+
+    /* The same suspended thread does not hide a later deadline: that one is reached exactly. */
+    reset_sched();
+    begin_clock_fixture(0, 0u);
+    s_det_clock = 1;
+    s_det_slice_us = 100u;
+    s_vbl_next_us = 16683u;
+    int stale = mk(0x23du, TH_WAIT_DELAY, 16);
+    s_tcb[stale].wake = 50u;
+    s_tcb[stale].suspended = 1;
+    int next = mk(0x23eu, TH_WAIT_DELAY, 16);
+    s_tcb[next].wake = 700u;
+    s_cur = -1;
+    sched_idle_wait();
+    expect(s_vtime_us == 700u && pick_next() == next,
+           "idle wait, deterministic clock: a deadline behind the clock does not hide the next one");
+    s_det_clock = 0;
+    s_det_slice_us = SCHED_DET_SLICE_US_DEFAULT;
+    s_host_ns_fn = NULL;
+}
+
+/* #2361: host work runs on the worker's thread, never the caller's; an item is done only when
+ * its call has returned; finishing reports how long the call took; and an abandoned item's
+ * context is dropped exactly once, by the worker when the call was still running and by the
+ * abandoning thread when it had finished.
+ * MUTANT: sched_host_work_abandon drops at once whatever the state -- the blocked call's
+ *   context is dropped while the call still uses it (dropped-while-running reads 1).
+ * MUTANT: the worker never drops an abandoned item -- its drop count stays 0.
+ * MUTANT: sched_host_work_done reads done before the call returns -- the first check fails. */
+typedef struct {
+    SDL_Semaphore *gate;       /* the call blocks on it; NULL = returns at once */
+    SDL_AtomicInt ran, running, dropped, dropped_while_running;
+    SDL_ThreadID thread;
+} HostWorkProbe;
+
+static void host_work_probe_run(void *ctx) {
+    HostWorkProbe *p = (HostWorkProbe *)ctx;
+    p->thread = SDL_GetCurrentThreadID();
+    SDL_SetAtomicInt(&p->running, 1);
+    if (p->gate) SDL_WaitSemaphore(p->gate);
+    SDL_AddAtomicInt(&p->ran, 1);
+    SDL_SetAtomicInt(&p->running, 0);
+}
+
+static void host_work_probe_drop(void *ctx) {
+    HostWorkProbe *p = (HostWorkProbe *)ctx;
+    if (SDL_GetAtomicInt(&p->running)) SDL_AddAtomicInt(&p->dropped_while_running, 1);
+    SDL_AddAtomicInt(&p->dropped, 1);
+}
+
+/* Wait (host time, 5 s at most) until *value reaches `want`. */
+static int host_work_probe_reaches(SDL_AtomicInt *value, int want) {
+    const uint64_t give_up = SDL_GetTicksNS() + 5000000000ull;
+    while (SDL_GetAtomicInt(value) < want && SDL_GetTicksNS() < give_up) SDL_Delay(1);
+    return SDL_GetAtomicInt(value) >= want;
+}
+
+static void test_host_work_runs_off_the_scheduler_thread(void) {
+    reset_sched();
+    begin_clock_fixture(0, 0u);
+    s_host_ns_fn = NULL;
+    expect(!sched_host_work_usable(),
+           "host work: a virtual clock, or no guest thread, keeps the caller's own call");
+
+    /* A call that blocks: not done until it returns, and it runs on another thread. */
+    static HostWorkProbe blocked;
+    memset(&blocked, 0, sizeof(blocked));
+    blocked.gate = SDL_CreateSemaphore(0);
+    SrHostWork *work = sched_host_work_submit(host_work_probe_run, host_work_probe_drop, &blocked);
+    expect(work != NULL && blocked.gate != NULL, "host work: an item is accepted");
+    if (!work || !blocked.gate) return;
+    expect(host_work_probe_reaches(&blocked.running, 1) && !sched_host_work_done(work),
+           "host work: the call is running and the item is not done while it blocks");
+    SDL_SignalSemaphore(blocked.gate);
+    expect(host_work_probe_reaches(&blocked.ran, 1), "host work: the released call returns");
+    const uint64_t give_up = SDL_GetTicksNS() + 5000000000ull;
+    while (!sched_host_work_done(work) && SDL_GetTicksNS() < give_up) SDL_Delay(1);
+    expect(sched_host_work_done(work) && blocked.thread != SDL_GetCurrentThreadID(),
+           "host work: the item is done once the call returned, on the worker's thread");
+    (void)sched_host_work_finish(work);
+    expect(SDL_GetAtomicInt(&blocked.dropped) == 0 && SDL_GetAtomicInt(&blocked.ran) == 1,
+           "host work: a finished item is not dropped: its context stays the submitter's");
+
+    /* Abandoned while the call still runs: the worker drops it after the call returns. */
+    static HostWorkProbe orphan;
+    memset(&orphan, 0, sizeof(orphan));
+    orphan.gate = blocked.gate;
+    work = sched_host_work_submit(host_work_probe_run, host_work_probe_drop, &orphan);
+    expect(work != NULL && host_work_probe_reaches(&orphan.running, 1), "host work: a second call is running");
+    sched_host_work_abandon(work);
+    expect(SDL_GetAtomicInt(&orphan.dropped) == 0,
+           "host work: an item abandoned while its call runs is not dropped yet");
+    SDL_SignalSemaphore(orphan.gate);
+    expect(host_work_probe_reaches(&orphan.dropped, 1) && SDL_GetAtomicInt(&orphan.dropped) == 1 &&
+               SDL_GetAtomicInt(&orphan.dropped_while_running) == 0 && SDL_GetAtomicInt(&orphan.ran) == 1,
+           "host work: the worker drops an abandoned item once, after its call returned");
+
+    /* Abandoned after the call returned: dropped at once, by the abandoning thread. */
+    static HostWorkProbe late;
+    memset(&late, 0, sizeof(late));
+    work = sched_host_work_submit(host_work_probe_run, host_work_probe_drop, &late);
+    expect(work != NULL && host_work_probe_reaches(&late.ran, 1), "host work: a third call returns");
+    const uint64_t give_up_late = SDL_GetTicksNS() + 5000000000ull;
+    while (!sched_host_work_done(work) && SDL_GetTicksNS() < give_up_late) SDL_Delay(1);
+    sched_host_work_abandon(work);
+    expect(SDL_GetAtomicInt(&late.dropped) == 1 && SDL_GetAtomicInt(&late.ran) == 1,
+           "host work: an item abandoned after its call returned is dropped at once, once");
+    SDL_DestroySemaphore(blocked.gate);
+}
+
 static void test_paced_vtime_is_host_anchored(void) {
     reset_sched();
     begin_clock_fixture(1, 0u);
@@ -6325,6 +6537,8 @@ int main(int argc, char **argv) {
     test_paced_vtime_is_host_anchored();
     test_fast_forward_paces_the_guest_clock();
     test_idle_wait_runs_a_wait_that_came_due();
+    test_idle_virtual_clock_stops_at_a_deadline_before_the_vblank();
+    test_host_work_runs_off_the_scheduler_thread();
     test_paced_vblank_has_one_authority();
     test_busy_guest_observes_every_display_period();
     test_masked_window_keeps_the_enabled_backlog();

@@ -61,10 +61,10 @@
     "schema_version": 1,
     "fallback_entry": 2728032,
     "worker_thread_entry": 288968,
-    "launcher_thread_entry": 2728308,
-    "dispatch_aliases": [
-      {"from": 198992, "to": 198984}
-    ]
+    "launcher_thread_entry": 2728308
   },
-  "notes": "Hot Shots Tennis (UCUS98701) title configuration: disc identity, guest module names and load addresses, and runtime bindings, all given as addresses. Contains no retail bytes, hashes, keys, recovered source, or private evidence. The executable, module_dir and psp_header entries name the repository's standard place_game_here/ input layout for the HST manager, which uses this manifest when -TitleManifest names it; the player uses it to recognize the disc as the built-in hst title."
+  "input": {
+    "analog_dead_zone": {"shape": "square", "counts": 64}
+  },
+  "notes": "Hot Shots Tennis (UCUS98701) title configuration: disc identity, guest module names and load addresses, and runtime bindings, all given as addresses, and the title's analog dead zone (the input block). Contains no retail bytes, hashes, keys, recovered source, or private evidence. The executable, module_dir and psp_header entries name the repository's standard place_game_here/ input layout for the HST manager, which uses this manifest when -TitleManifest names it; the player uses it to recognize the disc as the built-in hst title."
 }

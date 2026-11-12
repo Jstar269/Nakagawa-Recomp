@@ -12,7 +12,7 @@
 #define NK_TITLE_CATALOG_SCHEMA_VERSION 1
 #define NK_TITLE_MAX_LOOSE_CONTENT_ROOTS 16
 #define NK_TITLE_MAX_LOOSE_CONTENT_EXCLUDES 2
-#define NK_TITLE_CATALOG_DIGEST "6bdf56a33dec0c64"
+#define NK_TITLE_CATALOG_DIGEST "e367b71beb901374"
 
 typedef enum {
     NK_TITLE_KIND_RETAIL = 0,
@@ -59,6 +59,7 @@ typedef struct {
     bool requires_psmf;
     const NkModuleDefinition *modules;
     int module_count;
+    uint8_t analog_dead_zone_counts;    /* input.analog_dead_zone.counts (square): the left-stick dead zone the title ignores, in its centred counts; 0: none declared */
 } NkTitleEntry;
 
 /* An owned title snapshot remains valid across overlay reloads until released. */

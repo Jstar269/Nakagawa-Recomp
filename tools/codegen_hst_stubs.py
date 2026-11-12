@@ -14,7 +14,7 @@ to the chunk unchanged, so editing a body here changes the generated C exactly a
 ``codegen.py`` did.  ``tools/compat_overrides.py`` (``CODEGEN_CUSTOM_STUBS``) records why each
 address is coupled to the title, and ``tools/test_compat_manifest.py`` checks the two agree.
 
-Retired stubs, kept here so nobody reinstates them: 0x000468c8 (main_RunGameLoop scheduler wrapper, which ran the translated body renamed ``f_000468c8_real`` inside a frame loop with a yield per iteration) was retired under #363: the worker thread's own loop yields through its syscalls, and the function translates as written.  0x000011b0 (__register_frame_info bypass), 0x0000260c (exception helper bypass), 0x0000fe3c (_getmodreent), 0x00015ea0 (CSV tokenizer) and 0x000149a8 (strcpy) were retired under #363: the guest's own bodies run as written.  0x0001034c (heap-statistics walk skip) and
+Retired stubs, kept here so nobody reinstates them: 0x000468c8 (main_RunGameLoop scheduler wrapper, which ran the translated body renamed ``f_000468c8_real`` inside a frame loop with a yield per iteration) was retired under #363: the worker thread's own loop yields through its syscalls, and the function translates as written.  0x000011b0 (__register_frame_info bypass), 0x0000260c (exception helper bypass), 0x0000fe3c (_getmodreent), 0x00015ea0 (CSV tokenizer) and 0x000149a8 (strcpy) were retired under #363: the guest's own bodies run as written.  0x000143b0 (a native sprintf, sr_guest_sprintf) was retired under #363 on 2026-11-11: the title's own sprintf and the formatter it calls translate as written.  0x0001034c (heap-statistics walk skip) and
 0x001d9eb0 (title backdrop chooser postcondition) were retired under #363, because the walk
 runs over the retail allocator's statically linked, untouched bins once the allocator is
 host-bridged, and the chooser never yields 0; both now translate as written.  0x0001a5f8 and
@@ -91,11 +91,6 @@ HST_CUSTOM_STUBS = {
      * the same host-owned metadata ABI as malloc/free/memalign. */
     s->r[2] = sr_newlib_realloc(s->r[5], s->r[6], s->r[31]);
     s->pc = s->r[31];
-}""",
-
-
-    0x000143B0: """void f_000143b0(CpuState *s) {  /* custom stub: guest sprintf */
-    sr_guest_sprintf(s);
 }""",
 
 

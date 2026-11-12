@@ -130,9 +130,9 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.repository.default_branch }}
-          # Full history: the run is judged against the event's exact base SHA,
-          # which a depth-1 clone would not contain, and the ancestry check
-          # below needs real history rather than a graft.
+          # Full history: the run is judged against the merge base of the head
+          # with this branch, which a depth-1 clone would not contain, and the
+          # ancestry checks below need real history rather than a graft.
           fetch-depth: 0
           persist-credentials: false
 
@@ -237,7 +237,26 @@ jobs:
             exit 1
           fi
           echo "candidate head ${fetched} fetched as data only (never checked out)"
-          echo "base ${BASE_SHA} confirmed on the default branch"
+          echo "event base ${BASE_SHA} confirmed on the default branch"
+
+      # The verdict base is the merge base of the head with the default branch as it is now,
+      # as in provenance-attestation-merge-group.yml. The event's base SHA is the default
+      # branch's tip when the event fired; a pull request that is merely behind an admission
+      # would be judged as removing every path that admission added. Its fork point is the
+      # main commit its profile and controls were built against, and it is always on the
+      # trusted branch. The landing batch, whose base is the default branch itself, judges
+      # the combination.
+      - name: Resolve the verdict base
+        id: base
+        env:
+          HEAD_SHA: ${{ steps.target.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          [[ "${HEAD_SHA}" =~ ^[0-9a-f]{40}$ ]] || { echo "sha malformed" >&2; exit 1; }
+          base_sha="$(git merge-base "${HEAD_SHA}" HEAD)"
+          [[ "${base_sha}" =~ ^[0-9a-f]{40}$ ]] || { echo "base sha malformed" >&2; exit 1; }
+          echo "base_sha=${base_sha}" >> "${GITHUB_OUTPUT}"
+          echo "verdict base ${base_sha} (merge base of the head with the default branch)"
 
       # The private trusted authority. It lands outside GITHUB_WORKSPACE so it
       # is structurally outside the tree under verification, and the verifier
@@ -247,7 +266,7 @@ jobs:
         id: authority
         env:
           GH_TOKEN: ${{ secrets.PROVENANCE_AUTHORITY_TOKEN }}
-          BASE_SHA: ${{ steps.target.outputs.base_sha }}
+          BASE_SHA: ${{ steps.base.outputs.base_sha }}
           HEAD_SHA: ${{ steps.target.outputs.head_sha }}
           TRUSTED_REPO: Jstar269/nakagawa-recomp-history-private
           TRUSTED_REF: main
@@ -398,7 +417,7 @@ jobs:
       # tree and policy, and the verify step checks that binding again.
       - name: Generate the trusted base public baseline from the authority
         env:
-          BASE_SHA: ${{ steps.target.outputs.base_sha }}
+          BASE_SHA: ${{ steps.base.outputs.base_sha }}
         run: |
           set -euo pipefail
           mkdir -p "${RUNNER_TEMP}/trusted" "${RUNNER_TEMP}/baseline-scratch"
@@ -418,7 +437,7 @@ jobs:
       - name: Generate and verify ephemeral provenance controls
         env:
           HEAD_SHA: ${{ steps.target.outputs.head_sha }}
-          BASE_SHA: ${{ steps.target.outputs.base_sha }}
+          BASE_SHA: ${{ steps.base.outputs.base_sha }}
           AUTHORITY_SHA: ${{ steps.authority.outputs.authority_sha }}
           TRUSTED_CANDIDATE_POLICY: ${{ steps.authority.outputs.trusted_candidate_policy }}
           POLICY_DELTA_AUTHORITY: ${{ steps.authority.outputs.policy_delta_authority }}
@@ -428,7 +447,7 @@ jobs:
           # Existing exact path authority is sufficient for normal progress.
           # The legacy per-revision reviewed_blobs policy remains an explicit
           # opt-in via --require-reviewed-blobs for higher-assurance runs.
-          # Exact immutable SHAs from the event, never branch names: resolving
+          # Exact immutable SHAs (the head and its merge base), never branch names: resolving
           # a branch twice can name two different trees.
           policy_args=()
           # A V3 authority comes alone; a V1/V2 authority with its blessed candidate policy. The
@@ -456,6 +475,38 @@ jobs:
             "${policy_args[@]}" \
             | tee "${RUNNER_TEMP}/verify/report.txt"
 
+      # The publication audit of the candidate's whole tree, by the default
+      # branch's own copy of the audit. The verifier above judges the paths the
+      # profile publishes and new implementation paths; a file that is outside
+      # the profile and is not implementation (game data, a key, a private path)
+      # is not its subject. The pull request's own CI runs the audit too, but
+      # from the pull request's checkout, where the pull request could have
+      # changed the audit. Here it is the trusted copy, and it reads the
+      # candidate's tree from its objects (git ls-tree, git cat-file): never a
+      # checkout and never an archive, so no .gitattributes line of the
+      # candidate can hide a file. The profile is the candidate's, which the
+      # step above has just held to the trusted authority: a path it adds,
+      # removes or excludes is one a maintainer admitted. No secret is in this
+      # step's environment. A finding fails the job.
+      - name: Audit the candidate tree with the trusted publication audit
+        env:
+          HEAD_SHA: ${{ steps.target.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          if [[ ! "${HEAD_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::the candidate head is not a full commit SHA"
+            exit 1
+          fi
+          mkdir -p "${RUNNER_TEMP}/tree-audit"
+          git cat-file blob "${HEAD_SHA}:assets/public_source_profile.json" \
+            > "${RUNNER_TEMP}/tree-audit/public_source_profile.json"
+          python tools/publish_audit.py \
+            --repo-root "${GITHUB_WORKSPACE}" \
+            --committed-tree "${HEAD_SHA}" \
+            --policy "${RUNNER_TEMP}/tree-audit/public_source_profile.json" \
+            --public-scope --provenance-self-consistency
+          touch "${RUNNER_TEMP}/tree-audit/passed"
+
       # The first thing the pull-request author reads. The verdict itself is
       # unchanged -- this job still fails closed -- but a failure that only
       # means "a maintainer must admit this path" is now said in one sentence
@@ -474,6 +525,17 @@ jobs:
             echo '### Provenance: no verdict was produced' >> "${GITHUB_STEP_SUMMARY}"
             echo '' >> "${GITHUB_STEP_SUMMARY}"
             echo 'The attestation did not run to completion. That is a gate failure, not a pass.' \
+              >> "${GITHUB_STEP_SUMMARY}"
+            echo '' >> "${GITHUB_STEP_SUMMARY}"
+          fi
+          # The trusted tree audit fails the job on its own; say so here too, without copying its
+          # findings (the candidate's own paths) into the summary. They are in that step's log.
+          if [ -e "${RUNNER_TEMP}/tree-audit/public_source_profile.json" ] \
+            && [ ! -e "${RUNNER_TEMP}/tree-audit/passed" ]; then
+            echo '### Trusted publication audit: FAIL' >> "${GITHUB_STEP_SUMMARY}"
+            echo '' >> "${GITHUB_STEP_SUMMARY}"
+            echo 'The default branch publication audit refused the candidate tree. Its findings are in the log' \
+              'of the step "Audit the candidate tree with the trusted publication audit".' \
               >> "${GITHUB_STEP_SUMMARY}"
             echo '' >> "${GITHUB_STEP_SUMMARY}"
           fi
