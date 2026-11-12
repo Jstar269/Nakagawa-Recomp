@@ -66,7 +66,8 @@
  *    stencil test and ops against the destination snapshot, with pipeline blending off.
  *    Where the depth test runs, its fail op (unless it always passes) and the stencil-fail
  *    op must be KEEP, so the pipeline depth test and a discard give ge.c's order exactly
- *    (stencil_gpu_supported);
+ *    (stencil_gpu_supported), unless the depth-fail and depth-pass ops agree: that draw is
+ *    a colour batch and a stencil batch (append_depth_blind);
  *    other states take the software rasterizer. A stencil state whose result depends on
  *    the stencil it overwrites (stencil_reads_own_writes) never shares a batch between
  *    primitives whose boxes meet, so each reads a snapshot holding the ones before it.
@@ -5784,6 +5785,58 @@ static void append_wing(Batch *b, uint32_t first, uint32_t count) {
     s_wbatch[s_nwbatch++] = *b;
 }
 
+/* A depth-tested stencil state whose depth-fail and depth-pass ops agree (and are not KEEP)
+ * leaves the same stencil on every covered pixel the stencil test passes, whatever the depth
+ * test says: only the colour and depth depend on it. ge.c's order is then two batches over
+ * the same vertices. The colour batch runs the pipeline depth test with the stencil (alpha)
+ * channel masked and a stencil-fail op of KEEP, so a pixel failing the stencil test is
+ * discarded before it can write colour or depth. The stencil batch runs the stencil test and
+ * ops on every covered pixel, with the depth test always passing and no depth write, and
+ * writes alpha alone. The colour batch goes first, so both read the stencil as it was before
+ * the draw; primitives join a pair only where the state does not read its own writes or
+ * their boxes do not meet, as in append. */
+static int stencil_depth_blind(const Batch *b) {
+    const uint32_t flags = (uint32_t)b->pc.cfg[0] >> 8, ops = (uint32_t)b->pc.bl[3];
+    const uint32_t zfail = (ops >> 8) & 7u;
+    return (flags & F_STENCIL) && b->key.ztest && zfail != 0u && zfail == ((ops >> 16) & 7u);
+}
+
+static int batch_extends(const Batch *last, const Batch *b, uint32_t first) {
+    return last->first + last->count == first && !memcmp(&last->key, &b->key, sizeof(b->key)) &&
+           last->sx == b->sx && last->sy == b->sy && last->sw == b->sw && last->sh == b->sh &&
+           !memcmp(last->bconst, b->bconst, sizeof(b->bconst)) &&
+           !memcmp(&last->pc, &b->pc, sizeof(b->pc)) && last->dset == b->dset;
+}
+
+static void append_depth_blind(const Batch *b, uint32_t first, uint32_t count, int self_dep,
+                               const SnapRect *prim) {
+    Batch colour = *b, stencil = *b;
+    colour.key.cmask = (uint8_t)(colour.key.cmask & ~VK_COLOR_COMPONENT_A_BIT);
+    colour.pc.bl[3] = (int32_t)((uint32_t)b->pc.bl[3] & ~7u);
+    stencil.key.zfunc = VK_COMPARE_OP_ALWAYS;
+    stencil.key.zwrite = 0;
+    stencil.key.cmask = VK_COLOR_COMPONENT_A_BIT;
+    stencil.key.blend_on = 0;
+    stencil.key.srcf = stencil.key.dstf = stencil.key.eq = 0;
+    if (s_nbatch >= 2) {
+        Batch *last_colour = &s_batch[s_nbatch - 2], *last_stencil = &s_batch[s_nbatch - 1];
+        if (batch_extends(last_colour, &colour, first) && batch_extends(last_stencil, &stencil, first)) {
+            if (!self_dep || !snap_rect_overlap(&s_tail_prims, prim)) {
+                last_colour->count += count;
+                last_stencil->count += count;
+                if (self_dep) snap_rect_union(&s_tail_prims, prim);
+                return;
+            }
+            s_replay_stats.stencil_splits++;
+        }
+    }
+    colour.first = stencil.first = first;
+    colour.count = stencil.count = count;
+    s_batch[s_nbatch++] = colour;
+    s_batch[s_nbatch++] = stencil;
+    s_tail_prims = *prim;
+}
+
 static void append(Batch *b, uint32_t first, uint32_t count) {
     if (__builtin_expect(s_wing_dst != NULL, 0)) { append_wing(b, first, count); return; }
     if (s_cpu_profile) s_cpu_profile_stats.append_calls++;
@@ -5797,14 +5850,14 @@ static void append(Batch *b, uint32_t first, uint32_t count) {
     const int self_dep = !(b->once && !b->key.tnl) && stencil_reads_own_writes(b);
     SnapRect prim = !self_dep ? k_snap_rect_empty
                   : b->key.tnl ? tnl_rect(b, first, count) : verts_rect(b, first, count);
+    if (stencil_depth_blind(b)) {
+        append_depth_blind(b, first, count, self_dep, &prim);
+        return;
+    }
     if (s_nbatch) {
         Batch *last = &s_batch[s_nbatch - 1];
         if (s_cpu_profile) s_cpu_profile_stats.append_compare_calls++;
-        if (last->first + last->count == first &&
-            !memcmp(&last->key, &b->key, sizeof(b->key)) &&
-            last->sx == b->sx && last->sy == b->sy && last->sw == b->sw && last->sh == b->sh &&
-            !memcmp(last->bconst, b->bconst, sizeof(b->bconst)) &&
-            !memcmp(&last->pc, &b->pc, sizeof(b->pc)) && last->dset == b->dset) {
+        if (batch_extends(last, b, first)) {
             if (!self_dep || !snap_rect_overlap(&s_tail_prims, &prim)) {
                 last->count += count;
                 if (self_dep) snap_rect_union(&s_tail_prims, &prim);
@@ -5821,7 +5874,8 @@ static void append(Batch *b, uint32_t first, uint32_t count) {
 
 static void ensure_room(uint32_t verts) {
     if (s_cpu_profile) s_cpu_profile_stats.ensure_room_calls++;
-    if (s_nverts + verts > MAX_VERTS || s_nbatch >= MAX_BATCH - 1 || s_nwbatch >= MAX_BATCH - 1) {
+    if (s_nverts + verts > MAX_VERTS || s_nbatch >= MAX_BATCH - 2 ||   /* room for a pair */
+        s_nwbatch >= MAX_BATCH - 1) {
         if (s_cpu_profile) s_cpu_profile_stats.ensure_room_flushes++;
         submit_pending();
     }
@@ -5850,11 +5904,13 @@ static int native_rgb_mask_exact(void) {
  * pixel the depth test would also reject, or a depth-fail pixel, can only be dropped: the
  * ops for them must be KEEP while the depth test is on. A test that always passes never
  * runs its fail op: a stencil test the stencil-fail op, a depth test the depth-fail op.
+ * Agreeing depth-fail and depth-pass ops take two batches instead (append_depth_blind).
  * Clear mode ignores the stencil test (ge.c put_px_rgba). */
 static int stencil_gpu_supported(void) {
     if (!s_ge->stencil_enable || s_ge->clear || !s_ge->ztest_enable) return 1;
     const uint32_t func = s_ge->stencil_test & 7u, sfail = s_ge->stencil_op & 7u;
     const uint32_t zfail = (s_ge->stencil_op >> 8) & 7u;
+    if (zfail != 0u && zfail == ((s_ge->stencil_op >> 16) & 7u)) return 1;
     return (sfail == 0u || func == 1u) && (zfail == 0u || (s_ge->ztest & 7u) == 1u);
 }
 

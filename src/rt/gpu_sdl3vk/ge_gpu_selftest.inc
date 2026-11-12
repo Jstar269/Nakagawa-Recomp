@@ -5032,8 +5032,9 @@ static int coherence_run_native_bulk_copy(void) {
  * background, so the second sprite reads what the first wrote: a state that reads its own
  * writes must split there (stencil_splits). The depth list fills a striped depth buffer in
  * clear mode, with the stencil test on, which clear mode ignores, then draws the states the
- * GPU path takes under the depth test (depth-fail and tested stencil-fail ops KEEP). No
- * primitive may take the software fallback. */
+ * GPU path takes under the depth test (depth-fail and tested stencil-fail ops KEEP, or
+ * agreeing depth-fail and depth-pass ops with any stencil-fail op). No primitive may take
+ * the software fallback. */
 #define STP_CELLS_X 24u
 #define STP_PITCH 10u
 #define STP_ORIGIN 16u
@@ -5167,6 +5168,14 @@ static uint32_t stp_depth_list(uint32_t base, uint32_t fmt, int only) {
         stp_emit(&l, 0xE7, 0);
         stp_cell_sprites(&l, &vaddr, cell, 32768.0f);
     }
+    /* Agreeing depth-fail and depth-pass ops: a colour batch and a stencil batch. */
+    for (uint32_t func = 0; func < 8u; func++)
+        for (uint32_t op = 1; op < 6u; op++, cell++) {
+            stp_cell_state(&l, cell, func, ((cell / 3u) % 6u) | (op << 8) | (op << 16));
+            stp_emit(&l, 0xDE, cell % 8u);         /* every depth function */
+            stp_emit(&l, 0xE7, (cell / 8u) & 1u);
+            stp_cell_sprites(&l, &vaddr, cell, 32768.0f);
+        }
     stp_end(&l);
     return 0x08040000u;
 }
@@ -6073,6 +6082,8 @@ static int coherence_run_fallback_reasons(void) {
         {"stencil keep", 0, 1, 4u, 2u, 0x050000u, -1},
         {"stencil zfail op", 0, 1, 4u, 1u, 0x000100u, GEGPU_FALLBACK_STENCIL},
         {"stencil zfail op, depth always", 0, 1, 1u, 1u, 0x010101u, -1},
+        {"stencil zfail op = zpass op", 0, 1, 7u, 2u, 0x040404u, -1},
+        {"stencil zfail op != zpass op", 0, 1, 7u, 1u, 0x010201u, GEGPU_FALLBACK_STENCIL},
     };
     s_ge->color_test_enable = 0;
     for (unsigned i = 0; i < sizeof(st) / sizeof(st[0]); i++) {
@@ -6086,7 +6097,7 @@ static int coherence_run_fallback_reasons(void) {
         }
     }
     *s_ge = saved;
-    if (ok) printf("gpu coherence selftest: PASS %-22s 12 cells\n", "fallback-reasons");
+    if (ok) printf("gpu coherence selftest: PASS %-22s 14 cells\n", "fallback-reasons");
     return ok;
 }
 
