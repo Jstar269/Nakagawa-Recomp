@@ -1013,6 +1013,12 @@ int sched_interrupts_enabled(void) {
     return s_interrupts_enabled;
 }
 
+/* An interrupt episode is running (scheduler_service_pending): on a PSP its handler runs with the
+ * CPU's interrupts off, so no other interrupt is taken until it returns. */
+int sched_servicing_interrupts(void) {
+    return s_servicing_interrupts;
+}
+
 int sched_is_intr_context(void) {
     return s_cur < 0;
 }

@@ -30566,6 +30566,7 @@ static void test_ge_finish_callbacks_do_not_nest(void) {
 
 extern unsigned sr_hle_test_ge_finish_runs(void);
 extern void sr_hle_test_ge_finish_masked_reset(void);
+extern int ge_finish_masked_pending(void);
 
 static struct {
     uint32_t worker_uid, main_uid;
@@ -30651,20 +30652,26 @@ static void test_ge_finish_callback_thread_exit(void) {
     ge_tim_teardown();
 }
 
-/* A list that completes while the CPU's interrupts are suspended has its finish callback run
- * when they are resumed, as the GE finish interrupt would be taken on a PSP. The shape is Sonic
- * Rivals' (ULUS10195, #2375) GE command queue: with interrupts suspended, the game takes the
- * entry at the queue's index, enqueues its list, and only then advances the index and lowers the
- * count; its finish callback runs the same queue. The callback used to run inside
- * sceGeListEnQueue, before the index moved, so it enqueued the same entry again and the queue
- * advanced twice, skipping the next entry (the game's display flip; the screen stayed black).
+/* A list that completes while the CPU cannot take an interrupt (its interrupts suspended, or an
+ * interrupt handler running) has its finish callback run once it can, as the GE finish interrupt
+ * would be taken on a PSP. The shape is Sonic Rivals' (ULUS10195, #2375) GE command queue: with
+ * interrupts suspended, or from its VBLANK handler, the game takes the entry at the queue's
+ * index, enqueues its list, and only then advances the index and lowers the count; its finish
+ * callback runs the same queue. The callback used to run inside sceGeListEnQueue, before the
+ * index moved, so it enqueued the same entry again and the queue advanced twice, skipping the
+ * next entry (the game's display flip).
  * MUTANT: running the callback at once enqueues an entry twice and runs a callback under the
- * mask; a last-in first-out wait reverses the completion order; a delivery loop that ignores a
- * callback suspending interrupts again runs the next callback under the mask; dropping the bound
- * loses the 65th completion silently. */
-enum { GM_QUEUE = 0x08a39000u, GM_RING = GM_QUEUE + 8u, GM_RING_LEN = 4, GM_LOG = 80 };
+ * mask; deferring only under sceKernelCpuSuspendIntr runs it inside the VBLANK handler; a
+ * last-in first-out wait reverses the completion order; a delivery loop that ignores a callback
+ * suspending interrupts again never returns (the test hangs); deferring ahead of a running
+ * callback's own run runs the next callback inside it at the resume; keeping the waiting
+ * completions after a callback stops the run makes the service loop spin (the test hangs);
+ * dropping the bound loses the 65th completion silently. */
+enum { GM_QUEUE = 0x08a39000u, GM_RING = GM_QUEUE + 8u, GM_RING_LEN = 4, GM_LOG = 80,
+       GM_VBLANK_FN = 0x08a38100u, GM_THREAD_ENTRY = 0x08a38140u };
 static struct {
     unsigned callbacks, enqueues, masked_callbacks, thread_callbacks, suspend_in_callback;
+    unsigned in_handler, handler_callbacks, depth, max_depth, fatal_first, nest_one;
     uint32_t ids[GM_LOG], enqueued[GM_LOG];
     int process;
 } s_gm;
@@ -30687,11 +30694,40 @@ static void gm_finish_fn(CpuState *cpu) {
     s_gm.callbacks++;
     if (!sched_interrupts_enabled()) s_gm.masked_callbacks++;
     if (!sched_is_intr_context()) s_gm.thread_callbacks++;
+    if (s_gm.in_handler) s_gm.handler_callbacks++;
+    if (++s_gm.depth > s_gm.max_depth) s_gm.max_depth = s_gm.depth;
+    if (s_gm.nest_one) {
+        /* A callback that suspends the interrupts, enqueues the next list and resumes them. */
+        s_gm.nest_one = 0;
+        uint32_t prev = sched_suspend_interrupts();
+        (void)ge_tim_enqueue(cpu, ge_chain_list(1));
+        sched_resume_interrupts(prev);
+    }
+    if (s_gm.fatal_first) {
+        s_gm.fatal_first = 0;
+        cpu->flow_kind = SR_FLOW_FATAL;      /* the callback stops the run */
+    }
     if (s_gm.suspend_in_callback) {
         s_gm.suspend_in_callback = 0;
         (void)sched_suspend_interrupts();   /* left suspended: the guest resumes later */
     }
     if (s_gm.process) gm_process(cpu);
+    s_gm.depth--;
+    cpu->r[2] = 0u;
+}
+
+/* A VBLANK handler that runs the game's queue, as the title's does every frame. */
+static void gm_vblank_fn(CpuState *cpu) {
+    s_gm.in_handler = 1;
+    gm_process(cpu);
+    s_gm.in_handler = 0;
+    cpu->r[2] = 0u;
+}
+
+/* A guest thread whose list's finish callback suspends the interrupts, enqueues and resumes. */
+static void gm_thread_fn(CpuState *cpu) {
+    s_gm.nest_one = 1;
+    (void)ge_tim_enqueue(cpu, ge_chain_list(0));
     cpu->r[2] = 0u;
 }
 
@@ -30729,9 +30765,52 @@ static void test_ge_finish_callback_waits_for_interrupts(void) {
     expect(s_gm.callbacks == 2u && s_gm.ids[0] == ge_tim_finish_id(ge_chain_list(0)) &&
                s_gm.ids[1] == ge_tim_finish_id(ge_chain_list(1)),
            "GE finish masked: the resume runs both waiting callbacks, in completion order");
-    expect(s_gm.masked_callbacks == 0u && s_gm.thread_callbacks == 0u,
-           "GE finish masked: they run with interrupts enabled, in interrupt context");
+    expect(s_gm.masked_callbacks == 0u,
+           "GE finish masked: they run with interrupts enabled");
     expect(s_gm.enqueues == 2u, "GE finish masked: the callbacks find the queue already consumed");
+
+    /* The measured shape (CASE=display-ge-mask): a list enqueued stalled at its first word, then
+     * released by sceGeListUpdateStallAddr under the mask, runs to its end, and its callback runs
+     * only after the resume (PSP: 0/12 during the mask, 12/12 right after). */
+    gm_reset();
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = ge_chain_list(2);
+    cpu.r[5] = ge_chain_list(2);            /* stall == list: nothing runs yet */
+    cpu.r[6] = s_ge_tim_cbid;
+    cpu.r[7] = 0u;
+    uint32_t qid = sr_syscall(&cpu, NID_SCE_GE_LIST_ENQUEUE);
+    prev = sched_suspend_interrupts();
+    cpu.r[4] = qid;
+    cpu.r[5] = ge_chain_list(2) + 8u;       /* past FINISH and END */
+    (void)sr_syscall(&cpu, NID_SCE_GE_LIST_UPDATE_STALL_ADDR);
+    unsigned during_mask = s_gm.callbacks;
+    int list_done = ge_tim_sync(&cpu, NID_SCE_GE_LIST_SYNC, qid, 1u) == 0u;
+    sched_resume_interrupts(prev);
+    expect(during_mask == 0u && list_done,
+           "GE finish masked: a list released under the mask completes, its callback does not run (display-ge-mask)");
+    expect(s_gm.callbacks == 1u && s_gm.ids[0] == ge_tim_finish_id(ge_chain_list(2)),
+           "GE finish masked: its callback runs right after the resume (display-ge-mask)");
+
+    /* The same queue run from a VBLANK handler: on a PSP the handler runs with the CPU's
+     * interrupts off, so the finish callbacks run after it returns, each entry enqueued once. */
+    gm_reset();
+    s_gm.process = 1;
+    MEM_W32(GM_QUEUE, 2u);
+    MEM_W32(GM_QUEUE + 4u, 0u);
+    sr_test_register_guest_fn(GM_VBLANK_FN, gm_vblank_fn);
+    expect(td24b_dispatch4(NID_SCE_KERNEL_REGISTER_SUBINTR, 30u, 0u, GM_VBLANK_FN, 0u) == 0u &&
+               td24b_dispatch4(NID_SCE_KERNEL_ENABLE_SUBINTR, 30u, 0u, 0u, 0u) == 0u,
+           "GE finish masked: the VBLANK handler is registered and enabled");
+    sched_raise_interrupt(SCHED_INTR_VBLANK);
+    scheduler_service_pending();
+    (void)td24b_dispatch4(NID_SCE_KERNEL_RELEASE_SUBINTR, 30u, 0u, 0u, 0u);
+    expect(s_gm.enqueues == 2u && s_gm.enqueued[0] == ge_chain_list(0) &&
+               s_gm.enqueued[1] == ge_chain_list(1) && MEM_R32(GM_QUEUE) == 0u,
+           "GE finish masked: a VBLANK handler's queue run enqueues each entry once");
+    expect(s_gm.handler_callbacks == 0u && s_gm.callbacks == 2u &&
+               s_gm.ids[0] == ge_tim_finish_id(ge_chain_list(0)) &&
+               s_gm.ids[1] == ge_tim_finish_id(ge_chain_list(1)),
+           "GE finish masked: the callbacks run after the VBLANK handler returns, in order");
 
     /* A waiting callback that suspends the interrupts again holds the rest until the next resume. */
     gm_reset();
@@ -30747,6 +30826,30 @@ static void test_ge_finish_callback_waits_for_interrupts(void) {
     expect(s_gm.callbacks == 2u && s_gm.masked_callbacks == 0u &&
                s_gm.ids[1] == ge_tim_finish_id(ge_chain_list(1)),
            "GE finish masked: the held callback runs at the next resume");
+
+    /* On a guest thread, a finish callback that suspends the interrupts, enqueues and resumes
+     * them: the new list's callback joins the thread's running callback's run and runs after it
+     * returns, not inside it from the resume. */
+    gm_reset();
+    sr_test_register_guest_fn(GM_THREAD_ENTRY, gm_thread_fn);
+    memset(s_cpu, 0, sizeof(*s_cpu));
+    sched_run(GM_THREAD_ENTRY, 0u, 0u);
+    expect(s_gm.callbacks == 2u && s_gm.max_depth == 1u && s_gm.thread_callbacks == 2u &&
+               s_gm.ids[1] == ge_tim_finish_id(ge_chain_list(1)),
+           "GE finish masked: a list completed under the mask inside a thread's callback runs after it");
+
+    /* A delivered callback that stops the run: the completions still waiting are dropped by name,
+     * and the service returns instead of finding them due for ever. */
+    gm_reset();
+    memset(&cpu, 0, sizeof(cpu));
+    prev = sched_suspend_interrupts();
+    (void)ge_tim_enqueue(&cpu, ge_chain_list(0));
+    (void)ge_tim_enqueue(&cpu, ge_chain_list(1));
+    s_gm.fatal_first = 1;
+    sched_resume_interrupts(prev);
+    expect(s_gm.callbacks == 1u && s_cpu->flow_kind == SR_FLOW_FATAL && !ge_finish_masked_pending(),
+           "GE finish masked: a callback that stops the run drops the completions still waiting");
+    s_cpu->flow_kind = 0u;
 
     /* 64 completions wait; the 65th, with no room left, stops the run by name. */
     gm_reset();

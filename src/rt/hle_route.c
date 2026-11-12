@@ -2037,22 +2037,32 @@ static GeFinishRun *ge_finish_run_of(uint32_t owner) {
     return NULL;
 }
 
-/* A list that completes while the CPU's interrupts are suspended (sceKernelCpuSuspendIntr) has
- * its finish callback run once they are resumed, not now. On a PSP the callback runs from the GE
- * finish interrupt, which cannot be taken while the CPU holds interrupts off, so a guest that
- * suspends interrupts around its own GE queue bookkeeping (enqueue a list, then advance its
- * queue) never sees the callback in between (inferred from the interrupt model; not measured).
- * Here the list runs at once inside sceGeListEnQueue, so without this the callback ran inside
- * that bookkeeping: a callback that runs the same queue again found the entry not yet consumed,
- * enqueued it a second time and advanced the queue twice, and the entry after it was never run.
+/* A list that completes while the CPU cannot take an interrupt has its finish callback run once
+ * it can, not now:
+ *   - While the guest holds the CPU's interrupts suspended (sceKernelCpuSuspendIntr). MEASURED on a
+ *     PSP (CASE=display-ge-mask, docs/ARCHITECTURE.md): a stall-gated list released under the mask
+ *     ran to its end, and its finish callback ran in 0 of 12 trials during the mask and in 12 of
+ *     12 right after the resume.
+ *   - While an interrupt handler runs (scheduler_service_pending()). UNMEASURED: inferred from the
+ *     PSP's interrupt model, in which a handler runs with the CPU's interrupts off.
+ *   - The order of a waiting completion against other interrupts owed at the same resume is
+ *     UNMEASURED: this runtime delivers VBLANK episodes first (scheduler_service_pending()).
+ * Here the list runs at once inside sceGeListEnQueue, so without this a guest that keeps
+ * interrupts off around its own GE queue bookkeeping (enqueue a list, then advance its queue) had
+ * the callback run inside that bookkeeping: a callback that runs the same queue again found the
+ * entry not yet consumed, enqueued it a second time and advanced the queue twice, and the entry
+ * after it was never run.
  *
  * The completion waits here, first-in first-out, and the list itself is complete at once, as
  * before (its waiters are woken now). The scheduler delivers the waiting completions as a GE
  * interrupt (ge_timing_next_deadline_us reports them as due, ge_timing_service_due runs them),
- * so they run from scheduler_service_pending(), in interrupt context, at the resume or at the
- * next scheduler boundary with interrupts enabled. A list with no callback (a negative ID) owes
- * nothing. The bound is this runtime's: past GE_LIST_MAX waiting completions the run stops by
- * name. */
+ * so they run from scheduler_service_pending(), in interrupt context: at the resume, after the
+ * handler that raised them returns, or at the next scheduler boundary with interrupts enabled. A
+ * completion raised while its thread is inside a finish callback joins that callback's run
+ * instead (ge_finish_callback_now), so it never runs inside it. A list with no callback (a
+ * negative ID) owes nothing. When a callback or handler stops the run, the completions still
+ * waiting are reported and dropped, as a stopped run drops its own. The bound is this runtime's:
+ * past GE_LIST_MAX waiting completions the run stops by name. */
 static struct {
     uint32_t cbid, finish_id, user_arg;
 } s_ge_finish_masked[GE_LIST_MAX];
@@ -2060,15 +2070,23 @@ static unsigned s_ge_finish_masked_head, s_ge_finish_masked_count;
 
 int ge_finish_masked_pending(void) { return s_ge_finish_masked_count != 0u; }
 
-/* Run the completions that waited for the CPU's interrupts, in completion order, while the
- * interrupts stay enabled; a callback that suspends them again leaves the rest waiting. */
+static void ge_finish_callback_now(CpuState *s, uint32_t cbid, uint32_t finish_id, uint32_t user_arg);
+
+/* Run the completions that waited for an interrupt to be taken, in completion order, while the
+ * CPU's interrupts stay enabled; a callback that suspends them leaves the rest waiting. */
 void ge_finish_deliver_masked(CpuState *s) {
     while (s_ge_finish_masked_count && sched_interrupts_enabled() && s->flow_kind != SR_FLOW_FATAL) {
         unsigned head = s_ge_finish_masked_head;
         s_ge_finish_masked_head = (head + 1u) % GE_LIST_MAX;
         s_ge_finish_masked_count--;
-        ge_finish_callback(s, s_ge_finish_masked[head].cbid, s_ge_finish_masked[head].finish_id,
-                           s_ge_finish_masked[head].user_arg);
+        ge_finish_callback_now(s, s_ge_finish_masked[head].cbid, s_ge_finish_masked[head].finish_id,
+                               s_ge_finish_masked[head].user_arg);
+    }
+    /* Nothing more runs once the run stops; left waiting, they would stay due for ever. */
+    if (s_ge_finish_masked_count && s->flow_kind == SR_FLOW_FATAL) {
+        fprintf(stderr, "GE_FINISH_CB: %u waiting finish callbacks not run: a finish callback or "
+                        "handler stopped the run\n", s_ge_finish_masked_count);
+        s_ge_finish_masked_count = 0u;
     }
 }
 
@@ -2080,11 +2098,12 @@ void sr_hle_test_ge_finish_masked_reset(void) {
 #endif
 
 void ge_finish_callback(CpuState *s, uint32_t cbid, uint32_t finish_id, uint32_t user_arg) {
-    if (!sched_interrupts_enabled() && (int32_t)cbid >= 0) {
+    if ((int32_t)cbid >= 0 && !ge_finish_run_of(sched_current_uid()) &&
+        (!sched_interrupts_enabled() || sched_servicing_interrupts())) {
         if (s_ge_finish_masked_count == GE_LIST_MAX) {
             (void)hle_unmodelled_stop("GE finish callback",
-                                      "with %d list completions already waiting for the CPU's "
-                                      "interrupts to be resumed has no measured result",
+                                      "with %d list completions already waiting for an "
+                                      "interrupt to be taken has no measured result",
                                       GE_LIST_MAX);
             return;
         }
@@ -2094,10 +2113,15 @@ void ge_finish_callback(CpuState *s, uint32_t cbid, uint32_t finish_id, uint32_t
         s_ge_finish_masked[tail].user_arg = user_arg;
         s_ge_finish_masked_count++;
         if (ge_log_on())
-            fprintf(stderr, "GE_FINISH_CB: cbid=%u id=0x%04x waits for the CPU's interrupts "
-                            "to be resumed (uid=0x%x)\n", cbid, finish_id, sched_current_uid());
+            fprintf(stderr, "GE_FINISH_CB: cbid=%u id=0x%04x waits until an interrupt can be taken "
+                            "(uid=0x%x, %s)\n", cbid, finish_id, sched_current_uid(),
+                    sched_interrupts_enabled() ? "in a handler" : "interrupts suspended");
         return;
     }
+    ge_finish_callback_now(s, cbid, finish_id, user_arg);
+}
+
+static void ge_finish_callback_now(CpuState *s, uint32_t cbid, uint32_t finish_id, uint32_t user_arg) {
     const uint32_t owner = sched_current_uid();
     GeFinishRun *run = ge_finish_run_of(owner);
     if (run) {
