@@ -946,7 +946,9 @@ asset-index-selftest:
 # cells (#2109) run alone at scales 1 and 4 on each destination-read path (`--dst-read snapshot`,
 # `--dst-read interlock`; a device that refuses the interlock prints a SKIP line), and so does
 # stencil-once (write-once stencil batches: at scales 1 and 4 on the snapshot path, where they are
-# drawn last to first, and at scale 1 on the interlock path). The dst-read cells then run with the
+# drawn last to first, and at scale 1 on the interlock path). The dst-read cells run once more on
+# the interlock path with depth=32 (`--depth 32`): the depth-writing kill cells must keep the
+# snapshot path there, since the shader's depth copy is 16-bit. The dst-read cells then run with the
 # host twin on, native and full colour, on both paths at scales 1 and 4 (the twin's pass takes the
 # path the op took), and stencil-once with the native twin on the interlock path. The pipeline
 # cache (#2149) runs last, as three processes over one empty data root: a cold run saves the
@@ -1018,6 +1020,7 @@ gpu-coherence-selftest: $(GPU_COHERENCE_BIN)
 	$(GPU_COHERENCE_BIN) --dst-read snapshot --scale 4 --case dst-read
 	$(GPU_COHERENCE_BIN) --dst-read interlock --case dst-read
 	$(GPU_COHERENCE_BIN) --dst-read interlock --scale 4 --case dst-read
+	$(GPU_COHERENCE_BIN) --depth 32 --dst-read interlock --case dst-read
 	$(GPU_COHERENCE_BIN) --dst-read snapshot --case stencil-once
 	$(GPU_COHERENCE_BIN) --dst-read snapshot --scale 4 --case stencil-once
 	$(GPU_COHERENCE_BIN) --dst-read interlock --case stencil-once

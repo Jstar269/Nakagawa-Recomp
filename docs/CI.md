@@ -627,7 +627,9 @@ the color test, a narrow transform-mode depth range, a stencil-fail KEEP): on th
 the interlock with depth tested and written in the shader and equal the software GE in colour and depth, an
 overlapping pair, a primitive behind another in the same batch, a blended primitive under another depth test with
 depth writes off, and an opaque sprite behind the rejected one included; on the snapshot path their depth must equal it, and `dst-read-sfail` its colour too (a stencil
-batch that blends splits where its primitives overlap, a snapshot copy each). `dst-read-feedback`, a stencil state that textures from
+batch that blends splits where its primitives overlap, a snapshot copy each). The cells run once more on the
+interlock path with `--depth 32` (#2051): there those four keep the snapshot path, with no depth run in the
+shader, because the shader's depth copy is 16-bit. `dst-read-feedback`, a stencil state that textures from
 its own target, must keep the snapshot path on both paths: the destination copy is the texture its second sprite
 samples. On
 the snapshot path, the known difference must stay inside each overlap, and the device must hold no interlock

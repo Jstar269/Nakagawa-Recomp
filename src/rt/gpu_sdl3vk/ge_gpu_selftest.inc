@@ -9863,10 +9863,11 @@ static int coherence_run_dst_read_ztest(void) {
                         st->name, leg->name, diff, outside);
                 ok = 0;
             }
-            if (run.rmw_ops != 1u || run.rmw_batches != 1u || run.copies != 0u) {
+            if (run.rmw_ops != 1u || run.rmw_batches != 1u || run.copies != 0u || run.zruns != 0u) {
                 fprintf(stderr, "gpu coherence selftest [dst-read-ztest]: %s, %s: interlock ops %llu (want 1), "
-                                "RMW batches %llu (want 1), snapshot copies %llu (want 0)\n",
-                        st->name, leg->name, run.rmw_ops, run.rmw_batches, run.copies);
+                                "RMW batches %llu (want 1), snapshot copies %llu (want 0), shader depth runs %llu "
+                                "(want 0: no kill, so the early depth test owns depth)\n",
+                        st->name, leg->name, run.rmw_ops, run.rmw_batches, run.copies, run.zruns);
                 ok = 0;
             }
         } else {

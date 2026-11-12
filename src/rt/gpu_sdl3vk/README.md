@@ -93,7 +93,9 @@ Enabled with `SR_GPU_GE=1`. Implementation:
   shader (the alpha test, the color test, the transform-mode depth range when it is narrower
   than 0–65535, or a stencil-fail KEEP) tests and writes depth in the shader instead, inside the
   interlock and after those kills: the run's box of the D16 depth image is copied into a storage
-  buffer before its pass and back after it, bit for bit, and its pipelines test no depth. An op
+  buffer before its pass and back after it, bit for bit, and its pipelines test no depth. With
+  depth=32 (#2051) the depth image is D32, which that copy does not pack, so such an op keeps
+  the snapshot path. An op
   keeps the snapshot path when its destination-reading batch textures from its own target (the
   destination copy is its texture), and every op into a widescreen wing canvas does (it has no
   RMW objects). The host twin (#2050) does not change the path: the image is drawn as in a
