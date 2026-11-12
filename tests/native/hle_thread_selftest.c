@@ -11857,6 +11857,11 @@ static void reset_fixture(void) {
     s_stack_top = SR_STACK_ARENA_CEIL;
     stack_ranges_reset();
     s_vtime_us = 0;
+    /* The turbo clock charges its 10 ms quantum every TIMESLICE dispatches, counted on from the
+     * case before; some cases dispatch a host-dependent number of times, so a case's quantum fell
+     * where its predecessors left it. Each case starts the count afresh, so the quantum falls a
+     * whole TIMESLICE of dispatches in (PSP-DMAC-002 b3 failed when it fell inside the scenario). */
+    s_dispatches_since_time = 0u;
     s_tick = 0;
     s_interrupts_enabled = 1;
     s_dispatch_enabled = 1;
@@ -32038,12 +32043,6 @@ static void dch_setup(void (*scenario)(void)) {
     dmac_clear(DCH_DST2, DCH_REGION, 0u);
     g_worker_uid = SR_ROLE_UID_NONE;
     memset(s_cpu, 0, sizeof(*s_cpu));
-    /* The scenarios bracket windows of 58 to 4477 us with main's calls, which take no guest
-     * time. The fixture's turbo clock charges a 10 ms quantum every TIMESLICE dispatches,
-     * counted on from the cases before, so where it fell depended on them: a quantum inside a
-     * scenario ended the first window before the callers queued, or before a weaker ready
-     * caller ran. Each scenario starts the count afresh, so its quantum falls after it. */
-    s_dispatches_since_time = 0u;
     sched_run(DCH_MAIN_ENTRY, 0u, 0u);
     expect(s_dch_done && s_xfer_obj == 0u,
            "dmac channel: every guest thread ran to completion and the channel is idle");
@@ -32135,18 +32134,23 @@ static void dch_scenario_fifo(void) {
     s_dch_pending_after[1] = dch_pending(0) && dch_pending(2);
 }
 
-/* Whatever dispatch count the cases before leave, the arrival-order scenario runs the same:
- * on main, an inherited count that put the clock's quantum on the scenario's dispatches 2 to 6
- * failed its queueing check, and one on dispatch 11 its order and timing checks. */
+/* Whatever dispatch count the cases before leave, the arrival-order scenario runs the same. Each
+ * round leaves a count that puts the clock's quantum on one of the scenario's first 64 dispatches
+ * (counted from 0); reset_fixture starts the count afresh, so every round is the same run. Before
+ * it did, a quantum on dispatches 2 to 6 failed the queueing check and one on dispatch 11 the
+ * order and timing checks. The scenario itself takes fewer than 64 dispatches, so these phases
+ * cover it. */
 #define DCH_FIFO_PHASES 64u
 
 static void test_dmac_fifo_whatever_the_inherited_clock_phase(void) {
     const uint32_t dispatches = s_dispatches_since_time;
     unsigned failed = 0u;
+    uint32_t longest = 0u;
     for (uint32_t phase = 0u; phase < DCH_FIFO_PHASES; phase++) {
         memset(s_dch_pending_after, 0, sizeof s_dch_pending_after);
         s_dispatches_since_time = TIMESLICE - 1u - phase;
         dch_setup(dch_scenario_fifo);
+        if (s_dispatches_since_time > longest) longest = s_dispatches_since_time;
         const int ok = s_dch_pending_after[0] && s_dch_pending_after[1] && s_dch[0].order == 1 &&
                        s_dch[1].order == 2 && s_dch[2].order == 3 &&
                        s_dch[1].exit_us >= s_dch[0].deadline_us + 58u &&
@@ -32157,8 +32161,10 @@ static void test_dmac_fifo_whatever_the_inherited_clock_phase(void) {
                    (unsigned long long)s_dch[0].exit_us, (unsigned long long)s_dch[1].exit_us,
                    (unsigned long long)s_dch[2].exit_us);
     }
-    printf("dmac fifo: %u of %u inherited clock phases failed\n", failed, (unsigned)DCH_FIFO_PHASES);
+    printf("dmac fifo: %u of %u inherited clock phases failed; the scenario took %u dispatches\n", failed,
+           (unsigned)DCH_FIFO_PHASES, (unsigned)longest);
     expect(failed == 0u, "PSP-DMAC-002 b3: the arrival-order scenario holds at every inherited clock phase");
+    expect(longest < DCH_FIFO_PHASES, "the inherited phases cover every dispatch of the scenario");
     s_dispatches_since_time = dispatches;
 }
 
