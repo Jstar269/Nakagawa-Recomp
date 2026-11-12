@@ -8473,27 +8473,29 @@ static bool player_homebrew_key_valid(const char *key) {
     return true;
 }
 
+/* What clears the stop comes before the path, which comes last, so a long path can never cut
+   the instruction off (cold read of #2426, finding 1). */
 static void player_homebrew_elsewhere_text(char *out, size_t out_size, bool in_library,
                                            const char *title, const char *key,
                                            const char *shown) {
-    char from[MAX_PATH_LEN + 16];
-    if (shown[0]) {
-        snprintf(from, sizeof(from), "the folder \"%.300s\"", shown);
-    } else {
-        snprintf(from, sizeof(from), "another folder");
-    }
+    int used;
     if (in_library) {
-        snprintf(out, out_size,
-                 "%.120s (%s) is in the library, added from %s. A program is added from one "
-                 "folder: to add it from this one, remove %.120s from the library with \"Also "
-                 "delete the decrypted files and disc copy\" ticked. Nothing was changed.",
-                 title, key, from, title);
+        used = snprintf(out, out_size,
+                        "%.60s (%s) is in the library, added from another folder. A program is "
+                        "added from one folder: to add it from this one, remove %.60s from the "
+                        "library with \"Also delete the decrypted files and disc copy\" ticked. "
+                        "Nothing was changed.", title, key, title);
     } else {
-        snprintf(out, out_size,
-                 "%.120s (%s) has left the library, but Nakagawa still keeps its copy of %s. A "
-                 "program is added from one folder: to add it from this one, choose Delete kept "
-                 "copy, then add it again. The files it wrote on its Memory Stick stay. Nothing "
-                 "was changed.", title, key, from);
+        used = snprintf(out, out_size,
+                        "%.60s (%s) has left the library, but Nakagawa still keeps its copy of "
+                        "the folder it was added from. A program is added from one folder: to "
+                        "add it from this one, choose Delete kept copy, then add it again. The "
+                        "files it wrote on its Memory Stick stay. Nothing was changed.",
+                        title, key);
+    }
+    if (shown[0] && used > 0 && (size_t)used < out_size) {
+        snprintf(out + used, out_size - (size_t)used, " It was added from the folder \"%.160s\".",
+                 shown);
     }
 }
 
@@ -8892,16 +8894,21 @@ static bool player_homebrew_package_convert(const PlayerPsnPackage *package,
                                           &hooks, &program);
         if (rc == NK_PSP_OK && (strcmp(program.key, package->disc_id) != 0 ||
                                 strcmp(program.identity_sha256, package->identity_sha256) != 0)) {
-            (void)nk_remove_utf8(package->iso_path);
-            (void)nk_platform_remove_tree(view_root, NULL);
+            if (had_image) {
+                (void)nk_remove_utf8(package->iso_path);
+                (void)nk_platform_remove_tree(view_root, NULL);
+            } else {
+                (void)nk_pbp_homebrew_delete_import(package->iso_path, NULL, 0u);
+            }
             player_psn_result(code, code_size, "PBP_PACKAGE_UNSUPPORTED", message, message_size,
                               "The package changed after it was checked. Add it again.");
             return false;
         }
         if (rc == NK_PSP_OK) return true;
-        /* A first import keeps nothing; an earlier image of the same program (the same
-           key) keeps the new folder, which belongs to it. */
-        if (!had_image) (void)nk_platform_remove_tree(view_root, NULL);
+        /* A first import keeps nothing, its source record included (cold read of #2426,
+           finding 2); an earlier image of the same program (the same key) keeps the new
+           folder, which belongs to it. */
+        if (!had_image) (void)nk_pbp_homebrew_delete_import(package->iso_path, NULL, 0u);
     }
     /* With an earlier image, the new folder copy stays with it (review of #2426, N5). */
     if (rc == NK_PSP_ERR_CANCELLED) {

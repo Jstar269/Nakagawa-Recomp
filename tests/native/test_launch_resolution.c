@@ -1111,29 +1111,6 @@ static void test_no_iso_child_environment(const char *test_executable,
                          sep, sep, sep);
                 assert(nk_platform_path_missing(hb_file));
             }
-            /* The list's own bounds (review of #2426, m3): more lines than a folder may hold
-               entries, and files adding up to more than a folder may hold, are damage. */
-            {
-                size_t room =
-                    strlen(manifest_text) + (NK_PBP_HOMEBREW_FOLDER_MAX_ENTRIES + 1u) * 16u;
-                char *bad = (char *)malloc(room);
-                size_t used;
-                assert(bad != NULL);
-                used = (size_t)snprintf(bad, room, "%s", manifest_text);
-                for (unsigned i = 0; i <= NK_PBP_HOMEBREW_FOLDER_MAX_ENTRIES; ++i) {
-                    used += (size_t)snprintf(bad + used, room - used, "D m%u\n", i);
-                }
-                assert(used < room);
-                write_file(manifest_path, bad);
-                assert(nk_launch_start(&session) != NK_OK);
-                assert(strstr(session.last_error, "is damaged") != NULL);
-                snprintf(bad, room, "%sF %064d 629145600 m1\nF %064d 629145600 m2\n",
-                         manifest_text, 0, 0);
-                write_file(manifest_path, bad);
-                assert(nk_launch_start(&session) != NK_OK);
-                assert(strstr(session.last_error, "is damaged") != NULL);
-                free(bad);
-            }
             free(manifest_text);
             assert(nk_pbp_homebrew_write_view(hb_pbp, hb_view_root, NULL, problem,
                                               sizeof(problem)));

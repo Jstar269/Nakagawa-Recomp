@@ -6288,6 +6288,11 @@ static bool psn_test_cancel_now(void *userdata) {
     return true;
 }
 
+/* Cancels once the conversion has reported progress: after the folder copy, in the image. */
+static bool psn_test_cancel_after_progress(void *userdata) {
+    return ((const PsnTestProgress *)userdata)->calls > 0;
+}
+
 static uint8_t *psn_test_read_file(const char *path, size_t *size) {
     FILE *file = fopen(path, "rb");
     long length;
@@ -7000,6 +7005,23 @@ static void test_homebrew_package_becomes_a_private_disc(void) {
     assert(nk_platform_path_missing(view_root));
     snprintf(view_path, sizeof(view_path), "%s.importing", view_root);
     assert(nk_platform_path_missing(view_path));
+    /* A cancel once the folder copy is in place keeps nothing either: the copy and its source
+       record go with the partial image (cold read of #2426, finding 2). Failing before: the
+       record stayed, and the next pick from another folder was stopped as a kept copy. */
+    {
+        PlayerPsnConvertCallbacks late_cancel = { psn_test_progress,
+                                                  psn_test_cancel_after_progress, NULL };
+        memset(&progress, 0, sizeof(progress));
+        late_cancel.userdata = &progress;
+        assert(!player_psn_package_convert(&package, &late_cancel, code, sizeof(code), message,
+                                           sizeof(message)));
+        assert(progress.calls > 0 && strstr(message, "cancelled") != NULL);
+        assert(nk_platform_path_missing(package.iso_path) && nk_platform_path_missing(partial));
+        assert(nk_platform_path_missing(view_root));
+        snprintf(view_path, sizeof(view_path), "%s", view_root);
+        snprintf(view_path + strlen(view_path) - 4u, 16u, ".source");
+        assert(nk_platform_path_missing(view_path));
+    }
 
     memset(&progress, 0, sizeof(progress));
     hooks.userdata = &progress;
@@ -7352,6 +7374,24 @@ static void test_homebrew_package_becomes_a_private_disc(void) {
             assert(!player_psn_package_inspect(second_path, &refused, code, sizeof(code), message,
                                                sizeof(message)));
             assert(strcmp(code, "HOMEBREW_ALREADY_ADDED") == 0);
+            /* However long the first folder's path, the card keeps what clears the stop (cold
+               read of #2426, finding 1): the path comes last. */
+            {
+                uint8_t *kept_record;
+                size_t kept_record_len = 0;
+                char long_record[700];
+                kept_record = psn_test_read_file(record_path, &kept_record_len);
+                assert(kept_record != NULL);
+                memset(long_record, 'a', sizeof(long_record));
+                long_record[0] = '/';
+                memcpy(long_record + 600, "\nMYHB\n", 7u);
+                write_binary_file(record_path, (const uint8_t *)long_record, 607u);
+                player_app_refuse_homebrew_elsewhere(lib, &refused);
+                assert(strstr(lib->last_error.message, "Delete kept copy") != NULL);
+                assert(strstr(lib->last_error.message, "Nothing was changed.") != NULL);
+                write_binary_file(record_path, kept_record, kept_record_len);
+                free(kept_record);
+            }
             player_app_refuse_homebrew_elsewhere(lib, &refused);
             assert(strstr(lib->last_error.message, "has left the library") != NULL);
             assert(strstr(lib->last_error.message, "Delete kept copy") != NULL);
@@ -7359,6 +7399,23 @@ static void test_homebrew_package_becomes_a_private_disc(void) {
             assert(label != NULL && strcmp(label, "Delete kept copy") == 0);
             assert(strcmp(lib->last_error.subject_disc_id, package.disc_id) == 0);
             assert(!nk_platform_path_missing(record_path));
+            /* Another player has added the title again: the library file is read again under
+               its lock, and nothing is deleted (cold read of #2426, finding 3). */
+            {
+                NkLibrary *disk = (NkLibrary *)calloc(1, sizeof(NkLibrary));
+                assert(disk != NULL);
+                nk_library_init(disk);
+                snprintf(entry.iso_path, sizeof(entry.iso_path), "%s", again.iso_path);
+                assert(nk_library_add_or_update(disk, &entry) == NK_OK);
+                assert(nk_library_save(disk, lib->library.library_path) == NK_OK);
+                assert(!player_app_delete_kept_homebrew(lib, package.disc_id, error,
+                                                        sizeof(error)));
+                assert(strstr(error, "in the library again") != NULL);
+                assert(!nk_platform_path_missing(again.iso_path));
+                nk_library_init(disk);
+                assert(nk_library_save(disk, lib->library.library_path) == NK_OK);
+                free(disk);
+            }
             /* Where the first folder's path is shown (review of #2426, N7 and question 4): on
                the card, with the profile folder as "~"; Copy details and the report link
                carry no message, so not there at all. */
@@ -7417,6 +7474,40 @@ static void test_homebrew_package_becomes_a_private_disc(void) {
             after = psn_test_read_file(stick_file, &after_len);
             assert(after != NULL && after_len == 22u);
             free(after);
+            /* Delete kept copy deletes only a program's import in discs/ (cold read of #2426,
+               finding 3): a disc image that is not a program's, and a program's image outside
+               discs/, are refused, and nothing beside them goes. */
+            {
+                char plain_dir[NATIVE_TEST_PATH_MAX + 160];
+                char plain_iso[NATIVE_TEST_PATH_MAX + 192];
+                char plain_view[NATIVE_TEST_PATH_MAX + 192];
+                char problem[512];
+                uint8_t *image_bytes;
+                size_t image_len = 0;
+                snprintf(plain_dir, sizeof(plain_dir), "%s%cdiscs%cXZZZ99999", data_root, sep,
+                         sep);
+                assert(nk_platform_mkdir_p(plain_dir));
+                snprintf(plain_iso, sizeof(plain_iso), "%s%cXZZZ99999.iso", plain_dir, sep);
+                snprintf(plain_view, sizeof(plain_view), "%s%cXZZZ99999.ms0", plain_dir, sep);
+                write_binary_file(plain_iso, (const uint8_t *)"not a program", 13u);
+                assert(nk_platform_mkdir_p(plain_view));
+                assert(!nk_pbp_homebrew_delete_import(plain_iso, problem, sizeof(problem)));
+                assert(strstr(problem, "not a program's import") != NULL);
+                assert(nk_platform_file_exists(plain_iso) && nk_platform_dir_exists(plain_view));
+                assert(test_remove_tree(plain_dir));
+                snprintf(plain_dir, sizeof(plain_dir), "%s%celsewhere", base, sep);
+                assert(nk_platform_mkdir_p(plain_dir));
+                snprintf(plain_iso, sizeof(plain_iso), "%s%cXZZZ99999.iso", plain_dir, sep);
+                snprintf(plain_view, sizeof(plain_view), "%s%cXZZZ99999.ms0", plain_dir, sep);
+                image_bytes = psn_test_read_file(again.iso_path, &image_len);
+                assert(image_bytes != NULL);
+                write_binary_file(plain_iso, image_bytes, image_len);
+                free(image_bytes);
+                assert(nk_platform_mkdir_p(plain_view));
+                assert(!nk_pbp_homebrew_delete_import(plain_iso, problem, sizeof(problem)));
+                assert(nk_platform_file_exists(plain_iso) && nk_platform_dir_exists(plain_view));
+                assert(test_remove_tree(plain_dir));
+            }
             if (!stick_was_there) {
                 snprintf(stick_dir, sizeof(stick_dir), "%s%c%s", saves_root, sep,
                          package.disc_id);
