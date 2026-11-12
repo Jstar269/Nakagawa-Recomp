@@ -493,6 +493,45 @@ class SlotTests(unittest.TestCase):
         (self.slots / "mine.lock.reclaim").write_text("library-regress pid=1\n", encoding="utf-8")
         self.assertEqual(library_regress._lock_count(self.slots), 0)
 
+    def test_a_dead_lock_of_another_host_or_os_is_kept(self) -> None:
+        held = self.slots / "mine.lock"
+        held.write_text("library-regress pid=424242 host=elsewhere/linux\n", encoding="utf-8")
+        library_regress._clear_stale_lock(held, lambda _pid: False, lambda _text: None)
+        self.assertTrue(held.exists())
+
+    def test_our_dead_lock_naming_this_host_is_reclaimed(self) -> None:
+        held = self.slots / "mine.lock"
+        held.write_text(f"library-regress pid=424242 host={library_regress._host_id()}\n", encoding="utf-8")
+        library_regress._clear_stale_lock(held, lambda _pid: False, lambda _text: None)
+        self.assertEqual(list(self.slots.iterdir()), [])
+
+    def test_a_slot_file_held_open_for_a_moment_is_removed_on_a_later_try(self) -> None:
+        tries: list[int] = []
+
+        class Busy:
+            def unlink(self) -> None:
+                tries.append(1)
+                if len(tries) < 3:
+                    error = PermissionError(13, "in use")
+                    error.winerror = 32  # type: ignore[attr-defined]
+                    raise error
+
+        library_regress._remove_slot_file(Busy(), sleep=lambda _seconds: None)  # type: ignore[arg-type]
+        self.assertEqual(len(tries), 3)
+
+    def test_a_slot_file_that_stays_held_raises_after_a_second(self) -> None:
+        slept: list[float] = []
+
+        class Held:
+            def unlink(self) -> None:
+                error = PermissionError(13, "in use")
+                error.winerror = 32  # type: ignore[attr-defined]
+                raise error
+
+        with self.assertRaises(PermissionError):
+            library_regress._remove_slot_file(Held(), sleep=slept.append)  # type: ignore[arg-type]
+        self.assertAlmostEqual(sum(slept), 0.98)
+
     def test_a_quiet_lock_holds_the_run(self) -> None:
         (self.slots / "recomp-perf.lock").write_text("x", encoding="utf-8")
         held: list[float] = []

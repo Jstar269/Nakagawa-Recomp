@@ -72,6 +72,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -562,11 +563,39 @@ def _pid_alive(pid: int) -> bool:
     kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
     handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
     if not handle:
-        return bool(ctypes.get_last_error() == 5)  # type: ignore[attr-defined]  # access denied: it exists
+        # ERROR_INVALID_PARAMETER (87) means no process has that ID. Any other failure, access
+        # denied included, says nothing, so the process counts as alive and its lock is kept.
+        return bool(ctypes.get_last_error() != 87)  # type: ignore[attr-defined]
     code = ctypes.c_ulong()
     ok = kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
     kernel32.CloseHandle(handle)
-    return bool(ok) and code.value == 259  # STILL_ACTIVE
+    return not ok or code.value == 259  # STILL_ACTIVE; a failed query keeps the lock
+
+
+def _host_id() -> str:
+    """The host and OS a lock's process ID belongs to (a Windows run and a WSL run differ)."""
+    return f"{socket.gethostname()}/{sys.platform}"
+
+
+#: Windows refuses to delete a file another process has open (ERROR_SHARING_VIOLATION), and a
+#: waiting run opens the slot files to read them for a moment.
+_SHARING_VIOLATION = 32
+
+
+def _remove_slot_file(path: Path, sleep: Callable[[float], None] = time.sleep) -> None:
+    """Delete a lock or guard file; a missing one is not an error. A Windows sharing violation,
+    a reader holding the file for microseconds, is tried again for up to a second before the
+    error is raised."""
+    for attempt in range(50):
+        try:
+            path.unlink()
+            return
+        except FileNotFoundError:
+            return
+        except PermissionError as error:
+            if getattr(error, "winerror", None) != _SHARING_VIOLATION or attempt == 49:
+                raise
+            sleep(0.02)
 
 
 def _clear_stale_lock(lock: Path, pid_alive: Callable[[int], bool], log: Callable[[str], None]) -> None:
@@ -575,15 +604,16 @@ def _clear_stale_lock(lock: Path, pid_alive: Callable[[int], bool], log: Callabl
     Reclaiming runs take ``<lock>.reclaim`` (created exclusively; it does not count as a slot)
     and delete the lock only if it still holds the text that named the dead process. While a lock
     file exists no run can create one of the same name, and only a holder of ``.reclaim`` deletes
-    another run's lock, so a lock taken by a live run meanwhile is never touched. Process IDs
-    only mean something within one operating system: a slot folder is shared by runs on one OS
-    (a Windows run and a WSL run on the same machine see different IDs)."""
+    another run's lock, so a lock taken by a live run meanwhile is never touched. A process ID
+    only means something on its own host and OS, so a lock that names another host or OS (a
+    Windows run and a WSL run sharing a folder, or two machines) is never reclaimed here."""
     try:
         text = lock.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return
     match = re.search(r"\bpid=(\d+)", text)
-    if not match or pid_alive(int(match.group(1))):
+    host = re.search(r"\bhost=(\S+)", text)
+    if not match or (host and host.group(1) != _host_id()) or pid_alive(int(match.group(1))):
         return
     guard = lock.with_name(f"{lock.name}.reclaim")
     try:
@@ -595,7 +625,7 @@ def _clear_stale_lock(lock: Path, pid_alive: Callable[[int], bool], log: Callabl
         log(f"cannot reclaim {lock.name}: {guard.name}: {error}")
         return
     try:
-        os.write(descriptor, f"library-regress pid={os.getpid()}\n".encode())
+        os.write(descriptor, f"library-regress pid={os.getpid()} host={_host_id()}\n".encode())
         os.close(descriptor)
         try:
             current = lock.read_text(encoding="utf-8", errors="replace")
@@ -604,14 +634,14 @@ def _clear_stale_lock(lock: Path, pid_alive: Callable[[int], bool], log: Callabl
         if current != text:
             return  # a live run took the slot after the dead one was reclaimed
         try:
-            lock.unlink()
+            _remove_slot_file(lock)
         except OSError as error:
             log(f"cannot reclaim {lock.name} from process {match.group(1)}, which is gone: {error}")
             return
         log(f"reclaimed {lock.name}: process {match.group(1)} is gone")
     finally:
         try:
-            guard.unlink()
+            _remove_slot_file(guard)
         except OSError as error:
             log(f"cannot remove {guard.name}: {error}; reclaiming {lock.name} stops until it is removed")
 
@@ -619,10 +649,12 @@ def _clear_stale_lock(lock: Path, pid_alive: Callable[[int], bool], log: Callabl
 def _report_stale_guard(guard: Path, pid_alive: Callable[[int], bool], log: Callable[[str], None]) -> None:
     """Name a reclaim guard whose run is gone: it stops reclaiming until someone removes it."""
     try:
-        match = re.search(r"\bpid=(\d+)", guard.read_text(encoding="utf-8", errors="replace"))
+        text = guard.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return  # its run finished meanwhile
-    if match and not pid_alive(int(match.group(1))):
+    match = re.search(r"\bpid=(\d+)", text)
+    host = re.search(r"\bhost=(\S+)", text)
+    if match and (not host or host.group(1) == _host_id()) and not pid_alive(int(match.group(1))):
         log(f"{guard} was left by process {match.group(1)}, which is gone; remove it to let stale locks be reclaimed")
 
 
@@ -650,11 +682,12 @@ def acquire_slot(slot_dir: Path, name: str, max_slots: int, *, quiet_globs: Iter
             except FileExistsError:
                 descriptor = None
             if descriptor is not None:
-                os.write(descriptor, f"library-regress pid={os.getpid()} start={_utc_now()}\n".encode())
+                os.write(descriptor,
+                         f"library-regress pid={os.getpid()} host={_host_id()} start={_utc_now()}\n".encode())
                 os.close(descriptor)
                 if _lock_count(slot_dir) <= max_slots:
                     return lock
-                lock.unlink(missing_ok=True)  # another job took the last slot at the same moment
+                _remove_slot_file(lock)  # another job took the last slot at the same moment
         if not told:
             log(f"waiting for a title slot ({quiet + ' held' if quiet else f'{_lock_count(slot_dir)} held'})")
             told = True
@@ -709,7 +742,10 @@ def run_fast(args: argparse.Namespace, *,
         completed = run(command, check=False)
     finally:
         if lock is not None:
-            lock.unlink(missing_ok=True)
+            try:
+                _remove_slot_file(lock)
+            except OSError as error:  # the run's result still counts; a later run reclaims the lock
+                log(f"fast: could not remove {lock}: {error}; it is reclaimed once this process is gone")
     manifest_path = run_dir / "library-build.json"
     if completed.returncode != 0 or not manifest_path.is_file():
         log(f"fast: library_build.py ended {completed.returncode}; no verdict")
