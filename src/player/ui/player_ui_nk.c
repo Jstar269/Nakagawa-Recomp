@@ -364,7 +364,7 @@ static bool player_ui_add_font(NkUiTtf *ttf, int font, const char *base_path,
    platform writes paths: assets\fonts\ui on Windows, assets/fonts/ui
    elsewhere (#306). */
 static void player_ui_set_fonts_missing(char *error, size_t error_size) {
-    char sep = nk_platform_path_separator() == '\\' ? '\\' : '/';
+    char sep = nk_platform_path_separator();
     char message[96];
     snprintf(message, sizeof(message), "its fonts (assets%cfonts%cui) are missing or damaged",
              sep, sep);
