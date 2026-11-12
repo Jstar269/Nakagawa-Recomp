@@ -311,7 +311,8 @@ The **Where** column of each table names the places a code can appear:
 | `UPDATE_INSTALLED_BY_SETUP` | player | This copy was installed with Setup, so it updates by running the new release's Setup. |
 | `UPDATE_INSTALL_EXISTS` | player | The new version is already unpacked. |
 | `UPDATE_INSTALL_INCOMPLETE` | player | Unpacking the new version did not finish. |
-| `UPDATE_INSTALL_LEFTOVER` | player | A previous install attempt left files in the way. |
+| `UPDATE_INSTALL_LEFTOVER` | player | A folder Nakagawa did not make is where the new version unpacks. (Nakagawa's own unpack left by an interrupted install is removed on the next try.) |
+| `UPDATE_INSTALL_LEFTOVER_IN_USE` | player | An interrupted install's unpack folder could not be removed; something has it open. |
 | `UPDATE_INSTALL_MOVE_FAILED` | player | The new version could not be moved into place. |
 | `UPDATE_INSTALL_NOT_WRITABLE` | player | The install folder is not writable. |
 | `UPDATE_INSTALL_PATH` | player | The folder for the new version has too long a path. |
