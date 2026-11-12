@@ -1807,20 +1807,15 @@ switch are in `src/rt/gpu_sdl3vk/README.md` (#2052).
 
 At 1x the readback is the PSP's value.
 
-The render-target reads that decode at 1x do so by decision (#2279). The format, CLUT, swizzle, width and alignment
-cases reinterpret the target's memory, which the 1x decode does exactly; the mipmapped and depth cases have their own
-reasons. The README gives each reason in full:
+The render-target reads that decode at 1x (#2279; the README lists each with its reason) fall into two groups:
 
-- no scaled form, because the texture's texels are not the target's pixels: 8888 read as 16-bit or CLUT16, 16-bit
-  as 8888 or CLUT32, CLUT4, CLUT8, DXT, and an address off the target's pixel boundaries;
-- a scaled form that would redo the reinterpretation for every filter tap in the shader, kept at 1x because the 1x
-  read is exact and each would be its own shader path: a 16-bit target read as another 16-bit format (a repack),
-  CLUT16 and CLUT32 at the target's pixel size (a palette lookup), a swizzled read and another buffer width (an
-  address remap);
-- a mipmapped read (a mipmap filter and a highest level above 0): the chain is built from guest VRAM, its other
-  levels are 1x buffers, and a target image has no levels;
-- depth outside every colour target: the renderer never samples its depth image. The read commits the GPU's depth
-  to guest VRAM first, through the GE's CPU-read path.
+- no scaled form exists, because the texture's texels are not the target's pixels: 8888 read as 16-bit or CLUT16,
+  16-bit as 8888 or CLUT32, CLUT4, CLUT8, DXT, and an address off the target's pixel boundaries. The 1x decode is
+  the read;
+- a scaled form could exist but is not implemented, so these read at 1x and #2279 stays open for them: a 16-bit
+  target read as another 16-bit format, CLUT16 and CLUT32 at the target's pixel size, a swizzled read, a read with
+  another buffer width, a mipmapped read, and a depth read (outside every colour target, or inside one whose depth
+  was written last).
 
 `rtt-1x-reads` in `gpu-coherence-selftest` runs thirteen such reads at 1x, 2x and 4x (the README lists them): none
 binds a target's image, each depth read commits the GPU's depth first, and the reading target's guest VRAM equals

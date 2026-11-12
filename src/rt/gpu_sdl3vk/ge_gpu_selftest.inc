@@ -13450,7 +13450,7 @@ static int coherence_run_host_depth(void) {
 }
 
 /* rtt-1x-reads (#2279): the render-target reads that decode guest VRAM at 1x at every render scale,
- * each a recorded decision (src/rt/gpu_sdl3vk/README.md, docs/ENHANCEMENT_CONTRACT.md). T (8888,
+ * each listed with its reason (src/rt/gpu_sdl3vk/README.md, docs/ENHANCEMENT_CONTRACT.md). T (8888,
  * stride 512, at 0x100000) and U (5650, stride 512, at 0x010000) are drawn as 16 x 16 cells of
  * distinct colours (and alphas, in T) over their rows 0..63 and columns 0..255; M's depth buffer Z
  * (at 0x1A0000, outside every colour target) is filled in four rectangles of distinct depths with
