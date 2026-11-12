@@ -477,12 +477,14 @@ The launcher always exports `SR_ACE`, so an inherited value cannot opt a launch 
 `v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;smooth=x2;sas=off;tess=off;twin=off`. `tier` (`enhanced` or `ace`) only names the
 run, in the game badge, the pause menu and the stamps; a line without it is an Enhanced run. `stick` (the title's
 stick dead zone, 1 to 126, section 11.3.11), `load` (`fast` or `off`, section 11.3.10), `depth` (`32` or `off`,
-section 10.20), `ssaa` (`2`, `4` or `off`, section 10.21), `peak` (`limit` or `off`, section 10.22) and `cull` (`on`
-or `off`, section 11.3.6) are the other keys a line may leave out: a missing `stick`, `load`, `depth`, `ssaa`,
-`peak` or `cull` is off, `stick=<counts>`, `load=fast` and `cull=on` need `tier=ace` (`depth=32`, `ssaa=2|4` and
-`peak=limit` do not), the launcher writes `;load=fast` and `;cull=on` only for an Ace launch with that part on and
-`;ssaa=2` or `;ssaa=4` for an Enhanced or Ace launch with supersampling on, and no launcher writes `depth` or
-`peak` yet (sections 11.3.12 and 10.22). A line writes them in that order, `cull` last. Every
+section 10.20), `ssaa` (`2`, `4` or `off`, section 10.21), `peak` (`limit` or `off`, section 10.22), `glyphs` (`on`
+or `off`, sections 10.13 and 11.3.5) and `cull` (`on` or `off`, section 11.3.6) are the other keys a line may leave
+out: a missing `stick`, `load`, `depth`, `ssaa`, `peak`, `glyphs` or `cull` is off, `stick=<counts>`, `load=fast`
+and `cull=on` need `tier=ace` (`depth=32`, `ssaa=2|4`, `peak=limit` and `glyphs=on` do not), the launcher writes
+`;load=fast` and `;cull=on` only for an Ace launch with that part on and `;ssaa=2` or `;ssaa=4` for an Enhanced or
+Ace launch with supersampling on, and no launcher writes `depth` (section 11.3.12), `peak` (section 10.22) or
+`glyphs` (section 11.3.5) yet: a line that carries one is written by hand. A line writes them only when on, in that
+order, `cull` last, so a line with them off is the line without them, byte for byte. Every
 other key is required, in any order, each once; a value for a feature this build does not carry (`smooth=match`)
 refuses the line. So does anything else: the run is Authentic and one `ACE_MODE: refused (<reason>)` line says why.
 Unset is off. With Enhanced or Ace on, the launcher also exports `SR_ACE_REPORT`, the per-run report under
@@ -1301,18 +1303,24 @@ into a glyph's edge. This feature (#2110) rebuilds the rectangle a draw samples,
 render scale. It needs no font outline and no hook in the game's code, so it works whichever code drew the page, a
 font the user supplied from their own console included, and it works for *Hot Shots Tennis*, which draws through its
 own font library, and for *LittleBigPlanet*, which draws from pre-built atlases. It is guest-visible (section 11.1)
-and not admitted under section 11.2: section 11.3.5 is its entry, and this section says how it draws. The code is
+and not yet admitted under section 11.2: section 11.3.5 is its entry, and this section says how it draws. The code is
 `src/rt/gpu_sdl3vk/glyph_recon.c` (the setting, the refusals, the rebuild and its check: no GPU, no guest memory) and
 `glyph_gpu.inc`, included by `ge_gpu.c`.
 
-- **Settings.** `SR_GLYPHS=off|on`, read when the renderer starts; unset is off. It takes effect only in Ace Mode: in
-  an authentic run it is not read, and a request prints one `GLYPHS: off (sharp game text needs Ace Mode)` line. Any
-  other value prints `GLYPHS: refused (SR_GLYPHS takes off or on)` and the feature stays off. It needs a render scale
-  of 2 to 4, the factor the rebuild is made at (4 is the renderer's largest scale; the rebuild itself is tested up to
-  6); at 1x there is nothing to sharpen and a run prints
-  `GLYPHS: idle (render scale <n> leaves nothing to sharpen; it takes 2 to 4)`. It is not the launch line's `text`
-  key (section 10.1), which only sets the on-screen keyboard to the window's resolution; neither reads or implies the
-  other. It has no launch-line key, library setting or per-title setting; section 11.3.5 says what admission needs.
+- **Settings.** The launch line's `glyphs` key (section 10.1): `glyphs=on`, or `glyphs=off` or no key for off. It
+  is optional and an Enhanced part, so an Enhanced or an Ace line may carry it; any other value refuses the whole
+  line (`ACE_MODE: refused (bad value)`), and the run is Authentic. The renderer takes it once when it starts
+  (`nk_glyph_init`). An authentic run has no valid line with Ace on, so nothing can turn the feature on there,
+  and the unit's own Ace gate keeps it off even if asked (the `glyph-recon-selftest` settings cell). It needs a render scale of 2 to 4, the
+  factor the rebuild is made at (4 is the renderer's largest scale; the rebuild itself is tested up to 6); at 1x
+  there is nothing to sharpen, a run prints `GLYPHS: idle (render scale <n> leaves nothing to sharpen; it takes 2
+  to 4)`, and the report names `glyphs` unavailable with that reason. A run on the software GE, which has no
+  rebuild, names it unavailable at exit (`did not run: its renderer or presenter did not start`). It is not the
+  launch line's `text` key, which only sets the on-screen keyboard to the window's resolution; neither reads or
+  implies the other. It has no library or per-title setting yet; section 11.3.5 says what admission needs. The
+  `SR_GLYPHS` environment variable that switched it before the key is retired: set to any value, the run refuses to
+  start with one line that names `glyphs=on` and exits 1, as an invalid `SR_NOVBPACE` does, so a script that set it
+  is told rather than silently losing the part.
 - **Which draws.** A sprite primitive that maps one texel to one pixel (the smart 2D test of section 10.10, either
   direction) over a rectangle of whole texels, each side 4 to 64 texels, inside a cached texture that has one level,
   is not a render target and lies in main RAM, in 4444, 8888 or an indexed 4-bit or 8-bit format. Text drawn as
@@ -1394,7 +1402,9 @@ and not admitted under section 11.2: section 11.3.5 is its entry, and this secti
   the same draws rebuild the same tiles whatever the host's speed. The work is bounded by a count: at most 48
   rectangles are checked or rebuilt per present, and a draw past the count is drawn as the game made it and offered
   again by the next draw. No time budget exists.
-- **Stamps.** `GLYPHS: on (per_present=48, tolerance=2)` at start, followed by the line section 11.3.5 describes, and
+- **Stamps.** `ACE_MODE: glyphs on (...)` after the `ACE_MODE: on` line, `GLYPHS: on (per_present=48,
+  tolerance=2)` when the renderer starts, followed by the line section 11.3.5 describes, the report's `glyphs`
+  (`true`, or `false` with its reason under `unavailable`) and the feature words' `sharp game text`, and
   at exit `GLYPHS: draws (bound=, tiles_built=, tiles_kept=, tiles_stale=, page_decodes=, images=, capped=,
   budget_short=, tiles_full=)` and `GLYPHS: exit (refused: <name>=<count>, ...)`. Section 10.4 applies: the run is an Ace run.
 - **Limits.** One page holds at most 768 tiles; a draw past that is drawn as made (`tiles_full`). Text drawn as
@@ -1407,8 +1417,8 @@ and not admitted under section 11.2: section 11.3.5 is its entry, and this secti
   dither, the common 4444 case, is clean), a glow with a 1.25-texel falloff (1.02 to 1.18) by 64 to 69, and a soft shape
   sharing a rectangle with text (an H and a glow, 1.02 to 1.12) by up to 100. A crisp anti-aliased box or disk at a
   sub-texel offset also runs back at its corners (19, 49, 81 and 159 of 255 for a box at factors 2, 3, 4 and 6), in
-  the edge rebuild and not only in soft art. The feature is not part of the settings pages or the launch line. It is off unless `SR_GLYPHS=on` in an Ace
-  run; turning it on by default or putting it in a preset needs the owner's decision, to which these costs apply.
+  the edge rebuild and not only in soft art. The feature is on the launch line and not on the settings pages. It is off unless the
+  line carries `glyphs=on`; turning it on by default or putting it in a preset needs the owner's decision, to which these costs apply.
 - **Tests.** `glyph-recon-selftest` checks the setting and its Ace gate, every named refusal, the classifier, and the
   rebuild at every factor for 4444, 8888, indexed 4-bit and indexed 8-bit pages (block means, colour, repeatability,
   fewer soft pixels than a bilinear enlargement, no dependence on neighbouring cells), the downsample check
@@ -1429,9 +1439,15 @@ and not admitted under section 11.2: section 11.3.5 is its entry, and this secti
   bars of one colour (shallow, steep, four texels and two) and a box shadow draw without a ribbed row or column; the descriptor pool holds a set
   for every image an entry can have; a rewritten page draws its new tile and never the old, also when the rewrite
   misses the bytes the cache's content hash samples, and an unchanged cell keeps its tile; the 48-per-present count; guest memory and
-  the CLUT unchanged; the setting idle at 1x; and an authentic run that rebuilds nothing and draws the same picture
-  with `SR_GLYPHS` unset and on. `gpu-glyph-mutant` removes the content check of a bound tile, keys the tiles on the
-  cache's sampled content hash instead of its generation, removes the per-present count, and the VRAM, hard-edge, colour and Ace guards, each of which must fail its own cell.
+  the CLUT unchanged; the setting idle at 1x; and the key off byte for byte: one scene drawn in an authentic run, in an
+  Ace run whose line has no `glyphs` key and in one with `glyphs=off` rebuilds and decodes nothing and has one picture
+  hash (the device image and the frame the guest keeps), and with `glyphs=on` it draws rebuilt glyphs and another
+  hash. `ace-selftest` checks the key: its values, that `glyphs=off` formats as the line without it, its place after
+  `ssaa` and `peak` and before `cull`, the stamp's line, the feature words, and the report when the renderer confirms it, names
+  it unavailable or never starts; and it starts Ace Mode as a run does with `SR_GLYPHS=on` and checks that the
+  process stops with exit 1 and the line that names `glyphs=on`. `gpu-glyph-mutant` removes the content check of a bound tile, keys the tiles on the
+  cache's sampled content hash instead of its generation, removes the per-present count, and the VRAM, hard-edge and
+  colour guards, and builds a renderer that ignores the key, each of which must fail its own cell.
 
 ### 10.14. Finer Bezier and Spline Patches
 
@@ -1684,7 +1700,7 @@ at the Hot Shots Tennis (UCUS98701) title logo on a PSP-3000. Authentic keeps do
 (#2137) plays the same mix without the hardware's clipping: the unsaturated sum, through a true-peak limiter at the
 host's output.
 
-- **The line.** `peak=limit` sits just before `cull` (after the other optional keys) and is written only when on;
+- **The line.** `peak=limit` sits after `ssaa` and before `glyphs` and `cull` and is written only when on;
   a missing `peak` and `peak=off` are off. It is an Enhanced part and needs no `tier=ace`. A build without it
   (`ACE_HAS_PEAK`) refuses the line.
 - **What the guest sees: nothing.** The guest's SAS buffer gets the PSP's saturated bytes in every mode, because a
@@ -2294,45 +2310,52 @@ The feature of section 10.12 (#1880). Its presentation is described there; this 
   is the pack's; the runs item 4 lists, for a title and a pack, do not exist yet, and the feature may not be on by
   default before they do.
 
-#### 11.3.5. Sharp Game Text (Not Admitted)
+#### 11.3.5. Sharp Game Text (`glyphs`, Not Yet Admitted)
 
 The feature of section 10.13 (#2110). Its presentation is described there; this entry is what the guest can observe.
 
-- **Status: guest-visible, not admitted under section 11.2.** Each present commits the frame it shows to guest VRAM,
-  so a frame drawn with a rebuilt glyph is the frame the guest keeps. The feature is outside section 11.2: the
-  requirements below do not exist, and it is reachable only through an environment variable, for development.
-- **Key and off switch.** The feature has no launch-line key. `SR_GLYPHS` is an environment variable, not a key on
-  the launch line (section 10.1), and has no library or per-title setting. Its off switch is the variable unset or
-  `off`, and an authentic run, which never reads it. Admission under section 11.2 needs all three; the key name
-  `glyphs` is reserved for it.
+- **Status: guest-visible, not yet admitted under section 11.2.** Each present commits the frame it shows to guest
+  VRAM, so a frame drawn with a rebuilt glyph is the frame the guest keeps. Of what section 11.2 asks, the key exists
+  and the library and per-title switches and the private runs of item 4 do not (below); the admission is the owner's.
+- **Key and off switch.** `glyphs=on` on the launch line (section 10.1), an optional key: a line without it, or with
+  `glyphs=off`, is off and formats byte for byte as a line from before the key, and any other value refuses the line.
+  It needs no `tier=ace`: it is an Enhanced part. Its off switch is the key off or missing, and an authentic run,
+  which has no valid line with Ace on. It has no library or per-title setting, and the player never writes it, so a
+  player launch cannot turn it on: only a title's runtime started directly, with `SR_ACE` set by hand to a line that
+  carries `;glyphs=on`, can. Admission under section 11.2 needs both switches. The `SR_GLYPHS` environment
+  variable it replaces is retired: set, the run refuses to start and names the key (section 10.13).
 - **How it relates to the `text` key.** Not at all. `text` (section 10.1) draws the on-screen keyboard at the window's
   resolution on the presented image and changes no guest frame; `glyphs` rebuilds the game's own text inside the
   frame the game draws. Neither reads or implies the other, and `text=on` with `glyphs` off leaves a game's text as
   the game drew it.
-- **The cost of adding a key to the `SR_ACE` launch line.** Every key but `tier` is required (section 10.1), so a line
-  an older launcher wrote has no `glyphs` and is refused whole: the run is Authentic with an
-  `ACE_MODE: refused (<reason>)` line. A new required key also has to be written in every place that builds or checks
-  a full line: files outside the documents spell one out (among them `src/player/player_state.h`, `src/rt/ace.h`,
-  `tests/native/ace_selftest.c`, the launch-resolution and player-state tests, and the flight diff and package cache
-  tests). Beyond those, the key needs its row in the parser's table in
-  `src/rt/ace.c`, `AceConfig`, the canonical line, the report's `effective` block, the feature words, and the settings
-  pages and per-title precedence of sections 10.5 and 10.9. Making the key optional, as `tier` is, avoids the first
-  cost and not the second, and changes the rule that every other key is required. Which of the two is a decision
-  admission needs, with the library and per-title switches.
-- **Never silent.** A run with the feature on prints, after its `GLYPHS: on` line, one line naming it as guest-visible,
-  on through the environment and not admitted under section 11.2. The `glyph-recon-selftest` settings cell pins it.
+- **The cost of adding a key to the `SR_ACE` launch line.** A required key would refuse every line an older launcher
+  wrote and would have to be spelled out wherever a full line is built or checked (`src/player/player_state.h`, the
+  launch-resolution, player-state, flight diff and package cache tests among them). `glyphs` is optional, as `stick`,
+  `load`, `depth`, `ssaa`, `peak` and `cull` are, so it costs neither: a line without it is valid and unchanged, and only
+  `ace_format` writes it, when on. What it did cost: its row in the parser's table in `src/rt/ace.c` (with `on`, its
+  longest value, for `ace_longest_line`), `AceConfig` and `AceFeature`, the canonical line, the start line, the
+  report's `glyphs` field, the feature words, the exit check that names a part no renderer started, and
+  `ace-selftest`'s cells and worst-case line. A line with every part on is longer by `;glyphs=on` (10 characters);
+  `ace-selftest` builds the worst-case report from that line and checks it fits `ACE_REPORT_MAX`, and checks that
+  the longest line the key table makes fits `ACE_SPEC_MAX`. Still to come for admission: the settings pages and per-title
+  precedence of sections 10.5 and 10.9.
+- **Never silent.** A run with the feature on prints `ACE_MODE: glyphs on (...)` with the other Ace lines and,
+  after its `GLYPHS: on` line, one line naming it as guest-visible, on through the launch line's `glyphs` key and not
+  admitted under section 11.2. The `glyph-recon-selftest` settings cell pins it, and the report carries `glyphs`.
 - **What it changes:** the frame a present commits, wherever a sprite draw used a rebuilt glyph at a render scale of 2
   to 4.
 - **VRAM bytes:** differ in those frames, at those draws' pixels.
 - **Readbacks:** differ the same way, for a GE or display readback, save picture or screenshot that covers them.
   Texture readbacks and render-to-texture results are unchanged: a render target is never a page, and a page in VRAM
-  is never read. The feature adds no renderer readback. In an authentic run every glyph branch sits behind one switch
-  that stays 0, and `gpu-glyph-selftest` compares the picture of a scene drawn with `SR_GLYPHS` unset and set.
+  is never read. The feature adds no renderer readback. With the key off or missing, and in an authentic run, every
+  glyph branch sits behind one switch that stays 0, and `gpu-glyph-selftest` shows the picture of a scene is the same
+  byte for byte authentic, with no key and with `glyphs=off`, and differs with `glyphs=on`.
 - **Timing:** differs. A rectangle is checked or rebuilt on the renderer thread, the thread the guest runs on, at
   most 48 per present (section 10.13), so a scene that first draws many new glyphs takes a little longer for its
   first frames. Not measured on a title. The VBLANK schedule, the GE timing model and the media clocks are unchanged.
 - **I/O speed:** unchanged.
-- **Tier:** Enhanced. **Default:** off, and Ace-only: in an authentic run it stays off whatever the environment says.
+- **Tier:** Enhanced. **Default:** off: only a line with `glyphs=on` turns it on, and an authentic run has no valid
+  line with Ace on.
   Turning it on by default, or putting it in a preset, needs the owner's decision first, because of the trade-off in
   section 10.13 (some small, dense or filtered text is drawn smooth, and some soft art can still rib).
 - **Nothing worse (section 11.2, item 4):** not shown. The tests are synthetic. The private runs item 4 lists, before

@@ -7,6 +7,13 @@
  * Built from ace.c and this file alone, with nothing else of the runtime: a reference from
  * ace.c to any runtime function fails the link, which is invariant S1's link test for ace.c.
  */
+/* glibc hides setenv under strict C99 unless a POSIX feature level is selected before any system
+ * header is included (the --retired-env mode below sets SR_GLYPHS). */
+#ifndef _WIN32
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L
+#endif
+#endif
 #include "ace.h"
 
 #include <stdio.h>
@@ -257,6 +264,70 @@ static void cell_parse(void) {
         snprintf(spec, sizeof(spec), "%s;ssaa=2;ssaa=off", base);
         CHECK(ace_parse(spec, &c, why, sizeof(why)) == 0 && strcmp(why, "duplicate key") == 0, "a duplicate ssaa");
     }
+    /* glyphs (contract 10.13, 11.3.5): optional like load and cull, and an Enhanced part, so glyphs=on needs
+       no tier=ace; off and a missing key are the same line byte for byte, so a line without the key, the
+       stamps and the report keep their text. */
+    {
+        static const char base[] = "v1;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off;twin=off";
+        char spec[ACE_SPEC_MAX], out[ACE_SPEC_MAX], plain[ACE_SPEC_MAX];
+        CHECK(ace_parse(base, &c, why, sizeof(why)) == 1 && c.glyphs == 0 && ace_format(&c, plain, sizeof(plain)),
+              "a missing glyphs is off");
+        snprintf(spec, sizeof(spec), "%s;glyphs=off", base);
+        CHECK(ace_parse(spec, &c, why, sizeof(why)) == 1 && c.on && c.glyphs == 0 &&
+                  ace_format(&c, out, sizeof(out)) && strcmp(out, plain) == 0,
+              "glyphs=off formats as the line without the key ('%s' against '%s')", out, plain);
+        snprintf(spec, sizeof(spec), "%s;glyphs=on", base);
+        CHECK(ace_parse(spec, &c, why, sizeof(why)) == 1 && c.on && c.glyphs == 1 && c.tier == ACE_TIER_ENHANCED,
+              "glyphs=on in an Enhanced line (%s)", why);
+        CHECK(ace_format(&c, out, sizeof(out)) && strcmp(out + strlen(out) - 10, ";glyphs=on") == 0 &&
+                  strncmp(out, plain, strlen(plain)) == 0,
+              "glyphs=on formats as the plain line with the key last (%s)", out);
+        c.tier = ACE_TIER_ACE;
+        c.load = 1;
+        c.cull = 1;
+        CHECK(ace_format(&c, out, sizeof(out)) && strcmp(out + strlen(out) - 28, ";load=fast;glyphs=on;cull=on") == 0,
+              "glyphs after load and before cull, which stays last (%s)", out);
+        CHECK(ace_parse(out, &c, why, sizeof(why)) == 1 && c.glyphs == 1 && c.load == 1 && c.cull == 1,
+              "the canonical line parses back (%s)", why);
+        c.depth = 32;
+        c.ssaa = 4;
+        CHECK(ace_format(&c, out, sizeof(out)) &&
+                  strcmp(out + strlen(out) - 44, ";load=fast;depth=32;ssaa=4;glyphs=on;cull=on") == 0,
+              "load, depth, ssaa, glyphs, then cull (%s)", out);
+        CHECK(ace_parse(out, &c, why, sizeof(why)) == 1 && c.glyphs == 1 && c.depth == 32 && c.ssaa == 4,
+              "a line with depth, ssaa and glyphs parses back (%s)", why);
+        c.peak = 1;
+        CHECK(ace_format(&c, out, sizeof(out)) &&
+                  strcmp(out + strlen(out) - 55, ";load=fast;depth=32;ssaa=4;peak=limit;glyphs=on;cull=on") == 0,
+              "load, depth, ssaa, peak, glyphs, then cull (%s)", out);
+        CHECK(ace_parse(out, &c, why, sizeof(why)) == 1 && c.glyphs == 1 && c.peak == 1,
+              "a line with peak and glyphs parses back (%s)", why);
+        static const char *const bad[] = { "1", "yes", "ON", "fill", "2" };
+        for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+            snprintf(spec, sizeof(spec), "%s;glyphs=%s", base, bad[i]);
+            CHECK(ace_parse(spec, &c, why, sizeof(why)) == 0 && strcmp(why, "bad value") == 0 && c.on == 0,
+                  "glyphs=%s is a bad value (%s)", bad[i], why);
+        }
+        snprintf(spec, sizeof(spec), "%s;glyphs=on;glyphs=off", base);
+        CHECK(ace_parse(spec, &c, why, sizeof(why)) == 0 && strcmp(why, "duplicate key") == 0, "a duplicate glyphs");
+    }
+    /* SR_GLYPHS, retired by the glyphs key: set to anything, the run refuses to start and names the key
+       (ace_init_from_env exits with this line); unset or empty, nothing. */
+    {
+        static const char *const set[] = { "on", "off", "1", "maybe" };
+        char line[256];
+        CHECK(ace_retired_env(NULL, line, sizeof(line)) == 0 && line[0] == '\0', "SR_GLYPHS unset passes");
+        CHECK(ace_retired_env("", line, sizeof(line)) == 0, "SR_GLYPHS empty passes");
+        for (size_t i = 0; i < sizeof(set) / sizeof(set[0]); i++) {
+            char quoted[32];
+            snprintf(quoted, sizeof(quoted), "'%s'", set[i]);   /* the value itself, not the key's "on" */
+            CHECK(ace_retired_env(set[i], line, sizeof(line)) == 1 && strncmp(line, "SR_GLYPHS: retired", 18) == 0 &&
+                      strstr(line, "glyphs=on") != NULL && strstr(line, quoted) != NULL,
+                  "SR_GLYPHS=%s refuses the run and names glyphs=on: '%s'", set[i], line);
+        }
+        CHECK(ace_retired_env("a-value-much-longer-than-sixteen", line, sizeof(line)) == 1 &&
+                  strstr(line, "'a-value-much-lon...'") != NULL, "a long value is cut: '%s'", line);
+    }
     /* Every key but tier is required, whatever its place: leaving out any one of them refuses
        the line, leaving out tier does not (src/rt/ace.c names the required keys one by one). */
     {
@@ -343,7 +414,7 @@ static void cell_parse(void) {
 
     /* format and parse agree */
     char line[ACE_SPEC_MAX];
-    AceConfig a = { 1, 4, 0, 1, 0, 0, 0, ACE_TIER_ENHANCED, ACE_SAS_OFF, 0, 0, 0, 0, 0, 0, 0, 0 }, b;
+    AceConfig a = { 1, 4, 0, 1, 0, 0, 0, ACE_TIER_ENHANCED, ACE_SAS_OFF, 0, 0, 0, 0, 0, 0, 0, 0, 0 }, b;
     CHECK(ace_format(&a, line, sizeof(line)) && ace_parse(line, &b, NULL, 0) &&
           memcmp(&a, &b, sizeof(a)) == 0, "format round trip (%s)", line);
     CHECK(ace_format(&a, line, 8) == 0 && line[0] == '\0', "format refuses a short buffer");
@@ -396,7 +467,7 @@ static void cell_parse(void) {
         const AceConfig l = { .on = 1, .af = 16, .wide = ACE_WIDE_FILL,
                               .smooth = ACE_SMOOTH_MATCH, .tier = ACE_TIER_ENHANCED,
                               .sas = ACE_SAS_SINC, .cull = 1, .stick = ACE_STICK_COUNTS_MAX,
-                              .load = 1, .depth = 32, .ssaa = 4, .peak = 1 };
+                              .load = 1, .depth = 32, .ssaa = 4, .peak = 1, .glyphs = 1 };
         char longest[512];
         const size_t longest_len = ace_longest_line(longest, sizeof(longest));
         char edge[ACE_SPEC_MAX + 1];
@@ -464,6 +535,7 @@ static void cell_parse(void) {
         ACE_WIDEST(depth, 0, 32);
         ACE_WIDEST(ssaa, 0, 2, 4);
         ACE_WIDEST(peak, 0, 1);
+        ACE_WIDEST(glyphs, 0, 1);
         ACE_WIDEST(cull, 0, 1);
 #undef ACE_WIDEST
         AceConfig back;
@@ -634,6 +706,37 @@ static void cell_switch(void) {
     ace_set_ssaa_effective(1, "not asked: test");
     CHECK(ace_effective()->ssaa == 0 && ace_report_json(json, sizeof(json)) > 0 &&
           strstr(json, "not asked: test") == NULL, "a run that did not ask is untouched:\n%s", json);
+
+    /* glyphs=on (contract 10.13): the renderer confirms the part when it starts at a render scale of 2 to 4
+       and names it unavailable otherwise; a run without the key says nothing of it. */
+    CHECK(ace_init_spec(k_good, NULL) == 1 && ace_effective()->glyphs == 0 &&
+          ace_report_json(json, sizeof(json)) > 0 && strstr(json, "\"glyphs\"") == NULL &&
+          strstr(ace_spec_text(), "glyphs") == NULL, "a run without glyphs reports none:\n%s", json);
+    CHECK(ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;twin=off;glyphs=on",
+                        NULL) == 1 && ace_effective()->glyphs == 1, "glyphs=on in an Enhanced run turns it on");
+    CHECK(strcmp(ace_spec_text(), "v1;tier=enhanced;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;"
+                                  "sas=off;tess=off;twin=off;glyphs=on") == 0,
+          "the stamp's line carries glyphs=on: '%s'", ace_spec_text());
+    CHECK(ace_feature_words(words, sizeof(words)) > 0 && strcmp(words, "sharp game text") == 0,
+          "glyphs feature words: '%s'", words);
+    ace_confirm(ACE_FEATURE_GLYPHS);
+    ace_finish();   /* the renderer started it: stays on */
+    CHECK(ace_effective()->glyphs == 1 && ace_report_json(json, sizeof(json)) > 0 &&
+          strstr(json, "\"glyphs\": true") != NULL && strstr(json, "\"unavailable\": {}") != NULL,
+          "a confirmed glyphs run is on:\n%s", json);
+    CHECK(ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;twin=off;glyphs=on",
+                        NULL) == 1, "a second glyphs run");
+    ace_feature_unavailable(ACE_FEATURE_GLYPHS, "render scale 1 leaves nothing to sharpen; it takes 2 to 4");
+    CHECK(ace_effective()->glyphs == 0 && ace_requested()->glyphs == 1 && ace_report_json(json, sizeof(json)) > 0 &&
+          strstr(json, "\"glyphs\": false") != NULL &&
+          strstr(json, "\"glyphs\": \"render scale 1 leaves nothing to sharpen") != NULL,
+          "glyphs at render scale 1 is reported unavailable:\n%s", json);
+    CHECK(ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;twin=off;glyphs=on",
+                        NULL) == 1, "a third glyphs run");
+    ace_finish();   /* no renderer started it (the software GE) */
+    CHECK(ace_effective()->glyphs == 0 && ace_report_json(json, sizeof(json)) > 0 &&
+          strstr(json, "\"glyphs\": \"did not run: its renderer or presenter did not start\"") != NULL,
+          "a glyphs run with no renderer reports it unavailable:\n%s", json);
 
     /* load=fast (contract 11.3.10): the switch nk_ace_load_skip_wait() asks at a declared wait that
        would block (src/rt/hle_display.c, tested in hle-thread-selftest). Off, and in an
@@ -1679,7 +1782,7 @@ static void cell_report_worst(void) {
     memset(reason, 'r', sizeof(reason));
     reason[sizeof(reason) - 1] = '\0';
     CHECK(ace_init_spec("v1;tier=ace;af=16;text=on;readout=on;notice=on;wide=fill;smooth=x2;sas=sinc;"
-                        "tess=off;twin=off;stick=126;load=fast;depth=32;ssaa=4;peak=limit;cull=on",
+                        "tess=off;twin=off;stick=126;load=fast;depth=32;ssaa=4;peak=limit;glyphs=on;cull=on",
                         NULL), "the longest line was refused");
     ace_set_peak_stats(UINT64_MAX, UINT64_MAX, UINT64_MAX, 1e-9);
     ace_set_af_effective(8, NULL);
@@ -1973,6 +2076,23 @@ static void cell_pace(void) {
 }
 
 int main(int argc, char **argv) {
+    /* `--retired-env VALUE`: set SR_GLYPHS to VALUE (and SR_ACE off) and start Ace Mode the way a run does.
+       ace_init_from_env must stop the process with exit 1 and its line; mk/selftests.mk checks both, so a
+       start that ignores the retired variable fails there. Returning here is that failure. */
+    if (argc >= 3 && strcmp(argv[1], "--retired-env") == 0) {
+#ifdef _WIN32
+        const int set_failed = _putenv_s("SR_GLYPHS", argv[2]) != 0 || _putenv_s("SR_ACE", "off") != 0;
+#else
+        const int set_failed = setenv("SR_GLYPHS", argv[2], 1) != 0 || setenv("SR_ACE", "off", 1) != 0;
+#endif
+        if (set_failed) {
+            fprintf(stderr, "ace-selftest: FAIL could not set SR_GLYPHS for --retired-env\n");
+            return 2;
+        }
+        ace_init_from_env();
+        fprintf(stderr, "ace-selftest: FAIL SR_GLYPHS=%s did not stop the run at start\n", argv[2]);
+        return 3;
+    }
     cell_parse();
     cell_stick_curve();
     cell_stick_host_dead_zone_at_or_above_g();

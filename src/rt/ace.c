@@ -33,7 +33,7 @@ typedef enum {
     ACE_KEY_AF, ACE_KEY_TEXT, ACE_KEY_READOUT, ACE_KEY_NOTICE, ACE_KEY_WIDE, ACE_KEY_SMOOTH,
     ACE_KEY_SAS, ACE_KEY_TESS, ACE_KEY_TWIN, ACE_KEY_TIER, ACE_KEY_STICK, ACE_KEY_LOAD, ACE_KEY_DEPTH,
     ACE_KEY_SSAA,
-    ACE_KEY_CULL, ACE_KEY_PEAK
+    ACE_KEY_CULL, ACE_KEY_PEAK, ACE_KEY_GLYPHS
 } AceKey;
 
 static const struct {
@@ -57,6 +57,7 @@ static const struct {
     {"depth", ACE_KEY_DEPTH, 0, "32"},
     {"ssaa", ACE_KEY_SSAA, 0, "4"},
     {"peak", ACE_KEY_PEAK, 0, "limit"},
+    {"glyphs", ACE_KEY_GLYPHS, 0, "on"},
     {"cull", ACE_KEY_CULL, 0, "on"},
 };
 
@@ -173,6 +174,12 @@ int ace_parse(const char *spec, AceConfig *out, char *why, size_t why_cap) {
                     why_set(why, why_cap, "ssaa is not part of this build"); return 0;
                 }
                 break;
+            case ACE_KEY_GLYPHS:
+                ok = value_on_off(v, &c.glyphs);
+                if (ok && c.glyphs && !ACE_HAS_GLYPHS) {
+                    why_set(why, why_cap, "glyphs is not part of this build"); return 0;
+                }
+                break;
             case ACE_KEY_TIER:
                 if (strcmp(v, "enhanced") == 0) { c.tier = ACE_TIER_ENHANCED; ok = 1; }
                 else if (strcmp(v, "ace") == 0) { c.tier = ACE_TIER_ACE; ok = 1; }
@@ -274,6 +281,12 @@ int ace_format(const AceConfig *c, char *out, size_t cap) {
         const int m = snprintf(out + n, cap - (size_t)n, ";peak=limit");
         n = m < 0 ? -1 : n + m;
     }
+    /* Likewise glyphs, after the parts above and before cull: a missing glyphs is off, so a line
+       without it keeps its text (contract 10.13). */
+    if (n > 0 && (size_t)n < cap && c && c->on && c->glyphs) {
+        const int m = snprintf(out + n, cap - (size_t)n, ";glyphs=on");
+        n = m < 0 ? -1 : n + m;
+    }
     /* The same for cull, which stays last: written only when on. */
     if (n > 0 && (size_t)n < cap && c && c->on && c->cull) {
         const int m = snprintf(out + n, cap - (size_t)n, ";cull=on");
@@ -309,7 +322,7 @@ static double s_peak_min_gain = 1.0;
 
 static const char *const k_feature_key[ACE_FEATURE_COUNT] = {
     "af", "text", "readout", "notice", "wide", "smooth", "sas", "tess", "stick", "load", "cull",
-    "depth", "twin", "ssaa", "peak"
+    "depth", "twin", "ssaa", "peak", "glyphs"
 };
 
 /* The run's observation state. */
@@ -418,6 +431,9 @@ int ace_init_spec(const char *spec, const char *report_path) {
         fprintf(stderr, "ACE_MODE: ssaa %d (the host twin renders at %d times the render scale per axis and "
                         "the presenter shows its box-filtered average; guest VRAM and every readback are "
                         "unchanged)\n", s_req.ssaa, s_req.ssaa);
+    if (s_req.glyphs)
+        fprintf(stderr, "ACE_MODE: glyphs on (small text sprites draw from glyphs rebuilt at the render "
+                        "scale; the frames the game keeps in VRAM change where they do)\n");
     if (s_req.cull) fprintf(stderr, "ACE_MODE: cull on (a title's own culling is widened to the wings)\n");
     if (s_req.peak)
         fprintf(stderr, "ACE_MODE: peak limit (the host hears SAS mixes unsaturated, through a true-peak "
@@ -425,7 +441,24 @@ int ace_init_spec(const char *spec, const char *report_path) {
     return 1;
 }
 
+int ace_retired_env(const char *glyphs, char *why, size_t why_cap) {
+    if (!glyphs || !glyphs[0]) { why_set(why, why_cap, ""); return 0; }
+    if (why && why_cap)
+        snprintf(why, why_cap, "SR_GLYPHS: retired, and set to '%.16s%s'; sharp game text is the launch line's "
+                               "glyphs=on key (SR_ACE=v1;...;glyphs=on, contract section 10.13); unset SR_GLYPHS",
+                 glyphs, strlen(glyphs) > 16 ? "..." : "");
+    return 1;
+}
+
 int ace_init_from_env(void) {
+    char why[256];
+    /* A variable that used to switch a part on refuses the run rather than doing nothing without a word,
+       as an invalid SR_NOVBPACE or SR_DETERMINISTIC_CLOCK does (sched.c). */
+    if (ace_retired_env(getenv("SR_GLYPHS"), why, sizeof(why))) {
+        fprintf(stderr, "%s\n", why);
+        fflush(stderr);
+        exit(1);
+    }
     return ace_init_spec(getenv("SR_ACE"), getenv("SR_ACE_REPORT"));
 }
 
@@ -455,6 +488,7 @@ void ace_feature_unavailable(AceFeature feature, const char *reason) {
     case ACE_FEATURE_TWIN: s_eff.twin = 0; break;
     case ACE_FEATURE_SSAA: s_eff.ssaa = 0; break;
     case ACE_FEATURE_PEAK: s_eff.peak = 0; break;
+    case ACE_FEATURE_GLYPHS: s_eff.glyphs = 0; break;
     default: break;
     }
     fprintf(stderr, "ACE_MODE: %s unavailable (%s)\n", k_feature_key[feature], s_unavailable[feature]);
@@ -633,6 +667,8 @@ size_t ace_feature_words(char *out, size_t cap) {
     }
     if (s_eff.twin) used = words_add(out, cap, used, "full 32-bit colour");
     if (s_eff.readout) used = words_add(out, cap, used, "speed readout");
+    /* Last: a caption too short for every word drops this one, not a word that was there before it (#2110). */
+    if (s_eff.glyphs) used = words_add(out, cap, used, "sharp game text");
     return used;
 }
 
@@ -1250,6 +1286,7 @@ size_t ace_report_json(char *out, size_t cap) {
     if (s_req.depth) ACE_PUT("  \"depth\": %d,\n", s_eff.depth ? s_eff.depth : 16);
     if (s_req.ssaa) ACE_PUT("  \"ssaa\": %d,\n", s_eff.ssaa ? s_eff.ssaa : 1);
     if (s_ssaa_limited) ACE_PUT("  \"ssaa_requested\": %d,\n", s_req.ssaa);
+    if (s_req.glyphs) ACE_PUT("  \"glyphs\": %s,\n", s_eff.glyphs ? "true" : "false");
     if (s_req.cull) ACE_PUT("  \"cull\": %s,\n  \"cull_untracked\": %lu,\n",
                             s_eff.cull ? "true" : "false", s_cull_untracked);
     if (s_req.peak) ACE_PUT("  \"peak\": {\"on\": %s, \"pushes_wide\": %llu, \"frames_wide\": %llu, "
@@ -1353,11 +1390,11 @@ void ace_finish(void) {
     /* A feature that is on but never ran: its renderer or presenter did not start. */
     static const int has[ACE_FEATURE_COUNT] = { 1, 1, 1, 1, ACE_HAS_WIDE, ACE_HAS_SMOOTH, ACE_HAS_SAS, ACE_HAS_TESS,
                                                 ACE_HAS_STICK, ACE_HAS_LOAD, ACE_HAS_CULL,
-                                                ACE_HAS_DEPTH, 1, ACE_HAS_SSAA, ACE_HAS_PEAK };
+                                                ACE_HAS_DEPTH, 1, ACE_HAS_SSAA, ACE_HAS_PEAK, ACE_HAS_GLYPHS };
     const int on[ACE_FEATURE_COUNT] = { s_eff.af > 0, s_eff.text, s_eff.readout, s_eff.notice,
                                         s_eff.wide, s_eff.smooth, s_eff.sas, s_eff.tess, s_eff.stick,
                                         s_eff.load, s_eff.cull, s_eff.depth, s_eff.twin, s_eff.ssaa,
-                                        s_eff.peak };
+                                        s_eff.peak, s_eff.glyphs };
     for (int f = 0; f < ACE_FEATURE_COUNT; f++) {
         if (has[f] && on[f] && !s_confirmed[f])
             ace_feature_unavailable((AceFeature)f, f == ACE_FEATURE_CULL
