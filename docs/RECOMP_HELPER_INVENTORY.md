@@ -36,9 +36,9 @@ does not make this file stale. `--details` prints them to stdout.
 
 ## Summary
 
-- helpers: **491** (declared in `recomp.h`: 419)
-- reach class: emitter-reached 86, production-runtime-only 367, selftest-only 0, address-only 8, none 30
-- provenance class of the home definition: declared-only 1, project_authored_attested 38, upstream_derived 452
+- helpers: **492** (declared in `recomp.h`: 420)
+- reach class: emitter-reached 86, production-runtime-only 368, selftest-only 0, address-only 8, none 30
+- provenance class of the home definition: declared-only 1, project_authored_attested 38, upstream_derived 453
 
 ## Helpers
 
@@ -133,6 +133,7 @@ does not make this file stale. `--details` prints them to stdout.
 | `sched_current_thread_stack_range` | `rt/sched.c` | yes | production-runtime-only | `rt/sched.c`: upstream_derived |
 | `sched_current_uid` | `rt/ge_replay.c`, `rt/sched.c`, `rt/snapshot_runner.c`, `rt/verify_harness.c` | yes | production-runtime-only | `rt/ge_replay.c`: project_authored_attested; `rt/sched.c`: upstream_derived; `rt/snapshot_runner.c`: project_authored_attested; `rt/verify_harness.c`: project_authored_attested |
 | `sched_delay_current` | `rt/sched.c` | yes | production-runtime-only | `rt/sched.c`: upstream_derived |
+| `sched_delay_current_dispatching` | `rt/sched.c` | yes | production-runtime-only | `rt/sched.c`: upstream_derived |
 | `sched_delete_thread` | `rt/sched.c`, `rt/snapshot_runner.c`, `rt/verify_harness.c` | yes | production-runtime-only | `rt/sched.c`: upstream_derived; `rt/snapshot_runner.c`: project_authored_attested; `rt/verify_harness.c`: project_authored_attested |
 | `sched_dispatch_enabled` | `rt/sched.c` | yes | production-runtime-only | `rt/sched.c`: upstream_derived |
 | `sched_display_accumulated_hcount` | `rt/sched.c` | yes | production-runtime-only | `rt/sched.c`: upstream_derived |
