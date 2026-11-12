@@ -398,6 +398,28 @@ class PythonTests(unittest.TestCase):
             self.assertEqual(toolchain.read_pinned(path, hashlib.sha256(b"changed").hexdigest(), "u"), b"changed")
 
 
+class GradleWiringTests(unittest.TestCase):
+    """The app bundles the staged toolchain only when nk.toolchain names a staged folder."""
+
+    gradle = (Path(__file__).resolve().parent.parent / "android" / "app" / "build.gradle.kts").read_text(
+        encoding="utf-8")
+
+    def test_the_staged_folders_are_the_app_s_sources(self) -> None:
+        self.assertIn('findProperty("nk.toolchain")', self.gradle)
+        # stage_output writes jniLibs/arm64-v8a/ and assets/toolchain/ under --out.
+        self.assertIn('jniLibs.directories.add(File(toolchain, "jniLibs").path)', self.gradle)
+        self.assertIn('assets.directories.add(File(toolchain, "assets").path)', self.gradle)
+
+    def test_a_folder_that_was_not_staged_is_refused(self) -> None:
+        self.assertIn('File(dir, "toolchain-manifest.json").isFile', self.gradle)
+
+    def test_the_toolchain_is_bundled_for_arm64_only(self) -> None:
+        self.assertIn('require(abis == listOf("arm64-v8a"))', self.gradle)
+
+    def test_native_libraries_stay_extracted_so_they_can_run(self) -> None:
+        self.assertIn("useLegacyPackaging = true", self.gradle)
+
+
 class StampTests(unittest.TestCase):
     def test_a_finished_stage_is_not_run_again(self) -> None:
         with tempfile.TemporaryDirectory(prefix="nk-tc-test-") as tmp:
