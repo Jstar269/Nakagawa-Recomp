@@ -8,7 +8,7 @@ builds exist for development (below), but a successful object compile is not the
 | Area | Current state | Porting consequence |
 | --- | --- | --- |
 | Recompiler and guest memory | Mostly ISO C; guest arena is a 192 MiB host allocation | Compile on 64-bit targets, then validate address arithmetic, alignment, and memory budgets per device. |
-| Thread coroutines | Win32 fibers on Windows; `ucontext` plus `mmap` on glibc/musl POSIX; on Android (bionic has no `swapcontext`) and macOS (where it is deprecated) a stack-switch routine for x86-64 System V and AArch64, also selectable elsewhere with `SR_CORO_BACKEND_ASM` (`make coro-selftest-asm`); it is spelled for ELF and Mach-O, and `tools/test_native_host_backends.py` cross-assembles it for both | macOS still needs a stack-bounds query in place of `pthread_getattr_np` before the backend builds there (#329). Consoles need a supported platform backend behind `sr_coro`. |
+| Thread coroutines | Win32 fibers on Windows; `ucontext` plus `mmap` on glibc/musl POSIX; on Android (bionic has no `swapcontext`) and macOS (where it is deprecated) a stack-switch routine for x86-64 System V and AArch64, also selectable elsewhere with `SR_CORO_BACKEND_ASM` (`make coro-selftest-asm`); it is spelled for ELF and Mach-O, and `tools/test_native_host_backends.py` cross-assembles it for both | macOS still needs a stack-bounds query in place of `pthread_getattr_np`, and `_DARWIN_C_SOURCE` for the `mmap` flags, before the backend builds there (#329). Consoles need a supported platform backend behind `sr_coro`. |
 | Window, input, and presentation | SDL3/Vulkan path exists, but public `gui_*` functions are inside Windows-only `gui.c`; GDI is the fallback | Move the SDL path into platform-neutral code and keep GDI in a Windows backend. |
 | Audio | SDL3 audio stream | Portable in principle; validate device lifecycle, latency, and suspend/resume on each platform. |
 | Video decode | The common project-authored PSMF producer owns stream demux and AU boundaries; Windows uses Media Foundation; elsewhere the pinned, vendored FFmpeg n4.4 H.264 decoder subset (`src/rt/h264_ffmpeg_sub/`, LGPL-2.1-or-later, generic C, statically linked, no system FFmpeg) is the default `sr_h264` backend, and `H264_FFMPEG=0` keeps the fail-closed null backend | Android needs a build of the same subset for its ABI; validate decode speed on target devices (the C-only DSP paths are slower than SIMD). |
@@ -231,8 +231,9 @@ spelling (macOS, [#329](https://github.com/Jstar269/nakagawa-recomp/issues/329))
 building for Android uses. No make link line names the raw option; `tools/test_build_truth.py`
 (`LinkerSpellingTests`) fails if one does. The two Python helpers that link a program,
 `tools/nk_cli.py` (the VRAM decoder) and `tools/test_cpu_lle.py`, choose the same way from
-`sys.platform`. To see another host's link lines, pass `HOST_KIND` with a dry run, for example
-`make -n HOST_KIND=Darwin coro-selftest`.
+`sys.platform`. To see another host's link lines, pass `HOST_KIND` with a dry run; on Windows,
+also clear `OS`, or the target stays Windows. For example,
+`make -n OS= HOST_KIND=Darwin profiler-selftest` shows `-Wl,-dead_strip`.
 
 `src/rt/sr_coro.c` does not build on macOS yet: it reads the main thread's stack with
 `pthread_getattr_np`, which macOS lacks, and needs `_DARWIN_C_SOURCE` for `MAP_ANONYMOUS` and
