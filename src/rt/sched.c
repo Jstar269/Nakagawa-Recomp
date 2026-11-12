@@ -347,6 +347,9 @@ static void sched_wait_record_wake(TCB *owner, int terminal, uint32_t result);
 static int      s_ntcb = 0;
 static int      s_cur = -1;      /* index of running thread, -1 = scheduler */
 static int      s_last_pick = -1;/* rotation cursor (file-scope so the selftest can reset it) */
+/* The thread whose delay wait may not expire in the next scheduling decision
+ * (sched_delay_current_dispatching); -1 when none. pick_next clears it once it has promoted. */
+static int      s_hold_expiry = -1;
 static uint32_t s_watchdog_spin_observations;
 /* CPU-wide PSP interrupt state.  Because scheduling is suppressed while this is
  * false, an interrupt-disabled state cannot migrate to another guest thread. */
@@ -806,6 +809,7 @@ void sched_init(CpuState *cpu) {
     s_ntcb = 0;
     s_cur = -1;
     s_last_pick = -1;
+    s_hold_expiry = -1;
     s_watchdog_spin_observations = 0;
     s_root_seen = 0;
     s_tick = 0;
@@ -3092,6 +3096,7 @@ static void sched_transfer_window_step(void) {
  * nothing about who runs next, it only restores the truth about who is runnable. */
 static void sched_promote_expired_waits(void) {
     for (int i = 0; i < s_ntcb; i++) {
+        if (i == s_hold_expiry) continue;   /* until the next pick (sched_delay_current_dispatching) */
         if ((s_tcb[i].state == TH_WAIT_DELAY || s_tcb[i].state == TH_WAIT_OBJ) &&
             /* An infinite wait has no deadline and can only be released by a
              * signal. Without this guard a virtual clock that reached the
@@ -3229,6 +3234,10 @@ static void sched_rotation_mark(int head) {
  * state yields an identical decision. Returns an index or -1 if nothing is runnable. */
 static int pick_next(void) {
     sched_promote_expired_waits();
+    /* A held delay (sched_delay_current_dispatching) sits out exactly this decision's promotion.
+     * When nobody else is ready this returns -1, the idle path finds the held deadline already
+     * due, and the next pick promotes it: a lone thread resumes one decision later. */
+    s_hold_expiry = -1;
     sched_transfer_window_step();
     int best_pri = 0;
     int have_ready = 0;
@@ -4009,6 +4018,23 @@ void sched_delay_current(uint64_t usec) {
     switch_to_scheduler();
 }
 
+/* A delay wait whose block always hands the CPU to another ready thread, of any priority, before
+ * the waiter can resume. A 1 us deadline can be over already at the decision the block causes:
+ * on the virtual clock when that dispatch is charged a quantum (scheduler_keep_time_at_dispatch),
+ * on the paced clock when the host microsecond turns over before the scheduler samples it. The
+ * waiter, promoted in that same decision, would win it again at its own priority, so a
+ * lower-priority thread the caller waits for would not run. The hold covers that one decision's
+ * promotion only; from the next one on the wait ends at its deadline as sched_delay_current's.
+ * With no other thread ready, the waiter resumes at the next decision, after the idle path has
+ * found its deadline due (on the virtual clock that path charges its own quantum first). Ace's load skip
+ * (nk_ace_load_skip_wait, ENHANCEMENT_CONTRACT.md section 11.3.10) promises that ready threads of
+ * any priority run while it blocks; sceKernelDelayThread keeps sched_delay_current. */
+void sched_delay_current_dispatching(uint64_t usec) {
+    if (s_cur < 0) return;
+    s_hold_expiry = s_cur;
+    sched_delay_current(usec);
+}
+
 void sched_block_on(uint32_t obj) {
     if (s_cur < 0) return;
     TCB *t = &s_tcb[s_cur];
@@ -4226,6 +4252,7 @@ int sched_reset_for_loadexec(void) {
     s_ntcb = 0;
     s_cur = -1;
     s_last_pick = -1;
+    s_hold_expiry = -1;
     s_watchdog_spin_observations = 0;
     s_root_seen = 0;
     g_root_uid = SR_ROLE_UID_NONE;
