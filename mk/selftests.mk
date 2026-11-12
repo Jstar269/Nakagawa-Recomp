@@ -1379,13 +1379,16 @@ pipeline-cache-selftest:
 
 native-core-tests: pipeline-cache-selftest
 # texrepl-selftest - texture replacement packs (src/rt/texrepl.h, #1880): PPSSPP's texture hashes
-# against reference values, the pack's ini and file-name rules, the wildcard lookup order, the
-# palette identity, malformed packs refused whole, and the decoded-image budget. A synthetic pack
-# written by the test; no GPU, no SDL, no game data.
+# against reference values, the pack's ini and file-name rules, every key form and mip chain PPSSPP
+# reads, the wildcard lookup order, the palette identity, ZIP packs read in place (nk_zip.c and its
+# inflater), malformed packs and archives refused whole, and the decoded-image budget. Synthetic
+# packs written by the test; no GPU, no SDL, no game data. Once built, the same program measures a
+# large synthetic pack: $(BUILD_DIR)/texrepl_selftest$(EXE_EXT) --bench 10000.
 texrepl-selftest:
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_DIR)').mkdir(parents=True, exist_ok=True)"
 	$(CC) -std=c99 -O2 -Wall -Wextra -Wpedantic -Werror -Isrc/core -Isrc/rt -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" \
-		tests/native/texrepl_selftest.c src/rt/texrepl.c src/core/nk_shared_helpers.c \
+		-DNK_SORT_COUNT_COMPARES -DNK_INFLATE_COUNT_BUILDS tests/native/texrepl_selftest.c src/rt/texrepl.c src/core/nk_zip.c src/core/nk_psp_inflate.c \
+		src/core/nk_shared_helpers.c \
 		$(PLAYER_PLATFORM_SRC) $(PLAYER_PLATFORM_LIBS) \
 		-o $(BUILD_DIR)/texrepl_selftest$(EXE_EXT) && $(BUILD_DIR)/texrepl_selftest$(EXE_EXT)
 
@@ -1398,8 +1401,8 @@ texrepl-mutant:
 	$(NK_REQUIRE_POSIX_SHELL)
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_DIR)').mkdir(parents=True, exist_ok=True)"
 	@$(CC) -std=c99 -O2 -Wall -Wextra -Wpedantic -Werror -Isrc/core -Isrc/rt -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" \
-		-DNK_TEXREPL_MUTANT_NO_CLUTFORMAT_XOR tests/native/texrepl_selftest.c src/rt/texrepl.c \
-		src/core/nk_shared_helpers.c $(PLAYER_PLATFORM_SRC) \
+		-DNK_SORT_COUNT_COMPARES -DNK_INFLATE_COUNT_BUILDS -DNK_TEXREPL_MUTANT_NO_CLUTFORMAT_XOR tests/native/texrepl_selftest.c src/rt/texrepl.c \
+		src/core/nk_zip.c src/core/nk_psp_inflate.c src/core/nk_shared_helpers.c $(PLAYER_PLATFORM_SRC) \
 		$(PLAYER_PLATFORM_LIBS) -o $(BUILD_DIR)/texrepl_mutant$(EXE_EXT)
 	@rc=0; $(BUILD_DIR)/texrepl_mutant$(EXE_EXT) > $(BUILD_DIR)/texrepl_mutant.log 2>&1 || rc=$$?; \
 	cat $(BUILD_DIR)/texrepl_mutant.log; \
