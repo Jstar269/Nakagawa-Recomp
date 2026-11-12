@@ -211,13 +211,16 @@ before a backend dependency becomes a production one.
   `mingw-w64-ucrt-x86_64-llvm-tools` packages, with their LLVM dependencies `clang-libs`,
   `llvm-libs` and `lld`), or the programs `LLVM_CLANG` and `LLVM_LINK` name. The
   measurements on #330 used 23.1.3. MSYS2's package metadata gives each of those packages
-  the licence `Apache-2.0 WITH LLVM-exception`. The licence file the packages install
-  (`share/licenses/llvm-libs/LICENSE`, LLVM's `LICENSE.TXT`) opens with the Apache License
-  v2.0 with LLVM Exceptions and also carries the legacy University of Illinois/NCSA licence
-  and the notices of third-party software in LLVM. MSYS2's `pacman` installs packages from
+  the licence `Apache-2.0 WITH LLVM-exception`. Each package installs its own licence file
+  (`share/licenses/<package>/LICENSE`; for `llvm-libs` it is LLVM's `LICENSE.TXT`), which
+  opens with the Apache License v2.0 with LLVM Exceptions and also carries the legacy
+  University of Illinois/NCSA licence. It says that third-party software in LLVM carries
+  its own licence file or per-file licence terms. MSYS2's `pacman` installs packages from
   its repositories only with a valid signature (`SigLevel = Required` in its default
   `pacman.conf`). The project pins no version: any `clang` and `llvm-link` that run are
-  accepted, and their identity is recorded (Security, below).
+  accepted, and their identity is recorded (Security, below). Clang also compiles the
+  ABI shim (`src/rt/llvm_abi.c`) to bitcode, and the backend's tests also run LLVM's `opt`
+  when it is installed.
 - **What the repository holds.** No LLVM source, header, library or binary. The IR builder
   (`tools/llvm_ir.py`), the renderer (`tools/codegen_llvm.py`), the plan
   (`tools/lowering_plan.py`) and the ABI shim (`src/rt/llvm_abi.c`, `llvm_abi.h`) are
@@ -231,20 +234,22 @@ before a backend dependency becomes a production one.
   LLVM chunk object contains from LLVM is the machine code Clang generated for it.
 - **What ships.** Nothing from LLVM. Nothing in the player, the package builder or the
   release tooling selects `CODEGEN_BACKEND=llvm`, so the player builds packages with the C
-  backend unless the user's own environment sets that variable (the package builder
-  inherits the environment, and such a build is keyed as an LLVM build). The player's
-  prerequisite download (`assets/prereq_manifest.json`) fetches GCC, not
-  Clang or LLVM. The Android build's on-device Clang is a separate component, recorded in
+  backend unless the user's own environment selects the LLVM backend (that variable, or
+  `--backend=llvm` passed to codegen through Make's variables; the package builder inherits
+  the environment). The player's prerequisite download (`assets/prereq_manifest.json`)
+  fetches GCC, not Clang or LLVM. The Android build's on-device Clang is a separate component, recorded in
   [`NOTICE.md`](../NOTICE.md) and [`android/toolchain/PROVENANCE.md`](../android/toolchain/PROVENANCE.md);
   it compiles C and does not run this backend.
 - **Security.** The backend runs the two programs it finds on `PATH` (or the ones
   `LLVM_CLANG` and `LLVM_LINK` name) on files codegen wrote; it downloads nothing and
-  needs no network. An LLVM package's cache key holds each program's SHA-256 and version
-  report (`llvm_backend_options` in `tools/nk_core/package_cache.py`), so a changed
-  toolchain never reuses a package, and a missing program fails the build and the key
-  closed; a plain `make` build's generated-code profile carries the version strings
-  ([Build identity](#build-identity)). `llvm-link` runs
-  LLVM's verifier on every module before Clang compiles it.
+  needs no network. An LLVM package's cache key holds the SHA-256 and version report of
+  the `clang` and `llvm-link` programs (`llvm_backend_options` in
+  `tools/nk_core/package_cache.py`), so a new toolchain version or a replaced program gets
+  a new key; the libraries those programs load (`libLLVM`, `libclang-cpp`) are not hashed,
+  so a library changed under an unchanged program and version report is not seen. A
+  missing program fails the build and the key closed; a plain `make` build's
+  generated-code profile carries the version strings ([Build identity](#build-identity)).
+  `llvm-link` runs LLVM's verifier on every module before Clang compiles it.
 - **Where it is recorded.** Here, and in [`NOTICE.md`](../NOTICE.md) and
   [`CREDITS.md`](../CREDITS.md). The in-process stage above would link LLVM's libraries
   into a project tool or the player; before it lands it needs the usual pin, a

@@ -132,9 +132,9 @@ We aim to respond promptly and will remove material where appropriate.
   metadata lists as Apache-2.0 WITH LLVM-exception) on IR that the project-authored
   `tools/codegen_llvm.py` writes. The executable is linked by the C toolchain with GCC's
   runtime libraries, as a C build is. Nothing the project ships selects the backend; the
-  player's package builder uses it only when the user's own environment sets
-  `CODEGEN_BACKEND=llvm`. The facts and
-  the security notes are in `docs/LLVM_BACKEND.md`.
+  player's package builder uses it only when the user's own environment selects it
+  (for example `CODEGEN_BACKEND=llvm`). The facts and the security notes are in
+  `docs/LLVM_BACKEND.md`.
 - **VFPU tables** — PPSSPP-origin lookup data with the exact source and checksums
   recorded in `assets/vfpu/PROVENANCE.json`; inclusion is a provenance decision,
   not a claim about PSP firmware ownership.
