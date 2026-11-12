@@ -202,7 +202,7 @@ alias whose target is itself an alias source, because the runtime resolves exact
 step and a chain would silently stop short.
 
 No title in `assets/titles/` declares a dispatch alias; only the source-owned fixtures do.
-A title that declares one must be inventoried in `TITLE_CONFIGURED_DISPATCH`
+A tracked title manifest that declares one must be inventoried in `TITLE_CONFIGURED_DISPATCH`
 (`tools/compat_overrides.py`), which `TitleDeclaredDispatchBindings` in
 `tools/test_title_runtime_config.py` checks (#363).
 

@@ -722,7 +722,11 @@ class DispatchAddressCensus(unittest.TestCase):
         without ever being policed -- which is exactly the "moved a literal from one
         hardcoded table into another" failure this whole migration exists to avoid.
         """
-        inventoried = {int(o["address"]) for o in compat_overrides.TITLE_CONFIGURED_DISPATCH}
+        inventoried = ({int(o["address"]) for o in compat_overrides.TITLE_CONFIGURED_DISPATCH}
+                       | set(compat_overrides.RETIRED_TITLE_CONFIGURED_DISPATCH))
+        self.assertTrue(inventoried,
+                        "no live or retired title-configured dispatch address is inventoried; "
+                        "the assertion below would be vacuous")
         policed = {int(spellings[0], 16) for spellings in RETIRED_DISPATCH_ADDRESSES.values()}
         self.assertEqual(
             inventoried - policed, set(),
@@ -733,7 +737,11 @@ class DispatchAddressCensus(unittest.TestCase):
     def test_every_inventoried_binding_names_a_live_collection_and_accessor(self) -> None:
         """An inventory entry is prose unless it points at something real. Each one must
         name a collection the validator actually accepts, and that collection's generic
-        accessor must actually be called from dispatch()."""
+        accessor must actually be called from dispatch().
+
+        The inventory is empty since #363 retired its last entry, so the loop below
+        checks nothing until a title declares a binding again;
+        TitleDeclaredDispatchBindings is what forces that title into the inventory."""
         accessors = {
             "dispatch_aliases": "sr_title_config_dispatch_alias",
         }
@@ -968,8 +976,11 @@ class TitleDeclaredDispatchBindings(unittest.TestCase):
         """The exemption above is only sound for manifests that are fixtures in fact."""
         for name in sorted(BINDING_FIXTURES):
             with self.subTest(manifest=name):
-                self.assertTrue(self.aliases(ROOT / "assets" / "titles" / name),
+                path = ROOT / "assets" / "titles" / name
+                self.assertTrue(self.aliases(path),
                                 f"{name} declares no dispatch alias; it needs no exemption")
+                self.assertEqual(json.loads(path.read_text(encoding="utf-8")).get("kind"),
+                                 "synthetic", f"{name} is exempt as a fixture but is a title")
 
     def test_the_inventory_holds_no_alias_no_title_declares(self) -> None:
         declared = {alias["from"]

@@ -392,7 +392,7 @@ SCHEDULER_HOOKS = [
 TITLE_CONFIGURED_SCHEDULER_COMPAT: "list[dict]" = []
 
 # --- src/rt/recomp.c: dispatch bindings owned by TITLE CONFIGURATION ----------
-# Three addresses used to be numeric literals compiled into generic dispatch. They became
+# Three bindings used to be numeric literals compiled into generic dispatch. They became
 # typed entries in a validated title manifest's runtime_bindings block
 # (dispatch_aliases / callback_terminators), so they reached dispatch() only as
 # configuration, and an unconfigured build applied none of them.
@@ -405,14 +405,25 @@ TITLE_CONFIGURED_SCHEDULER_COMPAT: "list[dict]" = []
 TITLE_CONFIGURED_DISPATCH: "list[dict]" = [
     # 0x00030950 (TC30950, a dispatch alias into the body registered at 0x00030948):
     # retired under #363 (2026-11-11). It was recorded as a computed tail call landing 8
-    # bytes into a callee. The title's executable holds no jump, call, branch or data
-    # word that names 0x00030950, and the alias never fired on the private full-match
-    # route, so the title's binding is gone and that target is an ordinary dispatch miss.
+    # bytes into a callee. No such transfer was observed: the title's executable has no
+    # j, jal or branch to 0x00030950 and no data word 0x00030950 or 0x08030950 (a
+    # computed target cannot be ruled out statically), and the alias never fired on the
+    # private full-match route. The binding is gone, so that target is an ordinary
+    # dispatch miss: logged, then run from 0x00030950 itself by the interpreter floor or
+    # refused. Its recorded retirement step, registering the mid-function entry in
+    # codegen, was not needed for a transfer nothing makes.
     # 0x00292fa0 (callback-list walker terminal miss): retired under #363 (2026-11-02). It
     # named a virtual call in the frame loop, not a list walker, and its pc was whatever
     # the previous return left behind. It never fired on the gate route, so the title's
     # binding is gone and -1 at that site is an ordinary dispatch miss.
 ]
+
+#: Addresses TITLE_CONFIGURED_DISPATCH inventoried before each binding was retired: the
+#: alias source, the null terminator's return address and the terminal miss's pc. The
+#: generic-runtime literal guard (tools/test_compat_manifest.py
+#: _runtime_title_diagnostic_inventory) reads this list, so a retirement does not stop
+#: the guard from refusing these addresses in runtime sources.
+RETIRED_TITLE_CONFIGURED_DISPATCH: "tuple[int, ...]" = (0x00030950, 0x0003e06c, 0x00292fa0)
 
 OVERRIDES = (
     GUEST_PATCHES + CODEGEN_CUSTOM_STUBS + HST_SIMPLE_STUBS +
