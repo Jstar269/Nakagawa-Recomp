@@ -33808,6 +33808,370 @@ extern void sr_hle_test_atrac_reinit_reset(void);
 extern uint32_t sr_hle_test_atrac_release_count(void);
 extern void sr_hle_test_atrac_release_reset(void);
 
+/* #322: _sceAtracGetContextAddress hands out a guest context that follows the ID's state.
+ * Field offsets are PPSSPP's SceAtracContext (the info block at +0x80), not PSP-measured. */
+#define NID_SCE_ATRAC_GET_CONTEXT_ADDRESS 0x231fc6b7u
+#define NID_SCE_ATRAC_SET_LOOP_NUM_322    0x868120b5u
+#define NID_SCE_ATRAC_GET_LOOP_STATUS_322 0xfaa4f89bu
+static void test_atrac_guest_context_322(void) {
+    enum { SRC = 0x08006000u, TRACK = 0x08002000u, PCM_OUT = 0x08003000u, OUT_N = 0x08004100u,
+           OUT_END = 0x08004104u, OUT_REMAIN = 0x08004108u, LOOP_OUT = 0x08004110u,
+           LOOP_FLAG = 0x08004114u, SECOND = 0x08007000u, FRAMES = 8u, PREFIX_FRAMES = 4u };
+    const uint32_t prefix = TD1096_HEADER + PREFIX_FRAMES * TD1096_FRAME;
+    const uint32_t file_size = TD1096_HEADER + FRAMES * TD1096_FRAME;
+    extern void sr_hle_test_partition_reset(void);
+    const uint32_t loaded_end = s_fixture_loaded_end;
+    reset_fixture();
+    s_fixture_loaded_end = 0x08a00000u;   /* a main image in user RAM, as a game's is */
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+
+    expect(td24b_dispatch4(NID_SCE_ATRAC_GET_CONTEXT_ADDRESS, 3u, 0u, 0u, 0u) == ATRAC_ERROR_NO_ATRACID,
+           "_sceAtracGetContextAddress refuses an ID that is not in use (#322)");
+    uint32_t id = td24b_dispatch4(NID_SCE_ATRAC_GET_ID, ATRAC_CODEC_AT3, 0u, 0u, 0u);
+    expect(id < 8u, "context fixture: an AT3 ID");
+    if (id >= 8u) {
+        s_fixture_loaded_end = loaded_end;
+        sr_hle_test_partition_reset();
+        return;
+    }
+    const uint32_t ctx = td24b_dispatch4(NID_SCE_ATRAC_GET_CONTEXT_ADDRESS, id, 0u, 0u, 0u);
+    const uint32_t info = ctx + 0x80u;
+    expect(ctx >= 0x08a00000u && ctx < 0x0a000000u && (ctx & 0xffu) == 0u,
+           "_sceAtracGetContextAddress returns a 0x100-byte context in the user partition (#322)");
+    if (!(ctx >= 0x08a00000u && ctx < 0x0a000000u)) {
+        (void)td24b_dispatch4(NID_SCE_ATRAC_RELEASE_ID, id, 0u, 0u, 0u);
+        s_fixture_loaded_end = loaded_end;
+        sr_hle_test_partition_reset();
+        return;
+    }
+    expect(MEM_R8(info + 0x15u) == 1u && MEM_R16(info + 0x1au) == ATRAC_CODEC_AT3 &&
+               MEM_R32(info + 0x38u) == 0u && MEM_R32(ctx + 0xfcu) == id,
+           "an ID with no track: state NO_DATA (1), its codec, no buffer, and the ID at +0xfc");
+    expect(td24b_dispatch4(NID_SCE_ATRAC_GET_CONTEXT_ADDRESS, id, 0u, 0u, 0u) == ctx,
+           "a second call returns the same context");
+
+    /* SetData: a streamed prefix shorter than the file. */
+    td1096_build_at3_frames(SRC, 0x0270u, FRAMES, FRAMES * ATRAC3_FRAME_SAMPLES, 0u);
+    for (uint32_t b = 0; b < prefix; b++) MEM_W8(TRACK + b, MEM_R8(SRC + b));
+    expect(td24b_dispatch4(NID_SCE_ATRAC_SET_DATA, id, TRACK, prefix, 0u) == 0u,
+           "context fixture: SetData takes the streamed prefix");
+    expect(MEM_R8(info + 0x15u) == 4u && MEM_R8(info + 0x17u) == 2u &&
+               MEM_R16(info + 0x18u) == TD1096_FRAME && MEM_R16(info + 0x1au) == ATRAC_CODEC_AT3 &&
+               MEM_R32(info + 0x1cu) == TD1096_HEADER && MEM_R32(info + 0x24u) == file_size &&
+               MEM_R32(info + 0x38u) == TRACK && MEM_R32(info + 0x40u) == prefix &&
+               MEM_R32(info + 0x3cu) == 0u && MEM_R32(info + 0x44u) == 0u,
+           "after SetData the context names the stream: state, channels, frame size, codec, data "
+           "offset, file size, buffer and buffer size");
+
+    /* loopNum follows SetLoopNum, and a game's own write is what the library reads. */
+    expect(td24b_dispatch4(NID_SCE_ATRAC_SET_LOOP_NUM_322, id, 2u, 0u, 0u) == 0u &&
+               MEM_R32(info + 0x28u) == 2u,
+           "sceAtracSetLoopNum is written to the context's loopNum");
+    MEM_W32(info + 0x28u, 7u);
+    expect(td24b_dispatch4(NID_SCE_ATRAC_GET_LOOP_STATUS_322, id, LOOP_OUT, LOOP_FLAG, 0u) == 0u &&
+               MEM_R32(LOOP_OUT) == 7u,
+           "a loopNum the game writes into the context is the one the library reports");
+    MEM_W32(info + 0x28u, 0u);
+
+    /* The second buffer. */
+    expect(td24b_dispatch4(NID_SCE_ATRAC_SET_SECOND_BUFFER, id, SECOND, 0x800u, 0u) == 0u &&
+               MEM_R32(info + 0x3cu) == SECOND && MEM_R32(info + 0x44u) == 0x800u,
+           "sceAtracSetSecondBuffer is written to secondBuffer and secondBufferByte");
+    expect(td24b_dispatch4(NID_SCE_ATRAC_SET_SECOND_BUFFER, id, 0u, 0u, 0u) == 0u &&
+               MEM_R32(info + 0x3cu) == 0u && MEM_R32(info + 0x44u) == 0u,
+           "clearing the second buffer clears it in the context");
+
+    /* DecodeData publishes too: a field that is not read back is the library's again, and a
+     * context the game only wrote such fields into still decodes. */
+    MEM_W32(info + 0x38u, 0x0badf00du);
+    MEM_W32(ctx + 0xfcu, 0xffu);
+    {
+        uint32_t stops = sr_hle_test_unmodelled_stops();
+        uint32_t ret = td1096_decode(id, PCM_OUT, OUT_N, OUT_END, OUT_REMAIN);
+        expect(ret == 0u && MEM_R32(OUT_N) > 0u && sr_hle_test_unmodelled_stops() == stops,
+               "a context whose other fields the game wrote still decodes");
+    }
+    expect(MEM_R8(info + 0x15u) == 4u && MEM_R32(info + 0x28u) == 0u &&
+               MEM_R32(info + 0x38u) == TRACK && MEM_R32(ctx + 0xfcu) == id,
+           "sceAtracDecodeData rewrites the context from the library's state");
+
+    /* AddStreamData: the context keeps naming the same buffer and file. */
+    {
+        enum { WP = 0x08004200u, WB = 0x08004204u, RO = 0x08004208u };
+        expect(td24b_dispatch4(NID_SCE_ATRAC_GET_STREAM_DATA_INFO, id, WP, WB, RO) == 0u &&
+                   MEM_R32(WB) >= TD1096_FRAME,
+               "context fixture: the ring has room for a frame");
+        uint32_t wp = MEM_R32(WP), ro = MEM_R32(RO);
+        for (uint32_t b = 0; b < TD1096_FRAME; b++) MEM_W8(wp + b, MEM_R8(SRC + ro + b));
+        MEM_W32(info + 0x24u, 0u);
+        expect(td24b_dispatch4(0x7db31251u, id, TD1096_FRAME, 0u, 0u) == 0u &&
+                   MEM_R32(info + 0x24u) == file_size && MEM_R32(info + 0x38u) == TRACK,
+               "sceAtracAddStreamData publishes the context");
+    }
+
+    /* A state the game writes is not taken: honouring one is unmeasured, so the next call stops
+     * the run by name, whatever the value. With the runtime's own state back, calls go on. */
+    {
+        enum { REMAIN = 0x08004220u };
+        static const uint8_t written[] = { 2u, 1u, 0x10u };
+        static const char *const what[] = {
+            "ALL_DATA_LOADED written over a streamed track",
+            "NO_DATA written over a streamed track",
+            "FOR_SCESAS (a SAS voice's source) written over a streamed track",
+        };
+        char name[200];
+        for (size_t i = 0; i < sizeof(written); i++) {
+            uint32_t stops = sr_hle_test_unmodelled_stops();
+            MEM_W8(info + 0x15u, written[i]);
+            uint32_t ret = td24b_dispatch4(NID_SCE_ATRAC_GET_REMAIN_FRAME, id, REMAIN, 0u, 0u);
+            snprintf(name, sizeof(name), "%s stops the next call by name (#322)", what[i]);
+            expect(sr_hle_test_unmodelled_stops() == stops + 1u && ret != 0u, name);
+        }
+        MEM_W8(info + 0x15u, 4u);
+        uint32_t stops = sr_hle_test_unmodelled_stops();
+        expect(td24b_dispatch4(NID_SCE_ATRAC_GET_REMAIN_FRAME, id, REMAIN, 0u, 0u) == 0u &&
+                   MEM_R32(REMAIN) != 0xffffffffu && sr_hle_test_unmodelled_stops() == stops,
+               "with the runtime's own state in the context, calls go on");
+    }
+
+    /* Release clears the context; the slot's next owner starts from NO_DATA. */
+    expect(td24b_dispatch4(NID_SCE_ATRAC_RELEASE_ID, id, 0u, 0u, 0u) == 0u,
+           "context fixture: release the ID");
+    int zero = 1;
+    for (uint32_t off = 0; off < 0x100u; off += 4u) if (MEM_R32(ctx + off) != 0u) zero = 0;
+    expect(zero, "sceAtracReleaseAtracID clears the ID's context");
+    expect(td24b_dispatch4(NID_SCE_ATRAC_GET_CONTEXT_ADDRESS, id, 0u, 0u, 0u) == ATRAC_ERROR_NO_ATRACID,
+           "a released ID has no context");
+    uint32_t again = td24b_dispatch4(NID_SCE_ATRAC_GET_ID, ATRAC_CODEC_AT3, 0u, 0u, 0u);
+    expect(again == id && td24b_dispatch4(NID_SCE_ATRAC_GET_CONTEXT_ADDRESS, again, 0u, 0u, 0u) == ctx &&
+               MEM_R8(info + 0x15u) == 1u && MEM_R32(info + 0x38u) == 0u,
+           "the slot's next ID gets the same context, back at NO_DATA");
+    (void)td24b_dispatch4(NID_SCE_ATRAC_RELEASE_ID, again, 0u, 0u, 0u);
+    s_fixture_loaded_end = loaded_end;
+    sr_hle_test_partition_reset();
+}
+
+/* #322: two IDs, a program switch, and a partition that cannot hold the contexts. */
+static uint32_t ctx322_syscall(uint32_t nid, uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3) {
+    CpuState cpu;
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = a0; cpu.r[5] = a1; cpu.r[6] = a2; cpu.r[7] = a3;
+    return sr_syscall(&cpu, nid);
+}
+static void test_atrac_context_ids_loadexec_322(void) {
+    enum { NID_ALLOC_PART = 0x237dbd4fu, NID_FREE_PART = 0xb6d61d02u, NID_GET_HEAD = 0x9d9a5ba1u,
+           NID_MAX_FREE = 0xa291f107u, GAME_BYTES = 0x800u };
+    extern void sr_hle_test_partition_reset(void);
+    const uint32_t loaded_end = s_fixture_loaded_end;
+    reset_fixture();
+    s_fixture_loaded_end = 0x08a00000u;
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+
+    /* Two IDs: separate contexts 0x100 apart in one table, each with its own ID at +0xfc. */
+    uint32_t id0 = td24b_dispatch4(NID_SCE_ATRAC_GET_ID, ATRAC_CODEC_AT3, 0u, 0u, 0u);
+    uint32_t id1 = td24b_dispatch4(NID_SCE_ATRAC_GET_ID, ATRAC_CODEC_AT3, 0u, 0u, 0u);
+    expect(id0 < 8u && id1 < 8u && id0 != id1, "context fixture: two AT3 IDs");
+    uint32_t ctx0 = td24b_dispatch4(NID_SCE_ATRAC_GET_CONTEXT_ADDRESS, id0, 0u, 0u, 0u);
+    uint32_t ctx1 = td24b_dispatch4(NID_SCE_ATRAC_GET_CONTEXT_ADDRESS, id1, 0u, 0u, 0u);
+    uint32_t table = ctx0 - id0 * 0x100u;
+    expect(ctx0 >= 0x08a00000u && ctx0 < 0x0a000000u && ctx1 >= 0x08a00000u && ctx1 < 0x0a000000u &&
+               ctx0 != ctx1 && ctx1 - id1 * 0x100u == table &&
+               MEM_R32(ctx0 + 0xfcu) == id0 && MEM_R32(ctx1 + 0xfcu) == id1,
+           "two ATRAC IDs get separate contexts, 0x100 apart in one table, each with its ID at +0xfc");
+    if (!(ctx0 >= 0x08a00000u && ctx0 < 0x0a000000u)) {
+        s_fixture_loaded_end = loaded_end;
+        sr_hle_test_partition_reset();
+        return;
+    }
+    uint8_t before[0x100];
+    for (uint32_t b = 0; b < 0x100u; b++) before[b] = (uint8_t)MEM_R8(ctx0 + b);
+    expect(td24b_dispatch4(NID_SCE_ATRAC_SET_LOOP_NUM_322, id1, 3u, 0u, 0u) == 0u &&
+               MEM_R32(ctx1 + 0x80u + 0x28u) == 3u,
+           "context fixture: SetLoopNum on the second ID");
+    int same = 1;
+    for (uint32_t b = 0; b < 0x100u; b++) if (MEM_R8(ctx0 + b) != before[b]) same = 0;
+    expect(same, "a call on one ID leaves another ID's context untouched");
+
+    /* The table's block UID, found the way a game could: the block whose head is the table. */
+    uint32_t table_uid = 0u;
+    for (uint32_t u = 0x100u; u < 0x4000u && !table_uid; u++)
+        if (ctx322_syscall(NID_GET_HEAD, u, 0u, 0u, 0u) == table) table_uid = u;
+    expect(table_uid != 0u, "context fixture: the context table is a partition block");
+
+    /* sceKernelLoadExec: the next program's partition is empty and its UIDs start again, so one
+     * of its blocks takes the old table's UID. Its next context must not land in that block. */
+    sr_hle_loadexec_reset_guest_state();
+    uint32_t game_uid = 0u;
+    for (int n = 0; n < 0x4000 && game_uid < table_uid; n++) {
+        uint32_t u = ctx322_syscall(NID_ALLOC_PART, 2u, 0u, 0u, GAME_BYTES);
+        if (u == 0u || (u & 0x80000000u)) break;
+        game_uid = u;
+        if (u < table_uid) (void)ctx322_syscall(NID_FREE_PART, u, 0u, 0u, 0u);
+    }
+    uint32_t game = game_uid == table_uid ? ctx322_syscall(NID_GET_HEAD, game_uid, 0u, 0u, 0u) : 0u;
+    expect(game_uid == table_uid && game != 0u && !(game & 0x80000000u),
+           "context fixture: after LoadExec a block of the next program takes the old table's UID");
+    if (game) for (uint32_t b = 0; b < GAME_BYTES; b++) MEM_W8(game + b, 0xa5u);
+    uint32_t nid = td24b_dispatch4(NID_SCE_ATRAC_GET_ID, ATRAC_CODEC_AT3, 0u, 0u, 0u);
+    uint32_t nctx = nid < 8u ? td24b_dispatch4(NID_SCE_ATRAC_GET_CONTEXT_ADDRESS, nid, 0u, 0u, 0u) : 0u;
+    int intact = game != 0u;
+    for (uint32_t b = 0; game && b < GAME_BYTES; b++) if (MEM_R8(game + b) != 0xa5u) intact = 0;
+    expect(nid < 8u && nctx >= 0x08800000u && nctx < 0x0a000000u &&
+               (nctx + 0x100u <= game || nctx >= game + GAME_BYTES) && intact,
+           "after LoadExec the next program's context table is a new block, and the block that "
+           "reused the old table's UID is left untouched (#322)");
+
+    /* A partition that cannot hold the 0x800 bytes of contexts: no PSP result fits, so the call
+     * stops the run by name (ATRAC_CONTEXT_NO_MEMORY on stderr). */
+    if (nid < 8u) (void)td24b_dispatch4(NID_SCE_ATRAC_RELEASE_ID, nid, 0u, 0u, 0u);
+    reset_fixture();
+    s_fixture_loaded_end = 0x08a00000u;
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+    uint32_t fid = td24b_dispatch4(NID_SCE_ATRAC_GET_ID, ATRAC_CODEC_AT3, 0u, 0u, 0u);
+    uint32_t max_free = ctx322_syscall(NID_MAX_FREE, 0u, 0u, 0u, 0u);
+    uint32_t fill = max_free >= 0x100u ? ctx322_syscall(NID_ALLOC_PART, 2u, 0u, 0u, max_free) : 0u;
+    expect(fid < 8u && fill != 0u && !(fill & 0x80000000u) &&
+               ctx322_syscall(NID_MAX_FREE, 0u, 0u, 0u, 0u) < 0x800u,
+           "context fixture: the partition is full");
+    {
+        FILE *capture = NULL;
+        int saved_fd = -1;
+        char log[1024];
+        log[0] = '\0';
+        uint32_t stops = sr_hle_test_unmodelled_stops();
+        int capturing = hle_data_stderr_capture_begin(&capture, &saved_fd);
+        (void)td24b_dispatch4(NID_SCE_ATRAC_GET_CONTEXT_ADDRESS, fid, 0u, 0u, 0u);
+        if (capturing) hle_data_stderr_capture_end(capture, saved_fd, log, sizeof(log));
+        expect(sr_hle_test_unmodelled_stops() == stops + 1u && capturing &&
+                   strstr(log, "ATRAC_CONTEXT_NO_MEMORY") != NULL,
+               "_sceAtracGetContextAddress stops the run by name (ATRAC_CONTEXT_NO_MEMORY) when the "
+               "partition cannot hold the contexts");
+    }
+    expect(ctx322_syscall(NID_FREE_PART, fill, 0u, 0u, 0u) == 0u &&
+               td24b_dispatch4(NID_SCE_ATRAC_GET_CONTEXT_ADDRESS, fid, 0u, 0u, 0u) >= 0x08a00000u,
+           "once the partition has room the next call allocates the contexts");
+    if (fid < 8u) (void)td24b_dispatch4(NID_SCE_ATRAC_RELEASE_ID, fid, 0u, 0u, 0u);
+    s_fixture_loaded_end = loaded_end;
+    sr_hle_test_partition_reset();
+}
+
+
+/* #322: a whole AT3 track whose context state the game overwrites. Before, a written streamed
+ * state was taken as a label only, and every DecodeData returned 0 samples with no end flag. One
+ * DecodeData is enough to tell: it must stop by name. */
+static void test_atrac_context_state_write_322(void) {
+    enum { SRC = 0x08006000u, TRACK = 0x08010000u, PCM_OUT = 0x08003000u, OUT_N = 0x08004100u,
+           OUT_END = 0x08004104u, OUT_REMAIN = 0x08004108u, REMAIN = 0x08004220u, FRAMES = 8u };
+    extern void sr_hle_test_partition_reset(void);
+    const uint32_t loaded_end = s_fixture_loaded_end;
+    reset_fixture();
+    s_fixture_loaded_end = 0x08a00000u;
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+    const uint32_t file_size = TD1096_HEADER + FRAMES * TD1096_FRAME;
+    td1096_build_at3_frames(SRC, 0x0270u, FRAMES, FRAMES * ATRAC3_FRAME_SAMPLES, 0u);
+    for (uint32_t b = 0; b < file_size; b++) MEM_W8(TRACK + b, MEM_R8(SRC + b));
+    uint32_t id = td24b_dispatch4(NID_SCE_ATRAC_GET_ID, ATRAC_CODEC_AT3, 0u, 0u, 0u);
+    uint32_t set = id < 8u ? td24b_dispatch4(NID_SCE_ATRAC_SET_DATA, id, TRACK, file_size, 0u) : 1u;
+    uint32_t ctx = set == 0u ? td24b_dispatch4(NID_SCE_ATRAC_GET_CONTEXT_ADDRESS, id, 0u, 0u, 0u) : 0u;
+    const uint32_t info = ctx + 0x80u;
+    int ready = ctx >= 0x08a00000u && ctx < 0x0a000000u && MEM_R8(info + 0x15u) == 2u;
+    expect(ready, "state-write fixture: a whole AT3 track is ALL_DATA_LOADED in its context");
+    if (ready) {
+        uint32_t stops = sr_hle_test_unmodelled_stops();
+        uint32_t ret = td1096_decode(id, PCM_OUT, OUT_N, OUT_END, OUT_REMAIN);
+        expect(ret == 0u && MEM_R32(OUT_N) > 0u && sr_hle_test_unmodelled_stops() == stops,
+               "a context the game only reads decodes as before");
+        MEM_W32(info + 0x28u, 1u);   /* the game keeps its own loop count */
+        ret = td1096_decode(id, PCM_OUT, OUT_N, OUT_END, OUT_REMAIN);
+        expect(ret == 0u && MEM_R32(OUT_N) > 0u && sr_hle_test_unmodelled_stops() == stops,
+               "a context the game wrote loopNum into decodes as before");
+        MEM_W32(info + 0x28u, 0u);
+
+        MEM_W8(info + 0x15u, 4u);   /* STREAMED_WITHOUT_LOOP over a whole track */
+        MEM_W32(OUT_N, 0xdeadbeefu);
+        MEM_W32(OUT_END, 0xdeadbeefu);
+        ret = td1096_decode(id, PCM_OUT, OUT_N, OUT_END, OUT_REMAIN);
+        expect(sr_hle_test_unmodelled_stops() == stops + 1u && ret != 0u,
+               "a streamed state written over a whole track stops DecodeData by name, not 0 "
+               "samples with no end flag (#322)");
+        MEM_W8(info + 0x15u, 2u);
+        ret = td1096_decode(id, PCM_OUT, OUT_N, OUT_END, OUT_REMAIN);
+        expect(ret == 0u && MEM_R32(OUT_N) > 0u && sr_hle_test_unmodelled_stops() == stops + 1u,
+               "with its own state back, the track decodes on");
+
+        MEM_W8(info + 0x15u, 1u);   /* NO_DATA over a held track */
+        ret = td24b_dispatch4(NID_SCE_ATRAC_GET_REMAIN_FRAME, id, REMAIN, 0u, 0u);
+        expect(sr_hle_test_unmodelled_stops() == stops + 2u && ret != 0u,
+               "NO_DATA written over a held track stops the next call by name (#322)");
+        MEM_W8(info + 0x15u, 2u);
+    }
+    if (id < 8u) (void)td24b_dispatch4(NID_SCE_ATRAC_RELEASE_ID, id, 0u, 0u, 0u);
+    s_fixture_loaded_end = loaded_end;
+    sr_hle_test_partition_reset();
+}
+
+/* #322: an ATRAC3+ prefix with a fact chunk and no fmt chunk is a track whose frame size is 0,
+ * kept as ALL_DATA_LOADED. A streamed state written into its context must stop the run by name:
+ * the remaining-frame and reset arithmetic divide by the frame size. The dividing calls run only
+ * once the stop has been counted, so a build that takes the state fails here instead of crashing. */
+static void test_atrac_context_zero_frame_322(void) {
+    enum { TRACK = 0x08002000u, REMAIN = 0x08004220u, RESET_INFO = 0x08004300u };
+    extern void sr_hle_test_partition_reset(void);
+    const uint32_t loaded_end = s_fixture_loaded_end;
+    reset_fixture();
+    s_fixture_loaded_end = 0x08a00000u;
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+
+    for (uint32_t b = 0; b < 0x40u; b++) MEM_W8(TRACK + b, 0u);
+    MEM_W32(TRACK + 0x00u, 0x46464952u);   /* "RIFF" */
+    MEM_W32(TRACK + 0x04u, 0x1000u);
+    MEM_W32(TRACK + 0x08u, 0x45564157u);   /* "WAVE" */
+    MEM_W32(TRACK + 0x0cu, 0x74636166u);   /* "fact" */
+    MEM_W32(TRACK + 0x10u, 8u);
+    MEM_W32(TRACK + 0x14u, 2048u);         /* samples */
+    MEM_W32(TRACK + 0x18u, 0u);            /* delay */
+    uint32_t id = td24b_dispatch4(NID_SCE_ATRAC_GET_ID, 0x1000u /* ATRAC3+ */, 0u, 0u, 0u);
+    uint32_t set = id < 8u ? td24b_dispatch4(NID_SCE_ATRAC_SET_DATA, id, TRACK, 0x40u, 0u) : 1u;
+    uint32_t ctx = set == 0u ? td24b_dispatch4(NID_SCE_ATRAC_GET_CONTEXT_ADDRESS, id, 0u, 0u, 0u) : 0u;
+    const uint32_t info = ctx + 0x80u;
+    int ready = ctx >= 0x08a00000u && ctx < 0x0a000000u;
+    expect(ready && MEM_R8(info + 0x15u) == 2u && MEM_R16(info + 0x18u) == 0u,
+           "zero-frame fixture: a fact-only ATRAC3+ prefix is ALL_DATA_LOADED with frame size 0");
+    if (ready) {
+        uint32_t stops = sr_hle_test_unmodelled_stops();
+        MEM_W8(info + 0x15u, 4u);   /* STREAMED_WITHOUT_LOOP */
+        (void)td24b_dispatch4(NID_SCE_ATRAC_GET_LOOP_STATUS_322, id, REMAIN, REMAIN + 4u, 0u);
+        int stopped = sr_hle_test_unmodelled_stops() == stops + 1u;
+        expect(stopped, "a streamed state written for a track whose frame size is 0 stops the run "
+                        "by name (#322)");
+        if (stopped) {
+            /* Only reached once the written state is refused: these divide by the frame size. */
+            uint32_t r1 = td24b_dispatch4(NID_SCE_ATRAC_GET_REMAIN_FRAME, id, REMAIN, 0u, 0u);
+            MEM_W8(info + 0x15u, 3u);   /* HALFWAY_BUFFER */
+            uint32_t r2 = td24b_dispatch4(NID_SCE_ATRAC_GET_REMAIN_FRAME, id, REMAIN, 0u, 0u);
+            MEM_W8(info + 0x15u, 5u);
+            uint32_t r3 = td24b_dispatch4(NID_SCE_ATRAC_GET_BUFFER_INFO_FOR_RESETTING, id, 0u,
+                                          RESET_INFO, 0u);
+            expect(sr_hle_test_unmodelled_stops() == stops + 4u && r1 != 0u && r2 != 0u && r3 != 0u,
+                   "with a written state, GetRemainFrame and GetBufferInfoForResetting stop by "
+                   "name and never divide by a frame size of 0");
+        }
+        MEM_W8(info + 0x15u, 2u);
+        stops = sr_hle_test_unmodelled_stops();
+        expect(td24b_dispatch4(NID_SCE_ATRAC_GET_REMAIN_FRAME, id, REMAIN, 0u, 0u) == 0u &&
+                   MEM_R32(REMAIN) == 0xffffffffu && sr_hle_test_unmodelled_stops() == stops,
+               "with its own state back, the zero-frame track answers ALL_DATA_LOADED");
+    }
+    if (id < 8u) (void)td24b_dispatch4(NID_SCE_ATRAC_RELEASE_ID, id, 0u, 0u, 0u);
+    s_fixture_loaded_end = loaded_end;
+    sr_hle_test_partition_reset();
+}
+
 static void test_td24d_hle_batch(void) {
     reset_fixture();
     sr_hle_init();
@@ -51577,6 +51941,50 @@ static void test_vtimer_handler_return_below_100us_reschedules_100us_on(void) {
     s_pace_on = saved_pace;
 }
 
+#ifndef _WIN32
+#include <sys/wait.h>
+#endif
+/* Re-execute this binary in `mode` (one argument) and return its exit status, or -1 when it could not be
+ * started or waited for. The command line is quoted (exit_game_spawn_child says why). */
+static int aot_spawn_self(const char *self, const char *mode) {
+#ifdef _WIN32
+    wchar_t wide_self[EXITGAME_SPAWN_CAP];
+    wchar_t wide_mode[EXITGAME_SPAWN_CAP];
+    wchar_t command[EXITGAME_SPAWN_CAP];
+    if (MultiByteToWideChar(CP_ACP, 0, self, -1, wide_self, EXITGAME_SPAWN_CAP) <= 0 ||
+        MultiByteToWideChar(CP_ACP, 0, mode, -1, wide_mode, EXITGAME_SPAWN_CAP) <= 0) {
+        return -1;
+    }
+    size_t written = append_quoted_argument(command, EXITGAME_SPAWN_CAP, wide_self);
+    if (written == 0 || written + 1 >= EXITGAME_SPAWN_CAP) return -1;
+    command[written++] = L' ';
+    if (append_quoted_argument(command + written, EXITGAME_SPAWN_CAP - written, wide_mode) == 0)
+        return -1;
+    STARTUPINFOW startup;
+    PROCESS_INFORMATION child;
+    DWORD status = 0;
+    ZeroMemory(&startup, sizeof(startup));
+    startup.cb = sizeof(startup);
+    if (!CreateProcessW(NULL, command, NULL, NULL, TRUE, 0, NULL, NULL, &startup, &child))
+        return -1;
+    int waited = WaitForSingleObject(child.hProcess, INFINITE) == WAIT_OBJECT_0 &&
+                 GetExitCodeProcess(child.hProcess, &status);
+    CloseHandle(child.hThread);
+    CloseHandle(child.hProcess);
+    return waited ? (int)status : -1;
+#else
+    pid_t child = fork();
+    if (child == 0) {
+        execl(self, self, mode, (char *)NULL);
+        _exit(127);
+    }
+    if (child < 0) return -1;
+    int status = 0;
+    if (waitpid(child, &status, 0) != child || !WIFEXITED(status)) return -1;
+    return WEXITSTATUS(status);
+#endif
+}
+
 #ifdef SR_HLE_AOT_BOUNDARY_TEST
 /* This is the same wrapper emitted by emit_checked_body_call: set the linked
  * resume address, establish its explicit return boundary, call the native body,
@@ -51954,9 +52362,6 @@ static void test_aot_return_boundary_thread_isolation(void) {
  * recomp.c's stop, before any guest code runs; on this zero-based registry the offset-0
  * function would otherwise run as the thread. A loader entry of 0 (the boot thread's
  * module_start at offset 0) is not a code pointer and runs. */
-#ifndef _WIN32
-#include <sys/wait.h>
-#endif
 enum {
     NULLENTRY_LAUNCHER = 0x088a0400u,
     NULLENTRY_NAME = 0x00250b80u,
@@ -51996,47 +52401,6 @@ static int run_null_thread_entry_child(void) {
     sched_run(NULLENTRY_LAUNCHER, 0u, 0u);
     if ((int32_t)s_nullentry_create_result <= 0 || s_nullentry_start_result != 0u) return 97;
     return s_nullentry_offset0_runs ? 99 : 96; /* fail-open: the thread ran, or never started */
-}
-
-/* Re-execute this binary in `mode` and return its exit status, or -1 when it could not be
- * started or waited for. The command line is quoted (exit_game_spawn_child says why). */
-static int aot_spawn_self(const char *self, const char *mode) {
-#ifdef _WIN32
-    wchar_t wide_self[EXITGAME_SPAWN_CAP];
-    wchar_t wide_mode[EXITGAME_SPAWN_CAP];
-    wchar_t command[EXITGAME_SPAWN_CAP];
-    if (MultiByteToWideChar(CP_ACP, 0, self, -1, wide_self, EXITGAME_SPAWN_CAP) <= 0 ||
-        MultiByteToWideChar(CP_ACP, 0, mode, -1, wide_mode, EXITGAME_SPAWN_CAP) <= 0) {
-        return -1;
-    }
-    size_t written = append_quoted_argument(command, EXITGAME_SPAWN_CAP, wide_self);
-    if (written == 0 || written + 1 >= EXITGAME_SPAWN_CAP) return -1;
-    command[written++] = L' ';
-    if (append_quoted_argument(command + written, EXITGAME_SPAWN_CAP - written, wide_mode) == 0)
-        return -1;
-    STARTUPINFOW startup;
-    PROCESS_INFORMATION child;
-    DWORD status = 0;
-    ZeroMemory(&startup, sizeof(startup));
-    startup.cb = sizeof(startup);
-    if (!CreateProcessW(NULL, command, NULL, NULL, TRUE, 0, NULL, NULL, &startup, &child))
-        return -1;
-    int waited = WaitForSingleObject(child.hProcess, INFINITE) == WAIT_OBJECT_0 &&
-                 GetExitCodeProcess(child.hProcess, &status);
-    CloseHandle(child.hThread);
-    CloseHandle(child.hProcess);
-    return waited ? (int)status : -1;
-#else
-    pid_t child = fork();
-    if (child == 0) {
-        execl(self, self, mode, (char *)NULL);
-        _exit(127);
-    }
-    if (child < 0) return -1;
-    int status = 0;
-    if (waitpid(child, &status, 0) != child || !WIFEXITED(status)) return -1;
-    return WEXITSTATUS(status);
-#endif
 }
 
 static void test_aot_null_thread_entry(const char *self) {
@@ -52911,6 +53275,75 @@ int main(int argc, char **argv) {
     return rc;
 }
 
+/* #322: no ATRAC call divides by a frame size of 0. Each route runs in a child process, so a
+ * build that still divides fails its check with the child's crash status (0xC0000094 on Windows,
+ * SIGFPE on POSIX) instead of ending this binary. */
+#define ATRAC_ZERO_FRAME_CHILD "--atrac-zero-frame-child="
+/* The child: 0 when the route stopped the run by name, 2 when the fixture could not be built, 1
+ * otherwise. Once the game has written the state, the next call may stop already; that counts. */
+static int run_atrac_zero_frame_child(const char *route) {
+    enum { TRACK = 0x08002000u, OUT = 0x08004220u, RESET_INFO = 0x08004300u, PCM = 0x08003000u,
+           NID_ADD_STREAM_DATA = 0x7db31251u };
+    extern void sr_hle_test_partition_reset(void);
+    reset_fixture();
+    s_fixture_loaded_end = 0x08a00000u;
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+    const uint32_t stops = sr_hle_test_unmodelled_stops();
+    const int no_data = strcmp(route, "no-data") == 0;
+    uint32_t id = td24b_dispatch4(NID_SCE_ATRAC_GET_ID, 0x1000u /* ATRAC3+ */, 0u, 0u, 0u);
+    if (id >= 8u) return 2;
+    if (!no_data) {
+        /* A fact-only ATRAC3+ prefix: RIFF, WAVE and a fact chunk, no fmt chunk. */
+        for (uint32_t b = 0; b < 0x40u; b++) MEM_W8(TRACK + b, 0u);
+        MEM_W32(TRACK + 0x00u, 0x46464952u);
+        MEM_W32(TRACK + 0x04u, 0x1000u);
+        MEM_W32(TRACK + 0x08u, 0x45564157u);
+        MEM_W32(TRACK + 0x0cu, 0x74636166u);
+        MEM_W32(TRACK + 0x10u, 8u);
+        MEM_W32(TRACK + 0x14u, 2048u);
+        if (td24b_dispatch4(NID_SCE_ATRAC_SET_DATA, id, TRACK, 0x40u, 0u) != 0u) return 2;
+        uint32_t ctx = td24b_dispatch4(NID_SCE_ATRAC_GET_CONTEXT_ADDRESS, id, 0u, 0u, 0u);
+        if (ctx < 0x08a00000u || ctx >= 0x0a000000u || MEM_R16(ctx + 0x80u + 0x18u) != 0u) return 2;
+        MEM_W8(ctx + 0x80u + 0x15u, 1u);   /* the game writes NO_DATA */
+        if (strcmp(route, "no-data-state") != 0) {
+            (void)td24b_dispatch4(NID_ADD_STREAM_DATA, id, 0u, 0u, 0u);
+            if (sr_hle_test_unmodelled_stops() > stops) return 0;
+        }
+    }
+    if (no_data || strcmp(route, "no-data-state") == 0 || strcmp(route, "add-stream") == 0) {
+        (void)td24b_dispatch4(NID_SCE_ATRAC_GET_REMAIN_FRAME, id, OUT, 0u, 0u);
+    } else if (strcmp(route, "add-stream-decode") == 0) {
+        (void)td1096_decode(id, PCM, OUT, OUT + 4u, OUT + 8u);
+    } else if (strcmp(route, "add-stream-reset") == 0) {
+        (void)td24b_dispatch4(NID_SCE_ATRAC_GET_BUFFER_INFO_FOR_RESETTING, id, 0u, RESET_INFO, 0u);
+    } else {
+        return 2;
+    }
+    return sr_hle_test_unmodelled_stops() > stops ? 0 : 1;
+}
+static void test_atrac_zero_frame_routes_322(const char *self) {
+    static const char *const routes[] = { "no-data", "no-data-state", "add-stream",
+                                          "add-stream-decode", "add-stream-reset" };
+    static const char *const what[] = {
+        "sceAtracGetRemainFrame on an ID that never received a track",
+        "sceAtracGetRemainFrame after NO_DATA is written into a zero-frame track's context",
+        "sceAtracGetRemainFrame after NO_DATA and sceAtracAddStreamData(id, 0) on a zero-frame track",
+        "sceAtracDecodeData after NO_DATA and sceAtracAddStreamData(id, 0) on a zero-frame track",
+        "sceAtracGetBufferInfoForResetting after NO_DATA and sceAtracAddStreamData(id, 0) on a "
+        "zero-frame track",
+    };
+    char mode[96];
+    char name[256];
+    for (size_t i = 0; i < sizeof(routes) / sizeof(routes[0]); i++) {
+        snprintf(mode, sizeof(mode), "%s%s", ATRAC_ZERO_FRAME_CHILD, routes[i]);
+        int status = self ? aot_spawn_self(self, mode) : -1;
+        snprintf(name, sizeof(name), "%s stops the run by name and never divides by a frame size "
+                                     "of 0 (child status %d, #322)", what[i], status);
+        expect(status == 0, name);
+    }
+}
+
 static int hle_selftest_main(int argc, char **argv) {
     if (argc > 1 && strcmp(argv[1], "--psp-oracle") == 0)
         return run_psp_oracle(argc, argv);
@@ -52935,6 +53368,12 @@ static int hle_selftest_main(int argc, char **argv) {
     expect(s_sched_coro != NULL, "scheduler coroutine was adopted");
     expect(sr_coro_current() == s_sched_coro,
            "the adopted scheduler coroutine is the one currently running");
+
+    if (argc > 1 && strncmp(argv[1], ATRAC_ZERO_FRAME_CHILD, strlen(ATRAC_ZERO_FRAME_CHILD)) == 0) {
+        int rc = run_atrac_zero_frame_child(argv[1] + strlen(ATRAC_ZERO_FRAME_CHILD));
+        free(g_mem_base);
+        return rc;
+    }
 
     if (argc > 1 && strcmp(argv[1], "--rtc-rfc2822-local") == 0) {
         test_rtc_rfc2822_local();
@@ -53352,6 +53791,11 @@ static int hle_selftest_main(int argc, char **argv) {
     test_at3_set_data_delay_2048_1096();
     test_atrac_set_entry_points_1379();
     test_atrac_aa3_and_reinit_1379();
+    test_atrac_guest_context_322();
+    test_atrac_context_ids_loadexec_322();
+    test_atrac_context_state_write_322();
+    test_atrac_context_zero_frame_322();
+    test_atrac_zero_frame_routes_322(argc > 0 ? argv[0] : NULL);
     test_td24d_hle_batch();
     test_impose_language_mode_pair();
     test_sas_core_mix_preserves_caller_pcm();
