@@ -1114,7 +1114,8 @@ memory, no network; ZIP packs through the project's own `src/core/nk_zip.c` and 
   name, as distinct files would be. A file refused before it is read (over 64 MiB, not a regular file, outside
   the pack) is noted once for each name that reaches it, which costs no read. Identities are kept while the pack
   is open, so a file deleted and replaced meanwhile may share the old file's image under a name not yet read;
-  the table takes 36 bytes a slot, at most two slots a file read, outside `index_bytes`.
+  the table, outside `index_bytes`, takes 36 bytes a slot and is kept at most half full: at least 64 slots, and
+  under four for each file read or found damaged just after it doubles.
 - **Sorting.** The index, the hash ranges and the ZIP reader's name and offset checks sort with one project heapsort
   (`nk_zip_sort`, at most about 2n log2 n comparisons whatever the order), not the C library's `qsort`, which
   some C libraries make quadratic for a crafted order.
