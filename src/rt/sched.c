@@ -2318,6 +2318,15 @@ void sched_set_ge_timing_hooks(SrSchedGeNextDeadline next_deadline, SrSchedGeSer
     s_ge_timing_service = service_due;
 }
 
+/* The GE finish callbacks a VBLANK episode's handlers raised (they wait while the handler
+ * runs; hle_route.c ge_finish_callback) run when that episode returns, before the next owed
+ * episode, so a backlog of episodes cannot pile completions up behind one another. */
+static SrSchedGeServiceDue s_ge_waiting_deliver;
+
+void sched_set_ge_waiting_hook(SrSchedGeServiceDue deliver_waiting) {
+    s_ge_waiting_deliver = deliver_waiting;
+}
+
 static uint64_t sched_ge_next_deadline(void) {
     return s_ge_timing_next ? s_ge_timing_next() : SCHED_WAIT_FOREVER;
 }
@@ -2472,6 +2481,17 @@ static void scheduler_service_pending(void) {
                 break;
             }
             deliver_vblank();
+            /* The GE finish callbacks this episode's handlers raised run at its return, before
+             * the next owed episode, in interrupt context.  Whether a PSP takes a GE finish
+             * interrupt raised in a VBLANK handler before the next VBLANK edge it still owes
+             * is UNMEASURED; this keeps each callback next to the handler that raised it, as
+             * when it ran inside that handler. */
+            if (s_ge_waiting_deliver && s_interrupts_enabled) {
+                int save_cur = s_cur; s_cur = -1;
+                s_ge_waiting_deliver();
+                s_cur = save_cur;
+                sr_cpu_link_clear(s_cpu);
+            }
         }
         sr_perf_vblank_service(episodes);
     }

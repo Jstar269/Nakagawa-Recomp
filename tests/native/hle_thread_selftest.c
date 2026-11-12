@@ -30672,9 +30672,10 @@ enum { GM_QUEUE = 0x08a39000u, GM_RING = GM_QUEUE + 8u, GM_RING_LEN = 4, GM_LOG 
 static struct {
     unsigned callbacks, enqueues, masked_callbacks, thread_callbacks, suspend_in_callback;
     unsigned in_handler, handler_callbacks, depth, max_depth, fatal_first, nest_one;
-    unsigned suspend_enqueue_stay, stay_prev;
+    unsigned suspend_enqueue_stay, stay_prev, handlers, nevents;
     uint32_t peek_list, peek;
-    uint32_t ids[GM_LOG], enqueued[GM_LOG];
+    uint32_t ids[GM_LOG], enqueued[GM_LOG], cb_gp[GM_LOG];
+    char events[2 * GM_LOG];
     int process;
 } s_gm;
 
@@ -30692,7 +30693,11 @@ static void gm_process(CpuState *cpu) {
 }
 
 static void gm_finish_fn(CpuState *cpu) {
-    if (s_gm.callbacks < GM_LOG) s_gm.ids[s_gm.callbacks] = cpu->r[4];
+    if (s_gm.callbacks < GM_LOG) {
+        s_gm.ids[s_gm.callbacks] = cpu->r[4];
+        s_gm.cb_gp[s_gm.callbacks] = cpu->r[28];
+    }
+    if (s_gm.nevents < 2u * GM_LOG) s_gm.events[s_gm.nevents++] = 'C';
     s_gm.callbacks++;
     if (!sched_interrupts_enabled()) s_gm.masked_callbacks++;
     if (!sched_is_intr_context()) s_gm.thread_callbacks++;
@@ -30739,6 +30744,14 @@ static void gm_vblank_fn(CpuState *cpu) {
     s_gm.in_handler = 1;
     gm_process(cpu);
     s_gm.in_handler = 0;
+    cpu->r[2] = 0u;
+}
+
+/* A VBLANK handler that enqueues one list on every VBLANK, whatever its callbacks did. */
+static void gm_vblank_one_fn(CpuState *cpu) {
+    if (s_gm.nevents < 2u * GM_LOG) s_gm.events[s_gm.nevents++] = 'H';
+    (void)ge_tim_enqueue(cpu, ge_chain_list(s_gm.handlers % GE_CHAIN_BURST));
+    s_gm.handlers++;
     cpu->r[2] = 0u;
 }
 
@@ -30947,6 +30960,49 @@ static void test_ge_finish_callback_waits_for_interrupts(void) {
     s_vtime_us = saved_vtime;
     sr_hle_test_ge_timing(0);
     sr_hle_test_ge_lists_reset();
+    sr_test_register_guest_fn(GE_TIM_FINISH_FN, gm_finish_fn);
+    for (unsigned i = 0; i < GE_CHAIN_BURST; i++) ge_tim_write_list(ge_chain_list(i), 0u);
+
+    /* Under the mask the waiting callback keeps the enqueuing context's $gp, as when it ran
+     * inline, not the $gp of whoever resumes the interrupts. */
+    const uint32_t thread_gp = 0x08b40000u;
+    const uint32_t saved_gp = s_cpu->r[28];
+    gm_reset();
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[28] = thread_gp;
+    prev = sched_suspend_interrupts();
+    (void)ge_tim_enqueue(&cpu, ge_chain_list(0));
+    s_cpu->r[28] = 0x08b80000u;
+    sched_resume_interrupts(prev);
+    expect(s_gm.callbacks == 1u && s_gm.cb_gp[0] == thread_gp,
+           "GE finish masked: a callback that waited under the mask runs with the enqueuing "
+           "context's $gp");
+
+    /* A VBLANK handler that enqueues one list on every VBLANK, with 70 episodes owed (a host
+     * stall): each callback runs when its episode returns, before the next handler, so no more
+     * than one completion waits and the 64 bound is not reached; and it runs with the
+     * handler's $gp (s_gp), not the interrupted thread's. */
+    gm_reset();
+    uint32_t stops_before = sr_hle_test_unmodelled_stops();
+    sr_test_register_guest_fn(GM_VBLANK_FN, gm_vblank_one_fn);
+    expect(td24b_dispatch4(NID_SCE_KERNEL_REGISTER_SUBINTR, 30u, 0u, GM_VBLANK_FN, 0u) == 0u &&
+               td24b_dispatch4(NID_SCE_KERNEL_ENABLE_SUBINTR, 30u, 0u, 0u, 0u) == 0u,
+           "GE finish masked: the one-list-per-VBLANK handler is registered and enabled");
+    s_cpu->r[28] = thread_gp;
+    s_pending_vblanks = 70u;
+    scheduler_service_pending();
+    (void)td24b_dispatch4(NID_SCE_KERNEL_RELEASE_SUBINTR, 30u, 0u, 0u, 0u);
+    int alternating = s_gm.nevents == 140u;
+    for (unsigned i = 0; i < 140u && alternating; i++)
+        alternating &= s_gm.events[i] == ((i & 1u) ? 'C' : 'H');
+    expect(alternating && s_gm.handlers == 70u && s_gm.callbacks == 70u &&
+               sr_hle_test_unmodelled_stops() == stops_before && !ge_finish_masked_pending(),
+           "GE finish masked: with 70 VBLANKs owed, each handler's callback runs before the next "
+           "handler and nothing stops");
+    int handler_gp = 1;
+    for (unsigned i = 0; i < 70u; i++) handler_gp &= s_gm.cb_gp[i] == s_gp;
+    expect(handler_gp, "GE finish masked: a handler-raised callback runs with the handler's $gp");
+    s_cpu->r[28] = saved_gp;
 
     gm_reset();
     sr_test_register_guest_fn(GE_TIM_FINISH_FN, ge_tim_finish_fn);

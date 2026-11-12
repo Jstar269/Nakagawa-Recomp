@@ -2026,7 +2026,7 @@ typedef struct {
     uint32_t owner;
     unsigned head, count;
     struct {
-        uint32_t cbid, finish_id, user_arg;
+        uint32_t cbid, finish_id, user_arg, gp;
     } pending[GE_FINISH_PENDING_MAX];
 } GeFinishRun;
 static GeFinishRun s_ge_finish_runs[GE_FINISH_RUNS_MAX];
@@ -2067,9 +2067,16 @@ static GeFinishRun *ge_finish_run_of(uint32_t owner) {
  * with no callback (a negative ID) owes nothing. When a callback or handler stops the run, the
  * completions still waiting are reported and dropped, as a stopped run drops its own; a LoadExec
  * drops them too (the new program owes the old one's callbacks nothing). The bound is this
- * runtime's: past GE_LIST_MAX waiting completions the run stops by name. */
+ * runtime's: past GE_LIST_MAX waiting completions the run stops by name.
+ *
+ * A waiting completion keeps the $gp of the context that raised it (the handler's s_gp inside
+ * an interrupt handler, the thread's otherwise), and its callback runs with that $gp, as it did
+ * when it ran inline there; the state it runs in is otherwise the delivering context's
+ * (interrupt context, owner 0). Under the mask the list reads complete at once, while the
+ * SR_GE_TIMING model (hle.c, ge-timing C3) reads it drawing until its finish interrupt is
+ * taken; only the masking thread or the handler itself can see the difference. */
 static struct {
-    uint32_t cbid, finish_id, user_arg;
+    uint32_t cbid, finish_id, user_arg, gp;
 } s_ge_finish_masked[GE_LIST_MAX];
 static unsigned s_ge_finish_masked_head, s_ge_finish_masked_count;
 
@@ -2090,7 +2097,8 @@ void ge_finish_masked_reset_for_loadexec(void) {
     s_ge_finish_from_ge_interrupt = 0;
 }
 
-static int ge_finish_masked_push(uint32_t cbid, uint32_t finish_id, uint32_t user_arg, int front) {
+static int ge_finish_masked_push(uint32_t cbid, uint32_t finish_id, uint32_t user_arg, uint32_t gp,
+                                 int front) {
     if (s_ge_finish_masked_count == GE_LIST_MAX) {
         (void)hle_unmodelled_stop("GE finish callback",
                                   "with %d list completions already waiting for an "
@@ -2108,6 +2116,7 @@ static int ge_finish_masked_push(uint32_t cbid, uint32_t finish_id, uint32_t use
     s_ge_finish_masked[slot].cbid = cbid;
     s_ge_finish_masked[slot].finish_id = finish_id;
     s_ge_finish_masked[slot].user_arg = user_arg;
+    s_ge_finish_masked[slot].gp = gp;
     s_ge_finish_masked_count++;
     return 1;
 }
@@ -2121,8 +2130,11 @@ void ge_finish_deliver_masked(CpuState *s) {
         unsigned head = s_ge_finish_masked_head;
         s_ge_finish_masked_head = (head + 1u) % GE_LIST_MAX;
         s_ge_finish_masked_count--;
+        const uint32_t gp_save = s->r[28];
+        s->r[28] = s_ge_finish_masked[head].gp;   /* the raiser's $gp, as inline */
         ge_finish_callback_now(s, s_ge_finish_masked[head].cbid, s_ge_finish_masked[head].finish_id,
                                s_ge_finish_masked[head].user_arg);
+        s->r[28] = gp_save;
     }
     /* Nothing more runs once the run stops; left waiting, they would stay due for ever. */
     if (s_ge_finish_masked_count && s->flow_kind == SR_FLOW_FATAL) {
@@ -2155,7 +2167,7 @@ void ge_finish_callback(CpuState *s, uint32_t cbid, uint32_t finish_id, uint32_t
     else if (!ge_finish_run_of(sched_current_uid()) && sched_servicing_interrupts() && !ge_interrupt)
         why = "in a handler";
     if (why) {
-        if (!ge_finish_masked_push(cbid, finish_id, user_arg, 0)) return;
+        if (!ge_finish_masked_push(cbid, finish_id, user_arg, s->r[28], 0)) return;
         if (ge_log_on())
             fprintf(stderr, "GE_FINISH_CB: cbid=%u id=0x%04x waits until an interrupt can be taken "
                             "(uid=0x%x, %s)\n", cbid, finish_id, sched_current_uid(), why);
@@ -2179,6 +2191,7 @@ static void ge_finish_callback_now(CpuState *s, uint32_t cbid, uint32_t finish_i
         run->pending[tail].cbid = cbid;
         run->pending[tail].finish_id = finish_id;
         run->pending[tail].user_arg = user_arg;
+        run->pending[tail].gp = s->r[28];
         run->count++;
         if (ge_log_on())
             fprintf(stderr, "GE_FINISH_CB: cbid=%u id=0x%04x waits for the running finish callback "
@@ -2216,7 +2229,7 @@ static void ge_finish_callback_now(CpuState *s, uint32_t cbid, uint32_t finish_i
             while (run->count) {
                 unsigned last = (run->head + run->count - 1u) % GE_FINISH_PENDING_MAX;
                 if (!ge_finish_masked_push(run->pending[last].cbid, run->pending[last].finish_id,
-                                           run->pending[last].user_arg, 1))
+                                           run->pending[last].user_arg, run->pending[last].gp, 1))
                     break;
                 run->count--;
             }
@@ -2225,8 +2238,11 @@ static void ge_finish_callback_now(CpuState *s, uint32_t cbid, uint32_t finish_i
         unsigned head = run->head;
         run->head = (head + 1u) % GE_FINISH_PENDING_MAX;
         run->count--;
+        const uint32_t gp_save = s->r[28];
+        s->r[28] = run->pending[head].gp;
         ge_finish_callback_run(s, run->pending[head].cbid, run->pending[head].finish_id,
                                run->pending[head].user_arg);
+        s->r[28] = gp_save;
     }
     if (run->count)
         fprintf(stderr, "GE_FINISH_CB: %u waiting finish callbacks not run: a finish callback "

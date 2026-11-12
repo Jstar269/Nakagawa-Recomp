@@ -3509,7 +3509,9 @@ uint32_t ge_call_guest_gp_rv(CpuState *s, uint32_t fn, uint32_t gp,
  *
  * By default the runtime executes a display list synchronously inside the call that hands it
  * to the GE (sceGeListEnQueue, sceGeListUpdateStallAddr, sceGeContinue) and completes it
- * there: the finish callback runs and every later sync reads "done" with no guest time spent.
+ * there: the finish callback runs (or, while the CPU's interrupts are suspended or a handler
+ * runs, waits for them: hle_route.c ge_finish_callback) and every later sync reads "done"
+ * with no guest time spent.
  * On a PSP the GE draws while the CPU runs on, and sceGeDrawSync / sceGeListSync wait for it.
  *
  * With SR_GE_TIMING=1 a list that reached its END is GE_LIST_DRAWING until its completion
@@ -3567,6 +3569,11 @@ static uint64_t ge_timing_next_deadline_us(void) {
 /* Scheduler hook, run as an interrupt episode: first the finish callbacks that waited for the
  * CPU's interrupts (those lists completed earlier), then complete every list whose time has
  * passed, in completion order, and run its finish callback. */
+/* Scheduler hook, after each owed VBLANK episode: the finish callbacks its handlers raised. */
+static void ge_finish_deliver_waiting(void) {
+    ge_finish_deliver_masked(s_cpu);
+}
+
 static void ge_timing_service_due(void) {
     ge_finish_deliver_masked(s_cpu);
     while (s_ge_timing_drawing) {
@@ -4162,6 +4169,7 @@ void sr_hle_init(void) {
     /* GE completion interrupts: finish callbacks that waited for the CPU's interrupts to be
      * resumed, and the opt-in timing model's drawing lists (nothing unless SR_GE_TIMING=1). */
     sched_set_ge_timing_hooks(ge_timing_next_deadline_us, ge_timing_service_due);
+    sched_set_ge_waiting_hook(ge_finish_deliver_waiting);
     (void)ge_timing_on();
     sched_set_vtimer_hooks(vtimer_next_deadline_us, vtimer_service_one);
 #endif
