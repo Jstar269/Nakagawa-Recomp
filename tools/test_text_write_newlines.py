@@ -86,6 +86,8 @@ class TrackedArtifactNewlineTests(unittest.TestCase):
             )
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
             for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
                 described = _offending_write(node)
                 if described:
                     offenders.append(f"tools/{filename}:{node.lineno}: {described}")

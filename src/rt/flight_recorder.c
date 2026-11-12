@@ -222,9 +222,10 @@ static uint32_t s_flight_last_kind;
  * armed checkpoint mode would have seen. */
 static uint64_t s_flight_kind_recorded[SR_FLIGHT_KIND_WATCH_CHANGE + 1u];
 static int s_flight_init_state;
-/* Ace Mode's line for an enhanced run, else empty. Its size is ACE_SPEC_MAX (src/rt/ace.h, which the
- * recorder does not include), so any line the runtime accepts is kept whole: at 96 an Enhanced line
- * with depth=32 (97 characters) was cut to "depth=3". tools/test_flight_diff.py checks the size. */
+/* Ace Mode's line for an enhanced run, else empty. 192 is ACE_SPEC_MAX (src/rt/ace.h, which the
+ * recorder does not include), the parser's limit, so any line the runtime accepts is kept whole:
+ * at 96 an Enhanced line with depth=32 was cut to "depth=3". The bundle schema's maxLength
+ * is 191. tools/test_flight_diff.py holds the three together. */
 static char s_flight_ace[192];
 /* The window's upscale stamp (gui.c gui_upscale_init): "fsr1", "movie-anime4k", "movie-fsr1",
  * "fsr1+movie-anime4k" or "fsr1+movie-fsr1". 32 holds the longest (18) with room to spare. */

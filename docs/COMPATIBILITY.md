@@ -288,7 +288,7 @@ disc folder, so a moved or renamed disc counts as a different title until the ba
 baseline, sized from the baseline's per-title times to fit `--budget-minutes` (60 by default), builds them with
 `library_build.py --only` into a scratch folder, waits for a free title slot first when `--slot-dir` names a folder
 of lock files, and compares the result with the baseline; a selected title that ends without a verdict makes the
-run exit 3. Each run continues the rotation where the last one stopped. A full `library_build.py` run with `record` is the weekly ladder. Snapshots and comparisons name your own
+run exit 3, and the next run tries the same titles again. Each run with a verdict moves the rotation on. A full `library_build.py` run with `record` is the weekly ladder. Snapshots and comparisons name your own
 discs, so they stay private like the manifest.
 
 Builds run below normal priority with no window, `--jobs` at a time (default one per eight logical CPUs, at most

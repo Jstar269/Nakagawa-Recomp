@@ -70,6 +70,10 @@ Nakagawa has since substantially extended and modified that codebase. This repos
 - **LLVM 21.1.8 — the LLVM Project** — Apache-2.0 WITH LLVM-exception. clang, lld, compiler-rt builtins, libunwind,
   libc++abi and libc++, built by `tools/android_toolchain.py` from the pinned release tarball for the on-device C
   toolchain of the Android build ([`android/toolchain/`](android/toolchain/PROVENANCE.md)). Not vendored.
+- **LLVM, MSYS2 UCRT64 build — the LLVM Project** — Apache-2.0 WITH LLVM-exception in MSYS2's metadata. The opt-in
+  LLVM IR backend (`CODEGEN_BACKEND=llvm`, [#330](https://github.com/Jstar269/nakagawa-recomp/issues/330)) runs the
+  developer's own `clang` and `llvm-link`; nothing from LLVM is vendored, linked or shipped
+  ([`docs/LLVM_BACKEND.md`](docs/LLVM_BACKEND.md#third-party-toolchain-licence-provenance-and-security)).
 - **Android Open Source Project, `android-16.0.0_r4`** — bionic's headers, crt sources and symbol files (BSD-style
   and Apache-2.0; the kernel uapi headers GPL-2.0-only WITH Linux-syscall-note), and the liblog, libandroid and
   libvulkan symbol files and `android/log.h` (Apache-2.0), read by `tools/android_sysroot.py` to build that
