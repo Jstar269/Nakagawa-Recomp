@@ -52,6 +52,7 @@
 #endif
 #include "recomp.h"
 #include "ge_shared.h"
+#include "ge_scene.h"
 #include "ge_capture.h"
 #include "flight_recorder.h"
 #include "strbuf.h"
@@ -2005,6 +2006,8 @@ static int thru_ztest(void) {
 
 static void tnl_gestat_print(uint32_t frame);   /* the GPU T&L section */
 
+static void ge_scene_frame_begins(uint32_t frame);
+
 void ge_set_frame(uint32_t frame) {
     ge_capture_configure();
     ge_transition_trace_configure();
@@ -2038,6 +2041,7 @@ void ge_set_frame(uint32_t frame) {
             }
         }
     }
+    ge_scene_frame_begins(frame);
     s_ge_frame = frame;
     if (s_stat_on < 0) s_stat_on = getenv("SR_GESTAT") ? 1 : 0;
     /* A window closes on the first delivered vblank at or past each multiple of 60 and
@@ -6015,6 +6019,339 @@ static int ge_tnl_try_prim(int type, int count, const VFmt *vf, uint32_t vbase, 
     return 1;
 }
 
+/* ---- GE scene record (#1330, ge_scene.h) ----
+ *
+ * draw_prim hands each PRIM's record to the one registered consumer before the PRIM is drawn.
+ * The pointer starts at ge_scene_probe, which reads SR_GESCENE once at the first PRIM and either
+ * registers the dump or clears the pointer, so a run without SR_GESCENE pays one predicted branch
+ * per PRIM from then on. */
+static void ge_scene_probe(const GeSceneRecord *rec, void *user);
+static GeSceneConsumer s_scene_fn = ge_scene_probe;
+static void *s_scene_user;
+
+static void ge_scene_dump_end(int frame_over);
+
+void ge_scene_set_consumer(GeSceneConsumer fn, void *user) {
+    ge_scene_dump_end(0);
+    s_scene_fn = fn;
+    s_scene_user = user;
+}
+
+int ge_scene_vertex(const GeSceneRecord *rec, uint32_t i, GeSceneVertex *out) {
+    if (!out) return 0;
+    memset(out, 0, sizeof(*out));
+    if (!rec || rec->version != GE_SCENE_RECORD_VERSION || i >= rec->count) return 0;
+    VFmt vf;
+    decode_vtype(rec->vtype, &vf);
+    if (rec->index_format && !sr_inrange_n(rec->index_addr, rec->index_bytes)) return 0;
+    uint32_t a = rec->vertex_addr +
+                 (rec->index_format ? index_value(rec->index_addr, (int)rec->index_format, (int)i) : i) *
+                 (uint32_t)vf.stride;
+    if (!sr_inrange_n(a, (uint32_t)vf.stride)) return 0;
+    int r, g, b, al;
+    vtx_linear_begin(a, &vf);
+    read_pos(a, &vf, &out->pos[0], &out->pos[1], &out->pos[2]);
+    read_nrm(a, &vf, &out->nrm[0], &out->nrm[1], &out->nrm[2]);
+    read_tc(a, &vf, &out->uv[0], &out->uv[1]);
+    read_color(a, &vf, &r, &g, &b, &al);
+    if (vf.w_n) read_weights(a, &vf, out->weight);
+    vtx_linear_end();
+    out->rgba = (uint32_t)(r & 0xFF) | ((uint32_t)(g & 0xFF) << 8) |
+                ((uint32_t)(b & 0xFF) << 16) | ((uint32_t)(al & 0xFF) << 24);
+    return 1;
+}
+
+int ge_scene_project_for_test(const GeSceneRecord *rec, uint32_t i, GeVtx *out) {
+    if (!out || !rec || rec->version != GE_SCENE_RECORD_VERSION || rec->through || i >= rec->count)
+        return 0;
+    VFmt vf;
+    decode_vtype(rec->vtype, &vf);
+    if (rec->index_format && !sr_inrange_n(rec->index_addr, rec->index_bytes)) return 0;
+    uint32_t a = rec->vertex_addr +
+                 (rec->index_format ? index_value(rec->index_addr, (int)rec->index_format, (int)i) : i) *
+                 (uint32_t)vf.stride;
+    if (!sr_inrange_n(a, (uint32_t)vf.stride)) return 0;
+    ModelVtx m;
+    CVtx c;
+    decode_model_vtx(a, &vf, &m);
+    transform_model_vtx_clip(&m, &c);
+    if (c.nf || !(c.cw > NEAR_W)) return 0;
+    project_cvtx(&c, out);
+    return 1;
+}
+
+static void ge_scene_emit(int type, int count, const VFmt *vf, int idxfmt, uint32_t vbase,
+                          uint32_t ibase, unsigned long prim_index, uint32_t list_addr,
+                          uint32_t cmd_addr) {
+    GeSceneRecord rec;
+    memset(&rec, 0, sizeof(rec));
+    rec.version = GE_SCENE_RECORD_VERSION;
+    rec.size = (uint32_t)sizeof(rec);
+    rec.frame = s_ge_frame;
+    rec.list_addr = list_addr;
+    rec.cmd_addr = cmd_addr;
+    rec.prim_index = (uint64_t)prim_index;
+    rec.type = (uint32_t)type;
+    rec.count = (uint32_t)count;
+    rec.vtype = ge.vtype;
+    rec.through = (uint32_t)vf->through;
+    rec.weights = (uint32_t)vf->w_n;
+    rec.morphs = (uint32_t)vf->morph_n;
+    rec.index_format = (uint32_t)idxfmt;
+    rec.vertex_addr = vbase;
+    rec.vertex_stride = (uint32_t)vf->stride;
+    rec.vertex_span = (uint32_t)count;
+    if (idxfmt) {
+        rec.index_addr = ibase;
+        rec.index_bytes = (uint32_t)count << (idxfmt - 1);
+        uint32_t span = 0;
+        if (sr_inrange_n(ibase, rec.index_bytes)) {
+            for (int i = 0; i < count; i++) {
+                uint32_t v = index_value(ibase, idxfmt, i);
+                /* Index 0xFFFFFFFF would need a span of 2^32; it saturates (ge_scene.h). */
+                if (v >= span) span = v == UINT32_MAX ? UINT32_MAX : v + 1u;
+            }
+        }
+        rec.vertex_span = span;
+    }
+    rec.ge = &ge;
+    s_scene_fn(&rec, s_scene_user);
+}
+
+/* SR_GESCENE: the one-frame dump (ge_scene.h has the format). */
+static FILE *s_scene_dump_file;
+static uint32_t s_scene_dump_frame;
+static unsigned long s_scene_dump_records;
+static char s_scene_dump_path[1024];
+static int s_scene_dump_state = GE_SCENE_DUMP_IDLE;
+static int s_scene_dump_exit_hooked;
+static void ge_scene_dump_consumer(const GeSceneRecord *rec, void *user);
+static void ge_scene_dump_end_state(int frame_over);
+
+/* A write failed: the file is closed and nothing more is written or claimed. */
+static void ge_scene_dump_fail(const char *why) {
+    fprintf(stderr, "GESCENE WRITE_FAIL (%s %s)\n", why, s_scene_dump_path);
+    if (s_scene_dump_file) fclose(s_scene_dump_file);
+    s_scene_dump_file = NULL;
+    s_scene_dump_state = GE_SCENE_DUMP_WRITE_FAIL;
+    if (s_scene_fn == ge_scene_dump_consumer) s_scene_fn = NULL;
+}
+
+/* Ends the dump. frame_over: a later GE frame began, so the file holds the whole frame. Otherwise
+ * the run ended, or the consumer was replaced, before that: the frame is NOT_CAPTURED, and a file
+ * already started keeps the records written so far. */
+static void ge_scene_dump_end(int frame_over) {
+    ge_scene_dump_end_state(frame_over);
+    if (s_scene_fn == ge_scene_dump_consumer && s_scene_dump_state != GE_SCENE_DUMP_WAITING &&
+        s_scene_dump_state != GE_SCENE_DUMP_WRITING)
+        s_scene_fn = NULL;
+}
+
+static void ge_scene_dump_end_state(int frame_over) {
+    if (s_scene_dump_state == GE_SCENE_DUMP_WRITING) {
+        FILE *f = s_scene_dump_file;
+        s_scene_dump_file = NULL;
+        if (fclose(f) != 0) {
+            fprintf(stderr, "GESCENE WRITE_FAIL (cannot close %s)\n", s_scene_dump_path);
+            s_scene_dump_state = GE_SCENE_DUMP_WRITE_FAIL;
+        } else if (frame_over) {
+            s_scene_dump_state = GE_SCENE_DUMP_DONE;
+            fprintf(stderr, "GESCENE: frame %" PRIu32 ": %lu records -> %s\n", s_scene_dump_frame,
+                    s_scene_dump_records, s_scene_dump_path);
+        } else {
+            s_scene_dump_state = GE_SCENE_DUMP_NOT_CAPTURED;
+            fprintf(stderr,
+                    "GESCENE NOT_CAPTURED (GE frame %" PRIu32 " had not ended; its first %lu records are in %s)\n",
+                    s_scene_dump_frame, s_scene_dump_records, s_scene_dump_path);
+        }
+    } else if (s_scene_dump_state == GE_SCENE_DUMP_WAITING) {
+        s_scene_dump_state = GE_SCENE_DUMP_NOT_CAPTURED;
+        fprintf(stderr, "GESCENE NOT_CAPTURED (GE frame %" PRIu32 " drew no PRIM before the dump ended)\n",
+                s_scene_dump_frame);
+    }
+}
+
+void ge_scene_dump_finish(void) { ge_scene_dump_end(0); }
+
+/* ge_set_frame, before the frame number changes: a dump of an earlier frame is complete. */
+static void ge_scene_frame_begins(uint32_t frame) {
+    if ((s_scene_dump_state == GE_SCENE_DUMP_WRITING || s_scene_dump_state == GE_SCENE_DUMP_WAITING) &&
+        frame > s_scene_dump_frame)
+        ge_scene_dump_end(s_scene_dump_state == GE_SCENE_DUMP_WRITING);
+}
+
+int ge_scene_dump_state_for_test(void) { return s_scene_dump_state; }
+void ge_scene_dump_end_for_test(void) { ge_scene_dump_end(0); }
+void ge_scene_dump_rearm_for_test(void) {
+    ge_scene_dump_end(0);
+    s_scene_dump_state = GE_SCENE_DUMP_IDLE;
+    s_scene_dump_records = 0;
+    s_scene_dump_path[0] = '\0';
+    s_scene_fn = ge_scene_probe;
+    s_scene_user = NULL;
+}
+
+/* The record's bytes, appended to a growing buffer; 0 when the buffer could not grow. */
+typedef struct { uint8_t *p; size_t n, cap; int ok; } GeSceneBuf;
+
+static void gsb_put(GeSceneBuf *b, const void *src, size_t n) {
+    if (!b->ok) return;
+    if (b->n + n > b->cap) {
+        size_t cap = b->cap ? b->cap * 2u : 4096u;
+        while (cap < b->n + n) cap *= 2u;
+        uint8_t *p = (uint8_t *)realloc(b->p, cap);
+        if (!p) { b->ok = 0; return; }
+        b->p = p;
+        b->cap = cap;
+    }
+    memcpy(b->p + b->n, src, n);
+    b->n += n;
+}
+/* The host is little-endian on every supported target (recomp.h's guest access relies on it). */
+static void gsb_u32(GeSceneBuf *b, uint32_t v) { gsb_put(b, &v, 4); }
+static void gsb_i32(GeSceneBuf *b, int v) { int32_t s = (int32_t)v; gsb_put(b, &s, 4); }
+static void gsb_f32s(GeSceneBuf *b, const float *f, size_t n) { gsb_put(b, f, n * 4u); }
+static void gsb_u32s(GeSceneBuf *b, const uint32_t *v, size_t n) { gsb_put(b, v, n * 4u); }
+
+static void ge_scene_dump_consumer(const GeSceneRecord *rec, void *user) {
+    (void)user;
+    if (s_scene_dump_state != GE_SCENE_DUMP_WAITING && s_scene_dump_state != GE_SCENE_DUMP_WRITING)
+        return;
+    if (rec->frame != s_scene_dump_frame) {
+        if (rec->frame > s_scene_dump_frame)
+            ge_scene_dump_end(s_scene_dump_state == GE_SCENE_DUMP_WRITING);
+        return;
+    }
+    if (s_scene_dump_state == GE_SCENE_DUMP_WAITING) {
+        s_scene_dump_file = fopen(s_scene_dump_path, "wb");
+        if (!s_scene_dump_file) {
+            ge_scene_dump_fail("cannot create");
+            return;
+        }
+        s_scene_dump_state = GE_SCENE_DUMP_WRITING;
+        uint32_t head[2] = { 1u, s_scene_dump_frame };
+        if (fwrite("NKGESCN1", 1, 8, s_scene_dump_file) != 8 ||
+            fwrite(head, 4, 2, s_scene_dump_file) != 2) {
+            ge_scene_dump_fail("short write to");
+            return;
+        }
+    }
+    const GeState *g = rec->ge;
+    GeSceneBuf b = { NULL, 0, 0, 1 };
+    gsb_u32(&b, 0x4D495250u);
+    gsb_u32(&b, 0u);                         /* record_bytes, patched below */
+    /* identity */
+    gsb_u32(&b, rec->frame); gsb_u32(&b, rec->list_addr); gsb_u32(&b, rec->cmd_addr);
+    gsb_put(&b, &rec->prim_index, 8);
+    gsb_u32(&b, rec->type); gsb_u32(&b, rec->count); gsb_u32(&b, rec->vtype);
+    gsb_u32(&b, rec->through); gsb_u32(&b, rec->weights); gsb_u32(&b, rec->morphs);
+    gsb_u32(&b, rec->index_format); gsb_u32(&b, rec->vertex_addr); gsb_u32(&b, rec->vertex_stride);
+    gsb_u32(&b, rec->vertex_span); gsb_u32(&b, rec->index_addr); gsb_u32(&b, rec->index_bytes);
+    /* transforms */
+    gsb_f32s(&b, g->world, 12); gsb_f32s(&b, g->view, 12); gsb_f32s(&b, g->proj, 16);
+    gsb_f32s(&b, g->bone, 96); gsb_f32s(&b, g->tgen, 12);
+    gsb_u32s(&b, g->viewport_raw, 6); gsb_u32(&b, g->offsetx); gsb_u32(&b, g->offsety);
+    gsb_i32(&b, g->scis_x1); gsb_i32(&b, g->scis_y1); gsb_i32(&b, g->scis_x2); gsb_i32(&b, g->scis_y2);
+    gsb_u32(&b, g->minz); gsb_u32(&b, g->maxz);
+    /* targets */
+    gsb_u32(&b, g->fbp); gsb_u32(&b, g->fbw); gsb_u32(&b, g->fbfmt); gsb_u32(&b, g->zbp); gsb_u32(&b, g->zbw);
+    /* texture */
+    gsb_u32(&b, (uint32_t)g->tex_enable); gsb_u32(&b, g->tex_addr); gsb_u32(&b, g->tex_bufw);
+    gsb_u32(&b, g->tex_fmt); gsb_u32(&b, (uint32_t)g->tex_w); gsb_u32(&b, (uint32_t)g->tex_h);
+    gsb_u32(&b, (uint32_t)g->tex_swizzle); gsb_u32(&b, g->tex_wrap); gsb_u32(&b, g->tex_func);
+    gsb_u32(&b, g->tex_env); gsb_u32(&b, g->tex_filter); gsb_u32(&b, g->tex_map_mode);
+    gsb_u32(&b, g->tex_shade_ls); gsb_u32(&b, g->clut_addr); gsb_u32(&b, g->clut_fmt);
+    gsb_u32(&b, g->clut_gen);
+    gsb_f32s(&b, &g->tex_scale_u, 1); gsb_f32s(&b, &g->tex_scale_v, 1);
+    gsb_f32s(&b, &g->tex_off_u, 1); gsb_f32s(&b, &g->tex_off_v, 1);
+    /* output */
+    gsb_u32(&b, (uint32_t)g->blend_enable); gsb_u32(&b, g->blend_mode); gsb_u32(&b, g->blend_fixa);
+    gsb_u32(&b, g->blend_fixb); gsb_u32(&b, (uint32_t)g->atest_enable); gsb_u32(&b, g->atest);
+    gsb_u32(&b, (uint32_t)g->ztest_enable); gsb_u32(&b, g->ztest); gsb_u32(&b, (uint32_t)g->zwrite_disable);
+    gsb_u32(&b, g->depth_clip); gsb_u32(&b, (uint32_t)g->fog_enable);
+    gsb_f32s(&b, &g->fog_end, 1); gsb_f32s(&b, &g->fog_slope, 1); gsb_u32(&b, g->fog_color);
+    gsb_u32(&b, (uint32_t)g->dither_enable); gsb_u32(&b, (uint32_t)g->cull_enable); gsb_u32(&b, g->cull);
+    gsb_u32(&b, (uint32_t)g->clear); gsb_u32(&b, g->clear_mode); gsb_u32(&b, (uint32_t)g->shade_gouraud);
+    gsb_u32(&b, (uint32_t)g->stencil_enable); gsb_u32(&b, (uint32_t)g->color_test_enable);
+    gsb_u32(&b, (uint32_t)g->logic_op_enable); gsb_u32(&b, g->mask_rgb); gsb_u32(&b, (uint32_t)g->mask_alpha);
+    /* lighting */
+    gsb_u32(&b, (uint32_t)g->lighting_enable); gsb_u32(&b, (uint32_t)g->light_mode);
+    gsb_u32(&b, (uint32_t)g->reverse_normal);
+    for (int i = 0; i < 4; i++) gsb_u32(&b, (uint32_t)g->light_on[i]);
+    gsb_u32s(&b, g->light_type, 4);
+    gsb_f32s(&b, &g->light_pos[0][0], 12); gsb_f32s(&b, &g->light_dir[0][0], 12);
+    gsb_f32s(&b, &g->light_att[0][0], 12); gsb_f32s(&b, g->light_spot_exp, 4);
+    gsb_f32s(&b, g->light_spot_cut, 4);
+    gsb_u32s(&b, g->light_acol, 4); gsb_u32s(&b, g->light_dcol, 4); gsb_u32s(&b, g->light_scol, 4);
+    gsb_u32(&b, g->amb_color); gsb_u32(&b, (uint32_t)g->amb_alpha); gsb_u32(&b, g->material);
+    gsb_u32(&b, g->mat_emissive); gsb_u32(&b, g->mat_diffuse); gsb_u32(&b, g->mat_specular);
+    gsb_u32(&b, g->mat_update);
+    gsb_f32s(&b, &g->spec_coef, 1); gsb_f32s(&b, g->morph_weight, 8);
+    /* vertices */
+    gsb_u32(&b, rec->count);
+    for (uint32_t i = 0; i < rec->count; i++) {
+        GeSceneVertex v;
+        ge_scene_vertex(rec, i, &v);       /* zeros when refused */
+        gsb_f32s(&b, v.pos, 3); gsb_f32s(&b, v.nrm, 3); gsb_f32s(&b, v.uv, 2);
+        gsb_u32(&b, v.rgba); gsb_f32s(&b, v.weight, GE_SCENE_MAX_WEIGHTS);
+    }
+    if (!b.ok || b.n > UINT32_MAX) {
+        free(b.p);
+        ge_scene_dump_fail("out of memory for a record of");
+        return;
+    }
+    uint32_t bytes = (uint32_t)b.n;
+    memcpy(b.p + 4, &bytes, 4);
+    if (fwrite(b.p, 1, b.n, s_scene_dump_file) != b.n || fflush(s_scene_dump_file) != 0) {
+        free(b.p);
+        ge_scene_dump_fail("short write to");
+        return;
+    }
+    free(b.p);
+    s_scene_dump_records++;
+}
+
+static void ge_scene_probe(const GeSceneRecord *rec, void *user) {
+    (void)user;
+    s_scene_fn = NULL;
+    const char *frame = getenv("SR_GESCENE");
+    if (!frame || !*frame) return;
+    char *end = NULL;
+    /* strtoull accepts a sign and spaces and wraps "-1", so only digits are a frame number; a
+     * value past 64 bits saturates and is refused with the rest above UINT32_MAX. */
+    unsigned long long n = (*frame >= '0' && *frame <= '9') ? strtoull(frame, &end, 10) : 0u;
+    if (!end || *end || n > UINT32_MAX) {
+        s_scene_dump_state = GE_SCENE_DUMP_CONFIG_FAIL;
+        fprintf(stderr, "GESCENE CONFIG_FAIL (SR_GESCENE must be one GE frame number)\n");
+        return;
+    }
+    const char *dir = getenv("SR_GESCENE_DIR");
+    if (!dir || !*dir) {
+        s_scene_dump_state = GE_SCENE_DUMP_CONFIG_FAIL;
+        fprintf(stderr, "GESCENE CONFIG_FAIL (SR_GESCENE_DIR must name an existing output directory)\n");
+        return;
+    }
+    int len = snprintf(s_scene_dump_path, sizeof(s_scene_dump_path), "%s/gescene_f%" PRIu32 ".bin",
+                       dir, (uint32_t)n);
+    if (len < 0 || (size_t)len >= sizeof(s_scene_dump_path)) {
+        s_scene_dump_state = GE_SCENE_DUMP_CONFIG_FAIL;
+        fprintf(stderr, "GESCENE CONFIG_FAIL (SR_GESCENE_DIR is too long)\n");
+        return;
+    }
+    s_scene_dump_frame = (uint32_t)n;
+    s_scene_dump_state = GE_SCENE_DUMP_WAITING;
+    if (!s_scene_dump_exit_hooked) {
+        if (atexit(ge_scene_dump_finish) != 0) {
+            s_scene_dump_state = GE_SCENE_DUMP_CONFIG_FAIL;
+            fprintf(stderr, "GESCENE CONFIG_FAIL (cannot register the end-of-run report)\n");
+            return;
+        }
+        s_scene_dump_exit_hooked = 1;
+    }
+    s_scene_fn = ge_scene_dump_consumer;
+    ge_scene_dump_consumer(rec, NULL);
+}
+
 /* When an entire 3D primitive lands behind the near plane (all clip-w <= NEAR_W), dump the raw
  * model-space position, the resulting w's, and the full matrix state -- distinguishes "camera
  * genuinely faces away" from "our matrix state is wrong for this draw". Budgeted per stat window
@@ -6731,6 +7068,10 @@ static void draw_prim(uint32_t op, unsigned long prim_index, uint32_t list_addr,
     /* Advance vertex/index pointer (PPSSPP GPUCommon::AdvanceVerts). */
     if (idxfmt) ge.iaddr += (uint32_t)(count << (idxfmt - 1));
     else        ge.vaddr += (uint32_t)(count * vf.stride);
+
+    /* The scene record (ge_scene.h): one predicted branch without a consumer. */
+    if (__builtin_expect(s_scene_fn != NULL, 0))
+        ge_scene_emit(type, count, &vf, idxfmt, vbase, ibase, prim_index, list_addr, cmd_addr);
 
     /* Narrow transition harness (issue #69): one cached-gate check per draw, before any
      * vertex work; the helper keeps only weighted draws and emits one JSONL record. */

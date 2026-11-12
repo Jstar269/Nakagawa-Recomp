@@ -250,6 +250,23 @@ window is larger than the game's picture, and where the graphics card can't run 
 The other Enhanced options, such as **Smooth motion**, **Widescreen** and **Texture filtering**, stay as you set them
 under every preset.
 
+## Texture packs
+
+A texture pack replaces a game's textures with sharper images while the game plays in Ace Mode. Nakagawa ships
+no pack and downloads none: a pack is a folder or a ZIP file you made yourself or got from a community for your
+game, in the layout PSP emulators use (a `textures.ini` and PNG files named for the textures they replace). A
+folder that holds a `textures.zip` is read from that ZIP.
+
+When Nakagawa starts the game it reads the pack's list: the folder or ZIP and its `textures.ini`. If it cannot read
+that list (the folder or ZIP has gone, a file in its place is not an ordinary file, the ZIP is damaged, or the
+`textures.ini` has a line it does not understand), it does not use the pack at all, says why, and the game plays
+without it. An image the pack lists is read the first time the game draws its texture. An image that is missing,
+damaged, too large, linked to a place outside the pack's folder, or the wrong size is skipped on its own: that
+texture is drawn as the game made it, and the rest of the pack is used.
+
+The details, including what a pack made for an emulator cannot match here, are in
+[`ENHANCEMENT_CONTRACT.md`](ENHANCEMENT_CONTRACT.md#1012-texture-replacement).
+
 ## Keep it to your own games
 
 - Only use games you own.
