@@ -265,6 +265,32 @@ PROTECTED_EXTRA = frozenset({
     "tools/ci_test_weights.json",
     "tools/ci_trust_verdict.py",
     "tools/requirements-lock.txt",
+}) | frozenset({
+    # The publication gate's own code. Only the publication audit refuses a file that is outside the
+    # publication profile and is not implementation (game data, a key, a private path). It runs twice: in
+    # the attest job from the default branch's checkout, where a pull request cannot touch it, and in
+    # ``pull_request`` jobs from the pull request's own checkout, through pre-commit hooks and
+    # ``tools/build_public_export.py``. No workflow line names most of these files, so without this list a
+    # pull request could loosen the audit for its own run, and a loosened audit that reached the default
+    # branch unread would be the trusted one from then on. Listed here: every local hook pre-commit runs,
+    # every local module those hooks or the trusted-checkout tools load or run as a subprocess, and
+    # ``.gitattributes``, which the audit reads for its Git LFS rule. ``GateCodeTests`` in
+    # tools/test_ci_trust_verdict.py computes that closure and fails when a file in it is not protected.
+    # A new file in tools/ named like a standard-library module is protected too (``_shadows_stdlib``).
+    ".gitattributes",
+    "tools/enhancement_package.py",
+    "tools/history_audit.py",
+    "tools/lint_docs.py",
+    "tools/modified_file_notice_audit.py",
+    "tools/nk_core/__init__.py",
+    "tools/nk_core/git_isolation.py",
+    "tools/policy_sync.py",
+    "tools/provenance_ledger.py",
+    "tools/provenance_record_gap.py",
+    "tools/public_candidate.py",
+    "tools/public_export.py",
+    "tools/publication_policy.py",
+    "tools/publish_audit.py",
 })
 
 # A tools/ path standing on its own, not the tail of a longer path such as an
@@ -787,10 +813,36 @@ def referenced_tools(workflow_text: str) -> set[str]:
     return found
 
 
+#: What Python imports from a directory on ``sys.path``: a module file or a package's ``__init__``.
+_IMPORTABLE_SUFFIXES = (".py", ".pyc", ".pyw", ".pyd", ".so")
+
+
+def _shadows_stdlib(path: str) -> bool:
+    """Whether ``path`` would be imported in place of a standard-library module by a gate tool.
+
+    The gate tools run as ``python tools/X.py``, which puts ``tools/`` first on ``sys.path``, so a
+    ``tools/fnmatch.py`` replaces the ``fnmatch`` the publication audit imports. Adding such a file
+    changes the gate's code without touching a listed path.
+    """
+    parts = path.split("/")
+    if parts[0] != "tools" or len(parts) not in (2, 3):
+        return False
+    if len(parts) == 3:
+        name, leaf = parts[1], parts[2]
+        if not (leaf.startswith("__init__.") and leaf.lower().endswith(_IMPORTABLE_SUFFIXES)):
+            return False
+    else:
+        name, leaf = parts[1].split(".", 1)[0], parts[1]
+        if not leaf.lower().endswith(_IMPORTABLE_SUFFIXES):
+            return False
+    return name in sys.stdlib_module_names
+
+
 def protected_paths(trusted: dict[str, str], candidate: dict[str, str], workflow_texts: list[str]) -> set[str]:
     """Paths whose bytes define or decide the CI gates."""
     paths = {path for path in set(trusted) | set(candidate) if path.startswith(PROTECTED_PREFIXES)}
     paths |= PROTECTED_EXTRA
+    paths |= {path for path in set(trusted) | set(candidate) if _shadows_stdlib(path)}
     for text in workflow_texts:
         paths |= {path for path in referenced_tools(text) if path in trusted}
     return paths
