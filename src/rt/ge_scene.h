@@ -63,11 +63,14 @@ typedef struct GeSceneRecord {
     const GeState *ge;         /* the state the PRIM draws with; valid only during the callback */
 } GeSceneRecord;
 
-/* One vertex reference, after morphing and before skinning. pos, uv, rgba and weight are as
- * stored (morph-blended). nrm is the normal the T&L uses: REVERSENORMAL is already applied, and the
+/* One vertex reference, after morphing and before skinning, read by ge.c's own readers. pos, nrm,
+ * uv and rgba are blended across the morph targets; weight comes from the first target only, as
+ * the CPU path reads it. nrm is the normal the T&L uses: REVERSENORMAL is already applied, and the
  * record's state (`ge->reverse_normal`, and the dump's reverse_normal field) says whether it was.
- * Through mode keeps the screen coordinates in pos. Fields the format lacks are 0 (the colour is
- * then the material's, as the T&L uses it). */
+ * Through mode keeps the screen coordinates in pos. When the format lacks a field, the value is
+ * the one the T&L uses: a missing normal is (0, 0, 1) (negated under REVERSENORMAL), a missing
+ * colour is the material colour where one is set and opaque white otherwise, and missing
+ * texture coordinates and weights are 0. */
 typedef struct GeSceneVertex {
     float pos[3];
     float nrm[3];
