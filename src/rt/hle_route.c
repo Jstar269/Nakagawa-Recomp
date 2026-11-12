@@ -2209,7 +2209,10 @@ static void ge_finish_callback_now(CpuState *s, uint32_t cbid, uint32_t finish_i
         if (!run->count || s->flow_kind == SR_FLOW_FATAL) break;
         if (!sched_interrupts_enabled()) {
             /* The callback returned with the interrupts suspended: the rest of the run waits for
-             * the resume, ahead of anything that waits already (they completed first). */
+             * the resume, ahead of anything that waits already (they completed first). This
+             * runtime keeps one interrupt-enable state, so a callback can leave it suspended; on a
+             * PSP the return from the finish interrupt presumably restores the interrupted state
+             * (inferred, UNMEASURED), and a guest that does this has no measured result. */
             while (run->count) {
                 unsigned last = (run->head + run->count - 1u) % GE_FINISH_PENDING_MAX;
                 if (!ge_finish_masked_push(run->pending[last].cbid, run->pending[last].finish_id,
