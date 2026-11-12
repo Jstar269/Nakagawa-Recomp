@@ -1182,7 +1182,8 @@ class ForkCheckTest(unittest.TestCase):
         real_fork_check = pm.fork_check
 
         def stubbed(repo: Path, base: str, candidate: str, *, tip: str | None = None) -> tuple[int, list[str]]:
-            return real_fork_check(repo, base, candidate, tip=tip, audit_tool=self._stub_audit(0))
+            code, lines = real_fork_check(repo, base, candidate, tip=tip, audit_tool=self._stub_audit(0))
+            return code, lines
 
         out = io.StringIO()
         extra = ["--summary", str(summary)] if summary else []
