@@ -267,6 +267,11 @@ class TransferRuleTests(unittest.TestCase):
         plan, c_text = _plan_and_c(words)
         self.assertEqual(plan_signature(plan)["cache_notes"], [])
         self.assertEqual(c_signature(c_text)["cache_notes"], [])
+        # The address is the base register (rs, not the op in rt) plus the sign-extended
+        # displacement, as codegen._effect_cache computes it.
+        back = 0x2F << 26 | 4 << 21 | 0x14 << 16 | 0xFFF8        # cache 0x14, -8(r4)
+        self.assertEqual(P.decode_op(0, back, stale_detect=True),
+                         P.Op(0, back, "cache_note", None, (4,), 0xFFFFFFF8))
 
     def test_forms_outside_the_plan_are_refused_with_a_reason(self):
         with self.assertRaisesRegex(P.Unsupported, "FPU at 0x00000010"):

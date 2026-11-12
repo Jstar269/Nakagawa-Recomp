@@ -212,21 +212,26 @@ class LoweringTests(unittest.TestCase):
 
     def test_stale_detect_cache_hook_is_lowered_inside_its_trace_record(self):
         # codegen._effect_cache: under --stale-detect, `cache op, imm(rs)` reports rs + imm to
-        # the detector (sr_stale_note_cache_op); without it the word does nothing.
-        words = program(addiu(4, 0, 0x100), cache(0x14, 4, 0x40), JR_RA, NOP)
+        # the detector (sr_stale_note_cache_op); without it the word does nothing. The cache
+        # op 0x14 sits in the rt field, so a lowering that read rt would load r20; the second
+        # word's displacement is negative, so one that zero-extended it would add 65528.
+        words = program(addiu(4, 0, 0x100), cache(0x14, 4, 0x40), cache(0x14, 4, -8), JR_RA, NOP)
         options = codegen.CodegenOptions(stale_detect=True)
-        self.assertIn("sr_stale_note_cache_op((uint32_t)(s->r[4] + 0x00000040u));",
-                      self._c_text(words, options))
+        c_text = self._c_text(words, options)
+        self.assertIn("sr_stale_note_cache_op((uint32_t)(s->r[4] + 0x00000040u));", c_text)
+        self.assertIn("sr_stale_note_cache_op((uint32_t)(s->r[4] + 0xfffffff8u));", c_text)
         _, text = self.ir(words, options=options)
         lines = text.splitlines()
-        begin = next(i for i, l in enumerate(lines) if "@sr_llvm_begin(ptr %s, i32 4100," in l)
-        add = next(i for i, l in enumerate(lines) if i > begin and " add i32 " in l and ", 64" in l)
-        note = next(i for i, l in enumerate(lines) if "call void @sr_stale_note_cache_op(i32" in l)
-        end = next(i for i, l in enumerate(lines) if i > note and "@sr_llvm_end(" in l)
-        self.assertLess(begin, add)
-        self.assertLess(add, note)
-        self.assertIn(lines[add].split("=")[0].strip(), lines[note])
-        self.assertLess(note, end)
+        for pc, displacement in ((4100, ", 64"), (4104, ", -8")):
+            begin = next(i for i, l in enumerate(lines) if f"@sr_llvm_begin(ptr %s, i32 {pc}," in l)
+            end = next(i for i, l in enumerate(lines) if i > begin and "@sr_llvm_end(" in l)
+            add = next(i for i, l in enumerate(lines) if begin < i < end and " add i32 " in l)
+            note = next(i for i, l in enumerate(lines)
+                        if begin < i < end and "call void @sr_stale_note_cache_op(i32" in l)
+            self.assertLess(add, note)
+            self.assertIn(" add i32 %r4.", lines[add])
+            self.assertTrue(lines[add].endswith(displacement), lines[add])
+            self.assertIn(lines[add].split("=")[0].strip(), lines[note])
         self.assertIn("declare void @sr_stale_note_cache_op(i32)", text)
         self.assertVerifies(text)
         _, plain = self.ir(words)
