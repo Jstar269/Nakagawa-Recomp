@@ -30565,6 +30565,7 @@ static void test_ge_finish_callbacks_do_not_nest(void) {
 #define GX_WORKER_ENTRY 0x08a380c0u
 
 extern unsigned sr_hle_test_ge_finish_runs(void);
+extern void sr_hle_test_ge_finish_masked_reset(void);
 
 static struct {
     uint32_t worker_uid, main_uid;
@@ -30646,6 +30647,122 @@ static void test_ge_finish_callback_thread_exit(void) {
            "GE finish exit: another thread's list then has its finish callback run at once");
     expect(s_gx.stops_after_worker == s_gx.stops_before + 1u && sr_hle_test_ge_finish_runs() == 0u,
            "GE finish exit: ending with a completion waiting stops the run by name, not silently");
+    sr_test_register_guest_fn(GE_TIM_FINISH_FN, ge_tim_finish_fn);
+    ge_tim_teardown();
+}
+
+/* A list that completes while the CPU's interrupts are suspended has its finish callback run
+ * when they are resumed, as the GE finish interrupt would be taken on a PSP. The shape is Sonic
+ * Rivals' (ULUS10195, #2375) GE command queue: with interrupts suspended, the game takes the
+ * entry at the queue's index, enqueues its list, and only then advances the index and lowers the
+ * count; its finish callback runs the same queue. The callback used to run inside
+ * sceGeListEnQueue, before the index moved, so it enqueued the same entry again and the queue
+ * advanced twice, skipping the next entry (the game's display flip; the screen stayed black).
+ * MUTANT: running the callback at once enqueues an entry twice and runs a callback under the
+ * mask; a last-in first-out wait reverses the completion order; a delivery loop that ignores a
+ * callback suspending interrupts again runs the next callback under the mask; dropping the bound
+ * loses the 65th completion silently. */
+enum { GM_QUEUE = 0x08a39000u, GM_RING = GM_QUEUE + 8u, GM_RING_LEN = 4, GM_LOG = 80 };
+static struct {
+    unsigned callbacks, enqueues, masked_callbacks, thread_callbacks, suspend_in_callback;
+    uint32_t ids[GM_LOG], enqueued[GM_LOG];
+    int process;
+} s_gm;
+
+/* The game's queue: count at +0, index at +4, list addresses from +8. */
+static void gm_process(CpuState *cpu) {
+    while ((int32_t)MEM_R32(GM_QUEUE) > 0) {
+        uint32_t idx = MEM_R32(GM_QUEUE + 4u);
+        uint32_t list = MEM_R32(GM_RING + 4u * idx);
+        if (s_gm.enqueues < GM_LOG) s_gm.enqueued[s_gm.enqueues] = list;
+        s_gm.enqueues++;
+        (void)ge_tim_enqueue(cpu, list);
+        MEM_W32(GM_QUEUE + 4u, (idx + 1u) % GM_RING_LEN);
+        MEM_W32(GM_QUEUE, MEM_R32(GM_QUEUE) - 1u);
+    }
+}
+
+static void gm_finish_fn(CpuState *cpu) {
+    if (s_gm.callbacks < GM_LOG) s_gm.ids[s_gm.callbacks] = cpu->r[4];
+    s_gm.callbacks++;
+    if (!sched_interrupts_enabled()) s_gm.masked_callbacks++;
+    if (!sched_is_intr_context()) s_gm.thread_callbacks++;
+    if (s_gm.suspend_in_callback) {
+        s_gm.suspend_in_callback = 0;
+        (void)sched_suspend_interrupts();   /* left suspended: the guest resumes later */
+    }
+    if (s_gm.process) gm_process(cpu);
+    cpu->r[2] = 0u;
+}
+
+static void gm_reset(void) {
+    memset(&s_gm, 0, sizeof s_gm);
+    sr_hle_test_ge_finish_masked_reset();
+}
+
+static void test_ge_finish_callback_waits_for_interrupts(void) {
+    CpuState cpu;
+    ge_tim_setup();
+    sr_hle_test_ge_lists_reset();
+    sr_test_register_guest_fn(GE_TIM_FINISH_FN, gm_finish_fn);
+    for (unsigned i = 0; i < GE_CHAIN_BURST; i++) ge_tim_write_list(ge_chain_list(i), 0u);
+
+    /* The game's queue holds two lists; it runs them with interrupts suspended. */
+    gm_reset();
+    s_gm.process = 1;
+    MEM_W32(GM_QUEUE, 2u);
+    MEM_W32(GM_QUEUE + 4u, 0u);
+    MEM_W32(GM_RING, ge_chain_list(0));
+    MEM_W32(GM_RING + 4u, ge_chain_list(1));
+    memset(&cpu, 0, sizeof(cpu));
+    uint32_t prev = sched_suspend_interrupts();
+    gm_process(&cpu);
+    expect(s_gm.callbacks == 0u,
+           "GE finish masked: no finish callback runs while the CPU's interrupts are suspended");
+    expect(s_gm.enqueues == 2u && s_gm.enqueued[0] == ge_chain_list(0) &&
+               s_gm.enqueued[1] == ge_chain_list(1) && MEM_R32(GM_QUEUE) == 0u &&
+               MEM_R32(GM_QUEUE + 4u) == 2u,
+           "GE finish masked: each queue entry is enqueued once and the queue advances once per entry");
+    expect(ge_tim_sync(&cpu, NID_SCE_GE_DRAW_SYNC, 1u, 0u) == 0u,
+           "GE finish masked: the lists themselves are complete at once, as before");
+    sched_resume_interrupts(prev);
+    expect(s_gm.callbacks == 2u && s_gm.ids[0] == ge_tim_finish_id(ge_chain_list(0)) &&
+               s_gm.ids[1] == ge_tim_finish_id(ge_chain_list(1)),
+           "GE finish masked: the resume runs both waiting callbacks, in completion order");
+    expect(s_gm.masked_callbacks == 0u && s_gm.thread_callbacks == 0u,
+           "GE finish masked: they run with interrupts enabled, in interrupt context");
+    expect(s_gm.enqueues == 2u, "GE finish masked: the callbacks find the queue already consumed");
+
+    /* A waiting callback that suspends the interrupts again holds the rest until the next resume. */
+    gm_reset();
+    memset(&cpu, 0, sizeof(cpu));
+    prev = sched_suspend_interrupts();
+    (void)ge_tim_enqueue(&cpu, ge_chain_list(0));
+    (void)ge_tim_enqueue(&cpu, ge_chain_list(1));
+    s_gm.suspend_in_callback = 1;
+    sched_resume_interrupts(prev);
+    expect(s_gm.callbacks == 1u && !sched_interrupts_enabled(),
+           "GE finish masked: a callback that suspends the interrupts holds the next one");
+    sched_resume_interrupts(1u);
+    expect(s_gm.callbacks == 2u && s_gm.masked_callbacks == 0u &&
+               s_gm.ids[1] == ge_tim_finish_id(ge_chain_list(1)),
+           "GE finish masked: the held callback runs at the next resume");
+
+    /* 64 completions wait; the 65th, with no room left, stops the run by name. */
+    gm_reset();
+    uint32_t stops = sr_hle_test_unmodelled_stops();
+    memset(&cpu, 0, sizeof(cpu));
+    prev = sched_suspend_interrupts();
+    for (unsigned i = 0; i < GE_CHAIN_BURST; i++) (void)ge_tim_enqueue(&cpu, ge_chain_list(i));
+    expect(s_gm.callbacks == 0u && sr_hle_test_unmodelled_stops() == stops + 1u,
+           "GE finish masked: a completion with no room left to wait stops the run by name");
+    sched_resume_interrupts(prev);
+    int in_order = s_gm.callbacks == GE_CHAIN_WAIT;
+    for (unsigned i = 0; i < GE_CHAIN_WAIT && in_order; i++)
+        in_order &= s_gm.ids[i] == ge_tim_finish_id(ge_chain_list(i));
+    expect(in_order, "GE finish masked: 64 waiting completions run first-in first-out at the resume");
+
+    gm_reset();
     sr_test_register_guest_fn(GE_TIM_FINISH_FN, ge_tim_finish_fn);
     ge_tim_teardown();
 }
@@ -52797,6 +52914,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_ge_finish_callback_reports();
     test_ge_finish_callbacks_do_not_nest();
     test_ge_finish_callback_thread_exit();
+    test_ge_finish_callback_waits_for_interrupts();
     test_ge_queued_lists_run_in_order();
     test_ge_timing_blocking_sync_cannot_wait();
     test_volatile_mem_output_preflight();

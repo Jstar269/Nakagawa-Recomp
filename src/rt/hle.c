@@ -3551,9 +3551,12 @@ int ge_timing_on(void) {
     return s_ge_timing;
 }
 
-/* Scheduler hook: the earliest completion time of a drawing list, else UINT64_MAX. */
+/* Scheduler hook: 0 while a finish callback waits for the CPU's interrupts to be resumed (it is
+ * owed now; see ge_finish_callback), else the earliest completion time of a drawing list, else
+ * UINT64_MAX. */
 static uint64_t ge_timing_next_deadline_us(void) {
     uint64_t next = UINT64_MAX;
+    if (ge_finish_masked_pending()) return 0u;
     if (!s_ge_timing_drawing) return next;
     for (int i = 0; i < GE_LIST_MAX; i++)
         if (s_ge_lists[i].status == GE_LIST_DRAWING && s_ge_lists[i].done_us < next)
@@ -3561,9 +3564,11 @@ static uint64_t ge_timing_next_deadline_us(void) {
     return next;
 }
 
-/* Scheduler hook, run as an interrupt episode: complete every list whose time has passed,
- * in completion order, and run its finish callback. */
+/* Scheduler hook, run as an interrupt episode: first the finish callbacks that waited for the
+ * CPU's interrupts (those lists completed earlier), then complete every list whose time has
+ * passed, in completion order, and run its finish callback. */
 static void ge_timing_service_due(void) {
+    ge_finish_deliver_masked(s_cpu);
     while (s_ge_timing_drawing) {
         uint64_t now = sched_vtime_us();
         int best = -1;
@@ -4153,7 +4158,8 @@ void sr_hle_init(void) {
     hle_register_videocodec_handlers();
 #endif
 #ifndef SR_MPEG_MEDIA_SELFTEST
-    /* Opt-in GE completion timing: the hooks report nothing unless SR_GE_TIMING=1. */
+    /* GE completion interrupts: finish callbacks that waited for the CPU's interrupts to be
+     * resumed, and the opt-in timing model's drawing lists (nothing unless SR_GE_TIMING=1). */
     sched_set_ge_timing_hooks(ge_timing_next_deadline_us, ge_timing_service_due);
     (void)ge_timing_on();
     sched_set_vtimer_hooks(vtimer_next_deadline_us, vtimer_service_one);
