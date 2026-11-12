@@ -1038,6 +1038,12 @@ int sched_interrupts_enabled(void) {
     return s_interrupts_enabled;
 }
 
+/* An interrupt episode is running (scheduler_service_pending): on a PSP its handler runs with the
+ * CPU's interrupts off, so no other interrupt is taken until it returns. */
+int sched_servicing_interrupts(void) {
+    return s_servicing_interrupts;
+}
+
 int sched_is_intr_context(void) {
     return s_cur < 0;
 }
@@ -2337,6 +2343,16 @@ void sched_set_ge_timing_hooks(SrSchedGeNextDeadline next_deadline, SrSchedGeSer
     s_ge_timing_service = service_due;
 }
 
+/* Every waiting GE finish callback (hle_route.c ge_finish_callback: one a VBLANK episode's
+ * handlers raised waits while the handler runs, and one a thread raised under the mask waits for
+ * the resume) runs when each owed VBLANK episode returns, before the next one, so a backlog of
+ * episodes cannot pile completions up behind one another. */
+static SrSchedGeServiceDue s_ge_waiting_deliver;
+
+void sched_set_ge_waiting_hook(SrSchedGeServiceDue deliver_waiting) {
+    s_ge_waiting_deliver = deliver_waiting;
+}
+
 static uint64_t sched_ge_next_deadline(void) {
     return s_ge_timing_next ? s_ge_timing_next() : SCHED_WAIT_FOREVER;
 }
@@ -2491,6 +2507,18 @@ static void scheduler_service_pending(void) {
                 break;
             }
             deliver_vblank();
+            /* The waiting GE finish callbacks run at this episode's return, before the next
+             * owed episode, in interrupt context: the ones its handlers raised, and any a thread
+             * raised under the mask before this batch.  Whether a PSP takes a GE finish
+             * interrupt raised in a VBLANK handler before the next VBLANK edge it still owes
+             * is UNMEASURED; this keeps each callback next to the handler that raised it, as
+             * when it ran inside that handler. */
+            if (s_ge_waiting_deliver && s_interrupts_enabled) {
+                int save_cur = s_cur; s_cur = -1;
+                s_ge_waiting_deliver();
+                s_cur = save_cur;
+                sr_cpu_link_clear(s_cpu);
+            }
         }
         sr_perf_vblank_service(episodes);
     }
