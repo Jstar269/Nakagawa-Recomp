@@ -14305,6 +14305,7 @@ static void test_rtc_time_t_add_years_resolution_autotest(void) {
 enum {
     RTCA_NID_ADD_MICROS = 0x26d25a5du, RTCA_NID_ADD_SECONDS = 0xf2a4afe5u, RTCA_NID_ADD_DAYS = 0xe51b4b7au,
     RTCA_NID_DAY_OF_WEEK = 0x57726bc1u, RTCA_NID_CHECK_VALID = 0x4b1b5e82u,
+    RTCA_NID_ADD_MINUTES = 0xe6605bcau, RTCA_NID_ADD_HOURS = 0x26d7a24au, RTCA_NID_ADD_WEEKS = 0xcf3a2ca8u,
 };
 
 static int rtca_dst_is(uint16_t y, uint16_t mo, uint16_t d, uint16_t h, uint16_t mi, uint16_t sec, uint32_t us) {
@@ -14322,7 +14323,8 @@ static uint32_t rtca_add(uint32_t nid, uint16_t y, uint16_t mo, uint16_t d, uint
     expect(td24b_dispatch4(RTCT_NID_GET_TICK, RTCT_DATE, RTCT_SRC, 0u, 0u) == 0u, "the source date converts");
     MEM_W32(RTCT_DST, 0x1337u); MEM_W32(RTCT_DST + 4u, 0u);
     uint32_t lo = (uint32_t)(uint64_t)count, hi = (uint32_t)((uint64_t)count >> 32);
-    if (nid == RTCA_NID_ADD_DAYS) hi = 0u;   /* a 32-bit int argument: the 64-bit row is truncated */
+    if (nid == RTCA_NID_ADD_DAYS || nid == RTCA_NID_ADD_HOURS || nid == RTCA_NID_ADD_WEEKS)
+        hi = 0u;   /* a 32-bit int argument: the 64-bit row is truncated */
     return td24b_dispatch4(nid, RTCT_DST, RTCT_SRC, lo, hi);
 }
 
@@ -14330,6 +14332,72 @@ static uint32_t rtca_check_valid(uint16_t y, uint16_t mo, uint16_t d, uint16_t h
                                  uint32_t us) {
     rtct_date(y, mo, d, h, mi, sec, us);
     return td24b_dispatch4(RTCA_NID_CHECK_VALID, RTCT_DATE, 0u, 0u, 0u);
+}
+
+/* sceRtcTickAddMinutes, sceRtcTickAddHours and sceRtcTickAddWeeks against PSPAutotests
+ * tests/rtc/arithmetic.expected (f573fe8c, recorded on a PSP): the 8 fixed rows of each function,
+ * each the autotest's own (its loop rows are not checked here). Minutes
+ * take a 64-bit count; hours and weeks a 32-bit int, so the autotest's 64-bit constants are
+ * truncated (+ 62135596800000445 hours lands in year 383). Before these handlers the three NIDs
+ * were unregistered imports. */
+static void test_rtc_tick_add_minutes_hours_weeks_autotest(void) {
+    reset_fixture();
+    sr_hle_init();
+    expect(sr_hle_test_is_registered(RTCA_NID_ADD_MINUTES) && sr_hle_test_is_registered(RTCA_NID_ADD_HOURS) &&
+               sr_hle_test_is_registered(RTCA_NID_ADD_WEEKS),
+           "sceRtcTickAddMinutes, -Hours and -Weeks are registered");
+    static const struct {
+        uint32_t nid;
+        uint16_t y, mo, d, h, mi;
+        long long count;
+        uint16_t ry, rmo, rd, rh, rmi, rsec;
+        uint32_t rus;
+    } rows[] = {
+        /* checkRtcTickAddMinutes */
+        { RTCA_NID_ADD_MINUTES, 1970, 1, 1, 0, 0, -2000, 1969, 12, 30, 14, 40, 0, 445 },
+        { RTCA_NID_ADD_MINUTES, 1970, 1, 1, 0, 0, 2000, 1970, 1, 2, 9, 20, 0, 445 },
+        { RTCA_NID_ADD_MINUTES, 1970, 1, 1, 0, 0, -62135596800000445LL, 11640, 10, 4, 14, 46, 50, 248893 },
+        { RTCA_NID_ADD_MINUTES, 1970, 1, 1, 0, 0, 62135596800000445LL, 52565, 4, 16, 17, 14, 59, 303613 },
+        { RTCA_NID_ADD_MINUTES, 1, 1, 1, 0, 10, -10, 1, 1, 1, 0, 0, 0, 0 },
+        { RTCA_NID_ADD_MINUTES, 1, 1, 1, 0, 10, -11, 60267, 1, 19, 8, 0, 49, 551616 },
+        { RTCA_NID_ADD_MINUTES, 9999, 12, 31, 23, 50, 9, 9999, 12, 31, 23, 59, 0, 0 },
+        { RTCA_NID_ADD_MINUTES, 9999, 12, 31, 23, 50, 10, 10000, 1, 1, 0, 0, 0, 0 },
+        /* checkRtcTickAddHours */
+        { RTCA_NID_ADD_HOURS, 1970, 1, 1, 0, 0, -2000, 1969, 10, 9, 16, 0, 0, 445 },
+        { RTCA_NID_ADD_HOURS, 1970, 1, 1, 0, 0, 2000, 1970, 3, 25, 8, 0, 0, 445 },
+        { RTCA_NID_ADD_HOURS, 1970, 1, 1, 0, 0, -62135596800000445LL, 3556, 10, 18, 11, 0, 0, 445 },
+        { RTCA_NID_ADD_HOURS, 1970, 1, 1, 0, 0, 62135596800000445LL, 383, 3, 16, 13, 0, 0, 445 },
+        { RTCA_NID_ADD_HOURS, 1, 1, 1, 10, 0, -10, 1, 1, 1, 0, 0, 0, 0 },
+        { RTCA_NID_ADD_HOURS, 1, 1, 1, 10, 0, -11, 60267, 1, 19, 7, 1, 49, 551616 },
+        { RTCA_NID_ADD_HOURS, 9999, 12, 31, 20, 0, 3, 9999, 12, 31, 23, 0, 0, 0 },
+        { RTCA_NID_ADD_HOURS, 9999, 12, 31, 20, 0, 4, 10000, 1, 1, 0, 0, 0, 0 },
+        /* checkRtcTickAddWeeks */
+        { RTCA_NID_ADD_WEEKS, 1970, 1, 1, 0, 0, -2000, 1931, 9, 3, 0, 0, 0, 445 },
+        { RTCA_NID_ADD_WEEKS, 1970, 1, 1, 0, 0, 2000, 2008, 5, 1, 0, 0, 0, 445 },
+        { RTCA_NID_ADD_WEEKS, 1970, 1, 1, 0, 0, -62135596800000445LL, 6407, 10, 14, 0, 0, 0, 445 },
+        { RTCA_NID_ADD_WEEKS, 1970, 1, 1, 0, 0, 62135596800000445LL, 57798, 4, 8, 8, 1, 49, 552061 },
+        { RTCA_NID_ADD_WEEKS, 1, 1, 8, 0, 0, -1, 1, 1, 1, 0, 0, 0, 0 },
+        { RTCA_NID_ADD_WEEKS, 1, 1, 8, 0, 0, -2, 60267, 1, 12, 8, 1, 49, 551616 },
+        { RTCA_NID_ADD_WEEKS, 9999, 12, 20, 0, 0, 1, 9999, 12, 27, 0, 0, 0, 0 },
+        { RTCA_NID_ADD_WEEKS, 9999, 12, 20, 0, 0, 2, 10000, 1, 3, 0, 0, 0, 0 },
+    };
+    for (size_t i = 0; i < sizeof rows / sizeof rows[0]; i++) {
+        const uint32_t us = rows[i].y == 1970 ? 445u : 0u;   /* the autotest's 1970 rows carry .000445 */
+        char what[96];
+        snprintf(what, sizeof what, "arithmetic.expected row %u (nid 0x%08x, count %lld)", (unsigned)i,
+                 (unsigned)rows[i].nid, rows[i].count);
+        expect(rtca_add(rows[i].nid, rows[i].y, rows[i].mo, rows[i].d, rows[i].h, rows[i].mi, 0, us,
+                        rows[i].count) == 0u &&
+                   rtca_dst_is(rows[i].ry, rows[i].rmo, rows[i].rd, rows[i].rh, rows[i].rmi, rows[i].rsec,
+                               rows[i].rus),
+               what);
+    }
+    uint32_t stops = sr_hle_test_unmodelled_stops();
+    (void)td24b_dispatch4(RTCA_NID_ADD_MINUTES, 0u, RTCT_SRC, 1u, 0u);
+    (void)td24b_dispatch4(RTCA_NID_ADD_HOURS, RTCT_DST, 0u, 1u, 0u);
+    (void)td24b_dispatch4(RTCA_NID_ADD_WEEKS, 0u, RTCT_SRC, 1u, 0u);
+    expect(sr_hle_test_unmodelled_stops() == stops + 3u,
+           "the minute, hour and week adds stop by name on a NULL source or destination");
 }
 
 static void test_rtc_tick_add_day_of_week_check_valid_autotest(void) {
@@ -53180,6 +53248,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_power_set_clock_frequency_range_checks();
     test_rtc_time_t_add_years_resolution_autotest();
     test_rtc_tick_add_day_of_week_check_valid_autotest();
+    test_rtc_tick_add_minutes_hours_weeks_autotest();
     test_imports_20261102_measured_contracts();
     test_psp_measured_umd_state_20261024();
     test_unregistered_batch_ctrl_sampling_getter();
