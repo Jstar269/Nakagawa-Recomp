@@ -604,7 +604,7 @@ layout. Nothing in it is written at run time, so it can sit in a read-only folde
 | `source/` | The public-safe source export BUILD PACKAGE runs from (`tools/nk_cli.py`, the Makefile, `assets/prereq_manifest.json`). |
 | `prereqs/` | The pinned build prerequisites (#1285), checked by the player against `installed.json` and `bundle-inventory.txt` before BUILD PACKAGE uses them. |
 | `docs/`, `README.md`, `LICENSE`, `NOTICE.md`, `START HERE.txt` | User documentation. |
-| `SBOM.*`, `toolchain.json`, `SHA256SUMS.txt` | SPDX 2.3, SPDX 3 and CycloneDX SBOMs, the attested toolchain record, and the SHA-256 of every other file. |
+| `SBOM.*`, `toolchain.json`, `SHA256SUMS.txt` | SPDX 2.3, SPDX 3 and CycloneDX SBOMs, which carry the SHA-256 `bin/runtime-manifest.json` records for each executable and DLL in `bin/` (`verify_sbom.py --package-dir` checks it), the attested toolchain record, and the SHA-256 of every other file. |
 
 The image never holds a game, decrypted module, generated title code, save, key or firmware
 font: the release script's forbidden-file and private-path scans refuse them.
