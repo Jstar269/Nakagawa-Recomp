@@ -768,9 +768,10 @@ uint32_t sr_alloc_block_at(uint32_t addr, uint32_t size, const char *name) {
     /* Return the skipped virgin gap's free pieces to the free list (aligned starts keep
      * later Low heads 256-byte aligned: every Low take is a 0x100 multiple). The slivers
      * below the alignment stay leaked, exactly like today's bump alignment. Space a live
-     * stack or High block holds is not returned now, nor when its owner releases it to the
-     * arena below the bump pointer, where nothing reuses it until the bump pointer rolls
-     * back (fail-safe: never a second owner). */
+     * stack or High block holds is not returned now, nor when its owner later releases it:
+     * it goes back to the arena, which refuses it below the bump pointer, and no free entry
+     * covers it, so the bump pointer cannot roll back across it either. It is lost for the
+     * rest of the run (fail-safe: never a second owner). */
     for (int i = 0; i < ngap; i++)
         free_list_insert_sorted(gap_pieces[i][0], gap_pieces[i][1] - gap_pieces[i][0]);
 

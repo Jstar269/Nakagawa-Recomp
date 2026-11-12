@@ -38392,8 +38392,8 @@ static void test_partition_ends_at_lowest_live_stack(void) {
            "a fixed reservation above the lowest live stack succeeds");
     /* The reservation jumped the bump pointer over the lower thread's live stack. The skipped
      * range goes back to the free list, but not the live stack inside it: no free entry
-     * covers [lower_floor, upper_floor), and a Low block one page longer than the free space
-     * below the stack is refused instead of being placed over it. */
+     * covers [lower_floor, upper_floor), and a Low block one 256-byte step larger than the
+     * free space below the stack is refused instead of being placed over it. */
     extern int sr_hle_test_partition_free_block_count(void);
     extern int sr_hle_test_partition_get_free_block(int idx, uint32_t *addr_out, uint32_t *size_out);
     int free_over_stack = 0;
@@ -38423,6 +38423,33 @@ static void test_partition_ends_at_lowest_live_stack(void) {
     memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = below;
     expect(sr_syscall(&cpu, NID_GET_HEAD) == gap_start,
            "the block below the lower live stack starts at the old bump pointer");
+
+    /* The same with a High block in the skipped range instead of a live stack. */
+    reset_fixture();
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+    upper = sched_create_thread(0x2000u, 32, 0x8000u);
+    upper_floor = sched_guest_stack_floor();
+    /* sceKernelAllocMemoryBlock type 1 is the High path (sceKernelAllocPartitionMemory's type 1
+     * is placed Low here). */
+    title_hle_write_cstr(0x00280010u, "high");
+    const uint32_t high = memblock_alloc(0x00280010u, 1u, 0x8000u, 0u);
+    expect(high != 0x800200d9u && high < 0x80000000u && high != 0u, "a High block is allocated");
+    const uint32_t high_head = memblock_addr(high, 0x00280004u);
+    memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = upper;
+    expect(sr_syscall(&cpu, 0x9fa03cd3u) == 0u, "the dormant thread above the High block is deleted");
+    expect((sr_hle_test_partition_heap_ptr() + 0xFFu) < high_head && high_head + 0x8000u <= upper_floor,
+           "the High block lies between the bump pointer and the deleted stack");
+    between = sr_alloc_block_at(upper_floor, 0x1000u, "above-high");
+    expect(between != FAIL && between != 0u, "a fixed reservation above the High block succeeds");
+    int free_over_high = 0;
+    for (int i = 0; i < sr_hle_test_partition_free_block_count(); i++) {
+        uint32_t f_addr = 0u, f_size = 0u;
+        if (sr_hle_test_partition_get_free_block(i, &f_addr, &f_size) &&
+            f_addr < high_head + 0x8000u && f_addr + f_size > high_head)
+            free_over_high = 1;
+    }
+    expect(!free_over_high, "no free-list entry covers the live High block");
     s_fixture_loaded_end = 0x00400000u;
 }
 
