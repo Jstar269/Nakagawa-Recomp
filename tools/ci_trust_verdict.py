@@ -256,6 +256,20 @@ PRODUCERS: tuple[Producer, ...] = (
 )
 
 
+#: The status a fork's passing head gets. The fork's provenance producer is the Fork provenance check, which
+#: passes paths a pull request admits itself (it names them in its warnings), so a fork's green must not read
+#: like the upstream's, where only the maintainer's admission adds a path.
+FORK_SUCCESS_DESCRIPTION = ("Fork: intended jobs passed; provenance is the Fork provenance check, which passes "
+                            "paths a PR admits itself (see its warnings)")
+
+
+def status_description(verdict: Verdict, producers: tuple[Producer, ...]) -> str:
+    """The status description to post: a fork's success says what its provenance check covers."""
+    if verdict.state == "success" and producers != PRODUCERS:
+        return FORK_SUCCESS_DESCRIPTION
+    return verdict.description()
+
+
 def producers_for(repository: str | None, repository_id: str | None) -> tuple[Producer, ...]:
     """The producers judged for ``repository``: ``PRODUCERS`` unchanged for the upstream.
 
@@ -1824,7 +1838,7 @@ def main(argv: list[str] | None = None) -> int:
         print(gh.budget_note())
         raise
     _report(verdict, snapshot, args.summary, judged)
-    post(verdict.state, verdict.description())
+    post(verdict.state, status_description(verdict, producers))
     print(gh.budget_note())
     return 1 if verdict.state == "failure" else 0
 

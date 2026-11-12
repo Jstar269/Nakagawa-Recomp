@@ -709,7 +709,7 @@ jobs:
         run: |
           set -euo pipefail
           python tools/provenance_mode.py fork-check --repo "${GITHUB_WORKSPACE}" \
-            --base "${BASE_SHA}" --candidate "${HEAD_SHA}" --summary "${GITHUB_STEP_SUMMARY}"
+            --base "${BASE_SHA}" --tip HEAD --candidate "${HEAD_SHA}" --summary "${GITHUB_STEP_SUMMARY}"
 
   showcase_prx:
     name: Showcase demo PRXs (PSPDEV)

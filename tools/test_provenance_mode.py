@@ -355,8 +355,10 @@ class WorkflowConditionTest(unittest.TestCase):
         self.assertIn("    permissions:\n      contents: read\n      pull-requests: read\n    steps:\n", self.fork)
         step = self.fork[self.fork.index("      - name: Check the candidate with the trusted publication audit\n"):]
         self.assertIn("          set -euo pipefail\n", step)
+        # Review 2309-36f775933693 S1: the default branch is the trusted checkout's HEAD, not the event's base.
         self.assertIn('          python tools/provenance_mode.py fork-check --repo "${GITHUB_WORKSPACE}" \\\n'
-                      '            --base "${BASE_SHA}" --candidate "${HEAD_SHA}" --summary "${GITHUB_STEP_SUMMARY}"\n',
+                      '            --base "${BASE_SHA}" --tip HEAD --candidate "${HEAD_SHA}" '
+                      '--summary "${GITHUB_STEP_SUMMARY}"\n',
                       step)
         for tolerant in ("|| true", "|| :", "continue-on-error", "if: always()", "; exit 0"):
             self.assertNotIn(tolerant, step)
@@ -424,6 +426,18 @@ class ForkCheckTest(unittest.TestCase):
         self.assertIn("  added NEW.md", lines)
         self.assertFalse([line for line in lines if line.startswith("PROFILE_RULES_CHANGED")])
         self.assertEqual(lines[-1], f"{pm.FORK_CONTEXT}: PASS")
+        # Review 2309-36f775933693 S3: a pass that covers a pull request's own admission says so, by path.
+        self.assertEqual(pm.self_admitted(lines), ["NEW.md"])
+        self.assertTrue(pm._summary(lines, code).startswith(
+            f"### {pm.FORK_CONTEXT}: passed; this pull request admits 1 path(s) itself: `NEW.md`\n"))
+        self.assertEqual(len(pm.warning_annotations(lines)), 1)
+        self.assertTrue(pm.warning_annotations(lines)[0].startswith("::warning title="))
+        self.assertIn("::NEW.md is admitted by this pull request itself", pm.warning_annotations(lines)[0])
+        # A pull request that admits nothing gets a plain title and no warning.
+        code, lines = pm.fork_check(self.repo, self.base, self.base, audit_tool=self._stub_audit(0))
+        self.assertEqual(pm.self_admitted(lines), [])
+        self.assertTrue(pm._summary(lines, code).startswith(f"### {pm.FORK_CONTEXT}: passed\n"))
+        self.assertEqual(pm.warning_annotations(lines), [])
 
     def test_the_audit_judges_the_candidate_by_the_candidates_own_profile(self) -> None:
         # Failing-before: the audit took the profile from the checkout it ran in. On hosted CI that is the
@@ -488,6 +502,94 @@ class ForkCheckTest(unittest.TestCase):
         self._write_profile(["LATER.md", "README.md", "TOPIC.md"], exclude_paths=["x"])
         merged = self._commit()
         code, lines = pm.fork_check(self.repo, tip, merged, audit_tool=self._stub_audit(0))
+        self.assertEqual(code, 0, lines)
+
+    def _lagging_head_and_stricter_tip(self) -> tuple[str, str]:
+        _git(self.repo, "checkout", "--quiet", "-b", "topic", self.base)
+        (self.repo / "TOPIC.md").write_text("topic\n", encoding="utf-8")
+        self._write_profile(["README.md", "TOPIC.md"])
+        head = self._commit()
+        _git(self.repo, "checkout", "--quiet", "main")
+        self._write_profile(["README.md"], exclude_paths=["x"])
+        return head, self._commit()
+
+    def test_a_stale_event_base_does_not_hide_a_rule_tightened_on_the_tip(self) -> None:
+        # Review 2309-36f775933693 S1: the event's base can lag the default branch and equal the merge
+        # base, so a rule tightened on the tip was compared with nothing. The tip is the measure.
+        head, tip = self._lagging_head_and_stricter_tip()
+        code, lines = pm.fork_check(self.repo, self.base, head, tip=tip, audit_tool=self._stub_audit(0))
+        self.assertEqual(code, 1, lines)
+        self.assertIn(f"default branch tip {tip}", lines)
+        (finding,) = [line for line in lines if line.startswith("PROFILE_RULES_BEHIND")]
+        self.assertIn("changed exclude_paths after", finding)
+        # Failing-before: measured against the stale base alone, the check passed.
+        code, lines = pm.fork_check(self.repo, self.base, head, audit_tool=self._stub_audit(0))
+        self.assertEqual(code, 0, lines)
+
+    def test_the_command_line_measures_against_the_trusted_checkouts_head(self) -> None:
+        head, tip = self._lagging_head_and_stricter_tip()
+        self.assertEqual(_git(self.repo, "rev-parse", "HEAD"), tip)
+        calls = []
+        real_fork_check = pm.fork_check
+
+        def spy(repo: Path, base: str, candidate: str, *, tip: str | None = None) -> tuple[int, list[str]]:
+            calls.append((base, candidate, tip))
+            code, lines = real_fork_check(repo, base, candidate, tip=tip, audit_tool=self._stub_audit(0))
+            return code, lines
+
+        with mock.patch.object(pm, "fork_check", spy), mock.patch("sys.stdout", io.StringIO()):
+            code = pm.main(["fork-check", "--repository", "example-user/Nakagawa-Recomp", "--repository-id", "42",
+                            "--repo", str(self.repo), "--base", self.base, "--candidate", head])
+        self.assertEqual(calls, [(self.base, head, "HEAD")])
+        self.assertEqual(code, 1)
+
+    def test_a_base_that_is_not_on_the_default_branch_is_an_input_error(self) -> None:
+        head, tip = self._lagging_head_and_stricter_tip()
+        with self.assertRaisesRegex(pm.CheckError, "not an ancestor of the default branch tip"):
+            pm.fork_check(self.repo, head, head, tip=tip, audit_tool=self._stub_audit(0))
+
+    def _write_manifest(self, components: list[dict[str, object]]) -> None:
+        path = self.repo / pm.MANIFEST
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"components": components}), encoding="utf-8")
+
+    def test_the_release_manifest_and_the_binaries_it_waives_are_not_the_pull_requests(self) -> None:
+        # Review 2309-36f775933693 S2: the release manifest decides which binaries the audit accepts, and
+        # it was the candidate's to change.
+        approved: dict[str, object] = {"id": "image", "source_path": "image.gif", "disposition": "approved_binary"}
+        self._write_manifest([approved])
+        (self.repo / "image.gif").write_bytes(b"GIF89a" + bytes(8))
+        self._write_profile(["README.md", "image.gif"])
+        base = self._commit()
+        pbp = b"\x00PBP\x00\x00\x01\x00" + bytes(32)
+        cases: dict[str, tuple[list[dict[str, object]], dict[str, bytes], str]] = {
+            "self-approval": ([approved, {"id": "x", "source_path": "x.bin", "disposition": "approved_binary"}],
+                              {"x.bin": pbp}, "MANIFEST_CHANGED"),
+            "approved bytes replaced": ([approved], {"image.gif": pbp}, "WAIVED_BINARY_CHANGED: image.gif"),
+        }
+        for case, (components, files, code_text) in cases.items():
+            with self.subTest(case=case):
+                _git(self.repo, "reset", "--quiet", "--hard", base)
+                self._write_manifest(components)
+                for name, data in files.items():
+                    (self.repo / name).write_bytes(data)
+                head = self._commit()
+                code, lines = pm.fork_check(self.repo, base, head, audit_tool=self._stub_audit(0))
+                self.assertEqual(code, 1, lines)
+                self.assertTrue(any(line.startswith(code_text) for line in lines), lines)
+        # The default branch drops the approval after a pull request branched: the head must merge it.
+        _git(self.repo, "reset", "--quiet", "--hard", base)
+        _git(self.repo, "checkout", "--quiet", "-b", "lagging", base)
+        (self.repo / "README.md").write_text("edited\n", encoding="utf-8")
+        head = self._commit()
+        _git(self.repo, "checkout", "--quiet", "main")
+        self._write_manifest([])
+        tip = self._commit()
+        code, lines = pm.fork_check(self.repo, base, head, tip=tip, audit_tool=self._stub_audit(0))
+        self.assertEqual(code, 1, lines)
+        self.assertTrue(any(line.startswith("MANIFEST_BEHIND") for line in lines), lines)
+        # An edit elsewhere with the manifest and the approved bytes untouched passes.
+        code, lines = pm.fork_check(self.repo, base, head, audit_tool=self._stub_audit(0))
         self.assertEqual(code, 0, lines)
 
     def test_a_head_that_lags_only_the_bases_paths_passes(self) -> None:
@@ -670,6 +772,35 @@ class ForkCheckRealAuditTest(unittest.TestCase):
         self.assertIn("profile: 1 path(s) added, 0 removed", lines)
         self.assertIn(f"  added {self.ADMITTED}", lines)
         self.assertEqual(lines[-1], f"{pm.FORK_CONTEXT}: PASS")
+        # Review 2309-36f775933693 S3: the pass names what the pull request admitted itself.
+        self.assertIn(f"{pm.SELF_ADMITTED}: {self.ADMITTED}", "\n".join(lines))
+
+    def test_a_binary_approved_by_the_pull_request_itself_fails(self) -> None:
+        # Review 2309-36f775933693 S2, with the real audit: the scratch fork's EBOOT.PBP case plus the pull
+        # request's own approved_binary component and include_paths line; and the bytes of a path the
+        # manifest already approves replaced with a PBP image under its own name.
+        manifest = json.loads(_git(self.repo, "cat-file", "blob", f"{self.head_tree}:{pm.MANIFEST}"))
+        approved = pm.waived_paths(json.dumps(manifest).encode("utf-8"))
+        image = next(path for path in approved if path.endswith(".gif"))
+        manifest["components"].append({"id": "eboot", "name": "EBOOT", "type": "asset", "source_path": "EBOOT.PBP",
+                                       "license": "CC0-1.0", "disposition": "approved_binary",
+                                       "public_scope_included": True})
+        profile = json.loads(_git(self.repo, "cat-file", "blob", f"{self.head_tree}:{pm.POLICY}"))
+        profile["include_paths"] = sorted([*profile["include_paths"], "EBOOT.PBP"])
+        pbp = b"\x00PBP\x00\x00\x01\x00" + bytes(64)
+        cases = {
+            "self-approved EBOOT.PBP": ({"EBOOT.PBP": pbp,
+                                         pm.MANIFEST: (json.dumps(manifest, indent=2) + "\n").encode("utf-8"),
+                                         pm.POLICY: (json.dumps(profile, indent=2) + "\n").encode("utf-8")},
+                                        "MANIFEST_CHANGED"),
+            "approved image replaced": ({image: pbp}, f"WAIVED_BINARY_CHANGED: {image}"),
+        }
+        for case, (files, expected) in cases.items():
+            with self.subTest(case=case):
+                code, lines = pm.fork_check(self.repo, self.base, self._commit_tree(self._tree_with(files), self.base))
+                self.assertEqual(code, 1, "\n".join(lines))
+                self.assertTrue(any(line.startswith(expected) for line in lines), "\n".join(lines[-30:]))
+                self.assertEqual(lines[-1], f"{pm.FORK_CONTEXT}: FAIL")
 
     def test_an_export_ignore_line_does_not_hide_a_forbidden_file(self) -> None:
         attributes = _git(self.repo, "cat-file", "blob", f"{self.head_tree}:.gitattributes")

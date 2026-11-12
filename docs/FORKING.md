@@ -157,12 +157,25 @@ with its own code. It reads no secret and never contacts any authority. It:
 - runs the trusted publication audit on the pull request's exact tree with `--public-scope
   --provenance-self-consistency`, which refuses game data, keys, firmware, private and user paths,
   unclassified paths and an inconsistent public ledger exactly as upstream. The audit judges the
-  tree by the pull request's own profile, so it also refuses a pull request whose profile rules
-  differ from your default branch's (`PROFILE_RULES_BEHIND`): after you tighten a rule, merge the
-  default branch into older pull requests;
-- lists the paths the pull request adds to or removes from the publication profile, and says when the
-  profile's rules change. Those lines are your review prompt: in your fork, your admission and your
-  review are the provenance authority.
+  tree by the pull request's own profile, so the check refuses a pull request that changes the
+  profile's rules (`PROFILE_RULES_CHANGED`; it may change `include_paths` only) or whose rules differ
+  from your default branch's as the job checked it out, not as it was when the pull request opened
+  (`PROFILE_RULES_BEHIND`): after you tighten a rule, merge the default branch into older pull
+  requests;
+- holds the release manifest (`assets/release_manifest.json`) the same way. It decides which
+  binaries, such as images and fonts, the audit accepts, so a pull request may not change the
+  manifest (`MANIFEST_CHANGED`) or the bytes of a path it approves
+  (`WAIVED_BINARY_CHANGED`), and its manifest must equal your default branch's (`MANIFEST_BEHIND`).
+  You change those by your own push to the default branch, after review;
+- lists the paths the pull request adds to or removes from the publication profile, and names each
+  path the pull request admits itself (`SELF_ADMITTED`), in the check's title line and as a warning
+  on the check.
+
+**A green Fork provenance check does not mean you admitted anything.** The check cannot tell your
+admission from anyone else's: it passes a pull request that adds a path to `include_paths` and the
+ledger itself, as long as the audit finds nothing forbidden in the bytes. Your review of the named
+paths is the admission. In your fork, your admission and your review are the provenance authority;
+the **Trusted CI verdict**'s success text says the same.
 
 The job starts three ways, as the attestation does upstream ([Trusted CI verdict](CI.md#trusted-ci-verdict)):
 from `pull_request_target`, when a `CI` run is requested for a pull request (`workflow_run`), and from

@@ -3122,6 +3122,19 @@ class CommandLineTests(unittest.TestCase):
 
 
 class ForkProducerTests(unittest.TestCase):
+    def test_a_forks_success_says_what_its_provenance_check_covers(self) -> None:
+        # Review 2309-36f775933693 S3 (and N3): a fork's green read exactly like the upstream's, although
+        # its provenance check passes paths a pull request admits itself.
+        upstream = ctv.producers_for("Jstar269/Nakagawa-Recomp", "1330183186")
+        fork = ctv.producers_for("example-user/Nakagawa-Recomp", "42")
+        success = ctv.Verdict("success")
+        self.assertEqual(ctv.status_description(success, upstream), success.description())
+        self.assertEqual(ctv.status_description(success, fork), ctv.FORK_SUCCESS_DESCRIPTION)
+        self.assertLessEqual(len(ctv.FORK_SUCCESS_DESCRIPTION), 140)
+        self.assertIn("admits itself", ctv.FORK_SUCCESS_DESCRIPTION)
+        for verdict in (ctv.Verdict("failure", [ctv.Finding("JOB_FAILED", "x", "y")]), ctv.Verdict("pending", pending=["x"])):
+            self.assertEqual(ctv.status_description(verdict, fork), verdict.description())
+
     def _main_with_id(self, identity: str | None) -> tuple[mock.MagicMock, str]:
         """Run main() as the workflow does; return the producer choice's spy and the job log."""
         import io  # noqa: PLC0415

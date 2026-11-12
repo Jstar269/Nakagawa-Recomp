@@ -27,12 +27,21 @@ upstream job does, and never contacts the private authority. What comes from whe
   commit's objects. The profile a pull request carries is the one its own tree is judged by,
   so an admission inside the pull request is honoured and a head that lags the default branch
   is still judged by its own list of paths;
+* the default branch is the trusted checkout's ``HEAD`` (``--tip``), not the event's base, which can
+  lag it; the base must be an ancestor of it;
+* the release manifest (``assets/release_manifest.json``), whose dispositions waive the audit's
+  binary findings, may not change (``MANIFEST_CHANGED``) and must equal the tip's
+  (``MANIFEST_BEHIND``), and the bytes of a path it waives may not change
+  (``WAIVED_BINARY_CHANGED``);
+* every path the candidate adds to ``include_paths`` is named as ``SELF_ADMITTED``, in the summary's
+  title and as a warning annotation: the check cannot tell the fork maintainer's admission from a
+  contributor's, and passes both;
 * the candidate may change the profile's ``include_paths`` only. Each added or removed path is
   listed, because on a fork the fork maintainer's admission and review are the provenance
   authority. Any other change to the profile, such as an exclusion or the default disposition,
   fails the check (``PROFILE_RULES_CHANGED``): the rules a tree is judged by are not the pull
   request's to change. The change is measured from the merge base of the base and the candidate;
-* the candidate's rules, every profile key but ``include_paths``, must also equal the base's
+* the candidate's rules, every profile key but ``include_paths``, must also equal the tip's
   (``PROFILE_RULES_BEHIND``), so a rule tightened on the default branch after the pull request
   branched is not escaped by a head that lags it. The fix is to merge the default branch in.
 
@@ -80,6 +89,10 @@ FORK_CONTEXT = "Fork provenance check"
 WORKFLOW = ".github/workflows/provenance-attestation.yml"
 WORKFLOW_PREFIX = ".github/workflows/"
 POLICY = "assets/public_source_profile.json"
+MANIFEST = "assets/release_manifest.json"
+#: Release-manifest dispositions under which tools/publish_audit.py drops a binary finding.
+WAIVING_DISPOSITIONS = frozenset(("approved_binary", "optional_excluded_if_unverified", "approved_submodule"))
+SELF_ADMITTED = "SELF_ADMITTED"
 
 #: The job conditions in ``WORKFLOW``. GitHub's ``==`` ignores letter case for strings, as
 #: ``is_upstream`` does. They are exact complements, so exactly one of the two jobs runs, and an
@@ -211,12 +224,63 @@ def _merge_base(repo: Path, base: str, candidate: str) -> str:
     return sha
 
 
-def fork_check(repo: Path, base: str, candidate: str, *, audit_tool: Path | None = None) -> tuple[int, list[str]]:
-    """Run the fork provenance check. Returns the exit code and the report lines."""
+def _blob(repo: Path, rev: str, path: str) -> bytes | None:
+    """The bytes of ``path`` at ``rev``, or ``None`` when the commit has no such file."""
+    try:
+        return _git(repo, "cat-file", "blob", f"{rev}:{path}")
+    except CheckError:
+        return None
+
+
+def _blob_id(repo: Path, rev: str, path: str) -> str | None:
+    try:
+        return _git(repo, "rev-parse", "--verify", "--quiet", f"{rev}:{path}").decode("ascii").strip()
+    except CheckError:
+        return None
+
+
+def waived_paths(manifest: bytes | None) -> list[str]:
+    """The paths whose release-manifest disposition waives one of the audit's binary findings."""
+    if manifest is None:
+        return []
+    try:
+        document = json.loads(manifest)
+    except json.JSONDecodeError as error:
+        raise CheckError(f"{MANIFEST} is unreadable: {error}") from error
+    components = document.get("components") if isinstance(document, dict) else None
+    if not isinstance(components, list):
+        raise CheckError(f"{MANIFEST} has no components list")
+    paths = set()
+    for component in components:
+        if isinstance(component, dict) and component.get("disposition") in WAIVING_DISPOSITIONS:
+            path = component.get("source_path") or component.get("provenance_path")
+            if isinstance(path, str):
+                paths.add(path)
+    return sorted(paths)
+
+
+def _is_ancestor(repo: Path, older: str, newer: str) -> bool:
+    result = subprocess.run(["git", "-C", str(repo), "merge-base", "--is-ancestor", older, newer],
+                            capture_output=True, check=False)
+    return result.returncode == 0
+
+
+def fork_check(repo: Path, base: str, candidate: str, *, tip: str | None = None,
+               audit_tool: Path | None = None) -> tuple[int, list[str]]:
+    """Run the fork provenance check. Returns the exit code and the report lines.
+
+    ``base`` is the pull request's base as the event names it; ``tip`` is the default branch the
+    trusted checkout holds (``HEAD`` from the command line), which a base can lag behind. Every
+    comparison with "the default branch" is with the tip. Without a tip the base stands in for it.
+    """
     base_sha = _commit(repo, base)
+    tip_sha = _commit(repo, tip) if tip is not None else base_sha
+    if not _is_ancestor(repo, base_sha, tip_sha):
+        raise CheckError(f"base {base_sha} is not an ancestor of the default branch tip {tip_sha}")
     candidate_sha = _commit(repo, candidate)
-    branch_point = _merge_base(repo, base_sha, candidate_sha)
-    lines = [f"base {base_sha}", f"candidate {candidate_sha}", f"merge base {branch_point}"]
+    branch_point = _merge_base(repo, tip_sha, candidate_sha)
+    lines = [f"base {base_sha}", f"default branch tip {tip_sha}", f"candidate {candidate_sha}",
+             f"merge base {branch_point}"]
     failed = False
 
     collisions = context_findings(_workflow_blobs(repo, candidate_sha),
@@ -235,10 +299,11 @@ def fork_check(repo: Path, base: str, candidate: str, *, audit_tool: Path | None
             "the fork maintainer's own push, after review")
         failed = True
     else:
-        # The audit below judges the candidate by its own profile, so its rules must be the base's:
-        # a rule tightened on the default branch after the pull request branched would otherwise
-        # never apply to it, and a fork has no landing batch to judge the merged result.
-        behind = profile_changes(repo, base_sha, candidate_sha)[2]
+        # The audit below judges the candidate by its own profile, so its rules must be the default
+        # branch's as the trusted checkout holds them now: a rule tightened there after the pull
+        # request branched would otherwise never apply to it, and a fork has no landing batch to
+        # judge the merged result. The event's base can lag the tip, so it is not the measure.
+        behind = profile_changes(repo, tip_sha, candidate_sha)[2]
         if behind:
             lines.append(
                 f"PROFILE_RULES_BEHIND: {POLICY}: the default branch changed {', '.join(behind)} after this "
@@ -246,9 +311,37 @@ def fork_check(repo: Path, base: str, candidate: str, *, audit_tool: Path | None
                 "current rules")
             failed = True
 
+    # The release manifest decides which binaries (a file with binary magic, a prohibited extension, a
+    # gitlink) the audit accepts, and the audit reads it from the candidate. So it is held like the
+    # profile's rules: the pull request may not change it, it must equal the default branch's, and the
+    # bytes of a path it approves may not change either: they reach the default branch by review.
+    manifest = _blob(repo, candidate_sha, MANIFEST)
+    if manifest != _blob(repo, branch_point, MANIFEST):
+        lines.append(
+            f"MANIFEST_CHANGED: {MANIFEST}: the pull request changes the release manifest, whose dispositions "
+            "waive the audit's binary findings; it reaches the default branch by the fork maintainer's own push")
+        failed = True
+    elif manifest != _blob(repo, tip_sha, MANIFEST):
+        lines.append(
+            f"MANIFEST_BEHIND: {MANIFEST}: the default branch changed the release manifest after this pull "
+            "request branched; merge the default branch into it")
+        failed = True
+    for path in waived_paths(_blob(repo, branch_point, MANIFEST)):
+        if _blob_id(repo, candidate_sha, path) != _blob_id(repo, branch_point, path):
+            lines.append(
+                f"WAIVED_BINARY_CHANGED: {path}: the release manifest approves this path as a binary, and the "
+                "pull request changes its bytes; that change reaches the default branch by the fork "
+                "maintainer's own push")
+            failed = True
+
+    # Paths the pull request admits itself. The check cannot tell the fork maintainer's admission from
+    # anyone else's, so each is named, here, in the summary's title and as a warning annotation.
+    lines.extend(f"{SELF_ADMITTED}: {path}: admitted by this pull request's own profile and ledger, not on "
+                 "the default branch; review it as an admission" for path in added)
+
     # The audit takes its policy from the candidate's commit, not from the checkout it runs in. The
     # checkout is the default branch, whose profile lacks what this pull request admits and may list
-    # what a lagging head does not have yet. Its rules equal the base's, checked above.
+    # what a lagging head does not have yet. Its rules equal the tip's, checked above.
     tool = audit_tool or (ROOT / "tools" / "publish_audit.py")
     with tempfile.TemporaryDirectory(prefix="nakagawa-fork-policy-") as scratch:
         policy = Path(scratch) / "public_source_profile.json"
@@ -267,25 +360,44 @@ def fork_check(repo: Path, base: str, candidate: str, *, audit_tool: Path | None
     return (1 if failed else 0), lines
 
 
+def self_admitted(lines: list[str]) -> list[str]:
+    """The paths a fork check's report names as admitted by the pull request itself."""
+    prefix = f"{SELF_ADMITTED}: "
+    return [line[len(prefix):].split(": ", 1)[0] for line in lines if line.startswith(prefix)]
+
+
 def _summary(lines: list[str], code: int) -> str:
     verdict = "passed" if code == 0 else "failed"
+    admitted = self_admitted(lines)
+    title = f"### {FORK_CONTEXT}: {verdict}"
+    if admitted:
+        shown = ", ".join(f"`{path}`" for path in admitted[:10])
+        more = f" and {len(admitted) - 10} more" if len(admitted) > 10 else ""
+        title += f"; this pull request admits {len(admitted)} path(s) itself: {shown}{more}"
     return "\n".join([
-        f"### {FORK_CONTEXT}: {verdict}",
+        title,
         "",
         "This repository is not the upstream, so it has no access to the upstream's private trusted",
         "ledger. This check ran the trusted default branch's publication audit on the candidate's exact",
-        "tree, under the candidate's own publication profile, whose rules must equal the default",
-        "branch's, and checked the public ledger's self-consistency. A pull request may change the",
-        "profile's include_paths only, and not this check's own workflow; the paths it adds",
-        "or removes are listed below for review. The fork maintainer's admission",
-        "(`tools/fork_init.py`, `tools/admit_paths.py`) and review are this fork's provenance authority;",
-        "see docs/FORKING.md.",
+        "tree, under the candidate's own publication profile, whose rules and release manifest must",
+        "equal the default branch's, and checked the public ledger's self-consistency. A pull request",
+        "may change the profile's include_paths only, and not the release manifest, the bytes of a path",
+        "it approves, or this check's own workflow. A pass does not mean the fork maintainer admitted",
+        "anything: the paths a pull request admits itself are named above and below, for review. The",
+        "fork maintainer's admission (`tools/fork_init.py`, `tools/admit_paths.py`) and review are this",
+        "fork's provenance authority; see docs/FORKING.md.",
         "",
         "```text",
         *lines,
         "```",
         "",
     ])
+
+
+def warning_annotations(lines: list[str]) -> list[str]:
+    """GitHub workflow commands that put each self-admitted path on the check as a warning."""
+    return [f"::warning title={FORK_CONTEXT}: self-admitted path::{path} is admitted by this pull request "
+            "itself, not by the fork maintainer on the default branch" for path in self_admitted(lines)]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -298,6 +410,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--repo", type=Path, default=ROOT, help="repository holding both commits")
     parser.add_argument("--base", help="fork-check: exact base commit")
     parser.add_argument("--candidate", help="fork-check: exact candidate commit, read as data")
+    parser.add_argument("--tip", default="HEAD",
+                        help="fork-check: the default branch's tip, which --base must be an ancestor of "
+                             "(default: HEAD of --repo, the trusted checkout)")
     parser.add_argument("--summary", type=Path, help="fork-check: append a Markdown summary here")
     args = parser.parse_args(argv)
 
@@ -317,11 +432,13 @@ def main(argv: list[str] | None = None) -> int:
     if not args.base or not args.candidate:
         parser.error("fork-check needs --base and --candidate")
     try:
-        code, lines = fork_check(args.repo.resolve(), args.base, args.candidate)
+        code, lines = fork_check(args.repo.resolve(), args.base, args.candidate, tip=args.tip)
     except CheckError as error:
         print(f"{FORK_CONTEXT}: input error: {error}", file=sys.stderr)
         return 2
     print("\n".join(lines))
+    for command in warning_annotations(lines):
+        print(command)
     if args.summary:
         with args.summary.open("a", encoding="utf-8") as handle:
             handle.write(_summary(lines, code))
