@@ -40,6 +40,7 @@ typedef struct {
     const char *const *labels;
     int count;
 } EnhancedWords;
+static const char *const k_enhanced_ssaa_labels[] = {"2x", "4x", "Off"};
 #define ENHANCED_WORDS(words) {(words), (int)(sizeof(words) / sizeof((words)[0]))}
 static const EnhancedWords k_enhanced_words[PLAYER_PART_COUNT] = {
     [PLAYER_PART_FILTERING] = ENHANCED_WORDS(k_enhanced_af_labels),
@@ -55,6 +56,7 @@ static const EnhancedWords k_enhanced_words[PLAYER_PART_COUNT] = {
     [PLAYER_PART_STICK] = ENHANCED_WORDS(k_enhanced_switch_labels),
     [PLAYER_PART_LOAD] = ENHANCED_WORDS(k_enhanced_switch_labels),
     [PLAYER_PART_TWIN] = ENHANCED_WORDS(k_enhanced_switch_labels),
+    [PLAYER_PART_SSAA] = ENHANCED_WORDS(k_enhanced_ssaa_labels),
     [PLAYER_PART_MIPS] = ENHANCED_WORDS(k_enhanced_switch_labels)};
 #undef ENHANCED_WORDS
 /* The most words any part has, for the stays-put test's steps. */
@@ -3357,6 +3359,7 @@ static void test_settings_pages(void) {
               strstr(dump, "\"SMOOTH MOTION: OFF\"") != NULL &&
               strstr(dump, "\"CLEAN PITCHED SOUND: OFF\"") != NULL &&
               strstr(dump, "\"SHARPER ENLARGING: OFF\"") != NULL &&
+              strstr(dump, "\"SUPERSAMPLING: OFF\"") != NULL &&
               strstr(dump, "\"SMOOTH FAR TEXTURES: OFF\"") != NULL &&
               /* The sentences wrap; their lines are dumped one by one. */
               strstr(dump, "Smooths steady 30 FPS scenes") != NULL &&
@@ -3369,13 +3372,17 @@ static void test_settings_pages(void) {
               strstr(dump, "\xE2\x80\xA6\"") == NULL,
           "Settings > Enhanced shows all player parts and their complete descriptions");
     /* Each part's row is one table row: it names its part, so a new part needs no new op. The
-       first 13 parts' ids are 0x4543 to 0x454F; the 14th (Smooth far textures) is the second
-       range's first, 0x4680, and every earlier part keeps its id. */
+       first 13 parts' ids are 0x4543 to 0x454F; the 14th (Supersampling) is the second range's
+       first, 0x4680, and every earlier part keeps its id. */
     CHECK(PLAYER_UI_ID_ENHANCED_PART(0) == 0x4543u && PLAYER_UI_ID_ENHANCED_PART(12) == 0x454Fu &&
               PLAYER_UI_ID_ENHANCED_PART(PLAYER_PART_TWIN) == 0x454Fu &&
               PLAYER_UI_ID_ENHANCED_PART(13) == 0x4680u &&
-              PLAYER_UI_ID_ENHANCED_PART(PLAYER_PART_MIPS) == 0x4680u && PLAYER_PART_COUNT >= 14,
+              PLAYER_UI_ID_ENHANCED_PART(PLAYER_PART_SSAA) == 0x4680u && PLAYER_PART_COUNT >= 14,
           "the part rows' ids: 13 in the first range, the 14th in the second");
+    /* The 15th (Smooth far textures) follows Supersampling in the second range, at 0x4681. */
+    CHECK(PLAYER_UI_ID_ENHANCED_PART(14) == 0x4681u &&
+              PLAYER_UI_ID_ENHANCED_PART(PLAYER_PART_MIPS) == 0x4681u && PLAYER_PART_COUNT >= 15,
+          "the part rows' ids: the 15th in the second range, after the 14th");
     for (unsigned i = 0u; i < PLAYER_PART_COUNT; ++i) {
         PlayerUiAction part =
             activate_flow_button(PLAYER_UI_ID_ENHANCED_PART(i), FLOW_SETTINGS_ACE);

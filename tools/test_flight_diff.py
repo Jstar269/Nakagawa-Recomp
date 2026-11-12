@@ -346,18 +346,22 @@ class ComparabilityContractTests(unittest.TestCase):
         ace["runtime"]["enhancements"] = {"ace": self.ACE_LINE}
         flight_diff.validate_bundle(ace)
         # A line past the 95 characters the field used to keep: every optional key on (#2051's depth=32
-        # alone takes an Enhanced line to 97). The recorder keeps ACE_SPEC_MAX - 1 characters, and the
-        # schema allows as many.
+        # alone takes an Enhanced line to 97, #2073's ssaa=4 to 100). The recorder keeps ACE_SPEC_MAX - 1
+        # characters (its field is declared with ACE_SPEC_MAX, which ace-selftest checks against the
+        # longest line the key table formats), and the schema allows as many.
         long_line = ("v1;tier=ace;af=16;text=on;readout=off;notice=on;wide=fill;smooth=x2;sas=sinc;tess=4;"
-                     "stick=126;load=fast;depth=32;cull=on")
+                     "twin=off;mips=on;stick=126;load=fast;depth=32;ssaa=4;cull=on")
         self.assertGreater(len(long_line), 95)
         ace["runtime"]["enhancements"] = {"ace": long_line}
         flight_diff.validate_bundle(ace)
         header = (ROOT / "src" / "rt" / "ace.h").read_text(encoding="utf-8")
         spec_max = int(re.search(r"^#define ACE_SPEC_MAX (\d+)\b", header, re.MULTILINE).group(1))
         recorder = (ROOT / "src" / "rt" / "flight_recorder.c").read_text(encoding="utf-8")
-        field = int(re.search(r"^static char s_flight_ace\[(\d+)\];", recorder, re.MULTILINE).group(1))
-        self.assertEqual(field, spec_max)
+        self.assertRegex(recorder, r"(?m)^static char s_flight_ace\[ACE_SPEC_MAX\];")
+        self.assertRegex(recorder, r'(?m)^#include "ace\.h"')
+        schema = json.loads(flight_diff.SCHEMA_PATH.read_text(encoding="utf-8"))
+        ace_schema = schema["properties"]["runtime"]["properties"]["enhancements"]["properties"]["ace"]
+        self.assertEqual(ace_schema["maxLength"], spec_max - 1)
         self.assertLess(len(long_line), spec_max)
         ace["runtime"]["enhancements"] = {"ace": "v1;af=0" + ";x=1" * ((spec_max - 1 - 7) // 4)}
         flight_diff.validate_bundle(ace)
@@ -395,7 +399,7 @@ class ComparabilityContractTests(unittest.TestCase):
             "properties"]["ace"]
         self.assertEqual(ace_schema["maxLength"], spec_max - 1)
         recorder = (ROOT / "src" / "rt" / "flight_recorder.c").read_text(encoding="utf-8")
-        self.assertIn(f"static char s_flight_ace[{spec_max}];", recorder)
+        self.assertIn("static char s_flight_ace[ACE_SPEC_MAX];", recorder)   # ace.h's, spec_max
 
         _, candidate = self._comparable_pair()
 
@@ -1477,7 +1481,8 @@ _RECORDER_FORBIDDEN_CALL = re.compile(
     r"\b(?:Sleep|SleepEx|sleep|usleep|nanosleep|clock_nanosleep|sched_yield|pthread_yield"
     r"|thrd_sleep|thrd_yield|SwitchToThread|WaitFor\w+|SDL_\w+|sr_yield|SR_YIELD"
     r"|sr_coro_\w+|sched_\w+|switch_to_scheduler)\s*\(")
-_RECORDER_INCLUDES = {"flight_recorder.h", "recomp.h", "errno.h", "stdio.h", "stdlib.h",
+# ace.h is declarations, constants and pure inline arithmetic; the recorder takes ACE_SPEC_MAX from it.
+_RECORDER_INCLUDES = {"flight_recorder.h", "ace.h", "recomp.h", "errno.h", "stdio.h", "stdlib.h",
                       "string.h"}
 _C_COMMENT_OR_LITERAL = re.compile(
     r"/\*.*?\*/|//[^\n]*|\"(?:\\.|[^\"\\\n])*\"|'(?:\\.|[^'\\\n])*'", re.DOTALL)

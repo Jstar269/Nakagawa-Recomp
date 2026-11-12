@@ -136,9 +136,16 @@ static int set_env(const char *name, const char *value) {
  * makes the device. `--depth 32` turns Ace Mode on with the line's depth=32 (the 32-bit host depth
  * buffer, #2051), and `--depth-ref PATH` sets SR_GPU_DEPTH_REF, the file host-depth writes in a
  * key-off run and compares against with the key on.
+ * `--ssaa 2|4` turns Ace Mode on with that supersampling factor (#2073; it runs the host twin), and
+ * `--ssaa-ref PATH` sets SR_GPU_SSAA_REF (ssaa-edge's reference: a run without supersampling writes
+ * it, a supersampled run at the same scale checks it). `--ssaa-budget-mb N`, `--ssaa-max-dim N` and
+ * `--ssaa-expect F` force the size check's limits and name the factor ssaa-limit expects.
  * Recipes pass arguments, not a `VAR=value` prefix, which cmd.exe does not accept. */
 int main(int argc, char **argv) {
     int twin_arg = 0, twin_key = 0, twin_key_on = 0, authentic = 0, repl_only = 0, pcache_arg = 0, depth_arg = 0;
+    int ssaa_arg = 0, ssaa_expect = 0;
+    unsigned long long ssaa_budget_mb = 0;
+    unsigned ssaa_dim = 0;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--authentic") == 0) { authentic = 1; continue; }
         if (strcmp(argv[i], "--twin-key") == 0) {
@@ -160,6 +167,21 @@ int main(int argc, char **argv) {
             depth_arg = 1;
             continue;
         }
+        if (strcmp(argv[i], "--ssaa") == 0 || strcmp(argv[i], "--ssaa-budget-mb") == 0 ||
+            strcmp(argv[i], "--ssaa-max-dim") == 0 || strcmp(argv[i], "--ssaa-expect") == 0) {
+            char *end = NULL;
+            const unsigned long long v = i + 1 < argc ? strtoull(argv[i + 1], &end, 10) : 0;
+            if (i + 1 >= argc || !end || *end || end == argv[i + 1]) {
+                fprintf(stderr, "gpu coherence selftest: %s needs a number\n", argv[i]);
+                return 2;
+            }
+            if (strcmp(argv[i], "--ssaa") == 0) ssaa_arg = (int)v;
+            else if (strcmp(argv[i], "--ssaa-budget-mb") == 0) ssaa_budget_mb = v;
+            else if (strcmp(argv[i], "--ssaa-max-dim") == 0) ssaa_dim = (unsigned)v;
+            else ssaa_expect = (int)v;
+            i++;
+            continue;
+        }
         if (strcmp(argv[i], "--pipeline-cache") == 0) {
             char root[4096];
             if (i + 1 >= argc || !absolute_path(argv[++i], root, sizeof root) || !set_env("SR_USER_DATA_ROOT", root)) {
@@ -178,6 +200,7 @@ int main(int argc, char **argv) {
                          : strcmp(argv[i], "--twin") == 0 ? "SR_GPU_TWIN_COLOR"
                          : strcmp(argv[i], "--twin-ref") == 0 ? "SR_GPU_TWIN_REF"
                          : strcmp(argv[i], "--depth-ref") == 0 ? "SR_GPU_DEPTH_REF"
+                         : strcmp(argv[i], "--ssaa-ref") == 0 ? "SR_GPU_SSAA_REF"
                          : strcmp(argv[i], "--dst-read") == 0 ? "SR_GPU_DST_READ"
                          : strcmp(argv[i], "--ace") == 0 ? "SR_ACE" : NULL;
         if (!name || i + 1 >= argc || !set_env(name, argv[++i])) {
@@ -212,13 +235,17 @@ int main(int argc, char **argv) {
         return 1;
     }
 #else
-    if ((twin_arg || twin_key || depth_arg) && !authentic &&
-        !ace_init_spec(depth_arg ? "v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;twin=off;depth=32"
-                       : twin_key && twin_key_on ? "v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;twin=on"
-                                                 : "v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;twin=off", NULL)) {
-        fprintf(stderr, "gpu coherence selftest: FAIL the Ace line for the host twin or depth=32 was refused\n");
-        free(arena);
-        return 1;
+    {
+        char spec[192];
+        snprintf(spec, sizeof spec, "v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;twin=%s%s%s",
+                 twin_key && twin_key_on ? "on" : "off", depth_arg ? ";depth=32" : "",
+                 ssaa_arg == 4 ? ";ssaa=4" : ssaa_arg == 2 ? ";ssaa=2" : "");
+        if ((twin_arg || twin_key || depth_arg || ssaa_arg) && !authentic && !ace_init_spec(spec, NULL)) {
+            fprintf(stderr, "gpu coherence selftest: FAIL the Ace line for the host twin, depth=32 or "
+                    "supersampling was refused\n");
+            free(arena);
+            return 1;
+        }
     }
 #endif
 #ifdef SR_GPU_TEXSCALE_SELFTEST
@@ -254,6 +281,7 @@ int main(int argc, char **argv) {
 #endif
 #endif
 
+    gegpu_selftest_ssaa_limits(ssaa_budget_mb << 20, ssaa_dim, ssaa_expect);
     if (!sdl3vk_init("Nakagawa GPU coherence selftest") || !gegpu_init()) {
         fprintf(stderr, "gpu coherence selftest: SKIP (Vulkan initialization unavailable)\n");
         sdl3vk_shutdown();
