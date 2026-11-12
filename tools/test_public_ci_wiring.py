@@ -925,7 +925,7 @@ class WindowsRuntimePartitionTests(unittest.TestCase):
                 part = self.part_of(name)
                 self.assertIsNotNone(part, f"{name}: a step with its own limit must be in a part")
                 step_limits[cast(str, part)] = step_limits.get(cast(str, part), 0) + int(limit.group(1))
-        self.assertEqual(step_limits, {"routes": 15})
+        self.assertEqual(step_limits, {"smoke": 15})
         for group, (parts, timeout) in _windows_matrix_entries(self.block).items():
             with self.subTest(group=group):
                 self.assertEqual(timeout, sum(25 + step_limits.get(part, 0) for part in parts))
@@ -1871,7 +1871,7 @@ class PublicExportJobTests(unittest.TestCase):
         "Upload the verified fixture",
         "Gate profile-zero imports on HLE review status",
         "Build Nakagawa Font Copy",
-        "Build the homebrew fixtures for the Windows routes",
+        "Build the homebrew fixtures for the Windows job",
         "Upload the homebrew fixtures",
     )
     PROFILE_ZERO_CONDITION = "if: ${{ env.BUILD_PROFILE_ZERO == 'true' }}"
@@ -2088,10 +2088,10 @@ class PublicExportJobTests(unittest.TestCase):
                 self.assertIn("name: profile-zero-fixture", consumer)
                 self.assertIn("path: fixtures/profile_zero/prebuilt", consumer)
 
-    def test_homebrew_fixtures_are_built_from_source_for_the_windows_routes(self) -> None:
+    def test_homebrew_fixtures_are_built_from_source_for_the_windows_job(self) -> None:
         """#2143: the homebrew route tests run on Windows on programs this run built."""
         build = "\n".join(_ci_step(self.blocks["public_export"],
-                                   "Build the homebrew fixtures for the Windows routes") or [])
+                                   "Build the homebrew fixtures for the Windows job") or [])
         self.assertIn("for fixture in pspdev_phase5 homebrew_view; do", build)
         self.assertIn('if [ "$(git rev-parse HEAD)" != "$GITHUB_SHA" ]; then', build)
         self.assertIn('printf \'%s\\n\' "$GITHUB_SHA" > "$out/BUILT_FROM"', build)
@@ -2104,14 +2104,15 @@ class PublicExportJobTests(unittest.TestCase):
         windows = self.blocks["windows_runtime"]
         fetch = "Fetch the homebrew fixtures built from source"
         run = "Run the homebrew import routes on the fixtures built from source"
-        # The routes part, after the profile-zero routes; the fetch comes first.
-        self.assertLess(_ci_step_index(windows, "Build and run profile-zero production routes"),
+        # The smoke part (the shortest measured group), after its display smoke; the fetch
+        # comes first.
+        self.assertLess(_ci_step_index(windows, "Build and run display presentation smoke"),
                         _ci_step_index(windows, fetch))
         names = self._step_names(windows)
         self.assertEqual(names[names.index(fetch) + 1], run)
         for name in (fetch, run):
             with self.subTest(step=name):
-                self.assertIn("        if: contains(matrix.parts, 'routes')", _ci_step(windows, name) or [])
+                self.assertIn("        if: contains(matrix.parts, 'smoke')", _ci_step(windows, name) or [])
         self.assertIn("path: ${{ runner.temp }}/homebrew-fixtures",
                       "\n".join(_ci_step(windows, fetch) or []))
         step = "\n".join(_ci_step(windows, run) or [])
@@ -4036,12 +4037,12 @@ class CiRunHarness(unittest.TestCase):
 
 
 class WindowsRoutesFixtureTests(CiRunHarness):
-    """Every run that starts the Windows job also builds the fixtures its routes part downloads."""
+    """Every run that starts the Windows job also builds the fixtures its parts download."""
 
     def test_the_fixtures_are_built_whenever_the_windows_routes_run(self) -> None:
         # Failing before: an installer-only change starts windows_runtime (run_installer) with
         # run_python and run_windows false, so public_export built neither the profile-zero nor
-        # the homebrew fixtures, and the routes part's downloads failed.
+        # the homebrew fixtures, and the routes and smoke parts' downloads failed.
         event = {"action": "synchronize", "pull_request": {"number": 7, "draft": False,
                                                            "base": {"sha": "a" * 40}}}
         cases = (["assets/installer/nakagawa.iss"], ["assets/upstream/innosetup.lock.json"],

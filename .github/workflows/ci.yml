@@ -370,7 +370,7 @@ jobs:
   # profile_zero_fixture job (docs/CI.md, "Jobs per run"). They run after the export
   # step, so the export still sees the clean checkout, and only under BUILD_PROFILE_ZERO:
   # that job's old condition, plus run_installer, which also starts the Windows job whose
-  # routes part downloads these fixtures (an installer-only change starts it with
+  # smoke and routes parts download these fixtures (an installer-only change starts it with
   # run_python and run_windows both false). The steps never gate the
   # export: the job-level condition and the export step name no path output.
   public_export:
@@ -545,12 +545,12 @@ jobs:
         run: make --no-print-directory -C src/psp_companion BUILD_DIR="$RUNNER_TEMP/fontcopy"
 
       # #2143: the homebrew import route tests (tools/test_player_package_route.py) run in the
-      # Windows routes part, which has no PSPDEV, on programs built here from the fixtures'
+      # Windows smoke part, which has no PSPDEV, on programs built here from the fixtures'
       # own sources with the same locked PSPDEV. The folder holds each fixture's EBOOT.PBP
       # beside the main.c and Makefile it was built from, BUILT_FROM (the commit), and
       # SHA256SUMS over all of them; the tests check the sources against their checkout
       # and the routes step checks BUILT_FROM against its own commit. Nothing is committed.
-      - name: Build the homebrew fixtures for the Windows routes
+      - name: Build the homebrew fixtures for the Windows job
         if: ${{ env.BUILD_PROFILE_ZERO == 'true' }}
         run: |
           set -euo pipefail
@@ -2283,9 +2283,10 @@ jobs:
     # exactly one part, and steps that depend on one another (the staged smoke on the
     # production smoke) share it. tools/test_public_ci_wiring.py pins that every gate
     # the serial job ran still runs in exactly one part.
-    #   smoke:     production pipeline, AOT-gap, staged smoke, player, UI, display
+    #   smoke:     production pipeline, AOT-gap, staged smoke, player, UI, display,
+    #              homebrew import routes
     #   ladder:    full platform ladder
-    #   routes:    profile-zero production routes, native core tests, homebrew import routes
+    #   routes:    profile-zero production routes, native core tests
     #   selftests: cosimulation + mutants, scheduler, dispatch, FP, strbuf, HLE thread,
     #              Media Foundation H.264 media
     #   fuzz-0/1:  synthetic VFPU fuzzer, its cases split between two shards (FUZZ_CASE_SHARD)
@@ -2311,18 +2312,19 @@ jobs:
     # needs.windows_runtime.result aggregates all groups, and a failing step fails
     # its group's job.
     # A group's timeout is the sum of its parts' former 25-minute limits, plus the own
-    # limit of any step added to a part since: routes has the homebrew import routes'
-    # 15 minutes (#2143), so 40.
+    # limit of any step added to a part since: smoke has the homebrew import routes'
+    # 15 minutes (#2143), so 40. They run in smoke, measured at 8.1 minutes, rather than
+    # routes, measured at 13.9, so that no group becomes the run's longest job.
     strategy:
       fail-fast: false
       matrix:
         include:
           - group: smoke
             parts: [smoke]
-            timeout: 25
+            timeout: 40
           - group: routes
             parts: [routes]
-            timeout: 40
+            timeout: 25
           - group: ladder-fuzz
             parts: [ladder, fuzz-0, fuzz-1]
             timeout: 75
@@ -2665,8 +2667,26 @@ jobs:
           command -v pwsh
           mingw32-make --no-print-directory CC=gcc VULKAN_SDK=/ucrt64 profile-zero-e2e
 
+      # Presentation path on a source-owned guest: fill the PSP framebuffer, hand
+      # it to sceDisplaySetFrameBuf and wait for vblank, once per frame. The other
+      # smokes prove compute and the dispatch seam but never reach the display
+      # source, so a scheduler change that stops delivering vblanks to a guest
+      # whose only wait is a vblank wait was invisible to every hosted gate. Runs
+      # headless (--sched), then through the normal --sched --gui route with
+      # SR_VIDEO=offscreen: the assertions are the guest-visible framebuffer
+      # word and accepted offscreen-present ordering, so no display is required.
+      - name: Build and run display presentation smoke
+        if: contains(matrix.parts, 'smoke')
+        shell: msys2 {0}
+        env:
+          MSYS2_PATH_TYPE: inherit
+        run: |
+          set -euo pipefail
+          command -v pwsh
+          mingw32-make --no-print-directory CC=gcc VULKAN_SDK=/ucrt64 display-smoke-run
+
       - name: Fetch the homebrew fixtures built from source
-        if: contains(matrix.parts, 'routes')
+        if: contains(matrix.parts, 'smoke')
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: homebrew-fixtures
@@ -2683,7 +2703,7 @@ jobs:
       # The tests build the player themselves, so VULKAN_SDK names the UCRT64 Vulkan headers
       # as every other Windows step does, and MAKEFLAGS lets that build use the runner's cores.
       - name: Run the homebrew import routes on the fixtures built from source
-        if: contains(matrix.parts, 'routes')
+        if: contains(matrix.parts, 'smoke')
         shell: msys2 {0}
         timeout-minutes: 15
         env:
@@ -2712,24 +2732,6 @@ jobs:
             test_player_package_route.TestPlayerPackageRoute.test_homebrew_second_folder_stop_keeps_folders_out_of_the_report \
             2>&1 | tee "$log"
           tail -n 1 "$log" | tr -d '\r' | grep -qx 'OK'
-
-      # Presentation path on a source-owned guest: fill the PSP framebuffer, hand
-      # it to sceDisplaySetFrameBuf and wait for vblank, once per frame. The other
-      # smokes prove compute and the dispatch seam but never reach the display
-      # source, so a scheduler change that stops delivering vblanks to a guest
-      # whose only wait is a vblank wait was invisible to every hosted gate. Runs
-      # headless (--sched), then through the normal --sched --gui route with
-      # SR_VIDEO=offscreen: the assertions are the guest-visible framebuffer
-      # word and accepted offscreen-present ordering, so no display is required.
-      - name: Build and run display presentation smoke
-        if: contains(matrix.parts, 'smoke')
-        shell: msys2 {0}
-        env:
-          MSYS2_PATH_TYPE: inherit
-        run: |
-          set -euo pipefail
-          command -v pwsh
-          mingw32-make --no-print-directory CC=gcc VULKAN_SDK=/ucrt64 display-smoke-run
 
       # AOT <-> interpreter differential over the same source-owned guest bytes.
       # One pipeline run produces both execution lanes; the comparator diffs the

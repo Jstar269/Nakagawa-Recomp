@@ -101,7 +101,7 @@ LOW_FIXED_ADDRESS_BASE = 0x08804000
 
 HOMEBREW_REQUIRED = "NK_HOMEBREW_E2E_REQUIRED"
 # A folder of programs built from the fixtures below by a host with PSPDEV, for a host
-# without it (hosted CI's Windows routes run the homebrew tests on the folder its
+# without it (hosted CI's Windows smoke part runs the homebrew tests on the folder its
 # public_export job builds, .github/workflows/ci.yml): <dir>/<fixture>/EBOOT.PBP beside a
 # copy of the fixture's main.c and Makefile it was built from, and <dir>/SHA256SUMS over all.
 HOMEBREW_PREBUILT = "NK_HOMEBREW_EBOOT_DIR"

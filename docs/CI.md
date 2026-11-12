@@ -99,15 +99,16 @@ The jobs:
   condition; the job and that step still read no path output. The profile-zero steps follow,
   under the former job's condition (`allow_substantive` and `run_python` or `run_windows`,
   carried by the job's `BUILD_PROFILE_ZERO`), and upload the same `profile-zero-fixture`
-  artifact. `BUILD_PROFILE_ZERO` also holds for `run_installer`: an installer-only change
-  (`assets/installer/**`, say) starts the Windows job with `run_python` and `run_windows`
-  both false, and its `routes` part downloads this job's artifacts. Their `python3` is now the job's CPython 3.15.2 rather than the runner image's.
+  artifact. Their `python3` is now the job's CPython 3.15.2 rather than the runner image's.
   Under the same condition, the job then builds the two homebrew fixtures
   (`fixtures/pspdev_phase5`, `fixtures/homebrew_view`) and uploads them as `homebrew-fixtures`
-  for the Windows `routes` part (#2143).
+  for the Windows `smoke` part (#2143). `BUILD_PROFILE_ZERO` also holds for `run_installer`:
+  an installer-only change (`assets/installer/**`, say) starts the Windows job with
+  `run_python` and `run_windows` both false, and its `smoke` and `routes` parts download
+  this job's artifacts.
   The Python, native and Windows jobs wait for this job as before; native now also waits for
-  the fixture builds: about 25 seconds for the profile-zero fixture, plus the homebrew
-  fixtures' build, to be measured on the first full run.
+  the fixture builds: about 25 seconds for the profile-zero fixture, plus a few seconds for
+  the two homebrew programs (3 seconds locally in WSL).
 - **Python.** Four shards over the full suite, and four over the Makefile-coupled subset
   (see [Python test sharding](#python-test-sharding)). `test_production_smoke` alone takes
   about 16 minutes and has a shard to itself, so a fifth shard would not shorten the job.
@@ -150,8 +151,8 @@ only when `run_installer` is true. The Markdown lint, the main smoke and the fix
 two always-required jobs they now belong to, so `tools/ci_required.py` no longer takes a result
 or run flag of their own. Each merged job's `timeout-minutes` covers its parts: hygiene 35
 (15 + 10 + 10), public export 30 (15 + 15), each Windows group 25 per part plus the own
-limit of a step added to a part since (smoke 25, routes 40 with the homebrew import routes'
-15, ladder-fuzz 75, selftests 25), and each Python shard 60, twice the former 30 because it
+limit of a step added to a part since (smoke 40 with the homebrew import routes' 15, routes
+25, ladder-fuzz 75, selftests 25), and each Python shard 60, twice the former 30 because it
 does about twice the work.
 
 The trade-offs: a step that fails stops the later steps of its own job, so a pull request that
@@ -2147,7 +2148,7 @@ developer runs locally, without private inputs:
   validates the guest ProgramImage, generates a public AOT package, launches it
   through the headless production runtime, and checks all seven named
   guest-service cases for each manifest. It runs in the `routes` part, in the
-  `routes` group (40 minutes) of the `windows_runtime` job, and took about 123 seconds locally for both package
+  `routes` group (25 minutes) of the `windows_runtime` job, and took about 123 seconds locally for both package
   builds and runtime launches. The guest bytes are built from the fixture's own
   `main.c` and `Makefile` by the profile-zero steps of the `public_export` job (pinned PSPDEV, checked
   against the committed `fixtures/profile_zero/prebuilt/SHA256SUMS`) and downloaded
@@ -2162,7 +2163,7 @@ developer runs locally, without private inputs:
   result file, save and first rasterized frame with the values pinned in
   `tools/test_profile_zero_e2e.py` (`CROSS_HOST_DIGESTS`), so Windows and Linux must
   produce the same bytes (#306).
-  The `routes` part also runs the homebrew import route tests (#2143,
+  The `smoke` part runs the homebrew import route tests (#2143,
   `tools/test_player_package_route.py`), on the player the tests build, through the code the
   player's library uses when a user picks a homebrew `EBOOT.PBP`
   (`player_psn_package_inspect` and `player_psn_package_convert`) and its launch
@@ -2199,11 +2200,12 @@ developer runs locally, without private inputs:
   `ARGV0=disc0:/PSP_GAME/SYSDIR/EBOOT.BIN` and `DATA_BYTES=-1`, and the test failed on it.
   **Minutes added:** not yet measured on a hosted runner. Locally the step took 419 seconds
   (Windows 11, `-j4`, a shared host, no compiler cache), most of it the player build and the
-  two package builds; the `routes` group compiler cache holds no player objects until a run on
-  `main` saves them, since only `smoke` built the player before. The step's own limit is 15
-  minutes and the `routes` group's limit is 40, its former 25 plus those 15, so the group's
-  measured 13.9 minutes and the step's whole limit fit. The first full run records the real
-  figure here.
+  two package builds. No compiler-cache saving is assumed: the player and its two test
+  programs are each compiled and linked by one command, which the cache does not store, and
+  the builds run under a fresh temporary folder. The step's own limit is 15 minutes and the
+  `smoke` group's limit is 40, its former 25 plus those 15. The steps run in `smoke`, measured
+  at 8.1 minutes, rather than in `routes`, measured at 13.9, so that the longest Windows group
+  stays below a Python shard. The first full run records the real figure here.
   The same job builds Nakagawa Font Copy (`src/psp_companion/Makefile`), the PSP app
   behind the player's font import, through its user-mode import gate; nothing from
   that build is uploaded. Public
