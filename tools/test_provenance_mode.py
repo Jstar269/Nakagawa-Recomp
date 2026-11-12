@@ -334,7 +334,8 @@ class WorkflowConditionTest(unittest.TestCase):
 
     def test_fork_job_reads_no_secret_and_never_contacts_the_authority(self) -> None:
         block = _code(self.fork)
-        self.assertNotIn("secrets.", block)
+        # Every way an expression reaches the secrets context: secrets.X, secrets['X'], toJSON(secrets).
+        self.assertIsNone(re.search(r"\bsecrets\b", block), "the fork job names the secrets context")
         self.assertNotIn("history-private", block)
         self.assertNotIn("TRUSTED_REPO", block)
         self.assertNotIn("gh api", block)
@@ -471,11 +472,35 @@ class ForkCheckTest(unittest.TestCase):
         self._write_profile(["LATER.md", "README.md"], exclude_paths=["x"])
         tip = self._commit()
         code, lines = pm.fork_check(self.repo, tip, head, audit_tool=self._stub_audit(0))
-        self.assertEqual(code, 0, lines)
         self.assertIn(f"merge base {self.base}", lines)
         self.assertIn("profile: 1 path(s) added, 0 removed", lines)
         self.assertIn("  added TOPIC.md", lines)
+        self.assertFalse([line for line in lines if line.startswith("PROFILE_RULES_CHANGED")], lines)
         self.assertEqual(self._policy_seen(lines)["include_paths"], ["README.md", "TOPIC.md"])
+        # Failing-before: the audit judged the lagging head by its branch point's rules, so the
+        # exclusion added on the tip after it branched never applied to it, and the check passed.
+        self.assertEqual(code, 1, lines)
+        (finding,) = [line for line in lines if line.startswith("PROFILE_RULES_BEHIND")]
+        self.assertIn("the default branch changed exclude_paths after", finding)
+        # Merged with the tip, the head carries the tip's rules and passes.
+        _git(self.repo, "checkout", "--quiet", "topic")
+        _git(self.repo, "merge", "--quiet", "--no-edit", "-X", "theirs", "main")
+        self._write_profile(["LATER.md", "README.md", "TOPIC.md"], exclude_paths=["x"])
+        merged = self._commit()
+        code, lines = pm.fork_check(self.repo, tip, merged, audit_tool=self._stub_audit(0))
+        self.assertEqual(code, 0, lines)
+
+    def test_a_head_that_lags_only_the_bases_paths_passes(self) -> None:
+        _git(self.repo, "checkout", "--quiet", "-b", "topic", self.base)
+        (self.repo / "TOPIC.md").write_text("topic\n", encoding="utf-8")
+        self._write_profile(["README.md", "TOPIC.md"])
+        head = self._commit()
+        _git(self.repo, "checkout", "--quiet", "main")
+        (self.repo / "LATER.md").write_text("later\n", encoding="utf-8")
+        self._write_profile(["LATER.md", "README.md"])
+        tip = self._commit()
+        code, lines = pm.fork_check(self.repo, tip, head, audit_tool=self._stub_audit(0))
+        self.assertEqual(code, 0, lines)
 
     def test_unrelated_histories_are_an_input_error(self) -> None:
         _git(self.repo, "checkout", "--quiet", "--orphan", "island")
@@ -500,12 +525,48 @@ class ForkCheckTest(unittest.TestCase):
                 self.assertTrue(any(line.startswith("CI_CONTEXT_COLLISION: .github/workflows/spoof.yml")
                                     for line in lines), lines)
 
-    def test_the_gate_workflow_itself_may_name_both_checks(self) -> None:
+    def test_the_gate_workflow_may_name_both_checks_but_not_be_changed(self) -> None:
         workflow = self.repo / pm.WORKFLOW
         workflow.parent.mkdir(parents=True, exist_ok=True)
-        workflow.write_text(f"name: {pm.UPSTREAM_CONTEXT}\nname: {pm.FORK_CONTEXT}\n", encoding="utf-8")
+        workflow.write_bytes(f"name: {pm.UPSTREAM_CONTEXT}\nname: {pm.FORK_CONTEXT}\n".encode())
+        base = self._commit()
+        # Unchanged since the branch point: the trusted copy, which names both checks.
+        (self.repo / "README.md").write_text("fork, edited\n", encoding="utf-8")
         head = self._commit()
-        code, lines = pm.fork_check(self.repo, self.base, head, audit_tool=self._stub_audit(0))
+        code, lines = pm.fork_check(self.repo, base, head, audit_tool=self._stub_audit(0))
+        self.assertEqual(code, 0, lines)
+        # Failing-before: the gate workflow was skipped, so a pull request could add a job under
+        # the check's own name to it and post a green result beside the real one.
+        cases = {
+            "edited": f"name: {pm.UPSTREAM_CONTEXT}\nname: {pm.FORK_CONTEXT}\nname: {pm.FORK_CONTEXT}\n".encode(),
+            "deleted": None,
+        }
+        for case, content in cases.items():
+            with self.subTest(case=case):
+                _git(self.repo, "reset", "--quiet", "--hard", base)
+                if content is None:
+                    workflow.unlink()
+                else:
+                    workflow.write_bytes(content)
+                head = self._commit()
+                code, lines = pm.fork_check(self.repo, base, head, audit_tool=self._stub_audit(0))
+                self.assertEqual(code, 1, lines)
+                self.assertTrue(any(line.startswith(f"CI_GATE_WORKFLOW_CHANGED: {pm.WORKFLOW}")
+                                    for line in lines), lines)
+                self.assertEqual(lines[-1], f"{pm.FORK_CONTEXT}: FAIL")
+
+    def test_a_gate_workflow_changed_only_on_the_base_is_not_the_candidates(self) -> None:
+        workflow = self.repo / pm.WORKFLOW
+        workflow.parent.mkdir(parents=True, exist_ok=True)
+        workflow.write_bytes(b"name: gate v1\n")
+        branch_point = self._commit()
+        _git(self.repo, "checkout", "--quiet", "-b", "topic", branch_point)
+        (self.repo / "README.md").write_text("topic\n", encoding="utf-8")
+        head = self._commit()
+        _git(self.repo, "checkout", "--quiet", "main")
+        workflow.write_bytes(b"name: gate v2\n")
+        tip = self._commit()
+        code, lines = pm.fork_check(self.repo, tip, head, audit_tool=self._stub_audit(0))
         self.assertEqual(code, 0, lines)
 
     def test_the_real_audit_runs_against_the_candidate_tree(self) -> None:

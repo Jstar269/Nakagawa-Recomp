@@ -26,16 +26,23 @@ upstream job does, and never contacts the private authority. What comes from whe
 * the tree, the publication profile and the public ledger are the candidate's, read from its
   commit's objects. The profile a pull request carries is the one its own tree is judged by,
   so an admission inside the pull request is honoured and a head that lags the default branch
-  is still judged consistently;
+  is still judged by its own list of paths;
 * the candidate may change the profile's ``include_paths`` only. Each added or removed path is
   listed, because on a fork the fork maintainer's admission and review are the provenance
   authority. Any other change to the profile, such as an exclusion or the default disposition,
   fails the check (``PROFILE_RULES_CHANGED``): the rules a tree is judged by are not the pull
-  request's to change. The change is measured from the merge base of the base and the candidate.
+  request's to change. The change is measured from the merge base of the base and the candidate;
+* the candidate's rules, every profile key but ``include_paths``, must also equal the base's
+  (``PROFILE_RULES_BEHIND``), so a rule tightened on the default branch after the pull request
+  branched is not escaped by a head that lags it. The fix is to merge the default branch in.
 
 The check itself:
 
-* the candidate's workflows may not answer to either gate's check name;
+* the candidate may not change the gate's own workflow (``CI_GATE_WORKFLOW_CHANGED``), and its
+  other workflows may not spell either gate's check name (``CI_CONTEXT_COLLISION``). The second
+  is a byte match, a tripwire: a name built by an expression escapes it. What a fork's ruleset
+  should require is **Trusted CI verdict**, which binds the check to the trusted run, never the
+  check's name alone (docs/FORKING.md);
 * the trusted checkout's publication audit runs on the candidate's exact tree with
   ``--public-scope --provenance-self-consistency``: game data, keys, private paths, user
   paths, unclassified paths and an inconsistent ledger are refused exactly as on the upstream.
@@ -141,13 +148,21 @@ def _workflow_blobs(repo: Path, rev: str) -> dict[str, bytes]:
     return blobs
 
 
-def context_findings(workflows: dict[str, bytes]) -> list[str]:
-    """Candidate workflows, other than the gate's own, that name either gate's check.
+def context_findings(workflows: dict[str, bytes], trusted_gate: bytes | None) -> list[str]:
+    """A changed gate workflow, and candidate workflows that spell either gate's check name.
 
     A second job under the check's name would give a candidate-controlled result under the
-    context a fork maintainer reads, whatever the real check concluded.
+    context a fork maintainer reads, whatever the real check concluded. The gate's own workflow
+    names both checks, so it is held to the copy the candidate branched from (``trusted_gate``)
+    instead: a pull request that edits it could add a job under either name. The name match is
+    a byte search, a tripwire; the verdict, which binds each check to the trusted run, is what a
+    ruleset should require.
     """
     findings = []
+    if workflows.get(WORKFLOW) != trusted_gate:
+        findings.append(
+            f"CI_GATE_WORKFLOW_CHANGED: {WORKFLOW}: the pull request changes the workflow that runs this check; "
+            "a change to it reaches the default branch by the fork maintainer's own push, after review")
     for path, raw in sorted(workflows.items()):
         if path == WORKFLOW:
             continue
@@ -204,7 +219,8 @@ def fork_check(repo: Path, base: str, candidate: str, *, audit_tool: Path | None
     lines = [f"base {base_sha}", f"candidate {candidate_sha}", f"merge base {branch_point}"]
     failed = False
 
-    collisions = context_findings(_workflow_blobs(repo, candidate_sha))
+    collisions = context_findings(_workflow_blobs(repo, candidate_sha),
+                                  _workflow_blobs(repo, branch_point).get(WORKFLOW))
     lines.extend(collisions)
     failed |= bool(collisions)
 
@@ -218,10 +234,21 @@ def fork_check(repo: Path, base: str, candidate: str, *, audit_tool: Path | None
             "may change include_paths only. A change to the publication rules reaches the default branch by "
             "the fork maintainer's own push, after review")
         failed = True
+    else:
+        # The audit below judges the candidate by its own profile, so its rules must be the base's:
+        # a rule tightened on the default branch after the pull request branched would otherwise
+        # never apply to it, and a fork has no landing batch to judge the merged result.
+        behind = profile_changes(repo, base_sha, candidate_sha)[2]
+        if behind:
+            lines.append(
+                f"PROFILE_RULES_BEHIND: {POLICY}: the default branch changed {', '.join(behind)} after this "
+                "pull request branched; merge the default branch into it so its tree is judged by the "
+                "current rules")
+            failed = True
 
     # The audit takes its policy from the candidate's commit, not from the checkout it runs in. The
     # checkout is the default branch, whose profile lacks what this pull request admits and may list
-    # what a lagging head does not have yet.
+    # what a lagging head does not have yet. Its rules equal the base's, checked above.
     tool = audit_tool or (ROOT / "tools" / "publish_audit.py")
     with tempfile.TemporaryDirectory(prefix="nakagawa-fork-policy-") as scratch:
         policy = Path(scratch) / "public_source_profile.json"
@@ -247,8 +274,9 @@ def _summary(lines: list[str], code: int) -> str:
         "",
         "This repository is not the upstream, so it has no access to the upstream's private trusted",
         "ledger. This check ran the trusted default branch's publication audit on the candidate's exact",
-        "tree, under the candidate's own publication profile, and checked the public ledger's",
-        "self-consistency. A pull request may change the profile's include_paths only; the paths it adds",
+        "tree, under the candidate's own publication profile, whose rules must equal the default",
+        "branch's, and checked the public ledger's self-consistency. A pull request may change the",
+        "profile's include_paths only, and not this check's own workflow; the paths it adds",
         "or removes are listed below for review. The fork maintainer's admission",
         "(`tools/fork_init.py`, `tools/admit_paths.py`) and review are this fork's provenance authority;",
         "see docs/FORKING.md.",

@@ -148,11 +148,18 @@ the place of the trusted attestation. Like it, the job runs from your default br
 workflow and tools and reads the pull request as data, so a pull request cannot replace the check
 with its own code. It reads no secret and never contacts any authority. It:
 
-- refuses a pull request whose workflows declare a job named **Fork provenance check** or **Trusted
-  provenance attestation**, which would give a second result under the check's name;
+- refuses a pull request that changes `provenance-attestation.yml` itself, or whose other workflows
+  spell the name **Fork provenance check** or **Trusted provenance attestation**, either of which
+  could give a second result under the check's name. The name match is a byte search, a tripwire:
+  a job name built by an expression escapes it. So when you add a ruleset, require **Trusted CI
+  verdict**, which accepts the check only from the trusted run, not **Fork provenance check** by
+  name;
 - runs the trusted publication audit on the pull request's exact tree with `--public-scope
   --provenance-self-consistency`, which refuses game data, keys, firmware, private and user paths,
-  unclassified paths and an inconsistent public ledger exactly as upstream;
+  unclassified paths and an inconsistent public ledger exactly as upstream. The audit judges the
+  tree by the pull request's own profile, so it also refuses a pull request whose profile rules
+  differ from your default branch's (`PROFILE_RULES_BEHIND`): after you tighten a rule, merge the
+  default branch into older pull requests;
 - lists the paths the pull request adds to or removes from the publication profile, and says when the
   profile's rules change. Those lines are your review prompt: in your fork, your admission and your
   review are the provenance authority.
