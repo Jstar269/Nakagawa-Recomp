@@ -11347,6 +11347,11 @@ static int coherence_run_twin_key(void) {
                name);
     } else {
         const int twin_want = want > 0 || s_ssaa > 1;   /* supersampling runs it in native colour */
+        if (ace_requested()->ssaa > 1 && s_ssaa <= 1) {   /* else the --ssaa legs would test nothing */
+            fprintf(stderr, "gpu coherence selftest [%s]: FAIL gpu renderer: ssaa=%d was asked for and "
+                    "supersampling did not run\n", name, ace_requested()->ssaa);
+            ok = 0;
+        }
         if (s_twin != twin_want || (twin_want && s_twin_color != (want == 1))) {
             fprintf(stderr, "gpu coherence selftest [%s]: FAIL gpu renderer: the launch line's twin=on did not turn "
                     "the twin on (SR_GPU_TWIN_COLOR=%s): twin %s, colour %s, want %s\n", name, overridden ? env : "(unset)",

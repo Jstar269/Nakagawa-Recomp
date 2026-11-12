@@ -1623,9 +1623,10 @@ static void cell_report_worst(void) {
     char reason[128];
     memset(reason, 'r', sizeof(reason));
     reason[sizeof(reason) - 1] = '\0';
-    CHECK(ace_init_spec("v1;tier=ace;af=16;text=on;readout=on;notice=on;wide=fill;smooth=x2;sas=sinc;tess=off;twin=off;stick=126;load=fast;cull=on",
+    CHECK(ace_init_spec("v1;tier=ace;af=16;text=on;readout=on;notice=on;wide=fill;smooth=x2;sas=sinc;tess=off;twin=off;stick=126;load=fast;depth=32;ssaa=4;cull=on",
                         NULL), "the longest line was refused");
     ace_set_af_effective(8, NULL);
+    ace_set_ssaa_effective(2, reason);   /* "ssaa" and "ssaa_requested" with their reason */
     ace_note_af_failure();
     ace_set_cull_untracked(1ul);
     for (int f = 0; f < ACE_FEATURE_COUNT; f++) ace_feature_unavailable((AceFeature)f, reason);
