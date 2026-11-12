@@ -447,7 +447,7 @@ static void cell_switch(void) {
      * partial (the exit-at-VBLANK path never goes through the presenter again). "Runs first" is
      * testable because only a feature's first unavailable reason is kept: a hook run after the
      * never-ran settle would find cull already marked, and "partial: finish" would be missing. */
-    CHECK(ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=fill;smooth=off;sas=off;tess=off;tier=ace;"
+    CHECK(ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=fill;smooth=off;sas=off;tess=off;twin=off;tier=ace;"
                         "cull=on", NULL) == 1 && ace_effective()->cull == 1, "cull=on again for the finish hook");
     s_hook_ran = 0;
     ace_set_finish_hook(test_finish_hook);
