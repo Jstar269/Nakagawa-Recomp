@@ -4326,6 +4326,8 @@ static const struct { const char *code; const char *badge; } k_error_badges[] = 
     {"GAME_FILES_NOT_READY", "Game files needed"},
     {"EXPERIMENTAL_LAUNCH_UNAVAILABLE", "Not playable yet"},
     {"EXPERIMENTAL_PROFILE_FAILED", "Not saved"},
+    {"HOMEBREW_ALREADY_ADDED", "Already added"},
+    {"HOMEBREW_KEPT_COPY_NOT_DELETED", "Not deleted"},
     {"FACTORY_RESET_BUSY", "Reset waiting"},
     {"FACTORY_RESET_FAILED", "Reset stopped"},
     /* The build tools download's own codes (tools/nk_core/prereq_fetcher.py). */
