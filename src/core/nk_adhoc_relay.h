@@ -12,10 +12,11 @@
  *   - the data relay ("postoffice", port 27313): one connection per ad hoc socket, carrying the
  *     game's own PDP datagrams and PTP streams between consoles.
  *
- * This file and nk_adhoc_relay.c are this project's own code that encodes and decodes a wire
- * format: no upstream code is copied (src/core/PROVENANCE.md). The protocol is that of
- * Kethen/aemu_postoffice at commit 02abf18fd161a1639d9f93c48c4c46638c7c6d15 (the commit PPSSPP
- * 3bc60270 pins). What the code was written from:
+ * This file and nk_adhoc_relay.c encode and decode a wire format; no aemu_postoffice code is
+ * copied. nk_adhoc_relay.c is labelled derived-translated for the two parts translated from
+ * PPSSPP below (src/core/PROVENANCE.md); this header is this project's own. The protocol is
+ * that of Kethen/aemu_postoffice at commit 02abf18fd161a1639d9f93c48c4c46638c7c6d15 (the
+ * commit PPSSPP 3bc60270 pins). What the code was written from:
  *   - the packet layouts, opcode and init-type numbers and the 10 KiB and 50 KiB limits: that
  *     project's aemu_postoffice_packets.h (marked GPL-3.0-only) and adhocctl/packets_v1.h and
  *     adhocctl/pspstructs.h (PRO ONLINE notice, GPL version 3 or later); the lobby layouts are

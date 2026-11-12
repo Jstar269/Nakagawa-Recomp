@@ -192,9 +192,9 @@ so it is its own explicit choice with its own sentence in Settings. It is off by
     datagrams cannot wait for a trip through the launcher. The player starts a game with the server only when the
     user turned Online play on. That module is the only runtime file the egress allowlist test lets use the network.
 - **Where the code comes from** (`src/core/PROVENANCE.md` has the details).
-  - The relay codec (`src/core/nk_adhoc_relay.c/.h`) is this project's own code that encodes and decodes the
-    protocol's packets; no upstream code is copied. The packet layouts and limits come from aemu_postoffice's
-    headers, its login checks and port offset from PPSSPP.
+  - The relay codec (`src/core/nk_adhoc_relay.c/.h`) encodes and decodes the protocol's packets; no
+    aemu_postoffice code is copied. The packet layouts and limits come from aemu_postoffice's headers. Its login
+    checks and port offset are translated from PPSSPP, so `nk_adhoc_relay.c` is labelled derived-translated.
   - The in-process medium's lobby (`src/core/nk_adhoc_net.c`) is translated from PPSSPP's ad hoc server
     (`Core/HLE/proAdhocServer.cpp`, GPL-2.0-or-later) and labelled derived-translated. Its PDP half is this
     project's own.

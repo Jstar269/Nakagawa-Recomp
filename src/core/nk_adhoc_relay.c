@@ -5,7 +5,8 @@
  * The ad hoc relay's wire format (#1139): see nk_adhoc_relay.h, which says what each part was
  * written from. The login checks and the port offset are translated from PPSSPP at
  * 3bc60270eae3069f13dfbfdb7292a7e1375de6f6 (GPL-2.0-or-later), modified for this project
- * (2026-11-12): C99, the offset passed in. This file is conveyed as GPL-3.0-or-later. */
+ * (2026-11-12): C99, the offset passed in. Label: derived-translated
+ * (docs/provenance/INDEPENDENCE_MODEL.md). This file is conveyed as GPL-3.0-or-later. */
 
 #include "nk_adhoc_relay.h"
 
