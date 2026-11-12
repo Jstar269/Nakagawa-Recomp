@@ -6129,7 +6129,10 @@ static int coherence_run_fallback_counts(void) {
             s_ge->tex_enable = 1; s_ge->tex_addr = 0x04180000u; s_ge->tex_w = s_ge->tex_h = 8;
             s_ge->tex_filter = 4u; s_ge->tex_max_level = 7u;
             break;
-        default: break;                    /* lines and points always fall back */
+        case GEGPU_FALLBACK_LINE:          /* a textured line: the GPU draws only untextured ones */
+            s_ge->tex_enable = 1; s_ge->tex_addr = 0x04180000u; s_ge->tex_w = s_ge->tex_h = 8;
+            break;
+        default: break;                    /* points always fall back */
         }
         GeVtx p0 = { 30.0f, 30.0f, 1.0f, 1.0f, 0, 0, 1.0f, 200, 100, 50, 255 };
         GeVtx p1 = p0;
