@@ -224,6 +224,11 @@ though its call record is the fiber's first and a host entry's own.
 The ordinary lanes run the same cases on output without resume points. There every thread must be
 refused, and a hand-written frame for `rs` must be refused as `body-not-resumable`.
 
+The resume cases run last, and only when the phases before them reported no divergence: a resumed
+run is compared with the uninterrupted one, which means nothing once the lanes disagree, and a run
+that has already failed keeps its `cosim: FAIL` verdict instead of entering cells its defect may
+never end (an interpreter that drops delay slots never counts the `rs` loop down).
+
 What this does not prove: the harness's park is a stub and it has one thread, so nothing here
 runs the real `sr_yield` or describes another fiber's records, and the uninterrupted run and the
 snapshot come from one process. `mingw32-make aot-return-boundary-thread-selftest` covers the
