@@ -1038,6 +1038,7 @@ class SpExitWalkFanOutTests(unittest.TestCase):
         # Without the skip all 146 computed jumps fan out, 186,296 reach calls.
         self.assertLessEqual(work["fanouts"], 2, work)
         self.assertLessEqual(work["reach"], 3 * len(insns), work)
+        # On this body the walk serves each computed jump once.
         self.assertEqual(work["fanouts"] + work["skipped"], jumps, work)
         self.assertEqual(result, _stock_sp_exit_walk(elf, _WALK_BASE, insns, labels))
 
@@ -1079,6 +1080,36 @@ class SpExitWalkFanOutTests(unittest.TestCase):
             with self.subTest(words=[f"{w:08x}" for w in words]):
                 self.assertEqual(codegen._sp_exit_walk(elf, start, insns, labels), stock)
         self.assertGreater(walked, 1000, "most random bodies must reach the walk itself")
+
+    def test_a_fact_lost_between_fan_outs_is_fanned_out_again(self):
+        """The second jr's state lacks a fact the first one sent to every label: a frame slot
+        (the sw $s0 over the saved $sp), or a register value ($fp moved). Both are a fact
+        of hub missing from the new state, so the second fan-out runs and the reload of $sp
+        at label 8 becomes foreign, as it is for the previous walk."""
+        slot_lost = [
+            0x27BDFFE0,  # 0  addiu sp, sp, -32
+            0x03A0F021,  # 1  addu  fp, sp, zero
+            0xAFDD0008,  # 2  sw    sp, 8(fp)
+            0x01000008,  # 3  jr    t0
+            0x00000000,  # 4  nop
+            0xAFD00008,  # 5  sw    s0, 8(fp): the saved $sp is overwritten
+            0x01000008,  # 6  jr    t0
+            0x00000000,  # 7  nop
+            0x8FDD0008,  # 8  lw    sp, 8(fp)
+            0x03E00008,  # 9  jr    ra
+            0x00000000,  # 10 nop
+        ]
+        value_moved = list(slot_lost)
+        value_moved[5] = 0x27BEFFF0  # 5  addiu fp, fp, -16: $fp is known, at another offset
+        for name, words in (("slot", slot_lost), ("value", value_moved)):
+            elf = _WalkElf(words)
+            insns = {_WALK_BASE + 4 * i for i in range(len(words))}
+            labels = {_WALK_BASE + 20, _WALK_BASE + 32}
+            with self.subTest(name):
+                result = codegen._sp_exit_walk(elf, _WALK_BASE, insns, labels)
+                self.assertEqual(result, _stock_sp_exit_walk(elf, _WALK_BASE, insns, labels))
+                self.assertEqual(tuple([(a - _WALK_BASE) // 4 for a in sorted(part)]
+                                       for part in result), ([9], [3, 6, 9], [8]))
 
     def test_an_order_dependent_body_keeps_its_stock_verdict(self):
         """A store through a register a join forgot misses the frame, so the verdict depends
