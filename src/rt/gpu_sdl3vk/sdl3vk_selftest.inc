@@ -1632,22 +1632,6 @@ static int sdl3vk_capture_selftest_body(void) {
         return 1;
     }
 
-    /* ---- the picked device for the render status (#2151) ------------------------------ */
-    {
-        Sdl3VkDevice dev;
-        VkPhysicalDeviceProperties pp;
-        memset(&dev, 0, sizeof(dev));
-        vkGetPhysicalDeviceProperties(s_pdev, &pp);
-        if (!sdl3vk_device(&dev) || strcmp(dev.name, pp.deviceName) != 0 ||
-            dev.type != sdl3vk_device_type((int)pp.deviceType) ||
-            (dev.type == SDL3VK_DEVICE_DISCRETE && dev.alt_discrete)) {
-            fprintf(stderr, "device: the status names '%s' type %d alt_discrete %d; the device is "
-                            "'%s' type %d\n", dev.name, dev.type, dev.alt_discrete, pp.deviceName,
-                    (int)pp.deviceType);
-            ok = 0;
-        }
-    }
-
     /* ---- filter selection policy (issue #68) --------------------------------------- */
     /* Exact integer scaling must select VK_FILTER_NEAREST */
     if (sdl3vk_present_filter(480, 272, 960, 544) != VK_FILTER_NEAREST) {

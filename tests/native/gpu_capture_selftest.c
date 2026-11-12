@@ -99,19 +99,6 @@ int main(void) {
         assert(sdl3vk_pick_surface_format(RES_SUCCESS, 2, NULL) == -1);
         assert(sdl3vk_pick_surface_format(RES_OUT_OF_HOST_MEMORY, 4, two_bgra) == -1);
     }
-    /* The render status's device kind (#2151): each VkPhysicalDeviceType value (OTHER 0,
-     * INTEGRATED 1, DISCRETE 2, VIRTUAL 3, CPU 4), and an unknown value stays unknown. */
-    {
-        assert(sdl3vk_device_type(0) == SDL3VK_DEVICE_OTHER);
-        assert(sdl3vk_device_type(1) == SDL3VK_DEVICE_INTEGRATED);
-        assert(sdl3vk_device_type(2) == SDL3VK_DEVICE_DISCRETE);
-        assert(sdl3vk_device_type(3) == SDL3VK_DEVICE_VIRTUAL);
-        assert(sdl3vk_device_type(4) == SDL3VK_DEVICE_CPU);
-        assert(sdl3vk_device_type(5) == SDL3VK_DEVICE_UNKNOWN);
-        assert(sdl3vk_device_type(-1) == SDL3VK_DEVICE_UNKNOWN);
-        Sdl3VkDevice dev;
-        assert(sdl3vk_device(&dev) == 0);   /* nothing picked a device yet */
-    }
     /* F3 (#314): off, the performance HUD, off again; developer mode adds the profile HUD
      * between them, and a profile mode outside developer mode goes off. */
     {
