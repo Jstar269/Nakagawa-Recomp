@@ -1353,7 +1353,7 @@ static uint8_t *png_build(const PngSpec *sp, size_t *out_n) {
             for (unsigned x = 0; x < pw; x++)
                 for (unsigned c = 0; c < ch; c++)
                     put_sample(cur, (size_t)x * ch + c, (unsigned)sp->depth,
-                               px[(((size_t)(y0 + y * dy)) * sp->w + x0 + x * dx) * ch + c]);
+                               px[(((size_t)y0 + (size_t)y * dy) * sp->w + x0 + (size_t)x * dx) * ch + c]);
             const unsigned f = (unsigned)(row_no++ % 5);
             bw_byte(&raw, (uint8_t)f);
             for (size_t i = 0; i < rb; i++) {
