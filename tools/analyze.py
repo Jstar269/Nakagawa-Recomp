@@ -1635,14 +1635,18 @@ def _gpr_writes(word):
 def _defining_word(elf, start, use_addr, reg):
     """The last word in ``[start, use_addr)`` that writes ``reg``, as
     ``(addr, word)``, or ``None`` if none does or the straight-line run is
-    broken by a control transfer or an unclassified encoding."""
+    broken by a control transfer, an unclassified encoding or any REGIMM word.
+
+    A REGIMM trap writes no GPR, so reading through it would be sound, but it
+    would change the answer for inputs that analyzed before; it stops the walk,
+    as it always has, until a change that regenerates the library takes it."""
     for addr in range(use_addr - 4, start - 4, -4):
         raw = elf.read_at_vaddr(addr, 4)
         if raw is None or len(raw) < 4:
             return None
         word = int.from_bytes(raw, "little")
         writes = _gpr_writes(word)
-        if writes is None or writes == "unknown":
+        if writes is None or writes == "unknown" or word >> 26 == 1:
             return None
         if reg in writes:
             return addr, word

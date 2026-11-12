@@ -334,10 +334,12 @@ class TestGprWrites(unittest.TestCase):
         sparse = FakeElf({0x1000: 0x30C3000C, 0x1008: 0x00000000})
         self.assertIsNone(analyze._defining_word(sparse, 0x1000, 0x1008, 3))
 
-    def test_a_trap_does_not_end_the_backward_walk(self):
-        # teqi either raises an exception or falls through, writing no GPR: the definition
-        # before it still reaches the use after it.
+    def test_a_trap_still_ends_the_backward_walk(self):
+        # teqi writes no GPR, but reading through it would change the analysis of inputs that
+        # analyzed before this change, so it still ends the walk (a nop does not).
         words = {0x1000: 0x30C3000C, 0x1004: 0x048C0007, 0x1008: 0x00000000}
+        self.assertIsNone(analyze._defining_word(FakeElf(words), 0x1000, 0x1008, 3))
+        words[0x1004] = 0x00000000
         self.assertEqual(analyze._defining_word(FakeElf(words), 0x1000, 0x1008, 3),
                          (0x1000, 0x30C3000C))
 
@@ -353,6 +355,19 @@ class TestBoundedComputedGoto(unittest.TestCase):
     def test_shifted_index_names_the_scaled_pads(self):
         # andi $v1, $a2, 3; sll $v1, $v1, 2 -> the same four pads.
         words = _computed_goto_words(0x30C30003, inserted=(0x00031880,))  # sll $v1, $v1, 2
+        targets = analyze.bounded_computed_goto_targets(FakeElf(words), self.RANGES)
+        self.assertEqual(set(targets), self.PADS)
+
+    def test_a_trap_in_the_window_keeps_the_ladder_unresolved(self):
+        # teqi $a0, 7 between the index definition and the jump: the ladder stays unresolved and
+        # the analysis gains no entries, as before the REGIMM decoder classified traps.
+        words = _computed_goto_words(inserted=(0x048C0007,))
+        elf = FakeElf(words)
+        self.assertEqual(set(analyze.bounded_computed_goto_targets(elf, self.RANGES)), set())
+        starts, _ = analyze.analyze(elf)
+        self.assertEqual(self.PADS & set(starts), set())
+        # With a nop in the same place the ladder resolves.
+        words = _computed_goto_words(inserted=(0x00000000,))
         targets = analyze.bounded_computed_goto_targets(FakeElf(words), self.RANGES)
         self.assertEqual(set(targets), self.PADS)
 
