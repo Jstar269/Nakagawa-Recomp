@@ -477,7 +477,7 @@ ge-scene-selftest: $(RT_GE_O)
 	"$(PYTHON)" -c "import pathlib, sys; d = pathlib.Path(sys.argv[1]); d.mkdir(parents=True, exist_ok=True); [p.unlink() for p in d.glob('gescene_f*.bin')]" "$(GE_SCENE_SELFTEST_DIR)"
 	$(CC) $(CFLAGS) -Werror $(LDFLAGS) -o $(GE_SCENE_SELFTEST) \
 		tests/native/ge_scene_selftest.c $(RT_GE_O) src/rt/ge_capture.c \
-		src/rt/flight_recorder.c src/rt/perf.c -lm
+		src/rt/flight_recorder.c src/rt/perf.c src/rt/ace.c -lm
 	$(GE_SCENE_SELFTEST) "$(GE_SCENE_SELFTEST_DIR)"
 
 native-core-tests: ge-scene-selftest
