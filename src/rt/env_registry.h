@@ -126,7 +126,7 @@
     X("SR_GPU_READBACK_FULL", "flag-nonzero", "off (only the rows guest memory keeps are copied)", "gpu_sdl3vk/ge_gpu.c", "When enabled, a readback to guest memory copies the whole scaled target, the reference path for the narrowed copy.") \
     X("SR_GPU_SCALE", "number", "1 (falls back to SR_RESOLUTION_SCALE)", "gpu_sdl3vk/ge_gpu.c", "Internal render scale multiplier for the GPU GE renderer.") \
     X("SR_GPU_SSAA_REF", "path", "unset (no reference check)", "gpu_sdl3vk/ge_gpu_selftest.inc", "Reference file for the coherence self-test ssaa-edge case: a run without supersampling writes it, a supersampled run at that scale checks it.") \
-    X("SR_GPU_STATS", "flag-nonzero", "off", "gpu_sdl3vk/ge_gpu.c", "Enables statistics output in the Vulkan GE backend.") \
+    X("SR_GPU_STATS", "flag-nonzero", "off", "gpu_sdl3vk/ge_gpu.c,gui.c", "Enables statistics output in the Vulkan GE backend, with one line per accepted present of the primitives it handed to the software rasterizer.") \
     X("SR_GPU_SUBMIT_BATCH", "number", "SUBMIT_BATCH_MAX", "gpu_sdl3vk/ge_gpu.c", "Number of GPU ops per submit batch; values outside 1 to the maximum are ignored.") \
     X("SR_GPU_SYNC_SUBMIT", "flag-nonzero", "off (asynchronous submit)", "gpu_sdl3vk/ge_gpu.c", "When enabled, GPU command submission is synchronous instead of asynchronous.") \
     X("SR_GPU_TEX_SHADOW_DISABLE", "flag-nonzero", "off (texture shadow enabled)", "gpu_sdl3vk/ge_gpu.c", "Disables the GPU texture shadow when set to a non-empty value other than 0.") \

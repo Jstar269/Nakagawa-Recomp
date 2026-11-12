@@ -6145,60 +6145,93 @@ static int coherence_run_fallback_reasons(void) {
  * reason, after one GPU-drawn sprite, two primitives in that reason's state go through the real
  * hook: each counts one software primitive for that reason and none for another, no GPU
  * primitive is counted, and only the first counts a readback, because only then was the target
- * GPU-valid. A colour buffer in main RAM has no target, so it counts no readback. */
-static int coherence_run_fallback_counts(void) {
+ * GPU-valid. A colour buffer in main RAM has no target, so it counts no readback.
+ * The same scene is then drawn again from the same start without reading the counts between
+ * the primitives: the frame's bytes in guest memory must be identical, because reading the
+ * counts after each present (gui.c) is observation only. */
+static int fallback_counts_scene(int r, int observe, GeGpuFallbackCounts c[3], uint8_t **frame,
+                                 size_t *frame_bytes) {
     const uint32_t base = 0x04000000u | 0x00100000u;
+    const char *name = gegpu_fallback_token(r);
+    GeState saved = *s_ge;
+    int ok = 1;
+    coherence_reset_targets();
+    /* The same start each time: the frame buffers this scene can draw into, cleared, the 8x8
+     * texture inside the first included (its 1024-wide frame draws only the first rows). */
+    const size_t span = 512u * FB_H * 4u;
+    memset(SR_HOST(base), 0, span);
+    memset(SR_HOST(0x08000000u), 0, span);
+    if (!coherence_queue_g1_batch(base, 512u, 3u)) {
+        fprintf(stderr, "gpu coherence selftest [fallback-counts]: %s: the GPU sprite was not "
+                        "queued\n", name);
+        *s_ge = saved;
+        return 0;
+    }
+    if (observe) gegpu_fallback_counts(&c[0]);
+    s_ge->clear = 0;
+    switch (r) {
+    case GEGPU_FALLBACK_STENCIL:      /* a depth-tested stencil-fail INCR */
+        s_ge->stencil_enable = 1; s_ge->ztest_enable = 1;
+        s_ge->stencil_test = 2u; s_ge->stencil_op = 4u;
+        break;
+    case GEGPU_FALLBACK_COLOR_TEST:    /* a modulated texel: psp.frag's colour is inexact */
+        s_ge->color_test_enable = 1; s_ge->color_test = 2u;
+        s_ge->tex_enable = 1; s_ge->tex_addr = 0x04180000u; s_ge->tex_w = s_ge->tex_h = 8;
+        s_ge->tex_func = 0x100u; s_ge->tex_filter = 0u; s_ge->tex_max_level = 0u;
+        break;
+    case GEGPU_FALLBACK_LOGIC_OP: s_ge->logic_op_enable = 1; break;
+    case GEGPU_FALLBACK_WRITE_MASK: s_ge->mask_rgb = 0x0000F0u; break;   /* half of red */
+    case GEGPU_FALLBACK_RAM_FB: s_ge->fbp = 0x08000000u; break;
+    case GEGPU_FALLBACK_WIDE_STRIDE: s_ge->fbw = 1024u; break;
+    case GEGPU_FALLBACK_MIPS:          /* level 7 of an 8x8 texture: no Vulkan chain holds it */
+        s_ge->tex_enable = 1; s_ge->tex_addr = 0x04180000u; s_ge->tex_w = s_ge->tex_h = 8;
+        s_ge->tex_filter = 4u; s_ge->tex_max_level = 7u;
+        break;
+    case GEGPU_FALLBACK_LINE:          /* a textured line: the GPU draws only untextured ones */
+        s_ge->tex_enable = 1; s_ge->tex_addr = 0x04180000u; s_ge->tex_w = s_ge->tex_h = 8;
+        break;
+    default: break;                    /* points always fall back */
+    }
+    const uint32_t fbp = s_ge->fbp;
+    GeVtx p0 = { 30.0f, 30.0f, 1.0f, 1.0f, 0, 0, 1.0f, 200, 100, 50, 255 };
+    GeVtx p1 = p0;
+    p1.x = 40.0f;
+    p1.y = 40.0f;
+    for (int k = 1; k <= 2; k++) {
+        int drawn = r == GEGPU_FALLBACK_LINE ? hook_line(&p0, &p1, 0)
+                  : r == GEGPU_FALLBACK_POINT ? hook_point(&p0, 0)
+                  : hook_sprite(&p0, &p1, 0);
+        if (drawn) {
+            fprintf(stderr, "gpu coherence selftest [fallback-counts]: %s: the GPU drew it\n", name);
+            ok = 0;
+        }
+        if (observe) gegpu_fallback_counts(&c[k]);
+    }
+    /* The frame as the guest sees it: whatever the GPU target still holds, brought back first. */
+    GeGpuFbDescriptor desc = { .addr = base, .format = 3, .stride = 512u, .width = 480, .height = FB_H };
+    if (gegpu_sync_guest_fb(&desc) == GEGPU_SYNC_FAILED) {
+        fprintf(stderr, "gpu coherence selftest [fallback-counts]: %s: the frame could not be "
+                        "brought back\n", name);
+        ok = 0;
+    }
+    *frame_bytes = span;
+    *frame = (uint8_t *)malloc(*frame_bytes);
+    if (*frame) memcpy(*frame, SR_HOST(fbp), *frame_bytes);
+    else ok = 0;
+    *s_ge = saved;
+    return ok;
+}
+
+static int coherence_run_fallback_counts(void) {
     GeState saved = *s_ge;
     int ok = 1;
     for (int r = 0; r < GEGPU_FALLBACK_REASONS; r++) {
         const char *name = gegpu_fallback_token(r);
-        coherence_reset_targets();
-        if (!coherence_queue_g1_batch(base, 512u, 3u)) {
-            fprintf(stderr, "gpu coherence selftest [fallback-counts]: %s: the GPU sprite was not "
-                            "queued\n", name);
-            ok = 0;
-            continue;
-        }
         GeGpuFallbackCounts c[3];
-        gegpu_fallback_counts(&c[0]);
-        s_ge->clear = 0;
-        switch (r) {
-        case GEGPU_FALLBACK_STENCIL:      /* a depth-tested stencil-fail INCR */
-            s_ge->stencil_enable = 1; s_ge->ztest_enable = 1;
-            s_ge->stencil_test = 2u; s_ge->stencil_op = 4u;
-            break;
-        case GEGPU_FALLBACK_COLOR_TEST:    /* a modulated texel: psp.frag's colour is inexact */
-            s_ge->color_test_enable = 1; s_ge->color_test = 2u;
-            s_ge->tex_enable = 1; s_ge->tex_addr = 0x04180000u; s_ge->tex_w = s_ge->tex_h = 8;
-            s_ge->tex_func = 0x100u; s_ge->tex_filter = 0u; s_ge->tex_max_level = 0u;
-            break;
-        case GEGPU_FALLBACK_LOGIC_OP: s_ge->logic_op_enable = 1; break;
-        case GEGPU_FALLBACK_WRITE_MASK: s_ge->mask_rgb = 0x0000F0u; break;   /* half of red */
-        case GEGPU_FALLBACK_RAM_FB: s_ge->fbp = 0x08000000u; break;
-        case GEGPU_FALLBACK_WIDE_STRIDE: s_ge->fbw = 1024u; break;
-        case GEGPU_FALLBACK_MIPS:          /* level 7 of an 8x8 texture: no Vulkan chain holds it */
-            s_ge->tex_enable = 1; s_ge->tex_addr = 0x04180000u; s_ge->tex_w = s_ge->tex_h = 8;
-            s_ge->tex_filter = 4u; s_ge->tex_max_level = 7u;
-            break;
-        case GEGPU_FALLBACK_LINE:          /* a textured line: the GPU draws only untextured ones */
-            s_ge->tex_enable = 1; s_ge->tex_addr = 0x04180000u; s_ge->tex_w = s_ge->tex_h = 8;
-            break;
-        default: break;                    /* points always fall back */
-        }
-        GeVtx p0 = { 30.0f, 30.0f, 1.0f, 1.0f, 0, 0, 1.0f, 200, 100, 50, 255 };
-        GeVtx p1 = p0;
-        p1.x = 40.0f;
-        p1.y = 40.0f;
-        for (int k = 1; k <= 2; k++) {
-            int drawn = r == GEGPU_FALLBACK_LINE ? hook_line(&p0, &p1, 0)
-                      : r == GEGPU_FALLBACK_POINT ? hook_point(&p0, 0)
-                      : hook_sprite(&p0, &p1, 0);
-            if (drawn) {
-                fprintf(stderr, "gpu coherence selftest [fallback-counts]: %s: the GPU drew it\n", name);
-                ok = 0;
-            }
-            gegpu_fallback_counts(&c[k]);
-        }
+        uint8_t *seen = NULL, *unseen = NULL;
+        size_t seen_bytes = 0, unseen_bytes = 0;
+        memset(c, 0, sizeof(c));
+        if (!fallback_counts_scene(r, 1, c, &seen, &seen_bytes)) ok = 0;
         const unsigned long long want_rb = r == GEGPU_FALLBACK_RAM_FB ? 0u : 1u;
         int bad = !c[0].ready || !c[2].ready || c[2].gpu_prims != c[0].gpu_prims ||
                   c[1].sw_prims[r] != c[0].sw_prims[r] + 1u ||
@@ -6218,12 +6251,20 @@ static int coherence_run_fallback_counts(void) {
                     want_rb, want_rb, (unsigned)(c[2].gpu_prims - c[0].gpu_prims), c[2].ready);
             ok = 0;
         }
-        *s_ge = saved;
+        if (!fallback_counts_scene(r, 0, c, &unseen, &unseen_bytes)) ok = 0;
+        if (!seen || !unseen || seen_bytes != unseen_bytes ||
+            memcmp(seen, unseen, seen_bytes) != 0) {
+            fprintf(stderr, "gpu coherence selftest [fallback-counts]: %s: the frame differs when "
+                            "the counts are read between the primitives\n", name);
+            ok = 0;
+        }
+        free(seen);
+        free(unseen);
     }
     coherence_reset_targets();
     *s_ge = saved;
-    if (ok) printf("gpu coherence selftest: PASS %-22s %d reasons through the hooks\n",
-                   "fallback-counts", GEGPU_FALLBACK_REASONS);
+    if (ok) printf("gpu coherence selftest: PASS %-22s %d reasons through the hooks, frames identical "
+                   "with and without reading the counts\n", "fallback-counts", GEGPU_FALLBACK_REASONS);
     return ok;
 }
 

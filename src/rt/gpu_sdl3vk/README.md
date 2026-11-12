@@ -326,6 +326,42 @@ depth aliasing.
 
 `SR_GPU_NORTT=1` sends every render-target read through that 1x path, for bisecting.
 
+## Software fallback report (#2151)
+
+A primitive in a state this renderer cannot draw goes to `ge.c`'s software rasterizer
+(`software_fallback_begin`), with a synchronous colour and depth readback when its target was on the
+GPU. `gegpu_fallback_counts` counts both by reason (`GEGPU_FALLBACK_*`), always: one increment per
+software primitive, on top of the `fallback_prims` count that was already unconditional. After each
+accepted present `gui.c` steps tumbling windows of `GEGPU_FALLBACK_WINDOW_FRAMES` presents. A reason
+is over the rule in a window when its software primitives are at least `GEGPU_FALLBACK_MIN_PRIMS` and
+`GEGPU_FALLBACK_SHARE_PM` per mille of all primitives drawn (GPU and software), or its readbacks are at
+least `GEGPU_FALLBACK_READBACKS`. Over the rule in `GEGPU_FALLBACK_WINDOWS` windows in a row, it is
+reported once per run as `BOOT_EVENT phase=render_fallback` (`docs/DEBUGGING.md`), and the native
+player names it on the game's page. Reading the counts changes nothing the renderer draws
+(`fallback-counts` in `gpu-coherence-selftest` compares the frame's bytes with and without it).
+
+The values and their basis (2026-11-12):
+
+| Constant | Value | Basis |
+| --- | --- | --- |
+| `GEGPU_FALLBACK_READBACKS` | 30 a window | Measured cost: in six earlier private runs with fallback readbacks (Hot Shots Tennis on an older build, four runs, and two other titles), a least-squares fit of each perf interval's `vulkan_readback_ms` gave 1.8 to 3.5 ms per fallback readback, against under 0.02 ms for any other readback. 30 in 120 presents is 0.45 to 0.9 ms a present, 3 to 5 % of a 60 Hz present period. |
+| `GEGPU_FALLBACK_MIN_PRIMS` | 4000 a window | Estimated cost: the same fit of `ge_cpu_ms` gave 22 to 28 µs per software primitive in the three runs where it could separate the primitives from their readbacks (in the other three it could not). 4000 in 120 presents, about 33 a present, is then about 0.8 ms a present, the same share of the frame as the readback threshold. |
+| `GEGPU_FALLBACK_SHARE_PM` | 10 (1 %) | Both flagship titles drew about 3,370 GPU primitives a present over their measured routes (below); 1 % of that is about 34, the primitive threshold's level, so a busy scene needs a matching share before it is reported. |
+| `GEGPU_FALLBACK_WINDOW_FRAMES` | 120 presents | A rule parameter, not measured: 2 s at 60 presents a second, 4 s at 30, so a single transition or menu frame does not fill a window. |
+| `GEGPU_FALLBACK_WINDOWS` | 3 in a row | A rule parameter, not measured: a report needs at least 6 s of sustained cost, the kind that makes a game run slower. |
+
+Flagship measurement: Hot Shots Tennis (title screen and a rally, 15,181 presents, 39.3 million GPU
+primitives) and LittleBigPlanet (a play route run twice in Authentic, 10,243 presents, 33.9 million GPU
+primitives), on the GPU GE with `SR_GPU_STATS=1`, drew no primitive in software and took no fallback
+readback. Neither title reports a reason at any threshold above zero, and counting changes nothing they
+draw. Their data cannot place the thresholds from above (no fallback to measure); the cost figures
+above come from the earlier runs, and the thresholds should be checked again on a title whose GPU path
+falls back.
+
+To measure again: run a title on the GPU GE with `SR_GPU_STATS=1`; each accepted present prints
+`GEGPU_FALLBACK present gpu=<n>` followed by `<reason>=<software primitives>/<readbacks>` for each reason
+it had. Sum them over windows of presents and compare with the rule.
+
 ## Environment variables
 
 - `SR_GPU_GE=1` — enable the GPU rasterizer (SDL3 build only; default off).

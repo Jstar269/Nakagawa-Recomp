@@ -210,14 +210,13 @@ static inline const char *gegpu_fallback_token(int reason) {
  * windows of GEGPU_FALLBACK_WINDOW_FRAMES accepted presents; a reason is reported once per run
  * when, in GEGPU_FALLBACK_WINDOWS windows in a row, its software primitives were at least
  * GEGPU_FALLBACK_MIN_PRIMS and GEGPU_FALLBACK_SHARE_PM per mille of all primitives drawn, or its
- * readbacks at least GEGPU_FALLBACK_READBACKS. PROVISIONAL: chosen, not measured. They are
- * replaced by values measured on real titles (src/rt/gpu_sdl3vk/README.md says how); until
- * then a crossing reaches the player but is not drawn in the game window. */
-#define GEGPU_FALLBACK_WINDOW_FRAMES 120u   /* PROVISIONAL */
-#define GEGPU_FALLBACK_WINDOWS 3u           /* PROVISIONAL */
-#define GEGPU_FALLBACK_SHARE_PM 50u         /* PROVISIONAL: 5 % */
-#define GEGPU_FALLBACK_READBACKS 30u        /* PROVISIONAL: one every 4 presents */
-#define GEGPU_FALLBACK_MIN_PRIMS 16u        /* PROVISIONAL */
+ * readbacks at least GEGPU_FALLBACK_READBACKS. Each value's basis, measured where it says so, is
+ * in src/rt/gpu_sdl3vk/README.md, "Software fallback report". */
+#define GEGPU_FALLBACK_WINDOW_FRAMES 120u   /* 2 s at 60 presents a second */
+#define GEGPU_FALLBACK_WINDOWS 3u           /* in a row: at least 6 s */
+#define GEGPU_FALLBACK_SHARE_PM 10u         /* 1 % of all primitives */
+#define GEGPU_FALLBACK_READBACKS 30u        /* one every 4 presents: about 0.5-0.9 ms a present */
+#define GEGPU_FALLBACK_MIN_PRIMS 4000u      /* about 33 a present: about 0.8 ms a present */
 
 typedef struct GeGpuReplayStats {
     unsigned long long queue_submits;
