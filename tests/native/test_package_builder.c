@@ -1572,8 +1572,8 @@ restore:
  * package_builder_start in place of Python with argv[1] "--build-speed-probe" in place of
  * nk_cli.py. It writes the --build-speed it was given to <progress file>.speed and
  * stays, that file still open, until <progress file>.release appears, so the parent can
- * read the priority it runs at. Like a real build child, it finishes its file only when
- * it exits: the parent reads the file after that, never while the child runs. */
+ * read the priority it runs at. The file is complete only once the child exits, so the
+ * parent reads it after that, never while the child runs. */
 static int run_build_speed_probe(int argc, char *argv[]) {
     const char *speed = NULL;
     const char *progress = NULL;
@@ -1592,7 +1592,7 @@ static int run_build_speed_probe(int argc, char *argv[]) {
     }
     snprintf(path, sizeof(path), "%s.release", progress);
     for (int i = 0; i < 1500 && !nk_platform_file_exists(path); ++i) route_pause_ms(20);
-    /* Never released in 30 s: the parent is gone or stuck; say so in the exit code. */
+    /* Not released within 30 s: exit 5, which the parent's exit-code check reports. */
     bool released = nk_platform_file_exists(path);
     if (fclose(f) != 0) return 4;
     return released ? 0 : 5;
@@ -1665,10 +1665,7 @@ static void test_build_speed_reaches_the_child(void) {
         }
         assert(!session.is_building);
         assert(session.exit_code == 0);
-        /* Read only now the child has exited. A file a running child writes is not
-           finished, and on Windows a name a rename has just made can refuse a reader
-           (sharing violation) while the renaming process still holds it: reading as
-           soon as the name appeared failed landing runs at random. */
+        /* The child has exited, so its file is complete. */
         snprintf(path, sizeof(path), "%s.speed", session.progress_file_path);
         {
             FILE *f = fopen(path, "rb");
