@@ -405,11 +405,11 @@ status word through the table in [Status words](COMPATIBILITY.md#status-words). 
 the project's test route and read as a claim about the user's game (#1297), so only developer mode names it, in a
 `FOOTNOTE`. A title with an enhancement package then has an ENHANCEMENTS card (eyebrow and a tag, OPTIONAL for a
 package the maintainer released and EXPERIMENTAL for any other; [ENHANCEMENT_CONTRACT.md](ENHANCEMENT_CONTRACT.md#910-experimental-or-released)
-section 9.10). Only the package the player ships in `assets/enhancements/` can read OPTIONAL: a package in the user's
-data folder is tagged EXPERIMENTAL whatever it declares. The card holds the switch 60 FPS GAME LOGIC: ON or OFF
-(`PRIMARY` while on, never the default focus, disabled while a game starts or runs or the title's package builds),
-then a `BODY_S` line saying it is an optional enhancement made for this game
-and that off plays the original game as released ([ENHANCEMENT_CONTRACT.md](ENHANCEMENT_CONTRACT.md#9-declarative-frame-rate-rescale-packages-60-hz-logic)
+section 9.10). Only a package found in the source tree's `assets/enhancements/` can read OPTIONAL, never one from
+the user's data folder, which is tagged EXPERIMENTAL whatever it declares. The card holds the switch 60 FPS GAME
+LOGIC: ON or OFF (`PRIMARY` while on, never the default focus, disabled while a game starts or runs or the title's
+package builds), then a `BODY_S` line saying it is an optional enhancement made for this game and that off plays the
+original game as released ([ENHANCEMENT_CONTRACT.md](ENHANCEMENT_CONTRACT.md#9-declarative-frame-rate-rescale-packages-60-hz-logic)
 section 9). When the switch is saved on but the package is gone, the card stays and says why in `error`, and the
 primary action reads ENHANCEMENT UNAVAILABLE. Under the cards, one row that wraps at a larger text size: ADD TO
 STEAM (the [Add to Steam](#add-to-steam-built) dialog), REPORT A PROBLEM, and REMOVE FROM LIBRARY (a `DANGER`

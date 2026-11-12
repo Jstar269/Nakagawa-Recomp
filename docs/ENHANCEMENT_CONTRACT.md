@@ -445,9 +445,9 @@ enhancement package id a build records, not its declaration.
 
 Only the maintainer releases a package the project ships in `assets/enhancements/` (section 5.1), by a decision
 recorded in that package's entry below, with what was measured and the limits known when it was released. The
-player honours `"experimental": false` only in the package it loads from `assets/enhancements/`: a package in the
-user's data folder, which comes first (section 5.1), still loads and plays but is always shown as experimental,
-whatever it declares.
+player honours `"experimental": false` only in a package it finds in the source tree's `assets/enhancements/`
+(section 5.1), never in one from the user's data folder: a package there, which comes first, still loads and plays
+but is always shown as experimental, whatever it declares.
 
 #### 9.10.1. *Hot Shots Tennis* (UCUS98701): `hst.timing.native_60hz`
 
