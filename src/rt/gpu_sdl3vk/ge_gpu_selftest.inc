@@ -2100,27 +2100,57 @@ static float coherence_spr_expect(SprAxis ax, int nearest, uint32_t d, uint32_t 
     return 16.0f * floorf(pos);
 }
 
+typedef struct { int x, n; uint32_t tflt; float u0, u1, v0, v1; const char *name; } SprCell;
+
+/* Every sample stays inside texels 0..15, so clamping never decides a value. */
+static const SprCell k_spr_cells[] = {
+    { 100, 12, 0x000u, 2.0f, 14.0f, 2.0f, 14.0f, "nearest-1to1" },
+    { 120, 12, 0x000u, 2.5f, 14.5f, 2.5f, 14.5f, "nearest-half-origin" },
+    { 140, 12, 0x000u, 2.25f, 14.25f, 2.75f, 14.75f, "nearest-quarter-origin" },
+    { 160, 12, 0x000u, 2.0f, 14.0f, 14.5f, 2.5f, "nearest-flipped-v" },
+    { 180, 6, 0x000u, 2.25f, 14.25f, 2.25f, 14.25f, "nearest-minified" },
+    { 200, 12, 0x101u, 2.0f, 14.0f, 2.0f, 14.0f, "linear-1to1" },
+    { 220, 12, 0x101u, 2.5f, 14.5f, 2.5f, 14.5f, "linear-half-origin" },
+    { 240, 12, 0x101u, 2.0f, 14.0f, 14.5f, 2.5f, "linear-flipped-v" },
+};
+#define SPR_NEAREST_1TO1 4   /* the first four cells: nearest, one texel per pixel */
+
+/* The 16x16 gradient texture and a display list drawing `cells` as through-mode sprites at row y0 of
+ * the 8888 target at fba (stride 512), through ge.c's interpreter and the production hooks. */
+static void coherence_sprite_list(const SprCell *cells, int ncells, int y0, uint32_t fba, uint32_t stride);
+/* sprite-scaled's checks of the device image `dev` (at the render scale; freed here) and guest VRAM. */
+static int coherence_sprite_check(const SprCell *cells, int ncells, int y0, const uint32_t *fb, uint32_t stride,
+                                  uint32_t *dev, int ok);
+
 static int coherence_run_sprite_scaled(void) {
     const uint32_t fba = 0x00160000u, base = 0x04000000u | fba, stride = 512u;
     const size_t bytes = (size_t)stride * FB_H * 4u;
     uint32_t *fb = (uint32_t *)SR_HOST(base);
+    const SprCell *cells = k_spr_cells;
+    const int ncells = (int)(sizeof(k_spr_cells) / sizeof(k_spr_cells[0])), y0 = 10;
+    coherence_sprite_list(cells, ncells, y0, fba, stride);
+
+    uint32_t *dev = (uint32_t *)malloc((size_t)SCL_W * SCL_H * 4u);
+    if (!dev) return 0;
+    coherence_reset_targets();
+    memset(fb, 0, bytes);
+    sr_gpu_vram_dirty(base, (uint32_t)bytes);
+    ge_set_gpu_hooks(&k_hooks);
+    ge_run_list(COH_SAMPLE_LIST, 0);
+    GeGpuFbDescriptor desc = { .addr = base, .format = 3, .stride = stride,
+                               .width = 480, .height = 272 };
+    int ok = gegpu_sync_guest_fb(&desc);
+    Target *t = ok ? target_find_by_fba(fba) : NULL;
+    ok = t != NULL && coherence_read_device(t->img, VK_IMAGE_ASPECT_COLOR_BIT, &t->layout,
+                                            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, 4u, dev);
+    return coherence_sprite_check(cells, ncells, y0, fb, stride, dev, ok);
+}
+
+static void coherence_sprite_list(const SprCell *cells, int ncells, int y0, uint32_t fba, uint32_t stride) {
     uint32_t *tex = (uint32_t *)SR_HOST(COH_SAMPLE_TEX);
     for (unsigned v = 0; v < 16u; v++)
         for (unsigned u = 0; u < 16u; u++) tex[v * 16u + u] = 0xFF000000u | ((16u * v) << 8) | (16u * u);
     sr_gpu_vram_dirty(COH_SAMPLE_TEX, 16u * 16u * 4u);
-
-    /* Every sample stays inside texels 0..15, so clamping never decides a value. */
-    static const struct { int x, n; uint32_t tflt; float u0, u1, v0, v1; const char *name; } cells[] = {
-        { 100, 12, 0x000u, 2.0f, 14.0f, 2.0f, 14.0f, "nearest-1to1" },
-        { 120, 12, 0x000u, 2.5f, 14.5f, 2.5f, 14.5f, "nearest-half-origin" },
-        { 140, 12, 0x000u, 2.25f, 14.25f, 2.75f, 14.75f, "nearest-quarter-origin" },
-        { 160, 12, 0x000u, 2.0f, 14.0f, 14.5f, 2.5f, "nearest-flipped-v" },
-        { 180, 6, 0x000u, 2.25f, 14.25f, 2.25f, 14.25f, "nearest-minified" },
-        { 200, 12, 0x101u, 2.0f, 14.0f, 2.0f, 14.0f, "linear-1to1" },
-        { 220, 12, 0x101u, 2.5f, 14.5f, 2.5f, 14.5f, "linear-half-origin" },
-        { 240, 12, 0x101u, 2.0f, 14.0f, 14.5f, 2.5f, "linear-flipped-v" },
-    };
-    const int ncells = (int)(sizeof(cells) / sizeof(cells[0])), y0 = 10;
     RawSpriteVtx *vtx = (RawSpriteVtx *)SR_HOST(COH_SAMPLE_VERTS);
     uint32_t *dl = (uint32_t *)SR_HOST(COH_SAMPLE_LIST);
     int p = 0, nv = 0;
@@ -2164,21 +2194,11 @@ static int coherence_run_sprite_scaled(void) {
     DL_EMIT(0x0F, 0);
     DL_EMIT(0x0C, 0);
     #undef DL_EMIT
+}
 
+static int coherence_sprite_check(const SprCell *cells, int ncells, int y0, const uint32_t *fb, uint32_t stride,
+                                  uint32_t *dev, int ok) {
     const uint32_t s = (uint32_t)s_scale;
-    uint32_t *dev = (uint32_t *)malloc((size_t)SCL_W * SCL_H * 4u);
-    if (!dev) return 0;
-    coherence_reset_targets();
-    memset(fb, 0, bytes);
-    sr_gpu_vram_dirty(base, (uint32_t)bytes);
-    ge_set_gpu_hooks(&k_hooks);
-    ge_run_list(COH_SAMPLE_LIST, 0);
-    GeGpuFbDescriptor desc = { .addr = base, .format = 3, .stride = stride,
-                               .width = 480, .height = 272 };
-    int ok = gegpu_sync_guest_fb(&desc);
-    Target *t = ok ? target_find_by_fba(fba) : NULL;
-    ok = t != NULL && coherence_read_device(t->img, VK_IMAGE_ASPECT_COLOR_BIT, &t->layout,
-                                            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, 4u, dev);
     if (!ok) fprintf(stderr, "gpu coherence selftest [sprite-scaled]: draw or device read failed\n");
     int bad = 0;
     for (int c = 0; ok && c < ncells; c++) {
@@ -6096,8 +6116,39 @@ static int coherence_run_fallback_reasons(void) {
             ok = 0;
         }
     }
+    /* Write masks: a channel whose native bits are all masked or all written is the colour write
+     * mask's; any other falls back. Clear mode checks RGB when it writes colour (0x100) and alpha
+     * when it writes alpha (0x200); a draw's alpha is the stencil plane. */
+    struct { const char *what; int clear; uint32_t mode, fmt, rgb, alpha; int want; } wm[] = {
+        {"draw 8888 green masked", 0, 0u, 3u, 0x00ff00u, 0x00u, -1},
+        {"draw 8888 partial green", 0, 0u, 3u, 0x00f000u, 0x00u, GEGPU_FALLBACK_WRITE_MASK},
+        {"draw 8888 partial alpha", 0, 0u, 3u, 0x000000u, 0x7fu, -1},
+        {"clear 8888 alpha 0xff", 1, 0x300u, 3u, 0x000000u, 0xffu, -1},
+        {"clear 8888 alpha 0x7f", 1, 0x300u, 3u, 0x000000u, 0x7fu, GEGPU_FALLBACK_WRITE_MASK},
+        {"clear 4444 alpha 0x0f", 1, 0x300u, 2u, 0x000000u, 0x0fu, -1},
+        {"clear 4444 alpha 0x1f", 1, 0x300u, 2u, 0x000000u, 0x1fu, GEGPU_FALLBACK_WRITE_MASK},
+        {"clear 5551 alpha 0x7f", 1, 0x300u, 1u, 0x000000u, 0x7fu, -1},
+        {"clear 565 rgb 0x070307", 1, 0x300u, 0u, 0x070307u, 0x00u, -1},
+        {"clear 565 rgb 0x070707", 1, 0x300u, 0u, 0x070707u, 0x00u, GEGPU_FALLBACK_WRITE_MASK},
+        {"clear alpha only, partial rgb", 1, 0x200u, 3u, 0x0f55f0u, 0x00u, -1},
+        {"clear colour only, partial alpha", 1, 0x100u, 3u, 0x000000u, 0xc3u, -1},
+        {"clear colour, partial rgb", 1, 0x100u, 3u, 0x0f55f0u, 0x00u, GEGPU_FALLBACK_WRITE_MASK},
+        {"clear depth only, partial masks", 1, 0x400u, 3u, 0x0f55f0u, 0xc3u, -1},
+    };
+    s_ge->stencil_enable = 0; s_ge->ztest_enable = 0;
+    for (unsigned i = 0; i < sizeof(wm) / sizeof(wm[0]); i++) {
+        s_ge->clear = wm[i].clear; s_ge->clear_mode = wm[i].mode; s_ge->fbfmt = wm[i].fmt;
+        s_ge->mask_rgb = wm[i].rgb; s_ge->mask_alpha = (int)wm[i].alpha;
+        const int got = gpu_state_unsupported_reason();
+        if (got != wm[i].want) {
+            fprintf(stderr, "gpu coherence selftest [fallback-reasons]: %s gave %d, want %d\n",
+                    wm[i].what, got, wm[i].want);
+            ok = 0;
+        }
+    }
     *s_ge = saved;
-    if (ok) printf("gpu coherence selftest: PASS %-22s 14 cells\n", "fallback-reasons");
+    if (ok) printf("gpu coherence selftest: PASS %-22s 14 cells, %u write-mask cells\n", "fallback-reasons",
+                   (unsigned)(sizeof(wm) / sizeof(wm[0])));
     return ok;
 }
 
@@ -7607,6 +7658,25 @@ static int wide_picture_check(const char *what, const uint32_t *pic, int cols, c
             else if (x < d + 480u) want = frame[y * 512u + x - d];
             else want = want_wings ? canvas[y * 512u + x - 480u] : 0u;
             const uint32_t got = pic[(size_t)y * (uint32_t)cols + x];
+            /* With supersampling (contract 10.21) the frame is the average of its samples: a pixel by
+             * an edge mixes the colours on either side, so each channel lies within those of the
+             * guest pixels around it. The wings come from the canvas and stay exact. */
+            if (s_ssaa > 1 && x >= d && x < d + 480u && (got & 0x00FFFFFFu) != (want & 0x00FFFFFFu)) {
+                const uint32_t fx = x - d;
+                int inside = 1;
+                for (int sh = 0; sh < 24; sh += 8) {
+                    uint32_t lo = 255u, hi = 0u;
+                    for (uint32_t ny = y ? y - 1u : 0u; ny <= y + 1u && ny < FB_H; ny++)
+                        for (uint32_t nx = fx ? fx - 1u : 0u; nx <= fx + 1u && nx < 480u; nx++) {
+                            const uint32_t c = (frame[ny * 512u + nx] >> sh) & 0xFFu;
+                            if (c < lo) lo = c;
+                            if (c > hi) hi = c;
+                        }
+                    const uint32_t g = (got >> sh) & 0xFFu;
+                    if (g < lo || g > hi) inside = 0;
+                }
+                if (inside) continue;
+            }
             if ((got & 0x00FFFFFFu) != (want & 0x00FFFFFFu)) {
                 fprintf(stderr, "gpu coherence selftest [wide-fill]: present %s: picture (%u,%u) = %08x, want "
                                 "%08x\n", what, x, y, (unsigned)got, (unsigned)want);
@@ -8122,7 +8192,12 @@ static int coherence_run_depth_evict_holder(void) {
  *
  * twin-sync (`--twin native`, scale 1): a write the twin does not take (wgen bumped by hand) makes
  * the next present show the authentic image and re-seed the twin once; the present after it
- * shows the twin again, equal to the image. */
+ * shows the twin again, equal to the image. Two sub-cells then run a GPU block transfer from T1 to
+ * T3 with T3's twin behind (a mirrored write must not bring it in step: twin_note_write's `in_step`)
+ * and with T1's twin behind (the twins must not repeat the copy: hook_xfer's `src->tgen == src->wgen`).
+ *
+ * twin-drain-fail: as twin-alloc-fail with the drain of twin_off_for_run failing too
+ * (s_twin_inject_drain_fail): the twin goes off and nothing is freed. */
 
 #define TWIN_T1 0x00100000u                /* 5551, 512 x 272 x 2 bytes */
 #define TWIN_T2 0x00150000u                /* 8888 */
@@ -8348,6 +8423,7 @@ typedef struct {
     uint8_t *vram[3];                      /* guest VRAM of T1, T2, T3 after the scene */
     uint32_t *shown[3];                    /* what the presenter would show for each */
     int shown_scale[3];
+    int shown_twin[3];                     /* the presenter would show the twin */
     TwinRef ref;
 } TwinRun;
 
@@ -8384,15 +8460,21 @@ static int twin_run_scene(TwinRun *r) {
         if (!r->vram[i]) return 0;
         memcpy(r->vram[i], SR_HOST(0x04000000u | k_twin_fba[i]), bytes);
         r->ref.vram[i] = twin_hash(r->vram[i], bytes, 0xcbf29ce484222325ull);
-        /* what gegpu_present hands the presenter (target_prepare_present's choice) */
+        /* what gegpu_present hands the presenter (target_prepare_present's choice, and with
+         * supersampling its resolve) */
         t->tshow = s_twin && t->timg && !s_twin_authentic_shown && t->tgen == t->wgen;
+        if (t->tshow && s_ssaa > 1) {
+            if (!cmd_begin()) return 0;
+            ssaa_resolve(t);
+            if (!cmd_submit_wait(SR_PERF_GE_TARGET_READBACK_TRANSITION)) return 0;
+        }
+        r->shown_twin[i] = t->tshow;
         const int sc = present_scale(t);
         const uint32_t w = (uint32_t)FB_W * (uint32_t)sc, h = (uint32_t)FB_H * (uint32_t)sc;
         r->shown[i] = (uint32_t *)malloc((size_t)w * h * 4u);
         r->shown_scale[i] = sc;
         if (!r->shown[i]) return 0;
-        VkImageLayout *l = t->tshow ? &t->tlayout : &t->layout;
-        if (!twin_read_image(present_image(t), VK_IMAGE_ASPECT_COLOR_BIT, l,
+        if (!twin_read_image(present_image(t), VK_IMAGE_ASPECT_COLOR_BIT, present_layout(t),
                              VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 4u, w, h, r->shown[i]))
             return 0;
         t->tshow = 0;
@@ -8771,7 +8853,7 @@ static int coherence_run_twin_scene(void) {
                     "re-seed)\n", name, s_cnt_twin_ops - ops0, s_cnt_twin_reseed - reseed0);
             ok = 0;
         }
-        for (int i = 0; i < 3; i++) if (run.shown_scale[i] != s_tscale) {
+        for (int i = 0; i < 3; i++) if (!run.shown_twin[i]) {
             fprintf(stderr, "gpu coherence selftest [%s]: FAIL target %d shows its authentic image\n", name, i + 1);
             ok = 0;
         }
@@ -8794,7 +8876,9 @@ static int coherence_run_twin_scene(void) {
                         "the twin-off run at scale %d\n", name, i + 1, s_scale);
                 ok = 0;
             }
-            if (!s_twin_color) {
+            /* With supersampling the shown image is an average of samples the twin-off run never
+             * took (a gradient's, for one), so only guest VRAM is compared (ssaa-edge checks it). */
+            if (!s_twin_color && s_ssaa == 1) {
                 checked = "guest VRAM and the shown images equal the twin-off run at this scale";
                 for (int i = 0; i < 3; i++) if (run.ref.shown[i] != ref.shown[i]) {
                     fprintf(stderr, "gpu coherence selftest [%s]: FAIL the native twin of target %d differs "
@@ -8808,7 +8892,7 @@ static int coherence_run_twin_scene(void) {
          * scale of a texel (centre_shift), in both passes, so a device pixel can take the next
          * texel. #2104 removes that shift; whichever of the two lands second runs this at every
          * scale. Above 1x the full-colour check below shows that the pass sampled the twin. */
-        if (s_scale == 1 && !twin_sampled_equal(run.shown[1], run.shown[0], run.shown_scale[0])) {
+        if (s_scale == 1 && s_ssaa == 1 && !twin_sampled_equal(run.shown[1], run.shown[0], run.shown_scale[0])) {
             fprintf(stderr, "gpu coherence selftest [%s]: FAIL T2's twin is not T1's twin sampled at its "
                     "texel centres (the twin's pass did not sample the twin)\n", name);
             ok = 0;
@@ -8856,6 +8940,360 @@ static int coherence_run_twin_scene(void) {
     return ok;
 }
 
+/* ---- supersampling (Ace ssaa=2|4, #2073, ENHANCEMENT_CONTRACT.md 10.21) -----------------------
+ *
+ * ssaa-edge, run with supersampling off and at 2x and 4x (`--ssaa 2|4`), at the render scales the
+ * recipe names: a white triangle with a long diagonal edge and a thin sliver on a black 8888 target,
+ * drawn through ge.c's list interpreter and the production hooks.
+ *   - Guest VRAM after the scene: with SR_GPU_SSAA_REF the run without supersampling writes its
+ *     scale and the hash of the target's guest bytes, and a supersampled run at the same scale must
+ *     match them: supersampling changes nothing the guest reads.
+ *   - The shown image (what gegpu_present hands the presenter, at the render scale): without
+ *     supersampling every visible pixel is black or white; with it, pixels on the edges take values
+ *     in between (the resolve's average), only within a device pixel and a half of an edge, and
+ *     every pixel further away is exactly black or white. 4x gives more distinct grey levels than
+ *     2x can (a 2x2 box has three between black and white).
+ *
+ * ssaa-limit: the size check (ssaa_choose) with limits forced small: an image side over the
+ * device's largest and a memory budget each lower the factor or turn it off, with a message that
+ * names the reason. With `--ssaa N --ssaa-budget-mb M --ssaa-expect F` the run's own decision at
+ * init is checked too: the factor in effect, the Ace line's effective value and the twin's scale. */
+
+#define SS_BASE (0x04000000u | 0x00160000u)
+#define SS_VTX 0x00102000u
+#define SS_LIST 0x00100800u
+#define SS_WHITE 0xFFFFFFFFu
+#define SS_BLACK 0xFF000000u
+
+static unsigned long long s_ssaa_expect = 0;   /* --ssaa-expect: the factor init must choose (0 none) */
+
+void gegpu_selftest_ssaa_limits(unsigned long long budget_bytes, unsigned max_dim, int expect) {
+    s_ssaa_test_budget = budget_bytes;
+    s_ssaa_test_dim = max_dim;
+    s_ssaa_expect = expect > 0 ? (unsigned long long)expect : 0u;
+}
+
+/* Signed distance, in guest pixels, from (x, y) to the triangle's diagonal edge x / 480 + y / 272 = 1,
+ * and to the sliver's long edges (two lines from (40, 200) to (440, 204) and (440, 212)). */
+static double ss_edge_dist(double x, double y) {
+    const double a = 1.0 / 480.0, b = 1.0 / 272.0;
+    double d = fabs(a * x + b * y - 1.0) / sqrt(a * a + b * b);
+    /* the sliver: a triangle (40,200) (440,204) (440,212) */
+    static const double sv[3][2] = { { 40, 200 }, { 440, 204 }, { 440, 212 } };
+    for (int e = 0; e < 3; e++) {
+        const double x0 = sv[e][0], y0 = sv[e][1], x1 = sv[(e + 1) % 3][0], y1 = sv[(e + 1) % 3][1];
+        const double dx = x1 - x0, dy = y1 - y0, len2 = dx * dx + dy * dy;
+        double t = ((x - x0) * dx + (y - y0) * dy) / len2;
+        if (t < 0) t = 0;
+        if (t > 1) t = 1;
+        const double px = x0 + t * dx - x, py = y0 + t * dy - y, ds = sqrt(px * px + py * py);
+        if (ds < d) d = ds;
+    }
+    return d;
+}
+
+static int coherence_run_ssaa_edge(void) {
+    const char *name = "ssaa-edge";
+    const char *ref_path = getenv("SR_GPU_SSAA_REF");
+    if (s_twin_unavailable && g_ace_on && ace_effective()->ssaa > 1) {
+        printf("gpu coherence selftest: SKIP %s: supersampling was asked for but this device refused the "
+               "host twin\n", name);
+        return 1;
+    }
+    coherence_reset_targets();
+    for (uint32_t i = 0; i < 512u * FB_H; i++) ((uint32_t *)SR_HOST(SS_BASE))[i] = SS_BLACK;
+    sr_gpu_vram_dirty(SS_BASE, 512u * FB_H * 4u);
+
+    ThroughFloatVtx *v = (ThroughFloatVtx *)SR_HOST(SS_VTX);
+    v[0] = (ThroughFloatVtx){ SS_WHITE, 0.0f, 0.0f, 0.0f };
+    v[1] = (ThroughFloatVtx){ SS_WHITE, 480.0f, 0.0f, 0.0f };
+    v[2] = (ThroughFloatVtx){ SS_WHITE, 0.0f, 272.0f, 0.0f };
+    v[3] = (ThroughFloatVtx){ SS_WHITE, 40.0f, 200.0f, 0.0f };
+    v[4] = (ThroughFloatVtx){ SS_WHITE, 440.0f, 204.0f, 0.0f };
+    v[5] = (ThroughFloatVtx){ SS_WHITE, 440.0f, 212.0f, 0.0f };
+    uint32_t *dl = (uint32_t *)SR_HOST(SS_LIST);
+    int p = 0;
+    #define DL_EMIT(cmd, val) dl[p++] = ((uint32_t)(cmd) << 24) | ((uint32_t)(val) & 0x00FFFFFFu)
+    DL_EMIT(0x10, 0);
+    DL_EMIT(0x9C, SS_BASE & 0x00FFFFFFu);
+    DL_EMIT(0x9D, 512u | ((SS_BASE & 0xFF000000u) >> 8));
+    DL_EMIT(0xD2, 3);                                   /* 8888 */
+    DL_EMIT(0xD3, 0);
+    DL_EMIT(0x1E, 0);                                   /* no texture */
+    DL_EMIT(0x1D, 0);                                   /* no culling */
+    DL_EMIT(0x21, 0);                                   /* no blend */
+    DL_EMIT(0x22, 0);                                   /* no alpha test */
+    DL_EMIT(0x23, 0);                                   /* no depth test */
+    DL_EMIT(0xE7, 1);                                   /* no depth writes */
+    DL_EMIT(0x15, 0);
+    DL_EMIT(0x16, ((FB_H - 1) << 10) | 479);
+    DL_EMIT(0xD4, 0);
+    DL_EMIT(0xD5, ((FB_H - 1) << 10) | (FB_W - 1));
+    DL_EMIT(0x12, (1u << 23) | (7u << 2) | (3u << 7)); /* through, 8888 colour, float pos */
+    DL_EMIT(0x01, SS_VTX & 0x00FFFFFFu);
+    DL_EMIT(0x04, (3u << 16) | 6u);                     /* two triangles */
+    DL_EMIT(0x0F, 0);
+    DL_EMIT(0x0C, 0);
+    #undef DL_EMIT
+    ge_set_gpu_hooks(&k_hooks);
+    int ok = ge_run_list(SS_LIST, 0) == 0;
+    GeGpuFbDescriptor desc = { .addr = SS_BASE, .format = 3, .stride = 512u, .width = 480, .height = FB_H };
+    if (ok && (s_nbatch && !submit_pending())) ok = 0;
+    if (ok && gegpu_sync_guest_fb(&desc) != GEGPU_SYNC_OK) ok = 0;
+    Target *t = ok ? target_find_by_fba(SS_BASE & 0x001FFFFFu) : NULL;
+    if (!t || !t->gpu_valid) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL the scene did not run on the GPU\n", name);
+        coherence_reset_targets();
+        return 0;
+    }
+    const uint64_t vram = twin_hash(SR_HOST(SS_BASE), (size_t)512u * FB_H * 4u, 0xcbf29ce484222325ull);
+    /* guest VRAM: the triangle is there at all */
+    if (((uint32_t *)SR_HOST(SS_BASE))[10 * 512 + 10] != SS_WHITE ||
+        ((uint32_t *)SR_HOST(SS_BASE))[260 * 512 + 470] != SS_BLACK) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL guest VRAM does not hold the scene\n", name);
+        ok = 0;
+    }
+
+    /* what gegpu_present hands the presenter: target_prepare_present, the production step, chooses the
+     * image and resolves it */
+    if (ok && !target_prepare_present(t)) ok = 0;
+    const int sc = present_scale(t);
+    const uint32_t w = (uint32_t)FB_W * (uint32_t)sc, h = (uint32_t)FB_H * (uint32_t)sc;
+    uint32_t *img = (uint32_t *)malloc((size_t)w * h * 4u);
+    if (!img || !ok || !twin_read_image(present_image(t), VK_IMAGE_ASPECT_COLOR_BIT, present_layout(t),
+                                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 4u, w, h, img)) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL the shown image could not be read\n", name);
+        t->tshow = 0;
+        free(img);
+        coherence_reset_targets();
+        return 0;
+    }
+    const int shown_twin = t->tshow;
+    t->tshow = 0;
+    if (s_ssaa > 1 && (!shown_twin || sc != s_scale || s_tscale != s_scale * s_ssaa)) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL supersampling %dx shows %s at %dx (twin %dx, render "
+                "scale %dx)\n", name, s_ssaa, shown_twin ? "the resolve" : "the authentic image", sc, s_tscale,
+                s_scale);
+        ok = 0;
+    }
+    unsigned long mid = 0, far_mid = 0, near_far_off = 0;
+    uint8_t levels[256] = {0};
+    for (uint32_t y = 0; y < h; y++) {
+        for (uint32_t x = 0; x < (uint32_t)DRAW_W * (uint32_t)sc; x++) {
+            const uint32_t px = img[y * w + x];
+            const int is_bw = px == SS_WHITE || px == SS_BLACK;
+            const double d = ss_edge_dist(((double)x + 0.5) / sc, ((double)y + 0.5) / sc);
+            const int near = d <= 1.5 / sc;
+            if (!is_bw) {
+                const uint8_t r = (uint8_t)(px & 0xFFu), g = (uint8_t)((px >> 8) & 0xFFu),
+                              bl = (uint8_t)((px >> 16) & 0xFFu);
+                mid++;
+                if (r != g || g != bl || (px >> 24) != 0xFFu) near_far_off++;   /* grey, opaque */
+                levels[r] = 1;
+                if (!near) far_mid++;
+            }
+        }
+    }
+    unsigned distinct = 0;
+    for (int i = 0; i < 256; i++) distinct += levels[i];
+    if (s_ssaa == 1 && mid) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL without supersampling %lu shown pixels are neither "
+                "black nor white\n", name, mid);
+        ok = 0;
+    }
+    if (s_ssaa > 1) {
+        const unsigned min_levels = s_ssaa == 4 ? 4u : 1u;
+        if (mid < (unsigned long)DRAW_W * (unsigned long)sc / 2u || far_mid || near_far_off || distinct < min_levels) {
+            fprintf(stderr, "gpu coherence selftest [%s]: FAIL supersampling %dx: %lu filtered pixels (want at "
+                    "least %u), %lu away from every edge (want 0), %lu not opaque grey (want 0), %u grey levels "
+                    "(want at least %u)\n", name, s_ssaa, mid, DRAW_W * (unsigned)sc / 2u, far_mid, near_far_off,
+                    distinct, min_levels);
+            ok = 0;
+        }
+    }
+    free(img);
+    const char *checked = "no reference";
+    if (ok && ref_path) {
+        if (s_ssaa == 1) {
+            FILE *f = fopen(ref_path, "w");
+            if (!f || fprintf(f, "scale=%d vram=%016llx\n", s_scale, (unsigned long long)vram) < 0) {
+                fprintf(stderr, "gpu coherence selftest [%s]: FAIL cannot write %s\n", name, ref_path);
+                ok = 0;
+            }
+            if (f) fclose(f);
+            checked = "reference written";
+        } else {
+            FILE *f = fopen(ref_path, "r");
+            int rs = 0;
+            unsigned long long rv = 0;
+            if (!f || fscanf(f, "scale=%d vram=%llx", &rs, &rv) != 2) {
+                fprintf(stderr, "gpu coherence selftest [%s]: FAIL no reference in %s\n", name, ref_path);
+                ok = 0;
+            } else if (rs != s_scale) {
+                fprintf(stderr, "gpu coherence selftest [%s]: FAIL the reference was made at scale %d, this run "
+                        "is at %d\n", name, rs, s_scale);
+                ok = 0;
+            } else if (rv != vram) {
+                fprintf(stderr, "gpu coherence selftest [%s]: FAIL guest VRAM differs from the run without "
+                        "supersampling at scale %d\n", name, s_scale);
+                ok = 0;
+            } else {
+                checked = "guest VRAM equals the run without supersampling";
+            }
+            if (f) fclose(f);
+        }
+    }
+    if (ok)
+        printf("gpu coherence selftest: PASS %s ssaa=%d scale=%d: %lu filtered pixels, %u grey levels; %s\n",
+               name, s_ssaa, s_scale, mid, distinct, checked);
+    coherence_reset_targets();
+    return ok;
+}
+
+/* ssaa-sprite: sprite-scaled's nearest one-texel-per-pixel sprites (on a texel edge, half and a quarter
+ * of a texel off, flipped), drawn and presented through the production path. The PSP shows one texel
+ * across each guest pixel, and above 1x every device pixel of it does too (sprite_nearest_axis), so
+ * each guest pixel's samples are equal and their average is that texel: the shown image equals the
+ * authentic device image at every pixel of the sprites, at 2x and 4x as without supersampling. At
+ * render scale 1 the twin draws above 1x from its own vertices (s_tvcpu); drawing it from the
+ * authentic ones, made for 1x, splits a quarter-off sprite's texels inside each guest pixel. */
+static int coherence_run_ssaa_sprite(void) {
+    const char *name = "ssaa-sprite";
+    if (s_twin_unavailable && g_ace_on && ace_effective()->ssaa > 1) {
+        printf("gpu coherence selftest: SKIP %s: supersampling was asked for but this device refused the "
+               "host twin\n", name);
+        return 1;
+    }
+    const uint32_t fba = 0x00160000u, base = 0x04000000u | fba, stride = 512u;
+    const int y0 = 10;
+    coherence_sprite_list(k_spr_cells, SPR_NEAREST_1TO1, y0, fba, stride);
+    coherence_reset_targets();
+    memset(SR_HOST(base), 0, (size_t)stride * FB_H * 4u);
+    sr_gpu_vram_dirty(base, stride * FB_H * 4u);
+    ge_set_gpu_hooks(&k_hooks);
+    ge_run_list(COH_SAMPLE_LIST, 0);
+    GeGpuFbDescriptor desc = { .addr = base, .format = 3, .stride = stride, .width = 480, .height = FB_H };
+    int ok = gegpu_sync_guest_fb(&desc) == GEGPU_SYNC_OK;
+    Target *t = ok ? target_find_by_fba(fba) : NULL;
+    const uint32_t s = (uint32_t)s_scale;
+    uint32_t *dev = (uint32_t *)malloc((size_t)SCL_W * SCL_H * 4u);
+    uint32_t *img = (uint32_t *)malloc((size_t)SCL_W * SCL_H * 4u);
+    ok = ok && t && dev && img &&
+         coherence_read_device(t->img, VK_IMAGE_ASPECT_COLOR_BIT, &t->layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                               4u, dev) &&
+         target_prepare_present(t) && present_scale(t) == s_scale &&
+         twin_read_image(present_image(t), VK_IMAGE_ASPECT_COLOR_BIT, present_layout(t),
+                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 4u, SCL_W, SCL_H, img);
+    const int shown_twin = t ? t->tshow : 0;
+    if (t) t->tshow = 0;
+    if (!ok) fprintf(stderr, "gpu coherence selftest [%s]: FAIL the sprites could not be drawn or read\n", name);
+    if (ok && s_ssaa > 1 && !shown_twin) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL supersampling %dx shows the authentic image\n", name,
+                s_ssaa);
+        ok = 0;
+    }
+    unsigned long differ = 0, px = 0;
+    uint8_t levels[256] = {0};
+    for (int c = 0; ok && c < SPR_NEAREST_1TO1; c++) {
+        const SprCell *cell = &k_spr_cells[c];
+        for (uint32_t dy = 0; dy < (uint32_t)cell->n * s; dy++)
+            for (uint32_t dx = 0; dx < (uint32_t)cell->n * s; dx++) {
+                const size_t at = ((size_t)y0 * s + dy) * SCL_W + (size_t)cell->x * s + dx;
+                const uint32_t a = dev[at] & 0x00FFFFFFu, b = img[at] & 0x00FFFFFFu;
+                px++;
+                levels[a & 0xFFu] = 1;
+                if (a != b && differ++ < 8)
+                    fprintf(stderr, "gpu coherence selftest [%s/%s]: ssaa=%d scale=%u device pixel (%u,%u) shown "
+                            "%06x, authentic %06x\n", name, cell->name, s_ssaa, s, dx, dy, b, a);
+            }
+    }
+    unsigned distinct = 0;
+    for (int i = 0; i < 256; i++) distinct += levels[i];
+    if (ok && (differ || distinct < 8u)) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL ssaa=%d scale=%u: %lu of %lu sprite pixels differ from "
+                "the authentic image (want 0), %u texel values (want at least 8)\n", name, s_ssaa, s, differ, px,
+                distinct);
+        ok = 0;
+    }
+    free(dev);
+    free(img);
+    coherence_reset_targets();
+    if (ok)
+        printf("gpu coherence selftest: PASS %s ssaa=%d scale=%u: %lu sprite pixels shown as the authentic image, "
+               "%u texel values\n", name, s_ssaa, s, px, distinct);
+    return ok;
+}
+
+static int coherence_run_ssaa_limit(void) {
+    const char *name = "ssaa-limit";
+    int ok = 1;
+    char why[320];
+    struct { int want, scale; uint32_t dim; uint64_t budget; int expect; const char *says; } k_cells[] = {
+        { 4, 1, 16384u, 1ull << 40, 4, "" },
+        { 4, 4, 8192u, 1ull << 40, 4, "" },                     /* 8192 x 4352 fits a side of 8192 */
+        { 4, 4, 4096u, 1ull << 40, 2, "and this GPU's largest is 4096" },
+        { 2, 4, 2048u, 1ull << 40, 1, "2x at render scale 4x needs 4096x2176 images" },
+        { 4, 1, 0, 0, 2, "MB of GPU memory, over the" },        /* budget: exactly what 2x needs */
+        { 2, 4, 16384u, 1ull << 20, 1, "2x at render scale 4x needs about" },
+        { 2, 2, 16384u, 0, 2, "" },                             /* budget: exactly what 2x needs */
+        /* nothing fits: the reason names 4x's and then 2x's */
+        { 4, 4, 2048u, 1ull << 40, 1, "largest is 2048; 2x at render scale 4x needs 4096x2176 images" },
+    };
+    for (unsigned i = 0; i < sizeof(k_cells) / sizeof(k_cells[0]); i++) {
+        const uint32_t dim = k_cells[i].dim ? k_cells[i].dim : 16384u;
+        const uint64_t budget = k_cells[i].budget ? k_cells[i].budget
+                                                  : ssaa_bytes(k_cells[i].scale, 2, 2u);
+        const int got = ssaa_choose(k_cells[i].want, k_cells[i].scale, dim, budget, 2u, why, sizeof(why));
+        const int says = k_cells[i].says[0] ? strstr(why, k_cells[i].says) != NULL : why[0] == '\0';
+        if (got != k_cells[i].expect || !says) {
+            fprintf(stderr, "gpu coherence selftest [%s]: FAIL cell %u: want %d at scale %d (side %u, budget %llu MB) "
+                    "chose %d, want %d; message \"%s\", want \"%s\"\n", name, i, k_cells[i].want,
+                    k_cells[i].scale, dim, (unsigned long long)(budget >> 20), got, k_cells[i].expect, why,
+                    k_cells[i].says);
+            ok = 0;
+        }
+    }
+    /* The estimate grows with the factor's square (the resolve images at the render scale do not):
+     * 4x holds more than three times what 2x does, and a 32-bit depth format more than 16-bit. */
+    if (ssaa_bytes(4, 4, 2u) <= 3u * ssaa_bytes(4, 2, 2u) || ssaa_bytes(1, 2, 4u) <= ssaa_bytes(1, 2, 2u)) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL the size estimate does not grow with the factor and the "
+                "depth format\n", name);
+        ok = 0;
+    }
+    if (s_ssaa_expect) {
+        const int eff = g_ace_on ? ace_effective()->ssaa : 0;
+        const int want_eff = s_ssaa_expect > 1 ? (int)s_ssaa_expect : 0;
+        if ((unsigned long long)s_ssaa != s_ssaa_expect || eff != want_eff || s_tscale != s_scale * s_ssaa ||
+            (s_ssaa > 1) != (s_twin != 0)) {
+            fprintf(stderr, "gpu coherence selftest [%s]: FAIL init chose %d (Ace line's effective %d, twin %s at "
+                    "%dx), want %llu\n", name, s_ssaa, eff, s_twin ? "on" : "off", s_tscale, s_ssaa_expect);
+            ok = 0;
+        }
+        /* The Ace report says what the run got: the factor in effect (1 when unavailable, with the size
+         * check's reason), and the request beside a lowered one. */
+        static char json[ACE_REPORT_MAX];
+        char want[64];
+        const int req = g_ace_on ? ace_requested()->ssaa : 0;
+        snprintf(want, sizeof(want), "\"ssaa\": %llu", s_ssaa_expect);
+        int rep = g_ace_on && ace_report_json(json, sizeof(json)) > 0 && strstr(json, want) != NULL;
+        if (rep && s_ssaa_expect > 1 && (int)s_ssaa_expect < req) {
+            snprintf(want, sizeof(want), "\"ssaa_requested\": %d", req);
+            rep = strstr(json, want) != NULL;
+        }
+        if (rep && s_ssaa_expect == 1)
+            rep = strstr(json, "over the") != NULL || strstr(json, "largest is") != NULL;
+        if (!rep) {
+            fprintf(stderr, "gpu coherence selftest [%s]: FAIL the Ace report does not say %llu of %d with its "
+                    "reason:\n%s\n", name, s_ssaa_expect, req, g_ace_on ? json : "(Ace off)");
+            ok = 0;
+        }
+    }
+    if (ok)
+        printf("gpu coherence selftest: PASS %s: every forced limit lowers the factor with its reason%s\n", name,
+               s_ssaa_expect ? "; the run's own choice is the expected one" : "");
+    return ok;
+}
+
 /* twin-gate: the switch's values and the Ace gate (ENHANCEMENT_CONTRACT.md 10.11). Only "1" and
  * "native" ask for the twin; unset, empty, "0" and "off" are off; anything else is refused and off,
  * never more permissive. With Ace Mode off (`--authentic`) the twin stays off whatever the value.
@@ -8879,7 +9317,8 @@ static int coherence_run_twin_gate(void) {
     }
     const char *v = getenv("SR_GPU_TWIN_COLOR");
     const int mode = twin_mode_parse(v);
-    const int want_on = g_ace_on && mode > 0;
+    /* Supersampling (s_ssaa > 1) runs the twin too, in native colour unless the switch says 1. */
+    const int want_on = g_ace_on && (mode > 0 || s_ssaa > 1);
     if (s_twin_unavailable) {
         printf("gpu coherence selftest: SKIP %s run check: this device refused the twin\n", name);
     } else if (s_twin != want_on || (want_on && s_twin_color != (mode == 1))) {
@@ -8898,7 +9337,8 @@ static int coherence_run_twin_gate(void) {
  * allocation of the scene fails (N = 1: T1's twin; 2: its depth twin; 3: their framebuffer; 4 and
  * 5: T2's twin and framebuffer, after T1's twin has drawn). Each time the twin must go off for the
  * run, once, and the scene must then equal the twin-off run exactly: guest VRAM and the shown
- * images, at the user's scale, never a lower one. The twin is made again between steps. */
+ * images, at the user's scale, never a lower one. The twin is made again between steps. With
+ * supersampling asked for (`--ssaa`), the Ace report must then give `"ssaa": 1` (section 10.21). */
 static int coherence_run_twin_alloc_fail(void) {
     const char *name = "twin-alloc-fail";
     if (s_twin_unavailable) {
@@ -8945,6 +9385,14 @@ static int coherence_run_twin_alloc_fail(void) {
                     ok = 0;
                 }
             }
+            static char json[ACE_REPORT_MAX];
+            if (ok && g_ace_on && ace_requested()->ssaa > 1 &&
+                (ace_report_json(json, sizeof(json)) <= 0 || !strstr(json, "\"ssaa\": 1,"))) {
+                fprintf(stderr, "gpu coherence selftest [%s]: FAIL step %d: supersampling %dx was asked for and "
+                        "the twin is off, but the Ace report does not give \"ssaa\": 1\n", name, n,
+                        ace_requested()->ssaa);
+                ok = 0;
+            }
         }
         twin_run_free(&run);
     }
@@ -8953,6 +9401,173 @@ static int coherence_run_twin_alloc_fail(void) {
     if (ok)
         printf("gpu coherence selftest: PASS %s 5 steps colour %s scale=%d: the twin went off once each time and "
                "the scene equals the twin-off run\n", name, color ? "full" : "native", s_scale);
+    return ok;
+}
+
+/* twin-drain-fail (`--twin 1|native`, a twin-off reference at the same scale): as twin-alloc-fail,
+ * but twin_off_for_run's drain also fails (s_twin_inject_drain_fail: the device may be lost, work
+ * in flight). Then the twin must go off for the run and be shown nowhere, record no further twin
+ * pass, and free NOTHING at that point (the twin pool, the twin snapshot and every twin already made
+ * stay for gegpu_shutdown, which waits for the device first), and the scene must still equal the
+ * twin-off run exactly. The cell frees the leftovers itself between steps, as shutdown would. */
+static int coherence_run_twin_drain_fail(void) {
+    const char *name = "twin-drain-fail";
+    if (s_twin_unavailable) {
+        printf("gpu coherence selftest: SKIP %s: this device refused the twin\n", name);
+        return 1;
+    }
+    TwinRef ref;
+    const char *ref_path = getenv("SR_GPU_TWIN_REF");
+    if (!s_twin || !ref_path || !twin_ref_read(ref_path, &ref) || ref.scale != s_scale) {
+        fprintf(stderr, "gpu coherence selftest [%s]: needs --twin 1|native and a twin-off reference at "
+                "scale %d\n", name, s_scale);
+        return 0;
+    }
+    const int color = s_twin_color;
+    int ok = 1;
+    for (int n = 1; ok && n <= 5; n++) {
+        coherence_reset_targets();
+        coherence_reset_depths();
+        if (!s_twin) {
+            twin_release();                     /* what shutdown does for the previous step's leftovers */
+            if (!twin_init(color)) {
+                fprintf(stderr, "gpu coherence selftest [%s]: the twin could not be made again\n", name);
+                return 0;
+            }
+        }
+        const unsigned long fail0 = s_cnt_twin_alloc_fail;
+        s_twin_inject_fail = n;
+        s_twin_inject_drain_fail = 1;
+        TwinRun run = {0};
+        int ran = twin_run_scene(&run);
+        const int reached = s_twin_inject_fail == 0;
+        s_twin_inject_fail = 0;
+        s_twin_inject_drain_fail = 0;
+        if (!ran || !reached) {
+            fprintf(stderr, "gpu coherence selftest [%s]: FAIL step %d: %s\n", name, n,
+                    !ran ? "the scene did not run" : "the scene never made that many twin allocations");
+            ok = 0;
+        } else if (s_twin || s_twin_color || s_cnt_twin_alloc_fail != fail0 + 1) {
+            fprintf(stderr, "gpu coherence selftest [%s]: FAIL step %d: twin %s, failures counted %lu (want "
+                    "off, 1)\n", name, n, s_twin ? "still on" : "off", s_cnt_twin_alloc_fail - fail0);
+            ok = 0;
+        } else {
+            /* nothing freed: the pool and the snapshot, and (after the first allocation) T1's twin */
+            Target *t1 = target_find_by_fba(TWIN_T1);
+            if (s_dpool_twin == VK_NULL_HANDLE || s_tsnapimg == VK_NULL_HANDLE ||
+                (n >= 2 && (!t1 || t1->timg == VK_NULL_HANDLE))) {
+                fprintf(stderr, "gpu coherence selftest [%s]: FAIL step %d: the twins were freed after a "
+                        "failed drain (pool %s, snapshot %s, T1's twin %s): the GPU may still be using "
+                        "them\n", name, n, s_dpool_twin ? "kept" : "freed", s_tsnapimg ? "kept" : "freed",
+                        t1 && t1->timg ? "kept" : "freed");
+                ok = 0;
+            }
+            for (int i = 0; i < 3; i++) {
+                Target *t = target_find_by_fba(k_twin_fba[i]);
+                if (t && t->tshow) {
+                    fprintf(stderr, "gpu coherence selftest [%s]: FAIL step %d: target %d still shows a twin\n",
+                            name, n, i + 1);
+                    ok = 0;
+                }
+                if (run.shown_scale[i] != s_scale || run.ref.vram[i] != ref.vram[i] ||
+                    run.ref.shown[i] != ref.shown[i]) {
+                    fprintf(stderr, "gpu coherence selftest [%s]: FAIL step %d: target %d (shown at %dx) differs "
+                            "from the twin-off run at %dx (%s)\n", name, n, i + 1, run.shown_scale[i], s_scale,
+                            run.ref.vram[i] != ref.vram[i] ? "guest VRAM" : "the shown image");
+                    ok = 0;
+                }
+            }
+            /* the scene again, over the targets that kept their twins: no twin pass, no twin copy */
+            const unsigned long ops0 = s_cnt_twin_ops, copies0 = s_cnt_twin_copies;
+            if (ok && (ge_run_list(twin_list(), 0) != 0 || (s_nbatch && !submit_pending()))) {
+                fprintf(stderr, "gpu coherence selftest [%s]: FAIL step %d: the scene did not run again\n",
+                        name, n);
+                ok = 0;
+            } else if (ok && (s_cnt_twin_ops != ops0 || s_cnt_twin_copies != copies0)) {
+                fprintf(stderr, "gpu coherence selftest [%s]: FAIL step %d: twin passes +%lu, twin copies +%lu "
+                        "after the twin went off (want 0, 0)\n", name, n, s_cnt_twin_ops - ops0,
+                        s_cnt_twin_copies - copies0);
+                ok = 0;
+            }
+        }
+        twin_run_free(&run);
+    }
+    coherence_reset_targets();
+    coherence_reset_depths();
+    twin_release();                             /* the leftovers of the last step */
+    if (ok)
+        printf("gpu coherence selftest: PASS %s 5 steps colour %s scale=%d: the twin went off, nothing was "
+               "freed, no twin pass ran after it and the scene equals the twin-off run\n", name,
+               color ? "full" : "native", s_scale);
+    return ok;
+}
+
+/* twin-sync's block-transfer sub-cells: a transfer from T1 to T3 (a one-command list through ge.c
+ * and hook_xfer) while one of the two twins is behind its image (wgen bumped by hand). Both leave
+ * the destination's twin behind, so the next present re-seeds it:
+ *   dst_behind = 1: the source is in step, so the twins repeat the copy (twin_copy), but a copy
+ *     over a twin that was already behind does not bring it in step (the `in_step` guard of
+ *     twin_note_write): rows the copy does not cover are still missing from it.
+ *   dst_behind = 0: the source's twin is behind, so the copy must NOT be repeated on the twins
+ *     (hook_xfer's `src->tgen == src->wgen`): it would copy stale rows, and the destination's twin,
+ *     which was in step, would then be marked in step. */
+static int coherence_twin_sync_xfer(const char *name, int dst_behind) {
+    const char *what = dst_behind ? "a transfer over a twin behind its image"
+                                  : "a transfer from a twin behind its image";
+    TwinRun run = {0};
+    int ok = twin_run_scene(&run);
+    twin_run_free(&run);
+    Target *t1 = ok ? target_find_by_fba(TWIN_T1) : NULL, *t3 = ok ? target_find_by_fba(TWIN_T3) : NULL;
+    if (!t1 || !t3 || !t1->timg || !t3->timg || t1->tgen != t1->wgen || t3->tgen != t3->wgen) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL %s: no twins in step to start from\n", name, what);
+        return 0;
+    }
+    Target *lag = dst_behind ? t3 : t1;
+    lag->wgen++;                                /* a write the twin did not take */
+    s_twin_lag_cause = "twin-sync's simulated write";
+    uint32_t *dl = (uint32_t *)SR_HOST(TWIN_LIST);
+    int p = 0;
+    #define TWIN_XF(cmd, val) dl[p++] = ((uint32_t)(cmd) << 24) | ((uint32_t)(val) & 0x00FFFFFFu)
+    TWIN_XF(0xB2, TWIN_T1); TWIN_XF(0xB3, 512u | (0x04u << 16));
+    TWIN_XF(0xB4, TWIN_T3); TWIN_XF(0xB5, 512u | (0x04u << 16));
+    TWIN_XF(0xEB, 0); TWIN_XF(0xEC, 0);
+    TWIN_XF(0xEE, 479u | (135u << 10));        /* 480 x 136 */
+    TWIN_XF(0xEA, 0);                           /* 16-bit */
+    TWIN_XF(0x0F, 0); TWIN_XF(0x0C, 0);
+    #undef TWIN_XF
+    const unsigned long xfer0 = s_cnt_xferblit, copies0 = s_cnt_twin_copies;
+    ge_set_gpu_hooks(&k_hooks);
+    if (ge_run_list(TWIN_LIST, 0) != 0 || (s_nbatch && !submit_pending())) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL %s: the transfer list did not run\n", name, what);
+        ok = 0;
+    } else if (s_cnt_xferblit != xfer0 + 1) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL %s: hook_xfer did not take the transfer\n", name, what);
+        ok = 0;
+    } else if (s_cnt_twin_copies != copies0 + (dst_behind ? 1u : 0u)) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL %s: the twins repeated the copy %lu times (want %u)\n",
+                name, what, s_cnt_twin_copies - copies0, dst_behind ? 1u : 0u);
+        ok = 0;
+    } else if (t3->tgen == t3->wgen) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL %s: the destination's twin is marked in step "
+                "(%s)\n", name, what, dst_behind ? "the in_step guard of twin_note_write: a write that did "
+                "not cover a twin behind its image brought it in step" :
+                "hook_xfer's src->tgen == src->wgen: the copy was repeated from a twin behind its image");
+        ok = 0;
+    }
+    /* a present re-seeds each twin that is behind and shows the authentic image; then all is in step */
+    for (int i = 0; ok && i < 2; i++) {
+        Target *t = i ? t1 : t3;
+        if (t->tgen == t->wgen) continue;
+        if (!target_prepare_present(t) || t->tshow || t->tgen != t->wgen) {
+            fprintf(stderr, "gpu coherence selftest [%s]: FAIL %s: the present did not re-seed the twin of "
+                    "target 0x%06x\n", name, what, t->fba);
+            ok = 0;
+        }
+        t->tshow = 0;
+    }
+    if (!ok) {                                  /* keep the identity check of the next reset quiet */
+        t1->tgen = t1->wgen; t3->tgen = t3->wgen;
+    }
     return ok;
 }
 
@@ -8990,6 +9605,10 @@ static int coherence_run_twin_sync(void) {
         twin_identity_check(name);
         if (s_twin_identity_failures != failures0) ok = 0;
     }
+    /* the block-transfer sub-cells: the `in_step` guard of twin_note_write and hook_xfer's
+     * `src->tgen == src->wgen` (each alone is pinned here; see coherence_twin_sync_xfer) */
+    if (ok && !coherence_twin_sync_xfer(name, 1)) ok = 0;
+    if (ok && !coherence_twin_sync_xfer(name, 0)) ok = 0;
     if (s_nbatch) (void)submit_pending();
     (void)cmd_drain(GEGPU_BOUNDARY_LIFETIME);
     readback_poll();
@@ -8998,7 +9617,8 @@ static int coherence_run_twin_sync(void) {
     /* this case's re-seed is expected: take it out of the suite's no-re-seed count */
     s_cnt_twin_reseed = reseed0;
     if (ok) printf("gpu coherence selftest: PASS %s a twin behind its image showed the authentic image, "
-                   "was re-seeded once, then shown again\n", name);
+                   "was re-seeded once, then shown again; a block transfer over or from a twin behind "
+                   "its image left the destination's twin behind\n", name);
     coherence_reset_targets();
     coherence_reset_depths();
     return ok;
@@ -9035,11 +9655,13 @@ static int coherence_run_twin_sync(void) {
  * dst-read-alpha: 5551 and 4444 targets, whose alpha (the stencil) a non-stencil draw keeps.
  * dst-read-mixed: an opaque sprite, the overlapping blended pair, then an opaque sprite over part of
  * the pair, in one op: fixed-function, RMW and fixed-function runs with a break between each.
- * dst-read-depth: an alpha-tested, depth-writing blend whose second sprite the alpha test rejects,
- * then an opaque sprite behind it. The rmwzfb rule keeps that op on the snapshot path; colour and
- * depth equal ge.c on every path.
- * dst-read-ctest: the same op with the color test rejecting the second sprite, the shader's other
- * kill that the interlock variant's early depth test cannot undo.
+ * dst-read-depth, -ctest, -zrange, -sfail (the failing-before cells of the rmwzfb rule's four
+ * kills: the alpha test, the color test, a narrow depth range and a stencil-fail KEEP): a
+ * depth-writing, depth-tested blend whose overlapping pair must blend in order, with a primitive
+ * behind the first in the same batch and one the kill rejects, then an opaque sprite behind them
+ * all. On the interlock path the op takes the interlock, the run owns depth in the shader, and
+ * colour and depth equal ge.c; on the snapshot path depth equals ge.c and the hazard is pinned to
+ * the overlap.
  * dst-read-feedback: a stencil state that reads its own writes, texturing from its own target. Its
  * second sprite copies what the first drew, so its batch must start from a destination copy that
  * holds the first sprite, and that copy is the texture: the op keeps the snapshot path.
@@ -9145,44 +9767,105 @@ static uint32_t dro_mixed_list(const DroState *st) {
     return DRO_LIST;
 }
 
-/* dst-read-depth: clear depth to 0 in clear mode; then, with depth writes on and the depth test
- * ALWAYS, a blended pair (not overlapping) under the alpha test GREATER 0x40, whose second sprite
- * (alpha 0x20) the test rejects; then an opaque sprite at z 20000 under GEQUAL over both. Where
- * a rejected fragment wrote depth anyway, the opaque sprite would be hidden.
- * dst-read-ctest (`colour_kill`): the same with the color test NOTEQUAL the second sprite's colour
- * in place of the alpha test, so the color test rejects that sprite. */
-static uint32_t dro_depth_list(const DroState *st, int colour_kill) {
+/* dst-read-depth, -ctest, -zrange and -sfail, `kind` 0 to 3. Depth is cleared to 0 in clear mode
+ * (for -sfail the stencil too, then the stencil of K's box to 1). Then one primitive command under
+ * the depth test GEQUAL with depth writes on: the blended pair P1 and P2 at z 32768, which overlap
+ * (k_drk_overlap, the ordered-blend hazard); P3 at z 25268, which lies behind P1 where they meet
+ * (a depth test against depth the batch wrote itself); and K at z 47768, which the kind's test
+ * rejects: 0 the alpha test GREATER 0x40 (K's alpha is 0x20), 1 the color test NOTEQUAL K's colour,
+ * 2 the transform-mode depth range 0-40000, 3 the stencil test EQUAL 0 with a stencil-fail KEEP.
+ * Then Q at z 25268 under the depth test LESS with depth writes off, in the same shader-depth run:
+ * it passes over P1 and P2 and fails over P3 and the cleared depth, and writes none.
+ * Last an opaque sprite at z 20000 under GEQUAL with depth writes off over all of them: where K
+ * wrote depth anyway it would be hidden.
+ * -zrange draws the command in transform mode, with identity matrices and a viewport that maps clip
+ * x, y and z to 240 + 240 x, 136 - 136 y and 32768 + 30000 z: the boxes lie on 30 by 17 pixel
+ * steps and the depths on 7500 steps, which those maps reach exactly. */
+static const float k_drk_box[5][5] = {
+    { 60.0f, 34.0f, 150.0f, 102.0f, 32768.0f },    /* P1 */
+    { 120.0f, 68.0f, 210.0f, 136.0f, 32768.0f },   /* P2 */
+    { 30.0f, 17.0f, 90.0f, 68.0f, 25268.0f },      /* P3 */
+    { 240.0f, 34.0f, 300.0f, 102.0f, 47768.0f },   /* K */
+    { 30.0f, 51.0f, 150.0f, 119.0f, 25268.0f },    /* Q */
+};
+static const uint32_t k_drk_rgba[5] = { 0x803050F0u, 0x80E0C020u, 0x8040C0E0u, 0x80608020u, 0x80A040C0u };
+static const DroBox k_drk_overlap = { 120u, 68u, 150u, 102u };
+
+static uint32_t dro_kill_list(const DroState *st, int kind) {
     static const float clear[1][5] = { { 0.0f, 0.0f, 480.0f, 272.0f, 0.0f } };
-    static const float pair[2][5] = {
-        { 40.0f, 40.0f, 100.0f, 100.0f, 30000.0f },
-        { 110.0f, 40.0f, 170.0f, 100.0f, 30000.0f },
-    };
-    static const float behind[1][5] = { { 60.0f, 60.0f, 150.0f, 120.0f, 20000.0f } };
-    static const uint32_t clear_rgba[1] = { 0 }, pair_rgba[2] = { 0x803050F0u, 0x20E0C020u };
+    static const float behind[1][5] = { { 30.0f, 17.0f, 330.0f, 153.0f, 20000.0f } };
+    static const uint32_t clear_rgba[1] = { 0 }, stencil_rgba[1] = { 0xFF000000u };
     static const uint32_t behind_rgba[1] = { 0xFF20A060u };
+    float box[5][5];
+    uint32_t rgba[5];
+    memcpy(box, k_drk_box, sizeof box);
+    memcpy(rgba, k_drk_rgba, sizeof rgba);
+    if (kind == 0) rgba[3] = (rgba[3] & 0x00FFFFFFu) | 0x20000000u;
+    if (kind == 2) {
+        for (int i = 0; i < 5; i++) {
+            box[i][0] = (box[i][0] - 240.0f) / 240.0f; box[i][2] = (box[i][2] - 240.0f) / 240.0f;
+            box[i][1] = (136.0f - box[i][1]) / 136.0f; box[i][3] = (136.0f - box[i][3]) / 136.0f;
+            box[i][4] = (box[i][4] - 32768.0f) / 30000.0f;
+        }
+    }
     StpList l;
     uint32_t vaddr = DRO_VERTS;
     dro_begin(&l, st);
-    stp_emit(&l, 0xD3, 1u | 0x400u);                     /* clear mode: depth only */
+    stp_emit(&l, 0x17, 0);                                /* no lighting */
+    stp_emit(&l, 0xD3, 1u | 0x400u | (kind == 3 ? 0x200u : 0u));   /* clear mode: depth (stencil) */
     dro_sprites(&l, &vaddr, clear, clear_rgba, 1u);
+    if (kind == 3) {
+        stp_emit(&l, 0xD3, 1u | 0x200u);                  /* K's box: stencil 1 */
+        dro_sprites(&l, &vaddr, &k_drk_box[3], stencil_rgba, 1u);
+    }
     stp_emit(&l, 0xD3, 0);
     stp_emit(&l, 0x23, 1);
     stp_emit(&l, 0xE7, 0);                                /* depth writes on */
-    stp_emit(&l, 0xDE, 1);                                /* ALWAYS */
-    if (colour_kill) {
-        stp_emit(&l, 0x27, 1);
-        stp_emit(&l, 0xD8, 3u);                           /* color NOTEQUAL the second sprite's */
-        stp_emit(&l, 0xD9, pair_rgba[1] & 0x00FFFFFFu);
-        stp_emit(&l, 0xDA, 0xFFFFFFu);
-    } else {
+    stp_emit(&l, 0xDE, 7);                                /* GEQUAL */
+    if (kind == 0) {
         stp_emit(&l, 0x22, 1);
         stp_emit(&l, 0xDB, 6u | (0x40u << 8) | (0xFFu << 16));   /* alpha GREATER 0x40 */
+    } else if (kind == 1) {
+        stp_emit(&l, 0x27, 1);
+        stp_emit(&l, 0xD8, 3u);                           /* color NOTEQUAL K's */
+        stp_emit(&l, 0xD9, rgba[3] & 0x00FFFFFFu);
+        stp_emit(&l, 0xDA, 0xFFFFFFu);
+    } else if (kind == 2) {
+        static const float ident43[12] = { 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0 };
+        static const float ident44[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+        stp_emit(&l, 0x3A, 0);                            /* world, view, projection: identity */
+        for (int k = 0; k < 12; k++) stp_emit(&l, 0x3B, tfz_f24(ident43[k]));
+        stp_emit(&l, 0x3C, 0);
+        for (int k = 0; k < 12; k++) stp_emit(&l, 0x3D, tfz_f24(ident43[k]));
+        stp_emit(&l, 0x3E, 0);
+        for (int k = 0; k < 16; k++) stp_emit(&l, 0x3F, tfz_f24(ident44[k]));
+        stp_emit(&l, 0x42, tfz_f24(240.0f));
+        stp_emit(&l, 0x43, tfz_f24(-136.0f));
+        stp_emit(&l, 0x44, tfz_f24(30000.0f));
+        stp_emit(&l, 0x45, tfz_f24(2048.0f));
+        stp_emit(&l, 0x46, tfz_f24(2048.0f));
+        stp_emit(&l, 0x47, tfz_f24(32768.0f));
+        stp_emit(&l, 0x4C, (2048u - 240u) << 4);
+        stp_emit(&l, 0x4D, (2048u - 136u) << 4);
+        stp_emit(&l, 0xD6, 0);
+        stp_emit(&l, 0xD7, 40000u);                       /* depth range 0-40000 */
+        stp_emit(&l, 0x12, (7u << 2) | (3u << 7));        /* transform mode */
+    } else {
+        stp_emit(&l, 0x24, 1);
+        stp_emit(&l, 0xDC, 2u | (0u << 8) | (0xFFu << 16));      /* stencil EQUAL 0 */
+        stp_emit(&l, 0xDD, 0);                            /* KEEP, KEEP, KEEP */
     }
-    dro_sprites(&l, &vaddr, pair, pair_rgba, 2u);
+    dro_sprites(&l, &vaddr, (const float (*)[5])box, rgba, 4u);
+    stp_emit(&l, 0xE7, 1);                                /* Q: depth writes off, LESS */
+    stp_emit(&l, 0xDE, 4);
+    dro_sprites(&l, &vaddr, (const float (*)[5])&box[4], &rgba[4], 1u);
+    stp_emit(&l, 0xDE, 7);                                /* GEQUAL again for the sprite behind */
+    stp_emit(&l, 0x12, (7u << 2) | (3u << 7) | (1u << 23));   /* through mode */
     stp_emit(&l, 0x22, 0);
+    stp_emit(&l, 0x24, 0);
     stp_emit(&l, 0x27, 0);
     stp_emit(&l, 0x21, 0);
-    stp_emit(&l, 0xDE, 7);                                /* GEQUAL */
+    stp_emit(&l, 0xE7, 1);                                /* depth writes off */
     dro_sprites(&l, &vaddr, behind, behind_rgba, 1u);
     stp_end(&l);
     return DRO_LIST;
@@ -9212,7 +9895,7 @@ static unsigned dro_compare(const char *cell, const DroState *st, const uint8_t 
 }
 
 typedef struct DroRun {
-    unsigned long long batches, copies, rmw_ops, rmw_batches, rmw_breaks, fallbacks, twin_rmw_ops;
+    unsigned long long batches, copies, rmw_ops, rmw_batches, rmw_breaks, fallbacks, twin_rmw_ops, zruns;
 } DroRun;
 
 /* Set by a pair cell around dro_run_both in a twin run: the image and its twin, whole and at
@@ -9255,6 +9938,7 @@ static int dro_run_both(const DroState *st, uint32_t list, uint8_t *gpu_out, uin
     const unsigned long long b0 = s_replay_stats.batches, c0 = s_replay_stats.snapshot_copies;
     const unsigned long long o0 = s_cnt_rmw_ops, r0 = s_cnt_rmw_batches, k0 = s_cnt_rmw_breaks;
     const unsigned long long f0 = s_replay_stats.fallback_prims, t0 = s_cnt_twin_rmw_ops;
+    const unsigned long long z0 = s_cnt_rmw_zruns;
     ge_set_gpu_hooks(&k_hooks);
     ge_run_list(list, 0);
     GeGpuFbDescriptor desc = { .addr = DRO_BASE, .format = st->fmt, .stride = 512u,
@@ -9276,6 +9960,7 @@ static int dro_run_both(const DroState *st, uint32_t list, uint8_t *gpu_out, uin
     run->rmw_batches = s_cnt_rmw_batches - r0;
     run->rmw_breaks = s_cnt_rmw_breaks - k0;
     run->fallbacks = s_replay_stats.fallback_prims - f0;
+    run->zruns = s_cnt_rmw_zruns - z0;
     coherence_reset_targets();
     stp_fill_background(DRO_BASE, st->fmt);
     ge_set_gpu_hooks(NULL);
@@ -9350,7 +10035,10 @@ static int dro_twin_pair_check(const char *cell, const DroState *st, int ordered
         for (uint32_t x = 0; x < 480u * sc; x++) {
             const uint32_t gx = x / sc, gy = y / sc, i = gy * FB_W + gx;
             const uint32_t twin = s_dro_twin_px[(size_t)y * TSCL_W + x];
-            const uint32_t img = s_dro_img_px[(size_t)y * SCL_W + x];
+            /* the authentic device pixel this twin pixel lies in (the twin runs at a whole multiple of
+             * the render scale with supersampling, #2073) */
+            const uint32_t k = (uint32_t)(s_tscale / s_scale);
+            const uint32_t img = s_dro_img_px[(size_t)(y / k) * SCL_W + x / k];
             uint32_t want = img;
             if (s_twin_color) {
                 const uint32_t bg = dro_bg_rgb(st->fmt, i);
@@ -9516,35 +10204,61 @@ static int coherence_run_dst_read_mixed(void) {
     return dro_overlap_cell("dst-read-mixed", k_dro_mixed, 1u, dro_mixed_list, 1u, 3u);
 }
 
-/* dst-read-depth and dst-read-ctest: `what` names the shader kill in the messages. */
-static int dro_kill_cell(const char *cell, const DroState *stp, int colour_kill, const char *what) {
+/* dst-read-depth, -ctest, -zrange, -sfail (dro_kill_list): `what` names the kill in the messages. */
+static int dro_kill_cell(const char *cell, const DroState *stp, int kind, const char *what) {
     const DroState st = *stp;
     uint8_t *gpu_out = (uint8_t *)malloc(FB_W * FB_H * 4u);
     uint16_t *gz = (uint16_t *)malloc(480u * FB_H * 2u), *wz = (uint16_t *)malloc(480u * FB_H * 2u);
     int ok = gpu_out && gz && wz;
+    const int ordered = dro_ordered();
     GeState saved = *s_ge;
     DroRun run = {0};
-    if (ok && !dro_run_both(&st, dro_depth_list(&st, colour_kill), gpu_out, gz, wz, &run)) ok = 0;
+    unsigned diff = 0;
+    if (ok && !dro_run_both(&st, dro_kill_list(&st, kind), gpu_out, gz, wz, &run)) ok = 0;
     if (ok) {
-        static const DroBox none = { 0u, 0u, 0u, 0u };
         unsigned outside = 0, kept = 0, zdiff = 0;
-        unsigned diff = dro_compare(cell, &st, gpu_out, (const uint8_t *)SR_HOST(DRO_BASE),
-                                    &none, &outside, &kept);
+        diff = dro_compare(cell, &st, gpu_out, (const uint8_t *)SR_HOST(DRO_BASE), &k_drk_overlap,
+                           &outside, &kept);
         for (uint32_t i = 0; i < 480u * FB_H; i++) {
             if (gz[i] == wz[i]) continue;
             if (!zdiff++)
                 fprintf(stderr, "gpu coherence selftest [%s]: depth x=%u y=%u gpu=%u ge_c=%u\n", cell,
                         i % 480u, i / 480u, gz[i], wz[i]);
         }
-        if (diff || zdiff) {
-            fprintf(stderr, "gpu coherence selftest [%s]: colour differs from ge.c in %u pixels, "
-                            "depth differs from ge.c in %u pixels\n", cell, diff, zdiff);
+        /* The interlock path equals ge.c; the snapshot path keeps the known hazard, in the
+         * overlap only, and its depth equals ge.c. A stencil batch that blends never merges
+         * overlapping primitives (stencil_reads_own_writes), so for -sfail the snapshot path
+         * equals ge.c too, at the price of a copy per split batch. With depth=32 (s_depth32) the
+         * interlock path keeps the depth-writing op on the snapshot path (rmw_refuses), as there. */
+        const int split = kind == 3, zshd = ordered && !s_depth32;
+        if (zdiff || (zshd || split ? diff != 0u : (!diff || outside))) {
+            fprintf(stderr, "gpu coherence selftest [%s]: colour differs from ge.c in %u pixels, depth "
+                            "differs from ge.c in %u pixels (%u colour pixels outside the overlap) on the %s "
+                            "path%s\n", cell, diff, zdiff, outside,
+                    ordered ? (s_depth32 ? "interlock (depth=32)" : "interlock") : "snapshot", dro_twin_note());
             ok = 0;
         }
-        if (run.rmw_ops) {
-            fprintf(stderr, "gpu coherence selftest [%s]: the %s depth-writing op took "
-                            "the interlock (%llu ops); the rmwzfb rule keeps it on the snapshot path\n",
-                    cell, what, run.rmw_ops);
+        if (ordered && s_depth32 && (run.copies < (split ? 2u : 1u) || run.zruns)) {
+            fprintf(stderr, "gpu coherence selftest [%s]: with depth=32 the %s depth-writing op took %llu "
+                            "snapshot copies (want %s) and %llu shader-depth runs (want 0)\n", cell, what,
+                    run.copies, split ? "2 or more" : "1 or more", run.zruns);
+            ok = 0;
+        }
+        if (zshd && (run.rmw_ops < 1u || run.copies || run.zruns < 1u)) {
+            fprintf(stderr, "gpu coherence selftest [%s]: the %s depth-writing op took %llu interlock ops "
+                            "(want 1 or more), %llu snapshot copies (want 0), %llu shader-depth runs (want 1 "
+                            "or more)\n", cell, what, run.rmw_ops, run.copies, run.zruns);
+            ok = 0;
+        }
+        if (!ordered && (run.rmw_ops || run.copies < (split ? 2u : 1u))) {
+            fprintf(stderr, "gpu coherence selftest [%s]: on the snapshot path the %s op took %llu interlock "
+                            "ops and %llu snapshot copies (want 0 and %s)\n", cell, what, run.rmw_ops,
+                    run.copies, split ? "2 or more" : "1 or more");
+            ok = 0;
+        }
+        if (s_twin && run.twin_rmw_ops != run.rmw_ops) {
+            fprintf(stderr, "gpu coherence selftest [%s]: %llu interlock ops, %llu of them recorded into the "
+                            "host twin (want all)\n", cell, run.rmw_ops, run.twin_rmw_ops);
             ok = 0;
         }
         if (run.fallbacks) {
@@ -9556,9 +10270,19 @@ static int dro_kill_cell(const char *cell, const DroState *stp, int colour_kill,
     *s_ge = saved;
     coherence_reset_targets();
     free(gpu_out); free(gz); free(wz);
-    if (ok)
-        printf("gpu coherence selftest: PASS %-22s colour and depth equal ge.c; the op kept the snapshot\n",
-               cell);
+    if (ok && ordered && s_depth32)
+        printf("gpu coherence selftest: PASS %-22s interlock with depth=32: the depth-writing op kept the "
+               "snapshot path (%llu copies, %u pixels of the known hazard, all in the overlap)\n", cell,
+               run.copies, diff);
+    else if (ok && ordered)
+        printf("gpu coherence selftest: PASS %-22s interlock, depth in the shader (%llu runs): colour and "
+               "depth equal ge.c\n", cell, run.zruns);
+    else if (ok && kind == 3)
+        printf("gpu coherence selftest: PASS %-22s snapshot path: colour and depth equal ge.c; the stencil "
+               "batch split at the overlaps (%llu snapshot copies)\n", cell, run.copies);
+    else if (ok)
+        printf("gpu coherence selftest: PASS %-22s snapshot path: depth equals ge.c; the known #2109 hazard, "
+               "%u pixels, all in the overlap\n", cell, diff);
     return ok;
 }
 
@@ -9570,6 +10294,16 @@ static int coherence_run_dst_read_depth(void) {
 static int coherence_run_dst_read_ctest(void) {
     static const DroState st = { "5650 colour-tested", 0u, 0u, 2u | (3u << 4), 0u, 0u, 0u };
     return dro_kill_cell("dst-read-ctest", &st, 1, "colour-tested");
+}
+
+static int coherence_run_dst_read_zrange(void) {
+    static const DroState st = { "5650 depth range", 0u, 0u, 2u | (3u << 4), 0u, 0u, 0u };
+    return dro_kill_cell("dst-read-zrange", &st, 2, "depth-ranged");
+}
+
+static int coherence_run_dst_read_sfail(void) {
+    static const DroState st = { "5551 stencil-fail KEEP", 1u, 0u, 2u | (3u << 4), 0u, 0u, 0u };
+    return dro_kill_cell("dst-read-sfail", &st, 3, "stencil-tested");
 }
 
 typedef struct DroTexVtx { float u, v; uint32_t rgba; float x, y, z; } DroTexVtx;
@@ -9763,10 +10497,11 @@ static int coherence_run_dst_read_ztest(void) {
                         st->name, leg->name, diff, outside);
                 ok = 0;
             }
-            if (run.rmw_ops != 1u || run.rmw_batches != 1u || run.copies != 0u) {
+            if (run.rmw_ops != 1u || run.rmw_batches != 1u || run.copies != 0u || run.zruns != 0u) {
                 fprintf(stderr, "gpu coherence selftest [dst-read-ztest]: %s, %s: interlock ops %llu (want 1), "
-                                "RMW batches %llu (want 1), snapshot copies %llu (want 0)\n",
-                        st->name, leg->name, run.rmw_ops, run.rmw_batches, run.copies);
+                                "RMW batches %llu (want 1), snapshot copies %llu (want 0), shader depth runs %llu "
+                                "(want 0: no kill, so the early depth test owns depth)\n",
+                        st->name, leg->name, run.rmw_ops, run.rmw_batches, run.copies, run.zruns);
                 ok = 0;
             }
         } else {
@@ -9808,7 +10543,8 @@ static int coherence_run_dst_read_pins(void) {
     const int storage = (s_target_usage & VK_IMAGE_USAGE_STORAGE_BIT) != 0;
     const int objects = s_rp_rmw != VK_NULL_HANDLE || s_fs_rmw != VK_NULL_HANDLE ||
                         s_playout_rmw != VK_NULL_HANDLE || s_dpool_rmw != VK_NULL_HANDLE ||
-                        s_rmw_dlayout != VK_NULL_HANDLE;
+                        s_rmw_dlayout != VK_NULL_HANDLE || s_rmw_zbuf != VK_NULL_HANDLE;
+    const int rmw_pipes = s_rmw_pipe_n[0] + s_rmw_pipe_n[1];
     int ok = 1;
     if (vi.dst_read != (s_dst_interlock ? SDL3VK_DST_READ_INTERLOCK : SDL3VK_DST_READ_SNAPSHOT)) {
         fprintf(stderr, "gpu coherence selftest [dst-read-pins]: the device was made for path %d, the GE "
@@ -9816,15 +10552,16 @@ static int coherence_run_dst_read_pins(void) {
         ok = 0;
     }
     if (!s_dst_interlock) {
-        if (vi.device_extensions != base_ext || vi.device_features2 || storage || objects || s_rmw_pipe_n) {
+        if (vi.device_extensions != base_ext || vi.device_features2 || storage || objects || rmw_pipes) {
             fprintf(stderr, "gpu coherence selftest [dst-read-pins]: the snapshot path made interlock state: "
                             "extensions %u (want %u), features chain %d, STORAGE_BIT %d, objects %d, RMW "
                             "pipelines %d\n", vi.device_extensions, base_ext, vi.device_features2, storage,
-                    objects, s_rmw_pipe_n);
+                    objects, rmw_pipes);
             ok = 0;
         }
     } else if (vi.device_extensions != base_ext + 1u || !vi.device_features2 || vi.device_features ||
-               !storage || !s_rp_rmw || !s_fs_rmw || !s_playout_rmw || !s_dpool_rmw || !s_rmw_dlayout) {
+               !storage || !s_rp_rmw || !s_fs_rmw || !s_playout_rmw || !s_dpool_rmw || !s_rmw_dlayout ||
+               !s_rmw_zbuf) {
         fprintf(stderr, "gpu coherence selftest [dst-read-pins]: the interlock path lacks state: extensions "
                         "%u (want %u), features chain %d, pEnabledFeatures %d, STORAGE_BIT %d\n",
                 vi.device_extensions, base_ext + 1u, vi.device_features2, vi.device_features, storage);
@@ -9860,6 +10597,8 @@ static int coherence_run_dst_read(void) {
     if (!coherence_run_dst_read_mixed()) ok = 0;
     if (!coherence_run_dst_read_depth()) ok = 0;
     if (!coherence_run_dst_read_ctest()) ok = 0;
+    if (!coherence_run_dst_read_zrange()) ok = 0;
+    if (!coherence_run_dst_read_sfail()) ok = 0;
     if (!coherence_run_dst_read_feedback()) ok = 0;
     if (!coherence_run_dst_read_ztest()) ok = 0;
     if (!coherence_run_dst_read_pins()) ok = 0;
@@ -9880,6 +10619,8 @@ static int coherence_run_dst_read_one(const char *name) {
     if (strcmp(name, "dst-read-mixed") == 0) return coherence_run_dst_read_mixed();
     if (strcmp(name, "dst-read-depth") == 0) return coherence_run_dst_read_depth();
     if (strcmp(name, "dst-read-ctest") == 0) return coherence_run_dst_read_ctest();
+    if (strcmp(name, "dst-read-zrange") == 0) return coherence_run_dst_read_zrange();
+    if (strcmp(name, "dst-read-sfail") == 0) return coherence_run_dst_read_sfail();
     if (strcmp(name, "dst-read-feedback") == 0) return coherence_run_dst_read_feedback();
     if (strcmp(name, "dst-read-ztest") == 0) return coherence_run_dst_read_ztest();
     if (strcmp(name, "dst-read-pins") == 0)
@@ -10367,6 +11108,332 @@ static int coherence_run_stencil_once(void) {
     return ok;
 }
 
+/* twin-soft (`--twin 1` or `--twin native`, scale 1): the software renderer's host twin (ge.c,
+ * ge_twin_*, #2050) on twin-scene's list with no GPU hooks, run with the twin off, then on in the
+ * run's colour (ge_twin_set_mode), then off again. Checks:
+ *   - guest VRAM of T1, T2 and T3 with the twin on equals the twin-off runs byte for byte, and with
+ *     the twin off ge_twin_present_row shows nothing (the CPU presenter converts VRAM as before);
+ *   - full colour: T1's shown rows are smooth (every row rises and takes far more than the 5551
+ *     lattice's 32 red levels; the blended half too), T3's shown rows 0..135 are T1's (the block
+ *     transfer copied the slots), and T1 and T3 agree with the Vulkan twin's shown images
+ *     (twin-scene's run) within one step per colour channel (wide_near). The presenters show red,
+ *     green and blue, so alpha is not compared. T2 shows T1's 16-bit texels, on the 5551 lattice:
+ *     software texture fetches read VRAM (the render-to-texture difference of contract 10.11);
+ *   - native colour: every shown row equals the CPU presenter's conversion of guest VRAM;
+ *   - witness: a CPU store into a twinned pixel of T1 makes that pixel show its authentic value,
+ *     while the pixel beside it keeps the twin's colour. */
+typedef struct { uint8_t *vram[3]; uint32_t *shown[3]; int presented; } TwinSoftRun;
+
+static void twin_soft_free(TwinSoftRun *r) {
+    for (int i = 0; i < 3; i++) { free(r->vram[i]); free(r->shown[i]); }
+    memset(r, 0, sizeof(*r));
+}
+
+/* The presenter's view of a raw pixel (gui.c convert_fb_pixels), red in the low byte, no alpha. */
+static uint32_t twin_soft_cpu_shown(uint32_t p, uint32_t fmt) {
+    uint32_t r, g, b;
+    if (fmt == 3u) { r = p & 0xFFu; g = (p >> 8) & 0xFFu; b = (p >> 16) & 0xFFu; }
+    else if (fmt == 1u) { r = (p & 0x1Fu) << 3; g = ((p >> 5) & 0x1Fu) << 3; b = ((p >> 10) & 0x1Fu) << 3; }
+    else if (fmt == 2u) { r = (p & 0xFu) << 4; g = ((p >> 4) & 0xFu) << 4; b = ((p >> 8) & 0xFu) << 4; }
+    else { r = (p & 0x1Fu) << 3; g = ((p >> 5) & 0x3Fu) << 2; b = ((p >> 11) & 0x1Fu) << 3; }
+    return r | (g << 8) | (b << 16);
+}
+
+static int twin_soft_run(TwinSoftRun *r) {
+    coherence_reset_targets();
+    coherence_reset_depths();
+    for (int i = 0; i < 3; i++)
+        memset(SR_HOST(0x04000000u | k_twin_fba[i]), 0, 512u * FB_H * (k_twin_fmt[i] == 3u ? 4u : 2u));
+    ge_set_gpu_hooks(NULL);
+    int ok = ge_run_list(twin_list(), 0) == 0;
+    r->presented = 0;
+    for (int i = 0; ok && i < 3; i++) {
+        const uint32_t bytes = 512u * FB_H * (k_twin_fmt[i] == 3u ? 4u : 2u);
+        r->vram[i] = (uint8_t *)malloc(bytes);
+        r->shown[i] = (uint32_t *)calloc((size_t)FB_W * FB_H, 4u);
+        if (!r->vram[i] || !r->shown[i]) { ok = 0; break; }
+        memcpy(r->vram[i], SR_HOST(0x04000000u | k_twin_fba[i]), bytes);
+        for (uint32_t y = 0; y < FB_H; y++)
+            r->presented += ge_twin_present_row(0x04000000u | k_twin_fba[i], (int)k_twin_fmt[i], 512u, (int)y,
+                                                r->shown[i] + (size_t)y * FB_W, DRAW_W);
+    }
+    ge_set_gpu_hooks(&k_hooks);
+    return ok;
+}
+
+static int coherence_run_twin_soft(void) {
+    const char *name = "twin-soft";
+    if (s_twin_unavailable) {
+        printf("gpu coherence selftest: SKIP %s: the host twin was requested (SR_GPU_TWIN_COLOR=%s) but this "
+               "device refused it, and the case compares against the Vulkan twin\n", name, getenv("SR_GPU_TWIN_COLOR"));
+        return 1;
+    }
+    if (!s_twin || s_scale != 1) {
+        fprintf(stderr, "gpu coherence selftest [%s]: needs --twin 1 or --twin native at scale 1\n", name);
+        return 0;
+    }
+    const int mode = s_twin_color ? 1 : 2;
+    int ok = 1;
+    /* the Vulkan twin's shown images of the same list (full colour only) */
+    TwinRun vk = {0};
+    if (mode == 1 && !twin_run_scene(&vk)) {
+        fprintf(stderr, "gpu coherence selftest [%s]: the Vulkan twin-scene run did not run\n", name);
+        ok = 0;
+    }
+    TwinSoftRun off = {0}, on = {0}, off2 = {0};
+    if (ok && ge_twin_set_mode(0) != 0) ok = 0;
+    if (ok && !twin_soft_run(&off)) ok = 0;
+    if (ok && ge_twin_set_mode(mode) != mode) {
+        fprintf(stderr, "gpu coherence selftest [%s]: the software twin could not be turned on\n", name);
+        ok = 0;
+    }
+    if (ok && !twin_soft_run(&on)) ok = 0;
+    if (!ok) fprintf(stderr, "gpu coherence selftest [%s]: a software run did not run\n", name);
+    if (ok && (off.presented != 0 || on.presented != 3 * FB_H)) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL rows shown from the twin: %d with it off (want 0), "
+                "%d with it on (want %d)\n", name, off.presented, on.presented, 3 * FB_H);
+        ok = 0;
+    }
+    for (int i = 0; ok && i < 3; i++) {
+        if (memcmp(off.vram[i], on.vram[i], 512u * FB_H * (k_twin_fmt[i] == 3u ? 4u : 2u)) != 0) {
+            fprintf(stderr, "gpu coherence selftest [%s]: FAIL guest VRAM of target %d differs from the "
+                    "twin-off software run\n", name, i + 1);
+            ok = 0;
+        }
+    }
+    int distinct = 0, odistinct = 0, worst = 0;
+    if (ok && mode == 1) {
+        int mono, lattice, omono, olattice;
+        twin_gradient_stats(on.shown[0], 1, 0, 136, &mono, &distinct, &lattice);
+        if (!mono || lattice || distinct < 160) {
+            fprintf(stderr, "gpu coherence selftest [%s]: FAIL the software twin's gradient is not full colour "
+                    "(monotonic=%d lattice=%d red levels=%d)\n", name, mono, lattice, distinct);
+            ok = 0;
+        }
+        twin_gradient_stats(on.shown[0], 1, 136, FB_H, &omono, &odistinct, &olattice);
+        if (!omono || olattice || odistinct < 120) {
+            fprintf(stderr, "gpu coherence selftest [%s]: FAIL the software twin's blended gradient is not full "
+                    "colour (monotonic=%d lattice=%d red levels=%d)\n", name, omono, olattice, odistinct);
+            ok = 0;
+        }
+        if (!twin_rows_equal(on.shown[2], on.shown[0], 1, 0, 136)) {
+            fprintf(stderr, "gpu coherence selftest [%s]: FAIL T3's shown rows are not T1's (the block transfer "
+                    "did not copy the twin)\n", name);
+            ok = 0;
+        }
+        int smono, sdistinct, slattice;
+        twin_gradient_stats(on.shown[1], 1, 0, 136, &smono, &sdistinct, &slattice);
+        if (!slattice) {
+            fprintf(stderr, "gpu coherence selftest [%s]: FAIL T2 is off the 5551 lattice (red levels=%d): the "
+                    "software texture fetch no longer reads T1's 16-bit texels; update contract 10.11\n",
+                    name, sdistinct);
+            ok = 0;
+        }
+        for (int k = 0; k < 2; k++) {
+            const int i = k ? 2 : 0;
+            size_t far = 0, fx = 0, fy = 0;
+            for (uint32_t y = 0; y < FB_H; y++)
+                for (uint32_t x = 0; x < DRAW_W; x++) {
+                    const uint32_t a = on.shown[i][(size_t)y * FB_W + x] & 0x00FFFFFFu;
+                    const uint32_t b = vk.shown[i][(size_t)y * FB_W + x] & 0x00FFFFFFu;
+                    for (int sh = 0; sh < 24; sh += 8) {
+                        const int d = abs((int)((a >> sh) & 0xFFu) - (int)((b >> sh) & 0xFFu));
+                        if (d > worst) worst = d;
+                    }
+                    if (!wide_near(a, b) && far++ == 0) { fx = x; fy = y; }
+                }
+            if (far) {
+                fprintf(stderr, "gpu coherence selftest [%s]: FAIL T%d's software twin differs from the Vulkan "
+                        "twin by more than one step in %zu pixels, first (%zu,%zu): software 0x%06x, Vulkan "
+                        "0x%06x\n", name, i + 1, far, fx, fy,
+                        on.shown[i][fy * FB_W + fx] & 0x00FFFFFFu, vk.shown[i][fy * FB_W + fx] & 0x00FFFFFFu);
+                ok = 0;
+            }
+        }
+    }
+    if (ok && mode == 2) {
+        for (int i = 0; ok && i < 3; i++) {
+            for (uint32_t y = 0; ok && y < FB_H; y++)
+                for (uint32_t x = 0; x < DRAW_W; x++) {
+                    uint32_t p;
+                    if (k_twin_fmt[i] == 3u) memcpy(&p, on.vram[i] + ((size_t)y * 512u + x) * 4u, 4u);
+                    else { uint16_t h; memcpy(&h, on.vram[i] + ((size_t)y * 512u + x) * 2u, 2u); p = h; }
+                    if ((on.shown[i][(size_t)y * FB_W + x] & 0x00FFFFFFu) != twin_soft_cpu_shown(p, k_twin_fmt[i])) {
+                        fprintf(stderr, "gpu coherence selftest [%s]: FAIL the native software twin of target %d "
+                                "differs from the CPU presenter's image at (%u,%u)\n", name, i + 1, x, y);
+                        ok = 0;
+                        break;
+                    }
+                }
+        }
+    }
+    /* witness: a CPU store the twin does not take, into a pixel it holds */
+    if (ok) {
+        const uint32_t px = 100u, py = 40u, addr = 0x04000000u | (TWIN_T1 + (py * 512u + px) * 2u);
+        uint32_t before[DRAW_W], after[DRAW_W];
+        ge_set_gpu_hooks(NULL);
+        const int b_ok = ge_twin_present_row(0x04000000u | TWIN_T1, 1, 512u, (int)py, before, DRAW_W);
+        const uint16_t raw = sr_r16(addr), stored = (uint16_t)(raw ^ 0x0015u);
+        sr_w16(addr, stored);
+        const int a_ok = ge_twin_present_row(0x04000000u | TWIN_T1, 1, 512u, (int)py, after, DRAW_W);
+        ge_set_gpu_hooks(&k_hooks);
+        const uint32_t want = twin_soft_cpu_shown(stored, 1u);
+        if (!b_ok || !a_ok || (after[px] & 0x00FFFFFFu) != want ||
+            (after[px + 1] & 0x00FFFFFFu) != (before[px + 1] & 0x00FFFFFFu)) {
+            fprintf(stderr, "gpu coherence selftest [%s]: FAIL witness: after a CPU store of 0x%04x at (%u,%u) the "
+                    "pixel shows 0x%06x (want its authentic 0x%06x; before the store 0x%06x), its neighbour "
+                    "0x%06x (before 0x%06x)\n", name, stored, px, py, after[px] & 0x00FFFFFFu, want,
+                    before[px] & 0x00FFFFFFu, after[px + 1] & 0x00FFFFFFu, before[px + 1] & 0x00FFFFFFu);
+            ok = 0;
+        }
+    }
+    /* off again: nothing is shown from the twin, and VRAM is the twin-off run's */
+    if (ok && (ge_twin_set_mode(0) != 0 || !twin_soft_run(&off2) || off2.presented != 0)) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL with the twin turned off again, %d rows were shown "
+                "from it\n", name, off2.presented);
+        ok = 0;
+    }
+    for (int i = 0; ok && i < 3; i++)
+        if (memcmp(off.vram[i], off2.vram[i], 512u * FB_H * (k_twin_fmt[i] == 3u ? 4u : 2u)) != 0) {
+            fprintf(stderr, "gpu coherence selftest [%s]: FAIL guest VRAM of target %d changed between the "
+                    "twin-off runs\n", name, i + 1);
+            ok = 0;
+        }
+    if (ok && mode == 1)
+        printf("gpu coherence selftest: PASS %s software twin colour full: guest VRAM equals the twin-off run; "
+               "shown gradient %d red levels, blended %d; T3 holds T1's twin rows; T1 and T3 within %d of the "
+               "Vulkan twin per channel (bound 1); T2 shows T1's 16-bit texels; a CPU store shows the "
+               "authentic pixel; off shows nothing from the twin\n", name, distinct, odistinct, worst);
+    if (ok && mode == 2)
+        printf("gpu coherence selftest: PASS %s software twin colour native: guest VRAM equals the twin-off run; "
+               "the shown images equal the CPU presenter's; a CPU store shows the authentic pixel; off shows "
+               "nothing from the twin\n", name);
+    ge_twin_set_mode(-1);
+    twin_soft_free(&off); twin_soft_free(&on); twin_soft_free(&off2);
+    twin_run_free(&vk);
+    coherence_reset_targets();
+    coherence_reset_depths();
+    return ok;
+}
+
+/* twin-key (`--twin-key on|off`): the player's switch end to end. The harness's Ace line carries
+ * `twin=on` (`off`: `twin=off`, see below). With SR_GPU_TWIN_COLOR unset the line alone must turn the twin
+ * on in the GPU renderer (full colour, decided in gegpu_init) and in the software renderer (decided at its first colour
+ * write, ge_twin_set_mode(-1) first), and each must confirm it, so ace_finish's report holds no
+ * "twin" entry under "unavailable". With the variable set it wins (`--twin 0` or `off` is no twin,
+ * `--twin native` the twin with native colour), and the report then names the override. Each renderer
+ * is checked against its own freshly made Ace state. A device that refuses the GPU twin is a SKIP
+ * for the GPU half only after the report names the refusal. With `--twin-key off` the line asks
+ * for nothing: `--twin 1` or `native` still turns the twin on, and the report must then say it is
+ * on, as it runs (D-S1), with nothing named unavailable; with the variable unset or `0` no twin runs.
+ * With `--ssaa 2` the GPU renderer also runs the twin for supersampling's samples, in native colour
+ * unless the line or the variable asked for full colour, and that twin alone is not full colour:
+ * the report names the twin as above, whatever supersampling ran. */
+static int twin_key_report(int *effective, char *why, size_t n) {
+    static char json[ACE_REPORT_MAX];
+    why[0] = '\0';
+    if (!ace_report_json(json, sizeof json)) return 0;
+    const char *e = strstr(json, "\"twin\": ");        /* "effective" comes first */
+    const char *u = strstr(json, "\"unavailable\": {");
+    if (!e || !u) return 0;
+    *effective = strncmp(e + 8, "true", 4) == 0;
+    const char *end = strchr(u, '}');
+    const char *r = strstr(u, "\"twin\": \"");
+    if (r && end && r < end) {
+        r += 9;
+        size_t i = 0;
+        for (; r[i] && r[i] != '"' && i + 1 < n; i++) why[i] = r[i];
+        why[i] = '\0';
+    }
+    return 1;
+}
+
+/* The report for the renderer `who`: the twin is `want_on` or not, and the reason is named. */
+static int twin_key_check_report(const char *who, int want_on, int refused_ok) {
+    const int key = ace_requested()->twin;   /* the line asked for the twin */
+    int eff = -1;
+    char why[96];
+    ace_finish();
+    if (!twin_key_report(&eff, why, sizeof why)) {
+        fprintf(stderr, "gpu coherence selftest [twin-key]: FAIL %s: the Ace report could not be read\n", who);
+        return 0;
+    }
+    if (want_on && !why[0] && eff == 1) return 1;
+    if (!want_on && eff == 0 && (key ? strstr(why, "SR_GPU_TWIN_COLOR") != NULL : !why[0])) return 1;
+    if (refused_ok && eff == 0 && (why[0] || !key)) return 1;
+    fprintf(stderr, "gpu coherence selftest [twin-key]: FAIL %s: the report names the twin %s%s (effective "
+            "twin %s), want it %s\n", who, why[0] ? "unavailable: " : "available", why,
+            eff == 1 ? "on" : "off", want_on ? "on and not unavailable"
+            : key ? "off, unavailable by SR_GPU_TWIN_COLOR" : "off and not unavailable");
+    return 0;
+}
+
+static int coherence_run_twin_key(void) {
+    const char *name = "twin-key";
+    const int key = ace_requested()->twin;       /* --twin-key on: the line asks for the twin */
+    const char *k_line = key ? "v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;twin=on"
+                             : "v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;twin=off";
+    const char *env = getenv("SR_GPU_TWIN_COLOR");
+    const int overridden = env && env[0];
+    const int env_mode = twin_mode_parse(env);   /* 0, 1 or 2; -1 refused */
+    const int want = overridden ? (env_mode > 0 ? env_mode : 0) : key ? 1 : 0;
+    int ok = 1;
+    if (!g_ace_on) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL needs --twin-key on|off\n", name);
+        return 0;
+    }
+    /* the GPU renderer, decided by gegpu_init from this Ace line */
+    if (s_twin_unavailable) {
+        if (!twin_key_check_report("gpu renderer", 1, 1)) ok = 0;
+        printf("gpu coherence selftest: SKIP %s gpu renderer: this device refused the twin (the report names it)\n",
+               name);
+    } else {
+        const int twin_want = want > 0 || s_ssaa > 1;   /* supersampling runs it in native colour */
+        if (ace_requested()->ssaa > 1 && s_ssaa <= 1) {   /* else the --ssaa legs would test nothing */
+            fprintf(stderr, "gpu coherence selftest [%s]: FAIL gpu renderer: ssaa=%d was asked for and "
+                    "supersampling did not run\n", name, ace_requested()->ssaa);
+            ok = 0;
+        }
+        if (s_twin != twin_want || (twin_want && s_twin_color != (want == 1))) {
+            fprintf(stderr, "gpu coherence selftest [%s]: FAIL gpu renderer: the launch line's twin=on did not turn "
+                    "the twin on (SR_GPU_TWIN_COLOR=%s): twin %s, colour %s, want %s\n", name, overridden ? env : "(unset)",
+                    s_twin ? "on" : "off", s_twin_color ? "full" : "native",
+                    !twin_want ? "off" : want == 1 ? "on, full" : "on, native");
+            ok = 0;
+        }
+        if (!twin_key_check_report("gpu renderer", want > 0, 0)) ok = 0;
+    }
+    /* the software renderer: a fresh Ace state with the same line, the twin undecided */
+    if (!ace_init_spec(k_line, NULL)) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL the Ace line was refused\n", name);
+        return 0;
+    }
+    TwinSoftRun run = {0};
+    ge_twin_set_mode(-1);
+    if (!twin_soft_run(&run)) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL a software run did not run\n", name);
+        ok = 0;
+    } else {
+        const int got = ge_twin_mode();
+        if (got != want || run.presented != (want > 0 ? 3 * FB_H : 0)) {
+            fprintf(stderr, "gpu coherence selftest [%s]: FAIL software renderer: the launch line's twin=on did not "
+                    "turn the twin on (SR_GPU_TWIN_COLOR=%s): mode %d, %d rows shown from it, want mode %d, %d rows\n",
+                    name, overridden ? env : "(unset)", got, run.presented, want, want > 0 ? 3 * FB_H : 0);
+            ok = 0;
+        }
+    }
+    if (!twin_key_check_report("software renderer", want > 0, 0)) ok = 0;
+    ge_twin_set_mode(-1);
+    twin_soft_free(&run);
+    coherence_reset_targets();
+    coherence_reset_depths();
+    if (ok)
+        printf("gpu coherence selftest: PASS %s (line twin=%s) SR_GPU_TWIN_COLOR=%s: a twin %s in both renderers; "
+               "the report is consistent\n", name, key ? "on" : "off", overridden ? env : "(unset)",
+               want == 0 ? (key ? "off (the override named)" : "off") : want == 1 ? "in full colour" : "with native colour");
+    return ok;
+}
+
 /* rtt-scale (#2052): a bloom-like pass into a quarter-size render target Q (128 x 68, stride 128,
  * 8888) is sampled back by one sprite onto the full-size target M (512 x 272), 4x, linear (a
  * bloom's filter), in the target's own format and stride. That is the render-to-texture bind in
@@ -10616,6 +11683,1057 @@ static int coherence_run_rtt_scale(void) {
                "renderer's within 2 per channel (%u pixels differ more, all within 8 rows of the edge)\n",
                name, differ);
     }
+    return ok;
+}
+
+/* ==== GE raster cells (PSP-GE-RASTER-001, #343) ====
+ * This block is carried byte for byte by fixtures/psp_oracle/probe_ge_sample.c (the PSP
+ * side, CASE=ge-raster), tests/native/hle_thread_selftest.c (the software GE side) and
+ * src/rt/gpu_sdl3vk/ge_gpu_selftest.inc (the Vulkan side); tools/test_psp_oracle.py pins
+ * the copies. Each cell is one display list of project-written
+ * command words over generated patterns (no game data). It draws into the 16x4 window
+ * x 16..31, y 8..11 of a 64x32 colour buffer at VRAM offset GR_FB_OFFSET whose other pixels
+ * are 0 and whose window holds gr_dst() before the list runs. The base state turns every
+ * per-fragment unit off and selects a 16x4 texture drawn 1:1 by a through-mode sprite with
+ * REPLACE/RGBA, so a sprite's source colour is the texel; a cell's words then change only
+ * what it measures. Transform-mode cells (GR_K_FOG, GR_K_XTRI) use identity world and view
+ * matrices and a viewport that maps view x, y back to window pixels. The result is the
+ * window's 64 pixels (16-bit formats zero-extended). */
+
+#define GR_FB_OFFSET 0x00100000u   /* VRAM-relative colour buffer, stride 64, 32 rows */
+#define GR_ZB_OFFSET 0x00110000u   /* VRAM-relative depth buffer, stride 64 */
+#define GR_STRIDE 64u
+#define GR_ROWS 32u
+#define GR_WX 16u                  /* window x 16..31, y 8..11 */
+#define GR_WY 8u
+#define GR_WW 16u
+#define GR_WH 4u
+#define GR_N 64u                   /* pixels in the window, and texels in each texture */
+#define GR_LIST_WORDS 256u
+#define GR_VTX_WORDS 800u
+#define GR_TEX_BYTES 512u          /* room for the largest texture (GR_T_8888W, 320 bytes) */
+#define GR_CLUT_BYTES 1024u
+#define GR_Z 32768.0f              /* depth of every tested through-mode primitive */
+#define GR_RED 0xff0000ffu
+#define GR_GREEN 0xff00ff00u
+
+enum { GR_K_SPRITE, GR_K_ZSPRITE, GR_K_TRI, GR_K_WRAP, GR_K_CLEAR, GR_K_FOG, GR_K_XTRI,
+       GR_K_LINE, GR_K_POINT };
+enum { GR_T_8888, GR_T_5650, GR_T_5551, GR_T_4444, GR_T_CLUT8, GR_T_CLUT4, GR_T_CLUT4W,
+       GR_T_8888W, GR_T_COUNT };
+enum { GR_D_PATTERN, GR_D_WHITE };
+
+/* kind: what is drawn (GR_K_*); psm: framebuffer format; tex: source texture (GR_T_*);
+   dst: window contents before the draw (GR_D_*); arg: the kind's table row, the texture
+   buffer width of a GR_K_SPRITE (0: 16) or, for GR_K_FOG, 1 to give every pixel colour vcol;
+   vcol: vertex colour (ABGR); w: command words applied after the base state, 0 ends them. */
+struct gr_cell {
+    const char *name;
+    uint8_t kind, psm, tex, dst, arg;
+    uint32_t vcol;
+    uint32_t w[6];
+};
+
+#define GR_CELL_COUNT 189u
+static const struct gr_cell gr_cells[GR_CELL_COUNT] = {
+    {"b-sa-isa", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x21000001u, 0xdf000032u}},
+    {"b-fix", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x21000001u, 0xdf0000aau, 0xe040c0ffu, 0xe17f3f01u}},
+    {"b-fix-ff", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x21000001u, 0xdf0000aau, 0xe0ffffffu, 0xe1ffffffu}},
+    {"b-dc-sc", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x21000001u, 0xdf000000u}},
+    {"b-idc-isc", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x21000001u, 0xdf000011u}},
+    {"b-da-ida", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x21000001u, 0xdf000054u}},
+    {"b-2sa-2isa", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x21000001u, 0xdf000076u}},
+    {"b-2isa-2sa", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x21000001u, 0xdf000067u}},
+    {"b-2da-2ida", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x21000001u, 0xdf000098u}},
+    {"b-sub-sa-fix", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x21000001u, 0xdf0001a2u, 0xe1806040u}},
+    {"b-rsub-sa-isa", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x21000001u, 0xdf000232u}},
+    {"b-min", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x21000001u, 0xdf000332u}},
+    {"b-max", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x21000001u, 0xdf000432u}},
+    {"b-abs", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x21000001u, 0xdf000532u}},
+    {"b-eq6", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x21000001u, 0xdf000632u}},
+    {"b-eq7", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x21000001u, 0xdf000732u}},
+    {"b-fac11-15", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x21000001u, 0xdf0000fbu, 0xe0102030u, 0xe1c0b0a0u}},
+    {"b565-sa-isa", GR_K_SPRITE, 0u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x21000001u, 0xdf000032u}},
+    {"b5551-sa-isa", GR_K_SPRITE, 1u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x21000001u, 0xdf000032u}},
+    {"b4444-sa-isa", GR_K_SPRITE, 2u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x21000001u, 0xdf000032u}},
+    {"b565-da-ida", GR_K_SPRITE, 0u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x21000001u, 0xdf000054u}},
+    {"b-2sa-fix0", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x21000001u, 0xdf0000a6u, 0xe1000000u}},
+    {"b-2isa-fix0", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x21000001u, 0xdf0000a7u, 0xe1000000u}},
+    {"b-2da-fix0", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x21000001u, 0xdf0000a8u, 0xe1000000u}},
+    {"b-ffix-2isa", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x21000001u, 0xdf00007au, 0xe0ffffffu}},
+    {"b-ffix-2ida", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x21000001u, 0xdf00009au, 0xe0ffffffu}},
+    {"b5551-da-ida", GR_K_SPRITE, 1u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x21000001u, 0xdf000054u}},
+    {"b4444-da-ida", GR_K_SPRITE, 2u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x21000001u, 0xdf000054u}},
+    {"at-f0", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x22000001u, 0xdbff8000u}},
+    {"at-f1", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x22000001u, 0xdbff8001u}},
+    {"at-f2", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x22000001u, 0xdbff8002u}},
+    {"at-f3", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x22000001u, 0xdbff8003u}},
+    {"at-f4", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x22000001u, 0xdbff8004u}},
+    {"at-f5", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x22000001u, 0xdbff8005u}},
+    {"at-f6", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x22000001u, 0xdbff8006u}},
+    {"at-f7", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x22000001u, 0xdbff8007u}},
+    {"at-mask", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x22000001u, 0xdb3c3007u}},
+    {"at-gt0", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x22000001u, 0xdbff0006u}},
+    {"ct-never", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x27000001u, 0xd8000000u, 0xd9800000u, 0xda800000u}},
+    {"ct-always", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x27000001u, 0xd8000001u, 0xd9800000u, 0xda800000u}},
+    {"ct-eq", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x27000001u, 0xd8000002u, 0xd9800000u, 0xda800000u}},
+    {"ct-ne", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x27000001u, 0xd8000003u, 0xd9800000u, 0xda800000u}},
+    {"ct-eq-mix", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x27000001u, 0xd8000002u, 0xd9004080u, 0xda00c0c0u}},
+    {"st-f0", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x24000001u, 0xdcff8000u, 0xdd040003u}},
+    {"st-f1", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x24000001u, 0xdcff8001u, 0xdd040003u}},
+    {"st-f2", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x24000001u, 0xdcff8002u, 0xdd040003u}},
+    {"st-f3", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x24000001u, 0xdcff8003u, 0xdd040003u}},
+    {"st-f4", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x24000001u, 0xdcff8004u, 0xdd040003u}},
+    {"st-f5", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x24000001u, 0xdcff8005u, 0xdd040003u}},
+    {"st-f6", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x24000001u, 0xdcff8006u, 0xdd040003u}},
+    {"st-f7", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x24000001u, 0xdcff8007u, 0xdd040003u}},
+    {"st-op0", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x24000001u, 0xdcff5a01u, 0xdd000000u}},
+    {"st-op1", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x24000001u, 0xdcff5a01u, 0xdd010000u}},
+    {"st-op2", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x24000001u, 0xdcff5a01u, 0xdd020000u}},
+    {"st-op3", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x24000001u, 0xdcff5a01u, 0xdd030000u}},
+    {"st-op4", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x24000001u, 0xdcff5a01u, 0xdd040000u}},
+    {"st-op5", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x24000001u, 0xdcff5a01u, 0xdd050000u}},
+    {"st-op6", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x24000001u, 0xdcff5a01u, 0xdd060000u}},
+    {"st-op7", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x24000001u, 0xdcff5a01u, 0xdd070000u}},
+    {"st-mask", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x24000001u, 0xdcf05002u, 0xdd050002u}},
+    {"st4444-incr", GR_K_SPRITE, 2u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x24000001u, 0xdcff5a01u, 0xdd040000u}},
+    {"st4444-decr", GR_K_SPRITE, 2u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x24000001u, 0xdcff5a01u, 0xdd050000u}},
+    {"st4444-repl", GR_K_SPRITE, 2u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x24000001u, 0xdcff5a01u, 0xdd020000u}},
+    {"st4444-lt", GR_K_SPRITE, 2u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x24000001u, 0xdcff8004u, 0xdd040003u}},
+    {"st5551-incr", GR_K_SPRITE, 1u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x24000001u, 0xdcff5a01u, 0xdd040000u}},
+    {"st5551-decr", GR_K_SPRITE, 1u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x24000001u, 0xdcff5a01u, 0xdd050000u}},
+    {"st5551-repl7f", GR_K_SPRITE, 1u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x24000001u, 0xdcff7f01u, 0xdd020000u}},
+    {"st5551-inv", GR_K_SPRITE, 1u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x24000001u, 0xdcff5a01u, 0xdd030000u}},
+    {"st565-repl", GR_K_SPRITE, 0u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x24000001u, 0xdcff5a01u, 0xdd020000u}},
+    {"st565-eq0", GR_K_SPRITE, 0u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x24000001u, 0xdcff0002u, 0xdd000000u}},
+    {"z-f0", GR_K_ZSPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x23000001u, 0xde000000u}},
+    {"z-f1", GR_K_ZSPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x23000001u, 0xde000001u}},
+    {"z-f2", GR_K_ZSPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x23000001u, 0xde000002u}},
+    {"z-f3", GR_K_ZSPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x23000001u, 0xde000003u}},
+    {"z-f4", GR_K_ZSPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x23000001u, 0xde000004u}},
+    {"z-f5", GR_K_ZSPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x23000001u, 0xde000005u}},
+    {"z-f6", GR_K_ZSPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x23000001u, 0xde000006u}},
+    {"z-f7", GR_K_ZSPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x23000001u, 0xde000007u}},
+    {"z-lt-st", GR_K_ZSPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x23000001u, 0xde000004u, 0x24000001u, 0xdcff0001u, 0xdd040300u}},
+    {"z-gt-st", GR_K_ZSPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x23000001u, 0xde000006u, 0x24000001u, 0xdcff6006u, 0xdd040302u}},
+    {"tf-mod-rgb", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0xc9000000u, 0xca30a0e0u}},
+    {"tf-mod-rgb-x2", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0xc9010000u, 0xca30a0e0u}},
+    {"tf-mod-rgba", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0xc9000100u, 0xca30a0e0u}},
+    {"tf-mod-rgba-x2", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0xc9010100u, 0xca30a0e0u}},
+    {"tf-dec-rgb", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0xc9000001u, 0xca30a0e0u}},
+    {"tf-dec-rgb-x2", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0xc9010001u, 0xca30a0e0u}},
+    {"tf-dec-rgba", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0xc9000101u, 0xca30a0e0u}},
+    {"tf-dec-rgba-x2", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0xc9010101u, 0xca30a0e0u}},
+    {"tf-bld-rgb", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0xc9000002u, 0xca30a0e0u}},
+    {"tf-bld-rgb-x2", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0xc9010002u, 0xca30a0e0u}},
+    {"tf-bld-rgba", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0xc9000102u, 0xca30a0e0u}},
+    {"tf-bld-rgba-x2", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0xc9010102u, 0xca30a0e0u}},
+    {"tf-rep-rgb", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0xc9000003u, 0xca30a0e0u}},
+    {"tf-rep-rgb-x2", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0xc9010003u, 0xca30a0e0u}},
+    {"tf-rep-rgba", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0xc9000103u, 0xca30a0e0u}},
+    {"tf-rep-rgba-x2", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0xc9010103u, 0xca30a0e0u}},
+    {"tf-add-rgb", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0xc9000004u, 0xca30a0e0u}},
+    {"tf-add-rgb-x2", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0xc9010004u, 0xca30a0e0u}},
+    {"tf-add-rgba", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0xc9000104u, 0xca30a0e0u}},
+    {"tf-add-rgba-x2", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0xc9010104u, 0xca30a0e0u}},
+    {"tf-mod-rgba-w", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0xffffffffu, {0xc9000100u}},
+    {"tf-mod-rgba-1", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x01010101u, {0xc9000100u}},
+    {"tfa-mod-rgba", GR_K_SPRITE, 3u, GR_T_8888, GR_D_WHITE, 0u, 0x9aff7f20u, {0xc9000100u, 0xca30a0e0u, 0x21000001u, 0xdf00002au, 0xe0000000u}},
+    {"tfa-dec-rgba", GR_K_SPRITE, 3u, GR_T_8888, GR_D_WHITE, 0u, 0x9aff7f20u, {0xc9000101u, 0xca30a0e0u, 0x21000001u, 0xdf00002au, 0xe0000000u}},
+    {"tfa-bld-rgba", GR_K_SPRITE, 3u, GR_T_8888, GR_D_WHITE, 0u, 0x9aff7f20u, {0xc9000102u, 0xca30a0e0u, 0x21000001u, 0xdf00002au, 0xe0000000u}},
+    {"tfa-rep-rgba", GR_K_SPRITE, 3u, GR_T_8888, GR_D_WHITE, 0u, 0x9aff7f20u, {0xc9000103u, 0xca30a0e0u, 0x21000001u, 0xdf00002au, 0xe0000000u}},
+    {"tfa-add-rgba", GR_K_SPRITE, 3u, GR_T_8888, GR_D_WHITE, 0u, 0x9aff7f20u, {0xc9000104u, 0xca30a0e0u, 0x21000001u, 0xdf00002au, 0xe0000000u}},
+    {"tfa-mod-rgb", GR_K_SPRITE, 3u, GR_T_8888, GR_D_WHITE, 0u, 0x9aff7f20u, {0xc9000000u, 0xca30a0e0u, 0x21000001u, 0xdf00002au, 0xe0000000u}},
+    {"tx-5650", GR_K_SPRITE, 3u, GR_T_5650, GR_D_PATTERN, 0u, 0x9aff7f20u, {0xc3000000u}},
+    {"tx-5551", GR_K_SPRITE, 3u, GR_T_5551, GR_D_PATTERN, 0u, 0x9aff7f20u, {0xc3000001u}},
+    {"tx-4444", GR_K_SPRITE, 3u, GR_T_4444, GR_D_PATTERN, 0u, 0x9aff7f20u, {0xc3000002u}},
+    {"tx-c8-8888", GR_K_SPRITE, 3u, GR_T_CLUT8, GR_D_PATTERN, 0u, 0x9aff7f20u, {0xc3000005u, 0xc500ff03u}},
+    {"tx-c8-sh4", GR_K_SPRITE, 3u, GR_T_CLUT8, GR_D_PATTERN, 0u, 0x9aff7f20u, {0xc3000005u, 0xc5020f13u}},
+    {"tx-c8-5551", GR_K_SPRITE, 3u, GR_T_CLUT8, GR_D_PATTERN, 0u, 0x9aff7f20u, {0xc3000005u, 0xc500ff01u}},
+    {"tx-c4-4444", GR_K_SPRITE, 3u, GR_T_CLUT4, GR_D_PATTERN, 0u, 0x9aff7f20u, {0xc3000004u, 0xc500ff02u}},
+    {"tx-c4-off3", GR_K_SPRITE, 3u, GR_T_CLUT4, GR_D_PATTERN, 0u, 0x9aff7f20u, {0xc3000004u, 0xc503ff03u}},
+    {"tx-c4-bw48", GR_K_SPRITE, 3u, GR_T_CLUT4W, GR_D_PATTERN, 48u, 0x9aff7f20u, {0xc3000004u, 0xc500ff02u}},
+    {"tx-c4-bw64", GR_K_SPRITE, 3u, GR_T_CLUT4W, GR_D_PATTERN, 64u, 0x9aff7f20u, {0xc3000004u, 0xc500ff02u}},
+    {"tx-8888-bw20", GR_K_SPRITE, 3u, GR_T_8888W, GR_D_PATTERN, 20u, 0x9aff7f20u, {0u}},
+    {"tx-c8-bw24", GR_K_SPRITE, 3u, GR_T_8888W, GR_D_PATTERN, 24u, 0x9aff7f20u, {0xc3000005u, 0xc500ff03u}},
+    {"wr-c-neg", GR_K_WRAP, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0xc7000101u}},
+    {"wr-w-neg", GR_K_WRAP, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0xc7000000u}},
+    {"wr-uw-vc", GR_K_WRAP, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0xc7000100u}},
+    {"wr-c-big", GR_K_WRAP, 3u, GR_T_8888, GR_D_PATTERN, 1u, 0x9aff7f20u, {0xc7000101u}},
+    {"wr-w-big", GR_K_WRAP, 3u, GR_T_8888, GR_D_PATTERN, 1u, 0x9aff7f20u, {0xc7000000u}},
+    {"wr-w-min4", GR_K_WRAP, 3u, GR_T_8888, GR_D_PATTERN, 2u, 0x9aff7f20u, {0xc7000000u}},
+    {"wr-w-neg-lin", GR_K_WRAP, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0xc7000000u, 0xc6000101u}},
+    {"wr-c-neg-lin", GR_K_WRAP, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0xc7000101u, 0xc6000101u}},
+    {"e-tri0", GR_K_TRI, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x1e000000u}},
+    {"e-tri1", GR_K_TRI, 3u, GR_T_8888, GR_D_PATTERN, 1u, 0x9aff7f20u, {0x1e000000u}},
+    {"e-tri2", GR_K_TRI, 3u, GR_T_8888, GR_D_PATTERN, 2u, 0x9aff7f20u, {0x1e000000u}},
+    {"e-tri3", GR_K_TRI, 3u, GR_T_8888, GR_D_PATTERN, 3u, 0x9aff7f20u, {0x1e000000u}},
+    {"e-tri4", GR_K_TRI, 3u, GR_T_8888, GR_D_PATTERN, 4u, 0x9aff7f20u, {0x1e000000u}},
+    {"e-tri5", GR_K_TRI, 3u, GR_T_8888, GR_D_PATTERN, 5u, 0x9aff7f20u, {0x1e000000u}},
+    {"e-tri6", GR_K_TRI, 3u, GR_T_8888, GR_D_PATTERN, 6u, 0x9aff7f20u, {0x1e000000u}},
+    {"e-tri7", GR_K_TRI, 3u, GR_T_8888, GR_D_PATTERN, 7u, 0x9aff7f20u, {0x1e000000u}},
+    {"e-line0", GR_K_LINE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x1e000000u}},
+    {"e-line1", GR_K_LINE, 3u, GR_T_8888, GR_D_PATTERN, 1u, 0x9aff7f20u, {0x1e000000u}},
+    {"e-line2", GR_K_LINE, 3u, GR_T_8888, GR_D_PATTERN, 2u, 0x9aff7f20u, {0x1e000000u}},
+    {"e-line3", GR_K_LINE, 3u, GR_T_8888, GR_D_PATTERN, 3u, 0x9aff7f20u, {0x1e000000u}},
+    {"e-points", GR_K_POINT, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x1e000000u}},
+    {"fmt-565", GR_K_SPRITE, 0u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0u}},
+    {"fmt-5551", GR_K_SPRITE, 1u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0u}},
+    {"fmt-4444", GR_K_SPRITE, 2u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0u}},
+    {"dth-565", GR_K_SPRITE, 0u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x20000001u}},
+    {"dth-5551", GR_K_SPRITE, 1u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x20000001u}},
+    {"dth-4444", GR_K_SPRITE, 2u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x20000001u}},
+    {"dth-8888", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x20000001u}},
+    {"dth-565-b", GR_K_SPRITE, 0u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x20000001u, 0x21000001u, 0xdf000032u}},
+    {"msk-8888", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0xe80f55f0u, 0xe90000c3u}},
+    {"msk-565", GR_K_SPRITE, 0u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0xe8f0f0f0u}},
+    {"msk-4444", GR_K_SPRITE, 2u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0xe8000f0fu, 0xe90000f0u}},
+    {"msk-8888-st", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0xe9000f0fu, 0x24000001u, 0xdcff5a01u, 0xdd020000u}},
+    {"lo-0", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x28000001u, 0xe6000000u}},
+    {"lo-1", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x28000001u, 0xe6000001u}},
+    {"lo-2", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x28000001u, 0xe6000002u}},
+    {"lo-3", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x28000001u, 0xe6000003u}},
+    {"lo-4", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x28000001u, 0xe6000004u}},
+    {"lo-5", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x28000001u, 0xe6000005u}},
+    {"lo-6", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x28000001u, 0xe6000006u}},
+    {"lo-7", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x28000001u, 0xe6000007u}},
+    {"lo-8", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x28000001u, 0xe6000008u}},
+    {"lo-9", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x28000001u, 0xe6000009u}},
+    {"lo-10", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x28000001u, 0xe600000au}},
+    {"lo-11", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x28000001u, 0xe600000bu}},
+    {"lo-12", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x28000001u, 0xe600000cu}},
+    {"lo-13", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x28000001u, 0xe600000du}},
+    {"lo-14", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x28000001u, 0xe600000eu}},
+    {"lo-15", GR_K_SPRITE, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x28000001u, 0xe600000fu}},
+    {"lo-565-xor", GR_K_SPRITE, 0u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x28000001u, 0xe6000006u}},
+    {"clr-c", GR_K_CLEAR, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x5ac3a50fu, {0xd3000101u}},
+    {"clr-a", GR_K_CLEAR, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x5ac3a50fu, {0xd3000201u}},
+    {"clr-ca", GR_K_CLEAR, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x5ac3a50fu, {0xd3000301u}},
+    {"clr-ca-msk", GR_K_CLEAR, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x5ac3a50fu, {0xd3000301u, 0xe80f55f0u, 0xe90000c3u}},
+    {"clr-ca-dth565", GR_K_CLEAR, 0u, GR_T_8888, GR_D_PATTERN, 0u, 0x5ac3a50fu, {0xd3000301u, 0x20000001u}},
+    {"clr-ca-dth8888", GR_K_CLEAR, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x5ac3a50fu, {0xd3000301u, 0x20000001u}},
+    {"clr-c-565", GR_K_CLEAR, 0u, GR_T_8888, GR_D_PATTERN, 0u, 0x5ac3a50fu, {0xd3000101u}},
+    {"clr-ca-blend", GR_K_CLEAR, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x5ac3a50fu, {0xd3000301u, 0x21000001u, 0xdf000032u}},
+    {"clr-ca-atest", GR_K_CLEAR, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x5ac3a50fu, {0xd3000301u, 0x22000001u, 0xdb000000u}},
+    {"clr-a-4444", GR_K_CLEAR, 2u, GR_T_8888, GR_D_PATTERN, 0u, 0x5ac3a50fu, {0xd3000201u}},
+    {"xf-tri", GR_K_XTRI, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x1e000000u}},
+    {"xf-plain", GR_K_FOG, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x1e000000u}},
+    {"fog-a", GR_K_FOG, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x1e000000u, 0x1f000001u, 0xcf8040c0u, 0xcdc08000u, 0xce3c9249u}},
+    {"fog-b", GR_K_FOG, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x1e000000u, 0x1f000001u, 0xcf0080ffu, 0xcd000000u, 0xce3c8080u}},
+    {"fog-c", GR_K_FOG, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x9aff7f20u, {0x1e000000u, 0x1f000001u, 0xcfffffffu, 0xcd3f0000u, 0xce3c8000u}},
+    {"fog-k0-b", GR_K_FOG, 3u, GR_T_8888, GR_D_PATTERN, 1u, 0xff000000u, {0x1e000000u, 0x1f000001u, 0xcfffffffu, 0xcd000000u, 0xce3c8080u}},
+    {"fog-k0-c", GR_K_FOG, 3u, GR_T_8888, GR_D_PATTERN, 1u, 0xff000000u, {0x1e000000u, 0x1f000001u, 0xcfffffffu, 0xcd3f0000u, 0xce3c8000u}},
+    {"fog-k1-b", GR_K_FOG, 3u, GR_T_8888, GR_D_PATTERN, 1u, 0xffffffffu, {0x1e000000u, 0x1f000001u, 0xcf000000u, 0xcd000000u, 0xce3c8080u}},
+    {"fog-k1-c", GR_K_FOG, 3u, GR_T_8888, GR_D_PATTERN, 1u, 0xffffffffu, {0x1e000000u, 0x1f000001u, 0xcf000000u, 0xcd3f0000u, 0xce3c8000u}},
+};
+
+/* GR_K_WRAP texture rectangles: u0, v0 at the left/top edge, u1, v1 at the right/bottom. */
+static const float gr_wrap_uv[3][4] = {
+    {-8.0f, -2.0f, 8.0f, 2.0f}, {12.0f, 3.0f, 28.0f, 7.0f}, {-16.0f, -4.0f, 48.0f, 12.0f},
+};
+
+/* GR_K_TRI: two flat triangles (red, then green), x/y relative to the window origin. */
+static const float gr_tris[8][12] = {
+    {0.0f, 0.0f, 16.0f, 0.0f, 0.0f, 4.0f, 16.0f, 0.0f, 16.0f, 4.0f, 0.0f, 4.0f},
+    {0.5f, 0.5f, 15.5f, 0.5f, 0.5f, 3.5f, 15.5f, 0.5f, 15.5f, 3.5f, 0.5f, 3.5f},
+    {0.25f, 0.25f, 15.75f, 0.25f, 0.25f, 3.75f, 15.75f, 0.25f, 15.75f, 3.75f, 0.25f, 3.75f},
+    {0.96875f, 0.96875f, 15.03125f, 0.03125f, 2.03125f, 3.03125f,
+     8.53125f, 1.46875f, 15.96875f, 3.96875f, 4.46875f, 3.53125f},
+    {0.0f, 0.5f, 16.0f, 1.0f, 0.0f, 1.5f, 0.0f, 2.25f, 16.0f, 2.0f, 16.0f, 3.75f},
+    {0.0f, 0.0f, 7.5f, 0.0f, 7.5f, 4.0f, 7.5f, 0.0f, 16.0f, 4.0f, 7.5f, 4.0f},
+    {0.0f, 2.0f, 8.0f, 0.0f, 16.0f, 2.0f, 0.0f, 2.0f, 16.0f, 2.0f, 8.0f, 4.0f},
+    {0.0f, 0.0f, 0.0f, 4.0f, 16.0f, 0.0f, 16.0f, 0.0f, 0.0f, 4.0f, 16.0f, 4.0f},
+};
+
+/* GR_K_LINE: two lines (red, then green), x/y of both ends relative to the window origin. */
+static const float gr_lines[4][8] = {
+    {0.0f, 0.0f, 16.0f, 0.0f, 0.5f, 2.5f, 15.5f, 2.5f},
+    {0.0f, 0.0f, 15.0f, 3.0f, 2.0f, 3.5f, 13.0f, 0.5f},
+    {3.25f, 0.0f, 3.25f, 4.0f, 10.75f, 0.5f, 12.5f, 3.75f},
+    {15.5f, 3.0f, 0.25f, 0.5f, 12.0f, 3.75f, 9.5f, 0.25f},
+};
+
+/* GR_K_POINT: eight points, alternately red and green. */
+static const float gr_points[16] = {
+    0.0f, 0.0f, 2.5f, 0.0f, 4.25f, 1.0f, 6.75f, 1.5f,
+    8.0f, 2.0f, 10.5f, 2.5f, 12.375f, 3.0f, 14.625f, 3.625f,
+};
+
+/* Pattern byte `i` of stream `seed`: in every stream eight indices carry the edge values,
+   the rest a fixed integer hash. */
+static uint8_t gr_byte(uint32_t seed, uint32_t i)
+{
+    static const uint8_t edge[8] = {0x00u, 0xffu, 0x01u, 0xfeu, 0x7fu, 0x80u, 0x40u, 0xc0u};
+    const uint32_t slot = (i * 5u + seed * 11u) & 63u;
+    if (slot < 8u) {
+        return edge[slot];
+    }
+    uint32_t x = seed * 0x9e3779b9u + i * 0x85ebca6bu + 0x165667b1u;
+    x ^= x >> 15;
+    x *= 0x2c1b3c6du;
+    x ^= x >> 12;
+    x *= 0x297a2d39u;
+    x ^= x >> 15;
+    return (uint8_t)(x >> 24);
+}
+
+/* An ABGR word from streams seed .. seed + 3 (R, G, B, A). */
+static uint32_t gr_rgba(uint32_t seed, uint32_t i)
+{
+    return (uint32_t)gr_byte(seed, i) | ((uint32_t)gr_byte(seed + 1u, i) << 8) |
+           ((uint32_t)gr_byte(seed + 2u, i) << 16) | ((uint32_t)gr_byte(seed + 3u, i) << 24);
+}
+
+/* Window pixel i before the draw, in the cell's framebuffer format. */
+static uint32_t gr_dst(const struct gr_cell *c, uint32_t i)
+{
+    if (c->dst == GR_D_WHITE) {
+        return c->psm == 3u ? 0xffffffffu : 0xffffu;
+    }
+    if (c->psm == 3u) {
+        return gr_rgba(5u, i);
+    }
+    return (uint32_t)gr_byte(9u, i) | ((uint32_t)gr_byte(10u, i) << 8);
+}
+
+/* GR_K_ZSPRITE: the depth window pixel i holds before the tested z = 0x8000 sprite. */
+static uint32_t gr_depth(uint32_t i)
+{
+    static const uint16_t near_ref[8] = {0x8000u, 0x7fffu, 0x8001u, 0x0000u,
+                                         0xffffu, 0x7ffeu, 0x8002u, 0x8000u};
+    if ((i & 3u) == 0u) {
+        return near_ref[(i >> 2) & 7u];
+    }
+    return ((uint32_t)gr_byte(40u, i) << 8) | gr_byte(41u, i);
+}
+
+/* Texture t's bytes (16x4 texels at buffer width 16; GR_T_CLUT4W and GR_T_8888W carry 128
+   and 320 bytes for wider buffers); returns the byte count. */
+static uint32_t gr_texture(uint32_t t, uint8_t *out)
+{
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < GR_N; i++) {
+        if (t == GR_T_8888) {
+            const uint32_t v = gr_rgba(1u, i);
+            for (uint32_t b = 0; b < 4u; b++) {
+                out[n++] = (uint8_t)(v >> (8u * b));
+            }
+        } else if (t == GR_T_CLUT8) {
+            out[n++] = gr_byte(13u, i);
+        } else if (t == GR_T_CLUT4) {
+            if (i < GR_N / 2u) {
+                out[n++] = gr_byte(18u, i);
+            }
+        } else if (t == GR_T_CLUT4W) {
+            out[n++] = gr_byte(44u, i);
+            out[n++] = gr_byte(45u, i);
+        } else if (t == GR_T_8888W) {
+            for (uint32_t b = 0; b < 5u; b++) {
+                out[n++] = gr_byte(46u + b, i);
+            }
+        } else {
+            out[n++] = gr_byte(21u + t, i);
+            out[n++] = gr_byte(25u + t, i);
+        }
+    }
+    return n;
+}
+
+/* The CLUT the CLUT8/CLUT4 cells load: 256 8888 entries (512 16-bit ones). */
+static void gr_clut(uint8_t *out)
+{
+    for (uint32_t k = 0; k < GR_CLUT_BYTES / 4u; k++) {
+        const uint32_t v = gr_rgba(30u, k);
+        for (uint32_t b = 0; b < 4u; b++) {
+            out[k * 4u + b] = (uint8_t)(v >> (8u * b));
+        }
+    }
+}
+
+static uint32_t gr_fbits(float f)
+{
+    uint32_t u;
+    memcpy(&u, &f, sizeof(u));
+    return u;
+}
+
+/* One through-mode vertex: float u, v; 8888 colour; float x, y, z (vertex type 0x80019f). */
+static uint32_t gr_tvtx(uint32_t *out, float u, float v, uint32_t col, float x, float y, float z)
+{
+    out[0] = gr_fbits(u);
+    out[1] = gr_fbits(v);
+    out[2] = col;
+    out[3] = gr_fbits(x);
+    out[4] = gr_fbits(y);
+    out[5] = gr_fbits(z);
+    return 6u;
+}
+
+/* One transform-mode vertex: 8888 colour; float x, y, z (vertex type 0x19c). The x, y
+   given in window pixels become the view-space x, y that the GR_K_FOG viewport maps back
+   to those pixels: x = 32 + 32 * X and y = 16 + 16 * Y on the 64x32 buffer. */
+static uint32_t gr_xvtx(uint32_t *out, uint32_t col, float x, float y, float z)
+{
+    out[0] = col;
+    out[1] = gr_fbits((x - 32.0f) / 32.0f);
+    out[2] = gr_fbits((y - 16.0f) / 16.0f);
+    out[3] = gr_fbits(z);
+    return 4u;
+}
+
+/* The cell's vertex words; returns the count. */
+static uint32_t gr_vertices(const struct gr_cell *c, uint32_t *out)
+{
+    const float x0 = (float)GR_WX, y0 = (float)GR_WY;
+    const float x1 = x0 + (float)GR_WW, y1 = y0 + (float)GR_WH;
+    uint32_t n = 0;
+    if (c->kind == GR_K_ZSPRITE || c->kind == GR_K_FOG) {
+        /* One 1x1 sprite per window pixel: a depth in clear mode, or a colour at view z = i. */
+        for (uint32_t i = 0; i < GR_N; i++) {
+            const float x = x0 + (float)(i % GR_WW), y = y0 + (float)(i / GR_WW);
+            if (c->kind == GR_K_ZSPRITE) {
+                const float z = (float)gr_depth(i);
+                n += gr_tvtx(out + n, 0.0f, 0.0f, 0u, x, y, z);
+                n += gr_tvtx(out + n, 0.0f, 0.0f, 0u, x + 1.0f, y + 1.0f, z);
+            } else {
+                const uint32_t col = c->arg == 1u ? c->vcol : gr_rgba(1u, i);
+                n += gr_xvtx(out + n, col, x, y, (float)i);
+                n += gr_xvtx(out + n, col, x + 1.0f, y + 1.0f, (float)i);
+            }
+        }
+    }
+    if (c->kind == GR_K_TRI || c->kind == GR_K_XTRI) {
+        for (uint32_t k = 0; k < 6u; k++) {
+            const uint32_t col = k < 3u ? GR_RED : GR_GREEN;
+            const float x = x0 + gr_tris[c->arg][2u * k], y = y0 + gr_tris[c->arg][2u * k + 1u];
+            n += c->kind == GR_K_TRI ? gr_tvtx(out + n, 0.0f, 0.0f, col, x, y, GR_Z)
+                                     : gr_xvtx(out + n, col, x, y, 0.0f);
+        }
+    } else if (c->kind == GR_K_LINE) {
+        for (uint32_t k = 0; k < 4u; k++) {
+            n += gr_tvtx(out + n, 0.0f, 0.0f, k < 2u ? GR_RED : GR_GREEN,
+                         x0 + gr_lines[c->arg][2u * k], y0 + gr_lines[c->arg][2u * k + 1u], GR_Z);
+        }
+    } else if (c->kind == GR_K_POINT) {
+        for (uint32_t k = 0; k < 8u; k++) {
+            n += gr_tvtx(out + n, 0.0f, 0.0f, (k & 1u) ? GR_GREEN : GR_RED,
+                         x0 + gr_points[2u * k], y0 + gr_points[2u * k + 1u], GR_Z);
+        }
+    } else if (c->kind == GR_K_WRAP) {
+        const float *uv = gr_wrap_uv[c->arg];
+        n += gr_tvtx(out + n, uv[0], uv[1], c->vcol, x0, y0, GR_Z);
+        n += gr_tvtx(out + n, uv[2], uv[3], c->vcol, x1, y1, GR_Z);
+    } else if (c->kind != GR_K_FOG) {
+        n += gr_tvtx(out + n, 0.0f, 0.0f, c->vcol, x0, y0, GR_Z);
+        n += gr_tvtx(out + n, (float)GR_WW, (float)GR_WH, c->vcol, x1, y1, GR_Z);
+    }
+    return n;
+}
+
+/* The cell's display list for vertex words at `vtx`, texture t at tex[t] and the CLUT at
+   `clut` (physical addresses); returns the word count. Every state the draw reads is set. */
+static uint32_t gr_list(const struct gr_cell *c, uint32_t vtx, const uint32_t *tex, uint32_t clut,
+                        uint32_t *out)
+{
+    static const uint8_t off_units[12] = {0x17u, 0x1cu, 0x1du, 0x1fu, 0x20u, 0x21u,
+                                          0x22u, 0x23u, 0x24u, 0x25u, 0x27u, 0x28u};
+    static const float ident43[12] = {1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f,
+                                      0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f};
+    /* Clip z = 0 and w = 1 for every vertex, so the view z only feeds fog. */
+    static const float proj[16] = {1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f,
+                                   0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f};
+    const uint32_t t = tex[c->tex];
+    const uint32_t full = (GR_STRIDE - 1u) | ((GR_ROWS - 1u) << 10);
+    uint32_t n = 0;
+#define GR_W(cmd, data) (out[n++] = ((uint32_t)(cmd) << 24) | ((uint32_t)(data) & 0x00ffffffu))
+    GR_W(0x10, (vtx >> 8) & 0x000f0000u);
+    GR_W(0x9c, GR_FB_OFFSET);
+    GR_W(0x9d, GR_STRIDE);
+    GR_W(0xd2, c->psm);
+    GR_W(0x9e, GR_ZB_OFFSET);
+    GR_W(0x9f, GR_STRIDE);
+    GR_W(0x15, 0);
+    GR_W(0x16, full);
+    GR_W(0xd4, 0);
+    GR_W(0xd5, full);
+    GR_W(0x4c, 0);
+    GR_W(0x4d, 0);
+    GR_W(0xd6, 0);
+    GR_W(0xd7, 0xffffu);
+    for (uint32_t i = 0; i < 12u; i++) {
+        GR_W(off_units[i], 0);
+    }
+    GR_W(0x50, 0);              /* flat shading */
+    GR_W(0xd3, 0);              /* clear mode off */
+    GR_W(0xe7, 1);              /* depth writes off */
+    GR_W(0xe8, 0);
+    GR_W(0xe9, 0);
+    GR_W(0xdb, 0x00ff0001u);    /* alpha test ALWAYS */
+    GR_W(0xd8, 1);              /* colour test ALWAYS */
+    GR_W(0xd9, 0);
+    GR_W(0xda, 0);
+    GR_W(0xdc, 0x00ff0001u);    /* stencil test ALWAYS */
+    GR_W(0xdd, 0);              /* KEEP, KEEP, KEEP */
+    GR_W(0xde, 1);              /* depth test ALWAYS */
+    GR_W(0xdf, 0x32u);
+    GR_W(0xe0, 0);
+    GR_W(0xe1, 0);
+    GR_W(0xe6, 3);              /* logic op COPY */
+    GR_W(0xe2, 0x1d0cu);        /* the PSP SDK default dither matrix */
+    GR_W(0xe3, 0xf3e2u);
+    GR_W(0xe4, 0x0c1du);
+    GR_W(0xe5, 0xe2f3u);
+    GR_W(0xcf, 0);
+    GR_W(0xcd, 0);
+    GR_W(0xce, 0);
+    GR_W(0x55, 0xffffffu);
+    GR_W(0x58, 0xffu);
+    GR_W(0x1e, 1);              /* texture on: UV, linear, one level, 8888 */
+    GR_W(0xc0, 0);
+    GR_W(0xc2, 0);
+    GR_W(0xc3, 3);
+    GR_W(0xa0, t);
+    GR_W(0xa8, ((t >> 8) & 0x000f0000u) | (c->kind == GR_K_SPRITE && c->arg ? c->arg : GR_WW));
+    GR_W(0xb8, (2u << 8) | 4u); /* 16x4 */
+    GR_W(0xc6, 0);              /* nearest */
+    GR_W(0xc7, 0x101u);         /* clamp u and v */
+    GR_W(0xc8, 0);
+    GR_W(0xc9, 0x103u);         /* REPLACE, RGBA */
+    GR_W(0xca, 0);
+    GR_W(0x48, gr_fbits(1.0f) >> 8);
+    GR_W(0x49, gr_fbits(1.0f) >> 8);
+    GR_W(0x4a, 0);
+    GR_W(0x4b, 0);
+    if (c->tex == GR_T_CLUT8 || c->tex == GR_T_CLUT4 || c->tex == GR_T_CLUT4W ||
+        c->tex == GR_T_8888W) {
+        GR_W(0xb0, clut);
+        GR_W(0xb1, (clut >> 8) & 0x000f0000u);
+        GR_W(0xc5, 0x00ff03u);
+        GR_W(0xc4, GR_CLUT_BYTES / 32u);
+    }
+    GR_W(0xcb, 0);              /* texture flush */
+    GR_W(0x12, 0x0080019fu);    /* through, float uv, 8888 colour, float position */
+    GR_W(0x01, vtx);
+    if (c->kind == GR_K_ZSPRITE) {
+        GR_W(0xe7, 0);
+        GR_W(0xd3, 0x401u);     /* clear mode, depth only: one 1x1 sprite per pixel */
+        GR_W(0x04, (6u << 16) | (2u * GR_N));
+        GR_W(0xd3, 0);
+        GR_W(0xe7, 1);
+        GR_W(0x01, vtx + 2u * GR_N * 24u);
+    }
+    for (uint32_t i = 0; i < 6u && c->w[i] != 0u; i++) {
+        out[n++] = c->w[i];
+    }
+    if (c->kind == GR_K_FOG || c->kind == GR_K_XTRI) {
+        GR_W(0x3a, 0);
+        for (uint32_t i = 0; i < 12u; i++) {
+            GR_W(0x3b, gr_fbits(ident43[i]) >> 8);
+        }
+        GR_W(0x3c, 0);
+        for (uint32_t i = 0; i < 12u; i++) {
+            GR_W(0x3d, gr_fbits(ident43[i]) >> 8);
+        }
+        GR_W(0x3e, 0);
+        for (uint32_t i = 0; i < 16u; i++) {
+            GR_W(0x3f, gr_fbits(proj[i]) >> 8);
+        }
+        GR_W(0x42, gr_fbits(32.0f) >> 8);   /* viewport: x = 32 + 32 X, y = 16 + 16 Y */
+        GR_W(0x43, gr_fbits(16.0f) >> 8);
+        GR_W(0x44, 0);
+        GR_W(0x45, gr_fbits(2048.0f) >> 8);
+        GR_W(0x46, gr_fbits(2048.0f) >> 8);
+        GR_W(0x47, gr_fbits(32768.0f) >> 8);
+        GR_W(0x4c, (2048u - 32u) << 4);
+        GR_W(0x4d, (2048u - 16u) << 4);
+        GR_W(0x12, 0x0000019cu);  /* transform, 8888 colour, float position */
+        if (c->kind == GR_K_FOG) {
+            GR_W(0x04, (6u << 16) | (2u * GR_N));
+        } else {
+            GR_W(0x04, (3u << 16) | 6u);
+        }
+    } else if (c->kind == GR_K_TRI) {
+        GR_W(0x04, (3u << 16) | 6u);
+    } else if (c->kind == GR_K_LINE) {
+        GR_W(0x04, (1u << 16) | 4u);
+    } else if (c->kind == GR_K_POINT) {
+        GR_W(0x04, 8u);
+    } else {
+        GR_W(0x04, (6u << 16) | 2u);
+    }
+    GR_W(0x0f, 0);
+    GR_W(0x0c, 0);
+#undef GR_W
+    return n;
+}
+
+/* FNV-1a 64 over the window's 64 result words, each little-endian. */
+static uint64_t gr_digest(const uint32_t *px)
+{
+    uint64_t h = 0xcbf29ce484222325ull;
+    for (uint32_t i = 0; i < GR_N; i++) {
+        for (uint32_t b = 0; b < 4u; b++) {
+            h ^= (px[i] >> (8u * b)) & 0xffu;
+            h *= 0x100000001b3ull;
+        }
+    }
+    return h;
+}
+/* ==== end of the GE raster cells ==== */
+
+/* PSP-GE-RASTER-001 (#343): the window digest each cell left on a PSP-3000 (firmware 6.6.1,
+ * probe case ge-raster, docs/HARDWARE_ORACLE.md). Index k is gr_cells[k]. */
+static const struct {
+    const char *name;
+    uint64_t psp;
+} s_gr_psp[GR_CELL_COUNT] = {
+    {"b-sa-isa", 0xe2e3dd342f1b7aedull},
+    {"b-fix", 0x8ec220832fb9a609ull},
+    {"b-fix-ff", 0xa4df29b706351f0aull},
+    {"b-dc-sc", 0xae80e197b2487b80ull},
+    {"b-idc-isc", 0xc158ab0c9e67248eull},
+    {"b-da-ida", 0xd9612ab5d2b56816ull},
+    {"b-2sa-2isa", 0xf00f5598f5e83a8dull},
+    {"b-2isa-2sa", 0xd66d5d5af2f30cd9ull},
+    {"b-2da-2ida", 0xa847911d0f1e673full},
+    {"b-sub-sa-fix", 0x8759886443b6004full},
+    {"b-rsub-sa-isa", 0x00f648218bafb8f8ull},
+    {"b-min", 0xf21f885e6b14a8b6ull},
+    {"b-max", 0xd1b0e597970e8debull},
+    {"b-abs", 0x4d6f82babe9d8152ull},
+    {"b-eq6", 0x61b0b02428e84441ull},
+    {"b-eq7", 0x61b0b02428e84441ull},
+    {"b-fac11-15", 0x4def31c864814aafull},
+    {"b565-sa-isa", 0xa688406e73344322ull},
+    {"b5551-sa-isa", 0xc13232bb3a0ebe30ull},
+    {"b4444-sa-isa", 0x4aa79875c953edf2ull},
+    {"b565-da-ida", 0x4f0a3a47648a81c7ull},
+    {"b-2sa-fix0", 0x93349d9a477a8aa2ull},
+    {"b-2isa-fix0", 0x0fc0361ab21e8438ull},
+    {"b-2da-fix0", 0xc2b1ff28c04b6cfcull},
+    {"b-ffix-2isa", 0x4753d8fff6a1bc9bull},
+    {"b-ffix-2ida", 0x4973b119622d734cull},
+    {"b5551-da-ida", 0x130ed831ea47c0d5ull},
+    {"b4444-da-ida", 0x7eafc1cb089c2a0aull},
+    {"at-f0", 0x6b417febbd03b2ecull},
+    {"at-f1", 0x61b0b02428e84441ull},
+    {"at-f2", 0xcdc817528c030710ull},
+    {"at-f3", 0x3805351c8739f6fdull},
+    {"at-f4", 0x75af15df6b356590ull},
+    {"at-f5", 0xcd7d40eb15f0ab1cull},
+    {"at-f6", 0x71901108fa18e3b1ull},
+    {"at-f7", 0x2c3737c841f7433dull},
+    {"at-mask", 0xcc38ed26427815fbull},
+    {"at-gt0", 0x96354b2e62a1da37ull},
+    {"ct-never", 0x6b417febbd03b2ecull},
+    {"ct-always", 0x61b0b02428e84441ull},
+    {"ct-eq", 0x10c0807ec120af51ull},
+    {"ct-ne", 0x4475b5231e05efacull},
+    {"ct-eq-mix", 0x4d0afb4fb8bf5a0aull},
+    {"st-f0", 0xb3e5e86b6c945c14ull},
+    {"st-f1", 0xa673adbc5a81af31ull},
+    {"st-f2", 0xaa81ea4dcd87ab12ull},
+    {"st-f3", 0x5e193d5ad9c2e8ebull},
+    {"st-f4", 0xd4290d62c2eb2b52ull},
+    {"st-f5", 0xc2ae2f09fb82c06cull},
+    {"st-f6", 0xbd8efe4f49808d99ull},
+    {"st-f7", 0xb80ae59808ab34d3ull},
+    {"st-op0", 0x61b0b02428e84441ull},
+    {"st-op1", 0x8cce44c95088fe39ull},
+    {"st-op2", 0x8deef11e3a45a095ull},
+    {"st-op3", 0xe28eaf938faee78dull},
+    {"st-op4", 0xa673adbc5a81af31ull},
+    {"st-op5", 0x2e98a36ee874b23cull},
+    {"st-op6", 0x61b0b02428e84441ull},
+    {"st-op7", 0x61b0b02428e84441ull},
+    {"st-mask", 0xfc5213f372a980d8ull},
+    {"st4444-incr", 0x761201d2693253d6ull},
+    {"st4444-decr", 0xda56a206ea639db6ull},
+    {"st4444-repl", 0xf6fa0571670cd636ull},
+    {"st4444-lt", 0x89267a5400327090ull},
+    {"st5551-incr", 0x99788ba9f6d725f6ull},
+    {"st5551-decr", 0x11f6554bd26e93f6ull},
+    {"st5551-repl7f", 0x11f6554bd26e93f6ull},
+    {"st5551-inv", 0xb94551d4a09fff76ull},
+    {"st565-repl", 0x12eb7b0d599b524eull},
+    {"st565-eq0", 0x12eb7b0d599b524eull},
+    {"z-f0", 0x6b417febbd03b2ecull},
+    {"z-f1", 0x61b0b02428e84441ull},
+    {"z-f2", 0x0d4abd68740baa99ull},
+    {"z-f3", 0x8856970cd47244c8ull},
+    {"z-f4", 0xcacab511e92ade03ull},
+    {"z-f5", 0xe0adf135f4b58dfeull},
+    {"z-f6", 0x9ce9403e66b0f8cfull},
+    {"z-f7", 0xe27a10bc7d55a32eull},
+    {"z-lt-st", 0x5e0dbd0e6ba47d80ull},
+    {"z-gt-st", 0x9744cfbf2f4a20b2ull},
+    {"tf-mod-rgb", 0x528021cf7dc9ab2cull},
+    {"tf-mod-rgb-x2", 0xdfd3e8b5cf373522ull},
+    {"tf-mod-rgba", 0x528021cf7dc9ab2cull},
+    {"tf-mod-rgba-x2", 0xdfd3e8b5cf373522ull},
+    {"tf-dec-rgb", 0x61b0b02428e84441ull},
+    {"tf-dec-rgb-x2", 0x718a6690670a04bfull},
+    {"tf-dec-rgba", 0xc3662b29f8e75d67ull},
+    {"tf-dec-rgba-x2", 0xf87b6fb185779d15ull},
+    {"tf-bld-rgb", 0xc322f1a42d989cc0ull},
+    {"tf-bld-rgb-x2", 0xe2ca5f19c4d50788ull},
+    {"tf-bld-rgba", 0xc322f1a42d989cc0ull},
+    {"tf-bld-rgba-x2", 0xe2ca5f19c4d50788ull},
+    {"tf-rep-rgb", 0x61b0b02428e84441ull},
+    {"tf-rep-rgb-x2", 0x718a6690670a04bfull},
+    {"tf-rep-rgba", 0x61b0b02428e84441ull},
+    {"tf-rep-rgba-x2", 0x718a6690670a04bfull},
+    {"tf-add-rgb", 0x3ff03fb3785db8fbull},
+    {"tf-add-rgb-x2", 0x09e444041ba1e76aull},
+    {"tf-add-rgba", 0x3ff03fb3785db8fbull},
+    {"tf-add-rgba-x2", 0x09e444041ba1e76aull},
+    {"tf-mod-rgba-w", 0x61b0b02428e84441ull},
+    {"tf-mod-rgba-1", 0x1f26bf30dbbd11adull},
+    {"tfa-mod-rgba", 0xdc8184067b497b4cull},
+    {"tfa-dec-rgba", 0xd2cfdae5ad35a825ull},
+    {"tfa-bld-rgba", 0xdc8184067b497b4cull},
+    {"tfa-rep-rgba", 0xf50f75b899a90725ull},
+    {"tfa-add-rgba", 0xdc8184067b497b4cull},
+    {"tfa-mod-rgb", 0xd2cfdae5ad35a825ull},
+    {"tx-5650", 0x55191b7986f94bc5ull},
+    {"tx-5551", 0x50fd51ab4a3dc1bdull},
+    {"tx-4444", 0x48a401c483f8a640ull},
+    {"tx-c8-8888", 0xcc8e999943f08733ull},
+    {"tx-c8-sh4", 0xa4539c4c08f2b348ull},
+    {"tx-c8-5551", 0x672d960cefbf2f50ull},
+    {"tx-c4-4444", 0xca1b5888bc0a73b8ull},
+    {"tx-c4-off3", 0xe9f25d4569db9d85ull},
+    {"tx-c4-bw48", 0xc6e98ff96fefe004ull},
+    {"tx-c4-bw64", 0x7839e58d724c70b5ull},
+    {"tx-8888-bw20", 0x9fa773b0a1d72d9bull},
+    {"tx-c8-bw24", 0xb620ae02e7089a79ull},
+    {"wr-c-neg", 0x7c9b1a47a3d70368ull},
+    {"wr-w-neg", 0xb28ae2c44b1f4c09ull},
+    {"wr-uw-vc", 0xc209862396d56a05ull},
+    {"wr-c-big", 0x7e2190ed8778a2d5ull},
+    {"wr-w-big", 0x8b682ff667ebaaedull},
+    {"wr-w-min4", 0xa2e42f222f589b49ull},
+    {"wr-w-neg-lin", 0xb28ae2c44b1f4c09ull},
+    {"wr-c-neg-lin", 0x7c9b1a47a3d70368ull},
+    {"e-tri0", 0xf5a0993ec9228d41ull},
+    {"e-tri1", 0x0eaa42aa6b33ed99ull},
+    {"e-tri2", 0x9a27cacbebcdd6f1ull},
+    {"e-tri3", 0x58a0d3f1740cecf0ull},
+    {"e-tri4", 0xbac04c9003489048ull},
+    {"e-tri5", 0x6d8b51ec978358f3ull},
+    {"e-tri6", 0x44c4675b69c3e467ull},
+    {"e-tri7", 0xf5a0993ec9228d41ull},
+    {"e-line0", 0x4a67f079217de8beull},
+    {"e-line1", 0xa896e3153d5cc0bbull},
+    {"e-line2", 0x5ce41b1df46da45aull},
+    {"e-line3", 0x936dca4d32a5e7b7ull},
+    {"e-points", 0x68c7b5aa88c253a7ull},
+    {"fmt-565", 0x12eb7b0d599b524eull},
+    {"fmt-5551", 0x673de6b93dd90776ull},
+    {"fmt-4444", 0xe4ddad427dc21de6ull},
+    {"dth-565", 0xf0ef3c90518c45fdull},
+    {"dth-5551", 0x12406110445fa3b1ull},
+    {"dth-4444", 0x127c48c1dccd5544ull},
+    {"dth-8888", 0xdd0aecff5f0fa36bull},
+    {"dth-565-b", 0x2f4ed56110282d97ull},
+    {"msk-8888", 0xc554066569201d85ull},
+    {"msk-565", 0xfb76050e8e1f9ebaull},
+    {"msk-4444", 0xe4ddad427dc21de6ull},
+    {"msk-8888-st", 0x324672ef2806c4a1ull},
+    {"lo-0", 0xbe910e17deca3a2dull},
+    {"lo-1", 0xb410e3e5c05ac6ebull},
+    {"lo-2", 0x9f7d03d69cb73583ull},
+    {"lo-3", 0x61b0b02428e84441ull},
+    {"lo-4", 0x62b2029c0cf444d2ull},
+    {"lo-5", 0x6b417febbd03b2ecull},
+    {"lo-6", 0x8f3cc93ed2e25e10ull},
+    {"lo-7", 0x41043d49cee09bd2ull},
+    {"lo-8", 0x24b86f70ebc4230eull},
+    {"lo-9", 0x3c44a6f726c2b570ull},
+    {"lo-10", 0x07610972524b83a8ull},
+    {"lo-11", 0xf50bc89ce82a2c72ull},
+    {"lo-12", 0x274253721c649fbdull},
+    {"lo-13", 0x272bb88f382da21bull},
+    {"lo-14", 0x2254372563da19afull},
+    {"lo-15", 0x74b58b05fdf3eaadull},
+    {"lo-565-xor", 0x7b4ad7adbbf198bcull},
+    {"clr-c", 0x5982dec5529ace6dull},
+    {"clr-a", 0x7c24b06f87d84da0ull},
+    {"clr-ca", 0x6635ffd176aa2b25ull},
+    {"clr-ca-msk", 0xcec5ae97a8e37f30ull},
+    {"clr-ca-dth565", 0x7341485be704cba5ull},
+    {"clr-ca-dth8888", 0xa8195cd6205ffae5ull},
+    {"clr-c-565", 0xf3d7b8b640c9a8a5ull},
+    {"clr-ca-blend", 0x6635ffd176aa2b25ull},
+    {"clr-ca-atest", 0x6635ffd176aa2b25ull},
+    {"clr-a-4444", 0x24ffba3b563c2017ull},
+    {"xf-tri", 0xf5a0993ec9228d41ull},
+    {"xf-plain", 0x61b0b02428e84441ull},
+    {"fog-a", 0xfc6d7b8405af2fa1ull},
+    {"fog-b", 0x8545d166b94e44acull},
+    {"fog-c", 0x5a6d3e6eceb6619bull},
+    {"fog-k0-b", 0x89adaadf98387375ull},
+    {"fog-k0-c", 0x578c3b95de454f25ull},
+    {"fog-k1-b", 0xe3d831492858103dull},
+    {"fog-k1-c", 0x75e634dc776d8575ull},
+};
+
+/* PSP-GE-RASTER-001 (#343) on the Vulkan path at render scale 1. Every cell of the block above
+ * runs the probe's own list, vertices, textures and destination pattern through ge.c with the
+ * GPU hooks on, and the window read back from the GPU is compared with the digest the PSP-3000
+ * gave (s_gr_psp, the table test_ge_raster_cells_match_psp also reads). Each cell is in exactly
+ * one class, and a cell that changes class fails the case, so neither a new fallback nor a new
+ * divergence can hide:
+ *  - drawn on the GPU and equal to the PSP (every cell not named below);
+ *  - drawn on the GPU within a bound (k_gr_vk_divergent): the Vulkan blend and texture-function
+ *    arithmetic most likely rounds in floating point where the PSP truncates integer products
+ *    (not measured), so these may differ by 1 or 2 per channel; each pixel must stay within
+ *    GR_VK_DIVERGENT_MAX_DELTA of ge.c's, which equals the PSP's (docs/HARDWARE_ORACLE.md, "GE raster pixel
+ *    corpus"). Whether a cell lands on the PSP's value depends on the driver's rounding (lavapipe
+ *    draws tf-mod-rgba-1 exact, an RTX 3080 does not), so equal passes too and is counted;
+ *  - drawn by the software fallback (k_gr_vk_software): the backend refuses a primitive and
+ *    ge.c draws it, which proves nothing about Vulkan's raster, but the window must still
+ *    equal the PSP's after the readback. */
+static const char *const k_gr_vk_divergent[] = {
+    "b-sa-isa", "b-dc-sc", "b-idc-isc", "b-da-ida", "b-sub-sa-fix", "b-rsub-sa-isa",
+    "tf-mod-rgb", "tf-mod-rgb-x2", "tf-mod-rgba", "tf-mod-rgba-x2", "tf-dec-rgba",
+    "tf-dec-rgba-x2", "tf-bld-rgb", "tf-bld-rgb-x2", "tf-bld-rgba", "tf-bld-rgba-x2",
+    "tf-mod-rgba-1", "tfa-mod-rgba", "tfa-bld-rgba", "tfa-add-rgba",
+};
+static const char *const k_gr_vk_software[] = {
+    /* Z test with stencil, points, partial write masks (clear mode included) and logic ops. */
+    "z-lt-st", "z-gt-st", "e-points", "msk-8888", "msk-565", "clr-ca-msk", "lo-0", "lo-1",
+    "lo-2", "lo-3", "lo-4", "lo-5", "lo-6", "lo-7", "lo-8", "lo-9", "lo-10", "lo-11", "lo-12",
+    "lo-13", "lo-14", "lo-15", "lo-565-xor",
+};
+
+static int gr_vk_named(const char *const *names, size_t n, const char *cell) {
+    for (size_t i = 0; i < n; i++)
+        if (strcmp(names[i], cell) == 0) return 1;
+    return 0;
+}
+
+/* The largest difference of one native colour field between two pixels of format psm. */
+static uint32_t gr_vk_channel_delta(uint32_t psm, uint32_t a, uint32_t b) {
+    static const uint8_t k_fields[4][4][2] = {
+        {{0, 5}, {5, 6}, {11, 5}, {0, 0}}, {{0, 5}, {5, 5}, {10, 5}, {15, 1}},
+        {{0, 4}, {4, 4}, {8, 4}, {12, 4}}, {{0, 8}, {8, 8}, {16, 8}, {24, 8}},
+    };
+    uint32_t worst = 0;
+    for (int f = 0; f < 4; f++) {
+        const uint32_t shift = k_fields[psm & 3u][f][0], bits = k_fields[psm & 3u][f][1];
+        if (bits == 0) continue;
+        const uint32_t va = (a >> shift) & ((1u << bits) - 1u), vb = (b >> shift) & ((1u << bits) - 1u);
+        const uint32_t d = va > vb ? va - vb : vb - va;
+        if (d > worst) worst = d;
+    }
+    return worst;
+}
+
+/* One cell from a clean window: its list through ge.c, with the GPU hooks when gpu is set (the
+ * window is then read back from the GPU), into px. */
+static int gr_vk_draw(const struct gr_cell *c, int gpu, const uint32_t *tex, uint32_t clut,
+                      uint32_t px[GR_N], unsigned long long *fell, int *sync) {
+    /* synthetic main RAM below the user partition (the purity gate keeps game addresses out) */
+    const uint32_t list = 0x08600000u, vtx = 0x08604000u;
+    const uint32_t fb = 0x04000000u + GR_FB_OFFSET;
+    coherence_reset_targets();
+    memset(SR_HOST(fb), 0, GR_STRIDE * GR_ROWS * 4u);
+    for (uint32_t i = 0; i < GR_N; i++) {
+        const uint32_t at = (GR_WY + i / GR_WW) * GR_STRIDE + GR_WX + i % GR_WW;
+        if (c->psm == 3u) MEM_W32(fb + at * 4u, gr_dst(c, i));
+        else MEM_W16(fb + at * 2u, (uint16_t)gr_dst(c, i));
+    }
+    sr_gpu_vram_dirty(fb, GR_STRIDE * GR_ROWS * 4u);
+    (void)gr_vertices(c, (uint32_t *)SR_HOST(vtx));
+    (void)gr_list(c, vtx, tex, clut, (uint32_t *)SR_HOST(list));
+    const unsigned long long fallback0 = s_replay_stats.fallback_prims;
+    ge_set_gpu_hooks(gpu ? &k_hooks : NULL);
+    const int done = ge_run_list(list, 0) == 0;   /* 0: the list reached its END */
+    ge_set_gpu_hooks(&k_hooks);
+    *fell = s_replay_stats.fallback_prims - fallback0;
+    *sync = GEGPU_SYNC_NO_TARGET;
+    if (gpu) {
+        GeGpuFbDescriptor desc = { .addr = fb, .format = c->psm, .stride = GR_STRIDE,
+                                   .width = GR_STRIDE, .height = GR_ROWS };
+        *sync = gegpu_sync_guest_fb(&desc);
+    }
+    for (uint32_t i = 0; i < GR_N; i++) {
+        const uint32_t at = (GR_WY + i / GR_WW) * GR_STRIDE + GR_WX + i % GR_WW;
+        px[i] = c->psm == 3u ? MEM_R32(fb + at * 4u) : (uint32_t)MEM_R16(fb + at * 2u);
+    }
+    return done;
+}
+
+/* Pinned cells differ from the PSP by at most this much in any native colour field. */
+#define GR_VK_DIVERGENT_MAX_DELTA 2u
+
+/* Clears through all-or-nothing pixel masks, one per framebuffer format: the GPU draws them
+ * through its colour write mask and must give ge.c's window (which keeps every masked bit, as
+ * the PSP does for clr-ca-msk). Before #343's fix the GPU wrote every bit of the clear colour. */
+static int coherence_run_clear_masks(void) {
+    static const struct gr_cell k_cells[] = {
+        /* 8888: red and blue masked, alpha written. */
+        {"clr-mask-8888", GR_K_CLEAR, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x5ac3a50fu,
+         {0xd3000301u, 0xe8ff00ffu, 0xe9000000u}},
+        /* 8888: colour written, alpha masked. */
+        {"clr-mask-8888-a", GR_K_CLEAR, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x5ac3a50fu,
+         {0xd3000301u, 0xe8000000u, 0xe90000ffu}},
+        /* 565: red and blue masked (their top five bits), green written. */
+        {"clr-mask-565", GR_K_CLEAR, 0u, GR_T_8888, GR_D_PATTERN, 0u, 0x5ac3a50fu,
+         {0xd3000301u, 0xe8f803f8u}},
+        /* 5551: green masked, the alpha bit masked. */
+        {"clr-mask-5551", GR_K_CLEAR, 1u, GR_T_8888, GR_D_PATTERN, 0u, 0x5ac3a50fu,
+         {0xd3000301u, 0xe800f800u, 0xe9000080u}},
+        /* 4444: red and blue masked, green and alpha written (low nibbles are not stored). */
+        {"clr-mask-4444", GR_K_CLEAR, 2u, GR_T_8888, GR_D_PATTERN, 0u, 0x5ac3a50fu,
+         {0xd3000301u, 0xe8f00ff0u, 0xe900000fu}},
+    };
+    const uint32_t clut = 0x08618000u;
+    uint32_t tex[GR_T_COUNT];
+    for (uint32_t t = 0; t < GR_T_COUNT; t++) {
+        tex[t] = 0x08610000u + t * 0x400u;
+        (void)gr_texture(t, (uint8_t *)SR_HOST(tex[t]));
+    }
+    gr_clut((uint8_t *)SR_HOST(clut));
+    GeState saved = *s_ge;
+    int ok = 1;
+    for (size_t k = 0; k < sizeof(k_cells) / sizeof(k_cells[0]); k++) {
+        const struct gr_cell *c = &k_cells[k];
+        uint32_t px[GR_N], ref[GR_N], plain[GR_N];
+        unsigned long long fell = 0, ref_fell = 0, plain_fell = 0;
+        int sync = 0, ref_sync = 0, plain_sync = 0;
+        /* The same clear with no mask: ge.c's window must differ from it, or the cell keeps no
+         * destination bit and tests nothing. */
+        struct gr_cell unmasked = *c;
+        for (size_t w = 1; w < sizeof(unmasked.w) / sizeof(unmasked.w[0]); w++)
+            if ((unmasked.w[w] >> 24) == 0xe8u || (unmasked.w[w] >> 24) == 0xe9u)
+                unmasked.w[w] &= 0xff000000u;
+        const int done = gr_vk_draw(&unmasked, 0, tex, clut, plain, &plain_fell, &plain_sync) &&
+                         gr_vk_draw(c, 0, tex, clut, ref, &ref_fell, &ref_sync) &&
+                         gr_vk_draw(c, 1, tex, clut, px, &fell, &sync);
+        unsigned differ = 0, kept = 0;
+        for (uint32_t i = 0; i < GR_N; i++) {
+            if (px[i] != ref[i]) differ++;
+            if (ref[i] != plain[i]) kept++;
+        }
+        if (!done || sync != GEGPU_SYNC_OK || fell != 0u || differ != 0u || kept == 0u) {
+            fprintf(stderr, "gpu coherence selftest [clear-masks/%s]: %s, fell %llu, sync %d, %u of %u pixels "
+                            "differ from ge.c, ge.c's mask kept %u pixels\n", c->name,
+                    done ? "drawn" : "the list did not reach its END", fell, sync, differ, (unsigned)GR_N, kept);
+            ok = 0;
+        }
+    }
+    *s_ge = saved;
+    coherence_reset_targets();
+    ge_set_gpu_hooks(&k_hooks);
+    if (ok)
+        printf("gpu coherence selftest: PASS %-22s %u clears through all-or-nothing pixel masks drawn on "
+               "the GPU equal ge.c\n", "clear-masks", (unsigned)(sizeof(k_cells) / sizeof(k_cells[0])));
+    return ok;
+}
+
+static int coherence_run_psp_raster(void) {
+    if (s_scale != 1) {
+        fprintf(stderr, "gpu coherence selftest [psp-raster]: compares PSP pixels, so it runs only at render "
+                        "scale 1, not %d\n", s_scale);
+        return 0;
+    }
+    enum { GR_VK_SOFTWARE = sizeof(k_gr_vk_software) / sizeof(k_gr_vk_software[0]),
+           GR_VK_DIVERGENT = sizeof(k_gr_vk_divergent) / sizeof(k_gr_vk_divergent[0]) };
+    const uint32_t clut = 0x08618000u;
+    uint32_t tex[GR_T_COUNT];
+    for (uint32_t t = 0; t < GR_T_COUNT; t++) {
+        tex[t] = 0x08610000u + t * 0x400u;
+        (void)gr_texture(t, (uint8_t *)SR_HOST(tex[t]));
+    }
+    gr_clut((uint8_t *)SR_HOST(clut));
+    GeState saved = *s_ge;
+    unsigned gpu_match = 0, gpu_div = 0, sw_cells = 0, div_exact = 0;
+    uint32_t worst_div = 0;
+    int ok = 1;
+    for (uint32_t k = 0; k < GR_CELL_COUNT; k++) {
+        const struct gr_cell *c = &gr_cells[k];
+        uint32_t px[GR_N], ref[GR_N];
+        unsigned long long fell = 0, ref_fell = 0;
+        int sync = 0, ref_sync = 0;
+        if (strcmp(s_gr_psp[k].name, c->name) != 0) {
+            fprintf(stderr, "gpu coherence selftest [psp-raster]: digest row %u names %s, not %s\n",
+                    (unsigned)k, s_gr_psp[k].name, c->name);
+            ok = 0;
+            continue;
+        }
+        /* ge.c alone gives the PSP's window (test_ge_raster_cells_match_psp): the reference a
+         * divergent GPU window is measured against, pixel by pixel. */
+        if (!gr_vk_draw(c, 0, tex, clut, ref, &ref_fell, &ref_sync) ||
+            !gr_vk_draw(c, 1, tex, clut, px, &fell, &sync)) {
+            fprintf(stderr, "gpu coherence selftest [psp-raster/%s]: the list did not reach its END\n", c->name);
+            ok = 0;
+            continue;
+        }
+        const int want_sw = gr_vk_named(k_gr_vk_software, GR_VK_SOFTWARE, c->name);
+        const int want_div = gr_vk_named(k_gr_vk_divergent, GR_VK_DIVERGENT, c->name);
+        const int ref_ok = gr_digest(ref) == s_gr_psp[k].psp;
+        const int matches = gr_digest(px) == s_gr_psp[k].psp;
+        /* Drawn on the GPU: no primitive fell back and the GPU target was read back. Drawn by the
+         * software fallback: some primitive fell back and the readback did not fail. Anything else
+         * (a failed readback, or nothing drawn at all) is neither and fails. */
+        const int on_gpu = sync == GEGPU_SYNC_OK && fell == 0u;
+        const int on_sw = fell > 0u && sync != GEGPU_SYNC_FAILED;
+        uint32_t delta = 0;
+        for (uint32_t i = 0; i < GR_N; i++) {
+            const uint32_t d = gr_vk_channel_delta(c->psm, px[i], ref[i]);
+            if (d > delta) delta = d;
+        }
+        const char *got = on_gpu ? (matches ? "GPU, equal to the PSP" : "GPU, not equal to the PSP")
+                        : on_sw ? (matches ? "software fallback, equal to the PSP"
+                                           : "software fallback, not equal to the PSP")
+                        : "neither drawn on the GPU nor by the fallback";
+        int pass;
+        if (!ref_ok) pass = 0;
+        else if (want_sw) pass = on_sw && matches;
+        else if (want_div) pass = on_gpu && delta <= GR_VK_DIVERGENT_MAX_DELTA;   /* equal included */
+        else pass = on_gpu && matches;
+        if (on_gpu && !matches) {
+            gpu_div++;
+            if (delta > worst_div) worst_div = delta;
+        } else if (on_gpu) {
+            gpu_match++;
+            if (want_div) div_exact++;
+        } else if (on_sw) {
+            sw_cells++;
+        }
+        if (pass) continue;
+        ok = 0;
+        fprintf(stderr, "gpu coherence selftest [psp-raster/%s]: %s (fell %llu, sync %d), expected %s; "
+                "largest field difference from ge.c %u; ge.c %s the PSP; gpu=0x%016llx psp=0x%016llx",
+                c->name, got, fell, sync,
+                want_sw ? "software fallback, equal to the PSP"
+                        : want_div ? "GPU, within 2 per field of ge.c (which equals the PSP)" : "GPU, equal to the PSP",
+                (unsigned)delta, ref_ok ? "equals" : "does not equal",
+                (unsigned long long)gr_digest(px), (unsigned long long)s_gr_psp[k].psp);
+        for (uint32_t i = 0; i < GR_N; i++)
+            fprintf(stderr, "%s%08x", i % GR_WW ? " " : "\n  ", (unsigned)px[i]);
+        fprintf(stderr, "\n");
+    }
+    for (size_t n = 0; n < GR_VK_SOFTWARE + GR_VK_DIVERGENT; n++) {
+        const char *name = n < GR_VK_SOFTWARE ? k_gr_vk_software[n] : k_gr_vk_divergent[n - GR_VK_SOFTWARE];
+        uint32_t k = 0;
+        while (k < GR_CELL_COUNT && strcmp(gr_cells[k].name, name) != 0) k++;
+        if (k == GR_CELL_COUNT) {
+            fprintf(stderr, "gpu coherence selftest [psp-raster/%s]: no such cell\n", name);
+            ok = 0;
+        }
+    }
+    *s_ge = saved;
+    coherence_reset_targets();
+    ge_set_gpu_hooks(&k_hooks);
+    if (ok)
+        printf("gpu coherence selftest: PASS %-22s PSP-GE-RASTER-001 at 1x: %u cells drawn on the GPU "
+               "equal the PSP (%u of them pinned as rounding cells, exact on this driver), %u differ as "
+               "pinned (at most %u per field), %u drawn by the software fallback equal the PSP (%u cells)\n",
+               "psp-raster", gpu_match, div_exact, gpu_div, (unsigned)worst_div, sw_cells,
+               (unsigned)GR_CELL_COUNT);
     return ok;
 }
 
@@ -10952,9 +13070,15 @@ static int coherence_selftest_cases(void) {
         if (strcmp(only, "depth-evict-overlap") == 0) return coherence_run_depth_evict_overlap();
         if (strcmp(only, "depth-evict-holder") == 0) return coherence_run_depth_evict_holder();
         if (strcmp(only, "twin-scene") == 0) return coherence_run_twin_scene();
+        if (strcmp(only, "ssaa-edge") == 0) return coherence_run_ssaa_edge();
+        if (strcmp(only, "ssaa-sprite") == 0) return coherence_run_ssaa_sprite();
+        if (strcmp(only, "ssaa-limit") == 0) return coherence_run_ssaa_limit();
         if (strcmp(only, "twin-sync") == 0) return coherence_run_twin_sync();
         if (strcmp(only, "twin-gate") == 0) return coherence_run_twin_gate();
         if (strcmp(only, "twin-alloc-fail") == 0) return coherence_run_twin_alloc_fail();
+        if (strcmp(only, "twin-drain-fail") == 0) return coherence_run_twin_drain_fail();
+        if (strcmp(only, "twin-soft") == 0) return coherence_run_twin_soft();
+        if (strcmp(only, "twin-key") == 0) return coherence_run_twin_key();
         if (strcmp(only, "pipeline-cache-cold") == 0) return coherence_run_pipeline_cache(0);
         if (strcmp(only, "pipeline-cache-warm") == 0) return coherence_run_pipeline_cache(1);
         if (strcmp(only, "pipeline-cache-reject") == 0) return coherence_run_pipeline_cache_reject();
@@ -10966,6 +13090,8 @@ static int coherence_selftest_cases(void) {
         if (strcmp(only, "lines") == 0) return coherence_run_lines();
         if (strcmp(only, "host-depth") == 0) return coherence_run_host_depth();
         if (strcmp(only, "wide-raster") == 0) return coherence_run_wide_raster();
+        if (strcmp(only, "psp-raster") == 0) return coherence_run_psp_raster();
+        if (strcmp(only, "clear-masks") == 0) return coherence_run_clear_masks();
         fprintf(stderr, "gpu coherence selftest: unknown SR_GPU_COHERENCE_CASE '%s'\n", only);
         return 0;
     }
@@ -11023,6 +13149,8 @@ static int coherence_selftest_cases(void) {
      * ones before them leave. */
     if (!coherence_run_mip_levels()) ok = 0;
     if (!coherence_run_psp_sample_points()) ok = 0;
+    if (!coherence_run_psp_raster()) ok = 0;
+    if (!coherence_run_clear_masks()) ok = 0;
     if (!coherence_run_sprite_scaled()) ok = 0;
     if (!coherence_run_uv_edge_clamp()) ok = 0;
     /* After the mip fixtures: it rewrites the depth buffer they start from. */
@@ -11050,6 +13178,9 @@ static int coherence_selftest_cases(void) {
     if (s_twin && s_tscale == s_scale && !coherence_run_twin_sync()) ok = 0;
     if (!coherence_run_rtt_scale()) ok = 0;
     if (!coherence_run_host_depth()) ok = 0;
+    if (!coherence_run_ssaa_edge()) ok = 0;
+    if (!coherence_run_ssaa_sprite()) ok = 0;
+    if (!coherence_run_ssaa_limit()) ok = 0;
     coherence_reset_targets();
     return ok;
 }

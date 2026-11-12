@@ -286,13 +286,14 @@ class RunEntryIsPlanOwned(unittest.TestCase):
         cls.shell = shell
 
     def build(self, manifest: dict) -> dict:
-        return title_codegen_plan.build_manager_plan(
+        plan: dict = title_codegen_plan.build_manager_plan(
             manifest,
             game_name="synthetic",
             game_elf=Path("build/fixtures/synthetic.elf"),
             build_dir=Path("build/synthetic"),
             funcs_per_chunk=64,
         )
+        return plan
 
     def manifest(self) -> dict:
         returned: dict[str, Any] = title_manifest.load_manifest(TITLES / "synthetic.json")

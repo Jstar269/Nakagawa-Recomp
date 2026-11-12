@@ -60,8 +60,9 @@ foreach(pair IN LISTS NK_ANDROID_TITLES)
     # The Android process start and end (pid and exit status for the launcher).
     target_sources(${target} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/main/cpp/nk_android_title.c")
     target_include_directories(${target} PRIVATE "${NK_REPO_ROOT}/src/core")
-    # exit() and _exit() in the runtime go through the shim first (see nk_android_title.c).
-    target_link_options(${target} PRIVATE -Wl,--wrap=exit -Wl,--wrap=_exit -Wl,--wrap=_Exit)
+    # exit(), _exit() and atexit() in the runtime go through the shim (see nk_android_title.c).
+    target_link_options(${target} PRIVATE -Wl,--wrap=exit -Wl,--wrap=_exit -Wl,--wrap=_Exit
+        -Wl,--wrap=atexit)
     list(APPEND nk_android_targets ${target})
 endforeach()
 

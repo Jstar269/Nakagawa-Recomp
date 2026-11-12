@@ -8,14 +8,15 @@
  * value can never opt a launch in:
  *
  *     SR_ACE=off
- *     SR_ACE=v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off
+ *     SR_ACE=v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off;twin=off
  *
  * tier (enhanced or ace) only names the run, in the badge, the pause menu and the stamps; a
- * line without it is an Enhanced run. stick, load, depth and cull are the other keys a line may
- * leave out: a missing stick, load, depth or cull reads as off (section 11.2 item 2); stick has
- * no off word, its value is the game's dead zone (1..126), and a line that writes load=off,
- * depth=off or cull=off means the same as none; stick=<counts>, load=fast and cull=on need
- * tier=ace, and depth=32 (the 32-bit host depth buffer, #2051) does not. Every other
+ * line without it is an Enhanced run. stick, load, depth, ssaa and cull are the other keys a line
+ * may leave out: a missing stick, load, depth, ssaa or cull reads as off (section 11.2 item 2);
+ * stick has no off word, its value is the game's dead zone (1..126), and a line that writes
+ * load=off, depth=off, ssaa=off or cull=off means the same as none; stick=<counts>, load=fast and
+ * cull=on need tier=ace, and depth=32 (the 32-bit host depth buffer, #2051) and ssaa=2|4
+ * (supersampling, #2073) do not. Every other
  * key is required in v1, in any order, each once. A key or value for a feature this build
  * does not carry (smooth=match) is still parsed and refused. Anything else (an unknown version, key
  * or value, a duplicate, a missing key, an empty field) refuses the whole line: Ace is off for
@@ -50,6 +51,7 @@
 #define ACE_HAS_SAS 1           /* sas=sinc: band-limited SAS voice resampling (#2054) */
 #define ACE_HAS_TESS 1          /* tess=2..4: finer Bezier and spline patches (#2053) */
 #define ACE_HAS_CULL 1          /* cull=on: widen a title's own view-culling test to the wings (11.3.6) */
+#define ACE_HAS_SSAA 1          /* ssaa=2|4: supersampling on top of render scale (#2073, 10.21) */
 #define ACE_HAS_STICK 1         /* stick=<counts>: start the host stick past the game's dead zone (11.3.11) */
 #define ACE_STICK_COUNTS_MAX 126 /* stick=1..126: the square dead zone, in the game's centred counts */
 #define ACE_HAS_LOAD 1          /* load=fast: a title's declared loading waits return at once (11.3.10) */
@@ -83,6 +85,9 @@ typedef struct {
     int load;        /* load=fast: the waits a title's load part declares are skipped (guest timing, 11.3.10) */
     int depth;       /* depth=32: 0 off (the PSP's 16-bit depth), else 32: the Vulkan renderer's depth
                         buffer holds unrounded depth (guest-visible, 10.20 and 11.3.12) */
+    int twin;        /* full 32-bit colour: 16-bit games drawn on a host twin, no dither (host-only) */
+    int ssaa;        /* ssaa=2|4: 0 off, else the supersampling factor per axis on top of render scale;
+                        host presentation only (10.21) */
 } AceConfig;
 
 typedef enum {
@@ -98,6 +103,8 @@ typedef enum {
     ACE_FEATURE_LOAD,
     ACE_FEATURE_CULL,
     ACE_FEATURE_DEPTH,
+    ACE_FEATURE_TWIN,
+    ACE_FEATURE_SSAA,
     ACE_FEATURE_COUNT
 } AceFeature;
 
@@ -109,6 +116,10 @@ typedef enum {
 int ace_parse(const char *spec, AceConfig *out, char *why, size_t why_cap);
 /* Writes the canonical line for a config ("off" when !c->on). Returns 0 when it does not fit. */
 int ace_format(const AceConfig *c, char *out, size_t cap);
+/* Writes a line that gives every key of the parser's table its longest value, in the table's
+   order, and returns its length (0 when it does not fit). ace_format writes the same length
+   for the config it parses to: the longest line there is, whatever keys later parts add. */
+size_t ace_longest_line(char *out, size_t cap);
 
 /* ---- the run's switch ----------------------------------------------------------------------- */
 
@@ -118,7 +129,8 @@ extern int g_ace_on;   /* the run's switch: 1 only after a valid line with Ace o
  * sets g_ace_on. Returns g_ace_on. ace_init_spec does the same for a given value (tests). */
 int ace_init_from_env(void);
 int ace_init_spec(const char *spec, const char *report_path);
-/* The requested line, and what this host gave (a feature it cannot provide is off here). */
+/* The requested line, and what this host gave (a feature it cannot provide is off here). A host twin
+ * that SR_GPU_TWIN_COLOR turned on counts as given (ace_set_twin_running). */
 const AceConfig *ace_requested(void);
 const AceConfig *ace_effective(void);
 /* The canonical line of the run ("off" for an authentic run). */
@@ -195,8 +207,16 @@ void ace_note_af_failure(void);
 /* The pause menu's live Speed readout switch (Ace on only; a readout this host cannot draw
  * stays off). */
 void ace_set_readout(int on);
+/* A host twin (full 32-bit colour) that is running, whatever turned it on, the launch line or
+ * SR_GPU_TWIN_COLOR: the effective config and the report say so, and it counts as confirmed. A
+ * twin already named unavailable stays off. */
+void ace_set_twin_running(void);
 /* The anisotropy the device gives, at most the requested level (0 = none). */
 void ace_set_af_effective(int af, const char *reason);
+/* The supersampling factor the renderer could give (ENHANCEMENT_CONTRACT.md 10.21): below the
+ * request, the run records the factor and `reason` and says so in one "ACE_MODE: ssaa" line; 1 or
+ * less marks supersampling unavailable with `reason`. Does nothing unless ssaa was asked for. */
+void ace_set_ssaa_effective(int factor, const char *reason);
 /* The active features in words, joined by " \xC2\xB7 " ("16x filtering \xC2\xB7 crisp keyboard"),
  * for the pause menu caption and the launch notice. Empty with Ace off. */
 size_t ace_feature_words(char *out, size_t cap);
@@ -555,15 +575,21 @@ void ace_smooth_aux_report(const AceSmoothAuxStats *s);
 
 /* ---- the per-run report -------------------------------------------------------------------- */
 
-/* The worst case, every block present and every number at its widest, is about 4.8 KB with
- * stick and load in the spec; ace_selftest's cell_report_worst checks that it fits. */
-#define ACE_REPORT_MAX 5120u
+/* The worst case, every block present and every number at its widest, is about 5.2 KB with
+ * stick, load, twin and ssaa in the spec; ace_selftest's cell_report_worst checks that it fits. */
+#define ACE_REPORT_MAX 6144u
 /* The report's JSON for the run so far; 0 when it would not fit. */
 size_t ace_report_json(char *out, size_t cap);
 /* Settles the features that never ran (ace_confirm), then writes the report (SR_ACE_REPORT,
  * through a temporary file that atomically replaces the old report) and the exit stamp. An
  * empty SR_ACE_REPORT writes no file. Ace off: does nothing. Safe to call more than once. */
 void ace_finish(void);
+/* A callback ace_finish runs first, so a count the runtime keeps (the culling hook's untracked
+ * matrices) is read after the last frame on every exit path that writes the report, the exit-at-VBLANK one
+ * included.
+ * It may call ace_confirm, ace_feature_unavailable and ace_set_cull_untracked; it must be safe to
+ * run more than once. NULL clears it. */
+void ace_set_finish_hook(void (*hook)(void));
 
 /* ---- fast forward's keys (recomp.h, sched_fast_forward_on) ---------------------------------- */
 /* The game window sets these: a hold (Tab while it is held) and a toggle (F9). They only ask;

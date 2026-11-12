@@ -1195,6 +1195,9 @@ static const char *const k_part_tess_labels[] = {"2x", "3x", "4x", "Off"};
 static const char *const k_part_tess_words[] = {"2", "3", "4", "off"};
 static const char *const k_part_wide_words[] = {"fill", "off"};
 static const char *const k_part_load_words[] = {"fast", "off"};
+static const int k_part_ssaa_values[] = {2, 4, 0};
+static const char *const k_part_ssaa_labels[] = {"2x", "4x", "Off"};
+static const char *const k_part_ssaa_words[] = {"2", "4", "off"};
 static const char *const k_part_upscale_labels[] = {"FSR 1", "Off"};
 static const char *const k_part_upscale_words[] = {"fsr1", "off"};
 
@@ -1248,6 +1251,14 @@ static const PlayerEnhancedPartInfo k_enhanced_parts[PLAYER_PART_COUNT] = {
     {"load", "Short loads",
      "Ace only, in games with a loading-wait package. Skips those waits; changes the game's timing.",
      2, k_part_switch_values, k_part_switch_labels, k_part_load_words, 0},
+    {"twin", "Full 32-bit colour",
+     "Shows 16-bit games in full colour, without dither. Uses more memory.",
+     2, k_part_switch_values, k_part_switch_labels, k_part_switch_words, 0},
+    /* Host presentation only (contract 10.21): the picture the window shows, never guest memory.
+       Off by default and in every preset: it multiplies the GPU's work by 4 or 16. */
+    {"ssaa", "Supersampling",
+     "Smooths jagged edges. 2x takes 4 times the GPU work, 4x 16 times.",
+     3, k_part_ssaa_values, k_part_ssaa_labels, k_part_ssaa_words, 0},
 };
 
 const PlayerEnhancedPartInfo *player_enhanced_part(int part) {
@@ -2302,12 +2313,14 @@ void player_app_cycle_present_scaling(PlayerApp *app, int direction) {
    the weakest GPUs (Medium's and Handheld's frame passes it too on 1440p and 4K); High
    turns it off as Ultra without it, the plain 4x picture. No row sets frame pacing, Smooth
    motion, Widescreen, texture filtering, sound, the readout, the badge, Finer patches
-   (which changes GE timing, section 11.3.7) or Short loads (which changes guest
-   timing, section 11.3.10): those stay the library's and each game's own. docs/PLAYER_UI_DESIGN.md lists the same values, and
-   test_graphics_presets checks that every other part is -1, so a new part needs a choice. */
+   (which changes GE timing, section 11.3.7), Short loads (which changes guest timing, section
+   11.3.10) or Full 32-bit colour (the host twin, section 10.11): those stay the library's and
+   each game's own. docs/PLAYER_UI_DESIGN.md lists the same values, and test_graphics_presets
+   checks that every other part is -1, so a new part needs a choice. */
 #define PRESET_PART_LIST(X, text, upscale)                                                \
     X(FILTERING, -1) X(TEXT, (text)) X(READOUT, -1) X(NOTICE, -1) X(WIDE, -1) X(SMOOTH, -1) \
-    X(SAS, -1) X(TESS, -1) X(CULL, -1) X(UPSCALE, (upscale)) X(STICK, -1) X(LOAD, -1)
+    X(SAS, -1) X(TESS, -1) X(CULL, -1) X(UPSCALE, (upscale)) X(STICK, -1) X(LOAD, -1)    \
+    X(TWIN, -1) X(SSAA, -1)
 #define PRESET_PART_SET(part, value) [PLAYER_PART_##part] = value,
 #define PRESET_PART_ONE(part, value) + 1
 #define PRESET_PARTS(text, upscale) {PRESET_PART_LIST(PRESET_PART_SET, text, upscale)}
@@ -3080,9 +3093,10 @@ bool player_play_launch_line(const PlayerPlayResolved *play, char *out, size_t c
     for (int p = 0; p < PLAYER_PART_COUNT; p++) {
         /* The upscaler travels as SR_PRESENT_UPSCALE (player_play_present_upscale), which the
            launcher exports for every session; the runtime's SR_ACE line has no such key. Stick,
-           load and cull come last, in the Ace line's own order (src/rt/ace.c), whatever the enum's. */
+           load, ssaa and cull come last, in the Ace line's own order (src/rt/ace.c), whatever the
+           enum's. */
         if (p == PLAYER_PART_UPSCALE || p == PLAYER_PART_STICK || p == PLAYER_PART_LOAD ||
-            p == PLAYER_PART_CULL) continue;
+            p == PLAYER_PART_SSAA || p == PLAYER_PART_CULL) continue;
         n = snprintf(out + used, cap - used, ";%s=%s", k_enhanced_parts[p].key,
                      enhanced_part_word(p, play->part[p]));
         if (n <= 0 || (size_t)n >= cap - used) { out[0] = '\0'; return false; }
@@ -3100,6 +3114,13 @@ bool player_play_launch_line(const PlayerPlayResolved *play, char *out, size_t c
     if (play->mode == PLAYER_PLAY_ACE && play->part[PLAYER_PART_LOAD] == 1) {
         n = snprintf(out + used, cap - used, ";%s=%s", k_enhanced_parts[PLAYER_PART_LOAD].key,
                      enhanced_part_word(PLAYER_PART_LOAD, 1));
+        if (n <= 0 || (size_t)n >= cap - used) { out[0] = '\0'; return false; }
+        used += (size_t)n;
+    }
+    /* Supersampling is an Enhanced part (contract 10.21): Enhanced and Ace carry it when it is on. */
+    if (play->part[PLAYER_PART_SSAA] == 2 || play->part[PLAYER_PART_SSAA] == 4) {
+        n = snprintf(out + used, cap - used, ";%s=%d", k_enhanced_parts[PLAYER_PART_SSAA].key,
+                     play->part[PLAYER_PART_SSAA]);
         if (n <= 0 || (size_t)n >= cap - used) { out[0] = '\0'; return false; }
         used += (size_t)n;
     }

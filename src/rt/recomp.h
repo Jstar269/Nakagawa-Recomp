@@ -2493,6 +2493,14 @@ void     sched_set_vtimer_hooks(SrSchedVtimerNextDeadline next_deadline,
 /* hle.c's user-partition overlap test: sched.c refuses a thread stack range it reports. */
 typedef int (*SrSchedStackRangeRefusal)(uint32_t base, uint32_t end);
 void     sched_set_stack_range_refusal(SrSchedStackRangeRefusal refusal);
+/* hle.c's free blocks below the user partition's bump pointer: when no range above it holds a
+ * new thread stack, sched.c takes the highest such block that does (carved from its top) and
+ * gives it back to the partition when the thread is deleted. */
+typedef int (*SrSchedPartitionHoleAlloc)(uint32_t size, uint32_t *base_out);
+typedef void (*SrSchedPartitionHoleRelease)(uint32_t base, uint32_t size);
+void     sched_set_partition_hole_allocator(SrSchedPartitionHoleAlloc alloc,
+                                            SrSchedPartitionHoleRelease release);
+int      sched_guest_stack_overlaps(uint32_t base, uint32_t end);   /* any live thread stack */
 CpuState *sr_cpu_for_callbacks(void);               /* the CpuState guest callbacks run on */
 void     sched_dump_threads(void);                  /* the watchdog's thread table, to stderr */
 void     sched_watchdog_summary(uint32_t *ready, uint32_t *delay,
@@ -2528,6 +2536,10 @@ int      sched_current_join_result_pending(uint32_t uid); /* non-consuming join-
 void     sched_raise_interrupt(uint32_t source);     /* latch source; delivery occurs at a scheduler boundary */
 uint32_t sched_pending_interrupts(void);             /* source bits not yet serviced */
 void     sched_delay_current(uint64_t usec);        /* block current thread for usec */
+/* sched_delay_current(), but the wait cannot end inside the scheduling decision its own block
+ * causes: when another thread is ready then, of any priority, that thread is dispatched first.
+ * For the Ace load skip (nk_ace_load_skip_wait); see the definition in sched.c. */
+void     sched_delay_current_dispatching(uint64_t usec);
 void     sched_preempt(void);                       /* yield now if a higher-priority thread is ready */
 /* Set by the preemption timer when a stronger thread's deadline comes. A long HLE call polls it
  * between units of work and, where the thread that runs cannot reach the call's own state (for
