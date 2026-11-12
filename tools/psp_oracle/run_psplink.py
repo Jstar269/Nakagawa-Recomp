@@ -51,7 +51,9 @@ if TYPE_CHECKING:
     )
     from .parse_golden import (
         CAMPAIGN_PROBE_CASES,
+        GE_CORPUS_PROBES,
         DMAC_INVALID_CASES,
+        ge_corpus_cells,
         parse_cache_alias_output,
         parse_campaign_probe_output,
         parse_audio_query_output,
@@ -107,7 +109,9 @@ else:
     try:
         from .parse_golden import (
             CAMPAIGN_PROBE_CASES,
+            GE_CORPUS_PROBES,
             DMAC_INVALID_CASES,
+            ge_corpus_cells,
             parse_cache_alias_output,
             parse_campaign_probe_output,
             parse_audio_query_output,
@@ -131,7 +135,9 @@ else:
     except ImportError:  # direct ``python tools/psp_oracle/run_psplink.py`` invocation
         from psp_oracle.parse_golden import (
             CAMPAIGN_PROBE_CASES,
+            GE_CORPUS_PROBES,
             DMAC_INVALID_CASES,
+            ge_corpus_cells,
             parse_cache_alias_output,
             parse_campaign_probe_output,
             parse_audio_query_output,
@@ -4094,6 +4100,129 @@ def _canonicalize_psp(text: str, args: argparse.Namespace) -> str:
     return metadata + "\n" + "\n".join(records) + "\n"
 
 
+def _dump_ge_corpus(value: Any, indent: str = "") -> str:
+    """The corpus JSON layout: an object of scalars on one line, everything else one item per line."""
+
+    inner = indent + "  "
+    if isinstance(value, dict):
+        if all(not isinstance(item, (dict, list)) for item in value.values()):
+            return json.dumps(value, ensure_ascii=False)
+        body = ",\n".join(f"{inner}{json.dumps(key)}: {_dump_ge_corpus(item, inner)}"
+                          for key, item in value.items())
+        return "{\n" + body + "\n" + indent + "}"
+    if isinstance(value, list):
+        if not value:
+            return "[]"
+        body = ",\n".join(inner + _dump_ge_corpus(item, inner) for item in value)
+        return "[\n" + body + "\n" + indent + "]"
+    return json.dumps(value, ensure_ascii=False)
+
+
+def write_ge_corpus_probe_runs(
+    corpus_path: Path, schema_path: Path, run_paths: list[Path], results_root: Path
+) -> dict[str, Any]:
+    """Write the measured cells of GE corpus probe runs into the corpus.
+
+    Each runner report must carry one acceptance-eligible, qualified PSP_HARDWARE envelope for
+    ge-raster, ge-weight or ge-rtt, whose raw result's identity (model, firmware, source commit,
+    PRX SHA-256) is the envelope's. Its raw result becomes the private result record
+    ``ge-corpus/<test id>-<commit12>.txt`` under ``results_root``; the corpus gets the cells and an
+    envelope that names that record by path and SHA-256. Every report is checked before anything
+    is written, an existing record is never replaced by different bytes, and the corpus is written
+    only when the gate then refuses nothing and reports every written run MEASURED; otherwise the
+    records this call created are removed again.
+    """
+
+    corpus = json.loads(corpus_path.read_text(encoding="utf-8"))
+    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    runs = {run["test_id"]: run for run in corpus.get("probe_runs", [])}
+    staged: dict[str, tuple[Path, bytes]] = {}
+    for run_path in run_paths:
+        report = json.loads(run_path.read_text(encoding="utf-8"))
+        envelopes = [envelope for envelope in report.get("envelopes", [])
+                     if envelope.get("CASE_ID") in GE_CORPUS_PROBES]
+        if len(envelopes) != 1:
+            raise ProtocolError(f"{run_path.name}: expected one GE corpus probe envelope, "
+                                f"found {len(envelopes)}")
+        envelope = envelopes[0]
+        probe_case = envelope["CASE_ID"]
+        test_id = GE_CORPUS_PROBES[probe_case][0]
+        if test_id in staged:
+            raise ProtocolError(f"{run_path.name}: a second {probe_case} run in one write")
+        if (envelope.get("EVIDENCE_CLASS") != "PSP_HARDWARE"
+                or envelope.get("ACCEPTANCE_ELIGIBLE") is not True
+                or envelope.get("QUALIFICATION_STATUS") != "QUALIFIED"
+                or envelope.get("ACCEPTANCE_BLOCKERS")):
+            raise ProtocolError(f"{run_path.name}: {probe_case} is not an acceptance-eligible, "
+                                "qualified PSP_HARDWARE run")
+        raw_result = envelope.get("RAW_RESULT")
+        if not isinstance(raw_result, str):
+            raise ProtocolError(f"{run_path.name}: {probe_case} envelope has no RAW_RESULT text")
+        sequence = parse_campaign_probe_output(raw_result, probe_case)
+        cells = ge_corpus_cells(sequence, probe_case)
+        metadata = sequence.metadata
+        for field, key in (("model", "PHYSICAL_MODEL_LABEL"), ("firmware", "FW"),
+                           ("source_commit", "SOURCE_COMMIT"), ("binary_sha256", "BINARY_SHA256")):
+            if metadata.get(field) != envelope.get(key):
+                raise ProtocolError(f"{run_path.name}: raw result {field} is not the envelope's {key}")
+        commit = metadata["source_commit"]
+        record_path = f"ge-corpus/{test_id}-{commit[:12]}.txt"
+        data = raw_result.encode("utf-8")
+        target = results_root / record_path
+        if target.exists() and target.read_bytes() != data:
+            raise ProtocolError(f"{record_path} already holds a different result record")
+        staged[test_id] = (target, data)
+        runs[test_id] = {
+            "test_id": test_id,
+            "probe_case": probe_case,
+            "fixture": "fixtures/psp_oracle/probe_ge_sample.c",
+            "source_tier": "PSP_HARDWARE",
+            "evidence_envelope": {
+                "EVIDENCE_CLASS": "PSP_HARDWARE",
+                "ACCEPTANCE_ELIGIBLE": True,
+                "CASE_ID": probe_case,
+                "CONSOLE_MODEL": metadata["model"],
+                "FW": metadata["firmware"],
+                "SOURCE_COMMIT": commit,
+                "BINARY_SHA256": metadata["binary_sha256"],
+                "RESULT_RECORD": {"path": record_path, "sha256": hashlib.sha256(data).hexdigest()},
+            },
+            "cells": cells,
+        }
+    order = [test_id for test_id, _cells, _suffixes in GE_CORPUS_PROBES.values()]
+    corpus["probe_runs"] = [runs[test_id] for test_id in order if test_id in runs]
+    created: list[Path] = []
+    try:
+        for target, data in staged.values():
+            if target.exists():
+                continue  # the same bytes (checked above): an existing record is never removed
+            target.parent.mkdir(parents=True, exist_ok=True)
+            partial = target.with_name(target.name + ".partial")
+            created.append(partial)
+            partial.write_bytes(data)
+            created.append(target)
+            os.replace(partial, target)
+        report = ge_corpus_report(corpus, schema, results_root)
+        statuses = {item["test_id"]: item for item in report["probe_runs"]}
+        for test_id in staged:
+            if statuses[test_id]["status"] != "MEASURED":
+                raise ProtocolError(f"{test_id}: the gate refuses the written run: "
+                                    f"{statuses[test_id]['reason']}")
+        if report["status"] == "REFUSED":
+            raise ProtocolError("the gate refuses the corpus: " + "; ".join(
+                f"{item.get('test_id', item.get('case_id'))}: {item['reason']}"
+                for item in (*report["cases"], *report["probe_runs"]) if item["status"] == "REFUSED"))
+        partial_corpus = corpus_path.with_name(corpus_path.name + ".partial")
+        created.append(partial_corpus)
+        partial_corpus.write_text(_dump_ge_corpus(corpus) + "\n", encoding="utf-8", newline="\n")
+        os.replace(partial_corpus, corpus_path)
+    except BaseException:
+        for target in created:
+            target.unlink(missing_ok=True)
+        raise
+    return report
+
+
 def _argv_json(parser: argparse.ArgumentParser, value: str, option: str) -> list[str]:
     try:
         parsed = json.loads(value)
@@ -4141,6 +4270,14 @@ def main(argv: list[str] | None = None) -> int:
         "--ge-corpus-gate",
         action="store_true",
         help="validate the source-owned GE corpus and report per-case evidence status without hardware access",
+    )
+    parser.add_argument(
+        "--ge-corpus-write",
+        type=Path,
+        nargs="+",
+        metavar="RUN_REPORT",
+        help="write the measured cells of these ge-raster, ge-weight or ge-rtt runner reports into "
+             "the GE corpus, their raw results into --results-directory/ge-corpus",
     )
     parser.add_argument("--ge-corpus", type=Path, help="GE corpus JSON under fixtures/psp_oracle")
     parser.add_argument("--ge-corpus-schema", type=Path, help="GE corpus schema JSON under assets")
@@ -4206,7 +4343,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
     report: dict[str, Any]
-    if args.ge_corpus_gate:
+    if args.ge_corpus_gate or args.ge_corpus_write:
+        if args.ge_corpus_gate and args.ge_corpus_write:
+            parser.error("--ge-corpus-gate and --ge-corpus-write are separate runs")
         if any((
             args.prx, args.remote_command, args.command, args.psp_output, args.nakagawa_output,
             args.host0_output, args.validate_dmac_size_matrix, args.binary, args.source_commit,
@@ -4215,7 +4354,8 @@ def main(argv: list[str] | None = None) -> int:
             args.host0_root, args.out, args.annotate_report, args.observed_terminal_outcome,
             args.dry_run,
         )):
-            parser.error("--ge-corpus-gate cannot be combined with PSPLink execution or capture options")
+            parser.error("--ge-corpus-gate and --ge-corpus-write cannot be combined with PSPLink "
+                         "execution or capture options")
         corpus_path = (args.ge_corpus or DEFAULT_GE_CORPUS).resolve()
         schema_path = (args.ge_corpus_schema or DEFAULT_GE_CORPUS_SCHEMA).resolve()
         allowed_corpus_root = (ROOT / "fixtures" / "psp_oracle").resolve()
@@ -4253,6 +4393,15 @@ def main(argv: list[str] | None = None) -> int:
             results_root.relative_to(ROOT.resolve())
         except ValueError:
             parser.error("--results-directory must be inside the repository root")
+        if args.ge_corpus_write:
+            try:
+                report = write_ge_corpus_probe_runs(
+                    corpus_path, schema_path, list(args.ge_corpus_write), results_root)
+            except (OSError, UnicodeError, json.JSONDecodeError, KeyError, ProtocolError) as exc:
+                sys.stderr.write(f"--ge-corpus-write refused: {type(exc).__name__}: {exc}\n")
+                return 2
+            sys.stdout.write(dump_json(report))
+            return 2 if report["status"] == "REFUSED" else 0
         report = ge_corpus_report(corpus, schema, results_root if results_root.is_dir() else None)
         sys.stdout.write(dump_json(report))
         return 2 if report["status"] == "REFUSED" else 0

@@ -23,8 +23,8 @@ coverage:
 comment: false
 
 # The two measured surfaces upload independently and at different times: the
-# python flag from the Python tooling shards, the c flag from the native core
-# measurement. carryforward keeps each flag's last report current for a commit
+# python flag from the Python tooling shards, the c flag from the c_coverage
+# job. carryforward keeps each flag's last report current for a commit
 # where only the other surface ran, so neither report silently disappears.
 flag_management:
   individual_flags:
