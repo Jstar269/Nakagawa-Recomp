@@ -11,13 +11,16 @@ checked against its pinned SHA-256, is built three times:
 3. runtimes: compiler-rt builtins, libunwind, libc++abi and libc++, static, by the host clang;
 4. device: clang and lld for Android, by the host clang, linked against those runtimes. The
    build refuses a binary that holds the NDK's libc++ (its inline namespace is `__ndk1`).
+5. make: GNU make 4.4.1 from its pinned release tarball, configured for the device and
+   compiled by the host clang with make's own build.sh.
 
-`stage` then writes what the APK carries: `jniLibs/arm64-v8a/libnk_clang.so`, `libnk_lld.so`
-and `libnk_ld.so` (android/toolchain/nk_ld_launcher.c; Android runs only lib*.so files from an
+`stage` then writes what the APK carries: `jniLibs/arm64-v8a/libnk_clang.so`, `libnk_lld.so`,
+`libnk_make.so` and `libnk_ld.so` (android/toolchain/nk_ld_launcher.c; Android runs only lib*.so files from an
 app's native library folder), and `assets/toolchain/sysroot.tar` and `clang-resource.tar`,
 with `toolchain-manifest.json` listing every file's SHA-256 and, under
 `assets/toolchain/NOTICES/llvm/`, the LICENSE.TXT of each LLVM project the binaries hold and
-the notices of the third-party code inside them (LLVM_THIRD_PARTY_FILES and _EXCERPTS).
+the notices of the third-party code inside them (LLVM_THIRD_PARTY_FILES and _EXCERPTS), and make's
+COPYING under `NOTICES/make/`.
 
 Each stage writes into its own folder under --work and runs only when that folder has no
 `.done` stamp, so an interrupted build resumes. `--jobs` caps the compile jobs; links run one
@@ -46,6 +49,17 @@ LLVM_TARBALL = f"llvm-project-{LLVM_VERSION}.src.tar.xz"
 LLVM_URL = f"https://github.com/llvm/llvm-project/releases/download/llvmorg-{LLVM_VERSION}/{LLVM_TARBALL}"
 LLVM_SHA256 = "4633a23617fa31a3ea51242586ea7fb1da7140e426bd62fc164261fe036aa142"
 CLANG_MAJOR = LLVM_VERSION.split(".")[0]
+
+MAKE_VERSION = "4.4.1"
+MAKE_TARBALL = f"make-{MAKE_VERSION}.tar.gz"
+MAKE_URL = f"https://ftp.gnu.org/gnu/make/{MAKE_TARBALL}"
+MAKE_SHA256 = "dd16fb1d67bfab79a72f5e8390735c49e3e8e70b4945a15ab1f81ddb78658fb3"
+#: GNU make's own switches for a cross build with no optional parts. Bionic has no confstr(),
+#: which make's posix_spawn path calls to find the default PATH, so make uses fork and exec.
+MAKE_CONFIGURE = (
+    "--host=aarch64-linux-android", "--disable-nls", "--without-guile", "--disable-load",
+    "--disable-dependency-tracking", "--disable-posix-spawn",
+)
 
 API = 29
 TRIPLE = f"aarch64-unknown-linux-android{API}"
@@ -137,10 +151,16 @@ class Config:
     jobs: int
     host_cc: str
     host_cxx: str
+    make_tarball: Path
+    sh: str
 
     @property
     def src(self) -> Path:
         return self.work / "src" / f"llvm-project-{LLVM_VERSION}.src"
+
+    @property
+    def make_src(self) -> Path:
+        return self.work / "src" / f"make-{MAKE_VERSION}"
 
     @property
     def build(self) -> Path:
@@ -175,9 +195,9 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def verify_tarball(path: Path, expected: str = LLVM_SHA256) -> None:
+def verify_tarball(path: Path, expected: str = LLVM_SHA256, url: str = LLVM_URL) -> None:
     if not path.is_file():
-        raise ToolchainError(f"{path}: missing; fetch {LLVM_URL}")
+        raise ToolchainError(f"{path}: missing; fetch {url}")
     actual = sha256_file(path)
     if actual != expected:
         raise ToolchainError(f"{path}: sha256 {actual}, pinned {expected}")
@@ -191,10 +211,12 @@ def _mark(folder: Path) -> None:
     (folder / ".done").write_text("done\n", encoding="utf-8")
 
 
-def _run(command: list[str], log: Path, what: str) -> None:
+def _run(command: list[str], log: Path, what: str, cwd: Path | None = None,
+         env: dict[str, str] | None = None) -> None:
     log.parent.mkdir(parents=True, exist_ok=True)
     with log.open("wb") as handle:
-        result = subprocess.run(command, stdout=handle, stderr=subprocess.STDOUT, check=False)
+        result = subprocess.run(command, stdout=handle, stderr=subprocess.STDOUT, check=False,
+                                cwd=cwd, env=None if env is None else {**os.environ, **env})
     if result.returncode != 0:
         tail = log.read_bytes()[-3000:].decode(errors="replace")
         raise ToolchainError(f"{what} failed ({result.returncode}); see {log}:\n{tail}")
@@ -356,6 +378,58 @@ def stage_device(cfg: Config) -> None:
     _mark(folder)
 
 
+def make_configure(cfg: Config) -> tuple[list[str], dict[str, str]]:
+    """GNU make's configure, run in build/make, compiling with the host clang for the device."""
+    folder = cfg.build / "make"
+    source = Path(os.path.relpath(cfg.make_src, folder)).as_posix()
+    cc = (f"{Path(cfg.tool('clang')).as_posix()} --target={TRIPLE} --sysroot={cfg.sysroot.as_posix()} "
+          f"-resource-dir={cfg.resource.as_posix()}")
+    command = [cfg.sh, f"{source}/configure", *MAKE_CONFIGURE, f"CC={cc}",
+               # configure is run by a relative path, so the compiler sees relative sources.
+               f"CFLAGS=-O2 -ffile-prefix-map={source}=/make-src",
+               "LDFLAGS=-fuse-ld=lld -pie -Wl,--build-id=sha1 -Wl,--strip-all"]
+    # MSYS2's sh would turn the POSIX paths configure writes for the device, such as
+    # /usr/local/include, into Windows paths; elsewhere the variable means nothing.
+    env = {"MSYS2_ARG_CONV_EXCL": "*"}
+    shell = Path(cfg.sh)
+    if shell.parent != Path("."):
+        # configure's expr, sed and the rest must be the ones beside that shell: another
+        # POSIX layer's tools on PATH (Git for Windows', say) misparse its options.
+        env["PATH"] = f"{shell.parent}{os.pathsep}{os.environ.get('PATH', '')}"
+    return command, env
+
+
+def check_device_executable(data: bytes, binary: str, work: Path) -> None:
+    """A position-independent AArch64 ELF that names no build-machine path."""
+    if data[:5] != b"\x7fELF\x02" or int.from_bytes(data[16:18], "little") != 3 \
+            or int.from_bytes(data[18:20], "little") != 183:
+        raise ToolchainError(f"{binary}: not a position-independent AArch64 ELF")
+    for path in {work.as_posix(), str(work)}:
+        if path.encode() in data:
+            raise ToolchainError(f"{binary}: holds the build path {path}")
+
+
+def stage_make(cfg: Config) -> None:
+    """GNU make for the device: configure, then make's own build.sh, which needs no make."""
+    folder = cfg.build / "make"
+    if _done(folder):
+        return
+    if not _done(cfg.make_src):
+        verify_tarball(cfg.make_tarball, MAKE_SHA256, MAKE_URL)
+        cfg.make_src.parent.mkdir(parents=True, exist_ok=True)
+        with tarfile.open(cfg.make_tarball) as tar:
+            tar.extractall(cfg.make_src.parent, filter="data")
+        if not (cfg.make_src / "configure").is_file():
+            raise ToolchainError(f"{cfg.make_tarball}: no configure under {cfg.make_src.name}")
+        _mark(cfg.make_src)
+    folder.mkdir(parents=True, exist_ok=True)
+    command, env = make_configure(cfg)
+    _run(command, cfg.work / "logs" / "make-configure.log", "make configure", folder, env)
+    _run([cfg.sh, "./build.sh"], cfg.work / "logs" / "make-build.log", "make build", folder, env)
+    check_device_executable((folder / "make").read_bytes(), str(folder / "make"), cfg.work)
+    _mark(folder)
+
+
 def _tree_entries(root: Path, prefix: str) -> dict[str, android_sysroot.Entry]:
     return {f"{prefix}/{path.relative_to(root).as_posix()}": android_sysroot.Entry(path.read_bytes())
             for path in sorted(root.rglob("*")) if path.is_file()}
@@ -383,12 +457,15 @@ def stage_output(cfg: Config, out: Path) -> dict[str, str]:
     device = cfg.build / "android"
     for name, target in (("clang", "libnk_clang.so"), ("lld", "libnk_lld.so")):
         shutil.copyfile((device / "bin" / name).resolve(), libs / target)  # linked stripped
+    shutil.copyfile(cfg.build / "make" / "make", libs / "libnk_make.so")
     _run([cfg.tool("clang"), f"--target={TRIPLE}", f"--sysroot={cfg.sysroot}",
           f"-resource-dir={cfg.resource}", "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
           "-fPIE", "-pie", "-fuse-ld=lld", "-Wl,--build-id=sha1", "-s", cfg.prefix_maps(),
           "-o", str(libs / "libnk_ld.so"), str(LAUNCHER)],
          cfg.work / "logs" / "launcher.log", "building the ld launcher")
     shutil.copyfile(cfg.build / "sysroot.tar", assets / "sysroot.tar")
+    (assets / "NOTICES" / "make").mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(cfg.make_src / "COPYING", assets / "NOTICES" / "make" / "COPYING")
     notices = assets / "NOTICES" / "llvm"
     for project in LLVM_LICENSED:
         (notices / project).mkdir(parents=True, exist_ok=True)
@@ -405,6 +482,7 @@ def stage_output(cfg: Config, out: Path) -> dict[str, str]:
                 for path in sorted(out.rglob("*")) if path.is_file()
                 and path.name != "toolchain-manifest.json"}
     document = {"llvm": LLVM_VERSION, "llvm_sha256": LLVM_SHA256,
+                "make": MAKE_VERSION, "make_sha256": MAKE_SHA256,
                 "bionic": android_sysroot.BIONIC_COMMIT, "api": API, "files": manifest}
     (out / "toolchain-manifest.json").write_text(json.dumps(document, indent=2) + "\n",
                                                  encoding="utf-8", newline="\n")
@@ -425,18 +503,23 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--ninja", default="ninja")
     parser.add_argument("--host-cc", default="gcc")
     parser.add_argument("--host-cxx", default="g++")
+    parser.add_argument("--make-tarball", required=True, type=Path,
+                        help=f"{MAKE_TARBALL} from {MAKE_URL}")
+    parser.add_argument("--sh", default="sh", help="the POSIX shell that runs make's configure")
     parser.add_argument("--jobs", type=int, default=4, help="compile jobs (each can take 1 GB)")
     args = parser.parse_args(argv)
     if args.jobs < 1:
         parser.error("--jobs must be at least 1")
     cfg = Config(args.llvm_tarball.resolve(), args.bionic.resolve(), args.extra.resolve(),
-                 args.work.resolve(), args.cmake, args.ninja, args.jobs, args.host_cc, args.host_cxx)
+                 args.work.resolve(), args.cmake, args.ninja, args.jobs, args.host_cc, args.host_cxx,
+                 args.make_tarball.resolve(), args.sh)
     try:
         extract_source(cfg)
         stage_host(cfg)
         stage_sysroot(cfg)
         stage_runtimes(cfg)
         stage_device(cfg)
+        stage_make(cfg)
         manifest = stage_output(cfg, args.out.resolve())
     except (OSError, subprocess.CalledProcessError, ToolchainError, android_sysroot.SysrootError,
             android_sysroot.android_stubgen.SymbolFileError) as error:

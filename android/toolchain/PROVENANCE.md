@@ -1,7 +1,7 @@
 # PROVENANCE.md — `android/toolchain/` (the on-device C toolchain)
 
 The Android build of Nakagawa compiles a game's generated C on the device (issue #360), so the APK ships a C compiler,
-a linker and a sysroot for `aarch64-linux-android29`. Nothing in them comes from the Android NDK: each part is built by
+a linker, `make` and a sysroot for `aarch64-linux-android29`. Nothing in them comes from the Android NDK: each part is built by
 the project from a pinned upstream source, and this repository holds only the pins, the build tools and their tests. No
 upstream source file is vendored here.
 
@@ -73,4 +73,21 @@ What the APK carries, from `tools/android_toolchain.py`'s staging step:
   `ConvertUTF.cpp` and `UnicodeNameToCodepointGenerated.cpp` (Unicode licence), `MD5.cpp` (Alexander Peslyak, public
   domain or a cut-down BSD licence), `regstrlcpy.c` (Todd C. Miller, ISC) and `xxhash.cpp` (Yann Collet,
   BSD-2-Clause). The build refuses a tarball whose pinned lines no longer hold those notices;
+- `jniLibs/arm64-v8a/libnk_make.so` (GNU make, below) and `assets/toolchain/NOTICES/make/COPYING`;
 - `toolchain-manifest.json`, the SHA-256 of every staged file.
+
+## GNU make
+
+| Source | Revision | Built | Licence |
+| --- | --- | --- | --- |
+| [GNU make](https://www.gnu.org/software/make/) | 4.4.1, release tarball `make-4.4.1.tar.gz` from `https://ftp.gnu.org/gnu/make/`, SHA-256 `dd16fb1d67bfab79a72f5e8390735c49e3e8e70b4945a15ab1f81ddb78658fb3` | `make`, for `aarch64-linux-android29` | GPL-3.0-or-later |
+
+`tools/android_toolchain.py` checks the tarball's SHA-256, runs make's `configure` for the device with the host clang
+and the sysroot above, and compiles make with make's own `build.sh`, so the build needs no make of its own. The options
+are make's own: no NLS, Guile or `load`, and no `posix_spawn`, because bionic has no `confstr()` and make's
+`posix_spawn` path calls it to find the default `PATH`, so make uses fork and exec instead. The binary is linked
+position-independent and stripped, and the build refuses one that is not an AArch64 PIE or that names the build
+folder. Two builds in different folders give the same bytes. make needs only `libc.so` and `libdl.so`.
+
+make is GPL-3.0-or-later, so the release that ships the APK also carries the pinned `make-4.4.1.tar.gz` as its
+corresponding source, as for the other bundled GPL programs.

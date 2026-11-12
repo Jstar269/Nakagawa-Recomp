@@ -125,7 +125,9 @@ We aim to respond promptly and will remove material where appropriate.
   binaries: Henry Spencer's regex (BSD-3-Clause), BLAKE3 (CC0-1.0 or Apache-2.0), Ryu
   (Boost Software License 1.0), the Unicode conversion code and name tables (Unicode
   licence), MD5 (public domain or cut-down BSD), `strlcpy` (ISC) and xxHash
-  (BSD-2-Clause).
+  (BSD-2-Clause). The same tool builds GNU make 4.4.1 (GPL-3.0-or-later) from its
+  pinned release tarball and ships its `COPYING`; a release that ships the APK
+  carries that tarball as make's corresponding source.
 - **VFPU tables** — PPSSPP-origin lookup data with the exact source and checksums
   recorded in `assets/vfpu/PROVENANCE.json`; inclusion is a provenance decision,
   not a claim about PSP firmware ownership.

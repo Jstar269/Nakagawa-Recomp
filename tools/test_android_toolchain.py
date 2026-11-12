@@ -114,7 +114,8 @@ class LdLauncherTests(unittest.TestCase):
 def _config(work: Path) -> toolchain.Config:
     return toolchain.Config(
         llvm_tarball=work / "llvm.tar.xz", bionic=work / "bionic", extra=work / "extra",
-        work=work, cmake="cmake", ninja="ninja", jobs=3, host_cc="gcc", host_cxx="g++")
+        work=work, cmake="cmake", ninja="ninja", jobs=3, host_cc="gcc", host_cxx="g++",
+        make_tarball=work / "make.tar.gz", sh="sh")
 
 
 class PinTests(unittest.TestCase):
@@ -249,6 +250,64 @@ class ThirdPartyNoticeTests(unittest.TestCase):
                      "llvm/lib/Support/xxhash.cpp", "llvm/lib/Support/ConvertUTF.cpp",
                      "llvm/lib/Support/MD5.cpp", "libcxx/src/ryu/d2s.cpp"):
             self.assertIn(path, covered)
+
+
+def _elf(machine: int = 183, kind: int = 3) -> bytes:
+    return b"ELF" + bytes(9) + kind.to_bytes(2, "little") + machine.to_bytes(2, "little") + bytes(44)
+
+
+class MakeTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.cfg = _config(Path(tempfile.gettempdir()) / "nk-tc-make")
+
+    def test_make_is_built_from_its_pinned_release(self) -> None:
+        self.assertRegex(toolchain.MAKE_SHA256, r"^[0-9a-f]{64}$")
+        self.assertTrue(toolchain.MAKE_URL.startswith("https://ftp.gnu.org/gnu/make/"))
+        self.assertTrue(toolchain.MAKE_URL.endswith(f"/make-{toolchain.MAKE_VERSION}.tar.gz"))
+
+    def test_an_unchecked_make_tarball_is_refused_before_extraction(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="nk-tc-test-") as tmp:
+            cfg = _config(Path(tmp))
+            cfg.make_tarball.write_bytes(b"not make")
+            with self.assertRaisesRegex(toolchain.ToolchainError, "pinned"):
+                toolchain.stage_make(cfg)
+            self.assertFalse(cfg.make_src.exists())
+
+    def test_make_is_configured_for_the_device_with_the_project_clang(self) -> None:
+        command, env = toolchain.make_configure(self.cfg)
+        self.assertEqual(command[0], "sh")
+        self.assertEqual(command[1], "../../src/make-4.4.1/configure")
+        cc = next(arg for arg in command if arg.startswith("CC="))
+        self.assertIn(Path(self.cfg.tool("clang")).as_posix(), cc)
+        self.assertIn(f"--target={toolchain.TRIPLE}", cc)
+        self.assertIn(f"--sysroot={self.cfg.sysroot.as_posix()}", cc)
+        self.assertNotIn("\\", cc)
+        self.assertIn("--host=aarch64-linux-android", command)
+        self.assertIn("CFLAGS=-O2 -ffile-prefix-map=../../src/make-4.4.1=/make-src", command)
+        self.assertIn("-Wl,--strip-all", next(arg for arg in command if arg.startswith("LDFLAGS=")))
+        self.assertEqual(env, {"MSYS2_ARG_CONV_EXCL": "*"})
+
+    def test_configure_runs_with_the_tools_beside_the_given_shell(self) -> None:
+        shell = Path(tempfile.gettempdir()) / "posix" / "bin" / "sh"
+        cfg = toolchain.Config(**{**self.cfg.__dict__, "sh": str(shell)})
+        _command, env = toolchain.make_configure(cfg)
+        self.assertTrue(env["PATH"].startswith(f"{shell.parent}{os.pathsep}"))
+
+    def test_make_does_not_use_posix_spawn(self) -> None:
+        # Bionic has no confstr(), which make's posix_spawn path needs.
+        self.assertIn("--disable-posix-spawn", toolchain.MAKE_CONFIGURE)
+
+    def test_the_device_make_must_be_a_pie_aarch64_elf(self) -> None:
+        work = Path(tempfile.gettempdir()) / "nk-tc-work"
+        toolchain.check_device_executable(_elf(), "make", work)
+        for bad in (_elf(machine=62), _elf(kind=2), b"MZ" + bytes(62)):
+            with self.assertRaisesRegex(toolchain.ToolchainError, "AArch64"):
+                toolchain.check_device_executable(bad, "make", work)
+
+    def test_the_device_make_must_not_name_the_build_folder(self) -> None:
+        work = Path(tempfile.gettempdir()) / "nk-tc-work"
+        with self.assertRaisesRegex(toolchain.ToolchainError, "build path"):
+            toolchain.check_device_executable(_elf() + work.as_posix().encode() + b"/x.c", "make", work)
 
 
 class StampTests(unittest.TestCase):
