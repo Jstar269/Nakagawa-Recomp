@@ -1778,6 +1778,19 @@ _register_campaign_probe(
         "volatile-lock-before": 2,
     },
 )
+# hle-io-trunc (#1892): what PSP_O_TRUNC shows through the same and a second descriptor on the
+# Memory Stick. Every word is an observation (see probe_hle_measure.c for each cell's layout).
+_register_campaign_probe(
+    "hle-io-trunc", "PSP-HLE-IO-TRUNC-001",
+    ("trunc-open-view", "trunc-seek-read", "trunc-seek-write", "trunc-close-nowrite",
+     "trunc-recover-after-close", "two-fd-view", "two-fd-writer-survives",
+     "two-fd-trunc-writes-last", "remove-absent"),
+    {
+        "trunc-open-view": 7, "trunc-seek-read": 3, "trunc-seek-write": 11,
+        "trunc-close-nowrite": 11, "trunc-recover-after-close": 10, "two-fd-view": 17,
+        "two-fd-writer-survives": 16, "two-fd-trunc-writes-last": 13, "remove-absent": 2,
+    },
+)
 # hle-savedata-nodata (180, probe_hle_measure.c): savedata modes on a save that does not exist
 # (nodir), a save directory without PARAM.SFO (nosfo) and a probe-made save (data), then LOAD
 # and DELETE of the missing save last. Each dialog cell carries InitStart's return and 11
@@ -3401,6 +3414,7 @@ HLE_MACHINERY_STATUS_CASES = frozenset({
     "hle-vtimer-unit", "hle-vtimer-errors", "hle-kernel-pool-bounds", "hle-power-float-v0",
     "hle-null-out-pointers", "hle-audio-src", "hle-timer-order", "hle-savedata-getsize",
     "hle-savedata-nodata",
+    "hle-io-trunc",
 })
 VFPU_RAW_WORD_CASES = frozenset({"vfpu-transcendental-corpus"})
 #: Cases whose every cell is an unconditional observation: each record is PASS. hle-io-seek,
