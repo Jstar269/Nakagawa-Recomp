@@ -233,7 +233,7 @@ building for Android uses. No make link line names the raw option; `tools/test_b
 `tools/nk_cli.py` (the VRAM decoder) and `tools/test_cpu_lle.py`, choose the same way from
 `sys.platform`. To see another host's link lines, pass `HOST_KIND` with a dry run; on Windows,
 also clear `OS`, or the target stays Windows. For example,
-`make -n OS= HOST_KIND=Darwin profiler-selftest` shows `-Wl,-dead_strip`.
+`mingw32-make -n OS= HOST_KIND=Darwin profiler-selftest` shows `-Wl,-dead_strip`.
 
 `src/rt/sr_coro.c` does not build on macOS yet: it reads the main thread's stack with
 `pthread_getattr_np`, which macOS lacks, and needs `_DARWIN_C_SOURCE` for `MAP_ANONYMOUS` and

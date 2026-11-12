@@ -619,7 +619,6 @@ class NativeHostBackendTests(unittest.TestCase):
                            "the driver must tear down after the scheduler returns")
 
 
-
 class CoroutineAsmTargetTests(unittest.TestCase):
     """The stack-switch routine in src/rt/sr_coro.c, assembled for each object format it
     serves: ELF for Linux and Android, Mach-O for macOS (#329). Mach-O prefixes C names with an

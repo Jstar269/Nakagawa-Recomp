@@ -368,7 +368,8 @@ endif
 # HOST_KIND names the build host's operating system for the few link options whose spelling
 # depends on the linker rather than the compiler: Windows_NT on Windows, otherwise what
 # `uname -s` prints (Linux, Darwin). A value from the command line or the environment wins,
-# so `make -n HOST_KIND=Darwin <target>` shows another host's link lines.
+# so `make -n OS= HOST_KIND=Darwin <target>` shows a Mac's link lines (on Windows, OS= is
+# needed too, or the target stays Windows).
 ifndef HOST_KIND
 ifeq ($(OS),Windows_NT)
 HOST_KIND := Windows_NT

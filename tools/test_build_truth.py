@@ -4212,7 +4212,6 @@ class DoctorRefusesTrackedCodeCaptureTests(unittest.TestCase):
         self.assertIn(".nkcap", tracked[0].detail or "")
 
 
-
 class LinkerSpellingTests(unittest.TestCase):
     """Unused-section removal is spelled by the linker, not the compiler: GNU ld and the MinGW
     linker take --gc-sections, Apple's ld64 rejects it and takes -dead_strip (#329). Every link
@@ -4241,11 +4240,12 @@ class LinkerSpellingTests(unittest.TestCase):
             self.skipTest("GNU Make is required")
         with tempfile.TemporaryDirectory(prefix="nakagawa-linker-spelling-") as temp:
             # Windows_NT takes the same branch as Linux; each probe parses the whole Makefile,
-            # so the cases that choose differently are the ones probed. NK_TARGET_OS=posix stands
-            # for a build for the host itself on a POSIX host; a Mac building for Android links
-            # with the NDK's lld, which takes the GNU spelling.
-            for host, target, expected in (("Darwin", "NK_TARGET_OS=posix", "-Wl,-dead_strip"),
-                                           ("Linux", "NK_TARGET_OS=posix", "-Wl,--gc-sections"),
+            # so the cases that choose differently are the ones probed. OS= clears Windows' own
+            # OS variable, so the Makefile derives a build for the host itself on a POSIX host as
+            # it does there; a Mac building for Android links with the NDK's lld, which takes the
+            # GNU spelling.
+            for host, target, expected in (("Darwin", "OS=", "-Wl,-dead_strip"),
+                                           ("Linux", "OS=", "-Wl,--gc-sections"),
                                            ("Darwin", "NK_TARGET=android", "-Wl,--gc-sections")):
                 with self.subTest(host=host, target=target):
                     completed = subprocess.run(
