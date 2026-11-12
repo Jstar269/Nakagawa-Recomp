@@ -155,9 +155,10 @@ def check_import_table(
             if library == UNATTRIBUTED_LIBRARY:
                 reason = "stub slots that no library window claims"
             else:
-                reason = kernel_only_reason(library)
-                if reason is None:
+                kernel_reason = kernel_only_reason(library)
+                if kernel_reason is None:
                     continue
+                reason = kernel_reason
             violations.append(LibraryViolation(library, reason, tuple(nids)))
     refused = tuple(nid for nid in nids_by_library.get(REGISTRY_LIBRARY, ())
                     if nid not in REGISTRY_READ_NIDS)
@@ -180,11 +181,11 @@ def check_import_table(
             library, f"imports differ from the --exact-library set ({'; '.join(parts)})",
             tuple(extra) or tuple(missing)))
     for library in sorted(forbidden_libraries):
-        found = nids_by_library.get(library)
-        if found:
+        listed = nids_by_library.get(library)
+        if listed:
             violations.append(LibraryViolation(
                 library, "imports from a library this case forbids (--forbid-library)",
-                tuple(found)))
+                tuple(listed)))
     return GateResult(table.module_attributes, libraries, tuple(violations))
 
 

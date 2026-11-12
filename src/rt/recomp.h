@@ -2497,6 +2497,14 @@ void     sched_set_vtimer_hooks(SrSchedVtimerNextDeadline next_deadline,
 /* hle.c's user-partition overlap test: sched.c refuses a thread stack range it reports. */
 typedef int (*SrSchedStackRangeRefusal)(uint32_t base, uint32_t end);
 void     sched_set_stack_range_refusal(SrSchedStackRangeRefusal refusal);
+/* hle.c's free blocks below the user partition's bump pointer: when no range above it holds a
+ * new thread stack, sched.c takes the highest such block that does (carved from its top) and
+ * gives it back to the partition when the thread is deleted. */
+typedef int (*SrSchedPartitionHoleAlloc)(uint32_t size, uint32_t *base_out);
+typedef void (*SrSchedPartitionHoleRelease)(uint32_t base, uint32_t size);
+void     sched_set_partition_hole_allocator(SrSchedPartitionHoleAlloc alloc,
+                                            SrSchedPartitionHoleRelease release);
+int      sched_guest_stack_overlaps(uint32_t base, uint32_t end);   /* any live thread stack */
 CpuState *sr_cpu_for_callbacks(void);               /* the CpuState guest callbacks run on */
 void     sched_dump_threads(void);                  /* the watchdog's thread table, to stderr */
 void     sched_watchdog_summary(uint32_t *ready, uint32_t *delay,
