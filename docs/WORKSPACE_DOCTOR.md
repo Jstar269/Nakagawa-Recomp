@@ -290,6 +290,7 @@ These names are joined to a folder the runtime is given or finds, never to the r
 | `frames.csv` | the recording folder |
 | `vram_%PRIu32.bin` | the folder a VRAM dump request names |
 | `vram_%PRIu32.json` | that folder, the dump's GE state beside it |
+| `gescene_f%PRIu32.bin` | the folder `SR_GESCENE_DIR` names, a GE scene dump |
 | `recording.mkv` | the recording folder |
 | `video.mkv` | the recording folder |
 | `video.bgr0` | the recording folder |

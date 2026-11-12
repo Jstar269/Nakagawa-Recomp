@@ -56,15 +56,18 @@ typedef struct GeSceneRecord {
     uint32_t index_format;     /* 0 none, 1 u8, 2 u16, 3 u32 */
     uint32_t vertex_addr;      /* guest address of vertex 0 (BASE applied) */
     uint32_t vertex_stride;    /* bytes per vertex, morph targets included */
-    uint32_t vertex_span;      /* vertices from vertex_addr the PRIM reads: count, or the largest index + 1 */
+    uint32_t vertex_span;      /* vertices from vertex_addr the PRIM reads: count, or the largest
+                                * index + 1 (0xFFFFFFFF for index 0xFFFFFFFF, which saturates) */
     uint32_t index_addr;       /* guest address of the first index; 0 without indices */
     uint32_t index_bytes;      /* bytes of indices the PRIM reads; 0 without indices */
     const GeState *ge;         /* the state the PRIM draws with; valid only during the callback */
 } GeSceneRecord;
 
-/* One vertex reference as stored, after morphing and before skinning. Through mode keeps the
- * screen coordinates in pos. Fields the format lacks are 0 (the colour is then the material's,
- * as the T&L uses it). */
+/* One vertex reference, after morphing and before skinning. pos, uv, rgba and weight are as
+ * stored (morph-blended). nrm is the normal the T&L uses: REVERSENORMAL is already applied, and the
+ * record's state (`ge->reverse_normal`, and the dump's reverse_normal field) says whether it was.
+ * Through mode keeps the screen coordinates in pos. Fields the format lacks are 0 (the colour is
+ * then the material's, as the T&L uses it). */
 typedef struct GeSceneVertex {
     float pos[3];
     float nrm[3];
@@ -91,11 +94,31 @@ int ge_scene_vertex(const GeSceneRecord *rec, uint32_t i, GeSceneVertex *out);
  * near clipper's limit). Updates no counters that a run's GE output depends on. */
 int ge_scene_project_for_test(const GeSceneRecord *rec, uint32_t i, GeVtx *out);
 
+/* Test use: the SR_GESCENE dump's state; the end-of-run step atexit runs (an open dump becomes
+ * NOT_CAPTURED); and a re-arm that closes any dump that way and reads SR_GESCENE again at the next
+ * PRIM, as at start-up. */
+enum {
+    GE_SCENE_DUMP_IDLE,         /* SR_GESCENE not read yet, or not set */
+    GE_SCENE_DUMP_CONFIG_FAIL,
+    GE_SCENE_DUMP_WAITING,      /* set; the frame has drawn nothing yet */
+    GE_SCENE_DUMP_WRITING,
+    GE_SCENE_DUMP_DONE,
+    GE_SCENE_DUMP_WRITE_FAIL,
+    GE_SCENE_DUMP_NOT_CAPTURED
+};
+int ge_scene_dump_state_for_test(void);
+void ge_scene_dump_end_for_test(void);
+void ge_scene_dump_rearm_for_test(void);
+
 /*
  * The one-frame dump: SR_GESCENE=<GE frame number> with SR_GESCENE_DIR naming an existing
  * directory writes every record of that frame to <dir>/gescene_f<frame>.bin, flushed after each
- * record, and prints `GESCENE: frame <n>: <k> records -> <path>` once a later frame begins. The
- * file holds decoded game geometry: it is private evidence, like a VRAM dump, and never published.
+ * record, and prints `GESCENE: frame <n>: <k> records -> <path>` once a later frame begins. If the
+ * run ends, or a consumer replaces the dump, before that, it prints `GESCENE NOT_CAPTURED (...)`
+ * instead: a file already started keeps the records written so far but is not the whole frame. A
+ * bad setting prints `GESCENE CONFIG_FAIL (...)` and writes nothing; a failed create, write or
+ * close prints `GESCENE WRITE_FAIL (...)`, stops the dump and claims nothing more. The file holds
+ * decoded game geometry: it is private evidence, like a VRAM dump, and never published.
  *
  * Format, version 1, all little-endian:
  *   file header:  "NKGESCN1" (8 bytes), u32 version (1), u32 frame

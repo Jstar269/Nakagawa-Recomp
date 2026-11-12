@@ -463,6 +463,7 @@ ge-patch-tess-selftest: $(RT_GE_O)
 	$(GE_PATCH_TESS_SELFTEST)
 
 native-core-tests: ge-patch-tess-selftest
+
 # ge-scene-selftest -- the GE scene record (src/rt/ge_scene.h, #1330 phase 1) on the production
 # ge.o: source-owned display lists (static, indexed, skinned, morphed, lit, a second target, a
 # through-mode sprite) through ge_run_list() with a GPU backend stand-in. The record's vertices,

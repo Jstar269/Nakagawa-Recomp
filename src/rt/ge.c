@@ -2005,6 +2005,8 @@ static int thru_ztest(void) {
 
 static void tnl_gestat_print(uint32_t frame);   /* the GPU T&L section */
 
+static void ge_scene_frame_begins(uint32_t frame);
+
 void ge_set_frame(uint32_t frame) {
     ge_capture_configure();
     ge_transition_trace_configure();
@@ -2038,6 +2040,7 @@ void ge_set_frame(uint32_t frame) {
             }
         }
     }
+    ge_scene_frame_begins(frame);
     s_ge_frame = frame;
     if (s_stat_on < 0) s_stat_on = getenv("SR_GESTAT") ? 1 : 0;
     /* A window closes on the first delivered vblank at or past each multiple of 60 and
@@ -5771,10 +5774,10 @@ static void ge_scene_probe(const GeSceneRecord *rec, void *user);
 static GeSceneConsumer s_scene_fn = ge_scene_probe;
 static void *s_scene_user;
 
-static void ge_scene_dump_close(void);
+static void ge_scene_dump_end(int frame_over);
 
 void ge_scene_set_consumer(GeSceneConsumer fn, void *user) {
-    ge_scene_dump_close();
+    ge_scene_dump_end(0);
     s_scene_fn = fn;
     s_scene_user = user;
 }
@@ -5850,7 +5853,8 @@ static void ge_scene_emit(int type, int count, const VFmt *vf, int idxfmt, uint3
         if (sr_inrange_n(ibase, rec.index_bytes)) {
             for (int i = 0; i < count; i++) {
                 uint32_t v = index_value(ibase, idxfmt, i);
-                if (v + 1u > span) span = v + 1u;
+                /* Index 0xFFFFFFFF would need a span of 2^32; it saturates (ge_scene.h). */
+                if (v >= span) span = v == UINT32_MAX ? UINT32_MAX : v + 1u;
             }
         }
         rec.vertex_span = span;
@@ -5864,15 +5868,62 @@ static FILE *s_scene_dump_file;
 static uint32_t s_scene_dump_frame;
 static unsigned long s_scene_dump_records;
 static char s_scene_dump_path[1024];
-static int s_scene_dump_done;
+static int s_scene_dump_state = GE_SCENE_DUMP_IDLE;
+static int s_scene_dump_exit_hooked;
 
-static void ge_scene_dump_close(void) {
-    if (!s_scene_dump_file) return;
-    fclose(s_scene_dump_file);
+/* A write failed: the file is closed and nothing more is written or claimed. */
+static void ge_scene_dump_fail(const char *why) {
+    fprintf(stderr, "GESCENE WRITE_FAIL (%s %s)\n", why, s_scene_dump_path);
+    if (s_scene_dump_file) fclose(s_scene_dump_file);
     s_scene_dump_file = NULL;
-    s_scene_dump_done = 1;
-    fprintf(stderr, "GESCENE: frame %" PRIu32 ": %lu records -> %s\n", s_scene_dump_frame,
-            s_scene_dump_records, s_scene_dump_path);
+    s_scene_dump_state = GE_SCENE_DUMP_WRITE_FAIL;
+}
+
+/* Ends the dump. frame_over: a later GE frame began, so the file holds the whole frame. Otherwise
+ * the run ended, or the consumer was replaced, before that: the frame is NOT_CAPTURED, and a file
+ * already started keeps the records written so far. */
+static void ge_scene_dump_end(int frame_over) {
+    if (s_scene_dump_state == GE_SCENE_DUMP_WRITING) {
+        FILE *f = s_scene_dump_file;
+        s_scene_dump_file = NULL;
+        if (fclose(f) != 0) {
+            fprintf(stderr, "GESCENE WRITE_FAIL (cannot close %s)\n", s_scene_dump_path);
+            s_scene_dump_state = GE_SCENE_DUMP_WRITE_FAIL;
+        } else if (frame_over) {
+            s_scene_dump_state = GE_SCENE_DUMP_DONE;
+            fprintf(stderr, "GESCENE: frame %" PRIu32 ": %lu records -> %s\n", s_scene_dump_frame,
+                    s_scene_dump_records, s_scene_dump_path);
+        } else {
+            s_scene_dump_state = GE_SCENE_DUMP_NOT_CAPTURED;
+            fprintf(stderr,
+                    "GESCENE NOT_CAPTURED (GE frame %" PRIu32 " had not ended; its first %lu records are in %s)\n",
+                    s_scene_dump_frame, s_scene_dump_records, s_scene_dump_path);
+        }
+    } else if (s_scene_dump_state == GE_SCENE_DUMP_WAITING) {
+        s_scene_dump_state = GE_SCENE_DUMP_NOT_CAPTURED;
+        fprintf(stderr, "GESCENE NOT_CAPTURED (GE frame %" PRIu32 " drew no PRIM before the dump ended)\n",
+                s_scene_dump_frame);
+    }
+}
+
+static void ge_scene_dump_exit(void) { ge_scene_dump_end(0); }
+
+/* ge_set_frame, before the frame number changes: a dump of an earlier frame is complete. */
+static void ge_scene_frame_begins(uint32_t frame) {
+    if ((s_scene_dump_state == GE_SCENE_DUMP_WRITING || s_scene_dump_state == GE_SCENE_DUMP_WAITING) &&
+        frame > s_scene_dump_frame)
+        ge_scene_dump_end(s_scene_dump_state == GE_SCENE_DUMP_WRITING);
+}
+
+int ge_scene_dump_state_for_test(void) { return s_scene_dump_state; }
+void ge_scene_dump_end_for_test(void) { ge_scene_dump_end(0); }
+void ge_scene_dump_rearm_for_test(void) {
+    ge_scene_dump_end(0);
+    s_scene_dump_state = GE_SCENE_DUMP_IDLE;
+    s_scene_dump_records = 0;
+    s_scene_dump_path[0] = '\0';
+    s_scene_fn = ge_scene_probe;
+    s_scene_user = NULL;
 }
 
 /* The record's bytes, appended to a growing buffer; 0 when the buffer could not grow. */
@@ -5899,21 +5950,26 @@ static void gsb_u32s(GeSceneBuf *b, const uint32_t *v, size_t n) { gsb_put(b, v,
 
 static void ge_scene_dump_consumer(const GeSceneRecord *rec, void *user) {
     (void)user;
-    if (s_scene_dump_done) return;
+    if (s_scene_dump_state != GE_SCENE_DUMP_WAITING && s_scene_dump_state != GE_SCENE_DUMP_WRITING)
+        return;
     if (rec->frame != s_scene_dump_frame) {
-        if (s_scene_dump_file && rec->frame > s_scene_dump_frame) ge_scene_dump_close();
+        if (rec->frame > s_scene_dump_frame)
+            ge_scene_dump_end(s_scene_dump_state == GE_SCENE_DUMP_WRITING);
         return;
     }
-    if (!s_scene_dump_file) {
+    if (s_scene_dump_state == GE_SCENE_DUMP_WAITING) {
         s_scene_dump_file = fopen(s_scene_dump_path, "wb");
         if (!s_scene_dump_file) {
-            fprintf(stderr, "GESCENE WRITE_FAIL (cannot create %s)\n", s_scene_dump_path);
-            s_scene_dump_done = 1;
+            ge_scene_dump_fail("cannot create");
             return;
         }
+        s_scene_dump_state = GE_SCENE_DUMP_WRITING;
         uint32_t head[2] = { 1u, s_scene_dump_frame };
-        fwrite("NKGESCN1", 1, 8, s_scene_dump_file);
-        fwrite(head, 4, 2, s_scene_dump_file);
+        if (fwrite("NKGESCN1", 1, 8, s_scene_dump_file) != 8 ||
+            fwrite(head, 4, 2, s_scene_dump_file) != 2) {
+            ge_scene_dump_fail("short write to");
+            return;
+        }
     }
     const GeState *g = rec->ge;
     GeSceneBuf b = { NULL, 0, 0, 1 };
@@ -5975,17 +6031,15 @@ static void ge_scene_dump_consumer(const GeSceneRecord *rec, void *user) {
         gsb_u32(&b, v.rgba); gsb_f32s(&b, v.weight, GE_SCENE_MAX_WEIGHTS);
     }
     if (!b.ok || b.n > UINT32_MAX) {
-        fprintf(stderr, "GESCENE WRITE_FAIL (out of memory for a record)\n");
         free(b.p);
-        ge_scene_dump_close();
+        ge_scene_dump_fail("out of memory for a record of");
         return;
     }
     uint32_t bytes = (uint32_t)b.n;
     memcpy(b.p + 4, &bytes, 4);
     if (fwrite(b.p, 1, b.n, s_scene_dump_file) != b.n || fflush(s_scene_dump_file) != 0) {
-        fprintf(stderr, "GESCENE WRITE_FAIL (short write to %s)\n", s_scene_dump_path);
         free(b.p);
-        ge_scene_dump_close();
+        ge_scene_dump_fail("short write to");
         return;
     }
     free(b.p);
@@ -5998,22 +6052,37 @@ static void ge_scene_probe(const GeSceneRecord *rec, void *user) {
     const char *frame = getenv("SR_GESCENE");
     if (!frame || !*frame) return;
     char *end = NULL;
-    unsigned long n = strtoul(frame, &end, 10);
+    /* strtoull accepts a sign and spaces and wraps "-1", so only digits are a frame number; a
+     * value past 64 bits saturates and is refused with the rest above UINT32_MAX. */
+    unsigned long long n = (*frame >= '0' && *frame <= '9') ? strtoull(frame, &end, 10) : 0u;
     if (!end || *end || n > UINT32_MAX) {
+        s_scene_dump_state = GE_SCENE_DUMP_CONFIG_FAIL;
         fprintf(stderr, "GESCENE CONFIG_FAIL (SR_GESCENE must be one GE frame number)\n");
         return;
     }
     const char *dir = getenv("SR_GESCENE_DIR");
     if (!dir || !*dir) {
+        s_scene_dump_state = GE_SCENE_DUMP_CONFIG_FAIL;
         fprintf(stderr, "GESCENE CONFIG_FAIL (SR_GESCENE_DIR must name an existing output directory)\n");
         return;
     }
-    int len = snprintf(s_scene_dump_path, sizeof(s_scene_dump_path), "%s/gescene_f%lu.bin", dir, n);
+    int len = snprintf(s_scene_dump_path, sizeof(s_scene_dump_path), "%s/gescene_f%" PRIu32 ".bin",
+                       dir, (uint32_t)n);
     if (len < 0 || (size_t)len >= sizeof(s_scene_dump_path)) {
+        s_scene_dump_state = GE_SCENE_DUMP_CONFIG_FAIL;
         fprintf(stderr, "GESCENE CONFIG_FAIL (SR_GESCENE_DIR is too long)\n");
         return;
     }
     s_scene_dump_frame = (uint32_t)n;
+    s_scene_dump_state = GE_SCENE_DUMP_WAITING;
+    if (!s_scene_dump_exit_hooked) {
+        if (atexit(ge_scene_dump_exit) != 0) {
+            s_scene_dump_state = GE_SCENE_DUMP_CONFIG_FAIL;
+            fprintf(stderr, "GESCENE CONFIG_FAIL (cannot register the end-of-run report)\n");
+            return;
+        }
+        s_scene_dump_exit_hooked = 1;
+    }
     s_scene_fn = ge_scene_dump_consumer;
     ge_scene_dump_consumer(rec, NULL);
 }

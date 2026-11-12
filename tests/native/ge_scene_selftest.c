@@ -8,7 +8,7 @@
 // every screen-space triangle and sprite ge.c hands it (the real ge_set_gpu_hooks() seam). The
 // lists cover a static triangle list, an indexed strip, a 4-weight skinned mesh, a 2-target
 // morph, a lit draw with one directional light, a draw into a second target and a through-mode
-// sprite. Three checks:
+// sprite. Four checks:
 //
 // 1. The dump. SR_GESCENE=0 with SR_GESCENE_DIR=<argv[1]> is set before the first PRIM, so ge.c
 //    registers its dump; the file is read back and every record's identity and vertices are
@@ -21,6 +21,9 @@
 //    against the values written.
 // 3. No effect. The same lists with no consumer give the stand-in the same submissions, byte for
 //    byte, as with the consumer registered.
+// 4. The dump's outcomes: frame numbers that are not plain digits and an empty folder are
+//    CONFIG_FAIL, a folder that does not exist is WRITE_FAIL, and a frame that never comes, passes
+//    with nothing drawn, or is cut short by the end of the run is NOT_CAPTURED.
 //
 // No game input. Runtime entry points a GE list must not reach abort.
 
@@ -39,6 +42,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* ge.c: the GE frame number, as the scheduler hands it each vblank. */
+extern void ge_set_frame(uint32_t frame);
 
 extern uint32_t ge_run_list(uint32_t addr, int resume);
 
@@ -460,6 +466,67 @@ static void check_draws_match(void) {
 
 static uint32_t rd32(const uint8_t *p) { uint32_t v; memcpy(&v, p, 4); return v; }
 
+/* 314 words: magic and size 2, identity 17, transforms 162, targets 5, texture 20, output 25,
+ * lighting 83. */
+#define DUMP_FIXED 1256u
+
+static int file_exists(const char *dir, const char *name) {
+    char path[1024];
+    snprintf(path, sizeof path, "%s/%s", dir, name);
+    FILE *f = fopen(path, "rb");
+    if (f) fclose(f);
+    return f != NULL;
+}
+
+/* Re-arm the dump, set the two variables, run the list once at the current GE frame, and return
+ * the dump's state. */
+static int probe_run(const char *frame, const char *dir) {
+    ge_scene_dump_rearm_for_test();
+    env_set("SR_GESCENE", frame);
+    env_set("SR_GESCENE_DIR", dir);
+    s_nsubs = 0;
+    expect(ge_run_list(LIST_MAIN, 0) == 0, "probe run reaches END");
+    return ge_scene_dump_state_for_test();
+}
+
+/* 4. Settings the dump refuses, and the ways it ends without the whole frame. Runs at GE frame 1. */
+static void check_dump_outcomes(const char *dir) {
+    static const char *const bad[] = { "-1", "+1", " 1", "1x", "0x1", "4294967296",
+                                       "99999999999999999999999" };
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        char what[96];
+        snprintf(what, sizeof what, "SR_GESCENE=\"%s\" is CONFIG_FAIL", bad[i]);
+        expect(probe_run(bad[i], dir) == GE_SCENE_DUMP_CONFIG_FAIL, what);
+    }
+    expect(!file_exists(dir, "gescene_f4294967295.bin"), "a refused frame number writes nothing");
+    expect(probe_run("1", "") == GE_SCENE_DUMP_CONFIG_FAIL, "an empty SR_GESCENE_DIR is CONFIG_FAIL");
+
+    char missing[1024];
+    snprintf(missing, sizeof missing, "%s/no-such-folder", dir);
+    expect(probe_run("1", missing) == GE_SCENE_DUMP_WRITE_FAIL, "a folder that does not exist is WRITE_FAIL");
+
+    /* The frame never comes: NOT_CAPTURED when the run ends, and no file. */
+    expect(probe_run("99", dir) == GE_SCENE_DUMP_WAITING, "a later frame waits");
+    ge_scene_dump_end_for_test();
+    expect(ge_scene_dump_state_for_test() == GE_SCENE_DUMP_NOT_CAPTURED, "a frame that never came is NOT_CAPTURED");
+    expect(!file_exists(dir, "gescene_f99.bin"), "a frame that never came writes no file");
+
+    /* The frame passes with no PRIM drawn while the dump waits. */
+    expect(probe_run("2", dir) == GE_SCENE_DUMP_WAITING, "frame 2 waits");
+    ge_set_frame(3);
+    expect(ge_scene_dump_state_for_test() == GE_SCENE_DUMP_NOT_CAPTURED, "a frame that drew nothing is NOT_CAPTURED");
+
+    /* The run ends during the frame: NOT_CAPTURED, the records so far kept. Runs at frame 3. */
+    expect(probe_run("3", dir) == GE_SCENE_DUMP_WRITING, "the current frame is written");
+    ge_scene_dump_end_for_test();
+    expect(ge_scene_dump_state_for_test() == GE_SCENE_DUMP_NOT_CAPTURED, "a frame the run cut short is NOT_CAPTURED");
+    expect(file_exists(dir, "gescene_f3.bin"), "a cut-short frame keeps its file");
+
+    ge_scene_dump_rearm_for_test();
+    env_set("SR_GESCENE", NULL);
+    env_set("SR_GESCENE_DIR", NULL);
+}
+
 static void check_dump(const char *dir) {
     char path[1024];
     snprintf(path, sizeof path, "%s/gescene_f0.bin", dir);
@@ -474,7 +541,9 @@ static void check_dump(const char *dir) {
     size_t at = 16;
     unsigned k = 0;
     /* Offsets in a record: magic 0, bytes 4, frame 8, list 12, cmd 16, prim_index 20, type 28,
-     * count 32, vtype 36. The vertex block is the last 4 + count * 68 bytes (17 words a vertex). */
+     * count 32, vtype 36. The fixed part (header, identity and state, ge_scene.h) is DUMP_FIXED
+     * bytes; the targets block starts at byte 724 (fbp), lighting at 924 (lighting_enable). The
+     * vertex block is the last 4 + count * 68 bytes (17 words a vertex). */
     while (at + 8 <= n && k < MAX_PRIMS) {
         const uint8_t *r = buf + at;
         uint32_t bytes = rd32(r + 4);
@@ -482,6 +551,11 @@ static void check_dump(const char *dir) {
         snprintf(what, sizeof what, "dump record %u", k);
         if (rd32(r) != 0x4D495250u || bytes < 40u || at + bytes > n) { expect(0, what); return; }
         const Seen *s = &s_seen[k];
+        uint64_t prim_index;
+        memcpy(&prim_index, r + 20, 8);
+        expect(rd32(r + 8) == 0u && prim_index == s->rec.prim_index, what);
+        expect(bytes == DUMP_FIXED + 4u + s->rec.count * 68u, what);
+        expect(rd32(r + 724) == s->fbp && rd32(r + 924) == (uint32_t)s->lit, what);
         expect(rd32(r + 12) == s->rec.list_addr && rd32(r + 16) == s->rec.cmd_addr, what);
         expect(rd32(r + 28) == s->rec.type && rd32(r + 32) == s->rec.count &&
                rd32(r + 36) == s->rec.vtype, what);
@@ -517,7 +591,10 @@ int main(int argc, char **argv) {
     env_set("SR_GESCENE", "0");
     env_set("SR_GESCENE_DIR", argv[1]);
     expect(ge_run_list(LIST_MAIN, 0) == 0, "dump run reaches END");
-    ge_scene_set_consumer(NULL, NULL);          /* closes the dump */
+    expect(ge_scene_dump_state_for_test() == GE_SCENE_DUMP_WRITING, "the dump is writing frame 0");
+    ge_set_frame(1);                            /* a later frame: the dump is complete */
+    expect(ge_scene_dump_state_for_test() == GE_SCENE_DUMP_DONE, "the dump ends DONE when frame 1 begins");
+    ge_scene_set_consumer(NULL, NULL);
 
     /* 2. The consumer, and the draws it must agree with. */
     s_nsubs = 0;
@@ -536,6 +613,8 @@ int main(int argc, char **argv) {
     expect(ge_run_list(LIST_MAIN, 0) == 0, "plain run reaches END");
     expect(s_nsubs == with_n && memcmp(s_subs, with, sizeof(Sub) * with_n) == 0,
            "a consumer changes nothing ge.c submits");
+
+    check_dump_outcomes(argv[1]);
 
     ge_set_gpu_hooks(NULL);
     if (s_failures) {
