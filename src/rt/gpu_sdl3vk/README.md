@@ -332,40 +332,59 @@ A primitive in a state this renderer cannot draw goes to `ge.c`'s software raste
 (`software_fallback_begin`), with a synchronous colour and depth readback when its target was on the
 GPU. `gegpu_fallback_counts` counts both by reason (`GEGPU_FALLBACK_*`), always: one increment per
 software primitive, on top of the `fallback_prims` count that was already unconditional. A T&L
-primitive that falls back is counted as the triangles `hook_tri` then hands over, and the GPU's T&L
-primitives count by their triangles, so both sides count triangles. Not counted: block transfers
+primitive that falls back is not counted itself: its triangles reach `hook_tri`, which counts those it
+hands to `ge.c` (it may draw some on the GPU instead), and the readback its fallback took is counted. The
+GPU's T&L primitives count by their triangles, so both sides count triangles. Not counted: block transfers
 `ge.c` runs on the CPU (`hook_xfer` declining) and the readbacks of guest VRAM reads
 (`hook_vram_read`), which are not primitives.
 
 After each accepted present `gui.c` steps `nk_render_fallback_window_step` (`src/core/nk_shared_helpers.c`):
 tumbling windows of `NK_RENDER_FALLBACK_WINDOW_FRAMES` presents. A reason is over the rule in a window
-when its software primitives reach `NK_RENDER_FALLBACK_MIN_PRIMS` or its readbacks reach
-`NK_RENDER_FALLBACK_READBACKS`; each is a cost on its own, so neither depends on how busy the rest of the
-scene is. Over the rule in `NK_RENDER_FALLBACK_WINDOWS` windows in a row, it is reported once per run as
-`BOOT_EVENT phase=render_fallback` (`docs/DEBUGGING.md`), and the native player names it on the game's
-page. The event's `share_pm` (the reason's share of all primitives) is reported for the reader; the rule
-does not use it. Its `frames` is the span the rule watched, always
+when its estimated cost there reaches the budget: its readbacks times `NK_RENDER_FALLBACK_READBACK_US`
+plus its software primitives times `NK_RENDER_FALLBACK_PRIM_US`, at least `NK_RENDER_FALLBACK_BUDGET_US`
+(`nk_render_fallback_cost_us`, integer microseconds, saturating at the 64-bit limit). The cost does not
+depend on how busy the rest of the scene is. Over the rule in `NK_RENDER_FALLBACK_WINDOWS` windows in a
+row, it is reported once per run as `BOOT_EVENT phase=render_fallback` (`docs/DEBUGGING.md`), and the
+native player names it on the game's page. The event's `share_pm` (the reason's share of all primitives)
+is reported for the reader; the rule does not use it. Its `frames` is the span the rule watched, always
 `NK_RENDER_FALLBACK_WINDOWS` x `NK_RENDER_FALLBACK_WINDOW_FRAMES` (360) under this rule.
+
+The budget is per effect: costs of different effects do not add up. The report names an effect, and an
+effect that costs the budget on its own is one the person can be told about; a sum would also name
+effects whose own cost is negligible. Two effects each just under the budget are therefore not reported,
+which is the deliberate limit of this rule (`shared-helpers-selftest` checks it).
+
+Where the boundary lies: one kind alone reaches the budget at exactly `NK_RENDER_FALLBACK_READBACKS` (30)
+readbacks or `NK_RENDER_FALLBACK_MIN_PRIMS` (4,000) software primitives a window, the two limits the rule
+had before the kinds were added up; with both kinds, at `readbacks x 3,200 + primitives x 24 >= 96,000`,
+so 29 readbacks and 3,999 primitives (188,776 µs) are reported, and one cheap primitive a present with no
+readback (120 x 24 = 2,880 µs) never is.
 
 Reading the counts and stepping the rule change nothing the renderer draws: `fallback-notice` in
 `gpu-coherence-selftest` draws 361 frames that fall back through `ge.c` and `hook_tri`, with the rule
-run after each frame and without it, and requires the same picture both ways, equal to `ge.c`'s alone,
-and one `logic_op` report on the last frame.
+run after each frame and without it, and requires one `logic_op` report on the last frame with the
+frames' exact counts, and the same picture both ways, equal to `ge.c`'s alone.
 
 ### The values and their basis (2026-11-12)
 
 Each figure is **measured** (taken directly from a run), **derived** (computed from measured figures,
-arithmetic shown) or **chosen** (a rule parameter or a budget).
+arithmetic shown) or **chosen** (a rule parameter, a budget, or one value picked inside a derived range).
 
 | Figure | Value | Kind | Basis |
 | --- | --- | --- | --- |
 | Cost of a fallback readback | 1.8 to 3.5 ms | Derived | A least-squares fit of each perf interval's `vulkan_readback_ms` against its fallback readbacks, in six earlier private runs with fallback readbacks (Hot Shots Tennis on an older build, four runs, and two other titles); any other readback fitted under 0.02 ms. |
 | Cost of a software primitive | 22 to 28 µs | Derived | The same fit of `ge_cpu_ms` against software primitives, in the three of those runs where it could separate the primitives from their readbacks (in the other three it could not). |
-| Budget | about 0.8 ms a present | Chosen | About 5 % of a 16.7 ms present period at 60 presents a second: 96 ms a window of 120 presents. |
-| `NK_RENDER_FALLBACK_MIN_PRIMS` | 4000 a window | Derived | 96 ms / 28 µs = 3,429 and 96 ms / 22 µs = 4,364; 4000 lies between. Its cost is 4000 x 22 to 28 µs / 120 = 0.73 to 0.93 ms a present. |
-| `NK_RENDER_FALLBACK_READBACKS` | 30 a window | Derived | 96 ms / 3.5 ms = 27 and 96 ms / 1.8 ms = 53; 30, one every four presents, is near the costlier end. Its cost is 30 x 1.8 to 3.5 ms / 120 = 0.45 to 0.88 ms a present. |
+| `NK_RENDER_FALLBACK_BUDGET_US` | 96,000 µs a window | Chosen | About 0.8 ms a present, 5 % of a 16.7 ms present period at 60 presents a second: 0.8 ms x 120 presents. |
+| `NK_RENDER_FALLBACK_READBACK_US` | 3,200 µs | Chosen | One value inside the derived 1,800 to 3,500 µs, toward the costlier end, so readbacks are not undercounted; it divides the budget exactly. |
+| `NK_RENDER_FALLBACK_PRIM_US` | 24 µs | Chosen | One value inside the derived 22 to 28 µs, near the middle; it divides the budget exactly. |
+| `NK_RENDER_FALLBACK_READBACKS` | 30 a window | Derived | 96,000 / 3,200 = 30: readbacks alone at the budget. At the derived range, 30 x 1.8 to 3.5 ms / 120 = 0.45 to 0.88 ms a present. |
+| `NK_RENDER_FALLBACK_MIN_PRIMS` | 4,000 a window | Derived | 96,000 / 24 = 4,000: primitives alone at the budget. At the derived range, 4,000 x 22 to 28 µs / 120 = 0.73 to 0.93 ms a present. |
 | `NK_RENDER_FALLBACK_WINDOW_FRAMES` | 120 presents | Chosen | 2 s at 60 presents a second, 4 s at 30, so a single transition or menu frame does not fill a window. |
 | `NK_RENDER_FALLBACK_WINDOWS` | 3 in a row | Chosen | A report needs at least 6 s of sustained cost, the kind that makes a game run slower. |
+
+The largest window cost the rule computes without saturating is 2^64 - 1 µs; a window's counts would need
+more than 5.7 x 10^15 readbacks to reach it, and `nk_render_fallback_cost_us` returns that limit rather
+than a wrapped value if they ever did.
 
 For scale (measured with this report's first version, on the GPU GE with `SR_GPU_STATS=1`): the Hot Shots Tennis rally drew
 39,283,321 GPU primitives over 11,674 presents, 3,365 a present (its title screen 33,953 over 3,507,

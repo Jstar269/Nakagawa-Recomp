@@ -2577,8 +2577,8 @@ retail title is private: keep it out of the repository and every upload.
    counts each primitive drawn by `ge.c` instead, and each synchronous readback that took, by reason, always.
    After each accepted present `gui_present` steps the rule in `src/core/nk_shared_helpers.h`
    ([thresholds and their basis](../src/rt/gpu_sdl3vk/README.md#software-fallback-report-2151)): a reason whose
-   software primitives or readbacks reach their limit in each of three windows of 120 presents in a row is
-   reported once per run as
+   estimated cost (readbacks and software primitives at their per-unit costs) reaches the budget in each of three
+   windows of 120 presents in a row is reported once per run as
    `BOOT_EVENT phase=render_fallback reason=<name> frames=<n> sw_prims=<n> gpu_prims=<n> readbacks=<n> share_pm=<n>`
    (`nk_render_fallback_event_format` in `src/core/nk_shared_helpers.c`; the names are `stencil`, `color_test`,
    `logic_op`, `write_mask`, `ram_fb`, `wide_stride`, `mips`, `line`, `point`). The native player names those

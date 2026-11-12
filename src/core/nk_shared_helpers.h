@@ -152,15 +152,26 @@ typedef struct NkRenderFallbackCounts {
 } NkRenderFallbackCounts;
 
 /* When an effect is reported: tumbling windows of NK_RENDER_FALLBACK_WINDOW_FRAMES accepted
- * presents. An effect is over the rule in a window when its software primitives reach
- * NK_RENDER_FALLBACK_MIN_PRIMS or its readbacks reach NK_RENDER_FALLBACK_READBACKS, both a cost
- * budget a window; over the rule in NK_RENDER_FALLBACK_WINDOWS windows in a row, it is reported
+ * presents. An effect is over the rule in a window when its estimated cost there, its readbacks
+ * times NK_RENDER_FALLBACK_READBACK_US plus its software primitives times NK_RENDER_FALLBACK_PRIM_US,
+ * reaches NK_RENDER_FALLBACK_BUDGET_US (nk_render_fallback_cost_us). The budget is per effect:
+ * costs of different effects do not add up, so each report names an effect that costs the budget
+ * on its own. Over the rule in NK_RENDER_FALLBACK_WINDOWS windows in a row, an effect is reported
  * once per run. Each value is measured, derived (with its arithmetic) or chosen, as
  * src/rt/gpu_sdl3vk/README.md ("Software fallback report") sets out. */
 #define NK_RENDER_FALLBACK_WINDOW_FRAMES 120u /* chosen: 2 s at 60 presents a second */
 #define NK_RENDER_FALLBACK_WINDOWS 3u         /* chosen: at least 6 s in a row */
-#define NK_RENDER_FALLBACK_READBACKS 30u      /* derived: 0.45-0.88 ms a present */
-#define NK_RENDER_FALLBACK_MIN_PRIMS 4000u    /* derived: 0.73-0.93 ms a present */
+#define NK_RENDER_FALLBACK_BUDGET_US 96000u   /* chosen: 0.8 ms a present x 120 presents */
+#define NK_RENDER_FALLBACK_READBACK_US 3200u  /* chosen in the derived 1,800-3,500 us */
+#define NK_RENDER_FALLBACK_PRIM_US 24u        /* chosen in the derived 22-28 us */
+/* Derived: one kind alone at the budget, 96,000 / 3,200 = 30 readbacks and 96,000 / 24 = 4,000
+ * software primitives a window. */
+#define NK_RENDER_FALLBACK_READBACKS (NK_RENDER_FALLBACK_BUDGET_US / NK_RENDER_FALLBACK_READBACK_US)
+#define NK_RENDER_FALLBACK_MIN_PRIMS (NK_RENDER_FALLBACK_BUDGET_US / NK_RENDER_FALLBACK_PRIM_US)
+
+/* An effect's estimated cost in a window, in microseconds: readbacks x NK_RENDER_FALLBACK_READBACK_US
+ * + software primitives x NK_RENDER_FALLBACK_PRIM_US, UINT64_MAX when that does not fit. */
+uint64_t nk_render_fallback_cost_us(uint64_t sw_prims, uint64_t readbacks);
 
 /* One accepted present's share of the counts. */
 typedef struct NkRenderFallbackDelta {

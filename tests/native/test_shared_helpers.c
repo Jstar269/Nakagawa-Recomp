@@ -552,6 +552,54 @@ static void test_render_fallback_window(void) {
     c.ready = 0;
     CHECK(nk_render_fallback_window_step(&w, &c, &d) == 0u && !w.primed,
           "a renderer that is not running unprimes the window");
+
+    /* One cost budget per effect: readbacks and primitives add up; each kind alone still trips
+       it at its old limit, and one short of it does not. */
+    const uint64_t P = NK_RENDER_FALLBACK_MIN_PRIMS, B = NK_RENDER_FALLBACK_READBACKS;
+    CHECK(nk_render_fallback_cost_us(P, 0u) == NK_RENDER_FALLBACK_BUDGET_US &&
+              nk_render_fallback_cost_us(0u, B) == NK_RENDER_FALLBACK_BUDGET_US &&
+              nk_render_fallback_cost_us(P - 1u, 0u) < NK_RENDER_FALLBACK_BUDGET_US &&
+              nk_render_fallback_cost_us(0u, B - 1u) < NK_RENDER_FALLBACK_BUDGET_US &&
+              nk_render_fallback_cost_us(P - 1u, B - 1u) == 95976u + 92800u,
+          "the cost adds readbacks and primitives at their per-unit costs");
+    CHECK(nk_render_fallback_cost_us(0u, UINT64_MAX) == UINT64_MAX &&
+              nk_render_fallback_cost_us(UINT64_MAX, 0u) == UINT64_MAX &&
+              nk_render_fallback_cost_us(UINT64_MAX / NK_RENDER_FALLBACK_PRIM_US, 1u) == UINT64_MAX,
+          "a cost too large for 64 bits is the largest one, never a wrapped small one");
+    const NkRenderEffect each[3] = {NK_RENDER_EFFECT_STENCIL, NK_RENDER_EFFECT_LINE,
+                                    NK_RENDER_EFFECT_COLOR_TEST};
+    const uint64_t sw_of[3] = {P - 1u, P, 0u}, rb_of[3] = {B - 1u, 0u, B};
+    for (int k = 0; k < 3; ++k) {
+        memset(&w, 0, sizeof(w));
+        c.ready = 1;
+        (void)nk_render_fallback_window_step(&w, &c, NULL);
+        crossed = 0u;
+        for (uint32_t i = 0u; i < K; ++i)
+            crossed |= window_frames(&w, &c, each[k], 50000u, sw_of[k], rb_of[k], W);
+        CHECK(crossed == (uint16_t)(1u << each[k]),
+              "one short of each limit together, or either limit alone, is reported");
+    }
+    /* Two effects each under the budget are not reported, whatever their sum: the budget is per
+       effect, so a report names an effect that costs it alone. */
+    memset(&w, 0, sizeof(w));
+    (void)nk_render_fallback_window_step(&w, &c, NULL);
+    crossed = 0u;
+    for (uint32_t i = 0u; i < 2u * K; ++i) {
+        c.sw_prims[NK_RENDER_EFFECT_STENCIL] += 3000u;
+        crossed |= window_frames(&w, &c, NK_RENDER_EFFECT_COLOR_TEST, 50000u, 3000u, 0u, W);
+    }
+    CHECK(crossed == 0u, "costs of different effects do not add up");
+    /* One cheap primitive a present for ever, with no readback (a frame buffer in main memory):
+       120 x 24 us a window, never reported. */
+    memset(&w, 0, sizeof(w));
+    (void)nk_render_fallback_window_step(&w, &c, NULL);
+    crossed = 0u;
+    for (uint32_t f = 0u; f < 20u * K * W; ++f) {
+        c.gpu_prims += 3000u;
+        c.sw_prims[NK_RENDER_EFFECT_RAM_FB] += 1u;
+        crossed |= nk_render_fallback_window_step(&w, &c, NULL);
+    }
+    CHECK(crossed == 0u, "one cheap software primitive a present is never reported");
 }
 
 int main(void) {

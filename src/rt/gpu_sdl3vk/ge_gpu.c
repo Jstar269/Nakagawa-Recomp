@@ -6165,7 +6165,9 @@ static unsigned long long s_fallback_sw_prims[GEGPU_FALLBACK_REASONS];
 
 /* `forced` is the reason a primitive kind always falls back (lines, points), or -1 for one
  * that falls back only under an unsupported state. `counted` 0 leaves the primitive out of the
- * per-reason count: a T&L primitive declined here reaches hook_tri as triangles, counted there. */
+ * per-reason count: a T&L primitive declined here reaches hook_tri as triangles, and hook_tri counts
+ * those it hands to ge.c (it may draw some on the GPU instead). The readback, if any, is counted
+ * either way. */
 static int software_fallback_begin_counted(int forced, int counted) {
     const int reason = forced >= 0 ? forced : gpu_state_unsupported_reason();
     if (reason < 0) return 0;
