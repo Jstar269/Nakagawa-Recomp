@@ -92,7 +92,8 @@ HOMEBREW_REQUIRED = "NK_HOMEBREW_E2E_REQUIRED"
 # fixture's main.c and Makefile it was built from, and <dir>/SHA256SUMS over all of them.
 HOMEBREW_PREBUILT = "NK_HOMEBREW_EBOOT_DIR"
 HOMEBREW_FIXTURE = ROOT / "fixtures" / "pspdev_phase5"
-# The homebrew folder probe (#2143): opens its own files by relative path.
+# The homebrew folder probe (#2143), fixtures/homebrew_view/main.c built by
+# fixtures/homebrew_view/Makefile: it opens its own files by relative path.
 HOMEBREW_VIEW_FIXTURE = ROOT / "fixtures" / "homebrew_view"
 HOMEBREW_SOURCES = ("main.c", "Makefile")
 
@@ -1148,7 +1149,7 @@ class TestPlayerPackageRoute(unittest.TestCase):
 
     def homebrew_folder(self, eboot: Path, folder: str, files: dict[str, bytes]) -> Path:
         """Put the built package in its own folder, as on a PSP's Memory Stick, beside files."""
-        game = self.root / "stick" / "PSP" / "GAME" / folder
+        game: Path = self.root / "stick" / "PSP" / "GAME" / folder
         game.mkdir(parents=True)
         shutil.copyfile(eboot, game / "EBOOT.PBP")
         for name, data in files.items():
