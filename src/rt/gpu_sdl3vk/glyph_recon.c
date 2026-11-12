@@ -42,10 +42,6 @@
 static NkGlyphConfig s_cfg;
 static char s_start_line[384];   /* what the last nk_glyph_init printed */
 
-static void set_why(char *why, size_t cap, const char *text) {
-    if (why && cap) snprintf(why, cap, "%s", text);
-}
-
 void nk_glyph_configure(const NkGlyphConfig *cfg) {
     s_cfg = cfg ? *cfg : (NkGlyphConfig){ 0 };
 }
