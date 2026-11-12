@@ -136,8 +136,8 @@ Measured on a Windows 11 x64 PC building and running Hot Shots Tennis with the p
   folder deletes no games or saves. Every host uses the same folder name and the same layout inside it:
   `Nakagawa` with `config`, `data`, `cache`, `logs` and `saves` side by side. The folder sits in the host's
   own per-user location: `%LOCALAPPDATA%\Nakagawa` on Windows, `$XDG_DATA_HOME/Nakagawa` (else
-  `~/.local/share/Nakagawa`) on Linux, `~/Library/Application Support/Nakagawa` on macOS, and the app's own
-  private folder on Android.
+  `~/.local/share/Nakagawa`) on Linux, and `~/Library/Application Support/Nakagawa` on macOS. On Android the
+  app's own private folder is the data folder itself, with `config`, `cache`, `logs` and `saves` inside it.
 - **If you used an earlier Linux or macOS build.** The first start of this version moves your old folders
   into the new one, once: Linux's `nakagawa-recomp` data folder and its XDG config, cache and state folders,
   or macOS's `NakagawaRecomp`, `Caches/NakagawaRecomp` and `Logs/NakagawaRecomp`. Nothing is copied or

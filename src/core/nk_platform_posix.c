@@ -494,17 +494,17 @@ static bool resolve_rooted_path(const char *root, NkPathType type, char sep, cha
     return written > 0 && (size_t)written < max_len;
 }
 
-/* The default per-user root (#324): the same folder name and layout on every host. The root is
-   `Nakagawa` in the host's own per-user data base, and inside it config, data, cache, logs and saves
-   are five sibling folders, as on Windows (%LOCALAPPDATA%\Nakagawa). Linux keeps no XDG split:
-   XDG_CONFIG_HOME, XDG_CACHE_HOME and XDG_STATE_HOME are not read; XDG_DATA_HOME picks the base. An
-   explicit root (--user-data-root, portable mode) is the data folder itself, with config, cache,
-   logs and saves inside it (resolve_rooted_path above). */
+/* The default per-user root (#324): the same folder name and layout on Linux and macOS as on
+   Windows. The root is `Nakagawa` in the host's own per-user data base, and inside it config, data,
+   cache, logs and saves are five sibling folders, as on Windows (%LOCALAPPDATA%\Nakagawa). Linux keeps
+   no XDG split: XDG_CONFIG_HOME, XDG_CACHE_HOME and XDG_STATE_HOME are not read; XDG_DATA_HOME picks
+   the base. An explicit root (--user-data-root, portable mode) is the data folder itself, with config,
+   cache, logs and saves inside it (resolve_rooted_path above); so is Android's folder. */
 static bool posix_default_root(char *root, size_t max_len) {
     int written = 0;
 #if defined(__ANDROID__)
     /* No HOME or XDG folders on Android: the activity names the app's private folder in
-       NK_ANDROID_DATA_DIR, and that folder is the root. */
+       NK_ANDROID_DATA_DIR, and that folder is the root, laid out as an explicit root is. */
     const char *android_root = getenv("NK_ANDROID_DATA_DIR");
     if (!android_root || !android_root[0]) return false;
     written = snprintf(root, max_len, "%s", android_root);
@@ -530,6 +530,11 @@ static bool posix_default_root(char *root, size_t max_len) {
 static bool resolve_default_path(NkPathType type, char *out_path, size_t max_len) {
     char root[NK_MAX_PATH];
     if (!posix_default_root(root, sizeof(root))) return false;
+#if defined(__ANDROID__)
+    /* Android's folder is the data folder itself, with config, cache, logs and saves inside it
+       (tests/native/test_launch_resolution.c, the Android data directory rule). */
+    return resolve_rooted_path(root, type, '/', out_path, max_len);
+#else
     const char *leaf = NULL;
     switch (type) {
         case NK_PATH_DATA:   leaf = "data"; break;
@@ -541,6 +546,7 @@ static bool resolve_default_path(NkPathType type, char *out_path, size_t max_len
     }
     int written = snprintf(out_path, max_len, "%s/%s", root, leaf);
     return written > 0 && (size_t)written < max_len;
+#endif
 }
 
 static bool resolve_posix_path(NkPathType type, char *out_path, size_t max_len) {

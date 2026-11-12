@@ -109,8 +109,8 @@ Roadmap items decided with the table:
   (`src/player/package_builder.c`, `requires-python`). 3.15 stays the default. Widen further only to
   what the tool suite actually passes on, and only after the full suite runs green on that version.
 * **One app ID on every host:** `nakagawa-recomp` names the repository and the release files. The
-  per-user data folder is `Nakagawa` on every host, with `config`, `data`, `cache`, `logs` and `saves`
-  inside it (section 8). Linux (`nakagawa-recomp` plus the XDG config, cache and state homes) and macOS
+  per-user data folder is `Nakagawa` on Windows, Linux and macOS, with `config`, `data`, `cache`, `logs`
+  and `saves` inside it (section 8); Android's private folder is the data folder itself. Linux (`nakagawa-recomp` plus the XDG config, cache and state homes) and macOS
   (`NakagawaRecomp`, `Caches/NakagawaRecomp`, `Logs/NakagawaRecomp`) are moved there once at start by
   `src/core/nk_data_migrate.c`: whole-folder renames only, nothing copied or deleted, both-present
   refused with the paths named, a failed move undone, and library.json's stored paths rewritten
@@ -682,9 +682,10 @@ moves all of it into one folder (`nk_platform_set_app_data_dir_override`).
 | `Nakagawa\cache\` | the platform cache folder (`NK_PATH_CACHE`) | player |
 | `Nakagawa\fonts\` | optional UI font overrides | user |
 
-The other hosts use the same `Nakagawa` folder and the same five folders inside it: Linux puts it in
+Linux and macOS use the same `Nakagawa` folder and the same five folders inside it: Linux puts it in
 `$XDG_DATA_HOME` (else `~/.local/share`) and no longer uses the XDG config, cache or state homes, macOS
-in `~/Library/Application Support`, and Android in the app's private folder. A start after an upgrade
+in `~/Library/Application Support`. Android's private folder is the data folder itself, with `config`,
+`cache`, `logs` and `saves` inside it, as with `--user-data-root`. A start after an upgrade
 moves an older Linux or macOS profile in once (section 4). Each launch
 still starts one child process per title (Section 2, Option C), with the #297 run-package and
 save-root semantics unchanged.
