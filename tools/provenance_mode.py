@@ -72,6 +72,8 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
+import secrets
 import subprocess
 import sys
 import tempfile
@@ -290,8 +292,8 @@ def fork_check(repo: Path, base: str, candidate: str, *, tip: str | None = None,
 
     added, removed, rule_keys = profile_changes(repo, branch_point, candidate_sha)
     lines.append(f"profile: {len(added)} path(s) added, {len(removed)} removed")
-    lines.extend(f"  added {path}" for path in added)
-    lines.extend(f"  removed {path}" for path in removed)
+    lines.extend(f"  added {shown_path(path)}" for path in added)
+    lines.extend(f"  removed {shown_path(path)}" for path in removed)
     if rule_keys:
         lines.append(
             f"PROFILE_RULES_CHANGED: {POLICY}: the candidate changes {', '.join(rule_keys)}; a pull request "
@@ -336,7 +338,7 @@ def fork_check(repo: Path, base: str, candidate: str, *, tip: str | None = None,
 
     # Paths the pull request admits itself. The check cannot tell the fork maintainer's admission from
     # anyone else's, so each is named, here, in the summary's title and as a warning annotation.
-    lines.extend(f"{SELF_ADMITTED}: {path}: admitted by this pull request's own profile and ledger, not on "
+    lines.extend(f"{SELF_ADMITTED}: {shown_path(path)}: admitted by this pull request's own profile and ledger, not on "
                  "the default branch; review it as an admission" for path in added)
 
     # The audit takes its policy from the candidate's commit, not from the checkout it runs in. The
@@ -360,10 +362,37 @@ def fork_check(repo: Path, base: str, candidate: str, *, tip: str | None = None,
     return (1 if failed else 0), lines
 
 
+_PLAIN_PATH = re.compile(r"[A-Za-z0-9._/+@-]+")
+
+
+def shown_path(path: str) -> str:
+    """A path as the report shows it. A path from the candidate's profile is the pull request's data: one
+    with anything beyond plain path characters (a line break, a colon, a backtick, non-ASCII) is shown as
+    an ASCII JSON string, so it cannot start a line, end a field or a code span, or pose as another path."""
+    if _PLAIN_PATH.fullmatch(path):
+        return path
+    return json.dumps(path, ensure_ascii=True).replace("`", "\\u0060")
+
+
 def self_admitted(lines: list[str]) -> list[str]:
-    """The paths a fork check's report names as admitted by the pull request itself."""
+    """The paths, as shown, that a fork check's report names as admitted by the pull request itself."""
     prefix = f"{SELF_ADMITTED}: "
-    return [line[len(prefix):].split(": ", 1)[0] for line in lines if line.startswith(prefix)]
+    paths = []
+    for line in lines:
+        if not line.startswith(prefix):
+            continue
+        rest = line[len(prefix):]
+        if rest.startswith('"'):
+            paths.append(json.dumps(json.JSONDecoder().raw_decode(rest)[0], ensure_ascii=True).replace("`", "\\u0060"))
+        else:
+            paths.append(rest.split(": ", 1)[0])
+    return paths
+
+
+def _fence(lines: list[str]) -> str:
+    """A code fence longer than any backtick run in ``lines`` (the audit's output names candidate paths)."""
+    longest = max((len(run) for line in lines for run in re.findall(r"`+", line)), default=0)
+    return "`" * max(3, longest + 1)
 
 
 def _summary(lines: list[str], code: int) -> str:
@@ -387,16 +416,18 @@ def _summary(lines: list[str], code: int) -> str:
         "fork maintainer's admission (`tools/fork_init.py`, `tools/admit_paths.py`) and review are this",
         "fork's provenance authority; see docs/FORKING.md.",
         "",
-        "```text",
+        _fence(lines) + "text",
         *lines,
-        "```",
+        _fence(lines),
         "",
     ])
 
 
 def warning_annotations(lines: list[str]) -> list[str]:
     """GitHub workflow commands that put each self-admitted path on the check as a warning."""
-    return [f"::warning title={FORK_CONTEXT}: self-admitted path::{path} is admitted by this pull request "
+    # Workflow-command data escapes %, CR and LF; the path is already shown_path's single ASCII line.
+    return [f"::warning title={FORK_CONTEXT} - self-admitted path::"
+            f"{path.replace('%', '%25').replace(chr(13), '%0D').replace(chr(10), '%0A')} is admitted by this pull request "
             "itself, not by the fork maintainer on the default branch" for path in self_admitted(lines)]
 
 
@@ -431,12 +462,18 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     if not args.base or not args.candidate:
         parser.error("fork-check needs --base and --candidate")
+    # The report carries the candidate's paths and the audit's output about them, so the runner stops
+    # reading workflow commands while it prints; only the warnings below are commands.
+    token = secrets.token_hex(16)
+    print(f"::stop-commands::{token}", flush=True)
     try:
         code, lines = fork_check(args.repo.resolve(), args.base, args.candidate, tip=args.tip)
     except CheckError as error:
-        print(f"{FORK_CONTEXT}: input error: {error}", file=sys.stderr)
+        print(f"{FORK_CONTEXT}: input error: {error}", flush=True)
+        print(f"::{token}::", flush=True)
         return 2
     print("\n".join(lines))
+    print(f"::{token}::", flush=True)
     for command in warning_annotations(lines):
         print(command)
     if args.summary:

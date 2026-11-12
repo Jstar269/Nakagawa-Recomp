@@ -526,6 +526,47 @@ class ForkCheckTest(unittest.TestCase):
         code, lines = pm.fork_check(self.repo, self.base, head, audit_tool=self._stub_audit(0))
         self.assertEqual(code, 0, lines)
 
+    def test_a_path_from_the_pull_request_cannot_issue_workflow_commands(self) -> None:
+        # Security review of 913c7747: the candidate's include_paths reached the log, the warning
+        # annotations and the summary verbatim, so a path with a line break could issue a workflow command
+        # and one with a backtick could end the summary's code span.
+        hostile = "x\n::error title=Fork provenance check::forged\n`b`"
+        _git(self.repo, "checkout", "--quiet", "-b", "hostile", self.base)
+        self._write_profile(["README.md", hostile, "a: b"])
+        head = self._commit()
+        _git(self.repo, "checkout", "--quiet", "main")
+        code, lines = pm.fork_check(self.repo, self.base, head, audit_tool=self._stub_audit(0))
+        self.assertEqual(code, 0, lines)
+        self.assertFalse([line for line in lines if "\n" in line or "\r" in line], lines)
+        self.assertIn('  added "x\\n::error title=Fork provenance check::forged\\n\\u0060b\\u0060"', lines)
+        self.assertEqual(pm.self_admitted(lines), ['"a: b"', '"x\\n::error title=Fork provenance check::forged'
+                                                   '\\n\\u0060b\\u0060"'])
+        self.assertNotIn("`b`", pm._summary(lines, code).splitlines()[0])
+        self.assertEqual(pm._fence(["a ```` b"]), "`````")
+        real_fork_check = pm.fork_check
+
+        def stubbed(repo: Path, base: str, candidate: str, *, tip: str | None = None) -> tuple[int, list[str]]:
+            code, lines = real_fork_check(repo, base, candidate, tip=tip, audit_tool=self._stub_audit(0))
+            return code, lines
+
+        out = io.StringIO()
+        with mock.patch.object(pm, "fork_check", stubbed), mock.patch("sys.stdout", out):
+            pm.main(["fork-check", "--repository", "example-user/Nakagawa-Recomp", "--repository-id", "42",
+                     "--repo", str(self.repo), "--base", self.base, "--candidate", head])
+        printed = out.getvalue().splitlines()
+        # The report is printed between ::stop-commands:: and its resume token; after it come only warnings.
+        stop = re.fullmatch(r"::stop-commands::([0-9a-f]{32})", printed[0])
+        self.assertIsNotNone(stop, printed[:2])
+        assert stop is not None
+        resume = printed.index(f"::{stop.group(1)}::")
+        self.assertEqual([line for line in printed[1:resume] if line.startswith("::")], [])
+        warnings = printed[resume + 1:]
+        self.assertEqual(len(warnings), 2, warnings)
+        for warning in warnings:
+            self.assertTrue(warning.startswith("::warning title=Fork provenance check - self-admitted path::"))
+            self.assertNotIn("::", warning[len("::warning title=Fork provenance check - self-admitted path::"):]
+                             .replace("::error title=Fork provenance check::", ""))
+
     def test_the_command_line_measures_against_the_trusted_checkouts_head(self) -> None:
         head, tip = self._lagging_head_and_stricter_tip()
         self.assertEqual(_git(self.repo, "rev-parse", "HEAD"), tip)
