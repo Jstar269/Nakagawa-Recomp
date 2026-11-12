@@ -3660,7 +3660,9 @@ static int hle_run(void)
  * buffer's stride (fbw for colour, zbw for depth), or the whole block as one run when rows is 0, and holds 8 words: the pixel count; the counts
  * equal to the drawn value (colour 0xff00ff00 in 8888 and 0x07e0 in 5650, depth 0x0100), to the
  * cleared value (colour 0xff0000ff and 0x001f, which only a clear that wrote colour leaves;
- * depth 0x4000), to the fill (0x5a5a5a5a, or 0x5a5a at 16 bits) and to anything else; the
+ * depth 0x4000), to the fill (0x5a5a5a5a, or 0x5a5a at 16 bits) and to anything else (8888
+ * colour compares the RGB bytes only: its alpha byte is the stencil byte, which a draw with
+ * the stencil test off leaves as it was, as ge-depth-round measured on 2026-11-12); the
  * first other value and its index in the read (0 and 0xffffffff when none); and the read's
  * first pixel. A raw read holds the 16 pixels from (row0, col0), zero-extended. After the last
  * cell, `vram-restore` (2 words: the words written back and how many do not read back as
@@ -3931,13 +3933,19 @@ static void grb_read(const struct grb_cell *c, const struct grb_read *r)
     }
     uint32_t v[3];
     grb_values(c, r->buf, v);
+    /* 8888 colour: RGB only (the alpha byte is the stencil byte the draws leave as filled). */
+    const uint32_t m = r->buf == GRB_BUF_C && c->psm == 3u ? 0x00ffffffu : 0xffffffffu;
     uint32_t count[4] = {0u, 0u, 0u, 0u};
     uint32_t first_other = 0u;
     uint32_t first_index = 0xffffffffu;
     for (uint32_t y = 0; y < rows; y++) {
         for (uint32_t x = 0; x < cols; x++) {
             const uint32_t p = grb_pixel(c, r->buf, base + y * stride + x);
-            const uint32_t k = p == v[0] ? 0u : p == v[1] ? 1u : p == v[2] ? 2u : 3u;
+            const uint32_t q = p & m;
+            const uint32_t k = q == (v[0] & m)   ? 0u
+                               : q == (v[1] & m) ? 1u
+                               : q == (v[2] & m) ? 2u
+                                                 : 3u;
             if (k == 3u && count[3] == 0u) {
                 first_other = p;
                 first_index = y * cols + x;
@@ -4133,7 +4141,9 @@ static int hle_run(void)
  *               projection that passes view z through with w = 1, the viewport z scale 16384 and
  *               centre 32768, and vertex z (((i >> 2) & 1) + frac) / 16384, exact in float. EQUAL.
  *
- * The pass mask (bit i set when pixel i shows its source colour) repeats one byte, bit k for
+ * The pass mask (bit i set when pixel i shows its source colour's RGB; the alpha byte is the
+ * stencil byte, which the test draw leaves as the destination's: measured on the PSP-3000 on
+ * 2026-11-12, where comparing all 32 bits gave a zero mask) repeats one byte, bit k for
  * i % 8 = k:
  *               truncate   round half up   round half to even
  *   zr-thru-eq    0x1f         0x63              0x67
@@ -4488,9 +4498,9 @@ static void gdr_draw(const struct gdr_cell *c, uint32_t tex)
     for (uint32_t i = 0; i < GDR_N; i++) {
         const uint32_t p = fb[(GDR_WY + i / GDR_WW) * GDR_STRIDE + GDR_WX + i % GDR_WW];
         s_gdr_win[i] = p;
-        if (p == gdr_rgba(1u, i)) {
+        if (((p ^ gdr_rgba(1u, i)) & 0x00ffffffu) == 0u) {
             pass[i / 32u] |= 1u << (i % 32u);
-        } else if (p == gdr_rgba(5u, i)) {
+        } else if (((p ^ gdr_rgba(5u, i)) & 0x00ffffffu) == 0u) {
             pass[2]++;
         } else {
             pass[3]++;
