@@ -3444,6 +3444,78 @@ static int player_run_command_line_launch(PlayerApp *app, int game_index,
     return child_code < 0 ? 6 : child_code;
 }
 
+/* Opens `path` in the file manager, or the nearest folder above it that exists (a destination
+   that was never made). */
+static void player_open_migration_folder(const char *path) {
+    char folder[NK_MAX_PATH];
+    int written = snprintf(folder, sizeof(folder), "%s", path ? path : "");
+    if (written <= 0 || (size_t)written >= sizeof(folder)) return;
+    for (;;) {
+        if (nk_platform_dir_exists(folder)) break;
+        char *cut = strrchr(folder, '/');
+        if (!cut || cut == folder) return;
+        *cut = '\0';
+    }
+    if (!player_host_open_folder(folder)) {
+        fprintf(stderr, "[PLAYER] The folder %s could not be opened: %s\n", folder, SDL_GetError());
+    }
+}
+
+/* One data folder name on every host (#324): a Linux or macOS profile from before the rename is
+   moved into place once, before anything reads it (nk_data_migrate.h). Only a folder that
+   matters (library, saves, settings) can stop the start: then the message names both folders and
+   offers to open them, so no terminal is needed. A start that keeps the old folders goes on and
+   says so once. False to stop the start. */
+static bool player_migrate_user_data(void) {
+    static NkDataMigration migration;
+    nk_data_migrate_host(&migration);
+    if (migration.log[0]) fprintf(stderr, "[PLAYER] %s", migration.log);
+    switch (migration.status) {
+    case NK_MIGRATE_NOTHING:
+        return true;
+    case NK_MIGRATE_DONE:
+        printf("[PLAYER] %s (%zu folder(s) moved)\n", migration.message, migration.moved);
+        return true;
+    case NK_MIGRATE_KEPT_OLD:
+        fprintf(stderr, "[PLAYER] %s\n", migration.message);
+        if (nk_data_migrate_notice_is_new(&migration)) {
+            (void)SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION,
+                                           "Nakagawa Recomp kept your data folders",
+                                           migration.message, NULL);
+        }
+        return true;
+    case NK_MIGRATE_REFUSED:
+    case NK_MIGRATE_FAILED:
+        break;
+    }
+    fprintf(stderr, "[PLAYER] %s\n", migration.message);
+    /* Quit is the Return and Escape default: nothing happens without a choice. */
+    const SDL_MessageBoxButtonData buttons[] = {
+        { SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT | SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT, 0,
+          "Quit" },
+        { 0, 1, "Open both folders" }
+    };
+    const SDL_MessageBoxData dialog = {
+        SDL_MESSAGEBOX_ERROR,
+        NULL,
+        "Nakagawa Recomp can't move your data folder",
+        migration.message,
+        (int)(sizeof(buttons) / sizeof(buttons[0])),
+        buttons,
+        NULL
+    };
+    int button_id = 0;
+    if (!SDL_ShowMessageBox(&dialog, &button_id)) {
+        fprintf(stderr, "[PLAYER] The message could not be shown: %s\n", SDL_GetError());
+        return false;
+    }
+    if (button_id == 1) {
+        player_open_migration_folder(migration.folder_a);
+        player_open_migration_folder(migration.folder_b);
+    }
+    return false;
+}
+
 /* --user-data-root=<folder> makes this process keep its library, title
  * manifests, packages and staged games in <folder>, the same meaning as
  * nk_cli's --user-data-root, and its settings, cache, logs and saves in the
@@ -3472,21 +3544,7 @@ static bool player_apply_user_data_root(int argc, char *argv[]) {
         /* One data folder name on every host (#324): a Linux or macOS profile from before
            the rename is moved into place once, before anything reads it. Only the default
            per-user root migrates; portable mode and --user-data-root name their own folder. */
-        if (portable.state == NK_PORTABLE_ABSENT) {
-            NkDataMigration migration;
-            nk_data_migrate_host(&migration);
-            if (migration.status == NK_MIGRATE_REFUSED || migration.status == NK_MIGRATE_FAILED) {
-                fprintf(stderr, "[PLAYER] %s\n", migration.message);
-                (void)SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR,
-                                               "Nakagawa Recomp can't move your data folder",
-                                               migration.message, NULL);
-                return false;
-            }
-            if (migration.status == NK_MIGRATE_DONE) {
-                printf("[PLAYER] Moved your data into the Nakagawa folder (%zu folder(s)).\n",
-                       migration.moved);
-            }
-        }
+        if (portable.state == NK_PORTABLE_ABSENT && !player_migrate_user_data()) return false;
     }
     for (int i = 1; i < argc; i++) {
         if (strncmp(argv[i], prefix, sizeof(prefix) - 1u) != 0) continue;

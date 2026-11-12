@@ -13,6 +13,7 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import shutil
+import stat
 import sys
 import tarfile
 import tempfile
@@ -31,6 +32,85 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 CHUNK_SIZE = 64 * 1024
 
 
+def _holds_data(path: Path) -> bool:
+    """True when ``path`` is a link, a file, or a folder with a file or a link anywhere below it.
+
+    A folder that cannot be read counts as holding data, as in src/core/nk_data_migrate.c.
+    """
+    try:
+        info = os.lstat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    except OSError:
+        return True
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        return True
+    pending = [os.fspath(path)]
+    while pending:
+        try:
+            with os.scandir(pending.pop()) as entries:
+                for entry in entries:
+                    if entry.is_symlink() or not entry.is_dir(follow_symlinks=False):
+                        return True
+                    pending.append(entry.path)
+        except OSError:
+            return True
+    return False
+
+
+def _same_or_inside(a: Path, b: Path) -> bool:
+    first = os.path.realpath(os.fspath(a))
+    second = os.path.realpath(os.fspath(b))
+    try:
+        return os.path.commonpath([first, second]) in (first, second)
+    except ValueError:  # different drives: neither is inside the other
+        return False
+
+
+def _xdg_base(variable: str, *below_home: str) -> Path:
+    value = os.environ.get(variable)
+    return Path(value) if value else Path.home().joinpath(*below_home)
+
+
+def _choose_data_root(new_data: Path, old_data: Path, kept: tuple[Path, ...]) -> Path:
+    """The player's rule for its data folder (#324, src/core/nk_data_migrate.h).
+
+    The player moves an older data folder into the new layout at start-up. Until it has, and
+    whenever it keeps the old folders (a linked folder, XDG homes that point at each other, a library
+    a newer version wrote), the old folder is the one in use, so a tool uses it too. Both holding data
+    is the case the player refuses to start on; a tool refuses it as well rather than pick one.
+    """
+    old_has = _holds_data(old_data)
+    if old_has and _holds_data(new_data):
+        raise PrerequisiteFetchError(
+            f"DATA_MIGRATION_BOTH_PRESENT: both {old_data} and {new_data} hold Nakagawa data. Start "
+            "the Nakagawa player, which names both folders and what to do, then run this again."
+        )
+    if old_has or any(_same_or_inside(old_data, folder) for folder in kept):
+        return old_data
+    return new_data
+
+
+def _xdg_data_root() -> Path:
+    """Linux and the other XDG hosts: `Nakagawa/data` in the XDG data home, or the older folder."""
+    try:
+        data_base = _xdg_base("XDG_DATA_HOME", ".local", "share")
+    except RuntimeError as exc:
+        raise PrerequisiteFetchError(
+            "DATA_DIR_UNAVAILABLE: set XDG_DATA_HOME or HOME to locate per-user data."
+        ) from exc
+    kept: list[Path] = []
+    for variable, below_home, leaf in (
+        ("XDG_CACHE_HOME", (".cache",), ("nakagawa-recomp",)),
+        ("XDG_STATE_HOME", (".local", "state"), ("nakagawa-recomp", "logs")),
+    ):
+        try:
+            kept.append(_xdg_base(variable, *below_home).joinpath(*leaf))
+        except RuntimeError:
+            continue  # neither the variable nor HOME: the player has no such folder either
+    return _choose_data_root(data_base / "Nakagawa" / "data", data_base / "nakagawa-recomp", tuple(kept))
+
+
 def default_data_root() -> Path:
     """Return the player's per-user data root; never place downloads by an ISO."""
     if os.name == "nt":
@@ -43,19 +123,13 @@ def default_data_root() -> Path:
         return Path(base) / "Nakagawa" / "data"
     if sys.platform == "darwin":
         try:
-            return Path.home() / "Library" / "Application Support" / "Nakagawa" / "data"
+            support = Path.home() / "Library" / "Application Support"
         except RuntimeError as exc:
             raise PrerequisiteFetchError(
                 "DATA_DIR_UNAVAILABLE: set HOME to locate per-user data."
             ) from exc
-    if os.name == "posix" and os.environ.get("XDG_DATA_HOME"):
-        return Path(os.environ["XDG_DATA_HOME"]) / "Nakagawa" / "data"
-    try:
-        return Path.home() / ".local" / "share" / "Nakagawa" / "data"
-    except RuntimeError as exc:
-        raise PrerequisiteFetchError(
-            "DATA_DIR_UNAVAILABLE: set XDG_DATA_HOME or HOME to locate per-user data."
-        ) from exc
+        return _choose_data_root(support / "Nakagawa" / "data", support / "NakagawaRecomp" / "data", ())
+    return _xdg_data_root()
 
 
 def _safe_relative_path(value: str) -> PurePosixPath:

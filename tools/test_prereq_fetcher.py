@@ -32,6 +32,7 @@ from nk_core.prereq_fetcher import (
     download_verified_item,
     install_items,
     _pinned_sources,
+    _xdg_data_root,
     main as fetcher_main,
     stage_bundle,
     stage_sources,
@@ -182,6 +183,51 @@ class TestPrerequisiteFetcher(unittest.TestCase):
             )
 
         self.assertEqual(roots, {name: expected for name in roots})
+
+    def _linux_data_root(self, **overrides: str) -> Path:
+        environment = {
+            "HOME": str(self.root / "home"),
+            "XDG_DATA_HOME": str(self.root / "share"),
+            "XDG_CACHE_HOME": str(self.root / "cache"),
+            "XDG_STATE_HOME": str(self.root / "state"),
+        }
+        environment.update(overrides)
+        # The XDG rule itself, which default_data_root uses on Linux; called directly so the case
+        # also runs on a Windows host, where pathlib cannot make a POSIX path.
+        with patch.dict(os.environ, environment, clear=True):
+            return _xdg_data_root()
+
+    def test_tools_follow_the_player_data_folder_rule_on_linux(self) -> None:
+        """#324 S3: a tool uses the folder the player uses, and never starts a second library."""
+        old = self.root / "share" / "nakagawa-recomp"
+        new = self.root / "share" / "Nakagawa" / "data"
+        self.assertEqual(self._linux_data_root(), new, "a fresh install uses the new folder")
+        (new / "titles").mkdir(parents=True)
+        self.assertEqual(self._linux_data_root(), new, "empty new folders are not data")
+        old.mkdir(parents=True)
+        (old / "library.json").write_text("{}", encoding="utf-8")
+        self.assertEqual(self._linux_data_root(), old,
+                         "before the player has moved it, the old folder is the one in use")
+        (new / "library.json").write_text("{}", encoding="utf-8")
+        with self.assertRaisesRegex(PrerequisiteFetchError, "DATA_MIGRATION_BOTH_PRESENT"):
+            self._linux_data_root()
+        (old / "library.json").unlink()
+        old.rmdir()
+        self.assertEqual(self._linux_data_root(), new, "after the move, the new folder")
+
+    def test_tools_keep_the_old_folder_where_the_player_does(self) -> None:
+        old = self.root / "share" / "nakagawa-recomp"
+        # XDG_CACHE_HOME == XDG_DATA_HOME: the player keeps the old layout even on a fresh install.
+        self.assertEqual(self._linux_data_root(XDG_CACHE_HOME=str(self.root / "share")), old)
+        self.assertEqual(self._linux_data_root(XDG_STATE_HOME=str(self.root / "share")), old)
+        target = self.root / "games" / "nk"
+        target.mkdir(parents=True)
+        (self.root / "share").mkdir(parents=True, exist_ok=True)
+        try:
+            os.symlink(target, old, target_is_directory=True)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest(f"symbolic links unavailable here: {exc}")
+        self.assertEqual(self._linux_data_root(), old, "a linked old folder stays in use, as in the player")
 
     def test_happy_path_extracts_only_verified_payload_and_records_license(self) -> None:
         item = self.item()

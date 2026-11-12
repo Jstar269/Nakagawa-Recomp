@@ -819,6 +819,10 @@ bool nk_platform_user_data_plan(struct NkDataMigrationPlan *plan) {
     return false;
 }
 
+bool nk_platform_set_old_user_data_layout(bool on) {
+    return !on;
+}
+
 /* Helper to escape arguments for Windows command line according to Microsoft CRT rules */
 static void append_escaped_arg(char *buf, size_t buf_len, const char *arg) {
     if (!buf || buf_len == 0 || !arg) return;

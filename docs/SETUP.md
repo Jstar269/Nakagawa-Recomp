@@ -133,20 +133,31 @@ Measured on a Windows 11 x64 PC building and running Hot Shots Tennis with the p
 - **Where your data lives.** Imported discs, built games, saves and settings are in the per-user data
   folder (`%LOCALAPPDATA%\Nakagawa\data`, [below](#2-supply-local-game-inputs)), never inside the unpacked
   release. An update unpacks into a new folder and leaves the data folder alone, so deleting an old release
-  folder deletes no games or saves. Every host uses the same folder name and the same layout inside it:
-  `Nakagawa` with `config`, `data`, `cache`, `logs` and `saves` side by side. The folder sits in the host's
-  own per-user location: `%LOCALAPPDATA%\Nakagawa` on Windows, `$XDG_DATA_HOME/Nakagawa` (else
-  `~/.local/share/Nakagawa`) on Linux, and `~/Library/Application Support/Nakagawa` on macOS. On Android the
-  app's own private folder is the data folder itself, with `config`, `cache`, `logs` and `saves` inside it.
-- **If you used an earlier Linux or macOS build.** The first start of this version moves your old folders
-  into the new one, once: Linux's `nakagawa-recomp` data folder and its XDG config, cache and state folders,
-  or macOS's `NakagawaRecomp`, `Caches/NakagawaRecomp` and `Logs/NakagawaRecomp`. Nothing is copied or
-  deleted; each folder is renamed, and the paths your library stored for converted games are rewritten to
-  the new place (the old file is kept as `library.json.pre-migration`). If the new folder already holds data
-  as well as the old one, the player stops with `DATA_MIGRATION_BOTH_PRESENT`, names both folders and moves
-  nothing: keep the one you want in `Nakagawa` and move the other aside. If a move fails (a locked or
-  read-only folder, another disk), everything already moved is put back and the player stops with
-  `DATA_MIGRATION_FAILED`. Windows already used this layout, so a Windows profile has nothing to move.
+  folder deletes no games or saves. Every host uses the same folder name: `Nakagawa`, with `config`,
+  `data` and `saves` side by side. It sits in the host's own per-user location:
+  `%LOCALAPPDATA%\Nakagawa` on Windows, `$XDG_DATA_HOME/Nakagawa` (else `~/.local/share/Nakagawa`) on
+  Linux, and `~/Library/Application Support/Nakagawa` on macOS. Windows and macOS keep `cache` and `logs`
+  in that folder too. Linux keeps the cache in `~/.cache/nakagawa-recomp` and the logs in
+  `~/.local/state/nakagawa-recomp/logs` (or under `$XDG_CACHE_HOME` and `$XDG_STATE_HOME`), as before. On
+  Android the app's own private folder is the data folder itself, with `config`, `cache`, `logs` and
+  `saves` inside it.
+- **If you used an earlier Linux or macOS build.** The first start of this version moves your library,
+  saves and settings into the new folder, once: Linux's `nakagawa-recomp` data folder and its
+  `~/.config/nakagawa-recomp` settings, or macOS's `NakagawaRecomp` with `Caches/NakagawaRecomp` and
+  `Logs/NakagawaRecomp`. Nothing is copied, and nothing is deleted but empty folders; each folder is
+  renamed, and the paths your library stored for converted games are rewritten to the new place (the old
+  file is kept as `library.json.pre-migration`). Two starts at once take turns. If one of these folders
+  cannot be moved, nothing stays half-moved and the player does not start: it names both folders and
+  offers **Open both folders** and **Quit**. The code at the start of the message says why:
+  `DATA_MIGRATION_BOTH_PRESENT` when the new folder already holds data as well (keep the one you want in
+  `Nakagawa` and move the other aside), `DATA_MIGRATION_OTHER_DISK` when the two are on different disks
+  (Nakagawa does not copy saves between disks; move them yourself), and `DATA_MIGRATION_FAILED`
+  otherwise. A macOS cache or logs folder that cannot be moved is left where it is and named in the log;
+  it never stops the start. In three cases the player keeps using your earlier folders, moves nothing and
+  tells you once: the folder is a symbolic link (`DATA_MIGRATION_LINKED`), your XDG folders point at each
+  other (`DATA_MIGRATION_OVERLAP`), or your library was written by a newer version of Nakagawa
+  (`DATA_MIGRATION_NEWER_LIBRARY`; the move waits for a version that understands it). Windows already used
+  this layout, so a Windows profile has nothing to move.
 
 ## Install, update and uninstall (Windows)
 

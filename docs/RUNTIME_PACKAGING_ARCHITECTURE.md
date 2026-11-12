@@ -109,12 +109,29 @@ Roadmap items decided with the table:
   (`src/player/package_builder.c`, `requires-python`). 3.15 stays the default. Widen further only to
   what the tool suite actually passes on, and only after the full suite runs green on that version.
 * **One app ID on every host:** `nakagawa-recomp` names the repository and the release files. The
-  per-user data folder is `Nakagawa` on Windows, Linux and macOS, with `config`, `data`, `cache`, `logs`
-  and `saves` inside it (section 8); Android's private folder is the data folder itself. Linux (`nakagawa-recomp` plus the XDG config, cache and state homes) and macOS
-  (`NakagawaRecomp`, `Caches/NakagawaRecomp`, `Logs/NakagawaRecomp`) are moved there once at start by
-  `src/core/nk_data_migrate.c`: whole-folder renames only, nothing copied or deleted, both-present
-  refused with the paths named, a failed move undone, and library.json's stored paths rewritten
-  ([#324](https://github.com/Jstar269/nakagawa-recomp/issues/324)). Windows never used another name.
+  per-user data folder is `Nakagawa` on Windows, Linux and macOS, with `config`, `data` and `saves`
+  inside it (section 8). Windows and macOS keep `cache` and `logs` there too; Linux keeps them in the
+  XDG cache and state homes, where they always were. Android's private folder is the data folder
+  itself. An older Linux profile (`nakagawa-recomp` in the XDG data home, saves inside it, and the
+  XDG config folder) or macOS profile (`NakagawaRecomp`, `Caches/NakagawaRecomp`,
+  `Logs/NakagawaRecomp`) is moved there once at start by `src/core/nk_data_migrate.c`
+  ([#324](https://github.com/Jstar269/nakagawa-recomp/issues/324)). Its rules, each tested in
+  `tests/native/test_data_migrate.c`:
+  * One start at a time: the whole run holds a lock (`.nakagawa-migration.lock` beside `Nakagawa`), so
+    a second start waits and then finds the work done.
+  * Whole-folder renames only. Nothing is copied, and nothing is deleted except empty folders in the
+    way, one `rmdir` at a time, which the system refuses for a folder that holds anything.
+  * Only the folders that matter (library, saves, settings) can stop the start. When one of them
+    cannot move (data in both places, another disk, a folder that cannot be written), nothing stays
+    half-moved, and the player names both folders with **Open both folders** and **Quit**. A macOS
+    cache or logs folder that cannot move stays where it is, with a named line in the log.
+  * A linked folder, XDG homes that point at each other, or a `library.json` written by a newer
+    version keep the older folders in use for that start: nothing is moved or rewritten, and the user
+    is told once.
+  * library.json's stored paths are rewritten, and the original is kept whole as
+    `library.json.pre-migration`.
+
+  Windows never used another name.
 * **Code signing:** v0.0.1 and v0.0.2 ship unsigned. Until a build is signed, each
   release publishes the ZIP's SHA-256 and GitHub build attestations for every binary, and the release notes
   explain the SmartScreen prompt. The signing procedure is prepared
@@ -682,11 +699,17 @@ moves all of it into one folder (`nk_platform_set_app_data_dir_override`).
 | `Nakagawa\cache\` | the platform cache folder (`NK_PATH_CACHE`) | player |
 | `Nakagawa\fonts\` | optional UI font overrides | user |
 
-Linux and macOS use the same `Nakagawa` folder and the same five folders inside it: Linux puts it in
-`$XDG_DATA_HOME` (else `~/.local/share`) and no longer uses the XDG config, cache or state homes, macOS
-in `~/Library/Application Support`. Android's private folder is the data folder itself, with `config`,
-`cache`, `logs` and `saves` inside it, as with `--user-data-root`. A start after an upgrade
-moves an older Linux or macOS profile in once (section 4). Each launch
+Linux and macOS use the same `Nakagawa` folder. Linux puts it in `$XDG_DATA_HOME` (else
+`~/.local/share`) with `config`, `data` and `saves` inside it, and keeps the cache in
+`$XDG_CACHE_HOME/nakagawa-recomp` (else `~/.cache/nakagawa-recomp`) and the logs in
+`$XDG_STATE_HOME/nakagawa-recomp/logs` (else `~/.local/state/nakagawa-recomp/logs`), as before; it no
+longer reads the XDG config home. macOS puts it in `~/Library/Application Support`, with all five
+folders inside it. Android's private folder is the data folder itself, with `config`, `cache`, `logs`
+and `saves` inside it, as with `--user-data-root`. A start after an upgrade moves an older Linux or
+macOS profile in once (section 4); a start that cannot do so safely keeps using the older folders for
+that run and says so. The Python tools resolve the data folder by the same rule
+(`tools/nk_core/prereq_fetcher.py`): the older folder while it is the one in use, the new one after
+the move, and `DATA_MIGRATION_BOTH_PRESENT` when both hold data. Each launch
 still starts one child process per title (Section 2, Option C), with the #297 run-package and
 save-root semantics unchanged.
 

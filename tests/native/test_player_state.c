@@ -14637,7 +14637,7 @@ int main(int argc, char **argv) {
 #elif defined(__APPLE__)
         const char *cache_root_env = "HOME";
 #else
-        const char *cache_root_env = "XDG_DATA_HOME";
+        const char *cache_root_env = "XDG_CACHE_HOME";
 #endif
         bool had_cache_root_env;
         char *old_cache_root_env =
