@@ -908,6 +908,17 @@ class TestPublishAudit(unittest.TestCase):
         )
         self.assertFalse(any(f.code == "SPDX_UPSTREAM_LINEAGE" for f in stb_findings), stb_findings)
 
+        # #2207: stb_vorbis.c is byte-identical upstream too; another stb source still needs SPDX.
+        vorbis_header = b"// Ogg Vorbis audio decoder - v1.24 - public domain\n"
+        vorbis_findings = self._spdx_provenance_findings(
+            "third_party/stb/stb_vorbis.c", vorbis_header, "upstream_derived", "MIT OR Unlicense"
+        )
+        self.assertFalse(any(f.code == "SPDX_UPSTREAM_LINEAGE" for f in vorbis_findings), vorbis_findings)
+        stb_sibling = self._spdx_provenance_findings(
+            "third_party/stb/stb_other.c", vorbis_header, "upstream_derived", "MIT OR Unlicense"
+        )
+        self.assertTrue(any(f.code == "SPDX_UPSTREAM_LINEAGE" for f in stb_sibling), stb_sibling)
+
         sibling_findings = self._spdx_provenance_findings(
             "third_party/clay/other.h", upstream_header, "upstream_derived", "Zlib"
         )
