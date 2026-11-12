@@ -497,33 +497,41 @@ int main(void) {{
             self.assertNotIn(f"goto L_{target:08x}", body,
                              "a known function entry must not be treated as an intra-function label")
 
-    def test_a_trap_word_in_a_body_that_loads_sp_is_walked(self):
-        """A REGIMM trap (tlti) in a body that loads $sp: the frame walk steps over it (#2373).
+    def test_untranslated_regimm_words_in_a_body_that_loads_sp_are_walked(self):
+        """REGIMM words codegen does not translate, in a body that loads $sp (#2373).
 
-        The walk (_sp_exit_walk) runs only for a body that loads $sp, and steps every word
-        is_control() does not call a transfer through _frame_step, which asks _gpr_writes what
-        it writes. _gpr_writes called every REGIMM word a control transfer (None), so a trap
-        made _frame_step iterate None and codegen died with a TypeError instead of emitting
-        or refusing the body.
+        The frame walk (_sp_exit_walk) runs only for a body that loads $sp. It steps every
+        word is_control() does not call a transfer, and every delay slot, through _frame_step,
+        which asks _gpr_writes what the word writes. _gpr_writes called every REGIMM word a
+        transfer (None), and bltzall/bgezall are transfers is_control() leaves out, so a trap
+        (tlti) or a bgezall, as a word or in a delay slot, made _frame_step iterate None:
+        codegen died with a TypeError instead of refusing the body. These words have no
+        translation, so the body is refused by name, the fail-closed path every other
+        unsupported form takes.
         """
         owner = 0x00001000
-        words = {
-            owner: 0x27BDFFE0,                                          # addiu sp,sp,-0x20
-            owner + 4: 0x04AA7253,                                      # tlti a1,0x7253
-            owner + 8: (0x23 << 26) | (29 << 21) | (29 << 16) | 0x10,   # lw sp,0x10(sp)
-            owner + 12: 0x03E00008,                                     # jr ra
-            owner + 16: 0x00000000,
+        load_sp = (0x23 << 26) | (29 << 21) | (29 << 16) | 0x10        # lw sp,0x10(sp)
+        cases = {
+            "tlti a1,0x7253": ({owner + 4: 0x04AA7253, owner + 8: load_sp,
+                                owner + 12: 0x03E00008, owner + 16: 0x00000000},
+                               r"opcode 0x01 at 0x00001004"),
+            "bgezall zero": ({owner + 4: 0x04130002, owner + 8: load_sp,
+                              owner + 12: 0x03E00008, owner + 16: 0x00000000},
+                             r"opcode 0x01 at 0x00001004"),
+            "bgezall zero in a jr slot": ({owner + 4: load_sp, owner + 8: 0x03E00008,
+                                           owner + 12: 0x04130002},
+                                          r"opcode 0x01 at 0x0000100c"),
         }
-        with scratch_dir.TemporaryDirectory(prefix="sp_trap_") as tmp:
-            path = Path(tmp) / "sp_trap.elf"
-            path.write_bytes(_synthetic_elf(words, owner))
-            elf = analyze.Elf(os.fspath(path))
-            starts, ranges = analyze.analyze(elf)
-            self.assertIn(owner, starts)
-            # The trap itself has no translation yet, so the body is refused by name, the
-            # fail-closed path every other unsupported form takes; it must not crash the walk.
-            with self.assertRaisesRegex(codegen.Unsupported, r"opcode 0x01 at 0x00001004"):
-                codegen.emit_function(elf, owner, ranges, starts)
+        for name, (body, refusal) in cases.items():
+            words = {owner: 0x27BDFFE0, **body}                         # addiu sp,sp,-0x20
+            with self.subTest(name), scratch_dir.TemporaryDirectory(prefix="sp_regimm_") as tmp:
+                path = Path(tmp) / "sp_regimm.elf"
+                path.write_bytes(_synthetic_elf(words, owner))
+                elf = analyze.Elf(os.fspath(path))
+                starts, ranges = analyze.analyze(elf)
+                self.assertIn(owner, starts)
+                with self.assertRaisesRegex(codegen.Unsupported, refusal):
+                    codegen.emit_function(elf, owner, ranges, starts)
 
     def test_an_unsupported_body_leaves_no_sp_load_checks_behind(self):
         """An Unsupported raised mid-body clears the body's run-time $sp checks (#1935).

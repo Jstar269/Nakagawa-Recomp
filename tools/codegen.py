@@ -1515,7 +1515,11 @@ def _frame_step(w, regs, slots):
         if op == 0x2B and rt(w) in regs:
             slots[offset] = regs[rt(w)]
     written = _gpr_writes(w)
-    if written == "unknown":
+    if written is None:
+        # A transfer is_control() leaves out (bltzall/bgezall: effect() refuses them by name),
+        # stepped as a word or as a delay slot: it may link, so nothing written stays known.
+        written = frozenset(range(32))
+    elif written == "unknown":
         written = (frozenset({rt(w)}) if op == 0x12 else
                    frozenset() if op in _VFPU_OPCODES else frozenset(range(32)))
     for reg in written:
