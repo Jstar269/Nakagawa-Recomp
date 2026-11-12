@@ -11,6 +11,7 @@
 #endif
 
 #include "videorec.h"
+#include "perf.h" /* SR_DISPLAY_PERIOD_US */
 
 #include <errno.h>
 #include <fcntl.h>
@@ -39,7 +40,6 @@ extern char **environ;
 enum { VR_UNREAD = 0, VR_OFF, VR_ON, VR_DONE };
 
 #define VR_RING_FRAMES (1u << 20) /* about 23.8 s of mixed audio ahead of the flush point */
-#define VR_PERIOD_US 16683u       /* one VBLANK period, rounded; only used to spot late VBLANKs */
 /* Free space on the drive holding SR_VIDEOREC_DIR: a recording does not start with less than
  * VR_MIN_FREE_START, and stops (FAIL) when it falls under VR_MIN_FREE_RUN, checked every
  * VR_FREE_CHECK_FRAMES frames. A lossless 4K recording takes gigabytes a minute. */
@@ -1152,7 +1152,7 @@ void sr_videorec_vblank(uint32_t vcount, uint64_t guest_us) {
         vr_write_frame(s_last_vcount + i, guest_us, "gap");
         s_gap_frames++;
     }
-    if (guest_us - s_tick_us < VR_PERIOD_US / 2u) s_late_vblanks++;
+    if (guest_us - s_tick_us < SR_DISPLAY_PERIOD_US / 2u) s_late_vblanks++;
     s_k++;
     vr_flush_audio(sr_videorec_frame_sample(s_k));
     if (s_cur_new) {

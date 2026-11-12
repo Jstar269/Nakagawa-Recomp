@@ -1568,24 +1568,66 @@ static void cell_pace(void) {
     CHECK(ace_pace_flip_kind(&p) == ACE_PRESENT_HELD && p.held, "a re-flip leaves the frame held until shown");
     ace_pace_held_missed(&p, 1);
     CHECK(p.held && p.owed && p.busy == 2u, "a busy re-flip leaves the frame owed");
-    /* Owed, but the frame after it never reached a show pass either (its present was busy too):
-     * the pass holds a frame two steps back, so the next frame is shown as it is and kept, and
-     * the owed frame is counted as never shown. */
-    ace_pace_flip(&p, 1, ACE_RATE_K2, 1, 900u);          /* verdict OWED, never taken */
+    /* Owed, and the frame after it never reached a show pass either (its present was busy too).
+     * The owed frame is still the pass's newest, so the next present that takes a flip shows it
+     * and holds that flip's frame: in order, and nothing is superseded. */
+    ace_pace_flip(&p, 1, ACE_RATE_K2, 1, 900u);     /* verdict OWED, never taken */
     CHECK(p.held && p.owed, "a flip whose present is dropped leaves the owed frame owed");
     ace_pace_flip(&p, 1, ACE_RATE_K2, 1, 933u);
-    CHECK(ace_pace_take(&p) == ACE_SHOW_KEEP && p.superseded == 1u && !p.held && !p.owed && p.unpaired == 0u,
-          "an owed frame two steps back is superseded, not shown late");
-    /* A present that failed, or a closed window, gives the frame up, and it is counted. */
+    CHECK(ace_pace_take(&p) == ACE_SHOW_OWED && p.superseded == 0u && p.unpaired == 0u,
+          "an owed frame is shown however many flips the display missed (superseded %llu)",
+          (unsigned long long)p.superseded);
+    ace_pace_shown_owed(&p, 38u, 934u);
+    CHECK(ace_pace_held_shown(&p) == 868u, "the owed frame's delay runs from its own in-between");
+    CHECK(ace_pace_vblank(&p, 39u) && ace_pace_held_shown(&p) == 934u && !p.held,
+          "the frame of the flip that showed it is held for its VBLANK");
+    /* A title that flips each frame twice. The display is busy at the held frame's re-flip and
+     * VBLANK and at the next frame's flip, so that frame's re-flip is its first present: it
+     * shows the owed frame and holds its own, never replaces the owed one. */
     ace_pace_flip(&p, 1, ACE_RATE_K2, 1, 967u);
     CHECK(ace_pace_take(&p) == ACE_SHOW_BETWEEN, "consecutive again");
     ace_pace_shown_between(&p, 40u, 968u);
+    ace_pace_flip(&p, 0, ACE_RATE_K2, 1, 984u);
+    CHECK(ace_pace_flip_kind(&p) == ACE_PRESENT_HELD, "the re-flip is the held present");
+    ace_pace_held_missed(&p, 1);                         /* the re-flip's present: busy */
+    ace_pace_held_missed(&p, 1);                         /* its VBLANK: busy */
+    ace_pace_flip(&p, 1, ACE_RATE_K2, 1, 1000u);    /* verdict OWED, its present busy */
+    ace_pace_flip(&p, 0, ACE_RATE_K2, 1, 1017u);
+    CHECK(ace_pace_take(&p) == ACE_SHOW_OWED && ace_pace_flip_kind(&p) == ACE_PRESENT_REAL && p.held &&
+              p.superseded == 0u && p.busy == 4u,
+          "the re-flip of a newer frame shows the owed frame (superseded %llu, busy %llu)",
+          (unsigned long long)p.superseded, (unsigned long long)p.busy);
+    /* That present fails, and the renderer can present again: nothing reached the screen, so the
+     * frame stays owed and the verdict stands for the present that takes over. */
+    ace_pace_owed_failed(&p);
+    CHECK(p.held && p.owed && p.busy == 5u && p.superseded == 0u, "a failed present leaves the frame owed");
+    CHECK(ace_pace_take(&p) == ACE_SHOW_OWED, "the present that takes over shows the owed frame");
+    ace_pace_shown_owed(&p, 43u, 1018u);
+    CHECK(ace_pace_held_shown(&p) == 968u && p.held && p.owed,
+          "the re-flip's own frame is owed: its present showed the older one");
+    CHECK(ace_pace_vblank(&p, 44u) && ace_pace_held_shown(&p) == 1018u && !p.held,
+          "then the newer frame at its VBLANK");
+    /* An OWED verdict that no present took before a VBLANK showed the held frame owes nothing:
+     * the present that takes it shows its own frame and keeps it. */
+    ace_pace_flip(&p, 1, ACE_RATE_K2, 1, 1050u);
+    CHECK(ace_pace_take(&p) == ACE_SHOW_BETWEEN, "consecutive after the re-flip");
+    ace_pace_shown_between(&p, 46u, 1051u);
+    ace_pace_held_missed(&p, 1);
+    ace_pace_flip(&p, 1, ACE_RATE_K2, 1, 1083u);    /* verdict OWED, its present busy */
+    CHECK(ace_pace_vblank(&p, 48u) && ace_pace_held_shown(&p) == 1051u && !p.held, "its VBLANK shows it");
+    CHECK(ace_pace_take(&p) == ACE_SHOW_KEEP && p.superseded == 0u, "a stale OWED verdict shows its own frame");
+    /* A failed held present, or a closed window, gives the frame up, and it is counted. */
+    ace_pace_flip(&p, 1, ACE_RATE_K2, 1, 1117u);
+    CHECK(ace_pace_take(&p) == ACE_SHOW_BETWEEN, "consecutive again");
+    ace_pace_shown_between(&p, 50u, 1118u);
     ace_pace_held_missed(&p, 0);
-    CHECK(!p.held && !p.owed && p.superseded == 2u && !ace_pace_vblank(&p, 41u),
+    CHECK(!p.held && !p.owed && p.superseded == 1u && !ace_pace_vblank(&p, 51u),
           "a failed held present gives the frame up");
     /* Nothing held: a miss changes nothing. */
+    const uint64_t busy_before = p.busy;
     ace_pace_held_missed(&p, 1);
-    CHECK(!p.held && !p.owed && p.busy == 2u, "a miss with nothing held counted something");
+    ace_pace_owed_failed(&p);
+    CHECK(!p.held && !p.owed && p.busy == busy_before, "a miss with nothing held counted something");
     /* An in-between is made only of consecutive frames. The frame flipped at 700 never reached
      * a present (the presenter's slot rule dropped it): the pass still holds the one before, so
      * the next frame is shown as it is and kept, never blended with a frame two steps back. */
