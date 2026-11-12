@@ -2255,6 +2255,23 @@ class TestRuntimeDllStaging(unittest.TestCase):
             self.assertTrue((player_dir / "assets/fonts/ui/manifest.json").is_file())
             self.assertTrue((player_dir / "assets/fonts/ui/geist/OFL.txt").is_file())
 
+    def test_non_windows_player_staging_also_copies_the_redump_list(self) -> None:
+        # Linux and macOS take main()'s non-Windows branch; the player there needs the
+        # bundled Redump list beside it too, or every disc check says "no list" (#1731).
+        import stage_runtime_dlls
+
+        posix_os = SimpleNamespace(**{**vars(os), "name": "posix"})
+        with tempfile.TemporaryDirectory() as tmp:
+            player_dir = Path(tmp) / "player"
+            with patch.object(stage_runtime_dlls, "os", posix_os):
+                rc = stage_runtime_dlls.main(["--target", str(player_dir), "--include-ui-fonts"])
+            self.assertEqual(rc, 0)
+            staged = player_dir / "assets" / "redump" / "redump-psp.zip"
+            self.assertTrue(staged.is_file())
+            self.assertEqual(
+                staged.read_bytes(), (ROOT / "assets" / "redump" / "redump-psp.zip").read_bytes()
+            )
+
     def test_missing_sdl3_ttf_fails_the_stage_closed(self) -> None:
         import stage_runtime_dlls
 

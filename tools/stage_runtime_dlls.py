@@ -671,14 +671,17 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if os.name != "nt":
         # POSIX hosts resolve shared libraries through the system loader. The
-        # opt-in player still needs its font assets beside the executable.
+        # opt-in player still needs its font assets and the Redump list beside
+        # the executable.
         if args.include_ui_fonts:
             try:
                 fonts = stage_ui_font_assets(args.target, repo_root=ROOT)
+                redump = stage_redump_list(args.target, repo_root=ROOT)
             except StageError as exc:
                 print(f"stage_runtime_dlls: FAIL: {exc}", file=sys.stderr)
                 return 1
             print(f"stage_runtime_dlls: staged {len(fonts)} UI font asset(s) into {args.target}")
+            print(f"stage_runtime_dlls: staged the Redump list ({len(redump)} file(s)) into {args.target}")
             return 0
         print(
             "stage_runtime_dlls: non-Windows host; shared libraries resolve "
@@ -698,13 +701,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"stage_runtime_dlls: FAIL: {exc}", file=sys.stderr)
         return 1
     font_assets = [name for name in staged if name.startswith("assets/fonts/ui/")]
-    dlls = [name for name in staged if name not in font_assets]
+    redump = [name for name in staged if name.startswith("assets/redump/")]
+    dlls = [name for name in staged if name not in font_assets and name not in redump]
     print(
         f"stage_runtime_dlls: staged {len(dlls)} runtime DLL(s) into "
         f"{args.target}: {', '.join(dlls)}"
     )
     if font_assets:
         print(f"stage_runtime_dlls: staged {len(font_assets)} UI font asset(s) into {args.target}")
+    if redump:
+        print(f"stage_runtime_dlls: staged the Redump list ({len(redump)} file(s)) into {args.target}")
     if args.runtime_manifest:
         print(f"stage_runtime_dlls: wrote {RUNTIME_MANIFEST_NAME} into {args.target}")
     return 0
