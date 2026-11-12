@@ -343,7 +343,7 @@ target's image takes the next value of one count (`cseq`), a batch that writes d
 depth buffer with its own (`zseq`), and queued batches are submitted first. Depth written after the
 target last changed makes it a depth read: it commits what a CPU read would (the targets' drawn
 pixels in the span, then the whole depth buffer) and decodes guest VRAM at 1x, through the depth
-buffer's own address or the 0x04600000 linear view alike (`rtt-depth-alias`). Otherwise the
+buffer's own address or the 0x04200000 linear view alike (`rtt-depth-alias`). Otherwise the
 target's colour is the newer content and the rules above apply, so a title that leaves its depth
 address on a colour buffer it draws (and writes no depth there) keeps the direct bind
 (`rtt-depth-alias` draws the colour target over the depth buffer's rows and reads it again). The

@@ -10847,7 +10847,7 @@ static int coherence_run_rtt_edge(void) {
  * target's span. C (8888, stride 512, at 0x100000) is drawn magenta; T (at 0x060000) then fills its
  * depth buffer, which lies at 0x140000, inside C's span (C's row 128), with a clear, and two sprites
  * on T read 64 x 32 texels of it in C's own format and buffer width, through the depth buffer's
- * address and through the 0x04600000 VRAM mirror (the PSP's linear depth view). Each read passes
+ * address and through the 0x04200000 VRAM mirror (the PSP's linear depth view, PSP-VRAM-MIRROR-001). Each read passes
  * the direct-bind rules, and before depth aliasing was detected it bound C's image: magenta. The
  * depth buffer was written after C was drawn, so the read is a depth read: it commits the depth to
  * guest VRAM and decodes it there at 1x, the software renderer's picture. Then C is drawn green over the rows those reads
@@ -10920,7 +10920,7 @@ static int coherence_run_rtt_depth_alias(void) {
     DL_EMIT(0x12, 3u | (3u << 7) | (1u << 23));
     DL_EMIT(0x01, sv_addr);
     DL_EMIT(0x04, (6u << 16) | 2u);
-    DL_EMIT(0xA0, 0x600000u | RDA_Z);                      /* the same depth through the linear view */
+    DL_EMIT(0xA0, 0x200000u | RDA_Z);                      /* the same depth through the linear view */
     DL_EMIT(0x01, sv_addr + 2u * (uint32_t)sizeof(RawSpriteVtx));
     DL_EMIT(0x04, (6u << 16) | 2u);
     DL_EMIT(0x1E, 0);                                      /* C, green over the depth's first rows */
