@@ -640,8 +640,13 @@ def verify_sbom_matches(
 def _binary_hashes_spdx23(document: dict) -> list[tuple[str, list[str]]]:
     found = []
     for package in document.get("packages") or []:
-        if isinstance(package, dict) and str(package.get("name", "")).lower().endswith(".dll"):
-            found.append((str(package["name"]), [
+        if not isinstance(package, dict):
+            continue
+        name = str(package.get("name", ""))
+        file_name = str(package.get("packageFileName", ""))
+        key = name if name.lower().endswith(".dll") else file_name if file_name.startswith("bin/") else None
+        if key is not None:
+            found.append((key, [
                 str(item.get("checksumValue")) for item in package.get("checksums") or []
                 if isinstance(item, dict) and item.get("algorithm") == "SHA256"]))
     for item in document.get("files") or []:
@@ -690,8 +695,9 @@ def verify_runtime_binding(
 
     The manifest is checked against ``package_dir`` (the package's ``bin/``) first. Then, in
     every SBOM given, each listed DLL is exactly one DLL element under its file name and each
-    listed executable exactly one file element named ``bin/<name>``, each with exactly the
-    recorded SHA-256, and no other DLL or ``bin/`` file element is present.
+    listed executable exactly one element for ``bin/<name>`` (SPDX 2.3: a package with that
+    ``packageFileName``; SPDX 3 and CycloneDX: a file element of that name), each with
+    exactly the recorded SHA-256, and no other DLL or ``bin/`` element is present.
     """
     import package_notices
     import stage_runtime_dlls

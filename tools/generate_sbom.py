@@ -765,9 +765,9 @@ class RuntimeBindingError(Exception):
     """The package's runtime manifest and the SBOM's binary inventory disagree (#324)."""
 
 
-def runtime_file_spdx_id(name: str) -> str:
-    """SPDX identifier of a packaged executable (``bin/<name>``), shared with verify_sbom."""
-    return "SPDXRef-File-bin-" + re.sub(r"[^A-Za-z0-9.-]", "-", name)
+def runtime_executable_spdx_id(name: str) -> str:
+    """SPDX identifier of a packaged executable (``bin/<name>``)."""
+    return "SPDXRef-exe-" + re.sub(r"[^A-Za-z0-9.-]", "-", name)
 
 
 def bind_runtime_manifest(
@@ -818,7 +818,7 @@ def bind_runtime_manifest(
                       "package_path": f"bin/{entry['path']}"})
     executables = [{
         "name": entry["path"],
-        "spdx_id": runtime_file_spdx_id(entry["path"]),
+        "spdx_id": runtime_executable_spdx_id(entry["path"]),
         "package_path": f"bin/{entry['path']}",
         "sha256": entry["sha256"],
         "size": entry["size"],
@@ -834,7 +834,9 @@ def generate_spdx23(manifest_data: dict, py_packages: list[dict],
     """Build an SPDX 2.3 document with optional Python lock byte binding.
 
     A shipped DLL that :func:`bind_runtime_manifest` bound carries its SHA-256 and package
-    path, and each bound executable is a file of the root package with its SHA-256.
+    path, and each bound executable is a package of its own with its SHA-256 and package
+    path, which the root package ``GENERATES``. (A file element would not do: SPDX 2.3
+    forbids a package with ``filesAnalyzed`` false from containing files.)
     """
     if shipped_dlls is None:
         shipped_dlls = resolve_shipped_dlls(manifest_data=manifest_data)
@@ -901,6 +903,11 @@ def generate_spdx23(manifest_data: dict, py_packages: list[dict],
 
     for dll in shipped_dlls:
         if any(p.get("name") in (dll["name"], dll.get("id")) or p.get("SPDXID") == dll["spdx_id"] for p in packages):
+            if "sha256" in dll:
+                raise RuntimeBindingError(
+                    f"SBOM_DLL_NAME_TAKEN: another SPDX package already carries the name or identifier of "
+                    f"{dll['name']}, so its runtime manifest SHA-256 would be lost"
+                )
             continue
         dll_package = {
             "SPDXID": dll["spdx_id"],
@@ -967,19 +974,23 @@ def generate_spdx23(manifest_data: dict, py_packages: list[dict],
     if lock_relationships is not None:
         document["relationships"].extend(lock_relationships)
     for executable in shipped_executables or []:
-        document.setdefault("files", []).append({
+        document["packages"].append({
             "SPDXID": executable["spdx_id"],
-            "fileName": executable["package_path"],
-            "fileTypes": ["BINARY"],
+            "name": executable["name"],
+            "versionInfo": manifest_data.get("version", "0.1.0"),
+            "packageFileName": executable["package_path"],
+            "downloadLocation": "NOASSERTION",
+            "filesAnalyzed": False,
+            "primaryPackagePurpose": "APPLICATION",
             "checksums": [{"algorithm": "SHA256", "checksumValue": executable["sha256"]}],
-            "copyrightText": "NOASSERTION",
             "licenseConcluded": "NOASSERTION",
-            "licenseInfoInFiles": ["NOASSERTION"],
-            "comment": "Packaged executable; size and SHA-256 from bin/runtime-manifest.json.",
+            "licenseDeclared": manifest_data.get("license", "GPL-3.0-or-later"),
+            "copyrightText": "NOASSERTION",
+            "comment": "Packaged executable built from the root package; SHA-256 from bin/runtime-manifest.json.",
         })
         document["relationships"].append({
             "spdxElementId": root_pkg_id,
-            "relationshipType": "CONTAINS",
+            "relationshipType": "GENERATES",
             "relatedSpdxElement": executable["spdx_id"],
         })
     return document
@@ -1193,11 +1204,15 @@ def main(argv: list[str] | None = None) -> int:
         except RuntimeBindingError as exc:
             print(f"Error: {exc}", file=sys.stderr)
             return 1
-    spdx23_doc = generate_spdx23(
-        manifest_data, py_packages, lock_files=parsed["lock_files"],
-        lock_relationships=parsed["lock_relationships"], shipped_dlls=shipped_dlls,
-        shipped_executables=shipped_executables,
-    )
+    try:
+        spdx23_doc = generate_spdx23(
+            manifest_data, py_packages, lock_files=parsed["lock_files"],
+            lock_relationships=parsed["lock_relationships"], shipped_dlls=shipped_dlls,
+            shipped_executables=shipped_executables,
+        )
+    except RuntimeBindingError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
     spdx301_doc = generate_spdx301(manifest_data, py_packages, shipped_dlls=shipped_dlls,
                                    shipped_executables=shipped_executables)
     cyclonedx_doc = generate_cyclonedx(manifest_data, py_packages, shipped_dlls=shipped_dlls,

@@ -381,12 +381,17 @@ class TestRuntimeManifestBinding(unittest.TestCase):
         dll = next(p for p in spdx["packages"] if p["name"] == "SDL3.dll")
         self.assertEqual(dll["checksums"], [{"algorithm": "SHA256", "checksumValue": self.sha["SDL3.dll"]}])
         self.assertEqual(dll["packageFileName"], "bin/SDL3.dll")
-        player = next(f for f in spdx["files"] if f["fileName"] == "bin/nakagawa_player.exe")
+        player = next(p for p in spdx["packages"] if p.get("packageFileName") == "bin/nakagawa_player.exe")
         self.assertEqual(player["checksums"],
                          [{"algorithm": "SHA256", "checksumValue": self.sha["nakagawa_player.exe"]}])
-        self.assertIn(("SPDXRef-Package-nakagawa-recomp", "CONTAINS", player["SPDXID"]),
-                      {(r["spdxElementId"], r["relationshipType"], r["relatedSpdxElement"])
-                       for r in spdx["relationships"]})
+        self.assertEqual((player["name"], player["filesAnalyzed"], player["primaryPackagePurpose"]),
+                         ("nakagawa_player.exe", False, "APPLICATION"))
+        relations = {(r["spdxElementId"], r["relationshipType"], r["relatedSpdxElement"])
+                     for r in spdx["relationships"]}
+        self.assertIn(("SPDXRef-Package-nakagawa-recomp", "GENERATES", player["SPDXID"]), relations)
+        # SPDX 2.3 7.8: a package with filesAnalyzed false contains no files.
+        self.assertFalse([r for r in relations if r[1] in {"CONTAINS", "CONTAINED_BY"}])
+        self.assertEqual([f["fileName"] for f in spdx["files"]], [PY_LOCK_IDENTITY])
         graph = self.load("spdx3")["@graph"]
         dll3 = next(n for n in graph if n.get("spdx:name") == "SDL3.dll")
         self.assertEqual(dll3["spdx:verifiedUsing"][0]["spdx:hashValue"], self.sha["SDL3.dll"])
@@ -447,16 +452,25 @@ class TestRuntimeManifestBinding(unittest.TestCase):
         self.assertEqual(self.generate("--package-dir", str(self.bin))[0], 0)
         wrong = "0" * 64
         tamper = {
-            "spdx": lambda d: next(p for p in d["packages"] if p["name"] == "SDL3.dll")
+            ("spdx", "SDL3.dll"): lambda d: next(p for p in d["packages"] if p["name"] == "SDL3.dll")
             ["checksums"][0].update(checksumValue=wrong),
-            "spdx3": lambda d: next(n for n in d["@graph"] if n.get("spdx:name") == "bin/nakagawa_player.exe")
+            ("spdx", "bin/nakagawa_player.exe"): lambda d: next(
+                p for p in d["packages"] if p.get("packageFileName") == "bin/nakagawa_player.exe")
+            ["checksums"][0].update(checksumValue=wrong),
+            ("spdx3", "SDL3.dll"): lambda d: next(n for n in d["@graph"] if n.get("spdx:name") == "SDL3.dll")
             ["spdx:verifiedUsing"][0].update({"spdx:hashValue": wrong}),
-            "cyclonedx": lambda d: next(c for c in d["components"] if c["name"] == "SDL3.dll")
+            ("spdx3", "bin/nakagawa_player.exe"): lambda d: next(
+                n for n in d["@graph"] if n.get("spdx:name") == "bin/nakagawa_player.exe")
+            ["spdx:verifiedUsing"][0].update({"spdx:hashValue": wrong}),
+            ("cyclonedx", "SDL3.dll"): lambda d: next(c for c in d["components"] if c["name"] == "SDL3.dll")
+            ["hashes"][0].update(content=wrong),
+            ("cyclonedx", "bin/nakagawa_player.exe"): lambda d: next(
+                c for c in d["components"] if c["name"] == "bin/nakagawa_player.exe")
             ["hashes"][0].update(content=wrong),
         }
         label = {"spdx": "SPDX 2.3", "spdx3": "SPDX 3", "cyclonedx": "CycloneDX"}
-        for kind, change in tamper.items():
-            with self.subTest(kind=kind):
+        for (kind, binary), change in tamper.items():
+            with self.subTest(kind=kind, binary=binary):
                 original = self.load(kind)
                 document = json.loads(json.dumps(original))
                 change(document)
@@ -464,8 +478,33 @@ class TestRuntimeManifestBinding(unittest.TestCase):
                 code, stderr = self.verify()
                 self.save(kind, original)
                 self.assertEqual(code, 1)
-                self.assertIn(f"SBOM_BINARY_HASH: {label[kind]} SBOM records SHA-256 ['{wrong}']", stderr)
+                self.assertIn(f"SBOM_BINARY_HASH: {label[kind]} SBOM records SHA-256 ['{wrong}'] for {binary}",
+                              stderr)
         self.assertEqual(self.verify()[0], 0)
+
+    def test_verification_rejects_a_duplicated_element(self):
+        self.assertEqual(self.generate("--package-dir", str(self.bin))[0], 0)
+        document = self.load("spdx")
+        player = next(p for p in document["packages"] if p.get("packageFileName") == "bin/nakagawa_player.exe")
+        document["packages"].append(dict(player, SPDXID="SPDXRef-exe-copy"))
+        self.save("spdx", document)
+        code, stderr = self.verify()
+        self.assertEqual(code, 1)
+        self.assertIn("SBOM_BINARY_COUNT: SPDX 2.3 SBOM has 2 element(s) for bin/nakagawa_player.exe", stderr)
+
+    def test_verification_needs_an_sbom_to_check(self):
+        errors = verify_sbom.verify_runtime_binding(self.bin, {"SPDX 2.3": None, "SPDX 3": None,
+                                                               "CycloneDX": None})
+        self.assertEqual(len(errors), 1)
+        self.assertIn("--package-dir needs at least one of", errors[0])
+
+    def test_a_bound_dll_whose_name_is_taken_stops_generation(self):
+        manifest = json.loads(RELEASE_MANIFEST.read_text(encoding="utf-8"))
+        manifest["components"] = [{"id": "sdl", "name": "SDL3.dll"}]
+        shipped, executables = generate_sbom.bind_runtime_manifest(
+            self.bin, generate_sbom.resolve_shipped_dlls(package_dir=self.bin))
+        with self.assertRaisesRegex(generate_sbom.RuntimeBindingError, "SBOM_DLL_NAME_TAKEN: .*SDL3.dll"):
+            generate_sbom.generate_spdx23(manifest, [], shipped_dlls=shipped, shipped_executables=executables)
 
     def test_verification_rejects_a_binary_the_package_does_not_ship(self):
         self.assertEqual(self.generate("--package-dir", str(self.bin))[0], 0)
