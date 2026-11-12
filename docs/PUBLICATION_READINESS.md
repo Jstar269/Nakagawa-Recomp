@@ -729,6 +729,10 @@ profile order and the claims-form ledger.
 Each path is bound to its claim unless its origin is `third_party`, which is bound to its bytes. Override that per
 path with `"binding"` in `--origin-json`, or for every path with `--binding claim|bytes`. Bind an authored or
 adapted file to its claim. Bind a file imported unchanged to its bytes, because there the bytes are the claim.
+A binary file, a path under `assets/vfpu/` and a path the candidate's release manifest waives are always bound to
+their bytes, and a claim binding for one is refused (`ADMISSION_BINDING_BYTES_REQUIRED`): for a new path the
+publication audit holds such bytes only to the pull request's own pin
+([Approved binaries in the release manifest](#approved-binaries-in-the-release-manifest)).
 
 For path-adding pull requests approved together, use `--batch <file.json>` with entries shaped like:
 
@@ -873,6 +877,7 @@ the fetched bytes to equal the derived document exactly. Beyond the V3 refusals 
 | `POLICY_DELTA_CLAIM_MISMATCH` | an added path's class, record id, record class, upstream, revision or licence differs from the claim its admission approved |
 | `POLICY_DELTA_CLAIM_UNRESOLVED` | an added path no longer resolves to any class (for example, its record no longer covers it) |
 | `POLICY_DELTA_ADDED_BYTES_MISMATCH` | a byte-bound path's bytes differ from the digest its admission approved |
+| `POLICY_DELTA_BINARY_CLAIM_BOUND` | a binary file, a path under `assets/vfpu/` or a path the release manifest waives is admitted bound to its claim only |
 
 What it still protects:
 
@@ -914,7 +919,10 @@ candidate's exact bytes in the trusted ledger. The approval is a `reviewed_blobs
 SHA-256 of the new bytes, citing the path's own exact record. The verifier reads those entries only when such a
 change needs one. The trusted record's `upstream_revision` should be updated in the same private commit. A
 byte-identical file outside any manifest (for example a font) has no row to check. After it lands it is held by
-review, and by the next section when the release manifest approves it as a binary.
+review, and by the next section when the release manifest approves it as a binary. For a vendored binary the
+release manifest waives (a font, an image, a sound), a `reviewed_blobs` approval does not let an in-place change
+through: the publication audit refuses other bytes at that path regardless, and the update lands as a new path
+([Approved binaries in the release manifest](#approved-binaries-in-the-release-manifest)).
 
 ### Approved binaries in the release manifest
 
@@ -937,34 +945,42 @@ findings the waiver would have dropped are reported, with one more that says why
 
 The manifest is part of the tree under audit, so its own pin is not an approval: it shows only that a file and
 its pin still agree. The trusted attestation therefore runs the audit with `--trusted-base <verdict base>`, the
-merge base of the head with the default branch, and the base decides for every path it already carries or its
-manifest already waives:
+merge base of the head with the default branch, and the base decides for every path it already carries, its
+manifest already waives or its profile (`assets/public_source_profile.json`) already declares:
 
 * The base's manifest must record the same waiver for the path. A component the base does not have, or whose
   disposition differs from the base's, waives nothing there.
 * The bytes must be the ones the base vouches for: the file it carries, or, for a path it waives without
   carrying the file, the SHA-256 its manifest pins. No pin, the base's included, approves other bytes at a path
-  whose file the base has.
+  whose file the base has. A path the base only declares has no bytes the base vouches for, so no waiver holds
+  there.
 * The pin must be as the base has it, so the pull request did not touch the approval, or be exactly the file's
   SHA-256; the second is how a pull request corrects a pin that does not match the file the base carries.
 * Every refused waiver for a file the audited tree carries is reported, whether or not its bytes raise a binary
   finding, so the base never comes to hold such a waiver or pin that this check refuses. A component for a path
   the tree does not carry is not compared with the base: the path can only appear later with an admission, and
   that pull request is held to the base like any other.
-* A VFPU table the base carries is exempt only as the bytes the base carries.
+* A VFPU table the base carries is exempt only as the bytes the base carries, and one the base only declares is
+  not exempt.
 
-A path the base neither carries nor waives is new. The candidate's own pin applies to it, a new VFPU table is
-exempt by its path, and whether the path may be published is the admission's decision. A claim-bound admission
-accepts any content for its path until the pull request lands ([V4 policy deltas](#v4-policy-deltas)); a
-byte-bound one (`"binding": "bytes"`) approves exactly one file.
+A path the base neither carries, waives nor declares is new. The candidate's own pin applies to it, a new VFPU
+table is exempt by its path, and whether the path may be published is the admission's decision. A new waived
+file, VFPU table or other binary is therefore admitted bound to its bytes (`"binding": "bytes"`), which approves
+exactly one file; the verifier refuses a claim-bound admission for it ([V4 policy deltas](#v4-policy-deltas)).
 
 The audit has no input that approves new binary bytes at a path the base already holds. Replacing an approved
 binary or a VFPU table in place with other binary bytes, or changing the kind of a waiver in place for such
-bytes, therefore fails the trusted attestation; text in its place is audited as text. Until
-the trusted side records such an approval, a replacement lands as a new path: the new file under a new name with
-its own manifest component, the old file and its component removed, and the profile change admitted by the
-maintainer. A local run without `--trusted-base` (pre-commit, `contrib-check`, the hygiene job) compares the
-tree's own pins and applies the path exemption as it stands; it is a tripwire, not this check.
+bytes, therefore fails the trusted attestation. A replacement lands as a new path: the new file under a new name
+with its own manifest component, the old file and its component removed, and the profile change admitted by the
+maintainer.
+
+Text in place of a VFPU table is audited as text. A waiver stays held to the bytes the base vouches for even when
+the file is text, so text at a path the manifest waives is audited as text only once its component no longer
+waives it. To edit a text file the manifest lists as `approved_binary` (such as the brand SVGs), change its
+component to a disposition that is not a waiver, such as `included`, in the same pull request.
+
+A local run without `--trusted-base` (pre-commit, `contrib-check`, the hygiene job) compares the tree's own pins
+and applies the path exemption as it stands; it is a tripwire, not this check.
 
 ### V3 policy deltas
 
