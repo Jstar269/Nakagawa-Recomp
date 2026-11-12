@@ -548,10 +548,9 @@ static uint32_t h_NetAdhocctlGetAdhocId(CpuState *s) {
  *        as it is (UNMEASURED).
  *   +4   char group[8]: the group's name.
  *   +12  char nickname[128]: the registry's /CONFIG/SYSTEM/owner_name, NUL-padded, exactly as the
- *        registry holds it. KNOWN DIFFERENCE: adhocctl.expected:50 records "nickname set" on a
- *        PSP, but Nakagawa's default profile has an empty nickname, so a default run answers 128
- *        zero bytes. That is deliberate: personal keys, owner_name included, never hold a user's
- *        data (hle_system.c, the registry model). No fallback nickname is invented here.
+ *        registry holds it: the nickname the user chose in the player, else the neutral "Player"
+ *        (#2197), so a nickname is set as adhocctl.expected:50 records on a PSP. It is never taken
+ *        from the operating system.
  *   +140 u8 bssid[6]: not the console's own MAC, and with the locally administered bit set and the
  *        group bit clear ("unexpected (low bits 2)"). Its value is otherwise UNMEASURED: the
  *        profile MAC with those two bits set that way, which differs from the MAC in that bit.
@@ -572,7 +571,7 @@ static uint32_t h_NetAdhocctlGetParameter(CpuState *s) {
     const uint32_t channel = (setting == 1u || setting == 6u || setting == 11u) ? setting : 11u;
     MEM_W32(A0, channel);
     for (uint32_t i = 0; i < 8u; i++) MEM_W8(A0 + 4u + i, s_adhocctl.group[i]);
-    uint8_t nickname[128] = {0};   /* the registry's value, or empty: see the KNOWN DIFFERENCE above */
+    uint8_t nickname[128] = {0};   /* the registry's owner_name, NUL-padded */
     sreg_ensure_loaded();
     const int node = sreg_find_path("/CONFIG/SYSTEM/owner_name");
     if (node >= 0 && s_sreg_nodes[node].type == SREG_TYPE_STR) {

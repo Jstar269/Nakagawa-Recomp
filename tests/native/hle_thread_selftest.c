@@ -8746,15 +8746,17 @@ static void adh_main_fn(CpuState *cpu) {
     int group_ok = 1, nickname_ok = 1, bssid_local = 1;
     const char want[8] = {'T', 'E', 'S', 'T', 'G', 'R', 'P', '1'};
     for (uint32_t i = 0; i < 8u; i++) group_ok &= MEM_R8(ADH_PARAM + 4u + i) == (uint8_t)want[i];
-    for (uint32_t i = 0; i < 128u; i++) nickname_ok &= MEM_R8(ADH_PARAM + 12u + i) == 0u;
+    static const char want_nick[] = "Player"; /* owner_name's neutral default with no SR_NICKNAME (#2197) */
+    for (uint32_t i = 0; i < 128u; i++)
+        nickname_ok &= MEM_R8(ADH_PARAM + 12u + i) == (i < sizeof want_nick ? (uint8_t)want_nick[i] : 0u);
     for (uint32_t i = 0; i < 6u; i++) bssid_local &= MEM_R8(ADH_PARAM + 140u + i) == MEM_R8(ADH_WLAN_MAC + i);
     const uint32_t channel = MEM_R32(ADH_PARAM);
     expect((channel == 1u || channel == 6u || channel == 11u) && group_ok && nickname_ok &&
            !bssid_local && (MEM_R8(ADH_PARAM + 140u) & 3u) == 2u &&
            MEM_R8(ADH_PARAM + 146u) == 0xccu && MEM_R8(ADH_PARAM + 147u) == 0xccu,
            "adhocctl GetParameter: channel 1/6/11, the group, the registry's owner_name as the nickname "
-           "(empty on the default profile: a KNOWN DIFFERENCE from adhocctl.expected:50, \"nickname "
-           "set\"), and a locally administered BSSID that is not the console's MAC");
+           "(\"Player\" by default, NUL-padded; a nickname is set, as adhocctl.expected:50 records), "
+           "and a locally administered BSSID that is not the console's MAC");
     for (uint32_t i = 0; i < 6u; i++) MEM_W8(ADH_MAC + i, 0xccu);
     int local = adh(ADH_NID_LOCAL_ETHER, ADH_MAC, 0u, 0u) == 0u;
     for (uint32_t i = 0; i < 6u; i++) local &= MEM_R8(ADH_MAC + i) == MEM_R8(ADH_WLAN_MAC + i);
