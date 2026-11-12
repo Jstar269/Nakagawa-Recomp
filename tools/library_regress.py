@@ -572,9 +572,12 @@ def _pid_alive(pid: int) -> bool:
 def _clear_stale_lock(lock: Path, pid_alive: Callable[[int], bool], log: Callable[[str], None]) -> None:
     """Remove our own lock file when the process named in it is gone (a killed fast run).
 
-    The lock is moved aside before it is deleted, and deleted only if it still holds the text
-    that named the dead process: a run with the same slot name that took the slot meanwhile keeps
-    its lock, which is moved back. Slot folders are local to one machine (process IDs are)."""
+    Reclaiming runs take ``<lock>.reclaim`` (created exclusively; it does not count as a slot)
+    and delete the lock only if it still holds the text that named the dead process. While a lock
+    file exists no run can create one of the same name, and only a holder of ``.reclaim`` deletes
+    another run's lock, so a lock taken by a live run meanwhile is never touched. Process IDs
+    only mean something within one operating system: a slot folder is shared by runs on one OS
+    (a Windows run and a WSL run on the same machine see different IDs)."""
     try:
         text = lock.read_text(encoding="utf-8", errors="replace")
     except OSError:
@@ -582,24 +585,45 @@ def _clear_stale_lock(lock: Path, pid_alive: Callable[[int], bool], log: Callabl
     match = re.search(r"\bpid=(\d+)", text)
     if not match or pid_alive(int(match.group(1))):
         return
-    aside = lock.with_name(f"{lock.name}.reclaim-{os.getpid()}.lock")
+    guard = lock.with_name(f"{lock.name}.reclaim")
     try:
-        os.rename(lock, aside)
-    except OSError:
-        return  # gone already, or another run moved it aside first
-    try:
-        taken = aside.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        taken = None
-    if taken == text:
-        aside.unlink(missing_ok=True)
-        log(f"reclaimed {lock.name}: process {match.group(1)} is gone")
+        descriptor = os.open(guard, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        _report_stale_guard(guard, pid_alive, log)
+        return
+    except OSError as error:
+        log(f"cannot reclaim {lock.name}: {guard.name}: {error}")
         return
     try:
-        os.link(aside, lock)  # never replaces a lock created meanwhile
-        aside.unlink(missing_ok=True)
+        os.write(descriptor, f"library-regress pid={os.getpid()}\n".encode())
+        os.close(descriptor)
+        try:
+            current = lock.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return  # another reclaimer removed it first
+        if current != text:
+            return  # a live run took the slot after the dead one was reclaimed
+        try:
+            lock.unlink()
+        except OSError as error:
+            log(f"cannot reclaim {lock.name} from process {match.group(1)}, which is gone: {error}")
+            return
+        log(f"reclaimed {lock.name}: process {match.group(1)} is gone")
+    finally:
+        try:
+            guard.unlink()
+        except OSError as error:
+            log(f"cannot remove {guard.name}: {error}; reclaiming {lock.name} stops until it is removed")
+
+
+def _report_stale_guard(guard: Path, pid_alive: Callable[[int], bool], log: Callable[[str], None]) -> None:
+    """Name a reclaim guard whose run is gone: it stops reclaiming until someone removes it."""
+    try:
+        match = re.search(r"\bpid=(\d+)", guard.read_text(encoding="utf-8", errors="replace"))
     except OSError:
-        log(f"{aside.name} holds a live lock that could not be moved back; it still counts as a held slot")
+        return  # its run finished meanwhile
+    if match and not pid_alive(int(match.group(1))):
+        log(f"{guard} was left by process {match.group(1)}, which is gone; remove it to let stale locks be reclaimed")
 
 
 def _lock_count(slot_dir: Path) -> int:

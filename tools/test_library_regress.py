@@ -466,6 +466,33 @@ class SlotTests(unittest.TestCase):
         self.assertEqual(held.read_text(encoding="utf-8"), "library-regress pid=525252\n")
         self.assertEqual(sorted(path.name for path in self.slots.iterdir()), ["mine.lock"])
 
+    def test_a_dead_lock_is_left_while_another_run_reclaims_it(self) -> None:
+        held = self.slots / "mine.lock"
+        held.write_text("library-regress pid=424242\n", encoding="utf-8")
+        guard = self.slots / "mine.lock.reclaim"
+        guard.write_text(f"library-regress pid={library_regress.os.getpid()}\n", encoding="utf-8")
+        said: list[str] = []
+        library_regress._clear_stale_lock(held, lambda pid: pid != 424242, said.append)
+        self.assertEqual(held.read_text(encoding="utf-8"), "library-regress pid=424242\n")
+        self.assertTrue(guard.exists())
+        self.assertEqual(said, [])
+
+    def test_a_guard_left_by_a_dead_reclaimer_is_reported_not_removed(self) -> None:
+        held = self.slots / "mine.lock"
+        held.write_text("library-regress pid=424242\n", encoding="utf-8")
+        guard = self.slots / "mine.lock.reclaim"
+        guard.write_text("library-regress pid=525252\n", encoding="utf-8")
+        said: list[str] = []
+        library_regress._clear_stale_lock(held, lambda _pid: False, said.append)
+        self.assertTrue(held.exists() and guard.exists())
+        self.assertEqual(len(said), 1)
+        self.assertIn("525252", said[0])
+        self.assertIn("remove it", said[0])
+
+    def test_the_reclaim_guard_is_not_a_slot(self) -> None:
+        (self.slots / "mine.lock.reclaim").write_text("library-regress pid=1\n", encoding="utf-8")
+        self.assertEqual(library_regress._lock_count(self.slots), 0)
+
     def test_a_quiet_lock_holds_the_run(self) -> None:
         (self.slots / "recomp-perf.lock").write_text("x", encoding="utf-8")
         held: list[float] = []
