@@ -24,10 +24,10 @@ Classes are listed strongest first. A path takes the first class whose source na
 | Class | HLE NIDs | VFPU forms |
 | --- | ---: | ---: |
 | `hardware-measured` | 64 | 73 |
-| `ppsspp-derived` | 125 | 88 |
+| `ppsspp-derived` | 126 | 88 |
 | `game-route` | 0 | 0 |
 | `synthetic` | 359 | 183 |
-| `unverified` | 160 | 22 |
+| `unverified` | 159 | 22 |
 | total | 708 | 366 |
 
 The VFPU census also lists 307 forms the runtime refuses at the
@@ -168,7 +168,7 @@ a title that translates none has generated code unchanged.
 | `0x219c58f1` | `sceHprmIsMicrophoneExist` | input | `hardware-measured` | PSP oracle PSP-HLE-HPRM-001 |
 | `0x21ff80e4` | `sceMpegQueryStreamOffset` | mpeg | `ppsspp-derived` | sceMpeg banner: wrappers over the PPSSPP sceMpeg port in src/rt/mpeg.c |
 | `0x2255551e` | `sceHttpGetNetworkPspError` | network | `unverified` | no recorded evidence |
-| `0x231fc6b7` | `_sceAtracGetContextAddress` | audio_codec | `unverified` | no recorded evidence |
+| `0x231fc6b7` | `_sceAtracGetContextAddress` | audio_codec | `ppsspp-derived` | handler comment names PPSSPP; sceAtrac block: stream bookkeeping ported from PPSSPP sceAtrac.cpp |
 | `0x235d8787` | `scePsmfPlayerCreate` | mpeg | `synthetic` | HLE selftest dispatch |
 | `0x237dbd4f` | `sceKernelAllocPartitionMemory` | kernel_memory | `synthetic` | HLE selftest dispatch; note |
 | `0x23c31ffe` | `scePowerVolatileMemLock` | power | `synthetic` | HLE selftest dispatch |
@@ -445,7 +445,7 @@ a title that translates none has generated code unchanged.
 | `0x8218b4dd` | `sceKernelReferGlobalProfiler` | kernel_thread | `unverified` | generic success handler; performs none of the API contract |
 | `0x82826f70` | `sceKernelSleepThreadCB` | kernel_thread | `synthetic` | conformance cells and HLE selftest dispatch |
 | `0x82bc5777` | `sceKernelGetSystemTimeWide` | kernel_time | `hardware-measured` | PSP oracle PSP-HLE-VTIMER-002 |
-| `0x83bf7afd` | `sceAtracSetSecondBuffer` | audio_codec | `ppsspp-derived` | handler comment names PPSSPP; sceAtrac block: stream bookkeeping ported from PPSSPP sceAtrac.cpp |
+| `0x83bf7afd` | `sceAtracSetSecondBuffer` | audio_codec | `ppsspp-derived` | sceAtrac block: stream bookkeeping ported from PPSSPP sceAtrac.cpp |
 | `0x83e85ea0` | `sceAtracGetSecondBufferInfo` | audio_codec | `ppsspp-derived` | handler comment names PPSSPP; sceAtrac block: stream bookkeeping ported from PPSSPP sceAtrac.cpp |
 | `0x840e8133` | `sceKernelWaitThreadEndCB` | kernel_thread | `synthetic` | conformance cells and HLE selftest dispatch |
 | `0x843fbf43` | `scePowerSetCpuClockFrequency` | power | `synthetic` | HLE selftest dispatch; note |
