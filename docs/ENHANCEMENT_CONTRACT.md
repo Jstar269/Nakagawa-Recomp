@@ -175,7 +175,7 @@ Enhancement packages are declared as versioned JSON manifests adhering to `asset
 The declaration schema is kept lean and focused on core metadata and capability requests:
 
 - **Required root properties:** `schema_version` (must be 1), `id` (package identifier), `display_name`, `version` (semver), `category` (one of the 6 recognized categories), `target_title_id` (title ID or `*`), and `capabilities` (non-empty array of symbolic capability names).
-- **Optional root properties:** `min_runtime_version` (semver), `hooks` (array of hook objects with `symbol` and `type` only), and—for declarative frame-rate rescale packages (category `timing_frame_presentation`, and the `game_version`, `executable_sha256` and `sites` of a `guest_memory_code_hook` package, section 11.3.6)—`game_version` (exact title version string), `executable_sha256` (64-char lowercase hex SHA-256 of the stock guest ELF), `rng_policy` (`mode` and `reason`), and `sites` (non-empty array of symbolic instruction-site transform descriptors).
+- **Optional root properties:** `experimental` (`true` or `false`; a package without it is experimental, section 9.10), `min_runtime_version` (semver), `hooks` (array of hook objects with `symbol` and `type` only), and—for declarative frame-rate rescale packages (category `timing_frame_presentation`, and the `game_version`, `executable_sha256` and `sites` of a `guest_memory_code_hook` package, section 11.3.6)—`game_version` (exact title version string), `executable_sha256` (64-char lowercase hex SHA-256 of the stock guest ELF), `rng_policy` (`mode` and `reason`), and `sites` (non-empty array of symbolic instruction-site transform descriptors).
 - **Symbolic site descriptors (`sites`):** Each site entry declares `id` (site identifier), `function` (symbolic function name, never a raw hex address or `FUN_`/`sub_`/`loc_`/`func_` stem), `insn_offset` (non-negative 4-byte-aligned byte offset inside the function), `stock_digest` (64-char lowercase hex SHA-256 of the expected little-endian stock MIPS instruction word or words), optional `word_count` (an integer from 1 to 16, default `1`, the number of words `stock_digest` covers; only `1` has a defined rewrite, so a larger value refuses the package), and `transform` (one of the site transforms of section 9.2). A `gate_30hz_alt` site also declares `alternates`, a list of 1 to 4 distinct function symbols; every other transform refuses that field. A `clip_x_widen` site (category `guest_memory_code_hook`, section 11.3.6) also declares `clip_register` (`v0` or `v1`) and `clip_offsets` (1 to 4 distinct 16-byte-aligned byte offsets from 0 to 65536); no other transform takes them, and a `guest_memory_code_hook` package takes no other transform and carries only `game_version`, `executable_sha256` and `sites` of the timing fields.
 - **Published packages (section 5.1):** a published package adds `published_package` (must be 1), `disc_id`, `disc_version`, `digest_scheme` (`hmac-sha256-executable-key-v1`) and `site_map` (each symbolic name the package uses and its `0x%08x` address, and no other), and requires `executable_sha256`. Its stock digests (`stock_digest`, `low_stock_digest`, a data site's `stock_digest`, a data file's `sha256`) are HMAC-SHA-256 under `published_digest_key()`, SHA-256 of a fixed tag and the whole executable. It may not declare `stock_values`: a store site declares `stock_value_digests` instead, the keyed digests (`keyed_stock_value_digest()`) of the tag `stock value`, the site id and each stock value's 32 bits. Codegen embeds the key in the user's own build, and the store-site check (`nk_enh_store`) digests each value the game stores, compares it, and scales the observed value as the builder scales a stock value; a mismatch, or a result outside the f32 or s32 range, stops the run with `ENHANCEMENT_DATA_MISMATCH`, naming the site. `python tools/enhancement_package.py --publish <package> --elf <selected.elf> --base <hex> --disc-id <ID> --disc-version <n.nn> --out <disc_id>-<kind>.json` writes one from a private package and its `.symbols.json`, after checking that it resolves back to the same declaration. Its names come only from that symbol map, and it refuses any name the executable's own symbol table holds. A function without a decompilation name may carry a project-assigned name ending in its own address (`hst_fn_0001ea64`); a name whose 8-hex suffix differs from its site-map address is refused. A published package's `version` has no build metadata and a pre-release tag of at most 16 characters, and its `rng_policy.reason` is at most 1024 characters. Codegen resolves a published package only through `resolve_published_package()`, which refuses `modified_executable` and `site_mismatch`; build-package refuses `other_disc`, `other_revision` and `modified_executable` first, from the disc's PARAM.SFO. `tools/publish_audit.py` (`check_enhancement_packages`) refuses any package outside `assets/enhancements/`, any `.symbols.json`, and any file there, whatever its extension, that is not a valid published package named `<disc id, lowercase>-<kind>.json`. It also refuses a package in which any string or key, outside the digest slots and the site map's addresses, holds an address literal, an 8-hex-digit token delimited by anything but a letter or digit (an instruction word, or an address; a site-map name's own-address suffix is the one exception), a run of more than 8 hex digits, a base64-like run of 32 or more characters, an escaped byte or a control character. A regular-expression gate cannot stop text encoded on purpose: shorter base64 runs, or hex in chunks of 7 digits or fewer, pass it. Bounded fields (`rng_policy.reason` at 1024 characters) limit that, and review covers the rest. The audit checks only a digest's shape: it cannot tell a keyed digest from 32 raw bytes without the executable, so the export command, which computes every digest from the executable, is what makes it a digest.
 - **No speculative payloads:** Unimplemented category payloads (`assets`, `presentation`, `timing`, `camera`, `save_data`) remain forbidden in the schema until their respective runtime loaders land.
@@ -431,6 +431,44 @@ each keeps its own category, digest and checks.
   package is the build's one package, `packages/<disc_id>-enhanced-<hook id>`.
 - **Without one** the generated output, the package directory and the cache key are byte-identical to a build
   before this section.
+
+### 9.10. Experimental or Released
+
+A package is experimental unless it declares `"experimental": false`. A missing value reads as experimental, the
+validator refuses any value other than `true` or `false`, and the player reads anything but `false`, and a file it
+cannot use, as experimental. The flag changes one thing: the title page's ENHANCEMENTS card tags the title's 60 FPS
+game logic switch EXPERIMENTAL for an experimental package and OPTIONAL for a released one. The switch keeps its
+tier (Ace), its default (off, section 9.1, item 2) and what it runs. The flag is part of the declaration, so it is
+in the declaration digest and the AOT cache key like every other field (section 9.8).
+
+Only the maintainer releases a package the project ships in `assets/enhancements/` (section 5.1), by a decision
+recorded in that package's entry below, with what was measured and the limits known when it was released. A
+package in a user's data folder carries whatever its author wrote.
+
+#### 9.10.1. *Hot Shots Tennis* (UCUS98701): `hst.timing.native_60hz`
+
+- **Status.** Released from package 14.0.0-pre1 by the owner's decision of 2026-11-12 (#1732), with the known
+  limits below. It is short of the goal #1732 sets, true 60 logic updates a second in matches.
+- **Measured** (the side-by-side check of section 9.7, recorded in #2362). Package 14.0.0-pre1 against the
+  authentic game on a private full-match route (title screen, menus and one full match): 57.2 logic updates per
+  game second in the menus (with the boot), 59.9 on the title screen and 57.1 in a match. No compared event
+  differed from the authentic game: the point winner, the ball's side and the ball's owner match, and both
+  players' random-number seeds advance 1.98 and 2.03 times as often, as `rescale_probability` (section 9.3)
+  expects. Shot-type changes were too few to judge, and the tool's overall verdict reads `FAIL` only for reseeds it
+  cannot resolve as generator steps, which the authentic run has about as many of (35 against 38). The host was never fully idle: the
+  measured run had 43 % mean processor load from other work, and an earlier run at 53 % fell to 52.7 in the
+  match (`SLOWED`).
+- **Known limits.**
+  1. Further sites belong in the next package update: the eight `gate_30hz_store` sites of #2360 (a cursor ease, a
+     step toward a target and a float ease, which run twice as fast at 60 Hz until then), and five triage rows
+     still open (#2362).
+  2. At 60 Hz the step from the main menu into single player takes 3.94 s longer than in the authentic game (288
+     vertical blanks against 52). A 60 Hz run with an earlier package shows the same, so it is older than
+     14.0.0-pre1. Its cause is not traced yet (#1732).
+
+  Also recorded in #2362: when two bounces come 33 ms apart or less, the bounce-effect sites free their emitters
+  up to two 60 Hz updates early.
+- **Not run.** A run on a fully idle host.
 
 ## 10. Play Modes: Authentic, Enhanced and Ace
 

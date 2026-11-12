@@ -362,6 +362,22 @@ class TestEnhancementPackageSchema(unittest.TestCase):
                     validate_package(pkg)
                 self.assertIn(f"Missing required property '{field}'", str(ctx.exception))
 
+    def test_experimental_is_an_optional_boolean(self) -> None:
+        """experimental (section 9.10) may be left out or be true or false, and nothing else."""
+        for value in (True, False):
+            with self.subTest(value=value):
+                pkg = copy.deepcopy(self.valid_presentation_pkg)
+                pkg["experimental"] = value
+                self.assertIs(validate_package(pkg)["experimental"], value)
+        bad_values: tuple[object, ...] = ("false", 0, None, [])
+        for bad in bad_values:
+            with self.subTest(value=bad):
+                pkg = copy.deepcopy(self.valid_presentation_pkg)
+                pkg["experimental"] = bad
+                with self.assertRaises(EnhancementPackageError) as ctx:
+                    validate_package(pkg)
+                self.assertIn("experimental must be true or false", str(ctx.exception))
+
     def test_capabilities_validation(self) -> None:
         """Capabilities list must be non-empty array of unique valid identifiers."""
         # Empty array

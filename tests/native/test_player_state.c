@@ -7854,11 +7854,30 @@ static void test_play_mode_settings(void) {
         assert(app->title_enhancements[1].available && app->title_enhancements[1].shipped);
         assert(strcmp(app->title_enhancements[1].package_id, "shipped-60hz") == 0);
         assert(app->title_enhancements[2].available && !app->title_enhancements[2].shipped);
+        /* A package is experimental unless it declares "experimental": false (section 9.10). */
+        assert(app->title_enhancements[1].experimental && app->title_enhancements[2].experimental);
+        write_text_file(file,
+            "{\"id\": \"shipped-60hz\", \"target_title_id\": \"fixture-title-2\","
+            " \"experimental\": false}");
+        player_app_refresh_title_enhancements(app);
+        assert(app->title_enhancements[1].available && !app->title_enhancements[1].experimental);
+        write_text_file(file,
+            "{\"id\": \"shipped-60hz\", \"target_title_id\": \"fixture-title-2\","
+            " \"experimental\": \"false\"}");
+        player_app_refresh_title_enhancements(app);
+        assert(app->title_enhancements[1].available && app->title_enhancements[1].experimental);
+        write_text_file(file,
+            "{\"id\": \"shipped-60hz\", \"target_title_id\": \"fixture-title-3\","
+            " \"experimental\": false}");
+        player_app_refresh_title_enhancements(app);
+        assert(!app->title_enhancements[1].available && app->title_enhancements[1].experimental);
+        write_text_file(file,
+            "{\"id\": \"shipped-60hz\", \"target_title_id\": \"fixture-title-2\"}");
         snprintf(own, sizeof(own), "%s%cenhancements%ctest90002-60hz.json", root, sep, sep);
         write_text_file(own, "{}");
         player_app_refresh_title_enhancements(app);
         assert(!app->title_enhancements[1].available && !app->title_enhancements[1].shipped &&
-               app->title_enhancements[1].problem[0]);
+               app->title_enhancements[1].problem[0] && app->title_enhancements[1].experimental);
         remove(own);
         remove(file);
         player_app_refresh_title_enhancements(app);

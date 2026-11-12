@@ -204,6 +204,9 @@ typedef struct {
     /* The file read is the shipped published package, not one in the user's
        data folder. */
     bool shipped;
+    /* The package is experimental: true unless it is usable and declares
+       "experimental": false (docs/ENHANCEMENT_CONTRACT.md section 9.10). */
+    bool experimental;
     /* Why a file that exists cannot be used; empty when there is no file or it
        is usable. */
     char problem[160];
