@@ -269,7 +269,7 @@ int ace_format(const AceConfig *c, char *out, size_t cap) {
         const int m = snprintf(out + n, cap - (size_t)n, ";ssaa=%d", c->ssaa);
         n = m < 0 ? -1 : n + m;
     }
-    /* Likewise peak, after depth and ssaa, before glyphs and cull: a missing peak is off. */
+    /* Likewise peak, after depth and ssaa, before cull: a missing peak is off. */
     if (n > 0 && (size_t)n < cap && c && c->on && c->peak) {
         const int m = snprintf(out + n, cap - (size_t)n, ";peak=limit");
         n = m < 0 ? -1 : n + m;
