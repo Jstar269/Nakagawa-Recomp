@@ -192,6 +192,7 @@ def _runtime_title_diagnostic_inventory() -> dict[str, set[int]]:
     ]
     configured += [item["address"] for item in compat_overrides.TITLE_CONFIGURED_SCHEDULER_COMPAT]
     configured += [item["address"] for item in compat_overrides.TITLE_CONFIGURED_DISPATCH]
+    configured += list(compat_overrides.RETIRED_TITLE_CONFIGURED_DISPATCH)
     configured += [item["address"] for item in compat_overrides.SCHEDULER_HOOKS]
     all_addresses = (set(compat_overrides.RETIRED_DISPATCH_TARGETS) - {0, 0x1000}) | set(configured) | {
         0x0030a0bf, 0x0031101c, 0x0031105c,
@@ -1639,6 +1640,16 @@ class GenericRuntimeTitleAddressGuardTests(unittest.TestCase):
             found = _runtime_title_diagnostic_literals(
                 contaminated, inventory[relative_path])
             self.assertIn(address, found, relative_path)
+
+    def test_retired_title_configured_dispatch_addresses_stay_in_the_guard(self) -> None:
+        """Retiring a binding empties its inventory entry; the guard keeps its address (#363)."""
+        retired = set(compat_overrides.RETIRED_TITLE_CONFIGURED_DISPATCH)
+        self.assertEqual(retired, {0x00030950, 0x0003e06c, 0x00292fa0})
+        live = {int(item["address"]) for item in compat_overrides.TITLE_CONFIGURED_DISPATCH}
+        self.assertEqual(retired & live, set(), "an address is both live and retired")
+        for relative_path, addresses in _runtime_title_diagnostic_inventory().items():
+            with self.subTest(source=relative_path):
+                self.assertEqual(retired - addresses, set())
 
     def test_init_walker_guard_and_its_restore_are_retired(self) -> None:
         inventory = compat_overrides.RETIRED_INIT_WALKER_GUARD

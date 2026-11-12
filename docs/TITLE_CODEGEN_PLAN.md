@@ -201,6 +201,11 @@ to the normal miss path. Validation rejects a self-alias, a duplicate source, an
 alias whose target is itself an alias source, because the runtime resolves exactly one
 step and a chain would silently stop short.
 
+No title in `assets/titles/` declares a dispatch alias; only the fixtures `pspdev-phase5.json`,
+`synthetic.json` and `synthetic-title2.json` do. Any other manifest there that declares one must
+be inventoried in `TITLE_CONFIGURED_DISPATCH` (`tools/compat_overrides.py`), which
+`TitleDeclaredDispatchBindings` in `tools/test_title_runtime_config.py` checks (#363).
+
 The collection is normalized to a canonical order, so two manifests that mean the
 same thing produce the same digest and are not two different builds.
 
