@@ -4040,6 +4040,7 @@ void sr_hle_init(void) {
     hle_register_ctrl_sampling_handlers();
     sr_hle_power_register_lock();
     hle_register_gpi_gpo_handlers();
+    hle_register_std_handle_handlers();
     hle_register_mpeg_shared_handlers();
     hle_register_psmf_player_handlers();
     hle_register_partition_savedata_handlers();

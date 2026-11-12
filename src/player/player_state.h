@@ -247,6 +247,8 @@ typedef enum {
     PLAYER_PART_LOAD,          /* short loads (section 11.3.10): 0 off, 1 fast. The display waits
                                   a title's package declares return at once; guest timing changes. Ace
                                   only; a title without a load part ignores it */
+    PLAYER_PART_TWIN,          /* full 32-bit colour, the host twin (#2050, section 10.11): 0 off, 1 on.
+                                  Appended; the Ace line writes twin after tess */
     PLAYER_PART_COUNT
 } PlayerEnhancedPart;
 
@@ -1717,7 +1719,7 @@ void player_play_resolve(const PlayerSettings *settings, const char *disc_id,
  * Authentic resolution stays off. */
 void player_play_apply_logic_60(PlayerPlayResolved *play, bool logic_60);
 /* The SR_ACE line for a resolution: "off", or "v1;tier=enhanced;af=16;text=on;readout=off;
- * notice=on;wide=off;smooth=off;sas=off;tess=off" (tier=ace for Ace; smooth=match is never written).
+ * notice=on;wide=off;smooth=off;sas=off;tess=off;twin=off" (tier=ace for Ace; smooth=match is never written).
  * ";stick=<counts>" follows only for Ace with the Stick dead zone part on and a title whose
  * catalog entry declares a dead zone (stick_counts > 0); a missing stick is off.
  * ";load=fast" follows only for Ace with the Short loads part on; a missing load is off.

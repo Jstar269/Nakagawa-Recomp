@@ -40089,6 +40089,35 @@ static void test_fpl_blocking_waits(void) {
     s_cur = (int)(cur - s_tcb);
 }
 
+/* PSP-HLE-STDIO-001 (docs/HARDWARE_ORACLE.md, hle-std-handles, 2026-11-06, PSP-3000): a one-byte
+ * sceIoWrite to Stdout and to Stderr returns 1; sceIoClose of the Stdout handle returns
+ * 0x800200D1 and closes nothing, so a later write returns 1 and sceKernelStdout returns the same
+ * handle. The cells hold whatever value the runtime hands out for the handles. */
+static void test_std_handles_measured(void) {
+    reset_fixture();
+    sr_hle_init();
+    const uint32_t buf = 0x00240c00u;
+    MEM_W8(buf, (uint8_t)'x');
+    CpuState cpu;
+    memset(&cpu, 0, sizeof cpu);
+    const uint32_t out = sr_syscall(&cpu, 0xa6bab2e9u);   /* sceKernelStdout */
+    memset(&cpu, 0, sizeof cpu);
+    const uint32_t err = sr_syscall(&cpu, 0xf78ba90au);   /* sceKernelStderr */
+    memset(&cpu, 0, sizeof cpu); cpu.r[4] = out; cpu.r[5] = buf; cpu.r[6] = 1u;
+    expect(sr_syscall(&cpu, 0x42ec03acu) == 1u, "std handles: a 1-byte write to Stdout returns 1 (PSP-HLE-STDIO-001)");
+    memset(&cpu, 0, sizeof cpu); cpu.r[4] = err; cpu.r[5] = buf; cpu.r[6] = 1u;
+    expect(sr_syscall(&cpu, 0x42ec03acu) == 1u, "std handles: a 1-byte write to Stderr returns 1 (PSP-HLE-STDIO-001)");
+    memset(&cpu, 0, sizeof cpu); cpu.r[4] = out;
+    expect(sr_syscall(&cpu, 0x810c4bc3u) == 0x800200d1u,
+           "std handles: sceIoClose of Stdout returns 0x800200D1 (PSP-HLE-STDIO-001)");
+    memset(&cpu, 0, sizeof cpu); cpu.r[4] = out; cpu.r[5] = buf; cpu.r[6] = 1u;
+    expect(sr_syscall(&cpu, 0x42ec03acu) == 1u,
+           "std handles: Stdout still takes a write after the refused close (PSP-HLE-STDIO-001)");
+    memset(&cpu, 0, sizeof cpu);
+    expect(sr_syscall(&cpu, 0xa6bab2e9u) == out,
+           "std handles: sceKernelStdout returns the same handle after the close (PSP-HLE-STDIO-001)");
+}
+
 static void test_vpl_blocking_waits(void) {
     extern void sr_hle_test_partition_reset(void);
     reset_fixture();
@@ -44003,7 +44032,7 @@ static void test_ace_stick_remap_reaches_the_guest_only_from_the_live_stick(void
     extern int s_ctrl_test_stick;
     extern int ace_init_spec(const char *spec, const char *report_path);
     static const char stick_line[] =
-        "v1;tier=ace;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;stick=64";
+        "v1;tier=ace;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;twin=off;stick=64";
     CpuState cpu;
     RouteStickRead r;
     const int test_stick = s_ctrl_test_stick;
@@ -44831,14 +44860,15 @@ static uint32_t s_selfstop_guest_gp;
 static uint32_t s_selfstop_guest_returned;
 static uint32_t s_selfstop_guest_pc;
 static int s_selfstop_guest_in_scheduler;
+static uint32_t s_selfstop_guest_args[3] = {0u, 4u, SELFSTOP_ARG_ADDR};
 static void selfstop_guest_entry(CpuState *s) {
     s->pc = LIFECYCLE_MOD_B_BASE + LIFECYCLE_START_OFF;
     s->r[28] = s_selfstop_guest_gp;
     s_selfstop_guest_pc = s->pc;
     s_selfstop_guest_in_scheduler = sched_guest_thread_running();
-    s->r[4] = 0u; /* first argument is unnamed in the public PSPSDK declaration */
-    s->r[5] = 4u;
-    s->r[6] = SELFSTOP_ARG_ADDR;
+    s->r[4] = s_selfstop_guest_args[0]; /* unnamed in the public PSPSDK declaration */
+    s->r[5] = s_selfstop_guest_args[1];
+    s->r[6] = s_selfstop_guest_args[2];
     (void)sr_syscall(s, NID_SCE_KERNEL_SELF_STOP_UNLOAD_MODULE);
     s_selfstop_guest_returned = 1u; /* the API is terminal on the modeled success path */
 }
@@ -45375,6 +45405,51 @@ static void test_late_prx_unload_reload_lifecycle(void) {
     expect(sr_hle_test_module_count() == 0u && sr_hle_test_image_count() == 0u &&
                sr_hle_resolve_late_import(LIFECYCLE_EXPORT_B) == 0u,
            "self-stop: caller exit retires the module record, image and exports");
+
+    /* PSP-HLE-SELFSTOP-001 (docs/HARDWARE_ORACLE.md, 2026-11-08, PSP-3000), form (1, 0, NULL):
+     * a first argument of 1 behaves as 0 does. The call does not return, module_stop runs once
+     * with argument size 0 and argp 0, and the module is unloaded. */
+    self_uid = sr_hle_test_load_prx_image(path_b, LIFECYCLE_MOD_B_BASE, LIFECYCLE_EXPORT_B,
+                                          LIFECYCLE_PATCH_OFF_A_1);
+    expect(self_uid != 0u &&
+               sr_hle_test_set_module_image(self_uid, LIFECYCLE_MOD_B_BASE,
+                                            LIFECYCLE_MOD_B_BASE + LIFECYCLE_IMAGE_SIZE, self_gp),
+           "self-stop (1, 0, NULL): module image loads");
+    sr_test_register_guest_fn(LIFECYCLE_MOD_B_BASE + LIFECYCLE_START_OFF, lifecycle_start_fn);
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = self_uid;
+    expect(sr_syscall(&cpu, 0x50f0c1ecu) == 0u, "self-stop (1, 0, NULL): module starts");
+    /* Only (1, 0, NULL) was measured: a first argument of 1 with an argument block stays refused,
+     * so the call returns and the module stays loaded. */
+    s_lifecycle_stop_calls = 0u;
+    s_selfstop_guest_returned = 0u;
+    s_selfstop_guest_args[0] = 1u;
+    s_selfstop_guest_args[1] = 4u;
+    s_selfstop_guest_args[2] = SELFSTOP_ARG_ADDR;
+    sr_test_register_guest_fn(LIFECYCLE_MOD_B_BASE + LIFECYCLE_START_OFF, selfstop_guest_entry);
+    sched_run(LIFECYCLE_MOD_B_BASE + LIFECYCLE_START_OFF, 0u, 0u);
+    expect(s_selfstop_guest_returned == 1u && s_lifecycle_stop_calls == 0u &&
+               sr_hle_test_module_count() == 1u,
+           "self-stop (1, 4, argp): unmeasured form is refused and the module stays loaded");
+    s_lifecycle_stop_calls = 0u;
+    s_lifecycle_stop_arglen = 0xffffffffu;
+    s_lifecycle_stop_argp_word = 0xffffffffu;
+    s_selfstop_guest_returned = 0u;
+    s_selfstop_guest_args[0] = 1u;
+    s_selfstop_guest_args[1] = 0u;
+    s_selfstop_guest_args[2] = 0u;
+    sr_test_register_guest_fn(LIFECYCLE_MOD_B_BASE + LIFECYCLE_START_OFF, selfstop_guest_entry);
+    sched_run(LIFECYCLE_MOD_B_BASE + LIFECYCLE_START_OFF, 0u, 0u);
+    s_selfstop_guest_args[0] = 0u;
+    s_selfstop_guest_args[1] = 4u;
+    s_selfstop_guest_args[2] = SELFSTOP_ARG_ADDR;
+    expect(s_selfstop_guest_returned == 0u,
+           "self-stop (1, 0, NULL): the call does not return (PSP-HLE-SELFSTOP-001)");
+    expect(s_lifecycle_stop_calls == 1u && s_lifecycle_stop_arglen == 0u &&
+               s_lifecycle_stop_argp_word == 0u,
+           "self-stop (1, 0, NULL): module_stop runs once with size 0 and argp 0 (PSP-HLE-SELFSTOP-001)");
+    expect(sr_hle_test_module_count() == 0u && sr_hle_test_image_count() == 0u,
+           "self-stop (1, 0, NULL): the module is unloaded (PSP-HLE-SELFSTOP-001)");
 
     remove(path_a);
     remove(path_b);
@@ -46777,7 +46852,7 @@ static void test_wc_display_getmode_and_start_cb(void) {
 static void test_ace_load_skip_wait_only_where_the_stock_call_blocks(void) {
     enum { NID_WAIT_VBLANK_START = 0x984c27e7u };
     static const char k_load_fast[] =
-        "v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;tier=ace;load=fast";
+        "v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;twin=off;tier=ace;load=fast";
     CpuState cpu;
     reset_fixture();
     sr_hle_init();
@@ -46871,7 +46946,7 @@ static void ace_skip_waiter_guest_fn(CpuState *cpu) {
  * property held. Only the first failing run reports its properties. */
 static int ace_skip_yield_round(uint32_t phase, int report) {
     static const char k_load_fast[] =
-        "v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;tier=ace;load=fast";
+        "v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;twin=off;tier=ace;load=fast";
     reset_fixture();
     sr_hle_init();
     sr_test_guest_fn_reset();
@@ -46991,7 +47066,7 @@ static void ace_pacing_guest_fn(CpuState *cpu) {
 
 static void test_ace_load_skip_wait_stops_once_it_paces_updates(void) {
     static const char k_load_fast[] =
-        "v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;tier=ace;load=fast";
+        "v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;twin=off;tier=ace;load=fast";
     enum { UPDATES = (int)(sizeof(s_ace_pacing_skips) / sizeof(s_ace_pacing_skips[0])) };
     char captured[4096];
     FILE *capture = NULL;
@@ -52758,6 +52833,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_tlspl_lifecycle_and_thread_isolation();
     test_wb_tlspl_vpl_cells();
     test_vpl_blocking_waits();
+    test_std_handles_measured();
     test_kernel_pool_bounds_measured();
     test_mbx_lifecycle_and_ordering();
     test_intr_context_conformance();
