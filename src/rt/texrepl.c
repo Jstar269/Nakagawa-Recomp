@@ -2032,13 +2032,22 @@ static uint32_t *png_decode(const unsigned char *d, size_t n, const PngInfo *g, 
     if (!raw) { free(joined); snprintf(why, why_cap, "out of memory"); return NULL; }
     *scratch = (uint64_t)joined_bytes + (uint64_t)g->raw_size;
     size_t raw_n = 0, used = 0;
-    const int rc = nk_psp_inflate_raw_into(z + 2, zn - 2, raw, g->raw_size, &raw_n, &used, NULL, 0);
+    char inflate_why[96] = "";
+    const int rc = nk_psp_inflate_raw_into(z + 2, zn - 2, raw, g->raw_size, &raw_n, &used, inflate_why,
+                                           sizeof(inflate_why));
     /* The Adler-32 follows the stream's last byte, and ends the image data. */
     const int trailer_ok = rc == NK_INFLATE_OK && zn - 2 >= 4u && used == zn - 2 - 4u;
     const uint32_t adler = trailer_ok ? png_be32(z + 2 + used) : 0u;
     free(joined);
     if (rc != NK_INFLATE_OK || raw_n != g->raw_size || !trailer_ok) {
         free(raw);
+        /* The inflater's reason, without its "inflate: " prefix, names a refusal of a valid
+         * stream's shape (too many dynamic blocks) apart from damage. */
+        const char *reason = strncmp(inflate_why, "inflate: ", 9) == 0 ? inflate_why + 9 : inflate_why;
+        if (rc != NK_INFLATE_OK && rc != NK_INFLATE_ERR_OVERFLOW && rc != NK_INFLATE_ERR_MEMORY && reason[0]) {
+            snprintf(why, why_cap, "its image data does not unpack (%s)", reason);
+            return NULL;
+        }
         snprintf(why, why_cap, "%s",
                  rc == NK_INFLATE_ERR_OVERFLOW ? "its image data unpacks to more than the image"
                  : rc == NK_INFLATE_ERR_MEMORY ? "out of memory"

@@ -1124,9 +1124,11 @@ memory, no network; ZIP packs through the project's own `src/core/nk_zip.c` and 
   2048 x 2048 at 16 bits a channel, R is 32 MiB and the joined data at most 36 MiB, so a 64 MiB file with its
   data in several `IDAT` chunks peaks at 132 MiB (one `IDAT` chunk is unpacked where it lies, with nothing
   joined). Reading such a file from a DEFLATE ZIP entry, whose packed size may be 9/8 of the file and 64 bytes
-  more, peaks at 136 MiB and 64 bytes while it is unpacked, before the decode starts. A DEFLATE stream, in a PNG
-  or a ZIP entry, may have at most 64 dynamic Huffman blocks and one more for every KiB it has written
-  (`NK_INFLATE_DYNAMIC_FREE`, `src/core/nk_psp_inflate.h`), so the code tables it costs follow its output. `nk_texrepl_decode_png` is the same check and decode, for a caller with bytes of its own.
+  more, peaks at 136 MiB and 64 bytes while it is unpacked, before the decode starts. Every DEFLATE stream the
+  shared inflater unpacks (a PNG's, a ZIP entry's, a CSO block's, a module's gzip payload) may have at most 64
+  dynamic Huffman blocks and one more for every 128 bytes it has written (`NK_INFLATE_DYNAMIC_FREE`,
+  `src/core/nk_psp_inflate.h`), so the code tables it costs follow its output; zlib's smallest blocks (memLevel 1)
+  and a flush every 513 bytes used at most 0.40 of it, measured. A PNG refused by it says so in its note. `nk_texrepl_decode_png` is the same check and decode, for a caller with bytes of its own.
   One file is read, checked, decoded, noted and counted against the budget once, however many `[hashes]` lines
   or names reach it: names are first grouped as written, and before a file's bytes are read its identity (the
   ZIP entry a name resolves to, case ignored; a folder file's volume and 128-bit file ID, or device and inode) is
@@ -1187,8 +1189,11 @@ memory, no network; ZIP packs through the project's own `src/core/nk_zip.c` and 
   empty fixed blocks building the Huffman tables exactly twice, counted in the selftest's build
   (`NK_INFLATE_COUNT_BUILDS`), where tables built per block came to about 1.7 million; the Adler-32 one byte late refused;
   and the largest image the bound lets through, 2048 x 2048 at 16 bits a channel holding 36 MiB of empty dynamic
-  blocks, refused within 2 s by the dynamic-block budget (77 ms measured, 3.1 to 3.4 s before it); 64 empty dynamic blocks unpack, a 65th is refused after
-  64 blocks' tables, and 2 KiB written first earns two more. Two images taking turns in a budget for one, 1,000 rounds, are decoded 16 to 24
+  blocks, refused within 2 s by the dynamic-block budget (77 ms measured, 3.1 to 3.4 s before it), and the same image with
+  an empty dynamic block after every 128 bytes it writes, the most the budget allows, decoded within 2 s; 64 empty
+  dynamic blocks unpack, a 65th is refused after 64 blocks' tables, and 2 KiB written first earns 16 more, not 17;
+  400 KiB in dynamic blocks of 300 bytes, and in blocks of 513 bytes each followed by a flush's empty stored block,
+  unpack. Two images taking turns in a budget for one, 1,000 rounds, are decoded 16 to 24
   times, every lookup either served or `deferred`; 40,000 held images make room for one 200 x 200 image within
   0.25 s, all 40,000 evicted; a DEFLATE ZIP image's `decode_peak` counts its packed bytes beside the file. A
   `textures.ini` key holding ESC, a UTF-8 CSI, a raw CSI byte and a cut UTF-8 sequence, and a refused line holding an OSC sequence, reach the notes and

@@ -574,6 +574,7 @@ static NkZipStatus zip_reader_parse(NkZipReader *r, NkZipError *err) {
     uint8_t *central = NULL;
     ZipNameRef *refs = NULL;
     ZipEntry **by_offset = NULL;
+    uint64_t previous_end = 0u;
     NkZipStatus status;
     size_t at = 0;
 
@@ -735,14 +736,25 @@ static NkZipStatus zip_reader_parse(NkZipReader *r, NkZipError *err) {
     status = zip_names_distinct(refs, r->count, err);
     if (status != NK_ZIP_OK) goto done;
 
-    /* Each local header against its central entry. */
+    /* Each local header against its central entry, in file order. No two
+       entries share bytes: an entry whose header starts before the previous
+       one's data ends is refused before its header is read, so however far
+       the headers' fields claim to reach, no byte of the file is read twice. */
+    for (size_t i = 0; i < r->count; ++i) by_offset[i] = &r->entries[i];
+    if (r->count > 1) {
+        nk_zip_sort(by_offset, r->count, sizeof(by_offset[0]), zip_entry_offset_compare);
+    }
     for (size_t i = 0; i < r->count; ++i) {
-        ZipEntry *e = &r->entries[i];
+        ZipEntry *e = by_offset[i];
         uint8_t h[ZIP_LOCAL_SIZE];
         uint8_t *tail;
         uint16_t name_size, extra_size;
         uint64_t header_end;
         bool zip64 = false;
+        if (e->local_offset < previous_end) {
+            status = zip_fail(err, NK_ZIP_ERR_OVERLAP, e->name, e->name_size);
+            goto done;
+        }
         if ((uint64_t)e->local_offset + ZIP_LOCAL_SIZE > central_offset) {
             status = zip_fail(err, NK_ZIP_ERR_OFFSET, e->name, e->name_size);
             goto done;
@@ -803,19 +815,7 @@ static NkZipStatus zip_reader_parse(NkZipReader *r, NkZipError *err) {
             status = zip_fail(err, NK_ZIP_ERR_OFFSET, e->name, e->name_size);
             goto done;
         }
-        by_offset[i] = e;
-    }
-    /* No two entries share bytes: each one's header and data end before the
-       next one's header starts. */
-    if (r->count > 1) {
-        nk_zip_sort(by_offset, r->count, sizeof(by_offset[0]), zip_entry_offset_compare);
-        for (size_t i = 0; i + 1 < r->count; ++i) {
-            if (by_offset[i]->data_offset + by_offset[i]->packed > by_offset[i + 1]->local_offset) {
-                status = zip_fail(err, NK_ZIP_ERR_OVERLAP, by_offset[i + 1]->name,
-                                  by_offset[i + 1]->name_size);
-                goto done;
-            }
-        }
+        previous_end = header_end + e->packed;
     }
     status = zip_ok(err);
 done:

@@ -15,6 +15,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 static int g_failures = 0;
 static int g_checks = 0;
@@ -893,6 +894,78 @@ static void test_status_words(void) {
     printf("PASS: nk_zip status codes and messages are distinct; CRC-32 check value\n");
 }
 
+/* Local headers nested in one another's extra fields (the Fable review of
+   a7dd986554a0, S-2): 65,534 empty entries whose headers sit 38 bytes apart,
+   each declaring a 65,535-byte extra field (one block) that covers every header
+   after it. Every check of one header passes, so only the overlap refuses the
+   archive. When each header's name and extra field were read before the
+   overlap was looked at, a 5.8 MiB file cost 4.3 GB of reads and 65,534 reads
+   of 64 KiB. The entries are now taken in file order, and one that starts
+   inside the one before it is refused before its header is read: the archive
+   is read about once. The last header's name is wrong, so a reader that still
+   checked every header first would report that (ZIP_LOCAL_MISMATCH) instead
+   of the second entry's overlap. */
+static void test_nested_local_headers(const char *root) {
+    const size_t n = NK_ZIP_READ_MAX_ENTRIES;
+    const size_t step = 38u;
+    const size_t extra = 65535u;
+    const size_t central_offset = step * (n - 1u) + 30u + 4u + extra;
+    const size_t central_size = n * (46u + 4u);
+    const size_t size = central_offset + central_size + 22u;
+    uint8_t *buf = (uint8_t *)calloc(size, 1u);
+    char path[1100], what[200];
+    if (!buf) {
+        CHECK(false, "nested local headers: no memory for the archive");
+        return;
+    }
+    for (size_t i = 0; i < n; ++i) {
+        uint8_t *p = buf + step * i;
+        uint8_t *c = buf + central_offset + i * 50u;
+        char name[5];
+        snprintf(name, sizeof(name), "%04x", (unsigned)i);
+        put32(p, 0x04034b50u);
+        put16(p + 4, 10u);
+        put16(p + 26, 4u);
+        put16(p + 28, (uint16_t)extra);
+        memcpy(p + 30, name, 4u);
+        put16(p + 34, 0x4141u);
+        put16(p + 36, (uint16_t)(extra - 4u));
+        put32(c, 0x02014b50u);
+        put16(c + 4, 20u);
+        put16(c + 6, 10u);
+        put16(c + 28, 4u);
+        put32(c + 42, (uint32_t)(step * i));
+        memcpy(c + 46, name, 4u);
+    }
+    buf[step * (n - 1u) + 30u] = 'z';
+    {
+        uint8_t *e = buf + central_offset + central_size;
+        put32(e, 0x06054b50u);
+        put16(e + 8, (uint16_t)n);
+        put16(e + 10, (uint16_t)n);
+        put32(e + 12, (uint32_t)central_size);
+        put32(e + 16, (uint32_t)central_offset);
+    }
+    path_join(path, sizeof(path), root, "nested.zip");
+    write_file(path, buf, size);
+    free(buf);
+    {
+        NkZipReadOptions options = {n, 0, false, false};
+        NkZipReader *reader = NULL;
+        NkZipError err;
+        const clock_t t0 = clock();
+        NkZipStatus status = nk_zip_reader_open_file_with(&reader, path, &options, &err);
+        const double t = (double)(clock() - t0) / CLOCKS_PER_SEC;
+        snprintf(what, sizeof(what), "%zu nested local headers (%.1f MiB): %s in %.3f s", n,
+                 size / 1048576.0, nk_zip_status_code(status), t);
+        CHECK(status == NK_ZIP_ERR_OVERLAP && reader == NULL && strcmp(err.entry, "0001") == 0,
+              what);
+        CHECK(t < 0.5, what);
+        printf("nk_zip: %s\n", what);
+        if (reader) nk_zip_reader_close(reader);
+    }
+}
+
 int main(void) {
     char root[1024];
     native_test_create_root("nk_zip");
@@ -905,6 +978,7 @@ int main(void) {
     test_structure_refusals(root);
     test_read_options();
     test_folder_state(root);
+    test_nested_local_headers(root);
     if (g_failures) {
         fprintf(stderr, "%d of %d nk_zip checks failed\n", g_failures, g_checks);
         return 1;

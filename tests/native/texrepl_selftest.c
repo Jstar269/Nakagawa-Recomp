@@ -2509,10 +2509,57 @@ static Bw dynamic_run(unsigned count, const uint8_t *raw, size_t raw_n) {
     return z;
 }
 
+/* `n` bytes of `data` as one dynamic-Huffman block of literals only, the way zlib writes a block of
+ * text it found few repeats in: literals 0 to 254 have 8-bit codes, literal 255 and the end of block
+ * 9-bit ones, and no distance code is used. The 258 code lengths go through a code-length code of
+ * three symbols: 8 (one bit), 0 and 9 (two bits each). */
+static void literal_dynamic_block(Bw *b, const uint8_t *data, size_t n, int final) {
+    bw_bits(b, final ? 1u : 0u, 1);
+    bw_bits(b, 2, 2);
+    bw_bits(b, 0, 5);   /* 257 literal/length codes */
+    bw_bits(b, 0, 5);   /* 1 distance code */
+    bw_bits(b, 3, 4);   /* 7 code-length codes: 16 17 18 0 8 7 9 */
+    static const uint32_t cl[7] = { 0, 0, 0, 2, 1, 0, 2 };
+    for (int i = 0; i < 7; i++) bw_bits(b, cl[i], 3);
+    for (int i = 0; i < 255; i++) bw_code(b, 0, 1);   /* 8 for literals 0 to 254 */
+    bw_code(b, 3, 2);   /* 9 for literal 255 */
+    bw_code(b, 3, 2);   /* 9 for the end of block */
+    bw_code(b, 2, 2);   /* 0 for distance 0 */
+    for (size_t i = 0; i < n; i++) {
+        if (data[i] < 255u) bw_code(b, data[i], 8);
+        else bw_code(b, 510u, 9);
+    }
+    bw_code(b, 511u, 9);   /* end of block */
+}
+
+/* `n` bytes in literal dynamic blocks of `piece` bytes, each followed, when `flush`, by the empty
+ * stored block a zlib sync flush writes; then an empty final stored block. */
+static Bw literal_pieces(const uint8_t *data, size_t n, size_t piece, int flush) {
+    Bw z = { 0 };
+    for (size_t at = 0; at < n; at += piece) {
+        literal_dynamic_block(&z, data + at, n - at < piece ? n - at : piece, 0);
+        if (flush) {
+            bw_bits(&z, 0, 1);
+            bw_bits(&z, 0, 2);
+            bw_flush(&z);
+            const uint8_t none[4] = { 0x00, 0x00, 0xff, 0xff };
+            zbuf(&z.d, &z.n, &z.cap, none, 4);
+        }
+    }
+    bw_bits(&z, 1, 1);
+    bw_bits(&z, 0, 2);
+    bw_flush(&z);
+    const uint8_t none[4] = { 0x00, 0x00, 0xff, 0xff };
+    zbuf(&z.d, &z.n, &z.cap, none, 4);
+    return z;
+}
+
 /* The cold read of 7ff4d3e849f7 (M-3): an empty dynamic block costs three code tables and writes
  * nothing, so the largest image's bounded data, all such blocks, held the decoder for 3.1 to 3.4 s,
  * and a pack of a few hundred such images for minutes. A stream may now have 64 dynamic blocks and
- * one more for every KiB it has written. */
+ * one more for every 128 bytes it has written. The Fable review of a7dd986554a0 (S-1) measured one
+ * more for every KiB refusing valid zlib output: at memLevel 1 or 2 its blocks hold 127 or 255
+ * symbols, and a writer that flushes every 513 bytes ends a block each time. */
 static void test_inflate_dynamic_budget(void) {
     static const uint8_t two[2] = { 0, 0 };
     uint8_t into[4096];
@@ -2536,26 +2583,58 @@ static void test_inflate_dynamic_budget(void) {
     rc = nk_psp_inflate_raw(z.d, z.n, &out, &on, 2, 2, err, sizeof(err));
     CHECK(rc == NK_INFLATE_ERR_FORMAT && out == NULL, "the same unpacked to a new buffer: rc %d", rc);
     free(z.d);
-    /* Output earns blocks: 2 KiB written in a stored block, then 66 empty dynamic blocks. */
-    {
+    /* Output earns blocks, at the rate and no faster: 2 KiB written in a stored block earns 16 more
+     * empty dynamic blocks, not 17. */
+    for (unsigned extra = 0; extra <= 1u; extra++) {
         Bw w = { 0 };
         static uint8_t kib2[2048];
+        const unsigned count = NK_INFLATE_DYNAMIC_FREE + 16u + extra;   /* 2,048 / 128 */
         bw_bits(&w, 0, 1);
         bw_bits(&w, 0, 2);
         bw_flush(&w);
         const uint8_t hdr[4] = { 0x00, 0x08, 0xff, 0xf7 };
         zbuf(&w.d, &w.n, &w.cap, hdr, 4);
         zbuf(&w.d, &w.n, &w.cap, kib2, sizeof(kib2));
-        for (unsigned i = 0; i < NK_INFLATE_DYNAMIC_FREE + 2u; i++) empty_dynamic_block(&w);
+        for (unsigned i = 0; i < count; i++) empty_dynamic_block(&w);
         bw_bits(&w, 1, 1);
         bw_bits(&w, 0, 2);
         bw_flush(&w);
         const uint8_t none[4] = { 0x00, 0x00, 0xff, 0xff };
         zbuf(&w.d, &w.n, &w.cap, none, 4);
         rc = nk_psp_inflate_raw_into(w.d, w.n, into, sizeof(into), &on, &used, err, sizeof(err));
-        CHECK(rc == NK_INFLATE_OK && on == sizeof(kib2), "2 KiB, then %u empty dynamic blocks: rc %d, %zu bytes, '%s'",
-              NK_INFLATE_DYNAMIC_FREE + 2u, rc, on, err);
+        if (extra) {
+            CHECK(rc == NK_INFLATE_ERR_FORMAT && strstr(err, "more dynamic blocks"),
+                  "2 KiB, then %u empty dynamic blocks: rc %d, '%s'", count, rc, err);
+        } else {
+            CHECK(rc == NK_INFLATE_OK && on == sizeof(kib2), "2 KiB, then %u empty dynamic blocks: rc %d, %zu bytes, '%s'",
+                  count, rc, on, err);
+        }
         free(w.d);
+    }
+    /* Valid streams of small dynamic blocks unpack whole: 400 KiB in blocks of 300 literals (zlib at
+     * memLevel 1 wrote 367 to 456 bytes a block on average, measured), and in blocks of 513 each
+     * followed by a sync flush's empty stored block. One more block a KiB refused both. */
+    {
+        const size_t n = (size_t)400 << 10;
+        uint8_t *text = (uint8_t *)malloc(n);
+        uint8_t *back = (uint8_t *)malloc(n);
+        uint32_t x = 1880u;
+        for (size_t i = 0; i < n; i++) {
+            x = x * 1103515245u + 12345u;
+            text[i] = (uint8_t)(x >> 23);
+        }
+        for (int shape = 0; shape <= 1; shape++) {
+            const size_t piece = shape ? 513u : 300u;
+            Bw z = literal_pieces(text, n, piece, shape);
+            on = 0;
+            rc = nk_psp_inflate_raw_into(z.d, z.n, back, n, &on, &used, err, sizeof(err));
+            CHECK(rc == NK_INFLATE_OK && on == n && memcmp(back, text, n) == 0 && used == z.n,
+                  "400 KiB in dynamic blocks of %zu bytes%s: rc %d, %zu bytes, '%s'", piece,
+                  shape ? ", each flushed" : "", rc, on, err);
+            free(z.d);
+        }
+        free(back);
+        free(text);
     }
 }
 
@@ -2655,10 +2734,63 @@ static void test_png_work(void) {
         const double t0 = wall_s();
         const int ok = nk_texrepl_decode_png(png, n, 0, &px, &w, &h, why, sizeof(why));
         const double t = wall_s() - t0;
-        CHECK(!ok && strstr(why, "does not unpack") && t < NK_PNG_WORK_SECONDS,
+        CHECK(!ok && strstr(why, "does not unpack (more dynamic blocks than its output needs)") && t < NK_PNG_WORK_SECONDS,
               "%.1f MiB of empty dynamic blocks in a 2048x2048 RGBA16 PNG: %d in %.2f s, '%s'", n / 1048576.0, ok, t, why);
         printf("png work: the largest image's data, %.1f MiB of empty dynamic blocks, refused in %.0f ms\n", n / 1048576.0,
                t * 1e3);
+        free(px);
+        free(png);
+    }
+    {   /* the most dynamic blocks the budget lets the largest image have: after every 128 bytes it
+         * writes (a fixed block of matches), one empty dynamic block, 262,160 in all, then the image
+         * decodes. Measured, and bounded like the cell above. */
+        const size_t raw_n = (1u + 2048u * 8u) * 2048u;
+        Bw z = { 0 };
+        bw_byte(&z, 0x78);
+        bw_byte(&z, 0x01);
+        for (size_t at = 0; at < raw_n; at += NK_INFLATE_DYNAMIC_BYTES) {
+            unsigned left = NK_INFLATE_DYNAMIC_BYTES;
+            bw_bits(&z, 0, 1);
+            bw_bits(&z, 1, 2);
+            if (at == 0) {
+                fixed_sym(&z, 0);
+                left--;
+            }
+            while (left >= 13u) {
+                fixed_match(&z, 10);
+                left -= 10u;
+            }
+            if (left > 10u) {
+                fixed_match(&z, left - 5u);
+                left = 5u;
+            }
+            fixed_match(&z, left);
+            bw_code(&z, 0, 7);   /* end of block */
+            empty_dynamic_block(&z);
+        }
+        bw_bits(&z, 1, 1);
+        bw_bits(&z, 0, 2);
+        bw_flush(&z);
+        const uint8_t none[4] = { 0x00, 0x00, 0xff, 0xff };
+        zbuf(&z.d, &z.n, &z.cap, none, 4);
+        const uint32_t ad = (uint32_t)(raw_n % 65521u) << 16 | 1u;   /* Adler-32 of zeros */
+        const uint8_t t4[4] = { (uint8_t)(ad >> 24), (uint8_t)(ad >> 16), (uint8_t)(ad >> 8), (uint8_t)ad };
+        zbuf(&z.d, &z.n, &z.cap, t4, 4);
+        size_t n = 0;
+        uint8_t *png = png_with_idat(2048, 2048, 16, 6, NULL, z.d, z.n, &n);
+        free(z.d);
+        uint32_t *px = NULL;
+        int w = 0, h = 0;
+        nk_inflate_table_builds = 0;
+        const double t0 = wall_s();
+        const int ok = nk_texrepl_decode_png(png, n, 0, &px, &w, &h, why, sizeof(why));
+        const double t = wall_s() - t0;
+        const size_t blocks = raw_n / NK_INFLATE_DYNAMIC_BYTES;
+        CHECK(ok && w == 2048 && h == 2048 && nk_inflate_table_builds == 3u * blocks + 2u && t < NK_PNG_WORK_SECONDS,
+              "the largest image with %zu empty dynamic blocks between its writes: %d in %.2f s, %llu tables, '%s'", blocks,
+              ok, t, nk_inflate_table_builds, why);
+        printf("png work: the largest image with an empty dynamic block after every %u bytes (%zu) decoded in %.0f ms\n",
+               NK_INFLATE_DYNAMIC_BYTES, blocks, t * 1e3);
         free(px);
         free(png);
     }
