@@ -1290,9 +1290,13 @@ void ace_set_exit_report(AceFeature feature, void (*report)(void)) {
     if ((int)feature >= 0 && feature < ACE_FEATURE_COUNT) s_exit_report[feature] = report;
 }
 
+static void (*s_finish_hook)(void);
+void ace_set_finish_hook(void (*hook)(void)) { s_finish_hook = hook; }
+
 void ace_finish(void) {
     char json[ACE_REPORT_MAX];
     if (!g_ace_on) return;
+    if (s_finish_hook) s_finish_hook();   /* before the never-ran settle below */
     for (int f = 0; f < ACE_FEATURE_COUNT; f++)
         if (s_exit_report[f]) s_exit_report[f]();
     /* A feature that is on but never ran: its renderer or presenter did not start. */

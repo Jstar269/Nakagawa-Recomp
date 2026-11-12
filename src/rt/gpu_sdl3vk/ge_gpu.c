@@ -79,8 +79,11 @@
  *    stencil, the shader writes the constant as alpha, or, blended, the alpha blend factors
  *    store 0, with no snapshot; a blended colour is then the fixed-function blend's, within
  *    blend-parity-ff's bound of ge.c, as for a draw without the stencil test.
- *  - Approximated (no software fallback): partial-byte write masks (>= 0x80 disables
- *    the channel), lines/points (1px quads, not DDA).
+ *  - Write masks: a channel whose native bits are all masked or all written maps to the
+ *    colour write mask; any other mask (and in clear mode an alpha mask that is not) falls
+ *    back to ge.c (gpu_state_unsupported_reason).
+ *  - Approximated (no software fallback): untextured lines (1px quads, not DDA). Points and
+ *    textured lines fall back to ge.c.
  *  - Render scale (default 1): SR_RESOLUTION_SCALE carries the player's Settings >
  *    Internal Render Resolution choice (1..4); SR_GPU_SCALE overrides it as an
  *    explicit diagnostic (sr_parse_render_scale in ge_gpu.h). Targets/depth/snapshot images are
@@ -6000,20 +6003,22 @@ static void build_state(int persp, int sprite, Batch *b) {
     if (sx1 > sx2 || sy1 > sy2) { b->sw = 0; return; }   /* nothing drawable */
     b->sx = sx1; b->sy = sy1; b->sw = sx2 - sx1 + 1; b->sh = sy2 - sy1 + 1;
 
-    /* color write mask (partial-byte masks approximate: >= 0x80 disables the channel) */
+    /* Color write mask. gpu_state_unsupported_reason sends every mask that is not all or
+     * nothing per native channel to ge.c, so here a byte >= 0x80 means the channel is masked.
+     * Clear mode honours PMSKC/PMSKA as a draw does (ge.c clear sprites; PSP-GE-RASTER-001
+     * clr-ca-msk). */
+    const uint32_t mr = g->mask_rgb & 0xFF, mg = (g->mask_rgb >> 8) & 0xFF, mb = (g->mask_rgb >> 16) & 0xFF;
+    const uint32_t ma = (uint32_t)g->mask_alpha & 0xFF;
+    const uint32_t rgb_bits = (mr >= 0x80 ? 0 : VK_COLOR_COMPONENT_R_BIT) | (mg >= 0x80 ? 0 : VK_COLOR_COMPONENT_G_BIT)
+                            | (mb >= 0x80 ? 0 : VK_COLOR_COMPONENT_B_BIT);
     if (clear) {
-        k->cmask = ((g->clear_mode & 0x100) ? (VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
-                                               VK_COLOR_COMPONENT_B_BIT) : 0)
-                 | ((g->clear_mode & 0x200) ? VK_COLOR_COMPONENT_A_BIT : 0);
+        k->cmask = ((g->clear_mode & 0x100) ? rgb_bits : 0)
+                 | ((g->clear_mode & 0x200) && ma < 0x80 ? VK_COLOR_COMPONENT_A_BIT : 0);
     } else {
-        uint32_t mr = g->mask_rgb & 0xFF, mg = (g->mask_rgb >> 8) & 0xFF, mb = (g->mask_rgb >> 16) & 0xFF;
-        uint32_t ma = (uint32_t)g->mask_alpha & 0xFF;
-        (void)ma;
         /* Outside clear mode PSP alpha is the stencil plane: a draw without the stencil
          * test preserves destination alpha, and one with it stores the shader's stencil
          * value, which already carries the alpha write mask. */
-        k->cmask = (mr >= 0x80 ? 0 : VK_COLOR_COMPONENT_R_BIT) | (mg >= 0x80 ? 0 : VK_COLOR_COMPONENT_G_BIT)
-                 | (mb >= 0x80 ? 0 : VK_COLOR_COMPONENT_B_BIT);
+        k->cmask = rgb_bits;
         if (g->stencil_enable && stencil_fixed_alpha(g) != SFIX_KEEP) k->cmask |= VK_COLOR_COMPONENT_A_BIT;
     }
     /* A stencil state that cannot read the destination (stencil_fixed_alpha) needs no shader
@@ -6502,6 +6507,17 @@ static int native_rgb_mask_exact(void) {
     return (rm==0||rm==rfull)&&(gm==0||gm==gfull)&&(bm==0||bm==bfull);
 }
 
+/* The alpha (stencil) write mask in native bits is all or nothing: 565 has no alpha and 5551
+ * one bit; 4444 keeps the top nibble and 8888 the byte. */
+static int native_alpha_mask_exact(void) {
+    const uint32_t ma = (uint32_t)s_ge->mask_alpha & 0xFF;
+    switch (s_ge->fbfmt & 3) {
+        case 0: case 1: return 1;
+        case 2: return (ma >> 4) == 0 || (ma >> 4) == 15;
+        default: return ma == 0 || ma == 255;
+    }
+}
+
 /* Vulkan now carries EVERY blend state: exact fixed function where it maps, shader
  * blending against a destination snapshot everywhere else (including post-blend 16-bit
  * quantization and post-blend dither, which run in the shader in hardware order — see
@@ -6524,7 +6540,12 @@ static int stencil_gpu_supported(void) {
 static int gpu_state_unsupported_reason(void) {
     if (!stencil_gpu_supported()) return GEGPU_FALLBACK_STENCIL;
     if (s_ge->logic_op_enable) return GEGPU_FALLBACK_LOGIC_OP;
-    if (!s_ge->clear&&!native_rgb_mask_exact()) return GEGPU_FALLBACK_WRITE_MASK;
+    if ((!s_ge->clear || (s_ge->clear_mode & 0x100)) && !native_rgb_mask_exact())
+        return GEGPU_FALLBACK_WRITE_MASK;
+    /* Only clear mode needs this: outside it, the stencil value the shader stores already
+     * carries the alpha write mask. */
+    if (s_ge->clear && (s_ge->clear_mode & 0x200) && !native_alpha_mask_exact())
+        return GEGPU_FALLBACK_WRITE_MASK;
     /* Framebuffer placements the persistent-target model cannot represent: color
      * buffers in main RAM, and strides wider than the target images. */
     if (!is_vram(s_ge->fbp)) return GEGPU_FALLBACK_RAM_FB;

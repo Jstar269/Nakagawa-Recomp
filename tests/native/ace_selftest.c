@@ -385,6 +385,12 @@ static void cell_parse(void) {
 
 /* One declared load wait, as generated code names it to nk_ace_load_skip_wait(). */
 static int load_fast(void) { return nk_ace_load_fast("SYNTH_LOAD_WAIT", 0x08804010u); }
+static int s_hook_ran;
+static void test_finish_hook(void) {
+    s_hook_ran++;
+    ace_set_cull_untracked(3);
+    ace_feature_unavailable(ACE_FEATURE_CULL, "partial: finish");
+}
 
 static void cell_switch(void) {
     AceCounters n;
@@ -525,6 +531,19 @@ static void cell_switch(void) {
     CHECK(ace_effective()->cull == 0 && ace_requested()->cull == 1 &&
           ace_report_json(json, sizeof(json)) > 0 && strstr(json, "\"cull\": false") != NULL &&
           strstr(json, "partial: test") != NULL, "a partial cull run is reported unavailable:\n%s", json);
+    /* The finish hook runs before the report, so a table that fills after the last present still reads
+     * partial (the exit-at-VBLANK path never goes through the presenter again). "Runs first" is
+     * testable because only a feature's first unavailable reason is kept: a hook run after the
+     * never-ran settle would find cull already marked, and "partial: finish" would be missing. */
+    CHECK(ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=fill;smooth=off;sas=off;tess=off;twin=off;tier=ace;"
+                        "cull=on", NULL) == 1 && ace_effective()->cull == 1, "cull=on again for the finish hook");
+    s_hook_ran = 0;
+    ace_set_finish_hook(test_finish_hook);
+    ace_finish();
+    CHECK(s_hook_ran >= 1 && ace_effective()->cull == 0 &&
+          ace_report_json(json, sizeof(json)) > 0 && strstr(json, "\"cull_untracked\": 3") != NULL &&
+          strstr(json, "partial: finish") != NULL, "ace_finish runs the hook first:\n%s", json);
+    ace_set_finish_hook(NULL);
 
     /* depth=32 (contract 10.20): the stamp's line and the report carry it; a device without the
        format (ge_gpu.c) makes it unavailable, and the report says 16. */

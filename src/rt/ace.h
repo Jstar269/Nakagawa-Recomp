@@ -586,6 +586,12 @@ size_t ace_report_json(char *out, size_t cap);
  * through a temporary file that atomically replaces the old report) and the exit stamp. An
  * empty SR_ACE_REPORT writes no file. Ace off: does nothing. Safe to call more than once. */
 void ace_finish(void);
+/* A callback ace_finish runs first, so a count the runtime keeps (the culling hook's untracked
+ * matrices) is read after the last frame on every exit path that writes the report, the exit-at-VBLANK one
+ * included.
+ * It may call ace_confirm, ace_feature_unavailable and ace_set_cull_untracked; it must be safe to
+ * run more than once. NULL clears it. */
+void ace_set_finish_hook(void (*hook)(void));
 
 /* ---- fast forward's keys (recomp.h, sched_fast_forward_on) ---------------------------------- */
 /* The game window sets these: a hold (Tab while it is held) and a toggle (F9). They only ask;
