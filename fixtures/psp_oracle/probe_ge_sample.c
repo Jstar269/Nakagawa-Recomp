@@ -3645,7 +3645,7 @@ static int hle_run(void)
  * `display-check` (9 words: the call's result, the display address, buffer width and pixel
  * format, the address's VRAM offset (bits 21 and above, the cached/uncached and mirror bits,
  * masked off), the display span in bytes (width x 272 x 2, or x 4 for 8888), whether that span
- * overlaps 0x100000..0x187fff or the display could not be read, whether the GE went idle, and the
+ * overlaps 0x110000..0x197fff or the display could not be read, whether the GE went idle, and the
  * idle polls used). It then waits, bounded, for the whole GE to read idle (sceGeDrawSync(1)) with
  * nothing of its own queued, and only then saves the block. If the display overlaps or could not
  * be read, or the GE never idles, `display-check` is SKIP and every later record is SKIP with its
@@ -3666,8 +3666,12 @@ static int hle_run(void)
  * cell, `vram-restore` (2 words: the words written back and how many do not read back as
  * saved). */
 
-#define GRB_FB_OFFSET 0x00100000u   /* VRAM-relative colour block */
-#define GRB_ZB_OFFSET 0x00144000u   /* VRAM-relative depth block, directly after the colour block */
+/* 0x110000, not the 0x100000 the other GE cases use: on 2026-11-12 the XMB's display buffer was
+ * at VRAM 0x88000 (512 wide, 8888, 0x88000 bytes, to 0x10ffff), which overlapped a block at
+ * 0x100000, so display-check skipped every cell. This block clears both XMB buffers (0x0 and
+ * 0x88000) and ends at 0x197fff, inside the 2 MiB of VRAM. */
+#define GRB_FB_OFFSET 0x00110000u   /* VRAM-relative colour block */
+#define GRB_ZB_OFFSET 0x00154000u   /* VRAM-relative depth block, directly after the colour block */
 #define GRB_BLOCK_BYTES 0x00044000u /* 512 x 272 x 2 bytes */
 #define GRB_SAVE_WORDS ((2u * GRB_BLOCK_BYTES) / 4u)
 #define GRB_ROWS 272u

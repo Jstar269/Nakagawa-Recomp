@@ -12466,7 +12466,7 @@ class GeRasterBoundsProbeTests(_GeNewCaseMixin, unittest.TestCase):
         zb = int(_matched(re.search(r"#define GRB_ZB_OFFSET (0x[0-9a-f]+)u", self.section)).group(1), 16)
         block = int(_matched(re.search(r"#define GRB_BLOCK_BYTES (0x[0-9a-f]+)u", self.section))
                     .group(1), 16)
-        self.assertEqual((fb, zb, block), (0x100000, 0x144000, self.BLOCK))
+        self.assertEqual((fb, zb, block), (0x110000, 0x154000, self.BLOCK))
         self.assertEqual(block, 512 * 272 * 2)
         # Depth directly after colour, inside VRAM; the depth base has bits 6 and 13 clear and its
         # low 14 bits zero, so the GE's 0x2040 XOR keeps every depth word inside the block.
