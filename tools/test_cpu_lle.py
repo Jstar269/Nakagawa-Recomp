@@ -868,7 +868,8 @@ class LleSchedulerIntegrationTests(unittest.TestCase):
                 objects.append(obj)
 
             run_checked([
-                compiler, *(str(obj) for obj in objects), "-Wl,--gc-sections",
+                compiler, *(str(obj) for obj in objects),
+                "-Wl,-dead_strip" if sys.platform == "darwin" else "-Wl,--gc-sections",
                 *link_flags, "-lm", "-o", str(exe_path),
             ])
             ran = subprocess.run(

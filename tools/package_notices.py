@@ -648,13 +648,13 @@ def generate_package_notices(
         # Locate the license text files. A caller-supplied license_path wins; every
         # other record resolves through the inventory's license_texts, preferring the
         # in-tree copy so notices generation does not depend on a host toolchain.
-        sources: list[tuple[Path, str]] = []
+        bundled_sources: list[tuple[Path, str]] = []
         if "license_path" in record and Path(record["license_path"]).is_file():
-            sources.append((Path(record["license_path"]), record["license_path"]))
+            bundled_sources.append((Path(record["license_path"]), record["license_path"]))
         else:
-            sources = component_license_sources(record, toolchain_root, repo_root)
+            bundled_sources = component_license_sources(record, toolchain_root, repo_root)
 
-        if not sources:
+        if not bundled_sources:
             declared = [entry["file"] for entry in record.get("license_texts", [])]
             raise PackageRouteError(
                 "PACKAGE_LICENSE_TEXT_MISSING",
@@ -666,7 +666,7 @@ def generate_package_notices(
         _validate_spdx_id(record.get("spdx_id"), "bundled binary", bin_name)
         clean_slug = notice_file_name(record)
         target_lic_name = clean_slug
-        rel_src = make_relative_path(sources[0][0], toolchain_root, repo_root)
+        rel_src = make_relative_path(bundled_sources[0][0], toolchain_root, repo_root)
 
         components.append({
             "name": record["name"],
@@ -679,8 +679,8 @@ def generate_package_notices(
             "upstream_origin": record.get("upstream_origin", "NOASSERTION"),
             "disposition": record.get("disposition", "bundled_binary"),
         })
-        license_files_to_copy.append((target_lic_name, sources[0][0], record["name"]))
-        for extra_src, extra_display in sources[1:]:
+        license_files_to_copy.append((target_lic_name, bundled_sources[0][0], record["name"]))
+        for extra_src, extra_display in bundled_sources[1:]:
             extra_name = f"{Path(clean_slug).stem}-{Path(extra_display).name}"
             components[-1].setdefault("additional_license_files", []).append(extra_name)
             license_files_to_copy.append(
