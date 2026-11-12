@@ -9300,6 +9300,7 @@ static uint32_t utility_status(CpuState *cpu, uint32_t nid) {
     utility_end_frame();
     return status;
 }
+static int utility_poll_to_finished(CpuState *cpu, uint32_t update, uint32_t status);
 
 /* A zeroed parameter block whose common result field (+0x1c) holds a sentinel: an InitStart
  * that takes the block writes 0 there, so a refused one is visible by the sentinel staying. */
@@ -9470,13 +9471,16 @@ static void test_utility_dialog_single_slot(void) {
                utility_call(&cpu, NID_MSG_DIALOG_SHUTDOWN, 0u) == 0x80110005u &&
                utility_call(&cpu, NID_MSG_DIALOG_UPDATE, 0u) == 0x80110005u,
            "the message dialog that gave up the slot answers WRONG_TYPE");
+    MEM_W32(UTILITY_SAVEDATA_PARAM_ADDR + 0x30u, 22u); /* GETSIZE, its work: no memory-stick I/O */
     expect(utility_status(&cpu, NID_SAVEDATA_DIALOG_STATUS) == 2u &&
+               utility_call(&cpu, NID_SAVEDATA_DIALOG_SHUTDOWN, 0u) == 0x80110001u &&
+               utility_poll_to_finished(&cpu, NID_SAVEDATA_DIALOG_UPDATE, NID_SAVEDATA_DIALOG_STATUS) &&
                utility_call(&cpu, NID_SAVEDATA_DIALOG_SHUTDOWN, 0u) == 0u &&
                utility_call(&cpu, NID_SAVEDATA_DIALOG_SHUTDOWN, 0u) == 0x80110001u &&
                utility_status(&cpu, NID_SAVEDATA_DIALOG_STATUS) == 4u &&
                utility_status(&cpu, NID_SAVEDATA_DIALOG_STATUS) == 0u,
-           "the savedata dialog, started a frame ago, is RUNNING, then winds down to NONE after "
-           "ShutdownStart");
+           "the savedata dialog, started a frame ago, is RUNNING and refuses ShutdownStart; it "
+           "finishes, then winds down to NONE after ShutdownStart");
     expect(utility_call(&cpu, NID_SAVEDATA_DIALOG_SHUTDOWN, 0u) == 0x80110001u,
            "savedata ShutdownStart at NONE returns INVALID_STATUS");
     expect(utility_call(&cpu, NID_SAVEDATA_DIALOG_UPDATE, 0u) == 0x80110001u &&
@@ -9490,11 +9494,25 @@ static void test_utility_dialog_single_slot(void) {
             continue;
         utility_param_block(UTILITY_OTHER_PARAM_ADDR, utility_fixture_size(init));
         snprintf(what, sizeof(what), "%sInitStart takes the free slot; the dialog reports INIT, "
-                 "then winds down to NONE after ShutdownStart", dialogs[i].name);
+                 "and ShutdownStart during INIT and RUNNING returns INVALID_STATUS",
+                 dialogs[i].name);
         expect(utility_call(&cpu, init, UTILITY_OTHER_PARAM_ADDR) == 0u &&
                    MEM_R32(UTILITY_OTHER_PARAM_ADDR + 0x1cu) == 0u &&
+                   utility_call(&cpu, dialogs[i].shutdown, 0u) == 0x80110001u &&
                    utility_status(&cpu, dialogs[i].status) == 1u &&
                    utility_status(&cpu, NID_SAVEDATA_DIALOG_STATUS) == 0x80110005u &&
+                   utility_call(&cpu, dialogs[i].shutdown, 0u) == 0x80110001u &&
+                   utility_status(&cpu, dialogs[i].status) == 2u,
+               what);
+        /* Gamedata and sharing get no Update, which would create memory-stick directories: the
+         * test reset frees their slot. */
+        if (init != NID_NETCONF_DIALOG_INIT) {
+            sr_hle_test_osk_slot_reset();
+            continue;
+        }
+        snprintf(what, sizeof(what), "%s finishes, then winds down to NONE after ShutdownStart",
+                 dialogs[i].name);
+        expect(utility_poll_to_finished(&cpu, dialogs[i].update, dialogs[i].status) &&
                    utility_call(&cpu, dialogs[i].shutdown, 0u) == 0u &&
                    utility_status(&cpu, dialogs[i].status) == 4u &&
                    utility_status(&cpu, dialogs[i].status) == 0u,
@@ -9632,15 +9650,16 @@ static void test_msg_dialog_abort_without_update(void) {
     sr_hle_test_osk_slot_reset();
 }
 
-/* #1386 cancel cleanup: a game that gives up on a dialog calls ShutdownStart while it is still
- * RUNNING. Savedata, netconf, gamedata and game sharing take that (the message dialog refuses it,
- * tests/utility/dialog/status.expected). The shutdown must leave nothing behind: the dialog winds
- * down to NONE, writes no result into the abandoned block, and the next InitStart, of the same
- * type or another, starts fresh from INIT with a cleared result word. Which status a non-message
- * dialog reports after a RUNNING shutdown is not measured; only that the slot comes back is
- * asserted. Gamedata and sharing are cancelled before their first Update, which would create
- * memory-stick directories. */
-static void test_utility_dialog_cancel_cleanup(void) {
+/* #1386 cancel: a game that gives up on a dialog may call ShutdownStart while it is still INIT or
+ * RUNNING. Every type refuses it with INVALID_STATUS and changes nothing (utility_shutdown_refused,
+ * src/rt/hle_utility.c): the message dialog's measured rule (tests/utility/dialog/status.expected),
+ * and what the PSP-3000 captures of 2026-11-12 (PSP-HLE-UTILITY-DIALOG-001, not acceptance-eligible)
+ * recorded for savedata, netconf and gamedata install while RUNNING. INIT for those three and game
+ * sharing in any state are UNMEASURED. The dialog keeps the slot and moves on as before: no other
+ * InitStart takes the slot, and a dialog that does its work runs to FINISHED, shuts down, and the
+ * next InitStart of its type starts from INIT with a cleared result word. Gamedata and sharing get
+ * no Update, which would create memory-stick directories, so the test reset frees their slot. */
+static void test_utility_dialog_refused_cancel(void) {
     static const UtilityDialogNids dialogs[] = {
         { "sceUtilitySavedata", NID_SAVEDATA_DIALOG_INIT, NID_SAVEDATA_DIALOG_UPDATE,
           NID_SAVEDATA_DIALOG_STATUS, NID_SAVEDATA_DIALOG_SHUTDOWN },
@@ -9662,38 +9681,40 @@ static void test_utility_dialog_cancel_cleanup(void) {
         const uint32_t block = savedata ? UTILITY_SAVEDATA_PARAM_ADDR : UTILITY_OTHER_PARAM_ADDR;
         if (savedata) utility_savedata_block();
         else utility_param_block(block, utility_fixture_size(dialogs[i].init));
-        snprintf(what, sizeof(what), "%s reaches RUNNING before it is cancelled", dialogs[i].name);
+        snprintf(what, sizeof(what), "%s refuses ShutdownStart during INIT with INVALID_STATUS "
+                 "and still moves on to RUNNING", dialogs[i].name);
         expect(utility_call(&cpu, dialogs[i].init, block) == 0u &&
+                   utility_call(&cpu, dialogs[i].shutdown, 0u) == 0x80110001u &&
                    utility_status(&cpu, dialogs[i].status) == 1u &&
                    utility_status(&cpu, dialogs[i].status) == 2u,
                what);
         if (works) (void)utility_call(&cpu, dialogs[i].update, 0u); /* its work has started */
-        snprintf(what, sizeof(what), "%s accepts ShutdownStart while RUNNING", dialogs[i].name);
-        expect(utility_call(&cpu, dialogs[i].shutdown, 0u) == 0u, what);
-        int none = 0;
-        for (int frame = 0; frame < 4 && !none; frame++)
-            none = utility_status(&cpu, dialogs[i].status) == 0u;
-        snprintf(what, sizeof(what), "%s winds down to NONE after a cancel", dialogs[i].name);
-        expect(none, what);
-        /* Nothing may write into the abandoned block from here on. */
-        MEM_W32(block + 0x1cu, UTILITY_RESULT_UNTOUCHED);
-        for (int k = 0; k < 4; k++) {
-            (void)utility_call(&cpu, dialogs[i].update, 0u);
-            (void)utility_status(&cpu, dialogs[i].status);
-        }
-        snprintf(what, sizeof(what), "%s writes no result into its cancelled block", dialogs[i].name);
-        expect(MEM_R32(block + 0x1cu) == UTILITY_RESULT_UNTOUCHED, what);
+        snprintf(what, sizeof(what), "%s refuses ShutdownStart while RUNNING with INVALID_STATUS "
+                 "and stays RUNNING", dialogs[i].name);
+        expect(utility_call(&cpu, dialogs[i].shutdown, 0u) == 0x80110001u &&
+                   utility_status(&cpu, dialogs[i].status) == 2u,
+               what);
 
-        /* A message dialog takes the freed slot and finishes into its own block only. */
+        /* The refused cancel left the slot to the dialog. */
         utility_param_block(UTILITY_MSG_PARAM_ADDR, 0x2c4u);
-        snprintf(what, sizeof(what), "a message dialog starts after %s is cancelled", dialogs[i].name);
-        expect(msg_dialog_run_to_finished(&cpu, UTILITY_MSG_PARAM_ADDR), what);
-        snprintf(what, sizeof(what), "the message dialog leaves the cancelled %s block alone",
+        snprintf(what, sizeof(what), "a message InitStart is refused while %s, its cancel refused, "
+                 "holds the slot", dialogs[i].name);
+        expect(utility_call(&cpu, NID_MSG_DIALOG_INIT, UTILITY_MSG_PARAM_ADDR) == 0x80110001u &&
+                   MEM_R32(UTILITY_MSG_PARAM_ADDR + 0x1cu) == UTILITY_RESULT_UNTOUCHED,
+               what);
+        if (!works) {
+            sr_hle_test_osk_slot_reset();
+            continue;
+        }
+        snprintf(what, sizeof(what), "%s runs to FINISHED after its refused cancel and winds down "
+                 "to NONE after ShutdownStart", dialogs[i].name);
+        expect(utility_poll_to_finished(&cpu, dialogs[i].update, dialogs[i].status) &&
+                   utility_call(&cpu, dialogs[i].shutdown, 0u) == 0u &&
+                   utility_status(&cpu, dialogs[i].status) == 4u &&
+                   utility_status(&cpu, dialogs[i].status) == 0u,
+               what);
+        snprintf(what, sizeof(what), "%s starts again from INIT with its result word cleared",
                  dialogs[i].name);
-        expect(MEM_R32(block + 0x1cu) == UTILITY_RESULT_UNTOUCHED, what);
-
-        /* The same type starts again from INIT with its result word cleared. */
-        snprintf(what, sizeof(what), "%s starts again from INIT after a cancel", dialogs[i].name);
         expect(utility_call(&cpu, dialogs[i].init, block) == 0u &&
                    MEM_R32(block + 0x1cu) == 0u &&
                    utility_status(&cpu, dialogs[i].status) == 1u,
@@ -9864,15 +9885,19 @@ static void test_utility_dialog_status_sequence(void) {
                utility_status(&cpu, NID_SAVEDATA_DIALOG_STATUS) == 0u,
            "the next savedata dialog runs to NONE");
 
-    /* The edges: a cancel from RUNNING, and a caller better than 0x20, are unmeasured and keep
-     * the reported SHUTDOWN. */
+    /* The edges: a cancel from RUNNING is refused (utility_shutdown_refused), and a caller better
+     * than 0x20 is UNMEASURED and keeps the reported SHUTDOWN. */
     utility_savedata_block();
     expect(utility_call(&cpu, NID_SAVEDATA_DIALOG_INIT, UTILITY_SAVEDATA_PARAM_ADDR) == 0u &&
                utility_status(&cpu, NID_SAVEDATA_DIALOG_STATUS) == 1u &&
+               utility_call(&cpu, NID_SAVEDATA_DIALOG_SHUTDOWN, 0u) == 0x80110001u &&
+               utility_status(&cpu, NID_SAVEDATA_DIALOG_STATUS) == 2u,
+           "a savedata ShutdownStart during RUNNING returns INVALID_STATUS to a caller at 0x6F and "
+           "the dialog stays RUNNING");
+    expect(utility_poll_to_finished(&cpu, NID_SAVEDATA_DIALOG_UPDATE, NID_SAVEDATA_DIALOG_STATUS) &&
                utility_call(&cpu, NID_SAVEDATA_DIALOG_SHUTDOWN, 0u) == 0u &&
-               utility_status(&cpu, NID_SAVEDATA_DIALOG_STATUS) == 4u &&
                utility_status(&cpu, NID_SAVEDATA_DIALOG_STATUS) == 0u,
-           "a savedata ShutdownStart during RUNNING still reports SHUTDOWN to a caller at 0x6F");
+           "that savedata dialog finishes and a caller at 0x6F sees NONE after ShutdownStart");
     expect(utility_change_priority(&cpu, 0x10u) == 0u && utility_savedata_start_to_finished(&cpu),
            "savedata reaches FINISHED for a caller at 0x10");
     expect(utility_call(&cpu, NID_SAVEDATA_DIALOG_SHUTDOWN, 0u) == 0u &&
@@ -52928,7 +52953,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_storage_dialog_parameter_sizes();
     test_netconf_parameter_sizes();
     test_utility_dialog_single_slot();
-    test_utility_dialog_cancel_cleanup();
+    test_utility_dialog_refused_cancel();
     test_utility_dialog_status_sequence();
     test_utility_dialog_frame_driven_status();
     test_utility_dialog_start_up_during_status_spin();

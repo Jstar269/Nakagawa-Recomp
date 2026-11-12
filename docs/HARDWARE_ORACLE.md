@@ -3930,9 +3930,11 @@ stay in the private campaign directory.
   no directory to remove (its Dopen `0x80010002`). Every later dialog cell, net setup included, was SKIP with reason
   5, so no netconf or game sharing cell ran.
 
-The runtime's utility slot accepts ShutdownStart from RUNNING for savedata, netconf and gamedata (`hle_utility.c`
-calls that unmeasured); every ShutdownStart these captures recorded while RUNNING (four of the six issued) returned `0x80110001`. An
-acceptance-eligible run is needed before that is a measured claim (#1386).
+Every ShutdownStart these captures recorded while RUNNING (four of the six issued) returned `0x80110001`. The
+runtime's utility slot now refuses ShutdownStart during INIT and RUNNING with `0x80110001` for every dialog type, as
+the message dialog's measured rule does (`utility_shutdown_refused` in `src/rt/hle_utility.c`); for savedata, netconf
+and gamedata while RUNNING that agrees with these captures, and the other cells stay UNMEASURED. An
+acceptance-eligible run is needed before any of it is a measured claim (#1386).
 
 ### PSP-HLE-SAVEDATA-NODATA-001 capture 2026-11-10
 
