@@ -390,6 +390,19 @@ static void consumer(const GeSceneRecord *rec, void *user) {
     }
     GeSceneVertex junk;
     expect(!ge_scene_vertex(rec, rec->count, &junk), "a reference past count is refused");
+    if (rec->index_format) {
+        /* The same indexed PRIM with its vertices, then its indices, ending past guest memory: the
+         * reference is refused and left zeroed (the dump writes such a vertex as zeros). */
+        static const GeSceneVertex zero;
+        GeSceneRecord past = *rec;
+        past.vertex_addr = 0x0BFFFFFFu;
+        expect(!ge_scene_vertex(&past, 0, &junk) && memcmp(&junk, &zero, sizeof zero) == 0,
+               "a vertex past guest memory is refused and zeroed");
+        past = *rec;
+        past.index_addr = 0x0BFFFFFFu;
+        expect(!ge_scene_vertex(&past, 0, &junk) && memcmp(&junk, &zero, sizeof zero) == 0,
+               "indices past guest memory are refused and zeroed");
+    }
 }
 
 /* ---- Checks ---- */

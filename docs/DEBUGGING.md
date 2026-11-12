@@ -1349,15 +1349,17 @@ Supported formats are `5650`, `5551`, `4444`, `8888`, `CLUT4`, `CLUT8`, `CLUT16`
 #### GE scene dump
 
 Set `SR_GESCENE=<frame>` and `SR_GESCENE_DIR=<existing-directory>` to write every PRIM of one GE
-frame to `gescene_f<frame>.bin`: each draw's identity, the GE state it draws with (matrices,
-lights, material, texture, targets) and its vertices in model space, before skinning. The format
-is versioned and documented in `src/rt/ge_scene.h`. The runtime prints
+frame to `gescene_f<frame>.bin`: each draw's identity, the GE state it draws with (matrices, lights,
+material, texture, targets) and its vertices in model space, before skinning. The format is
+versioned and documented in `src/rt/ge_scene.h`. The runtime prints
 `GESCENE: frame <n>: <k> records -> <path>` once a later frame begins. It prints
-`GESCENE NOT_CAPTURED (...)` if the run ends first (a file already started then holds only part
-of the frame), `GESCENE CONFIG_FAIL (...)` for a frame number that is not plain digits or a
-missing directory, and `GESCENE WRITE_FAIL (...)` if the file cannot be created or written. Off by
-default and host-side; with no dump, nothing the GE draws changes. The file holds decoded game
-geometry: like a VRAM dump, it is private evidence and never published.
+`GESCENE NOT_CAPTURED (...)` if the run ends first, by any exit, `SR_EXIT_AT_VBLANK` and the other
+debug stops included; a file already started then holds only part of the frame. It prints
+`GESCENE CONFIG_FAIL (...)` for a frame number that is not plain digits or is above 4294967295, or
+an unset or empty `SR_GESCENE_DIR`, and `GESCENE WRITE_FAIL (...)` if the file cannot be created (a
+folder that does not exist), written or closed. Off by default and host-side; with no dump, nothing
+the GE draws changes. The file holds decoded game geometry: like a VRAM dump, it is private evidence
+and never published.
 
 #### Where `SR_EXIT_AT_VBLANK` actually stops
 

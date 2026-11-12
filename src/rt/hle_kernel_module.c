@@ -11,6 +11,7 @@
  * from hle.c on 2026-10-31 (#307). */
 
 #include "hle_internal.h"
+#include "ge_scene.h"
 
 /* Register or replace an export discovered while loading a PRX. The target is a guest address,
  * never a host function pointer. This makes module loading repeatable and keeps host ASLR out of
@@ -988,6 +989,7 @@ static uint32_t hle_libfont_startup_stop(const char *reason) {
     sr_hit_hle = 1;
     if (sr_sched_on) {
         sr_trace_close();
+        ge_scene_dump_finish();
         sr_compat_report();
         (void)sr_videorec_finish_status("the libfont start-up stop", HLE_LIBFONT_STARTUP_STOP_EXIT);
         sr_perf_shutdown();

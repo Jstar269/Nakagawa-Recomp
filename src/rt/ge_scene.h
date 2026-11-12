@@ -94,6 +94,11 @@ int ge_scene_vertex(const GeSceneRecord *rec, uint32_t i, GeSceneVertex *out);
  * near clipper's limit). Updates no counters that a run's GE output depends on. */
 int ge_scene_project_for_test(const GeSceneRecord *rec, uint32_t i, GeVtx *out);
 
+/* End the SR_GESCENE dump as the run ends: an open or waiting dump becomes NOT_CAPTURED. atexit
+ * runs it; an exit path that ends the process with _Exit calls it first, beside its other
+ * end-of-run reports. Idempotent, and a no-op without a dump. */
+void ge_scene_dump_finish(void);
+
 /* Test use: the SR_GESCENE dump's state; the end-of-run step atexit runs (an open dump becomes
  * NOT_CAPTURED); and a re-arm that closes any dump that way and reads SR_GESCENE again at the next
  * PRIM, as at start-up. */

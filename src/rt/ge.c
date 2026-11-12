@@ -5870,6 +5870,8 @@ static unsigned long s_scene_dump_records;
 static char s_scene_dump_path[1024];
 static int s_scene_dump_state = GE_SCENE_DUMP_IDLE;
 static int s_scene_dump_exit_hooked;
+static void ge_scene_dump_consumer(const GeSceneRecord *rec, void *user);
+static void ge_scene_dump_end_state(int frame_over);
 
 /* A write failed: the file is closed and nothing more is written or claimed. */
 static void ge_scene_dump_fail(const char *why) {
@@ -5877,12 +5879,20 @@ static void ge_scene_dump_fail(const char *why) {
     if (s_scene_dump_file) fclose(s_scene_dump_file);
     s_scene_dump_file = NULL;
     s_scene_dump_state = GE_SCENE_DUMP_WRITE_FAIL;
+    if (s_scene_fn == ge_scene_dump_consumer) s_scene_fn = NULL;
 }
 
 /* Ends the dump. frame_over: a later GE frame began, so the file holds the whole frame. Otherwise
  * the run ended, or the consumer was replaced, before that: the frame is NOT_CAPTURED, and a file
  * already started keeps the records written so far. */
 static void ge_scene_dump_end(int frame_over) {
+    ge_scene_dump_end_state(frame_over);
+    if (s_scene_fn == ge_scene_dump_consumer && s_scene_dump_state != GE_SCENE_DUMP_WAITING &&
+        s_scene_dump_state != GE_SCENE_DUMP_WRITING)
+        s_scene_fn = NULL;
+}
+
+static void ge_scene_dump_end_state(int frame_over) {
     if (s_scene_dump_state == GE_SCENE_DUMP_WRITING) {
         FILE *f = s_scene_dump_file;
         s_scene_dump_file = NULL;
@@ -5906,7 +5916,7 @@ static void ge_scene_dump_end(int frame_over) {
     }
 }
 
-static void ge_scene_dump_exit(void) { ge_scene_dump_end(0); }
+void ge_scene_dump_finish(void) { ge_scene_dump_end(0); }
 
 /* ge_set_frame, before the frame number changes: a dump of an earlier frame is complete. */
 static void ge_scene_frame_begins(uint32_t frame) {
@@ -6076,7 +6086,7 @@ static void ge_scene_probe(const GeSceneRecord *rec, void *user) {
     s_scene_dump_frame = (uint32_t)n;
     s_scene_dump_state = GE_SCENE_DUMP_WAITING;
     if (!s_scene_dump_exit_hooked) {
-        if (atexit(ge_scene_dump_exit) != 0) {
+        if (atexit(ge_scene_dump_finish) != 0) {
             s_scene_dump_state = GE_SCENE_DUMP_CONFIG_FAIL;
             fprintf(stderr, "GESCENE CONFIG_FAIL (cannot register the end-of-run report)\n");
             return;
