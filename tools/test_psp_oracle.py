@@ -12807,6 +12807,10 @@ class HleUtilityNetconfSharingProbeTests(unittest.TestCase):
     so netconf runs last, after every sharing record is written, and no gamedata, savedata or
     message-dialog open can be built into it."""
 
+    probe: ClassVar[str]
+    makefile: ClassVar[str]
+    imports: ClassVar[str]
+
     @classmethod
     def setUpClass(cls) -> None:
         fixture = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
