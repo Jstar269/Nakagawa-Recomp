@@ -30460,6 +30460,190 @@ static void test_ge_finish_callback_reports(void) {
     ge_tim_teardown();
 }
 
+/* #2375: a finish callback that enqueues the next list. An enqueued list runs at once here, so
+ * its finish callback used to run inside the one that enqueued it, a guest-call frame deeper per
+ * list, until the owner's frames ran out and the fifth callback in the chain was refused. On a
+ * PSP finish callbacks run from the GE interrupt handler, which does not re-enter itself: each
+ * runs after the previous returns, in completion order.
+ * MUTANT: running a completion's callback at once while one is running nests them (depth 4, the
+ * chain stops after 4 callbacks); running the waiting ones last-in first-out reverses the burst
+ * order; dropping the full-queue stop runs or loses the 65th completion silently. */
+/* GE_CHAIN_WAIT is the runtime's GE_LIST_MAX (hle_internal.h): the completions that may wait. */
+enum { GE_CHAIN_LEN = 6, GE_CHAIN_WAIT = 64, GE_CHAIN_BURST = GE_CHAIN_WAIT + 1 };
+static unsigned s_ge_chain_depth, s_ge_chain_max_depth, s_ge_chain_calls;
+static unsigned s_ge_chain_next, s_ge_chain_last, s_ge_chain_burst;
+static uint32_t s_ge_chain_ids[GE_CHAIN_BURST + 1];
+
+static uint32_t ge_chain_list(unsigned i) { return GE_TIM_DL2 + 0x100u * i; }
+
+static void ge_chain_finish_fn(CpuState *cpu) {
+    if (++s_ge_chain_depth > s_ge_chain_max_depth) s_ge_chain_max_depth = s_ge_chain_depth;
+    if (s_ge_chain_calls <= GE_CHAIN_BURST) s_ge_chain_ids[s_ge_chain_calls] = cpu->r[4];
+    s_ge_chain_calls++;
+    if (s_ge_chain_burst) {
+        unsigned n = s_ge_chain_burst;
+        s_ge_chain_burst = 0u;               /* only the first callback enqueues the burst */
+        for (unsigned i = 0; i < n; i++) (void)ge_tim_enqueue(cpu, ge_chain_list(i));
+    } else if (s_ge_chain_next < s_ge_chain_last) {
+        (void)ge_tim_enqueue(cpu, ge_chain_list(s_ge_chain_next++));
+    }
+    s_ge_chain_depth--;
+    cpu->r[2] = 0u;
+}
+
+static void ge_chain_reset(void) {
+    s_ge_chain_depth = s_ge_chain_max_depth = s_ge_chain_calls = 0u;
+    s_ge_chain_next = s_ge_chain_last = s_ge_chain_burst = 0u;
+    memset(s_ge_chain_ids, 0, sizeof(s_ge_chain_ids));
+}
+
+static void test_ge_finish_callbacks_do_not_nest(void) {
+    CpuState cpu;
+    ge_tim_setup();
+    sr_hle_test_ge_lists_reset();
+    sr_test_register_guest_fn(GE_TIM_FINISH_FN, ge_chain_finish_fn);
+    ge_tim_write_list(GE_TIM_DL, 0u);
+    for (unsigned i = 0; i < GE_CHAIN_BURST; i++) ge_tim_write_list(ge_chain_list(i), 0u);
+
+    /* A chain: each callback enqueues the next list. */
+    ge_chain_reset();
+    s_ge_chain_last = GE_CHAIN_LEN - 1u;
+    memset(&cpu, 0, sizeof(cpu));
+    (void)ge_tim_enqueue(&cpu, GE_TIM_DL);
+    expect(s_ge_chain_calls == GE_CHAIN_LEN,
+           "GE finish: a callback chain of 6 lists runs all 6 finish callbacks");
+    expect(s_ge_chain_max_depth == 1u,
+           "GE finish: a list completed inside a finish callback runs its callback after it returns");
+    int in_order = s_ge_chain_ids[0] == ge_tim_finish_id(GE_TIM_DL);
+    for (unsigned i = 1; i < GE_CHAIN_LEN; i++)
+        in_order &= s_ge_chain_ids[i] == ge_tim_finish_id(ge_chain_list(i - 1u));
+    expect(in_order, "GE finish: chained finish callbacks run in completion order");
+
+    /* A burst: the first callback enqueues 65 lists; 64 wait their turn, in order, and the 65th
+     * completion, with no room left to wait, stops the run by name. */
+    ge_chain_reset();
+    s_ge_chain_burst = GE_CHAIN_BURST;
+    uint32_t stops = sr_hle_test_unmodelled_stops();
+    memset(&cpu, 0, sizeof(cpu));
+    (void)ge_tim_enqueue(&cpu, GE_TIM_DL);
+    expect(s_ge_chain_max_depth == 1u && s_ge_chain_calls == 1u + GE_CHAIN_WAIT,
+           "GE finish: 64 completions raised in one callback each run after it, one at a time");
+    in_order = 1;
+    for (unsigned i = 0; i < GE_CHAIN_WAIT; i++)
+        in_order &= s_ge_chain_ids[1u + i] == ge_tim_finish_id(ge_chain_list(i));
+    expect(in_order, "GE finish: completions raised in one callback run first-in first-out");
+    expect(sr_hle_test_unmodelled_stops() == stops + 1u,
+           "GE finish: a completion with no room left to wait stops the run by name");
+
+    /* Nothing is left waiting: the next list's callback runs at once, at depth 1. */
+    ge_chain_reset();
+    memset(&cpu, 0, sizeof(cpu));
+    (void)ge_tim_enqueue(&cpu, GE_TIM_DL);
+    expect(s_ge_chain_calls == 1u && s_ge_chain_max_depth == 1u &&
+               s_ge_chain_ids[0] == ge_tim_finish_id(GE_TIM_DL),
+           "GE finish: after a chain the next list's callback runs at once, alone");
+    sr_test_register_guest_fn(GE_TIM_FINISH_FN, ge_tim_finish_fn);
+    ge_tim_teardown();
+}
+
+/* The waiting completions belong to the thread whose callback raised them. A worker thread whose
+ * finish callback ends the thread (sceKernelExitThread inside the callback) must give its run
+ * back, so a list another thread completes afterwards has its callback run at once; a worker
+ * that ends with a completion still waiting stops the run by name instead of dropping it.
+ * Real scheduler threads, real sceGeListEnQueue and sceKernelExitThread.
+ * MUTANT: one process-wide "callback running" flag, never cleared by the exit, leaves the main
+ * thread's later callback waiting forever (it never runs; reasoned, not built); dropping
+ * ge_finish_release_owner() from thread teardown leaves the dead worker's run open and loses its
+ * waiting completion without a stop (2 checks fail, measured). */
+#define GX_MAIN_ENTRY   0x08a38080u
+#define GX_WORKER_ENTRY 0x08a380c0u
+
+extern unsigned sr_hle_test_ge_finish_runs(void);
+
+static struct {
+    uint32_t worker_uid, main_uid;
+    int exit_with_waiting;           /* the worker's callback raises one more completion first */
+    int worker_after_enqueue;        /* the worker body ran past its enqueue */
+    unsigned calls, worker_calls, main_calls;
+    unsigned runs_after_worker, stops_before, stops_after_worker;
+    unsigned main_calls_after;
+    int main_done;
+} s_gx;
+
+static void gx_finish_fn(CpuState *cpu) {
+    const uint32_t uid = sched_current_uid();
+    s_gx.calls++;
+    if (uid == s_gx.worker_uid) {
+        s_gx.worker_calls++;
+        if (s_gx.exit_with_waiting) (void)ge_tim_enqueue(cpu, GE_TIM_DL2);
+        (void)sfs_call(cpu, NID_SCE_KERNEL_EXIT_THREAD, 0u, 0u, 0u, 0u);
+        return;   /* not reached: the thread ended */
+    }
+    if (uid == s_gx.main_uid) s_gx.main_calls++;
+    cpu->r[2] = 0u;
+}
+
+static void gx_worker_fn(CpuState *cpu) {
+    (void)ge_tim_enqueue(cpu, GE_TIM_DL);
+    s_gx.worker_after_enqueue = 1;
+    cpu->r[2] = 0u;
+}
+
+static uint32_t gx_run_worker(CpuState *cpu) {
+    const uint32_t w = sfs_call(cpu, NID_SCE_KERNEL_CREATE_THREAD, sfs_thread_name(), GX_WORKER_ENTRY,
+                                0x18u, 0u);
+    s_gx.worker_uid = w;
+    (void)sfs_call(cpu, NID_SCE_KERNEL_START_THREAD, w, 0u, 0u, 0u);
+    (void)sfs_call(cpu, NID_SCE_KERNEL_WAIT_THREAD_END, w, 0u, 0u, 0u);
+    return w;
+}
+
+static void gx_main_fn(CpuState *cpu) {
+    s_gx.main_uid = sfs_call(cpu, NID_SCE_KERNEL_GET_THREAD_ID, 0u, 0u, 0u, 0u);
+
+    /* A worker ends inside its finish callback with nothing waiting. */
+    s_gx.exit_with_waiting = 0;
+    const uint32_t w1 = gx_run_worker(cpu);
+    s_gx.runs_after_worker = sr_hle_test_ge_finish_runs();
+    (void)ge_tim_enqueue(cpu, GE_TIM_DL);
+    s_gx.main_calls_after = s_gx.main_calls;
+    (void)sfs_call(cpu, NID_SCE_KERNEL_DELETE_THREAD, w1, 0u, 0u, 0u);
+
+    /* A worker ends inside its finish callback with one completion waiting. */
+    s_gx.exit_with_waiting = 1;
+    s_gx.stops_before = sr_hle_test_unmodelled_stops();
+    const uint32_t w2 = gx_run_worker(cpu);
+    s_gx.stops_after_worker = sr_hle_test_unmodelled_stops();
+    (void)sfs_call(cpu, NID_SCE_KERNEL_DELETE_THREAD, w2, 0u, 0u, 0u);
+    s_gx.main_done = 1;
+    cpu->r[2] = 0u;
+}
+
+static void test_ge_finish_callback_thread_exit(void) {
+    ge_tim_setup();
+    sr_hle_test_ge_lists_reset();
+    memset(&s_gx, 0, sizeof s_gx);
+    s_gx.worker_uid = s_gx.main_uid = 0xffffffffu;
+    sr_test_register_guest_fn(GE_TIM_FINISH_FN, gx_finish_fn);
+    sr_test_register_guest_fn(GX_MAIN_ENTRY, gx_main_fn);
+    sr_test_register_guest_fn(GX_WORKER_ENTRY, gx_worker_fn);
+    ge_tim_write_list(GE_TIM_DL, 0u);
+    ge_tim_write_list(GE_TIM_DL2, 0u);
+    memset(s_cpu, 0, sizeof(*s_cpu));
+    sched_run(GX_MAIN_ENTRY, 0u, 0u);
+    expect(s_gx.main_done, "GE finish exit: the main body ran to its end");
+    expect(s_gx.worker_calls == 2u && !s_gx.worker_after_enqueue,
+           "GE finish exit: each worker's callback ran and ended the worker inside it");
+    expect(s_gx.runs_after_worker == 0u,
+           "GE finish exit: a thread that ends inside its finish callback gives its run back");
+    expect(s_gx.main_calls_after == 1u,
+           "GE finish exit: another thread's list then has its finish callback run at once");
+    expect(s_gx.stops_after_worker == s_gx.stops_before + 1u && sr_hle_test_ge_finish_runs() == 0u,
+           "GE finish exit: ending with a completion waiting stops the run by name, not silently");
+    sr_test_register_guest_fn(GE_TIM_FINISH_FN, ge_tim_finish_fn);
+    ge_tim_teardown();
+}
+
 /* #1374: lists enqueued while another list is still on the GE wait their turn, in enqueue
  * order, as the GE driver's queue runs them (uofw src/kd/ge/ge.c _sceGeListEnQueue and
  * _sceGeFinishInterrupt). The queued-list peek (1) is uofw's SCE_GE_LIST_QUEUED and
@@ -52509,6 +52693,8 @@ static int hle_selftest_main(int argc, char **argv) {
     test_ge_break_continue();
     test_ge_completion_timing();
     test_ge_finish_callback_reports();
+    test_ge_finish_callbacks_do_not_nest();
+    test_ge_finish_callback_thread_exit();
     test_ge_queued_lists_run_in_order();
     test_ge_timing_blocking_sync_cannot_wait();
     test_volatile_mem_output_preflight();
