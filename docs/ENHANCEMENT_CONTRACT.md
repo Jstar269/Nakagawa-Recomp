@@ -444,38 +444,11 @@ package misses the cache once. An enhanced package already built keeps launching
 enhancement package id a build records, not its declaration.
 
 Only the maintainer releases a package the project ships in `assets/enhancements/` (section 5.1), by a decision
-recorded in that package's entry below, with what was measured and the limits known when it was released. The
-player honours `"experimental": false` only in a package it finds in the source tree's `assets/enhancements/`
-(section 5.1), never in one from the user's data folder: a package there, which comes first, still loads and plays
-but is always shown as experimental, whatever it declares.
-
-#### 9.10.1. *Hot Shots Tennis* (UCUS98701): `hst.timing.native_60hz`
-
-- **Status.** Released from package 14.0.0-pre1 by the owner's decision of 2026-11-12 (#1732), with the known
-  limits below. It is short of the goal #1732 sets, true 60 logic updates a second in menus, the title screen
-  and matches.
-- **Measured** (the side-by-side check of section 9.7, recorded in #2362). Package 14.0.0-pre1 against the authentic
-  game on a private full-match route (title screen, menus and one full match): 57.2 logic updates per game second in
-  the menus (with the boot), 59.9 on the title screen and 57.1 in a match. In that run 77 % of the match's seconds
-  after its entry load held 57 or more, with short dips (the lowest second 33), so the `SLOWED` line of section 9.5,
-  item 4 (three seconds in a row under 57) can appear in a match. No compared event differed from the authentic
-  game: the point winner, the ball's side and the ball's owner match, and both players' random-number seeds advance
-  1.98 and 2.03 times as often, as `rescale_probability` (section 9.3) expects. Shot-type changes were too few to
-  judge, and the tool's overall verdict reads `FAIL` only for reseeds it cannot resolve as generator steps, which
-  the authentic run has about as many of (35 against 38). The host was never fully idle: the measured run had 43 %
-  mean processor load from other work, and an earlier run at 53 % fell to 52.7 in the match (`SLOWED`).
-- **Known limits.**
-  1. Further sites belong in the next package update: the eight `gate_30hz_store` sites of #2360 (a cursor ease, a
-     step toward a target and a float ease, which run twice as fast at 60 Hz until then), and five triage rows
-     still open (#2362).
-  2. At 60 Hz the step from the main menu into single player takes 3.94 s longer than in the authentic game (288
-     vertical blanks against 52). A 60 Hz run with an earlier package shows the same, so it is older than
-     14.0.0-pre1. Its cause is not traced yet (#1732).
-
-  Also recorded in #2362: when two bounces come 33 ms apart or less, the bounce-effect sites free their emitters
-  up to two 60 Hz updates early.
-- **Not run.** A run on a fully idle host, and a measurement of whether 14.0.0-pre1 costs more per update than
-  13.0.0-pre1.
+recorded in an entry for that package under this section, with what was measured and the limits known when it was
+released. No package the project ships is released yet. The player honours `"experimental": false` only in a
+package it finds in the source tree's `assets/enhancements/` (section 5.1), never in one from the user's data
+folder: a package there, which comes first, still loads and plays but is always shown as experimental, whatever it
+declares.
 
 ## 10. Play Modes: Authentic, Enhanced and Ace
 
