@@ -26,10 +26,13 @@ static int value_on_off(const char *v, int *out) {
 }
 
 /* The line's keys. Each says whether a line must carry it, so the order of the table decides
-   nothing: tier is the one key a line may leave out (an Enhanced run). */
+   nothing for the parser: tier is the one key a line may leave out (an Enhanced run). Each
+   also names the longest value ace_format writes for it, so ace_longest_line builds the
+   longest line from this table alone. */
 typedef enum {
     ACE_KEY_AF, ACE_KEY_TEXT, ACE_KEY_READOUT, ACE_KEY_NOTICE, ACE_KEY_WIDE, ACE_KEY_SMOOTH,
-    ACE_KEY_SAS, ACE_KEY_TESS, ACE_KEY_TIER, ACE_KEY_STICK, ACE_KEY_LOAD, ACE_KEY_GLYPHS,
+    ACE_KEY_SAS, ACE_KEY_TESS, ACE_KEY_TWIN, ACE_KEY_TIER, ACE_KEY_STICK, ACE_KEY_LOAD, ACE_KEY_DEPTH,
+    ACE_KEY_SSAA, ACE_KEY_GLYPHS,
     ACE_KEY_CULL
 } AceKey;
 
@@ -37,21 +40,41 @@ static const struct {
     const char *name;
     AceKey key;
     int required;
+    const char *longest;
 } k_ace_keys[] = {
-    {"af", ACE_KEY_AF, 1},
-    {"text", ACE_KEY_TEXT, 1},
-    {"readout", ACE_KEY_READOUT, 1},
-    {"notice", ACE_KEY_NOTICE, 1},
-    {"wide", ACE_KEY_WIDE, 1},
-    {"smooth", ACE_KEY_SMOOTH, 1},
-    {"sas", ACE_KEY_SAS, 1},
-    {"tess", ACE_KEY_TESS, 1},
-    {"tier", ACE_KEY_TIER, 0},
-    {"stick", ACE_KEY_STICK, 0},
-    {"load", ACE_KEY_LOAD, 0},
-    {"glyphs", ACE_KEY_GLYPHS, 0},
-    {"cull", ACE_KEY_CULL, 0},
+    {"af", ACE_KEY_AF, 1, "16"},
+    {"text", ACE_KEY_TEXT, 1, "off"},
+    {"readout", ACE_KEY_READOUT, 1, "off"},
+    {"notice", ACE_KEY_NOTICE, 1, "off"},
+    {"wide", ACE_KEY_WIDE, 1, "fill"},
+    {"smooth", ACE_KEY_SMOOTH, 1, "match"},
+    {"sas", ACE_KEY_SAS, 1, "sinc"},
+    {"tess", ACE_KEY_TESS, 1, "off"},
+    {"twin", ACE_KEY_TWIN, 1, "off"},
+    {"tier", ACE_KEY_TIER, 0, "enhanced"},
+    {"stick", ACE_KEY_STICK, 0, "126"},
+    {"load", ACE_KEY_LOAD, 0, "fast"},
+    {"depth", ACE_KEY_DEPTH, 0, "32"},
+    {"ssaa", ACE_KEY_SSAA, 0, "4"},
+    {"glyphs", ACE_KEY_GLYPHS, 0, "on"},
+    {"cull", ACE_KEY_CULL, 0, "on"},
 };
+
+size_t ace_longest_line(char *out, size_t cap) {
+    size_t used = 0;
+    int n;
+    if (!out || !cap) return 0;
+    n = snprintf(out, cap, "v1");
+    if (n < 0 || (size_t)n >= cap) { out[0] = '\0'; return 0; }
+    used = (size_t)n;
+    for (size_t i = 0; i < sizeof(k_ace_keys) / sizeof(k_ace_keys[0]); i++) {
+        if (!k_ace_keys[i].longest) { out[0] = '\0'; return 0; }
+        n = snprintf(out + used, cap - used, ";%s=%s", k_ace_keys[i].name, k_ace_keys[i].longest);
+        if (n < 0 || (size_t)n >= cap - used) { out[0] = '\0'; return 0; }
+        used += (size_t)n;
+    }
+    return used;
+}
 
 /* stick=<counts>: a decimal 1..ACE_STICK_COUNTS_MAX with no sign and no leading zero, so the
    line's text is the one ace_format writes. */
@@ -135,6 +158,21 @@ int ace_parse(const char *spec, AceConfig *out, char *why, size_t why_cap) {
                     why_set(why, why_cap, "load is not part of this build"); return 0;
                 }
                 break;
+            case ACE_KEY_DEPTH:
+                if (strcmp(v, "off") == 0) { c.depth = 0; ok = 1; }
+                else if (strcmp(v, "32") == 0) { c.depth = 32; ok = 1; }
+                if (ok && c.depth && !ACE_HAS_DEPTH) {
+                    why_set(why, why_cap, "depth is not part of this build"); return 0;
+                }
+                break;
+            case ACE_KEY_SSAA:
+                if (strcmp(v, "off") == 0) { c.ssaa = 0; ok = 1; }
+                else if (strcmp(v, "2") == 0) { c.ssaa = 2; ok = 1; }
+                else if (strcmp(v, "4") == 0) { c.ssaa = 4; ok = 1; }
+                if (ok && c.ssaa && !ACE_HAS_SSAA) {
+                    why_set(why, why_cap, "ssaa is not part of this build"); return 0;
+                }
+                break;
             case ACE_KEY_GLYPHS:
                 ok = value_on_off(v, &c.glyphs);
                 if (ok && c.glyphs && !ACE_HAS_GLYPHS) {
@@ -161,6 +199,7 @@ int ace_parse(const char *spec, AceConfig *out, char *why, size_t why_cap) {
                     why_set(why, why_cap, "sas is not part of this build"); return 0;
                 }
                 break;
+            case ACE_KEY_TWIN: ok = value_on_off(v, &c.twin); break;
             case ACE_KEY_TESS:
                 if (strcmp(v, "off") == 0) { c.tess = 0; ok = 1; }
                 else if (strcmp(v, "2") == 0 || strcmp(v, "3") == 0 || strcmp(v, "4") == 0) {
@@ -203,10 +242,10 @@ int ace_format(const AceConfig *c, char *out, size_t cap) {
     if (!out || !cap) return 0;
     if (!c || !c->on) n = snprintf(out, cap, "off");
     else n = snprintf(out, cap, "v1;tier=%s;af=%d;text=%s;readout=%s;notice=%s;wide=%s;smooth=%s;"
-                                "sas=%s;tess=%s",
+                                "sas=%s;tess=%s;twin=%s",
                       tier_word(c->tier), c->af, on_off(c->text), on_off(c->readout),
                       on_off(c->notice), wide_word(c->wide), smooth_word(c->smooth),
-                      sas_word(c->sas), tess_word(c->tess));
+                      sas_word(c->sas), tess_word(c->tess), on_off(c->twin));
     /* Written only when on: a missing stick is off, so every line without it keeps its text. */
     if (n > 0 && (size_t)n < cap && c && c->on && c->stick) {
         const int m = snprintf(out + n, cap - (size_t)n, ";stick=%d", c->stick);
@@ -215,6 +254,16 @@ int ace_format(const AceConfig *c, char *out, size_t cap) {
     /* Likewise load, after stick: a missing load is off. */
     if (n > 0 && (size_t)n < cap && c && c->on && c->load) {
         const int m = snprintf(out + n, cap - (size_t)n, ";load=fast");
+        n = m < 0 ? -1 : n + m;
+    }
+    /* Likewise depth, after load: a missing depth is the PSP's 16 bits. */
+    if (n > 0 && (size_t)n < cap && c && c->on && c->depth) {
+        const int m = snprintf(out + n, cap - (size_t)n, ";depth=%d", c->depth);
+        n = m < 0 ? -1 : n + m;
+    }
+    /* Likewise ssaa, after load: a missing ssaa is off. */
+    if (n > 0 && (size_t)n < cap && c && c->on && c->ssaa) {
+        const int m = snprintf(out + n, cap - (size_t)n, ";ssaa=%d", c->ssaa);
         n = m < 0 ? -1 : n + m;
     }
     /* Likewise glyphs, after the parts above and before cull: a missing glyphs is off, so a line
@@ -241,6 +290,8 @@ static char s_spec[ACE_SPEC_MAX] = "off";
 static char s_report_path[1024];
 static char s_unavailable[ACE_FEATURE_COUNT][96];
 static int s_af_device;          /* the device's level when lower than the request, else 0 */
+static int s_ssaa_limited;       /* the factor the renderer gave when lower than the request, else 0 */
+static char s_ssaa_why[128];     /* ...and why */
 static int s_confirmed[ACE_FEATURE_COUNT];
 static uint64_t s_af_failures;
 static unsigned long s_cull_untracked;
@@ -254,7 +305,7 @@ static int s_load_paced;             /* the guard fired: nothing is skipped for 
 
 static const char *const k_feature_key[ACE_FEATURE_COUNT] = {
     "af", "text", "readout", "notice", "wide", "smooth", "sas", "tess", "stick", "load", "cull",
-    "glyphs"
+    "depth", "twin", "ssaa", "glyphs"
 };
 
 /* The run's observation state. */
@@ -325,6 +376,8 @@ int ace_init_spec(const char *spec, const char *report_path) {
     s_load_update_skipped = 0;
     s_load_paced = 0;
     s_af_device = 0;
+    s_ssaa_limited = 0;
+    s_ssaa_why[0] = '\0';
     s_report_path[0] = '\0';
     snprintf(s_spec, sizeof(s_spec), "off");
     observation_reset();
@@ -340,9 +393,10 @@ int ace_init_spec(const char *spec, const char *report_path) {
         snprintf(s_report_path, sizeof(s_report_path), "%s", report_path);
     g_ace_on = 1;
     fprintf(stderr, "ACE_MODE: on (tier=%s, af=%d, text=%s, readout=%s, notice=%s, wide=%s, "
-            "smooth=%s, sas=%s, tess=%s)\n", tier_word(s_req.tier), s_req.af, on_off(s_req.text),
+            "smooth=%s, sas=%s, tess=%s, twin=%s)\n", tier_word(s_req.tier), s_req.af, on_off(s_req.text),
             on_off(s_req.readout), on_off(s_req.notice), wide_word(s_req.wide),
-            smooth_word(s_req.smooth), sas_word(s_req.sas), tess_word(s_req.tess));
+            smooth_word(s_req.smooth), sas_word(s_req.sas), tess_word(s_req.tess),
+            on_off(s_req.twin));
     if (s_req.stick)
         fprintf(stderr, "ACE_MODE: stick remap %d (the host stick starts past the game's square dead "
                         "zone of %d counts; the game reads changed stick values)\n",
@@ -350,6 +404,14 @@ int ace_init_spec(const char *spec, const char *report_path) {
     if (s_req.load)
         fprintf(stderr, "ACE_MODE: load fast (a title's declared loading waits return at once; "
                         "guest timing changes)\n");
+    if (s_req.depth)
+        fprintf(stderr, "ACE_MODE: depth %d (the host depth buffer keeps unrounded depth, so surfaces "
+                        "within one 16-bit step of each other can draw in a different order; guest "
+                        "depth reads stay 16-bit)\n", s_req.depth);
+    if (s_req.ssaa)
+        fprintf(stderr, "ACE_MODE: ssaa %d (the host twin renders at %d times the render scale per axis and "
+                        "the presenter shows its box-filtered average; guest VRAM and every readback are "
+                        "unchanged)\n", s_req.ssaa, s_req.ssaa);
     if (s_req.glyphs)
         fprintf(stderr, "ACE_MODE: glyphs on (small text sprites draw from glyphs rebuilt at the render "
                         "scale; the frames the game keeps in VRAM change where they do)\n");
@@ -396,10 +458,14 @@ void ace_feature_unavailable(AceFeature feature, const char *reason) {
     case ACE_FEATURE_SMOOTH: s_eff.smooth = 0; break;
     case ACE_FEATURE_STICK: s_eff.stick = 0; break;
     case ACE_FEATURE_SAS: s_eff.sas = 0; break;
+    case ACE_FEATURE_TESS: s_eff.tess = 0; break;
     case ACE_FEATURE_LOAD: s_eff.load = 0; break;
     case ACE_FEATURE_CULL: s_eff.cull = 0; break;
+    case ACE_FEATURE_DEPTH: s_eff.depth = 0; break;
+    case ACE_FEATURE_TWIN: s_eff.twin = 0; break;
+    case ACE_FEATURE_SSAA: s_eff.ssaa = 0; break;
     case ACE_FEATURE_GLYPHS: s_eff.glyphs = 0; break;
-    default: s_eff.tess = 0; break;
+    default: break;
     }
     fprintf(stderr, "ACE_MODE: %s unavailable (%s)\n", k_feature_key[feature], s_unavailable[feature]);
 }
@@ -508,6 +574,12 @@ void ace_set_readout(int on) {
     s_eff.readout = on ? 1 : 0;
 }
 
+void ace_set_twin_running(void) {
+    if (!g_ace_on || s_unavailable[ACE_FEATURE_TWIN][0]) return;
+    s_eff.twin = 1;
+    s_confirmed[ACE_FEATURE_TWIN] = 1;
+}
+
 void ace_set_af_effective(int af, const char *reason) {
     if (!g_ace_on || !s_req.af) return;
     if (af <= 0) { ace_feature_unavailable(ACE_FEATURE_AF, reason); return; }
@@ -515,6 +587,17 @@ void ace_set_af_effective(int af, const char *reason) {
         s_eff.af = af;
         s_af_device = af;
         fprintf(stderr, "ACE_MODE: af %d (the device's most)\n", af);
+    }
+}
+
+void ace_set_ssaa_effective(int factor, const char *reason) {
+    if (!g_ace_on || !s_req.ssaa) return;
+    if (factor <= 1) { ace_feature_unavailable(ACE_FEATURE_SSAA, reason); return; }
+    if (factor < s_req.ssaa) {
+        s_eff.ssaa = factor;
+        s_ssaa_limited = factor;
+        snprintf(s_ssaa_why, sizeof(s_ssaa_why), "%s", reason ? reason : "");
+        fprintf(stderr, "ACE_MODE: ssaa %d (asked for %d: %s)\n", factor, s_req.ssaa, s_ssaa_why);
     }
 }
 
@@ -540,6 +623,8 @@ size_t ace_feature_words(char *out, size_t cap) {
     if (s_eff.stick) used = words_add(out, cap, used, "stick remap");
     if (s_eff.load) used = words_add(out, cap, used, "short loads");
     if (s_eff.cull) used = words_add(out, cap, used, "wider culling");
+    if (s_eff.depth) used = words_add(out, cap, used, "32-bit depth");
+    if (s_eff.ssaa) used = words_add(out, cap, used, s_eff.ssaa == 4 ? "4x supersampling" : "2x supersampling");
     if (s_eff.glyphs) used = words_add(out, cap, used, "sharp game text");
     if (s_eff.smooth) used = words_add(out, cap, used, "smooth motion");
     if (s_eff.sas) used = words_add(out, cap, used, "clean pitched sound");
@@ -548,6 +633,7 @@ size_t ace_feature_words(char *out, size_t cap) {
         snprintf(tess, sizeof(tess), "%dx patches", s_eff.tess);
         used = words_add(out, cap, used, tess);
     }
+    if (s_eff.twin) used = words_add(out, cap, used, "full 32-bit colour");
     if (s_eff.readout) used = words_add(out, cap, used, "speed readout");
     return used;
 }
@@ -1151,10 +1237,11 @@ size_t ace_report_json(char *out, size_t cap) {
     if (!out || !cap) return 0;
     ACE_PUT("{\n  \"schema\": 1,\n  \"spec\": \"%s\",\n", s_spec);
     ACE_PUT("  \"effective\": {\"af\": %d, \"text\": %s, \"readout\": %s, \"notice\": %s, "
-            "\"wide\": \"%s\", \"smooth\": \"%s\", \"sas\": \"%s\", \"tess\": \"%s\"},\n",
+            "\"wide\": \"%s\", \"smooth\": \"%s\", \"sas\": \"%s\", \"tess\": \"%s\", "
+            "\"twin\": %s},\n",
             s_eff.af, s_eff.text ? "true" : "false", s_eff.readout ? "true" : "false",
             s_eff.notice ? "true" : "false", wide_word(s_eff.wide), smooth_word(s_eff.smooth),
-            sas_word(s_eff.sas), tess_word(s_eff.tess));
+            sas_word(s_eff.sas), tess_word(s_eff.tess), s_eff.twin ? "true" : "false");
     if (s_req.stick) ACE_PUT("  \"stick\": {\"counts\": %d, \"host_dead_zone\": %d, "
                              "\"samples_remapped\": %llu},\n",
                              s_req.stick, s_stick_host, s_stick_samples);
@@ -1162,6 +1249,9 @@ size_t ace_report_json(char *out, size_t cap) {
                             "  \"load_paced\": %s,\n",
                             s_eff.load ? "true" : "false", s_load_skipped, s_load_run_max,
                             s_load_paced ? "true" : "false");
+    if (s_req.depth) ACE_PUT("  \"depth\": %d,\n", s_eff.depth ? s_eff.depth : 16);
+    if (s_req.ssaa) ACE_PUT("  \"ssaa\": %d,\n", s_eff.ssaa ? s_eff.ssaa : 1);
+    if (s_ssaa_limited) ACE_PUT("  \"ssaa_requested\": %d,\n", s_req.ssaa);
     if (s_req.glyphs) ACE_PUT("  \"glyphs\": %s,\n", s_eff.glyphs ? "true" : "false");
     if (s_req.cull) ACE_PUT("  \"cull\": %s,\n  \"cull_untracked\": %lu,\n",
                             s_eff.cull ? "true" : "false", s_cull_untracked);
@@ -1250,17 +1340,21 @@ size_t ace_report_json(char *out, size_t cap) {
     return used;
 }
 
+static void (*s_finish_hook)(void);
+void ace_set_finish_hook(void (*hook)(void)) { s_finish_hook = hook; }
+
 void ace_finish(void) {
     char json[ACE_REPORT_MAX];
     if (!g_ace_on) return;
+    if (s_finish_hook) s_finish_hook();   /* before the never-ran settle below */
     /* A feature that is on but never ran: its renderer or presenter did not start. */
     static const int has[ACE_FEATURE_COUNT] = { 1, 1, 1, 1, ACE_HAS_WIDE, ACE_HAS_SMOOTH, ACE_HAS_SAS, ACE_HAS_TESS,
                                                 ACE_HAS_STICK, ACE_HAS_LOAD, ACE_HAS_CULL,
-                                                ACE_HAS_GLYPHS };
+                                                ACE_HAS_DEPTH, 1, ACE_HAS_SSAA, ACE_HAS_GLYPHS };
     const int on[ACE_FEATURE_COUNT] = { s_eff.af > 0, s_eff.text, s_eff.readout, s_eff.notice,
                                         s_eff.wide, s_eff.smooth, s_eff.sas, s_eff.tess, s_eff.stick,
-                                        s_eff.load,
-                                        s_eff.cull, s_eff.glyphs };
+                                        s_eff.load, s_eff.cull, s_eff.depth, s_eff.twin, s_eff.ssaa,
+                                        s_eff.glyphs };
     for (int f = 0; f < ACE_FEATURE_COUNT; f++) {
         if (has[f] && on[f] && !s_confirmed[f])
             ace_feature_unavailable((AceFeature)f, f == ACE_FEATURE_CULL

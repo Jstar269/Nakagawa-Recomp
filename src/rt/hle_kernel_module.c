@@ -1848,24 +1848,33 @@ static LoadedModule *module_for_guest_pc(const CpuState *s) {
     return NULL;
 }
 
-/* PSPSDK declares the first argument unnamed. The successful homebrew path is
- * deliberately synthetic and accepts only zero there; other values stay behind
- * a named refusal until their meaning is measured. */
+/* PSPSDK declares the first argument unnamed. PSP-HLE-SELFSTOP-001 (docs/HARDWARE_ORACLE.md,
+ * 2026-11-08, PSP-3000) measured (0, 0, NULL), (1, 0, NULL) and (0, 4, argp past RAM) from a
+ * helper module's own thread: each runs module_stop once, unloads the module and never returns.
+ * A first argument of 1 is taken only in its measured form, with no argument block; other
+ * values stay behind a named refusal until their meaning is measured. */
 static uint32_t h_SelfStopUnloadModule(CpuState *s) {
     uint32_t unknown = A0;
     uint32_t arglen = A1;
     uint32_t argp = A2;
     LoadedModule *mod = module_for_guest_pc(s);
     uint32_t current_uid = sched_current_uid();
-    if (unknown != 0u || !mod || current_uid == 0u || !mod->start_entry_ran ||
+    if (unknown > 1u || (unknown == 1u && (arglen != 0u || argp != 0u)) || !mod ||
+        current_uid == 0u || !mod->start_entry_ran ||
         mod->state != MODULE_STATE_STARTED) {
         fprintf(stderr, "PRX_SELFSTOP_UNAVAILABLE_SYNTHETIC: unknown=0x%x module=%s "
                         "thread=0x%x; refusing unsupported caller state\n",
                 unknown, mod ? mod->path : "none", current_uid);
         return HLE_KERNEL_ERROR_NOT_IMPLEMENTED;
     }
-    if (arglen != 0u && (!argp || !sr_guest_span_readable(argp, arglen)))
+    /* Differs from PSP-HLE-SELFSTOP-001: the PSP took (0, 4, argp past RAM) and ran module_stop
+     * with an argp of its own choosing, which the record does not give (#2397). Until that value
+     * is known, an unreadable argument block is refused by name. */
+    if (arglen != 0u && (!argp || !sr_guest_span_readable(argp, arglen))) {
+        fprintf(stderr, "PRX_SELFSTOP_ARGP_UNREADABLE_SYNTHETIC: arglen=%u argp=0x%08x; refusing "
+                        "(the argp the PSP hands module_stop here is unmeasured)\n", arglen, argp);
         return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
+    }
     if (mod->image_end > mod->image_base &&
         sched_module_range_busy(mod->image_base, mod->image_end, current_uid)) {
         fprintf(stderr, "PRX_SELFSTOP_SIBLING_THREAD_SYNTHETIC: uid=0x%x has another "

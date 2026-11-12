@@ -439,10 +439,11 @@ The player offers three play modes per game (#2055):
 - **Authentic** is the standard: the game as released, recreating the PSP as closely as the project can. It is the
   default for a new library.
 - **Enhanced** turns on the project-authored improvements that work for any game: texture filtering, crisp system
-  text, the speed readout, the game badge, widescreen, smooth motion, clean pitched sound, finer patches and sharper
-  enlarging. A new library starts with texture filtering, crisp system text and the game badge on and the rest off,
-  and a graphics preset sets crisp system text and sharper enlarging (section 10.1); finer patches are in no preset.
-  Each one is a *part* that can be turned off for the library or for a single game.
+  text, the speed readout, the game badge, widescreen, smooth motion, clean pitched sound, finer patches, sharper
+  enlarging and full 32-bit colour (section 10.11). A new library starts with texture filtering, crisp system text
+  and the game badge on and the rest off, and a graphics preset sets crisp system text and sharper enlarging
+  (section 10.1); finer patches and full 32-bit colour are in no preset. Each one is a *part* that can be turned
+  off for the library or for a single game.
 - **Ace** is Enhanced plus the improvements made for that game alone. Today that is the title's 60 FPS game logic
   package (section 9). The player offers Ace only for a title with a usable package; its own parts can be turned off
   for that game too.
@@ -455,15 +456,17 @@ Code identifiers that say `ace` mean "Enhanced or Ace"; every name a player read
 ### 10.1. The Launch Line
 
 The launcher always exports `SR_ACE`, so an inherited value cannot opt a launch in: `off` for Authentic, or
-`v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;smooth=x2;sas=off;tess=off`. `tier` (`enhanced` or `ace`) only names the
+`v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;smooth=x2;sas=off;tess=off;twin=off`. `tier` (`enhanced` or `ace`) only names the
 run, in the game badge, the pause menu and the stamps; a line without it is an Enhanced run. `stick` (the title's
-stick dead zone, 1 to 126, section 11.3.11), `load` (`fast` or `off`, section 11.3.10), `glyphs` (`on` or `off`,
-sections 10.13 and 11.3.5) and `cull` (`on` or `off`, section 11.3.6) are the other keys a line may leave out: a
-missing `stick`, `load`, `glyphs` or `cull` is off, `stick=<counts>`, `load=fast` and `cull=on` need `tier=ace`
-(`glyphs=on` does not: it is an Enhanced part), and the launcher writes `;load=fast` and `;cull=on` only for an Ace
-launch with that part on. The player has no setting for `glyphs` yet and never writes it (section 11.3.5); a line
-that carries it is written by hand. `ace_format` writes these keys only when on, in the order `stick`, `load`,
-`glyphs`, `cull`, so a line with them off is the line without them, byte for byte. Every
+stick dead zone, 1 to 126, section 11.3.11), `load` (`fast` or `off`, section 11.3.10), `depth` (`32` or `off`,
+section 10.20), `ssaa` (`2`, `4` or `off`, section 10.21), `glyphs` (`on` or `off`, sections 10.13 and 11.3.5) and
+`cull` (`on` or `off`, section 11.3.6) are the other keys a line may leave out: a missing `stick`, `load`, `depth`,
+`ssaa`, `glyphs` or `cull` is off, `stick=<counts>`, `load=fast` and `cull=on` need `tier=ace` (`depth=32`,
+`ssaa=2|4` and `glyphs=on` do not), the launcher writes `;load=fast` and `;cull=on` only for an Ace launch with that
+part on and `;ssaa=2` or `;ssaa=4` for an Enhanced or Ace launch with supersampling on, and no launcher writes
+`depth` (section 11.3.12) or `glyphs` (section 11.3.5) yet: a line that carries either is written by hand. A line
+writes them only when on, in that order, `cull` last, so a line with them off is the line without them, byte for
+byte. Every
 other key is required, in any order, each once; a value for a feature this build does not carry (`smooth=match`)
 refuses the line. So does anything else: the run is Authentic and one `ACE_MODE: refused (<reason>)` line says why.
 Unset is off. With Enhanced or Ace on, the launcher also exports `SR_ACE_REPORT`, the per-run report under
@@ -485,7 +488,8 @@ scaling or the smart 2D filter, which names the request and does not obey it (se
 `TWIN: refused` line when `SR_GPU_TWIN_COLOR` is set, which changes nothing else (section 10.11), one line that
 names an unknown or refused `SR_GPU_DST_READ` value, which changes nothing else, and the
 `sdl3vk: destination reads: interlock|snapshot` line that every run prints (below). Finer patches (section 10.14)
-have no environment variable, so an authentic run prints nothing for them.
+have no environment variable, so an authentic run prints nothing for them. Nor has the host depth buffer (section
+10.20): an authentic run makes the 16-bit depth buffer it always made and prints nothing for it.
 `gpu-coherence-selftest` checks the samplers and the pool; `display-smoke` keeps its image hash.
 
 One device feature setting outside Ace applies to every run, Authentic included, because it is a correctness fix and not an
@@ -509,6 +513,8 @@ the device is created with no feature outside Ace.
   the filtered picture: the same class as a render scale above 1x, and the launcher says so. The launch notice, the
   speed readout and the crisp keyboard draw only on the swapchain image, never on the frame a capture reads, and so
   do Smooth motion's in-between frames (section 10.6).
+- **Supersampling:** `ssaa=2` or `ssaa=4` changes only the image the presenter shows; the frames a present commits
+  to guest VRAM are those of a run without it (section 10.21).
 - **Sound:** `sas=sinc` writes band-limited sample values into the guest's SAS output buffer, so it is a
   guest-visible item. Its entry is section 11.3.1.
 - **Patches:** `tess=2` to `tess=4` draws every triangle patch with finer triangles, which changes the frames a
@@ -518,6 +524,9 @@ the device is created with no feature outside Ace.
   never when they are latched. It is a guest-visible item. Its entry is section 11.3.11.
 - **Loads:** `load=fast` (Ace only) shortens the display waits a title's own loading screen paces itself with, so
   it changes guest timing. It is a guest-visible item, not yet admitted. Its entry is section 11.3.10.
+- **Depth:** `depth=32` gives the Vulkan renderer a 32-bit float depth buffer, which changes which surface wins
+  where two lie within one 16-bit depth step, in the frames a present commits to guest VRAM. The depth the guest
+  reads stays 16-bit and unchanged. It is a guest-visible item, not yet admitted. Its entry is section 11.3.12.
 
 ### 10.4. Stamps and Evidence
 
@@ -781,7 +790,8 @@ that builds one clip-space matrix per camera and tests object bounds against it.
 
 ```json
 "enhanced": {"default": "enhanced", "af": "16", "text": "on", "readout": "off", "notice": "on", "wide": "off",
-            "smooth": "off", "sas": "off", "tess": "off", "upscale": "off"},
+            "smooth": "off", "sas": "off", "tess": "off", "cull": "off", "upscale": "off", "stick": "off",
+            "load": "off", "twin": "off"},
 "title_play": {"ULUS10000": {"mode": "ace", "af": "8"}, "ULES00000": {"mode": "library", "logic_60": "off"}}
 ```
 
@@ -806,7 +816,8 @@ when `"enhanced"` is absent, maps them as below, and writes the new keys from th
 
 `tests/native/test_player_state.c` (`test_play_mode_settings`, `test_play_mode_settings_mapping`) checks the names,
 the precedence, the off switches at both levels and this mapping; `test_play_mode_upscale_settings` checks sharper
-enlarging (`"upscale"`: `fsr1` or `off`) and the upscaler it sets for the launch.
+enlarging (`"upscale"`: `fsr1` or `off`) and the upscaler it sets for the launch; `test_play_mode_ssaa_settings`
+checks supersampling (`"ssaa"`: `2`, `4` or `off`) and its place on the launch line.
 
 ### 10.10. Texture Scaling and the Smart 2D Filter
 
@@ -889,44 +900,80 @@ The code is `src/rt/gpu_sdl3vk/tex_scale.c` and its hook in `ge_gpu.c`'s texture
 
 ### 10.11. Full 32-Bit Colour (the Host Twin)
 
-The game's 16-bit render targets are presented in full 32-bit colour without dither (#2050), in the Vulkan GE renderer.
+The game's 16-bit render targets are presented in full 32-bit colour without dither (#2050), in both GE renderers.
 It is a presentation-only change (section 2.2): it changes only the image the host shows, never what the guest
 draws, reads or waits for. The code is the host twin in `src/rt/gpu_sdl3vk/ge_gpu.c` (its header and the comment
-at `s_twin`).
+at `s_twin`) for the Vulkan renderer, and in `src/rt/ge.c` (the comment at `s_twin_mode`) for the software renderer.
 
 - **How.** Every render target and depth buffer gets a host-only twin at the user's render scale. Every write to the
   authentic image reaches its twin, in order: each render op is drawn a second time into the twin without dither or
   the 16-bit colour snap, and uploads, CPU-write patches, depth uploads, block transfers and destination snapshots
   are repeated on it. Twin passes sample twins, so a render-to-texture chain stays full colour. The presenter shows
   a twin only while it holds every write its image took; otherwise it shows the authentic image and re-seeds the twin.
+- **The software renderer.** The same switch turns on a twin in `ge.c`, decided on the renderer's first colour write
+  and inert while the Vulkan renderer draws. It keeps one host slot per 2-byte unit of the 2 MiB of VRAM (an 8888
+  pixel uses the slot of its first unit; 9 MiB of host memory): the twin's 8-bit colour, and a witness, the exact
+  value the authentic write left in VRAM. Each colour write is computed a second time from the same source colour,
+  with the same blend and logic op but no dither and no 16-bit colour snap, against the twin's colour where the slot
+  is valid and against the authentic pixel where it is not. A slot is valid only while VRAM still holds its witness
+  in the same format, so a write the twin does not take (a CPU store, DMA, the fast clear path) shows, and is
+  blended against, its authentic value from that pixel on. The twin's alpha is the alpha the authentic write left
+  (the stencil, in the target's format, as the Vulkan twin snaps it); a stencil-only write updates it, and a write
+  mask over colour bits leaves the pixel authentic. Block transfers within VRAM copy the slots with the bytes. The
+  CPU presenter shows the slots (`ge_twin_present_row`), each pixel without a valid slot as the CPU presenter converts it with the twin off.
+  `gpu-coherence-selftest` twin-soft checks it on twin-scene's list: guest VRAM equals the twin-off run byte for
+  byte, the shown gradients are smooth, and T1 and T3 are within one step per colour channel of the Vulkan twin.
+- **Render-to-texture in the software renderer.** Its texture fetches read guest VRAM, so a target drawn from a
+  render target's texture takes that texture's 16-bit texels into its twin: twin-scene's T2 shows T1's dithered
+  5551 texels in the software renderer, and T1's full colour twin in the Vulkan renderer. Its own blends and its
+  presentation are still full colour.
 - **Guest memory.** The authentic chain keeps the user's render scale, and nothing reads a twin back. Guest VRAM,
   every readback, every block transfer into RAM and the frame each present commits to guest VRAM are the twin-off
   run's at the same scale, byte for byte (`gpu-coherence-selftest` twin-scene, at scales 1, 2 and 4). Present-source
   captures follow the shown image, so they hold the twin's picture; `SR_GPU_TWIN_CAPTURE=authentic` shows and
   captures the authentic image instead.
 - **What the guest can observe (section 11.1).** Each of the four items is unchanged:
-  - VRAM bytes and other guest memory: unchanged, byte for byte (twin-scene, above).
+  - VRAM bytes and other guest memory: unchanged, byte for byte (twin-scene and twin-soft, above).
   - Readbacks: unchanged. GE and display readbacks, block transfers into RAM and the committed frame read the
     authentic image, as with the twin off (twin-scene).
   - Timing the guest can measure: unchanged. The guest timing model (VBLANK schedule, GE timing, media clocks) does
     not follow host GPU work (section 10.3). The second draw of each render op, and the drain when a twin allocation
     fails, are host waits.
   - I/O speed: unchanged. The twin performs no guest I/O.
-- **Default.** Off. It stays off by default until section 11.2 item 4's "nothing worse" runs pass: picture-gate or
-  route runs on *Hot Shots Tennis* and *LittleBigPlanet*, and a library sweep, each with the twin on against the same
-  run with it off. When the Ace launch line carries its key (`twin`, below), the key follows section 11.2 item 2.
-- **Setting.** `SR_GPU_TWIN_COLOR=1` (full colour) or `native` (the twin with the authentic colour, which the identity
-  self-tests use), read when the renderer starts. Unset, empty, `0` and `off` are off. Any other value prints
-  `TWIN: refused (...)` and leaves it off. It takes effect only in Ace Mode: in an authentic run it stays off whatever
-  the environment says, and a request prints one `TWIN: off (the host twin needs Ace Mode)` line. Until the Ace
-  launch line carries its key (`twin`, beside `tex`, `s2d` and `glyphs`, with the per-title switches of section
-  10.5, after #2074), the variable is the only way to turn it on, and it is off by default.
+- **Default.** Off. The player's part "Full 32-bit colour" (the launch line's `twin=on`) or `SR_GPU_TWIN_COLOR`
+  turns it on (see Setting). Turning it on by default needs section 11.2 item 4's "nothing worse" runs: picture-gate
+  or route runs on *Hot Shots Tennis* and *LittleBigPlanet*, and a library sweep, each with the twin on against the
+  same run with it off (#2050). The launch line carries its key (`twin`, below), which follows section 11.2 item 2:
+  a library switch and a per-title switch, each off by default.
+- **Setting.** The launch line's `twin=off|on` (section 10.1), a required key: `twin=on` asks for full colour. The
+  player writes it from the part "Full 32-bit colour" (`"twin"`, `on` or `off`) on the library's Settings > Enhanced
+  page and on each title's own page (sections 10.5 and 10.9); it is off unless the player turns it on.
+  `SR_GPU_TWIN_COLOR=1` (full colour) or `native` (the twin with the authentic colour, which the identity self-tests
+  use), read when the renderer starts (the software renderer: at its first colour write), stays as the developer
+  override and wins whenever it is set: unset or empty leaves the choice to the launch line, `0` and `off` are off,
+  and any other value prints `TWIN: refused (...)` and leaves it off. When the variable turns off a twin the line
+  asked for, the run names `twin` unavailable ("SR_GPU_TWIN_COLOR overrides it") in the report. `gpu-coherence-selftest`
+  twin-key turns the twin on through `twin=on` alone, in both renderers, and checks the report, with the variable
+  unset and set. A twin that the line or the variable turned on is reported on (`effective.twin` true, and in the
+  pause caption), so `SR_GPU_TWIN_COLOR=1` with the key off reports it too; `twin-key --twin-key off --twin 1` checks that. The twin takes effect only in Ace Mode: in an
+  authentic run it stays off whatever the environment says, and a request prints one `TWIN: off (the host twin
+  needs Ace Mode)` line. When the key asked for it and it does not come up (the `TWIN: unavailable` and `TWIN: off
+  for the rest of the run` cases below), the run names `twin` unavailable on stderr and in the report; a twin that
+  ran is confirmed, so a run where the renderer never started it is reported as not run (section 10.4).
+  Supersampling (section 10.21) also runs the twin, with the authentic colour unless the twin was asked
+  for in full colour; a twin that runs only for supersampling is not reported (`effective.twin` stays false,
+  and `twin` is not named unavailable); `twin-key` with `--ssaa 2` checks that.
 - **Cost.** Each render op is drawn twice at the render scale, and the twins use as much GPU memory as the targets.
+  In the software renderer each colour write is computed twice, and the slots take 9 MiB of host memory.
 - **Fail-closed.** A GPU without nearest blits of RGBA8 and D16 prints `TWIN: unavailable (...)` and runs without it.
   If any twin allocation fails during the run, one `TWIN: off for the rest of the run (...)` line is printed, every
-  twin is freed, and the run continues exactly as a twin-off run at the user's scale (`twin-alloc-fail`).
+  twin is freed, and the run continues exactly as a twin-off run at the user's scale (`twin-alloc-fail`). A software
+  renderer that cannot allocate its slots prints `TWIN: unavailable (the software renderer could not allocate its
+  twin)` and runs without it.
 - **Stamps.** `TWIN: on (colour=full|native, scale=<n>x)` at start, and `TWIN: exit (ops=, copies=, reseeds=,
-  authentic_presents=, alloc_failures=)` at exit. Section 10.4 applies: the run is an Ace run, refused as evidence.
+  authentic_presents=, alloc_failures=)` at exit; the software renderer's are `TWIN: on (software renderer,
+  colour=full|native)` and `TWIN: exit (software renderer, pixels=, units_copied=)`. Section 10.4 applies: the run
+  is an Ace run, refused as evidence.
 
 ### 10.12. Texture Replacement
 
@@ -1149,7 +1196,7 @@ and not yet admitted under section 11.2: section 11.3.5 is its entry, and this s
   Ace run whose line has no `glyphs` key and in one with `glyphs=off` rebuilds and decodes nothing and has one picture
   hash (the device image and the frame the guest keeps), and with `glyphs=on` it draws rebuilt glyphs and another
   hash. `ace-selftest` checks the key: its values, that `glyphs=off` formats as the line without it, its place after
-  `load` and before `cull`, the stamp's line, the feature words, and the report when the renderer confirms it, names
+  `ssaa` and before `cull`, the stamp's line, the feature words, and the report when the renderer confirms it, names
   it unavailable or never starts. `gpu-glyph-mutant` removes the content check of a bound tile, keys the tiles on the
   cache's sampled content hash instead of its generation, removes the per-present count, and the VRAM, hard-edge and
   colour guards, and builds a renderer that ignores the key, each of which must fail its own cell.
@@ -1245,6 +1292,157 @@ window's keys turn it on, and it never runs in an Authentic run.
   its VBLANK returns where the turbo clock's does). `hle-thread-selftest` pins the audio: no host push from either
   output path, the guest queue seeded from the host's depth once per run and draining in guest time, and the host
   queue and pushes back after it stops. `ace-selftest` pins the readout and the report.
+
+### 10.20. Higher-Precision Host Depth (`depth=32`)
+
+The PSP's depth buffer holds 16 bits, and the Vulkan renderer keeps that format (`D16_UNORM`). Games set their near
+and far planes for the PSP's screen, so surfaces that lie less than one 16-bit step apart, often far away, flicker
+against each other (z-fighting), and the flicker is easier to see above 1x. This feature gives the Vulkan renderer a
+32-bit float depth buffer for every game, with no per-title data (#2051). It is guest-visible (section 11.1):
+section 11.3.12 is its entry and says what the guest can observe; this section says how it tests. The code is in
+`src/rt/gpu_sdl3vk/ge_gpu.c` (`s_depth_fmt`, `depth_unorm`, `depth_texel`, `PipeKey.zbias`).
+
+- **Setting.** The `depth` key of the `SR_ACE` launch line (section 10.1): `depth=32`, or `depth=off`, the same as no
+  key. It is an Enhanced part and needs no `tier=ace`. The renderer reads it once when it starts; there is no
+  environment variable for it. The player has no setting for it yet, so no launcher writes the key (section
+  11.3.12).
+- **The buffer.** The depth attachment is `D32_SFLOAT` on the scale the 16-bit buffer uses: a draw at 16-bit depth z
+  stores z / 65535 (`psp.vert`, `psp_tnl.vert`), now without rounding it to a step. A device that cannot render to and
+  copy that format keeps `D16_UNORM`, and one `ACE_MODE: depth unavailable (...)` line says so. The host twin (section
+  10.11) keeps a depth twin of the same format, and Smooth motion's depth copy (section 10.6) is `R32_SFLOAT` instead
+  of `R16_UNORM`, which its passes sample as the same 0 to 1 values.
+- **How a test decides.** The fixed-function test compares the unrounded values. Rounding is monotonic, so where the
+  two values round to different 16-bit steps the answer is the PSP's. Only where they round to the same step can it
+  differ:
+  - LESS and GREATER, and LEQUAL and GEQUAL with depth writes on: the nearer surface by its unrounded depth wins,
+    where the PSP's test sees two equal values (its strict tests fail them, its or-equal tests pass them). This is
+    what removes z-fighting.
+  - LEQUAL and GEQUAL with depth writes off (decals, shadows and many effect passes): the fragment's depth leans
+    toward passing by a depth bias of 64 units of the primitive's float exponent (`DEPTH32_TIE_BIAS`), at most a
+    quarter of a 16-bit step. A surface drawn on the plane it lies on, from other vertices, then passes as it does at
+    16 bits instead of failing on float rounding, and as the draw writes no depth, no stored value moves. The same
+    lean also passes such a draw where its surface lies less than the bias behind the stored one, across a step
+    boundary too, where the PSP fails it.
+  - EQUAL and NOTEQUAL compare unrounded values. A pass drawn again from the same vertices (a second texture or a
+    lighting pass) has the same depth and gets the PSP's answer. A different surface that rounds to the same step
+    without lying exactly on the stored one fails EQUAL, where the PSP passes it.
+  - A surface with depth writes on, drawn with LEQUAL or GEQUAL on the plane of another from other vertices, is
+    decided by float rounding pixel by pixel where the PSP passes every pixel, so it can speckle. That, and the EQUAL
+    case above, are why the feature is off by default.
+  - Through-mode draws (2D overlays) and every line, 3D lines included, carry whole-step depths (a line's depth is
+    cut to its step), while a 3D surface stores its depth with its fraction. Such a draw at the step a surface
+    rounds to, with LEQUAL or GEQUAL, meets the cases above at each pixel: it fails where it lies on the losing side
+    of the stored value by more than the lean, or by any amount when it writes depth, where the PSP passes it. A
+    cut line can lie almost a whole step from the surface it was drawn on, so lines show this most.
+
+  ALWAYS, NEVER and clear mode are unchanged, and so is the minz/maxz range test, which rounds the fragment's depth
+  to a step in `psp.frag`, except that on a draw with the lean a device may give the shader the leaned depth, which
+  can move a pixel within a quarter step of the range's edge to the other side.
+- **What the guest reads.** Depth crosses to and from guest memory at 16 bits. An upload of guest depth stores step /
+  65535, the value a draw at that step stores (`depth_unorm`), so a draw at that step passes EQUAL against it. A
+  readback rounds each value to the nearest step (`depth_texel`), as the 16-bit attachment's conversion does. The
+  step stored at a pixel is the same with the key on and off: a test whose answer the key changes compares two
+  values of one step, and the value it keeps lies in that step either way, while a draw the lean passes writes no
+  depth. So a depth readback, depth read as a texture through guest memory, and the software renderer when a draw
+  falls back to it see the same 16-bit depth, except for a value near half way between two steps: Vulkan leaves the
+  precision of a 16-bit attachment's conversion to the driver, so such a value may land in the other step with the
+  key off (lavapipe stores 17/32 of a step as the lower step), while `depth_texel` rounds it to the nearest. The
+  colour is what changes.
+- **The software renderer** (`src/rt/ge.c`) keeps its 16-bit depth. It is the PSP's model and the renderer of the
+  fallback paths, so a frame it draws z-fights as on the PSP; this feature is a property of the Vulkan renderer's host
+  buffer.
+- **Cost.** Each depth buffer takes 4 bytes a device pixel instead of 2: at 4x (2048 x 1088 device pixels) about 8.9
+  MB instead of 4.5 MB, and as much again for its host twin. A depth readback or upload moves twice the bytes. A
+  draw that writes no depth with LEQUAL or GEQUAL uses a pipeline with depth bias, so such a state can take one more
+  pipeline.
+- **Stamps.** `ACE_MODE: on (...)` is followed by `ACE_MODE: depth 32 (...)`; the renderer prints
+  `HOST_DEPTH: on (D32_SFLOAT; ...)` when it makes the buffer; the report has `"depth": 32`, or 16 when the device
+  refused it; the badge's words name "32-bit depth"; the flight recorder's `runtime.enhancements` keeps the whole
+  line (its field holds `ACE_SPEC_MAX` characters; at 95 it cut an Enhanced line with `depth=32` to `depth=3`).
+  Section 10.4 applies: the run is an Enhanced or Ace run.
+- **Tests.** `ace-selftest` pins the key, its values, its place in the line, the stamp's line and the report.
+  `gpu-coherence-selftest` runs `host-depth` with the key off and on (`--depth 32`) at scales 1 and 4:
+  - z-fight: a surface drawn after a nearer one with GEQUAL and depth writes, behind it by one step closing to a
+    small fraction of one (1/256 at the last device pixel at scale 1, 1/1024 at scale 4): with the key off the far surface shows where the two round to one step, which is the defect; with the
+    key on the near surface shows at every pixel;
+  - decal: a quad drawn on its base's plane from other vertices with GEQUAL, and with LEQUAL, and depth writes off,
+    covers every pixel it spans, with the key on and off;
+  - depth-equal: the base's own vertices drawn again with EQUAL cover every pixel; one step nearer, none;
+  - upload: every 16-bit value written by the CPU reads back from the device unchanged, and a quad at a written
+    step passes EQUAL against it while one a step away fails, from 0 to 65535;
+  - readback: a scene's depth committed to guest VRAM hashes to the same value with the key on as the key-off run
+    at the same scale (`--depth-ref`). The scene is a z-fight the key changes (the far surface shows at some
+    pixels with the key off and at none with it on, which the test checks), drawn so that every pixel stores the
+    near surface's step either way and that step is whole at each device pixel centre, away from the half steps
+    where a 16-bit conversion's rounding is the driver's.
+
+  The whole suite also runs once with `--depth 32`, and its cells that read the device's depth image read it at
+  either format.
+
+### 10.21. Supersampling (`ssaa`)
+
+An Enhanced part (#2073), in the Vulkan GE renderer: each frame is drawn at 2 or 4 times the render scale on each
+axis, and the presenter shows the average of the samples that fall in each pixel. It smooths the edges of
+triangles, alpha-tested cut-outs and shader-made edges, which a higher render scale alone leaves stepped. It is a
+presentation-only change (section 2.2), in the render-scale class: it changes the image the host shows, never
+what the guest draws into, reads or waits for. The code is the comment at `s_ssaa` in
+`src/rt/gpu_sdl3vk/ge_gpu.c`.
+
+- **Setting.** Settings > Enhanced offers **Supersampling** (2x, 4x or Off), for the library or for one game
+  (section 10.5), and the launch line carries it as `ssaa=2` or `ssaa=4` for an Enhanced or Ace launch with it
+  on (section 10.1); a missing key or `ssaa=off` is off. It needs no `tier=ace`. It is off in a fresh settings
+  file and in no graphics preset, because of its cost (below): a preset leaves it as it is. It has no other switch.
+- **How.** It runs the host twin (section 10.11) at the render scale times the factor; the twin keeps the authentic
+  colour unless full colour was asked for. At each present the twin is averaged down to the render scale by
+  halving blits with linear filtering: one at 2x, two at 4x. Each halving step weighs four samples equally and
+  stores 8 bits a channel, so at 2x each shown pixel is the mean of the 4 samples it covers, rounded once, and at
+  4x the mean of the 16 it covers within two such roundings. Dither stays keyed to guest pixels, as at any render
+  scale. At render scale 1 the twin draws from its own copy of the vertices, with the above-1x texture fixes
+  (the render-scale item's edge box and nearest-sprite alignment, section 11.1) applied at the twin's scale; the
+  authentic chain keeps the 1x vertices unchanged. The presenter, the speed readout, Smooth motion and Widescreen
+  Fill take that image at the render scale, as without supersampling, so Fill's wings are drawn as usual.
+- **Guest memory.** The authentic chain keeps the render scale, and nothing reads the twin or its average back,
+  so guest VRAM, every readback, every block transfer into RAM and the frame each present commits to guest VRAM
+  are those of a run without supersampling at the same render scale. The tests: ssaa-edge hashes guest VRAM after
+  its scene is read back and requires the hash of a run without supersampling, at 2x and 4x and render scales 1
+  and 2; twin-scene and the whole suite run with it on at 2x and 4x, so every readback and block-transfer case
+  meets its own expected bytes with it on. Section 11.1's four items are unchanged, as for the twin: the extra GPU
+  work is a host wait, never in the guest timing model.
+- **What the picture shows.** Without it every pixel of a black-and-white scene is black or white; with it, pixels
+  on an edge take the shades between, only within a pixel and a half of the edge, and every other pixel keeps its
+  value (ssaa-edge, which reads the image the production present step, `target_prepare_present`, hands the
+  presenter). 4x gives more shades than 2x can. A nearest-filtered sprite drawn one texel per guest pixel shows
+  the authentic image at every pixel, since each guest pixel's samples hold the same texel (ssaa-sprite, at
+  render scales 1 and 2). Present-source captures follow the shown image, so they hold the averaged picture.
+- **Size check.** At start the renderer checks the twin's images against the GPU: each side at most the device's
+  largest image, framebuffer and viewport (`maxImageDimension2D`, `maxFramebufferWidth` and `Height`,
+  `maxViewportDimensions`), and an estimate of the memory the factor holds within half of the largest
+  device-local memory heap. The estimate counts four render targets (two display buffers and two others), each
+  with its twin and depth twin at the twin's scale (2 bytes a depth sample, 4 with `depth=32`, section 10.20) and
+  its average at the render scale, the twin snapshot, and at 4x the halving step. If 4x does not fit and 2x does, the run uses 2x and says so in one
+  `ACE_MODE: ssaa 2 (asked for 4: <reason>)` line; if nothing fits, supersampling is unavailable for the run
+  (`SSAA: unavailable (<reason>)`, the reason naming each factor tried; the Ace report and stamps say so, the
+  report's reason cut to its 95 characters). It never falls back to 1x without a
+  message. A GPU without linear blits of RGBA8, or one that refuses the twin, makes it unavailable the same way.
+  The estimate is not a promise: a title with more live render targets uses more, and a twin allocation that fails
+  later turns the twin off for the rest of the run with one `TWIN: off ...` line and one
+  `SSAA: off for the rest of the run with the twin` line (section 10.11), and the Ace report then gives
+  `"ssaa": 1` with the factor asked for (twin-alloc-fail with `--ssaa 2`). At render scale 1 a failed allocation of the twin's vertices makes it
+  unavailable the same way. `ssaa-limit` forces small limits and checks the factor chosen, the reason given and
+  the Ace report.
+- **Cost.** Every render op is drawn a second time, into the twin, at factor x factor times the render scale's
+  pixels: 4 times at 2x and 16 times at 4x, plus one or two blits per present. The estimate above, with 16-bit depth, is
+  17 MB at render scale 1 and 2x, 64 MB at 1x and 4x, 68 MB and 255 MB at 2x render scale, and 272 MB and 1020 MB at 4x
+  render scale (render scale 4 with 4x makes 8192 x 4352 images).
+- **Stamps.** `ACE_MODE: ssaa <n>` at start; `SSAA: on (<n>x: the twin renders <w>x<h>, ...)` when the twin starts;
+  the Ace report's `"ssaa"` (the factor in effect, 1 when unavailable) and `"ssaa_requested"` when the size check
+  lowered it; and "2x supersampling" or "4x supersampling" in the pause menu's list of parts. Section 10.4
+  applies.
+- **Tests.** `gpu-coherence-selftest` runs ssaa-edge without supersampling to write a reference at render scales 1
+  and 2 and at 2x and 4x against it, twin-scene, ssaa-sprite at 2x and 4x (render scale 1) and at 4x (render
+  scale 2), the whole suite at 2x and at 4x, twin-gate with it on, and ssaa-limit with a forced memory budget and
+  a forced largest side. `ace-selftest` checks the key's parsing,
+  order, report and words; `test_player_state` the setting, its presets and its launch line.
 
 ## 11. Guest-Visible Items
 
@@ -1815,12 +2013,13 @@ The feature of section 10.13 (#2110). Its presentation is described there; this 
 - **The cost of adding a key to the `SR_ACE` launch line.** A required key would refuse every line an older launcher
   wrote and would have to be spelled out wherever a full line is built or checked (`src/player/player_state.h`, the
   launch-resolution, player-state, flight diff and package cache tests among them). `glyphs` is optional, as `stick`,
-  `load` and `cull` are, so it costs neither: a line without it is valid and unchanged, and only `ace_format` writes
-  it, when on. What it did cost: its row in the parser's table in `src/rt/ace.c`, `AceConfig` and `AceFeature`, the
-  canonical line, the start line, the report's `glyphs` field, the feature words, the exit check that names a part
-  no renderer started, and `ace-selftest`'s cells and worst-case line. A line with every part on is longer by
-  `;glyphs=on` (10 characters); `ace-selftest` builds the worst-case report from that line and checks it fits
-  `ACE_REPORT_MAX`, and `ACE_SPEC_MAX` holds any line. Still to come for admission: the settings pages and per-title
+  `load`, `depth`, `ssaa` and `cull` are, so it costs neither: a line without it is valid and unchanged, and only
+  `ace_format` writes it, when on. What it did cost: its row in the parser's table in `src/rt/ace.c` (with `on`, its
+  longest value, for `ace_longest_line`), `AceConfig` and `AceFeature`, the canonical line, the start line, the
+  report's `glyphs` field, the feature words, the exit check that names a part no renderer started, and
+  `ace-selftest`'s cells and worst-case line. A line with every part on is longer by `;glyphs=on` (10 characters);
+  `ace-selftest` builds the worst-case report from that line and checks it fits `ACE_REPORT_MAX`, and checks that
+  the longest line the key table makes fits `ACE_SPEC_MAX`. Still to come for admission: the settings pages and per-title
   precedence of sections 10.5 and 10.9.
 - **Never silent.** A run with the feature on prints `ACE_MODE: glyphs on (...)` with the other Ace lines and,
   after its `GLYPHS: on` line, one line naming it as guest-visible, on through the launch line's `glyphs` key and not
@@ -1872,7 +2071,9 @@ The Layer 2 mechanism of section 10.8, for a title that skips objects outside it
   the report. The runtime remembers at most 4096 distinct matrices (see Limits below); the report's
   `cull_untracked` counts the matrix uses it left alone once that table was full, and cull is confirmed only
   while that count is 0: a run with a nonzero count reports cull unavailable as `partial` (the matrices
-  tracked before the table filled were widened, the rest were not), never as a complete run.
+  tracked before the table filled were widened, the rest were not), never as a complete run. The count is read
+  again when the run ends, on every exit path that writes the report, so a table that fills in the last frame
+  still reads partial.
 - **What it changes:** for the matrices at `clip_offsets`, 4 floats per listed matrix (its x output row) of guest memory
   per call, only while Widescreen is on and the key is on; and so which objects the title submits, and any logic the
   title gates on the same visibility test (animation or AI updates on visible objects, fixed object or display-list
@@ -1954,7 +2155,8 @@ The `load` Ace part of section 9.8, for a title that paces a loading screen with
   the pacing guard (below) has not fired. Then the call is not made. The thread instead blocks for 1 µs, the shortest delay wait the scheduler has (that of
   `sceKernelDelayThread(1)`); for that moment it is visibly in a delay wait, not a display wait. Ready threads of any
   priority, lower ones included, can then run as they would during the stock wait, and the waiter resumes at its
-  next scheduling point instead of the next VBLANK. A zero delay or a ready-queue rotation would not do this: on the
+  next scheduling point instead of the next VBLANK. The decision its block causes always runs another ready thread
+  first, even when the 1 µs is already over by then (`sched_delay_current_dispatching()`, `src/rt/sched.c`). A zero delay or a ready-queue rotation would not do this: on the
   PSP, `sceKernelDelayThread(0)` returns without yielding even to a thread of equal priority (#340), and a rotation
   yields only to threads of equal or higher priority, so a lower-priority thread would not run. `$v0` is then 0,
   which is what the stock function returns after its wait. With the key
@@ -2131,3 +2333,31 @@ zone smaller than the game's, the first live host count reaches the edge of the 
 - **Nothing worse (section 11.2, item 4):** not shown. The tests are synthetic (`ace-selftest`'s stick cells,
   `hle-thread-selftest`'s latch cell, `gui-present-selftest`'s dead-zone cell, the player's
   `test_play_mode_stick_settings`, and the manifest tests).
+
+#### 11.3.12. Higher-Precision Host Depth (`depth=32`, Not Yet Admitted)
+
+The feature of section 10.20 (#2051). How it tests is described there; this entry is what the guest can observe.
+
+- **Status: guest-visible, not admitted under section 11.2.** Each present commits the frame it shows to guest VRAM,
+  so a frame whose z-fighting the key removed is the frame the guest keeps. Its key and this entry are in place
+  (section 11.2, items 3 and 6). The library and per-title settings of item 2 are not: the player does not write the
+  key yet. The runs of item 4 do not exist.
+- **Key and off switch.** `depth=32` or `depth=off` on the launch line (section 10.1), an optional key; a line with
+  any other value is refused, and the run is Authentic. `depth=off` and a line without the key are off. An authentic
+  run has no line, so it never has the 32-bit buffer.
+- **Never silent.** A run with it on prints `ACE_MODE: depth 32 (...)`, and `HOST_DEPTH: on (...)` when the renderer
+  makes the buffer, or `ACE_MODE: depth unavailable (...)` when the device cannot.
+- **What it changes:** the colour of pixels where two surfaces lie within one 16-bit depth step of each other, in the
+  ways section 10.20 lists for each depth test: z-fighting surfaces show the nearer one, a draw that writes no depth
+  with LEQUAL or GEQUAL can pass up to a quarter step behind, an EQUAL pass on a different surface can fail, and a
+  coplanar surface that writes depth can speckle.
+- **VRAM bytes:** the colour bytes of those pixels differ, in the frames a present commits. The depth bytes do not:
+  the step stored at every pixel is the one the 16-bit buffer stores (section 10.20).
+- **Readbacks:** a colour readback, save picture or screenshot that covers those pixels differs the same way. A depth
+  readback, and depth read through guest memory, is unchanged.
+- **Timing:** unchanged. The GE timing model (`SR_GE_TIMING=1`) charges depth-tested spans whatever the host
+  buffer's format. The larger buffer and its readbacks are host GPU time and memory (section 10.20).
+- **I/O speed:** unchanged.
+- **Tier:** Enhanced. **Default:** off, and in no graphics preset.
+- **Nothing worse (section 11.2, item 4):** not shown. The tests are synthetic (`ace-selftest`, and
+  `gpu-coherence-selftest`'s `host-depth`); no title has been run with it.

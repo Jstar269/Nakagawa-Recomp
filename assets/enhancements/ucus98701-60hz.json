@@ -2,7 +2,7 @@
   "schema_version": 1,
   "id": "hst.timing.native_60hz",
   "display_name": "Hot Shots Tennis Native 60 Hz Logic (Experimental)",
-  "version": "13.0.0-pre1",
+  "version": "14.0.0-pre1",
   "category": "timing_frame_presentation",
   "target_title_id": "hst-ucus98701-v1",
   "game_version": "1.01",
@@ -5504,22 +5504,6 @@
       "transform": "gate_30hz"
     },
     {
-      "id": "S0956",
-      "function": "hst_fn_0024aaf4",
-      "insn_offset": 188,
-      "word_count": 1,
-      "stock_digest": "afa0ee2e083b44466080cf21c148a933900b1455c94c06dba09abbc193ed866a",
-      "transform": "step_x0.5"
-    },
-    {
-      "id": "S0956-2",
-      "function": "hst_fn_0024aaf4",
-      "insn_offset": 320,
-      "word_count": 1,
-      "stock_digest": "afa0ee2e083b44466080cf21c148a933900b1455c94c06dba09abbc193ed866a",
-      "transform": "step_x0.5"
-    },
-    {
       "id": "S0958",
       "function": "hst_fn_0024bd80",
       "insn_offset": 2016,
@@ -6192,6 +6176,246 @@
       "word_count": 1,
       "stock_digest": "cb1eb51a83196f1b8fbbd8e01174212d1c92096b2d5fb8ad61e04602045ce829",
       "transform": "count_x2"
+    },
+    {
+      "id": "S0403_a",
+      "function": "hst_fn_00117dd0",
+      "insn_offset": 440,
+      "word_count": 1,
+      "stock_digest": "918ba3afcda437a5c08c09612062eccf870755f5d1e4806db04bcd5fde027d29",
+      "transform": "count_x2"
+    },
+    {
+      "id": "S0403_b",
+      "function": "hst_fn_00117dd0",
+      "insn_offset": 444,
+      "word_count": 1,
+      "stock_digest": "41ceeba05843587c61afbffd79ab2d9dd6779514c16b5a252838e6fc9ee4ad4a",
+      "transform": "count_x2"
+    },
+    {
+      "id": "S0717",
+      "function": "hst_match_flow_match_time_counter",
+      "insn_offset": 132,
+      "word_count": 1,
+      "stock_digest": "0d7273f3c35511b287bc4b33f8b7cde9a452fb04d1581f21ff5c232be9f650ec",
+      "transform": "gate_30hz"
+    },
+    {
+      "id": "S0297_a",
+      "function": "hst_fn_000e57bc",
+      "insn_offset": 248,
+      "word_count": 1,
+      "stock_digest": "4fea0f4fd8e487e960ef1465ba4c0f32f36a947c9678d6b5475cabc992549930",
+      "transform": "count_x2"
+    },
+    {
+      "id": "S0297_b",
+      "function": "hst_fn_000e57bc",
+      "insn_offset": 372,
+      "word_count": 1,
+      "stock_digest": "0d7273f3c35511b287bc4b33f8b7cde9a452fb04d1581f21ff5c232be9f650ec",
+      "transform": "offset_x2"
+    },
+    {
+      "id": "S0437_a",
+      "function": "hst_fn_00128910",
+      "insn_offset": 76,
+      "word_count": 1,
+      "stock_digest": "fb0c4d91437ed0021efbaaa47f2a41d81f9a8486abeed4d98054018e90195825",
+      "transform": "gate_30hz"
+    },
+    {
+      "id": "S0954",
+      "function": "hst_fn_00247a7c",
+      "insn_offset": 3640,
+      "word_count": 1,
+      "stock_digest": "de7da4b6f2e702fd30ce8036d9c8b8053f6d3e8b7a51a68f334cc74c46d80ed9",
+      "transform": "gate_30hz"
+    },
+    {
+      "id": "S0544_a",
+      "function": "hst_fn_00170744",
+      "insn_offset": 48,
+      "word_count": 1,
+      "stock_digest": "e4fe4d6df0267408c804046f1db389f432f45293ca0c80b6d728063492cf4e20",
+      "transform": "step_x0.5"
+    },
+    {
+      "id": "S0544_b",
+      "function": "hst_fn_00170744",
+      "insn_offset": 116,
+      "word_count": 1,
+      "stock_digest": "cf50b9e4b5dd510dbd80191a6ede068a95e56d9078908231f5501e216fd966fb",
+      "transform": "step_x0.5"
+    },
+    {
+      "id": "S0555_a",
+      "function": "hst_fn_0017c968",
+      "insn_offset": 628,
+      "word_count": 1,
+      "stock_digest": "575dedfe8c4a4ce5eaa7971d82ce77e5313bdf62457ffccb53f7155232167c5a",
+      "transform": "count_x2"
+    },
+    {
+      "id": "S0555_b",
+      "function": "hst_fn_0017c968",
+      "insn_offset": 652,
+      "word_count": 1,
+      "stock_digest": "e14a1347a0126e3ad07bb58841583dbbd9b58318fa2a42326b584fcd2f0a2ddb",
+      "transform": "step_x0.5"
+    },
+    {
+      "id": "S0560",
+      "function": "hst_fn_0017e9c0",
+      "insn_offset": 40,
+      "word_count": 1,
+      "stock_digest": "1151d5c76373af3f51f7eceaea3ed61e8b28f94c4fcfea9042c77d1b9120e911",
+      "transform": "step_x0.5"
+    },
+    {
+      "id": "S0561_a",
+      "function": "hst_fn_001808c4",
+      "insn_offset": 500,
+      "word_count": 1,
+      "stock_digest": "ee07ce66d17b729d5b0457ff5a05ba6daa0e2fff25f862db5213ef3721518a1f",
+      "transform": "step_x0.5"
+    },
+    {
+      "id": "S0561_b",
+      "function": "hst_fn_001808c4",
+      "insn_offset": 620,
+      "word_count": 1,
+      "stock_digest": "ee07ce66d17b729d5b0457ff5a05ba6daa0e2fff25f862db5213ef3721518a1f",
+      "transform": "step_x0.5"
+    },
+    {
+      "id": "S0561_c",
+      "function": "hst_fn_001808c4",
+      "insn_offset": 740,
+      "word_count": 1,
+      "stock_digest": "ee07ce66d17b729d5b0457ff5a05ba6daa0e2fff25f862db5213ef3721518a1f",
+      "transform": "step_x0.5"
+    },
+    {
+      "id": "S0561_d",
+      "function": "hst_fn_001808c4",
+      "insn_offset": 860,
+      "word_count": 1,
+      "stock_digest": "ee07ce66d17b729d5b0457ff5a05ba6daa0e2fff25f862db5213ef3721518a1f",
+      "transform": "step_x0.5"
+    },
+    {
+      "id": "S0550_shop_a",
+      "function": "hst_fn_002708ac",
+      "insn_offset": 4016,
+      "word_count": 1,
+      "stock_digest": "c85f83a3c67be67d512d4a4cfdf0808a25bc3ba9b463901d192fe7eef863fea9",
+      "transform": "count_x2"
+    },
+    {
+      "id": "S0550_shop_b",
+      "function": "hst_fn_002708ac",
+      "insn_offset": 4316,
+      "word_count": 1,
+      "stock_digest": "c85f83a3c67be67d512d4a4cfdf0808a25bc3ba9b463901d192fe7eef863fea9",
+      "transform": "count_x2"
+    },
+    {
+      "id": "S0550_shop_c",
+      "function": "hst_fn_002708ac",
+      "insn_offset": 4504,
+      "word_count": 1,
+      "stock_digest": "c85f83a3c67be67d512d4a4cfdf0808a25bc3ba9b463901d192fe7eef863fea9",
+      "transform": "count_x2"
+    },
+    {
+      "id": "S0550_shop_d",
+      "function": "hst_fn_002708ac",
+      "insn_offset": 4780,
+      "word_count": 1,
+      "stock_digest": "c85f83a3c67be67d512d4a4cfdf0808a25bc3ba9b463901d192fe7eef863fea9",
+      "transform": "count_x2"
+    },
+    {
+      "id": "S0550_shop_e",
+      "function": "hst_fn_00273284",
+      "insn_offset": 5556,
+      "word_count": 1,
+      "stock_digest": "c85f83a3c67be67d512d4a4cfdf0808a25bc3ba9b463901d192fe7eef863fea9",
+      "transform": "count_x2"
+    },
+    {
+      "id": "S0550_shop_f",
+      "function": "hst_fn_00273284",
+      "insn_offset": 5956,
+      "word_count": 1,
+      "stock_digest": "c85f83a3c67be67d512d4a4cfdf0808a25bc3ba9b463901d192fe7eef863fea9",
+      "transform": "count_x2"
+    },
+    {
+      "id": "S0550_shop_g",
+      "function": "hst_fn_00273284",
+      "insn_offset": 6144,
+      "word_count": 1,
+      "stock_digest": "c85f83a3c67be67d512d4a4cfdf0808a25bc3ba9b463901d192fe7eef863fea9",
+      "transform": "count_x2"
+    },
+    {
+      "id": "S0550_shop_h",
+      "function": "hst_fn_00273284",
+      "insn_offset": 6420,
+      "word_count": 1,
+      "stock_digest": "c85f83a3c67be67d512d4a4cfdf0808a25bc3ba9b463901d192fe7eef863fea9",
+      "transform": "count_x2"
+    },
+    {
+      "id": "S1039",
+      "function": "hst_fn_002708ac",
+      "insn_offset": 7028,
+      "word_count": 1,
+      "stock_digest": "68f681b60549e3910cfb89a662b9a0c26a9bdf470871084f91c15ae5a396cb8b",
+      "transform": "gate_30hz"
+    },
+    {
+      "id": "S0580_a",
+      "function": "hst_fn_00199398",
+      "insn_offset": 208,
+      "word_count": 1,
+      "stock_digest": "0ed48af325df0e672ec3b9865d1dbdb846f346810cf92065c26624597e73cd97",
+      "transform": "count_x2"
+    },
+    {
+      "id": "S0580_b",
+      "function": "hst_fn_00199398",
+      "insn_offset": 204,
+      "word_count": 1,
+      "stock_digest": "e360deffb282e8e850bd7398595254ff4562d7d000c6ddeb98f3b156881c9ec7",
+      "transform": "count_x2"
+    },
+    {
+      "id": "V0124",
+      "function": "hst_fn_001eed9c",
+      "insn_offset": 400,
+      "word_count": 1,
+      "stock_digest": "aa4c09407700bbd8327644b5510af66987eba168aa266c339f5a9c03fd296453",
+      "transform": "gate_30hz"
+    },
+    {
+      "id": "S0741",
+      "function": "hst_fn_001ed27c",
+      "insn_offset": 176,
+      "word_count": 2,
+      "stock_digest": "82306b540bd71c5f8b274e0945f061e82339be945f54dfe55a7a218fb3e9617b",
+      "transform": "step_x0.5"
+    },
+    {
+      "id": "S0512",
+      "function": "hst_fn_001c821c",
+      "insn_offset": 752,
+      "word_count": 1,
+      "stock_digest": "60ca640752c9a08268f0f2d4de6eec5f36a6f953c8761648a7891f7469a95e2b",
+      "transform": "gate_30hz"
     }
   ],
   "update_boundary": {
@@ -6335,6 +6559,7 @@
     "hst_fn_000d399c": "0x000d399c",
     "hst_fn_000d4918": "0x000d4918",
     "hst_fn_000e3cd8": "0x000e3cd8",
+    "hst_fn_000e57bc": "0x000e57bc",
     "hst_fn_000e985c": "0x000e985c",
     "hst_fn_000e9b10": "0x000e9b10",
     "hst_fn_000ee8d0": "0x000ee8d0",
@@ -6357,12 +6582,14 @@
     "hst_fn_001135c0": "0x001135c0",
     "hst_fn_001150d8": "0x001150d8",
     "hst_fn_00117394": "0x00117394",
+    "hst_fn_00117dd0": "0x00117dd0",
     "hst_fn_0011acfc": "0x0011acfc",
     "hst_fn_0011b7f0": "0x0011b7f0",
     "hst_fn_001268d8": "0x001268d8",
     "hst_fn_00127dc4": "0x00127dc4",
     "hst_fn_00128298": "0x00128298",
     "hst_fn_0012855c": "0x0012855c",
+    "hst_fn_00128910": "0x00128910",
     "hst_fn_00128e40": "0x00128e40",
     "hst_fn_00129b74": "0x00129b74",
     "hst_fn_00129f94": "0x00129f94",
@@ -6387,9 +6614,11 @@
     "hst_fn_0015d960": "0x0015d960",
     "hst_fn_0015df28": "0x0015df28",
     "hst_fn_0016461c": "0x0016461c",
+    "hst_fn_00170744": "0x00170744",
     "hst_fn_00171714": "0x00171714",
     "hst_fn_0017c6d4": "0x0017c6d4",
     "hst_fn_0017c968": "0x0017c968",
+    "hst_fn_0017e9c0": "0x0017e9c0",
     "hst_fn_001808c4": "0x001808c4",
     "hst_fn_00186f18": "0x00186f18",
     "hst_fn_0018ab04": "0x0018ab04",
@@ -6397,6 +6626,7 @@
     "hst_fn_0018b1d0": "0x0018b1d0",
     "hst_fn_0018b2bc": "0x0018b2bc",
     "hst_fn_0018f238": "0x0018f238",
+    "hst_fn_00199398": "0x00199398",
     "hst_fn_0019953c": "0x0019953c",
     "hst_fn_00199754": "0x00199754",
     "hst_fn_0019a19c": "0x0019a19c",
@@ -6429,6 +6659,7 @@
     "hst_fn_001c6180": "0x001c6180",
     "hst_fn_001c6354": "0x001c6354",
     "hst_fn_001c6608": "0x001c6608",
+    "hst_fn_001c821c": "0x001c821c",
     "hst_fn_001d6dcc": "0x001d6dcc",
     "hst_fn_001d806c": "0x001d806c",
     "hst_fn_001d8854": "0x001d8854",
@@ -6437,6 +6668,7 @@
     "hst_fn_001e0ba0": "0x001e0ba0",
     "hst_fn_001e995c": "0x001e995c",
     "hst_fn_001e9e80": "0x001e9e80",
+    "hst_fn_001ed27c": "0x001ed27c",
     "hst_fn_001eed9c": "0x001eed9c",
     "hst_fn_001ef824": "0x001ef824",
     "hst_fn_001efcd8": "0x001efcd8",
@@ -6505,7 +6737,6 @@
     "hst_fn_0024973c": "0x0024973c",
     "hst_fn_002499c0": "0x002499c0",
     "hst_fn_0024a504": "0x0024a504",
-    "hst_fn_0024aaf4": "0x0024aaf4",
     "hst_fn_0024bd80": "0x0024bd80",
     "hst_fn_0024ce70": "0x0024ce70",
     "hst_fn_00252214": "0x00252214",
@@ -6566,6 +6797,7 @@
     "hst_hud_speed_pop_fade_factor": "0x000f175c",
     "hst_hud_stamina_bar_gauge_step": "0x000f1c7c",
     "hst_match_end_victory_early_event": "0x001ef424",
+    "hst_match_flow_match_time_counter": "0x00089724",
     "hst_match_flow_state_minimum_wait": "0x00089974",
     "hst_param_common_csv_load": "0x00160998",
     "hst_player_body_hit_swept_test": "0x0009f230",

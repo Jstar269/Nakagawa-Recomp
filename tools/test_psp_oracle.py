@@ -7957,7 +7957,10 @@ class HleIssuesProbeTests(unittest.TestCase):
             self.assertTrue(parse_campaign_probe_output(helper._body(clean), case).complete)
             # The first row, a middle row and the last row before the terminal.
             cells = spec.semantic_cases
-            for row in (cells[0], cells[len(cells) // 2], cells[-1]):
+            rows = [cells[0], cells[len(cells) // 2], cells[-1]]
+            # The io-seek cases' cleanup row is FAIL when the probe's ms0: directory survives.
+            rows += [cell for cell in cells if cell.endswith("-ms-cleanup")]
+            for row in rows:
                 for status in ("FAIL", "SKIP"):
                     with self.subTest(case=case, row=row, status=status):
                         text = helper._stream(case, {row: (status, 0, [0] * counts[row])})
@@ -12216,6 +12219,68 @@ class GeRasterProbeTests(unittest.TestCase):
         self.assertNotIn("#include", block)
         self.assertIn("test_ge_raster_cells_match_psp();", self.selftest)
 
+    def test_the_vulkan_selftest_carries_the_block_and_the_psp_digests(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        inc = (root / "src" / "rt" / "gpu_sdl3vk" / "ge_gpu_selftest.inc").read_text(encoding="utf-8")
+        self.assertEqual(inc.count(self.START), 1)
+        self.assertEqual(self._block(inc), self._block(self.probe))
+        table_start = "/* PSP-GE-RASTER-001 (#343): the window digest each cell left on a PSP-3000"
+
+        def table(text: str) -> str:
+            start = text.index(table_start)
+            return text[start:text.index("\n};\n", start) + 4]
+
+        self.assertEqual(table(inc), table(self.selftest))
+        # The case runs in the default (render scale 1) pass and on its own.
+        self.assertIn("    if (!coherence_run_psp_raster()) ok = 0;\n", inc)
+        self.assertIn('if (strcmp(only, "psp-raster") == 0) return coherence_run_psp_raster();', inc)
+        self.assertIn("    if (!coherence_run_clear_masks()) ok = 0;\n", inc)
+        self.assertIn('if (strcmp(only, "clear-masks") == 0) return coherence_run_clear_masks();', inc)
+        bodies = {}
+        for name in ("gr_vk_draw", "coherence_run_psp_raster"):
+            body = inc[inc.index(f"static int {name}("):]
+            bodies[name] = body[:body.index("\n}\n")]
+        for term in ("fallback_prims", "gegpu_sync_guest_fb(&desc)", "ge_set_gpu_hooks(gpu ? &k_hooks : NULL);",
+                     "const int done = ge_run_list(list, 0) == 0;", "return done;"):
+            self.assertIn(term, bodies["gr_vk_draw"])
+        for term in ("s_scale != 1", "gr_digest(ref) == s_gr_psp[k].psp", "gr_digest(px) == s_gr_psp[k].psp",
+                     "else if (want_sw) pass = on_sw && matches;",
+                     "else if (want_div) pass = on_gpu && delta <= GR_VK_DIVERGENT_MAX_DELTA;",
+                     "else pass = on_gpu && matches;"):
+            self.assertIn(term, bodies["coherence_run_psp_raster"])
+        self.assertIn("#define GR_VK_DIVERGENT_MAX_DELTA 2u\n", inc)
+        # The two pinned classes name real cells, once each, and no cell is in both.
+        cells = set(re.findall(r'^\s*\{"([a-z0-9-]+)", GR_K_', self._block(inc), re.M))
+        self.assertEqual(len(cells), 189)
+        pinned = []
+        for name in ("k_gr_vk_divergent", "k_gr_vk_software"):
+            start = inc.index(f"static const char *const {name}[] = {{")
+            pinned.append(re.findall(r'"([a-z0-9-]+)"', inc[start:inc.index("};", start)]))
+        divergent, software = pinned
+        self.assertEqual(len(divergent) + len(software), len(set(divergent) | set(software)))
+        self.assertLessEqual(set(divergent) | set(software), cells)
+        # docs/HARDWARE_ORACLE.md names exactly the pinned cells and their counts.
+        doc = (root / "docs" / "HARDWARE_ORACLE.md").read_text(encoding="utf-8")
+        para = doc[doc.index("  The Vulkan backend runs the same cells:"):]
+        para = " ".join(para[:para.index("\n\n")].split())
+        named = set(re.findall(r"`([a-z0-9-]+\*?)`", para))
+        lo = {cell for cell in cells if cell.startswith("lo-")}
+        self.assertIn("lo-*", named)
+        self.assertLessEqual(lo, set(software))
+        self.assertEqual((named & cells) | lo, set(divergent) | set(software))
+        # Each class's names sit in its own sentence, so a cell moved between the lists is caught.
+        sw_part, div_part = para.split(" are drawn on the GPU and differ")
+        sw_part = sw_part[sw_part.index(" are drawn by the software fallback"):]
+        div_part = div_part[:div_part.index(" The case pins all three classes")]
+        self.assertEqual(set(re.findall(r"`([a-z0-9-]+)`", sw_part)) & cells | lo, set(software))
+        self.assertEqual(set(re.findall(r"`([a-z0-9-]+)`", div_part)) & cells, set(divergent))
+        self.assertIn(f"{len(software)} are drawn by the software fallback", para)
+        self.assertIn(f"{len(divergent)} are drawn on the GPU and differ", para)
+        # A rounding cell may land on the PSP's value on one driver and not on another (lavapipe draws
+        # tf-mod-rgba-1 exact): the class is the bound alone, never a required difference.
+        self.assertNotIn("!matches && delta", bodies["coherence_run_psp_raster"])
+        self.assertIn(f"{len(cells) - len(software) - len(divergent)} cells are drawn on the GPU and equal", para)
+
     def test_section_calls_only_the_ge_and_cache_imports_and_is_bounded(self) -> None:
         self.assertEqual(set(re.findall(r"\b(sce\w+)\s*\(", self.section)), {
             "sceGeEdramGetAddr", "sceGeListEnQueue", "sceGeListSync", "sceGeDrawSync",
@@ -12569,6 +12634,60 @@ class KernelSemanticsProbeTests(unittest.TestCase):
         self.assertNotIn("sceKernelDcacheInvalidateRange", read)
         self.assertEqual(re.findall(r"s_ku_buf\[(\w+)\]", section), ["KU_BUF", "i"])
         self.assertIn("changed += s_ku_buf[i] != KU_FILL;", read)
+
+
+class HleIoSeekMemoryStickSetupAndCleanupTests(unittest.TestCase):
+    """hle-io-seek and hle-io-seek-edges touch only the Memory Stick directory they made (#1380)."""
+
+    CASES = (
+        ("hle_is_ms", "io-seek", "HLE_IS_FILE", "HLE_IS_DIR"),
+        ("hle_ise_ms", "io-edge", "HLE_ISE_FILE", "HLE_ISE_DIR"),
+    )
+    probe: str
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        fixture = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        cls.probe = (fixture / "probe_hle_measure.c").read_text(encoding="utf-8")
+
+    def _body(self, function: str) -> str:
+        start = self.probe.index(f"static void {function}(void)\n{{\n")
+        return self.probe[start:self.probe.index("\n}\n", start)]
+
+    def test_the_setup_abort_undoes_only_what_the_probe_made(self) -> None:
+        # Review of #2416, nit 4: the abort removed the file and the directory even when the mkdir
+        # had failed, so the directory might not have been the probe's.
+        for function, prefix, file_macro, dir_macro in self.CASES:
+            with self.subTest(case=prefix):
+                body = self._body(function)
+                abort = body[body.index(f'hle_step("{prefix}-ms-setup-abort");'):]
+                abort = abort[:abort.index("return;")]
+                self.assertIn(f"if (made < 0 || fd < 0 || wrote != (int){file_macro}_SIZE) {{", body)
+                self.assertIn(f"if (fd >= 0) (void)sceIoRemove({file_macro});", abort)
+                self.assertIn(f"if (made >= 0) (void)sceIoRmdir({dir_macro});", abort)
+                self.assertNotRegex(abort, r"\n\s*\(void\)sceIo(Remove|Rmdir)\(")
+
+    def test_a_directory_left_after_the_cleanup_fails_the_cleanup_row(self) -> None:
+        for function, prefix, _file_macro, dir_macro in self.CASES:
+            with self.subTest(case=prefix):
+                body = self._body(function)
+                cleanup = body[body.index(f'hle_step("{prefix}-ms-cleanup");'):]
+                self.assertIn(f"const SceUID post = sceIoDopen({dir_macro});", cleanup)
+                self.assertIn(
+                    f'hle_record("{prefix}-ms-cleanup", post >= 0 ? "FAIL" : "PASS", 0u, w, 4u);',
+                    cleanup,
+                )
+
+    def test_the_write_async_row_names_its_poll_cap_exhaustion_path(self) -> None:
+        # Review of #2416, nit 5: a write still pending when the poll cap runs out leaves the
+        # descriptor open; the comment says so and the cleanup row then reports FAIL.
+        body = self._body("hle_ise_ms")
+        comment = body[body.index("/* B4 io-edge-ms-write-async"):body.index('hle_step("io-edge-ms-write-async");')]
+        self.assertIn("poll cap runs out", comment)
+        self.assertIn("cleanup's remove and rmdir fail", comment)
+        self.assertIn("(unmeasured)", comment)
+        self.assertIn("HLE_ISE_POLL_CAP", body)
+        self.assertNotIn("while (", body)
 
 
 class HleUtilityNoneProbeTests(unittest.TestCase):
@@ -15025,6 +15144,35 @@ class IoCasesSourceTests(unittest.TestCase):
     def _code(text: str) -> str:
         return re.sub(r"/\*.*?\*/|//[^\n]*", "", text, flags=re.DOTALL)
 
+    def test_font_copies_are_not_registered_for_teardown_removal(self) -> None:
+        # probe.c maps sceIoOpen to probe_io_open, which records every host0 path opened with
+        # PSP_O_CREAT for teardown to remove, in a 16-entry table. Through it, the 2026-11-11
+        # PSP-3000 run's 21 copies overflowed the table: teardown removed 16, kept 5 and reported
+        # status=FAIL. Inside font_files.h the open tracks the descriptor only.
+        self.assertIn("#define PROBE_TEARDOWN_PATH_CAPACITY 16u", self.probe)
+        generic = self.probe[self.probe.index("SceUID probe_io_open(const char *path"):]
+        generic = generic[:generic.index("\n}\n")]
+        self.assertIn("if ((flags & PSP_O_CREAT) != 0) probe_track_disposable_path(path);", generic)
+        kept = self.probe[self.probe.index("SceUID probe_io_open_kept(const char *path"):]
+        kept = kept[:kept.index("\n}\n")]
+        # Defined before probe.c maps sceIoOpen to probe_io_open, so its call is the real one.
+        self.assertLess(self.probe.index("SceUID probe_io_open_kept("),
+                        self.probe.index("#define sceIoOpen(path, flags, mode) probe_io_open("))
+        self.assertIn("sceIoOpen(path, flags, mode)", kept)
+        block = self.probe[self.probe.index("#if PSP_ORACLE_CASE == PSP_ORACLE_CASE_FONT_FILES\n"):]
+        block = block[:block.index("#endif\n")]
+        self.assertIn("probe_track_uid(s_owned_fds, fd)", kept)
+        self.assertNotIn("probe_track_disposable_path", kept)
+        include = block.index('#include "font_files.h"\n')
+        self.assertTrue(block[:include].endswith(
+            "#undef sceIoOpen\n"
+            "#define sceIoOpen(path, flags, mode) probe_io_open_kept((path), (flags), (mode))\n"))
+        self.assertTrue(block[include:].startswith(
+            '#include "font_files.h"\n#undef sceIoOpen\n'
+            "#define sceIoOpen(path, flags, mode) probe_io_open((path), (flags), (mode))\n"))
+        # The font list holds more files than the path table: the old route always overflowed.
+        self.assertNotIn("copies are opened with sceIoOpen directly", self.probe)
+
     def test_flash0_is_only_listed_and_opened_read_only(self) -> None:
         code = self._code(self.fonts)
         self.assertEqual(set(re.findall(r"\b(sce\w+)\s*\(", code)),
@@ -15279,7 +15427,11 @@ class IoCasesSourceTests(unittest.TestCase):
                 start = self.probe.index(f"#if PSP_ORACLE_CASE == PSP_ORACLE_CASE_{macro}\n")
             block = self.probe[start:]
             block = block[:block.index("\n#endif")]
-            self.assertNotRegex(block, r"\bsce\w+\s*\(")
+            # The font-files block remaps sceIoOpen for its header (#undef, then #define to
+            # probe_io_open_kept and back); apart from those lines the block makes no PSP call.
+            remap = (r"(?m)^(#undef sceIoOpen|"
+                     r"#define sceIoOpen\(path, flags, mode\) probe_io_open(_kept)?\(.*)$")
+            self.assertNotRegex(re.sub(remap, "", block), r"\bsce\w+\s*\(")
 
     def test_raw_device_case_manifest_matches_its_captured_record_contract(self) -> None:
         manifest = json.loads((self.root / "tools" / "psp_oracle" / "manifest.json").read_text(

@@ -115,8 +115,9 @@ class LibraryBuildTests(unittest.TestCase):
                                           **options)
 
     def manifest(self, folder: Path | None = None) -> dict:
-        return json.loads(((folder or self.reports) / "library-build.json").read_text(
+        loaded: dict = json.loads(((folder or self.reports) / "library-build.json").read_text(
             encoding="utf-8"))
+        return loaded
 
     def by_source(self, manifest: dict) -> dict[str, dict]:
         return {record["source"]: record for record in manifest["titles"]}
