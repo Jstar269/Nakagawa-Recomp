@@ -108,44 +108,21 @@ static void make_page(uint32_t page[PW * PH], const Fmt *f, int variant) {
 /* ---- cells ---------------------------------------------------------------------------------- */
 
 static void cell_settings(void) {
-    NkGlyphConfig c;
-    char why[96];
-    check(nk_glyph_parse(NULL, &c, why, sizeof why) && !c.on, "settings", "unset is off");
-    check(nk_glyph_parse("off", &c, why, sizeof why) && !c.on, "settings", "off is off");
-    check(nk_glyph_parse("on", &c, why, sizeof why) && c.on, "settings", "on is on");
-    check(!nk_glyph_parse("yes", &c, why, sizeof why) && !c.on && strstr(why, "SR_GLYPHS"), "settings",
-          "a stray value is refused and names the variable");
-    check(!nk_glyph_parse("ON", &c, why, sizeof why), "settings", "values are exact");
-
-#ifdef _WIN32
-    _putenv("SR_GLYPHS=on");
-#else
-    setenv("SR_GLYPHS", "on", 1);
-#endif
-    const NkGlyphConfig *k = nk_glyph_init_from_env(0);
-    check(!k->on, "settings", "SR_GLYPHS=on with Ace Mode off");
+    /* The launch line's glyphs key (ace.c parses it; ace-selftest checks its values) reaches this unit as
+     * `requested`. */
+    const NkGlyphConfig *k = nk_glyph_init(0, 1);
+    check(!k->on, "settings", "glyphs=on with Ace Mode off");
     check(strstr(nk_glyph_start_lines(), "GLYPHS: off (sharp game text needs Ace Mode)") != NULL, "settings",
           "an authentic run names the request it does not obey: '%s'", nk_glyph_start_lines());
-    k = nk_glyph_init_from_env(1);
-    check(k->on, "settings-on", "SR_GLYPHS=on in an Ace run");
+    k = nk_glyph_init(1, 1);
+    check(k->on, "settings-on", "glyphs=on in an Ace run");
     check(strstr(nk_glyph_start_lines(), "GLYPHS: on (per_present=48, tolerance=2)") != NULL &&
-              strstr(nk_glyph_start_lines(), "guest-visible, on through SR_GLYPHS and not admitted under contract section 11.2") != NULL,
+              strstr(nk_glyph_start_lines(), "guest-visible, on through the launch line's glyphs key and not admitted under contract section 11.2") != NULL,
           "settings-on", "the start lines: '%s'", nk_glyph_start_lines());
-#ifdef _WIN32
-    _putenv("SR_GLYPHS=maybe");
-#else
-    setenv("SR_GLYPHS", "maybe", 1);
-#endif
-    k = nk_glyph_init_from_env(1);
-    check(!k->on && strstr(nk_glyph_start_lines(), "GLYPHS: refused (SR_GLYPHS takes off or on)") != NULL,
-          "settings-refused", "a stray value in an Ace run: '%s'", nk_glyph_start_lines());
-#ifdef _WIN32
-    _putenv("SR_GLYPHS=");
-#else
-    unsetenv("SR_GLYPHS");
-#endif
-    k = nk_glyph_init_from_env(1);
-    check(!k->on && nk_glyph_start_lines()[0] == '\0', "settings", "unset prints nothing");
+    k = nk_glyph_init(1, 0);
+    check(!k->on && nk_glyph_start_lines()[0] == '\0', "settings", "an Ace run without glyphs=on prints nothing");
+    k = nk_glyph_init(0, 0);
+    check(!k->on && nk_glyph_start_lines()[0] == '\0', "settings", "an authentic run prints nothing");
     char line[400];
     NkGlyphConfig off = { 0 };
     check(nk_glyph_admission_line(&off, line, sizeof line) == 0 && line[0] == '\0', "settings", "off has no admission line");

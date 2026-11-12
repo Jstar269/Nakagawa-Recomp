@@ -29,7 +29,8 @@ static int value_on_off(const char *v, int *out) {
    nothing: tier is the one key a line may leave out (an Enhanced run). */
 typedef enum {
     ACE_KEY_AF, ACE_KEY_TEXT, ACE_KEY_READOUT, ACE_KEY_NOTICE, ACE_KEY_WIDE, ACE_KEY_SMOOTH,
-    ACE_KEY_SAS, ACE_KEY_TESS, ACE_KEY_TIER, ACE_KEY_STICK, ACE_KEY_LOAD, ACE_KEY_CULL
+    ACE_KEY_SAS, ACE_KEY_TESS, ACE_KEY_TIER, ACE_KEY_STICK, ACE_KEY_LOAD, ACE_KEY_GLYPHS,
+    ACE_KEY_CULL
 } AceKey;
 
 static const struct {
@@ -48,6 +49,7 @@ static const struct {
     {"tier", ACE_KEY_TIER, 0},
     {"stick", ACE_KEY_STICK, 0},
     {"load", ACE_KEY_LOAD, 0},
+    {"glyphs", ACE_KEY_GLYPHS, 0},
     {"cull", ACE_KEY_CULL, 0},
 };
 
@@ -133,6 +135,12 @@ int ace_parse(const char *spec, AceConfig *out, char *why, size_t why_cap) {
                     why_set(why, why_cap, "load is not part of this build"); return 0;
                 }
                 break;
+            case ACE_KEY_GLYPHS:
+                ok = value_on_off(v, &c.glyphs);
+                if (ok && c.glyphs && !ACE_HAS_GLYPHS) {
+                    why_set(why, why_cap, "glyphs is not part of this build"); return 0;
+                }
+                break;
             case ACE_KEY_TIER:
                 if (strcmp(v, "enhanced") == 0) { c.tier = ACE_TIER_ENHANCED; ok = 1; }
                 else if (strcmp(v, "ace") == 0) { c.tier = ACE_TIER_ACE; ok = 1; }
@@ -209,6 +217,12 @@ int ace_format(const AceConfig *c, char *out, size_t cap) {
         const int m = snprintf(out + n, cap - (size_t)n, ";load=fast");
         n = m < 0 ? -1 : n + m;
     }
+    /* Likewise glyphs, after the parts above and before cull: a missing glyphs is off, so a line
+       without it keeps its text (contract 10.13). */
+    if (n > 0 && (size_t)n < cap && c && c->on && c->glyphs) {
+        const int m = snprintf(out + n, cap - (size_t)n, ";glyphs=on");
+        n = m < 0 ? -1 : n + m;
+    }
     /* The same for cull, which stays last: written only when on. */
     if (n > 0 && (size_t)n < cap && c && c->on && c->cull) {
         const int m = snprintf(out + n, cap - (size_t)n, ";cull=on");
@@ -239,7 +253,8 @@ static int s_load_update_skipped;    /* a wait was skipped since the last update
 static int s_load_paced;             /* the guard fired: nothing is skipped for the rest of the run */
 
 static const char *const k_feature_key[ACE_FEATURE_COUNT] = {
-    "af", "text", "readout", "notice", "wide", "smooth", "sas", "tess", "stick", "load", "cull"
+    "af", "text", "readout", "notice", "wide", "smooth", "sas", "tess", "stick", "load", "cull",
+    "glyphs"
 };
 
 /* The run's observation state. */
@@ -335,6 +350,9 @@ int ace_init_spec(const char *spec, const char *report_path) {
     if (s_req.load)
         fprintf(stderr, "ACE_MODE: load fast (a title's declared loading waits return at once; "
                         "guest timing changes)\n");
+    if (s_req.glyphs)
+        fprintf(stderr, "ACE_MODE: glyphs on (small text sprites draw from glyphs rebuilt at the render "
+                        "scale; the frames the game keeps in VRAM change where they do)\n");
     if (s_req.cull) fprintf(stderr, "ACE_MODE: cull on (a title's own culling is widened to the wings)\n");
     return 1;
 }
@@ -364,6 +382,7 @@ void ace_feature_unavailable(AceFeature feature, const char *reason) {
     case ACE_FEATURE_SAS: s_eff.sas = 0; break;
     case ACE_FEATURE_LOAD: s_eff.load = 0; break;
     case ACE_FEATURE_CULL: s_eff.cull = 0; break;
+    case ACE_FEATURE_GLYPHS: s_eff.glyphs = 0; break;
     default: s_eff.tess = 0; break;
     }
     fprintf(stderr, "ACE_MODE: %s unavailable (%s)\n", k_feature_key[feature], s_unavailable[feature]);
@@ -505,6 +524,7 @@ size_t ace_feature_words(char *out, size_t cap) {
     if (s_eff.stick) used = words_add(out, cap, used, "stick remap");
     if (s_eff.load) used = words_add(out, cap, used, "short loads");
     if (s_eff.cull) used = words_add(out, cap, used, "wider culling");
+    if (s_eff.glyphs) used = words_add(out, cap, used, "sharp game text");
     if (s_eff.smooth) used = words_add(out, cap, used, "smooth motion");
     if (s_eff.sas) used = words_add(out, cap, used, "clean pitched sound");
     if (s_eff.tess) {
@@ -1126,6 +1146,7 @@ size_t ace_report_json(char *out, size_t cap) {
                             "  \"load_paced\": %s,\n",
                             s_eff.load ? "true" : "false", s_load_skipped, s_load_run_max,
                             s_load_paced ? "true" : "false");
+    if (s_req.glyphs) ACE_PUT("  \"glyphs\": %s,\n", s_eff.glyphs ? "true" : "false");
     if (s_req.cull) ACE_PUT("  \"cull\": %s,\n  \"cull_untracked\": %lu,\n",
                             s_eff.cull ? "true" : "false", s_cull_untracked);
     ACE_PUT("  \"unavailable\": {");
@@ -1218,11 +1239,12 @@ void ace_finish(void) {
     if (!g_ace_on) return;
     /* A feature that is on but never ran: its renderer or presenter did not start. */
     static const int has[ACE_FEATURE_COUNT] = { 1, 1, 1, 1, ACE_HAS_WIDE, ACE_HAS_SMOOTH, ACE_HAS_SAS, ACE_HAS_TESS,
-                                                ACE_HAS_STICK, ACE_HAS_LOAD, ACE_HAS_CULL };
+                                                ACE_HAS_STICK, ACE_HAS_LOAD, ACE_HAS_CULL,
+                                                ACE_HAS_GLYPHS };
     const int on[ACE_FEATURE_COUNT] = { s_eff.af > 0, s_eff.text, s_eff.readout, s_eff.notice,
                                         s_eff.wide, s_eff.smooth, s_eff.sas, s_eff.tess, s_eff.stick,
                                         s_eff.load,
-                                        s_eff.cull };
+                                        s_eff.cull, s_eff.glyphs };
     for (int f = 0; f < ACE_FEATURE_COUNT; f++) {
         if (has[f] && on[f] && !s_confirmed[f])
             ace_feature_unavailable((AceFeature)f, f == ACE_FEATURE_CULL
