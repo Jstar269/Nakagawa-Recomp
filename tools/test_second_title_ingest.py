@@ -40,6 +40,13 @@ class SecondTitleIngestTests(unittest.TestCase):
             ROOT / "src" / "core" / "nk_title_manifest.c",
             ROOT / "src" / "core" / "nk_json.c",
             ROOT / "src" / "core" / "generated" / "nk_title_catalog.c",
+            # nk_launch.c starts a homebrew program from its Memory Stick folder
+            # (nk_pbp_homebrew.c), whose package reader reports through the PSP crypto
+            # engine (nk_psp_fail), which reads the key store.
+            ROOT / "src" / "core" / "nk_pbp_homebrew.c",
+            ROOT / "src" / "core" / "nk_psp_crypto.c",
+            ROOT / "src" / "core" / "nk_psp_keystore.c",
+            ROOT / "src" / "core" / "nk_psp_builtin_keys.c",
         ]
         if sys.platform == "win32":
             core_srcs.append(ROOT / "src" / "core" / "nk_platform_win32.c")
@@ -153,7 +160,8 @@ int main(int argc, char **argv) {
             "-I", str(ROOT / "src" / "core" / "generated"),
             str(self.harness_c),
         ] + [str(s) for s in core_srcs] + [
-            *(["-lshell32", "-lole32", "-luuid"] if sys.platform == "win32" else []),
+            # The key store's random source is BCrypt.
+            *(["-lshell32", "-lole32", "-luuid", "-lbcrypt"] if sys.platform == "win32" else []),
             "-o", str(self.exe_path),
         ]
         res = subprocess.run(cmd, capture_output=True, text=True)

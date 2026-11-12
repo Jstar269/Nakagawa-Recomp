@@ -1652,6 +1652,18 @@ class GenericLauncherHostileTests(unittest.TestCase):
         self.assertIn("No title profile", str(cm.exception))
 
 
+#: What nk_launch.c links beyond the launcher core: it starts a homebrew program from its
+#: Memory Stick folder (nk_pbp_homebrew.c), whose package reader reports through the PSP
+#: crypto engine (nk_psp_fail), which reads the key store.
+LAUNCH_HOMEBREW_SOURCES = tuple(
+    REPO_ROOT / "src" / "core" / name
+    for name in ("nk_pbp_homebrew.c", "nk_psp_crypto.c", "nk_psp_keystore.c",
+                 "nk_psp_builtin_keys.c")
+)
+#: The Windows libraries those harnesses link; the key store's random source is BCrypt.
+LAUNCH_WINDOWS_LIBS = ("-lshell32", "-lole32", "-luuid", "-lbcrypt")
+
+
 class GenericLauncherParityTests(unittest.TestCase):
     """Native and Python planners must select the same outcome."""
     _class_temp: Path
@@ -1728,6 +1740,7 @@ int main(int argc, char **argv) {
             REPO_ROOT / "src" / "core" / "nk_title_manifest.c",
             REPO_ROOT / "src" / "core" / "nk_json.c",
             REPO_ROOT / "src" / "core" / "generated" / "nk_title_catalog.c",
+            *LAUNCH_HOMEBREW_SOURCES,
         ]
         if sys.platform == "win32":
             core_srcs.append(REPO_ROOT / "src" / "core" / "nk_platform_win32.c")
@@ -1739,7 +1752,7 @@ int main(int argc, char **argv) {
             "-I", str(REPO_ROOT / "src" / "core" / "generated"),
             str(harness_c),
         ] + [str(s) for s in core_srcs] + (
-            ["-lshell32", "-lole32", "-luuid"] if sys.platform == "win32" else []
+            list(LAUNCH_WINDOWS_LIBS) if sys.platform == "win32" else []
         ) + ["-o", str(out)]
         res = subprocess.run(cmd, capture_output=True, text=True)
         if res.returncode != 0:
@@ -2026,8 +2039,9 @@ int main(int argc, char **argv) {
                 str(src_dir / "nk_title_manifest.c"),
                 str(REPO_ROOT / "src" / "core" / "nk_json.c"),
                 str(src_dir / "generated" / "nk_title_catalog.c"),
+                *(str(source) for source in LAUNCH_HOMEBREW_SOURCES),
                 str(platform_src),
-                *(["-lshell32", "-lole32", "-luuid"] if sys.platform == "win32" else []),
+                *(LAUNCH_WINDOWS_LIBS if sys.platform == "win32" else ()),
                 "-o", str(out),
             ]
             res = subprocess.run(cc, capture_output=True, text=True)
@@ -2243,6 +2257,7 @@ class GenericLauncherReintroductionGateTests(unittest.TestCase):
             REPO_ROOT / "src" / "core" / "nk_title_manifest.c",
             REPO_ROOT / "src" / "core" / "nk_json.c",
             REPO_ROOT / "src" / "core" / "generated" / "nk_title_catalog.c",
+            *LAUNCH_HOMEBREW_SOURCES,
         ]
         if sys.platform == "win32":
             core_srcs.append(REPO_ROOT / "src" / "core" / "nk_platform_win32.c")
@@ -2254,7 +2269,7 @@ class GenericLauncherReintroductionGateTests(unittest.TestCase):
             "-I", str(REPO_ROOT / "src" / "core" / "generated"),
             str(harness_c),
         ] + [str(s) for s in core_srcs] + (
-            ["-lshell32", "-lole32", "-luuid"] if sys.platform == "win32" else []
+            list(LAUNCH_WINDOWS_LIBS) if sys.platform == "win32" else []
         ) + ["-o", str(out)]
         res = subprocess.run(cmd, capture_output=True, text=True)
         self.assertEqual(res.returncode, 0, f"mutant compile failed: {res.stderr}")
