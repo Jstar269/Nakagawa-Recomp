@@ -374,6 +374,17 @@ static void atrac_consume_frame(Atrac *a) {
         a->bufferHeaderSize = 0;
     }
 }
+/* Every division by an ID's frame size goes through this check. A track whose frame size is 0
+ * (an ATRAC3+ prefix with a fact chunk and no fmt chunk, or an ID with no track) has no frame
+ * grid, so frame counts and ring sizes are not defined for it: the call that needs one stops
+ * the run by name (#322). Returns 1 when it stopped. */
+static int atrac_no_frame_size(const Atrac *a) {
+    if (a->bytesPerFrame != 0u) return 0;
+    (void)hle_unmodelled_stop(hle_import_name(sr_last_nid), "ID %u: the track has no frame size "
+                              "(no fmt chunk, or no track), so its frame arithmetic is not "
+                              "defined (#322)", (unsigned)(a - s_atrac));
+    return 1;
+}
 static uint32_t atrac_remaining_frames(const Atrac *a) {
     if (a->bufferState == ATRAC_STATE_ALL_DATA_LOADED)
         return ATRAC_PSP_ALLDATA_IS_ON_MEMORY;
@@ -388,6 +399,7 @@ static uint32_t atrac_remaining_frames(const Atrac *a) {
         if (atrac_streamed_state(a) && a->loopNum == 0)
             return ATRAC_PSP_LOOP_STREAM_IS_ON_MEMORY;
     }
+    if (atrac_no_frame_size(a)) return 0u;   /* the run has stopped */
     if (atrac_streamed_state(a))
         return a->bufferValidBytes / a->bytesPerFrame;
     int remainingBytes = (int)(a->size - currentFileOffset);
@@ -708,18 +720,21 @@ static uint32_t atrac_set_new(uint32_t buf, uint32_t readSize, uint32_t bufSize,
  *
  * Derived-translated from PPSSPP (GPL-2.0-or-later, revision
  * 3bc60270eae3069f13dfbfdb7292a7e1375de6f6; src/rt/PROVENANCE.md): the SceAtracContext and
- * SceAtracIdInfo layout and the AtracStatus values of Core/HLE/AtracBase.h, the field-by-field write and the read-back of Core/HLE/AtracCtx.cpp
- * (Atrac::WriteContextToPSPMem, Atrac::UpdateContextFromPSPMem, Atrac::NotifyGetContextAddress),
- * and the read-back before every call of Core/HLE/sceAtrac.cpp (getAtrac). Layout:
- * 0x100 bytes per ID, the codec block in the first 0x80 (left zero: no Media Engine here) and the
+ * SceAtracIdInfo layout and the AtracStatus values of Core/HLE/AtracBase.h; the field-by-field
+ * write and the read-back of PPSSPP's legacy Atrac class in Core/HLE/AtracCtx.cpp
+ * (Atrac::WriteContextToPSPMem, Atrac::UpdateContextFromPSPMem, Atrac::NotifyGetContextAddress);
+ * and the read-back before every call of Core/HLE/sceAtrac.cpp (getAtrac). Layout: 0x100 bytes
+ * per ID, the codec block in the first 0x80 (left zero: no Media Engine here) and the
  * SceAtracIdInfo block after it, with the ID at +0xfc. The offsets below are into the info block.
- * None of it is measured on a PSP (UNMEASURED; PSP request R2-3 in the lane notes).
+ * None of it is measured on a PSP (UNMEASURED).
  *
  * Where it lives: on a PSP the contexts sit in the ATRAC library module's data, in the user
- * partition. sceUtilityLoadModule records module state only and reserves no memory
- * (hle_utility.c), so the eight contexts are one user-partition block, allocated by the first
- * _sceAtracGetContextAddress (PPSSPP's Atrac allocates one context per ID in kernel memory
- * instead). A title that never calls it keeps the partition layout it had.
+ * partition, as PPSSPP's default Atrac2 path places them: contiguous, at g_atracBSS + id * 0x100
+ * in the module's BSS (sceAtrac.cpp, GetAtracContextAddress and AllocAndRegisterAtrac; the legacy
+ * Atrac class allocates one context per ID instead). sceUtilityLoadModule records module state
+ * only and reserves no memory (hle_utility.c), so the eight contexts are one user-partition
+ * block, allocated by the first _sceAtracGetContextAddress. A title that never calls it keeps
+ * the partition layout it had.
  *
  * Written: buffer, bufferByte, secondBuffer, secondBufferByte, state, numChan, sampleSize, codec,
  * dataOff, fileDataEnd and loopNum, which map one to one onto the runtime's state. Not modelled,
@@ -802,8 +817,12 @@ static Atrac *atrac_of(uint32_t id) {
     return a;
 }
 /* A new program (sceKernelLoadExec) starts with an empty user partition and restarts UIDs, so
- * the old table's UID may name one of the new program's blocks: forget it (hle_utility.c). */
-void hle_atrac_context_reset(void) { s_atrac_ctx_uid = 0u; }
+ * the old table's UID may name one of the new program's blocks: forget it, and every live ID's
+ * context address with it (hle_utility.c, and the selftest's partition reset in hle.c). */
+void hle_atrac_context_reset(void) {
+    s_atrac_ctx_uid = 0u;
+    for (unsigned i = 0; i < 8u; i++) s_atrac[i].ctxAddr = 0u;   /* their block is gone too */
+}
 /* The calls that change an ID's state publish it to its context before they return: the ID is
  * their first argument, read before the call's work. */
 static uint32_t atrac_published(uint32_t id, uint32_t ret) {
@@ -812,8 +831,9 @@ static uint32_t atrac_published(uint32_t id, uint32_t ret) {
 }
 /* _sceAtracGetContextAddress(id): the context's guest address. An ID that is not in use is
  * refused with ATRAC_ERROR_NO_ATRACID, the code every call returned before the context existed;
- * PPSSPP returns 0 there instead (UNMEASURED). When the partition cannot hold the contexts the
- * call returns 0 and says so on stderr: there is no context to point at. */
+ * PPSSPP returns 0 there instead (UNMEASURED). On a PSP the contexts are part of the library
+ * module's data, so the call cannot fail for lack of memory; when the runtime's partition cannot
+ * hold them, no PSP result fits and the run stops by name (ATRAC_CONTEXT_NO_MEMORY). */
 static uint32_t h_AtracGetContextAddress(CpuState *s) {
     const uint32_t id = A0;
     Atrac *a = atrac_of(id);
@@ -825,13 +845,10 @@ static uint32_t h_AtracGetContextAddress(CpuState *s) {
              * hle_atrac_context_reset forgot the old table's UID: allocate one. */
             const uint32_t uid = alloc_block(8u * ATRAC_CTX_SIZE);
             table = uid != 0xFFFFFFFFu ? block_addr(uid) : 0u;
-            if (!table) {
-                fprintf(stderr, "ATRAC_CONTEXT_NO_MEMORY: _sceAtracGetContextAddress(%u): the user "
-                                "partition cannot hold the 0x%x bytes of ATRAC contexts; returned 0 "
-                                "(#322).\n", id, 8u * ATRAC_CTX_SIZE);
-                fflush(stderr);
-                return 0u;
-            }
+            if (!table)
+                return hle_unmodelled_stop(hle_import_name(sr_last_nid), "ATRAC_CONTEXT_NO_MEMORY: "
+                                           "ID %u: the user partition cannot hold the 0x%x bytes "
+                                           "of ATRAC contexts (#322)", id, 8u * ATRAC_CTX_SIZE);
             s_atrac_ctx_uid = uid;
             for (uint32_t i = 0; i < 8u; i++) {
                 s_atrac[i].ctxAddr = 0u;
@@ -1507,6 +1524,7 @@ static uint32_t atrac_reset_buffer_info(const Atrac *a, uint32_t sample,
         first->minWrite = missing > 0xffffffffu ? 0xffffffffu : (uint32_t)missing;
         first->filePos = a->size;
     } else if (atrac_streamed_state(a)) {
+        if (atrac_no_frame_size(a)) return HLE_KERNEL_ERROR_NOT_IMPLEMENTED;   /* stopped */
         uint64_t off = a->dataByteOffset;
         if (sample >= spf)
             off += (uint64_t)((sample - spf) / spf) * a->bytesPerFrame;
