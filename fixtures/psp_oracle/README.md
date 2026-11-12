@@ -798,8 +798,10 @@ the flash0 read, a host0 read-back and a second flash0 read (`font-copy-*`
 `out8` bits). Only names of 1 to 63 bytes of `[A-Za-z0-9_.-]` not starting with
 `.` and files up to 16 MiB are copied; other entries are recorded and skipped.
 Nothing writes to `flash0:`. The copies and digests are the maintainer's private
-evidence and are never committed. `io_cases_host.c` runs both cases against a
-fake file system for the tests in `tools/test_psp_oracle.py`.
+evidence and are never committed. Inside `font_files.h` the copies' opens track
+only their descriptors, so probe teardown keeps the copies (`docs/HARDWARE_ORACLE.md`
+has the 2026-11-11 runs). `io_cases_host.c` runs both cases against a fake file
+system for the tests in `tools/test_psp_oracle.py`.
 
 The font-list case (`font-list`, `PSP-FONTLIST-001`, `font_list.h`) is not in the
 campaign queue; it runs only on the maintainer's request, with a user-mode
