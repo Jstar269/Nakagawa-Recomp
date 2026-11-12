@@ -120,6 +120,16 @@ the C body. What the C path leaves to a C compiler is explicit here:
   at other entries (`--region-split-threshold`), a conditional branch into another entry is
   a TAIL transfer to that entry's body, and a not-taken one continues into the next entry,
   as in C.
+- **Stale-code detection** (`--stale-detect`): a `cache` instruction reports its effective
+  address to the detector (`sr_stale_note_cache_op`) inside its trace record, as the C
+  emitter's does. The detector's records are kept per guest entry, and an LLVM body has
+  the same entry, symbol and registration as the C body, so a stale or self-modified block
+  is caught at its cache invalidation whichever backend compiled it.
+- **Static verification** (`--static-verify`): the plan carries `codegen.sv_points`, the
+  points `emit_function` asserts, computed from the same labels, and each assertion is a
+  call of `sr_llvm_sv_check` after the same straight-line word. Its body is the C chunks'
+  `sr_sv_check` (a test holds the two equal). A point that would not follow a straight-line
+  word keeps the function in C, by name.
 - **Undefined behavior** in LLVM terms never reaches the IR: variable shifts are masked to
   31 as the C does, rotates are shifts, `div`/`divu` select a safe divisor and then the
   PSP's defined results for division by zero and `INT_MIN / -1`, and `clz`/`clo` use
@@ -145,15 +155,15 @@ splitting the helpers into an inline bounds check and an out-of-line slow path i
 Lowered: the integer ALU and compares (including the Allegrex `max`/`min`, rotates, `ext`,
 `ins`, `wsbh`, `wsbw`, `seb`, `seh`, `bitrev`, `clz`, `clo`), HI/LO multiply, divide and
 multiply-accumulate, integer loads and stores (including `lwl`/`lwr`/`swl`/`swr` and
-`ll`/`sc`), `cache` and `sync`, conditional branches and branch-likely, `j`, `jal`,
-`jalr`, `jr`, the linked-branch CALL form (#968), continuations, the HLE syscall boundary
-and `break`, and the stack census wrapper.
+`ll`/`sc`), `cache` (with the `--stale-detect` hook) and `sync`, conditional branches and
+branch-likely, `j`, `jal`, `jalr`, `jr`, the linked-branch CALL form (#968), continuations,
+the HLE syscall boundary and `break`, the stack census wrapper, and `--static-verify`
+assertions.
 
 Kept in C, with the reason recorded: scalar FPU and VFPU instructions and their branches,
-COP0 and `eret`, `--lle-cpu` (its synchronous exception lowering), `--static-verify`
-assertions, `--stale-detect`'s `cache` hook, enhancement-package rewrite sites,
-runtime-placed modules (their addresses are relocatable expressions), and any HST
-profile address in a codegen table (`hst_emission_sites`: `GUEST_PATCHES` and `_SV_SPECIAL`,
+COP0 and `eret`, `--lle-cpu` (its synchronous exception lowering), enhancement-package
+rewrite sites, runtime-placed modules (their addresses are relocatable expressions), and
+any HST profile address in a codegen table (`hst_emission_sites`: `GUEST_PATCHES` and `_SV_SPECIAL`,
 both empty since #363). A test re-derives every HST-profile address site from
 `emit_function` and requires that none remains.
 
@@ -162,6 +172,10 @@ both empty since #363). A test re-derives every HST-profile address site from
 - `llvm-link` runs LLVM's verifier on each chunk's module and on the linked module before
   Clang sees it, and Clang verifies its IR input again; the tests run
   `opt -passes=verify` on the builder's output and on every chunk module of a real build.
+- `tools/test_lowering_plan.py` holds every plan to `emit_function` over a real build,
+  including one with `--static-verify --stale-detect` (each assertion's word, register and
+  value, and that the IR calls it after that word's trace record, before the next word or
+  edge); unit tests place the cache hook in a straight-line word and in a delay slot.
 - `cosim-selftest-llvm` runs the cosimulation corpus with every lowerable cell as an LLVM
   body in the AOT lane, compared with the production interpreter on the instruction trace,
   the ordered guest writes, the memory window and the state vector, and fails if fewer than
@@ -182,7 +196,22 @@ both empty since #363). A test re-derives every HST-profile address site from
 `--backend=llvm` is part of the codegen profile, so switching it regenerates the sources.
 In an LLVM build, the Clang and `llvm-link` version strings join the generated-code
 profile, so a toolchain change rebuilds the LLVM objects and is never mixed with objects
-from another toolchain. A C build's profiles are unchanged by this backend.
+from another toolchain, and the rule that writes the `.ll` files depends on the lowering
+(`codegen_llvm.py`, `llvm_ir.py`, `lowering_plan.py`), so editing it regenerates them.
+
+A package's cache key (#316, `tools/nk_core/package_cache.py`) carries the same identity:
+an LLVM package's `codegen_options` gain an `llvm_backend` entry naming the backend's
+epoch, the SHA-256 of each file in `LLVM_BACKEND_SOURCES` (the renderer, the `tools/`
+modules it imports, and the ABI shim; `codegen.py`, which hands itself to the renderer, is
+keyed for both backends by its own hash) and the SHA-256 and version report of the `clang`
+and `llvm-link` programs. That entry is in the package's `cache.codegen_options` and moves
+the generated-code and native digests, so an LLVM package is never reused for a C build,
+after a change to the renderer, the plan or the shim, or after the `clang` or `llvm-link`
+program or its version report changes (the libraries those programs load are not hashed),
+and a missing tool fails the key closed.
+`tools/test_codegen_llvm.py` derives the renderer's import closure and holds both the key
+and the Make rule to it. A C build adds nothing, so its profiles and keys are unchanged by
+this backend.
 
 ## Delivery, and the in-process stage
 
@@ -198,10 +227,63 @@ in-process stage, which is not built, would replace the delivery and nothing els
    compile at load time for the player's first-run path
    ([`AOT_PRODUCTIZATION_ARCHITECTURE.md`](AOT_PRODUCTIZATION_ARCHITECTURE.md), option E).
 
-LLVM is Apache-2.0 with the LLVM exception, which is compatible with GPL-3.0-or-later. The
-current stage vendors nothing: it uses the MSYS2 toolchain the user installs. Any LLVM
-header or library vendored or shipped later gets the usual pin, `PROVENANCE.md` entry,
-`CREDITS.md` credit and admission.
+The current stage vendors and ships nothing from LLVM
+([below](#third-party-toolchain-licence-provenance-and-security)).
+
+## Third-party toolchain: licence, provenance and security
+
+This records what the backend takes from LLVM, as facts; it is the review #330 asks for
+before a backend dependency becomes a production one.
+
+- **What runs.** An LLVM build runs two programs from the developer's own toolchain:
+  `clang` and `llvm-link` from MSYS2 UCRT64 (the `mingw-w64-ucrt-x86_64-clang` and
+  `mingw-w64-ucrt-x86_64-llvm-tools` packages, with their LLVM dependencies `clang-libs`,
+  `llvm-libs` and `lld`), or the programs `LLVM_CLANG` and `LLVM_LINK` name. The
+  measurements on #330 used 23.1.3. MSYS2's package metadata gives each of those packages
+  the licence `Apache-2.0 WITH LLVM-exception`. Each package installs its own licence file
+  (`share/licenses/<package>/LICENSE`; for `llvm-libs` it is LLVM's `LICENSE.TXT`), which
+  opens with the Apache License v2.0 with LLVM Exceptions and also carries the legacy
+  University of Illinois/NCSA licence. It says that third-party software in LLVM carries
+  its own licence file or per-file licence terms. MSYS2's `pacman` installs packages from
+  its repositories only with a valid signature (`SigLevel = Required` in its default
+  `pacman.conf`). The project pins no version: any `clang` and `llvm-link` that run are
+  accepted, and their identity is recorded (Security, below). Clang also compiles the
+  ABI shim (`src/rt/llvm_abi.c`) to bitcode, and the backend's tests also run LLVM's `opt`
+  when it is installed.
+- **What the repository holds.** No LLVM source, header, library or binary. The IR builder
+  (`tools/llvm_ir.py`), the renderer (`tools/codegen_llvm.py`), the plan
+  (`tools/lowering_plan.py`) and the ABI shim (`src/rt/llvm_abi.c`, `llvm_abi.h`) are
+  project-authored and GPL-3.0-or-later; the builder prints LLVM's textual IR, following
+  the LLVM Language Reference, and calls no LLVM code.
+- **What a build links.** Clang compiles each chunk's IR, linked with the shim's bitcode,
+  into an object; the executable is linked by `$(CC)`, as in a C build. MSYS2's Clang
+  targets `x86_64-w64-windows-gnu` and uses GCC's `libgcc` as its runtime library
+  (`clang -print-libgcc-file-name`), so the executable links the same runtime libraries as
+  a C build and no LLVM library (`libLLVM`, `compiler-rt`, `libc++`, `libunwind`). What an
+  LLVM chunk object contains from LLVM is the machine code Clang generated for it.
+- **What ships.** Nothing from LLVM. Nothing in the player, the package builder or the
+  release tooling selects `CODEGEN_BACKEND=llvm`, so the player builds packages with the C
+  backend unless the user's own environment selects the LLVM backend (that variable, or
+  `--backend=llvm` passed to codegen through Make's variables; the package builder inherits
+  the environment). The player's prerequisite download (`assets/prereq_manifest.json`)
+  fetches GCC, not Clang or LLVM. The Android build's on-device Clang is a separate component, recorded in
+  [`NOTICE.md`](../NOTICE.md) and [`android/toolchain/PROVENANCE.md`](../android/toolchain/PROVENANCE.md);
+  it compiles C and does not run this backend.
+- **Security.** The backend runs the two programs it finds on `PATH` (or the ones
+  `LLVM_CLANG` and `LLVM_LINK` name) on files codegen wrote; it downloads nothing and
+  needs no network. An LLVM package's cache key holds the SHA-256 and version report of
+  the `clang` and `llvm-link` programs (`llvm_backend_options` in
+  `tools/nk_core/package_cache.py`), so a new toolchain version or a replaced program gets
+  a new key; the libraries those programs load (`libLLVM`, `libclang-cpp`) are not hashed,
+  so a library changed under an unchanged program and version report is not seen. A
+  missing program fails the build and the key closed; a plain `make` build's
+  generated-code profile carries the version strings ([Build identity](#build-identity)).
+  `llvm-link` runs LLVM's verifier on every module before Clang compiles it.
+- **Where it is recorded.** Here, and in [`NOTICE.md`](../NOTICE.md) and
+  [`CREDITS.md`](../CREDITS.md). The in-process stage above would link LLVM's libraries
+  into a project tool or the player; before it lands it needs the usual pin, a
+  `PROVENANCE.md` manifest, `NOTICE.md` and `CREDITS.md` records and the maintainer's
+  admission, as the Android toolchain has.
 
 ## Not done
 
@@ -215,6 +297,3 @@ header or library vendored or shipped later gets the usual pin, `PROVENANCE.md` 
   at every access ([above](#semantics-in-the-ir)).
 - Runtime-placed (relocatable) modules.
 - The in-process stage, and arm64 hosts (#329).
-- The `--stale-detect` `cache` hook. Stale-code records are kept per guest entry, and an
-  LLVM body has the same entry, symbol and registration as the C body, so the detector
-  already covers lowered bodies; only a function containing the hook stays in C.

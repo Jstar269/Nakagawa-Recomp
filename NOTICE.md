@@ -134,6 +134,15 @@ We aim to respond promptly and will remove material where appropriate.
   with OpenSSL 3.5.9 under Apache-2.0 and SQLite 3.53.4 in the public domain), with
   the release's `LICENSE.txt`, CPython's `Doc/license.rst`, and the licence files
   of OpenSSL 3.5.9, bzip2 1.0.8, XZ Utils 5.4.6 and Zstandard 1.5.7.
+- **Opt-in LLVM IR backend toolchain (#330)** — nothing vendored, linked or shipped.
+  `CODEGEN_BACKEND=llvm` runs the developer's own `clang` and `llvm-link` (MSYS2 UCRT64
+  `mingw-w64-ucrt-x86_64-clang` and `mingw-w64-ucrt-x86_64-llvm-tools`, which MSYS2's
+  metadata lists as Apache-2.0 WITH LLVM-exception) on IR that the project-authored
+  `tools/codegen_llvm.py` writes. The executable is linked by the C toolchain with GCC's
+  runtime libraries, as a C build is. Nothing the project ships selects the backend; the
+  player's package builder uses it only when the user's own environment selects it
+  (for example `CODEGEN_BACKEND=llvm`). The facts and the security notes are in
+  `docs/LLVM_BACKEND.md`.
 - **VFPU tables** — PPSSPP-origin lookup data with the exact source and checksums
   recorded in `assets/vfpu/PROVENANCE.json`; inclusion is a provenance decision,
   not a claim about PSP firmware ownership.

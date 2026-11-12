@@ -856,6 +856,10 @@ static double player_ui_display_refresh_hz(SDL_Window *window) {
 }
 
 typedef char player_ui_enhanced_rows_fit[PLAYER_PART_COUNT <= PLAYER_UI_ENHANCED_ROWS ? 1 : -1];
+/* The part rows' element ids end before the next id in use. */
+typedef char player_ui_enhanced_row_ids_fit[
+    PLAYER_UI_ID_SETTINGS_ENHANCED_PART + PLAYER_UI_ENHANCED_ROWS <= PLAYER_UI_ID_SETTINGS_PROBLEM_REPORT
+        ? 1 : -1];
 
 /* Why a title offers no Ace: it has no usable package of its own (#2055). */
 #define PLAYER_UI_ACE_NEEDS_PACKAGE "Ace needs a package made for this game."
