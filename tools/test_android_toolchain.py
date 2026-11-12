@@ -620,6 +620,8 @@ public final class InstallMain {
     static final Set<String> threads = ConcurrentHashMap.newKeySet();
     /** b.tar's open number (1 counts, 2 unpacks) that gets bad.tar instead; 0 for none. */
     static volatile int badOpen;
+    /** b.tar's open number at which the process dies, as one killed part way does; 0 for none. */
+    static volatile int dieOpen;
     static final CountDownLatch release = new CountDownLatch(1);
     static volatile boolean gated;
     static final AtomicInteger bOpens = new AtomicInteger();
@@ -635,7 +637,9 @@ public final class InstallMain {
             }
         }
         String file = name;
-        if (name.equals("b.tar") && bOpens.incrementAndGet() == badOpen) file = "bad.tar";
+        int bOpen = name.equals("b.tar") ? bOpens.incrementAndGet() : 0;
+        if (bOpen != 0 && bOpen == dieOpen) Runtime.getRuntime().halt(9);
+        if (bOpen != 0 && bOpen == badOpen) file = "bad.tar";
         return new FileInputStream(new File(archives, file));
     }
 
@@ -646,6 +650,23 @@ public final class InstallMain {
 
     static void print(String key, Object value) {
         System.out.println(key + " " + value);
+    }
+
+    /** What LauncherActivity.main() does: awaitReady(set the variables, hand them to native code). */
+    static Thread waiter(ToolchainArchive.Install install, List<String> actions, String key) {
+        Thread waiter = new Thread(() -> {
+            try {
+                boolean ready = install.awaitReady(
+                    () -> actions.add("set " + install.status().state + " complete=" + install.isComplete()),
+                    () -> actions.add("import"));
+                print(key, ready + " " + actions);
+            } catch (InterruptedException e) {
+                print(key, "interrupted");
+            }
+        });
+        waiter.start();
+        while (waiter.isAlive() && waiter.getState() != Thread.State.WAITING) Thread.onSpinWait();
+        return waiter;
     }
 
     public static void main(String[] args) throws Exception {
@@ -665,6 +686,9 @@ public final class InstallMain {
                     print("second-start", install.start(executor));
                     release.countDown();
                     print("end", install.await());
+                    List<String> actions = Collections.synchronizedList(new ArrayList<>());
+                    waiter(install, actions, "ready").join();
+                    print("skip-when-done", install.skip());
                     print("third-start", install.start(executor));
                     print("threads", threads);
                     print("opens", opens.get());
@@ -684,27 +708,26 @@ public final class InstallMain {
                     ToolchainArchive.Install install = install("v1");
                     print("started", install.start(executor));
                     ToolchainArchive.Status failed = install.await();
-                    print("failed", failed.state);
-                    print("error", failed.error);
-                    print("partial-file", new File(work, "toolchain/a/a.h").isFile());
+                    print("failed", failed);
+                    print("folder-after-failure", new File(work, "toolchain").exists());
                     print("stamp-after-failure", new File(work, ".toolchain-unpacked").exists());
                     print("complete-after-failure", install.isComplete());
                     print("complete-for-a-new-start", install("v1").isComplete());
-                    Thread waiter = new Thread(() -> {
-                        try {
-                            install.awaitDone();
-                            print("waiter", "done");
-                        } catch (InterruptedException e) {
-                            print("waiter", "interrupted");
-                        }
-                    });
-                    waiter.start();
-                    while (waiter.isAlive() && waiter.getState() != Thread.State.WAITING) Thread.onSpinWait();
+                    List<String> actions = Collections.synchronizedList(new ArrayList<>());
+                    Thread waiter = waiter(install, actions, "waiter");
                     print("waiter-waits-on-failed", waiter.getState() + " " + install.status().state);
                     print("retry", install.start(executor));
                     waiter.join();
                     print("after-retry", install.status());
                     print("complete-after-retry", install.isComplete());
+                    break;
+                }
+                case "die": {
+                    dieOpen = 2;  // after a/ is unpacked, while b/ is about to be
+                    ToolchainArchive.Install install = install("v1");
+                    install.start(executor);
+                    install.await();
+                    print("survived", install.status());
                     break;
                 }
                 case "redo": {
@@ -726,6 +749,29 @@ public final class InstallMain {
                     print("opens", opens.get());
                     break;
                 }
+                case "skip": {
+                    badOpen = 2;
+                    ToolchainArchive.Install install = install("v1");
+                    install.start(executor);
+                    print("failed", install.await().state);
+                    List<String> actions = Collections.synchronizedList(new ArrayList<>());
+                    Thread waiter = waiter(install, actions, "player");
+                    print("waiter-waits-on-failed", waiter.getState() + " " + install.status().state);
+                    print("skip", install.skip());  // Continue without the build tools
+                    waiter.join();
+                    print("skip-again", install.skip());
+                    print("state", install.status().state);
+                    print("folder", new File(work, "toolchain").exists());
+                    print("stamp", new File(work, ".toolchain-unpacked").exists());
+                    print("complete-after-skip", install.isComplete());
+                    // The next start, a new process: the unpack runs again.
+                    ToolchainArchive.Install next = install("v1");
+                    print("next-complete-before", next.isComplete());
+                    print("next-started", next.start(executor));
+                    print("next-end", next.await());
+                    print("complete", next.isComplete());
+                    break;
+                }
                 case "unknown-version": {
                     ToolchainArchive.Install install = install(null);
                     print("complete-before", install.isComplete());
@@ -734,6 +780,7 @@ public final class InstallMain {
                     print("end", end.state);
                     print("error", end.error);
                     print("opens", opens.get());
+                    print("leftover", new File(work, "toolchain").exists());
                     break;
                 }
                 default:
@@ -806,6 +853,9 @@ class ToolchainInstallTests(unittest.TestCase):
         self.assertEqual(seen["second-start"], "false")          # a second start runs nothing
         self.assertEqual(seen["third-start"], "false")           # nor one after it is done
         self.assertEqual(seen["end"], "DONE 5/5")
+        # Once done: the variables are set (with the unpack complete), then handed to native code.
+        self.assertEqual(seen["ready"], "true [set DONE complete=true, import]")
+        self.assertEqual(seen["skip-when-done"], "false")
         self.assertEqual(seen["threads"], "[unpack-worker]")     # never on the caller's thread
         self.assertEqual(seen["opens"], "4")                     # one count and one unpack each
         self.assertEqual(seen["complete"], "true")
@@ -814,17 +864,33 @@ class ToolchainInstallTests(unittest.TestCase):
 
     def test_a_failed_unpack_leaves_no_stamp_and_can_be_retried(self) -> None:
         seen = self.run_scenario("failure")
-        self.assertEqual(seen["failed"], "FAILED")
-        self.assertEqual(seen["error"], "tar header checksum does not match")
-        self.assertEqual(seen["partial-file"], "true")            # it failed after writing a/
+        # It failed after writing a/'s two files, and deleted them.
+        self.assertEqual(seen["failed"], "FAILED 2/5 tar header checksum does not match")
+        self.assertEqual(seen["folder-after-failure"], "false")
         self.assertEqual(seen["stamp-after-failure"], "false")
         self.assertEqual(seen["complete-after-failure"], "false")
         self.assertEqual(seen["complete-for-a-new-start"], "false")
         self.assertEqual(seen["waiter-waits-on-failed"], "WAITING FAILED")  # a failure does not release main()
         self.assertEqual(seen["retry"], "true")
-        self.assertEqual(seen["waiter"], "done")
+        self.assertEqual(seen["waiter"], "true [set DONE complete=true, import]")
         self.assertEqual(seen["after-retry"], "DONE 5/5")
         self.assertEqual(seen["complete-after-retry"], "true")
+
+    def test_continuing_without_the_toolchain_leaves_it_unset_and_the_next_start_retries(self) -> None:
+        seen = self.run_scenario("skip")
+        self.assertEqual(seen["failed"], "FAILED")
+        self.assertEqual(seen["waiter-waits-on-failed"], "WAITING FAILED")
+        self.assertEqual(seen["skip"], "true")
+        self.assertEqual(seen["player"], "false []")             # the player starts; nothing is set
+        self.assertEqual(seen["skip-again"], "false")
+        self.assertEqual(seen["state"], "SKIPPED")
+        self.assertEqual(seen["folder"], "false")                # the partial folder is gone
+        self.assertEqual(seen["stamp"], "false")
+        self.assertEqual(seen["complete-after-skip"], "false")
+        self.assertEqual(seen["next-complete-before"], "false")
+        self.assertEqual(seen["next-started"], "true")
+        self.assertEqual(seen["next-end"], "DONE 5/5")
+        self.assertEqual(seen["complete"], "true")
 
     def test_a_run_that_died_part_way_is_done_again(self) -> None:
         for stamp in (None, "v0"):
@@ -842,6 +908,29 @@ class ToolchainInstallTests(unittest.TestCase):
                 self.assertEqual(seen["leftover"], "false")
                 self.assertEqual(seen["complete"], "true")
 
+    def test_a_process_killed_part_way_leaves_no_stamp_and_the_next_start_redoes_it(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="nk-tc-test-") as tmp:
+            archives, work = Path(tmp) / "archives", Path(tmp) / "files"
+            archives.mkdir()
+            work.mkdir()
+            entry = toolchain.android_sysroot.Entry
+            toolchain.android_sysroot.write_archive({"a.h": entry(b"a")}, archives / "a.tar")
+            toolchain.android_sysroot.write_archive({"b.h": entry(b"b")}, archives / "b.tar")
+            (work / ".toolchain-unpacked").write_text("v0", encoding="utf-8")   # an earlier APK's
+
+            def run(scenario: str) -> subprocess.CompletedProcess[str]:
+                return subprocess.run(["java", "-cp", str(self.classes), "io.github.jstar269.nakagawa.InstallMain",
+                                       str(archives), str(work), scenario],
+                                      capture_output=True, text=True, check=False, timeout=120)
+            died = run("die")
+            self.assertEqual(died.returncode, 9, died.stdout + died.stderr)
+            self.assertTrue((work / "toolchain" / "a" / "a.h").is_file())        # it died part way
+            self.assertFalse((work / ".toolchain-unpacked").exists())             # the stamp went first
+            again = run("redo")
+            self.assertIn("complete-before false", again.stdout, again.stdout + again.stderr)
+            self.assertIn("complete true", again.stdout)
+            self.assertEqual((work / ".toolchain-unpacked").read_text(encoding="utf-8"), "v1")
+
     def test_a_finished_unpack_is_not_done_again(self) -> None:
         seen = self.run_scenario("complete", lambda work: (work / ".toolchain-unpacked").write_text(
             "v1", encoding="utf-8"))
@@ -850,12 +939,16 @@ class ToolchainInstallTests(unittest.TestCase):
         self.assertEqual(seen["opens"], "0")
 
     def test_an_unknown_app_version_fails(self) -> None:
-        seen = self.run_scenario("unknown-version",
-                                 lambda work: (work / ".toolchain-unpacked").write_text("unknown", encoding="utf-8"))
+        def prepare(work: Path) -> None:
+            (work / ".toolchain-unpacked").write_text("unknown", encoding="utf-8")
+            (work / "toolchain" / "a").mkdir(parents=True)
+            (work / "toolchain" / "a" / "leftover.h").write_bytes(b"partial")
+        seen = self.run_scenario("unknown-version", prepare)
         self.assertEqual(seen["complete-before"], "false")
         self.assertEqual(seen["end"], "FAILED")
         self.assertEqual(seen["error"], "the app's version cannot be read")
         self.assertEqual(seen["opens"], "0")
+        self.assertEqual(seen["leftover"], "false")              # its space comes back too
 
 
 class StampTests(unittest.TestCase):

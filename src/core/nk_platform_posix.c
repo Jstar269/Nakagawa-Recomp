@@ -1124,6 +1124,17 @@ static void android_import_environment(JNIEnv *env) {
     (*env)->DeleteLocalRef(env, host);
 }
 
+/* LauncherActivity.nativeImportEnvironment, on SDL's thread just before the player's main():
+   the variables NakagawaHost set after this library loaded (a toolchain unpacked on this start
+   sets its own then), applied to this library's libc as JNI_OnLoad applied the earlier ones. */
+JNIEXPORT void JNICALL Java_io_github_jstar269_nakagawa_LauncherActivity_nativeImportEnvironment(
+    JNIEnv *env, jclass cls);
+JNIEXPORT void JNICALL Java_io_github_jstar269_nakagawa_LauncherActivity_nativeImportEnvironment(
+    JNIEnv *env, jclass cls) {
+    (void)cls;
+    android_import_environment(env);
+}
+
 JNIEXPORT jint JNI_OnLoad(JavaVM *vm, void *reserved) {
     (void)reserved;
     JNIEnv *env = NULL;

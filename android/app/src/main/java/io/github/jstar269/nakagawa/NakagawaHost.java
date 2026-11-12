@@ -185,14 +185,16 @@ final class NakagawaHost {
     /**
      * Starts the toolchain unpack on a worker thread when this APK bundles a toolchain that is not
      * unpacked yet. Returns that unpack, for the caller to show and to wait on before anything
-     * uses the toolchain, or null when there is nothing to wait for. A run already going on, or one
-     * that failed, is returned as it is: {@link #retryToolchain} starts a failed one again. Only
-     * the launcher calls it; a title's runtime does not use the toolchain.
+     * uses the toolchain, or null when there is nothing to wait for (none bundled, complete, or
+     * skipped in this process). A run already going on, or one that failed, is returned as it is:
+     * {@link #retryToolchain} starts a failed one again, {@link #skipToolchain} gives up on it.
+     * Only the launcher calls it; a title's runtime does not use the toolchain.
      */
     static synchronized ToolchainArchive.Install startToolchain(Context context) {
         if (!sBundlesToolchain) return null;
         ToolchainArchive.Install install = toolchain(context);
         ToolchainArchive.Status.State state = install.status().state;
+        if (state == ToolchainArchive.Status.State.SKIPPED) return null;
         if (state == ToolchainArchive.Status.State.IDLE) {
             if (install.isComplete()) return null;
             install.start(toolchainExecutor(install));
@@ -206,12 +208,17 @@ final class NakagawaHost {
     }
 
     /**
-     * Waits until {@code install} has finished the unpack, then sets the toolchain's variables.
-     * Called on the thread that runs the player's main(), never on the UI thread.
+     * Goes on without the toolchain after a failed unpack: the player starts with
+     * NK_ANDROID_TOOLCHAIN_DIR, PYTHONHOME and TMPDIR unset, so building on the device is
+     * unavailable, and the next start unpacks again. Returns whether the unpack had failed.
      */
-    static void awaitToolchain(Context context, ToolchainArchive.Install install) throws InterruptedException {
-        install.awaitDone();
-        setToolchainEnvironment(context);
+    static boolean skipToolchain(ToolchainArchive.Install install) {
+        boolean skipped = install.skip();
+        if (skipped) {
+            Log.w(TAG, "TOOLCHAIN_UNPACK_SKIPPED: the player starts without the build tools; building on the"
+                + " device is unavailable until a later start unpacks them");
+        }
+        return skipped;
     }
 
     /** One worker thread, which logs each run's outcome. */
@@ -232,7 +239,8 @@ final class NakagawaHost {
         });
     }
 
-    private static void setToolchainEnvironment(Context context) {
+    /** Only once the unpack is complete: by an earlier start (prepare) or by this one's run. */
+    static void setToolchainEnvironment(Context context) {
         File toolchain = new File(appDir(context), "toolchain");
         setenv("NK_ANDROID_TOOLCHAIN_DIR", toolchain.getAbsolutePath());
         setenv("PYTHONHOME", new File(toolchain, "python").getAbsolutePath());

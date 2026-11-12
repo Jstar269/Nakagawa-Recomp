@@ -9,4 +9,6 @@
     <string name="toolchain_unpack_progress">%1$,d of %2$,d files</string>
     <string name="toolchain_unpack_failed">The build tools could not be unpacked: %1$s</string>
     <string name="toolchain_unpack_retry">Try again</string>
+    <string name="toolchain_unpack_skip">Continue without the build tools</string>
+    <string name="toolchain_unpack_unavailable">Building on this device is unavailable until the build tools are unpacked. The next start tries again.</string>
 </resources>

@@ -301,10 +301,19 @@ them. It sets them only once the unpack is complete: after a failed one they are
 consumer must read that as "no usable toolchain", not guess the folder. The unpack (about 4,300
 files) runs on a worker thread, once per process, on the first start after an install or update.
 Meanwhile the launcher shows the files done of the total, and the player starts once the unpack
-is complete. A failure shows its reason and a **Try again** button (touch, Enter or a controller's
-A button), and the player keeps waiting. A file lock keeps a second process from unpacking at
-once, and every file is synced before the stamp that marks the unpack complete is written last;
-a failed or interrupted unpack leaves no stamp, so the next start unpacks again. The title
+is complete. Before the player starts, the launcher sets the variables and applies them to the
+player library's own C library too (`nativeImportEnvironment`), which is a separate one when an
+arm64 player runs under an ARM translation layer; the programs the player starts then inherit
+them on either kind of device.
+
+A failed unpack deletes what it had written and shows its reason, a note that building on the
+device is unavailable until an unpack succeeds, and two buttons: **Try again**, and **Continue
+without the build tools**, which starts the player with the three variables unset (logged as
+`TOOLCHAIN_UNPACK_SKIPPED`). A touch presses either button; the arrow keys, Tab or a
+controller's D-pad move between them, and Enter or the A button presses the focused one. A file
+lock keeps a second process from unpacking at once, and every file is synced before the stamp
+that marks the unpack complete is written last; a failed, skipped or interrupted unpack leaves
+no stamp, so the next start unpacks again. The title
 process never unpacks the toolchain: it sets the variables only when a complete unpack is
 already there. The unpacker takes only folders and regular files, and refuses links, paths that
 leave the folder, damaged headers and archives that end early.

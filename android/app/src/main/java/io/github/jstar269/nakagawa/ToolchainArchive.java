@@ -276,7 +276,8 @@ final class ToolchainArchive {
 
     /** One consistent view of an {@link Install}. */
     static final class Status {
-        enum State { IDLE, RUNNING, DONE, FAILED }
+        /** SKIPPED: the user went on without the toolchain after a failure; never complete. */
+        enum State { IDLE, RUNNING, DONE, FAILED, SKIPPED }
 
         final State state;
         /** Files written so far, of {@link #total}; total is 0 until the archives are counted. */
@@ -308,8 +309,10 @@ final class ToolchainArchive {
      * unpacking at once; when it does not match, the run deletes it first, then the toolchain
      * folder, counts the archives' files, unpacks each, and writes the stamp last, synced. A run
      * that fails, or a process that dies part way, therefore leaves no matching stamp, and the
-     * next start unpacks again. A failure becomes FAILED with its reason, and {@link #start}
-     * tries again.
+     * next start unpacks again. A failure deletes the stamp and the partial folder, so its space
+     * comes back, and becomes FAILED with its reason; {@link #start} then tries again, or
+     * {@link #skip} lets the caller go on without the toolchain (SKIPPED, which no later check
+     * reads as complete).
      */
     static final class Install {
         private final Source source;
@@ -377,9 +380,34 @@ final class ToolchainArchive {
             return status();
         }
 
-        /** Waits until a run has finished the unpack, through any failures and retries. */
-        synchronized void awaitDone() throws InterruptedException {
-            while (state != Status.State.DONE) wait();
+        /**
+         * After a failure, gives up on the toolchain for this process: the state becomes SKIPPED,
+         * which releases {@link #awaitReady} without running its actions. Returns whether it did
+         * (only a FAILED unpack can be skipped). The stamp stays absent, so the next start unpacks
+         * again.
+         */
+        boolean skip() {
+            synchronized (this) {
+                if (state != Status.State.FAILED) return false;
+                state = Status.State.SKIPPED;
+                notifyAll();
+            }
+            changed();
+            return true;
+        }
+
+        /**
+         * Waits, through any failures and retries, until the unpack is done or skipped. When it
+         * is done, runs {@code ready} in order on this thread and returns true; when it was
+         * skipped, runs none of them and returns false.
+         */
+        boolean awaitReady(Runnable... ready) throws InterruptedException {
+            synchronized (this) {
+                while (state != Status.State.DONE && state != Status.State.SKIPPED) wait();
+                if (state == Status.State.SKIPPED) return false;
+            }
+            for (Runnable action : ready) action.run();
+            return true;
         }
 
         private void run() {
@@ -395,31 +423,48 @@ final class ToolchainArchive {
         }
 
         private void unpackAll() throws IOException {
-            if (stamp == null) throw new IOException("the app's version cannot be read");
             try (RandomAccessFile lock = new RandomAccessFile(lockFile, "rw");
                  FileChannel channel = lock.getChannel()) {
                 channel.lock();  // released when the channel closes
-                if (isComplete()) return;  // another process finished it while this one waited
-                if (stampFile.exists() && !stampFile.delete()) throw new IOException("cannot delete " + stampFile);
-                deleteTree(folder);
-                int files = 0;
-                for (String[] archive : archives) {
-                    try (InputStream in = source.open(archive[0])) {
-                        files += count(in);
+                try {
+                    unpackLocked();
+                } catch (IOException | RuntimeException e) {
+                    // The stamp first, then the partial files, whose space the user may need back.
+                    try {
+                        if (stampFile.exists() && !stampFile.delete()) {
+                            throw new IOException("cannot delete " + stampFile);
+                        }
+                        deleteTree(folder);
+                    } catch (IOException | RuntimeException cleanup) {
+                        e.addSuppressed(cleanup);
                     }
+                    throw e;
                 }
-                synchronized (this) {
-                    total = files;
-                }
-                changed();
-                for (String[] archive : archives) {
-                    try (InputStream in = source.open(archive[0])) {
-                        unpack(in, new File(folder, archive[1]), this::fileDone);
-                    }
-                }
-                // Written last, after every file is synced: without it, the next start unpacks again.
-                writeText(stampFile, stamp);
             }
+        }
+
+        private void unpackLocked() throws IOException {
+            if (stamp == null) throw new IOException("the app's version cannot be read");
+            if (isComplete()) return;  // another process finished it while this one waited
+            if (stampFile.exists() && !stampFile.delete()) throw new IOException("cannot delete " + stampFile);
+            deleteTree(folder);
+            int files = 0;
+            for (String[] archive : archives) {
+                try (InputStream in = source.open(archive[0])) {
+                    files += count(in);
+                }
+            }
+            synchronized (this) {
+                total = files;
+            }
+            changed();
+            for (String[] archive : archives) {
+                try (InputStream in = source.open(archive[0])) {
+                    unpack(in, new File(folder, archive[1]), this::fileDone);
+                }
+            }
+            // Written last, after every file is synced: without it, the next start unpacks again.
+            writeText(stampFile, stamp);
         }
 
         private void fileDone() {
