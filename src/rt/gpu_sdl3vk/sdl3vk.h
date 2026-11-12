@@ -420,6 +420,22 @@ typedef struct Sdl3VkInfo {
 } Sdl3VkInfo;
 int sdl3vk_get_vk(Sdl3VkInfo *out);
 
+/* The device the presenter picked, for the render status (#2151): its name as the driver gives
+ * it, its kind, and whether another device that can present to the window is a discrete GPU.
+ * Returns 0 until sdl3vk_init() has succeeded. */
+enum {
+    SDL3VK_DEVICE_UNKNOWN, SDL3VK_DEVICE_DISCRETE, SDL3VK_DEVICE_INTEGRATED,
+    SDL3VK_DEVICE_VIRTUAL, SDL3VK_DEVICE_CPU, SDL3VK_DEVICE_OTHER
+};
+typedef struct Sdl3VkDevice {
+    char name[256];               /* VkPhysicalDeviceProperties.deviceName */
+    int type;                     /* SDL3VK_DEVICE_* */
+    int alt_discrete;
+} Sdl3VkDevice;
+int sdl3vk_device(Sdl3VkDevice *out);
+/* VkPhysicalDeviceType (as an int) to SDL3VK_DEVICE_*. Pure. */
+int sdl3vk_device_type(int vk_type);
+
 void sdl3vk_shutdown(void);
 
 #ifdef __cplusplus

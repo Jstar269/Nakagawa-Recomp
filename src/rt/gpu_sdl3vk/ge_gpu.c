@@ -6156,12 +6156,16 @@ static int tri_colours_vary(const GeVtx *A, const GeVtx *B, const GeVtx *C) {
            A->b != C->b || B->b != C->b || A->a != C->a || B->a != C->a;
 }
 
+/* Software primitives by reason, always counted (gegpu_fallback_counts, #2151). */
+static unsigned long long s_fallback_sw_prims[GEGPU_FALLBACK_REASONS];
+
 /* `forced` is the reason a primitive kind always falls back (lines, points), or -1 for one
  * that falls back only under an unsupported state. */
 static int software_fallback_begin(int forced) {
     const int reason = forced >= 0 ? forced : gpu_state_unsupported_reason();
     if (reason < 0) return 0;
     s_replay_stats.fallback_prims++;
+    s_fallback_sw_prims[reason]++;
     if (s_nbatch&&!submit_pending()) return 1;
 
     Target *t=is_vram(s_ge->fbp)?target_find_by_fba(vram_off(s_ge->fbp)):NULL;
@@ -7037,6 +7041,20 @@ void gegpu_replay_stats_reset(void) {
 void gegpu_replay_stats_get(GeGpuReplayStats *out) {
     if (out) *out = s_replay_stats;
 }
+
+void gegpu_fallback_counts(GeGpuFallbackCounts *out) {
+    if (!out) return;
+    memset(out, 0, sizeof(*out));
+    if (!s_ready) return;
+    out->ready = 1;
+    out->gpu_prims = (uint32_t)(s_cnt_tri + s_cnt_spr + s_cnt_tnl_prims);
+    for (int i = 0; i < GEGPU_FALLBACK_REASONS; i++) {
+        out->sw_prims[i] = s_fallback_sw_prims[i];
+        out->readbacks[i] = s_replay_stats.fallback_readbacks[i];
+    }
+}
+
+int gegpu_twin_unavailable(void) { return s_twin_unavailable; }
 
 /* Cumulative SR_GPU_STATS replay counters for the perf CSV (perf.c samples this once per
  * interval).  Only the per-interval counts are exported; see SrPerfGpuReplayCounter. */
