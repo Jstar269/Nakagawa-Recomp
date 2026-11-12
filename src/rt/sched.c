@@ -667,6 +667,12 @@ static int stack_range_alloc(uint32_t size, uint32_t *base_out) {
     return 0;
 }
 
+/* hle.c: told after a range goes back to the arena, so the user partition can take back the part
+ * of it that lies below its bump pointer (partition_arena_released). NULL: not told. */
+static SrSchedArenaRelease s_arena_release_hook;
+
+void sched_set_arena_release_hook(SrSchedArenaRelease release) { s_arena_release_hook = release; }
+
 static void stack_range_release(uint32_t base, uint32_t size) {
     if (!s_stack_allocator_ready || base == 0u || size == 0u) return;
     if (base < SR_STACK_ARENA_FLOOR || base > SR_STACK_ARENA_CEIL ||
@@ -709,14 +715,18 @@ static void stack_range_release(uint32_t base, uint32_t size) {
         }
     }
     stack_ranges_update_top();
+    if (s_arena_release_hook) s_arena_release_hook(base, size);
 }
 
-/* For the HLE user partition (hle.c): whether `addr`, an address inside the arena, is free here.
- * 1 when a free range holds it, with *end_out the end of that range; 0 when a live thread stack
- * or High block holds it, with *end_out the start of the next free range above it (the arena
- * ceiling when none). */
+/* For the HLE user partition (hle.c): whether the arena holds `addr`. Outside the arena it holds
+ * nothing: 1, with *end_out the arena's floor (an address below it) or UINT32_MAX (above it).
+ * Inside it: 1 when a free range holds it, with *end_out the end of that range; 0 when a live
+ * thread stack or High block holds it, with *end_out the start of the next free range above it
+ * (the arena ceiling when none). */
 int sched_stack_arena_free_at(uint32_t addr, uint32_t *end_out) {
     if (!s_stack_allocator_ready) stack_ranges_reset();
+    if (addr < SR_STACK_ARENA_FLOOR) { *end_out = SR_STACK_ARENA_FLOOR; return 1; }
+    if (addr >= SR_STACK_ARENA_CEIL) { *end_out = UINT32_MAX; return 1; }
     uint32_t next = SR_STACK_ARENA_CEIL;
     for (int i = 0; i < s_stack_free_count; i++) {
         const uint32_t base = s_stack_free[i].base, end = base + s_stack_free[i].size;

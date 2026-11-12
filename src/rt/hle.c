@@ -444,6 +444,22 @@ static void partition_free_block(uint32_t addr, uint32_t size) {
     }
 }
 
+/* sched.c hook: a thread stack or High block went back to the arena (stack_range_release). The
+ * part of it below the bump pointer lies in a gap a fixed reservation skipped while that stack or
+ * block was live (skipped_gap_pieces left it out of the free list then; nothing else is placed in
+ * the arena below the bump pointer), so the free list takes it back now and a later Low or fixed
+ * request can use it, as it could before such a gap was split. The arena keeps the range as well,
+ * but refuses it while it lies below the bump pointer, and every free entry lies below the bump
+ * pointer, so it has one owner at a time. Each piece starts 256-byte aligned. */
+static void partition_arena_released(uint32_t base, uint32_t size) {
+    if (size == 0u || size > UINT32_MAX - base || !partition_high_modelled()) return;
+    uint32_t lo = base < s_heap_base ? s_heap_base : base;
+    uint32_t hi = base + size > s_heap ? s_heap : base + size;
+    lo = (lo + 0xFFu) & ~0xFFu;   /* a user-RAM address: no wrap */
+    if (lo >= hi) return;
+    partition_free_block(lo, hi - lo);
+}
+
 uint32_t alloc_block(uint32_t size) {
     static int trace = -1, guard = -1;
     static uint32_t max_req = 0;
@@ -615,8 +631,9 @@ uint32_t alloc_block_high(uint32_t size) {
  * never handed out but someone else owns: the runtime's stacks in kernel RAM (a low-based
  * partition) and, in the thread-stack arena, live thread stacks and High blocks. Those stay with
  * their owners; returning them would let a later Low first fit hand out a live stack or High
- * block a second time. Each piece starts 256-byte aligned, as every Low take expects. */
-#define USER_PARTITION_STACK_ARENA_FLOOR 0x08800000u   /* sched.c SR_STACK_ARENA_FLOOR */
+ * block a second time. Each piece starts 256-byte aligned, as every Low take expects. When such
+ * an owner later gives its range back to the arena, partition_arena_released() returns it to the
+ * free list. */
 static int skipped_gap_pieces(uint32_t lo, uint32_t hi, uint32_t out[][2], int max) {
     int n = 0;
     uint32_t cur = lo;
@@ -626,13 +643,11 @@ static int skipped_gap_pieces(uint32_t lo, uint32_t hi, uint32_t out[][2], int m
         if (cur >= USER_PARTITION_RUNTIME_STACKS_BASE && cur < SR_NESTED_FRAME_END) {
             keep = 0;
             stop = SR_NESTED_FRAME_END;
-        } else if (cur >= USER_PARTITION_STACK_ARENA_FLOOR && cur < USER_PARTITION_RESERVED_FLOOR) {
-            keep = sched_stack_arena_free_at(cur, &stop);
         } else {
+            /* The arena answers for its own range; outside it, it holds nothing up to its floor. */
+            keep = sched_stack_arena_free_at(cur, &stop);
             if (cur < USER_PARTITION_RUNTIME_STACKS_BASE && stop > USER_PARTITION_RUNTIME_STACKS_BASE)
                 stop = USER_PARTITION_RUNTIME_STACKS_BASE;
-            if (cur < USER_PARTITION_STACK_ARENA_FLOOR && stop > USER_PARTITION_STACK_ARENA_FLOOR)
-                stop = USER_PARTITION_STACK_ARENA_FLOOR;
         }
         if (stop > hi || stop <= cur) stop = hi;
         const uint32_t start = (cur + 0xFFu) & ~0xFFu;   /* a user-RAM address: no wrap */
@@ -712,7 +727,8 @@ uint32_t sr_alloc_block_at(uint32_t addr, uint32_t size, const char *name) {
     }
 
     /* Capacity pre-check so a half-carved state is impossible: at most one split
-     * (a free entry strictly containing the range) plus at most one gap entry. */
+     * (a free entry strictly containing the range) plus one entry per piece of the
+     * skipped gap (skipped_gap_pieces). */
     int need_slots = 0;
     for (int i = 0; i < s_nfree_blocks; i++) {
         uint64_t f_end = (uint64_t)s_free_blocks[i].addr + (uint64_t)s_free_blocks[i].size;
@@ -4188,6 +4204,7 @@ void sr_hle_init(void) {
 #ifndef SR_MPEG_MEDIA_SELFTEST
     /* Opt-in GE completion timing: the hooks report nothing unless SR_GE_TIMING=1. */
     sched_set_ge_timing_hooks(ge_timing_next_deadline_us, ge_timing_service_due);
+    sched_set_arena_release_hook(partition_arena_released);
     (void)ge_timing_on();
     sched_set_vtimer_hooks(vtimer_next_deadline_us, vtimer_service_one);
 #endif
