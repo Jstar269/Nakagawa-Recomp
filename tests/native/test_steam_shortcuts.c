@@ -164,7 +164,7 @@ static void test_app_id(void) {
 static void test_new_file(void) {
     uint8_t *out = NULL;
     size_t size = 0;
-    CHECK_STATUS(nk_steam_vdf_add(NULL, 0, &kPlayer, &out, &size), NK_STEAM_OK, "new file");
+    CHECK_STATUS(nk_steam_vdf_add(NULL, 0, &kPlayer, &out, &size, NULL), NK_STEAM_OK, "new file");
     CHECK(out && size > 16u, "a new file has content");
     if (!out) return;
     static const uint8_t head[] = {0x00, 's', 'h', 'o', 'r', 't', 'c', 'u', 't', 's', 0x00,
@@ -189,7 +189,7 @@ static void test_existing_entries_are_preserved(void) {
     two_entries(&in);
     uint8_t *out = NULL;
     size_t size = 0;
-    CHECK_STATUS(nk_steam_vdf_add(in.data, in.size, &kPlayer, &out, &size), NK_STEAM_OK,
+    CHECK_STATUS(nk_steam_vdf_add(in.data, in.size, &kPlayer, &out, &size, NULL), NK_STEAM_OK,
                  "add to a file with two entries");
     if (!out) return;
     size_t end = in.size - 2u; /* the two 0x08 */
@@ -210,9 +210,9 @@ static void test_three_adds_number_in_order(void) {
     NkSteamShortcut c = {"C", "C:/c/c.exe", "C:/c", ""};
     uint8_t *one = NULL, *two = NULL, *three = NULL;
     size_t n1 = 0, n2 = 0, n3 = 0;
-    CHECK_STATUS(nk_steam_vdf_add(NULL, 0, &a, &one, &n1), NK_STEAM_OK, "first");
-    CHECK_STATUS(nk_steam_vdf_add(one, n1, &b, &two, &n2), NK_STEAM_OK, "second");
-    CHECK_STATUS(nk_steam_vdf_add(two, n2, &c, &three, &n3), NK_STEAM_OK, "third");
+    CHECK_STATUS(nk_steam_vdf_add(NULL, 0, &a, &one, &n1, NULL), NK_STEAM_OK, "first");
+    CHECK_STATUS(nk_steam_vdf_add(one, n1, &b, &two, &n2, NULL), NK_STEAM_OK, "second");
+    CHECK_STATUS(nk_steam_vdf_add(two, n2, &c, &three, &n3, NULL), NK_STEAM_OK, "third");
     if (three) {
         static const uint8_t k1[] = {0x00, '1', 0x00, 0x02, 'a', 'p', 'p', 'i', 'd'};
         static const uint8_t k2[] = {0x00, '2', 0x00, 0x02, 'a', 'p', 'p', 'i', 'd'};
@@ -231,7 +231,7 @@ static void test_existing_executable_is_reported_not_added(void) {
     uint8_t *out = (uint8_t *)1;
     size_t size = 7;
     NkSteamShortcut same = {"Renamed", "c:/games/a/A.EXE", "C:/Games/A", ""};
-    CHECK_STATUS(nk_steam_vdf_add(in.data, in.size, &same, &out, &size), NK_STEAM_ERR_EXISTS,
+    CHECK_STATUS(nk_steam_vdf_add(in.data, in.size, &same, &out, &size, NULL), NK_STEAM_ERR_EXISTS,
                  "the same executable, in another case and with another name");
     CHECK(out == NULL && size == 0u, "nothing is returned");
 }
@@ -240,7 +240,7 @@ static void test_no_shortcuts_map_gets_one(void) {
     static const uint8_t only_root_end[] = {0x08};
     uint8_t *out = NULL;
     size_t size = 0;
-    CHECK_STATUS(nk_steam_vdf_add(only_root_end, 1u, &kPlayer, &out, &size), NK_STEAM_OK,
+    CHECK_STATUS(nk_steam_vdf_add(only_root_end, 1u, &kPlayer, &out, &size, NULL), NK_STEAM_OK,
                  "a valid file without a shortcuts map");
     bool found = false;
     CHECK(out && nk_steam_vdf_has_exe(out, size, kPlayer.exe, &found) == NK_STEAM_OK && found,
@@ -257,7 +257,7 @@ static void test_corrupt_files_are_refused(void) {
     /* Every proper prefix is damaged, never accepted, never a crash. */
     int accepted = 0;
     for (size_t cut = 1; cut < good.size; cut++) {
-        NkSteamStatus s = nk_steam_vdf_add(good.data, cut, &kPlayer, &out, &size);
+        NkSteamStatus s = nk_steam_vdf_add(good.data, cut, &kPlayer, &out, &size, NULL);
         if (s == NK_STEAM_OK) accepted++;
         CHECK(s == NK_STEAM_ERR_CORRUPT || s == NK_STEAM_OK, "a cut file is corrupt or still whole");
         nk_steam_free(out);
@@ -270,7 +270,7 @@ static void test_corrupt_files_are_refused(void) {
     Raw bad;
     memcpy(&bad, &good, sizeof(bad));
     bad.data[bad.size++] = 0x00; /* trailing byte */
-    CHECK_STATUS(nk_steam_vdf_add(bad.data, bad.size, &kPlayer, &out, &size), NK_STEAM_ERR_CORRUPT,
+    CHECK_STATUS(nk_steam_vdf_add(bad.data, bad.size, &kPlayer, &out, &size, NULL), NK_STEAM_ERR_CORRUPT,
                  "trailing bytes");
 
     memset(&bad, 0, sizeof(bad));
@@ -278,7 +278,7 @@ static void test_corrupt_files_are_refused(void) {
     raw_byte(&bad, 0x09); /* an unknown type */
     raw_cstr(&bad, "x");
     raw_close(&bad);
-    CHECK_STATUS(nk_steam_vdf_add(bad.data, bad.size, &kPlayer, &out, &size), NK_STEAM_ERR_CORRUPT,
+    CHECK_STATUS(nk_steam_vdf_add(bad.data, bad.size, &kPlayer, &out, &size, NULL), NK_STEAM_ERR_CORRUPT,
                  "an unknown value type");
 
     memset(&bad, 0, sizeof(bad));
@@ -287,7 +287,7 @@ static void test_corrupt_files_are_refused(void) {
     raw_cstr(&bad, "key");
     memcpy(bad.data + bad.size, "no terminator", 13u); /* a string that never ends */
     bad.size += 13u;
-    CHECK_STATUS(nk_steam_vdf_add(bad.data, bad.size, &kPlayer, &out, &size), NK_STEAM_ERR_CORRUPT,
+    CHECK_STATUS(nk_steam_vdf_add(bad.data, bad.size, &kPlayer, &out, &size, NULL), NK_STEAM_ERR_CORRUPT,
                  "an unterminated string");
 
     memset(&bad, 0, sizeof(bad));
@@ -296,7 +296,7 @@ static void test_corrupt_files_are_refused(void) {
         raw_cstr(&bad, "n");
     }
     for (int i = 0; i < 41; i++) raw_byte(&bad, 0x08);
-    CHECK_STATUS(nk_steam_vdf_add(bad.data, bad.size, &kPlayer, &out, &size), NK_STEAM_ERR_CORRUPT,
+    CHECK_STATUS(nk_steam_vdf_add(bad.data, bad.size, &kPlayer, &out, &size, NULL), NK_STEAM_ERR_CORRUPT,
                  "nesting past the cap");
 
     memset(&bad, 0, sizeof(bad));
@@ -304,10 +304,10 @@ static void test_corrupt_files_are_refused(void) {
     raw_byte(&bad, 0x02);
     raw_cstr(&bad, "short");
     raw_byte(&bad, 1); /* an int32 with one byte */
-    CHECK_STATUS(nk_steam_vdf_add(bad.data, bad.size, &kPlayer, &out, &size), NK_STEAM_ERR_CORRUPT,
+    CHECK_STATUS(nk_steam_vdf_add(bad.data, bad.size, &kPlayer, &out, &size, NULL), NK_STEAM_ERR_CORRUPT,
                  "a short integer");
 
-    CHECK_STATUS(nk_steam_vdf_add((const uint8_t *)"text", 4u, &kPlayer, &out, &size),
+    CHECK_STATUS(nk_steam_vdf_add((const uint8_t *)"text", 4u, &kPlayer, &out, &size, NULL),
                  NK_STEAM_ERR_CORRUPT, "plain text");
 
     /* Single-byte damage must never crash. A refused file yields no output and leaves its input as it
@@ -320,7 +320,7 @@ static void test_corrupt_files_are_refused(void) {
         memcpy(&before, &flip, sizeof(before));
         out = (uint8_t *)0x1;
         size = 12345u;
-        NkSteamStatus s = nk_steam_vdf_add(flip.data, flip.size, &kPlayer, &out, &size);
+        NkSteamStatus s = nk_steam_vdf_add(flip.data, flip.size, &kPlayer, &out, &size, NULL);
         CHECK(memcmp(&before, &flip, sizeof(flip)) == 0, "the input is not modified");
         if (s == NK_STEAM_OK) {
             bool found = false;
@@ -351,7 +351,7 @@ static void test_steam_running_fails_closed(void) {
     size_t size = 0;
     NkSteamShortcut quoted = kPlayer;
     quoted.exe = "\"C:/Games/Nakagawa/nakagawa_player.exe\"";
-    CHECK_STATUS(nk_steam_vdf_add(NULL, 0, &quoted, &out, &size), NK_STEAM_ERR_ARGUMENT,
+    CHECK_STATUS(nk_steam_vdf_add(NULL, 0, &quoted, &out, &size, NULL), NK_STEAM_ERR_ARGUMENT,
                  "a quoted executable is refused: the app ID adds the quotes itself");
 }
 
@@ -360,30 +360,30 @@ static void test_arguments(void) {
     size_t size = 0;
     NkSteamShortcut bad = kPlayer;
     bad.app_name = "";
-    CHECK_STATUS(nk_steam_vdf_add(NULL, 0, &bad, &out, &size), NK_STEAM_ERR_ARGUMENT, "empty name");
+    CHECK_STATUS(nk_steam_vdf_add(NULL, 0, &bad, &out, &size, NULL), NK_STEAM_ERR_ARGUMENT, "empty name");
     bad = kPlayer;
     bad.exe = NULL;
-    CHECK_STATUS(nk_steam_vdf_add(NULL, 0, &bad, &out, &size), NK_STEAM_ERR_ARGUMENT, "no exe");
+    CHECK_STATUS(nk_steam_vdf_add(NULL, 0, &bad, &out, &size, NULL), NK_STEAM_ERR_ARGUMENT, "no exe");
     bad = kPlayer;
     bad.start_dir = "C:/x\ny";
-    CHECK_STATUS(nk_steam_vdf_add(NULL, 0, &bad, &out, &size), NK_STEAM_ERR_ARGUMENT,
+    CHECK_STATUS(nk_steam_vdf_add(NULL, 0, &bad, &out, &size, NULL), NK_STEAM_ERR_ARGUMENT,
                  "a control character in a field");
     bad = kPlayer;
     bad.launch_options = "--a\tb";
-    CHECK_STATUS(nk_steam_vdf_add(NULL, 0, &bad, &out, &size), NK_STEAM_ERR_ARGUMENT,
+    CHECK_STATUS(nk_steam_vdf_add(NULL, 0, &bad, &out, &size, NULL), NK_STEAM_ERR_ARGUMENT,
                  "a tab in the launch options");
     char huge[NK_STEAM_FIELD_MAX + 8u];
     memset(huge, 'x', sizeof(huge) - 1u);
     huge[sizeof(huge) - 1u] = '\0';
     bad = kPlayer;
     bad.app_name = huge;
-    CHECK_STATUS(nk_steam_vdf_add(NULL, 0, &bad, &out, &size), NK_STEAM_ERR_ARGUMENT,
+    CHECK_STATUS(nk_steam_vdf_add(NULL, 0, &bad, &out, &size, NULL), NK_STEAM_ERR_ARGUMENT,
                  "a name past the cap");
-    CHECK_STATUS(nk_steam_vdf_add(NULL, 0, NULL, &out, &size), NK_STEAM_ERR_ARGUMENT, "no shortcut");
+    CHECK_STATUS(nk_steam_vdf_add(NULL, 0, NULL, &out, &size, NULL), NK_STEAM_ERR_ARGUMENT, "no shortcut");
     /* A non-ASCII name is fine: its bytes are all 0x80 or more. */
     bad = kPlayer;
     bad.app_name = "\xE4\xB8\xAD\xE5\xB7\x9D";
-    CHECK_STATUS(nk_steam_vdf_add(NULL, 0, &bad, &out, &size), NK_STEAM_OK, "a UTF-8 name");
+    CHECK_STATUS(nk_steam_vdf_add(NULL, 0, &bad, &out, &size, NULL), NK_STEAM_OK, "a UTF-8 name");
     nk_steam_free(out);
 }
 
@@ -400,7 +400,7 @@ static void test_file_add_and_backup(void) {
     CHECK(write_bytes(vdf, in.data, in.size), "write the existing file");
 
     CHECK_STATUS(nk_steam_add_to_file(vdf, &kPlayer, false, "20261106-120000", backup,
-                                      sizeof(backup)), NK_STEAM_OK, "add");
+                                      sizeof(backup), NULL), NK_STEAM_OK, "add");
     CHECK(strstr(backup, "shortcuts.vdf.nakagawa-backup-20261106-120000") != NULL,
           "the backup is named for the stamp");
     CHECK(file_is(backup, in.data, in.size), "the backup holds the original bytes");
@@ -419,7 +419,7 @@ static void test_file_add_and_backup(void) {
     NkSteamShortcut second = {"Second", "C:/Second/s.exe", "C:/Second", ""};
     char backup2[NK_MAX_PATH];
     CHECK_STATUS(nk_steam_add_to_file(vdf, &second, false, "20261106-120000", backup2,
-                                      sizeof(backup2)), NK_STEAM_OK, "add again");
+                                      sizeof(backup2), NULL), NK_STEAM_OK, "add again");
     CHECK(strcmp(backup, backup2) != 0, "a second backup has its own name");
     CHECK(file_is(backup, in.data, in.size), "the first backup is untouched");
 
@@ -428,7 +428,7 @@ static void test_file_add_and_backup(void) {
     uint8_t *before = read_bytes(vdf, &before_size);
     char backup3[NK_MAX_PATH];
     CHECK_STATUS(nk_steam_add_to_file(vdf, &kPlayer, false, "20261106-120001", backup3,
-                                      sizeof(backup3)), NK_STEAM_ERR_EXISTS, "existing entry");
+                                      sizeof(backup3), NULL), NK_STEAM_ERR_EXISTS, "existing entry");
     CHECK(backup3[0] == '\0', "no backup for a refused add");
     CHECK(before && file_is(vdf, before, before_size), "the file is unchanged");
     free(before);
@@ -443,7 +443,7 @@ static void test_running_steam_blocks_every_write(void) {
     CHECK(nk_platform_mkdir_p(dir) && write_bytes(vdf, in.data, in.size), "fixture");
     char backup[NK_MAX_PATH];
     CHECK_STATUS(nk_steam_add_to_file(vdf, &kPlayer, true, "20261106-120000", backup,
-                                      sizeof(backup)), NK_STEAM_ERR_STEAM_RUNNING, "Steam runs");
+                                      sizeof(backup), NULL), NK_STEAM_ERR_STEAM_RUNNING, "Steam runs");
     CHECK(file_is(vdf, in.data, in.size), "the file is untouched");
     char leftover[NATIVE_TEST_PATH_MAX];
     snprintf(leftover, sizeof(leftover), "%s.nakagawa-backup-20261106-120000", vdf);
@@ -458,7 +458,7 @@ static void test_corrupt_file_is_left_alone(void) {
     CHECK(nk_platform_mkdir_p(dir) && write_bytes(vdf, junk, sizeof(junk)), "fixture");
     char backup[NK_MAX_PATH];
     CHECK_STATUS(nk_steam_add_to_file(vdf, &kPlayer, false, "20261106-120000", backup,
-                                      sizeof(backup)), NK_STEAM_ERR_CORRUPT, "corrupt file");
+                                      sizeof(backup), NULL), NK_STEAM_ERR_CORRUPT, "corrupt file");
     CHECK(file_is(vdf, junk, sizeof(junk)), "the file is untouched");
     snprintf(leftover, sizeof(leftover), "%s.nakagawa-backup-20261106-120000", vdf);
     CHECK(nk_platform_path_missing(leftover), "no backup of a file that was refused");
@@ -482,7 +482,7 @@ static void test_a_failed_backup_writes_nothing(void) {
     }
     char backup[NK_MAX_PATH];
     CHECK_STATUS(nk_steam_add_to_file(vdf, &kPlayer, false, "20261106-120000", backup,
-                                      sizeof(backup)), NK_STEAM_ERR_BACKUP, "no backup possible");
+                                      sizeof(backup), NULL), NK_STEAM_ERR_BACKUP, "no backup possible");
     CHECK(file_is(vdf, in.data, in.size), "the original is untouched");
     snprintf(name, sizeof(name), "%s.nakagawa-backup-20261106-120000", vdf);
     CHECK(file_is(name, in.data, 1u), "an earlier backup is not overwritten");
@@ -490,9 +490,9 @@ static void test_a_failed_backup_writes_nothing(void) {
 
 static void test_bad_stamp(void) {
     char backup[NK_MAX_PATH];
-    CHECK_STATUS(nk_steam_add_to_file("unused.vdf", &kPlayer, false, "../x", backup, sizeof(backup)),
+    CHECK_STATUS(nk_steam_add_to_file("unused.vdf", &kPlayer, false, "../x", backup, sizeof(backup), NULL),
                  NK_STEAM_ERR_ARGUMENT, "a stamp with path characters");
-    CHECK_STATUS(nk_steam_add_to_file("unused.vdf", &kPlayer, false, "", backup, sizeof(backup)),
+    CHECK_STATUS(nk_steam_add_to_file("unused.vdf", &kPlayer, false, "", backup, sizeof(backup), NULL),
                  NK_STEAM_ERR_ARGUMENT, "an empty stamp");
 }
 
@@ -532,19 +532,19 @@ static void test_accounts_and_add_for_account(void) {
 
     char backup[NK_MAX_PATH];
     CHECK_STATUS(nk_steam_add_for_account(steam, "20002", &kPlayer, is_running_yes,
-                                          "20261106-120000", backup, sizeof(backup)),
+                                          "20261106-120000", backup, sizeof(backup), NULL),
                  NK_STEAM_ERR_STEAM_RUNNING, "Steam runs");
     CHECK_STATUS(nk_steam_add_for_account(steam, "..", &kPlayer, is_running_no, "20261106-120000",
-                                          backup, sizeof(backup)), NK_STEAM_ERR_ARGUMENT,
+                                          backup, sizeof(backup), NULL), NK_STEAM_ERR_ARGUMENT,
                  "a path is not an account");
     CHECK_STATUS(nk_steam_add_for_account(steam, "0", &kPlayer, is_running_no, "20261106-120000",
-                                          backup, sizeof(backup)), NK_STEAM_ERR_ARGUMENT,
+                                          backup, sizeof(backup), NULL), NK_STEAM_ERR_ARGUMENT,
                  "account 0 is refused");
     CHECK_STATUS(nk_steam_add_for_account(steam, "999", &kPlayer, is_running_no, "20261106-120000",
-                                          backup, sizeof(backup)), NK_STEAM_ERR_NOT_FOUND,
+                                          backup, sizeof(backup), NULL), NK_STEAM_ERR_NOT_FOUND,
                  "an account that is not there");
     CHECK_STATUS(nk_steam_add_for_account(steam, "20002", &kPlayer, is_running_no,
-                                          "20261106-120000", backup, sizeof(backup)), NK_STEAM_OK,
+                                          "20261106-120000", backup, sizeof(backup), NULL), NK_STEAM_OK,
                  "an account with no shortcuts file yet gets one");
     CHECK(backup[0] == '\0', "a new file has nothing to back up");
     char vdf[NATIVE_TEST_PATH_MAX];
@@ -559,12 +559,220 @@ static void test_accounts_and_add_for_account(void) {
     CHECK(nk_platform_path_missing(vdf), "no other account was touched");
 #ifndef _WIN32
     CHECK_STATUS(nk_steam_add_for_account(steam, "30001", &kPlayer, NULL, "20261106-120000",
-                                          backup, sizeof(backup)), NK_STEAM_ERR_UNSUPPORTED,
+                                          backup, sizeof(backup), NULL), NK_STEAM_ERR_UNSUPPORTED,
                  "off Windows, without a probe of its own, nothing is written");
     char root[NK_MAX_PATH];
     CHECK_STATUS(nk_steam_find_root(root, sizeof(root)), NK_STEAM_ERR_UNSUPPORTED,
                  "off Windows, Steam is not found by itself");
 #endif
+}
+
+/* ---- One shortcut per game (#2152) ---- */
+
+static const NkSteamShortcut kGameA = {"Game A", "C:/Games/Nakagawa/bin/nakagawa_player.exe",
+                                       "C:/Games/Nakagawa/bin", "--launch-title=ULUS10001"};
+static const NkSteamShortcut kGameB = {"Game B", "C:/Games/Nakagawa/bin/nakagawa_player.exe",
+                                       "C:/Games/Nakagawa/bin", "--launch-title=ULUS10002"};
+
+/* An entry as an earlier Nakagawa folder left it, after the user played it and tagged it. */
+static void raw_game_entry(Raw *r, const char *index, const char *quoted_exe,
+                           const char *quoted_dir, const char *options) {
+    raw_byte(r, 0x00);
+    raw_cstr(r, index);
+    raw_int(r, "appid", 0x8000BEEFu);
+    raw_str(r, "AppName", "Game A");
+    raw_str(r, "exe", quoted_exe);
+    raw_str(r, "StartDir", quoted_dir);
+    raw_str(r, "icon", "");
+    raw_str(r, "LaunchOptions", options);
+    raw_int(r, "LastPlayTime", 1700000000u);
+    raw_byte(r, 0x00);
+    raw_cstr(r, "tags");
+    raw_str(r, "0", "favorite");
+    raw_byte(r, 0x08);
+    raw_byte(r, 0x08);
+}
+
+static size_t count_bytes(const uint8_t *hay, size_t size, const char *needle) {
+    size_t count = 0;
+    size_t length = strlen(needle);
+    for (size_t i = 0; length <= size && i + length <= size; i++) {
+        if (memcmp(hay + i, needle, length) == 0) count++;
+    }
+    return count;
+}
+
+static void test_each_game_is_its_own_shortcut(void) {
+    uint8_t *one = NULL, *two = NULL, *three = NULL, *again = (uint8_t *)1;
+    size_t n1 = 0, n2 = 0, n3 = 0, n4 = 7;
+    NkSteamChange change = NK_STEAM_CHANGE_NONE;
+    CHECK_STATUS(nk_steam_vdf_add(NULL, 0, &kGameA, &one, &n1, &change), NK_STEAM_OK, "game A");
+    CHECK(change == NK_STEAM_CHANGE_ADDED, "game A is added");
+    CHECK_STATUS(nk_steam_vdf_add(one, n1, &kGameB, &two, &n2, &change), NK_STEAM_OK,
+                 "game B: the same executable, other launch options");
+    CHECK(change == NK_STEAM_CHANGE_ADDED, "game B is added beside it");
+    CHECK_STATUS(nk_steam_vdf_add(two, n2, &kPlayer, &three, &n3, &change), NK_STEAM_OK,
+                 "the player itself, with no launch options");
+    CHECK(change == NK_STEAM_CHANGE_ADDED, "the bare player is a shortcut of its own");
+    CHECK(count_bytes(three, n3, "nakagawa_player.exe") == 3u, "three entries, one executable");
+    CHECK_STATUS(nk_steam_vdf_add(three, n3, &kGameA, &again, &n4, &change), NK_STEAM_ERR_EXISTS,
+                 "game A again");
+    CHECK(again == NULL && n4 == 0u && change == NK_STEAM_CHANGE_NONE,
+          "game A again is reported, not duplicated");
+    bool found = false;
+    CHECK_STATUS(nk_steam_vdf_has_exe(three, n3, kGameA.exe, &found), NK_STEAM_OK, "has exe");
+    CHECK(found, "the executable is listed");
+    nk_steam_free(one);
+    nk_steam_free(two);
+    nk_steam_free(three);
+}
+
+static void test_a_moved_folder_updates_its_own_entry(void) {
+    Raw in, want;
+    memset(&in, 0, sizeof(in));
+    raw_open(&in);
+    raw_entry(&in, "0", "Some Game", "\"C:/Games/A/a.exe\"");
+    raw_game_entry(&in, "1", "\"D:/Old/Nakagawa-0.0.1/bin/nakagawa_player.exe\"",
+                   "\"D:/Old/Nakagawa-0.0.1/bin\"", "--launch-title=ULUS10001");
+    raw_close(&in);
+    memset(&want, 0, sizeof(want));
+    raw_open(&want);
+    raw_entry(&want, "0", "Some Game", "\"C:/Games/A/a.exe\"");
+    raw_game_entry(&want, "1", "\"C:/Games/Nakagawa/bin/nakagawa_player.exe\"",
+                   "\"C:/Games/Nakagawa/bin\"", "--launch-title=ULUS10001");
+    raw_close(&want);
+    uint8_t *out = NULL;
+    size_t size = 0;
+    NkSteamChange change = NK_STEAM_CHANGE_NONE;
+    CHECK_STATUS(nk_steam_vdf_add(in.data, in.size, &kGameA, &out, &size, &change), NK_STEAM_OK,
+                 "the same game from a new Nakagawa folder");
+    CHECK(change == NK_STEAM_CHANGE_UPDATED, "its entry is updated");
+    CHECK(out && size == want.size && memcmp(out, want.data, size) == 0,
+          "only exe and StartDir change: the app ID, name, play time and tags stay");
+    nk_steam_free(out);
+
+    /* Not this game's entry: another game's options, the user's bare player entry, or
+       another program with these options. Each leaves its entry and adds one. */
+    static const char *const other_options[] = {"--launch-title=ULUS10002", ""};
+    for (size_t i = 0; i < 2u; i++) {
+        memset(&in, 0, sizeof(in));
+        raw_open(&in);
+        raw_game_entry(&in, "0", "\"D:/Old/bin/nakagawa_player.exe\"", "\"D:/Old/bin\"",
+                       other_options[i]);
+        raw_close(&in);
+        out = NULL;
+        CHECK_STATUS(nk_steam_vdf_add(in.data, in.size, &kGameA, &out, &size, &change),
+                     NK_STEAM_OK, "an entry with other launch options");
+        CHECK(change == NK_STEAM_CHANGE_ADDED && out && size > in.size &&
+                  memcmp(out, in.data, in.size - 2u) == 0,
+              "it stays as it was and a new entry follows");
+        nk_steam_free(out);
+    }
+    memset(&in, 0, sizeof(in));
+    raw_open(&in);
+    raw_game_entry(&in, "0", "\"D:/Tools/other.exe\"", "\"D:/Tools\"",
+                   "--launch-title=ULUS10001");
+    raw_close(&in);
+    out = NULL;
+    CHECK_STATUS(nk_steam_vdf_add(in.data, in.size, &kGameA, &out, &size, &change), NK_STEAM_OK,
+                 "another program with the same options");
+    CHECK(change == NK_STEAM_CHANGE_ADDED, "another program's entry is never taken over");
+    nk_steam_free(out);
+
+    /* The bare player is never matched by name alone: the user may have added it by hand. */
+    memset(&in, 0, sizeof(in));
+    raw_open(&in);
+    raw_game_entry(&in, "0", "\"D:/Old/bin/nakagawa_player.exe\"", "\"D:/Old/bin\"", "");
+    raw_close(&in);
+    out = NULL;
+    CHECK_STATUS(nk_steam_vdf_add(in.data, in.size, &kPlayer, &out, &size, &change), NK_STEAM_OK,
+                 "the bare player from another folder");
+    CHECK(change == NK_STEAM_CHANGE_ADDED, "a bare entry elsewhere is left alone");
+    nk_steam_free(out);
+}
+
+static void test_file_update_is_backed_up(void) {
+    char vdf[NATIVE_TEST_PATH_MAX];
+    char backup[NATIVE_TEST_PATH_MAX];
+    path_in(vdf, sizeof(vdf), "moved/shortcuts.vdf");
+    char dir[NATIVE_TEST_PATH_MAX];
+    path_in(dir, sizeof(dir), "moved");
+    CHECK(nk_platform_mkdir_p(dir), "folder");
+    Raw in;
+    memset(&in, 0, sizeof(in));
+    raw_open(&in);
+    raw_game_entry(&in, "0", "\"D:/Old/bin/nakagawa_player.exe\"", "\"D:/Old/bin\"",
+                   "--launch-title=ULUS10001");
+    raw_close(&in);
+    CHECK(write_bytes(vdf, in.data, in.size), "seed");
+    NkSteamChange change = NK_STEAM_CHANGE_NONE;
+    CHECK_STATUS(nk_steam_add_to_file(vdf, &kGameA, false, "20261108-090000", backup,
+                                      sizeof(backup), &change), NK_STEAM_OK, "update in a file");
+    CHECK(change == NK_STEAM_CHANGE_UPDATED, "the file says updated");
+    CHECK(backup[0] && file_is(backup, in.data, in.size), "the file from before is the backup");
+    size_t size = 0;
+    uint8_t *now = read_bytes(vdf, &size);
+    CHECK(now && count_bytes(now, size, "nakagawa_player.exe") == 1u &&
+              count_bytes(now, size, "C:/Games/Nakagawa/bin") == 2u,
+          "one entry, pointing at the new folder");
+    free(now);
+    CHECK_STATUS(nk_steam_add_to_file(vdf, &kGameA, false, "20261108-090001", backup,
+                                      sizeof(backup), &change), NK_STEAM_ERR_EXISTS, "again");
+    CHECK(change == NK_STEAM_CHANGE_NONE && backup[0] == '\0', "again writes nothing");
+}
+
+/* ---- Account names ---- */
+
+static void test_account_names(void) {
+    /* Account 20002 is 76561197960285730, 20003 is 76561197960285731. */
+    static const char text[] =
+        "\"users\"\n{\n"
+        "\t// a comment line\n"
+        "\t\"76561197960285730\"\n\t{\n"
+        "\t\t\"AccountName\"\t\t\"sign-in-name\"\n"
+        "\t\t\"PersonaName\"\t\t\"Ana \\\"Q\\\" Player\"\n"
+        "\t\t\"MostRecent\"\t\t\"1\"\n\t}\n"
+        "\t\"76561197960285731\"\n\t{\n"
+        "\t\t\"PersonaName\"\t\t\"Ren\\tSecond\"\n\t}\n"
+        "}\n";
+    char name[64];
+    CHECK(nk_steam_login_users_name(text, strlen(text), "20002", name, sizeof(name)) &&
+              strcmp(name, "Ana \"Q\" Player") == 0,
+          "the persona name, escapes read, not the sign-in name");
+    CHECK(nk_steam_login_users_name(text, strlen(text), "20003", name, sizeof(name)) &&
+              strcmp(name, "RenSecond") == 0,
+          "a control character is dropped");
+    CHECK(!nk_steam_login_users_name(text, strlen(text), "20004", name, sizeof(name)) &&
+              name[0] == '\0',
+          "an account not listed has no name");
+    CHECK(!nk_steam_login_users_name(text, strlen(text), "x1", name, sizeof(name)),
+          "an account ID is digits");
+    CHECK(!nk_steam_login_users_name(text, strlen(text) - 3u, "20002", name, sizeof(name)),
+          "an unclosed file does not parse");
+    static const char outside[] =
+        "\"other\" { \"76561197960285730\" { \"PersonaName\" \"Not this\" } }";
+    CHECK(!nk_steam_login_users_name(outside, strlen(outside), "20002", name, sizeof(name)),
+          "only the users map names accounts");
+    /* "Zoë" is Z o 0xC3 0xAB: a 4-byte buffer holds "Zo", never half of the ë. */
+    static const char utf8[] = "\"users\" { \"76561197960285730\" { \"PersonaName\" \"Zo\xC3\xAB\" } }";
+    char tiny[4];
+    CHECK(nk_steam_login_users_name(utf8, strlen(utf8), "20002", tiny, sizeof(tiny)) &&
+              strcmp(tiny, "Zo") == 0,
+          "a long name is cut at a whole UTF-8 character");
+
+    char steam[NATIVE_TEST_PATH_MAX];
+    char config[NATIVE_TEST_PATH_MAX];
+    char file[NATIVE_TEST_PATH_MAX];
+    path_in(steam, sizeof(steam), "names");
+    path_in(config, sizeof(config), "names/config");
+    path_in(file, sizeof(file), "names/config/loginusers.vdf");
+    CHECK_STATUS(nk_steam_account_name(steam, "20002", name, sizeof(name)),
+                 NK_STEAM_ERR_NOT_FOUND, "no loginusers.vdf");
+    CHECK(nk_platform_mkdir_p(config), "config folder");
+    CHECK(write_bytes(file, (const uint8_t *)text, strlen(text)), "loginusers.vdf");
+    CHECK_STATUS(nk_steam_account_name(steam, "20002", name, sizeof(name)), NK_STEAM_OK,
+                 "the file's name");
+    CHECK(strcmp(name, "Ana \"Q\" Player") == 0, "read from the file");
 }
 
 int main(void) {
@@ -585,6 +793,10 @@ int main(void) {
     test_a_failed_backup_writes_nothing();
     test_bad_stamp();
     test_accounts_and_add_for_account();
+    test_each_game_is_its_own_shortcut();
+    test_a_moved_folder_updates_its_own_entry();
+    test_file_update_is_backed_up();
+    test_account_names();
     if (g_failures) {
         fprintf(stderr, "test_steam_shortcuts: %d of %d checks failed\n", g_failures, g_checks);
         return 1;

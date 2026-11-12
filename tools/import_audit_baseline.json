@@ -3940,6 +3940,12 @@
     "name": "sceKernelSendMbx",
     "status": "partial"
   },
+  "0xe9d97901": {
+    "classification": "dedicated",
+    "handler": "h_AudioRestLen",
+    "name": "sceAudioGetChannelRestLen",
+    "status": "partial"
+  },
   "0xea382a27": {
     "classification": "dedicated",
     "handler": "h_PowerGetPllClockFrequencyFloat",

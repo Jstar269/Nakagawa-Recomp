@@ -11,10 +11,14 @@
 #include "nk_library.h"
 #include "nk_disc_verify.h"
 #include "nk_launch.h"
+#include "nk_steam_shortcuts.h"
 #include "nk_font.h"
+#include "nk_nickname.h"
+#include "nk_shared_helpers.h"
 #include "input_settings.h"
 #include "package_builder.h"
 #include "update_check.h"
+#include "discord_presence.h"
 #include "setup_staging.h"
 #include "nk_title_manifest.h"
 #include "generated/nk_title_catalog.h"
@@ -110,14 +114,6 @@ typedef struct {
 #define PLAYER_UI_MIN_SCALE 0.25f
 #define PLAYER_UI_MAX_SCALE 8.0f
 
-/* Where the launcher UI is laid out and how it reaches the output: `width` by
-   `height` layout units, each drawn as `scale` output pixels. */
-typedef struct {
-    int width;
-    int height;
-    float scale;
-} PlayerUiCanvas;
-
 typedef enum {
     PLAYER_CLOSE_QUIT = 0,
     PLAYER_CLOSE_CONFIRM_REQUIRED
@@ -197,13 +193,17 @@ typedef enum {
 #define PLAYER_DISC_ID_KEY_LEN 10
 
 /* A title's 60 FPS game-logic enhancement package (docs/ENHANCEMENT_CONTRACT.md
- * section 9): <user data>/enhancements/<disc ID, lowercase>-60hz.json. */
+ * section 9): <user data>/enhancements/<disc ID, lowercase>-60hz.json, else the
+ * published package the source tree ships at assets/enhancements/ (section 5.1). */
 typedef struct {
     /* The file parses, its id is a valid package name
        (nk_title_manifest_enhancement_id_valid) and its target_title_id is the
        title's own. */
     bool available;
     char package_id[NK_MAX_ENHANCEMENT_PACKAGE_ID];
+    /* The file read is the shipped published package, not one in the user's
+       data folder. */
+    bool shipped;
     /* Why a file that exists cannot be used; empty when there is no file or it
        is usable. */
     char problem[160];
@@ -233,9 +233,25 @@ typedef enum {
     PLAYER_PART_WIDE,          /* widescreen Fill (#1881): 0 off, 1 fill */
     PLAYER_PART_SMOOTH,        /* smooth motion (#1272): 0 off, 1 x2 */
     PLAYER_PART_SAS,           /* band-limited SAS resampling (#2054, section 11.3.1): 0 off, 1 sinc */
+    PLAYER_PART_TESS,          /* finer Bezier and spline patches (#2053, section 11.3.7): 0 off, or the
+                                  factor 2, 3 or 4. Off in a fresh file; alters GE timing */
+    PLAYER_PART_CULL,          /* wider culling (section 11.3.6): 0 off, 1 on. A title's own culling is
+                                  widened to Widescreen's wings; a title without a package ignores it */
     PLAYER_PART_UPSCALE,       /* the presentation upscaler (#2122): 0 off, 1 FSR 1. It reaches the
                                   runtime as SR_PRESENT_UPSCALE (NkRuntimeConfig.present_upscale),
                                   not in the SR_ACE line */
+    PLAYER_PART_STICK,         /* stick dead-zone remap (section 11.3.11): 0 off, 1 on. Acts only for a
+                                  title whose catalog entry declares a stick dead zone. Appended: the
+                                  enum fixes the Settings > Enhanced rows and the saved order; the Ace
+                                  line still writes stick before cull */
+    PLAYER_PART_LOAD,          /* short loads (section 11.3.10): 0 off, 1 fast. The display waits
+                                  a title's package declares return at once; guest timing changes. Ace
+                                  only; a title without a load part ignores it */
+    PLAYER_PART_TWIN,          /* full 32-bit colour, the host twin (#2050, section 10.11): 0 off, 1 on.
+                                  Appended; the Ace line writes twin after tess */
+    PLAYER_PART_SSAA,          /* supersampling (#2073, section 10.21): 0 off, or the factor 2 or 4 per
+                                  axis on top of the render scale. Host presentation only; off in a
+                                  fresh file and in every preset */
     PLAYER_PART_COUNT
 } PlayerEnhancedPart;
 
@@ -272,6 +288,8 @@ typedef struct {
     bool on;                   /* Enhanced or Ace: the launch line is not "off" */
     int part[PLAYER_PART_COUNT];
     bool logic_60;             /* Ace with its 60 FPS game logic on (the package may be gone) */
+    int stick_counts;          /* the square stick dead zone the title's catalog entry declares
+                                  (NkTitleEntry.analog_dead_zone_counts), 0 when none */
 } PlayerPlayResolved;
 
 typedef struct {
@@ -324,9 +342,17 @@ typedef struct {
        reuse them for other games with the same library (#1306). On by default; the
        copies never leave this PC. */
     bool share_system_libraries;
+    /* Settings > Build speed: how much of the PC a package build takes (Background,
+       Balanced, Fastest). "build_speed" in settings.json, an addition to schema version 2
+       as text_size is; a value this build does not know keeps Balanced. */
+    PackageBuildSpeed build_speed;
     /* Ask GitHub for a newer version once each time the player starts. Off until
        the user turns it on (AGENTS.md section 5; the button needs no switch). */
     bool check_updates_at_start;
+    /* Discord status (#2259): while a game runs, the Discord app on this PC shows its title,
+       play mode and elapsed time. Off by default (owner decision 2026-11-08); it cannot be
+       turned on while the build has no Discord application ID (nk_discord_available). */
+    bool discord_presence;
     /* The folder the last file picker picked from (Add disc, PSP fonts), where
        the next one opens. Empty on a first run: the pickers then open at the
        Desktop (player_app_picker_start_folder). */
@@ -337,6 +363,13 @@ typedef struct {
     /* Save locations are not a setting: nk_launch_prepare_session resolves a
        writable per-disc Memory Stick root at launch (SR_MEMSTICK). The settings
        screen shows that real root instead of a configurable dead field. */
+    /* The console nickname games read (#2197, src/core/nk_nickname.h): the
+       neutral NK_NICKNAME_DEFAULT until the user chooses one, and never taken
+       from the PC's user name. Kept only in settings.json. nickname_asked
+       records that the first-launch prompt was answered (Save or Skip), so it
+       is shown once. */
+    char nickname[NK_NICKNAME_MAX_BYTES + 1];
+    bool nickname_asked;
 } PlayerSettings;
 
 /* Check for updates (update_check.h). Each step runs on its own worker thread,
@@ -714,23 +747,35 @@ typedef enum {
     PLAYER_REBUILD_ACTIVE,      /* its build is starting or running */
     PLAYER_REBUILD_DONE,
     PLAYER_REBUILD_NO_DISC,     /* skipped: its disc image is missing */
-    PLAYER_REBUILD_FAILED       /* the build did not finish; the old package stays */
+    PLAYER_REBUILD_FAILED       /* the build did not finish (a rebuild keeps the old package) */
 } PlayerRebuildState;
+
+/* Why a game is in the build queue. */
+typedef enum {
+    PLAYER_QUEUE_REBUILD = 0,   /* an older Nakagawa built it: Rebuild all, Rebuild now */
+    PLAYER_QUEUE_BUILD          /* it has no package yet: the title page's Add to queue */
+} PlayerQueueKind;
 
 typedef struct {
     char disc_id[MAX_DISC_ID_LEN];
     PlayerRebuildState state;
+    PlayerQueueKind kind;
 } PlayerRebuildEntry;
 
-/* The queue file, rebuild-queue.json beside settings.json:
- *   {"format": "nakagawa-rebuild-queue", "schema_version": 1,
- *    "titles": [{"disc_id": "TEST00006", "state": "pending"}, ...]}
- * state is "pending", "done", "missing_disc" or "failed"; a title whose build
- * was running when the player closed is saved as "pending" and starts again.
- * A file with a newer schema_version, another format, or an unknown member is
- * left alone and not resumed. The file goes once nothing is pending. */
+/* The build queue: one queue for Add to queue and Rebuild all, one build at a
+ * time, in its order. Its file, rebuild-queue.json beside settings.json:
+ *   {"format": "nakagawa-rebuild-queue", "schema_version": 2,
+ *    "titles": [{"disc_id": "TEST00006", "kind": "build", "state": "pending"}, ...]}
+ * The titles are in queue order. kind is "build" or "rebuild"; state is
+ * "pending", "done", "missing_disc" or "failed", and a title whose build was
+ * running when the player closed is saved as "pending" and starts again.
+ * Schema 1 had no kind: every title in it is a rebuild, and the next save
+ * writes schema 2. A file with another format or an unknown member is not
+ * resumed. A file with a newer schema_version is not resumed and never
+ * replaced or removed: this player's queue then lasts until it closes. The
+ * file goes once nothing is pending. */
 #define PLAYER_REBUILD_QUEUE_FORMAT "nakagawa-rebuild-queue"
-#define PLAYER_REBUILD_QUEUE_SCHEMA_VERSION 1
+#define PLAYER_REBUILD_QUEUE_SCHEMA_VERSION 2
 #define PLAYER_REBUILD_QUEUE_FILE "rebuild-queue.json"
 
 typedef struct {
@@ -739,10 +784,13 @@ typedef struct {
     /* Titles are pending or one is being built. */
     bool active;
     /* A build could not start for a reason outside its title (its card is up,
-       or the build tool download was cancelled); Rebuild all starts again. */
+       or the build tool download was cancelled); Resume, Rebuild all or Add to
+       queue starts it again. */
     bool paused;
     /* The build session the queue started, once the builder runs; 0 before. */
     uint64_t build_generation;
+    /* rebuild-queue.json was written by a newer Nakagawa: it stays as it is. */
+    bool file_is_newer;
 } PlayerRebuildQueue;
 
 /* Disc verification (src/core/nk_disc_verify.h): each image the player adds is
@@ -823,6 +871,9 @@ struct PlayerApp {
     /* Directory holding the player executable; the package builder finds
        tools/nk_cli.py relative to it. Empty when unknown. */
     char install_root[MAX_PATH_LEN];
+    /* The folder this process was started with --user-data-root, absolute, or empty
+       for the default (or portable) folder. A Steam shortcut passes it on (#2152). */
+    char user_data_root[MAX_PATH_LEN];
     /* Read-only package root beside the player executable. Bundled showcase
        records are transient and never enter the user's persisted library. */
     char showcase_root[MAX_PATH_LEN];
@@ -888,14 +939,7 @@ struct PlayerApp {
     bool launch_pending;
     char launch_pending_disc_id[NK_MAX_DISC_ID_LEN];
 
-    /* Index of the leftmost visible card in the library strip. The strip
-       lays cards out horizontally and a 1280-wide window fits about four, so
-       without this every entry past the fourth was drawn outside the window
-       with no way to reach it. */
-    int library_scroll_index;
-
     /* Navigation & Focus */
-    int focus_index; /* current focused UI element index for gamepad/keyboard */
     int active_tab;   /* for settings: 0=Display, 1=Audio, 2=Controller, 3=Logs */
 
     /* Controller settings and live input monitor (#357) */
@@ -927,6 +971,10 @@ struct PlayerApp {
      * session runs on the defaults, and settings_notice says so on every
      * Settings page (player_app_load_settings). */
     bool settings_newer_schema;
+    /* This run keeps the first-launch nickname prompt down (#2197): a --screenshot, --view
+       or scripted run shows the page it names. Memory only: nickname_asked and settings.json
+       are left as they are. */
+    bool nickname_prompt_held;
     /* Why the library shows no saved games although library.json exists (a newer
      * player wrote it), or an empty string. Shown on the Library screen. */
     char library_notice[192];
@@ -946,8 +994,6 @@ struct PlayerApp {
     /* Window & layout metrics */
     int window_width;
     int window_height;
-    float dpi_scale;
-    bool logical_ui;
     bool enable_focus_handoff;
     bool child_window_ready;
     /* Start watch for the running launch (#1290): the first running check was
@@ -956,6 +1002,14 @@ struct PlayerApp {
     bool launch_running_check_logged;
     bool child_boot_event_seen;
     bool child_boot_wait_noted;
+    /* How the latest launch draws its picture, from its render_path boot event (#2151):
+       known once the event is read, for the disc that launch started. Cleared by each
+       launch. Hide on the game's page hides that fallback's notice for the rest of this
+       player session. */
+    bool render_path_known;
+    NkRenderPath render_path;
+    char render_path_disc[MAX_DISC_ID_LEN];
+    bool render_notice_hidden[NK_RENDER_FALLBACK_COUNT];
     bool close_confirmation_pending;
     char boot_event_file_path[MAX_PATH_LEN];
     bool should_quit;
@@ -979,6 +1033,14 @@ struct PlayerApp {
 
     /* The added images waiting for their disc check, and the one running. */
     PlayerDiscCheckState disc_check;
+
+    /* Discord status (#2259): what the running game shows, set when it starts, and the
+       client that sends it (player_app_discord_tick). */
+    char running_title[NK_MAX_TITLE_LEN];
+    PlayerPlayMode running_play_mode;
+    int64_t running_start_ms;      /* Unix time in milliseconds */
+    NkDiscordClient discord;
+    bool discord_ready;            /* discord is initialised */
 };
 
 /* State management API */
@@ -1021,18 +1083,6 @@ bool player_app_disc_check_line(const PlayerApp *app, char *out, size_t out_size
  * dump") and the title page's sentence about it; NULL when it is not checked. */
 const char *player_disc_tier_badge(uint32_t tier);
 const char *player_disc_tier_note(uint32_t tier);
-
-/* Display-only text rules. They change what is drawn, never a stored value.
- *
- * player_bitmap_glyph: one display unit of UTF-8 text for the bitmap font
- * (SDL_RenderDebugText, ASCII only). Writes its replacement to out (NUL-terminated,
- * at most two bytes) and returns the input bytes it covers (at least one). The
- * trademark sign becomes "TM"; any other non-ASCII code point, and any malformed
- * byte, becomes "?"; tabs and line breaks become spaces.
- * player_text_for_bitmap_font: applies that to a whole string. The output never
- * exceeds out_size and is cut at a whole glyph; returns its length. */
-size_t player_bitmap_glyph(const char *in, char out[3]);
-size_t player_text_for_bitmap_font(const char *in, char *out, size_t out_size);
 
 /* Privacy: the user's profile folder is shown as "~" wherever text is drawn, so
  * a screenshot or screen share does not show the account name. Only whole path
@@ -1254,7 +1304,7 @@ void player_app_set_library_write_error(PlayerApp *app);
    user can paste it into a browser, and returns to the view it was raised
    from (the library when raised from a card). */
 void player_app_set_link_open_error(PlayerApp *app, const char *url, const char *reason);
-/* The error card's words, shared by both launchers. The badge is a plain word
+/* The error card's words. The badge is a plain word
    for the kind of problem; an unknown code gets "Problem", never the code. */
 const char *player_error_badge(const ErrorState *error);
 /* The card title for a picked file refused at a named format boundary
@@ -1355,14 +1405,6 @@ void player_app_populate_sample_games(PlayerApp *app);
 void player_app_sync_library(PlayerApp *app);
 bool player_app_discover_showcase(PlayerApp *app, const char *executable_directory);
 
-/* Maximum SDL3_ttf load candidates from player_app_ttf_library_candidates. */
-#define PLAYER_APP_TTF_MAX_CANDIDATES 4
-
-/* Ordered SDL3_ttf library candidates for a player running from exe_dir: the
- * library beside the executable first, then the platform loader's default
- * bare-name search (PATH on Windows). Pure: no filesystem or loader calls. */
-int player_app_ttf_library_candidates(const char *exe_dir,
-                                      char out[][MAX_PATH_LEN], int max_out);
 /* True when a disc directory entry name is safe to write under the private
  * per-title folder (the tooling's FILENAME_RE and WINDOWS_RESERVED rules). */
 bool player_module_name_is_safe(const char *name);
@@ -1433,10 +1475,6 @@ void player_app_runtime_package_cache_store(
  * so it has no new reason to give. */
 void player_app_runtime_package_cache_set_reason(PlayerApp *app, int game_index,
                                                  const char *reason);
-/* The title's validated status is known (a check has finished and is not
- * pending). Until then a card must say it is checking, not "Not prepared". */
-bool player_app_runtime_package_status_known(const PlayerApp *app,
-                                             const GameRecord *game);
 /* The validator's reason for the title's current package state, or NULL. */
 const char *player_app_runtime_package_reason(const PlayerApp *app,
                                               const GameRecord *game);
@@ -1498,8 +1536,13 @@ const char *player_present_scaling_label(int scaling);
    uses the rows as the user set them, whatever the preset: a render scale above 1x is
    guest-visible (every present commits to VRAM, docs/ENHANCEMENT_CONTRACT.md), so a
    preset must not reach Authentic launch output. Editing one of the rows a preset sets
-   makes it Custom, which means the rows apply everywhere. The play mode, the Enhanced
-   parts and the launch line are not in the table. */
+   makes it Custom, which means the rows apply everywhere. The play mode is not in the table.
+   A row also sets some Enhanced parts (PlayerGraphicsPresetRow.part) in place of the
+   library's values: player_play_resolve uses them, so the launch line, the upscaler and the
+   Enhanced pages agree. A game's own value for a part still wins over the preset. Editing a
+   part the preset sets, for the library, makes the preset Custom; editing it for one game
+   does not. Going Custom by any edit copies the preset's parts into the library's, so Custom
+   keeps what the pages showed. */
 typedef enum {
     PLAYER_PRESET_CUSTOM = 0,
     PLAYER_PRESET_LOW,
@@ -1518,7 +1561,9 @@ typedef struct {
     int present_scaling;  /* NK_PRESENT_SCALING_* */
     bool vsync;
     int fullscreen;       /* 1 on, 0 off, -1 left as the user set it */
-    bool upscaler;        /* the note says the preset does not turn on Sharper enlarging (#2122) */
+    /* Each Enhanced part's value under this preset, or -1 where the library's own value
+       stays. Only presentation parts are set: Crisp system text and Sharper enlarging. */
+    int part[PLAYER_PART_COUNT];
 } PlayerGraphicsPresetRow;
 
 /* The preset's row; NULL for Custom or a value out of range. */
@@ -1527,12 +1572,11 @@ const PlayerGraphicsPresetRow *player_graphics_preset_row(int preset);
 int player_app_graphics_preset(const PlayerApp *app);
 /* The Settings row's value: "Low", ..., "Ultra", "Handheld", or "Custom". */
 const char *player_app_graphics_preset_label(const PlayerApp *app);
-/* The main Settings page's notice line while a preset is chosen: where it applies, and a
-   value it asks for that Settings cannot set. Returns false, with out empty, for Custom.
-   *warns is set when the note names a value that is not set. Derived from the choice, so
-   it goes when the preset becomes Custom and comes back with a saved preset. */
-bool player_app_graphics_preset_note(const PlayerApp *app, char *out, size_t cap,
-                                     bool *warns);
+/* The main Settings page's notice line while a preset is chosen: where it applies, and the
+   Enhanced parts it turns on and off. Returns false, with out empty, for Custom.
+   Derived from the choice, so it goes when the preset becomes Custom and comes back with a
+   saved preset. */
+bool player_app_graphics_preset_note(const PlayerApp *app, char *out, size_t cap);
 /* Chooses the preset. The rows keep their values: only Enhanced and Ace sessions use the
    preset's. */
 void player_app_apply_graphics_preset(PlayerApp *app, int preset);
@@ -1543,6 +1587,9 @@ void player_app_cycle_graphics_preset(PlayerApp *app, int direction);
    Authentic session, or Custom, leaves `config` as it is. */
 void player_session_apply_graphics_preset(const PlayerSettings *settings, bool enhanced,
                                           NkRuntimeConfig *config);
+/* The library's value for an Enhanced part as an Enhanced or Ace session uses it: the chosen
+   preset's where it sets the part, else the library's own (settings->enhanced.part). */
+int player_settings_library_part(const PlayerSettings *settings, int part);
 void player_app_set_fps_cap(PlayerApp *app, int cap);
 void player_app_cycle_fps_cap(PlayerApp *app, int direction);
 void player_app_toggle_fullscreen(PlayerApp *app);
@@ -1584,17 +1631,6 @@ bool player_window_fit_to_display(PlayerWindowRect requested,
                                   PlayerWindowFrame frame,
                                   bool requested_position_valid,
                                   PlayerWindowRect *out);
-/* Fit the launcher UI to a window whose drawable area is `pixel_width` x
- * `pixel_height` output pixels (#1129). The design keeps the proportions the
- * letterboxed 1280x720 canvas gave it: the scale is the one the letterbox
- * used, so the screens never lay out smaller than the design. Instead of
- * leaving bars, the canvas grows along the window's longer axis, and instead
- * of stretching a finished picture, the UI is drawn straight into the output
- * pixels with a uniform scale and no offset, so text is rasterised at exactly
- * `scale` and lands on whole pixels. A high-DPI window has more pixels and
- * therefore a larger scale. */
-bool player_ui_canvas_fit(int pixel_width, int pixel_height,
-                          PlayerUiCanvas *out);
 void player_app_toggle_vsync(PlayerApp *app);
 /* Settings > Accessibility. Each choice cycles Automatic, On, Off; the interface
  * size cycles Automatic, 100, 125, 150 and 200%; the text size cycles Standard
@@ -1627,10 +1663,17 @@ const char *player_library_sort_label(PlayerLibrarySort sort);
  * choice to package checks, builds and launches. */
 
 /* Reads <user_root>/enhancements/<disc ID, lowercase>-60hz.json for `game` with
- * nk_json. Returns out->available. A showcase demo, a test program or a disc ID
- * that is not a PSP disc ID has none. */
-bool player_read_title_enhancement(const char *user_root, const GameRecord *game,
-                                   PlayerTitleEnhancement *out);
+ * nk_json; when that file does not exist, the same name in `shipped_root` (the
+ * source tree's assets/enhancements folder, NULL for none), as tools/nk_cli.py
+ * build-package --experimental-60hz does. A file in the user's data folder comes
+ * first, even when it cannot be used. Returns out->available. A showcase demo, a
+ * test program or a disc ID that is not a PSP disc ID has none. */
+bool player_read_title_enhancement(const char *user_root, const char *shipped_root,
+                                   const GameRecord *game, PlayerTitleEnhancement *out);
+/* The folder of published packages the source tree beside this player ships
+ * (<source>/assets/enhancements, the tree package_builder_find_cli finds
+ * tools/nk_cli.py in). False when there is no source tree. */
+bool player_app_shipped_enhancements_root(const PlayerApp *app, char *out, size_t out_size);
 /* Re-reads every title's enhancement package and sets each GameRecord's
  * enhancement_package_id. player_app_sync_library calls it. */
 void player_app_refresh_title_enhancements(PlayerApp *app);
@@ -1679,7 +1722,11 @@ void player_play_resolve(const PlayerSettings *settings, const char *disc_id,
  * Authentic resolution stays off. */
 void player_play_apply_logic_60(PlayerPlayResolved *play, bool logic_60);
 /* The SR_ACE line for a resolution: "off", or "v1;tier=enhanced;af=16;text=on;readout=off;
- * notice=on;wide=off;smooth=off;sas=off" (tier=ace for Ace; smooth=match is never written).
+ * notice=on;wide=off;smooth=off;sas=off;tess=off;twin=off" (tier=ace for Ace; smooth=match is never written).
+ * ";stick=<counts>" follows only for Ace with the Stick dead zone part on and a title whose
+ * catalog entry declares a dead zone (stick_counts > 0); a missing stick is off.
+ * ";load=fast" follows only for Ace with the Short loads part on; a missing load is off.
+ * ";cull=on" follows, last, only for Ace with the Wider culling part on; a missing cull is off.
  * Returns false when it does not fit. */
 bool player_play_launch_line(const PlayerPlayResolved *play, char *out, size_t cap);
 /* The presentation upscaler a resolution asks for (NkRuntimeConfig.present_upscale, exported as
@@ -1733,8 +1780,10 @@ void player_app_enhanced_page_cycle_mode(PlayerApp *app);
  * library's. On a title's page whose game is gone, it closes the page instead. */
 void player_app_enhanced_page_cycle_part(PlayerApp *app, int part);
 void player_app_toggle_share_system_libraries(PlayerApp *app);
+/* Settings > Build speed: Background, Balanced, Fastest, then round; saved at once. The
+   next build uses it; a running one keeps the speed it started with. */
+void player_app_cycle_build_speed(PlayerApp *app);
 void player_app_adjust_volume(PlayerApp *app, int delta);
-void player_app_move_focus(PlayerApp *app, int delta, int focus_count);
 
 /* Index of the library entry carrying this disc ID, or -1 if there is none.
    nk_library_add_or_update updates an existing record IN PLACE, so the entry
@@ -1764,23 +1813,6 @@ int player_app_find_game_by_image(const PlayerApp *app, const char *disc_id,
    per-title controller mapping choice (#520) needs one to name. */
 const char *player_app_selected_disc_id(const PlayerApp *app);
 
-/* Move the library selection by `delta` entries, clamped to the library. */
-void player_app_move_selection(PlayerApp *app, int delta);
-
-/* How many library cards fit in the current window, at least one. */
-int player_app_visible_library_cards(const PlayerApp *app);
-
-/* Whether the settings renderer has enough client width and height for its
- * two-column layout. This is pure state logic so the threshold is tested
- * independently of SDL and the renderer cannot drift from the layout contract. */
-bool player_settings_uses_two_columns(int window_width, int window_height);
-
-/* Horizontal offset, from the card's left edge, where the settings right
- * column begins. It is never left of the end of the launcher fullscreen
- * control plus a gutter, so the columns cannot overlap at any card width the
- * two-column layout accepts. */
-float player_settings_second_column_offset(float card_width);
-
 /* Whether the event loop should attempt the launcher-to-game focus handoff on
  * this frame. Pure state logic so the once-per-launch contract is tested
  * without SDL: the launcher stays open behind the game and hands it the
@@ -1796,17 +1828,24 @@ bool player_app_should_attempt_window_handoff(bool interactive_window,
  * the exact path production will choose instead of assuming a sequence. */
 void player_app_next_boot_event_path(char *out, size_t out_size);
 
-/* How many keyboard/gamepad focus stops the current view offers, at least
- * one. Pure state logic (no SDL): the renderer draws its buttons in this
- * exact order, so the event loop can clamp focus_index and tests can pin
- * the contract without opening a window. */
-int player_app_focus_count(const PlayerApp *app);
-
 /* Process launch integration */
 bool player_app_launch_game(PlayerApp *app, int game_index);
 void player_app_stop_game(PlayerApp *app);
 void player_app_stop_stalled_game(PlayerApp *app);
 void player_app_keep_waiting_for_stalled_game(PlayerApp *app);
+
+/* The render notice (#2151): a heading and a sentence that name the slower path a fallback
+   takes, and what may fix it. False, with both NULL, for no fallback. */
+bool player_render_notice_text(NkRenderFallback fallback, const char **heading,
+                               const char **text);
+/* The notice for disc_id's page: the latest launch's fallback when that launch started this
+   disc, its render_path event has been read, and its notice is not hidden. */
+bool player_app_render_notice(const PlayerApp *app, const char *disc_id, const char **heading,
+                              const char **text);
+/* Hide: that fallback's notice stays hidden for the rest of this player session. */
+void player_app_hide_render_notice(PlayerApp *app);
+/* Reads one line of the session's boot events for the render_path event. */
+void player_app_consume_render_path_line(PlayerApp *app, const char *line);
 
 /* One PLAY, split so its slow part can leave the UI thread (#1298). Checking a
  * package hashes every artifact it lists (hundreds of MB for a retail title),
@@ -1843,6 +1882,8 @@ typedef struct {
     NkLaunchDataRootStatus data_root_status;
     char package_error[2048];
     char data_root_reason[1024];
+    /* The play mode the session runs in (Authentic, Enhanced or Ace). */
+    PlayerPlayMode play_mode;
     NkLaunchSession session;
 } PlayerLaunchWork;
 
@@ -2071,6 +2112,18 @@ size_t player_app_rebuild_banner_text(const PlayerApp *app, char *out, size_t ou
                                       bool *offers_rebuild_all);
 void player_app_rebuild_banner_dismiss(PlayerApp *app);
 
+/* The console nickname (#2197). The first-launch prompt asks for a nickname or
+   user name once: it shows until it is answered, and not while settings.json
+   is a newer player's, which this session cannot save. Its answer is the
+   nickname to save, or NULL for Skip, which keeps the current one (on a first
+   launch, NK_NICKNAME_DEFAULT). A nickname nk_nickname_valid refuses is not
+   taken: the answer returns false and the prompt stays. */
+bool player_app_nickname_prompt_visible(const PlayerApp *app);
+bool player_app_nickname_prompt_answer(PlayerApp *app, const char *nickname);
+/* Settings > Nickname: saves a new nickname at once. A value nk_nickname_valid
+   refuses changes nothing and returns false, so the old nickname stays. */
+bool player_app_set_nickname(PlayerApp *app, const char *nickname);
+
 /* PLAY for a game. An outdated game whose disc is in place asks first (the
    reminder: Rebuild now or Play anyway) unless Play anyway was chosen for it
    this session; anything else asks the event loop to launch. Returns true when
@@ -2089,6 +2142,25 @@ void player_app_rebuild_reminder_rebuild_now(PlayerApp *app);
    from a newer player is not read. */
 bool player_app_rebuild_all(PlayerApp *app);
 bool player_app_rebuild_enqueue(PlayerApp *app, const char *disc_id);
+/* The title page's Add to queue: the game goes last in the build queue (a
+   rebuild if an older Nakagawa built it), and the queue starts if it was idle.
+   False when it is already waiting or building, or its disc ID is not one the
+   queue file can hold. */
+bool player_app_build_queue_add(PlayerApp *app, int game_index);
+/* Remove from queue: a game that waits leaves the queue (the one building
+   stays; Cancel build stops it). The queue ends once nothing waits. */
+bool player_app_build_queue_remove(PlayerApp *app, const char *disc_id);
+/* Moves a waiting game one place earlier (direction < 0) or later (> 0), past
+   the next game that waits. False at either end or for the one building. */
+bool player_app_build_queue_move(PlayerApp *app, const char *disc_id, int direction);
+/* A paused queue goes on. */
+bool player_app_build_queue_resume(PlayerApp *app);
+/* The game's place in the queue, from 1 (the one building, or the next), and
+   the number of games waiting or building in *out_total; 0 when it is not
+   waiting or building. */
+int player_app_build_queue_place(const PlayerApp *app, const char *disc_id, int *out_total);
+/* The library's queue line has something to show: games wait or build. */
+bool player_app_build_queue_has_waiting(const PlayerApp *app);
 void player_app_rebuild_queue_step(PlayerApp *app);
 bool player_app_rebuild_queue_load(PlayerApp *app);
 bool player_app_rebuild_queue_save(const PlayerApp *app);
@@ -2114,6 +2186,11 @@ typedef struct {
        queue or rebuilds, and not without its disc. */
     bool can_rebuild;
     float fraction;
+    /* Its build queue entry, when it has one: a first build (not a rebuild),
+       and its place while it waits (player_app_build_queue_place). */
+    PlayerQueueKind kind;
+    int queue_place;
+    int queue_total;
 } PlayerRebuildCard;
 #define PLAYER_REBUILD_REMINDER_TEXT \
     "This game was built by an older Nakagawa. Rebuild it for the latest fixes."
@@ -2200,6 +2277,17 @@ void player_app_set_build_error(
 void player_app_set_online_mode(PlayerApp *app, bool on);
 void player_app_toggle_online_feature(PlayerApp *app, int feature); /* 0 news, 1 reports */
 void player_app_toggle_update_check_at_start(PlayerApp *app);
+/* Discord status (#2259). The switch stays off while nk_discord_available() is false. */
+void player_app_toggle_discord_presence(PlayerApp *app);
+/* What Discord shows now: the running game's title, play mode and start time. False when no
+   game runs or nothing can be shown. It ignores the setting; player_app_discord_tick checks
+   that. */
+bool player_app_discord_activity(const PlayerApp *app, NkDiscordActivity *out);
+/* Once per frame: with the setting on and the feature available, shows the running game (or
+   clears it when none runs); otherwise closes any connection. */
+void player_app_discord_tick(PlayerApp *app, uint64_t now_ms);
+/* Clear Discord status and close the connection, as the player exits. */
+void player_app_discord_shutdown(PlayerApp *app);
 void player_app_set_developer_mode(PlayerApp *app, bool on);
 /* The wizard's options step: skipping keeps both switches off. */
 void player_app_wizard_skip_options(PlayerApp *app);
@@ -2226,5 +2314,93 @@ size_t player_dev_log_text(const PlayerApp *app, char *out, size_t out_size);
 bool player_dev_log_save(PlayerApp *app);
 bool player_app_open_developer_log(PlayerApp *app);  /* false without developer mode */
 void player_app_close_developer_log(PlayerApp *app);
+
+/* ---- Start one game directly: --launch-title (#2152) ----
+ *
+ * `nakagawa_player --launch-title=<value>` starts one library game without the launcher
+ * window, through the same package check and launch as PLAY, and waits for the game to end,
+ * so a Steam shortcut tracks the game while it runs. The value is the game's disc ID, or
+ * "<disc ID>:<SHA-1 of the image>" when another image in the library has that disc ID (a
+ * retail disc beside its fan translation). Library indexes change as games come and go, so a
+ * shortcut never names one. */
+#define PLAYER_LAUNCH_TITLE_ARG "--launch-title="
+#define PLAYER_LAUNCH_TITLE_VALUE_MAX (NK_MAX_DISC_ID_LEN + 48)
+
+typedef enum {
+    PLAYER_LAUNCH_TITLE_FOUND = 0,
+    PLAYER_LAUNCH_TITLE_MALFORMED,   /* not a disc ID with an optional :SHA-1 */
+    PLAYER_LAUNCH_TITLE_MISSING,     /* no game in the library has it */
+    PLAYER_LAUNCH_TITLE_AMBIGUOUS    /* several images have the disc ID; the value needs :SHA-1 */
+} PlayerLaunchTitleResult;
+
+/* The value that names the user's library game at game_index. False for a bundled demo or
+ * sample, or a disc ID that is not letters, digits, '-' and '_'. */
+bool player_app_launch_title_value(const PlayerApp *app, int game_index, char *out,
+                                   size_t out_size);
+/* The library game a --launch-title value names. `message` (optional) gets a sentence for the
+ * user when it is not FOUND. */
+PlayerLaunchTitleResult player_app_find_launch_title(const PlayerApp *app, const char *value,
+                                                     int *game_index, char *message,
+                                                     size_t message_size);
+
+/* ---- Add to Steam (#2152) ----
+ *
+ * The title page's Add to Steam writes one non-Steam shortcut for the game into the user's
+ * local Steam library (src/core/nk_steam_shortcuts.h): this program, started in its own folder
+ * with --launch-title for the game (and --user-data-root when this process has one). Steam is
+ * found from this PC's own settings; nothing is downloaded and no network call is made. The
+ * shortcut carries no picture of its own: the player keeps disc art in memory only
+ * (player_ui_art.h), so Steam shows the executable's icon. */
+typedef enum {
+    PLAYER_STEAM_READY = 0,         /* Steam and an account were found; nothing written yet */
+    PLAYER_STEAM_ADDED,             /* a new shortcut */
+    PLAYER_STEAM_UPDATED,           /* the game's shortcut from another Nakagawa folder points here */
+    PLAYER_STEAM_ALREADY,           /* the same shortcut is there: nothing written */
+    PLAYER_STEAM_NOT_A_GAME,        /* a demo or sample, or a disc ID a shortcut cannot name */
+    PLAYER_STEAM_UNSUPPORTED,       /* this system cannot find Steam by itself */
+    PLAYER_STEAM_NOT_FOUND,         /* Steam is not installed for this user */
+    PLAYER_STEAM_NO_ACCOUNT,        /* no account has signed in to Steam on this PC */
+    PLAYER_STEAM_RUNNING,           /* Steam runs (or may): nothing written */
+    PLAYER_STEAM_UNREADABLE,        /* Steam's file does not parse or is too large: left alone */
+    PLAYER_STEAM_BACKUP_FAILED,     /* no verified backup, so nothing written */
+    PLAYER_STEAM_WRITE_FAILED,      /* the new file could not be written or did not verify */
+    PLAYER_STEAM_NO_PROGRAM         /* this program's own path is unknown or unusable */
+} PlayerSteamOutcome;
+
+#define PLAYER_STEAM_NAME_MAX 64u
+#define PLAYER_STEAM_OPTIONS_MAX (MAX_PATH_LEN + 96)
+
+typedef struct {
+    char disc_id[NK_MAX_DISC_ID_LEN];   /* the game the plan is for */
+    char app_name[NK_MAX_TITLE_LEN];
+    char exe[NK_MAX_PATH];
+    char start_dir[NK_MAX_PATH];
+    char launch_options[PLAYER_STEAM_OPTIONS_MAX];
+    char root[NK_MAX_PATH];             /* Steam's folder */
+    NkSteamAccount accounts[NK_STEAM_ACCOUNT_CAP];
+    char account_names[NK_STEAM_ACCOUNT_CAP][PLAYER_STEAM_NAME_MAX]; /* "" when unnamed */
+    size_t account_count;
+    bool ready;                         /* Steam and an account were found: Add can run */
+    bool portable;                      /* moving the folder needs Add to Steam again */
+    PlayerSteamOutcome outcome;
+    char backup_path[NK_MAX_PATH];      /* the last add's backup, or "" */
+} PlayerSteamPlan;
+
+/* Fills plan for the game: its shortcut, Steam's folder and the accounts, and returns
+ * plan->outcome (READY, or why nothing can be added). steam_root NULL finds Steam on this PC;
+ * exe NULL is this program (a test names both). Writes nothing. */
+PlayerSteamOutcome player_app_plan_steam_shortcut(const PlayerApp *app, int game_index,
+                                                  const char *steam_root, const char *exe,
+                                                  PlayerSteamPlan *plan);
+/* Adds or updates the shortcut for plan->accounts[account], after a verified backup, unless
+ * Steam runs (running NULL asks nk_steam_client_running). `stamp` names the backup
+ * (YYYYMMDD-HHMMSS). Returns and records the outcome; a READY plan is needed. */
+PlayerSteamOutcome player_steam_add(PlayerSteamPlan *plan, size_t account,
+                                    NkSteamRunningFn running, const char *stamp);
+/* The plain-words sentence for plan->outcome: what happened and what to do. Paths in the
+ * user's profile are shown with the profile folder shortened (player_display_text). */
+size_t player_steam_outcome_text(const PlayerSteamPlan *plan, char *out, size_t out_size);
+/* Whether the outcome is a success the user can act on (ADDED, UPDATED, ALREADY). */
+bool player_steam_outcome_ok(PlayerSteamOutcome outcome);
 
 #endif /* NAKAGAWA_PLAYER_STATE_H */

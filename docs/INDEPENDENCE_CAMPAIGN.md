@@ -193,6 +193,7 @@ Sizes are `wc -l` at base `6a4f359`, as above, and are not refreshed.
 | G19 | Texture replacement `src/rt/texrepl.c` (quick hash, palette hash and pack lookup; added 2026-11-06, #1880) | PPSSPP (`GPU/Common/TextureDecoder.cpp`, `GPU/Common/TextureReplacer.cpp`, `GPU/Common/TextureCacheCommon.cpp`) at 3bc60270, derived-translated | 965 | Ace texture replacement (`tex_xs_offer` in `ge_gpu.c`) | `texrepl-selftest` (PPSSPP hash vectors), `gpu-texscale-selftest` replace cell | None: host-only lookup of user packs; must stay bit-compatible with PPSSPP packs |
 | G20 | FSR 3.1.6 host and passes `src/rt/fsr3_host.c` + `src/rt/fsr3_host.h` + `src/rt/fsr3_jitter.c` + `src/rt/fsr3_jitter.h` + `src/rt/gpu_sdl3vk/fsr3_pass.c` (upscaler) and `src/rt/fsr3_fg_host.c` + `src/rt/fsr3_fg_host.h` + `src/rt/gpu_sdl3vk/fsr3_fg_pass.c` (frame generation); added 2026-11-06, #2081 | AMD FidelityFX SDK v2.4.0 at 7539ae8b6, MIT, derived-translated from its C++ host and Vulkan backend (sources named in each file and in `third_party/fidelityfx_sdk/PROVENANCE.md`) | 3,857 | The imported FSR 3 HLSL passes (`third_party/fidelityfx_sdk/`) and their `fsr3*_comp.inc` embeddings | `fsr3-host-selftest` and `fsr3-fg-host-selftest` (records of AMD's unmodified code on synthetic inputs), `fsr3-mutants`, `fsr3-fg-mutants`, `fsr3-pass-selftest` | None: opt-in host presentation; must stay equivalent to AMD's host so the passes get the inputs they were designed for |
 | G21 | Media Engine boundary `src/rt/hle_videocodec.c` (sceVideocodec, sceMpegbase, sceAudiocodec under a disc `mpeg.prx`; added 2026-11-07, #286) | JPCSP at 00ac4d6d (GPL-3.0-or-later; context words of `sceVideocodec.java`, `sceMpegbase.java`, `sceMeAudio.java`, `sceAudiocodec.java`) and uOFW at 28306bb5 (MIT; `audiocodec.c` wrapper checks), derived-translated (`src/rt/PROVENANCE.md`) | 1260 | A title's own `mpeg.prx` once started (guest-owned `sceMpeg`), the host H.264 seam and the ATRAC3plus decoder beneath it | `videocodec-selftest` (synthetic I_PCM H.264 and ATRAC3plus fixtures), the guest-owned `sceMpeg` cell in `hle-thread-selftest` | It is the HLE floor under LLE `mpeg.prx`: the Media Engine image is firmware and is never run, so this boundary stays; its synthetic words are replaced by PSP measurements (W-LLE-1), not rewritten |
+| G22 | OpenXR API headers `src/rt/xr/openxr/openxr.h` + `src/rt/xr/openxr/openxr_platform.h` + `src/rt/xr/openxr/openxr_platform_defines.h` (added 2026-11-08, #791) | Khronos OpenXR-SDK release-1.1.65 at 24a1f2b9, Apache-2.0 OR MIT, byte-identical imports (`src/rt/xr/openxr/PROVENANCE.md`) | 16,196 | The project-authored OpenXR module `src/rt/xr/nk_xr*.c`, which loads the runtime at run time | `xr-selftest` (fake runtime), byte identity against the pinned upstream blobs | None: opt-in VR presentation; public API declarations, kept identical to the pin |
 
 ## 3. Third-party dependencies — keep, with reasons
 
@@ -343,6 +344,10 @@ replacement by an LLE path that makes the component unnecessary ·
   boundary stays HLE. It stays labelled `derived-translated` with the JPCSP and uOFW notices; its
   synthetic context words are replaced by PSP measurements (W-LLE-1), and the synthetic fixtures in
   `videocodec-selftest` validate the decode and conversion paths.
+- **G22 OpenXR API headers → evidence, not rewrite.** Khronos's public API declarations,
+  imported byte-identical from the pinned OpenXR-SDK release with both licence texts beside them;
+  like the Vulkan headers they are submission API, not independence-relevant code. Validate by
+  byte identity against the pin and the module's `xr-selftest`.
 
 ## 5. Clean-room protocol for AI-agent work
 

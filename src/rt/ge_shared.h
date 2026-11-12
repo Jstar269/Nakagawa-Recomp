@@ -61,6 +61,7 @@ typedef struct {
     uint32_t tex_mip_addr[7], tex_mip_bufw[7];
     uint8_t tex_mip_wlog2[7], tex_mip_hlog2[7];
     uint32_t tex_max_level;                  /* TEXMODE bits 16-18: highest level sampled */
+    uint32_t tex_multi_clut;                 /* TEXMODE bit 8: per-level CLUT offset (#2031) */
     uint32_t tex_level_mode;                 /* TEXLEVEL bits 0-1: 0 auto, 1 constant, 2 slope */
     float tex_lod_bias;                      /* TEXLEVEL bits 16-23: signed 4.4 level bias */
     float tex_lod_slope;                     /* TEXLODSLOPE */
@@ -299,7 +300,7 @@ typedef enum GeProfileCheck {
 
 /* GPU rasterizer hooks. The primitive hooks return 1 when the primitive was taken by
  * the GPU backend (the software rasterizer is skipped) — in the full GPU renderer they
- * always take it. flush(reason) is called at GE sync points ("listend", "loadclut");
+ * always take it. flush(reason) is called at GE sync points ("listend", "xfersrc");
  * the backend decides what each requires. vram_dirty(addr,bytes) is a POST-WRITE notification:
  * guest memory already contains the CPU's new bytes. An overlapping persistent target must
  * merge exactly that byte span, preserve newer GPU bytes outside it, and prevent an older
@@ -455,6 +456,12 @@ int       ge_wide_wing_for(int window_w, int window_h);
 /* Turn Fill on with wing width `wing` (rounded down to a multiple of 4, capped), or off with 0.
  * A change clears every canvas. Returns the width in use. */
 int       ge_wide_set_wing(int wing);
+/* Whether the clip_x_widen hook may scale (the run's Ace cull key, after Widescreen is up), and how
+ * many matrices it has scaled so far (the run reports the key as confirmed once that is above 0). */
+void      ge_wide_set_cull(int on);
+unsigned long ge_wide_cull_calls(void);
+/* Matrix uses left unscaled because the hook's 4096-entry table was full (contract 11.3.6). */
+unsigned long ge_wide_cull_untracked(void);
 int       ge_wide_wing(void);
 /* The display was given framebuffer `fb_addr`: its canvas exists from now on. The last two
  * distinct addresses keep canvases (double buffering). No effect while Fill is off. */
@@ -479,11 +486,67 @@ int       ge_wide_picture(uint32_t fb_addr, const uint32_t *frame, uint32_t *out
 /* The software canvas of fb_addr: GE_WIDE_CANVAS_W raw framebuffer words per row, in format
  * *fmt (GE pixel format 0..3); NULL when none was drawn by the software rasterizer. */
 const uint32_t *ge_wide_canvas(uint32_t fb_addr, int *fmt);
+/* The software renderer's host twin, Enhanced 32-bit colour (#2050, ENHANCEMENT_CONTRACT.md
+ * 10.11; ge.c's comment at s_twin_mode). ge_twin_present_row fills `width` RGBA8 words (red in
+ * the low byte) of row `y` of the framebuffer at fbaddr (GE format fmt 0..3, stride in pixels,
+ * 0 = 512): the twin's colour where its slot is valid, else the pixel as the CPU presenter
+ * converts it. It returns 0, and writes nothing, while the twin is off, while a GPU backend is
+ * registered, with SR_GPU_TWIN_CAPTURE=authentic, or for a row outside VRAM. ge_twin_mode: -1
+ * not decided yet, 0 off, 1 full colour, 2 native. ge_twin_set_mode (selftests): 1 or 2 turn it
+ * on with every slot empty (returns 0 when it cannot be allocated), 0 turns it off, -1 decides
+ * again from the environment on the next colour write; each frees the slots it no longer needs. */
+int       ge_twin_present_row(uint32_t fbaddr, int fmt, uint32_t stride, int y, uint32_t *out_rgba, int width);
+int       ge_twin_mode(void);
+int       ge_twin_set_mode(int mode);
 /* GPU transform and lighting (#318): on with SR_GPU_TNL=1, or set here (-1 re-reads the
  * environment). The counts are PRIMs the backend drew and PRIMs ge.c found ineligible or the
  * backend declined, since the last reset. */
 void      ge_tnl_set_enabled(int on);
 void      ge_tnl_counts(unsigned long long *taken, unsigned long long *cpu, int reset);
+/* Why each of those `cpu` PRIMs kept ge.c's T&L: one count per reason. A PRIM is counted once,
+ * under the first reason ge.c finds: the draw's state in enum order up to LIGHT_RANGE, then
+ * ALLOC, then each vertex in turn (VERTEX_RANGE for its position, normal or weights before
+ * TEXCOORD_RANGE for its UV), then CLIP, then BACKEND. The counts sum to `cpu`, and a reset
+ * through either function clears both.
+ * A PRIM never offered (the switch off, no tnl_prim hook, fewer than 3 vertices, Fill on) is in
+ * neither, nor is one dropped because its depth surface could not be prepared.
+ * With SR_GESTAT, while the route is on (SR_GPU_TNL=1 and a backend with tnl_prim, as with
+ * SR_GPU_GE=1, from the first transform-mode triangle draw), each stat window prints
+ *   GESTAT-TNL f=<vblank> taken=<n> cpu=<n>: clear=<n> flat=<n> ... backend=<n>
+ * with every reason in enum order: that window's counts alone, kept apart from these totals and
+ * their resets. */
+typedef enum GeTnlReason {
+    GE_TNL_WHY_CLEAR = 0,       /* clear mode */
+    GE_TNL_WHY_FLAT,            /* flat shading */
+    GE_TNL_WHY_DIAGNOSTIC,      /* the GE timing model, SR_RTRACE or the primitive profile is on */
+    GE_TNL_WHY_TEXGEN,          /* texture map mode 1 or 2 */
+    GE_TNL_WHY_MATRIX_RANGE,    /* a WORLD, VIEW, PROJ or bone entry outside 0 or 2^-40..2^40 */
+    GE_TNL_WHY_VIEWPORT_RANGE,  /* a viewport scale or centre outside that range */
+    GE_TNL_WHY_TEXCOORD_RANGE,  /* the texture scale or offset, or a vertex UV, outside it */
+    GE_TNL_WHY_FOG_RANGE,       /* a finite fog end or slope outside it */
+    GE_TNL_WHY_SPECULAR_POW,    /* a specular or powered-diffuse light while ge_pow is inexact */
+    GE_TNL_WHY_LIGHT_RANGE,     /* a light position or attenuation outside that range */
+    GE_TNL_WHY_ALLOC,           /* the vertex or triangle buffer could not grow */
+    GE_TNL_WHY_VERTEX_RANGE,    /* a position, normal or weight outside that range */
+    GE_TNL_WHY_CLIP,            /* the clip-space bound: near plane, screen grid or depth range */
+    GE_TNL_WHY_BACKEND,         /* the backend's tnl_prim declined */
+    GE_TNL_WHY_COUNT
+} GeTnlReason;
+void        ge_tnl_reason_counts(unsigned long long out[GE_TNL_WHY_COUNT], int reset);
+const char *ge_tnl_reason_name(int why);   /* "clear", "flat", ...; NULL out of range */
+/* Finer Bezier and spline patches (#2053, ENHANCEMENT_CONTRACT.md 10.14): a host factor on the
+ * guest's PATCHDIVISION for triangle patches, from the tess key of the SR_ACE launch line (off,
+ * 2, 3 or 4; an authentic run has none). It alters GE timing under SR_GE_TIMING=1.
+ * ge_patch_tess_init(factor) is called with the run's effective factor: 0 or 1 leave the PSP's
+ * division, 2..4 turn the feature on, print its start lines and register ge_patch_tess_exit_report
+ * with sr_at_process_end, which prints the run's `PATCH_TESS: exit (quads=, capped_draws=)` line.
+ * It returns the factor in use (1: the PSP's division). ge_patch_tess_set is the selftest seam
+ * (1..4, anything else is 1). The counts are since the run started: patch quads drawn, and
+ * draws whose factor was lowered to stay within the vertex cap. */
+int       ge_patch_tess_init(int factor);
+int       ge_patch_tess_set(int factor);
+void      ge_patch_tess_counts(unsigned long long *quads, unsigned long long *capped);
+void      ge_patch_tess_exit_report(void);
 /* The specular and powered-diffuse power light_vertex uses: 0 (the default) the C library's
  * powf, 1 ge_powf, the integer power psp_tnl.vert repeats bit for bit, which also lets the GPU
  * T&L take those lights. The selftest seams give ge_powf and its 64 x 64-bit high product
@@ -519,7 +582,8 @@ void ge_fb_access_counts(unsigned long long *direct, unsigned long long *accesso
  * tex_w*tex_h words; layout is row-major, r|g<<8|b<<16|a<<24. */
 void      ge_decode_tex_rgba(uint32_t *out);
 /* Decode mip level `level` (1-7) of the CURRENT texture the same way: the level's own
- * address, buffer width and size (tex_mip_*), with level 0's format, swizzle and CLUT.
+ * address, buffer width and size (tex_mip_*), with level 0's format, swizzle and CLUT
+ * (TEXMODE's multi-CLUT bit offsets the level's CLUT entries, #2031).
  * out must hold that level's (1 << tex_mip_wlog2) * (1 << tex_mip_hlog2) words. */
 void      ge_decode_tex_level_rgba(uint32_t level, uint32_t *out);
 /* Decode one linear surface of guest memory to RGBA8 for the developer VRAM viewer (#314):
@@ -548,6 +612,48 @@ int       ge_vram_cli_decode(uint32_t addr, uint32_t width, uint32_t height, uin
  * while a GE capture is active, when the texture's bytes are not all readable, when it is
  * larger than GE_VRAM_VIEW_MAX_*, or when `capacity` words cannot hold it. */
 int       ge_vram_decode_bound_texture(uint32_t *out, size_t capacity);
+/* The developer VRAM viewer's sources and its decode (#314), shared by gui.c's pause page and
+ * vram-view-identity-selftest so both run the same code. A window is an address, a row stride
+ * and a size in pixels, and a format: a colour PSM 0-3, GE_VRAM_VIEW_DEPTH16, or for the
+ * texture source its own PSM 0-10. */
+#define GE_VRAM_VIEW_DEPTH16 11u
+enum {
+    GE_VRAM_VIEW_DISPLAY = 0,   /* the framebuffer on screen (the display's, not the GE's) */
+    GE_VRAM_VIEW_DRAW,          /* the GE's render target */
+    GE_VRAM_VIEW_DEPTH,         /* the GE's depth buffer */
+    GE_VRAM_VIEW_TEXTURE,       /* level 0 of the texture the last draw bound */
+    GE_VRAM_VIEW_SOURCES
+};
+typedef struct {
+    uint32_t addr, stride, width, height, format;
+} GeVramWindow;
+typedef struct {
+    GeVramWindow window[GE_VRAM_VIEW_SOURCES];
+    uint8_t present[GE_VRAM_VIEW_SOURCES];   /* the display or the GE state names that surface */
+    uint8_t texture_swizzled;
+} GeVramSources;
+/* The surfaces the viewer offers, as the VRAMDUMP sidecar names them: the displayed
+ * framebuffer (shown_valid, at shown_addr with shown_stride and colour format shown_fmt,
+ * 480 x 272), the draw target (ge_framebuffer(), FBW, FBPSM), the depth buffer (ZBP folded onto
+ * 0x04000000, ZBW or else FBW or else 512, DEPTH16) and the bound texture (its address, buffer
+ * width, size and PSM). A surface the state does not name is absent. Reads only. */
+void      ge_vram_view_sources(uint32_t shown_addr, uint32_t shown_stride, uint32_t shown_fmt,
+                               int shown_valid, GeVramSources *out);
+/* Decodes what the viewer shows for `window` into `out` (`capacity` words) with alpha made
+ * opaque, as the PSP display shows a framebuffer: the bound texture through
+ * ge_vram_decode_bound_texture when `texture` is set (the window then only names it), any other
+ * window through ge_vram_decode_surface. Stores the decoded size in *width and *height.
+ * Returns GE_VRAM_VIEW_SHOWN, or a refusal; after a refusal `out` holds nothing to show
+ * (a surface whose later row stops being readable mid-copy may have written earlier rows). */
+enum {
+    GE_VRAM_VIEW_SHOWN = 0,
+    GE_VRAM_VIEW_UNREADABLE,          /* the window cannot be read now */
+    GE_VRAM_VIEW_TEXTURE_REFUSED,     /* outside guest memory, over 512 pixels, or a GE capture runs */
+    GE_VRAM_VIEW_NO_ROOM              /* `out`, or a surface's window, is NULL; or `out` is
+                                         smaller than the window */
+};
+int       ge_vram_view_decode(int texture, const GeVramWindow *window, uint32_t *out,
+                              size_t capacity, uint32_t *width, uint32_t *height);
 /* The CLUT loads seen so far: the size of the last one and the largest, in bytes (0 before the
  * first). PPSSPP's palette identity for texture replacement is built from them. */
 void      ge_clut_load_extent(uint32_t *last_bytes, uint32_t *max_bytes);

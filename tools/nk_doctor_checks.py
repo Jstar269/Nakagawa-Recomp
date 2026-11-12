@@ -2113,9 +2113,9 @@ def check_typography_runtime(
 ) -> None:
     """Report whether SDL3_ttf and its resolved closure sit beside the player.
 
-    The launcher resolves SDL3_ttf at run time and falls back to the SDL bitmap
-    font only as a logged last resort, so an unstaged typography runtime is
-    always a named finding, never a silent pass. The closure is the mechanical
+    The launcher draws all its text with SDL3_ttf and has no fallback font:
+    without it the player says so and exits with code 4, so an unstaged
+    typography runtime is always a named finding, never a silent pass. The closure is the mechanical
     PE import walk from tools/stage_runtime_dlls.py, stopping at Windows system
     DLLs.
     """
@@ -2152,8 +2152,8 @@ def check_typography_runtime(
             detail=f"searched {searched}",
             remediation=(
                 "Install mingw-w64-ucrt-x86_64-sdl3_ttf (or set SDL3_TTF_DLL) and run "
-                "'mingw32-make player'; without it the player falls back to the SDL "
-                "bitmap font and logs the fallback at startup."
+                "'mingw32-make player'; without it the launcher cannot start, and the "
+                "player says so and exits with code 4."
             ),
         )
         report.fail(

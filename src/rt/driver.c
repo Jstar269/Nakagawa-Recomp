@@ -29,6 +29,7 @@
 #include "flight_recorder.h"
 #include "prx_loader.h"
 #include "ace.h"
+#include "ge_shared.h"
 #include "videorec.h"
 
 #include <errno.h>
@@ -44,6 +45,7 @@ void sr_register_all(void);
 extern void sr_audio_pause_enter(void);
 extern void sr_audio_pause_leave(void);
 extern int sr_audio_pause_script_ready(void);
+extern int sr_audio_init(void);
 
 /* The window's overlay callbacks join once gui_init has a presenter that can draw it. */
 static SrPauseHost s_driver_pause_host = {
@@ -55,9 +57,13 @@ static SrPauseHost s_driver_pause_host = {
 
 /* A scheduler run that ends without the guest ending it stops at the scheduler's next
  * boundary (#1377): the window reports an acceptance launch's last frame or the person's quit
- * (gui_stop_requested), and an SR_GE_CAPTURE_EXIT capture asks to end once written. */
+ * (gui_stop_requested), and an SR_GE_CAPTURE_EXIT capture asks to end once written. A SAVE
+ * parked at one of its preemption points holds the stop for up to 5 s of guest time, so it can
+ * finish first (#1296, sr_savedata_stop_deferred). */
+int sr_savedata_stop_deferred(uint64_t now_us);   /* savedata.c */
 static int driver_stop_requested(void) {
-    return ge_capture_exit_due() || gui_stop_requested();
+    if (!ge_capture_exit_due() && !gui_stop_requested()) return 0;
+    return !sr_savedata_stop_deferred(sched_vtime_us());
 }
 
 /* An end of main once the guest has run: a recording (#1273) names it and the exit status
@@ -536,6 +542,10 @@ int main(int argc, char **argv) {
          * the mixer (the headless gate) refuses it, and ace_finish reports it as never run. */
         if (ace_effective()->sas == ACE_SAS_SINC && sr_hle_sas_set_band_limited(1))
             ace_confirm(ACE_FEATURE_SAS);
+        /* tess=2..4 (#2053): finer Bezier and spline patches, read from the line, so an
+         * authentic run (g_ace_on 0, an all-zero effective config) never gets them. */
+        if (ace_effective()->tess > 1 && ge_patch_tess_init(ace_effective()->tess) > 1)
+            ace_confirm(ACE_FEATURE_TESS);
         (void)atexit(ace_finish);
     }
 
@@ -701,6 +711,20 @@ have_image:;
          * is process-start-only; LoadExec uses the explicit teardown/rebind seam below. */
         sched_init(&s);
         sched_preempt_timer_start();
+        /* The host audio device opens here, once, before the guest's first instruction
+         * (#2361). Opening it takes tens of milliseconds, and every guest thread runs on this
+         * one host thread, so an open at the guest's first audio call would stall sound and
+         * picture together just as the game begins to play. It comes after
+         * sched_preempt_timer_start, which raises this thread's priority in a paced run (the
+         * turbo and deterministic clocks raise nothing): on Linux the threads a raised thread
+         * creates inherit its nice value, and SDL's audio device thread is created by this
+         * open. sr_audio_init makes the same decision as at a first audio call:
+         * SR_AUDIO_DISABLED=1, SR_AUDIO_BACKEND=null (none, 0, off), or SR_HEADLESS=1 without
+         * SR_AUDIO_BACKEND opens nothing, and a failed open is reported once and the run goes
+         * on silently, so the result is not needed here. Outside the LoadExec loop: a replacement
+         * program keeps the open device. A run without the scheduler (below) opens the device
+         * at its first audio call. */
+        (void)sr_audio_init();
         for (;;) {
             sr_driver_boot_event("BOOT_EVENT phase=guest_start mode=scheduler entry=0x%08x", entry);
             sched_run(entry, s.r[4], s.r[5]);

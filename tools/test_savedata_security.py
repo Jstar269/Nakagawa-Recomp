@@ -68,7 +68,9 @@ void sr_heap_note_write(uint32_t a, uint32_t w, uint32_t v, uint32_t p)
     { (void)a; (void)w; (void)v; (void)p; }
 void sr_heap_note_bulk_write(uint32_t a, uint32_t w, uint32_t p)
     { (void)a; (void)w; (void)p; }
-uint32_t sched_current_uid(void) { return 0; }
+/* The calling guest thread: 0 (none) except in the preemption cases, which name an owner. */
+static uint32_t g_pp_uid;
+uint32_t sched_current_uid(void) { return g_pp_uid; }
 uint32_t sr_get_ge_status(void) { return 0; }
 /* src/rt/hle.c supplies the host Memory Stick free space; these cases do not size it. */
 /* 1 GiB free, the Memory Stick in pspautotests utility/savedata/getsize.expected (2ed7c9c5). */
@@ -77,6 +79,49 @@ int sr_hle_memstick_free_bytes(uint64_t *free_bytes) { *free_bytes = 0x40000000u
  * 2001-09-09 01:46:40 UTC and UTC here. */
 uint64_t sr_savedata_guest_rtc_tick(void) { return 62135596800000000ull + 1000000000ull * 1000000ull; }
 int32_t sr_savedata_console_offset_minutes(void) { return 0; }
+/* src/rt/sched.c supplies the preemption timer's flag, its edge inside a long call and the
+ * driver's stop check (#1296). The stub stands for the stronger thread that edge runs: it notes,
+ * the first time, what the SAVE had published by then, keeps that thread due again when
+ * g_pp_rearm is set, and at call g_pp_act_at does what g_pp_act names: start another savedata
+ * operation, end another thread and then start one, or end the saving thread (its coroutine
+ * never resumes: longjmp). */
+#include <setjmp.h>
+#include <sys/file.h>
+atomic_int_least32_t sr_preempt_due;
+int (*sr_sched_stop_requested)(void);
+uint32_t sr_savedata_execute(uint32_t param);
+uint32_t sr_savedata_release_thread(uint32_t thread_uid);
+int sr_savedata_stop_deferred(uint64_t now_us);
+enum { PP_NONE, PP_REENTER, PP_END_OTHER, PP_END_THREAD, PP_STOP_WINDOW };
+static int g_pp_calls, g_pp_rearm, g_pp_first_probe = -1, g_pp_act = PP_NONE, g_pp_act_at;
+static int (*g_pp_probe)(void);
+static uint32_t g_pp_reenter_result, g_pp_release_result, g_pp_running_release = 0xdeadbeefu;
+static int g_pp_deferred[3] = {-1, -1, -1};
+static jmp_buf g_pp_end;
+void sched_preempt_point(void) {
+    atomic_store_explicit(&sr_preempt_due, g_pp_rearm, memory_order_relaxed);
+    if (g_pp_calls++ == 0 && g_pp_probe) g_pp_first_probe = g_pp_probe();
+    if (g_pp_act == PP_NONE || g_pp_calls != g_pp_act_at) return;
+    if (g_pp_act == PP_END_OTHER) g_pp_release_result = sr_savedata_release_thread(g_pp_uid + 1u);
+    if (g_pp_act == PP_REENTER || g_pp_act == PP_END_OTHER)
+        g_pp_reenter_result = sr_savedata_execute(0x08800000u);
+    if (g_pp_act == PP_STOP_WINDOW) {
+        g_pp_deferred[0] = sr_savedata_stop_deferred(1000000u);
+        g_pp_deferred[1] = sr_savedata_stop_deferred(5999999u);
+        g_pp_deferred[2] = sr_savedata_stop_deferred(6000000u);
+    }
+    if (g_pp_act == PP_END_THREAD) {
+        g_pp_release_result = sr_savedata_release_thread(g_pp_uid);
+        longjmp(g_pp_end, 1);
+    }
+}
+static int pp_stopping(void) { return 1; }
+/* The driver's stop check runs inside a SAVE point before the SAVE parks: the owner's end
+ * reported there, while its operation is still running, must change nothing. */
+static int pp_owner_ends_while_running(void) {
+    if (g_pp_running_release == 0xdeadbeefu) g_pp_running_release = sr_savedata_release_thread(g_pp_uid);
+    return 0;
+}
 
 #ifdef ORDER_INSTRUMENTED
 static int g_write_open_count;
@@ -408,6 +453,7 @@ static void swap_final_file(void *opaque) {
 static void check_open_cases(const char *base) {
 #if defined(SR_CD_BACKEND_POSIX_AT)
     char root[512], path[512], outside[512], target[512], inroot[512], inroot_link[512], fifo[512], content[64];
+    char seed[512], seed_slot[600];
 
     /* Ordinary SAVE then LOAD: the production path still works. */
     snprintf(root, sizeof(root), "%s/normal", base);
@@ -423,6 +469,10 @@ static void check_open_cases(const char *base) {
     snprintf(root, sizeof(root), "%s/final", base);
     snprintf(outside, sizeof(outside), "%s/final-outside", base);
     CHECK(make_savedata_tree(root) && make_dir(outside), "final-link fixture");
+    /* A whole save first, so the save has its PARAM.SFO: a save without one is reported as
+     * damaged before its data file is opened (pspautotests loadbroken), and the LOAD below
+     * must reach the data file's open to prove that open does not follow the link. */
+    CHECK(run_save(root, "SEED.BIN", "SEED") == 0, "final-link fixture SAVE writes PARAM.SFO");
     snprintf(target, sizeof(target), "%s/target.bin", outside);
     snprintf(path, sizeof(path), "%s/PSP/SAVEDATA/ULUS99999SLOT00/DATA.BIN", root);
     CHECK(write_file(target, "OUTSIDE") && symlink(target, path) == 0, "final-link setup");
@@ -469,8 +519,19 @@ static void check_open_cases(const char *base) {
     CHECK(run_save(root, "DATA.BIN", "ATTACK") != 0, "intermediate symlink SAVE must fail closed");
     snprintf(path, sizeof(path), "%s/ULUS99999SLOT00/DATA.BIN", target);
     CHECK(!exists_no_follow(path), "intermediate symlink SAVE must not create outside data");
+    /* A whole save behind the link (made in its own tree, then moved there), so the LOAD below
+     * would succeed if its directory walk followed the link. The contained directory check
+     * refuses the link before PARAM.SFO or the data file is looked at; without the save behind
+     * it, the check would pass whatever LOAD did. */
+    snprintf(seed, sizeof(seed), "%s/intermediate-seed", base);
+    CHECK(make_savedata_tree(seed) && run_save(seed, "DATA.BIN", "OUTSIDE") == 0,
+          "intermediate-link seed SAVE");
+    snprintf(seed_slot, sizeof(seed_slot), "%s/PSP/SAVEDATA/ULUS99999SLOT00", seed);
+    snprintf(path, sizeof(path), "%s/ULUS99999SLOT00", target);
+    CHECK(rename(seed_slot, path) == 0, "intermediate-link seed moved behind the link");
     memset(content, 0, sizeof(content));
-    CHECK(run_load(root, "DATA.BIN", content, sizeof(content)) != 0,
+    CHECK(run_load(root, "DATA.BIN", content, sizeof(content)) != 0 &&
+              memcmp(content, "OUTSIDE", 7) != 0,
           "intermediate symlink LOAD must fail closed");
 
     /* An operator-configured root symlink remains valid: only below-root
@@ -814,6 +875,154 @@ static void check_atomic_cases(const char *base) {
 #endif
 }
 
+/* #1296: a SAVE is one HLE call that makes about one durable host write per member and per
+ * journal step, so a thread that came due during it waited for the whole SAVE. It now runs
+ * between those writes, before the SAVE publishes. While the SAVE is parked, that thread
+ * cannot reach the SAVE's lock or directory, a stop waits for it, and ending the saving
+ * thread releases what the SAVE held. */
+#if defined(SR_CD_BACKEND_POSIX_AT)
+static char g_pp_path[600];
+static int pp_published(void) {   /* 1 when the data file already holds the second SAVE's bytes */
+    char content[64];
+    return read_file(g_pp_path, content, sizeof(content)) && !strcmp(content, "SECOND-SAVE");
+}
+#endif
+
+static void check_preempt_cases(const char *base) {
+#if defined(SR_CD_BACKEND_POSIX_AT)
+    char root[512];
+    snprintf(root, sizeof(root), "%s/preempt", base);
+    snprintf(g_pp_path, sizeof(g_pp_path), "%s/PSP/SAVEDATA/ULUS99999SLOT00/DATA.BIN", root);
+    g_pp_uid = 0x101u;   /* the saving thread; 0x102 is another one */
+    CHECK(run_save(root, "DATA.BIN", "FIRST-SAVE") == 0, "the first SAVE must succeed");
+    CHECK(g_pp_calls == 0, "with no thread due a SAVE hands the CPU to nobody (%d)", g_pp_calls);
+
+    /* A stronger thread is due as the SAVE begins: it runs inside the call, before the data
+     * file is published, not once the whole SAVE has returned. */
+    g_pp_probe = pp_published;
+    atomic_store_explicit(&sr_preempt_due, 1, memory_order_relaxed);
+    CHECK(run_save(root, "DATA.BIN", "SECOND-SAVE") == 0, "a SAVE with a thread due must succeed");
+    CHECK(g_pp_calls == 1, "the due thread must run once inside the SAVE, ran %d times", g_pp_calls);
+    CHECK(g_pp_first_probe == 0, "the due thread must run before the SAVE publishes its data file");
+    CHECK(pp_published(), "the SAVE must still publish its bytes");
+
+    /* A thread due again after every step: one point before each member's staging write, one
+     * before the journal, one before each member is published (2 members: data, PARAM.SFO), one
+     * before the commit and one before the cleanup. */
+    g_pp_calls = 0;
+    g_pp_probe = NULL;
+    g_pp_rearm = 1;
+    atomic_store_explicit(&sr_preempt_due, 1, memory_order_relaxed);
+    CHECK(run_save(root, "DATA.BIN", "THIRD-SAVE") == 0, "a SAVE with a thread always due must succeed");
+    g_pp_rearm = 0;
+    atomic_store_explicit(&sr_preempt_due, 0, memory_order_relaxed);
+    CHECK(g_pp_calls == 7, "a two-member SAVE must hand the CPU over at 7 points, did at %d", g_pp_calls);
+
+    /* The thread that runs inside the SAVE starts another savedata operation: it is refused,
+     * and the parked SAVE still publishes its own bytes. */
+    g_pp_calls = 0;
+    g_pp_act = PP_REENTER;
+    g_pp_act_at = 1;
+    g_pp_reenter_result = 0;
+    atomic_store_explicit(&sr_preempt_due, 1, memory_order_relaxed);
+    CHECK(run_save(root, "DATA.BIN", "FOURTH-SAVE") == 0, "the parked SAVE must still succeed");
+    CHECK(g_pp_reenter_result == ERR_SAVE_ACCESS_ERROR_UNMEASURED,
+          "a savedata call while a SAVE is parked must be refused (0x%08x)", g_pp_reenter_result);
+    {
+        char content[64];
+        CHECK(read_file(g_pp_path, content, sizeof(content)) && !strcmp(content, "FOURTH-SAVE"),
+              "the parked SAVE must publish its bytes after the refusal");
+    }
+
+    /* Only the owner's parked SAVE is released. The owner's end reported while its operation
+     * runs (the stop check, before the SAVE parks) and another thread's end while it is parked
+     * leave it in flight: a savedata call is still refused, and the SAVE publishes. Point 3, so
+     * a release that wrongly frees the SAVE's state shows as these checks failing, not as a
+     * double free of the PARAM.SFO bytes. */
+    g_pp_calls = 0;
+    g_pp_act = PP_END_OTHER;
+    g_pp_act_at = 3;   /* before the journal: the PARAM.SFO bytes are already freed */
+    g_pp_reenter_result = 0;
+    g_pp_release_result = 0xdeadbeefu;
+    g_pp_running_release = 0xdeadbeefu;
+    sr_sched_stop_requested = pp_owner_ends_while_running;
+    g_pp_rearm = 1;
+    atomic_store_explicit(&sr_preempt_due, 1, memory_order_relaxed);
+    CHECK(run_save(root, "DATA.BIN", "FOURTH-SAVE-B") == 0, "a SAVE whose owner was named while running must succeed");
+    g_pp_rearm = 0;
+    atomic_store_explicit(&sr_preempt_due, 0, memory_order_relaxed);
+    sr_sched_stop_requested = NULL;
+    g_pp_act = PP_NONE;
+    CHECK(g_pp_running_release == 0u,
+          "the owner's end while its SAVE runs, not parked, must release nothing (0x%08x)", g_pp_running_release);
+    CHECK(g_pp_release_result == 0u,
+          "another thread's end must not release the parked SAVE (0x%08x)", g_pp_release_result);
+    CHECK(g_pp_reenter_result == ERR_SAVE_ACCESS_ERROR_UNMEASURED,
+          "after another thread's end a savedata call must still be refused (0x%08x)", g_pp_reenter_result);
+    {
+        char content[64];
+        CHECK(read_file(g_pp_path, content, sizeof(content)) && !strcmp(content, "FOURTH-SAVE-B"),
+              "the SAVE must publish its bytes after another thread's end");
+    }
+    fflush(stdout);
+
+    /* A stop that comes while the SAVE is parked waits for it, within its window; with the stop
+     * already due, the SAVE keeps the CPU to the end. */
+    g_pp_calls = 0;
+    g_pp_act = PP_STOP_WINDOW;
+    g_pp_act_at = 1;
+    atomic_store_explicit(&sr_preempt_due, 1, memory_order_relaxed);
+    CHECK(sr_savedata_stop_deferred(0) == 0, "no SAVE is parked, so a stop must not wait");
+    CHECK(run_save(root, "DATA.BIN", "FIFTH-SAVE") == 0, "a SAVE parked under a stop must succeed");
+    CHECK(g_pp_deferred[0] == 1 && g_pp_deferred[1] == 1 && g_pp_deferred[2] == 0,
+          "a stop must wait for a parked SAVE for 5 s of guest time (%d %d %d)",
+          g_pp_deferred[0], g_pp_deferred[1], g_pp_deferred[2]);
+    CHECK(sr_savedata_stop_deferred(7000000u) == 0, "a finished SAVE must not hold a stop");
+    g_pp_calls = 0;
+    g_pp_act = PP_NONE;
+    sr_sched_stop_requested = pp_stopping;
+    atomic_store_explicit(&sr_preempt_due, 1, memory_order_relaxed);
+    CHECK(run_save(root, "DATA.BIN", "SIXTH-SAVE") == 0, "a SAVE under a due stop must succeed");
+    CHECK(g_pp_calls == 0, "a SAVE must not hand the CPU over once a stop is due, did at %d", g_pp_calls);
+    sr_sched_stop_requested = NULL;
+    atomic_store_explicit(&sr_preempt_due, 0, memory_order_relaxed);
+
+    /* The saving thread ends while parked after its journal is written (point 4: before the
+     * first publish). Its lock is released, the next call rolls the SAVE back from the
+     * journal, and a new SAVE succeeds. */
+    g_pp_calls = 0;
+    g_pp_act = PP_END_THREAD;
+    g_pp_act_at = 4;
+    g_pp_rearm = 1;
+    atomic_store_explicit(&sr_preempt_due, 1, memory_order_relaxed);
+    if (!setjmp(g_pp_end)) {
+        (void)run_save(root, "DATA.BIN", "ENDED-SAVE");
+        CHECK(0, "the SAVE must have been abandoned at its fourth point");
+    }
+    g_pp_rearm = 0;
+    g_pp_act = PP_NONE;
+    atomic_store_explicit(&sr_preempt_due, 0, memory_order_relaxed);
+    CHECK(g_pp_release_result == ERR_SAVE_ACCESS_ERROR_UNMEASURED,
+          "releasing the ended thread's SAVE must report its access error (0x%08x)", g_pp_release_result);
+    {
+        char sdroot[600];
+        snprintf(sdroot, sizeof(sdroot), "%s/PSP/SAVEDATA", root);
+        const int fd = open(sdroot, O_RDONLY | O_DIRECTORY);
+        CHECK(fd >= 0 && flock(fd, LOCK_EX | LOCK_NB) == 0,
+              "the ended thread's SAVE must not keep the save data locked");
+        if (fd >= 0) close(fd);
+        char loaded[64];
+        CHECK(run_load(root, "DATA.BIN", loaded, sizeof(loaded)) == 0 && !strcmp(loaded, "SIXTH-SAVE"),
+              "the next call must roll the ended SAVE back (loaded '%s')", loaded);
+        CHECK(run_save(root, "DATA.BIN", "SEVENTH-SAVE") == 0 && run_load(root, "DATA.BIN", loaded, sizeof(loaded)) == 0 &&
+              !strcmp(loaded, "SEVENTH-SAVE"), "a SAVE after the ended one must succeed");
+    }
+#else
+    (void)base;
+    printf("SKIP: preemption savedata cases require the POSIX descriptor backend\n");
+#endif
+}
+
 #if defined(INJECT_INSTRUMENTED)
 #define BLOBS 0x08b00000u
 #define SAVE_MEMBERS 6
@@ -1055,6 +1264,7 @@ int main(int argc, char **argv) {
     if (!strcmp(argv[1], "open") && argc == 3) check_open_cases(argv[2]);
     else if (!strcmp(argv[1], "order") && argc == 3) check_write_order_cases(argv[2]);
     else if (!strcmp(argv[1], "atomic") && argc == 3) check_atomic_cases(argv[2]);
+    else if (!strcmp(argv[1], "preempt") && argc == 3) check_preempt_cases(argv[2]);
     else if (!strcmp(argv[1], "inject") && argc == 3) check_inject_cases(argv[2]);
     else if (!strcmp(argv[1], "getsize")) check_getsize_cases();
     else if (!strcmp(argv[1], "unsupported")) check_unsupported_host();
@@ -1179,6 +1389,24 @@ class TestSavedataSecurityProduction(unittest.TestCase):
             self.assertIsNotNone(run, "atomic-save selftest timed out")
             self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
             self.assertIn("security_selftest: OK", run.stdout)
+
+    @unittest.skipIf(os.name == "nt", "the preemption SAVE harness runs in the WSL POSIX lane")
+    def test_a_thread_due_during_a_save_runs_before_the_save_publishes(self):
+        """Also: no re-entry while parked, a stop waits for it, an ended thread frees it."""
+        with scratch_dir.TemporaryDirectory(prefix="savedata_preempt_") as tmp:
+            exe = _build(tmp)
+            run = _run(exe, "preempt", tmp)
+            self.assertIsNotNone(run, "preemption SAVE selftest timed out")
+            self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+            self.assertIn("security_selftest: OK", run.stdout)
+            self.assertNotIn("SKIP", run.stdout)
+            # A held stop and its expiry are named, once each (the stop-window cell).
+            held = "savedata: the stop waits for a SAVE parked at a preemption point, up to 5000000 us"
+            expired = "savedata: the stop window passed with the SAVE still parked"
+            self.assertEqual(run.stderr.count(held), 1, run.stderr)
+            self.assertEqual(run.stderr.count(expired), 1, run.stderr)
+            self.assertEqual(run.stderr.count("savedata: guest thread 0x101 ended inside a SAVE"), 1,
+                             run.stderr)
 
     @unittest.skipIf(os.name == "nt", "failure injection runs in the WSL POSIX lane")
     def test_every_failed_save_operation_keeps_the_previous_save(self):

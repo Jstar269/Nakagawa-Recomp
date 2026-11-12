@@ -537,6 +537,28 @@ class TestAuditPublicIssueLinks(unittest.TestCase):
                 self.assertTrue(all(not f[4] for f in findings), findings)
                 self.assertTrue(any("MALFORMED PUBLIC TRACKER URL" in f[3] for f in findings), findings)
 
+    def test_repository_links_are_audited_in_any_letter_case(self) -> None:
+        # GitHub resolves the owner and repository name in any letter case, so a link that spells the repository
+        # Jstar269/Nakagawa-Recomp names this tracker as surely as the lowercase spelling and is audited the same way.
+        for repo in ("https://github.com/Jstar269/Nakagawa-Recomp", "https://github.com/JSTAR269/nakagawa-RECOMP"):
+            with self.subTest(repo=repo):
+                (self.repo_path / "README.md").write_text(
+                    f"See {repo}/issues/23, {repo}/issues/999 and {repo}/issues/23-extra\n", encoding="utf-8"
+                )
+                findings = audit_markdown_files(self.repo_path, {23: self._tracker(23, "open")})
+                self.assertEqual([f[2] for f in findings if f[4]], [f"{repo}/issues/23"], findings)
+                failed = sorted(f[3].split(":")[0] for f in findings if not f[4])
+                self.assertEqual(
+                    failed, ["DEAD / UNRESOLVED PUBLIC REFERENCE #999", "MALFORMED PUBLIC TRACKER URL"], findings
+                )
+        # Only the letter case is free: another repository or owner is still not this tracker.
+        (self.repo_path / "README.md").write_text(
+            "See https://github.com/Jstar269/Nakagawa-Recomp-fork/issues/999 and "
+            "https://github.com/someone-else/Nakagawa-Recomp/issues/999\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(audit_markdown_files(self.repo_path, {}), [])
+
     def test_canonical_query_fragment_punctuation_and_pull_subroutes_stay_live(self) -> None:
         repo = "https://github.com/Jstar269/nakagawa-recomp"
         (self.repo_path / "README.md").write_text(

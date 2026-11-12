@@ -35,7 +35,8 @@ NK_UI_PLAYER_SCREEN_SRCS := \
 
 # The screens that came out of the old scr_title.c: the title page, the one-card flow pages,
 # About, the setup wizard, the game-found card, Settings, Controls and the developer log, with
-# the frame and form code they share (scr_flow.c, scr_form.c).
+# the frame and form code they share (scr_flow.c, scr_form.c), and the on-screen keyboard
+# the nickname editor uses (ui_keyboard.c).
 NK_UI_PLAYER_TITLE_SRCS := \
 	src/player/ui/scr_title.c \
 	src/player/ui/scr_flow.c \
@@ -51,7 +52,8 @@ NK_UI_PLAYER_TITLE_SRCS := \
 	src/player/ui/scr_disc.c \
 	src/player/ui/scr_settings.c \
 	src/player/ui/scr_controller.c \
-	src/player/ui/scr_devlog.c
+	src/player/ui/scr_devlog.c \
+	src/player/ui/ui_keyboard.c
 
 NK_UI_PLAYER_C5_SRCS := \
 	src/player/ui/player_ui_nk.c \

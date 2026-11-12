@@ -109,7 +109,11 @@ class TestGeCaptureWiring(unittest.TestCase):
         self.assertIn("VERT_ARENA_VERTS", gpu)
         self.assertIn("s_cmd_slot->vmap + vertex_base", gpu)
         self.assertIn("vertex_base * sizeof(GpuVert)", gpu)
-        self.assertIn("s_cmd_slot->vused += nverts", gpu)
+        # With the host twin's own vertices staged after the authentic ones, a draw takes twice
+        # its vertex count from the arena, and the arena advances by what was staged.
+        self.assertIn("const uint32_t nstaged = s_tvcpu ? 2u * nverts : nverts;", gpu)
+        self.assertIn("cmd_batch_begin_tnl(nstaged, ntverts, p1)", gpu)
+        self.assertIn("s_cmd_slot->vused += nstaged", gpu)
 
     def test_mixed_waits_and_transfer_boundaries_are_explicit(self):
         gpu = (RT / "gpu_sdl3vk" / "ge_gpu.c").read_text(encoding="utf-8")
@@ -407,14 +411,47 @@ class TestGeFirstBadDrawWiring(unittest.TestCase):
         # A skip is reported as a skip (exit 77 run alone), never as a pass.
         self.assertIn("GE_FBD_SKIP_STATUS ?= 77", self.makefile)
         self.assertNotIn("exit 77; fi", self.rule)
-        self.assertEqual(self.rule.count("exit $(GE_FBD_SKIP_STATUS); fi"), 4)
+        # Six runs can skip: the clean synthetic, the mutants, the overlap, the wide and narrow
+        # captures and the refused cells.
+        self.assertEqual(self.rule.count("exit $(GE_FBD_SKIP_STATUS); fi"), 6)
+        self.assertIn('echo "SKIP ge-first-bad-draw-selftest wide (no Vulkan device)"; '
+                      "exit $(GE_FBD_SKIP_STATUS); fi", self.rule)
         self.assertIn("--fbd-self-check", self.rule)
 
+    def test_wide_capture_is_compared_and_past_512_columns_is_refused(self):
+        # #2193: ge.c draws up to a 512 stride, so the 512-wide capture must compare clean and
+        # mutant 1's draw right of x 480 must be named; a scissor past 512 columns stays refused.
+        self.assertIn("for v in wide narrow past empty many deep; do", self.rule)
+        wide = self.rule.split("@log=$(GE_FBD_DIR)/wide.log;", 1)[1].split("@for cell in", 1)[0]
+        self.assertIn("$(GE_FBD_DIR)/wide.ngef --first-bad-draw", wide)
+        self.assertIn('"result=NO_DIFFERENCE draws=4 "', wide)
+        self.assertIn("for m in 1; do", wide)
+        self.assertIn("ge_replay_fbd_mutant$$m.exe $(GE_FBD_DIR)/wide.ngef", wide)
+        self.assertIn('"result=FIRST_BAD_DRAW index=3 "', wide)
+        self.assertIn('"past 5 reason=raster-bound"', self.rule)
+        self.assertNotIn('"wide 5 reason=raster-bound"', self.rule)
+
+    def test_narrow_capture_is_compared_up_to_its_stride(self):
+        # #2193: both renderers stop at the stride, so a 480 scissor on a 256 stride is compared
+        # (not refused as raster-bound) and must be clean: no column past the stride is drawn.
+        narrow = self.rule.split("@log=$(GE_FBD_DIR)/narrow.log;", 1)[1].split("@for cell in", 1)[0]
+        self.assertIn("$(GE_FBD_DIR)/narrow.ngef --first-bad-draw", narrow)
+        self.assertIn('"result=NO_DIFFERENCE draws=4 "', narrow)
+        self.assertIn('echo "SKIP ge-first-bad-draw-selftest narrow (no Vulkan device)"; '
+                      "exit $(GE_FBD_SKIP_STATUS); fi", narrow)
+        self.assertNotIn('"narrow 5 reason=raster-bound"', self.rule)
+
     def test_known_overlap_difference_is_pinned(self):
-        # #2109: the generated overlap capture must be found at draw 1, the overlap only.
+        # #2109: on the snapshot path the generated overlap capture must be found at draw 1, the
+        # overlap only; on the interlock path it must be NO_DIFFERENCE, and each leg must have
+        # run on the path it asked for.
         self.assertIn("--write-synthetic $(GE_FBD_DIR)/overlap.ngef overlap", self.rule)
+        self.assertIn("for path in snapshot interlock; do", self.rule)
+        self.assertIn("--dst-read $$path", self.rule)
+        self.assertIn('"sdl3vk: destination reads: $$path"', self.rule)
         self.assertIn('"result=FIRST_BAD_DRAW index=1 draws=2 "', self.rule)
         self.assertIn('"bbox=140,100,239,199"', self.rule)
+        self.assertIn('"result=NO_DIFFERENCE draws=2 "', self.rule)
 
     def test_replay_stops_before_a_draw_and_restores_no_observer(self):
         ge = (RT / "ge.c").read_text(encoding="utf-8")

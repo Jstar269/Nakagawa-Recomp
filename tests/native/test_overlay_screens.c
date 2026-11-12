@@ -560,6 +560,205 @@ static void test_pad_lost(void) {
     nk_ui_destroy(ui);
 }
 
+/* The bounds of the first command of `kind` that `id` drew this frame; false when none did. */
+static bool frame_bounds(NkUi *ui, NkOverlayState *state, const NkOverlayModel *model, NkUiId id,
+                         int kind, int out[4]) {
+    const NkUiDrawList *list;
+    nk_ui_begin(ui, 0.0);
+    (void)nk_overlay_frame(ui, state, model);
+    list = nk_ui_end(ui);
+    for (uint32_t i = 0u; list != NULL && i < list->ncmd; ++i) {
+        const NkUiDrawCmd *cmd = &list->cmd[i];
+        if (cmd->element_id != id || (int)cmd->kind != kind) continue;
+        for (int k = 0; k < 4; ++k) out[k] = (int)cmd->bounds[k];
+        return true;
+    }
+    return false;
+}
+
+/* Element `id`'s fill and text in `list`, drawn whole: each clip is its bounds
+   (no scroll container or window edge cuts it), between top and bottom. Its
+   borders are not counted: a focused control's ring is drawn outside it. */
+static bool list_shows_whole(const NkUiDrawList *list, NkUiId id, int top, int bottom) {
+    bool found = false;
+    for (uint32_t i = 0u; list != NULL && i < list->ncmd; ++i) {
+        const NkUiDrawCmd *cmd = &list->cmd[i];
+        if (cmd->element_id != id ||
+            (cmd->kind != NK_UI_DRAW_RECTANGLE && cmd->kind != NK_UI_DRAW_TEXT)) {
+            continue;
+        }
+        if (cmd->clip[0] != cmd->bounds[0] || cmd->clip[1] != cmd->bounds[1] ||
+            cmd->clip[2] != cmd->bounds[2] || cmd->clip[3] != cmd->bounds[3] ||
+            cmd->bounds[1] < top || cmd->bounds[3] > bottom) {
+            return false;
+        }
+        found = true;
+    }
+    return found;
+}
+
+/* The pause menu in the default game window (960 x 544) and at the PSP's own
+   480 x 272. The menu used to keep its 1280 x 800 spacing there: taller than the
+   window, its card was centred past both edges, so the game's name was cut at
+   the top, Quit to library at the bottom, and the card covered the prompt bar.
+   Now its spacing and buttons follow the window: at 960 x 544 every entry shows
+   whole with no scrolling, developer entries included; at 480 x 272 the card
+   stops above the prompt bar and scrolls, with RESUME shown and focused and
+   each entry brought into view as focus reaches it. */
+static void test_menu_fits_small_windows(void) {
+    static const struct { int w; int h; bool all_whole; } sizes[] = {
+        {960, 544, true}, {480, 272, false}
+    };
+    static const NkUiId entries[] = {
+        NK_OVERLAY_ID_RESUME, NK_OVERLAY_ID_SETTINGS, NK_OVERLAY_ID_CONTROLS,
+        NK_OVERLAY_ID_VRAM, NK_OVERLAY_ID_PROFILE, NK_OVERLAY_ID_QUIT
+    };
+    const NkUiId title_id = NK_UI_ID(NK_UI_ID_SCREEN_OVERLAY, 0x001002u);  /* MENU_ID_TITLE */
+    const NkUiId prompts_id = NK_UI_ID(NK_UI_ID_SCREEN_OVERLAY, 0x000004u); /* OVERLAY_ID_PROMPTS */
+    const NkUiTheme *theme = nk_ui_theme_n1();
+    for (size_t s = 0u; s < sizeof(sizes) / sizeof(sizes[0]); ++s) {
+        for (int developer = 0; developer < 2; ++developer) {
+            NkUi *ui = overlay_ui(sizes[s].w, sizes[s].h, 1.0f);
+            NkOverlayModel model = base_model((float)sizes[s].w, (float)sizes[s].h);
+            NkOverlayState state;
+            const NkUiDrawList *list;
+            int bar_top = sizes[s].h - (int)NK_UI_PROMPT_BAR_HEIGHT;
+            int edge = (int)NK_UI_SAFE_AREA_MIN;
+            int card_top = -1;
+            int card_bottom = -1;
+            bool inside = true;
+            char label[128];
+            if (ui == NULL) continue;
+            model.title_name = "Synthetic Showcase Scene: A Rather Long Name for the Pause Card";
+            model.ace_caption = "Enhanced: 16x filtering \xC2\xB7 crisp keyboard";
+            model.developer = developer != 0;
+            nk_overlay_open(&state, NK_OVERLAY_OPEN_USER);
+            (void)settle(ui, &state, &model);
+            nk_ui_begin(ui, 0.0);
+            (void)nk_overlay_frame(ui, &state, &model);
+            list = nk_ui_end(ui);
+            for (uint32_t i = 0u; list != NULL && i < list->ncmd; ++i) {
+                const NkUiDrawCmd *cmd = &list->cmd[i];
+                if (cmd->kind == NK_UI_DRAW_SCISSOR_START ||
+                    cmd->kind == NK_UI_DRAW_SCISSOR_END) {
+                    continue;
+                }
+                if (cmd->clip[0] < 0 || cmd->clip[1] < 0 || cmd->clip[2] > sizes[s].w ||
+                    cmd->clip[3] > sizes[s].h) {
+                    inside = false;
+                }
+                if (cmd->kind == NK_UI_DRAW_BORDER && cmd->rgba_pm == theme->line_strong &&
+                    cmd->bounds[2] - cmd->bounds[0] > sizes[s].w / 4) {
+                    /* Its edges, as shown: the card spans the highest to the lowest (the
+                       entries' own borders are inside it, cut by its scroll clip). */
+                    if (card_top < 0 || cmd->clip[1] < card_top) card_top = cmd->clip[1];
+                    if (cmd->clip[3] > card_bottom) card_bottom = cmd->clip[3];
+                }
+            }
+            (void)snprintf(label, sizeof(label), "pause menu at %dx%d%s", sizes[s].w,
+                           sizes[s].h, developer ? " in developer mode" : "");
+            if (card_top >= 0) {
+                fprintf(stderr, "  %s: card %d..%d, prompt bar at %d\n", label, card_top,
+                        card_bottom, bar_top);
+            }
+            CHECK(list != NULL && inside, label);
+            CHECK(card_top >= edge && card_bottom >= 0 && card_bottom <= bar_top,
+                  "the pause card stays inside the window and above the prompt bar");
+            CHECK(list_shows_whole(list, title_id, card_top, card_bottom),
+                  "the game's name shows whole at the top of the pause card");
+            CHECK(nk_ui_focused(ui) == NK_OVERLAY_ID_RESUME &&
+                      list_shows_whole(list, NK_OVERLAY_ID_RESUME, card_top, card_bottom),
+                  "RESUME shows whole and has the focus in a small game window");
+            CHECK(list_shows_whole(list, prompts_id, bar_top, sizes[s].h),
+                  "the prompt bar shows whole under the pause card");
+            for (size_t e = 0u; e < sizeof(entries) / sizeof(entries[0]); ++e) {
+                bool listed = developer || (entries[e] != NK_OVERLAY_ID_VRAM &&
+                                            entries[e] != NK_OVERLAY_ID_PROFILE);
+                if (!listed) continue;
+                if (sizes[s].all_whole) {
+                    CHECK(list_shows_whole(list, entries[e], card_top, card_bottom),
+                          "every pause entry shows whole at 960 x 544 with no scrolling");
+                } else if (entries[e] != NK_OVERLAY_ID_RESUME) {
+                    const NkUiDrawList *moved;
+                    (void)frame_with(ui, &state, &model, NK_UI_EV_NAV, NK_UI_DIR_DOWN);
+                    nk_ui_begin(ui, 0.0);
+                    (void)nk_overlay_frame(ui, &state, &model);
+                    moved = nk_ui_end(ui);
+                    CHECK(nk_ui_focused(ui) == entries[e] &&
+                              list_shows_whole(moved, entries[e], card_top, card_bottom),
+                          "at 480 x 272 each pause entry scrolls into view as focus reaches it");
+                }
+            }
+            nk_ui_destroy(ui);
+        }
+    }
+}
+
+/* The pause menu at every game-window height from the PSP's 272 to 800 (every 8 px, 960
+   wide, with and without the developer entries): the card stays above the prompt bar with
+   the game's name and RESUME whole and RESUME focused, and a card with nothing to scroll
+   shows every entry whole. A drift between the menu's height estimate and the dialog's
+   real spacing shows here as a cut entry. */
+static void test_menu_height_sweep(void) {
+    static const NkUiId entries[] = {
+        NK_OVERLAY_ID_RESUME, NK_OVERLAY_ID_SETTINGS, NK_OVERLAY_ID_CONTROLS,
+        NK_OVERLAY_ID_VRAM, NK_OVERLAY_ID_PROFILE, NK_OVERLAY_ID_QUIT
+    };
+    const NkUiId title_id = NK_UI_ID(NK_UI_ID_SCREEN_OVERLAY, 0x001002u); /* MENU_ID_TITLE */
+    const NkUiId card_id = NK_UI_ID(NK_UI_ID_SCREEN_OVERLAY, 0x000003u);  /* OVERLAY_ID_CARD */
+    const NkUiTheme *theme = nk_ui_theme_n1();
+    for (int height = 272; height <= 800; height += 8) {
+        for (int developer = 0; developer < 2; ++developer) {
+            NkUi *ui = overlay_ui(960, height, 1.0f);
+            NkOverlayModel model = base_model(960.0f, (float)height);
+            NkOverlayState state;
+            NkUiScrollState scroll;
+            const NkUiDrawList *list;
+            int bar_top = height - (int)NK_UI_PROMPT_BAR_HEIGHT;
+            int card_top = -1;
+            int card_bottom = -1;
+            bool scrolls;
+            bool ok = true;
+            if (ui == NULL) continue;
+            model.title_name = "Synthetic Showcase Scene: A Rather Long Name for the Pause Card";
+            model.ace_caption = "Enhanced: 16x filtering \xC2\xB7 crisp keyboard";
+            model.developer = developer != 0;
+            nk_overlay_open(&state, NK_OVERLAY_OPEN_USER);
+            (void)settle(ui, &state, &model);
+            nk_ui_begin(ui, 0.0);
+            (void)nk_overlay_frame(ui, &state, &model);
+            list = nk_ui_end(ui);
+            for (uint32_t i = 0u; list != NULL && i < list->ncmd; ++i) {
+                const NkUiDrawCmd *cmd = &list->cmd[i];
+                if (cmd->kind == NK_UI_DRAW_BORDER && cmd->rgba_pm == theme->line_strong &&
+                    cmd->bounds[2] - cmd->bounds[0] > 240) {
+                    if (card_top < 0 || cmd->clip[1] < card_top) card_top = cmd->clip[1];
+                    if (cmd->clip[3] > card_bottom) card_bottom = cmd->clip[3];
+                }
+            }
+            scrolls = nk_ui_scroll_state(ui, card_id, &scroll) && scroll.max_offset > 0.0f;
+            ok = list != NULL && card_top >= (int)NK_UI_SAFE_AREA_MIN && card_bottom <= bar_top &&
+                 list_shows_whole(list, title_id, card_top, card_bottom) &&
+                 nk_ui_focused(ui) == NK_OVERLAY_ID_RESUME &&
+                 list_shows_whole(list, NK_OVERLAY_ID_RESUME, card_top, card_bottom);
+            for (size_t e = 0u; ok && !scrolls && e < sizeof(entries) / sizeof(entries[0]); ++e) {
+                if (!developer && (entries[e] == NK_OVERLAY_ID_VRAM ||
+                                   entries[e] == NK_OVERLAY_ID_PROFILE)) {
+                    continue;
+                }
+                ok = list_shows_whole(list, entries[e], card_top, card_bottom);
+            }
+            if (!ok) {
+                fprintf(stderr, "  pause menu at 960x%d%s: card %d..%d, bar %d, %s\n", height,
+                        developer ? " (developer)" : "", card_top, card_bottom, bar_top,
+                        scrolls ? "scrolls" : "does not scroll");
+            }
+            CHECK(ok, "the pause menu fits, or scrolls with RESUME shown, at every height");
+            nk_ui_destroy(ui);
+        }
+    }
+}
+
 /* Every page at the design's three capture sizes: nothing drawn outside the window,
    nothing under the prompt bar but the bar, and the card clear of the edges. */
 static void test_fits_every_window(void) {
@@ -796,6 +995,24 @@ static void test_vram_page(void) {
     model.vram = NULL;
     CHECK(frame_has_text(ui, &state, &model, "Nothing to show"),
           "vram: no host data shows an empty picture, not a stale one");
+    {
+        /* Design pass (#314): the empty picture's words sit in the middle of the box, and the
+           window's size lines up with the rows' labels. */
+        int box[4], words[4], label[4], size[4];
+        CHECK(frame_bounds(ui, &state, &model, NK_OVERLAY_ID(0x006004u), NK_UI_DRAW_RECTANGLE,
+                           box) &&
+                  frame_bounds(ui, &state, &model, NK_OVERLAY_ID(0x006006u), NK_UI_DRAW_TEXT,
+                               words) &&
+                  abs((words[0] + words[2]) - (box[0] + box[2])) <= 2 &&
+                  abs((words[1] + words[3]) - (box[1] + box[3])) <= 2,
+              "vram: an empty picture centres its words in the box");
+        model.vram = &vram;
+        CHECK(frame_bounds(ui, &state, &model, NK_OVERLAY_ID(0x006101u), NK_UI_DRAW_TEXT, label) &&
+                  frame_bounds(ui, &state, &model, NK_OVERLAY_ID(0x006008u), NK_UI_DRAW_TEXT,
+                               size) &&
+                  size[0] == label[0],
+              "vram: the window's size starts where the rows' labels start");
+    }
     model.vram = &vram;
     action = frame_with(ui, &state, &model, NK_UI_EV_BACK, NK_UI_DIR_NONE);
     CHECK(action.kind == NK_OVERLAY_ACT_NONE && state.screen == NK_OVERLAY_SCREEN_MENU,
@@ -1301,6 +1518,8 @@ int main(int argc, char **argv) {
     test_quit();
     test_pad_lost();
     test_fits_every_window();
+    test_menu_fits_small_windows();
+    test_menu_height_sweep();
     test_developer_gate();
     test_vram_page();
     test_vram_clamp();

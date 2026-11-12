@@ -30,6 +30,11 @@ for Japanese and Korean, and the PSP's two Latin sizes), and their x-height, cap
 horizontal-stroke weight and spacing are set from aggregate measurements of the PSP fonts they stand in for.
 No letter shape comes from those fonts.
 
+Round letters such as `e`, `o` and `s` end on the same rows as flat ones such as `R`, `l` and `x`. Their outlines
+dip below the baseline and rise above the x-height and cap height by up to a third of a pixel at the PSP's sizes,
+which would otherwise be drawn as a faint extra row; the converter sets those overshoots on the flat letters'
+heights (`--snap-overshoot`, [the converter specification](../docs/cleanroom/PGF_CONVERTER_SPEC.md)).
+
 ## Without your PSP's fonts: what changes
 
 You don't need a PSP to play. Without its fonts, every game still starts and still draws its text, with the fonts
@@ -58,9 +63,10 @@ What changes:
 - **Weight of the serif faces.** The serif stand-ins (`ltn1`, `ltn3`, `ltn5`, `ltn7` and the same four of the
   smaller size) carry 6 % to 30 % more ink per letter than the PSP's, because the PSP's serif faces are lighter than
   Liberation Serif. Measured on 2026-11-07 on the PSP-3000's files described under "Measured differences" below.
-- **Weight of the bold sans-serif faces.** The sans-serif stand-ins carry the PSP fonts' ink per letter within 4 %.
-  The bold ones (`ltn4`, `ltn6`, `ltn12`, `ltn14`) are about 1 % to 3 % lighter, at the converter's largest
-  horizontal-stroke setting.
+- **Weight of the bold sans-serif faces.** The sans-serif stand-ins carry the PSP fonts' ink per letter within 2 %.
+  The bold ones (`ltn4`, `ltn6`, `ltn12`, `ltn14`) are at the converter's largest horizontal-stroke setting and
+  one-eighth of a pixel more vertical-stroke weight than the other faces of their size: `ltn4` and `ltn12` are
+  about 1 % lighter than the PSP's, `ltn6` and `ltn14` up to 2 % heavier.
 - **Japanese weight and Latin letters in Japanese text.** The Japanese stand-in is Noto Sans JP's regular weight;
   its stroke weight has not been compared with the PSP font's. Latin letters drawn with the Japanese font come from
   Noto Sans JP and are about 18 % narrower than the PSP's (9.7 pixels on average against 11.8).

@@ -275,8 +275,10 @@ commit, the hosted verdict, and the external authority document. A ledger that
 still carries a block is accepted only when the block exactly describes this
 candidate against this base; any other block is refused. If `PROVENANCE_BASE_SHA` is
 omitted, the command uses `merge-base(HEAD, origin/main)`.
-When the candidate publication profile changed, also supply the external
-`PROVENANCE_POLICY_DELTA_AUTHORITY` input: a V4 or V3 authority alone, or a V1/V2
+When the candidate publication profile changed, the command finds the V4
+authority named after the change beside the trusted ledger
+(`policy-deltas-v4/<selector sha256>.json`). Supply
+`PROVENANCE_POLICY_DELTA_AUTHORITY` only for a V3 authority, alone, or a V1/V2
 record together with `PROVENANCE_TRUSTED_CANDIDATE_POLICY`; the command stops
 when the shape is wrong or the authority is missing.
 
@@ -649,7 +651,10 @@ contributor's pull request only says where each new file came from
 
 1. **Commit the files with their publication entries.** `python tools/policy_sync.py --apply --regen-export` adds the
    paths to `assets/public_source_profile.json` and regenerates `PUBLIC_EXPORT.json`; commit both with the files. The
-   candidate policy hash is the SHA-256 of that committed profile.
+   candidate policy hash is the SHA-256 of that committed profile. The committed export does not record it: the
+   publication audit and the attestation recompute the policy digest from the committed profile. So the export
+   changes only when the profile's name, version or exclusion lists do, and two path-adding pull requests do not
+   conflict on it.
 2. **Record the authority in the private authority checkout on `main`:**
    * an admission authority document under `docs/provenance/admissions/` recording each new path, its
      classification, the SHA-256 of the bytes that were reviewed, and its binding when that is not the default;
@@ -663,21 +668,30 @@ contributor's pull request only says where each new file came from
      either one now. A V1/V2 record binds no claim and no bytes, so one that adds a path is refused
      (`POLICY_DELTA_LEGACY_ADDS_PATHS`), and its admission needs one `--rekey`.
 3. **Push the private `main` commit.** The hosted "Trusted provenance attestation" check reads the authority from
-   `main`; local-only records fail with HTTP 404.
-4. **Admit the new paths** with `provenance_ledger.py admit-new-reviewed`, from a clean candidate commit whose only
-   change from the base is the new paths and their profile entries. Commit the generated controls and merge that
-   commit into the task branch.
-5. **Refresh the controls** with `python tools/provenance_refresh.py --trusted-ledger <private
-   IMPLEMENTATION_PROVENANCE.json>`; when the profile changed, add `--policy-delta-authority` with the V4 file from
-   step 2 (a V1/V2 record also needs `--trusted-candidate-policy`). Always pass the trusted ledger: a V4 delta
-   is checked against the origin claims it derives from it.
-6. **Stage the generated controls with the change.** The pre-commit publication audit reads the index, so an unstaged
+   `main`; local-only records fail with HTTP 404. A head that was attested before this push failed; attest it
+   again with `gh workflow run provenance-attestation.yml -f pull_request_number=<n> -f head_sha=<head SHA>`, then
+   dispatch the verdict ([Re-running](CI.md#trusted-ci-verdict)).
+4. **Refresh the controls** on the pull request's branch with `python tools/provenance_refresh.py --trusted-ledger
+   <private IMPLEMENTATION_PROVENANCE.json>`. It applies the hosted rule. The base is `merge-base(HEAD, origin/main)`.
+   When the profile differs from it, the refresh finds the step 2 V4 file by the name the hosted check derives,
+   `policy-deltas-v4/<selector sha256>.json` beside the trusted ledger. An added or removed path is accepted
+   only when that verified V3 or V4 delta approves exactly that path. Every refresh then replays the hosted verdict
+   on the tree it is about to stage and refuses on any fatal finding (`REFRESH_HOSTED_VERDICT_FAIL`). That covers
+   what the checks before it leave to the hosted check, such as a profile change that leaves the tree alone or a
+   drifted byte-identical import. The refresh is stricter in one place: a tracked file the base did not carry
+   refuses unless the delta lists it in `include_added`, even when the delta newly excludes it; the hosted check
+   decides that case. The replay records the tree as an unreferenced commit, which `git gc` removes later. No
+   admission commit is needed as a base, so the refresh works on whatever `main` the branch has merged. Pass
+   `--policy-delta-authority` only for a V3 file or a V1/V2 record (which also needs `--trusted-candidate-policy`).
+   Always pass the trusted ledger: a V4 delta is checked against the origin claims it derives from it.
+5. **Stage the generated controls with the change.** The pre-commit publication audit reads the index, so an unstaged
    ledger or profile reports the old state.
 
 | Failure | Cause | Fix |
 | --- | --- | --- |
-| `REFRESH_NEW_PATH_REQUIRES_ADMISSION` | The refresh saw an added or removed path | Run step 4 first |
-| `POLICY_DELTA_AUTHORITY_REQUIRED` | The profile changed without its delta authority | Pass the step 2 file |
+| `REFRESH_NEW_PATH_REQUIRES_ADMISSION` | An added or removed path is not approved by the verified delta | Admit it (step 2), or drop the path |
+| `POLICY_DELTA_AUTHORITY_REQUIRED` | The profile changed and no delta named after the change sits beside the trusted ledger, or `origin/main` is stale, so the change is measured from an older base | Fetch `origin`, record step 2 for exactly this change, or fast-forward the authority checkout |
+| `REFRESH_HOSTED_VERDICT_FAIL` | The hosted attestation would fail the refreshed tree | Fix each finding it names |
 | Hosted check: HTTP 404 fetching the policy delta | The private records are not on the private `main` | Step 3 |
 | `ADMIT_HOOKS_WOULD_REWRITE` | A pre-commit hook would change a byte of a path being admitted | Fix it on the pull request branch, then admit |
 | `POLICY_DELTA_CLAIM_MISMATCH` | A new path's class, record, upstream, revision or licence differs from its admission | Restore the claim, or admit the new claim (a new decision) |
@@ -686,7 +700,7 @@ contributor's pull request only says where each new file came from
 | `POLICY_DELTA_UNAUTHORIZED` | The profile changes something the admission did not approve | Remove the extra change, or admit it |
 | `TRUSTED_BASELINE_INVALID` | The local private authority checkout is behind its `main` | Fast-forward it and rerun |
 
-**One command for steps 2 and 4.** After step 1, a maintainer can run:
+**One command for step 2.** After step 1, a maintainer can run:
 
 ```text
 python tools/admit_paths.py <pr-worktree> <path> [<path> ...] --approval-basis "<the human decision>" \
@@ -706,8 +720,9 @@ and derives its class with the gate's classifier. An implementation path needs a
 `IMPLEMENTATION_PROVENANCE.json`; the command never writes one. It writes and locally
 commits the admission and V4 policy-delta records under `docs/provenance/`, builds the clean candidate, runs
 `admit-new-reviewed`, and leaves the result on a local `admit/<slug>-<date>` branch, whose ledger is in the committed
-claims form. It then prints the commands still to run: the private push (step 3, skipped with `--push`), the merge of
-that branch, and the step 5 refresh. `tools/test_admit_paths.py` replays the 2026-10-22 `.recomp.json` admission
+claims form. That branch shows the admitted result; the pull request does not merge it. The command then prints the
+commands still to run: the private push (step 3, skipped with `--push`), the step 4 refresh on the pull request's own
+branch, its commit and the push. `tools/test_admit_paths.py` replays the 2026-10-22 `.recomp.json` admission
 against the private authority and requires the same admission record and the same tree, apart from the canonical
 profile order and the claims-form ledger.
 
@@ -739,15 +754,31 @@ shared `--base`; the tool commits their records in one local private commit and 
 no batch-size cap. `--push`, when used, pushes only private `main`.
 
 **Landing order.** Any order. A V4 delta records only its own pull request's change, so it stays valid when another
-path-adding pull request lands first: the verifier checks it against whatever base the pull request lands on. If Git
-conflicts on, or reorders, `assets/public_source_profile.json` during a merge, run
-`python tools/admit_paths.py --merge-profile <worktree>` and then `git add assets/public_source_profile.json`; the
-command merges `include_paths` and `exclude_paths` three ways against the merge base, so a path either side added
-stays and a path either side removed or moved stays out, and it refuses if another profile field differs or a path
-would end up both included and excluded. Keep unrelated ready PRs moving.
+path-adding pull request lands first: the verifier checks it against whatever base the pull request lands on. Two
+admissions that insert at the same sorted position make Git conflict on the profile and the ledger. The conflict
+procedure needs no re-key and no private push:
 
-`--rekey` (one pull request) and `--batch-resume` (a JSON list of entries) are for pull requests admitted before V4
-deltas existed. A V1/V2 delta binds nothing and is refused for a path addition. A V3 delta still works while every
+1. merge `origin/main` into the pull request;
+2. run `python tools/admit_paths.py --merge-profile <worktree>`, which writes and stages the merged profile, the
+   merged ledger and the export for the merged profile;
+3. commit the merge;
+4. run the step 4 refresh and commit what it changes as its own commit.
+
+`--merge-profile` merges `include_paths` and `exclude_paths` three ways, so a path either side added stays and a
+path either side removed or moved stays out. It refuses if another profile field differs or a path would end up both
+included and excluded. It reads the merge base, ours and theirs from the index stages Git leaves for the conflicted
+profile, so it works the same in a merge, a squash merge (`git merge --squash`), a cherry-pick and a rebase. When
+Git merged the profile cleanly during a real merge, it reads `HEAD`, `MERGE_HEAD` and their merge base. When the
+ledger is unmerged it merges its entries the same way, one path at a time, and refuses when both sides changed one
+entry differently. So the merge commit already records every path either side admitted, and the commit-stage
+publication audit passes with the hooks installed as [CONTRIBUTING.md](../CONTRIBUTING.md) describes. When the
+export is unmerged it writes the export for the merged profile, which depends on the profile alone. The refresh in
+step 4 regenerates both controls from the trusted inputs and decides their bytes; it changes nothing when the
+merged ledger already matches. Keep unrelated ready PRs moving.
+
+`--rekey` (one pull request) and `--batch-resume` (a JSON list of entries) are only for pull requests admitted
+before V4 deltas existed. A V4 admission never needs them, whatever lands first. A V1/V2 delta binds nothing and
+is refused for a path addition. A V3 delta still works while every
 added path keeps its admitted bytes, but any edit breaks it. They reuse the admission recorded for exactly these
 paths and record no new decision. A claim-bound path may have changed since; a byte-bound path must still have its
 recorded bytes. They take each claim from the current trusted record and write the V4 delta, so later edits and

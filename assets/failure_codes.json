@@ -728,6 +728,12 @@
         "route"
       ]
     },
+    "PACKAGE_INVALID_TARGET": {
+      "stage": "package",
+      "in": [
+        "route"
+      ]
+    },
     "PACKAGE_LICENSE_RECORD_MISSING": {
       "stage": "package",
       "in": [
@@ -1406,6 +1412,12 @@
       ]
     },
     "UPDATE_INSTALL_LEFTOVER": {
+      "stage": "host",
+      "in": [
+        "player"
+      ]
+    },
+    "UPDATE_INSTALL_LEFTOVER_IN_USE": {
       "stage": "host",
       "in": [
         "player"

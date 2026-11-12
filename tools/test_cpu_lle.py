@@ -584,6 +584,10 @@ typedef struct SDL_Mutex SDL_Mutex;
 typedef struct SDL_Condition SDL_Condition;
 typedef struct SDL_Thread SDL_Thread;
 typedef int (SDLCALL *SDL_ThreadFunction)(void *data);
+typedef enum { SDL_THREAD_PRIORITY_LOW, SDL_THREAD_PRIORITY_NORMAL, SDL_THREAD_PRIORITY_HIGH,
+               SDL_THREAD_PRIORITY_TIME_CRITICAL } SDL_ThreadPriority;
+static inline int SDL_SetCurrentThreadPriority(SDL_ThreadPriority p) { (void)p; return 1; }
+static inline const char *SDL_GetError(void) { return ""; }
 static inline SDL_Mutex *SDL_CreateMutex(void) { return 0; }
 static inline SDL_Condition *SDL_CreateCondition(void) { return 0; }
 static inline SDL_Thread *SDL_CreateThread(SDL_ThreadFunction fn, const char *name, void *data) {

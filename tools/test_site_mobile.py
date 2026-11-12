@@ -3,7 +3,8 @@
 
 The static checks need nothing but Python. They apply the Pages workflow's own reference rule (every local
 ``src``, ``srcset`` or ``href`` names a file the site publishes, and so does every absolute link to the site
-itself, such as the share-card image), check that in-page anchors resolve, that the page loads nothing from
+itself, such as the share-card image), check that the canonical, ``og:url`` and ``og:image`` addresses spell the
+site's case-sensitive address as Pages serves it, that in-page anchors resolve, that the page loads nothing from
 another host, that the two copies of the dark colour tokens agree, and that the page keeps the owner's content
 decisions (``FORBIDDEN``).
 
@@ -74,7 +75,8 @@ STATES = (
 STORAGE_KEY = "nk-theme"
 MIN_TARGET_PX = 44
 # The site's own address. An absolute link under it (the share-card image, the canonical URL) names a published file.
-SITE_URL = "https://jstar269.github.io/nakagawa-recomp/"
+# Pages paths are case-sensitive: this is the repository's own spelling, and the lowercase address returns 404.
+SITE_URL = "https://jstar269.github.io/Nakagawa-Recomp/"
 # The deep-blue top bar stays deep blue in both themes; its luminance must stay at or under DARK_MAX_LUMINANCE.
 BAR = "body > header.bar"
 # Filled blocks that deliberately keep a blue fill in both themes: the top bar, the blue buttons, the picked theme
@@ -165,6 +167,17 @@ class SiteStaticTests(unittest.TestCase):
         self.assertTrue(refs, "the page names no file of its own; the reference rule has nothing to check")
         missing = sorted(ref for ref in refs if not (SITE_DIR / ref).is_file())
         self.assertEqual(missing, [], f"referenced but not present under {SITE_DIR}")
+
+    def test_page_gives_its_own_case_sensitive_address(self) -> None:
+        named: dict[str, str] = {}
+        for tag, attrs in _parsed().tags:
+            if tag == "link" and attrs.get("rel") == "canonical":
+                named["canonical"] = str(attrs.get("href") or "")
+            if tag == "meta" and attrs.get("property") in ("og:url", "og:image"):
+                named[str(attrs.get("property"))] = str(attrs.get("content") or "")
+        self.assertEqual(named.get("canonical"), SITE_URL)
+        self.assertEqual(named.get("og:url"), SITE_URL)
+        self.assertTrue(named.get("og:image", "").startswith(SITE_URL), named.get("og:image"))
 
     def test_owner_content_decisions_hold(self) -> None:
         text = _page_text()

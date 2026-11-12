@@ -35,7 +35,7 @@ extern "C" {
  * failure nothing is registered and the software rasterizer runs unchanged. */
 int  gegpu_init(void);
 
-/* GE sync points ("listend", "loadclut"); the backend decides what each requires.
+/* GE sync points ("listend", "xfersrc"); the backend decides what each requires.
  * Safe to call when idle/uninitialized. */
 void gegpu_flush(const char *reason);
 
@@ -47,7 +47,11 @@ void gegpu_flush(const char *reason);
  * GEGPU_PRESENT_TARGET_FAILED: a GPU-valid target exists, but preparing or presenting it failed,
  *   so its newest pixels may exist only in the GPU image. The caller must make guest VRAM current
  *   with gegpu_sync_guest_fb() before converting it, or decline the frame.
- * SHOWN and WINDOW_CLOSED keep the values sdl3vk_present_image_ex() returns for them. */
+ * GEGPU_PRESENT_DISPLAY_BUSY: the display still holds every image and the present did not wait
+ *   (SDL3VK_PRESENT_DISPLAY_BUSY); the frame is not shown and nothing failed.
+ * SHOWN, WINDOW_CLOSED and DISPLAY_BUSY keep the values sdl3vk_present_image_ex() returns for
+ * them. */
+#define GEGPU_PRESENT_DISPLAY_BUSY 2
 #define GEGPU_PRESENT_SHOWN 1
 #define GEGPU_PRESENT_WINDOW_CLOSED 0
 #define GEGPU_PRESENT_NOT_RESIDENT (-1)
@@ -184,7 +188,9 @@ typedef struct GeGpuCpuProfileStats {
     unsigned long long append_merges;
 } GeGpuCpuProfileStats;
 
-/* Why a primitive left the Vulkan batch model for ge.c's software rasterizer. */
+/* Why a primitive left the Vulkan batch model for ge.c's software rasterizer. psp.frag runs the
+ * color test; COLOR_TEST names only the color-test draws whose colour psp.frag computes in floating
+ * point (ge_gpu.c color_test_colour_inexact), which stay on ge.c. */
 enum {
     GEGPU_FALLBACK_STENCIL, GEGPU_FALLBACK_COLOR_TEST, GEGPU_FALLBACK_LOGIC_OP,
     GEGPU_FALLBACK_WRITE_MASK, GEGPU_FALLBACK_RAM_FB, GEGPU_FALLBACK_WIDE_STRIDE,
@@ -239,6 +245,11 @@ void gegpu_cpu_profile_stats_get(GeGpuCpuProfileStats *out);
  * declared unconditionally so no translation unit ever sees an implicit
  * declaration under any flag combination. */
 int gegpu_coherence_selftest(void);
+/* Supersampling's size check in the coherence selftest (--ssaa-budget-mb, --ssaa-max-dim,
+ * --ssaa-expect): the GPU memory budget and largest image side gegpu_init uses in place of the
+ * device's (0 keeps the device's), and the factor ssaa-limit expects init to choose (0: none).
+ * Call before gegpu_init. */
+void gegpu_selftest_ssaa_limits(unsigned long long budget_bytes, unsigned max_dim, int expect);
 /* Ace Mode's texture filtering (src/rt/ace.h): the anisotropy level the renderer uses (0 in an
  * authentic run), the anisotropic samplers it has made, and its texture descriptor pool's
  * size. Invariant A2: an authentic run makes none and keeps MAX_TEX sets. */

@@ -55,7 +55,7 @@ except ImportError:  # direct script execution
     import pgf_writer  # type: ignore[no-redef]
 
 CONVERTER_NAME = "ttf2pgf"
-CONVERTER_VERSION = "0.4.0"
+CONVERTER_VERSION = "0.5.0"
 SPEC_PATH = "docs/cleanroom/PGF_CONVERTER_SPEC.md"
 PIN_SCHEMA = "font-pin/v1"
 
@@ -89,6 +89,12 @@ DEFAULT_PPEM = 12
 DEFAULT_CODES = "0x20-0x7E"
 ELLIPSIS_CODE = 0x2026
 FULL_STOP_CODE = 0x2E
+#: ``--snap-overshoot`` (spec section 3, rule 13): the band is up to one pixel, in sub-samples,
+#: and the flat edges come from these reference glyphs: baseline and cap height from ``H``,
+#: x-height from ``x``.
+MAX_SNAP_OVERSHOOT = SUPERSAMPLE
+SNAP_CAP_REFERENCE = 0x48
+SNAP_X_REFERENCE = 0x78
 DEFAULT_FONT_NAME = "Nakagawa Open Latin"
 DEFAULT_FONT_TYPE = "Regular"
 JAPANESE_CODE_POINTS_SHA256 = "abc5302681a3c700179f29ac22a7c8082ed087a07b4cf8c3de4de5f73e7e0889"
@@ -1561,6 +1567,92 @@ def load_metric_targets(path: Path) -> _MetricTargets:
     return _MetricTargets(ascender, descender, tolerance, ppem_min, ppem_max)
 
 
+def _overshoot_zones(font: _Ttf, which: str) -> tuple[int | Fraction, int | Fraction, int | Fraction]:
+    """The flat baseline, x-height and cap height of ``font`` in font units (spec section 3, rule 13).
+
+    Measured from the font's own outlines: the lowest and highest points of ``H`` and the highest
+    point of ``x``. Neither glyph needs to be in the converted code set.
+    """
+    edges: dict[int, list[int | Fraction]] = {}
+    for code in (SNAP_CAP_REFERENCE, SNAP_X_REFERENCE):
+        gid = font.glyph_id(code)
+        ys = [] if gid is None else [y for contour in font.outline(gid) for _x, y, _on in contour]
+        if not ys:
+            raise _refuse("snap-overshoot-unavailable", f"{which} has no outline for U+{code:04X}")
+        edges[code] = ys
+    base = min(edges[SNAP_CAP_REFERENCE])
+    cap = max(edges[SNAP_CAP_REFERENCE])
+    x_height = max(edges[SNAP_X_REFERENCE])
+    if not base < x_height < cap:
+        raise _refuse(
+            "snap-overshoot-unavailable",
+            f"{which}'s flat edges do not ascend: baseline {base}, x-height {x_height}, cap height {cap}",
+        )
+    return base, x_height, cap
+
+
+def _snap_overshoot(
+    contours: list[list[tuple]],
+    zones: tuple[int | Fraction, int | Fraction, int | Fraction],
+    threshold: int,
+    ppem: int,
+    units_per_em: int,
+) -> list[list[tuple]]:
+    """Set each contour's overshoot of less than ``threshold``/8 px on the flat edge it passes.
+
+    Spec section 3, rule 13: an outer contour (one no other contour of the glyph encloses) that
+    rises above the baseline and whose lowest point is in the band below it, or that comes down
+    below the x-height and whose highest point is in the band above the x-height or the cap
+    height, has each of its points in that band moved onto the edge. Every other contour, and
+    ``x``, stay as they are.
+    """
+    base, x_height, cap = zones
+    limit = threshold * units_per_em
+
+    def in_band(depth: int | Fraction) -> bool:
+        return depth > 0 and depth * ppem * SUPERSAMPLE < limit
+
+    boxes = [
+        None if not contour else (
+            min(x for x, _y, _on in contour), min(y for _x, y, _on in contour),
+            max(x for x, _y, _on in contour), max(y for _x, y, _on in contour),
+        )
+        for contour in contours
+    ]
+
+    def enclosed(index: int) -> bool:
+        box = boxes[index]
+        assert box is not None
+        return any(
+            other is not None and other != box and other[0] <= box[0] and other[1] <= box[1]
+            and other[2] >= box[2] and other[3] >= box[3]
+            for other_index, other in enumerate(boxes) if other_index != index
+        )
+
+    snapped: list[list[tuple]] = []
+    for index, contour in enumerate(contours):
+        box = boxes[index]
+        if box is None or enclosed(index):
+            snapped.append(contour)
+            continue
+        _left, low, _right, high = box
+        below = high > base and in_band(base - low)
+        top = None if low >= x_height else next(
+            (edge for edge in (x_height, cap) if in_band(high - edge)), None)
+        if not below and top is None:
+            snapped.append(contour)
+            continue
+        moved: list[tuple] = []
+        for x, y, on in contour:
+            if below and in_band(base - y):
+                y = base
+            elif top is not None and in_band(y - top):
+                y = top
+            moved.append((x, y, on))
+        snapped.append(moved)
+    return snapped
+
+
 class _Planner:
     """Builds glyph plans and metric-target searches for one font and code list.
 
@@ -1575,8 +1667,13 @@ class _Planner:
         *,
         baseline_ellipsis: bool = False,
         fallback: _Ttf | None = None,
+        snap_overshoot: int = 0,
     ) -> None:
         self.font = font
+        #: ``--snap-overshoot`` threshold in sub-samples (0: off) and each drawing font's flat
+        #: edges, keyed by the font object's identity (spec section 3, rule 13).
+        self.snap_overshoot = snap_overshoot
+        self.snap_zones: dict[int, tuple[int | Fraction, int | Fraction, int | Fraction]] = {}
         self.fallback = fallback
         self.codes = tuple(codes)
         self.outline_shift: dict[int, int] = {}
@@ -1602,6 +1699,25 @@ class _Planner:
         self._rasters: dict[int, dict[int, _Raster]] = {}
         if baseline_ellipsis:
             self.outline_shift[ELLIPSIS_CODE] = self._ellipsis_shift()
+        if snap_overshoot:
+            self.snap_zones[id(font)] = _overshoot_zones(font, "the font")
+            if fallback is not None and self.fallback_codes:
+                self.snap_zones[id(fallback)] = _overshoot_zones(fallback, "the fallback font")
+
+    def check_snap_bands(self, ppem: int) -> None:
+        """Refuse a ppem at which the band above the x-height would reach the cap height."""
+        if not self.snap_overshoot:
+            return
+        for font in (self.font, self.fallback):
+            if font is None or id(font) not in self.snap_zones:
+                continue
+            _base, x_height, cap = self.snap_zones[id(font)]
+            if (cap - x_height) * ppem * SUPERSAMPLE <= self.snap_overshoot * font.units_per_em:
+                raise _refuse(
+                    "snap-overshoot-zones-overlap",
+                    f"at ppem {ppem} a band of {self.snap_overshoot}/8 px above the x-height {x_height} "
+                    f"reaches the cap height {cap} (units per em {font.units_per_em})",
+                )
 
     def font_for(self, code: int) -> _Ttf:
         """The font that draws ``code``: the fallback only where the primary font has no glyph."""
@@ -1652,7 +1768,10 @@ class _Planner:
         cached = per_size.get(code)
         if cached is None:
             contours = self.outline(code)
-            upem = self.font_for(code).units_per_em
+            font = self.font_for(code)
+            upem = font.units_per_em
+            if self.snap_overshoot:
+                contours = _snap_overshoot(contours, self.snap_zones[id(font)], self.snap_overshoot, ppem, upem)
             shift = self.shift_x_26_6.get(code, 0)
             if shift:
                 # A 26.6 shift is exact in font units as a rational: x26 = x * ppem * 64 / upem.
@@ -1759,6 +1878,7 @@ def convert(
     fallback_data: bytes | None = None,
     fallback_path: str | None = None,
     fallback_pin: SourcePin | None = None,
+    snap_overshoot: int = 0,
 ) -> Conversion:
     """Convert one pinned TrueType font into a PGF image plus its manifest.
 
@@ -1767,7 +1887,8 @@ def convert(
     many sub-samples (eighths of a pixel, negative for tighter) to every advance.
     ``digit_advance_26_6`` gives the digits 0-9 one advance (tabular figures) and centres each
     digit's outline in the change. ``fallback_data`` is a second pinned font that draws only the
-    code points the first lacks. Every stage
+    code points the first lacks. ``snap_overshoot`` sets round letters' overshoots of less than that
+    many sub-samples on the flat baseline, x-height and cap height (spec section 3, rule 13). Every stage
     validates before the next runs; the returned bytes are final. Raises
     :class:`TtfConvertError` naming the refusal on any malformed, unsupported, or
     policy-violating input.
@@ -1814,6 +1935,14 @@ def convert(
             "digit-advance-out-of-range",
             f"--digit-advance {digit_advance_26_6!r} is outside 64..{pgf_writer.MAX_EDGE * 64} (26.6 px)",
         )
+    if (
+        isinstance(snap_overshoot, bool) or not isinstance(snap_overshoot, int)
+        or not 0 <= snap_overshoot <= MAX_SNAP_OVERSHOOT
+    ):
+        raise _refuse(
+            "snap-overshoot-out-of-range",
+            f"--snap-overshoot {snap_overshoot!r} is outside 0..{MAX_SNAP_OVERSHOOT} sub-samples",
+        )
     if (fallback_data is None) != (fallback_path is None):
         raise _refuse("conflicting-parameters", "a fallback font needs both its bytes and its path")
     if fallback_pin is not None and fallback_data is None:
@@ -1827,7 +1956,9 @@ def convert(
 
     font = _Ttf(data)
     fallback = _Ttf(fallback_data) if fallback_data is not None else None
-    planner = _Planner(font, code_list, baseline_ellipsis=baseline_ellipsis, fallback=fallback)
+    planner = _Planner(
+        font, code_list, baseline_ellipsis=baseline_ellipsis, fallback=fallback, snap_overshoot=snap_overshoot,
+    )
     if fallback is not None and not planner.fallback_codes:
         raise _refuse("fallback-unused", "the first font draws every code point; drop --fallback")
 
@@ -1844,6 +1975,7 @@ def convert(
             "achieved_descender_26_6": extents[1],
         }
     assert ppem is not None
+    planner.check_snap_bands(ppem)
 
     if digit_advance_26_6 is not None:
         if any(code not in planner.gids for code in DIGIT_CODES):
@@ -1943,6 +2075,7 @@ def convert(
         baseline_ellipsis=baseline_ellipsis,
         tracking=tracking,
         digit_advance_26_6=digit_advance_26_6,
+        snap_overshoot=snap_overshoot,
         fallback=None if fallback is None else {
             "data": fallback_data, "font": fallback, "path": fallback_path, "pin": fallback_pin,
             "codes": planner.fallback_codes,
@@ -1999,6 +2132,7 @@ def _build_manifest(
     baseline_ellipsis: bool = False,
     tracking: int = 0,
     digit_advance_26_6: int | None = None,
+    snap_overshoot: int = 0,
     fallback: dict | None = None,
 ) -> dict:
     first, last = codes
@@ -2029,6 +2163,16 @@ def _build_manifest(
         parameters["tracking_sub_samples"] = tracking
     if digit_advance_26_6 is not None:
         parameters["digit_advance_26_6"] = digit_advance_26_6
+    # Added in converter 0.5.0, likewise only when used.
+    if snap_overshoot:
+        snap: dict[str, object] = {
+            "unit": "sub-sample (1/8 pixel)",
+            "threshold": snap_overshoot,
+            "zones": _zones_record(planner.snap_zones[id(font)]),
+        }
+        if planner.fallback is not None and id(planner.fallback) in planner.snap_zones:
+            snap["fallback_zones"] = _zones_record(planner.snap_zones[id(planner.fallback)])
+        parameters["snap_overshoot"] = snap
     manifest = {
         "converter": {
             "name": CONVERTER_NAME,
@@ -2091,6 +2235,16 @@ def _build_manifest(
             "codes": list(fallback["codes"]),
         }
     return manifest
+
+
+def _zones_record(zones: tuple[int | Fraction, int | Fraction, int | Fraction]) -> dict[str, object]:
+    """Flat edges in font units for the manifest: an integer, or ``"p/q"`` for a scaled component."""
+    def value(edge: int | Fraction) -> object:
+        if isinstance(edge, Fraction) and edge.denominator != 1:
+            return f"{edge.numerator}/{edge.denominator}"
+        return int(edge)
+    base, x_height, cap = zones
+    return {"baseline": value(base), "x_height": value(x_height), "cap_height": value(cap)}
 
 
 def _license_block(pin: SourcePin | None) -> dict | None:
@@ -2201,6 +2355,13 @@ def _main(argv: list[str]) -> int:
         type=int,
         help="give the digits 0-9 this advance in 26.6 px, each centred in it (tabular figures)",
     )
+    parser.add_argument(
+        "--snap-overshoot",
+        type=int,
+        default=0,
+        help="set overshoots of less than N/8 px on the flat baseline, x-height and cap height "
+        f"measured from H and x (0..{MAX_SNAP_OVERSHOOT}, default 0: off)",
+    )
     parser.add_argument("--fallback", type=Path, help="second .ttf drawing only the code points the input lacks")
     parser.add_argument("--fallback-pin", type=Path, help="font-pin/v1 JSON for --fallback")
     parser.add_argument(
@@ -2276,6 +2437,7 @@ def _main(argv: list[str]) -> int:
             fallback_data=fallback_data,
             fallback_path=None if args.fallback is None else str(args.fallback),
             fallback_pin=fallback_pin,
+            snap_overshoot=args.snap_overshoot,
         )
         manifest = manifest_bytes(conversion.manifest)
     except TtfConvertError as exc:

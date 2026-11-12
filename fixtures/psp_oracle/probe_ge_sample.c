@@ -83,6 +83,7 @@ PSP_HEAP_SIZE_KB(64);
 
 #define GE_CASE_SAMPLE 109
 #define GE_CASE_RASTER 123
+#define GE_CASE_THROUGH_Z 185
 #define GE_CASE_MIP 126
 #define GE_CASE_LIGHT 139
 #define GE_CASE_OVERLAP 153
@@ -98,6 +99,10 @@ PSP_HEAP_SIZE_KB(64);
 #define HLE_CAMPAIGN_ID "ge-raster"
 #define HLE_TEST_ID "PSP-GE-RASTER-001"
 #define HLE_LOG "host0:/ge_raster_log.txt"
+#elif PSP_ORACLE_CASE == GE_CASE_THROUGH_Z
+#define HLE_CAMPAIGN_ID "ge-through-z"
+#define HLE_TEST_ID "PSP-GE-THROUGHZ-001"
+#define HLE_LOG "host0:/ge_through_z_log.txt"
 #elif PSP_ORACLE_CASE == GE_CASE_MIP
 #define HLE_CAMPAIGN_ID "ge-mip"
 #define HLE_TEST_ID "PSP-GE-MIP-001"
@@ -509,8 +514,9 @@ static int hle_run(void)
 
 /* ==== GE raster cells (PSP-GE-RASTER-001, #343) ====
  * This block is carried byte for byte by fixtures/psp_oracle/probe_ge_sample.c (the PSP
- * side, CASE=ge-raster) and tests/native/hle_thread_selftest.c (the software GE side);
- * tools/test_psp_oracle.py pins the copy. Each cell is one display list of project-written
+ * side, CASE=ge-raster), tests/native/hle_thread_selftest.c (the software GE side) and
+ * src/rt/gpu_sdl3vk/ge_gpu_selftest.inc (the Vulkan side); tools/test_psp_oracle.py pins
+ * the copies. Each cell is one display list of project-written
  * command words over generated patterns (no game data). It draws into the 16x4 window
  * x 16..31, y 8..11 of a 64x32 colour buffer at VRAM offset GR_FB_OFFSET whose other pixels
  * are 0 and whose window holds gr_dst() before the list runs. The base state turns every
@@ -1204,6 +1210,257 @@ static int hle_run(void)
 }
 
 #endif /* GE_CASE_RASTER */
+
+/* ------------------------------------------------------------------------- */
+#if PSP_ORACLE_CASE == GE_CASE_THROUGH_Z
+
+/* ==== GE through-mode depth cells (PSP-GE-THROUGHZ-001) ====
+ * What the GE does with a through-mode vertex z outside 0..65535, a fraction, an infinity or a
+ * NaN: clamp, wrap, truncate or drop the draw. Each cell is one display list of project-written
+ * command words (no game data): through mode (vertex type bit 23), float positions, 8888 vertex
+ * colour, no texture, one 16x16 flat sprite of colour GTZ_COLOUR over x 16..31, y 8..23, both
+ * vertices at the cell's z, with the depth test on with function ALWAYS and depth writes on;
+ * every other per-fragment unit is off, as in ge-rtt. The depth range words keep the
+ * ge-rtt/ge-raster values (0xd6 = 0, 0xd7 = 0xffff).
+ *
+ * Layout, as ge-raster and ge-rtt: a 64x32 5650 colour buffer at VRAM offset GTZ_FB_OFFSET and a
+ * 64x32 16-bit depth buffer at GTZ_ZB_OFFSET, both stride 64. Before every cell the CPU clears
+ * the colour block to 0 and fills every depth word with GTZ_ZCLEAR (0x1234) through the uncached
+ * VRAM mirror, then `sync` and a data-cache write-back. Like those cases it leaves the two blocks
+ * as the last cell drew them.
+ *
+ * The CPU's view of the GE's depth layout is not assumed: besides the depth words at the
+ * sprite's linear positions, each cell counts every depth word in the block that is no longer
+ * 0x1234 and records the lowest and highest of them, which does not depend on where the GE put
+ * them. The infinity and NaN cells come last.
+ *
+ * Records per cell: `<cell>-draw` (16 words: the GE wait outcome as ge-rtt (qid, list state,
+ * draw state, elapsed us, idle, reset result), the list length, the z bits, the number of colour
+ * pixels in the block that are not 0, the colour at the sprite's centre (24, 16), the number of
+ * changed depth words, the lowest and highest changed word (0xffffffff and 0 when none), the
+ * index of the first changed word (0xffffffff when none), and the depth words at the sprite's
+ * first pixel (16, 8) and its centre), then `<cell>-z` (the depth words of row y 16, x 16..31,
+ * zero-extended). */
+
+#define GTZ_FB_OFFSET 0x00100000u   /* VRAM-relative 5650 colour buffer, stride 64, 32 rows */
+#define GTZ_ZB_OFFSET 0x00110000u   /* VRAM-relative 16-bit depth buffer, stride 64, 32 rows */
+#define GTZ_STRIDE 64u
+#define GTZ_ROWS 32u
+#define GTZ_PIXELS (GTZ_STRIDE * GTZ_ROWS)
+#define GTZ_X0 16u                  /* sprite x 16..31, y 8..23 */
+#define GTZ_Y0 8u
+#define GTZ_SIDE 16u
+#define GTZ_CENTRE ((GTZ_Y0 + GTZ_SIDE / 2u) * GTZ_STRIDE + GTZ_X0 + GTZ_SIDE / 2u)
+#define GTZ_ZCLEAR 0x1234u
+#define GTZ_COLOUR 0xff00ff00u      /* ABGR green: 5650 0x07e0 */
+#define GTZ_LIST_WORDS 96u
+#define GTZ_WAIT_POLLS 5000u        /* 5000 x 100 us: a half-second bound per draw */
+#define GTZ_WAIT_POLL_US 100u
+
+struct gtz_cell {
+    const char *name;
+    uint32_t zbits;             /* the vertex z, as float bits */
+};
+
+#define GTZ_CELL_COUNT 11u
+static const struct gtz_cell gtz_cells[GTZ_CELL_COUNT] = {
+    {"zm1", 0xbf800000u},       /* -1.0 */
+    {"zm0p5", 0xbf000000u},     /* -0.5 */
+    {"z0", 0x00000000u},        /* 0.0 */
+    {"z0p5", 0x3f000000u},      /* 0.5 */
+    {"z1p5", 0x3fc00000u},      /* 1.5 */
+    {"z65535", 0x477fff00u},    /* 65535.0 */
+    {"z65535p5", 0x477fff80u},  /* 65535.5 */
+    {"z65536", 0x47800000u},    /* 65536.0 */
+    {"z70000", 0x4788b800u},    /* 70000.0 */
+    {"zinf", 0x7f800000u},      /* +infinity */
+    {"znan", 0x7fc00000u},      /* quiet NaN */
+};
+_Static_assert(sizeof(gtz_cells) / sizeof(gtz_cells[0]) == GTZ_CELL_COUNT, "GTZ_CELL_COUNT");
+
+static uint32_t s_gtz_vtx[8] __attribute__((aligned(64)));
+static uint32_t s_gtz_list[GTZ_LIST_WORDS] __attribute__((aligned(64)));
+static uint32_t s_gtz_row[GTZ_SIDE];
+
+static uint32_t gtz_fbits(float f)
+{
+    uint32_t u;
+    memcpy(&u, &f, sizeof(u));
+    return u;
+}
+
+static uint32_t gtz_phys(const void *p)
+{
+    return (uint32_t)(uintptr_t)p & 0x0fffffffu;
+}
+
+/* The uncached mirror of the VRAM block at `offset`. */
+static uintptr_t gtz_mirror(uint32_t offset)
+{
+    const uint32_t vram = (uint32_t)(uintptr_t)sceGeEdramGetAddr();
+    return (uintptr_t)((vram | 0x40000000u) + offset);
+}
+
+/* Colour block 0, every depth word GTZ_ZCLEAR, through the uncached mirror. */
+static void gtz_prepare(void)
+{
+    volatile uint16_t *fb = (volatile uint16_t *)gtz_mirror(GTZ_FB_OFFSET);
+    volatile uint16_t *zb = (volatile uint16_t *)gtz_mirror(GTZ_ZB_OFFSET);
+    for (uint32_t i = 0; i < GTZ_PIXELS; i++) {
+        fb[i] = 0u;
+        zb[i] = (uint16_t)GTZ_ZCLEAR;
+    }
+    __asm__ volatile("sync" ::: "memory");
+}
+
+/* The sprite's two vertices (colour, x, y, z), both at z. */
+static void gtz_vertices(uint32_t zbits)
+{
+    s_gtz_vtx[0] = GTZ_COLOUR;
+    s_gtz_vtx[1] = gtz_fbits((float)GTZ_X0);
+    s_gtz_vtx[2] = gtz_fbits((float)GTZ_Y0);
+    s_gtz_vtx[3] = zbits;
+    s_gtz_vtx[4] = GTZ_COLOUR;
+    s_gtz_vtx[5] = gtz_fbits((float)(GTZ_X0 + GTZ_SIDE));
+    s_gtz_vtx[6] = gtz_fbits((float)(GTZ_Y0 + GTZ_SIDE));
+    s_gtz_vtx[7] = zbits;
+}
+
+/* The cell's display list; returns the word count. The state words are ge-rtt's, with the
+   colour buffer 5650, the depth test on with ALWAYS and depth writes on. */
+static uint32_t gtz_list(uint32_t vtx, uint32_t *out)
+{
+    static const uint8_t off_units[11] = {0x17u, 0x1cu, 0x1du, 0x1fu, 0x20u, 0x21u,
+                                          0x22u, 0x24u, 0x25u, 0x27u, 0x28u};
+    const uint32_t full = (GTZ_STRIDE - 1u) | ((GTZ_ROWS - 1u) << 10);
+    uint32_t n = 0;
+#define GTZ_W(cmd, data) (out[n++] = ((uint32_t)(cmd) << 24) | ((uint32_t)(data) & 0x00ffffffu))
+    GTZ_W(0x10, (vtx >> 8) & 0x000f0000u);
+    GTZ_W(0x9c, GTZ_FB_OFFSET);
+    GTZ_W(0x9d, GTZ_STRIDE);
+    GTZ_W(0xd2, 0u);            /* 5650 */
+    GTZ_W(0x9e, GTZ_ZB_OFFSET);
+    GTZ_W(0x9f, GTZ_STRIDE);
+    GTZ_W(0x15, 0);
+    GTZ_W(0x16, full);
+    GTZ_W(0xd4, 0);
+    GTZ_W(0xd5, full);
+    GTZ_W(0xd6, 0);
+    GTZ_W(0xd7, 0xffffu);
+    for (uint32_t i = 0; i < 11u; i++) {
+        GTZ_W(off_units[i], 0); /* lighting, culling, texturing, fog, dither, blending, tests */
+    }
+    GTZ_W(0x23, 1);             /* depth test on */
+    GTZ_W(0xde, 1);             /* depth test ALWAYS */
+    GTZ_W(0xe7, 0);             /* depth writes on */
+    GTZ_W(0x1e, 0);             /* texture off */
+    GTZ_W(0x50, 0);             /* flat shading */
+    GTZ_W(0xd3, 0);             /* clear mode off */
+    GTZ_W(0xe8, 0);
+    GTZ_W(0xe9, 0);
+    GTZ_W(0xdb, 0x00ff0001u);   /* alpha test ALWAYS */
+    GTZ_W(0xd8, 1);             /* colour test ALWAYS */
+    GTZ_W(0xd9, 0);
+    GTZ_W(0xda, 0);
+    GTZ_W(0xdc, 0x00ff0001u);   /* stencil test ALWAYS */
+    GTZ_W(0xdd, 0);             /* KEEP, KEEP, KEEP */
+    GTZ_W(0xdf, 0x32u);
+    GTZ_W(0xe0, 0);
+    GTZ_W(0xe1, 0);
+    GTZ_W(0xe6, 3);             /* logic op COPY */
+    GTZ_W(0xcf, 0);
+    GTZ_W(0xcd, 0);
+    GTZ_W(0xce, 0);
+    GTZ_W(0x53, 0);             /* MATERIALUPDATE: vertex colour is the only colour source */
+    GTZ_W(0x55, 0xffffffu);
+    GTZ_W(0x58, 0xffu);
+    GTZ_W(0x12, 0x0080019cu);   /* through, 8888 colour, float position */
+    GTZ_W(0x01, vtx);
+    GTZ_W(0x04, (6u << 16) | 2u);   /* sprite */
+    GTZ_W(0x0f, 0);
+    GTZ_W(0x0c, 0);
+#undef GTZ_W
+    return n;
+}
+
+/* One cell: prepare the blocks, build the list, queue it, wait (bounded), read the blocks back,
+   then the `-draw` and `-z` records. */
+static void gtz_draw(const struct gtz_cell *c)
+{
+    static char row[64];
+    hle_step(c->name);
+    gtz_prepare();
+    gtz_vertices(c->zbits);
+    const uint32_t words = gtz_list(gtz_phys(s_gtz_vtx), s_gtz_list);
+    sceKernelDcacheWritebackAll();
+    const uint32_t t0 = sceKernelGetSystemTimeLow();
+    const int qid = sceGeListEnQueue(s_gtz_list, NULL, -1, NULL);
+    int list_state = qid;
+    int draw_state = -1;
+    int idle = 0;
+    for (unsigned i = 0; i < GTZ_WAIT_POLLS; i++) {
+        list_state = qid >= 0 ? sceGeListSync(qid, 1) : qid;
+        draw_state = sceGeDrawSync(1);
+        idle = draw_state == PSP_GE_LIST_DONE;
+        if (idle) {
+            break;
+        }
+        sceKernelDelayThread(GTZ_WAIT_POLL_US);
+    }
+    const uint32_t elapsed = sceKernelGetSystemTimeLow() - t0;
+    int reset_rc = 0;
+    if (!idle) {
+        PspGeBreakParam param;
+        memset(&param, 0, sizeof(param));
+        reset_rc = sceGeBreak(1, &param);
+        for (unsigned i = 0; i < GTZ_WAIT_POLLS; i++) {
+            if (sceGeDrawSync(1) == PSP_GE_LIST_DONE) {
+                break;
+            }
+            sceKernelDelayThread(GTZ_WAIT_POLL_US);
+        }
+    }
+    volatile uint16_t *fb = (volatile uint16_t *)gtz_mirror(GTZ_FB_OFFSET);
+    volatile uint16_t *zb = (volatile uint16_t *)gtz_mirror(GTZ_ZB_OFFSET);
+    uint32_t colour_written = 0u;
+    uint32_t z_changed = 0u;
+    uint32_t z_min = 0xffffffffu;
+    uint32_t z_max = 0u;
+    uint32_t z_first = 0xffffffffu;
+    for (uint32_t i = 0; i < GTZ_PIXELS; i++) {
+        colour_written += fb[i] != 0u;
+        const uint32_t z = zb[i];
+        if (z != GTZ_ZCLEAR) {
+            if (z_changed == 0u) {
+                z_first = i;
+            }
+            z_changed++;
+            z_min = z < z_min ? z : z_min;
+            z_max = z > z_max ? z : z_max;
+        }
+    }
+    for (uint32_t i = 0; i < GTZ_SIDE; i++) {
+        s_gtz_row[i] = zb[(GTZ_Y0 + GTZ_SIDE / 2u) * GTZ_STRIDE + GTZ_X0 + i];
+    }
+    const uint32_t draw[16] = {(uint32_t)qid, (uint32_t)list_state, (uint32_t)draw_state,
+                               elapsed, (uint32_t)idle, (uint32_t)reset_rc, words, c->zbits,
+                               colour_written, fb[GTZ_CENTRE], z_changed, z_min, z_max, z_first,
+                               zb[GTZ_Y0 * GTZ_STRIDE + GTZ_X0], zb[GTZ_CENTRE]};
+    snprintf(row, sizeof(row), "%s-draw", c->name);
+    hle_record(row, qid < 0 ? "FAIL" : idle ? "PASS" : "TIMEOUT", (uint32_t)qid, draw, 16);
+    snprintf(row, sizeof(row), "%s-z", c->name);
+    hle_record(row, "PASS", 0, s_gtz_row, GTZ_SIDE);
+}
+
+static int hle_run(void)
+{
+    for (uint32_t i = 0; i < GTZ_CELL_COUNT; i++) {
+        gtz_draw(&gtz_cells[i]);
+    }
+    return 1;
+}
+
+#endif /* GE_CASE_THROUGH_Z */
 
 /* ------------------------------------------------------------------------- */
 #if PSP_ORACLE_CASE == GE_CASE_MIP

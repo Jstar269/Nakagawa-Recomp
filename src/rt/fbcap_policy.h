@@ -71,6 +71,21 @@ int sr_fbcap_path(int owner, int index, char *out, size_t outsz);
 /* Exit status for the SR_FBDUMP route (see header comment). */
 int sr_fbcap_exit_status(int owner, int capture_result);
 
+/* The screenshot key's request (fbcap.h, screenshot key): the presenter's key handler sets it,
+ * the display path arms the next present with it and clears it once that capture published or
+ * failed. */
+void sr_screenshot_request(void);
+int sr_screenshot_pending(void);
+void sr_screenshot_clear(void);
+
+/* File name of a screenshot (fbcap.h, screenshot key): "<disc>_<YYYYMMDD>-<HHMMSS>.png", and
+ * "<disc>_<YYYYMMDD>-<HHMMSS>-<seq>.png" for seq 2 to 99, the next free name when two shots fall
+ * in the same second. The disc ID keeps only A-Z, a-z, 0-9, '-' and '_' and at most 32 of them;
+ * a NULL or empty result reads "game". Returns 1 when the name fits in outsz, else 0 with
+ * out empty; a field outside its calendar range or seq outside 1 to 99 also returns 0. */
+int sr_screenshot_name(const char *disc_id, int year, int month, int day, int hour, int minute,
+                       int second, int seq, char *out, size_t outsz);
+
 #ifdef __cplusplus
 }
 #endif

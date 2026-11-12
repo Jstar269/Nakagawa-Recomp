@@ -296,8 +296,8 @@ static const Vector vectors[] = {
     {0x40600000u, 0u, {4u, 3u, 4u, 3u, 4u}, {4u, 3u, 4u, 3u, 0x7fffffffu}},
     {0x40300000u, 1u, {3u, 2u, 3u, 2u, 2u}, {3u, 2u, 3u, 2u, 0x7fffffffu}},
     {0xc0300000u, 2u, {0xfffffffdu, 0xfffffffeu, 0xfffffffeu, 0xfffffffdu, 0xfffffffeu}, {0xfffffffdu, 0xfffffffeu, 0xfffffffeu, 0xfffffffdu, 0x80000000u}},
-    {0x00000001u, 0u, {0u, 0u, 1u, 0u, 0u}, {0u, 0u, 1u, 0u, 0u}},
-    {0x80000001u, 0u, {0u, 0u, 0u, 0xffffffffu, 0u}, {0u, 0u, 0u, 0xffffffffu, 0u}},
+    {0x00000001u, 0u, {0u, 0u, 1u, 0u, 0u}, {0u, 0u, 0u, 0u, 0u}},  /* the scalar FPU rounds a denormal; vf2i* flushes it (PSP-VFPU-CONVERT-001, vfpu-convert) */
+    {0x80000001u, 0u, {0u, 0u, 0u, 0xffffffffu, 0u}, {0u, 0u, 0u, 0u, 0u}},
     {0x4effffffu, 0u, {0x7fffff80u, 0x7fffff80u, 0x7fffff80u, 0x7fffff80u, 0x7fffff80u}, {0x7fffff80u, 0x7fffff80u, 0x7fffff80u, 0x7fffff80u, 0x7fffffffu}},
     {0x4f000000u, 0u, {0x7fffffffu, 0x7fffffffu, 0x7fffffffu, 0x7fffffffu, 0x7fffffffu}, {0x7fffffffu, 0x7fffffffu, 0x7fffffffu, 0x7fffffffu, 0x7fffffffu}},
     {0xcf000000u, 0u, {0x80000000u, 0x80000000u, 0x80000000u, 0x80000000u, 0x80000000u}, {0x80000000u, 0x80000000u, 0x80000000u, 0x80000000u, 0x80000000u}},

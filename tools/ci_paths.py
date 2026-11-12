@@ -32,6 +32,7 @@ import subprocess
 import sys
 import time
 from typing import Iterable, Mapping, Sequence
+import urllib.request
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -223,7 +224,9 @@ def _is_build_system(path: str) -> bool:
         logical_path in {"Makefile", "GNUmakefile", "CMakeLists.txt"}
         or logical_path.startswith("mk/")
         or logical_path.startswith("cmake/")
-        or logical_path.startswith("tools/build")
+        # tools/build_installer.py builds only the Windows Setup.exe: it routes the
+        # installer gate (_is_installer), not the native build.
+        or (logical_path.startswith("tools/build") and not _is_installer(logical_path))
         or logical_path.startswith("tools/hst_")
         or logical_path in {
             "tools/nk_doctor.py",
@@ -815,6 +818,9 @@ def _is_recognised(path: str) -> bool:
             _is_build_system,
             _is_native_runtime,
             _is_python_tool,
+            # The Inno script and lock route the installer gate; unrecognised they
+            # would force the full matrix the installer-inputs row skips.
+            _is_installer,
         )
     )
 
@@ -948,18 +954,22 @@ def trusted_for_self_hosted(
 
 #: Values of ``NK_SELF_HOSTED_LINUX`` that open the pool. ``on`` takes every trusted run;
 #: ``landing`` takes only the runs that land work (``landing_run``), so a small pool on a
-#: busy PC is not swamped by every task branch's Draft CI. Anything else is off.
+#: busy PC is not swamped by every task branch's Draft CI; ``batch`` takes only the desk's
+#: own landing runs (``batch_run``), so a Ready pull request's CI stays hosted too and the
+#: pool is kept for the batches. Anything else is off.
 SELF_HOSTED_SWITCH_ON = "on"
 SELF_HOSTED_SWITCH_LANDING = "landing"
+SELF_HOSTED_SWITCH_BATCH = "batch"
+SELF_HOSTED_SWITCHES = (SELF_HOSTED_SWITCH_ON, SELF_HOSTED_SWITCH_LANDING, SELF_HOSTED_SWITCH_BATCH)
 #: Head branches the landing desk opens for a batch of pull requests (``batch/desk-<UTC>``).
 SELF_HOSTED_LANDING_PREFIXES = ("batch/",)
 
 
 def self_hosted_switch(switch: str) -> str:
-    """The pool's switch state: ``on``, ``landing``, or ``off`` for any other value."""
+    """The pool's switch state: ``on``, ``landing``, ``batch``, or ``off`` for any other value."""
 
     value = switch.strip().lower()
-    if value in (SELF_HOSTED_SWITCH_ON, SELF_HOSTED_SWITCH_LANDING):
+    if value in SELF_HOSTED_SWITCHES:
         return value
     return "off"
 
@@ -988,8 +998,30 @@ def landing_run(event_name: str, event: Mapping[str, object], *, ref: str) -> bo
     return pull_request.get("draft") is False
 
 
+def batch_run(event_name: str, event: Mapping[str, object], *, ref: str) -> bool:
+    """Whether a run is one of the desk's own landing runs: a push to ``main``, a merge group, or a batch.
+
+    Unlike ``landing_run``, a Ready pull request from a task branch is not one: the desk
+    tests it again inside its batch, so in ``batch`` mode its own CI stays hosted. This
+    only narrows: callers check ``trusted_for_self_hosted`` first.
+    """
+
+    if event_name == "push":
+        return ref == "refs/heads/main"
+    if event_name == "merge_group":
+        return ref.startswith("refs/heads/gh-readonly-queue/main/")
+    if event_name != "pull_request":
+        return False
+    pull_request = event.get("pull_request")
+    if not isinstance(pull_request, dict):
+        return False
+    head = pull_request.get("head")
+    head_ref = head.get("ref") if isinstance(head, dict) else None
+    return isinstance(head_ref, str) and head_ref.startswith(SELF_HOSTED_LANDING_PREFIXES)
+
+
 def self_hosted_pool_available(switch: str, heartbeat: str, now: float) -> bool:
-    """Whether the pool's switch is open (``on`` or ``landing``) and its supervisor reported in recently."""
+    """Whether the pool's switch is open (``on``, ``landing`` or ``batch``) and its supervisor reported in recently."""
 
     if self_hosted_switch(switch) == "off":
         return False
@@ -1062,7 +1094,12 @@ def codeql_runner(
     heartbeat: str,
     now: float,
 ) -> str:
-    """The ``runs-on`` value, as JSON, for Trusted CodeQL's analyses."""
+    """The ``runs-on`` value, as JSON, for Trusted CodeQL's analyses.
+
+    ``landing`` and ``batch`` take the same targets here (``codeql_landing_target``): a
+    wake payload does not say whether its pull request is Ready, so neither mode gives a
+    task branch's analysis the pool.
+    """
 
     if (
         codeql_trusted_target(event_name, event, repository=repository, ref=ref)
@@ -1077,7 +1114,7 @@ def codeql_landing_target(event_name: str, event: Mapping[str, object], *, ref: 
     """Whether a CodeQL target lands work: a push to ``main``, or a wake of a merge group or batch.
 
     A "CodeQL wake" payload does not say whether its pull request is a Draft, so in
-    ``landing`` mode only the desk's batch branches and merge groups take the pool. This
+    ``landing`` and ``batch`` mode only the desk's batch branches and merge groups take the pool. This
     only narrows: callers check ``codeql_trusted_target`` first.
     """
 
@@ -1112,10 +1149,19 @@ def linux_runner(
     Ubuntu 24.04 for both.
     """
 
+    mode = self_hosted_switch(switch)
+    if mode == SELF_HOSTED_SWITCH_ON:
+        admitted = True
+    elif mode == SELF_HOSTED_SWITCH_LANDING:
+        admitted = landing_run(event_name, event, ref=ref)
+    elif mode == SELF_HOSTED_SWITCH_BATCH:
+        admitted = batch_run(event_name, event, ref=ref)
+    else:
+        admitted = False
     if (
         trusted_for_self_hosted(event_name, event, repository=repository, ref=ref)
         and self_hosted_pool_available(switch, heartbeat, now)
-        and (self_hosted_switch(switch) == SELF_HOSTED_SWITCH_ON or landing_run(event_name, event, ref=ref))
+        and admitted
     ):
         return json.dumps(list(SELF_HOSTED_LINUX_RUNNER), separators=(",", ":"))
     return json.dumps(hosted)
@@ -1192,16 +1238,188 @@ def _changed_files_from_git(event_name: str, event: Mapping[str, object]) -> lis
     return _parse_changed_paths(result.stdout)
 
 
+#: The two CI tiers (docs/CI.md, "Quick and full checks"). ``light`` is what the
+#: documentation calls the quick checks: classification, hygiene, the export audit and the
+#: quick-check job, about 5 runner-minutes. ``full`` adds every substantive gate the
+#: changed paths route, about 144 for a change that routes them all.
+TIER_LIGHT = "light"
+TIER_FULL = "full"
+#: ``NK_CI_TIERS``, a repository variable: only this value lets a pull request that is not
+#: a Draft run light. Unset, or anything else, every such pull request runs the full
+#: checks, as before the tiers existed. Deleting the variable turns the tiers off.
+CI_TIERS_ON = "on"
+#: A maintainer adds this label to ask for the full checks on one pull request. It decides
+#: cost only: tools/ci_trust_verdict.py never reads it, and judges whether ``CI required``
+#: succeeded, not why the full checks ran.
+FULL_TIER_LABEL = "ci-full-matrix"
+#: The variable that carries the job token for the label read below. The workflow sets it
+#: on the classify step alone and nothing else reads it, so a test or a local run never
+#: calls GitHub by accident.
+LABEL_TOKEN_VARIABLE = "NK_CI_LABEL_TOKEN"
+LABEL_READ_TIMEOUT = 15
+_REPOSITORY_NAME = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
+
+
+def ci_tiers_on(switch: str) -> bool:
+    """Whether ``NK_CI_TIERS`` turns the light tier on: exactly ``on``, ignoring case and spaces."""
+
+    return switch.strip().lower() == CI_TIERS_ON
+
+
+def carries_outside_code(pull_request: Mapping[str, object]) -> bool:
+    """Whether a pull request's head can hold commits someone outside the project wrote.
+
+    True for a fork's pull request, and for this repository's ``carry/`` and ``desk/``
+    branches (``SELF_HOSTED_UNTRUSTED_PREFIXES``), where the landing desk copies a fork's
+    commits. Such a head lands alone on its own commit, never inside a batch branch (which
+    the self-hosted pool trusts), so its own run must be the full one. A head whose
+    repository or branch cannot be read counts as outside code.
+    """
+
+    head = pull_request.get("head")
+    base = pull_request.get("base")
+    head_repo = head.get("repo") if isinstance(head, dict) else None
+    base_repo = base.get("repo") if isinstance(base, dict) else None
+    if not isinstance(head, dict) or not isinstance(head_repo, dict) or not isinstance(base_repo, dict):
+        return True
+    base_name = base_repo.get("full_name")
+    if not isinstance(base_name, str) or not same_repository(head_repo.get("full_name"), base_name):
+        return True
+    if head_repo.get("fork") is not False:
+        return True
+    head_ref = head.get("ref")
+    return not isinstance(head_ref, str) or not head_ref or head_ref.startswith(SELF_HOSTED_UNTRUSTED_PREFIXES)
+
+
+def pull_request_tier(event: Mapping[str, object], *, switch: str, labels: Iterable[str]) -> str:
+    """The tier of a ``pull_request`` run (docs/CI.md, "Quick and full checks").
+
+    ``light`` for a Draft, always: a Draft holds no substantive runner. Otherwise ``full``
+    unless the tiers are on (``ci_tiers_on``), and then ``full`` only for a head that lands
+    on its own run: a pull request carrying ``FULL_TIER_LABEL``, outside code
+    (``carries_outside_code``), and the landing desk's batch branches. Every other head is
+    ``light``: its full checks run on the batch that lands it. A payload without a readable
+    pull request is ``full``, the tier that cannot understate what a run must cover.
+
+    Nothing here is a trust decision. A light run cannot turn ``CI required`` green
+    (tools/ci_required.py), so a wrong answer costs runner time or a wait, never a merge.
+    """
+
+    pull_request = event.get("pull_request")
+    if not isinstance(pull_request, dict):
+        return TIER_FULL
+    if pull_request.get("draft"):
+        return TIER_LIGHT
+    if not ci_tiers_on(switch):
+        return TIER_FULL
+    if FULL_TIER_LABEL in set(labels):
+        return TIER_FULL
+    if carries_outside_code(pull_request):
+        return TIER_FULL
+    head = pull_request.get("head")
+    head_ref = head.get("ref") if isinstance(head, dict) else None
+    if isinstance(head_ref, str) and head_ref.startswith(SELF_HOSTED_LANDING_PREFIXES):
+        return TIER_FULL
+    return TIER_LIGHT
+
+
+def _label_names(labels: object) -> list[str] | None:
+    """The names in a GitHub label list, or None when it is not one."""
+
+    if not isinstance(labels, list):
+        return None
+    names = []
+    for label in labels:
+        name = label.get("name") if isinstance(label, dict) else None
+        if not isinstance(name, str):
+            return None
+        names.append(name)
+    return names
+
+
+def live_labels(event: Mapping[str, object], *, repository: str, token: str, api_root: str) -> list[str] | None:
+    """The pull request's labels as GitHub has them now, or None when they cannot be read.
+
+    A re-run reuses the first attempt's event, so the payload still has the labels of that
+    attempt. Reading them when the run starts is what makes "add the label, then re-run
+    all jobs" start the full checks. GitHub's answer is not candidate data: no file, title,
+    body or branch name of the pull request is consulted.
+    """
+
+    pull_request = event.get("pull_request")
+    number = pull_request.get("number") if isinstance(pull_request, dict) else None
+    if not token or not isinstance(number, int) or isinstance(number, bool) or number <= 0:
+        return None
+    root = api_root.rstrip("/")
+    if not root.startswith("https://") or not _REPOSITORY_NAME.fullmatch(repository):
+        return None
+    request = urllib.request.Request(
+        f"{root}/repos/{repository}/issues/{number}/labels?per_page=100",
+        headers={
+            "Accept": "application/vnd.github+json",
+            "Authorization": f"Bearer {token}",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "User-Agent": "nakagawa-recomp-ci-paths",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=LABEL_READ_TIMEOUT) as response:
+            answer = json.loads(response.read().decode("utf-8"))
+    except (OSError, ValueError):
+        return None
+    return _label_names(answer)
+
+
+def pull_request_labels(event: Mapping[str, object]) -> tuple[list[str], str]:
+    """The labels that decide the tier, and where they were read: GitHub now, else the event payload."""
+
+    pull_request = event.get("pull_request")
+    payload = _label_names(pull_request.get("labels") if isinstance(pull_request, dict) else None) or []
+    token = os.environ.get(LABEL_TOKEN_VARIABLE, "")
+    if not token:
+        return payload, "event payload"
+    live = live_labels(
+        event,
+        repository=os.environ.get("GITHUB_REPOSITORY", ""),
+        token=token,
+        api_root=os.environ.get("GITHUB_API_URL", "https://api.github.com"),
+    )
+    if live is None:
+        return payload, "event payload; the read from GitHub failed"
+    return live, "read from GitHub"
+
+
+def run_tier(event_name: str, event: Mapping[str, object]) -> tuple[str, str]:
+    """This run's tier, and a log line naming the labels read for it (empty when none were).
+
+    Only a ``pull_request`` run can be light. The labels are read only for a head that would
+    otherwise run light and is not a Draft, the one case where they can change the answer.
+    """
+
+    if event_name != "pull_request":
+        return TIER_FULL, ""
+    switch = os.environ.get("NK_CI_TIERS", "")
+    tier = pull_request_tier(event, switch=switch, labels=())
+    if tier != TIER_LIGHT or _event_draft(event_name, event):
+        return tier, ""
+    labels, source = pull_request_labels(event)
+    return pull_request_tier(event, switch=switch, labels=labels), f"labels={','.join(sorted(labels))} ({source})"
+
+
 #: Python shards for the full suite and for a change whose only build-system edit is a
-#: recipe-only Makefile edit. Three full shards keep a whole CI run near 14 jobs, inside
-#: the free plan's 20 concurrent jobs (docs/CI.md, "Jobs per run"); each plans to about
-#: 16 hosted minutes by run 42270920833's weights, and test_production_smoke alone takes
-#: about 12.5, so more shards would shorten the job little. The Makefile-coupled subset
-#: (tools/ci_test_shards.py --select makefile) is about nine tenths of the suite by
-#: measured weight, because most heavy modules run make, so it keeps the same three
+#: recipe-only Makefile edit. Each count is the fewest shards at which the heaviest
+#: module, test_production_smoke (about 16 hosted minutes by the weights in
+#: tools/ci_test_weights.json), sets the slowest shard: three shards plan to about 19
+#: minutes each, four to that module alone and about 14 minutes for each of the others,
+#: and a fifth would leave the slowest shard unchanged. Four keep a whole CI run at 17
+#: jobs (18 with the Windows installer job), inside the free plan's 20 concurrent jobs
+#: (docs/CI.md, "Jobs per run").
+#: tools/test_ci_test_shards.py holds both counts to that rule. The Makefile-coupled
+#: subset (tools/ci_test_shards.py --select makefile) is nearly the whole suite by
+#: measured weight, because most heavy modules run make, so it keeps the same four
 #: runners and saves the unrelated modules rather than a runner.
-PYTHON_SHARDS_FULL = 3
-PYTHON_SHARDS_MAKEFILE = 3
+PYTHON_SHARDS_FULL = 4
+PYTHON_SHARDS_MAKEFILE = 4
 
 
 _MAKEFILE_INCLUDE_RE = re.compile(r"^[ \t]*include[ \t]+(mk/[A-Za-z0-9_./-]+\.mk)[ \t]*$")
@@ -1268,6 +1486,7 @@ def classify(
     event_name: str = "pull_request",
     draft: bool = False,
     makefile_change: tuple[str, ...] | None = None,
+    tier: str = TIER_FULL,
 ) -> dict[str, str]:
     """Classify ``paths`` into gate decisions.
 
@@ -1275,6 +1494,10 @@ def classify(
     change's Makefile edit, or None when there is none or it is not provably
     recipe-only.  Only a non-None value narrows anything, so a caller that cannot
     compute it keeps the full ``build_system`` routing.
+
+    ``tier`` is ``pull_request_tier``'s answer for a pull request. Anything but ``full``
+    there, or a Draft, makes the run light: ``allow_substantive`` is false and the
+    exported ``tier`` is ``light``, always together. No other event is ever light.
     """
 
     files = sorted({_normalise(path) for path in paths if path.strip()})
@@ -1342,13 +1565,14 @@ def classify(
     run_installer = run_windows or any(_is_installer(path) for path in files)
     # A normal main push is already covered by its PR. Workflow changes are
     # exceptional: validate the new workflow itself on the default branch too.
-    # A Draft pull request runs only the quick jobs (classification, hygiene and
-    # security, the public export audit and CI required), whatever its paths: the
-    # substantive gates run when it is marked Ready (``ready_for_review``) and on
-    # every later push while it is not a Draft (docs/CI.md, "Draft pull requests").
-    # The run flags above still describe what the paths would route, and
-    # tools/ci_required.py never reports a Draft's run green (DRAFT_LIGHT_CI).
-    # Only a pull_request event can be a Draft, so no other event is narrowed.
+    # A light pull-request run (a Draft, or any head ``pull_request_tier`` calls
+    # light) runs only the quick jobs: classification, hygiene and security, the
+    # public export audit, the quick-check job and their aggregate, whatever its
+    # paths (docs/CI.md, "Quick and full checks"). The run flags above still describe
+    # what the paths would route, and tools/ci_required.py never reports a light
+    # run green. ``light`` is the one value both ``allow_substantive`` and ``tier``
+    # are made from, so the two cannot disagree on a pull request.
+    # Only a pull_request event can be light, so no other event is narrowed.
     #
     # On a main push only a changed CI definition, or a change set that cannot be
     # read (no paths, or history unavailable), re-runs the substantive matrix. An
@@ -1357,11 +1581,12 @@ def classify(
     # 79 main pushes repeat that matrix (2026-11-02 to 2026-11-07, docs/CI.md,
     # "Workflow topology"). ``workflow_ci`` itself still includes ``force_full``.
     draft_pull_request = event_name == "pull_request" and draft
+    light = event_name == "pull_request" and (draft or tier != TIER_FULL)
     is_main_push = event_name == "push" and os.environ.get("GITHUB_REF") == "refs/heads/main"
     changed_ci_definition = any(_is_workflow_ci(path) for path in files)
     undeterminable_change = not files or "<history-unavailable>" in files
     main_push_full = changed_ci_definition or undeterminable_change
-    allow_substantive = not draft_pull_request and (
+    allow_substantive = not light and (
         event_name in FULL_MATRIX_EVENTS or not is_main_push or main_push_full
     )
     run_main_smoke = is_main_push or event_name in FULL_MATRIX_EVENTS
@@ -1397,6 +1622,7 @@ def classify(
         "save_compiler_cache": str(save_compiler_cache).lower(),
         "allow_substantive": str(allow_substantive).lower(),
         "draft": str(draft_pull_request).lower(),
+        "tier": TIER_LIGHT if light else TIER_FULL,
     }
 
 
@@ -1476,11 +1702,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         endpoints = _diff_endpoints(args.event_name, event)
         if endpoints is not None:
             makefile_change = makefile_change_from_git(*endpoints)
+    tier, label_note = run_tier(args.event_name, event)
     outputs = classify(
         paths,
         event_name=args.event_name,
         draft=_event_draft(args.event_name, event),
         makefile_change=makefile_change,
+        tier=tier,
     )
     outputs["linux_runner"] = linux_runner(args.event_name, event, **pool)
     outputs["linux_runner_2604"] = linux_runner(args.event_name, event, **pool, hosted=HOSTED_LINUX_RUNNER_2604)
@@ -1491,6 +1719,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("changed_paths=" + ",".join(sorted(paths)))
     if makefile_change is not None:
         print("makefile_recipe_targets=" + ",".join(makefile_change))
+    if label_note:
+        print(label_note)
     for key, value in outputs.items():
         print(f"{key}={value}")
     return 0

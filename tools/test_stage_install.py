@@ -179,7 +179,7 @@ class InstallTests(unittest.TestCase):
             env={**os.environ, "NK_LNK": str(link)})
         target, arguments, workdir = result.stdout.strip().splitlines()
         self.assertEqual(Path(target), (dest / "bin" / "nakagawa_player.exe").resolve())
-        self.assertEqual(arguments, "--ui=next")
+        self.assertEqual(arguments, "")
         self.assertEqual(Path(workdir), (dest / "bin").resolve())
 
     @unittest.skipUnless(os.name == "nt", "Windows shortcuts")
@@ -452,7 +452,7 @@ class LinuxInstallTests(unittest.TestCase):
         section = parser["Desktop Entry"]
         player = str((dest / "bin" / "nakagawa_player").resolve())
         self.assertEqual(section["Type"], "Application")
-        self.assertEqual(shlex.split(section["Exec"]), [player, "--ui=next"])
+        self.assertEqual(shlex.split(section["Exec"]), [player])
         self.assertEqual(section["TryExec"], player)
         self.assertTrue(Path(section["TryExec"]).is_file())
         self.assertEqual(Path(section["Icon"]), icon)
@@ -500,8 +500,10 @@ class LinuxInstallTests(unittest.TestCase):
 # 2026-10-01T00:00:00Z, an even second (MS-DOS times have two-second resolution).
 _EPOCH = 1790812800
 # Every kind of stage entry: nested files, a space and a non-ASCII name, an empty folder.
+_STAGE_COMMIT = "c0ffee" + "0" * 34
 _STAGE_FILES = {
     "START HERE.txt": b"start\n",
+    "toolchain.json": json.dumps({"candidate": {"commit": _STAGE_COMMIT}}).encode("ascii"),
     "bin/nakagawa_player.exe": b"MZplayer",
     "bin/SDL3.dll": b"MZsdl",
     "bin/runtime-manifest.json": b"{}\n",
@@ -649,6 +651,8 @@ class PortableZipTests(unittest.TestCase):
 
     def test_cli_writes_the_zip_and_reports_it(self):
         stage = _make_stage(self.root / "a", reverse=False, mtime=1_700_000_000)
+        head = stage_install.resolve_commit("HEAD")
+        (stage / "toolchain.json").write_text(json.dumps({"candidate": {"commit": head}}), encoding="utf-8")
         out = self.root / "cli.zip"
         with mock.patch.object(stage_install.stage_runtime_dlls, "verify_runtime_manifest",
                                _no_runtime_check), \
@@ -660,8 +664,149 @@ class PortableZipTests(unittest.TestCase):
         self.assertEqual(report["event"], "portable-zip")
         self.assertEqual(report["sha256"], hashlib.sha256(out.read_bytes()).hexdigest())
         self.assertEqual(report["source_date_epoch"], _EPOCH)
+        self.assertEqual(report["source_commit"], head)
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             stage_install.main(["--portable-zip", str(out)])
+
+    def test_the_summary_names_the_source_commit_and_the_checksum_list(self):
+        stage = _make_stage(self.root / "a", reverse=False, mtime=1_700_000_000)
+        summary = stage_install.write_portable_zip(stage, self.root / "out.zip", source_date_epoch=_EPOCH,
+                                                   verify_runtime=_no_runtime_check,
+                                                   expected_commit=_STAGE_COMMIT)
+        self.assertEqual(summary["source_commit"], _STAGE_COMMIT)
+        with zipfile.ZipFile(self.root / "out.zip") as archive:
+            sums = archive.read("SHA256SUMS.txt")
+            self.assertEqual(json.loads(archive.read("toolchain.json"))["candidate"]["commit"], _STAGE_COMMIT)
+        self.assertEqual(summary["sha256sums_sha256"], hashlib.sha256(sums).hexdigest())
+
+    def test_a_stage_without_its_source_commit_is_refused(self):
+        cases = {
+            "missing": None,
+            "not JSON": b"{",
+            "no candidate": b'{"tools": {}}',
+            "short commit": json.dumps({"candidate": {"commit": _STAGE_COMMIT[:12]}}).encode("ascii"),
+            "upper case": json.dumps({"candidate": {"commit": _STAGE_COMMIT.upper()}}).encode("ascii"),
+        }
+        for label, content in cases.items():
+            with self.subTest(label):
+                stage = _make_stage(self.root / label, reverse=False, mtime=1_700_000_000)
+                record = stage / "toolchain.json"
+                if content is None:
+                    record.unlink()
+                else:
+                    record.write_bytes(content)
+                out = self.root / f"{label}.zip"
+                with self.assertRaisesRegex(stage_install.InstallError, "PORTABLE_SOURCE_COMMIT_MISSING"):
+                    stage_install.write_portable_zip(stage, out, source_date_epoch=_EPOCH,
+                                                     verify_runtime=_no_runtime_check)
+                self.assertFalse(out.exists())
+
+    def test_a_stage_built_from_another_commit_is_refused(self):
+        stage = _make_stage(self.root / "a", reverse=False, mtime=1_700_000_000)
+        out = self.root / "out.zip"
+        with self.assertRaisesRegex(stage_install.InstallError,
+                                    f"PORTABLE_SOURCE_COMMIT_MISMATCH: the stage was built from {_STAGE_COMMIT}"):
+            stage_install.write_portable_zip(stage, out, source_date_epoch=_EPOCH,
+                                             verify_runtime=_no_runtime_check, expected_commit="1" * 40)
+        self.assertFalse(out.exists())
+
+    def _cli_zip(self, stage: Path, out: Path, record: Path, revision: str) -> tuple[int, str]:
+        stderr = io.StringIO()
+        with mock.patch.object(stage_install.stage_runtime_dlls, "verify_runtime_manifest",
+                               _no_runtime_check), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(stderr):
+            status = stage_install.main(["--portable-zip", str(out), "--zip-stage", str(stage),
+                                         "--source-date-epoch", str(_EPOCH), "--revision", revision,
+                                         "--record", str(record)])
+        return status, stderr.getvalue()
+
+    def test_a_release_dry_run_gives_two_identical_records(self):
+        head = stage_install.resolve_commit("HEAD")
+        records = []
+        for side, reverse, mtime in (("a", False, 1_700_000_000), ("b", True, 1_800_000_000)):
+            stage = _make_stage(self.root / side, reverse=reverse, mtime=mtime)
+            (stage / "toolchain.json").write_text(json.dumps({"candidate": {"commit": head}}), encoding="utf-8")
+            out = self.root / side / "nakagawa-recomp-0.0.2-windows-x64.zip"
+            record = self.root / side / "record.json"
+            status, stderr = self._cli_zip(stage, out, record, "HEAD")
+            self.assertEqual(status, 0, stderr)
+            records.append((record.read_bytes(), out))
+        self.assertEqual(records[0][0], records[1][0])
+        self.assertEqual(records[0][1].read_bytes(), records[1][1].read_bytes())
+        record = json.loads(records[0][0])
+        self.assertEqual(record["format"], "nakagawa-portable-zip-record")
+        self.assertEqual(record["zip_name"], "nakagawa-recomp-0.0.2-windows-x64.zip")
+        self.assertEqual(record["sha256"], hashlib.sha256(records[0][1].read_bytes()).hexdigest())
+        self.assertEqual(record["source_commit"], head)
+        self.assertNotIn("zip", record)
+        self.assertNotIn(str(self.root), records[0][0].decode("ascii"))
+        self.assertNotIn(str(self.root).replace("\\", "\\\\"), records[0][0].decode("ascii"))
+
+    def test_the_record_never_lands_on_the_zip_or_in_the_stage(self):
+        head = stage_install.resolve_commit("HEAD")
+        stage = _make_stage(self.root / "a", reverse=False, mtime=1_700_000_000)
+        (stage / "toolchain.json").write_text(json.dumps({"candidate": {"commit": head}}), encoding="utf-8")
+        out = self.root / "out.zip"
+        # The relative and upper-case spellings reach the same files (the latter on a
+        # case-insensitive file system only, where the comparison must agree).
+        cases = [(out, out, "PORTABLE_RECORD_IS_ZIP"),
+                 (out, Path(os.path.relpath(out)), "PORTABLE_RECORD_IS_ZIP"),
+                 (out, out / "record.json", "PORTABLE_RECORD_IS_ZIP"),
+                 (self.root / "rec" / "out.zip", self.root / "rec", "PORTABLE_RECORD_IS_ZIP"),
+                 (out, stage / "record.json", "PORTABLE_RECORD_INSIDE_STAGE")]
+        if os.name == "nt":
+            cases.append((out, Path(str(out).upper()), "PORTABLE_RECORD_IS_ZIP"))
+        for zip_path, record, code in cases:
+            with self.subTest(record=str(record)):
+                status, stderr = self._cli_zip(stage, zip_path, record, "HEAD")
+                self.assertEqual(status, 1)
+                self.assertIn(code, stderr)
+                self.assertFalse(zip_path.exists())
+                self.assertFalse((stage / "record.json").exists())
+
+    def test_record_without_a_portable_zip_is_an_error(self):
+        with contextlib.redirect_stderr(io.StringIO()) as stderr, self.assertRaises(SystemExit):
+            stage_install.main(["--dest", str(self.root / "install"), "--record", str(self.root / "r.json")])
+        self.assertIn("--record goes with --portable-zip", stderr.getvalue())
+
+    def test_an_unknown_revision_writes_nothing(self):
+        stage = _make_stage(self.root / "a", reverse=False, mtime=1_700_000_000)
+        out = self.root / "out.zip"
+        status, stderr = self._cli_zip(stage, out, self.root / "record.json", "no-such-revision-324")
+        self.assertEqual(status, 1)
+        self.assertIn("PORTABLE_REVISION_UNRESOLVED", stderr)
+        self.assertFalse(out.exists())
+        self.assertFalse((self.root / "record.json").exists())
+
+    def test_a_missing_git_is_a_failure_line_with_one_code(self):
+        with mock.patch.object(stage_install.subprocess, "run", side_effect=FileNotFoundError("git")):
+            with self.assertRaises(stage_install.InstallError) as caught:
+                stage_install.resolve_commit("HEAD")
+        message = str(caught.exception)
+        self.assertTrue(message.startswith("PORTABLE_REVISION_UNRESOLVED: "), message)
+        self.assertNotIn("INSTALL_SOURCE_EXPORT_FAILED", message)
+        self.assertIn("could not run", message)
+
+    def test_a_sha256_repository_commit_is_accepted(self):
+        stage = _make_stage(self.root / "a", reverse=False, mtime=1_700_000_000)
+        commit = "ab" * 32
+        (stage / "toolchain.json").write_text(json.dumps({"candidate": {"commit": commit}}), encoding="utf-8")
+        self.assertEqual(stage_install.staged_source_commit(stage), commit)
+
+    def test_the_cli_refuses_another_revision_and_an_existing_record(self):
+        stage = _make_stage(self.root / "a", reverse=False, mtime=1_700_000_000)
+        out = self.root / "out.zip"
+        status, stderr = self._cli_zip(stage, out, self.root / "record.json", "HEAD")
+        self.assertEqual(status, 1)
+        self.assertIn("PORTABLE_SOURCE_COMMIT_MISMATCH", stderr)
+        self.assertFalse(out.exists())
+        self.assertFalse((self.root / "record.json").exists())
+        (self.root / "record.json").write_bytes(b"keep")
+        status, stderr = self._cli_zip(stage, out, self.root / "record.json", "HEAD")
+        self.assertEqual(status, 1)
+        self.assertIn("PORTABLE_RECORD_EXISTS", stderr)
+        self.assertFalse(out.exists())
+        self.assertEqual((self.root / "record.json").read_bytes(), b"keep")
 
 
 _V = "0.0.2"

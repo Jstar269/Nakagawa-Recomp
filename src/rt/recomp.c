@@ -34,6 +34,7 @@
 #include <inttypes.h>
 #include <string.h>
 #include "recomp.h"
+#include "cpu_lle.h"   /* sr_guest_lane_hold (#2201) */
 #include "nested_frames.h"
 #include "dispatch_table.h"   /* guest code-address table + primitives (issue #45) */
 #include "guest_interp.h"     /* executable-span interpreter floor (issue #116) */
@@ -91,15 +92,24 @@ static SrProfEntry *prof_find(uint32_t pc) {
 }
 #endif
 
+static int g_prof_final_dumped;
+
 void sr_profile_init(void) {
     memset(g_prof_table, 0, sizeof(g_prof_table));
     g_prof_lookup_drops = 0;
+    g_prof_final_dumped = 0;
     const char *e = getenv("SR_PROFILE");
     g_prof_enabled = (e != NULL && strcmp(e, "0") != 0) || ((g_sr_debug & 0x04) != 0);
     if (g_prof_enabled) {
         fprintf(stderr, "[profiler] Hot-path profiling enabled (SR_PROFILE=1 or SR_DEBUG & 0x04)\n");
-        atexit(sr_profile_dump);
+        atexit(sr_profile_dump_final);
     }
+}
+
+void sr_profile_dump_final(void) {
+    if (!g_prof_enabled || g_prof_final_dumped) return;
+    g_prof_final_dumped = 1;
+    sr_profile_dump();
 }
 
 void sr_profile_dump(void) {
@@ -2155,6 +2165,14 @@ static int dispatch_run_interp(
         ? sr_guest_interp_run_with_boundary(s, target, call_boundary, &fault)
         : drain == SR_DRAIN_SEGMENT ? sr_guest_interp_run_tail_step(s, target, &fault)
         : sr_guest_interp_run(s, target, &fault);
+    /* The COSIM guest lane refused an import under one of the interpreter's transfers: the
+     * run stopped with that refusal's fatal flow, which goes back to the lane's entry. Its
+     * result says so however the run ended (a handoff that returned with the flow pending
+     * included), as dispatch_after_aot does for a native body, and it is not a rejection of
+     * the guest code, so nothing is reported or recorded as one (#2196). */
+    if (sr_dispatch_unwind_requested && s->flow_kind == SR_FLOW_FATAL) {
+        return SR_GUEST_INTERP_FLOW_FATAL;
+    }
     if (interp_result == SR_GUEST_INTERP_AOT_HANDOFF ||
         interp_result == SR_GUEST_INTERP_CALL_RETURN) {
         return (int)interp_result;
@@ -2834,6 +2852,9 @@ static int dispatch_try_with_boundary(
     if (!fn) {
         uint32_t late = sr_hle_resolve_late_import(target);
         if (late == SR_HLE_LATE_BUILTIN) {
+            /* A built-in handler reached by the COSIM guest lane is an import like any other:
+             * refused, so its host-side effect happens only in the HLE lane (#2201). */
+            if (sr_guest_lane_refuse_import(s, target)) return SR_GUEST_INTERP_FLOW_FATAL;
             static int late_hle_n = 0;
             if (late_hle_n < 20) {
                 fprintf(stderr, "LATE_IMPORT_HLE: target=0x%08" PRIx32 " from pc=0x%08" PRIx32 " -> sr_syscall\n",
@@ -2952,6 +2973,10 @@ static int dispatch_try(CpuState *s, uint32_t target) {
 
 void dispatch_tail_step(CpuState *s, uint32_t target) {
     if (dispatch_try_with_boundary(s, target, NULL, SR_DRAIN_SEGMENT) < 0) {
+        /* The COSIM guest lane refused an import under the step: the step returns to its
+         * drain with the fatal flow pending. The refused body recorded no transfer, so the
+         * drain stops there, and the drain's own boundary reports the flow (#2196). */
+        if (sr_dispatch_unwind_requested && s->flow_kind == SR_FLOW_FATAL) return;
         sr_flight_fatal(SR_FLIGHT_KIND_FATAL_DISPATCH, target, 0u, 0u);
         fflush(stderr);
         exit(1);
@@ -2975,6 +3000,9 @@ int dispatch_call_try(CpuState *s, uint32_t target, uint32_t resume_pc) {
 
 void dispatch(CpuState *s, uint32_t target) {
     if (dispatch_try(s, target) < 0) {
+        /* The COSIM guest lane refused an import under the transfer: return with the fatal
+         * flow pending. Its only caller, the interpreter, returns at once (#2196). */
+        if (sr_dispatch_unwind_requested && s->flow_kind == SR_FLOW_FATAL) return;
         sr_flight_fatal(SR_FLIGHT_KIND_FATAL_DISPATCH, target, 0u, 0u);
         fflush(stderr);
         exit(1);
@@ -2990,9 +3018,39 @@ void dispatch_call(CpuState *s, uint32_t target, uint32_t resume_pc) {
 }
 
 /* Set only while the COSIM guest lane runs (src/rt/domain_mode.c, #2148): an import it
- * reaches is refused with SR_FLOW_FATAL, and the two call boundaries below return through
+ * reaches is refused with SR_FLOW_FATAL, and the dispatch boundaries (dispatch_tail_step,
+ * dispatch and the interpreter's result above, the call boundaries below) return through
  * that refusal to the lane's entry instead of ending the run. 0 everywhere else. */
 volatile int sr_dispatch_unwind_requested;
+
+/* The COSIM guest lane's import refusal (#2148, #2201): while the lane holds
+ * (sr_guest_lane_hold), an import it reaches -- through its stub (sr_import_call) or the
+ * late-import bridge (dispatch) -- runs no handler. Running one would apply a host-side
+ * effect the HLE lane applies again, and a handler that blocks would switch fibers inside
+ * the held lane. The lane unwinds instead, through the boundaries that honour the flag, and
+ * the call is reported NOT_COMPARED with the first refused NID. Returns 1 when refused. */
+int sr_guest_lane_refuse_import(CpuState *s, uint32_t nid) {
+    if (!sr_guest_lane_hold.held) return 0;
+    if (sr_guest_lane_hold.nested_nid == 0u) sr_guest_lane_hold.nested_nid = nid;
+    sr_dispatch_unwind_requested = 1;
+    s->flow_kind = SR_FLOW_FATAL;
+    s->flow_target = nid;
+    return 1;
+}
+
+/* The interpreter's linked call into a native body (guest_interp.c): dispatch_call, except
+ * that a COSIM guest-lane refusal under the call returns 1, and the interpreter then returns
+ * with the fatal flow pending instead of running on at resume_pc (#2196). 0 when the call
+ * returned; any other failure ends the run, as dispatch_call does. */
+int dispatch_call_interp(CpuState *s, uint32_t target, uint32_t resume_pc) {
+    if (dispatch_call_try(s, target, resume_pc) < 0) {
+        if (sr_dispatch_unwind_requested && s->flow_kind == SR_FLOW_FATAL) return 1;
+        sr_flight_fatal(SR_FLIGHT_KIND_FATAL_DISPATCH, target, resume_pc, 0u);
+        fflush(stderr);
+        exit(1);
+    }
+    return 0;
+}
 
 /* A dispatch_call frame is otherwise a wall to a guest return past it: its caller runs its
  * own continuation whatever the callee did. A generated call site honours the end check
@@ -3177,4 +3235,77 @@ void sr_end_impl(CpuState *s, uint32_t mem_addr, int mem_size) {
         sr_trace_close();
         abort();
     }
+}
+
+/* The VFPU sum-of-products adder, as a PSP-3000 measured it through vfad and vavg
+ * (PSP-VFPU-FUNNEL-001, 2026-10-29, issue #326: 936 cells over .p/.t/.q, 26 operand
+ * sets, three S prefixes, two identical passes). sum(a[i] * b[i]) is not a chain of IEEE
+ * operations. Each product keeps two guard bits below its 24-bit mantissa; the products are
+ * aligned to the largest exponent by truncating their magnitudes, summed as signed
+ * integers, the guard bits are dropped by truncation, and only a sum wider than 24 bits is
+ * rounded (to nearest, ties to even) as it is normalised. A denormal operand counts as
+ * zero, a zero or underflowing sum is +0, and a NaN operand, Inf * 0 or Inf - Inf gives the
+ * canonical 0x7f800001. So 2^24 - 1 sums to 2^24 - 2, and 1 - 2^-24 to 1 - 2^-23.
+ * Only two FUNNEL-001 cells separate two guard bits from one, so the width rests on them.
+ * An unrecorded PSP read (probe case vfpu-wide-dot-matrix, PSP-3000, 2026-11-08, issue #326)
+ * returned the same words for every sum-of-products cell it ran: vdot.p, vdot.q, vhdp.q, vcrsp.t, vqmul.q, vtfm4.q, vhtfm4.q
+ * and vmmul.q (identity prefixes, finite and special operands, 521 cells), and so did the
+ * carry-out cells of probe case vfpu-round-sep (also unrecorded, 2026-11-09: vdot.q
+ * (1 + 3 ulp) + 1 gives 2 + 2 ulp, rounded to nearest even, where truncation gives 2 + 1 ulp).
+ * The other widths of those forms and every non-identity prefix are not measured. */
+uint32_t sr_vfpu_dot_bits(const uint32_t *a, const uint32_t *b, int n) {
+    enum { GUARD = 2 };
+    int32_t ex[4];
+    uint64_t mt[4];
+    int sg[4], inf_sign = -1, emax = 0;
+    for (int i = 0; i < n; i++) {
+        const uint32_t ae = (a[i] >> 23) & 0xffu, be = (b[i] >> 23) & 0xffu;
+        sg[i] = (int)(((a[i] ^ b[i]) >> 31) & 1u);
+        ex[i] = 0;
+        mt[i] = 0;
+        if (ae == 255u || be == 255u) {
+            if ((ae == 255u && ((a[i] & 0x7fffffu) || be == 0u)) ||
+                (be == 255u && ((b[i] & 0x7fffffu) || ae == 0u)))
+                return 0x7f800001u;
+            if (inf_sign >= 0 && inf_sign != sg[i]) return 0x7f800001u;
+            inf_sign = sg[i];
+            continue;
+        }
+        if (ae == 0u || be == 0u) continue;
+        const uint64_t am = (uint64_t)((a[i] & 0x7fffffu) | 0x800000u) << GUARD;
+        const uint64_t bm = (uint64_t)((b[i] & 0x7fffffu) | 0x800000u) << GUARD;
+        mt[i] = (am * bm) >> (23 + GUARD);
+        ex[i] = (int32_t)ae + (int32_t)be - 127;
+    }
+    if (inf_sign >= 0) return 0x7f800000u | ((uint32_t)inf_sign << 31);
+    for (int i = 0; i < n; i++)
+        if (mt[i] && ex[i] > emax) emax = ex[i];
+    int64_t total = 0;
+    for (int i = 0; i < n; i++) {
+        const int d = emax - ex[i];
+        const int64_t m = d >= 32 ? 0 : (int64_t)(mt[i] >> d);
+        total += sg[i] ? -m : m;
+    }
+    uint32_t sign = 0u;
+    if (total < 0) {
+        sign = 0x80000000u;
+        total = -total;
+    }
+    uint64_t mag = (uint64_t)total >> GUARD;
+    if (mag == 0u || emax <= 0) return 0u;
+    int width = 64 - __builtin_clzll(mag);
+    if (width > 24) {
+        const int sh = width - 24;
+        const uint64_t half = 1ull << (sh - 1), low = mag & ((1ull << sh) - 1u);
+        if (low > half || (low == half && ((mag >> sh) & 1u))) mag += half;
+        width = 64 - __builtin_clzll(mag);
+        mag >>= width - 24;
+        emax += width - 24;
+    } else {
+        mag <<= 24 - width;
+        emax -= 24 - width;
+    }
+    if (emax >= 255) return sign | 0x7f800000u;
+    if (emax <= 0) return 0u;
+    return sign | ((uint32_t)emax << 23) | ((uint32_t)mag & 0x7fffffu);
 }

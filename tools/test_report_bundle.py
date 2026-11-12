@@ -160,7 +160,8 @@ class Fixture:
         (self.logs / "developer-log.txt").write_text(f"[player] {home}{BS}x\n", encoding="utf-8")
         (self.logs / "player-output.txt").write_text("player output\n", encoding="utf-8")
         (self.config / "settings.json").write_text(json.dumps(
-            {"library_dir": f"{home}\\Games", "update_token": "SECRET-TOKEN-VALUE", "volume": 7}), encoding="utf-8")
+            {"library_dir": f"{home}\\Games", "update_token": "SECRET-TOKEN-VALUE", "volume": 7,
+             "nickname": "Synthetic Nickname 7", "nickname_asked": True}), encoding="utf-8")
         # Planted files that must never appear: beside the allow-list, so a "walk and filter"
         # implementation would take them.
         (self.logs / "save-DATA.sav").write_bytes(b"SAVE-MARKER" + bytes(64))
@@ -246,6 +247,11 @@ class BundleTests(unittest.TestCase):
             self.assertEqual(settings["library_dir"], "~\\Games")
             self.assertEqual(settings["update_token"], "<removed>")
             self.assertEqual(settings["volume"], 7)
+            # The nickname (#2197) can be a real name: it is removed, the flag beside it kept.
+            self.assertEqual(settings["nickname"], "<removed>")
+            self.assertIs(settings["nickname_asked"], True)
+            for info in archive.infolist():
+                self.assertNotIn(b"synthetic nickname 7", archive.read(info).lower(), info.filename)
 
     def test_flight_recorder_summary_has_sizes_not_contents(self) -> None:
         plan = build(self.fx.inputs())
@@ -278,6 +284,25 @@ class BundleTests(unittest.TestCase):
         names = {e.arcname for e in plan.entries}
         self.assertIn("logs/game-TEST00002-last.txt", names)
         self.assertEqual(plan.archive_name, "20261102T123044Z-launcher.zip")
+
+    def test_settings_that_are_not_json_are_left_out(self) -> None:
+        # A settings file that does not parse cannot have its keys redacted, so neither the
+        # nickname (#2197) nor a token may ride along as plain text: a note stands in for it.
+        (self.fx.config / "settings.json").write_text(
+            '{"nickname": "Synthetic Nickname 7", "update_token": "SECRET-TOKEN-VALUE", "volume": 7,',
+            encoding="utf-8")
+        plan = build(self.fx.inputs())
+        reason = "is not valid JSON, so it was left out: it could hold the nickname or a token"
+        self.assertIn(("settings/settings.json", reason), plan.skipped)
+        with self.written(plan) as archive:
+            names = set(archive.namelist())
+            self.assertNotIn("settings/settings.json", names)
+            self.assertIn("settings/settings.json.left-out.txt", names)
+            self.assertIn(b"left out", archive.read("settings/settings.json.left-out.txt"))
+            for info in archive.infolist():
+                data = archive.read(info).lower()
+                self.assertNotIn(b"synthetic nickname 7", data, info.filename)
+                self.assertNotIn(b"secret-token-value", data, info.filename)
 
     def test_a_binary_renamed_to_a_log_is_skipped(self) -> None:
         (self.fx.logs / "game-TEST00001-prev.txt").write_bytes(b"~PSP\x00\x00" + bytes(range(256)))

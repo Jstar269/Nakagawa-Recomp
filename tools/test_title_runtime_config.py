@@ -53,7 +53,8 @@ RETIRED_RUNTIME_ADDRESSES = {
 
 #: Guest addresses that generic DISPATCH hardcoded before the typed collections existed.
 #: Migrated 2026-08-21 into runtime_bindings.dispatch_aliases and a forced-completion
-#: collection that #363 has since retired; the retired sites stay policed.
+#: collection. #363 has since retired the collection and, on 2026-11-11, the one alias a
+#: title declared; the retired sites stay policed.
 RETIRED_DISPATCH_ADDRESSES = {
     "dispatch alias source": ("0x00030950", "0x30950"),
     "dispatch alias target": ("0x00030948", "0x30948"),
@@ -721,10 +722,11 @@ class DispatchAddressCensus(unittest.TestCase):
         without ever being policed -- which is exactly the "moved a literal from one
         hardcoded table into another" failure this whole migration exists to avoid.
         """
-        inventoried = {int(o["address"]) for o in compat_overrides.TITLE_CONFIGURED_DISPATCH}
+        inventoried = ({int(o["address"]) for o in compat_overrides.TITLE_CONFIGURED_DISPATCH}
+                       | set(compat_overrides.RETIRED_TITLE_CONFIGURED_DISPATCH))
         self.assertTrue(inventoried,
-                        "TITLE_CONFIGURED_DISPATCH is empty; the inventory claims nothing "
-                        "and every assertion below would be vacuous")
+                        "no live or retired title-configured dispatch address is inventoried; "
+                        "the assertion below would be vacuous")
         policed = {int(spellings[0], 16) for spellings in RETIRED_DISPATCH_ADDRESSES.values()}
         self.assertEqual(
             inventoried - policed, set(),
@@ -735,7 +737,11 @@ class DispatchAddressCensus(unittest.TestCase):
     def test_every_inventoried_binding_names_a_live_collection_and_accessor(self) -> None:
         """An inventory entry is prose unless it points at something real. Each one must
         name a collection the validator actually accepts, and that collection's generic
-        accessor must actually be called from dispatch()."""
+        accessor must actually be called from dispatch().
+
+        The inventory is empty since #363 retired its last entry, so the loop below
+        checks nothing until a title declares a binding again;
+        TitleDeclaredDispatchBindings is what forces that title into the inventory."""
         accessors = {
             "dispatch_aliases": "sr_title_config_dispatch_alias",
         }
@@ -920,6 +926,73 @@ class DispatchAddressCensus(unittest.TestCase):
             "dispatch-isolation-selftest", workflow,
             ".github/workflows/ci.yml does not run make dispatch-isolation-selftest, so "
             "nothing enforces the isolation claim on a pull request")
+
+
+#: Manifests that exist to exercise the binding collections. They are not titles.
+BINDING_FIXTURES = frozenset({"pspdev-phase5.json", "synthetic.json", "synthetic-title2.json"})
+HST_MANIFEST = ROOT / "assets" / "titles" / "hst-ucus98701.json"
+
+
+class TitleDeclaredDispatchBindings(unittest.TestCase):
+    """A title's manifest states facts about the title, not forced guest outcomes (#363).
+
+    A dispatch alias makes a computed transfer to one address enter the body registered at
+    another, so a title that declares one carries behaviour, and the inventory in
+    tools/compat_overrides.py (TITLE_CONFIGURED_DISPATCH) has to say so. Hot Shots Tennis
+    declared the last one, from 0x00030950 into 0x00030948; it is retired."""
+
+    def aliases(self, path: Path) -> list[dict[str, int]]:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        bindings = title_manifest.validate_manifest(manifest).get("runtime_bindings") or {}
+        declared: list[dict[str, int]] = bindings.get("dispatch_aliases", [])
+        return declared
+
+    def test_hot_shots_tennis_declares_no_dispatch_alias(self) -> None:
+        self.assertEqual(self.aliases(HST_MANIFEST), [])
+        manifest = json.loads(HST_MANIFEST.read_text(encoding="utf-8"))
+        header = title_runtime_config.render_header(
+            title_runtime_config.bindings_from_manifest(manifest))
+        self.assertIn("#define SR_TITLE_CONFIG_DISPATCH_ALIAS_COUNT 0", header)
+        self.assertNotIn("SR_TITLE_CFG_ALIAS(", header)
+        valid = next(line for line in header.splitlines()
+                     if line.startswith("#define SR_TITLE_CONFIG_VALID "))
+        self.assertNotIn(title_runtime_config.COLLECTION_BITS["dispatch_aliases"], valid,
+                         "the runtime would still consult an alias list for this title")
+
+    def test_every_alias_a_title_declares_is_inventoried(self) -> None:
+        inventoried = {int(o["address"]) for o in compat_overrides.TITLE_CONFIGURED_DISPATCH}
+        titles = [path for path in sorted((ROOT / "assets" / "titles").glob("*.json"))
+                  if path.name not in BINDING_FIXTURES]
+        self.assertIn(HST_MANIFEST, titles)
+        for path in titles:
+            with self.subTest(manifest=path.name):
+                declared = {alias["from"] for alias in self.aliases(path)}
+                self.assertEqual(
+                    declared - inventoried, set(),
+                    f"{path.name} declares dispatch alias(es) that TITLE_CONFIGURED_DISPATCH "
+                    f"does not inventory: {sorted(hex(a) for a in declared - inventoried)}")
+
+    def test_the_fixtures_still_exercise_the_collection(self) -> None:
+        """The exemption above is only sound for manifests that are fixtures in fact."""
+        for name in sorted(BINDING_FIXTURES):
+            with self.subTest(manifest=name):
+                path = ROOT / "assets" / "titles" / name
+                self.assertTrue(self.aliases(path),
+                                f"{name} declares no dispatch alias; it needs no exemption")
+                self.assertEqual(json.loads(path.read_text(encoding="utf-8")).get("kind"),
+                                 "synthetic", f"{name} is exempt as a fixture but is a title")
+
+    def test_the_inventory_holds_no_alias_no_title_declares(self) -> None:
+        # dispatch_aliases is the only binding collection, so every inventory entry is an
+        # alias source. A second collection needs its own comparison here.
+        self.assertEqual(set(title_manifest.RUNTIME_BINDING_COLLECTIONS), {"dispatch_aliases"})
+        declared = {alias["from"]
+                    for path in (ROOT / "assets" / "titles").glob("*.json")
+                    if path.name not in BINDING_FIXTURES
+                    for alias in self.aliases(path)}
+        inventoried = {int(o["address"]) for o in compat_overrides.TITLE_CONFIGURED_DISPATCH}
+        self.assertEqual(inventoried - declared, set(),
+                         "TITLE_CONFIGURED_DISPATCH inventories a binding no title declares")
 
 
 class GenericRuntimeCarriesNoTitleAddress(unittest.TestCase):

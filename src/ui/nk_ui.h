@@ -501,6 +501,11 @@ bool nk_ui_scroll_in_motion(const NkUi *ui);
    (NkUiStyle.transition) that has not reached its end. A host draws the next
    frame soon, at its display rate, instead of waiting for input. */
 bool nk_ui_in_motion(const NkUi *ui);
+/* Every control the last frame registered had its laid-out place, so the next
+   frame runs a move, a Tab or a pointer hit at once. After a screen's first
+   frame this is false, and nk_ui_begin holds such input one frame for the
+   laid-out focus graph. */
+bool nk_ui_laid_out(const NkUi *ui);
 /* Clay's layout inspector (Clay_SetDebugModeEnabled), for developer mode: a
    panel down the window's right side that lists the layout and outlines the
    element under the pointer. Clay narrows the layout by the panel's width, so

@@ -1,0 +1,267 @@
+{
+  "comment": "Pinned inputs of tools/android_sysroot.py besides bionic. Each file is fetched read-only from its source at the commit below and must match its SHA-256 and git blob ID.",
+  "sources": {
+    "system/logging": {
+      "url": "https://android.googlesource.com/platform/system/logging",
+      "tag": "android-16.0.0_r4",
+      "commit": "58dac317ea08b8f275ebd01ce864acab2de30b93",
+      "license": "Apache-2.0"
+    },
+    "frameworks/native": {
+      "url": "https://android.googlesource.com/platform/frameworks/native",
+      "tag": "android-16.0.0_r4",
+      "commit": "fcbde2bcff56ca1d7bec9cabf8bdca5e288bf103",
+      "license": "Apache-2.0"
+    },
+    "frameworks/base": {
+      "url": "https://android.googlesource.com/platform/frameworks/base",
+      "tag": "android-16.0.0_r4",
+      "commit": "45034f0663f960d9ee5fb0a101a4732b71f6e2f4",
+      "license": "Apache-2.0"
+    },
+    "Vulkan-Headers": {
+      "url": "https://github.com/KhronosGroup/Vulkan-Headers",
+      "tag": "v1.4.363",
+      "commit": "6802bb4733b63ed5efd3adb308a6c885ef180ea1",
+      "license": "Apache-2.0 OR MIT"
+    },
+    "license-list-data": {
+      "url": "https://github.com/spdx/license-list-data",
+      "tag": "v3.29.0",
+      "commit": "31ba1a50e5397e00a304dbadc76531740e89ee48",
+      "license": "CC0-1.0 (the data); the texts are the licences themselves"
+    }
+  },
+  "files": {
+    "Vulkan-Headers/LICENSE.md": {
+      "sha256": "95ad366d23fadf701d355bc45fb8b82ae2d700239471d35d41286ac3b08ff903",
+      "size": 495,
+      "git_blob": "17cf4a17d6208dad41b88124d417e0af1d29736d"
+    },
+    "Vulkan-Headers/LICENSES/Apache-2.0.txt": {
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+      "size": 11358,
+      "git_blob": "d645695673349e3947e8e5ae42332d0ac3164cd7"
+    },
+    "Vulkan-Headers/LICENSES/MIT.txt": {
+      "sha256": "1ca3502222d967f3be5751c55f6b7ee735b5383909c3b501495f54b216dbf227",
+      "size": 1084,
+      "git_blob": "8495fe9e901b430947d54980af7c77c0bb8a6221"
+    },
+    "Vulkan-Headers/include/vk_video/vulkan_video_codec_av1std.h": {
+      "sha256": "c75c1d324b97d247aef0008024bc7f3adb98c741ab7f66c882ec38fdacc7ee33",
+      "size": 16694,
+      "git_blob": "5347b3639505d7ae7104d014b62a8ec0e680db50"
+    },
+    "Vulkan-Headers/include/vk_video/vulkan_video_codec_av1std_decode.h": {
+      "sha256": "7e3a1ce177c12546d410f3179ce1b81f2da7a8eba4f525b29cd563ab4099c0e5",
+      "size": 4257,
+      "git_blob": "e262e961ac04d00f5452c29f4ddf285f654a447c"
+    },
+    "Vulkan-Headers/include/vk_video/vulkan_video_codec_av1std_encode.h": {
+      "sha256": "8d166b4543260a38347860443b1a59c7a5e86cdb0d0facaf4c704f667de030e3",
+      "size": 5986,
+      "git_blob": "8afb2537f165a9c543b2f5b332cb09192f1c6b60"
+    },
+    "Vulkan-Headers/include/vk_video/vulkan_video_codec_h264std.h": {
+      "sha256": "fded484cef9f90fbbd089e0647268f36e5f4292179fbc5428a2c9e8d7709bbe9",
+      "size": 13961,
+      "git_blob": "2ae8932433efcc39002fa7ad2d12afc2a35f61ca"
+    },
+    "Vulkan-Headers/include/vk_video/vulkan_video_codec_h264std_decode.h": {
+      "sha256": "37b970c3d80536ad1ac074cfe19b58ee03c3075378e02179e1dc5e4351266821",
+      "size": 2730,
+      "git_blob": "fa1140586bbde4fc4add06605d18f0dffb26b23a"
+    },
+    "Vulkan-Headers/include/vk_video/vulkan_video_codec_h264std_encode.h": {
+      "sha256": "227e092b53c4e7ca1a948ed021704511c1ed16040cd6188ff6703e5ae66db64d",
+      "size": 6885,
+      "git_blob": "aba6fbf3a1d0b8a64061263072dc70cd3d3cacb2"
+    },
+    "Vulkan-Headers/include/vk_video/vulkan_video_codec_h265std.h": {
+      "sha256": "0b81f8986ada015ef2e127449eff9d9634899bb59a0a9277a4054e9ec4416c12",
+      "size": 23446,
+      "git_blob": "cf0cbefc088c670b3e7283ec4bfb85bf96b54886"
+    },
+    "Vulkan-Headers/include/vk_video/vulkan_video_codec_h265std_decode.h": {
+      "sha256": "879a0dd370a1b1ad184638906c52bdfe7d80d639fbc5a5baa8b02d7c5b60b147",
+      "size": 2436,
+      "git_blob": "7cfe54f284340b0f5559a8171721bcb58832a478"
+    },
+    "Vulkan-Headers/include/vk_video/vulkan_video_codec_h265std_encode.h": {
+      "sha256": "abb3e72af22e4e0a3dbe5dff7be1b275949388809fb3987830341e8f495ea1c7",
+      "size": 7469,
+      "git_blob": "fd8ee03b6980f391dcff226c4e5ea0ce9c1310c2"
+    },
+    "Vulkan-Headers/include/vk_video/vulkan_video_codec_vp9std.h": {
+      "sha256": "0a47125865376a3fe7014b69ff6db9d04e30ebf8c4d15664f1d894649ad5c09d",
+      "size": 5391,
+      "git_blob": "312a78574ef80010507cb92c32db7e00623cf7d2"
+    },
+    "Vulkan-Headers/include/vk_video/vulkan_video_codec_vp9std_decode.h": {
+      "sha256": "1ceb1a8d0e3370e508cf688a6e57dc314cd82186b60f3cef420ea4b1b483865d",
+      "size": 2378,
+      "git_blob": "2a7ecdc9776375b0fc088b30eaed35c998887b96"
+    },
+    "Vulkan-Headers/include/vk_video/vulkan_video_codecs_common.h": {
+      "sha256": "d2e7caa396c521d03d491a269572b1d31b925b5127d22fda14199951ebae89f8",
+      "size": 667,
+      "git_blob": "faedbef4673c1071a104c2de6c6270bec9ce657b"
+    },
+    "Vulkan-Headers/include/vulkan/vk_icd.h": {
+      "sha256": "ba22828f76de7231e7dfbb5d8564e7a58dd9f5dbeac8c1f0ff6c056c92db744a",
+      "size": 8228,
+      "git_blob": "38b137ce23f64a5e723b10cdcbbe7aa506a6e1f4"
+    },
+    "Vulkan-Headers/include/vulkan/vk_layer.h": {
+      "sha256": "a9fb1343e7e1fa3456189bf146f2186b8df46c1b1a01f88f8b9ae4cd25b1623c",
+      "size": 7182,
+      "git_blob": "0e9a27b129fe89c21dc5a83c5c51692ce3e08888"
+    },
+    "Vulkan-Headers/include/vulkan/vk_platform.h": {
+      "sha256": "a2cd9085c66776845d2524c3b0e73ccf4827ba046aa6f676c4b8ddbed47d6552",
+      "size": 2832,
+      "git_blob": "bbe60245d0f6f054782782b4de390193837e569c"
+    },
+    "Vulkan-Headers/include/vulkan/vulkan.h": {
+      "sha256": "096f50152d0b298d8df84a561a37d8190c8a60af34dff0e2cc8328b24491a640",
+      "size": 1620,
+      "git_blob": "934d9b1ecbd3f34984365ed55e1d5fd2cf9c5804"
+    },
+    "Vulkan-Headers/include/vulkan/vulkan_android.h": {
+      "sha256": "9dcce545a790b5b1ce00e103ade95c8efa4c8a0bf2ff39865d76a7d2f987aef2",
+      "size": 6337,
+      "git_blob": "1e318dc71faf6ea6d89e8b766db40f5d5e4a8b7f"
+    },
+    "Vulkan-Headers/include/vulkan/vulkan_beta.h": {
+      "sha256": "bb43577a445c357c3f0c03572b3dd3ebd9fca39914c0092f7d77e942af05d3fc",
+      "size": 17419,
+      "git_blob": "c84b1d48e6dcdf86cf292b3d5263be9418cad7ef"
+    },
+    "Vulkan-Headers/include/vulkan/vulkan_core.h": {
+      "sha256": "2f64fd6c7c3f342b0e44f039f1c359b7f0e6cfcb71a7dca1cc5156282faa3b51",
+      "size": 1362950,
+      "git_blob": "f13e7c847cf2fc366539f8b1fd949aa0124a02e8"
+    },
+    "Vulkan-Headers/include/vulkan/vulkan_directfb.h": {
+      "sha256": "efecf5a15380f61c16ef257ed55a998f2cc651789bec22056ccc81d2518daefc",
+      "size": 1959,
+      "git_blob": "527331a61f4345dd0fc0893b636cd6f07b3f343a"
+    },
+    "Vulkan-Headers/include/vulkan/vulkan_fuchsia.h": {
+      "sha256": "17aedccaae68825bfa2954faec1bc9e953b106f1161e1b2ab26ab4cdccf21a06",
+      "size": 12907,
+      "git_blob": "bfeee3943021fca202ebfe0ceedb7427bb168610"
+    },
+    "Vulkan-Headers/include/vulkan/vulkan_ggp.h": {
+      "sha256": "b68cbbf19b9397ee63dd6ba94526059bd2ff000c66083243758e3a04e215bd2c",
+      "size": 1946,
+      "git_blob": "b8961089b52439daa79b982af31ca2682353057a"
+    },
+    "Vulkan-Headers/include/vulkan/vulkan_ios.h": {
+      "sha256": "ebaeffc3f4ec0484dcf34753678f1642caf73f6db4e17f11f1b82302151b918c",
+      "size": 1359,
+      "git_blob": "d6f1ed53b423f71ccdfa134146c9d2cb9944db16"
+    },
+    "Vulkan-Headers/include/vulkan/vulkan_macos.h": {
+      "sha256": "3ae5522081741e9021be86727e11949ad8c695e66f75e1c422e577afd7657f59",
+      "size": 1391,
+      "git_blob": "2459e69fb06c9194f361584eb8372432c32e58d5"
+    },
+    "Vulkan-Headers/include/vulkan/vulkan_metal.h": {
+      "sha256": "d5fe0caf881cc9c72ea2ba31ca86c684e97cdec6741d6e6298ecbd8f58dc8c5e",
+      "size": 8073,
+      "git_blob": "1029b37322af30dd112a5133f4022d03093b3a5f"
+    },
+    "Vulkan-Headers/include/vulkan/vulkan_ohos.h": {
+      "sha256": "3cc40f845b5fd75cda0d8a3b1f2782522a3591657f67c656a211b4639eb23b16",
+      "size": 4113,
+      "git_blob": "e5cdd2d499600f809b38c77cd0c822d628bf2fff"
+    },
+    "Vulkan-Headers/include/vulkan/vulkan_screen.h": {
+      "sha256": "b9e7e7921b4be199c8ecfe518bd71bd8e533adbbab193714c542157b87b10e86",
+      "size": 4200,
+      "git_blob": "460432a44273873094f128e51f8418c479fda076"
+    },
+    "Vulkan-Headers/include/vulkan/vulkan_ubm.h": {
+      "sha256": "ac106317c017d1975f26184d3979dba0352f10aa1cfc7ef5373be92fef6bd137",
+      "size": 1878,
+      "git_blob": "37cf6609bc69ba71c21e470562d514e690a70b71"
+    },
+    "Vulkan-Headers/include/vulkan/vulkan_vi.h": {
+      "sha256": "a53e35bb1b3113e6ef4932cb9358a27861a198d7865227ecd93555fecc73dd68",
+      "size": 1332,
+      "git_blob": "f5237e47b7ae447b4d8c1e6f018a1191e1aa3664"
+    },
+    "Vulkan-Headers/include/vulkan/vulkan_wayland.h": {
+      "sha256": "6c4146149d45bcbb5a22c7540feaa396ee9a49f077737c7a343c62de5199fbc7",
+      "size": 1959,
+      "git_blob": "16645625f1a5066360022abfa201c29a47e90d20"
+    },
+    "Vulkan-Headers/include/vulkan/vulkan_win32.h": {
+      "sha256": "72f0b6de71287d3b04d12235e4f2fef8f343126f85be4963c516d31d5bb4c099",
+      "size": 15764,
+      "git_blob": "0750692779d74e5d77a0ce77fbce6b39d6dd23ac"
+    },
+    "Vulkan-Headers/include/vulkan/vulkan_xcb.h": {
+      "sha256": "3d49f5eb52090e72e1cf7cde545088225ac524a2ff1d1f35737e7d944474c1b7",
+      "size": 1973,
+      "git_blob": "439f65d54ab61c4233163e75513b20e9e53b21b5"
+    },
+    "Vulkan-Headers/include/vulkan/vulkan_xlib.h": {
+      "sha256": "3c44e97d3f380eb912e01a79e9667457fdf5e18164f0b09b3c61431f421bc551",
+      "size": 1954,
+      "git_blob": "7394bf7c79bb7e405c800f38a2ab61ffde805f82"
+    },
+    "Vulkan-Headers/include/vulkan/vulkan_xlib_xrandr.h": {
+      "sha256": "188233d112d812cca1777cfa6c1585073f1f2b033fa08b2f11c8d0757fcc232e",
+      "size": 1504,
+      "git_blob": "4aabd64426a01ff920466a1adc55c92c93a5e6bf"
+    },
+    "frameworks/base/NOTICE": {
+      "sha256": "cf4dd7cea5b6bcd2622ddd3529b3c74d16ba2b4db444575bc6f5c33f8a960530",
+      "size": 18182,
+      "git_blob": "4e699635e0418df49ba5b11631d001ad6a641ca6"
+    },
+    "frameworks/base/native/android/libandroid.map.txt": {
+      "sha256": "81d7d70f74c4a2d7b02f1daba270a12eca328690cf4ef8edf0c9cc2da9fa962d",
+      "size": 20954,
+      "git_blob": "a8eaff2fd5be3e85456e1defedb9ac2d4816fb85"
+    },
+    "frameworks/native/NOTICE": {
+      "sha256": "5f28c11f8b1b3f97b9d42c74b85371ebf4127f241b799279bcecd69f7ee542dc",
+      "size": 17680,
+      "git_blob": "152be2059579780efa1e1ff9f914ff17af575bfe"
+    },
+    "frameworks/native/vulkan/libvulkan/libvulkan.map.txt": {
+      "sha256": "6b9d47cdb25d6895ee0b65e50873eccbf75f8d07ce113145c9510c4e30153ff4",
+      "size": 8908,
+      "git_blob": "ffe46f7c58d233c6052ad7b97837aa0187bd7517"
+    },
+    "license-list-data/text/GPL-2.0-only.txt": {
+      "sha256": "aaf135472f81c5b4a0dca9367e5bb5e9750032b5bebe5442b36e4c0a47430df3",
+      "size": 17337,
+      "git_blob": "17cb286430a4d8094e473d06bd7f50f40438ddba"
+    },
+    "license-list-data/text/Linux-syscall-note.txt": {
+      "sha256": "5bcef4fedbfc08776630e65d5d0d074dd31208037eddb167ca46a9ec4f737764",
+      "size": 638,
+      "git_blob": "fcd056364e0932c32eff7392930a301fd7be9837"
+    },
+    "system/logging/liblog/NOTICE": {
+      "sha256": "f09747e3bc87e0ec3bdea983b37e18eeda223e01e678f76418a8a731ed8f590f",
+      "size": 10695,
+      "git_blob": "06a9081ca6475c0046240bb064e193b614a1e36c"
+    },
+    "system/logging/liblog/include/android/log.h": {
+      "sha256": "ee10b13125564cfebd95b2a37e87d3f507b502eb426c6951985abe6299a8a17f",
+      "size": 16026,
+      "git_blob": "9131364b0fa82d9f13fbeaf9042241ece9e41ba9"
+    },
+    "system/logging/liblog/liblog.map.txt": {
+      "sha256": "0f6863b6ac213350f96292402c0834c8fb89fa02042e960a80428304c0355019",
+      "size": 2787,
+      "git_blob": "7e265c511c412576789e4c0c43f3f7d9485e2834"
+    }
+  }
+}

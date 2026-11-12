@@ -219,11 +219,11 @@ static void add_audio_pes(Buf *b, int has_pts, int64_t pts, const uint8_t *es, u
     free(payload);
 }
 /* One PSP ATRAC frame: an 8-byte header whose size field is
- * ((code1 & 3) << 8 | code2 * 8) + 0x10 total bytes, then that many minus the
+ * (((code1 & 3) << 8 | code2) * 8) + 0x10 total bytes, then that many minus the
  * header in frame data. */
 static void audio_frame(Buf *b, uint8_t code1, uint8_t code2, uint8_t fill) {
     uint8_t h[8] = {0x0f, 0xd0, code1, code2, 0, 0, 0, 0};
-    uint32_t total = (uint32_t)(((code1 & 0x03u) << 8) | ((uint32_t)code2 * 8u)) + 0x10u;
+    uint32_t total = (uint32_t)((((code1 & 0x03u) << 8) | (uint32_t)code2) * 8u) + 0x10u;
     raw(b, h, 8);
     bytes(b, fill, total - 8u);
 }
@@ -1219,6 +1219,82 @@ static void test_pts_belongs_to_first_au_in_packet(void) {
     free(b.d);
 }
 
+/* #2205: the size field is ((b2 & 3) << 8 | b3) * 8 + 0x10, so a frame over 2 KiB has b2 & 3 != 0.
+ * Cutting access units with the multiply before the OR split such a frame at the wrong length
+ * (b2 & 3 = 1, b3 = 0 gave 0x110 bytes, not 0x810) and desynchronized the stream. */
+static void audio_size_fixture(Buf *b, const uint8_t *abuf, uint32_t alen) {
+    uint8_t es[16];
+    Buf v = { es, 0, sizeof(es), 0 };
+    raw(&v, k_aud, 4); raw(&v, k_picture1_body, sizeof(k_picture1_body));
+    b->at = 2048u;
+    b->overflow = 0;
+    memset(b->d, 0, b->cap);
+    b->d[0]='P'; b->d[1]='S'; b->d[2]='M'; b->d[3]='F';
+    be32(b->d + 8, 2048);
+    add_pack(b);
+    add_pes(b, 0xe0, 0, 0, es, v.at);
+    add_audio_pes(b, 0, 0, abuf, alen);
+    be32(b->d + 12, b->at - 2048u);
+}
+
+static void test_audio_frames_over_2_kib(void) {
+    CHECK(sr_psmf_audio_frame_bytes((const uint8_t[]){0x0f, 0xd0, 0x28, 0x06}) == 0x40u &&
+          sr_psmf_audio_frame_bytes((const uint8_t[]){0x0f, 0xd0, 0x29, 0x00}) == 0x810u &&
+          sr_psmf_audio_frame_bytes((const uint8_t[]){0x0f, 0xd0, 0x29, 0x01}) == 0x818u &&
+          sr_psmf_audio_frame_bytes((const uint8_t[]){0x0f, 0xd0, 0x2a, 0x10}) == 0x1090u &&
+          sr_psmf_audio_frame_bytes((const uint8_t[]){0x0f, 0xd0, 0x2b, 0xff}) == 0x2008u,
+          "the frame size is ((b2 & 3) << 8 | b3) * 8 + 0x10");
+
+    Buf b;
+    b.cap = 16384u;
+    b.d = (uint8_t *)calloc(1, b.cap);
+    uint8_t *abuf = (uint8_t *)calloc(1, 0x1400u);
+    if (!b.d || !abuf) { CHECK(0, "over-2-KiB fixture allocated"); free(b.d); free(abuf); return; }
+    Buf a = { abuf, 0, 0x1400u, 0 };
+    audio_frame(&a, 0x29, 0x00, 0xb1);               /* 0x810 bytes */
+    audio_frame(&a, 0x29, 0x5f, 0xb2);               /* 0xB08 bytes, the producer's cap */
+    audio_frame(&a, 0x28, 0x06, 0xb3);               /* 0x40 bytes: a frame after them stays in sync */
+    CHECK(!a.overflow && a.at == 0x810u + 0xb08u + 0x40u, "over-2-KiB audio ES is built to size");
+    audio_size_fixture(&b, abuf, a.at);
+    CHECK(!b.overflow, "over-2-KiB container fits its buffer");
+    MemSource mem = {b.d, b.at, 3, 0};
+    SrPsmfSource source = {mem_read, &mem, b.at};
+    SrPsmfProducer *p = sr_psmf_producer_open(&source, 0);
+    CHECK(p != NULL, "over-2-KiB fixture opens");
+    if (p) {
+        for (int i = 0; i < 256 && !sr_psmf_producer_eof(p); i++) sr_psmf_producer_pump(p, 1);
+        SrPsmfProducerStats st; sr_psmf_producer_stats(p, &st);
+        CHECK(st.eof && !st.failed && st.audio_aus == 3, "frames over 2 KiB form whole access units");
+        static const uint32_t want[3] = { 0x810u, 0xb08u, 0x40u };
+        static const uint8_t fill[3] = { 0xb1, 0xb2, 0xb3 };
+        for (int i = 0; i < 3; i++) {
+            SrPsmfAu au;
+            int got = sr_psmf_producer_pop(p, SR_PSMF_AU_AUDIO, &au);
+            CHECK(got && au.size == want[i] && au.data && au.data[8] == fill[i] &&
+                      au.data[au.size - 1u] == fill[i],
+                  "each frame over 2 KiB is cut at its own length");
+            if (got) sr_psmf_au_release(&au);
+        }
+        sr_psmf_producer_close(p);
+    }
+    /* One byte-unit past the cap (0xB10) is refused terminally. */
+    a.at = 0; a.overflow = 0;
+    audio_frame(&a, 0x29, 0x60, 0xb4);
+    audio_size_fixture(&b, abuf, a.at);
+    MemSource mem2 = {b.d, b.at, 3, 0};
+    SrPsmfSource source2 = {mem_read, &mem2, b.at};
+    p = sr_psmf_producer_open(&source2, 0);
+    CHECK(p != NULL, "over-cap fixture opens");
+    if (p) {
+        for (int i = 0; i < 256 && !sr_psmf_producer_eof(p) && !sr_psmf_producer_failed(p); i++)
+            sr_psmf_producer_pump(p, 1);
+        CHECK(sr_psmf_producer_failed(p), "a frame past the producer's 0xB08 cap fails the stream");
+        sr_psmf_producer_close(p);
+    }
+    free(abuf);
+    free(b.d);
+}
+
 /* ISO/IEC 13818-1 offsets: 0-3 pack_start_code; 4-13 MPEG-2 pack_header; 14-22 PES_header; 23-29 payload. */
 static const uint8_t corpus_pack_zero[] = {
     0x00, 0x00, 0x01, 0xBA,
@@ -1933,6 +2009,7 @@ int main(int argc, char **argv) {
         }
     }
     test_access_unit_formation();
+    test_audio_frames_over_2_kib();
     test_streaming_program_demux_matches_file_mode();
     test_streaming_demux_rejects_truncated_eos();
     test_streaming_demux_rejects_incomplete_pes_at_eos();

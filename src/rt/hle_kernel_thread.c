@@ -135,6 +135,7 @@ static uint32_t h_ExitThread(CpuState *s) {
         SR_VERIFY_REPORT_NOW();  /* _exit skips atexit, which would have written the report */
         (void)sr_videorec_finish_status("the guest's own exit path failed", 1);
         sr_perf_shutdown();      /* the end-of-process reports, as on the _Exit paths */
+        sr_profile_dump_final();
         _exit(1);
     }
     int delete_request = s_exit_delete_request;
@@ -698,8 +699,10 @@ static int hle_visit_threadman_ids(int tmid, SrUidVisitor visit, void *ctx) {
         case SR_TMID_SEMAPHORE:
         case SR_TMID_EVENT_FLAG: {
             const int kind = tmid == SR_TMID_SEMAPHORE ? SYNC_KIND_SEMA : SYNC_KIND_EVENT_FLAG;
-            for (int i = 0; i < 128; i++)
-                if (s_sync[i].used && s_sync[i].kind == kind) visit(s_sync[i].uid, ctx);
+            for (size_t i = 0, n = hle_sync_slot_count(); i < n; i++) {
+                const Sync *slot = hle_sync_slot(i);
+                if (slot->used && slot->kind == kind) visit(slot->uid, ctx);
+            }
             return 1;
         }
         case SR_TMID_MBOX:
@@ -719,8 +722,10 @@ static int hle_visit_threadman_ids(int tmid, SrUidVisitor visit, void *ctx) {
                 if (s_mutexes[i]) visit(s_mutexes[i]->uid, ctx);
             return 1;
         case 13:   /* PSPSDK SCE_KERNEL_TMID_LwMutex: a Sync of kind LWMUTEX */
-            for (int i = 0; i < 128; i++)
-                if (s_sync[i].used && s_sync[i].kind == SYNC_KIND_LWMUTEX) visit(s_sync[i].uid, ctx);
+            for (size_t i = 0, n = hle_sync_slot_count(); i < n; i++) {
+                const Sync *slot = hle_sync_slot(i);
+                if (slot->used && slot->kind == SYNC_KIND_LWMUTEX) visit(slot->uid, ctx);
+            }
             return 1;
         case 14:   /* PSPSDK SCE_KERNEL_TMID_Tlspl */
             for (int i = 0; i < TLSPL_MAX; i++)

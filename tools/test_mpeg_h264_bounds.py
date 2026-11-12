@@ -193,7 +193,7 @@ class TestMpegYcbcrContracts(unittest.TestCase):
             "rangeAddr & 3u",
             "frameWidth == 0",
             "ctx->pixelMode < 0 || ctx->pixelMode > 3",
-            "if ((x & 1) || (w & 1)) return SCE_MPEG_ERROR_INVALID_VALUE;",
+            "if ((x & 1) || (w & 1) || (y & 15) || (h & 1)) return SCE_MPEG_ERROR_INVALID_VALUE;",
             "x + w > (int64_t)l.width || y + h > (int64_t)l.height",
             "if ((uint64_t)w > frameWidth) return MPEG_ERROR_CSC_REFUSED;",
             "#define MPEG_ERROR_CSC_REFUSED 0x800001FEu",

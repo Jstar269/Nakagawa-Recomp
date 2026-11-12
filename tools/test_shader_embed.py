@@ -403,6 +403,83 @@ int main(int argc, char **argv) {
 """
 
 
+# SPIR-V opcodes and operands the destination-read checks read (SPIR-V 1.0 with
+# SPV_EXT_fragment_shader_interlock).
+SPV_OP_CAPABILITY, SPV_OP_EXECUTION_MODE, SPV_OP_DECORATE, SPV_OP_VARIABLE = 17, 16, 71, 59
+SPV_OP_BEGIN_INTERLOCK, SPV_OP_END_INTERLOCK = 5364, 5365
+SPV_OP_ATOMIC_OR, SPV_OP_ATOMIC_XOR = 241, 242
+SPV_CAP_PIXEL_INTERLOCK = 5378
+SPV_MODE_EARLY_FRAGMENT_TESTS, SPV_MODE_PIXEL_ORDERED, SPV_MODE_PIXEL_UNORDERED = 9, 5366, 5367
+SPV_DECORATION_COHERENT = 23
+
+
+def spirv_instructions(embedded: str) -> list[tuple[int, tuple[int, ...]]]:
+    """(opcode, operands) of every instruction of a checked-in embedding."""
+    data = shader_embed.parse_embedding((shader_embed.GPU_DIR / embedded).read_text(encoding="ascii"))
+    words = struct.unpack(f"<{len(data) // 4}I", data)
+    out = []
+    i = 5                                    # after the header
+    while i < len(words):
+        count = words[i] >> 16
+        if count == 0:
+            raise ValueError(f"{embedded}: zero-length instruction at word {i}")
+        out.append((words[i] & 0xFFFF, tuple(words[i + 1:i + count])))
+        i += count
+    return out
+
+
+class DstReadVariantTests(unittest.TestCase):
+    """psp.frag's ordered destination-read variant (#2109) and the default module beside it."""
+
+    # The default module, psp.frag built without SR_DST_INTERLOCK: a change meant for the variant
+    # alone (an #ifdef) must not change it. A deliberate change to the default fragment stage
+    # updates this hash; the last one added the color test, and the module is the same with and
+    # without the variant's #ifdef blocks in the source.
+    DEFAULT_FRAG_SPIRV_SHA256 = "ab1795bb84423d027451cb102ad9a72042f1579b79e79cb8752421e7cf92ce20"
+
+    def manifest_entry(self, embedded: str) -> dict:
+        manifest = shader_embed.load_manifest(shader_embed.MANIFEST)
+        entries = [e for e in manifest["shaders"] if e.get("embedded") == embedded]
+        self.assertEqual(len(entries), 1, embedded)
+        entry: dict = entries[0]
+        return entry
+
+    def test_default_module_is_unchanged(self) -> None:
+        entry = self.manifest_entry("psp_frag.inc")
+        self.assertEqual(entry["spirv_sha256"], self.DEFAULT_FRAG_SPIRV_SHA256)
+        self.assertNotIn("defines", entry)
+        ops = {op for op, _ in spirv_instructions("psp_frag.inc")}
+        self.assertFalse(ops & {SPV_OP_BEGIN_INTERLOCK, SPV_OP_END_INTERLOCK})
+
+    def test_variant_is_ordered_early_and_coherent(self) -> None:
+        entry = self.manifest_entry("psp_frag_rmw.inc")
+        self.assertEqual(entry["source"], "shaders/psp.frag")
+        self.assertEqual(entry["defines"], ["SR_DST_INTERLOCK"])
+        ins = spirv_instructions("psp_frag_rmw.inc")
+        ops = [op for op, _ in ins]
+        self.assertEqual(ops.count(SPV_OP_BEGIN_INTERLOCK), 1)
+        self.assertEqual(ops.count(SPV_OP_END_INTERLOCK), 1)
+        self.assertLess(ops.index(SPV_OP_BEGIN_INTERLOCK), ops.index(SPV_OP_END_INTERLOCK))
+        self.assertIn((SPV_OP_CAPABILITY, (SPV_CAP_PIXEL_INTERLOCK,)), ins)
+        modes = {operands[1] for op, operands in ins if op == SPV_OP_EXECUTION_MODE}
+        self.assertIn(SPV_MODE_PIXEL_ORDERED, modes)
+        self.assertIn(SPV_MODE_EARLY_FRAGMENT_TESTS, modes)
+        self.assertNotIn(SPV_MODE_PIXEL_UNORDERED, modes)
+        # The one storage image (the target) is Coherent: a store is visible to the next critical
+        # section's load without the Vulkan memory model.
+        coherent = {operands[0] for op, operands in ins
+                    if op == SPV_OP_DECORATE and operands[1] == SPV_DECORATION_COHERENT}
+        variables = {operands[1] for op, operands in ins if op == SPV_OP_VARIABLE}
+        self.assertEqual(len(coherent & variables), 1)
+        # Shader-owned depth (#2109): the packed D16 buffer is read and written only by atomics
+        # (two pixels share a word, outside each other's critical sections), and only in the
+        # critical section: one atomic read and one atomic XOR, both between begin and end.
+        begin, end = ops.index(SPV_OP_BEGIN_INTERLOCK), ops.index(SPV_OP_END_INTERLOCK)
+        atomics = [i for i, op in enumerate(ops) if op in (SPV_OP_ATOMIC_OR, SPV_OP_ATOMIC_XOR)]
+        self.assertEqual(sorted(ops[i] for i in atomics), [SPV_OP_ATOMIC_OR, SPV_OP_ATOMIC_XOR])
+        self.assertTrue(all(begin < i < end for i in atomics))
+
+
 class GePowfSharedTextTests(unittest.TestCase):
     def test_ge_c_and_the_tnl_shader_carry_one_text(self) -> None:
         ge_blocks = _pow_blocks(GE_C.read_text(encoding="utf-8"))

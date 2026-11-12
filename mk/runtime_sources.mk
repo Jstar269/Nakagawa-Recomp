@@ -33,7 +33,8 @@ NK_BUILD_DIR_READY := 1
 endif
 endif
 
-ifeq ($(OS),Windows_NT)
+# The platform the built program runs on (NK_TARGET_OS, root Makefile), not the host.
+ifeq ($(NK_TARGET_OS),windows)
 PLAYER_PLATFORM_SRC := src/core/nk_platform_win32.c
 PLAYER_PLATFORM_LIBS := -lshell32 -lole32 -luuid
 PLAYER_EXTRA_LIBS   := $(PLAYER_PLATFORM_LIBS) -lwinhttp -lbcrypt
@@ -165,6 +166,7 @@ RT_SRCS    := src/rt/recomp.c \
               src/rt/gpu_sdl3vk/ace_smooth.c \
               src/rt/gpu_sdl3vk/ace_hud.c \
               src/rt/gpu_sdl3vk/fsr1_pass.c \
+              src/rt/gpu_sdl3vk/anime4k_pass.c \
               src/core/nk_shared_helpers.c \
               src/core/nk_input_profile.c \
               src/core/nk_font.c \

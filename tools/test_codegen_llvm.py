@@ -83,6 +83,10 @@ def mul_s(fd, fs, ft):
     return 0x11 << 26 | 0x10 << 21 | ft << 16 | fs << 11 | fd << 6 | 0x02
 
 
+def cache(op, rs, imm):
+    return 0x2F << 26 | rs << 21 | op << 16 | (imm & 0xFFFF)
+
+
 def program(*words, start=0x1000):
     return {start + 4 * i: w for i, w in enumerate(words)}
 
@@ -201,6 +205,80 @@ class LoweringTests(unittest.TestCase):
         self.assertIn("ptr @f_00001014", text)
         self.assertVerifies(text)
 
+    def _c_text(self, words, options):
+        elf, start = FakeElf(words), min(words)
+        return "\n".join(codegen.emit_function(elf, start, [(start, start + 0x100)], {start},
+                                               options=options))
+
+    def test_stale_detect_cache_hook_is_lowered_inside_its_trace_record(self):
+        # codegen._effect_cache: under --stale-detect, `cache op, imm(rs)` reports rs + imm to
+        # the detector (sr_stale_note_cache_op); without it the word does nothing. The cache
+        # op 0x14 sits in the rt field, so a lowering that read rt would load r20; the second
+        # word's displacement is negative, so one that zero-extended it would add 65528.
+        words = program(addiu(4, 0, 0x100), cache(0x14, 4, 0x40), cache(0x14, 4, -8), JR_RA, NOP)
+        options = codegen.CodegenOptions(stale_detect=True)
+        c_text = self._c_text(words, options)
+        self.assertIn("sr_stale_note_cache_op((uint32_t)(s->r[4] + 0x00000040u));", c_text)
+        self.assertIn("sr_stale_note_cache_op((uint32_t)(s->r[4] + 0xfffffff8u));", c_text)
+        _, text = self.ir(words, options=options)
+        lines = text.splitlines()
+        for pc, displacement in ((4100, ", 64"), (4104, ", -8")):
+            begin = next(i for i, l in enumerate(lines) if f"@sr_llvm_begin(ptr %s, i32 {pc}," in l)
+            end = next(i for i, l in enumerate(lines) if i > begin and "@sr_llvm_end(" in l)
+            add = next(i for i, l in enumerate(lines) if begin < i < end and " add i32 " in l)
+            note = next(i for i, l in enumerate(lines)
+                        if begin < i < end and "call void @sr_stale_note_cache_op(i32" in l)
+            self.assertLess(add, note)
+            self.assertIn(" add i32 %r4.", lines[add])
+            self.assertTrue(lines[add].endswith(displacement), lines[add])
+            self.assertIn(lines[add].split("=")[0].strip(), lines[note])
+        self.assertIn("declare void @sr_stale_note_cache_op(i32)", text)
+        self.assertVerifies(text)
+        _, plain = self.ir(words)
+        self.assertNotIn("sr_stale_note_cache_op", plain)
+
+    def test_static_verify_checks_are_the_c_emitters_after_the_same_word(self):
+        words = program(addiu(4, 0, 1), addiu(5, 4, 2), addu(6, 4, 5), JR_RA, NOP)
+        options = codegen.CodegenOptions(static_verify=True)
+        expected = [(int(pc, 16), int(reg), int(value, 16)) for pc, reg, value in re.findall(
+            r"sr_sv_check\(s, (0x[0-9a-f]{8})u, (\d+), (0x[0-9a-f]{8})u\);",
+            self._c_text(words, options))]
+        self.assertEqual(expected, [(0x1008, 4, 1), (0x1008, 5, 3), (0x1008, 6, 4)])
+        before = dict(codegen.SV_STATS)
+        _, text = self.ir(words, options=options)
+        self.assertEqual(codegen.SV_STATS, before)        # the summary counts C's points once
+        lines = text.splitlines()
+        rendered = [(int(pc), int(reg), int(value)) for pc, reg, value in re.findall(
+            r"call void @sr_llvm_sv_check\(ptr %s, i32 (\d+), i32 (\d+), i32 (\d+)\)", text)]
+        self.assertEqual(rendered, expected)
+        word_end = max(i for i, l in enumerate(lines) if "@sr_llvm_end(" in l
+                       and i < next(j for j, m in enumerate(lines) if "call void @sr_llvm_sv_check(" in m))
+        word_begin = max(i for i, l in enumerate(lines) if i < word_end
+                         and "@sr_llvm_begin(ptr %s, i32 4104," in l)
+        self.assertLess(word_begin, word_end)
+        return_begin = next(i for i, l in enumerate(lines)
+                            if "@sr_llvm_begin(ptr %s, i32 4108," in l)
+        self.assertTrue(all(word_end < i < return_begin for i, l in enumerate(lines)
+                            if "call void @sr_llvm_sv_check(" in l))
+        self.assertVerifies(text)
+        _, plain = self.ir(words)
+        self.assertNotIn("sr_llvm_sv_check", plain)
+
+    def test_a_static_verify_check_off_a_straight_line_word_is_refused(self):
+        real_plan = codegen_llvm.P.plan_function
+
+        def misplaced(*args, **kwargs):
+            plan = real_plan(*args, **kwargs)
+            plan.sv_checks = {0x1004: ((4, 1),)}           # the jr's delay slot
+            return plan
+
+        words = program(addiu(4, 0, 1), JR_RA, addiu(5, 0, 2))
+        self.assertIsInstance(self.lower(words), codegen_llvm.LLVMBody)
+        with mock.patch.object(codegen_llvm.P, "plan_function", misplaced):
+            with self.assertRaisesRegex(codegen_llvm.LLVMUnsupported, "static-verify check at "
+                                        "0x00001004 is not on a straight-line word"):
+                self.lower(words)
+
     def test_unsupported_forms_fall_back_with_a_reason(self):
         with self.assertRaisesRegex(codegen_llvm.LLVMUnsupported, "FPU at 0x00001000"):
             self.lower(program(mul_s(0, 1, 2), JR_RA, NOP))
@@ -235,12 +313,14 @@ class LoweringTests(unittest.TestCase):
     def test_hst_emission_sites_cover_every_hst_address_in_emit_function(self):
         # Every `hst_profile and ... addr == <literal>` site in emit_function or
         # one of the `_emit_*` steps it was split into (#1531) emits something
-        # other than the plain word; the LLVM backend must refuse each one.
+        # other than the plain word; the LLVM backend must refuse each one. The last
+        # such sites (two loop fast paths and the guest abort exit) were retired under
+        # #363, so none may come back unnoticed.
         tree = ast.parse((ROOT / "tools" / "codegen.py").read_text(encoding="utf-8"))
         emitters = [n for n in ast.walk(tree)
                     if isinstance(n, ast.FunctionDef)
                     and (n.name == "emit_function" or n.name.startswith("_emit_"))]
-        self.assertIn("_emit_hst_patch_site", {n.name for n in emitters})
+        self.assertIn("emit_function", {n.name for n in emitters})
         literals = set()
         for node in (n for emit in emitters for n in ast.walk(emit)):
             if not isinstance(node, ast.If):
@@ -253,7 +333,7 @@ class LoweringTests(unittest.TestCase):
                         and isinstance(cmp.ops[0], ast.Eq)
                         and isinstance(cmp.comparators[0], ast.Constant)):
                     literals.add(cmp.comparators[0].value)
-        self.assertTrue(literals)
+        self.assertEqual(literals, set(), "an HST-profile address site is back in an emitter")
         self.assertLessEqual(literals, codegen_llvm.hst_emission_sites(codegen))
 
 
@@ -415,6 +495,40 @@ class PackageCacheTests(unittest.TestCase):
         self.assertIn("clang version", options["clang"])
         self.assertIn("LLVM version", options["llvm_link"])
 
+    def test_the_key_names_every_tools_module_the_lowering_imports(self):
+        # A change to any module the renderer imports changes the IR it writes, so each one
+        # must move an LLVM package's key; tools/codegen.py is keyed for both backends.
+        closure, pending = set(), ["codegen_llvm"]
+        while pending:
+            name = pending.pop()
+            if name in closure or name == "codegen" or name in sys.stdlib_module_names:
+                continue
+            path = ROOT / "tools" / f"{name}.py"
+            # Anything else must be a tools/ module this walk can read, or it fails here
+            # instead of leaving the closure silently.
+            self.assertTrue(path.is_file(), f"the lowering imports {name}, not found in tools/")
+            closure.add(name)
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+                if isinstance(node, ast.Import):
+                    pending.extend(alias.name.split(".")[0] for alias in node.names)
+                elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+                    pending.append(node.module.split(".")[0])
+        self.assertIn("lowering_plan", closure)
+        keyed = {path for path in self.pc.LLVM_BACKEND_SOURCES if path.startswith("tools/")}
+        self.assertEqual(keyed, {f"tools/{name}.py" for name in closure})
+        # The Make rule that writes the .ll files depends on the same modules in an LLVM
+        # build, and on none of them in a C build.
+        text = (ROOT / "mk" / "pipeline.mk").read_text(encoding="utf-8")
+        match = re.search(r"^CODEGEN_LLVM_PREREQ := \$\(if \$\(filter --backend=llvm,"
+                          r"\$\(CODEGEN_USER_ARGS\)\),"
+                          r"([^)]*)\)$", text, re.M)
+        self.assertIsNotNone(match)
+        self.assertEqual(set(match.group(1).split()), keyed)
+        rule = re.search(r"^\$\(BUILD_DIR\)/\$\(GAME_NAME\)_recomp\.c [^:\n]*: \$\(GAME_INPUT_PREREQ\)"
+                         r"[^\n]*", text, re.M)
+        self.assertIsNotNone(rule)
+        self.assertIn("$(CODEGEN_LLVM_PREREQ)", rule.group(0))
+
     def test_planner_and_cli_both_key_on_the_backend(self):
         for path in ("tools/title_codegen_plan.py", "tools/nk_cli.py"):
             text = (ROOT / path).read_text(encoding="utf-8")
@@ -447,11 +561,51 @@ class RuntimeAbiTests(unittest.TestCase):
                 cwd=ROOT, capture_output=True, text=True, check=False)
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_the_static_verify_shim_is_the_c_chunks_check(self):
+        source = (ROOT / "src" / "rt" / "llvm_abi.c").read_text(encoding="ascii")
+        shim = re.search(r"^void sr_llvm_sv_check\((.*?)\) (\{.*?^\})", source, re.M | re.S)
+        chunk = re.search(r"^static void sr_sv_check\((.*?)\) (\{.*?^\})", codegen.SR_SV_CHECK,
+                          re.M | re.S)
+        self.assertIsNotNone(shim)
+        self.assertIsNotNone(chunk)
+        self.assertEqual(shim.groups(), chunk.groups())
+
     def test_abi_header_declares_every_shim_the_backend_calls(self):
         header = (ROOT / "src" / "rt" / "llvm_abi.h").read_text(encoding="ascii")
         shims = {n for n in codegen_llvm.ABI_FUNCTIONS if n.startswith("sr_llvm_")}
         declared = set(re.findall(r"\b(sr_llvm_\w+)\(", header))
         self.assertEqual(shims, declared)
+
+
+class MutantAnchorTests(unittest.TestCase):
+    """Every cosimulation mutant must still apply to the source it damages (#2227).
+
+    Hosted CI runs only the default campaign, so a stale LLVM mutant would otherwise
+    surface only when someone ran ``cosim-mutants-llvm``. ``Mutant.apply`` raises when
+    a pattern matches a different number of times than declared.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "cosim_mutate", ROOT / "fixtures" / "cosim" / "mutate.py")
+        cls.mutate = importlib.util.module_from_spec(spec)
+        sys.modules["cosim_mutate"] = cls.mutate
+        spec.loader.exec_module(cls.mutate)
+
+    def test_every_mutant_pattern_matches_its_source(self):
+        m = self.mutate
+        paths = {
+            "interpreter": m.INTERPRETER, "fp-convert": m.FP_CONVERT,
+            "fpu-reference": m.FPU_REFERENCE, "generator": m.GENERATOR,
+            "split-generator": m.GENERATOR, "scheduler": m.SCHEDULER,
+            "llvm-backend": m.LLVM_BACKEND,
+        }
+        for mutant in (*m.MUTANTS, *m.LLVM_MUTANTS):
+            with self.subTest(mutant=mutant.name):
+                source = paths[mutant.target].read_text(encoding="utf-8")
+                self.assertNotEqual(mutant.apply(source), source)
 
 
 if __name__ == "__main__":

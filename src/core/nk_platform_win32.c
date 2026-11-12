@@ -29,6 +29,10 @@ char nk_platform_path_separator(void) {
     return '\\';
 }
 
+char nk_platform_path_list_separator(void) {
+    return ';';
+}
+
 /* Bounded UTF-8 -> UTF-16 conversion */
 static bool utf8_to_wide(const char *utf8, WCHAR *out_wide, size_t max_wide_chars) {
     if (!utf8 || !out_wide || max_wide_chars == 0) return false;
@@ -922,10 +926,22 @@ static WCHAR *build_controlled_unicode_environment(const char * const *envp) {
 
     if (envp && !failed) {
         for (int i = 0; envp[i]; i++) {
-            WCHAR witem[4096];
-            /* A requested variable that cannot be represented must not silently
-             * fall back to the parent's value. */
-            if (!utf8_to_wide(envp[i], witem, sizeof(witem) / sizeof(WCHAR))) {
+            /* Size each entry from its own length: a PATH with a toolchain folder
+             * prepended can run to the 32767-character variable limit. A requested
+             * variable that cannot be represented must not silently fall back to
+             * the parent's value. */
+            int wlen = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, envp[i], -1, NULL, 0);
+            if (wlen <= 0) {
+                failed = true;
+                break;
+            }
+            WCHAR *witem = (WCHAR *)malloc((size_t)wlen * sizeof(WCHAR));
+            if (!witem) {
+                failed = true;
+                break;
+            }
+            if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, envp[i], -1, witem, wlen) != wlen) {
+                free(witem);
                 failed = true;
                 break;
             }
@@ -948,11 +964,12 @@ static WCHAR *build_controlled_unicode_environment(const char * const *envp) {
                     vars[found_idx] = vars[count - 1];
                     count--;
                 }
+                free(witem);
                 continue;
             }
 
-            WCHAR *dup = _wcsdup(witem);
-            if (!dup) { failed = true; break; }
+            /* The converted entry becomes the stored string. */
+            WCHAR *dup = witem;
             if (found_idx >= 0) {
                 free(vars[found_idx].str);
                 vars[found_idx].str = dup;
@@ -1014,6 +1031,29 @@ bool nk_platform_spawn_process(
     const char * const *envp,
     const char *working_directory,
     const char *output_log_path,
+    NkProcessHandle *out_process
+) {
+    return nk_platform_spawn_process_at_priority(executable_path, argv, envp,
+                                                 working_directory, output_log_path,
+                                                 NK_PROCESS_PRIORITY_NORMAL, out_process);
+}
+
+bool nk_platform_process_priority(const NkProcessHandle *process, NkProcessPriority *out) {
+    if (!process || !process->is_active || !process->native_handle || !out) return false;
+    DWORD priority_class = GetPriorityClass((HANDLE)process->native_handle);
+    if (priority_class == 0) return false;
+    *out = priority_class == BELOW_NORMAL_PRIORITY_CLASS || priority_class == IDLE_PRIORITY_CLASS
+        ? NK_PROCESS_PRIORITY_LOW : NK_PROCESS_PRIORITY_NORMAL;
+    return true;
+}
+
+bool nk_platform_spawn_process_at_priority(
+    const char *executable_path,
+    const char * const *argv,
+    const char * const *envp,
+    const char *working_directory,
+    const char *output_log_path,
+    NkProcessPriority priority,
     NkProcessHandle *out_process
 ) {
     if (!executable_path || !out_process) return false;
@@ -1124,6 +1164,16 @@ bool nk_platform_spawn_process(
 
     DWORD creation_flags = CREATE_UNICODE_ENVIRONMENT | CREATE_SUSPENDED |
                            CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT;
+    /* The class is set at creation, so the child never runs at normal priority, and the
+       processes it starts inherit it: a below-normal creator's children default to its
+       class. A creator already below normal or idle passes its own class on instead, so
+       a low child is never raised above it. Normal leaves the flag out, as before. */
+    if (priority == NK_PROCESS_PRIORITY_LOW) {
+        DWORD own_class = GetPriorityClass(GetCurrentProcess());
+        if (own_class != IDLE_PRIORITY_CLASS && own_class != BELOW_NORMAL_PRIORITY_CLASS) {
+            creation_flags |= BELOW_NORMAL_PRIORITY_CLASS;
+        }
+    }
 
     STARTUPINFOEXW si;
     PROCESS_INFORMATION pi;
@@ -1249,6 +1299,35 @@ bool nk_platform_describe_os_error(int os_error, char *out, size_t out_size) {
         return false;
     }
     return true;
+}
+
+/* Windows runs any tool program the way it runs any other (nk_platform.h). */
+bool nk_platform_spawn_tool(const char *executable_path, const char * const *argv,
+                            const char * const *envp, const char *working_directory,
+                            const char *output_log_path, NkProcessHandle *out_process) {
+    return nk_platform_spawn_process(executable_path, argv, envp, working_directory,
+                                     output_log_path, out_process);
+}
+
+bool nk_platform_spawn_tool_at_priority(const char *executable_path, const char * const *argv,
+                                        const char * const *envp, const char *working_directory,
+                                        const char *output_log_path, NkProcessPriority priority,
+                                        NkProcessHandle *out_process) {
+    return nk_platform_spawn_process_at_priority(executable_path, argv, envp, working_directory,
+                                                 output_log_path, priority, out_process);
+}
+
+/* The desktop finds its tools on PATH or in the prerequisites folder, not in one bundled folder. */
+bool nk_platform_get_tool_dir(char *out_path, size_t max_len) {
+    if (out_path && max_len) out_path[0] = '\0';
+    return false;
+}
+
+/* No bundled tool folder, so no program is in one. */
+bool nk_platform_path_is_tool_in_dir(const char *dir, const char *path) {
+    (void)dir;
+    (void)path;
+    return false;
 }
 
 bool nk_platform_is_process_running(NkProcessHandle *process) {
@@ -1403,13 +1482,87 @@ unsigned long nk_platform_process_id(void) {
     return (unsigned long)_getpid();
 }
 
-int nk_platform_last_os_error(void) {
-    return (int)GetLastError();
+bool nk_platform_local_pipe_supported(void) {
+    return true;
 }
 
-const char *const *nk_platform_sdl3_ttf_library_names(void) {
-    static const char *const names[] = { "SDL3_ttf.dll", NULL };
-    return names;
+bool nk_platform_local_pipe_open(NkLocalPipe *pipe, const char *name) {
+    if (!pipe) return false;
+    memset(pipe, 0, sizeof(*pipe));
+    if (!name || !*name || strchr(name, '\\') || strchr(name, '/')) return false;
+    char narrow[128];
+    WCHAR wide[128];
+    int n = snprintf(narrow, sizeof(narrow), "\\\\.\\pipe\\%s", name);
+    if (n <= 0 || (size_t)n >= sizeof(narrow) ||
+        !utf8_to_wide(narrow, wide, sizeof(wide) / sizeof(wide[0]))) {
+        return false;
+    }
+    /* Identification level only: whatever program serves the pipe (any local process could
+       create it first) may learn who connected but can never impersonate this user. */
+    HANDLE handle = CreateFileW(wide, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING,
+                                FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT |
+                                    SECURITY_IDENTIFICATION,
+                                NULL);
+    if (handle == INVALID_HANDLE_VALUE) return false;
+    pipe->handle = handle;
+    pipe->open = true;
+    return true;
+}
+
+/* One overlapped transfer that gives up after timeout_ms, cancelling what is left. */
+static bool local_pipe_transfer(HANDLE handle, bool writing, void *data, DWORD len,
+                                unsigned timeout_ms, DWORD *done) {
+    OVERLAPPED ov;
+    memset(&ov, 0, sizeof(ov));
+    ov.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+    if (!ov.hEvent) return false;
+    *done = 0;
+    BOOL ok = writing ? WriteFile(handle, data, len, NULL, &ov)
+                      : ReadFile(handle, data, len, NULL, &ov);
+    bool result = false;
+    if (ok || GetLastError() == ERROR_IO_PENDING) {
+        if (WaitForSingleObject(ov.hEvent, timeout_ms) == WAIT_OBJECT_0) {
+            result = GetOverlappedResult(handle, &ov, done, FALSE) != 0;
+        } else {
+            (void)CancelIoEx(handle, &ov);
+            (void)GetOverlappedResult(handle, &ov, done, TRUE);
+        }
+    }
+    CloseHandle(ov.hEvent);
+    return result;
+}
+
+bool nk_platform_local_pipe_write(NkLocalPipe *pipe, const void *data, size_t len,
+                                  unsigned timeout_ms) {
+    if (!pipe || !pipe->open || !data || len == 0 || len > 0x7fffffffu) return false;
+    DWORD done = 0;
+    return local_pipe_transfer((HANDLE)pipe->handle, true, (void *)data, (DWORD)len,
+                               timeout_ms, &done) &&
+           done == (DWORD)len;
+}
+
+long nk_platform_local_pipe_read(NkLocalPipe *pipe, void *buf, size_t cap) {
+    if (!pipe || !pipe->open || !buf || cap == 0) return -1;
+    DWORD avail = 0;
+    if (!PeekNamedPipe((HANDLE)pipe->handle, NULL, 0, NULL, &avail, NULL)) return -1;
+    if (avail == 0) return 0;
+    DWORD want = avail < cap ? avail : (DWORD)(cap > 0x7fffffffu ? 0x7fffffffu : cap);
+    DWORD done = 0;
+    /* The bytes are already in the pipe, so this completes at once; the bound only keeps a
+       misbehaving server from holding the caller. */
+    if (!local_pipe_transfer((HANDLE)pipe->handle, false, buf, want, 1000u, &done)) return -1;
+    return (long)done;
+}
+
+void nk_platform_local_pipe_close(NkLocalPipe *pipe) {
+    if (!pipe) return;
+    if (pipe->open && pipe->handle) CloseHandle((HANDLE)pipe->handle);
+    pipe->handle = NULL;
+    pipe->open = false;
+}
+
+int nk_platform_last_os_error(void) {
+    return (int)GetLastError();
 }
 
 static bool system_font_file_exists(const char *path) {
@@ -1557,5 +1710,7 @@ bool nk_platform_host_startup(const char *log_tag) {
     (void)log_tag;
     return true;
 }
+
+void nk_platform_host_shutdown(void) {}
 
 #endif /* _WIN32 */

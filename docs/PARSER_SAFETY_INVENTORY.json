@@ -1945,7 +1945,7 @@
       "status": "PARTIAL"
     },
     {
-      "boundary": "Player Rebuild all queue JSON (rebuild-queue.json) consumed at startup",
+      "boundary": "Player build queue JSON (rebuild-queue.json: Add to queue and Rebuild all) consumed at startup",
       "id": "player-rebuild-queue-json",
       "entry": "src/player/player_state.c:player_app_rebuild_queue_load",
       "source_paths": [
@@ -1955,7 +1955,7 @@
         "tests/native/test_player_state.c"
       ],
       "max_input": "1 MiB queue file; parsing then goes through nk_json depth 16; at most MAX_LIBRARY_GAMES titles.",
-      "tables_nesting": "One titles array of two-member objects; a document with any other member or shape is refused.",
+      "tables_nesting": "One titles array of objects: disc_id and state in schema 1, disc_id, kind and state in schema 2; a repeated disc_id, or a document with any other member or shape, is refused.",
       "arithmetic": {
         "safe": "SAFE",
         "evidence": [
@@ -1964,11 +1964,12 @@
         ]
       },
       "allocation_time": "One bounded file read plus a depth-16 AST.",
-      "failure_atomicity": "A queue file that is unreadable, of another format, of a newer or invalid schema_version, or with an invalid title leaves the queue empty and the file in place; nothing is resumed from it.",
+      "failure_atomicity": "A queue file that is unreadable, of another format, of a newer or invalid schema_version, or with an invalid title leaves the queue empty and the file in place; nothing is resumed from it. A file with a newer schema_version is also never replaced or removed by a later save. A schema 1 file is rewritten as schema 2 only after it parsed in full.",
       "harness": "tests/native/test_player_state.c",
       "gap": "Deterministic cases run in CI through native-core-tests; there is no seeded mutation, sanitizer, or coverage-guided campaign for this route.",
       "malformed_input_coverage": [
-        "a newer schema_version and an unknown member, each refused with the file kept (tests/native/test_player_state.c:test_outdated_packages_rebuild)"
+        "a newer schema_version and an unknown member, each refused with the file kept (tests/native/test_player_state.c:test_outdated_packages_rebuild)",
+        "a schema 2 title without its kind and a repeated disc_id, each refused; a newer file kept byte for byte while this player's queue is saved and emptied (tests/native/test_player_state.c:test_build_queue)"
       ],
       "resource_gaps": [
         "No oversized, truncated or zero-length queue-file case in the native selftest.",

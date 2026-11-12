@@ -145,6 +145,19 @@ EXTRA_SPAN_ARG  = $(if $(strip $(EFFECTIVE_EXTRA_SPANS)),--extra-span=$(strip $(
 ifneq ($(filter default undefined,$(origin CC)),)
 CC := gcc
 endif
+# The system the built program runs on (#360). Empty builds for this host, as before.
+# NK_TARGET=android builds a title as the Android library TitleActivity loads,
+# <BUILD_DIR>/lib<GAME_NAME>.so, with an Android Clang as CC: on the device, or from a PC
+# with the NDK's aarch64-linux-android<api>-clang. The conditionals about the built
+# program read NK_TARGET_OS; the ones about the host's own shell and tools keep reading OS.
+NK_TARGET ?=
+ifeq ($(strip $(NK_TARGET)),)
+NK_TARGET_OS := $(if $(filter Windows_NT,$(OS)),windows,posix)
+else ifeq ($(NK_TARGET),android)
+NK_TARGET_OS := android
+else
+$(error NK_TARGET '$(NK_TARGET)' is not a target this Makefile builds; leave it empty to build for this host, or set NK_TARGET=android)
+endif
 # Quote the executable in recipes so explicit Windows paths with spaces work.
 PYTHON     ?= python
 ifeq ($(OS),Windows_NT)
@@ -152,6 +165,28 @@ POWERSHELL ?= powershell.exe
 else
 POWERSHELL ?= pwsh
 endif
+# RECIPE SHELL (#368). GNU Make runs recipes with sh. On Windows, mingw32-make looks
+# for sh.exe on PATH when it starts and, when it finds one, sets SHELL to its full
+# path. When it finds none, SHELL keeps the bare default `sh.exe` and every recipe
+# runs under cmd.exe instead, with no warning. Most recipes are written for both,
+# and the player's package build (a bundled toolchain with no sh) relies on that.
+# The rest use POSIX syntax (if/then, for loops, `[`, `VAR=value cmd`, `$$var`, `;`
+# between commands), which cmd.exe misreads: it fails with an unrelated error, or
+# worse, exits 0 (`echo ...; exit 2` prints the whole line and succeeds). Each such
+# recipe starts with $(NK_REQUIRE_POSIX_SHELL). Make expands a recipe in full before
+# running its first line, so under cmd.exe the guard stops Make, naming the target
+# and the fix, before any line of that recipe runs; with a POSIX sh it expands to
+# nothing. The guard applies to `make -n` too, which then stops instead of printing.
+# tools/test_build_truth.py::RecipeShellGuardTests classifies the recipes in Make's own
+# rule database, with the `define` macros they call, and fails when one in POSIX syntax
+# lacks the guard; it sees only the conditional branches of the host it runs on. An
+# explicit `SHELL=cmd.exe` on the command line is the caller's choice and is not refused.
+ifeq ($(OS),Windows_NT)
+NK_RECIPE_SHELL := $(if $(filter sh.exe,$(SHELL)),cmd.exe,posix)
+else
+NK_RECIPE_SHELL := posix
+endif
+NK_REQUIRE_POSIX_SHELL = $(if $(filter cmd.exe,$(NK_RECIPE_SHELL)),$(error $@ needs a POSIX sh, and mingw32-make found no sh.exe on PATH, so it would run this recipe with cmd.exe. Put the usr\bin folder of Git for Windows or MSYS2 on PATH and run it again; see "PATH order" in docs/SETUP.md))
 # glslc from the Vulkan SDK is used ONLY by the opt-in shaders target.
 GLSLC ?= glslc
 
@@ -204,7 +239,22 @@ BUILD_ROOT_RUN := $(if $(filter /%,$(BUILD_ROOT))$(findstring :,$(BUILD_ROOT)),$
 # retain their existing lightweight SDL behavior.
 SDL3_DIR ?=
 SDL3_MAKE_FRAGMENT := $(BUILD_ROOT)/.sdl3-discovery.mk
-ifeq ($(strip $(filter clean distclean clean-preview,$(MAKECMDGOALS))$(NK_INFO_ONLY)),)
+ifeq ($(NK_TARGET_OS),android)
+# An Android title links the APK's own libSDL3.so, so nothing is discovered on the host:
+# ANDROID_SDL3_INCLUDE names the folder holding SDL3/SDL.h and ANDROID_SDL3_LIBDIR the folder
+# holding libSDL3.so (the native library folder on the device). The Vulkan and Android
+# headers and libraries are the NDK sysroot's, which CC already searches.
+ANDROID_SDL3_INCLUDE ?=
+ANDROID_SDL3_LIBDIR ?=
+SDL3_DIR := $(ANDROID_SDL3_INCLUDE)
+SDL3_PROVIDER := android
+SDL3_VERSION := $(if $(wildcard $(ANDROID_SDL3_INCLUDE)/SDL3/SDL_version.h),$(strip $(shell "$(PYTHON)" -c "import re, sys; t = open(sys.argv[1], encoding='utf-8').read(); v = [re.search(r'define SDL_%s_VERSION\s+(\d+)' % k, t) for k in ('MAJOR', 'MINOR', 'MICRO')]; print('.'.join(m.group(1) for m in v) if all(v) else '')" "$(ANDROID_SDL3_INCLUDE)/SDL3/SDL_version.h")),)
+SDL3_ERROR := $(if $(SDL3_VERSION),$(if $(wildcard $(ANDROID_SDL3_LIBDIR)/libSDL3.so),,NK_TARGET=android needs ANDROID_SDL3_LIBDIR naming the folder that holds the APK's libSDL3.so (got '$(ANDROID_SDL3_LIBDIR)')),NK_TARGET=android needs ANDROID_SDL3_INCLUDE naming the folder that holds SDL3/SDL_version.h (got '$(ANDROID_SDL3_INCLUDE)'))
+SDL3_DLL :=
+SDL3_INC_FLAGS := $(if $(ANDROID_SDL3_INCLUDE),-I"$(ANDROID_SDL3_INCLUDE)",)
+SDL3_LDFLAGS := $(if $(ANDROID_SDL3_LIBDIR),-L"$(ANDROID_SDL3_LIBDIR)",)
+VULKAN_SDK :=
+else ifeq ($(strip $(filter clean distclean clean-preview,$(MAKECMDGOALS))$(NK_INFO_ONLY)),)
 ifeq ($(VULKAN_SDK),)
 _BUILD_DEPENDENCY_DISCOVERY := $(shell "$(PYTHON)" -W ignore -c "import sys; sys.path.insert(0, 'tools'); from nk_doctor_checks import write_build_discovery_make_fragment; write_build_discovery_make_fragment(r'$(SDL3_MAKE_FRAGMENT)', r'$(subst \,/,$(SDL3_DIR))', r'$(CC)', r'$(subst \,/,$(VULKAN_SDK))', True)" 2>&1)
 ifneq ($(strip $(_BUILD_DEPENDENCY_DISCOVERY)),)
@@ -238,7 +288,7 @@ endif
 # An explicit VULKAN_SDK override on Linux is still honoured: if the caller names a real
 # directory, -L<root>/lib is added and the SDK's own headers are picked up. The default
 # (no override, no discovery) is the system loader.
-ifeq ($(OS),Windows_NT)
+ifeq ($(NK_TARGET_OS),windows)
 VULKAN_INC_FLAGS := -I"$(VULKAN_SDK)/Include" -I"$(VULKAN_SDK)/include"
 VULKAN_LIB_FLAGS := -L"$(VULKAN_SDK)/Lib" -L"$(VULKAN_SDK)/lib"
 else
@@ -275,7 +325,7 @@ LINK_MAP_ARG = $(if $(strip $(LINK_MAP)),$(LINK_MAP_VALUE),)
 # The Vulkan import library name differs by platform: vulkan-1.lib (Windows SDK) vs libvulkan.so
 # (Linux loader). The two are NOT interchangeable, so the name is chosen per platform rather
 # than unified to one.
-ifeq ($(OS),Windows_NT)
+ifeq ($(NK_TARGET_OS),windows)
 VULKAN_LIB_NAME := -lvulkan-1
 WIN_ONLY_LIBS   := -lmfplat -lgdi32 -lole32 -lshell32 -luuid -lwinmm
 # -Wl,--no-insert-timestamp keeps the PE image byte-reproducible on the
@@ -292,10 +342,28 @@ REPRODUCIBLE_LINK_FLAG :=
 # transcendental maths (GE rasterizer, VFPU, ATRAC DSP) references libm
 # symbols and ld refuses an implicit dependency ("DSO missing from command
 # line"). Listed here, after the project libraries, exactly as -lm is on any
-# other GNU link line.
-POSIX_RUNTIME_LIBS := -lm
+# other GNU link line. An Android title also links the NDK's logging and native-activity
+# libraries, which the runtime's Android platform code calls.
+POSIX_RUNTIME_LIBS := -lm $(if $(filter android,$(NK_TARGET_OS)),-llog -landroid,)
 endif
 LIBS       ?= -lSDL3 $(VULKAN_LIB_NAME) $(WIN_ONLY_LIBS) $(POSIX_RUNTIME_LIBS)
+
+# What the compile goal links. A desktop title is an executable. An Android title is the
+# shared library TitleActivity loads (android/app/src/main/java/.../TitleActivity.java): it
+# adds nk_android_title.c, whose nk_android_title_main runs the runtime's main(), and the
+# exit wrappers there end the title's process the way a desktop child's exit does. Every
+# object a shared library links is position independent (GE_CFLAGS and RECOMP_FLAGS take
+# the same flag where they are defined).
+ifeq ($(NK_TARGET_OS),android)
+override CFLAGS += -fPIC
+TITLE_OUTPUT = $(BUILD_DIR)/lib$(GAME_NAME).so
+TITLE_LINK_FLAGS := -shared -Wl,--wrap=exit -Wl,--wrap=_exit -Wl,--wrap=_Exit -Wl,--wrap=atexit
+TITLE_ANDROID_OBJ = $(BUILD_DIR)/nk_android_title.o
+else
+TITLE_OUTPUT = $(BUILD_DIR)/$(GAME_NAME)$(EXE_EXT)
+TITLE_LINK_FLAGS :=
+TITLE_ANDROID_OBJ :=
+endif
 
 # Portable H.264 backend (src/rt/h264_ffmpeg.c): the pinned FFmpeg n4.4 H.264 decoder subset
 # vendored under src/rt/h264_ffmpeg_sub/ (LGPL-2.1-or-later, generic C, statically linked, no
@@ -303,7 +371,7 @@ LIBS       ?= -lSDL3 $(VULKAN_LIB_NAME) $(WIN_ONLY_LIBS) $(POSIX_RUNTIME_LIBS)
 # platform decoder exists; it is the default off Windows, where Media Foundation (h264_mf.c)
 # stays the backend. H264_FFMPEG=0 keeps h264_null.c failing closed. See NOTICE.md and
 # docs/PLATFORM_PORTABILITY.md.
-ifeq ($(OS),Windows_NT)
+ifeq ($(NK_TARGET_OS),windows)
 H264_FFMPEG ?= 0
 else
 H264_FFMPEG ?= 1
@@ -431,9 +499,9 @@ endif
 # rather than argv (#667).
 # tools/title_codegen_plan.py already picks a Make-safe build root
 # (NK_BUILD_ROOT, then the 8.3 short name) for every route that accepts an
-# operator-chosen output directory (#296).
+# operator-chosen output directory (#2281).
 ifneq ($(subst $(SPACE),,$(BUILD_DIR)),$(BUILD_DIR))
-$(error BUILD_DIR '$(BUILD_DIR)' contains a space, which GNU Make cannot represent in a target or prerequisite name. Use a relative BUILD_DIR under the repository root (the default `build/<game>`), or set NK_BUILD_ROOT to a folder without spaces so tools/title_codegen_plan.py can pick a Make-safe build root (issue #296).)
+$(error BUILD_DIR '$(BUILD_DIR)' contains a space, which GNU Make cannot represent in a target or prerequisite name. Use a relative BUILD_DIR under the repository root (the default `build/<game>`), or set NK_BUILD_ROOT to a folder without spaces so tools/title_codegen_plan.py can pick a Make-safe build root.)
 endif
 # No compile carries the build directory: the runtime writes its diagnostic exit artifacts
 # (crash dump, exit flag) beside its own executable, found at run time, so one compiled
@@ -483,6 +551,13 @@ ENHANCEMENT_PACKAGE_PROFILE_LINE :=
 else
 ENHANCEMENT_PACKAGE_ARG := --enhancement-package=$(ENHANCEMENT_PACKAGE)
 ENHANCEMENT_PACKAGE_PROFILE_LINE := $(NEWLINE)ENHANCEMENT_PACKAGE=$(ENHANCEMENT_PACKAGE)
+endif
+# A guest_memory_code_hook package applied beside ENHANCEMENT_PACKAGE (docs/ENHANCEMENT_CONTRACT.md
+# section 9.9). Passed whenever set: codegen refuses it without ENHANCEMENT_PACKAGE.
+ENHANCEMENT_CODE_HOOK_PACKAGE ?=
+ifneq ($(strip $(ENHANCEMENT_CODE_HOOK_PACKAGE)),)
+ENHANCEMENT_PACKAGE_ARG += --code-hook-package=$(ENHANCEMENT_CODE_HOOK_PACKAGE)
+ENHANCEMENT_PACKAGE_PROFILE_LINE := $(ENHANCEMENT_PACKAGE_PROFILE_LINE)$(NEWLINE)ENHANCEMENT_CODE_HOOK_PACKAGE=$(ENHANCEMENT_CODE_HOOK_PACKAGE)
 endif
 # The title's extracted files, where a package's data_files are read and checked.
 # Only a package build passes it; the package digest already names those files.

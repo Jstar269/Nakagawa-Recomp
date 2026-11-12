@@ -470,6 +470,7 @@ class TitleManifestTests(unittest.TestCase):
             re.DOTALL,
         )
         self.assertIsNotNone(section, "manifest documentation must retain its typed-root example")
+        assert section is not None
         documented_roots = json.loads("{" + section.group(1) + "}")[
             "loose_content_roots"
         ]
@@ -615,6 +616,41 @@ class TitleManifestTests(unittest.TestCase):
         value["codegen_profile"] = "unknown"
         with self.assertRaisesRegex(title_manifest.TitleManifestError, "unsupported codegen profile"):
             title_manifest.validate_manifest(value)
+
+    def test_input_dead_zone_is_optional_bounded_and_matches_the_schema(self) -> None:
+        self.assertNotIn("input", title_manifest.validate_manifest(self.fixture))
+        value = copy.deepcopy(self.fixture)
+        value["input"] = {"analog_dead_zone": {"shape": "square", "counts": 64}}
+        normalized = title_manifest.validate_manifest(value)
+        self.assertEqual(normalized["input"], {"analog_dead_zone": {"shape": "square", "counts": 64}})
+        for counts in (1, 126):
+            value["input"]["analog_dead_zone"]["counts"] = counts
+            self.assertEqual(title_manifest.validate_manifest(value)["input"]["analog_dead_zone"]["counts"],
+                             counts)
+        bad_blocks = [
+            ("not an object", "must be an object"),
+            ({}, "missing required field"),
+            ({"analog_dead_zone": {"shape": "round", "counts": 64}}, "unsupported dead-zone shape"),
+            ({"analog_dead_zone": {"shape": "square", "counts": 0}}, "must be in range 1..126"),
+            ({"analog_dead_zone": {"shape": "square", "counts": 127}}, "must be in range 1..126"),
+            ({"analog_dead_zone": {"shape": "square", "counts": 64.0}}, "must be an integer"),
+            ({"analog_dead_zone": {"shape": "square", "counts": True}}, "must be an integer"),
+            ({"analog_dead_zone": {"shape": "square"}}, "missing required field"),
+            ({"analog_dead_zone": {"shape": "square", "counts": 64, "extra": 1}}, "unknown field"),
+            ({"analog_dead_zone": {"shape": "square", "counts": 64}, "extra": 1}, "unknown field"),
+        ]
+        for block, message in bad_blocks:
+            with self.subTest(block=block):
+                value["input"] = block
+                with self.assertRaisesRegex(title_manifest.TitleManifestError, message):
+                    title_manifest.validate_manifest(value)
+        schema = json.loads((ROOT / "assets" / "title_manifest.schema.json").read_text(encoding="utf-8"))
+        zone = schema["$defs"]["input"]["properties"]["analog_dead_zone"]
+        self.assertEqual(tuple(zone["properties"]["shape"]["enum"]), title_manifest.ANALOG_DEAD_ZONE_SHAPES)
+        self.assertEqual((zone["properties"]["counts"]["minimum"], zone["properties"]["counts"]["maximum"]),
+                         title_manifest.ANALOG_DEAD_ZONE_COUNTS)
+        self.assertFalse(zone["additionalProperties"])
+        self.assertFalse(schema["$defs"]["input"]["additionalProperties"])
 
     def test_profile_zero_contract_is_versioned_and_fail_closed(self) -> None:
         normalized = title_manifest.validate_manifest(self.fixture)

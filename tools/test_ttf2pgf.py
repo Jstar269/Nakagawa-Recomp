@@ -43,6 +43,7 @@ import sys
 import tempfile
 import unittest
 from fractions import Fraction
+from unittest import mock
 from pathlib import Path
 from typing import ClassVar, cast
 
@@ -1414,7 +1415,7 @@ _CONVERT_FLAGS = {
     "--embolden-advance": "embolden_advance", "--nominal-size": "nominal_size_26_6",
     "--resolution": "resolution_26_6", "--header-ascender": "header_ascender_26_6",
     "--header-descender": "header_descender_26_6", "--tracking": "tracking",
-    "--digit-advance": "digit_advance_26_6",
+    "--digit-advance": "digit_advance_26_6", "--snap-overshoot": "snap_overshoot",
 }
 
 
@@ -1551,13 +1552,13 @@ class ProjectLatinStrikeTests(unittest.TestCase):
 
     def test_sans_faces_carry_the_console_ink_per_letter(self) -> None:
         """#1300: the stand-ins' horizontal strokes were thinner than the console's, so game text
-        drawn with a stand-in looked light. Each sans-serif face is within 4 % of the console's ink."""
+        drawn with a stand-in looked light. Each sans-serif face is within 2 % of the console's ink."""
         letters = [ord(c) for c in string.ascii_letters]
         for index, target in self.LETTER_INK.items():
             with self.subTest(index=index):
                 glyphs = _glyph_map(self._convert(index).glyphs)
                 ink = sum(sum(glyphs[code].samples) for code in letters) / 15 / len(letters)
-                self.assertLessEqual(abs(ink - target) / target, 0.04, f"ink per letter {ink:.1f}")
+                self.assertLessEqual(abs(ink - target) / target, 0.02, f"ink per letter {ink:.1f}")
 
     def test_the_ellipsis_sits_on_the_line_of_the_full_stop(self) -> None:
         # No strike passes --baseline-ellipsis: every Liberation face already draws U+2026 there.
@@ -1565,6 +1566,158 @@ class ProjectLatinStrikeTests(unittest.TestCase):
             with self.subTest(index=index):
                 glyphs = _glyph_map(self._convert(index).glyphs)
                 self.assertEqual(glyphs[0x2026].adjust_y, glyphs[ord(".")].adjust_y)
+
+    def test_round_and_flat_letters_share_their_rows(self) -> None:
+        """#1300: in "Reload? No save data found." the round letters ended a row below the flat ones
+        (their outlines overshoot the baseline by a fraction of a pixel). Every face of both sizes
+        sets them on the baseline, the x-height and the cap height of its flat letters."""
+        for index in range(16):
+            with self.subTest(index=index):
+                glyphs = _glyph_map(self._convert(index).glyphs)
+
+                # Top row and bottom edge of each letter's bitmap, in pixels above the baseline.
+                rows = {char: (glyphs[ord(char)].adjust_y, glyphs[ord(char)].adjust_y - glyphs[ord(char)].height)
+                        for char in "eoacsuRNHlnxOCGS"}
+                for char in "eoacsuRNHlnx":
+                    self.assertEqual(rows[char][1], 0, f"{char!r} ends below the baseline")
+                for char in "eoacs":
+                    self.assertEqual(rows[char][0], rows["x"][0], f"{char!r} rises above the x-height")
+                for char in "OCGS":
+                    self.assertEqual(rows[char][0], rows["H"][0], f"{char!r} rises above the cap height")
+                # Ascenders are not overshoots: at 13 ppem a band of half a pixel would have set the
+                # top of l, 75 units above the cap height, on it. l is drawn as without the option.
+                strike = "PROJECT_LATIN_STRIKE_ARGS" if index < 8 else "PROJECT_LATIN_SMALL_STRIKE_ARGS"
+                arguments = _convert_arguments(_makefile_flags(strike) + _makefile_flags(f"PROJECT_LATIN_{index}_SPACING"))
+                self.assertEqual(arguments.pop("snap_overshoot"), 3)
+                stem, style = self._face(index)
+                data = (LIBERATION_DIR / f"{stem}.ttf").read_bytes()
+                plain = convert(data, input_path=f"{stem}.ttf", output_path="nkltn.pgf",
+                                code_points=_code_set({ord("l")} | set(range(0x30, 0x3A))), font_type=style,
+                                **arguments)
+                self.assertEqual(glyphs[ord("l")], _glyph_map(plain.glyphs)[ord("l")])
+
+
+class OvershootSnapTests(CliRefusalMixin):
+    """#1300: ``--snap-overshoot`` (spec section 3, rule 13) sets round letters' overshoots on the
+    flat edges measured from the font's own ``H`` and ``x``, and moves nothing else."""
+
+    SIZES = (13, 20)  # the project's two Latin strikes, 7 and 10.125 points at 128 dpi
+    CODES = _code_set({ord(c) for c in "eoRHxlpvO.,"})
+
+    def setUp(self) -> None:
+        self.data = (LIBERATION_DIR / "LiberationSans-Regular.ttf").read_bytes()
+        self.pin = load_pin(LIBERATION_DIR / "LiberationSans-Regular.pin.json", self.data)
+        self.tmp = Path(tempfile.mkdtemp(prefix="ttf2pgf-snap-"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def _convert(self, ppem: int, **overrides: object) -> ttf2pgf.Conversion:
+        arguments: dict = {"input_path": "LiberationSans-Regular.ttf", "output_path": "out.pgf",
+                           "code_points": self.CODES, "ppem": ppem, "pin": self.pin}
+        arguments.update(overrides)
+        return convert(self.data, **arguments)
+
+    @staticmethod
+    def _bottom(glyph: Glyph) -> int:
+        return int(glyph.adjust_y - glyph.height)
+
+    def test_e_o_and_r_share_a_bottom_row_at_the_psp_sizes(self) -> None:
+        for ppem in self.SIZES:
+            with self.subTest(ppem=ppem):
+                plain = _glyph_map(self._convert(ppem).glyphs)
+                # Without the option the overshoot is a faint extra row under the round letters.
+                self.assertEqual([self._bottom(plain[ord(c)]) for c in "eoR"], [-1, -1, 0])
+                self.assertLess(max(plain[ord("e")].samples[-plain[ord("e")].width:]), 8, "under half coverage")
+                glyphs = _glyph_map(self._convert(ppem, snap_overshoot=3).glyphs)
+                self.assertEqual([self._bottom(glyphs[ord(c)]) for c in "eoR"], [0, 0, 0])
+                self.assertEqual(glyphs[ord("e")].adjust_y, glyphs[ord("x")].adjust_y)
+                self.assertEqual(glyphs[ord("o")].adjust_y, glyphs[ord("x")].adjust_y)
+                self.assertEqual(glyphs[ord("O")].adjust_y, glyphs[ord("H")].adjust_y)
+                # Flat letters and the comma's tail are drawn exactly as before; p keeps its descender.
+                for char in "RHxlv.,":
+                    self.assertEqual(glyphs[ord(char)], plain[ord(char)], char)
+                self.assertEqual(self._bottom(glyphs[ord("p")]), self._bottom(plain[ord("p")]))
+
+    def test_only_outer_overshoots_in_the_band_move(self) -> None:
+        zones = (0, 1000, 1400)  # baseline, x-height, cap height in font units
+        upem, ppem, threshold = 2048, 20, 3  # band: depths under 3 * 2048 / (8 * 20) = 38.4 units
+
+        def box(left: int, bottom: int, right: int, top: int) -> list[tuple]:
+            return [(left, bottom, True), (right, bottom, True), (right, top, True), (left, top, True)]
+
+        round_letter = box(0, -20, 500, 1020)
+        counter = box(100, -10, 400, 1010)       # enclosed by round_letter: a hole, never moved
+        deep = box(600, -39, 700, 500)            # 39 units is past the band
+        accent = box(800, 1200, 900, 1430)        # wholly above the x-height: an accent, never moved
+        capital = box(1000, 0, 1400, 1430)
+        moved = ttf2pgf._snap_overshoot([round_letter, counter, deep, accent, capital], zones, threshold, ppem, upem)
+        self.assertEqual(moved, [box(0, 0, 500, 1000), counter, deep, accent, box(1000, 0, 1400, 1400)])
+        # Off-curve points move like on-curve ones, and x never changes.
+        curve = [(0, -20, True), (250, -20, False), (500, 300, True), (250, 1030, False)]
+        self.assertEqual(ttf2pgf._snap_overshoot([curve], zones, threshold, ppem, upem),
+                         [[(0, 0, True), (250, 0, False), (500, 300, True), (250, 1000, False)]])
+
+    def test_the_band_ends_just_short_of_n_eighths_of_a_pixel(self) -> None:
+        # At 16 ppem and 2048 units per em, 3/8 px is exactly 48 units: depth * 16 * 8 < 3 * 2048.
+        zones, upem, ppem = (0, 1000, 1400), 2048, 16
+        for depth, moves in ((47, True), (48, False)):
+            with self.subTest(depth=depth):
+                below = [(0, -depth, True), (100, -depth, True), (100, 500, True), (0, 500, True)]
+                above = [(0, 0, True), (100, 0, True), (100, 1000 + depth, True), (0, 1000 + depth, True)]
+                snapped = ttf2pgf._snap_overshoot([below, above], zones, 3, ppem, upem)
+                self.assertEqual(min(y for _x, y, _on in snapped[0]), 0 if moves else -depth)
+                self.assertEqual(max(y for _x, y, _on in snapped[1]), 1000 if moves else 1000 + depth)
+                # One sub-sample more widens the band past the same depth.
+                wider = ttf2pgf._snap_overshoot([below], zones, 4, ppem, upem)
+                self.assertEqual(min(y for _x, y, _on in wider[0]), 0)
+
+    def test_the_option_is_recorded_and_absent_when_off(self) -> None:
+        conversion = self._convert(13, snap_overshoot=3)
+        self.assertEqual(conversion.manifest["converter"]["version"], "0.5.0")
+        self.assertEqual(conversion.manifest["parameters"]["snap_overshoot"], {
+            "unit": "sub-sample (1/8 pixel)", "threshold": 3,
+            "zones": {"baseline": 0, "x_height": 1082, "cap_height": 1409},
+        })
+        self.assertNotIn("snap_overshoot", self._convert(13).manifest["parameters"])
+        self.assertNotIn("snap_overshoot", self._convert(13, snap_overshoot=0).manifest["parameters"])
+        self.assertEqual(conversion.image, self._convert(13, snap_overshoot=3).image, "deterministic")
+
+    def test_misuse_is_refused(self) -> None:
+        for value in (-1, 9, True):
+            with self.subTest(value=value), self.assertRaises(TtfConvertError) as caught:
+                self._convert(13, snap_overshoot=value)
+            self.assertEqual(caught.exception.reason, "snap-overshoot-out-of-range")
+        # At 2 ppem a band of one pixel above the x-height (1082) reaches the cap height (1409).
+        with self.assertRaises(TtfConvertError) as caught:
+            self._convert(2, snap_overshoot=8)
+        self.assertEqual(caught.exception.reason, "snap-overshoot-zones-overlap")
+        real = ttf2pgf._Ttf.glyph_id
+
+        def without_x(font: ttf2pgf._Ttf, code: int) -> int | None:
+            return None if code == 0x78 else real(font, code)
+
+        with mock.patch.object(ttf2pgf._Ttf, "glyph_id", without_x), self.assertRaises(TtfConvertError) as caught:
+            self._convert(13, snap_overshoot=3, code_points=_code_set({0x48}))
+        self.assertEqual(caught.exception.reason, "snap-overshoot-unavailable")
+        self.assert_cli_refused("snap-overshoot-out-of-range", self.tmp / "out.pgf",
+                                LIBERATION_DIR / "LiberationSans-Regular.ttf", "--codes", "0x48-0x48",
+                                "--snap-overshoot", "9")
+        self.assert_cli_refused("snap-overshoot-zones-overlap", self.tmp / "out.pgf",
+                                LIBERATION_DIR / "LiberationSans-Regular.ttf", "--codes", "0x48-0x48",
+                                "--ppem", "2", "--snap-overshoot", "8")
+
+    def test_a_fallback_font_uses_its_own_edges(self) -> None:
+        gudea = FONT.read_bytes()
+        mplus = JAPANESE_FONT.read_bytes()
+        conversion = convert(gudea, input_path=str(FONT), output_path="out.pgf", code_points=_code_set({0x48, 0x3042}),
+                             ppem=13, pin=load_pin(PIN, gudea), fallback_data=mplus, fallback_path=str(JAPANESE_FONT),
+                             fallback_pin=load_pin(JAPANESE_PIN, mplus), snap_overshoot=3)
+        snap = conversion.manifest["parameters"]["snap_overshoot"]
+        expected = {}
+        for key, data in (("zones", gudea), ("fallback_zones", mplus)):
+            base, x_height, cap = ttf2pgf._overshoot_zones(ttf2pgf._Ttf(data), "font")
+            expected[key] = {"baseline": base, "x_height": x_height, "cap_height": cap}
+        self.assertEqual({key: snap[key] for key in expected}, expected)
+        self.assertNotEqual(snap["zones"], snap["fallback_zones"])
 
 
 class ProjectCjkSizeTests(unittest.TestCase):

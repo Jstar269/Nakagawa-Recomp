@@ -385,7 +385,7 @@ static uint32_t mpeg_audio_decode_frame(Mpeg *ctx, const uint8_t *frame, uint32_
     if (bytes <= 8u || frame[0] != 0x0fu || frame[1] != 0xd0u)
         return mpeg_contract_error("sceMpegAtracDecode", "the access unit is not an ATRAC3+ frame",
                                    SCE_MPEG_ERROR_INVALID_VALUE);
-    uint32_t frame_size = (uint32_t)(((frame[2] & 3u) << 8) | ((uint32_t)frame[3] * 8u)) + 0x10u;
+    uint32_t frame_size = sr_psmf_audio_frame_bytes(frame);
     if (frame_size != bytes)
         return mpeg_contract_error("sceMpegAtracDecode", "the frame header disagrees with the access unit",
                                    SCE_MPEG_ERROR_INVALID_VALUE);
@@ -1242,6 +1242,8 @@ uint32_t mpeg_avc_decode_detail(uint32_t mpegAddr, uint32_t detailAddr) {
 
 typedef struct {
     uint32_t mpeg, buf, width, height;   /* the sceMpegAvcInitYCbCr geometry; 0 when unknown */
+    uint32_t mode;                       /* the sceMpegAvcInitYCbCr mode: 1, 2 or 3 */
+    uint64_t hash;                       /* mode 2: FNV-1a of the last decoded picture (A/V time), 0 = none */
 } YcbcrBuf;
 static YcbcrBuf s_ycbcr[YCBCR_SLOT_COUNT];
 typedef struct {
@@ -1422,6 +1424,9 @@ static uint64_t ycbcr_planes_hash(uint32_t width, uint32_t height) {
     return h ? h : 1u;
 }
 
+/* The widest 16-bit CSC range captured on the PSP (PSP-MPEG-001: {0, 0, 64, 64}, stride 512). */
+#define YCBCR_CSC16_MEASURED_W 64u
+
 static int ycbcr_mode1_geometry(uint32_t width, uint32_t height) {
     return width && height && !(width & 15u) && !(height & 15u) &&
            width <= YCBCR_MODE1_MAX_W && height <= YCBCR_MODE1_MAX_H;
@@ -1463,10 +1468,17 @@ uint32_t mpeg_avc_query_ycbcr_size(uint32_t mpegAddr, uint32_t mode, uint32_t wi
     return 0;
 }
 
-/* Mode 1 only: its header is MEASURED (above); a buffer of Wa x Ha gets the pointers, in memory
+/* Mode 1: its header is MEASURED (above); a buffer of Wa x Ha gets the pointers, in memory
  * order, P0 = buf + 128, P2, P4 (luma, Wa Ha / 4 bytes each), P6 (chroma, Wa Ha / 8), P1, P3, P5
- * (luma), P7 (chroma).  Modes 2 and 3, and the PSP's own Init limits, are not measured; the
- * query's mode-1 limits are applied. */
+ * (luma), P7 (chroma).  The PSP's own Init limits are not measured; the query's mode-1 limits are
+ * applied.
+ * Mode 2 (MEASURED, PSP-MPEG-001 boot 145, 2026-11-07): the call returned 0 for a 480x272 buffer of
+ * the queried 128 bytes and left every byte past them alone.  What it writes into those 128 bytes
+ * before a decode was not dumped: they are zeroed here (UNMEASURED).  Only 480x272 was passed to Init
+ * in modes 2 and 3, so any other size is refused (the mode-1 limits stand in).  Nothing is hidden
+ * behind the buffer: a mode-2 buffer holds no picture (see ycbcr_store_picture).
+ * Mode 3: the call returned 0 for 480x272; its effect on the buffer, and every later call on it, are
+ * not measured (a decode on it blocked the PSP), so Init writes nothing and a decode is refused. */
 uint32_t mpeg_avc_init_ycbcr(uint32_t mpegAddr, uint32_t mode, uint32_t width, uint32_t height,
                              uint32_t buf) {
     Mpeg *ctx = mpeg_find(mpegAddr);
@@ -1474,9 +1486,27 @@ uint32_t mpeg_avc_init_ycbcr(uint32_t mpegAddr, uint32_t mode, uint32_t width, u
     if (getenv("SR_MPEGLOG"))
         fprintf(stderr, "MpegAvcInitYCbCr mode=%" PRIu32 " %" PRIu32 "x%" PRIu32 " buf=0x%" PRIx32 "\n",
                 mode, width, height, buf);
+    if (mode == 2u || mode == 3u) {
+        const uint32_t size = mode == 2u ? YCBCR_HEADER_BYTES : width * height * 3u / 2u;
+        /* UNMEASURED: only 480x272 was passed to Init in modes 2 and 3; the mode-1 limits stand in. */
+        if (!ycbcr_mode1_geometry(width, height))
+            return mpeg_contract_error("sceMpegAvcInitYCbCr", "a mode 2 or 3 size other than a multiple of 16 within 480x272 is not measured",
+                                       SCE_MPEG_ERROR_INVALID_VALUE);
+        if (!ycbcr_pointer_valid(buf, size, YCBCR_ALIGNMENT))
+            return mpeg_contract_error("sceMpegAvcInitYCbCr", "unaligned or truncated guest allocation", SCE_MPEG_ERROR_INVALID_VALUE);
+        YcbcrBuf *m = ycbcr_slot(mpegAddr, buf);
+        if (!m)
+            return mpeg_contract_error("sceMpegAvcInitYCbCr", "no host slot for another YCbCr buffer", SCE_MPEG_ERROR_NO_MEMORY);
+        m->width = width;
+        m->height = height;
+        m->mode = mode;
+        m->hash = 0;
+        if (mode == 2u)
+            for (uint32_t off = 0; off < YCBCR_HEADER_BYTES; off += 4u) MEM_W32(buf + off, 0u);
+        return 0;
+    }
     if (mode != 1u)
-        return mpeg_contract_error("sceMpegAvcInitYCbCr", "only the mode-1 YCbCr layout is measured",
-                                   SCE_MPEG_ERROR_INVALID_VALUE);
+        return mpeg_contract_error("sceMpegAvcInitYCbCr", "only modes 1 to 3 are measured", SCE_MPEG_ERROR_INVALID_VALUE);
     if (!ycbcr_mode1_geometry(width, height)) return SCE_MPEG_ERROR_INVALID_VALUE;
     if ((width / 16u) & 1u)
         return mpeg_contract_error("sceMpegAvcInitYCbCr", "the layout of an odd number of 16-pixel strips is not measured",
@@ -1491,6 +1521,8 @@ uint32_t mpeg_avc_init_ycbcr(uint32_t mpegAddr, uint32_t mode, uint32_t width, u
         return mpeg_contract_error("sceMpegAvcInitYCbCr", "no host slot for another YCbCr buffer", SCE_MPEG_ERROR_NO_MEMORY);
     b->width = width;
     b->height = height;
+    b->mode = 1u;
+    b->hash = 0;
     const uint32_t q = width * height / 4u, e = width * height / 8u;
     uint32_t p[8];
     p[0] = buf + YCBCR_HEADER_BYTES;
@@ -1519,17 +1551,42 @@ uint32_t mpeg_avc_decode_mode(uint32_t mpegAddr, uint32_t modeAddr) {
     return 0;
 }
 
-/* Write the decoded picture (pw x ph samples in the scratch planes) through buf's header. */
+/* FNV-1a of a pw x ph decoded picture's samples as the decoder delivered them (never 0). */
+static uint64_t ycbcr_raw_hash(uint32_t pw, uint32_t ph) {
+    uint64_t h = 1469598103934665603ull;
+    for (uint32_t y = 0; y < ph; y++)
+        for (uint32_t x = 0; x < pw; x++) h = (h ^ s_ycbcr_y[y * YCBCR_SCRATCH_W + x]) * 1099511628211ull;
+    for (uint32_t y = 0; y < (ph + 1u) / 2u; y++)
+        for (uint32_t x = 0; x < (pw + 1u) / 2u; x++) {
+            h = (h ^ s_ycbcr_cb[y * (YCBCR_SCRATCH_W / 2u) + x]) * 1099511628211ull;
+            h = (h ^ s_ycbcr_cr[y * (YCBCR_SCRATCH_W / 2u) + x]) * 1099511628211ull;
+        }
+    return h ? h : 1u;
+}
+
+/* Write the decoded picture (pw x ph samples in the scratch planes) through buf's header.  A mode-2
+ * buffer (MEASURED, below) gets only its 128-byte header. */
 static uint32_t ycbcr_store_picture(uint32_t mpegAddr, uint32_t buf, const YcbcrLayout *l, int pw, int ph,
                                     uint64_t *bytes) {
     if (pw <= 0 || ph <= 0 || (uint32_t)pw > YCBCR_MODE1_MAX_W || (uint32_t)ph > YCBCR_MODE1_MAX_H)
         return mpeg_contract_error("sceMpegAvcDecodeYCbCr", "a picture larger than 480x272 is beyond the measured layout",
                                    SCE_MPEG_ERROR_INVALID_VALUE);
     const uint32_t w = ((uint32_t)pw + 15u) & ~15u, h = ((uint32_t)ph + 15u) & ~15u;
+    YcbcrBuf *slot = ycbcr_find(mpegAddr, buf);
+    if (slot && slot->mode == 2u) {
+        /* MEASURED (PSP-MPEG-001 boot 145, 480x224 picture): after the decode the 128 bytes held word 0 =
+         * height / 16, word 1 = width / 16, words 4..11 = 2 and every other byte 0, and the bytes past
+         * them were untouched.  No plane pointer is written: the picture is not in the buffer, and a CSC
+         * of it wrote zero pixels (mpeg_avc_csc). */
+        for (uint32_t off = 0; off < YCBCR_HEADER_BYTES; off += 4u)
+            MEM_W32(buf + off, off == 0u ? h / 16u : off == 4u ? w / 16u : (off >= 16u && off < 48u) ? 2u : 0u);
+        slot->hash = sr_psmf_av_active() ? ycbcr_raw_hash((uint32_t)pw, (uint32_t)ph) : 0u;
+        *bytes = slot->hash;
+        return 0;
+    }
     if ((w / 16u) & 1u)
         return mpeg_contract_error("sceMpegAvcDecodeYCbCr", "the layout of an odd number of 16-pixel strips is not measured",
                                    SCE_MPEG_ERROR_INVALID_VALUE);
-    const YcbcrBuf *slot = ycbcr_find(mpegAddr, buf);
     if (slot && slot->width && (w / 32u) * h > (slot->width / 32u) * slot->height)
         return mpeg_contract_error("sceMpegAvcDecodeYCbCr", "the picture is larger than the YCbCr allocation",
                                    SCE_MPEG_ERROR_INVALID_VALUE);
@@ -1567,6 +1624,16 @@ uint32_t mpeg_avc_decode_ycbcr(uint32_t mpegAddr, uint32_t auAddr, uint32_t bufP
     YcbcrLayout layout;
     if (!ycbcr_header_read(buf, &layout))
         return mpeg_contract_error("sceMpegAvcDecodeYCbCr", "unaligned or unreadable YCbCr header", SCE_MPEG_ERROR_INVALID_VALUE);
+    const YcbcrBuf *target_slot = ycbcr_find(mpegAddr, buf);
+    if (target_slot && target_slot->mode == 3u) {
+        /* On the PSP the first call on a mode-3 buffer returned 0 and wrote a 16-byte {h/16, w/16, 0, 0}
+         * header over a black frame (Y 0x10 for w*h bytes, then 0x80 for w*h/2; the header overlays the
+         * start of Y), and the second never returned (PSP-MPEG-001 boots 145 and 152).  A real picture's
+         * layout was never observed, so none is invented. */
+        MEM_W32(initAddr, 0u);
+        return mpeg_contract_error("sceMpegAvcDecodeYCbCr", "decoding into a mode-3 YCbCr buffer is not measured (it blocked the PSP)",
+                                   SCE_MPEG_ERROR_INVALID_VALUE);
+    }
     g_mpeg_avcdec++;
     if (!ctx->h264Init || ctx->h264 < 0) {
         MEM_W32(initAddr, 0u);
@@ -1673,6 +1740,10 @@ uint32_t mpeg_avc_decode_stop_ycbcr(uint32_t mpegAddr, uint32_t bufPtr, uint32_t
     YcbcrLayout layout;
     if (!ycbcr_header_read(buf, &layout))
         return mpeg_contract_error("sceMpegAvcDecodeStopYCbCr", "unaligned or unreadable YCbCr header", SCE_MPEG_ERROR_INVALID_VALUE);
+    const YcbcrBuf *stop_slot = ycbcr_find(mpegAddr, buf);
+    if (stop_slot && stop_slot->mode == 3u)
+        return mpeg_contract_error("sceMpegAvcDecodeStopYCbCr", "a mode-3 YCbCr buffer is not measured (its decode blocked the PSP)",
+                                   SCE_MPEG_ERROR_INVALID_VALUE);
     int got = 0;
     SrH264FrameInfo info = {0};
 #ifdef SR_SDL3VK
@@ -1766,8 +1837,21 @@ uint32_t mpeg_avc_copy_ycbcr(uint32_t mpegAddr, uint32_t dst, uint32_t src) {
  * frame width narrower than the range (256) or a zeroed header with MPEG_ERROR_CSC_REFUSED; an
  * empty range succeeds.  The range {16, 16, 64, 64} wrote the destination from its first pixel
  * with source columns 16..79 and rows 0..63: x selects the source columns, and y had no effect in
- * that one case, so rows are taken from the top.  A y + h past the picture is refused like a
- * wide range, which is not measured.  The 16-bit pixel modes are not measured. */
+ * that one case, so rows are taken from the top.  The same dump was identical for y 0, 16, 32 and
+ * 160 (h 64, picture 480x224), so y never selects source rows; a range with y + h past the picture
+ * (y 16, h 224) is refused with MPEG_ERROR_CSC_REFUSED.  MEASURED (PSP-MPEG-001 boot 145, 480x224
+ * picture, range {16, y, 64, h}): y 1, 161 and 200 and h 63 return SCE_MPEG_ERROR_INVALID_VALUE
+ * (0x806101FE), a y of -16 returns MPEG_ERROR_CSC_REFUSED.  Every y that was accepted is a multiple
+ * of 16 and every refused-as-invalid y is not, so a y that is not a multiple of 16 is refused here
+ * (inferred: y 2..15 and 17..31 were not probed, and neither were even h values that are not
+ * multiples of 16); an odd h is refused the same way.
+ * MEASURED, 16-bit pixel modes (range {0, 0, 64, 64} of the 480x224 picture, stride 512): the
+ * colour bits equal the 8888 conversion (5650, 5551 and 4444 packing as modeled below), the alpha bit
+ * or nibble is 0, not set, and the destination is written in 32-pixel blocks: source columns 32 k ..
+ * 32 k + 31 land at destination pixels 64 k .. 64 k + 31, and the 32 pixels between blocks keep
+ * their old bytes.  The block layout is taken from the range's first column (x 0 was the only x
+ * measured).  Only a 64-pixel-wide range at stride 512 was captured: a wider 16-bit range, or one
+ * whose block spacing passes the frame width, is refused as not measured. */
 uint32_t mpeg_avc_csc(uint32_t mpegAddr, uint32_t buf, uint32_t rangeAddr, uint32_t frameWidth,
                       uint32_t dest) {
     Mpeg *ctx = mpeg_find(mpegAddr);
@@ -1787,23 +1871,38 @@ uint32_t mpeg_avc_csc(uint32_t mpegAddr, uint32_t buf, uint32_t rangeAddr, uint3
                                    MPEG_ERROR_CSC_REFUSED);
     const int64_t x = (int32_t)MEM_R32(rangeAddr), y = (int32_t)MEM_R32(rangeAddr + 4u);
     const int64_t w = (int32_t)MEM_R32(rangeAddr + 8u), h = (int32_t)MEM_R32(rangeAddr + 12u);
-    if ((x & 1) || (w & 1)) return SCE_MPEG_ERROR_INVALID_VALUE;
+    if ((x & 1) || (w & 1) || (y & 15) || (h & 1)) return SCE_MPEG_ERROR_INVALID_VALUE;
     if (x < 0 || y < 0 || w < 0 || h < 0 || x + w > (int64_t)l.width || y + h > (int64_t)l.height)
         return MPEG_ERROR_CSC_REFUSED;
     if (w == 0 || h == 0) return 0;
     if ((uint64_t)w > frameWidth) return MPEG_ERROR_CSC_REFUSED;
-    if (!ycbcr_planes_in(&l, l.width, l.height))
+    /* A mode-2 buffer holds no plane pointers: MEASURED (boot 145, 8888, range {0, 0, 480, 224} of its
+     * 480x224 picture) the CSC wrote zero bytes for every pixel of the range.  The 16-bit modes on such
+     * a buffer were not measured. */
+    const YcbcrBuf *csc_slot = ycbcr_find(mpegAddr, buf);
+    const int mode2 = csc_slot && csc_slot->mode == 2u;
+    if (mode2 && ctx->pixelMode != 3)
+        return mpeg_contract_error("sceMpegAvcCsc", "a 16-bit CSC of a mode-2 buffer is not measured", MPEG_ERROR_CSC_REFUSED);
+    if (!mode2 && !ycbcr_planes_in(&l, l.width, l.height))
         return mpeg_contract_error("sceMpegAvcCsc", "the header's plane pointers do not reach guest memory",
                                    MPEG_ERROR_CSC_REFUSED);
     uint32_t bpp = ctx->pixelMode == 3 ? 4u : 2u;
+    /* 16-bit modes write 32-pixel blocks 64 pixels apart: the last block ends at this pixel. */
+    const uint32_t reach = ctx->pixelMode == 3 ? (uint32_t)w : ((uint32_t)(w - 1) / 32u) * 64u + ((uint32_t)(w - 1) % 32u) + 1u;
+    /* UNMEASURED: only a 64-pixel-wide range at x 0 and stride 512 was captured in the 16-bit modes.
+     * A wider range would spread its blocks over more than that, perhaps past the stride into later
+     * rows, so it is refused instead of extrapolated (#302). */
+    if (ctx->pixelMode != 3 && ((uint64_t)w > YCBCR_CSC16_MEASURED_W || reach > frameWidth))
+        return mpeg_contract_error("sceMpegAvcCsc", "a 16-bit range wider than the measured 64 pixels, or whose 64-pixel block spacing passes the stride, is not measured",
+                                   MPEG_ERROR_CSC_REFUSED);
     SrGuestRectSpan span;
     /* The destination may be a swizzled VRAM mirror view (#1049), so each row is built in a
      * host scratch row and written with sr_guest_copy_out(), which translates it piece by
      * piece and prepares/commits the VRAM span of every piece. */
-    if (!sr_guest_rect_geometry(dest, 0u, 0u, frameWidth, (uint32_t)w, (uint32_t)h, bpp, &span) ||
+    if (!sr_guest_rect_geometry(dest, 0u, 0u, frameWidth, reach, (uint32_t)h, bpp, &span) ||
         !sr_guest_span_writable_any_view(span.first, span.total_bytes))
         return mpeg_contract_error("sceMpegAvcCsc", "destination rectangle is out of bounds", SCE_MPEG_ERROR_INVALID_VALUE);
-    uint8_t *out = (uint8_t *)malloc(span.row_bytes);
+    uint8_t *out = (uint8_t *)calloc(1u, span.row_bytes);
     if (!out)
         return mpeg_contract_error("sceMpegAvcCsc", "no scratch row for the destination", SCE_MPEG_ERROR_INVALID_VALUE);
     for (uint32_t row = 0; row < (uint32_t)h; row++) {
@@ -1812,7 +1911,7 @@ uint32_t mpeg_avc_csc(uint32_t mpegAddr, uint32_t buf, uint32_t rangeAddr, uint3
         (void)out;
         (void)rowAddr;
 #else
-        for (uint32_t col = 0; col < (uint32_t)w; col++) {
+        for (uint32_t col = 0; col < (uint32_t)w && !mode2; col++) {
             const uint32_t sx = (uint32_t)x + col, sy = row;
             int lp, cp;
             uint32_t lo = ycbcr_luma_at(sx, sy, l.height, &lp);
@@ -1826,12 +1925,12 @@ uint32_t mpeg_avc_csc(uint32_t mpegAddr, uint32_t buf, uint32_t rangeAddr, uint3
                     v16 = (uint16_t)((r >> 3) | ((g >> 2) << 5) | ((bl >> 3) << 11));
                     memcpy(out + col * 2u, &v16, 2u);
                     break;
-                case 1:
-                    v16 = (uint16_t)((r >> 3) | ((g >> 3) << 5) | ((bl >> 3) << 10) | 0x8000u);
+                case 1:   /* alpha bit 0, as measured */
+                    v16 = (uint16_t)((r >> 3) | ((g >> 3) << 5) | ((bl >> 3) << 10));
                     memcpy(out + col * 2u, &v16, 2u);
                     break;
-                case 2:
-                    v16 = (uint16_t)((r >> 4) | ((g >> 4) << 4) | ((bl >> 4) << 8) | 0xF000u);
+                case 2:   /* alpha nibble 0, as measured */
+                    v16 = (uint16_t)((r >> 4) | ((g >> 4) << 4) | ((bl >> 4) << 8));
                     memcpy(out + col * 2u, &v16, 2u);
                     break;
                 default:   /* 8888: R, G, B and alpha 0 */
@@ -1842,7 +1941,15 @@ uint32_t mpeg_avc_csc(uint32_t mpegAddr, uint32_t buf, uint32_t rangeAddr, uint3
                     break;
             }
         }
-        sr_guest_copy_out(rowAddr, out, span.row_bytes);
+        if (ctx->pixelMode == 3) {
+            sr_guest_copy_out(rowAddr, out, span.row_bytes);
+        } else {
+            /* 32-pixel blocks 64 pixels apart; the gap between them is left as the guest had it. */
+            for (uint32_t blk = 0; blk * 32u < (uint32_t)w; blk++) {
+                const uint32_t n = (uint32_t)w - blk * 32u < 32u ? (uint32_t)w - blk * 32u : 32u;
+                sr_guest_copy_out(rowAddr + blk * 128u, out + blk * 64u, n * 2u);
+            }
+        }
 #endif
     }
     free(out);
@@ -1852,7 +1959,8 @@ uint32_t mpeg_avc_csc(uint32_t mpegAddr, uint32_t buf, uint32_t rangeAddr, uint3
             fprintf(stderr, "MpegAvcCsc #%d ycbcr=0x%" PRIx32 " dest=0x%" PRIx32 " fw=%" PRIu32 " range=%d,%d %dx%d\n",
                     n, buf, dest, frameWidth, (int)x, (int)y, (int)w, (int)h);
     }
-    const int64_t pts = sr_psmf_av_active() ? ycbcr_picture_pts(mpegAddr, ycbcr_planes_hash(l.width, l.height)) : -1;
+    const int64_t pts = !sr_psmf_av_active() ? -1
+        : ycbcr_picture_pts(mpegAddr, mode2 ? csc_slot->hash : ycbcr_planes_hash(l.width, l.height));
     sr_psmf_av_note_video_delivery(span.first, span.total_bytes, pts, pts >= 0);
     return 0;
 }

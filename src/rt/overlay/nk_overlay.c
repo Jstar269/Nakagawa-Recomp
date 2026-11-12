@@ -75,6 +75,12 @@ NkUiLayout nk_overlay_layout(NkUiLayoutDirection direction, NkUiSizing width,
     return layout;
 }
 
+float nk_overlay_card_room(const NkOverlayModel *model) {
+    float height = model->logical_height > 80.0f ? model->logical_height : 800.0f;
+    float room = height - NK_UI_PROMPT_BAR_HEIGHT - 2.0f * NK_UI_SPACE_4;
+    return room > 1.0f ? room : 1.0f;
+}
+
 float nk_overlay_page_begin(NkUi *ui, const NkOverlayModel *model, float card_width) {
     float width = model->logical_width > 80.0f ? model->logical_width : 1280.0f;
     float card;
@@ -94,7 +100,8 @@ float nk_overlay_page_begin(NkUi *ui, const NkOverlayModel *model, float card_wi
     }
     card = width - 2.0f * NK_UI_GUTTER_NARROW;
     if (card > card_width) card = card_width;
-    if (!nk_ui_dialog_begin(ui, OVERLAY_ID_CARD, card)) {
+    /* Scrolling is the last resort: a page that fits its room does not move. */
+    if (!nk_ui_dialog_begin_scroll(ui, OVERLAY_ID_CARD, card, nk_overlay_card_room(model))) {
         nk_ui_end_container(ui);
         nk_ui_end_container(ui);
         return 0.0f;

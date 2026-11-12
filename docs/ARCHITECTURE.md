@@ -676,8 +676,15 @@ that starts a channel transfer stays blocked in the call for the transfer's meas
 and destination differ modulo 16); meanwhile another thread's `sceDmacTryMemcpy` returns BUSY
 (`0x80000021`) and its blocking `sceDmacMemcpy` queues, and queued callers get the channel in
 arrival order. A body of at most 0x100 bytes whose source and destination share their phase
-modulo 16 bypasses the channel. All of this was measured on a PSP-3000 (#303, `PSP-DMAC-001` and
-`PSP-DMAC-002`); the unmeasured choices are listed above `h_DmacMemcpy` in `src/rt/hle.c`.
+modulo 16 bypasses the channel. A copy into VRAM tells the GPU about every byte it writes: one dirty
+notification covers the whole destination range, whatever the size (the selftest pins this for
+RAM-to-VRAM copies of `0xC001`, `0x10000` and `0x100000` bytes; other directions are pinned at 64
+bytes). A VRAM-source copy that crosses the end of VRAM goes through a 4 KiB bounce buffer and
+dirties its destination one piece at a time instead. All of this was measured on a PSP-3000 (#303,
+`PSP-DMAC-001` and `PSP-DMAC-002`); the unmeasured choices are listed above the DMAC handlers in
+`src/rt/hle_cache_dma.c`. `make dmac-mutants` shows the selftest is load-bearing: it builds
+`hle-thread-selftest` against copies of that file with one defect each (a `0xC000` ceiling, a clamped
+dirty range, a wrong BUSY copy, ...) and requires every one to fail the assertion it names.
 
 ### Scheduler / coroutines
 
@@ -861,7 +868,10 @@ turbo virtual clock charged at the rate of the guest's work: a scheduler boundar
 `SR_DETERMINISTIC_SLICE_US` (default 100 µs, 1000 yield points at 10 million yield points per
 second; an estimate of about 33 cycles per yield point, not a measurement, and it decides guest
 results), a sleeper's deadline is reached by that work, an idle scheduler (no thread can run)
-advances one display period at a time as turbo's does, so it wakes a short sleeper up to 16.7 ms
+charges its slice, runs a sleeper that charge reaches (or serves an alarm, GE completion, VTimer or
+transfer window it reaches, while some thread waits), and otherwise goes to the earliest deadline
+still ahead when it comes before the next VBLANK or advances one display period when it does not,
+as turbo's does, so a sleeper whose deadline is at or past the next VBLANK can wake up to 16.7 ms
 late but identically on every run, and no vblank watchdog reads the host clock. The
 RTC starts at 2012-01-01 00:00:00 UTC instead of the host's date, and the audio queue the guest
 paces against (`sceAudioOutput*Blocking`, `sceAudioGetChannelRestLength`, the PSMF player's audio
@@ -875,9 +885,10 @@ re-qualified under `SR_DETERMINISTIC_CLOCK=1` before it is recorded, and a recor
 real-time, so it cannot be played live
 ([Recording a video of a run](DEBUGGING.md#recording-a-video-of-a-run)). Guest time and the RTC
 are then a function of the guest's own work, so two runs with the same inputs give the same
-frames. Host inputs that remain: whether the host has an audio device, the Memory Stick volume's
-free space, a random console MAC and PSID on fresh user data, and the mixer's 262144-frame cap,
-which drops audio when a run is faster than real time.
+frames. Audio (with or without a host device, whatever the mixer holds), the Memory Stick's
+size and free space, and a fresh profile's console MAC and PSID no longer come from the host:
+[Where `SR_EXIT_AT_VBLANK` actually stops](DEBUGGING.md#where-sr_exit_at_vblank-actually-stops)
+lists what the guest reads instead.
 
 **Runtime host-thread audit.** Guest threads, HLE handlers, the window's event pump and the
 pause loop all run on the runtime thread. Work that runs elsewhere, and why a paused guest
@@ -889,15 +900,17 @@ cannot observe it ([#1159](https://github.com/Jstar269/nakagawa-recomp/issues/11
 | Diagnostic stream drain (`src/rt/debug.c`, [#1296](https://github.com/Jstar269/nakagawa-recomp/issues/1296)) | A native thread, Windows only, started when stdout or stderr is redirected | Every 50 ms it writes the C runtime's buffered stdout and stderr text to the log. It reads no guest memory and writes nothing the guest reads, so a paused guest observes nothing. |
 | Android output pump (`src/core/nk_platform_posix.c`, [#360](https://github.com/Jstar269/nakagawa-recomp/issues/360)) | A native thread, Android only, started by `nk_platform_host_startup` | An app process's stdout and stderr go nowhere on Android, so it copies their text, line by line, to the system log and to the run log. It reads no guest memory and writes nothing the guest reads, so a paused guest observes nothing. |
 | Texture-scaling workers (`src/rt/gpu_sdl3vk/tex_scale.c`, [#1273](https://github.com/Jstar269/nakagawa-recomp/issues/1273)) | Two native threads, started at the first scaling job of an Ace Mode run with `SR_TEX_SCALE` on | They scale a host copy of texels the renderer already decoded and write only a host buffer. The runtime thread takes a finished copy at a later texture lookup, so nothing reaches guest memory except through the GE rendering row below, and a paused guest observes nothing. |
-| Preemption timer (`src/rt/sched.c`, [#1296](https://github.com/Jstar269/nakagawa-recomp/issues/1296)) | A native thread, paced runs started by the driver | It sleeps until the earliest timed wait of a thread stronger than the running one runs out, then ends the running slice so the next yield point enters the scheduler. It reads no guest memory and writes only the slice counter, which the runtime thread resets at every switch, so a paused guest observes nothing. |
-| SDL audio output (`src/rt/audio_sdl3.c`) | SDL's audio device thread consumes the bound channel streams | The guest reads only the queue depth, on its own calls. A pause stashes each queue and puts back exactly that depth on resume. If the stash fails, the device is paused, so nothing is consumed (`audio-selftest`). |
+| Preemption timer (`src/rt/sched.c`, [#1296](https://github.com/Jstar269/nakagawa-recomp/issues/1296)) | A native thread, paced runs started by the driver | It sleeps until the earliest timed wait of a thread stronger than the running one runs out, then ends the running slice so the next yield point enters the scheduler. It reads no guest memory and writes only the slice counter, which the runtime thread resets at every switch, so a paused guest observes nothing. The timer's thread and the runtime thread that starts it ask the host for high priority. On Windows that needs no privilege; on Linux it means nice -10, which an ordinary session refuses (and which threads the runtime thread creates later inherit when it is granted). A refusal leaves normal priority and is logged once, with its cause. |
+| Host worker (`src/rt/sched.c` `sched_host_work_*`, [#2361](https://github.com/Jstar269/nakagawa-recomp/issues/2361)) | A native thread, started at the first item of a paced run | It makes a host call that would block the runtime thread: today a `sceIoRead`'s read of the disc image (`io_disc_fetch_run` in `src/rt/hle_io.c`), into a host buffer. It reads and writes no guest memory. The guest thread that asked waits in the scheduler and copies the bytes itself when its wait ends, so a paused guest, whose threads do not run, takes nothing; the read's results, refusals and position are the same call's as without the worker. Under the turbo and deterministic clocks nothing is handed over. |
+| SDL audio output (`src/rt/audio_sdl3.c`) | SDL's audio device thread consumes the bound channel streams | The guest reads only the queue depth, on its own calls. A pause stashes each queue and puts back exactly that depth on resume. If the stash fails, the device is paused, so nothing is consumed (`audio-selftest`). The device, and with it SDL's device thread, is opened on the runtime thread by the driver once, before the scheduler runs the guest's first instruction ([#2361](https://github.com/Jstar269/nakagawa-recomp/issues/2361)): the open takes 45 to 92 ms, and no guest call waits on it. In a paced run it follows the scheduler thread's priority raise, so the device thread inherits it where the host passes priority on (Linux); the turbo and deterministic clocks raise nothing. The paced clock starts no later than that raise, so the open's time passes on it before the guest's first instruction: guest time, the VBLANK count and the VBLANK episodes owed start 45 to 92 ms in (3 to 5 VBLANKs), where they started near zero and the same time passed at the first audio call. Under the turbo and deterministic clocks no host time reaches the guest. `SR_AUDIO_DISABLED=1`, `SR_AUDIO_BACKEND=null` (or `none`, `0`, `off`), or `SR_HEADLESS=1` without `SR_AUDIO_BACKEND` opens no device. A run without the scheduler opens the device at its first audio call. |
 | Audio dump (`SR_AUDIODUMP`, postmix callback) | SDL's audio device thread | It writes the mixed output to a host WAV file and reads no guest memory. |
+| Audio pull reports (each channel stream's get-callback) | SDL's audio device thread | It reads its stream's queue depth and records the size of the device's pulls and whether the channel has been played dry. It reads no guest memory; its results are host atomics, which the guest's audio calls read as they read the queue depth, and a paused guest makes none. |
 | Asynchronous file I/O (`sceIoReadAsync` and related calls) | The runtime thread | A request completes in `io_async_dispatch_tick`, which runs at guest syscall entry and counts syscalls, not host time. A paused guest makes no syscalls. |
 | Media decode (ATRAC3+, H.264, MP3) | The runtime thread, inside the guest's decode call | Nothing runs between calls. |
 | GE rendering and readback (`src/rt/gpu_sdl3vk/ge_gpu.c`) | The host GPU | Results reach guest memory only through the read barrier the runtime thread takes before a guest read or a present. Its timing changes when bytes are copied, never what the guest reads. |
 
 Two source guards in `tools/test_sched_invariants.py` keep this table complete. One fails when a
-native thread creator appears outside the keyboard, diagnostic-stream, Android output-pump, texture-scaling and scheduler files. The other fails when a host callback
+native thread creator appears outside the keyboard, diagnostic-stream, Android output-pump, texture-scaling and scheduler files, or a third one in the scheduler's (it has the preemption timer and the host worker). The other fails when a host callback
 entry appears that is not listed above: SDL audio, timer, event-watch and dialog callbacks, OS
 thread pools, waits, timers, completion routines, and Media Foundation work queues. Before new
 host work is added, its row must say how a paused guest is kept from observing it.
@@ -919,7 +932,8 @@ the maintained references for exact behavior.
 | `SR_GPU_LOG` | present/unset | GPU diagnostics where implemented |
 | `SR_VIDEO` | e.g. `gdi` | Select host fallback video path |
 | `SR_PRESENT_SCALING` | `sharp` (default) / `integer` / `bilinear` | How the Vulkan presenter scales game frames into the window: sharp bilinear (nearest to the next integer multiple, then linear), the largest integer multiple letterboxed, or plain linear; an exact integer fit is a nearest blit in every mode ([#1129](https://github.com/Jstar269/nakagawa-recomp/issues/1129)). The player's Settings set it |
-| `SR_PRESENT_UPSCALE` | `off` (default) / `fsr1` | The presentation upscaler: with `fsr1` the Vulkan presenter scales the shown picture to its place in the window with AMD FidelityFX Super Resolution 1 (EASU, then RCAS sharpening; `src/rt/gpu_sdl3vk/fsr1_pass.c`, the FidelityFX SDK v2.4.0 MIT headers in `third_party/fidelityfx_sdk/`) in place of `SR_PRESENT_SCALING`'s filter, on whatever frame the presenter shows: movies are not a separate path ([#2111](https://github.com/Jstar269/nakagawa-recomp/issues/2111)). Presentation only: the guest's frame, guest VRAM and captures are untouched. Used only when the picture is enlarged |
+| `SR_PRESENT_UPSCALE` | `off` (default) / `fsr1` | The presentation upscaler: with `fsr1` the Vulkan presenter scales the shown picture to its place in the window with AMD FidelityFX Super Resolution 1 (EASU, then RCAS sharpening; `src/rt/gpu_sdl3vk/fsr1_pass.c`, the FidelityFX SDK v2.4.0 MIT headers in `third_party/fidelityfx_sdk/`) in place of `SR_PRESENT_SCALING`'s filter, on every frame the presenter shows except CPU-presented frames while `SR_MOVIE_UPSCALE` is on. Presentation only: the guest's frame, guest VRAM and captures are untouched. Used only when the picture is enlarged |
+| `SR_MOVIE_UPSCALE` | `off` (default) / `fsr1` / `anime4k` | The movie upscaler, for frames the CPU presents (decoded movies; every frame when the software GE draws): `fsr1` scales them with FSR 1 as `SR_PRESENT_UPSCALE` does, and `anime4k` first doubles them once or twice with Anime4K's CNN x2 (M) upscaler (`src/rt/gpu_sdl3vk/anime4k_pass.c`, the MIT shader in `third_party/anime4k/`), then takes them to the window's size with FSR 1 unless the doubled picture already is that size. It overrides `SR_PRESENT_UPSCALE` for those frames. Presentation only: the decoded movie, the guest's frame, guest VRAM and captures are untouched. Used only when the picture is enlarged |
 | `SR_LAUNCHER_DISPLAY_BOUNDS` | `<x>,<y>,<w>,<h>` or empty | Desktop bounds of the display that holds the launcher window, set by the launcher. The game window, windowed or fullscreen, opens on the display that contains the centre of that rectangle; empty, malformed or off-screen values use the primary display, and the last two are reported on stderr |
 | `SR_FBSNAP` | positive integer | Rotating PPM snapshot interval |
 | `SR_HLELOG` | present/unset | HLE dispatch diagnostics |

@@ -17,12 +17,12 @@
         "cpu_state_abi": {"const": 3},
         "enhancements": {
           "type": "object",
-          "description": "Present only in an enhanced run: with Ace Mode on (src/rt/ace.h), the run's SR_ACE line; with the presentation upscaler on (SR_PRESENT_UPSCALE, src/rt/gpu_sdl3vk/fsr1_pass.h), its mode. Such a run is not authentic, and tools/flight_diff.py refuses to compare a bundle that carries this block. An authentic run never writes it, so authentic bundles from before and after this property are unchanged.",
+          "description": "Present only in an enhanced run: with Ace Mode on (src/rt/ace.h), the run's SR_ACE line; with the presentation upscaler (SR_PRESENT_UPSCALE, src/rt/gpu_sdl3vk/fsr1_pass.h) or the movie upscaler (SR_MOVIE_UPSCALE, src/rt/gpu_sdl3vk/anime4k_pass.h) on, the window's stamp: fsr1, movie-fsr1, movie-anime4k, fsr1+movie-fsr1 or fsr1+movie-anime4k. Such a run is not authentic, and tools/flight_diff.py refuses to compare a bundle that carries this block. An authentic run never writes it, so authentic bundles from before and after this property are unchanged.",
           "additionalProperties": false,
           "minProperties": 1,
           "properties": {
-            "ace": {"type": "string", "pattern": "^v1(;[a-z]+=[a-z0-9]+)+$", "maxLength": 95},
-            "present_upscale": {"type": "string", "enum": ["fsr1"]}
+            "ace": {"type": "string", "pattern": "^v1(;[a-z][a-z0-9]*=[a-z0-9]+)+$", "maxLength": 191},
+            "present_upscale": {"type": "string", "enum": ["fsr1", "movie-fsr1", "movie-anime4k", "fsr1+movie-fsr1", "fsr1+movie-anime4k"]}
           }
         }
       }

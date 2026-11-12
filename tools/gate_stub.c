@@ -80,6 +80,10 @@ uint32_t sched_current_uid(void) { return 0u; }
 // so the recorder has a clock here. No scheduler runs, so it reports the paced clock, and a
 // requested recording is refused for needing SR_DETERMINISTIC_CLOCK=1.
 int      sched_clock_deterministic(void) { return 0; }
+/* driver.c's stop check asks whether a parked SAVE holds a stop, at the guest time (#1296). The
+ * gate runs no guest thread and no savedata, so guest time stays 0 and nothing holds a stop. */
+uint64_t sched_vtime_us(void) { return 0u; }
+int      sr_savedata_stop_deferred(uint64_t now_us) { (void)now_us; return 0; }
 /* The headless gate has no scheduler, so no thread role is ever captured. Reporting the
  * historical HST UIDs here would hand the gate a role identity it cannot have earned.
  * This file deliberately declares its own symbols instead of including recomp.h, so the
@@ -148,6 +152,9 @@ const struct SrPauseHost *sr_sched_pause_host = NULL;
 void sr_audio_pause_enter(void) {}
 void sr_audio_pause_leave(void) {}
 int sr_audio_pause_script_ready(void) { return 1; }
+/* driver.c opens the host audio device before the scheduler starts (#2361); the microtest never
+ * enters the scheduler, and this link has no audio backend: no device. */
+int sr_audio_init(void) { return -1; }
 CpuState *sr_cpu_for_callbacks(void) { return NULL; }
 int     sr_vblank_quantum_due(void) { return 0; }
 void    sr_hle_advance_time(uint32_t us) { (void)us; }
@@ -217,6 +224,7 @@ void     gui_pump(void) {}
 uint32_t gui_buttons(void) { return 0u; }
 void     gui_consume_button_pulses(void) {}
 void     gui_analog(uint8_t *lx, uint8_t *ly) { if (lx) *lx = 128; if (ly) *ly = 128; }
+int      gui_stick_dead_zone(void) { return 0; }
 int      gui_pad_present(void) { return 0; }
 void     gui_ace_vblank(uint32_t vcount) { (void)vcount; }
 int      gui_present(uint32_t fbaddr, int fmt, uint32_t stride) { (void)fbaddr; (void)fmt; (void)stride; return 1; }
@@ -237,6 +245,9 @@ int      gui_quit_requested(void) { return 0; }
 void     gui_shutdown(void) {}
 int      ge_capture_exit_due(void) { return 0; }
 void     ge_capture_exit_set_deferred(int deferred) { (void)deferred; }
+/* The gate has no patch drawing: driver.c asks for tess=2..4, the stub keeps the PSP's division (1)
+ * and ace_finish reports the feature as never run. */
+int      ge_patch_tess_init(int factor) { (void)factor; return 1; }
 
 /* --- Extracted-data preparation stub (hle.c seam; the gate never scans) --- */
 int sr_host_data_prepare(void) { return 4; /* SR_DATA_STATE_DISABLED */ }

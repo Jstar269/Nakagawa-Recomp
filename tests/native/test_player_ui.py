@@ -27,6 +27,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools"))
 from nk_core import package_cache  # noqa: E402  (the package-layer epochs the fixture must spell)
 from test_player_package_route import (  # noqa: E402
+    build_homebrew_eboot,
     build_plain_mips_elf,
     build_psp_container,
     create_test_iso_with_executables,
@@ -169,18 +170,6 @@ def read_bmp(path: Path) -> tuple[int, int, int, bytes]:
     return width, abs(signed_height), bits_per_pixel, data[pixel_offset:]
 
 
-def pixel_rgb(
-    bmp: tuple[int, int, int, bytes], x: int, y: int, top_down: bool = False
-) -> tuple[int, int, int]:
-    width, height, bpp, pixels = bmp
-    bytes_per_pixel = bpp // 8
-    stride = (width * bytes_per_pixel + 3) & ~3
-    row = y if top_down else height - y - 1
-    offset = row * stride + x * bytes_per_pixel
-    blue, green, red = pixels[offset : offset + 3]
-    return red, green, blue
-
-
 def png_chunk(kind: bytes, payload: bytes) -> bytes:
     body = kind + payload
     return struct.pack(">I", len(payload)) + body + struct.pack(">I", zlib.crc32(body))
@@ -193,28 +182,6 @@ def png_pixel(red: int, green: int, blue: int) -> bytes:
         + png_chunk(b"IDAT", zlib.compress(b"\x00" + bytes((red, green, blue, 255))))
         + png_chunk(b"IEND", b"")
     )
-
-
-def undecodable_png() -> bytes:
-    """PNG-shaped bytes the header reader accepts but the decoder rejects.
-
-    The signature, IHDR and IEND are well formed, so the image is an ordinary
-    ISO entry that reads back intact; the IDAT carries bytes that are not a
-    zlib stream, so SDL_LoadPNG_IO rejects it. This exercises decoder failure
-    separately from missing ISO data and from a build with no PNG decoder.
-    """
-    ihdr = png_chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 6, 0, 0, 0))
-    return (
-        b"\x89PNG\r\n\x1a\n"
-        + ihdr
-        + png_chunk(b"IDAT", b"not a zlib stream")
-        + png_chunk(b"IEND", b"")
-    )
-
-
-def corrupt_png_header() -> bytes:
-    """Bytes that the ISO reader rejects before a decoder is involved."""
-    return b"not a PNG image"
 
 
 def synthetic_art_iso(
@@ -633,46 +600,6 @@ def synthetic_experimental_profile(
     profile_path.write_text(json.dumps(profile, separators=(",", ":")) + "\n", encoding="utf-8")
 
 
-def badge_rect(frame: dict[str, str]) -> tuple[int, int, int, int]:
-    """The status badge rectangle the renderer reported for this frame."""
-    x, y, w, h = (int(value) for value in frame["badge"].split(","))
-    if w <= 0 or h <= 0:
-        raise AssertionError(f"frame {frame.get('frame')} drew no status badge")
-    return x, y, w, h
-
-
-def has_amber_badge(bmp: tuple[int, int, int, bytes], rect: tuple[int, int, int, int]) -> bool:
-    """True when the reported status badge is drawn in the amber accent."""
-    width, height, _, _ = bmp
-    x0, y0, w, h = rect
-    right = min(width, x0 + w)
-    bottom = min(height, y0 + h)
-    return any(
-        (lambda color: color[0] > 180 and 90 < color[1] < 205 and color[2] < 90)(
-            pixel_rgb(bmp, x, y)
-        )
-        for y in range(max(0, y0), bottom)
-        for x in range(max(0, x0), right)
-    )
-
-
-ICON_ART_RGB = (50, 190, 120)
-
-
-def has_icon_art(bmp: tuple[int, int, int, bytes]) -> bool:
-    width, height, _, _ = bmp
-    return any(
-        all(
-            abs(channel - expected) <= 12
-            for channel, expected in zip(
-                pixel_rgb(bmp, x, y), ICON_ART_RGB, strict=True
-            )
-        )
-        for y in range(112, min(196, height))
-        for x in range(min(1120, width), min(1210, width))
-    )
-
-
 def parse_frames(output: str) -> list[dict[str, str]]:
     frames = []
     for line in output.splitlines():
@@ -867,41 +794,21 @@ class ErrorCodeSourceTests(unittest.TestCase):
 
 
 class LegacyRendererSourceTests(unittest.TestCase):
-    """The shipped player never reaches the old renderer (owner, v0.0.1)."""
-
-    def test_ui_render_frame_is_called_only_in_the_regression_build(self) -> None:
-        for source in sorted((ROOT / "src" / "player").rglob("*.c")):
-            if source.name == "ui_renderer.c":
-                continue
-            depth = 0
-            guarded = []
-            for number, line in enumerate(source.read_text(encoding="utf-8").splitlines(), 1):
-                stripped = line.strip()
-                if stripped.startswith("#if"):
-                    depth += 1
-                    guarded.append("NK_PLAYER_UI_REGRESSION_TEST" in stripped and
-                                   not stripped.startswith("#ifndef"))
-                elif stripped.startswith("#else") or stripped.startswith("#elif"):
-                    if guarded:
-                        guarded[-1] = False
-                elif stripped.startswith("#endif"):
-                    depth -= 1
-                    if guarded:
-                        guarded.pop()
-                elif "ui_render_frame(" in stripped and not stripped.startswith("void "):
-                    self.assertTrue(any(guarded),
-                                    f"{source.name}:{number} calls ui_render_frame outside "
-                                    "the NK_PLAYER_UI_REGRESSION_TEST build")
+    """The old renderer is gone (#2071): nk_ui is the launcher, with no switch back."""
 
     def test_shipped_player_has_no_legacy_switch(self) -> None:
         main = (ROOT / "src" / "player" / "main.c").read_text(encoding="utf-8")
         self.assertNotIn('getenv("NK_UI")', main)
-        help_text = main[main.index('"Usage: nakagawa_player'):]
-        help_text = help_text[:help_text.index("return 0;")]
-        self.assertNotIn("--ui=", help_text)
-        legacy = main.index('strcmp(argv[i], "--ui=legacy")')
-        self.assertGreater(legacy, main.rindex("#ifdef NK_PLAYER_UI_REGRESSION_TEST", 0, legacy))
-        self.assertGreater(main.index("#endif", legacy), legacy)
+        # --ui= is named once, in the notice that the switch is gone: it selects nothing.
+        self.assertEqual(main.count('"--ui="'), 1)
+        self.assertNotIn("--ui=legacy", main)
+        self.assertIn("launcher is the only launcher.", main)
+        self.assertFalse((ROOT / "src" / "player" / "ui_renderer.c").exists())
+        self.assertFalse((ROOT / "src" / "player" / "ui_renderer.h").exists())
+        for source in sorted((ROOT / "src" / "player").rglob("*.[ch]")):
+            text = source.read_text(encoding="utf-8")
+            self.assertNotIn('#include "ui_renderer.h"', text, source.name)
+            self.assertNotIn("ui_render_frame(", text, source.name)
 
 
 UPDATE_RELEASES_URL = "https://api.github.com/repos/Jstar269/nakagawa-recomp/releases?per_page=10"
@@ -909,6 +816,23 @@ UPDATE_DOWNLOAD_PREFIX = "https://github.com/Jstar269/nakagawa-recomp/releases/d
 # The most one update step (check, download, install) may take in a WAIT_UPDATE step. A
 # ceiling, not a sleep: the script moves on as soon as the phase is reached.
 UPDATE_STEP_TIMEOUT_MS = 60000
+
+
+def _release_newer_than_player() -> str:
+    """One minor step past the player's own NK_PLAYER_VERSION, so the fixture release stays newer.
+
+    A fixed number goes stale at the next version bump: the player then rightly calls the
+    fixture's release current, and every update test reads "current" instead of "available".
+    """
+    header = (ROOT / "src" / "player" / "ui" / "player_ui_nk.h").read_text(encoding="utf-8")
+    found = re.search(r'#define\s+NK_PLAYER_VERSION\s+"(\d+)\.(\d+)\.(\d+)', header)
+    if found is None:
+        raise AssertionError("src/player/ui/player_ui_nk.h no longer defines NK_PLAYER_VERSION as x.y.z")
+    return f"{int(found[1])}.{int(found[2]) + 1}.0"
+
+
+# The release the update fixture serves as the newest one.
+UPDATE_NEWER_VERSION = _release_newer_than_player()
 
 # A TEST-ONLY minisign signer for the synthetic releases: Ed25519 (RFC 8032) in plain
 # Python, so no package is needed. Its key pair is derived from a fixed label at run
@@ -1002,7 +926,7 @@ class TestOnlyMinisigner:
 
 
 def write_update_fixture(
-    folder: Path, version: str = "0.0.3", *, wrong_checksum: bool = False,
+    folder: Path, version: str = UPDATE_NEWER_VERSION, *, wrong_checksum: bool = False,
     missing_file: bool = False, signed: bool = True, bad_signature: bool = False,
     player_key: bool = True,
 ) -> None:
@@ -1079,44 +1003,6 @@ def update_report(stdout: str) -> tuple[list[dict[str, str]], list[str]]:
 
 
 class NativePlayerUiTests(unittest.TestCase):
-    # The next UI is the only launcher. These tests pin behaviour of the old
-    # renderer, which only the regression build keeps (--ui=legacy): its
-    # library layout and hit boxes, its disc-art workers, its package-status
-    # badges and its build and error-card text metrics (the next UI's cards are
-    # covered by tests/native/test_player_screens.c). They run with --ui=legacy
-    # unless they name a mode themselves.
-    LEGACY_RENDERER_TESTS = frozenset((
-        "test_build_screen_follows_the_build_state",
-        "test_cli_not_found_error_text_fits_at_minimum_window",
-        "test_long_error_text_fits_at_minimum_window",
-        "test_completed_retry_clears_failure_when_cache_generation_changes",
-        "test_controller_bind_conflict_calibration_and_profile_save",
-        "test_corrupt_art_is_failed_after_bounded_retries",
-        "test_decoder_rejection_is_failed_after_bounded_retries",
-        "test_exit_path_joins_iso_art_workers_and_tears_down_textures",
-        "test_failed_post_build_worker_start_survives_cache_invalidation_and_retries",
-        "test_iso_art_failures_reach_a_terminal_state_after_bounded_retries",
-        "test_iso_art_retry_rereads_only_the_image_that_is_still_missing",
-        "test_late_mounted_iso_art_retries_after_cooldown",
-        "test_library_keyboard_gamepad_navigation_and_picker",
-        "test_incompatible_card_offers_rebuild_package_in_the_legacy_renderer",
-        "test_lost_worker_events_are_reclaimed_instead_of_stalling_the_card",
-        "test_mouse_click_adds_disc_through_sdl_event_loop",
-        "test_one_title_offline_art_and_stale_package_stay_off_frame_path",
-        "test_package_status_thread_creation_failure_is_unresolved_and_retryable",
-        "test_per_title_controller_mapping_choice",
-        "test_readable_art_without_png_decoder_is_unsupported",
-        "test_repeated_post_build_failures_keep_prior_title_retryable",
-        "test_settings_about_opens_the_pinned_license_list",
-        "test_settings_presentation_choice_saves_with_native_default_schema",
-        "test_settings_removal_requires_confirmation_and_keeps_other_app_data",
-        "test_settings_scaling_choice_cycles_and_saves_by_name",
-        "test_settings_screen_returns_to_library",
-        "test_settings_ui_sounds_toggle_is_the_last_stop_and_saves",
-        "test_staged_card_exposes_runtime_required_status",
-        "test_worker_start_failure_does_not_block_other_title_builds",
-    ))
-
     def run_player(
         self,
         view: str,
@@ -1142,7 +1028,6 @@ class NativePlayerUiTests(unittest.TestCase):
         build_preflight: str | None = None,
         legacy_data: bool = False,
         env_extra: dict[str, str] | None = None,
-        ui_mode: str | None = None,
         width: int = 1280,
         height: int = 720,
         timeout: float | None = None,
@@ -1309,7 +1194,6 @@ class NativePlayerUiTests(unittest.TestCase):
                     encoding="utf-8",
                 )
             ui_iso_path: Path | None = None
-            art_mount_source: Path | None = None
             if build_preflight is not None:
                 if build_preflight == "encrypted":
                     executable = build_psp_container()
@@ -1325,28 +1209,12 @@ class NativePlayerUiTests(unittest.TestCase):
                 if build_preflight == "encrypted":
                     synthetic_experimental_profile(runtime_root, "TEST00009", None)
             if art_iso is not None:
-                if art_iso == "saturated":
-                    # The cache exerciser appends a per-slot suffix. Keep
-                    # printf tokens in this caller-owned path to prove it is
-                    # always passed as data to a fixed format string.
-                    ui_iso_path = scratch / "art_%s_%p.iso"
-                else:
-                    ui_iso_path = scratch / "source-owned-synthetic.iso"
-                    synthetic_art_iso(
-                        ui_iso_path,
-                        include_picture=art_iso != "icon-only",
-                        icon_bytes=(
-                            undecodable_png() if art_iso == "undecodable" else
-                            corrupt_png_header() if art_iso == "corrupt" else None
-                        ),
-                    )
-                    if art_iso == "unavailable":
-                        ui_iso_path.rename(scratch / "source-owned-synthetic.iso.offline")
-                    elif art_iso == "late":
-                        art_mount_source = ui_iso_path
-                        ui_iso_path = scratch / "late-mounted-synthetic.iso"
-                    elif art_iso not in ("available", "icon-only", "undecodable", "corrupt"):
-                        raise ValueError(f"unknown synthetic ISO mode: {art_iso}")
+                if art_iso not in ("available", "unavailable", "icon-only"):
+                    raise ValueError(f"unknown synthetic ISO mode: {art_iso}")
+                ui_iso_path = scratch / "source-owned-synthetic.iso"
+                synthetic_art_iso(ui_iso_path, include_picture=art_iso != "icon-only")
+                if art_iso == "unavailable":
+                    ui_iso_path.rename(scratch / "source-owned-synthetic.iso.offline")
             if ready_source_iso is not None:
                 ui_iso_path = ready_source_iso
             if library_titles:
@@ -1394,10 +1262,6 @@ class NativePlayerUiTests(unittest.TestCase):
             elif experimental_build_ready:
                 view = "build-ready-experimental"
             args = [str(PLAYER_EXE), f"--view={view}"]
-            if ui_mode is None and self._testMethodName in self.LEGACY_RENDERER_TESTS:
-                ui_mode = "legacy"
-            if ui_mode is not None:
-                args.append(f"--ui={ui_mode}")
             event_script = list(events)
             if drop_invalid_iso:
                 invalid_iso = scratch / "source-owned-invalid.iso"
@@ -1425,8 +1289,6 @@ class NativePlayerUiTests(unittest.TestCase):
                         f"--ui-test-catalog-reload-count={catalog_reload_count}",
                     )
                 )
-            if art_mount_source is not None:
-                args.append(f"--ui-test-art-mount-source={art_mount_source}")
             args.append(f"--width={width}")
             args.append(f"--height={height}")
             if error_code:
@@ -1601,82 +1463,52 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertEqual(font_frames[1]["wizard_step"], "ready_launch")
         self.assertEqual(font_frames[1]["font_confirmed"], "1")
 
-    def test_wizard_options_step_sets_the_switches_and_skip_clears_them(self) -> None:
-        # Focus order on the step: CONTINUE, SKIP, BACK, then the two switches.
-        run = self.run_player(
-            "wizard-options",
-            ("KEY_TAB", "KEY_TAB", "KEY_TAB", "KEY_RETURN", "KEY_TAB", "KEY_RETURN"),
-            ui_mode="legacy",
-        )
-        frames = run["frames"]
-        assert isinstance(frames, list)
-        self.assertEqual(frames[0]["wizard_step"], "online_options")
-        self.assertEqual(frames[4]["online_mode"], "1")
-        self.assertEqual(frames[6]["developer_mode"], "1")
-        skipped = self.run_player(
-            "wizard-options",
-            ("KEY_TAB", "KEY_TAB", "KEY_TAB", "KEY_RETURN", "KEY_UP", "KEY_UP", "KEY_RETURN"),
-            ui_mode="legacy",
-        )
-        frames = skipped["frames"]
-        assert isinstance(frames, list)
-        self.assertEqual(frames[4]["online_mode"], "1")
-        self.assertEqual(frames[-1]["wizard_step"], "select_game")
-        self.assertEqual(frames[-1]["online_mode"], "0", "SKIP turns online mode back off")
-        self.assertEqual(frames[-1]["developer_mode"], "0")
-
     def test_developer_log_panel_needs_developer_mode(self) -> None:
-        # The next UI draws its own panel; --ui=legacy keeps the existing one.
-        for ui_mode in ("next", "legacy"):
-            with self.subTest(ui_mode=ui_mode):
-                panel = self.run_player("developer-log", ("KEY_F12",), ui_mode=ui_mode)
-                frames = panel["frames"]
-                assert isinstance(frames, list)
-                self.assertEqual(frames[0]["view"], "developer_log")
-                self.assertNotEqual(frames[0]["dev_log_lines"], "0")
-                self.assertEqual(frames[1]["view"], "library", "F12 closes the panel")
-                closed = self.run_player("developer-log", ("KEY_ESCAPE",), ui_mode=ui_mode)
-                frames = closed["frames"]
-                assert isinstance(frames, list)
-                self.assertEqual(frames[1]["view"], "library", "Esc closes the panel")
-                off = self.run_player("library", ("KEY_F12",), ui_mode=ui_mode)
-                frames = off["frames"]
-                assert isinstance(frames, list)
-                self.assertEqual(frames[-1]["view"], "library",
-                                 "without developer mode F12 does nothing")
+        panel = self.run_player("developer-log", ("KEY_F12",))
+        frames = panel["frames"]
+        assert isinstance(frames, list)
+        self.assertEqual(frames[0]["view"], "developer_log")
+        self.assertNotEqual(frames[0]["dev_log_lines"], "0")
+        self.assertEqual(frames[1]["view"], "library", "F12 closes the panel")
+        closed = self.run_player("developer-log", ("KEY_ESCAPE",))
+        frames = closed["frames"]
+        assert isinstance(frames, list)
+        self.assertEqual(frames[1]["view"], "library", "Esc closes the panel")
+        off = self.run_player("library", ("KEY_F12",))
+        frames = off["frames"]
+        assert isinstance(frames, list)
+        self.assertEqual(frames[-1]["view"], "library",
+                         "without developer mode F12 does nothing")
 
     def test_online_settings_open_from_settings_and_back(self) -> None:
-        for ui_mode in ("next", "legacy"):
-            with self.subTest(ui_mode=ui_mode):
-                run = self.run_player("online-settings", ("KEY_ESCAPE",), ui_mode=ui_mode)
-                frames = run["frames"]
-                assert isinstance(frames, list)
-                self.assertEqual(frames[0]["view"], "online_settings")
-                self.assertEqual(frames[1]["view"], "settings")
+        run = self.run_player("online-settings", ("KEY_ESCAPE",))
+        frames = run["frames"]
+        assert isinstance(frames, list)
+        self.assertEqual(frames[0]["view"], "online_settings")
+        self.assertEqual(frames[1]["view"], "settings")
 
     def test_build_cache_page_leads_to_tool_removal_and_back(self) -> None:
         """#1306: Settings > Build tools and cache holds the shared-library switch, the
         clear button and tool removal; cancelling a removal returns to the page."""
-        for ui_mode in ("next", "legacy"):
-            with self.subTest(ui_mode=ui_mode):
-                run = self.run_player(
-                    "build-cache",
-                    ("KEY_TAB", "KEY_TAB", "KEY_RETURN", "KEY_ESCAPE", "KEY_ESCAPE"),
-                    ui_mode=ui_mode,
-                )
-                frames = run["frames"]
-                assert isinstance(frames, list)
-                views = [frame["view"] for frame in frames]
-                visited = [view for i, view in enumerate(views) if i == 0 or views[i - 1] != view]
-                self.assertEqual(
-                    visited, ["build_cache", "confirm_remove_tools", "build_cache", "settings"], views
-                )
+        # Build speed sits between the switch and the clear button, one more Tab before
+        # Remove build tools.
+        run = self.run_player(
+            "build-cache",
+            ("KEY_TAB", "KEY_TAB", "KEY_TAB", "KEY_RETURN", "KEY_ESCAPE", "KEY_ESCAPE"),
+        )
+        frames = run["frames"]
+        assert isinstance(frames, list)
+        views = [frame["view"] for frame in frames]
+        visited = [view for i, view in enumerate(views) if i == 0 or views[i - 1] != view]
+        self.assertEqual(
+            visited, ["build_cache", "confirm_remove_tools", "build_cache", "settings"], views
+        )
 
     def test_next_ui_library_card_shows_the_disc_icon_once_read(self) -> None:
         """The next UI reads ICON0.PNG from the disc in the background and shows
         it on the card; a disc that cannot be read keeps the placeholder."""
-        shown = self.run_player("ready", ("WAIT_MS=1500",), art_iso="available", ui_mode="next")
-        missing = self.run_player("ready", ("WAIT_MS=1500",), art_iso="unavailable", ui_mode="next")
+        shown = self.run_player("ready", ("WAIT_MS=1500",), art_iso="available")
+        missing = self.run_player("ready", ("WAIT_MS=1500",), art_iso="unavailable")
         if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in shown["stdout"]:
             self.skipTest("the next UI could not start here (no UI fonts)")
         self.assertIn("[PLAYER_UI_TEST] next_ui_disc_icon index=0 width=1 height=1", shown["stdout"],
@@ -1700,7 +1532,7 @@ class NativePlayerUiTests(unittest.TestCase):
         # Scripted runs cut motion unless NK_UI_TEST_MOTION keeps the settings' choice.
         keep = {"NK_UI_TEST_MOTION": "1"}
         # The waits only bound how long the picture may take to be read on a busy machine.
-        rest = self.run_player("ready", ("WAIT_MS=4000",), art_iso="available", ui_mode="next",
+        rest = self.run_player("ready", ("WAIT_MS=4000",), art_iso="available",
                                settings=motion, env_extra=keep, wait_background=True)
         if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in str(rest["stdout"]):
             self.skipTest("the next UI could not start here (no UI fonts)")
@@ -1712,13 +1544,13 @@ class NativePlayerUiTests(unittest.TestCase):
                       "after resting on the first card, its picture is behind the library")
 
         browse = self.run_player("ready", ("WAIT_MS=300", "KEY_RIGHT", "WAIT_MS=1500"),
-                                 art_iso="available", ui_mode="next", settings=motion,
+                                 art_iso="available", settings=motion,
                                  env_extra=keep)
         self.assertNotIn("0", [game for _, game, _ in self.backdrops(browse)],
                          "focus that moved on before the rest brings no picture in")
 
         leave = self.run_player("ready", ("WAIT_MS=4000", "KEY_RIGHT", "WAIT_MS=1500"),
-                                art_iso="available", ui_mode="next", settings=motion,
+                                art_iso="available", settings=motion,
                                 env_extra=keep)
         states = [(game, shown) for _, game, shown in self.backdrops(leave)]
         if ("0", "1") in states:
@@ -1729,7 +1561,7 @@ class NativePlayerUiTests(unittest.TestCase):
             self.assertNotIn(("0", "1"), states[last_shown + 1:])
             self.assertEqual(states[-1], ("-1", "0"), "moving on takes the picture away")
 
-        bare = self.run_player("ready", ("WAIT_MS=1500",), art_iso="icon-only", ui_mode="next",
+        bare = self.run_player("ready", ("WAIT_MS=1500",), art_iso="icon-only",
                                settings=motion, env_extra=keep)
         bare_frames = self.backdrops(bare)
         self.assertEqual({game for _, game, _ in bare_frames}, {"-1"},
@@ -1737,7 +1569,7 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertLess(len(bare_frames), 100,
                         "after the rest on a disc with no picture the loop sleeps between frames")
 
-        still = self.run_player("ready", ("WAIT_MS=1500",), art_iso="available", ui_mode="next",
+        still = self.run_player("ready", ("WAIT_MS=1500",), art_iso="available",
                                 settings={"reduce_motion_choice": "on"}, env_extra=keep)
         self.assertEqual({game for _, game, _ in self.backdrops(still)}, {"-1"},
                          "Reduce motion: no picture behind the library")
@@ -1865,6 +1697,130 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertNotIn("QUIT_DIALOG", keyboard["stdout"], "Esc closes the box, not the player")
         self.assertEqual(self.focus_trail(keyboard)[-1], self.FIND)
 
+    @staticmethod
+    def find_states(run: dict[str, object]) -> list[str]:
+        """What the find box held while it was open, frame by frame, with repeats collapsed."""
+        stdout = run["stdout"]
+        assert isinstance(stdout, str)
+        states: list[str] = []
+        for text_hex in re.findall(
+                r"^\[PLAYER_UI_TEST\] find_box frame=\d+ text_hex=([0-9a-f]*)\r?$", stdout, re.M):
+            state = bytes.fromhex(text_hex).decode("utf-8")
+            if not states or states[-1] != state:
+                states.append(state)
+        return states
+
+    def test_next_ui_find_stops_at_its_cap(self) -> None:
+        """#2206: what a hardware keyboard types into the find box goes through the shared
+        keyboard's cap: 40 characters typed twice (the second time into a box that holds
+        text), 63 bytes kept."""
+        run = self.run_player(
+            "library", ("WAIT_MS=1000", "KEY_SLASH", "TEXT=" + "x" * 40, "WAIT_MS=200",
+                        "TEXT=" + "x" * 40, "WAIT_MS=200"),
+            library_titles=4, timeout=120.0,
+        )
+        if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in run["stdout"]:
+            self.skipTest("the next UI could not start here (no UI fonts)")
+        states = self.find_states(run)
+        self.assertTrue(states, run["stdout"])
+        self.assertEqual(states[-1], "x" * 63)
+
+    def test_next_ui_find_types_with_a_controller_alone(self) -> None:
+        """#2206: the find box's keys are the shared on-screen keyboard, so a controller
+        alone searches: the d-pad moves, A types the focused key, X deletes, Start is Done
+        (focus goes to the first match) and A opens it. Failing-before: the box had its own
+        grid, X did nothing while it was open, and Start left the library for Settings."""
+        run = self.run_player(
+            "library",
+            ("WAIT_MS=1000", "PAD_WEST", "WAIT_MS=100", "PAD_DPAD_UP", "PAD_SOUTH",
+             "PAD_DPAD_RIGHT", "PAD_SOUTH", "WAIT_MS=100", "PAD_WEST", "WAIT_MS=100",
+             "PAD_DPAD_LEFT", "PAD_SOUTH", "WAIT_MS=100", "PAD_START", "WAIT_MS=100",
+             "PAD_SOUTH", "WAIT_MS=200"),
+            library_titles=12, timeout=120.0,
+        )
+        if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in run["stdout"]:
+            self.skipTest("the next UI could not start here (no UI fonts)")
+        frames = run["frames"]
+        assert isinstance(frames, list)
+        self.assertIn(self.FIND_KEY_Q, self.focus_trail(run), "the pad opens the box on q")
+        # 1, 2, X deletes the 2, 1: "11" is in Synthetic title 11 and its disc ID alone.
+        self.assertEqual((frames[-1]["next_route"], frames[-1]["selected"]), ("2", "11"),
+                         "Start is Done, and A opens the one match")
+        self.assertEqual(self.find_states(run), ["", "1", "12", "1", "11"],
+                         "the keys typed 1 and 2, X deleted the 2, and 1 was typed again")
+
+    @staticmethod
+    def find_grid_trail(run: dict[str, object]) -> list[tuple[str | None, int, int, tuple[str, ...]]]:
+        """The library grid for each thing the find box held, in order: (the box's text,
+        or None while it is closed; the grid's games; the library's games; the disc IDs
+        the page drew). Each is the grid on the last frame of that text, so a keystroke's
+        own frame, which may still draw the grid of the text before, does not count."""
+        stdout = run["stdout"]
+        assert isinstance(stdout, str)
+        finds = {int(frame): bytes.fromhex(text_hex).decode("utf-8") for frame, text_hex in
+                 re.findall(r"^\[PLAYER_UI_TEST\] find_box frame=(\d+) text_hex=([0-9a-f]*)\r?$",
+                            stdout, re.M)}
+        grids = {int(frame): (int(matches), int(total), tuple(filter(None, shown.split(","))))
+                 for frame, matches, total, shown in re.findall(
+                     r"^\[PLAYER_UI_TEST\] library_grid frame=(\d+) matches=(\d+) total=(\d+)"
+                     r" shown=(\S*)\r?$", stdout, re.M)}
+        frames = run["frames"]
+        assert isinstance(frames, list)
+        trail: list[tuple[str | None, int, int, tuple[str, ...]]] = []
+        grid: tuple[int, int, tuple[str, ...]] | None = None
+        for frame in frames:
+            number = int(frame["frame"])
+            grid = grids.get(number, grid)
+            if grid is None:
+                continue
+            text = finds.get(number)
+            if trail and trail[-1][0] == text:
+                trail[-1] = (text, *grid)
+            else:
+                trail.append((text, *grid))
+        return trail
+
+    def test_next_ui_find_filters_the_grid_with_a_controller_alone(self) -> None:
+        """#2206: a controller alone searches the library by name, and the grid follows
+        the box. The pad opens the box on q, the d-pad moves to e and A types it, Y types
+        a space, the d-pad moves to 1 and A types it twice ("e 11"), X deletes back to an
+        empty box, A types 1, and B clears and closes the box. Each step's grid is the
+        games whose name or disc ID holds the text: "e 1" is in the names "Synthetic
+        title 1", "10" and "11" and in no disc ID (SCAL000nn), so it shows the name
+        search; the empty box and the cleared one give back the whole library."""
+        run = self.run_player(
+            "library",
+            ("WAIT_MS=1000", "PAD_WEST", "WAIT_MS=100", "PAD_DPAD_RIGHT", "PAD_DPAD_RIGHT",
+             "PAD_SOUTH", "WAIT_MS=100", "PAD_NORTH", "WAIT_MS=100", "PAD_DPAD_UP",
+             "PAD_DPAD_LEFT", "PAD_DPAD_LEFT", "PAD_SOUTH", "WAIT_MS=100", "PAD_SOUTH",
+             "WAIT_MS=100", "PAD_WEST", "WAIT_MS=100", "PAD_WEST", "WAIT_MS=100", "PAD_WEST",
+             "WAIT_MS=100", "PAD_WEST", "WAIT_MS=100", "PAD_SOUTH", "WAIT_MS=100", "PAD_EAST",
+             "WAIT_MS=200"),
+            library_titles=12, timeout=120.0,
+        )
+        if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in run["stdout"]:
+            self.skipTest("the next UI could not start here (no UI fonts)")
+        trail = self.find_grid_trail(run)
+        self.assertEqual([text for text, *_ in trail],
+                         [None, "", "e", "e ", "e 1", "e 11", "e 1", "e ", "e", "", "1", None],
+                         run["stdout"][-4000:])
+        full = {f"SCAL{index:05d}" for index in range(12)}
+        ones = {"SCAL00001", "SCAL00010", "SCAL00011"}  # Synthetic title 1, 10 and 11
+        for text, matches, total, shown in trail:
+            self.assertEqual(total, 12, f"the library holds 12 games ({text!r})")
+            self.assertTrue(set(shown) <= full, f"the page draws library games ({text!r})")
+            if text in ("e 1", "1"):
+                self.assertEqual((matches, set(shown)), (3, ones),
+                                 f"{text!r} keeps titles 1, 10 and 11")
+            elif text == "e 11":
+                self.assertEqual((matches, shown), (1, ("SCAL00011",)), "'e 11' keeps title 11")
+            else:
+                self.assertEqual(matches, 12, f"{text!r} keeps every game")
+                self.assertGreater(len(shown), len(ones), f"{text!r} draws a full page")
+        self.assertEqual(trail[-1][3], trail[0][3],
+                         "B clears the box, and the first page draws what it drew at the start")
+        self.assertEqual(self.focus_trail(run)[-1], self.FIND, "B returns focus to FIND")
+
     def test_next_ui_is_the_only_launcher(self) -> None:
         """The owner's rule for v0.0.1: the new launcher or nothing.
 
@@ -1902,9 +1858,51 @@ class NativePlayerUiTests(unittest.TestCase):
             self.assertNotIn("ZIP", completed.stderr)
             self.assertIn("tools/stage_install.py", completed.stderr)
         self.assertNotIn("compiled without", completed.stderr)
-        self.assertIn("assets\\fonts\\ui", completed.stderr)
+        # The folder is named the way this platform writes paths (#306).
+        if sys.platform == "win32":
+            self.assertIn("assets\\fonts\\ui", completed.stderr)
+        else:
+            self.assertIn("assets/fonts/ui", completed.stderr)
+            self.assertNotIn("assets\\fonts", completed.stderr)
         self.assertNotIn(marker, completed.stdout)
         self.assertNotIn("frame=", completed.stdout, "nothing is drawn after the message")
+
+    def test_removed_ui_switch_and_unknown_options_are_named_not_fatal(self) -> None:
+        """Shortcuts made before the old renderer went still pass --ui=next. The
+        switch is gone, so the player says it ignores it, and any other option it
+        does not know, then starts the launcher as usual."""
+        marker = "[PLAYER_UI_TEST] UI_NEXT_ACTIVE"
+        default_ui = self.run_player("empty")
+        if marker not in default_ui["stdout"]:
+            self.skipTest("the next UI needs SDL3_ttf, which this host lacks")
+        # The harness's own --ui-test-* options are taken first: none is unknown.
+        self.assertNotIn("Ignoring", str(default_ui["stderr"]))
+        with tempfile.TemporaryDirectory(prefix=".player-ui-test-", dir=ROOT) as tmp:
+            scratch = Path(tmp)
+            env = os.environ.copy()
+            env.update({
+                "SDL_VIDEODRIVER": "dummy",
+                "SDL_RENDER_DRIVER": "software",
+                "SDL_AUDIO_DRIVER": "dummy",
+                "LOCALAPPDATA": str(scratch),
+                "APPDATA": str(scratch),
+            })
+            shot = scratch / "shot.bmp"
+            completed = subprocess.run(
+                [str(PLAYER_EXE), f"--user-data-root={scratch / 'data'}",
+                 "--ui=legacy", "--no-such-option", "--view=library", f"--screenshot={shot}"],
+                cwd=ROOT, env=env, capture_output=True, text=True, timeout=60, check=False,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertTrue(shot.is_file(), completed.stdout + completed.stderr)
+            self.assertGreater(shot.stat().st_size, 0)
+        self.assertIn("Ignoring --ui=legacy", completed.stderr)
+        self.assertIn("the nk launcher is the only launcher", completed.stderr)
+        self.assertIn("Ignoring unknown option: --no-such-option", completed.stderr)
+        self.assertNotIn("Ignoring unknown option: --ui=legacy", completed.stderr)
+        self.assertNotIn("Ignoring unknown option: --view", completed.stderr)
+        self.assertNotIn("Ignoring unknown option: --screenshot", completed.stderr)
+        self.assertNotIn("Ignoring unknown option: --user-data-root", completed.stderr)
 
     def test_every_view_is_drawn_by_the_launcher(self) -> None:
         """Every PlayerView in player_state.h is drawn by the nk_ui launcher."""
@@ -2054,7 +2052,7 @@ class NativePlayerUiTests(unittest.TestCase):
         )
 
     def next_ui_run(self, view: str, events: tuple[str, ...], **kwargs: object) -> dict[str, object]:
-        run = self.run_player(view, events, ui_mode="next", **kwargs)  # type: ignore[arg-type]
+        run = self.run_player(view, events, **kwargs)  # type: ignore[arg-type]
         if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in run["stdout"]:
             self.skipTest("the next UI needs SDL3_ttf, which this host lacks")
         return run
@@ -2191,12 +2189,14 @@ class NativePlayerUiTests(unittest.TestCase):
         "resolution": str(0x4501), "pacing": str(0x4502), "done": str(0x450C),
         "online": str(0x450D), "notices": str(0x450E), "remove_tools": str(0x450F),
         "build_cache": str(0x451A), "share_libraries": str(0x451B),
+        "build_speed": str(0x4555),
         "developer": str(0x4515), "back": str(0x4517), "confirm_remove": str(0x4519),
         "controller": str(0x450B), "scaling": str(0x4505),
         "launcher_fullscreen": str(0x450A), "accessibility": str(0x452C),
         "interface_size": str(0x452D), "high_contrast": str(0x452E),
         "reduce_motion": str(0x4509), "text_size": str(0x452F),
         "ace": str(0x4540), "ace_open": str(0x4541), "ace_mode": str(0x4542),
+        "ui_sounds": str(0x4508),
         "preset": str(0x4510),
     }
     # From Resolution, Down runs through the Game card's seven rows (Play mode, which opens
@@ -2214,6 +2214,294 @@ class NativePlayerUiTests(unittest.TestCase):
                 trail.append(frame["next_focus"])
         return trail
 
+    # The nickname editor's Save and Skip (or Cancel), and Settings > Nickname (#2197).
+    NICKNAME_SAVE = str(0x4560)
+    NICKNAME_SKIP = str(0x4561)
+    SETTINGS_NICKNAME = str(0x4562)
+
+    def test_next_ui_first_launch_nickname_prompt(self) -> None:
+        """#2197: the first launch asks for a nickname once. Skip (Esc) keeps the neutral
+        "Player" and is remembered, so the next start does not ask; a typed nickname is
+        saved. --view=nickname-prompt is the one view that shows it. Failing-before: there was
+        no prompt and settings.json had no nickname."""
+        skip = self.next_ui_run("nickname-prompt", ("WAIT_MS=300", "KEY_ESCAPE", "WAIT_MS=200"))
+        self.assertIn(self.NICKNAME_KEY_Q, self.focus_trail(skip),
+                      "the prompt opens on its keyboard's first letter")
+        self.assertNotIn("QUIT_DIALOG", str(skip["stdout"]), "Esc is Skip, not quit")
+        settings = skip["settings"]
+        assert isinstance(settings, dict)
+        self.assertEqual(settings.get("nickname"), "Player")
+        self.assertIs(settings.get("nickname_asked"), True)
+        again = self.next_ui_run("nickname-prompt", ("WAIT_MS=300",), settings=settings)
+        self.assertNotIn(self.NICKNAME_KEY_Q, self.focus_trail(again), "it is asked only once")
+        typed = self.next_ui_run(
+            "nickname-prompt", ("WAIT_MS=300", "TEXT=Ren 7", "KEY_RETURN", "WAIT_MS=200"))
+        self.assertNotIn(self.NICKNAME_KEY_Q, self.focus_trail(self.next_ui_run(
+            "library", ("WAIT_MS=300",))), "any other view keeps the prompt down")
+        saved = typed["settings"]
+        assert isinstance(saved, dict)
+        self.assertEqual(saved.get("nickname"), "Ren 7")
+        self.assertIs(saved.get("nickname_asked"), True)
+
+    def test_next_ui_settings_edits_the_nickname(self) -> None:
+        """#2197: Settings > Online and developer > Nickname opens the editor on its keyboard.
+        Typing on a physical keyboard moves focus to Done, so Enter saves what was typed; an
+        empty Done (Backspace on nothing, then Enter) is refused and leaves the nickname as it
+        was; Cancel returns to the row. Failing-before: the page had no Nickname row."""
+        run = self.next_ui_run(
+            "online-settings",
+            ("WAIT_MS=100", "KEY_DOWN", "KEY_RETURN", "WAIT_MS=100", "TEXT=Kai", "KEY_RETURN",
+             "WAIT_MS=100", "KEY_RETURN", "WAIT_MS=100", "KEY_BACKSPACE", "KEY_RETURN",
+             "WAIT_MS=100", "KEY_ESCAPE", "WAIT_MS=100"),
+            settings={"nickname": "Old name", "nickname_asked": True})
+        trail = self.focus_trail(run)
+        self.assertEqual(trail[:4], [self.SETTINGS_FOCUS["developer"], self.SETTINGS_NICKNAME,
+                                     self.NICKNAME_KEY_Q, self.NICKNAME_SAVE], trail)
+        self.assertEqual(trail[-1], self.SETTINGS_NICKNAME, "Cancel returns to the row")
+        frames = run["frames"]
+        assert isinstance(frames, list)
+        self.assertEqual(frames[-1]["view"], "online_settings", "the editor keeps the page")
+        settings = run["settings"]
+        assert isinstance(settings, dict)
+        self.assertEqual(settings.get("nickname"), "Kai", "Save kept it; the empty Save did not")
+        # Typing stops at the 32-byte cap: 33 letters save as 32.
+        capped = self.next_ui_run(
+            "online-settings",
+            ("WAIT_MS=100", "KEY_DOWN", "KEY_RETURN", "WAIT_MS=100", "TEXT=" + "x" * 33,
+             "KEY_RETURN", "WAIT_MS=100"),
+            settings={"nickname": "Old name", "nickname_asked": True})
+        saved = capped["settings"]
+        assert isinstance(saved, dict)
+        self.assertEqual(saved.get("nickname"), "x" * 32, "the editor keeps the first 32 bytes")
+
+    # The nickname editor's on-screen keyboard (#2197): its first letter, q, is where it opens.
+    NICKNAME_KEY_BASE = 0x4570
+    NICKNAME_KEY_Q = str(0x4570 + 10)
+
+    @staticmethod
+    def nickname_states(run: dict[str, object]) -> list[tuple[str, str]]:
+        """What the nickname editor held while it was open, frame by frame, and the count it
+        showed, with repeats collapsed."""
+        stdout = run["stdout"]
+        assert isinstance(stdout, str)
+        states: list[tuple[str, str]] = []
+        for text_hex, count in re.findall(
+                r"^\[PLAYER_UI_TEST\] nickname_editor frame=\d+ text_hex=([0-9a-f]*) count=(.*?)\r?$",
+                stdout, re.M):
+            state = (bytes.fromhex(text_hex).decode("utf-8"), count)
+            if not states or states[-1] != state:
+                states.append(state)
+        return states
+
+    def test_next_ui_nickname_keyboard_types_with_a_controller(self) -> None:
+        """#2197: the first-launch prompt's on-screen keyboard types a nickname with a
+        controller alone: the d-pad moves, A types the focused key, L is Shift, Start is Done,
+        and the setting holds what was typed. The count follows the text. Failing-before: the
+        editor had no keys, so a controller could only skip or save the nickname in use."""
+        right7 = ("PAD_DPAD_RIGHT",) * 7
+        left7 = ("PAD_DPAD_LEFT",) * 7
+        run = self.next_ui_run(
+            "nickname-prompt",
+            ("WAIT_MS=300", "PAD_LEFT_SHOULDER", "PAD_DPAD_DOWN") + right7 +
+            ("PAD_SOUTH", "PAD_LEFT_SHOULDER") + left7 + ("PAD_SOUTH", "PAD_DPAD_UP") + right7 +
+            ("PAD_SOUTH", "WAIT_MS=100", "PAD_START", "WAIT_MS=200"))
+        trail = self.focus_trail(run)
+        shown = [focus for focus in trail if focus != "0"]
+        self.assertEqual(shown[0] if shown else None, self.NICKNAME_KEY_Q,
+                         "the keyboard opens on its first letter")
+        states = self.nickname_states(run)
+        self.assertEqual([text for text, _ in states], ["", "K", "Ka", "Kai"], states)
+        self.assertEqual(states[-1][1], "3 / 32 bytes", "the count follows the text")
+        settings = run["settings"]
+        assert isinstance(settings, dict)
+        self.assertEqual(settings.get("nickname"), "Kai", "Done saved what the keys typed")
+        self.assertIs(settings.get("nickname_asked"), True)
+
+    def test_next_ui_nickname_keyboard_cancel_keeps_the_nickname(self) -> None:
+        """#2197: Settings > Nickname: keys typed with a controller, then Cancel (B, or the
+        keyboard's own Cancel key) leaves the nickname as it was before the editor opened, and
+        focus returns to the row. Failing-before: the editor had no keys to type with."""
+        old = {"nickname": "Old name", "nickname_asked": True}
+        open_editor = ("WAIT_MS=100", "PAD_DPAD_DOWN", "PAD_SOUTH", "WAIT_MS=100")
+        typed = ("PAD_SOUTH", "PAD_DPAD_RIGHT", "PAD_SOUTH")
+        back = self.next_ui_run("online-settings",
+                                open_editor + typed + ("PAD_EAST", "WAIT_MS=100"),
+                                settings=dict(old))
+        key = self.next_ui_run(
+            "online-settings",
+            open_editor + typed + ("PAD_DPAD_LEFT",) + ("PAD_DPAD_DOWN",) * 4 +
+            ("PAD_DPAD_RIGHT",) * 3 + ("PAD_SOUTH", "WAIT_MS=100"),
+            settings=dict(old))
+        for name, run in (("B", back), ("the Cancel key", key)):
+            states = self.nickname_states(run)
+            self.assertIn(("qw", "2 / 32 bytes"), states, f"{name}: the keys typed qw")
+            # Cancel saves nothing; a settings.json the run did write keeps the nickname too.
+            saved = run["settings"]
+            nickname = saved.get("nickname") if isinstance(saved, dict) else old["nickname"]
+            self.assertEqual(nickname, "Old name",
+                             f"{name}: Cancel keeps the nickname from before the editor opened")
+            self.assertEqual(self.focus_trail(run)[-1], self.SETTINGS_NICKNAME,
+                             f"{name}: focus returns to the row")
+        self.assertIn(self.NICKNAME_SKIP, self.focus_trail(key), "the Cancel key was pressed")
+
+    def test_next_ui_nickname_keyboard_stops_at_32_bytes(self) -> None:
+        """#2197: pressing a key past the 32-byte cap types nothing: 33 presses of q leave 32
+        bytes, the count reads 32 / 32 bytes, and Done saves those 32. Failing-before: the
+        editor had no keys."""
+        run = self.next_ui_run(
+            "online-settings",
+            ("WAIT_MS=100", "PAD_DPAD_DOWN", "PAD_SOUTH", "WAIT_MS=100") + ("PAD_SOUTH",) * 33 +
+            ("WAIT_MS=100", "PAD_START", "WAIT_MS=100"),
+            settings={"nickname": "Old name", "nickname_asked": True})
+        states = self.nickname_states(run)
+        self.assertEqual(states[-1], ("q" * 32, "32 / 32 bytes"), states[-3:])
+        self.assertTrue(all(len(text.encode("utf-8")) <= 32 for text, _ in states), states[-3:])
+        settings = run["settings"]
+        assert isinstance(settings, dict)
+        self.assertEqual(settings.get("nickname"), "q" * 32)
+
+    def test_next_ui_nickname_keyboard_refuses_what_the_rule_refuses(self) -> None:
+        """#2197: what is typed goes through the keyboard's filter, nk_nickname_valid's rule:
+        a control character (C0, DEL) leaves the text and its count as they were, and what the
+        rule takes is still typed. Failing-before: the editor showed no count and kept no
+        filtered text the test could read."""
+        run = self.next_ui_run(
+            "online-settings",
+            ("WAIT_MS=100", "PAD_DPAD_DOWN", "PAD_SOUTH", "WAIT_MS=100", "TEXT=Ab",
+             "WAIT_MS=50", "TEXT=\x01", "WAIT_MS=50", "TEXT=\x7f", "WAIT_MS=50", "TEXT=\x1b",
+             "WAIT_MS=50", "TEXT=c", "WAIT_MS=50", "KEY_RETURN", "WAIT_MS=100"),
+            settings={"nickname": "Old name", "nickname_asked": True})
+        states = self.nickname_states(run)
+        self.assertEqual(states, [("", "0 / 32 bytes"), ("Ab", "2 / 32 bytes"),
+                                  ("Abc", "3 / 32 bytes")], states)
+        settings = run["settings"]
+        assert isinstance(settings, dict)
+        self.assertEqual(settings.get("nickname"), "Abc")
+
+    def test_next_ui_nickname_done_trims_spaces_and_refuses_only_spaces(self) -> None:
+        """#2197 review: Done saves the typed text without the spaces around it, and a nickname
+        of spaces alone is refused (nk_nickname_valid, the runtime's rule too), so the editor
+        stays open and the nickname is kept. Typed both on a physical keyboard and with the
+        on-screen Space key (Y). Failing-before: "   " passed the rule and was saved, and
+        "  Kai  " was saved with its spaces."""
+        old = {"nickname": "Old name", "nickname_asked": True}
+        open_editor = ("WAIT_MS=100", "PAD_DPAD_DOWN", "PAD_SOUTH", "WAIT_MS=100")
+        trimmed = self.next_ui_run(
+            "online-settings", open_editor + ("TEXT=  Kai  ", "KEY_RETURN", "WAIT_MS=100"),
+            settings=dict(old))
+        self.assertIn(("  Kai  ", "7 / 32 bytes"), self.nickname_states(trimmed))
+        saved = trimmed["settings"]
+        assert isinstance(saved, dict)
+        self.assertEqual(saved.get("nickname"), "Kai", "Done trims the spaces around the name")
+        self.assertEqual(self.focus_trail(trimmed)[-1], self.SETTINGS_NICKNAME,
+                         "the trimmed name was saved and the editor closed")
+        for name, typed in (("a physical keyboard", ("TEXT=   ", "KEY_RETURN")),
+                            ("the Space key", ("PAD_NORTH",) * 3 + ("PAD_START",))):
+            with self.subTest(typed=name):
+                run = self.next_ui_run("online-settings",
+                                       open_editor + typed + ("WAIT_MS=200",),
+                                       settings=dict(old))
+                states = self.nickname_states(run)
+                self.assertIn(("   ", "3 / 32 bytes"), states, f"{name}: three spaces were typed")
+                saved = run["settings"]
+                nickname = saved.get("nickname") if isinstance(saved, dict) else old["nickname"]
+                self.assertEqual(nickname, "Old name", f"{name}: spaces alone are not saved")
+                self.assertEqual(states[-1], ("   ", "3 / 32 bytes"),
+                                 f"{name}: the refused Done keeps the editor open as it was")
+                self.assertNotEqual(self.focus_trail(run)[-1], self.SETTINGS_NICKNAME,
+                                    f"{name}: the editor did not close")
+
+    def test_next_ui_nickname_physical_tab_moves_focus_and_is_not_shift(self) -> None:
+        """#2197 review N3: a physical Tab is the toolkit's focus cycle (NK_UI_EV_CYCLE) in the
+        nickname editor as everywhere, not Shift: L and R (NK_UI_EV_TAB) are Shift, and the Q
+        and E keys that also mean TAB elsewhere type their letters here. Tab moves focus off q,
+        and A then types a lowercase letter."""
+        run = self.next_ui_run(
+            "online-settings",
+            ("WAIT_MS=100", "PAD_DPAD_DOWN", "PAD_SOUTH", "WAIT_MS=100", "KEY_TAB", "WAIT_MS=50",
+             "PAD_SOUTH", "WAIT_MS=50", "TEXT=qe", "WAIT_MS=100"),
+            settings={"nickname": "Old name", "nickname_asked": True})
+        trail = self.focus_trail(run)
+        at_q = trail.index(self.NICKNAME_KEY_Q)
+        self.assertEqual(trail[at_q + 1:at_q + 2], [str(0x4570 + 11)],
+                         f"Tab moves focus from q to the next key, w: {trail}")
+        states = self.nickname_states(run)
+        self.assertEqual([text for text, _ in states], ["", "w", "wqe"],
+                         f"Tab did not turn Shift on, and q and e typed letters: {states}")
+
+    def bare_screenshot(self, view: str,
+                        settings: dict[str, object] | None) -> tuple[bytes, object]:
+        """A bare ``--screenshot=<bmp> --view=<view>`` run, as tools/capture_native_screenshots.py
+        starts the player: no --ui-test-* option, on a throwaway data root that has a
+        settings.json only when one is given. Its pixels, and the settings it left behind."""
+        with tempfile.TemporaryDirectory(prefix=".player-ui-test-", dir=ROOT) as tmp:
+            scratch = Path(tmp)
+            localappdata = scratch / "localappdata"
+            runtime_root = scratch / "runtime"
+            localappdata.mkdir()
+            runtime_root.mkdir()
+            config = (localappdata / "Nakagawa" / "config" if os.name == "nt"
+                      else scratch / "config" / "nakagawa-recomp")
+            if settings is not None:
+                config.mkdir(parents=True)
+                (config / "settings.json").write_text(
+                    json.dumps({"schema_version": 2, **settings}), encoding="utf-8")
+            env = os.environ.copy()
+            env.update({
+                "SDL_VIDEODRIVER": "dummy", "SDL_RENDER_DRIVER": "software",
+                "APPDATA": str(scratch), "LOCALAPPDATA": str(localappdata),
+                "USERPROFILE": str(scratch), "HOME": str(scratch),
+                "XDG_CONFIG_HOME": str(scratch / "config"), "XDG_DATA_HOME": str(scratch / "data"),
+                "XDG_CACHE_HOME": str(scratch / "cache"),
+            })
+            bmp = scratch / "shot.bmp"
+            completed = subprocess.run(
+                [str(PLAYER_EXE), f"--screenshot={bmp}", f"--view={view}",
+                 f"--runtime-root={runtime_root}", "--width=1280", "--height=720"],
+                cwd=ROOT, env=env, capture_output=True, text=True, timeout=120, check=False)
+            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            self.assertTrue(bmp.is_file(), completed.stdout)
+            saved_path = config / "settings.json"
+            saved = (json.loads(saved_path.read_text(encoding="utf-8"))
+                     if saved_path.is_file() else None)
+            return read_bmp(bmp)[3], saved
+
+    def test_bare_screenshot_view_never_shows_the_nickname_prompt(self) -> None:
+        """#2197 review B1: a bare --screenshot --view run on a fresh data root captures the page
+        it names, never the first-launch nickname prompt over it, and records no answer;
+        --view=nickname-prompt is the one view that shows it. Failing-before: the prompt
+        opened over every such run, so a fresh root's frame differed from an answered one's.
+
+        Review N1: whether the next UI runs here is the font-independent UI_NEXT_ACTIVE marker,
+        as the other next-UI tests read it, never the frames themselves. On hosted CI (the
+        Linux player UI job installs SDL3_ttf, and the repository ships open fonts) a missing
+        marker fails instead of skipping, and with the next UI running, a prompt view that
+        draws the same frame as the answered one is a failure.
+
+        Review S1: both roots turn Reduce motion on (``reduce_motion_choice``), which holds every
+        animation and transition still, so the frame a run captures does not depend on how far
+        a busy host let its clock run before the capture. The fresh root is still one that has
+        not answered the prompt: a settings.json without ``nickname_asked`` reads as not asked,
+        as a missing file does."""
+        marker = "[PLAYER_UI_TEST] UI_NEXT_ACTIVE"
+        if marker not in str(self.run_player("empty")["stdout"]):
+            if os.environ.get("GITHUB_ACTIONS") or os.environ.get("CI"):
+                self.fail("the next UI did not start on this CI host (no UI_NEXT_ACTIVE "
+                          "marker), so the nickname prompt could not be checked")
+            self.skipTest("the next UI needs SDL3_ttf, which this host lacks")
+        fresh_root = {"reduce_motion_choice": "on"}
+        answered = {**fresh_root, "nickname_asked": True}
+        prompt_fresh, _ = self.bare_screenshot("nickname-prompt", fresh_root)
+        prompt_answered, _ = self.bare_screenshot("nickname-prompt", answered)
+        self.assertTrue(prompt_fresh != prompt_answered, "the prompt view drew no prompt")
+        for view in ("settings", "library"):
+            with self.subTest(view=view):
+                fresh, saved = self.bare_screenshot(view, fresh_root)
+                reference, _ = self.bare_screenshot(view, answered)
+                self.assertEqual(fresh, reference, "the fresh root's frame shows the prompt")
+                self.assertFalse(isinstance(saved, dict) and saved.get("nickname_asked") is True,
+                                 "holding the prompt down is not saved as an answer")
+
     @staticmethod
     def preset_lines(run: dict[str, object]) -> list[dict[str, str]]:
         """The graphics preset row and note the main Settings page drew, in order (#2150)."""
@@ -2223,9 +2511,8 @@ class NativePlayerUiTests(unittest.TestCase):
         lines = []
         for line in stdout.splitlines():
             if line.startswith(prefix):
-                value, warns, note = line[len(prefix):].split("|", 2)
-                lines.append({"value": value[len("value="):], "warns": warns[len("warns="):],
-                              "note": note[len("note="):]})
+                value, note = line[len(prefix):].split("|", 1)
+                lines.append({"value": value[len("value="):], "note": note[len("note="):]})
         return lines
 
     def test_next_ui_graphics_preset_writes_its_settings(self) -> None:
@@ -2243,14 +2530,12 @@ class NativePlayerUiTests(unittest.TestCase):
         lines = self.preset_lines(run)
         self.assertEqual([line["value"] for line in lines], ["Custom", "Low", "Medium"],
                          run["stdout"])
-        self.assertEqual((lines[0]["warns"], lines[0]["note"]), ("0", ""),
+        self.assertEqual((lines[0]["note"],), ("",),
                          "a new library starts on Custom, with the page's own line")
         medium = lines[-1]
-        self.assertEqual(medium["warns"], "0")
         self.assertEqual(medium["note"],
-                         "Medium is used in Enhanced and Ace. Authentic uses your own display "
-                         "settings.")
-        self.assertNotIn("FSR 1", medium["note"])
+                         "Medium is used in Enhanced and Ace, with crisp text and FSR 1 on. "
+                         "Authentic uses your settings.")
         settings = run["settings"]
         assert isinstance(settings, dict)
         self.assertEqual(settings.get("graphics_preset"), "medium", "two steps: Low, then Medium")
@@ -2261,8 +2546,9 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertIs(settings.get("fullscreen"), False)
 
     def test_next_ui_graphics_preset_ultra_note_and_custom_on_edit(self) -> None:
-        """#2150: Ultra's note says it does not turn on Sharper enlarging, in the warning colour;
-        editing a row the preset sets (Resolution) makes it Custom and the note goes."""
+        """#2150: Ultra's row reads Ultra and its note names the Enhanced parts it turns on,
+        High's the one it turns off; editing a row the preset sets (Resolution) makes it Custom
+        and the note goes."""
         focus = self.SETTINGS_FOCUS
         run = self.next_ui_run(
             "settings",
@@ -2279,13 +2565,11 @@ class NativePlayerUiTests(unittest.TestCase):
                          ["Custom", "Low", "Medium", "High", "Ultra", "Custom"],
                          run["stdout"])
         ultra = lines[4]
-        self.assertEqual(ultra["warns"], "1", "Ultra's note says it does not turn on Sharper enlarging")
         self.assertIn("Ultra is used in Enhanced and Ace", ultra["note"])
-        self.assertIn("not turning on Sharper enlarging", ultra["note"])
-        self.assertIn("Authentic uses your own display settings", ultra["note"])
-        self.assertEqual(lines[3]["warns"], "0")
-        self.assertNotIn("Sharper enlarging", lines[3]["note"])
-        self.assertEqual((lines[-1]["warns"], lines[-1]["note"]), ("0", ""),
+        self.assertIn("with crisp text and FSR 1 on", ultra["note"])
+        self.assertIn("Authentic uses your settings", ultra["note"])
+        self.assertIn("with crisp text on and FSR 1 off", lines[3]["note"])
+        self.assertEqual((lines[-1]["note"],), ("",),
                          "an edited row makes the preset Custom and its note goes")
         settings = run["settings"]
         assert isinstance(settings, dict)
@@ -2303,9 +2587,19 @@ class NativePlayerUiTests(unittest.TestCase):
                          "Settings opens on Resolution")
         settings = run["settings"]
         assert isinstance(settings, dict)
+        self.assertEqual(settings.get("schema_version"), 2)
         self.assertEqual(settings.get("resolution_scale"), 2, "Resolution steps 1x to 2x")
         self.assertEqual(settings.get("fps_cap"), 0, "Frame pacing switches to no extra cap")
+        self.assertIs(settings.get("ui_sounds"), False, "launcher sounds are off by default")
         self.assertEqual(self.screens(run)[-1][0], "library")
+        # Frame pacing names PSP timing or no extra cap, never a fixed frame-rate cap.
+        launcher = (ROOT / "src" / "player" / "ui" / "player_ui_nk.c").read_text(
+            encoding="utf-8")
+        self.assertIn('"PSP timing" : "No extra cap"', launcher)
+        for source in sorted((ROOT / "src" / "player").rglob("*.c")):
+            text = source.read_text(encoding="utf-8").upper()
+            self.assertNotIn("30 FPS CAP", text, source.name)
+            self.assertNotIn("60 FPS CAP", text, source.name)
 
         done = self.next_ui_run(
             "settings",
@@ -2320,6 +2614,32 @@ class NativePlayerUiTests(unittest.TestCase):
         )
         self.assertEqual(self.screens(tabs), [("settings", "1"), ("library", "3")],
                          "the ABOUT tab on Settings closes it and opens About")
+
+    def test_next_ui_scaling_and_menu_sounds_are_saved(self) -> None:
+        """Scaling (#1129) cycles Sharp to Integer and is saved by its name; Menu
+        sounds, off by default, is switched on and saved."""
+        focus = self.SETTINGS_FOCUS
+        # Down from Resolution: Frame pacing, VSync, Game fullscreen, then Scaling.
+        scaling = self.next_ui_run(
+            "settings",
+            ("WAIT_MS=100",) + ("KEY_DOWN",) * 4 + ("KEY_RETURN", "WAIT_MS=100", "KEY_ESCAPE"),
+        )
+        self.assertEqual(self.focus_trail(scaling)[4], focus["scaling"])
+        settings = scaling["settings"]
+        assert isinstance(settings, dict)
+        self.assertEqual(settings.get("present_scaling"), "integer")
+        self.assertIs(settings.get("ui_sounds"), False)
+
+        # Menu sounds is on the Launcher and sound card, beside the Game card.
+        sounds = self.next_ui_run(
+            "settings",
+            ("WAIT_MS=100", "KEY_RIGHT", "KEY_DOWN", "KEY_DOWN", "KEY_DOWN", "KEY_RETURN",
+             "WAIT_MS=100", "KEY_ESCAPE"),
+        )
+        self.assertIn(focus["ui_sounds"], self.focus_trail(sounds))
+        settings = sounds["settings"]
+        assert isinstance(settings, dict)
+        self.assertIs(settings.get("ui_sounds"), True)
 
     def test_next_ui_play_mode_is_saved_and_its_page_opens(self) -> None:
         """The play modes (#2055): Authentic by default. Settings has one Play mode row
@@ -2364,6 +2684,27 @@ class NativePlayerUiTests(unittest.TestCase):
         trail = self.focus_trail(page)
         self.assertEqual(trail[-2:], [focus["ace_mode"], focus["ace_open"]],
                          "the page opens on its play mode and Back focuses the row that opened it")
+
+    def test_next_ui_enhanced_page_shows_the_graphics_presets_parts(self) -> None:
+        """#2150: with Ultra chosen, Settings > Enhanced shows the parts the preset sets with
+        its values and name, over the library's own (both off here); the other parts keep
+        the library's value."""
+        run = self.next_ui_run(
+            "settings",
+            ("WAIT_MS=100",) + ("KEY_DOWN",) * 5 + ("KEY_RETURN", "WAIT_MS=150", "KEY_ESCAPE",
+                                                     "WAIT_MS=100"),
+            settings={"graphics_preset": "ultra",
+                      "enhanced": {"default": "enhanced", "af": "4", "text": "off",
+                                   "readout": "off", "notice": "on", "smooth": "off",
+                                   "upscale": "off"}},
+        )
+        pages = [page for page in self.enhanced_pages(run) if page.get("title") == "library"]
+        self.assertTrue(pages, run["stdout"])
+        page = pages[-1]
+        self.assertEqual(page["text"], "On (Ultra)", page)
+        self.assertEqual(page["upscale"], "FSR 1 (Ultra)", page)
+        self.assertNotIn("(Ultra)", page["af"], "texture filtering is the library's own")
+        self.assertNotIn("(Ultra)", page["smooth"])
 
     def test_a_dedicated_data_root_keeps_everything_out_of_the_default_profile(self) -> None:
         """--user-data-root=<folder> opens the player on a second profile, for example a
@@ -2464,11 +2805,15 @@ class NativePlayerUiTests(unittest.TestCase):
                          ["settings", "prereq_about"])
         self.assertEqual(self.focus_trail(notices)[-1], focus["back"])
 
-        # Build tools and cache opens on its switch; Tab reaches Remove build tools.
+        # Build tools and cache opens on its switch; Tab passes Build speed and the
+        # clear button and reaches Remove build tools. The Tabs wait for the page's
+        # laid-out frame: on its first frame nk_ui holds a Tab one frame and runs it
+        # with the next, so Build speed would be focused in no frame the trail reads
+        # (a slow CI runner's WAIT_MS=100 ended before that second frame).
         # Right comes straight after the removal card opens, before its buttons are
         # laid out; nk_ui holds it a frame instead of losing it (a slow CI runner did).
-        to_removal = ("KEY_RIGHT", "KEY_RETURN", "WAIT_MS=100", "KEY_TAB", "KEY_TAB",
-                      "KEY_RETURN")
+        to_removal = ("KEY_RIGHT", "KEY_RETURN", "WAIT_VIEW=build_cache,5000",
+                      "WAIT_LAID_OUT=5000", "KEY_TAB", "KEY_TAB", "KEY_TAB", "KEY_RETURN")
         removal = self.next_ui_run(
             "settings",
             ("WAIT_MS=100",) + self.TO_SETTINGS_BUTTONS + to_removal +
@@ -2480,6 +2825,7 @@ class NativePlayerUiTests(unittest.TestCase):
         trail = self.focus_trail(removal)
         self.assertIn(focus["build_cache"], trail)
         self.assertIn(focus["share_libraries"], trail, "the page opens on its switch")
+        self.assertIn(focus["build_speed"], trail, "Build speed is the next stop")
         self.assertIn(focus["remove_tools"], trail)
         self.assertIn(focus["confirm_remove"], trail)
         self.assertFalse(removal["downloaded_tool_marker_exists"])
@@ -2538,7 +2884,7 @@ class NativePlayerUiTests(unittest.TestCase):
         return {entry["control"]: entry["primary"] for entry in entries}
 
     def test_next_ui_controller_rebind_calibrate_save_and_back(self) -> None:
-        """Controller settings in the next UI run the same handlers as the existing renderer.
+        """Controller settings in the next UI run the input_settings handlers.
 
         #1299: a button another control uses moves to the chosen one, and that control
         takes the chosen one's button, so the mapping never conflicts; every change is
@@ -2608,6 +2954,24 @@ class NativePlayerUiTests(unittest.TestCase):
                          [focus["calibrate"], focus["back"], focus["scope"]])
         self.assertEqual(frames[0]["input_scope"], "global")
         self.assertEqual(frames[-1]["input_scope"], "TEST00005")
+        self.assertEqual(frames[-1]["input_titles"], "1")
+        # The same choice again goes back to the global mapping.
+        unscoped = self.next_ui_run(
+            "controller",
+            ("WAIT_MS=100",) + self.TO_CALIBRATE + ("KEY_DOWN", "KEY_LEFT", "KEY_RETURN",
+                                                     "WAIT_MS=100", "KEY_RETURN", "WAIT_MS=100"),
+        )
+        frames = unscoped["frames"]
+        assert isinstance(frames, list)
+        self.assertIn("TEST00005", [frame["input_scope"] for frame in frames])
+        self.assertEqual(frames[-1]["input_scope"], "global")
+        self.assertEqual(frames[-1]["input_titles"], "0")
+
+        fallback = self.next_ui_run("controller", ("WAIT_MS=100",), invalid_profile=True)
+        frames = fallback["frames"]
+        assert isinstance(frames, list)
+        self.assertEqual(frames[-1]["profile_fallback"], "1",
+                         "an unreadable profile is reported, and the defaults are used")
 
         back = self.next_ui_run(
             "controller",
@@ -2777,7 +3141,6 @@ class NativePlayerUiTests(unittest.TestCase):
                     f"build-preflight-{fixture}",
                     ("WAIT_MS=100", "KEY_RETURN", "WAIT_MS=200"),
                     build_preflight=fixture,
-                    ui_mode="next",
                 )
                 if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in run["stdout"]:
                     self.skipTest("the next UI needs SDL3_ttf, which this host lacks")
@@ -2796,50 +3159,19 @@ class NativePlayerUiTests(unittest.TestCase):
                 )
                 if fixture == "encrypted":
                     self.assertIn("decrypted", title_frames[-1]["next_preflight"].lower())
+                    self.assertEqual(title_frames[-1]["next_preflight_code"], "EXECUTABLE")
+                    self.assertIn("ENCRYPTED_EXECUTABLE",
+                                  title_frames[-1]["next_preflight_detail"])
                     # #308: the title page knows the program input and the
                     # one file the build waits for.
                     self.assertEqual(title_frames[-1]["next_input_class"], "encrypted-retail")
                     self.assertEqual(title_frames[-1]["next_input_files"], "1")
                 else:
                     self.assertIn("title_settings", title_frames[-1]["next_preflight"].lower())
+                    self.assertEqual(title_frames[-1]["next_preflight_code"], "TITLE_PROFILE")
+                    self.assertIn("TITLE_PROFILE_", title_frames[-1]["next_preflight_detail"])
                     self.assertEqual(title_frames[-1]["next_input_class"], "plain-elf")
                     self.assertEqual(title_frames[-1]["next_input_files"], "0")
-
-    def test_build_package_waits_for_preflight_in_legacy_renderer(self) -> None:
-        """#1286: the legacy Library disables the same refused package inputs."""
-        for fixture in ("encrypted", "missing-manifest"):
-            with self.subTest(fixture=fixture):
-                run = self.run_player(
-                    f"build-preflight-{fixture}",
-                    ("WAIT_MS=100", "KEY_RETURN", "WAIT_MS=200"),
-                    build_preflight=fixture,
-                    ui_mode="legacy",
-                )
-                frames = run["frames"]
-                assert isinstance(frames, list)
-                self.assertTrue(frames, run["stdout"])
-                self.assertEqual(frames[-1]["package_building"], "0", run["stdout"])
-                self.assertEqual(frames[-1]["error"], "NONE", run["stdout"])
-                self.assertEqual(
-                    frames[-1]["next_preflight_action"], "OPEN_FOLDER", run["stdout"]
-                )
-                if fixture == "encrypted":
-                    self.assertEqual(frames[-1]["next_preflight_code"], "EXECUTABLE")
-                    self.assertIn("ENCRYPTED_EXECUTABLE", frames[-1]["next_preflight_detail"])
-                    self.assertIn("decrypted", frames[-1]["next_preflight"].lower())
-                else:
-                    self.assertEqual(frames[-1]["next_preflight_code"], "TITLE_PROFILE")
-                    self.assertIn("TITLE_PROFILE_", frames[-1]["next_preflight_detail"])
-                    self.assertIn("title_settings", frames[-1]["next_preflight"].lower())
-
-    def test_library_keyboard_gamepad_navigation_and_picker(self) -> None:
-        run = self.run_player("library", ("KEY_RIGHT", "PAD_DPAD_RIGHT", "KEY_TAB", "KEY_RETURN"))
-        frames = run["frames"]
-        assert isinstance(frames, list)
-        self.assertEqual([frames[i]["selected"] for i in range(1, 3)], ["1", "1"])
-        self.assertNotEqual(frames[0]["pixels"], frames[1]["pixels"])
-        self.assertEqual(frames[3]["focus"], "1")
-        self.assertEqual(frames[4]["picker"], "1")
 
     # CHECK FOR UPDATES, wait for the newer release, then Enter on its focused action
     # (Download, or the release page when Download is not offered).
@@ -2883,28 +3215,31 @@ class NativePlayerUiTests(unittest.TestCase):
         run, steps, requests = self.update_run(
             "updates", events, {}, env_extra={"NK_UI_TEST_UPDATE_REQUEST_DELAY_MS": "600"})
         names = [step["update"] for step in steps]
-        self.assertEqual(steps[0]["newest"], "v0.0.3")
+        self.assertEqual(steps[0]["newest"], f"v{UPDATE_NEWER_VERSION}")
         self.assertIn("available", names)
         self.assertEqual(requests[0], UPDATE_RELEASES_URL)
         if sys.platform != "win32":
             # No native download or SHA-256 check off Windows: the release page only.
             self.assertEqual(names, ["available"], steps)
             self.assertEqual(len(requests), 1)
-            self.assertIn("open_url=https://github.com/Jstar269/nakagawa-recomp/releases/tag/v0.0.3",
+            self.assertIn(f"open_url=https://github.com/Jstar269/nakagawa-recomp/releases/tag/v{UPDATE_NEWER_VERSION}",
                           run["stdout"])
             return
         self.assertEqual(names, ["available", "downloaded", "installed"], steps)
         self.assertEqual(
             requests[1:],
-            [UPDATE_DOWNLOAD_PREFIX + "v0.0.3/nakagawa-recomp-0.0.3-windows-x64.zip.sha256",
-             UPDATE_DOWNLOAD_PREFIX + "v0.0.3/nakagawa-recomp-0.0.3-windows-x64.zip.sha256.minisig",
-             UPDATE_DOWNLOAD_PREFIX + "v0.0.3/nakagawa-recomp-0.0.3-windows-x64.zip"],
+            [UPDATE_DOWNLOAD_PREFIX + f"v{UPDATE_NEWER_VERSION}/nakagawa-recomp-{UPDATE_NEWER_VERSION}-windows-x64.zip.sha256",
+             UPDATE_DOWNLOAD_PREFIX + f"v{UPDATE_NEWER_VERSION}/nakagawa-recomp-{UPDATE_NEWER_VERSION}-windows-x64.zip.sha256.minisig",
+             UPDATE_DOWNLOAD_PREFIX + f"v{UPDATE_NEWER_VERSION}/nakagawa-recomp-{UPDATE_NEWER_VERSION}-windows-x64.zip"],
             "the checksum file and its signature first, then the ZIP, each once")
         installed = steps[-1]
-        self.assertTrue(installed["zip"].endswith(
-            os.sep.join(("Nakagawa", "data", "downloads", "nakagawa-recomp-0.0.3-windows-x64.zip"))),
+        # The player writes its own separator, not the one of the Python running this test
+        # (MSYS2's python has os.sep "/" on Windows), so compare the path's last components.
+        self.assertEqual(
+            re.split(r"[\\/]", installed["zip"])[-4:],
+            ["Nakagawa", "data", "downloads", f"nakagawa-recomp-{UPDATE_NEWER_VERSION}-windows-x64.zip"],
             installed)
-        self.assertTrue(installed["install"].endswith("nakagawa-recomp-0.0.3-windows-x64"), installed)
+        self.assertTrue(installed["install"].endswith(f"nakagawa-recomp-{UPDATE_NEWER_VERSION}-windows-x64"), installed)
         frames = run["frames"]
         assert isinstance(frames, list)
         self.assertEqual(frames[-1]["view"], "updates")
@@ -3004,8 +3339,8 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertEqual(steps[-1]["zip"], "none", "nothing is kept or offered to install")
         self.assertEqual(
             requests[1:],
-            [UPDATE_DOWNLOAD_PREFIX + "v0.0.3/nakagawa-recomp-0.0.3-windows-x64.zip.sha256",
-             UPDATE_DOWNLOAD_PREFIX + "v0.0.3/nakagawa-recomp-0.0.3-windows-x64.zip.sha256.minisig"],
+            [UPDATE_DOWNLOAD_PREFIX + f"v{UPDATE_NEWER_VERSION}/nakagawa-recomp-{UPDATE_NEWER_VERSION}-windows-x64.zip.sha256",
+             UPDATE_DOWNLOAD_PREFIX + f"v{UPDATE_NEWER_VERSION}/nakagawa-recomp-{UPDATE_NEWER_VERSION}-windows-x64.zip.sha256.minisig"],
             "the ZIP is never requested")
 
     def test_update_without_a_signing_key_or_signature_offers_only_the_release_page(self) -> None:
@@ -3019,7 +3354,7 @@ class NativePlayerUiTests(unittest.TestCase):
                 self.assertEqual([step["update"] for step in steps], ["available"], steps)
                 self.assertEqual(requests, [UPDATE_RELEASES_URL])
                 self.assertIn(
-                    "open_url=https://github.com/Jstar269/nakagawa-recomp/releases/tag/v0.0.3",
+                    f"open_url=https://github.com/Jstar269/nakagawa-recomp/releases/tag/v{UPDATE_NEWER_VERSION}",
                     run["stdout"])
 
     def test_update_install_that_loses_a_listed_file_is_refused(self) -> None:
@@ -3086,116 +3421,6 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertIs(settings.get("check_updates_at_start"), True)
         self.assertEqual([view for view, _ in self.screens(run)], ["updates", "settings"])
 
-    def test_settings_screen_returns_to_library(self) -> None:
-        run = self.run_player("settings", ("KEY_TAB", "KEY_ESCAPE"))
-        frames = run["frames"]
-        assert isinstance(frames, list)
-        self.assertEqual(frames[0]["view"], "settings")
-        self.assertEqual(frames[1]["focus"], "1")
-        self.assertEqual(frames[2]["view"], "library")
-        self.assertNotEqual(frames[0]["pixels"], frames[2]["pixels"])
-
-    def test_settings_presentation_choice_saves_with_native_default_schema(self) -> None:
-        events = ("KEY_TAB",) * 4 + ("KEY_RETURN",) + ("KEY_TAB",) * 11 + ("KEY_RETURN",)
-        run = self.run_player("settings", events)
-        frames = run["frames"]
-        assert isinstance(frames, list)
-        self.assertEqual(frames[0]["focus_count"], "18")
-        self.assertEqual(frames[4]["focus"], "4")
-        self.assertEqual(frames[5]["focus"], "4")
-        self.assertNotEqual(frames[4]["pixels"], frames[5]["pixels"])
-        self.assertEqual(frames[-1]["view"], "library")
-        settings = run["settings"]
-        self.assertIsInstance(settings, dict)
-        assert isinstance(settings, dict)
-        self.assertEqual(settings.get("schema_version"), 2)
-        self.assertEqual(settings.get("fps_cap"), 0)
-        self.assertIs(settings.get("ui_sounds"), False, "launcher sounds are off by default")
-        renderer_source = (ROOT / "src" / "player" / "ui_renderer.c").read_text(
-            encoding="utf-8"
-        )
-        self.assertIn('case -1: return "PSP TIMING";', renderer_source)
-        self.assertIn('case 0:  return "NO EXTRA CAP";', renderer_source)
-        self.assertNotIn("30 FPS CAP", renderer_source)
-        self.assertNotIn("60 FPS CAP", renderer_source)
-
-    def test_settings_scaling_choice_cycles_and_saves_by_name(self) -> None:
-        """Game-frame scaling (#1129) is the eighth stop and is saved as its name."""
-        events = ("KEY_TAB",) * 7 + ("KEY_RETURN",) + ("KEY_TAB",) * 8 + ("KEY_RETURN",)
-        run = self.run_player("settings", events)
-        frames = run["frames"]
-        assert isinstance(frames, list)
-        self.assertEqual(frames[7]["focus"], "7")
-        self.assertEqual(frames[8]["focus"], "7")
-        self.assertNotEqual(frames[7]["pixels"], frames[8]["pixels"])
-        self.assertEqual(frames[-1]["view"], "library")
-        settings = run["settings"]
-        assert isinstance(settings, dict)
-        self.assertEqual(settings.get("present_scaling"), "integer")
-
-    def test_settings_ui_sounds_toggle_is_the_last_stop_and_saves(self) -> None:
-        """The launcher sounds switch is focused after every older control, so their stops keep their places."""
-        run = self.run_player("settings", ("KEY_TAB",) * 17 + ("KEY_RETURN",))
-        frames = run["frames"]
-        assert isinstance(frames, list)
-        self.assertEqual(frames[0]["focus_count"], "18")
-        self.assertEqual(frames[17]["focus"], "17")
-        self.assertNotEqual(frames[17]["pixels"], frames[18]["pixels"])
-        settings = run["settings"]
-        assert isinstance(settings, dict)
-        self.assertIs(settings.get("ui_sounds"), True)
-
-    def test_settings_about_opens_the_pinned_license_list(self) -> None:
-        run = self.run_player("settings", ("KEY_TAB",) * 13 + ("KEY_RETURN",))
-        frames = run["frames"]
-        assert isinstance(frames, list)
-        self.assertEqual(frames[0]["focus_count"], "18")
-        self.assertEqual(frames[13]["focus"], "13")
-        self.assertEqual(frames[-1]["view"], "prereq_about")
-
-    def test_settings_removal_requires_confirmation_and_keeps_other_app_data(self) -> None:
-        # Settings > BUILD TOOLS AND CACHE, then that page's REMOVE DOWNLOADED BUILD TOOLS.
-        events = ("KEY_TAB",) * 14 + ("KEY_RETURN", "KEY_TAB", "KEY_TAB", "KEY_RETURN", "KEY_RETURN")
-        run = self.run_player("settings", events, downloaded_tool_payload=True)
-        frames = run["frames"]
-        assert isinstance(frames, list)
-        self.assertEqual(frames[14]["focus"], "14")
-        self.assertEqual(frames[15]["view"], "build_cache")
-        self.assertEqual(frames[18]["view"], "confirm_remove_tools")
-        self.assertEqual(frames[-1]["view"], "settings")
-        self.assertFalse(run["downloaded_tool_marker_exists"])
-
-    def test_settings_layout_avoids_launcher_save_overlap_at_client_widths(self) -> None:
-        cases = (
-            (1044, 900, "1"),
-            (1187, 900, "1"),
-            (1043, 900, "0"),
-            (800, 720, "0"),
-            (1188, 619, "0"),
-            (1188, 620, "1"),
-        )
-        for width, height, expected_two_col in cases:
-            with self.subTest(width=width, height=height):
-                run = self.run_player("settings", width=width, height=height)
-                frames = run["frames"]
-                assert isinstance(frames, list)
-                self.assertEqual(frames[0]["settings_two_col"], expected_two_col)
-
-    def test_settings_text_is_drawn_with_the_font_it_was_laid_out_with(self) -> None:
-        """Long settings text (the VBlank note) never switches to the bitmap font.
-
-        Wrapping is measured with the TTF font. A string longer than the glyph
-        cache used to fall back to the wider bitmap font, so the note ran past
-        the panel's right edge. No frame may draw text that way while TTF is on."""
-        run = self.run_player("settings", width=1280, height=720)
-        frames = run["frames"]
-        assert isinstance(frames, list)
-        ttf_frames = [frame for frame in frames if frame["font"] == "ttf"]
-        if not ttf_frames:
-            self.skipTest("the system TTF font is not available in this environment")
-        for frame in ttf_frames:
-            self.assertEqual(frame["bitmap_text_draws"], "0", run["stdout"])
-
     def test_script_can_wait_for_a_view_and_a_minimum_duration(self) -> None:
         started = time.monotonic()
         run = self.run_player(
@@ -3216,15 +3441,6 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertIn("[PLAYER_UI_TEST] wait_ms result=PASS", run["stdout"])
         self.assertIn("[PLAYER_UI_TEST] assert_view result=PASS actual=library", run["stdout"])
         self.assertEqual(frames[-1]["view"], "settings")
-
-    def test_mouse_click_adds_disc_through_sdl_event_loop(self) -> None:
-        run = self.run_player(
-            "library", ("MOUSE_MOVE=400,360", "MOUSE_DOWN", "MOUSE_UP")
-        )
-        frames = run["frames"]
-        assert isinstance(frames, list)
-        self.assertEqual(frames[2]["picker"], "1")
-        self.assertNotEqual(frames[0]["pixels"], frames[2]["pixels"])
 
     def test_library_card_states_include_experimental_and_ready(self) -> None:
         # The ordinary library auto-discovers built showcase packages beside
@@ -3291,7 +3507,7 @@ class NativePlayerUiTests(unittest.TestCase):
         # per-frame floor here; they only reject the maintainer-reported shape
         # (a first frame of seconds, steady frames of hundreds of ms).
         events = ("KEY_LEFT",) * 24
-        offline = self.run_player(
+        offline = self.next_ui_run(
             "ready",
             events,
             art_iso="unavailable",
@@ -3312,13 +3528,14 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertLess(offline["wall_seconds"], 6.0)
         self.assertEqual(frames[-1]["selected_package_status"], "3")
         self.assertEqual(frames[-1]["selected_runtime"], "0")
-        # An absent disc image must show the initials placeholder, never a
-        # blank or a blocked frame waiting for the drive.
-        self.assertFalse(has_icon_art(offline["bmp"]))
+        # An absent disc image must show the placeholder, never a blank or a
+        # blocked frame waiting for the drive.
+        self.assertNotIn("next_ui_disc_icon", offline["stdout"])
 
-        available = self.run_player(
+        available = self.next_ui_run(
             "ready",
-            ("KEY_LEFT",) * 8,
+            # The launcher reads a card's art in the background once it is shown.
+            ("KEY_LEFT",) * 8 + ("WAIT_MS=1500",),
             art_iso="available",
             stale_package=True,
             wait_background=True,
@@ -3331,7 +3548,8 @@ class NativePlayerUiTests(unittest.TestCase):
         )
         self.assertEqual(art_frames[-1]["selected_package_status"], "3")
         # Synthetic icon art arrives without blocking the UI frame.
-        self.assertTrue(has_icon_art(available["bmp"]))
+        self.assertIn("[PLAYER_UI_TEST] next_ui_disc_icon index=0 width=1 height=1",
+                      available["stdout"])
 
     # An upgrade can leave a built package the validator no longer accepts. The
     # card then offers REBUILD PACKAGE (#1147) with the same consent, progress
@@ -3347,29 +3565,6 @@ class NativePlayerUiTests(unittest.TestCase):
             ("building_package", "prereq_consent", "prereq_progress", "error"),
             stdout,
         )
-
-    def test_incompatible_card_offers_rebuild_package_in_the_legacy_renderer(self) -> None:
-        shown = self.run_player("ready", (), incompatible_package=True, wait_background=True)
-        frames = shown["frames"]
-        assert isinstance(frames, list)
-        self.assertEqual(frames[-1]["selected_package_status"], "2", shown["stdout"])
-        self.assertEqual(frames[-1]["incompatible_reason"], self.INCOMPATIBLE_REASON)
-        # The button is a focus stop (it was a dead pill, with no stop).
-        self.assertEqual(frames[-1]["focus_count"], "4")
-        run = self.run_player(
-            "ready",
-            ("WAIT_PACKAGE_STATUS=INCOMPATIBLE,10000", "KEY_RETURN"),
-            incompatible_package=True,
-            wait_background=True,
-        )
-        self.assertIn("[PLAYER_UI_TEST] wait_package_status result=PASS", run["stdout"])
-        frames = run["frames"]
-        assert isinstance(frames, list)
-        self.assertEqual(frames[0]["view"], "ready_library")
-        self.assertTrue(
-            any(frame["selected_package_status"] == "2" for frame in frames), run["stdout"]
-        )
-        self.assert_rebuild_started(frames, run["stdout"])
 
     # A stand-in for tools/nk_cli.py that builds nothing: it records that it
     # started, then writes a heartbeat until it is stopped or 8 s pass.
@@ -3389,9 +3584,9 @@ class NativePlayerUiTests(unittest.TestCase):
     def test_closing_the_player_stops_a_running_package_build(self) -> None:
         # The player used to exit with a package build still running. On Linux
         # the build ran on as an orphan and kept writing into the data folder,
-        # which is how test_incompatible_card_offers_rebuild_package_in_the_
-        # legacy_renderer failed hosted CI with "Directory not empty" when its
-        # scratch folder was removed. A slow stand-in build makes that certain.
+        # which is how the old renderer's rebuild test failed hosted CI with
+        # "Directory not empty" when its scratch folder was removed. A slow
+        # stand-in build makes that certain.
         with tempfile.TemporaryDirectory(
             prefix=".slow-build-", dir=ROOT, ignore_cleanup_errors=True
         ) as tmp:
@@ -3401,12 +3596,13 @@ class NativePlayerUiTests(unittest.TestCase):
                                                               encoding="utf-8")
             witness = Path(tmp) / "witness"
             witness.mkdir()
-            run = self.run_player(
+            run = self.next_ui_run(
                 "ready",
-                ("WAIT_PACKAGE_STATUS=INCOMPATIBLE,10000", "KEY_RETURN", "WAIT_MS=1500"),
+                # Open the title, then its primary action, REBUILD PACKAGE (launcher review B6).
+                ("WAIT_PACKAGE_STATUS=INCOMPATIBLE,10000", "KEY_RETURN", "WAIT_MS=300",
+                 "KEY_RETURN", "WAIT_MS=1500"),
                 incompatible_package=True,
                 wait_background=True,
-                ui_mode="legacy",
                 env_extra={
                     "NK_INSTALL_ROOT": str(install_root),
                     "NK_UI_TEST_BUILD_WITNESS": str(witness),
@@ -3430,7 +3626,6 @@ class NativePlayerUiTests(unittest.TestCase):
     def test_incompatible_title_offers_rebuild_package_in_the_next_ui(self) -> None:
         shown = self.run_player(
             "ready", ("WAIT_MS=100",), incompatible_package=True, wait_background=True,
-            ui_mode="next",
         )
         if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in shown["stdout"]:
             self.skipTest("the next UI needs SDL3_ttf, which this host lacks")
@@ -3444,7 +3639,7 @@ class NativePlayerUiTests(unittest.TestCase):
             "ready",
             # Open the title: its primary action has focus (launcher review B6).
             ("WAIT_MS=300", "KEY_RETURN", "WAIT_MS=300", "KEY_RETURN", "WAIT_MS=300"),
-            incompatible_package=True, wait_background=True, ui_mode="next",
+            incompatible_package=True, wait_background=True,
         )
         frames = run["frames"]
         assert isinstance(frames, list)
@@ -3469,129 +3664,6 @@ class NativePlayerUiTests(unittest.TestCase):
             r"reloads=128 status_checks=128 status=1",
         )
 
-    def test_exit_path_joins_iso_art_workers_and_tears_down_textures(self) -> None:
-        """ui_font_shutdown() is the only place the ISO-art workers are joined
-        and the only font/texture teardown. Every exit has to reach it, so the
-        launcher never destroys the SDL queue or renderer while a worker is
-        still inside it."""
-        run = self.run_player(
-            "ready",
-            ("WAIT_ART_DELAY_ACTIVE", "QUIT"),
-            art_iso="available",
-            env_extra={"PLAYER_UI_TEST_ART_DELAY_MS": "5000"},
-        )
-        self.assertIn(
-            "[PLAYER_UI_TEST] wait_art_delay_active result=PASS", run["stdout"]
-        )
-        shutdown = re.findall(
-            r"\[PLAYER_UI_TEST\] font_shutdown "
-            r"art_jobs_active_at_shutdown=(\d+) art_jobs_drained=(\d+)",
-            run["stdout"],
-        )
-        self.assertEqual(len(shutdown), 1, run["stdout"])
-        self.assertEqual(shutdown[0], ("1", "1"), run["stdout"])
-
-    def test_iso_art_failures_reach_a_terminal_state_after_bounded_retries(self) -> None:
-        run = self.run_player(
-            "ready",
-            ("WAIT_ART_ATTEMPT=3", "WAIT_MS=2500"),
-            art_iso="unavailable",
-            env_extra={"PLAYER_UI_TEST_NO_PNG_DECODER": "1"},
-        )
-        attempts = re.findall(
-            r"\[PLAYER_UI_TEST\] art_attempt index=(\d+) "
-            r"completed_ns=(\d+) icon_loaded=(\d) pic1_loaded=(\d) wanted=(\d+) "
-            r"icon_state=(\w+) pic1_state=(\w+)",
-            run["stdout"],
-        )
-        self.assertEqual(len(attempts), 3, run["stdout"])
-        # A missing image remains retryable, then ends specifically as absent;
-        # it is not the same result as corrupt bytes or an unsupported decoder.
-        self.assertEqual(attempts[-1][5:], ("absent", "absent"), run["stdout"])
-
-    def test_corrupt_art_is_failed_after_bounded_retries(self) -> None:
-        run = self.run_player(
-            "ready",
-            ("WAIT_ART_ATTEMPT=3", "WAIT_MS=2500"),
-            art_iso="corrupt",
-            wait_background=True,
-        )
-        attempts = re.findall(
-            r"\[PLAYER_UI_TEST\] art_attempt index=(\d+) "
-            r"completed_ns=(\d+) icon_loaded=(\d) pic1_loaded=(\d) wanted=(\d+) "
-            r"icon_state=(\w+) pic1_state=(\w+)",
-            run["stdout"],
-        )
-        self.assertEqual(len(attempts), 3, run["stdout"])
-        self.assertEqual(attempts[-1][5:], ("failed", "loaded"), run["stdout"])
-
-    def test_readable_art_without_png_decoder_is_unsupported(self) -> None:
-        run = self.run_player(
-            "ready",
-            ("WAIT_ART_ATTEMPT=1", "WAIT_MS=2500"),
-            art_iso="available",
-            wait_background=True,
-            env_extra={"PLAYER_UI_TEST_NO_PNG_DECODER": "1"},
-        )
-        attempts = re.findall(
-            r"\[PLAYER_UI_TEST\] art_attempt index=(\d+) "
-            r"completed_ns=(\d+) icon_loaded=(\d) pic1_loaded=(\d) wanted=(\d+) "
-            r"icon_state=(\w+) pic1_state=(\w+)",
-            run["stdout"],
-        )
-        self.assertEqual(len(attempts), 1, run["stdout"])
-        self.assertEqual(
-            attempts[0][2:],
-            ("0", "0", "3", "unsupported", "unsupported"),
-            run["stdout"],
-        )
-        self.assertFalse(has_icon_art(run["bmp"]), run["stdout"])
-
-    def test_decoder_rejection_is_failed_after_bounded_retries(self) -> None:
-        """A decoder rejection is a failed image, not a build capability result."""
-        run = self.run_player(
-            "ready",
-            ("WAIT_ART_ATTEMPT=3", "WAIT_MS=2500"),
-            art_iso="undecodable",
-            wait_background=True,
-        )
-        attempts = re.findall(
-            r"\[PLAYER_UI_TEST\] art_attempt index=(\d+) "
-            r"completed_ns=(\d+) icon_loaded=(\d) pic1_loaded=(\d) wanted=(\d+) "
-            r"icon_state=(\w+) pic1_state=(\w+)",
-            run["stdout"],
-        )
-        self.assertEqual(len(attempts), 3, run["stdout"])
-        self.assertEqual(
-            attempts[0][2:],
-            ("0", "1", "3", "pending", "loaded"),
-            run["stdout"],
-        )
-        self.assertEqual(attempts[-1][5:], ("failed", "loaded"), run["stdout"])
-        self.assertFalse(has_icon_art(run["bmp"]), run["stdout"])
-
-    def test_iso_art_retry_rereads_only_the_image_that_is_still_missing(self) -> None:
-        """A disc with ICON0.PNG and no PIC1.PNG must not re-read its icon
-        (up to 1 MiB) on every retry: the attempt after the first asks only for
-        the picture it is still missing."""
-        run = self.run_player(
-            "ready",
-            ("WAIT_ART_ATTEMPT=1", "WAIT_MS=1500"),
-            art_iso="icon-only",
-            wait_background=True,
-        )
-        self.assertTrue(has_icon_art(run["bmp"]), run["stdout"])
-        attempts = re.findall(
-            r"\[PLAYER_UI_TEST\] art_attempt index=(\d+) "
-            r"completed_ns=(\d+) icon_loaded=(\d) pic1_loaded=(\d) wanted=(\d)",
-            run["stdout"],
-        )
-        self.assertGreaterEqual(len(attempts), 2, run["stdout"])
-        self.assertEqual(attempts[0][2:], ("1", "0", "3"))
-        for attempt in attempts[1:]:
-            # 2 == NK_ISO_ART_PICTURE: the loaded icon is not read again.
-            self.assertEqual(attempt[2:], ("1", "0", "2"), run["stdout"])
-
     def test_every_queued_title_claims_a_check_before_its_first_result(self) -> None:
         """A title whose package status is not known yet must be claimed as
         checking. Leaving it unclaimed shows "BUILD PACKAGE" for a title that
@@ -3604,19 +3676,17 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertEqual(frame["titles_pending"], str(titles), run["stdout"])
 
     def test_lost_worker_events_are_reclaimed_instead_of_stalling_the_card(self) -> None:
-        """A worker whose completion event never reaches the queue must not
-        leave its card pending for the session. With every push refused the
-        launcher still finishes both jobs, so the harness reaches its quit
-        instead of waiting on background work that can never finish."""
+        """A package-status worker whose completion event never reaches the
+        queue must not leave its card pending for the session. With every push
+        refused the launcher still applies the worker's result, so the harness
+        reaches its quit instead of waiting on a check that can never finish."""
         run = self.run_player(
             "ready",
             ("WAIT_MS=1200",),
-            art_iso="available",
             stale_package=True,
             wait_background=True,
             env_extra={"NK_UI_TEST_DROP_WORKER_EVENT": "1"},
         )
-        self.assertIn("ISO art for", run["stderr"])
         self.assertIn("Package status for", run["stderr"])
         frames = run["frames"]
         assert isinstance(frames, list)
@@ -3626,8 +3696,6 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertEqual(frames[-1]["titles_pending"], "0", run["stdout"])
         self.assertEqual(frames[-1]["titles_unclaimed"], "0", run["stdout"])
         self.assertEqual(frames[-1]["selected_package_status"], "3", run["stdout"])
-        # The art job was reclaimed, so the icon is retried rather than lost.
-        self.assertFalse(has_icon_art(run["bmp"]), run["stdout"])
 
     def test_package_status_thread_creation_failure_is_unresolved_and_retryable(
         self,
@@ -3635,12 +3703,14 @@ class NativePlayerUiTests(unittest.TestCase):
         """A failed worker start stays unresolved until the user retries.
 
         The 2-second library rescan must not turn one create failure into a
-        repeating thread-creation loop. The retry button then enters the same
-        production queue and lets the real validator establish MISSING.
+        repeating thread-creation loop. RETRY PACKAGE CHECK, the title page's
+        primary action, then enters the same production queue and lets the real
+        validator establish MISSING.
         """
-        run = self.run_player(
+        run = self.next_ui_run(
             "ready",
-            events=("WAIT_MS=2200", "KEY_RETURN", "WAIT_MS=100"),
+            # Open the title; its primary action has focus (launcher review B6).
+            events=("WAIT_MS=2200", "KEY_RETURN", "WAIT_MS=300", "KEY_RETURN", "WAIT_MS=300"),
             wait_background=True,
             env_extra={
                 "NK_UI_TEST_FAIL_PACKAGE_STATUS_THREAD_CREATE_AT": "1"
@@ -3653,7 +3723,9 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertTrue(failed_frames, run["stdout"])
         self.assertTrue(all(frame["selected_package_status"] == "4"
                             for frame in failed_frames), run["stdout"])
-        self.assertTrue(all(frame["package_check_failed_badge"] == "1"
+        self.assertTrue(all(frame["next_package"] == self.NEXT_PACKAGE_CHECK_FAILED
+                            for frame in failed_frames), run["stdout"])
+        self.assertTrue(any(frame["next_primary_label"] == "RETRY_PACKAGE_CHECK"
                             for frame in failed_frames), run["stdout"])
         self.assertTrue(all(frame["titles_failed"] == "1" and
                             frame["titles_pending"] == "0" and
@@ -3672,12 +3744,19 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertEqual(frames[-1]["selected_package_status"], "1")
         self.assertEqual(frames[-1]["package_building"], "0")
 
+    # PLAYER_UI_PACKAGE_CHECK_FAILED (player_ui_nk.h): the title's package check failed.
+    NEXT_PACKAGE_CHECK_FAILED = "4"
+
     def test_failed_post_build_worker_start_survives_cache_invalidation_and_retries(self) -> None:
-        run = self.run_player(
+        run = self.next_ui_run(
             "ready",
             events=(
                 "WAIT_VIEW=library,5000",
                 "INVALIDATE_PACKAGE_CACHE",
+                # Open the title, then RETRY PACKAGE CHECK, its primary action.
+                "WAIT_MS=100",
+                "KEY_RETURN",
+                "WAIT_MS=300",
                 "KEY_RETURN",
                 "WAIT_MS=100",
                 "WAIT_VIEW=ready_library,10000",
@@ -3705,7 +3784,9 @@ class NativePlayerUiTests(unittest.TestCase):
         failed_frames = [frame for frame in frames
                          if frame["selected_package_check_failed"] == "1"]
         self.assertTrue(failed_frames, run["stdout"])
-        self.assertTrue(all(frame["package_check_failed_badge"] == "1"
+        self.assertTrue(all(frame["next_package"] == self.NEXT_PACKAGE_CHECK_FAILED
+                            for frame in failed_frames), run["stdout"])
+        self.assertTrue(any(frame["next_primary_label"] == "RETRY_PACKAGE_CHECK"
                             for frame in failed_frames), run["stdout"])
         self.assertTrue(any(frame["package_status_thread_attempts"] == "2"
                             and frame["view"] == "library"
@@ -3760,10 +3841,14 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertEqual(frames[-1]["selected_package_status"], "1")
 
     def test_completed_retry_clears_failure_when_cache_generation_changes(self) -> None:
-        run = self.run_player(
+        run = self.next_ui_run(
             "ready",
             events=(
+                # Open the title, then RETRY PACKAGE CHECK; the 600 ms worker delay
+                # keeps the invalidation inside the retry's check.
                 "WAIT_MS=100",
+                "KEY_RETURN",
+                "WAIT_MS=200",
                 "KEY_RETURN",
                 "WAIT_MS=100",
                 "INVALIDATE_PACKAGE_CACHE",
@@ -3778,6 +3863,8 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertIn("[PLAYER_UI_TEST] invalidate_package_cache", run["stdout"])
         frames = run["frames"]
         assert isinstance(frames, list)
+        self.assertTrue(any(frame["next_primary_label"] == "RETRY_PACKAGE_CHECK"
+                            for frame in frames), run["stdout"])
         self.assertGreaterEqual(
             int(frames[-1]["package_status_thread_attempts"]), 3,
             run["stdout"],
@@ -3796,7 +3883,7 @@ class NativePlayerUiTests(unittest.TestCase):
         check's thread, so the window stayed up until the check ended (up to
         about 25 s with three titles); now the check stops at its next read."""
         run = self.run_player(
-            "ready", ("WAIT_MS=300",), ui_mode="next",
+            "ready", ("WAIT_MS=300",),
             env_extra={"NK_UI_TEST_PACKAGE_STATUS_WORKER_DELAY_MS": "5000"},
         )
         frames = run["frames"]
@@ -3817,7 +3904,7 @@ class NativePlayerUiTests(unittest.TestCase):
         # 4.5 s spans the first check (1.5 s) and the periodic re-check that starts after
         # 2 s with no check running.
         run = self.run_player(
-            "ready", ("WAIT_MS=4500",), wait_background=True, ui_mode="next",
+            "ready", ("WAIT_MS=4500",), wait_background=True,
             env_extra={"NK_UI_TEST_PACKAGE_STATUS_WORKER_DELAY_MS": "1500"},
         )
         if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in str(run["stdout"]):
@@ -3850,7 +3937,7 @@ class NativePlayerUiTests(unittest.TestCase):
         ends when the check under way finishes."""
         try:
             run = self.run_player(
-                "ready", ("WAIT_MS=500",), wait_background=True, ui_mode="next",
+                "ready", ("WAIT_MS=500",), wait_background=True,
                 env_extra={"NK_UI_TEST_PACKAGE_STATUS_WORKER_DELAY_MS": "2500"},
                 timeout=30.0,
             )
@@ -3970,6 +4057,11 @@ class NativePlayerUiTests(unittest.TestCase):
                 "START_SYNTHETIC_BUILD=2",
                 "WAIT_VIEW=ready_library,10000",
                 "ASSERT_VIEW=ready_library",
+                # The script started the builds, not the launcher's focus, which
+                # is still on A's card: select B to read its state.
+                "WAIT_MS=100",
+                "KEY_RIGHT",
+                "WAIT_MS=100",
                 "QUIT",
             ),
             runtime_ready=True,
@@ -3999,19 +4091,24 @@ class NativePlayerUiTests(unittest.TestCase):
                 for frame in frames),
             run["stdout"],
         )
-        self.assertEqual(frames[-1]["selected_disc"], "TEST00006")
-        self.assertEqual(frames[-1]["selected_package_check_failed"], "0")
-        self.assertEqual(frames[-1]["selected_package_status"], "0")
+        self.assertEqual(frames[-1]["selected_disc"], "TEST00006", run["stdout"])
+        self.assertEqual(frames[-1]["selected_package_check_failed"], "0", run["stdout"])
+        self.assertEqual(frames[-1]["selected_package_status"], "0", run["stdout"])
 
     def test_repeated_post_build_failures_keep_prior_title_retryable(self) -> None:
-        run = self.run_player(
+        run = self.next_ui_run(
             "library",
             events=(
                 "START_SYNTHETIC_BUILD=2",
                 "WAIT_PACKAGE_FAILURE=TEST00006,1",
                 "START_SYNTHETIC_BUILD=1",
                 "WAIT_PACKAGE_FAILURE=TEST00005,1",
+                # Select B, open its title, then RETRY PACKAGE CHECK.
+                "WAIT_MS=100",
                 "KEY_RIGHT",
+                "WAIT_MS=100",
+                "KEY_RETURN",
+                "WAIT_MS=300",
                 "KEY_RETURN",
                 "WAIT_PACKAGE_FAILURE=TEST00006,2",
                 "QUIT",
@@ -4056,25 +4153,6 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertEqual(frames[-1]["selected_package_check_failed"], "1")
         self.assertEqual(frames[-1]["selected_package_status"], "4")
         self.assertEqual(frames[-1]["titles_pending"], "0")
-
-    def test_texture_cache_saturation_with_in_flight_jobs_does_not_double_free_or_format_percent_tokens(
-        self,
-    ) -> None:
-        """When all 64 texture cache slots have in-flight art jobs, a new
-        request must return no slot rather than evicting and freeing a job whose
-        completion event is already in the SDL event queue. Evicting the in-flight
-        job would cause a use-after-free and double-free when its completion
-        event is subsequently delivered. The caller-owned path contains literal
-        %s/%p tokens to catch its accidental use as a printf format string."""
-        run = self.run_player(
-            "ready",
-            ("SATURATE_ART_CACHE",),
-            art_iso="saturated",
-        )
-        self.assertIn(
-            "[PLAYER_UI_TEST] saturate_art_cache result=PASS slots=64 delivered=64 overflow_refused=1",
-            run["stdout"],
-        )
 
     def test_async_build_validation_enters_ready_library(self) -> None:
         run = self.run_player(
@@ -4143,7 +4221,6 @@ class NativePlayerUiTests(unittest.TestCase):
         cancelled = self.run_player(
             "building",
             ("KEY_ESCAPE", "WAIT_MS=200", "KEY_S", "WAIT_MS=300", "ASSERT_VIEW=settings"),
-            ui_mode="next",
         )
         if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in cancelled["stdout"]:
             self.skipTest("the next UI needs SDL3_ttf, which this host lacks")
@@ -4153,26 +4230,6 @@ class NativePlayerUiTests(unittest.TestCase):
         cancelled_frames = cancelled["frames"]
         assert isinstance(cancelled_frames, list)
         self.assertEqual(cancelled_frames[-1]["view"], "settings")
-
-    def test_late_mounted_iso_art_retries_after_cooldown(self) -> None:
-        run = self.run_player(
-            "ready",
-            ("WAIT_ART_ATTEMPT=1", "MOUNT_ART_ISO", "WAIT_ART_ATTEMPT=2"),
-            art_iso="late",
-            wait_background=True,
-        )
-        self.assertTrue(has_icon_art(run["bmp"]))
-        attempts = re.findall(
-            r"\[PLAYER_UI_TEST\] art_attempt index=(\d+) "
-            r"completed_ns=(\d+) icon_loaded=(\d) pic1_loaded=(\d)",
-            run["stdout"],
-        )
-        self.assertEqual(len(attempts), 2, run["stdout"])
-        self.assertEqual(attempts[0][2:], ("0", "0"))
-        self.assertEqual(attempts[1][2:], ("1", "1"))
-        retry_delay_ns = int(attempts[1][1]) - int(attempts[0][1])
-        self.assertGreaterEqual(retry_delay_ns, 1_000_000_000)
-        self.assertLessEqual(retry_delay_ns, 2_500_000_000)
 
     def test_inspection_and_support_screens_render_and_return(self) -> None:
         for view in ("inspecting", "supported", "experimental", "unsupported"):
@@ -4185,13 +4242,17 @@ class NativePlayerUiTests(unittest.TestCase):
                 self.assertNotEqual(frames[0]["pixels"], frames[-1]["pixels"])
 
     def test_staged_card_exposes_runtime_required_status(self) -> None:
-        run = self.run_player("ready")
+        run = self.next_ui_run("ready", ("WAIT_MS=300",), wait_background=True)
         frame = run["frames"][0]  # type: ignore[index]
         self.assertEqual(frame["selected_staged"], "1")
         self.assertEqual(frame["selected_runtime"], "0")
-        frames = run["frames"]
-        assert isinstance(frames, list)
-        self.assertTrue(has_amber_badge(run["bmp"], badge_rect(frames[-1])))
+        statuses = [
+            line.split("status=", 1)[1]
+            for line in str(run["stdout"]).splitlines()
+            if line.startswith("[PLAYER_UI_TEST] next_ui_library_status index=0 ")
+        ]
+        self.assertTrue(statuses, run["stdout"])
+        self.assertEqual(statuses[-1], "Needs setup", statuses)
 
     def test_several_dropped_files_open_one_disc_and_say_what_happened(self) -> None:
         # The real SDL drop events through the player's event loop: two disc images and a text
@@ -4266,75 +4327,6 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertEqual(build_frames[1]["package_cancelled"], "1")
         self.assertEqual(build_frames[1]["view"], "library")
 
-    def test_build_screen_follows_the_build_state(self) -> None:
-        """The build screen names the state the session is in.
-
-        A package that has been written reads PACKAGE BUILT while it is checked.
-        It used to keep reading BUILDING RUNTIME PACKAGE, because only the stage
-        chips looked at completion."""
-        running = self.run_player("building", ("KEY_ESCAPE",))
-        running_frames = running["frames"]
-        assert isinstance(running_frames, list)
-        self.assertEqual(running_frames[0]["build_badge"], "BUILDING_RUNTIME_PACKAGE")
-
-        built = self.run_player("build-ready")
-        built_frames = built["frames"]
-        assert isinstance(built_frames, list)
-        self.assertEqual(built_frames[0]["view"], "building_package")
-        self.assertEqual(built_frames[0]["build_badge"], "PACKAGE_BUILT", built["stdout"])
-
-    def test_build_bar_shows_the_compiled_share_of_parts(self) -> None:
-        """A compile stage that counts its parts fills the bar to that share.
-
-        Without a count the bar sweeps and claims no percentage; a package build
-        once sat on that sweep for minutes with no sign of how far it had got.
-        The same count carries a calm note that other apps may feel slower, drawn
-        under the bar; a build without one draws no note. The next UI's card is
-        checked by nk-ui-player-screens-selftest."""
-        sweeping = self.run_player("building", ("KEY_ESCAPE",), ui_mode="legacy")
-        sweeping_frames = sweeping["frames"]
-        assert isinstance(sweeping_frames, list)
-        self.assertEqual(sweeping_frames[0]["build_badge"], "BUILDING_RUNTIME_PACKAGE")
-        self.assertEqual(sweeping_frames[0]["build_bar_permille"], "-1")
-        self.assertEqual(sweeping_frames[0]["build_notice"], "0")
-
-        counted = self.run_player("building-parts", ("KEY_ESCAPE",), ui_mode="legacy")
-        counted_frames = counted["frames"]
-        assert isinstance(counted_frames, list)
-        self.assertEqual(counted_frames[0]["view"], "building_package")
-        self.assertEqual(counted_frames[0]["build_bar_permille"], "300", counted["stdout"])
-        self.assertEqual(counted_frames[0]["build_notice"], "1", counted["stdout"])
-        self.assertEqual(counted_frames[1]["build_bar_permille"], "-1")
-        self.assertEqual(counted_frames[1]["build_notice"], "0")
-
-    def test_controller_bind_conflict_calibration_and_profile_save(self) -> None:
-        bind = self.run_player("controller", ("KEY_TAB", "KEY_RETURN", "PAD_SOUTH"))
-        bind_frames = bind["frames"]
-        assert isinstance(bind_frames, list)
-        self.assertEqual(bind_frames[2]["controller_capturing"], "1")
-        self.assertEqual(bind_frames[3]["controller_capturing"], "0")
-        # A taken button swaps with the chosen control's (#1299): no conflict is left.
-        self.assertEqual(bind_frames[3]["controller_conflicts"], "0")
-        self.assertNotEqual(bind_frames[0]["start_binding"], bind_frames[3]["start_binding"])
-
-        calibrate = self.run_player(
-            "controller", tuple(["KEY_TAB"] * 18 + ["KEY_RETURN", "KEY_ESCAPE"])
-        )
-        cal_frames = calibrate["frames"]
-        assert isinstance(cal_frames, list)
-        self.assertEqual(cal_frames[19]["calibrating"], "1")
-        self.assertEqual(cal_frames[20]["calibrating"], "0")
-        self.assertEqual(cal_frames[20]["view"], "controller")
-
-        invalid = self.run_player("controller", (), invalid_profile=True)
-        invalid_frame = invalid["frames"][0]  # type: ignore[index]
-        self.assertEqual(invalid_frame["profile_fallback"], "1")
-
-        save = self.run_player("controller", tuple(["KEY_TAB"] * 19 + ["KEY_RETURN"]))
-        save_frame = save["frames"][-2]  # type: ignore[index]
-        self.assertEqual(save_frame["profile_save_notice"], "1")
-        self.assertTrue(save["profile_exists"])
-
     def test_corrupt_disc_and_error_card_recovery(self) -> None:
         corrupt = self.run_player("library", ("KEY_RETURN",), drop_invalid_iso=True)
         error_frames = corrupt["frames"]
@@ -4350,26 +4342,13 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertEqual(missing_source_frames[1]["picker"], "1")
 
     def test_invalid_disc_in_wizard_is_visible_without_a_selected_iso(self) -> None:
-        for ui_mode in (None, "legacy"):
-            with self.subTest(ui_mode=ui_mode or "default"):
-                baseline = self.run_player("wizard2", ui_mode=ui_mode)
-                rejected = self.run_player(
-                    "wizard2", drop_invalid_iso=True, ui_mode=ui_mode
-                )
-                baseline_frames = baseline["frames"]
-                rejected_frames = rejected["frames"]
-                assert isinstance(baseline_frames, list)
-                assert isinstance(rejected_frames, list)
-                baseline_frame = baseline_frames[-1]
-                rejected_frame = rejected_frames[-1]
-                self.assertEqual(rejected_frame["view"], "wizard")
-                self.assertEqual(rejected_frame["wizard_step"], "select_game")
-                self.assertEqual(rejected_frame["bad_disc_notice"], "1")
-                if ui_mode == "legacy":
-                    self.assertNotEqual(
-                        rejected_frame["pixels"], baseline_frame["pixels"],
-                        "the legacy renderer must show the invalid-file sentence",
-                    )
+        rejected = self.run_player("wizard2", drop_invalid_iso=True)
+        rejected_frames = rejected["frames"]
+        assert isinstance(rejected_frames, list)
+        rejected_frame = rejected_frames[-1]
+        self.assertEqual(rejected_frame["view"], "wizard")
+        self.assertEqual(rejected_frame["wizard_step"], "select_game")
+        self.assertEqual(rejected_frame["bad_disc_notice"], "1")
 
         recovery_codes = (
             "EXPERIMENTAL_PROFILE_FAILED",
@@ -4388,27 +4367,25 @@ class NativePlayerUiTests(unittest.TestCase):
             "RUNTIME_PREMATURE_EXIT",
             "RUNTIME_ERROR_EXIT",
         )
-        # Both launchers: the next UI applies a control's action after the frame
-        # that drew it, so the frame of the press still shows the card and the
-        # library is drawn from the next frame; compare a frame after the wait.
-        for ui_mode in ("next", "legacy"):
-            for code in recovery_codes:
-                with self.subTest(code=code, ui_mode=ui_mode):
-                    recovered = self.run_player(
-                        "library", ("KEY_RETURN", "WAIT_MS=100"), error_code=code,
-                        ui_mode=ui_mode,
-                    )
-                    frames = recovered["frames"]
-                    assert isinstance(frames, list)
-                    self.assertEqual(frames[0]["view"], "error")
-                    self.assertEqual(frames[0]["error"], code)
-                    self.assertEqual(frames[1]["view"], "library")
-                    self.assertEqual(frames[-1]["view"], "library")
-                    self.assertNotEqual(frames[0]["pixels"], frames[-1]["pixels"],
-                                        "the library replaces the error card on screen")
-                    # Only a missing or corrupt source reopens the file picker.
-                    expected_picker = "1" if code in ("ISO_CORRUPT", "SOURCE_NOT_FOUND") else "0"
-                    self.assertEqual(frames[1]["picker"], expected_picker)
+        # The launcher applies a control's action after the frame that drew it,
+        # so the frame of the press still shows the card and the library is
+        # drawn from the next frame; compare a frame after the wait.
+        for code in recovery_codes:
+            with self.subTest(code=code):
+                recovered = self.run_player(
+                    "library", ("KEY_RETURN", "WAIT_MS=100"), error_code=code,
+                )
+                frames = recovered["frames"]
+                assert isinstance(frames, list)
+                self.assertEqual(frames[0]["view"], "error")
+                self.assertEqual(frames[0]["error"], code)
+                self.assertEqual(frames[1]["view"], "library")
+                self.assertEqual(frames[-1]["view"], "library")
+                self.assertNotEqual(frames[0]["pixels"], frames[-1]["pixels"],
+                                    "the library replaces the error card on screen")
+                # Only a missing or corrupt source reopens the file picker.
+                expected_picker = "1" if code in ("ISO_CORRUPT", "SOURCE_NOT_FOUND") else "0"
+                self.assertEqual(frames[1]["picker"], expected_picker)
 
     def test_pbp_package_error_card_names_the_package_boundary(self) -> None:
         """A store package dropped as an ISO is named as a package, not a broken disc.
@@ -4424,6 +4401,38 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertEqual(frames[1]["view"], "error")
         self.assertEqual(frames[1]["error"], "PBP_PACKAGE_UNSUPPORTED")
         self.assertEqual(frames[2]["picker"], "1")
+
+    def test_homebrew_eboot_drop_shows_experimental_card_and_adds_to_library(self) -> None:
+        """#2143: a real PSPSDK EBOOT.PBP picked in the launcher is imported, not refused.
+
+        Failing before: PSPSDK writes the category MG for every homebrew and the package
+        classifier read it as a firmware updater (FIRMWARE_OUT_OF_SCOPE). The package must
+        convert to its private disc image, show the Experimental card under its own title, and
+        ADD TO LIBRARY must store an experimental record under a non-retail library key.
+        """
+        with tempfile.TemporaryDirectory(prefix=".homebrew-eboot-", dir=ROOT) as tmp:
+            eboot = build_homebrew_eboot(Path(tmp))
+            package = eboot.read_bytes()
+        events = ("WAIT_VIEW=experimental|unsupported|supported|error,20000", "WAIT_MS=100",
+                  "KEY_RETURN", "WAIT_MS=2000")
+        run = self.next_ui_run("library", events, drop_bytes=("EBOOT.PBP", package),
+                               wait_background=True)
+        frames = run["frames"]
+        stdout = run["stdout"]
+        assert isinstance(frames, list) and isinstance(stdout, str)
+        self.assertNotIn("FIRMWARE_OUT_OF_SCOPE", stdout)
+        self.assertFalse(any(frame["view"] == "error" for frame in frames), stdout)
+        self.assertTrue(any(frame["view"] == "experimental" for frame in frames), stdout)
+        self.assertEqual(frames[-1]["view"], "library", stdout)
+        library = run["library"]
+        assert isinstance(library, dict)
+        self.assertEqual(len(library["games"]), 1, library)
+        record = library["games"][0]
+        self.assertTrue(record["is_experimental"], record)
+        self.assertRegex(record["disc_id"], r"^X[A-Z]{3}[0-9]{5}$")
+        self.assertEqual(record["title_name"], "Nakagawa PSP Recompilation Oracle")
+        self.assertIn(f"next_ui_disc_badge disc={record['disc_id']} badge=Beta / unofficial",
+                      stdout, "the Experimental card labels the program Beta / unofficial")
 
     def test_damaged_compressed_and_non_psp_disc_images_get_their_own_cards(self) -> None:
         """A .cso whose block index points outside the file is a damaged compressed disc
@@ -4543,64 +4552,6 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertIn((key, "Beta / unofficial"), badges, stdout)
         self.assertNotIn((key, "Your disc"), badges)
 
-    def test_long_error_text_fits_at_minimum_window(self) -> None:
-        run = self.run_player("error", error_code="UI_TEST_LONG_ERROR",
-                              width=960, height=540)
-        frames = run["frames"]
-        assert isinstance(frames, list)
-        self.assertEqual(frames[0]["error"], "UI_TEST_LONG_ERROR")
-        self.assertEqual(frames[0]["error_text_complete"], "1",
-                         "the error view clipped a long message")
-        self.assertGreater(int(frames[0]["error_text_lines"]), 4)
-
-    def test_cli_not_found_error_text_fits_at_minimum_window(self) -> None:
-        run = self.run_player("error", error_code="CLI_NOT_FOUND",
-                              width=960, height=540)
-        frames = run["frames"]
-        assert isinstance(frames, list)
-        self.assertEqual(frames[0]["error"], "CLI_NOT_FOUND")
-        self.assertEqual(frames[0]["error_text_complete"], "1",
-                         "the error view clipped the CLI_NOT_FOUND message")
-        self.assertEqual(frames[0]["error_details_complete"], "1")
-        self.assertGreater(int(frames[0]["error_details_lines"]), 0)
-        self.assertEqual(frames[0]["error_details_available"], "1")
-
-    def test_per_title_controller_mapping_choice(self) -> None:
-        """A disc can get its own mapping, or go back to the global one."""
-        # The library card carries the choice: three tabs reach it, because the
-        # primary action, add and remove come first and paging never applies to
-        # a one-title library.
-        card = self.run_player("library", ("KEY_TAB", "KEY_TAB", "KEY_TAB", "KEY_RETURN"))
-        card_frames = card["frames"]
-        assert isinstance(card_frames, list)
-        self.assertEqual(card_frames[0]["input_scope"], "global")
-        self.assertEqual(card_frames[0]["input_titles"], "0")
-        self.assertEqual(card_frames[4]["input_scope"], "TEST00005")
-        self.assertEqual(card_frames[4]["input_titles"], "1")
-        self.assertNotEqual(card_frames[0]["pixels"], card_frames[4]["pixels"])
-
-        # The same control in Controller Settings, which says which mapping it
-        # is editing, and which is the 23rd focus stop of that view.
-        settings = self.run_player(
-            "controller", tuple(["KEY_TAB"] * 22 + ["KEY_RETURN"])
-        )
-        settings_frames = settings["frames"]
-        assert isinstance(settings_frames, list)
-        self.assertEqual(settings_frames[0]["input_scope"], "global")
-        self.assertEqual(settings_frames[0]["focus_count"], "23")
-        self.assertEqual(settings_frames[23]["input_scope"], "TEST00005")
-        self.assertNotEqual(settings_frames[0]["pixels"], settings_frames[23]["pixels"])
-
-        # Toggling back returns the disc to the global mapping.
-        back = self.run_player(
-            "controller", tuple(["KEY_TAB"] * 22 + ["KEY_RETURN"] * 2)
-        )
-        back_frames = back["frames"]
-        assert isinstance(back_frames, list)
-        self.assertEqual(back_frames[23]["input_scope"], "TEST00005")
-        self.assertEqual(back_frames[24]["input_scope"], "global")
-        self.assertEqual(back_frames[24]["input_titles"], "0")
-
     def test_quit_from_library_runs_through_sdl_event_loop(self) -> None:
         run = self.run_player("library", ("KEY_ESCAPE",))
         frames = run["frames"]
@@ -4608,12 +4559,11 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertEqual(frames[-1]["view"], "library")
         self.assertEqual(frames[-1]["running"], "0")
 
-    # The next UI (--ui=next) reaches every flow the existing library reaches:
-    # the setup wizard from an empty library, Settings, the file picker and quit.
-    # The screens it hands over to keep drawing in the existing renderer.
+    # The launcher reaches every flow from the library: the setup wizard from an
+    # empty library, Settings, the file picker and quit.
 
     def test_empty_library_starts_the_setup_wizard(self) -> None:
-        run = self.run_player("empty", ("KEY_RETURN", "KEY_RETURN", "KEY_RETURN"), ui_mode="next")
+        run = self.run_player("empty", ("KEY_RETURN", "KEY_RETURN", "KEY_RETURN"))
         frames = run["frames"]
         assert isinstance(frames, list)
         self.assertEqual(frames[0]["view"], "library")
@@ -4623,17 +4573,17 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertEqual(frames[3]["wizard_step"], "select_game")
 
     def test_library_shortcuts_reach_settings_picker_and_quit(self) -> None:
-        settings = self.run_player("library", ("KEY_S",), ui_mode="next")
+        settings = self.run_player("library", ("KEY_S",))
         if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in settings["stdout"]:
             self.skipTest("the next UI needs SDL3_ttf, which this host lacks")
         frames = settings["frames"]
         assert isinstance(frames, list)
         self.assertEqual(frames[-1]["view"], "settings")
-        picker = self.run_player("library", ("KEY_O",), ui_mode="next")
+        picker = self.run_player("library", ("KEY_O",))
         frames = picker["frames"]
         assert isinstance(frames, list)
         self.assertEqual(frames[-1]["picker"], "1")
-        quit_run = self.run_player("library", ("KEY_ESCAPE",), ui_mode="next")
+        quit_run = self.run_player("library", ("KEY_ESCAPE",))
         frames = quit_run["frames"]
         assert isinstance(frames, list)
         self.assertEqual(frames[-1]["running"], "0")
@@ -4645,7 +4595,6 @@ class NativePlayerUiTests(unittest.TestCase):
         run = self.run_player(
             "wizard-options",
             ("WAIT_MS=100", "KEY_UP", "KEY_RETURN", "WAIT_MS=100"),
-            ui_mode="next",
         )
         if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in run["stdout"]:
             self.skipTest("the next UI needs SDL3_ttf, which this host lacks")
@@ -4660,7 +4609,6 @@ class NativePlayerUiTests(unittest.TestCase):
             # whichever button it lands on, and Right is Skip.
             ("WAIT_MS=100", "KEY_UP", "KEY_RETURN", "KEY_DOWN",
              "KEY_LEFT", "KEY_LEFT", "KEY_RIGHT", "KEY_RETURN"),
-            ui_mode="next",
         )
         frames = skipped["frames"]
         assert isinstance(frames, list)
@@ -4670,8 +4618,7 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertEqual(frames[-1]["developer_mode"], "0", "Skip turns developer mode back off")
 
     def test_next_ui_wizard_runs_the_first_run_path(self) -> None:
-        run = self.run_player("empty", ("KEY_RETURN", "KEY_RETURN", "KEY_RETURN", "KEY_RETURN"),
-                              ui_mode="next")
+        run = self.run_player("empty", ("KEY_RETURN", "KEY_RETURN", "KEY_RETURN", "KEY_RETURN"))
         frames = run["frames"]
         assert isinstance(frames, list)
         self.assertEqual(frames[1]["view"], "wizard")
@@ -4681,22 +4628,15 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertEqual(frames[3]["online_mode"], "0", "Continue is the options step's focus")
         self.assertEqual(frames[4]["picker"], "1",
                          "Choose a disc image is the focused action on Select game")
-        if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" in run["stdout"]:
-            # Without its fonts the next UI falls back to the existing renderer.
-            legacy = self.run_player("empty", ("KEY_RETURN",), ui_mode="legacy")
-            legacy_frames = legacy["frames"]
-            assert isinstance(legacy_frames, list)
-            self.assertNotEqual(frames[1]["pixels"], legacy_frames[1]["pixels"],
-                                "the next UI, not the existing renderer, draws the wizard")
 
-        fonts = self.run_player("wizard4", ("KEY_RETURN",), ui_mode="next")
+        fonts = self.run_player("wizard4", ("KEY_RETURN",))
         font_frames = fonts["frames"]
         assert isinstance(font_frames, list)
         self.assertEqual(font_frames[1]["wizard_step"], "ready_launch")
         self.assertEqual(font_frames[1]["font_confirmed"], "1")
 
         for key in ("KEY_ESCAPE", "KEY_RETURN"):
-            staging = self.run_player("wizard-staging", (key,), ui_mode="next")
+            staging = self.run_player("wizard-staging", (key,))
             stage_frames = staging["frames"]
             assert isinstance(stage_frames, list)
             self.assertEqual(stage_frames[0]["extracting"], "1")
@@ -4704,10 +4644,10 @@ class NativePlayerUiTests(unittest.TestCase):
 
     BUILD_ACTION = str(0x4001)
 
-    # The next UI draws the build, build tool download and error screens itself and
-    # keeps every action and Back meaning the existing renderer had.
+    # The next UI draws the build, build tool download and error screens, with
+    # their actions and Back.
     def test_next_ui_build_screen_cancels_and_returns(self) -> None:
-        building = self.run_player("building", ("KEY_ESCAPE",), ui_mode="next")
+        building = self.run_player("building", ("KEY_ESCAPE",))
         frames = building["frames"]
         assert isinstance(frames, list)
         self.assertEqual(frames[0]["view"], "building_package")
@@ -4716,38 +4656,47 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertEqual(frames[1]["view"], "library")
         # Launcher review B6: CANCEL BUILD is never the default focus, so a stray
         # Enter leaves the build running; a move reaches it.
-        stray = self.run_player("building", ("KEY_RETURN",), ui_mode="next")
+        stray = self.run_player("building", ("KEY_RETURN",))
         frames = stray["frames"]
         assert isinstance(frames, list)
         self.assertNotEqual(frames[0]["next_focus"], self.BUILD_ACTION,
                             "CANCEL BUILD is not focused while the build runs")
         self.assertEqual(frames[1]["package_cancelled"], "0",
                          "a stray Enter does not cancel the build")
+        # The build screen was drawn on that frame (-1 when it was not), and it
+        # shows the build running.
+        self.assertEqual(frames[0]["view"], "building_package")
+        self.assertNotEqual(frames[0]["next_build_built"], "-1",
+                            "the build screen was drawn")
+        self.assertEqual(frames[0]["next_build_built"], "0",
+                         "a running build is not shown as built")
         self.assertEqual(frames[1]["view"], "building_package")
-        cancel = self.run_player("building", ("KEY_DOWN", "KEY_RETURN"), ui_mode="next")
+        cancel = self.run_player("building", ("KEY_DOWN", "KEY_RETURN"))
         frames = cancel["frames"]
         assert isinstance(frames, list)
         self.assertIn(self.BUILD_ACTION, self.focus_trail(cancel),
                       "a move from no focus reaches CANCEL BUILD")
         self.assertEqual(frames[-1]["package_cancelled"], "1",
                          "Enter on CANCEL BUILD cancels the build")
-        built = self.run_player("build-ready", ("KEY_RETURN",), ui_mode="next")
+        built = self.run_player("build-ready", ("KEY_RETURN",))
         frames = built["frames"]
         assert isinstance(frames, list)
         self.assertEqual(frames[0]["view"], "building_package")
+        self.assertEqual(frames[0]["next_build_built"], "1",
+                         "a written package reads as built")
         self.assertEqual(frames[1]["view"], "library", "BACK TO LIBRARY once the package is built")
+        self.assertEqual(frames[1]["next_build_built"], "-1")
         self.assertEqual(frames[1]["package_cancelled"], "0")
 
     def test_next_ui_error_card_recovers_like_the_existing_card(self) -> None:
-        missing_source = self.run_player("error", ("KEY_RETURN",), ui_mode="next")
+        missing_source = self.run_player("error", ("KEY_RETURN",))
         frames = missing_source["frames"]
         assert isinstance(frames, list)
         self.assertEqual(frames[0]["error"], "SOURCE_NOT_FOUND")
         self.assertEqual(frames[1]["picker"], "1")
         for code in ("PACKAGE_BUILD_FAILED", "RUNTIME_PACKAGE_NOT_READY", "PYTHON_NOT_FOUND"):
             with self.subTest(code=code):
-                recovered = self.run_player("library", ("KEY_RETURN",), error_code=code,
-                                            ui_mode="next")
+                recovered = self.run_player("library", ("KEY_RETURN",), error_code=code)
                 frames = recovered["frames"]
                 assert isinstance(frames, list)
                 self.assertEqual(frames[0]["view"], "error")
@@ -4768,8 +4717,7 @@ class NativePlayerUiTests(unittest.TestCase):
         }
         for code, (title, badge) in expected.items():
             with self.subTest(code=code):
-                run = self.run_player("library", ("WAIT_MS=50",), error_code=code,
-                                      ui_mode="next")
+                run = self.run_player("library", ("WAIT_MS=50",), error_code=code)
                 frames = run["frames"]
                 assert isinstance(frames, list)
                 self.assertEqual(frames[0]["view"], "error")
@@ -4783,7 +4731,7 @@ class NativePlayerUiTests(unittest.TestCase):
         # and the raw boundary, and stays on this computer (clipboard only).
         copied = self.run_player(
             "library", ("WAIT_MS=50", "KEY_RIGHT", "KEY_RIGHT", "KEY_RETURN", "WAIT_MS=100"),
-            error_code="RUNTIME_SEMANTIC_BOUNDARY", ui_mode="next",
+            error_code="RUNTIME_SEMANTIC_BOUNDARY",
         )
         stdout = str(copied["stdout"])
         if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in stdout:
@@ -4816,7 +4764,7 @@ class NativePlayerUiTests(unittest.TestCase):
             "library",
             ("WAIT_MS=50", "KEY_DOWN", "KEY_RETURN", "WAIT_MS=50", "KEY_RIGHT", "KEY_RETURN",
              "WAIT_MS=50", "KEY_RIGHT", "KEY_RETURN", "WAIT_MS=100"),
-            error_code="RUNTIME_SEMANTIC_BOUNDARY", ui_mode="next",
+            error_code="RUNTIME_SEMANTIC_BOUNDARY",
             env_extra={"USERNAME": user, "USER": user},
         )
         stdout = str(run["stdout"])
@@ -4856,7 +4804,7 @@ class NativePlayerUiTests(unittest.TestCase):
         # A crash with no known cause: Report this game is the first link.
         crash = self.run_player(
             "library", ("WAIT_MS=50", "KEY_DOWN", "KEY_RETURN", "WAIT_MS=100"),
-            error_code="RUNTIME_ERROR_EXIT", ui_mode="next",
+            error_code="RUNTIME_ERROR_EXIT",
         )
         urls = re.findall(r"\[PLAYER_UI_TEST\] open_url=(\S+)", str(crash["stdout"]))
         self.assertEqual(len(urls), 1, crash["stdout"])
@@ -4881,10 +4829,10 @@ class NativePlayerUiTests(unittest.TestCase):
             with self.subTest(move_key=move_key):
                 run = self.run_player(
                     "library", ("WAIT_MS=50", move_key, "KEY_RETURN", "WAIT_VIEW=error,10000"),
-                    error_code="RUNTIME_ERROR_EXIT", ui_mode="next",
+                    error_code="RUNTIME_ERROR_EXIT",
                     env_extra={"NK_UI_TEST_SLOW_START_MS": "600"},
                 )
-                # --ui=next exits 4 when the launcher can't start, so a run that got here
+                # The player exits 4 when the launcher can't start, so a run that got here
                 # drew the next UI; anything else is a failure, never a skip.
                 self.assertIn("[PLAYER_UI_TEST] UI_NEXT_ACTIVE", str(run["stdout"]))
                 frames = run["frames"]
@@ -4922,7 +4870,7 @@ class NativePlayerUiTests(unittest.TestCase):
         slow_start_ms = 1500
         run = self.run_player(
             "ready", (*self.PLAY_READY_TITLE, "KEY_RETURN", "WAIT_MS=2500"),
-            post_build_ready=True, wait_background=True, ui_mode="next",
+            post_build_ready=True, wait_background=True,
             env_extra={"NK_UI_TEST_SLOW_START_MS": str(slow_start_ms)},
         )
         if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in str(run["stdout"]):
@@ -4978,7 +4926,7 @@ class NativePlayerUiTests(unittest.TestCase):
         opened the save folder instead of starting the game."""
         run = self.run_player(
             "ready", ("WAIT_MS=300", "KEY_RETURN", "WAIT_MS=4000"),
-            post_build_ready=True, wait_background=True, ui_mode="next",
+            post_build_ready=True, wait_background=True,
             env_extra={"NK_UI_TEST_PACKAGE_STATUS_WORKER_DELAY_MS": "1500"},
         )
         if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in str(run["stdout"]):
@@ -5011,7 +4959,7 @@ class NativePlayerUiTests(unittest.TestCase):
              "KEY_RETURN", "WAIT_MS=400",            # open the title
              "KEY_RETURN", "WAIT_MS=300",            # PLAY: the reminder
              "KEY_ESCAPE", "WAIT_MS=2000"),          # Play anyway
-            post_build_ready=True, wait_background=True, ui_mode="next",
+            post_build_ready=True, wait_background=True,
             package_built_by="v0.0.1",
         )
         if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in str(run["stdout"]):
@@ -5059,7 +5007,7 @@ class NativePlayerUiTests(unittest.TestCase):
         run = self.run_player(
             "ready",
             ("WAIT_MS=2500", "KEY_RETURN", "WAIT_MS=400", "KEY_RETURN", "WAIT_MS=1500"),
-            post_build_ready=True, wait_background=True, ui_mode="next",
+            post_build_ready=True, wait_background=True,
             package_built_by="current",
         )
         if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in str(run["stdout"]):
@@ -5080,7 +5028,7 @@ class NativePlayerUiTests(unittest.TestCase):
         with the confirmation unavailable (as the close-confirmation test does)."""
         run = self.run_player(
             "ready", ("WAIT_MS=300", "KEY_RETURN", "WAIT_MS=300", "CLOSE", "CLOSE"),
-            post_build_ready=True, wait_background=True, ui_mode="next",
+            post_build_ready=True, wait_background=True,
             env_extra={"NK_UI_TEST_GAME_RUNNING": running,
                        "NK_UI_TEST_MESSAGEBOX_FAIL": "1"},
         )
@@ -5118,7 +5066,7 @@ class NativePlayerUiTests(unittest.TestCase):
         run = self.run_player(
             "library",
             ("WAIT_MS=300", self.SECOND_TILE, "MOUSE_DOWN", "MOUSE_UP", "WAIT_MS=300"),
-            ui_mode="next", wait_background=True,
+            wait_background=True,
         )
         if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in str(run["stdout"]):
             self.skipTest("the next UI needs SDL3_ttf, which this host lacks")
@@ -5139,7 +5087,7 @@ class NativePlayerUiTests(unittest.TestCase):
              self.FIRST_TILE, "MOUSE_DOWN", "MOUSE_UP", "WAIT_MS=300",
              "KEY_ESCAPE", "WAIT_MS=300",
              self.SECOND_TILE, "MOUSE_DOWN", "MOUSE_UP", "WAIT_MS=300"),
-            ui_mode="next", wait_background=True, post_build_ready=True,
+            wait_background=True, post_build_ready=True,
         )
         if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in str(run["stdout"]):
             self.skipTest("the next UI needs SDL3_ttf, which this host lacks")
@@ -5172,7 +5120,7 @@ class NativePlayerUiTests(unittest.TestCase):
                       ("KEY_LEFT", "WAIT_MS=80", "KEY_RIGHT", "WAIT_MS=80"))
 
     def remove_run(self, events: tuple[str, ...]) -> list[dict[str, str]]:
-        run = self.run_player("library", events, ui_mode="next", wait_background=True)
+        run = self.run_player("library", events, wait_background=True)
         if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in str(run["stdout"]):
             self.skipTest("the next UI needs SDL3_ttf, which this host lacks")
         frames = run["frames"]
@@ -5386,6 +5334,43 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertNotIn("Smooth motion is off", lines[-1])
         self.assertEqual(page["smooth"], "Library (On)")
 
+    EVERY_PART_ON = {"default": "enhanced", "af": "16", "text": "on", "readout": "on",
+                     "notice": "on", "wide": "fill", "smooth": "x2", "sas": "sinc", "tess": "2",
+                     "cull": "on", "upscale": "fsr1"}
+    EVERY_PART_WORDS = ("16x texture filtering", "crisp system text", "speed readout",
+                        "game badge", "widescreen", "clean pitched sound", "2x finer patches",
+                        "wider culling", "sharper enlarging")
+
+    def every_part_play_line(self, title: dict[str, str]) -> str:
+        """The title page's play line for the packaged TEST00006 with every Enhanced part on in
+        the library and `title` as its own play choice: the line player_ui_nk.c builds."""
+        settings = {"enhanced": dict(self.EVERY_PART_ON), "title_play": {"TEST00006": title}}
+        run = self.next_ui_run(
+            "ready", ("WAIT_MS=300", "KEY_RETURN", "WAIT_MS=300"),
+            post_build_ready=True, wait_background=True, settings=settings,
+            enhancement_packages={"TEST00006": "display-smoke-v1"})
+        lines = re.findall(r"next_ui_title_play_line disc=TEST00006 line=(.+?)\r?$",
+                           str(run["stdout"]), re.M)
+        self.assertTrue(lines, run["stdout"])
+        return lines[-1]
+
+    def test_next_ui_play_line_names_every_part(self) -> None:
+        """The game page's play line with every part on names each one and ends whole: on main
+        the parts list (160 bytes) cut "sharper enlarging" to "sharper e", and the Ace line (256 bytes) was
+        cut mid-word, with no ellipsis for the page test to see."""
+        enhanced = self.every_part_play_line({"mode": "enhanced"})
+        self.assertTrue(enhanced.startswith("Enhanced for this game: "), enhanced)
+        self.assertTrue(enhanced.endswith("smooth motion, clean pitched sound, 2x finer patches, "
+                                          "wider culling, sharper enlarging."), enhanced)
+        for words in self.EVERY_PART_WORDS:
+            self.assertIn(words, enhanced)
+        ace = self.every_part_play_line({"mode": "ace"})
+        self.assertTrue(ace.startswith("Ace for this game: 60 FPS game logic, "), ace)
+        self.assertTrue(ace.endswith("Smooth motion is off while it runs at 60 FPS: this build "
+                                     "smooths only 30 FPS games."), ace)
+        for words in self.EVERY_PART_WORDS:
+            self.assertIn(words, ace)
+
     def test_compatibility_records_carry_a_player_tier(self) -> None:
         """#1297: every title record maps to a player tier; Hot Shots Tennis is Playable.
 
@@ -5453,7 +5438,7 @@ class NativePlayerUiTests(unittest.TestCase):
              "KEY_RETURN", "WAIT_MS=300", "KEY_RETURN", "WAIT_MS=300",  # ask, then KEEP PLAYING
              "KEY_RETURN", "WAIT_MS=300", "KEY_RIGHT", "KEY_RETURN", "WAIT_MS=300",  # STOP GAME
              "CLOSE", "CLOSE"),
-            post_build_ready=True, wait_background=True, ui_mode="next",
+            post_build_ready=True, wait_background=True,
             env_extra={"NK_UI_TEST_GAME_RUNNING": "TEST00006",
                        "NK_UI_TEST_MESSAGEBOX_FAIL": "1"},
         )
@@ -5496,7 +5481,7 @@ class NativePlayerUiTests(unittest.TestCase):
              *before_exit,
              f"GAME_EXIT={exit_code}", "WAIT_MS=300",  # the game ends on its own
              "KEY_ESCAPE", "WAIT_MS=300", "KEY_ESCAPE", "WAIT_MS=300", "CLOSE"),
-            post_build_ready=True, wait_background=True, ui_mode="next",
+            post_build_ready=True, wait_background=True,
             env_extra={"NK_UI_TEST_GAME_RUNNING": "TEST00006"},
         )
         if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in str(run["stdout"]):
@@ -5553,8 +5538,7 @@ class NativePlayerUiTests(unittest.TestCase):
     def test_preflight_refusal_is_not_a_build_failure(self) -> None:
         """#1286: a build refused at preflight never started, so its card is not
         "Package Build Failed" and its badge is not a code."""
-        run = self.run_player("library", ("WAIT_MS=50",), error_code="PACKAGE_BUILD_REFUSED",
-                              ui_mode="next")
+        run = self.run_player("library", ("WAIT_MS=50",), error_code="PACKAGE_BUILD_REFUSED")
         frames = run["frames"]
         assert isinstance(frames, list)
         self.assertEqual(frames[0]["view"], "error")
@@ -5562,14 +5546,12 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertEqual(frames[0]["error_badge"], "Build_not_started")
         self.assertEqual(frames[0]["error_retry"], "Try_again")
         # Every code the player raises has its own badge (#2007)...
-        named = self.run_player("library", ("WAIT_MS=50",), error_code="PYTHON_NOT_FOUND",
-                                ui_mode="next")
+        named = self.run_player("library", ("WAIT_MS=50",), error_code="PYTHON_NOT_FOUND")
         named_frames = named["frames"]
         assert isinstance(named_frames, list)
         self.assertEqual(named_frames[0]["error_badge"], "Build_tools_needed")
         # ...and a code it has never heard of still gets a plain badge.
-        other = self.run_player("library", ("WAIT_MS=50",), error_code="SOME_UNKNOWN_CODE",
-                                ui_mode="next")
+        other = self.run_player("library", ("WAIT_MS=50",), error_code="SOME_UNKNOWN_CODE")
         other_frames = other["frames"]
         assert isinstance(other_frames, list)
         self.assertEqual(other_frames[0]["error_badge"], "Problem")
@@ -5656,30 +5638,6 @@ class NativePlayerUiTests(unittest.TestCase):
         assert isinstance(frames, list)
         self.assertEqual(frames[-1]["game_running"], "1")
 
-    def test_font_fallback_reason_is_reported(self) -> None:
-        """Every frame names the active text path and, on fallback, why (#421)."""
-        forced = self.run_player("library", (), env_extra={"NK_UI_NO_TTF": "1"})
-        forced_frames = forced["frames"]
-        assert isinstance(forced_frames, list)
-        for frame in forced_frames:
-            self.assertEqual(frame["font"], "bitmap")
-            self.assertEqual(frame["font_reason"], "forced-off")
-        self.assertIn("NK_UI_NO_TTF", str(forced["stderr"]))
-
-        normal = self.run_player("library", ())
-        normal_frames = normal["frames"]
-        assert isinstance(normal_frames, list)
-        for frame in normal_frames:
-            self.assertIn(frame["font"], ("ttf", "bitmap"))
-            if frame["font"] == "ttf":
-                self.assertEqual(frame["font_reason"], "NONE")
-            else:
-                # A fallback without a named reason is exactly the silent
-                # degradation this contract forbids.
-                self.assertNotEqual(frame["font_reason"], "NONE")
-                self.assertTrue(frame["font_reason"])
-
-
 def library_disc_ids(scratch: Path) -> list[str]:
     """Disc IDs in every library.json this run wrote below its isolated LOCALAPPDATA."""
     ids: list[str] = []
@@ -5753,7 +5711,6 @@ class FirstRunRouteTests(unittest.TestCase):
             self.assertEqual(error_frame["view"], "error")
             self.assertEqual(error_frame["error"], "ISO_CORRUPT")
             self.assertEqual(error_frame["bad_disc_notice"], "1")
-            self.assertEqual(error_frame["error_text_complete"], "1")
             self.assertEqual(frames[-1]["view"], "library")
             self.assertEqual(frames[-1]["picker"], "1")
             self.assertTrue(screenshot.is_file())
@@ -6008,6 +5965,57 @@ class FirstRunRouteTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 2, completed.stdout + completed.stderr)
         self.assertIn("library is empty", completed.stderr)
         self.assertNotIn("has no prepared runtime", completed.stderr)
+
+    def test_launch_title_names_a_library_game_by_disc_id(self) -> None:
+        """#2152: --launch-title (what an Add to Steam shortcut runs) finds the game by its
+        disc ID, or disc ID and image SHA-1 when two images share it, and takes the
+        --launch-index route; a missing, shared or malformed value is refused by name."""
+        with tempfile.TemporaryDirectory(prefix=".first-run-launch-title-", dir=ROOT) as tmp:
+            scratch = Path(tmp)
+            user_root = scratch / "user data"
+            user_root.mkdir()
+            # A record keeps both image hashes or neither (nk_library.c).
+            games = [
+                {"disc_id": "ULUS10001", "title_name": "Synthetic One",
+                 "iso_path": str(scratch / "one.iso"), "title_id": "synthetic-one"},
+                {"disc_id": "ULUS10002", "title_name": "Synthetic Retail",
+                 "iso_path": str(scratch / "retail.iso"), "title_id": "synthetic-two",
+                 "content_sha1": "b" * 40, "content_crc32": "b" * 8},
+                {"disc_id": "ULUS10002", "title_name": "Synthetic Translation",
+                 "iso_path": str(scratch / "translation.iso"), "title_id": "synthetic-two",
+                 "content_sha1": "c" * 40, "content_crc32": "c" * 8},
+            ]
+            (user_root / "library.json").write_text(
+                json.dumps({"schema_version": 1, "games": games}), encoding="utf-8")
+            base = [f"--user-data-root={user_root}", "--headless-launch"]
+
+            found = self.run_route(scratch, [*base, "--launch-title=ULUS10001"])
+            # Found, then the launch route's own check: no runtime in the scratch root.
+            self.assertEqual(found.returncode, 3, found.stdout + found.stderr)
+            self.assertIn("PLAY NOW is unavailable", found.stderr)
+            self.assertIn("is not built for this PC yet", found.stderr)
+
+            by_image = self.run_route(scratch, [*base, "--launch-title=ULUS10002:" + "C" * 40])
+            self.assertEqual(by_image.returncode, 3, by_image.stdout + by_image.stderr)
+            self.assertIn("Synthetic Translation is not built", by_image.stderr)
+
+            shared = self.run_route(scratch, [*base, "--launch-title=ULUS10002"])
+            self.assertEqual(shared.returncode, 2, shared.stdout + shared.stderr)
+            self.assertIn("Several disc images in this library have disc ID ULUS10002",
+                          shared.stderr)
+
+            missing = self.run_route(scratch, [*base, "--launch-title=ULUS99999"])
+            self.assertEqual(missing.returncode, 2, missing.stdout + missing.stderr)
+            self.assertIn("No game with disc ID ULUS99999", missing.stderr)
+
+            malformed = self.run_route(scratch, [*base, "--launch-title=../ULUS10001"])
+            self.assertEqual(malformed.returncode, 2, malformed.stdout + malformed.stderr)
+            self.assertIn("needs a game's disc ID", malformed.stderr)
+
+            both = self.run_route(scratch, [*base, "--launch-title=ULUS10001",
+                                            "--launch-index=0"])
+            self.assertEqual(both.returncode, 2, both.stdout + both.stderr)
+            self.assertIn("not both", both.stderr)
 
     def test_demo_launch_index_names_its_bundled_entry_as_a_sample(self) -> None:
         with tempfile.TemporaryDirectory(prefix=".first-run-demo-", dir=ROOT) as tmp:

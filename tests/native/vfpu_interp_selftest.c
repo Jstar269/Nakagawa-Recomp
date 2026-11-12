@@ -198,7 +198,9 @@ static int check_cop2_control_transfers(void) {
         s.r[5] = value;
         CHECK(sr_vfpu_interp(&s, cop2_transfer(7, 5, 128 + i)) == SR_VFPU_COMPUTE,
               "mtvc accepts every VFPU control register");
-        CHECK(s.vfpuCtrl[i] == value, "mtvc writes the selected VFPU control register");
+        /* VFPU_CC (3) keeps only bits 0..5; see check_vfpu_cc_write_mask. */
+        CHECK(s.vfpuCtrl[i] == (i == 3 ? (value & 0x3fu) : value),
+              "mtvc writes the selected VFPU control register");
     }
 
     setup_state(&s);
@@ -208,6 +210,72 @@ static int check_cop2_control_transfers(void) {
     CHECK(memcmp(&s, &before, sizeof(s)) == 0,
           "invalid mfvc leaves the complete CpuState unchanged");
     bad |= memcmp(&s, &before, sizeof(s)) != 0;
+    return bad;
+}
+
+static int check_vfpu_cc_write_mask(void) {
+    /* PSP-VFPU-CCCMOV-001 (PSP-3000, 2026-11-08, issue #326, probe case vfpu-cc-cmov, cells
+     * cc-roundtrip-p0/p1): mtvc then mfvc on VFPU_CC (control register 3) read back
+     * written & 0x3f in every cell. */
+    static const uint32_t written[] = {0x00u, 0x3fu, 0x15u, 0x2au, 0x01u, 0x10u, 0x20u,
+                                       0x40u, 0x80u, 0xffu, 0x100u, 0xffffffffu};
+    CpuState s;
+    int bad = 0;
+    for (size_t i = 0; i < sizeof(written) / sizeof(written[0]); i++) {
+        setup_state(&s);
+        s.r[5] = written[i];
+        CHECK(sr_vfpu_interp(&s, cop2_transfer(7, 5, 128 + 3)) == SR_VFPU_COMPUTE,
+              "mtvc accepts VFPU_CC");
+        s.r[6] = 0xa5a5a5a5u;
+        CHECK(sr_vfpu_interp(&s, cop2_transfer(3, 6, 128 + 3)) == SR_VFPU_COMPUTE,
+              "mfvc reads VFPU_CC");
+        CHECK(s.r[6] == (written[i] & 0x3fu), "VFPU_CC reads back the written value and 0x3f");
+        bad |= s.r[6] != (written[i] & 0x3fu);
+    }
+    return bad;
+}
+
+/* PSP-VFPU-QUADWB-001 (PSP-3000, 2026-11-08, issue #326, probe case vfpu-quad-wb, base $t2 =
+ * r10, 16-byte aligned): bit 1 of an aligned lv.q/sv.q is the write-back flag. The console
+ * showed the flag does not change the base register in any form (offsets 0, +16, +32, -16;
+ * four stores in a row from one base did not drift) and that the access uses base + offset,
+ * as the plain word does. This pins that read in the interpreter. */
+static int check_quad_wb_measured(void) {
+    CpuState s;
+    int bad = 0;
+    {
+        static const uint32_t offsets[4] = {0x0000u, 0x0010u, 0x0020u, 0xFFF0u};
+        const uint32_t base = 0x08004200u;
+        for (int k = 0; k < 4; k++) {
+            const uint32_t at = base + (uint32_t)(int32_t)(int16_t)offsets[k];
+            sr_mem_init();
+            setup_state(&s);
+            s.r[10] = base;
+            for (int i = 0; i < 4; i++) MEM_W32(at + (uint32_t)i * 4u, 0x5a5a0000u + (uint32_t)i);
+            fill_vi(&s, 0);
+            CHECK(sr_vfpu_interp(&s, lvq(10, 0, offsets[k]) | 2u) == SR_VFPU_COMPUTE,
+                  "lv.q with the write-back bit set loads");
+            CHECK(s.vi[0] == 0x5a5a0000u && s.vi[3] == 0x5a5a0003u && s.r[10] == base,
+                  "lv.q wb loads from base + offset and leaves the base register unchanged");
+            for (int i = 0; i < 4; i++) s.vi[i] = 0xc0de0000u + (uint32_t)i;
+            CHECK(sr_vfpu_interp(&s, svq(10, 0, offsets[k]) | 2u) == SR_VFPU_STATE,
+                  "sv.q with the write-back bit set stores");
+            CHECK(MEM_R32(at) == 0xc0de0000u && MEM_R32(at + 12u) == 0xc0de0003u && s.r[10] == base,
+                  "sv.q wb stores at base + offset and leaves the base register unchanged");
+        }
+        /* Four stores in a row from one base land in order and the base never drifts. */
+        sr_mem_init();
+        setup_state(&s);
+        s.r[10] = base;
+        for (int q = 0; q < 4; q++) {
+            for (int i = 0; i < 4; i++) s.vi[i] = 0xc0de0000u + ((uint32_t)q << 8) + (uint32_t)i;
+            CHECK(sr_vfpu_interp(&s, svq(10, 0, (uint32_t)q * 16u) | 2u) == SR_VFPU_STATE &&
+                  s.r[10] == base, "a run of sv.q wb from one base does not drift the base");
+        }
+        CHECK(MEM_R32(base) == 0xc0de0000u && MEM_R32(base + 16u) == 0xc0de0100u &&
+              MEM_R32(base + 32u) == 0xc0de0200u && MEM_R32(base + 60u) == 0xc0de0303u,
+              "a run of sv.q wb stores each quad at its own offset");
+    }
     return bad;
 }
 
@@ -679,6 +747,57 @@ static uint32_t vf2i(unsigned mode, unsigned scale) {
            ((scale & 31u) << 16) | 1u;
 }
 
+static int find_overlap_diff_case(const char *name);
+
+/* PSP-VFPU-CONVERT-001 (PSP-3000, 2026-11-08, issue #326, probe case vfpu-convert, vf2in/vf2iz/
+ * vf2iu/vf2id.s at scale 0, both lanes): a denormal input of either sign converts as zero in all four modes,
+ * and a negative quiet NaN gives 0x7fffffff. The result must not depend on the host rounding mode. */
+static int check_vf2i_measured_cells(void) {
+    static const struct {
+        const char *name;
+        uint32_t input;
+        unsigned mode;
+        uint32_t expected;
+    } vectors[] = {
+        {"vf2in +denormal", 0x00000001u, 0u, 0x00000000u},
+        {"vf2in -denormal", 0x80000001u, 0u, 0x00000000u},
+        {"vf2iz +denormal", 0x00000001u, 1u, 0x00000000u},
+        {"vf2iz -denormal", 0x80000001u, 1u, 0x00000000u},
+        {"vf2iu +denormal not ceiled", 0x00000001u, 2u, 0x00000000u},
+        {"vf2iu -denormal", 0x80000001u, 2u, 0x00000000u},
+        {"vf2id +denormal", 0x00000001u, 3u, 0x00000000u},
+        {"vf2id -denormal not floored", 0x80000001u, 3u, 0x00000000u},
+        {"vf2in negative quiet NaN", 0xffc00000u, 0u, 0x7fffffffu},
+    };
+    static const int host_modes[] = {FE_TONEAREST, FE_DOWNWARD, FE_UPWARD, FE_TOWARDZERO};
+    static const char *const case_names[4] = {"vf2in-s-measured", "vf2iz-s-measured",
+                                              "vf2iu-s-measured", "vf2id-s-measured"};
+    CpuState s;
+    int bad = 0;
+    const int saved_mode = fegetround();
+    for (size_t m = 0; m < sizeof(host_modes) / sizeof(host_modes[0]); m++) {
+        CHECK(fesetround(host_modes[m]) == 0, "host rounding mode is available for the measured vf2i cells");
+        for (size_t i = 0; i < sizeof(vectors) / sizeof(vectors[0]); i++) {
+            const int c = find_overlap_diff_case(case_names[vectors[i].mode]);
+            CHECK(c >= 0 && overlap_diff_cases[c].w == vf2i(vectors[i].mode, 0u),
+                  "measured vf2i word is in the overlap-diff header");
+            if (c < 0) { bad = 1; continue; }
+            CpuState aot;
+            setup_identity_compute(&s);
+            s.vi[0] = vectors[i].input;
+            s.vi[4] = 0xa5a5a5a5u;
+            aot = s;
+            overlap_diff_run_codegen(&aot, c);
+            CHECK(sr_vfpu_interp(&s, vf2i(vectors[i].mode, 0u)) == SR_VFPU_COMPUTE,
+                  "measured vf2i cell executes through the interpreter");
+            CHECKB(bad, s.vi[4] == vectors[i].expected, vectors[i].name);
+            CHECKB(bad, aot.vi[4] == vectors[i].expected, vectors[i].name);
+        }
+    }
+    if (saved_mode != -1) (void)fesetround(saved_mode);
+    return bad;
+}
+
 static int check_vf2i_conversions(void) {
     static const struct {
         const char *name;
@@ -702,6 +821,7 @@ static int check_vf2i_conversions(void) {
         {"vf2in negative infinity", 0xff800000u, 0u, 0u, 0x80000000u},
         {"vf2in NaN", 0x7fc00000u, 0u, 0u, 0x7fffffffu},
         {"vf2in signaling NaN", 0x7f800001u, 0u, 0u, 0x7fffffffu},
+        {"vf2iu largest denormal scaled", 0x007fffffu, 2u, 31u, 0x00000000u}, /* derived from the rule, not a probe cell */
     };
     static const int host_modes[] = {
         FE_TONEAREST, FE_DOWNWARD, FE_UPWARD, FE_TOWARDZERO,
@@ -1987,6 +2107,16 @@ static int check_psp_measured_vfpu9(void) {
         {"vsgn.s -0", 0xd04a0405u, 0xe4u, {0x80000000u}, {0x00000000u}, 1, 1},
         {"vsgn.s -denormal", 0xd04a0020u, 0xe4u, {0x80000001u}, {0x00000000u}, 1, 0},
         {"vsgn.s -Inf", 0xd04a0020u, 0xe4u, {0xff800000u}, {0xbf800000u}, 1, 0},
+        /* vsgn.p/.t/.q (PSP-VFPU-VUS2I-001, probe case vfpu-vus2i, PSP-3000, 2026-11-08,
+         * issue #326): the same rule at every width. The .p row is a probe cell; the .t and
+         * .q rows mix lanes of different probe images and follow the rule (measured=0). */
+        {"vsgn.p 2.5 -3.5", 0xd04a0088u, 0xe4u, {0x40200000u, 0xc0600000u},
+         {0x3f800000u, 0xbf800000u}, 2, 1},
+        {"vsgn.t specials", 0xd04a8008u, 0xe4u, {0x7f800001u, 0x80000001u, 0x00000000u},
+         {0x3f800000u, 0x00000000u, 0x00000000u}, 3, 0},
+        {"vsgn.q specials", 0xd04a8088u, 0xe4u,
+         {0x80000000u, 0x00000001u, 0xffc00000u, 0x7f800000u},
+         {0x00000000u, 0x00000000u, 0xbf800000u, 0x3f800000u}, 4, 0},
         /* vbfy1.q: inf - inf and NaN operands give the canonical 0x7f800001. */
         {"vbfy1.q specials", 0xd0428080u, 0xe4u,
          {0x7f800000u, 0xff800000u, 0x7fc00000u, 0x00000000u},
@@ -2140,6 +2270,352 @@ static int check_vrexp2_measured_words(void) {
                     "FAIL: PSP-VFPU-TRANSCENDENTAL-001 vrexp2 in=0x%08x psp=0x%08x "
                     "aot=0x%08x interp=0x%08x kind=%d\n",
                     pairs[p][0], pairs[p][1], aot.vi[di[0]], interp.vi[di[0]], kind);
+        }
+    }
+    return bad;
+}
+
+/* PSP-VFPU-CCCMOV-001 (PSP-3000, 2026-11-08, issue #326, probe case vfpu-cc-cmov, cells
+ * vcmp-c<hh>-q-p0/p1): vcmp.q of C000 against C010 on the signed-zero and
+ * denormal operand set a = (+0, -0, +den, -den), b = (-0, +0, +0, +den), preset CC 0, read after
+ * vsync. A denormal operand compares as a zero, so EQ/LE/GE are true on all four lanes and
+ * LT/NE/GT are false; EZ is true and NZ false for all four. Both lanes run the same words. */
+static int check_vcmp_denormal_operands(void) {
+    static const uint32_t cc[16] = {0x00, 0x3f, 0x00, 0x3f, 0x3f, 0x00, 0x3f, 0x00,
+                                    0x3f, 0x00, 0x00, 0x00, 0x00, 0x3f, 0x3f, 0x3f};
+    static const uint32_t a[4] = {0x00000000u, 0x80000000u, 0x00000001u, 0x80000001u};
+    static const uint32_t b[4] = {0x80000000u, 0x00000000u, 0x00000000u, 0x00000001u};
+    int bad = 0;
+    for (int cond = 0; cond < 16; cond++) {
+        char name[32];
+        snprintf(name, sizeof(name), "vcmp-q-c%02d-measured", cond);
+        const int c = find_overlap_diff_case(name);
+        CHECK(c >= 0, "measured vcmp word is in the overlap-diff header");
+        if (c < 0) { bad = 1; continue; }
+        CpuState aot, interp;
+        setup_identity_compute(&aot);
+        for (int i = 0; i < 4; i++) { aot.vi[i] = a[i]; aot.vi[4 + i] = b[i]; }
+        interp = aot;
+        overlap_diff_run_codegen(&aot, c);
+        const int kind = sr_vfpu_interp(&interp, overlap_diff_cases[c].w);
+        g_checks++;
+        if (kind != SR_VFPU_STATE || aot.vfpuCtrl[3] != cc[cond] ||
+            interp.vfpuCtrl[3] != cc[cond]) {
+            g_failures++;
+            bad = 1;
+            fprintf(stderr, "FAIL: vcmp.q cond %d psp=0x%02x aot=0x%02x interp=0x%02x kind=%d\n",
+                    cond, cc[cond], aot.vfpuCtrl[3], interp.vfpuCtrl[3], kind);
+        }
+    }
+    return bad;
+}
+
+/* PSP-VFPU-BASICARITH-001 (PSP-3000, 2026-11-08, issue #326, probe case vfpu-basic-arith):
+ * vadd, vsub, vmul, vscl, vdiv.s, vmin and vmax over
+ * 20 operand classes, all 400 ordered pairs, identical at .s/.p/.t/.q for every form but vdiv,
+ * which was run at .s only; its .q case here follows the same lane rule. The reference
+ * below states the measured rule; it matched every one of the 400 pairs of each form in the
+ * console's table (checked off-tree against the private decode). The literal cells pin
+ * values quoted from that run independently of the reference. */
+static const uint32_t ar_ops[20] = {
+    0x00000000u, 0x80000000u, 0x00000001u, 0x80000001u, 0x007fffffu, 0x807fffffu, 0x00800000u,
+    0x80800000u, 0x3f800000u, 0xbf800000u, 0x7f000000u, 0xff000000u, 0x7f7fffffu, 0xff7fffffu,
+    0x7f800000u, 0xff800000u, 0x7fc00011u, 0xffc00022u, 0x7f800033u, 0xff800044u};
+static const char *const ar_opname[7] = {"vadd", "vsub", "vmul", "vdiv", "vscl", "vmin", "vmax"};
+
+static uint32_t ar_daz(uint32_t b) { return (b & 0x7f800000u) == 0u ? (b & 0x80000000u) : b; }
+static int ar_isnan(uint32_t b) { return (b & 0x7fffffffu) > 0x7f800000u; }
+static int ar_isinf(uint32_t b) { return (b & 0x7fffffffu) == 0x7f800000u; }
+static int ar_iszero(uint32_t b) { return (b & 0x7fffffffu) == 0u; }
+static float ar_f(uint32_t b) { float f; memcpy(&f, &b, 4); return f; }
+static uint32_t ar_b(float f) { uint32_t b; memcpy(&b, &f, 4); return b; }
+static int64_t ar_key(uint32_t b) {
+    b = ar_daz(b);
+    return (b >> 31) ? -(int64_t)(b & 0x7fffffffu) : (int64_t)(b & 0x7fffffffu);
+}
+
+/* op: 0 vadd, 1 vsub, 2 vmul, 3 vdiv, 4 vscl (a lane times the scalar b), 5 vmin, 6 vmax. */
+static uint32_t ar_ref(int op, uint32_t a, uint32_t b) {
+    if (op == 5) return ar_key(a) < ar_key(b) ? a : b;
+    if (op == 6) return ar_key(b) < ar_key(a) ? a : b;
+    a = ar_daz(a);
+    b = ar_daz(b);
+    const int nan_in = ar_isnan(a) || ar_isnan(b);
+    const uint32_t xs = (a ^ b) & 0x80000000u;
+    uint32_t r;
+    if (op == 0 || op == 1) {
+        /* inf + (-inf) and inf - inf are the invalid operations. */
+        if (nan_in || (ar_isinf(a) && ar_isinf(b) && (((a ^ b) >> 31) != (uint32_t)op)))
+            return 0x7f800001u;
+        r = ar_b(op == 0 ? ar_f(a) + ar_f(b) : ar_f(a) - ar_f(b));
+    } else if (op == 3) {
+        if (nan_in || (ar_isinf(a) && ar_isinf(b)) || (ar_iszero(a) && ar_iszero(b)))
+            return 0x7f800001u | xs;
+        r = ar_b(ar_f(a) / ar_f(b));
+    } else {
+        if (nan_in || (ar_isinf(a) && ar_iszero(b)) || (ar_iszero(a) && ar_isinf(b)))
+            return 0x7f800001u | xs;
+        r = ar_b(ar_f(a) * ar_f(b));
+    }
+    return ar_daz(r);
+}
+
+static int check_vfpu_basic_arith_measured(void) {
+    int bad = 0, reported = 0;
+    for (int op = 0; op < 7; op++) {
+        for (int wide = 0; wide < 2; wide++) {
+            char name[32];
+            snprintf(name, sizeof(name), "arith-%s-%c", ar_opname[op], wide ? 'q' : 's');
+            const int c = find_overlap_diff_case(name);
+            CHECK(c >= 0, "basic-arith word is in the overlap-diff header");
+            if (c < 0) { bad = 1; continue; }
+            const uint32_t w = overlap_diff_cases[c].w;
+            const int n = wide ? 4 : 1;
+            for (int ia = 0; ia < 20; ia++) {
+                for (int ib = 0; ib < 20; ib++) {
+                    uint8_t si[4], ti[4], di[4];
+                    uint32_t av[4], bv[4], want[4];
+                    CpuState aot, interp;
+                    setup_identity_compute(&aot);
+                    for (int i = 0; i < 128; i++) aot.vi[i] = 0x7a5a5a00u + (uint32_t)i;
+                    vreg_idx((int)((w >> 8) & 0x7fu), n, si);
+                    vreg_idx((int)((w >> 16) & 0x7fu), op == 4 ? 1 : n, ti);
+                    vreg_idx((int)(w & 0x7fu), n, di);
+                    for (int k = 0; k < n; k++) {
+                        av[k] = ar_ops[(ia + k) % 20];
+                        bv[k] = op == 4 ? ar_ops[ib] : ar_ops[(ib + 3 * k) % 20];
+                        want[k] = ar_ref(op, av[k], bv[k]);
+                        aot.vi[si[k]] = av[k];
+                        if (op != 4) aot.vi[ti[k]] = bv[k];
+                    }
+                    if (op == 4) aot.vi[ti[0]] = ar_ops[ib];
+                    interp = aot;
+                    overlap_diff_run_codegen(&aot, c);
+                    const int kind = sr_vfpu_interp(&interp, w);
+                    int ok = kind == SR_VFPU_COMPUTE && memcmp(aot.vi, interp.vi, sizeof(aot.vi)) == 0;
+                    for (int k = 0; k < n; k++)
+                        ok &= aot.vi[di[k]] == want[k] && interp.vi[di[k]] == want[k];
+                    g_checks++;
+                    if (!ok) {
+                        g_failures++;
+                        bad = 1;
+                        if (reported++ < 12)
+                            fprintf(stderr,
+                                    "FAIL: %s a=0x%08x b=0x%08x psp=0x%08x aot=0x%08x interp=0x%08x\n",
+                                    name, av[0], bv[0], want[0], aot.vi[di[0]], interp.vi[di[0]]);
+                    }
+                }
+            }
+        }
+    }
+    /* Literal cells quoted from the console's run (all at .s, lane 0). */
+    static const struct { int op; uint32_t a, b, want; const char *what; } cells[] = {
+        {5, 0x00000001u, 0x3f800000u, 0x00000001u, "vmin(+dmin, +1) keeps the denormal raw"},
+        {5, 0x00000001u, 0x00000000u, 0x00000000u, "vmin(+dmin, +0): tie, second operand"},
+        {6, 0x00000000u, 0x00000001u, 0x00000001u, "vmax(+0, +dmin): tie, second operand"},
+        {5, 0x00000000u, 0x80000000u, 0x80000000u, "vmin(+0, -0) = -0"},
+        {5, 0x80000000u, 0x00000000u, 0x00000000u, "vmin(-0, +0) = +0"},
+        {6, 0x00000000u, 0x80000000u, 0x80000000u, "vmax(+0, -0) = -0"},
+        {6, 0x80000000u, 0x00000000u, 0x00000000u, "vmax(-0, +0) = +0"},
+        {6, 0x7f800000u, 0x7fc00011u, 0x7fc00011u, "vmax(+inf, +qNaN) = the NaN, payload kept"},
+        {5, 0x7f800000u, 0x7fc00011u, 0x7f800000u, "vmin(+inf, +qNaN) = +inf"},
+        {5, 0x3f800000u, 0xffc00022u, 0xffc00022u, "vmin(+1, -qNaN) = the NaN"},
+        {0, 0x7fc00011u, 0x3f800000u, 0x7f800001u, "vadd with a NaN operand is 0x7f800001"},
+        {1, 0x7f800000u, 0x7f800000u, 0x7f800001u, "vsub(inf, inf) is 0x7f800001"},
+        {2, 0x00000000u, 0x7f800000u, 0x7f800001u, "vmul(+0, +inf) is 0x7f800001"},
+        {2, 0x00000000u, 0xff800000u, 0xff800001u, "vmul(+0, -inf) is 0xff800001"},
+        {2, 0xffc00022u, 0x3f800000u, 0xff800001u, "vmul(-qNaN, 1) takes the XOR of the signs"},
+        {2, 0x00000001u, 0x3f800000u, 0x00000000u, "vmul(dmin, 1) = +0"},
+        {3, 0x3f800000u, 0x00000000u, 0x7f800000u, "vdiv(1, +0) = +inf"},
+        {3, 0x00000000u, 0x00000000u, 0x7f800001u, "vdiv(0, 0) = 0x7f800001"},
+        {3, 0x3f800000u, 0x00000001u, 0x7f800000u, "vdiv(1, dmin): a denormal divisor is zero"},
+        {3, 0x00000001u, 0x3f800000u, 0x00000000u, "vdiv(dmin, 1) = +0"},
+        {3, 0x3f800000u, 0x7f000000u, 0x00000000u, "vdiv(1, 2^127) underflows to +0"},
+        {4, 0x7fc00011u, 0x3f800000u, 0x7f800001u, "vscl(NaN, 1) matches vmul"},
+        {3, 0x80000000u, 0x00000000u, 0xff800001u, "vdiv(-0, +0) takes the XOR of the signs"},
+        {3, 0x3f800000u, 0xffc00022u, 0xff800001u, "vdiv(1, -qNaN) takes the XOR of the signs"},
+        {3, 0xff800000u, 0x7f800000u, 0xff800001u, "vdiv(-inf, +inf) takes the XOR of the signs"},
+        {3, 0xffc00022u, 0x3f800000u, 0xff800001u, "vdiv(-qNaN, 1) takes the XOR of the signs"},
+        /* Derived from the rule, not console cells: the grid reaches no denormal result of
+         * vadd, vsub or vmul, so these pin the output flush that vdiv's cells imply. */
+        {0, 0x00c00000u, 0x80800000u, 0x00000000u, "derived: vadd of two normals flushes a denormal result"},
+        {1, 0x00c00000u, 0x00800000u, 0x00000000u, "derived: vsub of two normals flushes a denormal result"},
+        {2, 0x20000000u, 0x1f800000u, 0x00000000u, "derived: vmul of 2^-63 and 2^-64 flushes 2^-127"},
+    };
+    for (unsigned k = 0; k < sizeof(cells) / sizeof(cells[0]); k++) {
+        char name[32];
+        snprintf(name, sizeof(name), "arith-%s-s", ar_opname[cells[k].op]);
+        const int c = find_overlap_diff_case(name);
+        if (c < 0) { bad = 1; continue; }
+        const uint32_t w = overlap_diff_cases[c].w;
+        uint8_t si[1], ti[1], di[1];
+        CpuState aot, interp;
+        setup_identity_compute(&aot);
+        vreg_idx((int)((w >> 8) & 0x7fu), 1, si);
+        vreg_idx((int)((w >> 16) & 0x7fu), 1, ti);
+        vreg_idx((int)(w & 0x7fu), 1, di);
+        aot.vi[si[0]] = cells[k].a;
+        aot.vi[ti[0]] = cells[k].b;
+        interp = aot;
+        overlap_diff_run_codegen(&aot, c);
+        const int kind = sr_vfpu_interp(&interp, w);
+        g_checks++;
+        if (kind != SR_VFPU_COMPUTE || aot.vi[di[0]] != cells[k].want ||
+            interp.vi[di[0]] != cells[k].want) {
+            g_failures++;
+            bad = 1;
+            fprintf(stderr, "FAIL: %s: psp=0x%08x aot=0x%08x interp=0x%08x\n", cells[k].what,
+                    cells[k].want, aot.vi[di[0]], interp.vi[di[0]]);
+        }
+    }
+    return bad;
+}
+
+/* PSP-VFPU-BASICARITH-001 (same probe as above): vmov, vabs and vneg are bitwise (NaN payloads, denormals
+ * and -0 pass unchanged; vabs clears bit 31, vneg flips it), and vzero, vone and vidt write only the
+ * lanes of the width (vidt.s wrote lane 0 = 1.0 without a fault; vidt.p = (1, 0); vidt.q =
+ * (1, 0, 0, 0) for destination row 0), leaving the other lanes alone. */
+static int check_vfpu_unary_arith_measured(void) {
+    static const char *const names[6] = {"vmov", "vabs", "vneg", "vidt", "vzero", "vone"};
+    static const char suffix[3] = {'s', 'p', 'q'};
+    static const int sizes[3] = {1, 2, 4};
+    int bad = 0, reported = 0;
+    for (int op = 0; op < 6; op++) {
+        for (int f = 0; f < 3; f++) {
+            char name[32];
+            snprintf(name, sizeof(name), "arith-%s-%c", names[op], suffix[f]);
+            const int c = find_overlap_diff_case(name);
+            CHECK(c >= 0, "unary basic-arith word is in the overlap-diff header");
+            if (c < 0) { bad = 1; continue; }
+            const uint32_t w = overlap_diff_cases[c].w;
+            const int n = sizes[f];
+            for (int i = 0; i < 20; i++) {
+                uint8_t si[4], di[4];
+                uint32_t want[4];
+                CpuState aot, interp;
+                setup_identity_compute(&aot);
+                for (int k = 0; k < 128; k++) aot.vi[k] = 0x7a5a5a00u + (uint32_t)k;
+                vreg_idx((int)((w >> 8) & 0x7fu), n, si);
+                vreg_idx((int)(w & 0x7fu), n, di);
+                for (int k = 0; k < n; k++) {
+                    const uint32_t x = ar_ops[(i + k) % 20];
+                    aot.vi[si[k]] = x;
+                    want[k] = op == 0 ? x : op == 1 ? (x & 0x7fffffffu) : op == 2 ? (x ^ 0x80000000u)
+                            : op == 3 ? (k == 0 ? 0x3f800000u : 0u) : op == 4 ? 0u : 0x3f800000u;
+                }
+                interp = aot;
+                overlap_diff_run_codegen(&aot, c);
+                const int kind = sr_vfpu_interp(&interp, w);
+                int ok = kind == SR_VFPU_COMPUTE && memcmp(aot.vi, interp.vi, sizeof(aot.vi)) == 0;
+                for (int k = 0; k < n; k++)
+                    ok &= aot.vi[di[k]] == want[k] && interp.vi[di[k]] == want[k];
+                g_checks++;
+                if (!ok) {
+                    g_failures++;
+                    bad = 1;
+                    if (reported++ < 12)
+                        fprintf(stderr, "FAIL: %s in=0x%08x psp=0x%08x aot=0x%08x interp=0x%08x kind=%d\n",
+                                name, ar_ops[i], want[0], aot.vi[di[0]], interp.vi[di[0]], kind);
+                }
+            }
+        }
+    }
+    return bad;
+}
+
+/* vmscl.q (0xf2018488): each lane is a vmul lane. PSP-VFPU-WIDEDOT-001 and PSP-VFPU-ROUNDSEP-001 (PSP-3000, 2026-11-08 and
+ * 2026-11-09, issue #326, probe cases vfpu-wide-dot-matrix and vfpu-round-sep): a NaN operand or
+ * 0 * Inf gives 0x7f800001 with the XOR of the operand signs, and an inexact product rounds to
+ * nearest: 0x3fc00001 * 0x3fc00001 is 0x40100002, not the truncated 0x40100001. The scalar is the
+ * vt register, the matrix is at matrix 1, the result at matrix 2. */
+static int check_vmscl_measured(void) {
+    static const struct { uint32_t m, scalar, want; } cells[] = {
+        {0x3f800000u, 0x7fc00011u, 0x7f800001u}, {0xc0400000u, 0x7fc00011u, 0xff800001u},
+        {0x3f800000u, 0xffc00022u, 0xff800001u}, {0xc0400000u, 0xffc00022u, 0x7f800001u},
+        {0x3fc00001u, 0x3fc00001u, 0x40100002u}, {0xbfc00001u, 0x3fc00001u, 0xc0100002u},
+        {0x3fc00001u, 0xbfc00001u, 0xc0100002u}, {0xbfc00001u, 0xbfc00001u, 0x40100002u},
+        {0x3f800001u, 0x3f800001u, 0x3f800002u}, {0x3fc00003u, 0x3fc00001u, 0x40100003u},
+    };
+    int bad = 0;
+    const int c = find_overlap_diff_case("arith-vmscl-q");
+    CHECK(c >= 0, "arith-vmscl-q word is in the overlap-diff header");
+    if (c < 0) return 1;
+    const uint32_t w = overlap_diff_cases[c].w;
+    for (unsigned k = 0; k < sizeof(cells) / sizeof(cells[0]); k++) {
+        uint8_t ti[1];
+        CpuState aot, interp;
+        setup_identity_compute(&aot);
+        vreg_idx((int)((w >> 16) & 0x7fu), 1, ti);
+        aot.vi[16] = cells[k].m;
+        aot.vi[ti[0]] = cells[k].scalar;
+        interp = aot;
+        overlap_diff_run_codegen(&aot, c);
+        const int kind = sr_vfpu_interp(&interp, w);
+        g_checks++;
+        if (kind != SR_VFPU_COMPUTE || aot.vi[32] != cells[k].want || interp.vi[32] != cells[k].want) {
+            g_failures++;
+            bad = 1;
+            fprintf(stderr, "FAIL: vmscl 0x%08x * 0x%08x: psp=0x%08x aot=0x%08x interp=0x%08x\n", cells[k].m,
+                    cells[k].scalar, cells[k].want, aot.vi[32], interp.vi[32]);
+        }
+    }
+    return bad;
+}
+
+/* PSP-VFPU-VUS2I-001 (PSP-3000, 2026-11-08, issue #326, probe case vfpu-vus2i):
+ * vus2i.s/.p (half << 15) and vs2i.s/.p
+ * (half << 16) over twelve source words, identity prefixes. The low half goes to the even
+ * output lane; .p is two .s results in order. Both lanes run the probe's own words. */
+static int check_vus2i_vs2i_measured_words(void) {
+    static const uint32_t src[12] = {
+        0x00000001u, 0x00008000u, 0x0000ffffu, 0xffff0000u, 0x80000000u, 0x7fff8001u,
+        0xffff0001u, 0x12345678u, 0xffffffffu, 0x00010000u, 0x80008000u, 0x00000000u};
+    static const uint32_t us2i[12][2] = {
+        {0x00008000u, 0}, {0x40000000u, 0}, {0x7fff8000u, 0}, {0, 0x7fff8000u},
+        {0, 0x40000000u}, {0x40008000u, 0x3fff8000u}, {0x00008000u, 0x7fff8000u},
+        {0x2b3c0000u, 0x091a0000u}, {0x7fff8000u, 0x7fff8000u}, {0, 0x00008000u},
+        {0x40000000u, 0x40000000u}, {0, 0}};
+    static const uint32_t s2i[12][2] = {
+        {0x00010000u, 0}, {0x80000000u, 0}, {0xffff0000u, 0}, {0, 0xffff0000u},
+        {0, 0x80000000u}, {0x80010000u, 0x7fff0000u}, {0x00010000u, 0xffff0000u},
+        {0x56780000u, 0x12340000u}, {0xffff0000u, 0xffff0000u}, {0, 0x00010000u},
+        {0x80000000u, 0x80000000u}, {0, 0}};
+    static const char *const names[4] = {"vus2i-s-measured", "vus2i-p-measured",
+                                         "vs2i-s-measured", "vs2i-p-measured"};
+    int bad = 0;
+    for (int f = 0; f < 4; f++) {
+        const int c = find_overlap_diff_case(names[f]);
+        CHECK(c >= 0, "measured vus2i/vs2i word is in the overlap-diff header");
+        if (c < 0) { bad = 1; continue; }
+        const uint32_t w = overlap_diff_cases[c].w;
+        const int n = (f & 1) + 1;
+        const uint32_t (*want)[2] = f < 2 ? us2i : s2i;
+        for (int k = 0; k < 12; k++) {
+            uint8_t si[4], di[4];
+            CpuState aot, interp;
+            setup_identity_compute(&aot);
+            for (int i = 0; i < 128; i++) aot.vi[i] = 0x7a5a5a00u + (uint32_t)i;
+            vreg_idx((int)((w >> 8) & 0x7fu), n, si);
+            vreg_idx((int)(w & 0x7fu), 2 * n, di);
+            /* .p takes the pair (src[k], src[(k + 1) % 12]), the .s result of each in order. */
+            const uint32_t pair[2] = {src[k], src[(k + 1) % 12]};
+            for (int i = 0; i < n; i++) aot.vi[si[i]] = pair[i];
+            interp = aot;
+            overlap_diff_run_codegen(&aot, c);
+            const int kind = sr_vfpu_interp(&interp, w);
+            int ok = kind == SR_VFPU_COMPUTE;
+            for (int i = 0; i < n; i++)
+                for (int h = 0; h < 2; h++) {
+                    const uint32_t exp = want[i == 0 ? k : (k + 1) % 12][h];
+                    ok &= aot.vi[di[2 * i + h]] == exp && interp.vi[di[2 * i + h]] == exp;
+                }
+            ok &= memcmp(aot.vi, interp.vi, sizeof(aot.vi)) == 0;
+            g_checks++;
+            if (!ok) {
+                g_failures++;
+                bad = 1;
+                fprintf(stderr, "FAIL: %s src=0x%08x kind=%d\n", names[f], pair[0], kind);
+            }
         }
     }
     return bad;
@@ -2655,37 +3131,487 @@ static int sweep_diff(const CpuState *a, const CpuState *b, char *where, size_t 
  * operation. Swapping two NaN operands swaps the result, whatever the host compiler does with
  * a plain + or *. Project semantics, not PSP evidence. */
 static int check_vf_nan_rule(void) {
-    static const struct { uint32_t a, b, add, sub, mul, div; } cells[] = {
-        {0x7fc12345u, 0xffc00001u, 0x7fc12345u, 0x7fc12345u, 0x7fc12345u, 0x7fc12345u},
-        {0xffc00001u, 0x7fc12345u, 0xffc00001u, 0xffc00001u, 0xffc00001u, 0xffc00001u},
-        {0x7f800001u, 0x3f800000u, 0x7fc00001u, 0x7fc00001u, 0x7fc00001u, 0x7fc00001u}, /* sNaN quieted */
-        {0x3f800000u, 0xff800002u, 0xffc00002u, 0xffc00002u, 0xffc00002u, 0xffc00002u},
-        {0x7f800000u, 0xff800000u, 0xffc00000u, 0x7f800000u, 0xff800000u, 0xffc00000u}, /* Inf, -Inf */
-        {0x00000000u, 0x7f800000u, 0x7f800000u, 0xff800000u, 0xffc00000u, 0x00000000u}, /* 0, Inf */
-        {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0xffc00000u}, /* 0 / 0 */
-        {0x3fc00000u, 0x40000000u, 0x40600000u, 0xbf000000u, 0x40400000u, 0x3f400000u}, /* 1.5, 2 */
+    static const struct { uint32_t a, b, add, sub, mul; } cells[] = {
+        {0x7fc12345u, 0xffc00001u, 0x7fc12345u, 0x7fc12345u, 0x7fc12345u},
+        {0xffc00001u, 0x7fc12345u, 0xffc00001u, 0xffc00001u, 0xffc00001u},
+        {0x7f800001u, 0x3f800000u, 0x7fc00001u, 0x7fc00001u, 0x7fc00001u}, /* sNaN quieted */
+        {0x3f800000u, 0xff800002u, 0xffc00002u, 0xffc00002u, 0xffc00002u},
+        {0x7f800000u, 0xff800000u, 0xffc00000u, 0x7f800000u, 0xff800000u}, /* Inf, -Inf */
+        {0x00000000u, 0x7f800000u, 0x7f800000u, 0xff800000u, 0xffc00000u}, /* 0, Inf */
+        {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u}, /* 0 / 0 */
+        {0x3fc00000u, 0x40000000u, 0x40600000u, 0xbf000000u, 0x40400000u}, /* 1.5, 2 */
     };
     int bad = 0;
     for (size_t i = 0; i < sizeof(cells) / sizeof(cells[0]); i++) {
-        float a, b, r[4];
-        uint32_t got[4];
+        float a, b, r[3];
+        uint32_t got[3];
         memcpy(&a, &cells[i].a, 4);
         memcpy(&b, &cells[i].b, 4);
         r[0] = sr_vf_add(a, b);
         r[1] = sr_vf_sub(a, b);
         r[2] = sr_vf_mul(a, b);
-        r[3] = sr_vf_div(a, b);
         memcpy(got, r, sizeof(got));
-        const uint32_t want[4] = {cells[i].add, cells[i].sub, cells[i].mul, cells[i].div};
-        for (int k = 0; k < 4; k++) {
+        const uint32_t want[3] = {cells[i].add, cells[i].sub, cells[i].mul};
+        for (int k = 0; k < 3; k++) {
             if (got[k] != want[k]) {
                 fprintf(stderr, "FAIL: sr_vf_%s(0x%08x, 0x%08x) = 0x%08x, want 0x%08x\n",
-                        (const char *[]){"add", "sub", "mul", "div"}[k], cells[i].a, cells[i].b, got[k], want[k]);
+                        (const char *[]){"add", "sub", "mul"}[k], cells[i].a, cells[i].b, got[k], want[k]);
                 bad = 1;
             }
         }
     }
     CHECK(!bad, "sr_vf_* lane helpers return the first NaN operand, quieted, or 0xFFC00000");
+    return bad;
+}
+
+/* PSP-3000 reads of the dot, cross, quaternion and matrix forms (PSP-VFPU-WIDEDOT-001,
+ * 2026-11-08, issue #326, probe case vfpu-wide-dot-matrix: vdot.p/.q, vhdp.q, vcrsp.t, vqmul.q,
+ * vtfm4.q, vhtfm4.q, vmmul.q at identity prefixes, plus vmmov, vrot and the constant fills).
+ * wd_stream holds cells of that run, each the form index, the source words, then the result
+ * words, the console's own values (synthetic operands, no game data). Selected: the cells
+ * whose result is a NaN, an infinity or a negative zero first, then an even spread of the rest;
+ * the run had 521 sum-of-products cells (549 with vmmov, vrot and the constant fills) and
+ * sr_vfpu_dot_bits returned every sum. Every cell runs
+ * through the AOT body (via the overlap-diff header) and sr_vfpu_interp. Image words are
+ * m*16 + c*4 + r: vectors at the probe word's own registers, a matrix operand at matrix 1
+ * (vmmul: vt at matrix 0 and vs at matrix 1), the destination at matrix 2. */
+typedef struct { const char *name; int nsrc, ndst; } WdForm;
+static const WdForm wd_forms[] = {
+    {"vdot-p", 4, 1},  {"vdot-q", 8, 1},  {"vhdp-q", 8, 1},   {"vcrsp-t", 6, 3},  {"vqmul-q", 8, 4},
+    {"vtfm-q", 20, 4}, {"vhtfm-q", 19, 4}, {"vmmul-q", 32, 16}, {"vmmul-qt", 32, 16},
+    {"vmmov-q", 16, 16}, {"vrot-q", 1, 4}, {"vmzero-q", 0, 16}, {"vmidt-q", 0, 16},
+    {"vmone-q", 0, 16},
+};
+static const uint32_t wd_stream[] = {
+        0, 0x3fc00000u, 0xc0100000u, 0x3f400000u, 0x40800000u, 0xc0fc0000u,
+        0, 0x7fc00011u, 0xc0100000u, 0x3f400000u, 0x40800000u, 0x7f800001u,
+        0, 0xffc00022u, 0xc0100000u, 0x3f400000u, 0x40800000u, 0x7f800001u,
+        0, 0x7f800033u, 0xc0100000u, 0x3f400000u, 0x40800000u, 0x7f800001u,
+        0, 0x7f800000u, 0xc0100000u, 0x3f400000u, 0x40800000u, 0x7f800000u,
+        0, 0x80000000u, 0xc0100000u, 0x3f400000u, 0x40800000u, 0xc1100000u,
+        0, 0x3fc00000u, 0x80000000u, 0x3f400000u, 0x40800000u, 0x3f900000u,
+        0, 0x3fc00000u, 0xc0100000u, 0x80000000u, 0x40800000u, 0xc1100000u,
+        1, 0x3fc00000u, 0xc0100000u, 0x40400000u, 0x3f200000u, 0x3f400000u, 0x40800000u,
+      0xbfc00000u, 0x40200000u, 0xc12d0000u,
+        1, 0x7fc00011u, 0xc0100000u, 0x40400000u, 0x3f200000u, 0x3f400000u, 0x40800000u,
+      0xbfc00000u, 0x40200000u, 0x7f800001u,
+        1, 0xffc00022u, 0xc0100000u, 0x40400000u, 0x3f200000u, 0x3f400000u, 0x40800000u,
+      0xbfc00000u, 0x40200000u, 0x7f800001u,
+        1, 0x7f800033u, 0xc0100000u, 0x40400000u, 0x3f200000u, 0x3f400000u, 0x40800000u,
+      0xbfc00000u, 0x40200000u, 0x7f800001u,
+        1, 0x7f800000u, 0xc0100000u, 0x40400000u, 0x3f200000u, 0x3f400000u, 0x40800000u,
+      0xbfc00000u, 0x40200000u, 0x7f800000u,
+        1, 0x3fc00000u, 0xc0100000u, 0xffc00022u, 0x3f200000u, 0x3f400000u, 0x40800000u,
+      0xbfc00000u, 0x40200000u, 0x7f800001u,
+        1, 0x3fc00000u, 0xc0100000u, 0x40400000u, 0x3f200000u, 0x7f800000u, 0x40800000u,
+      0xbfc00000u, 0x40200000u, 0x7f800000u,
+        1, 0x3fc00000u, 0xc0100000u, 0x40400000u, 0x3f200000u, 0x3f400000u, 0x40800000u,
+      0x00000001u, 0x40200000u, 0xc0ca0000u,
+        2, 0x3fc00000u, 0xc0100000u, 0x40400000u, 0x3f200000u, 0x3f400000u, 0x40800000u,
+      0xbfc00000u, 0x40200000u, 0xc11e0000u,
+        2, 0x7fc00011u, 0xc0100000u, 0x40400000u, 0x3f200000u, 0x3f400000u, 0x40800000u,
+      0xbfc00000u, 0x40200000u, 0x7f800001u,
+        2, 0xffc00022u, 0xc0100000u, 0x40400000u, 0x3f200000u, 0x3f400000u, 0x40800000u,
+      0xbfc00000u, 0x40200000u, 0x7f800001u,
+        2, 0x7f800033u, 0xc0100000u, 0x40400000u, 0x3f200000u, 0x3f400000u, 0x40800000u,
+      0xbfc00000u, 0x40200000u, 0x7f800001u,
+        2, 0x7f800000u, 0xc0100000u, 0x40400000u, 0x3f200000u, 0x3f400000u, 0x40800000u,
+      0xbfc00000u, 0x40200000u, 0x7f800000u,
+        2, 0x3fc00000u, 0xc0100000u, 0xffc00022u, 0x3f200000u, 0x3f400000u, 0x40800000u,
+      0xbfc00000u, 0x40200000u, 0x7f800001u,
+        2, 0x3fc00000u, 0xc0100000u, 0x40400000u, 0x3f200000u, 0x7f800000u, 0x40800000u,
+      0xbfc00000u, 0x40200000u, 0x7f800000u,
+        2, 0x3fc00000u, 0xc0100000u, 0x40400000u, 0x3f200000u, 0x3f400000u, 0x40800000u,
+      0x00000001u, 0x40200000u, 0xc0ac0000u,
+        3, 0x3fc00000u, 0xc0100000u, 0x40400000u, 0x3f400000u, 0x40800000u, 0xbfc00000u,
+      0xc10a0000u, 0x40900000u, 0x40f60000u,
+        3, 0x7fc00011u, 0xc0100000u, 0x40400000u, 0x3f400000u, 0x40800000u, 0xbfc00000u,
+      0xc10a0000u, 0x7f800001u, 0x7f800001u,
+        3, 0xffc00022u, 0xc0100000u, 0x40400000u, 0x3f400000u, 0x40800000u, 0xbfc00000u,
+      0xc10a0000u, 0x7f800001u, 0x7f800001u,
+        3, 0x7f800033u, 0xc0100000u, 0x40400000u, 0x3f400000u, 0x40800000u, 0xbfc00000u,
+      0xc10a0000u, 0x7f800001u, 0x7f800001u,
+        3, 0x7f800000u, 0xc0100000u, 0x40400000u, 0x3f400000u, 0x40800000u, 0xbfc00000u,
+      0xc10a0000u, 0x7f800000u, 0x7f800000u,
+        3, 0x3fc00000u, 0x00000001u, 0x40400000u, 0x3f400000u, 0x40800000u, 0xbfc00000u,
+      0xc1400000u, 0x40900000u, 0x40c00000u,
+        3, 0x3fc00000u, 0xc0100000u, 0x40400000u, 0x7f800000u, 0x40800000u, 0xbfc00000u,
+      0xc10a0000u, 0x7f800000u, 0x7f800000u,
+        3, 0x3fc00000u, 0xc0100000u, 0x40400000u, 0x3f400000u, 0x40800000u, 0xffc00022u,
+      0x7f800001u, 0x7f800001u, 0x40f60000u,
+        4, 0x3fc00000u, 0xc0100000u, 0x40400000u, 0x3f200000u, 0x3f400000u, 0x40800000u,
+      0xbfc00000u, 0x40200000u, 0xc08d0000u, 0x3fb00000u, 0x41640000u, 0x415f0000u,
+        4, 0x7fc00011u, 0xc0100000u, 0x40400000u, 0x3f200000u, 0x3f400000u, 0x40800000u,
+      0xbfc00000u, 0x40200000u, 0x7f800001u, 0x7f800001u, 0x7f800001u, 0x7f800001u,
+        4, 0xffc00022u, 0xc0100000u, 0x40400000u, 0x3f200000u, 0x3f400000u, 0x40800000u,
+      0xbfc00000u, 0x40200000u, 0x7f800001u, 0x7f800001u, 0x7f800001u, 0x7f800001u,
+        4, 0x7f800033u, 0xc0100000u, 0x40400000u, 0x3f200000u, 0x3f400000u, 0x40800000u,
+      0xbfc00000u, 0x40200000u, 0x7f800001u, 0x7f800001u, 0x7f800001u, 0x7f800001u,
+        4, 0x7f800000u, 0xc0100000u, 0x40400000u, 0x3f200000u, 0x3f400000u, 0x40800000u,
+      0xbfc00000u, 0x40200000u, 0x7f800000u, 0x7f800000u, 0x7f800000u, 0xff800000u,
+        4, 0x3fc00000u, 0xc0100000u, 0xffc00022u, 0x3f200000u, 0x3f400000u, 0x40800000u,
+      0xbfc00000u, 0x40200000u, 0x7f800001u, 0x7f800001u, 0x7f800001u, 0x7f800001u,
+        4, 0x3fc00000u, 0xc0100000u, 0x40400000u, 0x3f200000u, 0x7f800000u, 0x40800000u,
+      0xbfc00000u, 0x40200000u, 0x7f800000u, 0x7f800000u, 0x7f800000u, 0xff800000u,
+        4, 0x3fc00000u, 0xc0100000u, 0x40400000u, 0x3f200000u, 0x3f400000u, 0x40800000u,
+      0x00000001u, 0x40200000u, 0xc0f90000u, 0xbf600000u, 0x41730000u, 0x41170000u,
+        5, 0x3fc00000u, 0xc0100000u, 0x40400000u, 0x3f200000u, 0x3f800000u, 0x40000000u,
+      0xc0400000u, 0x3f000000u, 0xbfc00000u, 0x40800000u, 0x3e800000u, 0xc0000000u, 0x40600000u,
+      0xbf400000u, 0x3fa00000u, 0x40c00000u, 0xc0900000u, 0x3e000000u, 0x40300000u, 0xbf800000u,
+      0xc13b0000u, 0xc13c0000u, 0x41670000u, 0x3f180000u,
+        5, 0x7fc00011u, 0xc0100000u, 0x40400000u, 0x3f200000u, 0x3f800000u, 0x40000000u,
+      0xc0400000u, 0x3f000000u, 0xbfc00000u, 0x40800000u, 0x3e800000u, 0xc0000000u, 0x40600000u,
+      0xbf400000u, 0x3fa00000u, 0x40c00000u, 0xc0900000u, 0x3e000000u, 0x40300000u, 0xbf800000u,
+      0x7f800001u, 0x7f800001u, 0x7f800001u, 0x7f800001u,
+        5, 0xffc00022u, 0xc0100000u, 0x40400000u, 0x3f200000u, 0x3f800000u, 0x40000000u,
+      0xc0400000u, 0x3f000000u, 0xbfc00000u, 0x40800000u, 0x3e800000u, 0xc0000000u, 0x40600000u,
+      0xbf400000u, 0x3fa00000u, 0x40c00000u, 0xc0900000u, 0x3e000000u, 0x40300000u, 0xbf800000u,
+      0x7f800001u, 0x7f800001u, 0x7f800001u, 0x7f800001u,
+        5, 0x7f800033u, 0xc0100000u, 0x40400000u, 0x3f200000u, 0x3f800000u, 0x40000000u,
+      0xc0400000u, 0x3f000000u, 0xbfc00000u, 0x40800000u, 0x3e800000u, 0xc0000000u, 0x40600000u,
+      0xbf400000u, 0x3fa00000u, 0x40c00000u, 0xc0900000u, 0x3e000000u, 0x40300000u, 0xbf800000u,
+      0x7f800001u, 0x7f800001u, 0x7f800001u, 0x7f800001u,
+        5, 0x7f800000u, 0xc0100000u, 0x40400000u, 0x3f200000u, 0x3f800000u, 0x40000000u,
+      0xc0400000u, 0x3f000000u, 0xbfc00000u, 0x40800000u, 0x3e800000u, 0xc0000000u, 0x40600000u,
+      0xbf400000u, 0x3fa00000u, 0x40c00000u, 0xc0900000u, 0x3e000000u, 0x40300000u, 0xbf800000u,
+      0x7f800000u, 0xff800000u, 0x7f800000u, 0xff800000u,
+        5, 0x3fc00000u, 0xc0100000u, 0xffc00022u, 0x3f200000u, 0x3f800000u, 0x40000000u,
+      0xc0400000u, 0x3f000000u, 0xbfc00000u, 0x40800000u, 0x3e800000u, 0xc0000000u, 0x40600000u,
+      0xbf400000u, 0x3fa00000u, 0x40c00000u, 0xc0900000u, 0x3e000000u, 0x40300000u, 0xbf800000u,
+      0x7f800001u, 0x7f800001u, 0x7f800001u, 0x7f800001u,
+        5, 0x3fc00000u, 0xc0100000u, 0x40400000u, 0x3f200000u, 0x7f800000u, 0x40000000u,
+      0xc0400000u, 0x3f000000u, 0xbfc00000u, 0x40800000u, 0x3e800000u, 0xc0000000u, 0x40600000u,
+      0xbf400000u, 0x3fa00000u, 0x40c00000u, 0xc0900000u, 0x3e000000u, 0x40300000u, 0xbf800000u,
+      0x7f800000u, 0xc13c0000u, 0x41670000u, 0x3f180000u,
+        5, 0x3fc00000u, 0xc0100000u, 0x40400000u, 0x3f200000u, 0x3f800000u, 0x40000000u,
+      0xc0400000u, 0x3f000000u, 0xbfc00000u, 0x40800000u, 0x3e800000u, 0xc0000000u, 0x40600000u,
+      0xbf400000u, 0x00000001u, 0x40c00000u, 0xc0900000u, 0x3e000000u, 0x40300000u, 0xbf800000u,
+      0xc13b0000u, 0xc13c0000u, 0x412b0000u, 0x3f180000u,
+        6, 0x3fc00000u, 0xc0100000u, 0x40400000u, 0x3f800000u, 0x40000000u, 0xc0400000u,
+      0x3f000000u, 0xbfc00000u, 0x40800000u, 0x3e800000u, 0xc0000000u, 0x40600000u, 0xbf400000u,
+      0x3fa00000u, 0x40c00000u, 0xc0900000u, 0x3e000000u, 0x40300000u, 0xbf800000u, 0xc1380000u,
+      0xc1480000u, 0x41858000u, 0x3e600000u,
+        6, 0x7fc00011u, 0xc0100000u, 0x40400000u, 0x3f800000u, 0x40000000u, 0xc0400000u,
+      0x3f000000u, 0xbfc00000u, 0x40800000u, 0x3e800000u, 0xc0000000u, 0x40600000u, 0xbf400000u,
+      0x3fa00000u, 0x40c00000u, 0xc0900000u, 0x3e000000u, 0x40300000u, 0xbf800000u, 0x7f800001u,
+      0x7f800001u, 0x7f800001u, 0x7f800001u,
+        6, 0xffc00022u, 0xc0100000u, 0x40400000u, 0x3f800000u, 0x40000000u, 0xc0400000u,
+      0x3f000000u, 0xbfc00000u, 0x40800000u, 0x3e800000u, 0xc0000000u, 0x40600000u, 0xbf400000u,
+      0x3fa00000u, 0x40c00000u, 0xc0900000u, 0x3e000000u, 0x40300000u, 0xbf800000u, 0x7f800001u,
+      0x7f800001u, 0x7f800001u, 0x7f800001u,
+        6, 0x7f800033u, 0xc0100000u, 0x40400000u, 0x3f800000u, 0x40000000u, 0xc0400000u,
+      0x3f000000u, 0xbfc00000u, 0x40800000u, 0x3e800000u, 0xc0000000u, 0x40600000u, 0xbf400000u,
+      0x3fa00000u, 0x40c00000u, 0xc0900000u, 0x3e000000u, 0x40300000u, 0xbf800000u, 0x7f800001u,
+      0x7f800001u, 0x7f800001u, 0x7f800001u,
+        6, 0x7f800000u, 0xc0100000u, 0x40400000u, 0x3f800000u, 0x40000000u, 0xc0400000u,
+      0x3f000000u, 0xbfc00000u, 0x40800000u, 0x3e800000u, 0xc0000000u, 0x40600000u, 0xbf400000u,
+      0x3fa00000u, 0x40c00000u, 0xc0900000u, 0x3e000000u, 0x40300000u, 0xbf800000u, 0x7f800000u,
+      0xff800000u, 0x7f800000u, 0xff800000u,
+        6, 0x3fc00000u, 0x80000000u, 0x40400000u, 0x3f800000u, 0x40000000u, 0xc0400000u,
+      0x3f000000u, 0xbfc00000u, 0x40800000u, 0x3e800000u, 0xc0000000u, 0x40600000u, 0xbf400000u,
+      0x3fa00000u, 0x40c00000u, 0xc0900000u, 0x3e000000u, 0x40300000u, 0xbf800000u, 0xc0e00000u,
+      0xc0600000u, 0x41700000u, 0x3f000000u,
+        6, 0x3fc00000u, 0xc0100000u, 0x40400000u, 0x80000000u, 0x40000000u, 0xc0400000u,
+      0x3f000000u, 0xbfc00000u, 0x40800000u, 0x3e800000u, 0xc0000000u, 0x40600000u, 0xbf400000u,
+      0x3fa00000u, 0x40c00000u, 0xc0900000u, 0x3e000000u, 0x40300000u, 0xbf800000u, 0xc1500000u,
+      0xc1480000u, 0x41858000u, 0x3e600000u,
+        6, 0x3fc00000u, 0xc0100000u, 0x40400000u, 0x3f800000u, 0x40000000u, 0xc0400000u,
+      0x3f000000u, 0xbfc00000u, 0x40800000u, 0x3e800000u, 0xc0000000u, 0x40600000u, 0xbf400000u,
+      0x80000000u, 0x40c00000u, 0xc0900000u, 0x3e000000u, 0x40300000u, 0xbf800000u, 0xc1380000u,
+      0xc1480000u, 0x414f0000u, 0x3e600000u,
+        7, 0x3f000000u, 0x40600000u, 0x3e000000u, 0xc0400000u, 0xc0000000u, 0xc0900000u,
+      0x40000000u, 0x3e800000u, 0x40c00000u, 0x3f800000u, 0x40800000u, 0x3fa00000u, 0xbf800000u,
+      0xbfc00000u, 0xbf400000u, 0x40300000u, 0x3f800000u, 0x40000000u, 0xc0400000u, 0x3f000000u,
+      0xbfc00000u, 0x40800000u, 0x3e800000u, 0xc0000000u, 0x40600000u, 0xbf400000u, 0x3fa00000u,
+      0x40c00000u, 0xc0900000u, 0x3e000000u, 0x40300000u, 0xbf800000u, 0x40b40000u, 0x419a4000u,
+      0xc195c000u, 0x3fc40000u, 0xc1870000u, 0xc1700000u, 0x3ec00000u, 0x415b0000u, 0xc0580000u,
+      0xc0d00000u, 0x42030000u, 0xc1890000u, 0xbec00000u, 0xc1230000u, 0x41530000u, 0xbf000000u,
+        7, 0x3f000000u, 0x40600000u, 0x3e000000u, 0xc0400000u, 0xc0000000u, 0xc0900000u,
+      0x40000000u, 0x3e800000u, 0x40c00000u, 0x3f800000u, 0x40800000u, 0x3fa00000u, 0xbf800000u,
+      0xbfc00000u, 0xbf400000u, 0x40300000u, 0x7fc00011u, 0x40000000u, 0xc0400000u, 0x3f000000u,
+      0xbfc00000u, 0x40800000u, 0x3e800000u, 0xc0000000u, 0x40600000u, 0xbf400000u, 0x3fa00000u,
+      0x40c00000u, 0xc0900000u, 0x3e000000u, 0x40300000u, 0xbf800000u, 0x7f800001u, 0x419a4000u,
+      0xc195c000u, 0x3fc40000u, 0x7f800001u, 0xc1700000u, 0x3ec00000u, 0x415b0000u, 0x7f800001u,
+      0xc0d00000u, 0x42030000u, 0xc1890000u, 0x7f800001u, 0xc1230000u, 0x41530000u, 0xbf000000u,
+        7, 0x3f000000u, 0x40600000u, 0x3e000000u, 0xc0400000u, 0xc0000000u, 0xc0900000u,
+      0x40000000u, 0x3e800000u, 0x40c00000u, 0x3f800000u, 0x40800000u, 0x3fa00000u, 0xbf800000u,
+      0xbfc00000u, 0xbf400000u, 0x40300000u, 0xffc00022u, 0x40000000u, 0xc0400000u, 0x3f000000u,
+      0xbfc00000u, 0x40800000u, 0x3e800000u, 0xc0000000u, 0x40600000u, 0xbf400000u, 0x3fa00000u,
+      0x40c00000u, 0xc0900000u, 0x3e000000u, 0x40300000u, 0xbf800000u, 0x7f800001u, 0x419a4000u,
+      0xc195c000u, 0x3fc40000u, 0x7f800001u, 0xc1700000u, 0x3ec00000u, 0x415b0000u, 0x7f800001u,
+      0xc0d00000u, 0x42030000u, 0xc1890000u, 0x7f800001u, 0xc1230000u, 0x41530000u, 0xbf000000u,
+        7, 0x3f000000u, 0x40600000u, 0x3e000000u, 0xc0400000u, 0xc0000000u, 0xc0900000u,
+      0x40000000u, 0x3e800000u, 0x40c00000u, 0x3f800000u, 0x40800000u, 0x3fa00000u, 0xbf800000u,
+      0xbfc00000u, 0xbf400000u, 0x40300000u, 0x7f800033u, 0x40000000u, 0xc0400000u, 0x3f000000u,
+      0xbfc00000u, 0x40800000u, 0x3e800000u, 0xc0000000u, 0x40600000u, 0xbf400000u, 0x3fa00000u,
+      0x40c00000u, 0xc0900000u, 0x3e000000u, 0x40300000u, 0xbf800000u, 0x7f800001u, 0x419a4000u,
+      0xc195c000u, 0x3fc40000u, 0x7f800001u, 0xc1700000u, 0x3ec00000u, 0x415b0000u, 0x7f800001u,
+      0xc0d00000u, 0x42030000u, 0xc1890000u, 0x7f800001u, 0xc1230000u, 0x41530000u, 0xbf000000u,
+        7, 0x3f000000u, 0x40600000u, 0x3e000000u, 0xc0400000u, 0xc0000000u, 0xc0900000u,
+      0x40000000u, 0x3e800000u, 0x40c00000u, 0x3f800000u, 0x40800000u, 0x3fa00000u, 0xbf800000u,
+      0xbfc00000u, 0xbf400000u, 0x40300000u, 0x7f800000u, 0x40000000u, 0xc0400000u, 0x3f000000u,
+      0xbfc00000u, 0x40800000u, 0x3e800000u, 0xc0000000u, 0x40600000u, 0xbf400000u, 0x3fa00000u,
+      0x40c00000u, 0xc0900000u, 0x3e000000u, 0x40300000u, 0xbf800000u, 0x7f800000u, 0x419a4000u,
+      0xc195c000u, 0x3fc40000u, 0xff800000u, 0xc1700000u, 0x3ec00000u, 0x415b0000u, 0x7f800000u,
+      0xc0d00000u, 0x42030000u, 0xc1890000u, 0xff800000u, 0xc1230000u, 0x41530000u, 0xbf000000u,
+        7, 0x3f000000u, 0x40600000u, 0x3e000000u, 0xc0400000u, 0xc0000000u, 0xc0900000u,
+      0x40000000u, 0x3e800000u, 0x40c00000u, 0x3f800000u, 0x40800000u, 0x3fa00000u, 0xbf800000u,
+      0xbfc00000u, 0xbf400000u, 0x40300000u, 0x3f800000u, 0x40000000u, 0xc0400000u, 0x3f000000u,
+      0xbfc00000u, 0x40800000u, 0x3e800000u, 0xc0000000u, 0x40600000u, 0xbf400000u, 0xffc00022u,
+      0x40c00000u, 0xc0900000u, 0x3e000000u, 0x40300000u, 0xbf800000u, 0x40b40000u, 0x419a4000u,
+      0x7f800001u, 0x3fc40000u, 0xc1870000u, 0xc1700000u, 0x7f800001u, 0x415b0000u, 0xc0580000u,
+      0xc0d00000u, 0x7f800001u, 0xc1890000u, 0xbec00000u, 0xc1230000u, 0x7f800001u, 0xbf000000u,
+        7, 0x7f800000u, 0x40600000u, 0x3e000000u, 0xc0400000u, 0xc0000000u, 0xc0900000u,
+      0x40000000u, 0x3e800000u, 0x40c00000u, 0x3f800000u, 0x40800000u, 0x3fa00000u, 0xbf800000u,
+      0xbfc00000u, 0xbf400000u, 0x40300000u, 0x3f800000u, 0x40000000u, 0xc0400000u, 0x3f000000u,
+      0xbfc00000u, 0x40800000u, 0x3e800000u, 0xc0000000u, 0x40600000u, 0xbf400000u, 0x3fa00000u,
+      0x40c00000u, 0xc0900000u, 0x3e000000u, 0x40300000u, 0xbf800000u, 0x7f800000u, 0xff800000u,
+      0x7f800000u, 0xff800000u, 0xc1870000u, 0xc1700000u, 0x3ec00000u, 0x415b0000u, 0xc0580000u,
+      0xc0d00000u, 0x42030000u, 0xc1890000u, 0xbec00000u, 0xc1230000u, 0x41530000u, 0xbf000000u,
+        7, 0x3f000000u, 0x40600000u, 0x3e000000u, 0xc0400000u, 0xc0000000u, 0xc0900000u,
+      0x40000000u, 0x3e800000u, 0x40c00000u, 0x3f800000u, 0x00000001u, 0x3fa00000u, 0xbf800000u,
+      0xbfc00000u, 0xbf400000u, 0x40300000u, 0x3f800000u, 0x40000000u, 0xc0400000u, 0x3f000000u,
+      0xbfc00000u, 0x40800000u, 0x3e800000u, 0xc0000000u, 0x40600000u, 0xbf400000u, 0x3fa00000u,
+      0x40c00000u, 0xc0900000u, 0x3e000000u, 0x40300000u, 0xbf800000u, 0x40b40000u, 0x419a4000u,
+      0xc195c000u, 0x3fc40000u, 0xc1870000u, 0xc1700000u, 0x3ec00000u, 0x415b0000u, 0x410a0000u,
+      0xc0f00000u, 0x41de0000u, 0xc1e10000u, 0xbec00000u, 0xc1230000u, 0x41530000u, 0xbf000000u,
+        8, 0x3f000000u, 0x40600000u, 0x3e000000u, 0xc0400000u, 0xc0000000u, 0xc0900000u,
+      0x40000000u, 0x3e800000u, 0x40c00000u, 0x3f800000u, 0x40800000u, 0x3fa00000u, 0xbf800000u,
+      0xbfc00000u, 0xbf400000u, 0x40300000u, 0x3f800000u, 0x40000000u, 0xc0400000u, 0x3f000000u,
+      0xbfc00000u, 0x40800000u, 0x3e800000u, 0xc0000000u, 0x40600000u, 0xbf400000u, 0x3fa00000u,
+      0x40c00000u, 0xc0900000u, 0x3e000000u, 0x40300000u, 0xbf800000u, 0x41130000u, 0x41688000u,
+      0xc10b8000u, 0xc0400000u, 0x412a0000u, 0xc1bbc000u, 0x41010000u, 0x419e0000u, 0x414e0000u,
+      0x41528000u, 0xc1150000u, 0x41be0000u, 0xc15c0000u, 0xc0e30000u, 0x41140000u, 0xc0980000u,
+        9, 0x3f800000u, 0x40000000u, 0xc0400000u, 0x3f000000u, 0xbfc00000u, 0x40800000u,
+      0x3e800000u, 0xc0000000u, 0x40600000u, 0xbf400000u, 0x3fa00000u, 0x40c00000u, 0xc0900000u,
+      0x3e000000u, 0x40300000u, 0xbf800000u, 0x3f800000u, 0x40000000u, 0xc0400000u, 0x3f000000u,
+      0xbfc00000u, 0x40800000u, 0x3e800000u, 0xc0000000u, 0x40600000u, 0xbf400000u, 0x3fa00000u,
+      0x40c00000u, 0xc0900000u, 0x3e000000u, 0x40300000u, 0xbf800000u,
+        9, 0x3f800000u, 0x40000000u, 0xc0400000u, 0x3f000000u, 0xbfc00000u, 0x7fc00011u,
+      0x3e800000u, 0xc0000000u, 0x40600000u, 0xbf400000u, 0x3fa00000u, 0x40c00000u, 0xc0900000u,
+      0x3e000000u, 0x40300000u, 0xbf800000u, 0x3f800000u, 0x40000000u, 0xc0400000u, 0x3f000000u,
+      0xbfc00000u, 0x7fc00011u, 0x3e800000u, 0xc0000000u, 0x40600000u, 0xbf400000u, 0x3fa00000u,
+      0x40c00000u, 0xc0900000u, 0x3e000000u, 0x40300000u, 0xbf800000u,
+        9, 0x3f800000u, 0x40000000u, 0xc0400000u, 0x3f000000u, 0xbfc00000u, 0xffc00022u,
+      0x3e800000u, 0xc0000000u, 0x40600000u, 0xbf400000u, 0x3fa00000u, 0x40c00000u, 0xc0900000u,
+      0x3e000000u, 0x40300000u, 0xbf800000u, 0x3f800000u, 0x40000000u, 0xc0400000u, 0x3f000000u,
+      0xbfc00000u, 0xffc00022u, 0x3e800000u, 0xc0000000u, 0x40600000u, 0xbf400000u, 0x3fa00000u,
+      0x40c00000u, 0xc0900000u, 0x3e000000u, 0x40300000u, 0xbf800000u,
+        9, 0x3f800000u, 0x40000000u, 0xc0400000u, 0x3f000000u, 0xbfc00000u, 0x7f800033u,
+      0x3e800000u, 0xc0000000u, 0x40600000u, 0xbf400000u, 0x3fa00000u, 0x40c00000u, 0xc0900000u,
+      0x3e000000u, 0x40300000u, 0xbf800000u, 0x3f800000u, 0x40000000u, 0xc0400000u, 0x3f000000u,
+      0xbfc00000u, 0x7f800033u, 0x3e800000u, 0xc0000000u, 0x40600000u, 0xbf400000u, 0x3fa00000u,
+      0x40c00000u, 0xc0900000u, 0x3e000000u, 0x40300000u, 0xbf800000u,
+        9, 0x3f800000u, 0x40000000u, 0xc0400000u, 0x3f000000u, 0xbfc00000u, 0x7f800000u,
+      0x3e800000u, 0xc0000000u, 0x40600000u, 0xbf400000u, 0x3fa00000u, 0x40c00000u, 0xc0900000u,
+      0x3e000000u, 0x40300000u, 0xbf800000u, 0x3f800000u, 0x40000000u, 0xc0400000u, 0x3f000000u,
+      0xbfc00000u, 0x7f800000u, 0x3e800000u, 0xc0000000u, 0x40600000u, 0xbf400000u, 0x3fa00000u,
+      0x40c00000u, 0xc0900000u, 0x3e000000u, 0x40300000u, 0xbf800000u,
+        9, 0x3f800000u, 0x40000000u, 0xc0400000u, 0x3f000000u, 0xbfc00000u, 0x00000001u,
+      0x3e800000u, 0xc0000000u, 0x40600000u, 0xbf400000u, 0x3fa00000u, 0x40c00000u, 0xc0900000u,
+      0x3e000000u, 0x40300000u, 0xbf800000u, 0x3f800000u, 0x40000000u, 0xc0400000u, 0x3f000000u,
+      0xbfc00000u, 0x00000001u, 0x3e800000u, 0xc0000000u, 0x40600000u, 0xbf400000u, 0x3fa00000u,
+      0x40c00000u, 0xc0900000u, 0x3e000000u, 0x40300000u, 0xbf800000u,
+        9, 0x3f800000u, 0x40000000u, 0xc0400000u, 0x3f000000u, 0xbfc00000u, 0x80000000u,
+      0x3e800000u, 0xc0000000u, 0x40600000u, 0xbf400000u, 0x3fa00000u, 0x40c00000u, 0xc0900000u,
+      0x3e000000u, 0x40300000u, 0xbf800000u, 0x3f800000u, 0x40000000u, 0xc0400000u, 0x3f000000u,
+      0xbfc00000u, 0x80000000u, 0x3e800000u, 0xc0000000u, 0x40600000u, 0xbf400000u, 0x3fa00000u,
+      0x40c00000u, 0xc0900000u, 0x3e000000u, 0x40300000u, 0xbf800000u,
+        10, 0x00000000u, 0x3f800000u, 0x00000000u, 0x00000000u, 0x00000000u,
+        10, 0x80000000u, 0x3f800000u, 0x80000000u, 0x00000000u, 0x00000000u,
+        10, 0x3f800000u, 0x80000000u, 0x3f800000u, 0x00000000u, 0x00000000u,
+        10, 0x40800000u, 0x3f800000u, 0x00000000u, 0x00000000u, 0x00000000u,
+        10, 0x7f800000u, 0x7f800001u, 0x7f800001u, 0x00000000u, 0x00000000u,
+        10, 0xff800000u, 0x7f800001u, 0xff800001u, 0x00000000u, 0x00000000u,
+        10, 0x7fc00011u, 0x7f800001u, 0x7f800001u, 0x00000000u, 0x00000000u,
+        11, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u,
+      0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u,
+      0x00000000u, 0x00000000u, 0x00000000u,
+        12, 0x3f800000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x3f800000u,
+      0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x3f800000u, 0x00000000u, 0x00000000u,
+      0x00000000u, 0x00000000u, 0x3f800000u,
+        13, 0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+      0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+      0x3f800000u, 0x3f800000u, 0x3f800000u,
+};
+
+static void wd_place(CpuState *s, int f, uint32_t w, const uint32_t *src) {
+    uint8_t ix[4];
+    const int vs = (int)((w >> 8) & 0x7fu), vt = (int)((w >> 16) & 0x7fu);
+    switch (f) {
+    case 0: case 1: case 2: case 3: case 4: {
+        const int n = f == 0 ? 2 : f == 3 ? 3 : 4;
+        vreg_idx(vs, n, ix);
+        for (int k = 0; k < n; k++) s->vi[ix[k]] = src[k];
+        vreg_idx(vt, n, ix);
+        for (int k = 0; k < n; k++) s->vi[ix[k]] = src[n + k];
+        break;
+    }
+    case 5: case 6: {  /* vtfm / vhtfm: the vector at vt, the matrix at matrix 1 */
+        const int n = f == 5 ? 4 : 3;
+        vreg_idx(vt, n, ix);
+        for (int k = 0; k < n; k++) s->vi[ix[k]] = src[k];
+        for (int k = 0; k < 16; k++) s->vi[16 + k] = src[n + k];
+        break;
+    }
+    case 7: case 8:
+        for (int k = 0; k < 32; k++) s->vi[k] = src[k];
+        break;
+    case 9:
+        for (int k = 0; k < 16; k++) s->vi[16 + k] = src[k];
+        break;
+    case 10:
+        vreg_idx(vs, 1, ix);
+        s->vi[ix[0]] = src[0];
+        break;
+    default:
+        break;
+    }
+}
+
+static int check_vfpu_wide_dot_measured(void) {
+    int bad = 0, reported = 0;
+    const uint32_t *p = wd_stream, *end = wd_stream + sizeof(wd_stream) / sizeof(wd_stream[0]);
+    while (p < end) {
+        const int f = (int)p[0];
+        const WdForm *form = &wd_forms[f];
+        const uint32_t *src = p + 1, *want = src + form->nsrc;
+        p = want + form->ndst;
+        char name[32];
+        snprintf(name, sizeof(name), "wide-%s", form->name);
+        const int c = find_overlap_diff_case(name);
+        CHECK(c >= 0, "wide-dot word is in the overlap-diff header");
+        if (c < 0) { bad = 1; continue; }
+        const uint32_t w = overlap_diff_cases[c].w;
+        CpuState aot, interp;
+        setup_identity_compute(&aot);
+        for (int i = 0; i < 128; i++) aot.vi[i] = 0x7a5a5a00u + (uint32_t)i;
+        wd_place(&aot, f, w, src);
+        interp = aot;
+        overlap_diff_run_codegen(&aot, c);
+        const int kind = sr_vfpu_interp(&interp, w);
+        uint8_t di[4];
+        if (form->ndst <= 4) vreg_idx((int)(w & 0x7fu), form->ndst, di);
+        int ok = kind == SR_VFPU_COMPUTE && memcmp(aot.vi, interp.vi, sizeof(aot.vi)) == 0;
+        uint32_t ga = 0, gi = 0;
+        int first = -1;
+        for (int k = 0; k < form->ndst; k++) {
+            const int at = form->ndst <= 4 ? di[k] : 32 + k;
+            if (aot.vi[at] != want[k] || interp.vi[at] != want[k]) {
+                if (first < 0) { first = k; ga = aot.vi[at]; gi = interp.vi[at]; }
+                ok = 0;
+            }
+        }
+        g_checks++;
+        if (!ok) {
+            g_failures++;
+            bad = 1;
+            if (reported++ < 12)
+                fprintf(stderr, "FAIL: %s lane %d psp=0x%08x aot=0x%08x interp=0x%08x (src0=0x%08x)\n",
+                        form->name, first, first >= 0 ? want[first] : 0u, ga, gi, form->nsrc ? src[0] : 0u);
+        }
+    }
+    return bad;
+}
+
+/* Cells of the same run quoted by value, independent of wd_stream's selection: the sum of the
+ * products is neither a float add chain nor an exact-then-rounded sum. (1, 2^-24,
+ * 2^-24, 2^-24) . (1, 1, 1, 1) is 1 + 1.5 ulp and the console returned 1 + 1 ulp; (2^24, 1, 1, 1)
+ * is 2^24 + 3 and it returned 2^24 + 2; 1e8 + 1 - 1e8 + 1 is zero in every operand order
+ * because each product of 1 truncates away against the 1e8 term's exponent. The carry-out
+ * cells separate that truncation of lower terms from the rounding to nearest even that follows
+ * a carry into a higher binade, the rule PSP-VFPU-FUNNEL-001 measured for vfad. */
+static int check_vfpu_wide_dot_quoted_cells(void) {
+    static const struct { uint32_t a[4], b[4], want; const char *what; } dots[] = {
+        {{0x3f800000u, 0x33800000u, 0x33800000u, 0x33800000u}, {0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u},
+         0x3f800001u, "1 + 3 * 2^-24 truncates to 1 + 1 ulp"},
+        {{0x4b800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u}, {0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u},
+         0x4b800001u, "2^24 + 3 truncates to 2^24 + 2"},
+        {{0x4cbebc20u, 0x3f800000u, 0xccbebc20u, 0x3f800000u}, {0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u},
+         0x00000000u, "1e8 + 1 - 1e8 + 1 = 0"},
+        {{0x3f800000u, 0xccbebc20u, 0x3f800000u, 0x4cbebc20u}, {0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u},
+         0x00000000u, "the same terms in another order = 0"},
+        /* Carry-out into the next binade rounds to nearest even (probe case vfpu-round-sep,
+         * also PSP-VFPU-ROUNDSEP-001, PSP-3000, 2026-11-09, b = (1, 1, 1, 1) with the last lane of a
+         * zero unless listed). */
+        {{0x3f800003u, 0x3f800000u, 0x00000000u, 0x00000000u}, {0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u},
+         0x40000002u, "(1 + 3 ulp) + 1 rounds to nearest even at the carry-out"},
+        {{0x3f800003u, 0x3f800003u, 0x3f800000u, 0x00000000u}, {0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u},
+         0x40400003u, "three terms carrying out into [2, 4)"},
+        {{0x3f800001u, 0x3f800000u, 0x00000000u, 0x00000000u}, {0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u},
+         0x40000000u, "(1 + 1 ulp) + 1 = 2"},
+        {{0xbf800003u, 0xbf800000u, 0x00000000u, 0x00000000u}, {0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u},
+         0xc0000002u, "(-1 - 3 ulp) - 1 rounds to nearest even"},
+        {{0x3f800007u, 0x3f800000u, 0x00000000u, 0x00000000u}, {0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u},
+         0x40000004u, "(1 + 7 ulp) + 1 rounds up to 2 + 4 ulp"},
+        {{0x3f800005u, 0x3f800000u, 0x00000000u, 0x00000000u}, {0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u},
+         0x40000002u, "(1 + 5 ulp) + 1 rounds down to 2 + 2 ulp"},
+        {{0x40000001u, 0x40000000u, 0x00000000u, 0x00000000u}, {0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u},
+         0x40800000u, "(2 + 1 ulp) + 2 = 4"},
+        {{0x7f800000u, 0x3f800000u, 0xff800000u, 0x3f800000u}, {0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u},
+         0x7f800001u, "+Inf and -Inf terms give 0x7f800001"},
+        {{0x00000000u, 0x3f800000u, 0x3f800000u, 0x3f800000u}, {0x7f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u},
+         0x7f800001u, "0 * Inf gives 0x7f800001"},
+    };
+    int bad = 0;
+    const int c = find_overlap_diff_case("wide-vdot-q");
+    CHECK(c >= 0, "wide-vdot-q word is in the overlap-diff header");
+    if (c < 0) return 1;
+    const uint32_t w = overlap_diff_cases[c].w;
+    for (unsigned k = 0; k < sizeof(dots) / sizeof(dots[0]); k++) {
+        uint8_t si[4], ti[4], di[1];
+        CpuState aot, interp;
+        setup_identity_compute(&aot);
+        vreg_idx((int)((w >> 8) & 0x7fu), 4, si);
+        vreg_idx((int)((w >> 16) & 0x7fu), 4, ti);
+        vreg_idx((int)(w & 0x7fu), 1, di);
+        for (int i = 0; i < 4; i++) {
+            aot.vi[si[i]] = dots[k].a[i];
+            aot.vi[ti[i]] = dots[k].b[i];
+        }
+        interp = aot;
+        overlap_diff_run_codegen(&aot, c);
+        const int kind = sr_vfpu_interp(&interp, w);
+        g_checks++;
+        if (kind != SR_VFPU_COMPUTE || aot.vi[di[0]] != dots[k].want || interp.vi[di[0]] != dots[k].want) {
+            g_failures++;
+            bad = 1;
+            fprintf(stderr, "FAIL: vdot.q %s: psp=0x%08x aot=0x%08x interp=0x%08x\n", dots[k].what,
+                    dots[k].want, aot.vi[di[0]], interp.vi[di[0]]);
+        }
+    }
+    /* vcrsp.t: (1, 2^-24, 2^-24) x (1, 1, 1) = (0, 0xbf7ffffe, 0x3f7ffffe). */
+    {
+        const int cc = find_overlap_diff_case("wide-vcrsp-t");
+        CHECK(cc >= 0, "wide-vcrsp-t word is in the overlap-diff header");
+        if (cc < 0) return 1;
+        const uint32_t wc = overlap_diff_cases[cc].w;
+        static const uint32_t av[3] = {0x3f800000u, 0x33800000u, 0x33800000u};
+        static const uint32_t bv[3] = {0x3f800000u, 0x3f800000u, 0x3f800000u};
+        static const uint32_t want[3] = {0x00000000u, 0xbf7ffffeu, 0x3f7ffffeu};
+        uint8_t si[3], ti[3], di[3];
+        CpuState aot, interp;
+        setup_identity_compute(&aot);
+        vreg_idx((int)((wc >> 8) & 0x7fu), 3, si);
+        vreg_idx((int)((wc >> 16) & 0x7fu), 3, ti);
+        vreg_idx((int)(wc & 0x7fu), 3, di);
+        for (int i = 0; i < 3; i++) {
+            aot.vi[si[i]] = av[i];
+            aot.vi[ti[i]] = bv[i];
+        }
+        interp = aot;
+        overlap_diff_run_codegen(&aot, cc);
+        const int kind = sr_vfpu_interp(&interp, wc);
+        int ok = kind == SR_VFPU_COMPUTE;
+        for (int i = 0; i < 3; i++) ok &= aot.vi[di[i]] == want[i] && interp.vi[di[i]] == want[i];
+        g_checks++;
+        if (!ok) {
+            g_failures++;
+            bad = 1;
+            fprintf(stderr, "FAIL: vcrsp.t (1, 2^-24, 2^-24) x (1, 1, 1): aot=0x%08x 0x%08x 0x%08x\n",
+                    aot.vi[di[0]], aot.vi[di[1]], aot.vi[di[2]]);
+        }
+    }
     return bad;
 }
 
@@ -2802,10 +3728,17 @@ int main(void) {
     bad |= check_psp_measured_funnel();
     bad |= check_psp_measured_sort();
     bad |= check_psp_measured_forms2();
+    bad |= check_vus2i_vs2i_measured_words();
+    bad |= check_vfpu_basic_arith_measured();
+    bad |= check_vfpu_unary_arith_measured();
+    bad |= check_vmscl_measured();
     bad |= check_vrndi_rule_cells();
     bad |= check_vfpu_forms_measured();
     bad |= check_cop2_control_transfers();
+    bad |= check_vfpu_cc_write_mask();
+    bad |= check_vcmp_denormal_operands();
     bad |= check_quad_memops();
+    bad |= check_quad_wb_measured();
     bad |= check_vcrs_widths();
     bad |= check_vasin_measured_domain_words();
     bad |= check_vfpu_compare_measured_words();
@@ -2820,7 +3753,10 @@ int main(void) {
     bad |= check_vfpu3_compare_parity();
     bad |= check_vhdp_signed_zero_corpus();
     bad |= check_vf2i_conversions();
+    bad |= check_vf2i_measured_cells();
     bad |= check_vf_nan_rule();
+    bad |= check_vfpu_wide_dot_measured();
+    bad |= check_vfpu_wide_dot_quoted_cells();
     bad |= check_log2_top_knot();
     bad |= check_alias_edge_sweep();
     bad |= g_failures != 0;

@@ -36,6 +36,9 @@ download first ([details](#player-build-package-prerequisites)).
 build itself still calls the built-in Windows PowerShell 5.1 (`powershell.exe`) for one step,
 copying the build assets (`tools/copy_build_assets.ps1`, through `POWERSHELL` in the
 `Makefile`). That script supports 5.1, so you do not need to change or install anything for it.
+The Python tools that start PowerShell (`tools/stage_install.py`, `tools/psp_readiness.py` and the
+report bundle) use PowerShell 7 (`pwsh`) when it is on `PATH` and fall back to Windows PowerShell
+5.1 otherwise. Set `NK_POWERSHELL` to a full path to choose one yourself.
 
 ## System requirements
 
@@ -50,21 +53,40 @@ Measured on a Windows 11 x64 PC building and running Hot Shots Tennis with the p
 | Memory | 8 GB RAM | 16 GB RAM |
 | Free disk space | 5 GB | 10 GB or more, on an SSD |
 
-- **Memory.** Building a game is the heavy part. One compiler process peaked at about 3 GB
-  while it compiled a large block of translated game code. BUILD PACKAGE keeps 4 GB free
-  for everything else and runs one compile job for each further 3 GB of available memory,
-  so a PC with 8 GB compiles one part at a time and one with 16 GB two or three, depending
-  on what else is running. Playing a built game needs far less.
+- **Memory.** Building a game is the heavy part. The translated game code is compiled in
+  parts of about 4 MB of C each, and one compiler process peaked at about 530 MB on such a
+  part. BUILD PACKAGE budgets 200 bytes of memory for each byte of C in a part, at least
+  768 MB (a 4 MB part gets 768 MB), keeps 2 GB of the available memory free for everything
+  else, and runs one compile job for each further 768 MB. With 4.2 GB available it runs
+  two jobs, with 5 GB four and with 7 GB six, so an 8 GB PC compiles several parts at once
+  depending on what else is running. A part larger than the usual size is budgeted at 256
+  bytes per byte, so a build that contains one runs fewer jobs. If less than 2.75 GB is
+  available, one job runs and the compiler may fail when memory runs out. If Windows gives
+  no memory reading, the build runs two jobs (one on a PC with a single processor). The
+  figures are in GB as Windows reports them (1024 x 1024 x 1024 bytes). The compiler is the
+  measured limit; the other build steps and the final link are not measured separately.
+  Playing a built game needs far less.
 - **Disk space.** Each game keeps three things in the player's data folder: its imported disc
   image (about 1.4 GB for Hot Shots Tennis), the built game (about 470 MB) and the build cache
   (about 400 MB). If the player downloads the build tools, they add a 102 MB download, and
   more once unpacked.
 - **SSD.** Builds read and write thousands of small files, so a hard disk makes them much
   slower. Keep the player's data folder on an SSD if you can.
-- **Processor.** BUILD PACKAGE runs up to eight compile jobs at a time, one per logical
-  processor, as far as memory allows, and the build screen counts the parts as they finish.
-  A first build takes several minutes. To choose the job count yourself, set the
-  `NK_PACKAGE_JOBS` environment variable to a number from 1 to 8 before starting the player.
+- **Processor.** Settings > Build tools and cache > Build speed sets how much of the PC a
+  build takes. Balanced, the default, runs up to eight compile jobs at a time, one per logical
+  processor, as far as memory allows. Background runs at most two, with the whole build at low
+  priority, so a game you play meanwhile stays smooth and the build takes longer. Fastest runs
+  one per logical processor, as far as memory allows. No speed runs more jobs than the free
+  memory allows. The build screen names the speed, the job count and what limited it, and counts
+  the parts as they finish; the build log names them too. When free memory, a single processor
+  or `NK_PACKAGE_JOBS` limits it to one job, the build screen says so and that the build will
+  take longer. If Windows gives no memory reading, every speed runs two jobs (one on a PC with a
+  single processor). If the PC does not report its processor count, every speed runs one job
+  and the build screen says nothing about processors. A first build takes several minutes. To
+  choose the job count yourself, set the `NK_PACKAGE_JOBS` environment variable to a number from
+  1 to 8 before starting the player: it replaces the speed's job count (a Background build stays
+  at low priority), and the build log and screen say so. `nk_cli.py build-package` takes the
+  same speeds as `--build-speed`.
 - **Texture scaling (Ace Mode, development only).** It is reachable only through the `SR_TEX_SCALE` and
   `SR_SMART_2D` environment variables, has no setting in the player, and is not admitted as an Enhanced or Ace
   item yet, because it changes the frames the game can read back
@@ -87,6 +109,27 @@ Measured on a Windows 11 x64 PC building and running Hot Shots Tennis with the p
   same 512 MB budget as texture scaling (`SR_TEX_SCALE_BUDGET_MB`). At most 48 rectangles are checked or rebuilt per
   frame, on the game's thread. Text drawn as triangles, or from a page in VRAM, is drawn as the game made it. The
   rules are in [`ENHANCEMENT_CONTRACT.md`](ENHANCEMENT_CONTRACT.md#1013-sharp-game-text).
+- **Finer Bezier and spline patches (Finer patches).** A part of Enhanced and Ace, off by default and in no graphics
+  preset: Settings > Enhanced offers it as **Finer patches** (2x, 3x, 4x or Off), for the library or for one game,
+  and the launch line carries it as `tess=`. It is not on by choosing Enhanced or Ace, because it changes the frames
+  the game can read back and alters the GE timing model's clocks
+  ([section 11.3.7](ENHANCEMENT_CONTRACT.md#1137-finer-bezier-and-spline-patches-tess)). Each curved patch is drawn
+  with factor x factor times the triangles, on the game's thread, up to 262144 vertices a draw, so a scene with many
+  patches takes longer to draw. With the GE timing model on (`SR_GE_TIMING=1`) the extra triangles also change
+  when the game's display lists complete and when `sceGeDrawSync` returns in game time: on 8888 targets without
+  depth test, later for small patches and possibly earlier for large ones; elsewhere by the finer surface's
+  coverage, in either direction. A run's log ends with a `PATCH_TESS: exit` line
+  that counts the draws the vertex cap lowered. The rules are in
+  [`ENHANCEMENT_CONTRACT.md`](ENHANCEMENT_CONTRACT.md#1014-finer-bezier-and-spline-patches).
+- **Supersampling.** A part of Enhanced and Ace, off by default and in no graphics preset: Settings > Enhanced
+  offers it as **Supersampling** (2x, 4x or Off), for the library or for one game, and the launch line carries it as
+  `ssaa=`. It draws every frame at 2 or 4 times the render scale on each axis and shows each pixel as the average of
+  its samples, which smooths jagged edges; the frames the game can read back do not change. It costs the GPU 4
+  times (2x) or 16 times (4x) the drawing work of the render scale alone, on top of it, and GPU memory for the
+  larger images: by the renderer's estimate about 17 MB (2x) or 64 MB (4x) at render scale 1, 68 or 255 MB at 2,
+  and 272 or 1020 MB at 4. At start the renderer checks that the images fit the GPU; when 4x does not, the run
+  uses 2x, and when neither does, it runs without supersampling, and the log says why in either case. The rules
+  are in [`ENHANCEMENT_CONTRACT.md`](ENHANCEMENT_CONTRACT.md#1021-supersampling-ssaa).
 - **Where your data lives.** Imported discs, built games, saves and settings are in the per-user data
   folder (`%LOCALAPPDATA%\Nakagawa\data`, [below](#2-supply-local-game-inputs)), never inside the unpacked
   release. An update unpacks into a new folder and leaves the data folder alone, so deleting an old release
@@ -105,18 +148,27 @@ choose **Pin to Start**, or send a shortcut to the Desktop. From a source checko
 both shortcuts with the player's taskbar identity, so the launcher and the games it starts share one taskbar
 button. The ZIP itself writes no shortcut.
 
-**Add to Steam** ([#2152](https://github.com/Jstar269/nakagawa-recomp/issues/2152)). The code that adds Nakagawa to a
-Steam library as a non-Steam game is in `src/core/nk_steam_shortcuts.c`; the player has no button that calls it,
-so add the executable in Steam by hand. It works on your PC only and makes no network call or
-download. It edits the binary `shortcuts.vdf` in the `userdata\<account>\config` folder of the Steam account you pick
-(Steam's folder comes from the current user's own registry setting on Windows). It adds one entry with the app name,
-the executable and its start-in folder, and no launch options, and it only adds: entries it did not write are copied
-byte for byte, an entry for the same executable is reported and nothing is written, and a file it cannot read is left
-untouched. Before it writes, it copies the file to `shortcuts.vdf.nakagawa-backup-<date>-<time>` and reads the copy
-back; if that fails it writes nothing. It writes a temporary file and renames it over the original. Steam rewrites
-this file when it exits, so while Steam runs nothing is written: close Steam first (Nakagawa never closes it). In
-portable mode the entry points at the executable's current folder, so moving the folder breaks the shortcut.
-Other platforms are unsupported and say so.
+**Add to Steam** ([#2152](https://github.com/Jstar269/nakagawa-recomp/issues/2152)). To start a game from Steam
+(for Steam Input, Big Picture or a handheld), exit Steam, open the game's page in the player, and choose
+**Add to Steam**. Choose the Steam account if more than one has signed in on this PC, then **Add to Steam** again.
+The shortcut starts `nakagawa_player.exe --launch-title=<disc ID>` from the player's own folder, which starts that
+game without the launcher window and waits for it to end, so Steam shows it as running. When two images in your
+library share a disc ID (a retail disc and its translation), the value also names the image, `<disc ID>:<SHA-1>`; a
+player started with `--user-data-root` passes that folder on too. Start Steam afterwards to find the game in your
+library; no restart is needed.
+
+It works on your PC only and makes no network call or download. Steam's folder comes from the current user's own
+registry setting (Windows only; on other systems the dialog says it is unsupported and writes nothing), and the
+account names come from Steam's own `config\loginusers.vdf`. It edits the binary `shortcuts.vdf` in that
+account's `userdata\<account>\config` folder. Before it writes, it copies the file to
+`shortcuts.vdf.nakagawa-backup-<date>-<time>` and reads the copy back; if that fails it writes nothing. It writes a
+temporary file and renames it over the original. Steam rewrites this file when it exits, so while Steam runs
+nothing is written: exit Steam first (Nakagawa never closes it). Entries Nakagawa did not write are copied byte for
+byte, and a file it cannot read is left untouched. Choosing **Add to Steam** again for a game already there changes
+nothing. After an update, which unpacks into a new folder, or after moving a portable copy, choosing it again updates
+that game's shortcut to the new folder instead of adding a second one: only its program and start-in folder change,
+and its play time and collections stay. The shortcut has no picture of its own (the player keeps disc art in memory
+only), so Steam shows the player's icon until you set one in Steam.
 
 **Update.** A copy `Setup.exe` installed updates by running the next release's Setup (see [below](#windows-installer-setupexe)). For a ZIP copy, Check for updates unpacks the new version into a new folder next to the running one and leaves the old
 one. Your data is in the per-user folders below, so the new version finds it. Delete the old folder when you
@@ -272,7 +324,8 @@ consumer ISO compatibility and interactive Linux presentation are not supported
 The supported and tested core development environment is:
 
 - Windows 11 x64. Older or unsupported Windows versions may work, but receive no compatibility guarantee.
-- PowerShell 7.6+ (`pwsh`) as the shell you type into. Windows PowerShell 5.1 is not supported for that.
+- PowerShell 7.6+ (`pwsh`) as the shell you type into. Windows PowerShell 5.1 is not supported for that,
+  although the build tools fall back to it where PowerShell 7 is missing ([Which PowerShell](#prerequisites)).
 - CPython 3.15.x (3.14.x is also accepted, `>=3.14,<3.16`), with `python` resolving to that feature line. 3.15 is the default: the pinned prerequisite and hosted CI both use 3.15.2.
 - Current MSYS2 UCRT64 GCC/G++, GNU Make, SDL3, and Vulkan loader packages. The release
   manifest's `toolchain_policy` records only the floors the code actually needs: a C11 compiler
@@ -335,6 +388,17 @@ Some folders hold a second copy of a tool that the build also calls, so the orde
   (for example, `C:/path/to/Python315/python.exe`); Make recipes and the player package builder use
   that explicit path even when MSYS2 is first on `PATH`. Run direct tooling commands through the
   same `PYTHON` path. Install the declared Python tooling dependencies before adding MSYS2 to `PATH`.
+- **The player's package build.** BUILD PACKAGE puts one UCRT64 toolchain's `bin` in front of the build
+  child's `PATH`, so Python, `mingw32-make` and `gcc` come from the same place: the release bundle, else
+  the per-user download, else a system MSYS2 UCRT64 install, tried in this order: a UCRT64 `bin`
+  already on `PATH`, then `MSYS_PATH`, then `C:\msys64\ucrt64`. A bundled or downloaded toolchain
+  needs only `gcc.exe` in its `bin`; a system install also needs its `include` to hold the SDL3
+  headers. A UCRT64 `bin` on `PATH` counts only when it is `<prefix named ucrt64>\bin`, and a complete
+  one is used even when `MSYS_PATH` names another install. A MinGW from another package manager ahead
+  of MSYS2 on your `PATH`, such as Chocolatey's, therefore no longer wins. With no complete UCRT64
+  toolchain the `PATH` is left alone and the build stops at `sdl3-check`, which names the `gcc` it
+  found. The `PATH` is also left alone in the rare case that it is already so long that the toolchain
+  folder cannot be added within the 32767-character Windows limit.
 - **POSIX shell.** If a Make recipe needs `sh`, put Git for Windows' `usr\bin` (`%ProgramFiles%\Git\usr\bin`)
   ahead of MSYS2's `usr\bin` (`C:\msys64\usr\bin`), as the [Windows host pitfalls](#windows-host-pitfalls)
   table describes.
@@ -357,7 +421,7 @@ tree when a user-profile path or a workspace root appears in a first-party file.
 
 ### Runtime DLLs (SDL3.dll, SDL3_ttf.dll & vulkan-1.dll)
 
-The native player (`nakagawa_player.exe`) requires `SDL3.dll` and the host Vulkan loader (`vulkan-1.dll`). It also loads `SDL3_ttf.dll` at run time for the readable UI font: `mingw32-make player` stages `SDL3_ttf.dll` and its full runtime dependency closure beside `build\nakagawa_player.exe` (`tools/stage_runtime_dlls.py`, with `SDL3_TTF_DLL` as the override in the same pattern as `SDL3_DLL`), so the same TTF font path is used whether the player is started from Explorer, a plain `cmd.exe` with no MSYS2 on `PATH`, a built title package, or the release layout. In a release archive, the matching `SDL3.dll`, `SDL3_ttf.dll` and its closure are already beside `bin/nakagawa_player.exe`; leave those files in `bin/`. In a source checkout, `tools/copy_build_assets.ps1` copies SDL3 and any imported MinGW runtime DLLs beside the built game executable and generates their third-party notices; the player target stages its own typography runtime the same way. Without `SDL3_ttf.dll` the player still runs, but falls back to the 8x8 SDL bitmap font and logs the failing step once to stderr — the fallback is never silent — and the workspace doctor reports it as `RUNTIME_SDL3_TTF`.
+The native player (`nakagawa_player.exe`) requires `SDL3.dll` and the host Vulkan loader (`vulkan-1.dll`). It also loads `SDL3_ttf.dll` at run time for the readable UI font: `mingw32-make player` stages `SDL3_ttf.dll` and its full runtime dependency closure beside `build\nakagawa_player.exe` (`tools/stage_runtime_dlls.py`, with `SDL3_TTF_DLL` as the override in the same pattern as `SDL3_DLL`), so the same TTF font path is used whether the player is started from Explorer, a plain `cmd.exe` with no MSYS2 on `PATH`, a built title package, or the release layout. In a release archive, the matching `SDL3.dll`, `SDL3_ttf.dll` and its closure are already beside `bin/nakagawa_player.exe`; leave those files in `bin/`. In a source checkout, `tools/copy_build_assets.ps1` copies SDL3 and any imported MinGW runtime DLLs beside the built game executable and generates their third-party notices; the player target stages its own typography runtime the same way. Without `SDL3_ttf.dll` the launcher cannot start: the player says why in a message box and on stderr and exits with code 4, and the workspace doctor reports it as `RUNTIME_SDL3_TTF`.
 
 #### 1. SDL3.dll
 
@@ -365,7 +429,7 @@ For a source build, install the MSYS2 UCRT64 SDL3 package described above. Do no
 
 #### 1a. SDL3_ttf.dll (UI typography)
 
-Install the MSYS2 UCRT64 `sdl3-ttf` package (with the `sdl3` package above). `mingw32-make player` then stages `SDL3_ttf.dll` and the mechanically resolved dependency closure (FreeType, HarfBuzz, Graphite2, libpng, zlib, bzip2, Brotli, GLib, libintl, libiconv, PCRE2 and the MinGW runtimes) beside `build\nakagawa_player.exe`, together with their licence texts in `THIRD_PARTY_NOTICES/`. Set `SDL3_TTF_DLL` to an explicit `SDL3_ttf.dll` file to override the toolchain copy, exactly like `SDL3_DLL`. `NK_UI_NO_TTF=1` still forces the bitmap fallback, for example on CI machines without the library.
+Install the MSYS2 UCRT64 `sdl3-ttf` package (with the `sdl3` package above). `mingw32-make player` then stages `SDL3_ttf.dll` and the mechanically resolved dependency closure (FreeType, HarfBuzz, Graphite2, libpng, zlib, bzip2, Brotli, GLib, libintl, libiconv, PCRE2 and the MinGW runtimes) beside `build\nakagawa_player.exe`, together with their licence texts in `THIRD_PARTY_NOTICES/`. Set `SDL3_TTF_DLL` to an explicit `SDL3_ttf.dll` file to override the toolchain copy, exactly like `SDL3_DLL`.
 
 #### 2. vulkan-1.dll
 
@@ -782,6 +846,11 @@ output directory contains spaces, the route builds in a Make-safe workspace—re
 the finished package to the destination. If neither fallback is available, or if the path contains
 characters that Make recipes cannot quote, the route stops with the named `PACKAGE_UNSUPPORTED_PATH`
 boundary.
+An enhancement data root is read in place rather than copied. When its path has a space or another
+character Make cannot take, the route uses its 8.3 short form on Windows, and stops with
+`PACKAGE_UNSUPPORTED_PATH` naming the data root when no short form exists (a volume with 8.3 names
+turned off, or any other platform). `NK_BUILD_ROOT` does not help there; move the data root to a
+location without such characters.
 
 `assets/titles/hst-ucus98701.json` is the HST title manifest, part of the repository since 2026-10-27: it carries HST's guest-address runtime bindings, and a `GAME_NAME=hst` build refuses to compile without it rather than silently producing a runtime with every title binding disabled. See [`assets/titles/README.md`](../assets/titles/README.md).
 
@@ -858,24 +927,50 @@ long-run present rate never exceeds the cap (`gui-present-selftest`).
 
 ### Presentation upscaler (`SR_PRESENT_UPSCALE`)
 
-In the player this is **Sharper enlarging** on Settings > Enhanced and on each game's page, off by
-default; the launcher sets `SR_PRESENT_UPSCALE` from it for an Enhanced or Ace run.
+In the player this is **Sharper enlarging** on Settings > Enhanced and on each game's page, off for a
+new library. The Medium, Ultra and Handheld graphics presets turn it on and Low and High turn it off; a
+game's own value wins over the preset ([PLAYER_UI_DESIGN.md](PLAYER_UI_DESIGN.md)). The launcher sets
+`SR_PRESENT_UPSCALE` from the result for an Enhanced or Ace run.
 
 `SR_PRESENT_UPSCALE=fsr1` makes the Vulkan presenter enlarge the picture to its place in the
 window with AMD FidelityFX Super Resolution 1: EASU, an edge-adaptive upscaler, then RCAS
 sharpening. `off`, the default, keeps the `SR_PRESENT_SCALING` filter. It runs only when the
-picture is enlarged on both axes, on whatever frame the presenter shows. It is presentation only:
+picture is enlarged on both axes, on every frame the presenter shows except a CPU-presented one
+while `SR_MOVIE_UPSCALE` is on. It is presentation only:
 the guest's frame, guest VRAM and captures are byte for byte what they are with it off
 (`gpu-capture-selftest` and, with a Vulkan device and a display, `display-smoke-fsr1`). A run
 recording (`SR_VIDEOREC_DIR`) is enlarged by FSR 1 too, at the recording's size, and its
 `record.json` names the filter ([DEBUGGING.md](DEBUGGING.md)). The pause
 overlay is drawn at the window's size on the CPU, so the paused picture is not upscaled and looks
-softer than the running one. Its cost is small: from 1920x1088 to 3840x2160, EASU and RCAS took
-0.40 ms per present on an RTX 3080 (`fsr1-selftest`). An unknown value, or a device without
+softer than the running one. Its cost is small. On an RTX 3080, EASU and RCAS took 0.40 ms per
+present from 1920x1088 to 3840x2160, 0.20 ms to 2560x1440, 0.11 ms from 960x544 to 1920x1080, 0.06 ms
+to 1280x800 and 0.11 ms from 480x272 to 1920x1080 (`fsr1-selftest`, which times each graphics preset's
+sizes, median of 15; measured on 2026-11-08 for #2150, and a second, independent run matched within
+0.01 ms). No low-end or handheld GPU has been measured. An unknown value, or a device without
 compute, leaves it off with a line in the log; so does a size whose images cannot be made, which
 is then not tried again. The launcher turns it off for an authentic session, and a run with it on
 is stamped as enhanced (`ACE_MODE: present upscale fsr1`), which `boot_gate.py` reads. The picture
 gate and the library sweep set it `off` for their own runs.
+
+### Movie upscaler (`SR_MOVIE_UPSCALE`)
+
+`SR_MOVIE_UPSCALE` gives frames the CPU presents, which are decoded movies (and every frame when the
+software GE draws), their own upscaler: `fsr1` scales them with FSR 1, and `anime4k` first doubles
+them once or twice with Anime4K's CNN x2 (M) network, which suits the flat colours and dark lines
+of animated and pre-rendered movies, then takes them to the window's size with FSR 1 (unless the
+doubled picture is already that size, as at the default 960x544 window). `off`, the
+default, leaves them to `SR_PRESENT_UPSCALE`. It applies in the window and in a recording
+(`SR_VIDEOREC_DIR`), each with its own passes at its own size. Use `anime4k` for line art and movies
+only: on other pictures, such as fine regular stripes, it adds a faint ripple along edges. It reaches
+only frames the CPU presents. A game whose movie the GE presents, drawn as a texture (LittleBigPlanet)
+or decoded into a GE target (Hot Shots Tennis), shows a GE frame, which this key does not upscale.
+Like `SR_PRESENT_UPSCALE` it is presentation only: the decoded movie, the guest's frame, guest VRAM
+and captures are unchanged (`display-smoke-anime4k`, which needs a Vulkan device and a display). A
+run with it on is stamped as enhanced (`ACE_MODE: present upscale movie-anime4k`, a
+`phase=present_upscale` boot event and `runtime.enhancements` in the flight bundle), so boot and
+flight evidence never takes it as authentic; an Authentic session from the launcher, the picture
+gate and the library sweep run with it `off`. A 480x272 movie frame costs 0.31 ms through two
+Anime4K stages and 0.75 ms with FSR 1 to 3811x2160 on an RTX 3080 (`anime4k-selftest`).
 
 Runtime logs are written under `logs/`. Use `SR_DEBUG=0xFF` for all categories or consult [DEBUGGING.md](DEBUGGING.md) for targeted logging.
 On Windows, runtime output redirected to a file or pipe is buffered: a line reaches the log within 50 ms,
@@ -933,10 +1028,11 @@ it needs all of the following:
 - `python`, `gcc`, and `mingw32-make` from either the current environment or the
   player's per-user downloaded build tools. The player changes `PATH` only for
   the build child; it never edits system `PATH` or the registry.
-- `powershell.exe` (Windows PowerShell 5.1, built into Windows 10 and 11). The
-  asset-copy step and the unpacking of the downloaded Python archive
-  (`Expand-Archive`) use it; PowerShell 7 remains the development baseline for
-  the other repository scripts.
+- PowerShell. The unpacking of the downloaded Python archive (`Expand-Archive`)
+  uses PowerShell 7 (`pwsh`) when it is installed and otherwise the built-in
+  Windows PowerShell 5.1, so nothing needs installing; `NK_POWERSHELL` names a
+  specific one. The asset-copy step uses `powershell.exe` (5.1) through
+  `POWERSHELL` in the `Makefile`.
 
 A release folder can carry the pinned prerequisites itself, in `prereqs/` beside `bin/` and
 `source/` ([#1285](https://github.com/Jstar269/nakagawa-recomp/issues/1285)). BUILD PACKAGE
@@ -1025,6 +1121,17 @@ connections, listed below, and each is opt-in.
 
 A release folder that carries a verified `prereqs/` tree never makes the build-tool
 download ([#1285](https://github.com/Jstar269/nakagawa-recomp/issues/1285)).
+
+**Discord status** (Settings > Online and developer, off by default) makes no network
+connection either. While a game runs, the player passes three things to the Discord app on this
+PC through Discord's local named pipe (`discord-ipc-0` to `discord-ipc-9`): the game's title as
+the disc names it (its disc ID when the disc names no title), the play mode (Authentic, Enhanced
+or Ace) and when the game started, with the player's process ID, which Discord's protocol needs. The
+Discord app then shows them on your profile, so Discord learns which game you play. Nothing else
+is sent: no path, save, user name or game memory. If Discord isn't running, the player tries
+again at most once a minute and says nothing; the status clears when the game exits. A build
+without the project's Discord application ID has no Discord status switch
+([`ONLINE_FEATURES.md`](ONLINE_FEATURES.md#discord-status)).
 
 Enhanced and Ace (Settings > Enhanced) make no network connection: its features run on this PC, and its per-game report
 stays in the user data folder.
@@ -1136,7 +1243,7 @@ refuses such a `BUILD_DIR` before any recipe runs and names the boundary:
 BUILD_DIR 'C:/path/with spaces/build' contains a space, which GNU Make cannot represent
 in a target or prerequisite name. Use a relative BUILD_DIR under the repository
 root (the default `build/<game>`), or set NK_BUILD_ROOT to a folder without spaces
-so tools/title_codegen_plan.py can pick a Make-safe build root (issue #296).
+so tools/title_codegen_plan.py can pick a Make-safe build root.
 ```
 
 The default relative `BUILD_DIR` carries no space, so an ordinary checkout is unaffected. Every route
@@ -1175,7 +1282,7 @@ the issue #1391 import/VFPU scope. Before this work, the full `tools/` scan used
 `python -m mypy --no-incremental --no-error-summary --no-pretty --python-version 3.15 --platform linux --explicit-package-bases tools`
 and reported 353 errors in 120 modules. The full-tree per-module ratchet remains in
 `tools/mypy_baseline.json`; its entries outside the clean scope are existing typing debt, not
-suppressed errors. The current full-tree residual is 318 errors in 106 modules; their per-module
+suppressed errors. The current full-tree residual is 246 errors in 92 modules; their per-module
 counts are listed in `tools/mypy_baseline.json` and remain guarded by that ratchet. The clean scope
 directly checks `tools/verify_vfpu_provenance.py`,
 `tools/hle_manifest.py`, `tools/psp_import_table.py`, `tools/import_audit_gate.py`,
@@ -1258,7 +1365,7 @@ outside the published repository.
 - **Preflight diagnostics:** run `.\nk.ps1 Doctor -TitleManifest C:\path\to\manifest.json -GameName game` (or `python tools/nk_doctor.py --title-manifest C:\path\to\manifest.json --game-name game`) to validate the toolchain, build dependencies, and the selected title's local inputs. Without a title selection, Doctor uses the public synthetic manifest.
 - **Missing Vulkan headers:** pass the correct `-VulkanSdk` path or `VULKAN_SDK=...` Make variable.
 - **`SDL3.dll` missing:** for the release package, keep `bin/SDL3.dll` beside `bin/nakagawa_player.exe`; for a source build, install the MSYS2 UCRT64 SDL3 package so `tools/copy_build_assets.ps1` stages it beside `build/nakagawa_player.exe`.
-- **Retro 8x8 bitmap font in the player UI:** the readable-font path needs `SDL3_ttf.dll` and its dependency closure beside `nakagawa_player.exe` (or on `PATH`). Install the MSYS2 UCRT64 `sdl3-ttf` package and re-run `mingw32-make player`, which stages the whole closure and its licence notices; the workspace doctor reports `RUNTIME_SDL3_TTF`/`RUNTIME_SDL3_TTF_CLOSURE`, and the player itself logs the failing step once to stderr when it falls back. `NK_UI_NO_TTF=1` forces the bitmap fallback on purpose.
+- **The player says its launcher cannot start (exit code 4):** the launcher needs `SDL3_ttf.dll` and its dependency closure beside `nakagawa_player.exe` (or on `PATH`), and its UI fonts in `assets/fonts/ui`. Install the MSYS2 UCRT64 `sdl3-ttf` package and re-run `mingw32-make player`, which stages the whole closure, the fonts and their licence notices; the workspace doctor reports `RUNTIME_SDL3_TTF`/`RUNTIME_SDL3_TTF_CLOSURE`, and the player names the missing part in its message.
 - **`PUBLIC_SAFE=1` active:** the runtime always compiles with `PUBLIC_SAFE=1`; the private-backend mode was retired on 2026-10-25. This mode links the public replacements — `iso_public.c` for ISO9660 lookups driven by `PSP_ISO`, `pgf_public.c` for fonts, and the SDL3 audio backend — plus `pgd_unavailable.c`. Disc routes keep working; PGD-protected data is refused in this mode, and the runtime refuses encrypted `~PSP` executables; the player decrypts them before a build (see [Encrypted executables](#encrypted-executables)).
 - **Missing ISO or missing extracted assets:** `place_game_here/ISO/<game>.iso` must be present, and `place_game_here/EXTRACTED/PSP_GAME/USRDIR/xbdata_extracted` (or configured `SR_DATAROOT`) must be populated. `SR_DATAROOT` may instead hold the read-only `<archive>.xb` archives; the runtime mounts those directly ([#298](https://github.com/Jstar269/nakagawa-recomp/issues/298)).
 - **No late PRX exports / asset lookups fail:** restore the required `place_game_here/EXTRACTED/` layout (decrypted `libfont.prx`, `scePsmf_library.prx`, `scePsmfP_library.prx`).
@@ -1308,6 +1415,7 @@ the report runs the toolchain check, which can take a minute.
 
 | Symptom | Cause | Fix |
 | --- | --- | --- |
+| Make stops with `<target> needs a POSIX sh, and mingw32-make found no sh.exe on PATH` | `mingw32-make` found no POSIX `sh`, so it would run that recipe with `cmd.exe`, which misreads sh syntax; the Makefile refuses before any line of the recipe runs | Put Git for Windows' `usr\bin` ahead of `C:\msys64\usr\bin` on `PATH` (see [PATH order](#path-order)) |
 | A Make recipe fails with a shell error, or runs words such as `status` as commands | `mingw32-make` found no POSIX `sh` and fell back to `cmd.exe` | Put Git for Windows' `usr\bin` ahead of `C:\msys64\usr\bin` on `PATH` (see [PATH order](#path-order)) |
 | `cannot find -lvulkan` with `VULKAN_SDK=/ucrt64` | That is the CI's MSYS2 layout; a local MSYS2 may lack the import library | Leave `VULKAN_SDK` unset so the Makefile finds the installed Vulkan SDK |
 | A Make-driven step fails on a `C:\path\to\dir` path | Backslashes in a Make variable are read as escapes | Pass Make paths with forward slashes (`C:/path/to/dir`) |

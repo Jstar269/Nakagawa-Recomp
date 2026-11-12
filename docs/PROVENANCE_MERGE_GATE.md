@@ -50,7 +50,7 @@ it agree with every other artifact.
 | T12 | Remove an exclusion from the publication policy | `POLICY_SUBSTITUTION` unless an external policy-delta authority (V3, or V1/V2 with its blessed policy) authorizes that precise `exclude_removed` entry; scope may otherwise tighten, never loosen |
 | T13 | Edit the ledger without regenerating the export | `EXPORT_FIELD_MISMATCH` |
 | T14 | Replay a green result from an earlier head | the verdict is bound to the candidate commit and tree, and the run fails closed if the fetched head is not the head the event named |
-| T15 | Merge on a stale base | the verifier refuses `MERGE_BASE_STALE` when the head is behind its base and evaluates the ratchet against the base tip, and the `main-minimal` ruleset's `strict_required_status_checks_policy` is `true` (live value read from the ruleset, 2026-10-10), so GitHub also requires the head to be up to date at merge time (see Merge-tree identity). This half is enforced by live ruleset configuration, not by code in this repository, so re-read the ruleset before relying on it |
+| T15 | Merge on a stale base | the `main-minimal` ruleset's `strict_required_status_checks_policy` is `true` (live value read from the ruleset, 2026-10-10), so GitHub requires the head to be up to date at merge time, and the head that then merges is attested against the default branch's tip (see Merge-tree identity). This is enforced by live ruleset configuration, not by code in this repository, so re-read the ruleset before relying on it. The hosted pull-request attestation judges a head against its merge base with the default branch, so a head that is only behind gets a verdict for its own change; the verifier still refuses `MERGE_BASE_STALE` for any caller that names a base the head is behind |
 | T16 | Add a symlink whose "content" is a path string | `TREE_INVALID` — provenance is only defined over regular file content |
 | T17 | Replace an existing file's implementation bytes, update the public hash coherently, and inherit the claim already recorded for that path | `CONTENT_UNATTESTED` — grandfathering requires the bytes to be frozen too |
 | T18 | Rename or copy an attested file so the new path inherits the old path's record | `TRUSTED_RECORD_UNRESOLVED` + `CLAIM_UNBACKED` — records name paths, and a new path is new |
@@ -65,18 +65,18 @@ it agree with every other artifact.
 | T27 | Use a wildcard record to authorize a new implementation path | `CLAIM_UNBACKED` — wildcard records remain inert for classification |
 | T27b | Supply malformed or ambiguous legacy `reviewed_blobs` metadata | ignored by normal mode; `--require-reviewed-blobs` remains available when strict legacy validation is deliberately requested |
 | T28 | Claim a different classification from the trusted path authority | `CLAIM_UNBACKED` or `CLASSIFICATION_DOWNGRADE` |
-| T29 | Have the gate judge a mutable branch name so two resolutions name different trees | `MUTABLE_REVISION_REFUSED` — CI passes the event's exact 40-hex head and base SHAs, and the base must be an ancestor of the default branch |
+| T29 | Have the gate judge a mutable branch name so two resolutions name different trees | `MUTABLE_REVISION_REFUSED` — CI passes exact 40-hex SHAs: the head the run was started for, and as the base its merge base with the default branch, which is on the default branch by construction |
 | T30 | Swap the authority between "what revision is main" and "read main" | the workflow resolves the authority commit once and reads the ledger **at that SHA**; the revision and the ledger's own SHA-256 are both reported |
 | T31 | Change an implementation file, drop it from `include_paths`, delete its ledger entry and regenerate the export, so the gate stops seeing the path | `TRUSTED_SCOPE_VIOLATION` — scope is anchored to the trusted base policy over the trusted base tree and may only widen |
 | T32 | Add an exclusion covering a changed implementation path | `TRUSTED_SCOPE_VIOLATION` — the same rule; removing a path from coverage is removing a path from coverage |
 | T33 | Add a new implementation file and simply leave it out of the policy | `TRUSTED_SCOPE_VIOLATION` — a new implementation path must enter the universe unless the **trusted** policy excludes it |
 | T34 | Relabel an implementation path as documentation, configuration or a fixture to escape content gating | `CLASSIFICATION_DOWNGRADE` — measured against trusted derivation, so correcting a genuine over-claim is still allowed |
-| T35 | Forge `policy_sha256`, `included_content_sha256`, counts or exclusion lists while keeping `provenance_ledger_sha256` correct | `EXPORT_FIELD_MISMATCH` — the whole export is recomputed and compared field by field |
+| T35 | Forge `policy_sha256`, `included_content_sha256`, counts or exclusion lists while keeping `provenance_ledger_sha256` correct, or commit a control generated against a different policy | `EXPORT_FIELD_MISMATCH` — the whole export is recomputed from the candidate's own policy and compared field by field; an omitted tree-derived field (including `policy_sha256`) is recomputed, a declared one must match |
 | T36 | Repeat a JSON object key so the verifier and a downstream reader disagree about which value wins | the strict parser refuses any duplicate key in the ledger, policy, export or authority before semantics run |
 | T37 | Spell a path in NFD, or with a backslash, control character or dot component, so two Git paths collapse to one identity | `TREE_INVALID` — paths must be canonical NFC POSIX relative, and ambiguity is refused rather than normalized |
 | T38 | Probe which private record ids exist by watching whether the gate says "absent" or "does not cover" | one `TRUSTED_RECORD_UNRESOLVED` code with one wording, and the claimed id is not echoed |
 | T39 | Exhaust the runner with a huge tree, a huge blob or huge path text | `TREE_TOO_LARGE` — ceilings are enforced as the bytes stream in, not after buffering |
-| T40 | Merge a pull request whose head is behind base so conflict-resolution bytes appear after verification | `MERGE_BASE_STALE` — the base must already be an ancestor of the head, which makes the head tree the merge result for all three allowed methods |
+| T40 | Merge a pull request whose head is behind base so conflict-resolution bytes appear after verification | a head that is behind the default branch cannot merge under the ruleset's strict policy (T15); bringing it up to date makes a new head, attested with the default branch's tip as its base, and that head tree is the merge result for all three allowed methods. The verifier refuses `MERGE_BASE_STALE` whenever the base it is given is not an ancestor of the head |
 | T41 | Stop tracking a file the profile still publishes, so it leaves the ledger (tracked files intersect `include_paths`) and the inherited universe (candidate tree) at once, with no finding | `INCLUDED_PATH_UNTRACKED` — a declared path must resolve to a tracked file, or be removed from the profile in the same change; a declaration the trusted base already could not resolve is reported, not blamed on the change |
 | T42 | Edit a newly admitted byte-identical import after its admission, keeping the approved profile change | `POLICY_DELTA_ADDED_BYTES_MISMATCH` — a V4 delta binds a byte-bound path to the SHA-256 its admission approved, as a V3 delta binds every added path (#1673); new admissions write no V1/V2 record, which binds no claim or bytes, and a legacy one that adds a path is refused (`POLICY_DELTA_LEGACY_ADDS_PATHS`), so a missed lookup has nothing to fall back to. An edit to a claim-bound path is allowed while its claim holds, like an edit to a landed authority-backed file (T24) |
 | T43 | Reuse an approved V3 or V4 delta on a base where its change no longer holds: the added path is already published or present, a removed or excluded path moved, a rule's earlier value changed | `POLICY_DELTA_PATH_EXISTS`, `POLICY_DELTA_BASE_MISMATCH`, `POLICY_DELTA_RULE_VALUE_MISMATCH` — the verifier derives the document from this base and candidate and requires the approved bytes to equal it |
@@ -110,9 +110,16 @@ verifier.
 
 The boundary is enforced structurally, not by convention:
 
-* the workflow is `pull_request_target`, so its definition is the base
-  branch's. A `pull_request` workflow would hand the definition to the
-  candidate, who could keep the required check's name and replace its body;
+* the workflow runs only on events whose definition the candidate does not
+  control: `pull_request_target` (the base branch's copy), `workflow_run` when a
+  `CI` run is requested for a pull request (always the default branch's copy),
+  and a `workflow_dispatch` naming a pull request and its head, which the CI
+  verdict accepts only from the default branch. A `pull_request` workflow would
+  hand the definition to the candidate, who could keep the required check's
+  name and replace its body. GitHub blocks `pull_request_target` by default in
+  public repositories from 2026-12-02, so the gate does not depend on that
+  event; the verifier holds the workflow's `on:` block to those three events
+  (`TRUSTED_WORKFLOW_WEAKENED`);
 * the candidate is **never checked out**. Its objects are fetched into the
   trusted checkout and read with `git cat-file`, so no candidate hook, build
   file, workflow, or Python module can execute in the job that holds the
@@ -229,6 +236,37 @@ generator the release process uses — from the candidate tree and the policy,
 and compares **every field**, reporting `EXPORT_FIELD_MISMATCH` for any
 difference, any missing field and any invented one.
 
+The committed control omits the fields listed in its `tree_derived_fields`: the
+tree-wide digests and counts, and `policy_sha256`. Committing them made every
+merge, and every admitted path, rewrite the same lines, so every open pull request
+conflicted. Omission is not trust. The gate recomputes each one, and a declared
+value must still match. Every field the policy decides (profile, policy version,
+exclusion lists, schema version) stays committed and compared, so a control
+generated against a different policy still fails with `EXPORT_FIELD_MISMATCH`,
+unless its bytes equal the current policy's output.
+
+The fields that `tree_derived_fields` lists are recomputed, so the committed
+control may omit them. `policy_sha256` is the digest of the candidate's own
+policy blob, which the gate has already bound to the trusted base policy or to
+the maintainer's policy-delta authority, so it may be omitted on the same
+terms, but only by a control whose `tree_derived_fields` names it. Two committed
+shapes are accepted:
+
+* `tree_derived_fields` without `policy_sha256`, and the digest declared: the
+  declared digest is compared with the recomputed one;
+* `tree_derived_fields` naming `policy_sha256`, and the digest omitted (a
+  declared one is still compared).
+
+A control whose list does not name `policy_sha256` and that declares no digest
+is refused with `EXPORT_FIELD_MISMATCH`, and the message names
+`make contrib-refresh` (`mingw32-make` on Windows) and
+`python tools/regen_all.py`. The publication audit (`tools/publish_audit.py`)
+runs a staleness check of its own: a declared digest, even an empty or null
+one, must equal the policy digest, and a control without one must name
+`policy_sha256` in `tree_derived_fields` and match the policy's profile,
+version and exclusion lists, else `POLICY_EXPORT_STALE`. It does not compare the
+whole `tree_derived_fields` list; that is the verifier's check above.
+
 `candidate_tree` and `source_tree` are the two advisory exceptions: the release
 process records the pre-export tree there, so they are informational. The real
 tree binding is the verdict's own `candidate_tree`.
@@ -265,17 +303,23 @@ so an attacker-shaped tree is refused rather than materialized first.
 The repository allows **merge, squash and rebase**. All three produce a final
 tree equal to the pull request head tree — but only when the base is already an
 ancestor of the head, because then there is nothing to reconcile and no
-conflict-resolution bytes can appear after verification. The gate therefore
-refuses `MERGE_BASE_STALE` when the head is behind its base.
+conflict-resolution bytes can appear after verification. The verifier therefore
+refuses `MERGE_BASE_STALE` when the base it is given is not an ancestor of the head.
 
-That makes head-tree attestation sufficient **for the verifier's side**. It is
-not a complete merge-time guarantee by itself: nothing in the verifier stops base
-from advancing between verification and the merge button. Closing that needs
-`strict_required_status_checks_policy: true`. The `main-minimal` ruleset requires
+The hosted pull-request attestation gives it the merge base of the head with the
+default branch, as the merge-group attestation does. A head that is only behind
+the default branch is therefore judged for its own change, against the commit it
+was built on, and is not failed for commits it never saw. Such a verdict
+describes the head, not the merge result. A head-tree attestation describes the merge result only for a head that
+is up to date, and nothing in the verifier stops the base from advancing between
+verification and the merge button. Both are closed by
+`strict_required_status_checks_policy: true`: a head that is behind cannot merge,
+and the up-to-date head that replaces it is attested with the default branch's
+tip as its base. A landing batch is such a head. The `main-minimal` ruleset requires
 two checks (`Trusted CI verdict`, `CodeQL`), since 2026-10-29 (#373), and its
 `strict_required_status_checks_policy` is **`true`** (live value read from the ruleset,
 2026-10-29; this document previously recorded `false` as of 2026-09-30), so GitHub does require an
-up-to-date head at merge time. That half of T15 is therefore enforced by live
+up-to-date head at merge time. T15 is therefore enforced by live
 configuration rather than by any code here — re-read the ruleset before relying
 on it, because a configuration change would silently reopen it with no diff in
 this repository. For the history of that decision see #364 and #373.
@@ -510,10 +554,13 @@ enforcement without the property. Do not do it.
 
 The trusted CI verdict ([`docs/CI.md`](CI.md#trusted-ci-verdict), #373) is the route
 chosen for #364. It does not make this context required. It requires a
-`Trusted provenance attestation` job, once, green, from a `pull_request_target` run of
-`provenance-attestation.yml` at the exact head, and refuses the context from any other
-workflow, event or app (`FOREIGN_PRODUCER`). Since 2026-10-29 the ruleset requires
-`Trusted CI verdict` and `CodeQL` only.
+`Trusted provenance attestation` job, once, green, from a run of
+`provenance-attestation.yml` that used a trusted definition: a `pull_request_target` run at
+the exact head, or a `workflow_run` or dispatched run of the default branch's current copy
+of the workflow whose run name carries the head
+([the attestation's two routes](CI.md#trusted-ci-verdict)). It refuses the context at the
+head from any other workflow, event or app (`FOREIGN_PRODUCER`). Since 2026-10-29 the
+ruleset requires `Trusted CI verdict` and `CodeQL` only.
 
 If this context is ever made required, the ruleset already carries a `pull_request` rule,
 `required_linear_history`, and an empty `bypass_actors` list; its
@@ -528,7 +575,7 @@ described as enforcement.**
 
 GitHub evaluates a required status check by context *name*, taking the most
 recent result for that name on the head commit. Both the trusted
-`pull_request_target` workflow and any workflow the candidate adds run as the
+workflow and any workflow the candidate adds run as the
 same app — GitHub Actions, `integration_id` 15368 — so pinning `integration_id`
 does not separate them. A candidate can declare a job named
 `Trusted provenance attestation`, have it `exit 0`, and delay it (a `sleep` is

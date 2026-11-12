@@ -14,6 +14,7 @@
 
 #include "recomp.h"
 #include "flight_recorder.h"
+#include "cpu_lle.h"   /* sr_guest_lane_hold (#2201) */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -316,8 +317,6 @@ static uint8_t *s_cosim_dirty_data;
 static size_t s_cosim_dirty_n;
 static size_t s_cosim_dirty_cap;
 static int s_cosim_active;            /* a cosim call is between its lanes */
-static int s_cosim_guest_active;      /* the guest lane is running */
-static uint32_t s_cosim_nested_nid;
 static uint32_t s_cosim_dead_stack = SR_COSIM_DEAD_STACK_DEFAULT;
 static uint32_t s_cosim_match_n;
 static uint32_t s_cosim_diff_n;
@@ -329,9 +328,11 @@ static unsigned s_cosim_logged_match_n;
 static void sr_cosim_reset(void) {
     s_cosim_dirty_n = 0u;
     s_cosim_active = 0;
-    s_cosim_guest_active = 0;
+    sr_guest_lane_hold.held = 0;
+    sr_guest_lane_hold.uid = 0u;
+    sr_guest_lane_hold.nested_nid = 0u;
+    sr_guest_lane_hold.yields = 0u;
     sr_dispatch_unwind_requested = 0;
-    s_cosim_nested_nid = 0u;
     s_cosim_dead_stack = SR_COSIM_DEAD_STACK_DEFAULT;
     s_cosim_match_n = 0u;
     s_cosim_diff_n = 0u;
@@ -636,10 +637,19 @@ static int sr_import_call_cosim(CpuState *s, uint32_t nid, uint32_t stub_pc) {
 
     s_cosim_active = 1;
     input = *s;
-    s_cosim_nested_nid = 0u;
-    s_cosim_guest_active = 1;
+    /* The lane holds the scheduler and interrupt delivery and refuses every import it
+     * reaches (#2201): no other thread or handler runs inside it, so its refusal and
+     * rollback touch only this lane. The HLE lane below runs unheld, exactly as
+     * SR_MODE_HLE. */
+    sr_guest_lane_hold.nested_nid = 0u;
+    sr_guest_lane_hold.yields = 0u;
+    sr_guest_lane_hold.uid = sched_current_uid();
+    sr_guest_lane_hold.held = 1;
     rc = sr_import_call_guest(s, nid, stub_pc, 1);
-    s_cosim_guest_active = 0;
+    sr_guest_lane_hold.held = 0;
+    sr_guest_lane_hold.uid = 0u;
+    const uint32_t nested_nid = sr_guest_lane_hold.nested_nid;
+    sr_guest_lane_hold.nested_nid = 0u;
     sr_dispatch_unwind_requested = 0;
     guest = *s;
     int kept = sr_cosim_capture_guest_and_restore();
@@ -649,8 +659,8 @@ static int sr_import_call_cosim(CpuState *s, uint32_t nid, uint32_t stub_pc) {
     s_cosim_active = 0;
 
     if (rc < 0 || guest.flow_kind != SR_FLOW_NONE) {
-        if (s_cosim_nested_nid != 0u) {
-            s_cosim_last.nested_nid = s_cosim_nested_nid;
+        if (nested_nid != 0u) {
+            s_cosim_last.nested_nid = nested_nid;
             sr_cosim_not_compared(SR_COSIM_REASON_NESTED_IMPORT);
         } else {
             sr_cosim_not_compared(SR_COSIM_REASON_GUEST_REJECTED);
@@ -696,18 +706,11 @@ int sr_import_call(CpuState *s, uint32_t nid, uint32_t stub_pc) {
                 nid, stub_pc);
         return -1;
     }
-    if (s_cosim_guest_active) {
+    if (sr_guest_lane_refuse_import(s, nid)) {
         /* The guest lane of a cosim call reached an import. Running it would
          * apply a host-side effect the HLE lane applies again, so the lane
-         * unwinds here and the call is reported NOT_COMPARED. */
-        if (s_cosim_nested_nid == 0u) {
-            s_cosim_nested_nid = nid;
-        }
-        /* Checked and continued calls between the export and this stub return
-         * through the refusal instead of ending the run (recomp.c). */
-        sr_dispatch_unwind_requested = 1;
-        s->flow_kind = SR_FLOW_FATAL;
-        s->flow_target = nid;
+         * unwinds through the dispatch boundaries between the export and this
+         * stub, and the call is reported NOT_COMPARED (recomp.c). */
         return -1;
     }
     domain = sr_domain_lookup_nid(nid);

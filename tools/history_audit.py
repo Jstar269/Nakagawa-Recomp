@@ -17,8 +17,8 @@ try:
     from .nk_core.git_isolation import isolated_git_env
     from .publication_policy import load_policy
 except ImportError:
-    from nk_core.git_isolation import isolated_git_env
-    from publication_policy import load_policy
+    from nk_core.git_isolation import isolated_git_env  # type: ignore[no-redef]
+    from publication_policy import load_policy  # type: ignore[no-redef]
 
 ROOT = Path(__file__).resolve().parent.parent
 #: The canonical publication policy; its ``private_roots`` name the local

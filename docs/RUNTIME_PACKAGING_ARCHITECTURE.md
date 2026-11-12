@@ -85,7 +85,7 @@ list is not evidence that a distributable installer or title package exists:
 * `src/core/nk_platform_win32.c`: Win32 `CreateProcessW` with UTF-16 executable/command-line conversion, environment block generation, and wait handles.
 * `src/core/nk_platform_posix.c`: POSIX `fork` + `execv` with environment configuration.
 * `src/core/nk_launch.h` & `src/core/nk_launch.c`: typed `NkLaunchSession` candidate resolution, environment construction, and process lifecycle management.
-* `src/player/ui/player_ui_nk.c`: the default launcher's "PLAY" / "STOP GAME" action triggers; the older `src/player/ui_renderer.c`, kept only in the regression-test build (`--ui=legacy`), keeps its "PLAY NOW" trigger and active PID indicators.
+* `src/player/ui/player_ui_nk.c`: the launcher's "PLAY" / "STOP GAME" action triggers.
 
 ---
 
@@ -152,9 +152,18 @@ bytes of C per translation unit (a value the caller sets wins, and the cache key
 it). Every function's C text, its order and the compile flags stay the same; only the
 boundaries between translation units move (gcc inlines the runtime header's static inline
 helpers into more functions of a smaller unit). Each compile job is then given memory in
-proportion to the target (256 bytes per byte, at least 1 GiB, at most the 3 GiB that
+proportion to the target (200 bytes per byte, at least 768 MiB, at most the 3 GiB that
 count-based chunks need), so a host with little free memory still compiles several chunks
-at once.
+at once. The budget comes from measurement: one cc1 at `-O1` on 4 MB generated units peaked at
+485 to 531 MiB (189 MiB for a 0.9 MB unit, #2284), so 768 MiB keeps a margin of 1.45 times. The
+planner keeps 2 GiB for the player and the OS. When even one job does not fit beside that
+reserve, the build still runs one job and its log says the compiler may fail; the compile
+progress file names what bound the job count (`limit`: `memory`, `cpu`, `override`, `max`,
+`background` for the Background speed's two-job cap, `unknown_memory` for the fixed two jobs
+when the host gives no memory reading, and `unknown_cpus` for one job when it gives no CPU
+count), and a one-job build tells the user in the player why it compiles one part at a time,
+except for `unknown_cpus`, which names no cause.
+The memory figures are GiB (1024^3 bytes), which is what Windows reports as GB.
 
 Only a single body can make its unit larger than the target (#1730). Codegen gives every body
 over `BODY_FALLBACK_BYTES` (4,000,000 bytes of C, the same in every build) a unit of its own
@@ -162,7 +171,7 @@ that compiles at `-O0`: the level most packages used before, at gcc's lowest tim
 level does not bound its memory, which grows with the body at every level (about 170 bytes per
 byte of C, linear up to the 4 MB budget: a generated body chained to 4 MB compiles at `-O2` in
 about a minute and 670 MB). The compile phase therefore budgets each job from the largest
-generated unit at the same 256 bytes per byte, without the 3 GiB cap, so a host runs fewer jobs
+generated unit at 256 bytes per byte (once it is over 125% of the target), without the 3 GiB cap, so a host runs fewer jobs
 while such a unit is in the build. The generated `<game>_recomp_opt.mk` sets the unit's level
 after `RECOMP_FLAGS`, so it is in the compile command and the object's cache key. It is a
 required generated-code output, and any line in it other than a comment, a unit row or that
@@ -171,10 +180,17 @@ under `optimization.fallback_units`, with the level the rest compiled at. These 
 compile flags that differ between units.
 Current Make recipes cannot transport whitespace or shell-sensitive characters
 in bound paths. Inputs at such paths are copied byte-for-byte into
-`<output-dir>/staged-inputs/` (hashes are unchanged). When the output directory
-contains spaces, packaging builds in a Make-safe workspace (`NK_BUILD_ROOT` or
-Windows 8.3 short paths) and atomically promotes into the destination; otherwise
-an unsupported path is rejected as `PACKAGE_UNSUPPORTED_PATH` (#296).
+`<output-dir>/staged-inputs/` (hashes are unchanged); staged guest PRX modules are
+included. When the output directory contains spaces, packaging builds in a Make-safe
+workspace (`NK_BUILD_ROOT` or Windows 8.3 short paths) and atomically promotes into the
+destination; otherwise an unsupported path is rejected as `PACKAGE_UNSUPPORTED_PATH`.
+Paths derived from that workspace are checked as written and never resolved again, because
+resolving a short form expands it back to the spaced name (#2281).
+
+An enhancement data root is read in place, not copied. The rule for it is the one for
+every path Make cannot take: it is used in its short (8.3) form, or refused by name when
+no short form exists, before Make runs. `NK_BUILD_ROOT` moves the build, not an input
+directory, so it does not apply to the data root.
 
 `package.json` is canonical JSON with this versioned shape:
 
@@ -265,12 +281,11 @@ unresolved, it names it. The player target then fails. A package build still
 succeeds with its required SDL3, libiconv and Vulkan runtimes, and prints the
 unresolved import as a warning. The prerequisite installer pins SDL3_ttf and its
 closure (`assets/prereq_manifest.json`), so this happens only on a host without
-them; that player draws with the bitmap fallback and logs why. Licence texts for
+them; that player's launcher cannot start, and it says why and exits with code 4. Licence texts for
 every staged DLL are copied beside them as `THIRD_PARTY_NOTICES/` by `tools/package_notices.py`, driven by
 `assets/third_party_components.json`. Because the closure sits beside the
 executable, launching from Explorer or a plain `cmd.exe` without MSYS2 on `PATH`
-uses the readable TTF font; the 8x8 SDL bitmap font remains only as a logged
-last-resort fallback (`NK_UI_NO_TTF=1` forces it), and the workspace doctor
+uses the launcher's TTF fonts; there is no bitmap-font fallback, and the workspace doctor
 reports `RUNTIME_SDL3_TTF`/`RUNTIME_SDL3_TTF_CLOSURE`.
 
 ## 6. Private content-addressed cache contract (#316)
@@ -435,21 +450,30 @@ What the player does (it suggests a rebuild and never forces one):
 * Each outdated card says "Built by an older Nakagawa. Rebuild for the latest
   fixes.", and the title page offers Rebuild beside PLAY. PLAY asks once a
   session (Rebuild now or Play anyway); Play anyway launches as before.
-* Rebuild all queues the outdated games and builds them one at a time, behind
-  whatever the user is doing, through the same package builder as BUILD
-  PACKAGE. The library line counts ("Rebuilding 2 of 5") and each card shows
-  its state and compile progress. A game can be played until its own rebuild
-  starts; while it runs, that game cannot launch and its card says why. A
-  game whose disc image is missing is skipped and its card asks for the disc
-  again; a failed or cancelled build is noted on its card and the queue moves
-  on.
+* Rebuild all queues the outdated games in the build queue, which builds one
+  game at a time, behind whatever the user is doing, through the same package
+  builder as BUILD PACKAGE. The library line counts ("Rebuilding 2 of 5", or
+  "Building 2 of 5" once the queue holds a first build) and each card shows
+  its state, its place in the queue and its compile progress. A game can be
+  played until its own rebuild starts; while it runs, that game cannot launch
+  and its card says why. A game whose disc image is missing is skipped and its
+  card asks for the disc again; a failed or cancelled build is noted on its
+  card and the queue moves on.
+* The same queue takes first builds: a game with no package offers Add to
+  queue beside BUILD PACKAGE on its page, and Remove from queue while it
+  waits. The library line's Queue opens the queue: the game building first,
+  then the ones that wait, each with Up, Down and Remove, and Resume when a
+  build could not start for a reason outside its game. The build card says how
+  many games follow.
 * The queue survives a restart in `rebuild-queue.json` beside `settings.json`:
-  `{"format": "nakagawa-rebuild-queue", "schema_version": 1, "titles":
-  [{"disc_id": "...", "state": "pending" | "done" | "missing_disc" |
-  "failed"}]}`. A build that was running is saved as `pending` and starts
-  again. A file with a newer `schema_version`, another format or an unknown
-  member is left in place and not resumed. The file goes when nothing is
-  pending.
+  `{"format": "nakagawa-rebuild-queue", "schema_version": 2, "titles":
+  [{"disc_id": "...", "kind": "build" | "rebuild", "state": "pending" |
+  "done" | "missing_disc" | "failed"}]}`, in queue order. A build that was
+  running is saved as `pending` and starts again. A schema 1 file (no `kind`,
+  every title a rebuild) is read as rebuilds and rewritten as schema 2. A file
+  with another format or an unknown member is left in place and not resumed;
+  a file with a newer `schema_version` is not resumed and is never replaced or
+  removed. The file goes when nothing is pending.
 
 A rebuild never removes the old package first. The build runs in the
 content-addressed cache entry, is validated, copied next to the package,
@@ -580,7 +604,7 @@ layout. Nothing in it is written at run time, so it can sit in a read-only folde
 | `source/` | The public-safe source export BUILD PACKAGE runs from (`tools/nk_cli.py`, the Makefile, `assets/prereq_manifest.json`). |
 | `prereqs/` | The pinned build prerequisites (#1285), checked by the player against `installed.json` and `bundle-inventory.txt` before BUILD PACKAGE uses them. |
 | `docs/`, `README.md`, `LICENSE`, `NOTICE.md`, `START HERE.txt` | User documentation. |
-| `SBOM.*`, `toolchain.json`, `SHA256SUMS.txt` | SPDX 2.3, SPDX 3 and CycloneDX SBOMs, the attested toolchain record, and the SHA-256 of every other file. |
+| `SBOM.*`, `toolchain.json`, `SHA256SUMS.txt` | SPDX 2.3, SPDX 3 and CycloneDX SBOMs, which carry the SHA-256 `bin/runtime-manifest.json` records for each executable and DLL in `bin/` (`verify_sbom.py --package-dir` checks it), the attested toolchain record, and the SHA-256 of every other file. |
 
 The image never holds a game, decrypted module, generated title code, save, key or firmware
 font: the release script's forbidden-file and private-path scans refuse them.

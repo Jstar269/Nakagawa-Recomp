@@ -32,6 +32,14 @@ uint32_t g_sr_store_context_pc;
 int g_sr_store_context_mem_gpr = -1;
 uint32_t g_sr_store_context_mem_offset;
 unsigned g_sr_store_context_mem_words;
+/* Read by recomp.h's sr_log_mem_watch_context, which ge.o's checked stores call. At -O2 the
+ * optimizer folds the reference away, which hid the missing definitions; an instrumented
+ * (--coverage) build keeps it in a .constprop clone, and the link failed (#2394). */
+uint32_t g_sr_mem_watch_context_pc;
+unsigned g_sr_mem_watch_context_limit;
+unsigned g_sr_mem_watch_context_count;
+int g_sr_mem_watch_context_fpr = -1;
+uint32_t g_sr_mem_watch_context_fpr_value;
 
 void sr_note_mem_write(uint32_t addr, uint32_t width, uint32_t value, uint32_t pc) {
     (void)addr; (void)width; (void)value; (void)pc;
@@ -102,7 +110,8 @@ static int write_ppm(const char *path, const GeState *state) {
 static void usage(const char *exe) {
     fprintf(stderr, "usage: %s <fixture.ngef> [--backend software|vulkan] [--repeat N] [--output frame.ppm]\n"
                     "       %s <fixture.ngef> --first-bad-draw [--mode auto|linear|bisect] [--report PREFIX]\n"
-                    "       %s --write-synthetic <fixture.ngef> [basic|overlap|wide|empty|many|deep]\n"
+                    "         (either Vulkan form also takes --dst-read snapshot|interlock: SR_GPU_DST_READ)\n"
+                    "       %s --write-synthetic <fixture.ngef> [basic|overlap|wide|past|empty|many|deep]\n"
                     "       %s --fbd-self-check\n", exe, exe, exe, exe);
 }
 
@@ -133,8 +142,9 @@ static void usage(const char *exe) {
 #define FBD_MAX_SIDE 1024u      /* scissor and transfer coordinates are 10 bits */
 #define FBD_DEPTH_STRIDE 512u   /* ge.c's software depth buffer: 272 rows of 512 */
 #define FBD_DEPTH_ROWS 272u
-#define FBD_RASTER_W 480u       /* ge.c rasterizes inside x 0..479, y 0..271 (the scissor */
-#define FBD_RASTER_H 272u       /* clamp in tri, sprite and the clear fill) */
+#define FBD_RASTER_W 512u       /* the widest target either renderer draws (ge.c raster_columns) */
+#define FBD_RASTER_H 272u       /* ge.c rasterizes rows 0..271 (the scissor clamp in tri, */
+                                /* sprite and the clear fill) */
 
 enum { FBD_KIND_COLOR, FBD_KIND_DEPTH, FBD_KIND_XFER };
 
@@ -254,6 +264,13 @@ static void fbd_finalize(FbdRun *run) {
     }
 }
 
+/* The columns ge.c rasterizes on this target (ge.c's raster_columns): up to the stride's last
+ * column, 512 at most. */
+static uint32_t fbd_raster_w(const GeState *st) {
+    const uint32_t stride = st->fbw ? st->fbw : 512u;
+    return stride < 512u ? stride : 512u;   /* ge.c's raster_columns (#2193) */
+}
+
 /* The scissor's extent from the buffer's origin: the pixels a draw can write. */
 static uint32_t fbd_extent(int last) {
     if (last < 0) return 1u;
@@ -289,10 +306,13 @@ static int fbd_observer(void *ctx, unsigned long index, uint32_t op, uint32_t cm
                        need_w, need_h);
         return 0;
     }
-    /* ge.c, the reference, rasterizes only inside 480x272, so a scissor past that has pixels
-     * with no reference to compare (the Vulkan backend draws them): a gap, not a difference. */
+    /* Both renderers draw only inside the target's columns (fbd_raster_w: the stride, 512 at
+     * most) and 272 rows, so that is what a draw can write. A scissor past 512 columns or 272
+     * rows reaches pixels neither renderer has (their targets are 512x272) and whose PSP
+     * result is unmeasured: a gap, not a difference. */
+    const uint32_t raster_w = fbd_raster_w(st);
     const uint32_t scis_w = fbd_extent(st->scis_x2), scis_h = fbd_extent(st->scis_y2);
-    const uint32_t need_w = scis_w < FBD_RASTER_W ? scis_w : FBD_RASTER_W;
+    const uint32_t need_w = scis_w < raster_w ? scis_w : raster_w;
     const uint32_t need_h = scis_h < FBD_RASTER_H ? scis_h : FBD_RASTER_H;
     if (scis_w > FBD_RASTER_W || scis_h > FBD_RASTER_H)
         fbd_gap(run, FBD_KIND_COLOR, fb_addr(st), st->fbw, scis_w, scis_h, need_w, need_h,
@@ -303,7 +323,9 @@ static int fbd_observer(void *ctx, unsigned long index, uint32_t op, uint32_t cm
     const int writes_depth = st->clear ? (st->clear_mode & 0x400u) != 0
                                        : st->ztest_enable && !st->zwrite_disable;
     if (writes_depth)
-        fbd_add_region(run, FBD_KIND_DEPTH, fbd_depth_base(st), st->zbw, 0u, need_w, need_h);
+        /* and only inside the depth buffer's zbw columns (ge.c's zbuf_write_index) */
+        fbd_add_region(run, FBD_KIND_DEPTH, fbd_depth_base(st), st->zbw, 0u,
+                       st->zbw && st->zbw < need_w ? st->zbw : need_w, need_h);
     if (st->blend_enable && !st->clear) run->blended = 1;
     return 0;
 }
@@ -760,8 +782,13 @@ static int fbd_self_check(void) {
  * - "overlap": a 5650 target, a clear, then ONE PRIM of two overlapping 50% alpha blends
  *   (draw 1). ge.c blends the second sprite over the first; a backend that blends every
  *   primitive of a batch against one pre-batch copy of the target does not (#2109).
- * - "wide": a 512-wide scissor and four draws; draw 3, the mutants' draw, lies right of x 480,
- *   where ge.c does not rasterize.
+ * - "wide": a 512-wide scissor on a 512-stride target and four draws; draw 3, the mutants'
+ *   draw, lies right of x 480, in the stride's columns ge.c rasterizes too (#2193).
+ * - "past": "wide" with the scissor to x 600, past the 512-pixel stride, where ge.c does not
+ *   rasterize.
+ * - "narrow": "wide"'s draws on a 256-stride target under a 480-pixel scissor. Both renderers
+ *   stop at the stride (#2193), so draw 2 is cut at x 255 and draw 3 draws nothing; a column
+ *   past the stride would land on the next row.
  * - "empty": a list with no draw.
  * - "many": 33 colour targets, one sprite each: one more than the tool compares.
  * - "deep": one sprite into a target of stride 1088, past the widest the tool compares. */
@@ -823,6 +850,19 @@ static int fbd_write_synthetic(const char *path, const char *variant) {
         sprite, sprite, sprite,                                 /* 1-3 */
         0x0F000000u, 0x0C000000u,
     };
+    const uint32_t past_tail[] = {
+        0xD2000003u,                                            /* 8888 */
+        0xD5000000u | 600u | (271u << 10),                      /* scissor 601x272 */
+        0xD3000301u, sprite, 0xD3000000u,                       /* 0: clear colour and stencil */
+        sprite, sprite, sprite,                                 /* 1-3 */
+        0x0F000000u, 0x0C000000u,
+    };
+    const uint32_t narrow_tail[] = {
+        0xD2000003u, 0x9D000000u | 256u,                        /* 8888, stride 256 */
+        0xD3000301u, sprite, 0xD3000000u,                       /* 0: clear colour and stencil */
+        sprite, sprite, sprite,                                 /* 1-3 */
+        0x0F000000u, 0x0C000000u,
+    };
     const uint32_t empty_tail[] = { 0xD2000003u, 0x0F000000u, 0x0C000000u };
     const uint32_t deep_tail[] = {
         0xD2000003u, 0x9D000000u | 1088u,                       /* stride 1088 */
@@ -856,6 +896,12 @@ static int fbd_write_synthetic(const char *path, const char *variant) {
     } else if (strcmp(variant, "wide") == 0) {
         sprites = wide; nsprites = 4; tail = wide_tail;
         ntail = (unsigned)(sizeof wide_tail / sizeof wide_tail[0]);
+    } else if (strcmp(variant, "past") == 0) {
+        sprites = wide; nsprites = 4; tail = past_tail;
+        ntail = (unsigned)(sizeof past_tail / sizeof past_tail[0]);
+    } else if (strcmp(variant, "narrow") == 0) {
+        sprites = wide; nsprites = 4; tail = narrow_tail;
+        ntail = (unsigned)(sizeof narrow_tail / sizeof narrow_tail[0]);
     } else if (strcmp(variant, "empty") == 0) {
         sprites = one; nsprites = 0; tail = empty_tail;
         ntail = (unsigned)(sizeof empty_tail / sizeof empty_tail[0]);
@@ -962,6 +1008,7 @@ int main(int argc, char **argv) {
     const char *output = "ge_replay.ppm";
     const char *fbd_mode = NULL;
     const char *fbd_report = NULL;
+    const char *dst_read = NULL;
     unsigned long repeat = 1;
     for (int i = 2; i < argc; i++) {
         if (strcmp(argv[i], "--backend") == 0 && i + 1 < argc) backend = argv[++i];
@@ -970,7 +1017,20 @@ int main(int argc, char **argv) {
         else if (strcmp(argv[i], "--first-bad-draw") == 0) { if (!fbd_mode) fbd_mode = "auto"; }
         else if (strcmp(argv[i], "--mode") == 0 && i + 1 < argc) fbd_mode = argv[++i];
         else if (strcmp(argv[i], "--report") == 0 && i + 1 < argc) fbd_report = argv[++i];
+        else if (strcmp(argv[i], "--dst-read") == 0 && i + 1 < argc) dst_read = argv[++i];
         else { usage(argv[0]); return 2; }
+    }
+    /* The Vulkan backend's destination-read path (#2109, sdl3vk.h), which sdl3vk_init reads when
+     * it makes the device: an argument, since cmd.exe takes no `VAR=value` prefix. */
+    if (dst_read) {
+        if (strcmp(dst_read, "snapshot") != 0 && strcmp(dst_read, "interlock") != 0) {
+            usage(argv[0]); return 2;
+        }
+#ifdef _WIN32
+        if (_putenv_s("SR_GPU_DST_READ", dst_read) != 0) return 2;
+#else
+        if (setenv("SR_GPU_DST_READ", dst_read, 1) != 0) return 2;
+#endif
     }
     if (fbd_mode) {
         if (strcmp(fbd_mode, "auto") != 0 && strcmp(fbd_mode, "linear") != 0 &&

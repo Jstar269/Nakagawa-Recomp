@@ -280,7 +280,9 @@ void sr_flight_init(void);
  * "enhancements": {"ace": "<line>"}, and tools/flight_diff.py refuses to compare it. NULL or ""
  * clears it; an authentic run never calls this, so its bundle is unchanged. */
 void sr_flight_set_enhancements(const char *ace_line);
-/* Marks the run's window as upscaled (SR_PRESENT_UPSCALE, gpu_sdl3vk/fsr1_pass.h): the runtime
+/* Marks the run's window as upscaled (SR_PRESENT_UPSCALE, gpu_sdl3vk/fsr1_pass.h, and/or
+ * SR_MOVIE_UPSCALE, gpu_sdl3vk/anime4k_pass.h; the mode is up to 31 characters, e.g.
+ * "fsr1+movie-anime4k"): the runtime
  * block then carries "enhancements": {"present_upscale": "<mode>"} (beside "ace" when Ace Mode is
  * on too), and tools/flight_diff.py refuses to compare it. NULL or "" clears it. */
 void sr_flight_set_present_upscale(const char *mode);
@@ -316,6 +318,38 @@ int sr_flight_event_count(void);
 int sr_flight_event_at(uint32_t index, SrFlightEvent *out);
 /* Registers the thread table every later bundle snapshots (NULL clears it). */
 void sr_flight_set_thread_source(SrFlightThreadSource source);
+
+/* ---- Replay divergence (#2147) ----
+ * A position in the record that the checkpoint mode can name: the newest recorded event is the
+ * occurrence-th event of its kind. after is the longest window the ring holds (limit - 1). */
+typedef struct {
+    uint32_t kind;
+    uint32_t occurrence;
+    uint32_t after;
+    uint64_t sequence;
+} SrFlightMark;
+
+/* The newest recorded event as a mark. Returns 1, or 0 when the recorder is off, has recorded
+ * nothing, has stopped recording (a terminal, or a mode that froze), or the count is past
+ * 32 bits. Reading it changes nothing. */
+int sr_flight_mark(SrFlightMark *out);
+
+enum {
+    SR_FLIGHT_DIVERGENCE_OFF = 0,   /* SR_FLIGHT is unset: there is no record */
+    SR_FLIGHT_DIVERGENCE_FROZE = 1, /* armed at the newest event and frozen there; *at names it */
+    SR_FLIGHT_DIVERGENCE_MODE = 2,  /* an SR_FLIGHT_TRIGGER mode is armed and stays in charge */
+    SR_FLIGHT_DIVERGENCE_NONE = 3   /* the record had stopped or held no event: nothing armed */
+};
+
+/* A replay reached its first divergent checkpoint (replay_checkpoint.c). With no mode armed,
+ * this arms the checkpoint mode at the newest recorded event, as SR_FLIGHT_TRIGGER=
+ * checkpoint:KIND:N:0 would have from the start, and that event matches it at once: the record
+ * freezes with terminal "trigger" and the bundle is written, holding the events just before
+ * the divergent checkpoint. Its events, policy and terminal are those a run armed with that
+ * spec from the start records; the thread table and the refusal counts are read when the
+ * bundle is written, here as the replay stops at the mismatch rather than at the event. An
+ * armed mode is never replaced. */
+int sr_flight_replay_divergence(SrFlightMark *at);
 
 #if defined(SR_HLE_THREAD_SELFTEST) || defined(SR_SCHED_LIVENESS_TEST)
 void sr_flight_test_reset(uint32_t enabled_classes, uint32_t limit);
@@ -457,6 +491,26 @@ static inline int sr_flight_event_at(uint32_t index, SrFlightEvent *out) {
 }
 static inline void sr_flight_set_thread_source(SrFlightThreadSource source) {
     (void)source;
+}
+typedef struct {
+    uint32_t kind;
+    uint32_t occurrence;
+    uint32_t after;
+    uint64_t sequence;
+} SrFlightMark;
+enum {
+    SR_FLIGHT_DIVERGENCE_OFF = 0,
+    SR_FLIGHT_DIVERGENCE_FROZE = 1,
+    SR_FLIGHT_DIVERGENCE_MODE = 2,
+    SR_FLIGHT_DIVERGENCE_NONE = 3
+};
+static inline int sr_flight_mark(SrFlightMark *out) {
+    (void)out;
+    return 0;
+}
+static inline int sr_flight_replay_divergence(SrFlightMark *at) {
+    (void)at;
+    return SR_FLIGHT_DIVERGENCE_OFF;
 }
 #if defined(SR_HLE_THREAD_SELFTEST) || defined(SR_SCHED_LIVENESS_TEST)
 static inline void sr_flight_test_reset(uint32_t enabled_classes, uint32_t limit) {

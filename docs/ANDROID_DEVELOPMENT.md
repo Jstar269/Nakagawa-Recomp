@@ -13,14 +13,21 @@ This page covers building and running the Android app from source. The plan it b
   `LauncherActivity` through SDL's Android Java layer.
 - **A title** runs in its own Android process, `:title`, as `TitleActivity`. The desktop player
   starts one child process per title; an Android app may not execute programs from its own files
-  (API 29 and later) and cannot fork itself safely, so the launcher asks Android to start that
+  (API 29 and later; a tool the app ships in its native library folder is the one exception, see
+  [native tests on a device](#native-tests-on-a-device)) and cannot fork itself safely, so the launcher asks Android to start that
   activity instead, with the same arguments and environment a desktop child gets
   (`nk_platform_spawn_process`, Android section of `src/core/nk_platform_posix.c`). The activity
   loads the title's runtime library, `libnk_title_<id>.so`, runs the runtime's `main()`, and its
   process ends when the run ends, as a desktop child's does. The guest sees no difference.
 - **A title's runtime library** is the package's generated C compiled with the runtime for the
   device's ABI (`nk_add_title_runtime` in `CMakeLists.txt`). Packages are built on a PC by the
-  ordinary route; the phone does not run the recompiler or a C compiler.
+  ordinary route; the APK contains no C compiler, Make or CPython
+  ([#360](https://github.com/Jstar269/nakagawa-recomp/issues/360)).
+- **A title built by the package route** is the same library, linked by Make with
+  `NK_TARGET=android` ([below](#a-title-library-from-the-package-route)). `TitleActivity` loads a
+  library the APK ships by its name, or a built one by its absolute path in the app's files
+  folder (`TitleLibrary.java`); it refuses any other library, and its process ends with exit
+  status 126.
 
 ## Prerequisites
 
@@ -71,6 +78,33 @@ clean checkout, with the versions listed under [Prerequisites](#prerequisites), 
 that runs the native gates ([`CI.md`](CI.md#android-launcher-build)). It builds and packages;
 it does not run the APK. It keeps the APK for 14 days as the artifact
 `nakagawa-android-arm64-debug`, for [testing on a phone](#test-on-a-phone).
+
+### A title library from the package route
+
+The Makefile builds a title for Android when `NK_TARGET=android`. The compile goal then links
+`<BUILD_DIR>/lib<GAME_NAME>.so`, a shared library holding `nk_android_title.c`, with every object
+built `-fPIC`, the exit wrappers that `nk_android_title.c` provides, and the libraries `-lSDL3
+-lvulkan -lm -llog -landroid`. `CC` is an Android Clang. `ANDROID_SDL3_INCLUDE` names the folder
+that holds `SDL3/SDL.h`, and `ANDROID_SDL3_LIBDIR` the folder that holds the APK's `libSDL3.so`.
+The conditionals about the built program (platform source, libraries, H.264 backend) follow
+`NK_TARGET`; the ones about the host's own shell follow the host. From a PC with the NDK:
+
+```bash
+mingw32-make all NK_TARGET=android \
+  CC=<ndk>/toolchains/llvm/prebuilt/windows-x86_64/bin/aarch64-linux-android29-clang \
+  ANDROID_SDL3_INCLUDE=<deps>/SDL/include ANDROID_SDL3_LIBDIR=<folder with libSDL3.so> \
+  GAME_NAME=... GAME_ELF=... BUILD_DIR=...
+```
+
+The package route passes the same choice through: `python tools/nk_cli.py build-package <disc
+id> --target android` (the default when nk_cli itself runs on Android). The package then records
+`lib<id>.so` as its executable.
+
+A build on the phone also needs a C compiler, GNU Make and CPython in the APK. Android lets an
+app run only the programs it ships in its native library folder, so those would ship there as
+`lib*.so` files. `nk_platform_spawn_tool` starts only programs in that folder, and on Android the
+package builder's Python is the APK's `libnk_python.so` there. The APK bundles none of the three
+([#360](https://github.com/Jstar269/nakagawa-recomp/issues/360)).
 
 ## Run in the emulator
 
@@ -177,6 +211,49 @@ The `-s` filter keeps only the launcher's, the title runtime's and SDL's lines, 
 lines and the rest of the system log stay out. Do not attach a full `adb logcat` or a bug report
 from Developer options: those carry other apps' data and account details.
 
+## Native tests on a device
+
+The native CTest set (the core, launcher-state and UI tests, and the runtime's coroutine, FP
+conversion and GE reference selftests) builds for arm64-v8a with the NDK and runs on a phone over
+`adb`, without Gradle or the APK. Configure the top-level CMake project with the NDK's toolchain
+file and `NK_ANDROID_TEST_DIR`, a folder under `/data/local/tmp`:
+
+```bash
+cmake -S . -B build/android-arm64-ctest -G Ninja \
+  -DCMAKE_MAKE_PROGRAM=$ANDROID_HOME/cmake/4.1.2/bin/ninja.exe \
+  -DCMAKE_TOOLCHAIN_FILE=$ANDROID_HOME/ndk/30.0.16248370/build/cmake/android.toolchain.cmake \
+  -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-29 -DBUILD_PLAYER=OFF \
+  -DNK_ANDROID_TEST_DIR=/data/local/tmp/<folder>
+cmake --build build/android-arm64-ctest
+ANDROID_SERIAL=<serial> ctest --test-dir build/android-arm64-ctest --output-on-failure
+```
+
+The NDK, CMake and minimum API are the ones the Gradle build pins
+([Prerequisites](#prerequisites)); on a Linux host the SDK's Ninja is `bin/ninja`. With
+`NK_ANDROID_TEST_DIR` set, CMake uses
+`tools/android_test_runner.py` as its cross-compiling emulator. A first setup test copies the
+repository's tracked files to `<dir>/src`. Then each test executable is pushed to `<dir>/bin` and
+run from `<dir>/work` or `<dir>/src`, whichever matches its CTest working directory, so every
+PASS, FAIL and SKIP (exit 77) is the device's own exit status. adb comes from `PATH` or `NK_ADB`,
+and `ANDROID_SERIAL` picks the device. Each test runs with `TMPDIR` set to `<dir>/tmp`, so the
+tests' temporary folders are in the device folder too, and the next run's setup test empties it.
+The tool writes only under `NK_ANDROID_TEST_DIR`; it needs USB debugging and no root. In Git Bash, set `MSYS_NO_PATHCONV=1` first, or the shell rewrites
+the device path into a Windows path, which the configure step refuses.
+
+A title cannot start from `adb shell`: on Android it starts in its own process through
+`TitleActivity`, and a program started from `adb shell` has no Java VM, so the title spawn fails
+closed there and the subtests that need it report SKIP with the reason. Tools are different:
+`nk_platform_spawn_tool` starts a program directly, but only one that is a regular file directly
+in the folder holding the app's native libraries (`nativeLibraryDir` in the app, the test's own
+folder under `adb shell`), because Android lets an app run programs it ships there and nothing it
+wrote itself. `posix_process_test` runs its child processes through that route. On Android the
+package builder's Python is only `libnk_python.so` in that folder, and the test folder has none.
+`package_builder_test` passes there. `player_state_test` asserts the Android toolchain card
+(it names `libnk_python.so` and gives no `PATH` or PPA advice), runs every other subtest, and skips
+only its package-rebuild steps, which need a runnable Python: it prints a `SKIP` line naming
+[#360](https://github.com/Jstar269/nakagawa-recomp/issues/360) and exits 77, which CTest reports as
+skipped.
+
 ## Storage
 
 The player's data, settings, caches, logs and saves are in `Nakagawa/` in the app's private
@@ -191,10 +268,11 @@ relative path against that folder, so `SDL_GetBasePath()` (`./` on Android) find
 | --- | --- |
 | Launcher library | The launcher does not list bundled titles; they start from `adb` (above). |
 | Disc import | Picking the user's own ISO through the system document picker (SAF) is not wired. |
-| Packages from a PC | Moving a package built on a PC to the phone and running it is not wired. |
+| Packages from a PC | A package can be built for Android on a PC (`NK_TARGET=android`), and `TitleActivity` loads a built library from the files folder. Moving the package to the phone, and the launcher starting it, are not wired. |
+| Building on the phone | The package route and its process rules are in place. The compiler, Make and Python it needs are not in the APK. |
 | Lifecycle | Measured in the emulator: with the title in the background the guest keeps running and every present fails (`swapchain acquire failed`), because the presenter does not recreate its Vulkan surface and swapchain after Android destroys the window surface. Pausing the guest in the background and recreating the swapchain on return are not done. |
 | Input | Touch controls are not built; SDL gamepads reach the runtime's ordinary input path. |
 | Video | The FFmpeg H.264 subset builds for Android; it has not been run on a device. |
-| Devices | Only the emulator has run it; no physical arm64 device has. Memory and API floors have not been measured. |
+| Devices | The APK has run only in the emulator. The native test set has run on one physical arm64 device, an Android 16 handheld with a Snapdragon 7 Gen 4-class SoC ([Native tests on a device](#native-tests-on-a-device)). Memory and API floors have not been measured. |
 
 <!-- issue-links: #360 -->

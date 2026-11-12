@@ -87,6 +87,22 @@ enum {
  * value -1. */
 int sdl3vk_parse_present_scaling(const char *value);
 
+/* How the GE backend reads the destination of a shader-blend or stencil draw (#2109), chosen
+ * once before the device is made, because the interlock path enables a device extension and
+ * features: the destination snapshot (a copy of the target taken before the batch; every device),
+ * or a fragment-shader interlock read-modify-write of the target itself
+ * (VK_EXT_fragment_shader_interlock, fragmentShaderPixelInterlock, fragmentStoresAndAtomics).
+ * SR_GPU_DST_READ=snapshot|interlock forces one; unset or unknown, the interlock is taken where
+ * the device has it. */
+enum {
+    SDL3VK_DST_READ_SNAPSHOT = 0,
+    SDL3VK_DST_READ_INTERLOCK = 1,
+};
+
+/* The path an SR_GPU_DST_READ value asks for: NULL or empty is -2 (the default order), an
+ * unknown value -1. */
+int sdl3vk_parse_dst_read(const char *value);
+
 typedef struct {
     int x, y, w, h;  /* destination rectangle in the swapchain image; w == 0 means draw nothing */
     int prescale;    /* > 1: nearest blit into a (prescale*srcw x prescale*srch) image first */
@@ -148,6 +164,23 @@ void sdl3vk_set_ui_pass(void (*pass)(const Sdl3VkUiPass *frame));
  * motion; NULL removes it. */
 typedef void *(*Sdl3VkShowPass)(void *cmd, void *src, int *w, int *h);
 void sdl3vk_set_show_pass(Sdl3VkShowPass pass);
+/* How the present a show pass recorded into ended, told once per show pass before that present
+ * returns: `result` is what the present returns (1 shown, -1 failed), and `submission` is the
+ * serial of the queue submission that carries the pass's commands (sdl3vk_present_completed), or
+ * 0 when they were never submitted. A present can fail after its submission (an out-of-date
+ * swapchain), so a failed one may still have run its commands. NULL removes it. */
+typedef void (*Sdl3VkShowDone)(int result, uint64_t submission);
+void sdl3vk_set_show_done(Sdl3VkShowDone done);
+/* The present frame slots: a present records only once its slot's previous submission has
+ * finished, so at most this many present submissions are in flight. A failed present can leave
+ * its slot to the next one, so the slots are not always used in turn. */
+#define SDL3VK_PRESENT_FRAMES 3
+/* The newest present submission the presenter has seen finished (its fence signalled), counted
+ * from 1 in submission order; 0 before any. That submission and every present submission before
+ * it have finished on the GPU: they share one queue, and a fence signals only after every command
+ * submitted to that queue before it. So what a show pass left in a buffer of its own may be read
+ * once this has reached its submission's serial. */
+uint64_t sdl3vk_present_completed(void);
 /* Presents what the show pass returns for no source: no capture, no input latch. Returns as the
  * other presents do, and 0 with nothing to show or no pass. */
 int sdl3vk_present_held(void);
@@ -156,10 +189,14 @@ int sdl3vk_present_held(void);
  * present whose shown image (w x h, in TRANSFER_SRC_OPTIMAL) is smaller than its place in the
  * window, after the show pass and before the frame blit. It may record into the command buffer,
  * and returns an image of exactly out_w x out_h, in TRANSFER_SRC_OPTIMAL, that is copied 1:1 into
- * that place, or NULL to scale as SR_PRESENT_SCALING says. A capture always reads the guest's
- * frame, so what it returns is never captured. Registered only when SR_PRESENT_UPSCALE asks for
- * it; NULL removes it. Handles are Vulkan's, passed as void pointers. */
-typedef void *(*Sdl3VkUpscalePass)(void *cmd, void *src, int w, int h, int out_w, int out_h);
+ * that place, or NULL to scale as SR_PRESENT_SCALING says. `cpu_frame` is 1 when the picture is
+ * a CPU-presented frame (a movie, or any frame of a software-GE run; a held present repeats the
+ * last one's kind). `*anime4k` (NULL when the caller does not ask) is set to 1 when Anime4K's
+ * stages made the returned image, so record.json can name them. A capture always reads the
+ * guest's frame, so what it returns is never captured. Registered only when SR_PRESENT_UPSCALE or
+ * SR_MOVIE_UPSCALE asks for it; NULL removes it. Handles are Vulkan's, passed as void pointers. */
+typedef void *(*Sdl3VkUpscalePass)(void *cmd, void *src, int w, int h, int out_w, int out_h,
+                                   int cpu_frame, int *anime4k);
 void sdl3vk_set_upscale_pass(Sdl3VkUpscalePass pass);
 /* The same for the recording (SR_VIDEOREC_DIR, #2138): called with the recording's place for a
  * recorded present whose shown image is smaller than it, so a recording made with the upscaler
@@ -212,6 +249,21 @@ int  sdl3vk_wait_image(void *vk_image);
  * recovery sequence itself failed. Presentation is refused from then on, and a capture
  * armed for a refused present resolves as failed. */
 int  sdl3vk_renderer_terminal(void);
+
+/* A guest present's result when the presentation engine cannot take a frame now: every
+ * swapchain image, or the present frame it would reuse, is still held by the display. The frame
+ * is not shown and nothing failed; the window keeps the last frame it has. Returned only while
+ * sdl3vk_set_present_nowait(1) is in force. */
+#define SDL3VK_PRESENT_DISPLAY_BUSY 2
+
+/* 1: a game-frame present (sdl3vk_present_rgba/_ex, sdl3vk_present_image/_ex,
+ * sdl3vk_present_held) never waits for the presentation engine and returns
+ * SDL3VK_PRESENT_DISPLAY_BUSY instead. gui.c sets it while the scheduler paces the guest to real
+ * time, so a FIFO (VSync) display never holds back the guest's VBLANK clock. 0 (the default):
+ * the present waits, keeping every frame, which deterministic-clock and turbo runs rely on. */
+void     sdl3vk_set_present_nowait(int on);
+/* Game-frame presents that returned SDL3VK_PRESENT_DISPLAY_BUSY since sdl3vk_init. */
+uint64_t sdl3vk_present_busy_count(void);
 
 /* Test-only present fault injection seam for selftests. Takes an int so this header
  * stays vulkan.h-free (pass VkResult value). */
@@ -359,6 +411,12 @@ typedef struct Sdl3VkInfo {
      * declaring DenormPreserve keeps fp32 subnormals, as GPU T&L needs (#318). */
     int      denorm_preserve_f32;
     void    *get_instance_proc_addr;   /* PFN_vkGetInstanceProcAddr */
+    /* SDL3VK_DST_READ_*: the path the device was made for. */
+    int      dst_read;
+    /* What vkCreateDevice was given, for the selftests' fallback pins: the extension count,
+     * whether pEnabledFeatures was set, and whether a VkPhysicalDeviceFeatures2 chain was. */
+    uint32_t device_extensions;
+    int      device_features, device_features2;
 } Sdl3VkInfo;
 int sdl3vk_get_vk(Sdl3VkInfo *out);
 

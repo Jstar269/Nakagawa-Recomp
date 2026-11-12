@@ -32,6 +32,7 @@ remedy, never a silent pass.
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -66,11 +67,23 @@ from test_iso_parity import (  # noqa: E402
     create_test_iso_with_executables,
     create_test_iso_with_modules,
 )
+from nk_core.iso_inspect import decrypted_module_dir  # noqa: E402
+from test_psp_decrypt import seal_with_builtin_table  # noqa: E402
 
 SHOWCASE_FIXTURE_DIR = ROOT / "fixtures" / "showcase"
 if str(SHOWCASE_FIXTURE_DIR) not in sys.path:
     sys.path.insert(0, str(SHOWCASE_FIXTURE_DIR))
 from showcase import DEMOS as SHOWCASE_DEMOS, make_icon_png, write_iso  # noqa: E402
+
+# The display-smoke generator's exact-pixel oracle: the stripe pattern the guest's MIPS
+# draws, recomputed in Python (fixtures/display_smoke/generate.py).
+_DISPLAY_SMOKE_SPEC = importlib.util.spec_from_file_location(
+    "display_smoke_generator", ROOT / "fixtures" / "display_smoke" / "generate.py"
+)
+if _DISPLAY_SMOKE_SPEC is None or _DISPLAY_SMOKE_SPEC.loader is None:
+    raise RuntimeError("cannot load fixtures/display_smoke/generate.py")
+display_smoke_generator = importlib.util.module_from_spec(_DISPLAY_SMOKE_SPEC)
+_DISPLAY_SMOKE_SPEC.loader.exec_module(display_smoke_generator)
 
 # Short enough to keep the hosted run quick, long enough that the guest really
 # presents frames. The guest loops this many times, one vblank wait each.
@@ -83,6 +96,66 @@ TITLE_ID = "experimental-ulus99998"
 LAUNCH_TIMEOUT_MS = 180000
 DISPLAY_SMOKE_BASE = 0x08810000
 LOW_FIXED_ADDRESS_BASE = 0x08804000
+
+
+HOMEBREW_REQUIRED = "NK_HOMEBREW_E2E_REQUIRED"
+HOMEBREW_FIXTURE = ROOT / "fixtures" / "pspdev_phase5"
+
+
+def build_homebrew_eboot(out_dir: Path) -> Path:
+    """Build the project's own PSPSDK program (fixtures/pspdev_phase5) into a real EBOOT.PBP.
+
+    PSPDEV's make and ``pack-pbp`` write the package, so its PARAM.SFO is the one every
+    PSPSDK homebrew has (category MG), not one a test author guessed (#2143). With no PSPDEV
+    the caller's test is skipped, or failed when NK_HOMEBREW_E2E_REQUIRED=1.
+    """
+    from test_profile_zero_e2e import _pspdev_backend, _wsl_path  # noqa: E402
+
+    def unavailable(reason: str) -> None:
+        if os.environ.get(HOMEBREW_REQUIRED) == "1":
+            raise AssertionError(f"{HOMEBREW_REQUIRED}=1, but the build did not run: {reason}")
+        raise unittest.SkipTest(f"NOT_RUN: {reason}")
+
+    backend = _pspdev_backend()
+    if backend is None:
+        unavailable("PSPDEV/PSPSDK is absent (psp-gcc, pack-pbp)")
+    assert backend is not None
+    out_dir.mkdir(parents=True, exist_ok=True)
+    makefile = HOMEBREW_FIXTURE / "Makefile"
+    if backend[0] == "wsl":
+        wsl = backend[1]
+        assert wsl is not None
+        command = [
+            wsl, "-d", "Ubuntu", "--", "/usr/bin/env", "PSPDEV=/usr/local/pspdev",
+            "PATH=/usr/local/pspdev/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            "make", "--no-print-directory", "-B", "-f", _wsl_path(wsl, makefile),
+            "-C", _wsl_path(wsl, out_dir), f"VPATH={_wsl_path(wsl, HOMEBREW_FIXTURE)}",
+            "EBOOT.PBP",
+        ]
+        environment = None
+    else:
+        make = shutil.which("mingw32-make") or shutil.which("make")
+        if not make:
+            unavailable("PSPDEV is installed but GNU Make is unavailable")
+        assert make is not None
+        command = [
+            make, "--no-print-directory", "-B", "-f", str(makefile), "-C", str(out_dir),
+            f"VPATH={HOMEBREW_FIXTURE}", "EBOOT.PBP",
+        ]
+        environment = os.environ.copy()
+        for key in ("MAKEFLAGS", "MFLAGS", "MAKELEVEL", "MAKEOVERRIDES"):
+            environment.pop(key, None)
+    completed = subprocess.run(command, cwd=ROOT, env=environment, capture_output=True,
+                               text=True, timeout=300, check=False)
+    if completed.returncode:
+        raise AssertionError(
+            f"PSPDEV build of {HOMEBREW_FIXTURE.name} failed (exit {completed.returncode}):\n"
+            f"{completed.stdout}\n{completed.stderr}"
+        )
+    eboot = out_dir / "EBOOT.PBP"
+    if not eboot.is_file():
+        raise AssertionError(f"PSPDEV did not produce {eboot}")
+    return eboot
 
 
 def synthetic_manifest() -> dict:
@@ -551,8 +624,37 @@ class TestPackageDiskSpace(unittest.TestCase):
             )
 
 
+#: Lines of ``logs/build_<id>.log`` a failed package build adds to the test's failure message.
+BUILD_LOG_TAIL_LINES = 60
+
+
+def build_failure_report(
+    built: subprocess.CompletedProcess, log_dir: Path, disc_id: str, *,
+    kept_scratch: Path | None = None,
+) -> str:
+    """The failure message for a package build that exited non-zero.
+
+    The harness's own output names the failing step, but the compiler's output is in the
+    build log, and the scratch directory used to be deleted with it (a one-off make exit 2
+    in the full route module, #2287, left nothing to read). This adds the log's last
+    ``BUILD_LOG_TAIL_LINES`` lines, or says that the log is missing, and names the scratch
+    directory the test kept.
+    """
+    parts = [(built.stdout or "")[-4000:] + (built.stderr or "")[-4000:]]
+    log_path = log_dir / f"build_{disc_id}.log"
+    if log_path.is_file():
+        tail = log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-BUILD_LOG_TAIL_LINES:]
+        parts.append(f"--- last {len(tail)} lines of {log_path} ---\n" + "\n".join(tail))
+    else:
+        parts.append(f"--- no build log at {log_path} ---")
+    if kept_scratch is not None:
+        parts.append(f"--- scratch directory kept for inspection: {kept_scratch} ---")
+    return "\n".join(parts)
+
+
 class TestPlayerPackageRoute(unittest.TestCase):
     binary_dir: ClassVar[Path]  # One scratch build root is assigned for the class.
+    keep_scratch = False  # Set by build_failure_message for a build that had to pass; see _remove_scratch.
 
     @classmethod
     def setUpClass(cls):
@@ -563,7 +665,7 @@ class TestPlayerPackageRoute(unittest.TestCase):
 
     def setUp(self):
         self.temporary = scratch_dir.TemporaryDirectory(prefix="nk-player-route-")
-        self.addCleanup(self.temporary.cleanup)
+        self.addCleanup(self._remove_scratch)
         self.root = Path(self.temporary.name)
         self.fixture_dir = self.root / "fixture"
         self.user_root = self.root / "user"
@@ -730,11 +832,38 @@ class TestPlayerPackageRoute(unittest.TestCase):
 
     def run_build_action(self, user_root: Path, *, env=None) -> subprocess.CompletedProcess:
         """Press BUILD PACKAGE: the player's own session, start to finish."""
-        return subprocess.run(
+        built = subprocess.run(
             [str(self.harness), "--build-package", str(ROOT), str(user_root), DISC_ID,
              str(user_root / "logs")],
             cwd=ROOT, env=env, capture_output=True, text=True, timeout=1800,
         )
+        return built
+
+    def build_failure_message(
+        self, built: subprocess.CompletedProcess, user_root: Path | None = None,
+    ) -> str:
+        """The assertion message for a build that had to pass: output, log tail, kept directory.
+
+        Called where a test needs the build to succeed, so a non-zero exit there keeps the
+        scratch directory. A refusal a test expects (an encrypted or malformed input) never
+        calls it and is cleaned up like any other run.
+        """
+        if built.returncode != 0:
+            self.keep_scratch = True
+        return build_failure_report(
+            built, (user_root or self.user_root) / "logs", DISC_ID,
+            kept_scratch=Path(self.temporary.name) if self.keep_scratch else None,
+        )
+
+    def _remove_scratch(self) -> None:
+        """Delete the scratch directory, except after a failed build: its logs are the evidence."""
+        if self.keep_scratch:
+            # Stop tempfile's finalizer too, or it would remove the directory at interpreter exit.
+            finalizer = getattr(self.temporary, "_finalizer", None)
+            if finalizer is not None:
+                finalizer.detach()
+            return
+        self.temporary.cleanup()
 
     def run_validator(self) -> subprocess.CompletedProcess:
         return subprocess.run(
@@ -761,15 +890,22 @@ class TestPlayerPackageRoute(unittest.TestCase):
     def run_launch(
         self, perf_csv: Path, *, accept_presented_frames: int | None = None,
         headless_timeout_ms: int | None = None, user_data_root: Path | None = None,
+        extra_environment: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess:
         environment = os.environ.copy()
         environment["LOCALAPPDATA"] = str(self.local_appdata)
+        environment.update(extra_environment or {})
         # The acceptance route must exercise a real host presenter. A caller's
         # offscreen SDL selection would make the test prove only framebuffer
         # conversion, so clear those overrides for this windowed child.
         environment.pop("SR_VIDEO", None)
         environment.pop("SDL_VIDEODRIVER", None)
         environment.pop("SDL_VIDEO_DRIVER", None)
+        # The same presenter with its window hidden (SR_WINDOW_HIDDEN, sdl3vk.c):
+        # nobody watches this run. Shown, the child's window joined the taskbar
+        # group of any Nakagawa player open on the PC as a blank "Nakagawa
+        # Recomp" window for the length of the launch.
+        environment["SR_WINDOW_HIDDEN"] = "1"
         # The opt-in child evidence channels. SR_PERF_CSV is how a launcher
         # proves the guest consumed vblanks without reading the child's stderr,
         # which is not a stable API of either process backend.
@@ -874,6 +1010,67 @@ class TestPlayerPackageRoute(unittest.TestCase):
         self.assertIn("add the disc from the player's library", completed.stderr)
         self.assertTrue((self.user_root / "experimental" / DISC_ID / "profile.json").is_file())
 
+    def test_homebrew_eboot_imports_and_builds_as_experimental(self):
+        """#2143: a real PSPSDK EBOOT.PBP imports, builds a package, and stays Experimental.
+
+        Failing before: PSPSDK writes the category MG for every homebrew, and the package
+        classifier read MG as a firmware updater, so the import ended FIRMWARE_OUT_OF_SCOPE;
+        and the small private disc image the import makes was refused by the build route's
+        1 MiB floor. This runs the production path: the player's own --iso import (package
+        inspect, conversion, disc inspection, experimental profile), the library record the
+        card's ADD TO LIBRARY writes, and the player's own BUILD PACKAGE action. The card's
+        click is covered by tests/native/test_player_ui.py.
+        """
+        self.skip_if_toolchain_unavailable()
+        eboot = build_homebrew_eboot(self.root / "homebrew")
+        environment = os.environ.copy()
+        environment["LOCALAPPDATA"] = str(self.local_appdata)
+        environment["APPDATA"] = str(self.root / "appdata")
+        environment["USERPROFILE"] = str(self.root / "userprofile")
+        imported = subprocess.run(
+            [str(self.player), f"--user-data-root={self.user_root}", f"--iso={eboot}",
+             "--stage-only"],
+            cwd=ROOT, env=environment, capture_output=True, text=True, timeout=120,
+        )
+        output = imported.stdout + imported.stderr
+        self.assertNotIn("FIRMWARE_OUT_OF_SCOPE", output)
+        self.assertNotIn("PBP_PACKAGE_UNSUPPORTED", output)
+        # An uncatalogued program stops --stage-only at the title list, as an ISO does; the
+        # import itself is what ran and what recorded the profile.
+        self.assertEqual(imported.returncode, 3, output)
+        found = re.search(r"Disc ID: (X[A-Z]{3}\d{5}), Title: ([^,\r\n]+), Supported: 0",
+                          imported.stdout)
+        self.assertIsNotNone(found, output)
+        assert found is not None
+        key, title = found.group(1), found.group(2)
+        self.assertEqual(title, "Nakagawa PSP Recompilation Oracle")
+        profile_path = self.user_root / "experimental" / key / "profile.json"
+        profile = json.loads(profile_path.read_text(encoding="utf-8"))
+        self.assertEqual(profile["manifest"]["verification_profile"], "experimental-unverified")
+        self.assertEqual(profile["manifest"]["display_name"], title)
+        iso_path = next((self.user_root / "discs" / key).glob("*.iso"))
+
+        # ADD TO LIBRARY on the Experimental card stores the record the build reads.
+        (self.user_root / "library.json").write_text(json.dumps({
+            "schema_version": 1,
+            "games": [{
+                "disc_id": key, "title_id": profile["manifest"]["id"], "title_name": title,
+                "iso_path": str(iso_path), "selected_executable": "EBOOT.BIN",
+                "is_experimental": True,
+            }],
+        }), encoding="utf-8")
+        environment["SDL_VIDEODRIVER"] = "dummy"
+        environment["SDL_AUDIODRIVER"] = "dummy"
+        environment["NK_BUILD_ROOT"] = str(self.root / "b")
+        built = subprocess.run(
+            [str(self.harness), "--build-package", str(ROOT), str(self.user_root), key,
+             str(self.user_root / "logs")],
+            cwd=ROOT, env=environment, capture_output=True, text=True, timeout=1800,
+        )
+        self.assertEqual(built.returncode, 0, built.stdout[-4000:] + built.stderr[-4000:])
+        self.assertIn("PACKAGE_BUILD_ROUTE status=PASS", built.stdout)
+        self.assertTrue((self.user_root / "packages" / key).is_dir())
+
     def test_uncatalogued_player_route_builds_with_generic_profile(self):
         """The package action upgrades the native profile through bring-up's writer."""
         self.skip_if_toolchain_unavailable()
@@ -908,7 +1105,7 @@ class TestPlayerPackageRoute(unittest.TestCase):
         build_environment["SDL_AUDIODRIVER"] = "dummy"
         build_environment["NK_BUILD_ROOT"] = str(self.root / "b")
         built = self.run_build_action(user_root, env=build_environment)
-        self.assertEqual(built.returncode, 0, built.stdout[-4000:] + built.stderr[-4000:])
+        self.assertEqual(built.returncode, 0, self.build_failure_message(built, user_root))
         self.assertIn("PACKAGE_BUILD_ROUTE status=PASS", built.stdout)
         self.assertIn("complete=1", built.stdout)
 
@@ -961,6 +1158,198 @@ class TestPlayerPackageRoute(unittest.TestCase):
         self.assertIn("[PLAYER] Launch index 0: PLAY NOW available", launched.stdout, output[-4000:])
         self.assertEqual(launched.returncode, 0, output[-4000:])
         self.assertIn("HEADLESS_ACCEPTANCE status=PASS", launched.stdout)
+        self.assertEqual(tracked_status(), before)
+
+    def test_sealed_disc_goes_from_iso_to_play_through_the_player(self):
+        """#308 item 1: a sealed source-owned disc, from ISO to a checked guest result.
+
+        The disc's EBOOT.BIN is the display-smoke guest sealed in a ``~PSP`` container
+        with a game recipe from the public built-in table (src/core/nk_psp_builtin_keys.c),
+        the way a retail disc ships its program. Every stage runs through the player's
+        own production code, and each one has a check that fails if it is skipped or
+        stubbed:
+
+          1. import: the player's ``--iso`` inspection writes the experimental profile;
+          2. decrypt: the same disc check opens the container with the built-in
+             tables and writes EBOOT.elf, byte-identical to the guest that was sealed
+             (the disc itself holds none of those bytes in the clear);
+          3. the build half refuses the disc while that decrypted EBOOT.elf is absent,
+             so the package cannot come from anywhere else;
+          4. analyze, generate and build: the player's BUILD PACKAGE action runs
+             title_codegen_plan.py and gcc, binds the package to the decrypted
+             program's digest, and the player's validator accepts the package;
+          5. launch: PLAY, headless, starts the guest at its entry, the runtime counts
+             FRAMES presents, and every frame it snapshots at a present is, pixel for
+             pixel, the stripe pattern the guest's own MIPS computes (the display-smoke
+             oracle), so
+             a launch or a translation that runs but draws the wrong thing fails.
+
+        One step is the test's, not the player's: the library record that ADD TO LIBRARY
+        writes on the Experimental card, because the player has no command-line route
+        for that click (tests/native/test_player_ui.py covers the click).
+
+        No game data and no key outside the built-in table: the guest is generated from
+        the committed fixtures/display_smoke recipe, and the seal reads the table at run
+        time.
+        """
+        self.skip_if_toolchain_unavailable()
+        before = tracked_status()
+
+        elf_bytes = fixed_address_exec_elf(
+            align_executable((self.fixture_dir / "guest.prx").read_bytes()),
+            LOW_FIXED_ADDRESS_BASE,
+        )
+        sealed = seal_with_builtin_table(elf_bytes)
+        self.assertEqual(sealed[:4], b"~PSP")
+        iso_path = self.root / "sealed-disc.iso"
+        create_test_iso_with_executables(
+            iso_path, sealed, disc_id=DISC_ID, title="Synthetic Sealed Disc",
+        )
+        # The program is on the disc only in its sealed form: a route that copied
+        # the guest instead of decrypting it would have no clear bytes to copy. The
+        # checked span is the file image of the first PT_LOAD segment, the guest's code.
+        phoff, = struct.unpack_from("<I", elf_bytes, 28)
+        phentsize, phnum = struct.unpack_from("<2H", elf_bytes, 42)
+        code = next(
+            elf_bytes[offset:offset + filesz]
+            for p_type, offset, filesz in (
+                struct.unpack_from("<2I8xI", elf_bytes, phoff + index * phentsize)
+                for index in range(phnum))
+            if p_type == 1 and filesz)
+        self.assertGreaterEqual(len(code), 0x100)
+        self.assertNotIn(code, iso_path.read_bytes())
+
+        user_root = self.root / "sealed-user-data"
+        user_root.mkdir()
+        decrypted_dir = decrypted_module_dir(user_root, DISC_ID)
+        assert decrypted_dir is not None
+        decrypted_eboot = decrypted_dir / "EBOOT.elf"
+        self.assertFalse(decrypted_eboot.exists())
+
+        # 1 and 2. Import: the player's own --iso inspection and disc check. Today an
+        # uncatalogued disc stops --stage-only at the title list (exit 3,
+        # STAGING_RESULT status=FAIL) after both ran; that is the current boundary.
+        environment = os.environ.copy()
+        environment["LOCALAPPDATA"] = str(self.local_appdata)
+        environment["APPDATA"] = str(self.root / "appdata")
+        environment["USERPROFILE"] = str(self.root / "userprofile")
+        imported = subprocess.run(
+            [str(self.player), f"--user-data-root={user_root}", f"--iso={iso_path}",
+             "--stage-only"],
+            cwd=ROOT, env=environment, capture_output=True, text=True, timeout=120,
+        )
+        import_output = imported.stdout + imported.stderr
+        self.assertEqual(imported.returncode, 3, import_output)
+        self.assertIn(f"Disc ID: {DISC_ID}, Title: Synthetic Sealed Disc, Supported: 0",
+                      imported.stdout)
+        self.assertIn(f"STAGING_RESULT status=FAIL disc_id={DISC_ID}", imported.stdout)
+        profile_path = user_root / "experimental" / DISC_ID / "profile.json"
+        self.assertTrue(profile_path.is_file(), import_output)
+        profile = json.loads(profile_path.read_text(encoding="utf-8"))
+        self.assertEqual(profile["manifest"]["verification_profile"], "experimental-unverified")
+        self.assertTrue(decrypted_eboot.is_file(),
+                        "the player's disc check did not decrypt EBOOT.BIN:\n" + import_output)
+        self.assertEqual(decrypted_eboot.read_bytes(), elf_bytes,
+                         "the decrypted EBOOT.elf is not the program that was sealed")
+
+        # ADD TO LIBRARY on the Experimental card stores the record the build reads
+        # (written here: the player has no command-line route for that click).
+        (user_root / "library.json").write_text(json.dumps({
+            "schema_version": 1,
+            "games": [{
+                "disc_id": DISC_ID, "title_id": profile["manifest"]["id"],
+                "title_name": "Synthetic Sealed Disc", "iso_path": str(iso_path),
+                "selected_executable": "EBOOT.BIN", "is_experimental": True,
+            }],
+        }), encoding="utf-8")
+        build_environment = os.environ.copy()
+        build_environment["SDL_VIDEODRIVER"] = "dummy"
+        build_environment["SDL_AUDIODRIVER"] = "dummy"
+        build_environment["NK_BUILD_ROOT"] = str(self.root / "b")
+
+        # 3. Without the decrypt stage's output the build has nothing to analyze.
+        held = self.root / "held-EBOOT.elf"
+        decrypted_eboot.replace(held)
+        refused = self.run_build_action(user_root, env=build_environment)
+        self.assertNotEqual(refused.returncode, 0, refused.stdout[-4000:])
+        self.assertIn("PACKAGE_BUILD_ROUTE status=FAIL", refused.stdout)
+        self.assertIn("[preflight] FAIL: ENCRYPTED_EXECUTABLE: EBOOT.BIN is encrypted",
+                      refused.stdout)
+        self.assertFalse((user_root / "packages" / DISC_ID).exists())
+        held.replace(decrypted_eboot)
+
+        # 4. BUILD PACKAGE: real analysis, AOT generation and a gcc link.
+        built = self.run_build_action(user_root, env=build_environment)
+        self.assertEqual(built.returncode, 0, self.build_failure_message(built, user_root))
+        self.assertIn("PACKAGE_BUILD_ROUTE status=PASS", built.stdout)
+        self.assertIn("complete=1", built.stdout)
+        build_log = (user_root / "logs" / f"build_{DISC_ID}.log").read_text(
+            encoding="utf-8", errors="replace")
+        self.assertIn("title_codegen_plan.py", build_log)
+        self.assertIn("gcc", build_log)
+        self.assertIn("Build finished:", build_log)
+        package_dir = user_root / "packages" / DISC_ID
+        package = json.loads((package_dir / "package.json").read_text(encoding="utf-8"))
+        self.assertEqual(package.get("format"), "nakagawa-aot-package")
+        self.assertTrue(package.get("generated_objects"), "no AOT code was generated")
+        self.assertTrue((package_dir / package["executable"]["path"]).is_file())
+        identity = package_cache.read_local_title_input_identity(user_root, DISC_ID)
+        self.assertIsNotNone(identity)
+        assert identity is not None
+        self.assertEqual(identity["main_executable"]["sha256"],
+                         hashlib.sha256(elf_bytes).hexdigest(),
+                         "the package is not bound to the decrypted program")
+        validated = subprocess.run(
+            [str(self.validator), "--validate-package", str(user_root), DISC_ID,
+             profile["manifest"]["id"], "1", "EBOOT.BIN"],
+            cwd=ROOT, env=build_environment, capture_output=True, text=True,
+        )
+        self.assertEqual(validated.returncode, 0, validated.stdout + validated.stderr)
+        self.assertIn("PACKAGE_STATUS=OK", validated.stdout)
+
+        # 5. PLAY, headless, through the player's own launch session. The runtime
+        #    reports acceptance once it counted FRAMES presents. SR_FBSNAP=1 makes it
+        #    snapshot the guest framebuffer at every present, whichever presenter
+        #    shows it (src/rt/hle_display.c: the legacy snap_<n>.ppm, synchronised
+        #    from the GPU first), into the child's working directory, the package.
+        perf_csv = self.sandbox / "sealed-perf.csv"
+        #    (snap_f*.ppm is the GE's own SR_GESTAT snapshot, not this one.)
+        legacy_snapshots = "snap_[0-9]*.ppm"
+        self.assertEqual(sorted(package_dir.glob(legacy_snapshots)), [])
+        launched = self.run_launch(perf_csv, user_data_root=user_root,
+                                   accept_presented_frames=FRAMES,
+                                   extra_environment={"SR_FBSNAP": "1"})
+        output = launched.stdout + launched.stderr
+        self.assertEqual(launched.returncode, 0, output[-4000:])
+        self.assertIn("[PLAYER] Launch index 0: PLAY NOW available", launched.stdout)
+        self.assertIn("HEADLESS_ACCEPTANCE status=PASS", launched.stdout)
+        # The guest's own result: every presented frame is exactly one frame of the
+        # stripe pattern its MIPS computes, recomputed here by the fixture's oracle,
+        # and the frames advance up to the guest's last one.
+        snapshots = sorted(package_dir.glob(legacy_snapshots))
+        self.assertTrue(snapshots, "the launch presented no frame the runtime could snapshot")
+        frames_seen = set()
+        for snapshot in snapshots:
+            try:
+                frames_seen.add(display_smoke_generator._require_exact_present_pixels(
+                    snapshot, FRAMES, f"sealed-disc launch {snapshot.name}"))
+            except RuntimeError as exc:
+                self.fail(str(exc))
+        self.assertGreater(len(frames_seen), 1, f"the guest's frames never advanced: {frames_seen}")
+        self.assertIn(FRAMES - 1, frames_seen, f"the guest's last frame was not presented: {frames_seen}")
+        # With --user-data-root, the player's cache folder is that root's cache
+        # (nk_platform_win32.c resolve_override_path).
+        boot_logs = list((user_root / "cache").glob("player-boot-*.events"))
+        self.assertEqual(len(boot_logs), 1, "the player did not retain the child's boot evidence")
+        events = boot_logs[0].read_text(encoding="utf-8", errors="replace")
+        self.assertIn(
+            f"BOOT_EVENT phase=guest_start mode=scheduler entry=0x{LOW_FIXED_ADDRESS_BASE:08x}",
+            events)
+        for forbidden in ("UNKNOWN NID", "NONPLT_MISS", "INTERP_REJECT"):
+            self.assertNotIn(forbidden, events)
+        rows = perf_csv.read_text(encoding="utf-8", errors="replace").splitlines()
+        self.assertGreaterEqual(int(rows[-1].split(",")[0]), FRAMES)
+
         self.assertEqual(tracked_status(), before)
 
     def test_fixed_address_exec_outside_ram_has_named_builder_boundary(self):
@@ -1249,7 +1638,7 @@ class TestPlayerPackageRoute(unittest.TestCase):
         # 1. BUILD PACKAGE, through the player's own session, with real
         #    analysis, codegen and compilation.
         built = self.run_build_action(self.user_root)
-        self.assertEqual(built.returncode, 0, built.stdout[-4000:] + built.stderr[-4000:])
+        self.assertEqual(built.returncode, 0, self.build_failure_message(built))
         self.assertIn("PACKAGE_BUILD_ROUTE status=PASS", built.stdout)
         self.assertIn("complete=1", built.stdout)
         # The child really analysed, generated and compiled: its own log names
@@ -1495,7 +1884,7 @@ class TestPlayerPackageRoute(unittest.TestCase):
             started = time.perf_counter()
             built = self.run_build_action(self.user_root)
             timings.append(time.perf_counter() - started)
-            self.assertEqual(built.returncode, 0, built.stdout[-4000:] + built.stderr[-4000:])
+            self.assertEqual(built.returncode, 0, self.build_failure_message(built))
             returned: str = log_path.read_text(encoding="utf-8", errors="replace")
             return returned
 
@@ -1541,7 +1930,7 @@ class TestPlayerPackageRoute(unittest.TestCase):
         for run_number in range(10):
             built = self.run_build_action(self.user_root)
             output = built.stdout + built.stderr
-            self.assertEqual(built.returncode, 0, output[-4000:])
+            self.assertEqual(built.returncode, 0, self.build_failure_message(built))
             self.assertIn("PACKAGE_BUILD_ROUTE status=PASS", output)
             self.assertIn("complete=1 failed=0", output)
             self.assertNotIn("PACKAGE_BUILD_ROUTE status=FAIL", output)
@@ -1564,7 +1953,7 @@ class TestPlayerPackageRoute(unittest.TestCase):
         self.assertIn("PACKAGE_STATUS=STALE", stale.stdout)
         rebuilt = self.run_build_action(self.user_root)
         rebuild_output = rebuilt.stdout + rebuilt.stderr
-        self.assertEqual(rebuilt.returncode, 0, rebuild_output[-4000:])
+        self.assertEqual(rebuilt.returncode, 0, self.build_failure_message(rebuilt))
         self.assertIn("PACKAGE_BUILD_ROUTE status=PASS", rebuild_output)
         self.assertIn("complete=1 failed=0", rebuild_output)
         self.assertNotIn("PACKAGE_BUILD_ROUTE status=FAIL", rebuild_output)
@@ -1573,7 +1962,7 @@ class TestPlayerPackageRoute(unittest.TestCase):
 
         reused = self.run_build_action(self.user_root)
         reuse_output = reused.stdout + reused.stderr
-        self.assertEqual(reused.returncode, 0, reuse_output[-4000:])
+        self.assertEqual(reused.returncode, 0, self.build_failure_message(reused))
         self.assertIn("PACKAGE_BUILD_ROUTE status=PASS", reuse_output)
         self.assertIn("PACKAGE_REUSED:",
                       log_path.read_text(encoding="utf-8", errors="replace"))
@@ -1691,6 +2080,78 @@ class TestPlayerPackageRoute(unittest.TestCase):
         # 4. Verify no orphan staging directory remains in packages root
         staging_dirs = list((user_root / "packages").glob(f".{DISC_ID}.staging-*"))
         self.assertEqual(staging_dirs, [], "no orphan staging directories must remain after a failed stage")
+
+
+class TestBuildFailureDiagnosis(unittest.TestCase):
+    """A failed package build leaves its compiler output readable (the make exit 2 seen in #2287)."""
+
+    def _route(self, scratch: scratch_dir.TemporaryDirectory) -> TestPlayerPackageRoute:
+        # The route test's setUp builds a whole fixture; run_build_action and the cleanup
+        # only need these attributes, so a bare instance exercises them without it.
+        route = TestPlayerPackageRoute("run_build_action")
+        route.temporary = scratch
+        route.root = Path(scratch.name)
+        route.user_root = route.root / "user"
+        route.harness = route.root / "harness"
+        return route
+
+    def _fake_build(self, route: TestPlayerPackageRoute, returncode: int, log_lines: int):
+        log_dir = route.user_root / "logs"
+
+        def fake_run(*_args, **_kwargs):
+            log_dir.mkdir(parents=True, exist_ok=True)
+            (log_dir / f"build_{DISC_ID}.log").write_text(
+                "".join(f"make line {n}\n" for n in range(1, log_lines + 1)), encoding="utf-8"
+            )
+            return subprocess.CompletedProcess([], returncode, "PACKAGE_BUILD_ROUTE status=FAIL\n", "")
+
+        with patch.object(subprocess, "run", fake_run):
+            return route.run_build_action(route.user_root)
+
+    def test_failed_build_keeps_scratch_and_reports_log_tail(self):
+        scratch = scratch_dir.TemporaryDirectory(prefix="nk-build-diagnosis-")
+        self.addCleanup(shutil.rmtree, scratch.name, ignore_errors=True)
+        route = self._route(scratch)
+        built = self._fake_build(route, returncode=2, log_lines=200)
+
+        message = route.build_failure_message(built)
+        self.assertTrue(route.keep_scratch)
+        self.assertIn("make line 200", message)
+        self.assertIn(f"make line {200 - BUILD_LOG_TAIL_LINES + 1}\n", message)
+        self.assertNotIn(f"make line {200 - BUILD_LOG_TAIL_LINES}\n", message)
+        self.assertIn("PACKAGE_BUILD_ROUTE status=FAIL", message)
+        self.assertIn(scratch.name, message)
+
+        route._remove_scratch()
+        self.assertTrue(Path(scratch.name, "user", "logs", f"build_{DISC_ID}.log").is_file())
+
+    def test_expected_refusal_removes_scratch(self):
+        # The encrypted and malformed-input tests expect a non-zero exit and never ask for the
+        # failure message, so their scratch directory must not outlive them.
+        scratch = scratch_dir.TemporaryDirectory(prefix="nk-build-diagnosis-")
+        self.addCleanup(shutil.rmtree, scratch.name, ignore_errors=True)
+        route = self._route(scratch)
+        refused = self._fake_build(route, returncode=2, log_lines=3)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertFalse(route.keep_scratch)
+        route._remove_scratch()
+        self.assertFalse(Path(scratch.name).exists())
+
+    def test_passing_build_still_removes_scratch(self):
+        scratch = scratch_dir.TemporaryDirectory(prefix="nk-build-diagnosis-")
+        self.addCleanup(shutil.rmtree, scratch.name, ignore_errors=True)
+        route = self._route(scratch)
+        self._fake_build(route, returncode=0, log_lines=3)
+        self.assertFalse(route.keep_scratch)
+        route._remove_scratch()
+        self.assertFalse(Path(scratch.name).exists())
+
+    def test_missing_log_is_named_not_skipped(self):
+        with tempfile.TemporaryDirectory(prefix="nk-build-diagnosis-") as temporary:
+            built = subprocess.CompletedProcess([], 2, "", "make: *** Error 2\n")
+            message = build_failure_report(built, Path(temporary) / "logs", DISC_ID)
+        self.assertIn("make: *** Error 2", message)
+        self.assertIn("no build log at", message)
 
 
 class TestRuntimeDllStaging(unittest.TestCase):

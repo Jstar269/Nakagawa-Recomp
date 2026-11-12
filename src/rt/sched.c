@@ -32,6 +32,7 @@
 #include "flight_recorder.h"
 #include "ace.h"            /* Ace Mode observation counters (Ace on only) */
 #include "replay_checkpoint.h" /* sched_for_each_thread_cpu (#2147) */
+#include "cpu_lle.h"          /* sr_guest_lane_hold: the COSIM guest lane (#2201) */
 
 /* Test-only scheduler liveness instrumentation (#290). Declared here, not in recomp.h, so the
  * CPU-state ABI header (and every title's generated-code build profile) stays unchanged. */
@@ -207,6 +208,8 @@ typedef struct {
     uint32_t stack_base;          /* user-visible stack range, excluding synthetic TLS */
     uint32_t stack_size;          /* aligned user-visible stack bytes */
     uint32_t stack_reservation;   /* user stack plus synthetic TLS reservation */
+    int      stack_in_partition;  /* the stack is a block taken from the user partition's free
+                                   * list below its bump pointer, not from the arena above it */
     /* Flight-recorder thread snapshot (schema 6). import_active/import_nid hold this
      * thread's sr_import_active/sr_import_nid while it is switched out, so a block records
      * the import the thread itself is inside, never another thread's. */
@@ -297,8 +300,26 @@ static int sched_pause_assert_no_guest(const char *function) {
     return 0;
 }
 
+/* A fiber switch or the loss of the lane's thread inside a held COSIM guest lane (#2201).
+ * The lane's import refusal and memory rollback would then reach another thread, or never
+ * run, so the run stops by name instead. */
+#define SCHED_GUEST_LANE_YIELD_LIMIT 200000u   /* "200000" in the stop's text */
+static void sched_guest_lane_fatal(const char *what, uint32_t uid) {
+    fprintf(stderr,
+            "SR_COSIM_FATAL: %s inside the COSIM guest lane (lane thread uid 0x%x, thread uid "
+            "0x%x); the lane cannot be rolled back alone, stopping\n",
+            what, sr_guest_lane_hold.uid, uid);
+    sr_flight_fatal(SR_FLIGHT_KIND_FATAL_HOST, sr_guest_lane_hold.uid, uid, 0u);
+    fflush(stderr);
+    exit(1);
+}
+
 static void sched_destroy_thread_coro(TCB *t) {
     if (!t) return;
+    /* Held, the lane's fiber never parks, so nothing destroys it; if anything ever does, the
+     * lane's state would outlive it and refuse every later import (#2201). */
+    if (sr_guest_lane_hold.held && sr_guest_lane_hold.uid != 0u && t->uid == sr_guest_lane_hold.uid)
+        sched_guest_lane_fatal("the lane's thread was destroyed", t->uid);
     if (t->coro) {
         sr_coro_destroy(t->coro);
         t->coro = NULL;
@@ -328,6 +349,9 @@ static void sched_wait_record_wake(TCB *owner, int terminal, uint32_t result);
 static int      s_ntcb = 0;
 static int      s_cur = -1;      /* index of running thread, -1 = scheduler */
 static int      s_last_pick = -1;/* rotation cursor (file-scope so the selftest can reset it) */
+/* The thread whose delay wait may not expire in the next scheduling decision
+ * (sched_delay_current_dispatching); -1 when none. pick_next clears it once it has promoted. */
+static int      s_hold_expiry = -1;
 static uint32_t s_watchdog_spin_observations;
 /* CPU-wide PSP interrupt state.  Because scheduling is suppressed while this is
  * false, an interrupt-disabled state cannot migrate to another guest thread. */
@@ -604,7 +628,8 @@ uint32_t sched_guest_stack_floor_above(uint32_t addr) {
     uint32_t floor = SR_STACK_ARENA_CEIL;
     for (int i = 0; i < s_ntcb; i++) {
         const TCB *t = &s_tcb[i];
-        if (t->stack_reservation == 0u || t->stack_released) continue;
+        /* A stack in a free block below the bump pointer is not the partition's top. */
+        if (t->stack_reservation == 0u || t->stack_released || t->stack_in_partition) continue;
         if (t->stack_base >= addr && t->stack_base < floor) floor = t->stack_base;
     }
     return floor;
@@ -612,11 +637,31 @@ uint32_t sched_guest_stack_floor_above(uint32_t addr) {
 
 uint32_t sched_guest_stack_floor(void) { return sched_guest_stack_floor_above(0u); }
 
+/* 1 when a live thread stack, from either source, touches [base, end). */
+int sched_guest_stack_overlaps(uint32_t base, uint32_t end) {
+    for (int i = 0; i < s_ntcb; i++) {
+        const TCB *t = &s_tcb[i];
+        if (t->stack_reservation == 0u || t->stack_released) continue;
+        if (t->stack_base < end && t->stack_base + t->stack_reservation > base) return 1;
+    }
+    return 0;
+}
+
 /* The HLE user partition (hle.c) installs a check that refuses a stack range it has
  * handed out. A callback rather than a link-time reference: several fixtures link
  * sched.c without hle.c, and with no check installed every range is accepted. */
 static SrSchedStackRangeRefusal s_stack_range_refusal;
 void sched_set_stack_range_refusal(SrSchedStackRangeRefusal refusal) { s_stack_range_refusal = refusal; }
+
+/* The same partition's free blocks below its bump pointer (hle.c), for a stack no range above it
+ * holds. Unset in fixtures that link sched.c without hle.c: there every stack is an arena range. */
+static SrSchedPartitionHoleAlloc s_partition_hole_alloc;
+static SrSchedPartitionHoleRelease s_partition_hole_release;
+void sched_set_partition_hole_allocator(SrSchedPartitionHoleAlloc alloc,
+                                        SrSchedPartitionHoleRelease release) {
+    s_partition_hole_alloc = alloc;
+    s_partition_hole_release = release;
+}
 
 /* A PSP allocates a thread stack from the high end of the user partition: the highest free
  * block that holds the request, carved from that block's top. Measured on a PSP-3000
@@ -787,6 +832,7 @@ void sched_init(CpuState *cpu) {
     s_ntcb = 0;
     s_cur = -1;
     s_last_pick = -1;
+    s_hold_expiry = -1;
     s_watchdog_spin_observations = 0;
     s_root_seen = 0;
     s_tick = 0;
@@ -1439,6 +1485,44 @@ static uint64_t host_now_ns(void) {
     return s_host_ns_fn ? s_host_ns_fn() : SDL_GetTicksNS();
 }
 
+/* ---- fast forward (recomp.h) -----------------------------------------------------------
+ * The paced clock samples guest time from pace_ns(): the host monotonic clock, run at
+ * s_ff_speed since the last speed change. Until fast forward first starts both anchors are 0
+ * and pace_ns() is host_now_ns() exactly, so a run that never uses it paces as before. A
+ * speed change re-anchors at the current paced time, so guest time stays continuous and only
+ * its rate changes. The pause runs at speed 1, so its host-interval anchor shifts stay exact.
+ * Waits convert a paced interval back to host time with pace_to_host_ns(). */
+static uint32_t s_ff_speed = 1u;
+static uint64_t s_ff_host_anchor_ns;
+static uint64_t s_ff_pace_anchor_ns;
+static uint32_t s_ff_epoch;
+
+static uint64_t pace_ns_at(uint64_t host_ns) {
+    if (s_ff_speed == 1u && s_ff_pace_anchor_ns == s_ff_host_anchor_ns) return host_ns;
+    const uint64_t since = host_ns > s_ff_host_anchor_ns ? host_ns - s_ff_host_anchor_ns : 0u;
+    return s_ff_pace_anchor_ns + since * s_ff_speed;
+}
+
+static uint64_t pace_ns(void) { return pace_ns_at(host_now_ns()); }
+
+static uint64_t pace_to_host_ns(uint64_t pace_interval_ns) {
+    return pace_interval_ns / s_ff_speed;
+}
+
+static void pace_set_speed(uint32_t speed) {
+    if (speed == s_ff_speed) return;
+    const uint64_t host = host_now_ns();
+    s_ff_pace_anchor_ns = pace_ns_at(host);
+    s_ff_host_anchor_ns = host;
+    if (speed > 1u && s_ff_speed == 1u) s_ff_epoch++;
+    s_ff_speed = speed;
+    ace_note_fast_forward(speed > 1u);
+    fprintf(stderr, "FAST_FORWARD: %s\n", speed > 1u ? "on" : "off");
+}
+
+int sched_fast_forward_on(void) { return s_ff_speed > 1u; }
+uint32_t sched_fast_forward_epoch(void) { return s_ff_epoch; }
+
 /* SR_DETERMINISTIC_CLOCK: unset, empty or '0' = off; '1' = on. There is no automatic choice: a
  * scripted run keeps the clock it always had unless its caller names this one (#2037).
  * SR_DETERMINISTIC_SLICE_US (1..100000, default SCHED_DET_SLICE_US_DEFAULT) is read only when the
@@ -1503,7 +1587,7 @@ static void pace_setup(void) {
         fprintf(stderr, "pace_setup: s_pace_on = %d (SR_NOVBPACE = %s) deterministic_clock = 0\n",
                 s_pace_on, e ? e : "<unset>");
     fflush(stderr);
-    s_clock_epoch_ns = host_now_ns();
+    s_clock_epoch_ns = pace_ns();
     s_vbl_next_ns = s_clock_epoch_ns;
     s_vbl_period_rem = 0;
     s_vtime_period_rem = 0;
@@ -1521,7 +1605,7 @@ int sched_vbl_paced(void) { pace_setup(); return s_pace_on > 0; }
 int sched_clock_deterministic(void) { pace_setup(); return s_det_clock; }
 
 static uint64_t host_us(void) {
-    return (host_now_ns() - s_clock_epoch_ns) / 1000u;
+    return (pace_ns() - s_clock_epoch_ns) / 1000u;
 }
 
 /* Observe host time without manufacturing guest time in deterministic mode.  All
@@ -1592,7 +1676,7 @@ static __uint128_t scheduler_vblank_delta(uint64_t count, uint32_t rem,
                                           uint32_t *new_rem) {
     __uint128_t phase = (__uint128_t)rem + (__uint128_t)count * 20000u;
     if (new_rem) *new_rem = (uint32_t)(phase % 60000u);
-    return (__uint128_t)count * 16683u + phase / 60000u;
+    return (__uint128_t)count * SR_DISPLAY_PERIOD_US + phase / 60000u;
 }
 
 static void scheduler_advance_vblank_deadlines(uint64_t count) {
@@ -1737,7 +1821,7 @@ static void sleep_until_us(uint64_t target_us) {
     for (;;) {
         uint64_t now = host_us();
         if (now >= target_us) break;
-        SDL_DelayPrecise((target_us - now) * 1000u);
+        SDL_DelayPrecise(pace_to_host_ns((target_us - now) * 1000u));
     }
     if (g_ace_on) ace_note_host_wait(host_now_ns() - ace_from);
     sr_rt_phase = SR_RT_PHASE_SCHED;
@@ -1753,7 +1837,7 @@ static void sleep_until_us(uint64_t target_us) {
 static void vblank_pace(void) {
     pace_setup();
     if (!s_pace_on) {
-        scheduler_add_time(16683u);
+        scheduler_add_time(SR_DISPLAY_PERIOD_US);
         s_vtime_period_rem += 20000u;
         if (s_vtime_period_rem >= 60000u) {
             scheduler_add_time(1u);
@@ -1761,18 +1845,21 @@ static void vblank_pace(void) {
         }
         return;
     }
-    uint64_t now = host_now_ns();
+    /* Fast forward (recomp.h): an Enhanced or Ace run on this paced clock, outside the pause. */
+    pace_set_speed(g_ace_on && !s_det_clock && !s_pause_active && ace_ff_requested()
+                       ? SCHED_FAST_FORWARD_SPEED : 1u);
+    uint64_t now = pace_ns();
     if (s_vbl_next_ns > now) {
         uint64_t wait_started = sr_perf_now_ns();
         uint64_t exec_wait_started = sr_exec_now_ns();
         sr_rt_phase = SR_RT_PHASE_HOST_WAIT;
-        SDL_DelayPrecise(s_vbl_next_ns - now);
+        const uint64_t host_from = g_ace_on ? host_now_ns() : 0u;
+        SDL_DelayPrecise(pace_to_host_ns(s_vbl_next_ns - now));
         sr_perf_guest_idle_wait(wait_started);
         sr_exec_idle(exec_wait_started);
         sr_rt_phase = SR_RT_PHASE_SCHED;
-        uint64_t waited_from = now;
-        now = host_now_ns();
-        if (g_ace_on) ace_note_host_wait(now - waited_from);
+        now = pace_ns();
+        if (g_ace_on) ace_note_host_wait(host_now_ns() - host_from);
     }
     uint32_t slots = 0u;
     /* 59.94 Hz is 60000/1001 Hz. Carry the fractional nanoseconds so the
@@ -1866,7 +1953,7 @@ static void sched_pump_host_window(void) {
 static uint64_t vblank_due_us(void) {
     pace_setup();
     if (!s_pace_on) return 0;
-    uint64_t now = host_now_ns();
+    uint64_t now = pace_ns();
     if (now >= s_vbl_next_ns) return 0;
     return (s_vbl_next_ns - now) / 1000u;
 }
@@ -2539,9 +2626,22 @@ static void sched_release_thread_resources(TCB *t) {
     t->resources_released = 1;
 }
 
+static void stack_reservation_release(uint32_t base, uint32_t size, int in_partition) {
+    if (!in_partition) {
+        stack_range_release(base, size);
+        return;
+    }
+    if (!s_partition_hole_release) {
+        fprintf(stderr, "FATAL: guest stack [0x%08x,0x%08x) came from the user partition, "
+                "which has no release installed\n", base, base + size);
+        abort();
+    }
+    s_partition_hole_release(base, size);
+}
+
 static void sched_release_thread_stack(TCB *t) {
     if (!t || t->stack_released) return;
-    stack_range_release(t->stack_base, t->stack_reservation);
+    stack_reservation_release(t->stack_base, t->stack_reservation, t->stack_in_partition);
     t->stack_released = 1;
 }
 
@@ -2705,25 +2805,37 @@ static uint32_t sched_create_thread_finish(TCB *t, uint32_t entry, int priority,
     if (user_sz < 0x200u) user_sz = 0x200u;
     uint32_t reservation = user_sz;
     uint32_t user_base = 0;
+    int in_partition = 0;
+    int overlapped = 0;
+    uint32_t overlap_base = 0;
     int stack_ok = stack_range_alloc(reservation, &user_base);
     if (stack_ok && s_stack_range_refusal &&
         s_stack_range_refusal(user_base, user_base + reservation)) {
-        /* The descending arena reached memory the user partition has handed out. A PSP
-         * allocates thread stacks from that partition, so the create fails for lack of
-         * memory instead of placing a stack over a live block. */
-        fprintf(stderr, "sched_create_thread: stack [0x%08x,0x%08x) would overlap live "
-                "user-partition memory -- failing create (maps to SCE_KERNEL_ERROR_NO_MEMORY)\n",
-                user_base, user_base + reservation);
+        /* The descending arena reached memory the user partition has handed out: no range
+         * above the partition's bump pointer holds the stack. */
+        overlapped = 1;
+        overlap_base = user_base;
         stack_range_release(user_base, reservation);
         stack_ok = 0;
     }
+    if (!stack_ok && s_partition_hole_alloc && s_partition_hole_alloc(reservation, &user_base)) {
+        /* The PSP's rule (stack_range_alloc) is the highest free block that holds the stack,
+         * and a block the guest freed below the bump pointer is one. */
+        in_partition = 1;
+        stack_ok = 1;
+    }
+    if (!stack_ok && overlapped)
+        fprintf(stderr, "sched_create_thread: stack [0x%08x,0x%08x) would overlap live "
+                "user-partition memory and no free partition block holds it -- failing create "
+                "(maps to SCE_KERNEL_ERROR_NO_MEMORY)\n",
+                overlap_base, overlap_base + reservation);
     /* The 0xFF fill and the k0/TLS seeding below write through host pointers over the
      * whole reservation, so the span is checked before anything is written. */
     if (stack_ok && !sr_guest_span_writable(user_base, reservation)) {
         fprintf(stderr, "sched_create_thread: stack [0x%08x,0x%08x) is not writable guest "
                 "memory -- failing create (maps to SCE_KERNEL_ERROR_NO_MEMORY)\n",
                 user_base, user_base + reservation);
-        stack_range_release(user_base, reservation);
+        stack_reservation_release(user_base, reservation, in_partition);
         stack_ok = 0;
     }
     if (!stack_ok) {
@@ -2770,6 +2882,7 @@ static uint32_t sched_create_thread_finish(TCB *t, uint32_t entry, int priority,
     t->stack_base = user_base;
     t->stack_size = user_sz;
     t->stack_reservation = reservation;
+    t->stack_in_partition = in_partition;
     t->stack_released = 0;
     /* A new stack is filled with 0xFF unless the creation attribute has NO_FILLSTACK
      * (evidence at sched_thread_stack_free_size). On a filled stack the lowest word holds the
@@ -3032,6 +3145,7 @@ static void sched_transfer_window_step(void) {
  * nothing about who runs next, it only restores the truth about who is runnable. */
 static void sched_promote_expired_waits(void) {
     for (int i = 0; i < s_ntcb; i++) {
+        if (i == s_hold_expiry) continue;   /* until the next pick (sched_delay_current_dispatching) */
         if ((s_tcb[i].state == TH_WAIT_DELAY || s_tcb[i].state == TH_WAIT_OBJ) &&
             /* An infinite wait has no deadline and can only be released by a
              * signal. Without this guard a virtual clock that reached the
@@ -3084,11 +3198,45 @@ static void sched_idle_wait(void) {
     if (any_waiting && sched_transfer_wake_deadline() < soonest)
         soonest = sched_transfer_wake_deadline();
     scheduler_progress_time();
-    if (s_pace_on && soonest_runnable != SCHED_WAIT_FOREVER && soonest_runnable <= s_vtime_us)
+    /* A wait that came due, by the host clock or by the slice just charged, runs now, on every
+     * clock. On a virtual clock it used to fall into the display-period step below, so a wait
+     * no longer than a slice (100 us on the deterministic clock) cost 16.7 ms and a VBLANK
+     * whenever its thread was the only one (#1296). */
+    if (soonest_runnable != SCHED_WAIT_FOREVER && soonest_runnable <= s_vtime_us)
         return;
     if (s_pace_on && soonest != (uint64_t)-1 && soonest > s_vtime_us &&
         soonest - s_vtime_us < vblank_due_us())
         { sleep_until_us(soonest); scheduler_progress_time(); }
+    else if (!s_pace_on) {
+        /* A virtual clock with nothing to run (#1296). A deadline the slice reached that is
+         * not a thread's to run (an alarm, a GE completion, a VTimer, a transfer window's end)
+         * is the caller's to serve now. Otherwise the clock goes to the next deadline still
+         * ahead when that comes before the next VBLANK, and no VBLANK comes due on the way; a
+         * suspended thread's deadline already behind the clock holds nothing. Only when the
+         * next deadline is at or past the next VBLANK does the clock step a display period:
+         * it used to step one every time, so a load of a thousand disc reads, each waiting
+         * for the drive, took a thousand VBLANKs under the deterministic clock. */
+        uint64_t ahead = SCHED_WAIT_FOREVER;
+        int source_due = 0;
+        for (int i = 0; i < s_ntcb; i++)
+            if ((s_tcb[i].state == TH_WAIT_DELAY || s_tcb[i].state == TH_WAIT_OBJ) &&
+                s_tcb[i].wake > s_vtime_us && s_tcb[i].wake < ahead)
+                ahead = s_tcb[i].wake;
+        if (any_waiting) {
+            const uint64_t sources[4] = { sched_alarm_wake_deadline(), sched_ge_wake_deadline(),
+                                          sched_vtimer_wake_deadline(), sched_transfer_wake_deadline() };
+            for (int i = 0; i < 4; i++) {
+                if (sources[i] <= s_vtime_us) source_due = 1;
+                else if (sources[i] < ahead) ahead = sources[i];
+            }
+        }
+        if (source_due) return;
+        if (ahead < s_vbl_next_us) s_vtime_us = ahead;
+        else {
+            vblank_pace();
+            scheduler_latch_due_events();
+        }
+    }
     else {
         vblank_pace();
         scheduler_latch_due_events();
@@ -3135,6 +3283,10 @@ static void sched_rotation_mark(int head) {
  * state yields an identical decision. Returns an index or -1 if nothing is runnable. */
 static int pick_next(void) {
     sched_promote_expired_waits();
+    /* A held delay (sched_delay_current_dispatching) sits out exactly this decision's promotion.
+     * When nobody else is ready this returns -1, the idle path finds the held deadline already
+     * due, and the next pick promotes it: a lone thread resumes one decision later. */
+    s_hold_expiry = -1;
     sched_transfer_window_step();
     int best_pri = 0;
     int have_ready = 0;
@@ -3216,6 +3368,11 @@ static void switch_to_scheduler(void) {
         SCHED_LIVENESS_OWNER(s_tcb[s_cur].uid);
 #endif
     if (!s_sched_coro || sr_coro_current() == s_sched_coro) return;
+    /* The COSIM guest lane cannot block: every import it reaches, through its stub or the
+     * late-import bridge, is refused before a handler could wait, and sr_yield does not
+     * switch while it is held. Any other switch is a stop (#2201). */
+    if (sr_guest_lane_hold.held)
+        sched_guest_lane_fatal("a fiber switch", s_cur >= 0 ? s_tcb[s_cur].uid : 0u);
     if (sr_perf_enabled) sr_perf_sched_state(sched_perf_state(), sched_perf_uid());
     sr_coro_switch(s_sched_coro);
 }
@@ -3333,8 +3490,29 @@ static void sched_preempt_timer_arm(void) {
     SDL_UnlockMutex(s_preempt_timer_mutex);
 }
 
+/* The two host threads that keep guest time (#1296): the scheduler's, which runs every guest
+ * thread and sleeps until the next deadline when none is ready, and the preemption timer's. At
+ * normal priority a busy host keeps either one from its core after its sleep ends: with every
+ * core busy, a 1-16 ms SDL_DelayPrecise on the reference PC ended a median 20 ms and up to 52 ms
+ * late, against under 1 ms at high priority or on an idle host. Each late wake makes the guest
+ * thread due then late, and the priority-16 sound threads of Hot Shots Tennis let the host queue
+ * run dry. Each thread raises itself once. What HIGH means depends on the host: on Windows a
+ * thread priority within the process's class, which needs no privilege; on Linux nice -10,
+ * which an ordinary session refuses ("setpriority() failed" on Ubuntu 24.04 with RLIMIT_NICE 0
+ * and no rtkit), and which threads the raised thread creates later inherit. A host that
+ * refuses keeps normal priority, and the first refusal is reported once, with its cause. */
+static void sched_host_thread_raise(const char *which) {
+    static atomic_flag s_said = ATOMIC_FLAG_INIT;
+    if (SDL_SetCurrentThreadPriority(SDL_THREAD_PRIORITY_HIGH)) return;
+    if (atomic_flag_test_and_set(&s_said)) return;
+    fprintf(stderr, "sched: the host refused high priority for the %s thread (%s); on a busy host "
+                    "a timed wake can come late\n", which, SDL_GetError());
+    fflush(stderr);
+}
+
 static int SDLCALL sched_preempt_timer_main(void *unused) {
     (void)unused;
+    sched_host_thread_raise("preemption timer");
     SDL_LockMutex(s_preempt_timer_mutex);
     for (;;) {
         const uint64_t at = s_preempt_timer_at_ns;
@@ -3368,6 +3546,7 @@ static int SDLCALL sched_preempt_timer_main(void *unused) {
 void sched_preempt_timer_start(void) {
     pace_setup();
     if (!s_pace_on || s_preempt_timer_mode != SCHED_PREEMPT_TIMER_OFF) return;
+    sched_host_thread_raise("scheduler");   /* the driver calls this on the scheduler's thread */
     s_preempt_timer_mutex = SDL_CreateMutex();
     s_preempt_timer_cond = SDL_CreateCondition();
     SDL_Thread *thread = s_preempt_timer_mutex && s_preempt_timer_cond
@@ -3379,6 +3558,140 @@ void sched_preempt_timer_start(void) {
     }
     SDL_DetachThread(thread);
     s_preempt_timer_mode = SCHED_PREEMPT_TIMER_THREAD;
+}
+
+/* ---- host work a guest thread waits for (#2361) ----------------------------------------
+ * Every guest thread runs on the scheduler's one host thread, so a host call that blocks
+ * there stops sound and picture together: a first read of a disc image on a USB hard disk
+ * held it 341 to 604 ms. One worker thread takes such a call instead. The guest thread that
+ * asked for it waits in the scheduler like any other waiter, and looks again each time its
+ * wait ends (the caller chooses how long: sched_delay_current), so the other threads run
+ * meanwhile, as they do on a PSP while a device transfers.
+ *
+ * Only a paced run uses it (sched_host_work_usable): there guest time is the host's already.
+ * Under the turbo and deterministic clocks the caller keeps its synchronous call, so guest
+ * time stays a function of the guest's work.
+ *
+ * One mutex guards the queue and every item's state. An item belongs to its submitter until
+ * it is finished (after done) or abandoned (the submitter's thread ended while it waited):
+ * an abandoned item is dropped by whoever comes last, the worker when it finishes the call or
+ * the abandoning thread when the call had already finished. run and drop are called with the
+ * mutex released; run never touches guest state, which only the scheduler's thread may. */
+struct SrHostWork {
+    SrHostWorkFn run, drop;
+    void *ctx;
+    int done, abandoned;
+    uint64_t host_ns;   /* how long run took */
+    struct SrHostWork *next;
+};
+static SDL_Mutex *s_host_work_mutex;
+static SDL_Condition *s_host_work_cond;
+static SrHostWork *s_host_work_head, *s_host_work_tail;
+static int s_host_work_state;   /* 0 not started, 1 running, -1 unavailable */
+#ifdef SR_HLE_THREAD_SELFTEST
+static int s_host_work_test_force;   /* a fixture on a virtual clock asks for the worker anyway */
+#endif
+
+static int SDLCALL sched_host_work_main(void *unused) {
+    (void)unused;
+    sr_perf_exclude_thread();   /* the perf counters are the scheduler thread's alone */
+    SDL_LockMutex(s_host_work_mutex);
+    for (;;) {
+        SrHostWork *w = s_host_work_head;
+        if (!w) {
+            SDL_WaitCondition(s_host_work_cond, s_host_work_mutex);
+            continue;
+        }
+        s_host_work_head = w->next;
+        if (!s_host_work_head) s_host_work_tail = NULL;
+        SDL_UnlockMutex(s_host_work_mutex);
+        const uint64_t from = SDL_GetTicksNS();
+        w->run(w->ctx);
+        const uint64_t host_ns = SDL_GetTicksNS() - from;
+        SDL_LockMutex(s_host_work_mutex);
+        w->host_ns = host_ns;
+        w->done = 1;
+        if (w->abandoned) {
+            SDL_UnlockMutex(s_host_work_mutex);
+            if (w->drop) w->drop(w->ctx);
+            free(w);
+            SDL_LockMutex(s_host_work_mutex);
+        }
+    }
+    return 0;
+}
+
+static int sched_host_work_start(void) {
+    if (s_host_work_state) return s_host_work_state > 0;
+    s_host_work_mutex = SDL_CreateMutex();
+    s_host_work_cond = SDL_CreateCondition();
+    SDL_Thread *thread = s_host_work_mutex && s_host_work_cond
+        ? SDL_CreateThread(sched_host_work_main, "nk-host-work", NULL) : NULL;
+    if (!thread) {
+        fprintf(stderr, "sched: host worker unavailable (%s); a blocking host read runs on the "
+                        "scheduler's thread, as before\n", SDL_GetError());
+        if (s_host_work_cond) SDL_DestroyCondition(s_host_work_cond);
+        if (s_host_work_mutex) SDL_DestroyMutex(s_host_work_mutex);
+        s_host_work_cond = NULL;
+        s_host_work_mutex = NULL;
+        s_host_work_state = -1;
+        return 0;
+    }
+    SDL_DetachThread(thread);
+    s_host_work_state = 1;
+    return 1;
+}
+
+int sched_host_work_usable(void) {
+    pace_setup();
+    int wanted = s_pace_on > 0;
+#ifdef SR_HLE_THREAD_SELFTEST
+    if (s_host_work_test_force) wanted = 1;
+#endif
+    return wanted && sched_guest_thread_running() && sched_wait_permitted() &&
+           sched_host_work_start();
+}
+
+SrHostWork *sched_host_work_submit(SrHostWorkFn run, SrHostWorkFn drop, void *ctx) {
+    if (!run || !sched_host_work_start()) return NULL;
+    SrHostWork *w = (SrHostWork *)calloc(1, sizeof(*w));
+    if (!w) return NULL;
+    w->run = run;
+    w->drop = drop;
+    w->ctx = ctx;
+    SDL_LockMutex(s_host_work_mutex);
+    if (s_host_work_tail) s_host_work_tail->next = w;
+    else s_host_work_head = w;
+    s_host_work_tail = w;
+    SDL_SignalCondition(s_host_work_cond);
+    SDL_UnlockMutex(s_host_work_mutex);
+    return w;
+}
+
+int sched_host_work_done(SrHostWork *w) {
+    if (!w) return 1;
+    SDL_LockMutex(s_host_work_mutex);
+    const int done = w->done;
+    SDL_UnlockMutex(s_host_work_mutex);
+    return done;
+}
+
+uint64_t sched_host_work_finish(SrHostWork *w) {
+    if (!w) return 0u;
+    const uint64_t host_ns = w->host_ns;   /* done, and never abandoned: the worker no longer holds it */
+    free(w);
+    return host_ns;
+}
+
+void sched_host_work_abandon(SrHostWork *w) {
+    if (!w) return;
+    SDL_LockMutex(s_host_work_mutex);
+    const int done = w->done;
+    w->abandoned = 1;
+    SDL_UnlockMutex(s_host_work_mutex);
+    if (!done) return;   /* the worker drops it when the call returns */
+    if (w->drop) w->drop(w->ctx);
+    free(w);
 }
 
 void sr_yield(CpuState *s) {
@@ -3396,6 +3709,24 @@ void sr_yield(CpuState *s) {
     /* Time and source latches advance at every scheduler boundary, even when
      * the CPU's interrupt-enable bit currently suppresses delivery. */
     scheduler_progress_time();
+    /* The COSIM guest lane holds the scheduler (#2201): no fiber switch and no interrupt
+     * delivery until it ends, so no other thread or handler runs under its import refusal or
+     * is rolled back with it. Time has advanced above, and with it the sources it latched;
+     * the first yield after the lane delivers what was latched. This is a dedicated hold, not
+     * the guest-visible interrupt state below, which the lane must leave untouched.
+     *
+     * A lane that waits for another thread or an interrupt (a spin on a word a peer or a
+     * handler writes) can never finish while held, so past a bound of held yields it stops
+     * by name rather than hang. The bound is the stuck-suspension figure below; a lane is one
+     * export call, which reaches sr_yield once per TIMESLICE yield points. */
+    if (sr_guest_lane_hold.held) {
+        if (++sr_guest_lane_hold.yields >= SCHED_GUEST_LANE_YIELD_LIMIT)
+            sched_guest_lane_fatal("200000 held yields without finishing (a wait on another "
+                                   "thread or an interrupt, which the hold defers)",
+                                   s_cur >= 0 ? s_tcb[s_cur].uid : 0u);
+        atomic_store_explicit(&sr_timeslice, TIMESLICE, memory_order_relaxed);
+        return;
+    }
     /* sceKernelCpuSuspendIntr is also a scheduler lock on a real single-core
      * PSP.  Defer both fiber switches and vblank interrupts until ResumeIntr
      * restores the saved state.  A suspension that never resumes freezes the
@@ -3736,6 +4067,23 @@ void sched_delay_current(uint64_t usec) {
     switch_to_scheduler();
 }
 
+/* A delay wait whose block always hands the CPU to another ready thread, of any priority, before
+ * the waiter can resume. A 1 us deadline can be over already at the decision the block causes:
+ * on the virtual clock when that dispatch is charged a quantum (scheduler_keep_time_at_dispatch),
+ * on the paced clock when the host microsecond turns over before the scheduler samples it. The
+ * waiter, promoted in that same decision, would win it again at its own priority, so a
+ * lower-priority thread the caller waits for would not run. The hold covers that one decision's
+ * promotion only; from the next one on the wait ends at its deadline as sched_delay_current's.
+ * With no other thread ready, the waiter resumes at the next decision, after the idle path has
+ * found its deadline due (on the virtual clock that path charges its own quantum first). Ace's load skip
+ * (nk_ace_load_skip_wait, ENHANCEMENT_CONTRACT.md section 11.3.10) promises that ready threads of
+ * any priority run while it blocks; sceKernelDelayThread keeps sched_delay_current. */
+void sched_delay_current_dispatching(uint64_t usec) {
+    if (s_cur < 0) return;
+    s_hold_expiry = s_cur;
+    sched_delay_current(usec);
+}
+
 void sched_block_on(uint32_t obj) {
     if (s_cur < 0) return;
     TCB *t = &s_tcb[s_cur];
@@ -3953,6 +4301,7 @@ int sched_reset_for_loadexec(void) {
     s_ntcb = 0;
     s_cur = -1;
     s_last_pick = -1;
+    s_hold_expiry = -1;
     s_watchdog_spin_observations = 0;
     s_root_seen = 0;
     g_root_uid = SR_ROLE_UID_NONE;
@@ -5190,6 +5539,7 @@ extern int sr_savedata_pause_busy(void);
 
 static uint64_t sched_pause_begin(void) {
     pace_setup();
+    pace_set_speed(1u);
     const uint64_t t0 = host_now_ns();
     const uint64_t latency_us = t0 >= s_pause_request_ns
         ? (t0 - s_pause_request_ns) / 1000u : 0u;

@@ -69,9 +69,9 @@ try:
     from . import provenance_ledger  # noqa: E402
     from .publication_policy import load_policy  # noqa: E402
 except ImportError:  # pragma: no cover - direct script execution
-    import provenance_attest_verify as verifier  # noqa: E402
-    import provenance_ledger  # noqa: E402
-    from publication_policy import load_policy  # noqa: E402
+    import provenance_attest_verify as verifier  # type: ignore[no-redef]  # noqa: E402
+    import provenance_ledger  # type: ignore[no-redef]  # noqa: E402
+    from publication_policy import load_policy  # type: ignore[no-redef]  # noqa: E402
 
 LEDGER_PATH = "assets/public_provenance_ledger.json"
 POLICY_PATH = "assets/public_source_profile.json"

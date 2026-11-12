@@ -735,6 +735,173 @@ static void test_watch_deferred_matches_synchronous(void) {
                 reports, resumed, s_sim_blocking);
 }
 
+/* ---- PNG publication and the screenshot key -------------------------------------------- */
+
+static uint32_t rd_be32(const unsigned char *p) {
+    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
+}
+
+/* PNG CRC-32, bit by bit: an implementation independent of the publisher's table. */
+static uint32_t ref_crc32(const unsigned char *p, size_t n) {
+    uint32_t c = 0xFFFFFFFFu;
+    for (size_t i = 0; i < n; i++) {
+        c ^= p[i];
+        for (int k = 0; k < 8; k++) c = (c >> 1) ^ (0xEDB88320u & (0u - (c & 1u)));
+    }
+    return c ^ 0xFFFFFFFFu;
+}
+
+/* Parse a published PNG: the signature; IHDR (w x h, 8-bit RGB, no interlace); one IDAT whose
+ * zlib stream is stored deflate blocks with a correct Adler-32; IEND last with nothing after it;
+ * every chunk CRC right. Each decoded row must start with filter 0 and equal rgb. */
+static int png_matches(const char *path, uint32_t w, uint32_t h, const unsigned char *rgb) {
+    static const unsigned char sig[8] = {0x89u, 'P', 'N', 'G', 0x0Du, 0x0Au, 0x1Au, 0x0Au};
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+    size_t raw_len = (size_t)h * (1u + 3u * (size_t)w);
+    size_t cap = raw_len + 4096u;
+    unsigned char *b = (unsigned char *)malloc(cap);
+    unsigned char *raw = (unsigned char *)malloc(raw_len);
+    size_t len = b ? fread(b, 1, cap, f) : 0u;
+    fclose(f);
+    int ok = b && raw && len < cap && len >= 8u + 25u + 12u + 12u && memcmp(b, sig, 8u) == 0;
+    size_t pos = 8u, got = 0u;
+    int seen_ihdr = 0, seen_idat = 0, seen_iend = 0;
+    while (ok && !seen_iend) {
+        if (pos + 12u > len) { ok = 0; break; }
+        uint32_t clen = rd_be32(b + pos);
+        if (clen > len - pos - 12u) { ok = 0; break; }
+        const unsigned char *type = b + pos + 4u;
+        const unsigned char *data = b + pos + 8u;
+        if (ref_crc32(type, (size_t)clen + 4u) != rd_be32(data + clen)) { ok = 0; break; }
+        if (memcmp(type, "IHDR", 4u) == 0) {
+            ok = !seen_ihdr && clen == 13u && rd_be32(data) == w && rd_be32(data + 4) == h &&
+                 data[8] == 8u && data[9] == 2u && data[10] == 0u && data[11] == 0u &&
+                 data[12] == 0u;
+            seen_ihdr = 1;
+        } else if (memcmp(type, "IDAT", 4u) == 0) {
+            ok = seen_ihdr && !seen_idat && clen >= 6u && data[0] == 0x78u &&
+                 (((uint32_t)data[0] << 8) | data[1]) % 31u == 0u;
+            size_t zp = 2u;
+            int final = 0;
+            while (ok && !final) {
+                if (zp + 5u > clen - 4u) { ok = 0; break; }
+                final = data[zp] & 1u;
+                ok = (data[zp] >> 1) == 0u;   /* BTYPE 00: a stored block */
+                uint32_t bl = data[zp + 1] | ((uint32_t)data[zp + 2] << 8);
+                uint32_t nl = data[zp + 3] | ((uint32_t)data[zp + 4] << 8);
+                ok = ok && (bl ^ 0xFFFFu) == nl && zp + 5u + bl <= clen - 4u &&
+                     got + bl <= raw_len;
+                if (ok) memcpy(raw + got, data + zp + 5u, bl);
+                got += bl;
+                zp += 5u + bl;
+            }
+            uint32_t a = 1u, bsum = 0u;
+            for (size_t i = 0; ok && i < got; i++) {
+                a = (a + raw[i]) % 65521u;
+                bsum = (bsum + a) % 65521u;
+            }
+            ok = ok && zp + 4u == clen && rd_be32(data + zp) == ((bsum << 16) | a);
+            seen_idat = 1;
+        } else if (memcmp(type, "IEND", 4u) == 0) {
+            ok = seen_idat && clen == 0u && pos + 12u == len;
+            seen_iend = 1;
+        } else {
+            ok = 0;
+        }
+        pos += (size_t)clen + 12u;
+    }
+    ok = ok && seen_iend && got == raw_len;
+    for (uint32_t y = 0; ok && y < h; y++) {
+        const unsigned char *row = raw + (size_t)y * (1u + 3u * (size_t)w);
+        ok = row[0] == 0u && memcmp(row + 1, rgb + (size_t)y * w * 3u, (size_t)w * 3u) == 0;
+    }
+    free(b);
+    free(raw);
+    return ok;
+}
+
+#define PNG_W2 1000u
+#define PNG_H2 70u
+static unsigned char s_rgbx[PNG_W2 * PNG_H2 * 4u];
+static unsigned char s_rgbx_want[PNG_W2 * PNG_H2 * 3u];
+
+/* A capture armed with a .png path publishes a PNG of exactly the frame, in both byte orders and
+ * across several stored blocks, an upper-case extension included; a .ppm path keeps P6. */
+static void test_png_capture(void) {
+    char path[600];
+    out_path(path, sizeof path, "shot.png");
+    remove(path);
+    CHECK(sr_capture_arm(path) == 1, "png: arm accepted");
+    CHECK(sr_capture_serve_host(s_frame, PSP_W, PSP_H, PSP_W * 4u, SR_CAP_ORDER_BGRX) == 1,
+          "png: host service publishes");
+    CHECK(sr_capture_result() == 1, "png: result is published");
+    CHECK(png_matches(path, PSP_W, PSP_H, s_frame_rgb), "png: chunks, CRCs, zlib and pixels exact");
+
+    for (size_t i = 0; i < (size_t)PNG_W2 * PNG_H2; i++) {
+        unsigned char r = (unsigned char)(i * 7u);
+        unsigned char g = (unsigned char)(i * 13u + 1u);
+        unsigned char b = (unsigned char)(i * 29u + 2u);
+        s_rgbx[i * 4u + 0u] = r;
+        s_rgbx[i * 4u + 1u] = g;
+        s_rgbx[i * 4u + 2u] = b;
+        s_rgbx[i * 4u + 3u] = 0xA5u;
+        s_rgbx_want[i * 3u + 0u] = r;
+        s_rgbx_want[i * 3u + 1u] = g;
+        s_rgbx_want[i * 3u + 2u] = b;
+    }
+    out_path(path, sizeof path, "SHOT_RGBX.PNG");
+    remove(path);
+    CHECK(sr_capture_arm(path) == 1, "png: second arm accepted");
+    CHECK(sr_capture_serve_host(s_rgbx, PNG_W2, PNG_H2, PNG_W2 * 4u, SR_CAP_ORDER_RGBX) == 1,
+          "png: RGBX service publishes");
+    CHECK(png_matches(path, PNG_W2, PNG_H2, s_rgbx_want), "png: multi-block RGBX image exact");
+
+    out_path(path, sizeof path, "still_ppm.ppm");
+    remove(path);
+    CHECK(sr_capture_arm(path) == 1, "png: ppm arm accepted");
+    CHECK(sr_capture_serve_host(s_frame, PSP_W, PSP_H, PSP_W * 4u, SR_CAP_ORDER_BGRX) == 1,
+          "png: ppm service publishes");
+    CHECK(ppm_matches(path, PSP_W, PSP_H, s_frame_rgb), "png: a .ppm path keeps the P6 format");
+}
+
+static void test_screenshot_name(void) {
+    char out[96];
+    CHECK(sr_screenshot_name("UCUS98701", 2026, 11, 9, 7, 5, 3, 1, out, sizeof out) == 1 &&
+              strcmp(out, "UCUS98701_20261109-070503.png") == 0,
+          "name: disc, date and time");
+    CHECK(sr_screenshot_name("UCUS98744", 2026, 1, 31, 23, 59, 59, 2, out, sizeof out) == 1 &&
+              strcmp(out, "UCUS98744_20260131-235959-2.png") == 0,
+          "name: second shot in the same second");
+    CHECK(sr_screenshot_name("../a b\\c:d", 2026, 11, 9, 0, 0, 0, 1, out, sizeof out) == 1 &&
+              strcmp(out, "abcd_20261109-000000.png") == 0,
+          "name: separators and other characters dropped from the disc ID");
+    CHECK(sr_screenshot_name(NULL, 2026, 11, 9, 0, 0, 0, 1, out, sizeof out) == 1 &&
+              strcmp(out, "game_20261109-000000.png") == 0,
+          "name: no disc ID reads game");
+    CHECK(sr_screenshot_name("/:.", 2026, 11, 9, 0, 0, 0, 1, out, sizeof out) == 1 &&
+              strcmp(out, "game_20261109-000000.png") == 0,
+          "name: a disc ID with no kept character reads game");
+    CHECK(sr_screenshot_name("UCUS98701", 2026, 13, 9, 0, 0, 0, 1, out, sizeof out) == 0 &&
+              out[0] == '\0',
+          "name: month out of range refused");
+    CHECK(sr_screenshot_name("UCUS98701", 2026, 11, 9, 0, 0, 0, 100, out, sizeof out) == 0,
+          "name: sequence above 99 refused");
+    CHECK(sr_screenshot_name("UCUS98701", 2026, 11, 9, 0, 0, 0, 1, out, 10u) == 0 &&
+              out[0] == '\0',
+          "name: a buffer too small is refused, not truncated");
+}
+
+static void test_screenshot_request(void) {
+    sr_screenshot_clear();
+    CHECK(!sr_screenshot_pending(), "request: none pending at start");
+    sr_screenshot_request();
+    sr_screenshot_request();
+    CHECK(sr_screenshot_pending(), "request: pending after the key");
+    sr_screenshot_clear();
+    CHECK(!sr_screenshot_pending(), "request: taken once cleared");
+}
+
 int main(int argc, char **argv) {
     snprintf(s_dir, sizeof s_dir, "%s", argc > 1 ? argv[1] : SR_SELFTEST_BUILD_ROOT "/fbcap_selftest");
     make_dir(s_dir);
@@ -755,6 +922,9 @@ int main(int argc, char **argv) {
     test_probe_result_pinned();
     test_deferred_probe();
     test_watch_deferred_matches_synchronous();
+    test_png_capture();
+    test_screenshot_name();
+    test_screenshot_request();
     if (s_failures) {
         fprintf(stderr, "fbcap_selftest: %d check(s) failed\n", s_failures);
         return 1;

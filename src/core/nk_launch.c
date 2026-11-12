@@ -1102,6 +1102,7 @@ NkResult nk_launch_prepare_session(
     session->config.master_volume = 100;
     snprintf(session->config.ace_spec, sizeof(session->config.ace_spec), "off");
     session->config.ace_report_path[0] = '\0';
+    snprintf(session->config.nickname, sizeof(session->config.nickname), "%s", NK_NICKNAME_DEFAULT);
 
     NkRuntimePackageInfo package_info;
     char package_error[1024] = "";
@@ -1500,6 +1501,7 @@ NkResult nk_launch_start(NkLaunchSession *session) {
     char env_ace_report[NK_MAX_PATH + 16];
     char env_ui_root[NK_MAX_PATH + 16];
     char env_launcher_display[96];
+    char env_nickname[sizeof(session->config.nickname) + 16];
     char sep = nk_platform_path_separator();
 
     if (session->config.fps_cap == -1) {
@@ -1550,6 +1552,10 @@ NkResult nk_launch_start(NkLaunchSession *session) {
         bool authentic = !session->enhancement_package_id[0] && strcmp(ace_line, "off") == 0;
         envp[env_count++] = !authentic && session->config.present_upscale == NK_PRESENT_UPSCALE_FSR1
                                 ? "SR_PRESENT_UPSCALE=fsr1" : "SR_PRESENT_UPSCALE=off";
+        /* The movie upscaler (SR_MOVIE_UPSCALE) has no setting: an authentic session runs it off
+           whatever the environment says, and an enhanced or Ace Mode session keeps the
+           inherited value. */
+        if (authentic) envp[env_count++] = "SR_MOVIE_UPSCALE=off";
     }
     envp[env_count++] = env_vsync;
     envp[env_count++] = env_fs;
@@ -1639,6 +1645,9 @@ NkResult nk_launch_start(NkLaunchSession *session) {
     snprintf(env_user_data_root, sizeof(env_user_data_root), "SR_USER_DATA_ROOT=%s",
              session->user_data_root);
     envp[env_count++] = env_user_data_root;
+    /* The console nickname (#2197), always exported so an inherited value cannot name it. */
+    snprintf(env_nickname, sizeof(env_nickname), "SR_NICKNAME=%s", session->config.nickname);
+    envp[env_count++] = env_nickname;
     /* What the pause overlay shows and draws with, beside the game's name (SR_GAME_TITLE
      * below): the disc ID and the player's folder for the UI fonts. Always exported, so an
      * empty value masks an inherited one instead of naming another game. */

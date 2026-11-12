@@ -40,6 +40,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 
 from nk_core.git_isolation import run_git  # noqa: E402
+import admit_paths  # noqa: E402
 import provenance_attest_verify as verifier  # noqa: E402
 import provenance_ledger  # noqa: E402
 import provenance_refresh  # noqa: E402
@@ -2149,6 +2150,162 @@ class MergePathTamperTests(GateCase):
         )
         self.assertFatal(self.run_verify(head), "TRUSTED_WORKFLOW_WEAKENED")
 
+    @staticmethod
+    def _gate(on_block: bytes) -> bytes:
+        context: bytes = RESERVED_CONTEXT.encode("utf-8")
+        return on_block + b"jobs:\n  attest:\n    name: " + context + b"\n"
+
+    def _weakened(self, raw: bytes) -> list[str]:
+        """The reasons the trigger check refuses ``raw`` as an edit of the base's trusted workflow."""
+        findings = verifier._ci_findings({TRUSTED_WORKFLOW: raw}, {TRUSTED_WORKFLOW: self.workflow_bytes()})
+        return [item.detail for item in findings if item.code == "TRUSTED_WORKFLOW_WEAKENED" and item.fatal]
+
+    WORKFLOW_RUN_GATE = (
+        b"on:\n"
+        b"  # CI is requested for every pull request event.\n"
+        b"  workflow_run:\n"
+        b"    workflows: [\"CI\"]\n"
+        b"    types: [requested]\n"
+        b"\n"
+        b"  workflow_dispatch:   # attest again after an admission\n"
+        b"    inputs:\n"
+        b"      head_sha:\n"
+        b"        type: string\n"
+    )
+
+    def test_a_gate_that_leaves_pull_request_target_for_workflow_run_is_not_weakened(self) -> None:
+        """GitHub blocks pull_request_target by default in public repositories from 2026-12-02; workflow_run
+        also runs the default branch's definition. Failing-before: the check wanted the literal
+        ``pull_request_target`` anywhere in the file, so the trigger could never be removed."""
+        raw = self._gate(self.WORKFLOW_RUN_GATE)
+        self.assertEqual(self._weakened(raw), [])
+        verdict = self.run_verify(self._commit_workflow(TRUSTED_WORKFLOW, raw))
+        self.assertPasses(verdict)
+        self.assertIn("TRUSTED_WORKFLOW_MODIFIED", self.codes(verdict, fatal_only=False))
+
+    def test_a_candidate_controlled_trigger_beside_the_trusted_one_is_refused(self) -> None:
+        """Failing-before: the literal token was still in the file, so a `pull_request` trigger added beside
+        it, which runs the candidate's own copy of the workflow, passed."""
+        for event in (b"pull_request", b"push", b"merge_group", b"schedule", b"issue_comment", b"workflow_call"):
+            with self.subTest(event=event):
+                raw = self._gate(b"on:\n  pull_request_target:\n  " + event + b":\n")
+                reasons = self._weakened(raw)
+                self.assertEqual(len(reasons), 1, reasons)
+                self.assertIn(f"runs on {event.decode()};", reasons[0])
+        head = self._commit_workflow(
+            TRUSTED_WORKFLOW, self._gate(b"on:\n  pull_request_target:\n  pull_request:\n"),
+        )
+        self.assertFatal(self.run_verify(head), "TRUSTED_WORKFLOW_WEAKENED")
+
+    def test_the_event_name_in_a_comment_is_not_a_trigger(self) -> None:
+        """Failing-before: any occurrence of the token satisfied the check, a comment included."""
+        raw = self._gate(b"# was pull_request_target\non:\n  pull_request:\n")
+        self.assertEqual(len(self._weakened(raw)), 2)   # a foreign trigger, and no trusted pull-request trigger
+
+    def test_a_gate_only_a_person_can_start_is_refused(self) -> None:
+        reasons = self._weakened(self._gate(b"on:\n  workflow_dispatch:\n"))
+        self.assertEqual(len(reasons), 1, reasons)
+        self.assertIn("no longer runs for pull requests", reasons[0])
+
+    def test_an_on_block_that_is_not_one_plain_event_per_line_is_refused(self) -> None:
+        """The check reads one form only and refuses the rest, rather than guess at GitHub's YAML reader."""
+        forms = {
+            "scalar": b"on: pull_request_target\n",
+            "flow sequence": b"on: [pull_request_target, pull_request]\n",
+            "flow mapping": b"on: {pull_request_target: {}, pull_request: {}}\n",
+            "block sequence": b"on:\n  - pull_request_target\n  - pull_request\n",
+            "quoted key": b"\"on\":\n  pull_request_target:\n",
+            "second on key": b"on:\n  pull_request_target:\non:\n  pull_request:\n",
+            "second key spelt as YAML 1.1 true": b"on:\n  pull_request_target:\ntrue:\n  pull_request:\n",
+            "quoted event": b"on:\n  pull_request_target:\n  \"pull_request\":\n",
+            "complex key event": b"on:\n  pull_request_target:\n  ? pull_request\n",
+            "merge key event": b"on:\n  pull_request_target:\n  <<: *more\n",
+            "event with an inline value": b"on:\n  pull_request_target: {types: [opened]}\n",
+            "repeated event": b"on:\n  pull_request_target:\n  pull_request_target:\n",
+            "events at another indent": b"on:\n    pull_request_target:\n",
+            "tab indent": b"on:\n\tpull_request_target:\n",
+            "top-level merge key": b"<<: *shared\non:\n  pull_request_target:\n",
+            # GitHub's reader would see only the escaped key: the plain `on:` is text inside the name.
+            "keys hidden in a multi-line scalar": (
+                b"name: \"x\non:\n  pull_request_target:\ny\"\n\"\\x6fn\":\n  pull_request:\n"),
+            "the same, its last line shaped like a key": (
+                b"name: \"x\non:\n  pull_request_target:\njobs: y\"\n\"\\x6fn\":\n  pull_request:\n"),
+            "an indented document with a decoy at column 0": (
+                b" name: x\n on:\n   pull_request:\non:\n  pull_request_target:\n"),
+            "second document": b"on:\n  pull_request_target:\n---\non:\n  pull_request:\n",
+            "unknown top-level key": b"on:\n  pull_request_target:\nyes:\n  pull_request:\n",
+            "byte-order mark": b"\xef\xbb\xbfon:\n  pull_request_target:\n",
+            "event with a comment glued to its colon": b"on:\n  pull_request_target:#x\n",
+            "event with a tab after its colon": b"on:\n  pull_request_target:\t\n",
+            "block scalar in the block": (
+                b"on:\n  workflow_dispatch:\n    inputs:\n      x:\n        description: |\n          text\n"),
+            "plain scalar continued on the next line": (
+                b"on:\n  workflow_dispatch:\n    inputs:\n      x:\n        description: two\n          lines\n"),
+            "sequence item in the block": b"on:\n  schedule:\n    - cron: \"1 2 * * 3\"\n",
+            "lone carriage return": b"on:\r  pull_request:\n  pull_request_target:\n",
+            "empty block": b"on:\n",
+            "no on key": b"name: gate\n",
+            "not UTF-8": b"on:\n  pull_request_target:\n# \xff\n",
+        }
+        for name, on_block in forms.items():
+            with self.subTest(form=name):
+                self.assertIsNone(verifier._workflow_events(self._gate(on_block)))
+                reasons = self._weakened(self._gate(on_block))
+                self.assertEqual(len(reasons), 1, reasons)
+                self.assertIn("cannot be checked", reasons[0])
+
+    def test_a_value_left_open_cannot_end_the_block_before_a_real_event(self) -> None:
+        """A quoted scalar or flow sequence that closes on a later line can put text shaped like a top-level
+        key in column 0. A reader that stops there misses the `pull_request:` a YAML reader finds after it
+        (PyYAML and ruamel.yaml both read all three events from each form). Failing-before: the reader
+        returned `['workflow_run', 'workflow_dispatch']` and no finding."""
+        head = b"on:\n  workflow_run:\n"
+        dispatch = b"  workflow_dispatch:\n    inputs:\n      head_sha:\n"
+        tail = b"        type: string\n  pull_request:\n"
+        plain = b"    workflows: [\"CI\"]\n    types: [requested]\n"
+        forms = {
+            "double-quoted scalar continued in column 0": (
+                head + plain + dispatch + b"        description: \"Full SHA\nenv: x\"\n" + tail),
+            "single-quoted scalar continued in column 0": (
+                head + plain + dispatch + b"        description: 'Full SHA\nenv: x'\n" + tail),
+            "flow sequence continued in column 0": (
+                head + b"    workflows: [\"CI\",\nenv: x]\n    types: [requested]\n" + dispatch + tail),
+            "quoted item of a flow sequence continued in column 0": (
+                head + b"    workflows: [\"CI\nenv: x\"]\n    types: [requested]\n" + dispatch + tail),
+            "U+2028 inside a quoted scalar": (
+                head + plain + dispatch + "        description: \"Full SHA\u2028env: x\"\n".encode() + tail),
+        }
+        for name, on_block in forms.items():
+            with self.subTest(form=name):
+                self.assertIsNone(verifier._workflow_events(self._gate(on_block)))
+                reasons = self._weakened(self._gate(on_block))
+                self.assertEqual(len(reasons), 1, reasons)
+                self.assertIn("cannot be checked", reasons[0])
+        # The same block with each value closed on its own line is read, and the foreign event is then seen.
+        closed = head + plain + dispatch + b"        description: \"Full SHA\"\n" + tail
+        self.assertEqual(verifier._workflow_events(self._gate(closed)),
+                         ["workflow_run", "workflow_dispatch", "pull_request"])
+
+    def test_a_line_break_yaml_and_python_disagree_on_is_refused(self) -> None:
+        # str.splitlines breaks at these and YAML does not, so a reader using it sees lines that are not there.
+        for separator in ("\u2028", "\u2029", "\x85", "\x0c", "\x0b", "\x1c", "\x1d", "\x1e"):
+            with self.subTest(separator=repr(separator)):
+                raw = self._gate(("on:\n  pull_request_target:\n# a comment" + separator + "env: x\n").encode())
+                self.assertIsNone(verifier._workflow_events(raw))
+        # Windows line endings are line endings in both.
+        self.assertEqual(verifier._workflow_events(self.workflow_bytes().replace(b"\n", b"\r\n")),
+                         ["pull_request_target"])
+
+    def test_the_plain_form_is_read_with_its_comments_and_settings(self) -> None:
+        self.assertEqual(verifier._workflow_events(self._gate(self.WORKFLOW_RUN_GATE)),
+                         ["workflow_run", "workflow_dispatch"])
+        self.assertEqual(verifier._workflow_events(self.workflow_bytes()), ["pull_request_target"])
+        # Only the `on:` block's own shape is held to the form: a tab in a step's script is not its business.
+        script = b"    steps:\n      - run: |\n          cat <<-EOF\n          \tindented\n          EOF\n"
+        self.assertEqual(verifier._workflow_events(self.workflow_bytes() + script), ["pull_request_target"])
+        with_keys = b"name: gate\nrun-name: x\n" + self.workflow_bytes() + b"permissions: {}\nconcurrency: g\n"
+        self.assertEqual(verifier._workflow_events(with_keys), ["pull_request_target"])
+
     def test_introducing_the_gate_workflow_is_not_reported_as_tampering(self) -> None:
         """A base without the workflow is the change that adds the gate."""
         # The predecessor has to be a real ancestor of the candidate, not a
@@ -2242,6 +2399,30 @@ class LiveRepositoryTests(unittest.TestCase):
         raw = (ROOT / TRUSTED_WORKFLOW).read_bytes()
         self.assertIn(b"pull_request_target", raw)
         self.assertNotIn(b"\non:\n  pull_request:\n", raw)
+
+    def test_the_trust_tools_and_workflows_hold_no_invisible_characters(self) -> None:
+        """A line or paragraph separator, a bidirectional control or a zero-width character does not show in a
+        diff and can change what a reader, an editor or a parser takes a line to be. They are written as
+        escapes. Failing-before: the reader's own list of separators held two of them as raw characters."""
+        invisible = {0x85, 0xFEFF, *range(0x200B, 0x2010), *range(0x2028, 0x202F), *range(0x2066, 0x206A)}
+        for name in ("tools/provenance_attest_verify.py", "tools/test_provenance_attest_verify.py",
+                     "tools/ci_trust_verdict.py", "tools/test_ci_trust_verdict.py",
+                     ".github/workflows/provenance-attestation.yml", ".github/workflows/ci-trust-verdict.yml"):
+            with self.subTest(file=name):
+                text = (ROOT / name).read_text(encoding="utf-8")
+                found = sorted({f"U+{ord(char):04X}" for char in text if ord(char) in invisible})
+                self.assertEqual(found, [])
+
+    def test_the_trusted_workflow_passes_the_trigger_check_it_is_held_to(self) -> None:
+        """Failing-before: the workflow had no workflow_run trigger, so it could not run once GitHub blocks
+        pull_request_target."""
+        events = verifier._workflow_events((ROOT / TRUSTED_WORKFLOW).read_bytes())
+        self.assertEqual(events, ["pull_request_target", "workflow_run", "workflow_dispatch"])
+        assert events is not None
+        self.assertLessEqual(set(events), verifier.TRUSTED_WORKFLOW_EVENTS)
+        self.assertNotIn("workflow_dispatch", verifier.TRUSTED_WORKFLOW_PULL_REQUEST_EVENTS)
+        for event in ("pull_request", "push", "merge_group"):
+            self.assertNotIn(event, verifier.TRUSTED_WORKFLOW_EVENTS)
 
     def test_the_trusted_workflow_never_checks_out_a_candidate_chosen_base(self) -> None:
         """A pull request picks its own base, so base.ref is attacker input.
@@ -3674,14 +3855,8 @@ class PolicyDeltaV3Tests(_PolicyDeltaFixture):
         self.assertIn("POLICY_DELTA_EMPTY", err.getvalue())
 
 
-class PolicyDeltaV4Tests(_PolicyDeltaFixture):
-    """V4 policy-delta authority: an admission binds each added path to its origin claim.
-
-    The claim is what the trusted record says (class, record id, record classification,
-    upstream, revision, licence). Bytes stay bound only for a byte-identical import. Each case
-    builds the document ``admit_paths.py`` writes and hands it to the verifier, as the workflow
-    does after looking it up under ``--policy-delta-key-v4``.
-    """
+class _PolicyDeltaV4Fixture(_PolicyDeltaFixture):
+    """Synthetic V4 admissions: the records, the vendored manifest and the authority document."""
 
     TOOL = "tools/new_tool.py"
     LIB = "third_party/lib/lib.h"
@@ -3737,6 +3912,16 @@ class PolicyDeltaV4Tests(_PolicyDeltaFixture):
         for path, raw in files.items():
             self.repo.write(path, raw)
         return self.repo.commit(message)
+
+
+class PolicyDeltaV4Tests(_PolicyDeltaV4Fixture):
+    """V4 policy-delta authority: an admission binds each added path to its origin claim.
+
+    The claim is what the trusted record says (class, record id, record classification,
+    upstream, revision, licence). Bytes stay bound only for a byte-identical import. Each case
+    builds the document ``admit_paths.py`` writes and hands it to the verifier, as the workflow
+    does after looking it up under ``--policy-delta-key-v4``.
+    """
 
     def _vendored_pr(self, branch: str = "pr-lib") -> str:
         return self._change(branch, self.base, {self.LIB: self.LIB_BYTES, self.MANIFEST: self._manifest()},
@@ -3930,6 +4115,412 @@ class PolicyDeltaV4Tests(_PolicyDeltaFixture):
         self.assertEqual(verdict["verdict"], "pass", verdict["findings"])
         verdict = self._attest(repinned, landed, None)
         self.assertEqual(verdict["verdict"], "pass", verdict["findings"])
+
+
+class LocalRefreshHostedRuleTests(_PolicyDeltaV4Fixture):
+    """``provenance_refresh`` follows the hosted rule for an admitted pull request on a moved base.
+
+    Two pull requests are admitted against the same base with their own V4 deltas, at adjacent
+    sort positions so Git conflicts on the profile. One lands; the other merges the new main
+    (``admit_paths.merge_profile`` for the profile and, when the pull request had refreshed its
+    controls, the ledger), then refreshes with main as its base. Before the hosted rule the
+    refresh refused any added path (``REFRESH_NEW_PATH_REQUIRES_ADMISSION``) and needed an
+    admission commit as its base.
+    """
+
+    def _coverage_gaps(self) -> set[str]:
+        """Included paths in the index with no ledger entry carrying evidence.
+
+        This is the rule behind the commit-stage publication audit's ``PROVENANCE_MISSING``
+        (``tools/publish_audit.py``), applied to this fixture's index; the audit as a whole needs
+        the full repository around it."""
+        def staged(path: str) -> bytes:
+            raw: bytes = run_git(["show", f":{path}"], cwd=self.repo.root, capture_output=True, check=True).stdout
+            return raw
+        indexed = set(run_git(["ls-files", "-z"], cwd=self.repo.root, capture_output=True, text=True,
+                              check=True).stdout.split("\0"))
+        policy = json.loads(staged(verifier.POLICY_PATH))
+        recorded = {entry["path"] for entry in json.loads(staged(verifier.LEDGER_PATH))["entries"]
+                    if isinstance(entry.get("evidence"), dict) and entry["evidence"]}
+        return {path for path in policy["include_paths"] if path in indexed} - recorded
+
+    def _authority_snapshot(self) -> dict[str, bytes]:
+        """Every file of the stand-in authority checkout: the trusted ledger and the V4 deltas."""
+        return {
+            path.relative_to(self.outside).as_posix(): path.read_bytes()
+            for path in sorted(self.outside.rglob("*"))
+            if path.is_file() and path.relative_to(self.outside).parts[0] in {
+                self.trusted_ledger.name, "policy-deltas-v4",
+            }
+        }
+
+    def _beside(self, authority: Path) -> Path:
+        """Store ``authority`` where the refresh looks it up: ``policy-deltas-v4/<key>.json`` beside the ledger."""
+        target = self.outside / "policy-deltas-v4" / f"{self._key(authority)}.json"
+        target.parent.mkdir(exist_ok=True)
+        target.write_bytes(authority.read_bytes())
+        return target
+
+    @staticmethod
+    def _key(authority: Path) -> str:
+        """The selector key ``_v4`` put at the end of the file name."""
+        return authority.stem.rsplit("-", 1)[1]
+
+    def _merge_main(self, branch: str, head: str, main: str, *, conflict: bool,
+                    ledger_conflict: bool = False) -> str:
+        """Merge ``main`` into the pull request as the documented conflict procedure does."""
+        self.repo.branch(branch, head)
+        merge = run_git(["merge", "--no-commit", "--no-ff", main], cwd=self.repo.root,
+                        capture_output=True, text=True, check=False)
+        self.assertIn(merge.returncode, (0, 1), merge.stderr)
+        unmerged = run_git(["diff", "--name-only", "--diff-filter=U"], cwd=self.repo.root,
+                           capture_output=True, text=True, check=True).stdout.split()
+        self.assertEqual(verifier.POLICY_PATH in unmerged, conflict, unmerged)
+        self.assertEqual(verifier.LEDGER_PATH in unmerged, ledger_conflict, unmerged)
+        if conflict or ledger_conflict:
+            admit_paths.merge_profile(self.repo.root)
+        self.assertEqual(run_git(["diff", "--name-only", "--diff-filter=U"], cwd=self.repo.root,
+                                 capture_output=True, text=True, check=True).stdout.split(), [])
+        hook, self.repo.before_commit = self.repo.before_commit, None
+        merged = self.repo.commit(f"merge main into {branch}")
+        self.repo.before_commit = hook
+        return merged
+
+    def _refresh(self, candidate: str, base: str, authority: Path | None = None,
+                 label: str = "refresh", **kwargs) -> verifier.EphemeralControls:
+        return cast(verifier.EphemeralControls, provenance_refresh.generate_controls(
+            repo=self.repo.root,
+            base_rev=base,
+            candidate_tree=verifier._rev_tree(self.repo.root, candidate),
+            trusted_ledger=self.trusted_ledger,
+            workdir=self.outside / label,
+            policy_delta_authority=authority,
+            **kwargs,
+        ))
+
+    def _commit_controls(self, controls: verifier.EphemeralControls) -> str:
+        hook, self.repo.before_commit = self.repo.before_commit, None
+        self.repo.write(verifier.LEDGER_PATH, controls.committed_ledger_bytes)
+        self.repo.write(verifier.EXPORT_PATH, controls.generated_export_bytes)
+        refreshed = self.repo.commit("provenance: refresh controls after merging main")
+        self.repo.before_commit = hook
+        return refreshed
+
+    def _refused(self, code: str, head: str, base: str, authority: Path | None,
+                 **kwargs) -> verifier.VerifyError:
+        before = self._authority_snapshot()
+        label = f"refused-{len(list(self.outside.glob('refused-*')))}"
+        with self.assertRaises(verifier.VerifyError) as caught:
+            self._refresh(head, base, authority, label=label, **kwargs)
+        self.assertEqual(caught.exception.code, code, str(caught.exception))
+        self.assertEqual(self._authority_snapshot(), before)
+        error: verifier.VerifyError = caught.exception
+        return error
+
+    def _second_on_moved_base(self, first_files: dict[str, bytes], second_files: dict[str, bytes], tag: str,
+                              *, bindings: dict[str, str] | None = None, conflict: bool = True,
+                              refreshed: bool = False) -> tuple[str, str, Path]:
+        """Admit both pull requests on the same base, land the first, merge main into the second.
+
+        With ``refreshed`` the second pull request first refreshes and commits its controls on
+        the old base, as step 4 of the admission does, so Git conflicts on the ledger too."""
+        head_1 = self._change(f"first-{tag}", self.base, first_files, include=list(first_files))
+        head_2 = self._change(f"second-{tag}", self.base, second_files, include=list(second_files))
+        v4_1 = self._v4(self.base, head_1, f"first-{tag}")
+        v4_2 = self._v4(self.base, head_2, f"second-{tag}", bindings)
+        if refreshed:
+            head_2 = self._commit_controls(self._refresh(head_2, self.base, v4_2, label=f"pr-refresh-{tag}"))
+        main_1 = self._land(head_1, self.base, v4_1)
+        return main_1, self._merge_main(f"second-{tag}-merged", head_2, main_1, conflict=conflict,
+                                        ledger_conflict=refreshed), v4_2
+
+    def _removal(self, branch: str, start: str, path: str, *, keep_in_profile: bool = False,
+                 files: dict[str, bytes] | None = None, include: tuple[str, ...] = ()) -> str:
+        """Delete ``path`` from the tree on a new branch, and from the profile unless ``keep_in_profile``."""
+        self.repo.branch(branch, start)
+        policy = self._profile(start)
+        policy["include_paths"] = sorted(
+            ({*policy["include_paths"]} | set(include)) - (set() if keep_in_profile else {path}))
+        for name, raw in (files or {}).items():
+            self.repo.write(name, raw)
+        self.repo.remove(path)
+        self.repo.write(verifier.POLICY_PATH, provenance_ledger.canonical_profile_bytes(policy))
+        return self.repo.commit(f"remove {path} on {branch}")
+
+    # -- must pass ------------------------------------------------------------
+
+    def test_two_admitted_prs_commute_through_a_refresh_on_a_moved_base(self) -> None:
+        results = {}
+        for first, second in ((self.NEW_A, self.NEW_B), (self.NEW_B, self.NEW_A)):
+            tag = first.rsplit("/", 1)[-1].split(".")[0]
+            with self.subTest(first=first):
+                # Each path carries the same bytes in both orders, so the final trees must agree.
+                main_1, merged, v4_2 = self._second_on_moved_base(
+                    {first: f"# {first}\n".encode()}, {second: f"# {second}\n".encode()}, tag, refreshed=True)
+                authority_before = self._authority_snapshot()
+                # The second pull request's own V4 delta, issued against the old base.
+                controls = self._refresh(merged, main_1, v4_2, label=f"explicit-{tag}")
+                assert controls.policy_delta is not None
+                self.assertEqual(controls.policy_delta["include_added"], [second])
+                # The same file found by its key beside the trusted ledger: no argument needed.
+                self._beside(v4_2)
+                looked_up = self._refresh(merged, main_1, label=f"lookup-{tag}")
+                self.assertEqual(looked_up.committed_ledger_bytes, controls.committed_ledger_bytes)
+                self.assertEqual(looked_up.generated_export_bytes, controls.generated_export_bytes)
+                # The merge commit already carries the controls the refresh regenerates, so the
+                # refresh commit has nothing to add.
+                self.assertEqual(self._blob(merged, verifier.LEDGER_PATH), controls.committed_ledger_bytes)
+                self.assertEqual(self._blob(merged, verifier.EXPORT_PATH), controls.generated_export_bytes)
+                refreshed = self._commit_controls(controls)
+                self.assertEqual(verifier._rev_tree(self.repo.root, refreshed),
+                                 verifier._rev_tree(self.repo.root, merged))
+                verdict = self._attest(refreshed, main_1, v4_2)
+                self.assertEqual(verdict["verdict"], "pass", verdict["findings"])
+                ledger_paths = {entry["path"] for entry in json.loads(controls.committed_ledger_bytes)["entries"]}
+                self.assertLessEqual({self.NEW_A, self.NEW_B}, ledger_paths)
+                self.assertEqual(self._authority_snapshot(), {
+                    **authority_before, f"policy-deltas-v4/{self._key(v4_2)}.json": v4_2.read_bytes(),
+                })
+                results[first] = (
+                    verifier._rev_tree(self.repo.root, refreshed),
+                    controls.committed_ledger_bytes,
+                    run_git(["show", f"{refreshed}:{verifier.POLICY_PATH}"], cwd=self.repo.root,
+                            capture_output=True, check=True).stdout,
+                )
+                for path in self.outside.glob("policy-deltas-v4/*.json"):
+                    path.unlink()
+        (tree_ab, ledger_ab, profile_ab), (tree_ba, ledger_ba, profile_ba) = results.values()
+        self.assertEqual((ledger_ab, profile_ab), (ledger_ba, profile_ba), "the landing order changes no byte")
+        self.assertEqual(tree_ab, tree_ba)
+
+    def _blob(self, rev: str, path: str) -> bytes:
+        raw: bytes = run_git(["show", f"{rev}:{path}"], cwd=self.repo.root, capture_output=True, check=True).stdout
+        return raw
+
+    def test_the_merge_commit_records_every_admitted_path(self) -> None:
+        """The merge commit of the documented procedure leaves no included path without a record.
+
+        Failing before: the procedure took main's ledger for the merge commit. It has no entry for
+        the pull request's admitted path, so the commit-stage publication audit refused the commit
+        with ``PROVENANCE_MISSING`` and only ``--no-verify`` could make it."""
+        head_1 = self._change("first-hook", self.base, {self.NEW_A: b"# a\n"}, include=[self.NEW_A])
+        head_2 = self._change("second-hook", self.base, {self.NEW_B: b"# b\n"}, include=[self.NEW_B])
+        v4_1, v4_2 = self._v4(self.base, head_1, "first-hook"), self._v4(self.base, head_2, "second-hook")
+        head_2 = self._commit_controls(self._refresh(head_2, self.base, v4_2, label="pr-refresh-hook"))
+        main_1 = self._land(head_1, self.base, v4_1)
+        # The old procedure's step 3, main's ledger in the merge commit, leaves the admitted path out.
+        self.repo.branch("second-hook-old", head_2)
+        run_git(["merge", "--no-commit", "--no-ff", main_1], cwd=self.repo.root, capture_output=True, check=False)
+        admit_paths.merge_profile(self.repo.root)
+        run_git(["checkout", main_1, "--", verifier.LEDGER_PATH, verifier.EXPORT_PATH], cwd=self.repo.root,
+                check=True, capture_output=True)
+        self.assertEqual(self._coverage_gaps(), {self.NEW_B})
+        run_git(["merge", "--abort"], cwd=self.repo.root, check=True, capture_output=True)
+        # The procedure as documented now.
+        merged = self._merge_main("second-hook-merged", head_2, main_1, conflict=True, ledger_conflict=True)
+        self.repo.branch("second-hook-check", merged)
+        self.assertEqual(self._coverage_gaps(), set())
+        self._beside(v4_2)
+        controls = self._refresh(merged, main_1, label="hook-refresh")
+        self.assertEqual(self._blob(merged, verifier.LEDGER_PATH), controls.committed_ledger_bytes)
+        self.assertEqual(self._attest(merged, main_1, v4_2)["verdict"], "pass")
+
+    def test_an_admitted_removal_refreshes_and_attests(self) -> None:
+        head_1 = self._change("add-then-remove", self.base, {self.NEW_A: b"# a\n"}, include=[self.NEW_A])
+        main_1 = self._land(head_1, self.base, self._v4(self.base, head_1, "add-then-remove"))
+        removal = self._removal("remove-a", main_1, self.NEW_A)
+        v4 = self._v4(main_1, removal, "remove-a")
+        self.assertEqual(json.loads(v4.read_bytes())["include_removed"], [self.NEW_A])
+        self._beside(v4)
+        controls = self._refresh(removal, main_1, label="removal")
+        assert controls.policy_delta is not None
+        self.assertEqual(controls.policy_delta["include_removed"], [self.NEW_A])
+        self.assertNotIn(self.NEW_A, {entry["path"] for entry in json.loads(controls.committed_ledger_bytes)["entries"]})
+        refreshed = self._commit_controls(controls)
+        verdict = self._attest(refreshed, main_1, v4)
+        self.assertEqual(verdict["verdict"], "pass", verdict["findings"])
+
+    def _exclusion_change(self, branch: str) -> str:
+        """A profile change that adds an exclusion and leaves the tree alone: no path added or removed."""
+        return self._change(branch, self.base, {}, mutate=lambda policy: policy.update(
+            exclude_paths=sorted({*policy["exclude_paths"], "docs/private-later.md"})))
+
+    def test_a_v1_profile_change_refreshes_and_attests(self) -> None:
+        """A V1/V2 record with its blessed policy reaches the replay, which must accept it.
+
+        The replay runs on every refresh, so it needs the blessed policy as the hosted check does;
+        without it the hosted verifier refuses the V1/V2 record and the refresh refuses a supported change."""
+        head = self._exclusion_change("v1-exclusion")
+        blessed = self.outside / "blessed-v1-exclusion.json"
+        blessed.write_bytes(provenance_ledger.canonical_profile_bytes(self._profile(head)))
+        v1 = self.outside / "v1-exclusion.json"
+        v1.write_bytes(_canonical({
+            "schema_version": 1, "kind": "policy-delta-authority",
+            "baseline_policy_sha256": _sha(provenance_ledger.canonical_profile_bytes(self._profile(self.base))),
+            "candidate_policy_sha256": _sha(blessed.read_bytes()),
+            "allowed_delta": {"include_added": [], "include_removed": [], "exclude_added": ["docs/private-later.md"],
+                              "exclude_removed": [], "rule_changes": []},
+        }))
+        controls = self._refresh(head, self.base, v1, label="v1-exclusion", trusted_candidate_policy=blessed)
+        assert controls.policy_delta is not None
+        self.assertEqual(controls.policy_delta["exclude_added"], ["docs/private-later.md"])
+        refreshed = self._commit_controls(controls)
+        verdict = self._attest(refreshed, self.base, v1, trusted_candidate_policy=blessed)
+        self.assertEqual(verdict["verdict"], "pass", verdict["findings"])
+
+    def test_a_v3_profile_change_with_no_tree_change_refreshes_and_attests(self) -> None:
+        head = self._exclusion_change("v3-exclusion")
+        v3 = self._v3(self.base, head, "v3-exclusion")
+        controls = self._refresh(head, self.base, v3, label="v3-exclusion")
+        refreshed = self._commit_controls(controls)
+        verdict = self._attest(refreshed, self.base, v3)
+        self.assertEqual(verdict["verdict"], "pass", verdict["findings"])
+
+    # -- must still refuse ------------------------------------------------------
+
+    def test_a_removal_the_delta_does_not_list_refuses(self) -> None:
+        """An admitted addition does not carry a removal from the tree alone."""
+        head_1 = self._change("riding-base", self.base, {self.NEW_A: b"# a\n"}, include=[self.NEW_A])
+        main_1 = self._land(head_1, self.base, self._v4(self.base, head_1, "riding-base"))
+        riding = self._removal("riding", main_1, self.NEW_A, keep_in_profile=True,
+                               files={self.NEW_B: b"# b\n"}, include=(self.NEW_B,))
+        v4 = self._v4(main_1, riding, "riding")
+        document = json.loads(v4.read_bytes())
+        self.assertEqual(([item["path"] for item in document["include_added"]], document["include_removed"]),
+                         ([self.NEW_B], []))
+        error = self._refused("REFRESH_NEW_PATH_REQUIRES_ADMISSION", riding, main_1, v4)
+        self.assertIn(self.NEW_A, str(error))
+        self.assertNotIn(self.NEW_B, str(error))
+
+    def test_a_profile_change_that_leaves_the_tree_alone_is_replayed(self) -> None:
+        """The hosted verdict is replayed even when no tree path is added or removed.
+
+        Failing before: the replay ran only for an added or removed tree path, so a refresh
+        accepted an admitted removal whose file was still in the tree, and the hosted check failed it."""
+        head_1 = self._change("kept-base", self.base, {self.NEW_A: b"# a\n"}, include=[self.NEW_A])
+        main_1 = self._land(head_1, self.base, self._v4(self.base, head_1, "kept-base"))
+        self.repo.branch("kept-in-tree", main_1)
+        policy = self._profile(main_1)
+        policy["include_paths"] = sorted(set(policy["include_paths"]) - {self.NEW_A})
+        self.repo.write(verifier.POLICY_PATH, provenance_ledger.canonical_profile_bytes(policy))
+        kept = self.repo.commit("drop docs/new-a.md from the profile only")
+        v4 = self._v4(main_1, kept, "kept-in-tree")
+        self.assertEqual(json.loads(v4.read_bytes())["include_removed"], [self.NEW_A])
+        error = self._refused("REFRESH_HOSTED_VERDICT_FAIL", kept, main_1, v4)
+        self.assertIn(self.NEW_A, str(error))
+
+    def test_a_v1_record_never_approves_a_removal(self) -> None:
+        """A V1/V2 record binds no claim, so the refresh does not take it for an admitted removal."""
+        head_1 = self._change("v1-base", self.base, {self.NEW_A: b"# a\n"}, include=[self.NEW_A])
+        main_1 = self._land(head_1, self.base, self._v4(self.base, head_1, "v1-base"))
+        removal = self._removal("v1-remove", main_1, self.NEW_A)
+        blessed = self.outside / "blessed-v1-remove.json"
+        blessed.write_bytes(provenance_ledger.canonical_profile_bytes(self._profile(removal)))
+        v1 = self.outside / "v1-remove.json"
+        v1.write_bytes(_canonical({
+            "schema_version": 1, "kind": "policy-delta-authority",
+            "baseline_policy_sha256": _sha(provenance_ledger.canonical_profile_bytes(self._profile(main_1))),
+            "candidate_policy_sha256": _sha(blessed.read_bytes()),
+            "allowed_delta": {"include_added": [], "include_removed": [self.NEW_A], "exclude_added": [],
+                              "exclude_removed": [], "rule_changes": []},
+        }))
+        error = self._refused("REFRESH_NEW_PATH_REQUIRES_ADMISSION", removal, main_1, v1,
+                              trusted_candidate_policy=blessed)
+        self.assertIn(self.NEW_A, str(error))
+
+    def test_a_looked_up_delta_inside_the_repository_refuses(self) -> None:
+        """``policy-deltas-v4`` beside an outside ledger, linked into the candidate repository."""
+        head = self._change("planted", self.base, {self.NEW_A: b"# a\n"}, include=[self.NEW_A])
+        v4 = self._v4(self.base, head, "planted")
+        planted = self.repo.root / ".git" / "planted-deltas"
+        planted.mkdir()
+        (planted / f"{self._key(v4)}.json").write_bytes(v4.read_bytes())
+        link = self.outside / "policy-deltas-v4"
+        if sys.platform == "win32":
+            import _winapi
+            _winapi.CreateJunction(str(planted), str(link))
+        else:
+            link.symlink_to(planted, target_is_directory=True)
+        with self.assertRaises(verifier.VerifyError) as caught:
+            provenance_refresh.policy_delta_v4_beside(
+                repo=self.repo.root.resolve(), base_commit=verifier._rev_commit(self.repo.root, self.base),
+                candidate_tree=verifier._rev_tree(self.repo.root, head), trusted_ledger=self.trusted_ledger,
+                workdir=self.outside / "planted-lookup",
+            )
+        self.assertEqual(caught.exception.code, "TRUSTED_INPUT_CANDIDATE_CONTROLLED")
+        self._refused("TRUSTED_INPUT_CANDIDATE_CONTROLLED", head, self.base, None)
+
+    def test_a_malformed_candidate_profile_is_a_named_refusal(self) -> None:
+        """The lookup validates the profile as the generator does; it never ends in a traceback."""
+        for label, value in (("nested-list", [[self.NEW_A]]), ("number", 7), ("string", self.NEW_A)):
+            with self.subTest(include_paths=label):
+                self.repo.branch(f"malformed-{label}", self.base)
+                policy = self._profile(self.base)
+                policy["include_paths"] = value
+                hook, self.repo.before_commit = self.repo.before_commit, None
+                self.repo.write(verifier.POLICY_PATH, json.dumps(policy, indent=2) + "\n")
+                head = self.repo.commit(f"malformed include_paths: {label}")
+                self.repo.before_commit = hook
+                self._refused("CANDIDATE_POLICY_INVALID", head, self.base, None)
+
+    def test_a_refresh_without_an_authority_refuses(self) -> None:
+        main_1, merged, _v4_2 = self._second_on_moved_base({self.NEW_A: b"# a\n"}, {self.NEW_B: b"# b\n"}, "none")
+        self._refused("POLICY_DELTA_AUTHORITY_REQUIRED", merged, main_1, None)
+
+    def test_a_v4_delta_for_another_path_set_refuses(self) -> None:
+        head_1 = self._change("first-other", self.base, {self.NEW_A: b"# a\n"}, include=[self.NEW_A])
+        head_2 = self._change("second-other", self.base, {self.NEW_B: b"# b\n"}, include=[self.NEW_B])
+        head_3 = self._change("third-other", self.base, {self.TOOL: b"x = 1\n"}, include=[self.TOOL])
+        v4_1 = self._v4(self.base, head_1, "first-other")
+        self._v4(self.base, head_2, "second-other")
+        v4_3 = self._v4(self.base, head_3, "third-other")
+        main_1 = self._land(head_1, self.base, v4_1)
+        merged = self._merge_main("second-other-merged", head_2, main_1, conflict=True)
+        key = verifier.policy_delta_key_v4(repo=self.repo.root, base_rev=main_1, candidate_rev=merged)
+        misnamed = self.outside / "policy-deltas-v4" / f"{key}.json"
+        misnamed.parent.mkdir(exist_ok=True)
+        for code, other in (("POLICY_DELTA_PATH_EXISTS", v4_1), ("POLICY_DELTA_UNAUTHORIZED", v4_3)):
+            with self.subTest(other=other.name):
+                # Passed explicitly, another admission's delta approves only its own path ...
+                self._refused(code, merged, main_1, other)
+                # ... and stored under this change's name it is still not the document derived for it.
+                misnamed.write_bytes(other.read_bytes())
+                self._refused(code, merged, main_1, None)
+
+    def test_one_extra_unadmitted_path_refuses(self) -> None:
+        main_1, merged, v4_2 = self._second_on_moved_base({self.NEW_A: b"# a\n"}, {self.NEW_B: b"# b\n"}, "extra")
+        self._beside(v4_2)
+        # In the profile too: the change has another name, so the admitted delta is not selected,
+        # and passed anyway it does not approve the extra path.
+        widened = self._change("extra-in-profile", merged, {self.TOOL: b"x = 1\n"}, include=[self.TOOL])
+        self._refused("POLICY_DELTA_AUTHORITY_REQUIRED", widened, main_1, None)
+        self._refused("POLICY_DELTA_UNAUTHORIZED", widened, main_1, v4_2)
+        # In the tree alone: the profile change is the admitted one, the extra file is not in it.
+        self.repo.branch("extra-in-tree", merged)
+        hook, self.repo.before_commit = self.repo.before_commit, None
+        self.repo.write("docs/unadmitted.md", b"# not admitted\n")
+        extra = self.repo.commit("an extra file without an admission")
+        self.repo.before_commit = hook
+        self._refused("REFRESH_NEW_PATH_REQUIRES_ADMISSION", extra, main_1, None)
+
+    def test_a_changed_byte_bound_import_refuses(self) -> None:
+        main_1, merged, v4_lib = self._second_on_moved_base(
+            {self.NEW_A: b"# a\n"}, {self.LIB: self.LIB_BYTES, self.MANIFEST: self._manifest()}, "lib",
+            bindings={self.LIB: "bytes"}, conflict=False,
+        )
+        self._beside(v4_lib)
+        self._refresh(merged, main_1, label="lib-unchanged")
+        edited = self._edit({self.LIB: self.LIB_BYTES.rstrip(b"\n")}, "a formatter drops the final newline")
+        self._refused("POLICY_DELTA_ADDED_BYTES_MISMATCH", edited, main_1, None)
+
+    def test_a_hosted_finding_on_the_refreshed_tree_refuses(self) -> None:
+        """The generator accepts a claim-bound import, but its manifest row says byte-identical."""
+        drifted = self.LIB_BYTES + b"/* local fix */\n"
+        main_1, merged, v4_lib = self._second_on_moved_base(
+            {self.NEW_A: b"# a\n"}, {self.LIB: drifted, self.MANIFEST: self._manifest()}, "drift", conflict=False,
+        )
+        self._beside(v4_lib)
+        self._refused("REFRESH_HOSTED_VERDICT_FAIL", merged, main_1, None)
 
 
 class VendoredManifestTests(unittest.TestCase):

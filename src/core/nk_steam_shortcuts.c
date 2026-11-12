@@ -76,6 +76,20 @@ typedef struct {
     size_t size;
     const char *want_exe;     /* the executable to look for, or NULL */
     bool exe_found;
+    /* The shortcut being added, or NULL: its own entry (the same executable and launch
+     * options) and an entry this one replaces (the same launch options and executable name,
+     * another folder). */
+    const NkSteamShortcut *want;
+    bool same_found;
+    bool moved_found;
+    size_t moved_exe_at, moved_exe_end;   /* the stored exe value, its NUL included */
+    size_t moved_dir_at, moved_dir_end;   /* the stored StartDir value, its NUL included */
+    /* The entry being walked (level 2). */
+    const char *cur_exe;
+    size_t cur_exe_at, cur_exe_end;
+    const char *cur_options;
+    bool cur_has_dir;
+    size_t cur_dir_at, cur_dir_end;
     bool have_shortcuts;
     size_t shortcuts_end;     /* offset of the 0x08 that closes "shortcuts" */
     size_t root_end;          /* offset of the 0x08 that closes the root */
@@ -119,6 +133,53 @@ static bool exe_matches(const char *stored, const char *want) {
     return true;
 }
 
+/* The file name of a path, after its last separator (quotes at either end ignored). */
+static void exe_base(const char *path, const char **base, size_t *length) {
+    size_t n = strlen(path);
+    if (n >= 2u && path[0] == '"' && path[n - 1u] == '"') {
+        path++;
+        n -= 2u;
+    }
+    size_t start = n;
+    while (start > 0u && path[start - 1u] != '/' && path[start - 1u] != '\\') start--;
+    *base = path + start;
+    *length = n - start;
+}
+
+static bool same_exe_name(const char *stored, const char *want) {
+    const char *a, *b;
+    size_t la, lb;
+    exe_base(stored, &a, &la);
+    exe_base(want, &b, &lb);
+    if (la != lb || la == 0u) return false;
+    for (size_t i = 0; i < la; i++) {
+        if (tolower((unsigned char)a[i]) != tolower((unsigned char)b[i])) return false;
+    }
+    return true;
+}
+
+/* After one entry was walked: is it this shortcut, or the one it replaces? */
+static void judge_entry(Scan *s) {
+    if (!s->want || !s->cur_exe) return;
+    const char *options = s->cur_options ? s->cur_options : "";
+    const char *want_options = s->want->launch_options ? s->want->launch_options : "";
+    if (strcmp(options, want_options) != 0) return;
+    if (exe_matches(s->cur_exe, s->want->exe)) {
+        s->same_found = true;
+        return;
+    }
+    /* Only an entry with Nakagawa's own launch options names one game; a bare executable
+     * could be anything the user added. The first such entry is the one updated. */
+    if (want_options[0] && s->cur_has_dir && !s->moved_found &&
+        same_exe_name(s->cur_exe, s->want->exe)) {
+        s->moved_found = true;
+        s->moved_exe_at = s->cur_exe_at;
+        s->moved_exe_end = s->cur_exe_end;
+        s->moved_dir_at = s->cur_dir_at;
+        s->moved_dir_end = s->cur_dir_end;
+    }
+}
+
 static bool all_digits(const char *text) {
     if (!*text) return false;
     for (; *text; text++) {
@@ -152,8 +213,12 @@ static bool scan_map(Scan *s, size_t *pos, int depth, int level) {
                         uint32_t index = (uint32_t)strtoul(key, NULL, 10) + 1u;
                         if (index > s->next_index) s->next_index = index;
                     }
+                    s->cur_exe = NULL;
+                    s->cur_options = NULL;
+                    s->cur_has_dir = false;
                 }
                 if (!scan_map(s, pos, depth + 1, child_level)) return false;
+                if (child_level == 2) judge_entry(s);
                 if (child_level == 1) {
                     s->have_shortcuts = true;
                     s->shortcuts_end = *pos - 1u;
@@ -161,11 +226,23 @@ static bool scan_map(Scan *s, size_t *pos, int depth, int level) {
                 break;
             }
             case VDF_STRING: {
+                size_t value_at = *pos;
                 const char *value = read_cstr(s, pos);
                 if (!value) return false;
                 if (level == 2 && s->want_exe && ieq(key, "exe") &&
                     exe_matches(value, s->want_exe)) {
                     s->exe_found = true;
+                }
+                if (level == 2 && ieq(key, "exe")) {
+                    s->cur_exe = value;
+                    s->cur_exe_at = value_at;
+                    s->cur_exe_end = *pos;
+                } else if (level == 2 && ieq(key, "StartDir")) {
+                    s->cur_has_dir = true;
+                    s->cur_dir_at = value_at;
+                    s->cur_dir_end = *pos;
+                } else if (level == 2 && ieq(key, "LaunchOptions")) {
+                    s->cur_options = value;
                 }
                 break;
             }
@@ -188,11 +265,13 @@ static bool scan_map(Scan *s, size_t *pos, int depth, int level) {
 }
 
 /* Parses a whole file: the root map, then nothing. */
-static NkSteamStatus scan_file(Scan *s, const uint8_t *data, size_t size, const char *want_exe) {
+static NkSteamStatus scan_file(Scan *s, const uint8_t *data, size_t size, const char *want_exe,
+                               const NkSteamShortcut *want) {
     memset(s, 0, sizeof(*s));
     s->data = data;
     s->size = size;
     s->want_exe = want_exe;
+    s->want = want;
     if (size > NK_STEAM_VDF_MAX_BYTES) return NK_STEAM_ERR_TOO_LARGE;
     size_t pos = 0;
     if (!scan_map(s, &pos, 0, 0) || pos != size) return NK_STEAM_ERR_CORRUPT;
@@ -204,7 +283,7 @@ NkSteamStatus nk_steam_vdf_has_exe(const uint8_t *in, size_t in_len, const char 
     *found = false;
     if (!in_len) return NK_STEAM_OK;
     Scan scan;
-    NkSteamStatus status = scan_file(&scan, in, in_len, exe);
+    NkSteamStatus status = scan_file(&scan, in, in_len, exe, NULL);
     if (status != NK_STEAM_OK) return status;
     *found = scan.exe_found;
     return NK_STEAM_OK;
@@ -306,10 +385,33 @@ static void put_entry(Buf *b, uint32_t index, const NkSteamShortcut *sc) {
     buf_byte(b, VDF_END);
 }
 
+/* The bytes of `in` with the entry at `at` rewritten to point at this shortcut's executable
+ * and folder; every other byte, the entry's app ID, name, play time and tags included, stays. */
+static void put_moved(Buf *b, const uint8_t *in, size_t in_len, const Scan *scan,
+                      const NkSteamShortcut *sc) {
+    bool exe_first = scan->moved_exe_at < scan->moved_dir_at;
+    size_t first_at = exe_first ? scan->moved_exe_at : scan->moved_dir_at;
+    size_t first_end = exe_first ? scan->moved_exe_end : scan->moved_dir_end;
+    size_t second_at = exe_first ? scan->moved_dir_at : scan->moved_exe_at;
+    size_t second_end = exe_first ? scan->moved_dir_end : scan->moved_exe_end;
+    const char *first = exe_first ? sc->exe : sc->start_dir;
+    const char *second = exe_first ? sc->start_dir : sc->exe;
+    buf_put(b, in, first_at);
+    buf_put(b, "\"", 1u);
+    buf_put(b, first, strlen(first));
+    buf_put(b, "\"\0", 2u);
+    buf_put(b, in + first_end, second_at - first_end);
+    buf_put(b, "\"", 1u);
+    buf_put(b, second, strlen(second));
+    buf_put(b, "\"\0", 2u);
+    buf_put(b, in + second_end, in_len - second_end);
+}
+
 NkSteamStatus nk_steam_vdf_add(const uint8_t *in, size_t in_len, const NkSteamShortcut *shortcut,
-                               uint8_t **out, size_t *out_len) {
+                               uint8_t **out, size_t *out_len, NkSteamChange *change) {
     if (out) *out = NULL;
     if (out_len) *out_len = 0;
+    if (change) *change = NK_STEAM_CHANGE_NONE;
     if (!shortcut || !out || !out_len || (!in && in_len)) return NK_STEAM_ERR_ARGUMENT;
     if (!field_ok(shortcut->app_name, false) || !field_ok(shortcut->exe, false) ||
         shortcut->exe[0] == '"' || !field_ok(shortcut->start_dir, false) || shortcut->start_dir[0] == '"' ||
@@ -319,12 +421,16 @@ NkSteamStatus nk_steam_vdf_add(const uint8_t *in, size_t in_len, const NkSteamSh
     Scan scan;
     Buf b = {0};
     uint32_t index = 0;
+    NkSteamChange made = NK_STEAM_CHANGE_ADDED;
     if (in_len) {
-        NkSteamStatus status = scan_file(&scan, in, in_len, shortcut->exe);
+        NkSteamStatus status = scan_file(&scan, in, in_len, NULL, shortcut);
         if (status != NK_STEAM_OK) return status;
-        if (scan.exe_found) return NK_STEAM_ERR_EXISTS;
+        if (scan.same_found) return NK_STEAM_ERR_EXISTS;
         index = scan.next_index;
-        if (scan.have_shortcuts) {
+        if (scan.moved_found) {
+            put_moved(&b, in, in_len, &scan, shortcut);
+            made = NK_STEAM_CHANGE_UPDATED;
+        } else if (scan.have_shortcuts) {
             buf_put(&b, in, scan.shortcuts_end);
             put_entry(&b, index, shortcut);
             buf_put(&b, in + scan.shortcuts_end, in_len - scan.shortcuts_end);
@@ -347,14 +453,15 @@ NkSteamStatus nk_steam_vdf_add(const uint8_t *in, size_t in_len, const NkSteamSh
         free(b.data);
         return NK_STEAM_ERR_TOO_LARGE;
     }
-    /* The result must parse and now list the executable, or it is not returned. */
-    NkSteamStatus verify = scan_file(&scan, b.data, b.size, shortcut->exe);
-    if (verify != NK_STEAM_OK || !scan.exe_found || !scan.have_shortcuts) {
+    /* The result must parse and now hold this shortcut, or it is not returned. */
+    NkSteamStatus verify = scan_file(&scan, b.data, b.size, NULL, shortcut);
+    if (verify != NK_STEAM_OK || !scan.same_found || !scan.have_shortcuts) {
         free(b.data);
         return NK_STEAM_ERR_WRITE;
     }
     *out = b.data;
     *out_len = b.size;
+    if (change) *change = made;
     return NK_STEAM_OK;
 }
 
@@ -446,8 +553,9 @@ static bool parent_dir(const char *path, char *dir, size_t cap) {
 
 NkSteamStatus nk_steam_add_to_file(const char *vdf_path, const NkSteamShortcut *shortcut,
                                    bool steam_running, const char *stamp,
-                                   char *backup_path, size_t backup_cap) {
+                                   char *backup_path, size_t backup_cap, NkSteamChange *change) {
     if (backup_path && backup_cap) backup_path[0] = '\0';
+    if (change) *change = NK_STEAM_CHANGE_NONE;
     if (!vdf_path || !vdf_path[0] || !shortcut || !stamp_ok(stamp)) return NK_STEAM_ERR_ARGUMENT;
     if (steam_running) return NK_STEAM_ERR_STEAM_RUNNING;
 
@@ -459,7 +567,8 @@ NkSteamStatus nk_steam_add_to_file(const char *vdf_path, const NkSteamShortcut *
 
     uint8_t *next = NULL;
     size_t next_size = 0;
-    status = nk_steam_vdf_add(current, current_size, shortcut, &next, &next_size);
+    NkSteamChange made = NK_STEAM_CHANGE_NONE;
+    status = nk_steam_vdf_add(current, current_size, shortcut, &next, &next_size, &made);
     if (status != NK_STEAM_OK) {
         free(current);
         return status;
@@ -478,17 +587,17 @@ NkSteamStatus nk_steam_add_to_file(const char *vdf_path, const NkSteamShortcut *
         /* A dated backup beside the file, never over an earlier one; if it cannot be made and
          * read back, nothing is written. */
         status = NK_STEAM_ERR_BACKUP;
-        bool made = false;
-        for (unsigned attempt = 0; attempt < 100u && !made; attempt++) {
+        bool backup_ready = false;
+        for (unsigned attempt = 0; attempt < 100u && !backup_ready; attempt++) {
             int n = attempt == 0u
                 ? snprintf(backup, sizeof(backup), "%s.nakagawa-backup-%s", vdf_path, stamp)
                 : snprintf(backup, sizeof(backup), "%s.nakagawa-backup-%s-%u", vdf_path, stamp,
                            attempt + 1u);
             if (n <= 0 || (size_t)n >= sizeof(backup)) goto done;
             if (!nk_platform_path_missing(backup)) continue;
-            made = true;
+            backup_ready = true;
         }
-        if (!made || !write_file_synced(backup, current, current_size) ||
+        if (!backup_ready || !write_file_synced(backup, current, current_size) ||
             !file_equals(backup, current, current_size)) {
             (void)nk_remove_utf8(backup);
             backup[0] = '\0';
@@ -507,6 +616,7 @@ NkSteamStatus nk_steam_add_to_file(const char *vdf_path, const NkSteamShortcut *
     }
     if (!file_equals(vdf_path, next, next_size)) goto done;
     status = NK_STEAM_OK;
+    if (change) *change = made;
 done:
     free(current);
     free(next);
@@ -569,6 +679,140 @@ NkSteamStatus nk_steam_list_accounts(const char *root, NkSteamAccount *accounts,
     qsort(accounts, list.count, sizeof(accounts[0]), account_compare);
     *count = list.count;
     return list.count ? NK_STEAM_OK : NK_STEAM_ERR_NOT_FOUND;
+}
+
+/* ---- Account names: <Steam>/config/loginusers.vdf, a text KeyValues file ---- */
+
+#define LOGIN_USERS_MAX_BYTES (1024u * 1024u)
+#define LOGIN_TOKEN_MAX 256u
+#define STEAM_ID64_BASE 76561197960265728ull
+
+typedef struct {
+    const char *p;
+    const char *end;
+} Text;
+
+enum { TOKEN_ERROR = -1, TOKEN_END = 0, TOKEN_STRING = 1, TOKEN_OPEN = '{', TOKEN_CLOSE = '}' };
+
+/* The next token: a quoted string (\\, \", \n and \t escapes; a longer one is cut at the
+ * buffer), an opening or closing brace, or the end. A // comment runs to the end of its line. */
+static int text_token(Text *t, char *buffer, size_t cap) {
+    for (;;) {
+        while (t->p < t->end && (unsigned char)*t->p <= ' ') t->p++;
+        if (t->end - t->p >= 2 && t->p[0] == '/' && t->p[1] == '/') {
+            while (t->p < t->end && *t->p != '\n') t->p++;
+            continue;
+        }
+        break;
+    }
+    if (t->p >= t->end) return TOKEN_END;
+    char c = *t->p++;
+    if (c == '{') return TOKEN_OPEN;
+    if (c == '}') return TOKEN_CLOSE;
+    if (c != '"') return TOKEN_ERROR;
+    size_t n = 0;
+    while (t->p < t->end) {
+        char ch = *t->p++;
+        if (ch == '"') {
+            buffer[n] = '\0';
+            return TOKEN_STRING;
+        }
+        if (ch == '\\' && t->p < t->end) {
+            char escaped = *t->p++;
+            ch = escaped == 'n' ? '\n' : escaped == 't' ? '\t' : escaped;
+        }
+        if (n + 1u < cap) buffer[n++] = ch;
+    }
+    return TOKEN_ERROR;
+}
+
+/* Copies a display name: control characters dropped, cut at a whole UTF-8 character. */
+static bool copy_name(const char *value, char *name, size_t cap) {
+    size_t n = 0;
+    for (const unsigned char *c = (const unsigned char *)value; *c; c++) {
+        if (*c < 0x20u || *c == 0x7Fu) continue;
+        if (n + 1u >= cap) break;
+        name[n++] = (char)*c;
+    }
+    /* Do not end inside a multi-byte character. */
+    size_t keep = n;
+    while (keep > 0u && ((unsigned char)name[keep - 1u] & 0xC0u) == 0x80u) keep--;
+    if (keep > 0u && ((unsigned char)name[keep - 1u] & 0x80u) != 0u) {
+        unsigned char lead = (unsigned char)name[keep - 1u];
+        size_t want = lead >= 0xF0u ? 4u : lead >= 0xE0u ? 3u : lead >= 0xC0u ? 2u : 1u;
+        if (n - (keep - 1u) == want) keep = n;
+        else keep--;
+    } else {
+        keep = n;
+    }
+    name[keep] = '\0';
+    return keep > 0u;
+}
+
+bool nk_steam_login_users_name(const char *text, size_t length, const char *account_id,
+                               char *name, size_t cap) {
+    if (name && cap) name[0] = '\0';
+    if (!text || !account_id || !all_digits(account_id) || strlen(account_id) > 10u || !name ||
+        cap == 0u || length > LOGIN_USERS_MAX_BYTES) {
+        return false;
+    }
+    unsigned long long id = strtoull(account_id, NULL, 10);
+    if (id == 0ull || id > 0xFFFFFFFFull) return false;
+    char want[24];
+    snprintf(want, sizeof(want), "%llu", id + STEAM_ID64_BASE);
+    Text t = {text, text + length};
+    char key[LOGIN_TOKEN_MAX];
+    char value[LOGIN_TOKEN_MAX];
+    int depth = 0;
+    bool in_users = false;
+    bool in_want = false;
+    bool found = false;
+    for (;;) {
+        int token = text_token(&t, key, sizeof(key));
+        if (token == TOKEN_END) return depth == 0 && found;
+        if (token == TOKEN_CLOSE) {
+            if (depth == 0) return false;
+            if (depth == 2) in_want = false;
+            if (depth == 1) in_users = false;
+            depth--;
+            continue;
+        }
+        if (token != TOKEN_STRING) return false;
+        token = text_token(&t, value, sizeof(value));
+        if (token == TOKEN_OPEN) {
+            if (++depth > VDF_MAX_DEPTH) return false;
+            if (depth == 1) in_users = ieq(key, "users");
+            if (depth == 2) in_want = in_users && strcmp(key, want) == 0;
+            continue;
+        }
+        if (token != TOKEN_STRING) return false;
+        if (depth == 2 && in_want && !found && ieq(key, "PersonaName")) {
+            found = copy_name(value, name, cap);
+        }
+    }
+}
+
+NkSteamStatus nk_steam_account_name(const char *root, const char *account_id, char *name,
+                                    size_t cap) {
+    if (name && cap) name[0] = '\0';
+    if (!root || !root[0] || !account_id || !name || cap == 0u) return NK_STEAM_ERR_ARGUMENT;
+    char path[NK_MAX_PATH];
+    if (snprintf(path, sizeof(path), "%s%cconfig%cloginusers.vdf", root,
+                 nk_platform_path_separator(), nk_platform_path_separator()) >= (int)sizeof(path)) {
+        return NK_STEAM_ERR_NOT_FOUND;
+    }
+    uint8_t *data = NULL;
+    size_t size = 0;
+    bool exists = false;
+    NkSteamStatus status = read_file(path, &data, &size, &exists);
+    if (status != NK_STEAM_OK || !exists) {
+        free(data);
+        return NK_STEAM_ERR_NOT_FOUND;
+    }
+    bool named = size <= LOGIN_USERS_MAX_BYTES &&
+                 nk_steam_login_users_name((const char *)data, size, account_id, name, cap);
+    free(data);
+    return named ? NK_STEAM_OK : NK_STEAM_ERR_NOT_FOUND;
 }
 
 /* Fail closed (the file is only written when Steam is surely closed): a Win32 error other than "no
@@ -646,8 +890,10 @@ bool nk_steam_client_running(void) { return false; }
 
 NkSteamStatus nk_steam_add_for_account(const char *root, const char *account_id,
                                        const NkSteamShortcut *shortcut, NkSteamRunningFn running,
-                                       const char *stamp, char *backup_path, size_t backup_cap) {
+                                       const char *stamp, char *backup_path, size_t backup_cap,
+                                       NkSteamChange *change) {
     if (backup_path && backup_cap) backup_path[0] = '\0';
+    if (change) *change = NK_STEAM_CHANGE_NONE;
     if (!root || !root[0] || !account_id || !all_digits(account_id) ||
         strcmp(account_id, "0") == 0 || strlen(account_id) >= sizeof(((NkSteamAccount *)0)->id)) {
         return NK_STEAM_ERR_ARGUMENT;
@@ -665,7 +911,7 @@ NkSteamStatus nk_steam_add_for_account(const char *root, const char *account_id,
         if (strcmp(accounts[i].id, account_id) != 0) continue;
         bool is_running = (running ? running : nk_steam_client_running)();
         return nk_steam_add_to_file(accounts[i].shortcuts_path, shortcut, is_running, stamp,
-                                    backup_path, backup_cap);
+                                    backup_path, backup_cap, change);
     }
     return NK_STEAM_ERR_NOT_FOUND;
 }

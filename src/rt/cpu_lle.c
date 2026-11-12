@@ -219,10 +219,17 @@ static uint32_t sr_cpu_live_cause_ip(const CpuState *s) {
     return ip;
 }
 
+SrGuestLaneHold sr_guest_lane_hold;
+
 static int sr_cpu_interrupt_eligible(const CpuState *s) {
     uint32_t status;
 
     if (!s || !s_lle_enabled || !s_intc.configured) {
+        return 0;
+    }
+    /* The COSIM guest lane defers delivery (#2201): a handler run inside it would run under
+     * the lane's import refusal and be rolled back with it. The source stays pending. */
+    if (sr_guest_lane_hold.held) {
         return 0;
     }
     status = s->cop0[SR_CP0_STATUS];

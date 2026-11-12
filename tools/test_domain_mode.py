@@ -167,12 +167,18 @@ class DomainSourcesTests(unittest.TestCase):
     def test_cosim_guest_lane_refuses_nested_imports(self):
         # An import reached from the guest lane would apply a host effect the
         # HLE lane applies again; the seam refuses it before any mode lookup.
+        # The refusal is recomp.c's, shared with the late-import bridge (#2201).
         text = DOMAIN_C.read_text(encoding="utf-8")
         seam = text.split("\nint sr_import_call(", 1)[1]
-        refuse = seam.index("if (s_cosim_guest_active)")
+        refuse = seam.index("if (sr_guest_lane_refuse_import(s, nid)) {")
         lookup = seam.index("domain = sr_domain_lookup_nid(nid);")
         self.assertLess(refuse, lookup)
         self.assertNotIn("sr_syscall", seam[refuse:lookup])
+        recomp = (DOMAIN_C.parent / "recomp.c").read_text(encoding="utf-8")
+        late = recomp.split("if (late == SR_HLE_LATE_BUILTIN) {", 1)[1]
+        self.assertLess(late.index("if (sr_guest_lane_refuse_import(s, target))"),
+                        late.index("sr_hle_call(s, target);"),
+                        "the late-import bridge refuses the guest lane before any handler runs")
 
     def test_header_declares_the_cosim_result_api(self):
         text = DOMAIN_H.read_text(encoding="utf-8")

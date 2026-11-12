@@ -1153,7 +1153,9 @@ static Fsr1Pass *s_test_fsr;
 static VkImage s_test_fsr_out;
 static int s_test_fsr_calls, s_test_fsr_args[4];
 
-static void *test_fsr_pass(void *cmd, void *src, int w, int h, int out_w, int out_h) {
+static void *test_fsr_pass(void *cmd, void *src, int w, int h, int out_w, int out_h, int cpu_frame,
+                           int *anime4k) {
+    (void)cpu_frame; (void)anime4k;
     s_test_fsr_calls++;
     s_test_fsr_args[0] = w;
     s_test_fsr_args[1] = h;
@@ -1170,7 +1172,9 @@ static void *test_fsr_pass(void *cmd, void *src, int w, int h, int out_w, int ou
 static Fsr1Pass *s_test_rec_fsr;
 static int s_test_rec_calls, s_test_rec_args[4];
 
-static void *test_rec_fsr_pass(void *cmd, void *src, int w, int h, int out_w, int out_h) {
+static void *test_rec_fsr_pass(void *cmd, void *src, int w, int h, int out_w, int out_h,
+                               int cpu_frame, int *anime4k) {
+    (void)cpu_frame; (void)anime4k;
     s_test_rec_calls++;
     s_test_rec_args[0] = w;
     s_test_rec_args[1] = h;
@@ -1193,8 +1197,9 @@ static int test_rec_read(uint8_t *out, size_t bytes, int *filter) {
 }
 
 /* The recording's upscaler when gui.c could not make its pass: asked, it returns nothing. */
-static void *test_rec_null_pass(void *cmd, void *src, int w, int h, int out_w, int out_h) {
-    (void)cmd; (void)src; (void)w; (void)h; (void)out_w; (void)out_h;
+static void *test_rec_null_pass(void *cmd, void *src, int w, int h, int out_w, int out_h,
+                                int cpu_frame, int *anime4k) {
+    (void)cmd; (void)src; (void)w; (void)h; (void)out_w; (void)out_h; (void)cpu_frame; (void)anime4k;
     s_test_rec_calls++;
     return NULL;
 }
@@ -1250,6 +1255,255 @@ static size_t test_rec_diff(const uint8_t *pic, int pw, int x0, int y0, const ui
     return bad;
 }
 #endif
+
+/* ---- present pacing: the guest clock never waits for the display ------------------------
+ * A fake display (the acquire seam) holds every swapchain image: an acquire that may wait blocks
+ * for PACE_TEST_BLOCK_MS, as a full FIFO queue does, and one that may not returns VK_NOT_READY.
+ * Presents paced to the guest's 59.94 Hz VBLANK must keep that cadence: none may wait, each is
+ * reported DISPLAY_BUSY and counted, and presents resume once the display frees. With no-wait
+ * off (deterministic-clock and turbo runs) the present still waits and shows the frame. */
+#define PACE_TEST_BLOCK_MS 50u
+#define PACE_TEST_FRAMES   12
+static int s_pace_test_busy;     /* the fake display holds every image */
+static int s_pace_test_waits;    /* acquires that were allowed to wait while it did */
+static int s_pace_test_acquires; /* every acquire the seam saw */
+static int s_pace_test_slot_pending;   /* the fake frame slot's submission has not finished */
+
+static VkResult pace_test_fence_status(VkDevice dev, VkFence fence) {
+    return s_pace_test_slot_pending ? VK_NOT_READY : vkGetFenceStatus(dev, fence);
+}
+
+static VkResult pace_test_acquire(VkDevice dev, VkSwapchainKHR swap, uint64_t timeout,
+                                  VkSemaphore sem, VkFence fence, uint32_t *idx) {
+    s_pace_test_acquires++;
+    if (s_pace_test_busy) {
+        if (timeout == 0) return VK_NOT_READY;
+        s_pace_test_waits++;
+        SDL_Delay(PACE_TEST_BLOCK_MS);
+    }
+    return vkAcquireNextImageKHR(dev, swap, timeout, sem, fence, idx);
+}
+
+/* A show pass that only counts its calls. */
+static int s_pace_test_pass_calls;
+static void *pace_test_show_pass(void *cmd, void *src, int *w, int *h) {
+    (void)cmd; (void)src; (void)w; (void)h;
+    s_pace_test_pass_calls++;
+    return NULL;
+}
+
+static int sdl3vk_present_pacing_selftest(void) {
+    static uint32_t px[PSP_W * PSP_H];
+    const uint64_t period = 16683333u;   /* one guest VBLANK, 1001/60000 s */
+    int ok = 1;
+    sdl3vk_set_present_nowait(1);
+    s_acquire_fn = pace_test_acquire;
+
+    /* The real display may be busy too, so the warm-up only requires no failure. */
+    for (int k = 0; k < PRESENT_FRAMES; k++) {
+        int r = sdl3vk_present_rgba(px);
+        if (r != 1 && r != SDL3VK_PRESENT_DISPLAY_BUSY) {
+            fprintf(stderr, "pacing: warm-up present %d returned %d\n", k, r); ok = 0;
+        }
+    }
+
+    s_pace_test_busy = 1;
+    s_pace_test_waits = 0;
+    const uint64_t busy_before = sdl3vk_present_busy_count();
+    int busy = 0, late = 0;
+    uint64_t worst = 0;
+    const uint64_t t0 = SDL_GetTicksNS();
+    for (int k = 0; k < PACE_TEST_FRAMES; k++) {
+        const uint64_t due = t0 + (uint64_t)k * period;
+        uint64_t now = SDL_GetTicksNS();
+        if (now < due) SDL_DelayPrecise(due - now);
+        if (sdl3vk_present_rgba(px) == SDL3VK_PRESENT_DISPLAY_BUSY) busy++;
+        now = SDL_GetTicksNS();
+        /* The guest's next VBLANK is due one period after this one; past it, it is late. */
+        if (now > due + period) late++;
+        if (now > due && now - due > worst) worst = now - due;
+    }
+    const uint64_t counted = sdl3vk_present_busy_count() - busy_before;
+    if (s_pace_test_waits != 0 || late != 0 || busy != PACE_TEST_FRAMES ||
+        counted != (uint64_t)PACE_TEST_FRAMES) {
+        fprintf(stderr, "pacing: with the display holding every image, %d of %d present(s) waited "
+                        "for it, %d guest VBLANK(s) were late (worst %.1f ms after its slot), %d "
+                        "present(s) reported DISPLAY_BUSY and %llu were counted (want 0, 0, %d, "
+                        "%d)\n", s_pace_test_waits, PACE_TEST_FRAMES, late, (double)worst / 1e6,
+                busy, (unsigned long long)counted, PACE_TEST_FRAMES, PACE_TEST_FRAMES);
+        ok = 0;
+    }
+
+    /* Smooth motion's held present is a game-frame present too: with the display holding every
+     * image it returns DISPLAY_BUSY before its show pass runs. Nothing of the held frame was
+     * shown, so its caller still owes that frame (gui_ace_vblank). */
+    {
+        Sdl3VkShowPass saved = s_show_pass;
+        s_pace_test_pass_calls = 0;
+        sdl3vk_set_show_pass(pace_test_show_pass);
+        const int held = sdl3vk_present_held();
+        sdl3vk_set_show_pass(saved);
+        if (held != SDL3VK_PRESENT_DISPLAY_BUSY || s_pace_test_pass_calls != 0) {
+            fprintf(stderr, "pacing: with the display holding every image, the held present returned %d "
+                            "and ran its show pass %d time(s) (want DISPLAY_BUSY and 0)\n", held,
+                    s_pace_test_pass_calls);
+            ok = 0;
+        }
+    }
+
+    /* The display frees: presents are shown again (the real display may still need a VBLANK). */
+    s_pace_test_busy = 0;
+    int shown = 0;
+    for (int k = 0; k < 30 && !shown; k++) {
+        shown = sdl3vk_present_rgba(px) == 1;
+        if (!shown) SDL_DelayPrecise(period);
+    }
+    if (!shown) { fprintf(stderr, "pacing: presents did not resume once the display freed\n"); ok = 0; }
+
+    /* The frame slot about to be reused is still pending (a FIFO display that has not released
+     * its acquire semaphore, or a GPU frames behind): the present returns DISPLAY_BUSY before
+     * any acquire, keeps the slot, and the next present after it signals is shown. Every slot is
+     * submitted first, so the poll reaches the fence. */
+    int submitted = 0;
+    for (int k = 0; k < 60 && submitted < PRESENT_FRAMES; k++) {
+        if (sdl3vk_present_rgba(px) == 1) submitted++;
+        else SDL_DelayPrecise(period);
+    }
+    s_pace_test_slot_pending = 1;
+    s_fence_status_fn = pace_test_fence_status;
+    const int acquires_before = s_pace_test_acquires;
+    const int cursor_before = s_frame_cursor;
+    const uint64_t slot_busy_before = s_present_busy_slot;
+    const int pending_result = sdl3vk_present_rgba(px);
+    const int slot_acquires = s_pace_test_acquires - acquires_before;
+    const int slot_cursor = s_frame_cursor;
+    const uint64_t slot_counted = s_present_busy_slot - slot_busy_before;
+    s_pace_test_slot_pending = 0;
+    int after_slot = 0;
+    for (int k = 0; k < 30 && after_slot != 1; k++) {
+        after_slot = sdl3vk_present_rgba(px);
+        if (after_slot != 1) SDL_DelayPrecise(period);
+    }
+    s_fence_status_fn = NULL;
+    if (submitted < PRESENT_FRAMES || pending_result != SDL3VK_PRESENT_DISPLAY_BUSY ||
+        slot_acquires != 0 || slot_cursor != cursor_before || slot_counted != 1u ||
+        after_slot != 1) {
+        fprintf(stderr, "pacing: with the frame slot pending (%d of %d slots submitted first), the "
+                        "present returned %d after %d acquire(s), moved the slot cursor %d -> %d, "
+                        "counted %llu slot drop(s), and the next present returned %d (want "
+                        "DISPLAY_BUSY, 0 acquires, the cursor kept, 1 counted, then 1)\n",
+                submitted, PRESENT_FRAMES, pending_result, slot_acquires, cursor_before,
+                slot_cursor, (unsigned long long)slot_counted, after_slot);
+        ok = 0;
+    }
+
+    /* No-wait off: the present waits for the display and shows the frame. */
+    sdl3vk_set_present_nowait(0);
+    s_pace_test_busy = 1;
+    s_pace_test_waits = 0;
+    int r = sdl3vk_present_rgba(px);
+    if (r != 1 || s_pace_test_waits != 1) {
+        fprintf(stderr, "pacing: with no-wait off the present returned %d after %d wait(s) "
+                        "(want 1 after 1)\n", r, s_pace_test_waits);
+        ok = 0;
+    }
+    s_pace_test_busy = 0;
+    s_acquire_fn = NULL;
+    if (ok) printf("gpu capture selftest: present pacing OK (%d presents, none waited for a busy "
+                   "display; worst %.1f ms after its VBLANK)\n", PACE_TEST_FRAMES,
+                   (double)worst / 1e6);
+    return ok;
+}
+
+/* ---- what a show pass learns of its present, and the finished-submission count ---------------
+ * Each show pass is told once how its present ended and which submission carries its commands.
+ * The count of finished submissions moves only when the presenter has seen a fence signalled: it
+ * never passes a pending submission. A present that fails after its submission (an out-of-date
+ * swapchain) keeps its slot and is told it failed; the swapchain rebuild waits for every frame,
+ * so the count then reaches that submission. */
+static int s_done_test_calls, s_done_test_result;
+static uint64_t s_done_test_submission;
+static void done_test_show_done(int result, uint64_t submission) {
+    s_done_test_calls++;
+    s_done_test_result = result;
+    s_done_test_submission = submission;
+}
+
+static int sdl3vk_present_completed_selftest(void) {
+    static uint32_t px[PSP_W * PSP_H];
+    int ok = 1;
+    const Sdl3VkShowPass saved_pass = s_show_pass;
+    const Sdl3VkShowDone saved_done = s_show_done;
+    sdl3vk_set_present_nowait(0);
+    sdl3vk_set_show_pass(pace_test_show_pass);
+    sdl3vk_set_show_done(done_test_show_done);
+    s_done_test_calls = 0;
+
+    const uint64_t first = s_present_submitted + 1u;
+    const int shown = sdl3vk_present_rgba(px);
+    const int shown_calls = s_done_test_calls, shown_result = s_done_test_result;
+    const uint64_t shown_submission = s_done_test_submission;
+    const uint64_t completed_after_shown = sdl3vk_present_completed();   /* its fence not yet seen */
+    const int cursor = s_frame_cursor;
+    sdl3vk_present_fault_inject(VK_ERROR_OUT_OF_DATE_KHR);
+    const int failed = sdl3vk_present_rgba(px);
+    const int failed_calls = s_done_test_calls, failed_result = s_done_test_result;
+    const uint64_t failed_submission = s_done_test_submission;
+    const int failed_cursor = s_frame_cursor;
+    const uint64_t completed_after_fail = sdl3vk_present_completed();
+    const int again = sdl3vk_present_rgba(px);
+    const uint64_t completed_again = sdl3vk_present_completed();
+    if (shown != 1 || shown_calls != 1 || shown_result != 1 || shown_submission != first ||
+        completed_after_shown >= first || failed != -1 || failed_calls != 2 || failed_result != -1 || failed_submission != first + 1u ||
+        failed_cursor != cursor || completed_after_fail != first + 1u || again != 1 ||
+        s_done_test_calls != 3 || s_done_test_submission != first + 2u || completed_again < first + 1u ||
+        completed_again > s_present_submitted) {
+        fprintf(stderr, "show done: shown %d (%d call(s), %d, submission %llu of %llu, %llu finished); out "
+                        "of date %d (%d, submission %llu, cursor %d -> %d, %llu finished); next %d (%d "
+                        "call(s), submission %llu, %llu finished) (want 1, 1 call, 1, the first, an older "
+                        "one finished; -1, -1, the next, "
+                        "the cursor kept, finished by the rebuild; 1, 3 calls, the one after, the "
+                        "failed one finished)\n",
+                shown, shown_calls, shown_result, (unsigned long long)shown_submission,
+                (unsigned long long)first, (unsigned long long)completed_after_shown, failed, failed_result, (unsigned long long)failed_submission,
+                cursor, failed_cursor, (unsigned long long)completed_after_fail, again,
+                s_done_test_calls, (unsigned long long)s_done_test_submission,
+                (unsigned long long)completed_again);
+        ok = 0;
+    }
+
+    /* A slot still pending under no-wait: the present returns DISPLAY_BUSY before its show pass, so
+     * no pass is told anything, and the count does not move. Every slot is submitted first, so the
+     * poll reaches the fence. */
+    for (int k = 0; k < PRESENT_FRAMES; k++) (void)sdl3vk_present_rgba(px);
+    sdl3vk_set_present_nowait(1);
+    s_pace_test_slot_pending = 1;
+    s_fence_status_fn = pace_test_fence_status;
+    const int calls_before = s_done_test_calls;
+    const uint64_t completed_before = sdl3vk_present_completed();
+    const int pending = sdl3vk_present_rgba(px);
+    const uint64_t completed_pending = sdl3vk_present_completed();
+    s_pace_test_slot_pending = 0;
+    s_fence_status_fn = NULL;
+    sdl3vk_set_present_nowait(0);
+    /* Every fence waited: the count is the newest submission. */
+    const int all = wait_all_present_frames();
+    if (pending != SDL3VK_PRESENT_DISPLAY_BUSY || s_done_test_calls != calls_before ||
+        completed_pending != completed_before || !all ||
+        sdl3vk_present_completed() != s_present_submitted) {
+        fprintf(stderr, "show done: with the slot pending the present returned %d, told %d pass(es) and "
+                        "moved the count %llu -> %llu; after every wait the count is %llu of %llu (want "
+                        "DISPLAY_BUSY, none, unmoved, every submission)\n",
+                pending, s_done_test_calls - calls_before, (unsigned long long)completed_before,
+                (unsigned long long)completed_pending, (unsigned long long)sdl3vk_present_completed(),
+                (unsigned long long)s_present_submitted);
+        ok = 0;
+    }
+    sdl3vk_set_show_pass(saved_pass);
+    sdl3vk_set_show_done(saved_done);
+    if (ok) printf("gpu capture selftest: show pass outcomes and the finished-submission count OK\n");
+    return ok;
+}
 
 static int sdl3vk_capture_selftest_body(void) {
     int ok = 1;
@@ -1489,6 +1743,74 @@ static int sdl3vk_capture_selftest_body(void) {
         ok = 0;
     }
     remove("selftest_cpu.ppm");
+
+    /* ---- the F3 HUD composes over the picture (#314, LIVE_FRAME_OVERLAY) ---------------
+     * The performance HUD, and in developer mode the profile HUD, are copied into a rectangle
+     * of the window's image after the frame blit: a rectangle inside the window that leaves
+     * the rest of the picture showing, at the 16-pixel inset, and the HUD surface the software
+     * renderer drew for it holds the HUD. The frame the game drew, the source the window is
+     * blitted from, is untouched: a capture of the same present is the same bytes as
+     * with the HUD off. Off again, nothing is copied. */
+    {
+        static const int modes[] = { SDL3VK_HUD_PERF, SDL3VK_HUD_PROFILE };
+        static const int want_w[] = { HUD_W, PROFILE_HUD_W };
+        static const int want_h[] = { HUD_H, PROFILE_HUD_H };
+        const int saved_developer = s_developer;
+        const int saved_mode = s_hud_enabled;
+        s_developer = 1;
+        for (int m = 0; m < 2; m++) {
+            const unsigned before = s_hud_last.copies;
+            const char *what = m ? "profile HUD" : "performance HUD";
+            hud_set_mode(modes[m]);
+            if (!sr_capture_arm("selftest_hud.ppm") || sdl3vk_present_rgba(px) != 1 ||
+                sr_capture_result() != 1) {
+                fprintf(stderr, "hud: %s present or capture failed\n", what); ok = 0;
+                continue;
+            }
+            if (!cap_test_verify_ppm("selftest_hud.ppm", PSP_W, PSP_H)) {
+                fprintf(stderr, "hud: with the %s on, the captured frame is not the frame the "
+                                "game drew\n", what);
+                ok = 0;
+            }
+            remove("selftest_hud.ppm");
+            if (s_hud_last.copies != before + 1u || s_hud_last.w != want_w[m] ||
+                s_hud_last.h != want_h[m]) {
+                fprintf(stderr, "hud: %s copies %u (want %u), %dx%d (want %dx%d)\n", what,
+                        s_hud_last.copies - before, 1u, s_hud_last.w, s_hud_last.h, want_w[m],
+                        want_h[m]);
+                ok = 0;
+                continue;
+            }
+            if (s_hud_last.x != 16 || s_hud_last.y != 16 ||
+                s_hud_last.x + s_hud_last.w > s_hud_last.swap_w ||
+                s_hud_last.y + s_hud_last.h > s_hud_last.swap_h ||
+                (s_hud_last.w >= s_hud_last.swap_w && s_hud_last.h >= s_hud_last.swap_h)) {
+                fprintf(stderr, "hud: %s rectangle (%d,%d %dx%d) in a %dx%d image does not sit "
+                                "over part of the picture\n", what, s_hud_last.x, s_hud_last.y,
+                        s_hud_last.w, s_hud_last.h, s_hud_last.swap_w, s_hud_last.swap_h);
+                ok = 0;
+            }
+            /* What was copied is the HUD: its background and border, as drawn. */
+            Uint8 r = 0, g = 0, b = 0, a = 0, br = 0, bg = 0, bb = 0, ba = 0;
+            if (!s_hud_surf || !SDL_ReadSurfacePixel(s_hud_surf, 2, s_hud_last.h - 2, &r, &g, &b, &a) ||
+                !SDL_ReadSurfacePixel(s_hud_surf, 0, 0, &br, &bg, &bb, &ba) ||
+                r != 20 || g != 24 || b != 32 || br != 70 || bg != 90 || bb != 130) {
+                fprintf(stderr, "hud: %s surface shows %u,%u,%u inside and %u,%u,%u on the "
+                                "border\n", what, r, g, b, br, bg, bb);
+                ok = 0;
+            }
+        }
+        hud_set_mode(SDL3VK_HUD_OFF);
+        {
+            const unsigned before = s_hud_last.copies;
+            if (sdl3vk_present_rgba(px) != 1 || s_hud_last.copies != before) {
+                fprintf(stderr, "hud: with the HUD off a present still copied a HUD\n");
+                ok = 0;
+            }
+        }
+        s_developer = saved_developer;
+        hud_set_mode(saved_mode);
+    }
 
     /* ---- presentation upscaler (#1273, SR_PRESENT_UPSCALE=fsr1) ------------------------
      * The real FSR 1 pass on the present path, under the validation layer. A 480x272 frame in the
@@ -2306,6 +2628,9 @@ static int sdl3vk_capture_selftest_body(void) {
         }
         s_quit_requested = 0;
     }
+
+    if (!sdl3vk_present_pacing_selftest()) ok = 0;
+    if (!sdl3vk_present_completed_selftest()) ok = 0;
 
     int errors = sdl3vk_validation_error_count();
     if (errors != 0) {

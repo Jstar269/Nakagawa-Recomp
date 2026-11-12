@@ -138,6 +138,29 @@ static void copy_executable(const char *source_path, const char *destination_pat
     assert(fclose(source) == 0);
 }
 
+/* SR_NICKNAME as the runtime reads it, UTF-8 (sr_utf8_env_alloc): through the wide environment
+ * on Windows, where the narrow getenv() yields active-code-page bytes. NULL when it is unset. */
+static const char *probe_env_utf8(const char *name, char *out, size_t cap) {
+#if defined(_WIN32) || defined(_WIN64)
+    WCHAR wide_name[64];
+    WCHAR wide_value[1024];
+    if (MultiByteToWideChar(CP_UTF8, 0, name, -1, wide_name, 64) <= 0) return NULL;
+    SetLastError(0); /* an empty value also answers 0, without ERROR_ENVVAR_NOT_FOUND */
+    DWORD n = GetEnvironmentVariableW(wide_name, wide_value, 1024);
+    if (n == 0 && GetLastError() == ERROR_ENVVAR_NOT_FOUND) return NULL;
+    if (n >= 1024) return NULL;
+    wide_value[n] = 0;
+    if (WideCharToMultiByte(CP_UTF8, 0, wide_value, -1, out, (int)cap, NULL, NULL) <= 0)
+        return NULL;
+    return out;
+#else
+    const char *value = getenv(name);
+    if (!value) return NULL;
+    snprintf(out, cap, "%s", value);
+    return out;
+#endif
+}
+
 static int write_launch_environment_probe(void) {
     const char *report_path = getenv("NK_LAUNCH_TEST_REPORT_FILE");
     if (!report_path || !*report_path) return 2;
@@ -151,6 +174,7 @@ static int write_launch_environment_probe(void) {
     const char *scale = getenv("SR_RESOLUTION_SCALE");
     const char *present_scaling = getenv("SR_PRESENT_SCALING");
     const char *present_upscale = getenv("SR_PRESENT_UPSCALE");
+    const char *movie_upscale = getenv("SR_MOVIE_UPSCALE");
     const char *fullscreen = getenv("SR_FULLSCREEN");
     const char *launcher_display = getenv("SR_LAUNCHER_DISPLAY_BOUNDS");
     const char *volume = getenv("SR_MASTER_VOLUME");
@@ -168,6 +192,8 @@ static int write_launch_environment_probe(void) {
     const char *ace_report = getenv("SR_ACE_REPORT");
     const char *host_time_zone = getenv("SR_HOST_TIME_ZONE");
     const char *code_capture = getenv("SR_CODE_CAPTURE");
+    char nickname_utf8[512];
+    const char *nickname = probe_env_utf8("SR_NICKNAME", nickname_utf8, sizeof(nickname_utf8));
     int ok = fprintf(f,
                      "PSP_ISO=%s\n"
                      "NK_LAUNCH_TEST_UNRELATED=%s\n"
@@ -176,6 +202,7 @@ static int write_launch_environment_probe(void) {
                      "SR_RESOLUTION_SCALE=%s\n"
                      "SR_PRESENT_SCALING=%s\n"
                      "SR_PRESENT_UPSCALE=%s\n"
+                     "SR_MOVIE_UPSCALE=%s\n"
                      "SR_FULLSCREEN=%s\n"
                      "SR_LAUNCHER_DISPLAY_BOUNDS=%s\n"
                      "SR_MASTER_VOLUME=%s\n"
@@ -192,7 +219,8 @@ static int write_launch_environment_probe(void) {
                      "SR_ACE=%s\n"
                      "SR_ACE_REPORT=%s\n"
                      "SR_HOST_TIME_ZONE=%s\n"
-                     "SR_CODE_CAPTURE=%s\n",
+                     "SR_CODE_CAPTURE=%s\n"
+                     "SR_NICKNAME=%s\n",
                      iso ? iso : "<unset>",
                      unrelated ? unrelated : "<unset>",
                      fps ? fps : "<unset>",
@@ -200,6 +228,7 @@ static int write_launch_environment_probe(void) {
                      scale ? scale : "<unset>",
                      present_scaling ? present_scaling : "<unset>",
                      present_upscale ? present_upscale : "<unset>",
+                     movie_upscale ? movie_upscale : "<unset>",
                      fullscreen ? fullscreen : "<unset>",
                      launcher_display ? launcher_display : "<unset>",
                      volume ? volume : "<unset>",
@@ -216,7 +245,8 @@ static int write_launch_environment_probe(void) {
                      ace ? ace : "<unset>",
                      ace_report ? ace_report : "<unset>",
                      host_time_zone ? host_time_zone : "<unset>",
-                     code_capture ? code_capture : "<unset>") >= 0;
+                     code_capture ? code_capture : "<unset>",
+                     nickname ? nickname : "<unset>") >= 0;
     if (fclose(f) != 0) ok = 0;
     /* Subtest 21 sets NK_LAUNCH_TEST_HOLD so the probe stays alive long
      * enough for nk_launch_stop to have a running child to stop. */
@@ -393,15 +423,24 @@ static void test_no_iso_child_environment(const char *test_executable,
     bool had_reduce_motion;
     char *old_reduce_motion = capture_environment_value("SR_REDUCE_MOTION", &had_reduce_motion);
     set_environment_value("SR_REDUCE_MOTION", "on");
+    /* Nor an inherited nickname (#2197): the session's, the neutral "Player" that
+       nk_launch_prepare_session gives a launch the player did not configure, masks it. */
+    bool had_nickname;
+    char *old_nickname = capture_environment_value("SR_NICKNAME", &had_nickname);
+    set_environment_value("SR_NICKNAME", "poisoned-parent-nickname");
     /* Nor an inherited Ace Mode line (src/rt/ace.h): a session the player did not resolve on
        is authentic, "off", and exports no report path (A1). */
     /* Nor an inherited presentation upscaler (#1273): an authentic session runs it off. */
     bool had_upscale;
     char *old_upscale = capture_environment_value("SR_PRESENT_UPSCALE", &had_upscale);
     set_environment_value("SR_PRESENT_UPSCALE", "fsr1");
+    /* Nor an inherited movie upscaler: authentic runs it off, an enhanced session keeps it. */
+    bool had_movie;
+    char *old_movie = capture_environment_value("SR_MOVIE_UPSCALE", &had_movie);
+    set_environment_value("SR_MOVIE_UPSCALE", "anime4k");
     bool had_ace;
     char *old_ace = capture_environment_value("SR_ACE", &had_ace);
-    set_environment_value("SR_ACE", "v1;af=16;text=on;readout=on;notice=on;wide=off;smooth=off;sas=off");
+    set_environment_value("SR_ACE", "v1;af=16;text=on;readout=on;notice=on;wide=off;smooth=off;sas=off;tess=off;twin=off");
     bool had_ace_report;
     char *old_ace_report = capture_environment_value("SR_ACE_REPORT", &had_ace_report);
     set_environment_value("SR_ACE_REPORT", "poisoned-parent-report.json");
@@ -532,6 +571,7 @@ static void test_no_iso_child_environment(const char *test_executable,
     /* Authentic: off, though the parent says fsr1 and the setting asks for it. */
     assert(session.config.present_upscale == NK_PRESENT_UPSCALE_FSR1);
     assert(strstr(observed, "SR_PRESENT_UPSCALE=off\n") != NULL);
+    assert(strstr(observed, "SR_MOVIE_UPSCALE=off\n") != NULL);
     assert(strstr(observed, "SR_FULLSCREEN=1\n") != NULL);
     assert(strstr(observed, "SR_MASTER_VOLUME=55\n") != NULL);
     /* The launcher's display reaches the child, windowed or fullscreen, and the
@@ -578,6 +618,9 @@ static void test_no_iso_child_environment(const char *test_executable,
     assert(strstr(observed, "SR_EXPERIMENTAL_60HZ=0\n") != NULL);
     assert(strstr(observed, "SR_DEVELOPER_MODE=0\n") != NULL);
     assert(strstr(observed, "SR_REDUCE_MOTION=system\n") != NULL);
+    assert(strcmp(session.config.nickname, NK_NICKNAME_DEFAULT) == 0);
+    assert(strstr(observed, "SR_NICKNAME=Player\n") != NULL);
+    assert(strstr(observed, "poisoned-parent-nickname") == NULL);
     assert(strcmp(session.config.ace_spec, "off") == 0);   /* prepare_session's default */
     assert(strstr(observed, "SR_ACE=off\n") != NULL);
     assert(strstr(observed, "SR_ACE_REPORT=\n") != NULL);   /* the parent's path is masked */
@@ -617,9 +660,12 @@ static void test_no_iso_child_environment(const char *test_executable,
              "fixture-60hz");
     session.config.developer_mode = true;
     session.config.reduce_motion = NK_REDUCE_MOTION_OFF;
+    /* The nickname the player chose reaches the child as SR_NICKNAME (#2197). */
+    snprintf(session.config.nickname, sizeof(session.config.nickname), "%s",
+             "Kaz \xE3\x83\x8A");
     /* An Ace Mode session exports its line and, with it, the report path. */
     snprintf(session.config.ace_spec, sizeof(session.config.ace_spec),
-             "v1;af=8;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off");
+             "v1;af=8;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off;twin=off");
     int ace_report_len = snprintf(session.config.ace_report_path,
                                   sizeof(session.config.ace_report_path),
                                   "%s%cace%cTEST00001.json", root, sep, sep);
@@ -644,9 +690,11 @@ static void test_no_iso_child_environment(const char *test_executable,
     assert(strstr(observed, "SR_EXPERIMENTAL_60HZ=1\n") != NULL);
     assert(strstr(observed, "SR_DEVELOPER_MODE=1\n") != NULL);
     assert(strstr(observed, "SR_REDUCE_MOTION=off\n") != NULL);
-    assert(strstr(observed, "SR_ACE=v1;af=8;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off\n") != NULL);
-    /* An enhanced session follows the setting. */
+    assert(strstr(observed, "SR_NICKNAME=Kaz \xE3\x83\x8A\n") != NULL);
+    assert(strstr(observed, "SR_ACE=v1;af=8;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off;twin=off\n") != NULL);
+    /* An enhanced session follows the setting, and keeps the inherited movie upscaler. */
     assert(strstr(observed, "SR_PRESENT_UPSCALE=fsr1\n") != NULL);
+    assert(strstr(observed, "SR_MOVIE_UPSCALE=anime4k\n") != NULL);
     {
         char expected_report[1200];
         snprintf(expected_report, sizeof(expected_report), "SR_ACE_REPORT=%s\n",
@@ -677,7 +725,7 @@ static void test_no_iso_child_environment(const char *test_executable,
                      "fixture-60hz");
         } else {
             snprintf(session.config.ace_spec, sizeof(session.config.ace_spec),
-                     "v1;af=8;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off");
+                     "v1;af=8;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off;twin=off");
         }
         assert(nk_launch_start(&session) == NK_OK);
         child_exit = nk_launch_wait(&session, -1);
@@ -690,7 +738,7 @@ static void test_no_iso_child_environment(const char *test_executable,
         assert(!ferror(report));
         assert(fclose(report) == 0);
         assert(strstr(observed, only == 0 ? "SR_ACE=off\n"
-                                          : "SR_ACE=v1;af=8;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off\n") != NULL);
+                                          : "SR_ACE=v1;af=8;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off;twin=off\n") != NULL);
         assert(strstr(observed, "SR_PRESENT_UPSCALE=fsr1\n") != NULL);
         session.enhancement_package_id[0] = '\0';
         snprintf(session.config.ace_spec, sizeof(session.config.ace_spec), "off");
@@ -700,6 +748,8 @@ static void test_no_iso_child_environment(const char *test_executable,
     free(old_ace);
     restore_environment_value("SR_PRESENT_UPSCALE", old_upscale, had_upscale);
     free(old_upscale);
+    restore_environment_value("SR_MOVIE_UPSCALE", old_movie, had_movie);
+    free(old_movie);
     restore_environment_value("SR_ACE_REPORT", old_ace_report, had_ace_report);
     free(old_ace_report);
     restore_environment_value("SR_EXPERIMENTAL_60HZ", old_60hz, had_60hz);
@@ -707,6 +757,8 @@ static void test_no_iso_child_environment(const char *test_executable,
     free(old_reduce_motion);
     free(old_60hz);
     restore_environment_value("SR_DEVELOPER_MODE", old_developer, had_developer);
+    restore_environment_value("SR_NICKNAME", old_nickname, had_nickname);
+    free(old_nickname);
     free(old_developer);
     restore_environment_value("SR_LAUNCHER_DISPLAY_BOUNDS", old_launcher_display,
                               had_launcher_display);
@@ -1114,7 +1166,40 @@ static void test_windows_data_directory_candidate_order(void) {
 }
 #endif
 
-#if !defined(_WIN32) && !defined(_WIN64)
+#if defined(__ANDROID__)
+/* Android has no HOME or XDG folders: every per-user folder is under the app's private files
+ * folder, which the activities pass as NK_ANDROID_DATA_DIR (nk_platform_posix.c). HOME and
+ * XDG_DATA_HOME are ignored, and without NK_ANDROID_DATA_DIR there is no data folder at all
+ * rather than a guessed one. */
+static void test_posix_data_directory_rule(void) {
+    bool android_was_set = false;
+    bool home_was_set = false;
+    bool xdg_was_set = false;
+    char *saved_android = capture_environment_value("NK_ANDROID_DATA_DIR", &android_was_set);
+    char *saved_home = capture_environment_value("HOME", &home_was_set);
+    char *saved_xdg = capture_environment_value("XDG_DATA_HOME", &xdg_was_set);
+    set_environment_value("HOME", "/synthetic/profile");
+    set_environment_value("XDG_DATA_HOME", "/synthetic/xdg");
+    set_environment_value("NK_ANDROID_DATA_DIR", "/synthetic/files/Nakagawa");
+
+    char data_root[256];
+    assert(nk_platform_resolve_app_data_dir(data_root, sizeof(data_root)));
+    assert(strcmp(data_root, "/synthetic/files/Nakagawa") == 0);
+    assert(nk_platform_resolve_path(NK_PATH_CONFIG, data_root, sizeof(data_root)));
+    assert(strcmp(data_root, "/synthetic/files/Nakagawa/config") == 0);
+    assert(nk_platform_resolve_path(NK_PATH_SAVES, data_root, sizeof(data_root)));
+    assert(strcmp(data_root, "/synthetic/files/Nakagawa/saves") == 0);
+    set_environment_value("NK_ANDROID_DATA_DIR", "");
+    assert(!nk_platform_resolve_app_data_dir(data_root, sizeof(data_root)));
+
+    restore_environment_value("NK_ANDROID_DATA_DIR", saved_android, android_was_set);
+    restore_environment_value("HOME", saved_home, home_was_set);
+    restore_environment_value("XDG_DATA_HOME", saved_xdg, xdg_was_set);
+    free(saved_android);
+    free(saved_home);
+    free(saved_xdg);
+}
+#elif !defined(_WIN32) && !defined(_WIN64)
 static void test_posix_data_directory_rule(void) {
     bool home_was_set = false;
     bool xdg_was_set = false;
@@ -2729,21 +2814,42 @@ int main(int argc, char **argv) {
     /* 18. A staged session without an ISO must clear an inherited PSP_ISO
      * when the runtime is actually spawned. The sentinel verifies that the
      * child still receives unrelated parent environment values. */
+#if defined(__ANDROID__)
+    /* Subtests 18 and 20 start the runtime as a child process. On Android a title starts in
+     * its own process through TitleActivity, over JNI, which a program run from adb shell has
+     * no Java VM for; nk_launch_start fails closed there (tests/native/test_posix_process.c).
+     * They run inside the app instead, and are reported as skipped below. */
+    printf("[LAUNCH_TEST] Subtest 18: skipped on Android (needs the app's TitleActivity)\n");
+#else
     test_no_iso_child_environment(argv[0], base, sep);
+#endif
 
     /* 19. A non-ASCII user profile must not break any user-data open. */
     test_non_ascii_user_data_root(base, sep);
     test_game_data_root_status(base, sep);
 
     /* 20. nk_launch_stop state changes and process termination. */
+#if defined(__ANDROID__)
+    printf("[LAUNCH_TEST] Subtest 20: skipped on Android (needs the app's TitleActivity)\n");
+#else
     test_launch_stop_functionality(argv[0], base, sep);
+#endif
 
     test_keep_run_log(base, sep);
 
     test_launcher_display_choice();
     test_build_identity_run_entry(base, sep);
 
+#if defined(__ANDROID__)
+    (void)test_no_iso_child_environment;
+    (void)test_launch_stop_functionality;
+    native_test_assert_real_config_untouched();
+    printf("SKIP launch_resolution_test subtests 18 and 20 (exit 77): they spawn the runtime, "
+           "which Android does through TitleActivity; every other subtest passed\n");
+    return 77;
+#else
     printf("[LAUNCH_TEST] ALL LAUNCH RESOLUTION TESTS PASSED!\n");
     native_test_assert_real_config_untouched();
     return 0;
+#endif
 }

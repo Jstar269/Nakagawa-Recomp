@@ -27,17 +27,31 @@ TARGET_ENV = "vulkan1.1"
 SHADERS = (
     ("vert", Path("shaders/psp.vert"), Path("psp_vert.inc")),
     ("frag", Path("shaders/psp.frag"), Path("psp_frag.inc")),
+    ("frag", Path("shaders/psp.frag"), Path("psp_frag_rmw.inc")),
     ("vert", Path("shaders/psp_tnl.vert"), Path("psp_tnl_vert.inc")),
     ("comp", Path("shaders/ace_match.comp"), Path("ace_match_comp.inc")),
     ("comp", Path("shaders/ace_compose.comp"), Path("ace_compose_comp.inc")),
+    ("comp", Path("shaders/ace_measure.comp"), Path("ace_measure_comp.inc")),
     ("comp", Path("shaders/fsr1_easu.comp"), Path("fsr1_easu_comp.inc")),
     ("comp", Path("shaders/fsr1_rcas.comp"), Path("fsr1_rcas_comp.inc")),
+    ("comp", Path("shaders/anime4k_cnn_x2_m_0.comp"), Path("anime4k_cnn_x2_m_0_comp.inc")),
+    ("comp", Path("shaders/anime4k_cnn_x2_m_1.comp"), Path("anime4k_cnn_x2_m_1_comp.inc")),
+    ("comp", Path("shaders/anime4k_cnn_x2_m_2.comp"), Path("anime4k_cnn_x2_m_2_comp.inc")),
+    ("comp", Path("shaders/anime4k_cnn_x2_m_3.comp"), Path("anime4k_cnn_x2_m_3_comp.inc")),
+    ("comp", Path("shaders/anime4k_cnn_x2_m_4.comp"), Path("anime4k_cnn_x2_m_4_comp.inc")),
+    ("comp", Path("shaders/anime4k_cnn_x2_m_5.comp"), Path("anime4k_cnn_x2_m_5_comp.inc")),
+    ("comp", Path("shaders/anime4k_cnn_x2_m_6.comp"), Path("anime4k_cnn_x2_m_6_comp.inc")),
+    ("comp", Path("shaders/anime4k_cnn_x2_m_7.comp"), Path("anime4k_cnn_x2_m_7_comp.inc")),
+    ("comp", Path("shaders/anime4k_cnn_x2_m_8.comp"), Path("anime4k_cnn_x2_m_8_comp.inc")),
 )
 UI_SHADERS = (
     ("vert", Path("shaders/ui.vert"), Path("shaders/ui_vert.inc")),
     ("frag", Path("shaders/ui.frag"), Path("shaders/ui_frag.inc")),
     ("frag", Path("shaders/waves.frag"), Path("shaders/waves_frag.inc")),
 )
+# glslc -D defines of an embedding, by embedded path; the manifest records them on its entry.
+# psp_frag_rmw.inc is psp.frag's ordered destination-read variant (#2109).
+DEFINES: dict[Path, tuple[str, ...]] = {Path("psp_frag_rmw.inc"): ("SR_DST_INTERLOCK",)}
 WORD_RE = re.compile(r"0x([0-9a-fA-F]{8})")
 
 
@@ -69,10 +83,13 @@ def glslc_version(glslc: str) -> str:
     return (proc.stdout + proc.stderr).strip()
 
 
-def compile_shader(glslc: str, source: Path, output: Path, gpu_dir: Path) -> bytes:
+def compile_shader(
+    glslc: str, source: Path, output: Path, gpu_dir: Path, defines: tuple[str, ...] = ()
+) -> bytes:
     relative_source = source.relative_to(gpu_dir)
     subprocess.run(
-        [glslc, f"--target-env={TARGET_ENV}", str(relative_source), "-o", str(output)],
+        [glslc, f"--target-env={TARGET_ENV}", *(f"-D{d}" for d in defines),
+         str(relative_source), "-o", str(output)],
         cwd=gpu_dir,
         check=True,
         timeout=120,
@@ -91,7 +108,8 @@ def regenerate(
         temp = Path(temp_name)
         for stage, source_rel, embedded_rel in shaders:
             source = gpu_dir / source_rel
-            spirv = compile_shader(glslc, source, temp / f"{source.stem}.{stage}.spv", gpu_dir)
+            defines = DEFINES.get(embedded_rel, ())
+            spirv = compile_shader(glslc, source, temp / f"{source.stem}.{stage}.spv", gpu_dir, defines)
             embedded = format_embedding(spirv).encode("ascii")
             entries.append(
                 {
@@ -104,6 +122,8 @@ def regenerate(
                     "embedded_sha256": sha256(embedded),
                 }
             )
+            if defines:
+                entries[-1]["defines"] = list(defines)
             staged.append((gpu_dir / embedded_rel, embedded))
 
     manifest = {
@@ -152,7 +172,7 @@ def verify(
     if actual != expected:
         errors.append("shader manifest file set does not match the build contract")
 
-    embedded_spirv: dict[tuple[str, str], bytes] = {}
+    embedded_spirv: dict[str, bytes] = {}   # by embedded path: two embeddings may share a source
     for entry in manifest["shaders"]:
         source = gpu_dir / entry.get("source", "")
         embedded = gpu_dir / entry.get("embedded", "")
@@ -163,6 +183,8 @@ def verify(
         except (OSError, UnicodeError, ValueError) as exc:
             errors.append(f"{entry.get('stage', '?')}: {exc}")
             continue
+        if tuple(entry.get("defines", ())) != DEFINES.get(Path(entry.get("embedded", "")), ()):
+            errors.append(f"{entry.get('embedded', '?')}: recorded defines differ from the build contract")
         checks = (
             ("source SHA-256", sha256(source_data), entry.get("source_sha256")),
             ("embedded SHA-256", sha256(embedded_data), entry.get("embedded_sha256")),
@@ -174,22 +196,22 @@ def verify(
                 errors.append(
                     f"{entry.get('stage', '?')}: {label} mismatch ({observed} != {recorded})"
                 )
-        embedded_spirv[(entry.get("stage", ""), entry.get("source", ""))] = spirv
+        embedded_spirv[entry.get("embedded", "")] = spirv
 
     if glslc and not errors:
         with tempfile.TemporaryDirectory(prefix="nakagawa-shader-verify-") as temp_name:
             temp = Path(temp_name)
-            for stage, source_rel, _ in shaders:
+            for stage, source_rel, embedded_rel in shaders:
                 try:
                     rebuilt = compile_shader(
                         glslc, gpu_dir / source_rel,
-                        temp / f"{source_rel.stem}.{stage}.spv", gpu_dir
+                        temp / f"{source_rel.stem}.{stage}.spv", gpu_dir,
+                        DEFINES.get(embedded_rel, ())
                     )
                 except (OSError, subprocess.SubprocessError) as exc:
                     errors.append(f"{stage}: reproducibility compile failed: {exc}")
                     continue
-                key = (stage, source_rel.as_posix())
-                if rebuilt != embedded_spirv.get(key):
+                if rebuilt != embedded_spirv.get(embedded_rel.as_posix()):
                     errors.append(f"{stage}: current glslc output differs from embedded SPIR-V")
     return errors
 

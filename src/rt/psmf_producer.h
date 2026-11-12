@@ -128,6 +128,14 @@ typedef struct {
     int64_t last_pts;
 } SrPsmfProducerStats;
 
+/* Total bytes of one PSP ATRAC3+ frame (the 8-byte header included) from its header `h` (at least
+ * four bytes): ((((h[2] & 3) << 8) | h[3]) * 8) + 0x10.  The 10-bit size field counts 8-byte units, so
+ * the OR comes before the multiply.  The producer cuts access units with this, and sceMpeg and the
+ * PSMF player check the held unit against it, so all three agree on one definition. */
+static inline uint32_t sr_psmf_audio_frame_bytes(const uint8_t *h) {
+    return (uint32_t)((((h[2] & 0x03u) << 8) | (uint32_t)h[3]) * 8u) + 0x10u;
+}
+
 typedef struct SrPsmfProducer SrPsmfProducer;
 
 /* Opens and validates the 2048-byte PSMF header and its bounded stream extent. */

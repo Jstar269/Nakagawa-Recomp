@@ -8,13 +8,27 @@ Stage the intended candidate changes first. The trusted base defaults to the
 merge-base of HEAD and origin/main; set ``PROVENANCE_BASE_SHA`` when the exact
 pull-request base differs. The detailed authority remains external and is
 never synthesized by this command.
+
+The refresh follows the hosted rule. When the profile differs from the base and
+no ``--policy-delta-authority`` is given, it looks up the V4 policy delta the
+hosted attestation would fetch, ``policy-deltas-v4/<selector sha256>.json``
+beside the trusted ledger in the external authority checkout. A public path may
+be added or removed only when the generator has verified a V3 or V4 authority
+that approves exactly that path. Every refresh then replays the hosted verdict
+on the tree it is about to stage and refuses on any fatal finding. So an
+admitted pull request refreshes on whatever base it has merged, and no
+admission commit is needed as its base.
+
+The refresh is stricter than the hosted check in one place: a tracked path the
+base did not carry refuses unless the delta lists it in ``include_added``, even
+when the delta newly excludes it. The hosted check decides that case.
 """
 
 from __future__ import annotations
 
 import argparse
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import subprocess
 import sys
 import tempfile
@@ -23,15 +37,26 @@ ROOT = Path(__file__).resolve().parent.parent
 LEDGER = "assets/public_provenance_ledger.json"
 EXPORT = "PUBLIC_EXPORT.json"
 POLICY = "assets/public_source_profile.json"
+#: Where ``--trusted-ledger`` sits in the authority checkout; the V4 deltas sit beside it.
+TRUSTED_LEDGER = "docs/provenance/IMPLEMENTATION_PROVENANCE.json"
+#: The identity and dates of the unreferenced commit the hosted verdict is replayed on.
+_REPLAY_IDENTITY = {
+    "GIT_AUTHOR_NAME": "provenance refresh replay",
+    "GIT_AUTHOR_EMAIL": "provenance-refresh@nakagawa-recomp.invalid",
+    "GIT_AUTHOR_DATE": "1970-01-01T00:00:00Z",
+    "GIT_COMMITTER_NAME": "provenance refresh replay",
+    "GIT_COMMITTER_EMAIL": "provenance-refresh@nakagawa-recomp.invalid",
+    "GIT_COMMITTER_DATE": "1970-01-01T00:00:00Z",
+}
 
 try:
     from . import provenance_attest_verify as verifier
     from . import provenance_ledger
     from .nk_core.git_isolation import isolated_git_env
 except ImportError:
-    import provenance_attest_verify as verifier
-    import provenance_ledger
-    from nk_core.git_isolation import isolated_git_env
+    import provenance_attest_verify as verifier  # type: ignore[no-redef]
+    import provenance_ledger  # type: ignore[no-redef]
+    from nk_core.git_isolation import isolated_git_env  # type: ignore[no-redef]
 
 
 def _run(repo: Path, *args: str, capture: bool = True) -> subprocess.CompletedProcess:
@@ -63,6 +88,129 @@ def _base_commit(repo: Path, requested: str | None) -> str:
     return returned
 
 
+def _profile_document(repo: Path, rev: str, *, code: str, label: str, workdir: Path) -> dict | None:
+    """The publication profile at ``rev`` (a commit or a tree), or ``None`` when it has none.
+
+    It is validated as the generator validates it, so a malformed profile refuses with the
+    generator's code before anything reads its path lists."""
+    result = subprocess.run(
+        ["git", "cat-file", "blob", f"{rev}:{POLICY}"], cwd=repo,
+        env=isolated_git_env(root=repo), capture_output=True, check=False,
+    )
+    if result.returncode:
+        return None
+    verifier._load_policy_bytes(result.stdout, workdir, f"{label.replace(' ', '_')}.json", code=code)
+    document: dict = verifier.strict_json(result.stdout, code=code, label=label)
+    return document
+
+
+def policy_delta_v4_beside(
+    *, repo: Path, base_commit: str, candidate_tree: str, trusted_ledger: Path, workdir: Path,
+) -> Path | None:
+    """The V4 authority the hosted attestation would fetch for this profile change, if present.
+
+    The hosted workflow names the file after ``policy_delta_v4_key`` of the base and candidate
+    profiles and fetches it from the authority's ``docs/provenance/policy-deltas-v4/``; locally
+    that directory sits beside the trusted ledger, outside the candidate repository. The name
+    only selects: the generator derives the whole document again from the trusted ledger and
+    the candidate and requires the file's bytes to equal it, as the hosted verifier does.
+    Returns ``None`` when the profile is unchanged or no such file exists. ``workdir`` holds the
+    copies the profile validation reads.
+    """
+    baseline = _profile_document(
+        repo, base_commit, code="TRUSTED_POLICY_INVALID", label="trusted policy", workdir=workdir,
+    )
+    candidate = _profile_document(
+        repo, candidate_tree, code="CANDIDATE_POLICY_INVALID", label="candidate policy", workdir=workdir,
+    )
+    if baseline is None or candidate is None or baseline == candidate:
+        return None
+    try:
+        key = provenance_ledger.policy_delta_v4_key(baseline, candidate)
+    except provenance_ledger.RefreshError as error:
+        raise verifier.VerifyError(error.code, str(error)) from error
+    relative = PurePosixPath(provenance_ledger.POLICY_DELTA_V4_DIR).relative_to(PurePosixPath(TRUSTED_LEDGER).parent)
+    found = trusted_ledger.parent.joinpath(*relative.parts, f"{key}.json")
+    if not found.is_file():
+        return None
+    external: Path = verifier._external_input(found, repo=repo, label="policy delta authority")
+    return external
+
+
+def _tree_with_controls(repo: Path, candidate_tree: str, controls: dict[str, bytes], index: Path) -> str:
+    """``candidate_tree`` with the generated controls in place, built in a scratch index."""
+    env = isolated_git_env(root=repo)
+    env["GIT_INDEX_FILE"] = str(index)
+
+    def git(*args: str, data: bytes | None = None) -> str:
+        result = subprocess.run(
+            ["git", *args], cwd=repo, env=env, input=data, capture_output=True, check=False,
+        )
+        if result.returncode:
+            raise verifier.VerifyError("GIT_ERROR", f"git {args[0]} failed while building the replay tree")
+        return result.stdout.decode("ascii").strip()
+
+    git("read-tree", candidate_tree)
+    for path, raw in sorted(controls.items()):
+        listed = git("ls-tree", candidate_tree, "--", path)
+        mode = listed.split(" ", 1)[0] if listed else "100644"
+        blob = git("hash-object", "-w", "--stdin", data=raw)
+        git("update-index", "--add", "--cacheinfo", f"{mode},{blob},{path}")
+    return git("write-tree")
+
+
+def _replay_hosted_verdict(
+    *,
+    repo: Path,
+    base_commit: str,
+    controls: verifier.EphemeralControls,
+    trusted_ledger: Path,
+    trusted_baseline: Path,
+    trusted_candidate_policy: Path | None,
+    policy_delta_authority: Path | None,
+    workdir: Path,
+) -> None:
+    """Run the hosted ephemeral verdict on the tree this refresh would stage; refuse on any fatal finding.
+
+    The tree is the candidate with the generated ledger and export in place, recorded as an
+    unreferenced child of the base, so the verifier reads it as it reads a pull-request head,
+    under the immutable-revision rule the workflow sets.
+    """
+    tree = _tree_with_controls(
+        repo, controls.candidate_tree,
+        {LEDGER: controls.committed_ledger_bytes, EXPORT: controls.generated_export_bytes},
+        workdir / "replay.index",
+    )
+    made = subprocess.run(
+        ["git", "commit-tree", tree, "-p", base_commit, "-m", "provenance refresh: hosted verdict replay"],
+        cwd=repo, env={**isolated_git_env(root=repo), **_REPLAY_IDENTITY},
+        text=True, capture_output=True, check=False,
+    )
+    commit = made.stdout.strip()
+    if made.returncode or len(commit) != 40:
+        raise verifier.VerifyError("GIT_ERROR", "could not record the tree for the hosted verdict replay")
+    verdict = verifier.verify_ephemeral(
+        repo=repo,
+        candidate_rev=commit,
+        base_rev=base_commit,
+        trusted_ledger=trusted_ledger,
+        trusted_baseline=trusted_baseline,
+        output_dir=workdir / "hosted-replay",
+        trusted_candidate_policy=trusted_candidate_policy,
+        policy_delta_authority=policy_delta_authority,
+        require_immutable_revisions=True,
+    )
+    fatal = sorted({
+        f"{finding['code']} {finding['path']}".strip()
+        for finding in verdict["findings"] if finding["fatal"]
+    })
+    if verdict["verdict"] != "pass" or fatal:
+        raise verifier.VerifyError(
+            "REFRESH_HOSTED_VERDICT_FAIL",
+            "the hosted attestation would fail the refreshed tree: " + ", ".join(fatal or ["no pass verdict"]),
+        )
+
+
 def generate_controls(
     *,
     repo: Path,
@@ -73,7 +221,11 @@ def generate_controls(
     trusted_candidate_policy: Path | None = None,
     policy_delta_authority: Path | None = None,
 ) -> verifier.EphemeralControls:
-    """Call the same generator used by the hosted ephemeral verifier."""
+    """Call the same generator used by the hosted ephemeral verifier.
+
+    With neither ``policy_delta_authority`` nor ``trusted_candidate_policy``, a changed profile
+    selects the V4 authority beside ``trusted_ledger`` (:func:`policy_delta_v4_beside`).
+    """
 
     repo = repo.resolve()
     # A V3 authority comes alone; a V1/V2 authority with its blessed candidate policy. The
@@ -97,6 +249,11 @@ def generate_controls(
     if workdir.exists() and not workdir.is_dir():
         raise verifier.VerifyError("OUTPUT_INVALID", "refresh scratch path is not a directory")
     base_commit = verifier._rev_commit(repo, base_rev)
+    if policy_delta_authority is None and trusted_candidate_policy is None:
+        policy_delta_authority = policy_delta_v4_beside(
+            repo=repo, base_commit=base_commit, candidate_tree=candidate_tree, trusted_ledger=trusted_ledger,
+            workdir=workdir / "lookup-inputs",
+        )
     # The same authority-generated baseline the hosted attestation uses; the
     # base commit's committed ledger is not an input.
     baseline_bytes = verifier.generate_authority_baseline(
@@ -135,25 +292,44 @@ def generate_controls(
     ):
         raise verifier.VerifyError(
             "POLICY_DELTA_AUTHORITY_REQUIRED",
-            "a changed publication profile needs the external blessed policy and delta authority",
+            "a changed publication profile needs its policy delta authority: none was passed, and no V4 "
+            "delta named after this profile change sits beside the trusted ledger",
         )
     changed = sorted(
         path for path in set(controls.base_blobs) | set(controls.candidate_blobs)
         if path not in verifier.CONTROL_PATHS | {verifier.POLICY_PATH}
         and controls.base_blobs.get(path) != controls.candidate_blobs.get(path)
     )
-    if not changed:
-        return controls
-    if any(path not in controls.base_blobs or path not in controls.candidate_blobs for path in changed):
-        raise verifier.VerifyError(
-            "REFRESH_NEW_PATH_REQUIRES_ADMISSION",
-            "public path additions or removals require the separate admission workflow",
+    added = {path for path in changed if path not in controls.base_blobs}
+    removed = {path for path in changed if path not in controls.candidate_blobs}
+    if added or removed:
+        # The hosted rule: an added or removed path needs a V3 or V4 authority that the generator
+        # has just verified against the trusted ledger and this candidate, and that approves this
+        # exact path. A V1/V2 record binds no claim and no bytes, so it never qualifies.
+        delta = controls.policy_delta
+        derived = (
+            delta is not None
+            and trusted_candidate_policy is None
+            and policy_delta_authority is not None
+            and provenance_ledger.is_derived_policy_delta(policy_delta_authority.read_bytes())
         )
-    if not set(changed) <= {entry["path"] for entry in controls.generated_ledger["entries"]}:
+        if delta is None or not derived:
+            unapproved = sorted(added | removed)
+        else:
+            unapproved = sorted((added - set(delta["include_added"])) | (removed - set(delta["include_removed"])))
+        if unapproved:
+            raise verifier.VerifyError(
+                "REFRESH_NEW_PATH_REQUIRES_ADMISSION",
+                "a tracked path the base did not carry, or one the candidate drops, needs an admitted V3 or V4 "
+                "policy delta that lists it in include_added or include_removed: "
+                + ", ".join(unapproved),
+            )
+    present = [path for path in changed if path not in removed]
+    if not set(present) <= {entry["path"] for entry in controls.generated_ledger["entries"]}:
         raise verifier.VerifyError(
             "REFRESH_PATH_NOT_PUBLIC", "changed paths must all be present in the trusted public scope",
         )
-    for path in changed:
+    for path in present:
         record_finding = verifier._exact_record_finding_for_change(
             path,
             base_blobs=controls.base_blobs,
@@ -165,6 +341,20 @@ def generate_controls(
                 record_finding,
                 f"changed executable/security-sensitive path lacks qualifying exact authority: {path}",
             )
+    # Every refresh, not only one that adds or removes a path: the checks above cover what this
+    # command can decide itself, and the hosted verdict covers the rest (a profile change that
+    # leaves the tree alone, a drifted byte-identical import), so a refresh never stages controls
+    # the hosted attestation would fail.
+    _replay_hosted_verdict(
+        repo=repo,
+        base_commit=base_commit,
+        controls=controls,
+        trusted_ledger=trusted_ledger,
+        trusted_baseline=baseline_path,
+        trusted_candidate_policy=trusted_candidate_policy,
+        policy_delta_authority=policy_delta_authority,
+        workdir=workdir,
+    )
 
     # The committed ledger is the claims form (#1673): ``generate_ephemeral_controls`` already
     # derived it from the same hashed generation the hosted verifier compares against, with no
@@ -225,7 +415,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--policy-delta-authority", type=Path,
         default=os.environ.get("PROVENANCE_POLICY_DELTA_AUTHORITY"),
-        help="external policy-delta authority: V3 alone, or V1/V2 with --trusted-candidate-policy",
+        help="external policy-delta authority: V3 or V4 alone, or V1/V2 with --trusted-candidate-policy; "
+             "by default a changed profile uses the V4 delta named after it beside --trusted-ledger",
     )
     parser.add_argument(
         "--apply-policy", action="store_true",

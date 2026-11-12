@@ -2802,13 +2802,17 @@ int main(int argc, char **argv) {{
     def _experimental_module_build(
         self, disc_id: str, usrdir_modules: dict[str, bytes],
         decrypted_modules: dict[str, bytes] | None = None,
+        extra_args: dict[str, object] | None = None,
+        planner_environments: list[dict[str, str]] | None = None,
     ) -> tuple[int, Path, list[str], str]:
         """Press BUILD PACKAGE for an uncatalogued disc whose USRDIR ships modules.
 
         The library entry and profile are what an imported uncatalogued disc gets
         (write_experimental_profile: no guest modules declared). The fake planner
         stops the build at its first codegen step, after the module intake, and
-        records its command. Returns (exit code, user root, command, stderr).
+        records its command (and, given planner_environments, its environment).
+        extra_args are further build-package arguments. Returns (exit code, user
+        root, command, stderr).
         """
         iso_file = self.temp_dir / f"{disc_id}-experimental-modules.iso"
         user_root = self.temp_dir / f"{disc_id}-user-data"
@@ -2842,6 +2846,8 @@ int main(int argc, char **argv) {{
             if _is_compiler_target_query(command):
                 return _REAL_SUBPROCESS_RUN(command, **kwargs)
             captured.extend(command)
+            if planner_environments is not None:
+                planner_environments.append(dict(kwargs.get("env") or {}))
             raise nk_cli.PackageBuildError("TEST_STOP_AFTER_MODULE_INTAKE")
 
         args = type("BuildArgs", (), {
@@ -2849,6 +2855,7 @@ int main(int argc, char **argv) {{
             "user_data_root": user_root,
             "module_dir": None,
             "psp_header": None,
+            **(extra_args or {}),
         })()
         stderr = io.StringIO()
         with patch.object(nk_cli.subprocess, "run", side_effect=stop_at_codegen), \
@@ -2856,6 +2863,40 @@ int main(int argc, char **argv) {{
              contextlib.redirect_stderr(stderr):
             result = nk_cli.cmd_build_package(args)
         return result, user_root, captured, stderr.getvalue()
+
+    def test_build_package_hands_the_build_speed_to_the_planner(self) -> None:
+        # Settings > Build speed reaches the planner, which sizes the Make jobs from
+        # NK_PACKAGE_BUILD_SPEED: both the codegen stage's planner run and the package
+        # build's (whose environment is the compile copy). Without the hand-off every
+        # speed would size as Balanced while the log still named the chosen speed.
+        cases: list[tuple[str, str | None, bool]] = [
+            ("TEST00091", None, False),
+            ("TEST00092", "background", False),
+            ("TEST00093", "balanced", False),
+            ("TEST00094", "fastest", False),
+            ("TEST00095", "background", True),
+            ("TEST00096", "fastest", True),
+        ]
+        speed_env = nk_cli._BUILD_SPEED_ENV
+        self.assertEqual(speed_env, "NK_PACKAGE_BUILD_SPEED")
+        with patch.dict(os.environ):
+            os.environ.pop(speed_env, None)
+            for disc_id, speed, staged in cases:
+                with self.subTest(speed=speed, codegen_stage=staged):
+                    extra: dict[str, object] = {}
+                    if speed is not None:
+                        extra["build_speed"] = speed
+                    if staged:
+                        extra["aot_stage_dir"] = self.temp_dir / f"{disc_id}-aot-stage"
+                    environments: list[dict[str, str]] = []
+                    result, _user_root, command, stderr = self._experimental_module_build(
+                        disc_id, {}, extra_args=extra, planner_environments=environments,
+                    )
+                    self.assertEqual(result, 1)
+                    self.assertIn("TEST_STOP_AFTER_MODULE_INTAKE", stderr)
+                    self.assertEqual(len(environments), 1)
+                    self.assertEqual("--aot-stage" in command, staged)
+                    self.assertEqual(environments[0].get(speed_env), speed or "balanced")
 
     def test_experimental_build_declares_usrdir_prx_as_runtime_placed_module(self) -> None:
         # The player's build route (#308): a PRX the game ships in USRDIR is declared as a

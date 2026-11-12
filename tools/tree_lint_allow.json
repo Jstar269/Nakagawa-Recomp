@@ -39,6 +39,10 @@
       "reason": "The repository's own GPL record, read by git and the forge by convention; its basename is shared with the vendored third_party licence copies."
     },
     {
+      "path": "assets/enhancements/*.json",
+      "reason": "A published Ace package (docs/ENHANCEMENT_CONTRACT.md): one file per disc and package, found by its name, `<disc id, lowercase>-<kind>.json`, the same name the player looks a package up by in `<user data>/enhancements/`, so no tracked file names a package."
+    },
+    {
       "path": "tools/test_*.py",
       "reason": "Consumed by the unittest discovery glob `-p \"test_*.py\"` in the Makefile, the hosted workflow and CONTRIBUTING.md, which is what makes a test module live. No test module names another."
     },

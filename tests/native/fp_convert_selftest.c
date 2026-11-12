@@ -98,7 +98,7 @@ static const VfpuVector kVfpuVectors[] = {
     {"vf2in -infinity",    0xff800000u, 0u, 0u, 0x80000000u},
     {"vf2in NaN",          0x7fc00000u, 0u, 0u, 0x7fffffffu},
     {"vf2in signaling NaN",0x7f800001u, 0u, 0u, 0x7fffffffu},
-    {"vf2iu subnormal",    0x00000001u, 2u, 31u, 0x00000001u},
+    {"vf2iu subnormal",    0x00000001u, 2u, 31u, 0x00000000u}, /* unrecorded PSP read (vfpu-convert): a denormal input is flushed to zero; scale 31 follows the rule */
 };
 
 /* Guest-RM-directed scalar arithmetic. Expected words are source-owned,

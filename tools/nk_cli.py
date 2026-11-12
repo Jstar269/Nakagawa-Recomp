@@ -27,7 +27,7 @@ import tempfile
 import threading
 import traceback
 import time
-from typing import Any
+from typing import Any, NoReturn
 import zlib
 
 
@@ -113,6 +113,8 @@ from analyze import check_code_overlay, is_code_overlay  # noqa: E402
 
 
 ROOT = Path(__file__).resolve().parent.parent
+# Published per-title packages (docs/ENHANCEMENT_CONTRACT.md section 5.1) this source tree ships.
+SHIPPED_ENHANCEMENTS = ROOT / "assets" / "enhancements"
 PACKAGE_CACHE_MARKER = ".nk-aot-package-cache-v1"
 MAX_GUEST_MODULES = MAX_MODULE_CANDIDATES
 MAX_GUEST_MODULE_BYTES = 256 * 1024 * 1024
@@ -1839,6 +1841,7 @@ def _current_package_cache_key(
     public_safe: bool = True,
     instruction_trace: bool = False,
     enhancement_package_path: Path | None = None,
+    code_hook_package_path: Path | None = None,
 ) -> dict:
     import title_codegen_plan
 
@@ -1872,8 +1875,7 @@ def _current_package_cache_key(
     environment = _runtime_build_environment(instruction_trace=instruction_trace)
     # The planner compiles with these when the environment sets none; the key must agree.
     environment.update(package_cache.package_optimization(environment))
-    if enhancement_package_path is not None:
-        environment["ENHANCEMENT_PACKAGE"] = str(enhancement_package_path)
+    environment.update(_package_environment(enhancement_package_path, code_hook_package_path))
     try:
         options = _package_codegen_options(manifest, environment)
     except package_cache.PackageCacheError as exc:
@@ -2129,7 +2131,8 @@ class _BuildProgressReporter:
 
     def report(self, stage: str, status: str, message: str,
                detail: str | None = None, *, completed: int | None = None,
-               total: int | None = None, notice: str | None = None) -> None:
+               total: int | None = None, notice: str | None = None,
+               speed: str | None = None) -> None:
         self.current_stage = stage
         if status == "FAIL":
             self._failed = True
@@ -2141,6 +2144,8 @@ class _BuildProgressReporter:
             payload["total"] = total
         if notice:
             payload["notice"] = notice
+        if speed:
+            payload["speed"] = speed
         line = json.dumps(payload, ensure_ascii=False) + "\n"
         if self._out_stream is not None:
             self._out_stream.write(line)
@@ -2193,6 +2198,90 @@ _OBJECT_CACHE_ROOT_PARTS = ("cache", "objects")
 # (SHARED_LIBRARY_CACHE_DIR_ENV / SHARED_LIBRARY_CACHE_ROOT_PARTS there).
 _SHARED_LIBRARY_CACHE_DIR_ENV = "NK_SHARED_LIBRARY_CACHE_DIR"
 _SHARED_LIBRARY_CACHE_ROOT_PARTS = ("cache", "shared-libraries")
+# The player's Settings > Build speed (--build-speed), passed to the planner, which sizes
+# the Make jobs from it (title_codegen_plan.PACKAGE_BUILD_SPEEDS and
+# PACKAGE_BUILD_SPEED_ENV). NK_PACKAGE_JOBS (PACKAGE_BUILD_JOBS_ENV there) stays the
+# expert override of the job count.
+_BUILD_SPEEDS = ("background", "balanced", "fastest")
+_BUILD_SPEED_DEFAULT = "balanced"
+_BUILD_SPEED_ENV = "NK_PACKAGE_BUILD_SPEED"
+_PACKAGE_JOBS_ENV = "NK_PACKAGE_JOBS"
+# Win32 priority classes (GetPriorityClass / SetPriorityClass).
+_WIN32_IDLE_PRIORITY_CLASS = 0x40
+_WIN32_BELOW_NORMAL_PRIORITY_CLASS = 0x4000
+# The nice value a Background build runs at on POSIX (NK_PLATFORM_LOW_PRIORITY_NICE in
+# src/core/nk_platform.h, which the player starts the build at).
+_LOW_PRIORITY_NICE = 10
+
+
+def lower_build_priority() -> bool:
+    """Run this process, and every process it starts, below normal priority.
+
+    A Background build from the player already starts low; this makes one started from
+    a terminal low as well. A process already at a lower priority keeps it. True when the
+    process now runs below normal.
+    """
+    # sys.platform, not os.name, so that type checkers narrow the platform-only calls.
+    if sys.platform == "win32":
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.GetCurrentProcess.restype = ctypes.c_void_p
+        kernel32.GetPriorityClass.argtypes = [ctypes.c_void_p]
+        kernel32.GetPriorityClass.restype = ctypes.c_uint32
+        kernel32.SetPriorityClass.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+        kernel32.SetPriorityClass.restype = ctypes.c_int
+        process = kernel32.GetCurrentProcess()
+        if kernel32.GetPriorityClass(process) in (_WIN32_IDLE_PRIORITY_CLASS,
+                                                  _WIN32_BELOW_NORMAL_PRIORITY_CLASS):
+            return True
+        return bool(kernel32.SetPriorityClass(process, _WIN32_BELOW_NORMAL_PRIORITY_CLASS))
+    try:
+        if os.getpriority(os.PRIO_PROCESS, 0) < _LOW_PRIORITY_NICE:
+            os.setpriority(os.PRIO_PROCESS, 0, _LOW_PRIORITY_NICE)
+        return True
+    except OSError:
+        return False
+
+
+def build_speed_log_line(speed: str, override: str | None) -> str:
+    """The build log's line naming the build speed, and NK_PACKAGE_JOBS when it overrides."""
+    what = {
+        "background": "at most 2 jobs, below normal priority",
+        "balanced": "jobs sized to the free memory and the CPUs, at most 8",
+        "fastest": "a job for every logical CPU the free memory allows",
+    }[speed]
+    line = f"BUILD_SPEED: {speed} ({what})"
+    if override is not None and override.strip():
+        line += (f"; {_PACKAGE_JOBS_ENV}={override.strip()} overrides its job count "
+                 "(the planner ignores a value that is not a number)")
+    return line + "\n"
+
+
+def compile_speed_line(speed: str | None, jobs: int | None, limit: str | None = None,
+                       free_gb: float | None = None) -> str | None:
+    """The build card's line naming the build speed, the job count and what bound it.
+
+    ``limit`` is the planner's (``PackageBuildPlan.limit``). A row from a planner that
+    names no speed gets no line, and the card keeps the speed's bare name.
+    """
+    if speed not in _BUILD_SPEEDS or not jobs or jobs < 1:
+        return None
+    name = speed.capitalize()
+    parts = "1 part at a time" if jobs == 1 else f"{jobs} parts at a time"
+    if limit == "override":
+        return f"Build speed: {name}, but {_PACKAGE_JOBS_ENV} sets {parts}."
+    free = f" ({free_gb:.1f} GB free)" if free_gb is not None else ""
+    why = {
+        "cpu": " because your PC reports one processor" if jobs == 1 else
+               ", one for each processor",
+        "memory": f", as many as the free memory allows{free}",
+        "max": ", the most Balanced runs; Fastest can run more",
+        "background": "",
+        "unknown_memory": ", because the free memory is unknown",
+    }.get(limit or "", "")
+    low = " at low priority" if speed == "background" else ""
+    return f"Build speed: {name}. {parts}{low}{why}."
 
 
 def compile_progress_message(completed: int, total: int) -> str:
@@ -2202,12 +2291,37 @@ def compile_progress_message(completed: int, total: int) -> str:
     return f"Compiling part {completed + 1} of {total}"
 
 
-def compile_load_notice(jobs: int | None, cpus: int | None) -> str | None:
-    """A calm note that other apps may slow down, sized to the share of the PC in use.
+def compile_load_notice(jobs: int | None, cpus: int | None, limit: str | None = None,
+                        free_gb: float | None = None,
+                        speed: str | None = None) -> str | None:
+    """A calm note about how the build uses the PC.
 
-    One job leaves most of the PC free, so it gets no notice.
+    A Background build (``speed``) runs below normal priority, so its note says games and
+    other apps come first instead, unless one job runs for want of memory.
+
+    Several jobs get a note that other apps may slow down, sized to the share of the PC in
+    use. One job gets a note that parts compile one at a time and the build takes longer,
+    with the planner's real reason: ``limit`` is what bound the job count (``"memory"``,
+    ``"cpu"`` or ``"override"``) and ``free_gb`` the free memory then. A one-job row from
+    an older planner has no ``limit`` and gets no note.
     """
-    if not jobs or jobs <= 1:
+    if not jobs:
+        return None
+    if speed == "background" and not (jobs <= 1 and limit == "memory"):
+        return ("The build runs at low priority, so games and other apps come first. "
+                "It takes longer while they are busy.")
+    if jobs <= 1:
+        if limit == "memory":
+            how = (f"only {free_gb:.1f} GB of memory is free" if free_gb is not None
+                   else "your PC is low on free memory")
+            return (f"Building compiles one part at a time because {how}, so it will "
+                    "take longer. Closing other apps or builds frees memory.")
+        if limit == "cpu":
+            return ("Building compiles one part at a time because your PC reports a single "
+                    "processor, so it will take longer.")
+        if limit == "override":
+            return ("Building compiles one part at a time because the job count was set "
+                    "to 1 (NK_PACKAGE_JOBS), so it will take longer.")
         return None
     if not cpus or jobs * 2 >= cpus:
         return ("Building uses most of your PC's power for a few minutes, "
@@ -2267,12 +2381,19 @@ class _CompileProgressRelay:
                 continue
             self.last = (completed, total)
             jobs, cpus = row.get("jobs"), row.get("cpus")
+            limit, free_gb = row.get("limit"), row.get("free_gb")
+            speed = row.get("speed")
+            jobs = jobs if isinstance(jobs, int) else None
+            limit = limit if isinstance(limit, str) else None
+            free_gb = free_gb if isinstance(free_gb, (int, float)) else None
+            speed = speed if isinstance(speed, str) else None
             self.reporter.report("compile", "RUNNING",
                                  compile_progress_message(completed, total),
                                  completed=completed, total=total,
                                  notice=compile_load_notice(
-                                     jobs if isinstance(jobs, int) else None,
-                                     cpus if isinstance(cpus, int) else None))
+                                     jobs, cpus if isinstance(cpus, int) else None,
+                                     limit, free_gb, speed),
+                                 speed=compile_speed_line(speed, jobs, limit, free_gb))
 
 
 _BUILD_DIAGNOSTIC_MARKERS = ("error:", "cannot find", "undefined reference")
@@ -2378,6 +2499,9 @@ def _package_build_lock(user_root: Path, disc_id: str):
 def cmd_build_package(args: argparse.Namespace, stage_observer=None) -> int:
     reporter = _BuildProgressReporter(getattr(args, "progress_json", None),
                                       getattr(args, "log_file", None))
+    if getattr(args, "build_speed", None) == "background" and not lower_build_priority():
+        reporter.log("BUILD_SPEED: background, but the build could not lower its own "
+                     "priority, so it runs at the priority it was started at\n")
     try:
         disc_id = str(args.disc_id).upper()
         try:
@@ -2415,15 +2539,27 @@ def _select_enhancement_package(
     enhancement_package: Path | None,
     experimental_60hz: bool,
     environment: Mapping[str, str],
+    sfo_disc_id: str | None = None,
+    disc_version: str | None = None,
+    shipped_enhancements: Path | None = None,
 ) -> tuple[Path | None, Path]:
     """The enhancement package a build applies and the package directory it writes.
 
     A package is applied only when the command names it (`--enhancement-package`, or
-    `--experimental-60hz` with `<user data>/enhancements/<disc id, lowercase>-60hz.json`).
+    `--experimental-60hz` with `<user data>/enhancements/<disc id, lowercase>-60hz.json`, else
+    the published package this source tree ships at
+    `assets/enhancements/<disc id, lowercase>-60hz.json`). The user's own file comes first, so a
+    package author can try a new declaration; a shipped file must be in the published form.
     An environment that names one on its own is refused, explicit package or not: the
     Makefile would read it, and it would otherwise enhance the authentic package or
     override the package checked here. An enhanced build gets its own directory, never
     the authentic `packages/<disc_id>`.
+
+    A published package (docs/ENHANCEMENT_CONTRACT.md section 5.1) names its disc. It is
+    refused by name before any site is read: `other_disc` when the disc's PARAM.SFO
+    DISC_ID differs, `other_revision` when its DISC_VERSION differs, and
+    `modified_executable` when both match but the executable's SHA-256 does not. Codegen
+    then checks every keyed stock digest (`site_mismatch`).
     """
     ambient = package_cache.ambient_enhancement_package(environment)
     if ambient is not None:
@@ -2433,14 +2569,22 @@ def _select_enhancement_package(
             "or --experimental-60hz."
         )
     package_path = enhancement_package
+    shipped = False
     if experimental_60hz and package_path is None:
-        candidate = user_root / "enhancements" / f"{disc_id.lower()}-60hz.json"
-        if not candidate.is_file():
+        leaf = f"{disc_id.lower()}-60hz.json"
+        candidate = user_root / "enhancements" / leaf
+        shipped_candidate = (SHIPPED_ENHANCEMENTS if shipped_enhancements is None
+                             else shipped_enhancements) / leaf
+        if candidate.is_file():
+            package_path = candidate
+        elif shipped_candidate.is_file():
+            package_path, shipped = shipped_candidate, True
+        else:
             raise PackageBuildError(
                 f"--experimental-60hz requires an enhancement package at {candidate} "
-                "or an explicit --enhancement-package <path>."
+                f"(or a published one at {shipped_candidate}) or an explicit "
+                "--enhancement-package <path>."
             )
-        package_path = candidate
     if package_path is None:
         return None, user_root / "packages" / disc_id
     import enhancement_package as enhancement_package_module
@@ -2450,6 +2594,13 @@ def _select_enhancement_package(
         package = enhancement_package_module.load_and_validate_package(package_path)
     except (OSError, ValueError) as exc:
         raise PackageBuildError(f"Enhancement package rejected: {exc}") from exc
+    if shipped and not enhancement_package_module.is_published_package(package):
+        raise PackageBuildError(
+            f"Enhancement package rejected: {package_path} is shipped with the source tree but is "
+            "not in the published form (docs/ENHANCEMENT_CONTRACT.md section 5.1)."
+        )
+    if enhancement_package_module.is_published_package(package):
+        _check_published_package_disc(package, sfo_disc_id, disc_version, executable_sha256)
     if package["target_title_id"] != title_id:
         raise PackageBuildError(
             f"Enhancement package target_title_id {package['target_title_id']!r} "
@@ -2461,6 +2612,162 @@ def _select_enhancement_package(
             f"does not match selected executable SHA-256 {executable_sha256}."
         )
     return package_path, user_root / "packages" / f"{disc_id}-enhanced-{package['id']}"
+
+
+def _package_environment(enhancement_package_path: Path | None,
+                         code_hook_package_path: Path | None) -> dict[str, str]:
+    """The Make variables that name a build's packages, for its cache key: none for an authentic build."""
+    environment: dict[str, str] = {}
+    if enhancement_package_path is not None:
+        environment["ENHANCEMENT_PACKAGE"] = str(enhancement_package_path)
+    if code_hook_package_path is not None:
+        environment["ENHANCEMENT_CODE_HOOK_PACKAGE"] = str(code_hook_package_path)
+    return environment
+
+
+def _planner_package_args(enhancement_package_path: Path | None, code_hook_package_path: Path | None,
+                          prepared_root: str) -> list[str]:
+    """The planner arguments that name a build's packages: none for an authentic build."""
+    args: list[str] = []
+    if enhancement_package_path is not None:
+        args += ["--enhancement-package", str(enhancement_package_path)]
+        # The title's extracted files, where the package's data_files are read.
+        if prepared_root and Path(prepared_root).is_dir():
+            args += ["--enhancement-data-root", prepared_root]
+    if code_hook_package_path is not None:
+        args += ["--code-hook-package", str(code_hook_package_path)]
+    return args
+
+
+def _select_code_hook_package(
+    user_root: Path,
+    disc_id: str,
+    *,
+    title_id: str,
+    executable_sha256: str,
+    code_hook_package: Path | None,
+    ace_cull: bool,
+    sfo_disc_id: str | None = None,
+    disc_version: str | None = None,
+    shipped_enhancements: Path | None = None,
+) -> Path | None:
+    """The code-hook package a build applies (docs/ENHANCEMENT_CONTRACT.md section 9.9), or None.
+
+    One is applied only when the command names it: `--code-hook-package`, or `--ace-cull` with
+    `<user data>/enhancements/<disc id, lowercase>-cull.json`, else a published one this source
+    tree ships under the same name. It must be a `guest_memory_code_hook` package for this
+    title and executable, checked as `_select_enhancement_package` checks its package.
+    """
+    package_path = code_hook_package
+    shipped = False
+    if ace_cull and package_path is None:
+        leaf = f"{disc_id.lower()}-cull.json"
+        candidate = user_root / "enhancements" / leaf
+        shipped_candidate = (SHIPPED_ENHANCEMENTS if shipped_enhancements is None
+                             else shipped_enhancements) / leaf
+        if candidate.is_file():
+            package_path = candidate
+        elif shipped_candidate.is_file():
+            package_path, shipped = shipped_candidate, True
+        else:
+            raise PackageBuildError(
+                f"--ace-cull requires a culling package at {candidate} "
+                f"(or a published one at {shipped_candidate}) or an explicit "
+                "--code-hook-package <path>."
+            )
+    if package_path is None:
+        return None
+    import enhancement_package as enhancement_package_module
+
+    package_path = Path(package_path).expanduser().resolve(strict=False)
+    try:
+        package = enhancement_package_module.load_and_validate_package(package_path)
+    except (OSError, ValueError) as exc:
+        raise PackageBuildError(f"Code-hook package rejected: {exc}") from exc
+    if package["category"] != "guest_memory_code_hook":
+        raise PackageBuildError(
+            f"Code-hook package rejected: {package_path} has category {package['category']!r}, "
+            "not 'guest_memory_code_hook'."
+        )
+    if not package.get("sites"):
+        raise PackageBuildError(f"Code-hook package rejected: {package_path} has no sites.")
+    if shipped and not enhancement_package_module.is_published_package(package):
+        raise PackageBuildError(
+            f"Code-hook package rejected: {package_path} is shipped with the source tree but is "
+            "not in the published form (docs/ENHANCEMENT_CONTRACT.md section 5.1)."
+        )
+    if enhancement_package_module.is_published_package(package):
+        _check_published_package_disc(package, sfo_disc_id, disc_version, executable_sha256)
+    if package["target_title_id"] != title_id:
+        raise PackageBuildError(
+            f"Code-hook package target_title_id {package['target_title_id']!r} "
+            f"does not match library title_id {title_id!r}."
+        )
+    if "executable_sha256" in package and package["executable_sha256"] != executable_sha256:
+        raise PackageBuildError(
+            f"Code-hook package executable_sha256 {package['executable_sha256']} "
+            f"does not match selected executable SHA-256 {executable_sha256}."
+        )
+    return package_path
+
+
+def _stack_code_hook_package(
+    user_root: Path,
+    disc_id: str,
+    enhancement_package_path: Path | None,
+    code_hook_package_path: Path | None,
+    target_dir: Path,
+) -> tuple[Path | None, Path | None, Path]:
+    """The enhancement package, the code-hook package beside it, and the package directory.
+
+    Without a code-hook package all three are as `_select_enhancement_package` chose them. A
+    code-hook package on its own is the build's one package, `<disc>-enhanced-<its id>`. Beside
+    a timing package the build is `<disc>-enhanced-<timing id>+<hook id>`: no package id holds a
+    `+`, so the name is never another variant's. A build carries at most one code-hook package,
+    and the name stays within the 64 characters a variant id may have.
+    """
+    if code_hook_package_path is None:
+        return enhancement_package_path, None, target_dir
+    import enhancement_package as enhancement_package_module
+
+    hook = enhancement_package_module.load_and_validate_package(code_hook_package_path)
+    if enhancement_package_path is None:
+        return code_hook_package_path, None, user_root / "packages" / f"{disc_id}-enhanced-{hook['id']}"
+    first = enhancement_package_module.load_and_validate_package(enhancement_package_path)
+    if first["category"] == "guest_memory_code_hook":
+        raise PackageBuildError(
+            f"Build refused: the enhancement package {first['id']!r} is a code-hook package too; "
+            "a build carries at most one beside its timing package."
+        )
+    variant = f"{first['id']}+{hook['id']}"
+    if len(variant) > 64:
+        raise PackageBuildError(
+            f"Build refused: the package ids {first['id']!r} and {hook['id']!r} together are "
+            f"{len(variant)} characters, more than the 64 a package variant may have."
+        )
+    return enhancement_package_path, code_hook_package_path, user_root / "packages" / f"{disc_id}-enhanced-{variant}"
+
+
+def _check_published_package_disc(package: Mapping[str, Any], sfo_disc_id: str | None,
+                                  disc_version: str | None, executable_sha256: str) -> None:
+    """Refuse a published package for another disc, revision or a modified executable, by name."""
+    def refuse(code: str, message: str) -> NoReturn:
+        raise PackageBuildError(f"Enhancement package refused ({code}): {message}. "
+                                "Nothing was built; the authentic package is unchanged.")
+
+    if not sfo_disc_id or not disc_version:
+        raise PackageBuildError("Enhancement package refused: a published package needs the disc's "
+                                "PARAM.SFO DISC_ID and DISC_VERSION, and this disc does not give both.")
+    if sfo_disc_id.upper() != package["disc_id"]:
+        refuse("other_disc", f"the package is for {package['disc_id']}, this disc is {sfo_disc_id.upper()} "
+                             "(another region or another game)")
+    if disc_version != package["disc_version"]:
+        refuse("other_revision", f"the package is for {package['disc_id']} version {package['disc_version']}, "
+                                 f"this disc is version {disc_version}")
+    if executable_sha256 != package["executable_sha256"]:
+        refuse("modified_executable", f"the disc ID and version match, but the executable's SHA-256 "
+                                      f"{executable_sha256} is not {package['executable_sha256']} "
+                                      "(a patched or re-encoded image)")
 
 
 @dataclass
@@ -2483,6 +2790,7 @@ class _PackageBuild:
     disc_id: Any = None
     elf_path: Any = None
     enhancement_package_path: Any = None
+    code_hook_package_path: Any = None
     entry: Any = None
     entry_package: Any = None
     entry_root: Any = None
@@ -2850,7 +3158,21 @@ def _package_cache_check(st):
         enhancement_package=getattr(args, "enhancement_package", None),
         experimental_60hz=bool(getattr(args, "experimental_60hz", False)),
         environment=os.environ,
+        sfo_disc_id=title_input_identity["disc"]["id"],
+        disc_version=title_input_identity["disc"]["disc_version"],
     )
+    code_hook_package_path = _select_code_hook_package(
+        user_root,
+        disc_id,
+        title_id=entry["title_id"],
+        executable_sha256=actual_hash,
+        code_hook_package=getattr(args, "code_hook_package", None),
+        ace_cull=bool(getattr(args, "ace_cull", False)),
+        sfo_disc_id=title_input_identity["disc"]["id"],
+        disc_version=title_input_identity["disc"]["disc_version"],
+    )
+    enhancement_package_path, code_hook_package_path, target_dir = _stack_code_hook_package(
+        user_root, disc_id, enhancement_package_path, code_hook_package_path, target_dir)
     _require_child(user_root, target_dir, "Package destination")
     if target_dir.is_symlink() or (target_dir.exists() and not target_dir.is_dir()):
         raise PackageBuildError("Package destination is not a safe directory; refusing to replace it.")
@@ -2868,6 +3190,7 @@ def _package_cache_check(st):
         title_input_identity,
         instruction_trace=bool(getattr(args, "instruction_trace", False)),
         enhancement_package_path=enhancement_package_path,
+        code_hook_package_path=code_hook_package_path,
     )
     previous_key = package_cache.package_cache_key(target_dir) if target_dir.is_dir() else None
     decision = package_cache.compare_cache_keys(previous_key, cache_key)
@@ -2929,6 +3252,7 @@ def _package_cache_check(st):
     st.cache_key = cache_key
     st.decision = decision
     st.enhancement_package_path = enhancement_package_path
+    st.code_hook_package_path = code_hook_package_path
     st.entry_package = entry_package
     st.entry_root = entry_root
     st.target_dir = target_dir
@@ -2979,16 +3303,15 @@ def _package_codegen(st):
             str(identity_path),
             "--public-safe",
         ]
+        package_target = getattr(args, "target", None)
+        if package_target is not None:
+            planner.extend(("--target", package_target))
         if module_dir is not None:
             planner.extend(("--module-dir", str(module_dir)))
         if cached_header is not None:
             planner.extend(("--psp-header", str(cached_header)))
-        if enhancement_package_path is not None:
-            planner.extend(("--enhancement-package", str(enhancement_package_path)))
-            # The title's extracted files, where the package's data_files are read.
-            prepared_root = entry.get("prepared_root") or ""
-            if prepared_root and Path(prepared_root).is_dir():
-                planner.extend(("--enhancement-data-root", prepared_root))
+        planner.extend(_planner_package_args(enhancement_package_path, st.code_hook_package_path,
+                                             entry.get("prepared_root") or ""))
         return planner
 
     def log_command(planner: list[str]) -> None:
@@ -3004,6 +3327,9 @@ def _package_codegen(st):
     build_environment = _runtime_build_environment(
         instruction_trace=bool(getattr(args, "instruction_trace", False))
     )
+    speed = getattr(args, "build_speed", None) or _BUILD_SPEED_DEFAULT
+    build_environment[_BUILD_SPEED_ENV] = speed
+    reporter.log(build_speed_log_line(speed, build_environment.get(_PACKAGE_JOBS_ENV)))
     command = planner_command(build_dir)
     if reuse_source is not None:
         command.extend(("--reuse-aot-from", str(reuse_source)))
@@ -5986,6 +6312,14 @@ def main() -> int:
         help="Experimental: opt in to building the native 60 Hz enhanced package (default: off / authentic 30 Hz)",
     )
     p_build.add_argument(
+        "--code-hook-package", type=Path, default=None,
+        help="Experimental: apply a guest_memory_code_hook package beside the enhancement package",
+    )
+    p_build.add_argument(
+        "--ace-cull", action="store_true", default=False,
+        help="Experimental: apply the title's culling package (<disc id>-cull.json, Ace's wider culling)",
+    )
+    p_build.add_argument(
         "--register-local-compatibility-record", action="store_true",
         help="explicitly record this exact local input identity for a manifest that requires it",
     )
@@ -5996,6 +6330,15 @@ def main() -> int:
     p_build.add_argument("--no-shared-libraries", action="store_true",
                          help="compile the disc's system libraries for this game only, "
                               "without the shared library cache")
+    p_build.add_argument("--build-speed", choices=_BUILD_SPEEDS, default=_BUILD_SPEED_DEFAULT,
+                         help="background: at most 2 jobs at low priority; balanced (default): "
+                              "jobs sized to the free memory and the CPUs, at most 8; fastest: "
+                              "a job for every logical CPU the free memory allows. "
+                              f"{_PACKAGE_JOBS_ENV} overrides the job count")
+    p_build.add_argument("--target", choices=("host", "android"), default=None,
+                         help="system the package runs on: host, or android for the "
+                              "shared library the Android app loads (default: android "
+                              "when this runs on Android, else host)")
     p_build.set_defaults(func=cmd_build_package)
 
     p_bringup = subparsers.add_parser(

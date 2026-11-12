@@ -323,8 +323,11 @@ class AdmitPathsTest(unittest.TestCase):
 
         steps = admit_paths.remaining_steps(result)
         self.assertIn("push origin main", steps[0])
-        self.assertIn(f"merge --no-edit {branch}", steps[1])
-        self.assertIn(f"provenance_refresh.py --base {result['admission_commit']} --trusted-ledger", steps[2])
+        # One refresh on the pull request's own branch: no admit-branch merge, no admission commit as its base.
+        self.assertIn("provenance_refresh.py --trusted-ledger", steps[1])
+        self.assertNotIn("merge --no-edit", " ".join(steps))
+        self.assertNotIn("--base", " ".join(steps))
+        self.assertEqual(len(steps), 4)
         self.assertNotIn(str(fixture.tmp / "nakagawa-admit-"), " ".join(steps))
         self.assertEqual([p for p in fixture.tmp.iterdir() if p.name.startswith("nakagawa-admit-")], [],
                          "the scratch candidate is removed")
@@ -625,54 +628,89 @@ class BatchAdmitPathsTest(unittest.TestCase):
     def test_two_entry_batches_merge_in_both_orders_with_canonical_profiles(self) -> None:
         for order in ((0, 1), (1, 0)):
             with self.subTest(order=order):
-                fixture = _Fixture(self)
-                git(fixture.pr, "checkout", "-q", "main")
-                base_document = json.loads(git_bytes(fixture.pr, "show", f"{fixture.base}:{admit_paths.POLICY}"))
-                base_document["exclude_paths"] = ["docs/private-z.md", "docs/private-a.md"]
-                write(
-                    fixture.pr, admit_paths.POLICY,
-                    json.dumps(base_document, indent=2, ensure_ascii=False) + "\n",
-                )
-                git(fixture.pr, "add", admit_paths.POLICY)
-                git(fixture.pr, "commit", "-qm", "make base exclusion order non-canonical")
-                fixture.base = git(fixture.pr, "rev-parse", "HEAD")
-                git(fixture.pr, "update-ref", "refs/remotes/origin/main", fixture.base)
-                paths = ["docs/order-a.md", "docs/order-b.md"]
-                slugs = ["order-a", "order-b"]
-                prs = [fixture.worktree(slug) for slug in slugs]
-                for index in range(2):
-                    fixture.add_pr_path(prs[index], paths[index], f"# {slugs[index]}\n")
-                batch = admit_paths.admit_batch(
-                    batch=[self.entry(prs[i], paths[i], slugs[i]) for i in range(2)],
-                    private_repo=fixture.authority, base=fixture.base, date=self.DATE,
-                    scratch_root=fixture.tmp,
-                )
+                self._land_two_entry_batch(order, "merge")
 
-                landing = fixture.worktree(f"landing-{order[0]}-{order[1]}")
-                first_commit = git(prs[order[0]], "rev-parse", "HEAD")
-                second_commit = git(prs[order[1]], "rev-parse", "HEAD")
-                git(landing, "merge", "--ff-only", first_commit)
-                first_policy = git_bytes(landing, "show", f"HEAD:{admit_paths.POLICY}")
-                merge = subprocess.run(
-                    ["git", "merge", "--no-commit", "--no-ff", second_commit],
-                    cwd=landing, env={**os.environ, **GIT_ENV}, capture_output=True, check=False,
-                )
-                self.assertTrue(merge.returncode in (0, 1), merge.stderr.decode("utf-8", errors="replace"))
-                git(landing, "rev-parse", "--verify", "MERGE_HEAD")
-                admit_paths.merge_profile(landing)
-                git(landing, "add", admit_paths.POLICY)
-                git(landing, "commit", "-qm", "merge path-adding PR")
+    def test_two_entry_batches_squash_cherry_pick_and_rebase_in_both_orders(self) -> None:
+        """The desk lands with ``merge --squash`` and ``cherry-pick``; neither sets ``MERGE_HEAD``.
 
-                base_policy = git_bytes(fixture.pr, "show", f"{fixture.base}:{admit_paths.POLICY}")
-                expected_profile = self.profile_union(base_policy, set(paths))
-                actual_profile = git_bytes(landing, "show", f"HEAD:{admit_paths.POLICY}")
-                self.assertEqual(actual_profile, expected_profile)
-                # The second PR's own V4 delta, issued against the old base, approves the merge.
-                second = next(delta for delta in batch["deltas"] if delta["paths"] == [paths[order[1]]])
-                self.verify_delta(
-                    fixture, baseline=first_policy, candidate=expected_profile,
-                    path=paths[order[1]], record=second["record"],
-                )
+        Two adjacent new paths make Git conflict on the profile in every mode, and the merge
+        tool reads the three sides from the index stages Git leaves for it."""
+        for mode in ("squash", "cherry-pick", "rebase"):
+            for order in ((0, 1), (1, 0)):
+                with self.subTest(mode=mode, order=order):
+                    self._land_two_entry_batch(order, mode)
+
+    def _land_two_entry_batch(self, order: tuple[int, int], mode: str) -> None:
+        fixture = _Fixture(self)
+        git(fixture.pr, "checkout", "-q", "main")
+        base_document = json.loads(git_bytes(fixture.pr, "show", f"{fixture.base}:{admit_paths.POLICY}"))
+        base_document["exclude_paths"] = ["docs/private-z.md", "docs/private-a.md"]
+        write(
+            fixture.pr, admit_paths.POLICY,
+            json.dumps(base_document, indent=2, ensure_ascii=False) + "\n",
+        )
+        git(fixture.pr, "add", admit_paths.POLICY)
+        git(fixture.pr, "commit", "-qm", "make base exclusion order non-canonical")
+        fixture.base = git(fixture.pr, "rev-parse", "HEAD")
+        git(fixture.pr, "update-ref", "refs/remotes/origin/main", fixture.base)
+        paths = ["docs/order-a.md", "docs/order-b.md"]
+        slugs = ["order-a", "order-b"]
+        prs = [fixture.worktree(slug) for slug in slugs]
+        for index in range(2):
+            fixture.add_pr_path(prs[index], paths[index], f"# {slugs[index]}\n")
+        batch = admit_paths.admit_batch(
+            batch=[self.entry(prs[i], paths[i], slugs[i]) for i in range(2)],
+            private_repo=fixture.authority, base=fixture.base, date=self.DATE,
+            scratch_root=fixture.tmp,
+        )
+
+        landing = fixture.worktree(f"landing-{order[0]}-{order[1]}")
+        first_commit = git(prs[order[0]], "rev-parse", "HEAD")
+        second_commit = git(prs[order[1]], "rev-parse", "HEAD")
+        git(landing, "merge", "--ff-only", first_commit)
+        first_policy = git_bytes(landing, "show", f"HEAD:{admit_paths.POLICY}")
+        env = {**os.environ, **GIT_ENV}
+        if mode == "rebase":
+            # The second pull request's branch replayed onto the first: ours is the
+            # landed side, theirs the commit being replayed.
+            git(landing, "checkout", "-q", "--detach", second_commit)
+            command = ["git", "rebase", first_commit]
+        else:
+            command = {
+                "merge": ["git", "merge", "--no-commit", "--no-ff", second_commit],
+                "squash": ["git", "merge", "--squash", "--no-commit", second_commit],
+                "cherry-pick": ["git", "cherry-pick", "--no-commit", second_commit],
+            }[mode]
+        self.assertEqual(git(prs[order[1]], "rev-list", "--count", f"{fixture.base}..{second_commit}"), "1")
+        merge = subprocess.run(command, cwd=landing, env=env, capture_output=True, check=False)
+        self.assertTrue(merge.returncode in (0, 1), merge.stderr.decode("utf-8", errors="replace"))
+        if mode == "merge":
+            git(landing, "rev-parse", "--verify", "MERGE_HEAD")
+        else:
+            self.assertNotEqual(git(landing, "ls-files", "--unmerged", "--", admit_paths.POLICY), "")
+            self.assertNotEqual(
+                subprocess.run(["git", "rev-parse", "--verify", "-q", "MERGE_HEAD"], cwd=landing, env=env,
+                               capture_output=True, check=False).returncode, 0,
+                "this mode sets no MERGE_HEAD",
+            )
+        admit_paths.merge_profile(landing)
+        git(landing, "add", admit_paths.POLICY)
+        if mode == "rebase":
+            subprocess.run(["git", "-c", "core.editor=true", "rebase", "--continue"], cwd=landing,
+                           env=env, check=True, capture_output=True)
+        else:
+            git(landing, "commit", "-qm", "merge path-adding PR")
+
+        base_policy = git_bytes(fixture.pr, "show", f"{fixture.base}:{admit_paths.POLICY}")
+        expected_profile = self.profile_union(base_policy, set(paths))
+        actual_profile = git_bytes(landing, "show", f"HEAD:{admit_paths.POLICY}")
+        self.assertEqual(actual_profile, expected_profile)
+        # The second PR's own V4 delta, issued against the old base, approves the merge.
+        second = next(delta for delta in batch["deltas"] if delta["paths"] == [paths[order[1]]])
+        self.verify_delta(
+            fixture, baseline=first_policy, candidate=expected_profile,
+            path=paths[order[1]], record=second["record"],
+        )
 
     def test_batch_has_no_entry_count_cap(self) -> None:
         five = [
@@ -810,6 +848,106 @@ class BatchAdmitPathsTest(unittest.TestCase):
         self.assertIn("docs/ours.md", merged["include_paths"])
         self.assertNotIn("docs/guide.md", merged["include_paths"])
         git(ours, "merge", "--abort")
+
+    def test_merge_profile_writes_nothing_when_the_ledger_refuses(self) -> None:
+        """All or nothing: a ledger conflict leaves the profile unmerged too, as the merge left it."""
+        fixture = _Fixture(self)
+        git(fixture.pr, "checkout", "-q", "main")
+        write(fixture.pr, admit_paths.LEDGER, admit_paths.provenance_ledger.claims_ledger_bytes(
+            self._claims(("docs/guide.md", "reviewed_documentation"))).decode("utf-8"))
+        git(fixture.pr, "add", admit_paths.LEDGER)
+        git(fixture.pr, "commit", "-qm", "a claims ledger on the base")
+        fixture.base = git(fixture.pr, "rev-parse", "HEAD")
+        git(fixture.pr, "update-ref", "refs/remotes/origin/main", fixture.base)
+        sides = {}
+        for side, classification in (("ours", "reviewed_other"), ("theirs", "reviewed_configuration")):
+            worktree = sides[side] = fixture.worktree(f"ledger-{side}")
+            fixture.add_pr_path(worktree, f"docs/{side}.md", f"# {side}\n")
+            write(worktree, admit_paths.LEDGER, admit_paths.provenance_ledger.claims_ledger_bytes(
+                self._claims(("docs/guide.md", classification))).decode("utf-8"))
+            git(worktree, "add", admit_paths.LEDGER)
+            git(worktree, "commit", "-qm", f"{side} reclassifies the guide")
+        ours = sides["ours"]
+        subprocess.run(["git", "merge", "--no-commit", "--no-ff", git(sides["theirs"], "rev-parse", "HEAD")],
+                       cwd=ours, env={**os.environ, **GIT_ENV}, capture_output=True, check=False)
+        unmerged_before = git(ours, "ls-files", "--unmerged")
+        self.assertIn(admit_paths.POLICY, unmerged_before)
+        self.assertIn(admit_paths.LEDGER, unmerged_before)
+        with self.assertRaises(AdmitError) as caught:
+            admit_paths.merge_profile(ours)
+        self.assertEqual(caught.exception.code, "MERGE_LEDGER_ENTRY_CONFLICT")
+        self.assertEqual(git(ours, "ls-files", "--unmerged"), unmerged_before)
+        git(ours, "merge", "--abort")
+
+    @staticmethod
+    def _ledger_sides(*documents: dict) -> list:
+        raws = [(json.dumps(document, indent=2) + "\n").encode("utf-8") for document in documents]
+        return [(label, (lambda raw=raw: raw)) for label, raw in zip(("base", "ours", "theirs"), raws, strict=True)]
+
+    @staticmethod
+    def _claims(*entries: tuple[str, str]) -> dict:
+        return {
+            "schema_version": provenance_ledger.CLAIMS_LEDGER_SCHEMA_VERSION,
+            "generated_by": "tools/provenance_ledger.py",
+            "entries": [
+                {"path": path, "classification": classification,
+                 "evidence": {"source": "documentation review", "statement": f"reviewed {path}"}}
+                for path, classification in entries
+            ],
+        }
+
+    def test_merged_ledger_is_the_three_way_merge_of_its_entries(self) -> None:
+        base = self._claims(("docs/a.md", "reviewed_documentation"), ("docs/z.md", "reviewed_documentation"))
+        ours = self._claims(("docs/a.md", "reviewed_documentation"), ("docs/m-ours.md", "reviewed_documentation"),
+                            ("docs/z.md", "reviewed_documentation"))
+        theirs = self._claims(("docs/a.md", "reviewed_other"), ("docs/m-theirs.md", "reviewed_documentation"))
+        merged = json.loads(admit_paths._merged_ledger(self._ledger_sides(base, ours, theirs)))
+        # Each side's addition stays, theirs' edit and theirs' removal win over ours' unchanged copy.
+        self.assertEqual(
+            [(entry["path"], entry["classification"]) for entry in merged["entries"]],
+            [("docs/a.md", "reviewed_other"), ("docs/m-ours.md", "reviewed_documentation"),
+             ("docs/m-theirs.md", "reviewed_documentation")],
+        )
+        # A side in the older hashed form merges by its claims.
+        hashed = json.loads(json.dumps(base))
+        hashed["schema_version"] = 1
+        for entry in hashed["entries"]:
+            entry["sha256"] = "0" * 64
+        self.assertEqual(admit_paths._merged_ledger(self._ledger_sides(hashed, ours, theirs)),
+                         admit_paths._merged_ledger(self._ledger_sides(base, ours, theirs)))
+        # Swapping ours and theirs gives the same bytes.
+        self.assertEqual(admit_paths._merged_ledger(self._ledger_sides(base, ours, theirs)),
+                         admit_paths._merged_ledger(self._ledger_sides(base, theirs, ours)))
+
+    def test_merged_ledger_refuses_what_it_cannot_merge(self) -> None:
+        base = self._claims(("docs/a.md", "reviewed_documentation"))
+        edited = self._claims(("docs/a.md", "reviewed_other"))
+        other_edit = self._claims(("docs/a.md", "reviewed_configuration"))
+        unevidenced = self._claims(("docs/a.md", "reviewed_documentation"))
+        unevidenced["entries"][0]["evidence"] = {}
+        field_changed = dict(edited, generated_by="something else")
+        cases = {
+            "MERGE_LEDGER_ENTRY_CONFLICT": self._ledger_sides(base, edited, other_edit),
+            "MERGE_LEDGER_NON_ENTRY_FIELD_CHANGED": self._ledger_sides(base, base, field_changed),
+            "MERGE_LEDGER_INPUT_INVALID": self._ledger_sides(base, base, unevidenced),
+        }
+        repeated = [(label, (lambda raw=raw: raw)) for label, raw in (
+            ("base", b'{"entries": [], "entries": []}\n'), ("ours", b"{}\n"), ("theirs", b"{}\n"))]
+        for code, sides in [*cases.items(), ("MERGE_LEDGER_INPUT_INVALID", repeated)]:
+            with self.subTest(code=code):
+                with self.assertRaises(AdmitError) as caught:
+                    admit_paths._merged_ledger(sides)
+                self.assertEqual(caught.exception.code, code)
+
+    def test_merged_profile_refuses_a_repeated_key(self) -> None:
+        """A side the verifier's strict JSON would refuse is not merged with its last key winning."""
+        profile = b'{"include_paths": ["docs/a.md"], "exclude_paths": []}\n'
+        smuggled = b'{"include_paths": ["docs/a.md"], "include_paths": ["docs/smuggled.md"], "exclude_paths": []}\n'
+        sides = [(label, (lambda raw=raw: raw)) for label, raw in
+                 (("base", profile), ("ours", profile), ("theirs", smuggled))]
+        with self.assertRaises(AdmitError) as caught:
+            admit_paths._merged_profile(sides)
+        self.assertEqual(caught.exception.code, "MERGE_PROFILE_INPUT_INVALID")
 
     def test_v4_delta_verifies_and_legacy_nested_and_flat_deltas_remain_readable(self) -> None:
         fixture = _Fixture(self)

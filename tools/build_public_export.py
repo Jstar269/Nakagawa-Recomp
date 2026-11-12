@@ -49,8 +49,8 @@ try:
     from . import public_export
     from .nk_core.git_isolation import isolated_git_env, run_git
 except ImportError:  # direct script execution
-    import public_export
-    from nk_core.git_isolation import isolated_git_env, run_git
+    import public_export  # type: ignore[no-redef]
+    from nk_core.git_isolation import isolated_git_env, run_git  # type: ignore[no-redef]
 
 PUBLIC_EXPORT_MANIFEST = "PUBLIC_EXPORT.json"
 PUBLIC_SAFE_PROFILE_ID = "public-safe-v1"
@@ -276,7 +276,7 @@ def load_public_safe_profile() -> tuple[dict, Path]:
     try:
         from . import public_candidate  # package import
     except ImportError:
-        import public_candidate  # direct script execution
+        import public_candidate  # type: ignore[no-redef]  # direct script execution
 
     profile_path = ROOT / "assets" / "public_source_profile.json"
     profile = public_candidate.load_profile(profile_path)
@@ -643,7 +643,7 @@ def _is_excluded(relative_path: str, profile: dict) -> bool:
     try:
         from . import public_candidate
     except ImportError:
-        import public_candidate
+        import public_candidate  # type: ignore[no-redef]
 
     return public_candidate.is_excluded(relative_path, profile)
 

@@ -32,7 +32,7 @@
     X("SCHED_DUMP", "flag-presence", "off", "sched.c", "Diagnostic switch read in sched.c that enables scheduler state dumping in the idle loop.") \
     X("SDL_VIDEODRIVER", "system", "unset (SDL picks the driver)", "gui.c", "Read with SDL_VIDEO_DRIVER to detect the offscreen driver for the headless presented-frames acceptance mode.") \
     X("SDL_VIDEO_DRIVER", "system", "unset", "gui.c", "Alias of SDL_VIDEODRIVER; a value of offscreen makes headless acceptance fail because a real presenter is required.") \
-    X("SR_ACE", "string", "off", "ace.c", "Spec string that turns on the optional enhancements (filtering, text, readout, notice, wide, smooth, band-limited SAS resampling).") \
+    X("SR_ACE", "string", "off", "ace.c", "Spec string that turns on the optional enhancements (filtering, text, readout, notice, wide, smooth, band-limited SAS resampling, full 32-bit colour).") \
     X("SR_ACE_REPORT", "path", "unset (no report written)", "ace.c", "Output path for the per-run Enhanced or Ace JSON report.") \
     X("SR_ACE_SMOOTH_DEPTH", "string", "on", "gpu_sdl3vk/ace_hud.c", "Exactly 0 stops Ace Smooth reading the GE's depth for its in-betweens.") \
     X("SR_ACE_SMOOTH_HUD", "string", "on", "gpu_sdl3vk/ace_hud.c", "Exactly 0 stops Ace Smooth reading the HUD mask of through-mode draws for its in-betweens.") \
@@ -62,7 +62,7 @@
     X("SR_DETERMINISTIC_CLOCK", "string", "empty (off)", "sched.c", "1 makes guest time follow the guest work, not the host clock; empty or 0 keeps the paced or turbo clock. 1 with SR_NOVBPACE=0 is rejected.") \
     X("SR_DETERMINISTIC_SLICE_US", "number", "100", "sched.c", "Guest microseconds the deterministic clock charges per scheduler boundary; a value outside 1..100000 or not a number is rejected.") \
     X("SR_DEVELOPER_MODE", "flag-nonzero", "off", "gpu_sdl3vk/sdl3vk.c", "Marks a hand-started run as a developer run in the SDL3 Vulkan presenter.") \
-    X("SR_DISC_ID", "string", "unset", "gui.c,replay_checkpoint.c", "Disc identifier string shown in the in-game pause overlay, set by the launcher.") \
+    X("SR_DISC_ID", "string", "unset", "gui.c,hle_display.c,replay_checkpoint.c", "Disc identifier string set by the launcher: shown in the in-game pause overlay and used in screenshot file names.") \
     X("SR_DISPLOG", "flag-presence", "off", "guest_interp.c,recomp.c", "Logs each guest dispatch with target, source pc and return address to stderr.") \
     X("SR_DLGLOG", "flag-presence", "off", "debug.h,hle_utility.c,savedata.c", "Prints diagnostic lines to stderr for utility dialogs and savedata dialog calls.") \
     X("SR_EXEC_SHARE_JSON", "path", "unset (no JSON written)", "perf.c", "File to which the execution-share profile is written as JSON at exit.") \
@@ -84,7 +84,7 @@
     X("SR_FONTDIR", "path", "unset", "hle_thread_selftest.c", "Font cache directory; the flash0 self-test sets it to a test cache and restores it.") \
     X("SR_FONTLOG", "flag-presence", "off", "debug.h,flash0_font.c,hle_data.c,hle_font.c,hle_system.c", "Enables font and flash0 font-serving diagnostic logging to stderr.") \
     X("SR_FPS_CAP", "number", "native scanout rate (also for empty or 'native')", "gui.c", "Caps presented frames per second; values above 240 clamp to 240, 0 is accepted, invalid text uses native.") \
-    X("SR_FSDIR", "path", "unset", "hle_thread_selftest.c", "Host directory used as the writable filesystem overlay; read here by self-tests that save and restore it.") \
+    X("SR_FSDIR", "path", "fs", "hle_host.c,hle_io.c,hle_thread_selftest.c", "Legacy flat Memory Stick folder; an ms0: read-open miss imports a file found there into memstick, and self-tests save and restore it.") \
     X("SR_FULLSCREEN", "flag-nonzero", "off (windowed)", "gpu_sdl3vk/sdl3vk.c", "When nonzero, the presenter asks SDL for desktop fullscreen before creating the Vulkan surface.") \
     X("SR_GAME_TITLE", "string", "unset (default window caption)", "driver.c,gui.c", "Title text for the window caption and pause overlay, sanitized before use; set by the launcher.") \
     X("SR_GEDUMP", "flag-presence", "off", "ge.c,hle.c", "Enables GE display list dump logging and framebuffer snapshots.") \
@@ -116,6 +116,8 @@
     X("SR_GPU_CAPTURE_TERMINAL_CASE", "string", "unset: lifecycle self-test runs", "gpu_sdl3vk/sdl3vk.c", "Names a terminal-fault case for the GPU capture self-test; when set, the lifecycle self-test is skipped.") \
     X("SR_GPU_COHERENCE_CASE", "string", "unset (run all cases)", "gpu_sdl3vk/ge_gpu.c", "Restricts the GPU coherence self-test to one case; scaled-upload, mip-lod or readback-rows.") \
     X("SR_GPU_CPU_PROFILE", "flag-nonzero", "off", "ge.c,ge_replay.c,gpu_sdl3vk/ge_gpu.c", "Enables CPU-side profiling of GPU and GE replay paths, with wall-phase stats in replay.") \
+    X("SR_GPU_DEPTH_REF", "path", "unset (no reference check)", "gpu_sdl3vk/ge_gpu_selftest.inc", "Reference file for the coherence self-test's host-depth case: a depth=32-off run writes its depth readback hash, a depth=32 run at the same scale checks it.") \
+    X("SR_GPU_DST_READ", "string", "unset (the interlock where the device has it, else the snapshot)", "gpu_sdl3vk/sdl3vk.c", "Destination-read path (snapshot or interlock) of shader blends and stencil; a path the device lacks is refused, an unknown value gets the default.") \
     X("SR_GPU_GE", "flag-nonzero", "off (software GE)", "gui.c", "Enables the GPU GE renderer when set to a non-empty value other than 0.") \
     X("SR_GPU_LOG", "flag-nonzero", "off", "gpu_sdl3vk/ge_gpu.c", "Enables verbose logging in the Vulkan GE backend and also turns on its statistics.") \
     X("SR_GPU_NORTT", "flag-nonzero", "off", "gpu_sdl3vk/ge_gpu.c", "When nonzero, changes how a texture sourced from a render target is bound in the GPU path.") \
@@ -123,14 +125,15 @@
     X("SR_GPU_PRESENT_DBG", "flag-presence", "off (first 3 early exits still logged)", "gpu_sdl3vk/ge_gpu.c", "Logs every GPU present call and every early-exit decline to stderr.") \
     X("SR_GPU_READBACK_FULL", "flag-nonzero", "off (only the rows guest memory keeps are copied)", "gpu_sdl3vk/ge_gpu.c", "When enabled, a readback to guest memory copies the whole scaled target, the reference path for the narrowed copy.") \
     X("SR_GPU_SCALE", "number", "1 (falls back to SR_RESOLUTION_SCALE)", "gpu_sdl3vk/ge_gpu.c", "Internal render scale multiplier for the GPU GE renderer.") \
+    X("SR_GPU_SSAA_REF", "path", "unset (no reference check)", "gpu_sdl3vk/ge_gpu_selftest.inc", "Reference file for the coherence self-test ssaa-edge case: a run without supersampling writes it, a supersampled run at that scale checks it.") \
     X("SR_GPU_STATS", "flag-nonzero", "off", "gpu_sdl3vk/ge_gpu.c", "Enables statistics output in the Vulkan GE backend.") \
     X("SR_GPU_SUBMIT_BATCH", "number", "SUBMIT_BATCH_MAX", "gpu_sdl3vk/ge_gpu.c", "Number of GPU ops per submit batch; values outside 1 to the maximum are ignored.") \
     X("SR_GPU_SYNC_SUBMIT", "flag-nonzero", "off (asynchronous submit)", "gpu_sdl3vk/ge_gpu.c", "When enabled, GPU command submission is synchronous instead of asynchronous.") \
     X("SR_GPU_TEX_SHADOW_DISABLE", "flag-nonzero", "off (texture shadow enabled)", "gpu_sdl3vk/ge_gpu.c", "Disables the GPU texture shadow when set to a non-empty value other than 0.") \
     X("SR_GPU_TIMESTAMPS", "flag-nonzero", "off", "gpu_sdl3vk/ge_gpu.c,gpu_sdl3vk/sdl3vk.c", "Times GE command buffers by op kind and the presentation blit with GPU timestamp queries (GEGPU_TS lines, SR_PERF_FRAMES gpu_* columns).") \
     X("SR_GPU_TNL", "string", "off", "ge.c", "Set to exactly 1 to hand eligible transform-mode triangles to the GPU backend for vertex transform.") \
-    X("SR_GPU_TWIN_CAPTURE", "string", "unset (captures follow the shown image)", "gpu_sdl3vk/ge_gpu.c", "Set to authentic to make the presenter show, and so capture, the authentic image while the host twin is on.") \
-    X("SR_GPU_TWIN_COLOR", "string", "off", "gpu_sdl3vk/ge_gpu.c", "Host twin (#2050), Ace Mode only: 1 presents full 32-bit colour without dither, native keeps authentic colour; other values but 0 and off are refused.") \
+    X("SR_GPU_TWIN_CAPTURE", "string", "unset (captures follow the shown image)", "ge.c,gpu_sdl3vk/ge_gpu.c", "Set to authentic to make the presenter show, and so capture, the authentic image while the host twin is on.") \
+    X("SR_GPU_TWIN_COLOR", "string", "off", "ge.c,gpu_sdl3vk/ge_gpu.c", "Overrides the player's Full 32-bit colour in both renderers, Ace Mode only: 1 full colour, native authentic colour, 0 or off none; others refused.") \
     X("SR_GPU_TWIN_DUMP", "path", "unset (no dump)", "gpu_sdl3vk/ge_gpu_selftest.inc", "File prefix where the coherence self-test's twin-scene case writes each shown frame as raw RGBA.") \
     X("SR_GPU_TWIN_REF", "path", "unset (no reference check)", "gpu_sdl3vk/ge_gpu_selftest.inc", "Reference file for the coherence self-test's twin cases: a twin-off run writes it, a twin-on run at the same scale checks it.") \
     X("SR_GPU_XFER_RING_KB", "number", "built-in default ring size", "gpu_sdl3vk/ge_gpu.c", "Transfer ring size in KiB (0 disables, above 65536 ignored).") \
@@ -144,6 +147,7 @@
     X("SR_HLE_DIAGNOSTICS", "flag-presence", "off", "title_config.c", "When set, enables HLE diagnostics if the title config has a valid diagnostics profile.") \
     X("SR_HOST_TIME_ZONE", "string", "unset (time zone keeps its seed)", "hle.c", "Host time zone as <minutes>,<0|1> (offset and daylight flag); invalid values are ignored with a message.") \
     X("SR_HUD", "flag-nonzero", "off", "gpu_sdl3vk/sdl3vk.c,perf.c", "Enables the developer HUD and performance counters when set to a non-empty value other than 0.") \
+    X("SR_IDENTITY_SEED", "string", "nakagawa-deterministic-profile-v1", "hle.c", "Seed for the synthetic WLAN MAC and OpenPSID of a fresh profile under SR_DETERMINISTIC_CLOCK=1; ignored otherwise.") \
     X("SR_INLOG", "flag-presence", "off", "debug.h,gpu_sdl3vk/sdl3vk.c,hle_input.c", "Logs controller input: published button changes in the SDL backend and HLE input calls.") \
     X("SR_IOLOG", "flag-presence", "off", "debug.h,hle_data.c,hle_io.c", "When set, logs file I/O operations to stderr and enables the file-system debug category.") \
     X("SR_LAUNCHER_DISPLAY_BOUNDS", "list", "unset (primary display)", "gpu_sdl3vk/sdl3vk.c,gui.c", "Display bounds as x,y,w,h used to open the launcher window on a chosen display.") \
@@ -152,11 +156,13 @@
     X("SR_MEMSTICK", "path", "memstick", "hle_thread_selftest.c,vfs_path.h", "Host directory that serves as the guest ms0: memory stick root.") \
     X("SR_MISS_SEEDS", "path", "unset (no file written)", "perf.c", "File to which the run's distinct dispatch-miss targets are written at exit, one guest address per line, for tools/miss_seeds.py.") \
     X("SR_MODULE_DIR", "path", "place_game_here/EXTRACTED/decrypted", "hle_kernel_module.c,hle_thread_selftest.c", "Directory holding the decrypted guest modules the runtime loads.") \
+    X("SR_MOVIE_UPSCALE", "string", "off", "gui.c", "Movie upscaler for CPU-presented frames: off, fsr1 or anime4k (Anime4K CNN x2 stages, then FSR 1); presentation only.") \
     X("SR_MPEGAV", "flag-presence", "off", "hle.c", "Enables MPEG/PSMF audio-video sync logging (also enabled by SR_MPEGLOG).") \
     X("SR_MPEGLOG", "flag-presence", "off", "debug.h,h264_ffmpeg.c,h264_mf.c,hle.c,hle_mpeg.c,mpeg.c", "Enables MPEG and H.264 decoder diagnostic logging in the video and MPEG HLE code.") \
     X("SR_MSGLOG", "flag-presence", "off", "hle_kernel_sync.c", "When set, logs message pipe creation and calls to stderr.") \
     X("SR_NAN_TRAP_CONTEXT", "flag-nonzero", "off", "debug.c", "Dumps scheduler CPU state and guest memory context when a NaN trap fires.") \
     X("SR_NAN_TRAP_LIMIT", "number", "SR_NAN_TRAP_DEFAULT_LIMIT", "debug.c", "Limit for the NaN trap, accepted from 0 to 1000000; invalid values are rejected.") \
+    X("SR_NICKNAME", "string", "unset: the neutral Player", "hle.c", "Player-chosen console nickname, served as /CONFIG/SYSTEM/owner_name if valid (1 to 32 UTF-8 bytes, no control characters, not all spaces), else Player, logged.") \
     X("SR_NIDLOG", "flag-presence", "off", "debug.h,hle.c", "Logs each HLE call by NID; read once per process.") \
     X("SR_NO2DZ", "flag-presence", "off", "ge.c", "When set, disables the depth test for through-mode (2D) primitives.") \
     X("SR_NOATEST", "flag-presence", "off", "ge.c", "Skips the GE alpha test so every fragment passes.") \

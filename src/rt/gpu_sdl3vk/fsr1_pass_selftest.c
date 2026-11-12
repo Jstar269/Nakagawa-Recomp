@@ -10,8 +10,9 @@
  *   flat-exact      a flat colour from a BGRA source stays that colour in every pixel at a
  *                   non-integer ratio (480x272 to 1355x768): no channel swap, no stray edge texels
  *   source-unread   the pass never writes the image it is given, and returns its own
- *   cost            GPU time of EASU alone and of EASU + RCAS from 1920x1088 (4x render scale) to
- *                   3840x2160, by timestamp queries, median of 15 (reported, not judged)
+ *   cost            GPU time of EASU alone and of EASU + RCAS at the graphics presets' sizes, from
+ *                   4x to 4K and 1440p, 2x to 1080p and 1280x800, and 1x to 1080p (#2150), by
+ *                   timestamp queries, median of 15 (reported, not judged)
  *
  * --easu-spv FILE runs the edge cells with another EASU shader (a mutant); they must then fail.
  * Exit 77 (SKIP) without a Vulkan loader or device.
@@ -622,51 +623,60 @@ static int cmp_double(const void *a, const void *b) {
     return x < y ? -1 : x > y;
 }
 
-/* cost: the GPU time of the pass at the showcase's size, 4x render scale to a 4K window. */
+/* cost: the GPU time of the pass at the graphics presets' sizes (#2150): the showcase's 4x
+   render scale to a 4K window, Ultra's 4x to 1440p, Medium's and Handheld's 2x to 1080p and
+   to a 1280x800 handheld screen, and Low's 1x to 1080p. Reported, not judged. */
 static void cell_cost(Fsr1Pass *p) {
-    const int w = 1920, h = 1088, ow = 3840, oh = 2160;
+    static const struct { int w, h, ow, oh; } sizes[] = {
+        { 1920, 1088, 3840, 2160 }, { 1920, 1088, 2560, 1440 }, { 960, 544, 1920, 1080 },
+        { 960, 544, 1280, 800 }, { 480, 272, 1920, 1080 },
+    };
     VkPhysicalDeviceProperties props;
     GetPhysicalDeviceProperties(g.physical, &props);
     if (props.limits.timestampPeriod <= 0.0f) { printf("fsr1-selftest: cost not measured (no timestamps)\n"); return; }
-    Source src;
-    memset(&src, 0, sizeof(src));
-    if (!image_make(&src, w, h, VK_FORMAT_R8G8B8A8_UNORM)) { CHECK(0, "source image"); return; }
-    for (int i = 0; i < 1024 * 1024; i++) g.map[i] = (uint32_t)i * 2654435761u | 0xFF000000u;
-    source_fill(&src, 1024, 1024, 1);
     VkQueryPoolCreateInfo qi;
     memset(&qi, 0, sizeof(qi));
     qi.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
     qi.queryType = VK_QUERY_TYPE_TIMESTAMP;
     qi.queryCount = 2;
     VkQueryPool pool = VK_NULL_HANDLE;
-    if (CreateQueryPool(g.device, &qi, NULL, &pool) != VK_SUCCESS) { CHECK(0, "query pool"); image_free(&src); return; }
+    if (CreateQueryPool(g.device, &qi, NULL, &pool) != VK_SUCCESS) { CHECK(0, "query pool"); return; }
     const char *names[2] = { "EASU", "EASU + RCAS" };
     const float sharp[2] = { FSR1_SHARPNESS_OFF, FSR1_SHARPNESS_DEFAULT };
-    for (int k = 0; k < 2; k++) {
-        double ms[15];
-        int n = 0;
-        for (int r = 0; r < 16; r++) {
-            cmd_begin();
-            CmdResetQueryPool(g.cb, pool, 0, 2);
-            CmdWriteTimestamp(g.cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, pool, 0);
-            VkImage out = fsr1_record(p, g.cb, src.image, w, h, ow, oh, sharp[k]);
-            CmdWriteTimestamp(g.cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, pool, 1);
-            cmd_end();
-            CHECK(out != VK_NULL_HANDLE, "the 4K pass recorded");
-            uint64_t t[2] = { 0, 0 };
-            if (GetQueryPoolResults(g.device, pool, 0, 2, sizeof t, t, sizeof t[0],
-                                    VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT) != VK_SUCCESS) continue;
-            if (r == 0) continue;  /* the first run builds the images */
-            ms[n++] = (double)(t[1] - t[0]) * props.limits.timestampPeriod / 1e6;
+    for (size_t z = 0; z < sizeof(sizes) / sizeof(sizes[0]); z++) {
+        const int w = sizes[z].w, h = sizes[z].h, ow = sizes[z].ow, oh = sizes[z].oh;
+        Source src;
+        memset(&src, 0, sizeof(src));
+        if (!image_make(&src, w, h, VK_FORMAT_R8G8B8A8_UNORM)) { CHECK(0, "source image"); break; }
+        const int fw = w < 1024 ? w : 1024, fh = h < 1024 ? h : 1024;
+        for (int i = 0; i < fw * fh; i++) g.map[i] = (uint32_t)i * 2654435761u | 0xFF000000u;
+        source_fill(&src, fw, fh, 1);
+        for (int k = 0; k < 2; k++) {
+            double ms[15];
+            int n = 0;
+            for (int r = 0; r < 16; r++) {
+                cmd_begin();
+                CmdResetQueryPool(g.cb, pool, 0, 2);
+                CmdWriteTimestamp(g.cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, pool, 0);
+                VkImage out = fsr1_record(p, g.cb, src.image, w, h, ow, oh, sharp[k]);
+                CmdWriteTimestamp(g.cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, pool, 1);
+                cmd_end();
+                CHECK(out != VK_NULL_HANDLE, "the cost pass recorded");
+                uint64_t t[2] = { 0, 0 };
+                if (GetQueryPoolResults(g.device, pool, 0, 2, sizeof t, t, sizeof t[0],
+                                        VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT) != VK_SUCCESS) continue;
+                if (r == 0) continue;  /* the first run builds the images */
+                ms[n++] = (double)(t[1] - t[0]) * props.limits.timestampPeriod / 1e6;
+            }
+            if (n) {
+                qsort(ms, (size_t)n, sizeof ms[0], cmp_double);
+                printf("fsr1-selftest: cost of %s, %dx%d to %dx%d on %s: %.3f ms (median of %d)\n",
+                       names[k], w, h, ow, oh, props.deviceName, ms[n / 2], n);
+            }
         }
-        if (n) {
-            qsort(ms, (size_t)n, sizeof ms[0], cmp_double);
-            printf("fsr1-selftest: cost of %s, 1920x1088 to 3840x2160 on %s: %.3f ms (median of %d)\n",
-                   names[k], props.deviceName, ms[n / 2], n);
-        }
+        image_free(&src);
     }
     DestroyQueryPool(g.device, pool, NULL);
-    image_free(&src);
 }
 
 static uint32_t *read_spirv(const char *path, size_t *bytes) {

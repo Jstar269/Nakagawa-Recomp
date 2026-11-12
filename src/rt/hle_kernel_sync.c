@@ -1091,22 +1091,26 @@ void hle_register_mbx_handlers(void) {
     sr_hle_register(0xa8e8c846, "sceKernelReferMbxStatus", h_ReferMbxStatus);
 }
 static Sync *sync_find(uint32_t uid, int kind) {
-    for (int i = 0; i < 128; i++)
-        if (s_sync[i].used && s_sync[i].uid == uid && s_sync[i].kind == kind) return &s_sync[i];
+    for (size_t i = 0, n = hle_sync_slot_count(); i < n; i++) {
+        Sync *slot = hle_sync_slot(i);
+        if (slot->used && slot->uid == uid && slot->kind == kind) return slot;
+    }
     return NULL;
 }
-/* The slot is cleared, so no field of a previous object (of any kind) survives
- * into the new one. */
+/* A free slot, or a new chunk's first one when every slot is taken (the table has no fixed cap,
+ * hle.c). NULL only when the host cannot allocate a chunk. The slot is cleared, so no field of a
+ * previous object (of any kind) survives into the new one. */
 static Sync *sync_new(int kind) {
-    for (int i = 0; i < 128; i++)
-        if (!s_sync[i].used) {
-            memset(&s_sync[i], 0, sizeof(s_sync[i]));
-            s_sync[i].used = 1;
-            s_sync[i].kind = kind;
-            s_sync[i].uid = sr_alloc_uid();
-            return &s_sync[i];
-        }
-    return NULL;
+    Sync *slot = NULL;
+    for (size_t i = 0, n = hle_sync_slot_count(); i < n && !slot; i++)
+        if (!hle_sync_slot(i)->used) slot = hle_sync_slot(i);
+    if (!slot) slot = hle_sync_grow();
+    if (!slot) return NULL;
+    memset(slot, 0, sizeof(*slot));
+    slot->used = 1;
+    slot->kind = kind;
+    slot->uid = sr_alloc_uid();
+    return slot;
 }
 
 static uint32_t h_CreateSema(CpuState *s) {

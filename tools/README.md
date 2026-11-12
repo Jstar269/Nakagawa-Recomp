@@ -268,7 +268,7 @@ set, so a new subpackage cannot ship undiscoverable either:
 | `sync_drift_check.py` | Fail-closed reconciliation between a public-safe export and the public repository. |
 | `provenance_ledger.py` | Build and validate the explicit public provenance ledger. |
 | `provenance_refresh.py` | Generate the public provenance controls with the hosted attestation logic. |
-| `admit_paths.py` | Admit new public paths in one command: derive each class, write the private admission and policy-delta records, build the clean candidate and run `admit-new-reviewed`, then print the push, merge and refresh still to run. |
+| `admit_paths.py` | Admit new public paths in one command: derive each class, write the private admission and policy-delta records, build the clean candidate and run `admit-new-reviewed`, then print the push and the one refresh still to run; `--merge-profile` resolves a conflict on the profile, ledger or export in any merge mode. |
 | `provenance_attest_verify.py` | Verify a candidate tree's public provenance against external authority. |
 | `provenance_record_gap.py` | Inventory the tracked paths that have no exact trusted provenance record (`--check-records` gates on it); `--check` is the separate upstream-derived disposition ratchet; the two flags are mutually exclusive (exit 2), so run them as two invocations. |
 | `modified_file_notice_audit.py` | Check the explicit notices recorded in the inherited-file manifest. |

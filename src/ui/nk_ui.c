@@ -1536,6 +1536,10 @@ const NkUiDrawList *nk_ui_end(NkUi *ui) {
     return ui->frame_ok ? &ui->draw.list : NULL;
 }
 
+bool nk_ui_laid_out(const NkUi *ui) {
+    return ui != NULL && !ui->graph_unplaced;
+}
+
 bool nk_ui_next_wake(const NkUi *ui, double *at_s) {
     double frame;
     if (ui == NULL || !ui->waves.active || ui->prefs.reduce_motion) {

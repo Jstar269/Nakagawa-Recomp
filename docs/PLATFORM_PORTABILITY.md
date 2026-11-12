@@ -38,7 +38,7 @@ caller:
   `player_launcher_unavailable_message_for_host`), so every host's words compile and are tested on
   every host.
 
-`src/player/main.c`, `ui_renderer.c`, `ui/player_ui_nk.c` and `player_state.h` hold no host
+`src/player/main.c`, `ui/player_ui_nk.c` and `player_state.h` hold no host
 conditionals. `tools/test_platform_seam.py` counts `_WIN32`, `__APPLE__`, `__linux__`,
 `__ANDROID__` and similar tests in `src/player`, `src/core` and `src/ui` outside the backends and
 holds every file to its recorded count, with the reason its branches stay. A new branch outside a

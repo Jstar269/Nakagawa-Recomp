@@ -25,6 +25,7 @@
 #endif
 
 #include "player_state.h"
+#include "player_enhanced_fixture.h"
 #include "ace.h"
 #include "iso_reader.h"
 #include "nk_font.h"
@@ -1918,9 +1919,17 @@ static void repeat_launch_and_settle(PlayerApp *app, int game_index,
                                      const char *expected_memstick) {
     char error_before[48];
     snprintf(error_before, sizeof(error_before), "%s", app->last_error.error_code);
+    int64_t before_ms = (int64_t)time(NULL) * 1000;
     assert(player_app_launch_game(app, game_index));
     assert(app->is_game_running);
     assert(strcmp(app->launch_session.memstick_root, expected_memstick) == 0);
+    /* Discord status (#2259) shows this game's own title and when it started. */
+    assert(strcmp(app->running_title, app->games[game_index].title_name) == 0);
+    assert(app->running_start_ms >= before_ms &&
+           app->running_start_ms <= (int64_t)time(NULL) * 1000);
+    assert(app->running_play_mode == PLAYER_PLAY_AUTHENTIC ||
+           app->running_play_mode == PLAYER_PLAY_ENHANCED ||
+           app->running_play_mode == PLAYER_PLAY_ACE);
     app->launch_time_ms = launch_tick;
     assert(nk_launch_wait(&app->launch_session, 10000) == 0);
     assert(player_app_monitor_game_session(app, settle_tick));
@@ -2040,41 +2049,6 @@ static void test_source_iso_member_path_validation(void) {
     assert(!nk_title_manifest_test_source_iso_path_valid(too_long));
 }
 #endif
-
-/* The bitmap fallback (SDL_RenderDebugText) draws ASCII only. Every UTF-8 text
- * it draws goes through player_text_for_bitmap_font, so a title that the system
- * font can draw (the trademark sign) is readable there too, and nothing else
- * reaches the debug font as raw bytes. */
-static void test_bitmap_font_text_fallback(void) {
-    char out[64];
-    size_t n = player_text_for_bitmap_font("Fixture\xE2\x84\xA2", out, sizeof(out));
-    assert(strcmp(out, "FixtureTM") == 0);
-    assert(n == strlen(out));
-
-    player_text_for_bitmap_font("caf\xC3\xA9", out, sizeof(out));
-    assert(strcmp(out, "caf?") == 0);
-
-    /* A truncated sequence and a stray continuation byte each become one '?'. */
-    player_text_for_bitmap_font("a\xE2\x84", out, sizeof(out));
-    assert(strcmp(out, "a??") == 0);
-    player_text_for_bitmap_font("\x80" "b", out, sizeof(out));
-    assert(strcmp(out, "?b") == 0);
-
-    player_text_for_bitmap_font("tab\there\x7f", out, sizeof(out));
-    assert(strcmp(out, "tab here?") == 0);
-
-    /* Output never overruns its buffer; the cut is at a whole glyph. */
-    char small[4];
-    n = player_text_for_bitmap_font("abcdef", small, sizeof(small));
-    assert(strcmp(small, "abc") == 0);
-    assert(n == 3);
-    char tiny[3];
-    n = player_text_for_bitmap_font("\xE2\x84\xA2" "x", tiny, sizeof(tiny));
-    assert(strcmp(tiny, "TM") == 0);
-    assert(n == 2);
-
-    printf("[PLAYER_STATE_TEST] bitmap font text fallback PASS\n");
-}
 
 /* Paths under the user's profile are shown with the profile folder replaced by
  * "~" (the stored path is untouched). The profile folder is matched on whole
@@ -3086,7 +3060,6 @@ static void test_platform_seam_answers_for_this_host(void) {
     assert(nk_platform_path_chars_equal('/', '\\'));
     assert(nk_platform_can_front_process_windows());
     assert(package_builder_toolchain_download_available());
-    assert(strcmp(nk_platform_sdl3_ttf_library_names()[0], "SDL3_ttf.dll") == 0);
     assert(same_env_value(nk_platform_env_home_dir(), getenv("USERPROFILE")));
     assert(same_env_value(nk_platform_env_user_name(), getenv("USERNAME")));
 #else
@@ -3094,10 +3067,8 @@ static void test_platform_seam_answers_for_this_host(void) {
     assert(host == NK_HOST_ANDROID);
 #elif defined(__APPLE__)
     assert(host == NK_HOST_MACOS);
-    assert(strcmp(nk_platform_sdl3_ttf_library_names()[0], "libSDL3_ttf.0.dylib") == 0);
 #elif defined(__linux__)
     assert(host == NK_HOST_LINUX);
-    assert(strcmp(nk_platform_sdl3_ttf_library_names()[0], "libSDL3_ttf.so.0") == 0);
 #endif
     assert(!nk_platform_is_path_separator('\\') && nk_platform_is_path_separator('/'));
     assert(!nk_platform_path_chars_equal('A', 'a'));
@@ -3119,16 +3090,6 @@ static void test_platform_seam_answers_for_this_host(void) {
     assert(nk_platform_path_chars_equal('x', 'x'));
     assert(!nk_platform_path_chars_equal('x', 'y'));
     assert(nk_platform_process_id() != 0ul);
-
-    /* The launcher's library candidates come from the same table. */
-    {
-        char candidates[4][MAX_PATH_LEN];
-        const char *const *names = nk_platform_sdl3_ttf_library_names();
-        int n = player_app_ttf_library_candidates(NULL, candidates, 4);
-        assert(n >= 1);
-        for (int i = 0; i < n; i++) assert(strcmp(candidates[i], names[i]) == 0);
-        assert(names[n] == NULL);
-    }
 
     /* A failed rename reports the host's own error code. */
     {
@@ -3162,7 +3123,8 @@ static void test_platform_seam_answers_for_this_host(void) {
                   "Nakagawa could not find your per-user data folder. "
                   "Set XDG_DATA_HOME or HOME") == 0);
     assert(strcmp(player_data_dir_unavailable_text(NK_HOST_ANDROID),
-                  player_data_dir_unavailable_text(NK_HOST_LINUX)) == 0);
+                  "Nakagawa could not find the app's data folder, which Android names in "
+                  "NK_ANDROID_DATA_DIR when the app starts. Start Nakagawa from its app icon") == 0);
     assert(strcmp(player_folder_open_failure_hint(NK_HOST_WINDOWS),
                   "Windows could not open it.") == 0);
     assert(strstr(player_folder_open_failure_hint(NK_HOST_LINUX), "xdg-utils") != NULL);
@@ -3440,10 +3402,24 @@ static void test_platform_cards_name_this_platform(void) {
     assert(app != NULL);
     nk_ps_set_env("XDG_DATA_HOME", NULL);
     nk_ps_set_env("HOME", NULL);
+#if defined(__ANDROID__)
+    /* Android's data root is only NK_ANDROID_DATA_DIR (nk_platform_posix.c), which the test
+       isolation sets; HOME and XDG are not read there. */
+    bool had_android_data = false;
+    char *saved_android_data = capture_environment_value("NK_ANDROID_DATA_DIR", &had_android_data);
+    nk_ps_set_env("NK_ANDROID_DATA_DIR", NULL);
+#endif
     assert(!player_app_open_prerequisite_about(app));
     assert(strcmp(app->last_error.error_code, "DATA_DIR_UNAVAILABLE") == 0);
     assert(strcmp(app->last_error.title, "Data folder not found") == 0); /* #1974: sentence case */
+#if defined(__ANDROID__)
+    assert(strstr(app->last_error.message, "NK_ANDROID_DATA_DIR") != NULL);
+    assert(strstr(app->last_error.message, "XDG_DATA_HOME") == NULL);
+    restore_environment_value("NK_ANDROID_DATA_DIR", saved_android_data, had_android_data);
+    free(saved_android_data);
+#else
     assert(strstr(app->last_error.message, "XDG_DATA_HOME or HOME") != NULL);
+#endif
     assert(strstr(app->last_error.message, "LOCALAPPDATA") == NULL);
     restore_environment_value("XDG_DATA_HOME", saved_xdg, had_xdg);
     restore_environment_value("HOME", saved_home, had_home);
@@ -3890,6 +3866,237 @@ static bool queue_file_exists(const PlayerApp *app) {
     return nk_platform_file_exists(path);
 }
 
+static bool queue_file_has(const char *path, const char *text) {
+    char *contents = read_text_file(path);
+    bool found = contents != NULL && strstr(contents, text) != NULL;
+    free(contents);
+    return found;
+}
+
+/* The build queue (Add to queue): one queue for first builds and rebuilds,
+ * through the same package-builder child as the rebuild test. On entry the
+ * four fixture games are ULUS99998 (built by this Nakagawa), ULUS99997 (an
+ * older build, disc gone), ULUS99996 (built by this Nakagawa) and ULUS99995
+ * (a package with no recorded identity); nothing is queued. */
+static void test_build_queue(PlayerApp *app, const char *user_root) {
+    char sep = nk_platform_path_separator();
+    char path[NATIVE_TEST_PATH_MAX + 192];
+    char queue_path[MAX_PATH_LEN];
+    char text[256];
+    char reason[2048];
+    bool offers = true;
+    int total = 0;
+    PlayerRebuildCard card;
+    PlayerRebuildQueue *queue = &app->rebuild_queue;
+
+    assert(player_app_rebuild_queue_path(app, queue_path, sizeof(queue_path)));
+    assert(!queue->active && !nk_platform_file_exists(queue_path));
+    /* ULUS99998 loses its package: Add to queue makes it a first build. */
+    snprintf(path, sizeof(path), "%s%cpackages%cULUS99998", user_root, sep, sep);
+    assert(test_remove_tree(path));
+    player_app_runtime_package_cache_invalidate(app);
+    assert(player_app_validate_runtime_package(app, &app->games[0], NULL, reason,
+                                               sizeof(reason)) == NK_RUNTIME_PACKAGE_MISSING);
+    assert(!player_app_game_is_outdated(app, &app->games[0]));
+    assert(player_app_game_is_outdated(app, &app->games[1]));
+
+    /* Order: each game goes last, and a game that waits is not added twice. */
+    assert(player_app_build_queue_add(app, 0));
+    assert(player_app_build_queue_add(app, 1));
+    assert(player_app_build_queue_add(app, 3));
+    assert(!player_app_build_queue_add(app, 0));
+    assert(!player_app_build_queue_add(app, 7));
+    assert(queue->active && !queue->paused && queue->count == 3);
+    assert(strcmp(queue->entries[0].disc_id, "ULUS99998") == 0 &&
+           queue->entries[0].kind == PLAYER_QUEUE_BUILD);
+    assert(strcmp(queue->entries[1].disc_id, "ULUS99997") == 0 &&
+           queue->entries[1].kind == PLAYER_QUEUE_REBUILD);   /* an older build */
+    assert(strcmp(queue->entries[2].disc_id, "ULUS99995") == 0 &&
+           queue->entries[2].kind == PLAYER_QUEUE_BUILD);
+    assert(player_app_build_queue_place(app, "ULUS99995", &total) == 3 && total == 3);
+    assert(player_app_build_queue_place(app, "ULUS99996", &total) == 0 && total == 3);
+    assert(player_app_rebuild_card(app, &app->games[0], &card));
+    assert(strcmp(card.word, "Queued") == 0 && card.kind == PLAYER_QUEUE_BUILD &&
+           !card.rebuilding && !card.can_rebuild);
+    assert(card.queue_place == 1 && card.queue_total == 3);
+    assert(!player_app_rebuild_card(app, &app->games[2], &card));
+    assert(player_app_build_queue_has_waiting(app) && player_app_rebuild_banner_visible(app));
+    (void)player_app_rebuild_banner_text(app, text, sizeof(text), &offers);
+    assert(strcmp(text, "Building 1 of 3") == 0 && !offers);
+    printf("[PLAYER_STATE_TEST] Add to queue puts each game last, once PASS\n");
+
+    /* Up and Down pass the next game that waits; neither end moves further. */
+    assert(player_app_build_queue_move(app, "ULUS99995", -1));
+    assert(strcmp(queue->entries[1].disc_id, "ULUS99995") == 0 &&
+           strcmp(queue->entries[2].disc_id, "ULUS99997") == 0);
+    assert(!player_app_build_queue_move(app, "ULUS99998", -1));
+    assert(!player_app_build_queue_move(app, "ULUS99997", 1));
+    assert(!player_app_build_queue_move(app, "ULUS99996", 1));     /* not queued */
+    assert(player_app_build_queue_move(app, "ULUS99998", 1));
+    assert(strcmp(queue->entries[0].disc_id, "ULUS99995") == 0 &&
+           strcmp(queue->entries[1].disc_id, "ULUS99998") == 0);
+    assert(player_app_build_queue_place(app, "ULUS99998", &total) == 2 && total == 3);
+    assert(queue_file_has(queue_path, "\"disc_id\": \"ULUS99995\", \"kind\": \"build\""));
+    /* A waiting game that left the library is not on the queue screen, so Up
+       and Down pass it like a finished one: each press visibly moves a row. */
+    queue->entries[3] = queue->entries[2];
+    queue->entries[2] = queue->entries[1];
+    memset(&queue->entries[1], 0, sizeof(queue->entries[1]));
+    snprintf(queue->entries[1].disc_id, sizeof(queue->entries[1].disc_id), "ULUS90001");
+    queue->entries[1].state = PLAYER_REBUILD_PENDING;
+    queue->entries[1].kind = PLAYER_QUEUE_BUILD;
+    queue->count = 4;
+    assert(player_app_find_game_by_disc_id(app, "ULUS90001") < 0);
+    assert(player_app_build_queue_move(app, "ULUS99998", -1));
+    assert(strcmp(queue->entries[0].disc_id, "ULUS99998") == 0 &&
+           strcmp(queue->entries[1].disc_id, "ULUS90001") == 0 &&
+           strcmp(queue->entries[2].disc_id, "ULUS99995") == 0);
+    assert(player_app_build_queue_move(app, "ULUS99998", 1));
+    assert(strcmp(queue->entries[0].disc_id, "ULUS99995") == 0 &&
+           strcmp(queue->entries[1].disc_id, "ULUS90001") == 0 &&
+           strcmp(queue->entries[2].disc_id, "ULUS99998") == 0);
+    queue->entries[1] = queue->entries[2];
+    queue->entries[2] = queue->entries[3];
+    queue->count = 3;
+    (void)player_app_rebuild_queue_save(app);
+    printf("[PLAYER_STATE_TEST] the build queue reorders PASS\n");
+
+    /* Remove from queue: the game leaves; the others keep their order. */
+    assert(player_app_build_queue_remove(app, "ULUS99995"));
+    assert(!player_app_build_queue_remove(app, "ULUS99995"));
+    assert(queue->count == 2 && queue->active);
+    assert(strcmp(queue->entries[0].disc_id, "ULUS99998") == 0 &&
+           strcmp(queue->entries[1].disc_id, "ULUS99997") == 0);
+    assert(!player_app_rebuild_card(app, &app->games[3], &card));
+    printf("[PLAYER_STATE_TEST] Remove from queue takes one game out PASS\n");
+
+    /* The file keeps the order and each title's kind, as schema 2, and a
+       restart resumes the queue from it. */
+    assert(queue_file_has(queue_path, "\"schema_version\": 2"));
+    assert(queue_file_has(queue_path,
+        "{\"disc_id\": \"ULUS99998\", \"kind\": \"build\", \"state\": \"pending\"},\n"
+        "    {\"disc_id\": \"ULUS99997\", \"kind\": \"rebuild\", \"state\": \"pending\"}"));
+    {
+        PlayerApp *resumed = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+        assert(resumed != NULL);
+        snprintf(resumed->settings_path, sizeof(resumed->settings_path), "%s",
+                 app->settings_path);
+        memcpy(resumed->games, app->games, sizeof(GameRecord) * 4u);
+        resumed->game_count = 4;
+        assert(player_app_rebuild_queue_load(resumed));
+        assert(resumed->rebuild_queue.active && resumed->rebuild_queue.count == 2);
+        assert(strcmp(resumed->rebuild_queue.entries[0].disc_id, "ULUS99998") == 0 &&
+               resumed->rebuild_queue.entries[0].kind == PLAYER_QUEUE_BUILD);
+        assert(strcmp(resumed->rebuild_queue.entries[1].disc_id, "ULUS99997") == 0 &&
+               resumed->rebuild_queue.entries[1].kind == PLAYER_QUEUE_REBUILD);
+        free(resumed);
+    }
+    printf("[PLAYER_STATE_TEST] the build queue persists and resumes after a restart PASS\n");
+
+    /* A first build that fails says so on its card, and the queue goes on:
+       ULUS99997's disc is missing, so it is skipped, and the queue ends. */
+    nk_ps_set_env("NAKAGAWA_TEST_PACKAGE_REBUILD_MODE", "failure");
+    app->active_view = VIEW_LIBRARY;
+    app->last_error.error_code[0] = '\0';
+    player_app_rebuild_queue_step(app);
+    assert(app->build_session.is_building && app->active_view == VIEW_LIBRARY);
+    assert(queue->entries[0].state == PLAYER_REBUILD_ACTIVE);
+    assert(player_app_rebuild_queue_owns_build(app));
+    assert(player_app_rebuild_card(app, &app->games[0], &card) && card.rebuilding);
+    assert(strcmp(card.word, "Building") == 0 && card.kind == PLAYER_QUEUE_BUILD);
+    assert(!player_app_build_queue_remove(app, "ULUS99998"));     /* it builds now */
+    assert(!player_app_build_queue_move(app, "ULUS99997", -1));    /* not past it */
+    player_app_rebuild_queue_step(app);                            /* one build at a time */
+    assert(queue->entries[1].state == PLAYER_REBUILD_PENDING);
+    poll_player_package_build_to_terminal(app);
+    assert(app->build_session.is_failed);
+    assert(!player_app_apply_build_outcome(app));
+    assert(app->active_view == VIEW_LIBRARY && app->last_error.error_code[0] == '\0');
+    assert(queue->entries[0].state == PLAYER_REBUILD_FAILED);
+    assert(player_app_rebuild_card(app, &app->games[0], &card));
+    assert(strcmp(card.word, "Build failed") == 0 && !card.rebuilding);
+    assert(strstr(card.detail, "the queue went on") != NULL);
+    player_app_rebuild_queue_step(app);
+    assert(queue->entries[1].state == PLAYER_REBUILD_NO_DISC);
+    assert(!app->build_session.is_building);
+    assert(!queue->active && !nk_platform_file_exists(queue_path));
+    assert(player_app_rebuild_card(app, &app->games[0], &card) &&
+           strcmp(card.word, "Build failed") == 0);
+    printf("[PLAYER_STATE_TEST] a failed queued build goes to its card and the queue goes on PASS\n");
+
+    /* Added again, a finished game waits again; this time its build passes. */
+    nk_ps_set_env("NAKAGAWA_TEST_PACKAGE_REBUILD_MODE", "success");
+    assert(player_app_build_queue_add(app, 0));
+    assert(queue->active && queue->count == 1);                  /* a new run */
+    (void)player_app_rebuild_banner_text(app, text, sizeof(text), &offers);
+    assert(strcmp(text, "Building 1 of 1") == 0);
+    player_app_rebuild_queue_step(app);
+    assert(app->build_session.is_building);
+    poll_player_package_build_to_terminal(app);
+    assert(app->build_session.is_complete && !app->build_session.is_failed);
+    assert(player_app_rebuild_queue_owns_build(app));
+    player_app_runtime_package_cache_invalidate(app);
+    player_app_rebuild_queue_build_checked(
+        app, player_app_validate_runtime_package(app, &app->games[0], NULL, reason,
+                                                 sizeof(reason)) == NK_RUNTIME_PACKAGE_OK);
+    assert(queue->entries[0].state == PLAYER_REBUILD_DONE && !queue->active);
+    assert(!player_app_rebuild_card(app, &app->games[0], &card));
+    assert(!nk_platform_file_exists(queue_path));
+    printf("[PLAYER_STATE_TEST] a queued first build that passes leaves its package PASS\n");
+
+    /* A schema 1 queue (rebuilds only, no kind) is read as rebuilds and
+       rewritten as schema 2 at once. */
+    write_text_file(queue_path,
+        "{\"format\":\"nakagawa-rebuild-queue\",\"schema_version\":1,"
+        "\"titles\":[{\"disc_id\":\"ULUS99997\",\"state\":\"pending\"},"
+        "{\"disc_id\":\"ULUS99996\",\"state\":\"failed\"}]}\n");
+    memset(queue, 0, sizeof(*queue));
+    assert(player_app_rebuild_queue_load(app));
+    assert(queue->active && queue->count == 2);
+    assert(queue->entries[0].kind == PLAYER_QUEUE_REBUILD &&
+           queue->entries[0].state == PLAYER_REBUILD_PENDING);
+    assert(queue->entries[1].kind == PLAYER_QUEUE_REBUILD &&
+           queue->entries[1].state == PLAYER_REBUILD_FAILED);
+    assert(queue_file_has(queue_path, "\"schema_version\": 2"));
+    assert(queue_file_has(queue_path,
+        "{\"disc_id\": \"ULUS99997\", \"kind\": \"rebuild\", \"state\": \"pending\"}"));
+    /* A schema 2 title must say its kind; a repeated title is refused too. */
+    write_text_file(queue_path,
+        "{\"format\":\"nakagawa-rebuild-queue\",\"schema_version\":2,"
+        "\"titles\":[{\"disc_id\":\"ULUS99997\",\"state\":\"pending\"}]}\n");
+    memset(queue, 0, sizeof(*queue));
+    assert(!player_app_rebuild_queue_load(app) && !queue->active);
+    write_text_file(queue_path,
+        "{\"format\":\"nakagawa-rebuild-queue\",\"schema_version\":2,\"titles\":["
+        "{\"disc_id\":\"ULUS99997\",\"kind\":\"rebuild\",\"state\":\"pending\"},"
+        "{\"disc_id\":\"ULUS99997\",\"kind\":\"build\",\"state\":\"pending\"}]}\n");
+    assert(!player_app_rebuild_queue_load(app) && !queue->active);
+    assert(nk_remove_utf8(queue_path) == 0);
+    printf("[PLAYER_STATE_TEST] a schema 1 rebuild queue migrates to schema 2 PASS\n");
+
+    /* A newer Nakagawa's queue is not resumed, and stays as it is while this
+       player's own queue comes and goes. */
+    static const char newer[] =
+        "{\"format\":\"nakagawa-rebuild-queue\",\"schema_version\":3,"
+        "\"titles\":[{\"disc_id\":\"ULUS99997\",\"kind\":\"rebuild\",\"state\":\"pending\","
+        "\"note\":\"from a newer player\"}]}\n";
+    write_text_file(queue_path, newer);
+    memset(queue, 0, sizeof(*queue));
+    assert(!player_app_rebuild_queue_load(app));
+    assert(!queue->active && queue->file_is_newer);
+    assert(player_app_build_queue_add(app, 3));
+    assert(queue->active && !player_app_rebuild_queue_save(app));
+    assert(player_app_build_queue_remove(app, "ULUS99995") && !queue->active);
+    {
+        char *kept = read_text_file(queue_path);
+        assert(kept != NULL && strcmp(kept, newer) == 0);
+        free(kept);
+    }
+    assert(nk_remove_utf8(queue_path) == 0);
+    memset(queue, 0, sizeof(*queue));
+    printf("[PLAYER_STATE_TEST] a newer build queue file stays untouched PASS\n");
+}
+
 /* Games built by an older Nakagawa (owner decision, 2026-10-29), through the
  * same package-builder child as the rebuild test above. `app` holds one
  * experimental title with a valid package and a disc in place; install_root
@@ -4136,7 +4343,7 @@ static void test_outdated_packages_rebuild(PlayerApp *app, const char *user_root
     char queue_path[MAX_PATH_LEN];
     assert(player_app_rebuild_queue_path(app, queue_path, sizeof(queue_path)));
     write_text_file(queue_path,
-        "{\"format\":\"nakagawa-rebuild-queue\",\"schema_version\":2,"
+        "{\"format\":\"nakagawa-rebuild-queue\",\"schema_version\":3,"
         "\"titles\":[{\"disc_id\":\"ULUS99997\",\"state\":\"pending\"}]}\n");
     assert(!player_app_rebuild_queue_load(app));
     assert(!app->rebuild_queue.active && nk_platform_file_exists(queue_path));
@@ -4146,6 +4353,9 @@ static void test_outdated_packages_rebuild(PlayerApp *app, const char *user_root
     assert(!player_app_rebuild_queue_load(app));
     assert(nk_remove_utf8(queue_path) == 0);
     printf("[PLAYER_STATE_TEST] a newer rebuild queue file is not resumed PASS\n");
+
+    memset(&app->rebuild_queue, 0, sizeof(app->rebuild_queue));
+    test_build_queue(app, user_root);
 
     app->game_count = 1;
     memset(&app->outdated, 0, sizeof(app->outdated));
@@ -4197,6 +4407,9 @@ static void test_build_outcome_is_shown_once_per_session(void) {
     free(app);
     printf("[PLAYER_STATE_TEST] build failure and cancel are shown once per session PASS\n");
 }
+
+/* Set when test_package_build_lifecycle skips its package rebuild steps (Android only). */
+static bool s_package_rebuild_skipped = false;
 
 static void test_package_build_lifecycle(const char *self_executable) {
     assert(self_executable && self_executable[0]);
@@ -4395,7 +4608,49 @@ static void test_package_build_lifecycle(const char *self_executable) {
     }
     assert(rebuild_status == NK_RUNTIME_PACKAGE_INCOMPATIBLE);
     nk_ps_set_env("NAKAGAWA_TEST_PACKAGE_REBUILD_MODE", "success");
-#if !defined(_WIN32) && !defined(_WIN64)
+#if defined(__ANDROID__)
+    /* On Android the package build's Python is only the app's libnk_python.so in its native
+       library folder (package_builder_find_python); the PYTHON stub above and PATH are not
+       searched, so python is the first tool missing and the card says where it looked. It
+       must not give the Linux advice: no PATH search for python, no PPA, no build-essential. */
+    assert(!player_app_rebuild_package(rebuild_app, 0));
+    assert(rebuild_app->active_view == VIEW_ERROR);
+    assert(strcmp(rebuild_app->last_error.error_code, "BUILD_TOOLCHAIN_MISSING") == 0);
+    assert(strstr(rebuild_app->last_error.message,
+                  "python was not found in the app's native library folder (libnk_python.so)") != NULL);
+    assert(strstr(rebuild_app->last_error.message, "ships no CPython 3.15") != NULL);
+    assert(strstr(rebuild_app->last_error.message, "downloads build tools only on Windows") != NULL);
+    assert(strstr(rebuild_app->last_error.message, "was not found on PATH") == NULL);
+    assert(strstr(rebuild_app->last_error.message, "deadsnakes") == NULL);
+    assert(strstr(rebuild_app->last_error.message, "build-essential") == NULL);
+    assert(!rebuild_app->build_session.is_building);
+    printf("[PLAYER_STATE_TEST] Android build tools: the card names libnk_python.so, no PATH or PPA advice PASS\n");
+    /* Every later step starts a package build, which needs a runnable Python from the tool
+       folder; the test's own PYTHON stub cannot be one there (#360). The rest of this
+       function is skipped and main() exits 77 after the other subtests have run. */
+    printf("SKIP player_state_test package rebuild lifecycle (exit 77): no libnk_python.so in the "
+           "app's native library folder (#360)\n");
+    s_package_rebuild_skipped = true;
+    free(rebuild_app);
+    assert(test_remove_tree(rebuild_root));
+    restore_environment_value("PYTHON", saved_python, had_python);
+    restore_environment_value("NAKAGAWA_TEST_PACKAGE_REBUILD_MODE",
+                              saved_build_mode, had_build_mode);
+    restore_environment_value("NAKAGAWA_TEST_PACKAGE_REBUILD_TITLE_ID",
+                              saved_title_id, had_title_id);
+    restore_environment_value("NAKAGAWA_TEST_PACKAGE_REBUILD_SOURCE_MEDIA",
+                              saved_source_media, had_source_media);
+    restore_environment_value("NK_INSTALL_ROOT", saved_install_override,
+                              had_install_override);
+    restore_environment_value("PATH", saved_path, had_path);
+    free(saved_path);
+    free(saved_python);
+    free(saved_build_mode);
+    free(saved_title_id);
+    free(saved_source_media);
+    free(saved_install_override);
+    return;
+#elif !defined(_WIN32) && !defined(_WIN64)
     /* gcc alone: the card names make and the package that provides it, and says
        nothing is downloaded here. It used to say only that Linux build-tool
        installation was in the works, even with every tool installed. */
@@ -5936,6 +6191,20 @@ static void test_bundled_prerequisite_build(const char *self_executable) {
     nk_ps_set_env("NK_INSTALL_ROOT", NULL);
     nk_ps_set_env("NAKAGAWA_TEST_PACKAGE_REBUILD_MODE", "reuse");
 
+#if defined(__ANDROID__)
+    /* On Android the build's Python is only the app's libnk_python.so (#360); a bundle's
+       python.exe is never used there, so the bundled build is refused by name instead. */
+    (void)prereqs;
+    (void)path;
+    (void)sep;
+    assert(!player_app_start_package_build(app, 0));
+    assert(strcmp(app->last_error.error_code, "BUILD_TOOLCHAIN_MISSING") == 0);
+    assert(strstr(app->last_error.message, "(libnk_python.so)") != NULL);
+    assert(!app->build_session.is_building);
+    printf("SKIP player_state_test bundled prerequisites (exit 77): the bundle's Python is not "
+           "used on Android (#360)\n");
+    s_package_rebuild_skipped = true;
+#else
     bool started = player_app_start_package_build(app, 0);
     if (!started) {
         fprintf(stderr, "bundled build refused: %s: %s\n", app->last_error.error_code,
@@ -5976,6 +6245,8 @@ static void test_bundled_prerequisite_build(const char *self_executable) {
     assert(app->prerequisites.phase != PLAYER_PREREQ_CONSENT);
     assert(!app->build_session.is_building);
 
+#endif
+
     restore_environment_value("PATH", saved_path, had_path);
     restore_environment_value("PYTHON", saved_python, had_python);
     restore_environment_value("NK_INSTALL_ROOT", saved_override, had_override);
@@ -5986,7 +6257,9 @@ static void test_bundled_prerequisite_build(const char *self_executable) {
     free(saved_mode);
     free(app);
     assert(native_test_remove_tree(root));
+#if !defined(__ANDROID__)
     printf("[PLAYER_STATE_TEST] bundled prerequisites PASS\n");
+#endif
 }
 
 /* ---- PSN releases of UMD games (#295 phase 2) ---------------------------- */
@@ -6545,12 +6818,12 @@ static const unsigned char real_kernel_prx[998] = {
     0x74, 0x72, 0x74, 0x61, 0x62, 0x00,
 };
 
-/* A PBP package of homebrew: PARAM.SFO (EG, no DISC_ID), an ICON0 section, a DATA.PSP program
-   and an empty DATA.PSAR, the form a homebrew EBOOT.PBP has. */
+/* A PBP package of homebrew: PARAM.SFO (MG, the category PSPSDK writes; no DISC_ID), an ICON0
+   section, a DATA.PSP program and an empty DATA.PSAR, the form a homebrew EBOOT.PBP has. */
 static uint8_t *homebrew_pbp(const char *title, const uint8_t *program, size_t program_len,
                              const uint8_t *icon, size_t icon_len, size_t *out_len) {
     uint8_t sfo[512];
-    size_t sfo_len = psp_seal_sfo(sfo, sizeof(sfo), "EG", "", title);
+    size_t sfo_len = psp_seal_sfo(sfo, sizeof(sfo), "MG", "", title);
     size_t icon_at = 0x28u + sfo_len;
     size_t psp_at = icon_at + icon_len;
     uint8_t *pbp = (uint8_t *)calloc(1, psp_at + program_len);
@@ -6595,6 +6868,39 @@ static void homebrew_expect_program(const char *title, const uint8_t *program, s
     }
 }
 
+/* #2145: a stop on code the program generated at run time (target-not-executable) says so for a
+   homebrew library key, never the generic "processor feature" card; a retail disc ID keeps the
+   generic card, and a network stop on homebrew names online play. Each card ends the run with
+   its boundary visible. */
+static void test_homebrew_stop_cards_name_their_limit(void) {
+    PlayerApp *app = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    assert(app != NULL);
+    printf("[PLAYER_STATE_TEST] Subtest: homebrew stop cards name run-time code and network use\n");
+    player_app_set_game_stop_error(app, "RUNTIME_SEMANTIC_BOUNDARY", "target-not-executable",
+                                   308u, 9, 9000u, "XABC01234", NULL);
+    assert(nk_disc_id_is_non_retail_key("XABC01234"));
+    assert(strcmp(app->last_error.title, "Game stopped early") == 0);
+    assert(strstr(app->last_error.message,
+                  "usually code a program generates while it runs") != NULL);
+    assert(strstr(app->last_error.message, "did not find before it started") != NULL);
+    assert(strstr(app->last_error.boundary_text, "not supported yet") == NULL);
+    assert(strstr(app->last_error.message, "processor feature") == NULL);
+    assert(strstr(app->last_error.boundary_text, "target-not-executable") != NULL);
+    assert(strcmp(app->last_error.stop_boundary, "target-not-executable") == 0);
+
+    player_app_set_game_stop_error(app, "RUNTIME_SEMANTIC_BOUNDARY", "target-not-executable",
+                                   308u, 9, 9000u, "ULUS10041", NULL);
+    assert(strstr(app->last_error.message, "processor feature") != NULL);
+    assert(strstr(app->last_error.message, "usually code a program generates") == NULL);
+
+    player_app_set_game_stop_error(app, "RUNTIME_SEMANTIC_BOUNDARY",
+                                   "unsupported-import-scenetadhocinit", 308u, 9, 9000u,
+                                   "XABC01234", NULL);
+    assert(strstr(app->last_error.message, "ad hoc wireless play") != NULL);
+    assert(strstr(app->last_error.boundary_text, "unsupported-import-scenetadhocinit") != NULL);
+    free(app);
+}
+
 /* #2143: an unencrypted homebrew EBOOT.PBP imports as a small private disc image holding its
    program (and icon) under the library key of that image: the same program and title is the
    same game, a different title is another. Encrypted and kernel-mode packages keep a named
@@ -6614,7 +6920,9 @@ static void test_homebrew_package_becomes_a_private_disc(void) {
     uint8_t icon[24];
     uint8_t *pbp;
     uint8_t *image;
-    size_t pbp_len = 0, image_len = 0;
+    uint8_t *before;
+    uint8_t *after;
+    size_t pbp_len = 0, image_len = 0, before_len = 0, after_len = 0;
     PlayerPsnPackage package;
     PlayerPsnPackage again;
     PlayerPsnPackage renamed;
@@ -6645,6 +6953,8 @@ static void test_homebrew_package_becomes_a_private_disc(void) {
     write_binary_file(pbp_path, pbp, pbp_len);
     free(pbp);
     assert(player_path_is_pbp_package(pbp_path));
+    before = psn_test_read_file(pbp_path, &before_len);
+    assert(before != NULL && before_len == pbp_len);
     assert(player_psn_package_inspect(pbp_path, &package, code, sizeof(code), message,
                                       sizeof(message)));
     assert(package.homebrew && !package.iso_ready);
@@ -6678,6 +6988,14 @@ static void test_homebrew_package_becomes_a_private_disc(void) {
     assert(memcmp(image + 22u * 2048u, program, 88u) == 0);
     assert(memcmp(image + 23u * 2048u, icon, sizeof(icon)) == 0);
     free(image);
+
+    /* The user's own package is only read, never changed: the import writes under the data
+       folder alone. (The package's folder is not mounted as ms0:/PSP/GAME/<folder>/ for the
+       program; the disc image holds only the program, its title and its icon, #2143.) */
+    after = psn_test_read_file(pbp_path, &after_len);
+    assert(after != NULL && after_len == before_len && memcmp(after, before, before_len) == 0);
+    free(before);
+    free(after);
 
     /* Picking it again reuses the checked image; the same program under another title is
        another game, and the same package picked from another place is the same one. */
@@ -6718,6 +7036,39 @@ static void test_homebrew_package_becomes_a_private_disc(void) {
         write_binary_file(other_path, pbp, pbp_len);
         free(pbp);
         psn_test_refused(other_path, "PBP_PACKAGE_UNSUPPORTED", "Only unencrypted homebrew");
+    }
+
+    /* A homebrew program that packs extra data into its DATA.PSAR is still a program: an MG
+       package whose DATA.PSP is a plain ELF is never reported as a firmware update. The same
+       package with a signed (~PSP) DATA.PSP and data after it is refused as one. */
+    {
+        PlayerPsnPackage package;
+        char code[64];
+        char message[512];
+        uint8_t signed_head[256];
+        size_t padded_len;
+        pbp = homebrew_pbp("Packed data", program, 88u, icon, sizeof(icon), &pbp_len);
+        padded_len = pbp_len + 64u;
+        pbp = (uint8_t *)realloc(pbp, padded_len);
+        assert(pbp != NULL);
+        memset(pbp + pbp_len, 0x5A, 64u);
+        write_binary_file(other_path, pbp, padded_len);
+        free(pbp);
+        (void)player_psn_package_inspect(other_path, &package, code, sizeof(code), message,
+                                         sizeof(message));
+        assert(strcmp(code, "FIRMWARE_OUT_OF_SCOPE") != 0);
+        assert(strstr(message, "firmware") == NULL);
+
+        memset(signed_head, 0, sizeof(signed_head));
+        memcpy(signed_head, "~PSP", 4);
+        pbp = homebrew_pbp("Packed data", signed_head, sizeof(signed_head), NULL, 0, &pbp_len);
+        padded_len = pbp_len + 64u;
+        pbp = (uint8_t *)realloc(pbp, padded_len);
+        assert(pbp != NULL);
+        memset(pbp + pbp_len, 0x5A, 64u);
+        write_binary_file(other_path, pbp, padded_len);
+        free(pbp);
+        psn_test_refused(other_path, "FIRMWARE_OUT_OF_SCOPE", "never decrypts firmware");
     }
 
     /* Modules built by the real PSPSDK (see the arrays above): the user-mode ones are taken and
@@ -7364,7 +7715,9 @@ static void test_play_mode_settings(void) {
            app->settings.enhanced.part[PLAYER_PART_NOTICE] == 1 &&
            app->settings.enhanced.part[PLAYER_PART_WIDE] == 0 &&
            app->settings.enhanced.part[PLAYER_PART_SMOOTH] == 0 &&
-           app->settings.enhanced.part[PLAYER_PART_SAS] == 0);
+           app->settings.enhanced.part[PLAYER_PART_SAS] == 0 &&
+           app->settings.enhanced.part[PLAYER_PART_TESS] == 0 &&
+           app->settings.enhanced.part[PLAYER_PART_TWIN] == 0);
     assert(app->settings.title_play_count == 0);
     player_play_resolve(&app->settings, "TEST90001", &r);
     assert(!r.on && r.mode == PLAYER_PLAY_AUTHENTIC && r.chosen == PLAYER_PLAY_LIBRARY);
@@ -7378,6 +7731,17 @@ static void test_play_mode_settings(void) {
         assert(has_off);
     }
     assert(player_enhanced_part(PLAYER_PART_COUNT) == NULL);
+    /* The screen test's fixture is the page a new settings file shows: same names, fresh-value
+       words and sentences as the shipped table. */
+    for (int p = 0; p < PLAYER_PART_COUNT; p++) {
+        const PlayerEnhancedPartInfo *info = player_enhanced_part(p);
+        if (strcmp(info->name, k_enhanced_parts[p].name) != 0 ||
+            strcmp(player_enhanced_part_label(p, info->fresh), k_enhanced_parts[p].value) != 0 ||
+            strcmp(info->sentence, k_enhanced_parts[p].sentence) != 0) {
+            fprintf(stderr, "FAIL: part %d (%s) differs from player_enhanced_fixture.h\n", p, info->name);
+            assert(0);
+        }
+    }
     assert(strcmp(player_enhanced_part_label(PLAYER_PART_FILTERING, 8), "8x") == 0 &&
            strcmp(player_enhanced_part_label(PLAYER_PART_FILTERING, 0), "Off") == 0 &&
            strcmp(player_enhanced_part_label(PLAYER_PART_FILTERING, 7), "Off") == 0);
@@ -7413,7 +7777,7 @@ static void test_play_mode_settings(void) {
            r.part[PLAYER_PART_READOUT] == 0 && r.part[PLAYER_PART_NOTICE] == 1);
     assert(player_play_launch_line(&r, line, sizeof(line)) &&
            strcmp(line, "v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;"
-                        "smooth=off;sas=off") == 0);
+                        "smooth=off;sas=off;tess=off;twin=off") == 0);
     /* Ace is offered only for a title with a usable package: library, Authentic, Enhanced,
        then back to library for title 1; Ace before library for title 2. */
     player_app_cycle_title_play_mode(app, 1);
@@ -7435,7 +7799,7 @@ static void test_play_mode_settings(void) {
            r.part[PLAYER_PART_NOTICE] == 1);
     assert(player_play_launch_line(&r, line, sizeof(line)) &&
            strcmp(line, "v1;tier=ace;af=16;text=on;readout=off;notice=on;wide=off;"
-                        "smooth=off;sas=off") == 0);
+                        "smooth=off;sas=off;tess=off;twin=off") == 0);
     assert(player_app_title_60hz_saved(app, "TEST90003") && player_app_title_60hz_on(app, 2));
     /* Ace's own part has its off switch: Ace stays, without the 60 FPS game logic. */
     player_app_set_title_60hz(app, 2, false);
@@ -7463,6 +7827,45 @@ static void test_play_mode_settings(void) {
             "{\"id\": \"fixture-60hz\", \"target_title_id\": \"fixture-title\"}");
         player_app_refresh_title_enhancements(app);
         assert(app->title_enhancements[2].available);
+    }
+    /* A published package the source tree ships (assets/enhancements, section 5.1) gives a
+       title without one in the user's data folder its Ace; a file in that folder comes first,
+       even one that cannot be used. */
+    {
+        char src_root[760], dir[800], file[860], own[860];
+        bool had_install = false;
+        char *saved_install = capture_environment_value("NK_INSTALL_ROOT", &had_install);
+        snprintf(src_root, sizeof(src_root), "%s%cshipped_src", root, sep);
+        snprintf(dir, sizeof(dir), "%s%ctools", src_root, sep);
+        assert(nk_platform_mkdir_p(dir));
+        snprintf(file, sizeof(file), "%s%cnk_cli.py", dir, sep);
+        write_text_file(file, "# fixture\n");
+        snprintf(dir, sizeof(dir), "%s%cassets%cenhancements", src_root, sep, sep);
+        assert(nk_platform_mkdir_p(dir));
+        snprintf(file, sizeof(file), "%s%ctest90002-60hz.json", dir, sep);
+        write_text_file(file,
+            "{\"id\": \"shipped-60hz\", \"target_title_id\": \"fixture-title-2\"}");
+        snprintf(app->games[1].title_id, sizeof(app->games[1].title_id), "fixture-title-2");
+        set_environment_value("NK_INSTALL_ROOT", src_root);
+        char found[NK_MAX_PATH];
+        assert(player_app_shipped_enhancements_root(app, found, sizeof(found)) &&
+               strstr(found, "shipped_src") && strstr(found, "enhancements"));
+        player_app_refresh_title_enhancements(app);
+        assert(app->title_enhancements[1].available && app->title_enhancements[1].shipped);
+        assert(strcmp(app->title_enhancements[1].package_id, "shipped-60hz") == 0);
+        assert(app->title_enhancements[2].available && !app->title_enhancements[2].shipped);
+        snprintf(own, sizeof(own), "%s%cenhancements%ctest90002-60hz.json", root, sep, sep);
+        write_text_file(own, "{}");
+        player_app_refresh_title_enhancements(app);
+        assert(!app->title_enhancements[1].available && !app->title_enhancements[1].shipped &&
+               app->title_enhancements[1].problem[0]);
+        remove(own);
+        remove(file);
+        player_app_refresh_title_enhancements(app);
+        assert(!app->title_enhancements[1].available);
+        restore_environment_value("NK_INSTALL_ROOT", saved_install, had_install);
+        free(saved_install);
+        app->games[1].title_id[0] = '\0';
     }
 
     /* Per-part off switches at the library's level: a following title gets them. */
@@ -7528,7 +7931,7 @@ static void test_play_mode_settings(void) {
     assert(r.on && r.mode == PLAYER_PLAY_ACE && r.logic_60 && r.part[PLAYER_PART_SMOOTH] == 0);
     assert(player_play_launch_line(&r, line, sizeof(line)) &&
            strcmp(line, "v1;tier=ace;af=16;text=off;readout=on;notice=on;wide=off;"
-                        "smooth=off;sas=off") == 0);
+                        "smooth=off;sas=off;tess=off;twin=off") == 0);
     assert(!player_app_title_60hz_on(app, 1) && app->games[1].enhancement_package_id[0] == '\0');
     player_app_set_experimental_60hz_session(app, false);
     assert(app->games[2].enhancement_package_id[0] == '\0');
@@ -7572,7 +7975,8 @@ static void test_play_mode_settings(void) {
                                       "\"text\": \"off\", \"readout\": \"off\", "
                                       "\"notice\": \"on\", \"wide\": \"off\", "
                                       "\"smooth\": \"off\", \"sas\": \"off\", "
-                                      "\"upscale\": \"off\"},") != NULL);
+                                      "\"tess\": \"off\", \"cull\": \"off\", \"upscale\": \"off\", "
+                                      "\"stick\": \"off\", \"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\"},") != NULL);
         assert(strstr(saved, "\"TEST90001\": {\"mode\": \"library\", \"af\": \"8\", "
                              "\"notice\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST90002\": {\"mode\": \"library\", \"logic_60\": \"off\"}")
@@ -7629,7 +8033,7 @@ static void test_play_mode_settings(void) {
         assert(nk_platform_mkdir_p(dir));
         assert(player_ace_report_path(root, "TEST90001", report, sizeof(report)));
         write_text_file(report,
-            "{\n  \"schema\": 1,\n  \"spec\": \"v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off\",\n"
+            "{\n  \"schema\": 1,\n  \"spec\": \"v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off;twin=off\",\n"
             "  \"effective\": {\"af\": 16, \"text\": true, \"readout\": false, \"notice\": true, "
             "\"wide\": \"off\", \"smooth\": \"off\"},\n  \"unavailable\": {},\n"
             "  \"rate\": {\"dominant\": \"30 Hz\", \"seconds\": {\"30 Hz\": 50.0}},\n"
@@ -7716,7 +8120,7 @@ static void test_play_mode_settings_mapping(void) {
         char line[192];
         assert(player_play_launch_line(&r, line, sizeof(line)) &&
                strcmp(line, "v1;tier=ace;af=16;text=on;readout=off;notice=on;wide=off;"
-                            "smooth=off;sas=off") == 0);
+                            "smooth=off;sas=off;tess=off;twin=off") == 0);
     }
     player_play_resolve(&back->settings, "TEST91001", &r);
     assert(r.chosen == PLAYER_PLAY_ACE && r.logic_60 && r.part[PLAYER_PART_FILTERING] == 16 &&
@@ -7769,7 +8173,8 @@ static void test_play_mode_sas_settings(void) {
     {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"smooth\": \"off\", \"sas\": \"sinc\", "
-                                      "\"upscale\": \"off\"}") != NULL);
+                                      "\"tess\": \"off\", \"cull\": \"off\", \"upscale\": \"off\", "
+                                      "\"stick\": \"off\", \"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST92001\": {\"mode\": \"library\", \"sas\": \"off\"}") != NULL);
         free(saved);
     }
@@ -7795,7 +8200,8 @@ static void test_play_mode_sas_settings(void) {
     {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"smooth\": \"off\", \"sas\": \"off\", "
-                                      "\"upscale\": \"off\"}") != NULL);
+                                      "\"tess\": \"off\", \"cull\": \"off\", \"upscale\": \"off\", "
+                                      "\"stick\": \"off\", \"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST92001\": {\"mode\": \"library\", \"sas\": \"sinc\"}") != NULL);
         free(saved);
     }
@@ -7824,6 +8230,526 @@ static void test_play_mode_sas_settings(void) {
     printf("PASS: clean pitched sound is read, resolved and saved at both levels\n");
 }
 
+/* Wider culling (contract 11.3.6, 11.2 item 2): a library "cull" and a title's own "cull" are read,
+ * the title's wins, both survive a save and a load, only an Ace launch carries the key, and a file
+ * without it leaves it off. */
+static void test_play_mode_cull_settings(void) {
+    char sep = nk_platform_path_separator();
+    char cache_root[512], root[700], path[800];
+    char line[192];
+    PlayerPlayResolved r;
+    assert(nk_platform_get_path(NK_PATH_CACHE, cache_root, sizeof(cache_root)));
+    snprintf(root, sizeof(root), "%s%cplay_mode_cull_probe", cache_root, sep);
+    assert(nk_platform_mkdir_p(root));
+    snprintf(path, sizeof(path), "%s%csettings.json", root, sep);
+    PlayerApp *app = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    PlayerApp *back = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    assert(app && back);
+
+    /* The library on; Ace is a title's own choice. One Ace title turns it off, another follows. */
+    write_text_file(path,
+        "{\"schema_version\": 2,"
+        " \"enhanced\": {\"default\": \"enhanced\", \"cull\": \"on\"},"
+        " \"title_play\": {\"TEST92001\": {\"mode\": \"ace\", \"cull\": \"off\"},"
+        " \"TEST92002\": {\"mode\": \"ace\"}}}");
+    assert(player_app_load_settings(app, path) == NK_OK);
+    assert(app->settings.enhanced.part[PLAYER_PART_CULL] == 1);
+    player_play_resolve(&app->settings, "TEST92001", &r);
+    assert(r.on && r.mode == PLAYER_PLAY_ACE && r.part[PLAYER_PART_CULL] == 0);
+    assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, "cull") == NULL);
+    player_play_resolve(&app->settings, "TEST92002", &r);       /* follows the library */
+    assert(r.on && r.mode == PLAYER_PLAY_ACE && r.part[PLAYER_PART_CULL] == 1);
+    assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, "tier=ace;") != NULL &&
+           strcmp(line + strlen(line) - 8, ";cull=on") == 0);
+    player_play_resolve(&app->settings, "TEST92003", &r);       /* Enhanced: read, never launched */
+    assert(r.on && r.mode == PLAYER_PLAY_ENHANCED && r.part[PLAYER_PART_CULL] == 1);
+    assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, "cull") == NULL);
+    assert(player_app_save_settings(app, path) == NK_OK);
+    {
+        char *saved = read_text_file(path);
+        assert(saved && strstr(saved, "\"cull\": \"on\", \"upscale\": \"off\", "
+                                      "\"stick\": \"off\", \"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\"}") != NULL);
+        free(saved);
+    }
+    memset(back, 0, sizeof(*back));
+    assert(player_app_load_settings(back, path) == NK_OK);
+    assert(back->settings.enhanced.part[PLAYER_PART_CULL] == 1);
+    player_play_resolve(&back->settings, "TEST92001", &r);
+    assert(r.on && r.part[PLAYER_PART_CULL] == 0);
+
+    /* A file that never had the key leaves it off. */
+    write_text_file(path,
+        "{\"schema_version\": 2, \"enhanced\": {\"default\": \"enhanced\"},"
+        " \"title_play\": {\"TEST92001\": {\"mode\": \"ace\"}}}");
+    memset(app, 0, sizeof(*app));
+    assert(player_app_load_settings(app, path) == NK_OK);
+    assert(app->settings.enhanced.part[PLAYER_PART_CULL] == 0);
+    player_play_resolve(&app->settings, "TEST92001", &r);
+    assert(r.on && r.mode == PLAYER_PLAY_ACE && r.part[PLAYER_PART_CULL] == 0);
+    assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, "cull") == NULL);
+
+    remove(path);
+    (void)test_rmdir(root);
+    free(back);
+    free(app);
+    printf("PASS: wider culling is read, resolved and saved at both levels, and only Ace launches it\n");
+}
+
+/* Stick dead-zone remap (contract 11.3.11, 11.2 item 2): a library "stick" and a title's own
+ * "stick" are read, the title's wins, both survive a save and a load, and only an Ace launch of a
+ * title whose catalog entry declares a dead zone carries the key, with the catalog's count. The
+ * built-in UCUS98701 declares 64; a disc the catalog does not know declares none. */
+static void expect_line_parses_in_runtime(const PlayerPlayResolved *r);
+
+static void test_play_mode_stick_settings(void) {
+    char sep = nk_platform_path_separator();
+    char cache_root[512], root[700], path[800];
+    char line[192];
+    PlayerPlayResolved r;
+    assert(nk_platform_get_path(NK_PATH_CACHE, cache_root, sizeof(cache_root)));
+    snprintf(root, sizeof(root), "%s%cplay_mode_stick_probe", cache_root, sep);
+    assert(nk_platform_mkdir_p(root));
+    snprintf(path, sizeof(path), "%s%csettings.json", root, sep);
+    PlayerApp *app = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    PlayerApp *back = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    assert(app && back);
+
+    /* Off in a fresh library and in no graphics preset. */
+    assert(player_enhanced_part(PLAYER_PART_STICK)->fresh == 0);
+    assert(strcmp(player_enhanced_part(PLAYER_PART_STICK)->key, "stick") == 0);
+    for (int p = PLAYER_PRESET_LOW; p < PLAYER_PRESET_COUNT; p++) {
+        assert(player_graphics_preset_row(p)->part[PLAYER_PART_STICK] == -1);
+    }
+
+    /* The library on; Ace is a title's own choice. */
+    write_text_file(path,
+        "{\"schema_version\": 2,"
+        " \"enhanced\": {\"default\": \"enhanced\", \"stick\": \"on\"},"
+        " \"title_play\": {\"UCUS98701\": {\"mode\": \"ace\"},"
+        " \"TEST92001\": {\"mode\": \"ace\"}}}");
+    assert(player_app_load_settings(app, path) == NK_OK);
+    assert(app->settings.enhanced.part[PLAYER_PART_STICK] == 1);
+    player_play_resolve(&app->settings, "UCUS98701", &r);
+    assert(r.on && r.mode == PLAYER_PLAY_ACE && r.part[PLAYER_PART_STICK] == 1 && r.stick_counts == 64);
+    assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, "tier=ace;") != NULL &&
+           strcmp(line + strlen(line) - 9, ";stick=64") == 0);
+    /* The part enum puts stick last (the rows and the saved order), but the Ace line keeps its own
+       sequence: tess, twin, then stick, then cull. */
+    r.part[PLAYER_PART_CULL] = 1;
+    assert(player_play_launch_line(&r, line, sizeof(line)) &&
+           strcmp(line + strlen(line) - 17, ";stick=64;cull=on") == 0 &&
+           strstr(line, ";tess=off;twin=off;stick=64") != NULL);
+    /* Short loads too: stick, then load, then cull (contract 11.3.10, 11.3.11). */
+    r.part[PLAYER_PART_LOAD] = 1;
+    assert(player_play_launch_line(&r, line, sizeof(line)) &&
+           strcmp(line + strlen(line) - 27, ";stick=64;load=fast;cull=on") == 0 &&
+           strstr(line, ";tess=off;twin=off;stick=64") != NULL);
+    expect_line_parses_in_runtime(&r);   /* the runtime writes the same order */
+    r.part[PLAYER_PART_LOAD] = 0;
+    r.part[PLAYER_PART_CULL] = 0;
+    player_play_resolve(&app->settings, "TEST92001", &r);       /* no declared dead zone */
+    assert(r.on && r.mode == PLAYER_PLAY_ACE && r.part[PLAYER_PART_STICK] == 1 && r.stick_counts == 0);
+    assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, "stick") == NULL);
+    player_play_resolve(&app->settings, "TEST92003", &r);       /* Enhanced: read, never launched */
+    assert(r.on && r.mode == PLAYER_PLAY_ENHANCED && r.part[PLAYER_PART_STICK] == 1);
+    assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, "stick") == NULL);
+    assert(player_app_save_settings(app, path) == NK_OK);
+    {
+        char *saved = read_text_file(path);
+        assert(saved && strstr(saved, "\"cull\": \"off\", \"upscale\": \"off\", \"stick\": \"on\", "
+                                      "\"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\"}") != NULL);
+        free(saved);
+    }
+
+    /* A title's own off wins over the library's on, and survives a save and a load. */
+    write_text_file(path,
+        "{\"schema_version\": 2,"
+        " \"enhanced\": {\"default\": \"enhanced\", \"stick\": \"on\"},"
+        " \"title_play\": {\"UCUS98701\": {\"mode\": \"ace\", \"stick\": \"off\"}}}");
+    memset(app, 0, sizeof(*app));
+    assert(player_app_load_settings(app, path) == NK_OK);
+    player_play_resolve(&app->settings, "UCUS98701", &r);
+    assert(r.on && r.mode == PLAYER_PLAY_ACE && r.part[PLAYER_PART_STICK] == 0 && r.stick_counts == 64);
+    assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, "stick") == NULL);
+    assert(player_app_save_settings(app, path) == NK_OK);
+    {
+        char *saved = read_text_file(path);
+        assert(saved && strstr(saved, "\"UCUS98701\": {\"mode\": \"ace\", \"stick\": \"off\"}") != NULL);
+        free(saved);
+    }
+    memset(back, 0, sizeof(*back));
+    assert(player_app_load_settings(back, path) == NK_OK);
+    assert(back->settings.enhanced.part[PLAYER_PART_STICK] == 1);
+    player_play_resolve(&back->settings, "UCUS98701", &r);
+    assert(r.on && r.part[PLAYER_PART_STICK] == 0);
+
+    /* A file that never had the key leaves it off, and an authentic launch has no line. */
+    write_text_file(path,
+        "{\"schema_version\": 2, \"enhanced\": {\"default\": \"enhanced\"},"
+        " \"title_play\": {\"UCUS98701\": {\"mode\": \"ace\"}, \"TEST92002\": {\"mode\": \"authentic\"}}}");
+    memset(app, 0, sizeof(*app));
+    assert(player_app_load_settings(app, path) == NK_OK);
+    assert(app->settings.enhanced.part[PLAYER_PART_STICK] == 0);
+    player_play_resolve(&app->settings, "UCUS98701", &r);
+    assert(r.on && r.mode == PLAYER_PLAY_ACE && r.part[PLAYER_PART_STICK] == 0);
+    assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, "stick") == NULL);
+    player_play_resolve(&app->settings, "TEST92002", &r);
+    assert(!r.on && player_play_launch_line(&r, line, sizeof(line)) && strcmp(line, "off") == 0);
+
+    /* An overlay manifest carries its own input block into its entry, which the player finds
+       for its disc: loaded as the player loads one (nk_title_manifest_load_overlay), a disc only
+       an overlay names gets the overlay's 40, and the same overlay without the block has none.
+       The player refuses an overlay for a disc the public catalog names, so HST keeps its public
+       64; an overlay loaded with an override replaces the public entry whole, its block too. */
+    {
+        static const char overlay_fmt[] =
+            "{\"schema_version\":1,\"id\":\"%s\",\"display_name\":\"Stick Overlay\","
+            "\"kind\":\"retail\",\"disc\":{\"id\":\"%s\",\"region\":\"NA\","
+            "\"revision_policy\":\"exact-disc-id\"},"
+            "\"executable\":{\"base\":0,\"entry\":142606336,\"bss_metadata_source\":\"elf\","
+            "\"extra_executable_spans\":[]},\"modules\":[],"
+            "\"filesystem\":{\"data_root\":\"data\",\"memory_stick_root\":\"ms\","
+            "\"device_prefixes\":[\"host0:\"]},\"hle_profile\":\"standard\","
+            "\"feature_requirements\":[\"allegrex\"],\"verification_profile\":\"smoke\"%s}";
+        static const char input_40[] = ",\"input\":{\"analog_dead_zone\":{\"shape\":\"square\",\"counts\":40}}";
+        char manifest[2048], mpath[800], err[256];
+        snprintf(mpath, sizeof(mpath), "%s%cstick_overlay.json", root, sep);
+        write_text_file(path,
+            "{\"schema_version\": 2, \"enhanced\": {\"default\": \"enhanced\", \"stick\": \"on\"},"
+            " \"title_play\": {\"UCUS98701\": {\"mode\": \"ace\"}, \"TEST92011\": {\"mode\": \"ace\"}}}");
+        memset(app, 0, sizeof(*app));
+        assert(player_app_load_settings(app, path) == NK_OK);
+        nk_title_catalog_clear_overlay();
+
+        snprintf(manifest, sizeof(manifest), overlay_fmt, "stick-overlay-check", "TEST92011", input_40);
+        write_text_file(mpath, manifest);
+        assert(nk_title_manifest_load_overlay(mpath, err, sizeof(err)));
+        player_play_resolve(&app->settings, "TEST92011", &r);
+        assert(r.on && r.mode == PLAYER_PLAY_ACE && r.part[PLAYER_PART_STICK] == 1 && r.stick_counts == 40);
+        assert(player_play_launch_line(&r, line, sizeof(line)) &&
+               strcmp(line + strlen(line) - 9, ";stick=40") == 0);
+
+        snprintf(manifest, sizeof(manifest), overlay_fmt, "stick-overlay-check", "TEST92011", "");
+        write_text_file(mpath, manifest);
+        assert(nk_title_manifest_load_overlay(mpath, err, sizeof(err)));
+        player_play_resolve(&app->settings, "TEST92011", &r);
+        assert(r.on && r.stick_counts == 0);
+        assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, "stick") == NULL);
+
+        snprintf(manifest, sizeof(manifest), overlay_fmt, "stick-overlay-hst", "UCUS98701", input_40);
+        write_text_file(mpath, manifest);
+        assert(!nk_title_manifest_load_overlay(mpath, err, sizeof(err)));
+        player_play_resolve(&app->settings, "UCUS98701", &r);
+        assert(r.stick_counts == 64);
+
+        assert(nk_title_manifest_load_overlay_ext(mpath, true, err, sizeof(err)));
+        player_play_resolve(&app->settings, "UCUS98701", &r);
+        assert(r.stick_counts == 40);
+        snprintf(manifest, sizeof(manifest), overlay_fmt, "stick-overlay-hst", "UCUS98701", "");
+        write_text_file(mpath, manifest);
+        assert(nk_title_manifest_load_overlay_ext(mpath, true, err, sizeof(err)));
+        player_play_resolve(&app->settings, "UCUS98701", &r);
+        assert(r.stick_counts == 0);
+
+        nk_title_catalog_clear_overlay();
+        player_play_resolve(&app->settings, "UCUS98701", &r);
+        assert(r.stick_counts == 64);   /* the public entry again */
+        remove(mpath);
+    }
+
+    remove(path);
+    (void)test_rmdir(root);
+    free(back);
+    free(app);
+    printf("PASS: stick dead-zone remap is read, resolved and saved at both levels, and only an Ace "
+           "launch of a title that declares a dead zone carries it\n");
+}
+
+/* Short loads (contract 11.3.10, 11.2 item 2): off in a fresh file and in every graphics
+ * preset, its row says it changes the game's timing, a library "load" and a title's own are read,
+ * the title's wins, only an Ace launch with it on carries ";load=fast", and an unknown word is off. */
+static void test_play_mode_load_settings(void) {
+    char sep = nk_platform_path_separator();
+    char cache_root[512], root[700], path[800];
+    char line[192];
+    PlayerPlayResolved r;
+    assert(nk_platform_get_path(NK_PATH_CACHE, cache_root, sizeof(cache_root)));
+    snprintf(root, sizeof(root), "%s%cplay_mode_load_probe", cache_root, sep);
+    assert(nk_platform_mkdir_p(root));
+    snprintf(path, sizeof(path), "%s%csettings.json", root, sep);
+    PlayerApp *app = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    PlayerApp *back = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    assert(app && back);
+
+    /* Fresh: off, named, guest-timing text, and no preset turns it on. */
+    player_app_settings_init_default(&app->settings);
+    assert(app->settings.enhanced.part[PLAYER_PART_LOAD] == 0);
+    assert(player_enhanced_part(PLAYER_PART_LOAD)->fresh == 0);
+    assert(strcmp(player_enhanced_part(PLAYER_PART_LOAD)->key, "load") == 0);
+    assert(strcmp(player_enhanced_part(PLAYER_PART_LOAD)->name, "Short loads") == 0);
+    assert(strstr(player_enhanced_part(PLAYER_PART_LOAD)->sentence, "Ace only") != NULL);
+    assert(strstr(player_enhanced_part(PLAYER_PART_LOAD)->sentence, "changes the game's timing") != NULL);
+    app->settings.enhanced.library = PLAYER_PLAY_ENHANCED;
+    for (int preset = PLAYER_PRESET_LOW; preset < PLAYER_PRESET_COUNT; preset++) {
+        player_app_apply_graphics_preset(app, preset);
+        player_play_resolve(&app->settings, "TEST95001", &r);
+        assert(r.on && r.part[PLAYER_PART_LOAD] == 0);
+        assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, "load") == NULL);
+    }
+
+    /* The library on; one Ace title turns it off, one follows, one stays Enhanced. */
+    write_text_file(path,
+        "{\"schema_version\": 2,"
+        " \"enhanced\": {\"default\": \"enhanced\", \"load\": \"fast\"},"
+        " \"title_play\": {\"TEST95001\": {\"mode\": \"ace\", \"load\": \"off\"},"
+        " \"TEST95002\": {\"mode\": \"ace\"}}}");
+    memset(app, 0, sizeof(*app));
+    assert(player_app_load_settings(app, path) == NK_OK);
+    assert(app->settings.enhanced.part[PLAYER_PART_LOAD] == 1);
+    player_play_resolve(&app->settings, "TEST95001", &r);
+    assert(r.on && r.mode == PLAYER_PLAY_ACE && r.part[PLAYER_PART_LOAD] == 0);
+    assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, "load") == NULL);
+    player_play_resolve(&app->settings, "TEST95002", &r);       /* follows the library */
+    assert(r.on && r.mode == PLAYER_PLAY_ACE && r.part[PLAYER_PART_LOAD] == 1);
+    assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, "tier=ace;") != NULL &&
+           strcmp(line + strlen(line) - 10, ";load=fast") == 0);
+    player_play_resolve(&app->settings, "TEST95003", &r);       /* Enhanced: read, never launched */
+    assert(r.on && r.mode == PLAYER_PLAY_ENHANCED && r.part[PLAYER_PART_LOAD] == 1);
+    assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, "load") == NULL);
+    assert(player_app_save_settings(app, path) == NK_OK);
+    {
+        char *saved = read_text_file(path);
+        assert(saved && strstr(saved, "\"cull\": \"off\", \"upscale\": \"off\", \"stick\": \"off\", "
+                                      "\"load\": \"fast\", \"twin\": \"off\", \"ssaa\": \"off\"}") != NULL);
+        assert(strstr(saved, "\"TEST95001\": {\"mode\": \"ace\", \"load\": \"off\"}") != NULL);
+        free(saved);
+    }
+    memset(back, 0, sizeof(*back));
+    assert(player_app_load_settings(back, path) == NK_OK);
+    assert(back->settings.enhanced.part[PLAYER_PART_LOAD] == 1);
+    player_play_resolve(&back->settings, "TEST95001", &r);
+    assert(r.on && r.part[PLAYER_PART_LOAD] == 0);
+
+    /* With cull on too, the line ends with both optional keys, cull last. */
+    app->settings.enhanced.part[PLAYER_PART_CULL] = 1;
+    player_play_resolve(&app->settings, "TEST95002", &r);
+    assert(player_play_launch_line(&r, line, sizeof(line)) &&
+           strcmp(line + strlen(line) - 18, ";load=fast;cull=on") == 0);
+
+    /* An unknown word reads as off. */
+    write_text_file(path,
+        "{\"schema_version\": 2, \"enhanced\": {\"default\": \"enhanced\", \"load\": \"faster\"},"
+        " \"title_play\": {\"TEST95002\": {\"mode\": \"ace\"}}}");
+    memset(app, 0, sizeof(*app));
+    assert(player_app_load_settings(app, path) == NK_OK);
+    assert(app->settings.enhanced.part[PLAYER_PART_LOAD] == 0);
+    player_play_resolve(&app->settings, "TEST95002", &r);
+    assert(r.on && r.mode == PLAYER_PLAY_ACE && r.part[PLAYER_PART_LOAD] == 0);
+    assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, "load") == NULL);
+
+    remove(path);
+    (void)test_rmdir(root);
+    free(back);
+    free(app);
+    printf("PASS: short loads are off by default, read and saved at both levels, and only Ace "
+           "launches them\n");
+}
+
+/* Supersampling (contract 10.21, #2073): off in a fresh file and in every graphics preset, its row
+ * names the GPU cost, a library "ssaa" and a title's own are read (2, 4 or off), the title's wins,
+ * Enhanced and Ace launches both carry ";ssaa=<factor>" (after load, before cull), Authentic
+ * carries no line, and an unknown word is off. */
+static void test_play_mode_ssaa_settings(void) {
+    char sep = nk_platform_path_separator();
+    char cache_root[512], root[700], path[800];
+    char line[192];
+    PlayerPlayResolved r;
+    assert(nk_platform_get_path(NK_PATH_CACHE, cache_root, sizeof(cache_root)));
+    snprintf(root, sizeof(root), "%s%cplay_mode_ssaa_probe", cache_root, sep);
+    assert(nk_platform_mkdir_p(root));
+    snprintf(path, sizeof(path), "%s%csettings.json", root, sep);
+    PlayerApp *app = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    PlayerApp *back = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    assert(app && back);
+
+    /* Fresh: off, named, its cost in the sentence, and no preset turns it on. */
+    player_app_settings_init_default(&app->settings);
+    const PlayerEnhancedPartInfo *info = player_enhanced_part(PLAYER_PART_SSAA);
+    assert(app->settings.enhanced.part[PLAYER_PART_SSAA] == 0);
+    assert(info->fresh == 0 && info->value_count == 3);
+    assert(strcmp(info->key, "ssaa") == 0);
+    assert(strcmp(info->name, "Supersampling") == 0);
+    assert(strstr(info->sentence, "GPU work") != NULL);
+    assert(strcmp(player_enhanced_part_label(PLAYER_PART_SSAA, 2), "2x") == 0);
+    assert(strcmp(player_enhanced_part_label(PLAYER_PART_SSAA, 4), "4x") == 0);
+    assert(strcmp(player_enhanced_part_label(PLAYER_PART_SSAA, 0), "Off") == 0);
+    app->settings.enhanced.library = PLAYER_PLAY_ENHANCED;
+    for (int preset = PLAYER_PRESET_LOW; preset < PLAYER_PRESET_COUNT; preset++) {
+        player_app_apply_graphics_preset(app, preset);
+        player_play_resolve(&app->settings, "TEST96001", &r);
+        assert(r.on && r.part[PLAYER_PART_SSAA] == 0);
+        assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, "ssaa") == NULL);
+    }
+
+    /* The library at 2x; one title at 4x, one off, one following; one Ace title. */
+    write_text_file(path,
+        "{\"schema_version\": 2,"
+        " \"enhanced\": {\"default\": \"enhanced\", \"ssaa\": \"2\"},"
+        " \"title_play\": {\"TEST96001\": {\"ssaa\": \"4\"},"
+        " \"TEST96002\": {\"ssaa\": \"off\"},"
+        " \"TEST96004\": {\"mode\": \"ace\"},"
+        " \"TEST96005\": {\"mode\": \"authentic\"}}}");
+    memset(app, 0, sizeof(*app));
+    assert(player_app_load_settings(app, path) == NK_OK);
+    assert(app->settings.enhanced.part[PLAYER_PART_SSAA] == 2);
+    player_play_resolve(&app->settings, "TEST96001", &r);       /* the title's own wins */
+    assert(r.on && r.mode == PLAYER_PLAY_ENHANCED && r.part[PLAYER_PART_SSAA] == 4);
+    assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, "tier=enhanced;") != NULL &&
+           strcmp(line + strlen(line) - 7, ";ssaa=4") == 0);
+    player_play_resolve(&app->settings, "TEST96002", &r);
+    assert(r.on && r.part[PLAYER_PART_SSAA] == 0);
+    assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, "ssaa") == NULL);
+    player_play_resolve(&app->settings, "TEST96003", &r);       /* follows the library */
+    assert(r.on && r.part[PLAYER_PART_SSAA] == 2);
+    assert(player_play_launch_line(&r, line, sizeof(line)) && strcmp(line + strlen(line) - 7, ";ssaa=2") == 0);
+    player_play_resolve(&app->settings, "TEST96004", &r);       /* Ace carries it too */
+    assert(r.on && r.mode == PLAYER_PLAY_ACE && r.part[PLAYER_PART_SSAA] == 2);
+    assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, "tier=ace;") != NULL &&
+           strcmp(line + strlen(line) - 7, ";ssaa=2") == 0);
+    player_play_resolve(&app->settings, "TEST96005", &r);       /* Authentic: no line */
+    assert(!r.on);
+    assert(player_play_launch_line(&r, line, sizeof(line)) && strcmp(line, "off") == 0);
+    assert(player_app_save_settings(app, path) == NK_OK);
+    {
+        char *saved = read_text_file(path);
+        assert(saved && strstr(saved, "\"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"2\"}") != NULL);
+        assert(strstr(saved, "\"ssaa\": \"4\"}") != NULL && strstr(saved, "\"ssaa\": \"off\"}") != NULL);
+        free(saved);
+    }
+    memset(back, 0, sizeof(*back));
+    assert(player_app_load_settings(back, path) == NK_OK);
+    assert(back->settings.enhanced.part[PLAYER_PART_SSAA] == 2);
+    player_play_resolve(&back->settings, "TEST96001", &r);
+    assert(r.on && r.part[PLAYER_PART_SSAA] == 4);
+
+    /* With load and cull on in an Ace launch, ssaa sits between them (the Ace line's order). */
+    app->settings.enhanced.part[PLAYER_PART_LOAD] = 1;
+    app->settings.enhanced.part[PLAYER_PART_CULL] = 1;
+    player_play_resolve(&app->settings, "TEST96004", &r);
+    assert(player_play_launch_line(&r, line, sizeof(line)) &&
+           strcmp(line + strlen(line) - 25, ";load=fast;ssaa=2;cull=on") == 0);
+
+    /* An unknown word reads as off. */
+    write_text_file(path,
+        "{\"schema_version\": 2, \"enhanced\": {\"default\": \"enhanced\", \"ssaa\": \"8\"}}");
+    memset(app, 0, sizeof(*app));
+    assert(player_app_load_settings(app, path) == NK_OK);
+    assert(app->settings.enhanced.part[PLAYER_PART_SSAA] == 0);
+    player_play_resolve(&app->settings, "TEST96003", &r);
+    assert(r.on && r.part[PLAYER_PART_SSAA] == 0);
+    assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, "ssaa") == NULL);
+
+    remove(path);
+    (void)test_rmdir(root);
+    free(back);
+    free(app);
+    printf("PASS: supersampling is off by default and in every preset, read and saved at both levels, "
+           "and Enhanced and Ace launches carry it\n");
+}
+
+/* Finer patches (contract 10.14, 11.3.7) at both levels: off in a fresh file and in no graphics
+ * preset, a library "tess" and a title's own are read (2, 3, 4 or off), the title's wins, an unknown
+ * word is off, the launch line carries the factor, and an Authentic run has no line. */
+static void test_play_mode_tess_settings(void) {
+    char sep = nk_platform_path_separator();
+    char cache_root[512], root[700], path[800];
+    char line[192];
+    PlayerPlayResolved r;
+    assert(nk_platform_get_path(NK_PATH_CACHE, cache_root, sizeof(cache_root)));
+    snprintf(root, sizeof(root), "%s%cplay_mode_tess_probe", cache_root, sep);
+    assert(nk_platform_mkdir_p(root));
+    snprintf(path, sizeof(path), "%s%csettings.json", root, sep);
+    PlayerApp *app = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    PlayerApp *back = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    assert(app && back);
+
+    /* Fresh: off, so an Enhanced run is not given it, and every graphics preset leaves it off. */
+    player_app_settings_init_default(&app->settings);
+    assert(app->settings.enhanced.part[PLAYER_PART_TESS] == 0);
+    assert(player_enhanced_part(PLAYER_PART_TESS)->fresh == 0);
+    assert(strstr(player_enhanced_part(PLAYER_PART_TESS)->sentence, "alters GE timing") != NULL);
+    app->settings.enhanced.library = PLAYER_PLAY_ENHANCED;
+    for (int preset = PLAYER_PRESET_LOW; preset < PLAYER_PRESET_COUNT; preset++) {
+        player_app_apply_graphics_preset(app, preset);
+        player_play_resolve(&app->settings, "TEST93001", &r);
+        assert(r.on && r.part[PLAYER_PART_TESS] == 0);
+        assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, ";tess=off") != NULL);
+    }
+
+    /* The library on at 4, one title off and one at 2 over it. */
+    write_text_file(path,
+        "{\"schema_version\": 2,"
+        " \"enhanced\": {\"default\": \"enhanced\", \"tess\": \"4\"},"
+        " \"title_play\": {\"TEST93001\": {\"mode\": \"library\", \"tess\": \"off\"},"
+        " \"TEST93002\": {\"mode\": \"ace\", \"tess\": \"2\"}}}");
+    assert(player_app_load_settings(app, path) == NK_OK);
+    assert(app->settings.enhanced.part[PLAYER_PART_TESS] == 4);
+    player_play_resolve(&app->settings, "TEST93001", &r);
+    assert(r.on && r.part[PLAYER_PART_TESS] == 0);
+    assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, ";tess=off") != NULL);
+    player_play_resolve(&app->settings, "TEST93002", &r);
+    assert(r.on && r.mode == PLAYER_PLAY_ACE && r.part[PLAYER_PART_TESS] == 2);
+    assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, "tier=ace;") != NULL &&
+           strstr(line, ";tess=2") != NULL);
+    player_play_resolve(&app->settings, "TEST93003", &r);       /* a title of its own follows */
+    assert(r.on && r.part[PLAYER_PART_TESS] == 4);
+    assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, ";tess=4") != NULL);
+    assert(player_app_save_settings(app, path) == NK_OK);
+    {
+        char *saved = read_text_file(path);
+        assert(saved && strstr(saved, "\"sas\": \"off\", \"tess\": \"4\", \"cull\": \"off\", "
+                                      "\"upscale\": \"off\", \"stick\": \"off\", \"load\": \"off\", "
+                                      "\"twin\": \"off\", \"ssaa\": \"off\"}") != NULL);
+        assert(strstr(saved, "\"TEST93001\": {\"mode\": \"library\", \"tess\": \"off\"}") != NULL);
+        assert(strstr(saved, "\"TEST93002\": {\"mode\": \"ace\", \"tess\": \"2\"}") != NULL);
+        free(saved);
+    }
+    memset(back, 0, sizeof(*back));
+    assert(player_app_load_settings(back, path) == NK_OK);
+    assert(back->settings.enhanced.part[PLAYER_PART_TESS] == 4);
+    player_play_resolve(&back->settings, "TEST93002", &r);
+    assert(r.on && r.part[PLAYER_PART_TESS] == 2);
+
+    /* A factor this build does not have, and a file from before the key, are off. */
+    write_text_file(path,
+        "{\"schema_version\": 2,"
+        " \"enhanced\": {\"default\": \"enhanced\", \"tess\": \"5\"},"
+        " \"title_play\": {\"TEST93001\": {\"mode\": \"library\", \"tess\": \"1\"}}}");
+    memset(app, 0, sizeof(*app));
+    assert(player_app_load_settings(app, path) == NK_OK);
+    assert(app->settings.enhanced.part[PLAYER_PART_TESS] == 0);
+    player_play_resolve(&app->settings, "TEST93001", &r);
+    assert(r.on && r.part[PLAYER_PART_TESS] == 0);
+    write_text_file(path, "{\"schema_version\": 2, \"enhanced\": {\"default\": \"enhanced\"}}");
+    memset(app, 0, sizeof(*app));
+    assert(player_app_load_settings(app, path) == NK_OK);
+    player_play_resolve(&app->settings, "TEST93001", &r);
+    assert(r.on && r.part[PLAYER_PART_TESS] == 0);
+
+    /* Authentic: no line at all, so the runtime has no factor. */
+    write_text_file(path, "{\"schema_version\": 2, \"enhanced\": {\"default\": \"authentic\", \"tess\": \"4\"}}");
+    memset(app, 0, sizeof(*app));
+    assert(player_app_load_settings(app, path) == NK_OK);
+    player_play_resolve(&app->settings, "TEST93001", &r);
+    assert(!r.on && player_play_launch_line(&r, line, sizeof(line)) && strcmp(line, "off") == 0);
+
+    remove(path);
+    (void)test_rmdir(root);
+    free(back);
+    free(app);
+    printf("PASS: finer patches are read, resolved and saved at both levels, off by default\n");
+}
+
 /* Graphics presets (#2150), an overlay: choosing one changes no row, an Enhanced or Ace
  * session takes the preset's values, an Authentic session keeps the user's rows under every
  * preset, editing a row it sets makes it Custom, and the choice is saved and loaded. */
@@ -7833,7 +8759,7 @@ static void graphics_preset_session(const PlayerSettings *settings, NkRuntimeCon
        preset for an Enhanced or Ace session. */
     memset(config, 0, sizeof(*config));
     player_app_apply_settings_to_session(settings, config);
-    player_play_resolve(settings, "TEST92150", r);
+    player_play_config_session(settings, "TEST92150", false, false, config, r);
     assert(player_play_launch_line(r, line, cap));
     player_session_apply_graphics_preset(settings, r->on, config);
 }
@@ -7843,7 +8769,6 @@ static void test_graphics_presets(void) {
     char cache_root[512], root[700], path[800];
     char line[192], custom_line[192];
     char note[192];
-    bool warns = true;
     PlayerPlayResolved r, custom_r;
     NkRuntimeConfig config, custom_config;
     PlayerSettings custom;
@@ -7858,8 +8783,8 @@ static void test_graphics_presets(void) {
     player_app_settings_init_default(&app->settings);
     assert(player_app_graphics_preset(app) == PLAYER_PRESET_CUSTOM);
     assert(strcmp(player_app_graphics_preset_label(app), "Custom") == 0);
-    assert(!player_app_graphics_preset_note(app, note, sizeof(note), &warns));
-    assert(note[0] == '\0' && !warns);
+    assert(!player_app_graphics_preset_note(app, note, sizeof(note)));
+    assert(note[0] == '\0');
     assert(player_graphics_preset_row(PLAYER_PRESET_CUSTOM) == NULL);
     assert(player_graphics_preset_row(PLAYER_PRESET_COUNT) == NULL);
     app->settings.graphics_preset = PLAYER_PRESET_COUNT;
@@ -7888,19 +8813,24 @@ static void test_graphics_presets(void) {
             assert(player_app_graphics_preset(app) == p);
             assert(strcmp(player_app_graphics_preset_label(app), row->value) == 0);
             assert(app->settings_notice[0] == '\0');
-            /* The note says where the preset applies, and names a value it cannot set. */
-            assert(player_app_graphics_preset_note(app, note, sizeof(note), &warns));
+            /* The note says where the preset applies and names the parts it sets, on and off. */
+            assert(player_app_graphics_preset_note(app, note, sizeof(note)));
             assert(strstr(note, row->label) != NULL &&
                    strstr(note, " is used in Enhanced and Ace") != NULL &&
-                   strstr(note, "Authentic uses your own display settings.") != NULL);
-            assert(warns == row->upscaler);
-            assert((strstr(note, "Sharper enlarging") != NULL) == row->upscaler);
-            if (row->upscaler) {
-                assert(strcmp(player_app_graphics_preset_label(app), "Ultra") == 0);
-            }
+                   strstr(note, "Authentic uses your settings.") != NULL);
+            assert(strcmp(note + strlen(row->label),
+                          row->part[PLAYER_PART_UPSCALE] == 1
+                              ? " is used in Enhanced and Ace, with crisp text and FSR 1 on. "
+                                "Authentic uses your settings."
+                              : " is used in Enhanced and Ace, with crisp text on and FSR 1 off. "
+                                "Authentic uses your settings.") == 0);
 
             /* Authentic: the session's config and launch line equal Custom's with the same
-               rows, under every preset. */
+               rows, under every preset. The library's parts are the opposite of the preset's,
+               so the Enhanced session below shows which one it took. */
+            app->settings.enhanced.part[PLAYER_PART_TEXT] = !row->part[PLAYER_PART_TEXT];
+            app->settings.enhanced.part[PLAYER_PART_UPSCALE] = !row->part[PLAYER_PART_UPSCALE];
+            custom.enhanced = app->settings.enhanced;
             graphics_preset_session(&app->settings, &config, &r, line, sizeof(line));
             graphics_preset_session(&custom, &custom_config, &custom_r, custom_line,
                                     sizeof(custom_line));
@@ -7910,38 +8840,200 @@ static void test_graphics_presets(void) {
             assert(config.resolution_scale == custom.resolution_scale &&
                    config.present_scaling == NK_PRESENT_SCALING_BILINEAR && !config.vsync &&
                    config.fullscreen == (fs != 0));
-            assert(config.present_upscale == NK_PRESENT_UPSCALE_OFF && config.ace_spec[0] == '\0');
+            assert(config.present_upscale == NK_PRESENT_UPSCALE_OFF && strcmp(config.ace_spec, "off") == 0);
 
-            /* Enhanced: the session takes the preset's values; the rest is the rows'. */
+            /* Enhanced: the session takes the preset's values and parts; the rest is the
+               rows' and the library's. */
             app->settings.enhanced.library = PLAYER_PLAY_ENHANCED;
             custom.enhanced.library = PLAYER_PLAY_ENHANCED;
             graphics_preset_session(&app->settings, &config, &r, line, sizeof(line));
             graphics_preset_session(&custom, &custom_config, &custom_r, custom_line,
                                     sizeof(custom_line));
-            assert(r.on && custom_r.on && strcmp(line, custom_line) == 0);
+            assert(r.on && custom_r.on);
             assert(config.resolution_scale == row->resolution_scale);
             assert(config.present_scaling == row->present_scaling);
             assert(config.vsync == row->vsync);
             assert(config.fullscreen == (row->fullscreen >= 0 ? row->fullscreen != 0 : fs != 0));
             assert(config.fps_cap == custom_config.fps_cap &&
-                   config.master_volume == custom_config.master_volume &&
-                   config.present_upscale == custom_config.present_upscale);
+                   config.master_volume == custom_config.master_volume);
+            for (int part = 0; part < PLAYER_PART_COUNT; part++) {
+                /* Only presentation parts; every other part is the library's. A new part
+                   needs its own choice here and in k_graphics_presets. */
+                if (part == PLAYER_PART_TEXT || part == PLAYER_PART_UPSCALE) {
+                    assert(row->part[part] == 0 || row->part[part] == 1);
+                    assert(r.part[part] == row->part[part]);
+                    assert(custom_r.part[part] == custom.enhanced.part[part]);
+                } else {
+                    assert(row->part[part] == -1);
+                    assert(r.part[part] == custom_r.part[part]);
+                }
+            }
+            /* Finer patches and Full 32-bit colour are in no preset: the row leaves both to the
+               library (a designated initializer would make a part it leaves out 0, "off"). */
+            assert(row->part[PLAYER_PART_TESS] == -1 && row->part[PLAYER_PART_TWIN] == -1);
+            assert(strstr(line, row->part[PLAYER_PART_TEXT] ? ";text=on" : ";text=off") != NULL);
+            assert(config.present_upscale == (row->part[PLAYER_PART_UPSCALE] == 1
+                                                  ? NK_PRESENT_UPSCALE_FSR1
+                                                  : NK_PRESENT_UPSCALE_OFF));
+            assert(custom_config.present_upscale == (custom.enhanced.part[PLAYER_PART_UPSCALE] == 1
+                                                         ? NK_PRESENT_UPSCALE_FSR1
+                                                         : NK_PRESENT_UPSCALE_OFF));
+            assert(player_settings_library_part(&app->settings, PLAYER_PART_UPSCALE) ==
+                   row->part[PLAYER_PART_UPSCALE]);
+            assert(player_settings_library_part(&custom, PLAYER_PART_UPSCALE) ==
+                   custom.enhanced.part[PLAYER_PART_UPSCALE]);
             assert(custom_config.resolution_scale == custom.resolution_scale &&
                    custom_config.present_scaling == NK_PRESENT_SCALING_BILINEAR &&
                    !custom_config.vsync);
+
+            /* A game's own value for a part wins over the preset. */
+            {
+                PlayerSettings own = app->settings;
+                PlayerTitlePlay *t = &own.title_play[0];
+                memset(t, 0, sizeof(*t));
+                snprintf(t->key, sizeof(t->key), "TEST92150"); /* its settings key */
+                t->mode = PLAYER_PLAY_LIBRARY;
+                for (int part = 0; part < PLAYER_PART_COUNT; part++) t->part[part] = -1;
+                t->part[PLAYER_PART_UPSCALE] = !row->part[PLAYER_PART_UPSCALE];
+                t->logic_60 = -1;
+                own.title_play_count = 1;
+                graphics_preset_session(&own, &config, &r, line, sizeof(line));
+                assert(r.on && r.part[PLAYER_PART_UPSCALE] == !row->part[PLAYER_PART_UPSCALE]);
+                assert(r.part[PLAYER_PART_TEXT] == row->part[PLAYER_PART_TEXT]);
+                assert(config.resolution_scale == row->resolution_scale);
+            }
         }
+    }
+
+    /* The table (docs/PLAYER_UI_DESIGN.md): Crisp system text on in every preset; Sharper
+       enlarging on in Medium, Ultra and Handheld, off in Low and High. */
+    for (int p = PLAYER_PRESET_LOW; p < PLAYER_PRESET_COUNT; p++) {
+        const PlayerGraphicsPresetRow *row = player_graphics_preset_row(p);
+        assert(row->part[PLAYER_PART_TEXT] == 1);
+        assert(row->part[PLAYER_PART_UPSCALE] ==
+               (p == PLAYER_PRESET_MEDIUM || p == PLAYER_PRESET_ULTRA ||
+                p == PLAYER_PRESET_HANDHELD));
+    }
+
+    /* Editing a part a preset sets, for the library, steps from the value the page shows (the
+       preset's) and makes the preset Custom; a part no preset sets leaves it as it is. */
+    player_app_settings_init_default(&app->settings);
+    app->settings.enhanced.part[PLAYER_PART_UPSCALE] = 0;
+    player_app_apply_graphics_preset(app, PLAYER_PRESET_ULTRA);
+    player_app_cycle_enhanced_part(app, PLAYER_PART_UPSCALE); /* shown On (Ultra), so Off */
+    assert(player_app_graphics_preset(app) == PLAYER_PRESET_CUSTOM);
+    assert(app->settings.enhanced.part[PLAYER_PART_UPSCALE] == 0);
+    player_app_apply_graphics_preset(app, PLAYER_PRESET_LOW);
+    player_app_cycle_enhanced_part(app, PLAYER_PART_UPSCALE); /* shown Off (Low), so On */
+    assert(player_app_graphics_preset(app) == PLAYER_PRESET_CUSTOM);
+    assert(app->settings.enhanced.part[PLAYER_PART_UPSCALE] == 1);
+    player_app_apply_graphics_preset(app, PLAYER_PRESET_HIGH);
+    player_app_cycle_enhanced_part(app, PLAYER_PART_TEXT);
+    assert(player_app_graphics_preset(app) == PLAYER_PRESET_CUSTOM);
+    player_app_apply_graphics_preset(app, PLAYER_PRESET_ULTRA);
+    player_app_cycle_enhanced_part(app, PLAYER_PART_SAS);
+    player_app_cycle_enhanced_part(app, PLAYER_PART_FILTERING);
+    player_app_cycle_enhanced_part(app, PLAYER_PART_SMOOTH);
+    player_app_cycle_enhanced_part(app, PLAYER_PART_WIDE);
+    assert(player_app_graphics_preset(app) == PLAYER_PRESET_ULTRA);
+
+    /* Going Custom keeps what the pages showed: the preset's parts become the library's, so
+       editing a display row, or one part, never turns the other part off. */
+    for (int edit = 0; edit < 2; edit++) {
+        NkRuntimeConfig cfg;
+        PlayerPlayResolved pr;
+        char pline[192];
+        player_app_settings_init_default(&app->settings);
+        app->settings.enhanced.library = PLAYER_PLAY_ENHANCED;
+        app->settings.enhanced.part[PLAYER_PART_TEXT] = 0;
+        app->settings.enhanced.part[PLAYER_PART_UPSCALE] = 0;
+        player_app_apply_graphics_preset(app, PLAYER_PRESET_ULTRA);
+        graphics_preset_session(&app->settings, &cfg, &pr, pline, sizeof(pline));
+        assert(cfg.present_upscale == NK_PRESENT_UPSCALE_FSR1 && pr.part[PLAYER_PART_TEXT] == 1);
+        if (edit == 0) {
+            player_app_cycle_resolution_scale(app, 1);
+        } else {
+            player_app_cycle_enhanced_part(app, PLAYER_PART_UPSCALE); /* FSR 1 (Ultra) -> Off */
+        }
+        assert(player_app_graphics_preset(app) == PLAYER_PRESET_CUSTOM);
+        assert(app->settings.enhanced.part[PLAYER_PART_TEXT] == 1);
+        assert(app->settings.enhanced.part[PLAYER_PART_UPSCALE] == (edit == 0 ? 1 : 0));
+        graphics_preset_session(&app->settings, &cfg, &pr, pline, sizeof(pline));
+        assert(pr.part[PLAYER_PART_TEXT] == 1 && strstr(pline, ";text=on") != NULL);
+        assert(cfg.present_upscale == (edit == 0 ? NK_PRESENT_UPSCALE_FSR1
+                                                 : NK_PRESENT_UPSCALE_OFF));
+    }
+    /* Under Handheld, toggling fullscreen (a row it sets) keeps its parts the same way. */
+    player_app_settings_init_default(&app->settings);
+    app->settings.enhanced.part[PLAYER_PART_UPSCALE] = 0;
+    player_app_apply_graphics_preset(app, PLAYER_PRESET_HANDHELD);
+    player_app_toggle_fullscreen(app);
+    assert(player_app_graphics_preset(app) == PLAYER_PRESET_CUSTOM);
+    assert(app->settings.enhanced.part[PLAYER_PART_UPSCALE] == 1);
+    /* A row edit while already Custom changes no part, and going Custom never touches a game's
+       own value, which keeps winning over the library's. */
+    app->settings.enhanced.part[PLAYER_PART_UPSCALE] = 0;
+    app->settings.enhanced.part[PLAYER_PART_TEXT] = 0;
+    player_app_cycle_resolution_scale(app, 1);
+    assert(player_app_graphics_preset(app) == PLAYER_PRESET_CUSTOM);
+    assert(app->settings.enhanced.part[PLAYER_PART_UPSCALE] == 0 &&
+           app->settings.enhanced.part[PLAYER_PART_TEXT] == 0);
+    {
+        NkRuntimeConfig cfg;
+        PlayerPlayResolved pr;
+        char pline[192];
+        PlayerTitlePlay *t = &app->settings.title_play[0];
+        player_app_settings_init_default(&app->settings);
+        app->settings.enhanced.library = PLAYER_PLAY_ENHANCED;
+        memset(t, 0, sizeof(*t));
+        snprintf(t->key, sizeof(t->key), "TEST92150");
+        t->mode = PLAYER_PLAY_LIBRARY;
+        for (int part = 0; part < PLAYER_PART_COUNT; part++) t->part[part] = -1;
+        t->part[PLAYER_PART_UPSCALE] = 0;
+        t->logic_60 = -1;
+        app->settings.title_play_count = 1;
+        player_app_apply_graphics_preset(app, PLAYER_PRESET_ULTRA);
+        player_app_cycle_resolution_scale(app, 1);
+        assert(player_app_graphics_preset(app) == PLAYER_PRESET_CUSTOM);
+        assert(app->settings.title_play_count == 1 &&
+               app->settings.title_play[0].part[PLAYER_PART_UPSCALE] == 0);
+        assert(app->settings.enhanced.part[PLAYER_PART_UPSCALE] == 1);
+        graphics_preset_session(&app->settings, &cfg, &pr, pline, sizeof(pline));
+        assert(cfg.present_upscale == NK_PRESENT_UPSCALE_OFF);
+        app->settings.title_play_count = 0;
+    }
+
+    /* A v0.0.2 settings file keeps its preset and its library parts as written, and an
+       Enhanced session takes the preset's parts over them: High with Sharper enlarging on and
+       Crisp system text off in the library launches with FSR 1 off and crisp text on. */
+    write_text_file(path,
+        "{\"schema_version\": 2, \"graphics_preset\": \"high\", \"enhanced\": {\"default\": "
+        "\"enhanced\", \"af\": \"16\", \"text\": \"off\", \"upscale\": \"fsr1\"}}");
+    memset(back, 0, sizeof(*back));
+    assert(player_app_load_settings(back, path) == NK_OK);
+    assert(player_app_graphics_preset(back) == PLAYER_PRESET_HIGH);
+    assert(back->settings.enhanced.part[PLAYER_PART_TEXT] == 0);
+    assert(back->settings.enhanced.part[PLAYER_PART_UPSCALE] == 1);
+    {
+        NkRuntimeConfig cfg;
+        PlayerPlayResolved pr;
+        char pline[192];
+        graphics_preset_session(&back->settings, &cfg, &pr, pline, sizeof(pline));
+        assert(pr.on && pr.part[PLAYER_PART_TEXT] == 1 && strstr(pline, ";text=on") != NULL);
+        assert(cfg.present_upscale == NK_PRESENT_UPSCALE_OFF);
+        assert(cfg.resolution_scale == 4);
     }
 
     /* Editing a row the preset sets makes it Custom, even to the same value, and the note
        goes with it. */
     player_app_settings_init_default(&app->settings);
     player_app_apply_graphics_preset(app, PLAYER_PRESET_ULTRA);
-    assert(player_app_graphics_preset_note(app, note, sizeof(note), &warns) && warns);
+    assert(player_app_graphics_preset_note(app, note, sizeof(note)));
     player_app_cycle_resolution_scale(app, 1);
     assert(player_app_graphics_preset(app) == PLAYER_PRESET_CUSTOM);
     assert(strcmp(player_app_graphics_preset_label(app), "Custom") == 0);
-    assert(!player_app_graphics_preset_note(app, note, sizeof(note), &warns));
-    assert(note[0] == '\0' && !warns);
+    assert(!player_app_graphics_preset_note(app, note, sizeof(note)));
+    assert(note[0] == '\0');
     player_app_apply_graphics_preset(app, PLAYER_PRESET_MEDIUM);
     player_app_set_resolution_scale(app, app->settings.resolution_scale);
     assert(player_app_graphics_preset(app) == PLAYER_PRESET_CUSTOM);
@@ -8004,8 +9096,8 @@ static void test_graphics_presets(void) {
     assert(player_app_graphics_preset(back) == PLAYER_PRESET_ULTRA);
     assert(back->settings.resolution_scale == 1);
     assert(strcmp(player_app_graphics_preset_label(back), "Ultra") == 0);
-    assert(player_app_graphics_preset_note(back, note, sizeof(note), &warns) && warns &&
-           strstr(note, "Sharper enlarging") != NULL);
+    assert(player_app_graphics_preset_note(back, note, sizeof(note)) &&
+           strstr(note, "FSR 1 on") != NULL);
 
     /* The rows a file holds are kept as they are beside its preset. */
     write_text_file(path,
@@ -8048,6 +9140,98 @@ static void test_graphics_presets(void) {
            "Custom on an edit, save and load\n");
 }
 
+/* Full 32-bit colour (contract 10.11, 11.2 item 2) at both levels: a library "twin" and a
+ * title's own "twin" are read, the title's wins either way, and both survive a save and a
+ * load; a file from before the play modes leaves it off. */
+static void test_play_mode_twin_settings(void) {
+    char sep = nk_platform_path_separator();
+    char cache_root[512], root[700], path[800];
+    char line[192];
+    PlayerPlayResolved r;
+    assert(nk_platform_get_path(NK_PATH_CACHE, cache_root, sizeof(cache_root)));
+    snprintf(root, sizeof(root), "%s%cplay_mode_twin_probe", cache_root, sep);
+    assert(nk_platform_mkdir_p(root));
+    snprintf(path, sizeof(path), "%s%csettings.json", root, sep);
+    PlayerApp *app = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    PlayerApp *back = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    assert(app && back);
+
+    /* Off until the player turns it on. */
+    player_app_settings_init_default(&app->settings);
+    assert(app->settings.enhanced.part[PLAYER_PART_TWIN] == 0);
+    assert(strcmp(player_enhanced_part(PLAYER_PART_TWIN)->key, "twin") == 0);
+
+    /* The library on, one title off over it. */
+    write_text_file(path,
+        "{\"schema_version\": 2,"
+        " \"enhanced\": {\"default\": \"enhanced\", \"twin\": \"on\"},"
+        " \"title_play\": {\"TEST92001\": {\"mode\": \"library\", \"twin\": \"off\"}}}");
+    assert(player_app_load_settings(app, path) == NK_OK);
+    assert(app->settings.enhanced.part[PLAYER_PART_TWIN] == 1);
+    player_play_resolve(&app->settings, "TEST92001", &r);
+    assert(r.on && r.part[PLAYER_PART_TWIN] == 0);
+    assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, ";twin=off") != NULL);
+    player_play_resolve(&app->settings, "TEST92002", &r);       /* a title of its own follows */
+    assert(r.on && r.part[PLAYER_PART_TWIN] == 1);
+    assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, ";twin=on") != NULL);
+    assert(player_app_save_settings(app, path) == NK_OK);
+    {
+        char *saved = read_text_file(path);
+        assert(saved && strstr(saved, "\"upscale\": \"off\", \"stick\": \"off\", "
+                                      "\"load\": \"off\", \"twin\": \"on\", \"ssaa\": \"off\"}") != NULL);
+        assert(strstr(saved, "\"TEST92001\": {\"mode\": \"library\", \"twin\": \"off\"}") != NULL);
+        free(saved);
+    }
+    memset(back, 0, sizeof(*back));
+    assert(player_app_load_settings(back, path) == NK_OK);
+    assert(back->settings.enhanced.part[PLAYER_PART_TWIN] == 1);
+    player_play_resolve(&back->settings, "TEST92001", &r);
+    assert(r.on && r.part[PLAYER_PART_TWIN] == 0);
+
+    /* The library off, one title on over it. */
+    write_text_file(path,
+        "{\"schema_version\": 2,"
+        " \"enhanced\": {\"default\": \"enhanced\", \"twin\": \"off\"},"
+        " \"title_play\": {\"TEST92001\": {\"mode\": \"library\", \"twin\": \"on\"}}}");
+    memset(app, 0, sizeof(*app));
+    assert(player_app_load_settings(app, path) == NK_OK);
+    assert(app->settings.enhanced.part[PLAYER_PART_TWIN] == 0);
+    player_play_resolve(&app->settings, "TEST92001", &r);
+    assert(r.on && r.part[PLAYER_PART_TWIN] == 1);
+    player_play_resolve(&app->settings, "TEST92002", &r);
+    assert(r.on && r.part[PLAYER_PART_TWIN] == 0);
+    assert(player_app_save_settings(app, path) == NK_OK);
+    {
+        char *saved = read_text_file(path);
+        assert(saved && strstr(saved, "\"upscale\": \"off\", \"stick\": \"off\", "
+                                      "\"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\"}") != NULL);
+        assert(strstr(saved, "\"TEST92001\": {\"mode\": \"library\", \"twin\": \"on\"}") != NULL);
+        free(saved);
+    }
+    memset(back, 0, sizeof(*back));
+    assert(player_app_load_settings(back, path) == NK_OK);
+    player_play_resolve(&back->settings, "TEST92001", &r);
+    assert(r.on && r.part[PLAYER_PART_TWIN] == 1);
+    assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, ";twin=on") != NULL);
+
+    /* The development builds' keys never carried twin: a word there is not read. */
+    write_text_file(path,
+        "{\"schema_version\": 2,"
+        " \"ace\": {\"enabled\": true, \"twin\": \"on\"},"
+        " \"ace_titles\": {\"TEST92001\": {\"mode\": \"ace\", \"twin\": \"on\"}}}");
+    memset(back, 0, sizeof(*back));
+    assert(player_app_load_settings(back, path) == NK_OK);
+    assert(back->settings.enhanced.part[PLAYER_PART_TWIN] == 0);
+    player_play_resolve(&back->settings, "TEST92001", &r);
+    assert(r.on && r.part[PLAYER_PART_TWIN] == 0);
+
+    remove(path);
+    (void)test_rmdir(root);
+    free(back);
+    free(app);
+    printf("PASS: full 32-bit colour is read, resolved and saved at both levels\n");
+}
+
 /* Smooth motion (#1272) as an Enhanced part: off by default, x2 on the launch line and never
  * match, and refused by the true 60 FPS game logic build whatever the settings say. */
 static void test_play_mode_smooth_motion(void) {
@@ -8062,7 +9246,7 @@ static void test_play_mode_smooth_motion(void) {
     player_play_resolve(&settings, "TEST90001", &r);
     assert(player_play_launch_line(&r, line, sizeof(line)) &&
            strcmp(line, "v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;"
-                        "smooth=x2;sas=off") == 0);
+                        "smooth=x2;sas=off;tess=off;twin=off") == 0);
     assert(strstr(line, "match") == NULL);
     player_play_apply_logic_60(&r, false);
     assert(r.part[PLAYER_PART_SMOOTH] == 1);
@@ -8070,8 +9254,33 @@ static void test_play_mode_smooth_motion(void) {
     assert(r.part[PLAYER_PART_SMOOTH] == 0 && r.on && r.part[PLAYER_PART_FILTERING] == 16 &&
            r.part[PLAYER_PART_TEXT] == 1 && r.part[PLAYER_PART_NOTICE] == 1);
     assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, "smooth=off") != NULL);
-    /* The line fits the runtime's buffer (src/rt/ace.h ACE_SPEC_MAX 192) with room to spare. */
-    assert(strlen(line) < 96u);
+    /* The longest line the parts can make fits the runtime's buffer (src/rt/ace.h ACE_SPEC_MAX):
+       each part takes the value that lengthens the line most, in Enhanced and in Ace, with the
+       largest stick dead zone, so a new part or word without room fails here. */
+    {
+        size_t longest = 0;
+        for (int ace = 0; ace < 2; ace++) {
+            PlayerPlayResolved big = r;
+            char probe[1024];
+            big.mode = ace ? PLAYER_PLAY_ACE : PLAYER_PLAY_ENHANCED;
+            big.stick_counts = ACE_STICK_COUNTS_MAX;
+            for (int p = 0; p < PLAYER_PART_COUNT; p++) {
+                const PlayerEnhancedPartInfo *info = player_enhanced_part(p);
+                int best = big.part[p];
+                size_t best_len = 0;
+                assert(info);
+                for (int v = 0; v < info->value_count; v++) {
+                    big.part[p] = info->values[v];
+                    assert(player_play_launch_line(&big, probe, sizeof(probe)));
+                    if (strlen(probe) >= best_len) { best_len = strlen(probe); best = info->values[v]; }
+                }
+                big.part[p] = best;
+            }
+            assert(player_play_launch_line(&big, probe, sizeof(probe)));
+            if (strlen(probe) > longest) longest = strlen(probe);
+        }
+        assert(longest + 1u <= (size_t)ACE_SPEC_MAX);
+    }
     assert(!player_play_launch_line(&r, line, 20u) && line[0] == '\0');
     /* Clean pitched sound (contract 11.3.1) is off by default, reaches the line as sinc when
        the library turns it on, and the 60 FPS game logic leaves it alone. */
@@ -8081,11 +9290,23 @@ static void test_play_mode_smooth_motion(void) {
     assert(r.on && r.part[PLAYER_PART_SAS] == 1);
     assert(player_play_launch_line(&r, line, sizeof(line)) &&
            strcmp(line, "v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;"
-                        "smooth=off;sas=sinc") == 0);
+                        "smooth=off;sas=sinc;tess=off;twin=off") == 0);
     player_play_apply_logic_60(&r, true);
     assert(r.part[PLAYER_PART_SAS] == 1 && player_play_launch_line(&r, line, sizeof(line)) &&
            strstr(line, "tier=ace;") != NULL && strstr(line, "sas=sinc") != NULL);
     settings.enhanced.part[PLAYER_PART_SAS] = 0;
+    /* Full 32-bit colour (contract 10.11) is off by default, reaches the line as on when the
+       library turns it on, and the 60 FPS game logic leaves it alone. */
+    settings.enhanced.part[PLAYER_PART_TWIN] = 1;
+    player_play_resolve(&settings, "TEST90001", &r);
+    assert(r.on && r.part[PLAYER_PART_TWIN] == 1);
+    assert(player_play_launch_line(&r, line, sizeof(line)) &&
+           strcmp(line, "v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;"
+                        "smooth=off;sas=off;tess=off;twin=on") == 0);
+    player_play_apply_logic_60(&r, true);
+    assert(r.part[PLAYER_PART_TWIN] == 1 && player_play_launch_line(&r, line, sizeof(line)) &&
+           strstr(line, "tier=ace;") != NULL && strstr(line, "twin=on") != NULL);
+    settings.enhanced.part[PLAYER_PART_TWIN] = 0;
     /* Widescreen Fill (#1881) is off by default, reaches the line as fill when the library
        turns it on, and the 60 FPS game logic leaves it alone. It stays on for the Authentic
        check below: Authentic is off whatever the parts say. */
@@ -8095,7 +9316,7 @@ static void test_play_mode_smooth_motion(void) {
     assert(r.on && r.part[PLAYER_PART_WIDE] == 1);
     assert(player_play_launch_line(&r, line, sizeof(line)) &&
            strcmp(line, "v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=fill;"
-                        "smooth=off;sas=off") == 0);
+                        "smooth=off;sas=off;tess=off;twin=off") == 0);
     player_play_apply_logic_60(&r, true);
     assert(r.part[PLAYER_PART_WIDE] == 1 && player_play_launch_line(&r, line, sizeof(line)) &&
            strstr(line, "tier=ace;") != NULL && strstr(line, ";wide=fill;") != NULL);
@@ -8106,7 +9327,9 @@ static void test_play_mode_smooth_motion(void) {
     assert(r.on && r.part[PLAYER_PART_WIDE] == 1 && r.part[PLAYER_PART_SMOOTH] == 1);
     const char *unavailable = player_enhanced_part_unavailable_label(
         PLAYER_PART_WIDE, r.part[PLAYER_PART_WIDE], r.part[PLAYER_PART_SMOOTH]);
-    assert(unavailable && strcmp(unavailable, "Off (Smooth motion is on)") == 0);
+    /* Just "Off": the row's sentence says Smooth motion disables it, and a longer word
+       here widened Settings > Enhanced's button column and reflowed every row. */
+    assert(unavailable && strcmp(unavailable, "Off") == 0);
     assert(player_enhanced_part_unavailable_label(PLAYER_PART_WIDE, 1, 0) == NULL);
     assert(player_enhanced_part_unavailable_label(PLAYER_PART_WIDE, 0, 1) == NULL);
     assert(player_enhanced_part_unavailable_label(PLAYER_PART_SMOOTH, 1, 1) == NULL);
@@ -8139,6 +9362,7 @@ static void expect_line_parses_in_runtime(const PlayerPlayResolved *r) {
     assert(c.wide == (r->part[PLAYER_PART_WIDE] ? ACE_WIDE_FILL : ACE_WIDE_OFF));
     assert(c.smooth == (r->part[PLAYER_PART_SMOOTH] ? ACE_SMOOTH_X2 : ACE_SMOOTH_OFF));
     assert(c.sas == (r->part[PLAYER_PART_SAS] ? ACE_SAS_SINC : ACE_SAS_OFF));
+    assert(c.twin == (r->part[PLAYER_PART_TWIN] ? 1 : 0));
     assert(ace_format(&c, canonical, sizeof(canonical)) && strcmp(canonical, line) == 0);
 }
 
@@ -8219,8 +9443,8 @@ static void test_play_mode_upscale_settings(void) {
     /* The library on with FSR 1; one title turns it off, one plays Authentic, one says fsr2. */
     write_text_file(path,
         "{\"schema_version\": 2,"
-        " \"enhanced\": {\"default\": \"enhanced\", \"upscale\": \"fsr1\"},"
-        " \"title_play\": {\"TEST94001\": {\"mode\": \"library\", \"upscale\": \"off\"},"
+        " \"enhanced\": {\"default\": \"enhanced\", \"upscale\": \"fsr1\", \"twin\": \"off\"},"
+        " \"title_play\": {\"TEST94001\": {\"mode\": \"library\", \"upscale\": \"off\", \"twin\": \"off\"},"
         " \"TEST94002\": {\"mode\": \"authentic\"},"
         " \"TEST94004\": {\"mode\": \"ace\", \"upscale\": \"fsr2\"}}}");
     assert(player_app_load_settings(app, path) == NK_OK);
@@ -8278,8 +9502,10 @@ static void test_play_mode_upscale_settings(void) {
     assert(player_app_save_settings(app, path) == NK_OK);
     {
         char *saved = read_text_file(path);
-        assert(saved && strstr(saved, "\"sas\": \"off\", \"upscale\": \"fsr1\"}") != NULL);
-        assert(strstr(saved, "\"TEST94001\": {\"mode\": \"library\", \"upscale\": \"off\"}") != NULL);
+        assert(saved && strstr(saved, "\"sas\": \"off\", \"tess\": \"off\", \"cull\": \"off\", "
+                                      "\"upscale\": \"fsr1\", \"stick\": \"off\", \"load\": \"off\", "
+                                      "\"twin\": \"off\", \"ssaa\": \"off\"}") != NULL);
+        assert(strstr(saved, "\"TEST94001\": {\"mode\": \"library\", \"upscale\": \"off\", \"twin\": \"off\"}") != NULL);
         free(saved);
     }
     memset(back, 0, sizeof(*back));
@@ -8544,6 +9770,418 @@ static void test_enhanced_package_variants(void) {
     printf("[PLAYER_STATE_TEST] enhanced and authentic package variants validate apart PASS\n");
 }
 
+/* The console nickname (#2197): "Player" until the user chooses one, and never the PC's user
+ * name; the first-launch prompt shows until it is answered, and Skip keeps "Player" and is not
+ * asked again after a reload; Settings saves a new nickname that a reload reads back; and a
+ * value the rule refuses (128 bytes, empty, a control character, malformed UTF-8) changes
+ * nothing, in Settings, in the prompt and in a hand-edited settings file. */
+static void test_player_nickname(void) {
+    static const char *const refused[] = {
+        "", "a\x01" "b", "tab\tname", "del\x7F", "c1 \xC2\x85", "\xC3\x28", "\xED\xA0\x80",
+    };
+    char sep = nk_platform_path_separator();
+    char cache_root[512], root[700], path[800], text[400];
+    char long_ok[33], long_bad[34], straddle[34];
+    PlayerApp *app = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    PlayerApp *back = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    char *saved;
+    assert(app && back);
+    /* The 32-byte cap, one byte past it, and a two-byte character that ends past it. */
+    memset(long_ok, 'n', 32u);
+    long_ok[32] = '\0';
+    memset(long_bad, 'n', 33u);
+    long_bad[33] = '\0';
+    memset(straddle, 'n', 31u);
+    memcpy(straddle + 31, "\xC3\xA9", 3u);
+    assert(nk_platform_get_path(NK_PATH_CACHE, cache_root, sizeof(cache_root)));
+    snprintf(root, sizeof(root), "%s%cnickname_probe", cache_root, sep);
+    assert(nk_platform_mkdir_p(root));
+    snprintf(path, sizeof(path), "%s%csettings.json", root, sep);
+
+    /* The default is "Player", whatever the PC's user name is. */
+    {
+        const char *names[] = {"USERNAME", "USER"};
+        for (size_t i = 0u; i < 2u; i++) {
+            const char *was = getenv(names[i]);
+            char kept[256];
+            snprintf(kept, sizeof(kept), "%s", was ? was : "");
+            nk_ps_set_env(names[i], "nk-os-user-name");
+            player_app_settings_init_default(&app->settings);
+            assert(strcmp(app->settings.nickname, "Player") == 0);
+            assert(!app->settings.nickname_asked);
+            nk_ps_set_env(names[i], was ? kept : NULL);
+        }
+    }
+
+    /* A settings file without the keys (an older player's) asks once. */
+    write_text_file(path, "{\"schema_version\": 2}");
+    player_app_init(app);
+    assert(player_app_load_settings(app, path) == NK_OK);
+    assert(strcmp(app->settings.nickname, "Player") == 0);
+    assert(player_app_nickname_prompt_visible(app));
+
+    /* Skip keeps "Player", and the prompt does not come back after a reload. */
+    assert(player_app_nickname_prompt_answer(app, NULL));
+    assert(!player_app_nickname_prompt_visible(app));
+    assert(strcmp(app->settings.nickname, "Player") == 0);
+    saved = read_text_file(path);
+    assert(saved && strstr(saved, "\"nickname\": \"Player\"") != NULL &&
+           strstr(saved, "\"nickname_asked\": true") != NULL);
+    free(saved);
+    player_app_init(back);
+    assert(player_app_load_settings(back, path) == NK_OK);
+    assert(!player_app_nickname_prompt_visible(back));
+    assert(strcmp(back->settings.nickname, "Player") == 0);
+
+    /* Settings: a new nickname is saved at once and a reload reads it back, 32 bytes too. */
+    assert(player_app_set_nickname(back, "Ren\xC3\xA9 7"));
+    player_app_init(app);
+    assert(player_app_load_settings(app, path) == NK_OK);
+    assert(strcmp(app->settings.nickname, "Ren\xC3\xA9 7") == 0);
+    assert(player_app_set_nickname(app, long_ok));
+    player_app_init(back);
+    assert(player_app_load_settings(back, path) == NK_OK);
+    assert(strcmp(back->settings.nickname, long_ok) == 0);
+
+    /* A refused value changes nothing: the old nickname stays, in memory and on disk. */
+    assert(!player_app_set_nickname(back, long_bad));
+    assert(!player_app_set_nickname(back, straddle));
+    assert(!player_app_set_nickname(back, NULL));
+    for (size_t i = 0u; i < sizeof(refused) / sizeof(refused[0]); i++) {
+        assert(!player_app_set_nickname(back, refused[i]));
+        assert(strcmp(back->settings.nickname, long_ok) == 0);
+    }
+    player_app_init(app);
+    assert(player_app_load_settings(app, path) == NK_OK);
+    assert(strcmp(app->settings.nickname, long_ok) == 0);
+
+    /* The prompt refuses the same values and stays up; a valid answer closes it. */
+    app->settings.nickname_asked = false;
+    assert(!player_app_nickname_prompt_answer(app, long_bad));
+    assert(!player_app_nickname_prompt_answer(app, "a\x01" "b"));
+    assert(player_app_nickname_prompt_visible(app));
+    assert(strcmp(app->settings.nickname, long_ok) == 0);
+    assert(player_app_nickname_prompt_answer(app, "Tester"));
+    assert(!player_app_nickname_prompt_visible(app));
+    assert(strcmp(app->settings.nickname, "Tester") == 0);
+
+    /* A hand-edited nickname the rule refuses is dropped for the default, not cut short. */
+    write_text_file(path, "{\"schema_version\": 2, \"nickname\": \"\\u0001x\", \"nickname_asked\": true}");
+    player_app_init(app);
+    assert(player_app_load_settings(app, path) == NK_OK);
+    assert(strcmp(app->settings.nickname, "Player") == 0 && app->settings.nickname_asked);
+    snprintf(text, sizeof(text), "{\"schema_version\": 2, \"nickname\": \"%s\"}", long_bad);
+    write_text_file(path, text);
+    player_app_init(app);
+    assert(player_app_load_settings(app, path) == NK_OK);
+    assert(strcmp(app->settings.nickname, "Player") == 0);
+    write_text_file(path, "{\"schema_version\": 2, \"nickname\": \"\"}");
+    player_app_init(app);
+    assert(player_app_load_settings(app, path) == NK_OK);
+    assert(strcmp(app->settings.nickname, "Player") == 0);
+    /* Only spaces is no name (nk_nickname_valid): it degrades to the default too. */
+    write_text_file(path, "{\"schema_version\": 2, \"nickname\": \"   \", \"nickname_asked\": true}");
+    player_app_init(app);
+    assert(player_app_load_settings(app, path) == NK_OK);
+    assert(strcmp(app->settings.nickname, "Player") == 0 && app->settings.nickname_asked);
+
+    /* A true first run, with no settings.json at all: "Player", and the prompt asks. */
+    nk_remove_utf8(path);
+    player_app_init(app);
+    (void)player_app_load_settings(app, path);
+    assert(strcmp(app->settings.nickname, "Player") == 0);
+    assert(!app->settings.nickname_asked);
+    assert(player_app_nickname_prompt_visible(app));
+
+    nk_remove_utf8(path);
+    free(app);
+    free(back);
+}
+
+/* ---- --launch-title and Add to Steam (#2152) ---- */
+
+static void steam_test_game(GameRecord *game, const char *disc, const char *name,
+                            char sha_digit) {
+    memset(game, 0, sizeof(*game));
+    snprintf(game->disc_id, sizeof(game->disc_id), "%s", disc);
+    snprintf(game->title_name, sizeof(game->title_name), "%s", name);
+    if (sha_digit) {
+        memset(game->content_sha1, sha_digit, 40u);
+        game->content_sha1[40] = '\0';
+    }
+}
+
+/* Users' games 0 to 2 (1 and 2 share a disc ID, a retail disc and its translation), a
+   sample, a showcase demo, and a disc ID a command line can't carry as it is. */
+static PlayerApp *steam_test_app(void) {
+    PlayerApp *app = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    assert(app != NULL);
+    steam_test_game(&app->games[0], "ULUS10001", "Synthetic Game One", 'a');
+    steam_test_game(&app->games[1], "ULUS10002", "Synthetic Retail", 'b');
+    steam_test_game(&app->games[2], "ULUS10002", "Synthetic Translation", 'c');
+    steam_test_game(&app->games[3], "TEST00005", "Synthetic Sample", 'd');
+    app->games[3].is_sample = true;
+    steam_test_game(&app->games[4], "TEST00007", "Synthetic Showcase", 'e');
+    app->games[4].is_showcase_package = true;
+    steam_test_game(&app->games[5], "BAD ID", "Synthetic Odd Disc", 'f');
+    app->game_count = 6;
+    return app;
+}
+
+static void test_launch_title_names_one_game(void) {
+    PlayerApp *app = steam_test_app();
+    char value[PLAYER_LAUNCH_TITLE_VALUE_MAX];
+    char message[512];
+    char upper[64];
+    int index = 99;
+    assert(player_app_launch_title_value(app, 0, value, sizeof(value)) &&
+           strcmp(value, "ULUS10001") == 0);
+    /* A shared disc ID is named with the image's SHA-1. */
+    assert(player_app_launch_title_value(app, 1, value, sizeof(value)) &&
+           strcmp(value, "ULUS10002:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb") == 0);
+    assert(!player_app_launch_title_value(app, 3, value, sizeof(value)) && value[0] == '\0');
+    assert(!player_app_launch_title_value(app, 4, value, sizeof(value)));
+    assert(!player_app_launch_title_value(app, 5, value, sizeof(value)));
+    assert(!player_app_launch_title_value(app, 6, value, sizeof(value)));
+    assert(!player_app_launch_title_value(app, -1, value, sizeof(value)));
+    assert(!player_app_launch_title_value(app, 1, value, 20u));
+    /* Every value names its own game again. */
+    for (int i = 0; i < 3; ++i) {
+        assert(player_app_launch_title_value(app, i, value, sizeof(value)));
+        assert(player_app_find_launch_title(app, value, &index, message, sizeof(message)) ==
+                   PLAYER_LAUNCH_TITLE_FOUND &&
+               index == i && message[0] == '\0');
+    }
+    snprintf(upper, sizeof(upper), "ULUS10002:%s", "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC");
+    assert(player_app_find_launch_title(app, upper, &index, NULL, 0u) ==
+               PLAYER_LAUNCH_TITLE_FOUND && index == 2);
+    assert(player_app_find_launch_title(app, "ULUS10002", &index, message, sizeof(message)) ==
+               PLAYER_LAUNCH_TITLE_AMBIGUOUS &&
+           index == -1 && strstr(message, "Several disc images") != NULL);
+    assert(player_app_find_launch_title(app, "ULUS99999", &index, message, sizeof(message)) ==
+               PLAYER_LAUNCH_TITLE_MISSING &&
+           strstr(message, "ULUS99999") != NULL);
+    /* Demos and samples are not the user's games, so no shortcut names them. */
+    assert(player_app_find_launch_title(app, "TEST00005", &index, NULL, 0u) ==
+           PLAYER_LAUNCH_TITLE_MISSING);
+    assert(player_app_find_launch_title(app, "TEST00007", &index, NULL, 0u) ==
+           PLAYER_LAUNCH_TITLE_MISSING);
+    static const char *const malformed[] = {"", "../ULUS10001", "ULUS 10001", "ULUS10001:",
+                                            "ULUS10001:abc", ":aaaa", "BAD ID"};
+    for (size_t i = 0u; i < sizeof(malformed) / sizeof(malformed[0]); ++i) {
+        assert(player_app_find_launch_title(app, malformed[i], &index, message,
+                                            sizeof(message)) == PLAYER_LAUNCH_TITLE_MALFORMED &&
+               index == -1 && strstr(message, "disc ID") != NULL);
+    }
+    free(app);
+}
+
+static bool steam_test_running_yes(void) { return true; }
+static bool steam_test_running_no(void) { return false; }
+
+static size_t steam_test_count(const char *path, const char *needle) {
+    FILE *f = nk_fopen_utf8(path, "rb");
+    static char data[1u << 16];
+    size_t size;
+    size_t count = 0u;
+    size_t length = strlen(needle);
+    if (f == NULL) return 0u;
+    size = fread(data, 1u, sizeof(data), f);
+    fclose(f);
+    for (size_t i = 0u; i + length <= size; ++i) {
+        if (memcmp(data + i, needle, length) == 0) count++;
+    }
+    return count;
+}
+
+static void test_add_to_steam_outcomes(void) {
+    PlayerApp *app = steam_test_app();
+    PlayerSteamPlan plan;
+    char steam[NK_MAX_PATH];
+    char exe[NK_MAX_PATH];
+    char moved_exe[NK_MAX_PATH];
+    char path[NK_MAX_PATH * 2];
+    char vdf[NK_MAX_PATH * 2];
+    char other_vdf[NK_MAX_PATH * 2];
+    char text[NK_MAX_PATH * 3];
+    snprintf(steam, sizeof(steam), "%s/steam2152", native_test_get_root());
+    snprintf(exe, sizeof(exe), "%s/Nakagawa/bin/nakagawa_player.exe", native_test_get_root());
+    snprintf(moved_exe, sizeof(moved_exe), "%s/Nakagawa-new/bin/nakagawa_player.exe",
+             native_test_get_root());
+    snprintf(vdf, sizeof(vdf), "%s/userdata/20002/config/shortcuts.vdf", steam);
+    snprintf(other_vdf, sizeof(other_vdf), "%s/userdata/20003/config/shortcuts.vdf", steam);
+
+    /* Every outcome has a sentence, and only the three successes count as done. */
+    for (int outcome = PLAYER_STEAM_READY; outcome <= PLAYER_STEAM_NO_PROGRAM; ++outcome) {
+        memset(&plan, 0, sizeof(plan));
+        plan.outcome = (PlayerSteamOutcome)outcome;
+        snprintf(plan.app_name, sizeof(plan.app_name), "Synthetic Game One");
+        assert((player_steam_outcome_text(&plan, text, sizeof(text)) > 0u) ==
+               (outcome != PLAYER_STEAM_READY));
+        assert(player_steam_outcome_ok((PlayerSteamOutcome)outcome) ==
+               (outcome == PLAYER_STEAM_ADDED || outcome == PLAYER_STEAM_UPDATED ||
+                outcome == PLAYER_STEAM_ALREADY));
+    }
+
+    /* A demo, a sample or an odd disc ID is not offered. */
+    assert(player_app_plan_steam_shortcut(app, 3, steam, exe, &plan) == PLAYER_STEAM_NOT_A_GAME &&
+           !plan.ready);
+    assert(player_app_plan_steam_shortcut(app, 4, steam, exe, &plan) == PLAYER_STEAM_NOT_A_GAME);
+    assert(player_app_plan_steam_shortcut(app, 5, steam, exe, &plan) == PLAYER_STEAM_NOT_A_GAME);
+    assert(player_steam_add(&plan, 0u, steam_test_running_no, "20261108-090000") ==
+           PLAYER_STEAM_NOT_A_GAME);
+    /* No Steam: nothing to add to, and the sentence says what to do. */
+    assert(player_app_plan_steam_shortcut(app, 0, steam, exe, &plan) == PLAYER_STEAM_NOT_FOUND &&
+           !plan.ready);
+    (void)player_steam_outcome_text(&plan, text, sizeof(text));
+    assert(strstr(text, "Steam isn't installed") != NULL && strstr(text, "nothing was added"));
+    /* Steam with no account yet. */
+    assert(nk_platform_mkdir_p(steam));
+    assert(player_app_plan_steam_shortcut(app, 0, steam, exe, &plan) == PLAYER_STEAM_NO_ACCOUNT);
+    (void)player_steam_outcome_text(&plan, text, sizeof(text));
+    assert(strstr(text, "sign in") != NULL);
+    /* A program path a shortcut can't hold. */
+    assert(player_app_plan_steam_shortcut(app, 0, steam, "nakagawa_player.exe", &plan) ==
+           PLAYER_STEAM_NO_PROGRAM);
+
+    /* Two accounts; one named in loginusers.vdf (76561197960285730 is account 20002). */
+    snprintf(path, sizeof(path), "%s/userdata/20002/config", steam);
+    assert(nk_platform_mkdir_p(path));
+    snprintf(path, sizeof(path), "%s/userdata/20003/config", steam);
+    assert(nk_platform_mkdir_p(path));
+    snprintf(path, sizeof(path), "%s/config", steam);
+    assert(nk_platform_mkdir_p(path));
+    snprintf(path, sizeof(path), "%s/config/loginusers.vdf", steam);
+    write_text_file(path, "\"users\"\n{\n\t\"76561197960285730\"\n\t{\n"
+                          "\t\t\"PersonaName\"\t\t\"Synthetic One\"\n\t}\n}\n");
+    assert(player_app_plan_steam_shortcut(app, 0, steam, exe, &plan) == PLAYER_STEAM_READY &&
+           plan.ready);
+    assert(plan.account_count == 2u && strcmp(plan.accounts[0].id, "20002") == 0 &&
+           strcmp(plan.account_names[0], "Synthetic One") == 0 &&
+           plan.account_names[1][0] == '\0');
+    assert(strcmp(plan.app_name, "Synthetic Game One") == 0 && strcmp(plan.exe, exe) == 0 &&
+           strstr(plan.start_dir, "/Nakagawa/bin") != NULL &&
+           strstr(exe, plan.start_dir) == exe && strlen(plan.start_dir) + 20u == strlen(exe));
+    assert(strcmp(plan.launch_options, "--launch-title=ULUS10001") == 0);
+    assert(!plan.portable);
+
+    /* Steam running: nothing is written, and the sentence says to exit Steam and that no
+       restart follows. */
+    assert(player_steam_add(&plan, 0u, steam_test_running_yes, "20261108-090000") ==
+           PLAYER_STEAM_RUNNING);
+    assert(nk_platform_path_missing(vdf));
+    (void)player_steam_outcome_text(&plan, text, sizeof(text));
+    assert(strstr(text, "Steam is running, so nothing was changed") != NULL &&
+           strstr(text, "Exit Steam") != NULL && strstr(text, "No restart is needed") != NULL);
+
+    /* Added: Steam had no list yet, so there was nothing to back up. */
+    assert(player_steam_add(&plan, 0u, steam_test_running_no, "20261108-090000") ==
+           PLAYER_STEAM_ADDED);
+    assert(plan.backup_path[0] == '\0' && steam_test_count(vdf, "ULUS10001") == 1u);
+    (void)player_steam_outcome_text(&plan, text, sizeof(text));
+    assert(strstr(text, "Added Synthetic Game One to Steam") != NULL &&
+           strstr(text, "no restart is needed") != NULL &&
+           strstr(text, "nothing to back up") != NULL);
+    /* Already there: reported, never duplicated, nothing written. */
+    assert(player_steam_add(&plan, 0u, steam_test_running_no, "20261108-090001") ==
+           PLAYER_STEAM_ALREADY);
+    assert(plan.backup_path[0] == '\0' && steam_test_count(vdf, "ULUS10001") == 1u);
+    (void)player_steam_outcome_text(&plan, text, sizeof(text));
+    assert(strstr(text, "already in this Steam library") != NULL &&
+           strstr(text, "Nothing was changed") != NULL);
+
+    /* A second game beside it: its own shortcut, after a backup of the list. */
+    assert(player_app_plan_steam_shortcut(app, 2, steam, exe, &plan) == PLAYER_STEAM_READY);
+    assert(strcmp(plan.launch_options,
+                  "--launch-title=ULUS10002:cccccccccccccccccccccccccccccccccccccccc") == 0);
+    assert(player_steam_add(&plan, 0u, steam_test_running_no, "20261108-090002") ==
+           PLAYER_STEAM_ADDED);
+    assert(plan.backup_path[0] != '\0' &&
+           strstr(plan.backup_path, "shortcuts.vdf.nakagawa-backup-20261108-090002") != NULL &&
+           steam_test_count(plan.backup_path, "ULUS10002") == 0u &&
+           steam_test_count(vdf, "nakagawa_player.exe") == 2u);
+    (void)player_steam_outcome_text(&plan, text, sizeof(text));
+    assert(strstr(text, "saved as") != NULL && strstr(text, "nakagawa-backup-20261108-090002"));
+
+    /* A new Nakagawa folder (each update unpacks into one): the game's shortcut is updated,
+       not duplicated. */
+    assert(player_app_plan_steam_shortcut(app, 0, steam, moved_exe, &plan) ==
+           PLAYER_STEAM_READY);
+    assert(player_steam_add(&plan, 0u, steam_test_running_no, "20261108-090003") ==
+           PLAYER_STEAM_UPDATED);
+    assert(steam_test_count(vdf, "ULUS10001") == 1u &&
+           steam_test_count(vdf, "Nakagawa-new/bin") == 2u &&
+           steam_test_count(vdf, "nakagawa_player.exe") == 2u && plan.backup_path[0] != '\0');
+    (void)player_steam_outcome_text(&plan, text, sizeof(text));
+    assert(strstr(text, "Updated Synthetic Game One in Steam") != NULL &&
+           strstr(text, "play time and collections stay") != NULL);
+
+    /* The other account's list does not parse: left as it was, no backup. */
+    write_text_file(other_vdf, "not a binary KeyValues file");
+    assert(player_steam_add(&plan, 1u, steam_test_running_no, "20261108-090004") ==
+           PLAYER_STEAM_UNREADABLE);
+    assert(plan.backup_path[0] == '\0' &&
+           steam_test_count(other_vdf, "not a binary KeyValues file") == 1u);
+    (void)player_steam_outcome_text(&plan, text, sizeof(text));
+    assert(strstr(text, "could not be read") != NULL && strstr(text, "Nothing was changed"));
+
+    /* No verified backup, so nothing is written: every backup name is taken. */
+    {
+        char taken[NK_MAX_PATH * 3];
+        FILE *before = nk_fopen_utf8(vdf, "rb");
+        static char original[1u << 16];
+        size_t original_size;
+        assert(before != NULL);
+        original_size = fread(original, 1u, sizeof(original), before);
+        fclose(before);
+        snprintf(taken, sizeof(taken), "%s.nakagawa-backup-20261108-090005", vdf);
+        write_text_file(taken, "x");
+        for (unsigned i = 2u; i <= 100u; ++i) {
+            snprintf(taken, sizeof(taken), "%s.nakagawa-backup-20261108-090005-%u", vdf, i);
+            write_text_file(taken, "x");
+        }
+        assert(player_app_plan_steam_shortcut(app, 1, steam, exe, &plan) == PLAYER_STEAM_READY);
+        assert(player_steam_add(&plan, 0u, steam_test_running_no, "20261108-090005") ==
+               PLAYER_STEAM_BACKUP_FAILED);
+        assert(steam_test_count(vdf, "ULUS10002:bbbb") == 0u);
+        before = nk_fopen_utf8(vdf, "rb");
+        assert(before != NULL);
+        {
+            static char now[1u << 16];
+            size_t now_size = fread(now, 1u, sizeof(now), before);
+            fclose(before);
+            assert(now_size == original_size && memcmp(now, original, now_size) == 0);
+        }
+        (void)player_steam_outcome_text(&plan, text, sizeof(text));
+        assert(strstr(text, "changed nothing") != NULL);
+    }
+    /* An account that is gone since the dialog opened. */
+    assert(player_steam_add(&plan, 5u, steam_test_running_no, "20261108-090006") ==
+           PLAYER_STEAM_NO_ACCOUNT);
+
+    /* A process started with --user-data-root passes the folder on, quoted, with no
+       separator before the closing quote. */
+    snprintf(app->user_data_root, sizeof(app->user_data_root), "C:/Synthetic data/Nakagawa/");
+    assert(player_app_plan_steam_shortcut(app, 0, steam, exe, &plan) == PLAYER_STEAM_READY);
+    assert(strcmp(plan.launch_options,
+                  "--launch-title=ULUS10001 \"--user-data-root=C:/Synthetic data/Nakagawa\"") ==
+           0);
+    /* A drive root keeps its separator ("C:" alone is relative to drive C's current folder);
+       a backslash before the closing quote is doubled so Windows reads one. */
+    snprintf(app->user_data_root, sizeof(app->user_data_root), "D:/");
+    assert(player_app_plan_steam_shortcut(app, 0, steam, exe, &plan) == PLAYER_STEAM_READY);
+    assert(strcmp(plan.launch_options, "--launch-title=ULUS10001 \"--user-data-root=D:/\"") == 0);
+#ifdef _WIN32
+    snprintf(app->user_data_root, sizeof(app->user_data_root), "D:\\");
+    assert(player_app_plan_steam_shortcut(app, 0, steam, exe, &plan) == PLAYER_STEAM_READY);
+    assert(strcmp(plan.launch_options,
+                  "--launch-title=ULUS10001 \"--user-data-root=D:\\\\\"") == 0);
+#endif
+    snprintf(app->user_data_root, sizeof(app->user_data_root), "C:/Odd\"Folder");
+    assert(player_app_plan_steam_shortcut(app, 0, steam, exe, &plan) == PLAYER_STEAM_NO_PROGRAM);
+    free(app);
+}
+
 int main(int argc, char **argv) {
     if (argc > 1 && strcmp(argv[1], "--image") == 0) {
         return repeat_launch_child_mode();
@@ -8632,6 +10270,7 @@ int main(int argc, char **argv) {
     test_versioned_user_data();
     test_psn_package_imports_as_its_iso();
     test_homebrew_package_becomes_a_private_disc();
+    test_homebrew_stop_cards_name_their_limit();
     test_stage_discard_removes_a_deep_tree();
     test_tree_helpers_walk_a_deep_tree();
 #if defined(_WIN32) || defined(_WIN64)
@@ -8639,6 +10278,8 @@ int main(int argc, char **argv) {
 #endif
     test_remove_from_library_deletes_what_nakagawa_built();
     test_saves_back_up_restore_and_add();
+    test_launch_title_names_one_game();
+    test_add_to_steam_outcomes();
     test_saves_backup_refuses_what_it_cannot_hold();
 #if defined(NK_SAVES_TEST_SEAMS)
     test_saves_change_nothing_without_a_whole_backup();
@@ -8657,7 +10298,6 @@ int main(int argc, char **argv) {
     test_windows_block_cards_name_the_block();
     test_skipped_showcase_logs_its_reason();
     test_build_outcome_is_shown_once_per_session();
-    test_bitmap_font_text_fallback();
     test_display_path_hides_profile_folder();
     test_report_this_game();
     test_license_folder_request();
@@ -8667,6 +10307,13 @@ int main(int argc, char **argv) {
     test_play_mode_settings_mapping();
     test_play_mode_smooth_motion();
     test_play_mode_sas_settings();
+    test_play_mode_cull_settings();
+    test_play_mode_stick_settings();
+    test_play_mode_load_settings();
+    test_play_mode_ssaa_settings();
+    test_play_mode_tess_settings();
+    test_play_mode_twin_settings();
+    test_player_nickname();
     test_graphics_presets();
     test_play_mode_line_parses_in_runtime();
     test_play_mode_upscale_settings();
@@ -8800,47 +10447,6 @@ int main(int argc, char **argv) {
     memset(&entry, 0, sizeof(entry));
     snprintf(entry.title_name, sizeof(entry.title_name), "Nameless");
     assert(player_app_add_game(app, &entry) == false);
-
-    /* 6. Every library entry must be reachable.
-     *
-     * The strip draws cards left to right on a 280-pixel pitch, so a
-     * 1280-wide window shows about four. Everything past those was drawn
-     * outside the window, and src/player had no wheel, paging, keyboard or
-     * offset handling at all -- so with a full library most games could
-     * neither be selected nor launched. */
-    printf("[PLAYER_STATE_TEST] Subtest 6: every entry is reachable\n");
-    fflush(stdout);
-
-    app->window_width = 1280;
-    app->window_height = 720;
-    int visible = player_app_visible_library_cards(app);
-    assert(visible >= 1);
-    assert(visible < NK_MAX_GAMES);   /* otherwise this proves nothing */
-
-    /* The library is already full from subtest 4. */
-    assert(app->game_count == NK_MAX_GAMES);
-    app->selected_game_index = 0;
-    for (int i = 1; i < NK_MAX_GAMES; i++) {
-        player_app_move_selection(app, 1);
-        assert(app->selected_game_index == i);
-    }
-    /* Including the ones that never fit on screen at once. */
-    assert(app->selected_game_index == NK_MAX_GAMES - 1);
-    assert(app->selected_game_index >= visible);
-
-    /* Selection clamps rather than wrapping or running off either end. */
-    player_app_move_selection(app, 1);
-    assert(app->selected_game_index == NK_MAX_GAMES - 1);
-    player_app_move_selection(app, -NK_MAX_GAMES * 2);
-    assert(app->selected_game_index == 0);
-    player_app_move_selection(app, -1);
-    assert(app->selected_game_index == 0);
-
-    /* A window too narrow for even one card still offers one. */
-    app->window_width = 100;
-    assert(player_app_visible_library_cards(app) == 1);
-    app->window_width = 1920;
-    assert(player_app_visible_library_cards(app) > visible);
 
     /* 7. The demo fixture set must contain a title that can actually launch.
      *
@@ -9102,6 +10708,16 @@ int main(int argc, char **argv) {
         player_app_apply_settings_to_session(&applied, &cfg);
         assert(cfg.reduce_motion == NK_REDUCE_MOTION_SYSTEM);
         assert(cfg.gui_mode == true);   /* untouched by the mapping */
+        /* The nickname reaches the session whole, and its copy always ends in a NUL (#2197). */
+        snprintf(applied.nickname, sizeof(applied.nickname), "%s", "Kaz \xE3\x83\x8A");
+        memset(cfg.nickname, 'x', sizeof(cfg.nickname));
+        player_app_apply_settings_to_session(&applied, &cfg);
+        assert(strcmp(cfg.nickname, "Kaz \xE3\x83\x8A") == 0);
+        memset(applied.nickname, 'n', sizeof(applied.nickname) - 1u);
+        applied.nickname[sizeof(applied.nickname) - 1u] = '\0';
+        memset(cfg.nickname, 'x', sizeof(cfg.nickname));
+        player_app_apply_settings_to_session(&applied, &cfg);
+        assert(strlen(cfg.nickname) == NK_NICKNAME_MAX_BYTES);
         /* NULL arguments are safe no-ops. */
         player_app_apply_settings_to_session(NULL, &cfg);
         player_app_apply_settings_to_session(&applied, NULL);
@@ -9188,22 +10804,6 @@ int main(int argc, char **argv) {
         free(mapped);
     }
 
-    /* 10. Focus clamps into range so keyboard/gamepad activation can never
-     * target a control the view no longer draws. */
-    printf("[PLAYER_STATE_TEST] Subtest 10: focus clamps\n");
-    fflush(stdout);
-    PlayerApp *focus = (PlayerApp *)calloc(1, sizeof(PlayerApp));
-    assert(focus != NULL);
-    focus->focus_index = 0;
-    player_app_move_focus(focus, 5, 3);
-    assert(focus->focus_index == 2);
-    player_app_move_focus(focus, -10, 3);
-    assert(focus->focus_index == 0);
-    player_app_move_focus(focus, 1, 0);
-    assert(focus->focus_index == 0);
-    player_app_move_focus(NULL, 1, 3);
-    free(focus);
-
     /* 11. Library removal touches only the entry, never the ISO file, and
      * invalid indices are refused before any save. */
     printf("[PLAYER_STATE_TEST] Subtest 11: library removal is entry-only\n");
@@ -9241,124 +10841,6 @@ int main(int argc, char **argv) {
         free(removal);
     }
 
-    /* 12. Focus-stop counts match the buttons each view draws, so the
-     * event loop can never park focus on a control that does not exist. */
-    printf("[PLAYER_STATE_TEST] Subtest 12: focus stops match drawn buttons\n");
-    fflush(stdout);
-    {
-        PlayerApp *stops = (PlayerApp *)calloc(1, sizeof(PlayerApp));
-        assert(stops != NULL);
-        nk_library_init(&stops->library);
-        stops->window_width = 1280;
-        stops->window_height = 720;
-        assert(player_app_focus_count(NULL) == 1);
-
-        stops->active_view = VIEW_LIBRARY;
-        stops->game_count = 0;
-        assert(player_app_focus_count(stops) == 1); /* empty: add only */
-
-        stops->active_view = PLAYER_VIEW_READY_LIBRARY;
-        assert(player_app_focus_count(stops) == 1); /* empty ready library */
-        stops->active_view = VIEW_LIBRARY;
-
-        seed_entry(&entry, "FCS00001", "Unprepared");
-        entry.is_prepared = false;
-        stops->games[0] = entry;
-        stops->game_count = 1;
-        stops->selected_game_index = 0;
-        assert(player_app_focus_count(stops) == 4); /* incompatible package: rebuild + add + remove + mapping (#1147) */
-
-        stops->games[0].is_prepared = true;
-        assert(player_app_focus_count(stops) == 4); /* no validated package is still incompatible: rebuild + add + remove + mapping */
-
-        stops->is_game_running = true;
-        assert(player_app_focus_count(stops) == 4); /* stop + add + remove + mapping */
-
-        /* Overflow adds the two paging stops. */
-        stops->is_game_running = false;
-        stops->window_width = 640;
-        assert(player_app_visible_library_cards(stops) == 2);
-        stops->game_count = 1;
-        assert(player_app_focus_count(stops) == 4); /* rebuild + add + remove + mapping */
-        seed_entry(&entry, "FCS00002", "Second");
-        stops->games[1] = entry;
-        seed_entry(&entry, "FCS00003", "Third");
-        stops->games[2] = entry;
-        stops->game_count = 3;
-        assert(player_app_focus_count(stops) == 6); /* + both paging stops */
-
-        /* A title with missing package offers the BUILD PACKAGE button */
-        stops->window_width = 1280;
-        stops->game_count = 1;
-        seed_entry(&entry, "TEST80001", "Synthetic Package Fixture");
-        snprintf(entry.title_id, sizeof(entry.title_id), "test-80001");
-        stops->games[0] = entry;
-        assert(player_app_focus_count(stops) == 4); /* build package + add + remove + mapping */
-        stops->focus_index = 0;
-        player_app_runtime_package_cache_mark_pending(stops, 0);
-        assert(player_app_focus_count(stops) == 4);
-        assert(stops->focus_index == 0); /* background validation keeps primary focus */
-        stops->runtime_package_cache[0].validation_pending = false;
-
-        stops->active_view = VIEW_BUILDING_PACKAGE;
-        assert(player_app_focus_count(stops) == 1); /* cancel build */
-
-        stops->active_view = VIEW_INSPECTING;
-        assert(player_app_focus_count(stops) == 1);
-        stops->active_view = VIEW_SUPPORTED_TITLE;
-        assert(player_app_focus_count(stops) == 2);
-        stops->active_view = VIEW_UNSUPPORTED_TITLE;
-        assert(player_app_focus_count(stops) == 1);
-        stops->active_view = VIEW_SETTINGS;
-        assert(player_app_focus_count(stops) == 18); /* two pacing modes; scaling; launcher fullscreen; online options; UI sounds */
-        stops->active_view = VIEW_PREREQ_CONSENT;
-        assert(player_app_focus_count(stops) == 2);
-        stops->active_view = VIEW_PREREQ_PROGRESS;
-        assert(player_app_focus_count(stops) == 1);
-        stops->active_view = VIEW_PREREQ_ABOUT;
-        stops->prerequisites.item_count = 0;
-        assert(player_app_focus_count(stops) == 1);
-        stops->prerequisites.item_count = 1;
-        assert(player_app_focus_count(stops) == 2);
-        stops->active_view = VIEW_CONFIRM_REMOVE_TOOLS;
-        assert(player_app_focus_count(stops) == 2);
-        stops->active_view = VIEW_CONTROLLER_SETTINGS;
-        assert(player_app_focus_count(stops) == 23); /* + the global / this-game choice */
-        stops->input_settings.calib.stage = CALIBRATION_STAGE_REST;
-        assert(player_app_focus_count(stops) == 1);
-        stops->input_settings.calib.stage = CALIBRATION_STAGE_EXTREMES;
-        assert(player_app_focus_count(stops) == 2);
-        stops->input_settings.calib.stage = CALIBRATION_STAGE_RESULT;
-        assert(player_app_focus_count(stops) == 2);
-        stops->input_settings.calib.stage = CALIBRATION_STAGE_INACTIVE;
-        assert(player_app_focus_count(stops) == 23);
-        /* With no library disc there is nothing to name, so the choice is not a
-         * focus stop and the count is the pre-#520 one. */
-        stops->selected_game_index = -1;
-        assert(player_app_focus_count(stops) == 22);
-        stops->selected_game_index = 0;
-        stops->active_view = VIEW_ERROR;
-        assert(player_app_focus_count(stops) == 1);
-
-        stops->active_view = VIEW_SETUP_WIZARD;
-        stops->wizard.step = WIZARD_STEP_WELCOME;
-        assert(player_app_focus_count(stops) == 2);
-        stops->wizard.step = WIZARD_STEP_SELECT_GAME;
-        stops->wizard.iso_selected = false;
-        assert(player_app_focus_count(stops) == 3);
-        stops->wizard.iso_selected = true;
-        assert(player_app_focus_count(stops) == 4);
-        stops->wizard.step = WIZARD_STEP_INSPECT_VERIFY;
-        assert(player_app_focus_count(stops) == 3);
-        stops->wizard.step = WIZARD_STEP_SYSTEM_FONTS;
-        assert(player_app_focus_count(stops) == 6); /* accept, cycle, back, cancel, import, remove */
-        stops->wizard.step = WIZARD_STEP_ONLINE_OPTIONS;
-        assert(player_app_focus_count(stops) == 5); /* online, developer, continue, skip, back */
-        stops->wizard.step = WIZARD_STEP_READY_LAUNCH;
-        assert(player_app_focus_count(stops) == 3);
-        free(stops);
-    }
-
     /* 13. Setup Wizard state machine: start, step navigation, and cancellation. */
     printf("[PLAYER_STATE_TEST] Subtest 13: setup wizard transitions\n");
     fflush(stdout);
@@ -9370,7 +10852,6 @@ int main(int argc, char **argv) {
         player_app_start_setup_wizard(wiz);
         assert(wiz->active_view == VIEW_SETUP_WIZARD);
         assert(wiz->wizard.step == WIZARD_STEP_WELCOME);
-        assert(wiz->focus_index == 0);
         /* The Game step draws the status line as the reason no disc is chosen:
            a new wizard has nothing to report (the walkthrough saw a welcome
            sentence there in the warning colour). */
@@ -9401,7 +10882,6 @@ int main(int argc, char **argv) {
         assert(wiz->wizard.is_extracting == true);
         assert(player_app_wizard_take_extraction_request(wiz) == true);
         assert(player_app_wizard_take_extraction_request(wiz) == false);
-        assert(player_app_focus_count(wiz) == 1);
         player_app_wizard_set_extraction_progress(wiz, 42, 2, 5, "xbdata/menu.xb");
         assert(wiz->wizard.extraction_percent == 42);
         assert(wiz->wizard.files_extracted == 2);
@@ -10288,8 +11768,6 @@ int main(int argc, char **argv) {
         assert(strstr(wiz->last_error.boundary_text, "from the library") != NULL);
         assert(strchr(wiz->last_error.boundary_text, '#') == NULL);
         assert(strstr(wiz->last_error.message, "#") == NULL);
-        player_app_set_view(wiz, VIEW_EXPERIMENTAL_TITLE);
-        assert(player_app_focus_count(wiz) == 2);
 
         remove(runtime_exe);
         remove(runtime_image);
@@ -11194,6 +12672,10 @@ int main(int argc, char **argv) {
         /* #1306: shared system libraries are on by default and persist when turned off. */
         assert(s_app->settings.share_system_libraries == true);
         player_app_toggle_share_system_libraries(s_app);
+        /* Settings > Build speed: Balanced by default; the button steps to Fastest. */
+        assert(s_app->settings.build_speed == PACKAGE_BUILD_SPEED_BALANCED);
+        player_app_cycle_build_speed(s_app);
+        assert(s_app->settings.build_speed == PACKAGE_BUILD_SPEED_FASTEST);
         s_app->settings.master_volume = 55;
         s_app->settings.launcher_window_maximized = true;
         s_app->settings.launcher_window_position_valid = true;
@@ -11218,6 +12700,7 @@ int main(int argc, char **argv) {
         assert(s_app2->settings.interface_size_pct == 150);
         assert(s_app2->settings.text_size_pct == 150);
         assert(s_app2->settings.share_system_libraries == false);
+        assert(s_app2->settings.build_speed == PACKAGE_BUILD_SPEED_FASTEST);
         assert(s_app2->settings.master_volume == 55);
         assert(s_app2->settings.library_sort == PLAYER_LIBRARY_SORT_PLAYED);
         /* The sort is saved by name; a name this build does not know keeps the default. */
@@ -11235,6 +12718,21 @@ int main(int argc, char **argv) {
                             "{\"schema_version\": 2, \"library_sort\": \"rating\"}");
             assert(player_app_load_settings(sorted, test_settings_path) == NK_OK);
             assert(sorted->settings.library_sort == PLAYER_LIBRARY_SORT_PLAYED);
+            /* The build speed is saved by name; a name this build does not know, or none,
+               keeps Balanced. */
+            write_text_file(test_settings_path,
+                            "{\"schema_version\": 2, \"build_speed\": \"background\"}");
+            assert(player_app_load_settings(sorted, test_settings_path) == NK_OK);
+            assert(sorted->settings.build_speed == PACKAGE_BUILD_SPEED_BACKGROUND);
+            write_text_file(test_settings_path,
+                            "{\"schema_version\": 2, \"build_speed\": \"turbo\"}");
+            assert(player_app_load_settings(sorted, test_settings_path) == NK_OK);
+            assert(sorted->settings.build_speed == PACKAGE_BUILD_SPEED_BALANCED);
+            sorted->settings.build_speed = PACKAGE_BUILD_SPEED_BACKGROUND;
+            assert(player_app_save_settings(sorted, test_settings_path) == NK_OK);
+            saved = read_text_file(test_settings_path);
+            assert(saved != NULL && strstr(saved, "\"build_speed\": \"background\",") != NULL);
+            free(saved);
             free(sorted);
         }
         s_app2->settings.library_sort = PLAYER_LIBRARY_SORT_PLAYED;
@@ -11542,68 +13040,6 @@ int main(int argc, char **argv) {
         }
         assert(confirmation_count == 2);
         s_app2->is_game_running = false;
-
-        /* The two-column layout is used from the first card width that can
-           hold it, with the right column pushed clear of the wide launcher
-           control. A window that wide must never fall into the single-column
-           flow, which cannot fit a 720 px client. */
-        assert(!player_settings_uses_two_columns(1043, 720));
-        assert(player_settings_uses_two_columns(1044, 720));
-        assert(player_settings_uses_two_columns(1187, 720));
-        assert(player_settings_uses_two_columns(1188, 720));
-        for (float card = 980.0f; card <= 1216.0f; card += 1.0f) {
-            float offset = player_settings_second_column_offset(card);
-            /* launcher control and hint end 562 px into the card */
-            assert(offset >= 562.0f + 24.0f);
-            /* the right column keeps usable width for the stepper */
-            assert(card - 32.0f - offset >= 300.0f);
-        }
-        assert(player_settings_uses_two_columns(1280, 620));
-        assert(!player_settings_uses_two_columns(1280, 619));
-
-        /* The launcher UI is drawn at the window's real pixel size (#1129)
-           with the scale the old 1280x720 letterbox used: the design never
-           lays out smaller, grows along the longer axis instead of leaving
-           bars, and the canvas covers the output with whole layout units. */
-        {
-            static const struct {
-                int pixel_w, pixel_h;
-                int width, height;
-                float scale;
-            } fits[] = {
-                { 1280, 720, 1280, 720, 1.0f },        /* 1x */
-                { 2560, 1440, 1280, 720, 2.0f },       /* 2x high-DPI window */
-                { 1920, 1080, 1280, 720, 1.5f },       /* 1080p fullscreen */
-                { 1500, 900, 1280, 768, 1.171875f },   /* fractional window */
-                { 3840, 2160, 1280, 720, 3.0f },       /* 4K fullscreen */
-                { 1920, 1200, 1280, 800, 1.5f },       /* 16:10 grows down */
-                { 2560, 1080, 1706, 720, 1.5f },       /* ultrawide grows across */
-                { 960, 540, 1280, 720, 0.75f },        /* minimum window */
-                { 1440, 810, 1280, 720, 1.125f },      /* minimum at 150% */
-                { 200, 100, 800, 400, 0.25f },         /* scale floor */
-                { 30720, 17280, 3840, 2160, 8.0f },    /* scale cap */
-            };
-            for (size_t i = 0; i < sizeof(fits) / sizeof(fits[0]); ++i) {
-                PlayerUiCanvas canvas;
-                assert(player_ui_canvas_fit(fits[i].pixel_w, fits[i].pixel_h,
-                                            &canvas));
-                assert(canvas.width == fits[i].width);
-                assert(canvas.height == fits[i].height);
-                assert(canvas.scale == fits[i].scale);
-                assert(canvas.width * canvas.scale <= fits[i].pixel_w + 0.01f);
-                assert(canvas.height * canvas.scale <= fits[i].pixel_h + 0.01f);
-                assert((canvas.width + 1) * canvas.scale > fits[i].pixel_w);
-                assert((canvas.height + 1) * canvas.scale > fits[i].pixel_h);
-            }
-            PlayerUiCanvas canvas;
-            /* 800 px at 800/720 is 720 units, not 719 from rounding error */
-            assert(player_ui_canvas_fit(1500, 800, &canvas));
-            assert(canvas.height == 720);
-            assert(canvas.width == 1350);
-            assert(!player_ui_canvas_fit(0, 720, &canvas));
-            assert(!player_ui_canvas_fit(1280, -1, &canvas));
-            assert(!player_ui_canvas_fit(1280, 720, NULL));
-        }
 
         /* The focus handoff is attempted once per launch, and only on proven
            evidence. The launcher stays open behind the game (#1298) and hands
@@ -11951,6 +13387,65 @@ int main(int argc, char **argv) {
             free(saved);
         }
 
+        /* Discord status (#2259; owner decision 2026-11-08): off by default and written as
+           off; this build has no Discord application ID, so the switch fails closed and the
+           tick never starts a client, even with a stored true. */
+        player_app_init(s_app2);
+        assert(!s_app2->settings.discord_presence);
+        assert(!nk_discord_available());
+        assert(player_app_save_settings(s_app2, test_settings_path) == NK_OK);
+        {
+            char *saved = read_text_file(test_settings_path);
+            assert(saved && strstr(saved, "\"discord_presence\": false") != NULL);
+            free(saved);
+        }
+        s_app2->settings_path[0] = '\0';
+        player_app_toggle_discord_presence(s_app2);
+        assert(!s_app2->settings.discord_presence);
+        write_text_file(test_settings_path,
+                        "{\"schema_version\": 2, \"discord_presence\": \"yes\"}");
+        player_app_init(s_app2);
+        assert(player_app_load_settings(s_app2, test_settings_path) == NK_OK);
+        assert(!s_app2->settings.discord_presence);
+        write_text_file(test_settings_path,
+                        "{\"schema_version\": 2, \"discord_presence\": true}");
+        player_app_init(s_app2);
+        assert(player_app_load_settings(s_app2, test_settings_path) == NK_OK);
+        assert(s_app2->settings.discord_presence);
+        s_app2->is_game_running = true;
+        player_app_discord_tick(s_app2, 1000u);
+        assert(!s_app2->discord_ready);
+        /* A stored On can still be turned off. */
+        s_app2->settings_path[0] = '\0';
+        player_app_toggle_discord_presence(s_app2);
+        assert(!s_app2->settings.discord_presence);
+
+        /* What it would show: the running game's title, play mode and start; nothing
+           when no game runs. A library-default mode reads as Authentic. */
+        {
+            NkDiscordActivity activity;
+            player_app_init(s_app2);
+            assert(!player_app_discord_activity(s_app2, &activity));
+            assert(activity.details[0] == '\0' && activity.state[0] == '\0');
+            s_app2->is_game_running = true;
+            snprintf(s_app2->running_title, sizeof(s_app2->running_title), "%s",
+                     "Synthetic Tennis: Test Grip");
+            s_app2->running_play_mode = PLAYER_PLAY_ENHANCED;
+            s_app2->running_start_ms = 1762560000000;
+            assert(player_app_discord_activity(s_app2, &activity));
+            assert(strcmp(activity.details, "Synthetic Tennis: Test Grip") == 0);
+            assert(strcmp(activity.state, "Enhanced") == 0);
+            assert(activity.start_ms == 1762560000000);
+            s_app2->running_play_mode = PLAYER_PLAY_LIBRARY;
+            assert(player_app_discord_activity(s_app2, &activity));
+            assert(strcmp(activity.state, "Authentic") == 0);
+            s_app2->running_play_mode = PLAYER_PLAY_ACE;
+            assert(player_app_discord_activity(s_app2, &activity));
+            assert(strcmp(activity.state, "Ace") == 0);
+            s_app2->is_game_running = false;
+            assert(!player_app_discord_activity(s_app2, &activity));
+        }
+
         remove(test_settings_path);
         free(s_app);
         free(s_app2);
@@ -12004,7 +13499,6 @@ int main(int argc, char **argv) {
         dev->settings.developer_mode = true;
         assert(player_app_open_developer_log(dev));
         assert(dev->active_view == VIEW_DEVELOPER_LOG);
-        assert(player_app_focus_count(dev) == 3);
         player_app_close_developer_log(dev);
         assert(dev->active_view == VIEW_SETTINGS);
         /* The layout inspector lasts only while developer mode does. */
@@ -12013,9 +13507,7 @@ int main(int argc, char **argv) {
         assert(!dev->dev_log.inspect_layout);
         dev->settings.developer_mode = true;
         dev->active_view = VIEW_ONLINE_SETTINGS;
-        assert(player_app_focus_count(dev) == 4); /* online, developer, open log, back */
         dev->settings.online_mode = true;
-        assert(player_app_focus_count(dev) == 6); /* + news, reports */
 
         /* The wizard step: Welcome -> Options -> Select game, and skipping
            turns both off. Every first run passes through it: it needs no game. */
@@ -12854,6 +14346,26 @@ int main(int argc, char **argv) {
      * retained child handle -- and no repository-tracked file changes across
      * all runs. The staged executable is a self-copy of this test binary
      * standing in for a recompiled runtime; the package is synthetic. */
+#if defined(__ANDROID__)
+    /* Every launch in this block spawns the runtime, which Android does only through the
+       app's TitleActivity over JNI; a program run from adb shell has no Java VM for it, and
+       nk_launch_start fails closed there (launch_resolution_test skips its spawning subtests
+       for the same reason). It runs inside the app instead. */
+    printf("SKIP player_state_test subtest 20 (exit 77): a launch needs the app's TitleActivity "
+           "(#360)\n");
+    s_package_rebuild_skipped = true;
+    /* Helpers only this block uses. */
+    (void)write_iso_with_fixture_eboot;
+    (void)set_environment_value;
+    (void)path_is_within;
+    (void)get_working_directory;
+    (void)git_status_snapshot;
+    (void)files_identical;
+    (void)read_repeat_launch_report;
+    (void)run_log_contains;
+    (void)append_runtime_event;
+    (void)repeat_launch_and_settle;
+#else
     printf("[PLAYER_STATE_TEST] Subtest 20: repeat launch through the player session path\n");
     fflush(stdout);
     {
@@ -13098,12 +14610,13 @@ int main(int argc, char **argv) {
                     } else {
                         snprintf(expected, sizeof(expected),
                                  "SR_RESOLUTION_SCALE=%d;SR_PRESENT_SCALING=%s;SR_VSYNC=%d;"
-                                 "SR_FULLSCREEN=%d;SR_PRESENT_UPSCALE=off",
+                                 "SR_FULLSCREEN=%d;SR_PRESENT_UPSCALE=%s",
                                  row->resolution_scale,
                                  row->present_scaling == NK_PRESENT_SCALING_SHARP ? "sharp"
                                      : row->present_scaling == NK_PRESENT_SCALING_INTEGER
                                          ? "integer" : "bilinear",
-                                 row->vsync ? 1 : 0, row->fullscreen > 0 ? 1 : 0);
+                                 row->vsync ? 1 : 0, row->fullscreen > 0 ? 1 : 0,
+                                 row->part[PLAYER_PART_UPSCALE] == 1 ? "fsr1" : "off");
                     }
                     if (strcmp(report.display, expected) != 0) {
                         fprintf(stderr, "preset %s, %s: launched %s, expected %s\n", row->word,
@@ -13540,6 +15053,88 @@ int main(int argc, char **argv) {
         assert(warning_card_has_details);
         assert(stall_log_kept);
 
+        /* #2151: a live synthetic runtime reports its render path as gui_init does. Each
+           forced start-up outcome reaches the game's page as its own notice, read from the
+           session's boot events; no fallback gives none; Hide keeps that fallback's notice
+           hidden for the rest of the session, and the next launch reads its own path. */
+        {
+            static const struct {
+                bool vulkan_started, gpu_ge_started;
+                NkRenderFallback fallback;
+                const char *names;
+            } forced[] = {
+                {false, false, NK_RENDER_FALLBACK_GDI_PRESENTER, "a basic Windows window"},
+                {true, false, NK_RENDER_FALLBACK_SOFTWARE_GE, "The GPU renderer did not start"},
+                {true, true, NK_RENDER_FALLBACK_NONE, NULL},
+                {false, false, NK_RENDER_FALLBACK_GDI_PRESENTER, NULL},  /* hidden by Hide */
+            };
+            bool render_ok = true;
+            for (size_t f = 0; f < sizeof(forced) / sizeof(forced[0]); ++f) {
+                const char *heading = "unset";
+                const char *text = "unset";
+                const char *want_heading = NULL;
+                const char *want_text = NULL;
+                char line[160];
+                char timed[192];
+                NkRenderPath path = nk_render_path_from_init(true, forced[f].vulkan_started,
+                                                             true, forced[f].gpu_ge_started);
+                set_environment_value("NK_REPEAT_LAUNCH_HOLD_OPEN", "1");
+                bool launched = player_app_launch_game(rep, 0) && rep->is_game_running &&
+                                rep->boot_event_file_path[0] != '\0';
+                render_ok = render_ok && launched && path.fallback == forced[f].fallback;
+                if (launched) {
+                    (void)player_app_monitor_game_session(rep, 90000 + (uint64_t)f * 1000);
+                    /* Nothing is known before the runtime's event arrives. */
+                    render_ok = render_ok && !rep->render_path_known &&
+                        !player_app_render_notice(rep, rep->games[0].disc_id, &heading,
+                                                  &text) &&
+                        heading == NULL && text == NULL;
+                    render_ok = render_ok &&
+                        nk_render_path_event_format(&path, line, sizeof(line)) > 0;
+                    snprintf(timed, sizeof(timed), "%s t_ns=77\n", line);
+                    render_ok = render_ok &&
+                        append_runtime_event(rep->boot_event_file_path, timed);
+                    (void)player_app_monitor_game_session(rep, 90500 + (uint64_t)f * 1000);
+                    bool shown = player_app_render_notice(rep, rep->games[0].disc_id,
+                                                          &heading, &text);
+                    render_ok = render_ok && rep->render_path_known &&
+                        rep->render_path.fallback == forced[f].fallback &&
+                        rep->render_path.vulkan == path.vulkan &&
+                        rep->render_path.gpu_ge == path.gpu_ge;
+                    if (forced[f].names != NULL) {
+                        render_ok = render_ok &&
+                            player_render_notice_text(forced[f].fallback, &want_heading,
+                                                      &want_text) &&
+                            shown && heading == want_heading && text == want_text &&
+                            strcmp(heading, "Drawn in software") == 0 &&
+                            strstr(text, forced[f].names) != NULL &&
+                            strstr(text, "Internal resolution setting has no effect") != NULL;
+                        /* Another game's page has no notice for this launch. */
+                        render_ok = render_ok && rep->game_count > 1 &&
+                            !player_app_render_notice(rep, rep->games[1].disc_id, &heading,
+                                                      &text);
+                        if (forced[f].fallback == NK_RENDER_FALLBACK_GDI_PRESENTER) {
+                            player_app_hide_render_notice(rep);
+                            render_ok = render_ok &&
+                                !player_app_render_notice(rep, rep->games[0].disc_id,
+                                                          &heading, &text);
+                        }
+                    } else {
+                        render_ok = render_ok && !shown && heading == NULL && text == NULL;
+                    }
+                }
+                if (rep->is_game_running) player_app_stop_game(rep);
+                set_environment_value("NK_REPEAT_LAUNCH_HOLD_OPEN", "");
+            }
+            assert(render_ok);
+            assert(!player_render_notice_text(NK_RENDER_FALLBACK_NONE, NULL, NULL));
+            /* Hide is for this session only: the hidden fallback is the one hidden. */
+            assert(rep->render_notice_hidden[NK_RENDER_FALLBACK_GDI_PRESENTER] &&
+                   !rep->render_notice_hidden[NK_RENDER_FALLBACK_SOFTWARE_GE]);
+            assert(dev_log_contains(rep, "render path: presenter=gdi ge=software "
+                                         "fallback=gdi_presenter"));
+        }
+
         /* #308: a live synthetic runtime keeps flipping frames that show nothing.
            The dark-picture event raises the same notice at 30 seconds, worded for
            a black screen; a flip-watchdog resume does not clear it, a visible
@@ -13709,6 +15304,7 @@ int main(int argc, char **argv) {
         test_rmdir(user_root);
         test_rmdir(scratch);
     }
+#endif
     /* 20b. A crafted disc controls module directory names; only plain names
        may be written under the private per-title folder. */
     {
@@ -13727,31 +15323,10 @@ int main(int argc, char **argv) {
         assert(!player_module_name_is_safe("space name.prx"));
         assert(player_module_name_is_safe("CONSOLE.prx"));
     }
-    /* 21. Host discovery: build preflight cards and the SDL3_ttf search order. */
-    printf("[PLAYER_STATE_TEST] Subtest 21: build preflight cards and SDL3_ttf search order\n");
+    /* 21. Host discovery: build preflight cards. */
+    printf("[PLAYER_STATE_TEST] Subtest 21: build preflight cards\n");
     fflush(stdout);
     {
-        /* 21a: SDL3_ttf candidates put the executable folder first, then the
-           platform loader's bare names (PATH on Windows). */
-        char with_dir[PLAYER_APP_TTF_MAX_CANDIDATES][MAX_PATH_LEN];
-        char without_dir[PLAYER_APP_TTF_MAX_CANDIDATES][MAX_PATH_LEN];
-        char trailing[PLAYER_APP_TTF_MAX_CANDIDATES][MAX_PATH_LEN];
-        int n_with = player_app_ttf_library_candidates("C:/rel/bin", with_dir,
-                                                       PLAYER_APP_TTF_MAX_CANDIDATES);
-        int n_without = player_app_ttf_library_candidates(NULL, without_dir,
-                                                          PLAYER_APP_TTF_MAX_CANDIDATES);
-        int n_trailing = player_app_ttf_library_candidates("C:/rel/bin/", trailing,
-                                                           PLAYER_APP_TTF_MAX_CANDIDATES);
-        assert(n_with == n_without + 1);
-        assert(n_with >= 2);
-        assert(strstr(with_dir[0], "C:/rel/bin") != NULL);
-        assert(strstr(with_dir[0], "SDL3_ttf") != NULL);
-        assert(strcmp(with_dir[1], without_dir[0]) == 0);
-        assert(strchr(with_dir[n_with - 1], '/') == NULL);
-        assert(strchr(with_dir[n_with - 1], '\\') == NULL);
-        assert(n_trailing == n_with);
-        assert(strcmp(trailing[0], with_dir[0]) == 0);
-
         /* 21b/21c: the two discovery cards a release user can hit. */
         PlayerApp *capp = (PlayerApp *)calloc(1, sizeof(PlayerApp));
         assert(capp != NULL);
@@ -13855,6 +15430,17 @@ int main(int argc, char **argv) {
         player_app_prereq_cancel(capp);
         assert(capp->prerequisites.phase == PLAYER_PREREQ_CANCELLED);
         assert(capp->active_view == VIEW_LIBRARY);
+#elif defined(__ANDROID__)
+        /* No download on Android either (#306), and its Python is only the app's
+           libnk_python.so (#360): the card names that folder, not a PATH search. */
+        assert(!player_app_start_package_build(capp, 0));
+        assert(strcmp(capp->last_error.error_code, "BUILD_TOOLCHAIN_MISSING") == 0);
+        assert(strstr(capp->last_error.message, "(libnk_python.so)") != NULL);
+        assert(strstr(capp->last_error.message, "was not found on PATH") == NULL);
+        assert(strstr(capp->last_error.message, "downloads build tools only on Windows") != NULL);
+        assert(strstr(capp->last_error.message, "in the works") == NULL);
+        assert(strstr(capp->last_error.message, "#") == NULL);
+        assert(capp->prerequisites.phase != PLAYER_PREREQ_CONSENT);
 #else
         /* Only Windows has a pinned download: other hosts use the system's own
            tools, so the card names the first missing one and its package, and
@@ -14236,13 +15822,23 @@ int main(int argc, char **argv) {
         }
 #endif
 
-        /* The reset: every folder is renamed with the stamp; logs stay. */
+        /* The reset: every folder is renamed with the stamp; logs stay. Where the logs
+           folder is inside a moved folder (a rooted layout: Android, or a data-root
+           override), it is moved back, so that folder holds the logs alone again. */
         assert(player_app_factory_reset(reset, "20261029-010205"));
         assert(reset->factory_reset_done && reset->should_quit);
         for (size_t i = 0; i < folder_count; ++i) {
             char moved[NK_MAX_PATH + 64];
             snprintf(moved, sizeof(moved), "%s-backup-20261029-010205", folders[i]);
-            assert(!nk_platform_dir_exists(folders[i]));
+            if (native_test_path_within(logs_dir, folders[i])) {
+                char moved_logs[NK_MAX_PATH * 2 + 64];
+                snprintf(moved_logs, sizeof(moved_logs), "%s%s", moved,
+                         logs_dir + strlen(folders[i]));
+                assert(nk_platform_dir_exists(folders[i]));
+                assert(!nk_platform_dir_exists(moved_logs));
+            } else {
+                assert(!nk_platform_dir_exists(folders[i]));
+            }
             assert(nk_platform_dir_exists(moved));
         }
         for (size_t i = 0; i < 4u; ++i) {
@@ -14274,15 +15870,58 @@ int main(int argc, char **argv) {
             assert(test_rmdir(moved) == 0);
         }
 
-        /* Put this test's data back for anything that runs after it. */
+        /* Put this test's data back for anything that runs after it. A folder the logs
+           were moved back into first returns them to its backup. */
         for (size_t i = 0; i < folder_count; ++i) {
             char moved[NK_MAX_PATH + 64];
             snprintf(moved, sizeof(moved), "%s-backup-20261029-010205", folders[i]);
+            if (native_test_path_within(logs_dir, folders[i])) {
+                char moved_logs[NK_MAX_PATH * 2 + 64];
+                snprintf(moved_logs, sizeof(moved_logs), "%s%s", moved,
+                         logs_dir + strlen(folders[i]));
+                assert(nk_rename_utf8(logs_dir, moved_logs) == 0);
+                assert(test_rmdir(folders[i]) == 0);
+            }
             assert(nk_rename_utf8(moved, folders[i]) == 0);
         }
         for (size_t i = 0; i < 4u; ++i) remove(marks[i]);
         free(reset);
         printf("[PLAYER_STATE_TEST] factory reset PASSED\n");
+    }
+    {
+        /* A data-root override is a rooted layout, as Android's is: the logs folder is
+           inside the data folder, which the reset moves aside, and the logs are moved
+           back so they stay where they were (#360). */
+        char rsep = nk_platform_path_separator();
+        char cache[NK_MAX_PATH];
+        char root[NK_MAX_PATH + 32];
+        char config[NK_MAX_PATH + 48];
+        char logs[NK_MAX_PATH + 48];
+        char kept_log[NK_MAX_PATH + 64];
+        char moved_root[NK_MAX_PATH + 64];
+        char moved_config[NK_MAX_PATH + 96];
+        assert(nk_platform_get_path(NK_PATH_CACHE, cache, sizeof(cache)));
+        snprintf(root, sizeof(root), "%s%creset-rooted", cache, rsep);
+        snprintf(config, sizeof(config), "%s%cconfig", root, rsep);
+        snprintf(logs, sizeof(logs), "%s%clogs", root, rsep);
+        snprintf(kept_log, sizeof(kept_log), "%s%crun.log", logs, rsep);
+        assert(nk_platform_mkdir_p(config) && nk_platform_mkdir_p(logs));
+        write_text_file(kept_log, "a run log\n");
+        PlayerApp *rooted = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+        assert(rooted != NULL);
+        assert(nk_platform_set_app_data_dir_override(root));
+        bool reset_ok = player_app_factory_reset(rooted, "20261029-010206");
+        assert(nk_platform_set_app_data_dir_override(NULL));
+        assert(reset_ok);
+        snprintf(moved_root, sizeof(moved_root), "%s-backup-20261029-010206", root);
+        snprintf(moved_config, sizeof(moved_config), "%s%cconfig", moved_root, rsep);
+        assert(nk_platform_dir_exists(moved_config));
+        assert(!nk_platform_dir_exists(config));
+        assert(nk_platform_file_exists(kept_log));
+        free(rooted);
+        assert(test_remove_tree(moved_root));
+        assert(test_remove_tree(root));
+        printf("[PLAYER_STATE_TEST] factory reset of a rooted layout keeps the logs PASSED\n");
     }
 
     /* 25. The file pickers (owner, 2026-10-29): a first run opens them at the
@@ -14354,7 +15993,12 @@ int main(int argc, char **argv) {
     test_game_build_check_names_the_executable_build();
 
     free(app);
-    printf("[PLAYER_STATE_TEST] ALL PLAYER STATE TESTS PASSED!\n");
     native_test_assert_real_config_untouched();
+    if (s_package_rebuild_skipped) {
+        printf("[PLAYER_STATE_TEST] SKIP: every subtest ran except the package rebuild steps "
+               "(exit 77, #360)\n");
+        return 77;
+    }
+    printf("[PLAYER_STATE_TEST] ALL PLAYER STATE TESTS PASSED!\n");
     return 0;
 }

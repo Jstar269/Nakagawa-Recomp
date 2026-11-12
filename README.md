@@ -10,28 +10,39 @@
 
 **Play PSP games you own as native Windows programs.**
 
-**[Download](https://github.com/Jstar269/nakagawa-recomp/releases/tag/v0.0.2) · [Website](https://jstar269.github.io/nakagawa-recomp/) · [Compatibility](docs/COMPATIBILITY.md) · [Discussions](https://github.com/Jstar269/nakagawa-recomp/discussions)**
+**[Download](https://github.com/Jstar269/Nakagawa-Recomp/releases/tag/v0.0.2) · [Website](https://jstar269.github.io/Nakagawa-Recomp/) · [Compatibility](docs/COMPATIBILITY.md) · [Discussions](https://github.com/Jstar269/Nakagawa-Recomp/discussions)**
 
-[![CI](https://github.com/Jstar269/nakagawa-recomp/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Jstar269/nakagawa-recomp/actions/workflows/ci.yml)
-[![License: GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](LICENSE)
-[![Platform: Windows 11 x64](https://img.shields.io/badge/platform-Windows%2011%20x64-0078D6.svg)](docs/SETUP.md)
+[![CI](https://github.com/Jstar269/Nakagawa-Recomp/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Jstar269/Nakagawa-Recomp/actions/workflows/ci.yml)
+[![License: GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-2F6FD0.svg)](LICENSE)
+[![Platform: Windows 11 x64](https://img.shields.io/badge/platform-Windows%2011%20x64-2F6FD0.svg)](docs/SETUP.md)
 
 </div>
 
-Nakagawa Recomp is a static recompiler for the PlayStation Portable. It translates a game's code into C once, before
-you play, and compiles it into a Windows program. You supply the game from your own disc. The project is early: one
-game is playable, one plays a stage, a dozen more start and get part of the way in, and the rest are untested.
+Nakagawa Recomp is a static recompiler for the PlayStation Portable. It translates a game's MIPS code into C once,
+before you play, and compiles it into a native Windows program. It isn't an emulator. You supply the game from your
+own disc: Nakagawa includes no games, game data, firmware or system fonts.
 
-[![A rally in Hot Shots Tennis: Get a Grip, running natively in Nakagawa Recomp; play the clip](docs/media/hst-rally-poster.png)](https://jstar269.github.io/nakagawa-recomp/media/hst-rally.mp4)
+**What works today:** v0.0.2 is an experimental pre-release. *Hot Shots Tennis: Get a Grip* is playable, with full
+matches and Story Mode. It runs in **Authentic** mode, as released, or in **Enhanced** mode, which adds options such
+as texture filtering, Smooth motion and Widescreen. *PAC-MAN Championship Edition* plays a stage, about a dozen more
+games start and get part of the way in, and most others stop early and name what is missing.
 
-[Watch a 28-second rally with sound](https://jstar269.github.io/nakagawa-recomp/media/hst-rally.mp4) (MP4, 4.5 MB).
+**Try it:** [download v0.0.2](#download), extract the ZIP, start `bin\nakagawa_player.exe`, drag in your game's
+`.iso`, then press **BUILD PACKAGE** and **PLAY**. Without a game of your own, the library's **TEST THIS PC** row has
+two demos the project wrote, which need no game files.
+
+[![A rally in Hot Shots Tennis: Get a Grip, running natively in Nakagawa Recomp; play the clip](docs/media/hst-rally-poster.png)](https://jstar269.github.io/Nakagawa-Recomp/media/hst-rally.mp4)
+
+[Watch a 28-second rally with sound](https://jstar269.github.io/Nakagawa-Recomp/media/hst-rally.mp4) (MP4, 4.5 MB),
+recorded with v0.0.1. The [v0.0.2 release page](https://github.com/Jstar269/Nakagawa-Recomp/releases/tag/v0.0.2) has
+screenshots of Enhanced mode.
 
 <div align="center"><sub>Hot Shots Tennis: Get a Grip belongs to its publisher. This repository contains no game data: you need your own copy of the game, and nothing here downloads one.</sub></div>
 
 ## Download
 
-[Download v0.0.2](https://github.com/Jstar269/nakagawa-recomp/releases/tag/v0.0.2), the latest release: one ZIP for
-Windows 11, 64-bit. It includes the build tools, so you don't need to install anything else.
+[Download v0.0.2](https://github.com/Jstar269/Nakagawa-Recomp/releases/tag/v0.0.2), the latest release: one 260 MB
+ZIP for Windows 11, 64-bit. It includes the build tools, so there is nothing else to install.
 
 1. Extract the ZIP and start `bin\nakagawa_player.exe`.
 2. Drag your game's `.iso` into the player window, or choose **START SETUP WIZARD**. Nakagawa decrypts your own disc
@@ -39,8 +50,12 @@ Windows 11, 64-bit. It includes the build tools, so you don't need to install an
 3. Press **BUILD PACKAGE**, then **PLAY**. A first build takes several minutes.
 
 The ZIP isn't code-signed, so Windows may warn you the first time. The
-[release notes](docs/RELEASE_NOTES_v0.0.2.md) say what works, what doesn't, and how to check the download.
-Settings > **CHECK FOR UPDATES** asks GitHub for a newer version when you select it and links to its release page.
+[release notes](docs/RELEASE_NOTES_v0.0.2.md) say what works, what doesn't, and
+[how to check the download](docs/RELEASE_NOTES_v0.0.2.md#checking-your-download).
+
+**Updating from v0.0.1:** extract v0.0.2 into a new folder. It finds your library, saves and settings, and
+**Rebuild all** in the library rebuilds the games v0.0.1 built. Settings > **CHECK FOR UPDATES** asks GitHub for a
+newer version when you select it and links to its release page.
 
 You need:
 
@@ -48,11 +63,9 @@ You need:
 - 8 GB of RAM (16 GB recommended) and 5 GB of free disk space, ideally on an SSD
   ([system requirements](docs/SETUP.md#system-requirements)).
 - Your own copy of the game as an uncompressed `.iso` disc image, or the `EBOOT.PBP` of a PSN release of a UMD game.
-  Nothing here downloads games, firmware or fonts.
-  [`docs/YOUR_OWN_GAMES.md`](docs/YOUR_OWN_GAMES.md) covers what to do if a file can't be decrypted.
-- The player also takes a compressed `.cso`, `.zso` or `.chd` image. It expands it once, when you add
-  it, into a plain `.iso` in its data folder, so you need free space for the full `.iso` as well
-  ([details](docs/SETUP.md#compressed-disc-images)).
+  The player also takes a compressed `.cso`, `.zso` or `.chd` image and expands it once, when you add it, into a
+  plain `.iso` in its data folder, so leave room for the full `.iso` ([details](docs/SETUP.md#compressed-disc-images)).
+  If a file can't be decrypted, [`docs/YOUR_OWN_GAMES.md`](docs/YOUR_OWN_GAMES.md) says what to do.
 
 ## Compatibility
 
@@ -60,24 +73,29 @@ You need:
 | --- | --- | --- |
 | *Hot Shots Tennis: Get a Grip* | Playable | Full matches and Story Mode play. Its title file ships with Nakagawa. On the reference PC, a 2026-10-27 measurement of current main ([#1296](https://github.com/Jstar269/nakagawa-recomp/issues/1296)) ran at about 29.5 of the game's own 30 frames per second in matches and 29.2 to 29.6 in menus. Sound effects and text clicks can drop out while the game loads. The opening movie shows black in v0.0.1 and plays from v0.0.2. |
 | PAC-MAN Championship Edition | In-game | Reaches its menu, plays a stage and resumes from its own save, through general fixes with no game-specific code ([#552](https://github.com/Jstar269/nakagawa-recomp/pull/552), [#556](https://github.com/Jstar269/nakagawa-recomp/pull/556), [#1126](https://github.com/Jstar269/nakagawa-recomp/issues/1126)). The rest of the game hasn't been tried. |
-| *Super Stardust Portable* | Title screen | Goes through its menus to difficulty select, then stops by name at a VFPU instruction Nakagawa doesn't support yet ([#326](https://github.com/Jstar269/nakagawa-recomp/issues/326)). |
+| *Super Stardust Portable* | Title screen | Goes through its menus to difficulty select, then stops by name at a VFPU instruction Nakagawa doesn't support yet ([#326](https://github.com/Jstar269/Nakagawa-Recomp/issues/326)). |
 | Eleven more games, *LittleBigPlanet* among them | No tier | Seen to start or run, in the project's testing or in user reports on v0.0.1, but not checked by the maintainer. Several reach menus or gameplay, most well below full speed. [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md) says how far each one gets. |
-| Any other PSP game | No tier | The player imports it, builds a package and names anything that isn't supported. For most games it stops at one of those named limits ([#308](https://github.com/Jstar269/nakagawa-recomp/issues/308)). |
+| Any other PSP game | No tier | The player imports it, builds a package and names anything that isn't supported. For most games it stops at one of those named limits ([#308](https://github.com/Jstar269/Nakagawa-Recomp/issues/308)). |
 | Two showcase demos | Playable | Small PSP programs the project wrote as tests. They ship with the release and need no game files. |
 
 Ratings use the player's words. Hot Shots Tennis and the two showcase demos are rated from the player's own record;
 every other rating comes from the game's status in [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md#status-words),
 which has the full detail for every game and every part of the PSP. To report how a game runs, post in
-[Compatibility reports](https://github.com/Jstar269/nakagawa-recomp/discussions/categories/compatibility-reports).
+[Compatibility reports](https://github.com/Jstar269/Nakagawa-Recomp/discussions/categories/compatibility-reports).
 
 ## How it works
 
 Nakagawa translates the game's MIPS code into C ahead of time and compiles it together with a runtime that stands in
 for the PSP's system software, graphics and sound. The player is written in C with SDL3 and Vulkan.
 
+- Every game has two play modes. **Authentic** plays it as released and is the default. **Enhanced** adds options
+  that work for any game, such as texture filtering, Smooth motion, Widescreen and sharper enlarging with AMD FSR 1,
+  and each one can be turned off.
 - When a game needs something that isn't supported yet, the player stops and names the missing piece.
-- No games, firmware or Sony system fonts ship here, and no game data is ever downloaded. Open replacement fonts
-  ship instead; the PSP's own fonts are used only if you copy them from your own console.
+- No games, firmware or Sony system fonts ship here, and no game data is ever downloaded. Games show the project's
+  own open fonts ([#313](https://github.com/Jstar269/nakagawa-recomp/issues/313)) unless you import the fonts from
+  your own PSP in Settings > **PSP FONTS**, or with `python tools/nk_cli.py fonts import <folder>`
+  ([how to copy them](docs/SETUP.md#copying-the-fonts-from-your-psp)).
 - The player works offline. It connects to the internet only when you agree: to fetch build tools when they
   aren't already present, and to check for updates when you ask ([network use](docs/SETUP.md#network-use)).
 
@@ -86,8 +104,8 @@ for the PSP's system software, graphics and sound. The player is written in C wi
 
 ## Build from source
 
-The [prerequisites](docs/SETUP.md#prerequisites) are listed in [`docs/SETUP.md`](docs/SETUP.md): Windows 11 x64
-with a Vulkan GPU, PowerShell 7.6+ and MSYS2 UCRT64.
+You need Windows 11 x64 with a Vulkan GPU, PowerShell 7.6+, MSYS2 UCRT64, CPython 3.15, the Vulkan SDK and Git.
+[`docs/SETUP.md`](docs/SETUP.md#prerequisites) lists the exact packages and the setup steps.
 
 1. Build the player from a checkout: `mingw32-make player`.
 2. Start `build\nakagawa_player.exe`, then drag a game's `.iso` into the window or choose **START SETUP WIZARD**.
@@ -97,12 +115,10 @@ with a Vulkan GPU, PowerShell 7.6+ and MSYS2 UCRT64.
    from your own disc instead.
 4. Press **BUILD PACKAGE**, then **PLAY**. If your PC doesn't have the build tools yet, consent once and the player
    downloads the exact versions it needs.
-5. Optional: text uses the project's own open fonts ([#313](https://github.com/Jstar269/nakagawa-recomp/issues/313)).
-   For the PSP's original lettering, import the fonts from your own PSP with
-   `python tools/nk_cli.py fonts import <folder>`.
 
-Without a game, `mingw32-make player showcase` builds the two showcase demos, and the player lists them on its own.
-On Windows this needs WSL 2 and PSPDEV ([steps](docs/SETUP.md#showcase-demos-on-windows-wsl-2-and-pspdev)).
+The release ZIP includes two showcase demos that need no game files. From a checkout,
+`mingw32-make player showcase` builds them, and the player lists them on its own. On Windows this needs WSL 2 and
+PSPDEV ([steps](docs/SETUP.md#showcase-demos-on-windows-wsl-2-and-pspdev)).
 
 | ![Nakagawa 3D Showcase: a brightly textured cube rotating against a dark background in the recompiled demo](docs/images/showcase-ge-scene.gif) | ![Nakagawa Breakout Showcase: the ball moving through a colored brick field above the paddle and score](docs/images/showcase-breakout.gif) |
 | :---: | :---: |
@@ -119,9 +135,9 @@ that compiles back to the original bytes. [lbp-psp-decomp](https://github.com/Js
 for LittleBigPlanet on the PSP. Both are source-only and contain no game data.
 
 No decomp source is copied into Nakagawa, which is meant for any PSP game. The decomp's function names can label the
-C that Nakagawa generates ([#1495](https://github.com/Jstar269/nakagawa-recomp/pull/1495)), and what it shows about
+C that Nakagawa generates ([#1495](https://github.com/Jstar269/Nakagawa-Recomp/pull/1495)), and what it shows about
 the game helps replace Nakagawa's Hot Shots Tennis workarounds with general fixes
-([#363](https://github.com/Jstar269/nakagawa-recomp/issues/363)).
+([#363](https://github.com/Jstar269/Nakagawa-Recomp/issues/363)).
 
 Work belongs in the recompiler and runtime when its cause is general, such as a system call, an instruction, a
 display-list command or a build step, because the fix then helps every game and can be tested with synthetic
@@ -131,22 +147,22 @@ saw.
 
 ## Contributing
 
-Testing is the most useful help right now: try a game you own and report how far it gets. Bugs go in
-[issues](https://github.com/Jstar269/nakagawa-recomp/issues), and
-[good first issues](https://github.com/Jstar269/nakagawa-recomp/labels/good%20first%20issue) are a place to start
+Testing is the most useful help right now: try a game you own and
+[report how far it gets](https://github.com/Jstar269/Nakagawa-Recomp/discussions/categories/compatibility-reports).
+Bugs go in [issues](https://github.com/Jstar269/Nakagawa-Recomp/issues), and
+[good first issues](https://github.com/Jstar269/Nakagawa-Recomp/labels/good%20first%20issue) are a place to start
 on code. [`CONTRIBUTING.md`](CONTRIBUTING.md) has the rules and the checks to run.
 
-[All documentation](docs/README.md) · [Contributing](CONTRIBUTING.md) · [Accessibility](ACCESSIBILITY.md) ·
-[Getting help](SUPPORT.md) · [Security](SECURITY.md) · [Code of conduct](CODE_OF_CONDUCT.md) ·
-[AI use](docs/AI_USAGE.md)
+[All documentation](docs/README.md) · [Accessibility](ACCESSIBILITY.md) · [Getting help](SUPPORT.md) ·
+[Security](SECURITY.md) · [Code of conduct](CODE_OF_CONDUCT.md) · [AI use](docs/AI_USAGE.md)
 
 ## Project health
 
-[![CodeQL](https://github.com/Jstar269/nakagawa-recomp/actions/workflows/codeql.yml/badge.svg?branch=main)](https://github.com/Jstar269/nakagawa-recomp/actions/workflows/codeql.yml)
-[![Coverage (Python tooling and native core tests)](https://codecov.io/gh/Jstar269/nakagawa-recomp/graph/badge.svg?branch=main)](https://app.codecov.io/gh/Jstar269/nakagawa-recomp)
+[![CodeQL](https://github.com/Jstar269/Nakagawa-Recomp/actions/workflows/codeql.yml/badge.svg?branch=main)](https://github.com/Jstar269/Nakagawa-Recomp/actions/workflows/codeql.yml)
+[![Coverage (Python tooling and native core tests)](https://codecov.io/gh/Jstar269/Nakagawa-Recomp/graph/badge.svg?branch=main)](https://app.codecov.io/gh/Jstar269/Nakagawa-Recomp)
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/15701/badge)](https://www.bestpractices.dev/projects/15701)
 [![OpenSSF Baseline](https://www.bestpractices.dev/projects/15701/baseline)](https://www.bestpractices.dev/projects/15701)
-[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/Jstar269/nakagawa-recomp/badge)](https://scorecard.dev/viewer/?uri=github.com/Jstar269/nakagawa-recomp)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/Jstar269/Nakagawa-Recomp/badge)](https://scorecard.dev/viewer/?uri=github.com/Jstar269/Nakagawa-Recomp)
 
 ## License and lineage
 
@@ -165,7 +181,7 @@ works with. This repository contains no game files, firmware or Sony system font
 locally with the public game key tables PPSSPP ships; it never downloads games and never decrypts firmware.
 
 Rights holders with a concern about anything here can contact the maintainer privately through
-[GitHub private reporting](https://github.com/Jstar269/nakagawa-recomp/security/advisories/new) or the contact on
+[GitHub private reporting](https://github.com/Jstar269/Nakagawa-Recomp/security/advisories/new) or the contact on
 the [maintainer's profile](https://github.com/Jstar269). We aim to respond promptly and will remove material where
 appropriate.
 
