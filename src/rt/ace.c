@@ -357,7 +357,23 @@ int ace_init_spec(const char *spec, const char *report_path) {
     return 1;
 }
 
+int ace_retired_env(const char *glyphs, char *why, size_t why_cap) {
+    if (!glyphs || !glyphs[0]) { why_set(why, why_cap, ""); return 0; }
+    if (why && why_cap)
+        snprintf(why, why_cap, "SR_GLYPHS: retired, and set to '%.16s%s'; sharp game text is the launch line's "
+                               "glyphs=on key (SR_ACE=v1;...;glyphs=on, contract section 10.13); unset SR_GLYPHS",
+                 glyphs, strlen(glyphs) > 16 ? "..." : "");
+    return 1;
+}
+
 int ace_init_from_env(void) {
+    char why[256];
+    /* A variable that used to switch a part on refuses the run rather than doing nothing without a word,
+       as an invalid SR_NOVBPACE or SR_DETERMINISTIC_CLOCK does (sched.c). */
+    if (ace_retired_env(getenv("SR_GLYPHS"), why, sizeof(why))) {
+        fprintf(stderr, "%s\n", why);
+        exit(1);
+    }
     return ace_init_spec(getenv("SR_ACE"), getenv("SR_ACE_REPORT"));
 }
 

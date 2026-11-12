@@ -1024,7 +1024,9 @@ and not yet admitted under section 11.2: section 11.3.5 is its entry, and this s
   rebuild, names it unavailable at exit (`did not run: its renderer or presenter did not start`). It is not the
   launch line's `text` key, which only sets the on-screen keyboard to the window's resolution; neither reads or
   implies the other. It has no library or per-title setting yet; section 11.3.5 says what admission needs. The
-  `SR_GLYPHS` environment variable that switched it before the key is retired and read by nothing.
+  `SR_GLYPHS` environment variable that switched it before the key is retired: set to any value, the run refuses to
+  start with one line that names `glyphs=on` and exits 1, as an invalid `SR_NOVBPACE` does, so a script that set it
+  is told rather than silently losing the part.
 - **Which draws.** A sprite primitive that maps one texel to one pixel (the smart 2D test of section 10.10, either
   direction) over a rectangle of whole texels, each side 4 to 64 texels, inside a cached texture that has one level,
   is not a render target and lies in main RAM, in 4444, 8888 or an indexed 4-bit or 8-bit format. Text drawn as
@@ -1804,7 +1806,8 @@ The feature of section 10.13 (#2110). Its presentation is described there; this 
   `glyphs=off`, is off and formats byte for byte as a line from before the key, and any other value refuses the line.
   It needs no `tier=ace`: it is an Enhanced part. Its off switch is the key off or missing, and an authentic run,
   which has no line. It has no library or per-title setting, and the player never writes it; admission under section
-  11.2 needs both. The `SR_GLYPHS` environment variable it replaces is retired.
+  11.2 needs both. The `SR_GLYPHS` environment variable it replaces is retired: set, the run refuses to start and
+  names the key (section 10.13).
 - **How it relates to the `text` key.** Not at all. `text` (section 10.1) draws the on-screen keyboard at the window's
   resolution on the presented image and changes no guest frame; `glyphs` rebuilds the game's own text inside the
   frame the game draws. Neither reads or implies the other, and `text=on` with `glyphs` off leaves a game's text as

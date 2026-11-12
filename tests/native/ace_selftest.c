@@ -177,6 +177,20 @@ static void cell_parse(void) {
         snprintf(spec, sizeof(spec), "%s;glyphs=on;glyphs=off", base);
         CHECK(ace_parse(spec, &c, why, sizeof(why)) == 0 && strcmp(why, "duplicate key") == 0, "a duplicate glyphs");
     }
+    /* SR_GLYPHS, retired by the glyphs key: set to anything, the run refuses to start and names the key
+       (ace_init_from_env exits with this line); unset or empty, nothing. */
+    {
+        static const char *const set[] = { "on", "off", "1", "maybe" };
+        char line[256];
+        CHECK(ace_retired_env(NULL, line, sizeof(line)) == 0 && line[0] == '\0', "SR_GLYPHS unset passes");
+        CHECK(ace_retired_env("", line, sizeof(line)) == 0, "SR_GLYPHS empty passes");
+        for (size_t i = 0; i < sizeof(set) / sizeof(set[0]); i++)
+            CHECK(ace_retired_env(set[i], line, sizeof(line)) == 1 && strncmp(line, "SR_GLYPHS: retired", 18) == 0 &&
+                      strstr(line, "glyphs=on") != NULL && strstr(line, set[i]) != NULL,
+                  "SR_GLYPHS=%s refuses the run and names glyphs=on: '%s'", set[i], line);
+        CHECK(ace_retired_env("a-value-much-longer-than-sixteen", line, sizeof(line)) == 1 &&
+                  strstr(line, "'a-value-much-lon...'") != NULL, "a long value is cut: '%s'", line);
+    }
     /* Every key but tier is required, whatever its place: leaving out any one of them refuses
        the line, leaving out tier does not (src/rt/ace.c names the required keys one by one). */
     {

@@ -116,8 +116,12 @@ int ace_format(const AceConfig *c, char *out, size_t cap);
 extern int g_ace_on;   /* the run's switch: 1 only after a valid line with Ace on */
 
 /* Reads SR_ACE once (and SR_ACE_REPORT when on), prints the start stamp or the refusal, and
- * sets g_ace_on. Returns g_ace_on. ace_init_spec does the same for a given value (tests). */
+ * sets g_ace_on. Returns g_ace_on. ace_init_spec does the same for a given value (tests).
+ * A retired variable that is set (ace_retired_env) stops the run first: the named line and exit 1. */
 int ace_init_from_env(void);
+/* SR_GLYPHS (its value, NULL or "" for unset) once switched sharp game text; the launch line's glyphs
+ * key replaced it. Returns 1 and writes the line that names the key to `why` when it is set, else 0. */
+int ace_retired_env(const char *glyphs, char *why, size_t why_cap);
 int ace_init_spec(const char *spec, const char *report_path);
 /* The requested line, and what this host gave (a feature it cannot provide is off here). */
 const AceConfig *ace_requested(void);
