@@ -1711,4 +1711,6 @@ bool nk_platform_host_startup(const char *log_tag) {
     return true;
 }
 
+void nk_platform_host_shutdown(void) {}
+
 #endif /* _WIN32 */

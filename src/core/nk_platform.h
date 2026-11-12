@@ -468,6 +468,13 @@ void nk_platform_setup_standard_streams(const char *fallback_log_name);
    the Android folder is missing; the process can still run but finds no bundled files. */
 bool nk_platform_host_startup(const char *log_tag);
 
+/* Process end, for a process that ends without exit()'s cleanup (Android's title process, see
+   android/app/src/main/cpp/nk_android_title.c). Android: flush stdout and stderr, and wait until
+   nk_platform_host_startup's copy has written every line to the system log and the log file, so
+   the last lines of a run are not lost; the streams go nowhere afterwards. Everywhere else it
+   does nothing. */
+void nk_platform_host_shutdown(void);
+
 #ifdef __cplusplus
 }
 #endif

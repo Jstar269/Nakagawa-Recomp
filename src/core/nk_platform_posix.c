@@ -1380,6 +1380,8 @@ void nk_platform_close_process(NkProcessHandle *process) {
 static int s_android_log_pipe[2] = { -1, -1 };
 static char s_android_log_tag[32] = "nakagawa";
 static FILE *s_android_log_file;
+static pthread_t s_android_log_thread;
+static bool s_android_log_thread_running;
 
 static void *android_log_pump(void *arg) {
     (void)arg;
@@ -1422,7 +1424,10 @@ bool nk_platform_host_startup(const char *log_tag) {
         setvbuf(stderr, NULL, _IOLBF, 0);
         (void)dup2(s_android_log_pipe[1], STDOUT_FILENO);
         (void)dup2(s_android_log_pipe[1], STDERR_FILENO);
-        if (pthread_create(&thread, NULL, android_log_pump, NULL) == 0) pthread_detach(thread);
+        if (pthread_create(&thread, NULL, android_log_pump, NULL) == 0) {
+            s_android_log_thread = thread;
+            s_android_log_thread_running = true;
+        }
     }
     /* SDL_GetBasePath() is "./" on Android: the folder the app unpacked its bundled files to
        (fonts) is made the working directory so that relative base resolves there. */
@@ -1434,11 +1439,35 @@ bool nk_platform_host_startup(const char *log_tag) {
     }
     return true;
 }
+
+void nk_platform_host_shutdown(void) {
+    if (!s_android_log_thread_running) return;
+    s_android_log_thread_running = false;
+    fflush(stdout);
+    fflush(stderr);
+    /* The pump reads until every write end is closed: the two standard streams and the pipe's
+       own. Then it has written every line, and it ends. */
+    int null_fd = open("/dev/null", O_WRONLY | O_CLOEXEC);
+    if (null_fd >= 0) {
+        (void)dup2(null_fd, STDOUT_FILENO);
+        (void)dup2(null_fd, STDERR_FILENO);
+        close(null_fd);
+    }
+    close(s_android_log_pipe[1]);
+    s_android_log_pipe[1] = -1;
+    (void)pthread_join(s_android_log_thread, NULL);
+    if (s_android_log_file) {
+        fclose(s_android_log_file);
+        s_android_log_file = NULL;
+    }
+}
 #else
 bool nk_platform_host_startup(const char *log_tag) {
     (void)log_tag;
     return true;
 }
+
+void nk_platform_host_shutdown(void) {}
 #endif
 
 bool nk_platform_local_time_zone(int *standard_minutes, bool *daylight_now) {

@@ -154,6 +154,28 @@ class AndroidAppContractTests(unittest.TestCase):
         self.assertIn('return "nk_android_title_main";', title)
         self.assertIn("int nk_android_title_main(int argc, char **argv)", shim)
 
+    def test_title_process_ends_without_the_framework_handlers(self) -> None:
+        """exit() in the app process would run the framework's static destructors while its render
+        threads still run (FORTIFY abort). The runtime's atexit() and exit() go through the shim,
+        which runs only the runtime's handlers, drains the log copy and ends with _exit()."""
+        cmake = (ANDROID / "app" / "CMakeLists.txt").read_text(encoding="utf-8")
+        shim = (ANDROID / "app" / "src" / "main" / "cpp" / "nk_android_title.c").read_text(encoding="utf-8")
+        for symbol in ("exit", "_exit", "_Exit", "atexit"):
+            self.assertIn(f"-Wl,--wrap={symbol}", cmake)
+        self.assertIn("int __wrap_atexit(void (*handler)(void))", shim)
+        self.assertNotIn("__real_exit(", shim)
+        wrap_exit = shim[shim.index("void __wrap_exit(int status) {"):]
+        wrap_exit = wrap_exit[:wrap_exit.index("\n}\n")]
+        self.assertIn("s_exit_handlers[--s_exit_handler_count]()", wrap_exit)
+        self.assertLess(wrap_exit.index("nk_platform_host_shutdown();"),
+                        wrap_exit.index("__real__exit(status);"))
+        self.assertIn("__wrap_exit(main(argc, argv));", shim)
+        header = (ROOT / "src" / "core" / "nk_platform.h").read_text(encoding="utf-8")
+        self.assertIn("void nk_platform_host_shutdown(void);", header)
+        for source in ("nk_platform_posix.c", "nk_platform_win32.c"):
+            text = (ROOT / "src" / "core" / source).read_text(encoding="utf-8")
+            self.assertIn("void nk_platform_host_shutdown(void)", text)
+
     def test_data_folder_has_the_name_every_host_uses(self) -> None:
         """The user data folder is called Nakagawa on every host; on Android it is in the
         app-private files folder and reaches the native layer as NK_ANDROID_DATA_DIR."""
