@@ -886,6 +886,7 @@ static unsigned long s_cnt_present_cpu = 0, s_cnt_rtt = 0, s_cnt_rtt_direct = 0;
 static uint64_t s_write_seq = 0;
 static unsigned long s_cnt_readback = 0, s_cnt_upload = 0, s_cnt_dirty = 0;
 static unsigned long s_cnt_snap = 0, s_cnt_texup = 0, s_cnt_xferblit = 0;
+static unsigned long s_cnt_depth_commit = 0;   /* depth_readback_to_guest copies (rtt-1x-reads) */
 static uint64_t s_cnt_tex_invalidations = 0;
 static uint64_t s_cnt_tex_clean_skips = 0;   /* CPU stores that skipped the texture scan (#282): */
 static uint64_t s_cnt_tex_quiet_skips = 0;   /* clean pages, and quiet pages */
@@ -3999,6 +4000,7 @@ static int depth_readback_to_guest(DepthEnt *d) {
         }
     }
     d->guest_dirty = 0;
+    s_cnt_depth_commit++;
     ge_zbuf_invalidate_guest_span(depth_first, depth_end - depth_first);
     if (sr_perf_enabled) sr_perf_vulkan_readback((uint32_t)readback_bytes(DEPTH_BPP));
     return 1;
