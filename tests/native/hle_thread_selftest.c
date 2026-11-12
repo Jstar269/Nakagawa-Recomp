@@ -32038,6 +32038,12 @@ static void dch_setup(void (*scenario)(void)) {
     dmac_clear(DCH_DST2, DCH_REGION, 0u);
     g_worker_uid = SR_ROLE_UID_NONE;
     memset(s_cpu, 0, sizeof(*s_cpu));
+    /* The scenarios bracket windows of 58 to 4477 us with main's calls, which take no guest
+     * time. The fixture's turbo clock charges a 10 ms quantum every TIMESLICE dispatches,
+     * counted on from the cases before, so where it fell depended on them: a quantum inside a
+     * scenario ended the first window before the callers queued, or before a weaker ready
+     * caller ran. Each scenario starts the count afresh, so its quantum falls after it. */
+    s_dispatches_since_time = 0u;
     sched_run(DCH_MAIN_ENTRY, 0u, 0u);
     expect(s_dch_done && s_xfer_obj == 0u,
            "dmac channel: every guest thread ran to completion and the channel is idle");
