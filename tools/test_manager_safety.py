@@ -48,6 +48,7 @@ class ManagerHelpTests(unittest.TestCase):
     def test_help_actions_match_validateset(self) -> None:
         source = self.source
         match = re.search(r'\[ValidateSet\(([^)]+)\)\]\s*\[string\]\$Action', source)
+        assert match is not None
         self.assertCountEqual(re.findall(r'"([^"]+)"', match.group(1)), self.actions)
         help_text = source.split("<#", 1)[1].split("#>", 1)[0]
         self.assertIn(".PARAMETER Action", help_text)

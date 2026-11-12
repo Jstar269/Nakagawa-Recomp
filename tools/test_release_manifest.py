@@ -54,7 +54,7 @@ def load_manifest() -> dict:
         return returned
 
 
-def load_sbom_inputs() -> tuple[dict, list[dict], list[dict]]:
+def load_sbom_inputs() -> tuple[dict, list[dict]]:
     data = load_manifest()
     py_packages = generate_sbom.parse_python_lockfile(PY_LOCK)
     return data, py_packages
