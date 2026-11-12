@@ -172,7 +172,7 @@ struct PlayerUiNk {
     const char *enhanced_modes[4];
     char enhanced_values[PLAYER_UI_ENHANCED_ROWS][48];
     char texpack_value[200];
-    char texpack_sentence[360];
+    char texpack_sentence[400];
     char enhanced_library_values[PLAYER_UI_ENHANCED_ROWS][48];
     char settings_tools[PLAYER_UI_SETTINGS_TOOLS][192];
     /* The factory reset check's folders, looked up when the check opens. */
@@ -948,7 +948,8 @@ static void player_ui_fill_enhanced(PlayerUiNk *player, const PlayerApp *app,
         } else {
             snprintf(player->texpack_value, sizeof(player->texpack_value), "Refused");
             snprintf(player->texpack_sentence, sizeof(player->texpack_sentence),
-                     "This pack can't be used: %s. Choose it again once it is fixed.",
+                     "This pack can't be used: %s. Fix it where it is; it is read again when this page "
+                     "opens and when the game starts.",
                      info && info->error[0] ? info->error : "it was not read");
         }
         model->texpack_value = player->texpack_value;
