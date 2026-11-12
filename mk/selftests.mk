@@ -948,7 +948,8 @@ asset-index-selftest:
 # suite run with it at 2x and 4x, ssaa-sprite checks that textured one-texel-per-pixel sprites are
 # shown as the authentic image (at render scale 1, where the twin draws from its own vertices, and
 # at 2), twin-alloc-fail with it on checks that the Ace report gives it as off once the twin is,
-# and ssaa-limit checks the size check with forced limits. The dst-read
+# ssaa-limit checks the size check with forced limits, and host-depth runs with depth=32 and
+# ssaa=4 against the key-off depth reference (a 4-byte depth twin, guest depth unchanged). The dst-read
 # cells (#2109) run alone at scales 1 and 4 on each destination-read path (`--dst-read snapshot`,
 # `--dst-read interlock`; a device that refuses the interlock prints a SKIP line), and so does
 # stencil-once (write-once stencil batches: at scales 1 and 4 on the snapshot path, where they are
@@ -1034,6 +1035,7 @@ gpu-coherence-selftest: $(GPU_COHERENCE_BIN)
 	$(GPU_COHERENCE_BIN) --ssaa 4 --ssaa-budget-mb 48 --ssaa-expect 2 --case ssaa-limit
 	$(GPU_COHERENCE_BIN) --ssaa 2 --ssaa-budget-mb 8 --ssaa-expect 1 --case ssaa-limit
 	$(GPU_COHERENCE_BIN) --ssaa 4 --scale 4 --ssaa-max-dim 4096 --ssaa-expect 2 --case ssaa-limit
+	$(GPU_COHERENCE_BIN) --depth 32 --ssaa 4 --case host-depth --depth-ref $(BUILD_DIR)/depth_ref_s1.txt
 	@rc=0; $(GPU_COHERENCE_BIN) --twin 1 --gpu-timestamps 1 --case gpu-timestamps || rc=$$?; \
 	if [ $$rc -eq 77 ]; then echo "SKIP gpu-coherence-selftest twin gpu-timestamps (exit 77; the reason is printed above)"; \
 	elif [ $$rc -ne 0 ]; then echo "FAIL gpu-coherence-selftest twin gpu-timestamps (exit $$rc)"; exit $$rc; fi

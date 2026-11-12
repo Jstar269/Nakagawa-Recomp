@@ -206,8 +206,10 @@ static void cell_parse(void) {
         CHECK(ace_parse(out, &c, why, sizeof(why)) == 1 && c.depth == 32 && c.ssaa == 4,
               "a line with depth and ssaa parses back (%s)", why);
         c.depth = 0;
-        CHECK(ace_parse(out, &c, why, sizeof(why)) == 1 && c.ssaa == 4 && c.load == 1 && c.cull == 1,
-              "the formatted line parses back (%s)", why);
+        CHECK(ace_format(&c, out, sizeof(out)) && strstr(out, "depth") == NULL &&
+                  ace_parse(out, &c, why, sizeof(why)) == 1 && c.depth == 0 && c.ssaa == 4 && c.load == 1 &&
+                  c.cull == 1,
+              "without depth, the formatted line parses back (%s; %s)", out, why);
         c.ssaa = 0;
         CHECK(ace_format(&c, out, sizeof(out)) && strstr(out, "ssaa") == NULL, "off writes no ssaa key (%s)", out);
         static const char *const bad[] = { "1", "3", "8", "on", "2x", "4 ", "", "OFF" };
