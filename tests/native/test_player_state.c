@@ -7976,7 +7976,7 @@ static void test_play_mode_settings(void) {
                                       "\"notice\": \"on\", \"wide\": \"off\", "
                                       "\"smooth\": \"off\", \"sas\": \"off\", "
                                       "\"tess\": \"off\", \"cull\": \"off\", \"upscale\": \"off\", "
-                                      "\"stick\": \"off\", \"load\": \"off\", \"twin\": \"off\"},") != NULL);
+                                      "\"stick\": \"off\", \"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\"},") != NULL);
         assert(strstr(saved, "\"TEST90001\": {\"mode\": \"library\", \"af\": \"8\", "
                              "\"notice\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST90002\": {\"mode\": \"library\", \"logic_60\": \"off\"}")
@@ -8174,7 +8174,7 @@ static void test_play_mode_sas_settings(void) {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"smooth\": \"off\", \"sas\": \"sinc\", "
                                       "\"tess\": \"off\", \"cull\": \"off\", \"upscale\": \"off\", "
-                                      "\"stick\": \"off\", \"load\": \"off\", \"twin\": \"off\"}") != NULL);
+                                      "\"stick\": \"off\", \"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST92001\": {\"mode\": \"library\", \"sas\": \"off\"}") != NULL);
         free(saved);
     }
@@ -8201,7 +8201,7 @@ static void test_play_mode_sas_settings(void) {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"smooth\": \"off\", \"sas\": \"off\", "
                                       "\"tess\": \"off\", \"cull\": \"off\", \"upscale\": \"off\", "
-                                      "\"stick\": \"off\", \"load\": \"off\", \"twin\": \"off\"}") != NULL);
+                                      "\"stick\": \"off\", \"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST92001\": {\"mode\": \"library\", \"sas\": \"sinc\"}") != NULL);
         free(saved);
     }
@@ -8268,7 +8268,7 @@ static void test_play_mode_cull_settings(void) {
     {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"cull\": \"on\", \"upscale\": \"off\", "
-                                      "\"stick\": \"off\", \"load\": \"off\", \"twin\": \"off\"}") != NULL);
+                                      "\"stick\": \"off\", \"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\"}") != NULL);
         free(saved);
     }
     memset(back, 0, sizeof(*back));
@@ -8357,7 +8357,7 @@ static void test_play_mode_stick_settings(void) {
     {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"cull\": \"off\", \"upscale\": \"off\", \"stick\": \"on\", "
-                                      "\"load\": \"off\", \"twin\": \"off\"}") != NULL);
+                                      "\"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\"}") != NULL);
         free(saved);
     }
 
@@ -8520,7 +8520,7 @@ static void test_play_mode_load_settings(void) {
     {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"cull\": \"off\", \"upscale\": \"off\", \"stick\": \"off\", "
-                                      "\"load\": \"fast\", \"twin\": \"off\"}") != NULL);
+                                      "\"load\": \"fast\", \"twin\": \"off\", \"ssaa\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST95001\": {\"mode\": \"ace\", \"load\": \"off\"}") != NULL);
         free(saved);
     }
@@ -8553,6 +8553,108 @@ static void test_play_mode_load_settings(void) {
     free(app);
     printf("PASS: short loads are off by default, read and saved at both levels, and only Ace "
            "launches them\n");
+}
+
+/* Supersampling (contract 10.21, #2073): off in a fresh file and in every graphics preset, its row
+ * names the GPU cost, a library "ssaa" and a title's own are read (2, 4 or off), the title's wins,
+ * Enhanced and Ace launches both carry ";ssaa=<factor>" (after load, before cull), Authentic
+ * carries no line, and an unknown word is off. */
+static void test_play_mode_ssaa_settings(void) {
+    char sep = nk_platform_path_separator();
+    char cache_root[512], root[700], path[800];
+    char line[192];
+    PlayerPlayResolved r;
+    assert(nk_platform_get_path(NK_PATH_CACHE, cache_root, sizeof(cache_root)));
+    snprintf(root, sizeof(root), "%s%cplay_mode_ssaa_probe", cache_root, sep);
+    assert(nk_platform_mkdir_p(root));
+    snprintf(path, sizeof(path), "%s%csettings.json", root, sep);
+    PlayerApp *app = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    PlayerApp *back = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    assert(app && back);
+
+    /* Fresh: off, named, its cost in the sentence, and no preset turns it on. */
+    player_app_settings_init_default(&app->settings);
+    const PlayerEnhancedPartInfo *info = player_enhanced_part(PLAYER_PART_SSAA);
+    assert(app->settings.enhanced.part[PLAYER_PART_SSAA] == 0);
+    assert(info->fresh == 0 && info->value_count == 3);
+    assert(strcmp(info->key, "ssaa") == 0);
+    assert(strcmp(info->name, "Supersampling") == 0);
+    assert(strstr(info->sentence, "GPU work") != NULL);
+    assert(strcmp(player_enhanced_part_label(PLAYER_PART_SSAA, 2), "2x") == 0);
+    assert(strcmp(player_enhanced_part_label(PLAYER_PART_SSAA, 4), "4x") == 0);
+    assert(strcmp(player_enhanced_part_label(PLAYER_PART_SSAA, 0), "Off") == 0);
+    app->settings.enhanced.library = PLAYER_PLAY_ENHANCED;
+    for (int preset = PLAYER_PRESET_LOW; preset < PLAYER_PRESET_COUNT; preset++) {
+        player_app_apply_graphics_preset(app, preset);
+        player_play_resolve(&app->settings, "TEST96001", &r);
+        assert(r.on && r.part[PLAYER_PART_SSAA] == 0);
+        assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, "ssaa") == NULL);
+    }
+
+    /* The library at 2x; one title at 4x, one off, one following; one Ace title. */
+    write_text_file(path,
+        "{\"schema_version\": 2,"
+        " \"enhanced\": {\"default\": \"enhanced\", \"ssaa\": \"2\"},"
+        " \"title_play\": {\"TEST96001\": {\"ssaa\": \"4\"},"
+        " \"TEST96002\": {\"ssaa\": \"off\"},"
+        " \"TEST96004\": {\"mode\": \"ace\"},"
+        " \"TEST96005\": {\"mode\": \"authentic\"}}}");
+    memset(app, 0, sizeof(*app));
+    assert(player_app_load_settings(app, path) == NK_OK);
+    assert(app->settings.enhanced.part[PLAYER_PART_SSAA] == 2);
+    player_play_resolve(&app->settings, "TEST96001", &r);       /* the title's own wins */
+    assert(r.on && r.mode == PLAYER_PLAY_ENHANCED && r.part[PLAYER_PART_SSAA] == 4);
+    assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, "tier=enhanced;") != NULL &&
+           strcmp(line + strlen(line) - 7, ";ssaa=4") == 0);
+    player_play_resolve(&app->settings, "TEST96002", &r);
+    assert(r.on && r.part[PLAYER_PART_SSAA] == 0);
+    assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, "ssaa") == NULL);
+    player_play_resolve(&app->settings, "TEST96003", &r);       /* follows the library */
+    assert(r.on && r.part[PLAYER_PART_SSAA] == 2);
+    assert(player_play_launch_line(&r, line, sizeof(line)) && strcmp(line + strlen(line) - 7, ";ssaa=2") == 0);
+    player_play_resolve(&app->settings, "TEST96004", &r);       /* Ace carries it too */
+    assert(r.on && r.mode == PLAYER_PLAY_ACE && r.part[PLAYER_PART_SSAA] == 2);
+    assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, "tier=ace;") != NULL &&
+           strcmp(line + strlen(line) - 7, ";ssaa=2") == 0);
+    player_play_resolve(&app->settings, "TEST96005", &r);       /* Authentic: no line */
+    assert(!r.on);
+    assert(player_play_launch_line(&r, line, sizeof(line)) && strcmp(line, "off") == 0);
+    assert(player_app_save_settings(app, path) == NK_OK);
+    {
+        char *saved = read_text_file(path);
+        assert(saved && strstr(saved, "\"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"2\"}") != NULL);
+        assert(strstr(saved, "\"ssaa\": \"4\"}") != NULL && strstr(saved, "\"ssaa\": \"off\"}") != NULL);
+        free(saved);
+    }
+    memset(back, 0, sizeof(*back));
+    assert(player_app_load_settings(back, path) == NK_OK);
+    assert(back->settings.enhanced.part[PLAYER_PART_SSAA] == 2);
+    player_play_resolve(&back->settings, "TEST96001", &r);
+    assert(r.on && r.part[PLAYER_PART_SSAA] == 4);
+
+    /* With load and cull on in an Ace launch, ssaa sits between them (the Ace line's order). */
+    app->settings.enhanced.part[PLAYER_PART_LOAD] = 1;
+    app->settings.enhanced.part[PLAYER_PART_CULL] = 1;
+    player_play_resolve(&app->settings, "TEST96004", &r);
+    assert(player_play_launch_line(&r, line, sizeof(line)) &&
+           strcmp(line + strlen(line) - 25, ";load=fast;ssaa=2;cull=on") == 0);
+
+    /* An unknown word reads as off. */
+    write_text_file(path,
+        "{\"schema_version\": 2, \"enhanced\": {\"default\": \"enhanced\", \"ssaa\": \"8\"}}");
+    memset(app, 0, sizeof(*app));
+    assert(player_app_load_settings(app, path) == NK_OK);
+    assert(app->settings.enhanced.part[PLAYER_PART_SSAA] == 0);
+    player_play_resolve(&app->settings, "TEST96003", &r);
+    assert(r.on && r.part[PLAYER_PART_SSAA] == 0);
+    assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, "ssaa") == NULL);
+
+    remove(path);
+    (void)test_rmdir(root);
+    free(back);
+    free(app);
+    printf("PASS: supersampling is off by default and in every preset, read and saved at both levels, "
+           "and Enhanced and Ace launches carry it\n");
 }
 
 /* Finer patches (contract 10.14, 11.3.7) at both levels: off in a fresh file and in no graphics
@@ -8607,7 +8709,7 @@ static void test_play_mode_tess_settings(void) {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"sas\": \"off\", \"tess\": \"4\", \"cull\": \"off\", "
                                       "\"upscale\": \"off\", \"stick\": \"off\", \"load\": \"off\", "
-                                      "\"twin\": \"off\"}") != NULL);
+                                      "\"twin\": \"off\", \"ssaa\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST93001\": {\"mode\": \"library\", \"tess\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST93002\": {\"mode\": \"ace\", \"tess\": \"2\"}") != NULL);
         free(saved);
@@ -9076,7 +9178,7 @@ static void test_play_mode_twin_settings(void) {
     {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"upscale\": \"off\", \"stick\": \"off\", "
-                                      "\"load\": \"off\", \"twin\": \"on\"}") != NULL);
+                                      "\"load\": \"off\", \"twin\": \"on\", \"ssaa\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST92001\": {\"mode\": \"library\", \"twin\": \"off\"}") != NULL);
         free(saved);
     }
@@ -9102,7 +9204,7 @@ static void test_play_mode_twin_settings(void) {
     {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"upscale\": \"off\", \"stick\": \"off\", "
-                                      "\"load\": \"off\", \"twin\": \"off\"}") != NULL);
+                                      "\"load\": \"off\", \"twin\": \"off\", \"ssaa\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST92001\": {\"mode\": \"library\", \"twin\": \"on\"}") != NULL);
         free(saved);
     }
@@ -9402,7 +9504,7 @@ static void test_play_mode_upscale_settings(void) {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"sas\": \"off\", \"tess\": \"off\", \"cull\": \"off\", "
                                       "\"upscale\": \"fsr1\", \"stick\": \"off\", \"load\": \"off\", "
-                                      "\"twin\": \"off\"}") != NULL);
+                                      "\"twin\": \"off\", \"ssaa\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST94001\": {\"mode\": \"library\", \"upscale\": \"off\", \"twin\": \"off\"}") != NULL);
         free(saved);
     }
@@ -10208,6 +10310,7 @@ int main(int argc, char **argv) {
     test_play_mode_cull_settings();
     test_play_mode_stick_settings();
     test_play_mode_load_settings();
+    test_play_mode_ssaa_settings();
     test_play_mode_tess_settings();
     test_play_mode_twin_settings();
     test_player_nickname();
