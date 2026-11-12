@@ -4706,6 +4706,10 @@ class TestPublishedPackages(_SynthTimingElfFixture):
                 package = json.loads(data.decode("utf-8"))
                 validate_package(copy.deepcopy(package))
                 self.assertEqual(publish_audit.check_enhancement_packages({rel: (data, None)}), [])
+        # Released by the owner's decision of 2026-11-12 (section 9.10.1): a re-export from a
+        # declaration without the flag would put it back to Experimental.
+        hst = json.loads((ROOT / "assets" / "enhancements" / "ucus98701-60hz.json").read_text("utf-8"))
+        self.assertIs(hst.get("experimental"), False)
 
     def test_validator_refuses_malformed_published_packages(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

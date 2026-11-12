@@ -32,7 +32,7 @@
     },
     "experimental": {
       "type": "boolean",
-      "description": "false when the maintainer has released the package out of Experimental (docs/ENHANCEMENT_CONTRACT.md section 9.10). A package without it is experimental."
+      "description": "false when the maintainer has released the package out of Experimental (docs/ENHANCEMENT_CONTRACT.md section 9.10). A package without it is experimental, and the player honours false only in a package shipped in assets/enhancements/."
     },
     "version": {
       "type": "string",

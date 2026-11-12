@@ -2896,7 +2896,7 @@ static PlayerUiPrimaryAction player_ui_fill_title(PlayerUiNk *player,
         out->enhancement_on = player_app_title_60hz_on(app, index);
         out->enhancement_session = app->experimental_60hz_session &&
                                    enhancement->available && !saved;
-        out->enhancement_released = enhancement->available && !enhancement->experimental;
+        out->enhancement_released = player_app_title_60hz_released(app, index);
         out->enhancement_enabled = !app->launch_pending && !app->is_game_running &&
             !out->enhancement_session &&
             !(app->build_session.is_building &&

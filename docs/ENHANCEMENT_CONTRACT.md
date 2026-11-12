@@ -319,7 +319,7 @@ A gated statement (a `gate_30hz`, `gate_30hz_hold` or `gate_30hz_store` site, an
 4. **Slowdown is reported.** An update that takes longer than one VBLANK of host time is followed by the title's own wait for the next VBLANK, so the logic runs below 60 updates per second while every per-update step stays halved: the game plays slower than the original. The generated start-up hands `nk_enhancement_updates` to the runtime (`sr_enhancement_register_updates()`), which compares it once a second. Logic that runs but stays under 57 updates per second for three seconds in a row is logged as `ENHANCEMENT_LOGIC_SLOWED` and shown in the game window as a red `60 FPS logic: <n>/s - SLOWED` line, with or without the F3 HUD. A second with no update at all (a load or a pause) clears the count.
 5. **Why it is declared, not inferred.** A `vblank_wait_2_to_1` site is the compare inside a title's wait loop, which can run several times in one update, so it does not mark where an update begins. The package names the boundary explicitly.
 
-This package format is experimental and opt-in.
+This package format is opt-in; whether a package is experimental is section 9.10.
 
 ### 9.6. Data Sites and Data Files
 
@@ -434,30 +434,36 @@ each keeps its own category, digest and checks.
 
 ### 9.10. Experimental or Released
 
-A package is experimental unless it declares `"experimental": false`. A missing value reads as experimental, the
-validator refuses any value other than `true` or `false`, and the player reads anything but `false`, and a file it
-cannot use, as experimental. The flag changes one thing: the title page's ENHANCEMENTS card tags the title's 60 FPS
-game logic switch EXPERIMENTAL for an experimental package and OPTIONAL for a released one. The switch keeps its
-tier (Ace), its default (off, section 9.1, item 2) and what it runs. The flag is part of the declaration, so it is
-in the declaration digest and the AOT cache key like every other field (section 9.8).
+A package is experimental unless it declares `"experimental": false`; the validator refuses any value other than
+`true` or `false`. The player treats a missing or non-boolean value, and a package it cannot use, as experimental.
+The flag changes one thing: the title page's ENHANCEMENTS card tags the title's 60 FPS game logic switch
+EXPERIMENTAL for an experimental package and OPTIONAL for a released one. The switch keeps its tier (Ace), its
+default (off, section 9.1, item 2) and what it runs. The flag is part of the declaration, so it is in the
+declaration digest and the AOT cache key like every other field (section 9.8): the next build of the enhanced
+package misses the cache once. An enhanced package already built keeps launching, because the player checks only the
+enhancement package id a build records, not its declaration.
 
 Only the maintainer releases a package the project ships in `assets/enhancements/` (section 5.1), by a decision
-recorded in that package's entry below, with what was measured and the limits known when it was released. A
-package in a user's data folder carries whatever its author wrote.
+recorded in that package's entry below, with what was measured and the limits known when it was released. The
+player honours `"experimental": false` only in the package it loads from `assets/enhancements/`: a package in the
+user's data folder, which comes first (section 5.1), still loads and plays but is always shown as experimental,
+whatever it declares.
 
 #### 9.10.1. *Hot Shots Tennis* (UCUS98701): `hst.timing.native_60hz`
 
 - **Status.** Released from package 14.0.0-pre1 by the owner's decision of 2026-11-12 (#1732), with the known
-  limits below. It is short of the goal #1732 sets, true 60 logic updates a second in matches.
-- **Measured** (the side-by-side check of section 9.7, recorded in #2362). Package 14.0.0-pre1 against the
-  authentic game on a private full-match route (title screen, menus and one full match): 57.2 logic updates per
-  game second in the menus (with the boot), 59.9 on the title screen and 57.1 in a match. No compared event
-  differed from the authentic game: the point winner, the ball's side and the ball's owner match, and both
-  players' random-number seeds advance 1.98 and 2.03 times as often, as `rescale_probability` (section 9.3)
-  expects. Shot-type changes were too few to judge, and the tool's overall verdict reads `FAIL` only for reseeds it
-  cannot resolve as generator steps, which the authentic run has about as many of (35 against 38). The host was never fully idle: the
-  measured run had 43 % mean processor load from other work, and an earlier run at 53 % fell to 52.7 in the
-  match (`SLOWED`).
+  limits below. It is short of the goal #1732 sets, true 60 logic updates a second in menus, the title screen
+  and matches.
+- **Measured** (the side-by-side check of section 9.7, recorded in #2362). Package 14.0.0-pre1 against the authentic
+  game on a private full-match route (title screen, menus and one full match): 57.2 logic updates per game second in
+  the menus (with the boot), 59.9 on the title screen and 57.1 in a match. In that run 77 % of the match's seconds
+  after its entry load held 57 or more, with short dips (the lowest second 33), so the `SLOWED` line of section 9.5,
+  item 4 (three seconds in a row under 57) can appear in a match. No compared event differed from the authentic
+  game: the point winner, the ball's side and the ball's owner match, and both players' random-number seeds advance
+  1.98 and 2.03 times as often, as `rescale_probability` (section 9.3) expects. Shot-type changes were too few to
+  judge, and the tool's overall verdict reads `FAIL` only for reseeds it cannot resolve as generator steps, which
+  the authentic run has about as many of (35 against 38). The host was never fully idle: the measured run had 43 %
+  mean processor load from other work, and an earlier run at 53 % fell to 52.7 in the match (`SLOWED`).
 - **Known limits.**
   1. Further sites belong in the next package update: the eight `gate_30hz_store` sites of #2360 (a cursor ease, a
      step toward a target and a float ease, which run twice as fast at 60 Hz until then), and five triage rows
@@ -468,7 +474,8 @@ package in a user's data folder carries whatever its author wrote.
 
   Also recorded in #2362: when two bounces come 33 ms apart or less, the bounce-effect sites free their emitters
   up to two 60 Hz updates early.
-- **Not run.** A run on a fully idle host.
+- **Not run.** A run on a fully idle host, and a measurement of whether 14.0.0-pre1 costs more per update than
+  13.0.0-pre1.
 
 ## 10. Play Modes: Authentic, Enhanced and Ace
 

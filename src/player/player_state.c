@@ -2924,9 +2924,12 @@ bool player_read_title_enhancement(const char *user_root, const char *shipped_ro
     } else {
         snprintf(out->package_id, sizeof(out->package_id), "%s", id);
         out->available = true;
-        /* Only an explicit false releases it; a missing or other value stays experimental. */
+        /* Only the shipped package's explicit false releases it (section 9.10): the maintainer
+           releases a shipped package, so a file in the user's data folder stays experimental
+           whatever it declares, and a missing or non-boolean value stays experimental. */
         bool experimental = true;
-        if (nk_json_get_bool(nk_json_obj_get(package, "experimental"), &experimental) &&
+        if (out->shipped &&
+            nk_json_get_bool(nk_json_obj_get(package, "experimental"), &experimental) &&
             !experimental) {
             out->experimental = false;
         }
@@ -2960,6 +2963,12 @@ bool player_app_title_60hz_blocked(const PlayerApp *app, int game_index) {
     if (!app || game_index < 0 || game_index >= app->game_count) return false;
     return player_app_title_60hz_saved(app, app->games[game_index].disc_id) &&
            !app->title_enhancements[game_index].available;
+}
+
+bool player_app_title_60hz_released(const PlayerApp *app, int game_index) {
+    if (!app || game_index < 0 || game_index >= app->game_count) return false;
+    const PlayerTitleEnhancement *enhancement = &app->title_enhancements[game_index];
+    return enhancement->available && enhancement->shipped && !enhancement->experimental;
 }
 
 /* The variant the title launches: its enhanced build when its 60 FPS game logic is on and its
