@@ -619,6 +619,27 @@ bool nk_platform_get_app_data_dir(char *out_path, size_t max_len) {
     return nk_platform_get_path(NK_PATH_DATA, out_path, max_len);
 }
 
+bool nk_platform_real_path(const char *path, char *out_path, size_t max_len) {
+    return nk_platform_absolute_path(path, out_path, max_len);
+}
+
+FILE *nk_platform_open_regular_file(const char *path) {
+    if (!path || !*path) return NULL;
+    /* O_NONBLOCK: opening a FIFO must not wait for a writer before it is refused. */
+    int fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
+    if (fd < 0) return NULL;
+    struct stat st;
+    int flags = fcntl(fd, F_GETFL);
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || flags < 0 ||
+        fcntl(fd, F_SETFL, flags & ~O_NONBLOCK) != 0) {
+        close(fd);
+        return NULL;
+    }
+    FILE *file = fdopen(fd, "rb");
+    if (!file) close(fd);
+    return file;
+}
+
 bool nk_platform_get_legacy_app_data_dir(char *out_path, size_t max_len) {
     (void)out_path;
     (void)max_len;
@@ -633,6 +654,62 @@ bool nk_platform_get_desktop_dir(char *out_path, size_t max_len) {
     int written = snprintf(out_path, max_len, "%s/Desktop", home);
     if (written > 0 && (size_t)written < max_len && nk_platform_dir_exists(out_path)) return true;
     written = snprintf(out_path, max_len, "%s", home);
+    if (written > 0 && (size_t)written < max_len && nk_platform_dir_exists(out_path)) return true;
+    out_path[0] = '\0';
+    return false;
+}
+
+/* The folder user-dirs.dirs names for key ("XDG_DOWNLOAD_DIR" and so on): a line
+   KEY="$HOME/<path>" or KEY="/<path>", as xdg-user-dirs writes it. */
+static bool posix_xdg_user_dir(const char *key, const char *home, char *out_path,
+                               size_t max_len) {
+    char config[4096];
+    char line[4096];
+    const char *config_home = getenv("XDG_CONFIG_HOME");
+    size_t key_length = strlen(key);
+    bool found = false;
+    int written = config_home && config_home[0] == '/'
+        ? snprintf(config, sizeof(config), "%s/user-dirs.dirs", config_home)
+        : snprintf(config, sizeof(config), "%s/.config/user-dirs.dirs", home);
+    if (written <= 0 || (size_t)written >= sizeof(config)) return false;
+    FILE *file = fopen(config, "r");
+    if (!file) return false;
+    while (!found && fgets(line, sizeof(line), file)) {
+        char *value = line + key_length + 2;
+        char *end;
+        if (strncmp(line, key, key_length) != 0 || line[key_length] != '=' ||
+            line[key_length + 1] != '"' || (end = strchr(value, '"')) == NULL)
+            continue;
+        *end = '\0';
+        if (strncmp(value, "$HOME", 5) == 0 && (value[5] == '/' || value[5] == '\0'))
+            written = snprintf(out_path, max_len, "%s%s", home, value + 5);
+        else if (value[0] == '/')
+            written = snprintf(out_path, max_len, "%s", value);
+        else
+            continue;
+        found = written > 0 && (size_t)written < max_len;
+    }
+    fclose(file);
+    return found;
+}
+
+bool nk_platform_get_personal_dir(NkPersonalDir which, char *out_path, size_t max_len) {
+    static const char *const names[NK_PERSONAL_COUNT] = {
+        "Documents", "Downloads", "Music", "Pictures", "Videos", "Desktop"
+    };
+    static const char *const keys[NK_PERSONAL_COUNT] = {
+        "XDG_DOCUMENTS_DIR", "XDG_DOWNLOAD_DIR", "XDG_MUSIC_DIR", "XDG_PICTURES_DIR",
+        "XDG_VIDEOS_DIR", "XDG_DESKTOP_DIR"
+    };
+    if (!out_path || max_len == 0) return false;
+    out_path[0] = '\0';
+    if ((unsigned)which >= (unsigned)NK_PERSONAL_COUNT) return false;
+    const char *home = getenv("HOME");
+    if (!home || !*home) return false;
+    if (posix_xdg_user_dir(keys[which], home, out_path, max_len) &&
+        nk_platform_dir_exists(out_path))
+        return true;
+    int written = snprintf(out_path, max_len, "%s/%s", home, names[which]);
     if (written > 0 && (size_t)written < max_len && nk_platform_dir_exists(out_path)) return true;
     out_path[0] = '\0';
     return false;
