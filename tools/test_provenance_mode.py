@@ -536,7 +536,9 @@ class ForkCheckTest(unittest.TestCase):
         head = self._commit()
         _git(self.repo, "checkout", "--quiet", "main")
         code, lines = pm.fork_check(self.repo, self.base, head, audit_tool=self._stub_audit(0))
-        self.assertEqual(code, 0, lines)
+        # Neither entry names a file (a name with a line break cannot be made on every platform).
+        self.assertEqual(code, 1, lines)
+        self.assertEqual(len([line for line in lines if line.startswith("PROFILE_PATH_MISSING: ")]), 2, lines)
         self.assertFalse([line for line in lines if "\n" in line or "\r" in line], lines)
         self.assertIn('  added "x\\n::error title=Fork provenance check::forged\\n\\u0060b\\u0060"', lines)
         self.assertEqual(pm.self_admitted(lines), ['"a: b"', '"x\\n::error title=Fork provenance check::forged'
@@ -562,10 +564,70 @@ class ForkCheckTest(unittest.TestCase):
         self.assertEqual([line for line in printed[1:resume] if line.startswith("::")], [])
         warnings = printed[resume + 1:]
         self.assertEqual(len(warnings), 2, warnings)
-        for warning in warnings:
-            self.assertTrue(warning.startswith("::warning title=Fork provenance check - self-admitted path::"))
-            self.assertNotIn("::", warning[len("::warning title=Fork provenance check - self-admitted path::"):]
-                             .replace("::error title=Fork provenance check::", ""))
+        prefix = "::warning title=Fork provenance check - self-admitted path::"
+        suffix = " is admitted by this pull request itself, not by the fork maintainer on the default branch"
+        self.assertEqual(warnings, [prefix + '"a: b"' + suffix,
+                                    prefix + '"x\\n::error title=Fork provenance check::forged\\n\\u0060b\\u0060"'
+                                    + suffix])
+
+    def test_the_resume_line_follows_an_input_error(self) -> None:
+        # Review 2309-913c7747 N2: commands stayed stopped when the check ended early.
+        out = io.StringIO()
+        with mock.patch("sys.stdout", out):
+            code = pm.main(["fork-check", "--repository", "example-user/Nakagawa-Recomp", "--repository-id", "42",
+                            "--repo", str(self.repo), "--base", "0" * 40, "--candidate", self.base])
+        self.assertEqual(code, 2)
+        printed = out.getvalue().splitlines()
+        stop = re.fullmatch(r"::stop-commands::([0-9a-f]{32})", printed[0])
+        assert stop is not None
+        self.assertEqual(printed[-1], f"::{stop.group(1)}::")
+
+    def test_a_profile_entry_names_a_file_of_the_pull_request(self) -> None:
+        # Review 2309-913c7747 S3: an entry with no file passed, and a later pull request could then add the
+        # file with nothing named.
+        _git(self.repo, "checkout", "--quiet", "-b", "entry", self.base)
+        self._write_profile(["README.md", "LATER.md"])
+        head = self._commit()
+        code, lines = pm.fork_check(self.repo, self.base, head, audit_tool=self._stub_audit(0))
+        self.assertEqual(code, 1, lines)
+        self.assertIn("PROFILE_PATH_MISSING: LATER.md: the pull request adds this path to include_paths, and its "
+                      "tree has no such file; admit a path together with its file", lines)
+        (self.repo / "LATER.md").write_text("later\n", encoding="utf-8")
+        head = self._commit()
+        code, lines = pm.fork_check(self.repo, self.base, head, audit_tool=self._stub_audit(0))
+        self.assertEqual(code, 0, lines)
+        self.assertEqual(pm.self_admitted(lines), ["LATER.md"])
+
+    def test_many_self_admitted_paths_cannot_hide_one(self) -> None:
+        # Review 2309-913c7747 S2: the title showed ten, GitHub shows ten warnings per step and drops a summary
+        # over 1 MiB, so decoys could push a path out of sight.
+        _git(self.repo, "checkout", "--quiet", "-b", "many", self.base)
+        names = [f"d{index:03}.md" for index in range(pm.SELF_ADMITTED_MAX_PATHS)]
+        for name in names:
+            (self.repo / name).write_text("decoy\n", encoding="utf-8")
+        self._write_profile(["README.md", *names])
+        head = self._commit()
+        code, lines = pm.fork_check(self.repo, self.base, head, audit_tool=self._stub_audit(0))
+        self.assertEqual(code, 0, lines)
+        summary = pm._summary(lines, code)
+        for name in names:
+            self.assertIn(f"- `{name}`", summary)
+        warnings = pm.warning_annotations(lines)
+        self.assertEqual(len(warnings), pm.WARNING_LIMIT)
+        self.assertIn(f"and {len(names) - pm.WARNING_LIMIT + 1} more paths", warnings[-1])
+        # One more is refused.
+        (self.repo / "zzz.md").write_text("decoy\n", encoding="utf-8")
+        self._write_profile(["README.md", *names, "zzz.md"])
+        head = self._commit()
+        code, lines = pm.fork_check(self.repo, self.base, head, audit_tool=self._stub_audit(0))
+        self.assertEqual(code, 1, lines)
+        self.assertTrue(any(line.startswith("SELF_ADMITTED_LIMIT: ") for line in lines), lines)
+        # A report too long for GitHub's summary is cut, never the list of admitted paths.
+        long_report = lines + ["  " + "x" * 1000] * 2000
+        summary = pm._summary(long_report, code)
+        self.assertLess(len(summary.encode("utf-8")), 1024 * 1024)
+        self.assertIn("- `zzz.md`", summary)
+        self.assertIn("(report cut to fit the summary; the job log has all of it)", summary)
 
     def test_the_command_line_measures_against_the_trusted_checkouts_head(self) -> None:
         head, tip = self._lagging_head_and_stricter_tip()
@@ -632,6 +694,24 @@ class ForkCheckTest(unittest.TestCase):
         # An edit elsewhere with the manifest and the approved bytes untouched passes.
         code, lines = pm.fork_check(self.repo, base, head, audit_tool=self._stub_audit(0))
         self.assertEqual(code, 0, lines)
+
+    def test_a_path_the_manifest_names_may_not_become_binary(self) -> None:
+        # Review 2309-913c7747 S1: a binary is not scanned as text, so a NUL byte hid a user path in a file
+        # the manifest describes as a licence.
+        self._write_manifest([{"id": "stb", "source_path": "LICENSE.txt", "disposition": "included"}])
+        (self.repo / "LICENSE.txt").write_text("licence\n", encoding="utf-8")
+        self._write_profile(["README.md", "LICENSE.txt"])
+        base = self._commit()
+        for data, expected in ((b"licence\nmore text\n", 0), (b"licence\x00hidden tail\n", 1), (b"\xff\xfe", 1),
+                               (b"licence\x1b[0m\n", 1)):
+            with self.subTest(data=data):
+                _git(self.repo, "reset", "--quiet", "--hard", base)
+                (self.repo / "LICENSE.txt").write_bytes(data)
+                head = self._commit()
+                code, lines = pm.fork_check(self.repo, base, head, audit_tool=self._stub_audit(0))
+                self.assertEqual(code, expected, lines)
+                self.assertEqual(any(line.startswith("COMPONENT_BINARY_CHANGED: LICENSE.txt") for line in lines),
+                                 bool(expected), lines)
 
     def test_a_head_that_lags_only_the_bases_paths_passes(self) -> None:
         _git(self.repo, "checkout", "--quiet", "-b", "topic", self.base)

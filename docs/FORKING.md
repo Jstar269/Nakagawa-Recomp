@@ -67,6 +67,9 @@ hosted rows come from reading each workflow, because a clone that is never pushe
    with `python -m unittest tools.test_<name>`; hosted CI runs the whole suite.
 4. Keep up with the upstream: `git remote add upstream https://github.com/Jstar269/Nakagawa-Recomp.git`,
    then `git fetch upstream` and merge `upstream/main` into your branch. Never rewrite published history.
+   Push the merge to your default branch yourself: as a pull request it fails the Fork provenance
+   check whenever the upstream changed that check's workflow, the release manifest, an approved
+   binary or a publication rule, which only your own push may change.
 
 ## Become your fork's provenance authority
 
@@ -165,11 +168,18 @@ with its own code. It reads no secret and never contacts any authority. It:
 - holds the release manifest (`assets/release_manifest.json`) the same way. It decides which
   binaries, such as images and fonts, the audit accepts, so a pull request may not change the
   manifest (`MANIFEST_CHANGED`) or the bytes of a path it approves
-  (`WAIVED_BINARY_CHANGED`), and its manifest must equal your default branch's (`MANIFEST_BEHIND`).
+  (`WAIVED_BINARY_CHANGED`) or give a path it names bytes that are not plain text
+  (`COMPONENT_BINARY_CHANGED`), and its manifest must equal your default branch's (`MANIFEST_BEHIND`).
   You change those by your own push to the default branch, after review;
 - lists the paths the pull request adds to or removes from the publication profile, and names each
-  path the pull request admits itself (`SELF_ADMITTED`), in the check's title line and as a warning
-  on the check.
+  path the pull request admits itself (`SELF_ADMITTED`): in the check's title line, as a warning on
+  the check and in a list at the top of its summary. An added path must name a file of the pull
+  request (`PROFILE_PATH_MISSING`), and a pull request may admit at most 50 paths itself
+  (`SELF_ADMITTED_LIMIT`), so that every one stays in view; admit more by your own push.
+
+A check judges a head once. When you tighten a rule or change the manifest on your default branch,
+an open pull request that already passed is not judged again until its next push: re-run its check
+(or merge the default branch into it) before you merge it.
 
 **A green Fork provenance check does not mean you admitted anything.** The check cannot tell your
 admission from anyone else's: it passes a pull request that adds a path to `include_paths` and the

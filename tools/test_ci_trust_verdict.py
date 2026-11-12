@@ -3122,6 +3122,8 @@ class CommandLineTests(unittest.TestCase):
 
 
 class ForkProducerTests(unittest.TestCase):
+    """The upstream judges the trusted attestation; a fork judges its Fork provenance check (docs/FORKING.md)."""
+
     def test_a_forks_success_says_what_its_provenance_check_covers(self) -> None:
         # Review 2309-36f775933693 S3 (and N3): a fork's green read exactly like the upstream's, although
         # its provenance check passes paths a pull request admits itself.
@@ -3165,8 +3167,6 @@ class ForkProducerTests(unittest.TestCase):
                 expected = ctv.provenance_mode.mode(repository, identity)
                 self.assertIn(f"Provenance producer set: {expected} (repository {repository}, "
                               f"ID {identity or 'unknown'})", log)
-
-    """The upstream judges the trusted attestation; a fork judges its Fork provenance check (docs/FORKING.md)."""
 
     def test_upstream_producers_are_unchanged(self) -> None:
         for repository, repository_id in (

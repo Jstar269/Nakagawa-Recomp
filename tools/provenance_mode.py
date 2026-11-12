@@ -32,10 +32,12 @@ upstream job does, and never contacts the private authority. What comes from whe
 * the release manifest (``assets/release_manifest.json``), whose dispositions waive the audit's
   binary findings, may not change (``MANIFEST_CHANGED``) and must equal the tip's
   (``MANIFEST_BEHIND``), and the bytes of a path it waives may not change
-  (``WAIVED_BINARY_CHANGED``);
+  (``WAIVED_BINARY_CHANGED``), nor may any path it names become binary (``COMPONENT_BINARY_CHANGED``);
 * every path the candidate adds to ``include_paths`` is named as ``SELF_ADMITTED``, in the summary's
-  title and as a warning annotation: the check cannot tell the fork maintainer's admission from a
-  contributor's, and passes both;
+  title and list and as a warning annotation: the check cannot tell the fork maintainer's admission
+  from a contributor's, and passes both. An added path must name a file of the candidate
+  (``PROFILE_PATH_MISSING``), and at most ``SELF_ADMITTED_MAX_PATHS`` may be added
+  (``SELF_ADMITTED_LIMIT``), so that every one is named on the check;
 * the candidate may change the profile's ``include_paths`` only. Each added or removed path is
   listed, because on a fork the fork maintainer's admission and review are the provenance
   authority. Any other change to the profile, such as an exclusion or the default disposition,
@@ -95,6 +97,15 @@ MANIFEST = "assets/release_manifest.json"
 #: Release-manifest dispositions under which tools/publish_audit.py drops a binary finding.
 WAIVING_DISPOSITIONS = frozenset(("approved_binary", "optional_excluded_if_unverified", "approved_submodule"))
 SELF_ADMITTED = "SELF_ADMITTED"
+#: At most this many paths, and this many characters of their names, may a pull request admit itself: each
+#: is named in the check's title, its warnings and its summary, which GitHub caps (ten warnings per step,
+#: 1 MiB of summary), so more could push a path out of sight. More reach the default branch by a push.
+SELF_ADMITTED_MAX_PATHS = 50
+SELF_ADMITTED_MAX_CHARS = 20_000
+#: Annotations GitHub shows per step; the last is kept for "and N more".
+WARNING_LIMIT = 10
+#: The summary's size limit, with room to spare under GitHub's 1 MiB.
+SUMMARY_LIMIT = 900_000
 
 #: The job conditions in ``WORKFLOW``. GitHub's ``==`` ignores letter case for strings, as
 #: ``is_upstream`` does. They are exact complements, so exactly one of the two jobs runs, and an
@@ -183,7 +194,7 @@ def context_findings(workflows: dict[str, bytes], trusted_gate: bytes | None) ->
             continue
         for context in (UPSTREAM_CONTEXT, FORK_CONTEXT):
             if context.encode("utf-8") in raw:
-                findings.append(f"CI_CONTEXT_COLLISION: {path}: names the reserved check context {context!r}")
+                findings.append(f"CI_CONTEXT_COLLISION: {shown_path(path)}: names the reserved check context {context!r}")
     return findings
 
 
@@ -261,6 +272,50 @@ def waived_paths(manifest: bytes | None) -> list[str]:
     return sorted(paths)
 
 
+def component_paths(manifest: bytes | None) -> list[str]:
+    """Every path a release-manifest component names, whatever its disposition."""
+    if manifest is None:
+        return []
+    try:
+        document = json.loads(manifest)
+    except json.JSONDecodeError as error:
+        raise CheckError(f"{MANIFEST} is unreadable: {error}") from error
+    components = document.get("components") if isinstance(document, dict) else None
+    if not isinstance(components, list):
+        raise CheckError(f"{MANIFEST} has no components list")
+    paths = set()
+    for component in components:
+        if isinstance(component, dict):
+            for key in ("source_path", "provenance_path"):
+                if isinstance(component.get(key), str):
+                    paths.add(component[key])
+    return sorted(paths)
+
+
+def _plain_text(data: bytes) -> bool:
+    """True for UTF-8 text without control bytes other than tab, line feed, form feed and carriage return.
+
+    Wider than the audit's own binary test on purpose: whatever the audit could treat as binary is not
+    plain text here."""
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    return not any(ord(ch) < 32 and ch not in "\t\n\f\r" or ch == "\x7f" for ch in text)
+
+
+def _tree_files(repo: Path, rev: str) -> set[str]:
+    """The regular files and links of ``rev``'s tree."""
+    listing = _git(repo, "ls-tree", "-r", "-z", "--full-tree", rev).decode("utf-8", "surrogateescape")
+    files = set()
+    for record in listing.split("\0"):
+        if record:
+            meta, _, path = record.partition("\t")
+            if meta.split(" ")[1] == "blob":
+                files.add(path)
+    return files
+
+
 def _is_ancestor(repo: Path, older: str, newer: str) -> bool:
     result = subprocess.run(["git", "-C", str(repo), "merge-base", "--is-ancestor", older, newer],
                             capture_output=True, check=False)
@@ -296,7 +351,7 @@ def fork_check(repo: Path, base: str, candidate: str, *, tip: str | None = None,
     lines.extend(f"  removed {shown_path(path)}" for path in removed)
     if rule_keys:
         lines.append(
-            f"PROFILE_RULES_CHANGED: {POLICY}: the candidate changes {', '.join(rule_keys)}; a pull request "
+            f"PROFILE_RULES_CHANGED: {POLICY}: the candidate changes {', '.join(map(shown_path, rule_keys))}; a pull request "
             "may change include_paths only. A change to the publication rules reaches the default branch by "
             "the fork maintainer's own push, after review")
         failed = True
@@ -308,7 +363,7 @@ def fork_check(repo: Path, base: str, candidate: str, *, tip: str | None = None,
         behind = profile_changes(repo, tip_sha, candidate_sha)[2]
         if behind:
             lines.append(
-                f"PROFILE_RULES_BEHIND: {POLICY}: the default branch changed {', '.join(behind)} after this "
+                f"PROFILE_RULES_BEHIND: {POLICY}: the default branch changed {', '.join(map(shown_path, behind))} after this "
                 "pull request branched; merge the default branch into it so its tree is judged by the "
                 "current rules")
             failed = True
@@ -328,16 +383,41 @@ def fork_check(repo: Path, base: str, candidate: str, *, tip: str | None = None,
             f"MANIFEST_BEHIND: {MANIFEST}: the default branch changed the release manifest after this pull "
             "request branched; merge the default branch into it")
         failed = True
-    for path in waived_paths(_blob(repo, branch_point, MANIFEST)):
+    base_manifest = _blob(repo, branch_point, MANIFEST)
+    waived = waived_paths(base_manifest)
+    for path in waived:
         if _blob_id(repo, candidate_sha, path) != _blob_id(repo, branch_point, path):
             lines.append(
-                f"WAIVED_BINARY_CHANGED: {path}: the release manifest approves this path as a binary, and the "
-                "pull request changes its bytes; that change reaches the default branch by the fork "
-                "maintainer's own push")
+                f"WAIVED_BINARY_CHANGED: {shown_path(path)}: the release manifest approves this path as a "
+                "binary, and the pull request changes its bytes; that change reaches the default branch by "
+                "the fork maintainer's own push")
+            failed = True
+    # A path the manifest names, whatever its disposition, may not become binary in a pull request
+    # either: the manifest's description of it no longer holds, and a binary is not scanned as text.
+    for path in sorted(set(component_paths(base_manifest)) - set(waived)):
+        before = _blob_id(repo, branch_point, path)
+        after = _blob_id(repo, candidate_sha, path)
+        if after is not None and after != before and not _plain_text(_git(repo, "cat-file", "blob", after)):
+            lines.append(
+                f"COMPONENT_BINARY_CHANGED: {shown_path(path)}: the release manifest names this path, and the "
+                "pull request gives it bytes that are not plain text; that change reaches the default branch "
+                "by the fork maintainer's own push")
             failed = True
 
     # Paths the pull request admits itself. The check cannot tell the fork maintainer's admission from
-    # anyone else's, so each is named, here, in the summary's title and as a warning annotation.
+    # anyone else's, so each is named, here, in the summary's title and as a warning annotation. An entry
+    # must name a file of the candidate, or a later pull request could add the file with nothing named.
+    files = _tree_files(repo, candidate_sha)
+    missing = [path for path in added if path not in files]
+    lines.extend(f"PROFILE_PATH_MISSING: {shown_path(path)}: the pull request adds this path to include_paths, "
+                 "and its tree has no such file; admit a path together with its file" for path in missing)
+    failed |= bool(missing)
+    if len(added) > SELF_ADMITTED_MAX_PATHS or sum(len(shown_path(path)) for path in added) > SELF_ADMITTED_MAX_CHARS:
+        lines.append(
+            f"SELF_ADMITTED_LIMIT: the pull request admits {len(added)} path(s) itself; at most "
+            f"{SELF_ADMITTED_MAX_PATHS} paths and {SELF_ADMITTED_MAX_CHARS} characters of names are named in "
+            "full on the check, so more reach the default branch by the fork maintainer's own push")
+        failed = True
     lines.extend(f"{SELF_ADMITTED}: {shown_path(path)}: admitted by this pull request's own profile and ledger, not on "
                  "the default branch; review it as an admission" for path in added)
 
@@ -403,22 +483,28 @@ def _summary(lines: list[str], code: int) -> str:
         shown = ", ".join(f"`{path}`" for path in admitted[:10])
         more = f" and {len(admitted) - 10} more" if len(admitted) > 10 else ""
         title += f"; this pull request admits {len(admitted)} path(s) itself: {shown}{more}"
+    listed = [f"- `{path}`" for path in admitted]
+    head = [title, "", *(["Paths this pull request admits itself:", "", *listed, ""] if listed else [])]
+    report = list(lines)
+    if sum(len(line) + 1 for line in head + report) > SUMMARY_LIMIT:
+        while report and sum(len(line) + 1 for line in head + report) > SUMMARY_LIMIT - 200:
+            report.pop()
+        report.append("(report cut to fit the summary; the job log has all of it)")
     return "\n".join([
-        title,
-        "",
+        *head,
         "This repository is not the upstream, so it has no access to the upstream's private trusted",
         "ledger. This check ran the trusted default branch's publication audit on the candidate's exact",
         "tree, under the candidate's own publication profile, whose rules and release manifest must",
         "equal the default branch's, and checked the public ledger's self-consistency. A pull request",
         "may change the profile's include_paths only, and not the release manifest, the bytes of a path",
         "it approves, or this check's own workflow. A pass does not mean the fork maintainer admitted",
-        "anything: the paths a pull request admits itself are named above and below, for review. The",
+        "anything: the paths a pull request admits itself are named above, for review. The",
         "fork maintainer's admission (`tools/fork_init.py`, `tools/admit_paths.py`) and review are this",
         "fork's provenance authority; see docs/FORKING.md.",
         "",
-        _fence(lines) + "text",
-        *lines,
-        _fence(lines),
+        _fence(report) + "text",
+        *report,
+        _fence(report),
         "",
     ])
 
@@ -426,9 +512,15 @@ def _summary(lines: list[str], code: int) -> str:
 def warning_annotations(lines: list[str]) -> list[str]:
     """GitHub workflow commands that put each self-admitted path on the check as a warning."""
     # Workflow-command data escapes %, CR and LF; the path is already shown_path's single ASCII line.
-    return [f"::warning title={FORK_CONTEXT} - self-admitted path::"
-            f"{path.replace('%', '%25').replace(chr(13), '%0D').replace(chr(10), '%0A')} is admitted by this pull request "
-            "itself, not by the fork maintainer on the default branch" for path in self_admitted(lines)]
+    admitted = self_admitted(lines)
+    shown = admitted if len(admitted) <= WARNING_LIMIT else admitted[:WARNING_LIMIT - 1]
+    commands = [f"::warning title={FORK_CONTEXT} - self-admitted path::"
+                f"{path.replace('%', '%25').replace(chr(13), '%0D').replace(chr(10), '%0A')} is admitted by this "
+                "pull request itself, not by the fork maintainer on the default branch" for path in shown]
+    if len(admitted) > len(shown):
+        commands.append(f"::warning title={FORK_CONTEXT} - self-admitted paths::and {len(admitted) - len(shown)} "
+                        "more paths this pull request admits itself; the check's summary lists them all")
+    return commands
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -467,13 +559,14 @@ def main(argv: list[str] | None = None) -> int:
     token = secrets.token_hex(16)
     print(f"::stop-commands::{token}", flush=True)
     try:
-        code, lines = fork_check(args.repo.resolve(), args.base, args.candidate, tip=args.tip)
-    except CheckError as error:
-        print(f"{FORK_CONTEXT}: input error: {error}", flush=True)
+        try:
+            code, lines = fork_check(args.repo.resolve(), args.base, args.candidate, tip=args.tip)
+        except CheckError as error:
+            print(f"{FORK_CONTEXT}: input error: {error}", flush=True)
+            return 2
+        print("\n".join(lines), flush=True)
+    finally:
         print(f"::{token}::", flush=True)
-        return 2
-    print("\n".join(lines))
-    print(f"::{token}::", flush=True)
     for command in warning_annotations(lines):
         print(command)
     if args.summary:
