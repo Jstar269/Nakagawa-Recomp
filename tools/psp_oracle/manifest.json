@@ -4292,7 +4292,7 @@
           "stdio-close-stdout",
           "hle-std-handles-done"
         ],
-        "measurement_note": "Measured by the 2026-11-06 PSP-3000 launch (system software 6.61, ARK-5.1.0 (owner); pspver 6.6.0, declared to the runner; boot 135, XMB context) of commit d5fed0ba, case hle-std-handles after the transport-write preflight: 4 records and the done record (out0 4), all PASS, acceptance-eligible with 0 blockers. sceKernelStdin, sceKernelStdout and sceKernelStderr return three distinct kernel UIDs (0x0093a513, 0x00938a15 and 0x00936f17 on that boot), not 1. A one-byte sceIoWrite returns 1 on Stdout and on Stderr. sceIoClose of the Stdout UID returns 0x800200d1 and closes nothing: a write after it returns 1 and sceKernelStdout returns the same UID. A read from Stdin is not run (it would wait on PSPLink's tty). The raw stream stays in the private campaign directory.",
+        "measurement_note": "Measured by the 2026-11-06 PSP-3000 launch (system software 6.61, ARK-5.1.0 (owner); pspver 6.6.0, declared to the runner; boot 135, XMB context) of commit d5fed0ba, case hle-std-handles after the transport-write preflight: 4 records and the done record (out0 4), all PASS, acceptance-eligible with 0 blockers. sceKernelStdin, sceKernelStdout and sceKernelStderr return three distinct kernel UIDs (0x0093a513, 0x00938a15 and 0x00936f17 on that boot), not 1. A one-byte sceIoWrite returns 1 on Stdout and on Stderr. sceIoClose of the Stdout UID returns 0x800200d1 and closes nothing: a write after it returns 1 and sceKernelStdout returns the same UID. A read from Stdin is not run (it would wait on PSPLink's tty). A second launch on 2026-11-12 (pspver 6.6.1, ARK-5 5.2.0; boot 200, game context) of commit 3872796c, also acceptance-eligible with 0 blockers, gave the same three UIDs and write results; there sceIoClose of the Stdout UID returned 0x80020325 instead of 0x800200d1 and again closed nothing. The raw streams stay in the private campaign directory.",
         "group": "system",
         "source": "fixtures/psp_oracle/probe_hle_measure.c",
         "prx": "hle_std_handles.prx",
@@ -8023,7 +8023,7 @@
       "id": "PSP-HLE-UTILITY-DIALOG-001",
       "status": "implemented",
       "hardware_evidence": "NOT_RUN",
-      "evidence_note": "Built as the fixed-shape case 161 utility-dialog timing and wrong-state stream. No hardware run is cited.",
+      "evidence_note": "Built as the fixed-shape case 161 utility-dialog timing and wrong-state stream. Captured twice in the game context on 2026-11-12 (boots 204 and 206, commit 3872796c), neither acceptance-eligible: a netconf dialog and then a gamedata install dialog stayed RUNNING to the poll cap. No hardware run is cited.",
       "group": "system",
       "source": "fixtures/psp_oracle/probe_hle_measure.c",
       "prx": "hle_utility_dialogs.prx",
@@ -8032,7 +8032,7 @@
       "case_ids": ["savedata-timing-*", "gamedata-*", "netconf-*", "sharing-*"],
       "invariant": "Each dialog timing and wrong-state call has a fixed-shape record and bounded status polling; no network join or setting change is performed.",
       "issues": [1386],
-      "risk": "low; game-context dialog calls are bounded and cleanup is restricted to the probe-owned directory",
+      "risk": "POWER RISK; a netconf or gamedata install dialog still RUNNING at the poll cap left PSPLink silent and needed a power cycle (boots 204 and 206); run only with the owner present. Cleanup is restricted to the probe-owned directory",
       "reset": "one PRX launch; PSPLink soft reset before the next launch"
     },
     {
@@ -8093,7 +8093,7 @@
       "id": "PSP-MPEG-YCBCR-001",
       "status": "implemented",
       "hardware_evidence": "NOT_RUN",
-      "evidence_note": "The YCbCr mode 2 and 3 cells now each create a fresh ringbuffer, MPEG context and registered stream from the PSMF offset. They were captured on hardware twice (2026-11-07 boot 145, 2026-11-08 boot 152; the probe prints test_id PSP-MPEG-001); the completion contract is unregistered, so the cells remain NOT_RUN.",
+      "evidence_note": "The YCbCr mode 2 and 3 cells now each create a fresh ringbuffer, MPEG context and registered stream from the PSMF offset. They were captured on hardware three times (2026-11-07 boot 145, 2026-11-08 boot 152, 2026-11-12 boot 202 in the game context; the probe prints test_id PSP-MPEG-001 and the earlier RC status, and mode 3's second decode blocked each time); the completion contract is unregistered, so the cells remain NOT_RUN.",
       "group": "media",
       "source": "fixtures/psp_oracle/probe.c",
       "prx": "nakagawa_psp_oracle.prx",

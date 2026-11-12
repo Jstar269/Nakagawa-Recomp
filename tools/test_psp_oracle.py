@@ -16212,6 +16212,27 @@ class Record20261015Tests(unittest.TestCase):
             self.assertIn(term, section)
         self.assertNotIn("no such rerun has been made", section)
 
+    def test_the_owner_reads_of_2026_11_12_keep_their_evidence_classes(self) -> None:
+        # hle-std-handles: the game-context launch (boot 200) adds to the XMB measurement (boot 135).
+        stdio = self.rows["PSP-HLE-STDIO-001"]
+        self.assertEqual(stdio["hardware_evidence"], "MEASURED")
+        for term in ("boot 135", "0x800200d1", "boot 200", "game context", "3872796c", "0x80020325"):
+            self.assertIn(term, stdio["measurement_note"])
+        self.assertIn("- **PSP-3000 single-case run of `hle-std-handles` in the game context (2026-11-12 UTC)**",
+                      self.doc)
+        # hle-utility-dialogs and mpeg-ycbcr were captured, not measured: neither envelope was eligible.
+        dialogs = self.rows["PSP-HLE-UTILITY-DIALOG-001"]
+        self.assertEqual(dialogs["hardware_evidence"], "NOT_RUN")
+        self.assertTrue(dialogs["risk"].startswith("POWER RISK"))
+        self.assertIn("boots 204 and 206", dialogs["evidence_note"])
+        section = self.doc.split("### PSP-HLE-UTILITY-DIALOG-001 captures 2026-11-12", 1)[1].split("\n### ", 1)[0]
+        for term in ("establish nothing about PSP", "Boot 204", "Boot 206", "0x80110001", "0x80110327"):
+            self.assertIn(term, section)
+        self.assertIn("(#psp-hle-utility-dialog-001-captures-2026-11-12)", self.doc)
+        mpeg = self.rows["PSP-MPEG-YCBCR-001"]
+        self.assertEqual(mpeg["hardware_evidence"], "NOT_RUN")
+        self.assertIn("2026-11-12 boot 202", mpeg["evidence_note"])
+
     def test_the_audio_src_and_timer_comparisons_are_recorded_and_pinned(self) -> None:
         for name in ("test_audio_src_matches_the_measured_contract",
                      "test_alarm_delivery_order_matches_the_timer_order_probe"):
