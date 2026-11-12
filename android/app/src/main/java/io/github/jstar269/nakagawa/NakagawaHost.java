@@ -16,8 +16,10 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.OutputStream;
+import java.io.RandomAccessFile;
+import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 
 /**
  * What the native code needs from Android before it starts, shared by both activities.
@@ -33,7 +35,9 @@ import java.nio.charset.StandardCharsets;
  * and its archives in assets/toolchain/ are unpacked to toolchain/ in the files folder:
  * sysroot/, clang-resource/ (clang's -resource-dir) and python/ (Python's standard library).
  * NK_ANDROID_TOOLCHAIN_DIR names that folder, PYTHONHOME the python/ inside it and TMPDIR the
- * app's cache folder, which every program the app starts inherits.
+ * app's cache folder, which every program the app starts inherits. They are set only once the
+ * unpack is complete; after a failed one they are absent, which means "no usable toolchain", and
+ * a consumer must not guess the folder instead.
  *
  * <p>The bundled files are unpacked into the app's files folder itself: SDL_GetBasePath() is
  * "./" on Android, and SDL opens a relative path against the files folder
@@ -95,7 +99,11 @@ final class NakagawaHost {
         String stamp = apkStamp(context);
         File stampFile = new File(app, ".unpacked");
         boolean bundlesToolchain;
-        try {
+        // The main and :title processes both get here: the lock keeps a second one from deleting
+        // or unpacking while the first does, and it then finds the first one's stamp.
+        try (RandomAccessFile lockFile = new RandomAccessFile(new File(app, ".unpack.lock"), "rw");
+             FileChannel channel = lockFile.getChannel()) {
+            channel.lock();  // released when the channel closes
             bundlesToolchain = hasAssets(context.getAssets(), "toolchain");
             if (!stamp.equals(readText(stampFile))) {
                 // Replace only what the APK bundles (assets/, titles/), never the user's data.
@@ -108,7 +116,8 @@ final class NakagawaHost {
                 }
                 deleteTree(toolchain);
                 if (bundlesToolchain) unpackToolchain(context.getAssets(), toolchain);
-                // Written last: without it, the next start deletes and unpacks everything again.
+                // Written last, after every file is synced (ToolchainArchive, copyAssetTree):
+                // without it, the next start deletes and unpacks everything again.
                 writeText(stampFile, stamp);
                 Log.i(TAG, "BUNDLED_FILES_UNPACKED dir=" + app + " stamp=" + stamp);
             }
@@ -165,10 +174,11 @@ final class NakagawaHost {
             if (parent != null && !parent.isDirectory() && !parent.mkdirs()) {
                 throw new IOException("cannot create " + parent);
             }
-            try (InputStream in = assets.open(path); OutputStream out = new FileOutputStream(target)) {
+            try (InputStream in = assets.open(path); FileOutputStream out = new FileOutputStream(target)) {
                 byte[] buffer = new byte[1 << 16];
                 int n;
                 while ((n = in.read(buffer)) > 0) out.write(buffer, 0, n);
+                out.getFD().sync();  // on storage before the stamp says it is there
             }
             return;
         }
@@ -176,11 +186,18 @@ final class NakagawaHost {
         for (String child : children) copyAssetTree(assets, path + "/" + child, new File(target, child));
     }
 
-    /** Deletes {@code file} and everything under it; a file that stays is a failure. */
+    /**
+     * Deletes {@code file} and everything under it; a file that stays is a failure. A symbolic
+     * link is deleted itself, never followed: File.listFiles() would list its target's folder.
+     */
     private static void deleteTree(File file) throws IOException {
-        File[] children = file.listFiles();
-        if (children != null) for (File child : children) deleteTree(child);
-        if (file.exists() && !file.delete()) throw new IOException("cannot delete " + file);
+        boolean link = Files.isSymbolicLink(file.toPath());
+        if (!link) {
+            File[] children = file.listFiles();
+            if (children != null) for (File child : children) deleteTree(child);
+        }
+        // exists() follows a link, so a dangling one would look absent.
+        if ((link || file.exists()) && !file.delete()) throw new IOException("cannot delete " + file);
     }
 
     private static String readText(File file) {
@@ -194,8 +211,9 @@ final class NakagawaHost {
     }
 
     private static void writeText(File file, String text) throws IOException {
-        try (OutputStream out = new FileOutputStream(file)) {
+        try (FileOutputStream out = new FileOutputStream(file)) {
             out.write(text.getBytes(StandardCharsets.UTF_8));
+            out.getFD().sync();
         }
     }
 }

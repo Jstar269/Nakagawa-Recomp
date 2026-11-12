@@ -18,7 +18,8 @@ import java.nio.charset.StandardCharsets;
  * <p>It reads that form and refuses everything else, so an archive cannot place a file
  * outside the target folder: a link, a device or any other entry type; an absolute path or one
  * with a "." or ".." part; a header whose checksum does not match; or an archive that ends early.
- * A file whose mode is executable stays executable for its owner.
+ * A file whose mode is executable stays executable for its owner. Each file is synced to storage
+ * before the next entry, so the caller's completion stamp, written after, never outlives its data.
  *
  * <p>It uses only java.io, so the host tests (tools/test_android_toolchain.py) run it with a
  * plain JDK.
@@ -57,8 +58,9 @@ final class ToolchainArchive {
                 if (parent != null && !parent.isDirectory() && !parent.mkdirs()) {
                     throw new IOException("cannot create " + parent);
                 }
-                try (OutputStream out = new FileOutputStream(file)) {
+                try (FileOutputStream out = new FileOutputStream(file)) {
                     copy(in, out, size);
+                    out.getFD().sync();
                 }
                 skipPadding(in, size);
                 if ((octal(header, 100, 8) & 0100) != 0 && !file.setExecutable(true, true)) {

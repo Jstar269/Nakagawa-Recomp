@@ -297,7 +297,10 @@ The app (`NakagawaHost`, with `ToolchainArchive` reading the archives) unpacks
 `clang-resource/` (its `-resource-dir`) and `python/` (Python's standard library). It sets
 `NK_ANDROID_TOOLCHAIN_DIR` to that folder, `PYTHONHOME` to `python/` inside it, and `TMPDIR`
 to the app's cache folder (clang's temporary files), and every program the app starts inherits
-them. The unpacker takes only folders and regular files, and
+them. It sets them only once the unpack is complete: after a failed one they are absent, and a
+consumer must read that as "no usable toolchain", not guess the folder. A file lock keeps the
+main and title processes from unpacking at once, and every file is synced before the stamp that
+marks the unpack complete is written. The unpacker takes only folders and regular files, and
 refuses links, paths that leave the folder, damaged headers and archives that end early.
 
 ## Storage
