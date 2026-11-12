@@ -566,6 +566,72 @@ MUTANTS: tuple[Mutant, ...] = (
         )],
         target="split-generator",
     ),
+    # The resume-at-PC lane (#2172): the cosimulation translated with --state-resume, where
+    # every yield point of the resume cells parks and the resumed run is compared with the
+    # uninterrupted one. Each mutant is one defect in the pass that writes the resume points.
+    Mutant(
+        "resume-call-point-skips-the-frame-above",
+        "RESUME GENERATOR: a call point continues without running the frame above it",
+        [(
+            'f"SR_RESUME_AT(_nk_e, SR_RESUME_POINT_CALL, 0x{callee}u); sr_resume_inner(s); "',
+            'f"SR_RESUME_AT(_nk_e, SR_RESUME_POINT_CALL, 0x{callee}u); "',
+            1,
+        )],
+        target="resume-generator",
+    ),
+    Mutant(
+        "resume-park-names-the-branch",
+        "RESUME GENERATOR: a loop edge parks naming its own PC, not the edge's target",
+        [(
+            'return (f"SR_YIELD_PARK(s, {site}, {body}, 0x{target}u, SR_RESUME_POINT_YIELD, _sp_entry); "',
+            'return (f"SR_YIELD_PARK(s, {site}, {body}, {site}, SR_RESUME_POINT_YIELD, _sp_entry); "',
+            1,
+        )],
+        target="resume-generator",
+    ),
+    Mutant(
+        # The point exists and validates; only what the resumed run then does is wrong.
+        "resume-loop-point-restarts-the-body",
+        "RESUME GENERATOR: a body resumed at a loop edge runs from its entry instead",
+        [(
+            'f"SR_RESUME_AT(_nk_e, SR_RESUME_POINT_YIELD, 0u); goto L_{target};")',
+            'f"SR_RESUME_AT(_nk_e, SR_RESUME_POINT_YIELD, 0u); goto _nk_enter;")',
+            1,
+        )],
+        target="resume-generator",
+    ),
+    Mutant(
+        "resume-entry-counts-a-yield-point",
+        "RESUME GENERATOR: a body resumed at its entry counts the entry's yield point again",
+        [(
+            'result.append(f"    SR_STATE_ENTRY(s, {body}); _nk_enter: ;")',
+            'result.append(f"    _nk_enter: ; SR_STATE_ENTRY(s, {body});")',
+            1,
+        )],
+        target="resume-generator",
+    ),
+    Mutant(
+        "resume-keeps-the-live-sp-as-entry-sp",
+        "RESUME GENERATOR: a resumed body takes the live $sp for its entry $sp",
+        [(
+            '        "    _sp_entry = _nk_e.sp;",\n',
+            '        "    _sp_entry = s->r[29];",\n',
+            1,
+        )],
+        target="resume-generator",
+    ),
+    Mutant(
+        "resume-label-after-the-end-check",
+        "RESUME GENERATOR: a resumed call skips its drain and its return-boundary end check",
+        [(
+            '                      f"f_{callee}(s); R_{resume}: SR_TAIL_DRAIN(s); "\n'
+            '                      f"if (sr_aot_return_boundary_end(s)) return;"\n',
+            '                      f"f_{callee}(s); SR_TAIL_DRAIN(s); "\n'
+            '                      f"if (sr_aot_return_boundary_end(s)) return; R_{resume}: ;"\n',
+            1,
+        )],
+        target="resume-generator",
+    ),
 )
 
 # The LLVM IR backend's own campaign (#330, `make cosim-mutants-llvm`). Each mutant is
@@ -679,6 +745,9 @@ LLVM_MUTANTS: tuple[Mutant, ...] = (
 
 #: The codegen arguments of the split-generator lane: every body split at other entries.
 SPLIT_CODEGEN_ARGS = "--stack-census --region-split-threshold=0"
+#: The resume lane (`make cosim-selftest-resume`): resume points, and the harness told so.
+RESUME_CODEGEN_ARGS = "--state-resume"
+RESUME_HARNESS_DEFS = "-DCOSIM_STATE_RESUME"
 
 
 def resolve_make() -> str:
@@ -738,6 +807,10 @@ def make_command(source: Path, target: str,
     elif target == "split-generator":
         command = ["cosim-selftest", f"CODEGEN_TOOL={source.as_posix()}",
                    f"COSIM_CODEGEN_ARGS={SPLIT_CODEGEN_ARGS}"]
+    elif target == "resume-generator":
+        command = ["cosim-selftest", f"CODEGEN_TOOL={source.as_posix()}",
+                   f"COSIM_CODEGEN_ARGS={RESUME_CODEGEN_ARGS}",
+                   f"COSIM_HARNESS_DEFS={RESUME_HARNESS_DEFS}"]
     elif target == "scheduler":
         command = ["aot-return-boundary-thread-selftest"]
         if harness_source is not None:
@@ -813,7 +886,7 @@ def run_gate(source: Path, target: str = "interpreter",
         # own existing cells remain active; the dedicated AOT-return mutant below
         # runs the new regression without this isolation.
         env["SR_COSIM_SKIP_AOT_RETURN_CASES"] = "1"
-    if target in ("generator", "split-generator", "llvm-backend"):
+    if target in ("generator", "split-generator", "resume-generator", "llvm-backend"):
         # A mutated copy of codegen.py still has to import its siblings
         # (analyze, host_stubs, build_profile), and running it from the ignored
         # build tree puts the wrong directory first on sys.path.
@@ -898,11 +971,18 @@ def run_gate(source: Path, target: str = "interpreter",
 
 def gate_options(mutant: Mutant) -> dict[str, bool | str | None]:
     """The verdict rules one mutant's gate runs under."""
+    # The rewritten-$ra cells print the same named stop in every run, so a mutant judged by
+    # that stop runs without them: the line it is killed by has to be its own.
     skip_ra_return_cases = mutant.name in {
-        "wrong-call-resume", "wrong-jump-target", "alter-link-value", "llvm-wrong-call-resume"
+        "wrong-call-resume", "wrong-jump-target", "alter-link-value", "llvm-wrong-call-resume",
+        "resume-loop-point-restarts-the-body"
     }
+    # A body resumed at a loop edge that runs from its entry instead saves the wrong $ra a
+    # second time, so its own return is the located failure: the run stops by name inside
+    # the first resumed run that takes the point, before any comparison.
     accepted_boundary = "AOT_RETURN_TARGET_MISMATCH" if mutant.name in {
-        "wrong-call-resume", "alter-link-value", "llvm-wrong-call-resume"
+        "wrong-call-resume", "alter-link-value", "llvm-wrong-call-resume",
+        "resume-loop-point-restarts-the-body"
     } else None
     if mutant.target == "scheduler":
         accepted_boundary = "AOT_RETURN_TARGET_MISMATCH"
@@ -911,12 +991,14 @@ def gate_options(mutant: Mutant) -> dict[str, bool | str | None]:
 
 
 BASELINES = {"interpreter": INTERPRETER, "scheduler": SCHEDULER,
-             "split-generator": GENERATOR, "llvm-backend": LLVM_BACKEND}
+             "split-generator": GENERATOR, "resume-generator": GENERATOR,
+             "llvm-backend": LLVM_BACKEND}
 #: How each lane's unmutated gate is named in the campaign report, in report order.
 #: A campaign's cosimulation lanes are judged by the interpreter or, for
 #: `--backend llvm`, by the unmutated LLVM backend; both report as the baseline.
 BASELINE_LABELS = {"interpreter": "baseline", "llvm-backend": "baseline",
                    "split-generator": "split baseline",
+                   "resume-generator": "resume baseline",
                    "scheduler": "AOT boundary baseline"}
 
 
@@ -929,11 +1011,12 @@ def plan_lanes(mutants: tuple[Mutant, ...] | list[Mutant],
     history its tree sees, is fixed for a given `jobs`. Scheduler mutants build
     the HLE-thread harness, a different gate with its own baseline, so they form
     one lane of their own, and so do split-generator mutants, whose baseline is the
-    unmutated generator with every body split. Returns (baseline target, indices
-    into `mutants`) for each lane: the cosimulation lanes, then the split-generator
-    and scheduler lanes.
+    unmutated generator with every body split, and resume-generator mutants, whose
+    baseline is the unmutated generator with resume points. Returns (baseline target,
+    indices into `mutants`) for each lane: the cosimulation lanes, then the
+    resume-generator, split-generator and scheduler lanes.
     """
-    own_lane = ("split-generator", "scheduler")
+    own_lane = ("resume-generator", "split-generator", "scheduler")
     cosim = [index for index, mutant in enumerate(mutants) if mutant.target not in own_lane]
     lanes = [(cosim_baseline, cosim[lane::jobs]) for lane in range(jobs)]
     lanes = [lane for lane in lanes if lane[1]]
@@ -992,6 +1075,7 @@ def main(argv: list[str] | None = None) -> int:
         "fpu-reference": FPU_REFERENCE.read_text(encoding="utf-8"),
         "generator": GENERATOR.read_text(encoding="utf-8"),
         "split-generator": GENERATOR.read_text(encoding="utf-8"),
+        "resume-generator": GENERATOR.read_text(encoding="utf-8"),
         "scheduler": SCHEDULER.read_text(encoding="utf-8"),
         "llvm-backend": LLVM_BACKEND.read_text(encoding="utf-8"),
     }
@@ -1001,6 +1085,7 @@ def main(argv: list[str] | None = None) -> int:
         "fpu-reference": "fpu_reference.c",
         "generator": "codegen.py",
         "split-generator": "codegen.py",
+        "resume-generator": "codegen.py",
         "scheduler": "sched.c",
         "llvm-backend": "codegen_llvm.py",
     }
@@ -1047,7 +1132,8 @@ def main(argv: list[str] | None = None) -> int:
     counts = {name: sum(1 for target, _ in lanes if target == name) for name in BASELINE_LABELS}
     print(f"COSIM_MUTATION lanes={len(lanes)} "
           f"({counts['interpreter'] + counts['llvm-backend']} cosim, "
-          f"{counts['split-generator']} split, {counts['scheduler']} scheduler)")
+          f"{counts['resume-generator']} resume, {counts['split-generator']} split, "
+          f"{counts['scheduler']} scheduler)")
     print("COSIM_MUTATION baseline: the unmutated sources must pass in every lane")
 
     killed = 0

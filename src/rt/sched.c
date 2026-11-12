@@ -214,6 +214,8 @@ typedef struct {
     int      import_active;
     uint32_t import_nid;
     int      pc_stale;            /* switched out inside a call: saved.pc is its last yield */
+    int      yield_switched;      /* switched out by sr_yield's own switch and not resumed since:
+                                   * the one state in which the thread is parked (#2172) */
     int      has_block_nid;       /* the last block happened inside an import */
     uint32_t block_nid;           /* NID of that import */
     int      block_start_valid;   /* block_start_us is the start of the current wait */
@@ -2887,6 +2889,7 @@ uint32_t sched_start_thread(uint32_t uid, uint32_t arglen, uint32_t argp) {
         /* The re-seeded pc is the entry, where the thread really resumes: the "switched out
          * inside a call" mark from its last run must not hide it from unload safety (#286). */
         t->pc_stale = 0;
+        t->yield_switched = 0;
         memset(&t->saved, 0, sizeof(t->saved));
         t->saved.r[26] = t->k0_init;
         t->saved.r[29] = t->sp_init;
@@ -3888,9 +3891,40 @@ void sr_yield(CpuState *s) {
     memcpy(&t->saved, s, sizeof(CpuState));
     if (t->state == TH_RUNNING) t->state = TH_READY;
     s_pause_switch_from_yield = 1;
+    t->yield_switched = 1;
     switch_to_scheduler();
+    t->yield_switched = 0;
     s_pause_switch_from_yield = 0;
     /* resumed later: the scheduler restored our registers into *s before switching back to this coroutine */
+}
+
+/* Whether thread `uid` is parked, and its switched-out call records (#2172; "Resume at a PC"
+ * in docs/ARCHITECTURE.md). sr_yield names the point it continues at before it does its own
+ * work: it advances time, latches and services interrupts and callbacks, and only then, if
+ * another thread should run, switches. Until that switch the thread is running, so a frame
+ * list taken inside the yield would skip the rest of it. The switch above marks the thread
+ * (yield_switched) for as long as it is out; no other switch does. pc_stale is not that mark:
+ * it is derived from a flag only the yielding thread clears, so a thread resumed in between
+ * and switched out inside a call can read clear. A thread at the yield's switch is in no
+ * import; that is checked too. */
+SrResumeStatus sched_resume_switched_out(uint32_t uid, const SrAotReturnBoundaryStack **stack_out,
+                                         const char **why_out) {
+    TCB *t = tcb_by_uid(uid);
+    *stack_out = NULL;
+    *why_out = "";
+    if (t == NULL || !t->started || t->coro == NULL || t->state == TH_DORMANT) {
+        *why_out = "has not started or has ended";
+        return SR_RESUME_NO_FRAMES;
+    }
+    if ((int)(t - s_tcb) == s_cur || t->state == TH_RUNNING)
+        *why_out = "is running";
+    else if (!t->yield_switched)
+        *why_out = "was switched out inside a call, not by sr_yield's own switch";
+    else if (t->hle_depth != 0 || t->import_active)
+        *why_out = "is inside an import";
+    if ((*why_out)[0] != '\0') return SR_RESUME_NOT_PARKED;
+    *stack_out = &t->aot_return_boundary_stack;
+    return SR_RESUME_OK;
 }
 
 /* PSP scheduling is strict-priority preemptive: the moment a higher-priority thread becomes

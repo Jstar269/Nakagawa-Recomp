@@ -72,6 +72,7 @@ PUBLIC_TARGETS := \
 	cosim-selftest-split \
 	cosim-selftest-opt \
 	cosim-selftest-promoted \
+	cosim-selftest-resume \
 	cosim-selftest-run \
 	cosim-selftest-clean \
 	cosim-mutants \
@@ -280,6 +281,7 @@ HELP_DESCRIPTION_cosim-selftest := run the source-owned AOT/interpreter cosimula
 HELP_DESCRIPTION_cosim-selftest-split := run the cosimulation with every body split at other entries
 HELP_DESCRIPTION_cosim-selftest-opt := run the cosimulation with generated code at COSIM_OPT_LEVEL (#1730)
 HELP_DESCRIPTION_cosim-selftest-promoted := run the cosimulation with codegen register promotion (#284)
+HELP_DESCRIPTION_cosim-selftest-resume := run the cosimulation with resume points and resume every parked thread (#2172)
 HELP_DESCRIPTION_cosim-selftest-run := build and run the cosimulation harness
 HELP_DESCRIPTION_cosim-selftest-clean := remove cosimulation artifacts
 HELP_DESCRIPTION_cosim-mutants := run the cosimulation negative corpus

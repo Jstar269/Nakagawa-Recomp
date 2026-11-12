@@ -598,6 +598,105 @@ static void test_segment_payload_refusals(void) {
     nkstate_buf_free(&out);
 }
 
+/* ---- "FRMS": resume frames are bound to the build that wrote them (#2172) ------------- */
+
+typedef struct {
+    NkStateThreadFrames threads[2];
+    unsigned loads;
+} FramesCtx;
+
+static NkStateStatus frames_save(void *ctx, NkStateBuf *out, char *detail, size_t cap) {
+    FramesCtx *c = (FramesCtx *)ctx;
+    return nkstate_frames_save(c->threads, 2u, out, detail, cap);
+}
+static NkStateStatus frames_load(void *ctx, const uint8_t *p, size_t len, char *detail, size_t cap) {
+    FramesCtx *c = (FramesCtx *)ctx;
+    c->loads++;
+    return nkstate_frames_load(c->threads, 2u, p, len, detail, cap);
+}
+
+static void test_frames_segment(void) {
+    /* Two threads: one three frames deep, parked at a loop edge; one parked at its entry. */
+    SrResumeFrame deep[3] = {
+        {0x08804000u, 0x08804020u, SR_RESUME_POINT_CALL, 0x09fff000u},
+        {0x08804100u, 0x08804118u, SR_RESUME_POINT_CALL, 0x09ffefe0u},
+        {0x08804200u, 0x08804210u, SR_RESUME_POINT_YIELD, 0x09ffefc0u},
+    };
+    SrResumeFrame shallow[1] = {{0x08804300u, 0x08804300u, SR_RESUME_POINT_ENTRY, 0x09ffd000u}};
+    FramesCtx saved = {{{0x101u, 3u, 3u, deep}, {0x102u, 1u, 1u, shallow}}, 0u};
+    SrResumeFrame got_deep[4], got_shallow[4];
+    FramesCtx loaded = {{{0x101u, 0u, 4u, got_deep}, {0x102u, 0u, 4u, got_shallow}}, 0u};
+    char detail[256];
+
+    NkStateIdentity self = test_identity();
+    const NkStateRequirement required[] = {{NKSTATE_FRAMES_TAG, "resume frames"}};
+    NkStateExporter writer[1] = {{NKSTATE_FRAMES_TAG, "resume frames", NKSTATE_FRAMES_VERSION,
+                                  frames_save, frames_load, &saved}};
+    NkStateBuf file = {0};
+    NkStateStatus st = nkstate_capture(&self, required, 1u, writer, 1u, &file, detail, sizeof detail);
+    CHECK(st == NKSTATE_OK, "a state with a FRMS segment was not written: %s (%s)",
+          nkstate_status_name(st), detail);
+    if (st != NKSTATE_OK) return;
+
+    /* The same build loads it, and it saves back to the same bytes. */
+    NkStateExporter reader[1] = {{NKSTATE_FRAMES_TAG, "resume frames", NKSTATE_FRAMES_VERSION,
+                                  frames_save, frames_load, &loaded}};
+    NkStateExpect expect = {&self, 1, reader, 1u};
+    st = nkstate_restore(file.data, file.len, &expect, detail, sizeof detail);
+    CHECK(st == NKSTATE_OK && loaded.loads == 1u, "the writing build did not load its frames: %s (%s)",
+          nkstate_status_name(st), detail);
+    CHECK(loaded.threads[0].count == 3u && loaded.threads[1].count == 1u &&
+          memcmp(got_deep, deep, sizeof deep) == 0 && memcmp(got_shallow, shallow, sizeof shallow) == 0,
+          "the loaded frames differ from the saved ones");
+
+    /* Another build: the generated code differs, so a body address and a point in it mean
+     * something else. Refused by the file's identity before the frames loader runs. */
+    NkStateIdentity other = self;
+    other.executable[7] ^= 0x40u;
+    memset(got_deep, 0, sizeof got_deep);
+    loaded.threads[0].count = loaded.threads[1].count = 0u;
+    loaded.loads = 0u;
+    NkStateExpect foreign = {&other, 1, reader, 1u};
+    st = nkstate_restore(file.data, file.len, &foreign, detail, sizeof detail);
+    CHECK(st == NKSTATE_EXECUTABLE_IDENTITY, "frames from another build gave %s (%s)",
+          nkstate_status_name(st), detail);
+    CHECK(loaded.loads == 0u && loaded.threads[0].count == 0u && got_deep[0].body == 0u,
+          "frames from another build reached the loader");
+
+    /* The same build with another frame layout: refused by the segment's version. */
+    NkStateExporter newer[1] = {{NKSTATE_FRAMES_TAG, "resume frames", NKSTATE_FRAMES_VERSION + 1u,
+                                 frames_save, frames_load, &loaded}};
+    NkStateExpect versioned = {&self, 1, newer, 1u};
+    st = nkstate_restore(file.data, file.len, &versioned, detail, sizeof detail);
+    CHECK(st == NKSTATE_SEGMENT_VERSION && loaded.loads == 0u, "frames of another version gave %s (%s)",
+          nkstate_status_name(st), detail);
+    nkstate_buf_free(&file);
+
+    /* The payload itself: another thread, too many frames, a short payload, trailing bytes.
+     * Each is refused whole. */
+    NkStateBuf seg = {0};
+    CHECK(nkstate_frames_save(saved.threads, 2u, &seg, detail, sizeof detail) == NKSTATE_OK, "frames save");
+    CHECK(seg.len == 4u + (8u + 3u * 16u) + (8u + 16u), "FRMS segment is %zu bytes", seg.len);
+    NkStateThreadFrames wrong_uid[2] = {{0x101u, 0u, 4u, got_deep}, {0x1ffu, 0u, 4u, got_shallow}};
+    memset(got_deep, 0, sizeof got_deep);
+    CHECK(nkstate_frames_load(wrong_uid, 2u, seg.data, seg.len, detail, sizeof detail) == NKSTATE_SEGMENT_PAYLOAD,
+          "frames for another thread uid were loaded");
+    CHECK(wrong_uid[0].count == 0u && got_deep[0].body == 0u, "a refused frames load wrote a frame");
+    NkStateThreadFrames small[2] = {{0x101u, 0u, 2u, got_deep}, {0x102u, 0u, 4u, got_shallow}};
+    CHECK(nkstate_frames_load(small, 2u, seg.data, seg.len, detail, sizeof detail) == NKSTATE_SEGMENT_PAYLOAD,
+          "three frames were loaded into room for two");
+    NkStateThreadFrames room[2] = {{0x101u, 0u, 4u, got_deep}, {0x102u, 0u, 4u, got_shallow}};
+    CHECK(nkstate_frames_load(room, 2u, seg.data, seg.len - 4u, detail, sizeof detail) == NKSTATE_TRUNCATED,
+          "a short FRMS segment was loaded");
+    CHECK(nkstate_frames_load(room, 1u, seg.data, seg.len, detail, sizeof detail) == NKSTATE_SEGMENT_PAYLOAD,
+          "a FRMS segment for two threads was loaded as one");
+    CHECK(room[0].count == 0u && got_deep[0].body == 0u, "a refused frames load wrote a frame");
+    CHECK(nkstate_buf_put_u32(&seg, 0u), "append");
+    CHECK(nkstate_frames_load(room, 2u, seg.data, seg.len, detail, sizeof detail) == NKSTATE_TRUNCATED,
+          "a FRMS segment with trailing bytes was loaded");
+    nkstate_buf_free(&seg);
+}
+
 /* One fixed file that tools/test_nkstate.py builds byte for byte too: the same identity,
  * one segment "TEST" version 1 holding "nakagawa-state". */
 #define GOLDEN_SHA256 "2be4fb0c0c28c07cc701b8a1ba35283fcaad29bee3fa8b590b9a8ac2f8555a2d"
@@ -1438,6 +1537,7 @@ int main(int argc, char **argv) {
     test_refusals();
     test_capture_refusals();
     test_segment_payload_refusals();
+    test_frames_segment();
     test_golden();
     test_checkpoints();
     test_checkpoint_stream();
