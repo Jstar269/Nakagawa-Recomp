@@ -577,8 +577,8 @@ void ace_smooth_aux_report(const AceSmoothAuxStats *s);
 
 /* ---- the per-run report -------------------------------------------------------------------- */
 
-/* The worst case, every block present and every number at its widest, is about 4.8 KB with
- * stick and load in the spec; ace_selftest's cell_report_worst checks that it fits. */
+/* The worst case, every block present and every number at its widest, is about 5.2 KB with
+ * every optional key in the spec; ace_selftest's cell_report_worst checks that it fits. */
 #define ACE_REPORT_MAX 6144u
 /* The report's JSON for the run so far; 0 when it would not fit. */
 size_t ace_report_json(char *out, size_t cap);
