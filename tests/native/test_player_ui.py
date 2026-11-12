@@ -1858,7 +1858,12 @@ class NativePlayerUiTests(unittest.TestCase):
             self.assertNotIn("ZIP", completed.stderr)
             self.assertIn("tools/stage_install.py", completed.stderr)
         self.assertNotIn("compiled without", completed.stderr)
-        self.assertIn("assets\\fonts\\ui", completed.stderr)
+        # The folder is named the way this platform writes paths (#306).
+        if sys.platform == "win32":
+            self.assertIn("assets\\fonts\\ui", completed.stderr)
+        else:
+            self.assertIn("assets/fonts/ui", completed.stderr)
+            self.assertNotIn("assets\\fonts", completed.stderr)
         self.assertNotIn(marker, completed.stdout)
         self.assertNotIn("frame=", completed.stdout, "nothing is drawn after the message")
 
