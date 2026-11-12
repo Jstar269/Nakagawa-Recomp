@@ -5327,11 +5327,49 @@ unsigned long ge_wide_cull_untracked(void) { return s_cull_untracked; }
 
 /* A matrix the hook scaled is remembered with the four x-row words it left, so a call that finds
  * those words unchanged (the title did not rebuild the matrix since) does not scale it again. The
- * table is open-addressed by the matrix's full address and never evicts, so two matrices cannot
- * share an entry; when it is full a new matrix is left alone (said once, and counted in
- * s_cull_untracked for the run report), never scaled untracked. */
+ * table is open-addressed by the matrix's full address, so two matrices cannot share an entry.
+ *
+ * An entry decides a call only while guest memory at its address still holds the words it records:
+ * once the title has written anything else there, a call at that address scales what it finds,
+ * with or without the entry. So when a new address would take the table past three-quarters full,
+ * the entries whose words are gone are dropped and the rest re-inserted in slot order (deterministic),
+ * which changes the outcome of no call unless the title later puts those very bits back at that
+ * address (package obligation (1) of contract 11.3.6 rules out restoring a widened copy). A title that builds its matrices in per-frame scratch memory,
+ * at an address that moves with whatever else the frame allocated, so reuses the room its earlier
+ * frames' matrices took instead of filling the table. Only matrices whose widened words are all still
+ * in guest memory hold an entry; if more than GE_CULL_SEEN of those exist at once, a new matrix is
+ * left alone (said once, and counted in s_cull_untracked for the run report), never scaled
+ * untracked. */
 #define GE_CULL_SEEN 4096u
-static struct { uint32_t addr; uint32_t row[4]; } s_cull_seen[GE_CULL_SEEN];
+#define GE_CULL_SWEEP_AT (GE_CULL_SEEN / 4u * 3u)
+typedef struct { uint32_t addr; uint32_t row[4]; } GeCullSeen;
+static GeCullSeen s_cull_seen[GE_CULL_SEEN];
+static uint32_t s_cull_live;   /* entries in use */
+unsigned ge_wide_cull_table_live(void) { return s_cull_live; }
+
+static uint32_t cull_find(uint32_t m) {   /* m's slot, the free slot m would take, or GE_CULL_SEEN if full */
+    uint32_t slot = ((m >> 4) * 2654435761u) >> 20;   /* 12 bits */
+    for (uint32_t probes = 0; probes < GE_CULL_SEEN; probes++) {
+        if (s_cull_seen[slot].addr == 0u || s_cull_seen[slot].addr == m) return slot;
+        slot = (slot + 1u) % GE_CULL_SEEN;
+    }
+    return GE_CULL_SEEN;
+}
+
+static void cull_sweep(void) {   /* drop the entries whose words the title has since overwritten */
+    static GeCullSeen keep[GE_CULL_SEEN];
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < GE_CULL_SEEN; i++) {
+        const GeCullSeen *e = &s_cull_seen[i];
+        if (e->addr == 0u) continue;
+        uint32_t now[4];   /* the address passed the 64-byte span check when its entry was made */
+        for (uint32_t k = 0; k < 4u; k++) memcpy(&now[k], SR_HOST(e->addr + 16u * k), sizeof now[k]);
+        if (memcmp(now, e->row, sizeof now) == 0) keep[n++] = *e;
+    }
+    memset(s_cull_seen, 0, sizeof s_cull_seen);
+    for (uint32_t j = 0; j < n; j++) s_cull_seen[cull_find(keep[j].addr)] = keep[j];
+    s_cull_live = n;
+}
 
 void sr_enhancement_widen_clip_x(uint32_t base, const uint32_t *offsets, uint32_t count) {
     const int wing = s_wide_d;
@@ -5350,18 +5388,17 @@ void sr_enhancement_widen_clip_x(uint32_t base, const uint32_t *offsets, uint32_
         }
         uint32_t row[4];   /* the x output row of a column-major matrix: elements 0, 4, 8 and 12 */
         for (uint32_t k = 0; k < 4u; k++) memcpy(&row[k], SR_HOST(m + 16u * k), sizeof row[k]);
-        uint32_t slot = ((m >> 4) * 2654435761u) >> 20;   /* 12 bits */
-        uint32_t probes = 0;
-        while (probes < GE_CULL_SEEN && s_cull_seen[slot].addr != 0u && s_cull_seen[slot].addr != m) {
-            slot = (slot + 1u) % GE_CULL_SEEN;
-            probes++;
+        uint32_t slot = cull_find(m);
+        if ((slot == GE_CULL_SEEN || s_cull_seen[slot].addr == 0u) && s_cull_live >= GE_CULL_SWEEP_AT) {
+            cull_sweep();   /* a new address: make room from the entries that no longer decide a call */
+            slot = cull_find(m);
         }
-        if (probes == GE_CULL_SEEN) {
+        if (slot == GE_CULL_SEEN) {
             static int full_reported;
             if (!full_reported) {
                 full_reported = 1;
-                fprintf(stderr, "clip_x_widen: more than %u distinct matrices; the rest are left alone "
-                                "(said once)\n", GE_CULL_SEEN);
+                fprintf(stderr, "clip_x_widen: more than %u widened matrices are in guest memory at once; "
+                                "the rest are left alone (said once)\n", GE_CULL_SEEN);
             }
             s_cull_untracked++;
             continue;
@@ -5375,6 +5412,7 @@ void sr_enhancement_widen_clip_x(uint32_t base, const uint32_t *offsets, uint32_
             memcpy(&row[k], &v, sizeof v);
             memcpy(SR_HOST(m + 16u * k), &row[k], sizeof row[k]);
         }
+        if (s_cull_seen[slot].addr == 0u) s_cull_live++;
         s_cull_seen[slot].addr = m;
         memcpy(s_cull_seen[slot].row, row, sizeof row);
         s_cull_calls++;

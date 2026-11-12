@@ -765,7 +765,8 @@ static void gui_cull_sync(void) {
     ace_set_cull_untracked(ge_wide_cull_untracked());
     if (ge_wide_cull_untracked())
         ace_feature_unavailable(ACE_FEATURE_CULL,
-                                "partial: the 4096-matrix table filled, later matrices were left alone");
+                                "partial: more than 4096 widened matrices were in guest memory at once, "
+                                "later matrices were left alone");
     else if (ge_wide_cull_calls())
         ace_confirm(ACE_FEATURE_CULL);   /* the title's hook has run */
 }

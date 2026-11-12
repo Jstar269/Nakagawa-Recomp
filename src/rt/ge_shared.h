@@ -460,8 +460,11 @@ int       ge_wide_set_wing(int wing);
  * many matrices it has scaled so far (the run reports the key as confirmed once that is above 0). */
 void      ge_wide_set_cull(int on);
 unsigned long ge_wide_cull_calls(void);
-/* Matrix uses left unscaled because the hook's 4096-entry table was full (contract 11.3.6). */
+/* Matrix uses left unscaled because the hook's 4096-entry table was full of matrices whose widened
+ * words were all still in guest memory (contract 11.3.6). */
 unsigned long ge_wide_cull_untracked(void);
+/* Entries the hook's table holds now (at most 4096; the self-test checks it stays bounded). */
+unsigned  ge_wide_cull_table_live(void);
 int       ge_wide_wing(void);
 /* The display was given framebuffer `fb_addr`: its canvas exists from now on. The last two
  * distinct addresses keep canvases (double buffering). No effect while Fill is off. */
