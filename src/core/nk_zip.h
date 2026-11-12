@@ -148,6 +148,8 @@ typedef struct {
     uint32_t size;       /* bytes; 0 for a folder */
     uint32_t crc32;
     bool is_folder;
+    bool deflated;       /* stored with DEFLATE (method 8); else stored as is */
+    uint64_t packed_size;/* bytes the entry takes in the archive */
 } NkZipEntryInfo;
 
 /* Opens an archive held in memory, which must outlive the reader. Every
@@ -176,7 +178,9 @@ bool nk_zip_reader_entry(const NkZipReader *reader, size_t index, NkZipEntryInfo
 /* Reads every entry's data and checks its CRC-32. */
 NkZipStatus nk_zip_reader_verify(NkZipReader *reader, NkZipError *err);
 /* Copies one entry's data into buf (cap bytes at least its size) and checks
-   its CRC-32. */
+   its CRC-32. A DEFLATE entry is unpacked straight into buf, so the read holds
+   buf and the entry's packed bytes, nothing more. On failure buf holds
+   whatever was written, not the entry. */
 NkZipStatus nk_zip_reader_read(NkZipReader *reader, size_t index, void *buf, size_t cap,
                                NkZipError *err);
 void nk_zip_reader_close(NkZipReader *reader);

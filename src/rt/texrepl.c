@@ -30,6 +30,7 @@
 #include "nk_zip.h"
 
 #include <ctype.h>
+#include <errno.h>
 #include <limits.h>
 #include <math.h>
 #include <stdarg.h>
@@ -269,7 +270,9 @@ typedef struct {
     int w, h;              /* known while state is 1 or 3 */
     uint8_t state;         /* 0 not read yet, 1 decoded, 2 cannot be used, 3 size known, image not held */
     uint32_t pins;
-    uint64_t lru;
+    uint32_t lru_prev, lru_next; /* the held (state 1) images, most recently used first: 1 + row, 0 none */
+    uint32_t decodes;      /* times its pixels were decoded */
+    uint32_t wait;         /* lookups that pass before an evicted image is decoded again (see image_load) */
     uint32_t same;         /* 0, or 1 + the row that holds this file's state: the same file under another
                               name (other case, an 8.3 name, a link), found before its bytes are read */
 } Image;
@@ -311,7 +314,7 @@ typedef struct { uint32_t addr, w, h, new_w, new_h, seq; } HashRange;
 typedef struct { uint32_t w, h; float value; uint32_t seq; } ReduceRange;
 
 /* A ZIP pack's file, by its name under the pack's root (the reader owns the name). */
-typedef struct { const char *rel; size_t index; uint32_t size; } ZipName;
+typedef struct { const char *rel; size_t index; uint32_t size; uint8_t deflated; uint64_t packed; } ZipName;
 
 struct NkTexRepl {
     char *dir;                 /* a folder pack */
@@ -346,9 +349,20 @@ struct NkTexRepl {
     char *diag[NK_TEXREPL_MAX_DIAG + 1];
     size_t diag_n, diag_dropped;
     char diag_last[64];
-    uint64_t budget, used, clock;
+    uint64_t budget, used;
+    uint32_t lru_head, lru_tail;   /* the held images' list (Image.lru_prev, lru_next), 1 + row, 0 none */
     NkTexReplStats stats;
 };
+
+/* Text from a pack (ini keys and values, file names) is printed to the terminal: every control
+ * character becomes '?', C0 and DEL as bytes and C1 (U+0080 to U+009F) as its two UTF-8 bytes, so
+ * a pack cannot send escape sequences. */
+static void text_clean(char *s) {
+    for (unsigned char *c = (unsigned char *)s; *c; c++) {
+        if (*c < 0x20u || *c == 0x7fu) *c = '?';
+        else if (*c == 0xc2u && c[1] >= 0x80u && c[1] <= 0x9fu) { c[0] = '?'; c[1] = '?'; c++; }
+    }
+}
 
 static void diag_add(NkTexRepl *p, const char *fmt, ...) {
     if (p->diag_n >= NK_TEXREPL_MAX_DIAG) { p->diag_dropped++; return; }
@@ -357,6 +371,7 @@ static void diag_add(NkTexRepl *p, const char *fmt, ...) {
     va_start(ap, fmt);
     vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
+    text_clean(buf);
     size_t n = strlen(buf);
     char *copy = (char *)malloc(n + 1);
     if (!copy) { p->diag_dropped++; return; }
@@ -656,14 +671,22 @@ static int path_inside_pack(const char *rel) {
  * matched: up to 16 hex digits of key, then up to 8 of data hash, then "_level". A field that does
  * not match is 0 (the level, 0 too), so a short name is a wildcard: "<16 digits>" alone is the key
  * with no data hash. The C library's sscanf is the one PPSSPP calls, so its rules (leading blanks,
- * a 0x prefix, a sign) are the same. */
+ * a 0x prefix, a sign) are the same. The level alone is read with strtol, as %d reads it, but a
+ * level past an int's range (undefined for sscanf) becomes INT_MAX or INT_MIN, which no chain has. */
 static int parse_hash_name(const char *name, uint64_t *cachekey, uint32_t *hash, int *level) {
     char k[128];
     snprintf(k, sizeof(k), "%s", name);   /* PPSSPP copies the key into 128 bytes */
     unsigned long long ck = 0;
     unsigned int h = 0;
-    int lv = 0;
-    if (sscanf(k, "%16llx%8x_%d", &ck, &h, &lv) < 1) return 0;
+    int lv = 0, n1 = -1, n2 = -1;
+    if (sscanf(k, "%16llx%n", &ck, &n1) < 1 || n1 < 0) return 0;
+    if (sscanf(k + n1, "%8x%n", &h, &n2) == 1 && n2 >= 0 && k[n1 + n2] == '_') {
+        const char *ls = k + n1 + n2 + 1;
+        char *end = NULL;
+        errno = 0;
+        const long v = strtol(ls, &end, 10);
+        if (end != ls) lv = (errno == ERANGE || v > INT_MAX) ? (v < 0 ? INT_MIN : INT_MAX) : v < INT_MIN ? INT_MIN : (int)v;
+    }
     *cachekey = (uint64_t)ck;
     *hash = (uint32_t)h;
     *level = lv;
@@ -1181,7 +1204,10 @@ static unsigned char *read_regular(const NkTexRepl *p, const char *path, size_t 
     uint64_t fid[3] = { 0, 0, 0 };
     WCHAR *w = wide_of(path);
     if (!w) return NULL;
-    HANDLE h = CreateFileW(w, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    /* Opened before it is checked (the checks are on this handle): should a name lead to a pipe, its
+     * server may only identify the caller, not act as it. */
+    HANDLE h = CreateFileW(w, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
+                           FILE_ATTRIBUTE_NORMAL | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, NULL);
     free(w);
     if (h == INVALID_HANDLE_VALUE) return NULL;
     unsigned char *buf = NULL;
@@ -1293,10 +1319,13 @@ static const ZipName *zip_find(const NkTexRepl *p, const char *rel) {
 
 /* A pack file's bytes, at most `cap`: from the folder, or from the ZIP without writing anything.
  * With `id`, the file's identity is put there; with `same` too, a file some image has already read
- * is not read again: *why is PACK_READ_SAME and *same that image's row plus 1. */
+ * is not read again: *why is PACK_READ_SAME and *same that image's row plus 1. With `held`, the most
+ * memory the read held at once: the file, and for a DEFLATE entry its packed bytes beside it. */
 static unsigned char *pack_read(NkTexRepl *p, const char *rel, size_t cap, size_t *size, PackRead *why,
-                                char *zip_why, size_t zip_why_cap, uint64_t id[ID_WORDS], uint32_t *same) {
+                                char *zip_why, size_t zip_why_cap, uint64_t id[ID_WORDS], uint32_t *same,
+                                uint64_t *held) {
     *why = PACK_READ_MISSING;
+    if (held) *held = 0;
     if (zip_why_cap) zip_why[0] = '\0';
     if (p->zip) {
         const ZipName *z = zip_find(p, rel);
@@ -1307,6 +1336,7 @@ static unsigned char *pack_read(NkTexRepl *p, const char *rel, size_t cap, size_
         }
         unsigned char *buf = (unsigned char *)malloc(z->size ? z->size : 1u);
         if (!buf) { *why = PACK_READ_DAMAGED; return NULL; }
+        if (held) *held = (uint64_t)z->size + (z->deflated ? z->packed : 0u);
         NkZipError ze;
         NkZipStatus st = nk_zip_reader_read(p->zip, z->index, buf, z->size, &ze);
         if (st != NK_ZIP_OK) {
@@ -1321,7 +1351,9 @@ static unsigned char *pack_read(NkTexRepl *p, const char *rel, size_t cap, size_
     }
     char path[1400];
     if (snprintf(path, sizeof(path), "%s/%s", p->dir, rel) >= (int)sizeof(path)) return NULL;
-    return read_regular(p, path, cap, size, why, 0, id, same);
+    unsigned char *buf = read_regular(p, path, cap, size, why, 0, id, same);
+    if (held && buf) *held = *size;
+    return buf;
 }
 
 static int ends_with_ci(const char *s, const char *suffix) {
@@ -1426,6 +1458,8 @@ static int open_zip(NkTexRepl *p, const char *path, char *err, size_t err_cap) {
         z->rel = e.name + root_len;
         z->index = i;
         z->size = e.size;
+        z->deflated = e.deflated;
+        z->packed = e.packed_size;
     }
     nk_zip_sort(p->zip_names, p->zip_name_n, sizeof(ZipName), zip_name_cmp);
     for (size_t i = 0; i < p->zip_name_n; i++) {
@@ -1469,10 +1503,8 @@ static NkTexRepl *open_fail(NkTexRepl *p) {
     return NULL;
 }
 
-NkTexRepl *nk_texrepl_open(const char *path, uint64_t budget_bytes, char *err, size_t err_cap) {
-    char ebuf[256], name[128];
-    if (!err || !err_cap) { err = ebuf; err_cap = sizeof(ebuf); }
-    err[0] = '\0';
+static NkTexRepl *texrepl_open(const char *path, uint64_t budget_bytes, char *err, size_t err_cap) {
+    char name[128];
     int is_dir = path && *path && nk_platform_dir_exists(path);
     if (!is_dir && !(path && *path && nk_platform_file_exists(path))) {
         snprintf(err, err_cap, "texture pack '%s' does not exist (a folder or a .zip file)",
@@ -1536,7 +1568,7 @@ NkTexRepl *nk_texrepl_open(const char *path, uint64_t budget_bytes, char *err, s
     size_t size = 0;
     PackRead why;
     char zip_why[40];
-    unsigned char *text = pack_read(p, "textures.ini", 4u << 20, &size, &why, zip_why, sizeof(zip_why), NULL, NULL);
+    unsigned char *text = pack_read(p, "textures.ini", 4u << 20, &size, &why, zip_why, sizeof(zip_why), NULL, NULL, NULL);
     if (!text && why != PACK_READ_MISSING) {
         snprintf(err, err_cap, "textures.ini cannot be read: %s%s%s",
                  why == PACK_READ_TOO_LARGE ? "it is larger than 4 MiB" : read_reason(why), zip_why[0] ? ", " : "",
@@ -1547,6 +1579,14 @@ NkTexRepl *nk_texrepl_open(const char *path, uint64_t budget_bytes, char *err, s
         char *z = (char *)realloc(text, size + 1);
         if (!z) { free(text); snprintf(err, err_cap, "out of memory"); return open_fail(p); }
         z[size] = '\0';
+        const char *nul = (const char *)memchr(z, 0, size);
+        if (nul) {   /* the text after it would go unread without a word */
+            int line = 1;
+            for (const char *c = z; c < nul; c++) line += *c == '\n';
+            free(z);
+            snprintf(err, err_cap, "textures.ini line %d holds a NUL byte, which no text file has", line);
+            return open_fail(p);
+        }
         int ok = parse_ini(p, z, err, err_cap);
         free(z);
         if (!ok) return open_fail(p);
@@ -1559,6 +1599,15 @@ NkTexRepl *nk_texrepl_open(const char *path, uint64_t budget_bytes, char *err, s
                  p->nonpng_listed);
     p->stats.open_ns = now_ns() - t0;
     p->stats.index_bytes = index_bytes(p);
+    return p;
+}
+
+NkTexRepl *nk_texrepl_open(const char *path, uint64_t budget_bytes, char *err, size_t err_cap) {
+    char ebuf[256];
+    if (!err || !err_cap) { err = ebuf; err_cap = sizeof(ebuf); }
+    err[0] = '\0';
+    NkTexRepl *p = texrepl_open(path, budget_bytes, err, err_cap);
+    text_clean(err);   /* the reason quotes the pack's own text */
     return p;
 }
 
@@ -1696,18 +1745,38 @@ static int is_indexed(const NkTexRepl *p, const NkTexReplId *id) {
     return k && k->mode != 0;
 }
 
+/* The held images are kept in a list, most recently used first, so that eviction takes the least
+ * recently used one without looking at every image the pack names. */
+static void lru_unlink(NkTexRepl *p, Image *im) {
+    if (im->lru_prev) p->images[im->lru_prev - 1u].lru_next = im->lru_next;
+    else p->lru_head = im->lru_next;
+    if (im->lru_next) p->images[im->lru_next - 1u].lru_prev = im->lru_prev;
+    else p->lru_tail = im->lru_prev;
+    im->lru_prev = im->lru_next = 0;
+}
+
+static void lru_push_front(NkTexRepl *p, Image *im) {
+    const uint32_t row = (uint32_t)(im - p->images) + 1u;
+    im->lru_prev = 0;
+    im->lru_next = p->lru_head;
+    if (p->lru_head) p->images[p->lru_head - 1u].lru_prev = row;
+    else p->lru_tail = row;
+    p->lru_head = row;
+}
+
+/* Drops the least recently used images nobody holds a pin on until `need` more bytes fit, or none
+ * is left to drop. Each step looks at one held image. */
 static void evict_for(NkTexRepl *p, uint64_t need) {
-    while (p->used + need > p->budget) {
-        Image *oldest = NULL;
-        for (size_t i = 0; i < p->image_n; i++) {
-            Image *v = &p->images[i];
-            if (v->state == 1 && v->pins == 0 && (!oldest || v->lru < oldest->lru)) oldest = v;
-        }
-        if (!oldest) return;
-        free(oldest->rgba);
-        oldest->rgba = NULL;
-        oldest->state = 3;   /* its size stays known */
-        p->used -= (uint64_t)oldest->w * (uint64_t)oldest->h * 4u;
+    uint32_t at = p->lru_tail;
+    while (at && p->used + need > p->budget) {
+        Image *v = &p->images[at - 1u];
+        at = v->lru_prev;
+        if (v->pins) continue;
+        lru_unlink(p, v);
+        free(v->rgba);
+        v->rgba = NULL;
+        v->state = 3;   /* its size stays known */
+        p->used -= (uint64_t)v->w * (uint64_t)v->h * 4u;
         p->stats.evicted++;
     }
 }
@@ -1853,6 +1922,15 @@ static int png_check(const unsigned char *d, size_t n, PngInfo *g, char *why, si
         if (!memcmp(type, "IEND", 4)) {
             if (!g->idat_count) { snprintf(why, why_cap, "no IDAT before IEND"); return 0; }
             g->raw_size = png_raw_size(g);
+            /* The image data may take what DEFLATE needs at worst for raw_size bytes and no more: the
+             * ZIP rule (an eighth over, plus 64 bytes; every literal of a fixed block is at most 9
+             * bits, a stored block costs 5 bytes in 65,535) and the zlib header and Adler-32. More is
+             * padding (empty blocks) the inflater would have to work through for nothing. */
+            if (g->idat_total > g->raw_size + g->raw_size / 8u + 64u + 6u) {
+                snprintf(why, why_cap, "its image data is %llu bytes, more than %llu can need",
+                         (unsigned long long)g->idat_total, (unsigned long long)g->raw_size);
+                return 0;
+            }
             return 1;
         }
     }
@@ -1924,24 +2002,26 @@ static uint32_t *png_decode(const unsigned char *d, size_t n, const PngInfo *g, 
         snprintf(why, why_cap, "its image data has no zlib header PNG allows");
         return NULL;
     }
-    uint8_t *raw = NULL;
-    size_t raw_n = 0;
-    /* What the inflater may hold beside the joined data, refused or not: raw_size at once when it is
-     * at most 1 MiB (its first block), else blocks doubled up to raw_size, the last move holding the
-     * old block and the new one. */
-    *scratch = (uint64_t)joined_bytes + (g->raw_size <= (1u << 20) ? (uint64_t)g->raw_size : 2u * (uint64_t)g->raw_size);
-    const int rc = nk_psp_inflate_raw(z + 2, zn - 2, &raw, &raw_n, g->raw_size, g->raw_size, NULL, 0);
-    const uint32_t adler = png_be32(z + zn - 4);
-    if ((uint64_t)joined_bytes + raw_n > *scratch) *scratch = (uint64_t)joined_bytes + raw_n;   /* what it gave */
+    /* The rows are unpacked into a buffer of exactly raw_size, the inflater's hard limit: nothing
+     * else is allocated for them, whatever the stream holds. */
+    uint8_t *raw = (uint8_t *)malloc(g->raw_size);
+    if (!raw) { free(joined); snprintf(why, why_cap, "out of memory"); return NULL; }
+    *scratch = (uint64_t)joined_bytes + (uint64_t)g->raw_size;
+    size_t raw_n = 0, used = 0;
+    const int rc = nk_psp_inflate_raw_into(z + 2, zn - 2, raw, g->raw_size, &raw_n, &used, NULL, 0);
+    /* The Adler-32 follows the stream's last byte, and ends the image data. */
+    const int trailer_ok = rc == NK_INFLATE_OK && zn - 2 >= 4u && used == zn - 2 - 4u;
+    const uint32_t adler = trailer_ok ? png_be32(z + 2 + used) : 0u;
     free(joined);
-    if (rc != NK_INFLATE_OK || raw_n != g->raw_size) {
+    if (rc != NK_INFLATE_OK || raw_n != g->raw_size || !trailer_ok) {
         free(raw);
         snprintf(why, why_cap, "%s",
-                 rc == NK_INFLATE_ERR_OVERFLOW || (rc == NK_INFLATE_OK && raw_n > g->raw_size)
-                     ? "its image data unpacks to more than the image"
+                 rc == NK_INFLATE_ERR_OVERFLOW ? "its image data unpacks to more than the image"
                  : rc == NK_INFLATE_ERR_MEMORY ? "out of memory"
-                 : rc == NK_INFLATE_OK         ? "its image data unpacks to less than the image"
-                                               : "its image data does not unpack");
+                 : rc != NK_INFLATE_OK         ? "its image data does not unpack"
+                 : raw_n != g->raw_size        ? "its image data unpacks to less than the image"
+                 : used + 4u > zn - 2          ? "its image data ends before its Adler-32"
+                                               : "its image data has bytes after its Adler-32");
         return NULL;
     }
     if (png_adler32(raw, raw_n) != adler) {
@@ -2067,6 +2147,14 @@ static int image_load(NkTexRepl *p, Image *im, int decode, int want_w, int want_
     if (im->state == 2) return 0;
     if (im->state == 1 || (im->state == 3 && !decode)) return 1;
     if (im->state == 3 && want_w && (im->w != want_w || im->h != want_h)) return 0;
+    if (im->state == 3 && im->wait) {
+        /* Evicted and wanted again soon after, more than once: the budget cannot hold what is being
+         * drawn. Each further decode waits twice as many lookups as the one before (at most 65,535),
+         * so an image evicted on every use is decoded about log2 of its lookups times, not on each. */
+        im->wait--;
+        p->stats.deferred++;
+        return 0;
+    }
     if (im->state == 3) {   /* its size is known: make room before reading the file again */
         const uint64_t known = (uint64_t)im->w * (uint64_t)im->h * 4u;
         evict_for(p, known);
@@ -2100,8 +2188,10 @@ static int image_load(NkTexRepl *p, Image *im, int decode, int want_w, int want_
     const uint32_t row = (uint32_t)(im - p->images);
     /* Only a first read looks for the file under another name: a later one (to decode an image whose
      * size alone was read, or one evicted) finds this image itself. */
+    uint64_t read_held = 0;
     unsigned char *file = pack_read(p, im->file, 64u << 20, &size, &why, zip_why, sizeof(zip_why), id,
-                                    im->state == 0 ? &same : NULL);
+                                    im->state == 0 ? &same : NULL, &read_held);
+    if (read_held > p->stats.decode_peak) p->stats.decode_peak = read_held;
     if (why == PACK_READ_SAME) {
         /* The file another image has read (or refused) under another name: that image holds its
          * state from now on, for every level naming either. */
@@ -2159,9 +2249,17 @@ static int image_load(NkTexRepl *p, Image *im, int decode, int want_w, int want_
         return skip_image(p, im);
     }
     im->state = 1;
+    lru_push_front(p, im);
     p->used += bytes;
     if (p->used > p->stats.cache_peak) p->stats.cache_peak = p->used;
     p->stats.loaded++;
+    if (++im->decodes >= 2u) {
+        im->wait = im->decodes >= 17u ? 65535u : (1u << (im->decodes - 1u)) - 1u;
+        if (im->decodes == 2u)
+            diag_add(p, "%s: evicted and decoded again; the %llu MiB texture budget cannot hold what is drawn "
+                        "(SR_TEX_REPLACE_BUDGET_MB raises it), so it is decoded less often from now on and drawn "
+                        "as the game draws it meanwhile", im->file, (unsigned long long)(p->budget >> 20));
+    }
     p->stats.decode_ns += now_ns() - t0;
     return 1;
 }
@@ -2240,7 +2338,8 @@ int nk_texrepl_lookup_level(NkTexRepl *p, const NkTexReplId *id, int level, NkTe
     Image *im = image_of(p, v);
     if (v->state != 1 || im->state != 1) { p->stats.misses++; return 0; }
     im->pins++;
-    im->lru = ++p->clock;
+    lru_unlink(p, im);
+    lru_push_front(p, im);
     p->stats.hits++;
     out->rgba = im->rgba;
     out->w = im->w;

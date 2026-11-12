@@ -34,6 +34,7 @@
 #include "texrepl.h"
 
 #include "nk_platform.h"
+#include "nk_psp_inflate.h"
 #include "nk_zip.h"
 #include "synthetic_png.h"
 
@@ -67,6 +68,12 @@
 
 #ifndef NK_SORT_COUNT_COMPARES
 #error "build with -DNK_SORT_COUNT_COMPARES (mk/selftests.mk texrepl-selftest): the sort cells count comparisons"
+#endif
+/* The most the largest image's data may take to refuse when it is all empty dynamic blocks (measured
+ * at about NK_PNG_WORK_MEASURED; the bound leaves room for a slow or sanitized build). */
+#define NK_PNG_WORK_SECONDS 10.0
+#ifndef NK_INFLATE_COUNT_BUILDS
+#error "build with -DNK_INFLATE_COUNT_BUILDS (mk/selftests.mk texrepl-selftest): the work cells count code tables"
 #endif
 #ifndef SR_SELFTEST_BUILD_ROOT
 #define SR_SELFTEST_BUILD_ROOT "."
@@ -1400,7 +1407,7 @@ static uint8_t *png_build(const PngSpec *sp, size_t *out_n) {
 }
 
 /* A 1x1 RGBA PNG whose image data unpacks to `mib` MiB: a filter byte, then runs of zeros. */
-static uint8_t *png_bomb(unsigned mib, size_t *out_n) {
+static uint8_t *png_bomb(unsigned mib, unsigned side, size_t *out_n) {
     Bw z = { 0 };
     bw_byte(&z, 0x78);
     bw_byte(&z, 0x01);
@@ -1416,7 +1423,8 @@ static uint8_t *png_bomb(unsigned mib, size_t *out_n) {
     Bw o = { 0 };
     static const uint8_t sig[8] = { 0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a };
     zbuf(&o.d, &o.n, &o.cap, sig, 8);
-    uint8_t ihdr[13] = { 0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0 };
+    const uint8_t ihdr[13] = { 0, 0, (uint8_t)(side >> 8), (uint8_t)side, 0, 0, (uint8_t)(side >> 8), (uint8_t)side,
+                               8, 6, 0, 0, 0 };
     png_chunk_out(&o, "IHDR", ihdr, 13);
     png_chunk_out(&o, "IDAT", z.d, z.n);
     png_chunk_out(&o, "IEND", NULL, 0);
@@ -1901,7 +1909,8 @@ static void test_png_seeds(void) {
         uint8_t *png = png_build(&sp, &n);
         uint32_t *ours = NULL;
         int w = 0, h = 0, sw = 0, sh = 0, not_run = 0;
-        if (!nk_texrepl_decode_png(png, n, 0, &ours, &w, &h, why, sizeof(why)) && strstr(why, "unpacks to more than the image"))
+        if (!nk_texrepl_decode_png(png, n, 0, &ours, &w, &h, why, sizeof(why)) &&
+            (strstr(why, "unpacks to more than the image") || strstr(why, "can need")))
             longer++;
         free(ours);
         unsigned char *theirs = stb_png(png, n, &sw, &sh, &not_run);
@@ -2208,19 +2217,29 @@ static void test_image_guards(void) {
 }
 
 /* A 1x1 PNG whose image data unpacks to 64 MiB, listed under 81 keys that every texture of up to
- * 256 texels a side reaches by the "size only" wildcard: each lookup refuses it after unpacking
- * at most 5 bytes, nothing is held, and the most one decode held is about the file. */
+ * 256 texels a side reaches by the "size only" wildcard: its 400 KiB of image data are more than a
+ * 1x1 image can need, so each lookup refuses it before unpacking a byte, nothing is held, and the
+ * most one decode held is the file. The same data under a 1024x1024 IHDR is within that bound and
+ * is refused by the inflater's own limit, after unpacking the 4 MiB the image implies. */
 static void test_png_bomb(void) {
     char dir[512], path[600], err[256] = "", why[96];
     size_t n = 0;
-    uint8_t *png = png_bomb(64, &n);
+    uint8_t *png = png_bomb(64, 1, &n);
     double t0 = wall_s();
     uint32_t *rgba = NULL;
     int w = 0, h = 0;
-    CHECK(!nk_texrepl_decode_png(png, n, 0, &rgba, &w, &h, why, sizeof(why)) && !rgba &&
-              strstr(why, "unpacks to more than the image"),
-          "a 64 MiB image data bomb: '%s'", why);
+    CHECK(!nk_texrepl_decode_png(png, n, 0, &rgba, &w, &h, why, sizeof(why)) && !rgba && strstr(why, "more than 5 can need"),
+          "a 64 MiB image data bomb under a 1x1 IHDR: '%s'", why);
     const double t_one = wall_s() - t0;
+    {
+        size_t n2 = 0;
+        uint8_t *big = png_bomb(64, 1024, &n2);
+        const double t1 = wall_s();
+        CHECK(!nk_texrepl_decode_png(big, n2, 0, &rgba, &w, &h, why, sizeof(why)) && !rgba &&
+                  strstr(why, "unpacks to more than the image") && wall_s() - t1 < 5.0,
+              "a 64 MiB image data bomb under a 1024x1024 IHDR: '%s' in %.2f s", why, wall_s() - t1);
+        free(big);
+    }
     make_pack(dir, sizeof(dir), "texrepl_png_bomb");
     pack_path(path, sizeof(path), "texrepl_png_bomb", "bomb.png");
     file_save(path, png, n);
@@ -2252,10 +2271,9 @@ static void test_png_bomb(void) {
               (unsigned long long)st.decode_peak, n);
         CHECK(st.reads == 1 && st.load_failed == 1, "the bomb named by 81 keys was read %llu times, refused %llu times",
               (unsigned long long)st.reads, (unsigned long long)st.load_failed);
-        CHECK(has_diag(p, "bomb.png: not a PNG this module decodes (its image data unpacks to more than the image)"),
-              "the bomb not noted");
+        CHECK(has_diag(p, "bomb.png: not a PNG this module decodes (its image data is"), "the bomb not noted");
         CHECK(t_all < 10.0, "81 bomb lookups took %.2f s", t_all);
-        printf("png bomb: %zu-byte 1x1 PNG unpacking to 64 MiB refused in %.1f ms; 81 wildcard lookups %.1f ms, "
+        printf("png bomb: %zu-byte 1x1 PNG unpacking to 64 MiB refused unread in %.1f ms; 81 wildcard lookups %.1f ms, "
                "most held by one decode %llu bytes, cache peak %llu\n",
                n, t_one * 1e3, t_all * 1e3, (unsigned long long)st.decode_peak, (unsigned long long)st.cache_peak);
         nk_texrepl_close(p);
@@ -2404,6 +2422,332 @@ static void test_png_bomb(void) {
         }
     }
     free(png);
+}
+
+/* An empty DEFLATE block: no output, only work. The fixed kind is 10 bits; the dynamic kind is 60
+ * (257 literal lengths and one distance length, through five code-length codes). */
+static void empty_fixed_block(Bw *b) {
+    bw_bits(b, 0, 1);
+    bw_bits(b, 1, 2);
+    bw_code(b, 0, 7);   /* end of block */
+}
+static void empty_dynamic_block(Bw *b) {
+    bw_bits(b, 0, 1);
+    bw_bits(b, 2, 2);
+    bw_bits(b, 0, 5);   /* 257 literal/length codes */
+    bw_bits(b, 0, 5);   /* 1 distance code */
+    bw_bits(b, 1, 4);   /* 5 code-length codes: 16 17 18 0 8 */
+    static const uint32_t cl[5] = { 0, 0, 1, 2, 2 };
+    for (int i = 0; i < 5; i++) bw_bits(b, cl[i], 3);
+    bw_code(b, 0, 1);   /* 18: 138 zeros */
+    bw_bits(b, 127, 7);
+    bw_code(b, 0, 1);   /* 18: 118 zeros */
+    bw_bits(b, 107, 7);
+    bw_code(b, 3, 2);   /* 8 for symbol 256 */
+    bw_code(b, 2, 2);   /* 0 for distance 0 */
+    bw_code(b, 0, 8);   /* end of block */
+}
+
+/* A zlib stream of about `bytes` of empty blocks, then `raw` in a final stored block and its
+ * Adler-32. */
+static Bw empty_blocks(size_t bytes, int dynamic, const uint8_t *raw, size_t raw_n) {
+    Bw z = { 0 };
+    bw_byte(&z, 0x78);
+    bw_byte(&z, 0x01);
+    while (z.n + 16 < bytes) {
+        if (dynamic) empty_dynamic_block(&z);
+        else empty_fixed_block(&z);
+    }
+    bw_bits(&z, 1, 1);
+    bw_bits(&z, 0, 2);
+    bw_flush(&z);
+    const uint8_t hdr[4] = { (uint8_t)raw_n, (uint8_t)(raw_n >> 8), (uint8_t)~raw_n, (uint8_t)(~raw_n >> 8) };
+    zbuf(&z.d, &z.n, &z.cap, hdr, 4);
+    zbuf(&z.d, &z.n, &z.cap, raw, raw_n);
+    uint32_t a = 1, s2 = 0;
+    for (size_t i = 0; i < raw_n; i++) { a = (a + raw[i]) % 65521u; s2 = (s2 + a) % 65521u; }
+    const uint32_t ad = s2 << 16 | a;
+    const uint8_t t[4] = { (uint8_t)(ad >> 24), (uint8_t)(ad >> 16), (uint8_t)(ad >> 8), (uint8_t)ad };
+    zbuf(&z.d, &z.n, &z.cap, t, 4);
+    return z;
+}
+
+/* A PNG: IHDR, the chunks in `pre` (raw chunk bytes), one IDAT of `z`, IEND. */
+static uint8_t *png_with_idat(unsigned w, unsigned h, unsigned depth, unsigned color, const Bw *pre, const uint8_t *z,
+                              size_t zn, size_t *out_n) {
+    Bw o = { 0 };
+    static const uint8_t sig[8] = { 0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a };
+    zbuf(&o.d, &o.n, &o.cap, sig, 8);
+    const uint8_t ihdr[13] = { 0, 0, (uint8_t)(w >> 8), (uint8_t)w, 0, 0, (uint8_t)(h >> 8), (uint8_t)h,
+                               (uint8_t)depth, (uint8_t)color, 0, 0, 0 };
+    png_chunk_out(&o, "IHDR", ihdr, 13);
+    if (pre && pre->n) zbuf(&o.d, &o.n, &o.cap, pre->d, pre->n);
+    png_chunk_out(&o, "IDAT", z, zn);
+    png_chunk_out(&o, "IEND", NULL, 0);
+    *out_n = o.n;
+    return o.d;
+}
+
+/* The work one PNG may cost, from the Fable review of 8bbc2987dc23 (B-1): before, 64 MiB of empty
+ * blocks in a 1x1 image's data, which a ZIP packs into 65 KiB, held the decoder for tens of seconds,
+ * and 5.6 million empty chunks for seconds. Now image data past what DEFLATE can need for the image
+ * is refused before it is unpacked, the inflater builds the fixed codes once a stream, and a chunk's
+ * CRC costs its bytes and no table. */
+static void test_png_work(void) {
+    char why[128];
+    static const uint8_t raw1[2] = { 0, 0 };   /* a 1x1 grey image: its row's filter byte and sample */
+    for (int dyn = 0; dyn <= 1; dyn++) {
+        Bw z = empty_blocks((size_t)64 << 20, dyn, raw1, 2);
+        size_t n = 0;
+        uint8_t *png = png_with_idat(1, 1, 8, 0, NULL, z.d, z.n, &n);
+        free(z.d);
+        uint32_t *px = NULL;
+        int w = 0, h = 0;
+        const double t0 = wall_s();
+        const int ok = nk_texrepl_decode_png(png, n, 0, &px, &w, &h, why, sizeof(why));
+        const double t = wall_s() - t0;
+        CHECK(!ok && strstr(why, "more than 2 can need") && t < 2.0, "64 MiB of empty %s blocks in a 1x1 PNG: %d in %.2f s, '%s'",
+              dyn ? "dynamic" : "fixed", ok, t, why);
+        printf("png work: 64 MiB of empty %s blocks in a 1x1 PNG refused in %.1f ms\n", dyn ? "dynamic" : "fixed", t * 1e3);
+        free(px);
+        free(png);
+    }
+    {   /* 5.6 million empty ancillary chunks before a good 1x1 image's data */
+        Bw one = { 0 }, pre = { 0 };
+        png_chunk_out(&one, "aaaa", NULL, 0);
+        const size_t count = ((size_t)64 << 20) / 12u - 8u;
+        pre.cap = count * 12u;
+        pre.d = (uint8_t *)malloc(pre.cap);
+        for (size_t i = 0; i < count; i++) memcpy(pre.d + i * 12u, one.d, 12u);
+        pre.n = pre.cap;
+        Bw z = empty_blocks(0, 0, raw1, 2);
+        size_t n = 0;
+        uint8_t *png = png_with_idat(1, 1, 8, 0, &pre, z.d, z.n, &n);
+        uint32_t *px = NULL;
+        int w = 0, h = 0;
+        const double t0 = wall_s();
+        const int ok = nk_texrepl_decode_png(png, n, 0, &px, &w, &h, why, sizeof(why));
+        const double t = wall_s() - t0;
+        CHECK(ok && w == 1 && h == 1 && t < 2.0, "%zu empty chunks before a 1x1 image: %d in %.2f s, '%s'", count, ok, t, why);
+        printf("png work: %zu empty chunks (%.0f MiB) checked in %.1f ms\n", count, n / 1048576.0, t * 1e3);
+        free(px);
+        free(png);
+        free(z.d);
+        free(pre.d);
+        free(one.d);
+    }
+    {   /* the fixed codes are built once a stream: 1 MiB of empty fixed blocks is about 840,000 */
+        Bw z = empty_blocks((size_t)1 << 20, 0, raw1, 2);
+        uint8_t *out = NULL, into[2];
+        size_t on = 0, used = 0;
+        nk_inflate_table_builds = 0;
+        int rc = nk_psp_inflate_raw(z.d + 2, z.n - 6, &out, &on, 2, 2, NULL, 0);
+        const unsigned long long b1 = nk_inflate_table_builds;
+        CHECK(rc == NK_INFLATE_OK && on == 2 && b1 == 2, "1 MiB of empty fixed blocks: rc %d, %zu bytes, %llu tables built",
+              rc, on, b1);
+        free(out);
+        nk_inflate_table_builds = 0;
+        rc = nk_psp_inflate_raw_into(z.d + 2, z.n - 2, into, sizeof(into), &on, &used, NULL, 0);
+        CHECK(rc == NK_INFLATE_OK && on == 2 && used == z.n - 6 && nk_inflate_table_builds == 2,
+              "the same into a buffer: rc %d, %zu bytes, %zu of %zu used, %llu tables", rc, on, used, z.n - 6,
+              nk_inflate_table_builds);
+        rc = nk_psp_inflate_raw_into(z.d + 2, z.n - 6, into, 1, &on, NULL, NULL, 0);
+        CHECK(rc == NK_INFLATE_ERR_OVERFLOW && on == 1, "into a buffer one byte short: rc %d, %zu bytes", rc, on);
+        free(z.d);
+    }
+    {   /* the Adler-32 must follow the stream: bytes between are refused, not skipped */
+        Bw z = empty_blocks(0, 0, raw1, 2);
+        Bw g = { 0 };
+        zbuf(&g.d, &g.n, &g.cap, z.d, z.n - 4);
+        const uint8_t junk[3] = { 1, 2, 3 };
+        zbuf(&g.d, &g.n, &g.cap, junk, 3);
+        zbuf(&g.d, &g.n, &g.cap, z.d + z.n - 4, 4);
+        size_t n = 0;
+        uint8_t *png = png_with_idat(1, 1, 8, 0, NULL, g.d, g.n, &n);
+        uint32_t *px = NULL;
+        int w = 0, h = 0;
+        CHECK(!nk_texrepl_decode_png(png, n, 0, &px, &w, &h, why, sizeof(why)) && strstr(why, "bytes after its Adler-32"),
+              "3 bytes between the stream and its Adler-32: '%s'", why);
+        free(png);
+        png = png_with_idat(1, 1, 8, 0, NULL, z.d, z.n, &n);
+        CHECK(nk_texrepl_decode_png(png, n, 0, &px, &w, &h, why, sizeof(why)) && w == 1, "the same PNG made right: '%s'", why);
+        free(px);
+        free(png);
+        free(g.d);
+        free(z.d);
+    }
+    {   /* within the bound, the most work an image can ask for: the largest image's data, 9/8 of what
+         * it unpacks to, all empty dynamic blocks. Measured, and bounded by a few times an honest
+         * decode of that size. */
+        const size_t raw_n = (1u + 2048u * 8u) * 2048u;
+        Bw z = empty_blocks(raw_n + raw_n / 8u + 64u - 32u, 1, raw1, 0);
+        size_t n = 0;
+        uint8_t *png = png_with_idat(2048, 2048, 16, 6, NULL, z.d, z.n, &n);
+        free(z.d);
+        uint32_t *px = NULL;
+        int w = 0, h = 0;
+        const double t0 = wall_s();
+        const int ok = nk_texrepl_decode_png(png, n, 0, &px, &w, &h, why, sizeof(why));
+        const double t = wall_s() - t0;
+        CHECK(!ok && strstr(why, "unpacks to less than the image") && t < NK_PNG_WORK_SECONDS,
+              "%.1f MiB of empty dynamic blocks in a 2048x2048 RGBA16 PNG: %d in %.2f s, '%s'", n / 1048576.0, ok, t, why);
+        printf("png work: the largest image's data, %.1f MiB of empty dynamic blocks, refused in %.0f ms\n", n / 1048576.0,
+               t * 1e3);
+        free(px);
+        free(png);
+    }
+}
+
+/* The cache under churn (the Fable review's S-1 and S-2). Two images taking turns in a budget that
+ * holds one: before, each of 2,000 lookups decoded its image again; now an image evicted and wanted
+ * again is decoded after twice as many lookups each time, so 1,000 lookups cost it 10 decodes.
+ * Eviction takes the least recently used image from a list: 40,000 held 1x1 images all make room
+ * for one at once, where a scan of every image for each would take 1.6 billion steps. A DEFLATE ZIP
+ * entry's read counts its packed bytes beside the file in decode_peak. */
+static void test_cache_churn(void) {
+    char dir[512], path[600], err[256] = "";
+    make_pack(dir, sizeof(dir), "texrepl_churn");
+    save_png_spec("texrepl_churn", "a.png", 32, 32, 0x301u);
+    save_png_spec("texrepl_churn", "b.png", 32, 32, 0x302u);
+    pack_path(path, sizeof(path), "texrepl_churn", "textures.ini");
+    write_text(path, "[options]\nhash = quick\n[hashes]\n0880f00000000505000000a1 = a.png\n"
+                     "0880f00000000505000000b1 = b.png\n");
+    NkTexRepl *p = nk_texrepl_open(dir, 32u * 32u * 4u, err, sizeof(err));
+    CHECK(p != NULL, "the churn pack: %s", err);
+    if (p) {
+        const NkTexReplId a = { 0x0880f000u, 3u, 0x0505u, 0u, 0xa1u }, b = { 0x0880f000u, 3u, 0x0505u, 0u, 0xb1u };
+        int hits = 0;
+        for (int k = 0; k < 1000; k++) hits += lookup_unpin(p, a, 0) + lookup_unpin(p, b, 0);
+        NkTexReplStats st;
+        nk_texrepl_stats(p, &st);
+        CHECK(st.loaded >= 16 && st.loaded <= 24 && (uint64_t)hits == st.loaded && st.deferred + st.loaded == 2000 &&
+                  has_diag(p, "a.png: evicted and decoded again"),
+              "two images taking turns in a budget for one: %llu decodes, %d hits, %llu deferred of 2000 lookups",
+              (unsigned long long)st.loaded, hits, (unsigned long long)st.deferred);
+        printf("cache churn: 2000 lookups of two images in a budget for one: %llu decodes, %llu deferred\n",
+               (unsigned long long)st.loaded, (unsigned long long)st.deferred);
+        nk_texrepl_close(p);
+    }
+
+    {   /* 40,000 held, then one image that needs all their room */
+        const unsigned kN = 40000u;
+        const uint8_t row[5] = { 0, 9, 8, 7, 255 };
+        size_t tn = 0, bn = 0;
+        uint8_t *tiny = png_raw(1, 1, 8, 6, row, sizeof(row), NULL, NULL, 0u, &tn);
+        const PngSpec bs = { 200, 200, 8, 6, 0, 0, 1, 1, 0, 0x303u };
+        uint8_t *big = png_build(&bs, &bn);
+        const size_t icap = (size_t)(kN + 1u) * 48u + 64u;
+        char *ini = (char *)malloc(icap);
+        size_t at = (size_t)snprintf(ini, icap, "[options]\nhash = quick\n[hashes]\n");
+        Zw z;
+        memset(&z, 0, sizeof(z));
+        const ZwOpt stored = { 0, 0, NULL, 0, 0, 0 };
+        for (unsigned k = 0; k < kN; k++) {
+            char name[16];
+            snprintf(name, sizeof(name), "i%05u.png", k);
+            zw_add(&z, name, tiny, tn, stored);
+            at += (size_t)snprintf(ini + at, icap - at, "0891000000000101%08x = %s\n", k, name);
+        }
+        zw_add(&z, "big.png", big, bn, stored);
+        at += (size_t)snprintf(ini + at, icap - at, "0891000000000101ffffffff = big.png\n");
+        zw_add_text(&z, "textures.ini", ini, 0);
+        char zip[600];
+        snprintf(zip, sizeof(zip), "%s/texrepl_churn_many.zip", SR_SELFTEST_BUILD_ROOT);
+        zw_finish(&z, zip, 0);
+        free(ini);
+        free(tiny);
+        free(big);
+        err[0] = '\0';
+        p = nk_texrepl_open(zip, (uint64_t)kN * 4u, err, sizeof(err));
+        CHECK(p != NULL, "the 40,000-image pack: %s", err);
+        if (p) {
+            int held = 0;
+            for (unsigned k = 0; k < kN; k++) {
+                const NkTexReplId id = { 0x08910000u, 3u, 0x0101u, 0u, k };
+                held += lookup_unpin(p, id, 0);
+            }
+            const NkTexReplId bid = { 0x08910000u, 3u, 0x0101u, 0u, 0xffffffffu };
+            const double t0 = wall_s();
+            const int got = lookup_unpin(p, bid, 0);
+            const double t = wall_s() - t0;
+            NkTexReplStats st;
+            nk_texrepl_stats(p, &st);
+            CHECK(held == (int)kN && got && st.evicted == kN && t < 0.25,
+                  "40,000 held, then one needing their room: %d held, %d, %llu evicted in %.3f s", held, got,
+                  (unsigned long long)st.evicted, t);
+            printf("cache churn: 40000 held 1x1 images evicted for one 200x200 in %.1f ms\n", t * 1e3);
+            nk_texrepl_close(p);
+        }
+    }
+
+    {   /* a DEFLATE entry's read: the file and its packed bytes at once */
+        Bw pre = { 0 };
+        uint8_t *zeros = (uint8_t *)calloc(1u << 20, 1);
+        png_chunk_out(&pre, "aaaa", zeros, 1u << 20);
+        free(zeros);
+        const uint8_t row[5] = { 0, 1, 2, 3, 4 };
+        size_t n = 0;
+        uint8_t *png = png_raw(1, 1, 8, 6, row, sizeof(row), &pre, NULL, 0u, &n);
+        free(pre.d);
+        Zw z;
+        memset(&z, 0, sizeof(z));
+        const ZwOpt deflated = { 8, 0, NULL, 0, 0, 0 };
+        zw_add(&z, "wide.png", png, n, deflated);
+        zw_add_text(&z, "textures.ini", "[options]\nhash = quick\n[hashes]\n0892000000000101000000a1 = wide.png\n", 0);
+        char zip[600];
+        snprintf(zip, sizeof(zip), "%s/texrepl_read_peak.zip", SR_SELFTEST_BUILD_ROOT);
+        zw_finish(&z, zip, 0);
+        free(png);
+        err[0] = '\0';
+        p = nk_texrepl_open(zip, 0, err, sizeof(err));
+        CHECK(p != NULL, "the read-peak pack: %s", err);
+        if (p) {
+            const NkTexReplId id = { 0x08920000u, 3u, 0x0101u, 0u, 0xa1u };
+            const int got = lookup_unpin(p, id, 0);
+            NkTexReplStats st;
+            nk_texrepl_stats(p, &st);
+            CHECK(got && st.decode_peak >= 2u * (uint64_t)n && st.decode_peak <= 2u * (uint64_t)n + 4096u,
+                  "a %zu-byte DEFLATE entry: decode_peak %llu (the file and its packed bytes: at least %zu)", n,
+                  (unsigned long long)st.decode_peak, 2u * n);
+            nk_texrepl_close(p);
+        }
+    }
+}
+
+/* Text from a pack reaches the terminal with its control characters as '?' (N7); a NUL byte in
+ * textures.ini refuses the pack, where the text after it went unread (N8); a level past an int's
+ * range is read as INT_MAX, defined, where sscanf's %d is not (N9). */
+static void test_ini_text(void) {
+    char dir[512], path[600], err[256] = "";
+    make_pack(dir, sizeof(dir), "texrepl_ini_text");
+    save_png_spec("texrepl_ini_text", "a.png", 4, 4, 0x311u);
+    pack_path(path, sizeof(path), "texrepl_ini_text", "textures.ini");
+    write_text(path, "[options]\nhash = quick\n[hashes]\n\x1b[31mzz\xc2\x9b = a.png\n"
+                     "0880e00000000202000000aa = a.png\n0880e00000000202000000aa_99999999999 = a.png\n");
+    NkTexRepl *p = nk_texrepl_open(dir, 0, err, sizeof(err));
+    CHECK(p != NULL, "the ini text pack: %s", err);
+    if (p) {
+        int control = 0;
+        for (size_t i = 0; i < nk_texrepl_diag_count(p); i++)
+            for (const unsigned char *c = (const unsigned char *)nk_texrepl_diag(p, i); *c; c++)
+                if (*c < 0x20u || *c == 0x7fu || (*c == 0xc2u && c[1] >= 0x80u && c[1] <= 0x9fu)) control++;
+        CHECK(control == 0 && has_diag(p, "'?[31mzz?" "?'"), "a key with ESC and CSI: %d control bytes in the notes", control);
+        CHECK(has_diag(p, "mip level 2147483647 is listed with no level 1"), "a level past an int's range not read as INT_MAX");
+        nk_texrepl_close(p);
+    }
+    write_text(path, "[options]\nhash = quick\n\x1b]0;pwn\x07\n");
+    err[0] = '\0';
+    p = nk_texrepl_open(dir, 0, err, sizeof(err));
+    int control = 0;
+    for (const unsigned char *c = (const unsigned char *)err; *c; c++) control += *c < 0x20u || *c == 0x7fu;
+    CHECK(p == NULL && control == 0 && strstr(err, "'?]0;pwn?'"), "an OSC sequence in a refused line: '%s'", err);
+    if (p) nk_texrepl_close(p);
+    static const char with_nul[] = "[options]\nhash = quick\n[hashes]\n\0zz = a.png\n";
+    file_save(path, (const uint8_t *)with_nul, sizeof(with_nul) - 1);
+    err[0] = '\0';
+    p = nk_texrepl_open(dir, 0, err, sizeof(err));
+    CHECK(p == NULL && strstr(err, "textures.ini line 4 holds a NUL byte"), "a NUL byte in textures.ini: '%s'", err);
+    if (p) nk_texrepl_close(p);
 }
 
 /* McIlroy's adversary ("A Killer Adversary for Quicksort", 1999) run against this C library's own
@@ -2876,6 +3220,9 @@ int main(int argc, char **argv) {
     test_png_checks_pinned();
     test_image_guards();
     test_png_bomb();
+    test_png_work();
+    test_cache_churn();
+    test_ini_text();
     test_zip_padding();
     test_hashranges_index();
     test_sort_adversary();

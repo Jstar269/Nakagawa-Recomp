@@ -55,6 +55,23 @@ int nk_psp_inflate_raw(const uint8_t *src, size_t srclen,
                        size_t expect, size_t cap,
                        char *err, size_t err_len);
 
+/*
+ * A raw DEFLATE stream unpacked into the caller's buffer of ``dst_cap``
+ * bytes, which is the hard ceiling: nothing is allocated for the output, and
+ * a stream that would write past it fails with NK_INFLATE_ERR_OVERFLOW.
+ * ``*outlen`` is the bytes written (on failure too, and the buffer then holds
+ * them, not a result). ``*consumed``, when given, is the input bytes the
+ * stream used, up to and including the byte that holds its last bit.
+ */
+int nk_psp_inflate_raw_into(const uint8_t *src, size_t srclen,
+                            uint8_t *dst, size_t dst_cap, size_t *outlen,
+                            size_t *consumed, char *err, size_t err_len);
+
+#ifdef NK_INFLATE_COUNT_BUILDS
+/* Huffman code tables built so far, in a build that counts them (tests). */
+extern unsigned long long nk_inflate_table_builds;
+#endif
+
 #ifdef __cplusplus
 }
 #endif

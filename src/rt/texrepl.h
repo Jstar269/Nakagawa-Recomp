@@ -162,10 +162,12 @@ void nk_texrepl_unpin(NkTexRepl *pack, NkTexReplHit *hit);
 /* Decodes PNG bytes as a pack image is decoded: refused, with a reason in `why`, unless the bytes
  * are a whole PNG (signature, IHDR first, every chunk's CRC right, an IDAT, IEND), 1 to
  * NK_TEXREPL_MAX_DIM texels a side and, when `max_bytes` is not 0, at most that many bytes of
- * R, G, B, A pixels. All is checked before any pixel memory is allocated. The image data is then
- * unpacked by nk_psp_inflate_raw into a buffer of exactly the size IHDR implies, and refused if it
- * would unpack to more or less, or its Adler-32 is wrong. On success `*rgba` is malloc'd (free it
- * with free) and 1 is returned. */
+ * R, G, B, A pixels, and image data no longer than R + R / 8 + 70 bytes, R being the raw size
+ * IHDR implies (more is work no honest encoder makes the reader do). All is checked before any
+ * pixel memory is allocated. The image data is then unpacked by nk_psp_inflate_raw_into into a
+ * buffer of exactly R bytes, and refused if it would unpack to more or less, if its Adler-32 is
+ * wrong or not right after the stream's last block. On success `*rgba` is malloc'd (free it with
+ * free) and 1 is returned. */
 int nk_texrepl_decode_png(const void *data, size_t size, uint64_t max_bytes, uint32_t **rgba, int *w, int *h,
                           char *why, size_t why_cap);
 /* The whole-number factor a hit is larger than a w x h texture by, the same on both axes, or 0
@@ -187,9 +189,13 @@ typedef struct NkTexReplStats {
     uint64_t skipped;         /* texture levels found unusable and skipped from then on, each counted once
                                  (a file several levels name is read, noted and counted in load_failed once) */
     uint64_t list_ns;         /* the part of open_ns spent listing the folder, or opening and indexing the ZIP */
-    uint64_t decode_peak;     /* the most memory one image's read and decode held at once (file, rows, result) */
+    uint64_t decode_peak;     /* the most memory one image's read and decode held at once: the file with a
+                                 ZIP entry's packed bytes while it is read, then the file with the joined
+                                 image data and the rows, then the rows and the result */
     uint64_t reads;           /* image files read from the pack: once for all the levels that name one file,
                                  again only after its decoded image was evicted */
+    uint64_t deferred;        /* lookups of an evicted image left unreplaced while its next decode waits
+                                 (an image evicted and needed again is decoded less often each time) */
 } NkTexReplStats;
 void nk_texrepl_stats(const NkTexRepl *pack, NkTexReplStats *out);
 void nk_texrepl_note_bad_factor(NkTexRepl *pack);

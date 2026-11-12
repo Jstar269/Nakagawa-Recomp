@@ -938,9 +938,12 @@ memory, no network; ZIP packs through the project's own `src/core/nk_zip.c` and 
   in an authentic run the pack is not read whatever the environment says, and a request prints one
   `TEX_REPLACE: off (texture replacement needs Ace Mode)` line. A pack whose folder, ZIP or `textures.ini` cannot
   be read or is malformed (a line that is no comment, section or `key = value`, no `hash` type, an unknown one, a
-  `textures.ini` over 4 MiB, a damaged or unsafe ZIP) prints
+  `textures.ini` over 4 MiB or holding a NUL byte, which no text file holds and which would hide the text after
+  it, a damaged or unsafe ZIP) prints
   `TEX_REPLACE: refused (<reason>); the game runs without the pack` and is refused whole; the reason names the pack
-  by its last path component only, and the run goes on unreplaced without waiting on the pack (a stored pack that
+  by its last path component only, and every control character in a reason or note (C0, DEL and the C1 range,
+  raw or in UTF-8), which a pack could use to send its own escape sequences to the terminal, is printed as `?`;
+  the run goes on unreplaced without waiting on the pack (a stored pack that
   no longer reads, its folder gone or its ini broken, is refused the same way at the next start). One image that
   cannot be used (missing, gone since the pack opened, not a regular file, outside the pack folder, over 64 MiB, a
   bad PNG, the wrong size for its level, over the budget) is skipped: its texture is drawn as the game made it, a
@@ -980,7 +983,9 @@ memory, no network; ZIP packs through the project's own `src/core/nk_zip.c` and 
     its first field matched: up to 16 hex digits of key, up to 8 of data hash, then `_<level>`; a field not
     matched is 0. So every form PPSSPP takes is taken: the full `<16><8>` name, `<16><8>_<level>`, a 16-digit
     key alone (any data hash), a shorter key, a name with blanks between the two fields, a 25-digit name (the
-    25th digit is no level). A key whose part is zero is a wildcard (see **Identity**). A value is a file under
+    25th digit is no level). A level past an `int`'s range, where `sscanf`'s `%d` is undefined, is read as the
+    largest or smallest `int` (so `_99999999999` is level 2,147,483,647, a chain no image reaches). A key whose
+    part is zero is a wildcard (see **Identity**). A value is a file under
     the pack's root; an empty value marks a texture to leave alone; a value that leaves the root is not read.
   - *Hash-named files* in the root need no ini line: a name of 24 characters, or 26 to 27 with `_` as the 25th,
     before `.png`, `.dds`, `.ktx2` or `.zim`, read with the same `sscanf`. DDS, KTX2 and ZIM files are listed
@@ -1074,20 +1079,26 @@ memory, no network; ZIP packs through the project's own `src/core/nk_zip.c` and 
   do. A texture the guest rewrites is looked up again: its new content is replaced by the image the pack lists for
   it, or scaled or drawn as made, and the old image is never drawn. Replaced content that returns is replaced again.
 - **Budget.** Decoded images stay in host memory up to `SR_TEX_REPLACE_BUDGET_MB`, the least recently used dropped
-  first and decoded again when next needed; an image the budget cannot hold is counted (`over_budget`) and its
-  texture drawn as made. Each file is held once, however many keys or mip levels name it. While every held image
+  first (taken from the tail of a list, so making room never scans the images) and decoded again when next
+  needed; an image the budget cannot hold is counted (`over_budget`) and its texture drawn as made. An image
+  dropped and wanted again is decoded again at once the first time; after its kth decode (k from 2) its next
+  2^(k-1) - 1 lookups, at most 65,535, draw the texture as made and are counted (`deferred`), and a note says it
+  was evicted and decoded again. Two images taking turns in a budget for one thus cost about 2 log2 n decodes
+  over n lookups, not n. Each file is held once, however many keys or mip levels name it. While every held image
   is in use, an image whose size is known and does not fit is not read again until one is released; one larger
   than the whole budget is never read again. The copies share the GPU budget of `SR_TEX_SCALE_BUDGET_MB` (512 MiB by default) and its
   reclamation (section 10.10).
 - **Guest memory and files.** Texture bytes are read through the same host view the cache's content hash reads;
   nothing is written to guest memory, the CLUT or a texture source. Files are read only from inside the pack's root,
   the folder or the ZIP (a name or `[hashes]` value that leaves it is refused); a ZIP is never extracted, a
-  DEFLATE entry being unpacked in memory and bounded by its declared size; nothing is uploaded and no network
+  DEFLATE entry being unpacked in memory straight into a buffer of its declared size; nothing is uploaded and no network
   connection is made. A folder's files are checked on the handle opened, not the name: one is read only when it is
   a regular disk file (Windows: `GetFileType` is `FILE_TYPE_DISK` and it is no folder; POSIX: `fstat` says
   `S_ISREG`, the file opened without blocking so a FIFO is refused at once) whose final path, links and junctions
   resolved (`GetFinalPathNameByHandleW`; `/proc/self/fd` or `realpath`), is inside the folder's own final path.
-  A name the ZIP reader refuses (a device name such as `CON.png`, `COM1.png` or `CON .png`, blanks before the
+  On Windows every file is opened with `SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION`, so a link to a named
+  pipe gives the pipe's server no more than the user's identity, never the right to act as the user, before the
+  handle check refuses it. A name the ZIP reader refuses (a device name such as `CON.png`, `COM1.png` or `CON .png`, blanks before the
   extension dropped as Windows drops them; a trailing dot or space; a character Windows refuses) is not opened at
   all. That rule is a first line only; the handle check above is the guard. Reads are capped: `textures.ini` at 4 MiB, an image at 64 MiB,
   in a folder or a ZIP alike; a ZIP image's data is unpacked only up to the size it declares, and a ZIP whose
@@ -1099,13 +1110,20 @@ memory, no network; ZIP packs through the project's own `src/core/nk_zip.c` and 
   PNG is checked before any pixel memory is allocated: the signature, `IHDR` first with 1 to 2048 texels a side
   and a pixel format the PNG standard defines, every chunk whole with its CRC right, `PLTE` and `tRNS` where and as
   long as the format allows, the `IDAT` chunks one after another, and `IEND`; its pixels (width x height x 4 bytes)
-  must fit the budget. The reader decodes PNG itself: the image data is unpacked by the project's inflater
-  (`nk_psp_inflate.c`) capped at exactly the size `IHDR` implies (each row's filter byte and bytes, each Adam7
-  pass's rows), and data that would unpack past it stops there and refuses the image, so a small PNG cannot make
-  the reader allocate or work beyond what its `IHDR` declares. The inflater's buffer starts at that size or 1 MiB, whichever
-  is smaller, and doubles up to that size, so while it grows it may hold the old block and the new one, up to twice the size; the memory
-  one decode takes, at most that plus the joined image data, or the pixels, plus the file, is recorded in the
-  pack's statistics (`decode_peak`). `nk_texrepl_decode_png` is the same check and decode, for a caller with bytes of its own.
+  must fit the budget, and the image data, all `IDAT` chunks together, may be at most R + R/8 + 70 bytes, R being
+  the size `IHDR` implies (each row's filter byte and bytes, each Adam7 pass's rows): stored blocks need R plus 5
+  bytes for each 65,535, and an image whose data is longer is refused by name ("its image data is N bytes, more
+  than R can need"), so a small image cannot carry megabytes of empty blocks for the reader to work through. The
+  reader decodes PNG itself: the image data is unpacked by the project's inflater (`nk_psp_inflate.c`) straight
+  into a buffer of exactly R bytes, and data that would unpack past it stops there and refuses the image, so a
+  small PNG cannot make the reader allocate or work beyond what its `IHDR` declares; the Adler-32 must follow the
+  stream's last block at once. The inflater builds the fixed Huffman tables once per stream, not once per block,
+  and the ZIP reader's CRC-32 table is a constant. The memory one decode takes, at most the file (with a DEFLATE
+  ZIP entry, its packed bytes too, while they are unpacked), then the joined image data and the R-byte buffer,
+  then that buffer and the pixels, is recorded in the pack's statistics (`decode_peak`); for the largest image,
+  2048 x 2048 at 16 bits a channel, R is 32 MiB and the joined data at most 36 MiB, so a 64 MiB file with its
+  data in several `IDAT` chunks peaks at 132 MiB (one `IDAT` chunk is unpacked where it lies, with nothing
+  joined). `nk_texrepl_decode_png` is the same check and decode, for a caller with bytes of its own.
   One file is read, checked, decoded, noted and counted against the budget once, however many `[hashes]` lines
   or names reach it: names are first grouped as written, and before a file's bytes are read its identity (the
   ZIP entry a name resolves to, case ignored; a folder file's volume and 128-bit file ID, or device and inode) is
@@ -1157,8 +1175,21 @@ memory, no network; ZIP packs through the project's own `src/core/nk_zip.c` and 
   are refused for that reason, and a 4-bit palette image with 256 `PLTE` entries and a grey image with a `PLTE`
   decode as stb_image decodes them. A 1x1 PNG whose
   data unpacks to 64 MiB, listed under 81 wildcard keys, is skipped 81 times within the time bound, nothing cached,
-  `decode_peak` within the file's size and 4 KiB, the file read and refused once; a ZIP image and a `textures.ini` behind 1 MiB of empty DEFLATE
-  blocks are refused at open; the sort is checked on every order up to 7 items, against its comparison bound on
+  `decode_peak` within the file's size and 4 KiB, the file read and refused once (its data, over R + R/8 + 70
+  bytes, refused before it is unpacked), and a 1024 x 1024 one unpacking past its size refused within 5 s; a ZIP
+  image and a `textures.ini` behind 1 MiB of empty DEFLATE blocks are refused at open. The three shapes of the
+  security review's slow decode each have a cell: a 1x1 PNG whose 64 MiB of data is all empty fixed-Huffman
+  blocks, and one all empty dynamic blocks, refused within 2 s by the input bound; 5.6 million empty ancillary
+  chunks before a good 1x1 image, decoded within 2 s (each chunk's CRC-32 from the constant table); 1 MiB of
+  empty fixed blocks building the Huffman tables exactly twice, counted in the selftest's build
+  (`NK_INFLATE_COUNT_BUILDS`), where tables built per block came to about 1.7 million; the Adler-32 one byte late refused;
+  and the largest image the bound lets through, 2048 x 2048 at 16 bits a channel holding 36 MiB of empty dynamic
+  blocks, refused within 10 s. Two images taking turns in a budget for one, 1,000 rounds, are decoded 16 to 24
+  times, every lookup either served or `deferred`; 40,000 held images make room for one 200 x 200 image within
+  0.25 s, all 40,000 evicted; a DEFLATE ZIP image's `decode_peak` counts its packed bytes beside the file. A
+  `textures.ini` key holding ESC and a UTF-8 CSI, and a refused line holding an OSC sequence, reach the notes and
+  the refusal with `?` for each control character; a level of `_99999999999` is level 2,147,483,647; a NUL byte
+  refuses the pack, naming its line; the sort is checked on every order up to 7 items, against its comparison bound on
   McIlroy's adversary and on the order that costs the C library's `qsort` most; then 16,384 `[hashes]` lines,
   16,384 `[indexed]` lines, 16,384 lines each of `[hashranges]` and `[reducehashranges]`, and a 16,384-entry ZIP (names and local headers) in that order open within a bound on
   the comparisons their sorts make, counted at the comparison functions in the selftest's build
