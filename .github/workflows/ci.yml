@@ -548,8 +548,9 @@ jobs:
       # Windows smoke part, which has no PSPDEV, on programs built here from the fixtures'
       # own sources with the same locked PSPDEV. The folder holds each fixture's EBOOT.PBP
       # beside the main.c and Makefile it was built from, BUILT_FROM (the commit), and
-      # SHA256SUMS over all of them; the tests check the sources against their checkout
-      # and the routes step checks BUILT_FROM against its own commit. Nothing is committed.
+      # SHA256SUMS over all of them; the tests check the sources against their checkout,
+      # and the Windows smoke step checks BUILT_FROM against its own commit. Nothing is
+      # committed.
       - name: Build the homebrew fixtures for the Windows job
         if: ${{ env.BUILD_PROFILE_ZERO == 'true' }}
         run: |
