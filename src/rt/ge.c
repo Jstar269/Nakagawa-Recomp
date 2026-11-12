@@ -852,6 +852,19 @@ static int s_zbuf_boundary_reported;
 
 static uint32_t zbuf_stride(void) { return ge.zbw ? ge.zbw : (ge.fbw ? ge.fbw : 512); }
 
+/* Where a depth write of pixel (x, y) goes in s_zbuf, or 0 when the pixel lies outside the
+ * depth buffer: zbw columns by 272 rows (#2193). s_zbuf holds guest depth row by row at the
+ * buffer's stride, so a column at or past zbw would be the next row's pixel there, or on row
+ * 271 a cell past the buffer that ge_zbuf_materialize_current never copies to guest memory.
+ * The Vulkan backend writes back the same zbw columns (depth_readback_to_guest). Whether a
+ * PSP stops at zbw is unmeasured. */
+static int zbuf_write_index(int x, int y, uint32_t *idx) {
+    const uint32_t stride = zbuf_stride();
+    if (x < 0 || y < 0 || y >= 272 || stride > 512u || (uint32_t)x >= stride) return 0;
+    *idx = (uint32_t)y * stride + (uint32_t)x;
+    return 1;
+}
+
 /* Extremes of (v ^ mask) over every integer v in [lo, hi]. The range is covered by aligned
  * power-of-two blocks: inside one block the XOR only permutes the low bits, so each block maps onto
  * one aligned interval. The result is exact for the even addresses a 16-bit surface uses and may
@@ -1128,6 +1141,8 @@ void ge_replay_restore(const GeState *state, const uint16_t *zbuf) {
     g_ge_stall_addr = 0;
 }
 
+static inline int raster_columns(void);
+
 static void zbuf_fill_rect(int x0, int y0, int x1, int y1, uint16_t z) {
     if (__builtin_expect(s_wing != NULL, 0)) {
         /* A wing canvas: its own depth, clipped to the pass's columns and the scissor rows,
@@ -1143,18 +1158,27 @@ static void zbuf_fill_rect(int x0, int y0, int x1, int y1, uint16_t z) {
         return;
     }
     if (!ge_zbuf_prepare_current()) return;
-    uint32_t stride = zbuf_stride();
+    /* The pixels the clear's colour reaches (the scissor, inside the target's columns and 272
+     * rows, as fill_rect_clear_fast and a GPU backend's scissor clip it), and of those only
+     * the ones inside the depth buffer (zbuf_write_index). */
+    const uint32_t stride = zbuf_stride();
+    if (stride > 512u) return;
+    int last_col = raster_columns() - 1;
+    if ((int)stride - 1 < last_col) last_col = (int)stride - 1;
+    if ((int)ge.scis_x2 < last_col) last_col = (int)ge.scis_x2;
+    const int last_row = (int)ge.scis_y2 < 271 ? (int)ge.scis_y2 : 271;
+    if (x0 < (int)ge.scis_x1) x0 = (int)ge.scis_x1;
+    if (y0 < (int)ge.scis_y1) y0 = (int)ge.scis_y1;
     if (x0 < 0) x0 = 0;
     if (y0 < 0) y0 = 0;
-    int wrote = 0;
+    if (x1 > last_col) x1 = last_col;
+    if (y1 > last_row) y1 = last_row;
+    if (x0 > x1 || y0 > y1) return;
     for (int y = y0; y <= y1; y++) {
-        uint32_t base = (uint32_t)y * stride;
-        for (int x = x0; x <= x1; x++) {
-            uint32_t idx = base + (uint32_t)x;
-            if (idx < 272u * 512u) { s_zbuf[idx] = z; wrote = 1; }
-        }
+        uint16_t *row = s_zbuf + (uint32_t)y * stride;
+        for (int x = x0; x <= x1; x++) row[x] = z;
     }
-    if (wrote) ge_zbuf_note_write();
+    ge_zbuf_note_write();
 }
 
 static void stat_zfail(void);
@@ -1183,6 +1207,17 @@ static int ztest_compare_px(int x, int y, uint16_t z) {
     if (!pass) stat_zfail();
     return pass;
 }
+
+/* Test-only (hle_thread_selftest): deliberately wrong raster rules, so the PSP-GE-RASTER-001
+ * cells are shown to catch each of them (#343). 0 is the measured rule set. */
+enum {
+    GE_RASTER_MUTANT_NONE = 0,
+    GE_RASTER_MUTANT_FILL_BOTTOM_RIGHT = 1, /* keep E == 0 pixels on bottom and right edges */
+    GE_RASTER_MUTANT_SNAP_HALF = 2,         /* snap vertices to 28.4 with +0.5, not +0.375 */
+    GE_RASTER_MUTANT_DITHER_SHIFTED = 3,    /* read the dither matrix at (x + 1, y + 1) */
+};
+static int s_raster_mutant;
+void ge_test_set_raster_mutant(int mutant) { s_raster_mutant = mutant; }
 
 /* Clamp interpolated depth to the 16-bit range. minz/maxz are NOT a clamp: the PSP
  * depth-range test DISCARDS transform-mode pixels outside [minz,maxz] (see zrange_ok). */
@@ -1327,13 +1362,14 @@ static void read_pos_one(uint32_t addr, const VFmt *v, float *x, float *y, float
          * through-mode float decoder applies, and which depth the hardware stores for
          * such a z is an open probe. An infinite z saturates as well (+inf to 65535, -inf
          * to 0), so its primitive is drawn, where the non-finite vertex rule dropped it
-         * before. PPSSPP draws a NaN z too, at depth 0; here a NaN stays NaN and the
-         * non-finite vertex rule still drops the primitive. Transform mode is untouched:
-         * its z is a model coordinate. */
+         * before. A NaN z is drawn too: PSP-GE-THROUGHZ-001 (docs/HARDWARE_ORACLE.md,
+         * 2026-11-10, PSP-3000) drew a through-mode sprite with both vertices at z = NaN.
+         * The depth it stores was not read; it takes depth 0 here, UNMEASURED (PPSSPP's
+         * rule too). Transform mode is untouched: its z is a model coordinate. */
         if (v->through) {
             if (*z >= 65535.0f) *z = 65535.0f;
             else if (*z > 0.0f) *z = (float)(int)*z;
-            else if (*z <= 0.0f) *z = 0.0f;
+            else *z = 0.0f;   /* z <= 0, or NaN */
         }
     } else if (v->pos_fmt == 2) {
         if (v->through) {
@@ -2719,13 +2755,26 @@ static int blend_chan(int s, int d, int sf, int df, int eq) {
     }
 }
 
+/* The columns the rasteriser may write, before the scissor. #2193 states that a PSP draws
+ * anywhere inside the scissor on a target up to 512 pixels wide (not measured here; the Vulkan
+ * backend already draws there), so a stride past 480 (an offscreen target, or a display
+ * buffer's padding) is drawn up to its last column, 511 at most. A narrower stride bounds the
+ * draw the same way: column x of row y is guest address (y * stride + x), so a column past the
+ * stride would land in the next row, or past the buffer's last row, and never in the target
+ * the draw was given (#2193). The Vulkan backend clamps its scissor to the same columns
+ * (build_state). Stopping at the stride, at any width, is unmeasured on a PSP. */
+static inline int raster_columns(void) {
+    const uint32_t stride = ge.fbw ? ge.fbw : 512u;
+    return stride < 512u ? (int)stride : 512;
+}
+
 static int pixel_in_bounds(int x, int y) {
     /* A wing pass replaces the screen's columns and the scissor's (which spans the screen:
      * wide_target) with the pass's canvas columns; the scissor's rows still apply. */
     if (__builtin_expect(s_wing != NULL, 0))
         return x >= s_wing_x0 && x <= s_wing_x1 && y >= 0 && y < 272 &&
                y >= ge.scis_y1 && y <= ge.scis_y2;
-    return x >= 0 && x < 480 && y >= 0 && y < 272 &&
+    return x >= 0 && x < raster_columns() && y >= 0 && y < 272 &&
            x >= ge.scis_x1 && x <= ge.scis_x2 && y >= ge.scis_y1 && y <= ge.scis_y2;
 }
 
@@ -2847,7 +2896,9 @@ static void compose_px_rgba(int x, int y, int r, int g, int b, int src_a, int st
     }
     /* Dither precedes clamping and logic, and applies in clear mode and RGBA8888 too. */
     if (ge.dither_enable) {
-        int d=ge.dith[y&3][x&3]; r=clamp8(r+d); g=clamp8(g+d); b=clamp8(b+d);
+        const int dx = s_raster_mutant == GE_RASTER_MUTANT_DITHER_SHIFTED ? x + 1 : x;
+        const int dy = s_raster_mutant == GE_RASTER_MUTANT_DITHER_SHIFTED ? y + 1 : y;
+        int d=ge.dith[dy&3][dx&3]; r=clamp8(r+d); g=clamp8(g+d); b=clamp8(b+d);
     }
     uint32_t rgba=pack8888(clamp8(r),clamp8(g),clamp8(b),clamp8(stencil));
     if (ge.logic_op_enable && !ge.clear)
@@ -2893,8 +2944,8 @@ static void put_px_rgba_tested(int x, int y, uint16_t pz, int use_z,
     if (use_z && !ge.zwrite_disable) {
         if (__builtin_expect(s_wing != NULL, 0)) s_wing->depth[WING_PX(x, y)] = pz;
         else {
-            uint32_t zi=(uint32_t)(y*(int)zbuf_stride()+x);
-            if (zi<272u*512u) { s_zbuf[zi]=pz; ge_zbuf_note_write(); }
+            uint32_t zi;
+            if (zbuf_write_index(x, y, &zi)) { s_zbuf[zi]=pz; ge_zbuf_note_write(); }
         }
     }
     if (ge.stencil_enable)
@@ -3340,7 +3391,8 @@ static double ge_time_row_clk(int w) {
 static void ge_time_scissor(int *x1, int *y1, int *x2, int *y2) {
     *x1 = ge.scis_x1 > 0 ? (int)ge.scis_x1 : 0;
     *y1 = ge.scis_y1 > 0 ? (int)ge.scis_y1 : 0;
-    *x2 = ge.scis_x2 < 479 ? (int)ge.scis_x2 : 479;
+    const int last = raster_columns() - 1;
+    *x2 = (int)ge.scis_x2 < last ? (int)ge.scis_x2 : last;
     *y2 = ge.scis_y2 < 271 ? (int)ge.scis_y2 : 271;
 }
 
@@ -3456,7 +3508,9 @@ static void raster_tri(const Vtx *A, const Vtx *B, const Vtx *C, int persp) {
     int minx=(int)floorf(fminf(A->x,fminf(B->x,C->x))), maxx=(int)ceilf(fmaxf(A->x,fmaxf(B->x,C->x)));
     int miny=(int)floorf(fminf(A->y,fminf(B->y,C->y))), maxy=(int)ceilf(fmaxf(A->y,fmaxf(B->y,C->y)));
     int cx1 = ge.scis_x1 > 0 ? ge.scis_x1 : 0,   cy1 = ge.scis_y1 > 0 ? ge.scis_y1 : 0;
-    int cx2 = ge.scis_x2 < 479 ? ge.scis_x2 : 479, cy2 = ge.scis_y2 < 271 ? ge.scis_y2 : 271;
+    const int last_col = raster_columns() - 1;
+    int cx2 = (int)ge.scis_x2 < last_col ? (int)ge.scis_x2 : last_col;
+    int cy2 = ge.scis_y2 < 271 ? ge.scis_y2 : 271;
     if (wing) { cx1 = s_wing_x0; cx2 = s_wing_x1; }
     if (minx < cx1) minx = cx1;
     if (maxx > cx2) maxx = cx2;
@@ -3470,9 +3524,10 @@ static void raster_tri(const Vtx *A, const Vtx *B, const Vtx *C, int persp) {
      * meshes both dropped pixels (cracks -> models dissolve into noise) and double-drew them
      * (blended seams). Integer edges give each edge pixel to exactly one triangle. */
     /* Hardware rounding: (int)(x*16 + 0.375) per PPSSPP ClipToScreenInternal. */
-    long long ax=(long long)floorf(A->x*16.0f+0.375f), ay=(long long)floorf(A->y*16.0f+0.375f);
-    long long bx=(long long)floorf(B->x*16.0f+0.375f), by=(long long)floorf(B->y*16.0f+0.375f);
-    long long cxx=(long long)floorf(C->x*16.0f+0.375f), cyy=(long long)floorf(C->y*16.0f+0.375f);
+    const float snap = s_raster_mutant == GE_RASTER_MUTANT_SNAP_HALF ? 0.5f : 0.375f;
+    long long ax=(long long)floorf(A->x*16.0f+snap), ay=(long long)floorf(A->y*16.0f+snap);
+    long long bx=(long long)floorf(B->x*16.0f+snap), by=(long long)floorf(B->y*16.0f+snap);
+    long long cxx=(long long)floorf(C->x*16.0f+snap), cyy=(long long)floorf(C->y*16.0f+snap);
     long long area2 = (bx-ax)*(cyy-ay) - (cxx-ax)*(by-ay);
     if (area2 == 0) { if (persp) s_stat.deg3d++; return; }
     const Vtx *VA=A, *VB=B, *VC=C;
@@ -3509,6 +3564,11 @@ static void raster_tri(const Vtx *A, const Vtx *B, const Vtx *C, int persp) {
     long long bias0 = (dy0 < 0 || (dy0 == 0 && dx0 > 0)) ? 0 : -1;
     long long bias1 = (dy1 < 0 || (dy1 == 0 && dx1 > 0)) ? 0 : -1;
     long long bias2 = (dy2 < 0 || (dy2 == 0 && dx2 > 0)) ? 0 : -1;
+    if (s_raster_mutant == GE_RASTER_MUTANT_FILL_BOTTOM_RIGHT) {
+        bias0 = (dy0 > 0 || (dy0 == 0 && dx0 < 0)) ? 0 : -1;
+        bias1 = (dy1 > 0 || (dy1 == 0 && dx1 < 0)) ? 0 : -1;
+        bias2 = (dy2 > 0 || (dy2 == 0 && dx2 < 0)) ? 0 : -1;
+    }
     /* raster_tri_lod_span: the level of detail of a triangle (#1373), measured on a PSP-3000
      * (PSP-GE-MIP-001: a-quad-w1to4, s-s1-w1to8 and the varying-w confirmation cells; the
      * largest of all four components, not u along x and v along y only: a-quad-v16-w1to8,
@@ -3550,9 +3610,9 @@ static void raster_tri(const Vtx *A, const Vtx *B, const Vtx *C, int persp) {
              * clearing depth with triangles would leave stale z behind (mass z-rejects). */
             if (ge.clear) {
                 if (ge.clear_mode & 0x400) {
-                    uint32_t zi = (uint32_t)(y * (int)zbuf_stride() + x);
+                    uint32_t zi;
                     if (wing) s_wing->depth[WING_PX(x, y)] = clamp_z(iz);
-                    else if (zi < 272u*512u) {
+                    else if (zbuf_write_index(x, y, &zi)) {
                         s_zbuf[zi] = clamp_z(iz);
                         ge_zbuf_note_write();
                     }
@@ -4663,7 +4723,9 @@ static void dump_xform_debug(uint32_t vbase, uint32_t ibase, int idxfmt, const V
  * constant across the rect, so rows are written directly (no per-pixel state checks). */
 static void fill_rect_clear_fast(int xa, int ya, int xb, int yb, int r, int g, int b, int a) {
     int cx1 = ge.scis_x1 > 0 ? ge.scis_x1 : 0,   cy1 = ge.scis_y1 > 0 ? ge.scis_y1 : 0;
-    int cx2 = ge.scis_x2 < 479 ? ge.scis_x2 : 479, cy2 = ge.scis_y2 < 271 ? ge.scis_y2 : 271;
+    const int last_col = raster_columns() - 1;
+    int cx2 = (int)ge.scis_x2 < last_col ? (int)ge.scis_x2 : last_col;
+    int cy2 = ge.scis_y2 < 271 ? ge.scis_y2 : 271;
     if (s_wing) { cx1 = s_wing_x0; cx2 = s_wing_x1; }
     if (xa < cx1) xa = cx1;
     if (xb > cx2 + 1) xb = cx2 + 1;
@@ -7583,6 +7645,68 @@ int ge_vram_decode_bound_texture(uint32_t *out, size_t capacity) {
         return 0;
     ge_decode_tex_rgba(out);
     return 1;
+}
+
+/* A GE-local offset (below 2 MiB) or any view of VRAM, as its 0x04000000 address: the fold
+ * ge_fb_addr() applies to the draw target. Any other address is left as it is. */
+static uint32_t ge_vram_view_fold(uint32_t addr) {
+    if (addr < 0x00200000u || (addr & 0x0F000000u) == 0x04000000u)
+        return 0x04000000u | (addr & 0x001FFFFFu);
+    return addr;
+}
+
+void ge_vram_view_sources(uint32_t shown_addr, uint32_t shown_stride, uint32_t shown_fmt,
+                          int shown_valid, GeVramSources *out) {
+    if (!out) return;
+    memset(out, 0, sizeof(*out));
+    /* The display is 480 x 272 whatever buffer it scans out. */
+    if (shown_valid) {
+        GeVramWindow w = { shown_addr, shown_stride, 480u, 272u, shown_fmt & 3u };
+        out->window[GE_VRAM_VIEW_DISPLAY] = w;
+        out->present[GE_VRAM_VIEW_DISPLAY] = 1;
+    }
+    if (ge.fbw) {
+        GeVramWindow w = { ge_fb_addr(), ge.fbw, 480u, 272u, ge.fbfmt & 3u };
+        out->window[GE_VRAM_VIEW_DRAW] = w;
+        out->present[GE_VRAM_VIEW_DRAW] = 1;
+    }
+    if (ge.zbp) {
+        GeVramWindow w = { ge_vram_view_fold(ge.zbp), ge.zbw ? ge.zbw : (ge.fbw ? ge.fbw : 512u),
+                           480u, 272u, GE_VRAM_VIEW_DEPTH16 };
+        out->window[GE_VRAM_VIEW_DEPTH] = w;
+        out->present[GE_VRAM_VIEW_DEPTH] = 1;
+    }
+    if (ge.tex_addr && ge.tex_w > 0 && ge.tex_h > 0) {
+        GeVramWindow w = { ge.tex_addr, ge.tex_bufw ? ge.tex_bufw : (uint32_t)ge.tex_w,
+                           (uint32_t)ge.tex_w, (uint32_t)ge.tex_h, ge.tex_fmt };
+        out->window[GE_VRAM_VIEW_TEXTURE] = w;
+        out->present[GE_VRAM_VIEW_TEXTURE] = 1;
+        out->texture_swizzled = ge.tex_swizzle != 0;
+    }
+}
+
+int ge_vram_view_decode(int texture, const GeVramWindow *window, uint32_t *out,
+                        size_t capacity, uint32_t *width, uint32_t *height) {
+    uint32_t w, h;
+    if (width) *width = 0u;
+    if (height) *height = 0u;
+    if (!out || (!texture && !window)) return GE_VRAM_VIEW_NO_ROOM;
+    if (texture) {
+        if (!ge_vram_decode_bound_texture(out, capacity)) return GE_VRAM_VIEW_TEXTURE_REFUSED;
+        w = (uint32_t)ge.tex_w;
+        h = (uint32_t)ge.tex_h;
+    } else {
+        if ((uint64_t)window->width * window->height > capacity) return GE_VRAM_VIEW_NO_ROOM;
+        if (!ge_vram_decode_surface(window->addr, window->width, window->height, window->stride,
+                                    window->format, out))
+            return GE_VRAM_VIEW_UNREADABLE;
+        w = window->width;
+        h = window->height;
+    }
+    for (size_t i = 0; i < (size_t)w * h; i++) out[i] |= 0xFF000000u;
+    if (width) *width = w;
+    if (height) *height = h;
+    return GE_VRAM_VIEW_SHOWN;
 }
 
 static void ge_vramdump_surface(FILE *file, int *first, const char *name,

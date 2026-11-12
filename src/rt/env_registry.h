@@ -84,7 +84,7 @@
     X("SR_FONTDIR", "path", "unset", "hle_thread_selftest.c", "Font cache directory; the flash0 self-test sets it to a test cache and restores it.") \
     X("SR_FONTLOG", "flag-presence", "off", "debug.h,flash0_font.c,hle_data.c,hle_font.c,hle_system.c", "Enables font and flash0 font-serving diagnostic logging to stderr.") \
     X("SR_FPS_CAP", "number", "native scanout rate (also for empty or 'native')", "gui.c", "Caps presented frames per second; values above 240 clamp to 240, 0 is accepted, invalid text uses native.") \
-    X("SR_FSDIR", "path", "unset", "hle_thread_selftest.c", "Host directory used as the writable filesystem overlay; read here by self-tests that save and restore it.") \
+    X("SR_FSDIR", "path", "fs", "hle_host.c,hle_io.c,hle_thread_selftest.c", "Legacy flat Memory Stick folder; an ms0: read-open miss imports a file found there into memstick, and self-tests save and restore it.") \
     X("SR_FULLSCREEN", "flag-nonzero", "off (windowed)", "gpu_sdl3vk/sdl3vk.c", "When nonzero, the presenter asks SDL for desktop fullscreen before creating the Vulkan surface.") \
     X("SR_GAME_TITLE", "string", "unset (default window caption)", "driver.c,gui.c", "Title text for the window caption and pause overlay, sanitized before use; set by the launcher.") \
     X("SR_GEDUMP", "flag-presence", "off", "ge.c,hle.c", "Enables GE display list dump logging and framebuffer snapshots.") \
@@ -116,6 +116,7 @@
     X("SR_GPU_CAPTURE_TERMINAL_CASE", "string", "unset: lifecycle self-test runs", "gpu_sdl3vk/sdl3vk.c", "Names a terminal-fault case for the GPU capture self-test; when set, the lifecycle self-test is skipped.") \
     X("SR_GPU_COHERENCE_CASE", "string", "unset (run all cases)", "gpu_sdl3vk/ge_gpu.c", "Restricts the GPU coherence self-test to one case; scaled-upload, mip-lod or readback-rows.") \
     X("SR_GPU_CPU_PROFILE", "flag-nonzero", "off", "ge.c,ge_replay.c,gpu_sdl3vk/ge_gpu.c", "Enables CPU-side profiling of GPU and GE replay paths, with wall-phase stats in replay.") \
+    X("SR_GPU_DEPTH_REF", "path", "unset (no reference check)", "gpu_sdl3vk/ge_gpu_selftest.inc", "Reference file for the coherence self-test's host-depth case: a depth=32-off run writes its depth readback hash, a depth=32 run at the same scale checks it.") \
     X("SR_GPU_DST_READ", "string", "unset (the interlock where the device has it, else the snapshot)", "gpu_sdl3vk/sdl3vk.c", "Destination-read path (snapshot or interlock) of shader blends and stencil; a path the device lacks is refused, an unknown value gets the default.") \
     X("SR_GPU_GE", "flag-nonzero", "off (software GE)", "gui.c", "Enables the GPU GE renderer when set to a non-empty value other than 0.") \
     X("SR_GPU_LOG", "flag-nonzero", "off", "gpu_sdl3vk/ge_gpu.c", "Enables verbose logging in the Vulkan GE backend and also turns on its statistics.") \
