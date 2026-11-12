@@ -950,7 +950,15 @@ asset-index-selftest:
 # software run and the Vulkan twin, twin-key turns the twin on through the launch line's `twin=on`
 # (`--twin-key on`) in both renderers and checks the Ace report, with the variable unset and set
 # (`--twin-key off --twin 1` has the variable alone turn it on, and the report must say it runs),
-# and gpu-timestamps runs once more with the twin shown. The dst-read
+# and gpu-timestamps runs once more with the twin shown. Supersampling
+# (#2073) follows: ssaa-edge runs without it to write a reference at scales 1 and 2 and at 2x and
+# 4x against it (guest VRAM identical, edges filtered only when on), twin-scene and the whole
+# suite run with it at 2x and 4x, ssaa-sprite checks that textured one-texel-per-pixel sprites are
+# shown as the authentic image (at render scale 1, where the twin draws from its own vertices, and
+# at 2), twin-alloc-fail with it on checks that the Ace report gives it as off once the twin is,
+# ssaa-limit checks the size check with forced limits, host-depth runs with depth=32 and
+# ssaa=4 against the key-off depth reference (a 4-byte depth twin, guest depth unchanged), and
+# twin-key with ssaa=2 checks that supersampling's own twin is not reported as full colour. The dst-read
 # cells (#2109) run alone at scales 1 and 4 on each destination-read path (`--dst-read snapshot`,
 # `--dst-read interlock`; a device that refuses the interlock prints a SKIP line), and so does
 # stencil-once (write-once stencil batches: at scales 1 and 4 on the snapshot path, where they are
@@ -1038,6 +1046,26 @@ gpu-coherence-selftest: $(GPU_COHERENCE_BIN)
 	$(GPU_COHERENCE_BIN) --twin-key off --twin 1 --case twin-key
 	$(GPU_COHERENCE_BIN) --twin-key off --twin native --case twin-key
 	$(GPU_COHERENCE_BIN) --twin-key off --case twin-key
+	$(GPU_COHERENCE_BIN) --case ssaa-edge --ssaa-ref $(BUILD_DIR)/ssaa_ref_s1.txt
+	$(GPU_COHERENCE_BIN) --ssaa 2 --case ssaa-edge --ssaa-ref $(BUILD_DIR)/ssaa_ref_s1.txt
+	$(GPU_COHERENCE_BIN) --ssaa 4 --case ssaa-edge --ssaa-ref $(BUILD_DIR)/ssaa_ref_s1.txt
+	$(GPU_COHERENCE_BIN) --scale 2 --case ssaa-edge --ssaa-ref $(BUILD_DIR)/ssaa_ref_s2.txt
+	$(GPU_COHERENCE_BIN) --ssaa 2 --scale 2 --case ssaa-edge --ssaa-ref $(BUILD_DIR)/ssaa_ref_s2.txt
+	$(GPU_COHERENCE_BIN) --ssaa 4 --scale 2 --case ssaa-edge --ssaa-ref $(BUILD_DIR)/ssaa_ref_s2.txt
+	$(GPU_COHERENCE_BIN) --ssaa 2 --case twin-scene --twin-ref $(BUILD_DIR)/twin_ref_s1.txt
+	$(GPU_COHERENCE_BIN) --ssaa 4 --twin 1 --scale 2 --case twin-scene --twin-ref $(BUILD_DIR)/twin_ref_s2.txt
+	$(GPU_COHERENCE_BIN) --ssaa 2
+	$(GPU_COHERENCE_BIN) --ssaa 4
+	$(GPU_COHERENCE_BIN) --ssaa 2 --case ssaa-sprite
+	$(GPU_COHERENCE_BIN) --ssaa 4 --case ssaa-sprite
+	$(GPU_COHERENCE_BIN) --ssaa 4 --scale 2 --case ssaa-sprite
+	$(GPU_COHERENCE_BIN) --ssaa 2 --twin native --scale 2 --case twin-alloc-fail --twin-ref $(BUILD_DIR)/twin_ref_s2.txt
+	$(GPU_COHERENCE_BIN) --ssaa 4 --ssaa-budget-mb 48 --ssaa-expect 2 --case ssaa-limit
+	$(GPU_COHERENCE_BIN) --ssaa 2 --ssaa-budget-mb 8 --ssaa-expect 1 --case ssaa-limit
+	$(GPU_COHERENCE_BIN) --ssaa 4 --scale 4 --ssaa-max-dim 4096 --ssaa-expect 2 --case ssaa-limit
+	$(GPU_COHERENCE_BIN) --depth 32 --ssaa 4 --case host-depth --depth-ref $(BUILD_DIR)/depth_ref_s1.txt
+	$(GPU_COHERENCE_BIN) --ssaa 2 --twin-key off --case twin-key
+	$(GPU_COHERENCE_BIN) --ssaa 2 --twin-key on --case twin-key
 	@rc=0; $(GPU_COHERENCE_BIN) --twin 1 --gpu-timestamps 1 --case gpu-timestamps || rc=$$?; \
 	if [ $$rc -eq 77 ]; then echo "SKIP gpu-coherence-selftest twin gpu-timestamps (exit 77; the reason is printed above)"; \
 	elif [ $$rc -ne 0 ]; then echo "FAIL gpu-coherence-selftest twin gpu-timestamps (exit $$rc)"; exit $$rc; fi
@@ -1120,8 +1148,9 @@ gpu-coherence-selftest-snapbar-mutants: shader-verify $(RT_GE_O)
 # launch line's twin=on unread in ge_gpu.c and in ge.c, and the two KEY_CONFIRM mutants leave a
 # running twin unconfirmed: the twin-key case. The two TWIN_REPORT mutants leave a running twin
 # unreported (the call to ace_set_twin_running) when only SR_GPU_TWIN_COLOR turned it on:
-# `--twin-key off --twin 1`. The ge.c mutants build their own ge.o. Each builds
-# its own binary, so thirteen are built; the target is not part of
+# `--twin-key off --twin 1`. GPU_SSAA_REPORT reports the twin that supersampling runs for its
+# samples as full colour: `--ssaa 2 --twin-key off`. The ge.c mutants build their own ge.o. Each builds
+# its own binary, so fourteen are built; the target is not part of
 # gpu-coherence-selftest or native-core-tests. Each mutant must fail with its own message; exit 77
 # (no Vulkan device) is a SKIP, as for the selftest itself.
 gpu-coherence-twin-mutants: $(GPU_COHERENCE_BIN)
@@ -1130,7 +1159,8 @@ gpu-coherence-twin-mutants: $(GPU_COHERENCE_BIN)
 	if [ $$rc -eq 77 ]; then echo "twin mutants: SKIP (no Vulkan device)"; exit 77; fi; \
 	if [ $$rc -ne 0 ]; then echo "twin mutants: the twin-off reference run failed (exit $$rc)" >&2; exit $$rc; fi
 	@for m in NATIVE_MUTANT SKIP_SITE_RENDER SKIP_SITE_UPLOAD SKIP_SITE_PATCH SKIP_SITE_DEPTH_UPLOAD SKIP_SITE_XFER SKIP_SITE_SNAPSHOT \
-			GPU_KEY_REQUEST GPU_KEY_CONFIRM SOFT_KEY_REQUEST SOFT_KEY_CONFIRM GPU_TWIN_REPORT SOFT_TWIN_REPORT; do \
+			GPU_KEY_REQUEST GPU_KEY_CONFIRM SOFT_KEY_REQUEST SOFT_KEY_CONFIRM GPU_TWIN_REPORT SOFT_TWIN_REPORT \
+			GPU_SSAA_REPORT; do \
 		case $$m in \
 			NATIVE_MUTANT) kill="the shown gradient is not full colour"; args="--twin 1 --scale 2 --case twin-scene --twin-ref $(BUILD_DIR)/twin_ref_mutant_s2.txt";; \
 			SKIP_SITE_RENDER) kill="twin of target 0x100000 differs in 100 pixels"; args="--twin native";; \
@@ -1143,6 +1173,7 @@ gpu-coherence-twin-mutants: $(GPU_COHERENCE_BIN)
 			SOFT_KEY_REQUEST) kill="FAIL software renderer: the launch line's twin=on did not turn the twin on"; args="--twin-key on --case twin-key";; \
 			SOFT_KEY_CONFIRM) kill="FAIL software renderer: the report names the twin unavailable: did not run"; args="--twin-key on --case twin-key";; \
 			GPU_TWIN_REPORT) kill="FAIL gpu renderer: the report names the twin available (effective twin off), want it on and not unavailable"; args="--twin-key off --twin 1 --case twin-key";; \
+			GPU_SSAA_REPORT) kill="FAIL gpu renderer: the report names the twin available (effective twin on), want it off and not unavailable"; args="--ssaa 2 --twin-key off --case twin-key";; \
 			SOFT_TWIN_REPORT) kill="FAIL software renderer: the report names the twin available (effective twin off), want it on and not unavailable"; args="--twin-key off --twin 1 --case twin-key";; \
 			*) kill="twin of target 0x000000 differs in"; args="--twin native";; \
 		esac; \
