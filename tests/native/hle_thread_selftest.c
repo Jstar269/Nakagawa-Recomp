@@ -33471,6 +33471,117 @@ extern void sr_hle_test_atrac_reinit_reset(void);
 extern uint32_t sr_hle_test_atrac_release_count(void);
 extern void sr_hle_test_atrac_release_reset(void);
 
+/* #322 slice 1: _sceAtracGetContextAddress hands out a guest context that follows the ID's state.
+ * Field offsets are PPSSPP's SceAtracContext (the info block at +0x80), not PSP-measured. */
+#define NID_SCE_ATRAC_GET_CONTEXT_ADDRESS 0x231fc6b7u
+#define NID_SCE_ATRAC_SET_LOOP_NUM_322    0x868120b5u
+#define NID_SCE_ATRAC_GET_LOOP_STATUS_322 0xfaa4f89bu
+static void test_atrac_guest_context_322(void) {
+    enum { SRC = 0x08006000u, TRACK = 0x08002000u, PCM_OUT = 0x08003000u, OUT_N = 0x08004100u,
+           OUT_END = 0x08004104u, OUT_REMAIN = 0x08004108u, LOOP_OUT = 0x08004110u,
+           LOOP_FLAG = 0x08004114u, SECOND = 0x08007000u, FRAMES = 8u, PREFIX_FRAMES = 4u };
+    const uint32_t prefix = TD1096_HEADER + PREFIX_FRAMES * TD1096_FRAME;
+    const uint32_t file_size = TD1096_HEADER + FRAMES * TD1096_FRAME;
+    extern void sr_hle_test_partition_reset(void);
+    const uint32_t loaded_end = s_fixture_loaded_end;
+    reset_fixture();
+    s_fixture_loaded_end = 0x08a00000u;   /* a main image in user RAM, as a game's is */
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+
+    expect(td24b_dispatch4(NID_SCE_ATRAC_GET_CONTEXT_ADDRESS, 3u, 0u, 0u, 0u) == ATRAC_ERROR_NO_ATRACID,
+           "_sceAtracGetContextAddress refuses an ID that is not in use (#322)");
+    uint32_t id = td24b_dispatch4(NID_SCE_ATRAC_GET_ID, ATRAC_CODEC_AT3, 0u, 0u, 0u);
+    expect(id < 8u, "context fixture: an AT3 ID");
+    if (id >= 8u) {
+        s_fixture_loaded_end = loaded_end;
+        sr_hle_test_partition_reset();
+        return;
+    }
+    const uint32_t ctx = td24b_dispatch4(NID_SCE_ATRAC_GET_CONTEXT_ADDRESS, id, 0u, 0u, 0u);
+    const uint32_t info = ctx + 0x80u;
+    expect(ctx >= 0x08a00000u && ctx < 0x0a000000u && (ctx & 0xffu) == 0u,
+           "_sceAtracGetContextAddress returns a 0x100-byte context in the user partition (#322)");
+    if (!(ctx >= 0x08a00000u && ctx < 0x0a000000u)) {
+        (void)td24b_dispatch4(NID_SCE_ATRAC_RELEASE_ID, id, 0u, 0u, 0u);
+        s_fixture_loaded_end = loaded_end;
+        sr_hle_test_partition_reset();
+        return;
+    }
+    expect(MEM_R8(info + 0x15u) == 1u && MEM_R16(info + 0x1au) == ATRAC_CODEC_AT3 &&
+               MEM_R32(info + 0x38u) == 0u && MEM_R32(ctx + 0xfcu) == id,
+           "an ID with no track: state NO_DATA (1), its codec, no buffer, and the ID at +0xfc");
+    expect(td24b_dispatch4(NID_SCE_ATRAC_GET_CONTEXT_ADDRESS, id, 0u, 0u, 0u) == ctx,
+           "a second call returns the same context");
+
+    /* SetData: a streamed prefix shorter than the file. */
+    td1096_build_at3_frames(SRC, 0x0270u, FRAMES, FRAMES * ATRAC3_FRAME_SAMPLES, 0u);
+    for (uint32_t b = 0; b < prefix; b++) MEM_W8(TRACK + b, MEM_R8(SRC + b));
+    expect(td24b_dispatch4(NID_SCE_ATRAC_SET_DATA, id, TRACK, prefix, 0u) == 0u,
+           "context fixture: SetData takes the streamed prefix");
+    expect(MEM_R8(info + 0x15u) == 4u && MEM_R8(info + 0x17u) == 2u &&
+               MEM_R16(info + 0x18u) == TD1096_FRAME && MEM_R16(info + 0x1au) == ATRAC_CODEC_AT3 &&
+               MEM_R32(info + 0x1cu) == TD1096_HEADER && MEM_R32(info + 0x24u) == file_size &&
+               MEM_R32(info + 0x38u) == TRACK && MEM_R32(info + 0x40u) == prefix &&
+               MEM_R32(info + 0x3cu) == 0u && MEM_R32(info + 0x44u) == 0u,
+           "after SetData the context names the stream: state, channels, frame size, codec, data "
+           "offset, file size, buffer and buffer size");
+
+    /* loopNum follows SetLoopNum, and a game's own write is what the library reads. */
+    expect(td24b_dispatch4(NID_SCE_ATRAC_SET_LOOP_NUM_322, id, 2u, 0u, 0u) == 0u &&
+               MEM_R32(info + 0x28u) == 2u,
+           "sceAtracSetLoopNum is written to the context's loopNum");
+    MEM_W32(info + 0x28u, 7u);
+    expect(td24b_dispatch4(NID_SCE_ATRAC_GET_LOOP_STATUS_322, id, LOOP_OUT, LOOP_FLAG, 0u) == 0u &&
+               MEM_R32(LOOP_OUT) == 7u,
+           "a loopNum the game writes into the context is the one the library reports");
+    MEM_W32(info + 0x28u, 0u);
+
+    /* The second buffer. */
+    expect(td24b_dispatch4(NID_SCE_ATRAC_SET_SECOND_BUFFER, id, SECOND, 0x800u, 0u) == 0u &&
+               MEM_R32(info + 0x3cu) == SECOND && MEM_R32(info + 0x44u) == 0x800u,
+           "sceAtracSetSecondBuffer is written to secondBuffer and secondBufferByte");
+    expect(td24b_dispatch4(NID_SCE_ATRAC_SET_SECOND_BUFFER, id, 0u, 0u, 0u) == 0u &&
+               MEM_R32(info + 0x3cu) == 0u && MEM_R32(info + 0x44u) == 0u,
+           "clearing the second buffer clears it in the context");
+
+    /* DecodeData publishes too: a state the game overwrote is the library's again. */
+    MEM_W8(info + 0x15u, 0x10u);
+    (void)td1096_decode(id, PCM_OUT, OUT_N, OUT_END, OUT_REMAIN);
+    expect(MEM_R8(info + 0x15u) == 4u && MEM_R32(info + 0x28u) == 0u && MEM_R32(ctx + 0xfcu) == id,
+           "sceAtracDecodeData rewrites the context from the library's state");
+
+    /* AddStreamData: the context keeps naming the same buffer and file. */
+    {
+        enum { WP = 0x08004200u, WB = 0x08004204u, RO = 0x08004208u };
+        expect(td24b_dispatch4(NID_SCE_ATRAC_GET_STREAM_DATA_INFO, id, WP, WB, RO) == 0u &&
+                   MEM_R32(WB) >= TD1096_FRAME,
+               "context fixture: the ring has room for a frame");
+        uint32_t wp = MEM_R32(WP), ro = MEM_R32(RO);
+        for (uint32_t b = 0; b < TD1096_FRAME; b++) MEM_W8(wp + b, MEM_R8(SRC + ro + b));
+        MEM_W32(info + 0x24u, 0u);
+        expect(td24b_dispatch4(0x7db31251u, id, TD1096_FRAME, 0u, 0u) == 0u &&
+                   MEM_R32(info + 0x24u) == file_size && MEM_R32(info + 0x38u) == TRACK,
+               "sceAtracAddStreamData publishes the context");
+    }
+
+    /* Release clears the context; the slot's next owner starts from NO_DATA. */
+    expect(td24b_dispatch4(NID_SCE_ATRAC_RELEASE_ID, id, 0u, 0u, 0u) == 0u,
+           "context fixture: release the ID");
+    int zero = 1;
+    for (uint32_t off = 0; off < 0x100u; off += 4u) if (MEM_R32(ctx + off) != 0u) zero = 0;
+    expect(zero, "sceAtracReleaseAtracID clears the ID's context");
+    expect(td24b_dispatch4(NID_SCE_ATRAC_GET_CONTEXT_ADDRESS, id, 0u, 0u, 0u) == ATRAC_ERROR_NO_ATRACID,
+           "a released ID has no context");
+    uint32_t again = td24b_dispatch4(NID_SCE_ATRAC_GET_ID, ATRAC_CODEC_AT3, 0u, 0u, 0u);
+    expect(again == id && td24b_dispatch4(NID_SCE_ATRAC_GET_CONTEXT_ADDRESS, again, 0u, 0u, 0u) == ctx &&
+               MEM_R8(info + 0x15u) == 1u && MEM_R32(info + 0x38u) == 0u,
+           "the slot's next ID gets the same context, back at NO_DATA");
+    (void)td24b_dispatch4(NID_SCE_ATRAC_RELEASE_ID, again, 0u, 0u, 0u);
+    s_fixture_loaded_end = loaded_end;
+    sr_hle_test_partition_reset();
+}
+
 static void test_td24d_hle_batch(void) {
     reset_fixture();
     sr_hle_init();
@@ -52649,6 +52760,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_at3_set_data_delay_2048_1096();
     test_atrac_set_entry_points_1379();
     test_atrac_aa3_and_reinit_1379();
+    test_atrac_guest_context_322();
     test_td24d_hle_batch();
     test_impose_language_mode_pair();
     test_sas_core_mix_preserves_caller_pcm();

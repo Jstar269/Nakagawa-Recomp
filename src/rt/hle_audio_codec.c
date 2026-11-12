@@ -699,7 +699,113 @@ static uint32_t atrac_set_new(uint32_t buf, uint32_t readSize, uint32_t bufSize,
     atrac_log_setdata(a, call);
     return (uint32_t)id;
 }
-static Atrac *atrac_of(uint32_t id) { return id < 8 && s_atrac[id].used ? &s_atrac[id] : 0; }
+/* _sceAtracGetContextAddress: the guest-visible context (#322).
+ *
+ * A game may ask for the address of an ID's context and read (or write) its fields directly; a
+ * SAS ATRAC3 voice is bound to one by that address. The runtime keeps its ATRAC state on the
+ * host, so the context is a guest copy, written from that state after every call that changes
+ * it, and read back where a game may write it.
+ *
+ * Layout: PPSSPP's SceAtracContext (Core/HLE/AtracBase.h, GPL-2.0-or-later, revision 3bc60270e):
+ * 0x100 bytes per ID, the codec block in the first 0x80 (left zero: no Media Engine here) and the
+ * SceAtracIdInfo block after it, with the ID at +0xfc. The offsets below are into the info block.
+ * None of it is measured on a PSP (UNMEASURED; PSP request R2-3 in the lane notes).
+ *
+ * Where it lives: on a PSP the contexts sit in the ATRAC library module's data, in the user
+ * partition. sceUtilityLoadModule records module state only and reserves no memory
+ * (hle_utility.c), so the eight contexts are one user-partition block, allocated by the first
+ * _sceAtracGetContextAddress. A title that never calls it keeps the partition layout it had.
+ *
+ * Written: buffer, bufferByte, secondBuffer, secondBufferByte, state, numChan, sampleSize, codec,
+ * dataOff, fileDataEnd and loopNum, which map one to one onto the runtime's state. Not modelled,
+ * and left as they are: the sample-domain fields (decodePos, endSample, loopStart, loopEnd,
+ * firstValidSample, numSkipFrames), which count from the first-sample offset the runtime keeps
+ * only for plain AT3, and the streaming cursors (curFileOff, streamDataByte, streamOff,
+ * secondStreamOff, curBuffer), whose PSP meaning differs from the runtime's ring view.
+ * Read back: loopNum, before every call on the ID, as PPSSPP does (Core/HLE/sceAtrac.cpp
+ * getAtrac); a game may keep its own value there. A guest write to any other field is
+ * overwritten by the next call that changes the context. */
+#define ATRAC_CTX_SIZE 0x100u
+#define ATRAC_CTX_INFO 0x80u              /* SceAtracIdInfo inside SceAtracContext */
+#define ATRAC_CTX_STATE 0x15u             /* u8 */
+#define ATRAC_CTX_NUM_CHAN 0x17u          /* u8 */
+#define ATRAC_CTX_SAMPLE_SIZE 0x18u       /* u16: bytes per encoded frame */
+#define ATRAC_CTX_CODEC 0x1au             /* u16: 0x1000 ATRAC3+, 0x1001 ATRAC3 */
+#define ATRAC_CTX_DATA_OFF 0x1cu
+#define ATRAC_CTX_FILE_DATA_END 0x24u
+#define ATRAC_CTX_LOOP_NUM 0x28u
+#define ATRAC_CTX_BUFFER 0x38u
+#define ATRAC_CTX_SECOND_BUFFER 0x3cu
+#define ATRAC_CTX_BUFFER_BYTE 0x40u
+#define ATRAC_CTX_SECOND_BUFFER_BYTE 0x44u
+#define ATRAC_CTX_ID 0xfcu                /* from the context start */
+#define ATRAC_CTX_STATUS_NO_DATA 1u       /* the PSP's state for an ID with no track yet */
+static uint32_t s_atrac_ctx_uid;          /* partition block of the eight contexts, 0 = none */
+
+static void atrac_ctx_push(const Atrac *a) {
+    if (!a->ctxAddr) return;
+    const uint32_t info = a->ctxAddr + ATRAC_CTX_INFO;
+    MEM_W8(info + ATRAC_CTX_STATE, a->bufferState ? (uint32_t)a->bufferState : ATRAC_CTX_STATUS_NO_DATA);
+    MEM_W8(info + ATRAC_CTX_NUM_CHAN, (uint32_t)a->channels);
+    MEM_W16(info + ATRAC_CTX_SAMPLE_SIZE, a->bytesPerFrame);
+    MEM_W16(info + ATRAC_CTX_CODEC, a->codecType);
+    MEM_W32(info + ATRAC_CTX_DATA_OFF, a->dataByteOffset);
+    MEM_W32(info + ATRAC_CTX_FILE_DATA_END, a->fileSize);
+    MEM_W32(info + ATRAC_CTX_LOOP_NUM, (uint32_t)a->loopNum);
+    MEM_W32(info + ATRAC_CTX_BUFFER, a->buf);
+    MEM_W32(info + ATRAC_CTX_SECOND_BUFFER, a->secondBuf);
+    MEM_W32(info + ATRAC_CTX_BUFFER_BYTE, a->bufferMaxSize);
+    MEM_W32(info + ATRAC_CTX_SECOND_BUFFER_BYTE, a->secondBufSize);
+    MEM_W32(a->ctxAddr + ATRAC_CTX_ID, (uint32_t)(a - s_atrac));
+}
+static void atrac_ctx_clear(uint32_t addr) {
+    for (uint32_t off = 0; off < ATRAC_CTX_SIZE; off += 4u) MEM_W32(addr + off, 0u);
+}
+static Atrac *atrac_of(uint32_t id) {
+    Atrac *a = id < 8 && s_atrac[id].used ? &s_atrac[id] : 0;
+    if (a && a->ctxAddr) a->loopNum = (int)MEM_R32(a->ctxAddr + ATRAC_CTX_INFO + ATRAC_CTX_LOOP_NUM);
+    return a;
+}
+/* The calls that change an ID's state publish it to its context before they return: the ID is
+ * their first argument, read before the call's work. */
+static uint32_t atrac_published(uint32_t id, uint32_t ret) {
+    if (id < 8u && s_atrac[id].used) atrac_ctx_push(&s_atrac[id]);
+    return ret;
+}
+/* _sceAtracGetContextAddress(id): the context's guest address. An ID that is not in use is
+ * refused with ATRAC_ERROR_NO_ATRACID, the code every call returned before the context existed;
+ * PPSSPP returns 0 there instead (UNMEASURED). When the partition cannot hold the contexts the
+ * call returns 0 and says so on stderr: there is no context to point at. */
+static uint32_t h_AtracGetContextAddress(CpuState *s) {
+    const uint32_t id = A0;
+    Atrac *a = atrac_of(id);
+    if (!a) return ATRAC_ERROR_NO_ATRACID;
+    if (!a->ctxAddr) {
+        uint32_t table = s_atrac_ctx_uid ? block_addr(s_atrac_ctx_uid) : 0u;
+        if (!table) {
+            /* A new program (sceKernelLoadExec) starts with a fresh partition, which drops the
+             * old block: block_addr no longer finds it, and the table is allocated again. */
+            const uint32_t uid = alloc_block(8u * ATRAC_CTX_SIZE);
+            table = uid != 0xFFFFFFFFu ? block_addr(uid) : 0u;
+            if (!table) {
+                fprintf(stderr, "ATRAC_CONTEXT_NO_MEMORY: _sceAtracGetContextAddress(%u): the user "
+                                "partition cannot hold the 0x%x bytes of ATRAC contexts; returned 0 "
+                                "(#322).\n", id, 8u * ATRAC_CTX_SIZE);
+                fflush(stderr);
+                return 0u;
+            }
+            s_atrac_ctx_uid = uid;
+            for (uint32_t i = 0; i < 8u; i++) {
+                s_atrac[i].ctxAddr = 0u;
+                atrac_ctx_clear(table + i * ATRAC_CTX_SIZE);
+            }
+        }
+        a->ctxAddr = table + id * ATRAC_CTX_SIZE;
+        atrac_ctx_clear(a->ctxAddr);
+    }
+    atrac_ctx_push(a);
+    return a->ctxAddr;
+}
 /* Shared body of the calls that configure an existing ID. A MOut call on a
  * track that is not mono returns NOT_MONO; the public reference keeps the
  * data in that case, but its stereo-to-mono output is not modelled here, so
@@ -746,19 +852,19 @@ static uint32_t h_AtracSetMOutHalfwayBufferAndGetID(CpuState *s) {
 }
 /* sceAtracSetData(id, buf, bufSize) */
 static uint32_t h_AtracSetData(CpuState *s) {
-    return atrac_set_existing(A0, A1, A2, A2, 0, "SetData");
+    return atrac_published(A0, atrac_set_existing(A0, A1, A2, A2, 0, "SetData"));
 }
 /* sceAtracSetHalfwayBuffer(id, buf, readSize, bufSize) */
 static uint32_t h_AtracSetHalfwayBuffer(CpuState *s) {
-    return atrac_set_existing(A0, A1, A2, A3, 0, "SetHalfwayBuffer");
+    return atrac_published(A0, atrac_set_existing(A0, A1, A2, A3, 0, "SetHalfwayBuffer"));
 }
 /* sceAtracSetMOutData(id, buf, bufSize) */
 static uint32_t h_AtracSetMOutData(CpuState *s) {
-    return atrac_set_existing(A0, A1, A2, A2, 1, "SetMOutData");
+    return atrac_published(A0, atrac_set_existing(A0, A1, A2, A2, 1, "SetMOutData"));
 }
 /* sceAtracSetMOutHalfwayBuffer(id, buf, readSize, bufSize) */
 static uint32_t h_AtracSetMOutHalfwayBuffer(CpuState *s) {
-    return atrac_set_existing(A0, A1, A2, A3, 1, "SetMOutHalfwayBuffer");
+    return atrac_published(A0, atrac_set_existing(A0, A1, A2, A3, 1, "SetMOutHalfwayBuffer"));
 }
 /* sceAtracSetAA3DataAndGetID(buf, bufSize, fileSize, metadataSizeAddr) and
  * sceAtracSetAA3HalfwayBufferAndGetID(buf, readSize, bufSize, fileSize) take
@@ -811,6 +917,9 @@ static uint32_t h_AtracReleaseAtracID(CpuState *s) {
     if (!a) return ATRAC_ERROR_BAD_ATRACID;
     atrac_release_decoder(a);
     atrac_stream_window_free(a);
+    /* The context goes with the ID: cleared, and the next owner of the slot asks again. */
+    if (a->ctxAddr) atrac_ctx_clear(a->ctxAddr);
+    a->ctxAddr = 0u;
     a->used = 0;
     return 0;
 }
@@ -1010,7 +1119,7 @@ static uint32_t atrac3_first_frame_rule(const Atrac *a, int *skip) {
     return 0;
 }
 
-static uint32_t h_AtracDecodeData(CpuState *s) {
+static uint32_t atrac_decode_data(CpuState *s) {
     /* a0=id, a1=outSamples, a2=*decodedSamples, a3=*finishFlag, t0=*remainFrames. */
     s_atrac_last_block_us = 0u;
     Atrac *a = atrac_of(A0); if (!a) return ATRAC_ERROR_BAD_ATRACID;
@@ -1106,6 +1215,10 @@ static uint32_t h_AtracDecodeData(CpuState *s) {
     if (block_us) sched_delay_current(block_us);
     return 0;
 }
+static uint32_t h_AtracDecodeData(CpuState *s) {
+    const uint32_t id = A0;
+    return atrac_published(id, atrac_decode_data(s));
+}
 /* sceAtracGetNextSample(id, *outN): how many samples the NEXT DecodeData call
  * will produce. Previously registered to the generic success handler, which
  * leaves the caller's output variable untouched -- so the game read whatever
@@ -1190,7 +1303,7 @@ static uint32_t h_AtracIsSecondBufferNeeded(CpuState *s) {
  * buffer with a nonzero size, are UNMEASURED: the inconsistent pair is
  * refused with the neighbouring SIZE_TOO_SMALL code. Errors reuse the
  * neighbouring Atrac codes. */
-static uint32_t h_AtracSetSecondBuffer(CpuState *s) {
+static uint32_t atrac_set_second_buffer(CpuState *s) {
     Atrac *a = atrac_of(A0); if (!a) return ATRAC_ERROR_BAD_ATRACID;
     uint32_t buf = A1, size = A2;
     if (!buf) {
@@ -1203,6 +1316,10 @@ static uint32_t h_AtracSetSecondBuffer(CpuState *s) {
     a->secondBuf = buf;
     a->secondBufSize = size;
     return 0;
+}
+static uint32_t h_AtracSetSecondBuffer(CpuState *s) {
+    const uint32_t id = A0;
+    return atrac_published(id, atrac_set_second_buffer(s));
 }
 static uint32_t h_AtracGetNextSample(CpuState *s) {
     Atrac *a = atrac_of(A0); if (!a) return ATRAC_ERROR_BAD_ATRACID;
@@ -1241,7 +1358,7 @@ static uint32_t h_AtracGetStreamDataInfo(CpuState *s) {
         MEM_W32(A3, readOffset);
     return 0;
 }
-static uint32_t h_AtracAddStreamData(CpuState *s) {
+static uint32_t atrac_add_stream_data(CpuState *s) {
     /* a1=size (new bytes available), a2=*writableBytes (updated by the call). */
     Atrac *a = atrac_of(A0); if (!a) return ATRAC_ERROR_BAD_ATRACID;
     uint32_t n = A1, writeOffset = 0, maxWritable = 0, readOffset = 0;
@@ -1276,6 +1393,10 @@ static uint32_t h_AtracAddStreamData(CpuState *s) {
     }
     return 0;
 }
+static uint32_t h_AtracAddStreamData(CpuState *s) {
+    const uint32_t id = A0;
+    return atrac_published(id, atrac_add_stream_data(s));
+}
 /* MEASURED (#1096, PSP-AT3-002): after a shortened first AT3 call the position is the samples
  * the guest has received (955 after a 955-sample call, then 1979, 3003, ...), so the dropped
  * leading samples are taken off the decoder position. */
@@ -1299,7 +1420,11 @@ static uint32_t h_AtracGetLoopStatus(CpuState *s) {
     if (A2) MEM_W32(A2, a->loopEndSample > 0 && a->bufferState != ATRAC_STATE_STREAMED_LOOP_TRAILER ? 1u : 0u);
     return 0;
 }
-static uint32_t h_AtracSetLoopNum(CpuState *s) { Atrac *a = atrac_of(A0); if (a) a->loopNum = (int)A1; return 0; }
+static uint32_t h_AtracSetLoopNum(CpuState *s) {
+    Atrac *a = atrac_of(A0);
+    if (a) { a->loopNum = (int)A1; atrac_ctx_push(a); }
+    return 0;
+}
 /* sceAtracGetBufferInfoForResetting and sceAtracResetPlayPosition share one
  * description of the refill that a reset to `sample` needs: one span of the
  * 32-byte PSPSDK pspatrac3.h PspBufferInfo (write address, bytes the guest
@@ -1375,7 +1500,7 @@ static uint32_t atrac_reset_buffer_info(const Atrac *a, uint32_t sample,
  * and leave the context unchanged. Whether the PSP decodes the state-loading
  * frame to prime the decoder is not measured; like sceAtracSetData, the HLE
  * skips it. */
-static uint32_t h_AtracResetPlayPosition(CpuState *s) {
+static uint32_t atrac_reset_play_position(CpuState *s) {
     Atrac *a = atrac_of(A0);
     if (!a) return ATRAC_ERROR_BAD_ATRACID;
     uint32_t sample = A1, wroteFirst = A2, wroteSecond = A3;
@@ -1404,6 +1529,10 @@ static uint32_t h_AtracResetPlayPosition(CpuState *s) {
         fprintf(stderr, "ATRAC_RESET: id=%u sample=%u wrote=%u size=%u pos=%u avail=%u state=%d\n",
                 A0, sample, wroteFirst, a->size, a->bufferPos, a->bufferValidBytes, a->bufferState);
     return 0;
+}
+static uint32_t h_AtracResetPlayPosition(CpuState *s) {
+    const uint32_t id = A0;
+    return atrac_published(id, atrac_reset_play_position(s));
 }
 
 /* sceAtracGetSecondBufferInfo(id, *puiPosition, *puiDataByte): second-buffer
@@ -2052,7 +2181,7 @@ void hle_register_atrac_handlers(void) {
     sr_hle_register_unsupported(0xd1f59fdb, "sceAtracStartEntry", 0x80630004u); /* ATRAC invalid codec type */
     sr_hle_register(0xeca32a99, "sceAtracIsSecondBufferNeeded", h_AtracIsSecondBufferNeeded);
     sr_hle_register(0xe88f759b, "sceAtracGetInternalErrorInfo", h_AtracGetInternalErrorInfo);
-    sr_hle_register_unsupported(0x231fc6b7, "_sceAtracGetContextAddress", 0x80630003u); /* ATRAC no ATRAC ID */
+    sr_hle_register(0x231fc6b7, "_sceAtracGetContextAddress", h_AtracGetContextAddress);
     sr_hle_register_unsupported(0x1575d64b, "sceAtracLowLevelInitDecoder", 0x80630004u); /* ATRAC invalid codec type */
     sr_hle_register_unsupported(0x0c116e1b, "sceAtracLowLevelDecode", 0x80630004u); /* ATRAC invalid codec type */
 }
