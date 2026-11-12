@@ -234,7 +234,25 @@
         "player"
       ]
     },
+    "HOMEBREW_ALREADY_ADDED": {
+      "stage": "inspect",
+      "in": [
+        "player"
+      ]
+    },
+    "HOMEBREW_FOLDER_UNSUPPORTED": {
+      "stage": "inspect",
+      "in": [
+        "player"
+      ]
+    },
     "HOMEBREW_KERNEL_MODE_UNSUPPORTED": {
+      "stage": "inspect",
+      "in": [
+        "player"
+      ]
+    },
+    "HOMEBREW_KEY_TAKEN": {
       "stage": "inspect",
       "in": [
         "player"
@@ -1133,6 +1151,12 @@
         "player"
       ]
     },
+    "HOMEBREW_KEPT_COPY_NOT_DELETED": {
+      "stage": "host",
+      "in": [
+        "player"
+      ]
+    },
     "INSTALL_CANCELLED": {
       "stage": "host",
       "in": [
@@ -1412,6 +1436,12 @@
       ]
     },
     "UPDATE_INSTALL_LEFTOVER": {
+      "stage": "host",
+      "in": [
+        "player"
+      ]
+    },
+    "UPDATE_INSTALL_LEFTOVER_IN_USE": {
       "stage": "host",
       "in": [
         "player"

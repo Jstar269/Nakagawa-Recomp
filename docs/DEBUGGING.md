@@ -612,9 +612,11 @@ coverage classes, such as `unverified` and `synthetic`, are defined in [`HLE_COV
 | `SR_NO2DZ=1` | Disable 2D Z-buffer |
 | `SR_GPU_STATS=1` | Emit bounded Vulkan submission/batch/texture/snapshot counters without per-submit logging |
 | `SR_GPU_TIMESTAMPS=1` | Measure GPU time with Vulkan timestamp queries: each GE command buffer split by op kind (render batch, snapshot copy, upload, readback, other), printed as a `GEGPU_TS` line every 60 presents and a `GEGPU_TS_TOTAL` line at exit, and the presentation blit; with `SR_PERF_FRAMES` the times also fill the `gpu_*` columns. An op on the interlock destination-read path (#2109) takes no snapshot copy, and its time counts as render batch. Ops overlap on the GPU, so the split is an attribution and the sum is the whole execution span. It changes no rendering, guest memory or wait |
-| `SR_GPU_TWIN_COLOR=1\|native` | Host twin (#2050), Ace Mode only: `1` presents full 32-bit colour without dither, `native` keeps the authentic colour (for identity checks). Any other value except `0` and `off` is refused. Guest VRAM is unchanged ([ENHANCEMENT_CONTRACT.md 10.11](ENHANCEMENT_CONTRACT.md#1011-full-32-bit-colour-the-host-twin)). Prints `TWIN:` lines at start and exit |
+| `SR_GPU_TWIN_COLOR=1\|native\|0\|off` | Developer override of the launch line's `twin` key (the player's "Full 32-bit colour", #2050), for the Vulkan and the software renderer. It wins whenever it is set, so it overrides the player's setting: `1` turns on full 32-bit colour without dither (also when the player left it off), `native` keeps the authentic colour (for identity checks), `0` and `off` turn off a twin the line asked for (the Ace report names `twin` unavailable: SR_GPU_TWIN_COLOR overrides it); unset or empty leaves the choice to the line. Ace Mode only. Any other value is refused. Guest VRAM is unchanged ([ENHANCEMENT_CONTRACT.md 10.11](ENHANCEMENT_CONTRACT.md#1011-full-32-bit-colour-the-host-twin)). Prints `TWIN:` lines at start and exit |
 | `SR_GPU_TWIN_CAPTURE=authentic` | With the twin on, present and capture the authentic image instead of the twin |
 | `SR_GPU_TWIN_DUMP=PREFIX` | `gpu-coherence-selftest` twin-scene: write each shown image as `PREFIX_t<n>_s<scale>.raw` (RGBA) |
+| `SR_GPU_DEPTH_REF=PATH` | `gpu-coherence-selftest` host-depth case: a run without `depth=32` writes this reference (its depth readback hash), a `depth=32` run at the same scale checks against it (the harness's `--depth-ref`) |
+| `SR_GPU_SSAA_REF=PATH` | `gpu-coherence-selftest` ssaa-edge case: a run without supersampling writes this reference (its guest VRAM hash), a supersampled run at the same scale checks against it (the harness's `--ssaa-ref`) |
 | `SR_GPU_TWIN_REF=PATH` | `gpu-coherence-selftest` twin cases: a twin-off run writes this reference, a twin-on run at the same scale checks against it (the harness's `--twin-ref`) |
 | `SR_GEDUMP=1` | Per-primitive `GE PRIM` lines (through and transform), bounded to the first ~40 |
 | `SR_GE_ENQUEUE_TRACE=1` | Trace GE enqueue/stall-update provenance without enabling the broader GE dump |
@@ -1345,6 +1347,21 @@ Supported formats are `5650`, `5551`, `4444`, `8888`, `CLUT4`, `CLUT8`, `CLUT16`
 
 `mingw32-make --no-print-directory display-smoke-run` checks raw-to-PNG pixels against the display smoke fixture's host-sink PPM and checks that enabling the capture leaves that PPM byte-identical. This headless check uses the existing `SR_FIRST_FRAME_DUMP` host-sink PPM; `SR_FBSNAP` and `SR_FBDUMP` captures are published from the same `SR_VIDEO=offscreen` sink as well. The interactive in-player VRAM panel remains UNBUILT; the headless viewer is the partial capability tracked by [#314](https://github.com/Jstar269/nakagawa-recomp/issues/314).
 
+#### GE scene dump
+
+Set `SR_GESCENE=<frame>` and `SR_GESCENE_DIR=<existing-directory>` to write every PRIM of one GE
+frame to `gescene_f<frame>.bin`: each draw's identity, the GE state it draws with (matrices, lights,
+material, texture, targets) and its vertices in model space, before skinning. The format is
+versioned and documented in `src/rt/ge_scene.h`. The runtime prints
+`GESCENE: frame <n>: <k> records -> <path>` once a later frame begins. It prints
+`GESCENE NOT_CAPTURED (...)` if the run ends first, by any exit, `SR_EXIT_AT_VBLANK` and the other
+debug stops included; a file already started then holds only part of the frame. It prints
+`GESCENE CONFIG_FAIL (...)` for a frame number that is not plain digits or is above 4294967295, an
+`SR_GESCENE_DIR` too long for a path, or an unset or empty `SR_GESCENE_DIR`, and
+`GESCENE WRITE_FAIL (...)` if the file cannot be created (a folder that does not exist), written or
+closed. Off by default and host-side; with no dump, nothing the GE draws changes. The file holds
+decoded game geometry: like a VRAM dump, it is private evidence and never published.
+
 #### Where `SR_EXIT_AT_VBLANK` actually stops
 
 It is the **last statement of `sr_vblank_tick()`**. At that point vblank *V* is complete in
@@ -1423,7 +1440,8 @@ Use the deterministic clock. Under the paced clock, guest time follows the host,
 from the first checkpoint on by design. To narrow a mismatch:
 
 - a `ram.<addr>` chunk: set a memory watch on that MiB;
-- a `cpu.<uid>` thread: arm `SR_FLIGHT_TRIGGER` near the mismatching vblank on the next run.
+- a `cpu.<uid>` thread: replay the recording with `SR_FLIGHT` set. Its first mismatch freezes the
+  flight record there (see "Recording and replaying a run" below).
 
 Hashing all of RAM takes a noticeable fraction of a second per checkpoint, so raise
 `SR_REPLAY_CHECKPOINT_EVERY` on long runs. A checkpoint file holds no game bytes, but it describes a
@@ -1473,6 +1491,26 @@ reaches it and writes exactly one verdict to stderr:
 | `REPLAY_MISSING_ANSWER call=osk request=<k> frame=<f> detail=<why>` | exit 1: the guest asked for an answer the recording does not hold. Nothing is made up |
 | `REPLAY_COMPLETE frame=<f> checkpoints=<n> answers=<k>` | every checkpoint matched. Input recorded after the last one is still served; the pad and the keyboard each go live when the recording runs out |
 | `REPLAY_NOT_RUN reached=<f> end=<f> checkpoints=<i>/<n>` | at exit, when the run stopped before the recording was used up. This is never a pass |
+
+With the flight recorder on (`SR_FLIGHT`, below), the first mismatch also arms it, so the record
+keeps the events just before the divergence:
+
+- With no `SR_FLIGHT_TRIGGER` mode armed, the mismatch arms the `checkpoint:KIND:N:0` mode at the
+  newest recorded event, the `N`th of its kind, and the record freezes there with terminal
+  `trigger`. The bundle has the events, policy and terminal of a run armed with that spec from the
+  start. Its thread table and refusal counts are read as the replay stops at the mismatch. stderr says
+  `SR_FLIGHT: the replay mismatch froze the record at event <seq> (SR_FLIGHT_TRIGGER=checkpoint:<kind>:<n>:0)`.
+- A mode you armed is left in charge, and stderr says so and nothing more.
+- When the frozen ring no longer holds the newest event before the last matching checkpoint (at
+  least `limit` events happened since), the bundle starts after that checkpoint. stderr then also
+  gives the next run's trigger,
+  `SR_FLIGHT_TRIGGER=checkpoint:<kind>:<n>:<limit-1>`. It opens the window at the newest event
+  before the last matching checkpoint, so the next replay, with the same `SR_FLIGHT`, keeps the
+  first `limit - 1` events after that checkpoint, where the divergence began. The two bundles
+  bracket the span. The position is exact only when the enabled classes record the same events
+  in both replays; check with `tools/flight_diff.py`.
+
+These `SR_FLIGHT:` lines are not verdicts. Without `SR_FLIGHT` the mismatch prints none.
 
 The pad is recorded after the route, the stick mode and the keyboard have shaped it, so a replay needs
 neither the person nor the script, and a pause requested during a replay does not change it. Route
@@ -1625,6 +1663,8 @@ scan: they are excluded from `presenting` and never counted as a stall.
 | `SR_FBDUMP=N` | At vcount=N publish the presented frame as `present_source.ppm` and exit; status 0 only if a capture was truly published, else 1 |
 | `SR_VRAMDUMP=V[,V...]` | Capture the raw 2 MiB guest VRAM image and GE metadata at up to eight unique presented vblanks; pair with `SR_VRAMDUMP_DIR` |
 | `SR_VRAMDUMP_DIR=PATH` | Existing directory for `vram_<vblank>.bin` and `.json` capture files |
+| `SR_GESCENE=F` | Dump GE frame `F`'s scene records (one per PRIM: identity, state, model-space vertices); pair with `SR_GESCENE_DIR` |
+| `SR_GESCENE_DIR=PATH` | Existing directory for the `gescene_f<frame>.bin` scene dump |
 | `SR_VIDEOREC_DIR=PATH` | Record the run: one video frame per VBLANK at the presenter's output size plus the game's mixed audio, on one guest timeline. Needs `SR_DETERMINISTIC_CLOCK=1`; without it the recording is refused ([Recording a video of a run](#recording-a-video-of-a-run)) |
 | `SR_VIDEOREC_CODEC=ffv1\|x264rgb\|nvenc\|raw` | Encoder for a recording (default `ffv1`, lossless); `raw` writes unencoded frames and needs no FFmpeg. An encoder that cannot run refuses the recording; it never falls back to `raw` |
 | `SR_VIDEOREC_SIZE=WxH` | Output size of a recording, independent of the window (even numbers); default: the window's size at the first recorded present |
@@ -2368,8 +2408,8 @@ player and game behave as they do for everyone ([#314](https://github.com/Jstar2
   is counted under its rule name (`rule=blend-2lsb`), and a frame with only those reports
   `result=RULE_ONLY`. Each buffer is compared over everything a draw can write there (the scissor,
   or a transfer's rectangle). When a buffer cannot be compared in full (more than 32 buffers, a
-  stride past 1024, a scissor past ge.c's raster bound (the stride up to 512 columns, or 480 on a
-  stride of 480 or less, and 272 rows), depth past ge.c's 272 rows),
+  stride past 1024, a scissor past 512 columns or 272 rows (both renderers draw up to the target's
+  stride, 512 at most, and compare that), depth past ge.c's 272 rows),
   the tool prints `result=INCOMPLETE` with a
   `GE_FBD_UNCOMPARED` line per buffer and exits 5, and a capture with no draw is `result=NO_DRAWS`
   (exit 6): neither is ever `NO_DIFFERENCE`. A capture of a title is private, and so are its report

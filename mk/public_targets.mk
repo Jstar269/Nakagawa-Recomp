@@ -133,6 +133,7 @@ PUBLIC_TARGETS := \
 	ge-tnl-census-selftest \
 	xr-selftest \
 	ge-patch-tess-selftest \
+	ge-scene-selftest \
 	ge-flight-overhead \
 	vfpu-tables-selftest \
 	watchpoints-file-selftest \
@@ -173,6 +174,7 @@ PUBLIC_TARGETS := \
 	atrac3p-title-accept \
 	gpu-coherence-selftest \
 	gpu-coherence-selftest-snapbar-mutants \
+	gpu-coherence-twin-mutants \
 	gpu-coherence-pcache-mutant \
 	vram-view-identity-selftest \
 	gpu-dst-read-mutants \
@@ -344,6 +346,7 @@ HELP_DESCRIPTION_ge-cpu-profile-validate-selftest := run the GE CPU-profile vali
 HELP_DESCRIPTION_ge-tnl-census-selftest := run the GPU T&L decline census selftest (#318) on the production GE object
 HELP_DESCRIPTION_xr-selftest := run the OpenXR (VR) module selftest (#791) against a fake OpenXR runtime: no headset or loader needed
 HELP_DESCRIPTION_ge-patch-tess-selftest := run the finer Bezier and spline patch selftest on the production GE object (no GPU)
+HELP_DESCRIPTION_ge-scene-selftest := run the GE scene record selftest (#1330): the dump, a consumer and the no-consumer identity on the production GE object
 HELP_DESCRIPTION_ge-flight-overhead := measure the disarmed flight recorder cost on the GE draw path (recorder linked vs absent; no game data)
 HELP_DESCRIPTION_vfpu-tables-selftest := run the VFPU table-loader selftest
 HELP_DESCRIPTION_watchpoints-file-selftest := run the watchpoints-file selftest
@@ -384,8 +387,9 @@ HELP_DESCRIPTION_audio-resampler-bench := run the synthetic-input audio resample
 HELP_DESCRIPTION_atrac3p-title-accept := run the optional ATRAC3+ title acceptance route
 HELP_DESCRIPTION_gpu-coherence-selftest := run the GPU coherence selftest
 HELP_DESCRIPTION_gpu-coherence-selftest-snapbar-mutants := prove the GPU coherence selftest kills three broken snapshot-copy barrier variants
+HELP_DESCRIPTION_gpu-coherence-twin-mutants := prove the GPU coherence selftest kills thirteen broken host-twin variants (builds thirteen binaries; not part of native-core-tests)
 HELP_DESCRIPTION_gpu-coherence-pcache-mutant := prove pipeline-cache-cold fails when pipelines bypass the Vulkan pipeline cache
-HELP_DESCRIPTION_vram-view-identity-selftest := check that the GE decoders the pause menu's VRAM viewer calls leave later frames, guest memory and the GE state unchanged (#314; needs a Vulkan device and fails without one)
+HELP_DESCRIPTION_vram-view-identity-selftest := check that the sources and decode the pause menu's VRAM viewer runs name the expected surfaces and leave later frames, guest memory and the GE state unchanged (#314; needs a Vulkan device and fails without one)
 HELP_DESCRIPTION_gpu-dst-read-mutants := prove the GPU coherence dst-read cells kill nine broken destination-read variants
 HELP_DESCRIPTION_gpu-stencil-once-mutants := prove the GPU coherence stencil-once case kills three broken write-once stencil batch variants
 HELP_DESCRIPTION_gpu-snapsync-selftest := run the GPU snapshot-sync selftest

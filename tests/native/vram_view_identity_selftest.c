@@ -7,10 +7,11 @@
  *
  * The viewer decodes guest VRAM while the game is paused at a VBLANK: the displayed framebuffer,
  * a window the user steps to (here the render-to-texture source), the depth buffer and the bound
- * texture. This test calls the decoders the page calls, ge_vram_decode_surface and
- * ge_vram_decode_bound_texture, with the arguments gui_pause_describe_vram and
- * gui_pause_decode_vram pass. It does not run those two gui.c functions, which are static there:
- * a change to them that writes guest state would not show here.
+ * texture. gui.c's page takes its sources from ge_vram_view_sources and decodes through
+ * ge_vram_view_decode (ge_shared.h); this test runs those two functions as gui_pause_describe_vram
+ * and gui_pause_decode_vram call them, checks which buffer, stride, size and format each source
+ * names, and decodes every source the page offers plus a window stepped off the display one.
+ * What gui.c adds around them is a field-for-field copy into the page's model.
  *
  * On the Vulkan backend those reads go through sr_guest_copy_in, which materialises
  * GPU-resident targets into guest VRAM and applies CPU stores the backend was still holding. A
@@ -309,24 +310,64 @@ static int expect_px(const char *what, uint32_t got, uint32_t want, uint32_t mas
     return 0;
 }
 
-/* What the page does at a VBLANK, for each source it offers: the arguments are the ones
- * gui_pause_describe_vram and gui_pause_decode_vram pass. Checks that each decode shows the
+static int expect_window(const char *what, const GeVramSources *s, int i, uint32_t addr,
+                         uint32_t stride, uint32_t width, uint32_t height, uint32_t format) {
+    const GeVramWindow *w = &s->window[i];
+    if (s->present[i] && w->addr == addr && w->stride == stride && w->width == width &&
+        w->height == height && w->format == format)
+        return 1;
+    fprintf(stderr, "vram view identity: FAIL %s source present=%u 0x%08x stride %u %ux%u format %u, "
+                    "want 0x%08x stride %u %ux%u format %u\n", what, s->present[i], w->addr,
+            w->stride, w->width, w->height, w->format, addr, stride, width, height, format);
+    return 0;
+}
+
+/* One decode as gui_pause_decode_vram asks it: the texture source by the GE state, any other
+ * window as given. Requires the decoded size to be the window's. */
+static int view(const char *what, int texture, const GeVramWindow *w) {
+    uint32_t width = 0, height = 0;
+    const int result = ge_vram_view_decode(texture, w, s_px, sizeof(s_px) / sizeof(s_px[0]),
+                                           &width, &height);
+    if (result == GE_VRAM_VIEW_SHOWN && width == w->width && height == w->height) return 1;
+    fprintf(stderr, "vram view identity: FAIL %s decode result %d, %ux%u for a %ux%u window\n",
+            what, result, width, height, w->width, w->height);
+    return 0;
+}
+
+/* What the page does at a VBLANK: the sources gui_pause_describe_vram describes (the display
+ * scans out T2), then each decoded as gui_pause_decode_vram decodes it, and a window stepped
+ * off the display one. Checks which surface each source names, that each decode shows the
  * scene, and that the decodes moved bytes into guest VRAM. */
 static int run_viewer(uint32_t f) {
-    const GeState *ge = ge_state_ptr();
     const uint32_t rgb = 0x00FFFFFFu;
+    GeVramSources src;
     int ok = 1;
     memcpy(s_before, SR_HOST(T1), sizeof(s_before));
+    ge_vram_view_sources(T2, STRIDE, 3u, 1, &src);
+    ok &= expect_window("display", &src, GE_VRAM_VIEW_DISPLAY, T2, STRIDE, PSP_W, PSP_H, 3u);
+    ok &= expect_window("draw", &src, GE_VRAM_VIEW_DRAW, T2, STRIDE, PSP_W, PSP_H, 3u);
+    ok &= expect_window("depth", &src, GE_VRAM_VIEW_DEPTH, ZBUF, STRIDE, PSP_W, PSP_H,
+                        GE_VRAM_VIEW_DEPTH16);
+    ok &= expect_window("texture", &src, GE_VRAM_VIEW_TEXTURE, T1, STRIDE, 512u, 256u, 3u);
+    ok &= !src.texture_swizzled;
+    if (!ok) return 0;
 
     /* The displayed framebuffer: T2. Its first window shows T1 (150, 90) at (166, 106). */
-    ok &= ge_vram_decode_surface(T2, PSP_W, PSP_H, STRIDE, 3u, s_px);
+    ok &= view("display", 0, &src.window[GE_VRAM_VIEW_DISPLAY]);
     ok &= expect_px("display (166,106)", s_px[106u * PSP_W + 166u], c_sprite(f), rgb);
     ok &= expect_px("display bar", s_px[258u * PSP_W + 5u], c_bar(f), rgb);
     /* The draw target the GE state names (T2 too, after list B). */
-    ok &= ge_framebuffer() == T2 && ge->fbw == STRIDE;
-    ok &= ge_vram_decode_surface(ge_framebuffer(), PSP_W, PSP_H, ge->fbw, ge->fbfmt & 3u, s_px);
-    /* A window the user stepped to: T1, the texture source, with the CPU stores in it. */
-    ok &= ge_vram_decode_surface(T1, PSP_W, PSP_H, STRIDE, 3u, s_px);
+    ok &= view("draw", 0, &src.window[GE_VRAM_VIEW_DRAW]);
+    ok &= expect_px("draw bar", s_px[258u * PSP_W + 5u], c_bar(f), rgb);
+    /* The display window stepped back once. This reproduces nk_overlay_vram_step (one window
+     * of stride x height pixels back), which this binary does not link: T1, the texture
+     * source, with the CPU stores in it. */
+    {
+        GeVramWindow stepped = src.window[GE_VRAM_VIEW_DISPLAY];
+        stepped.addr -= stepped.stride * stepped.height * 4u;
+        ok &= stepped.addr == T1;
+        ok &= view("stepped", 0, &stepped);
+    }
     ok &= expect_px("T1 sprite", s_px[90u * PSP_W + 150u], c_sprite(f), rgb);
     ok &= expect_px("T1 row 180", s_px[180u * PSP_W + 300u], 0xff000000u | (300u * 0x010203u) | f, ~0u);
     {
@@ -338,14 +379,13 @@ static int run_viewer(uint32_t f) {
     ok &= expect_px("T1 byte store", s_px[70u * PSP_W + 150u],
                     (c_sprite(f) & 0xff00ffffu) | ((0x11u + f) << 16), rgb);
     /* The depth buffer, as DEPTH16 grey: the RTT window's depth at (166, 106). */
-    ok &= ge_vram_decode_surface(ZBUF, PSP_W, PSP_H, STRIDE, 11u, s_px);
+    ok &= view("depth", 0, &src.window[GE_VRAM_VIEW_DEPTH]);
     {
         const uint32_t g = z_rtt(f) >> 8;
         ok &= expect_px("depth", s_px[106u * PSP_W + 166u], 0xff000000u | g | (g << 8) | (g << 16), ~0u);
     }
     /* The bound texture: T1 through the texture decoder, 512 x 256. */
-    ok &= ge->tex_addr == T1 && ge->tex_w == 512 && ge->tex_h == 256;
-    ok &= ge_vram_decode_bound_texture(s_px, sizeof(s_px) / sizeof(s_px[0]));
+    ok &= view("texture", 1, &src.window[GE_VRAM_VIEW_TEXTURE]);
     ok &= expect_px("texture", s_px[90u * 512u + 150u], c_sprite(f), rgb);
 
 #ifdef NK_VRAM_VIEW_MUTANT

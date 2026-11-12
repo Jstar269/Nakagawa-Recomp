@@ -5,6 +5,7 @@
 #define SR_FLIGHT_RECORDER_LINKED
 #endif
 #include "flight_recorder.h"
+#include "ace.h"     /* ACE_SPEC_MAX, the size of the Ace line the bundle keeps */
 #include "recomp.h"  /* SR_CPUSTATE_ABI_VERSION, stamped into the bundle header */
 
 #include <errno.h>
@@ -216,8 +217,17 @@ static uint32_t s_flight_limit = 256u;
 static uint64_t s_flight_recorded;
 static uint64_t s_flight_last_sequence;
 static uint32_t s_flight_last_kind;
+/* Events recorded of each kind, so the newest event can be named as a checkpoint position
+ * (sr_flight_mark). Index 0 is unused. Only terminal paths record without the trigger check,
+ * and no mark is taken after a terminal, so while a mark is valid these are the counts an
+ * armed checkpoint mode would have seen. */
+static uint64_t s_flight_kind_recorded[SR_FLIGHT_KIND_WATCH_CHANGE + 1u];
 static int s_flight_init_state;
-static char s_flight_ace[96];          /* Ace Mode's line for an enhanced run, else empty */
+/* Ace Mode's line for an enhanced run, else empty. It holds ACE_SPEC_MAX bytes, the size of every line
+ * the runtime accepts (ace-selftest checks that the longest line the key table formats fits it), so a
+ * line is kept whole: at 96 an Enhanced line with depth=32 was cut to "depth=3". The bundle schema's
+ * maxLength is ACE_SPEC_MAX - 1. tools/test_flight_diff.py checks the declaration and the schema. */
+static char s_flight_ace[ACE_SPEC_MAX];
 /* The window's upscale stamp (gui.c gui_upscale_init): "fsr1", "movie-anime4k", "movie-fsr1",
  * "fsr1+movie-anime4k" or "fsr1+movie-fsr1". 32 holds the longest (18) with room to spare. */
 static char s_flight_upscale[32];
@@ -546,6 +556,7 @@ static uint64_t record_locked(uint32_t event_class, uint32_t kind, uint32_t arg0
     s_flight_recorded = sequence;
     s_flight_last_sequence = sequence;
     s_flight_last_kind = kind;
+    if (kind <= SR_FLIGHT_KIND_WATCH_CHANGE) s_flight_kind_recorded[kind]++;
     if (s_trig_window_open && --s_trig_after_remaining == 0u) mode_freeze();
     return sequence;
 }
@@ -648,6 +659,46 @@ void sr_flight_record(uint32_t event_class, uint32_t kind, uint32_t arg0, uint32
                       uint32_t arg2, uint32_t arg3) {
     if (!sr_flight_class_enabled(event_class)) return;
     (void)record_checked(event_class, kind, arg0, arg1, arg2, arg3);
+}
+
+int sr_flight_mark(SrFlightMark *out) {
+    if (s_flight_init_state != 2) sr_flight_init();
+    if (s_flight_classes == 0u || s_flight_trigger_count != 0u || s_flight_recorded == 0u) return 0;
+    const uint32_t kind = s_flight_last_kind;
+    if (kind == 0u || kind > SR_FLIGHT_KIND_WATCH_CHANGE) return 0;
+    const uint32_t event_class = kind_class(kind);
+    if (event_class == 0u || event_class == SR_FLIGHT_CLASS_FATAL || !(s_flight_classes & event_class)) return 0;
+    const uint64_t occurrence = s_flight_kind_recorded[kind];
+    if (occurrence == 0u || occurrence > UINT32_MAX) return 0;
+    if (out) {
+        out->kind = kind;
+        out->occurrence = (uint32_t)occurrence;
+        out->after = s_flight_limit - 1u;
+        out->sequence = s_flight_last_sequence;
+    }
+    return 1;
+}
+
+int sr_flight_replay_divergence(SrFlightMark *at) {
+    if (s_flight_init_state != 2) sr_flight_init();
+    if (s_flight_classes == 0u) return SR_FLIGHT_DIVERGENCE_OFF;
+    if (s_trig_mode != SR_FLIGHT_TRIGGER_NONE) return SR_FLIGHT_DIVERGENCE_MODE;
+    SrFlightMark mark;
+    if (!sr_flight_mark(&mark)) return SR_FLIGHT_DIVERGENCE_NONE;
+    /* Armed through the production parser, so the policy the bundle states is one
+     * SR_FLIGHT_TRIGGER accepts. The mark only names an enabled, non-fatal kind, so it holds. */
+    char spec[64];
+    snprintf(spec, sizeof spec, "checkpoint:%" PRIu32 ":%" PRIu32 ":0", mark.kind, mark.occurrence);
+    if (!trigger_configure(spec, s_flight_classes, s_flight_limit)) {
+        trigger_clear();
+        return SR_FLIGHT_DIVERGENCE_NONE;
+    }
+    /* Armed after the fact: the earlier events of this kind were seen as they were recorded,
+     * and the newest one is the match, exactly as in a run armed from the start. */
+    s_trig_seen = (uint64_t)mark.occurrence - 1u;
+    check_trigger(mark.sequence, kind_class(mark.kind), mark.kind, 0u, 0u, 0u, 0u);
+    if (at) *at = mark;
+    return SR_FLIGHT_DIVERGENCE_FROZE;
 }
 
 /* Watch class (schema 7): a store inside the SR_WATCH range becomes a watch-change event when
@@ -1279,6 +1330,7 @@ void sr_flight_test_reset(uint32_t enabled_classes, uint32_t limit) {
     s_flight_recorded = 0u;
     s_flight_last_sequence = 0u;
     s_flight_last_kind = 0u;
+    memset(s_flight_kind_recorded, 0, sizeof(s_flight_kind_recorded));
     s_flight_init_state = 2;
     s_flight_dumped = 0;
     s_flight_dump_count = 0u;

@@ -121,6 +121,15 @@ Measured on a Windows 11 x64 PC building and running Hot Shots Tennis with the p
   coverage, in either direction. A run's log ends with a `PATCH_TESS: exit` line
   that counts the draws the vertex cap lowered. The rules are in
   [`ENHANCEMENT_CONTRACT.md`](ENHANCEMENT_CONTRACT.md#1014-finer-bezier-and-spline-patches).
+- **Supersampling.** A part of Enhanced and Ace, off by default and in no graphics preset: Settings > Enhanced
+  offers it as **Supersampling** (2x, 4x or Off), for the library or for one game, and the launch line carries it as
+  `ssaa=`. It draws every frame at 2 or 4 times the render scale on each axis and shows each pixel as the average of
+  its samples, which smooths jagged edges; the frames the game can read back do not change. It costs the GPU 4
+  times (2x) or 16 times (4x) the drawing work of the render scale alone, on top of it, and GPU memory for the
+  larger images: by the renderer's estimate about 17 MB (2x) or 64 MB (4x) at render scale 1, 68 or 255 MB at 2,
+  and 272 or 1020 MB at 4. At start the renderer checks that the images fit the GPU; when 4x does not, the run
+  uses 2x, and when neither does, it runs without supersampling, and the log says why in either case. The rules
+  are in [`ENHANCEMENT_CONTRACT.md`](ENHANCEMENT_CONTRACT.md#1021-supersampling-ssaa).
 - **Where your data lives.** Imported discs, built games, saves and settings are in the per-user data
   folder (`%LOCALAPPDATA%\Nakagawa\data`, [below](#2-supply-local-game-inputs)), never inside the unpacked
   release. An update unpacks into a new folder and leaves the data folder alone, so deleting an old release
@@ -1406,6 +1415,7 @@ the report runs the toolchain check, which can take a minute.
 
 | Symptom | Cause | Fix |
 | --- | --- | --- |
+| Make stops with `<target> needs a POSIX sh, and mingw32-make found no sh.exe on PATH` | `mingw32-make` found no POSIX `sh`, so it would run that recipe with `cmd.exe`, which misreads sh syntax; the Makefile refuses before any line of the recipe runs | Put Git for Windows' `usr\bin` ahead of `C:\msys64\usr\bin` on `PATH` (see [PATH order](#path-order)) |
 | A Make recipe fails with a shell error, or runs words such as `status` as commands | `mingw32-make` found no POSIX `sh` and fell back to `cmd.exe` | Put Git for Windows' `usr\bin` ahead of `C:\msys64\usr\bin` on `PATH` (see [PATH order](#path-order)) |
 | `cannot find -lvulkan` with `VULKAN_SDK=/ucrt64` | That is the CI's MSYS2 layout; a local MSYS2 may lack the import library | Leave `VULKAN_SDK` unset so the Makefile finds the installed Vulkan SDK |
 | A Make-driven step fails on a `C:\path\to\dir` path | Backslashes in a Make variable are read as escapes | Pass Make paths with forward slashes (`C:/path/to/dir`) |

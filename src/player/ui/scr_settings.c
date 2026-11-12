@@ -879,7 +879,7 @@ static void settings_ace(NkUi *ui, const PlayerUiSettingsModel *model, float inn
             *result = settings_op(PLAYER_UI_SETTINGS_CYCLE_PLAY_MODE);
         }
         for (int i = 0; i < count; i++) {
-            if (scr_wizard_value_state(ui, PLAYER_UI_ID_SETTINGS_ENHANCED_PART + (NkUiId)i,
+            if (scr_wizard_value_state(ui, PLAYER_UI_ID_ENHANCED_PART(i),
                                        SET_ID_TEXT + 0x404u + 4u * (NkUiId)i, rows[i + 1].name,
                                        rows[i + 1].value, rows[i + 1].sentence,
                                        model->enhanced_rows[i].on, off, inner - 32.0f, &column)) {
@@ -1118,13 +1118,17 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
         nk_ui_text_role(ui, FLOW_ID_TITLE, "PSP fonts", NK_UI_TYPE_TITLE, theme->paper);
         nk_ui_text_role(ui, FLOW_ID_LEAD,
                         /* #2005: what the stand-in fonts change, as font/README.md
-                           describes them (shapes, widths) and the converter's Latin set
-                           (tools/ttf2pgf.py, no Cyrillic). */
+                           describes them: letter shapes, Latin line widths within 3 %, and the
+                           characters they lack. The Latin stand-ins have every character
+                           of the PSP's Latin fonts, Cyrillic included (--latin-cyrillic-text
+                           in mk/housekeeping.mk); the Japanese one lacks about 2,200 of the
+                           PSP font's characters, all outside code page 932, and the Korean
+                           one 512, none of them Hangul. */
                         "Optional. Without your PSP's own fonts, every game still runs and "
                         "shows its text in open stand-in fonts. They look different: the "
                         "letters are shaped differently, English lines come out a little wider "
-                        "or narrower, and a few characters such as Cyrillic letters are "
-                        "missing. For the PSP's own look, "
+                        "or narrower, and some rarely used characters of the PSP's Japanese "
+                        "and Korean fonts are missing. For the PSP's own look, "
                         "connect your PSP by USB and choose Get fonts from my PSP, or copy the "
                         ".pgf files from flash0:/font on your PSP to a folder on this PC "
                         "(docs/SETUP.md, \"Copying the fonts from your PSP\") and choose them "

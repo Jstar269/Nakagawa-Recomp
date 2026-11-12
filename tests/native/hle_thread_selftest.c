@@ -191,6 +191,8 @@ static void gpu_dirty_reset(void) {
  * probe exported by hle.c. */
 extern uint32_t sr_hle_test_io_open(CpuState *s);
 extern uint32_t sr_hle_test_io_read(CpuState *s);
+extern uint32_t hle_io_umd_read_us(uint64_t bytes);   /* the UMD drive's read time (hle_io.c) */
+extern int sr_hle_test_io_disc_fetches_in_flight(void);
 extern uint32_t sr_hle_test_io_write(CpuState *s);
 extern uint32_t sr_hle_test_io_lseek(CpuState *s);
 extern uint32_t sr_hle_test_io_lseek32(CpuState *s);
@@ -382,6 +384,7 @@ static uint32_t vblank_delivered(uint32_t no, uint32_t *arg) {
 #define NID_SCE_AUDIO_SET_DATA_LEN 0xcb2e439eu
 #define NID_SCE_AUDIO_CHANGE_CHANNEL_CONFIG 0x95fd0c2du
 #define NID_SCE_AUDIO_GET_CHANNEL_REST_LENGTH 0xb011922fu
+#define NID_SCE_AUDIO_GET_CHANNEL_REST_LEN 0xe9d97901u
 #define NID_SCE_IO_RENAME 0x779103a0u
 #define NID_SCE_AUDIO_CHANGE_VOLUME 0xb7e1d8e7u
 #define NID_SCE_AUDIO_OUTPUT2_RESERVE 0x01562ba3u
@@ -575,6 +578,18 @@ void sr_audio_push(int ch, const int16_t *lr, int nframes, int volL, int volR) {
     }
 }
 
+/* Ace Mode's peak=limit (#2137): a push that carries the SAS grain's unsaturated sum. It is a push
+ * like any other for the counters above; the sum is kept for the provenance cells. */
+static unsigned long s_audio_push_wide_calls;
+static int32_t s_audio_push_wide_capture[8192u * 2u];
+void sr_audio_push_wide(int ch, const int16_t *lr, const int32_t *wide, int nframes, int volL, int volR) {
+    s_audio_push_wide_calls++;
+    if (wide && nframes > 0)
+        memcpy(s_audio_push_wide_capture, wide,
+               ((size_t)nframes < 8192u ? (size_t)nframes : 8192u) * 2u * sizeof(*wide));
+    sr_audio_push(ch, lr, nframes, volL, volR);
+}
+
 void sr_audio_push_silence(int ch, int nframes) {
     s_audio_silence_calls++;
     if (nframes <= 0 || ch < 0 || ch >= 9) return;
@@ -630,6 +645,7 @@ int sr_audio_queued(int ch) {
 static void audio_fixture_reset(void) {
     s_oor_calls = 0;
     s_audio_push_calls = 0;
+    s_audio_push_wide_calls = 0;
     s_audio_queue_calls = 0;
     s_audio_push_frames = 0;
     s_audio_push_first_l = 0;
@@ -780,6 +796,7 @@ int sr_perf_enabled;
  * a "the counters are live" predicate before handing it to a stub, so a constant 0 would
  * silently disable the media-telemetry call sites this harness has to observe. */
 uint64_t sr_perf_now_ns_impl(void) { static uint64_t t = 1000; t += 1000; return t; }
+void sr_perf_exclude_thread(void) {}
 void sr_perf_guest_begin(void) {}
 void sr_perf_guest_end(void) {}
 void sr_perf_guest_idle_wait(uint64_t started_ns) { (void)started_ns; }
@@ -916,6 +933,14 @@ int iso_lookup(const char *guest_path, uint32_t *out_lba, uint32_t *out_size) {
  * the ISO 9660 primary volume descriptor header at the start of sector 16 and every other byte
  * a function of its sector and offset, so a read from the wrong sector is visible. */
 enum { UMD_SYNTHETIC_SECTORS = 64u };
+/* The disc's size in sectors: 64 except while a test that reads more sets it. */
+static uint32_t s_umd_synthetic_sectors = UMD_SYNTHETIC_SECTORS;
+/* A host read that blocks, for the host-worker cell: while the gate is closed (1) a read of the
+ * synthetic disc waits for it to open (2), for 3 s of host time at most, and counts a wait that
+ * ran out. 0 = no gate. */
+static atomic_int s_umd_synthetic_gate;
+static atomic_int s_umd_synthetic_gate_timeouts;
+static atomic_uint s_umd_synthetic_reads;   /* reads of the synthetic disc */
 
 static uint8_t umd_synthetic_byte(uint64_t position) {
     static const uint8_t pvd[8] = {0x01u, 'C', 'D', '0', '0', '1', 0x01u, 0x00u};
@@ -926,14 +951,23 @@ static uint8_t umd_synthetic_byte(uint64_t position) {
 
 int iso_sector_count(uint32_t *out_sectors) {
     if (!s_umd_io_synthetic_enabled || !out_sectors) return -1;
-    *out_sectors = UMD_SYNTHETIC_SECTORS;
+    *out_sectors = s_umd_synthetic_sectors;
     return 0;
 }
 
 int iso_read(uint32_t lba, uint32_t offset, void *dst, uint32_t bytes) {
     if (s_umd_io_synthetic_enabled && dst) {
+        atomic_fetch_add(&s_umd_synthetic_reads, 1u);
+        if (atomic_load(&s_umd_synthetic_gate) == 1) {
+            int waited_ms = 0;
+            while (atomic_load(&s_umd_synthetic_gate) == 1 && waited_ms++ < 3000) SDL_Delay(1);
+            if (atomic_load(&s_umd_synthetic_gate) == 1) {
+                atomic_fetch_add(&s_umd_synthetic_gate_timeouts, 1);
+                atomic_store(&s_umd_synthetic_gate, 2);
+            }
+        }
         const uint64_t start = (uint64_t)lba * 2048u + offset;
-        const uint64_t end = (uint64_t)UMD_SYNTHETIC_SECTORS * 2048u;
+        const uint64_t end = (uint64_t)s_umd_synthetic_sectors * 2048u;
         if (start >= end) return 0;
         uint32_t n = end - start < bytes ? (uint32_t)(end - start) : bytes;
         for (uint32_t i = 0; i < n; i++) ((uint8_t *)dst)[i] = umd_synthetic_byte(start + i);
@@ -4059,6 +4093,201 @@ static void test_io_async_and_path_imports(void) {
            "sceIoSync names unsupported device semantics with a real error");
 }
 
+/* #1380 cells through the production syscall path (sr_syscall, by NID), one probe-owned
+ * Memory Stick file at a time. */
+enum {
+    MS_CELL_OPEN = 0x109f50bcu, MS_CELL_CLOSE = 0x810c4bc3u, MS_CELL_READ = 0x6a638d83u,
+    MS_CELL_WRITE = 0x42ec03acu, MS_CELL_LSEEK = 0x27eb27b8u, MS_CELL_LSEEK32 = 0x68963324u,
+    MS_CELL_GETSTAT = 0xace946e8u, MS_CELL_REMOVE = 0xf27a9c51u,
+    MS_CELL_PATH = 0x09017000u, MS_CELL_DATA = 0x09017100u, MS_CELL_STAT = 0x09017200u,
+    MS_CELL_BACK = 0x09017300u,
+};
+
+static uint32_t ms_cell_path_call(uint32_t nid, const char *guest, uint32_t flags) {
+    CpuState cpu;
+    fd_guest_copy(MS_CELL_PATH, guest, strlen(guest) + 1u);
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = MS_CELL_PATH;
+    if (nid == MS_CELL_OPEN) { cpu.r[5] = flags; cpu.r[6] = 0777u; }
+    if (nid == MS_CELL_GETSTAT) cpu.r[5] = MS_CELL_STAT;
+    return sr_syscall(&cpu, nid);
+}
+
+static uint32_t ms_cell_fd_call(uint32_t nid, uint32_t fd, uint32_t a1, uint32_t a2) {
+    CpuState cpu;
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = fd; cpu.r[5] = a1; cpu.r[6] = a2;
+    return sr_syscall(&cpu, nid);
+}
+
+/* sceIoLseek: the 64-bit offset in a2:a3, whence in t0; the high word comes back in v1. */
+static uint32_t ms_cell_seek64(uint32_t fd, int64_t offset, uint32_t whence, uint32_t *high) {
+    CpuState cpu;
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[3] = 0xdeadbeefu;
+    cpu.r[4] = fd;
+    cpu.r[6] = (uint32_t)((uint64_t)offset & 0xffffffffu);
+    cpu.r[7] = (uint32_t)((uint64_t)offset >> 32);
+    cpu.r[8] = whence;
+    uint32_t low = sr_syscall(&cpu, MS_CELL_LSEEK);
+    *high = cpu.r[3];
+    return low;
+}
+
+/* An open that should be refused; a descriptor it returns anyway is closed again. */
+static uint32_t ms_cell_refused_open(const char *guest, uint32_t flags) {
+    uint32_t rc = ms_cell_path_call(MS_CELL_OPEN, guest, flags);
+    if (rc < 64u) (void)ms_cell_fd_call(MS_CELL_CLOSE, rc, 0u, 0u);
+    return rc;
+}
+
+static int ms_cell_host_exists(const char *guest) {
+    char host[512];
+    fd_host_path(host, sizeof(host), guest);
+    FILE *f = fopen(host, "rb");
+    if (f) fclose(f);
+    return f != NULL;
+}
+
+/* The Memory Stick open, write and seek cells #1380 measured, each through sr_syscall: an
+ * open without PSP_O_CREAT (PSP-IO-EOF-001 io-eof-missing), PSP_O_RDONLY | PSP_O_CREAT on a
+ * missing file and a write through a PSP_O_RDONLY descriptor (PSP-HLE-IO-SEEK-001
+ * io-seek-ms-write-rdonly-creat and io-seek-ms-write-rdonly), an exclusive create of an
+ * existing file (PSP-KERNEL-SEM-001 io-excl-existing), seeks before the start, a write after a
+ * seek past the end and a read past it (PSP-IO-EOF-001 io-eof-seek-negative,
+ * io-eof-seek-negative-rdonly, io-eof-write-past, io-eof-read-past), and the 32-bit position
+ * (PSP-KERNEL-SEM-001 io-seek64). All measured on a PSP-3000 6.61. */
+static void test_io_memory_stick_cells_through_syscall(void) {
+    static const char file_guest[] = "ms0:/NAKAGAWA_IO_1380.BIN";
+    static const char missing_guest[] = "ms0:/NAKAGAWA_IO_1380_MISSING.BIN";
+    enum { MS_EINVAL = 0x80010016u, MS_ENOENT = 0x80010002u, MS_EEXIST = 0x80010011u,
+           MS_BADF = 0x80020323u, MS_SIZE = 16u };
+    uint8_t pattern[MS_SIZE];
+    for (uint32_t i = 0; i < MS_SIZE; i++) pattern[i] = (uint8_t)(0x40u + i);
+    char host[512];
+    fd_host_path(host, sizeof(host), file_guest);
+    nk_remove_utf8(host);
+    fd_host_path(host, sizeof(host), missing_guest);
+    nk_remove_utf8(host);
+    uint32_t high = 0;
+
+    /* io-eof-missing: write-only, read-write, read-only and write-only with PSP_O_TRUNC. */
+    static const uint32_t no_create[] = {0x0002u, 0x0003u, 0x0001u, 0x0402u};
+    for (size_t i = 0; i < sizeof(no_create) / sizeof(no_create[0]); i++)
+        expect(ms_cell_refused_open(missing_guest, no_create[i]) == MS_ENOENT,
+               "a missing Memory Stick file opened without PSP_O_CREAT is 0x80010002");
+    expect(ms_cell_path_call(MS_CELL_GETSTAT, missing_guest, 0u) == MS_ENOENT &&
+               !ms_cell_host_exists(missing_guest),
+           "an open without PSP_O_CREAT creates nothing");
+
+    /* io-seek-ms-write-rdonly-creat: PSP_O_RDONLY | PSP_O_CREAT on a missing file. */
+    expect(ms_cell_refused_open(missing_guest, 0x0201u) == MS_EINVAL,
+           "PSP_O_RDONLY | PSP_O_CREAT on a missing Memory Stick file is 0x80010016");
+    expect(ms_cell_path_call(MS_CELL_GETSTAT, missing_guest, 0u) == MS_ENOENT &&
+               !ms_cell_host_exists(missing_guest),
+           "the refused read-only create creates nothing");
+    fd_host_path(host, sizeof(host), missing_guest);
+    nk_remove_utf8(host);
+
+    /* The probe-owned 16-byte file, made by an exclusive create. */
+    fd_guest_copy(MS_CELL_DATA, pattern, MS_SIZE);
+    uint32_t fd = ms_cell_path_call(MS_CELL_OPEN, file_guest, 0x0A03u);  /* RDWR|CREAT|EXCL */
+    expect(fd >= 3u && fd < 64u, "an exclusive create of a new Memory Stick file opens");
+    if (fd < 3u || fd >= 64u) return;
+    expect(ms_cell_fd_call(MS_CELL_WRITE, fd, MS_CELL_DATA, MS_SIZE) == MS_SIZE &&
+               ms_cell_fd_call(MS_CELL_CLOSE, fd, 0u, 0u) == 0u,
+           "the probe file takes its 16 bytes");
+
+    /* io-excl-existing: with and without PSP_O_TRUNC, the file is left as it was. */
+    fd_host_path(host, sizeof(host), file_guest);
+    expect(ms_cell_refused_open(file_guest, 0x0A03u) == MS_EEXIST &&
+               ms_cell_refused_open(file_guest, 0x0E03u) == MS_EEXIST &&
+               fd_host_bytes_equal(host, pattern, MS_SIZE),
+           "an exclusive create of an existing file is 0x80010011 and leaves it unchanged");
+
+    /* Read-only creates no cell measured stop at the named boundary with nothing opened,
+     * created or cut: on an existing file, with PSP_O_TRUNC, and with PSP_O_EXCL. */
+    expect(ms_cell_refused_open(file_guest, 0x0201u) == 0x80010086u &&
+               ms_cell_refused_open(file_guest, 0x0601u) == 0x80010086u &&
+               fd_host_bytes_equal(host, pattern, MS_SIZE),
+           "PSP_O_RDONLY | PSP_O_CREAT on an existing file stops at the boundary, file unchanged");
+    expect(ms_cell_refused_open(missing_guest, 0x0A01u) == 0x80010086u &&
+               ms_cell_refused_open(missing_guest, 0x0301u) == 0x80010086u &&
+               !ms_cell_host_exists(missing_guest),
+           "PSP_O_RDONLY | PSP_O_CREAT with PSP_O_EXCL or PSP_O_APPEND stops at the boundary "
+           "and creates nothing");
+
+    /* io-seek-ms-write-rdonly: a write through a PSP_O_RDONLY descriptor. */
+    fd = ms_cell_path_call(MS_CELL_OPEN, file_guest, 0x0001u);
+    expect(fd >= 3u && fd < 64u, "the probe file opens read-only");
+    if (fd < 3u || fd >= 64u) return;
+    static const uint8_t other[4] = {0xd0u, 0xd1u, 0xd2u, 0xd3u};
+    fd_guest_copy(MS_CELL_BACK, other, sizeof(other));
+    expect(ms_cell_fd_call(MS_CELL_WRITE, fd, MS_CELL_BACK, 4u) == MS_BADF,
+           "a write through a PSP_O_RDONLY Memory Stick descriptor is 0x80020323");
+    /* io-eof-seek-negative-rdonly: SEEK_SET -1 on the read-only descriptor. */
+    expect(ms_cell_seek64(fd, -1, 0u, &high) == MS_EINVAL && high == 0xffffffffu &&
+               ms_cell_fd_call(MS_CELL_LSEEK32, fd, 0u, 1u) == 0u,
+           "a read-only Memory Stick seek to -1 is 0x80010016 and keeps the position");
+    expect(ms_cell_fd_call(MS_CELL_CLOSE, fd, 0u, 0u) == 0u &&
+               fd_host_bytes_equal(host, pattern, MS_SIZE),
+           "the refused write left the file unchanged");
+
+    fd = ms_cell_path_call(MS_CELL_OPEN, file_guest, 0x0003u);   /* RDWR */
+    expect(fd >= 3u && fd < 64u, "the probe file opens read-write");
+    if (fd < 3u || fd >= 64u) return;
+
+    /* io-eof-seek-negative: from position 8, SEEK_SET -1, SEEK_CUR -16 and SEEK_END -32. */
+    static const struct { int64_t offset; uint32_t whence; } before_start[] = {
+        {-1, 0u}, {-16, 1u}, {-32, 2u},
+    };
+    for (size_t i = 0; i < sizeof(before_start) / sizeof(before_start[0]); i++) {
+        expect(ms_cell_fd_call(MS_CELL_LSEEK32, fd, 8u, 0u) == 8u &&
+                   ms_cell_seek64(fd, before_start[i].offset, before_start[i].whence, &high) ==
+                       MS_EINVAL &&
+                   high == 0xffffffffu && ms_cell_fd_call(MS_CELL_LSEEK32, fd, 0u, 1u) == 8u,
+               "a Memory Stick seek before the start is 0x80010016 and keeps the position");
+    }
+    expect(ms_cell_fd_call(MS_CELL_LSEEK32, fd, 0xffffffffu, 0u) == MS_EINVAL &&
+               ms_cell_fd_call(MS_CELL_LSEEK32, fd, 0u, 1u) == 8u,
+           "sceIoLseek32 to -1 on the Memory Stick is 0x80010016 and keeps the position");
+
+    /* io-eof-write-past: a seek to 0x20 leaves the size at 16; a 4-byte write there makes the
+     * position and the size 0x24 and reads back at 0x20 (the gap's bytes are not asserted). */
+    expect(ms_cell_fd_call(MS_CELL_LSEEK32, fd, 0x20u, 0u) == 0x20u &&
+               ms_cell_seek64(fd, 0, 2u, &high) == MS_SIZE && high == 0u &&
+               ms_cell_fd_call(MS_CELL_LSEEK32, fd, 0x20u, 0u) == 0x20u,
+           "a Memory Stick seek past the end succeeds and leaves the size");
+    expect(ms_cell_fd_call(MS_CELL_WRITE, fd, MS_CELL_BACK, 4u) == 4u &&
+               ms_cell_fd_call(MS_CELL_LSEEK32, fd, 0u, 1u) == 0x24u &&
+               ms_cell_fd_call(MS_CELL_LSEEK32, fd, 0u, 2u) == 0x24u,
+           "a write past the end extends the file to the end of the write");
+    expect(ms_cell_fd_call(MS_CELL_LSEEK32, fd, 0u, 0u) == 0u &&
+               ms_cell_fd_call(MS_CELL_READ, fd, MS_CELL_STAT, 0x30u) == 0x24u &&
+               MEM_R32(MS_CELL_STAT + 0x20u) == MEM_R32(MS_CELL_BACK),
+           "a read from the start answers 0x24 with the tail at 0x20");
+
+    /* io-eof-read-past: a seek to 0x40 succeeds, a read there is 0, the position stays. */
+    expect(ms_cell_fd_call(MS_CELL_LSEEK32, fd, 0x40u, 0u) == 0x40u &&
+               ms_cell_fd_call(MS_CELL_READ, fd, MS_CELL_STAT, 4u) == 0u &&
+               ms_cell_fd_call(MS_CELL_LSEEK32, fd, 0u, 1u) == 0x40u,
+           "a read past the end of a Memory Stick file is 0 and keeps the position");
+
+    /* io-seek64: 0xFFFFFFFF is a position; 0x100000010 is 0x80010016, position unchanged. */
+    expect(ms_cell_seek64(fd, 0xffffffffll, 0u, &high) == 0xffffffffu && high == 0u,
+           "a Memory Stick seek to 0xFFFFFFFF is accepted");
+    expect(ms_cell_fd_call(MS_CELL_LSEEK32, fd, 8u, 0u) == 8u &&
+               ms_cell_seek64(fd, 0x100000010ll, 0u, &high) == MS_EINVAL &&
+               high == 0xffffffffu && ms_cell_fd_call(MS_CELL_LSEEK32, fd, 0u, 1u) == 8u,
+           "a Memory Stick seek to 0x100000010 is 0x80010016 and keeps the position");
+
+    expect(ms_cell_fd_call(MS_CELL_CLOSE, fd, 0u, 0u) == 0u &&
+               ms_cell_path_call(MS_CELL_REMOVE, file_guest, 0u) == 0u,
+           "the probe file closes and is removed");
+    fd_host_path(host, sizeof(host), missing_guest);
+    nk_remove_utf8(host);   /* only a runtime that wrongly created it leaves one */
+}
+
 /* sceIoAssign / sceIoUnassign through the production syscall path. WipEout Pure's Memory
  * Stick insert handler assigns "fatms0:" to "msstor0p1:" through "fatms0:" read/write, and
  * its eject handler unassigns it; before these handlers both NIDs were unregistered and the
@@ -4960,6 +5189,7 @@ static void test_fd_namespace(void) {
 
     test_io_async_and_path_imports();
     test_io_assign_through_syscall();
+    test_io_memory_stick_cells_through_syscall();
     test_io_open_async_notifies_later_callback();
     test_io_enhancement_data_file();
     test_state_sampler_rows();
@@ -5204,6 +5434,24 @@ static void test_umd_block_device_sectors(uint32_t fd, uint32_t data_addr) {
            "the position after the last UMD sector is refused");
     expect(umd_test_seek64(fd, INT64_MAX, 1u, &high) == 0x8001b003u,
            "an overflowing UMD SEEK_CUR is refused");
+    /* The refusal edge (PSP-IO-EOF-002 umd-eof-raw-seek-past, measured on a PSP-3000 6.61):
+     * from sector 16, SEEK_SET one and two past the last sector, SEEK_END +1 and SEEK_SET
+     * 0x100000000 answer 0x8001b003 with the high word 0xFFFFFFFF, sceIoLseek32 one past the
+     * last sector answers 0x8001b003, and the position stays 16. */
+    {
+        static const struct { int64_t offset; uint32_t whence; } past[] = {
+            {UMD_SYNTHETIC_SECTORS, 0u}, {UMD_SYNTHETIC_SECTORS + 1, 0u}, {1, 2u},
+            {0x100000000ll, 0u},
+        };
+        expect(umd_test_seek64(fd, 16, 0u, &high) == 16u, "UMD seek edge setup");
+        for (size_t i = 0; i < sizeof(past) / sizeof(past[0]); i++)
+            expect(umd_test_seek64(fd, past[i].offset, past[i].whence, &high) == 0x8001b003u &&
+                       high == 0xffffffffu && umd_test_seek64(fd, 0, 1u, &high) == 16u,
+                   "a UMD seek past the last sector is 0x8001b003 and keeps the position");
+        expect(umd_test_seek32(fd, (int32_t)UMD_SYNTHETIC_SECTORS, 0u) == 0x8001b003u &&
+                   umd_test_seek64(fd, 0, 1u, &high) == 16u,
+               "UMD sceIoLseek32 one past the last sector is 0x8001b003 and keeps the position");
+    }
     expect(umd_test_seek64(fd, 0, 3u, &high) == 0x80020324u && high == 0xffffffffu,
            "an unknown UMD whence is refused");
     expect(umd_test_seek32(fd, 0, 0u) == 0u, "UMD sceIoLseek32 SEEK_SET 0 is sector 0");
@@ -10101,11 +10349,13 @@ static void test_io_devctl_memory_stick(void) {
 /* ---- savedata GETSIZE / SIZES free space (#308) ---------------------------------------------
  * GETSIZE reports a shortfall, never the size of the data. On a PSP (pspautotests
  * tests/utility/savedata/getsize.expected, revision 2ed7c9c5) a zero-filled sizeInfo with no
- * entries for a save that exists changes only sectorSize (0x8000), freeSectors, freeKB and
+ * entries for a save that exists changes only sectorSize (0x8000 there; the PSP-3000 run of
+ * PSP-HLE-SAVEDATA-GETSIZE-001 reported 0x10000, see do_getsize), freeSectors, freeKB and
  * freeString, and the result is 0. A save that does not exist fills in the same figures and
- * reports RW_NO_DATA (PPSSPP as the behaviour reference, UNMEASURED on a PSP). Free space is the
- * host-backed Memory Stick the capacity devctl measures, in 32 KiB sectors; the shortfall
- * arithmetic for listed entries follows PPSSPP SavedataParam::GetSize as a behaviour reference. */
+ * reports RW_NO_DATA, and leaves overwriteKB and overwriteString alone
+ * (PSP-HLE-SAVEDATA-GETSIZE-001). Free space is the host-backed Memory Stick the capacity devctl
+ * measures, in 32 KiB sectors; the shortfall arithmetic for listed entries follows PPSSPP
+ * SavedataParam::GetSize as a behaviour reference. */
 extern void sr_hle_test_set_memstick_free_bytes(int mode, uint64_t bytes);
 
 enum {
@@ -10177,6 +10427,9 @@ static int getsize_write_host_file(const char *path, size_t bytes) {
 static void test_savedata_getsize_free_space(void) {
     static const char ms_root[] = HLE_BUILD_ROOT "/hle_savedata_getsize";
     static const char zero8[8] = { 0 };
+    static const char preset8[8] = { (char)0xA5, (char)0xA5, (char)0xA5, (char)0xA5,
+                                     (char)0xA5, (char)0xA5, (char)0xA5, (char)0xA5 };
+    enum { SAVEDATA_GETSIZE_OUT_BYTES = 44 };   /* sizeInfo after its four input words */
     const char *old_root_value = getenv("SR_MEMSTICK");
     char *old_root = old_root_value ? (char *)malloc(strlen(old_root_value) + 1u) : NULL;
     char text[8], save_host[512], file_host[600];
@@ -10208,7 +10461,7 @@ static void test_savedata_getsize_free_space(void) {
                    MEM_R32(GETSIZE_INFO_ADDR + 8u) == 0u && MEM_R32(GETSIZE_INFO_ADDR + 12u) == 0u,
                "GETSIZE leaves the entry counts and pointers alone");
         expect(MEM_R32(GETSIZE_INFO_ADDR + 16u) == 0x8000u,
-               "GETSIZE reports the PSP's 32 KiB savedata sector size");
+               "GETSIZE reports pspautotests' 32 KiB savedata sector size (a PSP-3000 reported 0x10000)");
         expect(sectors >= lo / 0x8000u && sectors <= hi / 0x8000u,
                "GETSIZE freeSectors * 0x8000 is the host-backed free space the devctl reports");
         expect(MEM_R32(GETSIZE_INFO_ADDR + 24u) == sectors * 32u,
@@ -10224,18 +10477,23 @@ static void test_savedata_getsize_free_space(void) {
     }
 
     /* 2. One secure entry of a few KB on a missing save fits: nothing needed, still no data. A
-     * game reads this pair as "no save yet, and room to make one". */
+     * game reads this pair as "no save yet, and room to make one". As on a PSP
+     * (PSP-HLE-SAVEDATA-GETSIZE-001), a preset shows what is left alone: neededKB is written,
+     * the other three are not. */
     {
         getsize_param(22u, "_GameData0");
         getsize_entry(GETSIZE_SECURE_ADDR, 0x2000u, "DATA.BIN");
         MEM_W32(GETSIZE_INFO_ADDR + 0u, 1u);
         MEM_W32(GETSIZE_INFO_ADDR + 8u, GETSIZE_SECURE_ADDR);
+        memset(g_mem_base + GETSIZE_INFO_ADDR + 16u, 0xA5, SAVEDATA_GETSIZE_OUT_BYTES);
         expect(sr_savedata_execute(GETSIZE_PARAM_ADDR) == 0x80110327u &&
                    MEM_R32(GETSIZE_INFO_ADDR + 16u) == 0x8000u &&
-                   MEM_R32(GETSIZE_INFO_ADDR + 36u) == 0u && MEM_R32(GETSIZE_INFO_ADDR + 48u) == 0u &&
-                   getsize_guest_bytes_are(GETSIZE_INFO_ADDR + 40u, zero8) &&
-                   getsize_guest_bytes_are(GETSIZE_INFO_ADDR + 52u, zero8),
-               "GETSIZE for one small secure file on a missing save reports RW_NO_DATA, neededKB 0, overwriteKB 0");
+                   MEM_R32(GETSIZE_INFO_ADDR + 36u) == 0u,
+               "GETSIZE for one small secure file on a missing save reports RW_NO_DATA, neededKB 0");
+        expect(MEM_R32(GETSIZE_INFO_ADDR + 48u) == 0xA5A5A5A5u &&
+                   getsize_guest_bytes_are(GETSIZE_INFO_ADDR + 40u, preset8) &&
+                   getsize_guest_bytes_are(GETSIZE_INFO_ADDR + 52u, preset8),
+               "GETSIZE on a missing save that fits leaves neededString and the overwrite fields alone");
     }
 
     /* 3. A shortfall: 64 KiB free (plus a partial sector), more data than that. */
@@ -10265,6 +10523,28 @@ static void test_savedata_getsize_free_space(void) {
         expect(MEM_R32(GETSIZE_INFO_ADDR + 48u) == 71u &&
                    getsize_guest_bytes_are(GETSIZE_INFO_ADDR + 52u, "71 KB\0\0"),
                "GETSIZE overwriteKB and overwriteString discount the files the save already holds");
+    }
+    /* A shortfall on a missing save writes the needed fields and leaves the overwrite fields
+     * alone, and a text field stops at its NUL (the write mask PSP-HLE-SAVEDATA-GETSIZE-001
+     * measured). The figures are not the PSP's: see do_getsize. */
+    {
+        getsize_param(22u, "_GameData0");
+        getsize_entry(GETSIZE_SECURE_ADDR, 0x20000u, "DATA.BIN");
+        MEM_W32(GETSIZE_INFO_ADDR + 0u, 1u);
+        MEM_W32(GETSIZE_INFO_ADDR + 8u, GETSIZE_SECURE_ADDR);
+        memset(g_mem_base + GETSIZE_INFO_ADDR + 16u, 0xA5, SAVEDATA_GETSIZE_OUT_BYTES);
+        expect(sr_savedata_execute(GETSIZE_PARAM_ADDR) == 0x80110327u &&
+                   getsize_guest_bytes_are(GETSIZE_INFO_ADDR + 28u, "64 KB\0\xA5\xA5"),
+               "GETSIZE on a missing save reports RW_NO_DATA and writes freeString through its NUL only");
+        /* write = 0x20010, free = 0x10000: 0x10010 bytes short, 65 KB rounded up. PPSSPP's
+         * arithmetic, not the measured one (a PSP charges three clusters more and wraps at 32
+         * bits; do_getsize). This cell pins which fields are written, not the PSP's figure. */
+        expect(MEM_R32(GETSIZE_INFO_ADDR + 36u) == 65u &&
+                   getsize_guest_bytes_are(GETSIZE_INFO_ADDR + 40u, "65 KB\0\xA5\xA5"),
+               "GETSIZE on a missing save writes the shortfall to neededKB and neededString");
+        expect(MEM_R32(GETSIZE_INFO_ADDR + 48u) == 0xA5A5A5A5u &&
+                   getsize_guest_bytes_are(GETSIZE_INFO_ADDR + 52u, preset8),
+               "GETSIZE on a missing save leaves overwriteKB and overwriteString alone");
     }
     /* Existing data the write replaces can make it fit again. */
     snprintf(file_host, sizeof(file_host), "%s/DATA.BIN", save_host);
@@ -11622,6 +11902,11 @@ static void reset_fixture(void) {
     s_stack_top = SR_STACK_ARENA_CEIL;
     stack_ranges_reset();
     s_vtime_us = 0;
+    /* The turbo clock charges its 10 ms quantum every TIMESLICE dispatches, counted on from the
+     * case before; some cases dispatch a host-dependent number of times, so a case's quantum fell
+     * where its predecessors left it. Each case starts the count afresh, so the quantum falls a
+     * whole TIMESLICE of dispatches in (PSP-DMAC-002 b3 failed when it fell inside the scenario). */
+    s_dispatches_since_time = 0u;
     s_tick = 0;
     s_interrupts_enabled = 1;
     s_dispatch_enabled = 1;
@@ -11862,9 +12147,13 @@ static void test_audio_calls_read_the_guest_queue_under_the_deterministic_clock(
     s_audio_queue_result = 100000;
     expect(audio_dispatch(&cpu, NID_SCE_AUDIO_GET_CHANNEL_REST_LENGTH, 0u, 0u, 0u) == 64u,
            "GetChannelRestLength reports the model's 64 frames, not the host's 100000");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_GET_CHANNEL_REST_LEN, 0u, 0u, 0u) == 64u,
+           "GetChannelRestLen agrees with RestLength on the model's 64 frames (#2361)");
     s_vtime_us += 2000u;   /* the 64 frames have played in guest time */
     expect(audio_dispatch(&cpu, NID_SCE_AUDIO_GET_CHANNEL_REST_LENGTH, 0u, 0u, 0u) == 0u,
            "and 2 ms of guest time later the model is empty whatever the host holds");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_GET_CHANNEL_REST_LEN, 0u, 0u, 0u) == 0u,
+           "and GetChannelRestLen reads the same empty model (#2361)");
 
     expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT2_RESERVE, 64u, 0u, 0u) == 0u,
            "Output2 reserves a 64-sample channel");
@@ -12182,6 +12471,29 @@ static void test_audio_regular_contract_safety(void) {
     s_audio_queue_result = -1;
     expect(audio_dispatch(&cpu, NID_SCE_AUDIO_GET_CHANNEL_REST_LENGTH, 0u, 0u, 0u) == 0u,
            "AudioGetChannelRestLength clamps negative queue backend report to 0");
+    s_audio_queue_result = 0;
+
+    /* sceAudioGetChannelRestLen (#2361) answers as sceAudioGetChannelRestLength does: on a
+     * PSP-3000 the two, channel in $a0, read the same rest length after each blocking output
+     * (PSP-HLE-AUDIO-REST-001). The invalid-channel code is UNMEASURED for both calls; RestLen
+     * keeps RestLength's.
+     * MUTANT: drop the 0xe9d97901 registration -- the first call below is an unimplemented
+     *   NID and the run stops (exit 7). */
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_GET_CHANNEL_REST_LEN, 0xffffffffu, 0u, 0u) ==
+               SCE_AUDIO_ERROR_INVALID_CH,
+           "AudioGetChannelRestLen rejects a negative channel with RestLength's code (unmeasured for both)");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_GET_CHANNEL_REST_LEN, 8u, 0u, 0u) ==
+               SCE_AUDIO_ERROR_INVALID_CH,
+           "AudioGetChannelRestLen rejects out-of-range channel 8 with RestLength's code (unmeasured for both)");
+    s_audio_queue_result = 512;
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_GET_CHANNEL_REST_LEN, 0u, 0u, 0u) == 512u,
+           "AudioGetChannelRestLen returns the queued frame count RestLength returns");
+    s_audio_queue_result = 0;
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_GET_CHANNEL_REST_LEN, 0u, 0u, 0u) == 0u,
+           "AudioGetChannelRestLen returns 0 when queue has 0 frames");
+    s_audio_queue_result = -1;
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_GET_CHANNEL_REST_LEN, 0u, 0u, 0u) == 0u,
+           "AudioGetChannelRestLen clamps negative queue backend report to 0");
     s_audio_queue_result = 0;
 
     for (uint32_t i = 0; i < 64u; i++)
@@ -13993,6 +14305,7 @@ static void test_rtc_time_t_add_years_resolution_autotest(void) {
 enum {
     RTCA_NID_ADD_MICROS = 0x26d25a5du, RTCA_NID_ADD_SECONDS = 0xf2a4afe5u, RTCA_NID_ADD_DAYS = 0xe51b4b7au,
     RTCA_NID_DAY_OF_WEEK = 0x57726bc1u, RTCA_NID_CHECK_VALID = 0x4b1b5e82u,
+    RTCA_NID_ADD_MINUTES = 0xe6605bcau, RTCA_NID_ADD_HOURS = 0x26d7a24au, RTCA_NID_ADD_WEEKS = 0xcf3a2ca8u,
 };
 
 static int rtca_dst_is(uint16_t y, uint16_t mo, uint16_t d, uint16_t h, uint16_t mi, uint16_t sec, uint32_t us) {
@@ -14010,7 +14323,8 @@ static uint32_t rtca_add(uint32_t nid, uint16_t y, uint16_t mo, uint16_t d, uint
     expect(td24b_dispatch4(RTCT_NID_GET_TICK, RTCT_DATE, RTCT_SRC, 0u, 0u) == 0u, "the source date converts");
     MEM_W32(RTCT_DST, 0x1337u); MEM_W32(RTCT_DST + 4u, 0u);
     uint32_t lo = (uint32_t)(uint64_t)count, hi = (uint32_t)((uint64_t)count >> 32);
-    if (nid == RTCA_NID_ADD_DAYS) hi = 0u;   /* a 32-bit int argument: the 64-bit row is truncated */
+    if (nid == RTCA_NID_ADD_DAYS || nid == RTCA_NID_ADD_HOURS || nid == RTCA_NID_ADD_WEEKS)
+        hi = 0u;   /* a 32-bit int argument: the 64-bit row is truncated */
     return td24b_dispatch4(nid, RTCT_DST, RTCT_SRC, lo, hi);
 }
 
@@ -14018,6 +14332,72 @@ static uint32_t rtca_check_valid(uint16_t y, uint16_t mo, uint16_t d, uint16_t h
                                  uint32_t us) {
     rtct_date(y, mo, d, h, mi, sec, us);
     return td24b_dispatch4(RTCA_NID_CHECK_VALID, RTCT_DATE, 0u, 0u, 0u);
+}
+
+/* sceRtcTickAddMinutes, sceRtcTickAddHours and sceRtcTickAddWeeks against PSPAutotests
+ * tests/rtc/arithmetic.expected (f573fe8c, recorded on a PSP): the 8 fixed rows of each function,
+ * each the autotest's own (its loop rows are not checked here). Minutes
+ * take a 64-bit count; hours and weeks a 32-bit int, so the autotest's 64-bit constants are
+ * truncated (+ 62135596800000445 hours lands in year 383). Before these handlers the three NIDs
+ * were unregistered imports. */
+static void test_rtc_tick_add_minutes_hours_weeks_autotest(void) {
+    reset_fixture();
+    sr_hle_init();
+    expect(sr_hle_test_is_registered(RTCA_NID_ADD_MINUTES) && sr_hle_test_is_registered(RTCA_NID_ADD_HOURS) &&
+               sr_hle_test_is_registered(RTCA_NID_ADD_WEEKS),
+           "sceRtcTickAddMinutes, -Hours and -Weeks are registered");
+    static const struct {
+        uint32_t nid;
+        uint16_t y, mo, d, h, mi;
+        long long count;
+        uint16_t ry, rmo, rd, rh, rmi, rsec;
+        uint32_t rus;
+    } rows[] = {
+        /* checkRtcTickAddMinutes */
+        { RTCA_NID_ADD_MINUTES, 1970, 1, 1, 0, 0, -2000, 1969, 12, 30, 14, 40, 0, 445 },
+        { RTCA_NID_ADD_MINUTES, 1970, 1, 1, 0, 0, 2000, 1970, 1, 2, 9, 20, 0, 445 },
+        { RTCA_NID_ADD_MINUTES, 1970, 1, 1, 0, 0, -62135596800000445LL, 11640, 10, 4, 14, 46, 50, 248893 },
+        { RTCA_NID_ADD_MINUTES, 1970, 1, 1, 0, 0, 62135596800000445LL, 52565, 4, 16, 17, 14, 59, 303613 },
+        { RTCA_NID_ADD_MINUTES, 1, 1, 1, 0, 10, -10, 1, 1, 1, 0, 0, 0, 0 },
+        { RTCA_NID_ADD_MINUTES, 1, 1, 1, 0, 10, -11, 60267, 1, 19, 8, 0, 49, 551616 },
+        { RTCA_NID_ADD_MINUTES, 9999, 12, 31, 23, 50, 9, 9999, 12, 31, 23, 59, 0, 0 },
+        { RTCA_NID_ADD_MINUTES, 9999, 12, 31, 23, 50, 10, 10000, 1, 1, 0, 0, 0, 0 },
+        /* checkRtcTickAddHours */
+        { RTCA_NID_ADD_HOURS, 1970, 1, 1, 0, 0, -2000, 1969, 10, 9, 16, 0, 0, 445 },
+        { RTCA_NID_ADD_HOURS, 1970, 1, 1, 0, 0, 2000, 1970, 3, 25, 8, 0, 0, 445 },
+        { RTCA_NID_ADD_HOURS, 1970, 1, 1, 0, 0, -62135596800000445LL, 3556, 10, 18, 11, 0, 0, 445 },
+        { RTCA_NID_ADD_HOURS, 1970, 1, 1, 0, 0, 62135596800000445LL, 383, 3, 16, 13, 0, 0, 445 },
+        { RTCA_NID_ADD_HOURS, 1, 1, 1, 10, 0, -10, 1, 1, 1, 0, 0, 0, 0 },
+        { RTCA_NID_ADD_HOURS, 1, 1, 1, 10, 0, -11, 60267, 1, 19, 7, 1, 49, 551616 },
+        { RTCA_NID_ADD_HOURS, 9999, 12, 31, 20, 0, 3, 9999, 12, 31, 23, 0, 0, 0 },
+        { RTCA_NID_ADD_HOURS, 9999, 12, 31, 20, 0, 4, 10000, 1, 1, 0, 0, 0, 0 },
+        /* checkRtcTickAddWeeks */
+        { RTCA_NID_ADD_WEEKS, 1970, 1, 1, 0, 0, -2000, 1931, 9, 3, 0, 0, 0, 445 },
+        { RTCA_NID_ADD_WEEKS, 1970, 1, 1, 0, 0, 2000, 2008, 5, 1, 0, 0, 0, 445 },
+        { RTCA_NID_ADD_WEEKS, 1970, 1, 1, 0, 0, -62135596800000445LL, 6407, 10, 14, 0, 0, 0, 445 },
+        { RTCA_NID_ADD_WEEKS, 1970, 1, 1, 0, 0, 62135596800000445LL, 57798, 4, 8, 8, 1, 49, 552061 },
+        { RTCA_NID_ADD_WEEKS, 1, 1, 8, 0, 0, -1, 1, 1, 1, 0, 0, 0, 0 },
+        { RTCA_NID_ADD_WEEKS, 1, 1, 8, 0, 0, -2, 60267, 1, 12, 8, 1, 49, 551616 },
+        { RTCA_NID_ADD_WEEKS, 9999, 12, 20, 0, 0, 1, 9999, 12, 27, 0, 0, 0, 0 },
+        { RTCA_NID_ADD_WEEKS, 9999, 12, 20, 0, 0, 2, 10000, 1, 3, 0, 0, 0, 0 },
+    };
+    for (size_t i = 0; i < sizeof rows / sizeof rows[0]; i++) {
+        const uint32_t us = rows[i].y == 1970 ? 445u : 0u;   /* the autotest's 1970 rows carry .000445 */
+        char what[96];
+        snprintf(what, sizeof what, "arithmetic.expected row %u (nid 0x%08x, count %lld)", (unsigned)i,
+                 (unsigned)rows[i].nid, rows[i].count);
+        expect(rtca_add(rows[i].nid, rows[i].y, rows[i].mo, rows[i].d, rows[i].h, rows[i].mi, 0, us,
+                        rows[i].count) == 0u &&
+                   rtca_dst_is(rows[i].ry, rows[i].rmo, rows[i].rd, rows[i].rh, rows[i].rmi, rows[i].rsec,
+                               rows[i].rus),
+               what);
+    }
+    uint32_t stops = sr_hle_test_unmodelled_stops();
+    (void)td24b_dispatch4(RTCA_NID_ADD_MINUTES, 0u, RTCT_SRC, 1u, 0u);
+    (void)td24b_dispatch4(RTCA_NID_ADD_HOURS, RTCT_DST, 0u, 1u, 0u);
+    (void)td24b_dispatch4(RTCA_NID_ADD_WEEKS, 0u, RTCT_SRC, 1u, 0u);
+    expect(sr_hle_test_unmodelled_stops() == stops + 3u,
+           "the minute, hour and week adds stop by name on a NULL source or destination");
 }
 
 static void test_rtc_tick_add_day_of_week_check_valid_autotest(void) {
@@ -15981,6 +16361,43 @@ static void test_route_observer_waits_for_guest_scanout_state(void) {
            "with the guest's own pixel format (1), not the initializer's 3");
     expect(g_sync_last.width == 480u && g_sync_last.height == 272u,
            "and the full visible extent");
+}
+
+/* The route observer and the FBSNAP snapshot decode the scanout through fb_decode_px. A
+ * 32-bit load of 0x04084000 is answered with the GE status word (sr_get_ge_status, 0x18
+ * when idle), so a decoder that read 8888 pixels through MEM_R32 replaced the pixel stored
+ * there: (0,264) of the usual stride-512 framebuffer at 0x04000000, in every FBSNAP
+ * snapshot of tools/test_player_package_route.py's sealed-disc launch (#308). Here the
+ * framebuffer sits at 0x0400D000, so the default 12x8 grid's sample (0,238) of cell (0,7)
+ * is the word at 0x04084000, and every cell must average to the one colour stored. */
+static void test_route_sample_reads_vram_not_the_ge_status_port(void) {
+    static const uint32_t NID_DISPLAY_SET_FRAME_BUF = 0x289d82feu;
+    static const uint32_t FB = 0x0400D000u;
+    static const uint32_t COLOUR = 0xFF604020u;   /* ABGR: R=0x20 G=0x40 B=0x60 */
+    uint8_t sig[4096];
+    CpuState cpu;
+
+    reset_fixture();
+    sr_hle_init();
+    memset(&cpu, 0, sizeof(cpu));
+    expect(FB + (238u * 512u) * 4u == 0x04084000u,
+           "fixture: cell (0,7)'s first sample is the word at the GE status port");
+    for (uint32_t i = 0; i < 512u * 272u; i++) sr_w32(FB + i * 4u, COLOUR);
+    expect(sr_r8(0x04084000u) == 0x20u && sr_r8(0x04084001u) == 0x40u,
+           "fixture: guest VRAM at 0x04084000 holds the stored pixel");
+    cpu.r[4] = FB; cpu.r[5] = 512; cpu.r[6] = 3; cpu.r[7] = 0;
+    expect(sr_syscall(&cpu, NID_DISPLAY_SET_FRAME_BUF) == 0u,
+           "an immediate SetFrameBuf at 0x0400D000 is accepted");
+    expect(sr_route_test_sample(sig) == 1, "the observer samples the guest's scanout");
+    int cells = sr_route_sig_bytes() / 3;
+    int wrong = -1;
+    for (int k = 0; k < cells && wrong < 0; k++)
+        if (sig[k * 3] != 0x20u || sig[k * 3 + 1] != 0x40u || sig[k * 3 + 2] != 0x60u) wrong = k;
+    if (wrong >= 0)
+        fprintf(stderr, "  cell %d sampled %02x %02x %02x, stored 20 40 60\n", wrong,
+                sig[wrong * 3], sig[wrong * 3 + 1], sig[wrong * 3 + 2]);
+    expect(wrong < 0,
+           "every sampled cell is the stored colour; the GE status word replaced no pixel");
 }
 
 /* ---- extracted-data census preparation seam ---------------------------------
@@ -26253,8 +26670,9 @@ static void test_ge_linear_filter_stays_inside_region(void) {
 
 /* ==== GE raster cells (PSP-GE-RASTER-001, #343) ====
  * This block is carried byte for byte by fixtures/psp_oracle/probe_ge_sample.c (the PSP
- * side, CASE=ge-raster) and tests/native/hle_thread_selftest.c (the software GE side);
- * tools/test_psp_oracle.py pins the copy. Each cell is one display list of project-written
+ * side, CASE=ge-raster), tests/native/hle_thread_selftest.c (the software GE side) and
+ * src/rt/gpu_sdl3vk/ge_gpu_selftest.inc (the Vulkan side); tools/test_psp_oracle.py pins
+ * the copies. Each cell is one display list of project-written
  * command words over generated patterns (no game data). It draws into the 16x4 window
  * x 16..31, y 8..11 of a 64x32 colour buffer at VRAM offset GR_FB_OFFSET whose other pixels
  * are 0 and whose window holds gr_dst() before the list runs. The base state turns every
@@ -27939,14 +28357,20 @@ static const struct {
     {"fog-k1-c", 0x75e634dc776d8575ull},
 };
 
-/* Every PSP-GE-RASTER-001 cell through production dispatch and the software GE, with the
- * probe's own list, vertices, textures and destination pattern; the window must match the
- * PSP's digest. A diverging cell prints its software window for comparison with the raw
- * hardware rows. */
-static void test_ge_raster_cells_match_psp(void) {
+void ge_test_set_raster_mutant(int mutant);
+
+/* Every PSP-GE-RASTER-001 cell through production dispatch and the software GE under raster
+ * rule set `mutant` (0 the measured rules, ge.c ge_test_set_raster_mutant), with the probe's own
+ * list, vertices, textures and destination pattern. diverged[k] says whether cell k's window
+ * differs from the PSP's digest; returns how many do. Under the measured rules a diverging cell
+ * prints its software window for comparison with the raw hardware rows. */
+static unsigned gr_run_cells(int mutant, unsigned char diverged[GR_CELL_COUNT], unsigned *names_ok,
+                             unsigned *synced)
+{
     CpuState cpu;
     reset_fixture();
     sr_hle_init();
+    ge_test_set_raster_mutant(mutant);
     const uint32_t list = 0x08900000u, vtx = 0x08904000u, clut = 0x08918000u;
     const uint32_t fb = 0x04000000u + GR_FB_OFFSET;
     uint32_t tex[GR_T_COUNT];
@@ -27955,7 +28379,9 @@ static void test_ge_raster_cells_match_psp(void) {
         (void)gr_texture(t, (uint8_t *)SR_HOST(tex[t]));
     }
     gr_clut((uint8_t *)SR_HOST(clut));
-    unsigned diverged = 0, names_ok = 1, synced = 1;
+    unsigned count = 0;
+    *names_ok = 1;
+    *synced = 1;
     for (uint32_t k = 0; k < GR_CELL_COUNT; k++) {
         const struct gr_cell *c = &gr_cells[k];
         uint32_t px[GR_N];
@@ -27973,25 +28399,75 @@ static void test_ge_raster_cells_match_psp(void) {
         memset(&cpu, 0, sizeof(cpu));
         cpu.r[4] = qid;
         if ((qid & 0xFF000000u) != 0x35000000u || sr_syscall(&cpu, NID_SCE_GE_LIST_SYNC) != 0u)
-            synced = 0;
+            *synced = 0;
         for (uint32_t i = 0; i < GR_N; i++) {
             const uint32_t at = (GR_WY + i / GR_WW) * GR_STRIDE + GR_WX + i % GR_WW;
             px[i] = c->psm == 3u ? MEM_R32(fb + at * 4u) : (uint32_t)MEM_R16(fb + at * 2u);
         }
-        if (strcmp(s_gr_psp[k].name, c->name) != 0) names_ok = 0;
+        if (strcmp(s_gr_psp[k].name, c->name) != 0) *names_ok = 0;
         const uint64_t digest = gr_digest(px);
-        if (digest != s_gr_psp[k].psp) {
-            diverged++;
-            fprintf(stderr, "GE-RASTER %s software=0x%016llx psp=0x%016llx", c->name,
-                    (unsigned long long)digest, (unsigned long long)s_gr_psp[k].psp);
-            for (uint32_t i = 0; i < GR_N; i++)
-                fprintf(stderr, "%s%08x", i % GR_WW ? " " : "\n  ", (unsigned)px[i]);
-            fprintf(stderr, "\n");
-        }
+        diverged[k] = digest != s_gr_psp[k].psp;
+        if (!diverged[k]) continue;
+        count++;
+        if (mutant != 0) continue;
+        fprintf(stderr, "GE-RASTER %s software=0x%016llx psp=0x%016llx", c->name,
+                (unsigned long long)digest, (unsigned long long)s_gr_psp[k].psp);
+        for (uint32_t i = 0; i < GR_N; i++)
+            fprintf(stderr, "%s%08x", i % GR_WW ? " " : "\n  ", (unsigned)px[i]);
+        fprintf(stderr, "\n");
     }
+    ge_test_set_raster_mutant(0);
+    return count;
+}
+
+/* Each deliberately wrong raster rule of ge.c and exactly the PSP-GE-RASTER-001 cells it fails.
+ * Depth rounding has no mutant here: every depth a cell draws or clears is an integer, so
+ * rounding to nearest instead of truncating passes all 189 cells (docs/HARDWARE_ORACLE.md). */
+#define GR_MUTANT_CELLS 8
+static const struct {
+    int mutant;
+    const char *rule;
+    const char *cells[GR_MUTANT_CELLS];
+} s_gr_mutants[] = {
+    {1, "top-left fill rule replaced by bottom-right", {"e-tri1", "e-tri3", "e-tri5", NULL}},
+    {2, "vertex snap bias +0.5 instead of +0.375", {"e-tri3", NULL}},
+    {3, "dither matrix read at (x + 1, y + 1)",
+     {"dth-565", "dth-5551", "dth-4444", "dth-8888", "dth-565-b", "clr-ca-dth565",
+      "clr-ca-dth8888", NULL}},
+};
+
+/* Every PSP-GE-RASTER-001 cell matches the PSP's window digest under the measured rules, and
+ * each wrong rule above fails its named cells, so the PSP data, not agreement with the software
+ * GE's own past output, pins those rules (#343). */
+static void test_ge_raster_cells_match_psp(void) {
+    unsigned char diverged[GR_CELL_COUNT];
+    unsigned names_ok = 0, synced = 0;
+    const unsigned count = gr_run_cells(0, diverged, &names_ok, &synced);
     expect(names_ok, "PSP-GE-RASTER-001 digest table rows name the cells in table order");
     expect(synced, "every PSP-GE-RASTER-001 list is accepted and completes");
-    expect(diverged == 0, "every PSP-GE-RASTER-001 cell matches the PSP window digest");
+    expect(count == 0, "every PSP-GE-RASTER-001 cell matches the PSP window digest");
+    for (size_t m = 0; m < sizeof(s_gr_mutants) / sizeof(s_gr_mutants[0]); m++) {
+        unsigned mnames = 0, msynced = 0;
+        const unsigned wrong = gr_run_cells(s_gr_mutants[m].mutant, diverged, &mnames, &msynced);
+        fprintf(stderr, "GE-RASTER mutant %d (%s): %u of %u cells differ from the PSP:",
+                s_gr_mutants[m].mutant, s_gr_mutants[m].rule, wrong, (unsigned)GR_CELL_COUNT);
+        for (uint32_t k = 0; k < GR_CELL_COUNT; k++)
+            if (diverged[k]) fprintf(stderr, " %s", gr_cells[k].name);
+        fprintf(stderr, "\n");
+        unsigned named = 0, caught = 0;
+        for (size_t n = 0; n < GR_MUTANT_CELLS && s_gr_mutants[m].cells[n] != NULL; n++) {
+            named++;
+            unsigned hit = 0;
+            for (uint32_t k = 0; k < GR_CELL_COUNT; k++)
+                if (strcmp(gr_cells[k].name, s_gr_mutants[m].cells[n]) == 0 && diverged[k]) hit = 1;
+            if (!hit)
+                fprintf(stderr, "GE-RASTER mutant %d: named cell %s matches the PSP\n",
+                        s_gr_mutants[m].mutant, s_gr_mutants[m].cells[n]);
+            caught += hit;
+        }
+        expect(msynced && named > 0 && caught == named && wrong == named,
+               "each wrong PSP-GE-RASTER-001 raster rule fails exactly its named PSP cells");
+    }
 }
 
 static void test_ge_guest_sentinel(void) {
@@ -28945,6 +29421,324 @@ static void test_savedata_thread_ended_inside_a_parked_save(void) {
     free(save_ms);
 }
 
+/* #1296, #2361: a read of the disc parks its thread for the drive's time, so the other threads
+ * run through it, as they do on a PSP while the drive transfers. The production path: real
+ * threads on their own coroutines, sceIoRead through the dispatcher, the blocking sound output
+ * and the scheduler's timed waits. A reader at priority 32 reads 4 MiB of the UMD block device
+ * in one call while a sound thread at priority 16 feeds 256-frame blocks and a thread at
+ * priority 48 counts milliseconds. Before the read took guest time it returned at once: no
+ * block was output during it and the weaker thread never ran. The cell runs on the fixture's
+ * virtual clock and again under the deterministic clock (SR_DETERMINISTIC_CLOCK=1), and holds
+ * on both.
+ *
+ * MUTANT: drop h_IoRead's last sched_delay_current (the rest of the drive's time) -- the long read takes no guest time, and
+ *   no block is output and the weaker thread does not count during it.
+ * MUTANT: h_IoRead waits whatever the result -- the refused read takes guest time.
+ * MUTANT: drop io_read_caller_can_wait from h_IoRead -- the read made with dispatch disabled
+ *   takes guest time. MUTANT: drop the on_umd test -- the Memory Stick read takes guest time.
+ * MUTANT: hle_io_umd_read_us charges a sector count as bytes -- the long read takes the minimum.
+ * MUTANT: io_async_complete_fd calls h_IoRead -- the waited queued read takes the drive's time.
+ * The idle clock's own cases (a wait the slice reaches, a deadline before the VBLANK, a due
+ * source) are sched_selftest's: test_idle_virtual_clock_stops_at_a_deadline_before_the_vblank. */
+enum {
+    URW_MAIN_ENTRY = 0x08a71000u,
+    URW_SOUND_ENTRY = 0x08a71040u,
+    URW_WEAK_ENTRY = 0x08a71080u,
+    URW_DOOMED_ENTRY = 0x08a71180u,
+    URW_FILE_LBA = 0x1002u,     /* where the synthetic lookup puts disc0:/UMD_DATA.BIN */
+    URW_DISC_SECTORS = 0x1100u, /* the disc for this cell: past that file */
+    URW_NID_IO_REMOVE = 0xf27a9c51u,
+    URW_NAME = 0x08a710c0u,
+    URW_PATH = 0x08a71100u,
+    URW_ASYNC_RESULT = 0x08a71200u,
+    URW_SOUND_BUF = 0x08a72000u,
+    URW_DST = 0x09000000u,
+    URW_SECTORS = 2048u,        /* 4 MiB in one read */
+    URW_SOUND_FRAMES = 256u,
+    URW_NID_IO_OPEN = 0x109f50bcu,
+    URW_NID_IO_CLOSE = 0x810c4bc3u,
+    URW_NID_IO_READ = 0x6a638d83u,
+    URW_NID_IO_WRITE = 0x42ec03acu,
+    URW_NID_IO_LSEEK32 = 0x68963324u,
+    URW_NID_IO_READ_ASYNC = 0xa0b5a7c2u,
+    URW_NID_IO_WAIT_ASYNC = 0xe23eec33u
+};
+static atomic_int s_urw_stop;
+static uint32_t s_urw_outputs, s_urw_weak;
+static uint32_t s_urw_read, s_urw_read_us, s_urw_read_outputs, s_urw_read_weak;
+static uint32_t s_urw_short, s_urw_short_us, s_urw_refused, s_urw_refused_us;
+static uint32_t s_urw_nodispatch, s_urw_nodispatch_us, s_urw_ms, s_urw_ms_us;
+static uint32_t s_urw_async, s_urw_async_us;
+static int s_urw_bytes_ok, s_urw_gated;
+static uint32_t s_urw_read_calls;   /* disc reads the long read made */
+static uint32_t s_urw_file, s_urw_file_us, s_urw_doomed_fd, s_urw_after_doomed;
+static int s_urw_file_ok, s_urw_doomed_returned, s_urw_in_flight_parked, s_urw_in_flight_ended;
+static int s_urw_after_doomed_ok;
+static uint32_t s_urw_gate_weak;   /* the weaker thread's count when the gated read began */
+
+static uint32_t urw_now(void) { return gsw_call(NID_SCE_KERNEL_GET_SYSTEM_TIME_LOW, 0u, 0u, 0u, 0u); }
+
+static void urw_sound_fn(CpuState *cpu) {
+    (void)gsw_call(NID_SCE_AUDIO_CH_RESERVE, 0u, URW_SOUND_FRAMES, 0u, 0u);
+    while (!atomic_load(&s_urw_stop)) {
+        (void)gsw_call(NID_SCE_AUDIO_OUTPUT_BLOCKING, 0u, 0x8000u, URW_SOUND_BUF, 0u);
+        s_urw_outputs++;
+    }
+    cpu->r[2] = 0u;
+}
+
+static void urw_weak_fn(CpuState *cpu) {
+    while (!atomic_load(&s_urw_stop)) {
+        (void)gsw_call(NID_SCE_KERNEL_DELAY_THREAD, 1000u, 0u, 0u, 0u);
+        s_urw_weak++;
+        /* The host read is still blocked, and this thread has run five times since it began:
+         * let it go on. */
+        if (atomic_load(&s_umd_synthetic_gate) == 1 && s_urw_weak >= s_urw_gate_weak + 5u)
+            atomic_store(&s_umd_synthetic_gate, 2);
+    }
+    cpu->r[2] = 0u;
+}
+
+/* A reader that is ended while the host is still reading for it (the worker pass). */
+static void urw_doomed_fn(CpuState *cpu) {
+    (void)gsw_call(URW_NID_IO_READ, s_urw_doomed_fd, URW_DST + 0x40000u, 8u, 0u);
+    s_urw_doomed_returned = 1;   /* not reached: main ends this thread inside the read */
+    cpu->r[2] = 0u;
+}
+
+static void urw_main_fn(CpuState *cpu) {
+    title_hle_write_cstr(URW_PATH, "umd0:");
+    const uint32_t fd = gsw_call(URW_NID_IO_OPEN, URW_PATH, 0x000f0001u, 0u, 0u);
+    const uint32_t sound = gsw_call(NID_SCE_KERNEL_CREATE_THREAD, URW_NAME, URW_SOUND_ENTRY, 16u, 0x1000u);
+    (void)gsw_call(NID_SCE_KERNEL_START_THREAD, sound, 0u, 0u, 0u);
+    const uint32_t weak = gsw_call(NID_SCE_KERNEL_CREATE_THREAD, URW_NAME, URW_WEAK_ENTRY, 48u, 0x1000u);
+    (void)gsw_call(NID_SCE_KERNEL_START_THREAD, weak, 0u, 0u, 0u);
+    (void)gsw_call(NID_SCE_KERNEL_DELAY_THREAD, 30000u, 0u, 0u, 0u);   /* the sound thread is in step */
+
+    /* The long read. */
+    uint32_t t0 = urw_now(), outputs0 = s_urw_outputs, weak0 = s_urw_weak;
+    s_urw_gate_weak = weak0;
+    if (s_urw_gated) atomic_store(&s_umd_synthetic_gate, 1);
+    const uint32_t reads0 = atomic_load(&s_umd_synthetic_reads);
+    s_urw_read = gsw_call(URW_NID_IO_READ, fd, URW_DST, URW_SECTORS, 0u);
+    s_urw_read_calls = atomic_load(&s_umd_synthetic_reads) - reads0;
+    atomic_store(&s_umd_synthetic_gate, 0);
+    s_urw_read_us = urw_now() - t0;
+    s_urw_read_outputs = s_urw_outputs - outputs0;
+    s_urw_read_weak = s_urw_weak - weak0;
+    s_urw_bytes_ok = umd_test_sectors_match(URW_DST, 0u, URW_SECTORS);
+
+    /* One sector: the drive's minimum. */
+    t0 = urw_now();
+    s_urw_short = gsw_call(URW_NID_IO_READ, fd, URW_DST, 1u, 0u);
+    s_urw_short_us = urw_now() - t0;
+
+    /* A refused read (a zero count) does not wait. */
+    t0 = urw_now();
+    s_urw_refused = gsw_call(URW_NID_IO_READ, fd, URW_DST, 0u, 0u);
+    s_urw_refused_us = urw_now() - t0;
+
+    /* With dispatch disabled the read returns at once (UNMEASURED on a PSP). */
+    const uint32_t dispatch = gsw_call(NID_SCE_KERNEL_SUSPEND_DISPATCH_THREAD, 0u, 0u, 0u, 0u);
+    t0 = urw_now();
+    s_urw_nodispatch = gsw_call(URW_NID_IO_READ, fd, URW_DST, 16u, 0u);
+    s_urw_nodispatch_us = urw_now() - t0;
+    (void)gsw_call(NID_SCE_KERNEL_RESUME_DISPATCH_THREAD, dispatch, 0u, 0u, 0u);
+
+    /* A queued read that is waited for completes on the request queue, with no drive time. */
+    (void)gsw_call(URW_NID_IO_LSEEK32, fd, 0u, 0u, 0u);
+    t0 = urw_now();
+    (void)gsw_call(URW_NID_IO_READ_ASYNC, fd, URW_DST, URW_SECTORS, 0u);
+    (void)gsw_call(URW_NID_IO_WAIT_ASYNC, fd, URW_ASYNC_RESULT, 0u, 0u);
+    s_urw_async_us = urw_now() - t0;
+    s_urw_async = MEM_R32(URW_ASYNC_RESULT);
+
+    if (s_urw_gated) {
+        /* A reader ended while the host read for it is blocked: its fetch is abandoned, the
+         * worker drops it when the host read returns, and the next reader is served. */
+        (void)gsw_call(URW_NID_IO_LSEEK32, fd, 0u, 0u, 0u);
+        s_urw_doomed_fd = fd;
+        s_urw_gate_weak = 0x7ffffff0u;   /* the weaker thread does not open this gate: main does */
+        atomic_store(&s_umd_synthetic_gate, 1);
+        const uint32_t doomed = gsw_call(NID_SCE_KERNEL_CREATE_THREAD, URW_NAME, URW_DOOMED_ENTRY, 24u, 0x1000u);
+        (void)gsw_call(NID_SCE_KERNEL_START_THREAD, doomed, 0u, 0u, 0u);   /* it runs and parks in its read */
+        s_urw_in_flight_parked = sr_hle_test_io_disc_fetches_in_flight();
+        (void)gsw_call(NID_SCE_KERNEL_TERMINATE_DELETE_THREAD, doomed, 0u, 0u, 0u);
+        s_urw_in_flight_ended = sr_hle_test_io_disc_fetches_in_flight();
+        atomic_store(&s_umd_synthetic_gate, 2);   /* the host read returns to nobody */
+        (void)gsw_call(URW_NID_IO_LSEEK32, fd, 32u, 0u, 0u);
+        s_urw_after_doomed = gsw_call(URW_NID_IO_READ, fd, URW_DST + 0x50000u, 4u, 0u);
+        s_urw_after_doomed_ok = umd_test_sectors_match(URW_DST + 0x50000u, 32u, 4u);
+        atomic_store(&s_umd_synthetic_gate, 0);
+    }
+    (void)gsw_call(URW_NID_IO_CLOSE, fd, 0u, 0u, 0u);
+
+    /* A file of the disc, read from the middle: the drive's time, and the right bytes. */
+    title_hle_write_cstr(URW_PATH, "disc0:/UMD_DATA.BIN");
+    const uint32_t file = gsw_call(URW_NID_IO_OPEN, URW_PATH, 1u, 0u, 0u);
+    (void)gsw_call(URW_NID_IO_LSEEK32, file, 512u, 0u, 0u);
+    t0 = urw_now();
+    s_urw_file = gsw_call(URW_NID_IO_READ, file, URW_DST + 0x60000u, 1024u, 0u);
+    s_urw_file_us = urw_now() - t0;
+    s_urw_file_ok = 1;
+    for (uint32_t i = 0; i < 1024u; i++)
+        if (MEM_R8(URW_DST + 0x60000u + i) != umd_synthetic_byte((uint64_t)URW_FILE_LBA * 2048u + 512u + i))
+            s_urw_file_ok = 0;
+    (void)gsw_call(URW_NID_IO_CLOSE, file, 0u, 0u, 0u);
+
+    /* A Memory Stick file is not the drive's: its read returns at once. */
+    title_hle_write_cstr(URW_PATH, "ms0:/urw_read.bin");
+    const uint32_t out = gsw_call(URW_NID_IO_OPEN, URW_PATH, 0x0602u, 0x1ffu, 0u);   /* WRONLY|CREAT|TRUNC */
+    (void)gsw_call(URW_NID_IO_WRITE, out, URW_DST, 4096u, 0u);
+    (void)gsw_call(URW_NID_IO_CLOSE, out, 0u, 0u, 0u);
+    const uint32_t in = gsw_call(URW_NID_IO_OPEN, URW_PATH, 1u, 0u, 0u);
+    t0 = urw_now();
+    s_urw_ms = gsw_call(URW_NID_IO_READ, in, URW_DST + 0x10000u, 4096u, 0u);
+    s_urw_ms_us = urw_now() - t0;
+    (void)gsw_call(URW_NID_IO_CLOSE, in, 0u, 0u, 0u);
+    (void)gsw_call(URW_NID_IO_REMOVE, URW_PATH, 0u, 0u, 0u);
+
+    atomic_store(&s_urw_stop, 1);
+    (void)gsw_call(NID_SCE_KERNEL_DELAY_THREAD, 30000u, 0u, 0u, 0u);   /* both loops see it and end */
+    cpu->r[2] = 0u;
+}
+
+static void urw_run(int deterministic, int host_worker) {
+    reset_fixture();
+    sr_hle_init();
+    sr_hle_test_register_iofilemgr();
+    sr_hle_test_audio_reset();
+    audio_fixture_reset();
+    sr_test_guest_fn_reset();
+    sr_test_register_guest_fn(URW_MAIN_ENTRY, urw_main_fn);
+    sr_test_register_guest_fn(URW_SOUND_ENTRY, urw_sound_fn);
+    sr_test_register_guest_fn(URW_WEAK_ENTRY, urw_weak_fn);
+    sr_test_register_guest_fn(URW_DOOMED_ENTRY, urw_doomed_fn);
+    title_hle_write_cstr(URW_NAME, "urw-thread");
+    s_umd_io_synthetic_enabled = 1;
+    s_umd_synthetic_sectors = URW_DISC_SECTORS;
+    s_det_clock = deterministic;
+    s_host_work_test_force = host_worker;
+    s_urw_gated = host_worker;
+    atomic_store(&s_umd_synthetic_gate, 0);
+    atomic_store(&s_umd_synthetic_gate_timeouts, 0);
+    /* The fixture's virtual clock has no guest-time sound queue: with no host device either,
+     * each output waits its block out, as the deterministic clock's model does once in step. */
+    s_audio_queue_result = -1;
+    atomic_store(&s_urw_stop, 0);
+    s_urw_outputs = s_urw_weak = 0u;
+    s_urw_read = s_urw_short = s_urw_refused = s_urw_nodispatch = s_urw_ms = s_urw_async = 0xdeadbeefu;
+    s_urw_read_us = s_urw_short_us = s_urw_refused_us = s_urw_nodispatch_us = 0xdeadbeefu;
+    s_urw_ms_us = s_urw_async_us = 0xdeadbeefu;
+    s_urw_read_outputs = s_urw_read_weak = 0xdeadbeefu;
+    s_urw_bytes_ok = 0;
+    s_urw_file = s_urw_file_us = s_urw_after_doomed = 0xdeadbeefu;
+    s_urw_file_ok = s_urw_doomed_returned = s_urw_after_doomed_ok = 0;
+    s_urw_in_flight_parked = s_urw_in_flight_ended = -1;
+    g_worker_uid = SR_ROLE_UID_NONE;
+    memset(s_cpu, 0, sizeof(*s_cpu));
+    sched_run(URW_MAIN_ENTRY, 0u, 0u);
+    s_det_clock = 0;
+    s_host_work_test_force = 0;
+    s_urw_gated = 0;
+    s_umd_synthetic_sectors = UMD_SYNTHETIC_SECTORS;
+    s_umd_io_synthetic_enabled = 0;
+    sr_hle_test_audio_reset();
+    audio_fixture_reset();
+    sr_test_guest_fn_reset();
+}
+
+static void test_umd_read_parks_its_thread_for_the_drives_time(void) {
+    static const char ms_root[] = HLE_BUILD_ROOT "/hle_umd_read_wait";
+    const char *old_ms = getenv("SR_MEMSTICK");
+    char *save_ms = old_ms ? (char *)malloc(strlen(old_ms) + 1u) : NULL;
+    if (save_ms) memcpy(save_ms, old_ms, strlen(old_ms) + 1u);
+    nk_platform_mkdir_p(ms_root);
+    hle_test_setenv("SR_MEMSTICK", ms_root);
+
+    const uint32_t drive_us = hle_io_umd_read_us((uint64_t)URW_SECTORS * 2048u);
+    const uint32_t minimum_us = hle_io_umd_read_us(2048u);
+    /* Blocks the sound thread outputs in the drive's time, less one for where in a block the
+     * read begins. */
+    const uint32_t blocks = (uint32_t)((uint64_t)drive_us * 44100u / (URW_SOUND_FRAMES * 1000000ull));
+    expect(blocks >= 4u && minimum_us < drive_us,
+           "the long read's drive time spans several sound blocks, and one sector takes less");
+
+    for (int deterministic = 0; deterministic <= 1; deterministic++) {
+        /* The fixture's own virtual clock is coarse: every scheduler pass that keeps time adds
+         * 10 ms, so a 5.8 ms block wait ends blocks late and a 100 us wait can take two such
+         * passes. There the bounds are one block and the long read's time; the deterministic
+         * clock keeps the drive's time in blocks and a short read under a display period. */
+        const uint32_t expected = deterministic ? blocks - 1u : 1u;
+        const uint32_t brief_us = deterministic ? 16683u : drive_us;
+        urw_run(deterministic, 0);
+        if (s_urw_read != URW_SECTORS || s_urw_read_us < drive_us || s_urw_read_outputs < expected ||
+            !s_urw_read_weak)
+            printf("  UMD read wait (%s clock): read 0x%08x in %u us (drive %u us), %u sound blocks "
+                   "(expected %u or more), weaker thread %u\n", deterministic ? "deterministic" : "virtual",
+                   (unsigned)s_urw_read, (unsigned)s_urw_read_us, (unsigned)drive_us,
+                   (unsigned)s_urw_read_outputs, (unsigned)expected, (unsigned)s_urw_read_weak);
+        expect(s_urw_read == URW_SECTORS && s_urw_bytes_ok,
+               "the long UMD read returns its sector count and the disc's bytes");
+        expect(s_urw_read_us >= drive_us && s_urw_read_us < 2u * drive_us,
+               "the long UMD read takes the drive's time in guest time");
+        expect(s_urw_read_outputs >= expected,
+               "the sound thread outputs its blocks through the long read");
+        expect(s_urw_read_weak != 0u, "a weaker thread runs while the reader waits for the drive");
+        expect(s_urw_short == 1u && s_urw_short_us >= minimum_us && s_urw_short_us < brief_us,
+               "a one-sector read waits the drive's minimum, not a display period");
+        expect(s_urw_file == 1024u && s_urw_file_ok && s_urw_file_us >= minimum_us && s_urw_file_us < brief_us,
+               "a read from the middle of a disc file returns its bytes after the drive's minimum");
+        expect(s_urw_refused == 0x80010016u && s_urw_refused_us == 0u,
+               "a refused read returns at once");
+        expect(s_urw_nodispatch == 16u && s_urw_nodispatch_us == 0u,
+               "a read made with dispatch disabled returns at once");
+        expect(s_urw_async == URW_SECTORS && s_urw_async_us < drive_us,
+               "a queued read that is waited for completes without the drive's time");
+        expect(s_urw_ms == 4096u && s_urw_ms_us == 0u,
+               "a Memory Stick read returns at once: the drive's time is the disc's only");
+    }
+
+    /* #2361: with the host worker (a paced run; forced here on the deterministic clock), a host
+     * read that blocks does not hold the other threads. The synthetic disc's read waits until
+     * the weaker guest thread has run five more times, so it can only end if that thread runs
+     * while the host read is blocked. Made on the scheduler's thread, as before, the read
+     * holds every thread until its 3 s of host time run out.
+     * MUTANT: drop the hle_io_release_thread call in sr_hle_release_thread_resources -- the ended
+     *   reader's fetch stays in flight. MUTANT: io_iso_read copies from half the offset into the
+     *   fetch (data + (offset - fetch->offset) / 2) -- the bytes served differ.
+     * MUTANT: h_IoRead never asks for the worker (io_disc_fetch_start returns NULL) -- the
+     *   gated read runs out. MUTANT: io_iso_read ignores the fetched bytes -- the disc is read
+     *   again on the scheduler's thread, 1024 more reads than the worker's 64. */
+    urw_run(1, 1);
+    if (atomic_load(&s_umd_synthetic_gate_timeouts) || s_urw_read != URW_SECTORS || !s_urw_bytes_ok)
+        printf("  UMD read on the host worker: read 0x%08x in %u us, bytes %s, %d gate waits ran out, "
+               "weaker thread %u, %u disc reads\n", (unsigned)s_urw_read, (unsigned)s_urw_read_us,
+               s_urw_bytes_ok ? "match" : "differ", atomic_load(&s_umd_synthetic_gate_timeouts),
+               (unsigned)s_urw_read_weak, (unsigned)s_urw_read_calls);
+    expect(atomic_load(&s_umd_synthetic_gate_timeouts) == 0 && s_urw_read_weak >= 5u,
+           "a blocked host read of the disc does not hold the other guest threads");
+    expect(s_urw_read == URW_SECTORS && s_urw_bytes_ok,
+           "a read fetched on the host worker returns its sector count and the disc's bytes");
+    expect(s_urw_read_calls == URW_SECTORS * 2048u / 65536u,
+           "the disc is read once, by the worker in 64 KiB pieces, and the read is served from that");
+    expect(s_urw_read_us >= drive_us, "a read fetched on the host worker still takes the drive's time");
+    expect(s_urw_file == 1024u && s_urw_file_ok,
+           "a disc file read from the middle is fetched from the right place on the worker");
+    expect(s_urw_in_flight_parked == 1 && !s_urw_doomed_returned,
+           "a reader parks while the host reads for it, with its fetch in flight");
+    expect(s_urw_in_flight_ended == 0,
+           "ending that reader abandons its fetch: none is left in flight");
+    expect(s_urw_after_doomed == 4u && s_urw_after_doomed_ok && sr_hle_test_io_disc_fetches_in_flight() == 0,
+           "after the abandoned host read returns, the next reader is served the right bytes");
+    expect(s_urw_short == 1u && s_urw_refused == 0x80010016u && s_urw_refused_us == 0u &&
+               s_urw_nodispatch == 16u && s_urw_nodispatch_us == 0u,
+           "with the host worker a short read, a refused one and one with dispatch disabled answer as before");
+
+    hle_test_setenv("SR_MEMSTICK", save_ms);
+    free(save_ms);
+}
+
 /* #1374: what the sync calls return for ids that name no list, for completed lists and
  * for sync types other than 0 and 1. Every expected value is a PSP-GE-SYNC-001 cell
  * (PSP-3000, probe ge-sync-ids, captured by the runs of 96fe29f6 and f6da6125 on
@@ -29750,6 +30544,190 @@ static void test_ge_finish_callback_reports(void) {
     expect(sr_hle_test_ge_finish_reports(1) == 1u,
            "GE finish: an unregistered callback ID is reported once, not once per list");
     s_ge_tim_cbid = registered;
+    ge_tim_teardown();
+}
+
+/* #2375: a finish callback that enqueues the next list. An enqueued list runs at once here, so
+ * its finish callback used to run inside the one that enqueued it, a guest-call frame deeper per
+ * list, until the owner's frames ran out and the fifth callback in the chain was refused. On a
+ * PSP finish callbacks run from the GE interrupt handler, which does not re-enter itself: each
+ * runs after the previous returns, in completion order.
+ * MUTANT: running a completion's callback at once while one is running nests them (depth 4, the
+ * chain stops after 4 callbacks); running the waiting ones last-in first-out reverses the burst
+ * order; dropping the full-queue stop runs or loses the 65th completion silently. */
+/* GE_CHAIN_WAIT is the runtime's GE_LIST_MAX (hle_internal.h): the completions that may wait. */
+enum { GE_CHAIN_LEN = 6, GE_CHAIN_WAIT = 64, GE_CHAIN_BURST = GE_CHAIN_WAIT + 1 };
+static unsigned s_ge_chain_depth, s_ge_chain_max_depth, s_ge_chain_calls;
+static unsigned s_ge_chain_next, s_ge_chain_last, s_ge_chain_burst;
+static uint32_t s_ge_chain_ids[GE_CHAIN_BURST + 1];
+
+static uint32_t ge_chain_list(unsigned i) { return GE_TIM_DL2 + 0x100u * i; }
+
+static void ge_chain_finish_fn(CpuState *cpu) {
+    if (++s_ge_chain_depth > s_ge_chain_max_depth) s_ge_chain_max_depth = s_ge_chain_depth;
+    if (s_ge_chain_calls <= GE_CHAIN_BURST) s_ge_chain_ids[s_ge_chain_calls] = cpu->r[4];
+    s_ge_chain_calls++;
+    if (s_ge_chain_burst) {
+        unsigned n = s_ge_chain_burst;
+        s_ge_chain_burst = 0u;               /* only the first callback enqueues the burst */
+        for (unsigned i = 0; i < n; i++) (void)ge_tim_enqueue(cpu, ge_chain_list(i));
+    } else if (s_ge_chain_next < s_ge_chain_last) {
+        (void)ge_tim_enqueue(cpu, ge_chain_list(s_ge_chain_next++));
+    }
+    s_ge_chain_depth--;
+    cpu->r[2] = 0u;
+}
+
+static void ge_chain_reset(void) {
+    s_ge_chain_depth = s_ge_chain_max_depth = s_ge_chain_calls = 0u;
+    s_ge_chain_next = s_ge_chain_last = s_ge_chain_burst = 0u;
+    memset(s_ge_chain_ids, 0, sizeof(s_ge_chain_ids));
+}
+
+static void test_ge_finish_callbacks_do_not_nest(void) {
+    CpuState cpu;
+    ge_tim_setup();
+    sr_hle_test_ge_lists_reset();
+    sr_test_register_guest_fn(GE_TIM_FINISH_FN, ge_chain_finish_fn);
+    ge_tim_write_list(GE_TIM_DL, 0u);
+    for (unsigned i = 0; i < GE_CHAIN_BURST; i++) ge_tim_write_list(ge_chain_list(i), 0u);
+
+    /* A chain: each callback enqueues the next list. */
+    ge_chain_reset();
+    s_ge_chain_last = GE_CHAIN_LEN - 1u;
+    memset(&cpu, 0, sizeof(cpu));
+    (void)ge_tim_enqueue(&cpu, GE_TIM_DL);
+    expect(s_ge_chain_calls == GE_CHAIN_LEN,
+           "GE finish: a callback chain of 6 lists runs all 6 finish callbacks");
+    expect(s_ge_chain_max_depth == 1u,
+           "GE finish: a list completed inside a finish callback runs its callback after it returns");
+    int in_order = s_ge_chain_ids[0] == ge_tim_finish_id(GE_TIM_DL);
+    for (unsigned i = 1; i < GE_CHAIN_LEN; i++)
+        in_order &= s_ge_chain_ids[i] == ge_tim_finish_id(ge_chain_list(i - 1u));
+    expect(in_order, "GE finish: chained finish callbacks run in completion order");
+
+    /* A burst: the first callback enqueues 65 lists; 64 wait their turn, in order, and the 65th
+     * completion, with no room left to wait, stops the run by name. */
+    ge_chain_reset();
+    s_ge_chain_burst = GE_CHAIN_BURST;
+    uint32_t stops = sr_hle_test_unmodelled_stops();
+    memset(&cpu, 0, sizeof(cpu));
+    (void)ge_tim_enqueue(&cpu, GE_TIM_DL);
+    expect(s_ge_chain_max_depth == 1u && s_ge_chain_calls == 1u + GE_CHAIN_WAIT,
+           "GE finish: 64 completions raised in one callback each run after it, one at a time");
+    in_order = 1;
+    for (unsigned i = 0; i < GE_CHAIN_WAIT; i++)
+        in_order &= s_ge_chain_ids[1u + i] == ge_tim_finish_id(ge_chain_list(i));
+    expect(in_order, "GE finish: completions raised in one callback run first-in first-out");
+    expect(sr_hle_test_unmodelled_stops() == stops + 1u,
+           "GE finish: a completion with no room left to wait stops the run by name");
+
+    /* Nothing is left waiting: the next list's callback runs at once, at depth 1. */
+    ge_chain_reset();
+    memset(&cpu, 0, sizeof(cpu));
+    (void)ge_tim_enqueue(&cpu, GE_TIM_DL);
+    expect(s_ge_chain_calls == 1u && s_ge_chain_max_depth == 1u &&
+               s_ge_chain_ids[0] == ge_tim_finish_id(GE_TIM_DL),
+           "GE finish: after a chain the next list's callback runs at once, alone");
+    sr_test_register_guest_fn(GE_TIM_FINISH_FN, ge_tim_finish_fn);
+    ge_tim_teardown();
+}
+
+/* The waiting completions belong to the thread whose callback raised them. A worker thread whose
+ * finish callback ends the thread (sceKernelExitThread inside the callback) must give its run
+ * back, so a list another thread completes afterwards has its callback run at once; a worker
+ * that ends with a completion still waiting stops the run by name instead of dropping it.
+ * Real scheduler threads, real sceGeListEnQueue and sceKernelExitThread.
+ * MUTANT: one process-wide "callback running" flag, never cleared by the exit, leaves the main
+ * thread's later callback waiting forever (it never runs; reasoned, not built); dropping
+ * ge_finish_release_owner() from thread teardown leaves the dead worker's run open and loses its
+ * waiting completion without a stop (2 checks fail, measured). */
+#define GX_MAIN_ENTRY   0x08a38080u
+#define GX_WORKER_ENTRY 0x08a380c0u
+
+extern unsigned sr_hle_test_ge_finish_runs(void);
+
+static struct {
+    uint32_t worker_uid, main_uid;
+    int exit_with_waiting;           /* the worker's callback raises one more completion first */
+    int worker_after_enqueue;        /* the worker body ran past its enqueue */
+    unsigned calls, worker_calls, main_calls;
+    unsigned runs_after_worker, stops_before, stops_after_worker;
+    unsigned main_calls_after;
+    int main_done;
+} s_gx;
+
+static void gx_finish_fn(CpuState *cpu) {
+    const uint32_t uid = sched_current_uid();
+    s_gx.calls++;
+    if (uid == s_gx.worker_uid) {
+        s_gx.worker_calls++;
+        if (s_gx.exit_with_waiting) (void)ge_tim_enqueue(cpu, GE_TIM_DL2);
+        (void)sfs_call(cpu, NID_SCE_KERNEL_EXIT_THREAD, 0u, 0u, 0u, 0u);
+        return;   /* not reached: the thread ended */
+    }
+    if (uid == s_gx.main_uid) s_gx.main_calls++;
+    cpu->r[2] = 0u;
+}
+
+static void gx_worker_fn(CpuState *cpu) {
+    (void)ge_tim_enqueue(cpu, GE_TIM_DL);
+    s_gx.worker_after_enqueue = 1;
+    cpu->r[2] = 0u;
+}
+
+static uint32_t gx_run_worker(CpuState *cpu) {
+    const uint32_t w = sfs_call(cpu, NID_SCE_KERNEL_CREATE_THREAD, sfs_thread_name(), GX_WORKER_ENTRY,
+                                0x18u, 0u);
+    s_gx.worker_uid = w;
+    (void)sfs_call(cpu, NID_SCE_KERNEL_START_THREAD, w, 0u, 0u, 0u);
+    (void)sfs_call(cpu, NID_SCE_KERNEL_WAIT_THREAD_END, w, 0u, 0u, 0u);
+    return w;
+}
+
+static void gx_main_fn(CpuState *cpu) {
+    s_gx.main_uid = sfs_call(cpu, NID_SCE_KERNEL_GET_THREAD_ID, 0u, 0u, 0u, 0u);
+
+    /* A worker ends inside its finish callback with nothing waiting. */
+    s_gx.exit_with_waiting = 0;
+    const uint32_t w1 = gx_run_worker(cpu);
+    s_gx.runs_after_worker = sr_hle_test_ge_finish_runs();
+    (void)ge_tim_enqueue(cpu, GE_TIM_DL);
+    s_gx.main_calls_after = s_gx.main_calls;
+    (void)sfs_call(cpu, NID_SCE_KERNEL_DELETE_THREAD, w1, 0u, 0u, 0u);
+
+    /* A worker ends inside its finish callback with one completion waiting. */
+    s_gx.exit_with_waiting = 1;
+    s_gx.stops_before = sr_hle_test_unmodelled_stops();
+    const uint32_t w2 = gx_run_worker(cpu);
+    s_gx.stops_after_worker = sr_hle_test_unmodelled_stops();
+    (void)sfs_call(cpu, NID_SCE_KERNEL_DELETE_THREAD, w2, 0u, 0u, 0u);
+    s_gx.main_done = 1;
+    cpu->r[2] = 0u;
+}
+
+static void test_ge_finish_callback_thread_exit(void) {
+    ge_tim_setup();
+    sr_hle_test_ge_lists_reset();
+    memset(&s_gx, 0, sizeof s_gx);
+    s_gx.worker_uid = s_gx.main_uid = 0xffffffffu;
+    sr_test_register_guest_fn(GE_TIM_FINISH_FN, gx_finish_fn);
+    sr_test_register_guest_fn(GX_MAIN_ENTRY, gx_main_fn);
+    sr_test_register_guest_fn(GX_WORKER_ENTRY, gx_worker_fn);
+    ge_tim_write_list(GE_TIM_DL, 0u);
+    ge_tim_write_list(GE_TIM_DL2, 0u);
+    memset(s_cpu, 0, sizeof(*s_cpu));
+    sched_run(GX_MAIN_ENTRY, 0u, 0u);
+    expect(s_gx.main_done, "GE finish exit: the main body ran to its end");
+    expect(s_gx.worker_calls == 2u && !s_gx.worker_after_enqueue,
+           "GE finish exit: each worker's callback ran and ended the worker inside it");
+    expect(s_gx.runs_after_worker == 0u,
+           "GE finish exit: a thread that ends inside its finish callback gives its run back");
+    expect(s_gx.main_calls_after == 1u,
+           "GE finish exit: another thread's list then has its finish callback run at once");
+    expect(s_gx.stops_after_worker == s_gx.stops_before + 1u && sr_hle_test_ge_finish_runs() == 0u,
+           "GE finish exit: ending with a completion waiting stops the run by name, not silently");
+    sr_test_register_guest_fn(GE_TIM_FINISH_FN, ge_tim_finish_fn);
     ge_tim_teardown();
 }
 
@@ -31452,6 +32430,40 @@ static void dch_scenario_fifo(void) {
     s_dch_pending_after[0] = dch_pending(0) && dch_pending(1);
     dch_start(2, 0x18u);   /* queues second, the stronger */
     s_dch_pending_after[1] = dch_pending(0) && dch_pending(2);
+}
+
+/* Whatever dispatch count the cases before leave, the arrival-order scenario runs the same. Each
+ * round leaves a count that puts the clock's quantum on one of the scenario's first 64 dispatches
+ * (counted from 0); reset_fixture starts the count afresh, so every round is the same run. Before
+ * it did, a quantum on dispatches 2 to 6 failed the queueing check and one on dispatch 11 the
+ * order and timing checks. The scenario itself takes fewer than 64 dispatches, so these phases
+ * cover it. */
+#define DCH_FIFO_PHASES 64u
+
+static void test_dmac_fifo_whatever_the_inherited_clock_phase(void) {
+    const uint32_t dispatches = s_dispatches_since_time;
+    unsigned failed = 0u;
+    uint32_t longest = 0u;
+    for (uint32_t phase = 0u; phase < DCH_FIFO_PHASES; phase++) {
+        memset(s_dch_pending_after, 0, sizeof s_dch_pending_after);
+        s_dispatches_since_time = TIMESLICE - 1u - phase;
+        dch_setup(dch_scenario_fifo);
+        if (s_dispatches_since_time > longest) longest = s_dispatches_since_time;
+        const int ok = s_dch_pending_after[0] && s_dch_pending_after[1] && s_dch[0].order == 1 &&
+                       s_dch[1].order == 2 && s_dch[2].order == 3 &&
+                       s_dch[1].exit_us >= s_dch[0].deadline_us + 58u &&
+                       s_dch[2].exit_us >= s_dch[1].exit_us + 58u;
+        if (!ok && failed++ == 0u)
+            printf("dmac fifo: first failing inherited phase %u: orders %d/%d/%d, exits %llu/%llu/%llu us\n",
+                   phase, s_dch[0].order, s_dch[1].order, s_dch[2].order,
+                   (unsigned long long)s_dch[0].exit_us, (unsigned long long)s_dch[1].exit_us,
+                   (unsigned long long)s_dch[2].exit_us);
+    }
+    printf("dmac fifo: %u of %u inherited clock phases failed; the scenario took %u dispatches\n", failed,
+           (unsigned)DCH_FIFO_PHASES, (unsigned)longest);
+    expect(failed == 0u, "PSP-DMAC-002 b3: the arrival-order scenario holds at every inherited clock phase");
+    expect(longest < DCH_FIFO_PHASES, "the inherited phases cover every dispatch of the scenario");
+    s_dispatches_since_time = dispatches;
 }
 
 static void test_dmac_queued_callers_are_served_in_arrival_order(void) {
@@ -33394,6 +34406,112 @@ static void test_sas_mix_saturates_without_wrapping(void) {
            "__sceSasCoreWithMix at unity gain never inverts a sample when the voice sum overflows int32");
     expect(wrong == 0,
            "__sceSasCoreWithMix saturates twenty full-scale voices at +32767 once every envelope is up");
+}
+
+/* ---- #2137: Ace Mode's peak=limit, the SAS side -------------------------------------------------
+ *
+ * The overflow fixture: twenty full-scale PCM voices over caller PCM of -1000 through
+ * __sceSasCoreWithMix, so the sum passes 16 bits once the envelopes rise and stays under it on
+ * the first samples, then sceAudioOutputBlocking of that same buffer. With the wide mix on, the
+ * guest's bytes must be the PSP's, saturated, exactly as with it off; the host's push must carry
+ * the unsaturated sum where the store saturated and the guest's value everywhere else; and a
+ * buffer the game changed after the mix, or a copy of it elsewhere, must play as the guest has it.
+ *
+ * MUTANT: store the wide sum into guest memory (sas_output_write(out, i, 0, wl)) -- the guest
+ *   bytes differ from the run with the switch off and the first cell fails.
+ * MUTANT: drop the memcmp in sas_wide_for_output -- the changed buffer still plays the kept sum
+ *   and the provenance cell fails. */
+static void sas_peak_overflow_grain(CpuState *cpu, int wide, int16_t *guest) {
+    const uint32_t core = 0x08030000u, out = 0x08010000u, pcm = 0x08040000u;
+    const uint32_t grain = 256u, voices = 20u, pcm_samples = 512u;
+    reset_fixture();
+    sr_hle_init();
+    sr_hle_test_sas_reset();
+    sr_hle_test_audio_reset();
+    audio_fixture_reset();
+    sr_hle_sas_set_wide_mix(wide);
+    memset(cpu, 0, sizeof(*cpu));
+    cpu->r[29] = 0x09012000u;
+    cpu->r[4] = core; cpu->r[5] = grain; cpu->r[6] = 32; cpu->r[7] = 0; cpu->r[8] = 44100;
+    expect(sr_syscall(cpu, NID_SAS_INIT) == 0, "peak fixture: __sceSasInit accepts the 256-sample grain");
+    for (uint32_t i = 0; i < pcm_samples; i++) MEM_W16(pcm + i * 2u, 0x7fffu);
+    for (uint32_t v = 0; v < voices; v++) {
+        cpu->r[4] = core; cpu->r[5] = v; cpu->r[6] = pcm; cpu->r[7] = pcm_samples; cpu->r[8] = 0xffffffffu;
+        expect(sr_syscall(cpu, NID_SAS_SET_VOICE_PCM) == 0, "peak fixture: __sceSasSetVoicePCM");
+        cpu->r[4] = core; cpu->r[5] = v; cpu->r[6] = 0x1000; cpu->r[7] = 0x1000;
+        cpu->r[8] = 0x1000; cpu->r[9] = 0x1000;
+        expect(sr_syscall(cpu, NID_SAS_SET_VOLUME) == 0, "peak fixture: __sceSasSetVolume");
+        cpu->r[4] = core; cpu->r[5] = v;
+        expect(sr_syscall(cpu, NID_SAS_SET_KEY_ON) == 0, "peak fixture: __sceSasSetKeyOn");
+    }
+    int16_t bgm[256 * 2];
+    for (uint32_t i = 0; i < grain * 2u; i++) bgm[i] = -1000;
+    sas_write_pcm(out, bgm, grain);
+    cpu->r[4] = core; cpu->r[5] = out; cpu->r[6] = 0x1000; cpu->r[7] = 0x1000;
+    expect(sr_syscall(cpu, NID_SAS_CORE_WITH_MIX) == 0, "peak fixture: __sceSasCoreWithMix");
+    sas_read_pcm(out, guest, grain);
+    expect(audio_dispatch(cpu, NID_SCE_AUDIO_CH_RESERVE, 0u, grain, 0u) == 0u,
+           "peak fixture: the regular channel takes 256-frame stereo blocks");
+}
+
+static void test_sas_peak_limit_keeps_guest_bytes_and_hands_the_host_the_sum(void) {
+    const uint32_t out = 0x08010000u, copy = 0x08050000u;
+    CpuState cpu;
+    int16_t off[256 * 2], on[256 * 2];
+
+    /* Off: the PSP's bytes, and a plain push of them. */
+    sas_peak_overflow_grain(&cpu, 0, off);
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT_BLOCKING, 0u, 0x8000u, out) == 256u,
+           "peak off: the output plays the grain");
+    expect(s_audio_push_calls == 1 && s_audio_push_wide_calls == 0,
+           "peak off: the output is a plain push (no wide sum is kept)");
+    uint32_t saturated = 0, unsaturated = 0;
+    for (uint32_t i = 0; i < 256u * 2u; i++) {
+        if (off[i] == 32767) saturated++;
+        else if (off[i] > -32768) unsaturated++;
+    }
+    expect(saturated > 0 && unsaturated > 0,
+           "peak fixture: the grain saturates once the envelopes rise and not before");
+
+    /* On: the same bytes in guest memory, and the sum for the host. */
+    sas_peak_overflow_grain(&cpu, 1, on);
+    expect(memcmp(off, on, sizeof(off)) == 0,
+           "peak on: the guest's SAS bytes are byte-identical to the run with the switch off");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT_BLOCKING, 0u, 0x8000u, out) == 256u,
+           "peak on: the output plays the grain");
+    expect(s_audio_push_calls == 1 && s_audio_push_wide_calls == 1,
+           "peak on: the unchanged SAS buffer reaches the host as one wide push");
+    expect(memcmp(s_audio_push_capture, on, sizeof(on)) == 0,
+           "peak on: the wide push still carries the guest's own bytes beside the sum");
+    uint32_t past = 0, wrong = 0;
+    for (uint32_t i = 0; i < 256u * 2u; i++) {
+        const int32_t w = s_audio_push_wide_capture[i];
+        if (on[i] == 32767) { if (w > 32767) past++; else wrong++; }
+        else if (w != on[i]) wrong++;
+    }
+    expect(wrong == 0, "peak on: the sum differs from the guest only where the store saturated");
+    expect(past == saturated, "peak on: every saturated sample carries a sum past 16 bits");
+    /* Twenty unity voices at full scale over -1000: once the envelopes are up the sum is
+     * 20 * 32767 - 1000, far past what any int16 holds. */
+    expect(s_audio_push_wide_capture[255 * 2] > 20 * 30000,
+           "peak on: the sum keeps all twenty voices");
+
+    /* The game changed the buffer after the mix: it plays as the guest has it. */
+    sas_peak_overflow_grain(&cpu, 1, on);
+    MEM_W16(out + 255u * 4u, 0x1234u);
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT_BLOCKING, 0u, 0x8000u, out) == 256u,
+           "peak on, changed buffer: the output plays");
+    expect(s_audio_push_calls == 1 && s_audio_push_wide_calls == 0,
+           "peak on, changed buffer: a span the game wrote after the mix gets no kept sum");
+
+    /* A copy elsewhere is the game's own buffer: it plays as the guest has it. */
+    sas_peak_overflow_grain(&cpu, 1, on);
+    sas_write_pcm(copy, on, 256u);
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT_BLOCKING, 0u, 0x8000u, copy) == 256u,
+           "peak on, copy: the output plays");
+    expect(s_audio_push_calls == 1 && s_audio_push_wide_calls == 0,
+           "peak on, copy: a buffer the SAS mixer never wrote gets no kept sum");
+    sr_hle_sas_set_wide_mix(0);
 }
 
 /* Production-dispatch SAS state regressions.  Each case uses only synthetic
@@ -38152,6 +39270,125 @@ static void test_partition_spans_the_whole_user_partition(void) {
            "the skipped span returns to the free list around the runtime's stacks");
 }
 
+/* A PSP takes a thread stack, and a High memory block, from the highest free block of the user
+ * partition that holds it (sched.c stack_range_alloc), and a block the guest freed below the
+ * partition's bump pointer is such a block. A title that keeps the whole partition for its own
+ * heap frees exactly a stack's size and then creates the thread (Discussion #2445). Before, the
+ * runtime looked only above the bump pointer, so sceKernelCreateThread returned NO_MEMORY, the
+ * High block MEMBLOCK_ALLOC_FAILED, and the title unloaded itself before its first frame. */
+#define FPB_NID_ALLOC_PART 0x237dbd4fu
+#define FPB_NID_GET_HEAD   0x9d9a5ba1u
+#define FPB_NID_FREE_PART  0xb6d61d02u
+#define FPB_NID_MAX_FREE   0xa291f107u
+#define FPB_NAME           0x00280010u
+#define FPB_ADDR_OUT       0x00280004u
+#define FPB_ENTRY          0x08900000u
+
+static uint32_t fpb_call(uint32_t nid, uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3) {
+    CpuState cpu;
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = a0; cpu.r[5] = a1; cpu.r[6] = a2; cpu.r[7] = a3;
+    return sr_syscall(&cpu, nid);
+}
+static uint32_t fpb_max_free(void) { return fpb_call(FPB_NID_MAX_FREE, 0u, 0u, 0u, 0u); }
+static uint32_t fpb_low(uint32_t size) { return fpb_call(FPB_NID_ALLOC_PART, 2u, 0u, 0u, size); }
+static uint32_t fpb_head(uint32_t uid) { return fpb_call(FPB_NID_GET_HEAD, uid, 0u, 0u, 0u); }
+static uint32_t fpb_free(uint32_t uid) { return fpb_call(FPB_NID_FREE_PART, uid, 0u, 0u, 0u); }
+/* sceKernelCreateThread through its production handler (attr 0 in t0). */
+static uint32_t fpb_thread(uint32_t stack) {
+    return fpb_call(NID_SCE_KERNEL_CREATE_THREAD, FPB_NAME, FPB_ENTRY, 32u, stack);
+}
+static uint32_t fpb_stack_base(uint32_t uid) {
+    TCB *t = uid < 0x80000000u ? tcb_by_uid(uid) : NULL;
+    return t ? t->stack_base : 0u;
+}
+
+static void test_high_requests_take_a_freed_partition_block(void) {
+    extern void sr_hle_test_partition_reset(void);
+    extern uint32_t sr_alloc_block_at(uint32_t addr, uint32_t size, const char *name);
+    const uint32_t NO_MEMORY = 0x80020190u;
+    const uint32_t main_top = 0x0a000000u - 0x8000u;   /* below the main thread's stack */
+
+    reset_fixture();
+    s_fixture_loaded_end = 0x08a00000u;
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+    title_hle_write_cstr(FPB_NAME, "fpb");
+    expect(sched_create_thread(0x2004u, 32, 0x8000u) != 0u, "freed block: a main thread is created");
+
+    /* Low blocks A, H and C, then H is freed: a 0x3000-byte block below the bump pointer. */
+    uint32_t a = fpb_low(0x10000u), h = fpb_low(0x3000u), c = fpb_low(0x1000u);
+    uint32_t hole = fpb_head(h);
+    expect(a < 0x80000000u && h < 0x80000000u && c < 0x80000000u && fpb_free(h) == 0u,
+           "freed block: three Low blocks, the middle one freed");
+
+    /* While the arena above the bump pointer holds the stack, that is where it goes: it is higher. */
+    uint32_t above = fpb_thread(0x2000u);
+    expect(fpb_stack_base(above) == main_top - 0x2000u,
+           "freed block: with room above the bump pointer the stack is carved there, not in the block");
+    expect(fpb_call(NID_SCE_KERNEL_DELETE_THREAD, above, 0u, 0u, 0u) == 0u, "freed block: that thread is deleted");
+
+    /* B takes everything above the bump pointer; only the freed block is left. */
+    uint32_t b = fpb_low(fpb_max_free());
+    expect(b < 0x80000000u && fpb_max_free() == 0x3000u, "freed block: the partition is full but for the block");
+
+    uint32_t worker = fpb_thread(0x2000u);
+    expect(fpb_stack_base(worker) == hole + 0x1000u,
+           "freed block: sceKernelCreateThread carves the stack from the top of the freed block");
+    expect(fpb_max_free() == 0x1000u && sched_guest_stack_floor() == main_top,
+           "freed block: the rest stays free and the partition's top does not move");
+    uint32_t small = fpb_thread(0x1000u);
+    expect(fpb_stack_base(small) == hole, "freed block: a second stack takes the rest");
+    expect(fpb_thread(0x200u) == NO_MEMORY && fpb_max_free() == 0u,
+           "freed block: with no free block left a further create returns NO_MEMORY");
+    expect(fpb_call(NID_SCE_KERNEL_DELETE_THREAD, worker, 0u, 0u, 0u) == 0u &&
+               fpb_call(NID_SCE_KERNEL_DELETE_THREAD, small, 0u, 0u, 0u) == 0u &&
+               fpb_max_free() == 0x3000u,
+           "freed block: deleting the threads gives the block back, coalesced");
+    expect(fpb_thread(0x3100u) == NO_MEMORY && fpb_max_free() == 0x3000u,
+           "freed block: a larger stack is still refused and the block stays free");
+
+    uint32_t high = memblock_alloc(FPB_NAME, 1u, 0x3000u, 0u);
+    expect(high < 0x80000000u && memblock_addr(high, FPB_ADDR_OUT) == hole && fpb_max_free() == 0u,
+           "freed block: a High memory block of that size takes the freed block");
+    expect(memblock_free(high) == 0u && fpb_max_free() == 0x3000u,
+           "freed block: freeing the High block gives it back to the partition");
+
+    /* Freeing the blocks above a live stack in the freed block stops the bump pointer at it. */
+    uint32_t pinned = fpb_thread(0x3000u);
+    expect(fpb_stack_base(pinned) == hole && fpb_free(b) == 0u && fpb_free(c) == 0u &&
+               fpb_max_free() == main_top - (hole + 0x3000u),
+           "freed block: the blocks above a stack in it free down to the stack's end, not past it");
+    expect(fpb_call(NID_SCE_KERNEL_DELETE_THREAD, pinned, 0u, 0u, 0u) == 0u &&
+               fpb_max_free() == main_top - hole,
+           "freed block: deleting that thread joins its block to the free space above");
+    (void)fpb_free(a);
+
+    /* A fixed reservation above a live High block returns the skipped gap, High block inside, to
+     * the free list (sr_alloc_block_at). A stack is never carved over that High block: the
+     * runtime refuses the request (fail closed) where a PSP could place it lower in the gap. */
+    reset_fixture();
+    s_fixture_loaded_end = 0x08a00000u;
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+    title_hle_write_cstr(FPB_NAME, "fpb");
+    expect(sched_create_thread(0x2004u, 32, 0x8000u) != 0u, "freed block: a main thread again");
+    uint32_t h1 = memblock_alloc(FPB_NAME, 1u, 0x100u, 0u);
+    uint32_t h2 = memblock_alloc(FPB_NAME, 1u, 0x100u, 0u);
+    uint32_t h2_addr = memblock_addr(h2, FPB_ADDR_OUT);
+    expect(memblock_addr(h1, FPB_ADDR_OUT) == main_top - 0x100u && h2_addr == main_top - 0x200u &&
+               memblock_free(h1) == 0u,
+           "freed block: two High blocks at the top, the upper one freed");
+    uint32_t fixed = sr_alloc_block_at(main_top - 0x100u, 0x100u, "fixed");
+    expect(fixed != 0xFFFFFFFFu, "freed block: a fixed reservation where the upper High block was");
+    expect(fpb_thread(0x200u) == NO_MEMORY && memblock_addr(h2, FPB_ADDR_OUT) == h2_addr,
+           "freed block: no stack is carved over the live High block in the skipped gap");
+    (void)memblock_free(h2);
+
+    s_fixture_loaded_end = 0x00400000u;
+    sr_hle_test_partition_reset();
+}
+
 static void test_alloc_block_at_fixed_address(void) {
     extern void sr_hle_test_partition_reset(void);
     extern uint32_t sr_hle_test_partition_heap_ptr(void);
@@ -39412,6 +40649,35 @@ static void test_fpl_blocking_waits(void) {
     expect(MEM_R32(out2) == 0xfeedfaceu, "FPL: deleted pool writes no output pointer");
     sr_coro_destroy(w_del.tcb->coro); w_del.tcb->coro = NULL;
     s_cur = (int)(cur - s_tcb);
+}
+
+/* PSP-HLE-STDIO-001 (docs/HARDWARE_ORACLE.md, hle-std-handles, 2026-11-06, PSP-3000): a one-byte
+ * sceIoWrite to Stdout and to Stderr returns 1; sceIoClose of the Stdout handle returns
+ * 0x800200D1 and closes nothing, so a later write returns 1 and sceKernelStdout returns the same
+ * handle. The cells hold whatever value the runtime hands out for the handles. */
+static void test_std_handles_measured(void) {
+    reset_fixture();
+    sr_hle_init();
+    const uint32_t buf = 0x00240c00u;
+    MEM_W8(buf, (uint8_t)'x');
+    CpuState cpu;
+    memset(&cpu, 0, sizeof cpu);
+    const uint32_t out = sr_syscall(&cpu, 0xa6bab2e9u);   /* sceKernelStdout */
+    memset(&cpu, 0, sizeof cpu);
+    const uint32_t err = sr_syscall(&cpu, 0xf78ba90au);   /* sceKernelStderr */
+    memset(&cpu, 0, sizeof cpu); cpu.r[4] = out; cpu.r[5] = buf; cpu.r[6] = 1u;
+    expect(sr_syscall(&cpu, 0x42ec03acu) == 1u, "std handles: a 1-byte write to Stdout returns 1 (PSP-HLE-STDIO-001)");
+    memset(&cpu, 0, sizeof cpu); cpu.r[4] = err; cpu.r[5] = buf; cpu.r[6] = 1u;
+    expect(sr_syscall(&cpu, 0x42ec03acu) == 1u, "std handles: a 1-byte write to Stderr returns 1 (PSP-HLE-STDIO-001)");
+    memset(&cpu, 0, sizeof cpu); cpu.r[4] = out;
+    expect(sr_syscall(&cpu, 0x810c4bc3u) == 0x800200d1u,
+           "std handles: sceIoClose of Stdout returns 0x800200D1 (PSP-HLE-STDIO-001)");
+    memset(&cpu, 0, sizeof cpu); cpu.r[4] = out; cpu.r[5] = buf; cpu.r[6] = 1u;
+    expect(sr_syscall(&cpu, 0x42ec03acu) == 1u,
+           "std handles: Stdout still takes a write after the refused close (PSP-HLE-STDIO-001)");
+    memset(&cpu, 0, sizeof cpu);
+    expect(sr_syscall(&cpu, 0xa6bab2e9u) == out,
+           "std handles: sceKernelStdout returns the same handle after the close (PSP-HLE-STDIO-001)");
 }
 
 static void test_vpl_blocking_waits(void) {
@@ -43328,7 +44594,7 @@ static void test_ace_stick_remap_reaches_the_guest_only_from_the_live_stick(void
     extern int s_ctrl_test_stick;
     extern int ace_init_spec(const char *spec, const char *report_path);
     static const char stick_line[] =
-        "v1;tier=ace;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;stick=64";
+        "v1;tier=ace;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;twin=off;stick=64";
     CpuState cpu;
     RouteStickRead r;
     const int test_stick = s_ctrl_test_stick;
@@ -44156,14 +45422,15 @@ static uint32_t s_selfstop_guest_gp;
 static uint32_t s_selfstop_guest_returned;
 static uint32_t s_selfstop_guest_pc;
 static int s_selfstop_guest_in_scheduler;
+static uint32_t s_selfstop_guest_args[3] = {0u, 4u, SELFSTOP_ARG_ADDR};
 static void selfstop_guest_entry(CpuState *s) {
     s->pc = LIFECYCLE_MOD_B_BASE + LIFECYCLE_START_OFF;
     s->r[28] = s_selfstop_guest_gp;
     s_selfstop_guest_pc = s->pc;
     s_selfstop_guest_in_scheduler = sched_guest_thread_running();
-    s->r[4] = 0u; /* first argument is unnamed in the public PSPSDK declaration */
-    s->r[5] = 4u;
-    s->r[6] = SELFSTOP_ARG_ADDR;
+    s->r[4] = s_selfstop_guest_args[0]; /* unnamed in the public PSPSDK declaration */
+    s->r[5] = s_selfstop_guest_args[1];
+    s->r[6] = s_selfstop_guest_args[2];
     (void)sr_syscall(s, NID_SCE_KERNEL_SELF_STOP_UNLOAD_MODULE);
     s_selfstop_guest_returned = 1u; /* the API is terminal on the modeled success path */
 }
@@ -44700,6 +45967,51 @@ static void test_late_prx_unload_reload_lifecycle(void) {
     expect(sr_hle_test_module_count() == 0u && sr_hle_test_image_count() == 0u &&
                sr_hle_resolve_late_import(LIFECYCLE_EXPORT_B) == 0u,
            "self-stop: caller exit retires the module record, image and exports");
+
+    /* PSP-HLE-SELFSTOP-001 (docs/HARDWARE_ORACLE.md, 2026-11-08, PSP-3000), form (1, 0, NULL):
+     * a first argument of 1 behaves as 0 does. The call does not return, module_stop runs once
+     * with argument size 0 and argp 0, and the module is unloaded. */
+    self_uid = sr_hle_test_load_prx_image(path_b, LIFECYCLE_MOD_B_BASE, LIFECYCLE_EXPORT_B,
+                                          LIFECYCLE_PATCH_OFF_A_1);
+    expect(self_uid != 0u &&
+               sr_hle_test_set_module_image(self_uid, LIFECYCLE_MOD_B_BASE,
+                                            LIFECYCLE_MOD_B_BASE + LIFECYCLE_IMAGE_SIZE, self_gp),
+           "self-stop (1, 0, NULL): module image loads");
+    sr_test_register_guest_fn(LIFECYCLE_MOD_B_BASE + LIFECYCLE_START_OFF, lifecycle_start_fn);
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = self_uid;
+    expect(sr_syscall(&cpu, 0x50f0c1ecu) == 0u, "self-stop (1, 0, NULL): module starts");
+    /* Only (1, 0, NULL) was measured: a first argument of 1 with an argument block stays refused,
+     * so the call returns and the module stays loaded. */
+    s_lifecycle_stop_calls = 0u;
+    s_selfstop_guest_returned = 0u;
+    s_selfstop_guest_args[0] = 1u;
+    s_selfstop_guest_args[1] = 4u;
+    s_selfstop_guest_args[2] = SELFSTOP_ARG_ADDR;
+    sr_test_register_guest_fn(LIFECYCLE_MOD_B_BASE + LIFECYCLE_START_OFF, selfstop_guest_entry);
+    sched_run(LIFECYCLE_MOD_B_BASE + LIFECYCLE_START_OFF, 0u, 0u);
+    expect(s_selfstop_guest_returned == 1u && s_lifecycle_stop_calls == 0u &&
+               sr_hle_test_module_count() == 1u,
+           "self-stop (1, 4, argp): unmeasured form is refused and the module stays loaded");
+    s_lifecycle_stop_calls = 0u;
+    s_lifecycle_stop_arglen = 0xffffffffu;
+    s_lifecycle_stop_argp_word = 0xffffffffu;
+    s_selfstop_guest_returned = 0u;
+    s_selfstop_guest_args[0] = 1u;
+    s_selfstop_guest_args[1] = 0u;
+    s_selfstop_guest_args[2] = 0u;
+    sr_test_register_guest_fn(LIFECYCLE_MOD_B_BASE + LIFECYCLE_START_OFF, selfstop_guest_entry);
+    sched_run(LIFECYCLE_MOD_B_BASE + LIFECYCLE_START_OFF, 0u, 0u);
+    s_selfstop_guest_args[0] = 0u;
+    s_selfstop_guest_args[1] = 4u;
+    s_selfstop_guest_args[2] = SELFSTOP_ARG_ADDR;
+    expect(s_selfstop_guest_returned == 0u,
+           "self-stop (1, 0, NULL): the call does not return (PSP-HLE-SELFSTOP-001)");
+    expect(s_lifecycle_stop_calls == 1u && s_lifecycle_stop_arglen == 0u &&
+               s_lifecycle_stop_argp_word == 0u,
+           "self-stop (1, 0, NULL): module_stop runs once with size 0 and argp 0 (PSP-HLE-SELFSTOP-001)");
+    expect(sr_hle_test_module_count() == 0u && sr_hle_test_image_count() == 0u,
+           "self-stop (1, 0, NULL): the module is unloaded (PSP-HLE-SELFSTOP-001)");
 
     remove(path_a);
     remove(path_b);
@@ -46102,7 +47414,7 @@ static void test_wc_display_getmode_and_start_cb(void) {
 static void test_ace_load_skip_wait_only_where_the_stock_call_blocks(void) {
     enum { NID_WAIT_VBLANK_START = 0x984c27e7u };
     static const char k_load_fast[] =
-        "v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;tier=ace;load=fast";
+        "v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;twin=off;tier=ace;load=fast";
     CpuState cpu;
     reset_fixture();
     sr_hle_init();
@@ -46140,7 +47452,15 @@ static void test_ace_load_skip_wait_only_where_the_stock_call_blocks(void) {
 /* A skipped wait still blocks, for the shortest real delay, so a loading loop that spins until a
  * lower-priority loader thread finishes does finish: the loader runs during the skip, as it would
  * during the stock wait, and sees the waiter in a delay wait. A zero delay or a rotation would not
- * let it run (#340), and the loop would spin to its bound. */
+ * let it run (#340), and the loop would spin to its bound.
+ *
+ * The virtual clock this fixture runs on charges a whole quantum at every TIMESLICE-th dispatch
+ * (scheduler_keep_time_at_dispatch), and the count carries over from every case before this one.
+ * When that charge fell on the decision the skip's block caused, the 1 us wait was already over
+ * there and the waiter, ready again at its higher priority, won it before the loader had run: the
+ * loop took a second skip. Which dispatch it fell on varied with the cases run before, so one run
+ * in many failed. The case therefore runs once with the charge at each of its first
+ * ACE_SKIP_PHASES dispatches, the decision after the block among them. */
 static volatile uint32_t s_ace_skip_loaded;
 static volatile uint32_t s_ace_skip_loaded_in_loop;
 static volatile uint32_t s_ace_skip_iterations;
@@ -46153,6 +47473,7 @@ enum {
     ACE_SKIP_WAITER_ENTRY = 0x08990300u,
     ACE_SKIP_LOADER_ENTRY = 0x08990340u,
     ACE_SKIP_LOOP_BOUND = 64u,
+    ACE_SKIP_PHASES = 16u,
 };
 
 static void ace_skip_loader_guest_fn(CpuState *cpu) {
@@ -46183,9 +47504,11 @@ static void ace_skip_waiter_guest_fn(CpuState *cpu) {
     cpu->r[2] = 0u;
 }
 
-static void test_ace_load_skip_wait_lets_a_lower_priority_thread_run(void) {
+/* One run of the case with the clock's next quantum due at dispatch phase + 1; 1 when every
+ * property held. Only the first failing run reports its properties. */
+static int ace_skip_yield_round(uint32_t phase, int report) {
     static const char k_load_fast[] =
-        "v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;tier=ace;load=fast";
+        "v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;twin=off;tier=ace;load=fast";
     reset_fixture();
     sr_hle_init();
     sr_test_guest_fn_reset();
@@ -46201,19 +47524,70 @@ static void test_ace_load_skip_wait_lets_a_lower_priority_thread_run(void) {
     sr_test_register_guest_fn(ACE_SKIP_LOADER_ENTRY, ace_skip_loader_guest_fn);
     g_worker_uid = SR_ROLE_UID_NONE;
     memset(s_cpu, 0, sizeof(*s_cpu));
+    s_dispatches_since_time = TIMESLICE - 1u - phase;
 
     sched_run(ACE_SKIP_WAITER_ENTRY, 0u, 0u);
 
-    expect(s_ace_skip_loader_lower, "ace load skip yield: the loader was ready at a lower priority");
-    expect(s_ace_skip_loaded_in_loop == 1u,
-           "ace load skip yield: the lower-priority loader ran during a skipped wait, before the loop ended");
-    expect(s_ace_skip_iterations == 1u, "ace load skip yield: the loading loop finished at its first skipped wait");
-    expect(s_ace_skip_waiter_state == TH_WAIT_DELAY,
-           "ace load skip yield: the waiter was in a delay wait while the loader ran");
-    expect(s_ace_skip_v0 == 0u, "ace load skip yield: a skipped wait returns 0 in $v0");
-    expect(ace_load_waits_skipped() == 1u, "ace load skip yield: the one skip is counted");
+    const int lower = s_ace_skip_loader_lower;
+    const int loaded_in_loop = s_ace_skip_loaded_in_loop == 1u;
+    const int first_skip = s_ace_skip_iterations == 1u;
+    const int delay_wait = s_ace_skip_waiter_state == TH_WAIT_DELAY;
+    const int v0 = s_ace_skip_v0 == 0u;
+    const int counted = ace_load_waits_skipped() == 1u;
+    if (report) {
+        printf("ace load skip yield: the first failing run had the quantum at dispatch %u\n",
+               (unsigned)phase + 1u);
+        expect(lower, "ace load skip yield: the loader was ready at a lower priority");
+        expect(loaded_in_loop,
+               "ace load skip yield: the lower-priority loader ran during a skipped wait, before the loop ended");
+        expect(first_skip, "ace load skip yield: the loading loop finished at its first skipped wait");
+        expect(delay_wait, "ace load skip yield: the waiter was in a delay wait while the loader ran");
+        expect(v0, "ace load skip yield: a skipped wait returns 0 in $v0");
+        expect(counted, "ace load skip yield: the one skip is counted");
+    }
     (void)ace_init_spec("off", NULL);
     sr_test_guest_fn_reset();
+    return lower && loaded_in_loop && first_skip && delay_wait && v0 && counted;
+}
+
+/* A thread alone: its skip still blocks, and with nobody else ready it resumes and finishes. */
+static volatile uint32_t s_ace_skip_lone_resumed;
+
+static void ace_skip_lone_guest_fn(CpuState *cpu) {
+    cpu->r[2] = 0x5au;
+    expect(nk_ace_load_skip_wait(cpu, "T", 0x08800000u) == 1, "ace load skip alone: the wait is skipped");
+    s_ace_skip_lone_resumed = cpu->r[2] == 0u ? 1u : 2u;
+    cpu->r[2] = 0u;
+}
+
+static void test_ace_load_skip_wait_lets_a_lower_priority_thread_run(void) {
+    static const char k_load_fast[] =
+        "v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;twin=off;tier=ace;load=fast";
+    /* The cases after this one keep the dispatch count they would have had. */
+    const uint32_t dispatches = s_dispatches_since_time;
+    unsigned failed = 0u;
+    for (uint32_t phase = 0u; phase < ACE_SKIP_PHASES; phase++) {
+        const int ok = ace_skip_yield_round(phase, 0);
+        if (!ok && failed++ == 0u) (void)ace_skip_yield_round(phase, 1);
+    }
+    printf("ace load skip yield: %u of %u clock phases failed\n", failed, (unsigned)ACE_SKIP_PHASES);
+    expect(failed == 0u, "ace load skip yield: at every clock phase the loop finished at its first skipped wait");
+
+    reset_fixture();
+    sr_hle_init();
+    sr_test_guest_fn_reset();
+    s_ace_skip_lone_resumed = 0u;
+    expect(ace_init_spec(k_load_fast, NULL) == 1, "ace load skip alone: load=fast is on");
+    sr_test_register_guest_fn(ACE_SKIP_WAITER_ENTRY, ace_skip_lone_guest_fn);
+    g_worker_uid = SR_ROLE_UID_NONE;
+    memset(s_cpu, 0, sizeof(*s_cpu));
+    sched_run(ACE_SKIP_WAITER_ENTRY, 0u, 0u);
+    expect(s_ace_skip_lone_resumed == 1u,
+           "ace load skip alone: with no other thread ready the skipped wait resumes, returning 0");
+    expect(ace_load_waits_skipped() == 1u, "ace load skip alone: the one skip is counted");
+    (void)ace_init_spec("off", NULL);
+    sr_test_guest_fn_reset();
+    s_dispatches_since_time = dispatches;
 }
 
 /* The pacing guard (ENHANCEMENT_CONTRACT.md 11.3.10), through the real skip on a running
@@ -46254,7 +47628,7 @@ static void ace_pacing_guest_fn(CpuState *cpu) {
 
 static void test_ace_load_skip_wait_stops_once_it_paces_updates(void) {
     static const char k_load_fast[] =
-        "v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;tier=ace;load=fast";
+        "v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;twin=off;tier=ace;load=fast";
     enum { UPDATES = (int)(sizeof(s_ace_pacing_skips) / sizeof(s_ace_pacing_skips[0])) };
     char captured[4096];
     FILE *capture = NULL;
@@ -51720,12 +53094,15 @@ static int hle_selftest_main(int argc, char **argv) {
     test_ge_blocking_sync_waits_for_stalled_list();
     test_ge_list_stops_for_a_stronger_thread();
     test_savedata_thread_ended_inside_a_parked_save();
+    test_umd_read_parks_its_thread_for_the_drives_time();
     test_ge_sync_ids_match_psp();
     test_ge_signal_jump_call_ret();
     test_ge_signal_depth_origin_stall();
     test_ge_break_continue();
     test_ge_completion_timing();
     test_ge_finish_callback_reports();
+    test_ge_finish_callbacks_do_not_nest();
+    test_ge_finish_callback_thread_exit();
     test_ge_queued_lists_run_in_order();
     test_ge_timing_blocking_sync_cannot_wait();
     test_volatile_mem_output_preflight();
@@ -51855,6 +53232,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_dmac_small_body_bypasses_the_channel();
     test_dmac_refused_try_copies_head_and_tail();
     test_dmac_queued_callers_are_served_in_arrival_order();
+    test_dmac_fifo_whatever_the_inherited_clock_phase();
     test_display_framebuf_latch();
     test_time_domains_are_coherent();
     test_kernel_import_sweep_sysclock_conversion();
@@ -51870,6 +53248,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_power_set_clock_frequency_range_checks();
     test_rtc_time_t_add_years_resolution_autotest();
     test_rtc_tick_add_day_of_week_check_valid_autotest();
+    test_rtc_tick_add_minutes_hours_weeks_autotest();
     test_imports_20261102_measured_contracts();
     test_psp_measured_umd_state_20261024();
     test_unregistered_batch_ctrl_sampling_getter();
@@ -51898,6 +53277,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_vcount_freezes_while_cpu_interrupts_are_masked();
     test_vcount_credits_one_deferred_period_on_resume();
     test_route_observer_waits_for_guest_scanout_state();
+    test_route_sample_reads_vram_not_the_ge_status_port();
     test_extracted_data_prepares_before_guest_and_lookup_never_builds();
     test_disc_route_serves_archive_and_loose_content_in_one_namespace();
     test_archive_discovery_skips_unpack_folders_only();
@@ -51976,6 +53356,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_impose_language_mode_pair();
     test_sas_core_mix_preserves_caller_pcm();
     test_sas_mix_saturates_without_wrapping();
+    test_sas_peak_limit_keeps_guest_bytes_and_hands_the_host_the_sum();
     test_sas_state_contracts();
     test_sas_set_volume_accepts_negative();
     test_sas_voice_volume_defaults();
@@ -52009,6 +53390,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_partition_ends_at_lowest_live_stack();
     test_max_free_unchanged_after_top_stack_deleted();
     test_partition_spans_the_whole_user_partition();
+    test_high_requests_take_a_freed_partition_block();
     test_partition_unknown_block_codes();
     test_module_id_queries_resolve_owning_module();
     test_query_module_info_answers_main_module_record();
@@ -52019,6 +53401,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_tlspl_lifecycle_and_thread_isolation();
     test_wb_tlspl_vpl_cells();
     test_vpl_blocking_waits();
+    test_std_handles_measured();
     test_kernel_pool_bounds_measured();
     test_mbx_lifecycle_and_ordering();
     test_intr_context_conformance();

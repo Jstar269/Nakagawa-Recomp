@@ -854,6 +854,10 @@ class TestProductionSmokePackage(unittest.TestCase):
         shutil.copyfile(self.fixture_dir / "guest.psp", psp_header)
         enhancement_package = inputs / "enhancement package.json"
         enhancement_package.write_text("{}", encoding="utf-8")
+        # A code-hook package beside it (contract section 9.9), with its symbols sidecar.
+        code_hook_package = inputs / "enhancement package.cull.json"
+        code_hook_package.write_text("{}", encoding="utf-8")
+        code_hook_package.with_suffix(".symbols.json").write_text("{}", encoding="utf-8")
         enhancement_data_root = long_root / "enhancement data"
         enhancement_data_root.mkdir()
         data_root_alias = alias_root / "ENHDAT~1"
@@ -877,12 +881,21 @@ class TestProductionSmokePackage(unittest.TestCase):
             return resolved
 
         make_calls = []
+        hook_sidecars = []
+        option_environments = []
 
         def record_make(command, *args, **kwargs):
             if command and command[0] == "/toolchain/make":
                 make_calls.append((list(command), dict(kwargs["env"])))
+                # The staged workspace is gone once build_package returns: look at Make time.
+                hook = kwargs["env"].get("ENHANCEMENT_CODE_HOOK_PACKAGE")
+                hook_sidecars.append(bool(hook) and Path(hook).with_suffix(".symbols.json").is_file())
                 return subprocess.CompletedProcess(command, 0)
             return real_run(command, *args, **kwargs)
+
+        def record_options(environment):
+            option_environments.append(dict(environment))
+            return {}
 
         with (
             mock.patch.dict(os.environ, {}, clear=False),
@@ -893,7 +906,7 @@ class TestProductionSmokePackage(unittest.TestCase):
             mock.patch.object(title_codegen_plan, "_version_identity",
                               return_value=("synthetic 1.0", "synthetic 1.0")),
             # The package file is staged, not parsed, by this route test.
-            mock.patch("nk_core.package_cache.enhancement_package_options", return_value={}),
+            mock.patch("nk_core.package_cache.enhancement_package_options", side_effect=record_options),
             mock.patch.object(title_codegen_plan.subprocess, "run", side_effect=record_make),
             contextlib.redirect_stdout(io.StringIO()),
             self.assertRaises(title_codegen_plan.PackageRouteError) as caught,
@@ -910,6 +923,7 @@ class TestProductionSmokePackage(unittest.TestCase):
                 make_command="make",
                 enhancement_package_path=enhancement_package,
                 enhancement_data_root=enhancement_data_root,
+                code_hook_package_path=code_hook_package,
             )
         # Make was recorded, not run, so the package is incomplete; any path refusal
         # would have stopped the route before Make with PACKAGE_UNSUPPORTED_PATH.
@@ -917,7 +931,7 @@ class TestProductionSmokePackage(unittest.TestCase):
         self.assertTrue(make_calls)
         path_keys = (
             "GAME_ELF", "GAME_PSP_HEADER", "TITLE_MANIFEST", "BUILD_DIR", "LINK_MAP",
-            "ENHANCEMENT_PACKAGE", "ENHANCEMENT_DATA_ROOT",
+            "ENHANCEMENT_PACKAGE", "ENHANCEMENT_DATA_ROOT", "ENHANCEMENT_CODE_HOOK_PACKAGE",
         )
         for command, environment in make_calls:
             for argument in command[1:]:
@@ -926,6 +940,8 @@ class TestProductionSmokePackage(unittest.TestCase):
                 value = environment[key]
                 self.assertFalse(title_codegen_plan._make_unsafe(value), (key, value))
                 self.assertTrue(Path(value).is_relative_to(alias_root), (key, value))
+            # The code-hook package is staged under a name of its own.
+            self.assertNotEqual(environment["ENHANCEMENT_CODE_HOOK_PACKAGE"], environment["ENHANCEMENT_PACKAGE"])
             # The data root is read in place: its short form is passed on as written.
             self.assertEqual(environment["ENHANCEMENT_DATA_ROOT"], data_root_alias.as_posix())
             extra = environment["GAME_EXTRA_ELFS"].split(" ")
@@ -934,6 +950,12 @@ class TestProductionSmokePackage(unittest.TestCase):
             self.assertTrue(Path(module_path).is_relative_to(alias_root), module_path)
             self.assertEqual(Path(module_path).name, "block.i3d.prx")
             self.assertEqual(Path(module_path).parent.name, "modules")
+        # Its sidecar was staged beside it, and the cache key was computed with it named.
+        self.assertEqual(hook_sidecars, [True] * len(make_calls))
+        self.assertTrue(option_environments)
+        for environment in option_environments:
+            self.assertEqual(Path(environment["ENHANCEMENT_CODE_HOOK_PACKAGE"]).name,
+                             "enhancement_package.cull.json", environment)
 
     def test_spaced_enhancement_data_root_uses_short_form_or_is_refused(self):
         """#2281: the data root is read in place and interpolated into the codegen

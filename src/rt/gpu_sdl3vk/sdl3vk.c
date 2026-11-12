@@ -217,6 +217,9 @@ static int (*s_logic_slowed_cb)(unsigned *rate) = NULL;
 static SDL_Surface  *s_hud_surf = NULL;
 static SDL_Renderer *s_hud_ren = NULL;
 static VkFormat      s_hud_fmt = VK_FORMAT_UNDEFINED;
+/* The last HUD composition (#314): how many times a present copied the HUD into the window's
+ * image, the rectangle it covered, and the image's size then. The capture selftest checks it. */
+static struct { unsigned copies; int x, y, w, h, swap_w, swap_h; } s_hud_last;
 
 int sdl3vk_hud_is_enabled(void) {
     return s_hud_enabled != SDL3VK_HUD_OFF;
@@ -2470,6 +2473,13 @@ static void draw_hud_overlay(VkCommandBuffer cmd, PresentFrame *f, VkImage dst_i
             VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
     vkCmdCopyBufferToImage(cmd, f->hud_staging, dst_img,
                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &bic);
+    s_hud_last.copies++;
+    s_hud_last.x = ox;
+    s_hud_last.y = oy;
+    s_hud_last.w = hud_w;
+    s_hud_last.h = hud_h;
+    s_hud_last.swap_w = swap_w;
+    s_hud_last.swap_h = swap_h;
 }
 
 static int present_common(VkImage src, int srcw, int srch, const uint32_t *upload) {

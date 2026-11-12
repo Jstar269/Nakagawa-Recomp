@@ -935,8 +935,10 @@ class LiveManifestTests(unittest.TestCase):
                     "docs/HARDWARE_ORACLE.md (PSP-KERNEL-SEM-001: io-seek64, io-seek64-rdwr)",
                     "docs/HARDWARE_ORACLE.md (PSP-IO-EOF-001: io-eof-seek-negative, io-eof-seek-negative-rdonly, io-eof-write-past, io-eof-read-past)",
                     "docs/HARDWARE_ORACLE.md (PSP-HLE-IO-SEEK-001: io-seek-flash-*)",
+                    "docs/HARDWARE_ORACLE.md (PSP-IO-EOF-002: umd-eof-raw-seek-past)",
                     "tests/native/hle_thread_selftest.c:test_flash0_font_device",
                     "tests/native/hle_thread_selftest.c:test_umd_block_device_sectors",
+                    "tests/native/hle_thread_selftest.c:test_io_memory_stick_cells_through_syscall",
                 ],
             ),
             0x109F50BC: (
@@ -946,7 +948,9 @@ class LiveManifestTests(unittest.TestCase):
                     "docs/HARDWARE_ORACLE.md (PSP-UMDIO-001: io-open-0000..0012)",
                     "docs/HARDWARE_ORACLE.md (PSP-KERNEL-SEM-001: io-missing-parent, io-excl-new, io-excl-existing)",
                     "docs/HARDWARE_ORACLE.md (PSP-IO-EOF-001: io-eof-missing)",
+                    "docs/HARDWARE_ORACLE.md (PSP-HLE-IO-SEEK-001: io-seek-ms-*)",
                     "tests/native/hle_thread_selftest.c:test_ms0_unified_namespace",
+                    "tests/native/hle_thread_selftest.c:test_io_memory_stick_cells_through_syscall",
                 ],
             ),
         }
@@ -992,13 +996,16 @@ class LiveManifestTests(unittest.TestCase):
                     "docs/HARDWARE_ORACLE.md (PSP-IO-001: io-read-verify and io-errors)",
                     "tests/native/hle_thread_selftest.c:test_ms0_unified_namespace",
                     "tests/native/hle_thread_selftest.c:test_umd_block_device_sectors",
+                    "tests/native/hle_thread_selftest.c:test_umd_read_parks_its_thread_for_the_drives_time",
                 ],
             ),
             0x42EC03AC: (
                 "h_IoWrite",
                 [
                     "docs/HARDWARE_ORACLE.md (PSP-IO-001: io-write and io-append)",
+                    "docs/HARDWARE_ORACLE.md (PSP-HLE-IO-SEEK-001: io-seek-ms-*)",
                     "tests/native/hle_thread_selftest.c:test_ms0_unified_namespace",
+                    "tests/native/hle_thread_selftest.c:test_io_memory_stick_cells_through_syscall",
                 ],
             ),
         }
@@ -1140,7 +1147,8 @@ class LiveManifestTests(unittest.TestCase):
         """Check batch 9's `(PSP-IO-001|PSP-UMDIO-001: io-... cells)` citations.
 
 Scoped to the four IoFileMgr handlers of batch 9 on purpose: the grammar is
-`(<oracle id>: <io- cell names or io-x-NNNN..NNNN ranges>)`, and the ids come
+`(<oracle id>: <io- cell names, io-x-NNNN..NNNN ranges or a cell glob such as
+io-x-* that the oracle row lists itself>)`, and the ids come
 from `tools/psp_oracle/manifest.json`. Any citation naming a PSP id that does
 not parse in that shape fails instead of being skipped. Other handlers' older
 citations (PSP-B1-01, no-colon forms) need their own check.
@@ -1161,7 +1169,7 @@ citations (PSP-B1-01, no-colon forms) need their own check.
             for prefix, first, last in re.findall(r"(io-[a-z]+-)(\d{4})\.\.(\d{4})", cells_text):
                 cited.update(f"{prefix}{n:04d}" for n in range(int(first), int(last) + 1))
             cells_text = re.sub(r"io-[a-z]+-\d{4}\.\.\d{4}", "", cells_text)
-            cited.update(re.findall(r"io-[a-z0-9]+(?:-[a-z0-9]+)*", cells_text))
+            cited.update(re.findall(r"io-[a-z0-9]+(?:-[a-z0-9]+)*(?:-\*)?", cells_text))
             self.assertTrue(cited, citation)
             self.assertLessEqual(cited, cells_by_id[oracle_id], citation)
 
@@ -1950,7 +1958,8 @@ class EvidenceTierTests(unittest.TestCase):
                 "PSP-HLE-VTIMER-003", "PSP-INTR-CAUSE-001", "PSP-IO-001", "PSP-IO-EOF-001", "PSP-IO-EOF-002", "PSP-KERNEL-001",
                 "PSP-KERNEL-002", "PSP-KERNEL-MISC-001", "PSP-KERNEL-SEM-001", "PSP-KERNEL-STATUS-001",
                 "PSP-LLSC-001",
-                "PSP-MODULE-START-001", "PSP-MUTEX-001", "PSP-REGISTRY-001", "PSP-SMOKE-001", "PSP-SYSTEM-001",
+                "PSP-MODULE-START-001", "PSP-MUTEX-001", "PSP-REGISTRY-001", "PSP-SAS-003",
+                "PSP-SMOKE-001", "PSP-SYSTEM-001",
                 "PSP-THREAD-003", "PSP-THREAD-EXIT-001", "PSP-TRACE-001", "PSP-TRANSPORT-001",
                 "PSP-UMDIO-001", "PSP-VFPU-BASICARITH-001", "PSP-VFPU-CCCMOV-001", "PSP-VFPU-CMP-001",
                 "PSP-VFPU-CONSTANTS-001", "PSP-VFPU-CONVERT-001", "PSP-VFPU-FORMS-001",

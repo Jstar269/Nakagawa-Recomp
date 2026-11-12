@@ -40,6 +40,7 @@ typedef struct {
     const char *const *labels;
     int count;
 } EnhancedWords;
+static const char *const k_enhanced_ssaa_labels[] = {"2x", "4x", "Off"};
 #define ENHANCED_WORDS(words) {(words), (int)(sizeof(words) / sizeof((words)[0]))}
 static const EnhancedWords k_enhanced_words[PLAYER_PART_COUNT] = {
     [PLAYER_PART_FILTERING] = ENHANCED_WORDS(k_enhanced_af_labels),
@@ -53,7 +54,9 @@ static const EnhancedWords k_enhanced_words[PLAYER_PART_COUNT] = {
     [PLAYER_PART_CULL] = ENHANCED_WORDS(k_enhanced_switch_labels),
     [PLAYER_PART_UPSCALE] = ENHANCED_WORDS(k_enhanced_upscale_labels),
     [PLAYER_PART_STICK] = ENHANCED_WORDS(k_enhanced_switch_labels),
-    [PLAYER_PART_LOAD] = ENHANCED_WORDS(k_enhanced_switch_labels)};
+    [PLAYER_PART_LOAD] = ENHANCED_WORDS(k_enhanced_switch_labels),
+    [PLAYER_PART_TWIN] = ENHANCED_WORDS(k_enhanced_switch_labels),
+    [PLAYER_PART_SSAA] = ENHANCED_WORDS(k_enhanced_ssaa_labels)};
 #undef ENHANCED_WORDS
 /* The most words any part has, for the stays-put test's steps. */
 enum { ENHANCED_MAX_WORDS = 5 };
@@ -3355,6 +3358,7 @@ static void test_settings_pages(void) {
               strstr(dump, "\"SMOOTH MOTION: OFF\"") != NULL &&
               strstr(dump, "\"CLEAN PITCHED SOUND: OFF\"") != NULL &&
               strstr(dump, "\"SHARPER ENLARGING: OFF\"") != NULL &&
+              strstr(dump, "\"SUPERSAMPLING: OFF\"") != NULL &&
               /* The sentences wrap; their lines are dumped one by one. */
               strstr(dump, "Smooths steady 30 FPS scenes") != NULL &&
               strstr(dump, "Adds about 17 ms of delay.\"") != NULL &&
@@ -3365,19 +3369,26 @@ static void test_settings_pages(void) {
               strstr(dump, "Ace Mode") == NULL && strstr(dump, "Boost") == NULL &&
               strstr(dump, "\xE2\x80\xA6\"") == NULL,
           "Settings > Enhanced shows all player parts and their complete descriptions");
-    /* Each part's row is one table row: it names its part, so a new part needs no new op. */
+    /* Each part's row is one table row: it names its part, so a new part needs no new op. The
+       first 13 parts' ids are 0x4543 to 0x454F; the 14th (Supersampling) is the second range's
+       first, 0x4680, and every earlier part keeps its id. */
+    CHECK(PLAYER_UI_ID_ENHANCED_PART(0) == 0x4543u && PLAYER_UI_ID_ENHANCED_PART(12) == 0x454Fu &&
+              PLAYER_UI_ID_ENHANCED_PART(PLAYER_PART_TWIN) == 0x454Fu &&
+              PLAYER_UI_ID_ENHANCED_PART(13) == 0x4680u &&
+              PLAYER_UI_ID_ENHANCED_PART(PLAYER_PART_SSAA) == 0x4680u && PLAYER_PART_COUNT >= 14,
+          "the part rows' ids: 13 in the first range, the 14th in the second");
     for (unsigned i = 0u; i < PLAYER_PART_COUNT; ++i) {
         PlayerUiAction part =
-            activate_flow_button(PLAYER_UI_ID_SETTINGS_ENHANCED_PART + i, FLOW_SETTINGS_ACE);
+            activate_flow_button(PLAYER_UI_ID_ENHANCED_PART(i), FLOW_SETTINGS_ACE);
         CHECK(settings_op_is(part, PLAYER_UI_SETTINGS_CYCLE_ENHANCED_PART) &&
                   part.title_index == (size_t)i,
               "each part's row steps that part");
-        part = activate_flow_button(PLAYER_UI_ID_SETTINGS_ENHANCED_PART + i,
+        part = activate_flow_button(PLAYER_UI_ID_ENHANCED_PART(i),
                                     FLOW_SETTINGS_ACE_TITLE);
         CHECK(settings_op_is(part, PLAYER_UI_SETTINGS_CYCLE_ENHANCED_PART) &&
                   part.title_index == (size_t)i,
               "each part's row on a game's page steps that part");
-        CHECK(activate_flow_button(PLAYER_UI_ID_SETTINGS_ENHANCED_PART + i,
+        CHECK(activate_flow_button(PLAYER_UI_ID_ENHANCED_PART(i),
                                    FLOW_SETTINGS_ACE_OFF).kind == PLAYER_UI_ACTION_NONE,
               "with the library Authentic a part row changes nothing");
     }
@@ -3576,9 +3587,16 @@ static void test_psp_fonts_page(void) {
           "Remove imported fonts removes them");
     CHECK(dump_flow_case(FLOW_SETTINGS_FONTS, dump, sizeof(dump)) &&
               strstr(dump, "Optional.") != NULL && strstr(dump, "flash0:/font") != NULL &&
-              strstr(dump, "Copying the fonts from your PSP") != NULL &&
-              /* #2005: what a player without the PSP's fonts sees, before they decide. */
-              strstr(dump, "Cyrillic") != NULL && strstr(dump, "narrower") != NULL &&
+              /* The dump holds one run per wrapped line, so each phrase is short
+                 enough to stay on one line. */
+              strstr(dump, "Copying the") != NULL &&
+              strstr(dump, "fonts from your PSP") != NULL &&
+              /* #2005: what a player without the PSP's fonts sees, before they decide.
+                 The Latin stand-ins have the PSP's Cyrillic letters; only rare Japanese
+                 and Korean characters are missing. */
+              strstr(dump, "Cyrillic") == NULL && strstr(dump, "rarely used characters") != NULL &&
+              strstr(dump, "Japanese and Korean fonts") != NULL &&
+              strstr(dump, "narrower") != NULL &&
               strstr(dump, "Japanese: synthetic fallback") != NULL &&
               strstr(dump, "Korean: synthetic fallback") != NULL &&
               strstr(dump, "Latin 16: synthetic fallback") != NULL &&
@@ -3957,16 +3975,14 @@ static EnhancedRowPlaces enhanced_row_places(FlowCase which) {
     NkUi *ui = NULL;
     /* As wide as the design window and tall enough that no row is scrolled away: a game's page
        stacks each row's sentence under its button at this width, so its last row starts below
-       1300 pixels. */
-    const NkUiDrawList *draw = flow_case_layout(which, 1280, 1600, &ui);
+       1300 pixels, and the window leaves room for parts still to come. */
+    const NkUiDrawList *draw = flow_case_layout(which, 1280, 2400, &ui);
     memset(&places, -1, sizeof(places));
     for (uint32_t i = 0u; draw != NULL && i < draw->ncmd; ++i) {
         const NkUiDrawCmd *cmd = &draw->cmd[i];
-        int row = cmd->element_id == PLAYER_UI_ID_SETTINGS_ACE_MODE ? 0
-                  : cmd->element_id >= PLAYER_UI_ID_SETTINGS_ENHANCED_PART &&
-                        cmd->element_id < PLAYER_UI_ID_SETTINGS_ENHANCED_PART + PLAYER_PART_COUNT
-                      ? 1 + (int)(cmd->element_id - PLAYER_UI_ID_SETTINGS_ENHANCED_PART)
-                      : -1;
+        int row = cmd->element_id == PLAYER_UI_ID_SETTINGS_ACE_MODE ? 0 : -1;
+        for (int p = 0; row < 0 && p < PLAYER_PART_COUNT; ++p)
+            if (cmd->element_id == PLAYER_UI_ID_ENHANCED_PART(p)) row = 1 + p;
         if (row < 0 || (cmd->kind != NK_UI_DRAW_RECTANGLE && cmd->kind != NK_UI_DRAW_BORDER)) {
             continue;
         }

@@ -31,7 +31,7 @@ unit tests instead:
 * ``HST_MANUAL_CALLABLES`` / ``HST_RESUME_OWNERS`` change entry *roles*
   (:func:`codegen.build_entry_catalog`);
 * ``_SV_SPECIAL`` suppresses ``--static-verify`` emission
-  (:func:`codegen.sv_plan`) -- the differential covers it too, because the
+  (:func:`codegen.sv_points`) -- the differential covers it too, because the
   differential runs with ``--static-verify`` enabled;
 * the address literals and named address tables themselves, which
   :class:`GateInventoryTests` re-derives from ``tools/codegen.py``'s AST.  That
@@ -107,9 +107,10 @@ def _addiu_sp(imm: int) -> int:
 # two loop fast paths, the guest-abort exit and the four --static-verify exclusions
 # followed on 2026-11-08 (#363): RETIRED_HST_ADDRESSES below holds them.
 # 0x000011B0, 0x0000260C, 0x0000FE3C, 0x00015EA0 and 0x000149A8 left this list when their
-# stubs were retired (#363): each now translates as written in both profiles.
+# stubs were retired (#363): each now translates as written in both profiles. 0x000143B0
+# (the native sprintf) followed on 2026-11-11.
 HST_CUSTOM_STUBS = (
-    0x0000F538, 0x000101C4, 0x00010738, 0x00013524, 0x000143B0,
+    0x0000F538, 0x000101C4, 0x00010738, 0x00013524,
     0x00011090, 0x000110DC, 0x000114A8, 0x000114C0,
 )
 HST_GUEST_PATCHES = tuple(sorted(codegen.GUEST_PATCHES))
@@ -482,14 +483,15 @@ class ProfileHstLegacyTests(unittest.TestCase):
             "sr_newlib_free(s->r[5], owner_ra)",
             "sr_newlib_memalign",
             "sr_newlib_realloc",
-            "sr_guest_sprintf(s);",
             "sr_native_memmove(dest, s->r[5], s->r[6], 0x00011090u)",
             "sr_native_memset(dest, (uint8_t)(s->r[5] & 0xFF), s->r[6], 0x000114c0u)",
         )
         missing = [s for s in expected if s not in self.combined]
         self.assertEqual(missing, [], "profile=hst lost legacy HST emission")
         # Retired under #363: the guest's own loops and abort() run as written.
-        for retired in ("MEMSET_FASTPATH", "ARRSHIFT_FASTPATH", "GUEST_ABORT", "_Exit(9)"):
+        # The native sprintf went on 2026-11-11: the title's own formatter runs.
+        for retired in ("MEMSET_FASTPATH", "ARRSHIFT_FASTPATH", "GUEST_ABORT", "_Exit(9)",
+                        "sr_guest_sprintf"):
             self.assertNotIn(retired, self.combined, f"profile=hst still emits {retired}")
 
     def test_diagnostic_probes_stay_compiled_out_in_production(self):
@@ -572,7 +574,7 @@ ADDR_OPERANDS = frozenset({"addr", "a", "start"})
 
 #: Functions whose bodies decide what translated C is emitted.
 EMITTERS = frozenset({
-    "effect", "normal_line", "emit_function", "main", "sv_plan",
+    "effect", "normal_line", "emit_function", "main", "sv_plan", "sv_points",
     # The steps emit_function and main were split into (#1531).
     "_translate", "_dup_slot_skips", "_emit_hst_patch_site", "_emit_non_control_word", "_emit_eret",
     "_emit_slot_exit", "_emit_unrelocated_jal", "_emit_jal", "_emit_jalr", "_emit_jr",
@@ -839,14 +841,15 @@ class GateInventoryTests(unittest.TestCase):
         )
         self.assertIn("hst_profile", _name_ids(binding[0].value.test))
 
-    def test_sv_special_is_read_only_by_sv_plan(self):
+    def test_sv_special_is_read_only_by_static_verify_planning(self):
+        # sv_points computes the points (sv_plan counts them, the LLVM plan reads them, #330).
         readers = {
             fn.name
             for fn in ast.walk(self.tree)
             if isinstance(fn, ast.FunctionDef)
             and "_SV_SPECIAL" in _name_ids(fn)
         }
-        self.assertEqual(readers, {"sv_plan"})
+        self.assertEqual(readers, {"sv_points"})
 
     def test_address_tables_have_not_grown_silently(self):
         """Every table entry is inside the specimen's covered set."""
@@ -1164,14 +1167,14 @@ class RetiredAddressGuardTests(unittest.TestCase):
 # 7. Bodies whose HST stubs were retired translate as written (#363)
 # ---------------------------------------------------------------------------
 
-#: Retired under #363 (2026-10-26 and 2026-10-27). Under profile=hst each of these
-#: addresses used to emit a title stub (a static-success simple stub, the
-#: heap-statistics walk skip, or the backdrop chooser's postcondition wrapper) in place
-#: of, or around, its own body. Each now translates its own instructions under every
-#: profile.
+#: Retired under #363 (2026-10-26 and 2026-10-27, and the native sprintf at 0x000143B0
+#: on 2026-11-11). Under profile=hst each of these addresses used to emit a title stub (a
+#: static-success simple stub, the heap-statistics walk skip, the backdrop chooser's
+#: postcondition wrapper, or a native sprintf) in place of, or around, its own body. Each
+#: now translates its own instructions under every profile.
 RETIRED_363_STUB_ADDRESSES: tuple[int, ...] = (
     0x00015F98, 0x0001034C, 0x0001C010, 0x0001C0FC, 0x0001C104, 0x0001C560,
-    0x0001C604, 0x0001C810, 0x0001C818, 0x001D9EB0,
+    0x0001C604, 0x0001C810, 0x0001C818, 0x001D9EB0, 0x000143B0,
 )
 
 
