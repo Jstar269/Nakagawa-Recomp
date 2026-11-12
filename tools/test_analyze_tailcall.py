@@ -292,6 +292,13 @@ class TestGprWrites(unittest.TestCase):
             0x00200008: None,                  # jr $at
             0x0040F809: None,                  # jalr $v0
             0x45000002: None,                  # bc1f
+            0x04110002: None,                  # bal (bgezal $zero)
+            0x04130002: None,                  # bgezall $zero
+            0x04AA7253: frozenset(),           # tlti $a1, 0x7253: a trap writes no GPR
+            0x048C0007: frozenset(),           # teqi $a0, 7
+            0x04850000: "unknown",             # REGIMM rt 5: no such instruction
+            0x18A00002: None,                  # blez $a1
+            0x18A10002: "unknown",             # blez with rt != 0: not a branch
             0x0000000C: frozenset(),           # syscall
             0x00850018: frozenset(),           # mult $a0, $a1
             0x00000011: frozenset(),           # mthi $zero
