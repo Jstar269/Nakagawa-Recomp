@@ -2851,6 +2851,7 @@ static void savedata_dialog_work_abandoned(uint32_t result) {
 void sr_hle_release_thread_resources(uint32_t thread_uid) {
     sr_mutex_release_thread(thread_uid);
     if (thread_uid) {
+        ge_finish_release_owner(thread_uid);
         const uint32_t abandoned = sr_savedata_release_thread(thread_uid);
         if (abandoned) savedata_dialog_work_abandoned(abandoned);
         io_cwd_release_thread(thread_uid);
