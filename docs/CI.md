@@ -1610,8 +1610,8 @@ objects (`git ls-tree`, `git cat-file`) and auditing exactly the files that tree
 or `.gitignore` line, VCS-looking directory name or repository-shaped root of the candidate can hide or
 rewrite a file, and the audit runs no Git command in the written tree; its own Git commands use a bare
 repository only when they name one (`safe.bareRepository=explicit`). The audit is also given the verdict base
-(`--trusted-base`), so a binary the release manifest approves keeps its waiver only for bytes that base vouches
-for, never on a pin the pull request wrote
+(`--trusted-base`): at a path that base already holds, a binary waiver covers only bytes the base vouches for,
+and the pull request's own manifest approves nothing there
 ([Approved binaries](PUBLICATION_READINESS.md#approved-binaries-in-the-release-manifest)). The
 merge-group observation (`provenance-attestation-merge-group.yml`) does not run it, as it is not a required
 check. `GateCodeTests` in `tools/test_ci_trust_verdict.py` fails when one of those tools gains a local

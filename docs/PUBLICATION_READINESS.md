@@ -918,39 +918,50 @@ review, and by the next section when the release manifest approves it as a binar
 
 ### Approved binaries in the release manifest
 
-`assets/release_manifest.json` waives the publication audit's binary findings for the files it approves: a
-component whose disposition is `approved_binary` (a screenshot, a font, a clip, a prebuilt fixture) or
-`optional_excluded_if_unverified`. The component pins the approved bytes in `hashes.sha256`, and the waiver covers
-those bytes only. When a file's bytes are not the pinned ones, the findings the waiver would have dropped are
-reported (`MAGIC`, `MAGIC_UNKNOWN`, and `PATH` for a prohibited extension), with one more that says why:
+The publication audit reports binary content: `MAGIC` for a known binary format, `MAGIC_UNKNOWN` for other
+binary bytes, and `PATH` for a prohibited extension. Two things waive those findings, and each approves bytes,
+not a path:
+
+* a component of `assets/release_manifest.json` whose disposition is `approved_binary` (a screenshot, a font, a
+  clip, a prebuilt fixture) or `optional_excluded_if_unverified`. It pins the approved bytes in `hashes.sha256`,
+  and only `approved_binary` waives the extension rule;
+* the `assets/vfpu/` exemption from `MAGIC_UNKNOWN`, for the VFPU lookup tables.
+
+A component of any other disposition waives nothing. When a waived file's bytes are not the approved ones, the
+findings the waiver would have dropped are reported, with one more that says why:
 
 | Finding | What happened |
 | --- | --- |
-| `APPROVED_BINARY_CHANGED` | the file's SHA-256 is not a pinned one, or the manifest's pin is not the file's SHA-256 |
-| `APPROVED_BINARY_UNPINNED` | the component has no `hashes.sha256`, or the trusted base carries the path without that waiver |
+| `APPROVED_BINARY_CHANGED` | the file's bytes are not the approved ones, or the manifest's pin is not the file's SHA-256 |
+| `APPROVED_BINARY_UNPINNED` | the component has no `hashes.sha256`, or the trusted base does not record that waiver |
 
-The manifest is part of the tree under audit, so its own pin catches only a file that changed without its pin.
-Rewriting a file and its pin together would pass. The trusted attestation therefore runs the audit with
-`--trusted-base <verdict base>`, the merge base of the head with the default branch, and the base decides for
-every path it already carries or its manifest already waives. Its manifest must record the same waiver for the
-path, and the waiver holds in two cases:
+The manifest is part of the tree under audit, so its own pin is not an approval: it shows only that a file and
+its pin still agree. The trusted attestation therefore runs the audit with `--trusted-base <verdict base>`, the
+merge base of the head with the default branch, and the base decides for every path it already carries or its
+manifest already waives:
 
-* the file and its pin are both as the base has them, so the pull request did not touch the approval; or
-* the bytes are ones the base vouches for (the SHA-256 its manifest pins, or the file it carries) and the
-  candidate's manifest pins exactly those bytes. This is how a pull request corrects a pin that does not match
-  the file the base carries.
+* The base's manifest must record the same waiver for the path. A component the base does not have, or whose
+  disposition differs from the base's, waives nothing there.
+* The bytes must be the ones the base vouches for: the file it carries, or, for a path it waives without
+  carrying the file, the SHA-256 its manifest pins. No pin, the base's included, approves other bytes at a path
+  whose file the base has.
+* The pin must be as the base has it, so the pull request did not touch the approval, or be exactly the file's
+  SHA-256; the second is how a pull request corrects a pin that does not match the file the base carries.
+* Every refused waiver is reported, whether or not the file's bytes raise a binary finding, so the base never
+  comes to hold a waiver or a pin that this check refuses.
+* A VFPU table the base carries is exempt only as the bytes the base carries.
 
-A pin changed in the pull request approves nothing, and a path the base carries without a waiver cannot gain one
-in a pull request. A path the base does not carry is new: the candidate's own pin applies to it, and whether it
-may be published is the admission's decision. A claim-bound admission accepts any content for its path until the
-pull request lands ([V4 policy deltas](#v4-policy-deltas)); a byte-bound one (`"binding": "bytes"`) approves
-exactly one file.
+A path the base neither carries nor waives is new. The candidate's own pin applies to it, a new VFPU table is
+exempt by its path, and whether the path may be published is the admission's decision. A claim-bound admission
+accepts any content for its path until the pull request lands ([V4 policy deltas](#v4-policy-deltas)); a
+byte-bound one (`"binding": "bytes"`) approves exactly one file.
 
-The audit has no input that approves new bytes at a path the base already carries, so replacing an approved
-binary in place fails the trusted attestation. Until the trusted side records such an approval, a replacement
-lands as a new path: the new file under a new name with its own manifest component, the old file and its
-component removed, and the profile change admitted by the maintainer. A local run without `--trusted-base` (pre-commit, `contrib-check`, the hygiene job) uses the tree's
-own pin and is a tripwire, not this check.
+The audit has no input that approves new bytes at a path the base already holds. Replacing an approved binary or
+a VFPU table in place, or changing the kind of a waiver in place, therefore fails the trusted attestation. Until
+the trusted side records such an approval, a replacement lands as a new path: the new file under a new name with
+its own manifest component, the old file and its component removed, and the profile change admitted by the
+maintainer. A local run without `--trusted-base` (pre-commit, `contrib-check`, the hygiene job) compares the
+tree's own pins and applies the path exemption as it stands; it is a tripwire, not this check.
 
 ### V3 policy deltas
 

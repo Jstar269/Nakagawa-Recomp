@@ -1033,15 +1033,18 @@ def _forbidden_path(path: str) -> str | None:
 # Release-manifest dispositions that waive a binary finding (MAGIC, MAGIC_UNKNOWN, and for
 # ``approved_binary`` the prohibited-extension PATH rule) for one path.
 BINARY_WAIVER_DISPOSITIONS = ("approved_binary", "optional_excluded_if_unverified")
+# The VFPU lookup tables: raw data with no magic, exempt from MAGIC_UNKNOWN by where they live.
+VFPU_TABLE_PREFIX = "assets/vfpu/"
 
 
 @dataclass(frozen=True)
 class TrustedWaiverBase:
-    """What a trusted base commit records about the release manifest's binary waivers.
+    """What a trusted base commit records about the audit's binary waivers.
 
     ``paths`` is every path of the base tree. For a path the base's manifest waives, ``waivers``
-    holds ``(disposition, pinned SHA-256)`` and ``blob_sha256`` the SHA-256 of the base's own
-    bytes there. The audited tree supplies none of it.
+    holds ``(disposition, pinned SHA-256)``. ``blob_sha256`` is the SHA-256 of the base's own
+    bytes at every path a waiver can cover: the ones its manifest waives and the ones under
+    ``VFPU_TABLE_PREFIX``. The audited tree supplies none of it.
     """
 
     paths: frozenset[str]
@@ -1074,16 +1077,22 @@ def _binary_waiver_refusal(
     manifest already waives, is therefore held to the base: its manifest must record the same
     waiver, and the waiver holds when
 
-    * the file and its pin are both as the base has them (the change under audit did not touch
-      the approval, whatever state the base is in); or
-    * the bytes are ones the base vouches for (the SHA-256 its manifest pins, or the file it
-      carries) and the audited manifest pins exactly those bytes.
+    * the bytes are the ones the base vouches for and the pin is as the base has it (the change
+      under audit did not touch the approval, whatever state the base is in); or
+    * the bytes are the ones the base vouches for and the audited manifest pins exactly them.
 
-    Any other path is new: its publication is the admission's decision, and the audited
-    manifest's pin applies.
+    The base vouches for the file it carries. Its manifest's pin stands in only for a path it
+    waives without carrying the file, so no pin the base holds approves other bytes at a path
+    whose file the base has. Any other path is new: its publication is the admission's
+    decision, and the audited manifest's pin applies.
     """
     pin = _manifest_pin(manifest_comp)
     actual = sha256.lower()
+    unpinned = (
+        "APPROVED_BINARY_UNPINNED",
+        f"release manifest waives this path as {disp} without a hashes.sha256 pin; a waiver "
+        "approves exact bytes",
+    )
     if trusted_base is not None and (rel in trusted_base.paths or rel in trusted_base.waivers):
         base_waiver = trusted_base.waivers.get(rel)
         if base_waiver is None or base_waiver[0] != disp:
@@ -1094,30 +1103,30 @@ def _binary_waiver_refusal(
                 "binary at a path the base already has",
             )
         base_pin = base_waiver[1]
-        base_bytes = trusted_base.blob_sha256.get(rel, "")
-        if actual and actual == base_bytes and pin == base_pin:
+        if rel in trusted_base.paths:
+            vouched, source = trusted_base.blob_sha256.get(rel, ""), "the file the trusted base carries"
+        else:
+            vouched, source = base_pin, "the bytes the trusted base's release manifest pins"
+        if actual and actual == vouched and pin == base_pin:
             return None
-        if not actual or actual not in (base_pin, base_bytes):
+        if not pin:
+            return unpinned
+        if not actual or actual != vouched:
             return (
                 "APPROVED_BINARY_CHANGED",
-                f"bytes (sha256 {actual or 'unreadable'}) are neither the ones the trusted base's "
-                f"release manifest pins (sha256 {base_pin or 'none'}) nor the file the base "
-                "carries; a pin changed in the tree under audit approves nothing, and a "
-                "replacement needs the maintainer's approval of the new bytes",
+                f"bytes (sha256 {actual or 'unreadable'}) are not {source} (sha256 "
+                f"{vouched or 'none'}); no pin approves other bytes at a path the base holds, "
+                "and a replacement needs the maintainer's approval of the new bytes",
             )
         if pin != actual:
             return (
                 "APPROVED_BINARY_CHANGED",
-                f"the audited release manifest pins sha256 {pin or 'none'} for this path, which is "
+                f"the audited release manifest pins sha256 {pin} for this path, which is "
                 f"not its bytes (sha256 {actual})",
             )
         return None
     if not pin:
-        return (
-            "APPROVED_BINARY_UNPINNED",
-            f"release manifest waives this path as {disp} without a hashes.sha256 pin; a waiver "
-            "approves exact bytes",
-        )
+        return unpinned
     if pin != actual:
         return (
             "APPROVED_BINARY_CHANGED",
@@ -1127,20 +1136,16 @@ def _binary_waiver_refusal(
     return None
 
 
-def _approved_binary_matches(reason: str, disp: str, manifest_comp: dict | None,
-                             sha256: str, rel: str = "",
-                             trusted_base: TrustedWaiverBase | None = None) -> bool:
-    """A prohibited-extension path passes only as a reviewed release-manifest binary.
+def _waives_extension_rule(reason: str, disp: str) -> bool:
+    """Whether an ``approved_binary`` waiver, when it holds, covers this PATH finding.
 
-    Project-authored build output (for example the profile-zero PSPDEV fixture)
-    may carry a guest-executable suffix. It is accepted only when the release
-    manifest records it as ``approved_binary`` and its bytes match the pinned
-    SHA-256, so a different file under an approved name is still reported.
-    ``_binary_waiver_refusal`` says whose pin that is.
+    Project-authored build output (for example the profile-zero PSPDEV fixture) may carry a
+    guest-executable suffix. Only that extension rule can be waived, and only by
+    ``approved_binary``; ``_binary_waiver_refusal`` decides whether the waiver holds for the
+    audited bytes, so a different file under an approved name is still reported. The
+    private-path rules are never waived.
     """
-    if not reason.startswith("prohibited extension") or disp != "approved_binary":
-        return False
-    return _binary_waiver_refusal(rel, disp, manifest_comp, sha256, trusted_base) is None
+    return reason.startswith("prohibited extension") and disp == "approved_binary"
 
 
 def is_keystore_content(rel: str, text: str | None) -> bool:
@@ -2988,13 +2993,12 @@ def audit_entries_with_semantics(
         waiver_refused_a_finding = False
 
         reason = _forbidden_path(rel)
-        if reason and _approved_binary_matches(
-            reason, disp, manifest_comp, sha256, rel, trusted_waiver_base
-        ):
-            reason = None
-        if reason:
-            if reason.startswith("prohibited extension") and disp == "approved_binary":
+        if reason and _waives_extension_rule(reason, disp):
+            if waiver_holds:
+                reason = None
+            else:
                 waiver_refused_a_finding = True
+        if reason:
             f = Finding("PATH", rel, reason)
             entry_findings.append(f)
 
@@ -3079,17 +3083,39 @@ def audit_entries_with_semantics(
         text_binary_kind = "binary" if is_binary else "text"
 
         if is_binary and magic == "none" and entry.kind not in ("symlink", "gitlink"):
-            if rel.startswith("assets/vfpu/"):
+            if rel.startswith(VFPU_TABLE_PREFIX):
+                # With a trusted base, a table the base carries is exempt only as the bytes the
+                # base carries; a table new to the base is the admission's decision.
+                if (
+                    trusted_waiver_base is not None
+                    and rel in trusted_waiver_base.paths
+                    and sha256 != trusted_waiver_base.blob_sha256.get(rel)
+                ):
+                    entry_findings.append(Finding(
+                        "MAGIC_UNKNOWN", rel,
+                        f"unknown binary magic: the {VFPU_TABLE_PREFIX} exemption covers only the "
+                        "file the trusted base carries at this path"))
+            elif waiver_holds:
                 pass
-            elif waiver_claimed and not waiver_holds:
+            elif waiver_claimed:
                 # The manifest component dispositions these bytes only as the binary it pins.
                 waiver_refused_a_finding = True
                 entry_findings.append(Finding("MAGIC_UNKNOWN", rel, "unknown binary magic is not the binary the release manifest approves"))
-            elif disp in ("unclassified", "excluded_pending_qualified_review") or exhaustive:
-                if not manifest_comp:
-                    entry_findings.append(Finding("MAGIC_UNKNOWN", rel, "unknown binary magic requires explicit manifest review/disposition"))
+            elif (
+                disp in ("unclassified", "excluded_pending_qualified_review")
+                or exhaustive
+                or trusted_waiver_base is not None
+            ):
+                # A manifest component of any other disposition approves no bytes: it is part of
+                # the tree under audit, and it pins nothing the audit could hold the file to.
+                entry_findings.append(Finding(
+                    "MAGIC_UNKNOWN", rel,
+                    "unknown binary magic requires a release-manifest binary waiver that pins these bytes"))
 
-        if waiver_refused_a_finding and waiver_refusal is not None:
+        # With a trusted base every refusal is reported, whether or not the bytes raised a binary
+        # finding in this audit: the base must never come to hold a waiver or a pin that this
+        # check refuses. Without one, a refusal is reported with the finding it restores.
+        if waiver_refusal is not None and (waiver_refused_a_finding or trusted_waiver_base is not None):
             entry_findings.append(Finding(waiver_refusal[0], rel, waiver_refusal[1]))
 
         if (exhaustive or public_scope) and not manifest_comp and prov == "unclassified":
@@ -3450,9 +3476,10 @@ def _materialize_committed_tree(
 def _load_trusted_waiver_base(ref: str, source_repo: Path) -> TrustedWaiverBase:
     """Read a trusted base commit's binary waivers from its own objects.
 
-    The base's path list is ``git ls-tree``'s; its release manifest and the files that manifest
-    waives are read with ``git cat-file``. Nothing comes from the tree under audit. A base whose
-    manifest cannot be read is an error: the audit must not run as if no waiver were pinned.
+    The base's path list is ``git ls-tree``'s; its release manifest, the files that manifest
+    waives and its VFPU tables are read with ``git cat-file``. Nothing comes from the tree under
+    audit. A base whose manifest cannot be read is an error: the audit must not run as if no
+    waiver were pinned.
     """
     tree_sha = _git_output(["rev-parse", "--verify", "--end-of-options", f"{ref}^{{tree}}"], source_repo).strip()
     blob_ids = {path: (mode, object_id) for path, mode, object_id in _committed_tree_entries(tree_sha, source_repo)}
@@ -3484,7 +3511,7 @@ def _load_trusted_waiver_base(ref: str, source_repo: Path) -> TrustedWaiverBase:
         for path, component in manifest_map.items()
         if component.get("disposition") in BINARY_WAIVER_DISPOSITIONS
     }
-    carried = sorted(path for path in waivers if path in blob_ids)
+    carried = sorted(path for path in blob_ids if path in waivers or path.startswith(VFPU_TABLE_PREFIX))
     return TrustedWaiverBase(
         paths=frozenset(blob_ids),
         waivers=waivers,
@@ -3578,11 +3605,11 @@ def _main(argv: list[str] | None, disposable: list[Path]) -> int:
         help=(
             "Trusted base commit, read from --repo-root's objects (in the attestation, the merge "
             "base with the default branch). A path that commit already carries, or that its "
-            "manifest already waives, keeps a "
-            "release-manifest binary waiver (approved_binary, optional_excluded_if_unverified) "
-            "only for bytes the base vouches for: the SHA-256 its own manifest pins, or the file "
-            "it carries. Without it the audited manifest's own pin is used, which the tree under "
-            "audit can rewrite."
+            "manifest already waives, keeps a binary waiver (the release manifest's "
+            "approved_binary and optional_excluded_if_unverified, and the assets/vfpu/ "
+            "exemption) only for bytes the base vouches for: the file it carries, or, where it "
+            "carries none, the SHA-256 its own manifest pins. Without it the audited manifest's "
+            "own pin is used, which the tree under audit can rewrite."
         ),
     )
     parser.add_argument(
@@ -3692,7 +3719,11 @@ def _main(argv: list[str] | None, disposable: list[Path]) -> int:
     else:
         audit_root = args.candidate_root.absolute() if args.candidate_root else audit_repo_root
     trusted_waiver_base: TrustedWaiverBase | None = None
-    if args.trusted_base:
+    if args.trusted_base is not None:
+        if not args.trusted_base.strip():
+            # An empty value must not run the audit as if no base had been named.
+            print("publication audit failed: --trusted-base names no commit", file=sys.stderr)
+            return 2
         try:
             trusted_waiver_base = _load_trusted_waiver_base(args.trusted_base, audit_repo_root)
         except (OSError, RuntimeError, subprocess.CalledProcessError) as error:

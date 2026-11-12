@@ -488,10 +488,9 @@ jobs:
       # step above has just held to the trusted authority: a path it adds,
       # removes or excludes is one a maintainer admitted. The release manifest
       # is the candidate's too, and it waives binary findings for the files it
-      # approves, so the audit is given the verdict base: a file the base
-      # already carries keeps its waiver only for bytes the base vouches for
-      # (the SHA-256 the base's own manifest pins, or the file the base
-      # carries). The candidate cannot approve new bytes by changing a pin. No
+      # approves, so the audit is given the verdict base: at a path the base
+      # already holds, a binary waiver covers only the file the base carries,
+      # and nothing in the candidate's manifest approves other bytes there. No
       # secret is in this step's environment. A finding fails the job.
       - name: Audit the candidate tree with the trusted publication audit
         env:
