@@ -63,9 +63,29 @@ relative path and SHA-256, and the gate verifies that file. Without that directo
 claim reports `NOT_RUN`, never `MEASURED`; the public checks (cell names and order, record names,
 window digests) still run. Software, Vulkan, or PPSSPP data cannot be promoted by setting a
 hardware label. The current command-word case reports `NOT_RUN`.
-**GE raster pixel conformance is partial (#343, open):** the `ge-raster`, `ge-weight` and
-`ge-rtt` cells are measured and in the corpus; the command-word case, the Vulkan comparison and
-the families no cell covers are not.
+
+**GE raster pixel conformance is partial (#343, open).** In the corpus and measured: the 189
+`ge-raster`, 16 `ge-weight` and 9 `ge-rtt` cells, each for its exact states only. The software GE
+gives every `ge-raster` cell (`test_ge_raster_cells_match_psp`); no test yet runs the `ge-weight` or
+`ge-rtt` cells through it. On Vulkan at render scale 1 (`gpu_coherence_selftest --case psp-raster`, in the
+`ge-raster` entry below), 146 `ge-raster` cells drawn on the GPU equal the PSP, 20 stay within 2 per
+colour field of it (most differ by 1 or 2, depending on the driver), and 23 are drawn by the software fallback. Other pixel evidence measured on a
+PSP but not in `ge_corpus.json`: PSP-GE-SAMPLE-001, PSP-GE-THROUGHZ-001, PSP-GE-MIP-001, PSP-GE-MIP-002,
+PSP-GE-LIGHT-001 and PSP-GE-OVERLAP-001 (their entries below). Not measured at all:
+
+- the command-word case above (`NOT_RUN`);
+- the depth the GE stores for a fractional z: every `ge-raster` depth is an integer and
+  PSP-GE-THROUGHZ-001 does not show the stored word, so depth rounding and the transform-mode depth
+  range mapping are not pinned;
+- clipping, the guard band and back-face culling;
+- scissor rectangles smaller than the surface: every cell scissors to the full surface;
+- index buffers, and vertex formats no cell uses;
+- swizzled, DXT and 32-bit-index CLUT textures;
+- lighting beyond PSP-GE-LIGHT-001's cells (other light types and colours, several lights), texture
+  projection and texture-coordinate generation, and splines and patches;
+- on Vulkan: render scales above 1, the 23 fallback cells (no Vulkan claim), the 20 rounding cells
+  (a known gap, tracked on #343), and the `ge-weight` and `ge-rtt` cells, which no Vulkan case
+  draws.
 
 ## Measured to date (index — exact cells only, do not generalize)
 
@@ -1261,6 +1281,26 @@ One console is one data point; see §11. Nothing here closes issue #70
     4444 and CLUT8 textures with CLUT shift, mask and offset, wrap and clamp under nearest and bilinear
     filtering, through-mode triangle coverage, points, 16-bit framebuffer conversion, dithering, pixel masks,
     the sixteen logic operations, and transform-mode triangles and sprites.
+
+  The Vulkan backend runs the same cells: `src/rt/gpu_sdl3vk/ge_gpu_selftest.inc` carries the block and the
+  PSP digest table byte for byte (`tools/test_psp_oracle.py` pins all three copies), and
+  `gpu_coherence_selftest --case psp-raster` (also in its default pass) draws every cell through `ge.c` with the
+  GPU hooks on at render scale 1 and compares the window it reads back with the PSP's digest. On 2026-11-11 146
+  cells are drawn on the GPU and equal the PSP. 23 are drawn by the software fallback and equal the PSP after
+  the readback, which proves nothing about the Vulkan raster: the depth test with stencil (`z-lt-st`,
+  `z-gt-st`), points (`e-points`), partial pixel masks (`msk-8888`, `msk-565`, `clr-ca-msk`) and the logic
+  operations (`lo-*`). 20 are drawn on the GPU and differ from the PSP by at most 2 per colour field, because
+  Vulkan most likely blends and combines texture and vertex colours in floating point where the PSP truncates integer
+  products: `b-sa-isa`, `b-dc-sc`, `b-idc-isc`, `b-da-ida`, `b-sub-sa-fix`, `b-rsub-sa-isa`, `tf-mod-rgb`,
+  `tf-mod-rgb-x2`, `tf-mod-rgba`, `tf-mod-rgba-x2`, `tf-mod-rgba-1`, `tf-dec-rgba`, `tf-dec-rgba-x2`,
+  `tf-bld-rgb`, `tf-bld-rgb-x2`, `tf-bld-rgba`, `tf-bld-rgba-x2`, `tfa-mod-rgba`, `tfa-bld-rgba` and
+  `tfa-add-rgba`; each of their pixels must stay within 2 per field of the window `ge.c` draws alone, which
+  equals the PSP's. Whether a rounding cell lands on the PSP's value depends on the driver: on an RTX 3080 all 20
+  differ by 1 or 2, while lavapipe (hosted CI) draws `tf-mod-rgba-1` exactly, so the case accepts an equal
+  window for these cells and reports how many were exact. The case pins all three classes, so a cell that moves between them fails, and so does a
+  cell whose readback fails or that neither class drew. It found that a clear with a partial pixel mask was
+  drawn unmasked on the GPU (`clr-ca-msk`); such a clear now falls back to `ge.c`, as a masked draw already
+  did.
 
 - **PSP-3000 single-case runs of the `ge-mip` and `ge-sync-ids` probes on commit `66940d76` (2026-10-31)**:
   system software 6.61, ARK-5.1.0 (owner); `pspver` 6.6.0. PSPLink 3.2.1, operator-declared model PSP-3000,
