@@ -5853,7 +5853,10 @@ bool player_app_render_notice(const PlayerApp *app, const char *disc_id, const c
         if (app->render_notice_hidden[app->render_path.fallback]) return false;
         return player_render_notice_text(app->render_path.fallback, heading, text);
     }
-    if (!app->render_path.gpu_ge || app->render_effects == 0u || app->render_effects_hidden ||
+    /* Hidden only when this game hid every effect it reports now. */
+    const uint16_t hidden =
+        strcmp(app->render_effects_hidden_disc, disc_id) == 0 ? app->render_effects_hidden : 0u;
+    if (!app->render_path.gpu_ge || (app->render_effects & (uint16_t)~hidden) == 0u ||
         !app->render_effects_text[0]) {
         return false;
     }
@@ -5868,10 +5871,16 @@ void player_app_hide_render_notice(PlayerApp *app) {
         return;
     }
     if (app->render_path.fallback == NK_RENDER_FALLBACK_NONE) {
-        if (app->render_effects == 0u) return;
-        app->render_effects_hidden = true;
+        if (app->render_effects == 0u || !app->render_path_disc[0]) return;
+        if (strcmp(app->render_effects_hidden_disc, app->render_path_disc) != 0) {
+            snprintf(app->render_effects_hidden_disc, sizeof(app->render_effects_hidden_disc),
+                     "%s", app->render_path_disc);
+            app->render_effects_hidden = 0u;
+        }
+        app->render_effects_hidden |= app->render_effects;
         player_dev_log_add(app, "runtime",
-                           "render notice hidden for this session: effects drawn in software");
+                           "render notice hidden for this session: effects drawn in software "
+                           "on %s", app->render_path_disc);
         return;
     }
     app->render_notice_hidden[app->render_path.fallback] = true;

@@ -483,6 +483,77 @@ static void test_render_fallback_event(void) {
     }
 }
 
+/* #2151: the rule nk_render_fallback_window_step keeps, on its own counts. */
+static uint16_t window_frames(NkRenderFallbackWindow *w, NkRenderFallbackCounts *c, int r,
+                              uint32_t gpu, uint64_t sw, uint64_t rb, uint32_t presents) {
+    uint16_t crossed = 0u;
+    for (uint32_t f = 0u; f < presents; ++f) {
+        if (f == 0u) {
+            c->gpu_prims += gpu;
+            c->sw_prims[r] += sw;
+            c->readbacks[r] += rb;
+        }
+        crossed |= nk_render_fallback_window_step(w, c, NULL);
+    }
+    return crossed;
+}
+
+static void test_render_fallback_window(void) {
+    const uint32_t W = NK_RENDER_FALLBACK_WINDOW_FRAMES, K = NK_RENDER_FALLBACK_WINDOWS;
+    const uint16_t ram_fb = (uint16_t)(1u << NK_RENDER_EFFECT_RAM_FB);
+    NkRenderFallbackWindow w;
+    NkRenderFallbackCounts c;
+    NkRenderFallbackDelta d;
+    memset(&w, 0, sizeof(w));
+    memset(&c, 0, sizeof(c));
+    c.ready = 1;
+    c.gpu_prims = 0xFFFFFFF0u;
+    CHECK(nk_render_fallback_window_step(&w, &c, &d) == 0u && w.primed,
+          "the first sample only primes the window");
+    /* A present's share, the GPU count wrapping. */
+    c.gpu_prims += 0x20u;
+    c.sw_prims[NK_RENDER_EFFECT_LINE] += 3u;
+    c.readbacks[NK_RENDER_EFFECT_LINE] += 1u;
+    CHECK(nk_render_fallback_window_step(&w, &c, &d) == 0u && d.gpu_prims == 0x20u &&
+              d.sw_prims[NK_RENDER_EFFECT_LINE] == 3u && d.readbacks[NK_RENDER_EFFECT_LINE] == 1u,
+          "a present's delta carries its counts across the GPU count's wrap");
+    memset(&w, 0, sizeof(w));
+    (void)nk_render_fallback_window_step(&w, &c, NULL);
+    /* 90 software primitives a present in 10,000 GPU ones, no readback: under 1 % of the scene,
+       over the primitive limit, reported on the K-th window with its share. */
+    uint16_t crossed = 0u;
+    for (uint32_t i = 0u; i + 1u < K; ++i)
+        crossed |= window_frames(&w, &c, NK_RENDER_EFFECT_RAM_FB, 10000u * W, 90u * W, 0u, W);
+    CHECK(crossed == 0u, "nothing is reported before the K-th window");
+    crossed = window_frames(&w, &c, NK_RENDER_EFFECT_RAM_FB, 10000u * W, 90u * W, 0u, W);
+    NkRenderFallbackEvent e = nk_render_fallback_window_event(&w, NK_RENDER_EFFECT_RAM_FB);
+    CHECK(crossed == ram_fb && e.frames == K * W && e.sw_prims == 90ull * W * K &&
+              e.readbacks == 0u && e.share_pm == 8u,
+          "the primitive limit decides on its own, whatever the share");
+    CHECK(window_frames(&w, &c, NK_RENDER_EFFECT_RAM_FB, 10000u * W, 90u * W, 0u, K * W) == 0u,
+          "a reason is reported once per run");
+    /* Counts going back start the window over; the run's reports are kept. */
+    memset(&c, 0, sizeof(c));
+    c.ready = 1;
+    CHECK(nk_render_fallback_window_step(&w, &c, &d) == 0u && w.frames == 0u &&
+              w.reported == ram_fb && d.gpu_prims == 0u,
+          "counts that started over restart the window, not a negative one");
+    /* Readbacks alone, one short and then at the limit. */
+    crossed = 0u;
+    for (uint32_t i = 0u; i < 2u * K; ++i)
+        crossed |= window_frames(&w, &c, NK_RENDER_EFFECT_STENCIL, 1000000u, 0u,
+                                 NK_RENDER_FALLBACK_READBACKS - 1u, W);
+    CHECK(crossed == 0u, "one readback under the limit is never reported");
+    for (uint32_t i = 0u; i < K; ++i)
+        crossed |= window_frames(&w, &c, NK_RENDER_EFFECT_STENCIL, 1000000u, 0u,
+                                 NK_RENDER_FALLBACK_READBACKS, W);
+    CHECK(crossed == (uint16_t)(1u << NK_RENDER_EFFECT_STENCIL),
+          "readbacks at the limit are reported");
+    c.ready = 0;
+    CHECK(nk_render_fallback_window_step(&w, &c, &d) == 0u && !w.primed,
+          "a renderer that is not running unprimes the window");
+}
+
 int main(void) {
     test_path_joins();
     test_legacy_path_contracts();
@@ -492,6 +563,7 @@ int main(void) {
     test_boot_events();
     test_render_path();
     test_render_fallback_event();
+    test_render_fallback_window();
     if (failures != 0) {
         fprintf(stderr, "shared helper selftest: %d failure(s)\n", failures);
         return 1;

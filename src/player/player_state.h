@@ -1012,11 +1012,14 @@ struct PlayerApp {
     bool render_notice_hidden[NK_RENDER_FALLBACK_COUNT];
     /* What the GPU renderer of the latest launch hands to the software renderer for long
        enough to slow the game, from its render_fallback boot events (#2151): one bit per
-       NkRenderEffect, and the sentence that names them. Cleared by each launch; Hide on the
-       game's page hides it for the rest of this player session. */
+       NkRenderEffect, and the sentence that names them. Cleared by each launch. Hide on the
+       game's page hides it for that game and the effects it named, for the rest of this
+       player session: another game, or an effect it did not name, shows it again. The last
+       game hidden is the one remembered. */
     uint16_t render_effects;
     char render_effects_text[384];
-    bool render_effects_hidden;
+    uint16_t render_effects_hidden;
+    char render_effects_hidden_disc[MAX_DISC_ID_LEN];
     bool close_confirmation_pending;
     char boot_event_file_path[MAX_PATH_LEN];
     bool should_quit;

@@ -472,148 +472,45 @@ static void gui_ace_presented(int accepted, int display_busy) {
  * While the GPU GE runs, a primitive in a state it cannot draw goes to ge.c's software rasterizer,
  * and when its target was on the GPU, with a synchronous readback (ge_gpu.c,
  * software_fallback_begin). gegpu_fallback_counts counts both by reason, always. After each
- * accepted present this reads them, and the rule in ge_gpu.h (GEGPU_FALLBACK_WINDOW_FRAMES and the
- * thresholds after it) decides when a reason is large and lasting enough to tell the person:
- * then it is reported once per run as BOOT_EVENT phase=render_fallback (nk_shared_helpers.h), and
- * the player names it on the game's page. Reading the counts changes nothing the GE draws.
+ * accepted present this reads them and steps nk_render_fallback_window_step, the rule in
+ * nk_shared_helpers.h that decides when a reason costs enough for long enough to tell the
+ * person: then it is reported once per run as BOOT_EVENT phase=render_fallback, and the player
+ * names it on the game's page. Reading the counts changes nothing the GE draws.
  * gui-present-selftest drives this code with the counts stubbed. */
-_Static_assert(GEGPU_FALLBACK_REASONS == (int)NK_RENDER_EFFECT_COUNT &&
-               GEGPU_FALLBACK_STENCIL == (int)NK_RENDER_EFFECT_STENCIL &&
-               GEGPU_FALLBACK_COLOR_TEST == (int)NK_RENDER_EFFECT_COLOR_TEST &&
-               GEGPU_FALLBACK_LOGIC_OP == (int)NK_RENDER_EFFECT_LOGIC_OP &&
-               GEGPU_FALLBACK_WRITE_MASK == (int)NK_RENDER_EFFECT_WRITE_MASK &&
-               GEGPU_FALLBACK_RAM_FB == (int)NK_RENDER_EFFECT_RAM_FB &&
-               GEGPU_FALLBACK_WIDE_STRIDE == (int)NK_RENDER_EFFECT_WIDE_STRIDE &&
-               GEGPU_FALLBACK_MIPS == (int)NK_RENDER_EFFECT_MIPS &&
-               GEGPU_FALLBACK_LINE == (int)NK_RENDER_EFFECT_LINE &&
-               GEGPU_FALLBACK_POINT == (int)NK_RENDER_EFFECT_POINT,
-               "the render_fallback event names the GE's fallback reasons in their order");
+static NkRenderFallbackWindow s_render_window;
+static int s_render_stats = -1;   /* SR_GPU_STATS: a line for each present that fell back; -1 unread */
 
-/* One accepted present's share of the counts. */
-typedef struct {
-    uint32_t gpu;
-    unsigned long long sw[GEGPU_FALLBACK_REASONS], rb[GEGPU_FALLBACK_REASONS];
-} RenderFallbackDelta;
-
-/* The tumbling windows over the cumulative counts: deltas kept, the GPU primitive count
- * wrapping at 2^32. */
-typedef struct {
-    int primed;                                       /* `last` holds a sample */
-    GeGpuFallbackCounts last;
-    uint32_t frames;                                  /* accepted presents in this window */
-    unsigned long long gpu, sw[GEGPU_FALLBACK_REASONS], rb[GEGPU_FALLBACK_REASONS];
-    uint32_t streak[GEGPU_FALLBACK_REASONS];          /* windows in a row past the rule */
-    /* Those windows' sums, for the event. */
-    unsigned long long span_gpu[GEGPU_FALLBACK_REASONS], span_all_sw[GEGPU_FALLBACK_REASONS];
-    unsigned long long span_sw[GEGPU_FALLBACK_REASONS], span_rb[GEGPU_FALLBACK_REASONS];
-    uint16_t reported;                                /* 1 << reason: already reported */
-} RenderFallbackWindow;
-
-static RenderFallbackWindow s_render_window;
-static int s_render_stats = -1;   /* SR_GPU_STATS: one line per accepted present; -1 unread */
-
-_Static_assert(GEGPU_FALLBACK_REASONS <= 16, "the reported reasons fit a uint16_t");
-
-/* One accepted present. Fills `delta` with its share (zero when the counts were not running or
- * started over) and returns the reasons that crossed the rule now, each once per run. */
-static uint16_t render_window_step(RenderFallbackWindow *w, const GeGpuFallbackCounts *now,
-                                   RenderFallbackDelta *delta) {
-    memset(delta, 0, sizeof(*delta));
-    if (!now->ready) {
-        w->primed = 0;
-        return 0;
-    }
-    int restart = !w->primed;
-    for (int r = 0; r < GEGPU_FALLBACK_REASONS && !restart; r++)
-        if (now->sw_prims[r] < w->last.sw_prims[r] || now->readbacks[r] < w->last.readbacks[r])
-            restart = 1;                      /* the counts started over: so does the window */
-    if (restart) {
-        uint16_t reported = w->reported;
-        memset(w, 0, sizeof(*w));
-        w->reported = reported;
-        w->last = *now;
-        w->primed = 1;
-        return 0;
-    }
-    delta->gpu = now->gpu_prims - w->last.gpu_prims;
-    w->gpu += delta->gpu;
-    for (int r = 0; r < GEGPU_FALLBACK_REASONS; r++) {
-        delta->sw[r] = now->sw_prims[r] - w->last.sw_prims[r];
-        delta->rb[r] = now->readbacks[r] - w->last.readbacks[r];
-        w->sw[r] += delta->sw[r];
-        w->rb[r] += delta->rb[r];
-    }
-    w->last = *now;
-    if (++w->frames < GEGPU_FALLBACK_WINDOW_FRAMES) return 0;
-    unsigned long long all_sw = 0;
-    for (int r = 0; r < GEGPU_FALLBACK_REASONS; r++) all_sw += w->sw[r];
-    const unsigned long long all = w->gpu + all_sw;
-    uint16_t crossed = 0;
-    for (int r = 0; r < GEGPU_FALLBACK_REASONS; r++) {
-        const unsigned long long share_pm = all ? 1000ull * w->sw[r] / all : 0ull;
-        const int over = (w->sw[r] >= GEGPU_FALLBACK_MIN_PRIMS && share_pm >= GEGPU_FALLBACK_SHARE_PM) ||
-                         w->rb[r] >= GEGPU_FALLBACK_READBACKS;
-        if (!over) {
-            w->streak[r] = 0;
-            w->span_gpu[r] = w->span_all_sw[r] = w->span_sw[r] = w->span_rb[r] = 0;
-            continue;
-        }
-        w->streak[r]++;
-        w->span_gpu[r] += w->gpu;
-        w->span_all_sw[r] += all_sw;
-        w->span_sw[r] += w->sw[r];
-        w->span_rb[r] += w->rb[r];
-        if (w->streak[r] >= GEGPU_FALLBACK_WINDOWS && !(w->reported & (1u << r))) {
-            w->reported |= (uint16_t)(1u << r);
-            crossed |= (uint16_t)(1u << r);
-        }
-    }
-    w->frames = 0;
-    w->gpu = 0;
-    memset(w->sw, 0, sizeof(w->sw));
-    memset(w->rb, 0, sizeof(w->rb));
-    return crossed;
-}
-
-/* The event for a reason render_window_step just returned: the windows in a row that crossed,
- * their software and GPU primitives, the reason's readbacks and its share of all primitives. */
-static NkRenderFallbackEvent render_fallback_event(const RenderFallbackWindow *w, int r) {
-    NkRenderFallbackEvent e;
-    const unsigned long long all = w->span_gpu[r] + w->span_all_sw[r];
-    e.reason = (NkRenderEffect)r;
-    e.frames = w->streak[r] * GEGPU_FALLBACK_WINDOW_FRAMES;
-    e.sw_prims = w->span_sw[r];
-    e.gpu_prims = w->span_gpu[r];
-    e.readbacks = w->span_rb[r];
-    e.share_pm = all ? (uint32_t)(1000ull * w->span_sw[r] / all) : 0u;
-    return e;
-}
-
-/* After each gui_present: an accepted present steps the windows. SR_GPU_STATS also prints each
- * present's counts, the figures the thresholds are measured from (src/rt/gpu_sdl3vk/README.md). */
+/* After each gui_present: an accepted present steps the windows. With SR_GPU_STATS, a present
+ * that handed anything to the software renderer also prints its counts, the figures the rule is
+ * checked against (src/rt/gpu_sdl3vk/README.md); a present that did not prints nothing. */
 static void gui_render_fallback_presented(int accepted) {
     if (!accepted) return;
     GeGpuFallbackCounts now;
-    RenderFallbackDelta delta;
+    NkRenderFallbackDelta delta;
     gegpu_fallback_counts(&now);
-    const uint16_t crossed = render_window_step(&s_render_window, &now, &delta);
+    const uint16_t crossed = nk_render_fallback_window_step(&s_render_window, &now, &delta);
     if (s_render_stats < 0) {
         const char *st = getenv("SR_GPU_STATS");
         s_render_stats = st && st[0] && strcmp(st, "0") != 0;
     }
-    if (s_render_stats && now.ready) {
+    if (s_render_stats) {
         char line[512];
-        int used = snprintf(line, sizeof(line), "GEGPU_FALLBACK present gpu=%lu", (unsigned long)delta.gpu);
+        int used = snprintf(line, sizeof(line), "GEGPU_FALLBACK present gpu=%lu",
+                            (unsigned long)delta.gpu_prims);
+        int fell = 0;
         for (int r = 0; r < GEGPU_FALLBACK_REASONS && used > 0 && (size_t)used < sizeof(line); r++) {
-            if (!delta.sw[r] && !delta.rb[r]) continue;
+            if (!delta.sw_prims[r] && !delta.readbacks[r]) continue;
+            fell = 1;
             used += snprintf(line + used, sizeof(line) - (size_t)used, " %s=%llu/%llu",
-                             gegpu_fallback_token(r), delta.sw[r], delta.rb[r]);
+                             gegpu_fallback_token(r), (unsigned long long)delta.sw_prims[r],
+                             (unsigned long long)delta.readbacks[r]);
         }
-        fprintf(stderr, "%s\n", line);
+        if (fell) fprintf(stderr, "%s\n", line);
     }
     for (int r = 0; r < GEGPU_FALLBACK_REASONS; r++) {
         if (!(crossed & (1u << r))) continue;
-        NkRenderFallbackEvent e = render_fallback_event(&s_render_window, r);
+        const NkRenderFallbackEvent e = nk_render_fallback_window_event(&s_render_window,
+                                                                        (NkRenderEffect)r);
         char line[256];
         if (nk_render_fallback_event_format(&e, line, sizeof(line)) > 0) sr_gui_boot_event("%s", line);
     }
@@ -2630,12 +2527,7 @@ static void selftest_unexpected(const char *name) {
 
 int sr_perf_enabled = 0;
 int sr_sched_on = 1;
-/* Only the render fallback test expects a boot event, the one call that reads the clock. */
-static int s_stub_boot_events;
-uint64_t sr_perf_now_ns_impl(void) {
-    if (!s_stub_boot_events) selftest_unexpected("sr_perf_now_ns_impl");
-    return 42u;
-}
+uint64_t sr_perf_now_ns_impl(void) { selftest_unexpected("sr_perf_now_ns_impl"); return 0; }
 
 static uint32_t s_stub_held;          /* buttons down now */
 static uint32_t s_stub_pulse;         /* pressed and released since the last consume */
@@ -3138,8 +3030,8 @@ static void selftest_busy_display_keeps_real_frames(void) {
 /* ---- the render fallback rule and its event (#2151) -----------------------------------------
  * gui_present's step after each present (gui_render_fallback_presented) with the GE's counts
  * stubbed: the boot event it writes goes to SR_BOOT_EVENT_FILE, as in a player launch, and is
- * read back with the player's parser. Each case uses the rule's own constants, so a measured
- * change to them is tested as it stands. */
+ * read back with the player's parser. Each case uses the rule's own constants, so a change to
+ * them is tested as it stands. */
 static GeGpuFallbackCounts s_stub_fallback;
 void gegpu_fallback_counts(GeGpuFallbackCounts *out) { *out = s_stub_fallback; }
 
@@ -3159,7 +3051,7 @@ static void fallback_reset(void) {
 /* One window of accepted presents; the first carries all of the window's counts, and a present
  * the slot rule dropped (accepted 0) comes between each two. */
 static void fallback_window(int r, uint32_t gpu, unsigned long long sw, unsigned long long rb) {
-    for (uint32_t f = 0; f < GEGPU_FALLBACK_WINDOW_FRAMES; f++) {
+    for (uint32_t f = 0; f < NK_RENDER_FALLBACK_WINDOW_FRAMES; f++) {
         if (f == 0) {
             s_stub_fallback.gpu_prims += gpu;
             s_stub_fallback.sw_prims[r] += sw;
@@ -3190,15 +3082,10 @@ static int fallback_events(NkRenderFallbackEvent *out, int max) {
 
 static void selftest_render_fallback_rule(int argc, char **argv) {
     NkRenderFallbackEvent ev[8];
-    const uint32_t W = GEGPU_FALLBACK_WINDOW_FRAMES, K = GEGPU_FALLBACK_WINDOWS;
-    /* Software and GPU primitives per window at exactly the share threshold, with at least the
-     * minimum of software primitives. */
-    const unsigned long long k = (GEGPU_FALLBACK_MIN_PRIMS + GEGPU_FALLBACK_SHARE_PM - 1u) /
-                                 GEGPU_FALLBACK_SHARE_PM;
-    const unsigned long long S = GEGPU_FALLBACK_SHARE_PM * k;
-    const uint32_t G = (uint32_t)((1000u - GEGPU_FALLBACK_SHARE_PM) * k);
-    assert(K >= 2u && GEGPU_FALLBACK_SHARE_PM > 0u && GEGPU_FALLBACK_SHARE_PM < 1000u &&
-           GEGPU_FALLBACK_MIN_PRIMS >= 2u && GEGPU_FALLBACK_READBACKS >= 1u);
+    const uint32_t W = NK_RENDER_FALLBACK_WINDOW_FRAMES, K = NK_RENDER_FALLBACK_WINDOWS;
+    const unsigned long long P = NK_RENDER_FALLBACK_MIN_PRIMS, B = NK_RENDER_FALLBACK_READBACKS;
+    const uint32_t G = 400000u;                  /* GPU primitives a window: a busy scene */
+    assert(K >= 2u && P >= 2u && B >= 1u);
     assert(argc >= 1 && argv[0]);
     (void)snprintf(s_fallback_events_path, sizeof(s_fallback_events_path), "%s.events", argv[0]);
 #ifdef _WIN32
@@ -3206,61 +3093,65 @@ static void selftest_render_fallback_rule(int argc, char **argv) {
 #else
     assert(setenv("SR_BOOT_EVENT_FILE", s_fallback_events_path, 1) == 0);
 #endif
-    s_stub_boot_events = 1;
     s_render_stats = 0;
 
     /* The event's names are the GE's reasons. */
     for (int r = 0; r < GEGPU_FALLBACK_REASONS; r++)
         assert(strcmp(gegpu_fallback_token(r), nk_render_effect_name((NkRenderEffect)r)) == 0);
 
-    /* At the share threshold: nothing until the K-th window in a row, then one event that
+    /* At the primitive threshold: nothing until the K-th window in a row, then one event that
      * carries those windows' counts; never a second one in the same run. */
     fallback_reset();
-    for (uint32_t i = 0; i + 1u < K; i++) fallback_window(GEGPU_FALLBACK_STENCIL, G, S, 0u);
+    for (uint32_t i = 0; i + 1u < K; i++) fallback_window(GEGPU_FALLBACK_STENCIL, G, P, 0u);
     assert(fallback_events(ev, 8) == 0);
-    fallback_window(GEGPU_FALLBACK_STENCIL, G, S, 0u);
+    fallback_window(GEGPU_FALLBACK_STENCIL, G, P, 0u);
     assert(fallback_events(ev, 8) == 1);
     assert(ev[0].reason == NK_RENDER_EFFECT_STENCIL && ev[0].frames == K * W &&
-           ev[0].sw_prims == K * S && ev[0].gpu_prims == (unsigned long long)K * G &&
-           ev[0].readbacks == 0u && ev[0].share_pm == GEGPU_FALLBACK_SHARE_PM);
-    for (uint32_t i = 0; i < K + 1u; i++) fallback_window(GEGPU_FALLBACK_STENCIL, G, S, 0u);
+           ev[0].sw_prims == K * P && ev[0].gpu_prims == (unsigned long long)K * G &&
+           ev[0].readbacks == 0u && ev[0].share_pm == (uint32_t)(1000u * P / (G + P)));
+    for (uint32_t i = 0; i < K + 1u; i++) fallback_window(GEGPU_FALLBACK_STENCIL, G, P, 0u);
     assert(fallback_events(ev, 8) == 1);
 
-    /* Just under the share, or under the minimum of software primitives at any share, or one
-     * readback short: never. */
+    /* One primitive short at any share (all of them here), or one readback short: never. */
     fallback_reset();
-    for (uint32_t i = 0; i < 2u * K; i++) fallback_window(GEGPU_FALLBACK_STENCIL, G + 1u, S, 0u);
+    for (uint32_t i = 0; i < 2u * K; i++) fallback_window(GEGPU_FALLBACK_LINE, 0u, P - 1u, 0u);
     for (uint32_t i = 0; i < 2u * K; i++)
-        fallback_window(GEGPU_FALLBACK_LINE, 0u, GEGPU_FALLBACK_MIN_PRIMS - 1u, 0u);
-    for (uint32_t i = 0; i < 2u * K; i++)
-        fallback_window(GEGPU_FALLBACK_RAM_FB, 1000000u, 1u, GEGPU_FALLBACK_READBACKS - 1u);
+        fallback_window(GEGPU_FALLBACK_RAM_FB, 1000000u, 1u, B - 1u);
     assert(fallback_events(ev, 8) == 0);
+
+    /* The cost decides, not the share: a busy scene of 10,000 GPU primitives a present with 90 a
+     * present drawn in software and no readback is under 1 % of the scene but about 2 ms a
+     * present at the derived cost, and is reported with its share. */
+    fallback_reset();
+    for (uint32_t i = 0; i < K; i++)
+        fallback_window(GEGPU_FALLBACK_RAM_FB, 10000u * W, 90u * W, 0u);
+    assert(fallback_events(ev, 8) == 1 && ev[0].reason == NK_RENDER_EFFECT_RAM_FB &&
+           ev[0].sw_prims == 90ull * W * K && ev[0].readbacks == 0u && ev[0].share_pm == 8u);
 
     /* A window under the rule breaks the run of windows: K-1 over, one under, K-1 over is not
      * enough; one more over is. */
     fallback_reset();
-    for (uint32_t i = 0; i + 1u < K; i++) fallback_window(GEGPU_FALLBACK_COLOR_TEST, G, S, 0u);
-    fallback_window(GEGPU_FALLBACK_COLOR_TEST, G + 1u, S, 0u);
-    for (uint32_t i = 0; i + 1u < K; i++) fallback_window(GEGPU_FALLBACK_COLOR_TEST, G, S, 0u);
+    for (uint32_t i = 0; i + 1u < K; i++) fallback_window(GEGPU_FALLBACK_COLOR_TEST, G, P, 0u);
+    fallback_window(GEGPU_FALLBACK_COLOR_TEST, G, P - 1u, 0u);
+    for (uint32_t i = 0; i + 1u < K; i++) fallback_window(GEGPU_FALLBACK_COLOR_TEST, G, P, 0u);
     assert(fallback_events(ev, 8) == 0);
-    fallback_window(GEGPU_FALLBACK_COLOR_TEST, G, S, 0u);
+    fallback_window(GEGPU_FALLBACK_COLOR_TEST, G, P, 0u);
     assert(fallback_events(ev, 8) == 1 && ev[0].reason == NK_RENDER_EFFECT_COLOR_TEST);
 
     /* Readbacks alone cross the rule, at a negligible share of primitives. */
     fallback_reset();
     for (uint32_t i = 0; i < K; i++)
-        fallback_window(GEGPU_FALLBACK_WRITE_MASK, 1000000u, 1u, GEGPU_FALLBACK_READBACKS);
+        fallback_window(GEGPU_FALLBACK_WRITE_MASK, 1000000u, 1u, B);
     assert(fallback_events(ev, 8) == 1 && ev[0].reason == NK_RENDER_EFFECT_WRITE_MASK &&
-           ev[0].readbacks == (unsigned long long)K * GEGPU_FALLBACK_READBACKS &&
-           ev[0].sw_prims == K && ev[0].share_pm == 0u);
+           ev[0].readbacks == (unsigned long long)K * B && ev[0].sw_prims == K &&
+           ev[0].share_pm == 0u);
 
     /* Two reasons in the same windows, half of all primitives each: each is reported, in reason
      * order. */
-    assert(GEGPU_FALLBACK_SHARE_PM <= 500u);
     fallback_reset();
     for (uint32_t i = 0; i < K; i++) {
-        s_stub_fallback.sw_prims[GEGPU_FALLBACK_POINT] += S;
-        fallback_window(GEGPU_FALLBACK_LOGIC_OP, 0u, S, 0u);
+        s_stub_fallback.sw_prims[GEGPU_FALLBACK_POINT] += P;
+        fallback_window(GEGPU_FALLBACK_LOGIC_OP, 0u, P, 0u);
     }
     assert(fallback_events(ev, 8) == 2 && ev[0].reason == NK_RENDER_EFFECT_LOGIC_OP &&
            ev[1].reason == NK_RENDER_EFFECT_POINT && ev[0].frames == K * W &&
@@ -3269,18 +3160,17 @@ static void selftest_render_fallback_rule(int argc, char **argv) {
     /* The GPU GE stopped (ready 0): nothing is counted, and its counts starting over make a new
      * window rather than a negative one. */
     fallback_reset();
-    for (uint32_t i = 0; i + 1u < K; i++) fallback_window(GEGPU_FALLBACK_MIPS, G, S, 0u);
+    for (uint32_t i = 0; i + 1u < K; i++) fallback_window(GEGPU_FALLBACK_MIPS, G, P, 0u);
     s_stub_fallback.ready = 0;
     gui_render_fallback_presented(1);
     memset(&s_stub_fallback, 0, sizeof(s_stub_fallback));
     s_stub_fallback.ready = 1;
     gui_render_fallback_presented(1);           /* primes again */
-    fallback_window(GEGPU_FALLBACK_MIPS, G, S, 0u);
+    fallback_window(GEGPU_FALLBACK_MIPS, G, P, 0u);
     assert(fallback_events(ev, 8) == 0);
-    for (uint32_t i = 0; i + 1u < K; i++) fallback_window(GEGPU_FALLBACK_MIPS, G, S, 0u);
+    for (uint32_t i = 0; i + 1u < K; i++) fallback_window(GEGPU_FALLBACK_MIPS, G, P, 0u);
     assert(fallback_events(ev, 8) == 1 && ev[0].reason == NK_RENDER_EFFECT_MIPS);
 
-    s_stub_boot_events = 0;
     remove(s_fallback_events_path);
 }
 #endif /* SR_SDL3VK */

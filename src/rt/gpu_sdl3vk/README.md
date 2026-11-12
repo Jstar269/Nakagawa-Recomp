@@ -331,36 +331,59 @@ depth aliasing.
 A primitive in a state this renderer cannot draw goes to `ge.c`'s software rasterizer
 (`software_fallback_begin`), with a synchronous colour and depth readback when its target was on the
 GPU. `gegpu_fallback_counts` counts both by reason (`GEGPU_FALLBACK_*`), always: one increment per
-software primitive, on top of the `fallback_prims` count that was already unconditional. After each
-accepted present `gui.c` steps tumbling windows of `GEGPU_FALLBACK_WINDOW_FRAMES` presents. A reason
-is over the rule in a window when its software primitives are at least `GEGPU_FALLBACK_MIN_PRIMS` and
-`GEGPU_FALLBACK_SHARE_PM` per mille of all primitives drawn (GPU and software), or its readbacks are at
-least `GEGPU_FALLBACK_READBACKS`. Over the rule in `GEGPU_FALLBACK_WINDOWS` windows in a row, it is
-reported once per run as `BOOT_EVENT phase=render_fallback` (`docs/DEBUGGING.md`), and the native
-player names it on the game's page. Reading the counts changes nothing the renderer draws
-(`fallback-counts` in `gpu-coherence-selftest` compares the frame's bytes with and without it).
+software primitive, on top of the `fallback_prims` count that was already unconditional. A T&L
+primitive that falls back is counted as the triangles `hook_tri` then hands over, and the GPU's T&L
+primitives count by their triangles, so both sides count triangles. Not counted: block transfers
+`ge.c` runs on the CPU (`hook_xfer` declining) and the readbacks of guest VRAM reads
+(`hook_vram_read`), which are not primitives.
 
-The values and their basis (2026-11-12):
+After each accepted present `gui.c` steps `nk_render_fallback_window_step` (`src/core/nk_shared_helpers.c`):
+tumbling windows of `NK_RENDER_FALLBACK_WINDOW_FRAMES` presents. A reason is over the rule in a window
+when its software primitives reach `NK_RENDER_FALLBACK_MIN_PRIMS` or its readbacks reach
+`NK_RENDER_FALLBACK_READBACKS`; each is a cost on its own, so neither depends on how busy the rest of the
+scene is. Over the rule in `NK_RENDER_FALLBACK_WINDOWS` windows in a row, it is reported once per run as
+`BOOT_EVENT phase=render_fallback` (`docs/DEBUGGING.md`), and the native player names it on the game's
+page. The event's `share_pm` (the reason's share of all primitives) is reported for the reader; the rule
+does not use it. Its `frames` is the span the rule watched, always
+`NK_RENDER_FALLBACK_WINDOWS` x `NK_RENDER_FALLBACK_WINDOW_FRAMES` (360) under this rule.
 
-| Constant | Value | Basis |
-| --- | --- | --- |
-| `GEGPU_FALLBACK_READBACKS` | 30 a window | Measured cost: in six earlier private runs with fallback readbacks (Hot Shots Tennis on an older build, four runs, and two other titles), a least-squares fit of each perf interval's `vulkan_readback_ms` gave 1.8 to 3.5 ms per fallback readback, against under 0.02 ms for any other readback. 30 in 120 presents is 0.45 to 0.9 ms a present, 3 to 5 % of a 60 Hz present period. |
-| `GEGPU_FALLBACK_MIN_PRIMS` | 4000 a window | Estimated cost: the same fit of `ge_cpu_ms` gave 22 to 28 µs per software primitive in the three runs where it could separate the primitives from their readbacks (in the other three it could not). 4000 in 120 presents, about 33 a present, is then about 0.8 ms a present, the same share of the frame as the readback threshold. |
-| `GEGPU_FALLBACK_SHARE_PM` | 10 (1 %) | Both flagship titles drew about 3,370 GPU primitives a present over their measured routes (below); 1 % of that is about 34, the primitive threshold's level, so a busy scene needs a matching share before it is reported. |
-| `GEGPU_FALLBACK_WINDOW_FRAMES` | 120 presents | A rule parameter, not measured: 2 s at 60 presents a second, 4 s at 30, so a single transition or menu frame does not fill a window. |
-| `GEGPU_FALLBACK_WINDOWS` | 3 in a row | A rule parameter, not measured: a report needs at least 6 s of sustained cost, the kind that makes a game run slower. |
+Reading the counts and stepping the rule change nothing the renderer draws: `fallback-notice` in
+`gpu-coherence-selftest` draws 361 frames that fall back through `ge.c` and `hook_tri`, with the rule
+run after each frame and without it, and requires the same picture both ways, equal to `ge.c`'s alone,
+and one `logic_op` report on the last frame.
 
-Flagship measurement: Hot Shots Tennis (title screen and a rally, 15,181 presents, 39.3 million GPU
-primitives) and LittleBigPlanet (a play route run twice in Authentic, 10,243 presents, 33.9 million GPU
-primitives), on the GPU GE with `SR_GPU_STATS=1`, drew no primitive in software and took no fallback
-readback. Neither title reports a reason at any threshold above zero, and counting changes nothing they
-draw. Their data cannot place the thresholds from above (no fallback to measure); the cost figures
-above come from the earlier runs, and the thresholds should be checked again on a title whose GPU path
-falls back.
+### The values and their basis (2026-11-12)
 
-To measure again: run a title on the GPU GE with `SR_GPU_STATS=1`; each accepted present prints
-`GEGPU_FALLBACK present gpu=<n>` followed by `<reason>=<software primitives>/<readbacks>` for each reason
-it had. Sum them over windows of presents and compare with the rule.
+Each figure is **measured** (taken directly from a run), **derived** (computed from measured figures,
+arithmetic shown) or **chosen** (a rule parameter or a budget).
+
+| Figure | Value | Kind | Basis |
+| --- | --- | --- | --- |
+| Cost of a fallback readback | 1.8 to 3.5 ms | Derived | A least-squares fit of each perf interval's `vulkan_readback_ms` against its fallback readbacks, in six earlier private runs with fallback readbacks (Hot Shots Tennis on an older build, four runs, and two other titles); any other readback fitted under 0.02 ms. |
+| Cost of a software primitive | 22 to 28 µs | Derived | The same fit of `ge_cpu_ms` against software primitives, in the three of those runs where it could separate the primitives from their readbacks (in the other three it could not). |
+| Budget | about 0.8 ms a present | Chosen | About 5 % of a 16.7 ms present period at 60 presents a second: 96 ms a window of 120 presents. |
+| `NK_RENDER_FALLBACK_MIN_PRIMS` | 4000 a window | Derived | 96 ms / 28 µs = 3,429 and 96 ms / 22 µs = 4,364; 4000 lies between. Its cost is 4000 x 22 to 28 µs / 120 = 0.73 to 0.93 ms a present. |
+| `NK_RENDER_FALLBACK_READBACKS` | 30 a window | Derived | 96 ms / 3.5 ms = 27 and 96 ms / 1.8 ms = 53; 30, one every four presents, is near the costlier end. Its cost is 30 x 1.8 to 3.5 ms / 120 = 0.45 to 0.88 ms a present. |
+| `NK_RENDER_FALLBACK_WINDOW_FRAMES` | 120 presents | Chosen | 2 s at 60 presents a second, 4 s at 30, so a single transition or menu frame does not fill a window. |
+| `NK_RENDER_FALLBACK_WINDOWS` | 3 in a row | Chosen | A report needs at least 6 s of sustained cost, the kind that makes a game run slower. |
+
+For scale (measured with this report's first version, on the GPU GE with `SR_GPU_STATS=1`): the Hot Shots Tennis rally drew
+39,283,321 GPU primitives over 11,674 presents, 3,365 a present (its title screen 33,953 over 3,507,
+about 10 a present; both routes together 39,317,274 over 15,181, 2,590 a present). LittleBigPlanet, a
+play route run twice in Authentic, drew 33,945,546 over 10,243 presents, 3,314 a present (3,366 and 3,262
+in the two runs). The primitive threshold, about 33 a present, is then about 1 % of such a scene; the
+rule does not depend on that share.
+
+Neither title drew a primitive in software or took a fallback readback on those routes, so neither
+reports anything and no new renderer code runs for them. Their data cannot place the thresholds (no
+fallback to measure); the costs come from the earlier runs, and the thresholds should be checked again on
+a title whose GPU path falls back.
+
+To measure again: run a title on the GPU GE with `SR_GPU_STATS=1`. Each accepted present that handed
+anything to the software renderer prints `GEGPU_FALLBACK present gpu=<n>` followed by
+`<reason>=<software primitives>/<readbacks>` for each reason it had; a present that did not prints
+nothing. Count the presents (the perf CSV or the run's frame count), sum the lines over windows of
+presents and compare with the rule.
 
 ## Environment variables
 

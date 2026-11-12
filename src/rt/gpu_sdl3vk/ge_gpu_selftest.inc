@@ -6145,29 +6145,22 @@ static int coherence_run_fallback_reasons(void) {
  * reason, after one GPU-drawn sprite, two primitives in that reason's state go through the real
  * hook: each counts one software primitive for that reason and none for another, no GPU
  * primitive is counted, and only the first counts a readback, because only then was the target
- * GPU-valid. A colour buffer in main RAM has no target, so it counts no readback.
- * The same scene is then drawn again from the same start without reading the counts between
- * the primitives: the frame's bytes in guest memory must be identical, because reading the
- * counts after each present (gui.c) is observation only. */
-static int fallback_counts_scene(int r, int observe, GeGpuFallbackCounts c[3], uint8_t **frame,
-                                 size_t *frame_bytes) {
+ * GPU-valid. A colour buffer in main RAM has no target, so it counts no readback. The hooks are
+ * called directly, so ge.c draws nothing here; fallback-notice below draws a scene that falls
+ * back through ge.c. */
+static int fallback_counts_scene(int r, GeGpuFallbackCounts c[3]) {
     const uint32_t base = 0x04000000u | 0x00100000u;
     const char *name = gegpu_fallback_token(r);
     GeState saved = *s_ge;
     int ok = 1;
     coherence_reset_targets();
-    /* The same start each time: the frame buffers this scene can draw into, cleared, the 8x8
-     * texture inside the first included (its 1024-wide frame draws only the first rows). */
-    const size_t span = 512u * FB_H * 4u;
-    memset(SR_HOST(base), 0, span);
-    memset(SR_HOST(0x08000000u), 0, span);
     if (!coherence_queue_g1_batch(base, 512u, 3u)) {
         fprintf(stderr, "gpu coherence selftest [fallback-counts]: %s: the GPU sprite was not "
                         "queued\n", name);
         *s_ge = saved;
         return 0;
     }
-    if (observe) gegpu_fallback_counts(&c[0]);
+    gegpu_fallback_counts(&c[0]);
     s_ge->clear = 0;
     switch (r) {
     case GEGPU_FALLBACK_STENCIL:      /* a depth-tested stencil-fail INCR */
@@ -6192,7 +6185,6 @@ static int fallback_counts_scene(int r, int observe, GeGpuFallbackCounts c[3], u
         break;
     default: break;                    /* points always fall back */
     }
-    const uint32_t fbp = s_ge->fbp;
     GeVtx p0 = { 30.0f, 30.0f, 1.0f, 1.0f, 0, 0, 1.0f, 200, 100, 50, 255 };
     GeVtx p1 = p0;
     p1.x = 40.0f;
@@ -6205,19 +6197,8 @@ static int fallback_counts_scene(int r, int observe, GeGpuFallbackCounts c[3], u
             fprintf(stderr, "gpu coherence selftest [fallback-counts]: %s: the GPU drew it\n", name);
             ok = 0;
         }
-        if (observe) gegpu_fallback_counts(&c[k]);
+        gegpu_fallback_counts(&c[k]);
     }
-    /* The frame as the guest sees it: whatever the GPU target still holds, brought back first. */
-    GeGpuFbDescriptor desc = { .addr = base, .format = 3, .stride = 512u, .width = 480, .height = FB_H };
-    if (gegpu_sync_guest_fb(&desc) == GEGPU_SYNC_FAILED) {
-        fprintf(stderr, "gpu coherence selftest [fallback-counts]: %s: the frame could not be "
-                        "brought back\n", name);
-        ok = 0;
-    }
-    *frame_bytes = span;
-    *frame = (uint8_t *)malloc(*frame_bytes);
-    if (*frame) memcpy(*frame, SR_HOST(fbp), *frame_bytes);
-    else ok = 0;
     *s_ge = saved;
     return ok;
 }
@@ -6228,10 +6209,8 @@ static int coherence_run_fallback_counts(void) {
     for (int r = 0; r < GEGPU_FALLBACK_REASONS; r++) {
         const char *name = gegpu_fallback_token(r);
         GeGpuFallbackCounts c[3];
-        uint8_t *seen = NULL, *unseen = NULL;
-        size_t seen_bytes = 0, unseen_bytes = 0;
         memset(c, 0, sizeof(c));
-        if (!fallback_counts_scene(r, 1, c, &seen, &seen_bytes)) ok = 0;
+        if (!fallback_counts_scene(r, c)) ok = 0;
         const unsigned long long want_rb = r == GEGPU_FALLBACK_RAM_FB ? 0u : 1u;
         int bad = !c[0].ready || !c[2].ready || c[2].gpu_prims != c[0].gpu_prims ||
                   c[1].sw_prims[r] != c[0].sw_prims[r] + 1u ||
@@ -6246,28 +6225,172 @@ static int coherence_run_fallback_counts(void) {
             fprintf(stderr, "gpu coherence selftest [fallback-counts]: %s: sw_prims +%llu +%llu "
                             "(want +1 +2) readbacks +%llu +%llu (want +%llu +%llu) gpu_prims +%u "
                             "(want +0), ready %d\n", name,
-                    c[1].sw_prims[r] - c[0].sw_prims[r], c[2].sw_prims[r] - c[0].sw_prims[r],
-                    c[1].readbacks[r] - c[0].readbacks[r], c[2].readbacks[r] - c[0].readbacks[r],
+                    (unsigned long long)(c[1].sw_prims[r] - c[0].sw_prims[r]),
+                    (unsigned long long)(c[2].sw_prims[r] - c[0].sw_prims[r]),
+                    (unsigned long long)(c[1].readbacks[r] - c[0].readbacks[r]),
+                    (unsigned long long)(c[2].readbacks[r] - c[0].readbacks[r]),
                     want_rb, want_rb, (unsigned)(c[2].gpu_prims - c[0].gpu_prims), c[2].ready);
             ok = 0;
         }
-        if (!fallback_counts_scene(r, 0, c, &unseen, &unseen_bytes)) ok = 0;
-        if (!seen || !unseen || seen_bytes != unseen_bytes ||
-            memcmp(seen, unseen, seen_bytes) != 0) {
-            fprintf(stderr, "gpu coherence selftest [fallback-counts]: %s: the frame differs when "
-                            "the counts are read between the primitives\n", name);
-            ok = 0;
-        }
-        free(seen);
-        free(unseen);
     }
     coherence_reset_targets();
     *s_ge = saved;
-    if (ok) printf("gpu coherence selftest: PASS %-22s %d reasons through the hooks, frames identical "
-                   "with and without reading the counts\n", "fallback-counts", GEGPU_FALLBACK_REASONS);
+    if (ok) printf("gpu coherence selftest: PASS %-22s %d reasons through the hooks\n",
+                   "fallback-counts", GEGPU_FALLBACK_REASONS);
     return ok;
 }
 
+/* The notice's logic on a scene that falls back for real (#2151). A frame is one display list
+ * run through ge.c: a sprite the GPU draws over the region, then two flat triangles under an
+ * XOR logic operation, which hook_tri hands to ge.c's software rasterizer. The GPU drew just
+ * before them, so each frame takes one readback. A run is the rule's whole span and the frame
+ * whose counts prime it: NK_RENDER_FALLBACK_WINDOWS x NK_RENDER_FALLBACK_WINDOW_FRAMES + 1
+ * frames. With the notice's logic on, each frame is followed by what gui.c runs after an accepted
+ * present (gegpu_fallback_counts, nk_render_fallback_window_step and the event's text); off, by
+ * nothing. On, it must report logic_op once, on the last frame, with the frames' exact counts.
+ * The picture after the last frame must be the same bytes on and off, and the same as those
+ * frames drawn by ge.c alone, so the software rasterizer's pixels are in it. */
+#define FNC_BASE (0x04000000u | 0x00100000u)
+#define FNC_FRAMES (NK_RENDER_FALLBACK_WINDOWS * NK_RENDER_FALLBACK_WINDOW_FRAMES + 1u)
+#define FNC_TRI_RGBA 0xFF5A3CA5u
+
+static uint32_t fnc_frame_list(uint32_t frame) {
+    StpList l; stp_begin(&l, FNC_BASE, 3u, 0);
+    stp_emit(&l, 0x24, 0);                               /* no stencil test */
+    stp_emit(&l, 0x21, 0);                               /* no blending */
+    uint32_t vaddr = 0x08060000u;
+    stp_sprite(&l, &vaddr, 0xFF000000u | (wrap_hash(0xF0A1u + frame) & 0x00FFFFFFu),
+               16.0f, 16.0f, 144.0f, 112.0f, 0.0f);
+    stp_emit(&l, 0xE6, 6u);                              /* XOR */
+    stp_emit(&l, 0x28, 1);
+    ParityGuestVtx *v = (ParityGuestVtx *)SR_HOST(vaddr);
+    v[0] = (ParityGuestVtx){ FNC_TRI_RGBA, 24.0f, 24.0f, 0.0f };
+    v[1] = (ParityGuestVtx){ FNC_TRI_RGBA, 136.0f, 24.0f, 0.0f };
+    v[2] = (ParityGuestVtx){ FNC_TRI_RGBA, 24.0f, 104.0f, 0.0f };
+    v[3] = (ParityGuestVtx){ FNC_TRI_RGBA, 136.0f, 24.0f, 0.0f };   /* the rectangle's other half */
+    v[4] = (ParityGuestVtx){ FNC_TRI_RGBA, 136.0f, 104.0f, 0.0f };
+    v[5] = (ParityGuestVtx){ FNC_TRI_RGBA, 24.0f, 104.0f, 0.0f };
+    stp_emit(&l, 0x01, vaddr & 0x00FFFFFFu);
+    stp_emit(&l, 0x04, (3u << 16) | 6u);
+    stp_emit(&l, 0x28, 0);
+    stp_end(&l);
+    return 0x08040000u;
+}
+
+/* One run of FNC_FRAMES frames over a fresh hashed background: on the GPU path with the notice's
+ * logic on (`notice` 1) or off (0), or through ge.c alone (`gpu` 0). Copies the picture after the
+ * last frame into `out`; with the logic on, returns its events in `ev` and their count in *nev,
+ * and the frame each was reported on in `at`. */
+static int fnc_run(int gpu, int notice, uint8_t *out, NkRenderFallbackEvent *ev, uint32_t *at,
+                   int *nev, GeGpuFallbackCounts *first, GeGpuFallbackCounts *last) {
+    NkRenderFallbackWindow window;
+    memset(&window, 0, sizeof(window));
+    *nev = 0;
+    coherence_reset_targets();
+    stp_fill_background(FNC_BASE, 3u);
+    ge_set_gpu_hooks(gpu ? &k_hooks : NULL);
+    for (uint32_t f = 0; f < FNC_FRAMES; f++) {
+        ge_run_list(fnc_frame_list(f), 0);
+        if (!notice) continue;
+        GeGpuFallbackCounts now;
+        gegpu_fallback_counts(&now);
+        if (f == 0) *first = now;
+        *last = now;
+        const uint16_t crossed = nk_render_fallback_window_step(&window, &now, NULL);
+        for (int r = 0; r < GEGPU_FALLBACK_REASONS; r++) {
+            if (!(crossed & (1u << r)) || *nev >= 4) continue;
+            char line[256];
+            ev[*nev] = nk_render_fallback_window_event(&window, (NkRenderEffect)r);
+            if (nk_render_fallback_event_format(&ev[*nev], line, sizeof(line)) <= 0) return 0;
+            at[*nev] = f;
+            (*nev)++;
+        }
+    }
+    ge_set_gpu_hooks(&k_hooks);
+    if (gpu) {
+        GeGpuFbDescriptor desc = { .addr = FNC_BASE, .format = 3, .stride = 512u, .width = 480,
+                                   .height = FB_H };
+        if (gegpu_sync_guest_fb(&desc) == GEGPU_SYNC_FAILED) return 0;
+    }
+    memcpy(out, SR_HOST(FNC_BASE), FB_W * FB_H * 4u);
+    return 1;
+}
+
+static int coherence_run_fallback_notice(void) {
+    const uint32_t bytes = FB_W * FB_H * 4u, span = FNC_FRAMES - 1u;
+    uint8_t *on = (uint8_t *)malloc(bytes), *off = (uint8_t *)malloc(bytes);
+    uint8_t *soft = (uint8_t *)malloc(bytes);
+    NkRenderFallbackEvent ev[4];
+    uint32_t at[4] = { 0 };
+    int nev = 0, unused = 0, ok = 1;
+    GeGpuFallbackCounts first, last;
+    memset(&first, 0, sizeof(first));
+    memset(&last, 0, sizeof(last));
+    if (!on || !off || !soft) { free(on); free(off); free(soft); return 0; }
+    GeState saved = *s_ge;
+    if (!fnc_run(1, 1, on, ev, at, &nev, &first, &last) ||
+        !fnc_run(1, 0, off, NULL, NULL, &unused, NULL, NULL) ||
+        !fnc_run(0, 0, soft, NULL, NULL, &unused, NULL, NULL)) {
+        fprintf(stderr, "gpu coherence selftest [fallback-notice]: a run failed (an event's text "
+                        "or the picture's sync)\n");
+        ok = 0;
+    }
+    const int lop = GEGPU_FALLBACK_LOGIC_OP;
+    /* The counts the frames made, from the first frame's end to the last's: two software
+     * triangles, one readback and one GPU sprite a frame, for logic_op only. */
+    const int counted = first.ready && last.ready &&
+        last.sw_prims[lop] - first.sw_prims[lop] == 2ull * span &&
+        last.readbacks[lop] - first.readbacks[lop] == span &&
+        (uint32_t)(last.gpu_prims - first.gpu_prims) == span;
+    if (ok && !counted) {
+        fprintf(stderr, "gpu coherence selftest [fallback-notice]: counts over %u frames: "
+                        "logic_op sw +%llu (want %u) readbacks +%llu (want %u) gpu +%u (want %u)\n",
+                span, (unsigned long long)(last.sw_prims[lop] - first.sw_prims[lop]), 2u * span,
+                (unsigned long long)(last.readbacks[lop] - first.readbacks[lop]), span,
+                (unsigned)(last.gpu_prims - first.gpu_prims), span);
+        ok = 0;
+    }
+    if (ok && (nev != 1 || ev[0].reason != NK_RENDER_EFFECT_LOGIC_OP || at[0] != FNC_FRAMES - 1u ||
+               ev[0].frames != span || ev[0].sw_prims != 2ull * span ||
+               ev[0].readbacks != span || ev[0].gpu_prims != span ||
+               ev[0].share_pm != (uint32_t)(1000u * 2u * span / (3u * span)))) {
+        fprintf(stderr, "gpu coherence selftest [fallback-notice]: %d events; the first: reason "
+                        "%d at frame %u frames=%u sw=%llu rb=%llu gpu=%llu share=%u\n", nev,
+                nev ? (int)ev[0].reason : -1, nev ? at[0] : 0u, nev ? ev[0].frames : 0u,
+                nev ? (unsigned long long)ev[0].sw_prims : 0ull,
+                nev ? (unsigned long long)ev[0].readbacks : 0ull,
+                nev ? (unsigned long long)ev[0].gpu_prims : 0ull, nev ? ev[0].share_pm : 0u);
+        ok = 0;
+    }
+    unsigned differ_off = 0, differ_soft = 0, xored = 0;
+    const uint32_t *pon = (const uint32_t *)on, *poff = (const uint32_t *)off;
+    const uint32_t *psoft = (const uint32_t *)soft;
+    for (uint32_t i = 0; ok && i < FB_W * FB_H; i++) {
+        if (pon[i] != poff[i] && !differ_off++)
+            fprintf(stderr, "gpu coherence selftest [fallback-notice]: logic on and off differ at "
+                            "x=%u y=%u: %08x %08x\n", i % FB_W, i / FB_W, pon[i], poff[i]);
+        if (i % FB_W < 480u && pon[i] != psoft[i] && !differ_soft++)
+            fprintf(stderr, "gpu coherence selftest [fallback-notice]: the GPU path and ge.c differ "
+                            "at x=%u y=%u: %08x %08x\n", i % FB_W, i / FB_W, pon[i], psoft[i]);
+    }
+    /* The triangles' pixels: the last sprite's colour XOR the triangles', in RGB. */
+    const uint32_t last_sprite = wrap_hash(0xF0A1u + FNC_FRAMES - 1u) & 0x00FFFFFFu;
+    if (ok) xored = (pon[64u * FB_W + 64u] & 0x00FFFFFFu) ==
+                    ((last_sprite ^ FNC_TRI_RGBA) & 0x00FFFFFFu);
+    if (ok && (differ_off || differ_soft || !xored)) {
+        fprintf(stderr, "gpu coherence selftest [fallback-notice]: %u pixels differ on and off, "
+                        "%u from ge.c; the triangles %s\n", differ_off, differ_soft,
+                xored ? "are drawn" : "are not in the picture");
+        ok = 0;
+    }
+    free(on); free(off); free(soft);
+    coherence_reset_targets();
+    *s_ge = saved;
+    if (ok) printf("gpu coherence selftest: PASS %-22s %u frames through ge.c and hook_tri: one "
+                   "logic_op event on the last, picture identical with the notice's logic on and "
+                   "off and equal to ge.c's\n", "fallback-notice", FNC_FRAMES);
+    return ok;
+}
 /* GPU transform and lighting parity (#318). Each cell is one display list of project-written
  * command words and generated vertices (no game data) drawing transform-mode triangles into a
  * cleared 512x272 8888 target with a depth buffer. It runs three ways: through the backend with
@@ -13204,6 +13327,8 @@ static int coherence_selftest_cases(void) {
         if (strcmp(only, "rtt-scale") == 0) return coherence_run_rtt_scale();
         if (strcmp(only, "color-test") == 0) return coherence_run_color_test();
         if (strcmp(only, "lines") == 0) return coherence_run_lines();
+        if (strcmp(only, "fallback-counts") == 0) return coherence_run_fallback_counts();
+        if (strcmp(only, "fallback-notice") == 0) return coherence_run_fallback_notice();
         if (strcmp(only, "host-depth") == 0) return coherence_run_host_depth();
         if (strcmp(only, "wide-raster") == 0) return coherence_run_wide_raster();
         if (strcmp(only, "psp-raster") == 0) return coherence_run_psp_raster();
@@ -13299,6 +13424,7 @@ static int coherence_selftest_cases(void) {
     if (!coherence_run_ssaa_limit()) ok = 0;
     /* Last: its software fallbacks hand the colour and depth surfaces it drew to ge.c. */
     if (!coherence_run_fallback_counts()) ok = 0;
+    if (!coherence_run_fallback_notice()) ok = 0;
     coherence_reset_targets();
     return ok;
 }

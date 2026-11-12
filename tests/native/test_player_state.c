@@ -15138,8 +15138,10 @@ int main(int argc, char **argv) {
         /* #2151: while the GPU renderer draws, the runtime reports each effect it hands to the
            software renderer for long enough (BOOT_EVENT phase=render_fallback, written by
            gui.c through nk_render_fallback_event_format). The game's page names them in one
-           sentence, each once, in the GE's order; another game's page does not; Hide hides it
-           for the session; the next launch starts with none. */
+           sentence, each once, in the GE's order; another game's page does not. Hide hides it
+           for that game and the effects it named: the same effects on the next launch stay
+           hidden, a new effect shows it again, and so does another game. A launch on the
+           software GE shows the start-up notice instead. */
         {
             static const char all_effects[] =
                 "Some of this game's drawing is done in software because the GPU renderer "
@@ -15149,15 +15151,21 @@ int main(int argc, char **argv) {
             static const char two_effects[] =
                 "Some of this game's drawing is done in software because the GPU renderer "
                 "cannot draw it: stencil effects and lines. The game may run slower.";
+            static const char three_effects[] =
+                "Some of this game's drawing is done in software because the GPU renderer "
+                "cannot draw it: stencil effects, mipmapped textures and lines. The game may "
+                "run slower.";
             char words[384];
             bool effects_ok = true;
+            int failed_pass = -1;
             NkRenderPath gpu_path = nk_render_path_from_init(true, true, true, true);
             NkRenderPath soft_path = nk_render_path_from_init(true, true, true, false);
+            assert(rep->game_count > 1);
             assert(player_render_effects_text(0x1FFu, words, sizeof(words)) &&
                    strcmp(words, all_effects) == 0);
             assert(!player_render_effects_text(0u, words, sizeof(words)) && words[0] == '\0');
             assert(!player_render_effects_text(0x1FFu, words, 64u) && words[0] == '\0');
-            for (int pass = 0; pass < 3; ++pass) {
+            for (int pass = 0; pass < 4 && effects_ok; ++pass) {
                 const char *heading = "unset";
                 const char *text = "unset";
                 char line[256];
@@ -15166,12 +15174,15 @@ int main(int argc, char **argv) {
                                                  0u, 200u};
                 NkRenderFallbackEvent lines = {NK_RENDER_EFFECT_LINE, 360u, 900u, 20000u, 40u,
                                                43u};
-                /* Pass 2 starts the software GE: no GPU renderer, so no effects notice, even
-                   with nothing hidden (as in a new player session). */
-                const NkRenderPath *path = pass == 2 ? &soft_path : &gpu_path;
-                if (pass == 2) rep->render_effects_hidden = false;
+                NkRenderFallbackEvent mips = {NK_RENDER_EFFECT_MIPS, 360u, 4800u, 1500000u, 0u,
+                                              3u};
+                /* Passes 0, 1 and 3 launch the first game, pass 2 the second; pass 3 starts
+                   the software GE: no GPU renderer, so no effects notice. */
+                const int game = pass == 2 ? 1 : 0;
+                const char *disc = rep->games[game].disc_id;
+                const NkRenderPath *path = pass == 3 ? &soft_path : &gpu_path;
                 set_environment_value("NK_REPEAT_LAUNCH_HOLD_OPEN", "1");
-                bool launched = player_app_launch_game(rep, 0) && rep->is_game_running &&
+                bool launched = player_app_launch_game(rep, game) && rep->is_game_running &&
                                 rep->boot_event_file_path[0] != '\0';
                 effects_ok = effects_ok && launched && rep->render_effects == 0u &&
                              rep->render_effects_text[0] == '\0';
@@ -15195,8 +15206,7 @@ int main(int argc, char **argv) {
                     effects_ok = effects_ok &&
                         append_runtime_event(rep->boot_event_file_path, timed);
                     (void)player_app_monitor_game_session(rep, 95500 + (uint64_t)pass * 1000);
-                    bool shown = player_app_render_notice(rep, rep->games[0].disc_id, &heading,
-                                                          &text);
+                    bool shown = player_app_render_notice(rep, disc, &heading, &text);
                     effects_ok = effects_ok && rep->render_path_known &&
                         rep->render_effects ==
                             ((1u << NK_RENDER_EFFECT_STENCIL) | (1u << NK_RENDER_EFFECT_LINE)) &&
@@ -15209,12 +15219,31 @@ int main(int argc, char **argv) {
                             !player_app_render_notice(rep, rep->games[1].disc_id, &heading,
                                                       &text);
                         player_app_hide_render_notice(rep);
-                        effects_ok = effects_ok && rep->render_effects_hidden &&
-                            !player_app_render_notice(rep, rep->games[0].disc_id, &heading,
-                                                      &text);
+                        effects_ok = effects_ok &&
+                            !player_app_render_notice(rep, disc, &heading, &text);
                     } else if (pass == 1) {
-                        /* Hidden for the session. */
+                        /* The same game and effects: still hidden. A new effect shows the
+                           notice again, naming all three; Hide then hides those. */
                         effects_ok = effects_ok && !shown && heading == NULL && text == NULL;
+                        effects_ok = effects_ok &&
+                            nk_render_fallback_event_format(&mips, line, sizeof(line)) > 0;
+                        snprintf(timed, sizeof(timed), "%s t_ns=84\n", line);
+                        effects_ok = effects_ok &&
+                            append_runtime_event(rep->boot_event_file_path, timed);
+                        (void)player_app_monitor_game_session(rep, 95800 + (uint64_t)pass * 1000);
+                        effects_ok = effects_ok &&
+                            player_app_render_notice(rep, disc, &heading, &text) &&
+                            heading != NULL && text != NULL &&
+                            strcmp(heading, "Partly drawn in software") == 0 &&
+                            strcmp(text, three_effects) == 0;
+                        player_app_hide_render_notice(rep);
+                        effects_ok = effects_ok &&
+                            !player_app_render_notice(rep, disc, &heading, &text);
+                    } else if (pass == 2) {
+                        /* Another game reporting the effects hidden on the first: shown. */
+                        effects_ok = effects_ok && shown && heading != NULL && text != NULL &&
+                            strcmp(heading, "Partly drawn in software") == 0 &&
+                            strcmp(text, two_effects) == 0;
                     } else {
                         /* No GPU renderer: the page names the start-up fallback, never the
                            effects. */
@@ -15223,9 +15252,11 @@ int main(int argc, char **argv) {
                             strstr(text, "The GPU renderer did not start") != NULL;
                     }
                 }
+                if (!effects_ok && failed_pass < 0) failed_pass = pass;
                 if (rep->is_game_running) player_app_stop_game(rep);
                 set_environment_value("NK_REPEAT_LAUNCH_HOLD_OPEN", "");
             }
+            if (!effects_ok) fprintf(stderr, "render effects: pass %d failed\n", failed_pass);
             assert(effects_ok);
             assert(dev_log_contains(rep, "render fallback: reason=stencil frames=360 "
                                          "sw_prims=5000 gpu_prims=20000 readbacks=0 "
