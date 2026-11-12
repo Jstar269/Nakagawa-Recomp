@@ -67,6 +67,18 @@ int nk_psp_inflate_raw_into(const uint8_t *src, size_t srclen,
                             uint8_t *dst, size_t dst_cap, size_t *outlen,
                             size_t *consumed, char *err, size_t err_len);
 
+/*
+ * A dynamic Huffman block costs three code tables before it writes a byte, so a
+ * stream of tiny ones costs table builds by the million and almost no output.
+ * Every function here refuses a stream (NK_INFLATE_ERR_FORMAT) whose next
+ * dynamic block would be more than NK_INFLATE_DYNAMIC_FREE plus one for every
+ * NK_INFLATE_DYNAMIC_BYTES it has written. Encoders write dynamic blocks of
+ * thousands of symbols (zlib up to 16,384, as do libdeflate and zopfli's
+ * splits), so no stream they write comes near it.
+ */
+#define NK_INFLATE_DYNAMIC_FREE 64u
+#define NK_INFLATE_DYNAMIC_BYTES 1024u
+
 #ifdef NK_INFLATE_COUNT_BUILDS
 /* Huffman code tables built so far, in a build that counts them (tests). */
 extern unsigned long long nk_inflate_table_builds;

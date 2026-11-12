@@ -69,15 +69,11 @@
 #ifndef NK_SORT_COUNT_COMPARES
 #error "build with -DNK_SORT_COUNT_COMPARES (mk/selftests.mk texrepl-selftest): the sort cells count comparisons"
 #endif
-/* The most the largest image's data may take to refuse when it is all empty dynamic blocks. Measured
- * at 3.1 to 3.4 s in the Windows build (-O2), the build native-core-tests runs; the bound leaves room
- * for a slow host. An AddressSanitizer build (-O1) took 9.1 to 12.9 s in WSL, so it gets four times
- * the room; the cells' table counts hold the same in both. */
-#if defined(__SANITIZE_ADDRESS__)
-#define NK_PNG_WORK_SECONDS 40.0
-#else
-#define NK_PNG_WORK_SECONDS 10.0
-#endif
+/* The most the largest image's data may take to refuse when it is all empty dynamic blocks, the
+ * bound of the other work cells. With the dynamic-block budget (NK_INFLATE_DYNAMIC_FREE) it takes
+ * 77 ms in the Windows build (-O2) and 76 ms under AddressSanitizer (-O1) in WSL; before, 3.1 to
+ * 3.4 s and 9.1 to 12.9 s. */
+#define NK_PNG_WORK_SECONDS 2.0
 #ifndef NK_INFLATE_COUNT_BUILDS
 #error "build with -DNK_INFLATE_COUNT_BUILDS (mk/selftests.mk texrepl-selftest): the work cells count code tables"
 #endif
@@ -2500,6 +2496,69 @@ static uint8_t *png_with_idat(unsigned w, unsigned h, unsigned depth, unsigned c
  * and 5.6 million empty chunks for seconds. Now image data past what DEFLATE can need for the image
  * is refused before it is unpacked, the inflater builds the fixed codes once a stream, and a chunk's
  * CRC costs its bytes and no table. */
+/* A raw DEFLATE stream of `count` empty dynamic blocks, then a final stored block of `raw`. */
+static Bw dynamic_run(unsigned count, const uint8_t *raw, size_t raw_n) {
+    Bw z = { 0 };
+    for (unsigned i = 0; i < count; i++) empty_dynamic_block(&z);
+    bw_bits(&z, 1, 1);
+    bw_bits(&z, 0, 2);
+    bw_flush(&z);
+    const uint8_t hdr[4] = { (uint8_t)raw_n, (uint8_t)(raw_n >> 8), (uint8_t)~raw_n, (uint8_t)(~raw_n >> 8) };
+    zbuf(&z.d, &z.n, &z.cap, hdr, 4);
+    zbuf(&z.d, &z.n, &z.cap, raw, raw_n);
+    return z;
+}
+
+/* The cold read of 7ff4d3e849f7 (M-3): an empty dynamic block costs three code tables and writes
+ * nothing, so the largest image's bounded data, all such blocks, held the decoder for 3.1 to 3.4 s,
+ * and a pack of a few hundred such images for minutes. A stream may now have 64 dynamic blocks and
+ * one more for every KiB it has written. */
+static void test_inflate_dynamic_budget(void) {
+    static const uint8_t two[2] = { 0, 0 };
+    uint8_t into[4096];
+    size_t on = 0, used = 0;
+    char err[96] = "";
+    Bw z = dynamic_run(NK_INFLATE_DYNAMIC_FREE, two, 2);
+    nk_inflate_table_builds = 0;
+    int rc = nk_psp_inflate_raw_into(z.d, z.n, into, sizeof(into), &on, &used, err, sizeof(err));
+    CHECK(rc == NK_INFLATE_OK && on == 2 && nk_inflate_table_builds == 3u * NK_INFLATE_DYNAMIC_FREE,
+          "%u empty dynamic blocks: rc %d, %zu bytes, %llu tables, '%s'", NK_INFLATE_DYNAMIC_FREE, rc, on,
+          nk_inflate_table_builds, err);
+    free(z.d);
+    z = dynamic_run(NK_INFLATE_DYNAMIC_FREE + 1u, two, 2);
+    nk_inflate_table_builds = 0;
+    rc = nk_psp_inflate_raw_into(z.d, z.n, into, sizeof(into), &on, &used, err, sizeof(err));
+    CHECK(rc == NK_INFLATE_ERR_FORMAT && strstr(err, "more dynamic blocks") &&
+              nk_inflate_table_builds == 3u * NK_INFLATE_DYNAMIC_FREE,
+          "%u empty dynamic blocks: rc %d, %llu tables, '%s'", NK_INFLATE_DYNAMIC_FREE + 1u, rc,
+          nk_inflate_table_builds, err);
+    uint8_t *out = NULL;
+    rc = nk_psp_inflate_raw(z.d, z.n, &out, &on, 2, 2, err, sizeof(err));
+    CHECK(rc == NK_INFLATE_ERR_FORMAT && out == NULL, "the same unpacked to a new buffer: rc %d", rc);
+    free(z.d);
+    /* Output earns blocks: 2 KiB written in a stored block, then 66 empty dynamic blocks. */
+    {
+        Bw w = { 0 };
+        static uint8_t kib2[2048];
+        bw_bits(&w, 0, 1);
+        bw_bits(&w, 0, 2);
+        bw_flush(&w);
+        const uint8_t hdr[4] = { 0x00, 0x08, 0xff, 0xf7 };
+        zbuf(&w.d, &w.n, &w.cap, hdr, 4);
+        zbuf(&w.d, &w.n, &w.cap, kib2, sizeof(kib2));
+        for (unsigned i = 0; i < NK_INFLATE_DYNAMIC_FREE + 2u; i++) empty_dynamic_block(&w);
+        bw_bits(&w, 1, 1);
+        bw_bits(&w, 0, 2);
+        bw_flush(&w);
+        const uint8_t none[4] = { 0x00, 0x00, 0xff, 0xff };
+        zbuf(&w.d, &w.n, &w.cap, none, 4);
+        rc = nk_psp_inflate_raw_into(w.d, w.n, into, sizeof(into), &on, &used, err, sizeof(err));
+        CHECK(rc == NK_INFLATE_OK && on == sizeof(kib2), "2 KiB, then %u empty dynamic blocks: rc %d, %zu bytes, '%s'",
+              NK_INFLATE_DYNAMIC_FREE + 2u, rc, on, err);
+        free(w.d);
+    }
+}
+
 static void test_png_work(void) {
     char why[128];
     static const uint8_t raw1[2] = { 0, 0 };   /* a 1x1 grey image: its row's filter byte and sample */
@@ -2596,7 +2655,7 @@ static void test_png_work(void) {
         const double t0 = wall_s();
         const int ok = nk_texrepl_decode_png(png, n, 0, &px, &w, &h, why, sizeof(why));
         const double t = wall_s() - t0;
-        CHECK(!ok && strstr(why, "unpacks to less than the image") && t < NK_PNG_WORK_SECONDS,
+        CHECK(!ok && strstr(why, "does not unpack") && t < NK_PNG_WORK_SECONDS,
               "%.1f MiB of empty dynamic blocks in a 2048x2048 RGBA16 PNG: %d in %.2f s, '%s'", n / 1048576.0, ok, t, why);
         printf("png work: the largest image's data, %.1f MiB of empty dynamic blocks, refused in %.0f ms\n", n / 1048576.0,
                t * 1e3);
@@ -2730,7 +2789,7 @@ static void test_ini_text(void) {
     make_pack(dir, sizeof(dir), "texrepl_ini_text");
     save_png_spec("texrepl_ini_text", "a.png", 4, 4, 0x311u);
     pack_path(path, sizeof(path), "texrepl_ini_text", "textures.ini");
-    write_text(path, "[options]\nhash = quick\n[hashes]\n\x1b[31mzz\xc2\x9b = a.png\n"
+    write_text(path, "[options]\nhash = quick\n[hashes]\n\x1b[31mzz\xc2\x9b\x9b" "2J\xe0\x80 = a.png\n"
                      "0880e00000000202000000aa = a.png\n0880e00000000202000000aa_99999999999 = a.png\n");
     NkTexRepl *p = nk_texrepl_open(dir, 0, err, sizeof(err));
     CHECK(p != NULL, "the ini text pack: %s", err);
@@ -2738,8 +2797,11 @@ static void test_ini_text(void) {
         int control = 0;
         for (size_t i = 0; i < nk_texrepl_diag_count(p); i++)
             for (const unsigned char *c = (const unsigned char *)nk_texrepl_diag(p, i); *c; c++)
-                if (*c < 0x20u || *c == 0x7fu || (*c == 0xc2u && c[1] >= 0x80u && c[1] <= 0x9fu)) control++;
-        CHECK(control == 0 && has_diag(p, "'?[31mzz?" "?'"), "a key with ESC and CSI: %d control bytes in the notes", control);
+                if (*c < 0x20u || *c == 0x7fu || (*c >= 0x80u && *c <= 0x9fu && (c == (const unsigned char *)nk_texrepl_diag(p, i) || c[-1] != 0xc2u)) ||
+                    (*c == 0xc2u && c[1] >= 0x80u && c[1] <= 0x9fu))
+                    control++;
+        CHECK(control == 0 && has_diag(p, "'?[31mzz?" "?" "?2J?" "?" "'"),
+              "a key with ESC, a UTF-8 CSI, a raw CSI and a cut sequence: %d control bytes in the notes", control);
         CHECK(has_diag(p, "mip level 2147483647 is listed with no level 1"), "a level past an int's range not read as INT_MAX");
         nk_texrepl_close(p);
     }
@@ -3229,6 +3291,7 @@ int main(int argc, char **argv) {
     test_image_guards();
     test_png_bomb();
     test_png_work();
+    test_inflate_dynamic_budget();
     test_cache_churn();
     test_ini_text();
     test_zip_padding();

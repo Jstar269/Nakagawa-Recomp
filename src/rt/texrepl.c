@@ -354,13 +354,37 @@ struct NkTexRepl {
     NkTexReplStats stats;
 };
 
+/* The length of the valid UTF-8 sequence at c (RFC 3629: no overlong form, no surrogate, nothing
+ * past U+10FFFF), or 0. */
+static size_t utf8_valid_at(const unsigned char *c) {
+    const unsigned char a = c[0];
+    if (a >= 0xc2u && a <= 0xdfu) return (c[1] & 0xc0u) == 0x80u ? 2u : 0u;
+    if (a >= 0xe0u && a <= 0xefu) {
+        const unsigned char lo = a == 0xe0u ? 0xa0u : 0x80u, hi = a == 0xedu ? 0x9fu : 0xbfu;
+        return c[1] >= lo && c[1] <= hi && (c[2] & 0xc0u) == 0x80u ? 3u : 0u;
+    }
+    if (a >= 0xf0u && a <= 0xf4u) {
+        const unsigned char lo = a == 0xf0u ? 0x90u : 0x80u, hi = a == 0xf4u ? 0x8fu : 0xbfu;
+        return c[1] >= lo && c[1] <= hi && (c[2] & 0xc0u) == 0x80u && (c[3] & 0xc0u) == 0x80u ? 4u : 0u;
+    }
+    return 0u;
+}
+
 /* Text from a pack (ini keys and values, file names) is printed to the terminal: every control
- * character becomes '?', C0 and DEL as bytes and C1 (U+0080 to U+009F) as its two UTF-8 bytes, so
- * a pack cannot send escape sequences. */
+ * character becomes '?', C0 and DEL as bytes and C1 (U+0080 to U+009F) as its two UTF-8 bytes, and
+ * so does every byte that is not part of valid UTF-8, a raw C1 byte (0x9B is CSI to some terminals)
+ * among them, so a pack cannot send escape sequences. */
 static void text_clean(char *s) {
-    for (unsigned char *c = (unsigned char *)s; *c; c++) {
-        if (*c < 0x20u || *c == 0x7fu) *c = '?';
-        else if (*c == 0xc2u && c[1] >= 0x80u && c[1] <= 0x9fu) { c[0] = '?'; c[1] = '?'; c++; }
+    for (unsigned char *c = (unsigned char *)s; *c;) {
+        if (*c < 0x80u) {
+            if (*c < 0x20u || *c == 0x7fu) *c = '?';
+            c++;
+            continue;
+        }
+        const size_t n = utf8_valid_at(c);
+        if (n == 0u) { *c++ = '?'; continue; }
+        if (n == 2u && c[0] == 0xc2u && c[1] <= 0x9fu) { c[0] = '?'; c[1] = '?'; }
+        c += n;
     }
 }
 

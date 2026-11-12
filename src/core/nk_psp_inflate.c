@@ -245,6 +245,7 @@ static int nk_deflate(Bits *b, OutBuf *o, char *err, size_t err_len)
     Huffman fixed_lh;
     Huffman fixed_dh;
     int fixed_built = 0;
+    size_t dynamic_blocks = 0u;
     Huffman lh;
     Huffman dh;
 
@@ -355,6 +356,13 @@ static int nk_deflate(Bits *b, OutBuf *o, char *err, size_t err_len)
                 int total;
                 int pos = 0;
                 int prev = 0;
+
+                if (++dynamic_blocks > NK_INFLATE_DYNAMIC_FREE +
+                                           o->len / NK_INFLATE_DYNAMIC_BYTES) {
+                    set_err(err, err_len,
+                            "inflate: more dynamic blocks than its output needs");
+                    return NK_INFLATE_ERR_FORMAT;
+                }
 
                 if (bits_n(b, 5, &v) != 0) {
                     set_err(err, err_len,

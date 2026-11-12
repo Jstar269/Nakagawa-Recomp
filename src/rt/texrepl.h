@@ -42,7 +42,8 @@
  * Files are checked on the handle opened, not the name: a folder file is read only when it is a
  * regular disk file whose final path (links and junctions resolved) is inside the folder's final
  * path, and only up to its cap; a name the ZIP reader would refuse (CON.png, "a.png.", "a:b") is
- * not opened. A ZIP pack's file is the same: a regular file, the folder's textures.zip inside it.
+ * not opened. A ZIP pack's file is checked the same way, a regular file, the folder's textures.zip
+ * inside it; the ZIP reader then opens it again by name to read it.
  * Messages name the pack by its last path component only.
  */
 #ifndef NK_TEXREPL_H
