@@ -1030,19 +1030,117 @@ def _forbidden_path(path: str) -> str | None:
     return None
 
 
+# Release-manifest dispositions that waive a binary finding (MAGIC, MAGIC_UNKNOWN, and for
+# ``approved_binary`` the prohibited-extension PATH rule) for one path.
+BINARY_WAIVER_DISPOSITIONS = ("approved_binary", "optional_excluded_if_unverified")
+
+
+@dataclass(frozen=True)
+class TrustedWaiverBase:
+    """What a trusted base commit records about the release manifest's binary waivers.
+
+    ``paths`` is every path of the base tree. For a path the base's manifest waives, ``waivers``
+    holds ``(disposition, pinned SHA-256)`` and ``blob_sha256`` the SHA-256 of the base's own
+    bytes there. The audited tree supplies none of it.
+    """
+
+    paths: frozenset[str]
+    waivers: dict[str, tuple[str, str]]
+    blob_sha256: dict[str, str]
+
+
+def _manifest_pin(component: dict | None) -> str:
+    hashes = (component or {}).get("hashes")
+    pin = hashes.get("sha256") if isinstance(hashes, dict) else None
+    return pin.lower() if isinstance(pin, str) else ""
+
+
+def _binary_waiver_refusal(
+    rel: str,
+    disp: str,
+    manifest_comp: dict | None,
+    sha256: str,
+    trusted_base: TrustedWaiverBase | None = None,
+) -> tuple[str, str] | None:
+    """Why the release manifest's binary waiver for ``rel`` does not cover the audited bytes.
+
+    ``None`` when it does; otherwise the finding ``(code, detail)``. A waiver approves bytes, not
+    a path: it holds only for the SHA-256 it pins, so different content under an approved name
+    is reported like any other binary.
+
+    Without a trusted base the pin is the audited manifest's own, which catches a file that
+    changed without its pin. That manifest is part of the tree under audit, so it cannot vouch
+    for a change to both. With a trusted base, a path the base already carries, or that its
+    manifest already waives, is therefore held to the base: its manifest must record the same
+    waiver, and the waiver holds when
+
+    * the file and its pin are both as the base has them (the change under audit did not touch
+      the approval, whatever state the base is in); or
+    * the bytes are ones the base vouches for (the SHA-256 its manifest pins, or the file it
+      carries) and the audited manifest pins exactly those bytes.
+
+    Any other path is new: its publication is the admission's decision, and the audited
+    manifest's pin applies.
+    """
+    pin = _manifest_pin(manifest_comp)
+    actual = sha256.lower()
+    if trusted_base is not None and (rel in trusted_base.paths or rel in trusted_base.waivers):
+        base_waiver = trusted_base.waivers.get(rel)
+        if base_waiver is None or base_waiver[0] != disp:
+            return (
+                "APPROVED_BINARY_UNPINNED",
+                f"the audited release manifest waives this path as {disp}, but the trusted base "
+                "does not record that waiver for it; the tree under audit cannot approve a "
+                "binary at a path the base already has",
+            )
+        base_pin = base_waiver[1]
+        base_bytes = trusted_base.blob_sha256.get(rel, "")
+        if actual and actual == base_bytes and pin == base_pin:
+            return None
+        if not actual or actual not in (base_pin, base_bytes):
+            return (
+                "APPROVED_BINARY_CHANGED",
+                f"bytes (sha256 {actual or 'unreadable'}) are neither the ones the trusted base's "
+                f"release manifest pins (sha256 {base_pin or 'none'}) nor the file the base "
+                "carries; a pin changed in the tree under audit approves nothing, and a "
+                "replacement needs the maintainer's approval of the new bytes",
+            )
+        if pin != actual:
+            return (
+                "APPROVED_BINARY_CHANGED",
+                f"the audited release manifest pins sha256 {pin or 'none'} for this path, which is "
+                f"not its bytes (sha256 {actual})",
+            )
+        return None
+    if not pin:
+        return (
+            "APPROVED_BINARY_UNPINNED",
+            f"release manifest waives this path as {disp} without a hashes.sha256 pin; a waiver "
+            "approves exact bytes",
+        )
+    if pin != actual:
+        return (
+            "APPROVED_BINARY_CHANGED",
+            f"bytes (sha256 {actual or 'unreadable'}) are not the ones the release manifest pins "
+            f"(sha256 {pin}); the waiver covers the pinned bytes only",
+        )
+    return None
+
+
 def _approved_binary_matches(reason: str, disp: str, manifest_comp: dict | None,
-                             sha256: str) -> bool:
+                             sha256: str, rel: str = "",
+                             trusted_base: TrustedWaiverBase | None = None) -> bool:
     """A prohibited-extension path passes only as a reviewed release-manifest binary.
 
     Project-authored build output (for example the profile-zero PSPDEV fixture)
     may carry a guest-executable suffix. It is accepted only when the release
     manifest records it as ``approved_binary`` and its bytes match the pinned
     SHA-256, so a different file under an approved name is still reported.
+    ``_binary_waiver_refusal`` says whose pin that is.
     """
     if not reason.startswith("prohibited extension") or disp != "approved_binary":
         return False
-    pinned = ((manifest_comp or {}).get("hashes") or {}).get("sha256", "")
-    return bool(pinned) and bool(sha256) and pinned.lower() == sha256.lower()
+    return _binary_waiver_refusal(rel, disp, manifest_comp, sha256, trusted_base) is None
 
 
 def is_keystore_content(rel: str, text: str | None) -> bool:
@@ -2656,6 +2754,7 @@ def audit_entries_with_semantics(
     tree_repo_root: Path | None = None,
     provenance_self_consistency: bool = False,
     extra_private_roots: list[str] | None = None,
+    trusted_waiver_base: TrustedWaiverBase | None = None,
 ) -> tuple[list[Finding], list[FileSemantics]]:
 
     content_source = _resolve_content_source(content_source, is_candidate_root)
@@ -2877,10 +2976,25 @@ def audit_entries_with_semantics(
             f = Finding("UNRESOLVED_PUBLIC", rel, "unresolved asset must be excluded from candidate public tree scope")
             entry_findings.append(f)
 
+        # A binary waiver approves the bytes it pins, not the path. When it does not cover
+        # the audited bytes, each finding it would have waived stands, and one more finding
+        # says why the waiver was refused.
+        waiver_claimed = disp in BINARY_WAIVER_DISPOSITIONS
+        waiver_refusal = (
+            _binary_waiver_refusal(rel, disp, manifest_comp, sha256, trusted_waiver_base)
+            if waiver_claimed else None
+        )
+        waiver_holds = waiver_claimed and waiver_refusal is None
+        waiver_refused_a_finding = False
+
         reason = _forbidden_path(rel)
-        if reason and _approved_binary_matches(reason, disp, manifest_comp, sha256):
+        if reason and _approved_binary_matches(
+            reason, disp, manifest_comp, sha256, rel, trusted_waiver_base
+        ):
             reason = None
         if reason:
+            if reason.startswith("prohibited extension") and disp == "approved_binary":
+                waiver_refused_a_finding = True
             f = Finding("PATH", rel, reason)
             entry_findings.append(f)
 
@@ -2954,9 +3068,10 @@ def audit_entries_with_semantics(
             policy_excluded = resolution is not None and resolution.is_excluded
             if policy_excluded:
                 pass
-            elif disp in ("optional_excluded_if_unverified", "approved_binary"):
+            elif waiver_holds:
                 pass
             else:
+                waiver_refused_a_finding = waiver_refused_a_finding or waiver_claimed
                 entry_findings.append(Finding("MAGIC", rel, magic))
 
         text_str = _decode_text_safe(raw_bytes)
@@ -2966,9 +3081,16 @@ def audit_entries_with_semantics(
         if is_binary and magic == "none" and entry.kind not in ("symlink", "gitlink"):
             if rel.startswith("assets/vfpu/"):
                 pass
+            elif waiver_claimed and not waiver_holds:
+                # The manifest component dispositions these bytes only as the binary it pins.
+                waiver_refused_a_finding = True
+                entry_findings.append(Finding("MAGIC_UNKNOWN", rel, "unknown binary magic is not the binary the release manifest approves"))
             elif disp in ("unclassified", "excluded_pending_qualified_review") or exhaustive:
                 if not manifest_comp:
                     entry_findings.append(Finding("MAGIC_UNKNOWN", rel, "unknown binary magic requires explicit manifest review/disposition"))
+
+        if waiver_refused_a_finding and waiver_refusal is not None:
+            entry_findings.append(Finding(waiver_refusal[0], rel, waiver_refusal[1]))
 
         if (exhaustive or public_scope) and not manifest_comp and prov == "unclassified":
             entry_findings.append(Finding("UNCLASSIFIED_PATH", rel, "tracked path has no explicit manifest provenance classification"))
@@ -3080,6 +3202,7 @@ def audit_entries(
     committed_tree_ref: str | None = None,
     tree_repo_root: Path | None = None,
     extra_private_roots: list[str] | None = None,
+    trusted_waiver_base: TrustedWaiverBase | None = None,
 ) -> list[Finding]:
     findings, _ = audit_entries_with_semantics(
         entries=entries,
@@ -3098,6 +3221,7 @@ def audit_entries(
         committed_tree_ref=committed_tree_ref,
         tree_repo_root=tree_repo_root,
         extra_private_roots=extra_private_roots,
+        trusted_waiver_base=trusted_waiver_base,
     )
     return findings
 
@@ -3323,6 +3447,51 @@ def _materialize_committed_tree(
     return destination, tree_sha
 
 
+def _load_trusted_waiver_base(ref: str, source_repo: Path) -> TrustedWaiverBase:
+    """Read a trusted base commit's binary waivers from its own objects.
+
+    The base's path list is ``git ls-tree``'s; its release manifest and the files that manifest
+    waives are read with ``git cat-file``. Nothing comes from the tree under audit. A base whose
+    manifest cannot be read is an error: the audit must not run as if no waiver were pinned.
+    """
+    tree_sha = _git_output(["rev-parse", "--verify", "--end-of-options", f"{ref}^{{tree}}"], source_repo).strip()
+    blob_ids = {path: (mode, object_id) for path, mode, object_id in _committed_tree_entries(tree_sha, source_repo)}
+
+    def read(paths: list[str]) -> dict[str, bytes]:
+        blobs = read_indexed_blobs_batch(
+            [GitEntry(blob_ids[path][0], blob_ids[path][1], "0", path, "file", working_mode=blob_ids[path][0])
+             for path in paths],
+            source_repo,
+        )
+        data: dict[str, bytes] = {}
+        for path in paths:
+            raw, error = blobs.get(path, (None, "not returned by git cat-file"))
+            if raw is None or error:
+                raise RuntimeError(f"trusted base file {path} is unreadable: {error}")
+            data[path] = raw
+        return data
+
+    manifest_rel = "assets/release_manifest.json"
+    if manifest_rel not in blob_ids:
+        raise RuntimeError(f"the trusted base has no {manifest_rel}")
+    manifest_map, manifest_findings = load_release_manifest_bytes(read([manifest_rel])[manifest_rel], manifest_rel)
+    if manifest_findings:
+        raise RuntimeError(
+            f"the trusted base's {manifest_rel} is unusable: "
+            f"{manifest_findings[0].code}: {manifest_findings[0].detail}")
+    waivers = {
+        path: (component["disposition"], _manifest_pin(component))
+        for path, component in manifest_map.items()
+        if component.get("disposition") in BINARY_WAIVER_DISPOSITIONS
+    }
+    carried = sorted(path for path in waivers if path in blob_ids)
+    return TrustedWaiverBase(
+        paths=frozenset(blob_ids),
+        waivers=waivers,
+        blob_sha256={path: hashlib.sha256(data).hexdigest() for path, data in read(carried).items()},
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     # A materialized committed tree is disposable: remove it however the audit ends.
     disposable: list[Path] = []
@@ -3401,6 +3570,20 @@ def _main(argv: list[str] | None, disposable: list[Path]) -> int:
         type=Path,
         default=None,
         help="Externally trusted release manifest used to prevent candidate control substitution",
+    )
+    parser.add_argument(
+        "--trusted-base",
+        type=str,
+        default=None,
+        help=(
+            "Trusted base commit, read from --repo-root's objects (in the attestation, the merge "
+            "base with the default branch). A path that commit already carries, or that its "
+            "manifest already waives, keeps a "
+            "release-manifest binary waiver (approved_binary, optional_excluded_if_unverified) "
+            "only for bytes the base vouches for: the SHA-256 its own manifest pins, or the file "
+            "it carries. Without it the audited manifest's own pin is used, which the tree under "
+            "audit can rewrite."
+        ),
     )
     parser.add_argument(
         "--private-root",
@@ -3508,6 +3691,13 @@ def _main(argv: list[str] | None, disposable: list[Path]) -> int:
         audit_root = committed_audit_root
     else:
         audit_root = args.candidate_root.absolute() if args.candidate_root else audit_repo_root
+    trusted_waiver_base: TrustedWaiverBase | None = None
+    if args.trusted_base:
+        try:
+            trusted_waiver_base = _load_trusted_waiver_base(args.trusted_base, audit_repo_root)
+        except (OSError, RuntimeError, subprocess.CalledProcessError) as error:
+            print(f"publication audit failed: cannot read the trusted base: {error}", file=sys.stderr)
+            return 2
     manifest_path = args.manifest or (audit_root / "assets" / "release_manifest.json")
     is_exhaustive = args.candidate_tree or bool(args.manifest_out) or bool(args.csv_out) or args.public_scope
     is_cand_root = bool(args.candidate_root)
@@ -3560,6 +3750,7 @@ def _main(argv: list[str] | None, disposable: list[Path]) -> int:
         committed_tree_ref=args.committed_tree,
         tree_repo_root=audit_repo_root,
         extra_private_roots=args.private_root,
+        trusted_waiver_base=trusted_waiver_base,
     )
     report = generate_manifest_report(
         entries,

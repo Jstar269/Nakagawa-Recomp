@@ -913,8 +913,44 @@ claim) are therefore both `maintainer_action` findings. They stay fatal until th
 candidate's exact bytes in the trusted ledger. The approval is a `reviewed_blobs` entry for the path, at the
 SHA-256 of the new bytes, citing the path's own exact record. The verifier reads those entries only when such a
 change needs one. The trusted record's `upstream_revision` should be updated in the same private commit. A
-byte-identical file outside any manifest (for example a font) has no row to check, so after it lands it is held
-only by review.
+byte-identical file outside any manifest (for example a font) has no row to check. After it lands it is held by
+review, and by the next section when the release manifest approves it as a binary.
+
+### Approved binaries in the release manifest
+
+`assets/release_manifest.json` waives the publication audit's binary findings for the files it approves: a
+component whose disposition is `approved_binary` (a screenshot, a font, a clip, a prebuilt fixture) or
+`optional_excluded_if_unverified`. The component pins the approved bytes in `hashes.sha256`, and the waiver covers
+those bytes only. When a file's bytes are not the pinned ones, the findings the waiver would have dropped are
+reported (`MAGIC`, `MAGIC_UNKNOWN`, and `PATH` for a prohibited extension), with one more that says why:
+
+| Finding | What happened |
+| --- | --- |
+| `APPROVED_BINARY_CHANGED` | the file's SHA-256 is not a pinned one, or the manifest's pin is not the file's SHA-256 |
+| `APPROVED_BINARY_UNPINNED` | the component has no `hashes.sha256`, or the trusted base carries the path without that waiver |
+
+The manifest is part of the tree under audit, so its own pin catches only a file that changed without its pin.
+Rewriting a file and its pin together would pass. The trusted attestation therefore runs the audit with
+`--trusted-base <verdict base>`, the merge base of the head with the default branch, and the base decides for
+every path it already carries or its manifest already waives. Its manifest must record the same waiver for the
+path, and the waiver holds in two cases:
+
+* the file and its pin are both as the base has them, so the pull request did not touch the approval; or
+* the bytes are ones the base vouches for (the SHA-256 its manifest pins, or the file it carries) and the
+  candidate's manifest pins exactly those bytes. This is how a pull request corrects a pin that does not match
+  the file the base carries.
+
+A pin changed in the pull request approves nothing, and a path the base carries without a waiver cannot gain one
+in a pull request. A path the base does not carry is new: the candidate's own pin applies to it, and whether it
+may be published is the admission's decision. A claim-bound admission accepts any content for its path until the
+pull request lands ([V4 policy deltas](#v4-policy-deltas)); a byte-bound one (`"binding": "bytes"`) approves
+exactly one file.
+
+The audit has no input that approves new bytes at a path the base already carries, so replacing an approved
+binary in place fails the trusted attestation. Until the trusted side records such an approval, a replacement
+lands as a new path: the new file under a new name with its own manifest component, the old file and its
+component removed, and the profile change admitted by the maintainer. A local run without `--trusted-base` (pre-commit, `contrib-check`, the hygiene job) uses the tree's
+own pin and is a tripwire, not this check.
 
 ### V3 policy deltas
 

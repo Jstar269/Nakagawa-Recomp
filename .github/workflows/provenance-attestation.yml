@@ -486,15 +486,25 @@ jobs:
       # checkout and never an archive, so no .gitattributes line of the
       # candidate can hide a file. The profile is the candidate's, which the
       # step above has just held to the trusted authority: a path it adds,
-      # removes or excludes is one a maintainer admitted. No secret is in this
-      # step's environment. A finding fails the job.
+      # removes or excludes is one a maintainer admitted. The release manifest
+      # is the candidate's too, and it waives binary findings for the files it
+      # approves, so the audit is given the verdict base: a file the base
+      # already carries keeps its waiver only for bytes the base vouches for
+      # (the SHA-256 the base's own manifest pins, or the file the base
+      # carries). The candidate cannot approve new bytes by changing a pin. No
+      # secret is in this step's environment. A finding fails the job.
       - name: Audit the candidate tree with the trusted publication audit
         env:
           HEAD_SHA: ${{ steps.target.outputs.head_sha }}
+          BASE_SHA: ${{ steps.base.outputs.base_sha }}
         run: |
           set -euo pipefail
           if [[ ! "${HEAD_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
             echo "::error::the candidate head is not a full commit SHA"
+            exit 1
+          fi
+          if [[ ! "${BASE_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::the verdict base is not a full commit SHA"
             exit 1
           fi
           mkdir -p "${RUNNER_TEMP}/tree-audit"
@@ -503,6 +513,7 @@ jobs:
           python tools/publish_audit.py \
             --repo-root "${GITHUB_WORKSPACE}" \
             --committed-tree "${HEAD_SHA}" \
+            --trusted-base "${BASE_SHA}" \
             --policy "${RUNNER_TEMP}/tree-audit/public_source_profile.json" \
             --public-scope --provenance-self-consistency
           touch "${RUNNER_TEMP}/tree-audit/passed"
