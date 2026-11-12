@@ -625,14 +625,43 @@ def _zip_info(name: str, date_time, *, directory: bool, size: int = 0) -> zipfil
     return info
 
 
+#: The attested toolchain record the release recipe copies to the stage root; its
+#: ``candidate.commit`` is the source commit the package was built from (#324).
+TOOLCHAIN_RECORD = "toolchain.json"
+_COMMIT_SHA = re.compile(r"[0-9a-f]{40}")
+#: The ``--record`` file of a portable ZIP: what a release dry run compares (#324).
+PORTABLE_RECORD_FORMAT = "nakagawa-portable-zip-record"
+PORTABLE_RECORD_SCHEMA_VERSION = 1
+
+
+def staged_source_commit(stage: Path) -> str:
+    """The source commit the stage's ``toolchain.json`` names (``candidate.commit``)."""
+    try:
+        record = json.loads((Path(stage) / TOOLCHAIN_RECORD).read_text(encoding="utf-8"))
+        commit = record["candidate"]["commit"]
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError) as exc:
+        raise InstallError(
+            f"PORTABLE_SOURCE_COMMIT_MISSING: the stage's {TOOLCHAIN_RECORD} names no candidate "
+            f"commit ({type(exc).__name__}: {exc})"
+        ) from exc
+    if not isinstance(commit, str) or not _COMMIT_SHA.fullmatch(commit):
+        raise InstallError(
+            f"PORTABLE_SOURCE_COMMIT_MISSING: the stage's {TOOLCHAIN_RECORD} candidate commit "
+            f"{commit!r} is not a full lower-case commit SHA"
+        )
+    return commit
+
+
 def write_portable_zip(stage: Path, zip_path: Path, *, source_date_epoch: int,
-                       verify_runtime=None) -> dict:
+                       verify_runtime=None, expected_commit: str | None = None) -> dict:
     """Write ``stage`` as a byte-reproducible ZIP at ``zip_path``; return its summary.
 
     ``SHA256SUMS.txt`` is rewritten first and ``bin/runtime-manifest.json`` is
     verified (``verify_runtime`` replaces that check; tests pass their own).
     Entries carry no root folder, the layout ``ZipFile.CreateFromDirectory``
-    produced for v0.0.1: one per file and one per empty folder.
+    produced for v0.0.1: one per file and one per empty folder. The summary
+    names the source commit from the stage's ``toolchain.json``, which must be
+    ``expected_commit`` when that is given.
     """
     stage = Path(stage).resolve()
     zip_path = Path(zip_path).resolve()
@@ -642,6 +671,12 @@ def write_portable_zip(stage: Path, zip_path: Path, *, source_date_epoch: int,
         raise InstallError(f"PORTABLE_ZIP_EXISTS: {zip_path} already exists; write a new file")
     if zip_path.is_relative_to(stage):
         raise InstallError("PORTABLE_ZIP_INSIDE_STAGE: write the ZIP outside the staged folder")
+    source_commit = staged_source_commit(stage)
+    if expected_commit is not None and source_commit != expected_commit:
+        raise InstallError(
+            f"PORTABLE_SOURCE_COMMIT_MISMATCH: the stage was built from {source_commit}, "
+            f"not from {expected_commit}"
+        )
     bin_dir = stage / "bin"
     try:
         if verify_runtime is None:
@@ -680,8 +715,31 @@ def write_portable_zip(stage: Path, zip_path: Path, *, source_date_epoch: int,
         "empty_folders": len(empty),
         "unpacked_bytes": total,
         "source_date_epoch": source_date_epoch,
+        "source_commit": source_commit,
+        "sha256sums_sha256": _sha256_path(stage / "SHA256SUMS.txt"),
         "zlib": zlib.ZLIB_RUNTIME_VERSION,
     }
+
+
+def portable_zip_record(summary: dict) -> bytes:
+    """The ``--record`` bytes of a portable ZIP summary: no local path, so two builds compare.
+
+    It names the ZIP by file name with its size and SHA-256, the source commit, the
+    SHA-256 of ``SHA256SUMS.txt`` (which covers every other file), the entry time and
+    the zlib that deflated it. Two builds of one package give the same bytes.
+    """
+    record = {key: value for key, value in summary.items() if key != "zip"}
+    record.update({
+        "format": PORTABLE_RECORD_FORMAT,
+        "schema_version": PORTABLE_RECORD_SCHEMA_VERSION,
+        "zip_name": Path(summary["zip"]).name,
+    })
+    return (json.dumps(record, indent=2, sort_keys=True, ensure_ascii=True) + "\n").encode("ascii")
+
+
+def resolve_commit(revision: str, *, repo: Path = ROOT) -> str:
+    """The full commit SHA ``revision`` names in ``repo``."""
+    return str(_git(repo, "rev-parse", "--verify", f"{revision}^{{commit}}"))
 
 
 _VERSION = r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?"
@@ -960,6 +1018,9 @@ def main(argv=None) -> int:
                              "one-archive-per-platform contract")
     parser.add_argument("--zip-stage", type=Path,
                         help="the staged release folder --portable-zip archives")
+    parser.add_argument("--record", type=Path,
+                        help="with --portable-zip, also write the ZIP's record (file name, size, SHA-256, "
+                             "source commit) to this new file, the evidence a release dry run compares")
     parser.add_argument("--source-date-epoch",
                         help="ZIP entry time as a Unix time (default: $SOURCE_DATE_EPOCH, else "
                              "the commit time of --revision)")
@@ -967,7 +1028,8 @@ def main(argv=None) -> int:
     parser.add_argument("--player", type=Path, default=default_player,
                         help=f"built player executable (default: build/{default_player.name})")
     parser.add_argument("--revision", default="HEAD",
-                        help="committed revision exported as source/ (default: HEAD)")
+                        help="committed revision exported as source/; with --portable-zip, the commit the "
+                             "stage's toolchain.json must name (default: HEAD)")
     parser.add_argument("--desktop-shortcut", action="store_true",
                         help=f"also write '{SHORTCUT_NAME}' on the Desktop (Windows), or a "
                              f"'{DESKTOP_ENTRY_NAME}' entry (Linux)")
@@ -1010,8 +1072,18 @@ def main(argv=None) -> int:
         if args.portable_zip is None or args.zip_stage is None or args.dest is not None:
             parser.error("--portable-zip and --zip-stage go together, without --dest")
         try:
+            if args.record is not None and args.record.exists():
+                raise InstallError(f"PORTABLE_RECORD_EXISTS: {args.record} already exists; write a new file")
             epoch = resolve_source_date_epoch(args.source_date_epoch, revision=args.revision)
-            summary = write_portable_zip(args.zip_stage, args.portable_zip, source_date_epoch=epoch)
+            summary = write_portable_zip(args.zip_stage, args.portable_zip, source_date_epoch=epoch,
+                                         expected_commit=resolve_commit(args.revision))
+            if args.record is not None:
+                try:
+                    args.record.parent.mkdir(parents=True, exist_ok=True)
+                    args.record.write_bytes(portable_zip_record(summary))
+                except OSError as exc:
+                    raise InstallError(f"PORTABLE_RECORD_UNWRITTEN: {args.record}: {exc}; the ZIP "
+                                       f"{summary['zip']} was written, its record was not") from exc
         except InstallError as exc:
             print(f"stage_install: FAIL: {exc}", file=sys.stderr)
             return 1
