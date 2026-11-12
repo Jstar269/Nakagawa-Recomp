@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 the Nakagawa Recomp authors
 
-"""Behavioral regression checks for the PSP-EABI guest sprintf bridge."""
+"""Behavioral regression checks for the PSP-EABI guest printf-family formatter."""
 
 import os
 import shutil
