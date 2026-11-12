@@ -201,11 +201,18 @@ bool nk_title_manifest_experimental_profile_executable(
  * that cannot climb out of the packages folder. */
 bool nk_title_manifest_enhancement_id_valid(const char *id);
 
+/* True when `variant` names an enhanced build: an enhancement package id, or
+ * <timing id>+<code-hook id> (docs/ENHANCEMENT_CONTRACT.md section 9.9), two
+ * different valid ids joined by the one `+` no id holds, 64 characters at most
+ * in all, as `nk_cli.py build-package` names them. */
+bool nk_title_manifest_enhancement_variant_valid(const char *variant);
+
 /* The folder name of a title's package under <user_data_root>/packages:
  * <DISC_ID> for the authentic package (enhancement_package_id NULL or empty),
  * <DISC_ID>-enhanced-<id> for an enhanced build, as `nk_cli.py build-package`
  * names them. False, with `out` empty, when the disc ID is not a PSP disc ID,
- * the id fails nk_title_manifest_enhancement_id_valid, or `out` is too small. */
+ * the id fails nk_title_manifest_enhancement_variant_valid, or `out` is too
+ * small. */
 bool nk_title_manifest_package_dir_name(const char *disc_id,
                                         const char *enhancement_package_id,
                                         char *out, size_t out_size);
@@ -214,7 +221,9 @@ bool nk_title_manifest_package_dir_name(const char *disc_id,
  * at <user_data_root>/packages/<DISC_ID>-enhanced-<id> when
  * `enhancement_package_id` names one. The package must be the variant its
  * folder names: an authentic package records no enhancement package in its
- * codegen options, and an enhanced one records this id. An invalid id is
+ * codegen options, and an enhanced one records this id, or for
+ * <timing id>+<hook id> the timing id and the code-hook package id, and a
+ * variant without a `+` records no code-hook package. An invalid id is
  * refused before any path is formed. Experimental entries are additionally
  * bound to their private profile's selected executable hash.
  * `current_disc_version` comes from the selected library ISO inspection;

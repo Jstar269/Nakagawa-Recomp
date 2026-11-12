@@ -115,8 +115,14 @@ typedef struct {
        package, packages/<disc_id>; an enhancement package id for the enhanced
        build, packages/<disc_id>-enhanced-<id> (docs/ENHANCEMENT_CONTRACT.md
        section 9). The player sets it from its per-title setting; the library
-       file never stores it. */
+       file never stores it. A build of a timing package with a code-hook
+       package is named <timing id>+<hook id> (section 9.9). */
     char enhancement_package_id[NK_MAX_ENHANCEMENT_PACKAGE_ID];
+    /* The enhanced build carries only a code-hook package, no timing package
+       (Wider culling with the 60 FPS game logic off, section 11.3.6): its launch
+       exports SR_EXPERIMENTAL_60HZ=0 and its build passes --ace-cull alone.
+       The library file never stores it. */
+    bool enhancement_hook_only;
 } NkGameEntry;
 
 #ifdef __cplusplus
