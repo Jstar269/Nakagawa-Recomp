@@ -1269,8 +1269,9 @@ instead, because the renderer does not detect depth aliasing. The cases, the dep
 
 At 1x the readback is the PSP's value.
 
-The render-target reads that decode at 1x do so by decision (#2279). None is a plain sample of the target's image;
-each reinterprets the target's memory, which the 1x decode does exactly. The README gives each reason in full:
+The render-target reads that decode at 1x do so by decision (#2279). The format, CLUT, swizzle, width and alignment
+cases reinterpret the target's memory, which the 1x decode does exactly; the mipmapped and depth cases have their own
+reasons. The README gives each reason in full:
 
 - no scaled form, because the texture's texels are not the target's pixels: 8888 read as 16-bit, 16-bit as 8888,
   CLUT4, CLUT8, DXT, and an address off the target's pixel boundaries;
@@ -1284,7 +1285,8 @@ each reinterprets the target's memory, which the 1x decode does exactly. The REA
   to guest VRAM first, through the GE's CPU-read path.
 
 `rtt-1x-reads` in `gpu-coherence-selftest` runs thirteen such reads at 1x, 2x and 4x (the README lists them): none
-binds a target's image, the depth reads commit the GPU's depth first, and guest VRAM equals the software renderer's.
+binds a target's image, each depth read commits the GPU's depth first, and the reading target's guest VRAM equals
+the software renderer's.
 
 ### 11.2. What an Item Must Have
 

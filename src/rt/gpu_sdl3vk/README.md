@@ -324,9 +324,10 @@ depth aliasing.
 
 ### Why the other reads stay at 1x (#2279)
 
-Each read below decodes guest VRAM at 1x at every render scale, by decision. None of them is a
-plain sample of the target's image: each reinterprets the target's memory, which is what the 1x
-decode does exactly, as the GE did.
+Each read below decodes guest VRAM at 1x at every render scale, by decision. The format, CLUT,
+swizzle, width and alignment cases are not plain samples of the target's image: each reinterprets
+the target's memory, which is what the 1x decode does exactly, as the GE did. The mipmapped and
+depth cases have their own reasons below.
 
 **No scaled form.** The texture's texel grid is not the target's pixel grid, so a texel has no
 device samples of its own:
@@ -368,10 +369,11 @@ the 0x04200000 linear view and the 0x04600000 view alike.
 `rtt-1x-reads` in `gpu-coherence-selftest` runs thirteen of these reads at 1x, 2x and 4x: an 8888
 target read as 4444, CLUT8, CLUT4, DXT1, CLUT32, swizzled, mipmapped and at half its buffer width;
 a 5650 target read as 5551 and as 8888; and its depth through the three views. None binds a
-target's image, the depth reads commit the GPU's depth first, and guest VRAM equals the software
-renderer's exactly. A control read in the target's own format binds its image directly. The
-others (an unaligned read, CLUT16, the other pairs of 16-bit formats) rest on the reasons above
-alone.
+target's image, each depth read commits depth the GPU wrote since the last commit, and the reading
+target's guest VRAM equals the software renderer's exactly. A control read in the target's own
+format binds its image directly. The other cases, among them an unaligned read, CLUT16, DXT3 and
+DXT5, the other pairs of formats, and swizzled, mipmapped or other-width reads of a 16-bit target,
+rest on the reasons above alone.
 
 ## Environment variables
 
