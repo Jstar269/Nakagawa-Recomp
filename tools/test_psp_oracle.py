@@ -12599,7 +12599,7 @@ class HleIoSeekMemoryStickSetupAndCleanupTests(unittest.TestCase):
                 self.assertIn(f"if (made < 0 || fd < 0 || wrote != (int){file_macro}_SIZE) {{", body)
                 self.assertIn(f"if (fd >= 0) (void)sceIoRemove({file_macro});", abort)
                 self.assertIn(f"if (made >= 0) (void)sceIoRmdir({dir_macro});", abort)
-                self.assertNotRegex(abort, rf"\n\s*\(void\)sceIo(Remove|Rmdir)\(")
+                self.assertNotRegex(abort, r"\n\s*\(void\)sceIo(Remove|Rmdir)\(")
 
     def test_a_directory_left_after_the_cleanup_fails_the_cleanup_row(self) -> None:
         for function, prefix, _file_macro, dir_macro in self.CASES:
