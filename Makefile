@@ -365,6 +365,26 @@ TITLE_LINK_FLAGS :=
 TITLE_ANDROID_OBJ :=
 endif
 
+# HOST_KIND names the build host's operating system for the few link options whose spelling
+# depends on the linker rather than the compiler: Windows_NT on Windows, otherwise what
+# `uname -s` prints (Linux, Darwin). Set it on the command line to inspect another host's
+# link lines.
+ifndef HOST_KIND
+ifeq ($(OS),Windows_NT)
+HOST_KIND := Windows_NT
+else
+HOST_KIND := $(shell uname -s 2>/dev/null)
+endif
+endif
+# Unused-section removal for the selftest links. GNU ld and the MinGW linker spell it
+# --gc-sections; Apple's ld64 rejects that option and spells it -dead_strip (#329). Every link
+# line uses this variable, never the raw option.
+ifeq ($(HOST_KIND),Darwin)
+LD_GC_SECTIONS := -Wl,-dead_strip
+else
+LD_GC_SECTIONS := -Wl,--gc-sections
+endif
+
 # Portable H.264 backend (src/rt/h264_ffmpeg.c): the pinned FFmpeg n4.4 H.264 decoder subset
 # vendored under src/rt/h264_ffmpeg_sub/ (LGPL-2.1-or-later, generic C, statically linked, no
 # system FFmpeg or dev headers). H264_FFMPEG=1 builds it and makes it the decoder where no
