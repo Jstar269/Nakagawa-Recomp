@@ -11,6 +11,7 @@
  * Extracted from hle.c on 2026-10-31 (#307). */
 
 #include "hle_internal.h"
+#include "ge_scene.h"
 #include "nid_names.h"   /* sr_nid_name(): names unknown NIDs in the trap below */
 #include "replay_checkpoint.h" /* sr_replay_pad_skip, sr_replay_pad_sample */
 #include "ace.h"         /* g_ace_on, ace_stick_sample: Ace's stick dead-zone remap */
@@ -246,6 +247,7 @@ static void route_fail(const char *fmt, ...) {
         sr_flight_fatal(SR_FLIGHT_KIND_FATAL_HOST, 0u, 0u, ROUTE_FAIL_EXIT);
         hle_exit_audio_stats();
         hle_exit_close_audio_dump();
+        ge_scene_dump_finish();
         sr_compat_report();
         (void)sr_videorec_finish_status("a route check failed", ROUTE_FAIL_EXIT);
         sr_perf_shutdown();
