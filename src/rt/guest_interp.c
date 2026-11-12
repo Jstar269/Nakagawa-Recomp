@@ -597,6 +597,49 @@ int sr_module_code_fetch_authority(uint32_t pc) {
     return module_span_owns(binding->code, pc - binding->base);
 }
 
+static const SrModuleNonCode **s_module_non_code;
+static size_t s_module_non_code_count;
+static size_t s_module_non_code_capacity;
+
+void sr_module_code_non_code_register(const SrModuleNonCode *record) {
+    if (!record || !record->code || (record->nspans && !record->spans)) {
+        fprintf(stderr, "sr_module_code_non_code_register: malformed generated record\n");
+        abort();
+    }
+    for (size_t i = 0; i < s_module_non_code_count; i++)
+        if (s_module_non_code[i] == record) return;
+    if (s_module_non_code_count == s_module_non_code_capacity) {
+        size_t next = s_module_non_code_capacity ? s_module_non_code_capacity * 2u : 4u;
+        const SrModuleNonCode **grown =
+            realloc((void *)s_module_non_code, next * sizeof(*grown));
+        if (!grown) {
+            fprintf(stderr, "sr_module_code_non_code_register: out of memory\n");
+            abort();
+        }
+        s_module_non_code = grown;
+        s_module_non_code_capacity = next;
+    }
+    s_module_non_code[s_module_non_code_count++] = record;
+}
+
+int sr_module_code_non_code(uint32_t pc, const char **name_out, uint32_t *link_out) {
+    const SrModuleBinding *binding = module_binding_for(pc);
+    if (!binding) return 0;
+    uint32_t link_pc = pc - binding->base;
+    for (size_t r = 0; r < s_module_non_code_count; r++) {
+        const SrModuleNonCode *record = s_module_non_code[r];
+        if (record->code != binding->code) continue;
+        for (uint32_t i = 0; i < record->nspans; i++) {
+            if (link_pc >= record->spans[i].start && link_pc < record->spans[i].end) {
+                if (name_out) *name_out = binding->code->name;
+                if (link_out) *link_out = link_pc;
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
 void sr_module_code_reset(void) {
     for (unsigned i = 0; i < SR_MODULE_CODE_MAX_BOUND; i++) {
         if (atomic_load_explicit(&s_module_binding_live[i], memory_order_acquire)) {

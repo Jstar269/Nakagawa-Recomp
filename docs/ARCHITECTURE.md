@@ -220,6 +220,27 @@ These tools run on the development host before the native compiler.
 `codegen.py` is the translation core.
 
 - **Function discovery:** consumes `analyze.py` results.
+- **Non-code in an image without relocation evidence:** an image loaded at a fixed address (an
+  overlay, or an `ET_EXEC` executable) carries no relocations, so the analyzer cannot tell a word
+  that holds a code address from any other. Its seed sweeps (address pairs, `j`-shaped words,
+  table stores, the word after a terminator) and its data-section pointers can then start
+  functions inside the data its code section holds. For such an image only (`relocated_words` is
+  `None`), `analyze.py` traces every candidate the format does not name and withdraws it when the
+  trace reaches a word no Allegrex CPU decodes (`reserved_encoding`: a reserved opcode, SPECIAL
+  function or REGIMM `rt`, a `blez`/`bgtz` form with `rt` set). The seeds that are never withdrawn
+  are the entry point, the exports and init array, the import stubs, and the addresses a run
+  reached (capture entries and miss seeds). A valid instruction the translator does not support is
+  no evidence, and neither is a transfer out of the image: a fixed-address overlay may call one
+  loaded later. Words that only withdrawn traces reached become void: the sweeps skip them, so a
+  seed whose evidence lies there is no evidence. Discovery runs again until a pass withdraws
+  nothing; each pass that continues withdraws at least one more address, so the loop ends without
+  a limit. An image whose code holds no reserved word is not traced again; otherwise the checking
+  traces share the words already known to reach none, so a tail many entries share is walked
+  once. The withdrawn addresses stay dispatch boundaries, the module's spans exclude the void, and
+  the descriptor registers an `SrModuleNonCode` record (count of withdrawn seeds and void words)
+  only for a module that has one, so other descriptors are unchanged. A dispatch that reaches a
+  withdrawn span stops with `NON_CODE_WITHDRAWN` (see [`DEBUGGING.md`](DEBUGGING.md)). Images with
+  relocation evidence are untouched.
 - **Instruction translation:** emits C operating on the shared `CpuState` ABI.
 - **Narrow compatibility translations:** address-specific/custom behavior is allowed only when
   evidence justifies it and should be tracked as semantic debt rather than treated as a general

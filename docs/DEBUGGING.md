@@ -461,6 +461,17 @@ non-zero:
   them, so another round would build the same thing.
 - `BRINGUP_CAPTURE_MISSING`: the run named a capture the folder does not hold.
 
+**Data withdrawn from a fixed-address image.** An image without relocation evidence (an overlay
+or an executable loaded at a fixed address) can keep data in its code section, and codegen withdraws
+the seeds whose traces reach a word no Allegrex CPU decodes, with the words only they reached
+([`ARCHITECTURE.md`](ARCHITECTURE.md#codegen-internals)). Codegen prints one line per such image,
+`codegen: <module>: withdrew N seeds as non-code, W words only they reached (no relocation evidence;
+evidence: ...)` (for the executable, `codegen: withdrew N seeds of the executable as non-code, ...`),
+with the reserved-word kinds counted. A dispatch into a module's withdrawn span stops with
+`NON_CODE_WITHDRAWN: 0x... is <module>@0x..., in a span the build withdrew as non-code`. The game
+called into those words, so the withdrawal was wrong: report it as a translator bug with the address
+and the module, not as a missing function.
+
 The share is a time share. It overstates the interpreter's share of instructions, because the
 interpreter is slower per instruction. The exact instruction share still needs a
 `PERF_AOT_INSTRUCTIONS=1` build with `SR_PERF=1`. Time is charged to the tier that is running. A

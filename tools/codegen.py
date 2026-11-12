@@ -23,6 +23,7 @@ import struct
 import re
 import os
 import sys
+from collections import Counter
 from dataclasses import dataclass, field as dataclass_field
 from typing import Any
 
@@ -40,7 +41,7 @@ from analyze import (
     canonical_cfg_gate, canonical_cfg_json, canonical_cfg_report,
     check_code_overlay, code_overlay_elf, code_overlay_layout, data_section_words,
     is_code_overlay, is_fixed_overlay, static_coverage, branch_kind, BRANCH_UNCOND,
-    seeds_in_analysis, _gpr_writes,
+    seeds_in_analysis, spans_without, _gpr_writes,
 )
 from codegen_hst_stubs import HST_CUSTOM_STUBS
 from host_stubs import HST_SIMPLE_STUBS
@@ -5255,6 +5256,12 @@ class RuntimeModuleTranslation:
     shared: bool = False
     # imports.variable_imports of the module at base 0: its sites are link addresses.
     var_imports: tuple = ()
+    # An image without relocation evidence: the seeds its analysis withdrew as non-code,
+    # ((address, first reserved word, why), ...), and the (start, end) link ranges only they
+    # reached, which are outside `spans` (analyze, "Non-code in an image without relocation
+    # evidence"). Empty for every other image; the descriptor then carries no record.
+    non_code: tuple = ()
+    non_code_spans: tuple = ()
 
     @property
     def base_symbol(self):
@@ -5441,7 +5448,9 @@ def translate_runtime_module(index, module_path, profile=None, cfg_gate=False, s
     ranges = exec_ranges(elf)
     discovery = {}
     try:
-        # A code overlay's entry points are held by the executable (entry_hints).
+        # A code overlay's entry points are held by the executable (entry_hints). In an image
+        # without relocation evidence the analysis withdraws the seeds that run into data
+        # (discovery["non_code"]); their addresses stay dispatch boundaries below.
         analyzed, _ = analyze(elf, cfg_gate=cfg_gate,
                               entry_hints=entry_hints if overlay else None,
                               mixed_code_data=fixed_overlay, report=discovery, entries=entries)
@@ -5449,6 +5458,20 @@ def translate_runtime_module(index, module_path, profile=None, cfg_gate=False, s
         sys.stderr.write(f"codegen: {format_boundary(exc, module_path)}\n")
         return 1
     known = {a for a in analyzed if in_ranges(a, ranges)}
+    non_code = discovery.get("non_code", {})
+    non_code_words = discovery.get("non_code_words", frozenset())
+    # A withdrawn address was an entry before, and every body stopped at it; it stays a
+    # boundary (a transfer there dispatches) so no remaining body changes its extent.
+    boundaries = set(non_code) or None
+    if non_code:
+        module.non_code = tuple((a, *non_code[a]) for a in sorted(non_code))
+        module.non_code_spans = tuple(word_runs(non_code_words))
+        reasons = Counter(re.sub(r" (0x[0-9a-f]+|\d+)$", "", why)
+                          for _, why in non_code.values())
+        sys.stderr.write(
+            f"codegen: {name}: withdrew {len(non_code)} seeds as non-code, "
+            f"{len(non_code_words)} words only they reached (no relocation evidence; "
+            f"evidence: {', '.join(f'{r} {n}' for r, n in reasons.most_common())})\n")
     if cfg_gate:
         report = canonical_cfg_report(elf, ranges=ranges, entries=sorted(known))
         findings = canonical_cfg_gate(report)
@@ -5497,8 +5520,10 @@ def translate_runtime_module(index, module_path, profile=None, cfg_gate=False, s
             else:
                 try:
                     # One walk serves the body and its translated-word count.
-                    flow = function_flow(elf, a, spans, known, options=options)
+                    flow = function_flow(elf, a, spans, known, dispatch_boundaries=boundaries,
+                                         options=options)
                     text = "\n".join(emit_function(elf, a, spans, known, profile=profile,
+                                                   dispatch_boundaries=boundaries,
                                                    flow=flow, options=options))
                     nwords = len(head_run_words(elf, a, flow[0]))
                     translated_words.update(flow[0])
@@ -5514,6 +5539,8 @@ def translate_runtime_module(index, module_path, profile=None, cfg_gate=False, s
     finally:
         ADDRESS_SPACE = previous_space
     module.spans = sorted(set((lo, hi) for lo, hi in ranges if hi > lo))
+    if non_code_words:
+        module.spans = spans_without(module.spans, non_code_words)
     if fixed_overlay:
         # Its file mixes code and data in one segment, so no leading run of bytes is code
         # only. The identity is every word a translation was emitted for, in address order,
@@ -5525,7 +5552,7 @@ def translate_runtime_module(index, module_path, profile=None, cfg_gate=False, s
         module.overlay_check_len = len(words)
         module.overlay_check_fnv1a64 = fnv1a64(words)
         code = {a for a in set(discovery.get("covered", ())) | translated_words | known
-                if in_ranges(a, ranges)}
+                if in_ranges(a, ranges) and a not in non_code_words}
         module.spans = word_runs(code)
         # An address its traced code materializes but never calls or jumps to may be data
         # (analyze._seed_materialized_code): it has no executable authority and is not part
@@ -5959,6 +5986,21 @@ def runtime_module_descriptor_lines(module):
                      for lo, hi in module.overlay_check_spans)
         lines.append("};")
     reason = c_string(module.unsupported_reason) if module.unsupported_reason else "NULL"
+    non_code = []
+    if module.non_code:
+        # Only a module with withdrawals carries the record (and sr_register_all registers it),
+        # so every other descriptor is unchanged.
+        non_code.append(f"static const SrModuleSpan sr_m{k}_non_code_spans[] = {{")
+        non_code.extend(f"    {{ 0x{lo:08x}u, 0x{hi:08x}u }}," for lo, hi in module.non_code_spans)
+        non_code += [
+            "};",
+            f"static const SrModuleNonCode sr_m{k}_non_code = {{",
+            f"    &sr_m{k}_code, sr_m{k}_non_code_spans, {len(module.non_code_spans)}u, "
+            f"{len(module.non_code)}u, "
+            f"{sum(hi - lo for lo, hi in module.non_code_spans) // 4}u,",
+            "};",
+            "",
+        ]
     lines += [
         f"static const SrModuleCode sr_m{k}_code = {{",
         f"    {c_string(module.name)}, 0x{module.file_size:08x}u, \"{module.file_sha256}\",",
@@ -5971,7 +6013,7 @@ def runtime_module_descriptor_lines(module):
         f"{check_spans}, {len(module.overlay_check_spans)}u",
         "};",
         "",
-    ]
+    ] + non_code
     return lines
 
 
@@ -6788,6 +6830,8 @@ def _registration_lines(elf, ranges, known, base_name, num_files, emitted, resum
     main_out.append("    sr_exec_span_reset();")
     for module in module_translations:
         main_out.append(f"    sr_module_code_register(&sr_m{module.index}_code);")
+        if module.non_code:
+            main_out.append(f"    sr_module_code_non_code_register(&sr_m{module.index}_non_code);")
     for lo, hi in exec_spans:
         main_out.append(
             f"    if (!sr_exec_span_register(0x{lo:08x}u, 0x{hi:08x}u)) {{"
@@ -7029,7 +7073,9 @@ def _translate(argv):
     extra_spans = resolve_extra_spans(extra_span_arg)
     # Seeds from a run's dispatch misses (tools/miss_seeds.py, #1848) are extra entries for the
     # primary image only. Without --miss-seeds the analysis call is exactly the one it always was.
-    seed_args = {}
+    # The analysis report carries the seeds withdrawn as non-code in an image without
+    # relocation evidence (analyze, "Non-code in an image without relocation evidence").
+    seed_args = {"report": {}}
     if cli.miss_seeds is not None:
         try:
             seed_args = {"seeds": set(miss_seeds.read_seed_file(cli.miss_seeds).seeds),
@@ -7038,14 +7084,24 @@ def _translate(argv):
             sys.stderr.write(f"codegen: {exc}\n")
             return 2
     try:
-        if seed_args:
+        if "seeds" in seed_args:
             seed_args["seed_check"] = emitter_seed_check(elf, profile, frozenset(omit_aot.addrs),
                                                          stack_census, options=options)
         analyzed, ranges = analyze(elf, extra_spans=extra_spans, cfg_gate=cfg_gate, **seed_args)
     except ImportTableError as exc:
         sys.stderr.write(f"codegen: {format_boundary(exc)}\n")
         return 1
-    miss_seed_outcome = seed_args["report"]["miss_seeds"] if seed_args else None
+    miss_seed_outcome = seed_args["report"]["miss_seeds"] if "seeds" in seed_args else None
+    # A withdrawn seed is no entry, and stays a boundary no body runs through.
+    main_non_code = {a: hit for a, hit in seed_args["report"].get("non_code", {}).items()
+                     if a not in analyzed}
+    if main_non_code:
+        reasons = Counter(re.sub(r" (0x[0-9a-f]+|\d+)$", "", why) for _, why in main_non_code.values())
+        sys.stderr.write(
+            f"codegen: withdrew {len(main_non_code)} seeds of the executable as non-code, "
+            f"{len(seed_args['report'].get('non_code_words', ()))} words only they reached "
+            f"(no relocation evidence; evidence: "
+            f"{', '.join(f'{r} {n}' for r, n in reasons.most_common())})\n")
     if miss_seed_outcome is not None:
         miss_seeds.report_outcome(miss_seed_outcome, prefix="CODEGEN_MISS_SEEDS")
     cfg_report = _cfg_report_and_gate(elf, analyzed, ranges, extra_spans, cfg_report_path, cfg_gate,
@@ -7053,7 +7109,7 @@ def _translate(argv):
     owned_exec_ranges = list(ranges)
     catalog = build_entry_catalog(analyzed, ranges, profile=profile, elf=elf)
     omitted = omit_aot.apply(catalog, elf.entry)
-    dispatch_boundaries = set(omit_aot.addrs)
+    dispatch_boundaries = set(omit_aot.addrs) | set(main_non_code)
     if omitted:
         for addr in sorted(omit_aot.addrs):
             sys.stderr.write(f"CODEGEN_OMIT_AOT 0x{addr:08x} dispatch-fallback\n")

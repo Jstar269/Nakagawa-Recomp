@@ -543,6 +543,42 @@ static void test_mixed_overlay_is_identified_by_its_code_ranges(void) {
     sr_module_code_reset();
 }
 
+/* Words a module's analysis withdrew as non-code (tools/analyze.py) lie outside its spans and
+ * are named: a transfer into one stops with NON_CODE_WITHDRAWN (dispatch_run_interp), so a
+ * wrong withdrawal is one line in the log. */
+static const SrModuleSpan k_module_a_non_code_spans[] = { { MODULE_GAP_OFF, MODULE_GAP_OFF + 0x10u } };
+static const SrModuleNonCode k_module_a_non_code = {
+    &k_module_a, k_module_a_non_code_spans, 1u, 1u, 4u,
+};
+
+static void test_runtime_module_non_code_is_named(void) {
+    SrModuleBindDetail detail;
+    const char *name = NULL;
+    uint32_t link = 0u;
+    sr_module_code_reset();
+    sr_exec_span_reset();
+    sr_module_code_register(&k_module_a);
+    sr_module_code_non_code_register(&k_module_a_non_code);
+    sr_module_code_non_code_register(&k_module_a_non_code);   /* registers once */
+    CHECK(!sr_module_code_non_code(MODULE_BASE_LOW + MODULE_GAP_OFF + 4u, &name, &link),
+          "an unbound module names nothing");
+    CHECK(sr_module_code_bind(&k_module_a, MODULE_BASE_LOW, &detail) == SR_MODULE_BIND_OK,
+          "module A binds (address 0x%08x)", detail.address);
+    CHECK(sr_module_code_non_code(MODULE_BASE_LOW + MODULE_GAP_OFF + 4u, &name, &link) &&
+              name && strcmp(name, "overlay_a.prx") == 0 && link == MODULE_GAP_OFF + 4u,
+          "a withdrawn word of a bound module is named with its module and link address");
+    CHECK(sr_module_code_fetch_authority(MODULE_BASE_LOW + MODULE_GAP_OFF + 4u) == 0,
+          "a withdrawn word is not executable");
+    Probe stop = probe(MODULE_BASE_LOW + MODULE_GAP_OFF + 4u, PROBE_PC, PROBE_RA);
+    CHECK(!stop.body_ran, "a transfer into a withdrawn word runs nothing (NON_CODE_WITHDRAWN)");
+    CHECK(!sr_module_code_non_code(MODULE_BASE_LOW + 0x20u, NULL, NULL) &&
+              !sr_module_code_non_code(MODULE_BASE_LOW + MODULE_GAP_OFF + 0x10u, NULL, NULL),
+          "span words and words past the withdrawn range are not named");
+    sr_module_code_unbind(&k_module_a);
+    CHECK(!sr_module_code_non_code(MODULE_BASE_LOW + MODULE_GAP_OFF + 4u, NULL, NULL),
+          "an unbound module's withdrawn words are not named");
+}
+
 static void test_runtime_module_binding_is_the_authority_for_its_range(void) {
     SrModuleBindDetail detail;
     sr_module_code_reset();
@@ -2553,6 +2589,7 @@ int main(int argc, char **argv) {
     test_call_boundary_keeps_callee_register_writes();
     test_historical_call_target_fails_at_named_boundary();
     test_runtime_module_binding_is_the_authority_for_its_range();
+    test_runtime_module_non_code_is_named();
     test_code_overlays_follow_guest_memory();
     test_mixed_overlay_is_identified_by_its_code_ranges();
     test_late_import_retirement_is_visible_after_warm_dispatch();

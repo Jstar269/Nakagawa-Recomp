@@ -2217,7 +2217,17 @@ static int dispatch_run_interp(
             fault.opcode_valid ? "" : "unavailable/", fault.opcode, fault.address);
     fprintf(stderr, "  SEMANTIC_BOUNDARY: %s; in the works: #308\n",
             dispatch_semantic_boundary_name(interp_result));
-    if (interp_result == SR_GUEST_INTERP_NOT_EXECUTABLE) code_capture_note(fault.pc, s->pc, s->r[31]);
+    if (interp_result == SR_GUEST_INTERP_NOT_EXECUTABLE) {
+        const char *module_name = NULL;
+        uint32_t link_pc = 0u;
+        if (sr_module_code_non_code(fault.pc, &module_name, &link_pc))
+            fprintf(stderr,
+                    "  NON_CODE_WITHDRAWN: 0x%08" PRIx32 " is %s@0x%08" PRIx32 ", in a span the build "
+                    "withdrew as non-code (its code section holds data there); a wrong "
+                    "withdrawal is a translator bug\n",
+                    fault.pc, module_name, link_pc);
+        code_capture_note(fault.pc, s->pc, s->r[31]);
+    }
     dispatch_record_semantic_stop(dispatch_semantic_boundary_name(interp_result));
     dump_dispatch_trace();
     return (int)interp_result;

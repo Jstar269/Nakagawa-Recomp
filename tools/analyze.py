@@ -1216,7 +1216,8 @@ def called_pointer_array_entries(elf, covered, relocated=None):
     return entries
 
 
-def trace_function(elf, start, ranges, covered, calls, hc, walked=None, unrelocated=None):
+def trace_function(elf, start, ranges, covered, calls, hc, walked=None, unrelocated=None,
+                   end_at_outside_jump=False):
     # Recursive descent over one function's intra-procedural control flow from `start`.
     # Adds every instruction address reached to `covered`, and every direct-call target (jal,
     # or a linking branch to a callable, #968) to `calls`. Returns newly found targets so
@@ -1239,6 +1240,10 @@ def trace_function(elf, start, ranges, covered, calls, hc, walked=None, unreloca
     # loader does not relocate names an address outside the module (a module linked against
     # its executable calls into it this way), so its target is no edge into this module's
     # code; the word is added to `unrelocated` when the caller passes a set.
+    # `end_at_outside_jump` ends the path at a `j` whose target is outside `ranges` and the
+    # file-backed executable bytes, as a `j` inside them does. Without it the path runs on past
+    # the delay slot, the discovery's long-standing behaviour; only the checking trace
+    # (_check_trace) sets it.
     relocated = _relocated_jumps(elf)
     ranges = span_index(ranges)
     stack = [start]
@@ -1347,6 +1352,8 @@ def trace_function(elf, start, ranges, covered, calls, hc, walked=None, unreloca
                     else:
                         stack.append(target)
                         break
+                elif end_at_outside_jump and not in_ranges(target, _file_backed_exec_ranges(elf)):
+                    break
             if op == 0 and funct == 0x08:  # jr (return / computed): end this path
                 covered.add(pc + 4)
                 # If the instruction after the delay slot is also jr $ra, the
@@ -1471,6 +1478,43 @@ def direct_j_edges(elf, ranges, targets=None):
 #: ``bgezal $zero``; these are *calls* wearing a branch encoding, so their
 #: target is a callable boundary and never continuation evidence.
 REGIMM_LINK_RT = frozenset({0x10, 0x11, 0x12, 0x13})
+
+#: Primary opcodes the Allegrex leaves undefined: the 64-bit and MIPS IV forms and the slots
+#: the VFPU does not use. COP3 (0x13) and jalx (0x1d) are left out: the PSP toolchain's
+#: disassembler still names them, so they are not judged here.
+_RESERVED_OPCODES = frozenset({0x1A, 0x1E, 0x27, 0x2C, 0x2D, 0x33, 0x3B})
+#: SPECIAL function codes the Allegrex defines (shifts and rotates, jr/jalr, the conditional
+#: moves, syscall, break, sync, the HI/LO moves, clz/clo, the multiply-divide unit, the ALU
+#: forms, max/min). The rest, the traps (0x30-0x36) included, are reserved.
+_SPECIAL_FUNCTS = frozenset({
+    0x00, 0x02, 0x03, 0x04, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0F,
+    0x10, 0x11, 0x12, 0x13, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D,
+    0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x2A, 0x2B, 0x2C, 0x2D, 0x2E, 0x2F,
+})
+#: REGIMM rt values the Allegrex defines: the eight branches. Its trap-immediate forms are
+#: reserved.
+_REGIMM_RTS = frozenset({0x00, 0x01, 0x02, 0x03}) | REGIMM_LINK_RT
+#: Branches whose encoding requires rt = 0: blez, bgtz, blezl, bgtzl.
+_RT_ZERO_BRANCHES = frozenset({0x06, 0x07, 0x16, 0x17})
+
+
+def reserved_encoding(word):
+    """Why ``word`` is no Allegrex instruction, or None when it may be one.
+
+    Only the opcode, SPECIAL function and REGIMM fields are judged, and the rt field of the
+    four branches that require it to be zero; a word this passes can still be an encoding no
+    instruction has (a reserved VFPU or FPU form). So a reason is proof that the word is not
+    code, and None proves nothing. tools/test_analyze_non_code.py pins every class."""
+    op = word >> 26
+    if op in _RESERVED_OPCODES:
+        return f"reserved opcode 0x{op:02x}"
+    if op == 0 and (word & 0x3F) not in _SPECIAL_FUNCTS:
+        return f"reserved SPECIAL function 0x{word & 0x3F:02x}"
+    if op == 1 and ((word >> 16) & 0x1F) not in _REGIMM_RTS:
+        return f"reserved REGIMM rt 0x{(word >> 16) & 0x1F:02x}"
+    if op in _RT_ZERO_BRANCHES and (word >> 16) & 0x1F:
+        return f"opcode 0x{op:02x} with rt {(word >> 16) & 0x1F}"
+    return None
 
 
 def linked_branch_target(source, word):
@@ -1875,6 +1919,11 @@ class _Discovery:
         # `walked`). Traces share a set only when their ranges are equal, so a word expanded
         # under one range list is never skipped under another.
         self.walked_by_ranges = {} if trace_memo else None
+        # An image without relocation evidence (_non_code_entries): the addresses withdrawn
+        # as non-code, never a seed or a call target, and the words a seed's evidence may not
+        # come from. Both stay empty for every other image.
+        self.non_code = frozenset()
+        self.void = frozenset()
 
     def trace_ranges_for_entry(self, entry):
         ranges = self.ranges
@@ -1916,7 +1965,10 @@ class _Discovery:
         # `file_exec_ranges` is only the file-backed PT_LOAD executable set. So a target in
         # an extra span that is not file-backed is accepted through `ranges` alone. A
         # proven span (a called pointer array's targets) is callable the same way; only a
-        # trace that starts inside it can name a target there.
+        # trace that starts inside it can name a target there. An address withdrawn as
+        # non-code is never one.
+        if addr in self.non_code:
+            return False
         return (in_ranges(addr, self.ranges) or in_ranges(addr, self.file_exec_ranges)
                 or in_ranges(addr, self.proven_spans))
 
@@ -1944,7 +1996,7 @@ class _Discovery:
             # evidence, so this runs once the traced code is known.
             seeds = set()
             for entry in called_pointer_array_entries(elf, covered, relocated):
-                if entry in functions:
+                if entry in functions or entry in self.non_code:
                     continue
                 if not callable_target(entry):
                     span = _containing_span(entry, _executable_segment_spans(elf))
@@ -1983,7 +2035,7 @@ def _seed_entry_point(d):
 
 
 def _seed_prologues_and_terminators(d):
-    elf, ranges, noisy = d.elf, d.ranges, d.noisy
+    elf, ranges, noisy, void = d.elf, d.ranges, d.noisy, d.void
     # Build a file-offset -> vaddr lookup from PT_LOAD segments (needed because
     # the raw file's byte offset differs from the guest virtual address for PRX/rebased ELFs).
     # If no PT_LOAD segment covers a given file offset, the address is skipped.
@@ -1999,7 +2051,7 @@ def _seed_prologues_and_terminators(d):
     for i in range(0, len(data) - 4, 4):
         w = int.from_bytes(data[i:i+4], 'little')
         va = file_to_vaddr(i)
-        if va is None:
+        if va is None or va in void:  # a withdrawn word is no evidence (_non_code_entries)
             continue
         # addiu sp, sp, -X (0x27bdXXXX where XXXX is negative)
         if (w >> 16) == 0x27BD and (w & 0x8000) and (va & 3) == 0:
@@ -2120,15 +2172,34 @@ def _seed_function_pointer_tables(d, entry_hints):
         if in_text(val) and _is_address_taken_entry(elf, val):
             hc.add(val)
 
+
+def spans_without(ranges, words):
+    """``ranges`` less the 4-byte words at ``words`` (the same list when there are none)."""
+    if not words:
+        return ranges
+    out = []
+    for lo, hi in ranges:
+        start = lo
+        for w in sorted(a for a in words if lo <= a < hi):
+            if w > start:
+                out.append((start, w))
+            start = max(start, w + 4)
+        if hi > start:
+            out.append((start, hi))
+    return out
+
+
+def _seed_computed_goto_pads(d):
     # A computed `jr` whose target set the code bounds (an `andi` mask applied to a
-    # materialized base) lands only on those pads; each one needs a dispatch entry.
-    hc.update(bounded_computed_goto_targets(elf, ranges))
+    # materialized base) lands only on those pads; each one needs a dispatch entry. The
+    # evidence is code in the text, so a withdrawn word takes no part (_non_code_entries).
+    d.hc.update(bounded_computed_goto_targets(d.elf, spans_without(d.ranges, d.void)))
 
 
 def _seed_address_materializations(d):
     elf, ranges, file_exec_ranges = d.elf, d.ranges, d.file_exec_ranges
     relocated, jumps, hc, noisy, jtails = d.relocated, d.jumps, d.hc, d.noisy, d.jtails
-    cfg_gate, in_text = d.cfg_gate, d.in_text
+    cfg_gate, in_text, void = d.cfg_gate, d.in_text, d.void
     # Sweep executable sections for weaker "block boundary" signals and possible indirect
     # targets. Direct JAL targets are collected by trace_function only after their source
     # instruction is reached; a linear sweep can mistake data inside .text for a call.
@@ -2164,6 +2235,11 @@ def _seed_address_materializations(d):
         for off in range(0, len(blob) - 3, 4):
             word = int.from_bytes(blob[off:off + 4], 'little')
             addr = lo + off
+            if addr in void:
+                # A word withdrawn as non-code is no evidence and ends a straight-line run
+                # (_non_code_entries). The set is empty for every other image.
+                hireg, clear_at, before_slot = {}, None, None
+                continue
             if clear_at is not None and addr == clear_at - 4:
                 before_slot = dict(hireg)
             elif clear_at is not None and addr == clear_at:
@@ -2799,7 +2875,7 @@ def _seed_materialized_code(d, entry_hints=(), work=None):
                 counts["site_checks"] += 1
                 counts["block_words"] += (site - start) // 4 + 1
                 named[site], starts[site] = target, start
-                if (target is not None and target not in withdrawn
+                if (target is not None and target not in withdrawn and target not in d.non_code
                         and target not in d.functions and target not in d.covered):
                     batch.add(target)
             if not batch:
@@ -2877,19 +2953,67 @@ def _analyze(elf, extra_spans, cfg_gate, trace_memo, report, entry_hints,
     # `seeds` are extra entries; `unusable`, a dict, receives why any of them cannot be one.
     # `floor` is the owned spans of the same analysis without seeds; `unproven`, a dict, receives
     # why a seed added off that floor is not proven an entry.
+    # `report` also receives non_code ({withdrawn address: (first reserved word, why)}) and
+    # non_code_words, the words only withdrawn code reached: both empty unless the image has
+    # no relocation evidence (_non_code_entries).
+    non_code, reach, void, evidence_cache = {}, {}, frozenset(), {}
+    while True:
+        d, structural, code_candidates, materialized_code_work = _discover(
+            elf, extra_spans, cfg_gate, trace_memo, entry_hints, mixed_code_data, seeds,
+            unusable, floor, unproven, entries, non_code, void)
+        if d.relocated is not None:
+            break
+        # Termination: every pass that continues adds at least one address to `non_code`,
+        # which only grows and holds addresses of this image's code ranges, a finite set.
+        # No pass limit is needed or applied.
+        found, reached = _non_code_entries(d, structural, evidence_cache)
+        for entry, (hit, words) in found.items():
+            non_code[entry], reach[entry] = hit, words
+        void = frozenset().union(*reach.values()) - reached
+        if not found:
+            break
+
+    merged_ranges = _owned_spans(d)
+    if report is not None:
+        report.update(covered=d.covered, calls=d.calls, hc=d.hc,
+                      code_candidates=code_candidates - d.covered - d.functions,
+                      materialized_code_work=materialized_code_work,
+                      non_code=dict(non_code), non_code_words=frozenset(void))
+    return d.functions, merged_ranges
+
+
+def _discover(elf, extra_spans, cfg_gate, trace_memo, entry_hints, mixed_code_data, seeds,
+              unusable, floor, unproven, entries, non_code, void):
+    """One discovery of the image with the given withdrawals: (state, structural seeds,
+    code_candidates, materialized_code_work). The structural seeds are the ones the image's
+    format names (entry point, exports and the init array, import stubs) and the ones a run
+    reached (entries, miss seeds): no withdrawal touches them. A data-section pointer or an
+    executable's pointer into the image is not one: without relocation evidence a data word that
+    equals a text address may be a coincidence."""
     d = _Discovery(elf, extra_spans, cfg_gate, trace_memo)
+    d.non_code = frozenset(non_code)
+    d.void = frozenset(void)
     _seed_entry_point(d)
     _seed_prologues_and_terminators(d)
     _seed_module_exports(d)
     _seed_import_stubs(d)
+    structural = set(d.hc)
     _seed_function_pointer_tables(d, entry_hints)
+    _seed_computed_goto_pads(d)
     _seed_address_materializations(d)
     if mixed_code_data:
         _keep_prologue_seeds(d)
     if entries is not None:
         _seed_only_entries(d, entries)
+        structural = set(d.hc)
     if seeds:
+        hc = set(d.hc)
         unusable.update(_seed_miss_targets(d, seeds, floor, unproven))
+        structural |= d.hc - hc
+    if d.non_code:
+        d.hc -= d.non_code
+        d.noisy -= d.non_code
+        d.jtails -= d.non_code
 
     # Trace each function's extent from the high-confidence seeds, following discovered calls.
     d.functions = set(d.hc)
@@ -2904,13 +3028,147 @@ def _analyze(elf, extra_spans, cfg_gate, trace_memo, report, entry_hints,
     # The late passes can reach start-up code that calls a pointer array (a function
     # entered only through a pointer or the gap fill); seed those arrays too.
     d.discover([])
+    return d, structural, code_candidates, materialized_code_work
 
-    merged_ranges = _owned_spans(d)
-    if report is not None:
-        report.update(covered=d.covered, calls=d.calls, hc=d.hc,
-                      code_candidates=code_candidates - d.covered - d.functions,
-                      materialized_code_work=materialized_code_work)
-    return d.functions, merged_ranges
+
+# ---- Non-code in an image without relocation evidence ------------------------------------
+#
+# Every relocation gate of the seed sweeps reads "no relocation map" as "every word is an
+# address" (_relocated_as). In an image whose code section also holds data, a data word that
+# looks like a `j`, an `la` pair, a table of pointers or a frame prologue then seeds a function,
+# and its trace and body run through the data. The analysis therefore withdraws, in such an
+# image, every seed the image's structure does not name whose trace reaches a word that is no
+# Allegrex instruction (reserved_encoding), with what only it reached, and discovers again.
+
+
+class _ReservedWord(Exception):
+    def __init__(self, address, why):
+        super().__init__(address, why)
+        self.address, self.why = address, why
+
+
+def _non_code_evidence(elf, ranges, cache):
+    """{word address: why} for the words of ``ranges`` no Allegrex CPU decodes (reserved_encoding).
+
+    Each range is read once (``cache``, keyed by range, keeps the answer across passes), so
+    the scan costs one read per range, not one per word."""
+    found = {}
+    for lo, hi in ranges:
+        key = (lo, hi)
+        if key not in cache:
+            raw = elf.read_at_vaddr(lo, hi - lo) or b""
+            cache[key] = {lo + i: why for i in range(0, len(raw) - 3, 4)
+                          if (why := reserved_encoding(int.from_bytes(raw[i:i + 4], "little")))}
+        found.update(cache[key])
+    return found
+
+
+class _CheckedCover(set):
+    """The `covered` set of a checking trace: adding a word no Allegrex CPU decodes (an
+    address of ``evidence``) stops the trace there (the word is kept)."""
+
+    def __init__(self, evidence):
+        super().__init__()
+        self.evidence = evidence
+
+    def add(self, address):
+        super().add(address)
+        why = self.evidence.get(address)
+        if why is not None:
+            raise _ReservedWord(address, why)
+
+
+class _ScratchSet:
+    """`calls` for a checking trace: reads the discovery's set and keeps its own additions."""
+
+    __slots__ = ("base", "added")
+
+    def __init__(self, base):
+        self.base, self.added = base, set()
+
+    def __contains__(self, item):
+        return item in self.added or item in self.base
+
+    def __iter__(self):
+        return iter(self.added | self.base)
+
+    def add(self, item):
+        self.added.add(item)
+
+
+class _CleanView:
+    """`walked` for a checking trace. A word in ``clean`` was expanded by an earlier trace that
+    reached no reserved word, so every path from it is known to reach none, and it ends a path.
+    The words this trace expands are kept apart in ``expanded``: they are clean only once the
+    whole trace is. Only expanded words count, never a word `covered` holds without expanding it
+    (a delay slot): a path that runs on through such a word goes where no trace has been."""
+
+    __slots__ = ("clean", "expanded")
+
+    def __init__(self, clean):
+        self.clean, self.expanded = clean, set()
+
+    def __contains__(self, item):
+        return item in self.clean
+
+    def add(self, item):
+        self.expanded.add(item)
+
+
+def _check_trace(d, entry, evidence, clean):
+    """(the words the trace from ``entry`` reaches, (first reserved word, why) or None).
+
+    The trace follows the discovery's rules against its seeds and call targets, ends a path
+    at a `j` out of the image (as at one inside it), and stops at the first word of
+    ``evidence``. A transfer out of the image is no evidence: an overlay at a fixed address
+    may call one loaded later. A path also ends at a word of ``clean`` (one set per range list, as the
+    discovery's `walked`): every path from there is known to reach no evidence, so the answer
+    is the one a full trace gives, and a tail many entries share is walked once. A trace that
+    reaches no evidence adds its words to ``clean``. It changes no state of the discovery."""
+    ranges = d.trace_ranges_for_entry(entry)
+    known = clean.setdefault(tuple(ranges), set())
+    covered = _CheckedCover(evidence)
+    view = _CleanView(known)
+    try:
+        trace_function(d.elf, entry, ranges, covered, _ScratchSet(d.calls), d.hc,
+                       walked=view, end_at_outside_jump=True)
+    except _ReservedWord as hit:
+        return frozenset(covered), (hit.address, hit.why)
+    known |= view.expanded
+    return frozenset(covered), None
+
+
+def _non_code_entries(d, structural, evidence_cache=None):
+    """({candidate to withdraw: ((first reserved word, why), words its trace reached)}, the
+    words that code which stays reaches).
+
+    The candidates are every seed and call target of this discovery that its structure does
+    not name, whether or not it became an entry: a weak seed that a withdrawn trace covered
+    would otherwise become an entry only in the next pass, one layer of data at a time. A
+    candidate is withdrawn when its checking trace reaches a reserved word. Each answer
+    depends on the candidate's own reach alone, so the result does not depend on the order
+    the candidates are visited in (_entry_order). An image whose code holds no reserved word
+    has nothing to withdraw and is not traced again."""
+    spans = sorted({*d.ranges, *d.file_exec_ranges, *d.proven_spans})
+    evidence = _non_code_evidence(d.elf, spans, {} if evidence_cache is None else evidence_cache)
+    if not evidence:
+        return {}, set()
+    candidates = {a for a in d.functions | d.hc | d.noisy | d.jtails | d.calls
+                  if (a & 3) == 0 and a not in structural and d.callable_target(a)}
+    found, reached, clean = {}, set(), {}
+    for entry in _entry_order(candidates | d.functions):
+        words, hit = _check_trace(d, entry, evidence, clean)
+        if hit is not None and entry in candidates:
+            found[entry] = (hit, words)
+        else:
+            reached |= words
+    return found, reached
+
+
+def _entry_order(entries):
+    """The order _non_code_entries visits entries in; tests replace it to show the result does
+    not depend on it."""
+    return sorted(entries)
 
 
 # ---- TOML model: a function inventory the codegen reads and a human can correct ----------
