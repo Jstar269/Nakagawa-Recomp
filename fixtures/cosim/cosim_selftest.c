@@ -3315,11 +3315,10 @@ int main(int argc, char **argv) {
     }
 #endif
     /* The resume cases compare a resumed run with the uninterrupted one, so they mean
-     * something only when the lanes agree. A run that has already diverged has its verdict,
-     * and its defect may never end the resume cells: an interpreter that drops delay slots
-     * never counts the rs loop down (its counter steps in a slot), and the trace's step
-     * abort would then replace the divergence report above with a crash, which the mutation
-     * gate cannot count as a kill. */
+     * something only when the lanes agree. A run that has already diverged has its verdict;
+     * the resumed runs have no step bound of their own, so a defect that breaks the lanes
+     * could keep one going until the trace's step abort replaced the divergence reports
+     * above with a crash, which the mutation gate cannot count as a kill. */
     if (g_failures == 0) {
         g_failures += run_resume_cases(argv[3]);
     } else {

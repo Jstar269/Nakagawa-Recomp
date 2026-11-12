@@ -226,8 +226,15 @@ refused, and a hand-written frame for `rs` must be refused as `body-not-resumabl
 
 The resume cases run last, and only when the phases before them reported no divergence: a resumed
 run is compared with the uninterrupted one, which means nothing once the lanes disagree, and a run
-that has already failed keeps its `cosim: FAIL` verdict instead of entering cells its defect may
-never end (an interpreter that drops delay slots never counts the `rs` loop down).
+that has already failed keeps its `cosim: FAIL` verdict instead of entering resumed runs, which
+have no step bound of their own.
+
+The three frames of the `rs` chain run nested in lane INTERP during the cell comparison, so they
+are written to end under every interpreter mutant: the loop counter of `rs` steps outside a delay
+slot, after the loop head and before the call, and the three frames pop their stack before
+`jr $ra` instead of in its slot. With the counter in a `jal` slot and the pops in the return
+slots, the `skip-delay-slot` mutant never left `rs` (a callee that keeps its frame hands its caller
+the callee's saved `$ra`), and the mutation gate could not count the run as a kill.
 
 What this does not prove: the harness's park is a stub and it has one thread, so nothing here
 runs the real `sr_yield` or describes another fiber's records, and the uninterrupted run and the
