@@ -211,10 +211,11 @@ write log and the slice counter untouched; the body with no points must not be c
 records the frame list cannot describe are built from the same snapshot, first checked to
 describe as exactly that list, then changed one field at a time, and each must be refused by
 name. Five more refusals are staged at the live park of each `rs` yield point: another
-`CpuState`, room for one frame, an open callback scope, and the two that pin when a thread is
-parked. Inside the yield, before any switch, the body has named its point and the running fiber
-must still be refused as `not-parked`; the hook then services an interrupt the way `sr_yield`
-does (a handler in a scope on the same fiber) and the fiber must be refused again. One more is a
+`CpuState`, room for one frame, an open callback scope, and two for the running fiber. Inside
+the yield, before any switch, the body has named its point and the running fiber must still be
+refused as `not-parked`; the hook then services an interrupt the way `sr_yield` does (a handler in
+a scope on the same fiber) and the fiber must be refused again. These two show only that the
+running fiber is never described; which switch parks a thread is the scheduler test's to show. One more is a
 live run of its own: a
 callback entered, in a scope, while the thread's own dispatch has begun no call record; its body
 reaches a yield point there and must be refused as `callback-or-interrupt-live` in every build,

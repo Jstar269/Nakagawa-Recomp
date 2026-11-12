@@ -50500,6 +50500,9 @@ static unsigned s_resume_park_peer_runs;
 static unsigned s_resume_park_passes;
 static int s_resume_park_running_in_handler;
 static int s_resume_park_in_yield;
+static int s_resume_park_marked_out;
+static int s_resume_park_peer_marked;
+static int s_resume_park_marked_after;
 static int s_resume_park_named_in_handler;
 static SrResumeStatus s_resume_park_in_handler;
 static SrResumeStatus s_resume_park_fiber_in_handler;
@@ -50531,15 +50534,17 @@ static void resume_park_peer(CpuState *s) {
     uint32_t count = 9u;
     TCB *t = tcb_by_uid(s_resume_park_uid);
     s_resume_park_peer_runs++;
+    s_resume_park_marked_out = t != NULL && t->yield_switched;
+    s_resume_park_peer_marked = s_cur >= 0 && s_tcb[s_cur].yield_switched;
     s_resume_park_from_peer = sched_resume_describe(
         s_resume_park_uid, s_resume_park_frames, 4u, &s_resume_park_count,
         s_resume_park_detail, sizeof s_resume_park_detail);
     s_resume_park_peer_itself = sched_resume_describe(sched_current_uid(), frames, 4u, &count, NULL, 0u);
     if (t != NULL) {
         /* The same records under a switch that was not the yield's own, and inside an import. */
-        t->pc_stale = 1;
+        t->yield_switched = 0;
         s_resume_park_other_switch = sched_resume_describe(s_resume_park_uid, frames, 4u, &count, NULL, 0u);
-        t->pc_stale = 0;
+        t->yield_switched = 1;
         t->import_active = 1;
         s_resume_park_in_import = sched_resume_describe(s_resume_park_uid, frames, 4u, &count, NULL, 0u);
         t->import_active = 0;
@@ -50581,6 +50586,7 @@ static void resume_park_body(CpuState *s) {
     SR_YIELD_PARK(s, RESUME_PARK_EDGE, RESUME_PARK_ENTRY, RESUME_PARK_LOOP,
                   SR_RESUME_POINT_YIELD, sp_entry);
     s_resume_park_in_yield = 0;
+    s_resume_park_marked_after = s_tcb[s_cur].yield_switched;
     s_resume_park_passes++;
 }
 
@@ -50597,6 +50603,9 @@ static void test_resume_describe_from_the_scheduler(void) {
     s_resume_park_running_in_handler = 0;
     s_resume_park_named_in_handler = 0;
     s_resume_park_in_yield = 0;
+    s_resume_park_marked_out = 0;
+    s_resume_park_peer_marked = 1;
+    s_resume_park_marked_after = 1;
     s_resume_park_in_handler = s_resume_park_fiber_in_handler = SR_RESUME_OK;
     s_resume_park_from_peer = s_resume_park_peer_itself = SR_RESUME_BAD_FRAMES;
     s_resume_park_other_switch = s_resume_park_in_import = SR_RESUME_OK;
@@ -50631,6 +50640,9 @@ static void test_resume_describe_from_the_scheduler(void) {
     if (s_resume_park_from_peer != SR_RESUME_OK)
         fprintf(stderr, "  resume describe: %s (%s)\n",
                 sr_resume_status_name(s_resume_park_from_peer), s_resume_park_detail);
+    expect(s_resume_park_marked_out && !s_resume_park_peer_marked && !s_resume_park_marked_after,
+           "resume describe: the yield's switch marks the thread it switched out, only that one, "
+           "and only until it runs again");
     expect(s_resume_park_peer_itself == SR_RESUME_NOT_PARKED,
            "resume describe: the thread that asks is running and is not parked");
     expect(s_resume_park_other_switch == SR_RESUME_NOT_PARKED,

@@ -688,10 +688,11 @@ checked, and it holds pointers into runtime state that a rewind would have to pu
 enters `sr_yield`. That does not park it. `sr_yield` then advances guest time, latches and
 services interrupts and callbacks, and only afterwards decides whether to switch; most often it
 returns without switching. A thread is parked once `sr_yield`'s own switch has switched it out.
-The scheduler records exactly that switch (`pc_stale == 0`), so a capture describes threads from
-the scheduler's side, `sched_resume_describe`, and the running fiber is never described, not even
-inside its yield: a frame list taken there would skip the rest of the yield. After that switch
-`sr_yield` does nothing more, so the point's label is the whole continuation.
+The scheduler marks the thread at exactly that switch, until it runs again, so a capture
+describes threads from the scheduler's side, `sched_resume_describe`, and the running fiber is
+never described, not even inside its yield: a frame list taken there would skip the rest of the
+yield. After that switch `sr_yield` does nothing more, so the point's label is the whole
+continuation.
 
 **What a thread is, as data.** A frame list, outermost frame first (`SrResumeFrame` in
 `src/rt/recomp.h`). Each frame names:
@@ -707,8 +708,10 @@ not part of it, as at a `dispatch_call`.
 
 A frame list means something only to the generated code that wrote it: it names bodies and
 points in them, and another build has other bodies. `sr_resume_validate` checks structure, not
-origin, so the binding is the state file's. An `nkstate` file carries the SHA-256 of the generated
-code and refuses another build as `executable-identity` before any loader runs. The frame lists
+origin, so the binding is the state file's. An `nkstate` file has a field for the SHA-256 of the
+generated code and refuses another build as `executable-identity` before any loader runs. No
+capture fills that field for a state yet; the one that does has to hash the generated code that
+is running. The frame lists
 travel only in that file, in its `FRMS` segment (`nkstate_frames_save`, `nkstate_frames_load`),
 whose version (`NKSTATE_FRAMES_VERSION`) changes with what a frame holds. `nkstate-selftest` loads
 a state with that segment under its own identity and requires `executable-identity` under another,
@@ -717,7 +720,8 @@ with the frames loader not reached.
 What a describable thread implies about the per-thread state the scheduler keeps outside its
 registers: it is in no import (`hle_depth` 0, no import active), which `sched_resume_describe`
 checks; it runs generated code; and interrupts and thread dispatch are enabled, or `sr_yield`
-would not have switched. Its outermost frame is a thread's own entry (`coro_body`): a callback or
+would not have switched, unless a stop was requested, when `sr_yield` switches with dispatch
+suspended. Its outermost frame is a thread's own entry (`coro_body`): a callback or
 interrupt entry opens a scope and is refused. Whoever resumes the thread therefore owes what
 `coro_body` does after `dispatch_from_host` returns.
 
