@@ -971,13 +971,15 @@ static int xst_cell_replace(int f) {
     tex_repl_init(0);
     const int authentic_read = s_repl != NULL;
     /* Contract 11.2 item 1: the listed texture drawn after that authentic start leaves the guest
-     * framebuffer byte for byte as a start without SR_TEX_REPLACE does, and the same draw with the
-     * pack read leaves other bytes, so the comparison can fail. The draws run in this harness's
-     * scaling state; only the start is authentic. */
+     * framebuffer byte for byte as a start without SR_TEX_REPLACE does. Section 1 below makes the
+     * same draw with the pack read and requires other bytes, so the comparison can fail. The draws
+     * run in this harness's scaling state; only the start is authentic. */
     const size_t fb_bytes = (size_t)XST_STRIDE * FB_H * 4u;
     uint8_t *fb_named = (uint8_t *)malloc(fb_bytes);
-    int authentic_same = 0, pack_differs = 0;
+    int authentic_same = 0;
     if (fb_named) {
+        const int onetoone_was = s_xs_onetoone_plain;
+        s_xs_onetoone_plain = 1;
         nk_tex_scale_set_sync(1);
         xst_reset();
         xst_upload(a);
@@ -994,17 +996,8 @@ static int xst_cell_replace(int f) {
         s_tmpl_ok = 0;
         drew = drew && xst_draw(20.0f, 140.0f);
         authentic_same = drew && memcmp(fb_named, SR_HOST(XST_BASE), fb_bytes) == 0;
-        tex_repl_shutdown();
-        s_repl = nk_texrepl_open(dir, 0, err, sizeof(err));
-        xst_reset();
-        xst_upload(a);
-        xst_state(XST_BASE, XST_TEX, 3u, 1, 1);
-        s_tmpl_ok = 0;
-        pack_differs = s_repl && xst_draw(20.0f, 140.0f) && memcmp(fb_named, SR_HOST(XST_BASE), fb_bytes) != 0;
-        tex_repl_shutdown();
-        s_repl = NULL;
+        s_xs_onetoone_plain = onetoone_was;
         xst_setenv("SR_TEX_REPLACE", dir);
-        free(fb_named);
     }
     tex_repl_shutdown();
     /* The off switch (contract 11.2 item 2): this harness's Enhanced line has no texpack=on, so an
@@ -1013,23 +1006,21 @@ static int xst_cell_replace(int f) {
     tex_repl_shutdown();
     xst_setenv("SR_TEX_REPLACE", NULL);
     s_repl = saved;
-    if (authentic_read || !authentic_same || !pack_differs || off_read || ace_requested()->texpack) {
+    if (authentic_read || !authentic_same || off_read || ace_requested()->texpack) {
         fprintf(stderr, "gpu texscale selftest: FAIL replace: %s\n",
                 authentic_read ? "an authentic start read SR_TEX_REPLACE"
                 : !authentic_same ? "an authentic start with SR_TEX_REPLACE set drew other framebuffer bytes "
                                     "than one without it"
-                : !pack_differs ? "the listed texture drawn with the pack read left the framebuffer as without "
-                                  "it (the authentic comparison is vacuous)"
                 : off_read ? "an Enhanced start without texpack=on read SR_TEX_REPLACE"
                 : "the harness line carries texpack=on, so the off switch is not tested");
-        free(rimg); free(wide);
+        free(fb_named); free(rimg); free(wide);
         return 0;
     }
 
     xst_reset();
     nk_tex_scale_set_sync(1);
     s_repl = nk_texrepl_open(dir, 0, err, sizeof(err));
-    if (!s_repl) { fprintf(stderr, "gpu texscale selftest: FAIL replace: %s\n", err); free(rimg); free(wide); return 0; }
+    if (!s_repl) { fprintf(stderr, "gpu texscale selftest: FAIL replace: %s\n", err); free(fb_named); free(rimg); free(wide); return 0; }
     NkTexReplStats st0;
     nk_texrepl_stats(s_repl, &st0);
     const uint64_t bound0 = s_cnt_repl_bound;
@@ -1042,6 +1033,7 @@ static int xst_cell_replace(int f) {
     xst_repl_expect(rimg, rf, want);
     xst_expect(a, 0, 1, plain);
     ok = xst_draw(20.0f, 140.0f);
+    const int pack_differs = memcmp(fb_named, SR_HOST(XST_BASE), fb_bytes) != 0;
     s_tmpl_ok = 0;
     ok = ok && xst_draw(60.0f, 140.0f);
     s_xs_onetoone_plain = onetoone_saved;
@@ -1050,6 +1042,11 @@ static int xst_cell_replace(int f) {
     if (memcmp(want, plain, sizeof(want)) == 0 || s_cnt_repl_bound <= bound0) {
         fprintf(stderr, "gpu texscale selftest: FAIL replace: the replacement is the texture (vacuous) or no replaced "
                         "bind was counted\n");
+        goto fail;
+    }
+    if (!pack_differs) {
+        fprintf(stderr, "gpu texscale selftest: FAIL replace: the listed texture drawn with the pack read left the "
+                        "framebuffer as without it (the authentic comparison is vacuous)\n");
         goto fail;
     }
 
@@ -1094,14 +1091,14 @@ static int xst_cell_replace(int f) {
 
     nk_texrepl_close(s_repl);
     s_repl = saved;
-    free(rimg); free(wide);
+    free(fb_named); free(rimg); free(wide);
     printf("gpu texscale selftest: PASS %-12s listed texture replaced at once, an unlisted rewrite never from the old image, "
            "a bad factor counted\n", "replace");
     return 1;
 fail:
     nk_texrepl_close(s_repl);
     s_repl = saved;
-    free(rimg); free(wide);
+    free(fb_named); free(rimg); free(wide);
     return 0;
 }
 
