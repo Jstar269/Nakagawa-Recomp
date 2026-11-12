@@ -754,9 +754,8 @@ class ForkCheckTest(unittest.TestCase):
                 head = self._commit()
                 code, lines = pm.fork_check(self.repo, base, head, audit_tool=self._stub_audit(0))
                 self.assertEqual(code, 1, lines)
-                self.assertIn(f"HELD_BYTES_CHANGED: assets/vfpu/{name}: the pull request changes this path, whose "
-                              "bytes are held on the default branch; that change reaches it by the fork "
-                              "maintainer's own push", lines)
+                self.assertIn(f"HELD_BYTES_CHANGED: assets/vfpu/{name}: the pull request adds, changes or removes "
+                              "this path, whose bytes and mode only the fork maintainer's own push changes", lines)
 
     def test_every_held_disposition_and_a_first_file_at_a_held_path(self) -> None:
         # Review 2309-66fce005c252 answer 6 (M4, M13): each held disposition, and a file added at a path the
@@ -775,6 +774,45 @@ class ForkCheckTest(unittest.TestCase):
                 self.assertEqual(code, 1, lines)
                 for path in ("font.pgf", "later.txt"):
                     self.assertTrue(any(line.startswith(f"HELD_BYTES_CHANGED: {path}: ") for line in lines), lines)
+
+    def test_a_held_paths_mode_is_held(self) -> None:
+        # Review 2309-82a49cb3d6ca N1: the executable bit on a held path.
+        self._write_manifest([{"id": "image", "source_path": "image.gif", "disposition": "approved_binary"}])
+        (self.repo / "image.gif").write_bytes(b"GIF89a" + bytes(8))
+        base = self._commit()
+        _git(self.repo, "update-index", "--chmod=+x", "image.gif")
+        _git(self.repo, "commit", "--quiet", "-m", "mode")
+        head = _git(self.repo, "rev-parse", "HEAD")
+        code, lines = pm.fork_check(self.repo, base, head, audit_tool=self._stub_audit(0))
+        self.assertEqual(code, 1, lines)
+        self.assertTrue(any(line.startswith("HELD_BYTES_CHANGED: image.gif: ") for line in lines), lines)
+
+    def test_a_changed_ledger_claim_is_named_like_an_admission(self) -> None:
+        # Review 2309-82a49cb3d6ca S3: rewriting the claim of a path already admitted passed with nothing named.
+        def ledger(classification: str) -> None:
+            (self.repo / pm.LEDGER).write_text(json.dumps({"entries": [
+                {"path": "README.md", "classification": classification, "evidence": {"record_id": "r"}}]}),
+                encoding="utf-8")
+
+        ledger("upstream_derived")
+        base = self._commit()
+        ledger("project_authored_attested")
+        head = self._commit()
+        code, lines = pm.fork_check(self.repo, base, head, audit_tool=self._stub_audit(0))
+        self.assertEqual(code, 0, lines)
+        self.assertEqual(pm.self_admitted(lines), ["README.md"])
+        self.assertIn("README.md", pm._summary(lines, code).splitlines()[0])
+        self.assertEqual(len(pm.warning_annotations(lines)), 1)
+
+    def test_the_trusted_audits_binary_test_is_loaded_once(self) -> None:
+        # Review 2309-82a49cb3d6ca S4 and N5: the module is registered while it runs (its dataclasses need
+        # that on Python 3.14) and loaded once.
+        tool = pm.ROOT / "tools" / "publish_audit.py"
+        first = pm._audit_binary_test(tool)
+        self.assertIs(pm._audit_binary_test(tool), first)
+        self.assertIn("nakagawa_trusted_publish_audit", sys.modules)
+        self.assertTrue(first(b"\x00"))
+        self.assertFalse(first(b"text\n"))
 
     def test_a_pull_request_with_two_merge_bases_is_refused(self) -> None:
         # Review 2309-66fce005c252 S1: the check compared with one merge base, while a merge applies the pull
@@ -937,14 +975,12 @@ class ForkCheckTest(unittest.TestCase):
 class ForkCheckRealAuditTest(unittest.TestCase):
     """The fork check with the real publication audit, in the layout hosted CI gives it.
 
-    Every test above stubs the audit, which is how both defects below went unseen. Here the candidate is
-    this checkout's own committed tree and the trusted tools are this checkout's. A scratch repository
-    borrows the objects, so nothing is checked out and nothing here is written to.
+    Every test above stubs the audit. Here the candidate is this checkout's own committed tree and the
+    trusted tools are this checkout's. A scratch repository borrows the objects, so nothing is checked out
+    and nothing here is written to.
 
-    * An admission inside the pull request passes. Failing-before: the audit read the profile of the
-      checkout it ran in, the default branch's, and refused the admitted path (``POLICY_SOURCE_MISMATCH``).
-    * One ``.gitattributes`` line does not hide a file. Failing-before: the audit read a ``git archive``
-      of the candidate, which leaves out a path marked ``export-ignore``.
+    * An admission inside the pull request passes: the candidate is judged by its own profile.
+    * One ``.gitattributes`` line does not change which files are judged.
 
     Each case runs the whole audit once, over every tracked file.
     """
@@ -1022,7 +1058,7 @@ class ForkCheckRealAuditTest(unittest.TestCase):
         # Review 2309-36f775933693 S2, with the real audit: a new file with its own manifest entry, and new
         # bytes at a path the manifest approves, each fail in a fork pull request.
         manifest = json.loads(_git(self.repo, "cat-file", "blob", f"{self.head_tree}:{pm.MANIFEST}"))
-        approved = pm.waived_paths(json.dumps(manifest).encode("utf-8"))
+        approved = pm.held_paths(json.dumps(manifest).encode("utf-8"))
         image = next(path for path in approved if path.endswith(".gif"))
         manifest["components"].append({"id": "eboot", "name": "EBOOT", "type": "asset", "source_path": "EBOOT.PBP",
                                        "license": "CC0-1.0", "disposition": "approved_binary",

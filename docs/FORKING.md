@@ -69,7 +69,7 @@ hosted rows come from reading each workflow, because a clone that is never pushe
    then `git fetch upstream` and merge `upstream/main` into your branch. Never rewrite published history.
    Push the merge to your default branch yourself: as a pull request it fails the Fork provenance
    check whenever the upstream changed that check's workflow, the release manifest, an approved
-   binary or a publication rule, which only your own push may change.
+   binary, a VFPU table, any other binary or a publication rule, which only your own push may change.
 
 ## Become your fork's provenance authority
 
@@ -168,12 +168,13 @@ with its own code. It reads no secret and never contacts any authority. It:
 - holds the release manifest (`assets/release_manifest.json`) the same way: a pull request may not
   change it (`MANIFEST_CHANGED`), and it must equal your default branch's (`MANIFEST_BEHIND`). Nor
   may a pull request change the bytes of a path the manifest marks approved or of a table under
-  `assets/vfpu/` (`HELD_BYTES_CHANGED`), or add or change any binary file (`BINARY_CHANGED`). You
-  change those by your own push to the default branch, after review;
+  `assets/vfpu/`, or their mode (`HELD_BYTES_CHANGED`), or add or change any binary file
+  (`BINARY_CHANGED`). You change those by your own push to the default branch, after review;
 - refuses a pull request that has more than one merge base with your default branch
   (`MULTIPLE_MERGE_BASES`): merge the default branch into it first;
 - lists the paths the pull request adds to or removes from the publication profile, and names each
-  path the pull request admits itself (`SELF_ADMITTED`): the first ten in the check's title line,
+  path the pull request admits itself or whose claim in the public ledger it changes
+  (`SELF_ADMITTED`): the first ten in the check's title line,
   the first nine as warnings on the check, and all of them in a list at the top of its summary. An added path must name a file of the pull
   request (`PROFILE_PATH_MISSING`), and a pull request may admit at most 50 paths, with 20,000
   characters of names in all, itself (`SELF_ADMITTED_LIMIT`), so that every one stays in view;

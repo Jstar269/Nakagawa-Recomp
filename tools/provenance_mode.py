@@ -75,6 +75,7 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Callable
+import functools
 import importlib.util
 import json
 import os
@@ -100,6 +101,7 @@ WORKFLOW = ".github/workflows/provenance-attestation.yml"
 WORKFLOW_PREFIX = ".github/workflows/"
 POLICY = "assets/public_source_profile.json"
 MANIFEST = "assets/release_manifest.json"
+LEDGER = "assets/public_provenance_ledger.json"
 #: Release-manifest dispositions whose paths a fork pull request may not change, byte for byte.
 HELD_PATH_DISPOSITIONS = frozenset(("approved_binary", "optional_excluded_if_unverified", "approved_submodule"))
 #: Paths under this prefix are held byte for byte too.
@@ -265,15 +267,49 @@ def _changed_blobs(repo: Path, older: str, newer: str) -> list[tuple[str, str]]:
     return changed
 
 
+@functools.lru_cache(maxsize=None)
 def _audit_binary_test(tool: Path) -> Callable[[bytes], bool]:
-    """The trusted audit's own test of whether bytes are binary, so the check and the audit cannot differ."""
-    spec = importlib.util.spec_from_file_location("nakagawa_trusted_publish_audit", tool)
+    """The trusted audit's own test of whether bytes are binary, so the check and the audit cannot differ.
+
+    Always the trusted checkout's audit, never a stand-in given for the run. The module is registered
+    while it executes, as an import would, since its dataclasses look themselves up there."""
+    name = "nakagawa_trusted_publish_audit"
+    spec = importlib.util.spec_from_file_location(name, tool)
     if spec is None or spec.loader is None:
         raise CheckError(f"cannot load {tool}")
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    sys.modules[name] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        del sys.modules[name]
+        raise
     test: Callable[[bytes], bool] = module._is_binary_bytes
     return test
+
+
+def _entry(repo: Path, rev: str, path: str) -> str | None:
+    """``"<mode> <type> <object>"`` of ``path`` at ``rev``, or ``None`` when the commit has no such entry."""
+    raw = _git(repo, "ls-tree", "-z", rev, "--", path).decode("utf-8", "surrogateescape")
+    for record in raw.split("\0"):
+        meta, _, name = record.partition("\t")
+        if name == path:
+            return meta
+    return None
+
+
+def _ledger_claims(repo: Path, rev: str) -> dict[str, str]:
+    """Each public-ledger entry at ``rev``, by path, in a canonical form; empty when there is none to read."""
+    raw = _blob(repo, rev, LEDGER)
+    try:
+        entries = json.loads(raw)["entries"] if raw is not None else []
+    except (ValueError, KeyError, TypeError):
+        return {}
+    claims = {}
+    for entry in entries if isinstance(entries, list) else []:
+        if isinstance(entry, dict) and isinstance(entry.get("path"), str):
+            claims[entry["path"]] = json.dumps(entry, sort_keys=True)
+    return claims
 
 
 def _blob(repo: Path, rev: str, path: str) -> bytes | None:
@@ -284,14 +320,7 @@ def _blob(repo: Path, rev: str, path: str) -> bytes | None:
         return None
 
 
-def _blob_id(repo: Path, rev: str, path: str) -> str | None:
-    try:
-        return _git(repo, "rev-parse", "--verify", "--quiet", f"{rev}:{path}").decode("ascii").strip()
-    except CheckError:
-        return None
-
-
-def waived_paths(manifest: bytes | None) -> list[str]:
+def held_paths(manifest: bytes | None) -> list[str]:
     """The paths the release manifest gives one of ``HELD_PATH_DISPOSITIONS``."""
     if manifest is None:
         return []
@@ -398,15 +427,15 @@ def fork_check(repo: Path, base: str, candidate: str, *, tip: str | None = None,
             "request branched; merge the default branch into it")
         failed = True
     tool = audit_tool or (ROOT / "tools" / "publish_audit.py")
-    held = set(waived_paths(_blob(repo, branch_point, MANIFEST)))
+    held = set(held_paths(_blob(repo, branch_point, MANIFEST)))
     changed = _changed_blobs(repo, branch_point, candidate_sha)
     held |= {path for path in _tree_files(repo, branch_point) if path.startswith(HELD_PREFIX)}
     held |= {path for path, _ in changed if path.startswith(HELD_PREFIX)}
     for path in sorted(held):
-        if _blob_id(repo, candidate_sha, path) != _blob_id(repo, branch_point, path):
+        if _entry(repo, candidate_sha, path) != _entry(repo, branch_point, path):
             lines.append(
-                f"HELD_BYTES_CHANGED: {shown_path(path)}: the pull request changes this path, whose bytes are "
-                "held on the default branch; that change reaches it by the fork maintainer's own push")
+                f"HELD_BYTES_CHANGED: {shown_path(path)}: the pull request adds, changes or removes this path, "
+                "whose bytes and mode only the fork maintainer's own push changes")
             failed = True
     is_binary = _audit_binary_test(ROOT / "tools" / "publish_audit.py")
     for path, blob in changed:
@@ -424,14 +453,21 @@ def fork_check(repo: Path, base: str, candidate: str, *, tip: str | None = None,
     lines.extend(f"PROFILE_PATH_MISSING: {shown_path(path)}: the pull request adds this path to include_paths, "
                  "and its tree has no such file; admit a path together with its file" for path in missing)
     failed |= bool(missing)
-    if len(added) > SELF_ADMITTED_MAX_PATHS or sum(len(shown_path(path)) for path in added) > SELF_ADMITTED_MAX_CHARS:
+    # A changed ledger claim for a path already admitted is an admission too: it is named the same way.
+    before, after = _ledger_claims(repo, branch_point), _ledger_claims(repo, candidate_sha)
+    reclaimed = sorted(path for path in before.keys() & after.keys() if before[path] != after[path]
+                       and path not in added)
+    named = [*added, *reclaimed]
+    if len(named) > SELF_ADMITTED_MAX_PATHS or sum(len(shown_path(path)) for path in named) > SELF_ADMITTED_MAX_CHARS:
         lines.append(
-            f"SELF_ADMITTED_LIMIT: the pull request admits {len(added)} path(s) itself; at most "
+            f"SELF_ADMITTED_LIMIT: the pull request admits or re-claims {len(named)} path(s) itself; at most "
             f"{SELF_ADMITTED_MAX_PATHS} paths and {SELF_ADMITTED_MAX_CHARS} characters of names are named in "
             "full on the check, so more reach the default branch by the fork maintainer's own push")
         failed = True
     lines.extend(f"{SELF_ADMITTED}: {shown_path(path)}: admitted by this pull request's own profile and ledger, not on "
                  "the default branch; review it as an admission" for path in added)
+    lines.extend(f"{SELF_ADMITTED}: {shown_path(path)}: this pull request changes its claim in the public ledger; "
+                 "review it as an admission" for path in reclaimed)
 
     # The audit takes its policy from the candidate's commit, not from the checkout it runs in. The
     # checkout is the default branch, whose profile lacks what this pull request admits and may list
@@ -512,9 +548,10 @@ def _summary(lines: list[str], code: int) -> str:
         "ledger. This check ran the trusted default branch's publication audit on the candidate's exact",
         "tree, under the candidate's own publication profile, whose rules and release manifest must",
         "equal the default branch's, and checked the public ledger's self-consistency. A pull request",
-        "may change the profile's include_paths only, and not the release manifest, the bytes of a path",
-        "it approves, or this check's own workflow. A pass does not mean the fork maintainer admitted",
-        "anything: the paths a pull request admits itself are named above, for review. The",
+        "may change the profile's include_paths only, and not the release manifest, the paths it",
+        "approves, the VFPU tables, any binary, or this check's own workflow. A pass does not mean the",
+        "fork maintainer admitted anything: the paths a pull request admits or re-claims itself are named",
+        "above, for review. The",
         "fork maintainer's admission (`tools/fork_init.py`, `tools/admit_paths.py`) and review are this",
         "fork's provenance authority; see docs/FORKING.md.",
         "",
