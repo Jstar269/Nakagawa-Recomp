@@ -47000,7 +47000,7 @@ static void ace_skip_lone_guest_fn(CpuState *cpu) {
 
 static void test_ace_load_skip_wait_lets_a_lower_priority_thread_run(void) {
     static const char k_load_fast[] =
-        "v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;tier=ace;load=fast";
+        "v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;twin=off;tier=ace;load=fast";
     /* The cases after this one keep the dispatch count they would have had. */
     const uint32_t dispatches = s_dispatches_since_time;
     unsigned failed = 0u;
