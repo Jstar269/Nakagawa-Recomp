@@ -417,6 +417,36 @@ class PackageCacheTests(unittest.TestCase):
         self.assertIn("clang version", options["clang"])
         self.assertIn("LLVM version", options["llvm_link"])
 
+    def test_the_key_names_every_tools_module_the_lowering_imports(self):
+        # A change to any module the renderer imports changes the IR it writes, so each one
+        # must move an LLVM package's key; tools/codegen.py is keyed for both backends.
+        closure, pending = set(), ["codegen_llvm"]
+        while pending:
+            name = pending.pop()
+            path = ROOT / "tools" / f"{name}.py"
+            if name in closure or name == "codegen" or not path.is_file():
+                continue
+            closure.add(name)
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+                if isinstance(node, ast.Import):
+                    pending.extend(alias.name.split(".")[0] for alias in node.names)
+                elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+                    pending.append(node.module.split(".")[0])
+        self.assertIn("lowering_plan", closure)
+        keyed = {path for path in self.pc.LLVM_BACKEND_SOURCES if path.startswith("tools/")}
+        self.assertEqual(keyed, {f"tools/{name}.py" for name in closure})
+        # The Make rule that writes the .ll files depends on the same modules in an LLVM
+        # build, and on none of them in a C build.
+        text = (ROOT / "mk" / "pipeline.mk").read_text(encoding="utf-8")
+        match = re.search(r"^CODEGEN_LLVM_PREREQ := \$\(if \$\(filter llvm,\$\(CODEGEN_BACKEND\)\),"
+                          r"([^)]*)\)$", text, re.M)
+        self.assertIsNotNone(match)
+        self.assertEqual(set(match.group(1).split()), keyed)
+        rule = re.search(r"^\$\(BUILD_DIR\)/\$\(GAME_NAME\)_recomp\.c [^:\n]*: \$\(GAME_INPUT_PREREQ\)"
+                         r"[^\n]*", text, re.M)
+        self.assertIsNotNone(rule)
+        self.assertIn("$(CODEGEN_LLVM_PREREQ)", rule.group(0))
+
     def test_planner_and_cli_both_key_on_the_backend(self):
         for path in ("tools/title_codegen_plan.py", "tools/nk_cli.py"):
             text = (ROOT / path).read_text(encoding="utf-8")

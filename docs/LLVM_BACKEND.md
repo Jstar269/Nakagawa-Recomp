@@ -182,7 +182,19 @@ both empty since #363). A test re-derives every HST-profile address site from
 `--backend=llvm` is part of the codegen profile, so switching it regenerates the sources.
 In an LLVM build, the Clang and `llvm-link` version strings join the generated-code
 profile, so a toolchain change rebuilds the LLVM objects and is never mixed with objects
-from another toolchain. A C build's profiles are unchanged by this backend.
+from another toolchain, and the rule that writes the `.ll` files depends on the lowering
+(`codegen_llvm.py`, `llvm_ir.py`, `lowering_plan.py`), so editing it regenerates them.
+
+A package's cache key (#316, `tools/nk_core/package_cache.py`) carries the same identity:
+an LLVM package's `codegen_options` gain an `llvm_backend` entry naming the backend's
+epoch, the SHA-256 of each file in `LLVM_BACKEND_SOURCES` (the renderer, every `tools/`
+module it imports, and the ABI shim) and the exact Clang and `llvm-link` binaries and
+version reports. That entry is in the package's `cache.codegen_options` and moves the
+generated-code and native digests, so an LLVM package is never reused for a C build, for a
+changed lowering, or across toolchains, and a missing tool fails the key closed.
+`tools/test_codegen_llvm.py` derives the renderer's import closure and holds both the key
+and the Make rule to it. A C build adds nothing, so its profiles and keys are unchanged by
+this backend.
 
 ## Delivery, and the in-process stage
 

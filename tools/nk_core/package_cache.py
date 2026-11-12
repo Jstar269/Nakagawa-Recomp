@@ -1153,8 +1153,10 @@ def nan_trap_enabled(environment: Mapping[str, str] | None = None) -> bool:
 AOT_ENHANCEMENT_PACKAGE_EPOCH = "aot-enhancement-package-v1"
 AOT_LLVM_BACKEND_EPOCH = "aot-llvm-backend-v1"
 
-#: The sources that decide what the LLVM IR backend (#330) emits and what its IR calls.
-LLVM_BACKEND_SOURCES = ("tools/codegen_llvm.py", "tools/llvm_ir.py",
+#: The sources that decide what the LLVM IR backend (#330) emits and what its IR calls:
+#: the renderer, every tools/ module it imports (test_codegen_llvm derives that closure),
+#: and the runtime ABI shim. `tools/codegen.py` is keyed for both backends already.
+LLVM_BACKEND_SOURCES = ("tools/codegen_llvm.py", "tools/llvm_ir.py", "tools/lowering_plan.py",
                         "src/rt/llvm_abi.c", "src/rt/llvm_abi.h")
 
 
