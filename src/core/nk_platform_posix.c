@@ -516,11 +516,20 @@ static bool join_path(char *out, size_t cap, const char *base, const char *rest)
 #endif
 
 #if !defined(__ANDROID__) && !defined(__APPLE__)
-/* An XDG base folder: the variable when it is set and not empty, else HOME and the default below
-   it. False when neither is set or the path does not fit. */
+/* An XDG base folder: the variable when it is set to an absolute path (trailing '/' dropped), else
+   HOME and the default below it. A relative value is ignored, as the XDG Base Directory
+   specification says (S2 of the second #324 review; the migration plan names it in its notes).
+   False when neither is usable or the path does not fit. */
 static bool xdg_base(const char *variable, const char *below_home, char *out, size_t cap) {
     const char *value = getenv(variable);
-    if (value && value[0]) return join_path(out, cap, value, "");
+    if (value && value[0] == '/') {
+        size_t length = strlen(value);
+        while (length > 1u && value[length - 1u] == '/') length--;
+        if (length >= cap) return false;
+        memcpy(out, value, length);
+        out[length] = '\0';
+        return true;
+    }
     const char *home = getenv("HOME");
     if (!home || !home[0]) return false;
     return join_path(out, cap, home, below_home);
@@ -700,6 +709,27 @@ static void plan_note(NkDataMigrationPlan *plan, const char *what, const char *w
                    NK_MIGRATE_CODE_PATH_UNAVAILABLE, what, why);
 }
 
+#if !defined(__APPLE__)
+/* A named line for each XDG variable set to a relative path, which xdg_base ignores. */
+static void plan_note_relative_xdg(NkDataMigrationPlan *plan) {
+    static const char *const variables[][2] = {
+        {"XDG_DATA_HOME", "~/.local/share"},
+        {"XDG_CONFIG_HOME", "~/.config"},
+        {"XDG_CACHE_HOME", "~/.cache"},
+        {"XDG_STATE_HOME", "~/.local/state"},
+    };
+    for (size_t i = 0; i < sizeof(variables) / sizeof(variables[0]); i++) {
+        const char *value = getenv(variables[i][0]);
+        if (!value || !value[0] || value[0] == '/') continue;
+        size_t used = strlen(plan->notes);
+        if (used >= sizeof(plan->notes) - 1u) return;
+        (void)snprintf(plan->notes + used, sizeof(plan->notes) - used,
+                       "%s: %s is set to '%.64s', which is not an absolute path; as the XDG Base "
+                       "Directory specification says, it is ignored and %s is used.\n",
+                       NK_MIGRATE_CODE_XDG_IGNORED, variables[i][0], value, variables[i][1]);
+    }
+}
+
 static bool plan_keep(NkDataMigrationPlan *plan, NkPathType type, const char *label) {
     if (plan->kept_count >= NK_MIGRATE_MAX_KEPT) return false;
     size_t k = plan->kept_count;
@@ -709,6 +739,7 @@ static bool plan_keep(NkDataMigrationPlan *plan, NkPathType type, const char *la
     plan->kept_count++;
     return true;
 }
+#endif
 #endif
 
 /* The older folders and where they go (nk_data_migrate.h). Only the paths are worked out here;
@@ -727,13 +758,18 @@ bool nk_platform_user_data_plan(struct NkDataMigrationPlan *plan) {
               resolve_layout_path(false, NK_PATH_DATA, new_data, sizeof(new_data)) &&
               resolve_layout_path(false, NK_PATH_SAVES, new_saves, sizeof(new_saves)) &&
               join_path(plan->library_file, sizeof(plan->library_file), new_data, "/library.json");
-    /* The lock is beside the new folder, in the data base, so no move ever carries it. */
+    /* The locks are beside the new folder, in the data base, so no move ever carries them; the
+       record of a completed run is in the new folder. */
     const char *slash = strrchr(root, '/');
     if (ok) {
         size_t parent = slash ? (size_t)(slash - root) : 0u;
         int written = snprintf(plan->lock_file, sizeof(plan->lock_file), "%.*s/.nakagawa-migration.lock",
                                (int)parent, root);
-        ok = slash && written > 0 && (size_t)written < sizeof(plan->lock_file);
+        int in_use = snprintf(plan->in_use_file, sizeof(plan->in_use_file), "%.*s/.nakagawa-in-use.lock",
+                              (int)parent, root);
+        ok = slash && written > 0 && (size_t)written < sizeof(plan->lock_file) && in_use > 0 &&
+             (size_t)in_use < sizeof(plan->in_use_file) &&
+             join_path(plan->done_file, sizeof(plan->done_file), root, "/.nakagawa-migration-done");
     }
     if (!ok) {
         memset(plan, 0, sizeof(*plan));
@@ -784,11 +820,12 @@ bool nk_platform_user_data_plan(struct NkDataMigrationPlan *plan) {
         const char *xdg_config = getenv("XDG_CONFIG_HOME");
         const char *home = getenv("HOME");
         plan_note(plan, "settings",
-                  (xdg_config && xdg_config[0]) || (home && home[0])
+                  (xdg_config && xdg_config[0] == '/') || (home && home[0])
                       ? "its path is too long"
-                      : "XDG_CONFIG_HOME and HOME are not set");
+                      : "XDG_CONFIG_HOME is not set to an absolute path, and HOME is not set");
     }
     ok = ok && plan_keep(plan, NK_PATH_CACHE, "cache") && plan_keep(plan, NK_PATH_LOGS, "logs");
+    plan_note_relative_xdg(plan);
 #endif
     if (ok && have_old_data) {
         ok = join_path(plan->remap_from, sizeof(plan->remap_from), old_data, "") &&

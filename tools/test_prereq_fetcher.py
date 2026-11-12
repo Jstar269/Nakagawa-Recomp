@@ -229,6 +229,46 @@ class TestPrerequisiteFetcher(unittest.TestCase):
             self.skipTest(f"symbolic links unavailable here: {exc}")
         self.assertEqual(self._linux_data_root(), old, "a linked old folder stays in use, as in the player")
 
+    def test_relative_xdg_values_are_ignored_as_the_player_ignores_them(self) -> None:
+        """#324 second review S2: a relative XDG_* value is ignored (XDG spec); HOME is used."""
+        new = self.root / "home" / ".local" / "share" / "Nakagawa" / "data"
+        self.assertEqual(self._linux_data_root(XDG_DATA_HOME="relative/share"), new)
+
+    def test_home_is_the_only_fallback(self) -> None:
+        """#324 second review N10: no password-database home, as in the player."""
+        with patch.dict(os.environ, {"XDG_DATA_HOME": "relative"}, clear=True):
+            with self.assertRaisesRegex(PrerequisiteFetchError, "DATA_DIR_UNAVAILABLE"):
+                _xdg_data_root()
+
+    @unittest.skipUnless(sys.platform != "win32", "the player's migration locks are POSIX flock locks")
+    def test_tools_refuse_while_the_player_moves_the_folders(self) -> None:
+        """#324 second review B1/S1: a tool never resolves the folder while a move is under way."""
+        import fcntl
+
+        share = self.root / "share"
+        share.mkdir(parents=True)
+        (share / "nakagawa-recomp").mkdir()
+        (share / "nakagawa-recomp" / "library.json").write_text("{}", encoding="utf-8")
+        with open(share / ".nakagawa-migration.lock", "a+b") as held:
+            fcntl.flock(held.fileno(), fcntl.LOCK_EX)
+            with self.assertRaisesRegex(PrerequisiteFetchError, "DATA_MIGRATION_IN_PROGRESS"):
+                self._linux_data_root()
+        self.assertEqual(self._linux_data_root(), share / "nakagawa-recomp",
+                         "once the move is over, the folder in use")
+
+    @unittest.skipUnless(sys.platform != "win32", "the player's migration locks are POSIX flock locks")
+    def test_tools_keep_the_folders_in_use_while_they_run(self) -> None:
+        """#324 second review B1: no start may move the folders while a tool uses them."""
+        import fcntl
+
+        share = self.root / "share"
+        (share / "nakagawa-recomp").mkdir(parents=True)
+        (share / "nakagawa-recomp" / "library.json").write_text("{}", encoding="utf-8")
+        self.assertEqual(self._linux_data_root(), share / "nakagawa-recomp")
+        with open(share / ".nakagawa-in-use.lock", "a+b") as probe:
+            with self.assertRaises(BlockingIOError):
+                fcntl.flock(probe.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
     def test_happy_path_extracts_only_verified_payload_and_records_license(self) -> None:
         item = self.item()
         result = install_items({"artifacts": [item]}, self.root, allow_http=True)

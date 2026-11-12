@@ -68,8 +68,72 @@ def _same_or_inside(a: Path, b: Path) -> bool:
 
 
 def _xdg_base(variable: str, *below_home: str) -> Path:
-    value = os.environ.get(variable)
-    return Path(value) if value else Path.home().joinpath(*below_home)
+    """An XDG base folder as the player finds it (src/core/nk_platform_posix.c, xdg_base).
+
+    A relative value is ignored, as the XDG Base Directory specification says, and HOME (not the
+    password database) is the fallback; RuntimeError when neither gives a folder.
+    """
+    value = os.environ.get(variable, "")
+    if value and os.path.isabs(value):  # "/..." on POSIX, where the rule applies
+        return Path(value)
+    home = os.environ.get("HOME", "")
+    if not home:
+        raise RuntimeError(f"neither {variable} (as an absolute path) nor HOME is set")
+    return Path(home).joinpath(*below_home)
+
+
+# The in-use lock each data base this process resolved, held shared for the process's life.
+_FOLDERS_IN_USE: dict[str, int] = {}
+
+
+def _open_lock(path: Path) -> int | None:
+    try:
+        return os.open(path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
+    except OSError:
+        return None
+
+
+def _use_data_folders(base: Path, resolve: Callable[[], Path]) -> Path:
+    """Resolve the data folder, never while the player moves the folders, and keep them in use.
+
+    The player moves an older layout only under ``.nakagawa-migration.lock`` and only while no process
+    holds ``.nakagawa-in-use.lock`` (src/core/nk_data_migrate.h). A tool takes the first, shared and
+    without waiting, while it resolves (refusing by name while a move is under way), and keeps a
+    shared lock on the second for the rest of its life, so no start moves the folders under it.
+    Without a data base there is no older folder to move; a lock file that cannot be opened cannot
+    be locked by the player either, which then moves nothing.
+    """
+    if sys.platform == "win32":
+        return resolve()
+    if os.name == "nt" or not base.is_dir():
+        return resolve()
+    import fcntl
+
+    run_fd = _open_lock(base / ".nakagawa-migration.lock")
+    if run_fd is None:
+        return resolve()
+    busy = PrerequisiteFetchError(
+        f"DATA_MIGRATION_IN_PROGRESS: the Nakagawa player is moving your data folders in {base}. "
+        "Run this again once it has started."
+    )
+    try:
+        try:
+            fcntl.flock(run_fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise busy from None
+        key = os.fspath(base)
+        if key not in _FOLDERS_IN_USE:
+            use_fd = _open_lock(base / ".nakagawa-in-use.lock")
+            if use_fd is not None:
+                try:
+                    fcntl.flock(use_fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    os.close(use_fd)
+                    raise busy from None
+                _FOLDERS_IN_USE[key] = use_fd
+        return resolve()
+    finally:
+        os.close(run_fd)
 
 
 def _choose_data_root(new_data: Path, old_data: Path, kept: tuple[Path, ...]) -> Path:
@@ -108,7 +172,10 @@ def _xdg_data_root() -> Path:
             kept.append(_xdg_base(variable, *below_home).joinpath(*leaf))
         except RuntimeError:
             continue  # neither the variable nor HOME: the player has no such folder either
-    return _choose_data_root(data_base / "Nakagawa" / "data", data_base / "nakagawa-recomp", tuple(kept))
+    return _use_data_folders(
+        data_base,
+        lambda: _choose_data_root(data_base / "Nakagawa" / "data", data_base / "nakagawa-recomp", tuple(kept)),
+    )
 
 
 def default_data_root() -> Path:
@@ -122,13 +189,14 @@ def default_data_root() -> Path:
             )
         return Path(base) / "Nakagawa" / "data"
     if sys.platform == "darwin":
-        try:
-            support = Path.home() / "Library" / "Application Support"
-        except RuntimeError as exc:
-            raise PrerequisiteFetchError(
-                "DATA_DIR_UNAVAILABLE: set HOME to locate per-user data."
-            ) from exc
-        return _choose_data_root(support / "Nakagawa" / "data", support / "NakagawaRecomp" / "data", ())
+        home = os.environ.get("HOME", "")
+        if not home:
+            raise PrerequisiteFetchError("DATA_DIR_UNAVAILABLE: set HOME to locate per-user data.")
+        support = Path(home) / "Library" / "Application Support"
+        return _use_data_folders(
+            support,
+            lambda: _choose_data_root(support / "Nakagawa" / "data", support / "NakagawaRecomp" / "data", ()),
+        )
     return _xdg_data_root()
 
 

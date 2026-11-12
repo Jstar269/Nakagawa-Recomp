@@ -18,6 +18,7 @@
 #endif
 
 #include "nk_data_migrate.h"
+#include "nk_library.h"
 #include "nk_platform.h"
 #include "native_test_isolation.h"
 
@@ -962,6 +963,553 @@ static void test_notice_is_shown_once(void) {
     CHECK(nk_data_migrate_notice_is_new(&r), "a different notice is shown");
 }
 
+/* ---- Another process using the old folders (B1 of the second #324 review) ---- */
+
+typedef enum { HOLD_FLOCK, HOLD_FLOCK_SHARED, HOLD_FCNTL, HOLD_OPEN_FILE, HOLD_CWD, HOLD_NOTHING } HoldKind;
+
+typedef struct {
+    pid_t pid;
+    int release; /* closing it lets the process end */
+} Holder;
+
+/* A second process that really holds `path` (a lock, an open file, its working folder), or just
+   runs (HOLD_NOTHING), until let_go. */
+static Holder hold_in_child(HoldKind kind, const char *path) {
+    Holder holder = {-1, -1};
+    int ready[2], release[2];
+    if (pipe(ready) != 0) return holder;
+    if (pipe(release) != 0) {
+        close(ready[0]);
+        close(ready[1]);
+        return holder;
+    }
+    nk_data_migrate_release_in_use(); /* the child must not inherit this process's own lock */
+    fflush(stdout);
+    fflush(stderr);
+    pid_t pid = fork();
+    if (pid == 0) {
+        close(ready[0]);
+        close(release[1]);
+        bool ok = true;
+        int fd = -1;
+        if (kind == HOLD_FLOCK || kind == HOLD_FLOCK_SHARED) {
+            fd = open(path, O_RDWR | O_CREAT, 0600);
+            ok = fd >= 0 && flock(fd, kind == HOLD_FLOCK ? LOCK_EX : LOCK_SH) == 0;
+        } else if (kind == HOLD_FCNTL) {
+            fd = open(path, O_RDWR | O_CREAT, 0600);
+            struct flock region;
+            memset(&region, 0, sizeof(region));
+            region.l_type = F_WRLCK;
+            region.l_whence = SEEK_SET;
+            ok = fd >= 0 && fcntl(fd, F_SETLK, &region) == 0;
+        } else if (kind == HOLD_OPEN_FILE) {
+            fd = open(path, O_RDONLY);
+            ok = fd >= 0;
+        } else if (kind == HOLD_CWD) {
+            ok = chdir(path) == 0;
+        }
+        char byte = ok ? 'y' : 'n';
+        ssize_t sent = write(ready[1], &byte, 1u);
+        ssize_t got = read(release[0], &byte, 1u); /* 0 when the parent closes it */
+        (void)sent;
+        (void)got;
+        _exit(0);
+    }
+    close(ready[1]);
+    close(release[0]);
+    char byte = 'n';
+    ssize_t got = pid > 0 ? read(ready[0], &byte, 1u) : -1;
+    close(ready[0]);
+    CHECK(pid > 0 && got == 1 && byte == 'y', "a second process holds what it should");
+    holder.pid = pid;
+    holder.release = release[1];
+    return holder;
+}
+
+static void let_go(Holder *holder) {
+    if (holder->release >= 0) close(holder->release);
+    if (holder->pid > 0) (void)waitpid(holder->pid, NULL, 0);
+    holder->release = -1;
+    holder->pid = -1;
+}
+
+static bool parent_of(const char *path, char *out, size_t cap) {
+    const char *slash = strrchr(path, '/');
+    if (!slash || (size_t)(slash - path) >= cap) return false;
+    memcpy(out, path, (size_t)(slash - path));
+    out[slash - path] = '\0';
+    return true;
+}
+
+static void check_kept_in_use(const Fixture *fx, const NkDataMigration *r, const char *what) {
+    CHECK(r->status == NK_MIGRATE_KEPT_OLD && strstr(r->message, NK_MIGRATE_CODE_IN_USE) == r->message,
+          what);
+    CHECK(strstr(r->log, NK_MIGRATE_CODE_IN_USE) != NULL, "the log says what is using them");
+    check_untouched(fx, "nothing moved while another process may use the old folders");
+    CHECK(!exists(fx->new_data), "and nothing was made in the new place");
+}
+
+static void test_old_locks_held_keep_the_old_folders(void) {
+    static const struct {
+        HoldKind kind;
+        const char *file;
+        const char *what;
+    } cases[] = {
+        {HOLD_FLOCK, "locks/library.lock", "an older player or tool writing the library"},
+        {HOLD_FLOCK, "locks/build-package-UCUS98744.lock", "an older tool building a package"},
+        {HOLD_FCNTL, "games/.staging_UCUS98744.lock", "an older player staging a game"},
+    };
+    for (size_t c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
+        Fixture fx;
+        build_fixture(&fx, true);
+        char path[NATIVE_TEST_PATH_MAX], dir[NATIVE_TEST_PATH_MAX];
+        join(path, sizeof(path), fx.old_data, cases[c].file);
+        CHECK(parent_of(path, dir, sizeof(dir)) && nk_platform_mkdir_p(dir), "make the lock folder");
+        NkDataMigrationPlan plan;
+        build_plan(&fx, &plan);
+        Holder holder = hold_in_child(cases[c].kind, path);
+        NkDataMigration r;
+        nk_data_migrate_run(&plan, &r);
+        check_kept_in_use(&fx, &r, cases[c].what);
+        CHECK(strstr(r.log, path) != NULL, "naming the lock");
+        let_go(&holder);
+        nk_data_migrate_run(&plan, &r);
+        CHECK(r.status == NK_MIGRATE_DONE, "once that process has ended, the next start moves the data");
+        check_migrated(&fx, "and all of it arrives");
+    }
+}
+
+/* A process of this version (a tool, or a player that kept the old folders) holds the in-use lock. */
+static void test_in_use_lock_keeps_the_old_folders(void) {
+    Fixture fx;
+    build_fixture(&fx, true);
+    NkDataMigrationPlan plan;
+    build_plan(&fx, &plan);
+    snprintf(plan.in_use_file, sizeof(plan.in_use_file), "%s/share/.nakagawa-in-use.lock", fx.root);
+    Holder holder = hold_in_child(HOLD_FLOCK_SHARED, plan.in_use_file);
+    NkDataMigration r;
+    nk_data_migrate_run(&plan, &r);
+    check_kept_in_use(&fx, &r, "a tool of this version holding the in-use lock keeps the old folders");
+    let_go(&holder);
+    plan.hold_in_use = true;
+    nk_data_migrate_run(&plan, &r);
+    CHECK(r.status == NK_MIGRATE_DONE, "the next start moves them");
+    int fd = open(plan.in_use_file, O_RDWR | O_CLOEXEC);
+    bool shared_held = fd >= 0 && flock(fd, LOCK_EX | LOCK_NB) != 0 && errno == EWOULDBLOCK;
+    bool shared_ok = fd >= 0 && flock(fd, LOCK_SH | LOCK_NB) == 0;
+    if (fd >= 0) close(fd);
+    CHECK(shared_held && shared_ok, "and then holds the in-use lock, shared, for the rest of its life");
+    nk_data_migrate_release_in_use();
+}
+
+#if defined(__linux__)
+/* Linux: an older copy that holds no lock, seen through /proc. */
+static void test_processes_using_the_old_folders_are_seen(void) {
+    char exe[NATIVE_TEST_PATH_MAX];
+    ssize_t n = readlink("/proc/self/exe", exe, sizeof(exe) - 1u);
+    CHECK(n > 0, "this program's name");
+    if (n <= 0) return;
+    exe[n] = '\0';
+    const char *name = strrchr(exe, '/') ? strrchr(exe, '/') + 1 : exe;
+    for (int c = 0; c < 3; c++) {
+        Fixture fx;
+        build_fixture(&fx, true);
+        NkDataMigrationPlan plan;
+        build_plan(&fx, &plan);
+        plan.scan_processes = true;
+        char path[NATIVE_TEST_PATH_MAX];
+        Holder holder;
+        if (c == 0) {
+            join(path, sizeof(path), fx.old_data, "discs/UCUS98744/UCUS98744.iso");
+            holder = hold_in_child(HOLD_OPEN_FILE, path); /* a game reading its disc */
+        } else if (c == 1) {
+            holder = hold_in_child(HOLD_CWD, fx.old_config); /* a tool started in the folder */
+        } else {
+            snprintf(plan.instance_name, sizeof(plan.instance_name), "%s", name);
+            holder = hold_in_child(HOLD_NOTHING, ""); /* another copy of this program */
+        }
+        NkDataMigration r;
+        nk_data_migrate_run(&plan, &r);
+        char pid[32];
+        snprintf(pid, sizeof(pid), "process %ld", (long)holder.pid);
+        check_kept_in_use(&fx, &r, c == 0   ? "a process with a file open in the old data folder"
+                                   : c == 1 ? "a process working in the old settings folder"
+                                            : "another copy of the player");
+        CHECK(strstr(r.log, pid) != NULL, "the log names the process");
+        let_go(&holder);
+        nk_data_migrate_run(&plan, &r);
+        CHECK(r.status == NK_MIGRATE_DONE, "once it has ended, the next start moves the data");
+    }
+}
+#endif
+
+/* The other side of B1: an older copy that could not be seen wrote into the old folder after the
+   move. The record of the completed run tells that apart from a second copy of the user's data. */
+static void test_late_writer_is_named(void) {
+    Fixture fx;
+    build_fixture(&fx, true);
+    NkDataMigrationPlan plan;
+    build_plan(&fx, &plan);
+    snprintf(plan.done_file, sizeof(plan.done_file), "%s/.nakagawa-migration-done", fx.new_root);
+    NkDataMigration r;
+    nk_data_migrate_run(&plan, &r);
+    CHECK(r.status == NK_MIGRATE_DONE && exists(plan.done_file), "a completed run leaves its record");
+    put_file(fx.old_data, "library.json", "{\"games\":[{\"iso_path\":\"/late.iso\"}]}");
+    char late_settings[NATIVE_TEST_PATH_MAX];
+    nk_data_migrate_run(&plan, &r);
+    CHECK(r.status == NK_MIGRATE_REFUSED && strstr(r.message, NK_MIGRATE_CODE_LATE_WRITES) == r.message,
+          "an old folder made again after the move is named as later writes, not as a second copy");
+    char want[NATIVE_TEST_PATH_MAX * 2];
+    snprintf(want, sizeof(want), "Nakagawa uses your data folder %s", fx.new_data);
+    CHECK(strstr(r.message, want) != NULL, "saying which folder is in use");
+    CHECK(strstr(r.message, "written there later") != NULL &&
+              strstr(r.message, "still running") != NULL,
+          "and that the other holds what an older copy wrote after the move");
+    CHECK(strcmp(r.folder_a, fx.old_data) == 0 && strcmp(r.folder_b, fx.new_data) == 0,
+          "with both folders for Open both folders");
+    join(late_settings, sizeof(late_settings), fx.old_data, "library.json");
+    CHECK(file_is(late_settings, "{\"games\":[{\"iso_path\":\"/late.iso\"}]}"), "nothing is merged or deleted");
+    join(late_settings, sizeof(late_settings), fx.new_data, "discs/UCUS98744/UCUS98744.iso");
+    CHECK(file_is(late_settings, "disc bytes"), "and the moved data stays where it is in use");
+    /* Without a record (a second copy made by hand), it is the both-present case. */
+    CHECK(nk_remove_utf8(plan.done_file) == 0, "forget the record");
+    nk_data_migrate_run(&plan, &r);
+    CHECK(r.status == NK_MIGRATE_REFUSED && strstr(r.message, NK_MIGRATE_CODE_BOTH_PRESENT) == r.message,
+          "a genuine conflict is still named as data in both places");
+}
+
+/* N6 and N8: after a completed run, nothing is finished again. */
+static void test_completed_run_is_not_finished_again(void) {
+    Fixture fx;
+    build_fixture(&fx, true);
+    NkDataMigrationPlan plan;
+    build_plan(&fx, &plan);
+    snprintf(plan.done_file, sizeof(plan.done_file), "%s/.nakagawa-migration-done", fx.new_root);
+    NkDataMigration r;
+    nk_data_migrate_run(&plan, &r);
+    CHECK(r.status == NK_MIGRATE_DONE, "the first start moves everything");
+    char dir[NATIVE_TEST_PATH_MAX], path[NATIVE_TEST_PATH_MAX];
+    join(dir, sizeof(dir), fx.new_data, "saves/ULUS10001");
+    put_file(dir, "ROOT.SAV", "a --user-data-root's own save");
+    put_file(fx.new_data, "library.json", fx.library_text); /* old paths, as a restored .bak has */
+    nk_data_migrate_run(&plan, &r);
+    CHECK(r.status == NK_MIGRATE_NOTHING, "a later start has nothing to do");
+    join(path, sizeof(path), dir, "ROOT.SAV");
+    CHECK(file_is(path, "a --user-data-root's own save"), "a saves folder made in data later stays (N6)");
+    join(path, sizeof(path), fx.new_saves, "ULUS10001");
+    CHECK(!exists(path), "and is not moved up");
+    CHECK(file_is(plan.library_file, fx.library_text), "the library is not read or rewritten again (N8)");
+}
+
+/* S1: library.json is rewritten under the library's own lock, held from before the first move. */
+static char g_old_library_lock[NATIVE_TEST_PATH_MAX], g_new_library_lock[NATIVE_TEST_PATH_MAX];
+static char g_new_library[NATIVE_TEST_PATH_MAX];
+static int g_library_probes = 0, g_library_free = 0;
+static pid_t g_writer = -1;
+
+/* Another writer, as nk_library.c and tools/nk_cli.py write: under the lock, read, add, write. */
+static void library_writer_child(void) {
+    /* A separate program has none of the run's open files; a forked copy would share its lock. */
+    for (int fd = 3; fd < 1024; fd++) (void)close(fd);
+    NkFileLock lock;
+    if (nk_library_lock_acquire(&lock, g_new_library, NK_LIBRARY_LOCK_TIMEOUT_MS) != NK_OK) _exit(2);
+    char *text = slurp(g_new_library);
+    char *end = text ? strstr(text, "]}") : NULL;
+    if (!end) _exit(3);
+    *end = '\0';
+    FILE *f = fopen(g_new_library, "wb");
+    if (!f) _exit(4);
+    fprintf(f, "%s,{\"iso_path\":\"/writer/added.iso\"}]}", text);
+    fclose(f);
+    nk_platform_file_lock_release(&lock);
+    _exit(0);
+}
+
+static void probe_library_lock(int call, const char *from, const char *to) {
+    (void)from;
+    (void)to;
+    const char *paths[] = {g_old_library_lock, g_new_library_lock};
+    for (size_t i = 0; i < 2u; i++) {
+        int fd = open(paths[i], O_RDWR | O_CLOEXEC);
+        if (fd < 0) continue;
+        g_library_probes++;
+        if (flock(fd, LOCK_EX | LOCK_NB) == 0) {
+            g_library_free++;
+            (void)flock(fd, LOCK_UN);
+        }
+        close(fd);
+    }
+    if (call == 2 && g_writer < 0) {
+        fflush(stdout);
+        fflush(stderr);
+        g_writer = fork();
+        if (g_writer == 0) library_writer_child();
+    }
+}
+
+static void test_library_lock_is_held_for_the_rewrite(void) {
+    Fixture fx;
+    build_fixture(&fx, true);
+    NkDataMigrationPlan plan;
+    build_plan(&fx, &plan);
+    join(g_old_library_lock, sizeof(g_old_library_lock), fx.old_data, "locks/library.lock");
+    join(g_new_library_lock, sizeof(g_new_library_lock), fx.new_data, "locks/library.lock");
+    snprintf(g_new_library, sizeof(g_new_library), "%s", plan.library_file);
+    g_library_probes = 0;
+    g_library_free = 0;
+    g_writer = -1;
+    use_seam(0, false);
+    g_before_rename = probe_library_lock;
+    NkDataMigration r;
+    nk_data_migrate_run(&plan, &r);
+    drop_seam();
+    int status = -1;
+    bool writer_ok = g_writer > 0 && waitpid(g_writer, &status, 0) == g_writer && WIFEXITED(status) &&
+                     WEXITSTATUS(status) == 0;
+    CHECK(r.status == NK_MIGRATE_DONE && r.library_rewritten, "the run completes");
+    CHECK(g_library_probes == 3 && g_library_free == 0,
+          "no other writer could take the library lock during any move or before the rewrite");
+    CHECK(writer_ok, "a writer that came along during the run waited for the lock, then wrote");
+    char *library = slurp(plan.library_file);
+    char want_iso[NATIVE_TEST_PATH_MAX + 64];
+    snprintf(want_iso, sizeof(want_iso), "\"%s/discs/UCUS98744/UCUS98744.iso\"", plan.remap_to);
+    CHECK(library && strstr(library, want_iso) != NULL && strstr(library, "/writer/added.iso") != NULL,
+          "so the library has both the rewritten paths and the other writer's entry");
+    free(library);
+}
+
+/* S2: stored paths spelled another way than the plan's are still found. */
+static void test_library_paths_in_other_spellings(void) {
+    char root[NATIVE_TEST_PATH_MAX], real_share[NATIVE_TEST_PATH_MAX], link_share[NATIVE_TEST_PATH_MAX];
+    new_case(root, sizeof(root));
+    join(real_share, sizeof(real_share), root, "share");
+    join(link_share, sizeof(link_share), root, "linked-share");
+    char old_real[NATIVE_TEST_PATH_MAX], dir[NATIVE_TEST_PATH_MAX];
+    join(old_real, sizeof(old_real), real_share, "nakagawa-recomp");
+    snprintf(dir, sizeof(dir), "%s/discs", old_real);
+    put_file(dir, "A.iso", "a");
+    CHECK(symlink(real_share, link_share) == 0, "a linked data base, as a linked HOME gives");
+    char text[NATIVE_TEST_PATH_MAX * 8];
+    snprintf(text, sizeof(text),
+             "{\"games\":[{\"iso_path\":\"%s/discs/A.iso\"},{\"iso_path\":\"%s//discs/./A.iso\"},"
+             "{\"iso_path\":\"%s/../nakagawa-recomp/discs/A.iso\"},{\"iso_path\":\"%s/nakagawa-recomp/\"}]}",
+             old_real, old_real, old_real, link_share);
+    put_file(old_real, "library.json", text);
+    NkDataMigrationPlan plan;
+    memset(&plan, 0, sizeof(plan));
+    /* The plan spells the old folder through the link, with a trailing '/'; the library does not. */
+    snprintf(plan.new_root, sizeof(plan.new_root), "%s/Nakagawa", link_share);
+    char from[NATIVE_TEST_PATH_MAX], to[NATIVE_TEST_PATH_MAX];
+    snprintf(from, sizeof(from), "%s/nakagawa-recomp", link_share);
+    snprintf(to, sizeof(to), "%s/Nakagawa/data", link_share);
+    add_move(&plan, from, to, "data", false, false);
+    snprintf(plan.remap_from, sizeof(plan.remap_from), "%s/nakagawa-recomp/", link_share);
+    snprintf(plan.remap_to, sizeof(plan.remap_to), "%s/Nakagawa/data", link_share);
+    snprintf(plan.library_file, sizeof(plan.library_file), "%s/Nakagawa/data/library.json", link_share);
+    snprintf(plan.old_library_file, sizeof(plan.old_library_file), "%s/nakagawa-recomp/library.json",
+             link_share);
+    NkDataMigration r;
+    nk_data_migrate_run(&plan, &r);
+    CHECK(r.status == NK_MIGRATE_DONE && r.library_rewritten, "the run completes and rewrites");
+    char *library = slurp(plan.library_file);
+    char want[NATIVE_TEST_PATH_MAX * 2];
+    snprintf(want, sizeof(want), "\"%s/Nakagawa/data/discs/A.iso\"", link_share);
+    int found = 0;
+    for (const char *p = library; p && (p = strstr(p, want)) != NULL; p++) found++;
+    CHECK(found == 3, "the resolved spelling, '//' and '.', and '..' all point at the new folder");
+    snprintf(want, sizeof(want), "\"%s/Nakagawa/data\"", link_share);
+    CHECK(library && strstr(library, want) != NULL, "and so does the folder itself, spelled with a '/'");
+    CHECK(library && strstr(library, old_real) == NULL && strstr(library, "nakagawa-recomp") == NULL,
+          "no stored path names the old folder");
+    free(library);
+    snprintf(want, sizeof(want), "%s/Nakagawa/data/discs/A.iso", link_share);
+    CHECK(file_is(want, "a"), "and the rewritten path reaches the disc");
+}
+
+/* S3: a relative link (GNU stow's kind) that leads out of the folder moving with it. */
+static void test_relative_links_that_leave_the_folder(void) {
+    for (int c = 0; c < 3; c++) {
+        Fixture fx;
+        build_fixture(&fx, true);
+        char target[NATIVE_TEST_PATH_MAX], link_path[NATIVE_TEST_PATH_MAX];
+        const char *text = NULL;
+        if (c == 0) {
+            join(target, sizeof(target), fx.root, "dotfiles");
+            put_file(target, "settings.json", "{\"stowed\":1}");
+            join(link_path, sizeof(link_path), fx.old_config, "stowed.json");
+            text = "../../dotfiles/settings.json"; /* the settings folder moves to another parent */
+        } else if (c == 1) {
+            join(target, sizeof(target), fx.root, "isos");
+            CHECK(nk_platform_mkdir_p(target), "a folder of images elsewhere");
+            join(link_path, sizeof(link_path), fx.old_data, "isos");
+            text = "../../isos"; /* the data folder moves one level deeper */
+        } else {
+            join(link_path, sizeof(link_path), fx.old_data, "save-alias");
+            text = "saves/UCUS98744"; /* into data/saves, which moves up on its own */
+        }
+        CHECK(symlink(text, link_path) == 0, "make the relative link");
+        NkDataMigrationPlan plan;
+        build_plan(&fx, &plan);
+        NkDataMigration r;
+        nk_data_migrate_run(&plan, &r);
+        CHECK(r.status == NK_MIGRATE_KEPT_OLD && strstr(r.message, NK_MIGRATE_CODE_LINKED) == r.message,
+              c == 0   ? "a stowed settings file keeps the old folders"
+              : c == 1 ? "a relative link out of the data folder keeps the old folders"
+                       : "a link into the saves, which move on their own, keeps the old folders");
+        CHECK(strstr(r.message, link_path) != NULL && strstr(r.message, text) != NULL,
+              "naming the link and where it points");
+        check_untouched(&fx, "nothing moved");
+        CHECK(is_link(link_path), "and the link is as it was");
+    }
+
+    /* An absolute link, and a relative one that stays inside the folder: both still work after. */
+    Fixture fx;
+    build_fixture(&fx, true);
+    char target[NATIVE_TEST_PATH_MAX], link_path[NATIVE_TEST_PATH_MAX];
+    join(target, sizeof(target), fx.root, "isos");
+    put_file(target, "B.iso", "b");
+    join(link_path, sizeof(link_path), fx.old_data, "isos");
+    CHECK(symlink(target, link_path) == 0, "an absolute link");
+    join(link_path, sizeof(link_path), fx.old_data, "disc-alias");
+    CHECK(symlink("discs/UCUS98744", link_path) == 0, "a relative link inside the data folder");
+    NkDataMigrationPlan plan;
+    build_plan(&fx, &plan);
+    NkDataMigration r;
+    nk_data_migrate_run(&plan, &r);
+    CHECK(r.status == NK_MIGRATE_DONE, "do not stop the move");
+    join(link_path, sizeof(link_path), fx.new_data, "isos/B.iso");
+    CHECK(file_is(link_path, "b"), "the absolute link still reaches its target");
+    join(link_path, sizeof(link_path), fx.new_data, "disc-alias/UCUS98744.iso");
+    CHECK(file_is(link_path, "disc bytes"), "and so does the relative one inside");
+}
+
+/* S4: the folder flush after the library's rename fails (EIO, as the reviewer's LD_PRELOAD shim made
+   it). The rename happened: the run is done, says so by name once, and the next start goes on. */
+static bool failing_sync_dir(const char *dir) {
+    (void)dir;
+    errno = EIO;
+    return false;
+}
+
+static void test_failed_folder_flush_is_named_not_fatal(void) {
+    Fixture fx;
+    build_fixture(&fx, true);
+    NkDataMigrationPlan plan;
+    build_plan(&fx, &plan);
+    nk_data_migrate_set_sync_dir_for_test(failing_sync_dir);
+    NkDataMigration r;
+    nk_data_migrate_run(&plan, &r);
+    nk_data_migrate_set_sync_dir_for_test(NULL);
+    CHECK(r.status == NK_MIGRATE_DONE && r.library_rewritten,
+          "a folder that cannot be flushed after a rename that succeeded does not fail the run");
+    char want[NATIVE_TEST_PATH_MAX + 64];
+    snprintf(want, sizeof(want), "%s could not be flushed", fx.new_data);
+    CHECK(strstr(r.log, NK_MIGRATE_CODE_NOT_FLUSHED) != NULL && strstr(r.log, want) != NULL,
+          "it is a named log line");
+    check_migrated(&fx, "the folders are where the renames put them");
+    nk_data_migrate_run(&plan, &r);
+    CHECK(r.status == NK_MIGRATE_NOTHING, "and the next start goes on");
+}
+
+/* S2's last rule: the rewritten library is read back, and a stored path that still names the old
+   folder undoes the run. The folder flush after the rewrite is where a writer that ignores the lock
+   (simulated here) puts an old path back. */
+static char g_sneak_library[NATIVE_TEST_PATH_MAX], g_sneak_old[NATIVE_TEST_PATH_MAX];
+static char g_sneak_new[NATIVE_TEST_PATH_MAX];
+static bool g_sneaked = false;
+
+static bool sneaking_sync_dir(const char *dir) {
+    (void)dir;
+    char *text = g_sneaked ? NULL : slurp(g_sneak_library);
+    char *end = text ? strstr(text, "]}") : NULL;
+    if (end && strstr(text, g_sneak_new) != NULL) {
+        *end = '\0';
+        FILE *f = fopen(g_sneak_library, "wb");
+        if (f) {
+            fprintf(f, "%s,{\"iso_path\":\"%s/sneaked.iso\"}]}", text, g_sneak_old);
+            fclose(f);
+            g_sneaked = true;
+        }
+    }
+    free(text);
+    return true;
+}
+
+static void test_rewritten_library_is_checked(void) {
+    Fixture fx;
+    build_fixture(&fx, true);
+    NkDataMigrationPlan plan;
+    build_plan(&fx, &plan);
+    snprintf(g_sneak_library, sizeof(g_sneak_library), "%s", plan.library_file);
+    snprintf(g_sneak_old, sizeof(g_sneak_old), "%s", fx.old_data);
+    snprintf(g_sneak_new, sizeof(g_sneak_new), "%s/discs", fx.new_data);
+    g_sneaked = false;
+    nk_data_migrate_set_sync_dir_for_test(sneaking_sync_dir);
+    NkDataMigration r;
+    nk_data_migrate_run(&plan, &r);
+    nk_data_migrate_set_sync_dir_for_test(NULL);
+    CHECK(g_sneaked, "an old path was put back after the rewrite");
+    CHECK(r.status != NK_MIGRATE_DONE, "the run is not reported done");
+    CHECK(strstr(r.message, "still name") != NULL || strstr(r.log, "still name") != NULL,
+          "it names the stored path that still points at the old folder");
+    check_untouched(&fx, "and the moves and the library are undone");
+}
+
+/* N1: a folder of another user (sudo with HOME kept) is not moved from here. */
+static void test_folder_of_another_user_is_not_moved(void) {
+    Fixture fx;
+    build_fixture(&fx, true);
+    NkDataMigrationPlan plan;
+    build_plan(&fx, &plan);
+    nk_data_migrate_set_euid_for_test((long)getuid() + 1L);
+    NkDataMigration r;
+    nk_data_migrate_run(&plan, &r);
+    nk_data_migrate_set_euid_for_test(-1);
+    CHECK(r.status == NK_MIGRATE_KEPT_OLD && strstr(r.message, NK_MIGRATE_CODE_OTHER_OWNER) == r.message,
+          "a folder of another user keeps the old folders");
+    check_untouched(&fx, "nothing moved");
+}
+
+/* N2: an earlier run stopped part-way, and now the lock cannot be taken: neither layout is whole,
+   and the message says so instead of advising to keep one folder. */
+static void test_lock_failure_after_a_stopped_run(void) {
+    Fixture fx;
+    build_fixture(&fx, true);
+    NkDataMigrationPlan plan;
+    build_plan(&fx, &plan);
+    CHECK(nk_platform_mkdir_p(fx.new_root), "make the new root");
+    CHECK(nk_rename_utf8(fx.old_data, fx.new_data) == 0, "the stopped run's first move");
+    put_file(fx.root, "not-a-folder", "x");
+    snprintf(plan.lock_file, sizeof(plan.lock_file), "%s/not-a-folder/.nakagawa-migration.lock", fx.root);
+    NkDataMigration r;
+    nk_data_migrate_run(&plan, &r);
+    CHECK(r.status == NK_MIGRATE_REFUSED && strstr(r.message, NK_MIGRATE_CODE_LOCK) == r.message,
+          "the start stops, by name");
+    CHECK(strstr(r.message, "stopped") != NULL && strstr(r.message, "finishes the move") != NULL &&
+              strstr(r.message, "Keep the folder you want") == NULL,
+          "saying a move is unfinished, not that two copies exist");
+    char path[NATIVE_TEST_PATH_MAX];
+    join(path, sizeof(path), fx.old_config, "settings.json");
+    CHECK(file_is(path, "{\"a\":1}"), "the settings stay where they are");
+}
+
+/* N9: a data folder that is a link to nothing (a disk that is not mounted). */
+static void test_dangling_link_is_named(void) {
+    Fixture fx;
+    build_fixture(&fx, false);
+    char dir[NATIVE_TEST_PATH_MAX];
+    join(dir, sizeof(dir), fx.root, "share");
+    CHECK(nk_platform_mkdir_p(dir), "make the data base");
+    CHECK(symlink("/nonexistent-disk/nakagawa", fx.old_data) == 0, "a link to a disk that is not there");
+    NkDataMigrationPlan plan;
+    build_plan(&fx, &plan);
+    NkDataMigration r;
+    nk_data_migrate_run(&plan, &r);
+    CHECK(r.status == NK_MIGRATE_KEPT_OLD && strstr(r.message, "does not exist") != NULL &&
+              strstr(r.message, "mount it") != NULL,
+          "says that the link's target is missing");
+}
+
 /* ---- The host's own plan and default folders ---- */
 
 #if !defined(__APPLE__) && !defined(__ANDROID__)
@@ -1022,6 +1570,9 @@ static void test_linux_default_folders_and_plan(void) {
           "and the library's stored paths are remapped");
     CHECK(strcmp(plan.lock_file, "/synthetic/xdg/.nakagawa-migration.lock") == 0,
           "the lock is beside the new folder, outside every move");
+    CHECK(strcmp(plan.in_use_file, "/synthetic/xdg/.nakagawa-in-use.lock") == 0 &&
+              strcmp(plan.done_file, "/synthetic/xdg/Nakagawa/.nakagawa-migration-done") == 0,
+          "so is the in-use lock, and the record of a completed run is in the new root");
     CHECK(plan.notes[0] == '\0', "every folder was located");
 
     CHECK(nk_platform_set_old_user_data_layout(true), "the old layout can be used for a run");
@@ -1064,7 +1615,7 @@ static void test_unlocatable_settings_are_named(void) {
     CHECK(plan.move_count == 2u, "with the data and saves moves");
     CHECK(strstr(plan.notes, NK_MIGRATE_CODE_PATH_UNAVAILABLE) == plan.notes &&
               strstr(plan.notes, "settings") != NULL &&
-              strstr(plan.notes, "XDG_CONFIG_HOME and HOME are not set") != NULL,
+              strstr(plan.notes, "XDG_CONFIG_HOME is not set to an absolute path, and HOME is not set") != NULL,
           "and a named line for the settings folder");
     NkDataMigration r;
     nk_data_migrate_host(&r);
@@ -1153,6 +1704,113 @@ static void test_host_cache_stays(void) {
     nk_data_migrate_host(&r);
     CHECK(r.status == NK_MIGRATE_NOTHING && r.log[0] == '\0', "a cache written again changes nothing");
 }
+
+/* B1 through the player's own entry point: an older player holding its library lock keeps this
+   start on the old folders, and a later start, once it has closed, moves them. */
+static void test_host_waits_for_an_older_player(void) {
+    char root[NATIVE_TEST_PATH_MAX], dir[NATIVE_TEST_PATH_MAX], lock_path[NATIVE_TEST_PATH_MAX];
+    new_case(root, sizeof(root));
+    linux_env(root, "share", "config", "cache", "state");
+    snprintf(dir, sizeof(dir), "%s/share/nakagawa-recomp", root);
+    put_file(dir, "library.json", "{\"games\":[]}");
+    snprintf(lock_path, sizeof(lock_path), "%s/locks/library.lock", dir);
+    snprintf(dir, sizeof(dir), "%s/share/nakagawa-recomp/locks", root);
+    CHECK(nk_platform_mkdir_p(dir), "make the old lock folder");
+    Holder holder = hold_in_child(HOLD_FLOCK, lock_path);
+    NkDataMigration r;
+    nk_data_migrate_host(&r);
+    CHECK(r.status == NK_MIGRATE_KEPT_OLD && strstr(r.message, NK_MIGRATE_CODE_IN_USE) == r.message,
+          "the host keeps the old folders while an older copy holds its library lock");
+    char out[NATIVE_TEST_PATH_MAX];
+    snprintf(dir, sizeof(dir), "%s/share/nakagawa-recomp", root);
+    CHECK(nk_platform_resolve_path(NK_PATH_DATA, out, sizeof(out)) && strcmp(out, dir) == 0,
+          "and this run uses the old data folder, as the older copy does");
+    (void)nk_platform_set_old_user_data_layout(false);
+    let_go(&holder);
+    nk_data_migrate_host(&r);
+    CHECK(r.status == NK_MIGRATE_DONE, "the next start, after the older copy closed, moves the data");
+    nk_data_migrate_release_in_use();
+}
+
+/* B1's other side through the host: the late writer's dialog after a completed move. */
+static void test_host_names_late_writes(void) {
+    char root[NATIVE_TEST_PATH_MAX], dir[NATIVE_TEST_PATH_MAX];
+    new_case(root, sizeof(root));
+    linux_env(root, "share", "config", "cache", "state");
+    snprintf(dir, sizeof(dir), "%s/share/nakagawa-recomp/saves/ULUS10001", root);
+    put_file(dir, "SAVE.bin", "save bytes");
+    NkDataMigration r;
+    nk_data_migrate_host(&r);
+    CHECK(r.status == NK_MIGRATE_DONE, "the first start moves the data");
+    snprintf(dir, sizeof(dir), "%s/share/nakagawa-recomp/saves/ULUS10001", root);
+    put_file(dir, "SAVE.bin", "written by an older copy after the move");
+    nk_data_migrate_host(&r);
+    CHECK(r.status == NK_MIGRATE_REFUSED && strstr(r.message, NK_MIGRATE_CODE_LATE_WRITES) == r.message,
+          "a start after a late write names it, from the record of the completed move");
+    char data[NATIVE_TEST_PATH_MAX];
+    snprintf(data, sizeof(data), "%s/share/Nakagawa/data", root);
+    CHECK(strcmp(r.folder_b, data) == 0 && strstr(r.folder_a, "/share/nakagawa-recomp") != NULL,
+          "with the folder in use and the other for Open both folders");
+    snprintf(dir, sizeof(dir), "%s/share/Nakagawa/saves/ULUS10001/SAVE.bin", root);
+    CHECK(file_is(dir, "save bytes"), "nothing is merged");
+    snprintf(dir, sizeof(dir), "%s/share/nakagawa-recomp/saves/ULUS10001/SAVE.bin", root);
+    CHECK(file_is(dir, "written by an older copy after the move"), "or deleted");
+    nk_data_migrate_release_in_use();
+}
+
+/* S2 through the host: the same folders spelled through a linked HOME, with a trailing '/', or
+   with a relative XDG value (which the XDG rules say to ignore). */
+static void test_host_spellings_of_the_data_home(void) {
+    for (int c = 0; c < 3; c++) {
+        char root[NATIVE_TEST_PATH_MAX], dir[NATIVE_TEST_PATH_MAX], value[NATIVE_TEST_PATH_MAX];
+        new_case(root, sizeof(root));
+        linux_env(root, "home/.local/share", "home/.config", "cache", "state");
+        char real_home[NATIVE_TEST_PATH_MAX], link_home[NATIVE_TEST_PATH_MAX];
+        join(real_home, sizeof(real_home), root, "home");
+        join(link_home, sizeof(link_home), root, "linked-home");
+        snprintf(dir, sizeof(dir), "%s/.local/share/nakagawa-recomp/discs", real_home);
+        put_file(dir, "A.iso", "a");
+        char text[NATIVE_TEST_PATH_MAX * 2];
+        /* The library spells the folder as the old version saw it: resolved. */
+        snprintf(text, sizeof(text), "{\"games\":[{\"iso_path\":\"%s/.local/share/nakagawa-recomp/discs/A.iso\"}]}",
+                 real_home);
+        snprintf(dir, sizeof(dir), "%s/.local/share/nakagawa-recomp", real_home);
+        put_file(dir, "library.json", text);
+        if (c == 0) {
+            CHECK(symlink(real_home, link_home) == 0, "HOME through a link");
+            native_test_set_env("HOME", link_home);
+            native_test_set_env("XDG_DATA_HOME", NULL);
+            native_test_set_env("XDG_CONFIG_HOME", NULL);
+        } else if (c == 1) {
+            snprintf(value, sizeof(value), "%s/.local/share/", real_home);
+            native_test_set_env("XDG_DATA_HOME", value);
+        } else {
+            native_test_set_env("XDG_DATA_HOME", "relative/share");
+        }
+        NkDataMigrationPlan plan;
+        CHECK(nk_platform_user_data_plan(&plan), "a plan");
+        if (c == 2) {
+            CHECK(strstr(plan.notes, NK_MIGRATE_CODE_XDG_IGNORED) != NULL &&
+                      strstr(plan.notes, "XDG_DATA_HOME") != NULL,
+                  "a relative XDG value is ignored, by name");
+            snprintf(value, sizeof(value), "%s/.local/share/Nakagawa", real_home);
+            CHECK(strcmp(plan.new_root, value) == 0, "and the default under HOME is used");
+        }
+        NkDataMigration r;
+        nk_data_migrate_host(&r);
+        CHECK(r.status == NK_MIGRATE_DONE && r.library_rewritten, "the data moves and the library is rewritten");
+        if (c == 2) CHECK(strstr(r.log, NK_MIGRATE_CODE_XDG_IGNORED) != NULL, "the log says so");
+        snprintf(dir, sizeof(dir), "%s/.local/share/Nakagawa/data/library.json", real_home);
+        char *library = slurp(dir);
+        CHECK(library && strstr(library, "nakagawa-recomp") == NULL && strstr(library, "/Nakagawa/data/discs/A.iso"),
+              c == 0   ? "a library spelled through the resolved HOME is rewritten"
+              : c == 1 ? "a trailing '/' on XDG_DATA_HOME changes nothing"
+                       : "and the rewritten library is the default's");
+        free(library);
+        nk_data_migrate_release_in_use();
+        native_test_set_env("XDG_DATA_HOME", NULL);
+    }
+}
 #elif defined(__APPLE__)
 static void test_macos_default_folders_and_plan(void) {
     native_test_set_env("HOME", "/synthetic/profile");
@@ -1221,12 +1879,30 @@ int main(void) {
     test_cache_and_logs_never_block();
     test_overlapping_kept_folder_keeps_the_old_folders();
     test_notice_is_shown_once();
+    test_old_locks_held_keep_the_old_folders();
+    test_in_use_lock_keeps_the_old_folders();
+#if defined(__linux__)
+    test_processes_using_the_old_folders_are_seen();
+#endif
+    test_late_writer_is_named();
+    test_completed_run_is_not_finished_again();
+    test_library_lock_is_held_for_the_rewrite();
+    test_library_paths_in_other_spellings();
+    test_relative_links_that_leave_the_folder();
+    test_failed_folder_flush_is_named_not_fatal();
+    test_rewritten_library_is_checked();
+    test_folder_of_another_user_is_not_moved();
+    test_lock_failure_after_a_stopped_run();
+    test_dangling_link_is_named();
 #if !defined(__APPLE__) && !defined(__ANDROID__)
     test_linux_default_folders_and_plan();
     test_unlocatable_settings_are_named();
     test_host_keeps_linked_folders_in_use();
     test_host_aliased_xdg_homes();
     test_host_cache_stays();
+    test_host_waits_for_an_older_player();
+    test_host_names_late_writes();
+    test_host_spellings_of_the_data_home();
 #elif defined(__APPLE__)
     test_macos_default_folders_and_plan();
 #endif

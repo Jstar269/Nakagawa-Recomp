@@ -122,14 +122,31 @@ Roadmap items decided with the table:
   * Whole-folder renames only. Nothing is copied, and nothing is deleted except empty folders in the
     way, one `rmdir` at a time, which the system refuses for a folder that holds anything.
   * Only the folders that matter (library, saves, settings) can stop the start. When one of them
-    cannot move (data in both places, another disk, a folder that cannot be written), nothing stays
-    half-moved, and the player names both folders with **Open both folders** and **Quit**. A macOS
-    cache or logs folder that cannot move stays where it is, with a named line in the log.
-  * A linked folder, XDG homes that point at each other, or a `library.json` written by a newer
-    version keep the older folders in use for that start: nothing is moved or rewritten, and the user
-    is told once.
-  * library.json's stored paths are rewritten, and the original is kept whole as
-    `library.json.pre-migration`.
+    cannot move (data in both places, another disk, a folder that cannot be written), the moves
+    already made are undone, and the player names both folders with **Open both folders** and
+    **Quit**. An undo that fails, or a run that is killed, is named, and the next start finishes it. A
+    macOS cache or logs folder that cannot move stays where it is, with a named line in the log.
+  * Nothing moves while another program may use the older folders. Every player and tool of this
+    version holds `.nakagawa-in-use.lock` (beside `Nakagawa`) shared for its life, and the run takes it
+    exclusively. The run also probes the locks the earlier version takes (`locks/*.lock`,
+    `games/.staging_*.lock`), holds the library's own lock from before the first move to after the
+    rewrite, and on Linux looks through `/proc` for a process of the user that runs the player's file
+    name or has its program, working folder or an open file in an older folder. Any of these keeps the
+    older folders in use for that start (`DATA_MIGRATION_IN_USE`).
+  * A completed run writes `.nakagawa-migration-done` in `Nakagawa`, naming the folders it moved. An
+    older folder made again after that holds only what a late writer added; it is named
+    (`DATA_MIGRATION_LATE_WRITES`), never merged or deleted. The record also retires the steps that
+    finish a stopped run: the saves-in-data rule and the library rewrite.
+  * A linked folder, a relative link inside a folder that would leave it after the move, XDG homes that
+    point at each other, a folder of another user, or a `library.json` written by a newer version keep
+    the older folders in use for that start: nothing is moved or rewritten, and the user is told once.
+    A relative XDG variable is ignored, as the XDG specification says.
+  * library.json's stored paths are matched in every spelling (lexically cleaned, and with links
+    resolved) and rewritten, the rewritten file is read back, and one that still names the old folder
+    undoes the run. The original is kept whole as `library.json.pre-migration`. A folder flush that
+    fails after a rename is a named log line, not a failure.
+  * The Python tools take the same in-use lock and refuse by name (`DATA_MIGRATION_IN_PROGRESS`) while
+    a run holds the migration lock.
 
   Windows never used another name.
 * **Code signing:** v0.0.1 and v0.0.2 ship unsigned. Until a build is signed, each
@@ -709,7 +726,9 @@ and `saves` inside it, as with `--user-data-root`. A start after an upgrade move
 macOS profile in once (section 4); a start that cannot do so safely keeps using the older folders for
 that run and says so. The Python tools resolve the data folder by the same rule
 (`tools/nk_core/prereq_fetcher.py`): the older folder while it is the one in use, the new one after
-the move, and `DATA_MIGRATION_BOTH_PRESENT` when both hold data. Each launch
+the move, and `DATA_MIGRATION_BOTH_PRESENT` when both hold data; while a start is moving the folders
+they stop with `DATA_MIGRATION_IN_PROGRESS`, and while they run they hold the in-use lock that keeps a
+start from moving them. Each launch
 still starts one child process per title (Section 2, Option C), with the #297 run-package and
 save-root semantics unchanged.
 

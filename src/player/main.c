@@ -3464,8 +3464,10 @@ static void player_open_migration_folder(const char *path) {
 /* One data folder name on every host (#324): a Linux or macOS profile from before the rename is
    moved into place once, before anything reads it (nk_data_migrate.h). Only a folder that
    matters (library, saves, settings) can stop the start: then the message names both folders and
-   offers to open them, so no terminal is needed. A start that keeps the old folders goes on and
-   says so once. False to stop the start. */
+   offers to open them, so no terminal is needed. A start that keeps the old folders (another
+   Nakagawa still using them among the reasons) goes on and says so once. From here on this process
+   holds the shared in-use lock, so no later start moves the folders under it or the games it
+   starts. False to stop the start. */
 static bool player_migrate_user_data(void) {
     static NkDataMigration migration;
     nk_data_migrate_host(&migration);
@@ -3495,10 +3497,15 @@ static bool player_migrate_user_data(void) {
           "Quit" },
         { 0, 1, "Open both folders" }
     };
+    /* A late writer (an older copy still running when the folders moved) is not a failure to move:
+       the message says which folder is in use and what the other one holds. */
+    const bool late = strncmp(migration.message, NK_MIGRATE_CODE_LATE_WRITES,
+                              strlen(NK_MIGRATE_CODE_LATE_WRITES)) == 0;
     const SDL_MessageBoxData dialog = {
-        SDL_MESSAGEBOX_ERROR,
+        late ? SDL_MESSAGEBOX_WARNING : SDL_MESSAGEBOX_ERROR,
         NULL,
-        "Nakagawa Recomp can't move your data folder",
+        late ? "Nakagawa Recomp found newer files in an earlier folder"
+             : "Nakagawa Recomp can't move your data folder",
         migration.message,
         (int)(sizeof(buttons) / sizeof(buttons[0])),
         buttons,
