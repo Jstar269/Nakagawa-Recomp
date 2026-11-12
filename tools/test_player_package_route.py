@@ -58,6 +58,7 @@ import nk_cli  # noqa: E402
 import scratch_dir  # noqa: E402
 from test_build_truth import _class_scratch_build_root  # noqa: E402
 from nk_core import package_cache  # noqa: E402
+from nk_core import report_bundle  # noqa: E402
 import prxload  # noqa: E402
 from import_fixtures import BASE_VADDR, _elf  # noqa: E402
 from test_iso_parity import (  # noqa: E402
@@ -1262,6 +1263,61 @@ class TestPlayerPackageRoute(unittest.TestCase):
         self.assertFalse((eboot.parent / "WRITTEN.TXT").exists())
         self.assertFalse((view / "WRITTEN.TXT").exists())
         self.assertFalse((folder / "MISSING.TXT").exists())
+
+    def test_homebrew_second_folder_stop_keeps_folders_out_of_the_report(self):
+        """#2426: the --iso stop for a second folder leaves both folders out of a problem report.
+
+        The player's --iso import of a program already added from another folder stops with
+        HOMEBREW_ALREADY_ADDED. A player started without a console writes its stdout and
+        stderr to logs/player-output.txt, which the one-click problem report collects. Failing
+        before (review of #2426's fixes, S2): the stderr line was the card's text, which names
+        the folder the program was added from, so that path reached the bundle as it was
+        whenever it lay outside the profile folder. The card may show it; the log line names
+        the title and what clears the stop.
+        """
+        self.require_homebrew_toolchain()
+        built = build_homebrew_eboot(self.root / "homebrew")
+        first = self.homebrew_folder(built, "NKFIRSTFOLDER", {})
+        second_dir = self.root / "elsewhere" / "PSP" / "GAME" / "NKSECONDFOLDER"
+        second_dir.mkdir(parents=True)
+        second = second_dir / "EBOOT.PBP"
+        shutil.copyfile(first, second)
+        environment = os.environ.copy()
+        environment["LOCALAPPDATA"] = str(self.local_appdata)
+        environment["APPDATA"] = str(self.root / "appdata")
+        environment["USERPROFILE"] = str(self.root / "userprofile")
+
+        def run_iso(eboot: Path) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                [str(self.player), f"--user-data-root={self.user_root}", f"--iso={eboot}",
+                 "--stage-only"],
+                cwd=ROOT, env=environment, capture_output=True, text=True, timeout=120,
+            )
+
+        imported = run_iso(first)
+        self.assertEqual(imported.returncode, 3, imported.stdout + imported.stderr)
+        refused = run_iso(second)
+        output = refused.stdout + refused.stderr
+        self.assertNotEqual(refused.returncode, 0, output)
+        self.assertIn("[PLAYER] HOMEBREW_ALREADY_ADDED:", refused.stderr)
+        self.assertIn("Nakagawa PSP Recompilation Oracle", refused.stderr)
+        self.assertIn("one folder", refused.stderr)
+
+        # What the player writes there when it has no console: one run's stdout and stderr.
+        logs, config = report_bundle.resolve_layout(self.user_root)
+        logs.mkdir(parents=True, exist_ok=True)
+        (logs / "player-output.txt").write_text(output, encoding="utf-8")
+        plan = report_bundle.build_plan(
+            report_bundle.ReportInputs(user_data_root=self.user_root, logs_dir=logs,
+                                       config_dir=config),
+            report_bundle.Identity(), ROOT, doctor=lambda _root: "", gpu=lambda: [],
+            memory=lambda: None,
+        )
+        self.assertIn("logs/player-output.txt", [entry.arcname for entry in plan.entries])
+        bundle = b"".join(entry.data for entry in plan.entries)
+        for folder in (first.parent, second.parent):
+            self.assertNotIn(folder.name.encode("utf-8"), bundle)
+            self.assertNotIn(str(folder).encode("utf-8"), bundle)
 
     def test_uncatalogued_player_route_builds_with_generic_profile(self):
         """The package action upgrades the native profile through bring-up's writer."""

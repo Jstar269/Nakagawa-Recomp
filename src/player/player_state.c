@@ -8499,7 +8499,8 @@ static void player_homebrew_elsewhere_text(char *out, size_t out_size, bool in_l
     }
 }
 
-void player_app_refuse_homebrew_elsewhere(PlayerApp *app, const PlayerPsnPackage *package) {
+void player_app_refuse_homebrew_elsewhere(PlayerApp *app, const PlayerPsnPackage *package,
+                                          char *log_line, size_t log_line_size) {
     char other[MAX_PATH_LEN];
     char shown[MAX_PATH_LEN];
     char message[sizeof(app->last_error.message)];
@@ -8517,6 +8518,12 @@ void player_app_refuse_homebrew_elsewhere(PlayerApp *app, const PlayerPsnPackage
     in_library = player_app_find_game_by_disc_id(app, package->disc_id) >= 0;
     player_homebrew_elsewhere_text(message, sizeof(message), in_library, title,
                                    package->disc_id, shown);
+    /* The log line names the title and what clears the stop, not the folder: stderr can be
+       player-output.txt, which a problem report collects (review of #2426's fixes, S2). */
+    if (log_line && log_line_size) {
+        player_homebrew_elsewhere_text(log_line, log_line_size, in_library, title,
+                                       package->disc_id, "");
+    }
     if (app->active_view == VIEW_SETUP_WIZARD) {
         player_app_wizard_reset_extraction(app);
         app->wizard.iso_selected = false;
@@ -8840,6 +8847,7 @@ static bool player_homebrew_package_convert(const PlayerPsnPackage *package,
     PlayerPsnBridge bridge;
     NkNpumdimgCallbacks hooks;
     bool had_image = false;
+    bool fresh = false;
     int rc;
     bridge.callbacks = callbacks;
     hooks.on_progress = player_psn_bridge_progress;
@@ -8859,6 +8867,10 @@ static bool player_homebrew_package_convert(const PlayerPsnPackage *package,
         char problem[512];
         char other[MAX_PATH_LEN];
         had_image = !nk_platform_path_missing(package->iso_path);
+        /* Only an attempt that found nothing of an earlier import may take everything away
+           when it fails: one that found its record, view, staging copy or seed records
+           leaves them, so the first folder's stop holds (review of #2426's fixes, S1). */
+        fresh = !had_image && !nk_pbp_homebrew_import_present(package->iso_path);
         problem[0] = '\0';
         /* Checked again here, before anything is written: another program's image may
            have arrived under the key since the inspection, or this one from another
@@ -8897,8 +8909,10 @@ static bool player_homebrew_package_convert(const PlayerPsnPackage *package,
             if (had_image) {
                 (void)nk_remove_utf8(package->iso_path);
                 (void)nk_platform_remove_tree(view_root, NULL);
-            } else {
+            } else if (fresh) {
                 (void)nk_pbp_homebrew_delete_import(package->iso_path, NULL, 0u);
+            } else {
+                (void)nk_remove_utf8(package->iso_path);
             }
             player_psn_result(code, code_size, "PBP_PACKAGE_UNSUPPORTED", message, message_size,
                               "The package changed after it was checked. Add it again.");
@@ -8907,15 +8921,18 @@ static bool player_homebrew_package_convert(const PlayerPsnPackage *package,
         if (rc == NK_PSP_OK) return true;
         /* A first import keeps nothing, its source record included (cold read of #2426,
            finding 2); an earlier image of the same program (the same key) keeps the new
-           folder, which belongs to it. */
-        if (!had_image) (void)nk_pbp_homebrew_delete_import(package->iso_path, NULL, 0u);
+           folder, which belongs to it; and an earlier import whose image has gone keeps its
+           record and folder copy. */
+        if (fresh) (void)nk_pbp_homebrew_delete_import(package->iso_path, NULL, 0u);
     }
     /* With an earlier image, the new folder copy stays with it (review of #2426, N5). */
     if (rc == NK_PSP_ERR_CANCELLED) {
         player_psn_result(code, code_size, nk_psp_status_name(rc), message, message_size,
                           "The conversion was cancelled, and the partial disc image was "
                           "removed.%s", had_image ? " The earlier disc image stays, with the "
-                          "new copy of the program's folder." : "");
+                          "new copy of the program's folder."
+                          : fresh ? "" : " The copy of the program's folder and the record of "
+                          "where it was added from stay.");
         return false;
     }
     fprintf(stderr, "[PLAYER] homebrew package conversion stopped: %s: %s\n",
@@ -8923,7 +8940,9 @@ static bool player_homebrew_package_convert(const PlayerPsnPackage *package,
     player_psn_result(code, code_size, nk_psp_status_name(rc), message, message_size,
                       "The package could not be turned into a disc image: %.200s. %s",
                       ctx.message, had_image ? "The earlier disc image stays, with the new "
-                      "copy of the program's folder." : "Nothing was kept.");
+                      "copy of the program's folder."
+                      : fresh ? "Nothing was kept." : "The copy of the program's folder and "
+                      "the record of where it was added from stay.");
     return false;
 }
 

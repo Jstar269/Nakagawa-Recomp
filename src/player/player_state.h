@@ -2006,7 +2006,8 @@ void player_app_psn_conversion_finish(PlayerApp *app);
  * while the title is in the library, its removal with "Also delete the decrypted files and
  * disc copy" ticked; once it has left the library, the card's "Delete kept copy". The
  * other folder's path is shown with the profile folder as "~". Nothing is changed. */
-void player_app_refuse_homebrew_elsewhere(PlayerApp *app, const PlayerPsnPackage *package);
+void player_app_refuse_homebrew_elsewhere(PlayerApp *app, const PlayerPsnPackage *package,
+                                          char *log_line, size_t log_line_size);
 /* Delete what the import of the program whose library key is key kept after the title left
  * the library (nk_pbp_homebrew_delete_import): its disc image, the copy of its folder and
  * their records. Its Memory Stick, with the files the program wrote, stays. False, with a

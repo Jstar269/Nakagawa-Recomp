@@ -234,7 +234,7 @@ static void player_take_picked_package(PlayerApp *app, const char *path) {
     if (!player_psn_package_inspect(path, &package, code, sizeof(code), message,
                                     sizeof(message))) {
         if (strcmp(code, "HOMEBREW_ALREADY_ADDED") == 0) {
-            player_app_refuse_homebrew_elsewhere(app, &package);
+            player_app_refuse_homebrew_elsewhere(app, &package, NULL, 0u);
         } else {
             player_show_picked_refusal(app, code, "Package not supported", message);
         }
@@ -2958,7 +2958,7 @@ static void finish_psn_job(PlayerApp *app, PlayerPsnJob *job) {
                      job->message);
         }
     } else if (strcmp(job->code, "HOMEBREW_ALREADY_ADDED") == 0) {
-        player_app_refuse_homebrew_elsewhere(app, &job->package);
+        player_app_refuse_homebrew_elsewhere(app, &job->package, NULL, 0u);
     } else if (job->package.disc_format != NK_DISC_FORMAT_NONE) {
         player_show_picked_refusal(app, job->code, player_disc_refusal_title(job->code),
                                    job->message);
@@ -4079,9 +4079,11 @@ static int player_load_library(PlayerRun *run) {
                                             sizeof(message));
         }
         if (!ok && strcmp(code, "HOMEBREW_ALREADY_ADDED") == 0) {
-            /* The card's text, which names what clears the stop. */
-            player_app_refuse_homebrew_elsewhere(app, &package);
-            fprintf(stderr, "[PLAYER] %s: %s\n", code, app->last_error.message);
+            /* What clears the stop, as the card says it, without the folder the card shows:
+               stderr may be player-output.txt, which a problem report collects. */
+            char log_line[sizeof(app->last_error.message)];
+            player_app_refuse_homebrew_elsewhere(app, &package, log_line, sizeof(log_line));
+            fprintf(stderr, "[PLAYER] %s: %s\n", code, log_line);
             if (run->stage_only || app->launch_headless) return 1;
             run->populate_sample = false;
             run->initial_iso_path = NULL;

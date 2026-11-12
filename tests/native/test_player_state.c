@@ -7259,6 +7259,58 @@ static void test_homebrew_package_becomes_a_private_disc(void) {
             assert(player_psn_package_convert(&again, &hooks, code, sizeof(code), message,
                                               sizeof(message)));
         }
+        /* A failed attempt removes only what it made (review of #2426's fixes, S1 and N1).
+           Failing before: a re-import from the first folder, its image gone by hand and the
+           attempt cancelled, deleted the earlier folder copy and record, and the second folder
+           then imported with no stop; and a copy from a folder of the same name elsewhere,
+           beside a view without its record, kept the record it wrote, so the first folder
+           was then stopped as "added from" the other. */
+        {
+            PlayerPsnConvertCallbacks late_cancel = { psn_test_progress,
+                                                      psn_test_cancel_after_progress, NULL };
+            PlayerPsnConvertCallbacks cancel_now = { psn_test_progress, psn_test_cancel_now,
+                                                     NULL };
+            char other_dir[NATIVE_TEST_PATH_MAX + 160];
+            char other_path[NATIVE_TEST_PATH_MAX + 192];
+            PlayerPsnPackage other;
+            uint8_t *bytes;
+            size_t bytes_len = 0;
+            /* S1: the image goes by hand; the first folder again, cancelled late. */
+            assert(remove(again.iso_path) == 0);
+            memset(&progress, 0, sizeof(progress));
+            late_cancel.userdata = &progress;
+            assert(!player_psn_package_convert(&again, &late_cancel, code, sizeof(code), message,
+                                               sizeof(message)));
+            assert(progress.calls > 0 && strstr(message, "cancelled") != NULL);
+            assert(nk_platform_path_missing(again.iso_path));
+            assert(!nk_platform_path_missing(record_path) && !nk_platform_path_missing(view_root));
+            assert(strstr(message, "record of where it was added from stay") != NULL);
+            psn_test_refused(second_path, "HOMEBREW_ALREADY_ADDED", "MYHB");
+            assert(player_psn_package_convert(&again, &hooks, code, sizeof(code), message,
+                                              sizeof(message)));
+            /* N1: a view without its record; a folder named MYHB elsewhere, its copy cancelled. */
+            assert(remove(record_path) == 0);
+            snprintf(other_dir, sizeof(other_dir), "%s%cOTHER%cMYHB", base, sep, sep);
+            assert(nk_platform_mkdir_p(other_dir));
+            snprintf(other_path, sizeof(other_path), "%s%cEBOOT.PBP", other_dir, sep);
+            bytes = psn_test_read_file(pbp_path, &bytes_len);
+            assert(bytes != NULL);
+            write_binary_file(other_path, bytes, bytes_len);
+            free(bytes);
+            other = again;
+            assert(strlen(other_path) < sizeof(other.pbp_path));
+            memcpy(other.pbp_path, other_path, strlen(other_path) + 1u);
+            memset(&progress, 0, sizeof(progress));
+            cancel_now.userdata = &progress;
+            assert(!player_psn_package_convert(&other, &cancel_now, code, sizeof(code), message,
+                                               sizeof(message)));
+            assert(nk_platform_path_missing(record_path));
+            assert(player_psn_package_inspect(pbp_path, &other, code, sizeof(code), message,
+                                              sizeof(message)));
+            assert(player_psn_package_convert(&again, &hooks, code, sizeof(code), message,
+                                              sizeof(message)));
+            assert(!nk_platform_path_missing(record_path));
+        }
         /* The same folder by another name (N2): a link named ALIAS to MYHB has MYHB's real
            path. On Windows the picked path keeps the link's name, so the program's folder on
            the Memory Stick would be ALIAS: the import stops, naming MYHB. On POSIX the
@@ -7356,7 +7408,7 @@ static void test_homebrew_package_becomes_a_private_disc(void) {
             /* In the library. */
             assert(!player_psn_package_inspect(second_path, &refused, code, sizeof(code), message,
                                                sizeof(message)));
-            player_app_refuse_homebrew_elsewhere(lib, &refused);
+            player_app_refuse_homebrew_elsewhere(lib, &refused, NULL, 0u);
             assert(lib->active_view == VIEW_ERROR &&
                    strcmp(lib->last_error.error_code, "HOMEBREW_ALREADY_ADDED") == 0);
             assert(strstr(lib->last_error.message, "is in the library") != NULL);
@@ -7386,13 +7438,13 @@ static void test_homebrew_package_becomes_a_private_disc(void) {
                 long_record[0] = '/';
                 memcpy(long_record + 600, "\nMYHB\n", 7u);
                 write_binary_file(record_path, (const uint8_t *)long_record, 607u);
-                player_app_refuse_homebrew_elsewhere(lib, &refused);
+                player_app_refuse_homebrew_elsewhere(lib, &refused, NULL, 0u);
                 assert(strstr(lib->last_error.message, "Delete kept copy") != NULL);
                 assert(strstr(lib->last_error.message, "Nothing was changed.") != NULL);
                 write_binary_file(record_path, kept_record, kept_record_len);
                 free(kept_record);
             }
-            player_app_refuse_homebrew_elsewhere(lib, &refused);
+            player_app_refuse_homebrew_elsewhere(lib, &refused, NULL, 0u);
             assert(strstr(lib->last_error.message, "has left the library") != NULL);
             assert(strstr(lib->last_error.message, "Delete kept copy") != NULL);
             label = player_error_retry_label(&lib->last_error);
@@ -7418,9 +7470,19 @@ static void test_homebrew_package_becomes_a_private_disc(void) {
             }
             /* Where the first folder's path is shown (review of #2426, N7 and question 4): on
                the card, with the profile folder as "~"; Copy details and the report link
-               carry no message, so not there at all. */
+               carry no message, so not there at all; and the --iso route's stderr line, which
+               can be player-output.txt and so reach a problem report, carries the title and
+               what clears the stop but not the folder (review of #2426's fixes, S2; the route
+               and the bundle are in tools/test_player_package_route.py). */
             {
                 char report[PLAYER_ERROR_DETAILS_MAX + 4096];
+                char log_line[sizeof(lib->last_error.message)];
+                player_app_refuse_homebrew_elsewhere(lib, &refused, log_line, sizeof(log_line));
+                assert(strstr(log_line, "My Homebrew") != NULL &&
+                       strstr(log_line, "Delete kept copy") != NULL);
+                assert(strstr(log_line, "MYHB") == NULL && strstr(log_line, base) == NULL &&
+                       strstr(log_line, "added from the folder") == NULL);
+                assert(strstr(lib->last_error.message, "added from the folder") != NULL);
                 const char *home = getenv(sep == '\\' ? "USERPROFILE" : "HOME");
                 if (home != NULL && home[0] != '\0' && native_test_path_within(folder_path, home)) {
                     assert(strstr(lib->last_error.message, home) == NULL);
@@ -7461,7 +7523,7 @@ static void test_homebrew_package_becomes_a_private_disc(void) {
             assert(index >= 0);
             assert(!player_psn_package_inspect(pbp_path, &refused, code, sizeof(code), message,
                                                sizeof(message)));
-            player_app_refuse_homebrew_elsewhere(lib, &refused);
+            player_app_refuse_homebrew_elsewhere(lib, &refused, NULL, 0u);
             assert(strstr(lib->last_error.message, "is in the library") != NULL &&
                    strstr(lib->last_error.message, "SECOND") != NULL);
             assert(player_app_remove_game_and_data(lib, index, PLAYER_REMOVE_ALSO_DISC_COPY,

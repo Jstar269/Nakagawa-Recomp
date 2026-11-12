@@ -1348,7 +1348,7 @@ bool nk_pbp_homebrew_write_view(const char *pbp_path, const char *view_root,
     HbText manifest;
     HbText record;
     bool ok;
-    bool first;
+    bool had_record;
     int written;
     if (!hb_check_source(pbp_path, view_root, &source, name, sizeof(name), problem,
                          problem_size))
@@ -1363,21 +1363,23 @@ bool nk_pbp_homebrew_write_view(const char *pbp_path, const char *view_root,
         return false;
     }
     /* The record first: whatever view or staging copy is on the disk from here on came from
-       the folder it names. A first import that fails takes it away again with its staging
-       copy, so nothing new is kept. */
-    first = hb_state(record_path) == HB_MISSING && hb_state(view_root) == HB_MISSING;
+       the folder it names. An import that fails takes away the record it wrote, with its
+       staging copy, and leaves one that was there before it (review of #2426's fixes, N1):
+       a failure removes only what this attempt made. */
+    had_record = hb_state(record_path) != HB_MISSING;
     memset(&record, 0, sizeof(record));
     hb_text_add(&record, source.real, "\n", name);
     hb_text_add(&record, "\n", NULL, NULL);
     ok = hb_write_text(record_path, &record) && nk_platform_sync_dir(parent);
     free(record.text);
     if (!ok) {
+        if (!had_record) (void)nk_remove_utf8(record_path);
         hb_problem(problem, problem_size, "%.400s could not be written.", record_path);
         return false;
     }
     if (!nk_platform_remove_tree(staging, NULL) || !nk_platform_mkdir_p_private(target)) {
         hb_problem(problem, problem_size, "%.400s could not be made.", target);
-        hb_drop_staging(staging, first ? record_path : NULL);
+        hb_drop_staging(staging, had_record ? NULL : record_path);
         return false;
     }
     memset(&manifest, 0, sizeof(manifest));
@@ -1388,14 +1390,14 @@ bool nk_pbp_homebrew_write_view(const char *pbp_path, const char *view_root,
     }
     free(manifest.text);
     if (!ok) {
-        hb_drop_staging(staging, first ? record_path : NULL);
+        hb_drop_staging(staging, had_record ? NULL : record_path);
         return false;
     }
     /* Between these two steps there is no view: a launch then stops by name
        (NK_PBP_HB_VIEW_MISSING) rather than run the program without its folder. */
     if (!nk_platform_remove_tree(view_root, NULL) || nk_rename_utf8(staging, view_root) != 0 ||
         !nk_platform_sync_dir(parent)) {
-        hb_drop_staging(staging, first ? record_path : NULL);
+        hb_drop_staging(staging, had_record ? NULL : record_path);
         hb_problem(problem, problem_size, "%.400s could not be put in place.", view_root);
         return false;
     }
@@ -1729,6 +1731,22 @@ bool nk_pbp_homebrew_other_source(const char *pbp_path, const char *iso_path, ch
        be this import's own, so any is another folder's. */
     if (hb_view_content(root, name, other, other_size) == HB_CONTENT_OTHER) return true;
     return hb_view_content(staging, name, other, other_size) != HB_CONTENT_NONE;
+}
+
+bool nk_pbp_homebrew_import_present(const char *iso_path)
+{
+    char root[HB_PATH_MAX];
+    char staging[HB_PATH_MAX];
+    char seeded[HB_PATH_MAX];
+    char record[HB_PATH_MAX];
+    if (!nk_pbp_homebrew_view_root(iso_path, root, sizeof(root)) ||
+        !hb_beside_image(iso_path, ".seeded", seeded, sizeof(seeded)) ||
+        !hb_record_path(root, record, sizeof(record)) ||
+        snprintf(staging, sizeof(staging), "%s.importing", root) >= (int)sizeof(staging))
+        return true;
+    return hb_state(iso_path) != HB_MISSING || hb_state(record) != HB_MISSING ||
+           hb_state(root) != HB_MISSING || hb_state(staging) != HB_MISSING ||
+           hb_state(seeded) != HB_MISSING;
 }
 
 bool nk_pbp_homebrew_delete_import(const char *iso_path, char *problem, size_t problem_size)

@@ -165,6 +165,12 @@ bool nk_pbp_homebrew_other_source(const char *pbp_path, const char *iso_path, ch
  * false, with a sentence in problem, when a part could not be deleted. */
 bool nk_pbp_homebrew_delete_import(const char *iso_path, char *problem, size_t problem_size);
 
+/* Whether anything of an import of the image at iso_path is on the disk: the image, its
+ * source record, its view, a staging copy or its seed records. True also when the paths
+ * cannot be formed, so a caller that cleans up after a failure keeps what it cannot name.
+ * Reads only. */
+bool nk_pbp_homebrew_import_present(const char *iso_path);
+
 /* Whether the view at view_root is the folder pbp_path is in as it is now: the
  * folder passes nk_pbp_homebrew_check_folder and its manifest, every file read
  * again, is the view's. False when anything differs or cannot be read. */
