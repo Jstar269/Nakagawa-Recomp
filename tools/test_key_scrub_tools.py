@@ -35,9 +35,10 @@ SAMPLE = bytes([0x01, 0x02, 0xab, 0xCD, 0x10, 0x0f, 0x7e, 0x80,
 
 
 def _run_git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
-    return run_git(
+    completed: subprocess.CompletedProcess[str] = run_git(
         args, cwd=repo, capture_output=True, text=True, check=False, timeout=60,
     )
+    return completed
 
 
 def _init_repo(*, bare: bool = False, empty: bool = False, initial_branch: str = "main") -> Path:
