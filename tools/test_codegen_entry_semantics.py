@@ -14,6 +14,7 @@ from __future__ import annotations
 from io import StringIO
 import os
 from pathlib import Path
+import random
 import re
 import shutil
 import struct
@@ -875,6 +876,219 @@ int main(void) {{
             self.assertIn(
                 "resume_sp=0x00001000 owner_sp=0x00001000", ran.stdout
             )
+
+
+_WALK_BASE = 0x08900000
+
+
+class _WalkElf:
+    """A flat run of words from _WALK_BASE, read as the frame walk reads an image."""
+
+    def __init__(self, words: list[int]) -> None:
+        self.words = words
+
+    def read_at_vaddr(self, addr: int, size: int) -> bytes | None:
+        index = (addr - _WALK_BASE) >> 2
+        if size != 4 or addr & 3 or index < 0 or index >= len(self.words):
+            return None
+        return self.words[index].to_bytes(4, "little")
+
+
+def _stock_sp_exit_walk(elf, start, insns, labels):
+    """_sp_exit_walk as it was before the fan-out skip, kept verbatim as the reference."""
+    read32, rt, rs, rd = codegen.read32, codegen.rt, codegen.rs, codegen.rd
+    own_sp = codegen._OWN_SP
+    if not any((read32(elf, addr) or 0) >> 26 == 0x23 and rt(read32(elf, addr)) == 29
+               for addr in insns):
+        return frozenset(), frozenset(), frozenset()
+    states: dict = {}
+    work: list = []
+    guest: set = set()
+    exits: set = set()
+    foreign: set = set()
+
+    def leave(addr, regs):
+        exits.add(addr)
+        if own_sp not in regs:
+            guest.add(addr)
+
+    def reach(addr, regs, slots, exit_at=None):
+        if addr not in insns:
+            leave(addr if exit_at is None else exit_at, regs)
+            return
+        old = states.get(addr)
+        if old is not None:
+            regs = {k: v for k, v in regs.items() if old[0].get(k) == v}
+            slots = {k: v for k, v in slots.items() if old[1].get(k) == v}
+            if (regs, slots) == old:
+                return
+        states[addr] = (regs, slots)
+        work.append(addr)
+
+    reach(start, {29: 0, own_sp: 0}, {})
+    while work:
+        addr = work.pop()
+        regs, slots = states[addr]
+        w = read32(elf, addr)
+        if w is None or codegen.is_eret(w):
+            continue
+        if not codegen.is_control(w):
+            if codegen._loads_foreign_sp(w, regs, slots):
+                foreign.add(addr)
+            reach(addr + 4, *codegen._frame_step(w, regs, slots))
+            continue
+        slot = read32(elf, addr + 4)
+        if codegen._loads_foreign_sp(slot, regs, slots):
+            foreign.add(addr + 4)
+        after = codegen._frame_step(slot, regs, slots) if slot is not None else (regs, slots)
+        op, fn = w >> 26, w & 0x3F
+        if op == 2:
+            reach(codegen.jump_target(addr, w), *after, exit_at=addr)
+        elif (op == 0 and fn in (0x08, 0x09) and (fn == 0x08 or rd(w) == 0)):
+            leave(addr, after[0])
+            if rs(w) != 31:
+                for label in labels:
+                    reach(label, *after)
+        elif op == 3 or (op == 0 and fn == 0x09) or codegen.is_link(w):
+            kept = {k: v for k, v in after[0].items()
+                    if k in codegen._CALL_SAVED_GPRS or k == own_sp}
+            reach(addr + 8, kept, after[1])
+        else:
+            reach(codegen.branch_target(addr, w), *after, exit_at=addr)
+            reach(addr + 8, *((regs, slots) if codegen.is_likely(w) else after))
+    return frozenset(guest), frozenset(exits), frozenset(foreign)
+
+
+def _beq_words(src: int, dst: int, rs_reg: int = 9, rt_reg: int = 10) -> int:
+    """beq rs, rt from word index src to word index dst."""
+    return (4 << 26) | (rs_reg << 21) | (rt_reg << 16) | ((dst - src - 1) & 0xFFFF)
+
+
+_WALK_FILLER = (
+    0x25080001,  # addiu t0, t0, 1
+    0xAFB00010,  # sw s0, 16(sp)
+    0x8FB00010,  # lw s0, 16(sp)
+    0x03A0F021,  # addu fp, sp, zero
+    0x27BDFFF0,  # addiu sp, sp, -16
+    0x27BD0010,  # addiu sp, sp, 16
+    0xAFBD0008,  # sw sp, 8(sp)
+    0x00000000,  # nop
+    0x00851021,  # addu v0, a0, a1
+    0x8C880000,  # lw t0, 0(a0)
+)
+
+
+def _walk_flow(words: list[int]):
+    elf = _WalkElf(words)
+    span = [(_WALK_BASE, _WALK_BASE + 4 * len(words))]
+    with codegen.options_scope(region_split_threshold=None) as options:
+        insns, labels, _ = codegen.function_flow(elf, _WALK_BASE, span, {_WALK_BASE},
+                                                 options=options)
+    return elf, insns, labels
+
+
+_ORDER_EXAMPLE = [
+    0x27BDFFE0,                     # 0  addiu sp, sp, -32
+    0x03A0F021,                     # 1  addu  fp, sp, zero
+    0xAFDD0008,                     # 2  sw    sp, 8(fp)
+    _beq_words(3, 10), 0,           # 3  beq   t1, t2, Q
+    0x03A02021,                     # 5  P: addu a0, sp, zero
+    0xA0880008,                     # 6  S: sb   t0, 8(a0)
+    0x8FDD0008,                     # 7  T: lw   sp, 8(fp)
+    0x03E00008, 0,                  # 8  jr ra; nop
+    _beq_words(10, 6, 0, 0), 0,     # 10 Q: b S
+]
+
+
+class SpExitWalkFanOutTests(unittest.TestCase):
+    """The frame walk sends the state at a computed jump to every label of the body (#2373).
+
+    Done at every computed jump, that costs (computed jumps) x (labels) per body: a runtime
+    module whose bodies hold 267k instructions, 28k labels and 1k computed jumps did not
+    finish code generation in 90 minutes. A fan-out whose state holds every fact of the
+    states already sent to all labels changes no label, so the walk skips it; every state,
+    push and verdict stays as it was.
+    """
+
+    @staticmethod
+    def _blocks_body(blocks: int, seed: int) -> list[int]:
+        """Ten-word blocks ending in a beq within reach or, every fifteenth, a computed
+        jr t0; one lw sp, so the walk runs."""
+        rng = random.Random(seed)
+        words: list[int] = []
+        for b in range(blocks):
+            for _ in range(8):
+                words.append(rng.choice(_WALK_FILLER))
+            at = len(words)
+            if b % 15 == 14:
+                words += [0x01000008, 0]  # jr t0; nop
+            else:
+                lo, hi = max(0, b - 300), min(blocks - 1, b + 300)
+                words += [_beq_words(at, rng.randint(lo, hi) * 10), 0]
+        words[11] = 0x8C9D0000  # lw sp, 0(a0)
+        words += [0x03E00008, 0]  # jr ra; nop
+        return words
+
+    def test_the_walk_is_linear_in_the_body(self):
+        elf, insns, labels = _walk_flow(self._blocks_body(2200, 2200))
+        jumps = sum(1 for a in insns if codegen.read32(elf, a) == 0x01000008)
+        self.assertEqual((len(insns), len(labels), jumps), (20922, 1276, 146))
+        work: dict[str, int] = {}
+        result = codegen._sp_exit_walk(elf, _WALK_BASE, insns, labels, work)
+        # Without the skip all 146 computed jumps fan out, 186,296 reach calls.
+        self.assertLessEqual(work["fanouts"], 2, work)
+        self.assertLessEqual(work["reach"], 3 * len(insns), work)
+        self.assertEqual(work["fanouts"] + work["skipped"], jumps, work)
+        self.assertEqual(result, _stock_sp_exit_walk(elf, _WALK_BASE, insns, labels))
+
+    def test_the_walk_gives_the_stock_verdicts(self):
+        rng = random.Random(20261112)
+        walked = 0
+        for _ in range(3000):
+            size = rng.randint(4, 60)
+            words: list[int] = []
+            for i in range(size):
+                r = rng.random()
+                if r < 0.45:
+                    words.append(rng.choice(_WALK_FILLER))
+                elif r < 0.55:
+                    words.append(rng.choice([0x01000008, 0x00800008, 0x03E00008, 0x00800009,
+                                             0x0080F809, 0x8C9D0000, 0x8FDD0008, 0xAFDD0008,
+                                             0x8FBD0008]))
+                elif r < 0.70:
+                    words.append(_beq_words(i, rng.randint(0, size)))
+                elif r < 0.75:
+                    words.append((20 << 26) | (9 << 21) | (10 << 16)
+                                 | ((rng.randint(0, size) - i - 1) & 0xFFFF))  # beql
+                elif r < 0.80:
+                    words.append((2 << 26) | (((_WALK_BASE >> 2) + rng.randint(0, size))
+                                              & 0x3FFFFFF))  # j
+                elif r < 0.84:
+                    words.append((3 << 26) | ((_WALK_BASE >> 2) & 0x3FFFFFF))  # jal
+                else:
+                    words.append(rng.getrandbits(32))
+            elf = _WalkElf(words)
+            every = [_WALK_BASE + 4 * i for i in range(size)]
+            insns = (set(every) if rng.random() < 0.5
+                     else set(rng.sample(every, max(1, size * 3 // 4))))
+            start = min(insns)
+            pool = every + [_WALK_BASE + 4 * size + 8, _WALK_BASE - 8]
+            labels = set(rng.sample(pool, rng.randint(0, min(len(pool), 12))))
+            stock = _stock_sp_exit_walk(elf, start, insns, labels)
+            walked += bool(stock[1])
+            with self.subTest(words=[f"{w:08x}" for w in words]):
+                self.assertEqual(codegen._sp_exit_walk(elf, start, insns, labels), stock)
+        self.assertGreater(walked, 1000, "most random bodies must reach the walk itself")
+
+    def test_an_order_dependent_body_keeps_its_stock_verdict(self):
+        """A store through a register a join forgot misses the frame, so the verdict depends
+        on the order the walk serves its worklist in; the skip keeps that order."""
+        elf, insns, labels = _walk_flow(_ORDER_EXAMPLE)
+        result = codegen._sp_exit_walk(elf, _WALK_BASE, insns, labels)
+        self.assertEqual(result, _stock_sp_exit_walk(elf, _WALK_BASE, insns, labels))
+        guest, exits, foreign = ([(a - _WALK_BASE) // 4 for a in sorted(part)]
+                                 for part in result)
+        self.assertEqual((guest, exits, foreign), ([8], [8, 12], [7]))
 
 
 def _minimal_elf_path(words, entry, *, e_type=2, reloc_section=None):
