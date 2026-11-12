@@ -1022,12 +1022,20 @@ static bool write_staging_mark(const char *mark) {
     return written;
 }
 
-/* Removes a staging folder with its mark removed last: when something in it cannot be
-   removed (a file held open), the mark stays, so the next try still knows the folder
-   as Nakagawa's own and removes it then. True once the folder is gone. */
+/* Removes a staging folder with its mark removed last. When the folder does not go (a
+   file in it held open, a window open on the folder itself, a file still being deleted),
+   it is marked again, so the next try still knows it as Nakagawa's own and removes it
+   then. True once the folder is gone; false is reported by the caller. */
 static bool remove_staging(const char *staging) {
-    if (!nk_platform_remove_tree(staging, NK_UPDATE_STAGING_MARK)) return false;
-    return nk_platform_remove_tree(staging, NULL) && nk_platform_path_missing(staging);
+    char mark[NK_MAX_PATH];
+    if (nk_platform_remove_tree(staging, NK_UPDATE_STAGING_MARK) &&
+        nk_platform_remove_tree(staging, NULL) && nk_platform_path_missing(staging)) {
+        return true;
+    }
+    if (!nk_platform_path_missing(staging) && staging_mark_path(staging, mark, sizeof(mark))) {
+        (void)write_staging_mark(mark);
+    }
+    return false;
 }
 
 bool nk_update_claim_staging(const char *staging, NkUpdateError *error) {
