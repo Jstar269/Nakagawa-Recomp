@@ -38655,6 +38655,26 @@ static void test_partition_skipped_gap_space_comes_back(void) {
     (void)sr_syscall(&cpu, NID_FREE_PART);
     memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = keep;
     (void)sr_syscall(&cpu, NID_DELETE_THREAD);
+
+    /* A fixed reservation that sits on a live thread stack (sr_alloc_block_at does not check
+     * thread stacks) stays the reservation's when that thread is deleted: the release frees none
+     * of it, so the bump pointer cannot roll back under the live reservation. */
+    uint32_t t = sched_create_thread(0x2000u, 32, 0x8000u);
+    uint32_t t_floor = sched_guest_stack_floor();
+    uint32_t on_stack = sr_alloc_block_at(t_floor, 0x1000u, "on-live-stack");
+    const uint32_t heap2 = sr_hle_test_partition_heap_ptr();
+    const int free2 = sr_hle_test_partition_free_block_count();
+    memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = t;
+    uint32_t del = sr_syscall(&cpu, NID_DELETE_THREAD);
+    expect(t != 0u && on_stack != 0xFFFFFFFFu && on_stack != 0u && heap2 == t_floor + 0x1000u &&
+               del == 0u,
+           "a fixed reservation is placed on a live thread stack and the thread is deleted");
+    expect(sr_hle_test_partition_heap_ptr() == heap2 && sr_hle_test_partition_free_block_count() == free2,
+           "deleting a thread whose stack a live fixed reservation covers frees none of the reservation");
+    memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = on_stack;
+    (void)sr_syscall(&cpu, NID_FREE_PART);
+    expect(sr_hle_test_partition_heap_ptr() == heap0 && sr_hle_test_partition_free_block_count() == free0,
+           "after the skipped-gap checks the bump pointer and the free list are back where they started");
     s_fixture_loaded_end = 0x00400000u;
 }
 
