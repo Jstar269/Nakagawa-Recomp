@@ -984,6 +984,25 @@ static void test_interrupted_install_staging(void) {
     assert(!nk_platform_file_exists(half));
     assert(nk_platform_file_exists(mark));
 
+#if defined(_WIN32) || defined(_WIN64)
+    /* A file in the leftover is held open (a window or a scanner has it): the claim is
+       refused as in use, and the mark stays, so the next try still knows the folder as
+       Nakagawa's own and removes it. */
+    {
+        FILE *held;
+        write_file(theirs);
+        held = fopen(theirs, "rb");
+        assert(held != NULL);
+        assert(!nk_update_claim_staging(staging, &error));
+        assert(strcmp(error.code, "UPDATE_INSTALL_LEFTOVER_IN_USE") == 0);
+        assert(nk_platform_file_exists(mark));
+        fclose(held);
+        assert(nk_update_claim_staging(staging, &error));
+        assert(!nk_platform_file_exists(theirs));
+        assert(nk_platform_file_exists(mark));
+    }
+#endif
+
     /* A folder of that name without the mark is not Nakagawa's: refused, left as it is. */
     assert(nk_platform_remove_tree(staging, NULL));
     assert(nk_platform_mkdir_p(staging));
