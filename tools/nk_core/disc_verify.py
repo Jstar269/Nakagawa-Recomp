@@ -22,19 +22,24 @@ Each image gets one tier:
 - ``VERIFIED_RETAIL``: its SHA-1 matches a disc in the list, and the CRC32 and size agree.
 - ``MODIFIED``: no match, but its disc ID is a known retail disc ID: one the list names (a
   datafile with ``<serial>`` entries), or the disc ID of a verified image in the same
-  library. Fan translations, patched and trimmed images land here.
+  library. So the image's hashes differ from every listed dump of its disc: a damaged or
+  incomplete dump does that as well as a changed copy (a fan translation, a patch, a trimmed
+  image), and the check can't tell which. Dumping the disc again and checking that is how a
+  user tells.
 - ``UNKNOWN``: neither. The image is not in the list, which means "not shown to be retail",
   never "bad".
 - ``NOT_CHECKED``: no list was found, or the image was not hashed.
 
-The datafile is read by a small bounded scanner, the same rules as ``src/core/nk_disc_verify.c``.
-It expands no entity and never reads a DTD: a ``<!DOCTYPE>`` that only names Logiqx's public
-DTD (as Redump's lists do) is skipped unread, and a list that declares entities, carries an
-internal DTD subset or refers to any entity but XML's five predefined ones and character
-references is refused (``DISC_DAT_ENTITY_REFUSED``). It reads each ``<game>`` element, its
-``<rom>`` elements' ``size``, ``crc`` and ``sha1`` attributes, and any ``<serial>`` text. A rom
-with a malformed hash or size is skipped and counted. A datafile may come as the zip Redump
-serves (one ``.dat`` inside, stored or deflated), read under the same size cap.
+The datafile is read in one forward pass (``_DatScanner``), the same rules as
+``src/core/nk_disc_verify.c``, so its cost is linear in its size, which ``MAX_DAT_BYTES``
+caps. It expands no entity and never reads a DTD: one ``<!DOCTYPE>`` before the root that
+only names an external DTD (Logiqx's, as Redump's lists do) is skipped unread, and any other
+``<!`` markup (an entity declaration, an internal DTD subset, a second DOCTYPE, a comment) or a
+reference to any entity but XML's five predefined ones and character references is refused
+(``DISC_DAT_ENTITY_REFUSED``). It reads each ``<game>`` element, its ``<rom>`` elements'
+``size``, ``crc`` and ``sha1`` attributes, and any ``<serial>`` text. A rom with a malformed
+hash or size is skipped and counted. A datafile may come as the zip Redump serves (exactly one
+entry, a ``.dat``, stored or deflated, not ZIP64), its size checked before it is inflated.
 """
 
 from __future__ import annotations
@@ -56,8 +61,13 @@ UNKNOWN = "UNKNOWN"
 NOT_CHECKED = "NOT_CHECKED"
 TIERS = (VERIFIED_RETAIL, MODIFIED, UNKNOWN, NOT_CHECKED)
 
-# The largest datafile read: Redump's biggest lists are a few MiB.
-MAX_DAT_BYTES = 64 * 1024 * 1024
+# The largest datafile read, a file or the .dat a zip holds (checked against the zip's own
+# size field before inflating, and again on the bytes inflated). Redump's PSP list of
+# 2026-11-12 is 1,475,779 bytes for 3,546 discs, about 416 bytes a disc, so 16 MiB holds about
+# 40,000 discs: ten times the list, and more than the PSP library will ever add. A file over it
+# is refused (DISC_DAT_TOO_LARGE), so the reader holds at most 16 MiB of bytes, the same text
+# decoded (at most 64 MiB in the worst character width) and MAX_DAT_ROMS roms.
+MAX_DAT_BYTES = 16 * 1024 * 1024
 MAX_DAT_ROMS = 200_000
 # Serials kept per <game>, as the C reader keeps them.
 MAX_GAME_SERIALS = 16
@@ -74,23 +84,21 @@ LIST_IMPORTED = "imported"
 LIST_BUNDLED = "bundled"
 _ZIP_MAGIC = b"PK\x03\x04"
 
-_GAME = re.compile(r"<game\b[^>]*>(.*?)</game\s*>", re.DOTALL)
-_GAME_OPEN = re.compile(r"<game\b")
-_DATAFILE_END = re.compile(r"</datafile\s*>")
-_ROM = re.compile(r"<rom\b([^>]*?)/?>")
-_ATTRIBUTE = re.compile(r'([A-Za-z_][A-Za-z0-9_.-]*)\s*=\s*"([^"]*)"')
-_SERIAL = re.compile(r"<serial>([^<]*)</serial\s*>")
-_HEADER_NAME = re.compile(r"<header\b.*?<name>([^<]*)</name\s*>.*?</header\s*>", re.DOTALL)
-_HEADER_VERSION = re.compile(r"<header\b.*?<version>([^<]*)</version\s*>.*?</header\s*>",
-                             re.DOTALL)
-_HEADER_DATE = re.compile(r"<header\b.*?<date>([^<]*)</date\s*>.*?</header\s*>", re.DOTALL)
-# What the reader refuses rather than skips: an entity declaration anywhere, a DOCTYPE with an
-# internal subset ("[" before its ">"), and a reference to any entity but the five predefined
-# ones and character references. The external DTD a DOCTYPE names is never read.
-_ENTITY_DECLARATION = re.compile(r"<!ENTITY", re.IGNORECASE)
-_DOCTYPE_SUBSET = re.compile(r"<!DOCTYPE\b[^>\[]*\[", re.IGNORECASE)
-_UNKNOWN_REFERENCE = re.compile(r"&(?!(?:amp|lt|gt|quot|apos);|#[0-9]{1,7};|#x[0-9A-Fa-f]{1,6};)")
-_GAME_NAME = re.compile(r'\bname\s*=\s*"([^"]*)"')
+# The datafile scanner's patterns. Each is matched at one position over a bounded window or
+# a span the scanner moves past, never searched across the whole text, so no input makes one
+# backtrack: no pattern has two unbounded quantifiers over characters they share.
+# The end of a tag: its ">", or a "<" that makes it malformed.
+_TAG_END = re.compile(r"[<>]")
+# An element name, read from at most _TAG_NAME_WINDOW characters after "<" or "</".
+_TAG_NAME = re.compile(r"[^ \t\r\n/>]*")
+_TAG_NAME_WINDOW = 16
+# One attribute up to its value's opening quote: name, "=", '"'. The name, spacing and "="
+# classes are disjoint, so a failed match backs off at most once per name character.
+_ATTRIBUTE_START = re.compile(r'[ \t\r\n]*([A-Za-z_][A-Za-z0-9_.:-]*)[ \t\r\n]*=[ \t\r\n]*"')
+# A reference XML defines without a DTD: the five predefined entities, or a decimal (1-7
+# digits) or hex (1-6 digits) character reference, matched in a window of its longest length.
+_REFERENCE = re.compile(r"&(?:amp|lt|gt|quot|apos|#[0-9]{1,7}|#x[0-9A-Fa-f]{1,6});")
+_REFERENCE_WINDOW = len("&#1114111;")
 _SHA1 = re.compile(r"[0-9a-fA-F]{40}")
 _CRC32 = re.compile(r"[0-9a-fA-F]{8}")
 _SIZE = re.compile(r"[0-9]{1,20}")
@@ -109,6 +117,8 @@ class DiscVerifyError(ValueError):
     def __init__(self, message: str, *, boundary_code: str) -> None:
         super().__init__(message)
         self.boundary_code = boundary_code
+        # LIST_IMPORTED or LIST_BUNDLED when load_verification_dat knows which list failed.
+        self.list_source = ""
 
 
 @dataclass(frozen=True)
@@ -145,88 +155,251 @@ class RedumpDat:
     rejected_roms: int = 0
     # LIST_IMPORTED or LIST_BUNDLED once a caller picked the list (load_verification_dat).
     source: str = ""
+    # For an import: the bundled list's date when the bundled list is newer (load_verification_dat).
+    newer_bundled_date: str = ""
 
     def __len__(self) -> int:
         return len(self.roms_by_sha1)
 
+    def stamp(self) -> str:
+        """The list's date (else its version) for output: printable ASCII only, at most 63
+        characters, as the C reader's copy is."""
+        return "".join(ch for ch in (self.date or self.version)
+                       if " " <= ch <= "~")[:63]
+
     def describe(self) -> str:
-        """Which list this is and its date, for output: "the bundled Redump list (... discs)"."""
+        """Which list this is and its date, for output: "the bundled Redump list (... discs)".
+
+        An import older than the bundled list says so, and how to use the bundled one again.
+        """
         owner = {LIST_IMPORTED: "your imported Redump list",
                  LIST_BUNDLED: "the Redump list bundled with Nakagawa"}.get(self.source, "a Redump list")
-        # The date is the datafile's own text: shown without control characters.
-        stamp = "".join(ch for ch in (self.date or self.version) if ch.isprintable())[:64]
+        stamp = self.stamp()
         dated = f"dated {stamp}, " if stamp else ""
-        return f"{owner} ({dated}{len(self)} discs)"
+        text = f"{owner} ({dated}{len(self)} discs)"
+        if self.newer_bundled_date:
+            text += (f", older than the list bundled with Nakagawa (dated {self.newer_bundled_date}): "
+                     "import a newer list, or delete verification/redump.dat from your data "
+                     "folder to use the bundled one")
+        return text
 
 
-def normalize_serials(text: str) -> tuple[str, ...]:
-    """Disc IDs in a ``<serial>`` value ("TEST-71002, TEST-71002GA") as PARAM.SFO spells them."""
-    serials = []
-    for part in text.split(","):
-        compact = re.sub(r"[\s-]", "", part).upper()
+def normalize_serials(text: str, limit: int = MAX_GAME_SERIALS) -> tuple[str, ...]:
+    """Disc IDs in a ``<serial>`` value ("TEST-71002, TEST-71002GA") as PARAM.SFO spells them.
+
+    At most ``limit`` IDs, as the C reader keeps them: the scan stops there, so a value of
+    any length costs one pass and the duplicate check stays within ``limit``.
+    """
+    serials: list[str] = []
+    start = 0
+    while start <= len(text) and len(serials) < limit:
+        comma = text.find(",", start)
+        stop = len(text) if comma < 0 else comma
+        compact = re.sub(r"[\s-]", "", text[start:stop]).upper()
         match = _RETAIL_DISC_ID.match(compact)
         if match and match.group(0) not in serials:
             serials.append(match.group(0))
+        start = stop + 1
     return tuple(serials)
 
 
-def parse_dat_text(text: str) -> RedumpDat:
-    """Read a Logiqx-format datafile (Redump's) from its text."""
-    if "<datafile" not in text:
-        raise DiscVerifyError("This file isn't a Redump datafile: it has no <datafile> element.",
-                              boundary_code="DISC_DAT_NOT_DATAFILE")
-    # A list cut short (a download that stopped) is refused, never read as the whole list:
-    # its discs past the cut would all read as unknown.
-    if not _DATAFILE_END.search(text):
-        raise DiscVerifyError("The datafile is cut short: it has no closing </datafile>.",
-                              boundary_code="DISC_DAT_NOT_DATAFILE")
-    if _ENTITY_DECLARATION.search(text) or _DOCTYPE_SUBSET.search(text):
-        raise DiscVerifyError("The datafile declares its own entities or DTD; a Redump list has "
-                              "none, so it was not read.", boundary_code="DISC_DAT_ENTITY_REFUSED")
-    if _UNKNOWN_REFERENCE.search(text):
-        raise DiscVerifyError("The datafile refers to an entity XML does not predefine; a Redump "
-                              "list has none, so it was not read.",
-                              boundary_code="DISC_DAT_ENTITY_REFUSED")
-    dat = RedumpDat()
-    header_name = _HEADER_NAME.search(text)
-    header_version = _HEADER_VERSION.search(text)
-    header_date = _HEADER_DATE.search(text)
-    dat.name = _xml_text(header_name.group(1)).strip() if header_name else ""
-    dat.version = _xml_text(header_version.group(1)).strip() if header_version else ""
-    dat.date = _xml_text(header_date.group(1)).strip() if header_date else ""
-    serials: set[str] = set()
-    if len(_GAME_OPEN.findall(text)) != len(_GAME.findall(text)):
-        raise DiscVerifyError("The datafile is cut short inside a <game> element.",
-                              boundary_code="DISC_DAT_NOT_DATAFILE")
-    for game in _GAME.finditer(text):
-        dat.games += 1
-        body = game.group(1)
-        game_serials: list[str] = []
-        for serial in _SERIAL.finditer(body):
-            for disc_id in normalize_serials(_xml_text(serial.group(1))):
-                if disc_id not in game_serials and len(game_serials) < MAX_GAME_SERIALS:
-                    game_serials.append(disc_id)
-        serials.update(game_serials)
-        for rom in _ROM.finditer(body):
-            attributes = dict(_ATTRIBUTE.findall(rom.group(1)))
-            sha1 = attributes.get("sha1", "")
-            crc = attributes.get("crc", "")
-            size = attributes.get("size", "")
-            if not (_SHA1.fullmatch(sha1) and _CRC32.fullmatch(crc) and _SIZE.fullmatch(size)
-                    and int(size) < 2**64):
-                dat.rejected_roms += 1
+def _not_datafile(message: str) -> DiscVerifyError:
+    return DiscVerifyError(message, boundary_code="DISC_DAT_NOT_DATAFILE")
+
+
+def _markup_refused() -> DiscVerifyError:
+    return DiscVerifyError("The datafile declares entities, a DTD of its own or markup a Redump "
+                           "list does not use, so it was not read.",
+                           boundary_code="DISC_DAT_ENTITY_REFUSED")
+
+
+class _DatScanner:
+    """One forward pass over a datafile's text, the rules of ``src/core/nk_disc_verify.c``.
+
+    The scan moves from the start to ``</datafile>`` and never goes back. Each search starts
+    where the last one stopped, each pattern is matched at one position, and lookahead is
+    bounded (a tag name, a reference), so the work is linear in the text's length.
+    ``examined`` counts the characters looked at, every one each time it is looked at, so a
+    test can hold the cost of any input to a fixed multiple of its length.
+
+    What it reads: the first ``<header>``'s ``<name>``, ``<version>`` and ``<date>``; each
+    ``<game>``'s ``<serial>`` text and its ``<rom>`` elements' ``size``, ``crc`` and ``sha1``.
+    What it refuses rather than skips: any ``<!`` markup but one ``<!DOCTYPE>`` before the root
+    that only names an external DTD (which is never read), so no entity is ever declared; a
+    reference to any entity but XML's five and character references; a ``<`` inside a tag.
+    """
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self.examined = 0
+
+    def _find(self, needle: str, start: int, stop: int) -> int:
+        at = self.text.find(needle, start, stop)
+        self.examined += max(0, (stop if at < 0 else at + len(needle)) - start)
+        return at
+
+    def _check_references(self, start: int, stop: int) -> None:
+        at = self._find("&", start, stop)
+        while at >= 0:
+            self.examined += _REFERENCE_WINDOW
+            if not _REFERENCE.match(self.text, at, min(at + _REFERENCE_WINDOW, len(self.text))):
+                raise DiscVerifyError("The datafile refers to an entity XML does not predefine; "
+                                      "a Redump list has none, so it was not read.",
+                                      boundary_code="DISC_DAT_ENTITY_REFUSED")
+            at = self._find("&", at + 1, stop)
+
+    def _attributes(self, start: int, stop: int) -> dict[str, str]:
+        """A tag's ``name="value"`` attributes in order, up to the first that is malformed.
+
+        The first of a repeated name is kept, as the C reader keeps it.
+        """
+        attributes: dict[str, str] = {}
+        pos = start
+        while pos < stop:
+            match = _ATTRIBUTE_START.match(self.text, pos, stop)
+            if match is None:
+                self.examined += stop - pos
+                break
+            self.examined += match.end() - pos
+            close = self._find('"', match.end(), stop)
+            if close < 0:
+                break
+            attributes.setdefault(match.group(1), self.text[match.end():close])
+            pos = close + 1
+        return attributes
+
+    def parse(self) -> RedumpDat:
+        text = self.text
+        length = len(text)
+        if self._find("<datafile", 0, length) < 0:
+            raise _not_datafile("This file isn't a Redump datafile: it has no <datafile> element.")
+        dat = RedumpDat()
+        serials: set[str] = set()
+        roms = 0
+        root = closed = doctype = False
+        header = 0  # 0 before the first <header>, 1 inside it, 2 after it
+        field = ""  # the element whose text is being read: name, version, date or serial
+        field_start = 0
+        game_serials: list[str] | None = None  # set while inside a <game>
+        game_roms: list[tuple[str, str, str, str]] = []
+        pos = 0
+        while pos < length:
+            lt = self._find("<", pos, length)
+            stop = length if lt < 0 else lt
+            self._check_references(pos, stop)
+            if lt < 0:
+                break
+            pending, field = field, ""
+            if text.startswith("<?", lt):
+                end = self._find("?>", lt + 2, length)
+                if end < 0:
+                    raise _not_datafile("The datafile is cut short inside a <?...?> declaration.")
+                pos = end + 2
                 continue
-            if len(dat.roms_by_sha1) >= MAX_DAT_ROMS:
-                raise DiscVerifyError(f"The datafile lists more than {MAX_DAT_ROMS} discs.",
-                                      boundary_code="DISC_DAT_TOO_LARGE")
-            entry = DatRom(name=_xml_text(attributes.get("name", "")), size_bytes=int(size),
-                           crc32=crc.lower(), sha1=sha1.lower(), serials=tuple(game_serials))
-            dat.roms_by_sha1.setdefault(entry.sha1, entry)
-    dat.serials = frozenset(serials)
-    if not dat.roms_by_sha1:
-        raise DiscVerifyError("The datafile lists no disc with a SHA-1 hash.",
-                              boundary_code="DISC_DAT_EMPTY")
-    return dat
+            if text.startswith("<!", lt):
+                self.examined += len("<!DOCTYPE")
+                if doctype or root or text[lt:lt + len("<!DOCTYPE")].upper() != "<!DOCTYPE":
+                    raise _markup_refused()
+                tag_end = _TAG_END.search(text, lt + 2)
+                self.examined += (length if tag_end is None else tag_end.end()) - (lt + 2)
+                if tag_end is None:
+                    raise _not_datafile("The datafile is cut short inside its <!DOCTYPE>.")
+                # Only "<!DOCTYPE name PUBLIC/SYSTEM ...>" naming an external DTD, which is
+                # never read: an internal subset ("[") or markup inside it is refused.
+                if tag_end.group(0) == "<" or self._find("[", lt, tag_end.start()) >= 0:
+                    raise _markup_refused()
+                doctype = True
+                pos = tag_end.end()
+                continue
+            tag_end = _TAG_END.search(text, lt + 1)
+            self.examined += (length if tag_end is None else tag_end.end()) - (lt + 1)
+            if tag_end is None:
+                raise _not_datafile("The datafile is cut short inside a tag.")
+            if tag_end.group(0) == "<":
+                raise _not_datafile("The datafile has a malformed tag: a '<' inside a tag.")
+            gt = tag_end.start()
+            self._check_references(lt, gt)
+            closing = text.startswith("</", lt)
+            name_start = lt + (2 if closing else 1)
+            window_stop = min(name_start + _TAG_NAME_WINDOW, gt)
+            self.examined += window_stop - name_start
+            name_match = _TAG_NAME.match(text, name_start, window_stop)
+            name = name_match.group(0) if name_match else ""
+            name_end = name_start + len(name)
+            bare = name_end == gt  # "<name>" with nothing after the name
+            pos = gt + 1
+            if closing:
+                if pending and name == pending:
+                    value = _xml_text(text[field_start:lt])
+                    self.examined += lt - field_start
+                    if pending == "serial" and game_serials is not None:
+                        for disc_id in normalize_serials(value):
+                            if disc_id not in game_serials and len(game_serials) < MAX_GAME_SERIALS:
+                                game_serials.append(disc_id)
+                    elif pending in ("name", "version", "date") and not getattr(dat, pending):
+                        setattr(dat, pending, value.strip())
+                elif name == "header" and header == 1:
+                    header = 2
+                elif name == "game" and game_serials is not None:
+                    dat.games += 1
+                    serials.update(game_serials)
+                    for rom_name, size, crc, sha1 in game_roms:
+                        entry = DatRom(name=_xml_text(rom_name), size_bytes=int(size),
+                                       crc32=crc.lower(), sha1=sha1.lower(),
+                                       serials=tuple(game_serials))
+                        dat.roms_by_sha1.setdefault(entry.sha1, entry)
+                    game_serials, game_roms = None, []
+                elif name == "datafile" and not text[name_end:gt].strip():
+                    self.examined += gt - name_end
+                    closed = True
+                    break
+                continue
+            self_closing = text[gt - 1] == "/"
+            if name == "datafile":
+                root = True
+            elif name == "header" and header == 0 and game_serials is None:
+                header = 1
+            elif name in ("name", "version", "date") and header == 1 and bare:
+                field, field_start = name, pos
+            elif name == "game":
+                if game_serials is not None:
+                    raise _not_datafile("The datafile is cut short inside a <game> element.")
+                if self_closing:
+                    dat.games += 1
+                else:
+                    game_serials, game_roms = [], []
+            elif name == "serial" and game_serials is not None and bare:
+                field, field_start = name, pos
+            elif name == "rom" and game_serials is not None:
+                attributes = self._attributes(name_end, gt - 1 if self_closing else gt)
+                sha1 = attributes.get("sha1", "")
+                crc = attributes.get("crc", "")
+                size = attributes.get("size", "")
+                if not (_SHA1.fullmatch(sha1) and _CRC32.fullmatch(crc) and _SIZE.fullmatch(size)
+                        and int(size) < 2**64):
+                    dat.rejected_roms += 1
+                    continue
+                roms += 1
+                if roms > MAX_DAT_ROMS:
+                    raise DiscVerifyError(f"The datafile lists more than {MAX_DAT_ROMS} discs.",
+                                          boundary_code="DISC_DAT_TOO_LARGE")
+                game_roms.append((attributes.get("name", ""), size, crc, sha1))
+        # A list cut short (a download that stopped) is refused, never read as the whole list:
+        # its discs past the cut would all read as unknown.
+        if not closed:
+            raise _not_datafile("The datafile is cut short: it has no closing </datafile>.")
+        if game_serials is not None:
+            raise _not_datafile("The datafile is cut short inside a <game> element.")
+        dat.serials = frozenset(serials)
+        if not dat.roms_by_sha1:
+            raise DiscVerifyError("The datafile lists no disc with a SHA-1 hash.",
+                                  boundary_code="DISC_DAT_EMPTY")
+        return dat
+
+
+def parse_dat_text(text: str) -> RedumpDat:
+    """Read a Logiqx-format datafile (Redump's) from its text, in one pass (``_DatScanner``)."""
+    return _DatScanner(text).parse()
 
 
 def _read_dat_bytes(path: Path | str) -> bytes:
@@ -243,6 +416,21 @@ def _read_dat_bytes(path: Path | str) -> bytes:
     return data
 
 
+# The end record and its comment are in the last 22 + 65,535 bytes of a zip.
+_ZIP_END_SEARCH = 22 + 0xFFFF
+
+
+def _has_zip64_extra(extra: bytes) -> bool:
+    """Whether a zip entry's extra field holds a ZIP64 block (header ID 0x0001)."""
+    at = 0
+    while at + 4 <= len(extra):
+        block_id = int.from_bytes(extra[at:at + 2], "little")
+        if block_id == 0x0001:
+            return True
+        at += 4 + int.from_bytes(extra[at + 2:at + 4], "little")
+    return False
+
+
 def _zip_refused(reason: str) -> DiscVerifyError:
     return DiscVerifyError(f"The zip can't be read as a Redump datafile: {reason}",
                            boundary_code="DISC_DAT_ZIP_INVALID")
@@ -255,12 +443,22 @@ def _dat_from_zip(data: bytes) -> bytes:
     Its size is never taken on trust: at most ``MAX_DAT_BYTES + 1`` bytes are inflated, and
     the CRC-32 is checked by reading it whole.
     """
+    # ZIP64 is refused, as the C reader refuses it: a ZIP64 end record (its locator sits just
+    # before the end record) or a ZIP64 extra field on the entry.
+    end_record = data.rfind(b"PK\x05\x06", max(0, len(data) - _ZIP_END_SEARCH))
+    if end_record >= 20 and data[end_record - 20:end_record - 16] == b"PK\x06\x07":
+        raise _zip_refused("it uses ZIP64.")
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as archive:
-            files = [info for info in archive.infolist() if not info.is_dir()]
+            # Every entry counts, a folder entry too: Redump's zip holds the one .dat alone.
+            files = archive.infolist()
             if len(files) != 1:
-                raise _zip_refused(f"it holds {len(files)} files, not one.")
+                raise _zip_refused(f"it holds {len(files)} entries, not one file.")
             info = files[0]
+            if info.is_dir():
+                raise _zip_refused("the one entry in it is a folder.")
+            if _has_zip64_extra(info.extra):
+                raise _zip_refused("it uses ZIP64.")
             if not info.filename.lower().endswith(".dat"):
                 raise _zip_refused("the file in it is not a .dat file.")
             if info.flag_bits & 0x1:
@@ -366,18 +564,49 @@ def load_verification_dat(user_data_root: Path | str, *,
 
     ``bundled`` defaults to :func:`bundled_dat_path`. ``RedumpDat.source`` says which list it
     is. An import that can't be read raises its ``DiscVerifyError``: the bundled list never
-    stands in for it silently, so the user learns their list is unusable. None only when
-    neither list exists.
+    stands in for it silently, so the user learns their list is unusable. The error's
+    ``list_source`` says which list failed. An import older than the bundled list is still
+    used (the user chose it), with ``newer_bundled_date`` set so the output says so. None only
+    when neither list exists.
     """
-    imported = load_imported_dat(user_data_root)
-    if imported is not None:
-        return imported
     path = Path(bundled) if bundled is not None else bundled_dat_path()
+    try:
+        imported = load_imported_dat(user_data_root)
+    except DiscVerifyError as exc:
+        exc.list_source = LIST_IMPORTED
+        raise
+    if imported is not None:
+        # The user's choice stands, but an import older than the bundled list is named as such.
+        try:
+            bundled_dat = load_dat(path) if path.is_file() else None
+        except DiscVerifyError:
+            bundled_dat = None
+        if bundled_dat is not None and list_date_is_older(imported.stamp(), bundled_dat.stamp()):
+            imported.newer_bundled_date = bundled_dat.stamp()
+        return imported
     if not path.is_file():
         return None
-    dat = load_dat(path)
+    try:
+        dat = load_dat(path)
+    except DiscVerifyError as exc:
+        exc.list_source = LIST_BUNDLED
+        raise
     dat.source = LIST_BUNDLED
     return dat
+
+
+_LIST_DATE = re.compile(r"([0-9]{4}-[0-9]{2}-[0-9]{2})(?: ([0-9]{2}-[0-9]{2}-[0-9]{2}))?")
+
+
+def list_date_is_older(date: str, other: str) -> bool:
+    """Whether a list's date sorts before another's, both in Redump's ``YYYY-MM-DD HH-MM-SS``
+    form (the time is optional). A date in any other form is never called older."""
+    mine, theirs = _LIST_DATE.fullmatch(date), _LIST_DATE.fullmatch(other)
+    if mine is None or theirs is None:
+        return False
+    if mine.group(1) != theirs.group(1):
+        return mine.group(1) < theirs.group(1)
+    return bool(mine.group(2) and theirs.group(2) and mine.group(2) < theirs.group(2))
 
 
 def hash_image(path: Path | str, *,

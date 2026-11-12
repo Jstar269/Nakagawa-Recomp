@@ -4732,8 +4732,13 @@ def _verification_dat(user_root: Path) -> disc_verify.RedumpDat | None:
     try:
         dat = disc_verify.load_verification_dat(user_root)
     except disc_verify.DiscVerifyError as exc:
-        print(f"The imported Redump list was not used [{exc.boundary_code}]: {exc} The disc was "
-              "not checked; import a list again with nk_cli.py redump-import.")
+        if exc.list_source == disc_verify.LIST_BUNDLED:
+            print(f"The Redump list bundled with Nakagawa was not used [{exc.boundary_code}]: "
+                  f"{exc} The disc was not checked; reinstall Nakagawa, or import a list with "
+                  "nk_cli.py redump-import.")
+        else:
+            print(f"The imported Redump list was not used [{exc.boundary_code}]: {exc} The disc "
+                  "was not checked; import a list again with nk_cli.py redump-import.")
         return None
     if dat is None:
         print("No Redump list was found (neither an imported one nor the bundled "

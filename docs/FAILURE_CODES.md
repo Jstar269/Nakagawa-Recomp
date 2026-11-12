@@ -52,12 +52,12 @@ The **Where** column of each table names the places a code can appear:
 | Code | Where | Meaning |
 | --- | --- | --- |
 | `DISC_DAT_EMPTY` | disc | The Redump datafile lists no disc with a SHA-1 hash. |
-| `DISC_DAT_ENTITY_REFUSED` | disc | The Redump datafile declares its own entities or an internal DTD, or refers to an entity XML does not predefine; it is refused unread, since a Redump list has none. |
+| `DISC_DAT_ENTITY_REFUSED` | disc | The Redump datafile declares entities or a DTD of its own, carries other `<!` markup a Redump list does not use (a second `<!DOCTYPE>`, a comment, CDATA), or refers to an entity XML does not predefine; it is refused unread. |
 | `DISC_DAT_NOT_DATAFILE` | disc | The file chosen as a Redump datafile has no `<datafile>` element, or is not UTF-8 text. |
 | `DISC_DAT_READ_FAILED` | disc | The Redump datafile could not be read. |
-| `DISC_DAT_TOO_LARGE` | disc | The Redump datafile is larger, or lists more discs, than a datafile can. |
+| `DISC_DAT_TOO_LARGE` | disc | The Redump datafile is larger than 16 MiB (for a zip, the `.dat` in it, by its own size field before it is inflated), or lists more than 200,000 discs. |
 | `DISC_DAT_WRITE_FAILED` | disc | The imported Redump datafile could not be saved in the data folder. |
-| `DISC_DAT_ZIP_INVALID` | disc | A zip given as a Redump datafile does not hold exactly one `.dat` file, stored or deflated and not encrypted, or fails its own checks (end record, offsets, CRC-32). |
+| `DISC_DAT_ZIP_INVALID` | disc | A zip given as a Redump datafile does not hold exactly one entry, a `.dat` file, stored or deflated, not encrypted and not ZIP64, or fails its own checks (end record, offsets, CRC-32). |
 | `DISC_IDENTIFY_FAILED` | library | The disc's title information could not be read, so the library could not identify the disc. The record's `identify_detail` says why. |
 | `DISC_IMAGE_BLOCK_CORRUPT` | disc, player | A compressed disc image has a block that does not decompress. |
 | `DISC_IMAGE_CHD_CD_UNSUPPORTED` | disc, player | The CHD file holds a CD image, not a PSP UMD. |

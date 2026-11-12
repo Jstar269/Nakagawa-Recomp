@@ -147,13 +147,13 @@ date (the player's developer log, and the output of `nk_cli.py bringup` and `lib
 | Disc check | Meaning |
 | :--- | :--- |
 | Verified retail | The image's hash matches a retail disc in the list. |
-| Modified | The hash matches nothing in the list, but the disc ID is a retail disc's: one the list names, or one a verified image in the same library carries. Fan translations, patched and trimmed images land here. |
+| Modified | The disc ID is a retail disc's (one the list names, or one a verified image in the same library carries), but the image's hashes match no dump of it in the list. A damaged or incomplete dump does that as well as a changed copy (a fan translation, a patch, a trimmed image); the check can't tell which. Dump the disc again and check it to tell. |
 | Unknown | Neither: the image is not in the list. That does not make it bad; it is only not shown to be retail. |
 | Not checked | No list was found (a build without the bundled list, and nothing imported), the list could not be read, or the image wasn't hashed. |
 
 The **Verified retail** column is the library's compatibility figure. Modified and unknown images are counted
-beside it. Redump's current PSP list names the disc IDs of almost every disc in `<serial>`, so a changed copy of a
-listed disc is labelled **Modified** on its own. An older list without `<serial>` entries (Redump's exports
+beside it. Redump's current PSP list names the disc IDs of almost every disc in `<serial>`, so an image of a
+listed disc whose hashes match no dump of it is labelled **Modified** on its own. An older list without `<serial>` entries (Redump's exports
 before its move to `redump.info`, such as the 2026-06-13 list the summary below was made with) names no disc
 IDs; with one, a modified image is **Modified** only when its retail disc is verified in the same library, and
 otherwise **Unknown**. Unknown means the image isn't shown to be a retail dump; it doesn't mean the image is
@@ -276,7 +276,10 @@ python tools/nk_cli.py redump-import "Sony - PlayStation Portable - Datfile (...
 The list is checked, then kept in your player data folder (`verification/redump.dat`), and discs added from then
 on are checked against it instead of the bundled list. A file that is not a Redump datafile is refused with a
 `DISC_DAT_*` code ([FAILURE_CODES.md](FAILURE_CODES.md)) and the earlier list stays. To go back to the bundled
-list, delete `verification/redump.dat` from the data folder.
+list, delete `verification/redump.dat` from the data folder. An import stays in use after an update brings a
+newer bundled list, since you chose it; each check then says so, with both lists' dates. The reader takes a
+list of up to 16 MiB, in one pass, and refuses anything else in it a Redump list does not use, such as
+entity declarations.
 
 Two images with one disc ID still share some folders, so only one of them is ready to play at a time:
 

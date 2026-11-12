@@ -447,6 +447,21 @@ class ZipAndEntityTests(unittest.TestCase):
         flagged[central + 8] |= 1
         self.refused(bytes(flagged), "DISC_DAT_ZIP_INVALID")
 
+    def test_the_zip_rules_are_the_c_readers(self) -> None:
+        text = datafile().encode("utf-8")
+        # A folder entry counts: the zip must hold the one .dat alone, as the C reader requires.
+        self.refused(zip_of({"d/": b"", "a.dat": text}), "DISC_DAT_ZIP_INVALID")
+        self.refused(zip_of({"d.dat/": b""}), "DISC_DAT_ZIP_INVALID")
+        # A ZIP64 block in the entry's central-directory extra field is refused, as the C
+        # reader refuses it (an empty block: header ID 0x0001, length 0).
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            info = zipfile.ZipInfo("list.dat")
+            info.compress_type = zipfile.ZIP_DEFLATED
+            info.extra = b"\x01\x00\x00\x00"
+            archive.writestr(info, text)
+        self.refused(buffer.getvalue(), "DISC_DAT_ZIP_INVALID")
+
     def test_an_oversized_list_in_a_zip_is_refused_before_it_is_read_whole(self) -> None:
         big = datafile().encode("utf-8")
         # The header's size is over the cap ...
@@ -480,6 +495,13 @@ class ZipAndEntityTests(unittest.TestCase):
                 "<datafile>", '<datafile><!ENTITY xxe SYSTEM "file:///etc/passwd">'),
             "undeclared reference": good.replace("Synthetic &amp; Test", "&xxe;"),
             "bare ampersand": good.replace("Synthetic &amp; Test", "A & B"),
+            "lowercase entity": good.replace("<datafile>", '<datafile><!entity a "b">'),
+            "second DOCTYPE": good.replace(external, external + external),
+            "DOCTYPE after the root": good.replace("<datafile>", "<datafile>" + external),
+            "markup inside the DOCTYPE": good.replace(
+                external, '<!DOCTYPE datafile <!ENTITY a "b">>'),
+            "comment": good.replace("<datafile>", "<datafile><!-- a -->"),
+            "CDATA": good.replace("Synthetic &amp; Test", "<![CDATA[x]]>"),
         }
         for name, text in cases.items():
             with self.subTest(name), self.assertRaises(disc_verify.DiscVerifyError) as raised:
@@ -488,6 +510,77 @@ class ZipAndEntityTests(unittest.TestCase):
         # The external DOCTYPE Redump's lists carry is skipped unread; character references stay.
         dat = disc_verify.parse_dat_text(good.replace("Synthetic &amp; Test", "A &#38; B &#x26;"))
         self.assertEqual(dat.name, "A &#38; B &#x26;")
+
+
+#: The most characters the reader may look at for each character of its input. The scanner
+#: counts each one every time it looks at it, so this bounds the work of any input (#1731
+#: review B1, S1: lists that once cost time quadratic in their size).
+COST_PER_CHARACTER = 8
+
+
+def hostile_lists(repeats: int) -> dict[str, str]:
+    """Datafiles of about ``repeats`` repetitions of a shape that once cost quadratic time, or
+    could: each is refused by name or read, never a hang."""
+    good = datafile()
+    game = good.index("\t<game")
+    retail = digest(RETAIL)
+    rom = f'<rom name="x" size="8192" crc="{retail.crc32}" sha1="{retail.sha1}"/>'
+    return {
+        # B1: DOCTYPEs after the root, once rescanned from each to the next ">".
+        "DOCTYPE after the root": good[:game] + "<!DOCTYPE" * repeats + good[game:],
+        "DOCTYPE before the root": good.replace("<datafile>", "<!DOCTYPE" * repeats + "<datafile>"),
+        # S1: header tags, once matched by three backtracking patterns.
+        "header tags": "<datafile>" + "<header" * repeats + good[game:],
+        "header elements": "<datafile>" + "<header>" * repeats + good[game:],
+        "unclosed games": good[:game] + '<game name="a">' * repeats + good[game:],
+        "game openers": good[:game] + "<game" * repeats + good[game:],
+        "a long attribute name": good[:game] + "<game>" + "<rom " + "a" * repeats + "/></game>"
+        + good[game:],
+        "many roms": good[:game] + "<game>" + rom * (repeats // 20) + "</game>" + good[game:],
+        "references": good.replace("Synthetic &amp; Test", "&amp;" * repeats),
+        "long reference": good.replace("Synthetic &amp; Test", "&#" + "1" * repeats + ";"),
+        "a long serial": good.replace("TEST-70001, TEST-70001GA", "TEST-70001," * repeats),
+        "many serials": good.replace("\t\t<serial>", "<serial>TEST-70002</serial>" * (repeats // 10)
+                                     + "\t\t<serial>"),
+        "an open declaration": "<datafile><?" + "x" * repeats,
+        "tags": good[:game] + "<a>" * repeats + good[game:],
+        "less-than signs": good[:game] + "<" * repeats + good[game:],
+        "ampersands": good.replace("Synthetic &amp; Test", "&" * repeats),
+        "no closing tag": good.replace("</datafile>", "") + "<x>" * repeats,
+    }
+
+
+class LinearCostTests(unittest.TestCase):
+    """The reader's work is linear in its input: counted, not timed (a time limit would be
+    flaky). tests/native/test_disc_verify.c holds the C reader to the same bound."""
+
+    def cost(self, text: str) -> int:
+        scanner = disc_verify._DatScanner(text)
+        try:
+            scanner.parse()
+        except disc_verify.DiscVerifyError as exc:
+            self.assertTrue(exc.boundary_code.startswith("DISC_DAT_"), exc.boundary_code)
+        return scanner.examined
+
+    def test_hostile_lists_cost_a_fixed_multiple_of_their_size(self) -> None:
+        for repeats in (20_000, 40_000):
+            for name, text in hostile_lists(repeats).items():
+                with self.subTest(name, repeats=repeats):
+                    self.assertLessEqual(self.cost(text), COST_PER_CHARACTER * len(text))
+
+    def test_the_review_inputs_are_refused_by_name(self) -> None:
+        lists = hostile_lists(200_000)
+        for name, code in (("DOCTYPE after the root", "DISC_DAT_ENTITY_REFUSED"),
+                           ("DOCTYPE before the root", "DISC_DAT_ENTITY_REFUSED"),
+                           ("header tags", "DISC_DAT_NOT_DATAFILE")):
+            with self.subTest(name), self.assertRaises(disc_verify.DiscVerifyError) as raised:
+                disc_verify.parse_dat_text(lists[name])
+            self.assertEqual(raised.exception.boundary_code, code)
+
+    def test_the_bundled_list_costs_the_same_bound(self) -> None:
+        with zipfile.ZipFile(disc_verify.bundled_dat_path()) as archive:
+            text = archive.read(archive.infolist()[0]).decode("utf-8-sig")
+        self.assertLessEqual(self.cost(text), COST_PER_CHARACTER * len(text))
 
 
 #: The list bundled with Nakagawa (assets/redump/PROVENANCE.md). A refreshed list changes these
@@ -550,7 +643,22 @@ class BundledListTests(unittest.TestCase):
             dat = disc_verify.load_verification_dat(data)
             assert dat is not None
             self.assertEqual((dat.source, len(dat)), (disc_verify.LIST_IMPORTED, 2))
-            self.assertEqual(dat.describe(), "your imported Redump list (dated 2026-10-31, 2 discs)")
+            # The import is older than the bundled list: it is still used (the user chose it),
+            # and the output names both dates and how to use the bundled list again.
+            self.assertEqual(dat.newer_bundled_date, BUNDLED_DATE)
+            self.assertEqual(dat.describe(), (
+                "your imported Redump list (dated 2026-10-31, 2 discs), older than the list "
+                f"bundled with Nakagawa (dated {BUNDLED_DATE}): import a newer list, or delete "
+                "verification/redump.dat from your data folder to use the bundled one"))
+            # A newer import gets no such note.
+            source.write_text(datafile().replace("2026-10-31", "2027-01-02 03-04-05"),
+                              encoding="utf-8")
+            disc_verify.import_dat(source, data)
+            dat = disc_verify.load_verification_dat(data)
+            assert dat is not None
+            self.assertEqual(dat.newer_bundled_date, "")
+            self.assertEqual(dat.describe(),
+                             "your imported Redump list (dated 2027-01-02 03-04-05, 2 discs)")
             # A damaged import is reported, never replaced by the bundled list.
             disc_verify.imported_dat_path(data).write_text("damaged", encoding="utf-8")
             with self.assertRaises(disc_verify.DiscVerifyError) as raised:
@@ -581,6 +689,33 @@ class BundledListTests(unittest.TestCase):
                 self.assertIsNone(nk_cli._verification_dat(data))
             self.assertIn("The imported Redump list was not used [DISC_DAT_NOT_DATAFILE]",
                           shown.getvalue())
+
+    def test_a_damaged_bundled_list_is_named_as_the_bundled_one(self) -> None:
+        import nk_cli
+
+        with tempfile.TemporaryDirectory() as folder:
+            damaged = Path(folder) / "redump-psp.zip"
+            damaged.write_bytes(b"PK\x03\x04 not a zip")
+            with mock.patch.object(disc_verify, "bundled_dat_path", return_value=damaged):
+                with self.assertRaises(disc_verify.DiscVerifyError) as raised:
+                    disc_verify.load_verification_dat(Path(folder) / "data")
+                self.assertEqual((raised.exception.boundary_code, raised.exception.list_source),
+                                 ("DISC_DAT_ZIP_INVALID", disc_verify.LIST_BUNDLED))
+                shown = io.StringIO()
+                with contextlib.redirect_stdout(shown):
+                    self.assertIsNone(nk_cli._verification_dat(Path(folder) / "data"))
+            self.assertIn("The Redump list bundled with Nakagawa was not used [DISC_DAT_ZIP_INVALID]",
+                          shown.getvalue())
+            self.assertNotIn("imported", shown.getvalue())
+
+    def test_list_dates_compare_in_redump_form_only(self) -> None:
+        older = disc_verify.list_date_is_older
+        self.assertTrue(older("2026-10-31", BUNDLED_DATE))
+        self.assertTrue(older("2026-11-12 16-02-52", BUNDLED_DATE))
+        self.assertFalse(older(BUNDLED_DATE, BUNDLED_DATE))
+        self.assertFalse(older("2026-11-12", BUNDLED_DATE))  # same day, no time: not called older
+        self.assertFalse(older("2027-01-01", BUNDLED_DATE))
+        self.assertFalse(older("version 3", BUNDLED_DATE))
 
 
 if __name__ == "__main__":

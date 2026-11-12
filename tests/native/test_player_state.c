@@ -2656,6 +2656,12 @@ static void test_disc_check_after_add(void) {
     assert(player_disc_tier_note(NK_DISC_TIER_UNKNOWN) != NULL &&
            player_disc_tier_badge(NK_DISC_TIER_NOT_CHECKED) == NULL &&
            player_disc_tier_note(NK_DISC_TIER_NOT_CHECKED) == NULL);
+    /* A hash mismatch names no cause: a damaged dump and a changed copy look
+       alike, and the note says how to tell (#1731 review S2). */
+    assert(strstr(player_disc_tier_note(NK_DISC_TIER_MODIFIED), "A damaged dump does that as well "
+                                                                "as a changed copy") != NULL &&
+           strstr(player_disc_tier_note(NK_DISC_TIER_MODIFIED), "dump the disc again") != NULL &&
+           strstr(player_disc_tier_note(NK_DISC_TIER_MODIFIED), "fan translation") == NULL);
 
     /* The retail disc: its own card beside the translation, which becomes
        modified once the retail disc is verified. On disk too. */

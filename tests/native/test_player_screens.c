@@ -909,8 +909,10 @@ static PlayerUiAction draw_page_case(NkUi *ui, FlowCase which) {
         fixture.compatibility_expect = k_compatibility_cases[1].expect;
         fixture.compatibility_known_issues = k_compatibility_cases[1].known_issues;
         fixture.compatibility_category = "Playable";
-        fixture.disc_check_note = "Disc check: a changed copy of a retail disc in your "
-                                  "library, such as a fan translation or a patch.";
+        fixture.disc_check_note = "Disc check: its disc ID is in the disc list, but its "
+                                  "contents match no dump of it there. A damaged dump does "
+                                  "that as well as a changed copy; dump the disc again and "
+                                  "check it to tell which.";
         fixture.ace_shown = true;
         fixture.ace_label = enhanced ? "Play mode: Enhanced" : "Play mode: Authentic";
         fixture.ace_in_effect = enhanced;

@@ -1165,8 +1165,9 @@ const char *player_disc_tier_note(uint32_t tier) {
         case NK_DISC_TIER_VERIFIED_RETAIL:
             return "Disc check: this image matches a retail disc in Redump's disc list.";
         case NK_DISC_TIER_MODIFIED:
-            return "Disc check: a changed copy of a retail disc, such as a fan translation "
-                   "or a patch.";
+            return "Disc check: its disc ID is in the disc list, but its contents match no "
+                   "dump of it there. A damaged dump does that as well as a changed copy; dump "
+                   "the disc again and check it to tell which.";
         case NK_DISC_TIER_UNKNOWN:
             return "Disc check: not in the disc list. That doesn't mean it's bad: it is "
                    "only not shown to be retail, and its disc ID isn't one the list names.";

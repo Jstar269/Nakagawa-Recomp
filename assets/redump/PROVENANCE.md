@@ -8,7 +8,7 @@ run time: `tools/stage_runtime_dlls.py` copies this folder beside the player, an
 
 ## Upstream source
 
-- Project: Redump (<https://redump.info/>), the official home of the Redump project since 2026-06-20.
+- Project: Redump (<https://redump.info/>).
 - Download: `https://redump.info/datfile/PSP`, linked from <https://redump.info/downloads> ("Sony PlayStation
   Portable", "Datfile"). Fetched once, anonymously, on 2026-11-12 at 18:43:40 UTC. The server named the file
   `Sony - PlayStation Portable - Datfile (3546) (2026-11-12 16-02-53).zip` (`Content-Type: application/zip`).

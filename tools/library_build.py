@@ -788,7 +788,10 @@ def main(argv: list[str] | None = None) -> int:
         else:
             dat = disc_verify.load_verification_dat(args.user_data_root)
     except disc_verify.DiscVerifyError as exc:
-        parser.error(f"{exc} [{exc.boundary_code}]")
+        which = {disc_verify.LIST_IMPORTED: "the imported Redump list",
+                 disc_verify.LIST_BUNDLED: "the Redump list bundled with Nakagawa"}.get(
+                     exc.list_source, "the Redump list given")
+        parser.error(f"{which} can't be used: {exc} [{exc.boundary_code}]")
     if dat is not None:
         print(f"library_build: discs are checked against {dat.describe()}", file=sys.stderr)
     build = LibraryBuild(

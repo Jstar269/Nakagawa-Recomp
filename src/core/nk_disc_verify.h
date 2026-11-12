@@ -18,22 +18,27 @@
  *                    size agree;
  *   MODIFIED         no match, but the disc ID is a known retail disc ID: one
  *                    the list names in a <serial>, or one a verified image in
- *                    the same library carries (fan translations, patched or
- *                    trimmed images);
+ *                    the same library carries. The image's hashes differ from
+ *                    every listed dump of its disc: a damaged dump does that
+ *                    as well as a changed copy (a fan translation, a patch, a
+ *                    trimmed image), and the check can't tell which;
  *   UNKNOWN          neither: not in the list, which means "not shown to be
  *                    retail", never "bad";
  *   NOT_CHECKED      no list found, or the image was never hashed.
  *
- * The datafile (Logiqx XML, as Redump publishes it) is read by a small bounded
- * scanner that expands no entity and never reads a DTD: a <!DOCTYPE> that only
- * names Logiqx's public DTD (as Redump's lists do) is skipped unread, and a
- * list that declares entities, carries an internal DTD subset or refers to an
- * entity other than XML's five predefined ones and character references is
- * refused (DISC_DAT_ENTITY_REFUSED). It reads each <game> element, the size,
- * crc and sha1 attributes of its <rom> elements, and any <serial> text. A rom
- * with a malformed hash or size is skipped and counted. A datafile may be the
- * zip Redump serves: one .dat inside, stored or deflated, inflated under the
- * same size cap and checked against its CRC-32 (DISC_DAT_ZIP_INVALID).
+ * The datafile (Logiqx XML, as Redump publishes it) is read in one forward
+ * pass, so its cost is linear in its size, which NK_DISC_DAT_MAX_BYTES caps.
+ * It expands no entity and never reads a DTD: one <!DOCTYPE> before the root
+ * that only names an external DTD (Logiqx's, as Redump's lists do) is skipped
+ * unread, and any other <! markup (an entity declaration, an internal DTD
+ * subset, a second DOCTYPE, a comment) or a reference to an entity other than
+ * XML's five predefined ones and character references is refused
+ * (DISC_DAT_ENTITY_REFUSED). It reads each <game> element, the size, crc and
+ * sha1 attributes of its <rom> elements, and any <serial> text. A rom with a
+ * malformed hash or size is skipped and counted. A datafile may be the zip
+ * Redump serves: exactly one entry, a .dat, stored or deflated, not ZIP64, its
+ * size checked before it is inflated and its CRC-32 after
+ * (DISC_DAT_ZIP_INVALID).
  */
 
 #ifndef NK_DISC_VERIFY_H
@@ -59,8 +64,14 @@ extern "C" {
 #define NK_DISC_BUNDLED_DAT_DIR1 "assets"
 #define NK_DISC_BUNDLED_DAT_DIR2 "redump"
 #define NK_DISC_BUNDLED_DAT_FILE "redump-psp.zip"
-/* The largest datafile read: Redump's biggest lists are a few MiB. */
-#define NK_DISC_DAT_MAX_BYTES (64u * 1024u * 1024u)
+/* The largest datafile read, a file or the .dat a zip holds (checked against
+   the zip's own size field before inflating, and on the bytes inflated).
+   Redump's PSP list of 2026-11-12 is 1,475,779 bytes for 3,546 discs, about
+   416 bytes a disc, so 16 MiB holds about 40,000 discs: ten times the list,
+   more than the PSP library will ever add. MAX_DAT_BYTES in disc_verify.py is
+   the same. The reader holds at most the file (16 MiB), the inflated .dat
+   (16 MiB) and NK_DISC_DAT_MAX_ROMS roms. */
+#define NK_DISC_DAT_MAX_BYTES (16u * 1024u * 1024u)
 #define NK_DISC_DAT_MAX_ROMS 200000u
 
 #define NK_DISC_SHA1_HEX_CHARS 40u
@@ -159,6 +170,9 @@ typedef struct {
     char name[128];
     char version[64];
     char date[64];
+    /* Set by nk_disc_dat_load_active on an import older than the bundled list:
+       the bundled list's date (printable ASCII). Empty otherwise. */
+    char newer_bundled_date[64];
 } NkDiscDat;
 
 void nk_disc_dat_free(NkDiscDat *dat);
@@ -169,6 +183,15 @@ void nk_disc_dat_free(NkDiscDat *dat);
    more than NK_DISC_DAT_MAX_ROMS roms (DISC_DAT_TOO_LARGE). */
 bool nk_disc_dat_parse(const char *text, size_t length, NkDiscDat *out,
                        NkDiscExpandStatus *status);
+/* nk_disc_dat_parse, also giving the bytes the reader looked at, each counted
+   every time it is looked at (NULL for none), whether it succeeds or not: the
+   tests hold it to a fixed multiple of length, for any input. */
+bool nk_disc_dat_parse_counted(const char *text, size_t length, NkDiscDat *out,
+                               NkDiscExpandStatus *status, uint64_t *bytes_examined);
+/* Whether a list's date sorts before another's, both in Redump's
+   "YYYY-MM-DD HH-MM-SS" form (the time is optional; on the same day it counts
+   only when both have one). Any other form is never called older. */
+bool nk_disc_list_date_is_older(const char *date, const char *other);
 /* The same, read from a file of at most NK_DISC_DAT_MAX_BYTES: a .dat, or the
    zip Redump serves with one .dat inside (DISC_DAT_ZIP_INVALID when it is not
    one). */
@@ -198,7 +221,8 @@ typedef enum {
    when a list was read; false with *source NONE and an empty status code when
    neither exists; false with *source naming the list and status saying why
    when the chosen list can't be read. A damaged import is reported, never
-   replaced by the bundled list. */
+   replaced by the bundled list. An import older than the bundled list is still
+   used (the user chose it), with out->newer_bundled_date set. */
 bool nk_disc_dat_load_active(const char *data_root, const char *bundled_path, NkDiscDat *out,
                              NkDiscListSource *source, NkDiscExpandStatus *status);
 
@@ -235,7 +259,7 @@ typedef struct {
     NkDiscListSource list;  /* which list the image was compared with */
     char list_date[64];     /* that list's own date (its header's <date>, else <version>) */
     char code[48];     /* empty, or the NK_DISC_* / DISC_DAT_* code behind a failure */
-    char reason[400];  /* one plain sentence for the card and the log; names the list */
+    char reason[640];  /* plain sentences for the card and the log; names the list */
 } NkDiscVerification;
 
 /* Hash the image at iso_path (for a compressed disc, the expansion the import
