@@ -3015,11 +3015,21 @@ bool player_app_title_60hz_released(const PlayerApp *app, int game_index) {
 
 bool player_app_title_cull_on(const PlayerApp *app, int game_index) {
     if (!app || game_index < 0 || game_index >= app->game_count) return false;
-    /* The launch line carries cull=on only for Ace with the part on (player_play_launch_line);
-       Authentic and Enhanced never build or launch the culling package. */
+    /* Exactly when the launch line carries cull=on (player_play_config_session): Ace with the
+       part on, including a title on Enhanced that the session's 60 FPS switch runs as Ace
+       (player_play_apply_logic_60). Authentic and Enhanced never build or launch the culling
+       package. */
     PlayerPlayResolved play;
     player_play_resolve(&app->settings, app->games[game_index].disc_id, &play);
+    player_play_apply_logic_60(&play, app->title_enhancements[game_index].available &&
+                                          player_app_title_60hz_on(app, game_index));
     return play.on && play.mode == PLAYER_PLAY_ACE && play.part[PLAYER_PART_CULL] == 1;
+}
+
+const char *player_app_title_cull_problem(const PlayerApp *app, int game_index) {
+    if (!player_app_title_cull_on(app, game_index)) return "";
+    const PlayerTitleEnhancement *enhancement = &app->title_enhancements[game_index];
+    return enhancement->cull_available ? "" : enhancement->cull_problem;
 }
 
 /* The variant the title launches: its enhanced build when its 60 FPS game logic is on and its
@@ -3033,8 +3043,15 @@ static void player_app_select_package_variant(PlayerApp *app, int game_index) {
     bool cull = enhancement->cull_available && player_app_title_cull_on(app, game_index);
     game->enhancement_hook_only = false;
     if (logic_60 && cull) {
-        snprintf(game->enhancement_package_id, sizeof(game->enhancement_package_id), "%s+%s",
-                 enhancement->package_id, enhancement->cull_package_id);
+        /* cull_available holds beside a usable timing package only when the joined name is a
+           valid variant (player_read_title_enhancement), so it fits; were it ever cut, the
+           timing build stays, as for a culling package that cannot be used. */
+        int n = snprintf(game->enhancement_package_id, sizeof(game->enhancement_package_id),
+                         "%s+%s", enhancement->package_id, enhancement->cull_package_id);
+        if (n < 0 || (size_t)n >= sizeof(game->enhancement_package_id)) {
+            snprintf(game->enhancement_package_id, sizeof(game->enhancement_package_id), "%s",
+                     enhancement->package_id);
+        }
     } else if (logic_60) {
         snprintf(game->enhancement_package_id, sizeof(game->enhancement_package_id), "%s",
                  enhancement->package_id);

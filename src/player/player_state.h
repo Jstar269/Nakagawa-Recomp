@@ -1717,6 +1717,10 @@ void player_app_set_experimental_60hz_session(PlayerApp *app, bool on);
    carries cull=on, and the title builds and launches with its culling package when it has a
    usable one (PlayerTitleEnhancement.cull_available). Authentic and Enhanced never. */
 bool player_app_title_cull_on(const PlayerApp *app, int game_index);
+/* Why the title's culling package cannot be used while player_app_title_cull_on asks for it
+   (PlayerTitleEnhancement.cull_problem), so the title page names it; "" when the part is off,
+   the package is usable, or the title has no culling package file. */
+const char *player_app_title_cull_problem(const PlayerApp *app, int game_index);
 
 /* ---- The play modes (#2055; src/rt/ace.h) ---- */
 

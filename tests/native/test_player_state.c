@@ -8534,6 +8534,34 @@ static void test_input_classification_and_check_again(void) {
  * including Enhanced, each part's off switch at both levels, the launch line with its tier,
  * settings that round-trip and survive bad values, the per-run report's "Last session" line,
  * and Authentic taking 60 FPS game logic off. */
+/* The build a title selects carries its culling package exactly when the launch line the
+   launch work builds from that selection (player_play_config_session, as
+   player_launch_work_run calls it) carries cull=on (contract 11.3.6): a line with cull=on and a
+   build without a usable package would run unwidened, and a build with it and a line without
+   would carry a hook that never acts. */
+static void assert_cull_build_matches_line(const PlayerApp *app, int index) {
+    const GameRecord *game = &app->games[index];
+    bool with_hook = game->enhancement_package_id[0] &&
+                     (game->enhancement_hook_only || strchr(game->enhancement_package_id, '+'));
+    NkRuntimeConfig config;
+    memset(&config, 0, sizeof(config));
+    PlayerPlayResolved play;
+    player_play_config_session(&app->settings, game->disc_id,
+                               game->enhancement_package_id[0] && !game->enhancement_hook_only,
+                               false, &config, &play);
+    bool line_cull = strstr(config.ace_spec, ";cull=on") != NULL;
+    bool usable = app->title_enhancements[index].cull_available;
+    if (with_hook != (line_cull && usable)) {
+        fprintf(stderr, "cull build/line mismatch: variant=%s hook_only=%d usable=%d line=%s\n",
+                game->enhancement_package_id, (int)game->enhancement_hook_only, (int)usable,
+                config.ace_spec);
+    }
+    /* Without a usable culling package the line may still ask (the run then says cull
+       unavailable, and the title page names the package's problem); with one, they agree. */
+    assert(with_hook == (line_cull && usable));
+    assert(line_cull == player_app_title_cull_on(app, index));
+}
+
 static void test_play_mode_settings(void) {
     char sep = nk_platform_path_separator();
     char cache_root[512], root[700], path[800], line[192];
@@ -8768,18 +8796,20 @@ static void test_play_mode_settings(void) {
         assert(!player_app_title_cull_on(app, 2));
         assert(strcmp(app->games[2].enhancement_package_id, "fixture-60hz") == 0 &&
                !app->games[2].enhancement_hook_only);
-        player_app_cycle_title_part(app, 2, PLAYER_PART_CULL);        /* library -> off */
-        player_app_cycle_title_part(app, 2, PLAYER_PART_CULL);        /* off -> on */
+        assert_cull_build_matches_line(app, 2);
+        player_app_cycle_title_part(app, 2, PLAYER_PART_CULL);        /* library -> on */
         assert(player_app_title_part(app, 2, PLAYER_PART_CULL) == 1);
         assert(player_app_title_cull_on(app, 2));
         assert(strcmp(app->games[2].enhancement_package_id, "fixture-60hz+fixture-cull") == 0 &&
                !app->games[2].enhancement_hook_only);
         player_play_resolve(&app->settings, "TEST90003", &r);
         assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, ";cull=on"));
+        assert_cull_build_matches_line(app, 2);
         /* Its 60 FPS game logic off: the culling package is the build's one package. */
         player_app_set_title_60hz(app, 2, false);
         assert(strcmp(app->games[2].enhancement_package_id, "fixture-cull") == 0 &&
                app->games[2].enhancement_hook_only);
+        assert_cull_build_matches_line(app, 2);
         player_app_set_title_60hz(app, 2, true);
         assert(strcmp(app->games[2].enhancement_package_id, "fixture-60hz+fixture-cull") == 0 &&
                !app->games[2].enhancement_hook_only);
@@ -8789,26 +8819,43 @@ static void test_play_mode_settings(void) {
                app->settings.enhanced.library == PLAYER_PLAY_ENHANCED);
         assert(!player_app_title_cull_on(app, 2));
         assert(!app->games[2].enhancement_package_id[0] && !app->games[2].enhancement_hook_only);
+        assert_cull_build_matches_line(app, 2);
         player_app_cycle_title_play_mode(app, 2);                     /* -> Authentic */
         assert(player_app_title_play_mode(app, 2) == PLAYER_PLAY_AUTHENTIC);
         assert(!player_app_title_cull_on(app, 2) && !app->games[2].enhancement_package_id[0]);
+        assert_cull_build_matches_line(app, 2);
         player_app_cycle_title_play_mode(app, 2);                     /* -> Enhanced */
         assert(player_app_title_play_mode(app, 2) == PLAYER_PLAY_ENHANCED);
         assert(!player_app_title_cull_on(app, 2) && !app->games[2].enhancement_package_id[0]);
-        /* The session's 60 FPS switch on Enhanced builds the timing package alone. */
+        assert_cull_build_matches_line(app, 2);
+        /* The session's 60 FPS switch runs a title on Enhanced as Ace (player_play_apply_logic_60),
+           so its line carries the title's cull=on and the build carries the culling package
+           beside the timing package. Failing before: it selected the timing package alone while
+           the line asked for cull. */
         player_app_set_experimental_60hz_session(app, true);
-        assert(strcmp(app->games[2].enhancement_package_id, "fixture-60hz") == 0);
+        assert(player_app_title_cull_on(app, 2));
+        assert(strcmp(app->games[2].enhancement_package_id, "fixture-60hz+fixture-cull") == 0 &&
+               !app->games[2].enhancement_hook_only);
+        assert_cull_build_matches_line(app, 2);
         player_app_set_experimental_60hz_session(app, false);
+        assert(!app->games[2].enhancement_package_id[0]);
         player_app_cycle_title_play_mode(app, 2);                     /* -> Ace */
         assert(player_app_title_play_mode(app, 2) == PLAYER_PLAY_ACE);
         assert(strcmp(app->games[2].enhancement_package_id, "fixture-60hz+fixture-cull") == 0);
         /* Following the library's part: its switch selects the build for every title. */
-        player_app_cycle_title_part(app, 2, PLAYER_PART_CULL);        /* on -> library (off) */
+        player_app_cycle_title_part(app, 2, PLAYER_PART_CULL);        /* on -> off */
+        assert(player_app_title_part(app, 2, PLAYER_PART_CULL) == 0);
+        assert(strcmp(app->games[2].enhancement_package_id, "fixture-60hz") == 0);
+        assert_cull_build_matches_line(app, 2);
+        player_app_cycle_title_part(app, 2, PLAYER_PART_CULL);        /* off -> library (off) */
         assert(player_app_title_part(app, 2, PLAYER_PART_CULL) == -1);
         assert(strcmp(app->games[2].enhancement_package_id, "fixture-60hz") == 0);
+        assert_cull_build_matches_line(app, 2);
         player_app_cycle_enhanced_part(app, PLAYER_PART_CULL);        /* library off -> on */
         assert(app->settings.enhanced.part[PLAYER_PART_CULL] == 1);
         assert(strcmp(app->games[2].enhancement_package_id, "fixture-60hz+fixture-cull") == 0);
+        assert_cull_build_matches_line(app, 2);
+        assert(!player_app_title_cull_problem(app, 2)[0]);
         assert(!app->games[0].enhancement_package_id[0]);             /* no package: authentic */
         /* A culling package that cannot ride: not a code-hook package, another game's, the
            timing package's own id, or one whose joined name is too long. The timing build
@@ -8834,11 +8881,20 @@ static void test_play_mode_settings(void) {
             assert(app->title_enhancements[2].available);
             assert(strcmp(app->games[2].enhancement_package_id, "fixture-60hz") == 0 &&
                    !app->games[2].enhancement_hook_only);
+            assert_cull_build_matches_line(app, 2);
+            /* Named on the title page while the part asks for it, never silently dropped. */
+            assert(strcmp(player_app_title_cull_problem(app, 2),
+                          app->title_enhancements[2].cull_problem) == 0);
         }
+        player_app_cycle_enhanced_part(app, PLAYER_PART_CULL);        /* library on -> off */
+        assert(!player_app_title_cull_problem(app, 2)[0]);
+        player_app_cycle_enhanced_part(app, PLAYER_PART_CULL);        /* library off -> on */
+        assert(player_app_title_cull_problem(app, 2)[0]);
         remove(cull_file);
         player_app_refresh_title_enhancements(app);
         assert(!app->title_enhancements[2].cull_available &&
                !app->title_enhancements[2].cull_problem[0]);
+        assert(!player_app_title_cull_problem(app, 2)[0]);
         assert(strcmp(app->games[2].enhancement_package_id, "fixture-60hz") == 0);
         player_app_cycle_enhanced_part(app, PLAYER_PART_CULL);        /* library on -> off */
         assert(app->settings.enhanced.part[PLAYER_PART_CULL] == 0);
