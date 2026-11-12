@@ -1735,7 +1735,10 @@ The feature of section 10.16 (#1273). How it draws is described there; this entr
   and contents refused while streaming are charged a sixteenth of their texels but may each decode level 0 again,
   hash it and upload a kept chain; the exit stamp's `frame_peak_ms` is the measured worst frame of all of it. On LittleBigPlanet's first story level at 4x, before the
   budget, builds took 7.1 s of an 8,740-VBLANK run, all in its intro and loading screens; on Hot Shots Tennis, 25 to
-  31 ms. The figures with the budget are not yet measured.
+  31 ms. With the budget (2026-11-12, the same host, an RTX 3080, render scale 4, nothing else running): on the same
+  LittleBigPlanet run (8,730 VBLANKs) builds took 484 and 490 ms in all over two runs, 187 binds were drawn plain
+  for the budget, and the worst frame (`frame_peak_ms`) took 1.9 and 2.3 ms; on a Hot Shots Tennis match (8,760
+  VBLANKs) builds took 14.9 ms, 17 binds were drawn plain for the budget, and the worst frame took 3.9 ms.
 - **I/O speed:** unchanged.
 - **Tier:** Enhanced. **Default:** off. It is in no graphics preset.
 - **Nothing worse (section 11.2, item 4):** not shown. It may not be on by default before the runs item 4 lists
