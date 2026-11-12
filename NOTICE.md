@@ -127,7 +127,11 @@ We aim to respond promptly and will remove material where appropriate.
   licence), MD5 (public domain or cut-down BSD), `strlcpy` (ISC) and xxHash
   (BSD-2-Clause). The same tool builds GNU make 4.4.1 (GPL-3.0-or-later) from its
   pinned release tarball and ships its `COPYING`; a release that ships the APK
-  carries that tarball as make's corresponding source.
+  carries that tarball as make's corresponding source. It also stages the official
+  CPython 3.15.2 Android release unchanged (PSF-2.0, with OpenSSL 3.5.9 under
+  Apache-2.0 and SQLite 3.53.4 in the public domain), with the release's
+  `LICENSE.txt`, CPython's `Doc/license.rst`, and the OpenSSL, bzip2, XZ Utils and
+  Zstandard licence files.
 - **VFPU tables** — PPSSPP-origin lookup data with the exact source and checksums
   recorded in `assets/vfpu/PROVENANCE.json`; inclusion is a provenance decision,
   not a claim about PSP firmware ownership.

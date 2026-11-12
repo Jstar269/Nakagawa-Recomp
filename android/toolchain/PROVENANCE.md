@@ -1,9 +1,10 @@
 # PROVENANCE.md — `android/toolchain/` (the on-device C toolchain)
 
 The Android build of Nakagawa compiles a game's generated C on the device (issue #360), so the APK ships a C compiler,
-a linker, `make` and a sysroot for `aarch64-linux-android29`. Nothing in them comes from the Android NDK: each part is built by
-the project from a pinned upstream source, and this repository holds only the pins, the build tools and their tests. No
-upstream source file is vendored here.
+a linker, `make`, a Python interpreter and a sysroot for `aarch64-linux-android29`. Nothing in them comes from the
+Android NDK. Python is the official CPython release for Android, shipped unchanged; every other part is built by the
+project from a pinned upstream source. This repository holds only the pins, the build tools and their tests. No upstream
+source file is vendored here.
 
 ## Project-authored files
 
@@ -11,6 +12,8 @@ Written for this project with Claude Code (Claude Opus 5.5) from the documented 
 
 - `nk_ld_launcher.c`: starts `libnk_lld.so` as `ld.lld`. Android runs only `lib*.so` files from an app's native library
   folder, and lld chooses its role from its program name.
+- `nk_python_launcher.c`: `libnk_python.so`, the `python` program, which the CPython release for Android does not
+  include. It runs Python's own command line (`Py_BytesMain`).
 - `sysroot-inputs.json`: the pins below.
 - `tools/android_stubgen.py`, `tools/android_sysroot.py` and `tools/android_toolchain.py`, with their tests: the stub
   generator for AOSP symbol files (`*.map.txt`), the sysroot builder and the toolchain build driver.
@@ -91,3 +94,28 @@ folder. Two builds in different folders give the same bytes. make needs only `li
 
 make is GPL-3.0-or-later, so the release that ships the APK also carries the pinned `make-4.4.1.tar.gz` as its
 corresponding source, as for the other bundled GPL programs.
+
+## Python
+
+| Source | Revision | Used | Licence |
+| --- | --- | --- | --- |
+| [CPython](https://www.python.org/downloads/android/) | 3.15.2, the official release `python-3.15.2-aarch64-linux-android.tar.gz` from `https://www.python.org/ftp/python/3.15.2/`, SHA-256 `cfd4f0fdaff465ba62ebf3c3df2c8c410d0802fef3f98897082460df704cfef6` | `prefix/lib/libpython3.15.so` and the `lib*_python.so` libraries it bundles (OpenSSL 3.5.9 and SQLite 3.53.4), unchanged; the standard library `prefix/lib/python3.15` without `__pycache__`; the headers, to compile the launcher | PSF-2.0; OpenSSL Apache-2.0; SQLite public domain |
+| [CPython](https://github.com/python/cpython) | `v3.15.2`, `5e58eaad7c58df58dfa8ea549c87996e01dd1077` | `Doc/license.rst`, SHA-256 `0d4c04850f7320219853c3c9d20cf9d2c6916524030e147f220f2b96b5ae8aeb`: the licences of the software incorporated into CPython (expat, libffi, libmpdec, mimalloc, zlib and the rest) | the licence texts themselves |
+| [OpenSSL](https://github.com/openssl/openssl) | `openssl-3.5.9`, `45e844fa2a14ec92d146bd8f5778ac130b6625fb` | `LICENSE.txt`, SHA-256 `7d5450cb2d142651b8afa315b5f238efc805dad827d91ba367d8516bc9d49e7a` | Apache-2.0 |
+| [bzip2](https://sourceware.org/git/bzip2.git) | `bzip2-1.0.8`, `6a8690fc8d26c815e798c588f796eabe9d684cf0` | `LICENSE`, SHA-256 `c6dbbf828498be844a89eaa3b84adbab3199e342eb5cb2ed2f0d4ba7ec0f38a3` (the `_bz2` module) | bzip2-1.0.6 |
+| [XZ Utils](https://github.com/tukaani-project/xz) | `v5.4.6`, `6e8732c5a317a349986a4078718f1d95b67072c5` | `COPYING`, SHA-256 `29a1e305b2e34eefe5d4602d00cde1d528b71c5d9f2eec5106972cf6ddb6f73f` (the `_lzma` module) | public domain (liblzma) |
+| [Zstandard](https://github.com/facebook/zstd) | `v1.5.7`, `f8745da6ff1ad1e7bab384bd1f9d742439278e99` | `LICENSE`, SHA-256 `7055266497633c9025b777c78eb7235af13922117480ed5c674677adc381c9d8` (the `_zstd` module) | BSD-3-Clause |
+
+The library versions are the ones the release's binaries report. `tools/android_toolchain.py` checks every SHA-256
+above, reads the release tarball without extracting it, and refuses one whose files are not where the release puts
+them or are links. It builds `libnk_python.so` from `nk_python_launcher.c` with the host clang against the release's
+headers and `libpython3.15.so`; it needs only that library, `libc.so` and `libdl.so`. The standard library becomes one
+tar with fixed metadata, and two builds give the same bytes.
+
+What the APK carries for Python:
+
+- `jniLibs/arm64-v8a/libnk_python.so`, `libpython3.15.so`, `libssl_python.so`, `libcrypto_python.so` and
+  `libsqlite3_python.so`;
+- `assets/toolchain/python-stdlib.tar` (`lib/python3.15/`, with its extension modules in `lib-dynload/`), which the
+  app unpacks; the caller sets `PYTHONHOME` to the folder that holds it;
+- `assets/toolchain/NOTICES/python/`: the release's `LICENSE.txt` and the licence files in the table.

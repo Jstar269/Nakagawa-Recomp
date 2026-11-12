@@ -14,10 +14,12 @@ included) and is skipped elsewhere.
 from __future__ import annotations
 
 import hashlib
+import io
 import os
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
@@ -115,7 +117,7 @@ def _config(work: Path) -> toolchain.Config:
     return toolchain.Config(
         llvm_tarball=work / "llvm.tar.xz", bionic=work / "bionic", extra=work / "extra",
         work=work, cmake="cmake", ninja="ninja", jobs=3, host_cc="gcc", host_cxx="g++",
-        make_tarball=work / "make.tar.gz", sh="sh")
+        make_tarball=work / "make.tar.gz", sh="sh", python_tarball=work / "python.tar.gz")
 
 
 class PinTests(unittest.TestCase):
@@ -308,6 +310,92 @@ class MakeTests(unittest.TestCase):
         work = Path(tempfile.gettempdir()) / "nk-tc-work"
         with self.assertRaisesRegex(toolchain.ToolchainError, "build path"):
             toolchain.check_device_executable(_elf() + work.as_posix().encode() + b"/x.c", "make", work)
+
+
+def _python_release(path: Path, *, extra: dict[str, bytes] | None = None, link: str | None = None) -> str:
+    """A tarball in the CPython Android release layout; returns its SHA-256."""
+    files = {
+        "prefix/lib/libpython3.15.so": b"libpython",
+        "prefix/lib/libpython3.so": b"stable abi stub",
+        "prefix/lib/libssl_python.so": b"ssl",
+        "prefix/lib/libcrypto.so": b"plain crypto",
+        "prefix/lib/pkgconfig/python3.pc": b"pc",
+        "prefix/include/python3.15/Python.h": b"/* Python.h */",
+        "prefix/lib/python3.15/LICENSE.txt": b"PSF licence",
+        "prefix/lib/python3.15/os.py": b"# os",
+        "prefix/lib/python3.15/__pycache__/os.cpython-315.pyc": b"pyc",
+        "prefix/lib/python3.15/lib-dynload/_ssl.cpython-315-aarch64-linux-android.so": b"elf",
+        "README.md": b"readme",
+        **(extra or {}),
+    }
+    with tarfile.open(path, "w:gz") as tar:
+        for name, data in files.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+        if link is not None:
+            info = tarfile.TarInfo(link)
+            info.type = tarfile.SYMTYPE
+            info.linkname = "elsewhere"
+            tar.addfile(info)
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+class PythonTests(unittest.TestCase):
+    def test_python_is_the_pinned_official_release(self) -> None:
+        self.assertRegex(toolchain.PYTHON_SHA256, r"^[0-9a-f]{64}$")
+        self.assertEqual(toolchain.PYTHON_URL, "https://www.python.org/ftp/python/3.15.2/"
+                         "python-3.15.2-aarch64-linux-android.tar.gz")
+        for _name, digest, url in toolchain.PYTHON_NOTICES:
+            self.assertRegex(digest, r"^[0-9a-f]{64}$")
+            self.assertTrue(url.startswith("https://"))
+
+    def test_an_unchecked_python_release_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="nk-tc-test-") as tmp:
+            tarball = Path(tmp) / "python.tar.gz"
+            _python_release(tarball)
+            with self.assertRaisesRegex(toolchain.ToolchainError, "pinned"):
+                toolchain.read_python_package(tarball)
+
+    def test_the_apk_takes_libpython_its_libraries_and_the_stdlib(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="nk-tc-test-") as tmp:
+            tarball = Path(tmp) / "python.tar.gz"
+            package = toolchain.read_python_package(tarball, _python_release(tarball))
+        self.assertEqual(sorted(package.libraries), ["libpython3.15.so", "libssl_python.so"])
+        self.assertEqual(list(package.headers), ["include/python3.15/Python.h"])
+        self.assertEqual(sorted(package.stdlib), [
+            "lib/python3.15/LICENSE.txt",
+            "lib/python3.15/lib-dynload/_ssl.cpython-315-aarch64-linux-android.so",
+            "lib/python3.15/os.py"])
+        self.assertTrue(package.stdlib[
+            "lib/python3.15/lib-dynload/_ssl.cpython-315-aarch64-linux-android.so"].executable)
+        self.assertFalse(package.stdlib["lib/python3.15/os.py"].executable)
+        self.assertEqual(package.license, b"PSF licence")
+
+    def test_a_link_where_a_file_belongs_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="nk-tc-test-") as tmp:
+            tarball = Path(tmp) / "python.tar.gz"
+            digest = _python_release(tarball, link="prefix/lib/python3.15/site.py")
+            with self.assertRaisesRegex(toolchain.ToolchainError, "not a regular file"):
+                toolchain.read_python_package(tarball, digest)
+
+    def test_a_different_layout_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="nk-tc-test-") as tmp:
+            tarball = Path(tmp) / "python.tar.gz"
+            with tarfile.open(tarball, "w:gz") as tar:
+                info = tarfile.TarInfo("prefix/lib/libpython3.14.so")
+                tar.addfile(info, io.BytesIO(b""))
+            digest = hashlib.sha256(tarball.read_bytes()).hexdigest()
+            with self.assertRaisesRegex(toolchain.ToolchainError, "release layout"):
+                toolchain.read_python_package(tarball, digest)
+
+    def test_a_licence_file_that_changed_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="nk-tc-test-") as tmp:
+            path = Path(tmp) / "LICENSE"
+            path.write_bytes(b"changed")
+            with self.assertRaisesRegex(toolchain.ToolchainError, "pinned"):
+                toolchain.read_pinned(path, hashlib.sha256(b"original").hexdigest(), "https://example.invalid/")
+            self.assertEqual(toolchain.read_pinned(path, hashlib.sha256(b"changed").hexdigest(), "u"), b"changed")
 
 
 class StampTests(unittest.TestCase):
