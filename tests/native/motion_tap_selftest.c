@@ -251,6 +251,36 @@ static MotionTapFrame *frame(const Draw *d, uint32_t n) {
     return frame_with_cap(d, n, NULL, 0);
 }
 
+/* A frame whose list, after its PRIMs, also drew what the tap names nothing for: `tris` raster
+ * calls for triangles (a Bezier or spline patch's) and `sprites` for rectangles (an
+ * immediate-mode one). */
+static MotionTapFrame *frame_unnamed(const Draw *d, uint32_t n, int tris, int sprites) {
+    MotionTapFrame *f = motion_tap_frame_create(0);
+    if (!f) {
+        fprintf(stderr, "motion_tap_selftest: no memory\n");
+        exit(2);
+    }
+    const GeMotionTap *tap = motion_tap_frame_listener(f);
+    GeVtx g[3];
+    memset(g, 0, sizeof g);
+    for (int c = 0; c < 3; c++) {
+        g[c].x = 300.0f + 8.0f * (float)c;
+        g[c].y = 200.0f + 4.0f * (float)(c & 1);
+        g[c].rw = 1.0f;
+    }
+    for (uint32_t i = 0; i < n; i++) emit(f, &d[i]);
+    for (int k = 0; k < tris; k++) tap->rastered(tap->user, &g[0], &g[1], &g[2]);
+    for (int k = 0; k < sprites; k++) tap->rastered(tap->user, &g[0], &g[1], NULL);
+    motion_tap_frame_close(f, NULL);
+    return f;
+}
+
+static float float_bits(uint32_t u) {
+    float f;
+    memcpy(&f, &u, sizeof f);
+    return f;
+}
+
 static int32_t g_pair[MAXP];
 static MotionMatchResult g_match;
 
@@ -301,8 +331,19 @@ static int submitted_of(const MotionTapView *v, uint32_t tri, MotionBuiltVert *o
     const int n = p->type == 6 ? 2 : 3;
     GeVtx g[3];
     for (int c = 0; c < n; c++) ge_vertex(p, &v->refs[p->first_ref + t->pos[c]], &g[c]);
+    const int flat = (p->flags & GE_MOTION_PRIM_FLAT) != 0;
     if (n == 2) backend_sprite(g, out);
-    else backend_tri((p->flags & GE_MOTION_PRIM_FLAT) != 0, g, out);
+    else backend_tri(flat, g, out);
+    /* motion_tap.c's own statement of the rule, which the ge.o test takes as B's values. */
+    MotionBuiltVert exported[3];
+    memset(exported, 0, sizeof exported);
+    motion_backend_vertices(flat, g, n, exported);
+    for (int c = 0; c < n; c++)
+        CHECK(same_bits(exported[c].x, out[c].x) && same_bits(exported[c].y, out[c].y) &&
+              same_bits(exported[c].z, out[c].z) && same_bits(exported[c].rw, out[c].rw) &&
+              same_bits(exported[c].u, out[c].u) && same_bits(exported[c].v, out[c].v) &&
+              same_bits(exported[c].fog, out[c].fog) && exported[c].rgba == out[c].rgba,
+              "motion_backend_vertices: record %u vertex %d is not put_vert's", tri, c);
     return n;
 }
 
@@ -792,6 +833,13 @@ static void cell_fog(void) {
           out[1].fog == 0.25f && out[2].fog == 0.875f, "fog: at 0.75 (%g %g %g)", (double)out[0].fog,
           (double)out[1].fog, (double)out[2].fog);
     CHECK(check_t1("fog", b, fb) == 1, "fog: checked at t = 1");
+    motion_tap_frame_free(fb);
+    /* At t = 1 a value is B's own bits, -0 included: 1.5 (1 - 1) + -0 would be +0. */
+    d[1].v[0].fog_arg = -0.0f;
+    fb = frame(&d[1], 1);
+    CHECK(plan(b, fa, fb) == 1 && motion_build_prim(b, 0, 1.0f, out, NULL) == MOTION_ITEM_BUILT &&
+          same_bits(out[0].fog, -0.0f), "fog: -0 in B is -0 at t = 1 (%g)", (double)out[0].fog);
+    CHECK(check_t1("fog -0", b, fb) == 1, "fog: -0 checked at t = 1");
     motion_build_free(b);
     motion_tap_frame_free(fa);
     motion_tap_frame_free(fb);
@@ -879,6 +927,23 @@ static void cell_static(void) {
     fb = frame(&d[1], 1);
     CHECK(plan(b, fa, fb) == 1 && motion_build_result(b)->copied == 2 && motion_build_result(b)->built == 0,
           "static: still triangles under a moved viewport are B's (why %#x)", (unsigned)motion_build_result(b)->why);
+    motion_tap_frame_free(fa);
+    motion_tap_frame_free(fb);
+    /* Still, with a vertex that is not a number, the same bits in both frames: ge.c dropped it
+     * in both, and it did not move. A NaN with other bits in B moved, as far as can be told. */
+    two_tris(d, 9, GE_MOTION_DROP, GE_MOTION_DROP, 0.0f);
+    d[0].v[4].clip[1] = d[1].v[4].clip[1] = float_bits(0x7FC00001u);
+    fa = frame(&d[0], 1);
+    fb = frame(&d[1], 1);
+    CHECK(plan(b, fa, fb) == 1 && motion_build_result(b)->not_plain == 0 && motion_build_result(b)->built == 1 &&
+          motion_build_prim(b, 1, 0.5f, out, NULL) == MOTION_ITEM_NONE,
+          "static: a still triangle with a NaN vertex is still (why %#x)", (unsigned)motion_build_result(b)->why);
+    motion_tap_frame_free(fb);
+    d[1].v[4].clip[1] = float_bits(0x7FC00002u);
+    fb = frame(&d[1], 1);
+    CHECK(plan(b, fa, fb) == 0 && motion_build_result(b)->why == MOTION_WHY_NOT_PLAIN &&
+          motion_build_result(b)->dropped_both == 1, "static: another NaN in B is a move (why %#x)",
+          (unsigned)motion_build_result(b)->why);
     motion_tap_frame_free(fa);
     motion_tap_frame_free(fb);
     motion_build_free(b);
@@ -1002,6 +1067,32 @@ static void cell_reasons(void) {
     with_line[1][1] = draw_any(0, 1, 11, 0);
     fb = frame(with_line[1], 2);
     expect_stopped("point", b, fa, fb, MOTION_WHY_UNKNOWN);
+    motion_tap_frame_free(fa);
+    motion_tap_frame_free(fb);
+
+    /* A Bezier patch's triangles, then an immediate-mode rectangle, in B: raster calls the tap
+     * names nothing for, so what they drew cannot be placed either. In A alone they do not
+     * matter. */
+    two_tris(d, 10, GE_MOTION_DRAW, GE_MOTION_DRAW, 0.05f);
+    fa = frame(&d[0], 1);
+    fb = frame_unnamed(&d[1], 1, 2, 0);
+    MotionTapView vu;
+    motion_tap_frame_view(fb, &vu);
+    CHECK(vu.unnamed == 2 && vu.ntris == 2 && vu.prims[0].submitted == 2 && vu.flags == MOTION_TAP_CLOSED,
+          "patch: the store counts its two raster calls apart from the PRIM's (%u)", (unsigned)vu.unnamed);
+    expect_stopped("patch", b, fa, fb, MOTION_WHY_UNKNOWN);
+    CHECK(motion_build_result(b)->unknown == 2 && motion_build_result(b)->built == 2,
+          "patch: each of its triangles is counted (%u)", (unsigned)motion_build_result(b)->unknown);
+    motion_tap_frame_free(fb);
+    fb = frame_unnamed(&d[1], 1, 0, 1);
+    expect_stopped("immediate mode", b, fa, fb, MOTION_WHY_UNKNOWN);
+    CHECK(motion_build_result(b)->unknown == 1, "immediate mode: counted once (%u)",
+          (unsigned)motion_build_result(b)->unknown);
+    motion_tap_frame_free(fa);
+    motion_tap_frame_free(fb);
+    fa = frame_unnamed(&d[0], 1, 2, 1);
+    fb = frame(&d[1], 1);
+    CHECK(plan(b, fa, fb) == 1, "patch: one in A alone stops nothing (why %#x)", (unsigned)motion_build_result(b)->why);
     motion_tap_frame_free(fa);
     motion_tap_frame_free(fb);
 
@@ -1211,8 +1302,6 @@ static void cell_current(void) {
     }
     tap->tri(tap->user, p012, vx, GE_MOTION_DROP);
     CHECK(!motion_tap_current(f, &cur), "current: a dropped triangle is never current");
-    tap->fan(tap->user, 0);
-    CHECK(!motion_tap_current(f, &cur), "current: a fan piece with no clipped triangle before it is nothing");
     g[1].x = (float)NAN;
     tap->tri(tap->user, p012, vx, GE_MOTION_DRAW);
     tap->rastered(tap->user, &g[0], &g[1], &g[2]);          /* the rasterizer drops a non-finite vertex */
@@ -1220,6 +1309,8 @@ static void cell_current(void) {
     motion_tap_frame_view(f, &v);
     CHECK(v.nprims == 1 && v.ntris == 4 && v.prims[0].ntris == 4 && v.prims[0].submitted == 3,
           "current: one whole triangle and two fan pieces were handed over (%u)", (unsigned)v.prims[0].submitted);
+    CHECK(v.unnamed == 2 && v.flags == 0 && v.dropped == 0,
+          "current: the two raster calls nothing was published for are counted (%u)", (unsigned)v.unnamed);
     CHECK(v.tris[1].decision == GE_MOTION_CLIP && v.tris[1].pieces == 3 && v.tris[0].pieces == 0,
           "current: the fan pieces are noted on their triangle (%u)", (unsigned)v.tris[1].pieces);
     CHECK(v.prims[0].bbox[0] == 10.0f && v.prims[0].bbox[1] == 20.0f && v.prims[0].bbox[2] == 50.0f &&
@@ -1246,12 +1337,24 @@ static void cell_current(void) {
     motion_tap_frame_close(f, NULL);
     tap->prim(tap->user, &d.p);
     tap->tri(tap->user, p012, vx, GE_MOTION_DRAW);
+    tap->fan(tap->user, 0);
+    tap->sprite(tap->user, p01, vx, 2, GE_MOTION_DRAW);
+    tap->rastered(tap->user, &g[0], &g[1], &g[2]);
     motion_tap_frame_view(f, &v);
-    CHECK(v.nprims == 3 && v.late == 2 && !motion_tap_current(f, &cur) && (v.flags & MOTION_TAP_CLOSED) &&
-          !(v.flags & MOTION_TAP_OVERFLOW), "current: a closed frame records nothing and counts the calls");
+    CHECK(v.nprims == 3 && v.late == 5 && v.unnamed == 2 && !motion_tap_current(f, &cur) &&
+          v.flags == MOTION_TAP_CLOSED, "current: a closed frame records nothing and counts the calls (%u late)",
+          (unsigned)v.late);
     motion_tap_frame_reset(f);
     motion_tap_frame_view(f, &v);
-    CHECK(v.nprims == 0 && v.flags == 0 && v.late == 0, "current: a reset frame is empty and open");
+    CHECK(v.nprims == 0 && v.flags == 0 && v.late == 0 && v.unnamed == 0, "current: a reset frame is empty and open");
+    /* A fan piece with no near-clipped triangle before it names nothing and breaks the contract. */
+    tap->prim(tap->user, &d.p);
+    tap->tri(tap->user, p012, vx, GE_MOTION_DROP);
+    tap->fan(tap->user, 0);
+    CHECK(!motion_tap_current(f, &cur), "current: a fan piece with no clipped triangle before it is nothing");
+    motion_tap_frame_view(f, &v);
+    CHECK(v.flags == MOTION_TAP_BAD_CALL && v.dropped == 1 && v.ntris == 1,
+          "current: a fan piece with no clipped triangle is a bad call (%#x)", (unsigned)v.flags);
     motion_tap_frame_free(f);
 }
 
@@ -1404,16 +1507,38 @@ static void cell_overflow(void) {
           (unsigned)v.nprims);
     motion_tap_frame_free(lists);
 
-    /* A position outside the PRIM is not a record. */
-    MotionTapFrame *bad = motion_tap_frame_create(0);
-    const GeMotionTap *tap = motion_tap_frame_listener(bad);
-    const uint16_t outside[3] = { 0, 1, 6 };
-    tap->prim(tap->user, &d[1].p);
-    tap->tri(tap->user, outside, d[1].v, GE_MOTION_DRAW);
-    motion_tap_frame_view(bad, &v);
-    CHECK((v.flags & MOTION_TAP_OVERFLOW) && v.ntris == 0 && !motion_tap_current(bad, &cur),
-          "overflow: a position outside the PRIM makes the frame incomplete");
-    motion_tap_frame_free(bad);
+    /* Calls that break the tap's contract are not records, and not an overflow either: a
+     * position outside the PRIM, a record with no PRIM open, a transform-mode PRIM with no
+     * camera, a fan piece out of range. Each frame is incomplete and refused as such. */
+    for (int which = 0; which < 4; which++) {
+        static const char *const what[] = { "a position outside the PRIM", "a record with no PRIM open",
+                                            "a transform-mode PRIM with no camera", "fan piece 2" };
+        MotionTapFrame *bad = motion_tap_frame_create(0);
+        const GeMotionTap *tap = motion_tap_frame_listener(bad);
+        const uint16_t outside[3] = { 0, 1, 6 }, inside[3] = { 0, 1, 2 };
+        GeMotionPrim p = d[1].p;
+        if (which == 2) p.proj = NULL;
+        if (which != 1) tap->prim(tap->user, &p);
+        if (which < 2) tap->tri(tap->user, which ? inside : outside, d[1].v, GE_MOTION_DRAW);
+        if (which == 3) {
+            tap->tri(tap->user, inside, d[1].v, GE_MOTION_CLIP);
+            tap->fan(tap->user, 2);
+        }
+        tap->tri(tap->user, inside, d[1].v, GE_MOTION_DRAW);        /* recorded no more */
+        motion_tap_frame_view(bad, &v);
+        CHECK(v.flags == MOTION_TAP_BAD_CALL && v.ntris == (which == 3 ? 1u : 0u) && v.dropped == 2 &&
+                  !motion_tap_current(bad, &cur),
+              "bad call: %s makes the frame incomplete (flags %#x, %u records, %u dropped)", what[which],
+              (unsigned)v.flags, (unsigned)v.ntris, (unsigned)v.dropped);
+        motion_tap_frame_close(bad, NULL);
+        const int ok = plan(b, fa, bad);
+        const MotionBuildResult *r = motion_build_result(b);
+        CHECK(ok == 0 && (r->why & MOTION_WHY_BAD_CALL) && !(r->why & MOTION_WHY_OVERFLOW) && r->built == 0 &&
+                  (r->flags & MOTION_F_NOT_REPLAYABLE),
+              "bad call: %s stops the frame as a bad call (why %#x)", what[which], (unsigned)r->why);
+        expect_no_values("bad call", b, bad);
+        motion_tap_frame_free(bad);
+    }
     motion_build_free(b);
     motion_tap_frame_free(fa);
     motion_tap_frame_free(fb);

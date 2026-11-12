@@ -11,7 +11,7 @@
  * positions and ge.c's decision. While a raster call runs it names the primitive that call
  * draws (motion_tap_current), so a backend can tie each vertex it captures to its source; a
  * primitive the tap does not name (a point, a line, a patch, an immediate-mode vertex) has
- * none, and reads as unknown.
+ * none, and reads as unknown. A raster call for one is counted (MotionTapView.unnamed).
  *
  * The bridge. motion_tap_frame_close ends a frame and builds the PRIM list motion_match takes:
  * one MotionPrim per PRIM that handed something to the rasterizer, with the box of those
@@ -42,8 +42,10 @@
  *     at t needs ge.c's acceptance and clip at clip(t), which this builder does not run;
  *   - a moving one whose viewport, offset or depth-clip switch differs between the frames
  *     (MOTION_WHY_STATE): being inside the screen grid in both frames says nothing about t then;
- *   - a point or line PRIM, or a record that is missing (MOTION_WHY_UNKNOWN);
- *   - a store that hit its cap (MOTION_WHY_OVERFLOW);
+ *   - a point or line PRIM, a patch or immediate-mode primitive (a raster call the tap named
+ *     nothing for), or a record that is missing (MOTION_WHY_UNKNOWN);
+ *   - a store that hit its cap (MOTION_WHY_OVERFLOW), or one given a call that breaks the
+ *     tap's contract (MOTION_WHY_BAD_CALL);
  *   - t = 1 not giving B's own values (MOTION_WHY_T1_MISMATCH, motion_build_check).
  *
  * With a reason set no values are given at all.
@@ -75,6 +77,9 @@ typedef struct MotionTapFrame MotionTapFrame;
 /* MotionTapView.flags */
 #define MOTION_TAP_OVERFLOW 0x01u   /* a record did not fit (the cap, a table, or memory): the frame is incomplete */
 #define MOTION_TAP_CLOSED   0x02u   /* motion_tap_frame_close ran */
+#define MOTION_TAP_BAD_CALL 0x04u   /* a call broke the tap's contract (a transform-mode PRIM with no view or
+                                     * projection, a record with no PRIM open or a position outside it, a fan
+                                     * piece with no near-clipped triangle): the frame is incomplete */
 
 /* MotionTapPrim.index_state */
 enum {
@@ -126,9 +131,13 @@ typedef struct {
 typedef struct {
     uint32_t flags;                 /* MOTION_TAP_* */
     uint32_t nprims, nrefs, ntris, ncameras;
-    uint32_t dropped;               /* callbacks whose record was not kept after an overflow */
+    uint32_t dropped;               /* callbacks whose record was not kept: the one that overflowed or broke
+                                     * the contract, and every one after it */
     uint32_t late;                  /* callbacks that arrived after the close: nothing was recorded */
-    size_t   bytes;                 /* memory the records take */
+    uint32_t unnamed;               /* raster calls the tap named nothing for: a patch's primitives and
+                                     * immediate-mode ones */
+    size_t   bytes;                 /* memory reserved for the records: what the arrays hold room for, kept
+                                     * across resets, at most the frame's cap */
     const MotionTapPrim *prims;     /* in draw order: a PRIM's serial is its index here */
     const GeMotionVtx *refs;
     const uint8_t *ref_set;         /* 1 where refs[] holds a reference (a triangle or sprite named it) */
@@ -206,11 +215,13 @@ enum { MOTION_V_UNMATCHED = 0, MOTION_V_MATCHED, MOTION_V_CLIPPED, MOTION_V_THRO
 #define MOTION_WHY_CUT         0x0002u  /* the matcher's cut flags, its coverage rule included */
 #define MOTION_WHY_FAILED      0x0004u  /* the matcher failed, an argument is invalid, or memory ran out */
 #define MOTION_WHY_OVERFLOW    0x0008u  /* A's or B's store is incomplete */
-#define MOTION_WHY_UNKNOWN     0x0010u  /* a point or line PRIM in B, or a record missing in A */
+#define MOTION_WHY_UNKNOWN     0x0010u  /* a point or line PRIM or an unnamed raster call in B, or a record
+                                         * missing in A */
 #define MOTION_WHY_NOT_PLAIN   0x0020u  /* a moving triangle or sprite not drawn whole in both frames */
 #define MOTION_WHY_NEAR_CLIP   0x0040u  /* a moving triangle the near plane cut in A or B */
 #define MOTION_WHY_STATE       0x0080u  /* a moving one whose projection state differs between A and B */
 #define MOTION_WHY_T1_MISMATCH 0x0100u  /* motion_build_check: t = 1 did not give B's values */
+#define MOTION_WHY_BAD_CALL    0x0200u  /* A's or B's store was given a call that breaks the tap's contract */
 
 typedef struct {
     uint32_t flags;                 /* MOTION_F_* */
@@ -263,6 +274,12 @@ int motion_build_prim(const MotionBuild *b, uint32_t tri, float t, MotionBuiltVe
  * the record gets no built values; else 0, and the plan gains MOTION_WHY_T1_MISMATCH, so it
  * gives no values from then on. */
 int motion_build_check(MotionBuild *b, uint32_t tri, const MotionBuiltVert *submitted);
+
+/* The backend's vertex rule (ge_gpu.c's put_vert) for what ge.c handed one raster call, in
+ * motion_build_prim's layout: n = 3, a triangle (flat: every vertex takes the last one's
+ * colour); n = 2, a sprite's floored rectangle with the second corner's depth, fog and colour.
+ * This is what motion_build_check expects as `submitted`. Other n write nothing. */
+void motion_backend_vertices(int flat, const GeVtx *g, int n, MotionBuiltVert *out);
 
 #ifdef __cplusplus
 }

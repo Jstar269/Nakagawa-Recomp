@@ -2599,7 +2599,8 @@ static void test_ge_bounding_box_branch(void) {
  * the list, with the bone, the quad's world matrix and the sprite moved, are matched by
  * motion_match, and the builder at t = 1 must give, bit for bit, what ge.c handed the
  * stand-in for frame B after the backend's vertex rule (the 28.4 snap, the flat-shading colour,
- * the sprite's floored corners). */
+ * the sprite's floored corners). A frame B that also holds the patch (MS_PATCH), or the
+ * immediate-mode triangle (MS_IMMEDIATE), cannot be built: the plan refuses it as unknown. */
 #define LIST_MOTION      0x08160000u
 #define MOTION_VERTS     0x08168000u
 #define MOTION_INDICES   0x0816C000u
@@ -2608,7 +2609,7 @@ static void test_ge_bounding_box_branch(void) {
 #define MOTION_ZBP       0x04110000u
 #define MOTION_BG        0xff302010u
 #define MOTION_CULL      0u          /* the face that keeps the strip's triangles */
-enum { MS_UNNAMED = 1 };
+enum { MS_UNNAMED = 1, MS_PATCH = 2, MS_IMMEDIATE = 4 };
 
 static uint32_t s_motion_vc;
 
@@ -2770,7 +2771,7 @@ static void build_motion_list(int flags, int frame) {
     W(0x01, at & 0x00FFFFFFu);
     W(0x04, (3u << 16) | 3u);
 
-    if (flags & MS_UNNAMED) {
+    if (flags & (MS_UNNAMED | MS_PATCH)) {
         /* A 4x4 Bezier patch over clip x 0.625..0.8125, y 0.6875..0.875: triangles, no PRIM.
          * It and the immediate-mode triangle follow PRIM 4's last fan piece with no PRIM
          * command between: only the end of that piece's raster call keeps them from being
@@ -2783,6 +2784,8 @@ static void build_motion_list(int flags, int frame) {
         W(0x36, (1u << 8) | 1u);           /* PATCHDIVISION 1x1 */
         W(0x37, 0u);                       /* PATCHPRIMITIVE triangles */
         W(0x05, 0x0404u);                  /* BEZIER 4x4 */
+    }
+    if (flags & (MS_UNNAMED | MS_IMMEDIATE)) {
         /* An immediate-mode triangle: vertices latched by commands, no PRIM. */
         W(0x12, through);
         W(0xF6, 0x00FFFFFFu);
@@ -2790,6 +2793,8 @@ static void build_motion_list(int flags, int frame) {
         immediate_vertex(3u, 20, 150);
         immediate_vertex(7u, 60, 150);
         immediate_vertex(7u, 20, 180);
+    }
+    if (flags & MS_UNNAMED) {
         /* PRIM 5, a line, and PRIM 6, a point. */
         at = s_motion_vc;
         motion_vtx(0xffffffffu, 0.0f, 0.875f, 0.0f);
@@ -2866,44 +2871,6 @@ static uint32_t motion_px(const MotionRun *r, unsigned x, unsigned y) {
     uint32_t px;
     memcpy(&px, r->vram + ((size_t)y * 512u + x) * 4u, 4u);
     return px;
-}
-
-/* The backend's vertex rule, as ge_gpu.c's put_vert, hook_tri and hook_sprite apply it. */
-static float motion_snap(float v) { return floorf(v * 16.0f + 0.375f) * (1.0f / 16.0f); }
-
-static uint32_t motion_pack(const GeVtx *g) {
-    const uint32_t r = (uint32_t)(g->r < 0 ? 0 : g->r > 255 ? 255 : g->r);
-    const uint32_t gg = (uint32_t)(g->g < 0 ? 0 : g->g > 255 ? 255 : g->g);
-    const uint32_t b = (uint32_t)(g->b < 0 ? 0 : g->b > 255 ? 255 : g->b);
-    const uint32_t a = (uint32_t)(g->a < 0 ? 0 : g->a > 255 ? 255 : g->a);
-    return r | (gg << 8) | (b << 16) | (a << 24);
-}
-
-static void motion_backend(int flat, const GeVtx *g, int n, MotionBuiltVert *o) {
-    if (n == 2) {
-        const float xa = floorf(fminf(g[0].x, g[1].x)), xb = floorf(fmaxf(g[0].x, g[1].x));
-        const float ya = floorf(fminf(g[0].y, g[1].y)), yb = floorf(fmaxf(g[0].y, g[1].y));
-        for (int c = 0; c < 2; c++) {
-            o[c].x = motion_snap(c ? xb : xa);
-            o[c].y = motion_snap(c ? yb : ya);
-            o[c].z = g[1].z;
-            o[c].rw = 1.0f;
-            o[c].u = o[c].v = 0.0f;
-            o[c].fog = g[1].fog;
-            o[c].rgba = motion_pack(&g[1]);
-        }
-        return;
-    }
-    for (int c = 0; c < 3; c++) {
-        o[c].x = motion_snap(g[c].x);
-        o[c].y = motion_snap(g[c].y);
-        o[c].z = g[c].z;
-        o[c].rw = g[c].rw;
-        o[c].u = g[c].u;
-        o[c].v = g[c].v;
-        o[c].fog = g[c].fog;
-        o[c].rgba = motion_pack(&g[flat ? 2 : c]);
-    }
 }
 
 /* The backend stand-in: it notes what it was handed and what the store called current, and
@@ -3165,6 +3132,10 @@ static void test_ge_motion_tap(void) {
     /* A 1x1 patch is two triangles; the immediate-mode triangle is the third. */
     expect(unnamed_lines == 1u && unnamed_points == 1u && unnamed_tris >= 3u, "motion_tap",
            "the line, the point, the patch and the immediate-mode triangle each reached the stand-in");
+    MotionTapView vu;
+    motion_tap_frame_view(f, &vu);
+    expect(vu.unnamed == unnamed_tris && vu.flags == 0u && vu.dropped == 0u, "motion_tap",
+           "the store counts each raster call the tap named nothing for: the patch's and the immediate-mode triangles");
     motion_expect_store(f, MS_UNNAMED, 0);
 
     /* Two frames, matched, and frame B built at t = 1 against what ge.c handed over for it. */
@@ -3222,7 +3193,10 @@ static void test_ge_motion_tap(void) {
             expect(kind == MOTION_ITEM_COPY_B, "motion_tap", "the clear is B's own");
             continue;
         }
-        motion_backend((vb.prims[s->cur.prim].flags & GE_MOTION_PRIM_FLAT) != 0, s->v, s->n, sub);
+        /* The backend's vertex rule (put_vert) on what ge.c handed over: motion_tap.c's own
+         * statement of it, which motion_tap_selftest checks against its restatement of put_vert. */
+        memset(sub, 0, sizeof sub);
+        motion_backend_vertices((vb.prims[s->cur.prim].flags & GE_MOTION_PRIM_FLAT) != 0, s->v, s->n, sub);
         expect(kind == MOTION_ITEM_BUILT && motion_build_check(build, s->cur.tri, sub) == 1, "motion_tap",
                "t = 1 gives the vertices ge.c handed over for frame B, bit for bit");
         for (int c = 0; kind == MOTION_ITEM_BUILT && c < s->n; c++)
@@ -3244,6 +3218,33 @@ static void test_ge_motion_tap(void) {
     expect(motion_build_prim(build, vb.prims[3].first_tri, 0.5f, out, NULL) == MOTION_ITEM_BUILT &&
            out[0].x == 301.0f && out[0].y == 20.0f && out[1].x == 342.0f && out[1].y == 60.0f &&
            out[0].z == 1000.0f && out[0].rgba == 0xff10b0e0u, "motion_tap", "the sprite halfway between the frames");
+    /* Frame B again, with the Bezier patch, then with the immediate-mode triangle: ge.c draws
+     * them with no PRIM, so nothing places them in the frame between, and the plan refuses it. */
+    for (int leg = 0; leg < 2; leg++) {
+        const char *what = leg ? "an immediate-mode triangle" : "a Bezier patch";
+        MotionMatchFrame mu;
+        MotionMatchResult mres;
+        int32_t upair[8];
+        motion_tap_frame_reset(f);
+        ge_motion_tap_set(motion_tap_frame_listener(f));
+        motion_run(leg ? MS_IMMEDIATE : MS_PATCH, 1, on);
+        ge_motion_tap_set(NULL);
+        motion_tap_frame_close(f, fa);
+        motion_tap_match_frame(f, &mu);
+        MotionTapView vl;
+        motion_tap_frame_view(f, &vl);
+        expect(mu.nprims == 5u && vl.unnamed == (leg ? 1u : 2u), "motion_tap",
+               "the unnamed draw adds nothing to the matcher's list, and the store counts its raster calls");
+        if (mu.nprims != 5u) continue;
+        expect(motion_match(&ma, &mu, &params, NULL, upair, NULL, &mres) == 0 && mres.flags == 0u &&
+               upair[0] == 0 && upair[4] == 4, "motion_tap", "the matcher pairs the five PRIMs");
+        const int ok = motion_build_plan(build, fa, f, upair, &mres);
+        if (ok != 0 || res->why != MOTION_WHY_UNKNOWN || res->unknown != (leg ? 1u : 2u) || res->built != 7u)
+            fprintf(stderr, "motion_tap: %s: plan %d why %#x unknown %u built %u\n", what, ok, (unsigned)res->why,
+                    (unsigned)res->unknown, (unsigned)res->built);
+        expect(ok == 0 && res->why == MOTION_WHY_UNKNOWN && res->unknown == (leg ? 1u : 2u) && res->built == 7u,
+               "motion_tap", "a frame B holding a patch or an immediate-mode triangle is refused as unknown");
+    }
     printf("MOTION_TAP identical=3 legs x 2 timing models, built_at_t1=%u prims=%u refs=%u tris=%u bytes=%zu\n",
            checked, (unsigned)vb.nprims, (unsigned)vb.nrefs, (unsigned)vb.ntris, vb.bytes);
 

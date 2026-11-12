@@ -3,8 +3,8 @@
 // Copyright (C) 2026 the Nakagawa Recomp authors
 // Derived from sal063/PSP-recompilation-project (GPL-2.0-or-later)
 // Restates src/rt/ge.c's project_cvtx and ge_gpu.c's put_vert (the 28.4 snap, the fog clamp, the
-// colour pack and the sprite rectangle) in snap16, clamp01, channel, mix_rgba, place and build;
-// the rest of this file was written for it.
+// colour pack and the sprite rectangle) in snap16, clamp01, channel, mix_rgba, place, build and
+// motion_backend_vertices; the rest of this file was written for it.
 // Modified by Nakagawa Recomp contributors, 2026-11-09.
 // See NOTICE.md for upstream lineage and modification provenance.
 // Derived from PPSSPP (https://github.com/hrydgard/ppsspp), GPL-2.0-or-later
@@ -16,8 +16,9 @@
  *
  * The projection, the snap, the fog clamp and the colour pack below repeat ge.c's project_cvtx
  * and the backend's put_vert expression for expression. Nothing ties the copies together at
- * build time; motion_build_check does at run time, on every frame, and the tests do against
- * the production ge.o.
+ * build time; motion_build_check does at run time, on every frame, and the tests do: the ge.c
+ * half against the production ge.o, motion_backend_vertices against motion_tap_selftest's own
+ * restatement of put_vert.
  */
 #include "motion_tap.h"
 
@@ -40,7 +41,7 @@ typedef struct {
 struct MotionTapFrame {
     GeMotionTap tap;                    /* the listener; its user is this frame */
     size_t cap_bytes, bytes;
-    uint32_t flags, dropped, late;
+    uint32_t flags, dropped, late, unnamed;
 
     MotionTapPrim *prims;
     uint32_t nprims, prims_cap;
@@ -90,14 +91,23 @@ static void *room_for(MotionTapFrame *f, void *p, uint32_t *cap, uint64_t need, 
     return q;
 }
 
-/* A record did not fit. What the frame holds stays readable, but it is not the whole frame,
- * and nothing more is recorded into it. */
-static void overflow(MotionTapFrame *f) {
-    f->flags |= MOTION_TAP_OVERFLOW;
+/* A record was not kept: `why` is MOTION_TAP_OVERFLOW when it did not fit, MOTION_TAP_BAD_CALL
+ * when the call broke the tap's contract. What the frame holds stays readable, but it is not
+ * the whole frame, and nothing more is recorded into it. */
+static void stop(MotionTapFrame *f, uint32_t why) {
+    f->flags |= why;
     f->dropped++;
     f->open_prim = -1;
     f->clip_tri = NO_TRI;
     f->have_cur = 0;
+}
+
+static void overflow(MotionTapFrame *f) {
+    stop(f, MOTION_TAP_OVERFLOW);
+}
+
+static void bad_call(MotionTapFrame *f) {
+    stop(f, MOTION_TAP_BAD_CALL);
 }
 
 /* 1 when the callback may record; counts it otherwise. */
@@ -106,7 +116,7 @@ static int recording(MotionTapFrame *f) {
         f->late++;
         return 0;
     }
-    if (f->flags & MOTION_TAP_OVERFLOW) {
+    if (f->flags & (MOTION_TAP_OVERFLOW | MOTION_TAP_BAD_CALL)) {
         f->dropped++;
         return 0;
     }
@@ -175,6 +185,10 @@ static void on_prim(void *user, const GeMotionPrim *p) {
     f->clip_tri = NO_TRI;
     f->have_cur = 0;
     if (!recording(f)) return;
+    if (!p || (!p->through && (!p->view || !p->proj))) {
+        bad_call(f);
+        return;
+    }
     const uint64_t n = (uint64_t)f->nprims + 1u, nrefs = (uint64_t)f->nrefs + p->count;
     uint32_t cam = MOTION_TAP_NO_CAMERA;
     int ok = 1;
@@ -184,7 +198,7 @@ static void on_prim(void *user, const GeMotionPrim *p) {
     f->refs = room_for(f, f->refs, &f->refs_cap, nrefs, sizeof *f->refs, &ok);
     f->ref_set = room_for(f, f->ref_set, &f->set_cap, nrefs, sizeof *f->ref_set, &ok);
     if (!ok || !list_note(f, p->list_addr, p->cmd_addr) ||
-        (!p->through && (!p->view || !p->proj || !camera_index(f, p->view, p->proj, &cam)))) {
+        (!p->through && !camera_index(f, p->view, p->proj, &cam))) {
         overflow(f);
         return;
     }
@@ -246,18 +260,24 @@ static void set_current(MotionTapFrame *f, uint32_t tri, int kind, int piece) {
     f->cur.piece = (uint8_t)piece;
 }
 
-/* A record for the open PRIM, or NULL when it cannot be kept. */
+/* A record for the open PRIM, or NULL when it cannot be kept. A record with no PRIM open, or
+ * with a position outside it, breaks the tap's contract. */
 static MotionTapTri *new_record(MotionTapFrame *f, const uint16_t *pos, int npos) {
     f->clip_tri = NO_TRI;
     f->have_cur = 0;
+    if (!recording(f)) return NULL;
     if (f->open_prim < 0) {
-        (void)recording(f);
+        bad_call(f);
         return NULL;
     }
     const MotionTapPrim *q = &f->prims[f->open_prim];
+    for (int k = 0; k < npos; k++)
+        if (pos[k] >= q->count) {
+            bad_call(f);
+            return NULL;
+        }
     int ok = 1;
-    for (int k = 0; k < npos; k++) ok = ok && pos[k] < q->count;
-    if (ok) f->tris = room_for(f, f->tris, &f->tris_cap, (uint64_t)f->ntris + 1u, sizeof *f->tris, &ok);
+    f->tris = room_for(f, f->tris, &f->tris_cap, (uint64_t)f->ntris + 1u, sizeof *f->tris, &ok);
     if (!ok) {
         overflow(f);
         return NULL;
@@ -286,7 +306,11 @@ static void on_tri(void *user, const uint16_t pos[3], const GeMotionVtx v[3], in
 static void on_fan(void *user, int piece) {
     MotionTapFrame *f = (MotionTapFrame *)user;
     f->have_cur = 0;
-    if (f->clip_tri == NO_TRI || piece < 0 || piece > 1) return;
+    if (!recording(f)) return;
+    if (f->clip_tri == NO_TRI || piece < 0 || piece > 1) {
+        bad_call(f);
+        return;
+    }
     f->tris[f->clip_tri].pieces |= (uint8_t)(1u << piece);
     set_current(f, f->clip_tri, MOTION_CUR_FAN, piece);
 }
@@ -316,7 +340,12 @@ static void box_add(float *box, const GeVtx *v) {
 
 static void on_rastered(void *user, const GeVtx *v0, const GeVtx *v1, const GeVtx *v2) {
     MotionTapFrame *f = (MotionTapFrame *)user;
-    if (!f->have_cur) return;
+    if (!f->have_cur) {
+        /* Nothing was published for it: a Bezier or spline patch's primitive, or an
+         * immediate-mode one. What it drew cannot be placed. */
+        if (recording(f)) f->unnamed++;
+        return;
+    }
     f->have_cur = 0;
     /* The rasterizer drops a primitive with a non-finite vertex before it draws anything. */
     if (!ge_vtx_finite(v0) || !ge_vtx_finite(v1) || (v2 && !ge_vtx_finite(v2))) return;
@@ -356,7 +385,7 @@ void motion_tap_frame_free(MotionTapFrame *f) {
 
 void motion_tap_frame_reset(MotionTapFrame *f) {
     if (!f) return;
-    f->flags = f->dropped = f->late = 0;
+    f->flags = f->dropped = f->late = f->unnamed = 0;
     f->nprims = f->nrefs = f->ntris = f->ncams = f->nlists = f->nmprims = 0;
     f->cam_last = f->list_last = 0;
     memset(&f->camera, 0, sizeof f->camera);
@@ -386,6 +415,7 @@ void motion_tap_frame_view(const MotionTapFrame *f, MotionTapView *out) {
     out->ncameras = f->ncams;
     out->dropped = f->dropped;
     out->late = f->late;
+    out->unnamed = f->unnamed;
     out->bytes = f->bytes;
     out->prims = f->prims;
     out->refs = f->refs;
@@ -475,9 +505,10 @@ struct MotionBuild {
 };
 
 /* One value of the frame at t. A value that does not change stays itself at every t, which
- * the weighted sum alone does not promise. */
+ * the weighted sum alone does not promise, and at t = 1 the value is B's own, bits included:
+ * a (1 - 1) + b would turn a -0 of B into +0. */
 static float mix(float a, float b, float t) {
-    if (a == b) return b;
+    if (a == b || t == 1.0f) return b;
     return a * (1.0f - t) + b * t;
 }
 
@@ -528,11 +559,21 @@ static const GeMotionVtx *ref_at(const MotionTapFrame *f, const MotionTapPrim *p
     return &f->refs[p->first_ref + pos];
 }
 
-/* Whether every value the builder mixes is the same in both. -0 equals +0; a NaN equals nothing. */
+static int same_bits(float a, float b) {
+    return memcmp(&a, &b, sizeof a) == 0;
+}
+
+/* -0 equals +0; a NaN equals a NaN with the same bits, so a vertex that is not a number and
+ * did not change is still. */
+static int same_value(float a, float b) {
+    return a == b || same_bits(a, b);
+}
+
+/* Whether every value the builder mixes is the same in both. */
 static int ref_same(const GeMotionVtx *a, const GeMotionVtx *b) {
-    return a->clip[0] == b->clip[0] && a->clip[1] == b->clip[1] && a->clip[2] == b->clip[2] &&
-           a->clip[3] == b->clip[3] && a->fog_arg == b->fog_arg &&
-           a->r == b->r && a->g == b->g && a->b == b->b && a->a == b->a;
+    return same_value(a->clip[0], b->clip[0]) && same_value(a->clip[1], b->clip[1]) &&
+           same_value(a->clip[2], b->clip[2]) && same_value(a->clip[3], b->clip[3]) &&
+           same_value(a->fog_arg, b->fog_arg) && a->r == b->r && a->g == b->g && a->b == b->b && a->a == b->a;
 }
 
 static int ref_finite(const GeMotionVtx *v) {
@@ -782,10 +823,21 @@ int motion_build_plan(MotionBuild *b, const MotionTapFrame *fa, const MotionTapF
     if (match->flags & MOTION_MATCH_CUT) b->r.why |= MOTION_WHY_CUT;
     if ((fb->flags & MOTION_TAP_OVERFLOW) || (fa && (fa->flags & MOTION_TAP_OVERFLOW)))
         b->r.why |= MOTION_WHY_OVERFLOW;
+    if ((fb->flags & MOTION_TAP_BAD_CALL) || (fa && (fa->flags & MOTION_TAP_BAD_CALL)))
+        b->r.why |= MOTION_WHY_BAD_CALL;
+    /* What B drew with nothing published for it (patches, immediate-mode primitives) cannot be
+     * placed, as with points and lines; in A alone it does not matter. */
+    if (fb->unnamed) {
+        b->r.unknown += fb->unnamed;
+        b->r.why |= MOTION_WHY_UNKNOWN;
+    }
     /* An incomplete store cannot be classified. A held frame still is: its counts say what
      * the pairs would have given. */
-    if (b->r.why & MOTION_WHY_OVERFLOW) memset(b->cls, CLS_NONE, fb->ntris);
-    else classify(b, pair_a);
+    if (b->r.why & (MOTION_WHY_OVERFLOW | MOTION_WHY_BAD_CALL)) {
+        if (fb->ntris) memset(b->cls, CLS_NONE, fb->ntris);
+    } else {
+        classify(b, pair_a);
+    }
     if (b->r.why & MOTION_WHY_CUT) b->r.flags |= MOTION_F_CUT;
     if (b->r.why & ~MOTION_WHY_CUT) b->r.flags |= MOTION_F_NOT_REPLAYABLE;
     return b->r.why == 0;
@@ -845,6 +897,35 @@ static void build(const MotionBuild *b, uint32_t tri, float t, MotionBuiltVert *
     }
 }
 
+void motion_backend_vertices(int flat, const GeVtx *g, int n, MotionBuiltVert *out) {
+    if (!g || !out || (n != 2 && n != 3)) return;
+    for (int c = 0; c < n; c++) {
+        /* The vertex whose colour it takes: a sprite's second corner, under flat shading the last. */
+        const GeVtx *from = n == 2 ? &g[1] : &g[flat ? 2 : c];
+        const int ch[4] = { from->r, from->g, from->b, from->a };
+        uint32_t rgba = 0;
+        for (int k = 0; k < 4; k++) rgba |= (uint32_t)(ch[k] < 0 ? 0 : ch[k] > 255 ? 255 : ch[k]) << (8 * k);
+        out[c].rgba = rgba;
+        if (n == 2) {
+            /* Whole pixels from the floored corners, the second corner's depth and fog, rw = 1. */
+            out[c].x = snap16(floorf(c ? fmaxf(g[0].x, g[1].x) : fminf(g[0].x, g[1].x)));
+            out[c].y = snap16(floorf(c ? fmaxf(g[0].y, g[1].y) : fminf(g[0].y, g[1].y)));
+            out[c].z = g[1].z;
+            out[c].rw = 1.0f;
+            out[c].u = out[c].v = 0.0f;
+            out[c].fog = g[1].fog;
+        } else {
+            out[c].x = snap16(g[c].x);
+            out[c].y = snap16(g[c].y);
+            out[c].z = g[c].z;
+            out[c].rw = g[c].rw;
+            out[c].u = g[c].u;
+            out[c].v = g[c].v;
+            out[c].fog = g[c].fog;
+        }
+    }
+}
+
 static void fill_mv(const MotionBuild *b, uint32_t tri, MotionVert *mv) {
     const MotionTapFrame *fa = b->fa, *fb = b->fb;
     const uint32_t s = b->prim_of[tri];
@@ -875,10 +956,6 @@ int motion_build_prim(const MotionBuild *b, uint32_t tri, float t, MotionBuiltVe
     if (cls == CLS_COPY) return MOTION_ITEM_COPY_B;
     build(b, tri, t, out);
     return MOTION_ITEM_BUILT;
-}
-
-static int same_bits(float a, float b) {
-    return memcmp(&a, &b, sizeof a) == 0;
 }
 
 int motion_build_check(MotionBuild *b, uint32_t tri, const MotionBuiltVert *submitted) {
