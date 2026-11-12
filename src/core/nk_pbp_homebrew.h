@@ -81,8 +81,9 @@ int nk_pbp_homebrew_convert_file(NkPspCtx *ctx, const char *pbp_path,
  * the folder the package was picked from beside the disc image, laid out as on a
  * Memory Stick: "<image without .iso>.ms0/PSP/GAME/<folder>/" (the view), with a
  * manifest of every entry (its path and, for a file, its size and SHA-256) in
- * "<image without .iso>.ms0/view.manifest", and the path the picked folder really
- * has in "<image without .iso>.ms0/view.source". A launch puts the view on the title's
+ * "<image without .iso>.ms0/view.manifest". Beside the image, "<image without
+ * .iso>.source" records the path the picked folder really has and the name it was picked
+ * by, written before the copy starts. A launch puts the view on the title's
  * Memory Stick (nk_pbp_homebrew_seed_memstick), then boots
  * ms0:/PSP/GAME/<folder>/EBOOT.PBP. Nothing is aliased: a path the folder does not
  * hold is missing, as on a PSP, and what the program writes stays on the title's
@@ -142,16 +143,27 @@ bool nk_pbp_homebrew_write_view(const char *pbp_path, const char *view_root,
                                 const NkNpumdimgCallbacks *callbacks,
                                 char *problem, size_t problem_size);
 
-/* Whether the image at iso_path already holds this program imported from a folder
- * other than the one pbp_path is in (review of #2426, M1). The program's key comes
- * from its EBOOT.PBP alone, so the same file in two folders is one title: importing
- * it from the second folder would replace the first folder's copy, and both would
- * run on one Memory Stick. True puts that other folder in other: the path it really
- * had, from the view's view.source, or, for a view without one, its folder name.
- * False when the image has no view (NK_PBP_HB_VIEW_FOUND) or its view came from the
- * folder pbp_path is in, every link resolved. Reads only. */
+/* Whether anything beside the image at iso_path came from a folder other than the one
+ * pbp_path is in (review of #2426, M1, S2). The program's key comes from its EBOOT.PBP
+ * alone, so the same file in two folders is one title: importing it from the second
+ * folder would replace the first folder's copy, and both would run on one Memory Stick.
+ * With a record (".source"), the folder must be the recorded one, by the path it really
+ * has, every link resolved, and by the name it is picked by; whatever state the view or
+ * its staging copy is in. Without one, the view must hold only PSP/GAME/<this folder's
+ * name>, and no staging copy may be there. A record or view that cannot be read counts as
+ * another folder's. True puts what names that folder in other: the recorded path, the
+ * view's other folder name, or "" when nothing does. False when nothing is there or all
+ * of it is this folder's. Reads only. */
 bool nk_pbp_homebrew_other_source(const char *pbp_path, const char *iso_path, char *other,
                                   size_t other_size);
+
+/* Delete what the import of the program whose image is iso_path keeps beside it: the image,
+ * the view, its staging copy, the seed records and the source record, the record last. The
+ * title's Memory Stick, with the program's own files, is not touched. Refused, deleting
+ * nothing, unless the folder holding iso_path is in the data folder's discs/ and the image,
+ * when there, is a program's. True when everything is gone (also when nothing was there);
+ * false, with a sentence in problem, when a part could not be deleted. */
+bool nk_pbp_homebrew_delete_import(const char *iso_path, char *problem, size_t problem_size);
 
 /* Whether the view at view_root is the folder pbp_path is in as it is now: the
  * folder passes nk_pbp_homebrew_check_folder and its manifest, every file read

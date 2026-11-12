@@ -4376,13 +4376,19 @@ const char *player_error_retry_label(const ErrorState *error) {
     switch (error->retry) {
         case PLAYER_ERROR_RETRY_RESTART_GAME: return "Restart game";
         case PLAYER_ERROR_RETRY_BUILD: return "Try again";
+        case PLAYER_ERROR_RETRY_DELETE_KEPT: return "Delete kept copy";
         case PLAYER_ERROR_RETRY_NONE:
         default: return NULL;
     }
 }
 
+static bool player_app_delete_kept_from_error(PlayerApp *app);
+
 bool player_app_retry_from_error(PlayerApp *app) {
     if (!app || !player_error_retry_label(&app->last_error)) return false;
+    if (app->last_error.retry == PLAYER_ERROR_RETRY_DELETE_KEPT) {
+        return player_app_delete_kept_from_error(app);
+    }
     int index = player_app_find_game_by_disc_id(app, app->last_error.subject_disc_id);
     if (index < 0) return false;
     PlayerErrorRetry retry = app->last_error.retry;
@@ -8432,11 +8438,13 @@ static void player_homebrew_key_taken(const char *key, const char *iso_path, cha
 static void player_homebrew_already_added(const char *title, const char *key, const char *other,
                                           char *code, size_t code_size, char *message,
                                           size_t message_size) {
+    char shown[MAX_PATH_LEN];
+    (void)player_display_text(other, shown, sizeof(shown));
+    /* The player shows the stop with what clears it (player_app_refuse_homebrew_elsewhere). */
     player_psn_result(code, code_size, "HOMEBREW_ALREADY_ADDED", message, message_size,
-                      "%.120s (%s) is already in the library, added from the folder "
-                      "\"%.300s\". A program is added from one folder: to add it from this "
-                      "one, remove %.120s from the library first. Nothing was changed.",
-                      title, key, other, title);
+                      "%.120s (%s) was added before from %s%.300s%s. A program is added from "
+                      "one folder. Nothing was changed.", title, key,
+                      shown[0] ? "the folder \"" : "another folder", shown, shown[0] ? "\"" : "");
 }
 
 static bool player_psn_disc_iso_path(char *out, size_t out_size, const char *data_root,
@@ -8451,6 +8459,166 @@ static bool player_psn_disc_iso_path(char *out, size_t out_size, const char *dat
     return nk_shared_path_join(out, out_size, data_root, relative, separator,
                                NK_SHARED_PATH_JOIN_ALWAYS,
                                NK_SHARED_PATH_REQUIRE_POSITIVE_LENGTH);
+}
+
+/* A key the import gives a program: X, three capital letters, five digits (nk_non_retail_disc_key). */
+static bool player_homebrew_key_valid(const char *key) {
+    if (!key || strlen(key) != 9u || key[0] != NK_NON_RETAIL_KEY_PREFIX) return false;
+    for (size_t i = 1; i < 4u; ++i) {
+        if (key[i] < 'A' || key[i] > 'Z') return false;
+    }
+    for (size_t i = 4; i < 9u; ++i) {
+        if (key[i] < '0' || key[i] > '9') return false;
+    }
+    return true;
+}
+
+static void player_homebrew_elsewhere_text(char *out, size_t out_size, bool in_library,
+                                           const char *title, const char *key,
+                                           const char *shown) {
+    char from[MAX_PATH_LEN + 16];
+    if (shown[0]) {
+        snprintf(from, sizeof(from), "the folder \"%.300s\"", shown);
+    } else {
+        snprintf(from, sizeof(from), "another folder");
+    }
+    if (in_library) {
+        snprintf(out, out_size,
+                 "%.120s (%s) is in the library, added from %s. A program is added from one "
+                 "folder: to add it from this one, remove %.120s from the library with \"Also "
+                 "delete the decrypted files and disc copy\" ticked. Nothing was changed.",
+                 title, key, from, title);
+    } else {
+        snprintf(out, out_size,
+                 "%.120s (%s) has left the library, but Nakagawa still keeps its copy of %s. A "
+                 "program is added from one folder: to add it from this one, choose Delete kept "
+                 "copy, then add it again. The files it wrote on its Memory Stick stay. Nothing "
+                 "was changed.", title, key, from);
+    }
+}
+
+void player_app_refuse_homebrew_elsewhere(PlayerApp *app, const PlayerPsnPackage *package) {
+    char other[MAX_PATH_LEN];
+    char shown[MAX_PATH_LEN];
+    char message[sizeof(app->last_error.message)];
+    const char *title;
+    PlayerView back = VIEW_LIBRARY;
+    bool in_library;
+    if (!app || !package) return;
+    title = package->title[0] ? package->title : "Homebrew";
+    other[0] = '\0';
+    shown[0] = '\0';
+    /* Asked again: what is beside the image now is what the card's action deletes. */
+    (void)nk_pbp_homebrew_other_source(package->pbp_path, package->iso_path, other,
+                                       sizeof(other));
+    if (other[0]) (void)player_display_text(other, shown, sizeof(shown));
+    in_library = player_app_find_game_by_disc_id(app, package->disc_id) >= 0;
+    player_homebrew_elsewhere_text(message, sizeof(message), in_library, title,
+                                   package->disc_id, shown);
+    if (app->active_view == VIEW_SETUP_WIZARD) {
+        player_app_wizard_reset_extraction(app);
+        app->wizard.iso_selected = false;
+        snprintf(app->wizard.status_message, sizeof(app->wizard.status_message),
+                 "HOMEBREW_ALREADY_ADDED: %.120s was added before from another folder.", title);
+        back = VIEW_SETUP_WIZARD;
+    }
+    player_app_set_error(app, "HOMEBREW_ALREADY_ADDED", "Program added from another folder",
+                         message, "Choose another disc", back);
+    if (!in_library && player_homebrew_key_valid(package->disc_id)) {
+        snprintf(app->last_error.subject_disc_id, sizeof(app->last_error.subject_disc_id), "%s",
+                 package->disc_id);
+        app->last_error.retry = PLAYER_ERROR_RETRY_DELETE_KEPT;
+    }
+}
+
+bool player_app_delete_kept_homebrew(PlayerApp *app, const char *key, char *error,
+                                     size_t error_size) {
+    char data_root[NK_MAX_PATH];
+    char iso_path[MAX_PATH_LEN];
+    char library_path[NK_MAX_PATH];
+    char problem[512];
+    NkFileLock lock;
+    bool locked = false;
+    bool ok;
+    if (error && error_size) error[0] = '\0';
+    if (!app || !player_homebrew_key_valid(key)) {
+        if (error && error_size) snprintf(error, error_size, "That is not a program's key.");
+        return false;
+    }
+    if (player_app_find_game_by_disc_id(app, key) >= 0) {
+        if (error && error_size) {
+            snprintf(error, error_size, "%s is in the library. Remove it there with \"Also "
+                     "delete the decrypted files and disc copy\" ticked.", key);
+        }
+        return false;
+    }
+    if (!nk_platform_get_app_data_dir(data_root, sizeof(data_root)) ||
+        !player_psn_disc_iso_path(iso_path, sizeof(iso_path), data_root, key)) {
+        if (error && error_size) {
+            snprintf(error, error_size, "Nakagawa's data folder could not be found.");
+        }
+        return false;
+    }
+    /* Another player may have added the title since this library was read: the file is read
+       again under the library lock, held while the files are deleted. */
+    if (player_library_file_path(app, library_path, sizeof(library_path)) &&
+        !nk_platform_path_missing(library_path)) {
+        GameRecord *probe = (GameRecord *)calloc(1, sizeof(*probe));
+        PlayerLibraryFileImages images = PLAYER_LIBRARY_FILE_UNREADABLE;
+        if (nk_library_lock_acquire(&lock, library_path, NK_LIBRARY_LOCK_TIMEOUT_MS) != NK_OK) {
+            free(probe);
+            if (error && error_size) {
+                snprintf(error, error_size, "The library is in use by another program. "
+                         "Try again in a moment.");
+            }
+            return false;
+        }
+        locked = true;
+        if (probe) {
+            snprintf(probe->disc_id, sizeof(probe->disc_id), "%s", key);
+            images = player_library_file_other_image(probe, library_path);
+            free(probe);
+        }
+        if (images != PLAYER_LIBRARY_FILE_NO_OTHER_IMAGE) {
+            nk_platform_file_lock_release(&lock);
+            if (error && error_size) {
+                snprintf(error, error_size, images == PLAYER_LIBRARY_FILE_OTHER_IMAGE
+                         ? "%s is in the library again. Remove it there with \"Also delete the "
+                           "decrypted files and disc copy\" ticked."
+                         : "The library file could not be read, so nothing was deleted (%s).",
+                         key);
+            }
+            return false;
+        }
+    }
+    ok = nk_pbp_homebrew_delete_import(iso_path, problem, sizeof(problem));
+    if (locked) nk_platform_file_lock_release(&lock);
+    if (!ok && error && error_size) snprintf(error, error_size, "%s", problem);
+    return ok;
+}
+
+/* The card's "Delete kept copy": on success, back where the program was picked, saying so. */
+static bool player_app_delete_kept_from_error(PlayerApp *app) {
+    char key[sizeof(app->last_error.subject_disc_id)];
+    char error[PLAYER_ERROR_DETAILS_MAX];
+    PlayerView back = app->last_error.return_view;
+    snprintf(key, sizeof(key), "%s", app->last_error.subject_disc_id);
+    player_dev_log_add(app, "error", "%s: delete the kept copy of %s",
+                       app->last_error.error_code, key);
+    if (!player_app_delete_kept_homebrew(app, key, error, sizeof(error))) {
+        player_app_set_error(app, "HOMEBREW_KEPT_COPY_NOT_DELETED", "Kept copy not deleted",
+                             error, "Back", back);
+        return true;
+    }
+    player_app_set_view(app, back);
+    if (back == VIEW_SETUP_WIZARD) {
+        snprintf(app->wizard.status_message, sizeof(app->wizard.status_message),
+                 "The kept copy of %s was deleted. Add the program's EBOOT.PBP again.", key);
+    } else {
+        snprintf(app->library_notice, sizeof(app->library_notice),
+                 "The kept copy of %s was deleted. Add the program's EBOOT.PBP again.", key);
+    }
+    return true;
 }
 
 static bool player_homebrew_package_inspect(const char *pbp_path, const NkPbpInfo *info,
@@ -8533,7 +8701,12 @@ static bool player_homebrew_package_inspect(const char *pbp_path, const NkPbpInf
     if (nk_pbp_homebrew_other_source(pbp_path, package->iso_path, other, sizeof(other))) {
         player_homebrew_already_added(info->title[0] ? info->title : "Homebrew", program.key,
                                       other, code, code_size, message, message_size);
-        package->iso_path[0] = '\0';
+        /* The package names the program, so the player can say what clears the stop. */
+        snprintf(package->pbp_path, sizeof(package->pbp_path), "%s", pbp_path);
+        snprintf(package->disc_id, sizeof(package->disc_id), "%s", program.key);
+        snprintf(package->title, sizeof(package->title), "%s",
+                 info->title[0] ? info->title : "Homebrew");
+        package->homebrew = true;
         return false;
     }
     snprintf(package->pbp_path, sizeof(package->pbp_path), "%s", pbp_path);
@@ -8664,6 +8837,7 @@ static bool player_homebrew_package_convert(const PlayerPsnPackage *package,
     NkPbpHomebrew program;
     PlayerPsnBridge bridge;
     NkNpumdimgCallbacks hooks;
+    bool had_image = false;
     int rc;
     bridge.callbacks = callbacks;
     hooks.on_progress = player_psn_bridge_progress;
@@ -8682,7 +8856,7 @@ static bool player_homebrew_package_convert(const PlayerPsnPackage *package,
         char view_root[MAX_PATH_LEN];
         char problem[512];
         char other[MAX_PATH_LEN];
-        bool had_image = !nk_platform_path_missing(package->iso_path);
+        had_image = !nk_platform_path_missing(package->iso_path);
         problem[0] = '\0';
         /* Checked again here, before anything is written: another program's image may
            have arrived under the key since the inspection, or this one from another
@@ -8729,17 +8903,20 @@ static bool player_homebrew_package_convert(const PlayerPsnPackage *package,
            key) keeps the new folder, which belongs to it. */
         if (!had_image) (void)nk_platform_remove_tree(view_root, NULL);
     }
+    /* With an earlier image, the new folder copy stays with it (review of #2426, N5). */
     if (rc == NK_PSP_ERR_CANCELLED) {
         player_psn_result(code, code_size, nk_psp_status_name(rc), message, message_size,
                           "The conversion was cancelled, and the partial disc image was "
-                          "removed.");
+                          "removed.%s", had_image ? " The earlier disc image stays, with the "
+                          "new copy of the program's folder." : "");
         return false;
     }
     fprintf(stderr, "[PLAYER] homebrew package conversion stopped: %s: %s\n",
             nk_psp_status_name(rc), ctx.message);
     player_psn_result(code, code_size, nk_psp_status_name(rc), message, message_size,
-                      "The package could not be turned into a disc image: %.200s. Nothing was "
-                      "kept.", ctx.message);
+                      "The package could not be turned into a disc image: %.200s. %s",
+                      ctx.message, had_image ? "The earlier disc image stays, with the new "
+                      "copy of the program's folder." : "Nothing was kept.");
     return false;
 }
 

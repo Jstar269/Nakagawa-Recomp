@@ -600,7 +600,6 @@ done:
 #define HB_COPY_CHUNK (64u * 1024u)
 #define HB_MANIFEST_NAME "view.manifest"
 /* The path the picked folder really had, one line (nk_pbp_homebrew_other_source). */
-#define HB_SOURCE_NAME "view.source"
 #define HB_MANIFEST_HEADER "nakagawa-homebrew-view 1"
 #define HB_SEEDED_HEADER "nakagawa-homebrew-seeded 2"
 #define HB_TEXT_MAX (8u * 1024u * 1024u)
@@ -1208,6 +1207,16 @@ static bool hb_check_source(const char *pbp_path, const char *view_root, HbSourc
         hb_problem(problem, problem_size, "%s", "The package's folder could not be found.");
         return false;
     }
+    /* The record of where a view came from is a line of text (review of #2426, N3). */
+    for (const char *c = source->real; *c != '\0'; ++c) {
+        if ((unsigned char)*c < 0x20u || *c == 0x7f) {
+            hb_problem(problem, problem_size,
+                       "The path of the folder \"%.80s\" holds a control character. Rename "
+                       "the folder, or the folder it is in, and add the program again.",
+                       source->picked + source->name_at);
+            return false;
+        }
+    }
     if (hb_path_within(view, source->real) || hb_path_within(source->real, view)) {
         hb_problem(problem, problem_size,
                    "The folder \"%.80s\" also holds Nakagawa's data folder, or lies inside it. "
@@ -1262,6 +1271,49 @@ static bool hb_build_manifest(const HbSource *source, const char *name, HbText *
     return hb_walk(source->real, "", to, 0u, &walk);
 }
 
+/* The record of the folder a view was copied from (review of #2426, S2), beside the image:
+   view_root with its ".ms0" replaced by ".source". It holds two lines: the path the folder
+   really had and the name it had as picked, which is the program's folder name on the
+   Memory Stick. It is written before the copy starts and is no part of the view, so a
+   damaged view, a view removed part way and a copy left in staging by a crash all still
+   have it. */
+static bool hb_record_path(const char *view_root, char *out, size_t out_size)
+{
+    size_t length = view_root != NULL ? strlen(view_root) : 0u;
+    if (length <= 4u || strcmp(view_root + length - 4u, ".ms0") != 0 || length + 3u >= out_size)
+        return false;
+    memcpy(out, view_root, length - 4u);
+    memcpy(out + length - 4u, ".source", 8u);
+    return true;
+}
+
+typedef enum { HB_RECORD_NONE, HB_RECORD_READ, HB_RECORD_BAD } HbRecordState;
+
+/* Read the record at path. HB_RECORD_READ points real and name into *text, which the caller
+   frees; HB_RECORD_BAD is a record that is there but cannot be read as two lines of text. */
+static HbRecordState hb_record_read(const char *path, char **text, const char **real,
+                                    const char **name)
+{
+    HbState state = hb_state(path);
+    char *first;
+    char *second;
+    *text = NULL;
+    if (state == HB_MISSING) return HB_RECORD_NONE;
+    if (state != HB_FILE || (*text = hb_read_text(path)) == NULL) return HB_RECORD_BAD;
+    for (const char *c = *text; *c != '\0'; ++c) {
+        if (((unsigned char)*c < 0x20u && *c != '\n') || *c == 0x7f) return HB_RECORD_BAD;
+    }
+    first = strchr(*text, '\n');
+    if (first == NULL || first == *text) return HB_RECORD_BAD;
+    second = strchr(first + 1, '\n');
+    if (second == NULL || second == first + 1 || second[1] != '\0') return HB_RECORD_BAD;
+    *first = '\0';
+    *second = '\0';
+    *real = *text;
+    *name = first + 1;
+    return HB_RECORD_READ;
+}
+
 /* The parent folder of path, for syncing its entries. */
 static bool hb_parent(const char *path, char *out, size_t out_size)
 {
@@ -1273,6 +1325,12 @@ static bool hb_parent(const char *path, char *out, size_t out_size)
     memcpy(out, path, end);
     out[end] = '\0';
     return true;
+}
+
+/* A failed import's staging copy goes; then record, when given, which no copy outlives. */
+static void hb_drop_staging(const char *staging, const char *record)
+{
+    if (nk_platform_remove_tree(staging, NULL) && record != NULL) (void)nk_remove_utf8(record);
 }
 
 bool nk_pbp_homebrew_write_view(const char *pbp_path, const char *view_root,
@@ -1290,6 +1348,7 @@ bool nk_pbp_homebrew_write_view(const char *pbp_path, const char *view_root,
     HbText manifest;
     HbText record;
     bool ok;
+    bool first;
     int written;
     if (!hb_check_source(pbp_path, view_root, &source, name, sizeof(name), problem,
                          problem_size))
@@ -1298,36 +1357,45 @@ bool nk_pbp_homebrew_write_view(const char *pbp_path, const char *view_root,
     if (written <= 0 || (size_t)written >= sizeof(staging) ||
         !hb_game_dir(staging, game, sizeof(game)) || !hb_join(target, sizeof(target), game, name) ||
         !hb_join(manifest_path, sizeof(manifest_path), staging, HB_MANIFEST_NAME) ||
-        !hb_join(record_path, sizeof(record_path), staging, HB_SOURCE_NAME) ||
+        !hb_record_path(view_root, record_path, sizeof(record_path)) ||
         !hb_parent(view_root, parent, sizeof(parent))) {
         hb_problem(problem, problem_size, "%s", "The path to Nakagawa's data folder is too long.");
         return false;
     }
+    /* The record first: whatever view or staging copy is on the disk from here on came from
+       the folder it names. A first import that fails takes it away again with its staging
+       copy, so nothing new is kept. */
+    first = hb_state(record_path) == HB_MISSING && hb_state(view_root) == HB_MISSING;
+    memset(&record, 0, sizeof(record));
+    hb_text_add(&record, source.real, "\n", name);
+    hb_text_add(&record, "\n", NULL, NULL);
+    ok = hb_write_text(record_path, &record) && nk_platform_sync_dir(parent);
+    free(record.text);
+    if (!ok) {
+        hb_problem(problem, problem_size, "%.400s could not be written.", record_path);
+        return false;
+    }
     if (!nk_platform_remove_tree(staging, NULL) || !nk_platform_mkdir_p_private(target)) {
         hb_problem(problem, problem_size, "%.400s could not be made.", target);
+        hb_drop_staging(staging, first ? record_path : NULL);
         return false;
     }
     memset(&manifest, 0, sizeof(manifest));
-    memset(&record, 0, sizeof(record));
-    hb_text_add(&record, source.real, "\n", NULL);
     ok = hb_build_manifest(&source, name, &manifest, target, callbacks, problem, problem_size);
-    /* The record of where the folder came from is in the view, so it is put in place with it. */
-    if (ok && (!hb_write_text(manifest_path, &manifest) || !hb_write_text(record_path, &record) ||
-               !nk_platform_sync_dir(staging))) {
+    if (ok && (!hb_write_text(manifest_path, &manifest) || !nk_platform_sync_dir(staging))) {
         hb_problem(problem, problem_size, "%.400s could not be written.", staging);
         ok = false;
     }
     free(manifest.text);
-    free(record.text);
     if (!ok) {
-        (void)nk_platform_remove_tree(staging, NULL);
+        hb_drop_staging(staging, first ? record_path : NULL);
         return false;
     }
     /* Between these two steps there is no view: a launch then stops by name
        (NK_PBP_HB_VIEW_MISSING) rather than run the program without its folder. */
     if (!nk_platform_remove_tree(view_root, NULL) || nk_rename_utf8(staging, view_root) != 0 ||
         !nk_platform_sync_dir(parent)) {
-        (void)nk_platform_remove_tree(staging, NULL);
+        hb_drop_staging(staging, first ? record_path : NULL);
         hb_problem(problem, problem_size, "%.400s could not be put in place.", view_root);
         return false;
     }
@@ -1580,44 +1648,134 @@ NkPbpHomebrewView nk_pbp_homebrew_find_view(const char *iso_path, char *folder,
     return NK_PBP_HB_VIEW_FOUND;
 }
 
+static bool hb_count_entry(const char *name, bool is_dir, void *ctx)
+{
+    (void)name;
+    (void)is_dir;
+    ++*(size_t *)ctx;
+    return true;
+}
+
+typedef enum { HB_CONTENT_NONE, HB_CONTENT_NAMED, HB_CONTENT_OTHER } HbContent;
+
+/* What dir, a view or its staging copy, holds, told by the program's folder name alone:
+   nothing (missing or empty), one folder PSP/GAME/<name>, or anything else, including what
+   cannot be listed. A folder of another name goes into other. */
+static HbContent hb_view_content(const char *dir, const char *name, char *other,
+                                 size_t other_size)
+{
+    char game[HB_PATH_MAX];
+    HbViewScan scan;
+    size_t entries = 0, skipped = 0;
+    HbState state = hb_state(dir);
+    if (state == HB_MISSING) return HB_CONTENT_NONE;
+    if (state != HB_FOLDER || !nk_platform_list_dir_counted(dir, hb_count_entry, &entries,
+                                                            &skipped) || skipped != 0u)
+        return HB_CONTENT_OTHER;
+    if (entries == 0u) return HB_CONTENT_NONE;
+    memset(&scan, 0, sizeof(scan));
+    skipped = 0;
+    if (!hb_game_dir(dir, game, sizeof(game)) || hb_state(game) != HB_FOLDER ||
+        !nk_platform_list_dir_counted(game, hb_view_scan, &scan, &skipped) || skipped != 0u ||
+        scan.files != 0u || scan.folders != 1u || scan.name[0] == '\0')
+        return HB_CONTENT_OTHER;
+    if (strcmp(scan.name, name) != 0) {
+        snprintf(other, other_size, "%s", scan.name);
+        return HB_CONTENT_OTHER;
+    }
+    return HB_CONTENT_NAMED;
+}
+
 bool nk_pbp_homebrew_other_source(const char *pbp_path, const char *iso_path, char *other,
                                   size_t other_size)
 {
-    char found[NK_PBP_HOMEBREW_FOLDER_NAME_MAX + 1u];
+    char name[NK_PBP_HOMEBREW_FOLDER_NAME_MAX + 1u];
     char root[HB_PATH_MAX];
-    char path[HB_PATH_MAX];
+    char staging[HB_PATH_MAX];
+    char record_path[HB_PATH_MAX];
     HbSource source;
-    char *stored = NULL;
-    size_t length = 0;
-    bool recorded = true;
+    char *text = NULL;
+    const char *stored_real = NULL;
+    const char *stored_name = NULL;
+    HbRecordState record;
     bool differs;
-    if (other == NULL || other_size == 0u) return false;
+    int written;
+    if (other == NULL || other_size == 0u) return true;
     other[0] = '\0';
-    if (nk_pbp_homebrew_find_view(iso_path, found, sizeof(found)) != NK_PBP_HB_VIEW_FOUND ||
-        !hb_source(pbp_path, &source) || !nk_pbp_homebrew_view_root(iso_path, root, sizeof(root)) ||
-        !hb_join(path, sizeof(path), root, HB_SOURCE_NAME))
+    /* What cannot be told is another folder's: the import stops. */
+    if (!hb_source(pbp_path, &source) ||
+        !nk_pbp_homebrew_folder_name(pbp_path, name, sizeof(name), NULL, 0u) ||
+        !nk_pbp_homebrew_view_root(iso_path, root, sizeof(root)) ||
+        !hb_record_path(root, record_path, sizeof(record_path)))
+        return true;
+    written = snprintf(staging, sizeof(staging), "%s.importing", root);
+    if (written <= 0 || (size_t)written >= sizeof(staging)) return true;
+    record = hb_record_read(record_path, &text, &stored_real, &stored_name);
+    if (record == HB_RECORD_BAD) {
+        free(text);
+        return true;
+    }
+    if (record == HB_RECORD_READ) {
+        /* The same folder, by the path it really has (on Windows as hb_path_within compares)
+           and by the name it is picked by, which names its folder on the Memory Stick
+           (review of #2426, N2). Every view and staging copy came from it. */
+        differs = !hb_path_within(source.real, stored_real) ||
+                  !hb_path_within(stored_real, source.real) || strcmp(stored_name, name) != 0;
+        if (differs) snprintf(other, other_size, "%s", stored_real);
+        free(text);
+        return differs;
+    }
+    /* No record: a view is compared by its folder's name; a staging copy cannot be told to
+       be this import's own, so any is another folder's. */
+    if (hb_view_content(root, name, other, other_size) == HB_CONTENT_OTHER) return true;
+    return hb_view_content(staging, name, other, other_size) != HB_CONTENT_NONE;
+}
+
+bool nk_pbp_homebrew_delete_import(const char *iso_path, char *problem, size_t problem_size)
+{
+    char root[HB_PATH_MAX];
+    char staging[HB_PATH_MAX];
+    char seeded[HB_PATH_MAX];
+    char converting[HB_PATH_MAX];
+    char record[HB_PATH_MAX];
+    char record_temp[HB_PATH_MAX];
+    char folder[HB_PATH_MAX];
+    HbState image;
+    if (!nk_pbp_homebrew_view_root(iso_path, root, sizeof(root)) ||
+        !hb_beside_image(iso_path, ".seeded", seeded, sizeof(seeded)) ||
+        !hb_record_path(root, record, sizeof(record)) ||
+        !hb_parent(iso_path, folder, sizeof(folder)) ||
+        snprintf(staging, sizeof(staging), "%s.importing", root) >= (int)sizeof(staging) ||
+        snprintf(converting, sizeof(converting), "%s.converting", iso_path) >=
+            (int)sizeof(converting) ||
+        snprintf(record_temp, sizeof(record_temp), "%s.tmp", record) >= (int)sizeof(record_temp)) {
+        hb_problem(problem, problem_size, "%s", "The path to Nakagawa's data folder is too long.");
         return false;
-    /* One line, the folder's real path: anything else is no record. */
-    if (!nk_platform_path_missing(path) && (stored = hb_read_text(path)) != NULL) {
-        length = strlen(stored);
-        if (length < 2u || stored[length - 1u] != '\n') recorded = false;
-        for (size_t i = 0; recorded && i + 1u < length; ++i) {
-            if ((unsigned char)stored[i] < 0x20u || stored[i] == 0x7f) recorded = false;
+    }
+    if (nk_platform_path_missing(folder)) return true;
+    /* Only the import's own files, in the data folder's discs/, and never a disc image
+       that is not a program's. */
+    image = hb_state(iso_path);
+    if (!hb_image_in_data(folder) || image == HB_FOLDER || image == HB_UNKNOWN ||
+        (image == HB_FILE && hb_image_is_homebrew(iso_path) != 1)) {
+        hb_problem(problem, problem_size,
+                   "%.400s is not a program's import, so nothing was deleted.", iso_path);
+        return false;
+    }
+    {
+        /* The record last: until everything else is gone, it still stops another folder. */
+        const char *const paths[] = { root, staging, seeded, converting, iso_path, record_temp,
+                                      record };
+        for (size_t i = 0; i < sizeof(paths) / sizeof(paths[0]); ++i) {
+            if (!nk_platform_remove_tree(paths[i], NULL)) {
+                hb_problem(problem, problem_size,
+                           "%.400s could not be deleted. Close any program using it and try "
+                           "again.", paths[i]);
+                return false;
+            }
         }
-    } else {
-        recorded = false;
     }
-    if (recorded) {
-        stored[length - 1u] = '\0';
-        differs = strcmp(stored, source.real) != 0;
-        if (differs) snprintf(other, other_size, "%s", stored);
-    } else {
-        /* A view written before the record: its folder's name is all it says. */
-        differs = strcmp(found, source.picked + source.name_at) != 0;
-        if (differs) snprintf(other, other_size, "%s", found);
-    }
-    free(stored);
-    return differs;
+    return true;
 }
 
 /* rel ("/"-separated) under base, in the host's separators. */
@@ -1906,10 +2064,18 @@ bool nk_pbp_homebrew_seed_memstick(const char *iso_path, const char *folder,
     if (view_damaged) {
         /* Without its manifest the view is BROKEN and no longer current, so adding the
            program again writes it afresh rather than keep failing here. */
-        (void)nk_remove_utf8(manifest_path);
-        hb_problem(problem, problem_size,
-                   "The copy of the program's folder beside %.300s is damaged. Add the "
-                   "program's EBOOT.PBP again.", iso_path);
+        if (nk_remove_utf8(manifest_path) != 0 && !nk_platform_path_missing(manifest_path)) {
+            /* Kept, the view would still pass as current and the next add say "ready"
+               (review of #2426, N9). */
+            hb_problem(problem, problem_size,
+                       "The copy of the program's folder is damaged, and %.300s could not be "
+                       "deleted. Close any program using it and start the title again.",
+                       manifest_path);
+        } else {
+            hb_problem(problem, problem_size,
+                       "The copy of the program's folder beside %.300s is damaged. Add the "
+                       "program's EBOOT.PBP again.", iso_path);
+        }
     }
     if (record_ok) {
         /* What a seed stopped part way did place is recorded too, and what it did not reach

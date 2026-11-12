@@ -209,7 +209,12 @@ its own Memory Stick. A program added before its folder came along stops with a 
 Keep each program in its own folder, as `PSP/GAME/<folder>/` on a PSP's Memory Stick has it, and named
 `EBOOT.PBP` in capitals, the one name a PSP starts a program from; a package with another name is refused with
 a message saying so. The key is made from the program and its title, so the same homebrew is
-the same game wherever you add it from, and the library shows it as **Beta / unofficial**. Two different
+the same game wherever you add it from, and the library shows it as **Beta / unofficial**. It is added from
+one folder: the same `EBOOT.PBP` picked in a second folder stops with a message naming the first folder and
+what clears the stop, which is removing the title with **Also delete the decrypted files and disc copy**
+ticked or, once the title has left the library, **Delete kept copy** on the message. Either way the files the
+program wrote on its Memory Stick stay; files an earlier start put there then count as the program's own and
+are kept, also when a later release changes them. Two different
 programs can, very rarely, get the same key: the second is then refused by name, and nothing of the first
 is replaced. Homebrew is
 **Experimental**: nobody has checked a program unless [`COMPATIBILITY.md`](COMPATIBILITY.md#homebrew-limits)

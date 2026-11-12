@@ -233,7 +233,11 @@ static void player_take_picked_package(PlayerApp *app, const char *path) {
     char message[512];
     if (!player_psn_package_inspect(path, &package, code, sizeof(code), message,
                                     sizeof(message))) {
-        player_show_picked_refusal(app, code, "Package not supported", message);
+        if (strcmp(code, "HOMEBREW_ALREADY_ADDED") == 0) {
+            player_app_refuse_homebrew_elsewhere(app, &package);
+        } else {
+            player_show_picked_refusal(app, code, "Package not supported", message);
+        }
         return;
     }
     if (package.iso_ready) {
@@ -2953,6 +2957,8 @@ static void finish_psn_job(PlayerApp *app, PlayerPsnJob *job) {
             snprintf(app->wizard.status_message, sizeof(app->wizard.status_message), "%.200s",
                      job->message);
         }
+    } else if (strcmp(job->code, "HOMEBREW_ALREADY_ADDED") == 0) {
+        player_app_refuse_homebrew_elsewhere(app, &job->package);
     } else if (job->package.disc_format != NK_DISC_FORMAT_NONE) {
         player_show_picked_refusal(app, job->code, player_disc_refusal_title(job->code),
                                    job->message);
@@ -4072,7 +4078,14 @@ static int player_load_library(PlayerRun *run) {
             ok = player_psn_package_convert(&package, &hooks, code, sizeof(code), message,
                                             sizeof(message));
         }
-        if (!ok) {
+        if (!ok && strcmp(code, "HOMEBREW_ALREADY_ADDED") == 0) {
+            /* The card's text, which names what clears the stop. */
+            player_app_refuse_homebrew_elsewhere(app, &package);
+            fprintf(stderr, "[PLAYER] %s: %s\n", code, app->last_error.message);
+            if (run->stage_only || app->launch_headless) return 1;
+            run->populate_sample = false;
+            run->initial_iso_path = NULL;
+        } else if (!ok) {
             fprintf(stderr, "[PLAYER] %s: %s\n", code, message);
             if (run->stage_only || app->launch_headless) return 1;
             run->populate_sample = false;
