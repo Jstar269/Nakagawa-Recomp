@@ -22,8 +22,9 @@ $(BUILD_DIR)/$(GAME_NAME)_image.bin: $(GAME_INPUT_PREREQ) tools/prxload.py
 	"$(PYTHON)" tools/prxload.py --env-elf $(GAME_BASE) $(PSP_HEADER_ENV_ARG) --out=$@
 
 # An LLVM build's .ll files also come from the LLVM lowering (#330), so editing it
-# regenerates them; a C build does not depend on these files.
-CODEGEN_LLVM_PREREQ := $(if $(filter llvm,$(CODEGEN_BACKEND)),tools/codegen_llvm.py tools/llvm_ir.py tools/lowering_plan.py)
+# regenerates them; a C build does not depend on these files. CODEGEN_BACKEND=llvm adds
+# --backend=llvm to CODEGEN_USER_ARGS (Makefile), so this sees either spelling.
+CODEGEN_LLVM_PREREQ := $(if $(filter --backend=llvm,$(CODEGEN_USER_ARGS)),tools/codegen_llvm.py tools/llvm_ir.py tools/lowering_plan.py)
 
 ifeq ($(NK_AOT_PREGENERATED),1)
 $(BUILD_DIR)/$(GAME_NAME)_recomp.c $(BUILD_DIR)/$(GAME_NAME)_recomp_funcs.h:

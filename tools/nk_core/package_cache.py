@@ -1154,8 +1154,9 @@ AOT_ENHANCEMENT_PACKAGE_EPOCH = "aot-enhancement-package-v1"
 AOT_LLVM_BACKEND_EPOCH = "aot-llvm-backend-v1"
 
 #: The sources that decide what the LLVM IR backend (#330) emits and what its IR calls:
-#: the renderer, every tools/ module it imports (test_codegen_llvm derives that closure),
-#: and the runtime ABI shim. `tools/codegen.py` is keyed for both backends already.
+#: the renderer, every tools/ module it imports other than codegen.py (test_codegen_llvm
+#: derives that closure), and the runtime ABI shim. `tools/codegen.py` is keyed for both
+#: backends by its own hash (`codegen_sha256`).
 LLVM_BACKEND_SOURCES = ("tools/codegen_llvm.py", "tools/llvm_ir.py", "tools/lowering_plan.py",
                         "src/rt/llvm_abi.c", "src/rt/llvm_abi.h")
 

@@ -423,9 +423,12 @@ class PackageCacheTests(unittest.TestCase):
         closure, pending = set(), ["codegen_llvm"]
         while pending:
             name = pending.pop()
-            path = ROOT / "tools" / f"{name}.py"
-            if name in closure or name == "codegen" or not path.is_file():
+            if name in closure or name == "codegen" or name in sys.stdlib_module_names:
                 continue
+            path = ROOT / "tools" / f"{name}.py"
+            # Anything else must be a tools/ module this walk can read, or it fails here
+            # instead of leaving the closure silently.
+            self.assertTrue(path.is_file(), f"the lowering imports {name}, not found in tools/")
             closure.add(name)
             for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
                 if isinstance(node, ast.Import):
@@ -438,7 +441,8 @@ class PackageCacheTests(unittest.TestCase):
         # The Make rule that writes the .ll files depends on the same modules in an LLVM
         # build, and on none of them in a C build.
         text = (ROOT / "mk" / "pipeline.mk").read_text(encoding="utf-8")
-        match = re.search(r"^CODEGEN_LLVM_PREREQ := \$\(if \$\(filter llvm,\$\(CODEGEN_BACKEND\)\),"
+        match = re.search(r"^CODEGEN_LLVM_PREREQ := \$\(if \$\(filter --backend=llvm,"
+                          r"\$\(CODEGEN_USER_ARGS\)\),"
                           r"([^)]*)\)$", text, re.M)
         self.assertIsNotNone(match)
         self.assertEqual(set(match.group(1).split()), keyed)

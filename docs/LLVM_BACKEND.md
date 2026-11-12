@@ -187,11 +187,12 @@ from another toolchain, and the rule that writes the `.ll` files depends on the 
 
 A package's cache key (#316, `tools/nk_core/package_cache.py`) carries the same identity:
 an LLVM package's `codegen_options` gain an `llvm_backend` entry naming the backend's
-epoch, the SHA-256 of each file in `LLVM_BACKEND_SOURCES` (the renderer, every `tools/`
-module it imports, and the ABI shim) and the exact Clang and `llvm-link` binaries and
-version reports. That entry is in the package's `cache.codegen_options` and moves the
-generated-code and native digests, so an LLVM package is never reused for a C build, for a
-changed lowering, or across toolchains, and a missing tool fails the key closed.
+epoch, the SHA-256 of each file in `LLVM_BACKEND_SOURCES` (the renderer, the `tools/`
+modules it imports other than `codegen.py`, which both backends key by its own hash, and
+the ABI shim) and the exact Clang and `llvm-link` binaries and version reports. That entry
+is in the package's `cache.codegen_options` and moves the generated-code and native
+digests, so an LLVM package is never reused for a C build, after a change to the renderer,
+the plan or the shim, or across toolchains, and a missing tool fails the key closed.
 `tools/test_codegen_llvm.py` derives the renderer's import closure and holds both the key
 and the Make rule to it. A C build adds nothing, so its profiles and keys are unchanged by
 this backend.
