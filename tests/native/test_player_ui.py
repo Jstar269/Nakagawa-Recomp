@@ -2143,9 +2143,12 @@ class NativePlayerUiTests(unittest.TestCase):
     def test_next_ui_checks_an_added_disc_once_on_a_worker(self) -> None:
         """#1731: a disc added from the game-found card is hashed once after the add, on the
         disc check worker (never the UI thread), and compared with the disc list the user
-        imported; its library record keeps the hashes and the tier. With no list it is
-        hashed and left unchecked. The worker is held for a moment: the library draws frames
-        meanwhile, with the check running."""
+        imported, which takes precedence over the list bundled beside the player; its library
+        record keeps the hashes and the tier. With no import it is compared with the bundled
+        list (assets/redump), where a synthetic disc is not listed: UNKNOWN, never a pass. A
+        test build without the bundled list staged beside it leaves the disc unchecked. The
+        worker is held for a moment: the library draws frames meanwhile, with the check
+        running."""
         with tempfile.TemporaryDirectory(prefix=".disc-check-", dir=ROOT) as tmp:
             iso_path = Path(tmp) / "synthetic.iso"
             create_test_iso_with_executables(
@@ -2161,7 +2164,9 @@ class NativePlayerUiTests(unittest.TestCase):
                      f"sha1=\"{sha1}\"/></game>\n</datafile>\n")
         events = ("WAIT_VIEW=experimental|unsupported|supported|error,15000", "WAIT_MS=100",
                   "KEY_RETURN", "WAIT_MS=2000")
-        for listed, tier in ((True, "VERIFIED_RETAIL"), (False, "NOT_CHECKED")):
+        bundled = (PLAYER_EXE.parent / "assets" / "redump" / "redump-psp.zip").is_file()
+        unlisted = ("UNKNOWN", "bundled") if bundled else ("NOT_CHECKED", "none")
+        for listed, (tier, source) in ((True, ("VERIFIED_RETAIL", "imported")), (False, unlisted)):
             with self.subTest(listed=listed):
                 run = self.next_ui_run("library", events, drop_bytes=("source-owned.iso", iso),
                                        disc_list=disc_list if listed else None,
@@ -2175,8 +2180,9 @@ class NativePlayerUiTests(unittest.TestCase):
                 self.assertGreaterEqual(len(checking), 2, stdout)
                 self.assertEqual(frames[-1]["disc_check"], "0", stdout)
                 checks = re.findall(
-                    r"^\[PLAYER\] DISC_CHECK disc=(\S+) result=(\S+) tier=(\S+)$", stdout, re.M)
-                self.assertEqual(checks, [("TEST00043", "HASHED", tier)], stdout)
+                    r"^\[PLAYER\] DISC_CHECK disc=(\S+) result=(\S+) tier=(\S+) list=(\S+)$",
+                    stdout, re.M)
+                self.assertEqual(checks, [("TEST00043", "HASHED", tier, source)], stdout)
                 library = run["library"]
                 assert isinstance(library, dict)
                 records = [game for game in library["games"] if game["disc_id"] == "TEST00043"]

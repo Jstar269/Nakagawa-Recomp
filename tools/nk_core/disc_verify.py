@@ -1,13 +1,21 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 the Nakagawa Recomp authors
 
-"""Disc verification: a whole-image hash compared with the user's Redump list.
+"""Disc verification: a whole-image hash compared with Redump's PSP list.
 
 A disc image is hashed whole (SHA-1 and CRC32, the two hashes Redump lists) on the user's
 machine. A compressed image (.cso, .zso, .chd) is hashed after the one-time expansion
-(``disc_expand_tool.ensure_plain_iso``), so it hashes the same as the .iso it holds. The
-hashes are compared with a Redump datafile the user imports themselves; nothing is uploaded
-or downloaded.
+(``disc_expand_tool.ensure_plain_iso``), so it hashes the same as the .iso it holds.
+
+The hashes are compared with one Redump PSP datafile:
+
+- the list the user imported (``nk_cli.py redump-import``), when there is one: it takes
+  precedence, so a user can move to a newer list than the one the project ships;
+- otherwise the list bundled with the project, ``assets/redump/redump-psp.zip``, Redump's own
+  download kept byte for byte (``assets/redump/PROVENANCE.md``).
+
+Nothing downloads a list and nothing is uploaded: the bundled list is a file in the checkout
+or the player's folder, and an import copies a file the user chose.
 
 Each image gets one tier:
 
@@ -15,24 +23,31 @@ Each image gets one tier:
 - ``MODIFIED``: no match, but its disc ID is a known retail disc ID: one the list names (a
   datafile with ``<serial>`` entries), or the disc ID of a verified image in the same
   library. Fan translations, patched and trimmed images land here.
-- ``UNKNOWN``: neither.
-- ``NOT_CHECKED``: no list was imported, or the image was not hashed.
+- ``UNKNOWN``: neither. The image is not in the list, which means "not shown to be retail",
+  never "bad".
+- ``NOT_CHECKED``: no list was found, or the image was not hashed.
 
-The datafile is read by a small bounded scanner, the same rules as ``src/core/nk_disc_verify.c``
-(no XML entity or DTD processing): each ``<game>`` element, its ``<rom>`` elements' ``size``,
-``crc`` and ``sha1`` attributes, and any ``<serial>`` text. A rom with a malformed hash or
-size is skipped and counted.
+The datafile is read by a small bounded scanner, the same rules as ``src/core/nk_disc_verify.c``.
+It expands no entity and never reads a DTD: a ``<!DOCTYPE>`` that only names Logiqx's public
+DTD (as Redump's lists do) is skipped unread, and a list that declares entities, carries an
+internal DTD subset or refers to any entity but XML's five predefined ones and character
+references is refused (``DISC_DAT_ENTITY_REFUSED``). It reads each ``<game>`` element, its
+``<rom>`` elements' ``size``, ``crc`` and ``sha1`` attributes, and any ``<serial>`` text. A rom
+with a malformed hash or size is skipped and counted. A datafile may come as the zip Redump
+serves (one ``.dat`` inside, stored or deflated), read under the same size cap.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 import hashlib
+import io
 import os
 from pathlib import Path
 import re
 import tempfile
 from typing import Callable, Iterable, Mapping, Optional
+import zipfile
 import zlib
 
 VERIFIED_RETAIL = "VERIFIED_RETAIL"
@@ -50,6 +65,14 @@ _XML_ENTITIES = {"&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": '"', "&apos;"
 HASH_CHUNK_BYTES = 1024 * 1024
 # The imported list, relative to the user's data folder (nk_disc_verify.h has the same path).
 DAT_RELATIVE_PATH = Path("verification") / "redump.dat"
+# The bundled list, relative to the checkout and to the player's folder (staged there by
+# tools/stage_runtime_dlls.py; nk_disc_verify.h has the same path).
+BUNDLED_DAT_RELATIVE_PATH = Path("assets") / "redump" / "redump-psp.zip"
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+# Which list a check used.
+LIST_IMPORTED = "imported"
+LIST_BUNDLED = "bundled"
+_ZIP_MAGIC = b"PK\x03\x04"
 
 _GAME = re.compile(r"<game\b[^>]*>(.*?)</game\s*>", re.DOTALL)
 _GAME_OPEN = re.compile(r"<game\b")
@@ -60,6 +83,13 @@ _SERIAL = re.compile(r"<serial>([^<]*)</serial\s*>")
 _HEADER_NAME = re.compile(r"<header\b.*?<name>([^<]*)</name\s*>.*?</header\s*>", re.DOTALL)
 _HEADER_VERSION = re.compile(r"<header\b.*?<version>([^<]*)</version\s*>.*?</header\s*>",
                              re.DOTALL)
+_HEADER_DATE = re.compile(r"<header\b.*?<date>([^<]*)</date\s*>.*?</header\s*>", re.DOTALL)
+# What the reader refuses rather than skips: an entity declaration anywhere, a DOCTYPE with an
+# internal subset ("[" before its ">"), and a reference to any entity but the five predefined
+# ones and character references. The external DTD a DOCTYPE names is never read.
+_ENTITY_DECLARATION = re.compile(r"<!ENTITY", re.IGNORECASE)
+_DOCTYPE_SUBSET = re.compile(r"<!DOCTYPE\b[^>\[]*\[", re.IGNORECASE)
+_UNKNOWN_REFERENCE = re.compile(r"&(?!(?:amp|lt|gt|quot|apos);|#[0-9]{1,7};|#x[0-9A-Fa-f]{1,6};)")
 _GAME_NAME = re.compile(r'\bname\s*=\s*"([^"]*)"')
 _SHA1 = re.compile(r"[0-9a-fA-F]{40}")
 _CRC32 = re.compile(r"[0-9a-fA-F]{8}")
@@ -108,13 +138,25 @@ class RedumpDat:
 
     name: str = ""
     version: str = ""
+    date: str = ""
     roms_by_sha1: dict[str, DatRom] = field(default_factory=dict)
     serials: frozenset[str] = frozenset()
     games: int = 0
     rejected_roms: int = 0
+    # LIST_IMPORTED or LIST_BUNDLED once a caller picked the list (load_verification_dat).
+    source: str = ""
 
     def __len__(self) -> int:
         return len(self.roms_by_sha1)
+
+    def describe(self) -> str:
+        """Which list this is and its date, for output: "the bundled Redump list (... discs)"."""
+        owner = {LIST_IMPORTED: "your imported Redump list",
+                 LIST_BUNDLED: "the Redump list bundled with Nakagawa"}.get(self.source, "a Redump list")
+        # The date is the datafile's own text: shown without control characters.
+        stamp = "".join(ch for ch in (self.date or self.version) if ch.isprintable())[:64]
+        dated = f"dated {stamp}, " if stamp else ""
+        return f"{owner} ({dated}{len(self)} discs)"
 
 
 def normalize_serials(text: str) -> tuple[str, ...]:
@@ -138,11 +180,20 @@ def parse_dat_text(text: str) -> RedumpDat:
     if not _DATAFILE_END.search(text):
         raise DiscVerifyError("The datafile is cut short: it has no closing </datafile>.",
                               boundary_code="DISC_DAT_NOT_DATAFILE")
+    if _ENTITY_DECLARATION.search(text) or _DOCTYPE_SUBSET.search(text):
+        raise DiscVerifyError("The datafile declares its own entities or DTD; a Redump list has "
+                              "none, so it was not read.", boundary_code="DISC_DAT_ENTITY_REFUSED")
+    if _UNKNOWN_REFERENCE.search(text):
+        raise DiscVerifyError("The datafile refers to an entity XML does not predefine; a Redump "
+                              "list has none, so it was not read.",
+                              boundary_code="DISC_DAT_ENTITY_REFUSED")
     dat = RedumpDat()
     header_name = _HEADER_NAME.search(text)
     header_version = _HEADER_VERSION.search(text)
+    header_date = _HEADER_DATE.search(text)
     dat.name = _xml_text(header_name.group(1)).strip() if header_name else ""
     dat.version = _xml_text(header_version.group(1)).strip() if header_version else ""
+    dat.date = _xml_text(header_date.group(1)).strip() if header_date else ""
     serials: set[str] = set()
     if len(_GAME_OPEN.findall(text)) != len(_GAME.findall(text)):
         raise DiscVerifyError("The datafile is cut short inside a <game> element.",
@@ -192,6 +243,52 @@ def _read_dat_bytes(path: Path | str) -> bytes:
     return data
 
 
+def _zip_refused(reason: str) -> DiscVerifyError:
+    return DiscVerifyError(f"The zip can't be read as a Redump datafile: {reason}",
+                           boundary_code="DISC_DAT_ZIP_INVALID")
+
+
+def _dat_from_zip(data: bytes) -> bytes:
+    """The one ``.dat`` inside a zip as Redump serves it, read under ``MAX_DAT_BYTES``.
+
+    The zip must hold exactly one file, named ``*.dat``, stored or deflated and not encrypted.
+    Its size is never taken on trust: at most ``MAX_DAT_BYTES + 1`` bytes are inflated, and
+    the CRC-32 is checked by reading it whole.
+    """
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            files = [info for info in archive.infolist() if not info.is_dir()]
+            if len(files) != 1:
+                raise _zip_refused(f"it holds {len(files)} files, not one.")
+            info = files[0]
+            if not info.filename.lower().endswith(".dat"):
+                raise _zip_refused("the file in it is not a .dat file.")
+            if info.flag_bits & 0x1:
+                raise _zip_refused("the file in it is encrypted.")
+            if info.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
+                raise _zip_refused("the file in it is compressed with a method other than deflate.")
+            if info.file_size > MAX_DAT_BYTES:
+                raise DiscVerifyError(f"The datafile in the zip is larger than {MAX_DAT_BYTES} bytes.",
+                                      boundary_code="DISC_DAT_TOO_LARGE")
+            with archive.open(info) as stream:
+                text = stream.read(MAX_DAT_BYTES + 1)
+                if len(text) > MAX_DAT_BYTES:
+                    raise DiscVerifyError(
+                        f"The datafile in the zip is larger than {MAX_DAT_BYTES} bytes.",
+                        boundary_code="DISC_DAT_TOO_LARGE")
+    except DiscVerifyError:
+        raise
+    except (zipfile.BadZipFile, zipfile.LargeZipFile, NotImplementedError, RuntimeError, EOFError,
+            ValueError, OSError, zlib.error) as exc:
+        raise _zip_refused(f"{exc}") from exc
+    return text
+
+
+def _dat_bytes(data: bytes) -> bytes:
+    """A datafile's own text: the bytes given, or the ``.dat`` inside them when they are a zip."""
+    return _dat_from_zip(data) if data.startswith(_ZIP_MAGIC) else data
+
+
 def _parse_dat_bytes(data: bytes) -> RedumpDat:
     try:
         text = data.decode("utf-8-sig")
@@ -202,8 +299,8 @@ def _parse_dat_bytes(data: bytes) -> RedumpDat:
 
 
 def load_dat(path: Path | str) -> RedumpDat:
-    """Read a datafile from disk, refusing one over ``MAX_DAT_BYTES``."""
-    return _parse_dat_bytes(_read_dat_bytes(path))
+    """Read a datafile (or the zip Redump serves) from disk, refusing one over ``MAX_DAT_BYTES``."""
+    return _parse_dat_bytes(_dat_bytes(_read_dat_bytes(path)))
 
 
 def imported_dat_path(user_data_root: Path | str) -> Path:
@@ -211,16 +308,24 @@ def imported_dat_path(user_data_root: Path | str) -> Path:
     return Path(user_data_root) / DAT_RELATIVE_PATH
 
 
+def bundled_dat_path(project_root: Path | str = PROJECT_ROOT) -> Path:
+    """The list bundled with the project, in a checkout or a player folder."""
+    return Path(project_root) / BUNDLED_DAT_RELATIVE_PATH
+
+
 def import_dat(source: Path | str, user_data_root: Path | str) -> RedumpDat:
     """Check a datafile the user chose and keep a copy in their data folder.
 
-    The copy replaces any earlier import whole (written beside it, then renamed), so a reader
-    never sees half a list. The file it is written to is created new under a random name, so a
-    link already in the folder is never written through. The bytes checked are the bytes
-    saved: the file is read once. Nothing leaves the machine.
+    ``source`` is a ``.dat`` or the zip Redump serves; from a zip, the ``.dat`` inside is what
+    is checked and kept. The copy replaces any earlier import whole (written beside it, then
+    renamed), so a reader never sees half a list. The file it is written to is created new
+    under a random name, so a link already in the folder is never written through. The bytes
+    checked are the bytes saved: the file is read once. Nothing leaves the machine. From then
+    on the import takes precedence over the bundled list.
     """
-    data = _read_dat_bytes(source)
+    data = _dat_bytes(_read_dat_bytes(source))
     dat = _parse_dat_bytes(data)
+    dat.source = LIST_IMPORTED
     target = imported_dat_path(user_data_root)
     temporary: Path | None = None
     folder = target.parent
@@ -248,7 +353,31 @@ def import_dat(source: Path | str, user_data_root: Path | str) -> RedumpDat:
 def load_imported_dat(user_data_root: Path | str) -> Optional[RedumpDat]:
     """The datafile the user imported into this data folder, or None when there is none."""
     path = imported_dat_path(user_data_root)
-    return load_dat(path) if path.is_file() else None
+    if not path.is_file():
+        return None
+    dat = load_dat(path)
+    dat.source = LIST_IMPORTED
+    return dat
+
+
+def load_verification_dat(user_data_root: Path | str, *,
+                          bundled: Path | str | None = None) -> Optional[RedumpDat]:
+    """The list a disc check uses: the user's import when there is one, else the bundled list.
+
+    ``bundled`` defaults to :func:`bundled_dat_path`. ``RedumpDat.source`` says which list it
+    is. An import that can't be read raises its ``DiscVerifyError``: the bundled list never
+    stands in for it silently, so the user learns their list is unusable. None only when
+    neither list exists.
+    """
+    imported = load_imported_dat(user_data_root)
+    if imported is not None:
+        return imported
+    path = Path(bundled) if bundled is not None else bundled_dat_path()
+    if not path.is_file():
+        return None
+    dat = load_dat(path)
+    dat.source = LIST_BUNDLED
+    return dat
 
 
 def hash_image(path: Path | str, *,

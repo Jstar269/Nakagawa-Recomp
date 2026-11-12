@@ -45,7 +45,7 @@ Nakagawa Program + User's Game ISO → Play
 > following describes the proposed packaging route. Bounded asset extraction and
 > the library's build-package → validate → launch route are connected
 > ([#487](https://github.com/Jstar269/nakagawa-recomp/pull/487)); the player also checks
-> each disc against the user's Redump list. What this option still needs is a
+> each disc against Redump's PSP list. What this option still needs is a
 > precompiled release that runs without a compiler on the user's machine.
 
 In this model, Nakagawa maintainers/packagers compile the verified title executable (or generic recompiled core for supported manifests) into standalone release packages.

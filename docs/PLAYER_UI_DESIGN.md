@@ -390,8 +390,8 @@ missing, starting, running), never the primary action: while its game runs, a re
 Stop the game to rebuild or change settings." The input note about decrypted files shows only while the package
 still needs them. Main column: eyebrow LIBRARY › TITLE, the name in `TITLE_XL`, the disc ID in `DATA`, the status
 pill and tag (YOUR DISC, BETA / UNOFFICIAL or the disc check's word, as on the card), then for a checked disc
-one `BODY_S` `muted` sentence on what the check found (for UNKNOWN DUMP: not shown to be retail, not modified,
-since Redump's PSP list names no disc IDs), then a PICTURE card when the last run of this game fell back to a
+one `BODY_S` `muted` sentence on what the check found (for UNKNOWN DUMP: not in the disc list, which doesn't
+mean bad, only not shown to be retail, and its disc ID isn't one the list names), then a PICTURE card when the last run of this game fell back to a
 slower drawing path (#2151): a DRAWN IN SOFTWARE pill in the brand blue, as a fact and not a warning, one `BODY_S`
 `paper` paragraph naming the renderer that did not start and what that costs (Internal resolution has no effect, the
 game may run slower, a graphics driver update may help), and a small Hide button, never the default focus, that hides

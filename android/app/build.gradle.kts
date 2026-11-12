@@ -40,11 +40,12 @@ val fetchNativeDeps = tasks.register<Exec>("fetchNativeDeps") {
     commandLine("cmake", "-DNK_ANDROID_DEPS_DIR=$depsDir", "-P", File(projectDir, "deps.cmake").path)
 }
 
-// The files the app unpacks on first start (LauncherActivity): the UI fonts, and for each bundled
-// title its flat image and package description.
+// The files the app unpacks on first start (LauncherActivity): the UI fonts, the bundled Redump PSP
+// list the disc check reads, and for each bundled title its flat image and package description.
 val stageBundledAssets = tasks.register<Sync>("stageBundledAssets") {
     into(bundledAssets)
     from(File(repoRoot, "assets/fonts/ui")) { into("app/assets/fonts/ui") }
+    from(File(repoRoot, "assets/redump")) { into("app/assets/redump") }
     for ((id, dir) in titles) {
         from(File(dir, "${id}_image.bin")) { into("app/titles/$id") }
         from(File(dir, "package.json")) { into("app/titles/$id") }

@@ -497,7 +497,7 @@ class LibraryBuild:
             return
         self.datafile = {"name": self.dat.name, "version": self.dat.version,
                          "discs": len(self.dat), "serials": len(self.dat.serials),
-                         "checked_at": _utc_now()}
+                         "source": self.dat.source or "given", "checked_at": _utc_now()}
         images = {key: (record.get("disc_id"), record_digest(record))
                   for key, record in self.records.items()}
         for key, tier in disc_verify.classify_all(images, self.dat).items():
@@ -770,20 +770,27 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-decrypt", action="store_true",
                         help="Skip the disc check that decrypts each disc's executable and modules")
     parser.add_argument("--redump-dat", type=Path, default=None,
-                        help="Your Redump PSP datafile: hash every disc and give it its "
-                             "verification tier; the list is imported into the data folder")
+                        help="A Redump PSP datafile (.dat or Redump's zip) to import into the "
+                             "data folder first; without it, the data folder's imported list "
+                             "or else the list bundled with Nakagawa gives every disc its "
+                             "verification tier")
     parser.add_argument("--verify-only", action="store_true",
                         help="Hash and classify the discs without building any")
     args = parser.parse_args(argv)
     if args.jobs < 1 or args.title_timeout < 1 or args.launch_timeout < 1:
         parser.error("--jobs, --title-timeout and --launch-timeout must be positive")
     only = read_only_list(args.only) if args.only is not None else None
-    dat = None
-    if args.redump_dat is not None:
-        try:
+    # The list is the one given (imported first), else the data folder's import, else the list
+    # bundled with Nakagawa (disc_verify.load_verification_dat).
+    try:
+        if args.redump_dat is not None:
             dat = disc_verify.import_dat(args.redump_dat, args.user_data_root)
-        except disc_verify.DiscVerifyError as exc:
-            parser.error(f"{exc} [{exc.boundary_code}]")
+        else:
+            dat = disc_verify.load_verification_dat(args.user_data_root)
+    except disc_verify.DiscVerifyError as exc:
+        parser.error(f"{exc} [{exc.boundary_code}]")
+    if dat is not None:
+        print(f"library_build: discs are checked against {dat.describe()}", file=sys.stderr)
     build = LibraryBuild(
         args.disc_root, args.user_data_root, args.work_dir, args.manifest_dir,
         jobs=args.jobs, priority=args.priority, title_timeout_seconds=args.title_timeout,

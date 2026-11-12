@@ -6987,8 +6987,9 @@ static void test_disc_verify_line_badge_and_note(void) {
         title.disc_id = "TEST70021";
         title.library_status = "Ready";
         title.badge = "Unknown dump";
-        title.disc_check_note = "Disc check: not in your disc list. This means not shown to be "
-                                "retail, not modified: Redump's PSP list names no disc IDs.";
+        title.disc_check_note = "Disc check: not in the disc list. That doesn't mean it's bad: it "
+                                "is only not shown to be retail, and its disc ID isn't one the "
+                                "list names.";
         title.primary_action_label = "PLAY";
         title.primary_action = PLAYER_UI_PRIMARY_PLAY;
         title.primary_action_enabled = true;
@@ -7008,7 +7009,7 @@ static void test_disc_verify_line_badge_and_note(void) {
         }
         (void)nk_ui_dump(ui, dump, sizeof(dump));
         CHECK(strstr(dump, "\"UNKNOWN DUMP\"") != NULL &&
-                  strstr(dump, "not shown to be retail, not modified") != NULL,
+                  strstr(dump, "That doesn't mean it's bad") != NULL,
               "the title page names the tier and what it means");
         CHECK(nk_ui_focused(ui) == PLAYER_UI_ID_TITLE_PRIMARY, "PLAY keeps the default focus");
         nk_ui_destroy(ui);

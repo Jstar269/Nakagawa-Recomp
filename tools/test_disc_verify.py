@@ -3,13 +3,17 @@
 
 """nk_core.disc_verify and the bring-up's library records keyed by disc ID plus hash.
 
-Synthetic data only: a datafile in Redump's layout naming made-up images, never a real list.
-The C reader (src/core/nk_disc_verify.c) has the same cases in tests/native/test_disc_verify.c.
+Synthetic data, a datafile in Redump's layout naming made-up images, for every case but one:
+``BundledListTests`` reads the real list the project ships (assets/redump), checks it against
+its pin and uses it as the default. The C reader (src/core/nk_disc_verify.c) has the same cases
+in tests/native/test_disc_verify.c.
 """
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -18,6 +22,7 @@ import tempfile
 import unittest
 from typing import cast
 from unittest import mock
+import zipfile
 import zlib
 
 TOOLS = Path(__file__).resolve().parent
@@ -365,6 +370,217 @@ class BringupLibraryTests(unittest.TestCase):
         self.write("disc.iso", RETAIL)
         self.write("disc.iso", OTHER)  # e.g. a compressed image expanded over the same path
         self.assertEqual([game["content_sha1"] for game in self.games()], [digest(OTHER).sha1])
+
+
+def zip_of(entries: dict[str, bytes], method: int = zipfile.ZIP_DEFLATED) -> bytes:
+    """A zip of the given files, as Redump serves its datfile (one .dat, deflated)."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=method) as archive:
+        for name, data in entries.items():
+            archive.writestr(name, data)
+    return buffer.getvalue()
+
+
+class ZipAndEntityTests(unittest.TestCase):
+    """Redump's zip is read as the .dat inside it; anything else is refused by name."""
+
+    def refused(self, data: bytes, code: str, *, max_bytes: int | None = None) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "list.zip"
+            path.write_bytes(data)
+            patch = (mock.patch.object(disc_verify, "MAX_DAT_BYTES", max_bytes)
+                     if max_bytes is not None else contextlib.nullcontext())
+            with patch, self.assertRaises(disc_verify.DiscVerifyError) as raised:
+                disc_verify.load_dat(path)
+            self.assertEqual(raised.exception.boundary_code, code)
+            # The importer refuses it the same way and keeps nothing.
+            with patch, self.assertRaises(disc_verify.DiscVerifyError) as raised:
+                disc_verify.import_dat(path, Path(folder) / "data")
+            self.assertEqual(raised.exception.boundary_code, code)
+            self.assertFalse(disc_verify.imported_dat_path(Path(folder) / "data").exists())
+
+    def test_the_zip_as_served_is_read_and_imported_as_its_dat(self) -> None:
+        text = datafile().encode("utf-8")
+        for method in (zipfile.ZIP_DEFLATED, zipfile.ZIP_STORED):
+            with self.subTest(method=method), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                source = root / "Sony - PlayStation Portable - Datfile (2) (2026-10-31).zip"
+                source.write_bytes(zip_of({"Synthetic - Datfile (2) (2026-10-31).dat": text}, method))
+                self.assertEqual(len(disc_verify.load_dat(source)), 2)
+                dat = disc_verify.import_dat(source, root / "data")
+                self.assertEqual((len(dat), dat.source), (2, disc_verify.LIST_IMPORTED))
+                # The .dat inside is what is kept, so the C reader and later loads read text.
+                self.assertEqual(disc_verify.imported_dat_path(root / "data").read_bytes(), text)
+
+    def test_nk_cli_imports_the_zip(self) -> None:
+        import argparse
+
+        import nk_cli
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            source = root / "redump.zip"
+            source.write_bytes(zip_of({"list.dat": datafile().encode("utf-8")}))
+            shown = io.StringIO()
+            with contextlib.redirect_stdout(shown):
+                self.assertEqual(nk_cli.cmd_redump_import(argparse.Namespace(
+                    datafile=source, user_data_root=root / "data")), 0)
+            self.assertIn("Imported a Redump list of 2 discs (version 2026-10-31)", shown.getvalue())
+            self.assertIn("in place of the list bundled with Nakagawa", shown.getvalue())
+
+    def test_a_zip_that_is_not_one_dat_is_refused_by_name(self) -> None:
+        text = datafile().encode("utf-8")
+        self.refused(zip_of({"a.dat": text, "b.dat": text}), "DISC_DAT_ZIP_INVALID")
+        self.refused(zip_of({"list.txt": text}), "DISC_DAT_ZIP_INVALID")
+        # An empty zip has no file header to be told by, so it is read as text, and refused.
+        self.refused(zip_of({}), "DISC_DAT_NOT_DATAFILE")
+        whole = zip_of({"list.dat": text}, zipfile.ZIP_STORED)
+        self.refused(whole[:-10], "DISC_DAT_ZIP_INVALID")  # cut short: no end record
+        # A changed byte in the stored data fails its CRC-32.
+        at = whole.index(b"<datafile>")
+        bent = whole[:at] + b"<DATAFILE>" + whole[at + len(b"<datafile>"):]
+        self.refused(bent, "DISC_DAT_ZIP_INVALID")
+        # The encrypted flag, in the local and central headers.
+        local, central = whole.index(b"PK\x03\x04"), whole.index(b"PK\x01\x02")
+        flagged = bytearray(whole)
+        flagged[local + 6] |= 1
+        flagged[central + 8] |= 1
+        self.refused(bytes(flagged), "DISC_DAT_ZIP_INVALID")
+
+    def test_an_oversized_list_in_a_zip_is_refused_before_it_is_read_whole(self) -> None:
+        big = datafile().encode("utf-8")
+        # The header's size is over the cap ...
+        self.refused(zip_of({"list.dat": big}), "DISC_DAT_TOO_LARGE", max_bytes=len(big) - 1)
+        # ... and a header that understates it is caught by reading at most the cap plus one.
+        whole = bytearray(zip_of({"list.dat": big}))
+        central = whole.index(b"PK\x01\x02")
+        local = whole.index(b"PK\x03\x04")
+        for header, offset in ((central, 24), (local, 22)):
+            whole[header + offset:header + offset + 4] = (16).to_bytes(4, "little")
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "list.zip"
+            path.write_bytes(bytes(whole))
+            with mock.patch.object(disc_verify, "MAX_DAT_BYTES", 64), \
+                    self.assertRaises(disc_verify.DiscVerifyError) as raised:
+                disc_verify.load_dat(path)
+            self.assertIn(raised.exception.boundary_code,
+                          ("DISC_DAT_TOO_LARGE", "DISC_DAT_ZIP_INVALID"))
+
+    def test_entity_bearing_lists_are_refused_by_name(self) -> None:
+        good = datafile()
+        external = ('<!DOCTYPE datafile PUBLIC "-//Logiqx//DTD ROM Management Datafile//EN" '
+                    '"http://www.logiqx.com/Dats/datafile.dtd">')
+        self.assertIn(external, good)
+        cases = {
+            "internal subset with an entity": good.replace(
+                external, '<!DOCTYPE datafile [<!ENTITY big "x">]>').replace(
+                "Synthetic &amp; Test", "&big;"),
+            "empty internal subset": good.replace(external, "<!DOCTYPE datafile [ ]>"),
+            "external entity": good.replace(
+                "<datafile>", '<datafile><!ENTITY xxe SYSTEM "file:///etc/passwd">'),
+            "undeclared reference": good.replace("Synthetic &amp; Test", "&xxe;"),
+            "bare ampersand": good.replace("Synthetic &amp; Test", "A & B"),
+        }
+        for name, text in cases.items():
+            with self.subTest(name), self.assertRaises(disc_verify.DiscVerifyError) as raised:
+                disc_verify.parse_dat_text(text)
+            self.assertEqual(raised.exception.boundary_code, "DISC_DAT_ENTITY_REFUSED", name)
+        # The external DOCTYPE Redump's lists carry is skipped unread; character references stay.
+        dat = disc_verify.parse_dat_text(good.replace("Synthetic &amp; Test", "A &#38; B &#x26;"))
+        self.assertEqual(dat.name, "A &#38; B &#x26;")
+
+
+#: The list bundled with Nakagawa (assets/redump/PROVENANCE.md). A refreshed list changes these
+#: with its pin; tests/native/test_disc_verify.c checks the same counts with the C reader.
+BUNDLED_DATE = "2026-11-12 16-02-53"
+BUNDLED_DISCS = 3546
+BUNDLED_SERIALS = 3907
+BUNDLED_SHA256 = "7e4afb96fe3a02b3e43e4138b1ebba911bdb1d96c73fa61f294166bb14fbebaf"
+BUNDLED_SIZE = 346932
+
+
+class BundledListTests(unittest.TestCase):
+    """The Redump PSP list shipped in assets/redump: pinned, used by default, overridden by an
+    import. The only real list the tests read; the cases above use synthetic ones."""
+
+    def test_the_bundled_list_matches_its_pin(self) -> None:
+        path = disc_verify.bundled_dat_path()
+        self.assertEqual(path, disc_verify.PROJECT_ROOT / "assets" / "redump" / "redump-psp.zip")
+        data = path.read_bytes()
+        self.assertEqual((len(data), hashlib.sha256(data).hexdigest()),
+                         (BUNDLED_SIZE, BUNDLED_SHA256))
+        manifest = json.loads((disc_verify.PROJECT_ROOT / "assets" / "release_manifest.json")
+                              .read_text(encoding="utf-8"))
+        pin = next(item for item in manifest["components"] if item["id"] == "redump-psp-datfile")
+        self.assertEqual((pin["source_path"], pin["hashes"]["sha256"], pin["size_bytes"]),
+                         ("assets/redump/redump-psp.zip", BUNDLED_SHA256, BUNDLED_SIZE))
+        provenance = (path.parent / "PROVENANCE.md").read_text(encoding="utf-8")
+        row = next(line for line in provenance.splitlines() if line.startswith("| `redump-psp.zip`"))
+        self.assertIn("imported byte-identical", row)
+        self.assertIn(f"`{BUNDLED_SHA256}`", row)
+        self.assertIn(pin["fetched_utc"], row)
+        self.assertIn("`https://redump.info/datfile/PSP`", row)
+
+    def test_the_bundled_list_loads_with_its_counts_and_a_known_entry_verifies(self) -> None:
+        dat = disc_verify.load_dat(disc_verify.bundled_dat_path())
+        self.assertEqual((dat.name, dat.version, dat.date),
+                         ("Sony - PlayStation Portable", BUNDLED_DATE, BUNDLED_DATE))
+        self.assertEqual((dat.games, len(dat), dat.rejected_roms, len(dat.serials)),
+                         (BUNDLED_DISCS, BUNDLED_DISCS, 0, BUNDLED_SERIALS))
+        known = disc_verify.DiscDigest(sha1="3ba8af1354c8ae1e5119dbff19730793c21ad56e",
+                                       crc32="b71764f4", size_bytes=1207468032)
+        self.assertEqual(disc_verify.classify("ULJM06340", known, dat), disc_verify.VERIFIED_RETAIL)
+        changed = disc_verify.DiscDigest(known.sha1, "b71764f5", known.size_bytes)
+        # The list names disc IDs, so a changed copy of a listed disc is Modified on its own.
+        self.assertEqual(disc_verify.classify("ULJM06340", changed, dat), disc_verify.MODIFIED)
+        self.assertEqual(disc_verify.classify("TEST70009", changed, dat), disc_verify.UNKNOWN)
+        self.assertIn("ULUS10020", dat.serials)
+
+    def test_the_bundled_list_is_the_default_and_an_import_overrides_it(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            data = Path(folder) / "data"
+            dat = disc_verify.load_verification_dat(data)
+            assert dat is not None
+            self.assertEqual((dat.source, len(dat)), (disc_verify.LIST_BUNDLED, BUNDLED_DISCS))
+            self.assertEqual(dat.describe(), "the Redump list bundled with Nakagawa "
+                                             f"(dated {BUNDLED_DATE}, {BUNDLED_DISCS} discs)")
+            source = Path(folder) / "chosen.dat"
+            source.write_text(datafile(), encoding="utf-8")
+            disc_verify.import_dat(source, data)
+            dat = disc_verify.load_verification_dat(data)
+            assert dat is not None
+            self.assertEqual((dat.source, len(dat)), (disc_verify.LIST_IMPORTED, 2))
+            self.assertEqual(dat.describe(), "your imported Redump list (dated 2026-10-31, 2 discs)")
+            # A damaged import is reported, never replaced by the bundled list.
+            disc_verify.imported_dat_path(data).write_text("damaged", encoding="utf-8")
+            with self.assertRaises(disc_verify.DiscVerifyError) as raised:
+                disc_verify.load_verification_dat(data)
+            self.assertEqual(raised.exception.boundary_code, "DISC_DAT_NOT_DATAFILE")
+            # Neither list: None, so the tier is Not checked.
+            self.assertIsNone(disc_verify.load_verification_dat(
+                Path(folder) / "empty", bundled=Path(folder) / "missing.zip"))
+
+    def test_bringup_says_which_list_it_used(self) -> None:
+        import nk_cli
+
+        with tempfile.TemporaryDirectory() as folder:
+            data = Path(folder) / "data"
+            shown = io.StringIO()
+            with contextlib.redirect_stdout(shown):
+                dat = nk_cli._verification_dat(data)
+            assert dat is not None and dat.source == disc_verify.LIST_BUNDLED
+            self.assertIn("Disc check: compared with the Redump list bundled with Nakagawa "
+                          f"(dated {BUNDLED_DATE}, {BUNDLED_DISCS} discs).", shown.getvalue())
+            # An image not in the list is Unknown, never verified.
+            self.assertEqual(disc_verify.classify("TEST70001", digest(RETAIL), dat),
+                             disc_verify.UNKNOWN)
+            disc_verify.imported_dat_path(data).parent.mkdir(parents=True)
+            disc_verify.imported_dat_path(data).write_text("damaged", encoding="utf-8")
+            shown = io.StringIO()
+            with contextlib.redirect_stdout(shown):
+                self.assertIsNone(nk_cli._verification_dat(data))
+            self.assertIn("The imported Redump list was not used [DISC_DAT_NOT_DATAFILE]",
+                          shown.getvalue())
 
 
 if __name__ == "__main__":

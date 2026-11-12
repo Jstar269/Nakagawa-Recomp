@@ -2,13 +2,16 @@
 /* Copyright (C) 2026 the Nakagawa Recomp authors */
 
 /*
- * Disc verification: a whole-image hash compared with the user's Redump list.
+ * Disc verification: a whole-image hash compared with Redump's PSP list.
  *
  * A disc image is hashed whole, with SHA-1 and CRC-32 (the hashes Redump
  * lists), on the user's machine. A compressed image (CSO, ZSO, CHD) is hashed
  * after its one-time expansion (nk_disc_expand.h), so it hashes the same as the
- * .iso it holds. The hashes are compared with a Redump datafile the user
- * imports themselves (nk_disc_dat_import); nothing is uploaded or downloaded.
+ * .iso it holds. The hashes are compared with one Redump datafile: the list the
+ * user imported (nk_disc_dat_import) when there is one, which takes precedence,
+ * else the list bundled with Nakagawa (assets/redump/redump-psp.zip in the
+ * player's folder, Redump's own download kept byte for byte). Nothing is
+ * uploaded or downloaded.
  *
  * Tiers (the same rules as tools/nk_core/disc_verify.py):
  *   VERIFIED_RETAIL  the SHA-1 matches a disc in the list, and the CRC-32 and
@@ -17,13 +20,20 @@
  *                    the list names in a <serial>, or one a verified image in
  *                    the same library carries (fan translations, patched or
  *                    trimmed images);
- *   UNKNOWN          neither;
- *   NOT_CHECKED      no list imported, or the image was never hashed.
+ *   UNKNOWN          neither: not in the list, which means "not shown to be
+ *                    retail", never "bad";
+ *   NOT_CHECKED      no list found, or the image was never hashed.
  *
  * The datafile (Logiqx XML, as Redump publishes it) is read by a small bounded
- * scanner with no entity or DTD processing: each <game> element, the size,
+ * scanner that expands no entity and never reads a DTD: a <!DOCTYPE> that only
+ * names Logiqx's public DTD (as Redump's lists do) is skipped unread, and a
+ * list that declares entities, carries an internal DTD subset or refers to an
+ * entity other than XML's five predefined ones and character references is
+ * refused (DISC_DAT_ENTITY_REFUSED). It reads each <game> element, the size,
  * crc and sha1 attributes of its <rom> elements, and any <serial> text. A rom
- * with a malformed hash or size is skipped and counted.
+ * with a malformed hash or size is skipped and counted. A datafile may be the
+ * zip Redump serves: one .dat inside, stored or deflated, inflated under the
+ * same size cap and checked against its CRC-32 (DISC_DAT_ZIP_INVALID).
  */
 
 #ifndef NK_DISC_VERIFY_H
@@ -44,6 +54,11 @@ extern "C" {
    the path tools/nk_core/disc_verify.py uses too). */
 #define NK_DISC_DAT_DIR "verification"
 #define NK_DISC_DAT_FILE "redump.dat"
+/* The bundled list, under the player's folder (and the checkout):
+   "assets/redump/redump-psp.zip", BUNDLED_DAT_RELATIVE_PATH in disc_verify.py. */
+#define NK_DISC_BUNDLED_DAT_DIR1 "assets"
+#define NK_DISC_BUNDLED_DAT_DIR2 "redump"
+#define NK_DISC_BUNDLED_DAT_FILE "redump-psp.zip"
 /* The largest datafile read: Redump's biggest lists are a few MiB. */
 #define NK_DISC_DAT_MAX_BYTES (64u * 1024u * 1024u)
 #define NK_DISC_DAT_MAX_ROMS 200000u
@@ -57,6 +72,8 @@ extern "C" {
 #define NK_DISC_DAT_NOT_DATAFILE   "DISC_DAT_NOT_DATAFILE"
 #define NK_DISC_DAT_EMPTY          "DISC_DAT_EMPTY"
 #define NK_DISC_DAT_TOO_LARGE      "DISC_DAT_TOO_LARGE"
+#define NK_DISC_DAT_ENTITY_REFUSED "DISC_DAT_ENTITY_REFUSED"
+#define NK_DISC_DAT_ZIP_INVALID    "DISC_DAT_ZIP_INVALID"
 
 typedef enum {
     NK_DISC_TIER_NOT_CHECKED = 0,
@@ -141,23 +158,49 @@ typedef struct {
     size_t rejected_roms;
     char name[128];
     char version[64];
+    char date[64];
 } NkDiscDat;
 
 void nk_disc_dat_free(NkDiscDat *dat);
 /* Read a datafile from memory. Refuses a text with no complete <datafile>
-   element, a list cut short included (DISC_DAT_NOT_DATAFILE), no rom with a SHA-1 (DISC_DAT_EMPTY) or more than
-   NK_DISC_DAT_MAX_ROMS roms (DISC_DAT_TOO_LARGE). */
+   element, a list cut short included (DISC_DAT_NOT_DATAFILE), entity
+   declarations, an internal DTD subset or an entity reference XML does not
+   predefine (DISC_DAT_ENTITY_REFUSED), no rom with a SHA-1 (DISC_DAT_EMPTY) or
+   more than NK_DISC_DAT_MAX_ROMS roms (DISC_DAT_TOO_LARGE). */
 bool nk_disc_dat_parse(const char *text, size_t length, NkDiscDat *out,
                        NkDiscExpandStatus *status);
-/* The same, read from a file of at most NK_DISC_DAT_MAX_BYTES. */
+/* The same, read from a file of at most NK_DISC_DAT_MAX_BYTES: a .dat, or the
+   zip Redump serves with one .dat inside (DISC_DAT_ZIP_INVALID when it is not
+   one). */
 bool nk_disc_dat_load(const char *path, NkDiscDat *out, NkDiscExpandStatus *status);
 /* <data_root>/verification/redump.dat. */
 bool nk_disc_dat_path(const char *data_root, char *out, size_t out_size);
-/* Check a datafile the user chose and keep a copy in their data folder,
-   replacing an earlier import whole (written beside it, then renamed). out
-   (optional) receives the parsed list. */
+/* <base_dir>assets/redump/redump-psp.zip, with the platform's separators.
+   base_dir is the player's folder; it may end in a separator (as
+   SDL_GetBasePath's does) or not. */
+bool nk_disc_bundled_dat_path(const char *base_dir, char *out, size_t out_size);
+/* Check a datafile the user chose (a .dat, or Redump's zip) and keep a copy
+   of the .dat in their data folder, replacing an earlier import whole
+   (written beside it, then renamed). From then on it takes precedence over the
+   bundled list. out (optional) receives the parsed list. */
 bool nk_disc_dat_import(const char *source, const char *data_root, NkDiscDat *out,
                         NkDiscExpandStatus *status);
+
+/* Which list a check used. */
+typedef enum {
+    NK_DISC_LIST_NONE = 0,  /* neither list was found */
+    NK_DISC_LIST_IMPORTED,  /* <data_root>/verification/redump.dat */
+    NK_DISC_LIST_BUNDLED    /* the list bundled with Nakagawa */
+} NkDiscListSource;
+
+/* The list a check uses: the import in data_root when there is one, else the
+   bundled list at bundled_path (NULL or "" for none). True with *source set
+   when a list was read; false with *source NONE and an empty status code when
+   neither exists; false with *source naming the list and status saying why
+   when the chosen list can't be read. A damaged import is reported, never
+   replaced by the bundled list. */
+bool nk_disc_dat_load_active(const char *data_root, const char *bundled_path, NkDiscDat *out,
+                             NkDiscListSource *source, NkDiscExpandStatus *status);
 
 /* Whether the list names this disc ID in a <serial>. */
 bool nk_disc_dat_has_serial(const NkDiscDat *dat, const char *disc_id);
@@ -177,44 +220,52 @@ size_t nk_disc_normalize_serials(const char *text, size_t length, char (*out_ids
 /* ---- one call for an add worker ----------------------------------------- */
 
 /* How one disc check ended. HASHED and later fill digest; tier says how the
-   image compares with the imported list (NOT_CHECKED when none is imported). */
+   image compares with the list used (NOT_CHECKED when none was found). */
 typedef enum {
     NK_DISC_VERIFY_HASHED = 0,     /* hashed; tier is set */
     NK_DISC_VERIFY_CANCELLED,      /* callbacks->is_cancelled said stop; nothing kept */
     NK_DISC_VERIFY_READ_FAILED,    /* the image could not be read whole; nothing kept */
-    NK_DISC_VERIFY_LIST_UNUSABLE   /* hashed, but the imported list is damaged: tier NOT_CHECKED */
+    NK_DISC_VERIFY_LIST_UNUSABLE   /* hashed, but the list is damaged: tier NOT_CHECKED */
 } NkDiscVerifyResult;
 
 typedef struct {
     NkDiscVerifyResult result;
     NkDiscTier tier;
     NkDiscDigest digest;
+    NkDiscListSource list;  /* which list the image was compared with */
+    char list_date[64];     /* that list's own date (its header's <date>, else <version>) */
     char code[48];     /* empty, or the NK_DISC_* / DISC_DAT_* code behind a failure */
-    char reason[400];  /* one plain sentence for the card and the log */
+    char reason[400];  /* one plain sentence for the card and the log; names the list */
 } NkDiscVerification;
 
 /* Hash the image at iso_path (for a compressed disc, the expansion the import
-   made) and compare it with the list imported into data_root. Reads the whole
-   image once, so call it from a worker, never the UI thread. callbacks may be
-   NULL; its on_progress gets bytes done of the total and is_cancelled is polled
-   between 1 MiB reads. disc_id_verified_elsewhere: a verified image in the same
-   library has this disc ID (nk_library_has_verified_disc_id), which makes a
-   modified image MODIFIED rather than UNKNOWN. Returns true for HASHED and
-   LIST_UNUSABLE. The image is never changed and nothing leaves the machine.
+   made) and compare it with the list nk_disc_dat_load_active picks: the import
+   in data_root, else the bundled list at bundled_dat_path (NULL for none;
+   nk_disc_bundled_dat_path makes it). Reads the whole image once, so call it
+   from a worker, never the UI thread. callbacks may be NULL; its on_progress
+   gets bytes done of the total and is_cancelled is polled between 1 MiB reads.
+   disc_id_verified_elsewhere: a verified image in the same library has this
+   disc ID (nk_library_has_verified_disc_id), which makes a modified image
+   MODIFIED rather than UNKNOWN. Returns true for HASHED and LIST_UNUSABLE.
+   check.list and check.reason say which list was used and its date. The image
+   is never changed and nothing leaves the machine.
 
        NkDiscVerification check;
        NkDiscExpandCallbacks cb = { on_progress, is_cancelled, job };
-       if (nk_disc_verify_image(game.iso_path, data_root, game.disc_id,
+       if (nk_disc_verify_image(game.iso_path, data_root, bundled_dat_path, game.disc_id,
                                 nk_library_has_verified_disc_id(&app->library, game.disc_id),
                                 &cb, &check)) {
            nk_disc_verification_to_entry(&check, &game);   (hashes and tier)
        }
        log or show check.reason either way, then add the game as today.
 
-   Redump's PSP list names no disc IDs, so with it a modified image is MODIFIED
-   only when its retail disc is verified in the same library; a lone fan
-   translation is UNKNOWN, which means "not shown to be retail", not "modified". */
-bool nk_disc_verify_image(const char *iso_path, const char *data_root, const char *disc_id,
+   Redump's current PSP list names disc IDs in <serial> for almost every disc,
+   so a changed image of a listed disc is MODIFIED. A list without serials (an
+   older export) makes a modified image MODIFIED only when its retail disc is
+   verified in the same library; otherwise it is UNKNOWN, which means "not
+   shown to be retail", not "modified" and not "bad". */
+bool nk_disc_verify_image(const char *iso_path, const char *data_root,
+                          const char *bundled_dat_path, const char *disc_id,
                           bool disc_id_verified_elsewhere,
                           const NkDiscExpandCallbacks *callbacks, NkDiscVerification *out);
 

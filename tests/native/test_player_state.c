@@ -2643,8 +2643,8 @@ static void test_disc_check_after_add(void) {
     assert(offers_cancel && strcmp(line, "Checking disc image: 40%") == 0);
 
     NkDiscVerification check;
-    assert(nk_disc_verify_image(item.iso_path, data_root, item.disc_id, verified_elsewhere,
-                                NULL, &check));
+    assert(nk_disc_verify_image(item.iso_path, data_root, NULL, item.disc_id,
+                                verified_elsewhere, NULL, &check));
     assert(check.tier == NK_DISC_TIER_UNKNOWN);
     player_app_disc_check_finish(app, &check);
     assert(!app->disc_check.running && app->disc_check.count == 0);
@@ -2667,8 +2667,8 @@ static void test_disc_check_after_add(void) {
     assert(strcmp(app->games[player_app_find_added_game(app, &retail_game)].iso_path,
                   retail_iso) == 0);
     assert(player_app_disc_check_take(app, &item, &verified_elsewhere));
-    assert(nk_disc_verify_image(item.iso_path, data_root, item.disc_id, verified_elsewhere,
-                                NULL, &check));
+    assert(nk_disc_verify_image(item.iso_path, data_root, NULL, item.disc_id,
+                                verified_elsewhere, NULL, &check));
     assert(check.tier == NK_DISC_TIER_VERIFIED_RETAIL);
     player_app_disc_check_finish(app, &check);
     static NkLibrary loaded;  /* too large for the stack (NK_MAX_GAMES) */
@@ -2723,8 +2723,8 @@ static void test_disc_check_after_add(void) {
         assert(player_app_remove_game(app, 0));
         assert(player_app_add_game(app, &retail_game));
         assert(player_app_disc_check_take(app, &item, &verified_elsewhere));
-        assert(nk_disc_verify_image(item.iso_path, data_root, item.disc_id, verified_elsewhere,
-                                    NULL, &check));
+        assert(nk_disc_verify_image(item.iso_path, data_root, NULL, item.disc_id,
+                                    verified_elsewhere, NULL, &check));
         player_app_disc_check_finish(app, &check);
         assert(app->game_count == 1 && app->games[0].content_sha1[0] != '\0');
         assert(nk_library_load(&loaded, path) == NK_OK && nk_library_count(&loaded) == 1);
@@ -2783,8 +2783,8 @@ static void test_disc_check_after_add(void) {
         assert(app->game_count == 0);
         assert(player_app_add_game(app, &retail_game));
         assert(player_app_disc_check_take(app, &item, &verified_elsewhere));
-        assert(nk_disc_verify_image(item.iso_path, data_root, item.disc_id, verified_elsewhere,
-                                    NULL, &check));
+        assert(nk_disc_verify_image(item.iso_path, data_root, NULL, item.disc_id,
+                                    verified_elsewhere, NULL, &check));
         player_app_disc_check_finish(app, &check);
         assert(app->game_count == 1 &&
                app->games[0].disc_verification == NK_DISC_TIER_VERIFIED_RETAIL);
@@ -2822,8 +2822,8 @@ static void test_disc_check_after_add(void) {
     assert(player_app_disc_check_take(app, &item, &verified_elsewhere));
     assert(player_app_disc_check_line(app, line, sizeof(line), &offers_cancel) &&
            strcmp(line, "Checking disc image: 0%") == 0);
-    assert(nk_disc_verify_image(item.iso_path, data_root, item.disc_id, verified_elsewhere,
-                                NULL, &check));
+    assert(nk_disc_verify_image(item.iso_path, data_root, NULL, item.disc_id,
+                                verified_elsewhere, NULL, &check));
     player_app_disc_check_finish(app, &check);
     assert(player_app_disc_check_line(app, line, sizeof(line), &offers_cancel) &&
            strcmp(line, "A disc image could not be checked") == 0);
@@ -2854,8 +2854,8 @@ static void test_disc_check_after_add(void) {
            app->games[translated_index].disc_verification == NK_DISC_TIER_NOT_CHECKED);
     assert(player_app_add_game(app, &translated));
     assert(player_app_disc_check_take(app, &item, &verified_elsewhere));
-    assert(nk_disc_verify_image(item.iso_path, data_root, item.disc_id, verified_elsewhere,
-                                NULL, &check));
+    assert(nk_disc_verify_image(item.iso_path, data_root, NULL, item.disc_id,
+                                verified_elsewhere, NULL, &check));
     player_app_disc_check_finish(app, &check);
     translated_index = player_app_find_added_game(app, &translated);
     assert(translated_index >= 0 &&
@@ -2867,8 +2867,8 @@ static void test_disc_check_after_add(void) {
     assert(player_app_disc_check_queue(app, &retail_game));
     assert(player_app_disc_check_take(app, &item, &verified_elsewhere));
     player_app_disc_check_cancel(app);
-    assert(nk_disc_verify_image(item.iso_path, data_root, item.disc_id, verified_elsewhere,
-                                NULL, &check));
+    assert(nk_disc_verify_image(item.iso_path, data_root, NULL, item.disc_id,
+                                verified_elsewhere, NULL, &check));
     assert(check.result == NK_DISC_VERIFY_HASHED);
     player_app_disc_check_finish(app, &check);
     assert(app->disc_check.count == 0 && !app->disc_check.running);

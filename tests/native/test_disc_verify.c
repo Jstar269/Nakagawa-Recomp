@@ -6,7 +6,9 @@
  * ID plus content hash (src/core/nk_library.c), on synthetic data only: the
  * SHA-1 and CRC-32 known answers, the whole-image hash with progress and
  * cancel, the Redump datafile reader, the three tiers, the import into the
- * data folder, and library files: one written before hashing still loads, a
+ * data folder, Redump's zip, the refusal of entity-bearing lists, the list
+ * bundled with Nakagawa (the one real list read: assets/redump, from the
+ * checkout) and an import overriding it, and library files: one written before hashing still loads, a
  * fan translation and its retail disc are two records, the modified one
  * labelled. The CSO/ZSO/CHD round trips in test_disc_expand.c check that an
  * expansion hashes the same as its .iso.
@@ -18,6 +20,7 @@
 #include "nk_disc_verify.h"
 #include "nk_library.h"
 #include "nk_platform.h"
+#include "nk_zip.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -418,33 +421,33 @@ static void test_verify_image_for_an_add_worker(void) {
     write_bytes(other, g_other, IMAGE_BYTES);
 
     /* No list imported yet: hashed, not checked, and it says so. */
-    CHECK(nk_disc_verify_image(retail, root, "TEST70001", false, NULL, &check));
+    CHECK(nk_disc_verify_image(retail, root, NULL, "TEST70001", false, NULL, &check));
     CHECK(check.result == NK_DISC_VERIFY_HASHED && check.tier == NK_DISC_TIER_NOT_CHECKED);
     CHECK(strcmp(check.digest.sha1, g_retail_digest.sha1) == 0 && check.code[0] == '\0');
     CHECK(strstr(check.reason, "no Redump list") != NULL);
 
     path_in(source, sizeof(source), "worker.dat");
-    char *text = build_dat(false); /* serial-less, as Redump's PSP list is */
+    char *text = build_dat(false); /* serial-less, as Redump's older PSP exports were */
     write_bytes(source, text, strlen(text));
     free(text);
     CHECK(nk_disc_dat_import(source, root, NULL, &status));
 
     Progress progress = {0, 0, 0, -1};
     NkDiscExpandCallbacks callbacks = {on_progress, on_cancel, &progress};
-    CHECK(nk_disc_verify_image(retail, root, "TEST70001", false, &callbacks, &check));
+    CHECK(nk_disc_verify_image(retail, root, NULL, "TEST70001", false, &callbacks, &check));
     CHECK(check.tier == NK_DISC_TIER_VERIFIED_RETAIL && progress.last_done == IMAGE_BYTES);
     CHECK(strncmp(check.reason, "Verified retail", 15) == 0);
     /* A lone modified image is unknown; beside its verified retail disc, modified. */
-    CHECK(nk_disc_verify_image(modified, root, "TEST70001", false, NULL, &check));
+    CHECK(nk_disc_verify_image(modified, root, NULL, "TEST70001", false, NULL, &check));
     CHECK(check.tier == NK_DISC_TIER_UNKNOWN && strncmp(check.reason, "Unknown", 7) == 0);
-    CHECK(nk_disc_verify_image(modified, root, "TEST70001", true, NULL, &check));
+    CHECK(nk_disc_verify_image(modified, root, NULL, "TEST70001", true, NULL, &check));
     CHECK(check.tier == NK_DISC_TIER_MODIFIED && strncmp(check.reason, "Modified", 8) == 0);
-    CHECK(nk_disc_verify_image(other, root, "TEST70009", false, NULL, &check));
+    CHECK(nk_disc_verify_image(other, root, NULL, "TEST70009", false, NULL, &check));
     CHECK(check.tier == NK_DISC_TIER_UNKNOWN);
 
     NkGameEntry entry;
     memset(&entry, 0, sizeof(entry));
-    CHECK(nk_disc_verify_image(retail, root, "TEST70001", false, NULL, &check));
+    CHECK(nk_disc_verify_image(retail, root, NULL, "TEST70001", false, NULL, &check));
     nk_disc_verification_to_entry(&check, &entry);
     CHECK(strcmp(entry.content_sha1, g_retail_digest.sha1) == 0 &&
           strcmp(entry.content_crc32, g_retail_digest.crc32) == 0 &&
@@ -453,7 +456,7 @@ static void test_verify_image_for_an_add_worker(void) {
     /* A cancel or an unreadable image keeps nothing, and the entry stays unhashed. */
     Progress stop = {0, 0, 0, 0};
     NkDiscExpandCallbacks cancel = {on_progress, on_cancel, &stop};
-    CHECK(!nk_disc_verify_image(retail, root, "TEST70001", false, &cancel, &check));
+    CHECK(!nk_disc_verify_image(retail, root, NULL, "TEST70001", false, &cancel, &check));
     CHECK(check.result == NK_DISC_VERIFY_CANCELLED && check.digest.sha1[0] == '\0');
     CHECK(strcmp(check.code, NK_DISC_CANCELLED) == 0);
     memset(&entry, 0, sizeof(entry));
@@ -461,16 +464,241 @@ static void test_verify_image_for_an_add_worker(void) {
     CHECK(entry.content_sha1[0] == '\0' && entry.disc_verification == NK_DISC_TIER_NOT_CHECKED);
     char missing[NATIVE_TEST_PATH_MAX];
     path_in(missing, sizeof(missing), "worker-missing.iso");
-    CHECK(!nk_disc_verify_image(missing, root, "TEST70001", false, NULL, &check));
+    CHECK(!nk_disc_verify_image(missing, root, NULL, "TEST70001", false, NULL, &check));
     CHECK(check.result == NK_DISC_VERIFY_READ_FAILED && strcmp(check.code, NK_DISC_READ_FAILED) == 0);
 
     /* A damaged imported list: still hashed, not checked, with the list's code. */
     CHECK(nk_disc_dat_path(root, imported, sizeof(imported)));
     write_bytes(imported, "damaged", 7);
-    CHECK(nk_disc_verify_image(retail, root, "TEST70001", false, NULL, &check));
+    CHECK(nk_disc_verify_image(retail, root, NULL, "TEST70001", false, NULL, &check));
     CHECK(check.result == NK_DISC_VERIFY_LIST_UNUSABLE && check.tier == NK_DISC_TIER_NOT_CHECKED);
     CHECK(strcmp(check.code, NK_DISC_DAT_NOT_DATAFILE) == 0 && check.digest.sha1[0] != '\0');
     printf("PASS one call for an add worker: tier, reason, cancel, damaged list\n");
+}
+
+/* ---- Redump's zip, entity refusal, and the bundled list ---------------- */
+
+static size_t read_all(const char *path, uint8_t *out, size_t cap) {
+    FILE *f = nk_fopen_utf8(path, "rb");
+    CHECK(f != NULL);
+    size_t got = fread(out, 1, cap, f);
+    fclose(f);
+    CHECK(got < cap);
+    return got;
+}
+
+/* A stored zip of the given entries (name, text) at path. */
+static void write_zip(const char *path, const char *const *names, const char *const *texts,
+                      size_t count) {
+    NkZipWriter *writer = NULL;
+    NkZipError err;
+    CHECK(nk_zip_writer_open(&writer, path, 0x0021u, 0u, &err) == NK_ZIP_OK);
+    for (size_t i = 0; i < count; i++) {
+        CHECK(nk_zip_writer_add_bytes(writer, names[i], texts[i], strlen(texts[i]), &err) ==
+              NK_ZIP_OK);
+    }
+    CHECK(nk_zip_writer_finish(writer, &err) == NK_ZIP_OK);
+}
+
+static void expect_load_refused(const char *path, const char *code) {
+    NkDiscDat dat;
+    NkDiscExpandStatus status;
+    CHECK(!nk_disc_dat_load(path, &dat, &status));
+    if (strcmp(status.code, code) != 0) {
+        fprintf(stderr, "expected %s, got %s: %s\n", code, status.code, status.message);
+    }
+    CHECK(strcmp(status.code, code) == 0);
+    CHECK(dat.roms == NULL && dat.rom_count == 0);
+}
+
+static void test_dat_zip_and_entity_refusals(void) {
+    NkDiscExpandStatus status;
+    NkDiscDat dat;
+    char zip[NATIVE_TEST_PATH_MAX], data_root[NATIVE_TEST_PATH_MAX];
+    char imported[NATIVE_TEST_PATH_MAX];
+    char *text = build_dat(true);
+    path_in(zip, sizeof(zip), "list.zip");
+    path_in(data_root, sizeof(data_root), "zip-data");
+
+    /* Redump's zip (here stored; the bundled list below is deflated) is read
+       and imported as the .dat inside it. */
+    const char *one_name[] = {"Synthetic - Datfile (2) (2026-10-31).dat"};
+    const char *one_text[] = {text};
+    write_zip(zip, one_name, one_text, 1);
+    CHECK(nk_disc_dat_load(zip, &dat, &status) && dat.rom_count == 2);
+    nk_disc_dat_free(&dat);
+    CHECK(nk_disc_dat_import(zip, data_root, NULL, &status));
+    CHECK(nk_disc_dat_path(data_root, imported, sizeof(imported)));
+    char *copy = read_text(imported);
+    CHECK(strcmp(copy, text) == 0);
+    free(copy);
+
+    /* Not one .dat: two files, or a file of another name. */
+    const char *two_names[] = {"a.dat", "b.dat"};
+    const char *two_texts[] = {text, text};
+    write_zip(zip, two_names, two_texts, 2);
+    expect_load_refused(zip, NK_DISC_DAT_ZIP_INVALID);
+    const char *txt_name[] = {"list.txt"};
+    write_zip(zip, txt_name, one_text, 1);
+    expect_load_refused(zip, NK_DISC_DAT_ZIP_INVALID);
+    /* A failed import keeps the earlier one. */
+    CHECK(!nk_disc_dat_import(zip, data_root, NULL, &status));
+    copy = read_text(imported);
+    CHECK(strcmp(copy, text) == 0);
+    free(copy);
+
+    /* A changed byte fails the CRC; a cut zip has no end record; a size past
+       the cap is refused before anything is inflated. */
+    static uint8_t bytes[16384];
+    write_zip(zip, one_name, one_text, 1);
+    size_t size = read_all(zip, bytes, sizeof(bytes));
+    /* The local header's name and extra lengths place the stored data. */
+    size_t data_at = 30u + (size_t)(bytes[26] | (bytes[27] << 8)) +
+                     (size_t)(bytes[28] | (bytes[29] << 8));
+    bytes[data_at + 100u] ^= 0x20u;
+    write_bytes(zip, bytes, size);
+    expect_load_refused(zip, NK_DISC_DAT_ZIP_INVALID);
+    bytes[data_at + 100u] ^= 0x20u;
+    write_bytes(zip, bytes, size - 10u);
+    expect_load_refused(zip, NK_DISC_DAT_ZIP_INVALID);
+    size_t central = SIZE_MAX;
+    for (size_t at = 0; at + 4u <= size; at++) {
+        if (memcmp(bytes + at, "PK\x01\x02", 4u) == 0) central = at;
+    }
+    CHECK(central != SIZE_MAX);
+    const uint8_t huge[4] = {0x00, 0x00, 0x00, 0x05}; /* 80 MiB, past NK_DISC_DAT_MAX_BYTES */
+    memcpy(bytes + central + 24u, huge, 4u);
+    write_bytes(zip, bytes, size);
+    expect_load_refused(zip, NK_DISC_DAT_TOO_LARGE);
+
+    /* Entities: declared, an internal DTD subset, or one XML does not
+       predefine are refused by name; the external DOCTYPE Redump's lists
+       carry, and character references, are read. */
+    char sha[48];
+    snprintf(sha, sizeof(sha), "%s", g_retail_digest.sha1);
+    /* Each case is the text before and after one good <rom>. */
+    static const char *const refused[][2] = {
+        {"<!DOCTYPE datafile [<!ENTITY big \"x\">]>\n<datafile><game name=\"&big;\">",
+         "</game></datafile>"},
+        {"<!DOCTYPE datafile [ ]>\n<datafile><game name=\"x\">", "</game></datafile>"},
+        {"<datafile><game name=\"&xxe;\">", "</game></datafile>"},
+        {"<datafile><!ENTITY x SYSTEM \"file:///etc/passwd\"><game name=\"x\">",
+         "</game></datafile>"},
+        {"<datafile><game name=\"A & B\">", "</game></datafile>"},
+    };
+    char rom[256], doc[1024];
+    snprintf(rom, sizeof(rom), "<rom name=\"r.iso\" size=\"%u\" crc=\"%s\" sha1=\"%s\"/>",
+             IMAGE_BYTES, g_retail_digest.crc32, sha);
+    for (size_t i = 0; i < sizeof(refused) / sizeof(refused[0]); i++) {
+        snprintf(doc, sizeof(doc), "%s%s%s", refused[i][0], rom, refused[i][1]);
+        CHECK(!nk_disc_dat_parse(doc, strlen(doc), &dat, &status));
+        CHECK(strcmp(status.code, NK_DISC_DAT_ENTITY_REFUSED) == 0 && dat.roms == NULL);
+    }
+    snprintf(doc, sizeof(doc),
+             "<!DOCTYPE datafile PUBLIC \"-//Logiqx//DTD ROM Management Datafile//EN\" "
+             "\"http://www.logiqx.com/Dats/datafile.dtd\">\n"
+             "<datafile><game name=\"A &amp; B &#38; C &#x26;\">%s</game></datafile>", rom);
+    CHECK(nk_disc_dat_parse(doc, strlen(doc), &dat, &status) && dat.rom_count == 1);
+    nk_disc_dat_free(&dat);
+    /* The same refusal from a file and through an import. */
+    path_in(zip, sizeof(zip), "entity.dat");
+    snprintf(doc, sizeof(doc), "%s%s%s", refused[0][0], rom, refused[0][1]);
+    write_bytes(zip, doc, strlen(doc));
+    expect_load_refused(zip, NK_DISC_DAT_ENTITY_REFUSED);
+    CHECK(!nk_disc_dat_import(zip, data_root, NULL, &status));
+    CHECK(strcmp(status.code, NK_DISC_DAT_ENTITY_REFUSED) == 0);
+    free(text);
+    printf("PASS Redump's zip, and malformed, oversized and entity-bearing lists refused by name\n");
+}
+
+/* The list bundled with Nakagawa, read from the checkout (the tests run from
+   its root): Redump's PSP datfile of 2026-11-12 16-02-53, pinned in
+   assets/redump/PROVENANCE.md. A refreshed list changes these numbers with
+   its pin; tools/test_disc_verify.py checks the SHA-256. */
+#define BUNDLED_DATE "2026-11-12 16-02-53"
+#define BUNDLED_DISCS 3546u
+#define BUNDLED_SERIALS 3907u
+
+static void test_bundled_list(void) {
+    NkDiscExpandStatus status;
+    NkDiscDat dat;
+    char bundled[NATIVE_TEST_PATH_MAX], joined[NATIVE_TEST_PATH_MAX];
+    char sep = nk_platform_path_separator();
+    char expect[NATIVE_TEST_PATH_MAX];
+
+    /* The path, with or without a separator after the folder. */
+    snprintf(expect, sizeof(expect), "base%cassets%credump%credump-psp.zip", sep, sep, sep);
+    CHECK(nk_disc_bundled_dat_path("base", joined, sizeof(joined)) && strcmp(joined, expect) == 0);
+    char base[16];
+    snprintf(base, sizeof(base), "base%c", sep);
+    CHECK(nk_disc_bundled_dat_path(base, joined, sizeof(joined)) && strcmp(joined, expect) == 0);
+    CHECK(!nk_disc_bundled_dat_path("base", joined, 8u));
+    CHECK(!nk_disc_bundled_dat_path("", joined, sizeof(joined)));
+
+    CHECK(nk_disc_bundled_dat_path(".", bundled, sizeof(bundled)));
+    CHECK(nk_platform_file_exists(bundled));
+    CHECK(nk_disc_dat_load(bundled, &dat, &status));
+    CHECK(strcmp(dat.name, "Sony - PlayStation Portable") == 0);
+    CHECK(strcmp(dat.date, BUNDLED_DATE) == 0 && strcmp(dat.version, BUNDLED_DATE) == 0);
+    CHECK(dat.games == BUNDLED_DISCS && dat.rom_count == BUNDLED_DISCS && dat.rejected_roms == 0);
+    CHECK(dat.serial_count == BUNDLED_SERIALS);
+    /* A known entry: its SHA-1, CRC-32 and size verify; anything else does not. */
+    NkDiscDigest known = {"3ba8af1354c8ae1e5119dbff19730793c21ad56e", "b71764f4", 1207468032u};
+    CHECK(nk_disc_classify(&dat, "ULJM06340", &known, false) == NK_DISC_TIER_VERIFIED_RETAIL);
+    NkDiscDigest changed = known;
+    snprintf(changed.crc32, sizeof(changed.crc32), "%s", "b71764f5");
+    /* The list names its disc IDs, so a changed copy of a listed disc is
+       Modified with no verified image beside it; an unlisted ID is Unknown. */
+    CHECK(nk_disc_classify(&dat, "ULJM06340", &changed, false) == NK_DISC_TIER_MODIFIED);
+    /* "ULUS-10020" and "ULJM 06341" spellings both read as disc IDs. */
+    CHECK(nk_disc_dat_has_serial(&dat, "ULUS10020") && nk_disc_dat_has_serial(&dat, "ULJM06341"));
+    CHECK(nk_disc_classify(&dat, "TEST70009", &changed, false) == NK_DISC_TIER_UNKNOWN);
+    nk_disc_dat_free(&dat);
+
+    /* With no import, a check uses the bundled list and names it and its date.
+       A synthetic image is not in it: Unknown, said not to mean bad. */
+    char root[NATIVE_TEST_PATH_MAX], retail[NATIVE_TEST_PATH_MAX], source[NATIVE_TEST_PATH_MAX];
+    NkDiscVerification check;
+    path_in(root, sizeof(root), "bundled-data");
+    path_in(retail, sizeof(retail), "bundled-retail.iso");
+    write_bytes(retail, g_retail, IMAGE_BYTES);
+    CHECK(nk_disc_verify_image(retail, root, bundled, "TEST70001", false, NULL, &check));
+    CHECK(check.result == NK_DISC_VERIFY_HASHED && check.tier == NK_DISC_TIER_UNKNOWN);
+    CHECK(check.list == NK_DISC_LIST_BUNDLED && strcmp(check.list_date, BUNDLED_DATE) == 0);
+    CHECK(strstr(check.reason, "bundled with Nakagawa (dated " BUNDLED_DATE ", 3546 discs)") != NULL);
+    CHECK(strstr(check.reason, "does not mean bad") != NULL);
+
+    /* An import takes precedence over the bundled list. */
+    path_in(source, sizeof(source), "bundled-override.dat");
+    char *text = build_dat(false);
+    write_bytes(source, text, strlen(text));
+    free(text);
+    CHECK(nk_disc_dat_import(source, root, NULL, &status));
+    CHECK(nk_disc_verify_image(retail, root, bundled, "TEST70001", false, NULL, &check));
+    CHECK(check.tier == NK_DISC_TIER_VERIFIED_RETAIL && check.list == NK_DISC_LIST_IMPORTED);
+    CHECK(strstr(check.reason, "your imported Redump list (dated 2026-10-31, 2 discs)") != NULL);
+    /* A damaged import is reported, never replaced by the bundled list. */
+    char imported[NATIVE_TEST_PATH_MAX];
+    CHECK(nk_disc_dat_path(root, imported, sizeof(imported)));
+    write_bytes(imported, "damaged", 7);
+    CHECK(nk_disc_verify_image(retail, root, bundled, "TEST70001", false, NULL, &check));
+    CHECK(check.result == NK_DISC_VERIFY_LIST_UNUSABLE && check.list == NK_DISC_LIST_IMPORTED);
+    CHECK(check.tier == NK_DISC_TIER_NOT_CHECKED && strstr(check.reason, "imported") != NULL);
+
+    /* A damaged bundled list: not checked, with its code; none at all: says so. */
+    char other_root[NATIVE_TEST_PATH_MAX], damaged[NATIVE_TEST_PATH_MAX];
+    path_in(other_root, sizeof(other_root), "bundled-none");
+    path_in(damaged, sizeof(damaged), "damaged-bundled.zip");
+    write_bytes(damaged, "PK\x03\x04 not a zip", 15);
+    CHECK(nk_disc_verify_image(retail, other_root, damaged, "TEST70001", false, NULL, &check));
+    CHECK(check.result == NK_DISC_VERIFY_LIST_UNUSABLE && check.list == NK_DISC_LIST_BUNDLED);
+    CHECK(strcmp(check.code, NK_DISC_DAT_ZIP_INVALID) == 0 &&
+          strstr(check.reason, "bundled") != NULL);
+    path_in(damaged, sizeof(damaged), "no-such-list.zip");
+    CHECK(nk_disc_verify_image(retail, other_root, damaged, "TEST70001", false, NULL, &check));
+    CHECK(check.result == NK_DISC_VERIFY_HASHED && check.list == NK_DISC_LIST_NONE);
+    CHECK(check.tier == NK_DISC_TIER_NOT_CHECKED && strstr(check.reason, "no Redump list") != NULL);
+    printf("PASS the bundled Redump list: pinned counts, a known entry, the import overrides it\n");
 }
 
 /* ---- library keyed by disc ID plus content hash ------------------------ */
@@ -892,6 +1120,8 @@ int main(void) {
     test_dat_reader_and_tiers();
     test_dat_import();
     test_verify_image_for_an_add_worker();
+    test_dat_zip_and_entity_refusals();
+    test_bundled_list();
     test_old_library_still_loads();
     test_library_keys_by_disc_id_and_hash();
     test_library_remove_never_takes_the_other_image();

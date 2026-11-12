@@ -9,6 +9,7 @@
 
 #include "nk_json.h"
 #include "nk_platform.h"
+#include "nk_psp_inflate.h"
 #include "nk_types.h"
 
 #include <stdarg.h>
@@ -414,6 +415,59 @@ static void copy_text(const Span *text, char *out, size_t out_size) {
     }
 }
 
+/* Whether [p, end) starts with needle, ASCII letters compared without case. */
+static bool starts_with_nocase(const char *p, const char *end, const char *needle) {
+    size_t n = strlen(needle);
+    if ((size_t)(end - p) < n) return false;
+    for (size_t i = 0; i < n; i++) {
+        char a = p[i], b = needle[i];
+        if (a >= 'a' && a <= 'z') a = (char)(a - 'a' + 'A');
+        if (b >= 'a' && b <= 'z') b = (char)(b - 'a' + 'A');
+        if (a != b) return false;
+    }
+    return true;
+}
+
+/* An '&' at p that XML defines without a DTD: one of the five predefined
+   entities, or a decimal (1-7 digits) or hex (1-6 digits) character reference. */
+static bool is_predefined_reference(const char *p, const char *end) {
+    static const char *const names[] = {"&amp;", "&lt;", "&gt;", "&quot;", "&apos;"};
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        size_t n = strlen(names[i]);
+        if ((size_t)(end - p) >= n && memcmp(p, names[i], n) == 0) return true;
+    }
+    if (end - p < 3 || p[1] != '#') return false;
+    const char *q = p + 2;
+    bool hex = *q == 'x';
+    if (hex) q++;
+    size_t digits = 0;
+    while (q < end && (hex ? is_hex_digit(*q) : (*q >= '0' && *q <= '9'))) {
+        q++;
+        digits++;
+    }
+    return digits >= 1u && digits <= (hex ? 6u : 7u) && q < end && *q == ';';
+}
+
+/* What the reader refuses rather than skips (disc_verify.py has the same
+   rules): an entity declaration anywhere, a DOCTYPE with an internal subset (a
+   '[' before its '>'), and a reference to an entity XML does not predefine.
+   The external DTD a DOCTYPE names is never read. */
+static bool has_entity_markup(const char *text, const char *end) {
+    for (const char *p = text; p < end; p++) {
+        if (*p == '&') {
+            if (!is_predefined_reference(p, end)) return true;
+        } else if (*p == '<' && p + 1 < end && p[1] == '!') {
+            if (starts_with_nocase(p, end, "<!ENTITY")) return true;
+            if (starts_with_nocase(p, end, "<!DOCTYPE")) {
+                for (const char *q = p + 9; q < end && *q != '>'; q++) {
+                    if (*q == '[') return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
 static int rom_compare(const void *a, const void *b) {
     return memcmp(((const NkDiscDatRom *)a)->sha1, ((const NkDiscDatRom *)b)->sha1, 20u);
 }
@@ -490,6 +544,11 @@ bool nk_disc_dat_parse(const char *text, size_t length, NkDiscDat *out,
         return verify_fail(status, NK_DISC_DAT_NOT_DATAFILE,
                            "The datafile is cut short: it has no closing </datafile>.");
     }
+    if (has_entity_markup(text, end)) {
+        return verify_fail(status, NK_DISC_DAT_ENTITY_REFUSED,
+                           "The datafile declares its own entities or DTD, or refers to an entity "
+                           "XML does not predefine; a Redump list has none, so it was not read.");
+    }
     const char *header = find_tag(text, end, "header");
     const char *header_end = header ? span_find(header, end, "</header") : NULL;
     if (header && header_end) {
@@ -499,6 +558,9 @@ bool nk_disc_dat_parse(const char *text, size_t length, NkDiscDat *out,
         }
         if (element_text(header, header_end, "version", &value)) {
             copy_text(&value, out->version, sizeof(out->version));
+        }
+        if (element_text(header, header_end, "date", &value)) {
+            copy_text(&value, out->date, sizeof(out->date));
         }
     }
     size_t rom_capacity = 0, serial_capacity = 0;
@@ -619,6 +681,139 @@ static bool read_bounded_file(const char *path, char **out_text, size_t *out_len
     return true;
 }
 
+static uint16_t read_le16(const uint8_t *p) {
+    return (uint16_t)(p[0] | (p[1] << 8));
+}
+
+static uint32_t read_le32(const uint8_t *p) {
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static bool zip_fail(NkDiscExpandStatus *status, const char *reason) {
+    return verify_fail(status, NK_DISC_DAT_ZIP_INVALID,
+                       "The zip can't be read as a Redump datafile: %s", reason);
+}
+
+/* The one .dat inside a zip as Redump serves it (PKWARE APPNOTE: one entry,
+   stored or deflated, not encrypted, no ZIP64), inflated under
+   NK_DISC_DAT_MAX_BYTES and checked against its CRC-32. Every offset and size
+   is checked against the bytes held before it is used. *out_text is malloc'd. */
+static bool dat_text_from_zip(const uint8_t *zip, size_t size, char **out_text, size_t *out_length,
+                              NkDiscExpandStatus *status) {
+    enum { EOCD = 22u, CENTRAL = 46u, LOCAL = 30u };
+    *out_text = NULL;
+    *out_length = 0;
+    if (size < EOCD) return zip_fail(status, "it is cut short.");
+    /* The end record is in the last 22 + 65535 bytes; its comment runs to the end. */
+    size_t eocd = SIZE_MAX;
+    size_t lowest = size - EOCD > 0xFFFFu ? size - EOCD - 0xFFFFu : 0u;
+    for (size_t at = size - EOCD + 1u; at-- > lowest;) {
+        if (read_le32(zip + at) == 0x06054b50u && at + EOCD + read_le16(zip + at + 20u) == size) {
+            eocd = at;
+            break;
+        }
+    }
+    if (eocd == SIZE_MAX) return zip_fail(status, "it has no end record.");
+    const uint8_t *end_record = zip + eocd;
+    uint32_t central_size = read_le32(end_record + 12u);
+    uint32_t central_offset = read_le32(end_record + 16u);
+    if (read_le16(end_record + 4u) != 0u || read_le16(end_record + 6u) != 0u) {
+        return zip_fail(status, "it spans several disks.");
+    }
+    if (read_le16(end_record + 8u) != 1u || read_le16(end_record + 10u) != 1u) {
+        return zip_fail(status, "it does not hold exactly one file.");
+    }
+    if ((uint64_t)central_offset + central_size > eocd || central_size < CENTRAL) {
+        return zip_fail(status, "its central directory is not where its end record says.");
+    }
+    const uint8_t *central = zip + central_offset;
+    uint16_t flags = read_le16(central + 8u);
+    uint16_t method = read_le16(central + 10u);
+    uint32_t crc = read_le32(central + 16u);
+    uint32_t packed_size = read_le32(central + 20u);
+    uint32_t plain_size = read_le32(central + 24u);
+    size_t name_length = read_le16(central + 28u);
+    size_t extra_length = read_le16(central + 30u);
+    size_t comment_length = read_le16(central + 32u);
+    uint32_t local_offset = read_le32(central + 42u);
+    if (read_le32(central) != 0x02014b50u ||
+        (uint64_t)CENTRAL + name_length + extra_length + comment_length != central_size) {
+        return zip_fail(status, "its central directory is malformed.");
+    }
+    if (packed_size == 0xFFFFFFFFu || plain_size == 0xFFFFFFFFu || local_offset == 0xFFFFFFFFu) {
+        return zip_fail(status, "it uses ZIP64.");
+    }
+    if (flags & 0x41u) return zip_fail(status, "the file in it is encrypted.");
+    if (method != 0u && method != 8u) {
+        return zip_fail(status, "the file in it is compressed with a method other than deflate.");
+    }
+    const char *name = (const char *)central + CENTRAL;
+    if (name_length < 4u || !starts_with_nocase(name + name_length - 4u, name + name_length, ".dat")) {
+        return zip_fail(status, "the file in it is not a .dat file.");
+    }
+    if (plain_size > NK_DISC_DAT_MAX_BYTES) {
+        return verify_fail(status, NK_DISC_DAT_TOO_LARGE,
+                           "The datafile in the zip is larger than %u bytes.",
+                           (unsigned)NK_DISC_DAT_MAX_BYTES);
+    }
+    if ((uint64_t)local_offset + LOCAL > central_offset) {
+        return zip_fail(status, "its file's header is past its central directory.");
+    }
+    const uint8_t *local = zip + local_offset;
+    uint64_t data_offset = (uint64_t)local_offset + LOCAL + read_le16(local + 26u) +
+                           read_le16(local + 28u);
+    if (read_le32(local) != 0x04034b50u || read_le16(local + 8u) != method) {
+        return zip_fail(status, "its file's header disagrees with its central directory.");
+    }
+    if (data_offset + packed_size > central_offset) {
+        return zip_fail(status, "its file's data runs past its central directory.");
+    }
+    const uint8_t *packed = zip + data_offset;
+    uint8_t *plain = NULL;
+    size_t plain_length = 0;
+    if (method == 0u) {
+        if (packed_size != plain_size) return zip_fail(status, "its stored file's sizes differ.");
+        plain = (uint8_t *)malloc((size_t)plain_size + 1u);
+        if (!plain) return verify_fail(status, NK_DISC_INTERNAL, "No memory was free to read the datafile.");
+        memcpy(plain, packed, plain_size);
+        plain_length = plain_size;
+    } else {
+        char error[128];
+        int rc = nk_psp_inflate_raw(packed, packed_size, &plain, &plain_length, plain_size,
+                                    (size_t)NK_DISC_DAT_MAX_BYTES, error, sizeof(error));
+        if (rc != NK_INFLATE_OK) free(plain);  /* NULL by its contract; freed either way */
+        if (rc == NK_INFLATE_ERR_OVERFLOW) {
+            return verify_fail(status, NK_DISC_DAT_TOO_LARGE,
+                               "The datafile in the zip is larger than %u bytes.",
+                               (unsigned)NK_DISC_DAT_MAX_BYTES);
+        }
+        if (rc != NK_INFLATE_OK) {
+            return zip_fail(status, rc == NK_INFLATE_ERR_MEMORY ? "no memory was free to inflate it."
+                                                                : "its file does not inflate.");
+        }
+    }
+    if (plain_length != plain_size || nk_crc32_update(0u, plain, plain_length) != crc) {
+        free(plain);
+        return zip_fail(status, "its file's size or CRC-32 does not match its header.");
+    }
+    *out_text = (char *)plain;
+    *out_length = plain_length;
+    return true;
+}
+
+/* A datafile's own text from a file: the file, or the .dat inside it when it
+   is a zip. *out_text is malloc'd. */
+static bool read_dat_source(const char *path, char **out_text, size_t *out_length,
+                            NkDiscExpandStatus *status) {
+    if (!read_bounded_file(path, out_text, out_length, status)) return false;
+    if (*out_length < 4u || memcmp(*out_text, "PK\x03\x04", 4u) != 0) return true;
+    char *zip = *out_text;
+    size_t zip_length = *out_length;
+    bool ok = dat_text_from_zip((const uint8_t *)zip, zip_length, out_text, out_length, status);
+    free(zip);
+    return ok;
+}
+
 bool nk_disc_dat_load(const char *path, NkDiscDat *out, NkDiscExpandStatus *status) {
     char *text = NULL;
     size_t length = 0;
@@ -626,7 +821,7 @@ bool nk_disc_dat_load(const char *path, NkDiscDat *out, NkDiscExpandStatus *stat
     if (!path || !path[0] || !out) {
         return verify_fail(status, NK_DISC_INTERNAL, "No datafile was given.");
     }
-    if (!read_bounded_file(path, &text, &length, status)) return false;
+    if (!read_dat_source(path, &text, &length, status)) return false;
     /* A UTF-8 byte-order mark is allowed, as the Python reader allows it. */
     size_t skip = length >= 3u && memcmp(text, "\xEF\xBB\xBF", 3u) == 0 ? 3u : 0u;
     bool ok = nk_disc_dat_parse(text + skip, length - skip, out, status);
@@ -642,6 +837,37 @@ bool nk_disc_dat_path(const char *data_root, char *out, size_t out_size) {
     return written > 0 && (size_t)written < out_size;
 }
 
+bool nk_disc_bundled_dat_path(const char *base_dir, char *out, size_t out_size) {
+    if (!base_dir || !base_dir[0] || !out || out_size == 0) return false;
+    char sep = nk_platform_path_separator();
+    size_t base_length = strlen(base_dir);
+    bool ends_in_separator = base_dir[base_length - 1u] == '/' || base_dir[base_length - 1u] == '\\';
+    char joiner[2] = {ends_in_separator ? '\0' : sep, '\0'};
+    int written = snprintf(out, out_size, "%s%s%s%c%s%c%s", base_dir, joiner,
+                           NK_DISC_BUNDLED_DAT_DIR1, sep, NK_DISC_BUNDLED_DAT_DIR2, sep,
+                           NK_DISC_BUNDLED_DAT_FILE);
+    return written > 0 && (size_t)written < out_size;
+}
+
+bool nk_disc_dat_load_active(const char *data_root, const char *bundled_path, NkDiscDat *out,
+                             NkDiscListSource *source, NkDiscExpandStatus *status) {
+    char imported[NK_MAX_PATH];
+    verify_status_clear(status);
+    if (source) *source = NK_DISC_LIST_NONE;
+    if (out) memset(out, 0, sizeof(*out));
+    if (!out) return verify_fail(status, NK_DISC_INTERNAL, "No datafile result was given.");
+    if (data_root && data_root[0] && nk_disc_dat_path(data_root, imported, sizeof(imported)) &&
+        nk_platform_file_exists(imported)) {
+        if (source) *source = NK_DISC_LIST_IMPORTED;
+        return nk_disc_dat_load(imported, out, status);
+    }
+    if (bundled_path && bundled_path[0] && nk_platform_file_exists(bundled_path)) {
+        if (source) *source = NK_DISC_LIST_BUNDLED;
+        return nk_disc_dat_load(bundled_path, out, status);
+    }
+    return false;
+}
+
 bool nk_disc_dat_import(const char *source, const char *data_root, NkDiscDat *out,
                         NkDiscExpandStatus *status) {
     char *text = NULL;
@@ -655,7 +881,8 @@ bool nk_disc_dat_import(const char *source, const char *data_root, NkDiscDat *ou
     if (!source || !source[0] || !nk_disc_dat_path(data_root, target, sizeof(target))) {
         return verify_fail(status, NK_DISC_INTERNAL, "No datafile or data folder was given.");
     }
-    if (!read_bounded_file(source, &text, &length, status)) return false;
+    /* From a zip, the .dat inside is what is checked and kept. */
+    if (!read_dat_source(source, &text, &length, status)) return false;
     size_t skip = length >= 3u && memcmp(text, "\xEF\xBB\xBF", 3u) == 0 ? 3u : 0u;
     if (!nk_disc_dat_parse(text + skip, length - skip, &parsed, status)) {
         free(text);
@@ -721,23 +948,42 @@ NkDiscTier nk_disc_classify(const NkDiscDat *dat, const char *disc_id,
 
 /* ---- one call for an add worker ----------------------------------------- */
 
-static const char *tier_reason(NkDiscTier tier) {
+/* One sentence for a tier, naming the list it was checked against. */
+static void tier_reason(NkDiscTier tier, const char *list, char *out, size_t out_size) {
     switch (tier) {
     case NK_DISC_TIER_VERIFIED_RETAIL:
-        return "Verified retail: the whole image matches a retail disc in your Redump list.";
+        snprintf(out, out_size, "Verified retail: the whole image matches a retail disc in %s.",
+                 list);
+        break;
     case NK_DISC_TIER_MODIFIED:
-        return "Modified: the image isn't in your Redump list, but its disc ID is a retail disc's "
-               "(a fan translation, patch or trimmed image).";
+        snprintf(out, out_size,
+                 "Modified: the image is not in %s, but its disc ID is a retail disc's "
+                 "(a fan translation, patch or trimmed image).", list);
+        break;
     case NK_DISC_TIER_UNKNOWN:
-        return "Unknown: the image isn't in your Redump list, and nothing shows its disc ID is "
-               "a retail disc's.";
     case NK_DISC_TIER_NOT_CHECKED:
     default:
-        return "Not checked: no Redump list is imported.";
+        snprintf(out, out_size,
+                 "Unknown: the image is not in %s, and nothing shows its disc ID is a retail "
+                 "disc's. Not in the list does not mean bad: it is only not shown to be retail.",
+                 list);
+        break;
     }
 }
 
-bool nk_disc_verify_image(const char *iso_path, const char *data_root, const char *disc_id,
+/* Keep printable ASCII and UTF-8 bytes of a list's own text, so its date can't
+   put control characters in a log line. */
+static void copy_printable(const char *text, char *out, size_t out_size) {
+    size_t used = 0;
+    for (const char *p = text; *p && used + 1u < out_size; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (c >= 0x20u && c != 0x7Fu) out[used++] = (char)c;
+    }
+    out[used] = '\0';
+}
+
+bool nk_disc_verify_image(const char *iso_path, const char *data_root,
+                          const char *bundled_dat_path, const char *disc_id,
                           bool disc_id_verified_elsewhere,
                           const NkDiscExpandCallbacks *callbacks, NkDiscVerification *out) {
     NkDiscExpandStatus status;
@@ -752,24 +998,40 @@ bool nk_disc_verify_image(const char *iso_path, const char *data_root, const cha
         return false;
     }
     out->result = NK_DISC_VERIFY_HASHED;
-    char dat_path[NK_MAX_PATH];
-    if (!data_root || !data_root[0] || !nk_disc_dat_path(data_root, dat_path, sizeof(dat_path)) ||
-        !nk_platform_file_exists(dat_path)) {
-        snprintf(out->reason, sizeof(out->reason), "%s", tier_reason(NK_DISC_TIER_NOT_CHECKED));
+    NkDiscDat dat;
+    NkDiscListSource source = NK_DISC_LIST_NONE;
+    bool loaded = nk_disc_dat_load_active(data_root, bundled_dat_path, &dat, &source, &status);
+    out->list = source;
+    if (!loaded && source == NK_DISC_LIST_NONE) {
+        snprintf(out->reason, sizeof(out->reason),
+                 "Not checked: no Redump list was found, neither an imported one nor the one "
+                 "bundled with Nakagawa.");
         return true;
     }
-    NkDiscDat dat;
-    if (!nk_disc_dat_load(dat_path, &dat, &status)) {
+    if (!loaded) {
         out->result = NK_DISC_VERIFY_LIST_UNUSABLE;
         snprintf(out->code, sizeof(out->code), "%s", status.code);
-        snprintf(out->reason, sizeof(out->reason),
-                 "Not checked: the imported Redump list can't be used (%s). Import it again.",
-                 status.code);
+        if (source == NK_DISC_LIST_IMPORTED) {
+            snprintf(out->reason, sizeof(out->reason),
+                     "Not checked: your imported Redump list can't be used (%s). Import it again.",
+                     status.code);
+        } else {
+            snprintf(out->reason, sizeof(out->reason),
+                     "Not checked: the Redump list bundled with Nakagawa can't be used (%s). "
+                     "Reinstall Nakagawa, or import a list.", status.code);
+        }
         return true;
     }
+    copy_printable(dat.date[0] ? dat.date : dat.version, out->list_date, sizeof(out->list_date));
+    char described[160];
+    snprintf(described, sizeof(described), "%s (%s%s%s%u discs)",
+             source == NK_DISC_LIST_IMPORTED ? "your imported Redump list"
+                                             : "the Redump list bundled with Nakagawa",
+             out->list_date[0] ? "dated " : "", out->list_date, out->list_date[0] ? ", " : "",
+             (unsigned)dat.rom_count);
     out->tier = nk_disc_classify(&dat, disc_id, &out->digest, disc_id_verified_elsewhere);
     nk_disc_dat_free(&dat);
-    snprintf(out->reason, sizeof(out->reason), "%s", tier_reason(out->tier));
+    tier_reason(out->tier, described, out->reason, sizeof(out->reason));
     return true;
 }
 

@@ -3756,7 +3756,8 @@ def cmd_report(args: argparse.Namespace) -> int:
 
 
 def cmd_redump_import(args: argparse.Namespace) -> int:
-    """Import the user's own Redump PSP datafile into their data folder (nothing is uploaded)."""
+    """Import a Redump PSP datafile (the .dat, or the zip Redump serves) into the user's data
+    folder, where it takes precedence over the bundled list. Nothing is uploaded."""
     try:
         user_root = _user_data_root(args.user_data_root)
         dat = disc_verify.import_dat(args.datafile, user_root)
@@ -3769,7 +3770,7 @@ def cmd_redump_import(args: argparse.Namespace) -> int:
     shown = "".join(ch for ch in dat.version if ch.isprintable())[:64]
     version = f" (version {shown})" if shown else ""
     print(f"Imported a Redump list of {len(dat)} discs{version}. Discs nk_cli.py bringup adds "
-          "from now on are checked against it.")
+          "from now on are checked against it, in place of the list bundled with Nakagawa.")
     return 0
 
 
@@ -4671,7 +4672,7 @@ def _write_bringup_library_locked(user_root: Path, iso_path: Path, metadata, tit
                 f"over the {MAX_LIBRARY_GAMES}-record limit."
             )
         games = list(payload["games"])
-    dat = _imported_dat(user_root) if digest is not None else None
+    dat = _verification_dat(user_root) if digest is not None else None
     replaced = _library_record_to_replace(games, metadata.disc_id.upper(), digest, iso_path, dat)
     if replaced is not None:
         del games[replaced]
@@ -4722,13 +4723,22 @@ def _write_bringup_library_locked(user_root: Path, iso_path: Path, metadata, tit
     _write_private_file(library_path, data)
 
 
-def _imported_dat(user_root: Path) -> disc_verify.RedumpDat | None:
-    """The Redump list imported into this data folder; None (tier not checked) without one."""
+def _verification_dat(user_root: Path) -> disc_verify.RedumpDat | None:
+    """The Redump list a disc check uses: the one imported into this data folder, else the
+    list bundled with Nakagawa; None (tier not checked) when neither can be used. Says which
+    list it used, or why none was used."""
     try:
-        return disc_verify.load_imported_dat(user_root)
+        dat = disc_verify.load_verification_dat(user_root)
     except disc_verify.DiscVerifyError as exc:
-        print(f"The imported Redump list was not used [{exc.boundary_code}]: {exc}")
+        print(f"The imported Redump list was not used [{exc.boundary_code}]: {exc} The disc was "
+              "not checked; import a list again with nk_cli.py redump-import.")
         return None
+    if dat is None:
+        print("No Redump list was found (neither an imported one nor the bundled "
+              f"{disc_verify.BUNDLED_DAT_RELATIVE_PATH.as_posix()}), so the disc was not checked.")
+    else:
+        print(f"Disc check: compared with {dat.describe()}.")
+    return dat
 
 
 def _add_disc_verification(record: dict, digest: disc_verify.DiscDigest, games: list,
@@ -6208,9 +6218,12 @@ def main() -> int:
 
     p_redump = subparsers.add_parser(
         "redump-import",
-        help="Import your Redump PSP datafile: discs added later are checked against it",
+        help="Import a newer Redump PSP datafile: discs added later are checked against it "
+             "instead of the list bundled with Nakagawa",
     )
-    p_redump.add_argument("datafile", type=Path, help="The Redump PSP datafile (.dat) you downloaded")
+    p_redump.add_argument("datafile", type=Path,
+                          help="The Redump PSP datafile you downloaded: the zip as served, or "
+                               "the .dat inside it")
     p_redump.add_argument("--user-data-root", type=Path, help="Override player per-user data directory")
     p_redump.set_defaults(func=cmd_redump_import)
 

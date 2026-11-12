@@ -2241,6 +2241,11 @@ class TestRuntimeDllStaging(unittest.TestCase):
                 (Path("assets") / "fonts" / "ui" / path.relative_to(source_root)).as_posix()
                 for path in source_root.rglob("*") if path.is_file()
             }
+            # The player's other bundled data goes with its fonts: the Redump PSP list (#1731).
+            redump_root = ROOT / "assets" / "redump"
+            expected |= {(Path("assets") / "redump" / path.name).as_posix()
+                         for path in redump_root.iterdir() if path.is_file()}
+            self.assertIn("assets/redump/redump-psp.zip", expected)
             self.assertEqual(set(staged), expected)
             for relative in expected:
                 source = ROOT / Path(relative)

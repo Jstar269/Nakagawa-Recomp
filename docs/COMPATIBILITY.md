@@ -134,21 +134,28 @@ The last three tiers need scripted-input checks, which the library build doesn't
 measured**. The first launch has no input and a fixed time limit, so a game that waits for a button press on its
 title screen still counts as **Draws frames**.
 
-Each disc is also checked against the [Redump](https://redump.org/) PSP list, if one was imported: the whole image
-(the expansion, for a `.cso`, `.zso` or `.chd`) is hashed with SHA-1 and CRC32 on the maintainer's PC and compared
-with the list. Nothing is uploaded.
+Each disc is also checked against the [Redump](https://redump.info/) PSP list: the whole image (the expansion, for
+a `.cso`, `.zso` or `.chd`) is hashed with SHA-1 and CRC32 on the PC that adds it and compared with the list.
+Nakagawa ships Redump's list in [`assets/redump/`](../assets/redump/PROVENANCE.md) (the datfile dated 2026-11-12
+16-02-53: 3,546 discs, with the disc IDs of 3,541 of them), so the check works with no setup. A list you import
+takes precedence over the bundled one. Nothing is uploaded, and nothing downloads a list: the bundled list is a
+file beside the player, and an import copies a file you chose. Each check says which list it used and that list's
+date (the player's developer log, and the output of `nk_cli.py bringup` and `library_build.py`).
 
 | Disc check | Meaning |
 | :--- | :--- |
 | Verified retail | The image's hash matches a retail disc in the list. |
 | Modified | The hash matches nothing in the list, but the disc ID is a retail disc's: one the list names, or one a verified image in the same library carries. Fan translations, patched and trimmed images land here. |
-| Unknown | Neither. |
-| Not checked | No list was imported, or the image wasn't hashed. |
+| Unknown | Neither: the image is not in the list. That does not make it bad; it is only not shown to be retail. |
+| Not checked | No list was found (a build without the bundled list, and nothing imported), the list could not be read, or the image wasn't hashed. |
 
 The **Verified retail** column is the library's compatibility figure. Modified and unknown images are counted
-beside it. Redump's PSP list names no disc IDs, so a modified image is labelled **Modified** only when its retail
-disc is verified in the same library; otherwise it is **Unknown**. Unknown means the image isn't shown to be a
-retail dump; it doesn't mean the image is modified, so the **Modified** column undercounts fan translations. A summary names the settings its discs were built with
+beside it. Redump's current PSP list names the disc IDs of almost every disc in `<serial>`, so a changed copy of a
+listed disc is labelled **Modified** on its own. An older list without `<serial>` entries (Redump's exports
+before its move to `redump.info`, such as the 2026-06-13 list the summary below was made with) names no disc
+IDs; with one, a modified image is **Modified** only when its retail disc is verified in the same library, and
+otherwise **Unknown**. Unknown means the image isn't shown to be a retail dump; it doesn't mean the image is
+modified or bad. A summary names the settings its discs were built with
 (the commit, the time budget per disc and the first launch's time limit), and two summaries are compared only where
 those match.
 
@@ -246,14 +253,28 @@ again. `--retry-failed` builds the failures again. Only `.iso` files are discs; 
 
 Discs are told apart by disc ID and the hash of the whole image. A file with the disc ID and the same hash as one
 seen before is recorded as a duplicate of the first file; a fan translation or other modified image that keeps its
-retail disc's ID is built as a disc of its own, and the library keeps a record for each. `--redump-dat <your Redump
-PSP datafile>` hashes every disc, gives each its disc check (see [Whole library](#whole-library)) and imports the
-list into the data folder; `--verify-only` hashes and checks the discs without building any. Hashes are kept in the
-manifest and reused while a file's size and modification time stay the same. The manifest records the settings each
-title was built with. `python tools/nk_cli.py redump-import <datafile>` imports a list into your player data folder
-on its own, and `nk_cli.py bringup` then hashes and checks each disc it adds. The player hashes and checks each disc
+retail disc's ID is built as a disc of its own, and the library keeps a record for each. Every disc is hashed and
+given its disc check (see [Whole library](#whole-library)) against the data folder's imported list, or else the bundled
+one; `--redump-dat <a Redump PSP datafile>` imports a list into the data folder first. `--verify-only` hashes and
+checks the discs without building any. Hashes are kept in the manifest and reused while a file's size and
+modification time stay the same. The manifest records the settings each title was built with, and which list
+checked its discs. `nk_cli.py bringup` hashes and checks each disc it adds. The player hashes and checks each disc
 it adds too, after the add and on a worker, and shows the result as the card's badge
 ([PLAYER_UI_DESIGN.md](PLAYER_UI_DESIGN.md#library-c5-built)).
+
+### Updating the disc list
+
+To use a newer list than the bundled one, download Redump's PSP datfile from
+<https://redump.info/datfile/PSP> and import it, the zip as downloaded or the `.dat` inside it:
+
+```text
+python tools/nk_cli.py redump-import "Sony - PlayStation Portable - Datfile (....).zip"
+```
+
+The list is checked, then kept in your player data folder (`verification/redump.dat`), and discs added from then
+on are checked against it instead of the bundled list. A file that is not a Redump datafile is refused with a
+`DISC_DAT_*` code ([FAILURE_CODES.md](FAILURE_CODES.md)) and the earlier list stays. To go back to the bundled
+list, delete `verification/redump.dat` from the data folder.
 
 Two images with one disc ID still share some folders, so only one of them is ready to play at a time:
 
