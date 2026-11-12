@@ -7133,6 +7133,63 @@ static void test_homebrew_package_becomes_a_private_disc(void) {
         assert(test_remove_tree(planted_dir));
     }
 
+    /* One program in two folders (review of #2426, M1): the key comes from the EBOOT.PBP
+       alone, so the same file copied into a second folder is the same title. Its import stops
+       by name, at inspection and at conversion, naming the title and the folder it was added
+       from, and replaces nothing; from its own folder it imports as before. A view without
+       its record (view.source) is compared by its folder's name. Failing before: the second
+       folder was imported over the first, its copy replacing the first folder's. */
+    {
+        char second_dir[NATIVE_TEST_PATH_MAX + 128];
+        char second_path[NATIVE_TEST_PATH_MAX + 160];
+        char second_data[NATIVE_TEST_PATH_MAX + 160];
+        char record_path[NATIVE_TEST_PATH_MAX + 320];
+        PlayerPsnPackage second;
+        uint8_t *first;
+        size_t first_len = 0;
+        snprintf(second_dir, sizeof(second_dir), "%s%cSECOND", base, sep);
+        assert(nk_platform_mkdir_p(second_dir));
+        snprintf(second_path, sizeof(second_path), "%s%cEBOOT.PBP", second_dir, sep);
+        snprintf(second_data, sizeof(second_data), "%s%cDATA.TXT", second_dir, sep);
+        first = psn_test_read_file(pbp_path, &first_len);
+        assert(first != NULL);
+        write_binary_file(second_path, first, first_len);
+        free(first);
+        write_binary_file(second_data, (const uint8_t *)"the second folder", 17u);
+        assert(!player_psn_package_inspect(second_path, &second, code, sizeof(code), message,
+                                           sizeof(message)));
+        assert(strcmp(code, "HOMEBREW_ALREADY_ADDED") == 0);
+        assert(strstr(message, "My Homebrew") != NULL && strstr(message, package.disc_id) != NULL);
+        assert(strstr(message, "MYHB") != NULL && strstr(message, "remove") != NULL);
+        assert(second.iso_path[0] == '\0');
+        /* At conversion too: the second folder picked after the first was inspected. */
+        second = again;
+        snprintf(second.pbp_path, sizeof(second.pbp_path), "%s", second_path);
+        assert(!player_psn_package_convert(&second, &hooks, code, sizeof(code), message,
+                                           sizeof(message)));
+        assert(strcmp(code, "HOMEBREW_ALREADY_ADDED") == 0);
+        snprintf(view_path, sizeof(view_path), "%s%cPSP%cGAME%cMYHB%cDATA.TXT", view_root, sep,
+                 sep, sep, sep);
+        after = psn_test_read_file(view_path, &after_len);
+        assert(after != NULL && after_len == 17u && memcmp(after, "the newer release", 17u) == 0);
+        free(after);
+        snprintf(view_path, sizeof(view_path), "%s%cPSP%cGAME%cSECOND", view_root, sep, sep, sep);
+        assert(nk_platform_path_missing(view_path));
+        /* From its own folder it is the same title as before. */
+        assert(player_psn_package_inspect(pbp_path, &second, code, sizeof(code), message,
+                                          sizeof(message)));
+        assert(second.homebrew && second.iso_ready);
+        /* A view without the record: the folder's name tells the two apart. */
+        snprintf(record_path, sizeof(record_path), "%s%cview.source", view_root, sep);
+        assert(!nk_platform_path_missing(record_path));
+        assert(remove(record_path) == 0);
+        psn_test_refused(second_path, "HOMEBREW_ALREADY_ADDED", "\"MYHB\"");
+        assert(player_psn_package_inspect(pbp_path, &second, code, sizeof(code), message,
+                                          sizeof(message)));
+        assert(second.homebrew && second.iso_ready);
+        assert(test_remove_tree(second_dir));
+    }
+
     /* A package not named EBOOT.PBP, in capitals, as the file has it on the disk, is refused
        by name at import (review of #2426, S1): the view and the launch use that one name, so
        such a package imported and then never started. */

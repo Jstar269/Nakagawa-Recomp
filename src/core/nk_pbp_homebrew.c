@@ -599,6 +599,8 @@ done:
 #define HB_PATH_MAX 4096u
 #define HB_COPY_CHUNK (64u * 1024u)
 #define HB_MANIFEST_NAME "view.manifest"
+/* The path the picked folder really had, one line (nk_pbp_homebrew_other_source). */
+#define HB_SOURCE_NAME "view.source"
 #define HB_MANIFEST_HEADER "nakagawa-homebrew-view 1"
 #define HB_SEEDED_HEADER "nakagawa-homebrew-seeded 2"
 #define HB_TEXT_MAX (8u * 1024u * 1024u)
@@ -1282,9 +1284,11 @@ bool nk_pbp_homebrew_write_view(const char *pbp_path, const char *view_root,
     char game[HB_PATH_MAX];
     char target[HB_PATH_MAX];
     char manifest_path[HB_PATH_MAX];
+    char record_path[HB_PATH_MAX];
     char parent[HB_PATH_MAX];
     HbSource source;
     HbText manifest;
+    HbText record;
     bool ok;
     int written;
     if (!hb_check_source(pbp_path, view_root, &source, name, sizeof(name), problem,
@@ -1294,6 +1298,7 @@ bool nk_pbp_homebrew_write_view(const char *pbp_path, const char *view_root,
     if (written <= 0 || (size_t)written >= sizeof(staging) ||
         !hb_game_dir(staging, game, sizeof(game)) || !hb_join(target, sizeof(target), game, name) ||
         !hb_join(manifest_path, sizeof(manifest_path), staging, HB_MANIFEST_NAME) ||
+        !hb_join(record_path, sizeof(record_path), staging, HB_SOURCE_NAME) ||
         !hb_parent(view_root, parent, sizeof(parent))) {
         hb_problem(problem, problem_size, "%s", "The path to Nakagawa's data folder is too long.");
         return false;
@@ -1303,12 +1308,17 @@ bool nk_pbp_homebrew_write_view(const char *pbp_path, const char *view_root,
         return false;
     }
     memset(&manifest, 0, sizeof(manifest));
+    memset(&record, 0, sizeof(record));
+    hb_text_add(&record, source.real, "\n", NULL);
     ok = hb_build_manifest(&source, name, &manifest, target, callbacks, problem, problem_size);
-    if (ok && (!hb_write_text(manifest_path, &manifest) || !nk_platform_sync_dir(staging))) {
-        hb_problem(problem, problem_size, "%.400s could not be written.", manifest_path);
+    /* The record of where the folder came from is in the view, so it is put in place with it. */
+    if (ok && (!hb_write_text(manifest_path, &manifest) || !hb_write_text(record_path, &record) ||
+               !nk_platform_sync_dir(staging))) {
+        hb_problem(problem, problem_size, "%.400s could not be written.", staging);
         ok = false;
     }
     free(manifest.text);
+    free(record.text);
     if (!ok) {
         (void)nk_platform_remove_tree(staging, NULL);
         return false;
@@ -1568,6 +1578,46 @@ NkPbpHomebrewView nk_pbp_homebrew_find_view(const char *iso_path, char *folder,
     if (!same) return NK_PBP_HB_VIEW_BROKEN;
     memcpy(folder, scan.name, strlen(scan.name) + 1u);
     return NK_PBP_HB_VIEW_FOUND;
+}
+
+bool nk_pbp_homebrew_other_source(const char *pbp_path, const char *iso_path, char *other,
+                                  size_t other_size)
+{
+    char found[NK_PBP_HOMEBREW_FOLDER_NAME_MAX + 1u];
+    char root[HB_PATH_MAX];
+    char path[HB_PATH_MAX];
+    HbSource source;
+    char *stored = NULL;
+    size_t length = 0;
+    bool recorded = true;
+    bool differs;
+    if (other == NULL || other_size == 0u) return false;
+    other[0] = '\0';
+    if (nk_pbp_homebrew_find_view(iso_path, found, sizeof(found)) != NK_PBP_HB_VIEW_FOUND ||
+        !hb_source(pbp_path, &source) || !nk_pbp_homebrew_view_root(iso_path, root, sizeof(root)) ||
+        !hb_join(path, sizeof(path), root, HB_SOURCE_NAME))
+        return false;
+    /* One line, the folder's real path: anything else is no record. */
+    if (!nk_platform_path_missing(path) && (stored = hb_read_text(path)) != NULL) {
+        length = strlen(stored);
+        if (length < 2u || stored[length - 1u] != '\n') recorded = false;
+        for (size_t i = 0; recorded && i + 1u < length; ++i) {
+            if ((unsigned char)stored[i] < 0x20u || stored[i] == 0x7f) recorded = false;
+        }
+    } else {
+        recorded = false;
+    }
+    if (recorded) {
+        stored[length - 1u] = '\0';
+        differs = strcmp(stored, source.real) != 0;
+        if (differs) snprintf(other, other_size, "%s", stored);
+    } else {
+        /* A view written before the record: its folder's name is all it says. */
+        differs = strcmp(found, source.picked + source.name_at) != 0;
+        if (differs) snprintf(other, other_size, "%s", found);
+    }
+    free(stored);
+    return differs;
 }
 
 /* rel ("/"-separated) under base, in the host's separators. */

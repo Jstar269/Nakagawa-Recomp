@@ -1080,6 +1080,37 @@ static void test_no_iso_child_environment(const char *test_executable,
                 snprintf(hb_file, sizeof(hb_file), "%s%cPSP%cGAME%cx", hb_stick, sep, sep, sep);
                 assert(nk_platform_path_missing(hb_file));
             }
+            /* M2 alone: the file is really in the view, under a folder the list never names,
+               with its own size and digest, so only the missing D entry tells it from a
+               listed one. Failing before: the launch went on and made the folder on the stick
+               without checking it for a link. */
+            {
+                char planted[NK_MAX_PATH * 2 + 96];
+                uint8_t digest[32];
+                char hex[65];
+                NkSha256 sha;
+                char *bad;
+                snprintf(planted, sizeof(planted), "%s%cPSP%cGAME%cMYHB%cunlisted", hb_view_root,
+                         sep, sep, sep, sep);
+                assert(nk_platform_mkdir_p(planted));
+                snprintf(planted + strlen(planted), sizeof(planted) - strlen(planted), "%cx", sep);
+                write_file(planted, "planted");
+                nk_sha256_init(&sha);
+                nk_sha256_update(&sha, (const uint8_t *)"planted", 7u);
+                nk_sha256_finish(&sha, digest);
+                for (int b = 0; b < 32; ++b) snprintf(hex + 2 * b, 3, "%02x", digest[b]);
+                bad = (char *)malloc(strlen(manifest_text) + 128u);
+                assert(bad != NULL);
+                snprintf(bad, strlen(manifest_text) + 128u, "%sF %s 7 unlisted/x\n",
+                         manifest_text, hex);
+                write_file(manifest_path, bad);
+                free(bad);
+                assert(nk_launch_start(&session) != NK_OK);
+                assert(strstr(session.last_error, "is damaged") != NULL);
+                snprintf(hb_file, sizeof(hb_file), "%s%cPSP%cGAME%cMYHB%cunlisted", hb_stick, sep,
+                         sep, sep, sep);
+                assert(nk_platform_path_missing(hb_file));
+            }
             free(manifest_text);
             assert(nk_pbp_homebrew_write_view(hb_pbp, hb_view_root, NULL, problem,
                                               sizeof(problem)));

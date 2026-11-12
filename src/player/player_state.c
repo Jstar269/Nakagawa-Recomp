@@ -8426,6 +8426,19 @@ static void player_homebrew_key_taken(const char *key, const char *iso_path, cha
                       "Nothing was changed.", key, iso_path);
 }
 
+/* One program in two folders (review of #2426, M1): the key comes from the EBOOT.PBP alone,
+   so a second folder holding the same file would replace the first folder's copy, and both
+   would run on one Memory Stick. The import stops by name; from its own folder it goes on. */
+static void player_homebrew_already_added(const char *title, const char *key, const char *other,
+                                          char *code, size_t code_size, char *message,
+                                          size_t message_size) {
+    player_psn_result(code, code_size, "HOMEBREW_ALREADY_ADDED", message, message_size,
+                      "%.120s (%s) is already in the library, added from the folder "
+                      "\"%.300s\". A program is added from one folder: to add it from this "
+                      "one, remove %.120s from the library first. Nothing was changed.",
+                      title, key, other, title);
+}
+
 static bool player_psn_disc_iso_path(char *out, size_t out_size, const char *data_root,
                                      const char *disc_id) {
     char relative[64];
@@ -8451,6 +8464,7 @@ static bool player_homebrew_package_inspect(const char *pbp_path, const NkPbpInf
     char view_root[MAX_PATH_LEN];
     char folder[NK_PBP_HOMEBREW_FOLDER_NAME_MAX + 1u];
     char problem[512];
+    char other[MAX_PATH_LEN];
     int rc;
     snprintf(label, sizeof(label), "%.120s", info->title[0] ? info->title : "This package");
     nk_psp_ctx_init(&ctx, NULL);
@@ -8513,6 +8527,12 @@ static bool player_homebrew_package_inspect(const char *pbp_path, const NkPbpInf
     if (!player_homebrew_key_free(package->iso_path, program.identity_sha256)) {
         player_homebrew_key_taken(program.key, package->iso_path, code, code_size, message,
                                   message_size);
+        package->iso_path[0] = '\0';
+        return false;
+    }
+    if (nk_pbp_homebrew_other_source(pbp_path, package->iso_path, other, sizeof(other))) {
+        player_homebrew_already_added(info->title[0] ? info->title : "Homebrew", program.key,
+                                      other, code, code_size, message, message_size);
         package->iso_path[0] = '\0';
         return false;
     }
@@ -8661,13 +8681,21 @@ static bool player_homebrew_package_convert(const PlayerPsnPackage *package,
     {
         char view_root[MAX_PATH_LEN];
         char problem[512];
+        char other[MAX_PATH_LEN];
         bool had_image = !nk_platform_path_missing(package->iso_path);
         problem[0] = '\0';
         /* Checked again here, before anything is written: another program's image may
-           have arrived under the key since the inspection. */
+           have arrived under the key since the inspection, or this one from another
+           folder. */
         if (!player_homebrew_key_free(package->iso_path, package->identity_sha256)) {
             player_homebrew_key_taken(package->disc_id, package->iso_path, code, code_size,
                                       message, message_size);
+            return false;
+        }
+        if (nk_pbp_homebrew_other_source(package->pbp_path, package->iso_path, other,
+                                         sizeof(other))) {
+            player_homebrew_already_added(package->title, package->disc_id, other, code,
+                                          code_size, message, message_size);
             return false;
         }
         if (!nk_pbp_homebrew_view_root(package->iso_path, view_root, sizeof(view_root)) ||

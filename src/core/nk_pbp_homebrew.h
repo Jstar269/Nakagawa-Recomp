@@ -81,7 +81,8 @@ int nk_pbp_homebrew_convert_file(NkPspCtx *ctx, const char *pbp_path,
  * the folder the package was picked from beside the disc image, laid out as on a
  * Memory Stick: "<image without .iso>.ms0/PSP/GAME/<folder>/" (the view), with a
  * manifest of every entry (its path and, for a file, its size and SHA-256) in
- * "<image without .iso>.ms0/view.manifest". A launch puts the view on the title's
+ * "<image without .iso>.ms0/view.manifest", and the path the picked folder really
+ * has in "<image without .iso>.ms0/view.source". A launch puts the view on the title's
  * Memory Stick (nk_pbp_homebrew_seed_memstick), then boots
  * ms0:/PSP/GAME/<folder>/EBOOT.PBP. Nothing is aliased: a path the folder does not
  * hold is missing, as on a PSP, and what the program writes stays on the title's
@@ -140,6 +141,17 @@ bool nk_pbp_homebrew_check_folder(const char *pbp_path, const char *view_root,
 bool nk_pbp_homebrew_write_view(const char *pbp_path, const char *view_root,
                                 const NkNpumdimgCallbacks *callbacks,
                                 char *problem, size_t problem_size);
+
+/* Whether the image at iso_path already holds this program imported from a folder
+ * other than the one pbp_path is in (review of #2426, M1). The program's key comes
+ * from its EBOOT.PBP alone, so the same file in two folders is one title: importing
+ * it from the second folder would replace the first folder's copy, and both would
+ * run on one Memory Stick. True puts that other folder in other: the path it really
+ * had, from the view's view.source, or, for a view without one, its folder name.
+ * False when the image has no view (NK_PBP_HB_VIEW_FOUND) or its view came from the
+ * folder pbp_path is in, every link resolved. Reads only. */
+bool nk_pbp_homebrew_other_source(const char *pbp_path, const char *iso_path, char *other,
+                                  size_t other_size);
 
 /* Whether the view at view_root is the folder pbp_path is in as it is now: the
  * folder passes nk_pbp_homebrew_check_folder and its manifest, every file read
