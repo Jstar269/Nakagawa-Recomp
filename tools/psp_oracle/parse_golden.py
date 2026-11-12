@@ -2055,8 +2055,8 @@ _register_campaign_probe(
 # hle-utility-netconf-sharing (166, probe_hle_measure.c): the game sharing and netconf rows of
 # case 161 only, same shapes, game sharing first and netconf last. Case 161's netconf dialog
 # stayed RUNNING to the poll cap on boot 204 and the console needed a power cycle (its gamedata
-# install dialog did the same on boot 206), so netconf runs after every sharing record is
-# written. No savedata, gamedata install or message dialog cell.
+# install dialog did the same on boot 206), and a stuck dialog makes every later dialog cell
+# SKIP 5, so game sharing runs before netconf. No savedata, gamedata install or message dialog cell.
 HLE_UTILITY_NETCONF_SHARING_ROWS = (
     *(row for row in HLE_UTILITY_DIALOGS_ROWS if row[0].startswith("sharing-")),
     *(row for row in HLE_UTILITY_DIALOGS_ROWS if row[0].startswith("netconf-")),

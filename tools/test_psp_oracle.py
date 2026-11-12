@@ -5976,9 +5976,7 @@ class HleMeasureProbeTests(unittest.TestCase):
         start, end = self._family_span(self.probe, macro)
         text = self.probe[start:end]
         if macro in self.SHARED_SECTIONS:
-            only = self.SHARED_SECTIONS[macro]
-            text = re.sub(rf"\n#if PSP_ORACLE_CASE == {only}\n.*?\n#endif\n", "\n", text,
-                          flags=re.DOTALL)
+            text = _select_case_blocks(text, macro)
         return text
 
     def _shared_section(self) -> str:
@@ -12878,38 +12876,54 @@ class HleUtilityNetconfSharingProbeTests(unittest.TestCase):
         return self.probe[self.probe.index("#if PSP_ORACLE_CASE == HLE_CASE_UTILITY_DIALOGS || "):
                           self.probe.index("#endif /* HLE_CASE_UTILITY_DIALOGS */")]
 
-    def test_a_stuck_dialog_skips_the_net_teardown_in_case_166_only(self) -> None:
+    def test_net_teardown_runs_on_every_path_and_records_each_return_as_in_161(self) -> None:
+        # Both cases resolve to case 161's teardown call: a stuck dialog does not skip it, so
+        # under a stuck netconf dialog the teardown runs as it did on boot 204.
         section = self._section()
-        for macro, skip in (
-                ("HLE_CASE_UTILITY_NETCONF_SHARING",
-                 "(reason == HLE_UD_SKIP_STUCK || s_ud_stuck) ? HLE_UD_SKIP_STUCK : 0u"),
-                ("HLE_CASE_UTILITY_DIALOGS", "reason == HLE_UD_SKIP_STUCK ? reason : 0u")):
+        for macro in ("HLE_CASE_UTILITY_NETCONF_SHARING", "HLE_CASE_UTILITY_DIALOGS"):
             code = _c_code(_select_case_blocks(section, macro))
             for kind in ("netconf", "sharing"):
                 with self.subTest(macro=macro, kind=kind):
                     group = code[code.index(f"static void hle_ud_{kind}(void)"):]
                     group = group[:group.index("\n}\n")]
                     self.assertEqual(re.findall(rf"hle_ud_{kind}_teardown\((.*)\);", group),
-                                     [f"stage, {skip}"])
-        # s_ud_stuck is raised only by a run stuck at its bound or a GetStatus error
-        # (hle_ud_settle) and by an accepted message dialog InitStart; the header names all three.
+                                     ["stage, reason == HLE_UD_SKIP_STUCK ? reason : 0u"])
+                    self.assertNotIn("s_ud_stuck", group)
+        # The only skip a teardown gets is its setup's own SKIP 5, made before any setup call.
         code = _c_code(section)
-        self.assertEqual(code.count("s_ud_stuck++"), 2)
-        settle = code[code.index("static void hle_ud_settle("):]
-        self.assertIn("HLE_UD_OUT_STUCK || r->outcome == HLE_UD_OUT_STATUS_ERROR",
-                      settle[:settle.index("\n}\n")])
+        for kind in ("netconf", "sharing"):
+            with self.subTest(kind=kind):
+                setup = code[code.index(f"static uint32_t hle_ud_{kind}_setup("):]
+                setup = setup[:setup.index("\n}\n")]
+                skip = setup[setup.index("if (s_ud_stuck) {"):setup.index("return HLE_UD_SKIP_STUCK;")]
+                self.assertNotIn("*stage", skip)
+                self.assertNotIn("sceNet", skip)
+                # Each teardown call's return is a recorded word of the teardown cell.
+                teardown = code[code.index(f"static void hle_ud_{kind}_teardown("):]
+                teardown = teardown[:teardown.index("\n}\n")]
+                self.assertEqual(re.findall(r"out\[(\d)\] = \(uint32_t\)sce\w+\(", teardown),
+                                 ["0", "1", "2", "3", "4"])
+                self.assertIn(f'hle_record("{kind}-teardown", "PASS", stage, out, '
+                              "HLE_UD_NET_WORDS);", teardown)
+        counts = dict(parse_golden.HLE_UTILITY_NETCONF_SHARING_ROWS)
+        self.assertEqual((counts["sharing-teardown"], counts["netconf-teardown"]), (5, 5))
+        # Case 166's only block of its own is its hle_run; no teardown is special-cased.
+        own = [block[:block.index("#endif")] for block in
+               section.split("#if PSP_ORACLE_CASE == HLE_CASE_UTILITY_NETCONF_SHARING\n")[1:]]
+        self.assertEqual([block.count("static int hle_run(void)") for block in own], [1])
+        self.assertNotIn("_teardown", "".join(own))
         header = " ".join(section[:section.index("*/")].split())
-        for term in ("case 166 skips the net teardown after a stuck dialog",
-                     "a run stuck at its bound, a GetStatus error, or an accepted message dialog "
-                     "InitStart",
-                     "This is not because the calls block: on boot 204 netconf-teardown ran",
-                     '"loaded module was not proven unloaded" blocker'):
+        for term in ("Case 166 tears each group's net setup down exactly as case 161 does, on every "
+                     "path that ran a setup, a stuck dialog's included",
+                     "netconf-teardown runs and records each call's return, as it did under the "
+                     "stuck dialog on boot 204",
+                     "The console is expected to need that power cycle either way",
+                     "teardown and cleanup still run.",
+                     "a stuck dialog's included, in case 161 and in case 166"):
             with self.subTest(term=term):
                 self.assertIn(term, header)
-        self.assertNotIn("teardown and cleanup still run.", header)
-        records = " ".join(section[:section.index("*/\n\n#include <pspumd.h>")].split())
-        self.assertIn("In case 161 they run on every path that ran a setup; in case 166 they are "
-                      "SKIP 5 after a stuck dialog", records)
+        for gone in ("skips the net teardown", "loaded module was not proven unloaded"):
+            self.assertNotIn(gone, header)
 
     def test_records_state_the_expected_netconf_stick_and_the_power_cycle(self) -> None:
         root = Path(__file__).resolve().parents[1]
@@ -12923,12 +12937,28 @@ class HleUtilityNetconfSharingProbeTests(unittest.TestCase):
             with self.subTest(field=field):
                 self.assertIn("boot 204", row[field])
         self.assertIn("the sharing cells have no expectation", row["evidence_note"])
-        # The other power-risk rows' form: one launch per boot, a power cycle after a stuck run.
-        self.assertTrue(row["reset"].startswith("one hle-utility-netconf-sharing launch per boot; "))
-        self.assertIn("the owner power-cycles the console before any further launch", row["reset"])
-        self.assertIn("nothing is retried on that boot", row["reset"])
-        self.assertIn("net teardown are SKIP 5", row["invariant"])
-        self.assertIn("module-unload blocker", row["invariant"])
+        # Operator steps in the other owner-present rows' form: the game context, the WLAN
+        # switch, one launch per boot and a power cycle after a stuck run.
+        self.assertTrue(row["reset"].startswith("game context: standalone PSPLink entered from the "
+                                                "XMB by one owner-present soft reset"))
+        for term in ("the WLAN switch on (the probe does not read it, so the owner records its "
+                     "position;",
+                     "one hle-utility-netconf-sharing launch per boot;",
+                     "the owner power-cycles the console before any further launch",
+                     "nothing is retried on that boot"):
+            with self.subTest(term=term):
+                self.assertIn(term, row["reset"])
+        for term in ("expected to need a power cycle after this case either way",
+                     "RADIO: the game sharing dialog is expected to start the PSP's ad hoc radio",
+                     "named NKORACL", "nothing is sent to an access point or any server",
+                     "in the game context, with the WLAN switch on"):
+            with self.subTest(term=term):
+                self.assertIn(term, row["risk"])
+        # The teardown rule: it always runs and its returns are recorded cells, NOT_RUN.
+        self.assertIn("each group's net teardown still runs on every path that ran its setup, as "
+                      "in case 161, with each call's return recorded (NOT_RUN until measured)",
+                      row["invariant"])
+        self.assertNotIn("SKIP 5, so the net modules stay loaded", row["invariant"])
         header = " ".join(self._section()[:self._section().index("*/")].split())
         parser = (root / "tools" / "psp_oracle" / "parse_golden.py").read_text(encoding="utf-8")
         parser = parser[parser.index("# hle-utility-netconf-sharing (166"):
@@ -12949,7 +12979,12 @@ class HleUtilityNetconfSharingProbeTests(unittest.TestCase):
             with self.subTest(cites=name):
                 self.assertIn("boot 204", texts[name])
         self.assertIn("one launch per boot", texts["docs"])
-        self.assertIn("One launch per boot", texts["readme"])
+        self.assertIn("Game context, WLAN switch on", texts["docs"])
+        for term in ("Operator steps:", "one launch per boot;", "the WLAN switch on",
+                     "ad hoc radio", "nothing is sent to an access point or any server",
+                     "the console is expected to need a power cycle after this case either way"):
+            with self.subTest(readme=term):
+                self.assertIn(term, texts["readme"])
 
 
 class HleUtilityDialogsProbeTests(unittest.TestCase):

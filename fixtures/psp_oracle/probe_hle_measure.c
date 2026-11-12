@@ -3477,8 +3477,7 @@ static int hle_run(void)
      vblank is read after the marker, so the marker cannot lengthen a measured shutdown.
    - Each dialog is back at NONE before the next starts. A run that is not back at NONE by its
      bound is recorded as stuck, makes COMPLETE report FAIL, and every later dialog cell (and net
-     setup) is SKIP with reason HLE_UD_SKIP_STUCK. In case 161 teardown and cleanup still run;
-     case 166 skips the net teardown after a stuck dialog (below).
+     setup) is SKIP with reason HLE_UD_SKIP_STUCK; teardown and cleanup still run.
 
    Left out: every message dialog run. The message dialog refuses ShutdownStart during INIT and
    RUNNING (pspautotests utility/dialog/status.expected, as hle_utility.c cites it), so once open it
@@ -3500,22 +3499,31 @@ static int hle_run(void)
    owner power-cycled the console; on boot 206 the gamedata install dialog did the same. Nothing
    in this probe presses a button, and ShutdownStart is its only way to end a RUNNING dialog, so
    netconf-timing is expected to stick here as it did on boot 204. Game sharing has never run on
-   a console (on both boots it was SKIP 5) and has no expectation. So case 166 runs game sharing
-   first and netconf last: every record is written to host0 (opened, written and closed) as soon
-   as its cell ends, so a hang in netconf loses only the cell in flight, never a sharing record.
-   The one launch is meant to measure the sharing cells, and to show whether netconf sticks as
-   on boot 204 when no savedata dialog has run before it. Expected end when netconf sticks:
-   netconf-timing records outcome 1, the netconf state cells and netconf-teardown are SKIP 5,
-   COMPLETE reports FAIL, and the console needs the owner's power cycle; one launch per boot.
+   a console (on both boots it was SKIP 5) and has no expectation. A stuck dialog makes every
+   later dialog cell SKIP 5, so whichever dialog runs first is the one measured: case 166 runs
+   game sharing first and netconf last. (No record was lost on boot 204 or 206: each stream was
+   complete and PSPLink went silent only after the done record; every record is written to host0,
+   opened, written and closed, as soon as its cell ends.) The one launch is meant to measure the
+   sharing cells, and to show whether netconf sticks as on boot 204 when no savedata dialog has
+   run before it. Expected end when netconf sticks: netconf-timing records outcome 1, the netconf
+   state cells are SKIP 5, netconf-teardown runs and records each call's return, as it did under
+   the stuck dialog on boot 204 (all five setup calls undone, then the done record), COMPLETE
+   reports FAIL, and the console needs the owner's power cycle. The console is expected to need
+   that power cycle either way: on boot 204 it followed a teardown that completed, and on boot
+   206 it came with no net module loaded. One launch per boot.
 
-   Case 166's net teardown is skipped (SKIP 5) when its own dialog cells set s_ud_stuck: a run
-   stuck at its bound, a GetStatus error, or an accepted message dialog InitStart. In each a
-   dialog may still be active, and the case does not unload the net modules under a dialog that
-   may still use them. This is not because the calls block: on boot 204 netconf-teardown ran
-   under the stuck netconf dialog and undid all five setup calls. Skipping keeps the done record
-   ahead of any call made under a live dialog; it is not expected to avoid the power cycle (boot
-   206 hung with no net module loaded). The modules then stay loaded at exit, so the run is
-   certain to carry the "loaded module was not proven unloaded" blocker.
+   Case 166 tears each group's net setup down exactly as case 161 does, on every path that ran a
+   setup, a stuck dialog's included. The two groups are coupled: netconf's setup loads COMMON and
+   calls sceNetInit again after sharing's teardown, so a sharing teardown that leaves either in
+   place makes netconf-setup fail and the netconf cells SKIP 6 (161 has the mirror case).
+
+   Operator conditions (README and manifest rows): game context, as for case 161; the WLAN switch
+   on. The probe does not read the switch, so a run with it off shows only what the net setup and
+   dialog cells return then. The game sharing dialog is expected to start the PSP's ad hoc radio
+   on its own and may offer its HLE_UD_GS_DATA_BYTES pattern bytes under HLE_UD_GS_NAME to a
+   nearby PSP in receive mode until it is shut down or the console is power-cycled; netconf may
+   scan for access points. The probe makes no connect call and answers no dialog, so nothing can
+   reach an access point or a server.
 
    Records, in order (a SKIP record keeps its word count, all words 0, and carries the reason in
    result: 1 a UMD is present, 2 the gamedata directory exists, 3 sceUmdCheckMedium failed, 4 the
@@ -3581,8 +3589,8 @@ static int hle_run(void)
    - netconf-teardown and sharing-teardown (5 words; result the number of setup calls undone):
      the Term calls and unloads in reverse order (ApctlTerm, InetTerm, NetTerm, unload INET,
      unload COMMON; AdhocctlTerm, AdhocTerm, NetTerm, unload ADHOC, unload COMMON), each made
-     only when its setup call succeeded (HLE_SENTINEL otherwise). In case 161 they run on every
-     path that ran a setup; in case 166 they are SKIP 5 after a stuck dialog (above). */
+     only when its setup call succeeded (HLE_SENTINEL otherwise). They run on every path that
+     ran a setup, a stuck dialog's included, in case 161 and in case 166. */
 
 #include <pspumd.h>
 #include <pspnet.h>
@@ -4353,12 +4361,7 @@ static void hle_ud_netconf(void)
     hle_ud_timing("netconf-timing", &k_ud_netconf, reason);
     hle_ud_states("netconf-state-init", "netconf-state-running", "netconf-state-finished",
                   "netconf-state-shutdown", &k_ud_netconf, reason);
-#if PSP_ORACLE_CASE == HLE_CASE_UTILITY_NETCONF_SHARING
-    /* Case 166: no unload under a dialog that may still be active (the header says why). */
-    hle_ud_netconf_teardown(stage, (reason == HLE_UD_SKIP_STUCK || s_ud_stuck) ? HLE_UD_SKIP_STUCK : 0u);
-#else
     hle_ud_netconf_teardown(stage, reason == HLE_UD_SKIP_STUCK ? reason : 0u);
-#endif
 }
 
 /* Game sharing's ad hoc setup: init calls only, no group is created or joined here. */
@@ -4444,12 +4447,7 @@ static void hle_ud_sharing(void)
     hle_ud_timing("sharing-timing", &k_ud_sharing, reason);
     hle_ud_states("sharing-state-init", "sharing-state-running", "sharing-state-finished",
                   "sharing-state-shutdown", &k_ud_sharing, reason);
-#if PSP_ORACLE_CASE == HLE_CASE_UTILITY_NETCONF_SHARING
-    /* Case 166: no unload under a dialog that may still be active (the header says why). */
-    hle_ud_sharing_teardown(stage, (reason == HLE_UD_SKIP_STUCK || s_ud_stuck) ? HLE_UD_SKIP_STUCK : 0u);
-#else
     hle_ud_sharing_teardown(stage, reason == HLE_UD_SKIP_STUCK ? reason : 0u);
-#endif
 }
 
 #if PSP_ORACLE_CASE == HLE_CASE_UTILITY_DIALOGS
@@ -4466,8 +4464,9 @@ static int hle_run(void)
 #endif
 
 #if PSP_ORACLE_CASE == HLE_CASE_UTILITY_NETCONF_SHARING
-/* Game sharing first, netconf last: netconf stuck RUNNING on boot 204 (case 161), so it runs only
-   after every sharing record is written. No savedata, gamedata install or message dialog opens. */
+/* Game sharing first, netconf last: netconf stuck RUNNING on boot 204 (case 161), and a stuck
+   dialog makes every later dialog cell SKIP 5, so sharing runs before it. No savedata or gamedata
+   install dialog is built in, and no message dialog is meant to open (size-0 block only). */
 static int hle_run(void)
 {
     hle_ud_sharing();
