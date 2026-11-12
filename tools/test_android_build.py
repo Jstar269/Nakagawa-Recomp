@@ -164,17 +164,47 @@ class AndroidAppContractTests(unittest.TestCase):
             self.assertIn(f"-Wl,--wrap={symbol}", cmake)
         self.assertIn("int __wrap_atexit(void (*handler)(void))", shim)
         self.assertNotIn("__real_exit(", shim)
-        wrap_exit = shim[shim.index("void __wrap_exit(int status) {"):]
-        wrap_exit = wrap_exit[:wrap_exit.index("\n}\n")]
-        self.assertIn("s_exit_handlers[--s_exit_handler_count]()", wrap_exit)
-        self.assertLess(wrap_exit.index("nk_platform_host_shutdown();"),
-                        wrap_exit.index("__real__exit(status);"))
         self.assertIn("__wrap_exit(main(argc, argv));", shim)
         header = (ROOT / "src" / "core" / "nk_platform.h").read_text(encoding="utf-8")
         self.assertIn("void nk_platform_host_shutdown(void);", header)
         for source in ("nk_platform_posix.c", "nk_platform_win32.c"):
             text = (ROOT / "src" / "core" / source).read_text(encoding="utf-8")
             self.assertIn("void nk_platform_host_shutdown(void)", text)
+
+    @unittest.skipUnless(sys.platform.startswith("linux") and shutil.which("cc"), "needs a Linux C compiler")
+    def test_the_title_shim_ends_the_process_as_exit_would(self) -> None:
+        """The shim built for Linux with the Android link's --wrap flags, around a stub runtime:
+        handlers run last-registered-first and once, a handler's own exit() goes on with the rest,
+        a second thread's exit() waits for the first, and the exit file is written after the log
+        is drained, with the status the process ends with."""
+        shim = ANDROID / "app" / "src" / "main" / "cpp" / "nk_android_title.c"
+        with tempfile.TemporaryDirectory(prefix="nk-title-shim-") as tmp:
+            work = Path(tmp)
+            (work / "harness.c").write_text(_TITLE_SHIM_HARNESS, encoding="utf-8")
+            program = work / "title"
+            wraps = [f"-Wl,--wrap={symbol}" for symbol in ("exit", "_exit", "_Exit", "atexit")]
+            subprocess.run(["cc", "-std=gnu11", "-Wall", "-Werror", "-I", str(ROOT / "src" / "core"),
+                            "-Dmain=nk_shim_runtime_main", "-c", str(shim), "-o", str(work / "shim.o")],
+                           check=True)
+            subprocess.run(["cc", "-std=gnu11", "-Wall", "-Werror", "-c",
+                            str(work / "harness.c"), "-o", str(work / "harness.o")], check=True)
+            subprocess.run(["cc", str(work / "harness.o"), str(work / "shim.o"), "-pthread", *wraps,
+                            "-o", str(program)], check=True)
+            cases = {
+                "order": (3, "b a shutdown(no-exit-file) "),
+                "nested": (5, "b nested a shutdown(no-exit-file) "),
+                "_exit": (4, "shutdown(no-exit-file) "),
+                "race": (2, "slow slow-done a shutdown(no-exit-file) "),
+            }
+            for mode, (status, trace) in cases.items():
+                with self.subTest(mode=mode):
+                    env = dict(os.environ, NK_ANDROID_EXIT_FILE=str(work / f"exit-{mode}"),
+                               NK_TEST_TRACE=str(work / f"trace-{mode}"))
+                    env.pop("NK_ANDROID_PID_FILE", None)
+                    ran = subprocess.run([str(program), mode], env=env, check=False, timeout=60)
+                    self.assertEqual(ran.returncode, status)
+                    self.assertEqual((work / f"exit-{mode}").read_text(encoding="utf-8"), f"{status}\n")
+                    self.assertEqual((work / f"trace-{mode}").read_text(encoding="utf-8"), trace)
 
     def test_data_folder_has_the_name_every_host_uses(self) -> None:
         """The user data folder is called Nakagawa on every host; on Android it is in the
@@ -555,6 +585,55 @@ class AndroidTitleLibraryTests(unittest.TestCase):
 def cast_str(value: str | None) -> str:
     assert value is not None
     return value
+
+
+#: A stub runtime for the title shim (nk_android_title.c), built on Linux by
+#: test_the_title_shim_ends_the_process_as_exit_would. The shim's main() is renamed to
+#: nk_shim_runtime_main; each mode registers handlers and ends the process one way.
+_TITLE_SHIM_HARNESS = r"""
+#include <fcntl.h>
+#include <pthread.h>
+#include <stdbool.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+int nk_android_title_main(int argc, char **argv);
+
+static void say(const char *text) {
+    int fd = open(getenv("NK_TEST_TRACE"), O_WRONLY | O_CREAT | O_APPEND, 0600);
+    if (fd < 0) return;
+    if (write(fd, text, strlen(text)) < 0) {}
+    close(fd);
+}
+
+bool nk_platform_host_startup(const char *log_tag) { (void)log_tag; return true; }
+void nk_platform_host_shutdown(void) {
+    say(access(getenv("NK_ANDROID_EXIT_FILE"), F_OK) == 0 ? "shutdown(exit-file) " : "shutdown(no-exit-file) ");
+}
+
+static void handler_a(void) { say("a "); }
+static void handler_b(void) { say("b "); }
+static void handler_nested(void) { say("nested "); exit(5); }
+static void *racer(void *arg) { (void)arg; exit(9); return NULL; }
+static void handler_slow(void) {
+    say("slow ");
+    pthread_t thread;
+    if (pthread_create(&thread, NULL, racer, NULL) == 0) usleep(200000);
+    say("slow-done ");
+}
+
+int nk_shim_runtime_main(int argc, char **argv) {
+    const char *mode = argc > 1 ? argv[1] : "";
+    if (strcmp(mode, "order") == 0) { atexit(handler_a); atexit(handler_b); return 3; }
+    if (strcmp(mode, "nested") == 0) { atexit(handler_a); atexit(handler_nested); atexit(handler_b); exit(1); }
+    if (strcmp(mode, "_exit") == 0) { atexit(handler_a); _exit(4); }
+    if (strcmp(mode, "race") == 0) { atexit(handler_a); atexit(handler_slow); exit(2); }
+    return 99;
+}
+
+int main(int argc, char **argv) { return nk_android_title_main(argc, argv); }
+"""
 
 
 if __name__ == "__main__":

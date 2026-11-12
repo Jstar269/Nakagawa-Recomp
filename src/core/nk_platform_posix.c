@@ -1389,6 +1389,7 @@ static void *android_log_pump(void *arg) {
     size_t used = 0;
     for (;;) {
         ssize_t n = read(s_android_log_pipe[0], buf + used, sizeof(buf) - 1u - used);
+        if (n < 0 && errno == EINTR) continue;
         if (n <= 0) break;
         used += (size_t)n;
         size_t start = 0;
@@ -1410,6 +1411,14 @@ static void *android_log_pump(void *arg) {
             used = 0;
         }
     }
+    if (used > 0) {   /* a last line with no newline */
+        buf[used] = '\0';
+        __android_log_write(ANDROID_LOG_INFO, s_android_log_tag, buf);
+        if (s_android_log_file) {
+            fprintf(s_android_log_file, "%s\n", buf);
+            fflush(s_android_log_file);
+        }
+    }
     return NULL;
 }
 
@@ -1418,7 +1427,10 @@ bool nk_platform_host_startup(const char *log_tag) {
     if (log_tag && log_tag[0]) snprintf(s_android_log_tag, sizeof(s_android_log_tag), "%s", log_tag);
     const char *log_path = getenv("NK_ANDROID_LOG_FILE");
     if (log_path && log_path[0]) s_android_log_file = fopen(log_path, "a");
-    if (s_android_log_pipe[0] < 0 && pipe(s_android_log_pipe) == 0) {
+    /* O_CLOEXEC: a child the runtime starts keeps no copy of the pipe's own write end, which would
+       hold off the end of file nk_platform_host_shutdown waits for. The standard streams it gets
+       are dup2() copies, inherited as on the desktop. */
+    if (s_android_log_pipe[0] < 0 && pipe2(s_android_log_pipe, O_CLOEXEC) == 0) {
         pthread_t thread;
         setvbuf(stdout, NULL, _IOLBF, 0);
         setvbuf(stderr, NULL, _IOLBF, 0);

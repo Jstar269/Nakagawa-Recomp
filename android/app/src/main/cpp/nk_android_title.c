@@ -19,13 +19,20 @@
  * the process (FORTIFY, SIGABRT). A desktop child has no such threads. So the runtime's atexit()
  * goes through the shim too: its handlers are kept here and run, last registered first, as exit()
  * would run them; the system log copy is drained (nk_platform_host_shutdown); and the process
- * ends with _exit(), which runs nobody else's.
+ * ends with _exit(), which runs nobody else's. The exit status is recorded last, after the log
+ * is drained, because the launcher takes the exit file as the end of the run.
+ *
+ * Guest threads call exit() too (sceKernelExitGame). The first thread to end the process owns
+ * the exit; any other thread that calls exit(), _exit() or _Exit() meanwhile waits for the
+ * process to end. A handler that calls exit() itself goes on with the handlers not yet run, then
+ * ends the process with its own status, as each handler runs once.
  * See nk_platform_spawn_process in src/core/nk_platform_posix.c for the launcher side.
  */
 
 #include "nk_platform.h"
 
 #include <fcntl.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -36,11 +43,29 @@ int main(int argc, char **argv);   /* src/rt/driver.c */
 void __real__exit(int status) __attribute__((noreturn));
 void __real__Exit(int status) __attribute__((noreturn));
 
-/* The runtime registers about a dozen; more than this is a programming error, refused loudly. */
+/* The runtime registers about a dozen; more than this is a programming error: atexit() fails
+   and says so on stderr. */
 #define NK_TITLE_EXIT_HANDLERS 64
 static void (*s_exit_handlers[NK_TITLE_EXIT_HANDLERS])(void);
 static int s_exit_handler_count;
-static int s_exiting;
+/* Held from the start of an exit to the end of the process, never released. Recursive, so a
+   handler that calls exit() on the exiting thread goes on; any other thread blocks here. It also
+   guards the handler table, which atexit() fills while the runtime runs. */
+static pthread_mutex_t s_exit_lock;
+static pthread_once_t s_exit_lock_once = PTHREAD_ONCE_INIT;
+
+static void init_exit_lock(void) {
+    pthread_mutexattr_t attr;
+    pthread_mutexattr_init(&attr);
+    pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+    pthread_mutex_init(&s_exit_lock, &attr);
+    pthread_mutexattr_destroy(&attr);
+}
+
+static void lock_exit(void) {
+    pthread_once(&s_exit_lock_once, init_exit_lock);
+    pthread_mutex_lock(&s_exit_lock);
+}
 
 static void write_number_file(const char *env_name, long value) {
     const char *path = getenv(env_name);
@@ -58,48 +83,46 @@ static void write_number_file(const char *env_name, long value) {
     if (written == (ssize_t)length) (void)rename(temp, path);
 }
 
-static void record_exit(int status) {
-    static int recorded;
-    if (recorded) return;
-    recorded = 1;
-    fflush(stdout);
-    fflush(stderr);
+/* The last step before the process ends: the log is drained first, so the launcher, which takes
+   the exit file as the end of the run, has every line by then. Called with s_exit_lock held. */
+static void finish_process(int status) {
+    fflush(NULL);
+    nk_platform_host_shutdown();
     write_number_file("NK_ANDROID_EXIT_FILE", (long)(status & 0xff));
 }
 
 int __wrap_atexit(void (*handler)(void)) {
     if (!handler) return -1;
-    if (s_exit_handler_count == NK_TITLE_EXIT_HANDLERS) {
+    lock_exit();
+    int full = s_exit_handler_count == NK_TITLE_EXIT_HANDLERS;
+    if (!full) s_exit_handlers[s_exit_handler_count++] = handler;
+    pthread_mutex_unlock(&s_exit_lock);
+    if (full) {
         fprintf(stderr, "nk_android_title: more than %d atexit handlers; this one will not run\n",
                 NK_TITLE_EXIT_HANDLERS);
         return -1;
     }
-    s_exit_handlers[s_exit_handler_count++] = handler;
     return 0;
 }
 
-void __wrap_exit(int status) {
-    record_exit(status);
-    /* A handler that calls exit() ends the process here: the remaining handlers do not run
-       twice, and the status recorded first stands. */
-    if (!s_exiting) {
-        s_exiting = 1;
-        while (s_exit_handler_count > 0) s_exit_handlers[--s_exit_handler_count]();
-    }
-    fflush(NULL);
-    nk_platform_host_shutdown();
+__attribute__((noreturn)) void __wrap_exit(int status) {
+    lock_exit();   /* never released: the process ends below */
+    /* Each handler is taken off the table before it runs, so a handler that calls exit() goes on
+       from the next one and never runs one twice. */
+    while (s_exit_handler_count > 0) s_exit_handlers[--s_exit_handler_count]();
+    finish_process(status);
     __real__exit(status);
 }
 
-void __wrap__exit(int status) {
-    record_exit(status);
-    nk_platform_host_shutdown();
+__attribute__((noreturn)) void __wrap__exit(int status) {
+    lock_exit();
+    finish_process(status);
     __real__exit(status);
 }
 
-void __wrap__Exit(int status) {
-    record_exit(status);
-    nk_platform_host_shutdown();
+__attribute__((noreturn)) void __wrap__Exit(int status) {
+    lock_exit();
+    finish_process(status);
     __real__Exit(status);
 }
 
