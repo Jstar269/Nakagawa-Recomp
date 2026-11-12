@@ -360,6 +360,17 @@ static bool player_ui_add_font(NkUiTtf *ttf, int font, const char *base_path,
     return false;
 }
 
+/* The launcher-unavailable reason names the fonts folder the way this
+   platform writes paths: assets\fonts\ui on Windows, assets/fonts/ui
+   elsewhere (#306). */
+static void player_ui_set_fonts_missing(char *error, size_t error_size) {
+    char sep = nk_platform_path_separator();
+    char message[96];
+    snprintf(message, sizeof(message), "its fonts (assets%cfonts%cui) are missing or damaged",
+             sep, sep);
+    player_ui_set_error(error, error_size, message);
+}
+
 /* The design system's eight font slots (nk_ui_theme.h). Every face falls back
    to Geist for Latin it lacks and to Noto Sans JP for Japanese titles. */
 static bool player_ui_register_fonts(NkUiTtf *ttf, const char *base_path,
@@ -367,15 +378,13 @@ static bool player_ui_register_fonts(NkUiTtf *ttf, const char *base_path,
 #ifdef NK_PLAYER_UI_REGRESSION_TEST
     /* Stands in for a ZIP extracted without its fonts folder. */
     if (getenv("NK_UI_TEST_HIDE_UI_FONTS") != NULL) {
-        player_ui_set_error(error, error_size,
-                            "its fonts (assets\\fonts\\ui) are missing or damaged");
+        player_ui_set_fonts_missing(error, error_size);
         return false;
     }
 #endif
     for (int font = 0; font < NK_UI_FONT_COUNT; ++font) {
         if (!player_ui_add_font(ttf, font, base_path, nk_ui_font_path(font))) {
-            player_ui_set_error(error, error_size,
-                                "its fonts (assets\\fonts\\ui) are missing or damaged");
+            player_ui_set_fonts_missing(error, error_size);
             return false;
         }
     }
@@ -856,6 +865,10 @@ static double player_ui_display_refresh_hz(SDL_Window *window) {
 }
 
 typedef char player_ui_enhanced_rows_fit[PLAYER_PART_COUNT <= PLAYER_UI_ENHANCED_ROWS ? 1 : -1];
+/* The part rows' element ids end before the next id in use. */
+typedef char player_ui_enhanced_row_ids_fit[
+    PLAYER_UI_ID_SETTINGS_ENHANCED_PART + PLAYER_UI_ENHANCED_ROWS <= PLAYER_UI_ID_SETTINGS_PROBLEM_REPORT
+        ? 1 : -1];
 
 /* Why a title offers no Ace: it has no usable package of its own (#2055). */
 #define PLAYER_UI_ACE_NEEDS_PACKAGE "Ace needs a package made for this game."

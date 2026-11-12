@@ -439,10 +439,11 @@ The player offers three play modes per game (#2055):
 - **Authentic** is the standard: the game as released, recreating the PSP as closely as the project can. It is the
   default for a new library.
 - **Enhanced** turns on the project-authored improvements that work for any game: texture filtering, crisp system
-  text, the speed readout, the game badge, widescreen, smooth motion, clean pitched sound, finer patches and sharper
-  enlarging. A new library starts with texture filtering, crisp system text and the game badge on and the rest off,
-  and a graphics preset sets crisp system text and sharper enlarging (section 10.1); finer patches are in no preset.
-  Each one is a *part* that can be turned off for the library or for a single game.
+  text, the speed readout, the game badge, widescreen, smooth motion, clean pitched sound, finer patches, sharper
+  enlarging and full 32-bit colour (section 10.11). A new library starts with texture filtering, crisp system text
+  and the game badge on and the rest off, and a graphics preset sets crisp system text and sharper enlarging
+  (section 10.1); finer patches and full 32-bit colour are in no preset. Each one is a *part* that can be turned
+  off for the library or for a single game.
 - **Ace** is Enhanced plus the improvements made for that game alone. Today that is the title's 60 FPS game logic
   package (section 9). The player offers Ace only for a title with a usable package; its own parts can be turned off
   for that game too.
@@ -455,7 +456,7 @@ Code identifiers that say `ace` mean "Enhanced or Ace"; every name a player read
 ### 10.1. The Launch Line
 
 The launcher always exports `SR_ACE`, so an inherited value cannot opt a launch in: `off` for Authentic, or
-`v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;smooth=x2;sas=off;tess=off`. `tier` (`enhanced` or `ace`) only names the
+`v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;smooth=x2;sas=off;tess=off;twin=off`. `tier` (`enhanced` or `ace`) only names the
 run, in the game badge, the pause menu and the stamps; a line without it is an Enhanced run. `stick` (the title's
 stick dead zone, 1 to 126, section 11.3.11), `load` (`fast` or `off`, section 11.3.10), `depth` (`32` or `off`,
 section 10.20) and `cull` (`on` or `off`, section 11.3.6) are the other keys a line may leave out: a missing
@@ -783,7 +784,8 @@ that builds one clip-space matrix per camera and tests object bounds against it.
 
 ```json
 "enhanced": {"default": "enhanced", "af": "16", "text": "on", "readout": "off", "notice": "on", "wide": "off",
-            "smooth": "off", "sas": "off", "tess": "off", "upscale": "off"},
+            "smooth": "off", "sas": "off", "tess": "off", "cull": "off", "upscale": "off", "stick": "off",
+            "load": "off", "twin": "off"},
 "title_play": {"ULUS10000": {"mode": "ace", "af": "8"}, "ULES00000": {"mode": "library", "logic_60": "off"}}
 ```
 
@@ -891,44 +893,77 @@ The code is `src/rt/gpu_sdl3vk/tex_scale.c` and its hook in `ge_gpu.c`'s texture
 
 ### 10.11. Full 32-Bit Colour (the Host Twin)
 
-The game's 16-bit render targets are presented in full 32-bit colour without dither (#2050), in the Vulkan GE renderer.
+The game's 16-bit render targets are presented in full 32-bit colour without dither (#2050), in both GE renderers.
 It is a presentation-only change (section 2.2): it changes only the image the host shows, never what the guest
 draws, reads or waits for. The code is the host twin in `src/rt/gpu_sdl3vk/ge_gpu.c` (its header and the comment
-at `s_twin`).
+at `s_twin`) for the Vulkan renderer, and in `src/rt/ge.c` (the comment at `s_twin_mode`) for the software renderer.
 
 - **How.** Every render target and depth buffer gets a host-only twin at the user's render scale. Every write to the
   authentic image reaches its twin, in order: each render op is drawn a second time into the twin without dither or
   the 16-bit colour snap, and uploads, CPU-write patches, depth uploads, block transfers and destination snapshots
   are repeated on it. Twin passes sample twins, so a render-to-texture chain stays full colour. The presenter shows
   a twin only while it holds every write its image took; otherwise it shows the authentic image and re-seeds the twin.
+- **The software renderer.** The same switch turns on a twin in `ge.c`, decided on the renderer's first colour write
+  and inert while the Vulkan renderer draws. It keeps one host slot per 2-byte unit of the 2 MiB of VRAM (an 8888
+  pixel uses the slot of its first unit; 9 MiB of host memory): the twin's 8-bit colour, and a witness, the exact
+  value the authentic write left in VRAM. Each colour write is computed a second time from the same source colour,
+  with the same blend and logic op but no dither and no 16-bit colour snap, against the twin's colour where the slot
+  is valid and against the authentic pixel where it is not. A slot is valid only while VRAM still holds its witness
+  in the same format, so a write the twin does not take (a CPU store, DMA, the fast clear path) shows, and is
+  blended against, its authentic value from that pixel on. The twin's alpha is the alpha the authentic write left
+  (the stencil, in the target's format, as the Vulkan twin snaps it); a stencil-only write updates it, and a write
+  mask over colour bits leaves the pixel authentic. Block transfers within VRAM copy the slots with the bytes. The
+  CPU presenter shows the slots (`ge_twin_present_row`), each pixel without a valid slot as the CPU presenter converts it with the twin off.
+  `gpu-coherence-selftest` twin-soft checks it on twin-scene's list: guest VRAM equals the twin-off run byte for
+  byte, the shown gradients are smooth, and T1 and T3 are within one step per colour channel of the Vulkan twin.
+- **Render-to-texture in the software renderer.** Its texture fetches read guest VRAM, so a target drawn from a
+  render target's texture takes that texture's 16-bit texels into its twin: twin-scene's T2 shows T1's dithered
+  5551 texels in the software renderer, and T1's full colour twin in the Vulkan renderer. Its own blends and its
+  presentation are still full colour.
 - **Guest memory.** The authentic chain keeps the user's render scale, and nothing reads a twin back. Guest VRAM,
   every readback, every block transfer into RAM and the frame each present commits to guest VRAM are the twin-off
   run's at the same scale, byte for byte (`gpu-coherence-selftest` twin-scene, at scales 1, 2 and 4). Present-source
   captures follow the shown image, so they hold the twin's picture; `SR_GPU_TWIN_CAPTURE=authentic` shows and
   captures the authentic image instead.
 - **What the guest can observe (section 11.1).** Each of the four items is unchanged:
-  - VRAM bytes and other guest memory: unchanged, byte for byte (twin-scene, above).
+  - VRAM bytes and other guest memory: unchanged, byte for byte (twin-scene and twin-soft, above).
   - Readbacks: unchanged. GE and display readbacks, block transfers into RAM and the committed frame read the
     authentic image, as with the twin off (twin-scene).
   - Timing the guest can measure: unchanged. The guest timing model (VBLANK schedule, GE timing, media clocks) does
     not follow host GPU work (section 10.3). The second draw of each render op, and the drain when a twin allocation
     fails, are host waits.
   - I/O speed: unchanged. The twin performs no guest I/O.
-- **Default.** Off. It stays off by default until section 11.2 item 4's "nothing worse" runs pass: picture-gate or
-  route runs on *Hot Shots Tennis* and *LittleBigPlanet*, and a library sweep, each with the twin on against the same
-  run with it off. When the Ace launch line carries its key (`twin`, below), the key follows section 11.2 item 2.
-- **Setting.** `SR_GPU_TWIN_COLOR=1` (full colour) or `native` (the twin with the authentic colour, which the identity
-  self-tests use), read when the renderer starts. Unset, empty, `0` and `off` are off. Any other value prints
-  `TWIN: refused (...)` and leaves it off. It takes effect only in Ace Mode: in an authentic run it stays off whatever
-  the environment says, and a request prints one `TWIN: off (the host twin needs Ace Mode)` line. Until the Ace
-  launch line carries its key (`twin`, beside `tex`, `s2d` and `glyphs`, with the per-title switches of section
-  10.5, after #2074), the variable is the only way to turn it on, and it is off by default.
+- **Default.** Off. The player's part "Full 32-bit colour" (the launch line's `twin=on`) or `SR_GPU_TWIN_COLOR`
+  turns it on (see Setting). Turning it on by default needs section 11.2 item 4's "nothing worse" runs: picture-gate
+  or route runs on *Hot Shots Tennis* and *LittleBigPlanet*, and a library sweep, each with the twin on against the
+  same run with it off (#2050). The launch line carries its key (`twin`, below), which follows section 11.2 item 2:
+  a library switch and a per-title switch, each off by default.
+- **Setting.** The launch line's `twin=off|on` (section 10.1), a required key: `twin=on` asks for full colour. The
+  player writes it from the part "Full 32-bit colour" (`"twin"`, `on` or `off`) on the library's Settings > Enhanced
+  page and on each title's own page (sections 10.5 and 10.9); it is off unless the player turns it on.
+  `SR_GPU_TWIN_COLOR=1` (full colour) or `native` (the twin with the authentic colour, which the identity self-tests
+  use), read when the renderer starts (the software renderer: at its first colour write), stays as the developer
+  override and wins whenever it is set: unset or empty leaves the choice to the launch line, `0` and `off` are off,
+  and any other value prints `TWIN: refused (...)` and leaves it off. When the variable turns off a twin the line
+  asked for, the run names `twin` unavailable ("SR_GPU_TWIN_COLOR overrides it") in the report. `gpu-coherence-selftest`
+  twin-key turns the twin on through `twin=on` alone, in both renderers, and checks the report, with the variable
+  unset and set. A twin that runs is reported on (`effective.twin` true, and in the pause caption) whatever turned
+  it on, so `SR_GPU_TWIN_COLOR=1` with the key off reports it too; `twin-key --twin-key off --twin 1` checks that. The twin takes effect only in Ace Mode: in an
+  authentic run it stays off whatever the environment says, and a request prints one `TWIN: off (the host twin
+  needs Ace Mode)` line. When the key asked for it and it does not come up (the `TWIN: unavailable` and `TWIN: off
+  for the rest of the run` cases below), the run names `twin` unavailable on stderr and in the report; a twin that
+  ran is confirmed, so a run where the renderer never started it is reported as not run (section 10.4).
 - **Cost.** Each render op is drawn twice at the render scale, and the twins use as much GPU memory as the targets.
+  In the software renderer each colour write is computed twice, and the slots take 9 MiB of host memory.
 - **Fail-closed.** A GPU without nearest blits of RGBA8 and D16 prints `TWIN: unavailable (...)` and runs without it.
   If any twin allocation fails during the run, one `TWIN: off for the rest of the run (...)` line is printed, every
-  twin is freed, and the run continues exactly as a twin-off run at the user's scale (`twin-alloc-fail`).
+  twin is freed, and the run continues exactly as a twin-off run at the user's scale (`twin-alloc-fail`). A software
+  renderer that cannot allocate its slots prints `TWIN: unavailable (the software renderer could not allocate its
+  twin)` and runs without it.
 - **Stamps.** `TWIN: on (colour=full|native, scale=<n>x)` at start, and `TWIN: exit (ops=, copies=, reseeds=,
-  authentic_presents=, alloc_failures=)` at exit. Section 10.4 applies: the run is an Ace run, refused as evidence.
+  authentic_presents=, alloc_failures=)` at exit; the software renderer's are `TWIN: on (software renderer,
+  colour=full|native)` and `TWIN: exit (software renderer, pixels=, units_copied=)`. Section 10.4 applies: the run
+  is an Ace run, refused as evidence.
 
 ### 10.12. Texture Replacement
 
@@ -1943,7 +1978,9 @@ The Layer 2 mechanism of section 10.8, for a title that skips objects outside it
   the report. The runtime remembers at most 4096 distinct matrices (see Limits below); the report's
   `cull_untracked` counts the matrix uses it left alone once that table was full, and cull is confirmed only
   while that count is 0: a run with a nonzero count reports cull unavailable as `partial` (the matrices
-  tracked before the table filled were widened, the rest were not), never as a complete run.
+  tracked before the table filled were widened, the rest were not), never as a complete run. The count is read
+  again when the run ends, on every exit path that writes the report, so a table that fills in the last frame
+  still reads partial.
 - **What it changes:** for the matrices at `clip_offsets`, 4 floats per listed matrix (its x output row) of guest memory
   per call, only while Widescreen is on and the key is on; and so which objects the title submits, and any logic the
   title gates on the same visibility test (animation or AI updates on visible objects, fixed object or display-list
@@ -2025,7 +2062,8 @@ The `load` Ace part of section 9.8, for a title that paces a loading screen with
   the pacing guard (below) has not fired. Then the call is not made. The thread instead blocks for 1 µs, the shortest delay wait the scheduler has (that of
   `sceKernelDelayThread(1)`); for that moment it is visibly in a delay wait, not a display wait. Ready threads of any
   priority, lower ones included, can then run as they would during the stock wait, and the waiter resumes at its
-  next scheduling point instead of the next VBLANK. A zero delay or a ready-queue rotation would not do this: on the
+  next scheduling point instead of the next VBLANK. The decision its block causes always runs another ready thread
+  first, even when the 1 µs is already over by then (`sched_delay_current_dispatching()`, `src/rt/sched.c`). A zero delay or a ready-queue rotation would not do this: on the
   PSP, `sceKernelDelayThread(0)` returns without yielding even to a thread of equal priority (#340), and a rotation
   yields only to threads of equal or higher priority, so a lower-priority thread would not run. `$v0` is then 0,
   which is what the stock function returns after its wait. With the key

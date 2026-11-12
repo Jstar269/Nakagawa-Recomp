@@ -9,8 +9,9 @@
 /* The ordered destination-read variant (#2109; ge_gpu.c, psp_frag_rmw.inc): the draw reads and
  * stores its own target as a storage image inside a pixel-ordered interlock, so every primitive of
  * a batch sees what the primitives before it stored. Early fragment tests: a fragment the depth
- * test rejects never reaches the store, and ge_gpu.c keeps the snapshot path for every op whose
- * shader kill would have to undo a depth write (the rmwzfb rule). */
+ * test rejects never reaches the store. A run that holds a batch whose shader kill would have to
+ * undo an early depth write (ge_gpu.c rmw_shader_depth) is drawn with k_zfunc set instead: the
+ * pipeline tests no depth, and the shader tests and writes it in the critical section. */
 #extension GL_ARB_fragment_shader_interlock : require
 layout(pixel_interlock_ordered) in;
 layout(early_fragment_tests) in;
@@ -48,6 +49,14 @@ layout(set = 0, binding = 0) uniform sampler2D u_tex;
  * mask is this constant, merged into the store. */
 layout(set = 2, binding = 0, rgba8) uniform coherent image2D u_dsti;
 layout(constant_id = 0) const int k_cmask = 15;   /* VkColorComponentFlags: R 1, G 2, B 4, A 8 */
+/* Shader-owned depth (ge_gpu.c, a run that holds a rmw_shader_depth batch): k_zfunc is the batch's
+ * VkCompareOp (0 NEVER .. 7 ALWAYS), -1 where the pipeline tests depth early. u_z holds the run's
+ * depth image, copied in before the pass and out after it: the D16 values two to a word, row by row
+ * at the image's width. Every access is an atomic, so the neighbour that shares a word (another
+ * pixel, outside this pixel's critical section) never loses a write. */
+layout(constant_id = 1) const int k_zfunc = -1;
+layout(constant_id = 2) const bool k_zwrite = false;
+layout(set = 2, binding = 1, std430) buffer ZBuf { uint w[]; } u_z;
 #else
 layout(set = 2, binding = 0) uniform sampler2D u_dst;
 #endif
@@ -367,6 +376,32 @@ void main() {
             stencil = stencil_op((pc.bl.w >> 16) & 7, spx.a, sref, fbfmt);
         }
     }
+
+#ifdef SR_DST_INTERLOCK
+    /* Shader-owned depth, in ge.c's order (put_px_rgba_tested): after the stencil test, before
+     * the blend. The fragment's z is rounded to nearest, as the depth-range test above takes it;
+     * that is assumed to equal the D16 attachment's own conversion, which Vulkan asks for but does
+     * not require, so an EQUAL or NOTEQUAL test between an early-depth run and a shader-depth run
+     * of one op relies on it. A failing fragment is dropped: the depth-fail op is KEEP
+     * wherever the test can fail (ge_gpu.c stencil_gpu_supported). */
+    if (k_zfunc >= 0 && !kill && !stencil_fail) {
+        uint zi = uint(gl_FragCoord.y) * uint(imageSize(u_dsti).x) + uint(gl_FragCoord.x);
+        uint zsh = (zi & 1u) * 16u;
+        uint z = uint(clamp(gl_FragCoord.z * 65535.0 + 0.5, 0.0, 65535.0));
+        uint zold = (atomicOr(u_z.w[zi >> 1u], 0u) >> zsh) & 0xFFFFu;
+        bool zpass;
+        if      (k_zfunc == 0) zpass = false;
+        else if (k_zfunc == 1) zpass = z <  zold;
+        else if (k_zfunc == 2) zpass = z == zold;
+        else if (k_zfunc == 3) zpass = z <= zold;
+        else if (k_zfunc == 4) zpass = z >  zold;
+        else if (k_zfunc == 5) zpass = z != zold;
+        else if (k_zfunc == 6) zpass = z >= zold;
+        else                   zpass = true;
+        if (!zpass) kill = true;
+        else if (k_zwrite) atomicXor(u_z.w[zi >> 1u], (z ^ zold) << zsh);
+    }
+#endif
 
     /* Shader blend: full PSP factor/equation set against the destination snapshot,
      * integer math identical to ge.c blend_chan(). Runs BEFORE dither/quantization so

@@ -173,6 +173,7 @@ PUBLIC_TARGETS := \
 	atrac3p-title-accept \
 	gpu-coherence-selftest \
 	gpu-coherence-selftest-snapbar-mutants \
+	gpu-coherence-twin-mutants \
 	gpu-coherence-pcache-mutant \
 	vram-view-identity-selftest \
 	gpu-dst-read-mutants \
@@ -384,6 +385,7 @@ HELP_DESCRIPTION_audio-resampler-bench := run the synthetic-input audio resample
 HELP_DESCRIPTION_atrac3p-title-accept := run the optional ATRAC3+ title acceptance route
 HELP_DESCRIPTION_gpu-coherence-selftest := run the GPU coherence selftest
 HELP_DESCRIPTION_gpu-coherence-selftest-snapbar-mutants := prove the GPU coherence selftest kills three broken snapshot-copy barrier variants
+HELP_DESCRIPTION_gpu-coherence-twin-mutants := prove the GPU coherence selftest kills thirteen broken host-twin variants (builds thirteen binaries; not part of native-core-tests)
 HELP_DESCRIPTION_gpu-coherence-pcache-mutant := prove pipeline-cache-cold fails when pipelines bypass the Vulkan pipeline cache
 HELP_DESCRIPTION_vram-view-identity-selftest := check that the sources and decode the pause menu's VRAM viewer runs name the expected surfaces and leave later frames, guest memory and the GE state unchanged (#314; needs a Vulkan device and fails without one)
 HELP_DESCRIPTION_gpu-dst-read-mutants := prove the GPU coherence dst-read cells kill nine broken destination-read variants
