@@ -1126,9 +1126,10 @@ memory, no network; ZIP packs through the project's own `src/core/nk_zip.c` and 
   joined). Reading such a file from a DEFLATE ZIP entry, whose packed size may be 9/8 of the file and 64 bytes
   more, peaks at 136 MiB and 64 bytes while it is unpacked, before the decode starts. Every DEFLATE stream the
   shared inflater unpacks (a PNG's, a ZIP entry's, a CSO block's, a module's gzip payload) may have at most 64
-  dynamic Huffman blocks and one more for every 128 bytes it has written (`NK_INFLATE_DYNAMIC_FREE`,
-  `src/core/nk_psp_inflate.h`), so the code tables it costs follow its output; zlib's smallest blocks (memLevel 1)
-  and a flush every 513 bytes used at most 0.40 of it, measured. A PNG refused by it says so in its note. `nk_texrepl_decode_png` is the same check and decode, for a caller with bytes of its own.
+  dynamic Huffman blocks and one more for every 64 bytes it has written (`NK_INFLATE_DYNAMIC_FREE`,
+  `src/core/nk_psp_inflate.h`), so the code tables it costs follow its output. 64 is half zlib's smallest block
+  (127 symbols at memLevel 1), so no stream zlib writes without flushing can be refused; its smallest blocks
+  and a flush every 513 bytes used at most 0.25 of it, measured. A PNG refused by it says so in its note. `nk_texrepl_decode_png` is the same check and decode, for a caller with bytes of its own.
   One file is read, checked, decoded, noted and counted against the budget once, however many `[hashes]` lines
   or names reach it: names are first grouped as written, and before a file's bytes are read its identity (the
   ZIP entry a name resolves to, case ignored; a folder file's volume and 128-bit file ID, or device and inode) is
@@ -1190,8 +1191,9 @@ memory, no network; ZIP packs through the project's own `src/core/nk_zip.c` and 
   (`NK_INFLATE_COUNT_BUILDS`), where tables built per block came to about 1.7 million; the Adler-32 one byte late refused;
   and the largest image the bound lets through, 2048 x 2048 at 16 bits a channel holding 36 MiB of empty dynamic
   blocks, refused within 2 s by the dynamic-block budget (77 ms measured, 3.1 to 3.4 s before it), and the same image with
-  the most empty dynamic blocks the budget allows (64, then one after every 128 bytes it writes) decoded within 2 s; 64 empty
-  dynamic blocks unpack, a 65th is refused after 64 blocks' tables, and 2 KiB written first earns 16 more, not 17;
+  the most empty dynamic blocks the budget allows (64, then one after every 64 bytes it writes) decoded within 5 s
+  (722 ms measured, 2.05 s under AddressSanitizer); 64 empty
+  dynamic blocks unpack, a 65th is refused after 64 blocks' tables, and 2 KiB written first earns 32 more, not 33;
   400 KiB in dynamic blocks of 300 bytes, and in blocks of 513 bytes each followed by a flush's empty stored block,
   unpack. Two images taking turns in a budget for one, 1,000 rounds, are decoded 16 to 24
   times, every lookup either served or `deferred`; 40,000 held images make room for one 200 x 200 image within

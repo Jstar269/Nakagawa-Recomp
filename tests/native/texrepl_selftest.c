@@ -74,6 +74,12 @@
  * 77 ms in the Windows build (-O2) and 76 ms under AddressSanitizer (-O1) in WSL; before, 3.1 to
  * 3.4 s and 9.1 to 12.9 s. */
 #define NK_PNG_WORK_SECONDS 2.0
+/* The most the largest image may take to decode with every dynamic block the budget allows
+ * (524,384 at one per 64 bytes). Its work is pinned exactly by the table count the cell checks; this
+ * bound only catches a block grown dearer. Measured: 722 ms in the Windows build (-O2) and 2.05 s
+ * under AddressSanitizer (-O1) in WSL, so a slow or loaded hosted runner (the coverage build, -j2)
+ * stays well inside it. */
+#define NK_PNG_ALLOWED_SECONDS 5.0
 #ifndef NK_INFLATE_COUNT_BUILDS
 #error "build with -DNK_INFLATE_COUNT_BUILDS (mk/selftests.mk texrepl-selftest): the work cells count code tables"
 #endif
@@ -2557,9 +2563,10 @@ static Bw literal_pieces(const uint8_t *data, size_t n, size_t piece, int flush)
 /* The cold read of 7ff4d3e849f7 (M-3): an empty dynamic block costs three code tables and writes
  * nothing, so the largest image's bounded data, all such blocks, held the decoder for 3.1 to 3.4 s,
  * and a pack of a few hundred such images for minutes. A stream may now have 64 dynamic blocks and
- * one more for every 128 bytes it has written. The Fable review of a7dd986554a0 (S-1) measured one
+ * one more for every 64 bytes it has written. The Fable review of a7dd986554a0 (S-1) measured one
  * more for every KiB refusing valid zlib output: at memLevel 1 or 2 its blocks hold 127 or 255
- * symbols, and a writer that flushes every 513 bytes ends a block each time. */
+ * symbols, and a writer that flushes every 513 bytes ends a block each time; 64 is half zlib's
+ * smallest block (the coordinator's decision on the cold read's n-2). */
 static void test_inflate_dynamic_budget(void) {
     static const uint8_t two[2] = { 0, 0 };
     uint8_t into[4096];
@@ -2583,12 +2590,12 @@ static void test_inflate_dynamic_budget(void) {
     rc = nk_psp_inflate_raw(z.d, z.n, &out, &on, 2, 2, err, sizeof(err));
     CHECK(rc == NK_INFLATE_ERR_FORMAT && out == NULL, "the same unpacked to a new buffer: rc %d", rc);
     free(z.d);
-    /* Output earns blocks, at the rate and no faster: 2 KiB written in a stored block earns 16 more
-     * empty dynamic blocks, not 17. */
+    /* Output earns blocks, at the rate and no faster: 2 KiB written in a stored block earns 32 more
+     * empty dynamic blocks, not 33. */
     for (unsigned extra = 0; extra <= 1u; extra++) {
         Bw w = { 0 };
         static uint8_t kib2[2048];
-        const unsigned count = NK_INFLATE_DYNAMIC_FREE + 16u + extra;   /* 2,048 / 128 */
+        const unsigned count = NK_INFLATE_DYNAMIC_FREE + 32u + extra;   /* 2,048 / 64 */
         bw_bits(&w, 0, 1);
         bw_bits(&w, 0, 2);
         bw_flush(&w);
@@ -2742,7 +2749,7 @@ static void test_png_work(void) {
         free(png);
     }
     {   /* the most dynamic blocks the budget lets the largest image have: the 64 free ones first,
-         * then after every 128 bytes it writes (a fixed block of matches) one more, 262,224 in all;
+         * then after every 64 bytes it writes (a fixed block of matches) one more, 524,384 in all;
          * then the image decodes. Measured, and bounded like the cell above. */
         const size_t raw_n = (1u + 2048u * 8u) * 2048u;
         Bw z = { 0 };
@@ -2787,8 +2794,8 @@ static void test_png_work(void) {
         const int ok = nk_texrepl_decode_png(png, n, 0, &px, &w, &h, why, sizeof(why));
         const double t = wall_s() - t0;
         const size_t blocks = NK_INFLATE_DYNAMIC_FREE + raw_n / NK_INFLATE_DYNAMIC_BYTES;
-        CHECK(ok && w == 2048 && h == 2048 && nk_inflate_table_builds == 3u * blocks + 2u && t < NK_PNG_WORK_SECONDS,
-              "the largest image with %zu empty dynamic blocks, 64 then one after every 128 bytes: %d in %.2f s, %llu tables, '%s'", blocks,
+        CHECK(ok && w == 2048 && h == 2048 && nk_inflate_table_builds == 3u * blocks + 2u && t < NK_PNG_ALLOWED_SECONDS,
+              "the largest image with %zu empty dynamic blocks, 64 then one after every 64 bytes: %d in %.2f s, %llu tables, '%s'", blocks,
               ok, t, nk_inflate_table_builds, why);
         printf("png work: the largest image with 64 empty dynamic blocks, then one after every %u bytes (%zu) decoded in %.0f ms\n",
                NK_INFLATE_DYNAMIC_BYTES, blocks, t * 1e3);

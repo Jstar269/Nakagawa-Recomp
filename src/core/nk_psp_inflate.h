@@ -73,15 +73,20 @@ int nk_psp_inflate_raw_into(const uint8_t *src, size_t srclen,
  * Every function here refuses a stream (NK_INFLATE_ERR_FORMAT) whose next
  * dynamic block would be more than NK_INFLATE_DYNAMIC_FREE plus one for every
  * NK_INFLATE_DYNAMIC_BYTES it has written. zlib at its default memLevel writes
- * blocks of up to 16,383 symbols; its smallest, at memLevel 1, hold 127, and a
- * writer that flushes often ends a block at each flush. Measured with zlib-ng
- * 1.3.1 over 400 KiB of text and image rows, memLevel 1 to 3 and a flush every
- * 513 or 769 bytes wrote dynamic blocks of 367 bytes or more on average and
- * used at most 0.40 of this allowance (4 MiB of text at memLevel 1: 0.38).
- * One more block for every 1,024 bytes refused several of those valid streams.
+ * blocks of up to 16,383 symbols; its smallest, at memLevel 1, hold 127, each
+ * at least one byte, and a writer that flushes often ends a block at each
+ * flush. 64 is half that smallest block, so a stream zlib writes without
+ * flushing earns about two blocks for each it uses and is never refused; a
+ * writer would have to flush more often than every 64 bytes. At 128 a valid
+ * stream of nearly all literals, with a dynamic block each time, could have
+ * been refused after about 1 MiB. Measured with zlib-ng 1.3.1 over 400 KiB of
+ * text and image rows, memLevel 1 to 3 and a flush every 513 or 769 bytes
+ * wrote dynamic blocks of 367 bytes or more on average and used at most 0.25
+ * of this allowance (4 MiB of text at memLevel 1: 0.23). One more block for
+ * every 1,024 bytes refused several of those valid streams.
  */
 #define NK_INFLATE_DYNAMIC_FREE 64u
-#define NK_INFLATE_DYNAMIC_BYTES 128u
+#define NK_INFLATE_DYNAMIC_BYTES 64u
 
 #ifdef NK_INFLATE_COUNT_BUILDS
 /* Huffman code tables built so far, in a build that counts them (tests). */
