@@ -1841,6 +1841,7 @@ def _current_package_cache_key(
     public_safe: bool = True,
     instruction_trace: bool = False,
     enhancement_package_path: Path | None = None,
+    code_hook_package_path: Path | None = None,
 ) -> dict:
     import title_codegen_plan
 
@@ -1874,8 +1875,7 @@ def _current_package_cache_key(
     environment = _runtime_build_environment(instruction_trace=instruction_trace)
     # The planner compiles with these when the environment sets none; the key must agree.
     environment.update(package_cache.package_optimization(environment))
-    if enhancement_package_path is not None:
-        environment["ENHANCEMENT_PACKAGE"] = str(enhancement_package_path)
+    environment.update(_package_environment(enhancement_package_path, code_hook_package_path))
     try:
         options = _package_codegen_options(manifest, environment)
     except package_cache.PackageCacheError as exc:
@@ -2614,6 +2614,140 @@ def _select_enhancement_package(
     return package_path, user_root / "packages" / f"{disc_id}-enhanced-{package['id']}"
 
 
+def _package_environment(enhancement_package_path: Path | None,
+                         code_hook_package_path: Path | None) -> dict[str, str]:
+    """The Make variables that name a build's packages, for its cache key: none for an authentic build."""
+    environment: dict[str, str] = {}
+    if enhancement_package_path is not None:
+        environment["ENHANCEMENT_PACKAGE"] = str(enhancement_package_path)
+    if code_hook_package_path is not None:
+        environment["ENHANCEMENT_CODE_HOOK_PACKAGE"] = str(code_hook_package_path)
+    return environment
+
+
+def _planner_package_args(enhancement_package_path: Path | None, code_hook_package_path: Path | None,
+                          prepared_root: str) -> list[str]:
+    """The planner arguments that name a build's packages: none for an authentic build."""
+    args: list[str] = []
+    if enhancement_package_path is not None:
+        args += ["--enhancement-package", str(enhancement_package_path)]
+        # The title's extracted files, where the package's data_files are read.
+        if prepared_root and Path(prepared_root).is_dir():
+            args += ["--enhancement-data-root", prepared_root]
+    if code_hook_package_path is not None:
+        args += ["--code-hook-package", str(code_hook_package_path)]
+    return args
+
+
+def _select_code_hook_package(
+    user_root: Path,
+    disc_id: str,
+    *,
+    title_id: str,
+    executable_sha256: str,
+    code_hook_package: Path | None,
+    ace_cull: bool,
+    sfo_disc_id: str | None = None,
+    disc_version: str | None = None,
+    shipped_enhancements: Path | None = None,
+) -> Path | None:
+    """The code-hook package a build applies (docs/ENHANCEMENT_CONTRACT.md section 9.9), or None.
+
+    One is applied only when the command names it: `--code-hook-package`, or `--ace-cull` with
+    `<user data>/enhancements/<disc id, lowercase>-cull.json`, else a published one this source
+    tree ships under the same name. It must be a `guest_memory_code_hook` package for this
+    title and executable, checked as `_select_enhancement_package` checks its package.
+    """
+    package_path = code_hook_package
+    shipped = False
+    if ace_cull and package_path is None:
+        leaf = f"{disc_id.lower()}-cull.json"
+        candidate = user_root / "enhancements" / leaf
+        shipped_candidate = (SHIPPED_ENHANCEMENTS if shipped_enhancements is None
+                             else shipped_enhancements) / leaf
+        if candidate.is_file():
+            package_path = candidate
+        elif shipped_candidate.is_file():
+            package_path, shipped = shipped_candidate, True
+        else:
+            raise PackageBuildError(
+                f"--ace-cull requires a culling package at {candidate} "
+                f"(or a published one at {shipped_candidate}) or an explicit "
+                "--code-hook-package <path>."
+            )
+    if package_path is None:
+        return None
+    import enhancement_package as enhancement_package_module
+
+    package_path = Path(package_path).expanduser().resolve(strict=False)
+    try:
+        package = enhancement_package_module.load_and_validate_package(package_path)
+    except (OSError, ValueError) as exc:
+        raise PackageBuildError(f"Code-hook package rejected: {exc}") from exc
+    if package["category"] != "guest_memory_code_hook":
+        raise PackageBuildError(
+            f"Code-hook package rejected: {package_path} has category {package['category']!r}, "
+            "not 'guest_memory_code_hook'."
+        )
+    if not package.get("sites"):
+        raise PackageBuildError(f"Code-hook package rejected: {package_path} has no sites.")
+    if shipped and not enhancement_package_module.is_published_package(package):
+        raise PackageBuildError(
+            f"Code-hook package rejected: {package_path} is shipped with the source tree but is "
+            "not in the published form (docs/ENHANCEMENT_CONTRACT.md section 5.1)."
+        )
+    if enhancement_package_module.is_published_package(package):
+        _check_published_package_disc(package, sfo_disc_id, disc_version, executable_sha256)
+    if package["target_title_id"] != title_id:
+        raise PackageBuildError(
+            f"Code-hook package target_title_id {package['target_title_id']!r} "
+            f"does not match library title_id {title_id!r}."
+        )
+    if "executable_sha256" in package and package["executable_sha256"] != executable_sha256:
+        raise PackageBuildError(
+            f"Code-hook package executable_sha256 {package['executable_sha256']} "
+            f"does not match selected executable SHA-256 {executable_sha256}."
+        )
+    return package_path
+
+
+def _stack_code_hook_package(
+    user_root: Path,
+    disc_id: str,
+    enhancement_package_path: Path | None,
+    code_hook_package_path: Path | None,
+    target_dir: Path,
+) -> tuple[Path | None, Path | None, Path]:
+    """The enhancement package, the code-hook package beside it, and the package directory.
+
+    Without a code-hook package all three are as `_select_enhancement_package` chose them. A
+    code-hook package on its own is the build's one package, `<disc>-enhanced-<its id>`. Beside
+    a timing package the build is `<disc>-enhanced-<timing id>+<hook id>`: no package id holds a
+    `+`, so the name is never another variant's. A build carries at most one code-hook package,
+    and the name stays within the 64 characters a variant id may have.
+    """
+    if code_hook_package_path is None:
+        return enhancement_package_path, None, target_dir
+    import enhancement_package as enhancement_package_module
+
+    hook = enhancement_package_module.load_and_validate_package(code_hook_package_path)
+    if enhancement_package_path is None:
+        return code_hook_package_path, None, user_root / "packages" / f"{disc_id}-enhanced-{hook['id']}"
+    first = enhancement_package_module.load_and_validate_package(enhancement_package_path)
+    if first["category"] == "guest_memory_code_hook":
+        raise PackageBuildError(
+            f"Build refused: the enhancement package {first['id']!r} is a code-hook package too; "
+            "a build carries at most one beside its timing package."
+        )
+    variant = f"{first['id']}+{hook['id']}"
+    if len(variant) > 64:
+        raise PackageBuildError(
+            f"Build refused: the package ids {first['id']!r} and {hook['id']!r} together are "
+            f"{len(variant)} characters, more than the 64 a package variant may have."
+        )
+    return enhancement_package_path, code_hook_package_path, user_root / "packages" / f"{disc_id}-enhanced-{variant}"
+
+
 def _check_published_package_disc(package: Mapping[str, Any], sfo_disc_id: str | None,
                                   disc_version: str | None, executable_sha256: str) -> None:
     """Refuse a published package for another disc, revision or a modified executable, by name."""
@@ -2656,6 +2790,7 @@ class _PackageBuild:
     disc_id: Any = None
     elf_path: Any = None
     enhancement_package_path: Any = None
+    code_hook_package_path: Any = None
     entry: Any = None
     entry_package: Any = None
     entry_root: Any = None
@@ -3026,6 +3161,18 @@ def _package_cache_check(st):
         sfo_disc_id=title_input_identity["disc"]["id"],
         disc_version=title_input_identity["disc"]["disc_version"],
     )
+    code_hook_package_path = _select_code_hook_package(
+        user_root,
+        disc_id,
+        title_id=entry["title_id"],
+        executable_sha256=actual_hash,
+        code_hook_package=getattr(args, "code_hook_package", None),
+        ace_cull=bool(getattr(args, "ace_cull", False)),
+        sfo_disc_id=title_input_identity["disc"]["id"],
+        disc_version=title_input_identity["disc"]["disc_version"],
+    )
+    enhancement_package_path, code_hook_package_path, target_dir = _stack_code_hook_package(
+        user_root, disc_id, enhancement_package_path, code_hook_package_path, target_dir)
     _require_child(user_root, target_dir, "Package destination")
     if target_dir.is_symlink() or (target_dir.exists() and not target_dir.is_dir()):
         raise PackageBuildError("Package destination is not a safe directory; refusing to replace it.")
@@ -3043,6 +3190,7 @@ def _package_cache_check(st):
         title_input_identity,
         instruction_trace=bool(getattr(args, "instruction_trace", False)),
         enhancement_package_path=enhancement_package_path,
+        code_hook_package_path=code_hook_package_path,
     )
     previous_key = package_cache.package_cache_key(target_dir) if target_dir.is_dir() else None
     decision = package_cache.compare_cache_keys(previous_key, cache_key)
@@ -3104,6 +3252,7 @@ def _package_cache_check(st):
     st.cache_key = cache_key
     st.decision = decision
     st.enhancement_package_path = enhancement_package_path
+    st.code_hook_package_path = code_hook_package_path
     st.entry_package = entry_package
     st.entry_root = entry_root
     st.target_dir = target_dir
@@ -3161,12 +3310,8 @@ def _package_codegen(st):
             planner.extend(("--module-dir", str(module_dir)))
         if cached_header is not None:
             planner.extend(("--psp-header", str(cached_header)))
-        if enhancement_package_path is not None:
-            planner.extend(("--enhancement-package", str(enhancement_package_path)))
-            # The title's extracted files, where the package's data_files are read.
-            prepared_root = entry.get("prepared_root") or ""
-            if prepared_root and Path(prepared_root).is_dir():
-                planner.extend(("--enhancement-data-root", prepared_root))
+        planner.extend(_planner_package_args(enhancement_package_path, st.code_hook_package_path,
+                                             entry.get("prepared_root") or ""))
         return planner
 
     def log_command(planner: list[str]) -> None:
@@ -6165,6 +6310,14 @@ def main() -> int:
     p_build.add_argument(
         "--experimental-60hz", action="store_true", default=False,
         help="Experimental: opt in to building the native 60 Hz enhanced package (default: off / authentic 30 Hz)",
+    )
+    p_build.add_argument(
+        "--code-hook-package", type=Path, default=None,
+        help="Experimental: apply a guest_memory_code_hook package beside the enhancement package",
+    )
+    p_build.add_argument(
+        "--ace-cull", action="store_true", default=False,
+        help="Experimental: apply the title's culling package (<disc id>-cull.json, Ace's wider culling)",
     )
     p_build.add_argument(
         "--register-local-compatibility-record", action="store_true",

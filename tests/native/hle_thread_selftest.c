@@ -384,6 +384,7 @@ static uint32_t vblank_delivered(uint32_t no, uint32_t *arg) {
 #define NID_SCE_AUDIO_SET_DATA_LEN 0xcb2e439eu
 #define NID_SCE_AUDIO_CHANGE_CHANNEL_CONFIG 0x95fd0c2du
 #define NID_SCE_AUDIO_GET_CHANNEL_REST_LENGTH 0xb011922fu
+#define NID_SCE_AUDIO_GET_CHANNEL_REST_LEN 0xe9d97901u
 #define NID_SCE_IO_RENAME 0x779103a0u
 #define NID_SCE_AUDIO_CHANGE_VOLUME 0xb7e1d8e7u
 #define NID_SCE_AUDIO_OUTPUT2_RESERVE 0x01562ba3u
@@ -4079,6 +4080,201 @@ static void test_io_async_and_path_imports(void) {
            "sceIoSync names unsupported device semantics with a real error");
 }
 
+/* #1380 cells through the production syscall path (sr_syscall, by NID), one probe-owned
+ * Memory Stick file at a time. */
+enum {
+    MS_CELL_OPEN = 0x109f50bcu, MS_CELL_CLOSE = 0x810c4bc3u, MS_CELL_READ = 0x6a638d83u,
+    MS_CELL_WRITE = 0x42ec03acu, MS_CELL_LSEEK = 0x27eb27b8u, MS_CELL_LSEEK32 = 0x68963324u,
+    MS_CELL_GETSTAT = 0xace946e8u, MS_CELL_REMOVE = 0xf27a9c51u,
+    MS_CELL_PATH = 0x09017000u, MS_CELL_DATA = 0x09017100u, MS_CELL_STAT = 0x09017200u,
+    MS_CELL_BACK = 0x09017300u,
+};
+
+static uint32_t ms_cell_path_call(uint32_t nid, const char *guest, uint32_t flags) {
+    CpuState cpu;
+    fd_guest_copy(MS_CELL_PATH, guest, strlen(guest) + 1u);
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = MS_CELL_PATH;
+    if (nid == MS_CELL_OPEN) { cpu.r[5] = flags; cpu.r[6] = 0777u; }
+    if (nid == MS_CELL_GETSTAT) cpu.r[5] = MS_CELL_STAT;
+    return sr_syscall(&cpu, nid);
+}
+
+static uint32_t ms_cell_fd_call(uint32_t nid, uint32_t fd, uint32_t a1, uint32_t a2) {
+    CpuState cpu;
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = fd; cpu.r[5] = a1; cpu.r[6] = a2;
+    return sr_syscall(&cpu, nid);
+}
+
+/* sceIoLseek: the 64-bit offset in a2:a3, whence in t0; the high word comes back in v1. */
+static uint32_t ms_cell_seek64(uint32_t fd, int64_t offset, uint32_t whence, uint32_t *high) {
+    CpuState cpu;
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[3] = 0xdeadbeefu;
+    cpu.r[4] = fd;
+    cpu.r[6] = (uint32_t)((uint64_t)offset & 0xffffffffu);
+    cpu.r[7] = (uint32_t)((uint64_t)offset >> 32);
+    cpu.r[8] = whence;
+    uint32_t low = sr_syscall(&cpu, MS_CELL_LSEEK);
+    *high = cpu.r[3];
+    return low;
+}
+
+/* An open that should be refused; a descriptor it returns anyway is closed again. */
+static uint32_t ms_cell_refused_open(const char *guest, uint32_t flags) {
+    uint32_t rc = ms_cell_path_call(MS_CELL_OPEN, guest, flags);
+    if (rc < 64u) (void)ms_cell_fd_call(MS_CELL_CLOSE, rc, 0u, 0u);
+    return rc;
+}
+
+static int ms_cell_host_exists(const char *guest) {
+    char host[512];
+    fd_host_path(host, sizeof(host), guest);
+    FILE *f = fopen(host, "rb");
+    if (f) fclose(f);
+    return f != NULL;
+}
+
+/* The Memory Stick open, write and seek cells #1380 measured, each through sr_syscall: an
+ * open without PSP_O_CREAT (PSP-IO-EOF-001 io-eof-missing), PSP_O_RDONLY | PSP_O_CREAT on a
+ * missing file and a write through a PSP_O_RDONLY descriptor (PSP-HLE-IO-SEEK-001
+ * io-seek-ms-write-rdonly-creat and io-seek-ms-write-rdonly), an exclusive create of an
+ * existing file (PSP-KERNEL-SEM-001 io-excl-existing), seeks before the start, a write after a
+ * seek past the end and a read past it (PSP-IO-EOF-001 io-eof-seek-negative,
+ * io-eof-seek-negative-rdonly, io-eof-write-past, io-eof-read-past), and the 32-bit position
+ * (PSP-KERNEL-SEM-001 io-seek64). All measured on a PSP-3000 6.61. */
+static void test_io_memory_stick_cells_through_syscall(void) {
+    static const char file_guest[] = "ms0:/NAKAGAWA_IO_1380.BIN";
+    static const char missing_guest[] = "ms0:/NAKAGAWA_IO_1380_MISSING.BIN";
+    enum { MS_EINVAL = 0x80010016u, MS_ENOENT = 0x80010002u, MS_EEXIST = 0x80010011u,
+           MS_BADF = 0x80020323u, MS_SIZE = 16u };
+    uint8_t pattern[MS_SIZE];
+    for (uint32_t i = 0; i < MS_SIZE; i++) pattern[i] = (uint8_t)(0x40u + i);
+    char host[512];
+    fd_host_path(host, sizeof(host), file_guest);
+    nk_remove_utf8(host);
+    fd_host_path(host, sizeof(host), missing_guest);
+    nk_remove_utf8(host);
+    uint32_t high = 0;
+
+    /* io-eof-missing: write-only, read-write, read-only and write-only with PSP_O_TRUNC. */
+    static const uint32_t no_create[] = {0x0002u, 0x0003u, 0x0001u, 0x0402u};
+    for (size_t i = 0; i < sizeof(no_create) / sizeof(no_create[0]); i++)
+        expect(ms_cell_refused_open(missing_guest, no_create[i]) == MS_ENOENT,
+               "a missing Memory Stick file opened without PSP_O_CREAT is 0x80010002");
+    expect(ms_cell_path_call(MS_CELL_GETSTAT, missing_guest, 0u) == MS_ENOENT &&
+               !ms_cell_host_exists(missing_guest),
+           "an open without PSP_O_CREAT creates nothing");
+
+    /* io-seek-ms-write-rdonly-creat: PSP_O_RDONLY | PSP_O_CREAT on a missing file. */
+    expect(ms_cell_refused_open(missing_guest, 0x0201u) == MS_EINVAL,
+           "PSP_O_RDONLY | PSP_O_CREAT on a missing Memory Stick file is 0x80010016");
+    expect(ms_cell_path_call(MS_CELL_GETSTAT, missing_guest, 0u) == MS_ENOENT &&
+               !ms_cell_host_exists(missing_guest),
+           "the refused read-only create creates nothing");
+    fd_host_path(host, sizeof(host), missing_guest);
+    nk_remove_utf8(host);
+
+    /* The probe-owned 16-byte file, made by an exclusive create. */
+    fd_guest_copy(MS_CELL_DATA, pattern, MS_SIZE);
+    uint32_t fd = ms_cell_path_call(MS_CELL_OPEN, file_guest, 0x0A03u);  /* RDWR|CREAT|EXCL */
+    expect(fd >= 3u && fd < 64u, "an exclusive create of a new Memory Stick file opens");
+    if (fd < 3u || fd >= 64u) return;
+    expect(ms_cell_fd_call(MS_CELL_WRITE, fd, MS_CELL_DATA, MS_SIZE) == MS_SIZE &&
+               ms_cell_fd_call(MS_CELL_CLOSE, fd, 0u, 0u) == 0u,
+           "the probe file takes its 16 bytes");
+
+    /* io-excl-existing: with and without PSP_O_TRUNC, the file is left as it was. */
+    fd_host_path(host, sizeof(host), file_guest);
+    expect(ms_cell_refused_open(file_guest, 0x0A03u) == MS_EEXIST &&
+               ms_cell_refused_open(file_guest, 0x0E03u) == MS_EEXIST &&
+               fd_host_bytes_equal(host, pattern, MS_SIZE),
+           "an exclusive create of an existing file is 0x80010011 and leaves it unchanged");
+
+    /* Read-only creates no cell measured stop at the named boundary with nothing opened,
+     * created or cut: on an existing file, with PSP_O_TRUNC, and with PSP_O_EXCL. */
+    expect(ms_cell_refused_open(file_guest, 0x0201u) == 0x80010086u &&
+               ms_cell_refused_open(file_guest, 0x0601u) == 0x80010086u &&
+               fd_host_bytes_equal(host, pattern, MS_SIZE),
+           "PSP_O_RDONLY | PSP_O_CREAT on an existing file stops at the boundary, file unchanged");
+    expect(ms_cell_refused_open(missing_guest, 0x0A01u) == 0x80010086u &&
+               ms_cell_refused_open(missing_guest, 0x0301u) == 0x80010086u &&
+               !ms_cell_host_exists(missing_guest),
+           "PSP_O_RDONLY | PSP_O_CREAT with PSP_O_EXCL or PSP_O_APPEND stops at the boundary "
+           "and creates nothing");
+
+    /* io-seek-ms-write-rdonly: a write through a PSP_O_RDONLY descriptor. */
+    fd = ms_cell_path_call(MS_CELL_OPEN, file_guest, 0x0001u);
+    expect(fd >= 3u && fd < 64u, "the probe file opens read-only");
+    if (fd < 3u || fd >= 64u) return;
+    static const uint8_t other[4] = {0xd0u, 0xd1u, 0xd2u, 0xd3u};
+    fd_guest_copy(MS_CELL_BACK, other, sizeof(other));
+    expect(ms_cell_fd_call(MS_CELL_WRITE, fd, MS_CELL_BACK, 4u) == MS_BADF,
+           "a write through a PSP_O_RDONLY Memory Stick descriptor is 0x80020323");
+    /* io-eof-seek-negative-rdonly: SEEK_SET -1 on the read-only descriptor. */
+    expect(ms_cell_seek64(fd, -1, 0u, &high) == MS_EINVAL && high == 0xffffffffu &&
+               ms_cell_fd_call(MS_CELL_LSEEK32, fd, 0u, 1u) == 0u,
+           "a read-only Memory Stick seek to -1 is 0x80010016 and keeps the position");
+    expect(ms_cell_fd_call(MS_CELL_CLOSE, fd, 0u, 0u) == 0u &&
+               fd_host_bytes_equal(host, pattern, MS_SIZE),
+           "the refused write left the file unchanged");
+
+    fd = ms_cell_path_call(MS_CELL_OPEN, file_guest, 0x0003u);   /* RDWR */
+    expect(fd >= 3u && fd < 64u, "the probe file opens read-write");
+    if (fd < 3u || fd >= 64u) return;
+
+    /* io-eof-seek-negative: from position 8, SEEK_SET -1, SEEK_CUR -16 and SEEK_END -32. */
+    static const struct { int64_t offset; uint32_t whence; } before_start[] = {
+        {-1, 0u}, {-16, 1u}, {-32, 2u},
+    };
+    for (size_t i = 0; i < sizeof(before_start) / sizeof(before_start[0]); i++) {
+        expect(ms_cell_fd_call(MS_CELL_LSEEK32, fd, 8u, 0u) == 8u &&
+                   ms_cell_seek64(fd, before_start[i].offset, before_start[i].whence, &high) ==
+                       MS_EINVAL &&
+                   high == 0xffffffffu && ms_cell_fd_call(MS_CELL_LSEEK32, fd, 0u, 1u) == 8u,
+               "a Memory Stick seek before the start is 0x80010016 and keeps the position");
+    }
+    expect(ms_cell_fd_call(MS_CELL_LSEEK32, fd, 0xffffffffu, 0u) == MS_EINVAL &&
+               ms_cell_fd_call(MS_CELL_LSEEK32, fd, 0u, 1u) == 8u,
+           "sceIoLseek32 to -1 on the Memory Stick is 0x80010016 and keeps the position");
+
+    /* io-eof-write-past: a seek to 0x20 leaves the size at 16; a 4-byte write there makes the
+     * position and the size 0x24 and reads back at 0x20 (the gap's bytes are not asserted). */
+    expect(ms_cell_fd_call(MS_CELL_LSEEK32, fd, 0x20u, 0u) == 0x20u &&
+               ms_cell_seek64(fd, 0, 2u, &high) == MS_SIZE && high == 0u &&
+               ms_cell_fd_call(MS_CELL_LSEEK32, fd, 0x20u, 0u) == 0x20u,
+           "a Memory Stick seek past the end succeeds and leaves the size");
+    expect(ms_cell_fd_call(MS_CELL_WRITE, fd, MS_CELL_BACK, 4u) == 4u &&
+               ms_cell_fd_call(MS_CELL_LSEEK32, fd, 0u, 1u) == 0x24u &&
+               ms_cell_fd_call(MS_CELL_LSEEK32, fd, 0u, 2u) == 0x24u,
+           "a write past the end extends the file to the end of the write");
+    expect(ms_cell_fd_call(MS_CELL_LSEEK32, fd, 0u, 0u) == 0u &&
+               ms_cell_fd_call(MS_CELL_READ, fd, MS_CELL_STAT, 0x30u) == 0x24u &&
+               MEM_R32(MS_CELL_STAT + 0x20u) == MEM_R32(MS_CELL_BACK),
+           "a read from the start answers 0x24 with the tail at 0x20");
+
+    /* io-eof-read-past: a seek to 0x40 succeeds, a read there is 0, the position stays. */
+    expect(ms_cell_fd_call(MS_CELL_LSEEK32, fd, 0x40u, 0u) == 0x40u &&
+               ms_cell_fd_call(MS_CELL_READ, fd, MS_CELL_STAT, 4u) == 0u &&
+               ms_cell_fd_call(MS_CELL_LSEEK32, fd, 0u, 1u) == 0x40u,
+           "a read past the end of a Memory Stick file is 0 and keeps the position");
+
+    /* io-seek64: 0xFFFFFFFF is a position; 0x100000010 is 0x80010016, position unchanged. */
+    expect(ms_cell_seek64(fd, 0xffffffffll, 0u, &high) == 0xffffffffu && high == 0u,
+           "a Memory Stick seek to 0xFFFFFFFF is accepted");
+    expect(ms_cell_fd_call(MS_CELL_LSEEK32, fd, 8u, 0u) == 8u &&
+               ms_cell_seek64(fd, 0x100000010ll, 0u, &high) == MS_EINVAL &&
+               high == 0xffffffffu && ms_cell_fd_call(MS_CELL_LSEEK32, fd, 0u, 1u) == 8u,
+           "a Memory Stick seek to 0x100000010 is 0x80010016 and keeps the position");
+
+    expect(ms_cell_fd_call(MS_CELL_CLOSE, fd, 0u, 0u) == 0u &&
+               ms_cell_path_call(MS_CELL_REMOVE, file_guest, 0u) == 0u,
+           "the probe file closes and is removed");
+    fd_host_path(host, sizeof(host), missing_guest);
+    nk_remove_utf8(host);   /* only a runtime that wrongly created it leaves one */
+}
+
 /* sceIoAssign / sceIoUnassign through the production syscall path. WipEout Pure's Memory
  * Stick insert handler assigns "fatms0:" to "msstor0p1:" through "fatms0:" read/write, and
  * its eject handler unassigns it; before these handlers both NIDs were unregistered and the
@@ -4980,6 +5176,7 @@ static void test_fd_namespace(void) {
 
     test_io_async_and_path_imports();
     test_io_assign_through_syscall();
+    test_io_memory_stick_cells_through_syscall();
     test_io_open_async_notifies_later_callback();
     test_io_enhancement_data_file();
     test_state_sampler_rows();
@@ -5224,6 +5421,24 @@ static void test_umd_block_device_sectors(uint32_t fd, uint32_t data_addr) {
            "the position after the last UMD sector is refused");
     expect(umd_test_seek64(fd, INT64_MAX, 1u, &high) == 0x8001b003u,
            "an overflowing UMD SEEK_CUR is refused");
+    /* The refusal edge (PSP-IO-EOF-002 umd-eof-raw-seek-past, measured on a PSP-3000 6.61):
+     * from sector 16, SEEK_SET one and two past the last sector, SEEK_END +1 and SEEK_SET
+     * 0x100000000 answer 0x8001b003 with the high word 0xFFFFFFFF, sceIoLseek32 one past the
+     * last sector answers 0x8001b003, and the position stays 16. */
+    {
+        static const struct { int64_t offset; uint32_t whence; } past[] = {
+            {UMD_SYNTHETIC_SECTORS, 0u}, {UMD_SYNTHETIC_SECTORS + 1, 0u}, {1, 2u},
+            {0x100000000ll, 0u},
+        };
+        expect(umd_test_seek64(fd, 16, 0u, &high) == 16u, "UMD seek edge setup");
+        for (size_t i = 0; i < sizeof(past) / sizeof(past[0]); i++)
+            expect(umd_test_seek64(fd, past[i].offset, past[i].whence, &high) == 0x8001b003u &&
+                       high == 0xffffffffu && umd_test_seek64(fd, 0, 1u, &high) == 16u,
+                   "a UMD seek past the last sector is 0x8001b003 and keeps the position");
+        expect(umd_test_seek32(fd, (int32_t)UMD_SYNTHETIC_SECTORS, 0u) == 0x8001b003u &&
+                   umd_test_seek64(fd, 0, 1u, &high) == 16u,
+               "UMD sceIoLseek32 one past the last sector is 0x8001b003 and keeps the position");
+    }
     expect(umd_test_seek64(fd, 0, 3u, &high) == 0x80020324u && high == 0xffffffffu,
            "an unknown UMD whence is refused");
     expect(umd_test_seek32(fd, 0, 0u) == 0u, "UMD sceIoLseek32 SEEK_SET 0 is sector 0");
@@ -11882,9 +12097,13 @@ static void test_audio_calls_read_the_guest_queue_under_the_deterministic_clock(
     s_audio_queue_result = 100000;
     expect(audio_dispatch(&cpu, NID_SCE_AUDIO_GET_CHANNEL_REST_LENGTH, 0u, 0u, 0u) == 64u,
            "GetChannelRestLength reports the model's 64 frames, not the host's 100000");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_GET_CHANNEL_REST_LEN, 0u, 0u, 0u) == 64u,
+           "GetChannelRestLen agrees with RestLength on the model's 64 frames (#2361)");
     s_vtime_us += 2000u;   /* the 64 frames have played in guest time */
     expect(audio_dispatch(&cpu, NID_SCE_AUDIO_GET_CHANNEL_REST_LENGTH, 0u, 0u, 0u) == 0u,
            "and 2 ms of guest time later the model is empty whatever the host holds");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_GET_CHANNEL_REST_LEN, 0u, 0u, 0u) == 0u,
+           "and GetChannelRestLen reads the same empty model (#2361)");
 
     expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT2_RESERVE, 64u, 0u, 0u) == 0u,
            "Output2 reserves a 64-sample channel");
@@ -12202,6 +12421,29 @@ static void test_audio_regular_contract_safety(void) {
     s_audio_queue_result = -1;
     expect(audio_dispatch(&cpu, NID_SCE_AUDIO_GET_CHANNEL_REST_LENGTH, 0u, 0u, 0u) == 0u,
            "AudioGetChannelRestLength clamps negative queue backend report to 0");
+    s_audio_queue_result = 0;
+
+    /* sceAudioGetChannelRestLen (#2361) answers as sceAudioGetChannelRestLength does: on a
+     * PSP-3000 the two, channel in $a0, read the same rest length after each blocking output
+     * (PSP-HLE-AUDIO-REST-001). The invalid-channel code is UNMEASURED for both calls; RestLen
+     * keeps RestLength's.
+     * MUTANT: drop the 0xe9d97901 registration -- the first call below is an unimplemented
+     *   NID and the run stops (exit 7). */
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_GET_CHANNEL_REST_LEN, 0xffffffffu, 0u, 0u) ==
+               SCE_AUDIO_ERROR_INVALID_CH,
+           "AudioGetChannelRestLen rejects a negative channel with RestLength's code (unmeasured for both)");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_GET_CHANNEL_REST_LEN, 8u, 0u, 0u) ==
+               SCE_AUDIO_ERROR_INVALID_CH,
+           "AudioGetChannelRestLen rejects out-of-range channel 8 with RestLength's code (unmeasured for both)");
+    s_audio_queue_result = 512;
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_GET_CHANNEL_REST_LEN, 0u, 0u, 0u) == 512u,
+           "AudioGetChannelRestLen returns the queued frame count RestLength returns");
+    s_audio_queue_result = 0;
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_GET_CHANNEL_REST_LEN, 0u, 0u, 0u) == 0u,
+           "AudioGetChannelRestLen returns 0 when queue has 0 frames");
+    s_audio_queue_result = -1;
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_GET_CHANNEL_REST_LEN, 0u, 0u, 0u) == 0u,
+           "AudioGetChannelRestLen clamps negative queue backend report to 0");
     s_audio_queue_result = 0;
 
     for (uint32_t i = 0; i < 64u; i++)

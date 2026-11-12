@@ -73,6 +73,11 @@ VkImage ace_smooth_held(AceBetween *s, VkCommandBuffer cmd);
  * the latest ace_smooth_record call, for a present that shows an owed frame (ace.h, ACE_SHOW_OWED).
  * VK_NULL_HANDLE when the pass does not have it (nothing recorded before, or the size changed). */
 VkImage ace_smooth_previous(AceBetween *s, VkCommandBuffer cmd);
+/* The present that showed the owed frame failed, so the frame the show pass recorded with it
+ * never reached the screen: the frame recorded before it is the newest again, as if that record
+ * had not been made, and there is no previous frame until the next record. Only for a record
+ * made without an in-between (ACE_SHOW_OWED records none). */
+void ace_smooth_unrecord(AceBetween *s);
 /* The pair counts (pairs, pairs_mask, pairs_depth, depth_refused) of AceSmoothAuxStats; the
  * other fields are left as they are. */
 void ace_smooth_aux_stats(const AceBetween *s, AceSmoothAuxStats *out);
