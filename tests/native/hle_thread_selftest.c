@@ -14285,7 +14285,8 @@ static uint32_t rtca_check_valid(uint16_t y, uint16_t mo, uint16_t d, uint16_t h
 }
 
 /* sceRtcTickAddMinutes, sceRtcTickAddHours and sceRtcTickAddWeeks against PSPAutotests
- * tests/rtc/arithmetic.expected (f573fe8c, recorded on a PSP), each row the autotest's own. Minutes
+ * tests/rtc/arithmetic.expected (f573fe8c, recorded on a PSP): the 8 fixed rows of each function,
+ * each the autotest's own (its loop rows are not checked here). Minutes
  * take a 64-bit count; hours and weeks a 32-bit int, so the autotest's 64-bit constants are
  * truncated (+ 62135596800000445 hours lands in year 383). Before these handlers the three NIDs
  * were unregistered imports. */

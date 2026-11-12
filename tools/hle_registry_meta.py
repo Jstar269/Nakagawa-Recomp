@@ -1373,6 +1373,30 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
         ],
         "limitation": "adds the sign-extended 32-bit day count times 86400000000 modulo 2^64 and returns 0, a wrap past year 1 or 9999 included (pspautotests-recorded); a NULL or unmapped source or destination is not measured and stops the run by name",
     },
+    "h_RtcTickAddMinutes": {
+        "status": "partial",
+        "evidence": [
+            "tests/native/hle_thread_selftest.c:test_rtc_tick_add_minutes_hours_weeks_autotest",
+            "PSPAutotests tests/rtc/arithmetic.expected (f573fe8c, recorded on a PSP): checkRtcTickAddMinutes, the 8 fixed rows",
+        ],
+        "limitation": "adds the 64-bit count times 60000000 modulo 2^64 and returns 0, a wrap past year 1 or 9999 included (pspautotests-recorded, the fixed rows; the autotest's loop rows are not checked); a NULL or unmapped source or destination is not measured and stops the run by name",
+    },
+    "h_RtcTickAddHours": {
+        "status": "partial",
+        "evidence": [
+            "tests/native/hle_thread_selftest.c:test_rtc_tick_add_minutes_hours_weeks_autotest",
+            "PSPAutotests tests/rtc/arithmetic.expected (f573fe8c, recorded on a PSP): checkRtcTickAddHours, the 8 fixed rows",
+        ],
+        "limitation": "adds the sign-extended 32-bit hour count times 3600000000 modulo 2^64 and returns 0, a wrap past year 1 or 9999 included (pspautotests-recorded, the fixed rows; the autotest's loop rows are not checked); a NULL or unmapped source or destination is not measured and stops the run by name",
+    },
+    "h_RtcTickAddWeeks": {
+        "status": "partial",
+        "evidence": [
+            "tests/native/hle_thread_selftest.c:test_rtc_tick_add_minutes_hours_weeks_autotest",
+            "PSPAutotests tests/rtc/arithmetic.expected (f573fe8c, recorded on a PSP): checkRtcTickAddWeeks, the 8 fixed rows",
+        ],
+        "limitation": "adds the sign-extended 32-bit week count times 604800000000 modulo 2^64 and returns 0, a wrap past year 1 or 9999 included (pspautotests-recorded, the fixed rows; the autotest's loop rows are not checked); a NULL or unmapped source or destination is not measured and stops the run by name",
+    },
     "h_RtcGetDayOfWeek": {
         "status": "partial",
         "evidence": [

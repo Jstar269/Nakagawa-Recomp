@@ -645,7 +645,7 @@
     "classification": "dedicated",
     "handler": "h_RtcTickAddHours",
     "name": "sceRtcTickAddHours",
-    "status": "unreviewed"
+    "status": "partial"
   },
   "0x278c0df5": {
     "classification": "dedicated",
@@ -3491,7 +3491,7 @@
     "classification": "dedicated",
     "handler": "h_RtcTickAddWeeks",
     "name": "sceRtcTickAddWeeks",
-    "status": "unreviewed"
+    "status": "partial"
   },
   "0xcf561893": {
     "classification": "dedicated",
@@ -3902,7 +3902,7 @@
     "classification": "dedicated",
     "handler": "h_RtcTickAddMinutes",
     "name": "sceRtcTickAddMinutes",
-    "status": "unreviewed"
+    "status": "partial"
   },
   "0xe7282cb6": {
     "classification": "dedicated",
