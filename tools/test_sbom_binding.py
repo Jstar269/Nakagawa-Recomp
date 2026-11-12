@@ -334,14 +334,17 @@ class TestRuntimeManifestBinding(unittest.TestCase):
         (self.bin / "THIRD_PARTY_NOTICES").mkdir(parents=True)
         (self.bin / "nakagawa_player.exe").write_bytes(b"MZ player bytes")
         (self.bin / "SDL3.dll").write_bytes(b"MZ sdl3 bytes")
+        (self.bin / "SDL3_ttf.dll").write_bytes(b"MZ sdl3_ttf bytes")
         (self.bin / "THIRD_PARTY_NOTICES" / "index.json").write_text(json.dumps({
             "schema_version": 1,
             "components": [{"name": "SDL3", "binary": "SDL3.dll", "version": "3.4.20",
-                            "spdx_id": "Zlib", "source_path": "share/licenses/SDL3/LICENSE.txt"}],
+                            "spdx_id": "Zlib", "source_path": "share/licenses/SDL3/LICENSE.txt"},
+                           {"name": "SDL3_ttf", "binary": "SDL3_ttf.dll", "version": "3.2.2",
+                            "spdx_id": "Zlib", "source_path": "share/licenses/SDL3_ttf/LICENSE.txt"}],
         }), encoding="utf-8")
         stage_runtime_dlls.write_runtime_manifest(self.bin, imports_of=_fake_imports)
         self.sha = {name: hashlib.sha256((self.bin / name).read_bytes()).hexdigest()
-                    for name in ("nakagawa_player.exe", "SDL3.dll")}
+                    for name in ("nakagawa_player.exe", "SDL3.dll", "SDL3_ttf.dll")}
         patcher = mock.patch.object(package_notices, "get_binary_imports", _fake_imports)
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -434,12 +437,48 @@ class TestRuntimeManifestBinding(unittest.TestCase):
 
     def test_inventories_must_agree(self):
         shipped = generate_sbom.resolve_shipped_dlls(package_dir=self.bin)
-        self.assertEqual([dll["name"] for dll in shipped], ["SDL3.dll"])
-        with self.assertRaisesRegex(generate_sbom.RuntimeBindingError, "SBOM_DLL_UNRECORDED: SDL3.dll"):
+        self.assertEqual([dll["name"] for dll in shipped], ["SDL3.dll", "SDL3_ttf.dll"])
+        self.assertEqual(shipped[1]["spdx_id"], "SPDXRef-dll-SDL3-ttf.dll")
+        with self.assertRaisesRegex(generate_sbom.RuntimeBindingError,
+                                    "SBOM_DLL_UNRECORDED: SDL3.dll, SDL3_ttf.dll"):
             generate_sbom.bind_runtime_manifest(self.bin, [])
-        extra = dict(shipped[0], name="SDL3_ttf.dll", spdx_id="SPDXRef-dll-SDL3_ttf.dll")
-        with self.assertRaisesRegex(generate_sbom.RuntimeBindingError, "SBOM_DLL_NOT_SHIPPED: .*SDL3_ttf.dll"):
+        extra = dict(shipped[0], name="SDL3_image.dll", spdx_id="SPDXRef-dll-SDL3-image.dll")
+        with self.assertRaisesRegex(generate_sbom.RuntimeBindingError, "SBOM_DLL_NOT_SHIPPED: .*SDL3_image.dll"):
             generate_sbom.bind_runtime_manifest(self.bin, shipped + [extra])
+
+    def test_two_binaries_may_not_share_an_identifier(self):
+        import stage_runtime_dlls
+        (self.bin / "nakagawa-player.exe").write_bytes(b"MZ other player")
+        stage_runtime_dlls.write_runtime_manifest(self.bin, imports_of=_fake_imports)
+        with self.assertRaisesRegex(generate_sbom.RuntimeBindingError,
+                                    "SBOM_SPDX_ID_COLLISION: .*SPDXRef-exe-nakagawa-player.exe"):
+            generate_sbom.bind_runtime_manifest(self.bin, generate_sbom.resolve_shipped_dlls(package_dir=self.bin))
+
+    def test_verification_reads_every_element_of_a_binary_name_and_the_dll_path(self):
+        self.assertEqual(self.generate("--package-dir", str(self.bin))[0], 0)
+        wrong = "0" * 64
+        cases = {
+            "cyclonedx": (lambda d: d["components"].append(
+                {"type": "application", "name": "SDL3.dll", "hashes": [{"alg": "SHA-256", "content": wrong}]}),
+                "SBOM_BINARY_COUNT: CycloneDX SBOM has 2 element(s) for SDL3.dll"),
+            "spdx3": (lambda d: d["@graph"].append(
+                {"@type": "spdx:Package", "spdx:name": "bin/nakagawa_player.exe"}),
+                "SBOM_BINARY_COUNT: SPDX 3 SBOM has 2 element(s) for bin/nakagawa_player.exe"),
+            "spdx": (lambda d: next(p for p in d["packages"] if p["name"] == "SDL3.dll").update(
+                packageFileName="bin/other.dll"),
+                "SBOM_BINARY_NOT_SHIPPED: SPDX 2.3 SBOM names bin/other.dll"),
+        }
+        for kind, (change, message) in cases.items():
+            with self.subTest(kind=kind):
+                original = self.load(kind)
+                document = json.loads(json.dumps(original))
+                change(document)
+                self.save(kind, document)
+                code, stderr = self.verify()
+                self.save(kind, original)
+                self.assertEqual(code, 1)
+                self.assertIn(message, stderr)
+        self.assertEqual(self.verify()[0], 0)
 
     def test_verification_rejects_an_sbom_without_the_hashes(self):
         self.assertEqual(self.generate()[0], 0)

@@ -693,7 +693,8 @@ def resolve_shipped_dlls(
         key = name.lower()
         if key in shipped:
             return
-        slug = re.sub(r"[^A-Za-z0-9._-]", "_", name)
+        # SPDX 2.3 identifiers allow letters, digits, "." and "-" only (SDL3_ttf.dll).
+        slug = re.sub(r"[^A-Za-z0-9.-]", "-", name)
         shipped[key] = {
             "name": name,
             "spdx_id": f"SPDXRef-dll-{slug}",
@@ -823,6 +824,12 @@ def bind_runtime_manifest(
         "sha256": entry["sha256"],
         "size": entry["size"],
     } for entry in manifest["files"] if entry["kind"] == "executable"]
+    identifiers = [item["spdx_id"] for item in (*bound, *executables)]
+    shared = sorted({identifier for identifier in identifiers if identifiers.count(identifier) > 1})
+    if shared:
+        raise RuntimeBindingError(
+            f"SBOM_SPDX_ID_COLLISION: two packaged binaries would share the identifier {', '.join(shared)}"
+        )
     return bound, executables
 
 

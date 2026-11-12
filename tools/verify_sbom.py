@@ -644,7 +644,12 @@ def _binary_hashes_spdx23(document: dict) -> list[tuple[str, list[str]]]:
             continue
         name = str(package.get("name", ""))
         file_name = str(package.get("packageFileName", ""))
-        key = name if name.lower().endswith(".dll") else file_name if file_name.startswith("bin/") else None
+        key = None
+        if name.lower().endswith(".dll"):
+            # A DLL package names its file in bin/; any other path counts as another binary.
+            key = file_name if file_name and file_name.lower() != f"bin/{name}".lower() else name
+        elif file_name.startswith("bin/"):
+            key = file_name
         if key is not None:
             found.append((key, [
                 str(item.get("checksumValue")) for item in package.get("checksums") or []
@@ -663,8 +668,7 @@ def _binary_hashes_spdx3(document: dict) -> list[tuple[str, list[str]]]:
         if not isinstance(node, dict):
             continue
         name = str(node.get("spdx:name", ""))
-        if ((node.get("@type") == "spdx:Package" and name.lower().endswith(".dll"))
-                or (node.get("@type") == "spdx:File" and name.startswith("bin/"))):
+        if name.lower().endswith(".dll") or name.startswith("bin/"):
             found.append((name, [
                 str(item.get("spdx:hashValue")) for item in node.get("spdx:verifiedUsing") or []
                 if isinstance(item, dict) and item.get("spdx:algorithm") == "sha256"]))
@@ -677,8 +681,7 @@ def _binary_hashes_cyclonedx(document: dict) -> list[tuple[str, list[str]]]:
         if not isinstance(component, dict):
             continue
         name = str(component.get("name", ""))
-        if ((component.get("type") == "library" and name.lower().endswith(".dll"))
-                or (component.get("type") == "file" and name.startswith("bin/"))):
+        if name.lower().endswith(".dll") or name.startswith("bin/"):
             found.append((name, [
                 str(item.get("content")) for item in component.get("hashes") or []
                 if isinstance(item, dict) and item.get("alg") == "SHA-256"]))
