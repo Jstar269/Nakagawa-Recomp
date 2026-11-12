@@ -708,6 +708,25 @@ static void stack_range_release(uint32_t base, uint32_t size) {
     stack_ranges_update_top();
 }
 
+/* For the HLE user partition (hle.c): whether `addr`, an address inside the arena, is free here.
+ * 1 when a free range holds it, with *end_out the end of that range; 0 when a live thread stack
+ * or High block holds it, with *end_out the start of the next free range above it (the arena
+ * ceiling when none). */
+int sched_stack_arena_free_at(uint32_t addr, uint32_t *end_out) {
+    if (!s_stack_allocator_ready) stack_ranges_reset();
+    uint32_t next = SR_STACK_ARENA_CEIL;
+    for (int i = 0; i < s_stack_free_count; i++) {
+        const uint32_t base = s_stack_free[i].base, end = base + s_stack_free[i].size;
+        if (addr >= base && addr < end) {
+            *end_out = end;
+            return 1;
+        }
+        if (base > addr && base < next) next = base;
+    }
+    *end_out = next;
+    return 0;
+}
+
 /* A High block of the user partition (sceKernelAllocMemoryBlock placement 1). A PSP takes High
  * blocks and thread stacks from the top of the same user partition, so a High block is carved from
  * this descending arena: the highest address at which a free range holds it below `ceiling` (the

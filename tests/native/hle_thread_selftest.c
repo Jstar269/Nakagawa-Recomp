@@ -38384,9 +38384,45 @@ static void test_partition_ends_at_lowest_live_stack(void) {
            "two stacked threads are created");
     memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = upper;
     expect(sr_syscall(&cpu, 0x9fa03cd3u) == 0u, "the dormant upper thread is deleted");
+    const uint32_t lower_floor = sched_guest_stack_floor();
+    const uint32_t gap_start = (sr_hle_test_partition_heap_ptr() + 0xFFu) & ~0xFFu;
+    expect(gap_start < lower_floor, "the bump pointer lies below the lower live stack");
     uint32_t between = sr_alloc_block_at(upper_floor, 0x1000u, "between-stacks");
     expect(between != FAIL && between != 0u,
            "a fixed reservation above the lowest live stack succeeds");
+    /* The reservation jumped the bump pointer over the lower thread's live stack. The skipped
+     * range goes back to the free list, but not the live stack inside it: no free entry
+     * covers [lower_floor, upper_floor), and a Low block one page longer than the free space
+     * below the stack is refused instead of being placed over it. */
+    extern int sr_hle_test_partition_free_block_count(void);
+    extern int sr_hle_test_partition_get_free_block(int idx, uint32_t *addr_out, uint32_t *size_out);
+    int free_over_stack = 0;
+    for (int i = 0; i < sr_hle_test_partition_free_block_count(); i++) {
+        uint32_t f_addr = 0u, f_size = 0u;
+        if (sr_hle_test_partition_get_free_block(i, &f_addr, &f_size) &&
+            f_addr < upper_floor && f_addr + f_size > lower_floor)
+            free_over_stack = 1;
+    }
+    expect(!free_over_stack, "no free-list entry covers the lower thread's live stack");
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = 2u; cpu.r[5] = 0u; cpu.r[6] = 0u; cpu.r[7] = (lower_floor - gap_start) + 0x100u;
+    uint32_t over = sr_syscall(&cpu, NID_ALLOC_PART);
+    uint32_t over_head = 0u;
+    if (over != 0x800200d9u && over != FAIL && over != 0u) {
+        memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = over;
+        over_head = sr_syscall(&cpu, NID_GET_HEAD);
+    }
+    expect(over == 0x800200d9u || over_head + (lower_floor - gap_start) + 0x100u <= lower_floor ||
+           over_head >= upper_floor,
+           "a Low block reaching into the lower live stack is refused");
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = 2u; cpu.r[5] = 0u; cpu.r[6] = 0u; cpu.r[7] = lower_floor - gap_start;
+    uint32_t below = sr_syscall(&cpu, NID_ALLOC_PART);
+    expect(below != 0x800200d9u && below != FAIL && below != 0u,
+           "the free space below the lower live stack is still handed out");
+    memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = below;
+    expect(sr_syscall(&cpu, NID_GET_HEAD) == gap_start,
+           "the block below the lower live stack starts at the old bump pointer");
     s_fixture_loaded_end = 0x00400000u;
 }
 
