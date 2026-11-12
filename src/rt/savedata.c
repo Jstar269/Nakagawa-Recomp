@@ -2669,6 +2669,16 @@ static int getsize_sum_entries(uint32_t count, uint32_t entries, uint64_t per_en
     return 1;
 }
 
+/* A sizeInfo text field: written through its NUL and no further. Measured for a save that does
+ * not exist (PSP-HLE-SAVEDATA-GETSIZE-001); a save that exists uses the same rule by analogy
+ * (UNMEASURED there). */
+static void wr_size_text(uint32_t addr, const char *s, int n) {
+    for (int i = 0; i < n; i++) {
+        MEM_W8(addr + (uint32_t)i, (uint8_t)s[i]);
+        if (!s[i]) break;
+    }
+}
+
 /* KB for the 32-bit sizeInfo fields, rounded up. A shortfall beyond 4 TiB is
  * not representable there and saturates at the field's maximum. */
 static uint32_t getsize_kb_round_up(uint64_t bytes) {
@@ -2686,11 +2696,25 @@ static uint32_t getsize_kb_round_up(uint64_t bytes) {
  * bytes, files already in the save count as overwritable, and the needed and
  * overwrite strings are written only when there is a shortfall.
  *
- * A save that does not exist fills in the same figures and then reports
- * ERR_RW_NO_DATA (PPSSPP PSPSaveDialog::ExecuteNotVisibleIOAction, revision
- * c9e2afb6; UNMEASURED on a PSP, whose recorded case has the save in place). A
- * game reads that pair as "no save yet, and this much room to make one", and
- * success as "there is a save to load". */
+ * A save that does not exist fills in the free figures and neededKB, with
+ * neededString on a shortfall, and reports ERR_RW_NO_DATA; overwriteKB and
+ * overwriteString stay as the game left them, and a NULL sizeInfo reports 0
+ * (PSP-3000, docs/HARDWARE_ORACLE.md, PSP-HLE-SAVEDATA-GETSIZE-001). A NULL
+ * sizeInfo for a save that exists reports 0 here too (UNMEASURED). A game
+ * reads RW_NO_DATA as "no save yet, and this much room to make one", and
+ * success as "there is a save to load".
+ *
+ * Measured but NOT reproduced: the shortfall figure. On the same run a PSP's
+ * neededKB charged three clusters beyond the entry's size and wrapped at 32
+ * bits of bytes, so its neededKB and neededString differ from the figures
+ * here, which stay PPSSPP's arithmetic (64-bit, no cluster charge,
+ * saturating). By that arithmetic its fit/shortfall boundary would differ
+ * too (UNMEASURED: the one shortfall cell wraps). One measured cell cannot divide
+ * those clusters between the entry's rounding and the save's own files, so
+ * the model waits for more cells (#308). The cluster size differs too: the
+ * runtime writes 0x8000, that PSP-3000's Memory Stick reported 0x10000.
+ *
+ * UNMEASURED: the overwrite fields and text of a save that exists. */
 static uint32_t do_getsize(uint32_t param, uint32_t size, const char *game, const char *save) {
     uint32_t si = savedata_optional_pointer(param, size, SDP_sizeInfo);
     if (!si) return 0;
@@ -2706,7 +2730,8 @@ static uint32_t do_getsize(uint32_t param, uint32_t size, const char *game, cons
     char dir[PATH_MAX];
     if (save_dir(dir, sizeof(dir), game, save) && !savedata_recover(dir))
         return ERR_RW_NO_MEMSTICK_UNMEASURED;
-    const uint32_t result = dir[0] && dir_exists(dir) ? 0u : ERR_RW_NO_DATA;
+    const int exists = dir[0] && dir_exists(dir);
+    const uint32_t result = exists ? 0u : ERR_RW_NO_DATA;
     uint64_t write_bytes = 0, overwrite_bytes = 0;
     if (!getsize_sum_entries(nSec, pSec, 0x10u, dir, &write_bytes, &overwrite_bytes) ||
         !getsize_sum_entries(nNorm, pNorm, 0u, dir, &write_bytes, &overwrite_bytes))
@@ -2716,21 +2741,22 @@ static uint32_t do_getsize(uint32_t param, uint32_t size, const char *game, cons
     MEM_W32(si + 16, CLUSTER);                              /* sectorSize */
     MEM_W32(si + 20, fr.sectors);                           /* freeSectors */
     MEM_W32(si + 24, fr.kb);                                /* freeKB */
-    wr_fixed(si + 28, fr.text, 8);                          /* freeString */
+    wr_size_text(si + 28, fr.text, 8);                      /* freeString */
     if (overwrite_bytes >= write_bytes || write_bytes - overwrite_bytes < fr.bytes) {
         MEM_W32(si + 36, 0);                                /* neededKB */
-        MEM_W32(si + 48, 0);                                /* overwriteKB */
+        if (exists) MEM_W32(si + 48, 0);                    /* overwriteKB */
         return result;
     }
     char text[24];
     uint64_t needed = write_bytes - fr.bytes;
     MEM_W32(si + 36, getsize_kb_round_up(needed));
     savedata_space_text(needed, 1, text, sizeof(text));
-    wr_fixed(si + 40, text, 8);                             /* neededString */
+    wr_size_text(si + 40, text, 8);                         /* neededString */
+    if (!exists) return result;
     uint64_t overwrite = needed > overwrite_bytes ? needed - overwrite_bytes : 0;
     MEM_W32(si + 48, getsize_kb_round_up(overwrite));
     savedata_space_text(overwrite, 1, text, sizeof(text));
-    wr_fixed(si + 52, text, 8);                             /* overwriteString */
+    wr_size_text(si + 52, text, 8);                         /* overwriteString */
     return result;
 }
 

@@ -742,6 +742,8 @@ static void gui_ace_smooth_init(void) {
  * this build the two are exclusive: with smooth motion on, Fill reports itself unavailable. */
 static int s_wide_on;
 
+static void gui_cull_sync(void);
+
 static void gui_wide_init(void) {
     const AceConfig *effective = ace_effective();
     s_wide_on = 0;
@@ -755,6 +757,7 @@ static void gui_wide_init(void) {
     s_wide_on = 1;
     ace_confirm(ACE_FEATURE_WIDE);
     ge_wide_set_cull(effective->cull);
+    ace_set_finish_hook(gui_cull_sync);   /* the exit path reads the final count (contract 11.3.6) */
 }
 
 static void gui_cull_sync(void) {
@@ -769,6 +772,7 @@ static void gui_cull_sync(void) {
 
 static void gui_wide_release(void) {
     gui_cull_sync();
+    ace_set_finish_hook(NULL);
     if (s_wide_on) (void)ge_wide_set_wing(0);
     ge_wide_set_cull(0);
     s_wide_on = 0;

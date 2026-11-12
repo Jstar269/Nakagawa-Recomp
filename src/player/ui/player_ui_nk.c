@@ -360,6 +360,17 @@ static bool player_ui_add_font(NkUiTtf *ttf, int font, const char *base_path,
     return false;
 }
 
+/* The launcher-unavailable reason names the fonts folder the way this
+   platform writes paths: assets\fonts\ui on Windows, assets/fonts/ui
+   elsewhere (#306). */
+static void player_ui_set_fonts_missing(char *error, size_t error_size) {
+    char sep = nk_platform_path_separator();
+    char message[96];
+    snprintf(message, sizeof(message), "its fonts (assets%cfonts%cui) are missing or damaged",
+             sep, sep);
+    player_ui_set_error(error, error_size, message);
+}
+
 /* The design system's eight font slots (nk_ui_theme.h). Every face falls back
    to Geist for Latin it lacks and to Noto Sans JP for Japanese titles. */
 static bool player_ui_register_fonts(NkUiTtf *ttf, const char *base_path,
@@ -367,15 +378,13 @@ static bool player_ui_register_fonts(NkUiTtf *ttf, const char *base_path,
 #ifdef NK_PLAYER_UI_REGRESSION_TEST
     /* Stands in for a ZIP extracted without its fonts folder. */
     if (getenv("NK_UI_TEST_HIDE_UI_FONTS") != NULL) {
-        player_ui_set_error(error, error_size,
-                            "its fonts (assets\\fonts\\ui) are missing or damaged");
+        player_ui_set_fonts_missing(error, error_size);
         return false;
     }
 #endif
     for (int font = 0; font < NK_UI_FONT_COUNT; ++font) {
         if (!player_ui_add_font(ttf, font, base_path, nk_ui_font_path(font))) {
-            player_ui_set_error(error, error_size,
-                                "its fonts (assets\\fonts\\ui) are missing or damaged");
+            player_ui_set_fonts_missing(error, error_size);
             return false;
         }
     }
