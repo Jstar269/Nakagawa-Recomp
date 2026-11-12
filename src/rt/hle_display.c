@@ -915,10 +915,10 @@ static uint32_t h_DisplayWaitVblankStart(CpuState *s) {
  * are the declared site's id and its jal's address, which the guard's line names.
  *
  * A skipped wait still blocks, for the shortest delay that does: 1 us, sceKernelDelayThread(1)'s
- * wait, through sched_delay_current_dispatching, so that the deadline cannot already be over when
- * the scheduler decides who runs next. Ready threads of any priority, lower ones included, run
- * then, as during the stock wait, and the caller resumes at its next scheduling point instead of
- * the next VBLANK. Neither a zero delay nor a ready-queue rotation would do: on the PSP (#340, h_DelayThread
+ * wait, through sched_delay_current_dispatching: even when that deadline is already over at the
+ * decision the block causes, that decision runs another ready thread first. Ready threads of any
+ * priority, lower ones included, run then, as during the stock wait, and the caller resumes at
+ * its next scheduling point instead of the next VBLANK. Neither a zero delay nor a ready-queue rotation would do: on the PSP (#340, h_DelayThread
  * in hle_kernel_thread.c) sceKernelDelayThread(0) does not yield, and a rotation yields only to
  * threads of equal or higher priority, so a loading loop that waits for a lower-priority loader
  * would spin. $v0 is then the 0 the stock call returns after its wait. */

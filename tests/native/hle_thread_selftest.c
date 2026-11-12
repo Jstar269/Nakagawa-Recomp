@@ -46913,7 +46913,21 @@ static int ace_skip_yield_round(uint32_t phase, int report) {
     return lower && loaded_in_loop && first_skip && delay_wait && v0 && counted;
 }
 
+/* A thread alone: its skip still blocks, and with nobody else ready it resumes and finishes. */
+static volatile uint32_t s_ace_skip_lone_resumed;
+
+static void ace_skip_lone_guest_fn(CpuState *cpu) {
+    cpu->r[2] = 0x5au;
+    expect(nk_ace_load_skip_wait(cpu, "T", 0x08800000u) == 1, "ace load skip alone: the wait is skipped");
+    s_ace_skip_lone_resumed = cpu->r[2] == 0u ? 1u : 2u;
+    cpu->r[2] = 0u;
+}
+
 static void test_ace_load_skip_wait_lets_a_lower_priority_thread_run(void) {
+    static const char k_load_fast[] =
+        "v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;tier=ace;load=fast";
+    /* The cases after this one keep the dispatch count they would have had. */
+    const uint32_t dispatches = s_dispatches_since_time;
     unsigned failed = 0u;
     for (uint32_t phase = 0u; phase < ACE_SKIP_PHASES; phase++) {
         const int ok = ace_skip_yield_round(phase, 0);
@@ -46921,6 +46935,22 @@ static void test_ace_load_skip_wait_lets_a_lower_priority_thread_run(void) {
     }
     printf("ace load skip yield: %u of %u clock phases failed\n", failed, (unsigned)ACE_SKIP_PHASES);
     expect(failed == 0u, "ace load skip yield: at every clock phase the loop finished at its first skipped wait");
+
+    reset_fixture();
+    sr_hle_init();
+    sr_test_guest_fn_reset();
+    s_ace_skip_lone_resumed = 0u;
+    expect(ace_init_spec(k_load_fast, NULL) == 1, "ace load skip alone: load=fast is on");
+    sr_test_register_guest_fn(ACE_SKIP_WAITER_ENTRY, ace_skip_lone_guest_fn);
+    g_worker_uid = SR_ROLE_UID_NONE;
+    memset(s_cpu, 0, sizeof(*s_cpu));
+    sched_run(ACE_SKIP_WAITER_ENTRY, 0u, 0u);
+    expect(s_ace_skip_lone_resumed == 1u,
+           "ace load skip alone: with no other thread ready the skipped wait resumes, returning 0");
+    expect(ace_load_waits_skipped() == 1u, "ace load skip alone: the one skip is counted");
+    (void)ace_init_spec("off", NULL);
+    sr_test_guest_fn_reset();
+    s_dispatches_since_time = dispatches;
 }
 
 /* The pacing guard (ENHANCEMENT_CONTRACT.md 11.3.10), through the real skip on a running
