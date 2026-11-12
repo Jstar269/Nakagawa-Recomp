@@ -5,9 +5,13 @@
 
 #include "nk_data_migrate.h"
 
+#include "nk_json.h"
+#include "nk_library.h"
 #include "nk_platform.h"
+#include "nk_user_data_schema.h"
 
 #include <stdarg.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -89,13 +93,6 @@ static void say(NkDataMigration *r, const char *format, ...) {
 
 /* ---- library.json ---- */
 
-static bool json_plain(const char *text) {
-    for (const char *c = text; *c; c++) {
-        if (*c == '"' || *c == '\\' || (unsigned char)*c < 0x20u) return false;
-    }
-    return true;
-}
-
 static bool read_whole(const char *path, char **data, size_t *size) {
     *data = NULL;
     *size = 0;
@@ -137,56 +134,167 @@ static bool write_whole(const char *path, const char *data, size_t size) {
     return (fclose(f) == 0) && ok;
 }
 
-/* Rewrites `"<from>/` to `"<to>/` inside library.json's strings, and a path that is exactly `<from>`.
-   Returns false only on a failure that should undo the migration; a library with nothing to rewrite
-   is fine. */
+/* A growing output buffer; `failed` is sticky. */
+typedef struct {
+    char *data;
+    size_t length;
+    size_t cap;
+    bool failed;
+} OutBuf;
+
+static void out_put(OutBuf *b, const char *bytes, size_t n) {
+    if (b->failed || n == 0u) return;
+    if (b->length + n > b->cap) {
+        size_t cap = b->cap ? b->cap : 4096u;
+        while (cap < b->length + n) {
+            if (cap > ((size_t)-1) / 2u) {
+                b->failed = true;
+                return;
+            }
+            cap *= 2u;
+        }
+        char *grown = (char *)realloc(b->data, cap);
+        if (!grown) {
+            b->failed = true;
+            return;
+        }
+        b->data = grown;
+        b->cap = cap;
+    }
+    memcpy(b->data + b->length, bytes, n);
+    b->length += n;
+}
+
+/* `text` as JSON string content, escaped as nk_library.c writes its strings. */
+static void out_put_escaped(OutBuf *b, const char *text, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)text[i];
+        char escape[8];
+        if (c == '"' || c == '\\') {
+            escape[0] = '\\';
+            escape[1] = (char)c;
+            out_put(b, escape, 2u);
+        } else if (c == '\n') {
+            out_put(b, "\\n", 2u);
+        } else if (c == '\r') {
+            out_put(b, "\\r", 2u);
+        } else if (c == '\t') {
+            out_put(b, "\\t", 2u);
+        } else if (c < 0x20u) {
+            snprintf(escape, sizeof(escape), "\\u%04x", (unsigned)c);
+            out_put(b, escape, 6u);
+        } else {
+            out_put(b, (const char *)&text[i], 1u);
+        }
+    }
+}
+
+/* Decodes the body of a JSON string literal (the bytes between its quotes) into `out`. False for a
+   malformed escape or a value longer than `cap`; such a string is left as it is. */
+static bool json_unescape(const char *body, size_t n, char *out, size_t cap, size_t *out_length) {
+    size_t o = 0;
+    for (size_t i = 0; i < n;) {
+        if (body[i] != '\\') {
+            if (o >= cap) return false;
+            out[o++] = body[i++];
+            continue;
+        }
+        uint32_t cp = 0;
+        size_t used = 0;
+        if (nk_json_decode_escape(body + i + 1u, n - i - 1u, &cp, &used) != NULL) return false;
+        char utf8[4];
+        size_t bytes = nk_json_utf8_encode(cp, utf8);
+        if (o + bytes > cap) return false;
+        memcpy(out + o, utf8, bytes);
+        o += bytes;
+        i += 1u + used;
+    }
+    *out_length = o;
+    return true;
+}
+
+/* Rewrites every JSON string in library.json whose value is the old data folder, or a path below
+   it, to the same path below the new one. Each string is decoded before it is compared and the new
+   value is escaped as the library writes it, so a folder name with a quote or a backslash is found
+   and stays valid JSON; every other byte is kept. A library a newer Nakagawa wrote
+   (schema_version above NK_LIBRARY_SCHEMA_VERSION) is refused by name, as the library writer
+   refuses to replace one. Returns false only on a failure that should undo the migration; a
+   library with nothing to rewrite is fine. */
 static bool rewrite_library(const NkDataMigrationPlan *plan, bool *rewritten, char *why,
                             size_t why_size) {
     *rewritten = false;
     if (!plan->remap_from[0] || !plan->remap_to[0] || !plan->library_file[0]) return true;
     if (nk_platform_path_missing(plan->library_file)) return true;
-    if (!json_plain(plan->remap_from) || !json_plain(plan->remap_to)) return true;
+    long version = nk_user_data_file_version(plan->library_file, MIGRATE_LIBRARY_MAX_BYTES);
+    if (version > (long)NK_LIBRARY_SCHEMA_VERSION) {
+        snprintf(why, why_size,
+                 "the library file %s was written by a newer version of Nakagawa (schema_version "
+                 "%ld), which this version cannot update",
+                 plan->library_file, version);
+        return false;
+    }
     char *data = NULL;
     size_t size = 0;
     if (!read_whole(plan->library_file, &data, &size)) {
         snprintf(why, why_size, "the library file %s could not be read", plan->library_file);
         return false;
     }
-    char needle[NK_MAX_PATH + 2], replacement[NK_MAX_PATH + 2];
-    snprintf(needle, sizeof(needle), "\"%s", plan->remap_from);
-    snprintf(replacement, sizeof(replacement), "\"%s", plan->remap_to);
-    size_t needle_len = strlen(needle), replacement_len = strlen(replacement);
+    const size_t from_length = strlen(plan->remap_from);
+    const size_t to_length = strlen(plan->remap_to);
+    const char sep = nk_platform_path_separator();
+    static char value[NK_MAX_PATH * 2u];
+    static char renamed[NK_MAX_PATH * 2u];
+    OutBuf out = {NULL, 0u, 0u, false};
     size_t hits = 0;
-    for (size_t i = 0; i + needle_len <= size; i++) {
-        /* The old folder itself, or a path below it: the next character ends the string or is a
-           separator, so "/data-old" is not mistaken for "/data". */
-        if (memcmp(data + i, needle, needle_len) == 0 &&
-            (i + needle_len == size || data[i + needle_len] == '"' || data[i + needle_len] == '/')) {
-            hits++;
-            i += needle_len - 1u;
+    bool too_long = false;
+    for (size_t i = 0; i < size && !out.failed;) {
+        if (data[i] != '"') {
+            out_put(&out, data + i, 1u);
+            i++;
+            continue;
         }
+        size_t end = i + 1u;
+        while (end < size && data[end] != '"') end += data[end] == '\\' ? 2u : 1u;
+        if (end >= size) { /* an unterminated string: keep the rest as it is */
+            out_put(&out, data + i, size - i);
+            break;
+        }
+        size_t value_length = 0;
+        bool match = json_unescape(data + i + 1u, end - i - 1u, value, sizeof(value), &value_length) &&
+                     value_length >= from_length &&
+                     memcmp(value, plan->remap_from, from_length) == 0 &&
+                     (value_length == from_length || value[from_length] == '/' ||
+                      value[from_length] == sep);
+        size_t renamed_length = match ? to_length + (value_length - from_length) : 0u;
+        if (match && renamed_length >= NK_MAX_PATH) {
+            too_long = true;
+            match = false;
+        }
+        if (!match) {
+            out_put(&out, data + i, end + 1u - i);
+        } else {
+            memcpy(renamed, plan->remap_to, to_length);
+            memcpy(renamed + to_length, value + from_length, value_length - from_length);
+            out_put(&out, "\"", 1u);
+            out_put_escaped(&out, renamed, renamed_length);
+            out_put(&out, "\"", 1u);
+            hits++;
+        }
+        i = end + 1u;
+    }
+    if (out.failed || too_long) {
+        free(data);
+        free(out.data);
+        snprintf(why, why_size,
+                 too_long ? "a path in the library file %s would be too long in the new folder"
+                          : "out of memory while rewriting the library file %s",
+                 plan->library_file);
+        return false;
     }
     if (hits == 0u) {
         free(data);
+        free(out.data);
         return true;
-    }
-    size_t out_cap = size + hits * (replacement_len > needle_len ? replacement_len - needle_len : 0u) + 1u;
-    char *out = (char *)malloc(out_cap);
-    if (!out) {
-        free(data);
-        snprintf(why, why_size, "out of memory while rewriting the library");
-        return false;
-    }
-    size_t o = 0;
-    for (size_t i = 0; i < size; i++) {
-        if (i + needle_len <= size && memcmp(data + i, needle, needle_len) == 0 &&
-            (i + needle_len == size || data[i + needle_len] == '"' || data[i + needle_len] == '/')) {
-            memcpy(out + o, replacement, replacement_len);
-            o += replacement_len;
-            i += needle_len - 1u;
-        } else {
-            out[o++] = data[i];
-        }
     }
     char backup[NK_MAX_PATH], temp[NK_MAX_PATH];
     bool ok = snprintf(backup, sizeof(backup), "%s.pre-migration", plan->library_file) <
@@ -194,7 +302,7 @@ static bool rewrite_library(const NkDataMigrationPlan *plan, bool *rewritten, ch
               snprintf(temp, sizeof(temp), "%s.migrating", plan->library_file) < (int)sizeof(temp);
     /* The original is kept once: a backup already there is the older, truer original. */
     if (ok && nk_platform_path_missing(backup)) ok = write_whole(backup, data, size);
-    ok = ok && write_whole(temp, out, o) && nk_rename_utf8(temp, plan->library_file) == 0;
+    ok = ok && write_whole(temp, out.data, out.length) && nk_rename_utf8(temp, plan->library_file) == 0;
     if (!ok) {
         (void)nk_remove_utf8(temp);
         snprintf(why, why_size, "the library file %s could not be rewritten", plan->library_file);
@@ -202,7 +310,7 @@ static bool rewrite_library(const NkDataMigrationPlan *plan, bool *rewritten, ch
         *rewritten = true;
     }
     free(data);
-    free(out);
+    free(out.data);
     return ok;
 }
 
@@ -257,7 +365,7 @@ void nk_data_migrate_run(const NkDataMigrationPlan *plan, NkDataMigration *resul
         /* A run stopped after its last move and before the library rewrite leaves stored paths
            into an old data folder that no longer exists; finish the rewrite. Nothing moved in
            this run, so a library that cannot be read or written is left to the library loader. */
-        char unused[NK_MAX_PATH + 96];
+        char unused[NK_MAX_PATH + 192];
         if (plan->remap_from[0] && nk_platform_path_missing(plan->remap_from) &&
             rewrite_library(plan, &result->library_rewritten, unused, sizeof(unused)) &&
             result->library_rewritten) {
@@ -306,7 +414,7 @@ void nk_data_migrate_run(const NkDataMigrationPlan *plan, NkDataMigration *resul
         done[done_count++] = i;
     }
 
-    char why[NK_MAX_PATH + 96] = "";
+    char why[NK_MAX_PATH + 192] = "";
     bool library_ok = true;
     if (!failed_move) {
         library_ok = rewrite_library(plan, &result->library_rewritten, why, sizeof(why));

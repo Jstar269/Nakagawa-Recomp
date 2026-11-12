@@ -351,6 +351,95 @@ static void test_resume_library_rewrite(void) {
           "a run after that finds nothing to do");
 }
 
+/* `s` as JSON string content: escaped as the library writes it, and with every '/' written as the
+   equally valid "\/" when `slash_escapes` (another writer's form, which must still match). */
+static void json_escape(char *out, size_t cap, const char *s, bool slash_escapes) {
+    size_t o = 0;
+    for (; *s && o + 7u < cap; s++) {
+        if (*s == '"' || *s == '\\' || (slash_escapes && *s == '/')) out[o++] = '\\';
+        out[o++] = *s;
+    }
+    out[o] = '\0';
+}
+
+/* An old data folder whose path has a quote and a backslash: library.json stores it escaped
+   (\" and \\), so the rewrite has to decode each string before comparing it and escape the new
+   value. The old folder is already gone (a finished move), so only the library is rewritten; no
+   folder with such a name has to exist, which keeps the case runnable on Windows too. */
+static void test_library_paths_that_need_escaping(void) {
+    char root[NATIVE_TEST_PATH_MAX], old_data[NATIVE_TEST_PATH_MAX], new_data[NATIVE_TEST_PATH_MAX];
+    new_case(root, sizeof(root));
+#if defined(_WIN32) || defined(_WIN64)
+    /* A quote is not a valid Windows name character, and asking for one is not "missing". */
+    snprintf(old_data, sizeof(old_data), "%s/share\\x/nakagawa-recomp", root);
+#else
+    snprintf(old_data, sizeof(old_data), "%s/sh\"are\\x/nakagawa-recomp", root);
+#endif
+    snprintf(new_data, sizeof(new_data), "%s/Nakagawa/data", root);
+    char old_plain[NATIVE_TEST_PATH_MAX * 2], old_slashes[NATIVE_TEST_PATH_MAX * 3];
+    json_escape(old_plain, sizeof(old_plain), old_data, false);
+    json_escape(old_slashes, sizeof(old_slashes), old_data, true);
+    char text[NATIVE_TEST_PATH_MAX * 8];
+    snprintf(text, sizeof(text),
+             "{\n  \"schema_version\": 1,\n  \"games\": [\n"
+             "    {\"iso_path\": \"%s/discs/A.iso\"},\n"
+             "    {\"iso_path\": \"%s\\/discs\\/B.iso\"},\n"
+             "    {\"iso_path\": \"%s-x/C.iso\"}\n  ]\n}\n",
+             old_plain, old_slashes, old_plain);
+    put_file(new_data, "library.json", text);
+
+    NkDataMigrationPlan plan;
+    memset(&plan, 0, sizeof(plan));
+    snprintf(plan.new_root, sizeof(plan.new_root), "%s/Nakagawa", root);
+    snprintf(plan.remap_from, sizeof(plan.remap_from), "%s", old_data);
+    snprintf(plan.remap_to, sizeof(plan.remap_to), "%s", new_data);
+    snprintf(plan.library_file, sizeof(plan.library_file), "%s/library.json", new_data);
+    NkDataMigration r;
+    nk_data_migrate_run(&plan, &r);
+    CHECK(r.status == NK_MIGRATE_DONE && r.library_rewritten,
+          "stored paths under a folder whose name needs JSON escaping are rewritten");
+    char new_plain[NATIVE_TEST_PATH_MAX * 2], want[NATIVE_TEST_PATH_MAX * 3];
+    json_escape(new_plain, sizeof(new_plain), new_data, false);
+    char *library = slurp(plan.library_file);
+    snprintf(want, sizeof(want), "\"%s/discs/A.iso\"", new_plain);
+    CHECK(library && strstr(library, want) != NULL, "an escaped path now points at the new folder");
+    snprintf(want, sizeof(want), "\"%s/discs/B.iso\"", new_plain);
+    CHECK(library && strstr(library, want) != NULL,
+          "so does one another writer escaped differently (\\/), written back as the library writes it");
+    snprintf(want, sizeof(want), "\"%s-x/C.iso\"", old_plain);
+    CHECK(library && strstr(library, want) != NULL, "a folder that only starts like the old one is untouched");
+    CHECK(library && strstr(library, "\"schema_version\": 1") != NULL, "the other bytes are kept");
+    free(library);
+}
+
+/* A library a newer Nakagawa wrote is not rewritten: the run fails, names the file and puts every
+   folder back, as the library writer refuses to replace such a file. */
+static void test_newer_library_is_refused(void) {
+    Fixture fx;
+    build_fixture(&fx, true);
+    char text[NATIVE_TEST_PATH_MAX * 4];
+    snprintf(text, sizeof(text),
+             "{\"schema_version\": 99, \"games\": [{\"iso_path\": \"%s/discs/UCUS98744/UCUS98744.iso\"}]}",
+             fx.old_data);
+    put_file(fx.old_data, "library.json", text);
+    NkDataMigrationPlan plan;
+    build_plan(&fx, &plan);
+    NkDataMigration r;
+    nk_data_migrate_run(&plan, &r);
+    CHECK(r.status == NK_MIGRATE_FAILED && strstr(r.message, NK_MIGRATE_CODE_FAILED) == r.message,
+          "a library from a newer version fails the migration");
+    CHECK(strstr(r.message, "newer version") != NULL && strstr(r.message, plan.library_file) != NULL,
+          "naming the file and why");
+    CHECK(strstr(r.message, "put back") != NULL, "and putting everything back");
+    char path[NATIVE_TEST_PATH_MAX];
+    join(path, sizeof(path), fx.old_data, "library.json");
+    CHECK(file_is(path, text), "the library is unchanged, in its old place");
+    join(path, sizeof(path), fx.old_data, "saves/UCUS98744/SAVE.bin");
+    CHECK(file_is(path, "save bytes"), "the saves are back too");
+    join(path, sizeof(path), fx.new_root, "data");
+    CHECK(!exists(path), "nothing is left in the new data folder");
+}
+
 static void test_failed_move_is_undone(void) {
     for (int fail_at = 1; fail_at <= 4; fail_at++) {
         Fixture fx;
@@ -534,8 +623,8 @@ static void test_windows_has_nothing_to_move(void) {
 int main(void) {
     native_test_create_root("data_migrate");
     snprintf(g_base, sizeof(g_base), "%s", native_test_get_root());
-    /* Forward slashes everywhere: library.json stores paths as JSON strings, and the engine leaves
-       a path with a backslash alone (it would need escaping), which only Windows temp folders have. */
+    /* Forward slashes everywhere, so the fixtures' expected library text can be built with plain
+       "%s/..." joins; test_library_paths_that_need_escaping covers stored paths that need escaping. */
     for (char *c = g_base; *c; c++) {
         if (*c == '\\') *c = '/';
     }
@@ -547,6 +636,8 @@ int main(void) {
     test_old_without_saves();
     test_resume_after_the_data_move();
     test_resume_library_rewrite();
+    test_library_paths_that_need_escaping();
+    test_newer_library_is_refused();
     test_failed_move_is_undone();
     test_failed_undo_is_reported();
     test_root_that_cannot_be_made();

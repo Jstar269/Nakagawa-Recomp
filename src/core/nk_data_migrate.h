@@ -22,7 +22,10 @@
  *     not yet moved still are, Linux's data/saves still moves up when the data folder had already
  *     moved, and library.json paths into an old data folder that is gone are still rewritten.
  *   - The stored absolute paths in library.json that pointed into the old data folder are rewritten to
- *     the new one (the original is kept as library.json.pre-migration).
+ *     the new one (the original is kept as library.json.pre-migration). Each JSON string is decoded
+ *     before it is compared and the new value is escaped as the library writes it, so a folder name
+ *     with a quote or a backslash is handled. A library a newer Nakagawa wrote (a higher
+ *     schema_version) is not rewritten: the run fails, names the file and undoes its moves.
  *
  * The plan comes from the host (nk_platform_user_data_plan): Windows has nothing to move. */
 
