@@ -7192,7 +7192,8 @@ static void test_homebrew_package_becomes_a_private_disc(void) {
         assert(strcmp(second.disc_id, package.disc_id) == 0 && second.iso_path[0] != '\0');
         /* At conversion too: the second folder picked after the first was inspected. */
         second = again;
-        snprintf(second.pbp_path, sizeof(second.pbp_path), "%s", second_path);
+        int second_written = snprintf(second.pbp_path, sizeof(second.pbp_path), "%s", second_path);
+        assert(second_written > 0 && (size_t)second_written < sizeof(second.pbp_path));
         assert(!player_psn_package_convert(&second, &hooks, code, sizeof(code), message,
                                            sizeof(message)));
         assert(strcmp(code, "HOMEBREW_ALREADY_ADDED") == 0);
