@@ -199,17 +199,34 @@ PGD-protected data aren't supported.
 PSP homebrew (programs the community wrote, with no game from a shop in them) is added the same way: pick its
 `EBOOT.PBP`. A homebrew program is not encrypted, so it needs no keys. The player writes a small disc image
 from the package once, on this PC, in `<user data>/discs/<key>/<key>.iso`, holding the program and its icon, and
-adds that image as if you had picked it. The key is made from the program and its title, so the same homebrew is
-the same game wherever you add it from, and the library shows it as **Beta / unofficial**. Homebrew is
+adds that image as if you had picked it. The folder the `EBOOT.PBP` is in comes with it, copied beside the image
+(`<key>.ms0`): the program runs from `ms0:/PSP/GAME/<folder>/` on its own Memory Stick, as on a PSP, so it finds
+the files it keeps beside itself. Each start copies the files the Memory Stick lacks from that copy, so what
+the program writes there stays. When a release changes only the files beside the program, copy it over the
+folder and pick its `EBOOT.PBP` again: the next start replaces each file the program left as it was, and
+keeps each one it changed or wrote. A release whose program changed is another title, with its own key and
+its own Memory Stick. A program added before its folder came along stops with a message asking you to pick it again.
+Keep each program in its own folder, as `PSP/GAME/<folder>/` on a PSP's Memory Stick has it, and named
+`EBOOT.PBP` in capitals, the one name a PSP starts a program from; a package with another name is refused with
+a message saying so. The key is made from the program and its title, so the same homebrew is
+the same game wherever you add it from, and the library shows it as **Beta / unofficial**. It is added from
+one folder: the same `EBOOT.PBP` picked in a second folder stops with a message naming the first folder,
+when it is known, and what clears the stop, which is removing the title with **Also delete the decrypted files and disc copy**
+ticked or, once the title has left the library, **Delete kept copy** on the message. Either way the files the
+program wrote on its Memory Stick stay; files an earlier start put there then count as the program's own and
+are kept, also when a later release changes them. Two different
+programs can, very rarely, get the same key: the second is then refused by name, and nothing of the first
+is replaced. Homebrew is
 **Experimental**: nobody has checked a program unless [`COMPATIBILITY.md`](COMPATIBILITY.md#homebrew-limits)
-says so. Your `EBOOT.PBP` is only read, never changed.
+says so. Your `EBOOT.PBP` and its folder are only read, never changed.
 
 Some homebrew can't run, and the player says which kind when you pick it: an encrypted program, kernel-mode
 homebrew and custom-firmware plugins (they need the PSP's own kernel), and anything that is not a PSP program.
 A program that writes its own machine code while it runs, such as an emulator with a JIT, starts and then stops
-at the first jump into that code. Only the `EBOOT.PBP` is imported: files that sit beside it in the program's
-folder (data, plugins, configuration) are not available to the program, so a program that needs them stops when
-it looks for one. [Homebrew limits](COMPATIBILITY.md#homebrew-limits) lists each kind.
+at the first jump into that code. A folder too large to copy (over 1 GiB, 4,096 files and folders, or 16 levels
+of folders), one that holds a link or a file kept in the cloud, one with a name a PSP's Memory Stick can't hold,
+and one that is or holds one of your personal folders (your home folder, Desktop, Documents, Downloads and the
+like) is refused when you pick the program. [Homebrew limits](COMPATIBILITY.md#homebrew-limits) lists each kind.
 
 ### Supplying title manifests
 
