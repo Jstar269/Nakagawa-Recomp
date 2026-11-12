@@ -57,9 +57,14 @@ def plan_signature(plan: P.FunctionPlan) -> dict:
         if t.kind in ("jump-self", "jump-label", "branch-label") and t.backward:
             yields.append(t.addr)
     tails += [(e.target, e.symbol) for e in plan.exits]
+    ops = [step for step in plan.steps if isinstance(step, P.Op)]
+    ops += [step.slot for step in plan.steps if isinstance(step, P.Transfer) and step.slot]
     return {"labels": sorted(labels), "continuations": sorted(e.target for e in plan.exits),
             "calls": sorted(calls), "dispatches": Counter(dispatches), "tails": Counter(tails),
-            "returns": returns, "yields": sorted(yields)}
+            "returns": returns, "yields": sorted(yields),
+            "sv_checks": sorted((addr, reg, value) for addr, checks in plan.sv_checks.items()
+                                for reg, value in checks),
+            "cache_notes": sorted(op.addr for op in ops if op.kind == "cache_note")}
 
 
 def _addr(text: str) -> int:
@@ -89,11 +94,16 @@ def c_signature(text: str) -> dict:
                   re.findall(r"dispatch_call_checked\(s, (0x[0-9a-f]{8}u|_t), (0x[0-9a-f]{8}u)\)\) return;",
                              text)]
     yields = [_addr(pc) for pc in re.findall(r"SR_YIELD\(s, (0x[0-9a-f]{8}u)\); goto", text)]
+    sv_checks = [(_addr(pc), int(reg), _addr(value)) for pc, reg, value in re.findall(
+        r"sr_sv_check\(s, (0x[0-9a-f]{8}u), (\d+), (0x[0-9a-f]{8}u)\);", text)]
+    cache_notes = [_addr(pc) for pc in re.findall(
+        r"sr_begin\(s, (0x[0-9a-f]{8}u), 0x[0-9a-f]{8}u\); sr_stale_note_cache_op\(", text)]
     return {"labels": sorted(int(a, 16) for a in re.findall(r"^  L_([0-9a-f]{8}): ;$", text, re.M)),
             "continuations": sorted(int(a, 16) for a in re.findall(r"^  _sr_cont_([0-9a-f]{8}): ;$",
                                                                    text, re.M)),
             "calls": sorted(calls), "dispatches": Counter(dispatches), "tails": Counter(tails),
-            "returns": text.count("SR_AOT_RETURN_CAPTURE(s,"), "yields": sorted(yields)}
+            "returns": text.count("SR_AOT_RETURN_CAPTURE(s,"), "yields": sorted(yields),
+            "sv_checks": sorted(sv_checks), "cache_notes": sorted(cache_notes)}
 
 
 class DriftGuardTests(unittest.TestCase):
@@ -143,6 +153,14 @@ class DriftGuardTests(unittest.TestCase):
 
     def test_plans_match_emit_function_under_the_stack_census(self):
         self._check(self._run("--funcs-per-chunk=1", "--stack-census"))
+
+    def test_plans_match_emit_function_under_static_verify_and_stale_detect(self):
+        # #330: --static-verify and --stale-detect bodies are lowered, with each assertion
+        # after the same word as in C. Every static-verify point of the corpus is in a
+        # lowered body, so the plans carry them all.
+        captured = self._run("--funcs-per-chunk=1", "--static-verify", "--stale-detect")
+        self._check(captured)
+        self.assertGreater(sum(len(plan.sv_checks) for _, _, plan in captured), 0)
 
     def test_plans_match_emit_function_with_every_body_split(self):
         # #1691: a split body's conditional edge into another entry is a TAIL transfer

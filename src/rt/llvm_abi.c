@@ -9,6 +9,8 @@
 
 #include "llvm_abi.h"
 
+#include <stdio.h>
+
 #define SR_LLVM_ABI __attribute__((always_inline)) inline
 
 SR_LLVM_ABI void sr_llvm_begin(CpuState *s, uint32_t pc, uint32_t op) {
@@ -56,4 +58,19 @@ SR_LLVM_ABI void sr_llvm_tail_record(CpuState *s, uint32_t target, RecompFn fn,
 
 SR_LLVM_ABI void sr_llvm_tail_drain(CpuState *s) {
     SR_TAIL_DRAIN(s);
+}
+
+/* Not always_inline: an inline definition may not hold the static report count. Linked
+   with --internalize, each chunk gets its own copy and count, as each C chunk does.
+   tools/test_codegen_llvm.py holds this body to codegen.SR_SV_CHECK's. */
+void sr_llvm_sv_check(CpuState *s, uint32_t pc, int reg, uint32_t expect) {
+    if (s->r[reg] != expect) {
+        static int s_sv_reports = 0;
+        if (s_sv_reports < 50) {
+            s_sv_reports++;
+            fprintf(stderr, "SV_MISMATCH pc=0x%08x r%d=0x%08x expected=0x%08x\n",
+                    pc, reg, s->r[reg], expect);
+            fflush(stderr);
+        }
+    }
 }
