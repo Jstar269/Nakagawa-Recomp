@@ -1135,6 +1135,12 @@ static void test_no_iso_child_environment(const char *test_executable,
         session.memstick_root[0] = '\0';
         assert(nk_launch_start(&session) != NK_OK);
         assert(strstr(session.last_error, "no Memory Stick folder") != NULL);
+        /* Nor with a relative one, which would land wherever the player was started
+           (nk_platform_path_is_absolute). */
+        copy_field(session.memstick_root, sizeof(session.memstick_root), "hb-relative-stick");
+        assert(nk_launch_start(&session) != NK_OK);
+        assert(strstr(session.last_error, "no Memory Stick folder") != NULL);
+        assert(nk_platform_path_missing("hb-relative-stick"));
         copy_field(session.memstick_root, sizeof(session.memstick_root), hb_stick);
 
         /* An image with the import's volume identifier outside the data folder's discs/ is

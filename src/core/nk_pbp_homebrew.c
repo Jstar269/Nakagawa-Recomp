@@ -613,11 +613,7 @@ static void hb_problem(char *problem, size_t problem_size, const char *fmt, cons
 
 static bool hb_is_separator(char c)
 {
-#ifdef _WIN32
-    return c == '\\' || c == '/';
-#else
-    return c == '/';
-#endif
+    return nk_platform_is_path_separator(c);
 }
 
 static bool hb_join(char *out, size_t out_size, const char *left, const char *right)
@@ -649,32 +645,14 @@ static bool hb_name_valid(const char *name, size_t length)
     return true;
 }
 
-static bool hb_is_absolute(const char *path)
-{
-#ifdef _WIN32
-    return (((path[0] >= 'A' && path[0] <= 'Z') || (path[0] >= 'a' && path[0] <= 'z')) &&
-            path[1] == ':' && hb_is_separator(path[2])) ||
-           (hb_is_separator(path[0]) && hb_is_separator(path[1]));
-#else
-    return path[0] == '/';
-#endif
-}
-
-/* Whether path is folder or lies inside it. */
+/* Whether path is folder or lies inside it, its names compared as the host compares them. */
 static bool hb_path_within(const char *path, const char *folder)
 {
     size_t length = strlen(folder);
     while (length > 0u && hb_is_separator(folder[length - 1u])) --length; /* "C:\" or "/" */
     for (size_t i = 0; i < length; ++i) {
-        char a = path[i], b = folder[i];
-        if (a == '\0') return false;
-#ifdef _WIN32
-        if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
-        if (b >= 'A' && b <= 'Z') b = (char)(b - 'A' + 'a');
-        if (a == '/') a = '\\';
-        if (b == '/') b = '\\';
-#endif
-        if (a != b) return false;
+        if (path[i] == '\0') return false;
+        if (!nk_platform_path_chars_equal(path[i], folder[i])) return false;
     }
     return path[length] == '\0' || hb_is_separator(path[length]);
 }
@@ -1939,7 +1917,8 @@ bool nk_pbp_homebrew_seed_memstick(const char *iso_path, const char *folder,
     bool ok = true;
     bool record_ok = false;
     bool view_damaged = false;
-    if (memstick_root == NULL || memstick_root[0] == '\0' || !hb_is_absolute(memstick_root)) {
+    if (memstick_root == NULL || memstick_root[0] == '\0' ||
+        !nk_platform_path_is_absolute(memstick_root)) {
         hb_problem(problem, problem_size, "%s",
                    "The title has no Memory Stick folder to put the program's folder on.");
         return false;

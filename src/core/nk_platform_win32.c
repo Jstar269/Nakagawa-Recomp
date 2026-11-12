@@ -1556,6 +1556,13 @@ bool nk_platform_is_path_separator(char c) {
     return c == '\\' || c == '/';
 }
 
+bool nk_platform_path_is_absolute(const char *path) {
+    if (path == NULL || path[0] == '\0') return false;
+    return (((path[0] >= 'A' && path[0] <= 'Z') || (path[0] >= 'a' && path[0] <= 'z')) &&
+            path[1] == ':' && nk_platform_is_path_separator(path[2])) ||
+           (nk_platform_is_path_separator(path[0]) && nk_platform_is_path_separator(path[1]));
+}
+
 bool nk_platform_path_chars_equal(char a, char b) {
     if (a == '/') a = '\\';
     if (b == '/') b = '\\';

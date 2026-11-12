@@ -1566,6 +1566,10 @@ bool nk_platform_is_path_separator(char c) {
     return c == '/';
 }
 
+bool nk_platform_path_is_absolute(const char *path) {
+    return path != NULL && path[0] == '/';
+}
+
 bool nk_platform_path_chars_equal(char a, char b) {
     return a == b;
 }

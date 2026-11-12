@@ -434,6 +434,10 @@ NkHostKind nk_platform_host_kind(void);
 bool nk_platform_path_chars_equal(char a, char b);
 /* '\\' or '/' on Win32; '/' on POSIX. */
 bool nk_platform_is_path_separator(char c);
+/* Whether `path` is absolute as written. Win32: a drive letter, ':' and a separator, or two
+   separators (a UNC or \\?\ path); POSIX: a leading '/'. The text alone: nothing is resolved
+   or looked up. False for NULL. */
+bool nk_platform_path_is_absolute(const char *path);
 
 /* The raw environment values naming the user: the profile folder (USERPROFILE on Win32,
    HOME on POSIX) and the account name (USERNAME on Win32, USER on POSIX). NULL when unset.
