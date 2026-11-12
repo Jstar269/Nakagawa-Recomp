@@ -31,7 +31,7 @@ unit tests instead:
 * ``HST_MANUAL_CALLABLES`` / ``HST_RESUME_OWNERS`` change entry *roles*
   (:func:`codegen.build_entry_catalog`);
 * ``_SV_SPECIAL`` suppresses ``--static-verify`` emission
-  (:func:`codegen.sv_plan`) -- the differential covers it too, because the
+  (:func:`codegen.sv_points`) -- the differential covers it too, because the
   differential runs with ``--static-verify`` enabled;
 * the address literals and named address tables themselves, which
   :class:`GateInventoryTests` re-derives from ``tools/codegen.py``'s AST.  That
@@ -572,7 +572,7 @@ ADDR_OPERANDS = frozenset({"addr", "a", "start"})
 
 #: Functions whose bodies decide what translated C is emitted.
 EMITTERS = frozenset({
-    "effect", "normal_line", "emit_function", "main", "sv_plan",
+    "effect", "normal_line", "emit_function", "main", "sv_plan", "sv_points",
     # The steps emit_function and main were split into (#1531).
     "_translate", "_dup_slot_skips", "_emit_hst_patch_site", "_emit_non_control_word", "_emit_eret",
     "_emit_slot_exit", "_emit_unrelocated_jal", "_emit_jal", "_emit_jalr", "_emit_jr",

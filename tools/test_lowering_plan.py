@@ -158,8 +158,8 @@ class DriftGuardTests(unittest.TestCase):
 
     def test_plans_match_emit_function_under_static_verify_and_stale_detect(self):
         # #330: --static-verify and --stale-detect bodies are lowered, with each assertion
-        # after the same word as in C. Every static-verify point of the corpus is in a
-        # lowered body, so the plans carry them all.
+        # after the same word as in C. The plans carry every static-verify point of the
+        # lowered bodies; a function kept in C keeps its points in its C body.
         captured = self._run("--funcs-per-chunk=1", "--static-verify", "--stale-detect")
         self._check(captured)
         placed = 0
