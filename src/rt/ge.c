@@ -56,6 +56,7 @@
 #include "ge_capture.h"
 #include "flight_recorder.h"
 #include "strbuf.h"
+#include "ace.h"            /* the host twin's switch (#2050): Ace Mode and its launch line */
 
 #include <stdint.h>
 #include <inttypes.h>
@@ -2853,12 +2854,261 @@ static int apply_stencil_op(int op, int old) {
     }
 }
 
+/* ---- the host twin of the software renderer (Enhanced 32-bit colour, #2050) ---------------
+ * ENHANCEMENT_CONTRACT.md 10.11. The switch is the Vulkan twin's: Ace Mode only, then
+ * SR_GPU_TWIN_COLOR when it is set (1 full colour, native, 0 or off), else the launch line's
+ * twin=on. It is decided on the first colour write the software renderer makes. With it on, each
+ * colour write into a framebuffer in VRAM is computed a second time from the same source colour,
+ * without dither or the 16-bit colour snap, and kept in a host slot keyed by VRAM address: one
+ * slot per 2-byte unit, an 8888 pixel in the slot of its first unit. A slot also holds its
+ * witness, the exact value the authentic write left in VRAM, and is valid only while VRAM still
+ * holds that value in the same format. So every write the twin does not take (CPU stores, DMA,
+ * uploads, the fast clear path) is caught pixel by pixel: that pixel blends against, and shows,
+ * its authentic value. Block transfers within VRAM copy the slots with the bytes. The presenter
+ * shows the slots (ge_twin_present_row). Nothing reads a slot back: guest VRAM, depth, stencil,
+ * the tests and timing are those of the twin-off run. Texture fetches read VRAM, so a target
+ * drawn from a render target takes that texture's 16-bit texels into its twin. The native twin
+ * keeps the authentic colour, as the CPU presenter shows it. The twin is inert while a GPU
+ * backend is registered (it has its own) and in wing passes. Off, nothing is allocated, and each
+ * write site costs one predictable branch. */
+#define GE_TWIN_VRAM  0x04000000u
+#define GE_TWIN_UNITS (0x00200000u / 2u)
+typedef struct { uint32_t rgba, wit; } GeTwinSlot;   /* the twin's RGBA8, the VRAM value it twins */
+static GeTwinSlot *s_twin_slot = NULL;     /* GE_TWIN_UNITS slots */
+static uint8_t *s_twin_fmt = NULL;         /* per slot: 0 empty, else the pixel format + 1 */
+static int s_twin_mode = -1;               /* -1 undecided, 0 off, 1 full colour, 2 native */
+static int s_twin_show_authentic = 0;      /* SR_GPU_TWIN_CAPTURE=authentic: show VRAM, not the twin */
+static unsigned long long s_twin_px = 0, s_twin_units_copied = 0;
+
+/* The slot of the pixel at guest `addr` spanning `bytes`, when it lies in the VRAM window. */
+static int ge_twin_index(uint32_t addr, uint32_t bytes, uint32_t *idx) {
+    const uint32_t phys = SR_PHYS(addr);
+    if ((phys & 1u) || phys < GE_TWIN_VRAM || bytes > 0x00200000u || phys - GE_TWIN_VRAM > 0x00200000u - bytes)
+        return 0;
+    *idx = (phys - GE_TWIN_VRAM) >> 1;
+    return 1;
+}
+
+static uint32_t ge_twin_rgb_bits(int fmt) {
+    static const uint32_t k[4] = { 0xFFFFu, 0x7FFFu, 0x0FFFu, 0x00FFFFFFu };
+    return k[fmt & 3];
+}
+
+/* A raw pixel as the CPU presenter shows it (gui.c convert_fb_pixels: each channel shifted up,
+ * not replicated), with the alpha unpack_color gives. */
+static uint32_t ge_twin_shown_raw(uint32_t raw, int fmt) {
+    int r, g, b, a;
+    unpack_color(raw, fmt, &r, &g, &b, &a);
+    switch (fmt & 3) {
+        case 0: r = (int)(raw & 0x1F) << 3; g = (int)((raw >> 5) & 0x3F) << 2; b = (int)((raw >> 11) & 0x1F) << 3; break;
+        case 1: r = (int)(raw & 0x1F) << 3; g = (int)((raw >> 5) & 0x1F) << 3; b = (int)((raw >> 10) & 0x1F) << 3; break;
+        case 2: r = (int)(raw & 0xF) << 4; g = (int)((raw >> 4) & 0xF) << 4; b = (int)((raw >> 8) & 0xF) << 4; break;
+        default: break;
+    }
+    return pack8888(r, g, b, a);
+}
+
+static void ge_twin_free(void) {
+    free(s_twin_slot); free(s_twin_fmt);
+    s_twin_slot = NULL; s_twin_fmt = NULL;
+}
+
+static void ge_twin_exit(void) {
+    if (s_twin_slot)
+        fprintf(stderr, "TWIN: exit (software renderer, pixels=%llu, units_copied=%llu)\n",
+                s_twin_px, s_twin_units_copied);
+    ge_twin_free();
+}
+
+/* The slots, every one empty. 0 when the host has no memory for them. */
+static int ge_twin_alloc(void) {
+    static int s_exit_registered = 0;
+    if (!s_twin_slot) s_twin_slot = (GeTwinSlot *)calloc(GE_TWIN_UNITS, sizeof(GeTwinSlot));
+    if (!s_twin_fmt) s_twin_fmt = (uint8_t *)calloc(GE_TWIN_UNITS, 1u);
+    if (!s_twin_slot || !s_twin_fmt) { ge_twin_free(); return 0; }
+    memset(s_twin_fmt, 0, GE_TWIN_UNITS);
+    if (!s_exit_registered) s_exit_registered = atexit(ge_twin_exit) == 0;
+    return 1;
+}
+
+/* The switch, read once (see above); the messages are the Vulkan twin's. */
+static int ge_twin_decide(void) {
+    s_twin_mode = 0;
+#ifndef SR_GE_VRAM_DECODER_CLI
+    const char *v = getenv("SR_GPU_TWIN_COLOR");
+    /* The launch line asks for the twin (SR_ACE's twin=on); SR_GPU_TWIN_COLOR, when set, wins. */
+    int key = g_ace_on && ace_effective()->twin;
+#ifdef SR_TWIN_SELFTEST_SOFT_KEY_REQUEST   /* the selftest's failing-before: the line's twin=on is not read */
+    key = 0;
+#endif
+    int mode = 0;
+    if (!v || !v[0]) {
+        mode = key;
+    } else if (strcmp(v, "1") == 0) {
+        mode = 1;
+    } else if (strcmp(v, "native") == 0) {
+        mode = 2;
+    } else if (strcmp(v, "0") != 0 && strcmp(v, "off") != 0) {
+        fprintf(stderr, "TWIN: refused (SR_GPU_TWIN_COLOR=%s: the values are 1, native, off and 0)\n", v);
+        if (key) ace_feature_unavailable(ACE_FEATURE_TWIN, "SR_GPU_TWIN_COLOR overrides it");
+        return 0;
+    }
+    if (mode && !g_ace_on) {
+        fprintf(stderr, "TWIN: off (the host twin needs Ace Mode)\n");
+        return 0;
+    }
+    if (!mode) {
+        if (key) ace_feature_unavailable(ACE_FEATURE_TWIN, "SR_GPU_TWIN_COLOR overrides it");
+        return 0;
+    }
+    const char *cap = getenv("SR_GPU_TWIN_CAPTURE");
+    s_twin_show_authentic = cap && strcmp(cap, "authentic") == 0;
+    if (!ge_twin_alloc()) {
+        fprintf(stderr, "TWIN: unavailable (the software renderer could not allocate its twin): native colour\n");
+        if (key) ace_feature_unavailable(ACE_FEATURE_TWIN, "the software renderer could not allocate it");
+        return 0;
+    }
+    /* The selftest's failing-befores: a running twin is never confirmed (KEY_CONFIRM, the line asked
+     * for it), or a twin the line did not ask for is not reported (TWIN_REPORT, SR_GPU_TWIN_COLOR). */
+#if !defined(SR_TWIN_SELFTEST_SOFT_KEY_CONFIRM) && !defined(SR_TWIN_SELFTEST_SOFT_TWIN_REPORT)
+    ace_set_twin_running();
+#endif
+    fprintf(stderr, "TWIN: on (software renderer, colour=%s)\n", mode == 1 ? "full" : "native");
+    s_twin_mode = mode;
+#endif
+    return s_twin_mode;
+}
+
+int ge_twin_set_mode(int mode) {
+    if (mode <= 0 || mode > 2) {
+        ge_twin_free();
+        s_twin_mode = mode < 0 ? -1 : 0;
+        return s_twin_mode;
+    }
+    if (!ge_twin_alloc()) { s_twin_mode = 0; return 0; }
+    s_twin_mode = mode;
+    return mode;
+}
+
+int ge_twin_mode(void) { return s_twin_mode; }
+
+/* The twin of one colour write (compose_px_rgba): the source colour (r, g, b, src_a), the VRAM
+ * value before the write, the value written (fin) and the write mask. The twin's alpha is the
+ * alpha fin holds: a 16-bit target's alpha bits are its stencil, and the Vulkan twin snaps them
+ * to the target's format too, so destination-alpha blends read what the guest's stencil holds. */
+static __attribute__((noinline)) void ge_twin_compose(int x, int y, int r, int g, int b, int src_a,
+                                                     uint32_t oldraw, uint32_t fin, uint32_t mask) {
+    if (s_twin_mode < 0 && !ge_twin_decide()) return;
+    const int fmt = (int)(ge.fbfmt & 3);
+    const uint32_t bpp = fmt == 3 ? 4u : 2u, stride = ge.fbw ? ge.fbw : 512;
+    uint32_t idx;
+    if (!ge_twin_index(ge_fb_addr() + (uint32_t)(y * (int)stride + x) * bpp, bpp, &idx)) return;
+    s_twin_px++;
+    if (fmt == 3) s_twin_fmt[idx + 1] = 0;   /* an 8888 pixel's second unit holds no slot */
+    /* A masked colour write keeps some old bits: the pixel shows its authentic value. */
+    if (mask & ge_twin_rgb_bits(fmt)) { s_twin_fmt[idx] = 0; return; }
+    uint32_t rgba;
+    if (s_twin_mode == 2) {
+        rgba = ge_twin_shown_raw(fin, fmt);
+    } else {
+        int dr, dg, db, da;
+        if (s_twin_fmt[idx] == (uint8_t)(fmt + 1) && s_twin_slot[idx].wit == oldraw) {
+            const uint32_t t = s_twin_slot[idx].rgba;
+            dr = (int)(t & 0xFF); dg = (int)((t >> 8) & 0xFF); db = (int)((t >> 16) & 0xFF); da = (int)(t >> 24);
+        } else {
+            unpack_color(oldraw, fmt, &dr, &dg, &db, &da);
+        }
+        if (fmt == 0) da = 0;
+        if (ge.clear) {
+            if (!(ge.clear_mode & 0x100)) { r = dr; g = dg; b = db; }
+        } else if (ge.blend_enable) {
+            int eq=(int)((ge.blend_mode>>8)&7);
+            int rfa=factor_component((int)(ge.blend_mode&0xF),   0,r,g,b,src_a,dr,dg,db,da,1);
+            int gfa=factor_component((int)(ge.blend_mode&0xF),   1,r,g,b,src_a,dr,dg,db,da,1);
+            int bfa=factor_component((int)(ge.blend_mode&0xF),   2,r,g,b,src_a,dr,dg,db,da,1);
+            int rfb=factor_component((int)((ge.blend_mode>>4)&0xF),0,r,g,b,src_a,dr,dg,db,da,0);
+            int gfb=factor_component((int)((ge.blend_mode>>4)&0xF),1,r,g,b,src_a,dr,dg,db,da,0);
+            int bfb=factor_component((int)((ge.blend_mode>>4)&0xF),2,r,g,b,src_a,dr,dg,db,da,0);
+            r=blend_chan(r,dr,rfa,rfb,eq); g=blend_chan(g,dg,gfa,gfb,eq); b=blend_chan(b,db,bfa,bfb,eq);
+        }
+        /* no dither, no 16-bit colour snap */
+        rgba = pack8888(clamp8(r), clamp8(g), clamp8(b), 0);
+        if (ge.logic_op_enable && !ge.clear)
+            rgba = apply_logic_op(ge.logic_op, pack8888(dr, dg, db, da), rgba);
+        int ur, ug, ub, ua;
+        unpack_color(fin, fmt, &ur, &ug, &ub, &ua);
+        rgba = (rgba & 0x00FFFFFFu) | ((uint32_t)ua << 24);
+    }
+    s_twin_slot[idx].rgba = rgba;
+    s_twin_slot[idx].wit = fin;
+    s_twin_fmt[idx] = (uint8_t)(fmt + 1);
+}
+
+/* The twin of a stencil-only write (write_stencil_px): a valid slot takes the alpha and the
+ * witness of the value written (fin); its colour bits did not change. */
+static __attribute__((noinline)) void ge_twin_stencil(int x, int y, uint32_t oldraw, uint32_t fin) {
+    const int fmt = (int)(ge.fbfmt & 3);
+    const uint32_t bpp = fmt == 3 ? 4u : 2u, stride = ge.fbw ? ge.fbw : 512;
+    uint32_t idx;
+    if (!ge_twin_index(ge_fb_addr() + (uint32_t)(y * (int)stride + x) * bpp, bpp, &idx)) return;
+    if (s_twin_fmt[idx] != (uint8_t)(fmt + 1) || s_twin_slot[idx].wit != oldraw) return;
+    int r, g, b, a;
+    unpack_color(fin, fmt, &r, &g, &b, &a);
+    s_twin_slot[idx].rgba = (s_twin_slot[idx].rgba & 0x00FFFFFFu) | ((uint32_t)a << 24);
+    s_twin_slot[idx].wit = fin;
+}
+
+/* The twin of one block-transfer row (ge_block_transfer): `bytes` copied from guest `src` to
+ * `dst`. Within VRAM the slots move with the bytes, so a copied slot keeps a witness VRAM holds.
+ * From outside VRAM the destination slots are emptied: those pixels show their new bytes. */
+static __attribute__((noinline)) void ge_twin_copy_row(uint32_t dst, uint32_t src, uint32_t bytes) {
+    uint32_t di, si;
+    if (!bytes || !ge_twin_index(dst, bytes, &di)) return;
+    const uint32_t n = bytes >> 1;
+    if (ge_twin_index(src, bytes, &si)) {
+        memmove(&s_twin_slot[di], &s_twin_slot[si], (size_t)n * sizeof(GeTwinSlot));
+        memmove(&s_twin_fmt[di], &s_twin_fmt[si], n);
+        s_twin_units_copied += n;
+    } else {
+        memset(&s_twin_fmt[di], 0, n);
+    }
+}
+
+int ge_twin_present_row(uint32_t fbaddr, int fmt, uint32_t stride, int y, uint32_t *out_rgba, int width) {
+#ifdef SR_GE_VRAM_DECODER_CLI
+    (void)fbaddr; (void)fmt; (void)stride; (void)y; (void)out_rgba; (void)width;
+    return 0;
+#else
+    if (s_twin_mode <= 0 || s_twin_show_authentic || s_gpu || !s_twin_slot || !out_rgba || fmt < 0 || fmt > 3 || y < 0 ||
+        width <= 0 || width > 0x10000)
+        return 0;
+    if (!stride) stride = 512;
+    const uint32_t bpp = fmt == 3 ? 4u : 2u;
+    const uint64_t row_off = (uint64_t)(uint32_t)y * stride * bpp;
+    uint32_t idx;
+    if (row_off > 0x00200000u || !ge_twin_index(fbaddr + (uint32_t)row_off, (uint32_t)width * bpp, &idx))
+        return 0;
+    const uint32_t base = fbaddr + (uint32_t)row_off;
+    for (int x = 0; x < width; x++, idx += bpp >> 1) {
+        /* the presenter's own loads: sr_r16, never sr_r32's GE status word at 0x04084000 */
+        const uint32_t a = base + (uint32_t)x * bpp;
+        uint32_t raw = sr_r16(a);
+        if (fmt == 3) raw |= (uint32_t)sr_r16(a + 2u) << 16;
+        out_rgba[x] = s_twin_fmt[idx] == (uint8_t)(fmt + 1) && s_twin_slot[idx].wit == raw
+                    ? s_twin_slot[idx].rgba : ge_twin_shown_raw(raw, fmt);
+    }
+    return 1;
+#endif
+}
+
 static void write_stencil_px(int x, int y, int stencil) {
     if ((ge.fbfmt&3)==0) return;
     uint32_t oldraw=read_fb_raw(x,y);
     int r,g,b,a; unpack_color(oldraw,ge.fbfmt&3,&r,&g,&b,&a);
     uint32_t newraw=pack_fb(r,g,b,stencil), mask=fb_write_mask_native();
-    write_fb_raw(x,y,(newraw&~mask)|(oldraw&mask));
+    const uint32_t fin=(newraw&~mask)|(oldraw&mask);
+    write_fb_raw(x,y,fin);
+    if (__builtin_expect(s_twin_mode > 0, 0) && !s_wing && !s_gpu) ge_twin_stencil(x,y,oldraw,fin);
 }
 
 static void compose_px_rgba(int x, int y, int r, int g, int b, int src_a, int stencil) {
@@ -2876,6 +3126,7 @@ static void compose_px_rgba(int x, int y, int r, int g, int b, int src_a, int st
                 s_ge_frame, r, g, b, src_a, ge.clear, s_in3d, ge.tex_enable,
                 ge.blend_enable, ge.blend_mode, ge.blend_fixa, ge.blend_fixb, ge.vtype, ge.fbp);
     }
+    const int r0 = r, g0 = g, b0 = b;   /* the source colour, for the host twin */
     uint32_t oldraw=read_fb_raw(x,y);
     int dr,dg,db,da; unpack_color(oldraw,ge.fbfmt&3,&dr,&dg,&db,&da);
     /* A 565 pixel has no alpha bits; blending reads its alpha as 0 (read_fb_px). */
@@ -2910,7 +3161,11 @@ static void compose_px_rgba(int x, int y, int r, int g, int b, int src_a, int st
     r=(int)(rgba&0xFF); g=(int)((rgba>>8)&0xFF); b=(int)((rgba>>16)&0xFF);
     stencil=(int)((rgba>>24)&0xFF);
     uint32_t c=pack_fb(r,g,b,stencil), mask=fb_write_mask_native();
-    write_fb_raw(x,y,(c&~mask)|(oldraw&mask));
+    const uint32_t fin=(c&~mask)|(oldraw&mask);
+    write_fb_raw(x,y,fin);
+    /* The host twin (#2050; off: s_twin_mode is 0 after the first write) */
+    if (__builtin_expect(s_twin_mode != 0, 0) && !s_wing && !s_gpu)
+        ge_twin_compose(x,y,r0,g0,b0,src_a,oldraw,fin,mask);
     if (s_wing) return;   /* host-only: the guest's pixel and list counters stay its own */
     g_ge_pixels++;
     if (s_in3d) s_stat.px3d++; else s_stat.px2d++;
@@ -7271,6 +7526,7 @@ static void ge_block_transfer(uint32_t startdata) {
         sr_guest_vram_write_prepare_bytes(dofs, dst.row_bytes);
         memmove(SR_HOST(dofs), SR_HOST(so), src.row_bytes);
         sr_guest_vram_write_commit_bytes(dofs, dst.row_bytes);
+        if (__builtin_expect(s_twin_mode > 0, 0) && !s_gpu) ge_twin_copy_row(dofs, so, src.row_bytes);
     }
 }
 

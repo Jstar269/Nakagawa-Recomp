@@ -34,6 +34,8 @@
 #include "osk_overlay.h"        /* the in-window keyboard: keys in, the frame drawn over */
 #include "osk_overlay_paint.h"
 #include "ace.h"             /* Ace Mode: crisp keyboard; refused by the acceptance checkpoint */
+#include "ge_shared.h"       /* the software renderer's twin rows (#2050) and the VRAM viewer's
+                                decoders (#314) */
 #ifdef SR_SDL3VK
 #include "gpu_sdl3vk/ge_gpu.h"
 #include "gpu_sdl3vk/ace_smooth.h" /* Ace Mode's in-between frames */
@@ -46,7 +48,6 @@
 #include "overlay/overlay_host.h" /* the pause overlay's pages (C9c) */
 #include "gpu_sdl3vk/ace_ui.h"   /* Ace Mode's in-game UI: notice, readout, crisp keyboard */
 #include "nk_platform.h"         /* the system's Reduce motion, for the Ace UI */
-#include "ge_shared.h"           /* the developer VRAM viewer's decoders (#314) */
 #include <SDL3/SDL_events.h>
 #include <SDL3/SDL_render.h>
 #endif
@@ -741,6 +742,8 @@ static void gui_ace_smooth_init(void) {
  * this build the two are exclusive: with smooth motion on, Fill reports itself unavailable. */
 static int s_wide_on;
 
+static void gui_cull_sync(void);
+
 static void gui_wide_init(void) {
     const AceConfig *effective = ace_effective();
     s_wide_on = 0;
@@ -754,6 +757,7 @@ static void gui_wide_init(void) {
     s_wide_on = 1;
     ace_confirm(ACE_FEATURE_WIDE);
     ge_wide_set_cull(effective->cull);
+    ace_set_finish_hook(gui_cull_sync);   /* the exit path reads the final count (contract 11.3.6) */
 }
 
 static void gui_cull_sync(void) {
@@ -768,6 +772,7 @@ static void gui_cull_sync(void) {
 
 static void gui_wide_release(void) {
     gui_cull_sync();
+    ace_set_finish_hook(NULL);
     if (s_wide_on) (void)ge_wide_set_wing(0);
     ge_wide_set_cull(0);
     s_wide_on = 0;
@@ -1296,6 +1301,16 @@ static uint32_t bgra_from_fb_word(uint32_t p, int fmt) {
 
 static void convert_fb_pixels(uint32_t fbaddr, int fmt, uint32_t stride) {
     for (int y = 0; y < PSP_H; y++) {
+        /* Enhanced 32-bit colour (#2050): the software renderer's host twin gives the row when
+         * it is on (RGBA8); off, and always under the Vulkan renderer, it returns 0. */
+        uint32_t *row = s_px + y * PSP_W;
+        if (ge_twin_present_row(fbaddr, fmt, stride, y, row, PSP_W)) {
+            for (int x = 0; x < PSP_W; x++) {
+                const uint32_t c = row[x];
+                row[x] = ((c & 0xFFu) << 16) | (c & 0xFF00u) | ((c >> 16) & 0xFFu);
+            }
+            continue;
+        }
         for (int x = 0; x < PSP_W; x++) {
             uint32_t i = (uint32_t)(y * (int)stride + x);
             uint32_t p;
@@ -2775,7 +2790,7 @@ static void busy_run(BusyRun *r, int reflip, int (*busy_at)(uint32_t), uint32_t 
     r->busy_at = busy_at;
     r->fail_vcount = fail_vcount;
     r->fails = fails;
-    assert(ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=x2;sas=off;tess=off", NULL));
+    assert(ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=x2;sas=off;tess=off;twin=off", NULL));
     s_on = 1; s_sdl3 = 1; s_offscreen = 0; s_quit_requested = 0;
     s_ace_smooth = (AceBetween *)&s_stub_held;
     memset(&s_stub_smooth, 0, sizeof(s_stub_smooth));
