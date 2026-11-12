@@ -50945,6 +50945,10 @@ static SrResumeStatus s_resume_park_from_peer;
 static SrResumeStatus s_resume_park_peer_itself;
 static SrResumeStatus s_resume_park_other_switch;
 static SrResumeStatus s_resume_park_in_import;
+static uint32_t s_resume_park_peer_uid;
+static int s_resume_park_peer_waited;
+static int s_resume_park_peer_marked_in_wait;
+static char s_resume_park_other_detail[160];
 static SrResumeFrame s_resume_park_frames[4];
 static uint32_t s_resume_park_count;
 static char s_resume_park_detail[160];
@@ -50976,14 +50980,20 @@ static void resume_park_peer(CpuState *s) {
         s_resume_park_detail, sizeof s_resume_park_detail);
     s_resume_park_peer_itself = sched_resume_describe(sched_current_uid(), frames, 4u, &count, NULL, 0u);
     if (t != NULL) {
-        /* The same records under a switch that was not the yield's own, and inside an import. */
-        t->yield_switched = 0;
-        s_resume_park_other_switch = sched_resume_describe(s_resume_park_uid, frames, 4u, &count, NULL, 0u);
-        t->yield_switched = 1;
+        /* The same records inside an import (a flag check: a thread at the yield's own
+         * switch is in no import). */
         t->import_active = 1;
         s_resume_park_in_import = sched_resume_describe(s_resume_park_uid, frames, 4u, &count, NULL, 0u);
         t->import_active = 0;
     }
+    /* A real switch that is not the yield's own: the peer blocks in sceKernelDelayThread, the
+     * parked thread runs again, and it describes the peer (resume_park_body). */
+    s_resume_park_peer_uid = sched_current_uid();
+    CpuState sc;
+    memset(&sc, 0, sizeof sc);
+    sc.r[4] = 1000u;
+    (void)sr_syscall(&sc, NID_SCE_KERNEL_DELAY_THREAD);
+    s_resume_park_peer_waited = 1;
     s->r[2] = 0u;
 }
 
@@ -51023,6 +51033,16 @@ static void resume_park_body(CpuState *s) {
     s_resume_park_in_yield = 0;
     s_resume_park_marked_after = s_tcb[s_cur].yield_switched;
     s_resume_park_passes++;
+    if (s_resume_park_peer_uid != 0u && !s_resume_park_peer_waited) {
+        /* The peer is out in its delay, switched by the wait and not by a yield. */
+        SrResumeFrame frames[4];
+        uint32_t count = 9u;
+        TCB *peer = tcb_by_uid(s_resume_park_peer_uid);
+        s_resume_park_peer_marked_in_wait = peer == NULL || peer->yield_switched;
+        s_resume_park_other_switch = sched_resume_describe(
+            s_resume_park_peer_uid, frames, 4u, &count,
+            s_resume_park_other_detail, sizeof s_resume_park_other_detail);
+    }
 }
 
 static void test_resume_describe_from_the_scheduler(void) {
@@ -51044,6 +51064,10 @@ static void test_resume_describe_from_the_scheduler(void) {
     s_resume_park_in_handler = s_resume_park_fiber_in_handler = SR_RESUME_OK;
     s_resume_park_from_peer = s_resume_park_peer_itself = SR_RESUME_BAD_FRAMES;
     s_resume_park_other_switch = s_resume_park_in_import = SR_RESUME_OK;
+    s_resume_park_peer_uid = 0u;
+    s_resume_park_peer_waited = 0;
+    s_resume_park_peer_marked_in_wait = 1;
+    s_resume_park_other_detail[0] = '\0';
     s_resume_park_count = 0u;
     memset(s_resume_park_frames, 0, sizeof s_resume_park_frames);
     s_resume_park_detail[0] = '\0';
@@ -51080,8 +51104,14 @@ static void test_resume_describe_from_the_scheduler(void) {
            "and only until it runs again");
     expect(s_resume_park_peer_itself == SR_RESUME_NOT_PARKED,
            "resume describe: the thread that asks is running and is not parked");
-    expect(s_resume_park_other_switch == SR_RESUME_NOT_PARKED,
-           "resume describe: a thread switched out inside a call is not parked");
+    expect(s_resume_park_other_switch == SR_RESUME_NOT_PARKED && !s_resume_park_peer_marked_in_wait &&
+               strstr(s_resume_park_other_detail, "not by sr_yield's own switch") != NULL,
+           "resume describe: a thread switched out by a blocking wait is unmarked and not parked");
+    if (s_resume_park_other_switch != SR_RESUME_NOT_PARKED || s_resume_park_peer_marked_in_wait)
+        fprintf(stderr, "  resume describe, blocked peer: %s marked=%d (%s)\n",
+                sr_resume_status_name(s_resume_park_other_switch), s_resume_park_peer_marked_in_wait,
+                s_resume_park_other_detail);
+    expect(s_resume_park_peer_waited, "resume describe: the peer's delay ended and it finished");
     expect(s_resume_park_in_import == SR_RESUME_NOT_PARKED,
            "resume describe: a thread inside an import is not parked");
     sr_aot_return_boundaries_reset();

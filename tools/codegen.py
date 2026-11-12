@@ -5219,6 +5219,17 @@ _STATE_RESUME_TYPES = frozenset(
      "double", "typedef"))
 #: After a statement's first word: a second name, so the first was a type.
 _STATE_RESUME_DECLARED = re.compile(r"[\s*]+([A-Za-z_]\w*)")
+#: The names a function-scope statement may start with and be followed by its parentheses.
+#: Text alone cannot tell a call from a macro that declares a local (`DECLARE(x);`), so a
+#: statement shaped like a call is read as one only when its first word is a callable body
+#: (``f_XXXXXXXX``, a prototype in the generated ``_funcs.h``) or one of these runtime names,
+#: none of which declares anything at the statement's own scope (each is a function, an
+#: expression, or a ``do { } while (0)`` block; src/rt/recomp.h). Any other name leaves the
+#: body without resume points.
+_STATE_RESUME_CALLS = frozenset(
+    ("sr_begin", "sr_end", "sr_tail_record", "sr_swl_pc", "sr_swr_pc", "MEM_W8_PC", "MEM_W16_PC",
+     "MEM_W32_PC", "SR_YIELD", "SR_TAIL_DRAIN", "SR_HOST_STACK_CHECK"))
+_STATE_RESUME_BODY_NAME = re.compile(r"f_[0-9a-f]{8}")
 #: After a statement's first word: a label's colon, so a new statement starts.
 _STATE_RESUME_COLON = re.compile(r"\s*:(?!:)")
 #: After the parentheses that follow a statement's first word: a name or a bracket, so the
@@ -5243,7 +5254,9 @@ class _StateResumeScan:
     ``readable`` is False when a line cannot be read this way (a comment left open, a line
     comment, a preprocessor line, a function-scope statement that may be a declaration whose
     name it cannot give, a function-scope statement cut by the end of its line right after
-    its first word); the pass then leaves the whole body alone.
+    its first word, a function-scope call of a name outside ``_STATE_RESUME_CALLS`` and the
+    callable bodies, which could be a macro that declares); the pass then leaves the whole
+    body alone.
     """
 
     def __init__(self, out):
@@ -5326,6 +5339,9 @@ class _StateResumeScan:
                     elif not code[token.end():].strip(" \t\n*"):
                         self.readable = False   # the line ends before the statement says more
                     elif code[token.end():].lstrip().startswith("("):
+                        if (word not in _STATE_RESUME_CALLS
+                                and not _STATE_RESUME_BODY_NAME.fullmatch(word)):
+                            self.readable = False   # a call or a macro that may declare
                         state["called"] = state["parens"]
 
     def looped(self, index, column):

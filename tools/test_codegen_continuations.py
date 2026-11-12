@@ -1090,7 +1090,7 @@ class StateResumeTests(unittest.TestCase):
         closed = out[:4] + [call + " }"] + out[6:]
         self.assertIn("SR_RESUME_POINT_CALL", "\n".join(codegen.state_resume_pass(closed, 0x1000)))
         # A brace in a comment or a string is not a block.
-        noisy = out[:3] + ['    /* } */ sr_log("}");', "    " + call.strip()] + out[6:]
+        noisy = out[:3] + ["    /* } */ s->r[2] = (uint32_t)sizeof(\"}\") + (uint32_t)'}';", "    " + call.strip()] + out[6:]
         self.assertIn("SR_RESUME_POINT_CALL", "\n".join(codegen.state_resume_pass(noisy, 0x1000)))
         # A comment left open, a line comment and a preprocessor line cannot be read: the
         # body is left as it is.
@@ -1159,6 +1159,11 @@ class StateResumeTests(unittest.TestCase):
             "    _Atomic(uint32_t) _x = 0u;",
             "    SR_NOTE(s) uint32_t _x = 0u;",
             "    uint32_t\n    _x = 1u;",
+            # A call-shaped statement whose name could be a macro that declares a local.
+            "    NK_DECLARE_LOCAL(_x);",
+            "    sr_note(s);",
+            "    sr_note(s) ? (void)0 : (void)0;",
+            "    f_0000100(s);",
         ):
             with self.subTest(declaration=declaration):
                 out = head + [declaration] + tail
@@ -1177,7 +1182,8 @@ class StateResumeTests(unittest.TestCase):
             "    SR_HOST_STACK_CHECK(0x00001000u);",
             "    MEM_W32_PC(s->r[29] + 12u, s->r[31], 0x00001004u);",
             "  L_00001004: ;",
-            "    sr_note(s) ? (void)0 : (void)0;",
+            "    f_00001040(s);",
+            "    sr_tail_record(s, 0x00001040u);",
             # A loop header's own local ends with the loop, and no label is granted inside one.
             "    for (uint32_t _i = (uint32_t){0}; _i < 2u; _i++) { s->r[8]++; }",
         ):
