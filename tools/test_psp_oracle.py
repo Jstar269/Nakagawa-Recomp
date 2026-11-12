@@ -12313,21 +12313,22 @@ class _GeNewCaseMixin:
         test.assertEqual(self.row["prx"], f"{stem}.prx")
         test.assertEqual(self.row["diagnostic_case_ids"], [case])
 
-    def _check_bounded(self, prefix: str) -> None:
+    def _check_bounded(self, prefix: str, extra: frozenset[str], polls: int) -> None:
         test = cast(unittest.TestCase, self)
         test.assertEqual(set(re.findall(r"\b(sce\w+)\s*\(", self.section)), {
             "sceGeEdramGetAddr", "sceGeListEnQueue", "sceGeListSync", "sceGeDrawSync",
             "sceGeBreak", "sceKernelDcacheWritebackAll", "sceKernelDelayThread",
-            "sceKernelGetSystemTimeLow"})
+            "sceKernelGetSystemTimeLow"} | extra)
         test.assertNotIn("while (", self.section)
-        for banned in ("for (;;)", "do {", "goto ", "malloc(", "sceGu", "sceDisplay", "sceIo"):
+        for banned in ("for (;;)", "do {", "goto ", "malloc(", "sceGu", "sceIo"):
             test.assertNotIn(banned, self.section)
-        test.assertEqual(self.section.count(f"i < {prefix}_WAIT_POLLS; i++"), 2)
+        test.assertEqual(self.section.count(f"i < {prefix}_WAIT_POLLS; i++"), polls)
         test.assertIn(f"#define {prefix}_WAIT_POLLS 5000u", self.section)
         # Every loop runs to a constant, a table count or a fixed read size.
         for loop in re.finditer(r"\bfor \(", self.section):
             header = self.section[loop.end():_c_close(self.section, loop.end() - 1)]
-            test.assertRegex(header, r"^(?:unsigned|uint32_t) (\w+) = 0; \1 < (?:\d+u|[A-Z][A-Z0-9_]*"
+            test.assertRegex(header, r"^(?:unsigned|uint32_t) (\w+) = 0; (?:!overlap && )?\1 < "
+                                     r"(?:\d+u|[A-Z][A-Z0-9_]*"
                                      r"(?: \* [A-Z][A-Z0-9_]*)?|rows|cols|3u && c->w\[i\] != 0u); \1\+\+$")
         for delay in re.findall(r"sceKernelDelayThread\((\w+)\)", self.section):
             test.assertEqual(delay, f"{prefix}_WAIT_POLL_US")
@@ -12337,11 +12338,31 @@ class _GeNewCaseMixin:
         test.assertIn(f"sceGeListEnQueue(s_{prefix.lower()}_list, NULL, -1, &args)", draw)
         test.assertLess(draw.index("hle_step("), draw.index("sceGeListEnQueue("))
         test.assertLess(draw.index("sceKernelDcacheWritebackAll();"), draw.index("sceGeListEnQueue("))
-        test.assertIn("reset_rc = sceGeBreak(1, &param);", draw)
-        test.assertIn('hle_record(row, qid < 0 ? "FAIL" : idle ? "PASS" : "TIMEOUT", (uint32_t)qid, '
-                      "draw, 9);", draw)
+        # The probe's own list decides the end of the wait, never another client's (the VSH's)
+        # lists: a peek of PSP_GE_LIST_DONE, or 0x80000100 once its slot is freed after it ended
+        # (PSP-GE-SYNC-001). sceGeBreak(1) runs only when the deadline passed without either.
+        p = prefix.lower()
+        wait = self.bodies[f"{p}_wait"]
+        test.assertIn(f"s_{p}_list_state = sceGeListSync(qid, 1);", wait)
+        test.assertIn(f"if (s_{p}_list_state == PSP_GE_LIST_DONE) {{", wait)
+        test.assertIn(f"if ((uint32_t)s_{p}_list_state == 0x80000100u) {{", wait)
+        test.assertIn(f"return {prefix}_WAIT_REJECTED;", wait)
+        test.assertNotIn("sceGeDrawSync(", wait)
+        test.assertNotIn("sceGeBreak(", wait)
+        test.assertLess(draw.index("sceGeListEnQueue("), draw.index(f"{p}_wait(qid);"))
+        test.assertEqual(draw.count("sceGeBreak("), 1)
+        breaking = draw.index(f"if (wait == {prefix}_WAIT_DEADLINE) {{")
+        reset = draw.index("reset_rc = sceGeBreak(1, &param);")
+        test.assertLess(breaking, reset)
+        test.assertLess(reset, _c_close(draw, draw.index("{", breaking)))
+        test.assertIn(f'const char *status = wait == {prefix}_WAIT_REJECTED ? "FAIL"\n'
+                      f'                         : wait == {prefix}_WAIT_DEADLINE ? "TIMEOUT" : "PASS";\n'
+                      "    hle_record(row, status, (uint32_t)qid, draw, 9);", draw)
+        test.assertIn("elapsed, wait, (uint32_t)reset_rc, words,", draw)
+        for code, value in (("DONE", 0), ("FREED", 1), ("DEADLINE", 2), ("REJECTED", 3)):
+            test.assertIn(f"#define {prefix}_WAIT_{code} {value}u", self.section)
 
-    def _check_stream(self) -> None:
+    def _check_stream(self, status: str = "PASS") -> None:
         test = cast(unittest.TestCase, self)
         spec, counts = CAMPAIGN_PROBE_CASES[self.CASE]
         test.assertEqual(spec.test_id, self.TEST_ID)
@@ -12351,7 +12372,7 @@ class _GeNewCaseMixin:
         for case in spec.semantic_cases:
             outs = " ".join(f"out{i}=0x00000000" for i in range(counts[case]))
             lines.append(f"NAKAGAWA_PSP_TEST schema=1 test_id={self.TEST_ID} case_id={case} "
-                         f"status=PASS result=0x00000000 {outs}\n")
+                         f"status={status} result=0x00000000 {outs}\n")
         lines.append(f"NAKAGAWA_PSP_TEST schema=1 test_id={self.TEST_ID} case_id={self.CASE}-done "
                      f"status=PASS result=0x00000000 out0=0x{len(spec.semantic_cases):08x}\n")
         report = parse_campaign_probe_output("".join(lines), self.CASE)
@@ -12587,17 +12608,63 @@ class GeRasterBoundsProbeTests(_GeNewCaseMixin, unittest.TestCase):
         self.assertEqual(bounded["depth-clear-scissor-z-r0-x92"], (0x4000,) * 8 + (0x5A5A,) * 8)
 
     def test_section_is_bounded_and_calls_only_the_ge_and_cache_imports(self) -> None:
-        self._check_bounded("GRB")
+        # The display read is the one call beyond the GE and cache imports.
+        self._check_bounded("GRB", frozenset({"sceDisplayGetFrameBuf"}), 3)
         read = self.bodies["grb_read"]
         self.assertIn("if (!fits) {", read)
         self.assertLess(read.index("if (!fits) {"), read.index("grb_pixel("))
+        self.assertIn("#include <pspdisplay.h>", self.section)
+        self.assertNotIn("#include <pspdisplay.h>", self.probe[:self.probe.index(
+            "#if PSP_ORACLE_CASE == GE_CASE_RASTER_BOUNDS\n")])
+
+    def test_display_check_and_ge_idle_come_before_any_vram_or_ge_use(self) -> None:
+        run = self.bodies["hle_run"]
+        check = run.index("sceDisplayGetFrameBuf(&top, &width, &format, PSP_DISPLAY_SETBUF_IMMEDIATE)")
+        idle = run.index("if (sceGeDrawSync(1) == PSP_GE_LIST_DONE) {")
+        record = run.index('hle_record("display-check", overlap || !ge_idle ? "SKIP" : "PASS", '
+                           "address, check, 9);")
+        skip = run.index("if (overlap || !ge_idle) {\n        grb_skip_all(address);\n"
+                         "        return 1;\n    }")
+        first_vram = min(run.index(token) for token in ("sceGeEdramGetAddr(", "s_grb_vram", "grb_draw("))
+        self.assertEqual(run.index('hle_step("display-check");'), run.index("hle_step("))
+        self.assertLess(check, idle)
+        self.assertLess(idle, record)
+        self.assertLess(record, skip)
+        self.assertLess(skip, first_vram)
+        # The span compared, as VRAM offsets with the cached/uncached and mirror bits masked off;
+        # an unreadable display counts as an overlap.
+        for fragment in (
+            "const int known = fb_rc >= 0 && top != NULL && width > 0 && width <= 4096 && format >= 0 &&",
+            "const uint32_t span = known ? (uint32_t)width * GRB_ROWS * (format == 3 ? 4u : 2u) : 0u;",
+            "const int in_vram = (address & 0x0f800000u) == 0x04000000u;",
+            "const uint32_t offset = address & 0x001fffffu;",
+            "const int overlap = !known || (in_vram && offset < GRB_FB_OFFSET + 2u * GRB_BLOCK_BYTES &&",
+            "offset + span > GRB_FB_OFFSET);",
+            "for (unsigned i = 0; !overlap && i < GRB_WAIT_POLLS; i++) {",
+            "const uint32_t check[9] = {(uint32_t)fb_rc, address, (uint32_t)width, (uint32_t)format,",
+            "offset, span, (uint32_t)overlap, (uint32_t)ge_idle, idle_polls};"):
+            self.assertIn(fragment, run)
+        # The skip path writes every later record as SKIP with its usual word count.
+        skip_all = self.bodies["grb_skip_all"]
+        for fragment in ('hle_record(row, "SKIP", address, s_grb_out, 9);',
+                         'hle_record(row, "SKIP", address, s_grb_out, grb_reads[i].raw ? 16u : 8u);',
+                         'hle_record("vram-restore", "SKIP", address, s_grb_out, 2);'):
+            self.assertIn(fragment, skip_all)
+        for banned in ("sceGe", "s_grb_vram", "s_grb_zview", "grb_draw("):
+            self.assertNotIn(banned, skip_all)
+
+    def test_a_skipped_run_keeps_the_stream_shape(self) -> None:
+        # Every record SKIP (the display overlapped or the GE never idled) still parses as the
+        # complete fixed-shape stream.
+        self._check_stream("SKIP")
 
     def test_stream_shape_matches_the_registry(self) -> None:
         self._check_stream()
         spec, counts = CAMPAIGN_PROBE_CASES[self.CASE]
-        self.assertEqual(spec.semantic_cases[0], "raster-512-x511-draw")
+        self.assertEqual(spec.semantic_cases[:2], ("display-check", "raster-512-x511-draw"))
+        self.assertEqual(counts["display-check"], 9)
         self.assertEqual(spec.semantic_cases[-1], "vram-restore")
-        self.assertEqual(len(spec.semantic_cases), len(self.CELLS) + 31 + 1)
+        self.assertEqual(len(spec.semantic_cases), 1 + len(self.CELLS) + 31 + 1)
         self.assertEqual(counts["vram-restore"], 2)
         self.assertEqual({counts[f"{cell}-draw"] for cell in self.CELLS}, {9})
         self.assertIn("const uint32_t draw[9] = {", self.bodies["grb_draw"])
@@ -12636,8 +12703,13 @@ class GeDepthRoundProbeTests(_GeNewCaseMixin, unittest.TestCase):
             ("zr-thru-gt", "0", "32768.5", "0x23000001", "0xde000006", "0"),
             ("zr-xf-eq", "1", "0.0", "0x23000001", "0xde000002", "0x1e000000"),
         ])
-        self.assertIn("static const float gdr_thru_frac[8] = {0.0f, 0.25f, 0.5f, 0.75f, 0.99609375f, "
-                      "-0.25f, -0.5f, -0.75f};", self.section)
+        self.assertIn("static const float gdr_thru_frac[8] = {0.0f, 0.25f, 0.5f, 0.75f, 0.99609375f,\n"
+                      "                                        -0.25f, -0.5f, -0.75f};", self.section)
+        # A truncate-column mask is read as "truncate or reduced precision" wherever it is cited.
+        self.assertIn('A 0x1f, 0xe0 or 0xff mask reads "truncate or reduced precision"', self.probe)
+        self.assertIn('pass mask reads "truncate or reduced precision"', self.row["evidence_note"])
+        self.assertIn("first hardware use of a GE-context enqueue", self.row["risk"])
+        self.assertIn('mask reads "truncate or reduced precision"', self.doc)
         self.assertIn("static const float gdr_xf_frac[4] = {0.0f, 0.25f, 0.5f, 0.75f};", self.section)
 
     def test_the_ge_raster_block_is_repeated_not_changed(self) -> None:
@@ -12716,7 +12788,7 @@ class GeDepthRoundProbeTests(_GeNewCaseMixin, unittest.TestCase):
                                              rf" +0x{expected[2]:02x}\n")
 
     def test_section_is_bounded_and_calls_only_the_ge_and_cache_imports(self) -> None:
-        self._check_bounded("GDR")
+        self._check_bounded("GDR", frozenset(), 2)
         # The CPU writes only the ge-raster colour block; the depth buffer is the GE's.
         draw = self.bodies["gdr_draw"]
         self.assertIn("for (unsigned i = 0; i < GDR_STRIDE * GDR_ROWS; i++) {", draw)

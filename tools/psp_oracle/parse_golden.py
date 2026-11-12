@@ -2869,9 +2869,11 @@ _register_campaign_probe(
     {case: (9 if case.endswith("-draw") else 16) for case in GE_RASTER_CASES},
 )
 
-# ge-raster-bounds (187, probe_ge_sample.c): #2193's raster bounds cells. Per cell of the
-# grb_cells table, in order: one `-draw` record (9 words: the GE wait outcome, the list length,
-# fbw and zbw), then the cell's reads of the grb_reads table in order, each a summary (8 words:
+# ge-raster-bounds (187, probe_ge_sample.c): #2193's raster bounds cells. First `display-check`
+# (9 words: the display buffer, whether it overlaps the probe's VRAM block, whether the GE idled);
+# when it is SKIP every later record is SKIP with the same word count. Then per cell of the
+# grb_cells table, in order: one `-draw` record (9 words: the probe's own list's wait outcome,
+# the list length, fbw and zbw), then the cell's reads of the grb_reads table in order, each a summary (8 words:
 # the pixel count; the drawn, cleared, fill and other counts; the first other value and its
 # index; the first pixel) or 16 raw pixels. After the last cell, `vram-restore` (2 words).
 GE_RASTER_BOUNDS_READS: tuple[tuple[str, tuple[tuple[str, int], ...]], ...] = (
@@ -2888,6 +2890,7 @@ GE_RASTER_BOUNDS_READS: tuple[tuple[str, tuple[tuple[str, int], ...]], ...] = (
 )
 GE_RASTER_BOUNDS_CELLS = tuple(cell for cell, _reads in GE_RASTER_BOUNDS_READS)
 GE_RASTER_BOUNDS_ROWS = (
+    ("display-check", 9),
     *(row for cell, reads in GE_RASTER_BOUNDS_READS
       for row in ((f"{cell}-draw", 9), *((f"{cell}-{read}", count) for read, count in reads))),
     ("vram-restore", 2),
