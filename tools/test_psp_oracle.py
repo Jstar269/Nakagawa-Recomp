@@ -12245,7 +12245,7 @@ class GeRasterProbeTests(unittest.TestCase):
             self.assertIn(term, bodies["gr_vk_draw"])
         for term in ("s_scale != 1", "gr_digest(ref) == s_gr_psp[k].psp", "gr_digest(px) == s_gr_psp[k].psp",
                      "else if (want_sw) pass = on_sw && matches;",
-                     "else if (want_div) pass = on_gpu && !matches && delta <= GR_VK_DIVERGENT_MAX_DELTA;",
+                     "else if (want_div) pass = on_gpu && delta <= GR_VK_DIVERGENT_MAX_DELTA;",
                      "else pass = on_gpu && matches;"):
             self.assertIn(term, bodies["coherence_run_psp_raster"])
         self.assertIn("#define GR_VK_DIVERGENT_MAX_DELTA 2u\n", inc)
@@ -12276,6 +12276,9 @@ class GeRasterProbeTests(unittest.TestCase):
         self.assertEqual(set(re.findall(r"`([a-z0-9-]+)`", div_part)) & cells, set(divergent))
         self.assertIn(f"{len(software)} are drawn by the software fallback", para)
         self.assertIn(f"{len(divergent)} are drawn on the GPU and differ", para)
+        # A rounding cell may land on the PSP's value on one driver and not on another (lavapipe draws
+        # tf-mod-rgba-1 exact): the class is the bound alone, never a required difference.
+        self.assertNotIn("!matches && delta", bodies["coherence_run_psp_raster"])
         self.assertIn(f"{len(cells) - len(software) - len(divergent)} cells are drawn on the GPU and equal", para)
 
     def test_section_calls_only_the_ge_and_cache_imports_and_is_bounded(self) -> None:

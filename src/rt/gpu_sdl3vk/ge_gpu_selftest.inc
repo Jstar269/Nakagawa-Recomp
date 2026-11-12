@@ -11438,10 +11438,12 @@ static const struct {
  * one class, and a cell that changes class fails the case, so neither a new fallback nor a new
  * divergence can hide:
  *  - drawn on the GPU and equal to the PSP (every cell not named below);
- *  - drawn on the GPU and not equal (k_gr_vk_divergent): the Vulkan blend and texture-function
+ *  - drawn on the GPU within a bound (k_gr_vk_divergent): the Vulkan blend and texture-function
  *    arithmetic most likely rounds in floating point where the PSP truncates integer products
- *    (not measured), so these differ by 1 or 2 per channel; each pixel must stay within GR_VK_DIVERGENT_MAX_DELTA of
- *    ge.c's, which equals the PSP's (docs/HARDWARE_ORACLE.md, "GE raster pixel corpus");
+ *    (not measured), so these may differ by 1 or 2 per channel; each pixel must stay within
+ *    GR_VK_DIVERGENT_MAX_DELTA of ge.c's, which equals the PSP's (docs/HARDWARE_ORACLE.md, "GE raster pixel
+ *    corpus"). Whether a cell lands on the PSP's value depends on the driver's rounding (lavapipe
+ *    draws tf-mod-rgba-1 exact, an RTX 3080 does not), so equal passes too and is counted;
  *  - drawn by the software fallback (k_gr_vk_software): the backend refuses a primitive and
  *    ge.c draws it, which proves nothing about Vulkan's raster, but the window must still
  *    equal the PSP's after the readback. */
@@ -11600,7 +11602,7 @@ static int coherence_run_psp_raster(void) {
     }
     gr_clut((uint8_t *)SR_HOST(clut));
     GeState saved = *s_ge;
-    unsigned gpu_match = 0, gpu_div = 0, sw_cells = 0;
+    unsigned gpu_match = 0, gpu_div = 0, sw_cells = 0, div_exact = 0;
     uint32_t worst_div = 0;
     int ok = 1;
     for (uint32_t k = 0; k < GR_CELL_COUNT; k++) {
@@ -11643,13 +11645,14 @@ static int coherence_run_psp_raster(void) {
         int pass;
         if (!ref_ok) pass = 0;
         else if (want_sw) pass = on_sw && matches;
-        else if (want_div) pass = on_gpu && !matches && delta <= GR_VK_DIVERGENT_MAX_DELTA;
+        else if (want_div) pass = on_gpu && delta <= GR_VK_DIVERGENT_MAX_DELTA;   /* equal included */
         else pass = on_gpu && matches;
         if (on_gpu && !matches) {
             gpu_div++;
             if (delta > worst_div) worst_div = delta;
         } else if (on_gpu) {
             gpu_match++;
+            if (want_div) div_exact++;
         } else if (on_sw) {
             sw_cells++;
         }
@@ -11659,7 +11662,7 @@ static int coherence_run_psp_raster(void) {
                 "largest field difference from ge.c %u; ge.c %s the PSP; gpu=0x%016llx psp=0x%016llx",
                 c->name, got, fell, sync,
                 want_sw ? "software fallback, equal to the PSP"
-                        : want_div ? "GPU, within 2 per field of the PSP" : "GPU, equal to the PSP",
+                        : want_div ? "GPU, within 2 per field of ge.c (which equals the PSP)" : "GPU, equal to the PSP",
                 (unsigned)delta, ref_ok ? "equals" : "does not equal",
                 (unsigned long long)gr_digest(px), (unsigned long long)s_gr_psp[k].psp);
         for (uint32_t i = 0; i < GR_N; i++)
@@ -11680,9 +11683,10 @@ static int coherence_run_psp_raster(void) {
     ge_set_gpu_hooks(&k_hooks);
     if (ok)
         printf("gpu coherence selftest: PASS %-22s PSP-GE-RASTER-001 at 1x: %u cells drawn on the GPU "
-               "equal the PSP, %u differ as pinned (at most %u per field), %u drawn by the software "
-               "fallback equal the PSP (%u cells)\n", "psp-raster", gpu_match, gpu_div,
-               (unsigned)worst_div, sw_cells, (unsigned)GR_CELL_COUNT);
+               "equal the PSP (%u of them pinned as rounding cells, exact on this driver), %u differ as "
+               "pinned (at most %u per field), %u drawn by the software fallback equal the PSP (%u cells)\n",
+               "psp-raster", gpu_match, div_exact, gpu_div, (unsigned)worst_div, sw_cells,
+               (unsigned)GR_CELL_COUNT);
     return ok;
 }
 

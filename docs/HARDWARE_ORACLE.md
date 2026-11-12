@@ -68,8 +68,8 @@ hardware label. The current command-word case reports `NOT_RUN`.
 `ge-raster`, 16 `ge-weight` and 9 `ge-rtt` cells, each for its exact states only. The software GE
 gives every `ge-raster` cell (`test_ge_raster_cells_match_psp`); no test yet runs the `ge-weight` or
 `ge-rtt` cells through it. On Vulkan at render scale 1 (`gpu_coherence_selftest --case psp-raster`, in the
-`ge-raster` entry below), 146 `ge-raster` cells drawn on the GPU equal the PSP, 20 differ by 1 or 2
-per colour field, and 23 are drawn by the software fallback. Other pixel evidence measured on a
+`ge-raster` entry below), 146 `ge-raster` cells drawn on the GPU equal the PSP, 20 stay within 2 per
+colour field of it (most differ by 1 or 2, depending on the driver), and 23 are drawn by the software fallback. Other pixel evidence measured on a
 PSP but not in `ge_corpus.json`: PSP-GE-SAMPLE-001, PSP-GE-THROUGHZ-001, PSP-GE-MIP-001, PSP-GE-MIP-002,
 PSP-GE-LIGHT-001 and PSP-GE-OVERLAP-001 (their entries below). Not measured at all:
 
@@ -1289,13 +1289,15 @@ One console is one data point; see §11. Nothing here closes issue #70
   cells are drawn on the GPU and equal the PSP. 23 are drawn by the software fallback and equal the PSP after
   the readback, which proves nothing about the Vulkan raster: the depth test with stencil (`z-lt-st`,
   `z-gt-st`), points (`e-points`), partial pixel masks (`msk-8888`, `msk-565`, `clr-ca-msk`) and the logic
-  operations (`lo-*`). 20 are drawn on the GPU and differ from the PSP by 1 or 2 per colour field, because
+  operations (`lo-*`). 20 are drawn on the GPU and differ from the PSP by at most 2 per colour field, because
   Vulkan most likely blends and combines texture and vertex colours in floating point where the PSP truncates integer
   products: `b-sa-isa`, `b-dc-sc`, `b-idc-isc`, `b-da-ida`, `b-sub-sa-fix`, `b-rsub-sa-isa`, `tf-mod-rgb`,
   `tf-mod-rgb-x2`, `tf-mod-rgba`, `tf-mod-rgba-x2`, `tf-mod-rgba-1`, `tf-dec-rgba`, `tf-dec-rgba-x2`,
   `tf-bld-rgb`, `tf-bld-rgb-x2`, `tf-bld-rgba`, `tf-bld-rgba-x2`, `tfa-mod-rgba`, `tfa-bld-rgba` and
   `tfa-add-rgba`; each of their pixels must stay within 2 per field of the window `ge.c` draws alone, which
-  equals the PSP's. The case pins all three classes, so a cell that moves between them fails, and so does a
+  equals the PSP's. Whether a rounding cell lands on the PSP's value depends on the driver: on an RTX 3080 all 20
+  differ by 1 or 2, while lavapipe (hosted CI) draws `tf-mod-rgba-1` exactly, so the case accepts an equal
+  window for these cells and reports how many were exact. The case pins all three classes, so a cell that moves between them fails, and so does a
   cell whose readback fails or that neither class drew. It found that a clear with a partial pixel mask was
   drawn unmasked on the GPU (`clr-ca-msk`); such a clear now falls back to `ge.c`, as a masked draw already
   did.
