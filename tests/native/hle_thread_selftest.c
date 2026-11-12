@@ -30672,6 +30672,8 @@ enum { GM_QUEUE = 0x08a39000u, GM_RING = GM_QUEUE + 8u, GM_RING_LEN = 4, GM_LOG 
 static struct {
     unsigned callbacks, enqueues, masked_callbacks, thread_callbacks, suspend_in_callback;
     unsigned in_handler, handler_callbacks, depth, max_depth, fatal_first, nest_one;
+    unsigned suspend_enqueue_stay, stay_prev;
+    uint32_t peek_list, peek;
     uint32_t ids[GM_LOG], enqueued[GM_LOG];
     int process;
 } s_gm;
@@ -30703,6 +30705,12 @@ static void gm_finish_fn(CpuState *cpu) {
         (void)ge_tim_enqueue(cpu, ge_chain_list(1));
         sched_resume_interrupts(prev);
     }
+    if (s_gm.suspend_enqueue_stay) {
+        /* A callback that suspends the interrupts, enqueues and returns with them suspended. */
+        s_gm.suspend_enqueue_stay = 0;
+        s_gm.stay_prev = sched_suspend_interrupts();
+        (void)ge_tim_enqueue(cpu, ge_chain_list(1));
+    }
     if (s_gm.fatal_first) {
         s_gm.fatal_first = 0;
         cpu->flow_kind = SR_FLOW_FATAL;      /* the callback stops the run */
@@ -30713,6 +30721,16 @@ static void gm_finish_fn(CpuState *cpu) {
     }
     if (s_gm.process) gm_process(cpu);
     s_gm.depth--;
+    cpu->r[2] = 0u;
+}
+
+/* The first callback reads the status of the list s_gm.peek_list (sceGeListSync mode 1). */
+static void gm_timing_finish_fn(CpuState *cpu) {
+    if (s_gm.callbacks++ == 0u) {
+        CpuState c;
+        memset(&c, 0, sizeof(c));
+        s_gm.peek = ge_tim_sync(&c, NID_SCE_GE_LIST_SYNC, s_gm.peek_list, 1u);
+    }
     cpu->r[2] = 0u;
 }
 
@@ -30864,6 +30882,71 @@ static void test_ge_finish_callback_waits_for_interrupts(void) {
     for (unsigned i = 0; i < GE_CHAIN_WAIT && in_order; i++)
         in_order &= s_gm.ids[i] == ge_tim_finish_id(ge_chain_list(i));
     expect(in_order, "GE finish masked: 64 waiting completions run first-in first-out at the resume");
+
+    /* L0 and L2 wait; at the resume L0's callback raises L1's completion while L2's still waits:
+     * L2's callback runs before L1's (completion order), and none runs inside another. */
+    gm_reset();
+    memset(&cpu, 0, sizeof(cpu));
+    prev = sched_suspend_interrupts();
+    (void)ge_tim_enqueue(&cpu, ge_chain_list(0));
+    (void)ge_tim_enqueue(&cpu, ge_chain_list(2));
+    s_gm.nest_one = 1;   /* the first callback enqueues ge_chain_list(1) */
+    sched_resume_interrupts(prev);
+    expect(s_gm.callbacks == 3u && s_gm.ids[0] == ge_tim_finish_id(ge_chain_list(0)) &&
+               s_gm.ids[1] == ge_tim_finish_id(ge_chain_list(2)) &&
+               s_gm.ids[2] == ge_tim_finish_id(ge_chain_list(1)) && s_gm.max_depth == 1u,
+           "GE finish masked: a completion raised while others wait runs after them, in "
+           "completion order");
+
+    /* A delivered callback that suspends the interrupts, enqueues and returns with them still
+     * suspended: the new list's callback waits for the resume, not just for the callback. */
+    gm_reset();
+    memset(&cpu, 0, sizeof(cpu));
+    prev = sched_suspend_interrupts();
+    (void)ge_tim_enqueue(&cpu, ge_chain_list(0));
+    s_gm.suspend_enqueue_stay = 1;
+    sched_resume_interrupts(prev);
+    expect(s_gm.callbacks == 1u && s_gm.masked_callbacks == 0u && !sched_interrupts_enabled() &&
+               ge_finish_masked_pending(),
+           "GE finish masked: a callback left with the interrupts suspended holds its run's next "
+           "callback");
+    sched_resume_interrupts(s_gm.stay_prev);
+    expect(s_gm.callbacks == 2u && s_gm.masked_callbacks == 0u &&
+               s_gm.ids[1] == ge_tim_finish_id(ge_chain_list(1)) && !ge_finish_masked_pending(),
+           "GE finish masked: that callback runs at the resume, with the interrupts enabled");
+
+    /* A LoadExec drops the completions still waiting: the new program owes them nothing. */
+    gm_reset();
+    memset(&cpu, 0, sizeof(cpu));
+    prev = sched_suspend_interrupts();
+    (void)ge_tim_enqueue(&cpu, ge_chain_list(0));
+    int waited = ge_finish_masked_pending();
+    sr_hle_loadexec_reset_guest_state();
+    sched_resume_interrupts(prev);
+    expect(waited && s_gm.callbacks == 0u && !ge_finish_masked_pending(),
+           "GE finish masked: a LoadExec drops the completions still waiting");
+
+    /* SR_GE_TIMING=1: the model's completion service is the GE finish interrupt itself, so each
+     * list's callback runs as that list completes: the second list is still drawing when the
+     * first list's callback reads it. */
+    gm_reset();
+    sr_hle_test_ge_lists_reset();
+    sr_hle_test_ge_timing(1);
+    sr_test_register_guest_fn(GE_TIM_FINISH_FN, gm_timing_finish_fn);
+    ge_tim_write_list(ge_chain_list(0), 0u);
+    ge_tim_write_list(ge_chain_list(1), 0u);
+    const uint64_t saved_vtime = s_vtime_us;
+    s_vtime_us = 1000u;
+    memset(&cpu, 0, sizeof(cpu));
+    (void)ge_tim_enqueue(&cpu, ge_chain_list(0));
+    s_gm.peek_list = ge_tim_enqueue(&cpu, ge_chain_list(1));
+    s_vtime_us = 1000000u;
+    scheduler_service_pending();
+    expect(s_gm.callbacks == 2u && s_gm.peek == 2u /* drawing */ && !ge_finish_masked_pending(),
+           "GE finish masked: an SR_GE_TIMING completion's callback runs when that list completes");
+    s_vtime_us = saved_vtime;
+    sr_hle_test_ge_timing(0);
+    sr_hle_test_ge_lists_reset();
 
     gm_reset();
     sr_test_register_guest_fn(GE_TIM_FINISH_FN, ge_tim_finish_fn);

@@ -3586,6 +3586,7 @@ static void ge_timing_service_due(void) {
         if (ge_log_on())
             fprintf(stderr, "GE_TIMING: list_id=0x%08x completed at %llu us (modelled %llu us)\n",
                     l->uid, (unsigned long long)now, (unsigned long long)l->done_us);
+        ge_finish_from_ge_interrupt();   /* this is the GE finish interrupt: its callback runs now */
         ge_finish_callback(s_cpu, l->cbid, l->finish_id, l->cbarg);
     }
 }

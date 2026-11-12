@@ -1434,6 +1434,8 @@ void ge_finish_callback(CpuState *s, uint32_t cbid, uint32_t finish_id, uint32_t
 void ge_finish_release_owner(uint32_t owner);
 int ge_finish_masked_pending(void);
 void ge_finish_deliver_masked(CpuState *s);
+void ge_finish_from_ge_interrupt(void);
+void ge_finish_masked_reset_for_loadexec(void);
 void ge_sync_wake(void);
 extern GeListInfo s_ge_lists[GE_LIST_MAX];
 extern uint64_t s_ge_list_done_bits;
