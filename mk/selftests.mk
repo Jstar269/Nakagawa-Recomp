@@ -1354,6 +1354,7 @@ tex-mips-selftest:
 	$(BUILD_DIR)/tex_mips_selftest$(EXE_EXT)
 
 tex-mips-mutant:
+	$(NK_REQUIRE_POSIX_SHELL)
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_DIR)').mkdir(parents=True, exist_ok=True)"
 	$(CC) $(CFLAGS) -O2 -DNK_TEX_MIPS_MUTANT_NO_FILL -o $(BUILD_DIR)/tex_mips_mutant$(EXE_EXT) \
 		src/rt/gpu_sdl3vk/tex_mips_selftest.c -lm
@@ -1395,6 +1396,7 @@ gpu-mips-selftest: shader-verify $(RT_GE_O)
 # entry chain levels with the key off (the key-off cell, in a run without mips), 4 keys the budget
 # window on host presents instead of guest flips (the budget-tx cell).
 gpu-mips-mutant: shader-verify $(RT_GE_O)
+	$(NK_REQUIRE_POSIX_SHELL)
 	@for n in 1 2 3 4; do \
 		args='--scale 4'; \
 		case $$n in 1) want='Invalid commandBuffer';; 2) want='want no build for the through-mode draw (BAD)';; \
