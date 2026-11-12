@@ -413,6 +413,31 @@ const char *nk_platform_env_user_name(void);
 /* This process's id (_getpid on Win32, getpid on POSIX). */
 unsigned long nk_platform_process_id(void);
 
+/* The client end of a named pipe another program on this PC serves: local IPC, never a
+   network connection. Discord Rich Presence (#2259) talks to the Discord app through one.
+   Win32: the named pipe <name> on this PC (the local pipe namespace only), opened for
+   overlapped I/O so a write can give up and no read waits, at identification level only, so
+   the program serving the pipe cannot act as this user. POSIX: unsupported; supported() is
+   false and open fails. */
+typedef struct {
+    void *handle;  /* Win32: the pipe's HANDLE */
+    bool open;
+} NkLocalPipe;
+
+bool nk_platform_local_pipe_supported(void);
+/* Connect to the pipe `name` (no directory: "discord-ipc-0"). False, quietly, when nobody
+   serves it or it is busy. */
+bool nk_platform_local_pipe_open(NkLocalPipe *pipe, const char *name);
+/* Write all `len` bytes within timeout_ms. False on a short write, a broken pipe or the
+   timeout; the caller then closes the pipe. */
+bool nk_platform_local_pipe_write(NkLocalPipe *pipe, const void *data, size_t len,
+                                  unsigned timeout_ms);
+/* Read what has already arrived, up to cap bytes, without waiting: the count read, 0 when
+   nothing is waiting, -1 when the other end closed the pipe or it failed. */
+long nk_platform_local_pipe_read(NkLocalPipe *pipe, void *buf, size_t cap);
+/* Close it; safe on a zeroed or closed pipe. */
+void nk_platform_local_pipe_close(NkLocalPipe *pipe);
+
 /* The OS error code of the last failed nk_platform or nk_*_utf8 file call on this thread:
    GetLastError() on Win32, errno on POSIX. Read it straight after the failing call. */
 int nk_platform_last_os_error(void);
@@ -442,6 +467,13 @@ void nk_platform_setup_standard_streams(const char *fallback_log_name);
    SDL_GetBasePath() points there. Everywhere else it does nothing and returns true. False when
    the Android folder is missing; the process can still run but finds no bundled files. */
 bool nk_platform_host_startup(const char *log_tag);
+
+/* Process end, for a process that ends without exit()'s cleanup (Android's title process, see
+   android/app/src/main/cpp/nk_android_title.c). Android: flush stdout and stderr, and wait until
+   nk_platform_host_startup's copy has written every line to the system log and the log file, so
+   the last lines of a run are not lost; the streams go nowhere afterwards. Everywhere else it
+   does nothing. */
+void nk_platform_host_shutdown(void);
 
 #ifdef __cplusplus
 }

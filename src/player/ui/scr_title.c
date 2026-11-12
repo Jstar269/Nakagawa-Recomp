@@ -68,6 +68,7 @@
 #define TITLE_ID_ENH_SESSION TITLE_ID(0x000067u)
 #define TITLE_ID_ACE_ROW TITLE_ID(0x000068u)
 #define TITLE_ID_ACE_TEXT TITLE_ID(0x000069u)
+#define TITLE_ID_ACE_LAST TITLE_ID(0x00006Au)
 #define TITLE_ID_PROMPTS TITLE_ID(0x000040u)
 #define TITLE_ID_WAVES TITLE_ID(0x000050u)
 
@@ -561,26 +562,18 @@ PlayerUiAction player_ui_screen_title(NkUi *ui,
                         }
                         nk_ui_flow_end(ui, &buttons);
                     }
-                    /* What the play mode turns on, then what it did last time: one paragraph of
-                       two lines at most. Beside the 60 FPS paragraph it has one line, the last
-                       session when there is one (the button already says the state), so the
-                       card fits the smallest window. */
+                    /* What the play mode turns on, then what it did last time, each its own
+                       paragraph and each whole: the last session shows nowhere else, the parts
+                       list grows with each new part, and the body scrolls (#2245), so the card
+                       grows instead of cutting either sentence short. */
                     if (title->ace_shown && title->ace_line != NULL && title->ace_line[0] != '\0') {
-                        NkUiTextStyle text = nk_ui_type(NK_UI_TYPE_BODY_S, theme->paper);
-                        char paragraph[480];
-                        bool last = title->ace_last_session != NULL &&
-                                    title->ace_last_session[0] != '\0';
-                        if (title->enhancement_shown) {
-                            (void)snprintf(paragraph, sizeof(paragraph), "%s",
-                                           last ? title->ace_last_session : title->ace_line);
-                        } else {
-                            (void)snprintf(paragraph, sizeof(paragraph), "%s%s%s", title->ace_line,
-                                           last ? " " : "", last ? title->ace_last_session : "");
+                        nk_ui_text_role(ui, TITLE_ID_ACE_TEXT, title->ace_line, NK_UI_TYPE_BODY_S,
+                                        theme->paper);
+                        if (title->ace_last_session != NULL &&
+                            title->ace_last_session[0] != '\0') {
+                            nk_ui_text_role(ui, TITLE_ID_ACE_LAST, title->ace_last_session,
+                                            NK_UI_TYPE_BODY_S, theme->muted);
                         }
-                        nk_ui_text(ui, TITLE_ID_ACE_TEXT,
-                                   nk_ui_text_clamp(ui, paragraph, &text, inner,
-                                                    title->enhancement_shown ? 1 : 2),
-                                   &text);
                     }
                 }
                 if (title->enhancement_shown) {

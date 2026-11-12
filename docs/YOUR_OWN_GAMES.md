@@ -253,26 +253,30 @@ under every preset.
 ## Texture packs
 
 A texture pack replaces a game's textures with sharper images while the game plays in Enhanced or Ace. Nakagawa
-ships no pack and downloads none: a pack is a folder you made yourself or got from a community for your game.
+ships no pack and downloads none: a pack is a folder you made yourself or got from a community for your game, in
+the layout PSP emulators use (a `textures.ini` and PNG files named for the textures they replace). A folder that
+holds a `textures.zip` is read from that ZIP.
 
-1. Put the pack's folder anywhere on your PC. It holds a `textures.ini` (optional) and PNG files named for the
-   textures they replace, the layout PSP emulators use.
+1. Put the pack's folder anywhere on your PC.
 2. On the game's page, open **Enhanced options** and choose **Texture pack folder**. Pick the folder that holds the
-   `textures.ini` or the PNG files. The row then shows the folder's name and how many textures it lists, and
-   **Texture pack** turns on for that game.
+   `textures.ini`, the PNG files or the `textures.zip`. The row then shows the folder's name and how many textures
+   it lists, and **Texture pack** turns on for that game.
 3. Play the game in Enhanced or Ace. In Authentic, the pack is not used.
 
-If Nakagawa cannot read the pack's list (a folder that has gone, or a `textures.ini` with a line that is not a
-section, a comment or `key = value`, or no hash type), or the pack says it is made for another game (its `[games]` section lists other games only, or more than 64), it says
-why and does not use the pack. When that happens as you start the game, **Play without the pack** starts it without
-the pack this time and keeps your choice. To use the pack again, fix it where it is (Nakagawa reads it again at every start) or choose another; **Remove texture pack**
-or turning **Texture pack** off stops Nakagawa asking. **Remove texture pack** forgets the folder for that game and does not
-delete it. An image the pack lists that is missing or cannot be decoded is skipped on its own: that texture is drawn
+Nakagawa reads the pack's list (the folder or ZIP and its `textures.ini`) when you choose it and again each time
+the game starts. If it cannot read that list (the folder or ZIP has gone, a file in its place is not an ordinary
+file, the ZIP is damaged, or the `textures.ini` has a line it does not understand), or the pack says it is made for
+another game (its `[games]` section lists other games only, or more than 64), it says why and does not use the
+pack. When that happens as you start the game, **Play without the pack** starts it without the pack this time and
+keeps your choice. To use the pack again, fix it where it is or choose another; **Remove texture pack** or turning
+**Texture pack** off stops Nakagawa asking. **Remove texture pack** forgets the folder for that game and does not
+delete it.
+
+An image the pack lists is read the first time the game draws its texture. An image that is missing, damaged, too
+large, linked to a place outside the pack's folder, or the wrong size is skipped on its own: that texture is drawn
 as the game made it, and the rest of the pack is used.
 
-Today a replacement image must be 2 to 6 times the size of the texture it replaces, the same on both sides, and at
-most 2048 pixels on a side; other images are skipped and the texture is drawn as the game made it. Only PNG files
-are read. The details are in
+The details, including what a pack made for an emulator cannot match here, are in
 [`ENHANCEMENT_CONTRACT.md`](ENHANCEMENT_CONTRACT.md#1012-texture-replacement).
 
 ## Keep it to your own games

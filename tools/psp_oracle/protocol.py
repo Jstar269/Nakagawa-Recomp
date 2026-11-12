@@ -970,9 +970,13 @@ def _ge_case_semantic_errors(case: dict[str, Any], path: str) -> list[tuple[str,
 
 #: Same bound the former inline RAW_RESULT string had (schema maxLength 16384).
 GE_RESULT_RECORD_MAX_BYTES = 16384
+#: A probe run's record is one whole campaign stream (ge-raster: 946 records, about 330 KB).
+GE_PROBE_RECORD_MAX_BYTES = 1 << 20
 
 
-def _load_result_record(record: Any, results_root: Path | None) -> tuple[str | None, str]:
+def _load_result_record(
+    record: Any, results_root: Path | None, max_bytes: int = GE_RESULT_RECORD_MAX_BYTES
+) -> tuple[str | None, str]:
     """Return (raw result text, "") or (None, refusal reason) for a RESULT_RECORD.
 
     Raw hardware result text stays in the private results directory; a public corpus
@@ -990,14 +994,14 @@ def _load_result_record(record: Any, results_root: Path | None) -> tuple[str | N
         size = target.stat().st_size
         if not target.is_file():
             return None, "RESULT_RECORD is not a regular file."
-        if size > GE_RESULT_RECORD_MAX_BYTES:
+        if size > max_bytes:
             return None, (f"RESULT_RECORD is {size} bytes; a GE result record is at most "
-                          f"{GE_RESULT_RECORD_MAX_BYTES} bytes.")
+                          f"{max_bytes} bytes.")
         with target.open("rb") as handle:
-            data = handle.read(GE_RESULT_RECORD_MAX_BYTES + 1)
+            data = handle.read(max_bytes + 1)
     except OSError:
         return None, "RESULT_RECORD is not present in the results directory."
-    if len(data) > GE_RESULT_RECORD_MAX_BYTES:
+    if len(data) > max_bytes:
         return None, "RESULT_RECORD grew past the size bound while being read."
     if hashlib.sha256(data).hexdigest() != record["sha256"]:
         return None, "RESULT_RECORD sha256 does not match the stored result."
@@ -1005,6 +1009,25 @@ def _load_result_record(record: Any, results_root: Path | None) -> tuple[str | N
         return data.decode("utf-8"), ""
     except UnicodeDecodeError:
         return None, "RESULT_RECORD is not UTF-8 result text."
+
+
+def _raw_identity_refusal(metadata: dict[str, str], envelope: dict[str, Any]) -> str:
+    """Why a raw result's identity does not bind to its envelope, or "" when it does."""
+
+    if metadata.get("source") != "psp":
+        return f"raw result source {metadata.get('source')!r} is not PSP hardware."
+    if metadata.get("model") != envelope["CONSOLE_MODEL"]:
+        return "raw result model does not match CONSOLE_MODEL."
+    if metadata.get("firmware") != envelope["FW"]:
+        return "raw result firmware does not match FW."
+    if metadata.get("source_commit") != envelope["SOURCE_COMMIT"]:
+        return "raw result source_commit does not match SOURCE_COMMIT."
+    if metadata.get("binary_sha256") != envelope["BINARY_SHA256"]:
+        return "raw result binary_sha256 does not match BINARY_SHA256."
+    metadata_problems = provenance_issues(metadata)
+    if metadata_problems:
+        return "raw result has unmeasured identity: " + "; ".join(metadata_problems)
+    return ""
 
 
 def _ge_case_status(case: dict[str, Any], results_root: Path | None = None) -> tuple[str, str]:
@@ -1045,20 +1068,9 @@ def _ge_case_status(case: dict[str, Any], results_root: Path | None = None) -> t
         parsed = parse_output(raw_result)
     except ProtocolError as exc:
         return "REFUSED", f"raw result protocol is invalid: {exc}"
-    metadata = parsed.metadata_dict()
-    if metadata.get("source") != "psp":
-        return "REFUSED", f"raw result source {metadata.get('source')!r} is not PSP hardware."
-    if metadata.get("model") != envelope["CONSOLE_MODEL"]:
-        return "REFUSED", "raw result model does not match CONSOLE_MODEL."
-    if metadata.get("firmware") != envelope["FW"]:
-        return "REFUSED", "raw result firmware does not match FW."
-    if metadata.get("source_commit") != envelope["SOURCE_COMMIT"]:
-        return "REFUSED", "raw result source_commit does not match SOURCE_COMMIT."
-    if metadata.get("binary_sha256") != envelope["BINARY_SHA256"]:
-        return "REFUSED", "raw result binary_sha256 does not match BINARY_SHA256."
-    metadata_problems = provenance_issues(metadata)
-    if metadata_problems:
-        return "REFUSED", "raw result has unmeasured identity: " + "; ".join(metadata_problems)
+    identity_refusal = _raw_identity_refusal(parsed.metadata_dict(), envelope)
+    if identity_refusal:
+        return "REFUSED", identity_refusal
     if envelope["CASE_ID"] != case_id:
         return "REFUSED", "oracle CASE_ID does not match the corpus case_id."
     records = [
@@ -1079,6 +1091,70 @@ def _ge_case_status(case: dict[str, Any], results_root: Path | None = None) -> t
         if int(observed, 16) != pixel["pixel_value"]:
             return "REFUSED", f"raw result {key} does not match the case pixel vector."
     return "MEASURED", "acceptance-eligible PSP_HARDWARE record matches this case and its pixel results."
+
+
+def _ge_probe_run_semantic_errors(run: dict[str, Any], path: str) -> list[tuple[str, str]]:
+    """Public checks of one corpus probe run: its identity, cells, records and window digests."""
+
+    from .parse_golden import GE_CORPUS_PROBES, ge_window_fnv1a64
+
+    errors: list[tuple[str, str]] = []
+    probe_case = run["probe_case"]
+    test_id, cells, suffixes = GE_CORPUS_PROBES[probe_case]
+    if run["test_id"] != test_id:
+        errors.append((path + ".test_id", f"probe {probe_case} records {test_id}"))
+    envelope = run["evidence_envelope"]
+    if not isinstance(envelope, dict):
+        errors.append((path + ".evidence_envelope", "a probe run needs its PSP_HARDWARE envelope"))
+    else:
+        if envelope["CASE_ID"] != probe_case:
+            errors.append((path + ".evidence_envelope.CASE_ID", f"must name the probe {probe_case}"))
+        if envelope["EVIDENCE_CLASS"] != "PSP_HARDWARE" or envelope["ACCEPTANCE_ELIGIBLE"] is not True:
+            errors.append((path + ".evidence_envelope",
+                           "a probe run is only an acceptance-eligible PSP_HARDWARE run"))
+    names = tuple(cell["cell"] for cell in run["cells"])
+    if names != cells:
+        errors.append((path + ".cells", f"must be the {len(cells)} {probe_case} cells in stream order"))
+        return errors
+    for index, cell in enumerate(run["cells"]):
+        cell_path = f"{path}.cells[{index}]"
+        expected = tuple(f"{cell['cell']}-{suffix}" for suffix in suffixes)
+        if tuple(record["case_id"] for record in cell["records"]) != expected:
+            errors.append((cell_path + ".records", "must be " + ", ".join(expected)))
+            continue
+        rows = [record["words"] for record, suffix in zip(cell["records"], suffixes, strict=True)
+                if suffix.startswith("r")]
+        if ge_window_fnv1a64(rows) != cell["window_fnv1a64"]:
+            errors.append((cell_path + ".window_fnv1a64", "is not the digest of the cell's rows"))
+    return errors
+
+
+def _ge_probe_run_status(run: dict[str, Any], results_root: Path | None) -> tuple[str, str]:
+    """MEASURED only when the private record re-derives every cell of the run exactly."""
+
+    from .parse_golden import ge_corpus_cells, parse_campaign_probe_output
+
+    if results_root is None:
+        return "NOT_RUN", ("PSP_HARDWARE envelope references a private result record; no results "
+                           "directory is available to verify it.")
+    envelope = run["evidence_envelope"]
+    raw_result, refusal = _load_result_record(
+        envelope.get("RESULT_RECORD"), results_root, GE_PROBE_RECORD_MAX_BYTES)
+    if raw_result is None:
+        return "REFUSED", refusal
+    try:
+        sequence = parse_campaign_probe_output(raw_result, run["probe_case"])
+        cells = ge_corpus_cells(sequence, run["probe_case"])
+    except ProtocolError as exc:
+        return "REFUSED", f"raw result does not give the corpus cells: {exc}"
+    identity_refusal = _raw_identity_refusal(sequence.metadata, envelope)
+    if identity_refusal:
+        return "REFUSED", identity_refusal
+    for recorded, derived in zip(run["cells"], cells, strict=True):
+        if recorded != derived:
+            return "REFUSED", f"corpus cell {recorded['cell']} differs from the result record."
+    return "MEASURED", (f"acceptance-eligible PSP_HARDWARE record gives all {len(cells)} cells of "
+                        f"{run['test_id']} exactly.")
 
 
 def ge_corpus_report(corpus: Any, schema: Any, results_root: Path | None = None) -> dict[str, Any]:
@@ -1124,7 +1200,8 @@ def ge_corpus_report(corpus: Any, schema: Any, results_root: Path | None = None)
     cases = corpus.get("cases") if isinstance(corpus, dict) else None
     if not isinstance(cases, list):
         cases = []
-    root_errors = [(path, reason) for path, reason in schema_errors if not path.startswith("cases[")]
+    root_errors = [(path, reason) for path, reason in schema_errors
+                   if not path.startswith(("cases[", "probe_runs["))]
     if root_errors:
         reason = "; ".join(
             f"{path or 'corpus'}: {message}" for path, message in root_errors
@@ -1159,10 +1236,35 @@ def ge_corpus_report(corpus: Any, schema: Any, results_root: Path | None = None)
         else:
             status, reason = _ge_case_status(item, results_root)
             case_reports.append({"case_id": report_id, "status": status, "reason": reason})
-    report_status = "REFUSED" if any(item["status"] == "REFUSED" for item in case_reports) else "IN_THE_WORKS"
+
+    probe_runs = corpus.get("probe_runs", []) if isinstance(corpus, dict) else []
+    run_reports: list[dict[str, str]] = []
+    seen_test_ids: set[str] = set()
+    for index, run in enumerate(probe_runs if isinstance(probe_runs, list) else []):
+        test_id = run.get("test_id") if isinstance(run, dict) else None
+        report_id = test_id if isinstance(test_id, str) else f"probe_runs[{index}]"
+        path_prefix = f"probe_runs[{index}]"
+        errors = [
+            (path, reason) for path, reason in schema_errors
+            if path == path_prefix or path.startswith((path_prefix + ".", path_prefix + "["))
+        ]
+        if not errors and isinstance(run, dict):
+            errors.extend(_ge_probe_run_semantic_errors(run, path_prefix))
+        if isinstance(test_id, str):
+            if test_id in seen_test_ids:
+                errors.append((path_prefix + ".test_id", "duplicates an earlier probe run"))
+            seen_test_ids.add(test_id)
+        if errors:
+            reason = "; ".join(f"schema violation at {path}: {message}" for path, message in errors)
+            run_reports.append({"test_id": report_id, "status": "REFUSED", "reason": reason})
+        else:
+            status, reason = _ge_probe_run_status(run, results_root)
+            run_reports.append({"test_id": report_id, "status": status, "reason": reason})
+    refused = any(item["status"] == "REFUSED" for item in (*case_reports, *run_reports))
     return {
-        "status": report_status,
+        "status": "REFUSED" if refused else "IN_THE_WORKS",
         "semantic_boundary": boundary,
         "tracking_issue": issue,
         "cases": case_reports,
+        "probe_runs": run_reports,
     }

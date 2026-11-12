@@ -263,6 +263,7 @@ add_executable(test_player_state
     tests/native/test_player_state.c
     tests/native/native_test_isolation.c
     src/player/player_state.c
+    src/player/discord_presence.c
     src/player/input_settings.c
     src/player/iso_reader.c
     src/player/package_builder.c
@@ -623,6 +624,20 @@ endif()
 add_test(NAME update_check_test COMMAND test_update_check)
 set_tests_properties(update_check_test PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
+# Discord status (#2259) on a fake transport and, on Windows, a fake pipe server with a
+# test-only name; it never opens Discord's own pipes.
+add_executable(test_discord_presence
+    tests/native/test_discord_presence.c
+    tests/native/native_test_isolation.c
+    src/player/discord_presence.c
+)
+target_include_directories(test_discord_presence PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/player
+)
+target_link_libraries(test_discord_presence PRIVATE nakagawa_core)
+add_test(NAME discord_presence_test COMMAND test_discord_presence)
+
 add_executable(test_input_settings
     tests/native/test_input_settings.c
     tests/native/native_test_isolation.c
@@ -746,6 +761,7 @@ if(BUILD_PLAYER)
         src/player/package_builder.c
         src/core/nk_disc_chd.c
         src/player/update_check.c
+        src/player/discord_presence.c
         ${NK_UI_CORE_SOURCES}
         ${NK_UI_EDGE_SOURCES}
         src/ui/backend/nk_ui_sdlr.c
@@ -981,6 +997,8 @@ set(NK_RUNTIME_SOURCES
     src/rt/gpu_sdl3vk/tex_scale.c
     src/rt/gpu_sdl3vk/glyph_recon.c
     src/rt/texrepl.c
+    src/core/nk_zip.c
+    src/core/nk_psp_inflate.c
     third_party/xbrz/xbrz.c
     src/rt/gpu_sdl3vk/ace_ui.c
     src/rt/gpu_sdl3vk/ace_smooth.c

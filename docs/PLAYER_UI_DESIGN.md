@@ -186,7 +186,7 @@ not from constants. At a larger text size:
 - a row of buttons wraps onto a second row when it would run past its column (`nk_ui_flow_begin`: the Settings
   actions, the title page's actions);
 - the setting rows on Accessibility, the online options, Updates and build tools put each sentence under its
-  button, at the full width, when beside it a sentence would be cut;
+  button, at the full width, when beside it a sentence would be cut, and there it wraps whole;
 - the Library's narrowest card grows with the text, so fewer columns fit and a page holds fewer cards
   (`player_ui_library_page_size_at`), and its heading row leaves the LIBRARY heading out when the row's controls
   would not fit beside it (the tab names the page);
@@ -201,7 +201,11 @@ screens are laid out on at least its
 1280 x 720 design size (`NkUiViewport.min_logical_w` / `min_logical_h`): a smaller window, down to the 960 x 540
 minimum, lowers the density so the same layout is drawn smaller, instead of pushing buttons and the prompt bar off
 the window. A larger window keeps its density and gains room. Clay clips at most 100 containers per layout: shorten
-long text with `nk_ui_text_clamp` instead of clipping it.
+long text with `nk_ui_text_clamp` instead of clipping it, but only text the player can read whole another way (a
+value with its own editor or detail page); text with no other place to be read wraps whole on a page that scrolls.
+One exception is by design: at the design text size a setting's sentence beside its button is clamped to two lines,
+so the rows keep their side-by-side layout (Settings > Enhanced stacks its rows at every size instead). Above it, a sentence that would be cut makes the rows stack, and under
+its button the sentence wraps whole.
 
 Wrapped text keeps its wrapped height when its page is overfull. Clay took a paragraph's minimum height before
 wrapping, as one line, so compressing an overfull column squeezed the paragraph back and the next block painted over
@@ -333,14 +337,20 @@ first page.
 
 FIND, beside it, opens the find box; so do the screen's Options action (the pad's west button, Space) and, from a
 hardware keyboard, "/" or Ctrl+F. The box takes TEST THIS PC's room: a field showing what is typed ("Type a name or
-disc ID" until then), a primary DONE, and an on-screen keyboard of 44 px keys in four rows 4 px apart (digits, three
-QWERTY rows with `-`, `.`, `'`, SPACE and DELETE), so a row of cards still fits at 1280 x 720. The grid shows the
-games whose name or disc ID holds what is typed, ignoring case, without the add card or the demos; the count reads
-"3 of 40 titles", and no match says "No games match". A hardware keyboard types straight in (SDL's text input is on
+disc ID" until then) and, 4 px under it, the player's shared on-screen keyboard (`src/player/ui/ui_keyboard.c`, the
+nickname editor's too). Its keys are small controls (34 px at 100% text) in rows 4 px apart, the last 8 px below
+the others: digits, three QWERTY rows with `'`, `,`, `.` and `-`, a row of symbols, and SHIFT, SPACE, DELETE, CANCEL
+and DONE. The letters are lower case until SHIFT. The field is a key's height, so a row of cards still fits under
+the box at 1280 x 720; with larger text the grid scrolls under it.
+The box takes printable characters, up to 63 bytes. The grid shows the games whose name or disc ID holds what is
+typed, ignoring case, without the add card or the demos; the count reads "3 of 40 titles", and no match says "No
+games match". With a controller the keyboard's shortcuts work while the box is open: X deletes, Y types a space, L
+or R is SHIFT and Start is DONE (instead of the next tab and Settings). DONE moves focus to the first match, and the
+box stays open. A hardware keyboard types straight in, through the same filter and limit (SDL's text input is on
 while the box is open, so an input method works too), Backspace deletes, and letters that are launcher shortcuts
 (O, S, D, Q, E) are typed instead. Opened from the keyboard, focus is on DONE, so Enter moves to the first match; from
-a controller or the mouse, on Q. Esc or B clears and closes the box and focus returns to FIND. The prompt bar reads
-MOVE, SELECT and CLEAR while it is open.
+a controller or the mouse, on q. CANCEL, Esc or B clears and closes the box and focus returns to FIND. The prompt bar
+reads MOVE, SELECT, DELETE, DONE and CLEAR while it is open.
 
 The sorts are those three. Find is one
 model for every input: a Find action (a button, and a controller button) opens a find box that filters the library
@@ -557,16 +567,17 @@ PLAY MODE closes the GAME card (the play modes, docs/ENHANCEMENT_CONTRACT.md sec
 default (AUTHENTIC: OPTIONS or ENHANCED: OPTIONS; Authentic for a new library), and it opens Settings > Enhanced, a
 dialog card in the same pattern: PLAY MODE, then one row per Enhanced part from the player's part table (TEXTURE
 FILTERING 16x, 8x, 4x, 2x, Off; CRISP SYSTEM TEXT; SPEED READOUT; GAME BADGE; WIDESCREEN; SMOOTH MOTION; CLEAN
-PITCHED SOUND; FINER PATCHES; WIDER CULLING; SHARPER ENLARGING; a new library has 16x filtering, crisp text and the
-badge on and the rest off, and a graphics preset sets SHARPER ENLARGING and CRISP SYSTEM TEXT in Enhanced and Ace,
-below), each beside a sentence
-that says what it does and what it costs. A new part is a new row with no change to the page. While the mode is
+PITCHED SOUND; FINER PATCHES; WIDER CULLING; SHARPER ENLARGING; STICK DEAD ZONE; SHORT LOADS; FULL 32-BIT COLOUR; a
+new library has 16x filtering, crisp text and the badge on and the rest off, and a graphics preset sets SHARPER
+ENLARGING and CRISP SYSTEM TEXT in Enhanced and Ace, below), each beside a sentence that says what it does and what it
+costs. A new part is a new row with no change to the page. While the mode is
 Authentic the part rows are disabled (`dim`, not focusable) and keep their values. The title page's ENHANCEMENTS
 card shows PLAY MODE for every game (LIBRARY DEFAULT, AUTHENTIC, ENHANCED, and ACE only for a game with a usable
 package; `PRIMARY` while Enhanced or Ace is in effect, never the default focus), ENHANCED OPTIONS, which opens the
 same page for that game alone (its play mode, and each part on LIBRARY (16X) or its own value; Done returns
-to the title page), one or two lines of what is on and the last session, and, while Ace is in effect, Ace's 60 FPS
-switch beside them. A library card where Enhanced or Ace is in effect carries an `ENHANCED` or `ACE` badge at the
+to the title page), and, while Ace is in effect, Ace's 60 FPS switch in the same row. Under the buttons come what is
+on and, as its own `BODY_S` `muted` paragraph, the last session. Both sentences wrap whole, however many parts are
+on: the page body scrolls, so the card grows instead of ending either one in an ellipsis. A library card where Enhanced or Ace is in effect carries an `ENHANCED` or `ACE` badge at the
 art's top right. In game, the pause menu's caption names the mode and its parts and its Settings page has a live
 SPEED READOUT row; the launch notice (ENHANCED or ACE, top right, 3 s, a cut with Reduce motion) and the readout
 (top left) are chips on the 16 px safe area.
@@ -606,9 +617,9 @@ about 4x or more on any screen of 1080p or more, past that range everywhere, and
 every pass counts. HIGH turns it off as ULTRA without it, the plain 4x picture. Where the GPU renderer cannot run FSR
 1, the normal scaling filter stays, as for the part. `fsr1-selftest` reports the pass's cost at each of these sizes
 (`docs/SETUP.md`). No preset sets frame pacing, the play mode, SMOOTH MOTION, WIDESCREEN, TEXTURE FILTERING, CLEAN
-PITCHED SOUND, FINER PATCHES, WIDER CULLING, the SPEED READOUT or the GAME BADGE: they change timing, framing,
-guest-visible output or the HUD, or
-have no measured cost on low-end GPUs, so they stay the library's and each game's.
+PITCHED SOUND, FINER PATCHES, STICK DEAD ZONE, SHORT LOADS, WIDER CULLING, FULL 32-BIT COLOUR, the SPEED READOUT or
+the GAME BADGE: they change timing, framing, input, guest-visible output or the HUD, or have no measured cost on
+low-end GPUs, so they stay the library's and each game's.
 
 The parts a preset sets are resolved with the rest (`player_play_resolve`): a game's own value, else the preset's,
 else the library's, so the launch line, `SR_PRESENT_UPSCALE` and both Enhanced pages agree. Settings > Enhanced shows
@@ -782,8 +793,10 @@ Drawn by the runtime over the frozen game frame under the `scrim` while the game
 - Focus ring 7.2:1 on the ground, at least 6.1:1 on any surface, 4.4:1 over the brightest wave point and 3.7:1 on
   the scrim over a white game frame; high-contrast focus for any background, from Settings > Accessibility or a
   Windows contrast theme.
-- Targets are at least 44 px high; the interface size (100 to 200%) scales the whole layout through the density,
-  and the text size (100, 125 or 150%) scales type alone, with the layout reflowing around it.
+- Targets are at least 44 px high, except small controls (34 px at 100% text): the library's heading-row buttons
+  and the on-screen keyboard's keys, small so that a row of cards still fits under the find box at 1280 x 720. The
+  interface size (100 to 200%) scales the whole layout through the density, and the text size (100, 125 or 150%)
+  scales type alone, with the layout reflowing around it.
 - Reduce motion holds the waves and makes transitions cuts; Automatic follows Windows' Animation effects.
 - Launcher sounds are off by default and never replace a visual cue.
 

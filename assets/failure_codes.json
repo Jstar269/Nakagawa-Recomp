@@ -1429,6 +1429,12 @@
         "player"
       ]
     },
+    "UPDATE_INSTALL_LEFTOVER_IN_USE": {
+      "stage": "host",
+      "in": [
+        "player"
+      ]
+    },
     "UPDATE_INSTALL_MOVE_FAILED": {
       "stage": "host",
       "in": [

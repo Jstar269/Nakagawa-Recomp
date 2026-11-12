@@ -895,7 +895,7 @@ static void settings_ace(NkUi *ui, const PlayerUiSettingsModel *model, float inn
             *result = settings_op(PLAYER_UI_SETTINGS_CYCLE_PLAY_MODE);
         }
         for (int i = 0; i < count; i++) {
-            if (scr_wizard_value_state(ui, PLAYER_UI_ID_SETTINGS_ENHANCED_PART + (NkUiId)i,
+            if (scr_wizard_value_state(ui, PLAYER_UI_ID_ENHANCED_PART(i),
                                        SET_ID_TEXT + 0x404u + 4u * (NkUiId)i, rows[i + 1].name,
                                        rows[i + 1].value, rows[i + 1].sentence,
                                        model->enhanced_rows[i].on, off, inner - 32.0f, &column)) {
@@ -952,9 +952,30 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
         nk_ui_text_role(ui, FLOW_ID_LEAD, SCR_ONLINE_NOT_BUILT_LINE, NK_UI_TYPE_BODY_S,
                         theme->warning);
         if (scr_wizard_box_begin(ui, 0u)) {
-            WizardColumn column = scr_online_developer_column(ui, model->online_mode,
-                                                              model->developer_mode,
-                                                              inner - 32.0f);
+            /* Discord status shows when this build can show it, or while it is stored On
+               (so it can be turned off), as the Online mode row does (#2007). */
+            bool discord_row = model->discord_available || model->discord_presence;
+            const char *discord_sentence = model->discord_available
+                ? SCR_DISCORD_SENTENCE : SCR_DISCORD_STORED_ON_SENTENCE;
+            /* One button column for every row the page shows, so a sentence of any of them
+               that would be cut makes them all stack. The Nickname button's value is clamped
+               to half the column, so only its name counts for the column's width. */
+            WizardRow rows[4];
+            size_t row_count = 0u;
+            if (model->online_mode) {
+                rows[row_count++] = (WizardRow){"Online mode", "On",
+                                                SCR_ONLINE_STORED_ON_SENTENCE};
+            }
+            rows[row_count++] = (WizardRow){"Developer mode",
+                                            model->developer_mode ? "On" : "Off",
+                                            WIZARD_DEVELOPER_SENTENCE};
+            if (discord_row) {
+                rows[row_count++] = (WizardRow){"Discord status",
+                                                model->discord_presence ? "On" : "Off",
+                                                discord_sentence};
+            }
+            rows[row_count++] = (WizardRow){"Nickname", "", SCR_NICKNAME_SENTENCE};
+            WizardColumn column = scr_wizard_column(ui, rows, row_count, inner - 32.0f, false);
             if (model->online_mode &&
                 scr_wizard_switch(ui, PLAYER_UI_ID_SETTINGS_ONLINE_MODE, SET_ID_TEXT + 0x80u,
                                   "Online mode", SCR_ONLINE_STORED_ON_SENTENCE, true,
@@ -966,6 +987,12 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                               model->developer_mode, inner - 32.0f, &column)) {
                 *result = settings_op(PLAYER_UI_SETTINGS_TOGGLE_DEVELOPER);
             }
+            if (discord_row &&
+                scr_wizard_switch(ui, PLAYER_UI_ID_SETTINGS_DISCORD, SET_ID_TEXT + 0xB0u,
+                                  "Discord status", discord_sentence, model->discord_presence,
+                                  inner - 32.0f, &column)) {
+                *result = settings_op(PLAYER_UI_SETTINGS_TOGGLE_DISCORD);
+            }
             {
                 /* The console nickname games read (#2197); its button opens the nickname
                    editor. A long one is shortened here. */
@@ -975,8 +1002,7 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                                      nk_ui_text_clamp(ui, safe_text(model->nickname,
                                                                     NK_NICKNAME_DEFAULT),
                                                       &value, column.cell * 0.5f, 1),
-                                     "What games show as this PSP's nickname. It is never "
-                                     "taken from this PC's user name.",
+                                     SCR_NICKNAME_SENTENCE,
                                      false, inner - 32.0f, &column)) {
                     *result = settings_op(PLAYER_UI_SETTINGS_EDIT_NICKNAME);
                 }
@@ -1123,13 +1149,17 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
         nk_ui_text_role(ui, FLOW_ID_TITLE, "PSP fonts", NK_UI_TYPE_TITLE, theme->paper);
         nk_ui_text_role(ui, FLOW_ID_LEAD,
                         /* #2005: what the stand-in fonts change, as font/README.md
-                           describes them (shapes, widths) and the converter's Latin set
-                           (tools/ttf2pgf.py, no Cyrillic). */
+                           describes them: letter shapes, Latin line widths within 3 %, and the
+                           characters they lack. The Latin stand-ins have every character
+                           of the PSP's Latin fonts, Cyrillic included (--latin-cyrillic-text
+                           in mk/housekeeping.mk); the Japanese one lacks about 2,200 of the
+                           PSP font's characters, all outside code page 932, and the Korean
+                           one 512, none of them Hangul. */
                         "Optional. Without your PSP's own fonts, every game still runs and "
                         "shows its text in open stand-in fonts. They look different: the "
                         "letters are shaped differently, English lines come out a little wider "
-                        "or narrower, and a few characters such as Cyrillic letters are "
-                        "missing. For the PSP's own look, "
+                        "or narrower, and some rarely used characters of the PSP's Japanese "
+                        "and Korean fonts are missing. For the PSP's own look, "
                         "connect your PSP by USB and choose Get fonts from my PSP, or copy the "
                         ".pgf files from flash0:/font on your PSP to a folder on this PC "
                         "(docs/SETUP.md, \"Copying the fonts from your PSP\") and choose them "

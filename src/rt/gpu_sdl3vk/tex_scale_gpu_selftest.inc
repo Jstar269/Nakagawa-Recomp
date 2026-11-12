@@ -986,6 +986,36 @@ static int xst_cell_replace(int f) {
         return 0;
     }
 
+    /* A stored pack that no longer reads (its folder gone, or its textures.ini malformed): an Ace
+     * start refuses it with one TEX_REPLACE: refused line and returns, so the run goes on without it. */
+    {
+        char gone[400], bad_dir[400];
+        snprintf(gone, sizeof(gone), "%s/texrepl_gpu_gone_pack", SR_SELFTEST_BUILD_ROOT);
+        snprintf(bad_dir, sizeof(bad_dir), "%s/texrepl_gpu_bad_pack", SR_SELFTEST_BUILD_ROOT);
+        nk_platform_mkdir_p(bad_dir);
+        snprintf(path, sizeof(path), "%s/textures.ini", bad_dir);
+        FILE *f = nk_fopen_utf8(path, "wb");
+        const int wrote = f && fputs("[options]\nhash = crc32\n", f) >= 0;
+        if (f) fclose(f);
+        const char *const stored[2] = { gone, bad_dir };
+        for (int k = 0; k < 2; k++) {
+            saved = s_repl;
+            s_repl = NULL;
+            xst_setenv("SR_TEX_REPLACE", stored[k]);
+            tex_repl_init(1);
+            const int read = s_repl != NULL;
+            tex_repl_shutdown();
+            xst_setenv("SR_TEX_REPLACE", NULL);
+            s_repl = saved;
+            if (!wrote || read) {
+                fprintf(stderr, "gpu texscale selftest: FAIL replace: an unreadable stored pack (%s) was used\n",
+                        k ? "malformed textures.ini" : "folder gone");
+                free(rimg); free(wide);
+                return 0;
+            }
+        }
+    }
+
     xst_reset();
     nk_tex_scale_set_sync(1);
     s_repl = nk_texrepl_open(dir, 0, err, sizeof(err));

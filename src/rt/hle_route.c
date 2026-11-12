@@ -11,8 +11,10 @@
  * Extracted from hle.c on 2026-10-31 (#307). */
 
 #include "hle_internal.h"
+#include "ge_scene.h"
 #include "nid_names.h"   /* sr_nid_name(): names unknown NIDs in the trap below */
 #include "replay_checkpoint.h" /* sr_replay_pad_skip, sr_replay_pad_sample */
+#include "ace.h"         /* g_ace_on, ace_stick_sample: Ace's stick dead-zone remap */
 
 #define ROUTE_MAX_CP     32
 #define ROUTE_MAX_ALT    4
@@ -245,6 +247,7 @@ static void route_fail(const char *fmt, ...) {
         sr_flight_fatal(SR_FLIGHT_KIND_FATAL_HOST, 0u, 0u, ROUTE_FAIL_EXIT);
         hle_exit_audio_stats();
         hle_exit_close_audio_dump();
+        ge_scene_dump_finish();
         sr_compat_report();
         (void)sr_videorec_finish_status("a route check failed", ROUTE_FAIL_EXIT);
         sr_perf_shutdown();
@@ -1463,7 +1466,14 @@ void sr_ctrl_sample(void) {
     uint8_t route_lx = 128u, route_ly = 128u;
     int route_stick = s_route_state != ROUTE_OFF && sr_input_stick(&s_input, &route_lx, &route_ly);
     if (s_ctrl_sampling_mode == 1u) {
-        if (gui_on()) gui_analog(&lx, &ly);
+        if (gui_on()) {
+            gui_analog(&lx, &ly);
+            /* Ace's stick dead-zone remap (stick=<counts>, contract 11.3.11) reshapes the live host
+             * stick only. It does nothing unless the run's line asked for it, so every other run
+             * latches the bytes the window gave. A route's stick and a replay's recorded sample
+             * below are already the guest's bytes and pass through unchanged. */
+            if (g_ace_on) ace_stick_sample(&lx, &ly, gui_stick_dead_zone());
+        }
 #ifdef SR_HLE_THREAD_SELFTEST
         if (s_ctrl_test_stick) { lx = s_ctrl_test_lx; ly = s_ctrl_test_ly; }
 #endif
@@ -1963,7 +1973,7 @@ unsigned sr_hle_test_ge_finish_reports(int reset) {
  * callback the same way (PSP-GE-TIMING-001 c4, measured on a PSP-3000); the FINISH id itself
  * is UNMEASURED. A title that marks one kind of frame with its own FINISH id waited forever
  * for a callback that, given the queue ID, never saw it. */
-void ge_finish_callback(CpuState *s, uint32_t cbid, uint32_t finish_id, uint32_t user_arg) {
+static void ge_finish_callback_run(CpuState *s, uint32_t cbid, uint32_t finish_id, uint32_t user_arg) {
     const size_t cb_max = sizeof(s_ge_cb) / sizeof(s_ge_cb[0]);
     /* sceGeListEnQueue's callback ID is a signed int, and a negative one (the SDK's -1) is a
      * list enqueued with no callback, so there is nothing to run and nothing to report. */
@@ -1989,6 +1999,127 @@ void ge_finish_callback(CpuState *s, uint32_t cbid, uint32_t finish_id, uint32_t
     if (ge_log_on())
         fprintf(stderr, "GE_FINISH_CB: callback fn=0x%08x returned\n", cb->finish_func);
 }
+
+/* Finish callbacks run one at a time on each thread. On a PSP the finish callback runs from the
+ * GE driver's finish interrupt, and an interrupt handler is not entered again by its own
+ * interrupt while it runs, so a list that completes while a finish callback is still running
+ * has its callback run after that one returns (inferred from the interrupt model; not measured).
+ * Here an enqueued list runs at once, on the enqueuing thread, so a callback that enqueues the
+ * next list (a common way to chain frames) would otherwise run that list's callback inside
+ * itself, one guest-call frame deeper per list, until the thread has no frame left and the
+ * callback is refused.
+ *
+ * So the first finish callback a thread runs opens a run for that thread; completions the
+ * thread raises before the run ends wait in it and run, first-in first-out, after the running
+ * callback returns. The run belongs to its thread, not to the process: a callback that blocks
+ * (it runs in thread context here) leaves other threads' callbacks free to run, as they did
+ * before, and a thread that ends inside a callback gives its run back through
+ * ge_finish_release_owner(). Each list is marked complete, and its waiters woken, before its
+ * waiting callback runs; whether a PSP wakes them before or after the callback is UNMEASURED.
+ *
+ * Both bounds are this runtime's, not the PSP's: a run holds up to GE_LIST_MAX waiting
+ * completions (a waiting completion no longer holds a list slot) and up to
+ * GE_FINISH_RUNS_MAX contexts (threads, and owner 0 for interrupt or no-thread context) may be
+ * inside a finish callback at once. Past either bound the run stops by name; the compatibility
+ * report records the import that completed the list. */
+enum { GE_FINISH_PENDING_MAX = GE_LIST_MAX, GE_FINISH_RUNS_MAX = 8 };
+typedef struct {
+    int active;
+    uint32_t owner;
+    unsigned head, count;
+    struct {
+        uint32_t cbid, finish_id, user_arg;
+    } pending[GE_FINISH_PENDING_MAX];
+} GeFinishRun;
+static GeFinishRun s_ge_finish_runs[GE_FINISH_RUNS_MAX];
+
+static GeFinishRun *ge_finish_run_of(uint32_t owner) {
+    for (int i = 0; i < GE_FINISH_RUNS_MAX; i++)
+        if (s_ge_finish_runs[i].active && s_ge_finish_runs[i].owner == owner) return &s_ge_finish_runs[i];
+    return NULL;
+}
+
+void ge_finish_callback(CpuState *s, uint32_t cbid, uint32_t finish_id, uint32_t user_arg) {
+    const uint32_t owner = sched_current_uid();
+    GeFinishRun *run = ge_finish_run_of(owner);
+    if (run) {
+        if (run->count == GE_FINISH_PENDING_MAX) {
+            (void)hle_unmodelled_stop("GE finish callback",
+                                      "with %d list completions already waiting for the running "
+                                      "finish callback to return has no measured result",
+                                      GE_FINISH_PENDING_MAX);
+            return;
+        }
+        unsigned tail = (run->head + run->count) % GE_FINISH_PENDING_MAX;
+        run->pending[tail].cbid = cbid;
+        run->pending[tail].finish_id = finish_id;
+        run->pending[tail].user_arg = user_arg;
+        run->count++;
+        if (ge_log_on())
+            fprintf(stderr, "GE_FINISH_CB: cbid=%u id=0x%04x waits for the running finish callback "
+                            "(uid=0x%x)\n", cbid, finish_id, owner);
+        return;
+    }
+    for (int i = 0; i < GE_FINISH_RUNS_MAX && !run; i++)
+        if (!s_ge_finish_runs[i].active) run = &s_ge_finish_runs[i];
+    if (!run) {
+        (void)hle_unmodelled_stop("GE finish callback",
+                                  "while %d other contexts are inside finish callbacks "
+                                  "has no measured result", GE_FINISH_RUNS_MAX);
+        return;
+    }
+    run->active = 1;
+    run->owner = owner;
+    run->head = run->count = 0u;
+    ge_finish_callback_run(s, cbid, finish_id, user_arg);
+    for (;;) {
+        /* A thread that ended inside the callback gave this run back, and the slot may be
+         * another thread's by now; a scheduler that resumed it here must not touch the slot. */
+        if (!run->active || run->owner != owner) {
+            (void)hle_unmodelled_stop("GE finish callback",
+                                      "returned on uid 0x%x after its thread's run was given back "
+                                      "has no measured result", owner);
+            return;
+        }
+        if (!run->count || s->flow_kind == SR_FLOW_FATAL) break;
+        unsigned head = run->head;
+        run->head = (head + 1u) % GE_FINISH_PENDING_MAX;
+        run->count--;
+        ge_finish_callback_run(s, run->pending[head].cbid, run->pending[head].finish_id,
+                               run->pending[head].user_arg);
+    }
+    if (run->count)
+        fprintf(stderr, "GE_FINISH_CB: %u waiting finish callbacks not run: a finish callback "
+                        "stopped the run\n", run->count);
+    run->count = 0u;
+    run->active = 0;
+}
+
+/* The thread `owner` is ending (exit, termination, or an unwind out of a finish callback that
+ * skipped the end of ge_finish_callback): give its run back. Completions still waiting in it
+ * have no thread left to run their callbacks on. A PSP runs these callbacks in interrupt context,
+ * which is not expected to end a thread (inferred, not measured), so this state has no PSP
+ * counterpart and the run stops by name rather than dropping them. */
+void ge_finish_release_owner(uint32_t owner) {
+    GeFinishRun *run = ge_finish_run_of(owner);
+    if (!run) return;
+    const unsigned waiting = run->count;
+    run->count = 0u;
+    run->active = 0;
+    if (waiting)
+        (void)hle_unmodelled_stop("GE finish callback",
+                                  "from a thread that ended inside it with %u list completions "
+                                  "waiting has no measured result", waiting);
+}
+
+#ifdef SR_HLE_THREAD_SELFTEST
+/* Test-build-only view: threads with an open finish-callback run. */
+unsigned sr_hle_test_ge_finish_runs(void) {
+    unsigned n = 0;
+    for (int i = 0; i < GE_FINISH_RUNS_MAX; i++) n += s_ge_finish_runs[i].active != 0;
+    return n;
+}
+#endif
 
 void ge_sync_wake(void) { sched_wake(GE_SYNC_WAIT_OBJ); }
 

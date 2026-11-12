@@ -63,7 +63,7 @@ class TreeLintTests(unittest.TestCase):
         root = pathlib.Path(holder.name)
         tracked = tree_lint.tracked_files(root)
         allowed = tree_lint.load_allowlist(allowlist) if allowlist else {}
-        return {entry["path"]: str(entry["status"]) for entry in tree_lint.unreferenced(root, tracked, allowed)}
+        return {str(entry["path"]): str(entry["status"]) for entry in tree_lint.unreferenced(root, tracked, allowed)}
 
     def _findings(self, files: dict[str, str], allowlist: pathlib.Path) -> list[dict[str, object]]:
         holder = self._repo(files)
@@ -142,7 +142,7 @@ class TreeLintTests(unittest.TestCase):
         root = pathlib.Path(holder.name)
         findings = tree_lint.unreferenced(root, tree_lint.tracked_files(root), {})
         self.assertEqual(
-            {entry["path"]: entry["status"] for entry in findings if entry["path"].endswith("Makefile")},
+            {entry["path"]: entry["status"] for entry in findings if str(entry["path"]).endswith("Makefile")},
             {"fixtures/one/Makefile": tree_lint.AMBIGUOUS, "fixtures/two/Makefile": tree_lint.AMBIGUOUS},
         )
         self.assertEqual(

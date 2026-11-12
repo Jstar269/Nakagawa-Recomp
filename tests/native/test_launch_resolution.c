@@ -443,7 +443,7 @@ static void test_no_iso_child_environment(const char *test_executable,
     set_environment_value("SR_MOVIE_UPSCALE", "anime4k");
     bool had_ace;
     char *old_ace = capture_environment_value("SR_ACE", &had_ace);
-    set_environment_value("SR_ACE", "v1;af=16;text=on;readout=on;notice=on;wide=off;smooth=off;sas=off;tess=off");
+    set_environment_value("SR_ACE", "v1;af=16;text=on;readout=on;notice=on;wide=off;smooth=off;sas=off;tess=off;twin=off");
     bool had_ace_report;
     char *old_ace_report = capture_environment_value("SR_ACE_REPORT", &had_ace_report);
     set_environment_value("SR_ACE_REPORT", "poisoned-parent-report.json");
@@ -674,7 +674,7 @@ static void test_no_iso_child_environment(const char *test_executable,
              "Kaz \xE3\x83\x8A");
     /* An Ace Mode session exports its line and, with it, the report path. */
     snprintf(session.config.ace_spec, sizeof(session.config.ace_spec),
-             "v1;af=8;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off");
+             "v1;af=8;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off;twin=off");
     int ace_report_len = snprintf(session.config.ace_report_path,
                                   sizeof(session.config.ace_report_path),
                                   "%s%cace%cTEST00001.json", root, sep, sep);
@@ -702,7 +702,7 @@ static void test_no_iso_child_environment(const char *test_executable,
     assert(strstr(observed, "SR_DEVELOPER_MODE=1\n") != NULL);
     assert(strstr(observed, "SR_REDUCE_MOTION=off\n") != NULL);
     assert(strstr(observed, "SR_NICKNAME=Kaz \xE3\x83\x8A\n") != NULL);
-    assert(strstr(observed, "SR_ACE=v1;af=8;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off\n") != NULL);
+    assert(strstr(observed, "SR_ACE=v1;af=8;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off;twin=off\n") != NULL);
     assert(strstr(observed, "SR_TEX_REPLACE=\n") != NULL);
     assert(strstr(observed, "fixture-pack-folder") == NULL);
     /* An enhanced session follows the setting, and keeps the inherited movie upscaler. */
@@ -738,7 +738,7 @@ static void test_no_iso_child_environment(const char *test_executable,
                      "fixture-60hz");
         } else {
             snprintf(session.config.ace_spec, sizeof(session.config.ace_spec),
-                     "v1;af=8;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off");
+                     "v1;af=8;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off;twin=off");
         }
         assert(nk_launch_start(&session) == NK_OK);
         child_exit = nk_launch_wait(&session, -1);
@@ -751,7 +751,7 @@ static void test_no_iso_child_environment(const char *test_executable,
         assert(!ferror(report));
         assert(fclose(report) == 0);
         assert(strstr(observed, only == 0 ? "SR_ACE=off\n"
-                                          : "SR_ACE=v1;af=8;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off\n") != NULL);
+                                          : "SR_ACE=v1;af=8;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off;twin=off\n") != NULL);
         assert(strstr(observed, "SR_PRESENT_UPSCALE=fsr1\n") != NULL);
         session.enhancement_package_id[0] = '\0';
         snprintf(session.config.ace_spec, sizeof(session.config.ace_spec), "off");
@@ -759,7 +759,7 @@ static void test_no_iso_child_environment(const char *test_executable,
 
     /* A line with texpack=on exports the title's pack folder (contract section 10.12). */
     snprintf(session.config.ace_spec, sizeof(session.config.ace_spec),
-             "v1;af=8;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off;texpack=on");
+             "v1;af=8;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off;twin=off;texpack=on");
     assert(nk_launch_start(&session) == NK_OK);
     child_exit = nk_launch_wait(&session, -1);
     nk_launch_stop(&session);
@@ -770,7 +770,7 @@ static void test_no_iso_child_environment(const char *test_executable,
     observed[observed_size] = '\0';
     assert(!ferror(report));
     assert(fclose(report) == 0);
-    assert(strstr(observed, ";tess=off;texpack=on\n") != NULL);
+    assert(strstr(observed, ";tess=off;twin=off;texpack=on\n") != NULL);
     assert(strstr(observed, "SR_TEX_REPLACE=fixture-pack-folder\n") != NULL);
     assert(strstr(observed, "poisoned-parent-pack") == NULL);
     snprintf(session.config.ace_spec, sizeof(session.config.ace_spec), "off");

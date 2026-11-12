@@ -76,6 +76,7 @@ class TestThirdPartyComponentInventory(unittest.TestCase):
             with self.subTest(component=key):
                 texts = record.get("license_texts")
                 self.assertTrue(texts, f"{key} declares no license_texts")
+                assert texts is not None
                 for entry in texts:
                     path = ROOT / entry["file"]
                     self.assertTrue(path.is_file(), f"{key} license text missing: {entry['file']}")

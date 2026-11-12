@@ -33,6 +33,7 @@ import ci_trust_verdict  # noqa: E402
 import mypy_baseline  # noqa: E402
 import showcase as showcase_cli  # noqa: E402
 from makefile_text import read_makefile  # noqa: E402
+from test_ci_test_shards import _bash_path, _step_bash  # noqa: E402
 
 
 def _ci_job_blocks() -> dict[str, list[str]]:
@@ -382,7 +383,11 @@ class PublicCiWiringTests(unittest.TestCase):
             _ci_step_index(native_tools, step_name),
         )
         makefile = read_makefile(ROOT)
-        self.assertIn("gpu-coherence-selftest: $(GPU_COHERENCE_BIN)\n\t$(GPU_COHERENCE_BIN)\n", makefile)
+        self.assertIn(
+            "gpu-coherence-selftest: $(GPU_COHERENCE_BIN)\n"
+            "\t$(NK_REQUIRE_POSIX_SHELL)\n\t$(GPU_COHERENCE_BIN)\n",
+            makefile,
+        )
         docs = (ROOT / "docs" / "CI.md").read_text(encoding="utf-8")
         self.assertIn("`gpu-coherence-selftest`", docs)
 
@@ -837,7 +842,8 @@ _WINDOWS_MAIN_SAVE_CONDITION = (
 #: run"). Parts in one group share the build tree; the fuzz shards, which used to run on
 #: separate runners, share build/windows-runtime, and each rebuilds and reruns there.
 _WINDOWS_GROUPS = {
-    "smoke-routes": ["smoke", "routes"],
+    "smoke": ["smoke"],
+    "routes": ["routes"],
     "ladder-fuzz": ["ladder", "fuzz-0", "fuzz-1"],
     "selftests": ["selftests"],
 }
@@ -1085,9 +1091,6 @@ _NATIVE_SERIAL_GATES = {
         "run: python tools/format_portability_check.py",
     "Run native core test suite (hostile parsers, catalog, launch resolution, POSIX process)":
         "run: make CC=gcc native-core-tests",
-    "Measure native core C statement coverage":
-        'CFLAGS="$base_cflags --coverage" LDFLAGS="--coverage" native-core-tests',
-    "Upload C coverage to Codecov": "directory: ${{ runner.temp }}/native-core-gcov",
     "Compile GE frontend profiling mode":
         'make --no-print-directory CC=gcc BUILD_DIR="$build_dir" GE_FRONTEND_PROFILE=1 "$build_dir/ge.o"',
     "Build and run HLE thread selftest (links SDL3)": "run: make CC=gcc -j4 hle-thread-selftest",
@@ -1183,7 +1186,6 @@ _NATIVE_DEPENDENT_GATES = (
      "Stage the installed Linux player and smoke the installed binary"),
     ("Build and run the Linux showcase headlessly",
      "Stage the installed Linux player and smoke the installed binary"),
-    ("Measure native core C statement coverage", "Upload C coverage to Codecov"),
     ("Build run_elf (Interpreter runner)", "Generate golden oracle trace (Gate A)"),
     ("Compile MIPS microtest ELF (Gate A, -march=r4000 -mfp32)", "Generate golden oracle trace (Gate A)"),
     ("Create dummy init trace for interpreter", "Generate golden oracle trace (Gate A)"),
@@ -1981,6 +1983,20 @@ class PublicExportJobTests(unittest.TestCase):
         self.assertIn("python tools/build_public_export.py --export-dir", export)
         self.assertIn("--public-safe-profile 2>&1", export)
         self.assertIn("PROVENANCE_UNVERIFIED", export)
+        # Review 2387-0087347807fa N-A: a failed gate whose text named PROVENANCE_UNVERIFIED passed.
+        # The gates' part must hold no [FAIL] line, and the token is searched only after the last pass line.
+        for line in ("marker='[ALL GATES PASSED] Public-export gates verified.'",
+                     'last="$(grep -nxF "$marker" <<<"$output" | tail -n 1 | cut -d: -f1 || true)"',
+                     'gates="$(head -n "$last" <<<"$output")"',
+                     'audit="$(tail -n "+$((last + 1))" <<<"$output")"',
+                     "if grep -q '^\\[FAIL\\] ' <<<\"$gates\"; then",
+                     'if ! grep -q "PROVENANCE_UNVERIFIED" <<<"$audit"; then'):
+            self.assertIn(line, export)
+        self.assertNotIn('grep -q "PROVENANCE_UNVERIFIED" <<<"$output"', export)
+        # Review 2387 (Fable) R2: a gate failing after a forged pass line landed in the audit half.
+        self.assertIn('if grep -qF "[FAILED CLOSED] Public-export gates failed" <<<"$output"; then', export)
+        self.assertLess(export.index("[FAILED CLOSED] Public-export gates failed"), export.index("marker='"))
+        self.assertEqual(export.count('echo "a publication gate failed before the candidate audit ran" >&2'), 3)
         job = "\n".join(self.blocks["public_export"])
         self.assertIn("fetch-depth: 0", job)
         self.assertIn('python-version: "3.15.2"', job)
@@ -2094,25 +2110,115 @@ def _folded_run(step: list[str]) -> str:
 
 
 class CoverageWiringTests(unittest.TestCase):
-    """Coverage is measured inside the existing gates and published informationally.
+    """Coverage is measured beside the gates and published informationally.
 
     The measurement may not weaken a gate: the Python shards run the exact module
-    list they always ran under unittest, the unprofiled native core gate keeps its
-    command, and both uploads are informational (``.github/codecov.yml``,
-    ``fail_ci_if_error: false``), so a Codecov outage cannot fail a required job.
+    list they always ran under unittest, the native gates run unprofiled in
+    native_tools while c_coverage, a job ci_required never reads, builds and runs the
+    same self-tests again with gcov, and both uploads are informational
+    (``.github/codecov.yml``, ``fail_ci_if_error: false``), so a Codecov outage
+    cannot fail a required job (#2394).
     """
 
     PYTHON_TEST_NEEDLE = "Run Python unit tests"
-    C_MEASURE_STEP = "Measure native core C statement coverage"
-    C_GATE_STEP = "Run native core test suite (hostile parsers, catalog, launch resolution, POSIX process)"
+    C_JOB = "c_coverage"
+    C_WRAPPER_STEP = "Put the coverage gcc wrapper first on PATH"
+    C_COLLECT_STEP = "Collect the gcov reports"
+    C_MEASURE_PREFIX = "Measure the "
     UPLOADS = {
         "python_tools": ("Upload Python coverage to Codecov", "python", "coverage-python.xml"),
-        "native_tools": ("Upload C coverage to Codecov", "c", None),
+        "c_coverage": ("Upload C coverage to Codecov", "c", None),
+    }
+    #: native_tools' setup, repeated byte for byte so both jobs build against the same
+    #: packages and pinned libraries and share their caches.
+    C_SETUP_STEPS = (
+        "Check out repository",
+        "Set up Python",
+        "Restore the native apt package cache",
+        "Install native test dependencies",
+        "Key the pinned SDL3 install",
+        "Restore the pinned SDL3 install",
+        "Build pinned SDL3 for headless Linux runtime",
+        "Install the pinned SDL3 into the Linux prefix",
+        "Key the pinned SDL3_ttf install",
+        "Restore the pinned SDL3_ttf install",
+        "Build pinned SDL3_ttf with vendored FreeType and HarfBuzz",
+        "Install and verify pinned SDL3_ttf and shaping libraries",
+        "Install PSPDEV from the checked-in lock",
+    )
+    #: Every native_tools gate is either measured or named here with the reason it is not, so a
+    #: gate added later fails this test until it is classified (docs/CI.md, "Coverage").
+    #: Gates c_coverage measures through make: the gate's step, and the targets it builds again.
+    C_MEASURED_BY_MAKE = {
+        "Build and run the vendored FFmpeg H.264 media selftest": ("psmf-media-selftest",),
+        "Run native core test suite (hostile parsers, catalog, launch resolution, POSIX process)":
+            ("native-core-tests",),
+        "Build and run HLE thread selftest (links SDL3)": ("hle-thread-selftest",),
+        "Run Linux title-configured HLE selftests": ("hle-title-selftest",),
+        "Run Linux AOT return-boundary selftest": ("aot-return-boundary-thread-selftest",),
+        "Run Linux scheduler selftest matrix": ("sched-selftest",),
+        "Run Linux dispatch isolation selftest matrix": ("dispatch-isolation-selftest",),
+        "Run Linux AOT/interpreter cosimulation": ("cosim-selftest",),
+        "Run Linux snapshot execution selftest": ("snapshot-selftest",),
+        "Run Linux verify selftest": ("verify-selftest",),
+        "Run Linux GPU snapshot sync selftest": ("gpu-snapsync-selftest",),
+        "Run host present pacing selftest (links SDL3)": ("gui-present-selftest",),
+        "Run native player UI regressions headlessly": ("player-ui-regressions",),
+        "Run Linux native player UI tests headlessly": ("player-ui-tests",),
+        "Verify lavapipe and run GPU capture selftest": ("gpu-capture-selftest",),
+        "Run GPU coherence selftest on lavapipe": ("gpu-coherence-selftest", "vram-view-identity-selftest"),
+        "Run GPU texture scaling selftest on lavapipe": ("gpu-texscale-selftest",),
+        "Run the FSR 3 pass selftest on lavapipe": ("fsr3-pass-selftest",),
+        "Run the FSR 3 frame generation refusal on lavapipe": ("fsr3-fg-pass-selftest",),
+    }
+    #: Self-tests native_tools compiles directly: c_coverage repeats the step itself.
+    C_COPIED_STEPS = (
+        "Run selftest (C++ interpreter unit tests under UBSan)",
+        "Run portable FPU/VFPU conversion selftest under UBSan",
+        "Run VFPU table loader selftest (source-owned, no game inputs)",
+        "Run watchpoints-file parser selftest (source-owned, no game inputs)",
+        "Run strbuf checked-append formatting selftest under UBSan",
+        "Run VFPU interpreter selftest (source-owned, no game inputs)",
+        "Run ATRAC3+ decoder and bridge selftests (source-owned, no game inputs)",
+    )
+    #: Gates that are not C self-tests, or that would measure deliberately broken code.
+    C_NOT_MEASURED = {
+        "Run import-coverage and fake-success audit gate": "a Python audit",
+        "Run provenance record and disposition gap check": "a Python check",
+        "Compile host-neutral runtime objects on Linux": "compiles only",
+        "Check 32-bit format specifier portability across portable core": "a syntax-only build",
+        "Compile GE frontend profiling mode": "compiles only",
+        _NIGHTLY_REPEAT_STEP: "reruns binaries already measured",
+        "Run Linux cosimulation mutation corpus": "mutants",
+        "Reproduce the FSR 3 shaders with the pinned DXC": "shader bytes, no C",
+        "Configure, build, and test CMake Linux player": "an end-to-end player route",
+        "Build and run the Linux showcase headlessly": "an end-to-end player route",
+        "Build and run the profile-zero production route on Linux": "an end-to-end route",
+        "Smoke the CMake Linux player headlessly": "an end-to-end player route",
+        "Stage the installed Linux player and smoke the installed binary": "an end-to-end player route",
+        "Build run_elf (Interpreter runner)": "a codegen gate",
+        "Generate synthetic microtest C source (Gate A — generic MIPS III + FPU)": "a codegen gate",
+        "Compile MIPS microtest ELF (Gate A, -march=r4000 -mfp32)": "a codegen gate",
+        "Generate synthetic microtest C source (Gate B — Allegrex extensions)": "a codegen gate",
+        "Compile MIPS microtest ELF (Gate B, -march=r4000)": "a codegen gate",
+        "Create dummy init trace for interpreter": "a codegen gate",
+        "Generate golden oracle trace (Gate A)": "a codegen gate",
+        "Run recompiler codegen gate (Gate A — compile and verify MIPS-to-C translation)": "a codegen gate",
+        "Generate golden oracle trace (Gate B)": "a codegen gate",
+        "Run recompiler codegen gate (Gate B — Allegrex extensions)": "a codegen gate",
+        "Run synthetic framebuffer-memory parity checks (A/B framebuffer diffs)": "a codegen gate",
     }
 
     def setUp(self) -> None:
         self.blocks = _ci_job_blocks()
         self.ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+
+    def _measure_steps(self) -> list[str]:
+        block = self.blocks[self.C_JOB]
+        names = [line.strip()[len("- name: "):] for line in block if line.strip().startswith("- name: ")]
+        measured = [name for name in names if name.startswith(self.C_MEASURE_PREFIX)]
+        self.assertTrue(measured, "c_coverage measures nothing")
+        return measured
 
     def test_python_shards_run_their_unchanged_module_list_under_coverage(self) -> None:
         step = _ci_step_with(self.blocks["python_tools"], "coverage run")
@@ -2130,46 +2236,141 @@ class CoverageWiringTests(unittest.TestCase):
         self.assertIn("python -m coverage combine", text)
         self.assertIn("python -m coverage xml -o coverage-python.xml", text)
 
-    def test_native_coverage_is_a_separate_instrumented_build_beside_the_gate(self) -> None:
+    def test_c_coverage_is_a_hosted_job_beside_native_tools_that_no_gate_reads(self) -> None:
+        block = self.blocks[self.C_JOB]
         native = self.blocks["native_tools"]
-        gate = _ci_step(native, self.C_GATE_STEP)
-        self.assertIsNotNone(gate, "the unprofiled native core gate was removed")
-        self.assertIn("make CC=gcc native-core-tests", "\n".join(gate or []))
-        measured = _ci_step(native, self.C_MEASURE_STEP)
-        self.assertIsNotNone(measured, "native_tools no longer measures C coverage")
-        self.assertLess(
-            _ci_step_index(native, self.C_GATE_STEP),
-            _ci_step_index(native, self.C_MEASURE_STEP),
-            "the measured build runs after the gate it must not disturb",
+        # The native gates run unprofiled: no instrumented build, no upload in their job.
+        self.assertNotIn("--coverage", "\n".join(native))
+        self.assertNotIn("codecov", "\n".join(native))
+        self.assertIn("make CC=gcc native-core-tests", "\n".join(_ci_step(
+            native, "Run native core test suite (hostile parsers, catalog, launch resolution, POSIX process)") or []))
+        # It runs when native_tools does, and only on the nightly schedule or a manual run: the
+        # Trusted CI verdict waits for the whole CI run, which this job would outlast.
+        self.assertEqual(
+            _job_if(block),
+            _job_if(native) + " && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')",
         )
-        text = _folded_run(measured or [])
-        # Its own build directory, under the runner temp tree, so the gate's tree
-        # and objects are never reused or overwritten.
-        self.assertIn('coverage_build="$RUNNER_TEMP/native-core-coverage"', text)
-        self.assertIn('BUILD_DIR="$coverage_build"', text)
-        # The instrumentation is appended to the Makefile's own flags, so the
-        # measured build keeps the default configuration.
-        self.assertIn("compiler-info", text)
-        self.assertIn('CFLAGS="$base_cflags --coverage"', text)
-        self.assertIn('LDFLAGS="--coverage"', text)
-        self.assertIn("native-core-tests", text)
-        self.assertNotIn("gcovr", text)
+        needs = [line.strip() for line in block if line.startswith("    needs: ")]
+        self.assertEqual(needs, [line.strip() for line in native if line.startswith("    needs: ")])
+        # A hosted runner: the measurement never takes a self-hosted pool slot from a gate.
+        self.assertIn("    runs-on: ubuntu-24.04", block)
+        self.assertNotIn("linux_runner", "\n".join(block))
+        # Not required: ci_required neither needs nor reads it, so it can never fail or hold a merge.
+        required = "\n".join(self.blocks["ci_required"])
+        self.assertNotIn(self.C_JOB, required)
+        self.assertNotIn(self.C_JOB, (ROOT / "tools" / "ci_required.py").read_text(encoding="utf-8"))
 
-    def test_native_gcov_reports_are_generated_from_the_repository_root(self) -> None:
-        text = _folded_run(_ci_step(self.blocks["native_tools"], self.C_MEASURE_STEP) or [])
+    def test_c_coverage_repeats_native_tools_setup_byte_for_byte(self) -> None:
+        block = self.blocks[self.C_JOB]
+        for name in self.C_SETUP_STEPS:
+            with self.subTest(step=name):
+                ours = _ci_step(block, name)
+                self.assertIsNotNone(ours, f"c_coverage lost the setup step {name!r}")
+                # A step's lines run on to the comment above the next step: compare the step itself.
+                self.assertEqual(_uncommented("\n".join(ours or [])).rstrip(),
+                                 _uncommented("\n".join(_ci_step(self.blocks["native_tools"], name) or [])).rstrip())
+        # Package installs go through the workflow's apt helper, as everywhere else.
+        self.assertIn('bash -c "$NK_APT_INSTALL" nk-apt-install',
+                      "\n".join(_ci_step(block, "Install native test dependencies") or []))
+
+    def test_every_compile_is_instrumented_by_the_gcc_wrapper(self) -> None:
+        block = self.blocks[self.C_JOB]
+        wrapper = _folded_run(_ci_step(block, self.C_WRAPPER_STEP) or [])
+        # The wrapper runs the real gcc, found before the wrapper exists, with --coverage
+        # added, and goes first on PATH for every later step.
+        self.assertIn("for compiler in gcc g++; do", wrapper)
+        self.assertIn('real="$(command -v "$compiler")"', wrapper)
+        self.assertIn('exec %s --coverage "$@"', wrapper)
+        self.assertIn('"$real" > "$wrapper_dir/$compiler"', wrapper)
+        self.assertIn('echo "$wrapper_dir" >> "$GITHUB_PATH"', wrapper)
+        # After every setup step, so the pinned libraries are built uninstrumented, and
+        # before every measurement; the next step fails if the wrapper is not the gcc found.
+        wrapper_index = _ci_step_index(block, self.C_WRAPPER_STEP)
+        for name in self.C_SETUP_STEPS:
+            with self.subTest(setup=name):
+                self.assertLess(_ci_step_index(block, name), wrapper_index)
+        build_dir_step = "\n".join(_ci_step(block, "Create build directory") or [])
+        self.assertIn('test "$(command -v gcc)" = "$RUNNER_TEMP/coverage-gcc/gcc"', build_dir_step)
+        self.assertIn('test "$(command -v g++)" = "$RUNNER_TEMP/coverage-gcc/g++"', build_dir_step)
+        for name in self.C_COPIED_STEPS:
+            with self.subTest(copied=name):
+                self.assertLess(wrapper_index, _ci_step_index(block, name))
+        for name in self._measure_steps():
+            with self.subTest(measure=name):
+                self.assertLess(wrapper_index, _ci_step_index(block, name))
+                text = _uncommented("\n".join(_ci_step(block, name) or []))
+                # The gates' own make commands: instrumentation comes from the wrapper alone.
+                self.assertNotIn("--coverage", text)
+                self.assertNotIn("CFLAGS=", text)
+                self.assertIn("make CC=gcc", text)
+                self.assertNotIn("mutant", text)
+
+    def test_every_native_gate_is_measured_or_named_as_not_measured(self) -> None:
+        measured = set(self.C_MEASURED_BY_MAKE)
+        copied = set(self.C_COPIED_STEPS)
+        skipped = set(self.C_NOT_MEASURED)
+        self.assertFalse(measured & copied or measured & skipped or copied & skipped)
+        self.assertEqual(measured | copied | skipped, set(_NATIVE_SERIAL_GATES))
+
+    def test_every_measured_gate_target_is_built_again_under_coverage(self) -> None:
+        native = self.blocks["native_tools"]
+        measured = _uncommented("\n".join("\n".join(_ci_step(self.blocks[self.C_JOB], name) or [])
+                                          for name in self._measure_steps()))
+        for step, targets in self.C_MEASURED_BY_MAKE.items():
+            gate = _uncommented("\n".join(_ci_step(native, step) or []))
+            for target in targets:
+                with self.subTest(step=step, target=target):
+                    self.assertRegex(gate, rf"make [^\n]*\b{re.escape(target)}\b")
+                    self.assertRegex(measured, rf"make [^\n]*\b{re.escape(target)}\b")
+        # Everything the job builds lands under build/, where the collection step looks.
+        self.assertNotIn("RUNNER_TEMP/", measured.replace('"$RUNNER_TEMP/vulkan-summary.txt"', "")
+                         .replace('"$RUNNER_TEMP/texscale.log"', ""))
+
+    def test_the_directly_compiled_selftests_are_copied_byte_for_byte(self) -> None:
+        block = self.blocks[self.C_JOB]
+        part = "        if: matrix.part == 'translation'"
+        for name in self.C_COPIED_STEPS:
+            with self.subTest(step=name):
+                gate = _ci_step(self.blocks["native_tools"], name) or []
+                self.assertIn(part, gate)
+                ours = _ci_step(block, name)
+                self.assertIsNotNone(ours, f"c_coverage does not repeat {name!r}")
+                self.assertEqual(_uncommented("\n".join(ours or [])).rstrip(),
+                                 _uncommented("\n".join(line for line in gate if line != part)).rstrip())
+                # After the translation selftests, which generate the headers they include.
+                self.assertLess(_ci_step_index(block, "Measure the HLE, scheduler, dispatch and translation selftests"),
+                                _ci_step_index(block, name))
+
+    def test_the_gpu_measurement_keeps_the_gates_guards(self) -> None:
+        text = _uncommented("\n".join(_ci_step(self.blocks[self.C_JOB], "Measure the GPU selftests on lavapipe") or []))
+        self.assertIn('grep -qi llvmpipe "$RUNNER_TEMP/vulkan-summary.txt"', text)
+        self.assertIn("if grep -q '^SKIP gpu-texscale' \"$RUNNER_TEMP/texscale.log\"; then", text)
+        self.assertIn("NK_UI_VK_REQUIRE=1 make CC=gcc fsr3-pass-selftest", text)
+
+    def test_c_gcov_reports_are_generated_from_the_repository_root(self) -> None:
+        text = _folded_run(_ci_step(self.blocks[self.C_JOB], self.C_COLLECT_STEP) or [])
         # gcov runs in the step's working directory, the repository root, where the
         # objects' recorded src/... paths resolve. A cd into the build directory would
         # bring back the header-only reports Codecov rejected.
-        self.assertNotIn('cd "$coverage_build"', text)
-        # One gcov run per object: several objects in one run append duplicate line
+        self.assertNotIn("cd ", text)
+        # Notes files of mutants built inside a measured target are skipped.
+        self.assertIn("mapfile -t notes < <(find build -name '*.gcno' ! -path '*mutant*' -print | LC_ALL=C sort)",
+                      text)
+        # One gcov run per notes file: several objects in one run append duplicate line
         # records for a shared source into the same report.
-        self.assertIn('for gcno in "$coverage_build"/*.gcno; do', text)
+        self.assertIn('for gcno in "${notes[@]}"; do', text)
         self.assertIn('gcov -p -b -r "$gcno"', text)
-        self.assertIn('gcov_dir="$RUNNER_TEMP/native-core-gcov"', text)
-        # The selftests' own sources stay out of the number, and an empty set of
-        # reports fails the step instead of uploading nothing.
-        self.assertIn("_selftest\\.c$", text)
+        self.assertIn('gcov_dir="$RUNNER_TEMP/c-coverage-gcov"', text)
+        # The tests' own sources and generated C stay out of the number, and an empty set
+        # of notes or reports fails the step instead of uploading nothing.
+        self.assertIn("0:Source:(tests/|fixtures/|build/|src/player/player_ui_test\\.c$|.*selftest\\.(c|cpp|inc)$)",
+                      text)
+        self.assertIn('test "${#notes[@]}" -gt 0', text)
         self.assertIn('test "${#reports[@]}" -gt 0', text)
+        collect = _ci_step_index(self.blocks[self.C_JOB], self.C_COLLECT_STEP)
+        for name in (*self._measure_steps(), *self.C_COPIED_STEPS):
+            with self.subTest(step=name):
+                self.assertLess(_ci_step_index(self.blocks[self.C_JOB], name), collect)
 
     def test_both_uploads_use_the_pinned_action_oidc_and_the_declared_flags(self) -> None:
         for job, (name, flag, report) in self.UPLOADS.items():
@@ -2186,7 +2387,7 @@ class CoverageWiringTests(unittest.TestCase):
                     # The reports are generated in the measuring step; the action only
                     # uploads them. Its gcov plugin runs gcov from the build directory,
                     # where the objects' repository-relative sources cannot be opened.
-                    self.assertIn("directory: ${{ runner.temp }}/native-core-gcov", text)
+                    self.assertIn("directory: ${{ runner.temp }}/c-coverage-gcov", text)
                     self.assertIn("plugins: noop", text)
                     self.assertNotIn("plugins: gcov", text)
                 else:
@@ -2248,7 +2449,7 @@ class CoverageWiringTests(unittest.TestCase):
         for terms in (
             ("python_tools", "coverage-python.xml", "unittest"),
             (".github/codecov.yml", "informational"),
-            ("native_tools", "native-core-tests"),
+            ("c_coverage", "native-core-tests", "gcov"),
         ):
             with self.subTest(terms=terms):
                 self.assertTrue(
@@ -2317,6 +2518,21 @@ _HOSTED_RUNS_ON = re.compile(r"^(ubuntu|windows|macos)-[0-9][0-9.]*$")
 
 def _uncommented(text: str) -> str:
     return "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
+
+
+def _named_step(job: str, name: str) -> str:
+    """One step of a job's text: from its ``- name:`` line to the next step, comments dropped."""
+    lines = job.splitlines()
+    first = lines.index(f"      - name: {name}")
+    last = next((i for i in range(first + 1, len(lines)) if lines[i].startswith("      - ")), len(lines))
+    return "".join(line + "\n" for line in lines[first:last] if not line.lstrip().startswith("#"))
+
+
+def _step_script(step: str) -> str:
+    """The body of a step's ``run: |`` block, without its indentation."""
+    lines = step.splitlines()
+    start = lines.index("        run: |")
+    return "".join(line[10:] + "\n" for line in lines[start + 1:] if line.startswith("          ") or not line.strip())
 
 
 def _workflow_job_blocks(name: str) -> dict[str, list[str]]:
@@ -2916,14 +3132,65 @@ class TrustedAttestationRouteTests(unittest.TestCase):
                 self.assertFalse(_actions_eval(self.guard, context))
                 self.assertEqual(_actions_value(self.title, context), self.PLAIN)
 
+    def test_the_attest_job_audits_the_whole_candidate_tree_with_the_trusted_audit(self) -> None:
+        # Failing-before: no trusted job ran the publication audit, so the only refusal of a file outside the
+        # profile came from the pull request's own copy of the audit.
+        step = _matched(re.search(
+            r"(?m)^      - name: Audit the candidate tree with the trusted publication audit\n((?:(?:        .*)?\n)+)",
+            self.attest)).group(1)
+        self.assertEqual(self.attest.count("python tools/publish_audit.py"), 1)
+        self.assertIn("          HEAD_SHA: ${{ steps.target.outputs.head_sha }}\n", step)
+        self.assertIn("          set -euo pipefail\n", step)
+        # The candidate is named by commit and read as objects; its own profile is the policy.
+        self.assertIn('          git cat-file blob "${HEAD_SHA}:assets/public_source_profile.json" \\\n'
+                      '            > "${RUNNER_TEMP}/tree-audit/public_source_profile.json"\n', step)
+        self.assertIn('          python tools/publish_audit.py \\\n'
+                      '            --repo-root "${GITHUB_WORKSPACE}" \\\n'
+                      '            --committed-tree "${HEAD_SHA}" \\\n'
+                      '            --trusted-base "${BASE_SHA}" \\\n'
+                      '            --policy "${RUNNER_TEMP}/tree-audit/public_source_profile.json" \\\n'
+                      '            --public-scope --provenance-self-consistency\n'
+                      '          touch "${RUNNER_TEMP}/tree-audit/passed"\n', step)
+        # Failing-before: the release manifest that waives binary findings was the candidate's alone, so a
+        # pull request could put other bytes under an approved binary's path. The audit is given the verdict
+        # base (the merge base with the default branch, resolved by the trusted checkout), re-checked here.
+        self.assertIn("          BASE_SHA: ${{ steps.base.outputs.base_sha }}\n", step)
+        self.assertIn('          if [[ ! "${BASE_SHA}" =~ ^[0-9a-f]{40}$ ]]; then\n', step)
+        self.assertIn('          base_sha="$(git merge-base "${HEAD_SHA}" HEAD)"\n', self.attest)
+        # Nothing of the candidate's stands in for the base: no manifest is read from the head for it.
+        self.assertNotIn("--trusted-manifest", step)
+        self.assertNotIn("release_manifest.json", step)
+        # Review 2387-0087347807fa N-F: nothing read a copy of the report; the job log holds it.
+        self.assertNotIn("tree-audit/report.txt", self.attest)
+        # The head is re-checked here, so a reordered step cannot pass an unchecked value to Git.
+        self.assertIn('          if [[ ! "${HEAD_SHA}" =~ ^[0-9a-f]{40}$ ]]; then\n', step)
+        # A failed tree audit is named in the summary, after the verdict, without its findings.
+        explain = _matched(re.search(
+            r"(?m)^      - name: Explain the verdict in plain words\n((?:(?:        .*)?\n)+)", self.attest)).group(1)
+        self.assertIn("&& [ ! -e \"${RUNNER_TEMP}/tree-audit/passed\" ]; then\n", explain)
+        self.assertIn("### Trusted publication audit: FAIL", explain)
+        self.assertNotIn("report.txt", explain)
+        # Its exit code decides the job, it runs only after the verifier passed, and it holds no secret.
+        for tolerant in ("|| true", "continue-on-error", "if:", "secrets.", "GH_TOKEN", "GITHUB_TOKEN"):
+            self.assertNotIn(tolerant, step)
+        verify = self.attest.index("            --trusted-baseline ")
+        audit = self.attest.index("- name: Audit the candidate tree with the trusted publication audit")
+        explain = self.attest.index("- name: Explain the verdict in plain words")
+        self.assertLess(verify, audit)
+        self.assertLess(audit, explain)
+
     def test_every_attestation_step_takes_its_target_from_the_resolver(self) -> None:
         text = _uncommented(self.text)
         # The event's values and the triggering run's head enter once, in the resolver step's env.
         self.assertEqual(len(re.findall(r"github\.event\.pull_request\.head\.sha", text)), 2)   # and the title
         self.assertEqual(len(re.findall(r"github\.event\.pull_request\.base\.sha", text)), 1)
         self.assertEqual(len(re.findall(r"github\.event\.pull_request\.number", text)), 2)      # and concurrency
-        self.assertEqual(self.attest.count("${{ steps.target.outputs.head_sha }}"), 3)
-        self.assertEqual(self.attest.count("${{ steps.target.outputs.base_sha }}"), 4)
+        # The merge base and the trusted tree audit read the head too.
+        self.assertEqual(self.attest.count("${{ steps.target.outputs.head_sha }}"), 5)
+        # The event's base is only checked to be on the default branch; the verdict base is the merge base.
+        self.assertEqual(self.attest.count("${{ steps.target.outputs.base_sha }}"), 1)
+        # The trusted tree audit reads it too, to hold the release manifest's binary waivers to the base.
+        self.assertEqual(self.attest.count("${{ steps.base.outputs.base_sha }}"), 4)
         self.assertEqual(self.attest.count("${{ steps.target.outputs.number }}"), 1)
         self.assertIn("--attestation-target)", self.attest)
         # A run that resolves no pull request must fail: nothing in the job tolerates a failed step.
@@ -2934,6 +3201,86 @@ class TrustedAttestationRouteTests(unittest.TestCase):
         self.assertIn("          set -euo pipefail\n", resolver)
         self.assertIn('if [ "${GITHUB_REF}" != "refs/heads/${DEFAULT_BRANCH}" ]; then', resolver)
         self.assertRegex(resolver, r'(?s)\*\)\n\s+echo "unsupported event \$\{EVENT_NAME\}" >&2\n\s+exit 1')
+
+    def test_the_verdict_base_is_the_merge_base_of_the_head_with_the_default_branch(self) -> None:
+        # Every step that judges the candidate reads the merge base, never the event's base.
+        for name in ("Fetch the trusted detailed implementation ledger",
+                     "Generate the trusted base public baseline from the authority",
+                     "Generate and verify ephemeral provenance controls"):
+            with self.subTest(step=name):
+                step = _named_step(self.attest, name)
+                self.assertIn("          BASE_SHA: ${{ steps.base.outputs.base_sha }}\n", step)
+                self.assertNotIn("steps.target.outputs.base_sha", step)
+        resolve = _named_step(self.attest, "Resolve the verdict base")
+        self.assertIn("        id: base\n", resolve)
+        self.assertLess(self.attest.index("- name: Fetch the candidate objects"),
+                        self.attest.index("- name: Resolve the verdict base"))
+        self.assertLess(self.attest.index("- name: Resolve the verdict base"),
+                        self.attest.index("- name: Fetch the trusted detailed implementation ledger"))
+
+        # Run the step's own script. `main` is A, then B (an admission lands after the fork).
+        bash, reason = _step_bash()
+        if bash is None:
+            self.skipTest(reason)
+        script = _step_script(resolve)
+        with tempfile.TemporaryDirectory() as scratch:
+            repo = Path(scratch) / "repo"
+            repo.mkdir()
+
+            def git(*args: str) -> str:
+                done = subprocess.run(
+                    ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false",
+                     *args], cwd=repo, capture_output=True, text=True, check=True)
+                return done.stdout.strip()
+
+            def commit(message: str, name: str) -> str:
+                (repo / name).write_text(message + "\n", encoding="utf-8")
+                git("add", name)
+                git("commit", "-q", "-m", message)
+                return git("rev-parse", "HEAD")
+
+            git("init", "-q", "-b", "main")
+            fork_point = commit("A", "a.txt")
+            git("checkout", "-q", "-b", "behind")
+            behind = commit("a pull request that forked at A", "pr.txt")
+            git("checkout", "-q", "main")
+            tip = commit("B: an admission lands", "admitted.txt")
+            git("checkout", "-q", "-b", "merged", behind)
+            git("merge", "-q", "--no-edit", "main")
+            merged = git("rev-parse", "HEAD")
+            git("checkout", "-q", "main")
+            later = commit("C: a later admission", "later.txt")
+            git("checkout", "-q", "--orphan", "unrelated")
+            git("rm", "-q", "-rf", ".")
+            unrelated = commit("no history in common", "x.txt")
+            git("checkout", "-q", "main")          # the trusted checkout is the default branch
+
+            def run(head: str) -> tuple[int, str, str]:
+                output = Path(scratch) / "github-output"
+                output.write_text("", encoding="utf-8")
+                done = subprocess.run(
+                    [bash, "-c", script], cwd=repo, capture_output=True, text=True, check=False,
+                    env={**os.environ, "HEAD_SHA": head, "GITHUB_OUTPUT": _bash_path(output)})
+                return done.returncode, output.read_text(encoding="utf-8"), done.stderr
+
+            # Behind an admission: judged against its fork point, not against the tip it never saw.
+            self.assertEqual(run(behind)[:2], (0, f"base_sha={fork_point}\n"))
+            # A head that merged main at B and is behind C: the newest main commit it contains.
+            self.assertEqual(run(merged)[:2], (0, f"base_sha={tip}\n"))
+            # The tip itself: the tip.
+            self.assertEqual(run(later)[:2], (0, f"base_sha={later}\n"))
+            # A head that is not a SHA is refused before git runs.
+            for head in ("main", "", later.upper()):
+                with self.subTest(head=head):
+                    code, written, err = run(head)
+                    self.assertEqual((code, written), (1, ""))
+                    self.assertIn("sha malformed", err)
+                    self.assertNotIn("base sha malformed", err)
+            # No common history: git merge-base finds no base and the step stops there.
+            code, written, err = run(unrelated)
+            self.assertNotEqual(code, 0)
+            self.assertEqual(written, "")
+            self.assertNotIn("malformed", err)
 
     def test_candidate_chosen_text_never_reaches_the_job(self) -> None:
         text = _uncommented(self.text)
@@ -3073,6 +3420,218 @@ class SelfHostedRunnerWiringTests(unittest.TestCase):
                      "which is the boundary", "`all_external_contributors`", "`gh run rerun <run>`"):
             with self.subTest(fact=fact):
                 self.assertIn(fact, section)
+
+
+def _workflow_env_value(name: str, key: str) -> str:
+    """One workflow-level `env:` value: a `|` block keeps its lines, a `>-` block folds them."""
+    lines = _workflow_text(name).splitlines()
+    start = lines.index("env:")
+    header = next(i for i in range(start + 1, len(lines)) if lines[i].startswith(f"  {key}: "))
+    style = lines[header].split(":", 1)[1].strip()
+    body: list[str] = []
+    for line in lines[header + 1:]:
+        if line.strip() and not line.startswith("    "):
+            break
+        body.append(line[4:])
+    while body and not body[-1].strip():
+        body.pop()
+    if style == "|":
+        return "".join(line + "\n" for line in body)
+    if style == ">-":
+        return " ".join(line.strip() for line in body if line.strip())
+    raise AssertionError(f"{key}: unexpected block style {style!r}")
+
+
+_APT_STUBS = {
+    "sudo": '#!/bin/sh\nexec "$@"\n',
+    "timeout": '#!/bin/sh\nshift\nexec "$@"\n',
+    "dpkg-query": (
+        '#!/bin/bash\nfor last; do :; done\n'
+        'case " $NK_TEST_INSTALLED " in *" $last "*) printf installed ;; '
+        '*) echo "dpkg-query: no packages found matching $last" >&2; exit 1 ;; esac\n'
+    ),
+    "curl": (
+        '#!/bin/bash\nfor url; do :; done\necho "curl $url" >> "$NK_TEST_LOG"\n'
+        'for up in $NK_TEST_UP; do case "$url" in "$up"*) exit 0 ;; esac; done\n'
+        'echo "curl: (6) Could not resolve host" >&2\nexit 6\n'
+    ),
+    "apt-get": (
+        '#!/bin/bash\ncase "$1" in\n'
+        '  update) echo "update $(tr \'\\n\' \' \' < "$NK_APT_ROOT/etc/apt/apt-mirrors.txt")" >> "$NK_TEST_LOG" ;;\n'
+        '  install) n=$(( $(cat "$NK_TEST_COUNT" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$NK_TEST_COUNT"\n'
+        '    echo "install ${*:2}" >> "$NK_TEST_LOG"; [ "$n" -gt "$NK_TEST_INSTALL_FAILURES" ] ;;\n'
+        '  *) exit 64 ;;\nesac\n'
+    ),
+}
+
+
+class AptInstallHelperTests(unittest.TestCase):
+    """The workflow's one apt helper (NK_APT_INSTALL), run as the steps run it, against stubs.
+
+    On 2026-11-11 the hosted runners reached none of Canonical's hosts and every apt step
+    failed: the lint job's format-portability step had no fallback at all, and the native
+    job's fallback only reordered ubuntu.com hosts that were down too.
+    """
+
+    ALL_MIRRORS: ClassVar[list[str]]
+    CANONICAL = ("http://azure.archive.ubuntu.com/", "http://archive.ubuntu.com/", "http://security.ubuntu.com/")
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.ALL_MIRRORS = _workflow_env_value("ci.yml", "NK_APT_MIRRORS").split()
+
+    def run_helper(self, *args: str, up: Sequence[str] = (), installed: str = "",
+                   install_failures: int = 0) -> tuple[subprocess.CompletedProcess[str], list[str], Path]:
+        bash, reason = _step_bash()
+        if bash is None:
+            self.skipTest(reason)
+        holder = tempfile.TemporaryDirectory()
+        self.addCleanup(holder.cleanup)
+        scratch = Path(holder.name)
+        root = scratch / "root"
+        (root / "etc" / "apt" / "apt.conf.d").mkdir(parents=True)
+        (root / "etc" / "apt" / "sources.list.d").mkdir()
+        (root / "etc" / "os-release").write_text('NAME="Ubuntu"\nVERSION_CODENAME=noble\n', encoding="utf-8")
+        # The hosted image's form, and a plain Canonical URI as another image would carry it.
+        (root / "etc" / "apt" / "sources.list.d" / "ubuntu.sources").write_text(
+            "Types: deb\nURIs: mirror+file:/etc/apt/apt-mirrors.txt\nSuites: noble noble-updates\n", encoding="utf-8")
+        (root / "etc" / "apt" / "sources.list.d" / "plain.sources").write_text(
+            "Types: deb\nURIs: http://azure.archive.ubuntu.com/ubuntu/\nSuites: noble\n"
+            "Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n\n"
+            "Types: deb\nURIs: https://security.ubuntu.com/ubuntu\nSuites: noble-security\n"
+            "Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n", encoding="utf-8")
+        stubs = scratch / "bin"
+        stubs.mkdir()
+        for name, body in _APT_STUBS.items():
+            (stubs / name).write_bytes(body.encode("utf-8"))
+            (stubs / name).chmod(0o755)
+        log = scratch / "log"
+        log.write_text("", encoding="utf-8")
+        env = {
+            **os.environ,
+            "NK_APT_INSTALL": _workflow_env_value("ci.yml", "NK_APT_INSTALL"),
+            "NK_APT_MIRRORS": " ".join(self.ALL_MIRRORS),
+            "NK_APT_ROOT": _bash_path(root),
+            "NK_TEST_STUBS": _bash_path(stubs),
+            "NK_TEST_LOG": _bash_path(log),
+            "NK_TEST_COUNT": _bash_path(scratch / "count"),
+            "NK_TEST_UP": " ".join(up),
+            "NK_TEST_INSTALLED": installed,
+            "NK_TEST_INSTALL_FAILURES": str(install_failures),
+        }
+        # The steps' own invocation, with the stubs first on PATH.
+        wrapper = 'export PATH="$NK_TEST_STUBS:$PATH"; bash -c "$NK_APT_INSTALL" nk-apt-install "$@"'
+        done = subprocess.run([bash, "-c", wrapper, "wrapper", *args], capture_output=True, text=True,
+                              env=env, timeout=120, check=False)
+        return done, log.read_text(encoding="utf-8").splitlines(), root
+
+    def test_the_mirror_list_reaches_beyond_canonical(self) -> None:
+        self.assertEqual(self.ALL_MIRRORS[:2], ["http://azure.archive.ubuntu.com/ubuntu/",
+                                                "http://archive.ubuntu.com/ubuntu/"])
+        others = [m for m in self.ALL_MIRRORS if not re.match(r"https?://([a-z.]+\.)?ubuntu\.com/", m)]
+        self.assertGreaterEqual(len(others), 2, self.ALL_MIRRORS)
+
+    def test_an_outage_of_every_canonical_host_installs_from_the_other_mirrors(self) -> None:
+        others = [m for m in self.ALL_MIRRORS if not m.startswith(self.CANONICAL)]
+        done, log, root = self.run_helper("--no-install-recommends", "libc6-dev-i386", up=others)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual([line.split()[0] for line in log if not line.startswith("curl ")], ["update", "install"])
+        self.assertEqual(log[len(self.ALL_MIRRORS)].split()[1:], others)
+        self.assertEqual(log[-1], "install -y --no-install-recommends libc6-dev-i386")
+        self.assertEqual((root / "etc" / "apt" / "apt-mirrors.txt").read_text(encoding="utf-8").split(), others)
+        mirror_list = f"mirror+file:{_bash_path(root)}/etc/apt/apt-mirrors.txt"
+        plain = (root / "etc" / "apt" / "sources.list.d" / "plain.sources").read_text(encoding="utf-8")
+        self.assertEqual(plain.count(f"URIs: {mirror_list}\n"), 2, plain)
+        self.assertNotIn("ubuntu.com", plain)
+        # The rewrite changes where the indexes come from, never the key that must sign them.
+        self.assertEqual(plain.count("Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n"), 2, plain)
+        network = (root / "etc" / "apt" / "apt.conf.d" / "79-nk-apt-network").read_text(encoding="utf-8")
+        self.assertIn('Acquire::Retries "5";', network)
+        for mirror in self.ALL_MIRRORS:
+            with self.subTest(probed=mirror):
+                self.assertIn(f"curl {mirror}dists/noble/InRelease", log)
+                if mirror not in others:
+                    self.assertIn(f"{mirror} did not serve dists/noble/InRelease", done.stderr)
+
+    def test_no_mirror_answering_fails_before_apt_runs(self) -> None:
+        done, log, _ = self.run_helper("libc6-dev-i386")
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("::error::nk-apt-install: no Ubuntu mirror answered for noble", done.stderr)
+        self.assertEqual([line for line in log if not line.startswith("curl ")], [])
+
+    def test_a_failed_attempt_moves_the_head_mirror_to_the_end(self) -> None:
+        done, log, _ = self.run_helper("libc6-dev-i386", up=self.ALL_MIRRORS, install_failures=1)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        updates = [line.split()[1:] for line in log if line.startswith("update ")]
+        self.assertEqual(updates, [self.ALL_MIRRORS, self.ALL_MIRRORS[1:] + self.ALL_MIRRORS[:1]])
+
+    def test_every_attempt_failing_fails_the_step(self) -> None:
+        done, log, _ = self.run_helper("libc6-dev-i386", up=self.ALL_MIRRORS, install_failures=99)
+        self.assertEqual(done.returncode, 1)
+        self.assertEqual(sum(line.startswith("install ") for line in log), 3)
+        self.assertIn("::error::nk-apt-install: installing libc6-dev-i386 failed on every attempt", done.stderr)
+
+    def test_installed_packages_need_no_mirror(self) -> None:
+        done, log, _ = self.run_helper("cmake", "git", installed="cmake git")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(log, [])
+        self.assertIn("already installed: cmake git", done.stdout)
+
+    def test_only_missing_packages_are_installed(self) -> None:
+        done, log, _ = self.run_helper("cmake", "libc6-dev-i386", up=self.ALL_MIRRORS, installed="cmake")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(log[-1], "install -y libc6-dev-i386")
+
+    def test_no_package_is_a_usage_error(self) -> None:
+        done, log, _ = self.run_helper("--no-install-recommends", up=self.ALL_MIRRORS)
+        self.assertEqual(done.returncode, 2)
+        self.assertEqual(log, [])
+
+    # Each way to switch off or bypass apt's signature check, on the command line, in an apt
+    # configuration item or in a sources entry. apt reads `trusted` as a boolean (yes, true,
+    # 1, on), so any value is refused, as is force-yes in either spelling.
+    _APT_TRUST_WEAKENERS = re.compile(
+        r"--allow-unauthenticated|--allow-insecure-repositories|--allow-downgrade-to-insecure-repositories"
+        r"|force-yes|\btrusted\s*[=:]|AllowInsecure|AllowDowngradeToInsecure|AllowUnauthenticated",
+        re.IGNORECASE)
+
+    def test_no_workflow_weakens_apt_signature_checks(self) -> None:
+        """docs/CI.md's "a mirror changes speed, not trust" holds only while every index must be signed."""
+        for sample in ("apt-get install --allow-unauthenticated x", "apt-get update --allow-insecure-repositories",
+                       "--allow-downgrade-to-insecure-repositories", "apt-get --force-yes install x",
+                       "deb [trusted=yes] http://m/ubuntu noble main", "Trusted: yes",
+                       "deb [ trusted=1 ] http://m/ubuntu noble main", "deb [arch=amd64 trusted=true] http://m/ x",
+                       "Trusted: on", "-o APT::Get::force-yes=true",
+                       'Acquire::AllowInsecureRepositories "true";', "-o APT::Get::AllowUnauthenticated=true",
+                       'Acquire::AllowDowngradeToInsecureRepositories "1";'):
+            with self.subTest(sample=sample):
+                self.assertRegex(sample, self._APT_TRUST_WEAKENERS)
+        files = sorted((ROOT / ".github").rglob("*.yml")) + sorted((ROOT / ".github").rglob("*.yaml"))
+        self.assertIn(ROOT / ".github" / "workflows" / "ci.yml", files)
+        for path in files:
+            for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                with self.subTest(file=path.relative_to(ROOT).as_posix(), line=number):
+                    self.assertNotRegex(line, self._APT_TRUST_WEAKENERS)
+
+    def test_every_package_install_goes_through_the_helper(self) -> None:
+        """Both apt steps call the helper; no step runs apt-get itself."""
+        text = _workflow_text("ci.yml")
+        jobs = text[text.index("\njobs:\n"):]
+        self.assertNotRegex(jobs, r"(?m)^\s*[^#\n]*\bapt-get\b")
+        invocation = 'bash -c "$NK_APT_INSTALL" nk-apt-install'
+        blocks = _ci_job_blocks()
+        lint = _ci_step(blocks["quick_checks"], "Check 32-bit format specifier portability across portable core")
+        native = _ci_step(blocks["native_tools"], "Install native test dependencies")
+        assert lint is not None and native is not None
+        lint_text, native_text = "\n".join(lint), "\n".join(native)
+        self.assertIn(f"{invocation} --no-install-recommends libc6-dev-i386", lint_text)
+        # The check runs after the install, in the same step, and the step can only fail.
+        self.assertLess(lint_text.index(invocation), lint_text.index("python tools/format_portability_check.py"))
+        self.assertIn("set -euo pipefail", lint_text)
+        self.assertNotIn("continue-on-error", lint_text)
+        self.assertIn(f"{invocation} build-essential", native_text)
+        self.assertIn("libc6-dev-i386", native_text)
+        self.assertIn("set -euo pipefail", native_text)
 
 
 class Gcc16CanaryWiringTests(unittest.TestCase):
@@ -3306,9 +3865,13 @@ class CiRunHarness(unittest.TestCase):
     FULL_ONLY = frozenset({"ci_required"})
     HEAVY = frozenset({"python_tools", "native_tools", "linux_gcc16", "android_build", "windows_runtime",
                        "windows_installer"})
+    #: Routed like a heavy job, but only on the nightly schedule and a manual run, so it never holds
+    #: back a pull request's or a landing batch's verdict (c_coverage, docs/CI.md "Coverage").
+    NIGHTLY = frozenset({"c_coverage"})
+    NIGHTLY_EVENTS = frozenset({"schedule", "workflow_dispatch"})
     LIGHT = QUICK | LIGHT_ONLY
     FULL = QUICK | FULL_ONLY
-    JOBS = QUICK | LIGHT_ONLY | FULL_ONLY | HEAVY
+    JOBS = QUICK | LIGHT_ONLY | FULL_ONLY | HEAVY | NIGHTLY
     RESULT_KEYS = {
         "hygiene": "HYGIENE_RESULT", "public_export": "PUBLIC_EXPORT_RESULT",
         "python_tools": "PYTHON_RESULT", "native_tools": "NATIVE_RESULT", "android_build": "ANDROID_RESULT",
@@ -3443,7 +4006,8 @@ class DraftLightCiWiringTests(CiRunHarness):
             for switch in ("", "on"):
                 with self.subTest(event=event_name, switch=switch):
                     ran, outputs, green = self._run(event_name, event, ref="refs/heads/main", switch=switch)
-                    self.assertEqual(ran, set(self.FULL | self.HEAVY))
+                    nightly = self.NIGHTLY if event_name in self.NIGHTLY_EVENTS else frozenset()
+                    self.assertEqual(ran, set(self.FULL | self.HEAVY | nightly))
                     self.assertEqual(outputs["run_main_smoke"], "true")
                     self.assertTrue(green)
 
@@ -3458,7 +4022,7 @@ class DraftLightCiWiringTests(CiRunHarness):
     def test_heavy_jobs_are_skipped_through_the_classifier_alone(self) -> None:
         """One switch: every heavy job gates on allow_substantive, and none reads the draft flag itself."""
         blocks = _workflow_job_blocks("ci.yml")
-        for job in sorted(self.HEAVY):
+        for job in sorted(self.HEAVY | self.NIGHTLY):
             with self.subTest(job=job):
                 self.assertIn("needs.classify.outputs.allow_substantive == 'true'", _job_if(blocks[job]))
                 self.assertNotIn("draft", _job_if(blocks[job]))

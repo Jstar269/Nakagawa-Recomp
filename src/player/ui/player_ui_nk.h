@@ -141,8 +141,8 @@ typedef enum {
                                            Enhanced for that game */
     PLAYER_UI_ACTION_CYCLE_SORT,        /* the library's next sort */
     PLAYER_UI_ACTION_FIND_OPEN,         /* open the library's find box */
-    PLAYER_UI_ACTION_FIND_KEY,          /* an on-screen key: title_index is a codepoint, or
-                                           PLAYER_UI_FIND_DELETE or PLAYER_UI_FIND_DONE */
+    PLAYER_UI_ACTION_FIND_KEY,          /* the find box's keyboard: title_index is
+                                           PLAYER_UI_FIND_EDITED, _DONE or _CANCEL */
     PLAYER_UI_ACTION_DISC_VERIFY,       /* the library's disc check line; .primary carries
                                            the op (PlayerUiDiscVerifyOp) */
     PLAYER_UI_ACTION_OPEN_SAVES,        /* the title page's Saves (#1883) */
@@ -222,9 +222,11 @@ typedef enum {
     PLAYER_UI_DISC_VERIFY_HIDE      /* hide the line about a check that could not finish */
 } PlayerUiDiscVerifyOp;
 
-/* The find box's keys that are not characters. */
-#define PLAYER_UI_FIND_DELETE 8u
-#define PLAYER_UI_FIND_DONE 10u
+/* What the find box's keyboard did (PLAYER_UI_ACTION_FIND_KEY). The keys edit the
+   model's find_keyboard in place. */
+#define PLAYER_UI_FIND_EDITED 1u /* the text or the letter case changed */
+#define PLAYER_UI_FIND_DONE 2u   /* Done, or the pad's Start: on to the matches */
+#define PLAYER_UI_FIND_CANCEL 3u /* Cancel: clear and close the box */
 
 /* What a control about games an older Nakagawa built asks for
    (PLAYER_UI_ACTION_REBUILD). main.c runs the player_state handlers. */
@@ -378,9 +380,12 @@ typedef struct {
     /* The find box is open: the grid holds the games that match find_query (the
        host filters `grid`), the add card and the demos are left out, and the
        box and its on-screen keyboard sit above the grid. game_total is the
-       number of games, for "3 of 40 titles". */
+       number of games, for "3 of 40 titles". The box's keys are the shared
+       on-screen keyboard (#2206): it edits find_keyboard's text, which is
+       find_query; with find_keyboard NULL the box shows the text alone. */
     bool find_open;
     const char *find_query;
+    UiKeyboard *find_keyboard;
     size_t game_total;
     /* Why no saved games are listed although a library file exists (a newer
        Nakagawa wrote it, and it is kept as it is), or NULL. */
@@ -635,12 +640,13 @@ typedef enum {
     PLAYER_UI_SETTINGS_CYCLE_BUILD_SPEED,    /* Background, Balanced, Fastest */
     PLAYER_UI_SETTINGS_CHOOSE_TEXPACK,       /* a title's Enhanced page: pick its pack's folder */
     PLAYER_UI_SETTINGS_REMOVE_TEXPACK,       /* a title's Enhanced page: forget its pack */
-    PLAYER_UI_SETTINGS_EDIT_NICKNAME         /* the nickname editor (#2197) */
+    PLAYER_UI_SETTINGS_EDIT_NICKNAME,        /* the nickname editor (#2197) */
+    PLAYER_UI_SETTINGS_TOGGLE_DISCORD        /* Settings > Online and developer (#2259) */
 } PlayerUiSettingsOp;
 
 /* Settings > Enhanced's rows after the play mode: one per Enhanced part (player_state.h
    PlayerEnhancedPart), in that order. */
-#define PLAYER_UI_ENHANCED_ROWS 12
+#define PLAYER_UI_ENHANCED_ROWS 15
 typedef struct {
     const char *name;           /* "Texture filtering" */
     const char *value;          /* "16x", "Off", "Library (On)" on a title's page */
@@ -745,6 +751,10 @@ typedef struct {
     PlayerUiUpdateStep update_step;
     PlayerUiUpdateStep update_failed_step;   /* CHECKING, DOWNLOADING or INSTALLING */
     bool check_updates_at_start;
+    /* Settings > Online and developer: Discord status (#2259), and whether this build can
+       turn it on (it has a Discord application ID). */
+    bool discord_presence;
+    bool discord_available;
     const char *current_version;    /* "0.0.2" */
     const char *update_version;     /* "0.0.2", once checked */
     bool update_prerelease;
@@ -1007,8 +1017,9 @@ enum {
     PLAYER_UI_ID_LIBRARY_EMPTY_WIZARD = 0x1005u,
     PLAYER_UI_ID_LIBRARY_SORT = 0x1006u,
     PLAYER_UI_ID_LIBRARY_FIND = 0x1007u,          /* FIND in the heading */
-    PLAYER_UI_ID_LIBRARY_FIND_DONE = 0x1008u,
-    PLAYER_UI_ID_LIBRARY_FIND_KEY_BASE = 0x1080u, /* + the key's place on the keyboard */
+    PLAYER_UI_ID_LIBRARY_FIND_DONE = 0x1008u,     /* the find box keyboard's Done */
+    PLAYER_UI_ID_LIBRARY_FIND_CANCEL = 0x1009u,   /* and its Cancel */
+    PLAYER_UI_ID_LIBRARY_FIND_KEY_BASE = 0x1080u, /* + the key's place: UI_KEYBOARD_KEY_COUNT */
     PLAYER_UI_ID_BUILD_ACTION = 0x4001u,
     PLAYER_UI_ID_PREREQ_ACCEPT = 0x4101u,
     PLAYER_UI_ID_PREREQ_CANCEL = 0x4102u,
@@ -1132,14 +1143,19 @@ enum {
     PLAYER_UI_ID_SETTINGS_ACE = 0x4540u,              /* retired: the GAME card's old switch */
     PLAYER_UI_ID_SETTINGS_ACE_OPEN = 0x4541u,         /* the GAME card's row that opens Enhanced */
     PLAYER_UI_ID_SETTINGS_ACE_MODE = 0x4542u,         /* the Enhanced page's play mode */
-    /* + the part (PlayerEnhancedPart): 0x4543 to 0x454E, PLAYER_UI_ENHANCED_ROWS of them */
+    /* The part rows (PlayerEnhancedPart), PLAYER_UI_ENHANCED_ROWS of them, take their ids from
+       PLAYER_UI_ID_ENHANCED_PART(part): parts 0 to 12 at 0x4543 to 0x454F (the range ends before
+       0x4550), parts 13 and on at 0x4680 to 0x469F (room for PLAYER_UI_ENHANCED_MORE_IDS, 32
+       parts), so adding a part moves no other part's id */
     PLAYER_UI_ID_SETTINGS_ENHANCED_PART = 0x4543u,
+    PLAYER_UI_ID_SETTINGS_ENHANCED_PART_MORE = 0x4680u,
     PLAYER_UI_ID_SETTINGS_PROBLEM_REPORT = 0x4550u,   /* Settings: opens the Problem report page */
     PLAYER_UI_ID_REPORT_CREATE = 0x4551u,
     PLAYER_UI_ID_REPORT_FOLDER = 0x4552u,
     PLAYER_UI_ID_SETTINGS_OPEN_DATA_FOLDER = 0x4553u, /* Settings: shows the data folder */
     PLAYER_UI_ID_SETTINGS_OPEN_LOGS = 0x4554u,        /* Settings: shows the logs folder */
     PLAYER_UI_ID_SETTINGS_BUILD_SPEED = 0x4555u,      /* Build tools and cache: Build speed */
+    PLAYER_UI_ID_SETTINGS_DISCORD = 0x4556u,          /* Settings > Online: Discord status */
     PLAYER_UI_ID_SETTINGS_TEXPACK_CHOOSE = 0x455Au,   /* a title's Enhanced page: Texture pack folder */
     PLAYER_UI_ID_SETTINGS_TEXPACK_REMOVE = 0x455Bu,   /* a title's Enhanced page: Remove texture pack */
     PLAYER_UI_ID_NICKNAME_SAVE = 0x4560u,             /* the nickname editor's Save */
@@ -1186,6 +1202,16 @@ enum {
 
 #define PLAYER_UI_ID_LIBRARY_ITEM(index) \
     ((NkUiId)(PLAYER_UI_ID_LIBRARY_ITEM_BASE + (uint32_t)(index)))
+
+/* Settings > Enhanced's part rows: the first PLAYER_UI_ENHANCED_FIRST_IDS parts in the first
+   range, the rest in the second (player_ui_nk.c checks that both hold every row). */
+#define PLAYER_UI_ENHANCED_FIRST_IDS 13u
+#define PLAYER_UI_ENHANCED_MORE_IDS 32u
+#define PLAYER_UI_ID_ENHANCED_PART(part)                                                     \
+    ((NkUiId)((uint32_t)(part) < PLAYER_UI_ENHANCED_FIRST_IDS                                  \
+                  ? PLAYER_UI_ID_SETTINGS_ENHANCED_PART + (uint32_t)(part)                     \
+                  : PLAYER_UI_ID_SETTINGS_ENHANCED_PART_MORE +                                 \
+                        ((uint32_t)(part) - PLAYER_UI_ENHANCED_FIRST_IDS)))
 
 NkUiRouter *nk_ui_router_create(void);
 void nk_ui_router_destroy(NkUiRouter *router);
@@ -1379,6 +1405,9 @@ PlayerUiAction player_ui_screen_nickname(NkUi *ui, const PlayerUiNicknameModel *
    nk_nickname_valid takes inside a nickname, so no control character is ever
    typed. A space is typed; a nickname of spaces alone is refused on Done. */
 bool player_ui_nickname_accepts(uint32_t codepoint, void *user);
+/* The find box's character filter (UiKeyboardFilter): any character a title name or
+   a disc ID can hold, so nothing but control characters is refused. */
+bool player_ui_find_accepts(uint32_t codepoint, void *user);
 
 /* The top bar every launcher screen draws: LIBRARY, ABOUT and SETTINGS tabs,
    focusable and switched with L / R. Returns the action for a tab the user
@@ -1463,6 +1492,11 @@ unsigned player_ui_nk_test_focus(const PlayerUiNk *player);
 /* Test only: what the nickname editor holds and its count ("12 / 32 bytes") in
    count, or NULL (and "") while it is closed. */
 const char *player_ui_nk_test_nickname(const PlayerUiNk *player, char *count, size_t cap);
+/* What the library's find box holds while it is open, else NULL. */
+const char *player_ui_nk_test_find(const PlayerUiNk *player);
+/* Test only: how many of the library's games the last library frame's grid held (the
+   find box's matches while it is open), and in *total how many games it has. */
+size_t player_ui_nk_test_library_grid(const PlayerUiNk *player, size_t *total);
 /* Test only: the next UI's last frame was laid out (nk_ui_laid_out), so the
    next frame takes a move at once; false without a next UI. */
 bool player_ui_nk_test_laid_out(const PlayerUiNk *player);

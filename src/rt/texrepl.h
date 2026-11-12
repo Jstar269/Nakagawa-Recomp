@@ -3,27 +3,48 @@
 /*
  * texrepl.h - Texture replacement packs in PPSSPP's layout (#1880), phase 1: the host half.
  *
- * A pack is a local folder the user supplies (the project ships none and never downloads
- * one): an optional textures.ini and PNG files, each named for the texture it replaces. This
- * module reads a pack and answers "what replaces this guest texture?". It never touches the GPU,
- * guest memory or the network: the renderer (ge_gpu.c) hashes a texture it has just decoded,
- * asks here, and uploads whatever comes back through its scaled-copy path (tex_scale.h).
+ * A pack is a local folder or ZIP file the user supplies (the project ships none and never
+ * downloads one): a textures.ini (optional in a folder) and images, each named for the texture it
+ * replaces. This module reads a pack and answers "what replaces this guest texture?". It never
+ * touches the GPU, guest memory or the network: the renderer (ge_gpu.c) hashes a texture it has
+ * just decoded, asks here, and uploads whatever comes back through its scaled-copy path
+ * (tex_scale.h).
  *
- * What is read, from PPSSPP's documented layout (design reading only; the code is this project's):
+ * Where a pack is read from (docs/ENHANCEMENT_CONTRACT.md section 10.12 has the full rules):
+ *   - a folder: its textures.ini and files; a textures.zip in it is read instead, as in PPSSPP;
+ *   - a ZIP file, read in place (nothing is extracted): its root is the archive's top when
+ *     textures.ini is there, else its one top-level folder holding textures.ini. A ZIP with no
+ *     textures.ini is refused, as PPSSPP refuses one. Names in a ZIP are matched with case ignored.
+ * What is read, from PPSSPP's layout (the behaviour is PPSSPP's; the code is this project's):
  *   [options]          hash = quick | xxh32 | xxh64 (required when the ini exists), ignoreAddress,
- *                      reduceHash, skipLastDXT1Blocks128x64, skipLastDXT1Blocks128x128, version
- *   [hashes]           <24 hex digits>[_<level>] = <file under the pack folder>; an empty file marks a
- *                      texture to leave alone
+ *                      reduceHash, skipLastDXT1Blocks128x64, skipLastDXT1Blocks128x128, version;
+ *                      the first line of each counts
+ *   [hashes]           <key>[_<level>] = <file under the pack's root>, the key read as PPSSPP's
+ *                      sscanf("%16llx%8x_%d") reads it (a short key is a wildcard); an empty file
+ *                      marks a texture to leave alone; "_<level>" lines are mip levels
  *   [hashranges]       addr,w,h = newW,newH   (the area a texture's hash covers)
  *   [reducehashranges] w,h = fraction          (with reduceHash)
- *   and hash-named PNG files in the folder's root, which need no ini line.
- * What is not read is reported, never silently ignored: [filtering], [indexed], [games],
- * saveIndexed, ignoreMipmap, mip-level files (name_1.png), DDS/KTX2/ZIM files, and any key or
- * section this module does not know each add a line to nk_texrepl_diag.
+ *   and hash-named files in the root (24 characters, or 26-27 with "_<level>"; .png, .dds, .ktx2,
+ *   .zim), which need no ini line. Only the first section of each name is read, as in PPSSPP.
+ * What is not applied is reported, never silently ignored: [filtering], [games], saveIndexed,
+ * DDS/KTX2/ZIM images (listed, so they match, but not decoded), a texture [indexed] marks (its
+ * image holds palette indices, so it is not replaced), and any key or section this module does not
+ * know each add a line to nk_texrepl_diag.
  *
- * A malformed ini (a line that is no comment, section or key = value, an unfinished section header,
- * no hash type, an unknown hash type) makes nk_texrepl_open fail with a message, and nothing
- * loads: a half-read pack would replace some textures and not others in a way nobody asked for.
+ * A pack is refused whole, with a message and nothing loaded, when its folder, textures.ini or ZIP
+ * cannot be read or is malformed: a line that is no comment, section or key = value, an unfinished
+ * or indented section header, a line before any section, no hash type or an unknown one, a
+ * textures.ini over 4 MiB, a damaged ZIP or one with an unsafe name. One image that cannot be used
+ * (missing, not a regular file, outside the pack folder, over 64 MiB, a bad PNG, the wrong size for
+ * its level, over the budget) is skipped: its texture is drawn as the game draws it, a line goes to
+ * nk_texrepl_diag and stats.skipped counts it.
+ *
+ * Files are checked on the handle opened, not the name: a folder file is read only when it is a
+ * regular disk file whose final path (links and junctions resolved) is inside the folder's final
+ * path, and only up to its cap; a name the ZIP reader would refuse (CON.png, "a.png.", "a:b") is
+ * not opened. A ZIP pack's file is checked the same way, a regular file, the folder's textures.zip
+ * inside it; the ZIP reader then opens it again by name to read it.
+ * Messages name the pack by its last path component only.
  */
 #ifndef NK_TEXREPL_H
 #define NK_TEXREPL_H
@@ -40,6 +61,11 @@ extern "C" {
 #define NK_TEXREPL_MAX_DIM 2048
 /* The diagnostics kept; the rest are counted in the last line. */
 #define NK_TEXREPL_MAX_DIAG 40
+/* A ZIP pack's entries may declare at most this many unpacked bytes in all (more is refused whole);
+ * each image read is capped at 64 MiB and textures.ini at 4 MiB, in a ZIP or a folder. */
+#define NK_TEXREPL_MAX_PACK_BYTES ((uint64_t)8u << 30)
+/* Mip levels a texture's chain holds at most (PPSSPP's MAX_REPLACEMENT_MIP_LEVELS). */
+#define NK_TEXREPL_MAX_LEVELS 12
 
 typedef enum {
     NK_TEXREPL_HASH_QUICK = 0,
@@ -75,12 +101,15 @@ uint32_t nk_texrepl_bits_per_texel(uint32_t format);
 /* ---- pack ------------------------------------------------------------------------------- */
 typedef struct NkTexRepl NkTexRepl;
 
-/* Read the pack in `dir`. `budget_bytes` bounds the decoded images kept in memory (0 takes
- * NK_TEXREPL_DEFAULT_BUDGET_MB). Returns NULL and fills `err` when the folder cannot be read or its
- * textures.ini is malformed; nothing is loaded then. */
-NkTexRepl *nk_texrepl_open(const char *dir, uint64_t budget_bytes, char *err, size_t err_cap);
+/* Read the pack at `path`, a folder or a ZIP file. `budget_bytes` bounds the decoded images kept in
+ * memory (0 takes NK_TEXREPL_DEFAULT_BUDGET_MB). Returns NULL and fills `err` when the pack cannot be
+ * read, its ZIP is damaged or holds an unsafe name, or its textures.ini is malformed; nothing is
+ * loaded then. A ZIP's structure is checked whole here; each file's CRC-32 when it is first read. */
+NkTexRepl *nk_texrepl_open(const char *path, uint64_t budget_bytes, char *err, size_t err_cap);
 void nk_texrepl_close(NkTexRepl *pack);
 
+/* 1 when the pack is read from a ZIP (a .zip path, or a folder's textures.zip). */
+int nk_texrepl_is_zip(const NkTexRepl *pack);
 NkTexReplHash nk_texrepl_hash_kind(const NkTexRepl *pack);
 /* How many textures the pack lists (replacements and "leave alone" lines alike). */
 size_t nk_texrepl_entry_count(const NkTexRepl *pack);
@@ -131,9 +160,28 @@ typedef struct NkTexReplHit {
 /* The replacement for a texture, or none. Returns 1 and fills `out` (the image stays in memory
  * until nk_texrepl_unpin), or 0: no entry, a "leave alone" entry, an unsupported or unreadable file,
  * or an image the budget cannot hold. The first lookup of an entry decodes its PNG on the calling
- * thread. */
+ * thread. The same as nk_texrepl_lookup_level with level 0. */
 int nk_texrepl_lookup(NkTexRepl *pack, const NkTexReplId *id, NkTexReplHit *out);
+/* How many mip levels the pack lists for the texture (0 to NK_TEXREPL_MAX_LEVELS; 0 when it lists
+ * none or leaves the texture alone). Listed is not usable: see nk_texrepl_lookup_level. */
+int nk_texrepl_level_count(const NkTexRepl *pack, const NkTexReplId *id);
+/* Mip level `level` of the texture's replacement, as PPSSPP loads a chain: it counts only when
+ * every level from 0 up to it is a readable PNG and level n is level 0's size halved n times (at
+ * least 1), so a chain stops at its first unusable level. Returns 1 and fills `out` as
+ * nk_texrepl_lookup does, or 0. The renderer does not draw levels above 0 yet. */
+int nk_texrepl_lookup_level(NkTexRepl *pack, const NkTexReplId *id, int level, NkTexReplHit *out);
 void nk_texrepl_unpin(NkTexRepl *pack, NkTexReplHit *hit);
+/* Decodes PNG bytes as a pack image is decoded: refused, with a reason in `why`, unless the bytes
+ * are a whole PNG (signature, IHDR first, every chunk's CRC right, an IDAT, IEND), 1 to
+ * NK_TEXREPL_MAX_DIM texels a side and, when `max_bytes` is not 0, at most that many bytes of
+ * R, G, B, A pixels, and image data no longer than R + R / 8 + 70 bytes, R being the raw size
+ * IHDR implies (more is work no honest encoder makes the reader do). All is checked before any
+ * pixel memory is allocated. The image data is then unpacked by nk_psp_inflate_raw_into into a
+ * buffer of exactly R bytes, and refused if it would unpack to more or less, if its Adler-32 is
+ * wrong or not right after the stream's last block. On success `*rgba` is malloc'd (free it with
+ * free) and 1 is returned. */
+int nk_texrepl_decode_png(const void *data, size_t size, uint64_t max_bytes, uint32_t **rgba, int *w, int *h,
+                          char *why, size_t why_cap);
 /* The whole-number factor a hit is larger than a w x h texture by, the same on both axes, or 0
  * when it is not one (the renderer draws such a texture unreplaced and counts it). */
 int nk_texrepl_factor(const NkTexReplHit *hit, int w, int h);
@@ -148,6 +196,18 @@ typedef struct NkTexReplStats {
     uint64_t bad_factor;      /* counted by the renderer through nk_texrepl_note_bad_factor */
     uint64_t cache_bytes, cache_peak;
     uint64_t decode_ns;
+    uint64_t open_ns;         /* nk_texrepl_open, by the C clock */
+    uint64_t index_bytes;     /* what the open pack's own index holds (not the ZIP reader's directory) */
+    uint64_t skipped;         /* texture levels found unusable and skipped from then on, each counted once
+                                 (a file several levels name is read, noted and counted in load_failed once) */
+    uint64_t list_ns;         /* the part of open_ns spent listing the folder, or opening and indexing the ZIP */
+    uint64_t decode_peak;     /* the most memory one image's read and decode held at once: the file with a
+                                 ZIP entry's packed bytes while it is read, then the file with the joined
+                                 image data and the rows, then the rows and the result */
+    uint64_t reads;           /* image files read from the pack: once for all the levels that name one file,
+                                 again only after its decoded image was evicted */
+    uint64_t deferred;        /* lookups of an evicted image left unreplaced while its next decode waits
+                                 (an image evicted and needed again is decoded less often each time) */
 } NkTexReplStats;
 void nk_texrepl_stats(const NkTexRepl *pack, NkTexReplStats *out);
 void nk_texrepl_note_bad_factor(NkTexRepl *pack);

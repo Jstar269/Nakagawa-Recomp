@@ -130,7 +130,10 @@ def main() -> int:
 
     # Stage A scalar map: verify all 128 field->phys pairs against the formula.
     scalar_line = next(l for l in payloads[0].splitlines() if "case_id=S:map" in l)
-    pairs = re.search(r"map=(\S+)", scalar_line).group(1).split(",")
+    map_match = re.search(r"map=(\S+)", scalar_line)
+    if map_match is None:
+        raise SystemExit("verify_vfpu_addr: the S:map line carries no map= field")
+    pairs = map_match.group(1).split(",")
     bad = 0
     for tok in pairs:
         f, ph = (int(x, 16) for x in tok.split(":"))

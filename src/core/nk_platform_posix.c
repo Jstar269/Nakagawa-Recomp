@@ -1380,6 +1380,8 @@ void nk_platform_close_process(NkProcessHandle *process) {
 static int s_android_log_pipe[2] = { -1, -1 };
 static char s_android_log_tag[32] = "nakagawa";
 static FILE *s_android_log_file;
+static pthread_t s_android_log_thread;
+static bool s_android_log_thread_running;
 
 static void *android_log_pump(void *arg) {
     (void)arg;
@@ -1387,6 +1389,7 @@ static void *android_log_pump(void *arg) {
     size_t used = 0;
     for (;;) {
         ssize_t n = read(s_android_log_pipe[0], buf + used, sizeof(buf) - 1u - used);
+        if (n < 0 && errno == EINTR) continue;
         if (n <= 0) break;
         used += (size_t)n;
         size_t start = 0;
@@ -1408,6 +1411,14 @@ static void *android_log_pump(void *arg) {
             used = 0;
         }
     }
+    if (used > 0) {   /* a last line with no newline */
+        buf[used] = '\0';
+        __android_log_write(ANDROID_LOG_INFO, s_android_log_tag, buf);
+        if (s_android_log_file) {
+            fprintf(s_android_log_file, "%s\n", buf);
+            fflush(s_android_log_file);
+        }
+    }
     return NULL;
 }
 
@@ -1416,13 +1427,19 @@ bool nk_platform_host_startup(const char *log_tag) {
     if (log_tag && log_tag[0]) snprintf(s_android_log_tag, sizeof(s_android_log_tag), "%s", log_tag);
     const char *log_path = getenv("NK_ANDROID_LOG_FILE");
     if (log_path && log_path[0]) s_android_log_file = fopen(log_path, "a");
-    if (s_android_log_pipe[0] < 0 && pipe(s_android_log_pipe) == 0) {
+    /* O_CLOEXEC: a child the runtime starts keeps no copy of the pipe's own write end, which would
+       hold off the end of file nk_platform_host_shutdown waits for. The standard streams it gets
+       are dup2() copies, inherited as on the desktop. */
+    if (s_android_log_pipe[0] < 0 && pipe2(s_android_log_pipe, O_CLOEXEC) == 0) {
         pthread_t thread;
         setvbuf(stdout, NULL, _IOLBF, 0);
         setvbuf(stderr, NULL, _IOLBF, 0);
         (void)dup2(s_android_log_pipe[1], STDOUT_FILENO);
         (void)dup2(s_android_log_pipe[1], STDERR_FILENO);
-        if (pthread_create(&thread, NULL, android_log_pump, NULL) == 0) pthread_detach(thread);
+        if (pthread_create(&thread, NULL, android_log_pump, NULL) == 0) {
+            s_android_log_thread = thread;
+            s_android_log_thread_running = true;
+        }
     }
     /* SDL_GetBasePath() is "./" on Android: the folder the app unpacked its bundled files to
        (fonts) is made the working directory so that relative base resolves there. */
@@ -1434,11 +1451,35 @@ bool nk_platform_host_startup(const char *log_tag) {
     }
     return true;
 }
+
+void nk_platform_host_shutdown(void) {
+    if (!s_android_log_thread_running) return;
+    s_android_log_thread_running = false;
+    fflush(stdout);
+    fflush(stderr);
+    /* The pump reads until every write end is closed: the two standard streams and the pipe's
+       own. Then it has written every line, and it ends. */
+    int null_fd = open("/dev/null", O_WRONLY | O_CLOEXEC);
+    if (null_fd >= 0) {
+        (void)dup2(null_fd, STDOUT_FILENO);
+        (void)dup2(null_fd, STDERR_FILENO);
+        close(null_fd);
+    }
+    close(s_android_log_pipe[1]);
+    s_android_log_pipe[1] = -1;
+    (void)pthread_join(s_android_log_thread, NULL);
+    if (s_android_log_file) {
+        fclose(s_android_log_file);
+        s_android_log_file = NULL;
+    }
+}
 #else
 bool nk_platform_host_startup(const char *log_tag) {
     (void)log_tag;
     return true;
 }
+
+void nk_platform_host_shutdown(void) {}
 #endif
 
 bool nk_platform_local_time_zone(int *standard_minutes, bool *daylight_now) {
@@ -1503,6 +1544,40 @@ const char *nk_platform_env_user_name(void) {
 
 unsigned long nk_platform_process_id(void) {
     return (unsigned long)getpid();
+}
+
+/* Local pipes are unsupported on POSIX: every open fails and the caller's feature stays
+   off. */
+bool nk_platform_local_pipe_supported(void) {
+    return false;
+}
+
+bool nk_platform_local_pipe_open(NkLocalPipe *pipe, const char *name) {
+    (void)name;
+    if (pipe) memset(pipe, 0, sizeof(*pipe));
+    return false;
+}
+
+bool nk_platform_local_pipe_write(NkLocalPipe *pipe, const void *data, size_t len,
+                                  unsigned timeout_ms) {
+    (void)pipe;
+    (void)data;
+    (void)len;
+    (void)timeout_ms;
+    return false;
+}
+
+long nk_platform_local_pipe_read(NkLocalPipe *pipe, void *buf, size_t cap) {
+    (void)pipe;
+    (void)buf;
+    (void)cap;
+    return -1;
+}
+
+void nk_platform_local_pipe_close(NkLocalPipe *pipe) {
+    if (!pipe) return;
+    pipe->handle = NULL;
+    pipe->open = false;
 }
 
 int nk_platform_last_os_error(void) {
