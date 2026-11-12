@@ -662,16 +662,37 @@ static uint32_t tex_canonical(uint32_t addr) {
     return sr_vram_cpu_aperture(addr) ? sr_vram_cpu_address(addr) : SR_PHYS(addr);
 }
 
+/* The 0x04200000 and 0x04600000 views of VRAM (address bit 21) read each offset elsewhere
+ * (sr_vram_cpu_address, PSP-VRAM-MIRROR-001), changing only offset bits 5..9 and 13: the bytes
+ * that `bytes` from VRAM offset `off` read through either view lie in the 16 KiB-aligned blocks
+ * around them, [*lo, *lo + *len), clamped at the end of VRAM. */
+static void vram_view_envelope(uint32_t off, uint32_t bytes, uint32_t *lo, uint32_t *len) {
+    const uint64_t end = ((uint64_t)off + bytes + 0x3FFFu) & ~UINT64_C(0x3FFF);
+    *lo = off & ~0x3FFFu;
+    *len = (uint32_t)((end < 0x200000u ? end : 0x200000u) - *lo);
+}
+
+/* The canonical range a texture source at `addr` reads: through a reordering view, the
+ * envelope of its plain offset, so a write to any byte the view reads overlaps it. */
+static void tex_source_range(uint32_t addr, uint32_t bytes, uint64_t *lo, uint64_t *hi) {
+    if (sr_vram_cpu_aperture(addr) && (SR_PHYS(addr) & 0x00200000u)) {
+        uint32_t off, len;
+        vram_view_envelope(SR_PHYS(addr) & 0x001FFFFFu, bytes, &off, &len);
+        *lo = SR_VRAM_CPU_BASE + off;
+        *hi = *lo + len;
+        return;
+    }
+    *lo = tex_canonical(addr);
+    *hi = *lo + bytes;
+}
+
 /* Cache the canonical source range of level 0, then of each level 1..mip.max_level (#1373). */
 static void tex_ent_set_ranges(TexEnt *e) {
     int n = 0;
-    e->range_lo[n] = tex_canonical(e->addr);
-    e->range_hi[n] = e->range_lo[n] + e->bytes;
+    tex_source_range(e->addr, e->bytes, &e->range_lo[n], &e->range_hi[n]);
     n++;
-    for (uint32_t l = 0; l < e->mip.max_level && l < 7u; l++, n++) {
-        e->range_lo[n] = tex_canonical(e->mip.addr[l]);
-        e->range_hi[n] = e->range_lo[n] + e->mip_bytes[l];
-    }
+    for (uint32_t l = 0; l < e->mip.max_level && l < 7u; l++, n++)
+        tex_source_range(e->mip.addr[l], e->mip_bytes[l], &e->range_lo[n], &e->range_hi[n]);
     e->range_n = n;
 }
 
@@ -5573,6 +5594,18 @@ static DepthEnt *depth_containing(uint32_t a) {
 
 static int hook_vram_read(uint32_t addr, uint32_t bytes);
 
+/* Mark every cached texture that reads canonical [a0, a1) stale, for a write to guest VRAM that
+ * no hook_vram_dirty reported. */
+static void tex_invalidate_span(uint64_t a0, uint64_t a1) {
+    for (int i = 0; i < s_tex_n; i++) {
+        TexEnt *e = &s_tex[i];
+        if (e->content_valid && tex_ent_overlaps(e, a0, a1)) {
+            s_cnt_tex_invalidations++;
+            e->content_valid = 0;
+        }
+    }
+}
+
 /* Build pipeline key + push constants for the current GE state. Always succeeds. */
 static void build_state(int persp, int sprite, Batch *b) {
     uint64_t key_started = cpu_profile_now();
@@ -5888,16 +5921,11 @@ static void build_state(int persp, int sprite, Batch *b) {
                 b->pc.texsize[3] = (float)(pix / src->stride);
             } else {
                 /* incompatible stride/format reinterpretation, mip levels or a reordering view:
-                 * VRAM + decoder. A render target is drawn as the GE drew it: never from a scaled copy. A depth
-                 * read commits what a CPU read would (the targets' pixels, then the depth). */
+                 * VRAM + decoder. A render target is drawn as the GE drew it: never from a scaled
+                 * copy. A depth read commits what a CPU read would (the targets' pixels, then the
+                 * depth). */
                 uint32_t off = vram_off(g->tex_addr), span = tex_span_size(g->tex_bufw, g->tex_w, g->tex_h);
-                if (view_read) {
-                    /* Both views change only offset bits 5..9 and 13, so the bytes a span reads
-                     * through them lie in the 16 KiB-aligned blocks around it. */
-                    const uint64_t end = ((uint64_t)off + span + 0x3FFFu) & ~UINT64_C(0x3FFF);
-                    off &= ~0x3FFFu;
-                    span = (uint32_t)((end < 0x200000u ? end : 0x200000u) - off);
-                }
+                if (view_read) vram_view_envelope(off, span, &off, &span);
                 if (depth_read) {
                     if (!hook_vram_read(0x04000000u + off, span))
                         fprintf(stderr, "gegpu: a depth read at 0x%06x could not commit the depth to guest "
@@ -5908,6 +5936,11 @@ static void build_state(int persp, int sprite, Batch *b) {
                 } else {
                     (void)target_readback_span(src, off, span);
                 }
+                /* A source read through a view has no content hash (tex_source_ptr), and the
+                 * readbacks above (a presentation copy's included) write guest VRAM without
+                 * hook_vram_dirty, so a decode cached before them may be stale: decode again. */
+                if (view_read)
+                    tex_invalidate_span(SR_VRAM_CPU_BASE + (uint64_t)off, SR_VRAM_CPU_BASE + (uint64_t)off + span);
                 s_tex_noscale = 1;
                 b->dset = tex_get();
                 s_tex_noscale = 0;

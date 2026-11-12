@@ -350,8 +350,13 @@ movie as a texture through a view after writing the frames there with the CPU (#
 only if the fetch undoes the write's transform. A read through 0x04200000 or 0x04600000 therefore
 never binds the target's image, whose pixels are in plain order: it reads back every target's
 pixels in the 16 KiB-aligned blocks the view can reach and decodes guest VRAM through the view at
-1x (`rtt-vram-view` in `gpu-coherence-selftest`, at 1x, 2x and 4x: an 8888 and a 5650 target read
-through each view, against the software renderer).
+1x. A source read through a view has no content hash, so the texture cache keeps its decode current
+another way: its source range is those blocks, so a notified CPU write to any byte the view reads
+makes it stale, and a render-target read through a view decodes again after the readbacks. The
+cell `rtt-vram-view` in `gpu-coherence-selftest` runs at 1x, 2x and 4x against the software
+renderer: an 8888 and a 5650 target read through each view, then the 8888 target redrawn and read
+through 0x04200000 again, and a texture in no target read through 0x04200000 before and after a CPU
+write to bytes that only the 16 KiB blocks cover.
 
 Depth is matched by address like any texture. A depth buffer read as a texture decodes guest VRAM
 at 1x when its address lies outside every colour target's span. When the texture's address lies
