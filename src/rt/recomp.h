@@ -1119,8 +1119,6 @@ uint32_t sr_bitrev(uint32_t x);
  * too: generated code calls it where a codegen temporary compatibility patch applies. */
 void sr_compat_fired(const char *collection, uint32_t anchor, const char *name);
 
-/* PSP-EABI bridge used by the generated guest sprintf entry. */
-void sr_guest_sprintf(CpuState *s);
 /* Format the guest string at `fmt` with variadic words starting in register
  * `first_reg` into a bounded host buffer (NUL-terminated; never guest-visible).
  * Returns the full formatted length, as printf does. */
@@ -1558,6 +1556,20 @@ int sr_enhancement_logic_slowed(unsigned *rate);
  * a matrix at every call cannot be scaled twice; the call at the site must leave each listed matrix
  * describing the camera it was built for (rewritten, or unchanged since the last call). */
 void sr_enhancement_widen_clip_x(uint32_t base, const uint32_t *offsets, uint32_t count);
+/* A vblank_wait_skip site of a package's Ace load part (section 9.8), from generated code at the
+ * site's jal to sceDisplayWaitVblankStart, after its delay slot (src/rt/hle_display.c): nonzero
+ * only while the run's Ace line carries load=fast (nk_ace_load_fast(), src/rt/ace.c, which counts
+ * each skip) and waits are permitted, and then that call is skipped, the thread blocks for 1 us
+ * (sceKernelDelayThread(1)'s delay wait, so threads of any priority run) and $v0 = 0. Where waits are
+ * not permitted it returns 0, so the stock call runs and returns CAN_NOT_WAIT. Never gated by
+ * SR_EXPERIMENTAL_60HZ. site and pc are the site's id and its jal's address. It stops skipping
+ * for the rest of the run once a skip has happened in ACE_LOAD_PACING_UPDATES (src/rt/ace.h)
+ * logic updates in a row, as counted by nk_ace_load_update(). */
+int nk_ace_load_skip_wait(CpuState *s, const char *site, uint32_t pc);
+/* One logic update begins: generated code calls it at the package's update_boundary, ungated,
+ * when the package has an Ace load part (src/rt/ace.c; contract 11.3.10). It only feeds the load
+ * part's pacing guard and does nothing unless the run's load=fast is in effect. */
+void nk_ace_load_update(void);
 
 /* The kernel's record of the main module, emitted by tools/codegen.py from the ELF (PT_LOAD
  * segments, SceModuleInfo, section or program headers, and the syslib's
@@ -2182,6 +2194,8 @@ void     gui_consume_button_pulses(void);          /* after one PSP VBLANK sampl
  * when no SDL3 presenter is up (the GDI and offscreen presenters have no SDL3 gamepad). */
 uint32_t gui_pad_pulses_take(void);
 void     gui_analog(uint8_t *lx, uint8_t *ly);   /* live left-stick (0..255, 128=centre) */
+int      gui_stick_dead_zone(void);              /* the input profile's stick dead zone in centred
+                                                    counts (ace_stick_host_counts); 0 without one */
 int      gui_pad_present(void);                  /* 1 when a game controller is connected */
 void     gui_ace_vblank(uint32_t vcount);        /* Ace Mode's smooth motion: a held frame's VBLANK */
 /* Returns 1 only when the selected presenter accepted the validated frame. */
@@ -2523,6 +2537,19 @@ void     sched_preempt(void);                       /* yield now if a higher-pri
 extern atomic_int_least32_t sr_preempt_due;
 void     sched_preempt_point(void);
 void     sched_block_on(uint32_t obj);              /* block current thread until sched_wake(obj) */
+/* Host work a guest thread waits for (#2361, sched.c): a host call that would block the
+ * scheduler's thread runs on one worker thread instead, and the guest thread that asked waits in
+ * the scheduler until it is done, so the other threads run meanwhile. usable is true only in a
+ * paced run, on a guest thread that may wait; otherwise the caller makes its call itself. run
+ * must not touch guest state. The submitter finishes a done item; if its thread ends first the
+ * item is abandoned, and drop (may be NULL) releases ctx once the call has returned. */
+typedef struct SrHostWork SrHostWork;
+typedef void (*SrHostWorkFn)(void *ctx);
+int      sched_host_work_usable(void);
+SrHostWork *sched_host_work_submit(SrHostWorkFn run, SrHostWorkFn drop, void *ctx);   /* NULL: make the call yourself */
+int      sched_host_work_done(SrHostWork *work);
+uint64_t sched_host_work_finish(SrHostWork *work);    /* after done: releases the item, not ctx; the host ns run took */
+void     sched_host_work_abandon(SrHostWork *work);   /* the waiting thread ended */
 void     sched_wait_vblank_start(void);             /* sceDisplayWaitVblankStart: always block to the next vblank start edge */
 int      sched_wait_vblank(void);                   /* sceDisplayWaitVblank: 1 if already inside the vblank interval (no block), else blocks and returns 0 */
 int      sched_wait_vblank_cb(int wait_start);       /* callback-aware display wait; wait_start selects WaitVblankStart semantics */

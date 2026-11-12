@@ -14,7 +14,8 @@
 // (PSP-HLE-POWER-002), hle-null-out-pointers (PSP-HLE-NULL-OUT-001),
 // hle-audio-src (PSP-HLE-AUDIO-SRC-001), hle-timer-order
 // (PSP-HLE-TIMER-ORDER-001) and hle-savedata-getsize
-// (PSP-HLE-SAVEDATA-GETSIZE-001), plus hle-utility-none (PSP-HLE-UTILITY-NONE-001), which
+// (PSP-HLE-SAVEDATA-GETSIZE-001), hle-savedata-nodata (PSP-HLE-SAVEDATA-NODATA-001, case 180:
+// savedata modes on a missing save, a directory without PARAM.SFO and a probe-made save), plus hle-utility-none (PSP-HLE-UTILITY-NONE-001), which
 // imports no InitStart call, and hle-utility-dialogs (PSP-HLE-UTILITY-DIALOG-001), which opens
 // the savedata, gamedata install, netconf and game sharing dialogs in game context and never
 // answers them, and hle-nickname-limit (PSP-HLE-NICKNAME-001, case 164), which reads the owner_name
@@ -83,12 +84,14 @@ PSP_HEAP_SIZE_KB(64);
 #define HLE_CASE_AUDIO_SRC 102
 #define HLE_CASE_TIMER_ORDER 103
 #define HLE_CASE_SAVEDATA_GETSIZE 104
+#define HLE_CASE_SAVEDATA_NODATA 180
 #define HLE_CASE_UTILITY_NONE 140
 #define HLE_CASE_STD_HANDLES 156
 #define HLE_CASE_AUDIO_REST 159
 #define HLE_CASE_SELF_STOP 167
 #define HLE_CASE_UTILITY_DIALOGS 161
 #define HLE_CASE_IO_SEEK 162
+#define HLE_CASE_IO_SEEK_EDGES 186
 #define HLE_CASE_NICKNAME_LIMIT 164
 
 #if PSP_ORACLE_CASE == HLE_CASE_KERNEL_STATUS
@@ -151,6 +154,10 @@ PSP_HEAP_SIZE_KB(64);
 #define HLE_CAMPAIGN_ID "hle-savedata-getsize"
 #define HLE_TEST_ID "PSP-HLE-SAVEDATA-GETSIZE-001"
 #define HLE_LOG "host0:/hle_savedata_getsize_log.txt"
+#elif PSP_ORACLE_CASE == HLE_CASE_SAVEDATA_NODATA
+#define HLE_CAMPAIGN_ID "hle-savedata-nodata"
+#define HLE_TEST_ID "PSP-HLE-SAVEDATA-NODATA-001"
+#define HLE_LOG "host0:/hle_savedata_nodata_log.txt"
 #elif PSP_ORACLE_CASE == HLE_CASE_UTILITY_NONE
 #define HLE_CAMPAIGN_ID "hle-utility-none"
 #define HLE_TEST_ID "PSP-HLE-UTILITY-NONE-001"
@@ -175,6 +182,10 @@ PSP_HEAP_SIZE_KB(64);
 #define HLE_CAMPAIGN_ID "hle-io-seek"
 #define HLE_TEST_ID "PSP-HLE-IO-SEEK-001"
 #define HLE_LOG "host0:/hle_io_seek_log.txt"
+#elif PSP_ORACLE_CASE == HLE_CASE_IO_SEEK_EDGES
+#define HLE_CAMPAIGN_ID "hle-io-seek-edges"
+#define HLE_TEST_ID "PSP-HLE-IO-SEEK-002"
+#define HLE_LOG "host0:/hle_io_seek_edges_log.txt"
 #elif PSP_ORACLE_CASE == HLE_CASE_NICKNAME_LIMIT
 #define HLE_CAMPAIGN_ID "hle-nickname-limit"
 #define HLE_TEST_ID "PSP-HLE-NICKNAME-001"
@@ -2184,6 +2195,834 @@ static int hle_run(void)
 #endif /* HLE_CASE_SAVEDATA_GETSIZE */
 
 /* ------------------------------------------------------------------------- */
+#if PSP_ORACLE_CASE == HLE_CASE_SAVEDATA_NODATA
+
+/* What the savedata utility answers for a save that is not there, for a save directory that
+   has no PARAM.SFO, and for a real save, and what it leaves in each mode's output structure.
+   The runtime's answers (src/rt/savedata.c: DELETE 0x80110347, DELETEDATA and ERASE of a
+   missing save 0x80110327, the FILES counts on these errors) are UNMEASURED; this case records
+   what the console does. No value is compared with an expected one, here or in the parser.
+
+   Memory Stick safety. Every name is probe-owned: game name NKPROBE01, saves NODIR, NOSFO and
+   DATA. nodata-precheck lists ms0:/PSP/SAVEDATA (bounded); when any NKPROBE01* entry is there,
+   or the list cannot be read to its end, every later cell records SKIP (result 1) and nothing
+   on the Memory Stick is touched. Otherwise the probe writes only ms0:/PSP/SAVEDATA/
+   NKPROBE01NOSFO (sceIoMkdir, and one 16-byte DATA.BIN of its own), which it removes at the end
+   of state B, and the utility writes only what AUTOSAVE creates under NKPROBE01DATA, which
+   AUTODELETE removes; when the directory is still there after that, the probe removes each
+   regular file in that one directory and the directory itself (data-cleanup).
+
+   Order: state A (no directory, save NODIR), state B (directory without PARAM.SFO, save NOSFO),
+   state C (a real save, DATA), destructive modes last within each state, then the two modes that
+   may show a system dialog, LOAD and DELETE of NODIR, last of all: they need a button press
+   (owner present; cross accepts, buttonSwap 1). Every dialog runs as a game drives it, as in
+   hle-savedata-getsize: GetStatus once a vblank, Update(1) while VISIBLE, ShutdownStart once at
+   QUIT, done at NONE after an accepted ShutdownStart; at most HLE_ND_POLL_VBLANKS polls, or
+   HLE_ND_DIALOG_POLL_VBLANKS (under 30 s) for the two dialog modes. A dialog not done by its
+   bound records the TIMEOUT outcome; if it was still VISIBLE the probe calls ShutdownStart once
+   and records its return. After any TIMEOUT no further savedata call is made: every later
+   dialog cell records SKIP (result 2), and the Memory Stick cleanups still run. A TIMEOUT, a
+   SKIP from the precheck or a probe directory left behind makes COMPLETE report FAIL. Game
+   context only: under the XMB a dialog stays at INIT (PSP-HLE-UTILITY-NONE-001 note).
+
+   Every dialog record (result InitStart's return) starts with 11 words:
+     out0 the common result word (block + 0x1c, preset HLE_SENTINEL)
+     out1 the GetStatus values, one nibble per change, first change highest (0xE for any value
+          outside 0-4; the first eight changes), out2 the number of changes, out3 the polls
+     out4 the outcome: 0 NONE after an accepted ShutdownStart, 1 TIMEOUT, 2 InitStart refused
+     out5 the ShutdownStart return (HLE_SENTINEL when not called), out6 the last GetStatus
+          value, out7 the Update calls, out8 the bind word (block + 0x34, preset HLE_SENTINEL)
+     out9, out10 sceIoGetstat of the save directory before InitStart and after the dialog
+   then the mode's output words, each preset so that a word the utility leaves shows:
+     load (AUTOLOAD, READDATASECURE, READDATA, LOAD; 15): dataSize (+0x7c, preset
+          HLE_SENTINEL), the bytes of the 1 KiB 0xA5-filled read buffer that changed, 1 when the
+          buffer equals the probe's synthetic data, the first sfoParam title word (+0x80, preset)
+     sizes (SIZES; 24): msFree clusterSize, freeClusters, freeKB; msData's used-data block (7
+          words from +36); usedData usedClusters, usedSpaceKB, usedSpace32KB
+     list (LIST; 22): resultCount, 1 when the entries pointer is still the probe's, the
+          changed bytes of the four 72-byte entries, each entry's st_mode, each entry's name
+          class (1 NODIR, 2 NOSFO, 3 DATA, 0x11-0x13 the same with NKPROBE01 in front, 0 another
+          name, 0xE no NUL in 20 bytes, HLE_SENTINEL untouched; no name text is recorded)
+     files (FILES; 24): the secure, normal and system result counts; a bit per list whose
+          pointer is still the probe's; the changed bytes of each list's four 80-byte entries;
+          each list's first entry st_mode and st_size low word
+     erase (ERASESECURE, ERASE, DELETEDATA, AUTODELETE, DELETE; 13): dataSize (+0x7c, preset),
+          sceIoGetstat of the save's DATA.BIN after the dialog
+     getsize (GETSIZE; 19): sizeInfo sectorSize, freeSectors, freeKB, freeString word 0,
+          neededKB, neededString word 0, overwriteKB, overwriteString word 0
+     save (AUTOSAVE; 14): dataSize after, sceIoGetstat of DATA.BIN and of PARAM.SFO after
+   Structure offsets are SceUtilitySavedataParam's (PSPSDK psputility_savedata.h), the offsets
+   src/rt/savedata.c reads (its SDP_* enum); the _Static_asserts below pin each against the
+   header. The list entry layouts are the header's SceUtilitySavedataIdListEntry (name at +52)
+   and SceUtilitySavedataFileListEntry (st_size at +8), as src/rt/savedata.c writes them
+   (do_list, savedata.c:2312-2317; do_files, savedata.c:2398-2406). Every cell passes the same
+   synthetic 16-byte key (+0x5dc) and secureVersion 0; AUTOSAVE writes 1 KiB of probe pattern
+   bytes with the SFO strings "NK probe" and no icon, picture or sound. */
+#include <stddef.h>
+
+#define HLE_ND_PARAM_BYTES 0x600u
+#define HLE_ND_STATUS_NONE 0
+#define HLE_ND_STATUS_VISIBLE 2
+#define HLE_ND_STATUS_QUIT 3
+#define HLE_ND_POLL_VBLANKS 1200u
+#define HLE_ND_DIALOG_POLL_VBLANKS 1790u
+#define HLE_ND_SEQ_NIBBLES 8u
+#define HLE_ND_OUTCOME_COMPLETE 0u
+#define HLE_ND_OUTCOME_TIMEOUT 1u
+#define HLE_ND_OUTCOME_INIT_REFUSED 2u
+#define HLE_ND_ABSENT 0x80010002u /* sceIoGetstat: no such file or directory */
+#define HLE_ND_SKIP_PRESENT 1u
+#define HLE_ND_SKIP_STUCK 2u
+#define HLE_ND_SKIP_SETUP 3u
+#define HLE_ND_BASE_WORDS 11u
+#define HLE_ND_LOAD_WORDS 15u
+#define HLE_ND_SIZES_WORDS 24u
+#define HLE_ND_LIST_WORDS 22u
+#define HLE_ND_FILES_WORDS 24u
+#define HLE_ND_ERASE_WORDS 13u
+#define HLE_ND_GETSIZE_WORDS 19u
+#define HLE_ND_SAVE_WORDS 14u
+#define HLE_ND_PRECHECK_WORDS 4u
+#define HLE_ND_SETUP_WORDS 5u
+#define HLE_ND_NOSFO_CLEANUP_WORDS 3u
+#define HLE_ND_DATA_CLEANUP_WORDS 8u
+#define HLE_ND_DATA_BYTES 1024u
+#define HLE_ND_FILE_BYTES 16u
+#define HLE_ND_LIST_ENTRIES 4u
+#define HLE_ND_ID_ENTRY_BYTES 72u
+#define HLE_ND_ID_NAME_OFFSET 52u
+#define HLE_ND_FILE_ENTRY_BYTES 80u
+#define HLE_ND_FILE_SIZE_OFFSET 8u
+#define HLE_ND_SIZE_INFO_WORDS 15u
+#define HLE_ND_SIZE_ENTRY_BYTES 24u
+#define HLE_ND_SECURE_FITS_BYTES 0x2000ull
+#define HLE_ND_ROOT_READS 4096u
+#define HLE_ND_CLEAN_READS 16u
+#define HLE_ND_CLEAN_FILES 8u
+#define HLE_ND_NAME_BYTES 32u
+#define HLE_ND_FILL 0xA5u
+#define HLE_ND_GAME "NKPROBE01"
+#define HLE_ND_ROOT "ms0:/PSP/SAVEDATA"
+#define HLE_ND_NODIR_DIR HLE_ND_ROOT "/" HLE_ND_GAME "NODIR"
+#define HLE_ND_NOSFO_DIR HLE_ND_ROOT "/" HLE_ND_GAME "NOSFO"
+#define HLE_ND_DATA_DIR HLE_ND_ROOT "/" HLE_ND_GAME "DATA"
+#define HLE_ND_NOSFO_FILE HLE_ND_NOSFO_DIR "/DATA.BIN"
+#define HLE_ND_DATA_FILE "DATA.BIN"
+#define HLE_ND_MISSING_FILE "NOFILE.BIN"
+
+enum { HLE_ND_NODIR = 0, HLE_ND_NOSFO = 1, HLE_ND_DATA = 2 };
+
+_Static_assert(PSP_UTILITY_SAVEDATA_AUTOLOAD == 0 && PSP_UTILITY_SAVEDATA_AUTOSAVE == 1 &&
+               PSP_UTILITY_SAVEDATA_LOAD == 2 && SCE_UTILITY_SAVEDATA_SIZES == 8 &&
+               SCE_UTILITY_SAVEDATA_AUTODELETE == 9 && SCE_UTILITY_SAVEDATA_DELETE == 10 &&
+               SCE_UTILITY_SAVEDATA_LIST == 11 && SCE_UTILITY_SAVEDATA_FILES == 12 &&
+               SCE_UTILITY_SAVEDATA_READDATASECURE == 15 && SCE_UTILITY_SAVEDATA_READDATA == 16 &&
+               SCE_UTILITY_SAVEDATA_ERASESECURE == 19 && SCE_UTILITY_SAVEDATA_ERASE == 20 &&
+               SCE_UTILITY_SAVEDATA_DELETEDATA == 21 && SCE_UTILITY_SAVEDATA_GETSIZE == 22,
+               "the savedata mode numbers src/rt/savedata.c uses");
+_Static_assert(offsetof(SceUtilitySavedataParam, mode) == 0x30u &&
+               offsetof(SceUtilitySavedataParam, bind) == 0x34u &&
+               offsetof(SceUtilitySavedataParam, overwrite) == 0x38u &&
+               offsetof(SceUtilitySavedataParam, gameName) == 0x3cu &&
+               offsetof(SceUtilitySavedataParam, saveName) == 0x4cu &&
+               offsetof(SceUtilitySavedataParam, saveNameList) == 0x60u &&
+               offsetof(SceUtilitySavedataParam, fileName) == 0x64u &&
+               offsetof(SceUtilitySavedataParam, dataBuf) == 0x74u &&
+               offsetof(SceUtilitySavedataParam, dataBufSize) == 0x78u &&
+               offsetof(SceUtilitySavedataParam, dataSize) == 0x7cu &&
+               offsetof(SceUtilitySavedataParam, sfoParam) == 0x80u &&
+               offsetof(SceUtilitySavedataParam, msFree) == 0x5d0u &&
+               offsetof(SceUtilitySavedataParam, msData) == 0x5d4u &&
+               offsetof(SceUtilitySavedataParam, utilityData) == 0x5d8u &&
+               offsetof(SceUtilitySavedataParam, key) == 0x5dcu &&
+               offsetof(SceUtilitySavedataParam, idList) == 0x5f4u &&
+               offsetof(SceUtilitySavedataParam, fileList) == 0x5f8u &&
+               offsetof(SceUtilitySavedataParam, sizeInfo) == 0x5fcu &&
+               sizeof(SceUtilitySavedataParam) == HLE_ND_PARAM_BYTES,
+               "the SDP_* offsets of src/rt/savedata.c");
+_Static_assert(sizeof(SceUtilitySavedataIdListEntry) == HLE_ND_ID_ENTRY_BYTES &&
+               offsetof(SceUtilitySavedataIdListEntry, name) == HLE_ND_ID_NAME_OFFSET &&
+               sizeof(SceUtilitySavedataFileListEntry) == HLE_ND_FILE_ENTRY_BYTES &&
+               offsetof(SceUtilitySavedataFileListEntry, st_size) == HLE_ND_FILE_SIZE_OFFSET &&
+               sizeof(SceUtilitySavedataIdListInfo) == 12u &&
+               sizeof(SceUtilitySavedataFileListInfo) == 36u &&
+               sizeof(SceUtilitySavedataMsFreeInfo) == 20u &&
+               sizeof(SceUtilitySavedataMsDataInfo) == 64u &&
+               sizeof(SceUtilitySavedataUsedDataInfo) == 28u &&
+               sizeof(PspUtilitySavedataSizeInfo) == HLE_ND_SIZE_INFO_WORDS * 4u &&
+               sizeof(PspUtilitySavedataSizeEntry) == HLE_ND_SIZE_ENTRY_BYTES,
+               "the list and size structures src/rt/savedata.c reads and writes");
+_Static_assert(HLE_ND_SIZES_WORDS <= HLE_MAX_WORDS && HLE_ND_FILES_WORDS <= HLE_MAX_WORDS,
+               "a record fits the writer");
+
+static const char *const k_hle_nd_save[3] = {"NODIR", "NOSFO", "DATA"};
+static const char *const k_hle_nd_full[3] = {"NKPROBE01NODIR", "NKPROBE01NOSFO", "NKPROBE01DATA"};
+static const char *const k_hle_nd_dir[3] = {HLE_ND_NODIR_DIR, HLE_ND_NOSFO_DIR, HLE_ND_DATA_DIR};
+static const char *const k_hle_nd_data_path[3] = {
+    HLE_ND_NODIR_DIR "/DATA.BIN", HLE_ND_NOSFO_DIR "/DATA.BIN", HLE_ND_DATA_DIR "/DATA.BIN",
+};
+/* The synthetic key is 16 characters of probe-owned ASCII text, not a real key. */
+#define HLE_ND_KEY_BYTES 16u
+static const char k_hle_nd_key[HLE_ND_KEY_BYTES + 1u] = "NKPROBE01KEY0001";
+/* State B's own file: "NKPROBE01NOSFO" and two NULs. */
+static const uint8_t k_hle_nd_nosfo_bytes[HLE_ND_FILE_BYTES] = {
+    0x4e, 0x4b, 0x50, 0x52, 0x4f, 0x42, 0x45, 0x30, 0x31, 0x4e, 0x4f, 0x53, 0x46, 0x4f, 0x00, 0x00,
+};
+
+static uint8_t s_nd_param[HLE_ND_PARAM_BYTES] __attribute__((aligned(64)));
+static uint8_t s_nd_data[HLE_ND_DATA_BYTES] __attribute__((aligned(64)));
+static uint8_t s_nd_read[HLE_ND_DATA_BYTES] __attribute__((aligned(64)));
+static uint32_t s_nd_id_info[3] __attribute__((aligned(64)));
+static uint8_t s_nd_ids[HLE_ND_LIST_ENTRIES * HLE_ND_ID_ENTRY_BYTES] __attribute__((aligned(64)));
+static uint32_t s_nd_file_info[9] __attribute__((aligned(64)));
+static uint8_t s_nd_files[3][HLE_ND_LIST_ENTRIES * HLE_ND_FILE_ENTRY_BYTES]
+    __attribute__((aligned(64)));
+static uint32_t s_nd_ms_free[5] __attribute__((aligned(64)));
+static uint8_t s_nd_ms_data[64] __attribute__((aligned(64)));
+static uint32_t s_nd_used[7] __attribute__((aligned(64)));
+static uint32_t s_nd_size_info[HLE_ND_SIZE_INFO_WORDS] __attribute__((aligned(64)));
+static uint8_t s_nd_size_entry[HLE_ND_SIZE_ENTRY_BYTES] __attribute__((aligned(64)));
+static char s_nd_name_list[2][20] __attribute__((aligned(64)));
+static SceIoDirent s_nd_dirent;
+static char s_nd_names[HLE_ND_CLEAN_FILES][HLE_ND_NAME_BYTES];
+static char s_nd_path[sizeof(HLE_ND_DATA_DIR) + 1u + HLE_ND_NAME_BYTES];
+static uint32_t s_nd_skip;
+static uint32_t s_nd_stuck;
+static uint32_t s_nd_nosfo_made;
+static uint32_t s_nd_bad;
+
+static void hle_nd_put32(uint32_t offset, uint32_t value)
+{
+    memcpy(s_nd_param + offset, &value, sizeof(value));
+}
+
+static uint32_t hle_nd_get32(uint32_t offset)
+{
+    uint32_t value;
+    memcpy(&value, s_nd_param + offset, sizeof(value));
+    return value;
+}
+
+/* A NUL-terminated text into a field of `field` bytes, cleared first; every text here is
+   shorter than its field. */
+static void hle_nd_put_text(uint32_t offset, uint32_t field, const char *text)
+{
+    memset(s_nd_param + offset, 0, field);
+    memcpy(s_nd_param + offset, text, strlen(text) + 1u);
+}
+
+static uint32_t hle_nd_word(const uint8_t *buf, uint32_t offset)
+{
+    uint32_t value;
+    memcpy(&value, buf + offset, sizeof(value));
+    return value;
+}
+
+static uint32_t hle_nd_changed(const uint8_t *buf, uint32_t bytes)
+{
+    uint32_t changed = 0;
+    for (uint32_t i = 0; i < bytes; i++) {
+        changed += buf[i] != HLE_ND_FILL;
+    }
+    return changed;
+}
+
+static void hle_nd_fill_words(uint32_t *out, uint32_t count)
+{
+    for (uint32_t i = 0; i < count; i++) {
+        out[i] = HLE_SENTINEL;
+    }
+}
+
+static uint32_t hle_nd_ptr(const void *p)
+{
+    return (uint32_t)(uintptr_t)p;
+}
+
+/* sceIoGetstat's return for one path; the step names the cell. */
+static uint32_t hle_nd_stat(const char *step, const char *path)
+{
+    SceIoStat st;
+    memset(&st, 0, sizeof(st));
+    hle_step(step);
+    return (uint32_t)sceIoGetstat(path, &st);
+}
+
+/* 0 when a dialog cell for `save` may run, else its SKIP reason. */
+static uint32_t hle_nd_reason(uint32_t save)
+{
+    if (s_nd_skip) {
+        return HLE_ND_SKIP_PRESENT;
+    }
+    if (s_nd_stuck) {
+        return HLE_ND_SKIP_STUCK;
+    }
+    if (save == HLE_ND_NOSFO && !s_nd_nosfo_made) {
+        return HLE_ND_SKIP_SETUP;
+    }
+    return 0u;
+}
+
+/* The block every cell starts from, at the offsets src/rt/savedata.c reads (SDP_*): the
+   probe's game and save name, DATA.BIN as fileName, no data buffer, the synthetic key, and
+   the common result, bind and dataSize words preset to HLE_SENTINEL. */
+static void hle_nd_param(uint32_t mode, uint32_t save)
+{
+    memset(s_nd_param, 0, sizeof(s_nd_param));
+    hle_nd_put32(0x00u, HLE_ND_PARAM_BYTES); /* common size */
+    hle_nd_put32(0x04u, 1u);                 /* language: English */
+    hle_nd_put32(0x08u, 1u);                 /* buttonSwap: cross accepts */
+    hle_nd_put32(0x0cu, 17u);                /* graphics thread priority */
+    hle_nd_put32(0x10u, 19u);                /* access thread priority */
+    hle_nd_put32(0x14u, 18u);                /* font thread priority */
+    hle_nd_put32(0x18u, 16u);                /* sound thread priority */
+    hle_nd_put32(0x1cu, HLE_SENTINEL);       /* common result */
+    hle_nd_put32(0x30u, mode);
+    hle_nd_put32(0x34u, HLE_SENTINEL);       /* bind */
+    hle_nd_put_text(0x3cu, 13u, HLE_ND_GAME);
+    hle_nd_put_text(0x4cu, 20u, k_hle_nd_save[save]);
+    hle_nd_put_text(0x64u, 13u, HLE_ND_DATA_FILE);
+    hle_nd_put32(0x7cu, HLE_SENTINEL);       /* dataSize */
+    memcpy(s_nd_param + 0x5dcu, k_hle_nd_key, HLE_ND_KEY_BYTES);
+}
+
+static uint32_t hle_nd_nibble(int status)
+{
+    return (status >= 0 && status <= 4) ? (uint32_t)status : 0xEu;
+}
+
+/* One dialog on the block hle_nd_param built; out1-out7 of the record. */
+static int hle_nd_run(const char *step, uint32_t polls, uint32_t *w)
+{
+    int accepted = 0;
+    int shutdown_called = 0;
+    int last = 0;
+    w[1] = 0u;
+    w[2] = 0u;
+    w[3] = 0u;
+    w[5] = HLE_SENTINEL;
+    w[7] = 0u;
+    hle_step(step);
+    const int init = sceUtilitySavedataInitStart((SceUtilitySavedataParam *)(void *)s_nd_param);
+    uint32_t outcome = init >= 0 ? HLE_ND_OUTCOME_TIMEOUT : HLE_ND_OUTCOME_INIT_REFUSED;
+    const uint32_t bound = init >= 0 ? polls : 1u;
+    for (uint32_t i = 0; i < bound; i++) {
+        const int status = sceUtilitySavedataGetStatus();
+        w[3]++;
+        w[6] = (uint32_t)status;
+        if (i == 0 || status != last) {
+            if (w[2] < HLE_ND_SEQ_NIBBLES) {
+                w[1] = (w[1] << 4) | hle_nd_nibble(status);
+            }
+            w[2]++;
+            last = status;
+        }
+        if (init < 0) {
+            break;
+        }
+        if (status == HLE_ND_STATUS_VISIBLE) {
+            sceUtilitySavedataUpdate(1);
+            w[7]++;
+        } else if (status == HLE_ND_STATUS_QUIT && !shutdown_called) {
+            const int rc = sceUtilitySavedataShutdownStart();
+            w[5] = (uint32_t)rc;
+            shutdown_called = 1;
+            accepted = rc >= 0;
+        } else if (status == HLE_ND_STATUS_NONE && accepted) {
+            outcome = HLE_ND_OUTCOME_COMPLETE;
+            break;
+        }
+        (void)sceDisplayWaitVblankStart();
+    }
+    if (outcome == HLE_ND_OUTCOME_TIMEOUT) {
+        /* No later cell makes a savedata call. A dialog still VISIBLE gets one ShutdownStart. */
+        s_nd_stuck = 1u;
+        if (last == HLE_ND_STATUS_VISIBLE && !shutdown_called) {
+            hle_step(step);
+            w[5] = (uint32_t)sceUtilitySavedataShutdownStart();
+        }
+    }
+    w[4] = outcome;
+    return init;
+}
+
+/* The 11 words every dialog record starts with; returns InitStart's return. */
+static int hle_nd_dialog(const char *case_id, uint32_t save, uint32_t polls, uint32_t *out)
+{
+    out[9] = hle_nd_stat(case_id, k_hle_nd_dir[save]);
+    const int init = hle_nd_run(case_id, polls, out);
+    out[0] = hle_nd_get32(0x1cu);
+    out[8] = hle_nd_get32(0x34u);
+    out[10] = hle_nd_stat(case_id, k_hle_nd_dir[save]);
+    if (save == HLE_ND_NODIR && out[10] != HLE_ND_ABSENT) {
+        s_nd_bad++;
+    }
+    return init;
+}
+
+/* AUTOLOAD, READDATASECURE, READDATA and LOAD into the 0xA5-filled 1 KiB read buffer. */
+static void hle_nd_load_cell(const char *case_id, uint32_t mode, uint32_t save, uint32_t polls)
+{
+    uint32_t out[HLE_ND_LOAD_WORDS];
+    hle_nd_fill_words(out, HLE_ND_LOAD_WORDS);
+    const uint32_t reason = hle_nd_reason(save);
+    if (reason) {
+        hle_record(case_id, "SKIP", reason, out, HLE_ND_LOAD_WORDS);
+        return;
+    }
+    hle_nd_param(mode, save);
+    memset(s_nd_read, HLE_ND_FILL, sizeof(s_nd_read));
+    hle_nd_put32(0x74u, hle_nd_ptr(s_nd_read));
+    hle_nd_put32(0x78u, HLE_ND_DATA_BYTES);
+    hle_nd_put32(0x80u, HLE_SENTINEL); /* sfoParam title: an output of the load modes */
+    const int init = hle_nd_dialog(case_id, save, polls, out);
+    out[11] = hle_nd_get32(0x7cu);
+    out[12] = hle_nd_changed(s_nd_read, HLE_ND_DATA_BYTES);
+    out[13] = memcmp(s_nd_read, s_nd_data, HLE_ND_DATA_BYTES) == 0 ? 1u : 0u;
+    out[14] = hle_nd_get32(0x80u);
+    hle_record(case_id, "PASS", (uint32_t)init, out, HLE_ND_LOAD_WORDS);
+}
+
+/* SIZES with all three output blocks; msData names this cell's save. */
+static void hle_nd_sizes_cell(const char *case_id, uint32_t save)
+{
+    uint32_t out[HLE_ND_SIZES_WORDS];
+    hle_nd_fill_words(out, HLE_ND_SIZES_WORDS);
+    const uint32_t reason = hle_nd_reason(save);
+    if (reason) {
+        hle_record(case_id, "SKIP", reason, out, HLE_ND_SIZES_WORDS);
+        return;
+    }
+    hle_nd_param(SCE_UTILITY_SAVEDATA_SIZES, save);
+    hle_nd_put32(0x74u, hle_nd_ptr(s_nd_data));
+    hle_nd_put32(0x78u, HLE_ND_DATA_BYTES);
+    hle_nd_put32(0x7cu, HLE_ND_DATA_BYTES);
+    hle_nd_fill_words(s_nd_ms_free, 5u);
+    hle_nd_fill_words(s_nd_used, 7u);
+    memset(s_nd_ms_data, HLE_ND_FILL, sizeof(s_nd_ms_data));
+    memset(s_nd_ms_data, 0, 36u);
+    memcpy(s_nd_ms_data, HLE_ND_GAME, sizeof(HLE_ND_GAME));
+    memcpy(s_nd_ms_data + 16u, k_hle_nd_save[save], strlen(k_hle_nd_save[save]) + 1u);
+    hle_nd_put32(0x5d0u, hle_nd_ptr(s_nd_ms_free));
+    hle_nd_put32(0x5d4u, hle_nd_ptr(s_nd_ms_data));
+    hle_nd_put32(0x5d8u, hle_nd_ptr(s_nd_used));
+    const int init = hle_nd_dialog(case_id, save, HLE_ND_POLL_VBLANKS, out);
+    out[11] = s_nd_ms_free[0];
+    out[12] = s_nd_ms_free[1];
+    out[13] = s_nd_ms_free[2];
+    for (uint32_t i = 0; i < 7u; i++) {
+        out[14u + i] = hle_nd_word(s_nd_ms_data, 36u + 4u * i);
+    }
+    out[21] = s_nd_used[0];
+    out[22] = s_nd_used[1];
+    out[23] = s_nd_used[4];
+    hle_record(case_id, "PASS", (uint32_t)init, out, HLE_ND_SIZES_WORDS);
+}
+
+static uint32_t hle_nd_name_class(const uint8_t *name)
+{
+    if (hle_nd_word(name, 0u) == HLE_SENTINEL) {
+        return HLE_SENTINEL;
+    }
+    if (memchr(name, 0, 20u) == NULL) {
+        return 0xEu;
+    }
+    for (uint32_t i = 0; i < 3u; i++) {
+        if (strcmp((const char *)name, k_hle_nd_save[i]) == 0) {
+            return i + 1u;
+        }
+        if (strcmp((const char *)name, k_hle_nd_full[i]) == 0) {
+            return i + 0x11u;
+        }
+    }
+    return 0u;
+}
+
+/* LIST: saveName "<>" and a saveNameList of one "<>" entry, the wildcard form
+   src/rt/savedata.c reads (resolve_save, savedata.c:2730-2779); four sentinel-filled entries. */
+static void hle_nd_list_cell(const char *case_id, uint32_t save)
+{
+    uint32_t out[HLE_ND_LIST_WORDS];
+    hle_nd_fill_words(out, HLE_ND_LIST_WORDS);
+    const uint32_t reason = hle_nd_reason(save);
+    if (reason) {
+        hle_record(case_id, "SKIP", reason, out, HLE_ND_LIST_WORDS);
+        return;
+    }
+    hle_nd_param(SCE_UTILITY_SAVEDATA_LIST, save);
+    hle_nd_put_text(0x4cu, 20u, "<>");
+    memset(s_nd_name_list, 0, sizeof(s_nd_name_list));
+    memcpy(s_nd_name_list[0], "<>", sizeof("<>"));
+    hle_nd_put32(0x60u, hle_nd_ptr(s_nd_name_list));
+    memset(s_nd_ids, HLE_ND_FILL, sizeof(s_nd_ids));
+    s_nd_id_info[0] = HLE_ND_LIST_ENTRIES;
+    s_nd_id_info[1] = HLE_SENTINEL;
+    s_nd_id_info[2] = hle_nd_ptr(s_nd_ids);
+    hle_nd_put32(0x5f4u, hle_nd_ptr(s_nd_id_info));
+    const int init = hle_nd_dialog(case_id, save, HLE_ND_POLL_VBLANKS, out);
+    out[11] = s_nd_id_info[1];
+    out[12] = s_nd_id_info[2] == hle_nd_ptr(s_nd_ids) ? 1u : 0u;
+    out[13] = hle_nd_changed(s_nd_ids, (uint32_t)sizeof(s_nd_ids));
+    for (uint32_t i = 0; i < HLE_ND_LIST_ENTRIES; i++) {
+        const uint8_t *entry = s_nd_ids + i * HLE_ND_ID_ENTRY_BYTES;
+        out[14u + i] = hle_nd_word(entry, 0u);
+        out[18u + i] = hle_nd_name_class(entry + HLE_ND_ID_NAME_OFFSET);
+    }
+    hle_record(case_id, "PASS", (uint32_t)init, out, HLE_ND_LIST_WORDS);
+}
+
+/* FILES: room for four entries in each list, every entry sentinel-filled. */
+static void hle_nd_files_cell(const char *case_id, uint32_t save)
+{
+    uint32_t out[HLE_ND_FILES_WORDS];
+    hle_nd_fill_words(out, HLE_ND_FILES_WORDS);
+    const uint32_t reason = hle_nd_reason(save);
+    if (reason) {
+        hle_record(case_id, "SKIP", reason, out, HLE_ND_FILES_WORDS);
+        return;
+    }
+    hle_nd_param(SCE_UTILITY_SAVEDATA_FILES, save);
+    memset(s_nd_files, HLE_ND_FILL, sizeof(s_nd_files));
+    for (uint32_t l = 0; l < 3u; l++) {
+        s_nd_file_info[l] = HLE_ND_LIST_ENTRIES;
+        s_nd_file_info[3u + l] = HLE_SENTINEL;
+        s_nd_file_info[6u + l] = hle_nd_ptr(s_nd_files[l]);
+    }
+    hle_nd_put32(0x5f8u, hle_nd_ptr(s_nd_file_info));
+    const int init = hle_nd_dialog(case_id, save, HLE_ND_POLL_VBLANKS, out);
+    out[14] = 0u;
+    for (uint32_t l = 0; l < 3u; l++) {
+        out[11u + l] = s_nd_file_info[3u + l];
+        if (s_nd_file_info[6u + l] == hle_nd_ptr(s_nd_files[l])) {
+            out[14] |= 1u << l;
+        }
+        out[15u + l] = hle_nd_changed(s_nd_files[l], (uint32_t)sizeof(s_nd_files[l]));
+        out[18u + l] = hle_nd_word(s_nd_files[l], 0u);
+        out[21u + l] = hle_nd_word(s_nd_files[l], HLE_ND_FILE_SIZE_OFFSET);
+    }
+    hle_record(case_id, "PASS", (uint32_t)init, out, HLE_ND_FILES_WORDS);
+}
+
+/* ERASESECURE, ERASE, DELETEDATA, AUTODELETE and DELETE; `file` is the fileName. */
+static void hle_nd_erase_cell(const char *case_id, uint32_t mode, uint32_t save, const char *file,
+                              uint32_t polls)
+{
+    uint32_t out[HLE_ND_ERASE_WORDS];
+    hle_nd_fill_words(out, HLE_ND_ERASE_WORDS);
+    const uint32_t reason = hle_nd_reason(save);
+    if (reason) {
+        hle_record(case_id, "SKIP", reason, out, HLE_ND_ERASE_WORDS);
+        return;
+    }
+    hle_nd_param(mode, save);
+    hle_nd_put_text(0x64u, 13u, file);
+    const int init = hle_nd_dialog(case_id, save, polls, out);
+    out[11] = hle_nd_get32(0x7cu);
+    out[12] = hle_nd_stat(case_id, k_hle_nd_data_path[save]);
+    hle_record(case_id, "PASS", (uint32_t)init, out, HLE_ND_ERASE_WORDS);
+}
+
+/* GETSIZE as in getsize-missing-secure (one 0x2000-byte secure entry), the control. */
+static void hle_nd_getsize_cell(const char *case_id, uint32_t save)
+{
+    uint32_t out[HLE_ND_GETSIZE_WORDS];
+    hle_nd_fill_words(out, HLE_ND_GETSIZE_WORDS);
+    const uint32_t reason = hle_nd_reason(save);
+    if (reason) {
+        hle_record(case_id, "SKIP", reason, out, HLE_ND_GETSIZE_WORDS);
+        return;
+    }
+    hle_nd_param(SCE_UTILITY_SAVEDATA_GETSIZE, save);
+    const uint64_t secure_bytes = HLE_ND_SECURE_FITS_BYTES;
+    memset(s_nd_size_entry, 0, sizeof(s_nd_size_entry));
+    memcpy(s_nd_size_entry, &secure_bytes, sizeof(secure_bytes));
+    memcpy(s_nd_size_entry + 8u, HLE_ND_DATA_FILE, sizeof(HLE_ND_DATA_FILE));
+    hle_nd_fill_words(s_nd_size_info, HLE_ND_SIZE_INFO_WORDS);
+    s_nd_size_info[0] = 1u;
+    s_nd_size_info[1] = 0u;
+    s_nd_size_info[2] = hle_nd_ptr(s_nd_size_entry);
+    s_nd_size_info[3] = 0u;
+    hle_nd_put32(0x5fcu, hle_nd_ptr(s_nd_size_info));
+    const int init = hle_nd_dialog(case_id, save, HLE_ND_POLL_VBLANKS, out);
+    out[11] = s_nd_size_info[4];
+    out[12] = s_nd_size_info[5];
+    out[13] = s_nd_size_info[6];
+    out[14] = s_nd_size_info[7];
+    out[15] = s_nd_size_info[9];
+    out[16] = s_nd_size_info[10];
+    out[17] = s_nd_size_info[12];
+    out[18] = s_nd_size_info[13];
+    hle_record(case_id, "PASS", (uint32_t)init, out, HLE_ND_GETSIZE_WORDS);
+}
+
+/* AUTOSAVE of NKPROBE01DATA: 1 KiB of probe pattern bytes, SFO strings "NK probe", no icons. */
+static void hle_nd_save_cell(const char *case_id)
+{
+    uint32_t out[HLE_ND_SAVE_WORDS];
+    hle_nd_fill_words(out, HLE_ND_SAVE_WORDS);
+    const uint32_t reason = hle_nd_reason(HLE_ND_DATA);
+    if (reason) {
+        hle_record(case_id, "SKIP", reason, out, HLE_ND_SAVE_WORDS);
+        return;
+    }
+    hle_nd_param(PSP_UTILITY_SAVEDATA_AUTOSAVE, HLE_ND_DATA);
+    hle_nd_put32(0x38u, 1u); /* overwrite */
+    hle_nd_put32(0x74u, hle_nd_ptr(s_nd_data));
+    hle_nd_put32(0x78u, HLE_ND_DATA_BYTES);
+    hle_nd_put32(0x7cu, HLE_ND_DATA_BYTES);
+    hle_nd_put_text(0x80u, 0x80u, "NK probe");  /* sfoParam title */
+    hle_nd_put_text(0x100u, 0x80u, "NK probe"); /* sfoParam savedataTitle */
+    hle_nd_put_text(0x180u, 0x400u, "NK probe"); /* sfoParam detail */
+    const int init = hle_nd_dialog(case_id, HLE_ND_DATA, HLE_ND_POLL_VBLANKS, out);
+    out[11] = hle_nd_get32(0x7cu);
+    out[12] = hle_nd_stat(case_id, HLE_ND_DATA_DIR "/DATA.BIN");
+    out[13] = hle_nd_stat(case_id, HLE_ND_DATA_DIR "/PARAM.SFO");
+    hle_record(case_id, "PASS", (uint32_t)init, out, HLE_ND_SAVE_WORDS);
+}
+
+static int hle_nd_is_probe_name(const char *name)
+{
+    static const char prefix[] = HLE_ND_GAME;
+    for (uint32_t i = 0; i + 1u < sizeof(prefix); i++) {
+        char c = name[i];
+        if (c >= 'a' && c <= 'z') {
+            c = (char)(c - 'a' + 'A');
+        }
+        if (c != prefix[i]) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/* Lists ms0:/PSP/SAVEDATA to its end (at most HLE_ND_ROOT_READS entries). Only a count of
+   NKPROBE01* names is kept; no name is recorded. out0 the Dopen return, out1 the NKPROBE01*
+   entries, out2 1 when the listing reached its end, out3 the Dclose return. */
+static void hle_nd_precheck(void)
+{
+    uint32_t out[HLE_ND_PRECHECK_WORDS];
+    uint32_t matches = 0;
+    uint32_t complete = 0;
+    hle_step("nodata-precheck");
+    const SceUID dfd = sceIoDopen(HLE_ND_ROOT);
+    out[3] = HLE_SENTINEL;
+    if (dfd >= 0) {
+        hle_step("nodata-precheck-dread");
+        for (uint32_t i = 0; i < HLE_ND_ROOT_READS; i++) {
+            memset(&s_nd_dirent, 0, sizeof(s_nd_dirent));
+            const int got = sceIoDread(dfd, &s_nd_dirent);
+            if (got <= 0) {
+                complete = got == 0 ? 1u : 0u;
+                break;
+            }
+            if (hle_nd_is_probe_name(s_nd_dirent.d_name)) {
+                matches++;
+            }
+        }
+        hle_step("nodata-precheck-dclose");
+        out[3] = (uint32_t)sceIoDclose(dfd);
+    }
+    out[0] = (uint32_t)dfd;
+    out[1] = matches;
+    out[2] = complete;
+    s_nd_skip = (dfd < 0 || !complete || matches) ? HLE_ND_SKIP_PRESENT : 0u;
+    hle_record("nodata-precheck", "PASS", s_nd_skip, out, HLE_ND_PRECHECK_WORDS);
+}
+
+/* State B: the probe makes NKPROBE01NOSFO and writes its own 16-byte DATA.BIN there. out0 the
+   Mkdir return, out1 the Open return, out2 the Write return, out3 the Close return, out4
+   sceIoGetstat of the directory. */
+static void hle_nd_nosfo_setup(void)
+{
+    uint32_t out[HLE_ND_SETUP_WORDS];
+    hle_nd_fill_words(out, HLE_ND_SETUP_WORDS);
+    if (s_nd_skip) {
+        hle_record("nosfo-setup", "SKIP", HLE_ND_SKIP_PRESENT, out, HLE_ND_SETUP_WORDS);
+        return;
+    }
+    hle_step("nosfo-setup");
+    const int made = sceIoMkdir(HLE_ND_NOSFO_DIR, 0777);
+    out[0] = (uint32_t)made;
+    if (made >= 0) {
+        s_nd_nosfo_made = 1u;
+        hle_step("nosfo-setup-file");
+        const SceUID fd = sceIoOpen(HLE_ND_NOSFO_FILE, PSP_O_WRONLY | PSP_O_CREAT | PSP_O_TRUNC, 0777);
+        out[1] = (uint32_t)fd;
+        if (fd >= 0) {
+            out[2] = (uint32_t)sceIoWrite(fd, k_hle_nd_nosfo_bytes, HLE_ND_FILE_BYTES);
+            out[3] = (uint32_t)sceIoClose(fd);
+        }
+    }
+    out[4] = hle_nd_stat("nosfo-setup-stat", HLE_ND_NOSFO_DIR);
+    hle_record("nosfo-setup", "PASS", (uint32_t)made, out, HLE_ND_SETUP_WORDS);
+}
+
+/* Removes what state B made: its own file and the directory. out0 the Remove return, out1 the
+   Rmdir return, out2 sceIoGetstat of the directory afterwards (the result too). */
+static void hle_nd_nosfo_cleanup(void)
+{
+    uint32_t out[HLE_ND_NOSFO_CLEANUP_WORDS];
+    hle_nd_fill_words(out, HLE_ND_NOSFO_CLEANUP_WORDS);
+    if (!s_nd_nosfo_made) {
+        hle_record("nosfo-cleanup", "SKIP", s_nd_skip ? HLE_ND_SKIP_PRESENT : HLE_ND_SKIP_SETUP,
+                   out, HLE_ND_NOSFO_CLEANUP_WORDS);
+        return;
+    }
+    hle_step("nosfo-cleanup");
+    out[0] = (uint32_t)sceIoRemove(HLE_ND_NOSFO_FILE);
+    hle_step("nosfo-cleanup-rmdir");
+    out[1] = (uint32_t)sceIoRmdir(HLE_ND_NOSFO_DIR);
+    out[2] = hle_nd_stat("nosfo-cleanup-stat", HLE_ND_NOSFO_DIR);
+    if (out[2] != HLE_ND_ABSENT) {
+        s_nd_bad++;
+    }
+    hle_record("nosfo-cleanup", "PASS", out[2], out, HLE_ND_NOSFO_CLEANUP_WORDS);
+}
+
+/* s_nd_path = HLE_ND_DATA_DIR "/" name; a kept name is shorter than HLE_ND_NAME_BYTES. */
+static void hle_nd_data_path(const char *name)
+{
+    const uint32_t dir = (uint32_t)sizeof(HLE_ND_DATA_DIR) - 1u;
+    const uint32_t len = (uint32_t)strlen(name);
+    memcpy(s_nd_path, HLE_ND_DATA_DIR, dir);
+    s_nd_path[dir] = '/';
+    memcpy(s_nd_path + dir + 1u, name, len + 1u);
+}
+
+/* After AUTODELETE: when NKPROBE01DATA is still there, remove each regular file in that one
+   directory and then the directory. out0 sceIoGetstat of the directory after AUTODELETE, out1
+   the Dopen return (HLE_SENTINEL when not needed), out2 the regular files found, out3 those
+   removed, out4 other entries, out5 the Dclose return, out6 the Rmdir return, out7 sceIoGetstat
+   of the directory at the end (the result too). */
+static void hle_nd_data_cleanup(void)
+{
+    uint32_t out[HLE_ND_DATA_CLEANUP_WORDS];
+    hle_nd_fill_words(out, HLE_ND_DATA_CLEANUP_WORDS);
+    if (s_nd_skip) {
+        hle_record("data-cleanup", "SKIP", HLE_ND_SKIP_PRESENT, out, HLE_ND_DATA_CLEANUP_WORDS);
+        return;
+    }
+    uint32_t files = 0;
+    uint32_t removed = 0;
+    uint32_t other = 0;
+    out[0] = hle_nd_stat("data-cleanup", HLE_ND_DATA_DIR);
+    if (out[0] != HLE_ND_ABSENT) {
+        hle_step("data-cleanup-dopen");
+        const SceUID dfd = sceIoDopen(HLE_ND_DATA_DIR);
+        out[1] = (uint32_t)dfd;
+        if (dfd >= 0) {
+            hle_step("data-cleanup-dread");
+            for (uint32_t i = 0; i < HLE_ND_CLEAN_READS; i++) {
+                memset(&s_nd_dirent, 0, sizeof(s_nd_dirent));
+                if (sceIoDread(dfd, &s_nd_dirent) <= 0) {
+                    break;
+                }
+                const char *name = s_nd_dirent.d_name;
+                if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) {
+                    continue;
+                }
+                uint32_t len = 0;
+                for (; len < HLE_ND_NAME_BYTES && name[len] != '\0'; len++) {
+                }
+                if (FIO_S_ISREG(s_nd_dirent.d_stat.st_mode) && files < HLE_ND_CLEAN_FILES &&
+                    len > 0u && len < HLE_ND_NAME_BYTES && strchr(name, '/') == NULL) {
+                    memcpy(s_nd_names[files], name, len + 1u);
+                    files++;
+                } else {
+                    other++;
+                }
+            }
+            hle_step("data-cleanup-dclose");
+            out[5] = (uint32_t)sceIoDclose(dfd);
+            for (uint32_t f = 0; f < files; f++) {
+                hle_nd_data_path(s_nd_names[f]);
+                hle_step("data-cleanup-remove");
+                if (sceIoRemove(s_nd_path) >= 0) {
+                    removed++;
+                }
+            }
+            hle_step("data-cleanup-rmdir");
+            out[6] = (uint32_t)sceIoRmdir(HLE_ND_DATA_DIR);
+        }
+    }
+    out[2] = files;
+    out[3] = removed;
+    out[4] = other;
+    out[7] = hle_nd_stat("data-cleanup-verify", HLE_ND_DATA_DIR);
+    if (out[7] != HLE_ND_ABSENT) {
+        s_nd_bad++;
+    }
+    hle_record("data-cleanup", "PASS", out[7], out, HLE_ND_DATA_CLEANUP_WORDS);
+}
+
+static int hle_run(void)
+{
+    for (uint32_t i = 0; i < HLE_ND_DATA_BYTES; i++) {
+        s_nd_data[i] = (uint8_t)(i * 7u + 0x4eu);
+    }
+    hle_nd_precheck();
+    /* State A: no directory. */
+    hle_nd_load_cell("nodir-autoload", PSP_UTILITY_SAVEDATA_AUTOLOAD, HLE_ND_NODIR,
+                     HLE_ND_POLL_VBLANKS);
+    hle_nd_sizes_cell("nodir-sizes", HLE_ND_NODIR);
+    hle_nd_list_cell("nodir-list", HLE_ND_NODIR);
+    hle_nd_files_cell("nodir-files", HLE_ND_NODIR);
+    hle_nd_load_cell("nodir-readsecure", SCE_UTILITY_SAVEDATA_READDATASECURE, HLE_ND_NODIR,
+                     HLE_ND_POLL_VBLANKS);
+    hle_nd_load_cell("nodir-read", SCE_UTILITY_SAVEDATA_READDATA, HLE_ND_NODIR,
+                     HLE_ND_POLL_VBLANKS);
+    hle_nd_erase_cell("nodir-erasesecure", SCE_UTILITY_SAVEDATA_ERASESECURE, HLE_ND_NODIR,
+                      HLE_ND_DATA_FILE, HLE_ND_POLL_VBLANKS);
+    hle_nd_erase_cell("nodir-erase", SCE_UTILITY_SAVEDATA_ERASE, HLE_ND_NODIR, HLE_ND_DATA_FILE,
+                      HLE_ND_POLL_VBLANKS);
+    hle_nd_erase_cell("nodir-deletedata", SCE_UTILITY_SAVEDATA_DELETEDATA, HLE_ND_NODIR,
+                      HLE_ND_DATA_FILE, HLE_ND_POLL_VBLANKS);
+    hle_nd_erase_cell("nodir-autodelete", SCE_UTILITY_SAVEDATA_AUTODELETE, HLE_ND_NODIR,
+                      HLE_ND_DATA_FILE, HLE_ND_POLL_VBLANKS);
+    hle_nd_getsize_cell("nodir-getsize", HLE_ND_NODIR);
+    /* State B: a directory without PARAM.SFO. */
+    hle_nd_nosfo_setup();
+    hle_nd_load_cell("nosfo-autoload", PSP_UTILITY_SAVEDATA_AUTOLOAD, HLE_ND_NOSFO,
+                     HLE_ND_POLL_VBLANKS);
+    hle_nd_sizes_cell("nosfo-sizes", HLE_ND_NOSFO);
+    hle_nd_list_cell("nosfo-list", HLE_ND_NOSFO);
+    hle_nd_files_cell("nosfo-files", HLE_ND_NOSFO);
+    hle_nd_load_cell("nosfo-readsecure", SCE_UTILITY_SAVEDATA_READDATASECURE, HLE_ND_NOSFO,
+                     HLE_ND_POLL_VBLANKS);
+    hle_nd_load_cell("nosfo-read", SCE_UTILITY_SAVEDATA_READDATA, HLE_ND_NOSFO,
+                     HLE_ND_POLL_VBLANKS);
+    hle_nd_erase_cell("nosfo-erase", SCE_UTILITY_SAVEDATA_ERASE, HLE_ND_NOSFO, HLE_ND_DATA_FILE,
+                      HLE_ND_POLL_VBLANKS);
+    hle_nd_erase_cell("nosfo-deletedata", SCE_UTILITY_SAVEDATA_DELETEDATA, HLE_ND_NOSFO,
+                      HLE_ND_DATA_FILE, HLE_ND_POLL_VBLANKS);
+    hle_nd_erase_cell("nosfo-autodelete", SCE_UTILITY_SAVEDATA_AUTODELETE, HLE_ND_NOSFO,
+                      HLE_ND_DATA_FILE, HLE_ND_POLL_VBLANKS);
+    hle_nd_nosfo_cleanup();
+    /* State C: a real save, deleted last. */
+    hle_nd_save_cell("data-autosave");
+    hle_nd_load_cell("data-autoload", PSP_UTILITY_SAVEDATA_AUTOLOAD, HLE_ND_DATA,
+                     HLE_ND_POLL_VBLANKS);
+    hle_nd_sizes_cell("data-sizes", HLE_ND_DATA);
+    hle_nd_list_cell("data-list", HLE_ND_DATA);
+    hle_nd_files_cell("data-files", HLE_ND_DATA);
+    hle_nd_load_cell("data-readsecure", SCE_UTILITY_SAVEDATA_READDATASECURE, HLE_ND_DATA,
+                     HLE_ND_POLL_VBLANKS);
+    hle_nd_erase_cell("data-erase-missing", SCE_UTILITY_SAVEDATA_ERASE, HLE_ND_DATA,
+                      HLE_ND_MISSING_FILE, HLE_ND_POLL_VBLANKS);
+    hle_nd_erase_cell("data-autodelete", SCE_UTILITY_SAVEDATA_AUTODELETE, HLE_ND_DATA,
+                      HLE_ND_DATA_FILE, HLE_ND_POLL_VBLANKS);
+    hle_nd_data_cleanup();
+    /* Last: the two modes that may show a system dialog (owner present to press a button). */
+    hle_nd_load_cell("nodir-load", PSP_UTILITY_SAVEDATA_LOAD, HLE_ND_NODIR,
+                     HLE_ND_DIALOG_POLL_VBLANKS);
+    hle_nd_erase_cell("nodir-delete", SCE_UTILITY_SAVEDATA_DELETE, HLE_ND_NODIR, HLE_ND_DATA_FILE,
+                      HLE_ND_DIALOG_POLL_VBLANKS);
+    return !s_nd_skip && !s_nd_stuck && s_nd_bad == 0u;
+}
+
+#endif /* HLE_CASE_SAVEDATA_NODATA */
+
+/* ------------------------------------------------------------------------- */
 #if PSP_ORACLE_CASE == HLE_CASE_UTILITY_NONE
 
 /* #1386: what each utility dialog's Update, ShutdownStart and GetStatus answer when no dialog
@@ -3767,10 +4606,13 @@ static void hle_is_ms(void)
     w[2] = (uint32_t)fd;
     w[3] = (uint32_t)wrote;
     hle_record("io-seek-ms-setup", "PASS", (uint32_t)fd, w, 4u);
-    if (fd < 0 || wrote != (int)HLE_IS_FILE_SIZE) {
+    /* Go on only when this probe made the directory and the file. The abort undoes only what
+       the probe made: the file only when its O_EXCL open created it, the directory only when
+       the mkdir above created it (a failed mkdir may mean the directory is someone else's). */
+    if (made < 0 || fd < 0 || wrote != (int)HLE_IS_FILE_SIZE) {
         hle_step("io-seek-ms-setup-abort");
-        (void)sceIoRemove(HLE_IS_FILE);
-        (void)sceIoRmdir(HLE_IS_DIR);
+        if (fd >= 0) (void)sceIoRemove(HLE_IS_FILE);
+        if (made >= 0) (void)sceIoRmdir(HLE_IS_DIR);
         hle_is_ms_skip_rest((uint32_t)fd);
         return;
     }
@@ -3844,7 +4686,8 @@ static void hle_is_ms(void)
     const SceUID post = sceIoDopen(HLE_IS_DIR);
     w[3] = (uint32_t)post;
     if (post >= 0) (void)sceIoDclose(post);
-    hle_record("io-seek-ms-cleanup", "PASS", 0u, w, 4u);
+    /* A directory that is still there after the cleanup is left on the Memory Stick: FAIL. */
+    hle_record("io-seek-ms-cleanup", post >= 0 ? "FAIL" : "PASS", 0u, w, 4u);
 }
 
 /* disc0:/UMD_DATA.BIN, read-only: the ioctl seek to -1, to the size and to size + 1, each from
@@ -3897,6 +4740,324 @@ static int hle_run(void)
 }
 
 #endif /* HLE_CASE_IO_SEEK */
+
+/* ------------------------------------------------------------------------- */
+#if PSP_ORACLE_CASE == HLE_CASE_IO_SEEK_EDGES
+
+/* #1380 (i1380-io, the cells hle-io-seek left open): SEEK_CUR and past-0x100000000 seeks on a
+   flash0: file, the 64-bit seeks where the high word could change, and four Memory Stick
+   open-flag and async-write cells on a probe-owned file.
+
+   Read-only on flash0:. No disc0: or UMD call is made. The only writes are to ms0:/NKIOSK02, a
+   directory the probe creates and removes, with a name distinct from hle-io-seek's NKIOSK01
+   (every ms0: row is SKIP when it already exists, so nothing that is not the probe's is
+   touched): the 16-byte synthetic file, the 4-byte sceIoWrite and sceIoWriteAsync calls on
+   descriptors opened without PSP_O_WRONLY, the PSP_O_TRUNC open of that file, and the file a
+   PSP_O_CREAT | PSP_O_EXCL open of the missing name may create (removed at once when it
+   exists). Every value recorded is a return value, a 64-bit position or result as (low, high)
+   words, a count, a flag, or a size or comparison of the probe's own synthetic file; no byte
+   of the flash0: file is recorded. Every row is emitted on every run with a fixed word count;
+   a word that does not apply is HLE_SENTINEL. Before each seek the position is set to 8, so a
+   refused seek's effect on the position is visible.
+
+   Order: flash0: rows, then ms0: rows. The only loops are the read-to-end of the flash0: file,
+   bounded to HLE_ISE_READ_CAP chunks, and the sceIoPollAsync poll, bounded to
+   HLE_ISE_POLL_CAP polls HLE_ISE_POLL_US apart; sceIoWaitAsync is called only after a poll
+   reported the write complete, so no call here waits without a bound (risk low). */
+
+#define HLE_ISE_FLASH "flash0:/font/ltn0.pgf"
+#define HLE_ISE_DIR "ms0:/NKIOSK02"
+#define HLE_ISE_FILE HLE_ISE_DIR "/e.bin"
+#define HLE_ISE_MISSING HLE_ISE_DIR "/missing.bin"
+#define HLE_ISE_FILE_SIZE 16u
+#define HLE_ISE_READ_CHUNK 4096u
+#define HLE_ISE_READ_CAP 512u
+#define HLE_ISE_PRE 8
+#define HLE_ISE_POLL_CAP 100u
+#define HLE_ISE_POLL_US 10000u
+
+static uint8_t s_hle_ise_buf[HLE_ISE_READ_CHUNK] __attribute__((aligned(64)));
+/* The sceIoWriteAsync source stays valid until the descriptor is closed. */
+static uint8_t s_hle_ise_async[4] __attribute__((aligned(64))) = {0xf0, 0xf1, 0xf2, 0xf3};
+
+static void hle_ise_pair(uint32_t *w, SceOff r)
+{
+    w[0] = (uint32_t)((uint64_t)r & 0xffffffffu);
+    w[1] = (uint32_t)((uint64_t)r >> 32);
+}
+
+static void hle_ise_skip(const char *row, uint32_t count, uint32_t result)
+{
+    uint32_t w[HLE_MAX_WORDS];
+    for (uint32_t i = 0; i < count; i++) w[i] = HLE_SENTINEL;
+    hle_record(row, "SKIP", result, w, count);
+}
+
+/* One flash0: seek row, 5 words: the seek's return (low, high; high is HLE_SENTINEL for the
+   32-bit call), the position after it (SEEK_CUR 0, low, high) and the return of the SET 8
+   that preceded it. The offset is literal + per_size * size. */
+static void hle_ise_flash_seek(const char *row, SceUID fd, int wide, int whence, int64_t literal,
+                               int per_size, int64_t size)
+{
+    uint32_t w[5];
+    hle_step(row);
+    const int64_t offset = literal + (int64_t)per_size * size;
+    w[4] = (uint32_t)sceIoLseek(fd, HLE_ISE_PRE, PSP_SEEK_SET);
+    if (wide) {
+        hle_ise_pair(&w[0], sceIoLseek(fd, offset, whence));
+    } else {
+        w[0] = (uint32_t)sceIoLseek32(fd, (int)offset, whence);
+        w[1] = HLE_SENTINEL;
+    }
+    hle_ise_pair(&w[2], sceIoLseek(fd, 0, PSP_SEEK_CUR));
+    hle_record(row, "PASS", w[0], w, 5u);
+}
+
+static const char *const k_hle_ise_flash_rows[15] = {
+    "io-edge-flash-s64-cur-neg9", "io-edge-flash-s64-cur-past16",
+    "io-edge-flash-s64-cur-to-ffffffff", "io-edge-flash-s64-cur-to-2p32",
+    "io-edge-flash-s32-cur-neg9", "io-edge-flash-s32-cur-past16",
+    "io-edge-flash-s64-set-2p32-plus1", "io-edge-flash-s64-set-2p33",
+    "io-edge-flash-s64-set-max", "io-edge-flash-s64-end-to-ffffffff",
+    "io-edge-flash-s64-end-to-2p32", "io-edge-flash-s64-set-10000",
+    "io-edge-flash-s64-set-7fffffff", "io-edge-flash-s64-set-80000000",
+    "io-edge-flash-s64-set-fffffffe",
+};
+
+static void hle_ise_flash(void)
+{
+    uint32_t w[5];
+    hle_step("io-edge-flash-open");
+    const SceUID fd = sceIoOpen(HLE_ISE_FLASH, PSP_O_RDONLY, 0);
+    if (fd < 0) {
+        hle_ise_skip("io-edge-flash-open", 3u, (uint32_t)fd);
+        for (unsigned i = 0; i < 15u; i++) hle_ise_skip(k_hle_ise_flash_rows[i], 5u, (uint32_t)fd);
+        hle_ise_skip("io-edge-flash-close", 1u, (uint32_t)fd);
+        return;
+    }
+    /* The size comes from SEEK_END; the file is then read to its end (bytes discarded) and the
+       two are compared, so the record says only whether they match. */
+    const int64_t size = sceIoLseek(fd, 0, PSP_SEEK_END);
+    (void)sceIoLseek(fd, 0, PSP_SEEK_SET);
+    int64_t total = 0;
+    for (uint32_t i = 0; i < HLE_ISE_READ_CAP; i++) {
+        const int got = sceIoRead(fd, s_hle_ise_buf, HLE_ISE_READ_CHUNK);
+        if (got <= 0) break;
+        total += got;
+    }
+    w[0] = (uint32_t)fd;
+    w[1] = (size > 0 && total == size) ? 1u : 0u;
+    w[2] = (uint32_t)sceIoLseek32(fd, 0, PSP_SEEK_SET);
+    hle_record("io-edge-flash-open", "PASS", (uint32_t)fd, w, 3u);
+
+    /* A1: SEEK_CUR from 8 to -1, to size + 16, to 0xFFFFFFFF and to 0x100000000. */
+    hle_ise_flash_seek("io-edge-flash-s64-cur-neg9", fd, 1, PSP_SEEK_CUR, -9, 0, size);
+    hle_ise_flash_seek("io-edge-flash-s64-cur-past16", fd, 1, PSP_SEEK_CUR, 8, 1, size);
+    hle_ise_flash_seek("io-edge-flash-s64-cur-to-ffffffff", fd, 1, PSP_SEEK_CUR,
+                       0xffffffffll - 8, 0, size);
+    hle_ise_flash_seek("io-edge-flash-s64-cur-to-2p32", fd, 1, PSP_SEEK_CUR,
+                       0x100000000ll - 8, 0, size);
+    /* A2: the first two again through the 32-bit call. */
+    hle_ise_flash_seek("io-edge-flash-s32-cur-neg9", fd, 0, PSP_SEEK_CUR, -9, 0, size);
+    hle_ise_flash_seek("io-edge-flash-s32-cur-past16", fd, 0, PSP_SEEK_CUR, 8, 1, size);
+    /* A3: SEEK_SET past 0x100000000. */
+    hle_ise_flash_seek("io-edge-flash-s64-set-2p32-plus1", fd, 1, PSP_SEEK_SET, 0x100000001ll, 0,
+                       size);
+    hle_ise_flash_seek("io-edge-flash-s64-set-2p33", fd, 1, PSP_SEEK_SET, 0x200000000ll, 0, size);
+    hle_ise_flash_seek("io-edge-flash-s64-set-max", fd, 1, PSP_SEEK_SET, 0x7fffffffffffffffll, 0,
+                       size);
+    /* A4: SEEK_END to 0xFFFFFFFF and to 0x100000000. */
+    hle_ise_flash_seek("io-edge-flash-s64-end-to-ffffffff", fd, 1, PSP_SEEK_END, 0xffffffffll, -1,
+                       size);
+    hle_ise_flash_seek("io-edge-flash-s64-end-to-2p32", fd, 1, PSP_SEEK_END, 0x100000000ll, -1,
+                       size);
+    /* A5: SEEK_SET around the points where the high word could change. */
+    hle_ise_flash_seek("io-edge-flash-s64-set-10000", fd, 1, PSP_SEEK_SET, 0x10000ll, 0, size);
+    hle_ise_flash_seek("io-edge-flash-s64-set-7fffffff", fd, 1, PSP_SEEK_SET, 0x7fffffffll, 0,
+                       size);
+    hle_ise_flash_seek("io-edge-flash-s64-set-80000000", fd, 1, PSP_SEEK_SET, 0x80000000ll, 0,
+                       size);
+    hle_ise_flash_seek("io-edge-flash-s64-set-fffffffe", fd, 1, PSP_SEEK_SET, 0xfffffffell, 0,
+                       size);
+
+    hle_step("io-edge-flash-close");
+    w[0] = (uint32_t)sceIoClose(fd);
+    hle_record("io-edge-flash-close", "PASS", w[0], w, 1u);
+}
+
+/* Rows from B1 on (everything after the setup row) as SKIP. */
+static void hle_ise_ms_skip_rest(uint32_t result)
+{
+    hle_ise_skip("io-edge-ms-rdonly-creat-write", 4u, result);
+    hle_ise_skip("io-edge-ms-rdonly-creat-trunc", 4u, result);
+    hle_ise_skip("io-edge-ms-rdonly-creat-excl", 4u, result);
+    hle_ise_skip("io-edge-ms-write-async", 10u, result);
+    hle_ise_skip("io-edge-ms-cleanup", 4u, result);
+}
+
+static void hle_ise_ms(void)
+{
+    uint32_t w[10];
+    uint8_t pattern[HLE_ISE_FILE_SIZE];
+    for (unsigned i = 0; i < HLE_ISE_FILE_SIZE; i++) pattern[i] = (uint8_t)(0x40u + i);
+    SceIoStat st;
+
+    /* If the directory exists it is not the probe's, so nothing below may touch it. */
+    hle_step("io-edge-ms-setup");
+    const SceUID pre = sceIoDopen(HLE_ISE_DIR);
+    if (pre >= 0) {
+        (void)sceIoDclose(pre);
+        hle_ise_skip("io-edge-ms-setup", 4u, (uint32_t)pre);
+        hle_ise_ms_skip_rest((uint32_t)pre);
+        return;
+    }
+    const int made = sceIoMkdir(HLE_ISE_DIR, 0777);
+    SceUID fd = sceIoOpen(HLE_ISE_FILE, PSP_O_RDWR | PSP_O_CREAT | PSP_O_EXCL, 0777);
+    int wrote = -1;
+    if (fd >= 0) {
+        wrote = sceIoWrite(fd, pattern, HLE_ISE_FILE_SIZE);
+        (void)sceIoClose(fd);
+    }
+    w[0] = (uint32_t)pre;
+    w[1] = (uint32_t)made;
+    w[2] = (uint32_t)fd;
+    w[3] = (uint32_t)wrote;
+    hle_record("io-edge-ms-setup", "PASS", (uint32_t)fd, w, 4u);
+    /* Go on only when this probe made the directory and the file. The abort undoes only what
+       the probe made: the file only when its O_EXCL open created it, the directory only when
+       the mkdir above created it (a failed mkdir may mean the directory is someone else's). */
+    if (made < 0 || fd < 0 || wrote != (int)HLE_ISE_FILE_SIZE) {
+        hle_step("io-edge-ms-setup-abort");
+        if (fd >= 0) (void)sceIoRemove(HLE_ISE_FILE);
+        if (made >= 0) (void)sceIoRmdir(HLE_ISE_DIR);
+        hle_ise_ms_skip_rest((uint32_t)fd);
+        return;
+    }
+
+    /* B1 io-edge-ms-rdonly-creat-write: PSP_O_RDONLY | PSP_O_CREAT on the existing file, then a
+       4-byte write. w = open, write, close, and 1 when a fresh read of the first 4 bytes
+       differs from the synthetic pattern (HLE_SENTINEL when the read-back failed). The open's
+       result is the measurement, so the row is PASS whatever it returns. */
+    hle_step("io-edge-ms-rdonly-creat-write");
+    fd = sceIoOpen(HLE_ISE_FILE, PSP_O_RDONLY | PSP_O_CREAT, 0777);
+    w[0] = (uint32_t)fd;
+    w[1] = HLE_SENTINEL;
+    w[2] = HLE_SENTINEL;
+    w[3] = HLE_SENTINEL;
+    if (fd >= 0) {
+        static const uint8_t bytes[4] = {0xd0, 0xd1, 0xd2, 0xd3};
+        w[1] = (uint32_t)sceIoWrite(fd, bytes, 4);
+        w[2] = (uint32_t)sceIoClose(fd);
+    }
+    const SceUID rd = sceIoOpen(HLE_ISE_FILE, PSP_O_RDONLY, 0777);
+    if (rd >= 0) {
+        uint8_t back[4] = {0, 0, 0, 0};
+        const int got = sceIoRead(rd, back, 4);
+        (void)sceIoClose(rd);
+        if (got == 4) w[3] = memcmp(back, pattern, 4) != 0 ? 1u : 0u;
+    }
+    hle_record("io-edge-ms-rdonly-creat-write", "PASS", (uint32_t)fd, w, 4u);
+
+    /* B2 io-edge-ms-rdonly-creat-trunc: PSP_O_RDONLY | PSP_O_CREAT | PSP_O_TRUNC on the existing
+       file. w = open, close (HLE_SENTINEL when the open failed), the getstat's result and the
+       file's st_size low word after it (HLE_SENTINEL when the getstat failed). */
+    hle_step("io-edge-ms-rdonly-creat-trunc");
+    fd = sceIoOpen(HLE_ISE_FILE, PSP_O_RDONLY | PSP_O_CREAT | PSP_O_TRUNC, 0777);
+    w[0] = (uint32_t)fd;
+    w[1] = HLE_SENTINEL;
+    w[3] = HLE_SENTINEL;
+    if (fd >= 0) w[1] = (uint32_t)sceIoClose(fd);
+    memset(&st, 0, sizeof(st));
+    hle_step("io-edge-ms-rdonly-creat-trunc-stat");
+    const int trunc_stat = sceIoGetstat(HLE_ISE_FILE, &st);
+    w[2] = (uint32_t)trunc_stat;
+    if (trunc_stat >= 0) w[3] = (uint32_t)((uint64_t)st.st_size & 0xffffffffu);
+    hle_record("io-edge-ms-rdonly-creat-trunc", "PASS", (uint32_t)fd, w, 4u);
+
+    /* B3 io-edge-ms-rdonly-creat-excl: PSP_O_RDONLY | PSP_O_CREAT | PSP_O_EXCL on the missing
+       name. w = open, close (HLE_SENTINEL when the open failed), the getstat's result (whether a
+       file was created) and, only when it was, the remove's result (else HLE_SENTINEL). */
+    hle_step("io-edge-ms-rdonly-creat-excl");
+    fd = sceIoOpen(HLE_ISE_MISSING, PSP_O_RDONLY | PSP_O_CREAT | PSP_O_EXCL, 0777);
+    w[0] = (uint32_t)fd;
+    w[1] = HLE_SENTINEL;
+    w[3] = HLE_SENTINEL;
+    if (fd >= 0) w[1] = (uint32_t)sceIoClose(fd);
+    memset(&st, 0, sizeof(st));
+    hle_step("io-edge-ms-rdonly-creat-excl-stat");
+    const int excl_stat = sceIoGetstat(HLE_ISE_MISSING, &st);
+    w[2] = (uint32_t)excl_stat;
+    if (excl_stat >= 0) {
+        hle_step("io-edge-ms-rdonly-creat-excl-remove");
+        w[3] = (uint32_t)sceIoRemove(HLE_ISE_MISSING);
+    }
+    hle_record("io-edge-ms-rdonly-creat-excl", "PASS", (uint32_t)fd, w, 4u);
+
+    /* B4 io-edge-ms-write-async: sceIoWriteAsync of 4 bytes on a PSP_O_RDONLY descriptor.
+       w = open, the call's result, the number of sceIoPollAsync calls made (HLE_SENTINEL when
+       the call did not return 0), the last poll's return and the 64-bit result word it wrote
+       (low, high; preset to HLE_SENTINEL), then sceIoWaitAsync's return and its 64-bit result
+       (low, high), called only when a poll returned 0 (complete), and the close's result. Each
+       word that was not reached is HLE_SENTINEL. The open is the probe's setup, so the row is
+       FAIL when it fails.
+       If the poll cap runs out while sceIoPollAsync still returns 1 (pending), no wait is made.
+       The close is then expected to fail with the write still pending and leave the descriptor
+       open (unmeasured), in which case the cleanup's remove and rmdir fail and its row reports
+       FAIL with the directory left behind. Nothing waits without a bound on that path. The
+       2026-11-11 PSP-3000 run never reached it (sceIoWriteAsync refused the write at once). */
+    hle_step("io-edge-ms-write-async");
+    fd = sceIoOpen(HLE_ISE_FILE, PSP_O_RDONLY, 0777);
+    for (unsigned i = 1; i < 10u; i++) w[i] = HLE_SENTINEL;
+    w[0] = (uint32_t)fd;
+    if (fd >= 0) {
+        const int queued = sceIoWriteAsync(fd, s_hle_ise_async, 4);
+        w[1] = (uint32_t)queued;
+        if (queued == 0) {
+            SceInt64 polled = (SceInt64)(((uint64_t)HLE_SENTINEL << 32) | HLE_SENTINEL);
+            int last = (int)HLE_SENTINEL;
+            uint32_t polls = 0;
+            hle_step("io-edge-ms-write-async-poll");
+            for (uint32_t i = 0; i < HLE_ISE_POLL_CAP; i++) {
+                if (i > 0u) (void)sceKernelDelayThread(HLE_ISE_POLL_US);
+                last = sceIoPollAsync(fd, &polled);
+                polls = i + 1u;
+                if (last != 1) break;
+            }
+            w[2] = polls;
+            w[3] = (uint32_t)last;
+            hle_ise_pair(&w[4], polled);
+            if (last == 0) {
+                SceInt64 waited = (SceInt64)(((uint64_t)HLE_SENTINEL << 32) | HLE_SENTINEL);
+                hle_step("io-edge-ms-write-async-wait");
+                w[6] = (uint32_t)sceIoWaitAsync(fd, &waited);
+                hle_ise_pair(&w[7], waited);
+            }
+        }
+        hle_step("io-edge-ms-write-async-close");
+        w[9] = (uint32_t)sceIoClose(fd);
+    }
+    hle_record("io-edge-ms-write-async", fd >= 0 ? "PASS" : "FAIL", (uint32_t)fd, w, 10u);
+
+    hle_step("io-edge-ms-cleanup");
+    w[0] = (uint32_t)sceIoRemove(HLE_ISE_FILE);
+    w[1] = (uint32_t)sceIoRemove(HLE_ISE_MISSING);
+    w[2] = (uint32_t)sceIoRmdir(HLE_ISE_DIR);
+    hle_step("io-edge-ms-cleanup-check");
+    const SceUID post = sceIoDopen(HLE_ISE_DIR);
+    w[3] = (uint32_t)post;
+    if (post >= 0) (void)sceIoDclose(post);
+    /* A directory that is still there after the cleanup is left on the Memory Stick: FAIL. */
+    hle_record("io-edge-ms-cleanup", post >= 0 ? "FAIL" : "PASS", 0u, w, 4u);
+}
+
+static int hle_run(void)
+{
+    hle_ise_flash();
+    hle_ise_ms();
+    return 1;
+}
+
+#endif /* HLE_CASE_IO_SEEK_EDGES */
 
 /* ------------------------------------------------------------------------- */
 #if PSP_ORACLE_CASE == HLE_CASE_NICKNAME_LIMIT

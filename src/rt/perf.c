@@ -1468,8 +1468,14 @@ void sr_perf_set_gpu_replay_source(SrPerfGpuReplaySource source) {
     seed_gpu_replay_base();
 }
 
+/* The counters belong to the scheduler's host thread and are not guarded. A host thread that
+ * reaches accounted code (the host worker's disc read, #2361) excludes itself: its clock reads
+ * return 0, and every accounting call takes a zero start as nothing to count. */
+static _Thread_local int s_perf_thread_excluded;
+void sr_perf_exclude_thread(void) { s_perf_thread_excluded = 1; }
+
 uint64_t sr_perf_now_ns_impl(void) {
-    return s_perf.enabled && !s_perf.shutdown ? raw_now_ns() : 0;
+    return s_perf.enabled && !s_perf.shutdown && !s_perf_thread_excluded ? raw_now_ns() : 0;
 }
 
 void sr_perf_guest_begin(void) {
@@ -1507,7 +1513,6 @@ void sr_perf_vblank(void) {
  * phase that was executing when the period came due is what turns "the rate is
  * low" into "this construct holds the CPU".  Counted here, not derived afterwards:
  * after the fact the phase is unknowable. */
-#define SR_PERF_DISPLAY_PERIOD_US 16683u   /* 60000/1001 Hz */
 #define SR_PERF_PHASE_SAMPLE_N 4u          /* guest-PC/NID samples kept per phase */
 
 typedef struct SrPerfPhaseAttrib {
@@ -1663,8 +1668,8 @@ void sr_perf_vblank_latch(uint64_t gap_us, uint32_t periods, int masked) {
     if (phase >= SR_RT_PHASE_COUNT) phase = SR_RT_PHASE_OTHER;
     SrPerfPhaseAttrib *a = &s_phase_attrib[phase];
     a->latches++;
-    if (gap_us <= SR_PERF_DISPLAY_PERIOD_US) return;
-    uint64_t lost = gap_us - SR_PERF_DISPLAY_PERIOD_US;
+    if (gap_us <= SR_DISPLAY_PERIOD_US) return;
+    uint64_t lost = gap_us - SR_DISPLAY_PERIOD_US;
     s_perf.late_since_frame = 1;
     a->late++;
     a->lost_us += lost;

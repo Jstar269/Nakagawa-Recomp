@@ -4766,6 +4766,28 @@
       }
     },
     {
+      "path": "src/player/discord_presence.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "player-discord-presence-2259",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "src/player/discord_presence.h",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "player-discord-presence-2259",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
       "path": "src/player/input_settings.c",
       "classification": "project_authored_attested",
       "evidence": {
@@ -6773,6 +6795,17 @@
       }
     },
     {
+      "path": "src/rt/gpu_sdl3vk/ace_measure_comp.inc",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "ace_smooth_measure_20261109",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
       "path": "src/rt/gpu_sdl3vk/ace_smooth.c",
       "classification": "project_authored_attested",
       "evidence": {
@@ -7627,6 +7660,17 @@
       "evidence": {
         "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
         "record_id": "ace-wide-1272",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "src/rt/gpu_sdl3vk/shaders/ace_measure.comp",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "ace_smooth_measure_20261109",
         "evidence_tier": "S",
         "authorship": "independent implementation record",
         "upstream_attribution": null
@@ -12932,6 +12976,17 @@
       }
     },
     {
+      "path": "tests/native/player_enhanced_fixture.h",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "ace_smooth_measure_20261109",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
       "path": "tests/native/profiler_selftest.c",
       "classification": "project_authored_attested",
       "evidence": {
@@ -13080,6 +13135,17 @@
       "evidence": {
         "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
         "record_id": "disc-verify-compat-table-20261031",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/native/test_discord_presence.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "player-discord-presence-2259",
         "evidence_tier": "S",
         "authorship": "independent implementation record",
         "upstream_attribution": null

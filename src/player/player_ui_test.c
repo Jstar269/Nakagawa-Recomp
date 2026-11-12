@@ -799,6 +799,39 @@ void player_ui_test_report_frame(int frame_number, const PlayerApp *app,
             }
             printf(" count=%s\n", count);
         }
+        /* The library's find box (#2206) while it is open, in hex the same way. */
+        const char *find = player_ui_nk_test_find(g_ui_test_next_ui);
+        if (find != NULL) {
+            printf("[PLAYER_UI_TEST] find_box frame=%d text_hex=", frame_number);
+            for (size_t i = 0; find[i] != '\0'; i++) {
+                printf("%02x", (unsigned)(unsigned char)find[i]);
+            }
+            printf("\n");
+        }
+        /* The library grid at its root, each time it changes: how many games it holds
+           (the find box's matches while it is open), of how many, and the disc IDs of
+           the titles the frame drew, in order (player_ui_nk_shown_titles). */
+        if (player_ui_nk_at_library_root(g_ui_test_next_ui)) {
+            static char last_grid[PLAYER_UI_SHOWN_TITLES_MAX * MAX_DISC_ID_LEN + 64];
+            char grid[sizeof(last_grid)];
+            int shown[PLAYER_UI_SHOWN_TITLES_MAX];
+            size_t total = 0u;
+            size_t matches = player_ui_nk_test_library_grid(g_ui_test_next_ui, &total);
+            size_t shown_count = player_ui_nk_shown_titles(g_ui_test_next_ui, shown,
+                                                           PLAYER_UI_SHOWN_TITLES_MAX);
+            size_t used = (size_t)snprintf(grid, sizeof(grid), "matches=%zu total=%zu shown=",
+                                           matches, total);
+            for (size_t i = 0u; i < shown_count && used < sizeof(grid); i++) {
+                const char *disc = shown[i] >= 0 && shown[i] < app->game_count
+                    ? app->games[shown[i]].disc_id : "?";
+                used += (size_t)snprintf(grid + used, sizeof(grid) - used, "%s%s",
+                                         i > 0u ? "," : "", disc[0] ? disc : "?");
+            }
+            if (strcmp(grid, last_grid) != 0) {
+                memcpy(last_grid, grid, strlen(grid) + 1u);
+                printf("[PLAYER_UI_TEST] library_grid frame=%d %s\n", frame_number, grid);
+            }
+        }
     }
 
     static bool consent_items_reported = false;

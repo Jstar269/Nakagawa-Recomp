@@ -32,9 +32,11 @@ Nakagawa doesn't support, it stops and says what is missing.
   - **Texture filtering**, 2x to 16x, which keeps slanted surfaces sharp; **Crisp system text**, which draws the
     on-screen keyboard at your screen's resolution; a **Speed readout**; and a **Game badge** that names the mode for
     a few seconds when a game starts ([#1797](https://github.com/Jstar269/nakagawa-recomp/pull/1797)).
-  - **Smooth motion** shows a game that holds a steady 30 frames per second at up to 60 (54.8 measured on Hot Shots
-    Tennis) by making the frames in between from the two latest real frames. A game that does not hold 30 is shown as
-    it is. The game itself is untouched. It adds about 17 ms of delay ([#1939](https://github.com/Jstar269/nakagawa-recomp/pull/1939)).
+  - **Smooth motion** makes the frames in between from the two latest real frames when a game holds a steady 30
+    frames per second. A game that does not hold 30 is shown as it is. The 54.8 measured on Hot Shots Tennis counts
+    pictures presented a second; during a rally its in-betweens mostly repeat the earlier frame, so the motion itself
+    stays near 30 ([Smooth motion](ENHANCEMENT_CONTRACT.md#106-smooth-motion) says what it follows and how the
+    readout counts it). The game itself is untouched. It adds about 17 ms of delay ([#1939](https://github.com/Jstar269/nakagawa-recomp/pull/1939)).
   - **Widescreen** shows more of the 3D scene at the sides and keeps the HUD in shape. Some objects appear late at
     the edges, and Smooth motion turns it off ([#2067](https://github.com/Jstar269/nakagawa-recomp/pull/2067), [#2174](https://github.com/Jstar269/nakagawa-recomp/pull/2174)).
   - **Sharper enlarging** enlarges the picture with AMD FidelityFX Super Resolution 1 ([#2082](https://github.com/Jstar269/nakagawa-recomp/pull/2082), [#2175](https://github.com/Jstar269/nakagawa-recomp/pull/2175)). It does not enlarge movie frames the game draws through the GPU ([#2111](https://github.com/Jstar269/nakagawa-recomp/issues/2111)).

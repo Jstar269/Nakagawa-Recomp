@@ -1482,6 +1482,85 @@ unsigned long nk_platform_process_id(void) {
     return (unsigned long)_getpid();
 }
 
+bool nk_platform_local_pipe_supported(void) {
+    return true;
+}
+
+bool nk_platform_local_pipe_open(NkLocalPipe *pipe, const char *name) {
+    if (!pipe) return false;
+    memset(pipe, 0, sizeof(*pipe));
+    if (!name || !*name || strchr(name, '\\') || strchr(name, '/')) return false;
+    char narrow[128];
+    WCHAR wide[128];
+    int n = snprintf(narrow, sizeof(narrow), "\\\\.\\pipe\\%s", name);
+    if (n <= 0 || (size_t)n >= sizeof(narrow) ||
+        !utf8_to_wide(narrow, wide, sizeof(wide) / sizeof(wide[0]))) {
+        return false;
+    }
+    /* Identification level only: whatever program serves the pipe (any local process could
+       create it first) may learn who connected but can never impersonate this user. */
+    HANDLE handle = CreateFileW(wide, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING,
+                                FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT |
+                                    SECURITY_IDENTIFICATION,
+                                NULL);
+    if (handle == INVALID_HANDLE_VALUE) return false;
+    pipe->handle = handle;
+    pipe->open = true;
+    return true;
+}
+
+/* One overlapped transfer that gives up after timeout_ms, cancelling what is left. */
+static bool local_pipe_transfer(HANDLE handle, bool writing, void *data, DWORD len,
+                                unsigned timeout_ms, DWORD *done) {
+    OVERLAPPED ov;
+    memset(&ov, 0, sizeof(ov));
+    ov.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+    if (!ov.hEvent) return false;
+    *done = 0;
+    BOOL ok = writing ? WriteFile(handle, data, len, NULL, &ov)
+                      : ReadFile(handle, data, len, NULL, &ov);
+    bool result = false;
+    if (ok || GetLastError() == ERROR_IO_PENDING) {
+        if (WaitForSingleObject(ov.hEvent, timeout_ms) == WAIT_OBJECT_0) {
+            result = GetOverlappedResult(handle, &ov, done, FALSE) != 0;
+        } else {
+            (void)CancelIoEx(handle, &ov);
+            (void)GetOverlappedResult(handle, &ov, done, TRUE);
+        }
+    }
+    CloseHandle(ov.hEvent);
+    return result;
+}
+
+bool nk_platform_local_pipe_write(NkLocalPipe *pipe, const void *data, size_t len,
+                                  unsigned timeout_ms) {
+    if (!pipe || !pipe->open || !data || len == 0 || len > 0x7fffffffu) return false;
+    DWORD done = 0;
+    return local_pipe_transfer((HANDLE)pipe->handle, true, (void *)data, (DWORD)len,
+                               timeout_ms, &done) &&
+           done == (DWORD)len;
+}
+
+long nk_platform_local_pipe_read(NkLocalPipe *pipe, void *buf, size_t cap) {
+    if (!pipe || !pipe->open || !buf || cap == 0) return -1;
+    DWORD avail = 0;
+    if (!PeekNamedPipe((HANDLE)pipe->handle, NULL, 0, NULL, &avail, NULL)) return -1;
+    if (avail == 0) return 0;
+    DWORD want = avail < cap ? avail : (DWORD)(cap > 0x7fffffffu ? 0x7fffffffu : cap);
+    DWORD done = 0;
+    /* The bytes are already in the pipe, so this completes at once; the bound only keeps a
+       misbehaving server from holding the caller. */
+    if (!local_pipe_transfer((HANDLE)pipe->handle, false, buf, want, 1000u, &done)) return -1;
+    return (long)done;
+}
+
+void nk_platform_local_pipe_close(NkLocalPipe *pipe) {
+    if (!pipe) return;
+    if (pipe->open && pipe->handle) CloseHandle((HANDLE)pipe->handle);
+    pipe->handle = NULL;
+    pipe->open = false;
+}
+
 int nk_platform_last_os_error(void) {
     return (int)GetLastError();
 }

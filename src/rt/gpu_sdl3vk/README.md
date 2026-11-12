@@ -88,14 +88,20 @@ Enabled with `SR_GPU_GE=1`. Implementation:
   target as a storage image, blends, and stores it inside a pixel-ordered interlock, so
   overlapping primitives match `ge.c`. These batches record in a depth-only render pass with
   the colour image in `GENERAL`. The other batches of the op keep the fixed-function pass, with
-  a barrier at each switch, and the op takes no snapshot copy. The variant tests depth early,
-  so an op whose destination-reading batch writes depth and may still kill a fragment in the
-  shader keeps the snapshot path (the alpha test, the color test, the transform-mode depth range
-  when it is narrower than 0–65535, or a stencil-fail KEEP). So does an op whose stencil state
-  also blends in fixed function, an op whose destination-reading batch textures from its own
-  target (the destination copy is its texture), every op into a widescreen wing canvas (which has
-  no RMW objects), and
-  every op while the host twin runs. The `submit-batch` and `gpu-timestamps` cells hold the
+  a barrier at each switch, and the op takes no snapshot copy. The variant tests depth early.
+  A run of these batches that holds one that writes depth and may still kill a fragment in the
+  shader (the alpha test, the color test, the transform-mode depth range when it is narrower
+  than 0–65535, or a stencil-fail KEEP) tests and writes depth in the shader instead, inside the
+  interlock and after those kills: the run's box of the D16 depth image is copied into a storage
+  buffer before its pass and back after it, bit for bit, and its pipelines test no depth. With
+  depth=32 (#2051) the depth image is D32, which that copy does not pack, so such an op keeps
+  the snapshot path. An op
+  keeps the snapshot path when its destination-reading batch textures from its own target (the
+  destination copy is its texture), and every op into a widescreen wing canvas does (it has no
+  RMW objects). The host twin (#2050) does not change the path: the image is drawn as in a
+  twin-off run, and the twin's pass of an interlock op records the same runs into the twin, which
+  it loads and stores as a storage image in place of the twin snapshot. The `submit-batch` and
+  `gpu-timestamps` cells hold the
   snapshot path on every device, since they count and time snapshot copies. The interlock path is
   taken where the device has it; `SR_GPU_DST_READ` forces a path. On the snapshot path the
   device, images, render passes and default shader are made exactly as before. The

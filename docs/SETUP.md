@@ -1128,6 +1128,17 @@ connections, listed below, and each is opt-in.
 A release folder that carries a verified `prereqs/` tree never makes the build-tool
 download ([#1285](https://github.com/Jstar269/nakagawa-recomp/issues/1285)).
 
+**Discord status** (Settings > Online and developer, off by default) makes no network
+connection either. While a game runs, the player passes three things to the Discord app on this
+PC through Discord's local named pipe (`discord-ipc-0` to `discord-ipc-9`): the game's title as
+the disc names it (its disc ID when the disc names no title), the play mode (Authentic, Enhanced
+or Ace) and when the game started, with the player's process ID, which Discord's protocol needs. The
+Discord app then shows them on your profile, so Discord learns which game you play. Nothing else
+is sent: no path, save, user name or game memory. If Discord isn't running, the player tries
+again at most once a minute and says nothing; the status clears when the game exits. A build
+without the project's Discord application ID has no Discord status switch
+([`ONLINE_FEATURES.md`](ONLINE_FEATURES.md#discord-status)).
+
 Enhanced and Ace (Settings > Enhanced) make no network connection: its features run on this PC, and its per-game report
 stays in the user data folder.
 
@@ -1410,6 +1421,7 @@ the report runs the toolchain check, which can take a minute.
 
 | Symptom | Cause | Fix |
 | --- | --- | --- |
+| Make stops with `<target> needs a POSIX sh, and mingw32-make found no sh.exe on PATH` | `mingw32-make` found no POSIX `sh`, so it would run that recipe with `cmd.exe`, which misreads sh syntax; the Makefile refuses before any line of the recipe runs | Put Git for Windows' `usr\bin` ahead of `C:\msys64\usr\bin` on `PATH` (see [PATH order](#path-order)) |
 | A Make recipe fails with a shell error, or runs words such as `status` as commands | `mingw32-make` found no POSIX `sh` and fell back to `cmd.exe` | Put Git for Windows' `usr\bin` ahead of `C:\msys64\usr\bin` on `PATH` (see [PATH order](#path-order)) |
 | `cannot find -lvulkan` with `VULKAN_SDK=/ucrt64` | That is the CI's MSYS2 layout; a local MSYS2 may lack the import library | Leave `VULKAN_SDK` unset so the Makefile finds the installed Vulkan SDK |
 | A Make-driven step fails on a `C:\path\to\dir` path | Backslashes in a Make variable are read as escapes | Pass Make paths with forward slashes (`C:/path/to/dir`) |

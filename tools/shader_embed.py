@@ -31,6 +31,7 @@ SHADERS = (
     ("vert", Path("shaders/psp_tnl.vert"), Path("psp_tnl_vert.inc")),
     ("comp", Path("shaders/ace_match.comp"), Path("ace_match_comp.inc")),
     ("comp", Path("shaders/ace_compose.comp"), Path("ace_compose_comp.inc")),
+    ("comp", Path("shaders/ace_measure.comp"), Path("ace_measure_comp.inc")),
     ("comp", Path("shaders/fsr1_easu.comp"), Path("fsr1_easu_comp.inc")),
     ("comp", Path("shaders/fsr1_rcas.comp"), Path("fsr1_rcas_comp.inc")),
     ("comp", Path("shaders/anime4k_cnn_x2_m_0.comp"), Path("anime4k_cnn_x2_m_0_comp.inc")),

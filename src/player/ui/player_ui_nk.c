@@ -118,6 +118,7 @@ struct PlayerUiNk {
        input is on for it. */
     bool find_open;
     char find_query[64];
+    UiKeyboard find_keyboard;  /* edits find_query (#2206) */
     bool find_text_input;
     /* The control the box focuses, on the first frame that lays it out. */
     NkUiId find_focus;
@@ -159,7 +160,8 @@ struct PlayerUiNk {
     char settings_saves[NK_MAX_PATH];
     /* The play mode on the open title's page: what it turns on, and its last session, read
        at most every two seconds (the runtime writes the report when a game ends). */
-    char ace_line[256];
+    /* Every part named, with the 60 FPS and smooth-motion words: the line is never cut. */
+    char ace_line[PLAYER_PART_COUNT * 64 + 192];
     char enhanced_smooth_sentence[160];  /* the Smooth motion row's words under 60 FPS logic */
     char ace_last_session[200];
     char ace_last_disc[NK_MAX_DISC_ID_LEN];
@@ -282,7 +284,7 @@ struct PlayerUiNk {
     char status_reported[PLAYER_UI_TITLE_CAP][32]; /* the status word last printed */
     char play_reported[PLAYER_UI_TITLE_CAP][16];   /* the play mode badge last printed */
     char enhanced_reported[512];                    /* Settings > Enhanced as last printed */
-    char ace_line_reported[256];                    /* the open title's play line last printed */
+    char ace_line_reported[PLAYER_PART_COUNT * 64 + 192]; /* the play line last printed */
     char preset_note_reported[200];                 /* the main Settings page's preset note */
     int disc_reported_view;  /* the game-found card whose rows were printed, or -1 */
 #endif
@@ -854,6 +856,17 @@ static double player_ui_display_refresh_hz(SDL_Window *window) {
 }
 
 typedef char player_ui_enhanced_rows_fit[PLAYER_PART_COUNT <= PLAYER_UI_ENHANCED_ROWS ? 1 : -1];
+/* The part rows' element ids (PLAYER_UI_ID_ENHANCED_PART): each range ends before the next id in
+   use, and the two hold every row. */
+typedef char player_ui_enhanced_row_ids_fit[
+    PLAYER_UI_ID_SETTINGS_ENHANCED_PART + PLAYER_UI_ENHANCED_FIRST_IDS <= PLAYER_UI_ID_SETTINGS_PROBLEM_REPORT
+        ? 1 : -1];
+typedef char player_ui_enhanced_more_row_ids_fit[
+    PLAYER_UI_ID_SETTINGS_ENHANCED_PART_MORE + PLAYER_UI_ENHANCED_MORE_IDS <= PLAYER_UI_ID_DEVELOPER_LOG_COPY &&
+            PLAYER_UI_ID_CONTROLLER_GLYPH_BASE + PLAYER_UI_ID_CONTROLLER_GLYPH_BASE_SPAN <=
+                PLAYER_UI_ID_SETTINGS_ENHANCED_PART_MORE &&
+            PLAYER_UI_ENHANCED_ROWS <= PLAYER_UI_ENHANCED_FIRST_IDS + PLAYER_UI_ENHANCED_MORE_IDS
+        ? 1 : -1];
 
 /* Why a title offers no Ace: it has no usable package of its own (#2055). */
 #define PLAYER_UI_ACE_NEEDS_PACKAGE "Ace needs a package made for this game."
@@ -1142,6 +1155,8 @@ static PlayerUiAction player_ui_render_settings(PlayerUiNk *player, PlayerApp *a
         model.update_step = (PlayerUiUpdateStep)update->phase;
         model.update_failed_step = (PlayerUiUpdateStep)update->failed_step;
         model.check_updates_at_start = app->settings.check_updates_at_start;
+        model.discord_presence = app->settings.discord_presence;
+        model.discord_available = nk_discord_available();
         model.current_version = NK_PLAYER_VERSION;
         if (checked) {
             model.update_version = newest->version;
@@ -1883,6 +1898,15 @@ unsigned player_ui_nk_test_focus(const PlayerUiNk *player) {
     return player != NULL && player->ui != NULL ? (unsigned)nk_ui_focused(player->ui) : 0u;
 }
 
+const char *player_ui_nk_test_find(const PlayerUiNk *player) {
+    return player_ui_nk_find_open(player) ? player->find_query : NULL;
+}
+
+size_t player_ui_nk_test_library_grid(const PlayerUiNk *player, size_t *total) {
+    if (total != NULL) *total = player != NULL ? player->library_game_total : 0u;
+    return player != NULL ? player->library_grid_count : 0u;
+}
+
 const char *player_ui_nk_test_nickname(const PlayerUiNk *player, char *count, size_t cap) {
     if (count != NULL && cap > 0u) count[0] = '\0';
     if (player == NULL || !player->nickname_open) return NULL;
@@ -2258,13 +2282,16 @@ size_t player_ui_nk_shown_titles(const PlayerUiNk *player, int *out, size_t cap)
 
 /* The library's find box. From a hardware keyboard, which types straight into
    it, focus goes to DONE, so Enter moves on to the matches; otherwise to the
-   on-screen keyboard's Q, ready for a controller or the mouse. */
+   on-screen keyboard's q, ready for a controller or the mouse. */
 static void player_ui_find_open(PlayerUiNk *player, bool from_keyboard) {
     player->find_open = true;
     player->find_query[0] = '\0';
+    ui_keyboard_init(&player->find_keyboard, player->find_query,
+                     sizeof(player->find_query) - 1u, player_ui_find_accepts, NULL);
     player->library_page = 0u;
-    player->find_focus = from_keyboard ? PLAYER_UI_ID_LIBRARY_FIND_DONE
-                                       : PLAYER_UI_ID_LIBRARY_FIND_KEY_BASE + 10u;
+    player->find_focus = from_keyboard
+        ? PLAYER_UI_ID_LIBRARY_FIND_DONE
+        : PLAYER_UI_ID_LIBRARY_FIND_KEY_BASE + UI_KEYBOARD_KEY_DEFAULT;
 }
 
 /* Clears and closes the box; focus goes back to FIND. */
@@ -2275,47 +2302,16 @@ static void player_ui_find_close(PlayerUiNk *player) {
     player->find_focus = PLAYER_UI_ID_LIBRARY_FIND;
 }
 
-/* Adds one character as UTF-8, when it fits whole; control characters are
-   not typed. */
-static void player_ui_find_type(PlayerUiNk *player, uint32_t codepoint) {
-    char bytes[4];
-    size_t n;
-    size_t length = strlen(player->find_query);
-    if (codepoint < 0x20u || codepoint == 0x7Fu || codepoint > 0x10FFFFu) return;
-    if (codepoint < 0x80u) {
-        bytes[0] = (char)codepoint;
-        n = 1u;
-    } else if (codepoint < 0x800u) {
-        bytes[0] = (char)(0xC0u | (codepoint >> 6));
-        bytes[1] = (char)(0x80u | (codepoint & 0x3Fu));
-        n = 2u;
-    } else if (codepoint < 0x10000u) {
-        bytes[0] = (char)(0xE0u | (codepoint >> 12));
-        bytes[1] = (char)(0x80u | ((codepoint >> 6) & 0x3Fu));
-        bytes[2] = (char)(0x80u | (codepoint & 0x3Fu));
-        n = 3u;
-    } else {
-        bytes[0] = (char)(0xF0u | (codepoint >> 18));
-        bytes[1] = (char)(0x80u | ((codepoint >> 12) & 0x3Fu));
-        bytes[2] = (char)(0x80u | ((codepoint >> 6) & 0x3Fu));
-        bytes[3] = (char)(0x80u | (codepoint & 0x3Fu));
-        n = 4u;
-    }
-    if (length + n >= sizeof(player->find_query)) return;
-    memcpy(player->find_query + length, bytes, n);
-    player->find_query[length + n] = '\0';
-    player->library_page = 0u;
+/* A hardware keyboard's text (SDL's UTF-8), typed through the on-screen keyboard's
+   filter and cap (player_ui_find_accepts): control characters and bytes that are not
+   a whole UTF-8 character are left out. */
+static void player_ui_find_type(PlayerUiNk *player, const char *text) {
+    if (ui_keyboard_type(&player->find_keyboard, text)) player->library_page = 0u;
 }
 
 /* Removes the last character, all of its UTF-8 bytes. */
 static void player_ui_find_delete(PlayerUiNk *player) {
-    size_t length = strlen(player->find_query);
-    while (length > 0u && ((unsigned char)player->find_query[length - 1u] & 0xC0u) == 0x80u) {
-        --length;
-    }
-    if (length > 0u) --length;
-    player->find_query[length] = '\0';
-    player->library_page = 0u;
+    if (ui_keyboard_delete(&player->find_keyboard)) player->library_page = 0u;
 }
 
 /* The nickname editor starts empty, showing the nickname in use until
@@ -2401,20 +2397,7 @@ bool player_ui_nk_handle_event(PlayerUiNk *player, const SDL_Event *event) {
            Backspace deletes one, and a printable key is not also a shortcut
            (D, Q, E). Esc or the pad's B clears and closes it, below. */
         if (event->type == SDL_EVENT_TEXT_INPUT && event->text.text != NULL) {
-            const char *cursor = event->text.text;
-            const unsigned char *bytes = (const unsigned char *)cursor;
-            for (size_t i = 0u; bytes[i] != 0u;) {
-                uint32_t codepoint = bytes[i];
-                size_t extra = codepoint >= 0xF0u ? 3u : codepoint >= 0xE0u ? 2u
-                    : codepoint >= 0xC0u ? 1u : 0u;
-                if (extra > 0u) codepoint &= 0x3Fu >> extra;
-                for (size_t k = 1u; k <= extra && bytes[i + k] != 0u; ++k) {
-                    codepoint = (codepoint << 6) | (bytes[i + k] & 0x3Fu);
-                }
-                player_ui_find_type(player, codepoint);
-                i += 1u + extra;
-                while (bytes[i] != 0u && (bytes[i] & 0xC0u) == 0x80u) ++i;
-            }
+            player_ui_find_type(player, event->text.text);
             return true;
         }
         if (event->type == SDL_EVENT_KEY_DOWN || event->type == SDL_EVENT_KEY_UP) {
@@ -2664,7 +2647,8 @@ static void player_ui_title_ace(PlayerUiNk *player, const PlayerApp *app, int in
     if (play.mode == PLAYER_PLAY_AUTHENTIC) {
         out->ace_line = "Authentic: plays exactly as released, with nothing added.";
     } else {
-        char words[160] = "";
+        /* Every part: each as long as its part[64], with the ", " before it. */
+        char words[PLAYER_PART_COUNT * (64 + 2)] = "";
         size_t used = 0;
         size_t count = 0;
         for (int p = 0; p < PLAYER_PART_COUNT; p++) {
@@ -3511,6 +3495,7 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
         model.sort_label = player_library_sort_label(app->settings.library_sort);
         model.find_open = player->find_open;
         model.find_query = player->find_query;
+        model.find_keyboard = player->find_open ? &player->find_keyboard : NULL;
         model.game_total = player->library_game_total;
         model.page_index = player->library_page;
         model.page_size = page_size;
@@ -3584,10 +3569,11 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
                 nk_ui_focus(player->ui, games > 0u
                                             ? PLAYER_UI_ID_LIBRARY_ITEM(player->library_grid[0])
                                             : PLAYER_UI_ID_LIBRARY_FIND_DONE);
-            } else if (action.title_index == PLAYER_UI_FIND_DELETE) {
-                player_ui_find_delete(player);
+            } else if (action.title_index == PLAYER_UI_FIND_CANCEL) {
+                player_ui_find_close(player);
             } else {
-                player_ui_find_type(player, (uint32_t)action.title_index);
+                /* A key edited the text (or the letter case): the matches start over. */
+                player->library_page = 0u;
             }
             action.kind = PLAYER_UI_ACTION_NONE;
         } else if (action.kind == PLAYER_UI_ACTION_CYCLE_SORT) {

@@ -263,7 +263,7 @@ class FakeUsbHostFsProcess:
 
     def __init__(self, lines=(), *, exits: bool = False):
         self.stdout = LiveServerOutput(lines)
-        self.returncode = None
+        self.returncode: int | None = None
         self.terminated = False
         if exits:
             self.stdout.close()
@@ -284,6 +284,52 @@ class FakeUsbHostFsProcess:
 
 
 USBHOSTFS_BANNER = ("USBHostFS (c) TyRaNiD 2k6", "waiting for device...")
+
+
+class _CommandInput:
+    """The stdin pipe of a synthetic usbhostfs_pc; it keeps what the runner wrote."""
+
+    def __init__(self, on_close):
+        self.written = ""
+        self.closed = False
+        self.fail_write: OSError | None = None
+        self._on_close = on_close
+
+    def write(self, text: str) -> int:
+        if self.closed:
+            raise ValueError("write to closed file")
+        if self.fail_write is not None:
+            raise self.fail_write
+        self.written += text
+        return len(text)
+
+    def flush(self) -> None:
+        pass
+
+    def close(self) -> None:
+        if not self.closed:
+            self.closed = True
+            self._on_close()
+
+
+class CommandInputUsbHostFsProcess(FakeUsbHostFsProcess):
+    """A synthetic usbhostfs_pc that reads shell commands on stdin, as the real one does."""
+
+    def __init__(self, lines=(), *, obeys_exit: bool = True):
+        super().__init__(lines)
+        self.obeys_exit = obeys_exit
+        self.stdin = _CommandInput(self._input_closed)
+
+    def _input_closed(self) -> None:
+        if self.obeys_exit and self.stdin.written.startswith("exit\n"):
+            self.returncode = 134  # libusb can abort after exit_app; the status is not checked
+            self.stdout.emit("Exiting")
+            self.stdout.close()
+
+    def wait(self, timeout):
+        if self.returncode is None:
+            raise subprocess.TimeoutExpired("fake-usbhostfs", timeout)
+        return self.returncode
 
 
 class SimulatedPsplinkTransport:
@@ -2199,11 +2245,170 @@ class HardwareRunnerProtocolTests(unittest.TestCase):
         self.assertEqual(len(popen_calls), 2)
         self.assertEqual(popen_calls[0][0][0:2], ["fake-usbhostfs", str(scratch.resolve())])
         self.assertTrue(popen_calls[0][0][2].startswith("/"))
-        self.assertEqual(popen_calls[0][1]["stdin"], subprocess.DEVNULL)
+        # stdin is a pipe so stop() can send usbhostfs_pc its `exit` command; these fakes have no
+        # command input, so stop() falls back to terminating them.
+        self.assertEqual(popen_calls[0][1]["stdin"], subprocess.PIPE)
         self.assertEqual(popen_calls[0][1]["stdout"], subprocess.PIPE)
         self.assertEqual(popen_calls[0][1]["stderr"], subprocess.STDOUT)
         self.assertTrue(created[0].terminated)
         self.assertTrue(created[1].terminated)
+        self.assertIn("not released", adapter.stop_detail)
+
+    @patch.object(run_psplink_module, "_read_hardware_lock", _lock_held)
+    def test_stop_sends_usbhostfs_its_exit_command_and_does_not_terminate_it(self):
+        # #352: terminating the wsl.exe that owns usbhostfs_pc ends the Linux process with
+        # SIGHUP, so it never releases the PSPLink USB interface, and the next server's first
+        # PSPLink command was lost (PSP-3000, 2026-11-11). stop() sends `exit` instead, which
+        # runs usbhostfs_pc's own exit_app; terminate is only the fallback.
+        fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        with tempfile.TemporaryDirectory(prefix="runner-exit-", dir=fixture_dir) as scratch_name:
+            scratch = Path(scratch_name)
+            created = []
+
+            def popen_factory(command, **kwargs):
+                self.assertEqual(kwargs["stdin"], subprocess.PIPE)
+                process = CommandInputUsbHostFsProcess(USBHOSTFS_BANNER)
+                created.append(process)
+                return process
+
+            def command_runner(command, timeout):
+                if command == ["usbipd", "list"]:
+                    created[-1].stdout.emit("Connected to device")
+                    return 0, "2-1 054c:01c9 PSP Type B Attached\n", "", "PROCESS_EXITED"
+                return 0, "PSPLink v3.2.1\n", "", "PROCESS_EXITED"
+
+            adapter = PsplinkProcessTransport(
+                session_id="synthetic-session",
+                pspsh_argv=["fake-pspsh", "-e", "{remote_command}"],
+                usbhostfs_argv=["fake-usbhostfs", "{host0_root}"],
+                host0_root=scratch,
+                command_runner=command_runner,
+                popen_factory=popen_factory,
+            )
+            adapter.start()
+            adapter.restart()
+            restart_stop = adapter.stop_detail
+            adapter.stop()
+
+        self.assertEqual(len(created), 2)
+        for process in created:
+            self.assertEqual(process.stdin.written, "exit\n")
+            self.assertTrue(process.stdin.closed)
+            self.assertFalse(process.terminated)
+            self.assertIsNotNone(process.returncode)
+        self.assertEqual(restart_stop, "usbhostfs_pc exited after its `exit` command")
+        self.assertEqual(adapter.stop_detail, "usbhostfs_pc exited after its `exit` command")
+
+    @patch.object(run_psplink_module, "_read_hardware_lock", _lock_held)
+    def test_stop_terminates_a_usbhostfs_that_ignores_its_exit_command(self):
+        fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        with tempfile.TemporaryDirectory(prefix="runner-exit-", dir=fixture_dir) as scratch_name:
+            scratch = Path(scratch_name)
+            process = CommandInputUsbHostFsProcess(USBHOSTFS_BANNER, obeys_exit=False)
+
+            def command_runner(command, timeout):
+                if command == ["usbipd", "list"]:
+                    process.stdout.emit("Connected to device")
+                    return 0, "2-1 054c:01c9 PSP Type B Attached\n", "", "PROCESS_EXITED"
+                raise AssertionError(f"unexpected command: {command}")
+
+            adapter = PsplinkProcessTransport(
+                session_id="synthetic-session",
+                pspsh_argv=["fake-pspsh", "-e", "{remote_command}"],
+                usbhostfs_argv=["fake-usbhostfs", "{host0_root}"],
+                host0_root=scratch,
+                command_runner=command_runner,
+                popen_factory=lambda _command, **_kwargs: process,
+            )
+            adapter.start()
+            with patch.object(run_psplink_module, "USBHOSTFS_EXIT_TIMEOUT", 0.05):
+                adapter.stop()
+
+        self.assertEqual(process.stdin.written, "exit\n")
+        self.assertTrue(process.terminated)
+        self.assertIn("did not exit", adapter.stop_detail)
+        self.assertIn("not released", adapter.stop_detail)
+
+    @patch.object(run_psplink_module, "_read_hardware_lock", _lock_held)
+    def test_stop_of_a_usbhostfs_that_already_exited_sends_nothing(self):
+        process, adapter, scratch = self._started_command_input_server()
+        with scratch:
+            adapter.start()
+            process.returncode = 1
+            process.stdout.close()
+            adapter.stop()
+
+        self.assertEqual(process.stdin.written, "")
+        self.assertFalse(process.terminated)
+        self.assertEqual(adapter.stop_detail, "usbhostfs_pc had already exited")
+
+    @patch.object(run_psplink_module, "_read_hardware_lock", _lock_held)
+    def test_stop_terminates_a_usbhostfs_whose_exit_command_cannot_be_sent(self):
+        # On Windows a broken stdin pipe raises OSError(22) from write while wsl.exe lives on.
+        process, adapter, scratch = self._started_command_input_server()
+        process.stdin.fail_write = OSError(22, "Invalid argument")
+        with scratch:
+            adapter.start()
+            adapter.stop()
+
+        self.assertTrue(process.terminated)
+        self.assertEqual(
+            adapter.stop_detail,
+            "usbhostfs_pc's `exit` command could not be sent (OSError); terminated, so the "
+            "PSPLink USB interface was not released",
+        )
+
+    def _started_command_input_server(self):
+        fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        scratch = tempfile.TemporaryDirectory(prefix="runner-exit-", dir=fixture_dir)
+        process = CommandInputUsbHostFsProcess(USBHOSTFS_BANNER)
+
+        def command_runner(command, timeout):
+            if command == ["usbipd", "list"]:
+                process.stdout.emit("Connected to device")
+                return 0, "2-1 054c:01c9 PSP Type B Attached\n", "", "PROCESS_EXITED"
+            raise AssertionError(f"unexpected command: {command}")
+
+        adapter = PsplinkProcessTransport(
+            session_id="synthetic-session",
+            pspsh_argv=["fake-pspsh", "-e", "{remote_command}"],
+            usbhostfs_argv=["fake-usbhostfs", "{host0_root}"],
+            host0_root=Path(scratch.name),
+            command_runner=command_runner,
+            popen_factory=lambda _command, **_kwargs: process,
+        )
+        return process, adapter, scratch
+
+    def test_l1_records_how_the_owned_usbhostfs_stopped_and_restarted(self):
+        class DetailedRestartTransport(SimulatedPsplinkTransport):
+            def restart(self):
+                super().restart()
+                self.stop_detail = "usbhostfs_pc exited after its `exit` command"
+                self.start_detail = "USBHostFS reported `Connected to device`"
+                self.fail_all_ver = False
+
+        transport = DetailedRestartTransport(fail_all_ver=True)
+        transport.case_started = True
+        transport.current_case = "model-profile"
+        transport._probe_loaded = True
+        runner = PsplinkCampaignRunner(
+            transport,
+            console_model="PSP-3000-04g",
+            source_commit=SOURCE_COMMIT,
+            model_code=3,
+        )
+
+        self.assertTrue(runner._recover(transport._probe_uid, "unload confirmation lost"))
+        restart = runner.recovery_events.index(
+            "L1: restart owned usbhostfs_pc process and requalify"
+        )
+        self.assertEqual(
+            runner.recovery_events[restart + 1:restart + 3],
+            [
+                "L1: stop: usbhostfs_pc exited after its `exit` command",
+                "L1: transport start: USBHostFS reported `Connected to device`",
+            ],
+        )
 
     def test_21_nonfinite_timeout_is_rejected_before_transport_starts(self):
         fixture_dir = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"

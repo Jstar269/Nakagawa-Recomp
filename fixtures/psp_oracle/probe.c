@@ -131,6 +131,8 @@ PSP_MODULE_INFO("NAKAGAWA_PSP_ORACLE", 0, 1, 0);
 #define PSP_ORACLE_CASE_FONT_LIST 75
 #define PSP_ORACLE_CASE_VRAM_MIRROR 76
 #define PSP_ORACLE_CASE_GE_SYNC_IDS 78
+/* GE SIGNAL handler behaviours 0x00-0x04 and RJUMP/RCALL offset alignment (PSP-GE-SIGNAL-001). */
+#define PSP_ORACLE_CASE_GE_SIGNAL 181
 /* #1106: a late-loaded PRX that owns a semaphore-blocked waiter, an event flag and a callback. Its
    module_stop returns 0 without deleting, waking or otherwise touching them. PSPLink's modstop and
    modunld then measure what survives. Never returns from main, so the probe teardown never runs. */
@@ -335,6 +337,8 @@ static void emit(int emulated, const char *text) {
 #define PROBE_HOST0_LOG "host0:/ge_break_continue_log.txt"
 #elif PSP_ORACLE_CASE == PSP_ORACLE_CASE_GE_SYNC_IDS
 #define PROBE_HOST0_LOG "host0:/ge_sync_ids_log.txt"
+#elif PSP_ORACLE_CASE == PSP_ORACLE_CASE_GE_SIGNAL
+#define PROBE_HOST0_LOG "host0:/ge_signal_log.txt"
 #elif PSP_ORACLE_CASE == PSP_ORACLE_CASE_REFER_STATUS_SIZE
 #define PROBE_HOST0_LOG "host0:/refer_status_size_log.txt"
 #elif PSP_ORACLE_CASE == PSP_ORACLE_CASE_REGISTRY_READONLY
@@ -621,6 +625,14 @@ SceUID probe_io_open(const char *path, int flags, SceMode mode) {
         (void)probe_track_uid(s_owned_fds, fd);
         if ((flags & PSP_O_CREAT) != 0) probe_track_disposable_path(path);
     }
+    return fd;
+}
+
+/* For a case whose host0 files are its output (font-files): the descriptor is tracked so teardown
+   closes a leaked one, the path is not, so teardown never removes the file. */
+SceUID probe_io_open_kept(const char *path, int flags, SceMode mode) {
+    const SceUID fd = sceIoOpen(path, flags, mode);
+    if (fd >= 0) (void)probe_track_uid(s_owned_fds, fd);
     return fd;
 }
 
@@ -2885,6 +2897,7 @@ static void run_display_mask_duty(int emulated) {
 #if PSP_ORACLE_CASE == PSP_ORACLE_CASE_DISPLAY_GE_MASK || \
     PSP_ORACLE_CASE == PSP_ORACLE_CASE_GE_BREAK_CONTINUE || \
     PSP_ORACLE_CASE == PSP_ORACLE_CASE_GE_SYNC_IDS || \
+    PSP_ORACLE_CASE == PSP_ORACLE_CASE_GE_SIGNAL || \
     PSP_ORACLE_CASE == PSP_ORACLE_CASE_GE_NAN || \
     PSP_ORACLE_CASE == PSP_ORACLE_CASE_VRAM_MIRROR || \
     PSP_ORACLE_CASE == PSP_ORACLE_CASE_GE_TIMING || \
@@ -9387,9 +9400,19 @@ static void run_registry_font(int emulated) {
 #if PSP_ORACLE_CASE == PSP_ORACLE_CASE_FONT_FILES
 /* Read-only copy of flash0:/font to host0:/fonts (PSP-FONTFILES-001). The listing, copy and
  * verification live in font_files.h, which a host harness also runs against a fake file system
- * (tools/test_psp_oracle.py). Records and step markers go through the durable host0 writer; the
- * copies are opened with sceIoOpen directly so probe teardown never removes them. */
+ * (tools/test_psp_oracle.py). Records and step markers go through the durable host0 writer.
+ *
+ * The copies are the case's output, so teardown must keep them. probe.c maps sceIoOpen to
+ * probe_io_open, which records every host0 path opened with PSP_O_CREAT for teardown to remove,
+ * and the path table holds PROBE_TEARDOWN_PATH_CAPACITY (16) entries. Through that wrapper, the
+ * 2026-11-11 PSP-3000 run's 21 copies filled the table: teardown removed the first 16, kept the
+ * last 5 and reported status=FAIL. Inside font_files.h, sceIoOpen is therefore probe_io_open_kept,
+ * which tracks only the descriptor (teardown still closes a leaked one) and never the path. */
+#undef sceIoOpen
+#define sceIoOpen(path, flags, mode) probe_io_open_kept((path), (flags), (mode))
 #include "font_files.h"
+#undef sceIoOpen
+#define sceIoOpen(path, flags, mode) probe_io_open((path), (flags), (mode))
 
 static int s_font_files_emulated;
 
@@ -10425,6 +10448,439 @@ static void run_ge_sync_ids(int emulated) {
     emit_record_extended(emulated, "PSP-GE-SYNC-001", "ge-sync-ids-done", "PASS", 0, &done, 1);
 }
 #endif
+
+#if PSP_ORACLE_CASE == PSP_ORACLE_CASE_GE_SIGNAL
+/* What the GE driver does with a SIGNAL whose behaviour is a handler code (0x01 suspend, 0x02
+ * continue, 0x03 pause), an undefined low code (0x00, 0x04), and the relative jump and call
+ * forms (RJUMP 0x13, RCALL 0x14) with a word-aligned and an unaligned offset. The runtime
+ * (src/rt/ge.c, ge_signal_end) models only 0x10-0x16 and lets the list run on after the END for
+ * every other behaviour; no console measurement of the handler behaviours exists.
+ *
+ * Encoding, checked against uofw src/kd/ge/ge.c (_sceGeListInterrupt, _sceGeFinishInterrupt,
+ * sceGeContinue; github.com/uofw/uofw, MIT) and include/ge_user.h: SIGNAL is command 0x0E with
+ * the behaviour in bits 16-23 and a 16-bit argument in bits 0-15, and the driver acts only on a
+ * SIGNAL immediately followed by END (0x0C). There the END argument matters: for 0x03 its low
+ * byte becomes the list's signal (2, SCE_GE_DL_SIGNAL_PAUSE in uofw include/ge_kernel.h, makes
+ * the next FINISH pause the list), for 0x01 under a compiled SDK version <= 0x02000010 it becomes
+ * the list state, and for the jump family it carries the low 16 bits of the offset (the SIGNAL
+ * argument the high 16). RJUMP and RCALL count from the SIGNAL word (uofw &cmdList[off / 4 - 2],
+ * cmdList the word after the END), so uofw truncates an unaligned offset to a word; the runtime
+ * reports it as a fault. A behaviour uofw does not know (its default case) leaves the GE stopped.
+ *
+ * Nothing is drawn. The markers are material colour commands 0x54-0x57, whose last value
+ * sceGeGetCmd reads back: every list first writes all four with a per-cell "pre" value, then
+ * marker A (0x55), the SIGNAL/END pair, marker B (0x55), FINISH (0x5678) and END. The jump cells
+ * put three markers at words 12-14 (the word before, at and after the target an offset of 0x20
+ * names; the SIGNAL is word 5), so which of them ran shows where the list went. An unaligned
+ * offset of 0x22 is used instead of a small one such as +6: uofw truncates +6 to the END word
+ * itself, which would re-run the same SIGNAL/END pair without end. Every list, its call stacks
+ * and the bad-return sublist are in this PRX's RAM; no texture, framebuffer or VRAM address is
+ * named. A list is enqueued stalled at its first word, its id is published to the handlers and
+ * only then is the stall moved past the list, so a handler that runs at once reads its own list.
+ *
+ * Each cell is bounded: 100 ms of 1 ms list-state polls, then, if the list still reads queued,
+ * drawing, stalled or paused, sceGeContinue in a helper thread waited for with a deadline and
+ * another 100 ms of polls, then a wait of up to 100 ms for the GE to go idle and, only if the
+ * list still reads 1-4 or the GE is still busy after it, a sceGeBreak(1) reset, recorded as
+ * TIMEOUT. Neither decision rests on a single sceGeDrawSync sample, because in the XMB context
+ * the VSH draws its own lists every frame. The
+ * undefined behaviours come last among the handler cells and the unaligned jump cells last of
+ * all. Teardown restores the four marker commands with one more list, leaves the GE idle and
+ * unregisters both callback ids. */
+#define GSG_CMD_NOP 0x00u
+#define GSG_CMD_END 0x0Cu
+#define GSG_CMD_SIGNAL 0x0Eu
+#define GSG_CMD_FINISH 0x0Fu
+#define GSG_REG_FIRST 0x54u          /* material emissive, ambient, diffuse, specular */
+#define GSG_REG_A 0x55u              /* markers A and B, and the word after the target */
+#define GSG_REGS 4u
+#define GSG_SIGNAL_ID 0x1234u
+#define GSG_FINISH_ID 0x5678u
+#define GSG_BEH_RET 0x12u
+#define GSG_PRE 0x0E0000u
+#define GSG_MARK_A 0x0A0000u
+#define GSG_MARK_B 0x0B0000u
+#define GSG_MARK_AFTER 0x0D0000u     /* 0x54, the word after the SIGNAL/END of a jump cell */
+#define GSG_MARK_PREV 0x0C1000u      /* 0x57, word 12 */
+#define GSG_MARK_EXACT 0x0C2000u     /* 0x56, word 13 */
+#define GSG_MARK_NEXT 0x0C3000u      /* 0x55, word 14 */
+#define GSG_MARK_BADRET 0x0BAD00u    /* 0x54, the sublist a stale stack slot names */
+#define GSG_LIST_WORDS 32u
+#define GSG_BADRET_WORD 24u
+#define GSG_STACKS 4u
+#define GSG_POLLS 100u
+#define GSG_POLL_US 1000u
+#define GSG_RUNS 6u
+#define GSG_CONTINUE_TIMEOUT_US 200000u
+#define GSG_IDLE_WAIT_US 100000u
+#define GSG_HELPER_PRIORITY 0x18
+#define GSG_HELPER_STACK 0x1000
+#define GSG_BUSY_SPIN_CAP 4000000u
+#define GSG_SIGNAL_ARG 0x00005161u
+#define GSG_FINISH_ARG 0x0000f161u
+
+enum { GSG_KIND_CONTROL, GSG_KIND_HANDLER, GSG_KIND_RJUMP, GSG_KIND_RCALL };
+
+typedef struct {
+    const char *name;        /* step and record stem             */
+    uint8_t kind;
+    uint8_t behaviour;       /* SIGNAL bits 16-23                */
+    uint8_t end_arg;         /* handler cells: the END argument  */
+    uint8_t handlers;        /* 1: the handler id, 0: NULL id    */
+    uint16_t offset;         /* jump cells: relative byte offset */
+    uint16_t busy_us;        /* signal handler busy time         */
+} GsgCell;
+
+#define GSG_CELLS 14u
+static const GsgCell s_gsg_cells[GSG_CELLS] = {
+    {"ctl", GSG_KIND_CONTROL, 0x00u, 0u, 1u, 0u, 0u},
+    {"b01", GSG_KIND_HANDLER, 0x01u, 0u, 1u, 0u, 0u},
+    {"b02", GSG_KIND_HANDLER, 0x02u, 0u, 1u, 0u, 0u},
+    {"b03", GSG_KIND_HANDLER, 0x03u, 2u, 1u, 0u, 0u},
+    {"b01-nocb", GSG_KIND_HANDLER, 0x01u, 0u, 0u, 0u, 0u},
+    {"b02-nocb", GSG_KIND_HANDLER, 0x02u, 0u, 0u, 0u, 0u},
+    {"b03-nocb", GSG_KIND_HANDLER, 0x03u, 2u, 0u, 0u, 0u},
+    {"b02-block", GSG_KIND_HANDLER, 0x02u, 0u, 1u, 0u, 5000u},
+    {"b00", GSG_KIND_HANDLER, 0x00u, 0u, 1u, 0u, 0u},
+    {"b04", GSG_KIND_HANDLER, 0x04u, 0u, 1u, 0u, 0u},
+    {"rjump-al", GSG_KIND_RJUMP, 0x13u, 0u, 1u, 0x20u, 0u},
+    {"rcall-al", GSG_KIND_RCALL, 0x14u, 0u, 1u, 0x20u, 0u},
+    {"rjump-un", GSG_KIND_RJUMP, 0x13u, 0u, 1u, 0x22u, 0u},
+    {"rcall-un", GSG_KIND_RCALL, 0x14u, 0u, 1u, 0x22u, 0u},
+};
+
+static uint32_t s_gsg_list[GSG_LIST_WORDS] __attribute__((aligned(64)));
+static uint32_t s_gsg_restore[8] __attribute__((aligned(64)));
+static SceGeStack s_gsg_stacks[GSG_STACKS] __attribute__((aligned(64)));
+
+/* What a handler saw on its first call, and its last call. */
+enum {
+    GSG_CALL_COUNT, GSG_CALL_ID, GSG_CALL_ARG, GSG_CALL_A2, GSG_CALL_STATE, GSG_CALL_MARK_IN,
+    GSG_CALL_MARK_OUT, GSG_CALL_T_IN, GSG_CALL_T_OUT, GSG_CALL_LAST_ID, GSG_CALL_LAST_A2,
+    GSG_CALL_LAST_T, GSG_CALL_WORDS
+};
+#define GSG_SIG 0u
+#define GSG_FIN 1u
+static volatile uint32_t s_gsg_calls[2][GSG_CALL_WORDS];
+static volatile int s_gsg_qid = -1;
+static volatile uint32_t s_gsg_t0;
+static volatile uint32_t s_gsg_busy_us;
+
+static void emit_ge_signal(int emulated, const char *case_id, const char *status,
+                           uint32_t result, const uint32_t *out, size_t count) {
+    emit_record_extended(emulated, "PSP-GE-SIGNAL-001", case_id, status, result, out, count);
+}
+
+static uint32_t gsg_cmd(uint32_t cmd, uint32_t payload) {
+    return (cmd << 24) | (payload & 0x00ffffffu);
+}
+
+/* Runs in the GE interrupt. The third argument register is recorded as the handlers receive it
+ * (uofw passes the list address there for an SDK version above 0x02000010). */
+static void gsg_note(uint32_t which, int id, void *arg, void *a2) {
+    volatile uint32_t *r = s_gsg_calls[which];
+    const uint32_t t_in = (uint32_t)sceKernelGetSystemTimeLow();
+    const uint32_t n = r[GSG_CALL_COUNT];
+    r[GSG_CALL_COUNT] = n + 1u;
+    r[GSG_CALL_LAST_ID] = (uint32_t)id;
+    r[GSG_CALL_LAST_A2] = (uint32_t)(uintptr_t)a2;
+    r[GSG_CALL_LAST_T] = t_in - s_gsg_t0;
+    if (n != 0u) return;
+    r[GSG_CALL_ID] = (uint32_t)id;
+    r[GSG_CALL_ARG] = (uint32_t)(uintptr_t)arg;
+    r[GSG_CALL_A2] = (uint32_t)(uintptr_t)a2;
+    r[GSG_CALL_STATE] = (uint32_t)sceGeListSync(s_gsg_qid, 1);
+    r[GSG_CALL_MARK_IN] = sceGeGetCmd((int)GSG_REG_A);
+    r[GSG_CALL_T_IN] = t_in - s_gsg_t0;
+    if (which == GSG_SIG && s_gsg_busy_us != 0u) {
+        /* Hold the handler for busy_us; the cap only bounds a system timer that stops. */
+        for (uint32_t k = 0; k < GSG_BUSY_SPIN_CAP; k++) {
+            if ((uint32_t)sceKernelGetSystemTimeLow() - t_in >= s_gsg_busy_us) break;
+        }
+    }
+    r[GSG_CALL_MARK_OUT] = sceGeGetCmd((int)GSG_REG_A);
+    r[GSG_CALL_T_OUT] = (uint32_t)sceKernelGetSystemTimeLow() - s_gsg_t0;
+}
+
+static void gsg_signal_cb(int id, void *arg, void *a2) { gsg_note(GSG_SIG, id, arg, a2); }
+static void gsg_finish_cb(int id, void *arg, void *a2) { gsg_note(GSG_FIN, id, arg, a2); }
+
+static void gsg_read_markers(uint32_t *out) {
+    for (uint32_t r = 0; r < GSG_REGS; r++) {
+        out[r] = sceGeGetCmd((int)(GSG_REG_FIRST + r));
+    }
+}
+
+/* Build one cell's list in s_gsg_list and refill the call stacks. Every stack slot's saved list
+ * address names the bad-return sublist, so a RET that restores a slot the matching RCALL did not
+ * fill ends there with its own marker instead of at address 0. */
+static void gsg_build(const GsgCell *cell, uint32_t c) {
+    uint32_t *w = s_gsg_list;
+    for (uint32_t k = 0; k < GSG_LIST_WORDS; k++) w[k] = gsg_cmd(GSG_CMD_NOP, 0u);
+    for (uint32_t r = 0; r < GSG_REGS; r++) w[r] = gsg_cmd(GSG_REG_FIRST + r, GSG_PRE | c);
+    w[GSG_BADRET_WORD] = gsg_cmd(GSG_REG_FIRST, GSG_MARK_BADRET | c);
+    w[GSG_BADRET_WORD + 1u] = gsg_cmd(GSG_CMD_FINISH, GSG_FINISH_ID);
+    w[GSG_BADRET_WORD + 2u] = gsg_cmd(GSG_CMD_END, 0u);
+    for (uint32_t s = 0; s < GSG_STACKS; s++) {
+        for (uint32_t k = 0; k < 8u; k++) s_gsg_stacks[s].stack[k] = 0u;
+        s_gsg_stacks[s].stack[1] = (uint32_t)(uintptr_t)&s_gsg_list[GSG_BADRET_WORD];
+    }
+    if (cell->kind == GSG_KIND_CONTROL) {
+        w[4] = gsg_cmd(GSG_CMD_FINISH, GSG_FINISH_ID);
+        w[5] = gsg_cmd(GSG_CMD_END, 0u);
+        return;
+    }
+    w[4] = gsg_cmd(GSG_REG_A, GSG_MARK_A | c);
+    if (cell->kind == GSG_KIND_HANDLER) {
+        w[5] = gsg_cmd(GSG_CMD_SIGNAL, ((uint32_t)cell->behaviour << 16) | GSG_SIGNAL_ID);
+        w[6] = gsg_cmd(GSG_CMD_END, cell->end_arg);
+        w[7] = gsg_cmd(GSG_REG_A, GSG_MARK_B | c);
+        w[8] = gsg_cmd(GSG_CMD_FINISH, GSG_FINISH_ID);
+        w[9] = gsg_cmd(GSG_CMD_END, 0u);
+        return;
+    }
+    /* Jump family: offset high 16 bits in the SIGNAL, low 16 in the END. */
+    w[5] = gsg_cmd(GSG_CMD_SIGNAL, ((uint32_t)cell->behaviour << 16) | ((uint32_t)cell->offset >> 16));
+    w[6] = gsg_cmd(GSG_CMD_END, (uint32_t)cell->offset & 0xffffu);
+    w[7] = gsg_cmd(GSG_REG_FIRST, GSG_MARK_AFTER | c);
+    w[8] = gsg_cmd(GSG_CMD_FINISH, GSG_FINISH_ID);
+    w[9] = gsg_cmd(GSG_CMD_END, 0u);
+    w[12] = gsg_cmd(GSG_REG_FIRST + 3u, GSG_MARK_PREV | c);
+    w[13] = gsg_cmd(GSG_REG_FIRST + 2u, GSG_MARK_EXACT | c);
+    w[14] = gsg_cmd(GSG_REG_A, GSG_MARK_NEXT | c);
+    if (cell->kind == GSG_KIND_RJUMP) {
+        w[15] = gsg_cmd(GSG_CMD_FINISH, GSG_FINISH_ID);
+        w[16] = gsg_cmd(GSG_CMD_END, 0u);
+    } else {
+        w[15] = gsg_cmd(GSG_CMD_SIGNAL, GSG_BEH_RET << 16);
+        w[16] = gsg_cmd(GSG_CMD_END, 0u);
+        w[17] = gsg_cmd(GSG_CMD_FINISH, GSG_FINISH_ID);
+        w[18] = gsg_cmd(GSG_CMD_END, 0u);
+    }
+}
+
+/* 100 polls of sceGeListSync(qid, 1), 1 ms apart, run-length encoded: out[0] the run count
+ * (it may exceed GSG_RUNS), out[1..12] up to six (state, polls) pairs, out[13] elapsed us.
+ * Returns the last state. */
+#define GSG_SEQ_WORDS (2u + 2u * GSG_RUNS)
+static int gsg_poll(int qid, uint32_t *out) {
+    uint32_t runs = 0u;
+    int prev = 0;
+    for (uint32_t k = 0; k < 2u * GSG_RUNS; k++) out[1u + k] = (k & 1u) ? 0u : 0xffffffffu;
+    const uint32_t start = (uint32_t)sceKernelGetSystemTimeLow();
+    for (uint32_t i = 0; i < GSG_POLLS; i++) {
+        const int s = qid >= 0 ? sceGeListSync(qid, 1) : qid;
+        if (i == 0u || s != prev) {
+            if (runs < GSG_RUNS) out[1u + 2u * runs] = (uint32_t)s;
+            runs++;
+            prev = s;
+        }
+        if (runs <= GSG_RUNS) out[2u * runs]++;
+        sceKernelDelayThread(GSG_POLL_US);
+    }
+    out[0] = runs;
+    out[1u + 2u * GSG_RUNS] = (uint32_t)sceKernelGetSystemTimeLow() - start;
+    return prev;
+}
+
+static volatile int s_gsg_continue_rc;
+static volatile int s_gsg_continue_returned;
+
+static int gsg_continue_thread(SceSize args, void *argp) {
+    (void)args;
+    (void)argp;
+    s_gsg_continue_rc = sceGeContinue();
+    s_gsg_continue_returned = 1;
+    return 0;
+}
+
+/* sceGeContinue in a helper thread, waited for with a deadline. Outputs: result, returned,
+ * wait result. */
+static void gsg_continue(uint32_t *out) {
+    s_gsg_continue_rc = 0;
+    s_gsg_continue_returned = 0;
+    const SceUID th = sceKernelCreateThread("gsg_cont", gsg_continue_thread, GSG_HELPER_PRIORITY,
+                                            GSG_HELPER_STACK, PSP_THREAD_ATTR_USER, NULL);
+    int wait_rc = (int)th;
+    if (th >= 0) {
+        const int start_rc = sceKernelStartThread(th, 0, NULL);
+        SceUInt timeout = GSG_CONTINUE_TIMEOUT_US;
+        wait_rc = start_rc < 0 ? start_rc : sceKernelWaitThreadEnd(th, &timeout);
+        (void)(wait_rc >= 0 ? sceKernelDeleteThread(th) : sceKernelTerminateDeleteThread(th));
+    }
+    out[0] = (uint32_t)s_gsg_continue_rc;
+    out[1] = (uint32_t)s_gsg_continue_returned;
+    out[2] = (uint32_t)wait_rc;
+}
+
+/* One cell: three records.
+ * -cb  (24): enqueue qid, callback id used, stall update result, the SIGNAL and END words
+ *      (0 for the control), the signal handler's 12 words (count, first id, arg, a2, list
+ *      state, marker 0x55 on entry and on return, entry and return us after the stall release,
+ *      last id, last a2, last us) and the finish handler's first 7 (count, id, arg, a2, list
+ *      state, marker 0x55, us).
+ * -run (19): the first 100 ms of list states (GSG_SEQ_WORDS), the four markers after it and
+ *      sceGeDrawSync(1).
+ * -end (27): continue issued, its result, returned and wait result, the second 100 ms of list
+ *      states, the final list and draw states, reset issued, the sceGeBreak(1) result and the
+ *      draw state after its bounded wait, and the four markers at the end. */
+#define GSG_CB_WORDS 24u
+#define GSG_RUN_WORDS (GSG_SEQ_WORDS + GSG_REGS + 1u)
+#define GSG_END_WORDS (4u + GSG_SEQ_WORDS + 5u + GSG_REGS)
+static void gsg_cell(int emulated, uint32_t index, int cbid_handlers, int cbid_null) {
+    const GsgCell *cell = &s_gsg_cells[index];
+    const uint32_t c = index + 1u;
+    char case_id[48];
+    probe_step(emulated, "ge-signal", cell->name);
+    gsg_build(cell, c);
+    for (uint32_t w = 0; w < 2u; w++) {
+        for (uint32_t k = 0; k < GSG_CALL_WORDS; k++) s_gsg_calls[w][k] = 0u;
+    }
+    s_gsg_busy_us = cell->busy_us;
+    s_gsg_qid = -1;
+    sceKernelDcacheWritebackAll();
+    PspGeListArgs args;
+    memset(&args, 0, sizeof(args));
+    args.size = sizeof(args);
+    args.numStacks = GSG_STACKS;
+    args.stacks = s_gsg_stacks;
+    const int jump = cell->kind == GSG_KIND_RJUMP || cell->kind == GSG_KIND_RCALL;
+    const int cbid = cell->handlers ? cbid_handlers : cbid_null;
+    void *const list = (void *)s_gsg_list;
+    const int qid = sceGeListEnQueue(list, list, cbid, jump ? &args : NULL);
+    int stall_rc = qid;
+    if (qid >= 0) {
+        s_gsg_qid = qid;
+        s_gsg_t0 = (uint32_t)sceKernelGetSystemTimeLow();
+        stall_rc = sceGeListUpdateStallAddr(qid, (void *)&s_gsg_list[GSG_LIST_WORDS]);
+    }
+
+    uint32_t run[GSG_RUN_WORDS];
+    const int last1 = gsg_poll(qid, run);
+    gsg_read_markers(&run[GSG_SEQ_WORDS]);
+    const int draw1 = sceGeDrawSync(1);
+    run[GSG_SEQ_WORDS + GSG_REGS] = (uint32_t)draw1;
+
+    uint32_t end[GSG_END_WORDS];
+    memset(end, 0, sizeof(end));
+    /* Continue is decided from this list only: it still reads queued, drawing, stalled or
+       paused (PSPSDK PspGeListState 1-4). sceGeDrawSync is recorded but not used here: in the
+       XMB context the VSH queues its own lists every frame. */
+    if (qid >= 0 && last1 >= 1 && last1 <= 4) {
+        probe_step(emulated, "ge-signal", "continue");
+        end[0] = 1u;
+        gsg_continue(&end[1]);
+        (void)gsg_poll(qid, &end[4]);
+    }
+    uint32_t *tail = &end[4u + GSG_SEQ_WORDS];
+    /* A bounded wait (GSG_IDLE_WAIT_US) for global idle before the reset decision, so a VSH
+       list that is drawing at the moment of one sample does not trigger a sceGeBreak(1). */
+    GeIdleWait w = ge_wait_idle(-1, GSG_IDLE_WAIT_US);
+    tail[0] = (uint32_t)(qid >= 0 ? sceGeListSync(qid, 1) : qid);
+    tail[1] = (uint32_t)w.draw_state;
+    const int final_list = (int)tail[0];
+    const int timed_out = !w.idle || (qid >= 0 && final_list >= 1 && final_list <= 4);
+    if (timed_out) {
+        probe_step(emulated, "ge-signal", "reset");
+        tail[2] = 1u;
+        tail[3] = (uint32_t)ge_reset_queues(&w);
+    }
+    tail[4] = (uint32_t)sceGeDrawSync(1);
+    gsg_read_markers(&tail[5]);
+
+    /* The handler words are read after the GE is idle or reset, so no handler is running. */
+    uint32_t cb[GSG_CB_WORDS];
+    cb[0] = (uint32_t)qid;
+    cb[1] = (uint32_t)cbid;
+    cb[2] = (uint32_t)stall_rc;
+    cb[3] = cell->kind == GSG_KIND_CONTROL ? 0u : s_gsg_list[5];
+    cb[4] = cell->kind == GSG_KIND_CONTROL ? 0u : s_gsg_list[6];
+    for (uint32_t k = 0; k < GSG_CALL_WORDS; k++) cb[5u + k] = s_gsg_calls[GSG_SIG][k];
+    for (uint32_t k = 0; k < 7u; k++) {
+        static const uint8_t fin[7] = {GSG_CALL_COUNT, GSG_CALL_ID, GSG_CALL_ARG, GSG_CALL_A2,
+                                       GSG_CALL_STATE, GSG_CALL_MARK_IN, GSG_CALL_T_IN};
+        cb[5u + GSG_CALL_WORDS + k] = s_gsg_calls[GSG_FIN][fin[k]];
+    }
+    const char *status = qid < 0 ? "SKIP" : "PASS";
+    snprintf(case_id, sizeof(case_id), "gsg-%s-cb", cell->name);
+    emit_ge_signal(emulated, case_id, status, cb[5], cb, GSG_CB_WORDS);
+    snprintf(case_id, sizeof(case_id), "gsg-%s-run", cell->name);
+    emit_ge_signal(emulated, case_id, status, (uint32_t)draw1, run, GSG_RUN_WORDS);
+    snprintf(case_id, sizeof(case_id), "gsg-%s-end", cell->name);
+    emit_ge_signal(emulated, case_id, qid < 0 ? "SKIP" : timed_out ? "TIMEOUT" : "PASS",
+                   tail[4], end, GSG_END_WORDS);
+}
+
+static void run_ge_signal(int emulated) {
+    uint32_t out[12];
+    uint32_t orig[GSG_REGS];
+
+    probe_step(emulated, "ge-signal", "setup");
+    gsg_read_markers(orig);
+    PspGeCallbackData cb;
+    memset(&cb, 0, sizeof(cb));
+    /* The handlers take the third argument register as well; the cast goes through a generic
+       function type, as PspGeCallback declares two. */
+    cb.signal_func = (PspGeCallback)(void (*)(void))gsg_signal_cb;
+    cb.signal_arg = (void *)(uintptr_t)GSG_SIGNAL_ARG;
+    cb.finish_func = (PspGeCallback)(void (*)(void))gsg_finish_cb;
+    cb.finish_arg = (void *)(uintptr_t)GSG_FINISH_ARG;
+    const int cbid_handlers = sceGeSetCallback(&cb);
+    PspGeCallbackData none;
+    memset(&none, 0, sizeof(none));
+    const int cbid_null_rc = sceGeSetCallback(&none);
+    /* A refused NULL registration leaves the no-handler cells with no callback id at all. */
+    const int cbid_null = cbid_null_rc >= 0 ? cbid_null_rc : -1;
+    out[0] = (uint32_t)sceKernelGetCompiledSdkVersion();
+    out[1] = (uint32_t)cbid_handlers;
+    out[2] = (uint32_t)cbid_null_rc;
+    for (uint32_t r = 0; r < GSG_REGS; r++) out[3u + r] = orig[r];
+    emit_ge_signal(emulated, "gsg-setup", cbid_handlers >= 0 ? "PASS" : "SKIP",
+                   (uint32_t)cbid_handlers, out, 3u + GSG_REGS);
+
+    for (uint32_t i = 0; i < GSG_CELLS; i++) {
+        gsg_cell(emulated, i, cbid_handlers, cbid_null);
+    }
+
+    /* Restore the four marker commands, leave the GE idle and unregister both ids. */
+    probe_step(emulated, "ge-signal", "teardown");
+    for (uint32_t r = 0; r < GSG_REGS; r++) {
+        s_gsg_restore[r] = gsg_cmd(GSG_REG_FIRST + r, orig[r]);
+    }
+    s_gsg_restore[4] = gsg_cmd(GSG_CMD_FINISH, 0u);
+    s_gsg_restore[5] = gsg_cmd(GSG_CMD_END, 0u);
+    s_gsg_restore[6] = gsg_cmd(GSG_CMD_NOP, 0u);
+    s_gsg_restore[7] = gsg_cmd(GSG_CMD_NOP, 0u);
+    sceKernelDcacheWritebackAll();
+    s_gsg_qid = -1;
+    const int qid = sceGeListEnQueue((const void *)s_gsg_restore, NULL, -1, NULL);
+    GeIdleWait w = ge_wait_idle(qid, qid >= 0 ? GE_IDLE_DEADLINE_US : 0u);
+    uint32_t reset_issued = 0u;
+    int reset_rc = 0;
+    if (!w.idle) {
+        reset_issued = 1u;
+        reset_rc = ge_reset_queues(&w);
+    }
+    out[0] = (uint32_t)qid;
+    out[1] = (uint32_t)w.list_state;
+    out[2] = (uint32_t)w.draw_state;
+    out[3] = reset_issued;
+    out[4] = (uint32_t)reset_rc;
+    /* Unconditional, so every path unregisters: a refused registration's negative id is
+       refused again here and its result recorded. */
+    const int unset_handlers = sceGeUnsetCallback(cbid_handlers);
+    const int unset_null = sceGeUnsetCallback(cbid_null_rc);
+    out[5] = (uint32_t)unset_handlers;
+    out[6] = (uint32_t)unset_null;
+    out[7] = (uint32_t)sceGeDrawSync(1);
+    gsg_read_markers(&out[8]);
+    emit_ge_signal(emulated, "gsg-teardown", w.idle ? "PASS" : "TIMEOUT", (uint32_t)reset_rc,
+                   out, 12u);
+
+    uint32_t done = 1u + 3u * GSG_CELLS + 1u;  /* the records above */
+    emit_record_extended(emulated, "PSP-GE-SIGNAL-001", "ge-signal-done", "PASS", 0, &done, 1);
+}
+#endif /* PSP_ORACLE_CASE_GE_SIGNAL */
 
 #if PSP_ORACLE_CASE == PSP_ORACLE_CASE_KERNEL_MISC
 static void run_kernel_misc(int emulated) {
@@ -12295,8 +12751,20 @@ static void run_sas_adsr(int emulated) {
     const uint32_t done[1] = {s_sas_adsr_records};
     /* PASS: the run completed. It is not a correctness verdict; nothing here is compared. */
     sas_adsr_record(emulated, "sas-adsr-done", sascore_ok ? "PASS" : "SKIP", done, 1u);
+    /* Unload what this case loaded, newest first, so the runner's post-unload module set equals
+       the one before the launch (the 2026-11-10 capture was blocked by the two AV modules left
+       loaded). No SAS call follows. Not yet run on a PSP: unloading SASCORE while a SAS core is
+       initialised is unmeasured, and the results are not recorded (the stream is unchanged). */
+    if (sascore_ok) {
+        probe_step(emulated, "sas-adsr", "unload-sascore");
+        (void)sceUtilityUnloadAvModule(PSP_AV_MODULE_SASCORE);
+    }
+    if (load[0] == 0u) {
+        probe_step(emulated, "sas-adsr", "unload-avcodec");
+        (void)sceUtilityUnloadAvModule(PSP_AV_MODULE_AVCODEC);
+    }
     probe_step(emulated, "sas-adsr", "park");
-    /* Normal teardown: parks until PSPLink modstop. The AV modules stay loaded, as in sas-init. */
+    /* Normal teardown: parks until PSPLink modstop. */
     probe_teardown(emulated);
 }
 #endif
@@ -12674,6 +13142,18 @@ static void run_sas_mix(int emulated) {
     const uint32_t done[1] = {s_sas_mix_records};
     /* PASS: the run completed. It is not a correctness verdict; nothing here is compared. */
     sas_mix_record(emulated, "sas-mix-done", sascore_ok ? "PASS" : "SKIP", done, 1u);
+    /* Unload what this case loaded, newest first, so the runner's post-unload module set equals
+       the one before the launch (the 2026-11-07 and 2026-11-11 captures were blocked by the two
+       AV modules left loaded). No SAS call follows. Not yet run on a PSP: unloading SASCORE while a SAS
+       core is initialised is unmeasured, and the results are not recorded (the stream is unchanged). */
+    if (sascore_ok) {
+        probe_step(emulated, "sas-mix", "unload-sascore");
+        (void)sceUtilityUnloadAvModule(PSP_AV_MODULE_SASCORE);
+    }
+    if (load[0] == 0u) {
+        probe_step(emulated, "sas-mix", "unload-avcodec");
+        (void)sceUtilityUnloadAvModule(PSP_AV_MODULE_AVCODEC);
+    }
     probe_step(emulated, "sas-mix", "park");
     probe_teardown(emulated);
 }
@@ -14697,6 +15177,8 @@ int main(int argc, char *argv[]) {
     run_ge_break_continue(emulated);
 #elif PSP_ORACLE_CASE == PSP_ORACLE_CASE_GE_SYNC_IDS
     run_ge_sync_ids(emulated);
+#elif PSP_ORACLE_CASE == PSP_ORACLE_CASE_GE_SIGNAL
+    run_ge_signal(emulated);
 #elif PSP_ORACLE_CASE == PSP_ORACLE_CASE_REFER_STATUS_SIZE
     run_refer_status_size(emulated);
 #elif PSP_ORACLE_CASE == PSP_ORACLE_CASE_REGISTRY_READONLY

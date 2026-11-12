@@ -31,6 +31,7 @@ SELFTEST_REPEAT ?= 20
 SELFTEST_REPEAT_EXES = $(foreach cfg,$(SCHED_SELFTEST_CONFIGS),$(BUILD_DIR)/sched_selftest_$(cfg).exe) $(BUILD_DIR)/hle_thread_selftest.exe
 
 selftest-repeat:
+	$(NK_REQUIRE_POSIX_SHELL)
 	@case "$(SELFTEST_REPEAT)" in ''|*[!0-9]*|0) echo "selftest-repeat: SELFTEST_REPEAT must be a positive integer, got '$(SELFTEST_REPEAT)'" >&2; exit 2;; esac
 	@for exe in $(SELFTEST_REPEAT_EXES); do \
 		[ -x "$$exe" ] || { echo "selftest-repeat: $$exe is missing; run sched-selftest and hle-thread-selftest first" >&2; exit 2; }; \
@@ -216,6 +217,7 @@ fsr3-mutants: fsr3-host-selftest
 # to a part of a mutant's name to run just that one.
 .PHONY: dmac-mutants
 dmac-mutants:
+	$(NK_REQUIRE_POSIX_SHELL)
 	NK_DMAC_MUTANTS_BUILD_DIR="$(BUILD_ROOT)/dmac-mutants" NK_DMAC_MUTANTS_MAKE="$(MAKE)" "$(PYTHON)" -m unittest tools.test_dmac_semantics.TestDmacMutationCampaign
 
 # fsr3-fg-host-selftest - FSR 3 frame generation's CPU side (src/rt/fsr3_fg_host.c) against the record
@@ -261,12 +263,14 @@ fsr3-shader-verify:
 	"$(PYTHON)" tools/shader_embed.py verify --shader-set fsr3
 	"$(PYTHON)" tools/shader_embed.py verify --shader-set fsr3fg
 fsr3-shader-repro-verify:
+	$(NK_REQUIRE_POSIX_SHELL)
 	@for set in fsr3 fsr3fg; do \
 		rc=0; "$(PYTHON)" tools/shader_embed.py verify --shader-set $$set --recompile --dxc "$(DXC)" || rc=$$?; \
 		if [ $$rc -eq 77 ]; then echo "SKIP fsr3-shader-repro-verify $$set (exit 77; the reason is printed above)"; \
 		elif [ $$rc -ne 0 ]; then exit $$rc; fi; \
 	done
 fsr3-pass-selftest: fsr3-shader-verify
+	$(NK_REQUIRE_POSIX_SHELL)
 	@if ! printf '%s\n' '#include <vulkan/vulkan.h>' | $(CC) -E -x c $(VULKAN_INC_FLAGS) - >/dev/null 2>&1; then \
 		echo "SKIP fsr3-pass-selftest (the Vulkan headers were not found)"; \
 		if [ "$(NK_UI_VK_REQUIRE)" = 1 ]; then exit 1; fi; exit 0; \
@@ -297,6 +301,7 @@ native-core-tests: fsr3-fg-pass-selftest
 .PHONY: fsr3-fg-pass-selftest fsr3-fg-pass-mutants
 FSR3FG_PASS_ARGS ?=
 fsr3-fg-pass-selftest: fsr3-shader-verify
+	$(NK_REQUIRE_POSIX_SHELL)
 	@if ! printf '%s\n' '#include <vulkan/vulkan.h>' | $(CC) -E -x c $(VULKAN_INC_FLAGS) - >/dev/null 2>&1; then \
 		echo "SKIP fsr3-fg-pass-selftest (the Vulkan headers were not found)"; \
 		if [ "$(NK_UI_VK_REQUIRE)" = 1 ]; then exit 1; fi; exit 0; \
@@ -418,7 +423,7 @@ GE_CPU_PROFILE_VALIDATE_SELFTEST := $(BUILD_DIR)/ge_cpu_profile_validate_selftes
 ge-cpu-profile-validate-selftest: $(RT_GE_O)
 	$(CC) $(CFLAGS) -Werror $(LDFLAGS) -o $(GE_CPU_PROFILE_VALIDATE_SELFTEST) \
 		tests/native/ge_cpu_profile_validate_selftest.c $(RT_GE_O) src/rt/ge_capture.c \
-		src/rt/flight_recorder.c src/rt/perf.c -lm
+		src/rt/flight_recorder.c src/rt/perf.c src/rt/ace.c -lm
 	$(GE_CPU_PROFILE_VALIDATE_SELFTEST)
 	$(GE_CPU_PROFILE_VALIDATE_SELFTEST) --strip-cache-disabled
 
@@ -435,7 +440,7 @@ GE_TNL_CENSUS_SELFTEST := $(BUILD_DIR)/ge_tnl_census_selftest$(EXE_EXT)
 ge-tnl-census-selftest: $(RT_GE_O)
 	$(CC) $(CFLAGS) -Werror $(LDFLAGS) -o $(GE_TNL_CENSUS_SELFTEST) \
 		tests/native/ge_tnl_census_selftest.c $(RT_GE_O) src/rt/ge_capture.c \
-		src/rt/flight_recorder.c src/rt/perf.c -lm
+		src/rt/flight_recorder.c src/rt/perf.c src/rt/ace.c -lm
 	$(GE_TNL_CENSUS_SELFTEST)
 
 native-core-tests: ge-tnl-census-selftest
@@ -454,7 +459,7 @@ GE_PATCH_TESS_SELFTEST := $(BUILD_DIR)/ge_patch_tess_selftest$(EXE_EXT)
 ge-patch-tess-selftest: $(RT_GE_O)
 	$(CC) $(CFLAGS) -Werror -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(LDFLAGS) -o $(GE_PATCH_TESS_SELFTEST) \
 		tests/native/ge_patch_tess_selftest.c $(RT_GE_O) src/rt/ge_capture.c \
-		src/rt/flight_recorder.c src/rt/perf.c -lm
+		src/rt/flight_recorder.c src/rt/perf.c src/rt/ace.c -lm
 	$(GE_PATCH_TESS_SELFTEST)
 
 native-core-tests: ge-patch-tess-selftest
@@ -467,7 +472,7 @@ native-core-tests: ge-patch-tess-selftest
 GE_FLIGHT_DIR := $(BUILD_DIR)/ge-flight-overhead
 GE_FLIGHT_ROUNDS ?= 30
 GE_FLIGHT_PAIRS ?= 5
-GE_FLIGHT_SRCS := tests/native/ge_cpu_profile_validate_selftest.c src/rt/ge_capture.c src/rt/flight_recorder.c src/rt/perf.c
+GE_FLIGHT_SRCS := tests/native/ge_cpu_profile_validate_selftest.c src/rt/ge_capture.c src/rt/flight_recorder.c src/rt/perf.c src/rt/ace.c
 
 ge-flight-overhead:
 	"$(PYTHON)" -c "import os, sys; [os.makedirs(d, exist_ok=True) for d in sys.argv[1:]]" $(GE_FLIGHT_DIR)/linked $(GE_FLIGHT_DIR)/absent
@@ -596,6 +601,7 @@ psmf-media-selftest: $(PSMF_MEDIA_RUNTIME_OBJS) $(RT_GE_O) $(GENERIC_TITLE_CONFI
 # nothing. The mutation is compiled only into this synthetic fixture translation unit.
 # -Wno-unused-function: unused static helpers, mostly src/rt/hle.c; 103 warnings without it (#735 item 9).
 psmf-media-selftest-csc-mutant: $(PSMF_MEDIA_RUNTIME_OBJS) $(RT_GE_O) $(GENERIC_TITLE_CONFIG_HEADER) $(ATRAC3P_OBJS) $(BUILD_DIR)/atrac3p_bridge.o
+	$(NK_REQUIRE_POSIX_SHELL)
 	$(CC) $(CFLAGS) $(FUZZ_SAN_FLAGS) -Isrc/rt -std=c11 -Werror -c src/rt/psmf_producer.c -o $(BUILD_DIR)/psmf_producer_media_selftest_csc_mutant.o
 	$(CC) $(CFLAGS) $(FLIGHT_IDENTITY_DEFS) $(FUZZ_SAN_FLAGS) -Isrc/rt -std=c11 -Werror -ffunction-sections -fdata-sections -DSR_MPEG_CSC_NO_WRITE_MUTANT -c tests/native/psmf_media_selftest.c -o $(BUILD_DIR)/psmf_media_selftest_csc_mutant.o
 	$(CC) $(CFLAGS) -I$(GENERIC_TITLE_CONFIG_DIR) $(FLIGHT_IDENTITY_DEFS) $(FUZZ_SAN_FLAGS) $(HLE_INCLUDES) -DSR_MPEG_MEDIA_SELFTEST -Isrc/rt -std=c11 -Wno-unused-function -ffunction-sections -fdata-sections \
@@ -827,7 +833,12 @@ domain-mode-selftest: $(GENERIC_TITLE_CONFIG_HEADER)
 # frame it happened. SR_RECORD/SR_REPLAY run in fresh child processes: a replay ends in the
 # recorded state without asking the (fake) keyboard user, and a changed word, an extra poll,
 # an early stop, an edited or truncated file and the host clock each end in their own named
-# verdict. Exit code 0 = all hold.
+# verdict. The record and replay children are processes of their own. Under SR_FLIGHT the first
+# divergent checkpoint freezes the flight record at its newest event, in the same bytes as a run
+# armed with that checkpoint trigger from the start (this fixture has no thread table and no
+# refusals, which are read when a bundle is written); when the ring lost the last matching
+# checkpoint, the trigger it names for the next run keeps the first events after that
+# checkpoint. Exit code 0 = all hold.
 nkstate-selftest: $(GENERIC_TITLE_CONFIG_HEADER)
 	$(CC) $(CFLAGS) -I$(GENERIC_TITLE_CONFIG_DIR) $(LDFLAGS) -o $(BUILD_DIR)/nkstate_selftest.exe \
 		-DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" \
@@ -922,17 +933,30 @@ asset-index-selftest:
 # widescreen Fill case (#1881) run again alone at render scales 2 and 4; the sprite-scaled and
 # uv-edge-clamp cases (#2110) run alone at scales 2, 3 and 4; rtt-scale (#2052: a quarter-size
 # render target sampled back, linear, at the render scale and not at 1x) runs alone at scales 2
-# and 4 (the whole-suite run covers 1x). Each is selected by arguments: a
+# and 4 (the whole-suite run covers 1x). The 32-bit host depth buffer (#2051) runs host-depth with the
+# key off and then on (`--depth 32`) at scales 1 and 4, the key-off run writing the depth readback's
+# hash that the key-on run must match (`--depth-ref`), then the whole suite with the key on, and
+# host-depth once more with the native twin. Each is selected by arguments: a
 # VAR=value prefix needs a POSIX shell, and cmd.exe does not take one. The host twin (#2050) runs
 # after them: twin-off runs of twin-scene write reference files that the twin-on runs at the
 # same scale check (guest VRAM always, the shown images for the native twin), `--twin native`
 # runs the whole suite with every twin checked against its image after each case, twin-gate
-# checks the switch's values and its Ace gate (`--authentic`), and twin-alloc-fail injects a
-# failed twin allocation, and gpu-timestamps runs once more with the twin shown. The dst-read
+# checks the switch's values and its Ace gate (`--authentic`), twin-alloc-fail injects a
+# failed twin allocation, twin-drain-fail one whose drain fails too (nothing may be freed),
+# twin-soft runs the software renderer's twin (ge.c) on twin-scene's list against the twin-off
+# software run and the Vulkan twin, twin-key turns the twin on through the launch line's `twin=on`
+# (`--twin-key on`) in both renderers and checks the Ace report, with the variable unset and set
+# (`--twin-key off --twin 1` has the variable alone turn it on, and the report must say it runs),
+# and gpu-timestamps runs once more with the twin shown. The dst-read
 # cells (#2109) run alone at scales 1 and 4 on each destination-read path (`--dst-read snapshot`,
 # `--dst-read interlock`; a device that refuses the interlock prints a SKIP line), and so does
 # stencil-once (write-once stencil batches: at scales 1 and 4 on the snapshot path, where they are
-# drawn last to first, and at scale 1 on the interlock path). The pipeline
+# drawn last to first, and at scale 1 on the interlock path). The dst-read cells run once more on
+# the interlock path with depth=32 (`--depth 32`): the depth-writing kill cells must keep the
+# snapshot path there, since the shader's depth copy is 16-bit. The dst-read cells then run with the
+# host twin on, native and full colour, on both paths at scales 1 and 4 (the twin's pass takes the
+# path the op took), and stencil-once with the native twin on the interlock path.
+# gpu-coherence-twin-mutants (below) proves the twin cells kill the twin's mutants. The pipeline
 # cache (#2149) runs last, as three processes over one empty data root: a cold run saves the
 # cache, a warm run must start from it and draw the same frames, and a reject run re-opens it
 # over damaged, foreign and other-driver files and with the switch off or refused.
@@ -945,6 +969,7 @@ $(GPU_COHERENCE_BIN): shader-verify $(RT_GE_O)
 		$(SDL3VK_SRCS) $(GEGPU_SRCS) $(LIBS)
 
 gpu-coherence-selftest: $(GPU_COHERENCE_BIN)
+	$(NK_REQUIRE_POSIX_SHELL)
 	$(GPU_COHERENCE_BIN)
 	$(GPU_COHERENCE_BIN) --scale 2 --case scaled-upload
 	$(GPU_COHERENCE_BIN) --scale 4 --case scaled-upload
@@ -972,6 +997,12 @@ gpu-coherence-selftest: $(GPU_COHERENCE_BIN)
 	$(GPU_COHERENCE_BIN) --scale 4 --case uv-edge-clamp
 	$(GPU_COHERENCE_BIN) --scale 2 --case rtt-scale
 	$(GPU_COHERENCE_BIN) --scale 4 --case rtt-scale
+	$(GPU_COHERENCE_BIN) --case host-depth --depth-ref $(BUILD_DIR)/depth_ref_s1.txt
+	$(GPU_COHERENCE_BIN) --depth 32 --case host-depth --depth-ref $(BUILD_DIR)/depth_ref_s1.txt
+	$(GPU_COHERENCE_BIN) --scale 4 --case host-depth --depth-ref $(BUILD_DIR)/depth_ref_s4.txt
+	$(GPU_COHERENCE_BIN) --depth 32 --scale 4 --case host-depth --depth-ref $(BUILD_DIR)/depth_ref_s4.txt
+	$(GPU_COHERENCE_BIN) --depth 32
+	$(GPU_COHERENCE_BIN) --twin native --depth 32 --case host-depth
 	$(GPU_COHERENCE_BIN) --case twin-scene --twin-ref $(BUILD_DIR)/twin_ref_s1.txt
 	$(GPU_COHERENCE_BIN) --scale 2 --case twin-scene --twin-ref $(BUILD_DIR)/twin_ref_s2.txt
 	$(GPU_COHERENCE_BIN) --scale 4 --case twin-scene --twin-ref $(BUILD_DIR)/twin_ref_s4.txt
@@ -988,6 +1019,17 @@ gpu-coherence-selftest: $(GPU_COHERENCE_BIN)
 	$(GPU_COHERENCE_BIN) --twin yes --case twin-gate
 	$(GPU_COHERENCE_BIN) --twin 1 --scale 4 --case twin-alloc-fail --twin-ref $(BUILD_DIR)/twin_ref_s4.txt
 	$(GPU_COHERENCE_BIN) --twin native --scale 2 --case twin-alloc-fail --twin-ref $(BUILD_DIR)/twin_ref_s2.txt
+	$(GPU_COHERENCE_BIN) --twin 1 --scale 4 --case twin-drain-fail --twin-ref $(BUILD_DIR)/twin_ref_s4.txt
+	$(GPU_COHERENCE_BIN) --twin native --scale 2 --case twin-drain-fail --twin-ref $(BUILD_DIR)/twin_ref_s2.txt
+	$(GPU_COHERENCE_BIN) --twin 1 --case twin-soft
+	$(GPU_COHERENCE_BIN) --twin native --case twin-soft
+	$(GPU_COHERENCE_BIN) --twin-key on --case twin-key
+	$(GPU_COHERENCE_BIN) --twin-key on --twin native --case twin-key
+	$(GPU_COHERENCE_BIN) --twin-key on --twin 0 --case twin-key
+	$(GPU_COHERENCE_BIN) --twin-key on --twin off --case twin-key
+	$(GPU_COHERENCE_BIN) --twin-key off --twin 1 --case twin-key
+	$(GPU_COHERENCE_BIN) --twin-key off --twin native --case twin-key
+	$(GPU_COHERENCE_BIN) --twin-key off --case twin-key
 	@rc=0; $(GPU_COHERENCE_BIN) --twin 1 --gpu-timestamps 1 --case gpu-timestamps || rc=$$?; \
 	if [ $$rc -eq 77 ]; then echo "SKIP gpu-coherence-selftest twin gpu-timestamps (exit 77; the reason is printed above)"; \
 	elif [ $$rc -ne 0 ]; then echo "FAIL gpu-coherence-selftest twin gpu-timestamps (exit $$rc)"; exit $$rc; fi
@@ -995,9 +1037,19 @@ gpu-coherence-selftest: $(GPU_COHERENCE_BIN)
 	$(GPU_COHERENCE_BIN) --dst-read snapshot --scale 4 --case dst-read
 	$(GPU_COHERENCE_BIN) --dst-read interlock --case dst-read
 	$(GPU_COHERENCE_BIN) --dst-read interlock --scale 4 --case dst-read
+	$(GPU_COHERENCE_BIN) --depth 32 --dst-read interlock --case dst-read
 	$(GPU_COHERENCE_BIN) --dst-read snapshot --case stencil-once
 	$(GPU_COHERENCE_BIN) --dst-read snapshot --scale 4 --case stencil-once
 	$(GPU_COHERENCE_BIN) --dst-read interlock --case stencil-once
+	$(GPU_COHERENCE_BIN) --twin native --dst-read snapshot --case dst-read
+	$(GPU_COHERENCE_BIN) --twin native --dst-read snapshot --scale 4 --case dst-read
+	$(GPU_COHERENCE_BIN) --twin native --dst-read interlock --case dst-read
+	$(GPU_COHERENCE_BIN) --twin native --dst-read interlock --scale 4 --case dst-read
+	$(GPU_COHERENCE_BIN) --twin 1 --dst-read snapshot --case dst-read
+	$(GPU_COHERENCE_BIN) --twin 1 --dst-read snapshot --scale 4 --case dst-read
+	$(GPU_COHERENCE_BIN) --twin 1 --dst-read interlock --case dst-read
+	$(GPU_COHERENCE_BIN) --twin 1 --dst-read interlock --scale 4 --case dst-read
+	$(GPU_COHERENCE_BIN) --twin native --dst-read interlock --case stencil-once
 	@"$(PYTHON)" -c "import shutil; shutil.rmtree('$(BUILD_DIR)/pipeline_cache_test', ignore_errors=True)"
 	$(GPU_COHERENCE_BIN) --pipeline-cache $(BUILD_DIR)/pipeline_cache_test --case pipeline-cache-cold
 	$(GPU_COHERENCE_BIN) --pipeline-cache $(BUILD_DIR)/pipeline_cache_test --case pipeline-cache-warm
@@ -1013,6 +1065,7 @@ gpu-coherence-selftest: $(GPU_COHERENCE_BIN)
 # then takes the cache's handle, on any driver (lavapipe keeps no pipeline data, so the cache's
 # size cannot tell). Exit 77 (no Vulkan device) is a SKIP.
 gpu-coherence-pcache-mutant: shader-verify $(RT_GE_O)
+	$(NK_REQUIRE_POSIX_SHELL)
 	@"$(PYTHON)" -c "import shutil; shutil.rmtree('$(BUILD_DIR)/pipeline_cache_mutant', ignore_errors=True)"
 	@bin=$(BUILD_DIR)/gpu_coherence_pcache_mutant.exe; kill="the pipelines did not go through it"; \
 	$(CC) $(CFLAGS) -DSR_GPU_COHERENCE_SELFTEST -DSR_PCACHE_SELFTEST_NULL_MUTANT -ffunction-sections -fdata-sections \
@@ -1031,6 +1084,7 @@ gpu-coherence-pcache-mutant: shader-verify $(RT_GE_O)
 # barriers' destination access. Each builds its own binary and must fail with its own message;
 # exit 77 (no Vulkan device) is a SKIP, as for the selftest itself.
 gpu-coherence-selftest-snapbar-mutants: shader-verify $(RT_GE_O)
+	$(NK_REQUIRE_POSIX_SHELL)
 	@for m in 1 2 3; do \
 		case $$m in \
 			1) kill="barrier commands, want";; \
@@ -1049,8 +1103,60 @@ gpu-coherence-selftest-snapbar-mutants: shader-verify $(RT_GE_O)
 		echo "gpu-coherence-selftest-snapbar-mutants: mutant $$m killed ($$kill)"; \
 	done
 
-# vram-view-identity-selftest — the GE decoders the pause menu's VRAM viewer calls leave later
-# frames, guest memory and the GE state unchanged (#314; the gui.c layer and timing are not covered). ge.c's lists run on ge_gpu.c's real targets: each frame draws a target, stores into it
+# gpu-coherence-twin-mutants - the host twin's (#2050) selftest cells must kill each compile-time
+# mutant in ge_gpu.c. SR_TWIN_SELFTEST_NATIVE_MUTANT keeps the 16-bit colour snap in the
+# full-colour twin: twin-scene at scale 2 against a twin-off reference. Each
+# SR_TWIN_SELFTEST_SKIP_SITE_<site> leaves one authentic write without its mirror
+# (RENDER, UPLOAD, PATCH, DEPTH_UPLOAD, XFER, SNAPSHOT): the whole suite with `--twin native` (its
+# identity checks). SR_TWIN_SELFTEST_GPU_KEY_REQUEST and SR_TWIN_SELFTEST_SOFT_KEY_REQUEST leave the
+# launch line's twin=on unread in ge_gpu.c and in ge.c, and the two KEY_CONFIRM mutants leave a
+# running twin unconfirmed: the twin-key case. The two TWIN_REPORT mutants leave a running twin
+# unreported (the call to ace_set_twin_running) when only SR_GPU_TWIN_COLOR turned it on:
+# `--twin-key off --twin 1`. The ge.c mutants build their own ge.o. Each builds
+# its own binary, so thirteen are built; the target is not part of
+# gpu-coherence-selftest or native-core-tests. Each mutant must fail with its own message; exit 77
+# (no Vulkan device) is a SKIP, as for the selftest itself.
+gpu-coherence-twin-mutants: $(GPU_COHERENCE_BIN)
+	$(NK_REQUIRE_POSIX_SHELL)
+	@rc=0; $(GPU_COHERENCE_BIN) --scale 2 --case twin-scene --twin-ref $(BUILD_DIR)/twin_ref_mutant_s2.txt || rc=$$?; \
+	if [ $$rc -eq 77 ]; then echo "twin mutants: SKIP (no Vulkan device)"; exit 77; fi; \
+	if [ $$rc -ne 0 ]; then echo "twin mutants: the twin-off reference run failed (exit $$rc)" >&2; exit $$rc; fi
+	@for m in NATIVE_MUTANT SKIP_SITE_RENDER SKIP_SITE_UPLOAD SKIP_SITE_PATCH SKIP_SITE_DEPTH_UPLOAD SKIP_SITE_XFER SKIP_SITE_SNAPSHOT \
+			GPU_KEY_REQUEST GPU_KEY_CONFIRM SOFT_KEY_REQUEST SOFT_KEY_CONFIRM GPU_TWIN_REPORT SOFT_TWIN_REPORT; do \
+		case $$m in \
+			NATIVE_MUTANT) kill="the shown gradient is not full colour"; args="--twin 1 --scale 2 --case twin-scene --twin-ref $(BUILD_DIR)/twin_ref_mutant_s2.txt";; \
+			SKIP_SITE_RENDER) kill="twin of target 0x100000 differs in 100 pixels"; args="--twin native";; \
+			SKIP_SITE_UPLOAD) kill="twin of target 0x100000 is behind"; args="--twin native";; \
+			SKIP_SITE_PATCH) kill="differs in 1 pixels, first (137,91)"; args="--twin native";; \
+			SKIP_SITE_DEPTH_UPLOAD) kill="twin of depth 0x080000 differs"; args="--twin native";; \
+			SKIP_SITE_XFER) kill="twin of target 0x060000 differs in 65280 pixels"; args="--twin native";; \
+			GPU_KEY_REQUEST) kill="FAIL gpu renderer: the launch line's twin=on did not turn the twin on"; args="--twin-key on --case twin-key";; \
+			GPU_KEY_CONFIRM) kill="FAIL gpu renderer: the report names the twin unavailable: did not run"; args="--twin-key on --case twin-key";; \
+			SOFT_KEY_REQUEST) kill="FAIL software renderer: the launch line's twin=on did not turn the twin on"; args="--twin-key on --case twin-key";; \
+			SOFT_KEY_CONFIRM) kill="FAIL software renderer: the report names the twin unavailable: did not run"; args="--twin-key on --case twin-key";; \
+			GPU_TWIN_REPORT) kill="FAIL gpu renderer: the report names the twin available (effective twin off), want it on and not unavailable"; args="--twin-key off --twin 1 --case twin-key";; \
+			SOFT_TWIN_REPORT) kill="FAIL software renderer: the report names the twin available (effective twin off), want it on and not unavailable"; args="--twin-key off --twin 1 --case twin-key";; \
+			*) kill="twin of target 0x000000 differs in"; args="--twin native";; \
+		esac; \
+		geobj=$(RT_GE_O); \
+		case $$m in SOFT_KEY_*|SOFT_TWIN_*) geobj=$(BUILD_DIR)/ge_twin_mutant_$$m.o; \
+			$(CC) $(GE_CFLAGS) -DSR_TWIN_SELFTEST_$$m -c src/rt/ge.c -o $$geobj || exit 1;; esac; \
+		bin=$(BUILD_DIR)/gpu_coherence_twin_mutant_$$m.exe; \
+		$(CC) $(CFLAGS) -DSR_GPU_COHERENCE_SELFTEST -DSR_TWIN_SELFTEST_$$m -ffunction-sections -fdata-sections \
+			-DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(LDFLAGS) -Wl,--gc-sections -o $$bin \
+			tests/native/gpu_coherence_selftest.c src/rt/ge_capture.c src/rt/ge_raster_ref.c $$geobj src/rt/flight_recorder.c src/rt/perf.c \
+			$(SDL3VK_SRCS) $(GEGPU_SRCS) $(LIBS) || exit 1; \
+		$$bin $$args > $$bin.log 2>&1; result=$$?; \
+		if test $$result -eq 77; then echo "twin mutant $$m: SKIP (no Vulkan device)"; exit 77; fi; \
+		if test $$result -eq 0; then cat $$bin.log; echo "twin mutant $$m unexpectedly passed" >&2; exit 1; fi; \
+		if ! grep -Fq "$$kill" $$bin.log; then cat $$bin.log; echo "twin mutant $$m failed for another reason" >&2; exit 1; fi; \
+		echo "gpu-coherence-twin-mutants: mutant $$m killed ($$kill)"; \
+	done
+
+# vram-view-identity-selftest — the sources and decode the pause menu's VRAM viewer runs
+# (ge_vram_view_sources, ge_vram_view_decode, with gui.c's arguments) name the expected surfaces and
+# leave later frames, guest memory and the GE state unchanged (#314; timing is not covered).
+# ge.c's lists run on ge_gpu.c's real targets: each frame draws a target, stores into it
 # from the CPU, draws it as a texture into the shown target and presents that with a capture
 # armed. A run without the viewer writes the digest (every presented frame, the lists' return
 # codes, then guest VRAM and RAM as a guest read sees them and the GE state); runs with the
@@ -1066,6 +1172,7 @@ $(VRAM_VIEW_BIN): shader-verify $(RT_GE_O)
 		$(SDL3VK_SRCS) $(GEGPU_SRCS) $(LIBS)
 
 vram-view-identity-selftest: $(VRAM_VIEW_BIN)
+	$(NK_REQUIRE_POSIX_SHELL)
 	$(VRAM_VIEW_BIN) --write $(BUILD_DIR)/vram_view_ref_s1.txt
 	$(VRAM_VIEW_BIN) --check $(BUILD_DIR)/vram_view_ref_s1.txt
 	$(VRAM_VIEW_BIN) --check $(BUILD_DIR)/vram_view_ref_s1.txt --view-at 1
@@ -1086,17 +1193,33 @@ vram-view-identity-selftest: $(VRAM_VIEW_BIN)
 # gpu-dst-read-mutants — the dst-read cells must kill each SR_GPU_DSTREAD_MUTANT in ge_gpu.c (#2109):
 # 1 merges every channel from the loaded destination, so the RMW store has no effect
 # (dst-read-order), 2 swaps the RMW batches' source and destination blend factors (dst-read-order),
-# 3 lets an op the rmwzfb rule refuses take the interlock, so an alpha-rejected fragment writes depth
-# (dst-read-depth), 4 gives colour targets STORAGE_BIT on the snapshot path (dst-read-pins), 5
+# 3 lets every batch the rmwzfb rule names test depth early, so an alpha-rejected fragment writes
+# depth (dst-read-depth), 4 gives colour targets STORAGE_BIT on the snapshot path (dst-read-pins), 5
 # turns the RMW pipelines' depth test off, so a sprite behind the wall blends (dst-read-ztest), 6
 # drops the rmwzfb rule's color-test line, so a fragment the color test rejects writes depth
-# (dst-read-ctest), and 7 drops its own-target line, so a sprite that textures from its own target
-# samples texels older than the sprite before it (dst-read-feedback).
-# Mutants 1 to 3 and 5 to 7 run on the interlock path, 4 on the snapshot path. Each builds its own
+# (dst-read-ctest), 7 drops rmw_refuses's own-target line, so a sprite that textures from its own
+# target samples texels older than the sprite before it (dst-read-feedback), 8 keeps every op of a run
+# with the host twin on the snapshot path, so the image blends the pair against the pre-batch
+# destination again (dst-read-order with the native twin), and 9 records the twin's pass of an
+# interlock op as one pass that reads the twin snapshot, so the twin differs from its image
+# (dst-read-order with the native twin).
+# 10 is mutant 9's build run with the full-colour twin, whose check must fail too.
+# 11 drops the rmwzfb rule's depth-range line, so a fragment outside the depth range writes depth
+# (dst-read-zrange), 12 its stencil-fail line, so a stencil-rejected fragment writes depth
+# (dst-read-sfail), 13 makes the shader's depth test always pass in a shader-depth run, so a sprite
+# behind the first one in its batch blends over it (dst-read-depth), and 14 skips that run's copy of
+# its depth back to the depth image, so the opaque sprite behind them shows through (dst-read-depth).
+# 15 restores the rule before shader-owned depth, so such an op keeps the snapshot path and its
+# overlapping pair blends against the pre-batch destination (dst-read-depth: the failing-before state).
+# 16 copies the twin's pass of a shader-depth run back into the image's depth, so the twin's depth
+# and the sprite behind it differ from the image (dst-read-depth with the native twin), and 17 lets a
+# shader-depth run write depth for a batch whose depth writes are off (dst-read-depth: Q's depth).
+# Mutants 1 to 3 and 5 to 17 run on the interlock path, 4 on the snapshot path. Each builds its own
 # binary and must fail with its own message. Exit 77 (no Vulkan device, or a device without the
-# interlock for 1 to 3 and 5 to 7) is a SKIP of that mutant.
+# interlock for 1 to 3 and 5 to 17) is a SKIP of that mutant.
 gpu-dst-read-mutants: shader-verify $(RT_GE_O)
-	@for m in 1 2 3 4 5 6 7; do \
+	$(NK_REQUIRE_POSIX_SHELL)
+	@for m in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17; do \
 		case $$m in \
 			1) args="--dst-read interlock --case dst-read-order"; kill="the RMW store had no effect";; \
 			2) args="--dst-read interlock --case dst-read-order"; kill="differs from ge.c in [0-9]+ pixels .* on the interlock path";; \
@@ -1104,10 +1227,20 @@ gpu-dst-read-mutants: shader-verify $(RT_GE_O)
 			5) args="--dst-read interlock --case dst-read-ztest"; kill="colour differs from ge.c in [0-9]+ pixels .* on the interlock path";; \
 			6) args="--dst-read interlock --case dst-read-ctest"; kill="dst-read-ctest\]: colour differs from ge.c in [0-9]+ pixels, depth differs from ge.c in [1-9]";; \
 			7) args="--dst-read interlock --case dst-read-feedback"; kill="dst-read-feedback\]: [1-9][0-9]* pixels differ from ge.c";; \
+			8) args="--twin native --dst-read interlock --case dst-read-order"; kill="differs from ge.c in [1-9][0-9]* pixels \(0 outside the overlap\) on the interlock path \(host twin on\)";; \
+			9) args="--twin native --dst-read interlock --case dst-read-order"; kill="host twin \(native colour\) differs from its image in [1-9][0-9]* device pixels";; \
+			10) args="--twin 1 --dst-read interlock --case dst-read-order"; kill="host twin \(full colour\) differs from the ordered 8-bit blend in [1-9][0-9]* device pixels";; \
+			11) args="--dst-read interlock --case dst-read-zrange"; kill="dst-read-zrange\]: colour differs from ge.c in [0-9]+ pixels, depth differs from ge.c in [1-9]";; \
+			12) args="--dst-read interlock --case dst-read-sfail"; kill="dst-read-sfail\]: colour differs from ge.c in [0-9]+ pixels, depth differs from ge.c in [1-9]";; \
+			13) args="--dst-read interlock --case dst-read-depth"; kill="dst-read-depth\]: colour differs from ge.c in [1-9][0-9]* pixels";; \
+			14) args="--dst-read interlock --case dst-read-depth"; kill="dst-read-depth\]: colour differs from ge.c in [1-9][0-9]* pixels, depth differs from ge.c in [1-9]";; \
+			15) args="--dst-read interlock --case dst-read-depth"; kill="dst-read-depth\]: the alpha-tested depth-writing op took [0-9]+ interlock ops \(want 1 or more\), [1-9][0-9]* snapshot copies";; \
+			16) args="--twin native --dst-read interlock --case dst-read-depth"; kill="twin identity\]: before a case frees its targets \(5650 alpha-tested\): twin of (target|depth) 0x[0-9a-f]+ differs";; \
+			17) args="--dst-read interlock --case dst-read-depth"; kill="dst-read-depth\]: colour differs from ge.c in [0-9]+ pixels, depth differs from ge.c in [1-9]";; \
 			*) args="--dst-read snapshot --case dst-read-pins"; kill="the snapshot path made interlock state";; \
 		esac; \
 		bin=$(BUILD_DIR)/gpu_coherence_dstread_mutant$$m.exe; \
-		$(CC) $(CFLAGS) -DSR_GPU_COHERENCE_SELFTEST -DSR_GPU_DSTREAD_MUTANT=$$m -ffunction-sections -fdata-sections \
+		$(CC) $(CFLAGS) -DSR_GPU_COHERENCE_SELFTEST -DSR_GPU_DSTREAD_MUTANT=$$(test $$m -eq 10 && echo 9 || echo $$m) -ffunction-sections -fdata-sections \
 			-DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(LDFLAGS) -Wl,--gc-sections -o $$bin \
 			tests/native/gpu_coherence_selftest.c src/rt/ge_capture.c src/rt/ge_raster_ref.c $(RT_GE_O) src/rt/flight_recorder.c src/rt/perf.c \
 			$(SDL3VK_SRCS) $(GEGPU_SRCS) $(LIBS) || exit 1; \
@@ -1125,6 +1258,7 @@ gpu-dst-read-mutants: shader-verify $(RT_GE_O)
 # the snapshot path, where the batch is reordered. Each builds its own binary and must fail with
 # its own message. Exit 77 (no Vulkan device) is a SKIP of that mutant.
 gpu-stencil-once-mutants: shader-verify $(RT_GE_O)
+	$(NK_REQUIRE_POSIX_SHELL)
 	@for m in 1 2 3; do \
 		case $$m in \
 			1) kill="stencil-once\]: mesh: [1-9][0-9]* pixels differ from ge.c";; \
@@ -1153,6 +1287,7 @@ gpu-stencil-once-mutants: shader-verify $(RT_GE_O)
 # no anisotropic sampler, a transformed linear draw gets one, a nearest one does not. Exit 77
 # (SKIP) without Vulkan or without anisotropic filtering.
 gpu-ace-selftest: shader-verify $(RT_GE_O)
+	$(NK_REQUIRE_POSIX_SHELL)
 	$(CC) $(CFLAGS) -DSR_GPU_COHERENCE_SELFTEST -DSR_GPU_ACE_SELFTEST -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" \
 		-ffunction-sections -fdata-sections $(LDFLAGS) -Wl,--gc-sections \
 		-o $(BUILD_DIR)/gpu_ace_selftest.exe \
@@ -1168,6 +1303,7 @@ gpu-ace-selftest: shader-verify $(RT_GE_O)
 # worker threads need SDL3, so without it the recipe reports SKIP.
 TEX_SCALE_SDL_READY := $(and $(filter-out none,$(SDL3_PROVIDER)),$(if $(strip $(SDL3_ERROR)),,yes))
 tex-scale-selftest:
+	$(NK_REQUIRE_POSIX_SHELL)
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_DIR)').mkdir(parents=True, exist_ok=True)"
 	@if [ -z "$(TEX_SCALE_SDL_READY)" ]; then echo "SKIP tex-scale-selftest (SDL3 not found by build discovery)"; exit 0; fi; \
 	$(CC) $(CFLAGS) -O2 -ffunction-sections -fdata-sections $(LDFLAGS) -Wl,--gc-sections \
@@ -1205,7 +1341,7 @@ native-core-tests: tex-mips-selftest tex-mips-mutant
 # keep level 0, and a color-tested draw stays with the software renderer. It runs at render scales
 # 4, 2 and 1, with 16x texture filtering, and once with mips off, where the minified cell must show
 # level 0's aliasing and no chain may exist. Exit 77 (SKIP) without Vulkan.
-GPU_MIPS_LINE := v1;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off
+GPU_MIPS_LINE := v1;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;twin=off
 gpu_mips_run = rc=0; $(BUILD_DIR)/gpu_mips_selftest.exe $(1) || rc=$$?; \
 	if [ $$rc -eq 77 ]; then echo "SKIP gpu-mips-selftest $(2) (exit 77; the reason is printed above)"; \
 	elif [ $$rc -ne 0 ]; then echo "FAIL gpu-mips-selftest $(2) (exit $$rc)"; exit $$rc; fi
@@ -1282,6 +1418,7 @@ GLYPH_RECON_MUTANTS := \
 	SOFT_RATIO_LOW:"FAIL text: only " \
 	PLAIN_BICUBIC:"FAIL rebuild: 4444 glyph 0 at factor 2: downsample"
 glyph-recon-mutant:
+	$(NK_REQUIRE_POSIX_SHELL)
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_DIR)').mkdir(parents=True, exist_ok=True)"
 	@for m in $(GLYPH_RECON_MUTANTS); do \
 		name=$${m%%:*}; want=$${m#*:}; rc=0; \
@@ -1326,6 +1463,7 @@ native-core-tests: texrepl-selftest
 # the CLUTFORMAT word out of a palette texture's identity. The palette identity cell must fail, and
 # for that reason: its expected values were worked out from PPSSPP's formula, not from this code.
 texrepl-mutant:
+	$(NK_REQUIRE_POSIX_SHELL)
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_DIR)').mkdir(parents=True, exist_ok=True)"
 	@$(CC) -std=c99 -O2 -Wall -Wextra -Wpedantic -Werror -Isrc/core -Isrc/rt -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" \
 		-DNK_TEXREPL_MUTANT_NO_CLUTFORMAT_XOR tests/native/texrepl_selftest.c src/rt/texrepl.c \
@@ -1342,6 +1480,7 @@ texrepl-mutant:
 # an authentic start read SR_TEX_SCALE and SR_SMART_2D. It passes only when the settings cell fails
 # for that reason, so the Ace gate is under test (contract section 11.2, item 1).
 tex-scale-gate-mutant:
+	$(NK_REQUIRE_POSIX_SHELL)
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_DIR)').mkdir(parents=True, exist_ok=True)"
 	@if [ -z "$(TEX_SCALE_SDL_READY)" ]; then echo "SKIP tex-scale-gate-mutant (SDL3 not found by build discovery)"; exit 0; fi; \
 	$(CC) $(CFLAGS) -O2 -ffunction-sections -fdata-sections $(LDFLAGS) -Wl,--gc-sections -DNK_TEX_SCALE_MUTANT_NO_ACE_GATE \
@@ -1367,6 +1506,7 @@ GPU_TEXSCALE_BUILD = $(CC) $(CFLAGS) -DSR_GPU_COHERENCE_SELFTEST -DSR_GPU_TEXSCA
 		tests/native/gpu_coherence_selftest.c src/rt/ge_capture.c src/rt/ge_raster_ref.c $(RT_GE_O) src/rt/flight_recorder.c src/rt/perf.c \
 		$(SDL3VK_SRCS) $(GEGPU_SRCS) $(LIBS)
 gpu-texscale-selftest: shader-verify $(RT_GE_O)
+	$(NK_REQUIRE_POSIX_SHELL)
 	$(GPU_TEXSCALE_BUILD) -o $(BUILD_DIR)/gpu_texscale_selftest.exe
 	@for args in "--scale 1" "--scale 4" "--scale 2 --tex-scale 4" "--twin native --scale 1" "--twin native --scale 4" \
 		"--twin native --scale 2 --tex-scale 4" "--twin 1 --scale 4" "--repl-only --scale 1"; do \
@@ -1381,6 +1521,7 @@ gpu-texscale-selftest: shader-verify $(RT_GE_O)
 # NK_TEXREPL_MUTANT_NO_CLUTFORMAT_XOR, a palette identity without the CLUTFORMAT word (the CLUT8
 # texture a PPSSPP-named file lists is then never found).
 gpu-texrepl-mutant: shader-verify $(RT_GE_O)
+	$(NK_REQUIRE_POSIX_SHELL)
 	$(GPU_TEXSCALE_BUILD) -DNK_TEXREPL_MUTANT_NO_LOOKUP -o $(BUILD_DIR)/gpu_texrepl_mutant_lookup.exe
 	$(GPU_TEXSCALE_BUILD) -DNK_TEXREPL_MUTANT_NO_CLUTFORMAT_XOR -o $(BUILD_DIR)/gpu_texrepl_mutant_xor.exe
 	@for m in lookup:"FAIL replace: the first draw of a listed texture is not its replacement" \
@@ -1400,6 +1541,7 @@ gpu-texrepl-mutant: shader-verify $(RT_GE_O)
 # made from the texture's current content. The rewrite cell must fail, and for that reason: the
 # build passes only when the run fails and prints that the stale copy was drawn.
 gpu-texscale-mutant: shader-verify $(RT_GE_O)
+	$(NK_REQUIRE_POSIX_SHELL)
 	$(GPU_TEXSCALE_BUILD) -DNK_TEX_SCALE_MUTANT_SKIP_CONTENT_CHECK -o $(BUILD_DIR)/gpu_texscale_mutant.exe
 	@rc=0; $(BUILD_DIR)/gpu_texscale_mutant.exe > $(BUILD_DIR)/gpu_texscale_mutant.log 2>&1 || rc=$$?; \
 	cat $(BUILD_DIR)/gpu_texscale_mutant.log; \
@@ -1425,6 +1567,7 @@ GPU_GLYPH_BUILD = $(CC) $(CFLAGS) -DSR_GPU_COHERENCE_SELFTEST -DSR_GPU_TEXSCALE_
 		tests/native/gpu_coherence_selftest.c src/rt/ge_capture.c src/rt/ge_raster_ref.c $(RT_GE_O) src/rt/flight_recorder.c src/rt/perf.c \
 		$(SDL3VK_SRCS) $(GEGPU_SRCS) $(LIBS)
 gpu-glyph-selftest: shader-verify $(RT_GE_O)
+	$(NK_REQUIRE_POSIX_SHELL)
 	$(GPU_GLYPH_BUILD) -o $(BUILD_DIR)/gpu_glyph_selftest.exe
 	@for args in "--scale 4" "--scale 2" "--scale 3" "--scale 1"; do \
 		rc=0; $(BUILD_DIR)/gpu_glyph_selftest.exe $$args || rc=$$?; \
@@ -1460,6 +1603,7 @@ GPU_GLYPH_MUTANTS := \
 	NK_GLYPH_MUTANT_NO_COLOUR_CHECK@--scale,4@"FAIL refuse: a two-colour page" \
 	NK_GLYPH_MUTANT_NO_ACE_GATE@--authentic,--glyphs,on,--scale,4@"FAIL authentic:"
 gpu-glyph-mutant: shader-verify $(RT_GE_O)
+	$(NK_REQUIRE_POSIX_SHELL)
 	@for m in $(GPU_GLYPH_MUTANTS); do \
 		macro=$${m%%@*}; rest=$${m#*@}; args=$$(echo "$${rest%%@*}" | tr ',' ' '); want=$${rest#*@}; rc=0; \
 		$(GPU_GLYPH_BUILD) -D$$macro -o $(BUILD_DIR)/gpu_glyph_mutant_$$macro.exe || exit 1; \
@@ -1496,6 +1640,7 @@ $(GPU_CAPTURE_BIN): shader-verify
 		$(SDL3VK_SRCS) $(LIBS)
 
 gpu-capture-selftest: $(GPU_CAPTURE_BIN)
+	$(NK_REQUIRE_POSIX_SHELL)
 	$(GPU_CAPTURE_BIN)
 	SR_GPU_CAPTURE_TERMINAL_CASE=surface-lost $(GPU_CAPTURE_BIN)
 	SR_GPU_CAPTURE_TERMINAL_CASE=unclassified $(GPU_CAPTURE_BIN)
@@ -1517,6 +1662,7 @@ GPU_SELFTEST_BINS ?= $(GPU_COHERENCE_BIN) $(GPU_CAPTURE_BIN)
 GPU_SELFTEST_PREREQS ?= $(GPU_COHERENCE_BIN) $(GPU_CAPTURE_BIN)
 
 gpu-selftest-status: $(GPU_SELFTEST_PREREQS)
+	$(NK_REQUIRE_POSIX_SHELL)
 	@status=0; \
 	for sr_bin in $(GPU_SELFTEST_BINS); do \
 	  sr_name=`basename $$sr_bin`; \
@@ -1548,7 +1694,11 @@ ge-replay: shader-verify $(RT_GE_O)
 # copy of the target, a known difference no mutant made: it must be found as draw 1, its 100x100
 # overlap and nothing else. On the interlock path the capture must be NO_DIFFERENCE; a device
 # without the interlock refuses that path (sdl3vk prints the reason) and the leg is a SKIP.
-# Then fail-closed cells: a 512-wide scissor (ge.c rasterizes inside 480x272 only), 33 targets
+# The wide capture (a 512 scissor on a 512 stride) must compare clean, and so must the narrow one
+# (its draws on a 256 stride under a 480 scissor: both renderers stop at the stride, #2193). Then
+# fail-closed cells: a
+# scissor past 512 columns (the past capture: x2 600 on a 512 stride; both renderers draw up to
+# the stride, 512 at most), 33 targets
 # (one past the limit) and a stride past 1024 are INCOMPLETE (exit 5), and a capture with no
 # draw is NO_DRAWS (exit 6); none is ever NO_DIFFERENCE.
 # Exit 77 (no Vulkan device) is a SKIP, as for gpu-coherence-selftest (GE_FBD_SKIP_STATUS).
@@ -1557,6 +1707,7 @@ GE_FBD_DIR = $(BUILD_DIR)/ge_first_bad_draw
 # Vulkan device gets SKIP lines there, as for its other skipped cases, not a make error.
 GE_FBD_SKIP_STATUS ?= 77
 ge-first-bad-draw-selftest: ge-replay
+	$(NK_REQUIRE_POSIX_SHELL)
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(GE_FBD_DIR)').mkdir(parents=True, exist_ok=True)"
 	@$(BUILD_DIR)/ge_replay.exe --fbd-self-check
 	@$(BUILD_DIR)/ge_replay.exe --write-synthetic $(GE_FBD_DIR)/synthetic.ngef
@@ -1609,10 +1760,30 @@ ge-first-bad-draw-selftest: ge-replay
 			cat $$log; echo "FAIL ge-first-bad-draw-selftest: the #2109 overlap was not found as draw 1, exactly the overlap ($$mode)" >&2; exit 1; fi; \
 		echo "ge-first-bad-draw-selftest: known difference #2109 on the snapshot path found at draw 1, the 100x100 overlap only ($$mode)"; \
 	done; done
-	@for v in wide empty many deep; do \
+	@for v in wide narrow past empty many deep; do \
 		$(BUILD_DIR)/ge_replay.exe --write-synthetic $(GE_FBD_DIR)/$$v.ngef $$v || exit 1; \
 	done
-	@for cell in "wide 5 reason=raster-bound" "empty 6 result=NO_DRAWS" "many 5 reason=region-limit" "deep 5 reason=stride"; do \
+	@log=$(GE_FBD_DIR)/wide.log; result=0; \
+	$(BUILD_DIR)/ge_replay.exe $(GE_FBD_DIR)/wide.ngef --first-bad-draw --report $(GE_FBD_DIR)/wide > $$log 2>&1 || result=$$?; \
+	if test $$result -eq 77; then cat $$log; echo "SKIP ge-first-bad-draw-selftest wide (no Vulkan device)"; exit $(GE_FBD_SKIP_STATUS); fi; \
+	if test $$result -ne 0 || ! grep -Fq "result=NO_DIFFERENCE draws=4 " $$log; then \
+		cat $$log; echo "FAIL ge-first-bad-draw-selftest: the wide capture (scissor 512 on a 512 stride) was not compared as NO_DIFFERENCE" >&2; exit 1; fi; \
+	echo "ge-first-bad-draw-selftest: the wide capture is compared across its 512 columns, NO_DIFFERENCE"; \
+	for m in 1; do \
+		log=$(GE_FBD_DIR)/wide-mutant$$m.log; result=0; \
+		$(BUILD_DIR)/ge_replay_fbd_mutant$$m.exe $(GE_FBD_DIR)/wide.ngef --first-bad-draw \
+			--report $(GE_FBD_DIR)/wide-mutant$$m > $$log 2>&1 || result=$$?; \
+		if test $$result -ne 1 || ! grep -Fq "result=FIRST_BAD_DRAW index=3 " $$log; then \
+			cat $$log; echo "FAIL ge-first-bad-draw-selftest: mutant $$m's draw right of x 480 was not named as draw 3 on the wide capture" >&2; exit 1; fi; \
+		echo "ge-first-bad-draw-selftest: mutant $$m named as draw 3 on the wide capture, right of x 480"; \
+	done
+	@log=$(GE_FBD_DIR)/narrow.log; result=0; \
+	$(BUILD_DIR)/ge_replay.exe $(GE_FBD_DIR)/narrow.ngef --first-bad-draw --report $(GE_FBD_DIR)/narrow > $$log 2>&1 || result=$$?; \
+	if test $$result -eq 77; then cat $$log; echo "SKIP ge-first-bad-draw-selftest narrow (no Vulkan device)"; exit $(GE_FBD_SKIP_STATUS); fi; \
+	if test $$result -ne 0 || ! grep -Fq "result=NO_DIFFERENCE draws=4 " $$log; then \
+		cat $$log; echo "FAIL ge-first-bad-draw-selftest: the narrow capture (scissor 480 on a 256 stride) was not compared as NO_DIFFERENCE" >&2; exit 1; fi; \
+	echo "ge-first-bad-draw-selftest: the narrow capture is compared up to its stride, NO_DIFFERENCE"
+	@for cell in "past 5 reason=raster-bound" "empty 6 result=NO_DRAWS" "many 5 reason=region-limit" "deep 5 reason=stride"; do \
 		set -- $$cell; log=$(GE_FBD_DIR)/$$1.log; result=0; \
 		$(BUILD_DIR)/ge_replay.exe $(GE_FBD_DIR)/$$1.ngef --first-bad-draw --report $(GE_FBD_DIR)/$$1 > $$log 2>&1 || result=$$?; \
 		if test $$result -eq 77; then cat $$log; echo "SKIP ge-first-bad-draw-selftest $$1 (no Vulkan device)"; exit $(GE_FBD_SKIP_STATUS); fi; \

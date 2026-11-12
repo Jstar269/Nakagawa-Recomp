@@ -637,6 +637,130 @@ def verify_sbom_matches(
     return errors, verified_digests
 
 
+def _binary_name(value: object) -> str:
+    """A name as the binding compares it: forward slashes, no leading ``./``."""
+    name = str(value).replace("\\", "/")
+    while name.startswith("./"):
+        name = name[2:]
+    return name
+
+
+def _is_binary_name(name: str) -> bool:
+    lowered = name.lower()
+    return lowered.endswith(".dll") or lowered.startswith("bin/")
+
+
+def _binary_hashes_spdx23(document: dict) -> list[tuple[str, list[str]]]:
+    found = []
+    for package in document.get("packages") or []:
+        if not isinstance(package, dict):
+            continue
+        name = _binary_name(package.get("name", ""))
+        file_name = _binary_name(package.get("packageFileName", ""))
+        key = None
+        if name.lower().endswith(".dll"):
+            # A DLL package names its file in bin/; a missing or other path is another element.
+            if not file_name:
+                key = f"{name} (no packageFileName)"
+            else:
+                key = name if file_name.lower() == f"bin/{name}".lower() else file_name
+        elif _is_binary_name(file_name):
+            key = file_name
+        if key is not None:
+            found.append((key, [
+                str(item.get("checksumValue")) for item in package.get("checksums") or []
+                if isinstance(item, dict) and item.get("algorithm") == "SHA256"]))
+    for item in document.get("files") or []:
+        if isinstance(item, dict) and _is_binary_name(_binary_name(item.get("fileName", ""))):
+            found.append((_binary_name(item["fileName"]), [
+                str(checksum.get("checksumValue")) for checksum in item.get("checksums") or []
+                if isinstance(checksum, dict) and checksum.get("algorithm") == "SHA256"]))
+    return found
+
+
+def _binary_hashes_spdx3(document: dict) -> list[tuple[str, list[str]]]:
+    found = []
+    for node in document.get("@graph") or []:
+        if not isinstance(node, dict):
+            continue
+        name = _binary_name(node.get("spdx:name", ""))
+        if _is_binary_name(name):
+            found.append((name, [
+                str(item.get("spdx:hashValue")) for item in node.get("spdx:verifiedUsing") or []
+                if isinstance(item, dict) and item.get("spdx:algorithm") == "sha256"]))
+    return found
+
+
+def _binary_hashes_cyclonedx(document: dict) -> list[tuple[str, list[str]]]:
+    found = []
+    for component in document.get("components") or []:
+        if not isinstance(component, dict):
+            continue
+        name = _binary_name(component.get("name", ""))
+        if _is_binary_name(name):
+            found.append((name, [
+                str(item.get("content")) for item in component.get("hashes") or []
+                if isinstance(item, dict) and item.get("alg") == "SHA-256"]))
+    return found
+
+
+def verify_runtime_binding(
+    package_dir: Path,
+    sboms: dict[str, Path | None],
+    *,
+    imports_of=None,
+) -> list[str]:
+    """Check that each SBOM carries the SHA-256 ``bin/runtime-manifest.json`` records (#324).
+
+    The manifest is checked against ``package_dir`` (the package's ``bin/``) first. Then, in
+    every SBOM given, each listed DLL is exactly one DLL element under its file name and each
+    listed executable exactly one element for ``bin/<name>`` (SPDX 2.3: a package with that
+    ``packageFileName``; SPDX 3 and CycloneDX: a file element of that name), each with
+    exactly the recorded SHA-256, and no other DLL or ``bin/`` element is present.
+    """
+    import package_notices
+    import stage_runtime_dlls
+
+    try:
+        manifest = stage_runtime_dlls.verify_runtime_manifest(
+            package_dir,
+            imports_of=package_notices.get_binary_imports if imports_of is None else imports_of,
+        )
+    except stage_runtime_dlls.RuntimeManifestError as exc:
+        return [str(exc)]
+    expected = {}
+    for entry in manifest["files"]:
+        name = entry["path"] if entry["kind"] == "runtime-library" else f"bin/{entry['path']}"
+        expected[name.lower()] = (name, entry["sha256"])
+    readers = {"SPDX 2.3": _binary_hashes_spdx23, "SPDX 3": _binary_hashes_spdx3,
+               "CycloneDX": _binary_hashes_cyclonedx}
+    errors: list[str] = []
+    given = {label: path for label, path in sboms.items() if path is not None}
+    if not given:
+        return ["--package-dir needs at least one of --spdx, --spdx3 and --cyclonedx to check"]
+    for label, path in given.items():
+        try:
+            document = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            errors.append(f"Failed to parse {label} SBOM {path}: {exc}")
+            continue
+        observed: dict[str, list[list[str]]] = {}
+        for name, hashes in readers[label](document if isinstance(document, dict) else {}):
+            observed.setdefault(name.lower(), []).append(hashes)
+        for key, (name, sha256) in sorted(expected.items()):
+            records = observed.get(key, [])
+            if len(records) != 1:
+                errors.append(f"SBOM_BINARY_COUNT: {label} SBOM has {len(records)} element(s) for "
+                              f"{name}; the runtime manifest lists it once")
+            elif records[0] != [sha256]:
+                errors.append(f"SBOM_BINARY_HASH: {label} SBOM records SHA-256 {records[0]} for {name}; "
+                              f"the runtime manifest records {sha256}")
+        for key in sorted(set(observed) - set(expected)):
+            errors.append(f"SBOM_BINARY_NOT_SHIPPED: {label} SBOM names {key}, which the runtime "
+                          "manifest does not list")
+    return errors
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path, default=ROOT / "assets" / "release_manifest.json")
@@ -666,6 +790,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--spdx", type=Path, help="Path to SPDX 2.3 JSON SBOM to verify")
     parser.add_argument("--spdx3", type=Path, help="Path to SPDX 3.0.1 JSON-LD SBOM")
     parser.add_argument("--cyclonedx", type=Path, help="Path to CycloneDX 1.5 JSON SBOM")
+    parser.add_argument(
+        "--package-dir", type=Path, default=None,
+        help=("The package's bin/ folder: check it against its runtime-manifest.json, then require "
+              "every SBOM given to carry exactly the SHA-256 the manifest records for each executable and DLL"),
+    )
     args = parser.parse_args(argv)
     errors = verify_release_locks(
         args.manifest, release_index_path=args.release_index,
@@ -691,6 +820,9 @@ def main(argv: list[str] | None = None) -> int:
         errors.extend(match_errors)
     if args.spdx3 or args.cyclonedx:
         errors.extend(verify_additional_sbom_root_versions(args.spdx3, args.cyclonedx, args.manifest))
+    if args.package_dir is not None:
+        errors.extend(verify_runtime_binding(args.package_dir, {
+            "SPDX 2.3": args.spdx, "SPDX 3": args.spdx3, "CycloneDX": args.cyclonedx}))
     if errors:
         seen = set()
         for err in errors:
@@ -705,6 +837,8 @@ def main(argv: list[str] | None = None) -> int:
         checked_items.append("expected release version")
     if args.spdx3 or args.cyclonedx:
         checked_items.append("additional SBOM root versions")
+    if args.package_dir is not None:
+        checked_items.append("runtime manifest hashes")
     if args.spdx:
         checked_items.append("SBOM elements")
         py_digest = verified_digests["python"]

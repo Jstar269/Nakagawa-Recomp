@@ -96,6 +96,7 @@ typedef struct {
     uint32_t expected_data_file_count;
     bool requires_font_firmware;
     bool requires_psmf;
+    uint8_t analog_dead_zone_counts;   /* input.analog_dead_zone.counts; 0 when not declared */
     NkModuleDefinition modules[MAX_MODULES];
     char module_names[MAX_MODULES][129];
     int module_count;
@@ -162,6 +163,7 @@ static void overlay_slot_anchor(OverlayStorageSlot *dest) {
     dest->entry.expected_data_file_count = dest->expected_data_file_count;
     dest->entry.requires_font_firmware = dest->requires_font_firmware;
     dest->entry.requires_psmf = dest->requires_psmf;
+    dest->entry.analog_dead_zone_counts = dest->analog_dead_zone_counts;
     for (int m = 0; m < dest->module_count; m++) {
         dest->modules[m].name = dest->module_names[m];
     }
@@ -606,6 +608,7 @@ typedef struct ManifestParse {
     size_t loose_root_count;
     bool has_font_feature;
     bool has_psmf_feature;
+    uint8_t analog_dead_zone_counts;
     uint32_t expected_file_count;
     uint32_t fallback_entry;
 } ManifestParse;
@@ -620,7 +623,7 @@ static bool manifest_parse_identity(ManifestParse *mp) {
         "schema_version", "id", "display_name", "kind", "disc", "executable",
         "modules", "filesystem", "hle_profile", "feature_requirements",
         "compatibility_manifest", "verification_profile", "codegen_profile", "notes",
-        "runtime_contract", "profile_zero", "runtime_bindings", "game_name", NULL
+        "runtime_contract", "profile_zero", "runtime_bindings", "game_name", "input", NULL
     };
     static const char * const required_root_keys[] = {
         "schema_version", "id", "display_name", "kind", "executable",
@@ -1324,7 +1327,7 @@ static bool manifest_parse_features(ManifestParse *mp) {
     return true;
 }
 
-/* The optional compatibility manifest and notes (checks 13-14). */
+/* The optional compatibility manifest, notes and input (checks 13-14a). */
 static bool manifest_parse_optional_fields(ManifestParse *mp) {
     char *error_buf = mp->error_buf;
     size_t error_buf_len = mp->error_buf_len;
@@ -1345,6 +1348,42 @@ static bool manifest_parse_optional_fields(ManifestParse *mp) {
             if (error_buf) snprintf(error_buf, error_buf_len, "$.notes: must be a string <= 2048 characters");
             return false;
         }
+    }
+
+    /* 14a. input (optional): how the title reads its controls. The rules are
+       tools/title_manifest.py validate_input's. An overlay carries the value in its own
+       entry, as it carries every other field; nothing is merged from a public entry. An
+       overlay that declares no input block has none. */
+    JsonNode *input_node = obj_get(root, "input");
+    if (input_node) {
+        static const char * const input_keys[] = {"analog_dead_zone", NULL};
+        static const char * const zone_keys[] = {"shape", "counts", NULL};
+        if (!check_object_keys(input_node, "$.input", input_keys, input_keys, error_buf, error_buf_len)) {
+            return false;
+        }
+        JsonNode *zone = obj_get(input_node, "analog_dead_zone");
+        if (!check_object_keys(zone, "$.input.analog_dead_zone", zone_keys, zone_keys,
+                               error_buf, error_buf_len)) {
+            return false;
+        }
+        JsonNode *shape = obj_get(zone, "shape");
+        if (shape->type != JSON_STRING || strcmp(shape->u.str_val, "square") != 0) {
+            if (error_buf) snprintf(error_buf, error_buf_len,
+                                    "$.input.analog_dead_zone.shape: unsupported dead-zone shape");
+            return false;
+        }
+        JsonNode *counts = obj_get(zone, "counts");
+        if (counts->type != JSON_NUMBER || !counts->u.num.is_integer) {
+            if (error_buf) snprintf(error_buf, error_buf_len,
+                                    "$.input.analog_dead_zone.counts: must be an integer");
+            return false;
+        }
+        if (counts->u.num.int_val < 1 || counts->u.num.int_val > 126) {
+            if (error_buf) snprintf(error_buf, error_buf_len,
+                                    "$.input.analog_dead_zone.counts: must be in range 1..126");
+            return false;
+        }
+        mp->analog_dead_zone_counts = (uint8_t)counts->u.num.int_val;
     }
     return true;
 }
@@ -1616,6 +1655,7 @@ static void manifest_build_slot(const ManifestParse *mp, OverlayStorageSlot *out
     out->expected_data_file_count = mp->expected_file_count;
     out->requires_font_firmware = mp->has_font_feature;
     out->requires_psmf = mp->has_psmf_feature;
+    out->analog_dead_zone_counts = mp->analog_dead_zone_counts;
 
     out->module_count = (int)mp->mods_node->u.arr.count;
     for (int i = 0; i < out->module_count; i++) {
@@ -1656,6 +1696,7 @@ static void manifest_build_slot(const ManifestParse *mp, OverlayStorageSlot *out
     out->entry.expected_data_file_count = out->expected_data_file_count;
     out->entry.requires_font_firmware = out->requires_font_firmware;
     out->entry.requires_psmf = out->requires_psmf;
+    out->entry.analog_dead_zone_counts = out->analog_dead_zone_counts;
     out->entry.modules = out->modules;
     out->entry.module_count = out->module_count;
 }

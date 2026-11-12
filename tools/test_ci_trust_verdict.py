@@ -11,12 +11,14 @@ leaves the process and no real pull request is opened.
 
 from __future__ import annotations
 
+import ast
 import copy
 import json
 import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -3117,6 +3119,200 @@ class CommandLineTests(unittest.TestCase):
     def test_snapshot_cannot_be_posted(self) -> None:
         with mock.patch("sys.stderr"), self.assertRaises(SystemExit):
             self._main(Scenario().raw, "--post")
+
+
+class GateCodeTests(unittest.TestCase):
+    """The code that decides what the publication gate passes is a protected path.
+
+    Failing-before: ``tools/publish_audit.py``, ``tools/policy_sync.py`` and the modules they import were
+    not protected. They ran only from the pull request's own checkout, and the trusted attestation did not
+    judge a file that is outside the publication profile and is not implementation. A pull request could
+    therefore loosen the audit, add such a file, and reach a green verdict with no ``ci-change-approved``.
+    """
+
+    # The tools the trusted checkout runs, with secrets or to judge a head, and the public-export job's
+    # tool. Every local hook pre-commit runs is added to these in ``setUpClass``.
+    TRUSTED_ROOTS = (
+        "tools/ci_trust_verdict.py",
+        "tools/provenance_attest_verify.py",
+        "tools/publish_audit.py",
+        "tools/build_public_export.py",
+    )
+    tree: dict[str, str]
+    protected: set[str]
+    hooks: set[str]
+    roots: tuple[str, ...]
+    # Imports that a gate never executes, each with the reason. Everything else a root can load is followed.
+    NOT_LOADED_BY_A_GATE = {
+        # Inside the draft and publish commands only; the audit calls the package validator, which is
+        # pure Python over the package's JSON.
+        ("tools/enhancement_package.py", "tools/analyze.py"),
+        ("tools/enhancement_package.py", "tools/imports.py"),
+        # A subprocess of the public-export job that checks the export's SBOM against the generator's
+        # output. It does not decide whether a file may be published (publish_audit.py and
+        # history_audit.py do), and it loads the analyzer and code generator, about 30 modules that
+        # would all need the approval for every change.
+        ("tools/build_public_export.py", "tools/verify_sbom.py"),
+    }
+    @classmethod
+    def setUpClass(cls) -> None:
+        texts = [path.read_text(encoding="utf-8") for path in sorted(WORKFLOWS.glob("*.y*ml"))]
+        listed = subprocess.run(["git", "-C", str(ROOT), "ls-files", "-z"], check=True, capture_output=True).stdout
+        cls.tree = {path: "x" for path in listed.decode("utf-8").split("\0") if path}
+        cls.protected = ctv.protected_paths(cls.tree, cls.tree, texts)
+        config = (ROOT / ".pre-commit-config.yaml").read_text(encoding="utf-8")
+        cls.hooks = set(re.findall(r"(?m)^\s+entry: python (tools/[A-Za-z0-9_/]+\.py)\b", config))
+        cls.roots = (*cls.TRUSTED_ROOTS, *sorted(cls.hooks))
+
+    @staticmethod
+    def _resolve(module: str, level: int, here: Path) -> list[str]:
+        """Every tools/ file that importing ``module`` from ``here`` loads: packages' __init__ files too."""
+        base = here.parent if level else ROOT / "tools"
+        for _ in range(max(level - 1, 0)):
+            base = base.parent
+        parts = [part for part in module.split(".") if part]
+        if not level and parts[:1] == ["tools"]:
+            parts = parts[1:]
+        found: list[Path] = []
+        for part in parts:
+            if (base / part / "__init__.py").is_file():
+                found.append(base / part / "__init__.py")
+                base = base / part
+            elif (base / f"{part}.py").is_file():
+                found.append(base / f"{part}.py")
+                break
+            else:
+                break
+        return [path.relative_to(ROOT).as_posix() for path in found]
+
+    @classmethod
+    def _imports(cls, path: str) -> set[str]:
+        """Local modules ``path`` imports anywhere in its text, except under ``if TYPE_CHECKING:``."""
+        file = ROOT / path
+        parsed = ast.parse(file.read_text(encoding="utf-8"))
+        typing_only = {id(node) for block in ast.walk(parsed)
+                       if isinstance(block, ast.If) and getattr(block.test, "id", "") == "TYPE_CHECKING"
+                       for statement in block.body for node in ast.walk(statement)}
+        found: set[str] = set()
+        for node in ast.walk(parsed):
+            if id(node) in typing_only:
+                continue
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    found.update(cls._resolve(alias.name, 0, file))
+            elif isinstance(node, ast.ImportFrom):
+                found.update(cls._resolve(node.module or "", node.level, file))
+                for alias in node.names:
+                    found.update(cls._resolve(f"{node.module or ''}.{alias.name}".strip("."), node.level, file))
+        return found | cls._subprocess_tools(parsed)
+
+    @staticmethod
+    def _subprocess_tools(parsed: ast.AST) -> set[str]:
+        """tools/ scripts named as ``<root> / "tools" / "<name>.py"``, the form the gate tools run them by."""
+        found: set[str] = set()
+        for node in ast.walk(parsed):
+            if (isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div)
+                    and isinstance(node.right, ast.Constant) and isinstance(node.right.value, str)
+                    and node.right.value.endswith(".py")
+                    and isinstance(node.left, ast.BinOp) and isinstance(node.left.right, ast.Constant)
+                    and node.left.right.value == "tools" and (ROOT / "tools" / node.right.value).is_file()):
+                found.add(f"tools/{node.right.value}")
+        return found
+
+    def _closure(self) -> set[str]:
+        seen: set[str] = set()
+        todo = list(self.roots)
+        while todo:
+            path = todo.pop()
+            if path in seen:
+                continue
+            seen.add(path)
+            todo.extend(target for target in self._imports(path) if (path, target) not in self.NOT_LOADED_BY_A_GATE)
+        return seen
+
+    def test_every_module_a_gate_loads_is_protected(self) -> None:
+        closure = self._closure()
+        self.assertEqual(sorted(path for path in closure if path not in self.protected), [])
+        # The roots are real files, and the walk found the modules this change is about.
+        self.assertLessEqual(set(self.roots), set(self.tree))
+        for path in ("tools/publication_policy.py", "tools/provenance_ledger.py", "tools/public_export.py",
+                     "tools/nk_core/git_isolation.py", "tools/nk_core/__init__.py", "tools/enhancement_package.py",
+                     "tools/history_audit.py"):
+            self.assertIn(path, closure)
+
+    def test_the_walk_follows_the_scripts_a_gate_runs(self) -> None:
+        # Failing-before (review 2387-22495ab5fee4 S2): only imports were followed, so a script the
+        # public-export job runs as a subprocess, such as history_audit.py, was outside the closure.
+        self.assertEqual(self._imports("tools/build_public_export.py") & {
+            "tools/publish_audit.py", "tools/history_audit.py", "tools/verify_sbom.py"},
+            {"tools/publish_audit.py", "tools/history_audit.py", "tools/verify_sbom.py"})
+
+    def test_a_new_tools_module_named_like_the_standard_library_is_protected(self) -> None:
+        # Failing-before (review 2387-22495ab5fee4 S3): an added tools/fnmatch.py replaced the fnmatch the
+        # audit imports, and no listed path changed.
+        for path in ("tools/fnmatch.py", "tools/json/__init__.py", "tools/tempfile.pyc", "tools/glob.PY",
+                     "tools/hashlib.cpython-315-x86_64-linux-gnu.so"):
+            with self.subTest(path=path):
+                protected = ctv.protected_paths({}, {path: "1"}, [])
+                self.assertEqual(ctv.protected_changes({}, {path: "1"}, {}, protected),
+                                 [{"path": path, "kind": "added"}])
+        for path in ("tools/fnmatch_rules.py", "tools/json/data.json", "tools/nk_core/json.py", "docs/json.py"):
+            with self.subTest(path=path):
+                self.assertNotIn(path, ctv.protected_paths({}, {path: "1"}, []))
+        # Nothing in the tree today is named so; the rule costs no approval for an existing file.
+        self.assertEqual(sorted(path for path in self.tree if ctv._shadows_stdlib(path)), [])
+
+    def test_the_exemptions_are_real_edges_inside_functions(self) -> None:
+        for source, target in sorted(self.NOT_LOADED_BY_A_GATE):
+            with self.subTest(source=source, target=target):
+                self.assertIn(target, self._imports(source))
+                parsed = ast.parse((ROOT / source).read_text(encoding="utf-8"))
+                module = Path(target).stem
+                top_level = [node for node in parsed.body if isinstance(node, (ast.Import, ast.ImportFrom))
+                             and module in ([alias.name for alias in node.names] + [getattr(node, "module", "")])]
+                self.assertEqual(top_level, [], "an exempt edge must not run when the module is loaded")
+                self.assertNotIn(target, self.protected, "an exempt edge to a protected file needs no exemption")
+
+    def test_every_local_pre_commit_hook_is_protected(self) -> None:
+        # The hooks are read from the configuration, so a new one is a root the day it is added.
+        for hook in ("tools/publish_audit.py", "tools/policy_sync.py", "tools/modified_file_notice_audit.py",
+                     "tools/provenance_record_gap.py", "tools/lint_docs.py"):
+            self.assertIn(hook, self.hooks)
+        self.assertEqual(sorted(self.hooks - self.protected), [])
+        # Every hook that runs a local tool is written in the one form the pattern reads.
+        config = (ROOT / ".pre-commit-config.yaml").read_text(encoding="utf-8")
+        local = re.findall(r"(?m)^\s+entry: (.*tools/.*)$", config)
+        self.assertEqual(len(local), len(re.findall(r"(?m)^\s+entry: python tools/[A-Za-z0-9_/]+\.py\b", config)), local)
+
+    def test_a_change_to_the_audit_needs_the_approval(self) -> None:
+        for path in ("tools/publish_audit.py", "tools/policy_sync.py", "tools/publication_policy.py",
+                     "tools/nk_core/git_isolation.py", ".gitattributes"):
+            with self.subTest(path=path):
+                trusted = {path: "1"}
+                candidate = {path: "2"}
+                protected = ctv.protected_paths(trusted, candidate, [])
+                self.assertEqual(ctv.protected_changes(trusted, candidate, trusted, protected),
+                                 [{"path": path, "kind": "modified"}])
+
+    def test_importing_the_git_environment_helper_loads_no_other_package_module(self) -> None:
+        # tools/nk_core/__init__.py resolves its exports on first use. Were it eager, every gate would run
+        # the preparation engine and the code generator at import, and they would be gate code too.
+        script = ("import sys; sys.path.insert(0, 'tools'); import nk_core.git_isolation; "
+                  "print(sorted(name for name in sys.modules if name.split('.')[0] == 'nk_core'))")
+        result = subprocess.run([sys.executable, "-c", script], cwd=ROOT, check=True, capture_output=True, text=True)
+        self.assertEqual(result.stdout.strip(), "['nk_core', 'nk_core.git_isolation']")
+
+    def test_the_package_still_exports_its_names(self) -> None:
+        script = ("import sys; sys.path.insert(0, 'tools'); import nk_core; "
+                  "from nk_core import TitleRegistry, inspect_iso, package_cache; "
+                  "assert sorted(nk_core.__all__) == sorted(nk_core._EXPORTS); "
+                  "assert all(getattr(nk_core, name) is not None for name in nk_core.__all__); "
+                  "print(TitleRegistry.__module__, inspect_iso.__module__, package_cache.__name__)")
+        result = subprocess.run([sys.executable, "-c", script], cwd=ROOT, check=True, capture_output=True, text=True)
+        self.assertEqual(result.stdout.strip(), "nk_core.title_registry nk_core.iso_inspect nk_core.package_cache")
+        missing = subprocess.run([sys.executable, "-c", "import sys; sys.path.insert(0, 'tools'); import nk_core; nk_core.nope"],
+                                 cwd=ROOT, check=False, capture_output=True, text=True)
+        self.assertIn("AttributeError", missing.stderr)
 
 
 if __name__ == "__main__":

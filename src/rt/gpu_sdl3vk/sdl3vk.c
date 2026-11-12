@@ -52,7 +52,7 @@
 
 #define PSP_W 480
 #define PSP_H 272
-#define PRESENT_FRAMES 3
+#define PRESENT_FRAMES SDL3VK_PRESENT_FRAMES
 #define HUD_W 240
 #define HUD_H 108
 #define LOGIC_NOTICE_H 22
@@ -75,6 +75,7 @@ typedef struct PresentFrame {
     VkDeviceMemory fbimg_mem;
     VkImage source;
     int submitted;
+    uint64_t serial;  /* its latest submission's (sdl3vk_present_completed) */
     int ts_written;   /* SR_GPU_TIMESTAMPS: this recording holds its start/end pair */
 } PresentFrame;
 
@@ -216,6 +217,9 @@ static int (*s_logic_slowed_cb)(unsigned *rate) = NULL;
 static SDL_Surface  *s_hud_surf = NULL;
 static SDL_Renderer *s_hud_ren = NULL;
 static VkFormat      s_hud_fmt = VK_FORMAT_UNDEFINED;
+/* The last HUD composition (#314): how many times a present copied the HUD into the window's
+ * image, the rectangle it covered, and the image's size then. The capture selftest checks it. */
+static struct { unsigned copies; int x, y, w, h, swap_w, swap_h; } s_hud_last;
 
 int sdl3vk_hud_is_enabled(void) {
     return s_hud_enabled != SDL3VK_HUD_OFF;
@@ -259,6 +263,9 @@ void sdl3vk_set_logic_slowed_cb(int (*cb)(unsigned *rate)) {
 
 static void (*s_ui_pass)(const Sdl3VkUiPass *frame);
 static Sdl3VkShowPass s_show_pass;
+static Sdl3VkShowDone s_show_done;
+static uint64_t s_present_submitted;  /* present submissions made, the newest one's serial */
+static uint64_t s_present_completed;  /* sdl3vk_present_completed */
 static Sdl3VkUpscalePass s_upscale_pass;
 static Sdl3VkUpscalePass s_rec_upscale_pass;  /* the recording's own upscaler (#2138) */
 static int s_upscale_cpu_frame;  /* the last source present's kind, for the held presents */
@@ -273,6 +280,27 @@ static struct {
 
 void sdl3vk_set_show_pass(Sdl3VkShowPass pass) {
     s_show_pass = pass;
+}
+
+void sdl3vk_set_show_done(Sdl3VkShowDone done) {
+    s_show_done = done;
+}
+
+uint64_t sdl3vk_present_completed(void) {
+    return s_present_completed;
+}
+
+/* A frame's submission has been seen finished: its slot is free, and the completed count moves
+ * up to it (it never moves back, as slots can be waited out of order). */
+static void present_frame_finished(PresentFrame *f) {
+    f->submitted = 0;
+    f->source = VK_NULL_HANDLE;
+    if (f->serial > s_present_completed) s_present_completed = f->serial;
+}
+
+static void present_frame_submitted(PresentFrame *f) {
+    f->submitted = 1;
+    f->serial = ++s_present_submitted;
 }
 
 void sdl3vk_set_upscale_pass(Sdl3VkUpscalePass pass) {
@@ -341,8 +369,7 @@ static int wait_present_frame(PresentFrame *f) {
         s_renderer_terminal = 1;
         return 0;
     }
-    f->submitted=0;
-    f->source=VK_NULL_HANDLE;
+    present_frame_finished(f);
     if (f->ts_written) {
         uint64_t v[2];
         uint32_t q = (uint32_t)(f - s_frame) * 2u;
@@ -1956,8 +1983,7 @@ static int recover_unenqueued_present(PresentFrame *f, uint32_t idx) {
             s_renderer_terminal = 1;
             return 0;
         }
-        f->submitted = 0;
-        f->source = VK_NULL_HANDLE;
+        present_frame_finished(f);
     }
     if (s_swap_sem_done[idx]) {
         vkDestroySemaphore(s_dev, s_swap_sem_done[idx], NULL);
@@ -2447,6 +2473,13 @@ static void draw_hud_overlay(VkCommandBuffer cmd, PresentFrame *f, VkImage dst_i
             VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
     vkCmdCopyBufferToImage(cmd, f->hud_staging, dst_img,
                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &bic);
+    s_hud_last.copies++;
+    s_hud_last.x = ox;
+    s_hud_last.y = oy;
+    s_hud_last.w = hud_w;
+    s_hud_last.h = hud_h;
+    s_hud_last.swap_w = swap_w;
+    s_hud_last.swap_h = swap_h;
 }
 
 static int present_common(VkImage src, int srcw, int srch, const uint32_t *upload) {
@@ -2454,6 +2487,8 @@ static int present_common(VkImage src, int srcw, int srch, const uint32_t *uploa
     const char *why = NULL;
     int quit = 0;
     int presented = 0;
+    int pass_ran = 0;                /* the show pass recorded into this present (Sdl3VkShowDone) */
+    uint64_t pass_submission = 0;
     poll_input(&quit);
     if (quit) { why = "window closed during present"; goto fail_quit; }
     PresentFrame *f = &s_frame[s_frame_cursor];
@@ -2546,6 +2581,7 @@ static int present_common(VkImage src, int srcw, int srch, const uint32_t *uploa
         VkImage show = src;
         int showw = srcw, showh = srch;
         if (s_show_pass) {
+            pass_ran = 1;
             VkImage alt = (VkImage)s_show_pass((void *)cmd, (void *)src, &showw, &showh);
             if (alt) show = alt;
             else { showw = srcw; showh = srch; }
@@ -2705,7 +2741,8 @@ static int present_common(VkImage src, int srcw, int srch, const uint32_t *uploa
         }
         if (perf_submit_started) sr_perf_vulkan_submit(perf_submit_started);
         if (sr_perf_enabled) sr_perf_present_submit();
-        f->submitted = 1;
+        present_frame_submitted(f);
+        if (pass_ran) pass_submission = f->serial;
         f->source = upload ? VK_NULL_HANDLE : src;
         if (cap_in_submit)
             sr_capture_mark_recorded(upload ? SR_CAP_SRC_CPU : SR_CAP_SRC_GPU,
@@ -2829,8 +2866,7 @@ static int present_common(VkImage src, int srcw, int srch, const uint32_t *uploa
                 why = "capture fence wait failed"; goto fail;
             }
             if (perf_wait_started) sr_perf_vulkan_wait(perf_wait_started, 0);
-            f->submitted = 0;
-            f->source = VK_NULL_HANDLE;
+            present_frame_finished(f);
         }
         /* The frame reached the presentation engine (vkQueuePresentKHR succeeded above):
          * a readback/publication failure must not make the frame itself look unpresented,
@@ -2842,6 +2878,7 @@ static int present_common(VkImage src, int srcw, int srch, const uint32_t *uploa
         else
             sr_capture_publish_recorded(s_cap.map, s_cap_w * 4u, s_cap_order);
     }
+    if (pass_ran && s_show_done) s_show_done(1, pass_submission);
     return 1;
 
 display_busy:
@@ -2857,8 +2894,9 @@ fail_acquired:
     s_renderer_terminal = 1;
 fail:
     /* One exit for every failure above: the armed capture resolves as failed, never as
-     * an invented success. */
+     * an invented success, and a show pass learns its picture was not shown. */
     sr_capture_fail(why);
+    if (pass_ran && s_show_done) s_show_done(-1, pass_submission);
     return -1;
 fail_quit:
     sr_capture_fail(why);
@@ -3205,7 +3243,7 @@ int sdl3vk_present_overlay(const void *px, int pitch) {
         s_renderer_terminal = 1;
         return -1;
     }
-    f->submitted = 1;
+    present_frame_submitted(f);
     f->source = VK_NULL_HANDLE;
 
     VkPresentInfoKHR pi = { .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR };

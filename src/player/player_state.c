@@ -1194,6 +1194,7 @@ static const int k_part_tess_values[] = {2, 3, 4, 0};
 static const char *const k_part_tess_labels[] = {"2x", "3x", "4x", "Off"};
 static const char *const k_part_tess_words[] = {"2", "3", "4", "off"};
 static const char *const k_part_wide_words[] = {"fill", "off"};
+static const char *const k_part_load_words[] = {"fast", "off"};
 static const char *const k_part_upscale_labels[] = {"FSR 1", "Off"};
 static const char *const k_part_upscale_words[] = {"fsr1", "off"};
 
@@ -1216,7 +1217,7 @@ static const PlayerEnhancedPartInfo k_enhanced_parts[PLAYER_PART_COUNT] = {
      "Shows more 3D space; HUD stays shaped. Some objects pop in. Smooth motion disables it.",
      2, k_part_switch_values, k_part_switch_labels, k_part_wide_words, 0},
     {"smooth", "Smooth motion",
-     "Shows steady 30 FPS scenes at 60, others as they are. Adds about 17 ms of delay.",
+     "Smooths steady 30 FPS scenes only where it can follow the motion. Adds about 17 ms of delay.",
      2, k_part_switch_values, k_part_switch_labels, k_part_smooth_words, 0},
     /* A guest-visible item (contract 11.3.1): off by default until its "nothing worse" runs
        exist (11.2 item 4), with its own off switch in the library and each title (item 2). */
@@ -1237,6 +1238,19 @@ static const PlayerEnhancedPartInfo k_enhanced_parts[PLAYER_PART_COUNT] = {
     {"upscale", "Sharper enlarging",
      "AMD FSR 1 sharpens display and recordings; game memory and screenshots do not change.",
      2, k_part_switch_values, k_part_upscale_labels, k_part_upscale_words, 0},
+    /* A guest-visible item (contract 11.3.11): off by default; it acts only for a title whose
+       catalog entry declares the stick dead zone the game ignores. */
+    {"stick", "Stick dead zone",
+     "Ace only, in games that ignore part of the stick. Small pushes count; the feel changes.",
+     2, k_part_switch_values, k_part_switch_labels, k_part_switch_words, 0},
+    /* A guest-visible item (contract 11.3.10) that changes guest timing: off by default and in no
+       preset; it matters only for a title whose own package declares a load part, and only in Ace. */
+    {"load", "Short loads",
+     "Ace only, in games with a loading-wait package. Skips those waits; changes the game's timing.",
+     2, k_part_switch_values, k_part_switch_labels, k_part_load_words, 0},
+    {"twin", "Full 32-bit colour",
+     "Shows 16-bit games in full colour, without dither. Uses more memory.",
+     2, k_part_switch_values, k_part_switch_labels, k_part_switch_words, 0},
     /* A guest-visible item (contract 11.3.8): every present commits the smoothed frame to guest VRAM,
        as texture filtering does. Off by default until its "nothing worse" runs exist (11.2 item 4),
        with its own off switch in the library and each title (item 2). */
@@ -1336,6 +1350,7 @@ void player_app_settings_init_default(PlayerSettings *settings) {
     settings->share_system_libraries = true;
     settings->build_speed = PACKAGE_BUILD_SPEED_BALANCED;
     settings->check_updates_at_start = false;
+    settings->discord_presence = false;
     settings->picker_folder[0] = '\0';
     settings->rebuild_prompt_version[0] = '\0';
     settings->developer_mode = false;
@@ -1911,6 +1926,14 @@ NkResult player_app_load_settings(PlayerApp *app, const char *file_path) {
         app->settings.check_updates_at_start = update_val;
     }
 
+    /* Discord status: off unless the file says true. A build without a Discord application
+       ID keeps the stored choice but never acts on it (player_app_discord_tick). */
+    NkJsonNode *discord_node = nk_json_obj_get(root, "discord_presence");
+    bool discord_val = false;
+    if (discord_node && nk_json_get_bool(discord_node, &discord_val)) {
+        app->settings.discord_presence = discord_val;
+    }
+
     /* A folder that no longer fits is dropped, not cut short. */
     const char *picker_folder = nk_json_get_string(nk_json_obj_get(root, "picker_folder"));
     if (picker_folder && strlen(picker_folder) < sizeof(app->settings.picker_folder)) {
@@ -2164,6 +2187,8 @@ NkResult player_app_save_settings(const PlayerApp *app, const char *file_path) {
             package_build_speed_key(app->settings.build_speed));
     fprintf(f, "  \"check_updates_at_start\": %s,\n",
             app->settings.check_updates_at_start ? "true" : "false");
+    fprintf(f, "  \"discord_presence\": %s,\n",
+            app->settings.discord_presence ? "true" : "false");
     player_settings_write_string(f, "picker_folder", app->settings.picker_folder);
     player_settings_write_string(f, "rebuild_prompt_version",
                                  app->settings.rebuild_prompt_version);
@@ -2285,14 +2310,18 @@ void player_app_cycle_present_scaling(PlayerApp *app, int direction) {
    its 1x frame is enlarged about 4x or more on any screen of 1080p or more, past that range, on
    the weakest GPUs (Medium's and Handheld's frame passes it too on 1440p and 4K); High
    turns it off as Ultra without it, the plain 4x picture. No row sets frame pacing, Smooth
-   motion, Widescreen, texture filtering, sound, the readout, the badge or Finer patches
-   (which changes GE timing, section 11.3.7): those stay the library's and each game's own. docs/PLAYER_UI_DESIGN.md lists the same values, and
-   test_graphics_presets checks that every other part is -1, so a new part needs a choice. */
-#define PRESET_PARTS(text, upscale)                                                        \
-    {[PLAYER_PART_FILTERING] = -1, [PLAYER_PART_TEXT] = (text), [PLAYER_PART_READOUT] = -1, \
-     [PLAYER_PART_NOTICE] = -1, [PLAYER_PART_WIDE] = -1, [PLAYER_PART_SMOOTH] = -1,         \
-     [PLAYER_PART_SAS] = -1, [PLAYER_PART_TESS] = -1, [PLAYER_PART_CULL] = -1,              \
-     [PLAYER_PART_UPSCALE] = (upscale), [PLAYER_PART_MIPS] = -1}
+   motion, Widescreen, texture filtering, sound, the readout, the badge, Finer patches
+   (which changes GE timing, section 11.3.7), Short loads (which changes guest timing, section
+   11.3.10) or Full 32-bit colour (the host twin, section 10.11): those stay the library's and
+   each game's own. docs/PLAYER_UI_DESIGN.md lists the same values, and test_graphics_presets
+   checks that every other part is -1, so a new part needs a choice. */
+#define PRESET_PART_LIST(X, text, upscale)                                                \
+    X(FILTERING, -1) X(TEXT, (text)) X(READOUT, -1) X(NOTICE, -1) X(WIDE, -1) X(SMOOTH, -1) \
+    X(SAS, -1) X(TESS, -1) X(CULL, -1) X(UPSCALE, (upscale)) X(STICK, -1) X(LOAD, -1)    \
+    X(TWIN, -1) X(MIPS, -1)
+#define PRESET_PART_SET(part, value) [PLAYER_PART_##part] = value,
+#define PRESET_PART_ONE(part, value) + 1
+#define PRESET_PARTS(text, upscale) {PRESET_PART_LIST(PRESET_PART_SET, text, upscale)}
 static const PlayerGraphicsPresetRow k_graphics_presets[PLAYER_PRESET_COUNT] = {
     [PLAYER_PRESET_LOW] = {"low", "Low", "Low", 1, NK_PRESENT_SCALING_SHARP, true, -1,
                            PRESET_PARTS(1, 0)},
@@ -2306,10 +2335,15 @@ static const PlayerGraphicsPresetRow k_graphics_presets[PLAYER_PRESET_COUNT] = {
                                 NK_PRESENT_SCALING_SHARP, true, 1, PRESET_PARTS(1, 1)},
 };
 #undef PRESET_PARTS
-/* A new PLAYER_PART_* needs a value under each preset in PRESET_PARTS (-1 leaves it the
-   library's). A part PRESET_PARTS leaves out reads 0 (off), which test_graphics_presets catches by
-   requiring -1 for every part from 0 to PLAYER_PART_COUNT that it does not set, so no count
-   literal here has to change when a part is added. */
+/* A new PLAYER_PART_* fails to compile here ("size of array is negative") until
+   PRESET_PART_LIST gives it a value under each preset (-1 leaves it the library's): the list's
+   length is checked against the enum. A part the list leaves out would read 0 (off), which
+   test_graphics_presets also catches by requiring -1 for every part it does not set. */
+typedef char k_graphics_presets_name_every_part[
+    (0 PRESET_PART_LIST(PRESET_PART_ONE, 0, 0)) == PLAYER_PART_COUNT ? 1 : -1];
+#undef PRESET_PART_ONE
+#undef PRESET_PART_SET
+#undef PRESET_PART_LIST
 
 const PlayerGraphicsPresetRow *player_graphics_preset_row(int preset) {
     if (preset <= PLAYER_PRESET_CUSTOM || preset >= PLAYER_PRESET_COUNT) return NULL;
@@ -2808,12 +2842,25 @@ void player_app_toggle_ui_sounds(PlayerApp *app) {
     maybe_persist_settings(app);
 }
 
-bool player_read_title_enhancement(const char *user_root, const GameRecord *game,
-                                   PlayerTitleEnhancement *out) {
+bool player_app_shipped_enhancements_root(const PlayerApp *app, char *out, size_t out_size) {
+    if (!out || out_size == 0) return false;
+    out[0] = '\0';
+    /* The tree whose tools/nk_cli.py builds packages ships them: the same root a build uses. */
+    char source[NK_MAX_PATH];
+    char assets[NK_MAX_PATH];
+    return player_app_build_source_root(app, source, sizeof(source)) &&
+           player_join_path(assets, sizeof(assets), source, "assets") &&
+           player_join_path(out, out_size, assets, "enhancements");
+}
+
+bool player_read_title_enhancement(const char *user_root, const char *shipped_root,
+                                   const GameRecord *game, PlayerTitleEnhancement *out) {
     if (!out) return false;
     memset(out, 0, sizeof(*out));
     char key[PLAYER_DISC_ID_KEY_LEN];
-    if (!user_root || !user_root[0] || !game || game->is_sample ||
+    bool have_user = user_root && user_root[0];
+    bool have_shipped = shipped_root && shipped_root[0];
+    if ((!have_user && !have_shipped) || !game || game->is_sample ||
         game->is_showcase_package || !game->title_id[0] ||
         !player_disc_id_key(game->disc_id, key)) {
         return false;
@@ -2823,11 +2870,16 @@ bool player_read_title_enhancement(const char *user_root, const GameRecord *game
     snprintf(leaf, sizeof(leaf), "%s-60hz.json", key);
     char folder[MAX_PATH_LEN];
     char path[MAX_PATH_LEN];
-    if (!player_join_path(folder, sizeof(folder), user_root, "enhancements") ||
-        !player_join_path(path, sizeof(path), folder, leaf) ||
-        !nk_platform_file_exists(path)) {
-        return false;
+    bool found = have_user &&
+                 player_join_path(folder, sizeof(folder), user_root, "enhancements") &&
+                 player_join_path(path, sizeof(path), folder, leaf) &&
+                 nk_platform_file_exists(path);
+    if (!found && have_shipped && player_join_path(path, sizeof(path), shipped_root, leaf) &&
+        nk_platform_file_exists(path)) {
+        found = true;
+        out->shipped = true;
     }
+    if (!found) return false;
     FILE *f = nk_fopen_utf8(path, "rb");
     if (!f) {
         snprintf(out->problem, sizeof(out->problem), "Its enhancement package can't be read.");
@@ -2917,9 +2969,12 @@ static void player_app_select_package_variant(PlayerApp *app, int game_index) {
 void player_app_refresh_title_enhancements(PlayerApp *app) {
     if (!app) return;
     char user_root[NK_MAX_PATH];
+    char shipped[NK_MAX_PATH];
     bool have_root = player_app_data_root(app, user_root, sizeof(user_root));
+    bool have_shipped = player_app_shipped_enhancements_root(app, shipped, sizeof(shipped));
     for (int i = 0; i < app->game_count && i < MAX_LIBRARY_GAMES; i++) {
-        (void)player_read_title_enhancement(have_root ? user_root : NULL, &app->games[i],
+        (void)player_read_title_enhancement(have_root ? user_root : NULL,
+                                            have_shipped ? shipped : NULL, &app->games[i],
                                             &app->title_enhancements[i]);
         player_app_select_package_variant(app, i);
     }
@@ -2930,8 +2985,11 @@ void player_app_refresh_title_enhancements(PlayerApp *app) {
    package checked. */
 static void player_app_title_play_changed(PlayerApp *app, int game_index) {
     char user_root[NK_MAX_PATH];
+    char shipped[NK_MAX_PATH];
     bool have_root = player_app_data_root(app, user_root, sizeof(user_root));
+    bool have_shipped = player_app_shipped_enhancements_root(app, shipped, sizeof(shipped));
     (void)player_read_title_enhancement(have_root ? user_root : NULL,
+                                        have_shipped ? shipped : NULL,
                                         &app->games[game_index],
                                         &app->title_enhancements[game_index]);
     player_app_select_package_variant(app, game_index);
@@ -2997,6 +3055,15 @@ void player_play_resolve(const PlayerSettings *settings, const char *disc_id,
         out->part[p] = enhanced_part_value_index(p, value) >= 0 ? value : 0;
     }
     out->logic_60 = out->mode == PLAYER_PLAY_ACE && (!title || title->logic_60 != 0);
+    /* The stick dead zone is the title's own data, never a value in this file: the input block
+       of the entry found for the disc, a loaded overlay manifest's own or else the public
+       manifest's (carried into the generated catalog). Nothing is merged between the two. */
+    if (disc_id && disc_id[0]) {
+        nk_title_catalog_lock();
+        const NkTitleEntry *entry = nk_title_catalog_find_by_disc_id_locked(disc_id);
+        out->stick_counts = entry ? entry->analog_dead_zone_counts : 0;
+        nk_title_catalog_unlock();
+    }
 }
 
 void player_play_apply_logic_60(PlayerPlayResolved *play, bool logic_60) {
@@ -3023,20 +3090,34 @@ bool player_play_launch_line(const PlayerPlayResolved *play, char *out, size_t c
     used = (size_t)n;
     for (int p = 0; p < PLAYER_PART_COUNT; p++) {
         /* The upscaler travels as SR_PRESENT_UPSCALE (player_play_present_upscale), which the
-           launcher exports for every session; the runtime's SR_ACE line has no such key. */
-        if (p == PLAYER_PART_UPSCALE) continue;
-        /* cull is written last, below, whatever its place in the enum (the key order of
-           src/rt/ace.c's ace_format). */
-        if (p == PLAYER_PART_CULL) continue;
-        /* A missing mips is off (contract 11.3.8): the key is written only when the part is on. */
+           launcher exports for every session; the runtime's SR_ACE line has no such key. Stick,
+           load and cull come last, in the Ace line's own order (src/rt/ace.c), whatever the enum's. */
+        if (p == PLAYER_PART_UPSCALE || p == PLAYER_PART_STICK || p == PLAYER_PART_LOAD ||
+            p == PLAYER_PART_CULL) continue;
+        /* A missing mips is off (contract 11.3.8): the key is written only when the part is on,
+           right after twin. */
         if (p == PLAYER_PART_MIPS && play->part[p] != 1) continue;
         n = snprintf(out + used, cap - used, ";%s=%s", k_enhanced_parts[p].key,
                      enhanced_part_word(p, play->part[p]));
         if (n <= 0 || (size_t)n >= cap - used) { out[0] = '\0'; return false; }
         used += (size_t)n;
     }
-    /* A missing cull is off (contract 11.2 item 2): the line carries the key only when it is on. */
-    if (play->part[PLAYER_PART_CULL] == 1 && play->mode == PLAYER_PLAY_ACE) {
+    /* A missing stick, load or cull is off (contract 11.2 item 2): the line carries each key only
+       when it is on in an Ace launch. Stick also needs the title's declared dead zone: its value is
+       that count, not the part's word. */
+    if (play->mode == PLAYER_PLAY_ACE && play->part[PLAYER_PART_STICK] == 1 && play->stick_counts >= 1 &&
+        play->stick_counts <= ACE_STICK_COUNTS_MAX) {
+        n = snprintf(out + used, cap - used, ";stick=%d", play->stick_counts);
+        if (n <= 0 || (size_t)n >= cap - used) { out[0] = '\0'; return false; }
+        used += (size_t)n;
+    }
+    if (play->mode == PLAYER_PLAY_ACE && play->part[PLAYER_PART_LOAD] == 1) {
+        n = snprintf(out + used, cap - used, ";%s=%s", k_enhanced_parts[PLAYER_PART_LOAD].key,
+                     enhanced_part_word(PLAYER_PART_LOAD, 1));
+        if (n <= 0 || (size_t)n >= cap - used) { out[0] = '\0'; return false; }
+        used += (size_t)n;
+    }
+    if (play->mode == PLAYER_PLAY_ACE && play->part[PLAYER_PART_CULL] == 1) {
         n = snprintf(out + used, cap - used, ";%s=%s", k_enhanced_parts[PLAYER_PART_CULL].key,
                      enhanced_part_word(PLAYER_PART_CULL, 1));
         if (n <= 0 || (size_t)n >= cap - used) { out[0] = '\0'; return false; }
@@ -3273,6 +3354,47 @@ void player_app_toggle_update_check_at_start(PlayerApp *app) {
     player_dev_log_add(app, "settings", "check for updates at start %s",
                        app->settings.check_updates_at_start ? "on" : "off");
     maybe_persist_settings(app);
+}
+
+void player_app_toggle_discord_presence(PlayerApp *app) {
+    if (!app) return;
+    /* Fail closed: without an application ID (or local pipes) the switch cannot turn on. */
+    if (!app->settings.discord_presence && !nk_discord_available()) return;
+    app->settings.discord_presence = !app->settings.discord_presence;
+    player_dev_log_add(app, "settings", "Discord status %s",
+                       app->settings.discord_presence ? "on" : "off");
+    maybe_persist_settings(app);
+}
+
+bool player_app_discord_activity(const PlayerApp *app, NkDiscordActivity *out) {
+    if (out) memset(out, 0, sizeof(*out));
+    if (!app || !out || !app->is_game_running) return false;
+    PlayerPlayMode mode = app->running_play_mode == PLAYER_PLAY_ENHANCED ||
+                                  app->running_play_mode == PLAYER_PLAY_ACE
+                              ? app->running_play_mode
+                              : PLAYER_PLAY_AUTHENTIC;
+    return nk_discord_activity_make(out, app->running_title, player_play_mode_name(mode),
+                                    app->running_start_ms);
+}
+
+void player_app_discord_tick(PlayerApp *app, uint64_t now_ms) {
+    if (!app) return;
+    if (!app->settings.discord_presence || !nk_discord_available()) {
+        player_app_discord_shutdown(app);
+        return;
+    }
+    if (!app->discord_ready) {
+        nk_discord_client_init(&app->discord, NK_DISCORD_APPLICATION_ID, NULL, NULL);
+        app->discord_ready = true;
+    }
+    NkDiscordActivity activity;
+    bool show = player_app_discord_activity(app, &activity);
+    nk_discord_client_update(&app->discord, show ? &activity : NULL, now_ms);
+}
+
+void player_app_discord_shutdown(PlayerApp *app) {
+    if (!app || !app->discord_ready) return;
+    nk_discord_client_shutdown(&app->discord);
 }
 
 void player_app_toggle_share_system_libraries(PlayerApp *app) {
@@ -5159,6 +5281,7 @@ void player_launch_work_run(PlayerLaunchWork *work) {
                                    game->enhancement_package_id[0] != '\0',
                                    work->headless_accept_presented_frames > 0u, &session->config,
                                    &ace);
+        work->play_mode = ace.on ? ace.mode : PLAYER_PLAY_AUTHENTIC;
         /* The graphics preset (#2150) overlays the display rows for Enhanced and Ace only:
            an Authentic run keeps the user's own rows, since a render scale above 1x reaches
            guest VRAM (docs/ENHANCEMENT_CONTRACT.md 10.3). */
@@ -5273,6 +5396,11 @@ bool player_app_launch_finish(PlayerApp *app, PlayerLaunchWork *work) {
 
     app->is_game_running = true;
     app->launch_time_ms = 0;
+    /* What Discord status shows while it runs (#2259): the title from the disc's own
+       metadata, the play mode and the start time; nothing else about the game or the PC. */
+    snprintf(app->running_title, sizeof(app->running_title), "%s", work->game.title_name);
+    app->running_play_mode = work->play_mode;
+    app->running_start_ms = (int64_t)time(NULL) * 1000;
     /* The library may have changed while the work ran: find the game again. */
     if (game_index < 0 || game_index >= app->game_count ||
         strcmp(app->games[game_index].disc_id, work->game.disc_id) != 0) {

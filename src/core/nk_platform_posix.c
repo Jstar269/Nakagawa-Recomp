@@ -1505,6 +1505,40 @@ unsigned long nk_platform_process_id(void) {
     return (unsigned long)getpid();
 }
 
+/* Local pipes are unsupported on POSIX: every open fails and the caller's feature stays
+   off. */
+bool nk_platform_local_pipe_supported(void) {
+    return false;
+}
+
+bool nk_platform_local_pipe_open(NkLocalPipe *pipe, const char *name) {
+    (void)name;
+    if (pipe) memset(pipe, 0, sizeof(*pipe));
+    return false;
+}
+
+bool nk_platform_local_pipe_write(NkLocalPipe *pipe, const void *data, size_t len,
+                                  unsigned timeout_ms) {
+    (void)pipe;
+    (void)data;
+    (void)len;
+    (void)timeout_ms;
+    return false;
+}
+
+long nk_platform_local_pipe_read(NkLocalPipe *pipe, void *buf, size_t cap) {
+    (void)pipe;
+    (void)buf;
+    (void)cap;
+    return -1;
+}
+
+void nk_platform_local_pipe_close(NkLocalPipe *pipe) {
+    if (!pipe) return;
+    pipe->handle = NULL;
+    pipe->open = false;
+}
+
 int nk_platform_last_os_error(void) {
     return errno;
 }

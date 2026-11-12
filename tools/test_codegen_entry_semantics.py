@@ -1355,5 +1355,349 @@ class SymbolMapFileTests(unittest.TestCase):
         self.assertIn("$(SYMBOL_MAP_PROFILE_LINE)", entries.group(1))
 
 
+# --- a varargs formatter at the address of the retired native sprintf bridge (#363) ----------
+
+_ZERO, _V0, _A0, _A1, _A2, _A3, _T0, _T1, _T2, _T3 = 0, 2, 4, 5, 6, 7, 8, 9, 10, 11
+_T4, _T5, _T6, _T7, _S0, _T8, _T9, _SP, _RA = 12, 13, 14, 15, 16, 24, 25, 29, 31
+
+
+def _itype(op: int, rs: int, rt: int, imm: int) -> int:
+    return (op << 26) | (rs << 21) | (rt << 16) | (imm & 0xFFFF)
+
+
+def _rtype(rs: int, rt: int, rd: int, funct: int, shamt: int = 0) -> int:
+    return (rs << 21) | (rt << 16) | (rd << 11) | (shamt << 6) | funct
+
+
+def _addiu(rt, rs, imm): return _itype(0x09, rs, rt, imm)
+def _sltiu(rt, rs, imm): return _itype(0x0B, rs, rt, imm)
+def _andi(rt, rs, imm): return _itype(0x0C, rs, rt, imm)
+def _lw(rt, offset, rs): return _itype(0x23, rs, rt, offset)
+def _lbu(rt, offset, rs): return _itype(0x24, rs, rt, offset)
+def _sb(rt, offset, rs): return _itype(0x28, rs, rt, offset)
+def _sw(rt, offset, rs): return _itype(0x2B, rs, rt, offset)
+def _addu(rd, rs, rt): return _rtype(rs, rt, rd, 0x21)
+def _subu(rd, rs, rt): return _rtype(rs, rt, rd, 0x23)
+def _sll(rd, rt, shamt): return _rtype(0, rt, rd, 0x00, shamt)
+def _jr(rs): return _rtype(rs, 0, 0, 0x08)
+
+
+# The label forms take the address map at assembly time.
+def _beq(rs, rt, label): return lambda pc, at: _itype(0x04, rs, rt, (at[label] - pc - 4) >> 2)
+def _jal(label): return lambda pc, at: (0x03 << 26) | ((at[label] >> 2) & 0x03FFFFFF)
+def _lui_hi(rt, label): return lambda pc, at: _itype(0x0F, 0, rt, at[label] >> 16)
+def _ori_lo(rt, rs, label): return lambda pc, at: _itype(0x0D, rs, rt, at[label] & 0xFFFF)
+
+
+def _assemble(base: int, program: list, at: dict[str, int]) -> dict[int, int]:
+    """Lay `program` (words, label-taking callables, and label names) out from `base`."""
+    pc = base
+    for item in program:
+        if isinstance(item, str):
+            at[item] = pc
+        else:
+            pc += 4
+    words, pc = {}, base
+    for item in program:
+        if isinstance(item, str):
+            continue
+        words[pc] = item(pc, at) if callable(item) else item
+        pc += 4
+    return words
+
+
+#: The address where --profile=hst emitted a native sprintf in place of the guest's own.
+FORMATTER = 0x000143B0
+#: A callable the HST profile seeds (tools/compat_overrides.py HST_ENTRY_ROLES); the fixture
+#: keeps it a leaf of its own so the profile's seed does not split the formatter's core.
+FORMATTER_LEAF = 0x00014430
+FORMATTER_CORE = 0x00014438
+FORMATTER_CASES = ("case_char", "case_string", "case_nibble", "case_skip")
+
+# int format(char *dst, const char *fmt, ...), PSP EABI: the variable arguments arrive in
+# a2, a3 and t0..t3, the entry spills them to its frame and passes their address on. After
+# the core returns, the entry ends the text through the destination it kept in its frame, as
+# sprintf does through its stream, so a frame lost across the core's computed transfers
+# shows in the text and in $ra.
+_FORMATTER_ENTRY = [
+    _addiu(_SP, _SP, -0x30),
+    _sw(_RA, 0x14, _SP),
+    _sw(_A0, 0x0C, _SP),
+    _sw(_A2, 0x18, _SP), _sw(_A3, 0x1C, _SP), _sw(_T0, 0x20, _SP),
+    _sw(_T1, 0x24, _SP), _sw(_T2, 0x28, _SP), _sw(_T3, 0x2C, _SP),
+    _jal("core"),
+    _addiu(_A2, _SP, 0x18),
+    _lw(_T0, 0x0C, _SP),
+    _lw(_RA, 0x14, _SP),
+    _addu(_T0, _T0, _V0),
+    _sb(_ZERO, 0, _T0),
+    _jr(_RA),
+    _addiu(_SP, _SP, 0x30),
+]
+# The core walks the format. A byte '0'..'3' selects a conversion through a jump table,
+# inside the loop and with the core's frame live: '0' stores the next argument's low byte,
+# '1' copies the string it points to, '2' stores 'A' plus its low nibble, '3' skips it.
+# Any other byte is copied. It returns the length written, like sprintf, and leaves the
+# terminator to its caller.
+_FORMATTER_CORE = [
+    "core",
+    _addiu(_SP, _SP, -0x20),
+    _sw(_RA, 0x1C, _SP),
+    _sw(_S0, 0x18, _SP),
+    _sw(_A0, 0x10, _SP),
+    _addu(_S0, _A2, _ZERO),
+    "loop",
+    _lbu(_T4, 0, _A1),
+    _addiu(_A1, _A1, 1),
+    _beq(_T4, _ZERO, "done"),
+    0,
+    _addiu(_T5, _T4, -0x30),
+    _sltiu(_T6, _T5, 4),
+    _beq(_T6, _ZERO, "literal"),
+    _sll(_T5, _T5, 2),
+    _lui_hi(_T6, "table"),
+    _ori_lo(_T6, _T6, "table"),
+    _addu(_T5, _T5, _T6),
+    _lw(_T5, 0, _T5),
+    _jr(_T5),
+    0,
+    "literal",
+    _sb(_T4, 0, _A0),
+    _beq(_ZERO, _ZERO, "loop"),
+    _addiu(_A0, _A0, 1),
+    "case_char",
+    _lw(_T7, 0, _S0),
+    _addiu(_S0, _S0, 4),
+    _sb(_T7, 0, _A0),
+    _beq(_ZERO, _ZERO, "loop"),
+    _addiu(_A0, _A0, 1),
+    "case_string",
+    _lw(_T7, 0, _S0),
+    _addiu(_S0, _S0, 4),
+    "copy",
+    _lbu(_T8, 0, _T7),
+    _beq(_T8, _ZERO, "loop"),
+    _addiu(_T7, _T7, 1),
+    _sb(_T8, 0, _A0),
+    _beq(_ZERO, _ZERO, "copy"),
+    _addiu(_A0, _A0, 1),
+    "case_nibble",
+    _lw(_T7, 0, _S0),
+    _addiu(_S0, _S0, 4),
+    _andi(_T7, _T7, 15),
+    _addiu(_T7, _T7, 0x41),
+    _sb(_T7, 0, _A0),
+    _beq(_ZERO, _ZERO, "loop"),
+    _addiu(_A0, _A0, 1),
+    "case_skip",
+    _beq(_ZERO, _ZERO, "loop"),
+    _addiu(_S0, _S0, 4),
+    "done",
+    _lw(_T9, 0x10, _SP),
+    _subu(_V0, _A0, _T9),
+    _lw(_RA, 0x1C, _SP),
+    _lw(_S0, 0x18, _SP),
+    _jr(_RA),
+    _addiu(_SP, _SP, 0x20),
+]
+
+
+def _formatter_fixture() -> tuple[dict[int, int], dict[str, int]]:
+    """The formatter's words and its labels; `table` is where _synthetic_elf puts .data."""
+    at = {"core": FORMATTER_CORE, "table": 0}
+    words: dict[int, int] = {}
+    for _ in range(2):   # the second pass sees the table's address
+        words = _assemble(FORMATTER, _FORMATTER_ENTRY, at)
+        words.update({FORMATTER_LEAF: _jr(_RA), FORMATTER_LEAF + 4: _addu(_V0, _ZERO, _ZERO)})
+        words.update(_assemble(FORMATTER_CORE, _FORMATTER_CORE, at))
+        for addr in range(FORMATTER, max(words), 4):
+            words.setdefault(addr, 0)
+        at["table"] = (max(words) + 4 + 0xFF) & ~0xFF
+    return words, at
+
+
+_FORMATTER_RECOMP_H = """\
+#ifndef TEST_RECOMP_H
+#define TEST_RECOMP_H
+#include <stdint.h>
+#define SR_CPUSTATE_ABI_VERSION 3u
+typedef struct CpuState { uint32_t r[32]; uint32_t pc; } CpuState;
+uint32_t test_mem_r8(uint32_t addr);
+uint32_t test_mem_r32(uint32_t addr);
+void test_mem_w8(uint32_t addr, uint32_t value);
+void test_mem_w32(uint32_t addr, uint32_t value);
+#define MEM_R8(a) test_mem_r8((uint32_t)(a))
+#define MEM_R32(a) test_mem_r32((uint32_t)(a))
+#define MEM_W8_PC(a, v, pc) test_mem_w8((uint32_t)(a), (uint32_t)(v))
+#define MEM_W32_PC(a, v, pc) test_mem_w32((uint32_t)(a), (uint32_t)(v))
+#define SR_YIELD(s, pc) ((void)0)
+#define sr_begin(s, pc, op) ((void)0)
+#define sr_end(s, addr, size) ((void)0)
+void dispatch(CpuState *s, uint32_t target);
+void dispatch_call(CpuState *s, uint32_t target, uint32_t resume_pc);
+int dispatch_call_checked(CpuState *s, uint32_t target, uint32_t resume_pc);
+void sr_register(uint32_t addr, void (*fn)(CpuState *));
+void sr_register_all(void);
+void sr_exec_span_reset(void);
+int sr_exec_span_register(uint32_t start, uint32_t end);
+void sr_raw_syscall(CpuState *s, uint32_t code, uint32_t pc);
+void sr_hle_call(CpuState *s, uint32_t nid);
+void sr_syscall(CpuState *s, uint32_t nid);
+void sr_unimplemented(uint32_t addr, const char *reason);
+""" + _TAIL_PROTOCOL_HEADER + """#endif
+"""
+
+_FORMATTER_DST = 0x0001D000
+_FORMATTER_TEXT = 0x0001E000
+_FORMATTER_STACK = 0x0001F000
+_FORMATTER_OUTCOME = (
+    "out=[Aserve|q|L|set|match] ret=20 sp=0x0001f000 ra=0x12345678 s0=0x5a5a5a5a")
+
+
+def _formatter_harness(at: dict[str, int]) -> str:
+    table = "\n".join(
+        f"    test_mem_w32(0x{at['table'] + 4 * index:08x}u, 0x{at[label]:08x}u);"
+        for index, label in enumerate(FORMATTER_CASES))
+    return f"""\
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "formatter_funcs.h"
+{_TAIL_PROTOCOL_IMPL}
+static uint8_t mem[0x20000];
+static uint8_t *at(uint32_t addr, uint32_t size) {{
+    if (addr > sizeof mem - size) abort();
+    return mem + addr;
+}}
+uint32_t test_mem_r8(uint32_t addr) {{ return *at(addr, 1u); }}
+void test_mem_w8(uint32_t addr, uint32_t value) {{ *at(addr, 1u) = (uint8_t)value; }}
+uint32_t test_mem_r32(uint32_t addr) {{
+    const uint8_t *p = at(addr, 4u);
+    return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
+}}
+void test_mem_w32(uint32_t addr, uint32_t value) {{
+    uint8_t *p = at(addr, 4u);
+    p[0] = (uint8_t)value; p[1] = (uint8_t)(value >> 8);
+    p[2] = (uint8_t)(value >> 16); p[3] = (uint8_t)(value >> 24);
+}}
+/* dispatch() runs what the generated registration recorded, as the runtime's does. */
+static struct {{ uint32_t addr; void (*fn)(CpuState *); }} registered[32];
+static unsigned registered_count;
+void sr_register(uint32_t addr, void (*fn)(CpuState *)) {{
+    if (registered_count == 32u) abort();
+    registered[registered_count].addr = addr;
+    registered[registered_count++].fn = fn;
+}}
+void sr_exec_span_reset(void) {{}}
+int sr_exec_span_register(uint32_t start, uint32_t end) {{ (void)start; (void)end; return 1; }}
+void sr_raw_syscall(CpuState *s, uint32_t code, uint32_t pc) {{ (void)s; (void)code; (void)pc; }}
+void sr_hle_call(CpuState *s, uint32_t nid) {{ (void)s; (void)nid; }}
+void sr_syscall(CpuState *s, uint32_t nid) {{ (void)s; (void)nid; }}
+void sr_unimplemented(uint32_t addr, const char *reason) {{ (void)addr; (void)reason; abort(); }}
+void dispatch(CpuState *s, uint32_t target) {{
+    for (unsigned i = 0; i < registered_count; i++) {{
+        if (registered[i].addr == target) {{ registered[i].fn(s); sr_tail_drain(s); return; }}
+    }}
+    abort();
+}}
+void dispatch_call(CpuState *s, uint32_t target, uint32_t resume_pc) {{
+    (void)resume_pc;
+    dispatch(s, target);
+}}
+int dispatch_call_checked(CpuState *s, uint32_t target, uint32_t resume_pc) {{
+    dispatch_call(s, target, resume_pc);
+    return 0;
+}}
+static uint32_t put(uint32_t addr, const char *text) {{
+    memcpy(at(addr, (uint32_t)strlen(text) + 1u), text, strlen(text) + 1u);
+    return addr;
+}}
+
+int main(void) {{
+    CpuState cpu = {{0}};
+    sr_register_all();
+{table}
+    memset(at(0x{_FORMATTER_DST:08x}u, 48u), '~', 48u);   /* an unterminated text shows */
+    cpu.r[4] = 0x{_FORMATTER_DST:08x}u;
+    cpu.r[5] = put(0x{_FORMATTER_TEXT:08x}u, "A1|0|2|31|1");
+    cpu.r[6] = put(0x{_FORMATTER_TEXT + 0x40:08x}u, "serve");   /* a2: '1' */
+    cpu.r[7] = 0x00000171u;                                     /* a3: '0', low byte 'q' */
+    cpu.r[8] = 0x0000002bu;                                     /* t0: '2', nibble 11 */
+    cpu.r[9] = 0xdeadbeefu;                                     /* t1: '3', skipped */
+    cpu.r[10] = put(0x{_FORMATTER_TEXT + 0x80:08x}u, "set");    /* t2: '1' */
+    cpu.r[11] = put(0x{_FORMATTER_TEXT + 0xc0:08x}u, "match");  /* t3: '1' */
+    cpu.r[16] = 0x5a5a5a5au;
+    cpu.r[29] = 0x{_FORMATTER_STACK:08x}u;
+    cpu.r[31] = 0x12345678u;
+    f_{FORMATTER:08x}(&cpu); sr_tail_drain(&cpu);
+    printf("out=[%s] ret=%u sp=0x%08x ra=0x%08x s0=0x%08x\\n",
+           (const char *)at(0x{_FORMATTER_DST:08x}u, 64u), cpu.r[2], cpu.r[29], cpu.r[31],
+           cpu.r[16]);
+    return 0;
+}}
+"""
+
+
+@unittest.skipUnless(CC, "gcc is required for the generated-C execution regression")
+class FormatterAtRetiredSprintfBridgeTests(unittest.TestCase):
+    """The function at 0x000143b0 runs its own instructions under every profile (#363).
+
+    --profile=hst used to emit a native sprintf there in place of the title's own, recorded
+    as hiding a formatter that corrupted %s arguments. This fixture is a formatter of the
+    same shape at that address: the entry spills the PSP EABI variable arguments (a2, a3,
+    t0..t3) to its frame, and the core picks each conversion through a jump table inside
+    its loop while its own frame is live, so every conversion is a computed transfer that
+    owes the core's frame, and the entry then reads its own frame again. It fails while the
+    profile emits anything but the guest's words there, and if the text, its terminator, the
+    return value, $ra or a callee-saved register come back wrong. The generated entry
+    rebalances $sp itself on every exit, so a lost frame shows in the terminator and $ra,
+    not in $sp. The drain is this harness's stand-in, so the fixture checks the generated
+    code, not the runtime's own drain (src/rt/guest_interp.c)."""
+
+    def _run(self, profile: str, work: Path) -> tuple[str, str]:
+        assert CC is not None
+        words, at = _formatter_fixture()
+        elf = work / "formatter.elf"
+        generated = work / "formatter.c"
+        elf.write_bytes(_synthetic_elf(
+            words, FORMATTER, pointers=tuple(at[label] for label in FORMATTER_CASES)))
+        result = subprocess.run(
+            [sys.executable, str(CODEGEN), str(elf), str(generated), f"--profile={profile}"],
+            cwd=ROOT, capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        chunks = sorted(work.glob("formatter_*.c"))
+        text = "\n".join(path.read_text(encoding="ascii") for path in chunks)
+        start = text.index(f"void f_{FORMATTER:08x}(CpuState *s)")
+        body = text[start:text.index("\nvoid ", start + 1)]
+        self.assertNotIn("custom stub", body,
+                         f"profile={profile} emits a hand-written body at 0x{FORMATTER:08x}")
+        self.assertIn(f"sr_begin(s, 0x{FORMATTER:08x}u, 0x{words[FORMATTER]:08x}u)", body,
+                      f"profile={profile} does not translate the guest's first word")
+        self.assertIn(f"f_{FORMATTER_CORE:08x}(s)", body, "the entry does not call its core")
+        (work / "recomp.h").write_text(_FORMATTER_RECOMP_H, encoding="ascii")
+        (work / "harness.c").write_text(_formatter_harness(at), encoding="ascii")
+        exe = work / "formatter.exe"
+        compiled = subprocess.run(
+            [CC, "-std=c11", "-O0", "-I", str(work), str(work / "harness.c"),
+             str(generated), *(str(path) for path in chunks), "-lm", "-o", str(exe)],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(compiled.returncode, 0, compiled.stderr + compiled.stdout)
+        ran = subprocess.run([str(exe)], capture_output=True, text=True)
+        self.assertEqual(ran.returncode, 0, ran.stderr + ran.stdout)
+        return body, ran.stdout.strip()
+
+    def test_the_guest_formatter_runs_and_formats_under_both_profiles(self):
+        bodies = {}
+        for profile in ("hst", "none"):
+            with self.subTest(profile=profile), \
+                    scratch_dir.TemporaryDirectory(prefix="formatter_") as tmp:
+                bodies[profile], outcome = self._run(profile, Path(tmp))
+                self.assertEqual(outcome, _FORMATTER_OUTCOME)
+        self.assertEqual(bodies.get("hst"), bodies.get("none"),
+                         "the formatter's entry diverged between profiles")
+
 if __name__ == "__main__":
     unittest.main()
