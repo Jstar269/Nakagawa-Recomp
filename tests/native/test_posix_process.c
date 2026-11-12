@@ -305,6 +305,27 @@ static void desktop_tool_subtest(void) {
 }
 #endif
 
+/* nk_platform_env_utf8 gives the bytes as they are: unset is 0, set and empty is 1, a value that
+   does not fit is -1, with `out` emptied. */
+static void env_utf8_subtest(void) {
+    printf("[POSIX_PROCESS_TEST] Subtest 11: nk_platform_env_utf8\n");
+    fflush(stdout);
+    const char *expected = "pack_\xC3\xA9\xE6\xBC\xA2";    /* 10 bytes */
+    char out[64];
+    assert(unsetenv("NK_ENV_UTF8_TEST") == 0);
+    out[0] = 'x';
+    assert(nk_platform_env_utf8("NK_ENV_UTF8_TEST", out, sizeof(out)) == 0 && out[0] == '\0');
+    assert(setenv("NK_ENV_UTF8_TEST", "", 1) == 0);
+    out[0] = 'x';
+    assert(nk_platform_env_utf8("NK_ENV_UTF8_TEST", out, sizeof(out)) == 1 && out[0] == '\0');
+    assert(setenv("NK_ENV_UTF8_TEST", expected, 1) == 0);
+    assert(nk_platform_env_utf8("NK_ENV_UTF8_TEST", out, sizeof(out)) == 1 && strcmp(out, expected) == 0);
+    assert(nk_platform_env_utf8("NK_ENV_UTF8_TEST", out, 11) == 1 && strcmp(out, expected) == 0);
+    out[0] = 'x';
+    assert(nk_platform_env_utf8("NK_ENV_UTF8_TEST", out, 10) == -1 && out[0] == '\0');
+    assert(unsetenv("NK_ENV_UTF8_TEST") == 0);
+}
+
 int main(int argc, char **argv) {
     if (argc >= 2 && strncmp(argv[1], "--child-", 8) == 0) return child_main(argc, argv);
     assert(nk_platform_get_executable_path(s_self, sizeof(s_self)));
@@ -498,6 +519,7 @@ int main(int argc, char **argv) {
 
     file_size_subtest();
     tool_dir_rule_subtest();
+    env_utf8_subtest();
 #if defined(__ANDROID__)
     android_refusals_subtest();
 #else

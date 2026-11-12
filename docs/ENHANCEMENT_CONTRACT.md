@@ -1292,9 +1292,10 @@ memory, no network; ZIP packs through the project's own `src/core/nk_zip.c` and 
   listed texture drawn from the pack's image from the draw that finds it, even with the 1:1 rule on, with
   `SR_TEX_REPLACE` alone and with xBRZ also on; a rewrite to unlisted
   content never drawn from the old image; the content returning replaced again; an image of no whole factor counted
-  and not used; neither an authentic start nor an Enhanced start without `texpack=on` reading a pack; and a
-  `texpack=on` start whose stored pack no longer reads (its folder gone, its `textures.ini` malformed), whose
-  budget is out of range or that names no folder refused, the renderer going on without it.
+  and not used; and neither an authentic start nor an Enhanced start without `texpack=on` reading a pack. Its
+  `replace-only` run, whose line carries `texpack=on`, refuses a stored pack that no longer reads (its folder gone,
+  its `textures.ini` naming no hash type or one the reader does not know), a budget out of range and a start that
+  names no folder, the renderer going on without the pack.
   `ace-selftest` checks the key (optional, off when missing, on or off only, written after `peak` and before
   `cull`); `test_player_state`'s `test_play_mode_texpack_settings` checks the settings round trip, the
   refusals, the line and the folder a launch gets; `test_launch_resolution` checks that only a `texpack=on`
@@ -2295,9 +2296,11 @@ The feature of section 10.12 (#1880). Its presentation is described there; this 
   the pack is not read whatever the environment says.
 - **Authentic stays byte-identical (section 11.2, item 1).** With the line `off`, `g_ace_on` stays 0 and
   `tex_repl_init` reads no pack; `gpu-texscale-selftest`'s `replace` cell starts the renderer authentic and with an
-  Enhanced line without the key, with `SR_TEX_REPLACE` set, and checks that neither reads the pack; it also draws a
-  texture the pack lists after the authentic start and compares the guest framebuffer, byte for byte, with the same
-  draw after a start without `SR_TEX_REPLACE`.
+  Enhanced line without the key, with `SR_TEX_REPLACE` set, and checks that neither reads the pack. It also draws a
+  texture the pack lists after that authentic start and checks that the guest framebuffer is byte for byte the same
+  draw's after a start without `SR_TEX_REPLACE`, and that the draw with the pack read differs, so the comparison can
+  fail. The draws run in the cell's scaling state; only the start is authentic, and with the line `off` the rest of
+  the frame is the renderer's authentic path, which the pack never reaches.
 - **Nothing worse (section 11.2, item 4):** not shown. A pack is the user's own content, so what it does to a title
   is the pack's; the runs item 4 lists, for a title and a pack, do not exist yet, and the feature may not be on by
   default before they do.

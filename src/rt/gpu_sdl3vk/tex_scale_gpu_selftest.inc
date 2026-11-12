@@ -941,7 +941,7 @@ static void xst_repl_expect(const uint32_t *img, int rf, uint32_t *want) {
  * scales what the pack leaves); the replaced content coming back is replaced again; an image that
  * is no whole factor of the texture is counted and the texture drawn as the game made it; the 1:1
  * rule that binds guest-resolution textures never applies to a replacement; and an authentic start
- * reads no pack. */
+ * reads no pack, so what it draws is what a start without SR_TEX_REPLACE draws. */
 static int xst_cell_replace(int f) {
     const int rf = 3, rw = XST_W * rf, rh = XST_H * rf, ww = 24;
     uint32_t a[XST_W * XST_H], b[XST_W * XST_H], d[XST_W * XST_H];
@@ -971,10 +971,12 @@ static int xst_cell_replace(int f) {
     tex_repl_init(0);
     const int authentic_read = s_repl != NULL;
     /* Contract 11.2 item 1: the listed texture drawn after that authentic start leaves the guest
-     * framebuffer byte for byte as a start without SR_TEX_REPLACE does. */
+     * framebuffer byte for byte as a start without SR_TEX_REPLACE does, and the same draw with the
+     * pack read leaves other bytes, so the comparison can fail. The draws run in this harness's
+     * scaling state; only the start is authentic. */
     const size_t fb_bytes = (size_t)XST_STRIDE * FB_H * 4u;
     uint8_t *fb_named = (uint8_t *)malloc(fb_bytes);
-    int authentic_same = 0;
+    int authentic_same = 0, pack_differs = 0;
     if (fb_named) {
         nk_tex_scale_set_sync(1);
         xst_reset();
@@ -992,6 +994,15 @@ static int xst_cell_replace(int f) {
         s_tmpl_ok = 0;
         drew = drew && xst_draw(20.0f, 140.0f);
         authentic_same = drew && memcmp(fb_named, SR_HOST(XST_BASE), fb_bytes) == 0;
+        tex_repl_shutdown();
+        s_repl = nk_texrepl_open(dir, 0, err, sizeof(err));
+        xst_reset();
+        xst_upload(a);
+        xst_state(XST_BASE, XST_TEX, 3u, 1, 1);
+        s_tmpl_ok = 0;
+        pack_differs = s_repl && xst_draw(20.0f, 140.0f) && memcmp(fb_named, SR_HOST(XST_BASE), fb_bytes) != 0;
+        tex_repl_shutdown();
+        s_repl = NULL;
         xst_setenv("SR_TEX_REPLACE", dir);
         free(fb_named);
     }
@@ -1002,45 +1013,17 @@ static int xst_cell_replace(int f) {
     tex_repl_shutdown();
     xst_setenv("SR_TEX_REPLACE", NULL);
     s_repl = saved;
-    if (authentic_read || !authentic_same || off_read || ace_requested()->texpack) {
+    if (authentic_read || !authentic_same || !pack_differs || off_read || ace_requested()->texpack) {
         fprintf(stderr, "gpu texscale selftest: FAIL replace: %s\n",
                 authentic_read ? "an authentic start read SR_TEX_REPLACE"
                 : !authentic_same ? "an authentic start with SR_TEX_REPLACE set drew other framebuffer bytes "
                                     "than one without it"
+                : !pack_differs ? "the listed texture drawn with the pack read left the framebuffer as without "
+                                  "it (the authentic comparison is vacuous)"
                 : off_read ? "an Enhanced start without texpack=on read SR_TEX_REPLACE"
                 : "the harness line carries texpack=on, so the off switch is not tested");
         free(rimg); free(wide);
         return 0;
-    }
-
-    /* A stored pack that no longer reads (its folder gone, or its textures.ini malformed): an Ace
-     * start refuses it with one TEX_REPLACE: refused line and returns, so the run goes on without it. */
-    {
-        char gone[400], bad_dir[400];
-        snprintf(gone, sizeof(gone), "%s/texrepl_gpu_gone_pack", SR_SELFTEST_BUILD_ROOT);
-        snprintf(bad_dir, sizeof(bad_dir), "%s/texrepl_gpu_bad_pack", SR_SELFTEST_BUILD_ROOT);
-        nk_platform_mkdir_p(bad_dir);
-        snprintf(path, sizeof(path), "%s/textures.ini", bad_dir);
-        FILE *f = nk_fopen_utf8(path, "wb");
-        const int wrote = f && fputs("[options]\nhash = crc32\n", f) >= 0;
-        if (f) fclose(f);
-        const char *const stored[2] = { gone, bad_dir };
-        for (int k = 0; k < 2; k++) {
-            saved = s_repl;
-            s_repl = NULL;
-            xst_setenv("SR_TEX_REPLACE", stored[k]);
-            tex_repl_init(1);
-            const int read = s_repl != NULL;
-            tex_repl_shutdown();
-            xst_setenv("SR_TEX_REPLACE", NULL);
-            s_repl = saved;
-            if (!wrote || read) {
-                fprintf(stderr, "gpu texscale selftest: FAIL replace: an unreadable stored pack (%s) was used\n",
-                        k ? "malformed textures.ini" : "folder gone");
-                free(rimg); free(wide);
-                return 0;
-            }
-        }
     }
 
     xst_reset();
@@ -1263,7 +1246,8 @@ int gegpu_texrepl_only_selftest(void) {
            "replace-only");
 
     /* The refusals of a texpack=on start (tex_repl_init): no folder named, a budget outside 1 to
-     * 8192 MB, a folder whose textures.ini names no hash, and a pack whose [games] names another
+     * 8192 MB, a stored folder that is gone, a folder whose textures.ini names no hash or a hash type
+     * the reader does not know, and a pack whose [games] names another
      * game than SR_DISC_ID (or a run with no SR_DISC_ID) each read no pack, so the run draws the
      * game's own textures; the same pack is read for the game it names. The pack this cell drew
      * from is put back afterwards. */
@@ -1284,6 +1268,13 @@ int gegpu_texrepl_only_selftest(void) {
     const int other_ok =
         fother && fputs("[options]\nhash = quick\n[games]\nULUS-99999 = textures.ini\n", fother) >= 0;
     if (fother) fclose(fother);
+    char gone[400], unknown_hash[400], unknown_ini[480];
+    snprintf(gone, sizeof(gone), "%s/texrepl_gpu_gone_pack", SR_SELFTEST_BUILD_ROOT);
+    snprintf(unknown_hash, sizeof(unknown_hash), "%s/texrepl_gpu_crc32_pack", SR_SELFTEST_BUILD_ROOT);
+    snprintf(unknown_ini, sizeof(unknown_ini), "%s/textures.ini", unknown_hash);
+    FILE *funknown = nk_platform_mkdir_p(unknown_hash) ? fopen(unknown_ini, "wb") : NULL;
+    const int unknown_ok = funknown && fputs("[options]\nhash = crc32\n", funknown) >= 0;
+    if (funknown) fclose(funknown);
     const char *disc_env = getenv("SR_DISC_ID");
     char disc_copy[64];
     snprintf(disc_copy, sizeof(disc_copy), "%s", disc_env ? disc_env : "");
@@ -1305,6 +1296,14 @@ int gegpu_texrepl_only_selftest(void) {
     xst_setenv("SR_TEX_REPLACE", bad);
     tex_repl_init(1);
     const int malformed_read = s_repl != NULL;
+    tex_repl_shutdown();
+    xst_setenv("SR_TEX_REPLACE", gone);
+    tex_repl_init(1);
+    const int gone_read = s_repl != NULL;
+    tex_repl_shutdown();
+    xst_setenv("SR_TEX_REPLACE", unknown_hash);
+    tex_repl_init(1);
+    const int unknown_read = s_repl != NULL;
     tex_repl_shutdown();
     xst_setenv("SR_TEX_REPLACE", other);
     xst_setenv("SR_DISC_ID", "NPJH50001");
@@ -1341,21 +1340,24 @@ int gegpu_texrepl_only_selftest(void) {
     xst_setenv("SR_DISC_ID", disc_copy[0] ? disc_copy : NULL);
     xst_setenv("SR_TEX_REPLACE", pack_copy);
     s_repl = drawn;
-    if (!ini_ok || !other_ok || !wide_ok || !wide_set || unnamed_read || budget_read || malformed_read ||
-        other_game_read || no_disc_read || !named_game_read || !wide_read) {
+    if (!ini_ok || !other_ok || !unknown_ok || !wide_ok || !wide_set || unnamed_read || budget_read ||
+        malformed_read || gone_read || unknown_read || other_game_read || no_disc_read || !named_game_read ||
+        !wide_read) {
         fprintf(stderr, "gpu texscale selftest: FAIL replace-only: %s\n",
-                !ini_ok || !other_ok || !wide_ok || !wide_set ? "cannot write the refused packs"
+                !ini_ok || !other_ok || !unknown_ok || !wide_ok || !wide_set ? "cannot write the refused packs"
                 : unnamed_read ? "texpack=on with no SR_TEX_REPLACE read a pack"
                 : budget_read ? "SR_TEX_REPLACE_BUDGET_MB=0 read a pack"
                 : malformed_read ? "a textures.ini with no hash type read a pack"
+                : gone_read ? "a stored pack whose folder is gone was read"
+                : unknown_read ? "a textures.ini with an unknown hash type read a pack"
                 : other_game_read ? "a pack whose [games] names another game was read"
                 : no_disc_read ? "a pack whose [games] names a game was read by a run with no SR_DISC_ID"
                 : !named_game_read ? "a pack was refused for the game its [games] names"
                 : "a pack in a folder with a non-ASCII name was refused");
         return 0;
     }
-    printf("gpu texscale selftest: PASS %-12s texpack=on with no folder, a bad budget, a malformed pack or "
-           "another game's pack reads none; a pack is read for the game it names and from a non-ASCII folder\n",
+    printf("gpu texscale selftest: PASS %-12s texpack=on with no folder, a bad budget, a gone folder, a "
+           "malformed pack or another game's pack reads none; a pack is read for the game it names and from a non-ASCII folder\n",
            "replace-only");
     return 1;
 }
