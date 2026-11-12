@@ -3,4 +3,10 @@
 <!-- Copyright (C) 2026 the Nakagawa Recomp authors -->
 <resources>
     <string name="app_name">Nakagawa</string>
+    <!-- LauncherActivity, while the on-device toolchain is unpacked on the first start. -->
+    <string name="toolchain_unpack_title">Unpacking the build tools</string>
+    <string name="toolchain_unpack_counting">Reading the archives</string>
+    <string name="toolchain_unpack_progress">%1$,d of %2$,d files</string>
+    <string name="toolchain_unpack_failed">The build tools could not be unpacked: %1$s</string>
+    <string name="toolchain_unpack_retry">Try again</string>
 </resources>

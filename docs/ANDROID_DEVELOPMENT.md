@@ -298,10 +298,16 @@ The app (`NakagawaHost`, with `ToolchainArchive` reading the archives) unpacks
 `NK_ANDROID_TOOLCHAIN_DIR` to that folder, `PYTHONHOME` to `python/` inside it, and `TMPDIR`
 to the app's cache folder (clang's temporary files), and every program the app starts inherits
 them. It sets them only once the unpack is complete: after a failed one they are absent, and a
-consumer must read that as "no usable toolchain", not guess the folder. A file lock keeps the
-main and title processes from unpacking at once, and every file is synced before the stamp that
-marks the unpack complete is written. The unpacker takes only folders and regular files, and
-refuses links, paths that leave the folder, damaged headers and archives that end early.
+consumer must read that as "no usable toolchain", not guess the folder. The unpack (about 4,300
+files) runs on a worker thread, once per process, on the first start after an install or update.
+Meanwhile the launcher shows the files done of the total, and the player starts once the unpack
+is complete. A failure shows its reason and a **Try again** button (touch, Enter or a controller's
+A button), and the player keeps waiting. A file lock keeps a second process from unpacking at
+once, and every file is synced before the stamp that marks the unpack complete is written last;
+a failed or interrupted unpack leaves no stamp, so the next start unpacks again. The title
+process never unpacks the toolchain: it sets the variables only when a complete unpack is
+already there. The unpacker takes only folders and regular files, and refuses links, paths that
+leave the folder, damaged headers and archives that end early.
 
 ## Storage
 

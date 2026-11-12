@@ -12,14 +12,14 @@ import android.util.Log;
 
 import java.io.BufferedInputStream;
 import java.io.File;
-import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.RandomAccessFile;
 import java.nio.channels.FileChannel;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
+import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 /**
  * What the native code needs from Android before it starts, shared by both activities.
@@ -37,7 +37,9 @@ import java.nio.file.Files;
  * NK_ANDROID_TOOLCHAIN_DIR names that folder, PYTHONHOME the python/ inside it and TMPDIR the
  * app's cache folder, which every program the app starts inherits. They are set only once the
  * unpack is complete; after a failed one they are absent, which means "no usable toolchain", and
- * a consumer must not guess the folder instead.
+ * a consumer must not guess the folder instead. The unpack (about 4,300 files) runs on a worker
+ * thread (ToolchainArchive.Install), never on the UI thread: the launcher shows its progress,
+ * or its failure with a way to retry, and starts the player once it is complete.
  *
  * <p>The bundled files are unpacked into the app's files folder itself: SDL_GetBasePath() is
  * "./" on Android, and SDL opens a relative path against the files folder
@@ -87,7 +89,11 @@ final class NakagawaHost {
         return out;
     }
 
-    /** Sets the environment and unpacks the bundled files when this APK version has not yet. */
+    /**
+     * Sets the environment and unpacks the bundled app files when this APK version has not yet.
+     * The toolchain is not unpacked here, on the UI thread: the launcher starts that
+     * ({@link #startToolchain}) and its variables are set once it is complete.
+     */
     static void prepare(Context context) {
         File data = dataDir(context);
         File app = appDir(context);
@@ -95,8 +101,8 @@ final class NakagawaHost {
         setenv("NK_ANDROID_DATA_DIR", data.getAbsolutePath());
         setenv("NK_ANDROID_APP_DIR", app.getAbsolutePath());
         setenv("NK_ANDROID_NATIVE_LIB_DIR", context.getApplicationInfo().nativeLibraryDir);
-        File toolchain = new File(app, "toolchain");
-        String stamp = apkStamp(context);
+        String apk = apkStamp(context);
+        String stamp = apk != null ? apk : "unknown";
         File stampFile = new File(app, ".unpacked");
         boolean bundlesToolchain;
         // The main and :title processes both get here: the lock keeps a second one from deleting
@@ -105,42 +111,46 @@ final class NakagawaHost {
              FileChannel channel = lockFile.getChannel()) {
             channel.lock();  // released when the channel closes
             bundlesToolchain = hasAssets(context.getAssets(), "toolchain");
-            if (!stamp.equals(readText(stampFile))) {
+            if (!stamp.equals(ToolchainArchive.readText(stampFile))) {
                 // Replace only what the APK bundles (assets/, titles/), never the user's data.
                 String[] bundled = context.getAssets().list("app");
                 if (bundled != null) {
                     for (String child : bundled) {
-                        deleteTree(new File(app, child));
+                        ToolchainArchive.deleteTree(new File(app, child));
                         copyAssetTree(context.getAssets(), "app/" + child, new File(app, child));
                     }
                 }
-                deleteTree(toolchain);
-                if (bundlesToolchain) unpackToolchain(context.getAssets(), toolchain);
-                // Written last, after every file is synced (ToolchainArchive, copyAssetTree):
-                // without it, the next start deletes and unpacks everything again.
-                writeText(stampFile, stamp);
+                // A toolchain this APK no longer carries goes, its stamp first; one it carries
+                // has its own stamp and is replaced by the launcher's unpack.
+                if (!bundlesToolchain) {
+                    ToolchainArchive.deleteTree(new File(app, TOOLCHAIN_STAMP));
+                    ToolchainArchive.deleteTree(new File(app, "toolchain"));
+                }
+                // Written last, after every file is synced (copyAssetTree): without it, the next
+                // start deletes and copies the bundled files again.
+                ToolchainArchive.writeText(stampFile, stamp);
                 Log.i(TAG, "BUNDLED_FILES_UNPACKED dir=" + app + " stamp=" + stamp);
             }
         } catch (IOException e) {
-            // The toolchain variables stay unset, so nothing is pointed at a partial toolchain/.
             Log.e(TAG, "BUNDLED_FILES_UNPACK_FAILED dir=" + app, e);
             return;
         }
-        // Only after a complete unpack, by this start or by an earlier one with the same stamp.
-        if (bundlesToolchain) {
-            setenv("NK_ANDROID_TOOLCHAIN_DIR", toolchain.getAbsolutePath());
-            setenv("PYTHONHOME", new File(toolchain, "python").getAbsolutePath());
-            // clang and Python write temporary files; an app may write only its own folders.
-            setenv("TMPDIR", context.getCacheDir().getAbsolutePath());
+        synchronized (NakagawaHost.class) {
+            sBundlesToolchain = bundlesToolchain;
         }
+        // Only after a complete unpack, by an earlier start with the same stamp; otherwise the
+        // variables stay unset, so nothing is pointed at a partial toolchain/.
+        if (bundlesToolchain && toolchain(context).isComplete()) setToolchainEnvironment(context);
     }
 
+    /** The APK's version and install time, or null when they cannot be read. */
     private static String apkStamp(Context context) {
         try {
             PackageInfo info = context.getPackageManager().getPackageInfo(context.getPackageName(), 0);
             return info.getLongVersionCode() + "-" + info.lastUpdateTime;
         } catch (Exception e) {
-            return "unknown";
+            Log.e(TAG, "cannot read the app's version", e);
+            return null;
         }
     }
 
@@ -150,15 +160,84 @@ final class NakagawaHost {
         {"clang-resource.tar", "clang-resource"},
         {"python-stdlib.tar", "python"},
     };
+    /** In the files folder: the toolchain unpack's stamp, written last, and its lock. */
+    private static final String TOOLCHAIN_STAMP = ".toolchain-unpacked";
+    private static final String TOOLCHAIN_LOCK = ".toolchain.lock";
 
-    private static void unpackToolchain(AssetManager assets, File toolchain) throws IOException {
-        for (String[] archive : TOOLCHAIN_ARCHIVES) {
-            File target = new File(toolchain, archive[1]);
-            try (InputStream in = new BufferedInputStream(assets.open("toolchain/" + archive[0]), 1 << 16)) {
-                int files = ToolchainArchive.unpack(in, target);
-                Log.i(TAG, "TOOLCHAIN_UNPACKED archive=" + archive[0] + " files=" + files + " dir=" + target);
-            }
+    /** Whether this APK bundles a toolchain, as the last {@link #prepare} found. */
+    private static boolean sBundlesToolchain;
+    /** This process's toolchain unpack: one, so an activity created again finds its run. */
+    private static ToolchainArchive.Install sToolchain;
+    private static ExecutorService sToolchainExecutor;
+
+    private static synchronized ToolchainArchive.Install toolchain(Context context) {
+        if (sToolchain == null) {
+            AssetManager assets = context.getApplicationContext().getAssets();
+            File app = appDir(context);
+            sToolchain = new ToolchainArchive.Install(
+                name -> new BufferedInputStream(assets.open("toolchain/" + name), 1 << 16),
+                TOOLCHAIN_ARCHIVES, new File(app, "toolchain"), new File(app, TOOLCHAIN_STAMP),
+                new File(app, TOOLCHAIN_LOCK), apkStamp(context));
         }
+        return sToolchain;
+    }
+
+    /**
+     * Starts the toolchain unpack on a worker thread when this APK bundles a toolchain that is not
+     * unpacked yet. Returns that unpack, for the caller to show and to wait on before anything
+     * uses the toolchain, or null when there is nothing to wait for. A run already going on, or one
+     * that failed, is returned as it is: {@link #retryToolchain} starts a failed one again. Only
+     * the launcher calls it; a title's runtime does not use the toolchain.
+     */
+    static synchronized ToolchainArchive.Install startToolchain(Context context) {
+        if (!sBundlesToolchain) return null;
+        ToolchainArchive.Install install = toolchain(context);
+        ToolchainArchive.Status.State state = install.status().state;
+        if (state == ToolchainArchive.Status.State.IDLE) {
+            if (install.isComplete()) return null;
+            install.start(toolchainExecutor(install));
+        }
+        return install;
+    }
+
+    /** Starts a failed toolchain unpack again; returns whether it started. */
+    static synchronized boolean retryToolchain(ToolchainArchive.Install install) {
+        return install.start(toolchainExecutor(install));
+    }
+
+    /**
+     * Waits until {@code install} has finished the unpack, then sets the toolchain's variables.
+     * Called on the thread that runs the player's main(), never on the UI thread.
+     */
+    static void awaitToolchain(Context context, ToolchainArchive.Install install) throws InterruptedException {
+        install.awaitDone();
+        setToolchainEnvironment(context);
+    }
+
+    /** One worker thread, which logs each run's outcome. */
+    private static Executor toolchainExecutor(ToolchainArchive.Install install) {
+        if (sToolchainExecutor == null) {
+            sToolchainExecutor = Executors.newSingleThreadExecutor(task -> new Thread(task, "nk-toolchain-unpack"));
+        }
+        ExecutorService executor = sToolchainExecutor;
+        return task -> executor.execute(() -> {
+            Log.i(TAG, "TOOLCHAIN_UNPACK_STARTED");
+            task.run();
+            ToolchainArchive.Status status = install.status();
+            if (status.state == ToolchainArchive.Status.State.DONE) {
+                Log.i(TAG, "TOOLCHAIN_UNPACKED files=" + status.done);
+            } else {
+                Log.e(TAG, "TOOLCHAIN_UNPACK_FAILED " + status);
+            }
+        });
+    }
+
+    private static void setToolchainEnvironment(Context context) {
+        File toolchain = new File(appDir(context), "toolchain");
+        setenv("NK_ANDROID_TOOLCHAIN_DIR", toolchain.getAbsolutePath());
+        setenv("PYTHONHOME", new File(toolchain, "python").getAbsolutePath());
+        // clang and Python write temporary files; an app may write only its own folders.
+        setenv("TMPDIR", context.getCacheDir().getAbsolutePath());
     }
 
     /** Whether the APK has assets under {@code path}; a failed listing is a failure, not "no". */
@@ -184,36 +263,5 @@ final class NakagawaHost {
         }
         if (!target.isDirectory() && !target.mkdirs()) throw new IOException("cannot create " + target);
         for (String child : children) copyAssetTree(assets, path + "/" + child, new File(target, child));
-    }
-
-    /**
-     * Deletes {@code file} and everything under it; a file that stays is a failure. A symbolic
-     * link is deleted itself, never followed: File.listFiles() would list its target's folder.
-     */
-    private static void deleteTree(File file) throws IOException {
-        boolean link = Files.isSymbolicLink(file.toPath());
-        if (!link) {
-            File[] children = file.listFiles();
-            if (children != null) for (File child : children) deleteTree(child);
-        }
-        // exists() follows a link, so a dangling one would look absent.
-        if ((link || file.exists()) && !file.delete()) throw new IOException("cannot delete " + file);
-    }
-
-    private static String readText(File file) {
-        try (InputStream in = new FileInputStream(file)) {
-            byte[] bytes = new byte[256];
-            int n = in.read(bytes);
-            return n > 0 ? new String(bytes, 0, n, StandardCharsets.UTF_8) : "";
-        } catch (IOException e) {
-            return "";
-        }
-    }
-
-    private static void writeText(File file, String text) throws IOException {
-        try (FileOutputStream out = new FileOutputStream(file)) {
-            out.write(text.getBytes(StandardCharsets.UTF_8));
-            out.getFD().sync();
-        }
     }
 }

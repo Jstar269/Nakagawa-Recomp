@@ -595,6 +595,269 @@ class ToolchainArchiveTests(unittest.TestCase):
         self.assertIn("bad PAX record", self.refused(build))
 
 
+#: Runs one ToolchainArchive.Install scenario on a.tar and b.tar in <archives> with <work> as the
+#: files folder, and prints what it saw as "key value" lines.
+INSTALL_MAIN = """package io.github.jstar269.nakagawa;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InterruptedIOException;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicInteger;
+public final class InstallMain {
+    static final String[][] ARCHIVES = {{"a.tar", "a"}, {"b.tar", "b"}};
+    static File archives;
+    static File work;
+    static final AtomicInteger opens = new AtomicInteger();
+    static final Set<String> threads = ConcurrentHashMap.newKeySet();
+    /** b.tar's open number (1 counts, 2 unpacks) that gets bad.tar instead; 0 for none. */
+    static volatile int badOpen;
+    static final CountDownLatch release = new CountDownLatch(1);
+    static volatile boolean gated;
+    static final AtomicInteger bOpens = new AtomicInteger();
+
+    static InputStream open(String name) throws IOException {
+        opens.incrementAndGet();
+        threads.add(Thread.currentThread().getName());
+        if (gated) {
+            try {
+                release.await();
+            } catch (InterruptedException e) {
+                throw new InterruptedIOException();
+            }
+        }
+        String file = name;
+        if (name.equals("b.tar") && bOpens.incrementAndGet() == badOpen) file = "bad.tar";
+        return new FileInputStream(new File(archives, file));
+    }
+
+    static ToolchainArchive.Install install(String stamp) {
+        return new ToolchainArchive.Install(InstallMain::open, ARCHIVES, new File(work, "toolchain"),
+            new File(work, ".toolchain-unpacked"), new File(work, ".toolchain.lock"), stamp);
+    }
+
+    static void print(String key, Object value) {
+        System.out.println(key + " " + value);
+    }
+
+    public static void main(String[] args) throws Exception {
+        archives = new File(args[0]);
+        work = new File(args[1]);
+        ExecutorService executor = Executors.newSingleThreadExecutor(r -> new Thread(r, "unpack-worker"));
+        List<ToolchainArchive.Status> seen = Collections.synchronizedList(new ArrayList<>());
+        try {
+            switch (args[2]) {
+                case "background": {
+                    gated = true;
+                    ToolchainArchive.Install install = install("v1");
+                    install.setListener(seen::add);
+                    print("started", install.start(executor));
+                    // The unpack is held at its first open, so start() has returned while it runs.
+                    print("state-after-start", install.status().state);
+                    print("second-start", install.start(executor));
+                    release.countDown();
+                    print("end", install.await());
+                    print("third-start", install.start(executor));
+                    print("threads", threads);
+                    print("opens", opens.get());
+                    print("complete", install.isComplete());
+                    boolean ordered = true;
+                    int last = 0;
+                    for (ToolchainArchive.Status s : seen) {
+                        if (s.done > 0 && (s.total == 0 || s.done > s.total || s.done < last)) ordered = false;
+                        last = s.done;
+                    }
+                    print("progress-ordered", ordered);
+                    print("last-seen", seen.get(seen.size() - 1));
+                    break;
+                }
+                case "failure": {
+                    badOpen = 2;  // b.tar counts clean, then is damaged when unpacked, after a/
+                    ToolchainArchive.Install install = install("v1");
+                    print("started", install.start(executor));
+                    ToolchainArchive.Status failed = install.await();
+                    print("failed", failed.state);
+                    print("error", failed.error);
+                    print("partial-file", new File(work, "toolchain/a/a.h").isFile());
+                    print("stamp-after-failure", new File(work, ".toolchain-unpacked").exists());
+                    print("complete-after-failure", install.isComplete());
+                    print("complete-for-a-new-start", install("v1").isComplete());
+                    Thread waiter = new Thread(() -> {
+                        try {
+                            install.awaitDone();
+                            print("waiter", "done");
+                        } catch (InterruptedException e) {
+                            print("waiter", "interrupted");
+                        }
+                    });
+                    waiter.start();
+                    while (waiter.isAlive() && waiter.getState() != Thread.State.WAITING) Thread.onSpinWait();
+                    print("waiter-waits-on-failed", waiter.getState() + " " + install.status().state);
+                    print("retry", install.start(executor));
+                    waiter.join();
+                    print("after-retry", install.status());
+                    print("complete-after-retry", install.isComplete());
+                    break;
+                }
+                case "redo": {
+                    // What a run that died part way leaves: some files and no matching stamp.
+                    ToolchainArchive.Install install = install("v1");
+                    print("complete-before", install.isComplete());
+                    print("started", install.start(executor));
+                    print("end", install.await());
+                    print("threads", threads);
+                    print("leftover", new File(work, "toolchain/a/leftover.h").exists());
+                    print("complete", install.isComplete());
+                    break;
+                }
+                case "complete": {
+                    ToolchainArchive.Install install = install("v1");
+                    print("complete-before", install.isComplete());
+                    print("started", install.start(executor));
+                    print("end", install.await());
+                    print("opens", opens.get());
+                    break;
+                }
+                case "unknown-version": {
+                    ToolchainArchive.Install install = install(null);
+                    print("complete-before", install.isComplete());
+                    install.start(executor);
+                    ToolchainArchive.Status end = install.await();
+                    print("end", end.state);
+                    print("error", end.error);
+                    print("opens", opens.get());
+                    break;
+                }
+                default:
+                    throw new IllegalArgumentException(args[2]);
+            }
+        } finally {
+            executor.shutdown();
+        }
+    }
+}
+"""
+
+
+@unittest.skipIf(shutil.which("javac") is None or shutil.which("java") is None, "needs a JDK")
+class ToolchainInstallTests(unittest.TestCase):
+    """The app's whole-toolchain unpack (ToolchainArchive.Install), which runs off the UI thread."""
+
+    classes: Path
+    _tmp: tempfile.TemporaryDirectory[str]
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls._tmp = tempfile.TemporaryDirectory(prefix="nk-tc-java-")
+        root = Path(cls._tmp.name)
+        main = root / "src" / "io" / "github" / "jstar269" / "nakagawa" / "InstallMain.java"
+        main.parent.mkdir(parents=True)
+        main.write_text(INSTALL_MAIN, encoding="utf-8")
+        cls.classes = root / "classes"
+        subprocess.run(["javac", "--release", "17", "-Xlint:all", "-Werror", "-d", str(cls.classes),
+                        str(ARCHIVE_JAVA), str(main)], check=True, capture_output=True)
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls._tmp.cleanup()
+
+    def run_scenario(self, scenario: str, prepare: object = None) -> dict[str, str]:
+        with tempfile.TemporaryDirectory(prefix="nk-tc-test-") as tmp:
+            archives, work = Path(tmp) / "archives", Path(tmp) / "files"
+            archives.mkdir()
+            work.mkdir()
+            entry = toolchain.android_sysroot.Entry
+            toolchain.android_sysroot.write_archive({"a.h": entry(b"a"), "sub/a2.h": entry(b"a2")},
+                                                    archives / "a.tar")
+            toolchain.android_sysroot.write_archive({"b.h": entry(b"b"), "c.h": entry(b"c"),
+                                                     "sub/d.h": entry(b"d")}, archives / "b.tar")
+            bad = bytearray((archives / "b.tar").read_bytes())
+            bad[0] ^= 0x01
+            (archives / "bad.tar").write_bytes(bytes(bad))
+            if prepare is not None:
+                assert callable(prepare)
+                prepare(work)
+            result = subprocess.run(["java", "-cp", str(self.classes), "io.github.jstar269.nakagawa.InstallMain",
+                                     str(archives), str(work), scenario],
+                                    capture_output=True, text=True, check=False, timeout=120)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            seen: dict[str, str] = {}
+            for line in result.stdout.splitlines():
+                key, _, value = line.partition(" ")
+                seen[key] = value
+            if seen.get("complete") == "true" or seen.get("complete-after-retry") == "true":
+                for name, data in (("a/a.h", b"a"), ("a/sub/a2.h", b"a2"), ("b/b.h", b"b"), ("b/sub/d.h", b"d")):
+                    self.assertEqual((work / "toolchain" / name).read_bytes(), data, name)
+                self.assertEqual((work / ".toolchain-unpacked").read_text(encoding="utf-8"), "v1")
+            return seen
+
+    def test_the_unpack_runs_on_the_worker_and_once(self) -> None:
+        seen = self.run_scenario("background")
+        self.assertEqual(seen["started"], "true")
+        self.assertEqual(seen["state-after-start"], "RUNNING")   # start() did not wait for it
+        self.assertEqual(seen["second-start"], "false")          # a second start runs nothing
+        self.assertEqual(seen["third-start"], "false")           # nor one after it is done
+        self.assertEqual(seen["end"], "DONE 5/5")
+        self.assertEqual(seen["threads"], "[unpack-worker]")     # never on the caller's thread
+        self.assertEqual(seen["opens"], "4")                     # one count and one unpack each
+        self.assertEqual(seen["complete"], "true")
+        self.assertEqual(seen["progress-ordered"], "true")       # the total is known before any file
+        self.assertEqual(seen["last-seen"], "DONE 5/5")
+
+    def test_a_failed_unpack_leaves_no_stamp_and_can_be_retried(self) -> None:
+        seen = self.run_scenario("failure")
+        self.assertEqual(seen["failed"], "FAILED")
+        self.assertEqual(seen["error"], "tar header checksum does not match")
+        self.assertEqual(seen["partial-file"], "true")            # it failed after writing a/
+        self.assertEqual(seen["stamp-after-failure"], "false")
+        self.assertEqual(seen["complete-after-failure"], "false")
+        self.assertEqual(seen["complete-for-a-new-start"], "false")
+        self.assertEqual(seen["waiter-waits-on-failed"], "WAITING FAILED")  # a failure does not release main()
+        self.assertEqual(seen["retry"], "true")
+        self.assertEqual(seen["waiter"], "done")
+        self.assertEqual(seen["after-retry"], "DONE 5/5")
+        self.assertEqual(seen["complete-after-retry"], "true")
+
+    def test_a_run_that_died_part_way_is_done_again(self) -> None:
+        for stamp in (None, "v0"):
+            with self.subTest(stamp=stamp):
+                def prepare(work: Path, stamp: str | None = stamp) -> None:
+                    (work / "toolchain" / "a").mkdir(parents=True)
+                    (work / "toolchain" / "a" / "leftover.h").write_bytes(b"partial")
+                    if stamp is not None:
+                        (work / ".toolchain-unpacked").write_text(stamp, encoding="utf-8")
+                seen = self.run_scenario("redo", prepare)
+                self.assertEqual(seen["complete-before"], "false")
+                self.assertEqual(seen["started"], "true")
+                self.assertEqual(seen["end"], "DONE 5/5")
+                self.assertEqual(seen["threads"], "[unpack-worker]")
+                self.assertEqual(seen["leftover"], "false")
+                self.assertEqual(seen["complete"], "true")
+
+    def test_a_finished_unpack_is_not_done_again(self) -> None:
+        seen = self.run_scenario("complete", lambda work: (work / ".toolchain-unpacked").write_text(
+            "v1", encoding="utf-8"))
+        self.assertEqual(seen["complete-before"], "true")
+        self.assertEqual(seen["end"], "DONE 0/0")
+        self.assertEqual(seen["opens"], "0")
+
+    def test_an_unknown_app_version_fails(self) -> None:
+        seen = self.run_scenario("unknown-version",
+                                 lambda work: (work / ".toolchain-unpacked").write_text("unknown", encoding="utf-8"))
+        self.assertEqual(seen["complete-before"], "false")
+        self.assertEqual(seen["end"], "FAILED")
+        self.assertEqual(seen["error"], "the app's version cannot be read")
+        self.assertEqual(seen["opens"], "0")
+
+
 class StampTests(unittest.TestCase):
     def test_a_finished_stage_is_not_run_again(self) -> None:
         with tempfile.TemporaryDirectory(prefix="nk-tc-test-") as tmp:
