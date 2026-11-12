@@ -1,5 +1,15 @@
-/* SPDX-License-Identifier: GPL-3.0-or-later */
-/* Copyright (C) 2026 the Nakagawa Recomp authors */
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (C) 2025-2026 the psp-recomp authors
+// Copyright (C) 2026 the Nakagawa Recomp authors
+// Derived from sal063/PSP-recompilation-project (GPL-2.0-or-later)
+// Restates src/rt/ge.c's project_cvtx and draw_prim's cull order, and ge_gpu.c's put_vert, as
+// reference functions (ge_vertex, pack_rgba, snap_ref, backend_tri, backend_sprite, cull_swap);
+// the rest of this file was written for it.
+// Modified by Nakagawa Recomp contributors, 2026-11-09.
+// See NOTICE.md for upstream lineage and modification provenance.
+// Derived from PPSSPP (https://github.com/hrydgard/ppsspp), GPL-2.0-or-later
+// Copyright (c) 2012- PPSSPP Project and contributors
+
 /*
  * motion_tap_selftest.c - the frame store, the bridge to the matcher and the in-between builder
  * of render-state motion (motion_tap.h, #2081), on synthetic tap records with the real matcher

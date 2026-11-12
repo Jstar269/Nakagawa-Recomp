@@ -1,5 +1,15 @@
-/* SPDX-License-Identifier: GPL-3.0-or-later */
-/* Copyright (C) 2026 the Nakagawa Recomp authors */
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (C) 2025-2026 the psp-recomp authors
+// Copyright (C) 2026 the Nakagawa Recomp authors
+// Derived from sal063/PSP-recompilation-project (GPL-2.0-or-later)
+// Restates src/rt/ge.c's project_cvtx and ge_gpu.c's put_vert (the 28.4 snap, the fog clamp, the
+// colour pack and the sprite rectangle) in snap16, clamp01, channel, mix_rgba, place and build;
+// the rest of this file was written for it.
+// Modified by Nakagawa Recomp contributors, 2026-11-09.
+// See NOTICE.md for upstream lineage and modification provenance.
+// Derived from PPSSPP (https://github.com/hrydgard/ppsspp), GPL-2.0-or-later
+// Copyright (c) 2012- PPSSPP Project and contributors
+
 /*
  * motion_tap.c - the frame store and the in-between builder of render-state motion (#2081).
  * The rules are in motion_tap.h. Pure C: the C library only.
