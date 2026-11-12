@@ -10336,11 +10336,13 @@ static void test_io_devctl_memory_stick(void) {
 /* ---- savedata GETSIZE / SIZES free space (#308) ---------------------------------------------
  * GETSIZE reports a shortfall, never the size of the data. On a PSP (pspautotests
  * tests/utility/savedata/getsize.expected, revision 2ed7c9c5) a zero-filled sizeInfo with no
- * entries for a save that exists changes only sectorSize (0x8000), freeSectors, freeKB and
+ * entries for a save that exists changes only sectorSize (0x8000 there; the PSP-3000 run of
+ * PSP-HLE-SAVEDATA-GETSIZE-001 reported 0x10000, see do_getsize), freeSectors, freeKB and
  * freeString, and the result is 0. A save that does not exist fills in the same figures and
- * reports RW_NO_DATA (PPSSPP as the behaviour reference, UNMEASURED on a PSP). Free space is the
- * host-backed Memory Stick the capacity devctl measures, in 32 KiB sectors; the shortfall
- * arithmetic for listed entries follows PPSSPP SavedataParam::GetSize as a behaviour reference. */
+ * reports RW_NO_DATA, and leaves overwriteKB and overwriteString alone
+ * (PSP-HLE-SAVEDATA-GETSIZE-001). Free space is the host-backed Memory Stick the capacity devctl
+ * measures, in 32 KiB sectors; the shortfall arithmetic for listed entries follows PPSSPP
+ * SavedataParam::GetSize as a behaviour reference. */
 extern void sr_hle_test_set_memstick_free_bytes(int mode, uint64_t bytes);
 
 enum {
@@ -10412,6 +10414,9 @@ static int getsize_write_host_file(const char *path, size_t bytes) {
 static void test_savedata_getsize_free_space(void) {
     static const char ms_root[] = HLE_BUILD_ROOT "/hle_savedata_getsize";
     static const char zero8[8] = { 0 };
+    static const char preset8[8] = { (char)0xA5, (char)0xA5, (char)0xA5, (char)0xA5,
+                                     (char)0xA5, (char)0xA5, (char)0xA5, (char)0xA5 };
+    enum { SAVEDATA_GETSIZE_OUT_BYTES = 44 };   /* sizeInfo after its four input words */
     const char *old_root_value = getenv("SR_MEMSTICK");
     char *old_root = old_root_value ? (char *)malloc(strlen(old_root_value) + 1u) : NULL;
     char text[8], save_host[512], file_host[600];
@@ -10443,7 +10448,7 @@ static void test_savedata_getsize_free_space(void) {
                    MEM_R32(GETSIZE_INFO_ADDR + 8u) == 0u && MEM_R32(GETSIZE_INFO_ADDR + 12u) == 0u,
                "GETSIZE leaves the entry counts and pointers alone");
         expect(MEM_R32(GETSIZE_INFO_ADDR + 16u) == 0x8000u,
-               "GETSIZE reports the PSP's 32 KiB savedata sector size");
+               "GETSIZE reports pspautotests' 32 KiB savedata sector size (a PSP-3000 reported 0x10000)");
         expect(sectors >= lo / 0x8000u && sectors <= hi / 0x8000u,
                "GETSIZE freeSectors * 0x8000 is the host-backed free space the devctl reports");
         expect(MEM_R32(GETSIZE_INFO_ADDR + 24u) == sectors * 32u,
@@ -10459,18 +10464,23 @@ static void test_savedata_getsize_free_space(void) {
     }
 
     /* 2. One secure entry of a few KB on a missing save fits: nothing needed, still no data. A
-     * game reads this pair as "no save yet, and room to make one". */
+     * game reads this pair as "no save yet, and room to make one". As on a PSP
+     * (PSP-HLE-SAVEDATA-GETSIZE-001), a preset shows what is left alone: neededKB is written,
+     * the other three are not. */
     {
         getsize_param(22u, "_GameData0");
         getsize_entry(GETSIZE_SECURE_ADDR, 0x2000u, "DATA.BIN");
         MEM_W32(GETSIZE_INFO_ADDR + 0u, 1u);
         MEM_W32(GETSIZE_INFO_ADDR + 8u, GETSIZE_SECURE_ADDR);
+        memset(g_mem_base + GETSIZE_INFO_ADDR + 16u, 0xA5, SAVEDATA_GETSIZE_OUT_BYTES);
         expect(sr_savedata_execute(GETSIZE_PARAM_ADDR) == 0x80110327u &&
                    MEM_R32(GETSIZE_INFO_ADDR + 16u) == 0x8000u &&
-                   MEM_R32(GETSIZE_INFO_ADDR + 36u) == 0u && MEM_R32(GETSIZE_INFO_ADDR + 48u) == 0u &&
-                   getsize_guest_bytes_are(GETSIZE_INFO_ADDR + 40u, zero8) &&
-                   getsize_guest_bytes_are(GETSIZE_INFO_ADDR + 52u, zero8),
-               "GETSIZE for one small secure file on a missing save reports RW_NO_DATA, neededKB 0, overwriteKB 0");
+                   MEM_R32(GETSIZE_INFO_ADDR + 36u) == 0u,
+               "GETSIZE for one small secure file on a missing save reports RW_NO_DATA, neededKB 0");
+        expect(MEM_R32(GETSIZE_INFO_ADDR + 48u) == 0xA5A5A5A5u &&
+                   getsize_guest_bytes_are(GETSIZE_INFO_ADDR + 40u, preset8) &&
+                   getsize_guest_bytes_are(GETSIZE_INFO_ADDR + 52u, preset8),
+               "GETSIZE on a missing save that fits leaves neededString and the overwrite fields alone");
     }
 
     /* 3. A shortfall: 64 KiB free (plus a partial sector), more data than that. */
@@ -10500,6 +10510,28 @@ static void test_savedata_getsize_free_space(void) {
         expect(MEM_R32(GETSIZE_INFO_ADDR + 48u) == 71u &&
                    getsize_guest_bytes_are(GETSIZE_INFO_ADDR + 52u, "71 KB\0\0"),
                "GETSIZE overwriteKB and overwriteString discount the files the save already holds");
+    }
+    /* A shortfall on a missing save writes the needed fields and leaves the overwrite fields
+     * alone, and a text field stops at its NUL (the write mask PSP-HLE-SAVEDATA-GETSIZE-001
+     * measured). The figures are not the PSP's: see do_getsize. */
+    {
+        getsize_param(22u, "_GameData0");
+        getsize_entry(GETSIZE_SECURE_ADDR, 0x20000u, "DATA.BIN");
+        MEM_W32(GETSIZE_INFO_ADDR + 0u, 1u);
+        MEM_W32(GETSIZE_INFO_ADDR + 8u, GETSIZE_SECURE_ADDR);
+        memset(g_mem_base + GETSIZE_INFO_ADDR + 16u, 0xA5, SAVEDATA_GETSIZE_OUT_BYTES);
+        expect(sr_savedata_execute(GETSIZE_PARAM_ADDR) == 0x80110327u &&
+                   getsize_guest_bytes_are(GETSIZE_INFO_ADDR + 28u, "64 KB\0\xA5\xA5"),
+               "GETSIZE on a missing save reports RW_NO_DATA and writes freeString through its NUL only");
+        /* write = 0x20010, free = 0x10000: 0x10010 bytes short, 65 KB rounded up. PPSSPP's
+         * arithmetic, not the measured one (a PSP charges three clusters more and wraps at 32
+         * bits; do_getsize). This cell pins which fields are written, not the PSP's figure. */
+        expect(MEM_R32(GETSIZE_INFO_ADDR + 36u) == 65u &&
+                   getsize_guest_bytes_are(GETSIZE_INFO_ADDR + 40u, "65 KB\0\xA5\xA5"),
+               "GETSIZE on a missing save writes the shortfall to neededKB and neededString");
+        expect(MEM_R32(GETSIZE_INFO_ADDR + 48u) == 0xA5A5A5A5u &&
+                   getsize_guest_bytes_are(GETSIZE_INFO_ADDR + 52u, preset8),
+               "GETSIZE on a missing save leaves overwriteKB and overwriteString alone");
     }
     /* Existing data the write replaces can make it fit again. */
     snprintf(file_host, sizeof(file_host), "%s/DATA.BIN", save_host);
