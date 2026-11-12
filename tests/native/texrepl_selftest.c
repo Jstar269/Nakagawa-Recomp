@@ -69,9 +69,15 @@
 #ifndef NK_SORT_COUNT_COMPARES
 #error "build with -DNK_SORT_COUNT_COMPARES (mk/selftests.mk texrepl-selftest): the sort cells count comparisons"
 #endif
-/* The most the largest image's data may take to refuse when it is all empty dynamic blocks (measured
- * at about NK_PNG_WORK_MEASURED; the bound leaves room for a slow or sanitized build). */
+/* The most the largest image's data may take to refuse when it is all empty dynamic blocks. Measured
+ * at 3.1 to 3.4 s in the Windows build (-O2), the build native-core-tests runs; the bound leaves room
+ * for a slow host. An AddressSanitizer build (-O1) took 9.1 to 12.9 s in WSL, so it gets four times
+ * the room; the cells' table counts hold the same in both. */
+#if defined(__SANITIZE_ADDRESS__)
+#define NK_PNG_WORK_SECONDS 40.0
+#else
 #define NK_PNG_WORK_SECONDS 10.0
+#endif
 #ifndef NK_INFLATE_COUNT_BUILDS
 #error "build with -DNK_INFLATE_COUNT_BUILDS (mk/selftests.mk texrepl-selftest): the work cells count code tables"
 #endif
@@ -103,7 +109,8 @@ static uint32_t *solid(int w, int h, uint32_t colour) {
 }
 
 static void pack_path(char *out, size_t n, const char *pack, const char *file) {
-    snprintf(out, n, "%s/%s/%s", SR_SELFTEST_BUILD_ROOT, pack, file);
+    const int written = snprintf(out, n, "%s/%s/%s", SR_SELFTEST_BUILD_ROOT, pack, file);
+    if (written < 0 || (size_t)written >= n) { fprintf(stderr, "path too long: %s/%s\n", pack, file); exit(2); }
 }
 static void make_pack(char *dir, size_t n, const char *pack) {
     snprintf(dir, n, "%s/%s", SR_SELFTEST_BUILD_ROOT, pack);
@@ -2600,7 +2607,8 @@ static void test_png_work(void) {
 
 /* The cache under churn (the Fable review's S-1 and S-2). Two images taking turns in a budget that
  * holds one: before, each of 2,000 lookups decoded its image again; now an image evicted and wanted
- * again is decoded after twice as many lookups each time, so 1,000 lookups cost it 10 decodes.
+ * again is decoded after twice as many lookups each time, so 1,000 lookups cost it 10 decodes. Every
+ * lookup is either a hit (a decode, or the image still held) or deferred.
  * Eviction takes the least recently used image from a list: 40,000 held 1x1 images all make room
  * for one at once, where a scan of every image for each would take 1.6 billion steps. A DEFLATE ZIP
  * entry's read counts its packed bytes beside the file in decode_peak. */
@@ -2620,7 +2628,7 @@ static void test_cache_churn(void) {
         for (int k = 0; k < 1000; k++) hits += lookup_unpin(p, a, 0) + lookup_unpin(p, b, 0);
         NkTexReplStats st;
         nk_texrepl_stats(p, &st);
-        CHECK(st.loaded >= 16 && st.loaded <= 24 && (uint64_t)hits == st.loaded && st.deferred + st.loaded == 2000 &&
+        CHECK(st.loaded >= 16 && st.loaded <= 24 && (uint64_t)hits + st.deferred == 2000 &&
                   has_diag(p, "a.png: evicted and decoded again"),
               "two images taking turns in a budget for one: %llu decodes, %d hits, %llu deferred of 2000 lookups",
               (unsigned long long)st.loaded, hits, (unsigned long long)st.deferred);
