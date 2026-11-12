@@ -40,6 +40,7 @@ static void audio_note_sas_buf(uint32_t buf) {
  * so a no-op return makes the audio thread monopolise the CPU. Here it yields the thread for
  * the buffer's duration AND forwards the samples to the host waveOut backend (audio.c). */
 extern void sr_audio_push(int ch, const int16_t *lr, int nframes, int volL, int volR);
+extern void sr_audio_push_wide(int ch, const int16_t *lr, const int32_t *wide, int nframes, int volL, int volR);
 /* Slots 0..7 are the regular hardware channels. Slot 8 models the separate
  * sceAudioOutput2 channel, which has its own reservation and queue. */
 static int s_audio_ch[9], s_audio_fmt[9];   /* regular fmt: 0=stereo, 0x10=mono */
@@ -461,6 +462,8 @@ static void audio_wait(uint32_t us) {
     sched_delay_current(us);
 }
 
+static const int32_t *sas_wide_for_output(uint32_t buf, uint32_t n, const int16_t *lr);
+
 static uint32_t audio_output(CpuState *s, uint32_t ch, uint32_t buf, int voll, int volr) {
     (void)s;
     uint32_t n = ch < 9 ? s_audio_len[ch] : 1024;
@@ -491,7 +494,12 @@ static uint32_t audio_output(CpuState *s, uint32_t ch, uint32_t buf, int voll, i
         psmf_av_audio_submit((int)ch, buf, bytes, mono ? 2u : 4u, 44100u);   /* queue lead read before the push */
         uint64_t out_started = sr_perf_now_ns();
         sr_videorec_audio((int)ch, lr, (int)n, voll, volr, sched_vtime_us());
-        if (!sched_fast_forward_on()) sr_audio_push((int)ch, lr, (int)n, voll, volr);
+        if (!sched_fast_forward_on()) {
+            /* Ace Mode's peak=limit: a SAS grain the output hands over unchanged plays unsaturated. */
+            const int32_t *wide = mono ? NULL : sas_wide_for_output(buf, n, lr);
+            if (wide) sr_audio_push_wide((int)ch, lr, wide, (int)n, voll, volr);
+            else sr_audio_push((int)ch, lr, (int)n, voll, volr);
+        }
         audio_vq_pushed((int)ch, (int)n);
         if (out_started) sr_perf_audio_output(out_started, n);
     }
@@ -886,10 +894,73 @@ static int s_sas_lookahead;
 
 int sr_hle_sas_set_band_limited(int on) { s_sas_band_limited = on ? 1 : 0; return 1; }
 
+/* Ace Mode's peak=limit (#2137, docs/ENHANCEMENT_CONTRACT.md 10.22). The guest's grain stays what
+ * the PSP writes, saturated, because a game may read it back. What changes is what the host hears:
+ * the last few grains whose stereo sum saturated are kept here with the sum before saturation,
+ * and an output (audio_output) that hands the host a span holding exactly the bytes such a grain
+ * stored hands the host that sum instead, for the host's true-peak limiter (audio_sdl3.c). A span
+ * the game changed after the mix (its own volume, its own mixing, a copy elsewhere) no longer holds
+ * those bytes and plays as the guest has it. Raw (four-plane) output mode is not kept: its planes
+ * are not what sceAudioOutput* plays. */
+#define SAS_WIDE_RING 8
+#define SAS_WIDE_LIMIT (1 << 24)   /* the widest sum kept; the host's own bound (audio_sdl3.c) */
+typedef struct {
+    uint32_t addr, frames;                 /* the grain: addr .. addr + frames * 4; 0 frames: free */
+    int16_t stored[SAS_GRAIN_MAX * 2];     /* the bytes the store left, saturated */
+    int32_t wide[SAS_GRAIN_MAX * 2];       /* the sum before saturation */
+} SasWideGrain;
+static int s_sas_wide_mix;
+static SasWideGrain s_sas_wide[SAS_WIDE_RING];
+static uint32_t s_sas_wide_next;
+
+int sr_hle_sas_set_wide_mix(int on) {
+    s_sas_wide_mix = on ? 1 : 0;
+    for (int i = 0; i < SAS_WIDE_RING; i++) s_sas_wide[i].frames = 0;
+    s_sas_wide_next = 0;
+    return 1;
+}
+
+/* A mix into [out, out + bytes) makes every kept grain it overlaps stale. */
+static void sas_wide_forget(uint32_t out, uint32_t bytes) {
+    for (int i = 0; i < SAS_WIDE_RING; i++) {
+        SasWideGrain *g = &s_sas_wide[i];
+        if (g->frames && g->addr < out + bytes && out < g->addr + g->frames * 4u) g->frames = 0;
+    }
+}
+
+/* The host's copy of an output of n stereo frames at buf (`lr`, as read from the guest): `lr`
+ * widened, with every kept grain whose bytes the span still holds unchanged replaced by its sum.
+ * NULL when no kept grain matches, so the output plays as the guest has it. */
+static const int32_t *sas_wide_for_output(uint32_t buf, uint32_t n, const int16_t *lr) {
+    static int32_t wide[65536 * 2];
+    int matched = 0;
+    if (!s_sas_wide_mix || !buf || !n) return NULL;
+    const uint64_t end = (uint64_t)buf + (uint64_t)n * 4u;
+    for (int i = 0; i < SAS_WIDE_RING; i++) {
+        const SasWideGrain *g = &s_sas_wide[i];
+        if (!g->frames) continue;
+        const uint64_t g_end = (uint64_t)g->addr + (uint64_t)g->frames * 4u;
+        const uint64_t lo = g->addr > buf ? g->addr : buf;
+        const uint64_t hi = g_end < end ? g_end : end;
+        if (lo >= hi || ((lo - buf) & 3u) || ((lo - g->addr) & 3u)) continue;
+        const uint32_t at = (uint32_t)((lo - buf) / 4u), from = (uint32_t)((lo - g->addr) / 4u);
+        const uint32_t count = (uint32_t)((hi - lo) / 4u);
+        if (memcmp(lr + at * 2u, g->stored + from * 2u, (size_t)count * 4u) != 0) continue;
+        if (!matched) {
+            for (uint32_t k = 0; k < n * 2u; k++) wide[k] = lr[k];
+            matched = 1;
+        }
+        memcpy(wide + at * 2u, g->wide + from * 2u, (size_t)count * 2u * sizeof(int32_t));
+    }
+    return matched ? wide : NULL;
+}
+
 void hle_sas_guest_reset(void) {
     memset(&s_sas_core, 0, sizeof(s_sas_core));
     memset(s_sasv, 0, sizeof(s_sasv));
     s_sas_max_voices = SAS_VOICES;
+    for (int i = 0; i < SAS_WIDE_RING; i++) s_sas_wide[i].frames = 0;
+    s_sas_wide_next = 0;
 }
 
 #ifdef SR_HLE_THREAD_SELFTEST
@@ -1258,12 +1329,32 @@ static void sas_mix_stateful(uint32_t out, int add, int32_t in_gain_l, int32_t i
         }
         if (rs) sas_mix_band_limited(v, &pre, &grain, mixl, mixr, mixsl, mixsr);
     }
+    /* peak=limit: the stereo sum before the store saturates it, for the host only. */
+    static int32_t wide_sum[SAS_GRAIN_MAX * 2];
+    int32_t *wide_grain = NULL;
+    int wide_differs = 0;
+    if (s_sas_wide_mix) {
+        sas_wide_forget(out, (uint32_t)n * (s_sas_core.output_mode ? 8u : 4u));
+        if (!s_sas_core.output_mode) wide_grain = wide_sum;
+    }
     for (int i = 0; i < n; i++) {
         /* in_gain_l/in_gain_r scale the caller's PCM already in out (add only), never the voice
          * mix (#2135). The product is 64-bit and saturated before the store, so a volume of any
          * size clips instead of wrapping. */
         int l = mixl[i], r = mixr[i];
         int sl = mixsl[i], sr = mixsr[i];
+        if (wide_grain) {
+            int64_t wl = l, wr = r;
+            if (add) {
+                wl += ((int64_t)sas_output_read(out, (uint32_t)i, 0) * in_gain_l) >> 12;
+                wr += ((int64_t)sas_output_read(out, (uint32_t)i, 1) * in_gain_r) >> 12;
+            }
+            wl = wl > SAS_WIDE_LIMIT ? SAS_WIDE_LIMIT : wl < -SAS_WIDE_LIMIT ? -SAS_WIDE_LIMIT : wl;
+            wr = wr > SAS_WIDE_LIMIT ? SAS_WIDE_LIMIT : wr < -SAS_WIDE_LIMIT ? -SAS_WIDE_LIMIT : wr;
+            wide_grain[i * 2] = (int32_t)wl;
+            wide_grain[i * 2 + 1] = (int32_t)wr;
+            if (wl > 32767 || wl < -32768 || wr > 32767 || wr < -32768) wide_differs = 1;
+        }
         if (add) {
             l = sas_add_scaled_input(l, sas_output_read(out, (uint32_t)i, 0), in_gain_l);
             r = sas_add_scaled_input(r, sas_output_read(out, (uint32_t)i, 1), in_gain_r);
@@ -1281,6 +1372,19 @@ static void sas_mix_stateful(uint32_t out, int add, int32_t in_gain_l, int32_t i
             sas_output_write(out, (uint32_t)i, 2, sl);
             sas_output_write(out, (uint32_t)i, 3, sr);
         }
+    }
+    /* Kept only when the store saturated, in the oldest slot: elsewhere the guest's bytes are the
+     * sum already, and a grain that did not saturate leaves the kept ones alone. */
+    if (wide_grain && wide_differs) {
+        SasWideGrain *g = &s_sas_wide[s_sas_wide_next];
+        memcpy(g->wide, wide_grain, (size_t)n * 2u * sizeof(int32_t));
+        for (int i = 0; i < n; i++) {
+            g->stored[i * 2] = sas_output_read(out, (uint32_t)i, 0);
+            g->stored[i * 2 + 1] = sas_output_read(out, (uint32_t)i, 1);
+        }
+        g->addr = out;
+        g->frames = (uint32_t)n;
+        s_sas_wide_next = (s_sas_wide_next + 1u) % SAS_WIDE_RING;
     }
     if (stat) {
         int post_peak = 0;

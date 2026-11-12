@@ -26,9 +26,9 @@ Classes are listed strongest first. A path takes the first class whose source na
 | `hardware-measured` | 64 | 73 |
 | `ppsspp-derived` | 125 | 88 |
 | `game-route` | 0 | 0 |
-| `synthetic` | 372 | 183 |
+| `synthetic` | 375 | 183 |
 | `unverified` | 147 | 22 |
-| total | 708 | 366 |
+| total | 711 | 366 |
 
 The VFPU census also lists 307 forms the runtime refuses at the
 issue #326 boundary (`unsupported-encoding` and `supported-opcode-form-unmodeled`). No path executes
@@ -177,6 +177,7 @@ a title that translates none has generated code unchanged.
 | `0x267a6dd2` | `__sceSasRevParam` | audio | `unverified` | no recorded evidence |
 | `0x26927d19` | `sceVideocodecGetVersion` | videocodec | `unverified` | no recorded evidence |
 | `0x26d25a5d` | `sceRtcTickAddMicroseconds` | rtc | `synthetic` | HLE selftest dispatch |
+| `0x26d7a24a` | `sceRtcTickAddHours` | rtc | `synthetic` | HLE selftest dispatch |
 | `0x278c0df5` | `sceKernelWaitThreadEnd` | kernel_thread | `synthetic` | conformance cells and HLE selftest dispatch; note |
 | `0x27c4594c` | `sceRtcGetTime_t` | rtc | `synthetic` | HLE selftest dispatch |
 | `0x27cc57f0` | `sceKernelLibcTime` | kernel_time | `synthetic` | HLE selftest dispatch |
@@ -642,6 +643,7 @@ a title that translates none has generated code unchanged.
 | `0xcd203292` | `sceKernelCancelEventFlag` | kernel_sync | `synthetic` | HLE selftest dispatch; note |
 | `0xceadeb47` | `sceKernelDelayThread` | kernel_thread | `synthetic` | conformance cells and HLE selftest dispatch; note |
 | `0xceb870b1` | `sceMpegFreeAvcEsBuf` | mpeg | `ppsspp-derived` | sceMpeg banner: wrappers over the PPSSPP sceMpeg port in src/rt/mpeg.c |
+| `0xcf3a2ca8` | `sceRtcTickAddWeeks` | rtc | `synthetic` | HLE selftest dispatch |
 | `0xcf561893` | `sceRtcGetWin32FileTime` | rtc | `synthetic` | HLE selftest dispatch |
 | `0xcf8e084d` | `sceNetAdhocctlExitGameMode` | network | `unverified` | no recorded evidence |
 | `0xd021c0fb` | `sceMp3Decode` | audio_codec | `ppsspp-derived` | sceMp3 block: derived-translated from PPSSPP at a pinned revision |
@@ -708,6 +710,7 @@ a title that translates none has generated code unchanged.
 | `0xe47e40e4` | `sceGeEdramGetAddr` | ge | `hardware-measured` | PSP oracle PSP-HLE-GE-EDRAM-001, PSP-VRAM-MIRROR-001 |
 | `0xe49bfe92` | `sceUtilityUnloadModule` | utility | `ppsspp-derived` | registry notes name PPSSPP |
 | `0xe51b4b7a` | `sceRtcTickAddDays` | rtc | `synthetic` | HLE selftest dispatch |
+| `0xe6605bca` | `sceRtcTickAddMinutes` | rtc | `synthetic` | HLE selftest dispatch |
 | `0xe7282cb6` | `sceKernelAllocateFplCB` | kernel_memory | `synthetic` | conformance cells and HLE selftest dispatch |
 | `0xe792cd94` | `scePsmfPlayerReleasePsmf` | mpeg | `synthetic` | HLE selftest dispatch |
 | `0xe7c27d1b` | `sceRtcGetCurrentClockLocalTime` | rtc | `synthetic` | HLE selftest dispatch |

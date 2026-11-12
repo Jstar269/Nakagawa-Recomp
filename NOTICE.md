@@ -134,7 +134,15 @@ We aim to respond promptly and will remove material where appropriate.
   binaries: Henry Spencer's regex (BSD-3-Clause), BLAKE3 (CC0-1.0 or Apache-2.0), Ryu
   (Boost Software License 1.0), the Unicode conversion code and name tables (Unicode
   licence), MD5 (public domain or cut-down BSD), `strlcpy` (ISC) and xxHash
-  (BSD-2-Clause).
+  (BSD-2-Clause). The same tool builds GNU make 4.4.1 (GPL-3.0-or-later) from its
+  pinned release tarball and ships its `COPYING` and a `SOURCE.txt` that names the
+  tarball, its SHA-256 and the build scripts' commit; a release that ships the APK
+  carries that tarball, and `tools/android_toolchain.py` at the release's revision
+  (it holds make's configure and build settings), as make's corresponding source.
+  It also stages the official CPython 3.15.2 Android release unchanged (PSF-2.0,
+  with OpenSSL 3.5.9 under Apache-2.0 and SQLite 3.53.4 in the public domain), with
+  the release's `LICENSE.txt`, CPython's `Doc/license.rst`, and the licence files
+  of OpenSSL 3.5.9, bzip2 1.0.8, XZ Utils 5.4.6 and Zstandard 1.5.7.
 - **Opt-in LLVM IR backend toolchain (#330)** — nothing vendored, linked or shipped.
   `CODEGEN_BACKEND=llvm` runs the developer's own `clang` and `llvm-link` (MSYS2 UCRT64
   `mingw-w64-ucrt-x86_64-clang` and `mingw-w64-ucrt-x86_64-llvm-tools`, which MSYS2's
